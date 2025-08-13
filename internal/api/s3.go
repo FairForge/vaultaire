@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -252,20 +251,12 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 
-	// For now, return the parsed request as JSON for testing
-	response := map[string]interface{}{
-		"bucket":    s3Req.Bucket,
-		"object":    s3Req.Object,
-		"operation": s3Req.Operation,
-		"method":    s3Req.Method,
-		"path":      s3Req.Path,
-		"query":     s3Req.Query,
-		"headers":   s3Req.Headers,
-		"timestamp": s3Req.Timestamp,
-		"tenant_id": tenantID,
+	// For now, return not implemented for actual S3 operations
+	if s3Req.Operation != "" && s3Req.Operation != "Unknown" {
+		WriteS3Error(w, ErrNotImplemented, r.URL.Path, generateRequestID())
+		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
+	// If no specific operation, return method not allowed
+	WriteS3Error(w, ErrMethodNotAllowed, r.URL.Path, generateRequestID())
 }
