@@ -12,7 +12,7 @@ func InitializeEngine(logger *zap.Logger) engine.Engine {
 	eng := engine.NewEngine(logger)
 
 	// Add local driver for testing
-	localDriver := drivers.NewLocalDriver("/tmp/vaultaire")
+	localDriver := drivers.NewLocalDriver("/tmp/vaultaire", logger)
 	eng.AddDriver("local", localDriver)
 	eng.SetPrimary("local")
 

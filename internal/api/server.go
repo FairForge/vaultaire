@@ -37,7 +37,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, db *sql.DB) *Server {
 	eng := engine.NewEngine(logger)
 
 	// Add local driver for testing
-	localDriver := drivers.NewLocalDriver("/tmp/vaultaire")
+	localDriver := drivers.NewLocalDriver("/tmp/vaultaire", logger)
 	eng.AddDriver("local", localDriver)
 	eng.SetPrimary("local")
 

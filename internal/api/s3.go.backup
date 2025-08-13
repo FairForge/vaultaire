@@ -251,65 +251,12 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 
-	// Route based on operation
-	switch s3Req.Operation {
-	case "GetObject":
-		s.handleGetObject(w, r, s3Req)
-	case "HeadObject":
-		s.handleHeadObject(w, r, s3Req)
-	case "PutObject":
-		s.handlePutObject(w, r, s3Req)
-	case "DeleteObject":
-		s.handleDeleteObject(w, r, s3Req)
-	case "ListObjects":
-		s.handleListObjects(w, r, s3Req)
-	case "ListBuckets":
-		s.handleListBuckets(w, r, s3Req)
-	default:
-		s.logger.Warn("operation not implemented",
-			zap.String("operation", s3Req.Operation))
+	// For now, return not implemented for actual S3 operations
+	if s3Req.Operation != "" && s3Req.Operation != "Unknown" {
 		WriteS3Error(w, ErrNotImplemented, r.URL.Path, generateRequestID())
+		return
 	}
-}
 
-// handleGetObject handles S3 GET requests
-func (s *Server) handleGetObject(w http.ResponseWriter, r *http.Request, req *S3Request) {
-	// Use the adapter to translate S3 → Engine
-	adapter := NewS3ToEngine(s.engine, s.logger)
-
-	// Log dual terminology for debugging
-	s.logger.Debug("S3 GET translating to engine",
-		zap.String("s3.bucket", req.Bucket),
-		zap.String("s3.object", req.Object),
-		zap.String("engine.container", req.Bucket), // Maps to container
-		zap.String("engine.artifact", req.Object),  // Maps to artifact
-	)
-
-	// Call the adapter's HandleGet
-	adapter.HandleGet(w, r, req.Bucket, req.Object)
-}
-
-// handleHeadObject handles HEAD requests (not implemented yet)
-func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S3Request) {
-	WriteS3Error(w, ErrNotImplemented, r.URL.Path, generateRequestID())
-}
-
-// handlePutObject handles PUT requests (not implemented yet)
-func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3Request) {
-	WriteS3Error(w, ErrNotImplemented, r.URL.Path, generateRequestID())
-}
-
-// handleDeleteObject handles DELETE requests (not implemented yet)
-func (s *Server) handleDeleteObject(w http.ResponseWriter, r *http.Request, req *S3Request) {
-	WriteS3Error(w, ErrNotImplemented, r.URL.Path, generateRequestID())
-}
-
-// handleListObjects handles bucket listing (not implemented yet)
-func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request, req *S3Request) {
-	WriteS3Error(w, ErrNotImplemented, r.URL.Path, generateRequestID())
-}
-
-// handleListBuckets handles listing all buckets (not implemented yet)
-func (s *Server) handleListBuckets(w http.ResponseWriter, r *http.Request, req *S3Request) {
-	WriteS3Error(w, ErrNotImplemented, r.URL.Path, generateRequestID())
+	// If no specific operation, return method not allowed
+	WriteS3Error(w, ErrMethodNotAllowed, r.URL.Path, generateRequestID())
 }

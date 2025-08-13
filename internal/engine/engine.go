@@ -100,7 +100,7 @@ func (e *CoreEngine) Get(ctx context.Context, container, artifact string) (io.Re
 		return nil, fmt.Errorf("no primary driver configured")
 	}
 
-	return driver.Get(ctx, container+"/"+artifact)
+	return driver.Get(ctx, container, artifact)
 }
 
 // Put stores an artifact (S3 PutObject)
@@ -118,11 +118,10 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 		})
 	}()
 
-	key := container + "/" + artifact
 
 	// Store to primary
 	if driver, ok := e.drivers[e.primary]; ok {
-		if err := driver.Put(ctx, key, data); err != nil {
+		if err := driver.Put(ctx, container, artifact, data); err != nil {
 			return err
 		}
 	}
@@ -143,11 +142,10 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 
 // Delete removes an artifact (S3 DeleteObject)
 func (e *CoreEngine) Delete(ctx context.Context, container, artifact string) error {
-	key := container + "/" + artifact
 
 	var lastErr error
 	for name, driver := range e.drivers {
-		if err := driver.Delete(ctx, key); err != nil {
+		if err := driver.Delete(ctx, container, artifact); err != nil {
 			e.logger.Warn("delete failed",
 				zap.String("driver", name),
 				zap.Error(err))
@@ -161,7 +159,7 @@ func (e *CoreEngine) Delete(ctx context.Context, container, artifact string) err
 // List returns artifacts in a container (S3 ListObjects)
 func (e *CoreEngine) List(ctx context.Context, container string) ([]Artifact, error) {
 	if driver, ok := e.drivers[e.primary]; ok {
-		keys, err := driver.List(ctx, container+"/")
+		keys, err := driver.List(ctx, container)
 		if err != nil {
 			return nil, err
 		}
