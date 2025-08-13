@@ -316,4 +316,3 @@ MIT License - see [LICENSE](LICENSE) file for details.
 [Join Discussion](https://github.com/FairForge/vaultaire/discussions)
 
 </div>
-EOF
