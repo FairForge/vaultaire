@@ -1,87 +1,55 @@
 package engine
 
 import (
+	"context"
 	"io"
 	"time"
 )
 
+// Container replaces Bucket - ready for compute/ML workloads
 type Container struct {
-	ID           string
-	TenantID     string
-	Name         string
-	Type         ContainerType
-	Metadata     map[string]interface{}
-	Capabilities Capabilities
+	ID       string                 `json:"id"`
+	Name     string                 `json:"name"`
+	Type     string                 `json:"type"` // "storage", "compute", "ml-model", "vector-db"
+	Created  time.Time              `json:"created"`
+	Metadata map[string]interface{} `json:"metadata"`
+
+	// Hidden ML fields (not exposed in S3 API)
+	Temperature float64 `json:"-"` // Access frequency score
+	Tier        string  `json:"-"` // "hot", "warm", "cold", "archive"
 }
 
-type ContainerType string
-
-const (
-	ContainerTypeObject  ContainerType = "object"
-	ContainerTypeDataset ContainerType = "dataset"
-	ContainerTypeCompute ContainerType = "compute"
-	ContainerTypeStream  ContainerType = "stream"
-)
-
+// Artifact replaces Object - ready for any data type
 type Artifact struct {
-	ID             string
-	ContainerID    string
-	Key            string
-	Size           int64
-	ContentType    string
-	ETag           string
-	Epoch          int64
-	Features       map[string]interface{}
-	ComputeResults map[string]interface{}
+	ID        string                 `json:"id"`
+	Container string                 `json:"container"`
+	Key       string                 `json:"key"`
+	Type      string                 `json:"type"` // "blob", "wasm", "model", "vector", "dataset"
+	Size      int64                  `json:"size"`
+	Modified  time.Time              `json:"modified"`
+	ETag      string                 `json:"etag"`
+	Metadata  map[string]interface{} `json:"metadata"`
+
+	// Hidden ML/AI fields
+	Features    map[string]float64 `json:"-"` // For ML training
+	Vector      []float64          `json:"-"` // For similarity search
+	AccessCount int64              `json:"-"` // For smart caching
+	LastAccess  time.Time          `json:"-"` // For tiering decisions
 }
 
+// Operation represents any engine operation (not just storage)
 type Operation struct {
-	ID          string
-	Type        OpType
-	Container   string
-	Key         string
-	Stream      io.Reader
-	Metadata    map[string]interface{}
-	PolicyHints PolicyHints
+	Type      string // "get", "put", "delete", "compute", "query"
+	Container string
+	Artifact  string
+	Context   context.Context
+	Metadata  map[string]interface{}
 }
 
-type OpType string
-
-const (
-	OpGet     OpType = "GET"
-	OpPut     OpType = "PUT"
-	OpDelete  OpType = "DELETE"
-	OpList    OpType = "LIST"
-	OpQuery   OpType = "QUERY"
-	OpCompute OpType = "COMPUTE"
-)
-
-type PolicyHints struct {
-	PreferredBackends []string
-	CacheStrategy     string
-	ConsistencyLevel  string
-	Priority          int
-}
-
-type Capabilities struct {
-	Versioning    bool
-	Encryption    bool
-	Compression   bool
-	Deduplication bool
-	Compute       bool
-}
-
+// Result can hold any operation result
 type Result struct {
 	Success  bool
-	Data     interface{}
+	Data     io.ReadCloser
 	Metadata map[string]interface{}
-	Metrics  Metrics
-}
-
-type Metrics struct {
-	Duration     time.Duration
-	BytesRead    int64
-	BytesWritten int64
-	BackendUsed  string
-	CacheHit     bool
+	Error    error
 }

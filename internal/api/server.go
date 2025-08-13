@@ -10,10 +10,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/config"
+	"github.com/FairForge/vaultaire/internal/drivers"
+	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/gorilla/mux"
 	"go.uber.org/zap"
-
-	"github.com/FairForge/vaultaire/internal/config"
 )
 
 type Server struct {
@@ -24,6 +25,7 @@ type Server struct {
 	db         *sql.DB
 	auth       *Auth
 	events     chan Event
+	engine     engine.Engine
 
 	requestCount int64
 	errorCount   int64
@@ -31,10 +33,20 @@ type Server struct {
 }
 
 func NewServer(cfg *config.Config, logger *zap.Logger, db *sql.DB) *Server {
+	// Create the engine BEFORE the struct initialization
+	eng := engine.NewEngine(logger)
+
+	// Add local driver for testing
+	localDriver := drivers.NewLocalDriver("/tmp/vaultaire")
+	eng.AddDriver("local", localDriver)
+	eng.SetPrimary("local")
+
+	// Now create the server with the initialized engine
 	s := &Server{
 		config:    cfg,
 		logger:    logger,
 		db:        db,
+		engine:    eng, // Use the engine we created above
 		auth:      NewAuth(db, logger),
 		events:    make(chan Event, 1000),
 		router:    mux.NewRouter(),
