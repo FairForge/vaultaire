@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ type S3Request struct {
 	Operation string
 	Query     map[string]string
 	Headers   map[string]string
+	TenantID  string
 
 	// Request metadata
 	Method    string
@@ -187,6 +189,38 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate the request signature FIRST
+	auth := NewAuth(s.db, s.logger) // Create auth instance
+	tenantID, err := auth.ValidateRequest(r)
+	if err != nil {
+		s.logger.Error("authentication failed",
+			zap.Error(err),
+			zap.String("path", r.URL.Path))
+
+		// Return S3-style authentication error
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?>
+<Error>
+	<Code>SignatureDoesNotMatch</Code>
+	<Message>%s</Message>
+	<RequestId>%d</RequestId>
+</Error>`, err.Error(), time.Now().UnixNano())
+		return
+	}
+
+	// Log authentication status
+	if tenantID != "" {
+		s.logger.Info("authenticated request",
+			zap.String("tenant_id", tenantID),
+			zap.String("method", r.Method),
+			zap.String("path", r.URL.Path))
+	} else {
+		s.logger.Debug("anonymous request",
+			zap.String("method", r.Method),
+			zap.String("path", r.URL.Path))
+	}
+
 	// Create parser
 	parser := NewS3Parser(s.logger)
 
@@ -198,6 +232,8 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s3Req.TenantID = tenantID
+
 	// Log event for ML training data collection
 	eventLogger := events.NewEventLogger(s.logger)
 	eventLogger.Log(events.Event{
@@ -205,12 +241,14 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		Container: s3Req.Bucket, // External: bucket, Internal: container
 		Artifact:  s3Req.Object, // External: object, Internal: artifact
 		Operation: s3Req.Operation,
+		TenantID:  tenantID,
 		Data: map[string]interface{}{
-			"method":  r.Method,
-			"path":    r.URL.Path,
-			"size":    r.ContentLength,
-			"query":   len(s3Req.Query),
-			"headers": len(s3Req.Headers),
+			"method":    r.Method,
+			"path":      r.URL.Path,
+			"size":      r.ContentLength,
+			"query":     len(s3Req.Query),
+			"headers":   len(s3Req.Headers),
+			"tenant_id": tenantID,
 		},
 	})
 
@@ -224,6 +262,7 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		"query":     s3Req.Query,
 		"headers":   s3Req.Headers,
 		"timestamp": s3Req.Timestamp,
+		"tenant_id": tenantID,
 	}
 
 	w.Header().Set("Content-Type", "application/json")

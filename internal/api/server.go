@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -20,16 +21,22 @@ type Server struct {
 	logger     *zap.Logger
 	router     *mux.Router
 	httpServer *http.Server
+	db         *sql.DB
+	auth       *Auth
+	events     chan Event
 
 	requestCount int64
 	errorCount   int64
 	startTime    time.Time
 }
 
-func NewServer(cfg *config.Config, logger *zap.Logger) *Server {
+func NewServer(cfg *config.Config, logger *zap.Logger, db *sql.DB) *Server {
 	s := &Server{
 		config:    cfg,
 		logger:    logger,
+		db:        db,
+		auth:      NewAuth(db, logger),
+		events:    make(chan Event, 1000),
 		router:    mux.NewRouter(),
 		startTime: time.Now(),
 	}
