@@ -226,3 +226,39 @@ func (a *S3ToEngine) handleRangeRequest(w http.ResponseWriter, r *http.Request,
 		a.logger.Error("failed to copy range", zap.Error(err))
 	}
 }
+
+// HandlePut processes S3 PUT requests using the engine
+func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, object string) {
+	// Translate S3 terms to Engine terms
+	container := bucket
+	artifact := object
+	
+	// Call engine with Container/Artifact terminology
+	err := a.engine.Put(r.Context(), container, artifact, r.Body)
+	if err != nil {
+		a.logger.Error("engine put failed",
+			zap.Error(err),
+			zap.String("container", container),
+			zap.String("artifact", artifact))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return
+	}
+	
+	// Calculate ETag (simple MD5 of the path for now)
+	h := md5.New()
+	h.Write([]byte(fmt.Sprintf("%s/%s", container, artifact)))
+	etag := fmt.Sprintf("%x", h.Sum(nil))
+	
+	// Return S3-compliant response
+	w.Header().Set("ETag", fmt.Sprintf(`"%s"`, etag))
+	w.Header().Set("x-amz-request-id", generateRequestID())
+	w.WriteHeader(http.StatusOK)
+	
+	// Log successful upload for ML
+	a.logger.Info("artifact stored",
+		zap.String("s3.bucket", bucket),
+		zap.String("s3.object", object),
+		zap.String("engine.container", container),
+		zap.String("engine.artifact", artifact),
+		zap.Int64("size", r.ContentLength))
+}
