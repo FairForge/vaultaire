@@ -27,7 +27,7 @@ func main() {
 	}
 
 	// Create server
-	server := api.NewServer(cfg, logger)
+	server := api.NewServer(cfg, logger, nil) // TODO: Add database later
 
 	// Handle shutdown gracefully
 	go func() {
