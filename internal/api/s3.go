@@ -294,9 +294,21 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	WriteS3Error(w, ErrNotImplemented, r.URL.Path, generateRequestID())
 }
 
-// handlePutObject handles PUT requests (not implemented yet)
+// handlePutObject handles PUT requests
 func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3Request) {
-	WriteS3Error(w, ErrNotImplemented, r.URL.Path, generateRequestID())
+	// Use the adapter to translate S3 → Engine
+	adapter := NewS3ToEngine(s.engine, s.logger)
+
+	// Log dual terminology
+	s.logger.Debug("S3 PUT translating to engine",
+		zap.String("s3.bucket", req.Bucket),
+		zap.String("s3.object", req.Object),
+		zap.String("engine.container", req.Bucket),
+		zap.String("engine.artifact", req.Object),
+		zap.Int64("size", r.ContentLength))
+
+	// Call the adapter's HandlePut
+	adapter.HandlePut(w, r, req.Bucket, req.Object)
 }
 
 // handleDeleteObject handles DELETE requests (not implemented yet)
