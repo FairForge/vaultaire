@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/events"
 	"go.uber.org/zap"
 )
 
@@ -196,6 +197,22 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
+
+	// Log event for ML training data collection
+	eventLogger := events.NewEventLogger(s.logger)
+	eventLogger.Log(events.Event{
+		Type:      "s3_request",
+		Container: s3Req.Bucket, // External: bucket, Internal: container
+		Artifact:  s3Req.Object, // External: object, Internal: artifact
+		Operation: s3Req.Operation,
+		Data: map[string]interface{}{
+			"method":  r.Method,
+			"path":    r.URL.Path,
+			"size":    r.ContentLength,
+			"query":   len(s3Req.Query),
+			"headers": len(s3Req.Headers),
+		},
+	})
 
 	// For now, return the parsed request as JSON for testing
 	response := map[string]interface{}{
