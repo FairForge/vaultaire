@@ -185,7 +185,7 @@ func (a *Auth) validateTimestamp(amzDate string) error {
 // calculateSignature computes the AWS Signature V4
 func (a *Auth) calculateSignature(r *http.Request, accessKey, secretKey, signedHeaders, amzDate string) (string, error) {
 	// Step 1: Create canonical request
-	canonicalRequest, payloadHash := a.createCanonicalRequest(r, signedHeaders)
+	canonicalRequest, _ := a.createCanonicalRequest(r, signedHeaders)
 
 	// Step 2: Create string to sign
 	date := amzDate[:8]
