@@ -83,4 +83,19 @@ Percentage done: 10%
 Potential revenue identified: $1,499/month
 Time to first customer: ~60 days
 
+## GitHub Enterprise Workflow (REQUIRED):
+- ✅ Branch protection enabled on main
+- ✅ All changes require PR
+- ✅ CI must pass before merge
+- ✅ Cannot push directly to main
+
+## Standard workflow:
+git checkout -b feat/step-XX
+# make changes
+git add .
+git commit -m "feat: description"
+git push origin feat/step-XX
+# Create PR, wait for CI, merge
+git checkout main && git pull
+
 Remember: Every step forward is progress. The Reddit customer is waiting!
