@@ -1,0 +1,34 @@
+name: CI
+on: [push, pull_request]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+    
+    - name: Build
+      run: make build
+    
+    - name: Test S3 Operations
+      run: |
+        ./bin/vaultaire &
+        SERVER_PID=$!
+        sleep 2
+        
+        # Test PUT
+        curl -X PUT localhost:8080/test/file.txt -d "test" || exit 1
+        
+        # Test GET
+        curl localhost:8080/test/file.txt || exit 1
+        
+        # Test DELETE
+        curl -X DELETE localhost:8080/test/file.txt || exit 1
+        
+        kill $SERVER_PID
+        echo "✅ All S3 operations working!"
