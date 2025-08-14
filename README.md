@@ -1,318 +1,106 @@
-# Vaultaire
+# Vaultaire - Universal Storage Orchestration Engine
 
-<div align="center">
-  <h1>🏛️ Vaultaire</h1>
-  
-  <h3>Your S3 API stays the same. Your bill drops 90%.</h3>
-  
-  <p>
-    <strong>Open-source storage router that learns your access patterns and automatically optimizes costs</strong>
-  </p>
+[![Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Go 1.21+](https://img.shields.io/badge/go-1.21+-00ADD8.svg)](https://go.dev/)
+[![S3 Compatible](https://img.shields.io/badge/S3-Compatible-orange.svg)](docs/s3-api.md)
 
-  <p>
-    <img src="https://img.shields.io/badge/status-alpha-orange" alt="Status: Alpha">
-    <img src="https://img.shields.io/badge/progress-33%2F500-blue" alt="Progress: 33/500">
-    <img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT">
-    <img src="https://img.shields.io/badge/go-%3E%3D1.21-00ADD8" alt="Go Version">
-    <img src="https://img.shields.io/github/stars/FairForge/vaultaire?style=social" alt="Stars">
-  </p>
+> Turn any storage backend into intelligent, unified infrastructure
 
-  <p>
-    <a href="#-quick-start">Quick Start</a> •
-    <a href="#-the-vision">Vision</a> •
-    <a href="#-current-status">Status</a> •
-    <a href="#-contributing">Contributing</a> •
-    <a href="#-roadmap">Roadmap</a>
-  </p>
-</div>
+## What is Vaultaire?
 
----
+Vaultaire is a storage orchestration engine that provides a single S3-compatible API across multiple storage backends. Think of it as a universal translator for storage - use one API, store anywhere.
 
-## 🤯 The Problem
+## Three Ways to Use Vaultaire
 
-You're paying **$10,000/month** for S3 storage. But here's the thing:
-- 🧊 **80% of your data** is accessed less than once per month
-- 💸 **Cold storage costs 95% less** than S3 Standard ($1/TB vs $23/TB)
-- 😩 **Managing lifecycle rules is a nightmare**
-- 🔒 **You're locked into one vendor**
+### 🚀 stored.ge - Managed Storage for Developers
+- $3.99/TB/month
+- 100GB Seagate Lyve Cloud included
+- Perfect for indie developers
+- [Sign up at stored.ge](https://stored.ge)
 
-## ✨ The Solution
+### 🏢 stored.cloud - Enterprise Storage Platform  
+- Starting at $19.99/TB/month
+- 100% enterprise infrastructure
+- SLA guarantees & compliance
+- [Learn more at stored.cloud](https://stored.cloud)
 
-Vaultaire is an intelligent storage proxy that **automatically** routes your data to the cheapest storage tier that meets your performance needs.
+### ��️ Vaultaire Core - Self-Hosted Solution
+- Open source (Apache 2.0)
+- Bring your own backends
+- Deploy on your infrastructure
+- [Get started below](#quick-start)
 
-\`\`\`
-Your App → [S3 API] → Vaultaire → Smart Routing → Multiple Backends
-                           ↓
-                    ML Learning Engine
-                           ↓
-                    90% Cost Savings
-\`\`\`
+## Quick Start (Self-Hosted)
 
-### How It Works
+```bash
+# Run with Docker
+docker run -d \
+  -p 9000:9000 \
+  -v /etc/vaultaire:/config \
+  vaultaire/core:latest
 
-1. **Zero Code Changes** - Keep using your existing S3 code
-2. **Learns Access Patterns** - ML tracks how you use each file
-3. **Automatic Optimization** - Moves data to cheapest appropriate tier
-4. **Transparent Retrieval** - Fetches from any tier seamlessly
-5. **90% Cost Reduction** - Most users save 85-95% on storage costs
-
----
-
-## ⚡ Quick Start
-
-### 🚧 Current Status: Alpha Development (Step 33/500)
-
-**What's Working Now:**
-\`\`\`bash
-# Clone and build
-git clone https://github.com/FairForge/vaultaire
+# Or build from source
+git clone https://github.com/fairforge/vaultaire
 cd vaultaire
-go build -o bin/vaultaire ./cmd/vaultaire
+make build
+./bin/vaultaire serve
+Features
 
-# Run the server
-./bin/vaultaire
+✅ Universal S3 API - Works with any S3 client
+✅ Multi-Backend Support - Mix Wasabi, R2, Hetzner, etc.
+✅ Intelligent Tiering - Automatic hot/cold data management
+✅ Erasure Coding - Built-in redundancy
+✅ Event Streaming - Full audit trail
+✅ ML-Ready - Predictive caching (Enterprise)
 
-# Test the S3 endpoint (returns parsed request)
-curl http://localhost:8080/mybucket/test.jpg
-\`\`\`
+Architecture
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   S3 API    │────▶│   Engine    │────▶│   Drivers   │
+│  (bucket/   │     │ (container/ │     │  (Multiple  │
+│   object)   │     │  artifact)  │     │  Backends)  │
+└─────────────┘     └─────────────┘     └─────────────┘
+Read full architecture docs →
+Supported Backends
 
-**Coming This Week (Steps 34-50):**
-- ✅ S3 GET/PUT/DELETE operations
-- ✅ Actual file storage
-- ✅ Docker image
-- ✅ First alpha release
+✅ Local filesystem
+✅ S3 / S3-compatible
+✅ Seagate Lyve Cloud
+✅ Wasabi
+✅ Cloudflare R2
+✅ Backblaze B2
+✅ MinIO
+🔄 Hetzner Storage Box (coming soon)
+🔄 Google Cloud Storage (coming soon)
 
-**Want to help?** Jump to [Contributing](#-contributing) - we need you!
+Documentation
 
----
+Architecture Overview
+API Reference
+Configuration Guide
+Driver Development
+Deployment Guide
+Contributing Guidelines
+Code of Conduct
 
-## 💰 The Vision
+Contributing
+See CONTRIBUTING.md for details on our code of conduct and the process for submitting pull requests.
+License
+Apache 2.0 - see LICENSE
+This project uses Apache 2.0 to ensure:
 
-### Before Vaultaire
-\`\`\`javascript
-// Your S3 code
-const s3 = new AWS.S3();
-await s3.putObject({
-  Bucket: 'photos',
-  Key: 'user/photo.jpg',
-  Body: imageBuffer
-}).promise();
+✅ Enterprise-friendly usage
+✅ Patent protection for all users
+✅ Clear contribution guidelines
+✅ Compatible with commercial use
 
-// 💸 Monthly bill: $10,000
-// All data in S3 Standard ($23/TB)
-\`\`\`
+Why We Built This
+Storage is fragmented. Every provider has different APIs, pricing, and capabilities. Vaultaire unifies them all behind a single, intelligent interface.
+We believe in making enterprise-grade storage accessible to everyone through intelligent orchestration.
+Status
 
-### After Vaultaire
-\`\`\`javascript
-// Same code, different endpoint
-const s3 = new AWS.S3({
-  endpoint: 'http://vaultaire:8080'
-});
-await s3.putObject({
-  Bucket: 'photos',
-  Key: 'user/photo.jpg',
-  Body: imageBuffer  
-}).promise();
+🚧 Current Phase: MVP Development
+📊 Progress: Step 43 of 500
+🎯 Next Milestone: S3 DELETE/LIST operations
+�� Launch Target: Q1 2025
 
-// 💰 Monthly bill: $1,000
-// Vaultaire automatically distributes:
-// - 10% hot → S3 Standard ($23/TB)
-// - 30% warm → S3 IA ($12/TB)
-// - 60% cold → Glacier ($1/TB)
-\`\`\`
-
----
-
-## 📊 Current Status
-
-### ✅ Completed (Steps 1-33)
-- [x] Project structure and configuration
-- [x] HTTP server with health checks
-- [x] S3 request parsing
-- [x] AWS Signature V4 authentication
-- [x] Event logging for ML training
-- [x] PostgreSQL integration
-- [x] Future-proof architecture (WASM-ready, ML-ready)
-
-### 🔄 In Progress (Steps 34-50)
-- [ ] S3 Error responses (Step 34)
-- [ ] S3 GET implementation (Steps 35-40)
-- [ ] S3 PUT implementation (Steps 41-45)
-- [ ] S3 DELETE implementation (Steps 46-50)
-
-### 📋 Next Up (Steps 51-90)
-- [ ] S3 LIST operations
-- [ ] Connect to real storage backends
-- [ ] Basic routing logic
-- [ ] Docker packaging
-
-**Progress:** 33/500 steps (6.6%) • **ETA for MVP:** 2-3 weeks
-
----
-
-## 🚀 Features
-
-### Working Now
-- ✅ **S3-Compatible API** - Works with existing S3 SDKs
-- ✅ **Request Authentication** - AWS Signature V4 support
-- ✅ **Event Collection** - Gathering data for ML training
-
-### Coming Soon (This Month)
-- 🔄 **Multi-Backend Support** - S3, Azure, GCS, MinIO, and more
-- 🔄 **Intelligent Routing** - ML-based access pattern prediction
-- 🔄 **Automatic Tiering** - Move data based on access patterns
-- 🔄 **Cost Analytics** - Real-time savings dashboard
-
-### Future (Q1 2025)
-- 📋 **WASM Compute** - Run functions at the edge
-- 📋 **Encryption** - At-rest and in-transit
-- 📋 **Multi-Region** - Global replication
-- 📋 **GraphQL API** - Modern query interface
-
----
-
-## 🛠️ Architecture
-
-\`\`\`
-vaultaire/
-├── cmd/           # Entry points
-├── internal/      
-│   ├── api/       # HTTP & S3 handlers
-│   ├── engine/    # Core storage engine
-│   ├── events/    # ML event collection
-│   └── config/    # Configuration
-├── examples/      # Usage examples
-└── docs/          # Documentation
-\`\`\`
-
-### Key Design Decisions
-- **Engine-based architecture** - Not just storage, but compute-ready
-- **Event-driven from day 1** - Collecting ML training data
-- **Container/Artifact model** - Future-proof terminology
-- **Pipeline architecture** - Middleware for transformations
-
----
-
-## 🤝 Contributing
-
-We're at Step 33 of 500 - **lots of opportunities to help!**
-
-### 🎯 Good First Issues
-
-#### No Go Experience Needed
-- [ ] Test the current build and report bugs
-- [ ] Improve this README
-- [ ] Add your use case to examples/
-- [ ] Create a logo for the project
-
-#### 10-Minute Enhancements
-- [ ] Add error handling improvements
-- [ ] Add debug logging
-- [ ] Write unit tests
-- [ ] Add code comments
-
-#### 30-Minute Features
-- [ ] Implement S3 GET (Step 35)
-- [ ] Add Docker support
-- [ ] Add compression
-- [ ] Add metrics
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for details, or just:
-
-1. Fork the repo
-2. Create your feature branch (\`git checkout -b feature/amazing\`)
-3. Commit changes (\`git commit -m 'Add amazing feature'\`)
-4. Push (\`git push origin feature/amazing\`)
-5. Open a Pull Request
-
----
-
-## 📈 Roadmap
-
-### Phase 1: MVP (Current - 2 weeks)
-- Complete S3 API (Steps 34-90)
-- Connect first backend (Steps 91-150)
-- Basic routing (Steps 151-200)
-- **Goal:** First working version
-
-### Phase 2: Intelligence (Week 3-4)
-- ML model training (Steps 201-300)
-- Pattern prediction (Steps 301-400)
-- Auto-optimization (Steps 401-500)
-- **Goal:** 90% cost reduction
-
-### Phase 3: Production (Month 2)
-- Multi-backend support
-- Production hardening
-- Docker/K8s deployment
-- **Goal:** 100 users
-
-### Phase 4: Scale (Month 3)
-- Commercial features
-- SaaS offering
-- Enterprise support
-- **Goal:** $10K MRR
-
----
-
-## 🔧 Supported Backends (Planned)
-
-| Backend | Status | Cost/TB | Use Case |
-|---------|--------|---------|----------|
-| Local FS | 🔄 Dev | $0 | Development |
-| AWS S3 | 📋 Soon | $23 | Hot data |
-| S3 Glacier | 📋 Soon | $1 | Archives |
-| Backblaze | 📋 Soon | $6 | Warm data |
-| MinIO | 📋 Soon | Varies | Self-hosted |
-| Azure Blob | 📋 Planned | $20 | Enterprise |
-| GCS | 📋 Planned | $20 | Enterprise |
-
----
-
-## 💡 Why Vaultaire?
-
-- **Save 90% on storage costs** - Automatic optimization
-- **Zero vendor lock-in** - Open source, multi-backend
-- **No code changes** - Drop-in S3 replacement
-- **Future-proof** - ML-ready, WASM-ready, built for 2030
-
----
-
-## 📊 Project Status
-
-- **Version:** 0.1.0-alpha
-- **Status:** Active Development
-- **License:** MIT
-- **Language:** Go 1.21+
-- **Database:** PostgreSQL 15+
-
----
-
-## 🙏 Acknowledgments
-
-Built with ❤️ by [Isaac Viera](https://github.com/IsaacViera) and the [FairForge](https://fairforge.io) team.
-
-Special thanks to:
-- The Go community for excellent libraries
-- MinIO team for S3 protocol inspiration
-- Everyone who's contributed ideas and feedback
-
----
-
-## 📄 License
-
-MIT License - see [LICENSE](LICENSE) file for details.
-
----
-
-<div align="center">
-  
-### Ready to cut your storage costs by 90%?
-
-**⭐ Star this repo to follow our journey!**
-
-[Report Bug](https://github.com/FairForge/vaultaire/issues) • 
-[Request Feature](https://github.com/FairForge/vaultaire/issues) • 
-[Join Discussion](https://github.com/FairForge/vaultaire/discussions)
-
-</div>
+Built by @fairforge | Blog | Twitter
