@@ -340,9 +340,75 @@ func (s *Server) handleDeleteObject(w http.ResponseWriter, r *http.Request, req 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleListObjects handles bucket listing (not implemented yet)
+// handleListObjects handles bucket listing
 func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request, req *S3Request) {
-	WriteS3Error(w, ErrNotImplemented, r.URL.Path, generateRequestID())
+	// Log the operation
+	s.logger.Debug("S3 LIST translating to engine",
+		zap.String("s3.bucket", req.Bucket),
+		zap.String("engine.container", req.Bucket),
+	)
+
+	// List objects from the engine (no prefix parameter needed)
+	ctx := r.Context()
+	objects, err := s.engine.List(ctx, req.Bucket)
+	if err != nil {
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return
+	}
+
+	// Build S3 XML response
+	type Object struct {
+		Key          string
+		LastModified string
+		Size         int64
+		StorageClass string
+	}
+
+	type ListBucketResult struct {
+		Name        string
+		Prefix      string
+		MaxKeys     int
+		IsTruncated bool
+		Contents    []Object
+	}
+
+	result := ListBucketResult{
+		Name:        req.Bucket,
+		Prefix:      req.Query["prefix"],
+		MaxKeys:     1000,
+		IsTruncated: false,
+		Contents:    make([]Object, 0),
+	}
+
+	// Convert engine objects to S3 format
+	for _, obj := range objects {
+		result.Contents = append(result.Contents, Object{
+			Key:          obj.Key,
+			LastModified: obj.Modified.Format(time.RFC3339), // Changed from LastModified to Modified
+			Size:         obj.Size,
+			StorageClass: "STANDARD",
+		})
+	}
+
+	// Marshal to XML
+	w.Header().Set("Content-Type", "application/xml")
+	w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>`))
+	w.Write([]byte(`<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">`))
+	w.Write([]byte(fmt.Sprintf("<Name>%s</Name>", result.Name)))
+	w.Write([]byte(fmt.Sprintf("<Prefix>%s</Prefix>", result.Prefix)))
+	w.Write([]byte(fmt.Sprintf("<MaxKeys>%d</MaxKeys>", result.MaxKeys)))
+	w.Write([]byte(fmt.Sprintf("<IsTruncated>%t</IsTruncated>", result.IsTruncated)))
+
+	for _, obj := range result.Contents {
+		w.Write([]byte("<Contents>"))
+		w.Write([]byte(fmt.Sprintf("<Key>%s</Key>", obj.Key)))
+		w.Write([]byte(fmt.Sprintf("<LastModified>%s</LastModified>", obj.LastModified)))
+		w.Write([]byte(fmt.Sprintf("<Size>%d</Size>", obj.Size)))
+		w.Write([]byte(fmt.Sprintf("<StorageClass>%s</StorageClass>", obj.StorageClass)))
+		w.Write([]byte("</Contents>"))
+	}
+
+	w.Write([]byte("</ListBucketResult>"))
 }
 
 // handleListBuckets handles listing all buckets (not implemented yet)
