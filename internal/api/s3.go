@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -311,9 +312,32 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3
 	adapter.HandlePut(w, r, req.Bucket, req.Object)
 }
 
-// handleDeleteObject handles DELETE requests (not implemented yet)
+// handleDeleteObject handles DELETE requests
 func (s *Server) handleDeleteObject(w http.ResponseWriter, r *http.Request, req *S3Request) {
-	WriteS3Error(w, ErrNotImplemented, r.URL.Path, generateRequestID())
+	// Log dual terminology
+	s.logger.Debug("S3 DELETE translating to engine",
+		zap.String("s3.bucket", req.Bucket),
+		zap.String("s3.object", req.Object),
+		zap.String("engine.container", req.Bucket),
+		zap.String("engine.artifact", req.Object),
+	)
+
+	// Delete using the engine (with context)
+	ctx := r.Context()
+	err := s.engine.Delete(ctx, req.Bucket, req.Object)
+	if err != nil {
+		// Check if file doesn't exist
+		if os.IsNotExist(err) {
+			WriteS3Error(w, ErrNoSuchKey, r.URL.Path, generateRequestID())
+			return
+		}
+		// Other errors
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return
+	}
+
+	// S3 DELETE returns 204 No Content on success
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleListObjects handles bucket listing (not implemented yet)
