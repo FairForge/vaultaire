@@ -28,3 +28,42 @@ Current Step: 44 of 500
 - [ ] Config: Make backends map[string]interface{}
 - [ ] Streaming: Verify no []byte returns
 - [ ] Context: Add context.Context to all functions
+
+## 🔥 Code Snippets to Preserve
+
+### Multi-Tenancy Pattern (MUST ADD)
+```go
+// internal/middleware/tenant.go
+func ExtractTenant(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        tenantID := r.Header.Get("X-Tenant-ID")
+        if tenantID == "" {
+            tenantID = "default"  // For MVP
+        }
+        ctx := context.WithValue(r.Context(), "tenant", tenantID)
+        next.ServeHTTP(w, r.WithContext(ctx))
+    })
+}
+Metrics Pattern (MUST ADD)
+go// internal/metrics/collector.go
+var (
+    requestCount = promauto.NewCounterVec(
+        prometheus.CounterOpts{
+            Name: "vaultaire_requests_total",
+        },
+        []string{"method", "tenant", "status"},
+    )
+)
+
+func RecordRequest(method, tenant, status string) {
+    requestCount.WithLabelValues(method, tenant, status).Inc()
+}
+Event Logging Pattern (MUST USE)
+go// Every operation must log
+h.events.Log(EventType{
+    Operation: "DELETE",
+    Container: req.Container,
+    Key:       req.Key,
+    Tenant:    tenantID,
+    Timestamp: time.Now(),
+})
