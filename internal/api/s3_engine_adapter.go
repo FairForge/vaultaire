@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/FairForge/vaultaire/internal/engine"
+	"github.com/FairForge/vaultaire/internal/tenant"
 	"go.uber.org/zap"
 )
 
@@ -43,9 +44,23 @@ func (a *S3ToEngine) TranslateRequest(req *S3Request) engine.Operation {
 
 // HandleGet processes S3 GET requests using the engine
 func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, object string) {
-	// Translate S3 terms to Engine terms
-	container := bucket // S3 Bucket → Engine Container
-	artifact := object  // S3 Object → Engine Artifact
+	// Get tenant from context
+	t, err := tenant.FromContext(r.Context())
+	if err != nil {
+		a.logger.Warn("no tenant in context", zap.Error(err))
+		WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
+		return
+	}
+
+	// Translate S3 terms to Engine terms with tenant namespace
+	container := t.NamespaceContainer(bucket) // S3 Bucket → Namespaced Container
+	artifact := object                        // S3 Object → Engine Artifact
+
+	a.logger.Debug("GET with tenant isolation",
+		zap.String("tenant_id", t.ID),
+		zap.String("original_bucket", bucket),
+		zap.String("namespaced_container", container),
+		zap.String("artifact", artifact))
 
 	// Call engine with Container/Artifact terminology
 	reader, err := a.engine.Get(r.Context(), container, artifact)
@@ -229,12 +244,26 @@ func (a *S3ToEngine) handleRangeRequest(w http.ResponseWriter, r *http.Request,
 
 // HandlePut processes S3 PUT requests using the engine
 func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, object string) {
-	// Translate S3 terms to Engine terms
-	container := bucket
+	// Get tenant from context
+	t, err := tenant.FromContext(r.Context())
+	if err != nil {
+		a.logger.Warn("no tenant in context", zap.Error(err))
+		WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
+		return
+	}
+
+	// Translate S3 terms to Engine terms with tenant namespace
+	container := t.NamespaceContainer(bucket) // Namespaced container
 	artifact := object
-	
+
+	a.logger.Debug("PUT with tenant isolation",
+		zap.String("tenant_id", t.ID),
+		zap.String("original_bucket", bucket),
+		zap.String("namespaced_container", container),
+		zap.String("artifact", artifact))
+
 	// Call engine with Container/Artifact terminology
-	err := a.engine.Put(r.Context(), container, artifact, r.Body)
+	err = a.engine.Put(r.Context(), container, artifact, r.Body)
 	if err != nil {
 		a.logger.Error("engine put failed",
 			zap.Error(err),
@@ -243,19 +272,20 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return
 	}
-	
+
 	// Calculate ETag (simple MD5 of the path for now)
 	h := md5.New()
 	h.Write([]byte(fmt.Sprintf("%s/%s", container, artifact)))
 	etag := fmt.Sprintf("%x", h.Sum(nil))
-	
+
 	// Return S3-compliant response
 	w.Header().Set("ETag", fmt.Sprintf(`"%s"`, etag))
 	w.Header().Set("x-amz-request-id", generateRequestID())
 	w.WriteHeader(http.StatusOK)
-	
+
 	// Log successful upload for ML
 	a.logger.Info("artifact stored",
+		zap.String("tenant_id", t.ID),
 		zap.String("s3.bucket", bucket),
 		zap.String("s3.object", object),
 		zap.String("engine.container", container),
