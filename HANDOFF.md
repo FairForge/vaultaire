@@ -99,3 +99,14 @@ git push origin feat/step-XX
 git checkout main && git pull
 
 Remember: Every step forward is progress. The Reddit customer is waiting!
+
+
+## IMPORTANT: Workflow Reminder
+After EVERY step:
+1. Create PR (never push to main)
+2. Wait for CI to pass
+3. Merge PR
+4. Update HANDOFF.md
+5. Update PROGRESS.md
+See CHECKLIST.md for full workflow
+
