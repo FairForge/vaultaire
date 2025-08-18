@@ -1,0 +1,74 @@
+.
+├── CLAUDE.md
+├── CODE_OF_CONDUCT.md
+├── CONTRIBUTING.md
+├── LICENSE
+├── Makefile
+├── PROGRESS.md
+├── PROJECT_STRUCTURE.txt
+├── README.md
+├── README.old.md
+├── TRACKING_MOVED.md
+├── cmd
+│   └── vaultaire
+│       └── main.go
+├── configs
+├── docs
+│   ├── API.md
+│   ├── ARCHITECTURE.md
+│   ├── BUSINESS.md
+│   ├── CONFIG.md
+│   ├── DEPLOY.md
+│   ├── DRIVERS.md
+│   ├── archive
+│   │   ├── CHECKLIST.md
+│   │   ├── CONTEXT.md
+│   │   └── HANDOFF.md
+│   └── index.md
+├── examples
+├── go.mod
+├── go.sum
+├── internal
+│   ├── api
+│   │   ├── auth.go
+│   │   ├── event_type.go
+│   │   ├── s3.go
+│   │   ├── s3.go.backup
+│   │   ├── s3_engine_adapter.go
+│   │   ├── s3_engine_adapter.go.backup
+│   │   ├── s3_errors.go
+│   │   ├── server.go
+│   │   ├── server.go.backup
+│   │   └── server_engine_init.go
+│   ├── compute
+│   ├── config
+│   │   ├── config.go
+│   │   └── env.go
+│   ├── core
+│   ├── drivers
+│   │   └── local.go
+│   ├── engine
+│   │   ├── engine.go
+│   │   ├── interface.go
+│   │   └── types.go
+│   ├── events
+│   │   └── logger.go
+│   ├── intelligence
+│   ├── orchestrator
+│   ├── pipeline
+│   │   └── pipeline.go
+│   └── tenant
+│       ├── store.go
+│       ├── tenant.go
+│       └── tenant_test.go
+├── pkg
+├── scripts
+├── step48_preview.md
+├── test
+├── test_s3_get.sh
+├── test_s3_put.sh
+├── vaultaire
+├── verify.sh
+└── verify_step33.sh
+
+22 directories, 50 files
