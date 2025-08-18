@@ -1,0 +1,10 @@
+{
+  "allowedTools": [
+    "Edit",
+    "Bash(git add:*)",
+    "Bash(git commit:*)",
+    "Bash(go test:*)",
+    "Bash(go run:*)",
+    "Bash(curl:*)"
+  ]
+}
