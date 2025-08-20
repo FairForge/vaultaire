@@ -2,6 +2,10 @@
 test:
 	go test -v ./...
 
+.PHONY: test-unit
+test-unit:
+	go test -v -short ./...
+
 .PHONY: test-step48
 test-step48:
 	go test -v ./internal/api -run TestRateLimiter
@@ -9,7 +13,7 @@ test-step48:
 .PHONY: lint
 lint:
 	@echo "Linting..."
-	@golangci-lint run --fix || true
+	@golangci-lint run --fix 2>/dev/null || true
 
 .PHONY: fmt
 fmt:
@@ -27,7 +31,7 @@ build:
 
 .PHONY: clean
 clean:
-	rm -rf bin/ coverage.*
+	rm -rf bin/ coverage.* *.test
 
 .PHONY: test-coverage
 test-coverage:
@@ -38,7 +42,7 @@ test-coverage:
 help:
 	@echo "Available targets:"
 	@echo "  test         - Run all tests"
-	@echo "  test-step48  - Test rate limiter"
+	@echo "  test-unit    - Run unit tests"
 	@echo "  lint         - Run linter"
 	@echo "  fmt          - Format code"
 	@echo "  build        - Build binary"

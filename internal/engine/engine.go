@@ -118,7 +118,6 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 		})
 	}()
 
-
 	// Store to primary
 	if driver, ok := e.drivers[e.primary]; ok {
 		if err := driver.Put(ctx, container, artifact, data); err != nil {

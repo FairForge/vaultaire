@@ -32,3 +32,16 @@ dist/
 .DS_Store
 Thumbs.db
 docs/BUSINESS.md
+
+# Archives
+docs/archive/
+test/archive/
+
+# Build artifacts
+bin/
+vaultaire
+*.test
+coverage.*
+
+# OS files
+.DS_Store
