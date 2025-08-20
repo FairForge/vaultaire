@@ -238,14 +238,14 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 	// Create tenant object and add to context
 	if tenantID != "" {
 		t := &tenant.Tenant{
-			ID:        tenantID,
-			Namespace: fmt.Sprintf("tenant/%s/", tenantID),
-			Plan:      "starter",
-			Status:    "active",
-			StorageQuota: 100 * 1024 * 1024 * 1024, // 100GB for MVP
+			ID:                tenantID,
+			Namespace:         fmt.Sprintf("tenant/%s/", tenantID),
+			Plan:              "starter",
+			Status:            "active",
+			StorageQuota:      100 * 1024 * 1024 * 1024, // 100GB for MVP
 			RequestsPerSecond: 100,
 		}
-		
+
 		// Add tenant to request context
 		ctx := tenant.WithTenant(r.Context(), t)
 		r = r.WithContext(ctx)
