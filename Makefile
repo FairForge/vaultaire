@@ -1,52 +1,45 @@
-# Vaultaire Engine Makefile
-BINARY := vaultaire
-VERSION := 0.1.0
-BUILD_TIME := $(shell date -u '+%Y-%m-%d_%H:%M:%S')
-GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+.PHONY: test
+test:
+	go test -v ./...
 
-# Go build flags
-LDFLAGS := -ldflags "-X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME) -X main.GitCommit=$(GIT_COMMIT)"
-GOFLAGS := -v
+.PHONY: test-step48
+test-step48:
+	go test -v ./internal/api -run TestRateLimiter
 
-.PHONY: all
-all: clean test build
+.PHONY: lint
+lint:
+	@echo "Linting..."
+	@golangci-lint run --fix || true
+
+.PHONY: fmt
+fmt:
+	@echo "Formatting..."
+	@gofmt -s -w .
+	@go mod tidy
+
+.PHONY: run
+run:
+	go run cmd/vaultaire/main.go
 
 .PHONY: build
 build:
-	@echo "🔨 Building Vaultaire Engine v$(VERSION)..."
-	@go build $(GOFLAGS) -race $(LDFLAGS) -o bin/$(BINARY) ./cmd/vaultaire
-	@echo "✅ Build complete: bin/$(BINARY)"
-
-.PHONY: test
-test:
-	@echo "🧪 Running tests..."
-	@go test -race -cover ./...
-	@echo "✅ Tests complete"
-
-.PHONY: run
-run: build
-	@echo "🚀 Starting Vaultaire Engine..."
-	@./bin/$(BINARY)
+	go build -o bin/vaultaire cmd/vaultaire/main.go
 
 .PHONY: clean
 clean:
-	@echo "🧹 Cleaning..."
-	@rm -rf bin/ coverage.out *.prof
-	@echo "✅ Clean complete"
+	rm -rf bin/ coverage.*
 
-.PHONY: dev
-dev:
-	@echo "👨‍💻 Starting development mode..."
-	@go run -race ./cmd/vaultaire
+.PHONY: test-coverage
+test-coverage:
+	go test -coverprofile=coverage.out ./...
+	go tool cover -html=coverage.out
 
 .PHONY: help
 help:
-	@echo "Vaultaire Engine Makefile"
-	@echo ""
-	@echo "Usage:"
-	@echo "  make build    - Build the binary"
-	@echo "  make test     - Run tests"
-	@echo "  make run      - Build and run"
-	@echo "  make clean    - Clean build artifacts"
-	@echo "  make dev      - Run in development mode"
-	@echo "  make help     - Show this help"
+	@echo "Available targets:"
+	@echo "  test         - Run all tests"
+	@echo "  test-step48  - Test rate limiter"
+	@echo "  lint         - Run linter"
+	@echo "  fmt          - Format code"
+	@echo "  build        - Build binary"
+	@echo "  clean        - Clean artifacts"
