@@ -1,0 +1,11 @@
+# <type>(<scope>): <subject> [Step XX]
+#
+# <body>
+#
+# <footer>
+#
+# Type: feat, fix, docs, test, refactor, perf, chore
+# Scope: api, engine, tenant, drivers, etc.
+# Subject: imperative mood, max 50 chars
+# Body: explain what and why, not how
+# Footer: closes #issue
