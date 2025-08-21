@@ -18,12 +18,12 @@ func RateLimitMiddleware(limiter *RateLimiter) Middleware {
 			if tenantID == "" {
 				tenantID = "default" // Default tenant for requests without ID
 			}
-			
+
 			// Set rate limit headers (always set, even on success)
 			w.Header().Set("X-RateLimit-Limit", "100")
 			w.Header().Set("X-RateLimit-Remaining", "99") // Simplified for now
 			w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", time.Now().Add(time.Second).Unix()))
-			
+
 			// Check rate limit
 			if !limiter.Allow(tenantID) {
 				// Rate limit exceeded
@@ -32,7 +32,7 @@ func RateLimitMiddleware(limiter *RateLimiter) Middleware {
 				_, _ = w.Write([]byte("Rate limit exceeded"))
 				return
 			}
-			
+
 			// Continue to next handler
 			next.ServeHTTP(w, r)
 		})
