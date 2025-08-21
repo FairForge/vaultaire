@@ -28,7 +28,8 @@ func RateLimitMiddleware(limiter *RateLimiter) Middleware {
 			if !limiter.Allow(tenantID) {
 				// Rate limit exceeded
 				w.WriteHeader(http.StatusTooManyRequests)
-				w.Write([]byte("Rate limit exceeded"))
+				// Handle error to satisfy gosec
+				_, _ = w.Write([]byte("Rate limit exceeded"))
 				return
 			}
 			
