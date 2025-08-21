@@ -51,7 +51,7 @@ func NewUsageTracker(db Database) *UsageTracker {
 func (u *UsageTracker) RecordUpload(ctx context.Context, userID, bucket, key string, size int64) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	
+
 	usage, exists := u.cache[userID]
 	if !exists {
 		usage = &Usage{
@@ -59,16 +59,16 @@ func (u *UsageTracker) RecordUpload(ctx context.Context, userID, bucket, key str
 		}
 		u.cache[userID] = usage
 	}
-	
+
 	usage.StorageBytes += size
 	usage.ObjectCount++
 	usage.LastUpdated = time.Now()
-	
+
 	// TODO: Persist to database
 	// if u.db != nil {
 	//     return u.db.UpdateUsage(ctx, usage)
 	// }
-	
+
 	return nil
 }
 
@@ -76,7 +76,7 @@ func (u *UsageTracker) RecordUpload(ctx context.Context, userID, bucket, key str
 func (u *UsageTracker) RecordDelete(ctx context.Context, userID, bucket, key string, size int64) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	
+
 	usage, exists := u.cache[userID]
 	if !exists {
 		usage = &Usage{
@@ -84,21 +84,21 @@ func (u *UsageTracker) RecordDelete(ctx context.Context, userID, bucket, key str
 		}
 		u.cache[userID] = usage
 	}
-	
+
 	usage.StorageBytes -= size
 	if usage.StorageBytes < 0 {
 		usage.StorageBytes = 0
 	}
-	
+
 	usage.ObjectCount--
 	if usage.ObjectCount < 0 {
 		usage.ObjectCount = 0
 	}
-	
+
 	usage.LastUpdated = time.Now()
-	
+
 	// TODO: Persist to database
-	
+
 	return nil
 }
 
@@ -106,7 +106,7 @@ func (u *UsageTracker) RecordDelete(ctx context.Context, userID, bucket, key str
 func (u *UsageTracker) RecordBandwidth(ctx context.Context, userID string, bwType BandwidthType, bytes int64) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	
+
 	usage, exists := u.cache[userID]
 	if !exists {
 		usage = &Usage{
@@ -114,7 +114,7 @@ func (u *UsageTracker) RecordBandwidth(ctx context.Context, userID string, bwTyp
 		}
 		u.cache[userID] = usage
 	}
-	
+
 	switch bwType {
 	case BandwidthTypeUpload:
 		usage.BandwidthUpload += bytes
@@ -123,11 +123,11 @@ func (u *UsageTracker) RecordBandwidth(ctx context.Context, userID string, bwTyp
 	default:
 		return fmt.Errorf("invalid bandwidth type: %s", bwType)
 	}
-	
+
 	usage.LastUpdated = time.Now()
-	
+
 	// TODO: Persist to database
-	
+
 	return nil
 }
 
@@ -135,20 +135,20 @@ func (u *UsageTracker) RecordBandwidth(ctx context.Context, userID string, bwTyp
 func (u *UsageTracker) GetUsage(ctx context.Context, userID string) (*Usage, error) {
 	u.mu.RLock()
 	defer u.mu.RUnlock()
-	
+
 	usage, exists := u.cache[userID]
 	if !exists {
 		// Try database
 		// if u.db != nil {
 		//     return u.db.GetUsage(ctx, userID)
 		// }
-		
+
 		return &Usage{
 			UserID:      userID,
 			LastUpdated: time.Now(),
 		}, nil
 	}
-	
+
 	return usage, nil
 }
 
@@ -156,14 +156,14 @@ func (u *UsageTracker) GetUsage(ctx context.Context, userID string) (*Usage, err
 func (u *UsageTracker) ResetMonthlyBandwidth(ctx context.Context) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	
+
 	for _, usage := range u.cache {
 		usage.BandwidthUpload = 0
 		usage.BandwidthDownload = 0
 		usage.LastUpdated = time.Now()
 	}
-	
+
 	// TODO: Persist to database
-	
+
 	return nil
 }
