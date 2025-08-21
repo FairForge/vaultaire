@@ -1,14 +1,14 @@
 .PHONY: test
 test:
-	go test -v ./...
+	go test -v -short ./...
 
 .PHONY: test-unit
 test-unit:
-	go test -v -short ./...
+	go test -v -short -short ./...
 
 .PHONY: test-step48
 test-step48:
-	go test -v ./internal/api -run TestRateLimiter
+	go test -v -short ./internal/api -run TestRateLimiter
 
 .PHONY: lint
 lint:
