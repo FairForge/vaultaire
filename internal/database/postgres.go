@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
-	
+
 	_ "github.com/lib/pq" // PostgreSQL driver
 )
 
@@ -37,20 +37,20 @@ func NewPostgres(cfg Config) (*Postgres, error) {
 	if cfg.SSLMode == "" {
 		cfg.SSLMode = "disable"
 	}
-	
+
 	dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
 		cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.Database, cfg.SSLMode)
-	
+
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
-	
+
 	// Set connection pool settings
 	db.SetMaxOpenConns(25)
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(5 * time.Minute)
-	
+
 	return &Postgres{db: db}, nil
 }
 
@@ -87,13 +87,13 @@ func (p *Postgres) CreateTables(ctx context.Context) error {
 			UNIQUE(tenant_id, container, name)
 		)`,
 	}
-	
+
 	for _, query := range queries {
 		if _, err := p.db.ExecContext(ctx, query); err != nil {
 			return fmt.Errorf("create table: %w", err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -110,7 +110,7 @@ func (p *Postgres) CreateTenant(ctx context.Context, tenant *Tenant) error {
 // GetTenant retrieves a tenant by ID
 func (p *Postgres) GetTenant(ctx context.Context, id string) (*Tenant, error) {
 	query := `SELECT id, name, created_at, updated_at FROM tenants WHERE id = $1`
-	
+
 	var tenant Tenant
 	err := p.db.QueryRowContext(ctx, query, id).Scan(
 		&tenant.ID,
@@ -118,13 +118,13 @@ func (p *Postgres) GetTenant(ctx context.Context, id string) (*Tenant, error) {
 		&tenant.CreatedAt,
 		&tenant.UpdatedAt,
 	)
-	
+
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("tenant not found")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("query tenant: %w", err)
 	}
-	
+
 	return &tenant, nil
 }
