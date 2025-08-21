@@ -27,7 +27,7 @@ func NewMetrics() *Metrics {
 	// Use singleton pattern to avoid duplicate registration
 	metricsOnce.Do(func() {
 		registry := prometheus.NewRegistry()
-		
+
 		m := &Metrics{
 			RequestCounter: prometheus.NewCounterVec(
 				prometheus.CounterOpts{
@@ -38,8 +38,8 @@ func NewMetrics() *Metrics {
 			),
 			LatencyHistogram: prometheus.NewHistogramVec(
 				prometheus.HistogramOpts{
-					Name: "vaultaire_request_duration_seconds",
-					Help: "HTTP request latency in seconds",
+					Name:    "vaultaire_request_duration_seconds",
+					Help:    "HTTP request latency in seconds",
 					Buckets: prometheus.DefBuckets,
 				},
 				[]string{"tenant", "method", "path"},
@@ -53,15 +53,15 @@ func NewMetrics() *Metrics {
 			),
 			registry: registry,
 		}
-		
+
 		// Register metrics with custom registry
 		registry.MustRegister(m.RequestCounter)
 		registry.MustRegister(m.LatencyHistogram)
 		registry.MustRegister(m.RateLimitHits)
-		
+
 		metricsInstance = m
 	})
-	
+
 	return metricsInstance
 }
 
