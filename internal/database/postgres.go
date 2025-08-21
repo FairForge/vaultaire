@@ -148,7 +148,7 @@ func (p *Postgres) CreateArtifact(ctx context.Context, artifact *Artifact) error
 		INSERT INTO artifacts (tenant_id, container, name, size, content_type, etag)
 		VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING id, created_at, updated_at`
-	
+
 	err := p.db.QueryRowContext(ctx, query,
 		artifact.TenantID,
 		artifact.Container,
@@ -157,7 +157,7 @@ func (p *Postgres) CreateArtifact(ctx context.Context, artifact *Artifact) error
 		artifact.ContentType,
 		artifact.ETag,
 	).Scan(&artifact.ID, &artifact.CreatedAt, &artifact.UpdatedAt)
-	
+
 	if err != nil {
 		return fmt.Errorf("insert artifact: %w", err)
 	}
@@ -170,7 +170,7 @@ func (p *Postgres) GetArtifact(ctx context.Context, tenantID, container, name st
 		SELECT id, tenant_id, container, name, size, content_type, etag, created_at, updated_at
 		FROM artifacts
 		WHERE tenant_id = $1 AND container = $2 AND name = $3`
-	
+
 	var artifact Artifact
 	err := p.db.QueryRowContext(ctx, query, tenantID, container, name).Scan(
 		&artifact.ID,
@@ -183,14 +183,14 @@ func (p *Postgres) GetArtifact(ctx context.Context, tenantID, container, name st
 		&artifact.CreatedAt,
 		&artifact.UpdatedAt,
 	)
-	
+
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("artifact not found")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("query artifact: %w", err)
 	}
-	
+
 	return &artifact, nil
 }
 
@@ -202,13 +202,13 @@ func (p *Postgres) ListArtifacts(ctx context.Context, tenantID, container string
 		WHERE tenant_id = $1 AND container = $2
 		ORDER BY name
 		LIMIT $3`
-	
+
 	rows, err := p.db.QueryContext(ctx, query, tenantID, container, limit)
 	if err != nil {
 		return nil, fmt.Errorf("query artifacts: %w", err)
 	}
 	defer rows.Close()
-	
+
 	var artifacts []*Artifact
 	for rows.Next() {
 		var a Artifact
@@ -228,31 +228,31 @@ func (p *Postgres) ListArtifacts(ctx context.Context, tenantID, container string
 		}
 		artifacts = append(artifacts, &a)
 	}
-	
+
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("rows error: %w", err)
 	}
-	
+
 	return artifacts, nil
 }
 
 // DeleteArtifact removes artifact metadata
 func (p *Postgres) DeleteArtifact(ctx context.Context, tenantID, container, name string) error {
 	query := `DELETE FROM artifacts WHERE tenant_id = $1 AND container = $2 AND name = $3`
-	
+
 	result, err := p.db.ExecContext(ctx, query, tenantID, container, name)
 	if err != nil {
 		return fmt.Errorf("delete artifact: %w", err)
 	}
-	
+
 	rows, err := result.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("rows affected: %w", err)
 	}
-	
+
 	if rows == 0 {
 		return fmt.Errorf("artifact not found")
 	}
-	
+
 	return nil
 }
