@@ -2,7 +2,7 @@ package api
 
 import (
 	"context"
-	"crypto/md5"
+	"crypto/sha256"
 
 	"fmt"
 	"io"
@@ -93,7 +93,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	if info, err := os.Stat(filePath); err == nil {
 		fileInfo = info
 		// Calculate simple ETag
-		h := md5.New()
+		h := sha256.New()
 		h.Write([]byte(fmt.Sprintf("%s-%d", artifact, info.Size())))
 		etag = fmt.Sprintf("%x", h.Sum(nil))
 	} else {
@@ -274,7 +274,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	}
 
 	// Calculate ETag (simple MD5 of the path for now)
-	h := md5.New()
+	h := sha256.New()
 	h.Write([]byte(fmt.Sprintf("%s/%s", container, artifact)))
 	etag := fmt.Sprintf("%x", h.Sum(nil))
 
