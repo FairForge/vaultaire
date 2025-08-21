@@ -44,7 +44,7 @@ func (d *LocalDriver) Get(ctx context.Context, container, artifact string) (io.R
 // Put stores an artifact in a container
 func (d *LocalDriver) Put(ctx context.Context, container, artifact string, data io.Reader) error {
 	containerPath := filepath.Join(d.basePath, container)
-	if err := os.MkdirAll(containerPath, 0755); err != nil {
+	if err := os.MkdirAll(containerPath, 0750); err != nil {
 		return fmt.Errorf("create container: %w", err)
 	}
 
