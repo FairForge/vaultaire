@@ -110,8 +110,8 @@ func WriteS3Error(w http.ResponseWriter, code string, resource string, requestID
 
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(statusCode)
-	w.Write([]byte(xml.Header))
-	w.Write(xmlData)
+	_, _ = w.Write([]byte(xml.Header))
+	_, _ = w.Write(xmlData)
 }
 
 // generateRequestID creates a unique request ID

@@ -86,7 +86,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(health)
+	_ = json.NewEncoder(w).Encode(health)
 }
 
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
@@ -96,7 +96,7 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(ready)
+	_ = json.NewEncoder(w).Encode(ready)
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
@@ -106,7 +106,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	)
 
 	w.Header().Set("Content-Type", "text/plain")
-	w.Write([]byte(metrics))
+	_, _ = w.Write([]byte(metrics))
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
@@ -117,7 +117,7 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(version)
+	_ = json.NewEncoder(w).Encode(version)
 }
 
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
