@@ -68,16 +68,16 @@ func NewBillingService(apiKey string) *BillingService {
 func (b *BillingService) CreateCustomer(ctx context.Context, userID, email string) (*Customer, error) {
 	// In production, this would call Stripe API
 	// For MVP, simulate with in-memory storage
-	
+
 	customer := &Customer{
 		UserID:    userID,
 		Email:     email,
 		StripeID:  fmt.Sprintf("cus_%d", time.Now().Unix()),
 		CreatedAt: time.Now(),
 	}
-	
+
 	b.customers[customer.StripeID] = customer
-	
+
 	return customer, nil
 }
 
@@ -85,20 +85,20 @@ func (b *BillingService) CreateCustomer(ctx context.Context, userID, email strin
 func (b *BillingService) RecordUsage(ctx context.Context, customerID string, usage *UsageRecord) error {
 	// In production, this would create Stripe Usage Records
 	// For MVP, we just validate the customer exists
-	
+
 	if _, exists := b.customers[customerID]; !exists {
 		return fmt.Errorf("customer not found: %s", customerID)
 	}
-	
+
 	// TODO: Store usage records for monthly billing
-	
+
 	return nil
 }
 
 // CalculateCharges calculates charges based on usage
 func (b *BillingService) CalculateCharges(usage *UsageRecord) *Charges {
 	charges := &Charges{}
-	
+
 	// Free tier: 5GB storage, 50GB bandwidth
 	const (
 		freeStorageGB   = 5.0
@@ -107,28 +107,28 @@ func (b *BillingService) CalculateCharges(usage *UsageRecord) *Charges {
 		storageRatePerGB   = 1 // 1 cent per GB over free tier
 		bandwidthRatePerGB = 1 // 1 cent per GB over free tier
 	)
-	
+
 	// Calculate storage charges
 	if usage.StorageGB > freeStorageGB {
 		overageGB := usage.StorageGB - freeStorageGB
 		charges.StorageCents = int(overageGB * storageRatePerGB)
 	}
-	
+
 	// Calculate bandwidth charges
 	if usage.BandwidthGB > freeBandwidthGB {
 		overageGB := usage.BandwidthGB - freeBandwidthGB
 		charges.BandwidthCents = int(overageGB * bandwidthRatePerGB)
 	}
-	
+
 	charges.TotalCents = charges.StorageCents + charges.BandwidthCents
-	
+
 	return charges
 }
 
 // CreateInvoice creates an invoice for charges
 func (b *BillingService) CreateInvoice(ctx context.Context, customerID string, charges *Charges) (*Invoice, error) {
 	// In production, this would create a Stripe Invoice
-	
+
 	invoice := &Invoice{
 		ID:          fmt.Sprintf("inv_%d", time.Now().Unix()),
 		CustomerID:  customerID,
@@ -136,16 +136,16 @@ func (b *BillingService) CreateInvoice(ctx context.Context, customerID string, c
 		Status:      "pending",
 		CreatedAt:   time.Now(),
 	}
-	
+
 	b.invoices[invoice.ID] = invoice
-	
+
 	return invoice, nil
 }
 
 // ProcessPayment processes a payment
 func (b *BillingService) ProcessPayment(ctx context.Context, customerID, paymentMethodID string, amountCents int) (*Payment, error) {
 	// In production, this would call Stripe Payment Intent API
-	
+
 	payment := &Payment{
 		ID:          fmt.Sprintf("pay_%d", time.Now().Unix()),
 		CustomerID:  customerID,
@@ -153,9 +153,9 @@ func (b *BillingService) ProcessPayment(ctx context.Context, customerID, payment
 		Status:      "succeeded", // Simulate success
 		ProcessedAt: time.Now(),
 	}
-	
+
 	b.payments[payment.ID] = payment
-	
+
 	return payment, nil
 }
 
@@ -165,6 +165,6 @@ func (b *BillingService) GetCustomer(ctx context.Context, customerID string) (*C
 	if !exists {
 		return nil, fmt.Errorf("customer not found")
 	}
-	
+
 	return customer, nil
 }
