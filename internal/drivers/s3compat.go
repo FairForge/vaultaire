@@ -159,4 +159,3 @@ func (d *S3CompatDriver) HealthCheck(ctx context.Context) error {
 func (d *S3CompatDriver) Name() string {
 	return "s3compat"
 }
-
