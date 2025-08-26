@@ -29,7 +29,7 @@ type Tenant struct {
 	ID        string
 	Name      string
 	CreatedAt time.Time
-	UpdatedAt time.Time
+	Email     string
 }
 
 // NewPostgres creates a new PostgreSQL connection
@@ -99,8 +99,8 @@ func (p *Postgres) CreateTables(ctx context.Context) error {
 
 // CreateTenant creates a new tenant
 func (p *Postgres) CreateTenant(ctx context.Context, tenant *Tenant) error {
-	query := `INSERT INTO tenants (id, name, created_at) VALUES ($1, $2, $3)`
-	_, err := p.db.ExecContext(ctx, query, tenant.ID, tenant.Name, tenant.CreatedAt)
+	query := `INSERT INTO tenants (id, name, email, created_at) VALUES ($1, $2, $3, $4)`
+	_, err := p.db.ExecContext(ctx, query, tenant.ID, tenant.Name, tenant.Email, tenant.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("insert tenant: %w", err)
 	}
@@ -109,14 +109,14 @@ func (p *Postgres) CreateTenant(ctx context.Context, tenant *Tenant) error {
 
 // GetTenant retrieves a tenant by ID
 func (p *Postgres) GetTenant(ctx context.Context, id string) (*Tenant, error) {
-	query := `SELECT id, name, created_at, updated_at FROM tenants WHERE id = $1`
+	query := `SELECT id, name, email, created_at FROM tenants WHERE id = $1`
 
 	var tenant Tenant
 	err := p.db.QueryRowContext(ctx, query, id).Scan(
 		&tenant.ID,
 		&tenant.Name,
+		&tenant.Email,
 		&tenant.CreatedAt,
-		&tenant.UpdatedAt,
 	)
 
 	if err == sql.ErrNoRows {
