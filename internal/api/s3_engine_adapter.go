@@ -321,39 +321,39 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 
 // HandleList processes S3 LIST requests
 func (a *S3ToEngine) HandleList(w http.ResponseWriter, r *http.Request, bucket, prefix string) {
-    // Get tenant from context
-    t, err := tenant.FromContext(r.Context())
-    if err != nil {
-        a.logger.Warn("no tenant in context", zap.Error(err))
-        WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
-        return
-    }
-    
-    // List using engine with tenant namespace
-    container := t.NamespaceContainer(bucket)
-    
-    artifacts, err := a.engine.List(r.Context(), container)
-    if err != nil {
-        a.logger.Error("list failed", 
-            zap.String("container", container),
-            zap.Error(err))
-        WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-        return
-    }
-    
-    // Convert to S3 XML response
-    w.Header().Set("Content-Type", "application/xml")
-    w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>`))
-    w.Write([]byte(`<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">`))
-    w.Write([]byte(fmt.Sprintf("<Name>%s</Name>", bucket)))
-    
-    for _, artifact := range artifacts {
-        w.Write([]byte("<Contents>"))
-        w.Write([]byte(fmt.Sprintf("<Key>%s</Key>", artifact.Key)))
-        w.Write([]byte(fmt.Sprintf("<Size>%d</Size>", artifact.Size)))
-        w.Write([]byte("<StorageClass>STANDARD</StorageClass>"))
-        w.Write([]byte("</Contents>"))
-    }
-    
-    w.Write([]byte("</ListBucketResult>"))
+	// Get tenant from context
+	t, err := tenant.FromContext(r.Context())
+	if err != nil {
+		a.logger.Warn("no tenant in context", zap.Error(err))
+		WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
+		return
+	}
+
+	// List using engine with tenant namespace
+	container := t.NamespaceContainer(bucket)
+
+	artifacts, err := a.engine.List(r.Context(), container)
+	if err != nil {
+		a.logger.Error("list failed",
+			zap.String("container", container),
+			zap.Error(err))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return
+	}
+
+	// Convert to S3 XML response
+	w.Header().Set("Content-Type", "application/xml")
+	w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>`))
+	w.Write([]byte(`<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">`))
+	fmt.Fprintf(w, "<Name>%s</Name>", bucket)
+
+	for _, artifact := range artifacts {
+		w.Write([]byte("<Contents>"))
+		fmt.Fprintf(w, "<Key>%s</Key>", artifact.Key)
+		fmt.Fprintf(w, "<Size>%d</Size>", artifact.Size)
+		w.Write([]byte("<StorageClass>STANDARD</StorageClass>"))
+		w.Write([]byte("</Contents>"))
+	}
+
+	w.Write([]byte("</ListBucketResult>"))
 }
