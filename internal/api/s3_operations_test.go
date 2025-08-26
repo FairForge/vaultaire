@@ -23,7 +23,7 @@ func TestS3_PutAndGet_WithTenant(t *testing.T) {
 	// Create temp dir for storage
 	tempDir, err := os.MkdirTemp("", "vaultaire-test-*")
 	require.NoError(t, err)
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	// Create and register a local driver
 	driver := drivers.NewLocalDriver(tempDir, logger)

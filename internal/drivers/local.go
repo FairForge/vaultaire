@@ -56,7 +56,10 @@ func (d *LocalDriver) Put(ctx context.Context, container, artifact string, data 
 	defer file.Close()
 
 	_, err = io.Copy(file, data)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to copy data: %w", err)
+	}
+	return nil
 }
 
 // Delete removes an artifact from a container
@@ -87,5 +90,5 @@ func (d *LocalDriver) List(ctx context.Context, container string) ([]string, err
 // HealthCheck verifies the driver is working
 func (d *LocalDriver) HealthCheck(ctx context.Context) error {
 	_, err := os.Stat(d.basePath)
-	return err
+	return fmt.Errorf("health check failed: %w", err)
 }
