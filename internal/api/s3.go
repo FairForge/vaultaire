@@ -337,73 +337,9 @@ func (s *Server) handleDeleteObject(w http.ResponseWriter, r *http.Request, req 
 
 // handleListObjects handles bucket listing
 func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request, req *S3Request) {
-	// Log the operation
-	s.logger.Debug("S3 LIST translating to engine",
-		zap.String("s3.bucket", req.Bucket),
-		zap.String("engine.container", req.Bucket),
-	)
-
-	// List objects from the engine (no prefix parameter needed)
-	ctx := r.Context()
-	objects, err := s.engine.List(ctx, req.Bucket)
-	if err != nil {
-		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-		return
-	}
-
-	// Build S3 XML response
-	type Object struct {
-		Key          string
-		LastModified string
-		Size         int64
-		StorageClass string
-	}
-
-	type ListBucketResult struct {
-		Name        string
-		Prefix      string
-		MaxKeys     int
-		IsTruncated bool
-		Contents    []Object
-	}
-
-	result := ListBucketResult{
-		Name:        req.Bucket,
-		Prefix:      req.Query["prefix"],
-		MaxKeys:     1000,
-		IsTruncated: false,
-		Contents:    make([]Object, 0),
-	}
-
-	// Convert engine objects to S3 format
-	for _, obj := range objects {
-		result.Contents = append(result.Contents, Object{
-			Key:          obj.Key,
-			LastModified: obj.Modified.Format(time.RFC3339), // Changed from LastModified to Modified
-			Size:         obj.Size,
-			StorageClass: "STANDARD",
-		})
-	}
-
-	// Marshal to XML
-	w.Header().Set("Content-Type", "application/xml")
-	_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>`))
-	_, _ = w.Write([]byte(`<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">`))
-	_, _ = fmt.Fprintf(w, "<Name>%s</Name>", result.Name)
-	_, _ = fmt.Fprintf(w, "<Prefix>%s</Prefix>", result.Prefix)
-	_, _ = fmt.Fprintf(w, "<MaxKeys>%d</MaxKeys>", result.MaxKeys)
-	_, _ = fmt.Fprintf(w, "<IsTruncated>%t</IsTruncated>", result.IsTruncated)
-
-	for _, obj := range result.Contents {
-		_, _ = w.Write([]byte("<Contents>"))
-		_, _ = fmt.Fprintf(w, "<Key>%s</Key>", obj.Key)
-		_, _ = fmt.Fprintf(w, "<LastModified>%s</LastModified>", obj.LastModified)
-		_, _ = fmt.Fprintf(w, "<Size>%d</Size>", obj.Size)
-		_, _ = fmt.Fprintf(w, "<StorageClass>%s</StorageClass>", obj.StorageClass)
-		_, _ = w.Write([]byte("</Contents>"))
-	}
-
-	_, _ = w.Write([]byte("</ListBucketResult>"))
+	// Use the adapter for tenant isolation (like PUT/GET/DELETE do)
+	adapter := NewS3ToEngine(s.engine, s.logger)
+	adapter.HandleList(w, r, req.Bucket, "")  // Empty prefix for now
 }
 
 // handleListBuckets handles listing all buckets (not implemented yet)
