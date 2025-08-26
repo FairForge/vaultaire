@@ -11,16 +11,16 @@ import (
 	"go.uber.org/zap"
 )
 
-func TestQuotalessDriver_Operations(t *testing.T) {
+func TestS3CompatDriver_Operations(t *testing.T) {
 	// Skip if no credentials
-	accessKey := os.Getenv("QUOTALESS_ACCESS_KEY")
-	secretKey := os.Getenv("QUOTALESS_SECRET_KEY")
+	accessKey := os.Getenv("S3_ACCESS_KEY")
+	secretKey := os.Getenv("S3_SECRET_KEY")
 	if accessKey == "" || secretKey == "" {
-		t.Skip("QUOTALESS_ACCESS_KEY and QUOTALESS_SECRET_KEY required")
+		t.Skip("S3_ACCESS_KEY and S3_SECRET_KEY required")
 	}
 
 	logger := zap.NewNop()
-	driver, err := NewQuotalessDriver(accessKey, secretKey, logger)
+	driver, err := NewS3CompatDriver(accessKey, secretKey, logger)
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -30,7 +30,7 @@ func TestQuotalessDriver_Operations(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Test Put
-	testData := []byte("test content for Quotaless")
+	testData := []byte("test content for S3-compatible")
 	err = driver.Put(ctx, "test-container", "test-artifact", bytes.NewReader(testData))
 	assert.NoError(t, err)
 
