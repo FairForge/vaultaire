@@ -93,17 +93,3 @@ go// Always pass context through
 func Operation(ctx context.Context, ...) error {
     // Use ctx for cancellation, timeouts, values
 }
-
-## When Ignoring Errors is Acceptable
-```go
-// OK in error response paths (already handling an error)
-if err != nil {
-    _, _ = w.Write([]byte("error"))  // ✅ OK
-    return
-}
-
-// OK in tests for setup that's not under test
-_ = tracker.RecordUpload(...)  // ✅ OK in tests
-
-// NOT OK in business logic
-result, _ := db.Query(...)  // ❌ WRONG - handle the error!
