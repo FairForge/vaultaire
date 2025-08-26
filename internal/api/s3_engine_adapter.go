@@ -292,3 +292,29 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		zap.String("engine.artifact", artifact),
 		zap.Int64("size", r.ContentLength))
 }
+
+// HandleDelete processes S3 DELETE requests
+func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket, object string) {
+    // Get tenant from context
+    t, err := tenant.FromContext(r.Context())
+    if err != nil {
+        a.logger.Warn("no tenant in context", zap.Error(err))
+        WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
+        return
+    }
+    
+    // Delete using engine with tenant namespace
+    container := t.NamespaceContainer(bucket)
+    
+    if err := a.engine.Delete(r.Context(), container, object); err != nil {
+        a.logger.Error("delete failed", 
+            zap.String("container", container),
+            zap.String("artifact", object),
+            zap.Error(err))
+        WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+        return
+    }
+    
+    // S3 returns 204 No Content for successful DELETE
+    w.WriteHeader(http.StatusNoContent)
+}
