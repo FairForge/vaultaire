@@ -35,10 +35,10 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine) *
 
 	// Now create the server with the initialized engine
 	s := &Server{
-		config:    cfg,
-		logger:    logger,
-		db:        nil,
-		engine:    eng, // Use the engine we created above
+		config: cfg,
+		logger: logger,
+		db:     nil,
+		engine: eng, // Use the engine we created above
 		// auth:      NewAuth(nil, logger),
 		events:    make(chan Event, 1000),
 		router:    mux.NewRouter(),

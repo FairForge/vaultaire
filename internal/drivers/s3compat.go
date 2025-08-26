@@ -154,3 +154,9 @@ func (d *S3CompatDriver) HealthCheck(ctx context.Context) error {
 	d.logger.Debug("S3-compatible health check passed")
 	return nil
 }
+
+// Name returns the driver name
+func (d *S3CompatDriver) Name() string {
+	return "s3compat"
+}
+
