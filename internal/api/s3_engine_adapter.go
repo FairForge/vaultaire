@@ -83,7 +83,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		}
 		return
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	// Get file info for headers
 	filePath := filepath.Join("/tmp/vaultaire", container, artifact)
@@ -94,7 +94,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		fileInfo = info
 		// Calculate simple ETag
 		h := sha256.New()
-		h.Write([]byte(fmt.Sprintf("%s-%d", artifact, info.Size())))
+		fmt.Fprintf(h, "%s-%d", artifact, info.Size())
 		etag = fmt.Sprintf("%x", h.Sum(nil))
 	} else {
 		// Fallback if we can't stat
@@ -275,7 +275,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 
 	// Calculate ETag (simple MD5 of the path for now)
 	h := sha256.New()
-	h.Write([]byte(fmt.Sprintf("%s/%s", container, artifact)))
+	fmt.Fprintf(h, "%s/%s", container, artifact)
 	etag := fmt.Sprintf("%x", h.Sum(nil))
 
 	// Return S3-compliant response
