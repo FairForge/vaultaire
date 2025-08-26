@@ -339,7 +339,7 @@ func (s *Server) handleDeleteObject(w http.ResponseWriter, r *http.Request, req 
 func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request, req *S3Request) {
 	// Use the adapter for tenant isolation (like PUT/GET/DELETE do)
 	adapter := NewS3ToEngine(s.engine, s.logger)
-	adapter.HandleList(w, r, req.Bucket, "")  // Empty prefix for now
+	adapter.HandleList(w, r, req.Bucket, "") // Empty prefix for now
 }
 
 // handleListBuckets handles listing all buckets (not implemented yet)
