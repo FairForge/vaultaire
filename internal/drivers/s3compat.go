@@ -14,16 +14,16 @@ import (
 	"go.uber.org/zap"
 )
 
-// QuotalessDriver implements storage.Backend for Quotaless S3-compatible API
-type QuotalessDriver struct {
+// S3CompatDriver implements storage.Backend for S3-compatible S3-compatible API
+type S3CompatDriver struct {
 	client *s3.Client
 	bucket string
 	prefix string
 	logger *zap.Logger
 }
 
-// NewQuotalessDriver creates a new Quotaless storage driver
-func NewQuotalessDriver(accessKey, secretKey string, logger *zap.Logger) (*QuotalessDriver, error) {
+// NewS3CompatDriver creates a new S3-compatible storage driver
+func NewS3CompatDriver(accessKey, secretKey string, logger *zap.Logger) (*S3CompatDriver, error) {
 	// Create HTTP client that allows self-signed certs
 	httpClient := &http.Client{
 		Transport: &http.Transport{
@@ -35,7 +35,7 @@ func NewQuotalessDriver(accessKey, secretKey string, logger *zap.Logger) (*Quota
 
 	// Create S3 client directly with minimal config
 	client := s3.New(s3.Options{
-		BaseEndpoint: aws.String("https://us.quotaless.cloud:8000"),
+		BaseEndpoint: aws.String("https://us.s3compat.cloud:8000"),
 		Region:       "us-east-1",
 		Credentials: credentials.NewStaticCredentialsProvider(
 			accessKey,
@@ -46,7 +46,7 @@ func NewQuotalessDriver(accessKey, secretKey string, logger *zap.Logger) (*Quota
 		HTTPClient:   httpClient,
 	})
 
-	return &QuotalessDriver{
+	return &S3CompatDriver{
 		client: client,
 		bucket: "data",
 		prefix: "personal-files/vaultaire",
@@ -55,7 +55,7 @@ func NewQuotalessDriver(accessKey, secretKey string, logger *zap.Logger) (*Quota
 }
 
 // buildKey constructs the full S3 key with prefix
-func (d *QuotalessDriver) buildKey(container, artifact string) string {
+func (d *S3CompatDriver) buildKey(container, artifact string) string {
 	if artifact == "" {
 		return path.Join(d.prefix, container)
 	}
@@ -63,7 +63,7 @@ func (d *QuotalessDriver) buildKey(container, artifact string) string {
 }
 
 // Get retrieves an artifact
-func (d *QuotalessDriver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
+func (d *S3CompatDriver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
 	key := d.buildKey(container, artifact)
 
 	result, err := d.client.GetObject(ctx, &s3.GetObjectInput{
@@ -78,7 +78,7 @@ func (d *QuotalessDriver) Get(ctx context.Context, container, artifact string) (
 }
 
 // Put stores an artifact
-func (d *QuotalessDriver) Put(ctx context.Context, container, artifact string, data io.Reader) error {
+func (d *S3CompatDriver) Put(ctx context.Context, container, artifact string, data io.Reader) error {
 	key := d.buildKey(container, artifact)
 
 	_, err := d.client.PutObject(ctx, &s3.PutObjectInput{
@@ -90,7 +90,7 @@ func (d *QuotalessDriver) Put(ctx context.Context, container, artifact string, d
 		return fmt.Errorf("put object %s: %w", key, err)
 	}
 
-	d.logger.Debug("stored artifact in Quotaless",
+	d.logger.Debug("stored artifact in S3-compatible",
 		zap.String("key", key),
 		zap.String("bucket", d.bucket))
 
@@ -98,7 +98,7 @@ func (d *QuotalessDriver) Put(ctx context.Context, container, artifact string, d
 }
 
 // Delete removes an artifact
-func (d *QuotalessDriver) Delete(ctx context.Context, container, artifact string) error {
+func (d *S3CompatDriver) Delete(ctx context.Context, container, artifact string) error {
 	key := d.buildKey(container, artifact)
 
 	_, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
@@ -113,7 +113,7 @@ func (d *QuotalessDriver) Delete(ctx context.Context, container, artifact string
 }
 
 // List lists artifacts in a container
-func (d *QuotalessDriver) List(ctx context.Context, container string) ([]string, error) {
+func (d *S3CompatDriver) List(ctx context.Context, container string) ([]string, error) {
 	prefix := d.buildKey(container, "") + "/"
 
 	result, err := d.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
@@ -139,7 +139,7 @@ func (d *QuotalessDriver) List(ctx context.Context, container string) ([]string,
 }
 
 // HealthCheck verifies connectivity
-func (d *QuotalessDriver) HealthCheck(ctx context.Context) error {
+func (d *S3CompatDriver) HealthCheck(ctx context.Context) error {
 	// Try to list the bucket root - this should always work
 	_, err := d.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 		Bucket:  aws.String(d.bucket),
@@ -151,6 +151,6 @@ func (d *QuotalessDriver) HealthCheck(ctx context.Context) error {
 		return fmt.Errorf("health check failed: %w", err)
 	}
 
-	d.logger.Debug("Quotaless health check passed")
+	d.logger.Debug("S3-compatible health check passed")
 	return nil
 }
