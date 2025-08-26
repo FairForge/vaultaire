@@ -43,23 +43,23 @@ func (d *LocalDriver) Get(ctx context.Context, container, artifact string) (io.R
 
 // Put stores an artifact in a container
 func (d *LocalDriver) Put(ctx context.Context, container, artifact string, data io.Reader) error {
-        containerPath := filepath.Join(d.basePath, container)
-        if err := os.MkdirAll(containerPath, 0750); err != nil {
-                return fmt.Errorf("create container: %w", err)
-        }
-        
-        fullPath := filepath.Join(d.basePath, container, artifact)
-        file, err := os.Create(fullPath)
-        if err != nil {
-                return fmt.Errorf("create file: %w", err)
-        }
-        defer file.Close()
-        
-        _, err = io.Copy(file, data)
-        if err != nil {
-                return fmt.Errorf("failed to copy data: %w", err)
-        }
-        return nil
+	containerPath := filepath.Join(d.basePath, container)
+	if err := os.MkdirAll(containerPath, 0750); err != nil {
+		return fmt.Errorf("create container: %w", err)
+	}
+
+	fullPath := filepath.Join(d.basePath, container, artifact)
+	file, err := os.Create(fullPath)
+	if err != nil {
+		return fmt.Errorf("create file: %w", err)
+	}
+	defer file.Close()
+
+	_, err = io.Copy(file, data)
+	if err != nil {
+		return fmt.Errorf("failed to copy data: %w", err)
+	}
+	return nil
 }
 
 // Delete removes an artifact from a container
