@@ -22,13 +22,13 @@ jobs:
         sleep 2
         
         # Test PUT
-        curl -X PUT localhost:8000/test/file.txt -d "test" || exit 1
+        curl -X PUT -H "X-Tenant-ID: test" localhost:8000/test/file.txt -d "test" || exit 1
         
         # Test GET
-        curl localhost:8000/test/file.txt || exit 1
+        curl -H "X-Tenant-ID: test" localhost:8000/test/file.txt || exit 1
         
         # Test DELETE
-        curl -X DELETE localhost:8000/test/file.txt || exit 1
+        curl -X DELETE -H "X-Tenant-ID: test" localhost:8000/test/file.txt || exit 1
         
         kill $SERVER_PID
         echo "✅ All S3 operations working!"
