@@ -29,7 +29,7 @@ type Tenant struct {
 	ID        string
 	Name      string
 	CreatedAt time.Time
-	Email string
+	Email     string
 }
 
 // NewPostgres creates a new PostgreSQL connection
@@ -112,17 +112,12 @@ func (p *Postgres) GetTenant(ctx context.Context, id string) (*Tenant, error) {
 	query := `SELECT id, name, email, created_at FROM tenants WHERE id = $1`
 
 	var tenant Tenant
-        err := p.db.QueryRowContext(ctx, query, id).Scan(
-                &tenant.ID,
-                &tenant.Name,
-                &tenant.Email,
-                &tenant.CreatedAt,
-        )
-
-
-
-
-
+	err := p.db.QueryRowContext(ctx, query, id).Scan(
+		&tenant.ID,
+		&tenant.Name,
+		&tenant.Email,
+		&tenant.CreatedAt,
+	)
 
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("tenant not found")
