@@ -411,17 +411,17 @@ func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request, req *
 	w.Header().Set("Content-Type", "application/xml")
 	_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>`))
 	_, _ = w.Write([]byte(`<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">`))
-	_, _ = w.Write([]byte(fmt.Sprintf("<Name>%s</Name>", result.Name)))
-	_, _ = w.Write([]byte(fmt.Sprintf("<Prefix>%s</Prefix>", result.Prefix)))
-	_, _ = w.Write([]byte(fmt.Sprintf("<MaxKeys>%d</MaxKeys>", result.MaxKeys)))
-	_, _ = w.Write([]byte(fmt.Sprintf("<IsTruncated>%t</IsTruncated>", result.IsTruncated)))
+	_, _ = fmt.Fprintf(w, "<Name>%s</Name>", result.Name)
+	_, _ = fmt.Fprintf(w, "<Prefix>%s</Prefix>", result.Prefix)
+	_, _ = fmt.Fprintf(w, "<MaxKeys>%d</MaxKeys>", result.MaxKeys)
+	_, _ = fmt.Fprintf(w, "<IsTruncated>%t</IsTruncated>", result.IsTruncated)
 
 	for _, obj := range result.Contents {
 		_, _ = w.Write([]byte("<Contents>"))
-		_, _ = w.Write([]byte(fmt.Sprintf("<Key>%s</Key>", obj.Key)))
-		_, _ = w.Write([]byte(fmt.Sprintf("<LastModified>%s</LastModified>", obj.LastModified)))
-		_, _ = w.Write([]byte(fmt.Sprintf("<Size>%d</Size>", obj.Size)))
-		_, _ = w.Write([]byte(fmt.Sprintf("<StorageClass>%s</StorageClass>", obj.StorageClass)))
+		_, _ = fmt.Fprintf(w, "<Key>%s</Key>", obj.Key)
+		_, _ = fmt.Fprintf(w, "<LastModified>%s</LastModified>", obj.LastModified)
+		_, _ = fmt.Fprintf(w, "<Size>%d</Size>", obj.Size)
+		_, _ = fmt.Fprintf(w, "<StorageClass>%s</StorageClass>", obj.StorageClass)
 		_, _ = w.Write([]byte("</Contents>"))
 	}
 
