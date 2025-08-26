@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/config"
-	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/gorilla/mux"
 	"go.uber.org/zap"
@@ -32,22 +31,15 @@ type Server struct {
 	startTime    time.Time
 }
 
-func NewServer(cfg *config.Config, logger *zap.Logger, db *sql.DB) *Server {
-	// Create the engine BEFORE the struct initialization
-	eng := engine.NewEngine(logger)
-
-	// Add local driver for testing
-	localDriver := drivers.NewLocalDriver("/tmp/vaultaire", logger)
-	eng.AddDriver("local", localDriver)
-	eng.SetPrimary("local")
+func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine) *Server {
 
 	// Now create the server with the initialized engine
 	s := &Server{
 		config:    cfg,
 		logger:    logger,
-		db:        db,
+		db:        nil,
 		engine:    eng, // Use the engine we created above
-		auth:      NewAuth(db, logger),
+		// auth:      NewAuth(nil, logger),
 		events:    make(chan Event, 1000),
 		router:    mux.NewRouter(),
 		startTime: time.Now(),
