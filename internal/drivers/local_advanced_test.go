@@ -207,3 +207,42 @@ func TestLocalDriver_ExtendedAttributes(t *testing.T) {
 		assert.Contains(t, attrs, "user.myattr")
 	})
 }
+
+func TestLocalDriver_Checksums(t *testing.T) {
+	testDir := t.TempDir()
+	logger := zap.NewNop()
+	driver := NewLocalDriver(testDir, logger)
+	ctx := context.Background()
+
+	testContent := []byte("test content for checksum")
+	
+	t.Run("GetChecksum", func(t *testing.T) {
+		err := driver.Put(ctx, "container", "test.txt", bytes.NewReader(testContent))
+		require.NoError(t, err)
+
+		// Get MD5 checksum
+		checksum, err := driver.GetChecksum(ctx, "container", "test.txt", ChecksumMD5)
+		require.NoError(t, err)
+		assert.NotEmpty(t, checksum)
+
+		// Get SHA256 checksum
+		checksum256, err := driver.GetChecksum(ctx, "container", "test.txt", ChecksumSHA256)
+		require.NoError(t, err)
+		assert.NotEmpty(t, checksum256)
+		assert.NotEqual(t, checksum, checksum256) // Different algorithms = different results
+	})
+
+	t.Run("VerifyChecksum", func(t *testing.T) {
+		// First get the correct checksum
+		checksum, err := driver.GetChecksum(ctx, "container", "test.txt", ChecksumSHA256)
+		require.NoError(t, err)
+
+		// Verify with correct checksum
+		err = driver.VerifyChecksum(ctx, "container", "test.txt", checksum, ChecksumSHA256)
+		assert.NoError(t, err)
+
+		// Verify with wrong checksum
+		err = driver.VerifyChecksum(ctx, "container", "test.txt", "wrongchecksum", ChecksumSHA256)
+		assert.Error(t, err)
+	})
+}

@@ -2,7 +2,12 @@ package drivers
 
 import (
 	"context"
+	"crypto/md5"
+	"crypto/sha256"
+	"crypto/sha512"
+	"encoding/hex"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"path/filepath"
@@ -283,4 +288,59 @@ func (d *LocalDriver) GetOwnership(ctx context.Context, container, artifact stri
 	}
 
 	return -1, -1, fmt.Errorf("unable to get ownership information")
+}
+
+// ChecksumAlgorithm represents a hashing algorithm
+type ChecksumAlgorithm string
+
+const (
+	ChecksumMD5    ChecksumAlgorithm = "md5"
+	ChecksumSHA256 ChecksumAlgorithm = "sha256"
+	ChecksumSHA512 ChecksumAlgorithm = "sha512"
+)
+
+// GetChecksum calculates the checksum of an artifact
+func (d *LocalDriver) GetChecksum(ctx context.Context, container, artifact string, algorithm ChecksumAlgorithm) (string, error) {
+	fullPath := filepath.Join(d.basePath, container, artifact)
+
+	file, err := os.Open(fullPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("artifact not found: %w", err)
+		}
+		return "", fmt.Errorf("open failed: %w", err)
+	}
+	defer file.Close()
+
+	var h hash.Hash
+	switch algorithm {
+	case ChecksumMD5:
+		h = md5.New()
+	case ChecksumSHA256:
+		h = sha256.New()
+	case ChecksumSHA512:
+		h = sha512.New()
+	default:
+		return "", fmt.Errorf("unsupported algorithm: %s", algorithm)
+	}
+
+	if _, err := io.Copy(h, file); err != nil {
+		return "", fmt.Errorf("read failed: %w", err)
+	}
+
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// VerifyChecksum verifies an artifact matches the expected checksum
+func (d *LocalDriver) VerifyChecksum(ctx context.Context, container, artifact string, expected string, algorithm ChecksumAlgorithm) error {
+	actual, err := d.GetChecksum(ctx, container, artifact, algorithm)
+	if err != nil {
+		return err
+	}
+
+	if actual != expected {
+		return fmt.Errorf("checksum mismatch: expected %s, got %s", expected, actual)
+	}
+
+	return nil
 }
