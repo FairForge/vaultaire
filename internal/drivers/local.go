@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -400,18 +401,18 @@ func (d *LocalDriver) ListDirectory(ctx context.Context, container, dir string) 
 // WalkDirectory walks a directory tree and calls fn for each entry
 func (d *LocalDriver) WalkDirectory(ctx context.Context, container, dir string, fn func(path string, entry os.DirEntry) error) error {
 	basePath := filepath.Join(d.basePath, container, dir)
-	
+
 	return filepath.WalkDir(basePath, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		
+
 		// Get relative path from container
 		relPath, err := filepath.Rel(filepath.Join(d.basePath, container), path)
 		if err != nil {
 			return fmt.Errorf("get relative path failed: %w", err)
 		}
-		
+
 		return fn(relPath, entry)
 	})
 }
@@ -419,7 +420,7 @@ func (d *LocalDriver) WalkDirectory(ctx context.Context, container, dir string, 
 // GetDirectorySize calculates the total size of a directory
 func (d *LocalDriver) GetDirectorySize(ctx context.Context, container, dir string) (int64, error) {
 	var totalSize int64
-	
+
 	err := d.WalkDirectory(ctx, container, dir, func(path string, entry os.DirEntry) error {
 		if !entry.IsDir() {
 			info, err := entry.Info()
@@ -430,10 +431,79 @@ func (d *LocalDriver) GetDirectorySize(ctx context.Context, container, dir strin
 		}
 		return nil
 	})
-	
+
 	if err != nil {
 		return 0, fmt.Errorf("walk directory failed: %w", err)
 	}
-	
+
 	return totalSize, nil
+}
+
+// DirectoryIndex represents indexed directory information
+type DirectoryIndex struct {
+	FileCount int
+	DirCount  int
+	TotalSize int64
+	Files     []string
+	Dirs      []string
+}
+
+// IndexDirectory creates an index of a directory
+func (d *LocalDriver) IndexDirectory(ctx context.Context, container, dir string) (*DirectoryIndex, error) {
+	index := &DirectoryIndex{
+		Files: make([]string, 0),
+		Dirs:  make([]string, 0),
+	}
+
+	err := d.WalkDirectory(ctx, container, dir, func(path string, entry os.DirEntry) error {
+		if entry.IsDir() {
+			if path != dir && path != "." {
+				index.DirCount++
+				index.Dirs = append(index.Dirs, path)
+			}
+		} else {
+			index.FileCount++
+			index.Files = append(index.Files, path)
+			if info, err := entry.Info(); err == nil {
+				index.TotalSize += info.Size()
+			}
+		}
+		return nil
+	})
+
+	return index, err
+}
+
+// FindFilesByExtension finds all files with a specific extension
+func (d *LocalDriver) FindFilesByExtension(ctx context.Context, container, ext string) ([]string, error) {
+	var files []string
+
+	err := d.WalkDirectory(ctx, container, "", func(path string, entry os.DirEntry) error {
+		if !entry.IsDir() && strings.HasSuffix(path, ext) {
+			files = append(files, path)
+		}
+		return nil
+	})
+
+	return files, err
+}
+
+// FindFilesByPattern finds files matching a glob pattern
+func (d *LocalDriver) FindFilesByPattern(ctx context.Context, container, pattern string) ([]string, error) {
+	var files []string
+
+	err := d.WalkDirectory(ctx, container, "", func(path string, entry os.DirEntry) error {
+		if !entry.IsDir() {
+			matched, err := filepath.Match(pattern, filepath.Base(path))
+			if err != nil {
+				return err
+			}
+			if matched {
+				files = append(files, path)
+			}
+		}
+		return nil
+	})
+
+	return files, err
 }
