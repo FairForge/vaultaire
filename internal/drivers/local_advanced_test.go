@@ -156,7 +156,7 @@ func TestLocalDriver_FileOwnership(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Skip("Ownership tests require root privileges")
 	}
-	
+
 	testDir := t.TempDir()
 	logger := zap.NewNop()
 	driver := NewLocalDriver(testDir, logger)
@@ -177,5 +177,33 @@ func TestLocalDriver_FileOwnership(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, uid, gotUid)
 		assert.Equal(t, gid, gotGid)
+	})
+}
+
+func TestLocalDriver_ExtendedAttributes(t *testing.T) {
+	testDir := t.TempDir()
+	logger := zap.NewNop()
+	driver := NewLocalDriver(testDir, logger)
+	ctx := context.Background()
+
+	t.Run("SetAndGetXAttr", func(t *testing.T) {
+		err := driver.Put(ctx, "container", "test.txt", strings.NewReader("content"))
+		require.NoError(t, err)
+
+		// Set extended attribute
+		err = driver.SetXAttr(ctx, "container", "test.txt", "user.myattr", []byte("myvalue"))
+		if err != nil {
+			t.Skip("Extended attributes not supported on this filesystem")
+		}
+
+		// Get extended attribute
+		value, err := driver.GetXAttr(ctx, "container", "test.txt", "user.myattr")
+		require.NoError(t, err)
+		assert.Equal(t, []byte("myvalue"), value)
+
+		// List extended attributes
+		attrs, err := driver.ListXAttrs(ctx, "container", "test.txt")
+		require.NoError(t, err)
+		assert.Contains(t, attrs, "user.myattr")
 	})
 }
