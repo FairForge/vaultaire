@@ -602,23 +602,23 @@ func (d *LocalDriver) CompareDirectories(ctx context.Context, sourceContainer, s
 // GetDirectoryModTime returns the most recent modification time in a directory
 func (d *LocalDriver) GetDirectoryModTime(ctx context.Context, container, dir string) (time.Time, error) {
 	var latestTime time.Time
-	
+
 	err := d.WalkDirectory(ctx, container, dir, func(path string, entry os.DirEntry) error {
 		info, err := entry.Info()
 		if err != nil {
 			return err
 		}
-		
+
 		if info.ModTime().After(latestTime) {
 			latestTime = info.ModTime()
 		}
 		return nil
 	})
-	
+
 	if err != nil {
 		return time.Time{}, fmt.Errorf("walk directory failed: %w", err)
 	}
-	
+
 	return latestTime, nil
 }
 
@@ -628,6 +628,88 @@ func (d *LocalDriver) HasDirectoryChanged(ctx context.Context, container, dir st
 	if err != nil {
 		return false, err
 	}
-	
+
 	return modTime.After(since), nil
+}
+
+// AtomicWrite performs an atomic write operation using temp file + rename
+func (d *LocalDriver) AtomicWrite(ctx context.Context, container, artifact string, data io.Reader) error {
+	containerPath := filepath.Join(d.basePath, container)
+	if err := os.MkdirAll(containerPath, 0750); err != nil {
+		return fmt.Errorf("create container: %w", err)
+	}
+	
+	finalPath := filepath.Join(d.basePath, container, artifact)
+	parentDir := filepath.Dir(finalPath)
+	if err := os.MkdirAll(parentDir, 0750); err != nil {
+		return fmt.Errorf("create parent directory: %w", err)
+	}
+	
+	// Create temp file in same directory (for atomic rename)
+	tempFile, err := os.CreateTemp(parentDir, ".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tempPath := tempFile.Name()
+	
+	// Ensure cleanup on error
+	defer func() {
+		if tempFile != nil {
+			tempFile.Close()
+		}
+		if tempPath != "" {
+			os.Remove(tempPath) // Clean up temp file if still exists
+		}
+	}()
+	
+	// Write data to temp file
+	if _, err := io.Copy(tempFile, data); err != nil {
+		return fmt.Errorf("write to temp file: %w", err)
+	}
+	
+	// Sync to disk before rename
+	if err := tempFile.Sync(); err != nil {
+		return fmt.Errorf("sync temp file: %w", err)
+	}
+	
+	// Close before rename
+	if err := tempFile.Close(); err != nil {
+		return fmt.Errorf("close temp file: %w", err)
+	}
+	tempFile = nil // Prevent double close
+	
+	// Atomic rename
+	if err := os.Rename(tempPath, finalPath); err != nil {
+		return fmt.Errorf("atomic rename: %w", err)
+	}
+	tempPath = "" // Prevent cleanup of renamed file
+	
+	return nil
+}
+
+// AtomicRename performs an atomic rename operation
+func (d *LocalDriver) AtomicRename(ctx context.Context, container, oldName, newName string) error {
+	oldPath := filepath.Join(d.basePath, container, oldName)
+	newPath := filepath.Join(d.basePath, container, newName)
+	
+	// Check if source exists
+	if _, err := os.Stat(oldPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("source not found: %w", err)
+		}
+		return fmt.Errorf("stat failed: %w", err)
+	}
+	
+	// Ensure destination directory exists
+	newDir := filepath.Dir(newPath)
+	if err := os.MkdirAll(newDir, 0750); err != nil {
+		return fmt.Errorf("create destination directory: %w", err)
+	}
+	
+	// Atomic rename
+	if err := os.Rename(oldPath, newPath); err != nil {
+		return fmt.Errorf("rename failed: %w", err)
+	}
+	
+	return nil
 }

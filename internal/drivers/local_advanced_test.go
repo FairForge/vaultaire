@@ -438,3 +438,44 @@ func TestLocalDriver_DirectoryMonitoring(t *testing.T) {
 		assert.True(t, changed)
 	})
 }
+
+func TestLocalDriver_AtomicOperations(t *testing.T) {
+	testDir := t.TempDir()
+	logger := zap.NewNop()
+	driver := NewLocalDriver(testDir, logger)
+	ctx := context.Background()
+
+	t.Run("AtomicWrite", func(t *testing.T) {
+		// Atomic write should either fully succeed or fully fail
+		err := driver.AtomicWrite(ctx, "container", "atomic.txt", strings.NewReader("atomic content"))
+		require.NoError(t, err)
+		
+		// Verify file exists with correct content
+		reader, err := driver.Get(ctx, "container", "atomic.txt")
+		require.NoError(t, err)
+		content, _ := io.ReadAll(reader)
+		reader.Close()
+		assert.Equal(t, "atomic content", string(content))
+	})
+
+	t.Run("AtomicRename", func(t *testing.T) {
+		// Create original file
+		err := driver.Put(ctx, "container", "original.txt", strings.NewReader("original content"))
+		require.NoError(t, err)
+		
+		// Atomic rename
+		err = driver.AtomicRename(ctx, "container", "original.txt", "renamed.txt")
+		require.NoError(t, err)
+		
+		// Original should not exist
+		_, err = driver.Get(ctx, "container", "original.txt")
+		assert.Error(t, err)
+		
+		// Renamed should exist with same content
+		reader, err := driver.Get(ctx, "container", "renamed.txt")
+		require.NoError(t, err)
+		content, _ := io.ReadAll(reader)
+		reader.Close()
+		assert.Equal(t, "original content", string(content))	})
+}
+
