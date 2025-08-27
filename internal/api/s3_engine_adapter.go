@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"crypto/sha256"
-
 	"fmt"
 	"io"
 	"net/http"
@@ -92,10 +91,10 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 
 	if info, err := os.Stat(filePath); err == nil {
 		fileInfo = info
-		// Calculate simple ETag
+		// Calculate simple ETag using SHA256
 		h := sha256.New()
-		fmt.Fprintf(h, "%s-%d", artifact, info.Size())
-		etag = fmt.Sprintf("%x", h.Sum(nil))
+		h.Write([]byte(filePath))
+		etag = fmt.Sprintf("%x", h.Sum(nil))[:32] // Use first 32 chars for ETag
 	} else {
 		// Fallback if we can't stat
 		fileInfo = nil
@@ -273,10 +272,10 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		return
 	}
 
-	// Calculate ETag (simple MD5 of the path for now)
+	// Calculate ETag using SHA256 of the path
 	h := sha256.New()
-	fmt.Fprintf(h, "%s/%s", container, artifact)
-	etag := fmt.Sprintf("%x", h.Sum(nil))
+	h.Write([]byte(filepath.Join(container, artifact)))
+	etag := fmt.Sprintf("%x", h.Sum(nil))[:32] // Use first 32 chars for ETag
 
 	// Return S3-compliant response
 	w.Header().Set("ETag", fmt.Sprintf(`"%s"`, etag))
@@ -343,17 +342,47 @@ func (a *S3ToEngine) HandleList(w http.ResponseWriter, r *http.Request, bucket, 
 
 	// Convert to S3 XML response
 	w.Header().Set("Content-Type", "application/xml")
-	w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>`))
-	w.Write([]byte(`<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">`))
-	fmt.Fprintf(w, "<Name>%s</Name>", bucket)
 
-	for _, artifact := range artifacts {
-		w.Write([]byte("<Contents>"))
-		fmt.Fprintf(w, "<Key>%s</Key>", artifact.Key)
-		fmt.Fprintf(w, "<Size>%d</Size>", artifact.Size)
-		w.Write([]byte("<StorageClass>STANDARD</StorageClass>"))
-		w.Write([]byte("</Contents>"))
+	if _, err := w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>`)); err != nil {
+		a.logger.Error("failed to write XML header", zap.Error(err))
+		return
 	}
 
-	w.Write([]byte("</ListBucketResult>"))
+	if _, err := w.Write([]byte(`<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">`)); err != nil {
+		a.logger.Error("failed to write response", zap.Error(err))
+		return
+	}
+
+	if _, err := fmt.Fprintf(w, "<Name>%s</Name>", bucket); err != nil {
+		a.logger.Error("failed to write bucket name", zap.Error(err))
+		return
+	}
+
+	for _, artifact := range artifacts {
+		if _, err := w.Write([]byte("<Contents>")); err != nil {
+			a.logger.Error("failed to write contents tag", zap.Error(err))
+			return
+		}
+		if _, err := fmt.Fprintf(w, "<Key>%s</Key>", artifact.Key); err != nil {
+			a.logger.Error("failed to write key", zap.Error(err))
+			return
+		}
+		if _, err := fmt.Fprintf(w, "<Size>%d</Size>", artifact.Size); err != nil {
+			a.logger.Error("failed to write size", zap.Error(err))
+			return
+		}
+		if _, err := w.Write([]byte("<StorageClass>STANDARD</StorageClass>")); err != nil {
+			a.logger.Error("failed to write storage class", zap.Error(err))
+			return
+		}
+		if _, err := w.Write([]byte("</Contents>")); err != nil {
+			a.logger.Error("failed to write contents closing tag", zap.Error(err))
+			return
+		}
+	}
+
+	if _, err := w.Write([]byte("</ListBucketResult>")); err != nil {
+		a.logger.Error("failed to write closing tag", zap.Error(err))
+		return
+	}
 }

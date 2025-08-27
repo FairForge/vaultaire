@@ -18,10 +18,8 @@ type CoreEngine struct {
 	logger  *zap.Logger
 
 	// Hidden components (ready but dormant)
-	compute ComputeEngine     // For WASM
-	ml      MLEngine          // For ML operations
-	cache   map[string][]byte // Simple cache for now
-	mu      sync.RWMutex
+	cache map[string][]byte // Simple cache for now
+	mu    sync.RWMutex
 
 	// Metrics for ML training
 	accessLog []AccessEvent

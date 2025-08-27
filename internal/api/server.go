@@ -22,7 +22,6 @@ type Server struct {
 	router     *mux.Router
 	httpServer *http.Server
 	db         *sql.DB
-	auth       *Auth
 	events     chan Event
 	engine     engine.Engine
 
