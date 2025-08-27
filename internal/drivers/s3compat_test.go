@@ -42,10 +42,20 @@ func TestS3CompatDriver_Operations(t *testing.T) {
 	// Test Get
 	reader, err := driver.Get(ctx, "test-container", "test-artifact")
 	require.NoError(t, err)
-	defer reader.Close()
 
+	defer func() {
+		if err := reader.Close(); err != nil {
+			t.Errorf("failed to close reader: %v", err)
+		}
+	}()
+
+	// Fix: Declare buf BEFORE using it
 	buf := new(bytes.Buffer)
-	buf.ReadFrom(reader)
+	_, err = buf.ReadFrom(reader) // Don't need n since we're not using it
+	if err != nil {
+		t.Fatalf("failed to read: %v", err)
+	}
+
 	assert.Equal(t, testData, buf.Bytes())
 
 	// Test Delete
