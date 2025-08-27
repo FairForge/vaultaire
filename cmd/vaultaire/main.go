@@ -52,7 +52,7 @@ func main() {
 		if dataPath == "" {
 			dataPath = "/tmp/vaultaire-data"
 		}
-		if err := os.MkdirAll(dataPath, 0755); err != nil {
+		if err := os.MkdirAll(dataPath, 0750); err != nil {
 			logger.Fatal("failed to create storage directory", zap.Error(err))
 		}
 		localDriver := drivers.NewLocalDriver(dataPath, logger)
