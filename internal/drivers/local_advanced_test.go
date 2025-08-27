@@ -285,3 +285,36 @@ func TestLocalDriver_DirectoryOperations(t *testing.T) {
 		assert.Len(t, entries, 3) // 2 files + 1 subdir
 	})
 }
+
+func TestLocalDriver_DirectoryTraversal(t *testing.T) {
+	testDir := t.TempDir()
+	logger := zap.NewNop()
+	driver := NewLocalDriver(testDir, logger)
+	ctx := context.Background()
+
+	// Setup test structure
+	driver.Put(ctx, "container", "file1.txt", strings.NewReader("root"))
+	driver.Put(ctx, "container", "dir1/file2.txt", strings.NewReader("level1"))
+	driver.Put(ctx, "container", "dir1/dir2/file3.txt", strings.NewReader("level2"))
+	driver.Put(ctx, "container", "dir1/dir2/dir3/file4.txt", strings.NewReader("level3"))
+
+	t.Run("WalkDirectory", func(t *testing.T) {
+		var files []string
+		err := driver.WalkDirectory(ctx, "container", "", func(path string, entry os.DirEntry) error {
+			if !entry.IsDir() {
+				files = append(files, path)
+			}
+			return nil
+		})
+		require.NoError(t, err)
+		assert.Len(t, files, 4)
+		assert.Contains(t, files, "file1.txt")
+		assert.Contains(t, files, filepath.Join("dir1", "file2.txt"))
+	})
+
+	t.Run("GetDirectorySize", func(t *testing.T) {
+		size, err := driver.GetDirectorySize(ctx, "container", "dir1")
+		require.NoError(t, err)
+		assert.Greater(t, size, int64(0))
+	})
+}

@@ -348,29 +348,29 @@ func (d *LocalDriver) VerifyChecksum(ctx context.Context, container, artifact st
 // CreateDirectory creates a directory within a container
 func (d *LocalDriver) CreateDirectory(ctx context.Context, container, dir string) error {
 	fullPath := filepath.Join(d.basePath, container, dir)
-	
+
 	if err := os.MkdirAll(fullPath, 0750); err != nil {
 		return fmt.Errorf("create directory failed: %w", err)
 	}
-	
+
 	return nil
 }
 
 // RemoveDirectory removes a directory from a container
 func (d *LocalDriver) RemoveDirectory(ctx context.Context, container, dir string) error {
 	fullPath := filepath.Join(d.basePath, container, dir)
-	
+
 	if err := os.RemoveAll(fullPath); err != nil {
 		return fmt.Errorf("remove directory failed: %w", err)
 	}
-	
+
 	return nil
 }
 
 // DirectoryExists checks if a directory exists
 func (d *LocalDriver) DirectoryExists(ctx context.Context, container, dir string) (bool, error) {
 	fullPath := filepath.Join(d.basePath, container, dir)
-	
+
 	info, err := os.Stat(fullPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -378,14 +378,14 @@ func (d *LocalDriver) DirectoryExists(ctx context.Context, container, dir string
 		}
 		return false, fmt.Errorf("stat failed: %w", err)
 	}
-	
+
 	return info.IsDir(), nil
 }
 
 // ListDirectory lists entries in a directory
 func (d *LocalDriver) ListDirectory(ctx context.Context, container, dir string) ([]os.DirEntry, error) {
 	fullPath := filepath.Join(d.basePath, container, dir)
-	
+
 	entries, err := os.ReadDir(fullPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -393,6 +393,47 @@ func (d *LocalDriver) ListDirectory(ctx context.Context, container, dir string) 
 		}
 		return nil, fmt.Errorf("read directory failed: %w", err)
 	}
-	
+
 	return entries, nil
+}
+
+// WalkDirectory walks a directory tree and calls fn for each entry
+func (d *LocalDriver) WalkDirectory(ctx context.Context, container, dir string, fn func(path string, entry os.DirEntry) error) error {
+	basePath := filepath.Join(d.basePath, container, dir)
+	
+	return filepath.WalkDir(basePath, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		
+		// Get relative path from container
+		relPath, err := filepath.Rel(filepath.Join(d.basePath, container), path)
+		if err != nil {
+			return fmt.Errorf("get relative path failed: %w", err)
+		}
+		
+		return fn(relPath, entry)
+	})
+}
+
+// GetDirectorySize calculates the total size of a directory
+func (d *LocalDriver) GetDirectorySize(ctx context.Context, container, dir string) (int64, error) {
+	var totalSize int64
+	
+	err := d.WalkDirectory(ctx, container, dir, func(path string, entry os.DirEntry) error {
+		if !entry.IsDir() {
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			totalSize += info.Size()
+		}
+		return nil
+	})
+	
+	if err != nil {
+		return 0, fmt.Errorf("walk directory failed: %w", err)
+	}
+	
+	return totalSize, nil
 }
