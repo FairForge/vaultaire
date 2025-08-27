@@ -215,7 +215,7 @@ func TestLocalDriver_Checksums(t *testing.T) {
 	ctx := context.Background()
 
 	testContent := []byte("test content for checksum")
-	
+
 	t.Run("GetChecksum", func(t *testing.T) {
 		err := driver.Put(ctx, "container", "test.txt", bytes.NewReader(testContent))
 		require.NoError(t, err)
@@ -244,5 +244,44 @@ func TestLocalDriver_Checksums(t *testing.T) {
 		// Verify with wrong checksum
 		err = driver.VerifyChecksum(ctx, "container", "test.txt", "wrongchecksum", ChecksumSHA256)
 		assert.Error(t, err)
+	})
+}
+
+func TestLocalDriver_DirectoryOperations(t *testing.T) {
+	testDir := t.TempDir()
+	logger := zap.NewNop()
+	driver := NewLocalDriver(testDir, logger)
+	ctx := context.Background()
+
+	t.Run("CreateAndRemoveDirectory", func(t *testing.T) {
+		// Create directory
+		err := driver.CreateDirectory(ctx, "container", "mydir")
+		require.NoError(t, err)
+
+		// Verify it exists
+		exists, err := driver.DirectoryExists(ctx, "container", "mydir")
+		require.NoError(t, err)
+		assert.True(t, exists)
+
+		// Remove directory
+		err = driver.RemoveDirectory(ctx, "container", "mydir")
+		require.NoError(t, err)
+
+		// Verify it's gone
+		exists, err = driver.DirectoryExists(ctx, "container", "mydir")
+		require.NoError(t, err)
+		assert.False(t, exists)
+	})
+
+	t.Run("ListDirectory", func(t *testing.T) {
+		// Create structure
+		driver.Put(ctx, "container", "dir1/file1.txt", strings.NewReader("content1"))
+		driver.Put(ctx, "container", "dir1/file2.txt", strings.NewReader("content2"))
+		driver.Put(ctx, "container", "dir1/subdir/file3.txt", strings.NewReader("content3"))
+
+		// List directory
+		entries, err := driver.ListDirectory(ctx, "container", "dir1")
+		require.NoError(t, err)
+		assert.Len(t, entries, 3) // 2 files + 1 subdir
 	})
 }
