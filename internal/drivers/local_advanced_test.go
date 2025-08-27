@@ -352,3 +352,48 @@ func TestLocalDriver_DirectoryIndexing(t *testing.T) {
 		assert.Len(t, files, 2)
 	})
 }
+
+func TestLocalDriver_DirectorySync(t *testing.T) {
+	testDir := t.TempDir()
+	logger := zap.NewNop()
+	driver := NewLocalDriver(testDir, logger)
+	ctx := context.Background()
+
+	t.Run("SyncDirectories", func(t *testing.T) {
+		// Create source structure
+		driver.Put(ctx, "source", "file1.txt", strings.NewReader("content1"))
+		driver.Put(ctx, "source", "dir1/file2.txt", strings.NewReader("content2"))
+		
+		// Sync to destination
+		err := driver.SyncDirectory(ctx, "source", "", "dest", "")
+		require.NoError(t, err)
+		
+		// Verify destination has same structure
+		reader, err := driver.Get(ctx, "dest", "file1.txt")
+		require.NoError(t, err)
+		content, _ := io.ReadAll(reader)
+		reader.Close()
+		assert.Equal(t, "content1", string(content))
+		
+		reader, err = driver.Get(ctx, "dest", "dir1/file2.txt")
+		require.NoError(t, err)
+		reader.Close()
+	})
+
+	t.Run("CompareDirectories", func(t *testing.T) {
+		// Compare identical directories
+		diff, err := driver.CompareDirectories(ctx, "source", "", "dest", "")
+		require.NoError(t, err)
+		assert.Empty(t, diff.Added)
+		assert.Empty(t, diff.Modified)
+		assert.Empty(t, diff.Deleted)
+		
+		// Add file to dest
+		driver.Put(ctx, "dest", "extra.txt", strings.NewReader("extra"))
+		
+		// Compare again
+		diff, err = driver.CompareDirectories(ctx, "source", "", "dest", "")
+		require.NoError(t, err)
+		assert.Len(t, diff.Added, 1)
+	})
+}
