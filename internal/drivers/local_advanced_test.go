@@ -99,7 +99,7 @@ func TestLocalDriver_FileInfo(t *testing.T) {
 
 		info, err := driver.GetInfo(ctx, "container", "test.txt")
 		require.NoError(t, err)
-		
+
 		assert.Equal(t, "test.txt", info.Name)
 		assert.Equal(t, int64(len(testData)), info.Size)
 		assert.False(t, info.IsDir)
@@ -109,6 +109,45 @@ func TestLocalDriver_FileInfo(t *testing.T) {
 
 	t.Run("NonExistentFileInfo", func(t *testing.T) {
 		_, err := driver.GetInfo(ctx, "container", "nonexistent.txt")
+		assert.Error(t, err)
+	})
+}
+
+func TestLocalDriver_FilePermissions(t *testing.T) {
+	testDir := t.TempDir()
+	logger := zap.NewNop()
+	driver := NewLocalDriver(testDir, logger)
+	ctx := context.Background()
+
+	t.Run("SetAndGetPermissions", func(t *testing.T) {
+		// Create test file
+		err := driver.Put(ctx, "container", "test.txt", strings.NewReader("content"))
+		require.NoError(t, err)
+
+		// Set permissions
+		err = driver.SetPermissions(ctx, "container", "test.txt", 0644)
+		require.NoError(t, err)
+
+		// Get permissions
+		mode, err := driver.GetPermissions(ctx, "container", "test.txt")
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0644), mode)
+
+		// Change permissions
+		err = driver.SetPermissions(ctx, "container", "test.txt", 0600)
+		require.NoError(t, err)
+
+		mode, err = driver.GetPermissions(ctx, "container", "test.txt")
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0600), mode)
+	})
+
+	t.Run("PermissionsOnNonExistent", func(t *testing.T) {
+		// Should error on non-existent file
+		_, err := driver.GetPermissions(ctx, "container", "nonexistent.txt")
+		assert.Error(t, err)
+
+		err = driver.SetPermissions(ctx, "container", "nonexistent.txt", 0644)
 		assert.Error(t, err)
 	})
 }
