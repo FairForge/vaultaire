@@ -148,13 +148,13 @@ func (d *LocalDriver) SupportsSymlinks() bool {
 	testLink := filepath.Join(d.basePath, ".symlink-test-link")
 
 	// Clean up any previous test files
-	os.Remove(testLink)
-	os.Remove(testFile)
-	defer os.Remove(testLink)
-	defer os.Remove(testFile)
+	_ = os.Remove(testLink)
+	_ = os.Remove(testFile)
+	defer func() { _ = os.Remove(testLink) }()
+	defer func() { _ = os.Remove(testFile) }()
 
 	// Create test file
-	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
+	if err := os.WriteFile(testFile, []byte("test"), 0600); err != nil {
 		return false
 	}
 
@@ -656,10 +656,10 @@ func (d *LocalDriver) AtomicWrite(ctx context.Context, container, artifact strin
 	// Ensure cleanup on error
 	defer func() {
 		if tempFile != nil {
-			tempFile.Close()
+			_ = tempFile.Close()
 		}
 		if tempPath != "" {
-			os.Remove(tempPath) // Clean up temp file if still exists
+			_ = os.Remove(tempPath) // Clean up temp file if still exists
 		}
 	}()
 
@@ -799,10 +799,10 @@ func (t *Transaction) Rollback() error {
 	if t.committed {
 		return fmt.Errorf("transaction already committed")
 	}
-	
+
 	// Clear operations without executing
 	t.operations = nil
 	t.committed = true // Mark as done to prevent further use
-	
+
 	return nil
 }
