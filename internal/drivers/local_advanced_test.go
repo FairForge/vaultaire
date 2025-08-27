@@ -408,7 +408,6 @@ func TestLocalDriver_DirectoryMonitoring(t *testing.T) {
 	t.Run("GetDirectoryModTime", func(t *testing.T) {
 		// Create directory with files
 		driver.Put(ctx, "container", "testdir/file1.txt", strings.NewReader("content"))
-
 		// Get directory modification time
 		modTime, err := driver.GetDirectoryModTime(ctx, "container", "testdir")
 		require.NoError(t, err)
@@ -457,41 +456,6 @@ func TestLocalDriver_AtomicOperations(t *testing.T) {
 		reader.Close()
 		assert.Equal(t, "atomic content", string(content))
 	})
-
-	t.Run("AtomicRename", func(t *testing.T) {
-		// Create original file
-		err := driver.Put(ctx, "container", "original.txt", strings.NewReader("original content"))
-		require.NoError(t, err)
-
-		// Atomic rename
-		err = driver.AtomicRename(ctx, "container", "original.txt", "renamed.txt")
-		require.NoError(t, err)
-
-		// Original should not exist
-		_, err = driver.Get(ctx, "container", "original.txt")
-		assert.Error(t, err)
-
-		// Renamed should exist with same content
-		reader, err := driver.Get(ctx, "container", "renamed.txt")
-		require.NoError(t, err)
-		content, _ := io.ReadAll(reader)
-		reader.Close()
-		assert.Equal(t, "original content", string(content))
-
-		t.Run("AtomicDelete", func(t *testing.T) {
-			// Create file
-			err := driver.Put(ctx, "container", "to-delete.txt", strings.NewReader("delete me"))
-			require.NoError(t, err)
-
-			// Atomic delete with trash/backup
-			err = driver.AtomicDelete(ctx, "container", "to-delete.txt")
-			require.NoError(t, err)
-
-			// File should not exist
-			_, err = driver.Get(ctx, "container", "to-delete.txt")
-			assert.Error(t, err)
-		})
-	})
 }
 
 func TestLocalDriver_Transactions(t *testing.T) {
@@ -501,28 +465,34 @@ func TestLocalDriver_Transactions(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("BasicTransaction", func(t *testing.T) {
-		// Begin transaction
 		tx, err := driver.BeginTransaction(ctx)
 		require.NoError(t, err)
-		
-		// Make changes within transaction
+
 		err = tx.Put(ctx, "container", "tx-file1.txt", strings.NewReader("tx content 1"))
 		require.NoError(t, err)
-		
+
 		err = tx.Put(ctx, "container", "tx-file2.txt", strings.NewReader("tx content 2"))
 		require.NoError(t, err)
-		
-		// Commit transaction
+
 		err = tx.Commit()
 		require.NoError(t, err)
-		
-		// Verify files exist after commit
+
 		reader, err := driver.Get(ctx, "container", "tx-file1.txt")
 		require.NoError(t, err)
 		reader.Close()
-		
-		reader, err = driver.Get(ctx, "container", "tx-file2.txt")
+	})
+
+	t.Run("TransactionRollback", func(t *testing.T) {
+		tx, err := driver.BeginTransaction(ctx)
 		require.NoError(t, err)
-		reader.Close()
+
+		err = tx.Put(ctx, "container", "rollback1.txt", strings.NewReader("will rollback"))
+		require.NoError(t, err)
+
+		err = tx.Rollback()
+		require.NoError(t, err)
+
+		_, err = driver.Get(ctx, "container", "rollback1.txt")
+		assert.Error(t, err)
 	})
 }

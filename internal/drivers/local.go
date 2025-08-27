@@ -793,3 +793,16 @@ func (t *Transaction) Commit() error {
 	t.committed = true
 	return nil
 }
+
+// Rollback cancels the transaction
+func (t *Transaction) Rollback() error {
+	if t.committed {
+		return fmt.Errorf("transaction already committed")
+	}
+	
+	// Clear operations without executing
+	t.operations = nil
+	t.committed = true // Mark as done to prevent further use
+	
+	return nil
+}
