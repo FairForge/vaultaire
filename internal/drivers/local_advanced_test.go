@@ -478,17 +478,51 @@ func TestLocalDriver_AtomicOperations(t *testing.T) {
 		reader.Close()
 		assert.Equal(t, "original content", string(content))
 
-	t.Run("AtomicDelete", func(t *testing.T) {
-		// Create file
-		err := driver.Put(ctx, "container", "to-delete.txt", strings.NewReader("delete me"))
+		t.Run("AtomicDelete", func(t *testing.T) {
+			// Create file
+			err := driver.Put(ctx, "container", "to-delete.txt", strings.NewReader("delete me"))
+			require.NoError(t, err)
+
+			// Atomic delete with trash/backup
+			err = driver.AtomicDelete(ctx, "container", "to-delete.txt")
+			require.NoError(t, err)
+
+			// File should not exist
+			_, err = driver.Get(ctx, "container", "to-delete.txt")
+			assert.Error(t, err)
+		})
+	})
+}
+
+func TestLocalDriver_Transactions(t *testing.T) {
+	testDir := t.TempDir()
+	logger := zap.NewNop()
+	driver := NewLocalDriver(testDir, logger)
+	ctx := context.Background()
+
+	t.Run("BasicTransaction", func(t *testing.T) {
+		// Begin transaction
+		tx, err := driver.BeginTransaction(ctx)
 		require.NoError(t, err)
 		
-		// Atomic delete with trash/backup
-		err = driver.AtomicDelete(ctx, "container", "to-delete.txt")
+		// Make changes within transaction
+		err = tx.Put(ctx, "container", "tx-file1.txt", strings.NewReader("tx content 1"))
 		require.NoError(t, err)
 		
-		// File should not exist
-		_, err = driver.Get(ctx, "container", "to-delete.txt")
-		assert.Error(t, err)
-	})	})
+		err = tx.Put(ctx, "container", "tx-file2.txt", strings.NewReader("tx content 2"))
+		require.NoError(t, err)
+		
+		// Commit transaction
+		err = tx.Commit()
+		require.NoError(t, err)
+		
+		// Verify files exist after commit
+		reader, err := driver.Get(ctx, "container", "tx-file1.txt")
+		require.NoError(t, err)
+		reader.Close()
+		
+		reader, err = driver.Get(ctx, "container", "tx-file2.txt")
+		require.NoError(t, err)
+		reader.Close()
+	})
 }

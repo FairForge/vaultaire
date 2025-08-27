@@ -1,6 +1,7 @@
 package drivers
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5"
 	"crypto/sha256"
@@ -717,7 +718,7 @@ func (d *LocalDriver) AtomicRename(ctx context.Context, container, oldName, newN
 // AtomicDelete performs an atomic delete by moving to trash first
 func (d *LocalDriver) AtomicDelete(ctx context.Context, container, artifact string) error {
 	sourcePath := filepath.Join(d.basePath, container, artifact)
-	
+
 	// Check if file exists
 	if _, err := os.Stat(sourcePath); err != nil {
 		if os.IsNotExist(err) {
@@ -725,22 +726,70 @@ func (d *LocalDriver) AtomicDelete(ctx context.Context, container, artifact stri
 		}
 		return fmt.Errorf("stat failed: %w", err)
 	}
-	
+
 	// Create trash directory
 	trashDir := filepath.Join(d.basePath, ".trash", container)
 	if err := os.MkdirAll(trashDir, 0750); err != nil {
 		return fmt.Errorf("create trash directory: %w", err)
 	}
-	
+
 	// Generate unique trash name with timestamp
 	timestamp := time.Now().Unix()
 	trashName := fmt.Sprintf("%s.%d", filepath.Base(artifact), timestamp)
 	trashPath := filepath.Join(trashDir, trashName)
-	
+
 	// Move to trash atomically
 	if err := os.Rename(sourcePath, trashPath); err != nil {
 		return fmt.Errorf("move to trash failed: %w", err)
 	}
-	
+
+	return nil
+}
+
+// Transaction represents a batch of operations
+type Transaction struct {
+	driver     *LocalDriver
+	operations []func() error
+	committed  bool
+}
+
+// BeginTransaction starts a new transaction
+func (d *LocalDriver) BeginTransaction(ctx context.Context) (*Transaction, error) {
+	return &Transaction{
+		driver:     d,
+		operations: make([]func() error, 0),
+	}, nil
+}
+
+// Put adds a put operation to the transaction
+func (t *Transaction) Put(ctx context.Context, container, artifact string, data io.Reader) error {
+	// Read data into memory for transaction (not ideal for large files)
+	content, err := io.ReadAll(data)
+	if err != nil {
+		return fmt.Errorf("read data: %w", err)
+	}
+
+	t.operations = append(t.operations, func() error {
+		return t.driver.Put(ctx, container, artifact, bytes.NewReader(content))
+	})
+
+	return nil
+}
+
+// Commit executes all operations in the transaction
+func (t *Transaction) Commit() error {
+	if t.committed {
+		return fmt.Errorf("transaction already committed")
+	}
+
+	// Execute all operations
+	for _, op := range t.operations {
+		if err := op(); err != nil {
+			// TODO: Rollback on error
+			return fmt.Errorf("transaction failed: %w", err)
+		}
+	}
+
+	t.committed = true
 	return nil
 }
