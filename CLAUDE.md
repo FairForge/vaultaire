@@ -1,170 +1,209 @@
-# Vaultaire Development Guide - ENTERPRISE TDD WORKFLOW
+Based on the Claude Code best practices document, here's an improved CLAUDE.md that incorporates the useful patterns while staying focused on your Vaultaire project:
 
-## 🚨 CRITICAL: Follow This EVERY Step (48-510)
+```markdown
+# CLAUDE.md - Vaultaire Development Control
 
-### BEFORE Starting Any Step:
+## Current Position
+**Step: 51 of 510 (10%)**
+**Branch: file-operations** (covers steps 51-55)
+**Working File: internal/drivers/local.go**
+**Test File: internal/drivers/local_advanced_test.go**
+
+## Quick Start Commands
 ```bash
-# 1. Verify clean state
-git status  # Should be clean
-make test   # All passing
+make test          # Run all tests
+make fmt           # Format code
+go test ./internal/drivers -run TestLocalDriver -v  # Current tests
+git checkout file-operations  # Current branch
+```
 
-# 2. Create feature branch
-git checkout main
-git pull origin main
-git checkout -b step-XX-feature-name
+## What Exists (Don't Break)
+```
+✅ LocalDriver: Get, Put, Delete, List, HealthCheck
+✅ S3 API: GET, PUT, DELETE, LIST working
+✅ Multi-tenancy: Namespace isolation working
+✅ Rate limiting: Per-tenant with token bucket
+✅ Metrics: Prometheus integrated
+✅ Database: PostgreSQL connected
+✅ Main server: Wired and running at :8000
+```
 
-# 3. Write tests FIRST (TDD)
-cat > internal/path/feature_test.go
-# Write failing tests
+## Architecture Rules
+- **Pattern**: Engine/Container/Artifact (universal abstraction)
+- **Streaming**: Always io.Reader, never []byte
+- **Context**: Every function takes context.Context first param
+- **Errors**: Always `fmt.Errorf("context: %w", err)`
+- **Tenancy**: Namespace with tenant ID
 
-# 4. Run tests - should FAIL
-go test ./internal/path -run TestFeature -v
-# RED phase ✅
-DURING Development:
-bash# 1. Write minimal code to pass ONE test
-# 2. Run test - should PASS
-make test-stepXX
-# GREEN phase ✅
+## TDD Workflow (USE THIS)
 
-# 3. Refactor if needed
-# 4. Run ALL tests
-make test
-# REFACTOR phase ✅
+### 1. Explore & Plan (Don't code yet!)
+```bash
+# Read relevant files first
+cat internal/drivers/local.go
+grep -n "TODO" internal/
 
-# 5. Check coverage
-go test -cover ./internal/...
-# Should be >80% for new code
-AFTER Completing Step:
-bash# 1. Run full check
-make lint          # No errors
-make test          # All passing
-make test-coverage # >80% for critical paths
+# Make a plan - use word "think" for better reasoning
+"Think about how to implement symlink support"
+```
 
-# 2. Update documentation
-echo "## Step XX: Feature ✅" >> PROGRESS.md
-cat > STEP_XX_COMPLETE.md  # Full details
+### 2. Write Tests First
+```bash
+vim internal/drivers/local_advanced_test.go
+# Write test that MUST FAIL
+go test ./internal/drivers -run TestSymlink -v
+# Verify it fails (RED phase)
+```
 
-# 3. Commit with conventional format
-git add -A
-git commit -m "feat(scope): description [Step XX]
+### 3. Implement & Iterate
+```bash
+vim internal/drivers/local.go
+# Write minimal code to pass
+go test ./internal/drivers -run TestSymlink -v
+# Keep iterating until GREEN
+```
 
-- What it does
-- How it works
-- Tests: X/X passing
-- Coverage: XX%"
+### 4. Commit When Done
+```bash
+go fmt ./...
+go test ./...
+git add .
+git commit -m "feat(drivers): implement symlinks [Step 51]"
+git push origin file-operations
+```
 
-# 4. Push and create PR
-git push origin step-XX-feature
-# Create PR on GitHub
+## Step Groups (Work Together)
 
-# 5. Prepare next step
-cat > NEW_CHAT_STEP_XX.md
-📊 Current Status
+### Current: Steps 51-55 File Operations
+```go
+☐ Step 51: SupportsSymlinks(), GetWithOptions(), GetInfo()
+☐ Step 52: SetPermissions(), GetPermissions() 
+☐ Step 53: SetOwnership(), GetOwnership()
+☐ Step 54: SetXAttr(), GetXAttr(), ListXAttrs()
+☐ Step 55: GetChecksum(), VerifyChecksum()
+```
 
-Completed: Steps 1-48 ✅
-Current: Step 49 (HTTP Middleware)
-Progress: 48/510 (9.4%)
-Velocity: 15 steps/day target
+### Next Groups
+- Steps 56-60: Directory operations
+- Steps 61-65: Atomic operations  
+- Steps 66-70: File watching
+- Steps 71-75: Parallel I/O (CRITICAL - 10x speed)
 
-🏗️ Architecture Rules (NEVER VIOLATE)
+## Checklist for Complex Tasks
 
-Engine/Container/Artifact pattern (NOT storage/bucket/object)
-Stream everything with io.Reader (never []byte)
-Event log EVERY operation for ML
-Context propagation on ALL functions
-Tenant isolation via namespacing
-Error wrapping with context
+When doing migrations or fixing many issues:
+1. Generate a checklist in a markdown file
+2. Work through systematically
+3. Check off completed items
+4. Use `/clear` between major context switches
 
-✅ Enterprise Patterns In Use
+Example:
+```markdown
+# Lint Fixes Checklist
+☐ Fix error wrapping in local.go:45
+☐ Fix error wrapping in local.go:67
+☐ Add missing error check in s3.go:203
+```
 
-TDD: Write tests first, always
-Rate Limiting: ✅ Step 48 complete
-Structured Logging: internal/logger ready
-Metrics: Coming in Step 49
-Multi-tenancy: ✅ Step 47 complete
+## Git Worktrees (For Parallel Work)
 
-🧪 Testing Standards
-go// EVERY test must:
-func TestFeature_Aspect(t *testing.T) {
+```bash
+# Work on multiple features simultaneously
+git worktree add ../vaultaire-auth steps-76-80
+git worktree add ../vaultaire-cache steps-151-155
+
+# Clean up when done
+git worktree remove ../vaultaire-auth
+```
+
+## Code Templates
+
+### Test Pattern
+```go
+func TestFeature(t *testing.T) {
     t.Run("specific case", func(t *testing.T) {
         // Arrange
-        sut := NewThing()
+        driver := NewLocalDriver(t.TempDir(), zap.NewNop())
         
-        // Act
-        result := sut.Method()
+        // Act  
+        result, err := driver.Method()
         
         // Assert
+        require.NoError(t, err)
         assert.Equal(t, expected, result)
     })
 }
-📁 Project Structure
-vaultaire/
-├── internal/
-│   ├── api/          # HTTP handlers ✅
-│   ├── drivers/      # Storage backends ✅
-│   ├── engine/       # Core orchestration ✅
-│   ├── events/       # ML event logging ✅
-│   ├── logger/       # Structured logging ✅
-│   └── tenant/       # Multi-tenancy ✅
-├── cmd/vaultaire/    # Main server
-├── CLAUDE.md         # THIS FILE - YOUR BIBLE
-├── PROGRESS.md       # Step tracking
-└── Makefile          # All commands
-🎯 Make Commands (USE THESE)
-bashmake help          # Show all commands
-make test          # Run all tests (do this often!)
-make test-stepXX   # Test specific step
-make test-coverage # Generate coverage report
-make lint          # Run linter (before commit)
-make fmt           # Format code
-make bench         # Run benchmarks
-make pre-commit    # Run everything before commit
-🚀 Daily Workflow
-yamlMorning:
-1. Review PROGRESS.md
-2. Check current step
-3. Read previous STEP_XX_COMPLETE.md
+```
 
-Development:
-1. Write tests first (TDD)
-2. Make them pass
-3. Check coverage
-4. Run linter
+### Error Wrapping
+```go
+if err != nil {
+    return fmt.Errorf("get artifact %s/%s: %w", container, artifact, err)
+}
+```
 
-Evening:
-1. Commit with conventional format
-2. Update PROGRESS.md
-3. Create handoff document
-4. Prepare tomorrow's work
-📊 Quality Gates (MUST PASS)
+## Progress Map
 
- Tests written FIRST
- All tests passing
- Coverage >80% for critical paths
- Linter passing
- No commented code
- Errors wrapped with context
- Logging added
- Documentation updated
+```
+Phase 1: Foundation      [##########] 100% ✅ Steps 1-50
+Phase 2: Storage Backends [#####-----] 10%  ⏳ Steps 51-150  
+Phase 3: Intelligence     [----------] 0%   Steps 151-250
+Phase 4: Enterprise       [----------] 0%   Steps 251-350
+Phase 5: Scale           [----------] 0%   Steps 351-450
+Phase 6: Launch          [----------] 0%   Steps 451-510
+```
 
-🎓 What You've Learned
+## Resume Instructions
 
-✅ TDD (Step 48 - Rate Limiting)
-✅ Professional Git workflow
-✅ Enterprise patterns
-✅ Structured logging
-⏳ Metrics (Step 49)
-⏳ Circuit breakers (Step 75)
+For new chat, provide:
+1. This CLAUDE.md file
+2. The master plan
+3. Say: "Continue from Step X implementing [feature]"
 
-�� Business Context
+## Quality Gates (Simple)
 
-Target: $3.99/TB
-Break-even: 55 customers
-Launch: October 2024
-Current MRR: $0 (need to ship!)
+Before commit:
+- [ ] Tests written first and passing
+- [ ] `go fmt ./...` applied
+- [ ] Errors wrapped with context
+- [ ] No `_ =` ignoring errors
 
-🔥 Motivation
-Every step completed = $40k/year closer
-Every test written = Sleep better at night
-Every pattern learned = $20k higher salary
-Remember: You're building ENTERPRISE software that will handle REAL money!
+Skip:
+- Coverage percentages
+- Perfect documentation  
+- Individual step files
+
+## Business Context
+- **Product**: stored.ge at $3.99/TB
+- **Break-even**: 55 customers
+- **Target**: Ship by October 2024
+- **Differentiator**: Unified API across all storage
+
+## Last Session Notes
+**Date**: [UPDATE THIS]
+**Completed**: Steps 1-50, went back to do 51-55 properly
+**Next**: Implement Step 51 symlink support
+**Blockers**: None
+
+---
+
+## Remember
+1. **Plan before coding** - Think through approach first
+2. **Test drives development** - Red → Green → Refactor
+3. **Ship working code** - Not documentation
+4. **Use /clear frequently** - Keep context focused
+5. **Course correct early** - Don't let Claude go too far astray
+
+**This file + master plan = everything needed to continue**
+```
+
+Key improvements from the Claude Code best practices:
+1. Added "explore & plan" phase before coding
+2. Added checklist approach for complex tasks
+3. Added git worktrees for parallel work
+4. Emphasized using `/clear` to manage context
+5. Added progress visualization
+6. Simplified quality gates even more
+7. Added "think" keyword tip for better reasoning
+
+This version is more actionable and incorporates the proven patterns from Anthropic's internal use while staying focused on your actual project needs.

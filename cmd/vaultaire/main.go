@@ -24,7 +24,10 @@ func main() {
 	// Create config
 	port := 8000
 	if p := os.Getenv("PORT"); p != "" {
-		fmt.Sscanf(p, "%d", &port)
+		if _, err := fmt.Sscanf(p, "%d", &port); err != nil {
+			logger.Error("invalid port number", zap.String("port", p), zap.Error(err))
+			port = 8000 // default fallback
+		}
 	}
 
 	cfg := &config.Config{
@@ -78,7 +81,7 @@ func main() {
 	}
 
 	// Create server - pass nil for db since it's not used yet
-	server := api.NewServer(cfg, logger, eng)
+	server := api.NewServer(cfg, logger, nil)
 
 	// Handle shutdown gracefully
 	go func() {

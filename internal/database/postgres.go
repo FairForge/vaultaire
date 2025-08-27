@@ -7,6 +7,7 @@ import (
 	"time"
 
 	_ "github.com/lib/pq" // PostgreSQL driver
+	"go.uber.org/zap"
 )
 
 // Config holds database configuration
@@ -21,7 +22,8 @@ type Config struct {
 
 // Postgres represents a PostgreSQL connection
 type Postgres struct {
-	db *sql.DB
+	db     *sql.DB
+	logger *zap.Logger
 }
 
 // Tenant represents a tenant in the system
@@ -33,7 +35,7 @@ type Tenant struct {
 }
 
 // NewPostgres creates a new PostgreSQL connection
-func NewPostgres(cfg Config) (*Postgres, error) {
+func NewPostgres(cfg Config, logger *zap.Logger) (*Postgres, error) {
 	if cfg.SSLMode == "" {
 		cfg.SSLMode = "disable"
 	}
@@ -51,7 +53,10 @@ func NewPostgres(cfg Config) (*Postgres, error) {
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(5 * time.Minute)
 
-	return &Postgres{db: db}, nil
+	return &Postgres{
+		db:     db,
+		logger: logger,
+	}, nil
 }
 
 // Close closes the database connection
@@ -207,7 +212,11 @@ func (p *Postgres) ListArtifacts(ctx context.Context, tenantID, container string
 	if err != nil {
 		return nil, fmt.Errorf("query artifacts: %w", err)
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			p.logger.Error("failed to close rows", zap.Error(err))
+		}
+	}()
 
 	var artifacts []*Artifact
 	for rows.Next() {
