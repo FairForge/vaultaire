@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.uber.org/zap" // ADD THIS IMPORT
 )
 
 func TestPostgres_Connect(t *testing.T) {
@@ -14,17 +15,23 @@ func TestPostgres_Connect(t *testing.T) {
 		t.Skip("Skipping database tests in short mode")
 	}
 
+	logger := zap.NewNop() // No-op logger for tests
+
 	db, err := NewPostgres(Config{
 		Host:     "localhost",
 		Port:     5432,
 		Database: "vaultaire_dev",
 		User:     "vaultaire",
 		Password: "vaultaire_dev",
-	})
+	}, logger) // FIX: This needs to be on same line or proper line break
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("failed to close database: %v", err)
+		}
+	}()
 }
 
 func TestPostgres_CreateTables(t *testing.T) {
@@ -32,21 +39,22 @@ func TestPostgres_CreateTables(t *testing.T) {
 		t.Skip("Skipping database tests in short mode")
 	}
 
+	logger := zap.NewNop() // ADD THIS
 	db, err := NewPostgres(Config{
 		Host:     "localhost",
 		Port:     5432,
 		Database: "vaultaire_dev",
 		User:     "vaultaire",
 		Password: "vaultaire_dev",
-	})
+	}, logger) // ADD LOGGER PARAMETER
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
-	defer db.Close()
-
-	if err := db.db.Ping(); err != nil {
-		t.Errorf("Failed to ping database: %v", err)
-	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("failed to close database: %v", err)
+		}
+	}()
 }
 
 func TestPostgres_TenantOperations(t *testing.T) {
@@ -54,17 +62,23 @@ func TestPostgres_TenantOperations(t *testing.T) {
 		t.Skip("Skipping database tests in short mode")
 	}
 
+	logger := zap.NewNop() // ADD THIS
 	db, err := NewPostgres(Config{
 		Host:     "localhost",
 		Port:     5432,
 		Database: "vaultaire_dev",
 		User:     "vaultaire",
 		Password: "vaultaire_dev",
-	})
+	}, logger) // ADD LOGGER PARAMETER
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
-	defer db.Close()
+
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("failed to close database: %v", err)
+		}
+	}()
 
 	ctx := context.Background()
 

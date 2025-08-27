@@ -200,12 +200,14 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		// Return S3-style authentication error
 		w.Header().Set("Content-Type", "application/xml")
 		w.WriteHeader(http.StatusForbidden)
-		fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?>
+		if _, err := fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?>
 <Error>
-	<Code>SignatureDoesNotMatch</Code>
-	<Message>%s</Message>
-	<RequestId>%d</RequestId>
-</Error>`, err.Error(), time.Now().UnixNano())
+    <Code>SignatureDoesNotMatch</Code>
+    <Message>%s</Message>
+    <RequestId>%d</RequestId>
+</Error>`, err.Error(), time.Now().UnixNano()); err != nil {
+			s.logger.Error("failed to write response", zap.Error(err))
+		}
 		return
 	}
 
