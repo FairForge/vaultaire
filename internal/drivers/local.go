@@ -638,20 +638,20 @@ func (d *LocalDriver) AtomicWrite(ctx context.Context, container, artifact strin
 	if err := os.MkdirAll(containerPath, 0750); err != nil {
 		return fmt.Errorf("create container: %w", err)
 	}
-	
+
 	finalPath := filepath.Join(d.basePath, container, artifact)
 	parentDir := filepath.Dir(finalPath)
 	if err := os.MkdirAll(parentDir, 0750); err != nil {
 		return fmt.Errorf("create parent directory: %w", err)
 	}
-	
+
 	// Create temp file in same directory (for atomic rename)
 	tempFile, err := os.CreateTemp(parentDir, ".tmp-*")
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
 	tempPath := tempFile.Name()
-	
+
 	// Ensure cleanup on error
 	defer func() {
 		if tempFile != nil {
@@ -661,29 +661,29 @@ func (d *LocalDriver) AtomicWrite(ctx context.Context, container, artifact strin
 			os.Remove(tempPath) // Clean up temp file if still exists
 		}
 	}()
-	
+
 	// Write data to temp file
 	if _, err := io.Copy(tempFile, data); err != nil {
 		return fmt.Errorf("write to temp file: %w", err)
 	}
-	
+
 	// Sync to disk before rename
 	if err := tempFile.Sync(); err != nil {
 		return fmt.Errorf("sync temp file: %w", err)
 	}
-	
+
 	// Close before rename
 	if err := tempFile.Close(); err != nil {
 		return fmt.Errorf("close temp file: %w", err)
 	}
 	tempFile = nil // Prevent double close
-	
+
 	// Atomic rename
 	if err := os.Rename(tempPath, finalPath); err != nil {
 		return fmt.Errorf("atomic rename: %w", err)
 	}
 	tempPath = "" // Prevent cleanup of renamed file
-	
+
 	return nil
 }
 
@@ -691,7 +691,7 @@ func (d *LocalDriver) AtomicWrite(ctx context.Context, container, artifact strin
 func (d *LocalDriver) AtomicRename(ctx context.Context, container, oldName, newName string) error {
 	oldPath := filepath.Join(d.basePath, container, oldName)
 	newPath := filepath.Join(d.basePath, container, newName)
-	
+
 	// Check if source exists
 	if _, err := os.Stat(oldPath); err != nil {
 		if os.IsNotExist(err) {
@@ -699,16 +699,47 @@ func (d *LocalDriver) AtomicRename(ctx context.Context, container, oldName, newN
 		}
 		return fmt.Errorf("stat failed: %w", err)
 	}
-	
+
 	// Ensure destination directory exists
 	newDir := filepath.Dir(newPath)
 	if err := os.MkdirAll(newDir, 0750); err != nil {
 		return fmt.Errorf("create destination directory: %w", err)
 	}
-	
+
 	// Atomic rename
 	if err := os.Rename(oldPath, newPath); err != nil {
 		return fmt.Errorf("rename failed: %w", err)
+	}
+
+	return nil
+}
+
+// AtomicDelete performs an atomic delete by moving to trash first
+func (d *LocalDriver) AtomicDelete(ctx context.Context, container, artifact string) error {
+	sourcePath := filepath.Join(d.basePath, container, artifact)
+	
+	// Check if file exists
+	if _, err := os.Stat(sourcePath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("artifact not found: %w", err)
+		}
+		return fmt.Errorf("stat failed: %w", err)
+	}
+	
+	// Create trash directory
+	trashDir := filepath.Join(d.basePath, ".trash", container)
+	if err := os.MkdirAll(trashDir, 0750); err != nil {
+		return fmt.Errorf("create trash directory: %w", err)
+	}
+	
+	// Generate unique trash name with timestamp
+	timestamp := time.Now().Unix()
+	trashName := fmt.Sprintf("%s.%d", filepath.Base(artifact), timestamp)
+	trashPath := filepath.Join(trashDir, trashName)
+	
+	// Move to trash atomically
+	if err := os.Rename(sourcePath, trashPath); err != nil {
+		return fmt.Errorf("move to trash failed: %w", err)
 	}
 	
 	return nil
