@@ -507,3 +507,94 @@ func (d *LocalDriver) FindFilesByPattern(ctx context.Context, container, pattern
 
 	return files, err
 }
+
+// DirectoryDiff represents differences between two directories
+type DirectoryDiff struct {
+	Added    []string
+	Modified []string
+	Deleted  []string
+}
+
+// SyncDirectory synchronizes files from source to destination
+func (d *LocalDriver) SyncDirectory(ctx context.Context, sourceContainer, sourceDir, destContainer, destDir string) error {
+	return d.WalkDirectory(ctx, sourceContainer, sourceDir, func(path string, entry os.DirEntry) error {
+		if entry.IsDir() {
+			// Create directory in destination
+			destPath := filepath.Join(destDir, path)
+			return d.CreateDirectory(ctx, destContainer, destPath)
+		}
+		
+		// Copy file
+		sourcePath := filepath.Join(sourceDir, path)
+		destPath := filepath.Join(destDir, path)
+		
+		reader, err := d.Get(ctx, sourceContainer, sourcePath)
+		if err != nil {
+			return fmt.Errorf("get source file %s: %w", sourcePath, err)
+		}
+		defer reader.Close()
+		
+		err = d.Put(ctx, destContainer, destPath, reader)
+		if err != nil {
+			return fmt.Errorf("put dest file %s: %w", destPath, err)
+		}
+		
+		return nil
+	})
+}
+
+// CompareDirectories compares two directories and returns differences
+func (d *LocalDriver) CompareDirectories(ctx context.Context, sourceContainer, sourceDir, destContainer, destDir string) (*DirectoryDiff, error) {
+	diff := &DirectoryDiff{
+		Added:    []string{},
+		Modified: []string{},
+		Deleted:  []string{},
+	}
+	
+	// Build source file map
+	sourceFiles := make(map[string]os.FileInfo)
+	err := d.WalkDirectory(ctx, sourceContainer, sourceDir, func(path string, entry os.DirEntry) error {
+		if !entry.IsDir() {
+			if info, err := entry.Info(); err == nil {
+				sourceFiles[path] = info
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	
+	// Build dest file map and find added/modified
+	destFiles := make(map[string]os.FileInfo)
+	err = d.WalkDirectory(ctx, destContainer, destDir, func(path string, entry os.DirEntry) error {
+		if !entry.IsDir() {
+			if info, err := entry.Info(); err == nil {
+				destFiles[path] = info
+				
+				if sourceInfo, exists := sourceFiles[path]; exists {
+					// Check if modified (simple size check)
+					if sourceInfo.Size() != info.Size() {
+						diff.Modified = append(diff.Modified, path)
+					}
+				} else {
+					// File in dest but not in source = added
+					diff.Added = append(diff.Added, path)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	
+	// Find deleted (in source but not in dest)
+	for path := range sourceFiles {
+		if _, exists := destFiles[path]; !exists {
+			diff.Deleted = append(diff.Deleted, path)
+		}
+	}
+	
+	return diff, nil
+}
