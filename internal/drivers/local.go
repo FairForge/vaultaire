@@ -207,3 +207,39 @@ func (d *LocalDriver) GetInfo(ctx context.Context, container, artifact string) (
 
 	return fi, nil
 }
+
+// SetPermissions sets the file permissions for an artifact
+func (d *LocalDriver) SetPermissions(ctx context.Context, container, artifact string, mode os.FileMode) error {
+	fullPath := filepath.Join(d.basePath, container, artifact)
+	
+	// Check if file exists
+	if _, err := os.Stat(fullPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("artifact not found: %w", err)
+		}
+		return fmt.Errorf("stat failed: %w", err)
+	}
+	
+	// Set permissions
+	if err := os.Chmod(fullPath, mode); err != nil {
+		return fmt.Errorf("chmod failed: %w", err)
+	}
+	
+	return nil
+}
+
+// GetPermissions retrieves the file permissions for an artifact
+func (d *LocalDriver) GetPermissions(ctx context.Context, container, artifact string) (os.FileMode, error) {
+	fullPath := filepath.Join(d.basePath, container, artifact)
+	
+	info, err := os.Stat(fullPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, fmt.Errorf("artifact not found: %w", err)
+		}
+		return 0, fmt.Errorf("stat failed: %w", err)
+	}
+	
+	// Return just the permission bits (not file type bits)
+	return info.Mode() & os.ModePerm, nil
+}
