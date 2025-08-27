@@ -151,3 +151,31 @@ func TestLocalDriver_FilePermissions(t *testing.T) {
 		assert.Error(t, err)
 	})
 }
+
+func TestLocalDriver_FileOwnership(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("Ownership tests require root privileges")
+	}
+	
+	testDir := t.TempDir()
+	logger := zap.NewNop()
+	driver := NewLocalDriver(testDir, logger)
+	ctx := context.Background()
+
+	t.Run("SetAndGetOwnership", func(t *testing.T) {
+		err := driver.Put(ctx, "container", "test.txt", strings.NewReader("content"))
+		require.NoError(t, err)
+
+		// Set ownership (using current user/group as safe test)
+		uid := os.Getuid()
+		gid := os.Getgid()
+		err = driver.SetOwnership(ctx, "container", "test.txt", uid, gid)
+		require.NoError(t, err)
+
+		// Get ownership
+		gotUid, gotGid, err := driver.GetOwnership(ctx, "container", "test.txt")
+		require.NoError(t, err)
+		assert.Equal(t, uid, gotUid)
+		assert.Equal(t, gid, gotGid)
+	})
+}
