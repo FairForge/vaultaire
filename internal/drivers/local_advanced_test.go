@@ -318,3 +318,37 @@ func TestLocalDriver_DirectoryTraversal(t *testing.T) {
 		assert.Greater(t, size, int64(0))
 	})
 }
+
+func TestLocalDriver_DirectoryIndexing(t *testing.T) {
+	testDir := t.TempDir()
+	logger := zap.NewNop()
+	driver := NewLocalDriver(testDir, logger)
+	ctx := context.Background()
+
+	// Create test structure
+	driver.Put(ctx, "container", "docs/readme.txt", strings.NewReader("readme"))
+	driver.Put(ctx, "container", "docs/guide.pdf", strings.NewReader("guide"))
+	driver.Put(ctx, "container", "images/photo1.jpg", strings.NewReader("photo1"))
+	driver.Put(ctx, "container", "images/photo2.png", strings.NewReader("photo2"))
+
+	t.Run("IndexDirectory", func(t *testing.T) {
+		index, err := driver.IndexDirectory(ctx, "container", "")
+		require.NoError(t, err)
+		assert.NotNil(t, index)
+		assert.Equal(t, 4, index.FileCount)
+		assert.Equal(t, 2, index.DirCount)
+	})
+
+	t.Run("FindFilesByExtension", func(t *testing.T) {
+		files, err := driver.FindFilesByExtension(ctx, "container", ".txt")
+		require.NoError(t, err)
+		assert.Len(t, files, 1)
+		assert.Contains(t, files[0], "readme.txt")
+	})
+
+	t.Run("FindFilesByPattern", func(t *testing.T) {
+		files, err := driver.FindFilesByPattern(ctx, "container", "photo*")
+		require.NoError(t, err)
+		assert.Len(t, files, 2)
+	})
+}
