@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -363,18 +364,18 @@ func TestLocalDriver_DirectorySync(t *testing.T) {
 		// Create source structure
 		driver.Put(ctx, "source", "file1.txt", strings.NewReader("content1"))
 		driver.Put(ctx, "source", "dir1/file2.txt", strings.NewReader("content2"))
-		
+
 		// Sync to destination
 		err := driver.SyncDirectory(ctx, "source", "", "dest", "")
 		require.NoError(t, err)
-		
+
 		// Verify destination has same structure
 		reader, err := driver.Get(ctx, "dest", "file1.txt")
 		require.NoError(t, err)
 		content, _ := io.ReadAll(reader)
 		reader.Close()
 		assert.Equal(t, "content1", string(content))
-		
+
 		reader, err = driver.Get(ctx, "dest", "dir1/file2.txt")
 		require.NoError(t, err)
 		reader.Close()
@@ -387,13 +388,53 @@ func TestLocalDriver_DirectorySync(t *testing.T) {
 		assert.Empty(t, diff.Added)
 		assert.Empty(t, diff.Modified)
 		assert.Empty(t, diff.Deleted)
-		
+
 		// Add file to dest
 		driver.Put(ctx, "dest", "extra.txt", strings.NewReader("extra"))
-		
+
 		// Compare again
 		diff, err = driver.CompareDirectories(ctx, "source", "", "dest", "")
 		require.NoError(t, err)
 		assert.Len(t, diff.Added, 1)
+	})
+}
+
+func TestLocalDriver_DirectoryMonitoring(t *testing.T) {
+	testDir := t.TempDir()
+	logger := zap.NewNop()
+	driver := NewLocalDriver(testDir, logger)
+	ctx := context.Background()
+
+	t.Run("GetDirectoryModTime", func(t *testing.T) {
+		// Create directory with files
+		driver.Put(ctx, "container", "testdir/file1.txt", strings.NewReader("content"))
+
+		// Get directory modification time
+		modTime, err := driver.GetDirectoryModTime(ctx, "container", "testdir")
+		require.NoError(t, err)
+		assert.NotZero(t, modTime)
+
+		// Sleep briefly then add new file
+		time.Sleep(10 * time.Millisecond)
+		driver.Put(ctx, "container", "testdir/file2.txt", strings.NewReader("new"))
+
+		// Mod time should be newer
+		newModTime, err := driver.GetDirectoryModTime(ctx, "container", "testdir")
+		require.NoError(t, err)
+		assert.True(t, newModTime.After(modTime))
+	})
+
+	t.Run("HasDirectoryChanged", func(t *testing.T) {
+		// Get initial state
+		since := time.Now()
+
+		// Add file after timestamp
+		time.Sleep(10 * time.Millisecond)
+		driver.Put(ctx, "container", "testdir/file3.txt", strings.NewReader("newer"))
+
+		// Check if changed
+		changed, err := driver.HasDirectoryChanged(ctx, "container", "testdir", since)
+		require.NoError(t, err)
+		assert.True(t, changed)
 	})
 }

@@ -523,22 +523,22 @@ func (d *LocalDriver) SyncDirectory(ctx context.Context, sourceContainer, source
 			destPath := filepath.Join(destDir, path)
 			return d.CreateDirectory(ctx, destContainer, destPath)
 		}
-		
+
 		// Copy file
 		sourcePath := filepath.Join(sourceDir, path)
 		destPath := filepath.Join(destDir, path)
-		
+
 		reader, err := d.Get(ctx, sourceContainer, sourcePath)
 		if err != nil {
 			return fmt.Errorf("get source file %s: %w", sourcePath, err)
 		}
 		defer reader.Close()
-		
+
 		err = d.Put(ctx, destContainer, destPath, reader)
 		if err != nil {
 			return fmt.Errorf("put dest file %s: %w", destPath, err)
 		}
-		
+
 		return nil
 	})
 }
@@ -550,7 +550,7 @@ func (d *LocalDriver) CompareDirectories(ctx context.Context, sourceContainer, s
 		Modified: []string{},
 		Deleted:  []string{},
 	}
-	
+
 	// Build source file map
 	sourceFiles := make(map[string]os.FileInfo)
 	err := d.WalkDirectory(ctx, sourceContainer, sourceDir, func(path string, entry os.DirEntry) error {
@@ -564,14 +564,14 @@ func (d *LocalDriver) CompareDirectories(ctx context.Context, sourceContainer, s
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Build dest file map and find added/modified
 	destFiles := make(map[string]os.FileInfo)
 	err = d.WalkDirectory(ctx, destContainer, destDir, func(path string, entry os.DirEntry) error {
 		if !entry.IsDir() {
 			if info, err := entry.Info(); err == nil {
 				destFiles[path] = info
-				
+
 				if sourceInfo, exists := sourceFiles[path]; exists {
 					// Check if modified (simple size check)
 					if sourceInfo.Size() != info.Size() {
@@ -588,13 +588,46 @@ func (d *LocalDriver) CompareDirectories(ctx context.Context, sourceContainer, s
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Find deleted (in source but not in dest)
 	for path := range sourceFiles {
 		if _, exists := destFiles[path]; !exists {
 			diff.Deleted = append(diff.Deleted, path)
 		}
 	}
-	
+
 	return diff, nil
+}
+
+// GetDirectoryModTime returns the most recent modification time in a directory
+func (d *LocalDriver) GetDirectoryModTime(ctx context.Context, container, dir string) (time.Time, error) {
+	var latestTime time.Time
+	
+	err := d.WalkDirectory(ctx, container, dir, func(path string, entry os.DirEntry) error {
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		
+		if info.ModTime().After(latestTime) {
+			latestTime = info.ModTime()
+		}
+		return nil
+	})
+	
+	if err != nil {
+		return time.Time{}, fmt.Errorf("walk directory failed: %w", err)
+	}
+	
+	return latestTime, nil
+}
+
+// HasDirectoryChanged checks if directory has changed since a given time
+func (d *LocalDriver) HasDirectoryChanged(ctx context.Context, container, dir string, since time.Time) (bool, error) {
+	modTime, err := d.GetDirectoryModTime(ctx, container, dir)
+	if err != nil {
+		return false, err
+	}
+	
+	return modTime.After(since), nil
 }
