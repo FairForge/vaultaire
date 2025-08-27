@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"go.uber.org/zap"
@@ -211,7 +212,7 @@ func (d *LocalDriver) GetInfo(ctx context.Context, container, artifact string) (
 // SetPermissions sets the file permissions for an artifact
 func (d *LocalDriver) SetPermissions(ctx context.Context, container, artifact string, mode os.FileMode) error {
 	fullPath := filepath.Join(d.basePath, container, artifact)
-	
+
 	// Check if file exists
 	if _, err := os.Stat(fullPath); err != nil {
 		if os.IsNotExist(err) {
@@ -219,19 +220,19 @@ func (d *LocalDriver) SetPermissions(ctx context.Context, container, artifact st
 		}
 		return fmt.Errorf("stat failed: %w", err)
 	}
-	
+
 	// Set permissions
 	if err := os.Chmod(fullPath, mode); err != nil {
 		return fmt.Errorf("chmod failed: %w", err)
 	}
-	
+
 	return nil
 }
 
 // GetPermissions retrieves the file permissions for an artifact
 func (d *LocalDriver) GetPermissions(ctx context.Context, container, artifact string) (os.FileMode, error) {
 	fullPath := filepath.Join(d.basePath, container, artifact)
-	
+
 	info, err := os.Stat(fullPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -239,7 +240,47 @@ func (d *LocalDriver) GetPermissions(ctx context.Context, container, artifact st
 		}
 		return 0, fmt.Errorf("stat failed: %w", err)
 	}
-	
+
 	// Return just the permission bits (not file type bits)
 	return info.Mode() & os.ModePerm, nil
+}
+
+// SetOwnership sets the owner and group for an artifact
+func (d *LocalDriver) SetOwnership(ctx context.Context, container, artifact string, uid, gid int) error {
+	fullPath := filepath.Join(d.basePath, container, artifact)
+
+	// Check if file exists
+	if _, err := os.Stat(fullPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("artifact not found: %w", err)
+		}
+		return fmt.Errorf("stat failed: %w", err)
+	}
+
+	// Set ownership
+	if err := os.Chown(fullPath, uid, gid); err != nil {
+		return fmt.Errorf("chown failed: %w", err)
+	}
+
+	return nil
+}
+
+// GetOwnership retrieves the owner and group for an artifact
+func (d *LocalDriver) GetOwnership(ctx context.Context, container, artifact string) (uid, gid int, err error) {
+	fullPath := filepath.Join(d.basePath, container, artifact)
+
+	info, err := os.Stat(fullPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return -1, -1, fmt.Errorf("artifact not found: %w", err)
+		}
+		return -1, -1, fmt.Errorf("stat failed: %w", err)
+	}
+
+	// Get system-specific file info
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		return int(stat.Uid), int(stat.Gid), nil
+	}
+
+	return -1, -1, fmt.Errorf("unable to get ownership information")
 }
