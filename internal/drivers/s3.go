@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -97,15 +99,82 @@ func (d *S3Driver) List(ctx context.Context, container, prefix string) ([]string
 	if prefix != "" {
 		input.Prefix = aws.String(prefix)
 	}
-	
+
 	result, err := d.client.ListObjectsV2(ctx, input)
 	if err != nil {
 		return nil, fmt.Errorf("list objects in %s: %w", container, err)
 	}
-	
+
 	var keys []string
 	for _, obj := range result.Contents {
 		keys = append(keys, *obj.Key)
 	}
 	return keys, nil
+}
+
+// S3MultipartUpload represents an S3 multipart upload
+type S3MultipartUpload struct {
+	Bucket   string
+	Key      string
+	UploadID string
+}
+
+// CreateMultipartUpload starts a new S3 multipart upload
+func (d *S3Driver) CreateMultipartUpload(ctx context.Context, container, artifact string) (*MultipartUpload, error) {
+	result, err := d.client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(container),
+		Key:    aws.String(artifact),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create multipart upload: %w", err)
+	}
+
+	return &MultipartUpload{
+		ID:        *result.UploadId,
+		Container: container,
+		Artifact:  artifact,
+	}, nil
+}
+
+// UploadPart uploads a part in S3 multipart upload
+func (d *S3Driver) UploadPart(ctx context.Context, upload *MultipartUpload, partNumber int, data io.Reader) (CompletedPart, error) {
+	result, err := d.client.UploadPart(ctx, &s3.UploadPartInput{
+		Bucket:     aws.String(upload.Container),
+		Key:        aws.String(upload.Artifact),
+		UploadId:   aws.String(upload.ID),
+		PartNumber: aws.Int32(int32(partNumber)),
+		Body:       data,
+	})
+	if err != nil {
+		return CompletedPart{}, fmt.Errorf("upload part %d: %w", partNumber, err)
+	}
+
+	return CompletedPart{
+		PartNumber: partNumber,
+		ETag:       *result.ETag,
+	}, nil
+}
+
+// CompleteMultipartUpload finishes the S3 multipart upload
+func (d *S3Driver) CompleteMultipartUpload(ctx context.Context, upload *MultipartUpload, parts []CompletedPart) error {
+	var completedParts []types.CompletedPart
+	for _, p := range parts {
+		completedParts = append(completedParts, types.CompletedPart{
+			PartNumber: aws.Int32(int32(p.PartNumber)),
+			ETag:       aws.String(p.ETag),
+		})
+	}
+
+	_, err := d.client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:   aws.String(upload.Container),
+		Key:      aws.String(upload.Artifact),
+		UploadId: aws.String(upload.ID),
+		MultipartUpload: &types.CompletedMultipartUpload{
+			Parts: completedParts,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("complete multipart upload: %w", err)
+	}
+	return nil
 }

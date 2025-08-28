@@ -47,7 +47,7 @@ func TestLocalDriver_SymlinkSupport(t *testing.T) {
 			FollowSymlinks: true,
 		})
 		require.NoError(t, err)
-		defer reader.Close()
+		defer mustClose(reader)
 
 		content, err := io.ReadAll(reader)
 		require.NoError(t, err)
@@ -63,7 +63,7 @@ func TestLocalDriver_SymlinkSupport(t *testing.T) {
 		linkPath := filepath.Join(testDir, "container1", "link.txt")
 		if _, err := os.Lstat(linkPath); os.IsNotExist(err) {
 			realPath := filepath.Join(testDir, "container1", "realfile.txt")
-			os.Symlink(realPath, linkPath)
+			_ = os.Symlink(realPath, linkPath)
 		}
 
 		info, err := driver.GetInfo(ctx, "container1", "link.txt")
@@ -276,9 +276,9 @@ func TestLocalDriver_DirectoryOperations(t *testing.T) {
 
 	t.Run("ListDirectory", func(t *testing.T) {
 		// Create structure
-		driver.Put(ctx, "container", "dir1/file1.txt", strings.NewReader("content1"))
-		driver.Put(ctx, "container", "dir1/file2.txt", strings.NewReader("content2"))
-		driver.Put(ctx, "container", "dir1/subdir/file3.txt", strings.NewReader("content3"))
+		_ = driver.Put(ctx, "container", "dir1/file1.txt", strings.NewReader("content1"))
+		_ = driver.Put(ctx, "container", "dir1/file2.txt", strings.NewReader("content2"))
+		_ = driver.Put(ctx, "container", "dir1/subdir/file3.txt", strings.NewReader("content3"))
 
 		// List directory
 		entries, err := driver.ListDirectory(ctx, "container", "dir1")
@@ -373,7 +373,7 @@ func TestLocalDriver_DirectorySync(t *testing.T) {
 		reader, err := driver.Get(ctx, "dest", "file1.txt")
 		require.NoError(t, err)
 		content, _ := io.ReadAll(reader)
-		reader.Close()
+		mustClose(reader)
 		assert.Equal(t, "content1", string(content))
 
 		reader, err = driver.Get(ctx, "dest", "dir1/file2.txt")
