@@ -1,21 +1,25 @@
-## Step Number: XX
+## Description
+<!-- Brief description of changes -->
 
-### What This PR Does
-Brief description of functionality added
+## Step Number
+<!-- If applicable: Step XX of master plan -->
 
-### Tests Added
-- [ ] Unit tests written first (TDD)
-- [ ] All tests passing
-- [ ] Coverage >80%
+## Type of change
+- [ ] Bug fix (non-breaking change which fixes an issue)
+- [ ] New feature (non-breaking change which adds functionality)
+- [ ] Breaking change (fix or feature that would cause existing functionality to not work as expected)
+- [ ] Documentation update
 
-### Quality Checks
-- [ ] All errors wrapped with context
-- [ ] Structured logging added
-- [ ] No linter warnings
-- [ ] Documentation updated
+## Testing
+- [ ] Unit tests pass locally
+- [ ] Integration tests pass (if applicable)
+- [ ] Coverage remains above 80%
 
-### Files Changed
-- Key files modified and why
-
-### Next Steps
-What comes after this PR
+## Checklist
+- [ ] My code follows the project's style guidelines
+- [ ] I have performed a self-review of my code
+- [ ] I have added tests that prove my fix is effective or that my feature works
+- [ ] New and existing unit tests pass locally with my changes
+- [ ] I have made corresponding changes to the documentation
+- [ ] My changes generate no new warnings from golangci-lint
+- [ ] Error handling follows project standards (wrapped with context)

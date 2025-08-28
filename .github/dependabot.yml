@@ -1,14 +1,22 @@
 version: 2
 updates:
-  # Go modules
   - package-ecosystem: "gomod"
     directory: "/"
     schedule:
-      interval: "daily"
+      interval: "weekly"
+      day: "monday"
     open-pull-requests-limit: 10
-    
-  # GitHub Actions
+    groups:
+      aws:
+        patterns:
+          - "github.com/aws/aws-sdk-go*"
+      test-dependencies:
+        patterns:
+          - "*test*"
+          - "*mock*"
+          
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    open-pull-requests-limit: 5

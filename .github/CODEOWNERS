@@ -1,0 +1,8 @@
+# Default owner for everything
+* @IsaacViera
+
+# Specific ownership
+/internal/drivers/ @IsaacViera
+/internal/engine/ @IsaacViera
+/internal/api/ @IsaacViera
+/.github/ @IsaacViera
