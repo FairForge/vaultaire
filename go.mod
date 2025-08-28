@@ -11,7 +11,7 @@ require (
 	github.com/gorilla/mux v1.8.1
 	github.com/lib/pq v1.10.9
 	github.com/prometheus/client_golang v1.23.0
-	github.com/stretchr/testify v1.11.0
+	github.com/stretchr/testify v1.11.1
 	go.uber.org/zap v1.27.0
 	golang.org/x/crypto v0.41.0
 	golang.org/x/sys v0.35.0
