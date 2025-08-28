@@ -1,0 +1,35 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkoutongwith:
+          fetch-depth: 0
+          
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          
+      - name: Build binaries
+        run: |
+          GOOS=linux GOARCH=amd64 go build -o vaultaire-linux-amd64 cmd/vaultaire/main.go
+          GOOS=darwin GOARCH=amd64 go build -o vaultaire-darwin-amd64 cmd/vaultaire/main.go
+          GOOS=windows GOARCH=amd64 go build -o vaultaire-windows-amd64.exe cmd/vaultaire/main.go
+          
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            vaultaire-linux-amd64
+            vaultaire-darwin-amd64
+            vaultaire-windows-amd64.exe
+          generate_release_notes: true
