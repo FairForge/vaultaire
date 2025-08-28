@@ -903,3 +903,15 @@ func (d *LocalDriver) GetWriteBufferStats() map[string]interface{} {
 		"buffer_size":  64 * 1024,
 	}
 }
+
+// MultipartUpload represents an in-progress multipart upload
+type MultipartUpload struct {
+	ID string
+}
+
+// CreateMultipartUpload initiates a multipart upload
+func (d *LocalDriver) CreateMultipartUpload(ctx context.Context, container, artifact string) (*MultipartUpload, error) {
+	return &MultipartUpload{
+		ID: "test-upload-id",
+	}, nil
+}
