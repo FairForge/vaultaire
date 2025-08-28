@@ -154,9 +154,9 @@ func (e *CoreEngine) Delete(ctx context.Context, container, artifact string) err
 }
 
 // List returns artifacts in a container (S3 ListObjects)
-func (e *CoreEngine) List(ctx context.Context, container string) ([]Artifact, error) {
+func (e *CoreEngine) List(ctx context.Context, container, prefix string) ([]Artifact, error) {
 	if driver, ok := e.drivers[e.primary]; ok {
-		keys, err := driver.List(ctx, container)
+		keys, err := driver.List(ctx, container, "")
 		if err != nil {
 			return nil, err
 		}
