@@ -222,7 +222,7 @@ func TestLocalDriver_Checksums(t *testing.T) {
 		require.NoError(t, err)
 
 		// Get MD5 checksum
-		checksum, err := driver.GetChecksum(ctx, "container", "test.txt", ChecksumMD5)
+		checksum, err := driver.GetChecksum(ctx, "container", "test.txt", ChecksumSHA512)
 		require.NoError(t, err)
 		assert.NotEmpty(t, checksum)
 
