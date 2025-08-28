@@ -804,3 +804,102 @@ func (t *Transaction) Rollback() error {
 	t.committed = true
 	return nil
 }
+
+// BufferedWriter wraps a file with write buffering
+type BufferedWriter struct {
+	file   *os.File
+	buffer *bufio.Writer
+	driver *LocalDriver
+	mu     sync.Mutex
+}
+
+// Write implements io.Writer
+func (bw *BufferedWriter) Write(p []byte) (n int, err error) {
+	bw.mu.Lock()
+	defer bw.mu.Unlock()
+	
+	return bw.buffer.Write(p)
+}
+
+// Flush forces buffer to disk
+func (bw *BufferedWriter) Flush() error {
+	bw.mu.Lock()
+	defer bw.mu.Unlock()
+	
+	return bw.buffer.Flush()
+}
+
+// Close flushes and closes the file
+func (bw *BufferedWriter) Close() error {
+	bw.mu.Lock()
+	defer bw.mu.Unlock()
+	
+	// Flush buffer first
+	if err := bw.buffer.Flush(); err != nil {
+		return fmt.Errorf("flush failed: %w", err)
+	}
+	
+	// Sync to disk
+	if err := bw.file.Sync(); err != nil {
+		return fmt.Errorf("sync failed: %w", err)
+	}
+	
+	// Close file
+	if err := bw.file.Close(); err != nil {
+		return fmt.Errorf("close failed: %w", err)
+	}
+	
+	// Update stats
+	bw.driver.mu.Lock()
+	bw.driver.stats.Writes++
+	bw.driver.mu.Unlock()
+	
+	return nil
+}
+
+// PutBuffered creates a buffered writer for efficient small writes
+func (d *LocalDriver) PutBuffered(ctx context.Context, container, artifact string) (io.WriteCloser, error) {
+	containerPath := filepath.Join(d.basePath, container)
+	if err := os.MkdirAll(containerPath, 0750); err != nil {
+		return nil, fmt.Errorf("create container: %w", err)
+	}
+	
+	fullPath := filepath.Join(d.basePath, container, artifact)
+	
+	// Security check
+	if !strings.HasPrefix(fullPath, d.basePath) {
+		return nil, fmt.Errorf("path traversal detected")
+	}
+	
+	// Create parent directory
+	parentDir := filepath.Dir(fullPath)
+	if err := os.MkdirAll(parentDir, 0750); err != nil {
+		return nil, fmt.Errorf("create parent directory: %w", err)
+	}
+	
+	// Create file
+	file, err := os.Create(fullPath)
+	if err != nil {
+		return nil, fmt.Errorf("create file: %w", err)
+	}
+	
+	// Create buffered writer (64KB buffer)
+	buffer := bufio.NewWriterSize(file, 64*1024)
+	
+	return &BufferedWriter{
+		file:   file,
+		buffer: buffer,
+		driver: d,
+	}, nil
+}
+
+// GetWriteBufferStats returns buffer statistics
+func (d *LocalDriver) GetWriteBufferStats() map[string]interface{} {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	
+	return map[string]interface{}{
+		"total_writes": d.stats.Writes,
+		"buffer_size":  64 * 1024,
+	}
+}
