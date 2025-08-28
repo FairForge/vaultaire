@@ -915,6 +915,7 @@ type MultipartUpload struct {
 	Container string
 	Artifact  string
 }
+
 // CreateMultipartUpload initiates a multipart upload
 // CreateMultipartUpload initiates a multipart upload
 func (d *LocalDriver) CreateMultipartUpload(ctx context.Context, container, artifact string) (*MultipartUpload, error) {
@@ -924,6 +925,7 @@ func (d *LocalDriver) CreateMultipartUpload(ctx context.Context, container, arti
 		Artifact:  artifact,
 	}, nil
 }
+
 // CompletedPart represents a completed upload part
 type CompletedPart struct {
 	PartNumber int
@@ -938,7 +940,7 @@ func (d *LocalDriver) UploadPart(ctx context.Context, upload *MultipartUpload, p
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
 		return CompletedPart{}, fmt.Errorf("create temp dir: %w", err)
 	}
-	
+
 	// Save part to temp file
 	partPath := filepath.Join(tempDir, fmt.Sprintf("part_%d", partNumber))
 	file, err := os.Create(partPath)
@@ -946,18 +948,19 @@ func (d *LocalDriver) UploadPart(ctx context.Context, upload *MultipartUpload, p
 		return CompletedPart{}, fmt.Errorf("create part file: %w", err)
 	}
 	defer file.Close()
-	
+
 	size, err := io.Copy(file, data)
 	if err != nil {
 		return CompletedPart{}, fmt.Errorf("write part: %w", err)
 	}
-	
+
 	return CompletedPart{
 		PartNumber: partNumber,
 		ETag:       fmt.Sprintf("etag-%d", partNumber),
 		Size:       size,
 	}, nil
 }
+
 // CompleteMultipartUpload assembles all parts into the final file
 func (d *LocalDriver) CompleteMultipartUpload(ctx context.Context, upload *MultipartUpload, parts []CompletedPart) error {
 	// Create container directory
@@ -965,7 +968,7 @@ func (d *LocalDriver) CompleteMultipartUpload(ctx context.Context, upload *Multi
 	if err := os.MkdirAll(containerPath, 0755); err != nil {
 		return fmt.Errorf("create container: %w", err)
 	}
-	
+
 	// Create final file
 	finalPath := filepath.Join(containerPath, upload.Artifact)
 	finalFile, err := os.Create(finalPath)
@@ -973,7 +976,7 @@ func (d *LocalDriver) CompleteMultipartUpload(ctx context.Context, upload *Multi
 		return fmt.Errorf("create final file: %w", err)
 	}
 	defer finalFile.Close()
-	
+
 	// Assemble parts in order
 	tempDir := filepath.Join(d.basePath, ".uploads", upload.ID)
 	for _, part := range parts {
@@ -982,16 +985,16 @@ func (d *LocalDriver) CompleteMultipartUpload(ctx context.Context, upload *Multi
 		if err != nil {
 			return fmt.Errorf("open part %d: %w", part.PartNumber, err)
 		}
-		
+
 		if _, err := io.Copy(finalFile, partFile); err != nil {
 			partFile.Close()
 			return fmt.Errorf("copy part %d: %w", part.PartNumber, err)
 		}
 		partFile.Close()
 	}
-	
+
 	// Clean up temp files
 	os.RemoveAll(tempDir)
-	
+
 	return nil
 }

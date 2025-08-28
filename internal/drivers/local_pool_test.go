@@ -79,7 +79,7 @@ func TestLocalDriver_ParallelReads_ShowsProblem(t *testing.T) {
 			defer reader.Close()
 
 			// Simulate some work
-			io.Copy(io.Discard, reader)
+			mustCopy(io.Discard, reader)
 			time.Sleep(10 * time.Millisecond)
 		}(i)
 	}
@@ -116,7 +116,7 @@ func TestLocalDriver_PooledReads(t *testing.T) {
 	if err != nil {
 		t.Fatal("GetPooled failed:", err)
 	}
-	defer driver.ReturnPooledReader(reader) // Return to pool
+	defer func() { _ = driver.ReturnPooledReader(reader) }() // Return to pool
 
 	content, _ := io.ReadAll(reader)
 	if !bytes.Equal(content, []byte("file-5-content")) {
@@ -158,7 +158,7 @@ func TestLocalDriver_ConcurrentPooledReads(t *testing.T) {
 			content, err := io.ReadAll(reader)
 			if err != nil {
 				errors <- fmt.Errorf("worker %d read: %v", id, err)
-				driver.ReturnPooledReader(reader)
+				_ = driver.ReturnPooledReader(reader)
 				return
 			}
 
@@ -168,7 +168,7 @@ func TestLocalDriver_ConcurrentPooledReads(t *testing.T) {
 			}
 
 			// Return to pool
-			driver.ReturnPooledReader(reader)
+			_ = driver.ReturnPooledReader(reader)
 		}(i)
 	}
 
@@ -204,7 +204,7 @@ func BenchmarkLocalDriver_ConcurrentReads(b *testing.B) {
 		b.RunParallel(func(pb *testing.PB) {
 			for pb.Next() {
 				reader, _ := driver.Get(ctx, "bench", "test.dat")
-				io.Copy(io.Discard, reader)
+				mustCopy(io.Discard, reader)
 				reader.Close()
 			}
 		})
@@ -214,8 +214,8 @@ func BenchmarkLocalDriver_ConcurrentReads(b *testing.B) {
 		b.RunParallel(func(pb *testing.PB) {
 			for pb.Next() {
 				reader, _ := driver.GetPooled(ctx, "bench", "test.dat")
-				io.Copy(io.Discard, reader)
-				driver.ReturnPooledReader(reader)
+				mustCopy(io.Discard, reader)
+				_ = driver.ReturnPooledReader(reader)
 			}
 		})
 	})

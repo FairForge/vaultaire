@@ -22,7 +22,7 @@ func TestLocalDriver_ParallelOperations(t *testing.T) {
 		count := 100
 		var wg sync.WaitGroup
 		errors := make([]error, count)
-		
+
 		start := time.Now()
 		for i := 0; i < count; i++ {
 			wg.Add(1)
@@ -34,11 +34,11 @@ func TestLocalDriver_ParallelOperations(t *testing.T) {
 		}
 		wg.Wait()
 		elapsed := time.Since(start)
-		
+
 		for i, err := range errors {
 			assert.NoError(t, err, "file %d failed", i)
 		}
-		
+
 		t.Logf("Parallel write of %d files took %v", count, elapsed)
 	})
 }
