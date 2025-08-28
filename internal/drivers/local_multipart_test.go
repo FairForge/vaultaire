@@ -47,3 +47,33 @@ func TestLocalDriver_UploadPart(t *testing.T) {
 		t.Errorf("expected part number 1, got %d", part.PartNumber)
 	}
 }
+
+func TestLocalDriver_CompleteMultipartUpload(t *testing.T) {
+	// Arrange
+	driver := NewLocalDriver(t.TempDir(), zap.NewNop())
+	ctx := context.Background()
+	
+	upload, _ := driver.CreateMultipartUpload(ctx, "test", "complete.bin")
+	data1 := []byte("part 1 data")
+	data2 := []byte("part 2 data")
+	
+	part1, _ := driver.UploadPart(ctx, upload, 1, bytes.NewReader(data1))
+	part2, _ := driver.UploadPart(ctx, upload, 2, bytes.NewReader(data2))
+	
+	parts := []CompletedPart{part1, part2}
+	
+	// Act
+	err := driver.CompleteMultipartUpload(ctx, upload, parts)
+	
+	// Assert
+	if err != nil {
+		t.Fatal(err)
+	}
+	
+	// Verify file was created
+	reader, err := driver.Get(ctx, "test", "complete.bin")
+	if err != nil {
+		t.Fatal("completed file should exist")
+	}
+	defer reader.Close()
+}

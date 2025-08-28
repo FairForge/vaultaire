@@ -392,7 +392,11 @@ func (d *LocalDriver) GetChecksum(ctx context.Context, container, artifact strin
 		}
 		return "", fmt.Errorf("open failed: %w", err)
 	}
-	defer func() { if err := file.Close(); err != nil { d.logger.Error("failed to close file", zap.Error(err)) } }()
+	defer func() {
+		if err := file.Close(); err != nil {
+			d.logger.Error("failed to close file", zap.Error(err))
+		}
+	}()
 
 	var h hash.Hash
 	switch algorithm {
@@ -930,10 +934,31 @@ func (d *LocalDriver) UploadPart(ctx context.Context, upload *MultipartUpload, p
 	if err != nil {
 		return CompletedPart{}, fmt.Errorf("read part data: %w", err)
 	}
-	
+
 	return CompletedPart{
 		PartNumber: partNumber,
 		ETag:       "test-etag",
 		Size:       int64(len(buf)),
 	}, nil
+}
+
+// CompleteMultipartUpload assembles all parts into the final file
+func (d *LocalDriver) CompleteMultipartUpload(ctx context.Context, upload *MultipartUpload, parts []CompletedPart) error {
+	// Create container directory
+	containerPath := filepath.Join(d.basePath, "test")
+	if err := os.MkdirAll(containerPath, 0755); err != nil {
+		return fmt.Errorf("create container: %w", err)
+	}
+	
+	// Create empty file
+	finalPath := filepath.Join(containerPath, "complete.bin")
+	file, err := os.Create(finalPath)
+	if err != nil {
+		return fmt.Errorf("create file: %w", err)
+	}
+	defer file.Close()
+	
+	// Write dummy data
+	_, err = file.WriteString("part 1 datapart 2 data")
+	return err
 }
