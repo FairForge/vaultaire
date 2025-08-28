@@ -113,24 +113,24 @@ func (d *S3CompatDriver) Delete(ctx context.Context, container, artifact string)
 }
 
 // List lists artifacts in a container
-func (d *S3CompatDriver) List(ctx context.Context, container string) ([]string, error) {
-	prefix := d.buildKey(container, "") + "/"
+func (d *S3CompatDriver) List(ctx context.Context, container, prefix string) ([]string, error) {
+	s3Prefix := d.buildKey(container, "") + "/"
 
 	result, err := d.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 		Bucket: aws.String(d.bucket),
-		Prefix: aws.String(prefix),
+		Prefix: aws.String(s3Prefix),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("list objects with prefix %s: %w", prefix, err)
+		return nil, fmt.Errorf("list objects with s3Prefix %s: %w", prefix, err)
 	}
 
 	var artifacts []string
-	prefixLen := len(prefix)
+	s3PrefixLen := len(prefix)
 
 	for _, obj := range result.Contents {
-		if obj.Key != nil && len(*obj.Key) > prefixLen {
+		if obj.Key != nil && len(*obj.Key) > s3PrefixLen {
 			// Remove the prefix to get just the artifact name
-			artifactPath := (*obj.Key)[prefixLen:]
+			artifactPath := (*obj.Key)[s3PrefixLen:]
 			artifacts = append(artifacts, artifactPath)
 		}
 	}

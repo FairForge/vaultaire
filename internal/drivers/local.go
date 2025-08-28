@@ -46,7 +46,7 @@ func NewLocalDriver(basePath string, logger *zap.Logger) *LocalDriver {
 		logger:       logger,
 		readerPool: &sync.Pool{
 			New: func() interface{} {
-				return bufio.NewReaderSize(nil, 64*1024)
+				return bufio.NewReaderSize(nil, 1024*1024)
 			},
 		},
 		filePool: &sync.Pool{
@@ -124,7 +124,7 @@ func (d *LocalDriver) Delete(ctx context.Context, container, artifact string) er
 }
 
 // List lists artifacts in a container
-func (d *LocalDriver) List(ctx context.Context, container string) ([]string, error) {
+func (d *LocalDriver) List(ctx context.Context, container, prefix string) ([]string, error) {
 	containerPath := filepath.Join(d.basePath, container)
 	var artifacts []string
 
@@ -892,7 +892,7 @@ func (d *LocalDriver) PutBuffered(ctx context.Context, container, artifact strin
 	}
 
 	// Create buffered writer (64KB buffer)
-	buffer := bufio.NewWriterSize(file, 64*1024)
+	buffer := bufio.NewWriterSize(file, 1024*1024)
 
 	return &BufferedWriter{
 		file:   file,
@@ -1001,4 +1001,17 @@ func (d *LocalDriver) CompleteMultipartUpload(ctx context.Context, upload *Multi
 	_ = os.RemoveAll(tempDir)
 
 	return nil
+}
+
+// Exists checks if an artifact exists
+func (d *LocalDriver) Exists(ctx context.Context, container, artifact string) (bool, error) {
+	fullPath := filepath.Join(d.basePath, container, artifact)
+	_, err := os.Stat(fullPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat %s: %w", fullPath, err)
+	}
+	return true, nil
 }
