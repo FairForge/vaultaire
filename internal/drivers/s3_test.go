@@ -57,3 +57,35 @@ func TestS3Driver_Put(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestS3Driver_Delete(t *testing.T) {
+	// Skip if no credentials
+	endpoint := os.Getenv("S3_ENDPOINT")
+	accessKey := os.Getenv("S3_ACCESS_KEY")
+	secretKey := os.Getenv("S3_SECRET_KEY")
+	if endpoint == "" || accessKey == "" || secretKey == "" {
+		t.Skip("S3 credentials not set")
+	}
+	
+	driver, _ := NewS3Driver(endpoint, accessKey, secretKey, "us-east-1", zap.NewNop())
+	ctx := context.Background()
+	
+	// Put something first
+	testData := []byte("delete me")
+	err := driver.Put(ctx, "lyve-bucket-test", "delete-test.txt", bytes.NewReader(testData))
+	if err != nil {
+		t.Fatal(err)
+	}
+	
+	// Delete it
+	err = driver.Delete(ctx, "lyve-bucket-test", "delete-test.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	
+	// Verify it's gone
+	_, err = driver.Get(ctx, "lyve-bucket-test", "delete-test.txt")
+	if err == nil {
+		t.Fatal("file should be deleted")
+	}
+}
