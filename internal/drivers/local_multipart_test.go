@@ -1,6 +1,7 @@
 package drivers
 
 import (
+	"bytes"
 	"context"
 	"testing"
 
@@ -11,10 +12,10 @@ func TestLocalDriver_CreateMultipartUpload(t *testing.T) {
 	// Arrange
 	driver := NewLocalDriver(t.TempDir(), zap.NewNop())
 	ctx := context.Background()
-	
+
 	// Act
 	upload, err := driver.CreateMultipartUpload(ctx, "test-container", "large-file.bin")
-	
+
 	// Assert
 	if err != nil {
 		t.Fatal(err)
@@ -24,5 +25,25 @@ func TestLocalDriver_CreateMultipartUpload(t *testing.T) {
 	}
 	if upload.ID == "" {
 		t.Error("upload ID should not be empty")
+	}
+}
+
+func TestLocalDriver_UploadPart(t *testing.T) {
+	// Arrange
+	driver := NewLocalDriver(t.TempDir(), zap.NewNop())
+	ctx := context.Background()
+
+	upload, _ := driver.CreateMultipartUpload(ctx, "test", "file.bin")
+	data := []byte("test part data")
+
+	// Act
+	part, err := driver.UploadPart(ctx, upload, 1, bytes.NewReader(data))
+
+	// Assert
+	if err != nil {
+		t.Fatal(err)
+	}
+	if part.PartNumber != 1 {
+		t.Errorf("expected part number 1, got %d", part.PartNumber)
 	}
 }
