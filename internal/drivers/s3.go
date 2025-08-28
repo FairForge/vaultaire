@@ -41,7 +41,7 @@ func NewS3Driver(endpoint, accessKey, secretKey, region string, logger *zap.Logg
 	// Create S3 client with custom endpoint
 	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
 		o.BaseEndpoint = aws.String(endpoint)
-		o.UsePathStyle = false // Lyve Cloud uses virtual hosted-style
+		o.UsePathStyle = true // Lyve Cloud uses virtual hosted-style
 	})
 
 	return &S3Driver{
