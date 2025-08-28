@@ -50,7 +50,7 @@ func TestS3Driver_Put(t *testing.T) {
 	data := []byte("test data")
 
 	// Act
-	err = driver.Put(ctx, "${S3_BUCKET}", "test-file.txt", bytes.NewReader(data))
+	err = driver.Put(ctx, "data", "personal-files/test-file.txt", bytes.NewReader(data))
 
 	// Assert
 	if err != nil {
@@ -72,19 +72,19 @@ func TestS3Driver_Delete(t *testing.T) {
 
 	// Put something first
 	testData := []byte("delete me")
-	err := driver.Put(ctx, "${S3_BUCKET}", "delete-test.txt", bytes.NewReader(testData))
+	err := driver.Put(ctx, "data", "personal-files/delete-test.txt", bytes.NewReader(testData))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Delete it
-	err = driver.Delete(ctx, "${S3_BUCKET}", "delete-test.txt")
+	err = driver.Delete(ctx, "data", "personal-files/delete-test.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Verify it's gone
-	_, err = driver.Get(ctx, "${S3_BUCKET}", "delete-test.txt")
+	_, err = driver.Get(ctx, "data", "personal-files/delete-test.txt")
 	if err == nil {
 		t.Fatal("file should be deleted")
 	}
@@ -102,7 +102,7 @@ func TestS3Driver_MultipartUpload(t *testing.T) {
 	ctx := context.Background()
 
 	// Start multipart upload
-	upload, err := driver.CreateMultipartUpload(ctx, "${S3_BUCKET}", "multipart-test.bin")
+	upload, err := driver.CreateMultipartUpload(ctx, "data", "personal-files/multipart-test.bin")
 	if err != nil {
 		t.Fatal(err)
 	}
