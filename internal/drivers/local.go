@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/md5"
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/hex"
@@ -66,6 +65,10 @@ func (d *LocalDriver) Name() string {
 // Get retrieves an artifact from a container
 func (d *LocalDriver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
 	fullPath := filepath.Join(d.basePath, container, artifact)
+	cleanPath := filepath.Clean(fullPath)
+	if !strings.HasPrefix(cleanPath, filepath.Clean(d.basePath)) {
+		return nil, fmt.Errorf("path traversal detected: %s", artifact)
+	}
 
 	d.logger.Debug("LocalDriver.Get",
 		zap.String("container", container),
@@ -83,6 +86,10 @@ func (d *LocalDriver) Put(ctx context.Context, container, artifact string, data 
 	}
 
 	fullPath := filepath.Join(d.basePath, container, artifact)
+	cleanPath := filepath.Clean(fullPath)
+	if !strings.HasPrefix(cleanPath, filepath.Clean(d.basePath)) {
+		return fmt.Errorf("path traversal detected: %s", artifact)
+	}
 
 	parentDir := filepath.Dir(fullPath)
 	if err := os.MkdirAll(parentDir, 0750); err != nil {
@@ -376,7 +383,6 @@ func (d *LocalDriver) GetOwnership(ctx context.Context, container, artifact stri
 type ChecksumAlgorithm string
 
 const (
-	ChecksumMD5    ChecksumAlgorithm = "md5"
 	ChecksumSHA256 ChecksumAlgorithm = "sha256"
 	ChecksumSHA512 ChecksumAlgorithm = "sha512"
 )
@@ -400,8 +406,6 @@ func (d *LocalDriver) GetChecksum(ctx context.Context, container, artifact strin
 
 	var h hash.Hash
 	switch algorithm {
-	case ChecksumMD5:
-		h = md5.New()
 	case ChecksumSHA256:
 		h = sha256.New()
 	case ChecksumSHA512:
@@ -947,7 +951,7 @@ func (d *LocalDriver) UploadPart(ctx context.Context, upload *MultipartUpload, p
 	if err != nil {
 		return CompletedPart{}, fmt.Errorf("create part file: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	size, err := io.Copy(file, data)
 	if err != nil {
@@ -975,7 +979,7 @@ func (d *LocalDriver) CompleteMultipartUpload(ctx context.Context, upload *Multi
 	if err != nil {
 		return fmt.Errorf("create final file: %w", err)
 	}
-	defer finalFile.Close()
+	defer func() { _ = finalFile.Close() }()
 
 	// Assemble parts in order
 	tempDir := filepath.Join(d.basePath, ".uploads", upload.ID)
@@ -987,14 +991,14 @@ func (d *LocalDriver) CompleteMultipartUpload(ctx context.Context, upload *Multi
 		}
 
 		if _, err := io.Copy(finalFile, partFile); err != nil {
-			partFile.Close()
+			_ = partFile.Close()
 			return fmt.Errorf("copy part %d: %w", part.PartNumber, err)
 		}
-		partFile.Close()
+		_ = partFile.Close()
 	}
 
 	// Clean up temp files
-	os.RemoveAll(tempDir)
+	_ = os.RemoveAll(tempDir)
 
 	return nil
 }
