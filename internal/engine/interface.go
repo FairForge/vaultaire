@@ -11,7 +11,7 @@ type Engine interface {
 	Get(ctx context.Context, container, artifact string) (io.ReadCloser, error)
 	Put(ctx context.Context, container, artifact string, data io.Reader) error
 	Delete(ctx context.Context, container, artifact string) error
-	List(ctx context.Context, container string) ([]Artifact, error)
+	List(ctx context.Context, container, prefix string) ([]Artifact, error)
 
 	// Hidden capabilities (implement as no-ops for now)
 	Execute(ctx context.Context, container string, wasm []byte, input io.Reader) (io.Reader, error)
@@ -34,7 +34,7 @@ type Driver interface {
 	Get(ctx context.Context, container, artifact string) (io.ReadCloser, error)
 	Put(ctx context.Context, container, artifact string, data io.Reader) error
 	Delete(ctx context.Context, container, artifact string) error
-	List(ctx context.Context, container string) ([]string, error)
+	List(ctx context.Context, container, prefix string) ([]string, error)
 	HealthCheck(ctx context.Context) error
 }
 

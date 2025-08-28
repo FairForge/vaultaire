@@ -35,7 +35,7 @@ func TestS3CompatDriver_Operations(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Test List
-	artifacts, err := driver.List(ctx, "test-container")
+	artifacts, err := driver.List(ctx, "test-container", "")
 	assert.NoError(t, err)
 	assert.Contains(t, artifacts, "test-artifact")
 
