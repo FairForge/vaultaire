@@ -45,3 +45,19 @@ coverage.*
 
 # OS files
 .DS_Store
+.env
+main
+*.test
+bin/
+
+# Binaries
+bin/
+*.test
+main
+vaultaire
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

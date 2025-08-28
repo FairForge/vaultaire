@@ -331,7 +331,7 @@ func (a *S3ToEngine) HandleList(w http.ResponseWriter, r *http.Request, bucket, 
 	// List using engine with tenant namespace
 	container := t.NamespaceContainer(bucket)
 
-	artifacts, err := a.engine.List(r.Context(), container)
+	artifacts, err := a.engine.List(r.Context(), container, "")
 	if err != nil {
 		a.logger.Error("list failed",
 			zap.String("container", container),
