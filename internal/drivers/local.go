@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"go.uber.org/zap"
 )
 
@@ -1014,4 +1015,123 @@ func (d *LocalDriver) Exists(ctx context.Context, container, artifact string) (b
 		return false, fmt.Errorf("stat %s: %w", fullPath, err)
 	}
 	return true, nil
+}
+
+// Watch implements the Watcher interface
+func (d *LocalDriver) Watch(ctx context.Context, prefix string) (<-chan WatchEvent, <-chan error, error) {
+	events := make(chan WatchEvent, 10)
+	errors := make(chan error, 1)
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return nil, nil, fmt.Errorf("create watcher: %w", err)
+	}
+
+	watchPath := d.basePath
+	if prefix != "" {
+		watchPath = filepath.Join(d.basePath, prefix)
+	}
+
+	err = filepath.Walk(watchPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			if err := watcher.Add(path); err != nil {
+				return fmt.Errorf("add watch path %s: %w", path, err)
+			}
+			d.logger.Debug("watching directory", zap.String("path", path))
+		}
+		return nil
+	})
+
+	if err != nil {
+		watcher.Close()
+		return nil, nil, fmt.Errorf("walk directory tree: %w", err)
+	}
+
+	go d.processWatchEvents(ctx, watcher, events, errors, prefix)
+	return events, errors, nil
+}
+
+func (d *LocalDriver) processWatchEvents(
+	ctx context.Context,
+	watcher *fsnotify.Watcher,
+	events chan<- WatchEvent,
+	errors chan<- error,
+	prefix string,
+) {
+	defer close(events)
+	defer close(errors)
+	defer watcher.Close()
+
+	for {
+		select {
+		case <-ctx.Done():
+			d.logger.Debug("stopping watcher", zap.String("reason", "context cancelled"))
+			return
+
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return
+			}
+
+			if we := d.convertEvent(event, prefix); we != nil {
+				select {
+				case events <- *we:
+					d.logger.Debug("sent watch event",
+						zap.Int("type", int(we.Type)),
+						zap.String("path", we.Path))
+				case <-ctx.Done():
+					return
+				}
+			}
+
+			if event.Op&fsnotify.Create == fsnotify.Create {
+				if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
+					watcher.Add(event.Name)
+					d.logger.Debug("added new directory to watcher",
+						zap.String("path", event.Name))
+				}
+			}
+
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return
+			}
+			select {
+			case errors <- fmt.Errorf("watcher error: %w", err):
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
+}
+
+func (d *LocalDriver) convertEvent(event fsnotify.Event, prefix string) *WatchEvent {
+	relPath, err := filepath.Rel(d.basePath, event.Name)
+	if err != nil {
+		return nil
+	}
+
+	if prefix != "" && !strings.HasPrefix(relPath, prefix) {
+		return nil
+	}
+
+	we := &WatchEvent{Path: relPath}
+
+	switch {
+	case event.Op&fsnotify.Create == fsnotify.Create:
+		we.Type = WatchEventCreate
+	case event.Op&fsnotify.Write == fsnotify.Write:
+		we.Type = WatchEventModify
+	case event.Op&fsnotify.Remove == fsnotify.Remove:
+		we.Type = WatchEventDelete
+	case event.Op&fsnotify.Rename == fsnotify.Rename:
+		we.Type = WatchEventRename
+	default:
+		return nil
+	}
+
+	return we
 }
