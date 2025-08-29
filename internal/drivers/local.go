@@ -1032,7 +1032,7 @@ func (d *LocalDriver) Watch(ctx context.Context, prefix string) (<-chan WatchEve
 		watchPath = filepath.Join(d.basePath, prefix)
 	}
 
-	err = filepath.Walk(watchPath, func(path string, info os.FileInfo, err error) error {
+	if err = filepath.Walk(watchPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -1043,7 +1043,9 @@ func (d *LocalDriver) Watch(ctx context.Context, prefix string) (<-chan WatchEve
 			d.logger.Debug("watching directory", zap.String("path", path))
 		}
 		return nil
-	})
+	}); err != nil {
+		return nil, nil, fmt.Errorf("walk directory: %w", err)
+	}
 
 	go d.processWatchEvents(ctx, watcher, events, errors, prefix)
 	return events, errors, nil
@@ -1092,7 +1094,9 @@ func (d *LocalDriver) processWatchEvents(
 
 			if event.Op&fsnotify.Create == fsnotify.Create {
 				if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
-					watcher.Add(event.Name)
+					if err := watcher.Add(event.Name); err != nil {
+						d.logger.Error("failed to add new dir", zap.String("path", event.Name), zap.Error(err))
+					}
 					d.logger.Debug("added new directory to watcher",
 						zap.String("path", event.Name))
 				}
