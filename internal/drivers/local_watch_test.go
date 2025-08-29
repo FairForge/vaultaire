@@ -17,20 +17,20 @@ func TestLocalDriver_WatchForChanges(t *testing.T) {
 		tmpDir := t.TempDir()
 		logger := zap.NewNop()
 		driver := NewLocalDriver(tmpDir, logger)
-		
+
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		
+
 		events, errors, err := driver.Watch(ctx, "")
 		require.NoError(t, err)
-		
+
 		// Create file after watching starts
 		testFile := filepath.Join(tmpDir, "test.txt")
 		time.Sleep(100 * time.Millisecond)
-		
+
 		err = os.WriteFile(testFile, []byte("hello"), 0644)
 		require.NoError(t, err)
-		
+
 		// Should receive create event
 		select {
 		case event := <-events:
@@ -43,21 +43,21 @@ func TestLocalDriver_WatchForChanges(t *testing.T) {
 			t.Fatal("timeout waiting for create event")
 		}
 	})
-	
+
 	t.Run("handles context cancellation", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		logger := zap.NewNop()
 		driver := NewLocalDriver(tmpDir, logger)
-		
+
 		ctx, cancel := context.WithCancel(context.Background())
-		
+
 		events, errors, err := driver.Watch(ctx, "")
 		require.NoError(t, err)
-		
+
 		// Cancel context
 		time.Sleep(100 * time.Millisecond)
 		cancel()
-		
+
 		// Channels should close
 		select {
 		case _, ok := <-events:
@@ -74,19 +74,19 @@ func TestLocalDriver_WatchExtended(t *testing.T) {
 	t.Run("detects file changes", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		driver := NewLocalDriver(tmpDir, zap.NewNop())
-		
+
 		testFile := filepath.Join(tmpDir, "modify.txt")
 		require.NoError(t, os.WriteFile(testFile, []byte("initial"), 0644))
-		
+
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		
+
 		events, errors, err := driver.Watch(ctx, "")
 		require.NoError(t, err)
-		
+
 		time.Sleep(100 * time.Millisecond)
 		require.NoError(t, os.WriteFile(testFile, []byte("modified"), 0644))
-		
+
 		select {
 		case event := <-events:
 			// macOS may report as Create or Modify
@@ -98,23 +98,23 @@ func TestLocalDriver_WatchExtended(t *testing.T) {
 			t.Fatal("timeout waiting for modify event")
 		}
 	})
-	
+
 	t.Run("detects file deletion", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		driver := NewLocalDriver(tmpDir, zap.NewNop())
-		
+
 		testFile := filepath.Join(tmpDir, "delete.txt")
 		require.NoError(t, os.WriteFile(testFile, []byte("will delete"), 0644))
-		
+
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		
+
 		events, errors, err := driver.Watch(ctx, "")
 		require.NoError(t, err)
-		
+
 		time.Sleep(100 * time.Millisecond)
 		require.NoError(t, os.Remove(testFile))
-		
+
 		select {
 		case event := <-events:
 			// Should be delete or rename (macOS sometimes reports as rename)
