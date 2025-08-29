@@ -1045,11 +1045,6 @@ func (d *LocalDriver) Watch(ctx context.Context, prefix string) (<-chan WatchEve
 		return nil
 	})
 
-	if err != nil {
-		watcher.Close()
-		return nil, nil, fmt.Errorf("walk directory tree: %w", err)
-	}
-
 	go d.processWatchEvents(ctx, watcher, events, errors, prefix)
 	return events, errors, nil
 }
@@ -1063,7 +1058,11 @@ func (d *LocalDriver) processWatchEvents(
 ) {
 	defer close(events)
 	defer close(errors)
-	defer watcher.Close()
+	defer func() {
+		if err := watcher.Close(); err != nil {
+			d.logger.Error("failed to close watcher", zap.Error(err))
+		}
+	}()
 
 	for {
 		select {
@@ -1085,6 +1084,10 @@ func (d *LocalDriver) processWatchEvents(
 				case <-ctx.Done():
 					return
 				}
+			}
+
+			if err := watcher.Add(event.Name); err != nil {
+				d.logger.Error("failed to add directory", zap.String("path", event.Name), zap.Error(err))
 			}
 
 			if event.Op&fsnotify.Create == fsnotify.Create {
