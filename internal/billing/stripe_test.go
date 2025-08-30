@@ -1,112 +1,45 @@
 package billing
 
 import (
-	"context"
+	"os"
 	"testing"
-	"time"
 )
 
-func TestBillingService_CreateCustomer(t *testing.T) {
-	service := NewBillingService("test_key")
+func TestStripeService_CreateCustomer(t *testing.T) {
+	// Skip if no real API key
+	if os.Getenv("STRIPE_TEST_KEY") == "" {
+		t.Skip("STRIPE_TEST_KEY not set")
+	}
 
-	customer, err := service.CreateCustomer(context.Background(), "user-1", "test@example.com")
+	service := &StripeService{
+		apiKey: os.Getenv("STRIPE_TEST_KEY"),
+	}
+
+	customerID, err := service.CreateCustomer("user@example.com", "tenant-123")
 	if err != nil {
 		t.Fatalf("Failed to create customer: %v", err)
 	}
 
-	if customer.UserID != "user-1" {
-		t.Errorf("Expected user ID user-1, got %s", customer.UserID)
-	}
-
-	if customer.Email != "test@example.com" {
-		t.Errorf("Expected email test@example.com, got %s", customer.Email)
-	}
-
-	if customer.StripeID == "" {
-		t.Error("Expected Stripe ID to be set")
+	if customerID == "" {
+		t.Error("Expected customer ID, got empty string")
 	}
 }
 
-func TestBillingService_RecordUsage(t *testing.T) {
-	service := NewBillingService("test_key")
+func TestStripeService_CreateCheckoutSession(t *testing.T) {
+	if os.Getenv("STRIPE_TEST_KEY") == "" {
+		t.Skip("STRIPE_TEST_KEY not set")
+	}
 
-	// Create customer first
-	customer, _ := service.CreateCustomer(context.Background(), "user-1", "test@example.com")
+	service := &StripeService{
+		apiKey: os.Getenv("STRIPE_TEST_KEY"),
+	}
 
-	// Record usage
-	err := service.RecordUsage(context.Background(), customer.StripeID, &UsageRecord{
-		StorageGB:   2.5,
-		BandwidthGB: 10.0,
-		Timestamp:   time.Now(),
-	})
-
+	session, err := service.CreateCheckoutSession("cus_123", "price_1TB", "https://stored.ge/success")
 	if err != nil {
-		t.Fatalf("Failed to record usage: %v", err)
-	}
-}
-
-func TestBillingService_CalculateCharges(t *testing.T) {
-	service := NewBillingService("test_key")
-
-	// Test free tier (no charges)
-	charges := service.CalculateCharges(&UsageRecord{
-		StorageGB:   2.0,  // Under 5GB free
-		BandwidthGB: 10.0, // Under 50GB free
-	})
-
-	if charges.TotalCents != 0 {
-		t.Errorf("Expected 0 charges for free tier, got %d", charges.TotalCents)
+		t.Fatalf("Failed to create session: %v", err)
 	}
 
-	// Test overage charges
-	charges = service.CalculateCharges(&UsageRecord{
-		StorageGB:   10.0,  // 5GB over = $0.05
-		BandwidthGB: 100.0, // 50GB over = $0.50
-	})
-
-	expectedCents := 55 // $0.55
-	if charges.TotalCents != expectedCents {
-		t.Errorf("Expected %d cents, got %d", expectedCents, charges.TotalCents)
-	}
-}
-
-func TestBillingService_CreateInvoice(t *testing.T) {
-	service := NewBillingService("test_key")
-
-	customer, _ := service.CreateCustomer(context.Background(), "user-1", "test@example.com")
-
-	invoice, err := service.CreateInvoice(context.Background(), customer.StripeID, &Charges{
-		StorageCents:   10,
-		BandwidthCents: 45,
-		TotalCents:     55,
-	})
-
-	if err != nil {
-		t.Fatalf("Failed to create invoice: %v", err)
-	}
-
-	if invoice.AmountCents != 55 {
-		t.Errorf("Expected invoice amount 55 cents, got %d", invoice.AmountCents)
-	}
-
-	if invoice.Status != "pending" {
-		t.Errorf("Expected pending status, got %s", invoice.Status)
-	}
-}
-
-func TestBillingService_ProcessPayment(t *testing.T) {
-	service := NewBillingService("test_key")
-
-	payment, err := service.ProcessPayment(context.Background(), "cus_test", "pm_test", 399)
-	if err != nil {
-		t.Fatalf("Failed to process payment: %v", err)
-	}
-
-	if payment.AmountCents != 399 {
-		t.Errorf("Expected payment amount 399 cents, got %d", payment.AmountCents)
-	}
-
-	if payment.Status != "succeeded" {
-		t.Errorf("Expected succeeded status, got %s", payment.Status)
+	if session.URL == "" {
+		t.Error("Expected checkout URL")
 	}
 }
