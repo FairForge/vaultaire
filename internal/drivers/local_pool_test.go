@@ -76,7 +76,7 @@ func TestLocalDriver_ParallelReads_ShowsProblem(t *testing.T) {
 				t.Errorf("Worker %d failed: %v", id, err)
 				return
 			}
-			defer reader.Close()
+			defer func() { _ = reader.Close() }()
 
 			// Simulate some work
 			mustCopy(io.Discard, reader)
@@ -198,14 +198,14 @@ func BenchmarkLocalDriver_ConcurrentReads(b *testing.B) {
 
 	// Setup test data
 	testData := bytes.Repeat([]byte("benchmark"), 1024*10) // 80KB
-	driver.Put(ctx, "bench", "test.dat", bytes.NewReader(testData))
+	_ = driver.Put(ctx, "bench", "test.dat", bytes.NewReader(testData))
 
 	b.Run("WithoutPool", func(b *testing.B) {
 		b.RunParallel(func(pb *testing.PB) {
 			for pb.Next() {
 				reader, _ := driver.Get(ctx, "bench", "test.dat")
 				mustCopy(io.Discard, reader)
-				reader.Close()
+				_ = reader.Close()
 			}
 		})
 	})

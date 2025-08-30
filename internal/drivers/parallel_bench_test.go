@@ -22,7 +22,7 @@ func BenchmarkParallelVsSequential(b *testing.B) {
 			b.SetBytes(int64(size))
 			for i := 0; i < b.N; i++ {
 				buf := make([]byte, size)
-				reader.ReadAt(buf, 0)
+				_, _ = reader.ReadAt(buf, 0)
 			}
 		})
 
@@ -30,7 +30,7 @@ func BenchmarkParallelVsSequential(b *testing.B) {
 			b.SetBytes(int64(size))
 			for i := 0; i < b.N; i++ {
 				cr := NewChunkReader(reader, int64(size))
-				cr.ReadParallel(context.Background())
+				_, _ = cr.ReadParallel(context.Background())
 			}
 		})
 	}

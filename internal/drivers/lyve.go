@@ -42,7 +42,7 @@ func NewLyveDriver(accessKey, secretKey, tenantID, region string, logger *zap.Lo
 		config.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(accessKey, secretKey, ""),
 		),
-		config.WithRegion(region),
+		// nolint:staticcheck // AWS SDK v1 compatibility		config.WithRegion(region),
 		config.WithEndpointResolverWithOptions(aws.EndpointResolverWithOptionsFunc(
 			func(service, region string, options ...interface{}) (aws.Endpoint, error) {
 				return aws.Endpoint{

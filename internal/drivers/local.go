@@ -1142,3 +1142,64 @@ func (d *LocalDriver) convertEvent(event fsnotify.Event, prefix string) *WatchEv
 
 	return we
 }
+
+// Copy copies a file preserving permissions
+func (d *LocalDriver) Copy(ctx context.Context, srcContainer, srcArtifact, dstContainer, dstArtifact string) error {
+	perm, err := d.GetPermissions(ctx, srcContainer, srcArtifact)
+	if err != nil {
+		return fmt.Errorf("get source permissions: %w", err)
+	}
+
+	reader, err := d.Get(ctx, srcContainer, srcArtifact)
+	if err != nil {
+		return fmt.Errorf("read source: %w", err)
+	}
+	defer func() { _ = reader.Close() }()
+
+	err = d.Put(ctx, dstContainer, dstArtifact, reader)
+	if err != nil {
+		return fmt.Errorf("write destination: %w", err)
+	}
+
+	return d.SetPermissions(ctx, dstContainer, dstArtifact, perm)
+}
+
+// FileLock represents a file lock
+type FileLock struct {
+	file *os.File
+	path string
+}
+
+// LockType for file locking
+type LockType int
+
+const (
+	LockShared LockType = iota
+	LockExclusive
+)
+
+// WriteAt writes data at a specific offset
+func (d *LocalDriver) WriteAt(ctx context.Context, container, artifact string, data []byte, offset int64) error {
+	fullPath := filepath.Join(d.basePath, container, artifact)
+
+	file, err := os.OpenFile(fullPath, os.O_RDWR, 0666)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = file.Close() }()
+
+	_, err = file.WriteAt(data, offset)
+	return err
+}
+
+// HoleInfo represents a hole in a sparse file
+type HoleInfo struct {
+	Offset int64
+	Length int64
+}
+
+// FileInfoExtended includes block allocation info
+type FileInfoExtended struct {
+	Size            int64
+	BlocksAllocated int64
+}
