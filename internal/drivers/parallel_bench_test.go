@@ -4,36 +4,34 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"go.uber.org/zap"
 	"testing"
 )
 
-func BenchmarkParallelWorkers(b *testing.B) {
-	driver := NewLocalDriver(b.TempDir(), zap.NewNop())
-	ctx := context.Background()
-
-	// Smaller files, more of them - better for parallelism
-	fileCount := 1000
-	fileSize := 10 * 1024 // 10KB each
-
-	operations := make([]PutOperation, fileCount)
-	for i := 0; i < fileCount; i++ {
-		data := make([]byte, fileSize)
-		operations[i] = PutOperation{
-			Container: "bench",
-			Artifact:  fmt.Sprintf("file-%d.dat", i),
-			Data:      bytes.NewReader(data),
-		}
+func BenchmarkParallelVsSequential(b *testing.B) {
+	sizes := []int{
+		1 * 1024 * 1024,   // 1MB
+		10 * 1024 * 1024,  // 10MB
+		100 * 1024 * 1024, // 100MB
 	}
 
-	for _, workers := range []int{1, 2, 4, 8, 16, 32} {
-		b.Run(fmt.Sprintf("Workers-%d", workers), func(b *testing.B) {
-			parallel := NewParallelDriver(driver, workers, zap.NewNop())
-			b.ResetTimer()
-			for n := 0; n < b.N; n++ {
-				parallel.ParallelPut(ctx, operations)
+	for _, size := range sizes {
+		data := bytes.Repeat([]byte("x"), size)
+		reader := bytes.NewReader(data)
+
+		b.Run(fmt.Sprintf("Sequential_%dMB", size/1024/1024), func(b *testing.B) {
+			b.SetBytes(int64(size))
+			for i := 0; i < b.N; i++ {
+				buf := make([]byte, size)
+				reader.ReadAt(buf, 0)
 			}
-			b.SetBytes(int64(fileCount * fileSize))
+		})
+
+		b.Run(fmt.Sprintf("Parallel_%dMB", size/1024/1024), func(b *testing.B) {
+			b.SetBytes(int64(size))
+			for i := 0; i < b.N; i++ {
+				cr := NewChunkReader(reader, int64(size))
+				cr.ReadParallel(context.Background())
+			}
 		})
 	}
 }
