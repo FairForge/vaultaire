@@ -294,10 +294,10 @@ func TestLocalDriver_DirectoryTraversal(t *testing.T) {
 	ctx := context.Background()
 
 	// Setup test structure
-	driver.Put(ctx, "container", "file1.txt", strings.NewReader("root"))
-	driver.Put(ctx, "container", "dir1/file2.txt", strings.NewReader("level1"))
-	driver.Put(ctx, "container", "dir1/dir2/file3.txt", strings.NewReader("level2"))
-	driver.Put(ctx, "container", "dir1/dir2/dir3/file4.txt", strings.NewReader("level3"))
+	_ = driver.Put(ctx, "container", "file1.txt", strings.NewReader("root"))
+	_ = driver.Put(ctx, "container", "dir1/file2.txt", strings.NewReader("level1"))
+	_ = driver.Put(ctx, "container", "dir1/dir2/file3.txt", strings.NewReader("level2"))
+	_ = driver.Put(ctx, "container", "dir1/dir2/dir3/file4.txt", strings.NewReader("level3"))
 
 	t.Run("WalkDirectory", func(t *testing.T) {
 		var files []string
@@ -327,10 +327,10 @@ func TestLocalDriver_DirectoryIndexing(t *testing.T) {
 	ctx := context.Background()
 
 	// Create test structure
-	driver.Put(ctx, "container", "docs/readme.txt", strings.NewReader("readme"))
-	driver.Put(ctx, "container", "docs/guide.pdf", strings.NewReader("guide"))
-	driver.Put(ctx, "container", "images/photo1.jpg", strings.NewReader("photo1"))
-	driver.Put(ctx, "container", "images/photo2.png", strings.NewReader("photo2"))
+	_ = driver.Put(ctx, "container", "docs/readme.txt", strings.NewReader("readme"))
+	_ = driver.Put(ctx, "container", "docs/guide.pdf", strings.NewReader("guide"))
+	_ = driver.Put(ctx, "container", "images/photo1.jpg", strings.NewReader("photo1"))
+	_ = driver.Put(ctx, "container", "images/photo2.png", strings.NewReader("photo2"))
 
 	t.Run("IndexDirectory", func(t *testing.T) {
 		index, err := driver.IndexDirectory(ctx, "container", "")
@@ -362,8 +362,8 @@ func TestLocalDriver_DirectorySync(t *testing.T) {
 
 	t.Run("SyncDirectories", func(t *testing.T) {
 		// Create source structure
-		driver.Put(ctx, "source", "file1.txt", strings.NewReader("content1"))
-		driver.Put(ctx, "source", "dir1/file2.txt", strings.NewReader("content2"))
+		_ = driver.Put(ctx, "source", "file1.txt", strings.NewReader("content1"))
+		_ = driver.Put(ctx, "source", "dir1/file2.txt", strings.NewReader("content2"))
 
 		// Sync to destination
 		err := driver.SyncDirectory(ctx, "source", "", "dest", "")
@@ -378,7 +378,7 @@ func TestLocalDriver_DirectorySync(t *testing.T) {
 
 		reader, err = driver.Get(ctx, "dest", "dir1/file2.txt")
 		require.NoError(t, err)
-		reader.Close()
+		_ = reader.Close()
 	})
 
 	t.Run("CompareDirectories", func(t *testing.T) {
@@ -390,7 +390,7 @@ func TestLocalDriver_DirectorySync(t *testing.T) {
 		assert.Empty(t, diff.Deleted)
 
 		// Add file to dest
-		driver.Put(ctx, "dest", "extra.txt", strings.NewReader("extra"))
+		_ = driver.Put(ctx, "dest", "extra.txt", strings.NewReader("extra"))
 
 		// Compare again
 		diff, err = driver.CompareDirectories(ctx, "source", "", "dest", "")
@@ -407,7 +407,7 @@ func TestLocalDriver_DirectoryMonitoring(t *testing.T) {
 
 	t.Run("GetDirectoryModTime", func(t *testing.T) {
 		// Create directory with files
-		driver.Put(ctx, "container", "testdir/file1.txt", strings.NewReader("content"))
+		_ = driver.Put(ctx, "container", "testdir/file1.txt", strings.NewReader("content"))
 		// Get directory modification time
 		modTime, err := driver.GetDirectoryModTime(ctx, "container", "testdir")
 		require.NoError(t, err)
@@ -415,7 +415,7 @@ func TestLocalDriver_DirectoryMonitoring(t *testing.T) {
 
 		// Sleep briefly then add new file
 		time.Sleep(10 * time.Millisecond)
-		driver.Put(ctx, "container", "testdir/file2.txt", strings.NewReader("new"))
+		_ = driver.Put(ctx, "container", "testdir/file2.txt", strings.NewReader("new"))
 
 		// Mod time should be newer
 		newModTime, err := driver.GetDirectoryModTime(ctx, "container", "testdir")
@@ -429,7 +429,7 @@ func TestLocalDriver_DirectoryMonitoring(t *testing.T) {
 
 		// Add file after timestamp
 		time.Sleep(10 * time.Millisecond)
-		driver.Put(ctx, "container", "testdir/file3.txt", strings.NewReader("newer"))
+		_ = driver.Put(ctx, "container", "testdir/file3.txt", strings.NewReader("newer"))
 
 		// Check if changed
 		changed, err := driver.HasDirectoryChanged(ctx, "container", "testdir", since)
@@ -453,7 +453,7 @@ func TestLocalDriver_AtomicOperations(t *testing.T) {
 		reader, err := driver.Get(ctx, "container", "atomic.txt")
 		require.NoError(t, err)
 		content, _ := io.ReadAll(reader)
-		reader.Close()
+		_ = reader.Close()
 		assert.Equal(t, "atomic content", string(content))
 	})
 }
@@ -479,7 +479,7 @@ func TestLocalDriver_Transactions(t *testing.T) {
 
 		reader, err := driver.Get(ctx, "container", "tx-file1.txt")
 		require.NoError(t, err)
-		reader.Close()
+		_ = reader.Close()
 	})
 
 	t.Run("TransactionRollback", func(t *testing.T) {

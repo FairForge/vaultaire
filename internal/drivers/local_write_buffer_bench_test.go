@@ -30,7 +30,7 @@ func BenchmarkLocalDriver_MultipleWrites(b *testing.B) {
 			}
 
 			// Single write to disk
-			driver.Put(ctx, "bench", filename, &buf)
+			_ = driver.Put(ctx, "bench", filename, &buf)
 		}
 	})
 
@@ -43,7 +43,7 @@ func BenchmarkLocalDriver_MultipleWrites(b *testing.B) {
 			writer, _ := driver.PutBuffered(ctx, "bench", filename)
 			// Write 100 small chunks - buffering reduces syscalls
 			for j := 0; j < 100; j++ {
-				mustWrite(writer, smallData)
+				_, _ = mustWrite(writer, smallData)
 			}
 			mustClose(writer)
 		}

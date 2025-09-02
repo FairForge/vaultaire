@@ -76,7 +76,7 @@ func TestLocalDriver_CompleteMultipartUpload(t *testing.T) {
 	if err != nil {
 		t.Fatal("completed file should exist")
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 }
 
 func TestLocalDriver_MultipartUpload_VerifyContent(t *testing.T) {
@@ -107,7 +107,7 @@ func TestLocalDriver_MultipartUpload_VerifyContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	content, err := io.ReadAll(reader)
 	if err != nil {
