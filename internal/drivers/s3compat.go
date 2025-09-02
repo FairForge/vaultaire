@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"path"
 
+	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -78,7 +79,7 @@ func (d *S3CompatDriver) Get(ctx context.Context, container, artifact string) (i
 }
 
 // Put stores an artifact
-func (d *S3CompatDriver) Put(ctx context.Context, container, artifact string, data io.Reader) error {
+func (d *S3CompatDriver) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...engine.PutOption) error {
 	key := d.buildKey(container, artifact)
 
 	_, err := d.client.PutObject(ctx, &s3.PutObjectInput{

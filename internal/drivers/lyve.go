@@ -3,7 +3,6 @@ package drivers
 import (
 	"context"
 	"fmt"
-	"io"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -42,7 +41,7 @@ func NewLyveDriver(accessKey, secretKey, tenantID, region string, logger *zap.Lo
 		config.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(accessKey, secretKey, ""),
 		),
-		// nolint:staticcheck // AWS SDK v1 compatibility		config.WithRegion(region),
+		config.WithRegion(region),
 		config.WithEndpointResolverWithOptions(aws.EndpointResolverWithOptionsFunc(
 			func(service, region string, options ...interface{}) (aws.Endpoint, error) {
 				return aws.Endpoint{
@@ -62,52 +61,4 @@ func NewLyveDriver(accessKey, secretKey, tenantID, region string, logger *zap.Lo
 		region:   region,
 		logger:   logger,
 	}, nil
-}
-
-func (d *LyveDriver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
-	key := d.buildTenantKey(fmt.Sprintf("%s/%s", container, artifact))
-	result, err := d.client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(d.getBucket()),
-		Key:    aws.String(key),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("get object: %w", err)
-	}
-	return result.Body, nil
-}
-
-func (d *LyveDriver) Put(ctx context.Context, container, artifact string, data io.Reader) error {
-	key := d.buildTenantKey(fmt.Sprintf("%s/%s", container, artifact))
-	_, err := d.client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(d.getBucket()),
-		Key:    aws.String(key),
-		Body:   data,
-	})
-	return err
-}
-
-func (d *LyveDriver) Delete(ctx context.Context, container, artifact string) error {
-	key := d.buildTenantKey(fmt.Sprintf("%s/%s", container, artifact))
-	_, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(d.getBucket()),
-		Key:    aws.String(key),
-	})
-	return err
-}
-
-func (d *LyveDriver) List(ctx context.Context, container, prefix string) ([]string, error) {
-	fullPrefix := d.buildTenantKey(fmt.Sprintf("%s/%s", container, prefix))
-	result, err := d.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket: aws.String(d.getBucket()),
-		Prefix: aws.String(fullPrefix),
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	var artifacts []string
-	for _, obj := range result.Contents {
-		artifacts = append(artifacts, *obj.Key)
-	}
-	return artifacts, nil
 }

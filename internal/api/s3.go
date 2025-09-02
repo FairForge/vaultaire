@@ -285,6 +285,10 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		s.handleListObjects(w, r, s3Req)
 	case "ListBuckets":
 		s.handleListBuckets(w, r, s3Req)
+	case "CreateBucket":
+		s.CreateBucket(w, r)
+	case "DeleteBucket":
+		s.DeleteBucket(w, r)
 	default:
 		s.logger.Warn("operation not implemented",
 			zap.String("operation", s3Req.Operation))
@@ -345,7 +349,7 @@ func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request, req *
 	adapter.HandleList(w, r, req.Bucket, "") // Empty prefix for now
 }
 
-// handleListBuckets handles listing all buckets (not implemented yet)
+// handleListBuckets handles listing all buckets
 func (s *Server) handleListBuckets(w http.ResponseWriter, r *http.Request, req *S3Request) {
-	WriteS3Error(w, ErrNotImplemented, r.URL.Path, generateRequestID())
+	s.ListBuckets(w, r)
 }
