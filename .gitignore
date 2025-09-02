@@ -61,3 +61,5 @@ vaultaire
 .idea/
 *.swp
 *.swo
+.env
+.env.production

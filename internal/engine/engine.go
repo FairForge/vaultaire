@@ -102,7 +102,7 @@ func (e *CoreEngine) Get(ctx context.Context, container, artifact string) (io.Re
 }
 
 // Put stores an artifact (S3 PutObject)
-func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data io.Reader) error {
+func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...PutOption) error {
 	start := time.Now()
 
 	// Log for ML training
@@ -118,7 +118,7 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 
 	// Store to primary
 	if driver, ok := e.drivers[e.primary]; ok {
-		if err := driver.Put(ctx, container, artifact, data); err != nil {
+		if err := driver.Put(ctx, container, artifact, data, opts...); err != nil {
 			return fmt.Errorf("failed to store to primary driver: %w", err)
 		}
 	}

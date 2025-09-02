@@ -9,7 +9,7 @@ import (
 type Engine interface {
 	// Storage operations (visible to users)
 	Get(ctx context.Context, container, artifact string) (io.ReadCloser, error)
-	Put(ctx context.Context, container, artifact string, data io.Reader) error
+	Put(ctx context.Context, container, artifact string, data io.Reader, opts ...PutOption) error
 	Delete(ctx context.Context, container, artifact string) error
 	List(ctx context.Context, container, prefix string) ([]Artifact, error)
 
@@ -32,7 +32,7 @@ type Engine interface {
 type Driver interface {
 	Name() string
 	Get(ctx context.Context, container, artifact string) (io.ReadCloser, error)
-	Put(ctx context.Context, container, artifact string, data io.Reader) error
+	Put(ctx context.Context, container, artifact string, data io.Reader, opts ...PutOption) error
 	Delete(ctx context.Context, container, artifact string) error
 	List(ctx context.Context, container, prefix string) ([]string, error)
 	HealthCheck(ctx context.Context) error
@@ -56,4 +56,30 @@ type MLEngine interface {
 	LoadModel(path string) error
 	Train(data [][]float64, labels []float64) error
 	Predict(input []float64) (float64, error)
+}
+
+// PutOption is a function that configures Put operations
+type PutOption func(*PutOptions)
+
+// PutOptions holds options for Put operations
+type PutOptions struct {
+	ContentType     string
+	CacheControl    string
+	ContentEncoding string
+	ContentLanguage string
+	UserMetadata    map[string]string
+}
+
+// WithContentType sets the content type
+func WithContentType(ct string) PutOption {
+	return func(o *PutOptions) {
+		o.ContentType = ct
+	}
+}
+
+// WithUserMetadata sets user metadata
+func WithUserMetadata(meta map[string]string) PutOption {
+	return func(o *PutOptions) {
+		o.UserMetadata = meta
+	}
 }
