@@ -1,6 +1,7 @@
 package drivers
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -56,14 +57,23 @@ func NewS3Driver(endpoint, accessKey, secretKey, region string, logger *zap.Logg
 
 // Put stores data in S3
 func (d *S3Driver) Put(ctx context.Context, container, artifact string, data io.Reader) error {
-	_, err := d.client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(container),
-		Key:    aws.String(artifact),
-		Body:   data,
+	// Buffer the data to get its size
+	buf, err := io.ReadAll(data)
+	if err != nil {
+		return fmt.Errorf("read data: %w", err)
+	}
+
+	_, err = d.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:        aws.String(container),
+		Key:           aws.String(artifact),
+		Body:          bytes.NewReader(buf),
+		ContentLength: aws.Int64(int64(len(buf))),
 	})
+
 	if err != nil {
 		return fmt.Errorf("put object %s/%s: %w", container, artifact, err)
 	}
+
 	return nil
 }
 
