@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/fsnotify/fsnotify"
 	"go.uber.org/zap"
 )
@@ -80,7 +81,13 @@ func (d *LocalDriver) Get(ctx context.Context, container, artifact string) (io.R
 }
 
 // Put stores an artifact in a container
-func (d *LocalDriver) Put(ctx context.Context, container, artifact string, data io.Reader) error {
+func (d *LocalDriver) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...engine.PutOption) error {
+	// Apply options (but don't use them yet)
+	var options engine.PutOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
+
 	containerPath := filepath.Join(d.basePath, container)
 	if err := os.MkdirAll(containerPath, 0750); err != nil {
 		return fmt.Errorf("create container: %w", err)
@@ -101,18 +108,12 @@ func (d *LocalDriver) Put(ctx context.Context, container, artifact string, data 
 	if err != nil {
 		return fmt.Errorf("create file: %w", err)
 	}
+	defer file.Close()
 
-	defer func() {
-		if err := file.Close(); err != nil {
-			d.logger.Error("failed to close file",
-				zap.String("path", fullPath),
-				zap.Error(err))
-		}
-	}()
-
+	// Copy data
 	_, err = io.Copy(file, data)
 	if err != nil {
-		return fmt.Errorf("failed to copy data: %w", err)
+		return fmt.Errorf("write data: %w", err)
 	}
 
 	return nil
@@ -135,7 +136,9 @@ func (d *LocalDriver) List(ctx context.Context, container, prefix string) ([]str
 		}
 		if !info.IsDir() {
 			if rel, err := filepath.Rel(containerPath, path); err == nil {
-				artifacts = append(artifacts, rel)
+				if !strings.HasSuffix(rel, ".meta") {
+					artifacts = append(artifacts, rel)
+				}
 			}
 		}
 		return nil
