@@ -5,7 +5,6 @@ package drivers
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
