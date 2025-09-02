@@ -63,3 +63,4 @@ vaultaire
 *.swo
 .env
 .env.production
+.private/

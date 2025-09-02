@@ -34,12 +34,17 @@ func TestStripeService_CreateCheckoutSession(t *testing.T) {
 		apiKey: os.Getenv("STRIPE_TEST_KEY"),
 	}
 
-	session, err := service.CreateCheckoutSession("cus_123", "price_1TB", "https://stored.ge/success")
+	// Define the missing variables
+	customerID := "cus_test123"
+	successURL := "https://stored.ge/success"
+	cancelURL := "https://stored.ge/cancel"
+
+	sessionURL, err := service.CreateCheckoutSession(customerID, successURL, cancelURL)
 	if err != nil {
-		t.Fatalf("Failed to create session: %v", err)
+		t.Fatalf("Failed to create checkout session: %v", err)
 	}
 
-	if session.URL == "" {
+	if sessionURL == "" {
 		t.Error("Expected checkout URL")
 	}
 }
