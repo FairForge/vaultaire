@@ -68,13 +68,29 @@ func main() {
 			logger.Fatal("S3_ACCESS_KEY and S3_SECRET_KEY required for s3 mode")
 		}
 
-		s3Driver, err := drivers.NewS3CompatDriver(accessKey, secretKey, logger)
+		s3CompatDriver, err := drivers.NewS3CompatDriver(accessKey, secretKey, logger)
 		if err != nil {
 			logger.Fatal("failed to create S3 driver", zap.Error(err))
 		}
-		eng.AddDriver("s3", s3Driver)
+		eng.AddDriver("s3", s3CompatDriver)
 		eng.SetPrimary("s3")
 		logger.Info("using S3-compatible storage")
+
+	case "quotaless":
+		// Quotaless driver for production
+		accessKey := os.Getenv("QUOTALESS_ACCESS_KEY")
+		secretKey := os.Getenv("QUOTALESS_SECRET_KEY")
+		if accessKey == "" || secretKey == "" {
+			logger.Fatal("QUOTALESS_ACCESS_KEY and QUOTALESS_SECRET_KEY required for quotaless mode")
+		}
+
+		quotalessDriver, err := drivers.NewQuotalessDriver(accessKey, secretKey, logger)
+		if err != nil {
+			logger.Fatal("failed to create Quotaless driver", zap.Error(err))
+		}
+		eng.AddDriver("quotaless", quotalessDriver)
+		eng.SetPrimary("quotaless")
+		logger.Info("using Quotaless storage")
 
 	default:
 		logger.Fatal("invalid STORAGE_MODE", zap.String("mode", storageMode))
