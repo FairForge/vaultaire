@@ -57,7 +57,7 @@ func (w *WebhookDispatcher) Dispatch(ctx context.Context, event WatchEvent) erro
 			}
 			req.Header.Set("Content-Type", "application/json")
 
-			w.client.Do(req)
+			_, _ = w.client.Do(req)
 		}(url)
 	}
 

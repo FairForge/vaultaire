@@ -80,8 +80,8 @@ func main() {
 		logger.Fatal("invalid STORAGE_MODE", zap.String("mode", storageMode))
 	}
 
-	// Create server - pass nil for db since it's not used yet
-	server := api.NewServer(cfg, logger, nil)
+	// Create server with engine
+	server := api.NewServer(cfg, logger, eng)
 
 	// Handle shutdown gracefully
 	go func() {

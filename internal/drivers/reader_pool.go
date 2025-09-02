@@ -50,7 +50,7 @@ func (p *ReaderPool) Put(reader io.ReadCloser) {
 	select {
 	case p.pool <- reader:
 	default:
-		reader.Close()
+		_ = reader.Close()
 		p.mu.Lock()
 		p.active--
 		p.mu.Unlock()

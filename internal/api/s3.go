@@ -236,21 +236,22 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 
 	s3Req.TenantID = tenantID
 
-	// Create tenant object and add to context
-	if tenantID != "" {
-		t := &tenant.Tenant{
-			ID:                tenantID,
-			Namespace:         fmt.Sprintf("tenant/%s/", tenantID),
-			Plan:              "starter",
-			Status:            "active",
-			StorageQuota:      100 * 1024 * 1024 * 1024, // 100GB for MVP
-			RequestsPerSecond: 100,
-		}
-
-		// Add tenant to request context
-		ctx := tenant.WithTenant(r.Context(), t)
-		r = r.WithContext(ctx)
+	// Always create a tenant - use "default" for anonymous
+	if tenantID == "" {
+		tenantID = "default"
 	}
+
+	t := &tenant.Tenant{
+		ID:                tenantID,
+		Namespace:         fmt.Sprintf("tenant/%s/", tenantID),
+		Plan:              "starter",
+		Status:            "active",
+		StorageQuota:      100 * 1024 * 1024 * 1024,
+		RequestsPerSecond: 100,
+	}
+	// Add tenant to request context
+	ctx := tenant.WithTenant(r.Context(), t)
+	r = r.WithContext(ctx)
 
 	// Log event for ML training data collection
 	eventLogger := events.NewEventLogger(s.logger)

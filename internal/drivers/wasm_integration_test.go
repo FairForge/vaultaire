@@ -10,7 +10,7 @@ func TestWASMPlugin_ActualTransform(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to load plugin: %v", err)
 	}
-	defer plugin.Close()
+	defer func() { _ = plugin.Close() }()
 
 	testCases := []struct {
 		input    []byte

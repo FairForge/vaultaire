@@ -34,7 +34,7 @@ func (h *HistoryStore) GetHistory(ctx context.Context, tenantID, container, arti
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var records []ChangeRecord
 	for rows.Next() {

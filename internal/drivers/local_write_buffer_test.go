@@ -47,7 +47,7 @@ func TestLocalDriver_BufferedWrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	content, _ := io.ReadAll(reader)
 	expected := bytes.Repeat(data, 100)
@@ -80,7 +80,7 @@ func TestLocalDriver_ConcurrentBufferedWrites(t *testing.T) {
 			// Write incrementally
 			for j := 0; j < 10; j++ {
 				data := fmt.Sprintf("Worker %d line %d\n", id, j)
-				writer.Write([]byte(data))
+				_, _ = writer.Write([]byte(data))
 			}
 
 			// Close to flush
@@ -100,7 +100,7 @@ func TestLocalDriver_ConcurrentBufferedWrites(t *testing.T) {
 			t.Errorf("file %s missing: %v", filename, err)
 			continue
 		}
-		reader.Close()
+		_ = reader.Close()
 	}
 }
 
@@ -127,14 +127,14 @@ func TestLocalDriver_BufferAutoFlush(t *testing.T) {
 
 	// Should auto-flush when buffer fills
 	// Close to ensure final flush
-	writer.Close()
+	_ = writer.Close()
 
 	// Verify
 	reader, err := driver.Get(ctx, "autoflush", "large.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	content, _ := io.ReadAll(reader)
 	if len(content) != len(largeData) {
@@ -163,8 +163,8 @@ func BenchmarkLocalDriver_Writes(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			filename := fmt.Sprintf("buf-%d.txt", i)
 			writer, _ := driver.PutBuffered(ctx, "bench", filename)
-			writer.Write(smallData)
-			writer.Close()
+			_, _ = writer.Write(smallData)
+			_ = writer.Close()
 		}
 	})
 }
