@@ -92,6 +92,34 @@ func main() {
 		eng.SetPrimary("quotaless")
 		logger.Info("using Quotaless storage")
 
+		// Add this case to main.go's switch statement
+
+	case "lyve":
+		accessKey := os.Getenv("LYVE_ACCESS_KEY")
+		secretKey := os.Getenv("LYVE_SECRET_KEY")
+		region := os.Getenv("LYVE_REGION")
+		if region == "" {
+			region = "us-east-1"
+		}
+
+		if accessKey == "" || secretKey == "" {
+			logger.Fatal("LYVE_ACCESS_KEY and LYVE_SECRET_KEY required for lyve mode")
+		}
+
+		// For now, use a default tenant - in production this would come from auth
+		tenantID := "default"
+		if tid := os.Getenv("TENANT_ID"); tid != "" {
+			tenantID = tid
+		}
+
+		lyveDriver, err := drivers.NewLyveDriver(accessKey, secretKey, tenantID, region, logger)
+		if err != nil {
+			logger.Fatal("failed to create Lyve driver", zap.Error(err))
+		}
+		eng.AddDriver("lyve", lyveDriver)
+		eng.SetPrimary("lyve")
+		logger.Info("using Lyve Cloud storage", zap.String("region", region))
+
 	default:
 		logger.Fatal("invalid STORAGE_MODE", zap.String("mode", storageMode))
 	}
