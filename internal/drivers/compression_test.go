@@ -12,16 +12,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// Adapter to make LocalDriver compatible with Driver interface
-type driverAdapter struct {
-	*LocalDriver
-}
-
-func (d *driverAdapter) Put(ctx context.Context, container, artifact string, data io.Reader) error {
-	// Call LocalDriver.Put without options
-	return d.LocalDriver.Put(ctx, container, artifact, data)
-}
-
 func TestCompressionDriver(t *testing.T) {
 	t.Run("compresses and decompresses data", func(t *testing.T) {
 		// Arrange
