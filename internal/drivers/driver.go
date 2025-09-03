@@ -3,12 +3,14 @@ package drivers
 import (
 	"context"
 	"io"
+
+	"github.com/FairForge/vaultaire/internal/engine"
 )
 
 // Driver is the common interface all storage drivers must implement
 type Driver interface {
 	Get(ctx context.Context, container, artifact string) (io.ReadCloser, error)
-	Put(ctx context.Context, container, artifact string, data io.Reader) error
+	Put(ctx context.Context, container, artifact string, data io.Reader, opts ...engine.PutOption) error
 	Delete(ctx context.Context, container, artifact string) error
 	List(ctx context.Context, container string, prefix string) ([]string, error)
 	Exists(ctx context.Context, container, artifact string) (bool, error)
