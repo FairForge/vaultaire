@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/config"
+	"github.com/FairForge/vaultaire/internal/docs"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/gorilla/mux"
 	"go.uber.org/zap"
@@ -63,10 +64,14 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/metrics", s.handleMetrics).Methods("GET")
 	s.router.HandleFunc("/version", s.handleVersion).Methods("GET")
 
+	// API Documentation routes - call the functions to get the handlers
+	s.router.HandleFunc("/docs", docs.SwaggerUIHandler()).Methods("GET")
+	s.router.HandleFunc("/openapi.json", docs.OpenAPIJSONHandler()).Methods("GET")
+
 	s.router.Use(s.loggingMiddleware)
 
+	// S3 catch-all (MUST be last)
 	s.router.PathPrefix("/").HandlerFunc(s.handleS3Request)
-
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
