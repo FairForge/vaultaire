@@ -24,10 +24,10 @@ func TestVersioning(t *testing.T) {
 		// Arrange
 		vm := NewVersionManager()
 		vm.RegisterHandler("v1", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Write([]byte("API v1"))
+			_, _ = w.Write([]byte("API v1"))
 		}))
 		vm.RegisterHandler("v2", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Write([]byte("API v2"))
+			_, _ = w.Write([]byte("API v2"))
 		}))
 
 		// Test v1

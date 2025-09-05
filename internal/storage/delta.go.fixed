@@ -1,0 +1,13 @@
+// ... existing code up to line 45 ...
+    // Compress the XOR result (zeros compress well)
+    var buf bytes.Buffer
+    gz := gzip.NewWriter(&buf)
+    if _, err := gz.Write(xorData[:len(modified)]); err != nil {
+        return nil
+    }
+    if err := gz.Close(); err != nil {
+        return nil
+    }
+    
+    compressed := buf.Bytes()
+// ... rest of the file ...
