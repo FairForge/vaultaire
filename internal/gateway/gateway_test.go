@@ -40,7 +40,7 @@ func TestGateway(t *testing.T) {
 		gw := NewGateway()
 		gw.HandleFunc("/api/v1/*", func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("v1 response"))
+			_, _ = w.Write([]byte("v1 response"))
 		})
 
 		// Act
