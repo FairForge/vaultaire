@@ -34,21 +34,13 @@ func NewLyveDriver(accessKey, secretKey, tenantID, region string, logger *zap.Lo
 			credentials.NewStaticCredentialsProvider(accessKey, secretKey, ""),
 		),
 		config.WithRegion(region),
-		config.WithEndpointResolverWithOptions(aws.EndpointResolverWithOptionsFunc(
-			func(service, region string, options ...interface{}) (aws.Endpoint, error) {
-				return aws.Endpoint{
-					URL:           endpoint,
-					SigningRegion: region,
-				}, nil
-			},
-		)),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
 
 	return &LyveDriver{
-		client:   s3.NewFromConfig(cfg),
+		client:   s3.NewFromConfig(cfg, func(o *s3.Options) { o.BaseEndpoint = aws.String(endpoint); o.UsePathStyle = true }),
 		tenantID: tenantID,
 		region:   region,
 		logger:   logger,
