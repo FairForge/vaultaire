@@ -37,7 +37,7 @@ func NewAPIKeyManager() *APIKeyManager {
 func (m *APIKeyManager) GenerateKey(tenantID string, permissions []string) string {
 	// Generate random key
 	bytes := make([]byte, 32)
-	rand.Read(bytes)
+	_, _ = rand.Read(bytes)
 	key := "vlt_" + hex.EncodeToString(bytes)
 
 	// Store key
@@ -111,8 +111,8 @@ func (m *APIKeyManager) Middleware(next http.Handler) http.Handler {
 		}
 
 		// Add tenant to context
-		ctx := context.WithValue(r.Context(), "tenant", tenantID)
-		ctx = context.WithValue(ctx, "api_key", key)
+		ctx := context.WithValue(r.Context(), ContextKeyTenant, tenantID)
+		ctx = context.WithValue(ctx, ContextKeyAPIKey, key)
 
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
