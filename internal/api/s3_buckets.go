@@ -52,7 +52,9 @@ func (s *Server) ListBuckets(w http.ResponseWriter, r *http.Request) {
 			response.Owner.DisplayName = tenantID
 
 			w.Header().Set("Content-Type", "application/xml")
-			xml.NewEncoder(w).Encode(response)
+			if err := xml.NewEncoder(w).Encode(response); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 			return
 		}
 		s.logger.Error("Failed to list containers", zap.Error(err))
