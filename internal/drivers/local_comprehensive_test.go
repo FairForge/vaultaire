@@ -37,7 +37,7 @@ func TestLocalDriver_Statistics(t *testing.T) {
 	_ = driver.Put(ctx, "test", "file1", bytes.NewReader([]byte("test")))
 	reader, _ := driver.GetPooled(ctx, "test", "file1")
 	if reader != nil {
-		reader.Close()
+		_ = reader.Close()
 	}
 
 	stats := driver.GetPoolStats()
