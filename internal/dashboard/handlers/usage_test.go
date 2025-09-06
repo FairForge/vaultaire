@@ -8,14 +8,6 @@ import (
 	"testing"
 )
 
-type UsageStats struct {
-	StorageGB   float64 `json:"storage_gb"`
-	BandwidthGB float64 `json:"bandwidth_gb"`
-	Requests    int64   `json:"requests"`
-	Cost        float64 `json:"cost"`
-	Period      string  `json:"period"`
-}
-
 func TestUsageHandler(t *testing.T) {
 	t.Run("returns usage stats as JSON", func(t *testing.T) {
 		handler := NewUsageHandler(nil) // Will pass mock later
