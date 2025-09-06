@@ -30,7 +30,7 @@ func TestCompressionDriver(t *testing.T) {
 		// Get should decompress
 		reader, err := compressed.Get(ctx, "test", "file.txt")
 		require.NoError(t, err)
-		defer reader.Close()
+		defer func() { _ = reader.Close() }()
 
 		result, err := io.ReadAll(reader)
 		require.NoError(t, err)

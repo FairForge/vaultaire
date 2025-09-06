@@ -43,8 +43,8 @@ func (de *DeltaEncoder) CreateDelta(original, modified []byte) *Delta {
 	// Compress the XOR result (zeros compress well)
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
-	gz.Write(xorData[:len(modified)])
-	gz.Close()
+	_, _ = gz.Write(xorData[:len(modified)])
+	_ = gz.Close()
 
 	compressed := buf.Bytes()
 
@@ -74,7 +74,7 @@ func (de *DeltaEncoder) ApplyDelta(original []byte, delta *Delta) []byte {
 	if err != nil {
 		return nil
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	xorData, err := io.ReadAll(reader)
 	if err != nil {

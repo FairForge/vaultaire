@@ -62,7 +62,7 @@ func (c *CompressionDriver) Get(ctx context.Context, container, artifact string)
 	case "gzip":
 		gr, err := gzip.NewReader(reader)
 		if err != nil {
-			reader.Close()
+			_ = reader.Close()
 			return nil, fmt.Errorf("create gzip reader: %w", err)
 		}
 
@@ -72,7 +72,7 @@ func (c *CompressionDriver) Get(ctx context.Context, container, artifact string)
 			underlying: reader,
 		}, nil
 	default:
-		reader.Close()
+		_ = reader.Close()
 		return nil, fmt.Errorf("unsupported algorithm: %s", c.algorithm)
 	}
 }
@@ -87,7 +87,7 @@ func (r *compressedReader) Read(p []byte) (int, error) {
 }
 
 func (r *compressedReader) Close() error {
-	r.gzipReader.Close()
+	_ = r.gzipReader.Close()
 	return r.underlying.Close()
 }
 

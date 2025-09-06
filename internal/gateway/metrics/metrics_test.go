@@ -101,7 +101,7 @@ func TestMiddleware_RecordsMetrics(t *testing.T) {
 	// Create test handler
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("test response"))
+		_, _ = w.Write([]byte("test response"))
 	})
 
 	// Wrap with middleware
@@ -130,7 +130,7 @@ func TestMiddleware_TracksErrors(t *testing.T) {
 	// Create handler that returns error
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("error"))
+		_, _ = w.Write([]byte("error"))
 	})
 
 	wrapped := Middleware(collector)(handler)

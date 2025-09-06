@@ -108,5 +108,5 @@ func FormatRateLimitError(w http.ResponseWriter, retryAfter int) {
 	w.WriteHeader(http.StatusTooManyRequests)
 
 	errorMsg := fmt.Sprintf(`{"error":"Rate limit exceeded","retry_after":%d}`, retryAfter)
-	w.Write([]byte(errorMsg))
+	_, _ = w.Write([]byte(errorMsg))
 }

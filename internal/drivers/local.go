@@ -108,7 +108,7 @@ func (d *LocalDriver) Put(ctx context.Context, container, artifact string, data 
 	if err != nil {
 		return fmt.Errorf("create file: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	// Copy data
 	_, err = io.Copy(file, data)

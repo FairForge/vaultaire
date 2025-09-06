@@ -69,7 +69,7 @@ func (r *ResumableUpload) StartUpload(ctx context.Context, uploadID, container, 
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
-	file.Close()
+	_ = file.Close()
 
 	r.logger.Info("started resumable upload",
 		zap.String("upload_id", uploadID),
@@ -96,7 +96,7 @@ func (r *ResumableUpload) UploadChunk(ctx context.Context, uploadID string, offs
 	if err != nil {
 		return fmt.Errorf("open temp file: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	// Seek to offset
 	if _, err := file.Seek(offset, 0); err != nil {
@@ -149,7 +149,7 @@ func (r *ResumableUpload) CompleteUpload(ctx context.Context, uploadID string) e
 	if err != nil {
 		return fmt.Errorf("open temp file: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	// Upload to backend
 	if err := r.backend.Put(ctx, metadata.Container, metadata.Artifact, file); err != nil {
@@ -157,8 +157,8 @@ func (r *ResumableUpload) CompleteUpload(ctx context.Context, uploadID string) e
 	}
 
 	// Clean up
-	os.Remove(tempPath)
-	os.Remove(r.getMetadataPath(uploadID))
+	_ = os.Remove(tempPath)
+	_ = os.Remove(r.getMetadataPath(uploadID))
 
 	r.logger.Info("completed resumable upload",
 		zap.String("upload_id", uploadID),
