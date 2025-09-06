@@ -222,7 +222,7 @@ func BenchmarkLocalDriver_ConcurrentReads(b *testing.B) {
 }
 
 // Helper to count open FDs (Linux/Mac)
-func countOpenFDs(t testing.TB) int {
+func countOpenFDs(_ testing.TB) int {
 	pid := os.Getpid()
 	fdPath := fmt.Sprintf("/proc/%d/fd", pid)
 
