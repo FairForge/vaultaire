@@ -6,6 +6,14 @@ import (
 	"net/http"
 )
 
+// UsageStats represents storage usage statistics
+type UsageStats struct {
+	StorageGB   float64 `json:"storage_gb"`
+	BandwidthGB float64 `json:"bandwidth_gb"`
+	Requests    int64   `json:"requests"`
+	Cost        float64 `json:"cost"`
+	Period      string  `json:"period"`
+}
 type UsageHandler struct {
 	// Will add database connection later
 	db interface{}
@@ -45,7 +53,7 @@ func (h *UsageHandler) UsageDashboard(w http.ResponseWriter, r *http.Request) {
         <h1>Usage Statistics</h1>
         <pre>
 Storage:    125.5 GB
-Bandwidth:  450.2 GB  
+Bandwidth:  450.2 GB
 Requests:   15,234
 Cost:       $0.50
         </pre>
