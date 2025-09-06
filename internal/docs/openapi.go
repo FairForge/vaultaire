@@ -629,7 +629,7 @@ func OpenAPIJSONHandler() http.HandlerFunc {
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(specJSON)
+		_, _ = w.Write(specJSON)
 	}
 }
 
@@ -637,7 +637,7 @@ func OpenAPIJSONHandler() http.HandlerFunc {
 func SwaggerUIHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprint(w, swaggerUIHTML)
+		_, _ = fmt.Fprint(w, swaggerUIHTML)
 	}
 }
 

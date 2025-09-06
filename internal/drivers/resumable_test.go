@@ -50,7 +50,7 @@ func TestResumableUpload(t *testing.T) {
 		// Assert - Verify complete file
 		reader, err := driver.Get(ctx, "test", "file.bin")
 		require.NoError(t, err)
-		defer reader.Close()
+		defer func() { _ = reader.Close() }()
 
 		result := new(bytes.Buffer)
 		_, err = result.ReadFrom(reader)
