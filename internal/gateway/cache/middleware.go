@@ -84,10 +84,12 @@ func CacheMiddleware(cache *ResponseCache, options CacheOptions) func(http.Handl
 				w.Header().Set("X-Cache", "HIT")
 				w.Header().Set("ETag", entry.ETag)
 				w.WriteHeader(entry.StatusCode)
-				if _, err := w.Write(entry.Data); err != nil { return }
-    // Log error but don't fail - response is already committed
-    // This is best-effort since headers are already sent
- 	   			return
+				if _, err := w.Write(entry.Data); err != nil {
+					return
+				}
+				// Log error but don't fail - response is already committed
+				// This is best-effort since headers are already sent
+				return
 			}
 
 			// Record the response
