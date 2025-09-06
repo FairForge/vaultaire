@@ -45,8 +45,8 @@ func TestAPIKeyManager(t *testing.T) {
 		key := mgr.GenerateKey("tenant-1", []string{"read"})
 
 		handler := mgr.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			tenant := r.Context().Value("tenant").(string)
-			w.Write([]byte("tenant:" + tenant))
+			tenant := r.Context().Value(ContextKeyTenant).(string)
+			_, _ = w.Write([]byte("tenant:" + tenant))
 		}))
 
 		// Valid key
