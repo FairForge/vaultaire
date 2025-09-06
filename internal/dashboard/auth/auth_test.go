@@ -66,7 +66,7 @@ func TestAuthMiddleware(t *testing.T) {
 		middleware := AuthMiddleware(sm)
 
 		handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Write([]byte("protected"))
+			_, _ = w.Write([]byte("protected"))
 		}))
 
 		req := httptest.NewRequest("GET", "/dashboard", nil)
