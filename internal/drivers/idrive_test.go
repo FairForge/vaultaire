@@ -2,6 +2,7 @@
 package drivers
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"fmt"
@@ -541,4 +542,60 @@ func (m *MockIDriveDriver) Exists(ctx context.Context, container, artifact strin
 		return false, fmt.Errorf("mock failure")
 	}
 	return true, nil
+}
+
+func TestIDriveIntegration(t *testing.T) {
+	t.Run("complete workflow integration", func(t *testing.T) {
+		// Skip if no credentials
+		if os.Getenv("IDRIVE_ACCESS_KEY") == "" {
+			t.Skip("Integration test requires iDrive credentials")
+		}
+
+		// Create fully configured driver
+		logger := zap.NewNop()
+		driver, err := NewIDriveDriverFromConfig(logger)
+		require.NoError(t, err)
+
+		// Add all features
+		driver.SetEgressTracker(NewEgressTracker())
+		cache := NewSmartCache(10 * 1024 * 1024)
+		advisor := NewCostAdvisor()
+
+		// Remove unused variables or use them:
+		// quota := NewBandwidthQuota(100 * 1024 * 1024)  // REMOVED
+		// predictor := NewEgressPredictor()               // REMOVED
+
+		ctx := context.WithValue(context.Background(), TenantIDKey, "test-tenant")
+
+		// Test complete workflow
+		testData := []byte("integration test data")
+
+		// Upload
+		err = driver.Put(ctx, "test-bucket", "integration.txt", bytes.NewReader(testData))
+		assert.NoError(t, err)
+
+		// Cache it
+		cache.Put("test-tenant", "integration.txt", testData)
+
+		// Track usage
+		advisor.RecordUpload("test-tenant", "integration.txt", int64(len(testData)), "text/plain")
+
+		// Download
+		reader, err := driver.Get(ctx, "test-bucket", "integration.txt")
+		assert.NoError(t, err)
+		defer reader.Close()
+
+		// Verify
+		data, err := io.ReadAll(reader)
+		assert.NoError(t, err)
+		assert.Equal(t, testData, data)
+
+		// Check metrics
+		assert.True(t, driver.GetEgressTracker().GetTenantEgress("test-tenant") > 0)
+		assert.NotNil(t, cache.Get("test-tenant", "integration.txt"))
+
+		// Cleanup
+		err = driver.Delete(ctx, "test-bucket", "integration.txt")
+		assert.NoError(t, err)
+	})
 }
