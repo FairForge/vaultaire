@@ -402,3 +402,40 @@ func TestSmartCache(t *testing.T) {
 		assert.Equal(t, 0.6, stats.HitRatio) // 3/5 = 0.6
 	})
 }
+
+func TestCostAdvisor(t *testing.T) {
+	t.Run("recommends compression for text files", func(t *testing.T) {
+		advisor := NewCostAdvisor()
+
+		// Add usage pattern
+		advisor.RecordUpload("tenant-1", "logs.txt", 10*1024*1024, "text/plain")
+		advisor.RecordUpload("tenant-1", "data.json", 5*1024*1024, "application/json")
+
+		recommendations := advisor.GetRecommendations("tenant-1")
+
+		// Should recommend compression for text files
+		assert.Contains(t, recommendations[0].Title, "compression")
+		assert.Greater(t, recommendations[0].EstimatedSavings, 0.0)
+	})
+
+	t.Run("suggests archival for infrequent access", func(t *testing.T) {
+		advisor := NewCostAdvisor()
+		now := time.Now()
+
+		// File not accessed for 30 days
+		advisor.RecordUpload("tenant-1", "old-backup.zip", 100*1024*1024, "application/zip")
+		advisor.RecordAccess("tenant-1", "old-backup.zip", now.AddDate(0, -2, 0))
+
+		recommendations := advisor.GetRecommendations("tenant-1")
+
+		// Should suggest moving to archive tier
+		found := false
+		for _, rec := range recommendations {
+			if strings.Contains(rec.Title, "archive") {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found)
+	})
+}
