@@ -115,5 +115,4 @@ Health checks every 30 seconds
 Egress tracking in real-time
 Alert thresholds: 50%, 75%, 90%
 Cache hit ratio tracking
-
 ```
