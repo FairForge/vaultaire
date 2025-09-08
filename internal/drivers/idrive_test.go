@@ -349,3 +349,56 @@ func TestEgressPredictor(t *testing.T) {
 		assert.Equal(t, expected, avgDaily)
 	})
 }
+
+func TestSmartCache(t *testing.T) {
+	t.Run("caches frequently accessed objects", func(t *testing.T) {
+		cache := NewSmartCache(10 * 1024 * 1024) // 10MB cache
+
+		// First access - cache miss
+		data := []byte("test data")
+		hit := cache.Get("tenant-1", "file.txt")
+		assert.Nil(t, hit)
+
+		// Store in cache
+		cache.Put("tenant-1", "file.txt", data)
+
+		// Second access - cache hit
+		hit = cache.Get("tenant-1", "file.txt")
+		assert.Equal(t, data, hit)
+	})
+
+	t.Run("evicts least recently used items", func(t *testing.T) {
+		cache := NewSmartCache(100) // Small 100 byte cache
+
+		// Fill cache
+		cache.Put("tenant-1", "file1.txt", make([]byte, 40))
+		cache.Put("tenant-1", "file2.txt", make([]byte, 40))
+
+		// Access file1 to make it more recent
+		cache.Get("tenant-1", "file1.txt")
+
+		// Add file3 - should evict file2 (least recently used)
+		cache.Put("tenant-1", "file3.txt", make([]byte, 40))
+
+		assert.NotNil(t, cache.Get("tenant-1", "file1.txt"))
+		assert.Nil(t, cache.Get("tenant-1", "file2.txt")) // Evicted
+		assert.NotNil(t, cache.Get("tenant-1", "file3.txt"))
+	})
+
+	t.Run("tracks cache hit ratio", func(t *testing.T) {
+		cache := NewSmartCache(1024)
+
+		// 2 misses, 3 hits
+		cache.Get("tenant-1", "file1.txt") // miss
+		cache.Put("tenant-1", "file1.txt", []byte("data"))
+		cache.Get("tenant-1", "file1.txt") // hit
+		cache.Get("tenant-1", "file1.txt") // hit
+		cache.Get("tenant-1", "file2.txt") // miss
+		cache.Get("tenant-1", "file1.txt") // hit
+
+		stats := cache.GetStats()
+		assert.Equal(t, int64(3), stats.Hits)
+		assert.Equal(t, int64(2), stats.Misses)
+		assert.Equal(t, 0.6, stats.HitRatio) // 3/5 = 0.6
+	})
+}
