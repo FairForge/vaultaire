@@ -247,3 +247,47 @@ func TestEgressTracker(t *testing.T) {
 		assert.Equal(t, 0.10, cost) // $0.10 for 10GB
 	})
 }
+
+func TestBandwidthQuota(t *testing.T) {
+	t.Run("enforces monthly bandwidth limits", func(t *testing.T) {
+		quota := NewBandwidthQuota(10 * 1024 * 1024 * 1024) // 10GB monthly quota
+
+		// Use 5GB
+		allowed := quota.AllowEgress("tenant-1", 5*1024*1024*1024)
+		assert.True(t, allowed)
+
+		// Try to use another 6GB (should fail - over quota)
+		allowed = quota.AllowEgress("tenant-1", 6*1024*1024*1024)
+		assert.False(t, allowed)
+
+		// Check remaining quota
+		remaining := quota.GetRemaining("tenant-1")
+		assert.Equal(t, int64(5*1024*1024*1024), remaining)
+	})
+
+	t.Run("tracks multiple tenants independently", func(t *testing.T) {
+		quota := NewBandwidthQuota(5 * 1024 * 1024 * 1024) // 5GB per tenant
+
+		// Tenant 1 uses 3GB
+		quota.AllowEgress("tenant-1", 3*1024*1024*1024)
+
+		// Tenant 2 uses 4GB
+		allowed := quota.AllowEgress("tenant-2", 4*1024*1024*1024)
+		assert.True(t, allowed) // Each tenant has own quota
+
+		assert.Equal(t, int64(2*1024*1024*1024), quota.GetRemaining("tenant-1"))
+		assert.Equal(t, int64(1*1024*1024*1024), quota.GetRemaining("tenant-2"))
+	})
+
+	t.Run("resets monthly", func(t *testing.T) {
+		quota := NewBandwidthQuota(1024) // 1KB quota
+		quota.AllowEgress("tenant-1", 1024)
+
+		// Manually trigger reset (normally done by timer)
+		quota.Reset()
+
+		// Should be able to use quota again
+		allowed := quota.AllowEgress("tenant-1", 1024)
+		assert.True(t, allowed)
+	})
+}
