@@ -4,12 +4,14 @@ package drivers
 import (
 	"context"
 	"crypto/rand"
+	"fmt"
 	"io"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -438,4 +440,105 @@ func TestCostAdvisor(t *testing.T) {
 		}
 		assert.True(t, found)
 	})
+}
+
+func TestRegionalFailover(t *testing.T) {
+	t.Run("fails over to secondary region", func(t *testing.T) {
+		primary := &MockIDriveDriver{shouldFail: true}
+		secondary := &MockIDriveDriver{shouldFail: false}
+
+		failover := NewRegionalFailover(primary, secondary, zap.NewNop())
+
+		// Primary fails, should use secondary
+		err := failover.Put(context.Background(), "bucket", "file.txt", strings.NewReader("data"))
+		assert.NoError(t, err)
+		assert.Equal(t, 1, primary.putCalls)
+		assert.Equal(t, 1, secondary.putCalls)
+	})
+
+	t.Run("tracks region health", func(t *testing.T) {
+		primary := &MockIDriveDriver{}
+		secondary := &MockIDriveDriver{}
+
+		failover := NewRegionalFailover(primary, secondary, zap.NewNop())
+
+		// Mark primary as unhealthy
+		failover.MarkUnhealthy("primary")
+
+		// Should use secondary even though primary might work
+		failover.Get(context.Background(), "bucket", "file.txt")
+		assert.Equal(t, 0, primary.getCalls)
+		assert.Equal(t, 1, secondary.getCalls)
+
+		// Check health status - using renamed type
+		status := failover.GetHealthStatus()
+		assert.False(t, status.PrimaryHealthy)
+		assert.True(t, status.SecondaryHealthy)
+	})
+
+	t.Run("automatic recovery probe", func(t *testing.T) {
+		primary := &MockIDriveDriver{shouldFail: true}
+		secondary := &MockIDriveDriver{}
+
+		failover := NewRegionalFailover(primary, secondary, zap.NewNop())
+		failover.SetRecoveryInterval(100 * time.Millisecond)
+
+		// Primary fails initially
+		failover.Put(context.Background(), "bucket", "file.txt", strings.NewReader("data"))
+		assert.False(t, failover.GetHealthStatus().PrimaryHealthy)
+
+		// Fix primary
+		primary.shouldFail = false
+
+		// Wait for recovery probe
+		time.Sleep(200 * time.Millisecond)
+
+		// Should detect primary is healthy again
+		status := failover.GetHealthStatus()
+		assert.True(t, status.PrimaryHealthy)
+	})
+}
+
+// MockIDriveDriver for testing
+type MockIDriveDriver struct {
+	shouldFail bool
+	putCalls   int
+	getCalls   int
+}
+
+func (m *MockIDriveDriver) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...engine.PutOption) error {
+	m.putCalls++
+	if m.shouldFail {
+		return fmt.Errorf("mock failure")
+	}
+	return nil
+}
+
+func (m *MockIDriveDriver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
+	m.getCalls++
+	if m.shouldFail {
+		return nil, fmt.Errorf("mock failure")
+	}
+	return io.NopCloser(strings.NewReader("mock data")), nil
+}
+
+func (m *MockIDriveDriver) Delete(ctx context.Context, container, artifact string) error {
+	if m.shouldFail {
+		return fmt.Errorf("mock failure")
+	}
+	return nil
+}
+
+func (m *MockIDriveDriver) List(ctx context.Context, container string, prefix string) ([]string, error) {
+	if m.shouldFail {
+		return nil, fmt.Errorf("mock failure")
+	}
+	return []string{}, nil
+}
+
+func (m *MockIDriveDriver) Exists(ctx context.Context, container, artifact string) (bool, error) {
+	if m.shouldFail {
+		return false, fmt.Errorf("mock failure")
+	}
+	return true, nil
 }
