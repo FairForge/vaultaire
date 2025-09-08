@@ -115,7 +115,7 @@ func (rf *RegionalFailover) Delete(ctx context.Context, container, artifact stri
 		err := rf.primary.Delete(ctx, container, artifact)
 		if err == nil {
 			// Also delete from secondary
-			rf.secondary.Delete(ctx, container, artifact)
+			_ = rf.secondary.Delete(ctx, container, artifact)
 			return nil
 		}
 		lastErr = err
