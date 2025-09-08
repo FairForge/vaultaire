@@ -10,12 +10,18 @@ import (
 	"go.uber.org/zap"
 )
 
+type QuotaManager interface {
+	CheckAndReserve(ctx context.Context, tenantID string, bytes int64) (bool, error)
+	ReleaseQuota(ctx context.Context, tenantID string, bytes int64) error
+}
+
 // CoreEngine implements the Engine interface
 type CoreEngine struct {
 	drivers map[string]Driver
 	primary string
 	backup  string
 	logger  *zap.Logger
+	quota   QuotaManager
 
 	// Hidden components (ready but dormant)
 	cache map[string][]byte // Simple cache for now
@@ -105,6 +111,31 @@ func (e *CoreEngine) Get(ctx context.Context, container, artifact string) (io.Re
 func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...PutOption) error {
 	start := time.Now()
 
+	// Check quota if manager is configured
+	if e.quota != nil {
+		tenantID, ok := ctx.Value(tenantIDKey).(string)
+		if ok && tenantID != "" {
+			// For now, use a reasonable size estimate (will be improved later)
+			estimatedSize := int64(10 * 1024 * 1024) // 10MB default
+
+			allowed, err := e.quota.CheckAndReserve(ctx, tenantID, estimatedSize)
+			if err != nil {
+				return fmt.Errorf("checking quota: %w", err)
+			}
+			if !allowed {
+				return ErrQuotaExceeded
+			}
+
+			// If put fails, release the quota
+			defer func() {
+				if err := recover(); err != nil {
+					_ = e.quota.ReleaseQuota(ctx, tenantID, estimatedSize)
+					panic(err)
+				}
+			}()
+		}
+	}
+
 	// Log for ML training
 	defer func() {
 		e.logAccess(AccessEvent{
@@ -126,7 +157,7 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 	// Queue for backup (async)
 	if e.backup != "" && e.backup != e.primary {
 		go func() {
-			if _, ok := e.drivers[e.backup]; ok { // Changed driver to _ since we're not using it yet
+			if _, ok := e.drivers[e.backup]; ok {
 				// TODO: Re-read data for backup
 				e.logger.Info("queued for backup",
 					zap.String("artifact", artifact))
@@ -135,6 +166,11 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 	}
 
 	return nil
+}
+
+// SetQuotaManager sets the quota manager (ADD THIS AS A SEPARATE METHOD)
+func (e *CoreEngine) SetQuotaManager(qm QuotaManager) {
+	e.quota = qm
 }
 
 // Delete removes an artifact (S3 DeleteObject)

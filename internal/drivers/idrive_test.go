@@ -467,7 +467,7 @@ func TestRegionalFailover(t *testing.T) {
 		failover.MarkUnhealthy("primary")
 
 		// Should use secondary even though primary might work
-		failover.Get(context.Background(), "bucket", "file.txt")
+		_, _ = failover.Get(context.Background(), "container", "key")
 		assert.Equal(t, 0, primary.getCalls)
 		assert.Equal(t, 1, secondary.getCalls)
 
@@ -485,7 +485,7 @@ func TestRegionalFailover(t *testing.T) {
 		failover.SetRecoveryInterval(100 * time.Millisecond)
 
 		// Primary fails initially
-		failover.Put(context.Background(), "bucket", "file.txt", strings.NewReader("data"))
+		_ = failover.Put(context.Background(), "container", "key", strings.NewReader("data"))
 		assert.False(t, failover.GetHealthStatus().PrimaryHealthy)
 
 		// Fix primary
@@ -583,7 +583,7 @@ func TestIDriveIntegration(t *testing.T) {
 		// Download
 		reader, err := driver.Get(ctx, "test-bucket", "integration.txt")
 		assert.NoError(t, err)
-		defer reader.Close()
+		defer func() { _ = reader.Close() }()
 
 		// Verify
 		data, err := io.ReadAll(reader)
