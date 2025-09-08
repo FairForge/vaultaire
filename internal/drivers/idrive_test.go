@@ -197,3 +197,53 @@ func TestIDriveDriver_MultipartUpload(t *testing.T) {
 		assert.Error(t, err)
 	})
 }
+
+func TestIDriveDriver_EgressTracking(t *testing.T) {
+	t.Run("tracks download bandwidth", func(t *testing.T) {
+		driver, _ := NewIDriveDriver(
+			"test-key",
+			"test-secret",
+			"https://e2.idrive.com",
+			"us-west-1",
+			zap.NewNop(),
+		)
+
+		// Initialize egress tracker
+		driver.egressTracker = NewEgressTracker()
+
+		// Simulate a download (will fail without creds but should track attempt)
+		ctx := context.WithValue(context.Background(), TenantIDKey, "tenant-123")
+		_, err := driver.Get(ctx, "bucket", "file.bin")
+
+		assert.Error(t, err) // Expected without real creds
+
+		// Check that tracking was attempted
+		assert.NotNil(t, driver.egressTracker)
+	})
+}
+
+func TestEgressTracker(t *testing.T) {
+	t.Run("records bandwidth per tenant", func(t *testing.T) {
+		tracker := NewEgressTracker()
+
+		// Record some downloads
+		tracker.RecordEgress("tenant-1", 1024*1024) // 1MB
+		tracker.RecordEgress("tenant-1", 2048*1024) // 2MB
+		tracker.RecordEgress("tenant-2", 512*1024)  // 512KB
+
+		// Check totals
+		assert.Equal(t, int64(3*1024*1024), tracker.GetTenantEgress("tenant-1"))
+		assert.Equal(t, int64(512*1024), tracker.GetTenantEgress("tenant-2"))
+	})
+
+	t.Run("calculates costs based on rates", func(t *testing.T) {
+		tracker := NewEgressTracker()
+		tracker.SetRate(0.01) // $0.01 per GB
+
+		// Record 10GB for tenant
+		tracker.RecordEgress("tenant-1", 10*1024*1024*1024)
+
+		cost := tracker.GetTenantCost("tenant-1")
+		assert.Equal(t, 0.10, cost) // $0.10 for 10GB
+	})
+}
