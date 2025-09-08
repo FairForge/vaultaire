@@ -19,6 +19,13 @@ import (
 	"github.com/FairForge/vaultaire/internal/engine"
 )
 
+type ContextKey string
+
+const (
+	// TenantIDKey is the context key for tenant ID
+	TenantIDKey ContextKey = "tenant_id"
+)
+
 // IDriveDriver implements Driver interface for iDrive E2 storage
 type IDriveDriver struct {
 	accessKey          string
@@ -27,8 +34,9 @@ type IDriveDriver struct {
 	region             string
 	client             *s3.Client
 	logger             *zap.Logger
-	multipartThreshold int64 // Size threshold for multipart uploads
-	partSize           int64 // Size of each part in multipart upload
+	multipartThreshold int64          // Size threshold for multipart uploads
+	partSize           int64          // Size of each part in multipart upload
+	egressTracker      *EgressTracker // Track bandwidth usage
 
 }
 
@@ -90,21 +98,66 @@ func (d *IDriveDriver) Get(ctx context.Context, container, artifact string) (io.
 		return nil, fmt.Errorf("idrive get %s/%s: %w", container, artifact, err)
 	}
 
-	d.logger.Debug("artifact retrieved",
-		zap.String("container", container),
-		zap.String("artifact", artifact),
-	)
+	// Track egress if we have a tracker and tenant ID
+	if d.egressTracker != nil {
+		if tenantID, ok := ctx.Value(TenantIDKey).(string); ok && tenantID != "" {
+			// Wrap the reader to track bytes read
+			return &egressTrackingReader{
+				ReadCloser: result.Body,
+				tracker:    d.egressTracker,
+				tenantID:   tenantID,
+			}, nil
+		}
+	}
+
 	return result.Body, nil
+}
+
+// egressTrackingReader wraps a reader to track bytes read
+type egressTrackingReader struct {
+	io.ReadCloser
+	tracker   *EgressTracker
+	tenantID  string
+	bytesRead int64
+}
+
+func (r *egressTrackingReader) Read(p []byte) (n int, err error) {
+	n, err = r.ReadCloser.Read(p)
+	if n > 0 {
+		r.bytesRead += int64(n)
+		r.tracker.RecordEgress(r.tenantID, int64(n))
+	}
+	return n, err
+}
+
+// GetEgressTracker returns the egress tracker
+func (d *IDriveDriver) GetEgressTracker() *EgressTracker {
+	return d.egressTracker
+}
+
+// SetEgressTracker sets the egress tracker
+func (d *IDriveDriver) SetEgressTracker(tracker *EgressTracker) {
+	d.egressTracker = tracker
 }
 
 // Put stores an artifact in iDrive
 func (d *IDriveDriver) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...engine.PutOption) error {
-	// Note: The opts parameter matches your interface but we'll implement option handling later
-	_, err := d.client.PutObject(ctx, &s3.PutObjectInput{
+	input := &s3.PutObjectInput{
 		Bucket: aws.String(container),
 		Key:    aws.String(artifact),
 		Body:   data,
-	})
+	}
+
+	// If we can determine the size, add it for better performance
+	if seeker, ok := data.(io.Seeker); ok {
+		size, err := seeker.Seek(0, io.SeekEnd)
+		if err == nil {
+			_, _ = seeker.Seek(0, io.SeekStart) // Fixed: use underscores to ignore returns
+			input.ContentLength = aws.Int64(size)
+		}
+	}
+
+	_, err := d.client.PutObject(ctx, input)
 	if err != nil {
 		return fmt.Errorf("idrive put %s/%s: %w", container, artifact, err)
 	}
