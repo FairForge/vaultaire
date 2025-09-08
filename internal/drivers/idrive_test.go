@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -289,5 +290,62 @@ func TestBandwidthQuota(t *testing.T) {
 		// Should be able to use quota again
 		allowed := quota.AllowEgress("tenant-1", 1024)
 		assert.True(t, allowed)
+	})
+}
+
+func TestEgressPredictor(t *testing.T) {
+	t.Run("predicts monthly usage based on current rate", func(t *testing.T) {
+		predictor := NewEgressPredictor()
+
+		// Record usage for first 5 days of month
+		now := time.Date(2024, 1, 5, 12, 0, 0, 0, time.UTC)
+		predictor.RecordUsage("tenant-1", 5*1024*1024*1024, now) // 5GB in 5 days
+
+		// Predict full month usage (should be ~30GB for 30 days)
+		predicted := predictor.PredictMonthlyUsage("tenant-1", now)
+
+		// 5GB/5days = 1GB/day * 30 days = 30GB
+		expectedMin := int64(29 * 1024 * 1024 * 1024)
+		expectedMax := int64(31 * 1024 * 1024 * 1024)
+		assert.True(t, predicted >= expectedMin && predicted <= expectedMax,
+			"Expected ~30GB, got %d", predicted/(1024*1024*1024))
+	})
+
+	t.Run("generates alerts at threshold levels", func(t *testing.T) {
+		predictor := NewEgressPredictor()
+		predictor.SetQuota("tenant-1", 10*1024*1024*1024) // 10GB quota
+
+		// Info alert at 50% usage (not "No alert")
+		alert := predictor.CheckAlert("tenant-1", 5*1024*1024*1024)
+		assert.Equal(t, AlertInfo, alert.Level) // Changed from AlertNone to AlertInfo
+
+		// Warning at 75% usage
+		alert = predictor.CheckAlert("tenant-1", 7.5*1024*1024*1024)
+		assert.Equal(t, AlertWarning, alert.Level)
+
+		// Critical at 90% usage
+		alert = predictor.CheckAlert("tenant-1", 9*1024*1024*1024)
+		assert.Equal(t, AlertCritical, alert.Level)
+
+		// No alert below 50%
+		alert = predictor.CheckAlert("tenant-1", 4*1024*1024*1024) // 40%
+		assert.Equal(t, AlertNone, alert.Level)
+	})
+
+	t.Run("tracks usage patterns over time", func(t *testing.T) {
+		predictor := NewEgressPredictor()
+
+		// Simulate daily usage
+		for day := 1; day <= 7; day++ {
+			date := time.Date(2024, 1, day, 0, 0, 0, 0, time.UTC)
+			predictor.RecordDailyUsage("tenant-1", int64(day)*1024*1024*1024, date)
+		}
+
+		// Get average daily usage
+		avgDaily := predictor.GetAverageDailyUsage("tenant-1")
+
+		// Average should be (1+2+3+4+5+6+7)/7 = 4GB
+		expected := int64(4 * 1024 * 1024 * 1024)
+		assert.Equal(t, expected, avgDaily)
 	})
 }
