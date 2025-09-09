@@ -313,9 +313,62 @@ func (s *Server) handleGetObject(w http.ResponseWriter, r *http.Request, req *S3
 	adapter.HandleGet(w, r, req.Bucket, req.Object)
 }
 
-// handleHeadObject handles HEAD requests (not implemented yet)
+// handleHeadObject handles HEAD requests
 func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S3Request) {
-	WriteS3Error(w, ErrNotImplemented, r.URL.Path, generateRequestID())
+	// Log dual terminology for debugging
+	s.logger.Debug("S3 HEAD translating to engine",
+		zap.String("s3.bucket", req.Bucket),
+		zap.String("s3.object", req.Object),
+		zap.String("engine.container", req.Bucket),
+		zap.String("engine.artifact", req.Object),
+	)
+
+	// Get the tenant from context
+	t, err := tenant.FromContext(r.Context())
+	if err != nil || t == nil {
+		WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
+		return
+	}
+
+	// Build the container name with tenant prefix
+	containerName := fmt.Sprintf("%s_%s", t.ID, req.Bucket)
+
+	// Try to get the artifact to check if it exists
+	reader, err := s.engine.Get(r.Context(), containerName, req.Object)
+	if err != nil {
+		s.logger.Debug("HeadObject failed",
+			zap.String("bucket", req.Bucket),
+			zap.String("object", req.Object),
+			zap.Error(err))
+		WriteS3Error(w, ErrNoSuchKey, r.URL.Path, generateRequestID())
+		return
+	}
+
+	// Read the data to get the size
+	var size int64 = 0
+	if reader != nil {
+		// For HEAD, we need to get the size somehow
+		// Read all data to count bytes (not efficient but works for MVP)
+		buf := make([]byte, 8192)
+		for {
+			n, err := reader.Read(buf)
+			size += int64(n)
+			if err != nil {
+				break
+			}
+		}
+		reader.Close()
+	}
+
+	// Set the required headers
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("ETag", fmt.Sprintf("\"d41d8cd98f00b204e9800998ecf8427e\"")) // Mock ETag for now
+	w.Header().Set("Last-Modified", time.Now().UTC().Format(time.RFC1123))
+	w.Header().Set("x-amz-storage-class", "STANDARD")
+
+	// HEAD requests don't have a body, just headers
+	w.WriteHeader(http.StatusOK)
 }
 
 // handlePutObject handles PUT requests
