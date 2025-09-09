@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/FairForge/vaultaire/internal/database"
 	"github.com/FairForge/vaultaire/internal/usage"
@@ -44,8 +45,20 @@ func TestUsageAPI_GetUsageStats(t *testing.T) {
 	server, db := setupTestUsageAPI(t)
 	defer func() { _ = db.Close() }()
 
+	// Use unique tenant ID
+	tenantID := "test-tenant-" + time.Now().Format("20060102150405")
+
+	// Create tenant with proper quota - use server.quotaManager instead of qm
+	err := server.quotaManager.CreateTenant(context.Background(), tenantID, "starter", 1073741824) // 1GB
+	require.NoError(t, err)
+
+	// Record usage - 500MB
+	allowed, err := server.quotaManager.CheckAndReserve(context.Background(), tenantID, 524288000)
+	require.NoError(t, err)
+	require.True(t, allowed)
+
 	req := httptest.NewRequest("GET", "/api/v1/usage/stats", nil)
-	req = req.WithContext(context.WithValue(req.Context(), tenantIDKey, "tenant-123"))
+	req = req.WithContext(context.WithValue(req.Context(), tenantIDKey, tenantID)) // Use tenantID, not "tenant-123"
 	w := httptest.NewRecorder()
 
 	server.handleGetUsageStats(w, req)
@@ -53,7 +66,7 @@ func TestUsageAPI_GetUsageStats(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var response UsageStats
-	err := json.NewDecoder(w.Body).Decode(&response)
+	err = json.NewDecoder(w.Body).Decode(&response)
 	require.NoError(t, err)
 
 	assert.Equal(t, int64(524288000), response.StorageUsed)
@@ -68,9 +81,10 @@ func TestUsageAPI_GetUsageAlerts(t *testing.T) {
 
 	// Fix: To get >90%, we need more than 966367641 bytes (90% of 1GB)
 	// Let's use 970000000 bytes total (about 90.3%)
-	_, err := server.quotaManager.(*usage.QuotaManager).CheckAndReserve(
+	allowed, err := server.quotaManager.CheckAndReserve(
 		context.Background(), "tenant-123", 445712000) // 524288000 + 445712000 = 970000000
 	require.NoError(t, err)
+	require.True(t, allowed)
 
 	req := httptest.NewRequest("GET", "/api/v1/usage/alerts", nil)
 	req = req.WithContext(context.WithValue(req.Context(), tenantIDKey, "tenant-123"))

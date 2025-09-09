@@ -87,12 +87,12 @@ func TestQuotaTemplates_ApplyTemplate(t *testing.T) {
 
 	templates := NewQuotaTemplates()
 
-	// Apply professional template to tenant
-	err := templates.ApplyTemplate(context.Background(), qm, "tenant-123", "professional")
+	// Use unique tenant ID
+	err := templates.ApplyTemplate(context.Background(), qm, "tenant-template-test", "professional")
 	require.NoError(t, err)
 
 	// Verify quota was set correctly
-	used, limit, err := qm.GetUsage(context.Background(), "tenant-123")
+	used, limit, err := qm.GetUsage(context.Background(), "tenant-template-test")
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), used)
 	assert.Equal(t, int64(107374182400), limit) // 100GB
