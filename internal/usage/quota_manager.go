@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 )
 
 type QuotaManager struct {
@@ -140,4 +141,57 @@ func (m *QuotaManager) GetUsage(ctx context.Context, tenantID string) (used, lim
 	}
 
 	return used, limit, nil
+}
+
+func (qm *QuotaManager) UpdateQuota(ctx context.Context, tenantID string, newLimit int64) error {
+	query := `
+        UPDATE tenant_quotas
+        SET storage_limit_bytes = $1, updated_at = NOW()
+        WHERE tenant_id = $2`
+
+	_, err := qm.db.ExecContext(ctx, query, newLimit, tenantID)
+	return err
+}
+
+// Fix ListQuotas to use correct column names:
+func (qm *QuotaManager) ListQuotas(ctx context.Context) ([]map[string]interface{}, error) {
+	query := `
+        SELECT tenant_id, tier, storage_limit_bytes, storage_used_bytes, created_at
+        FROM tenant_quotas
+        ORDER BY created_at DESC`
+
+	rows, err := qm.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var quotas []map[string]interface{}
+	for rows.Next() {
+		q := make(map[string]interface{})
+		var tenantID, tier string
+		var storageLimit, storageUsed int64
+		var createdAt time.Time
+
+		err := rows.Scan(&tenantID, &tier, &storageLimit, &storageUsed, &createdAt)
+		if err != nil {
+			continue
+		}
+
+		q["tenant_id"] = tenantID
+		q["plan"] = tier // Map tier to plan for API consistency
+		q["storage_limit"] = storageLimit
+		q["storage_used"] = storageUsed
+		q["created_at"] = createdAt
+
+		quotas = append(quotas, q)
+	}
+
+	return quotas, nil
+}
+
+func (qm *QuotaManager) DeleteQuota(ctx context.Context, tenantID string) error {
+	query := `DELETE FROM tenant_quotas WHERE tenant_id = $1`
+	_, err := qm.db.ExecContext(ctx, query, tenantID)
+	return err
 }

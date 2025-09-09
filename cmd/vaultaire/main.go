@@ -26,6 +26,22 @@ func (n *nilQuotaManager) CheckAndReserve(ctx context.Context, tenantID string, 
 	return true, nil // Always allow for now
 }
 
+func (n *nilQuotaManager) CreateTenant(ctx context.Context, tenantID, plan string, storageLimit int64) error {
+	return nil
+}
+
+func (n *nilQuotaManager) UpdateQuota(ctx context.Context, tenantID string, newLimit int64) error {
+	return nil
+}
+
+func (n *nilQuotaManager) ListQuotas(ctx context.Context) ([]map[string]interface{}, error) {
+	return []map[string]interface{}{}, nil
+}
+
+func (n *nilQuotaManager) DeleteQuota(ctx context.Context, tenantID string) error {
+	return nil
+}
+
 func main() {
 	// Create logger
 	logger, _ := zap.NewProduction()

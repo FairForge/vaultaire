@@ -35,6 +35,10 @@ type Server struct {
 type QuotaManager interface {
 	GetUsage(ctx context.Context, tenantID string) (used, limit int64, err error)
 	CheckAndReserve(ctx context.Context, tenantID string, bytes int64) (bool, error)
+	CreateTenant(ctx context.Context, tenantID, plan string, storageLimit int64) error
+	UpdateQuota(ctx context.Context, tenantID string, newLimit int64) error
+	ListQuotas(ctx context.Context) ([]map[string]interface{}, error)
+	DeleteQuota(ctx context.Context, tenantID string) error
 }
 
 func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, qm QuotaManager) *Server {
@@ -71,6 +75,9 @@ func (s *Server) setupRoutes() {
 	// Add usage routes
 	s.router.HandleFunc("/api/v1/usage/stats", s.handleGetUsageStats).Methods("GET")
 	s.router.HandleFunc("/api/v1/usage/alerts", s.handleGetUsageAlerts).Methods("GET")
+
+	// Add quota management routes
+	s.setupQuotaManagementRoutes()
 
 	// API Documentation routes
 	s.router.HandleFunc("/docs", docs.SwaggerUIHandler()).Methods("GET")
