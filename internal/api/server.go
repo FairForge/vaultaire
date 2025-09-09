@@ -18,31 +18,39 @@ import (
 )
 
 type Server struct {
-	config     *config.Config
-	logger     *zap.Logger
-	router     *mux.Router
-	httpServer *http.Server
-	db         *sql.DB
-	events     chan Event
-	engine     engine.Engine
+	config       *config.Config
+	logger       *zap.Logger
+	router       *mux.Router
+	httpServer   *http.Server
+	db           *sql.DB
+	events       chan Event
+	engine       *engine.CoreEngine
+	quotaManager QuotaManager
 
 	requestCount int64
 	errorCount   int64
 	startTime    time.Time
 }
 
-func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine) *Server {
+type QuotaManager interface {
+	GetUsage(ctx context.Context, tenantID string) (used, limit int64, err error)
+	CheckAndReserve(ctx context.Context, tenantID string, bytes int64) (bool, error)
+	CreateTenant(ctx context.Context, tenantID, plan string, storageLimit int64) error
+	UpdateQuota(ctx context.Context, tenantID string, newLimit int64) error
+	ListQuotas(ctx context.Context) ([]map[string]interface{}, error)
+	DeleteQuota(ctx context.Context, tenantID string) error
+}
 
-	// Now create the server with the initialized engine
+func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, qm QuotaManager) *Server {
 	s := &Server{
-		config: cfg,
-		logger: logger,
-		db:     nil,
-		engine: eng, // Use the engine we created above
-		// auth:      NewAuth(nil, logger),
-		events:    make(chan Event, 1000),
-		router:    mux.NewRouter(),
-		startTime: time.Now(),
+		config:       cfg,
+		logger:       logger,
+		db:           nil,
+		engine:       eng,
+		quotaManager: qm, // ADD THIS
+		events:       make(chan Event, 1000),
+		router:       mux.NewRouter(),
+		startTime:    time.Now(),
 	}
 
 	s.setupRoutes()
@@ -64,7 +72,14 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/metrics", s.handleMetrics).Methods("GET")
 	s.router.HandleFunc("/version", s.handleVersion).Methods("GET")
 
-	// API Documentation routes - call the functions to get the handlers
+	// Add usage routes
+	s.router.HandleFunc("/api/v1/usage/stats", s.handleGetUsageStats).Methods("GET")
+	s.router.HandleFunc("/api/v1/usage/alerts", s.handleGetUsageAlerts).Methods("GET")
+
+	// Add quota management routes
+	s.setupQuotaManagementRoutes()
+
+	// API Documentation routes
 	s.router.HandleFunc("/docs", docs.SwaggerUIHandler()).Methods("GET")
 	s.router.HandleFunc("/openapi.json", docs.OpenAPIJSONHandler()).Methods("GET")
 
