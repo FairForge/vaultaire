@@ -21,7 +21,11 @@ func setupTestDB(t *testing.T) *sql.DB {
 		t.Fatalf("Cannot open test database: %v", err)
 	}
 
-	// Clean slate - add report tables
+	// Clean slate - add billing tables
+	_, _ = db.Exec("DROP TABLE IF EXISTS invoices")
+	_, _ = db.Exec("DROP TABLE IF EXISTS billing_credits")
+	_, _ = db.Exec("DROP TABLE IF EXISTS billing_charges")
+	_, _ = db.Exec("DROP TABLE IF EXISTS billing_policies")
 	_, _ = db.Exec("DROP TABLE IF EXISTS report_schedules")
 	_, _ = db.Exec("DROP TABLE IF EXISTS usage_daily_snapshots")
 	_, _ = db.Exec("DROP TABLE IF EXISTS usage_reports")
