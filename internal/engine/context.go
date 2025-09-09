@@ -9,7 +9,8 @@ type contextKey string
 const (
 	tenantIDKey  contextKey = "tenant_id"
 	requestIDKey contextKey = "request_id"
-	userIDKey    contextKey = "user_id"
+
+// const userIDKey = "userID"  // Remove this line
 )
 
 func WithTenantID(ctx context.Context, tenantID string) context.Context {

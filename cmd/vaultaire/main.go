@@ -16,6 +16,32 @@ import (
 	"go.uber.org/zap"
 )
 
+type nilQuotaManager struct{}
+
+func (n *nilQuotaManager) GetUsage(ctx context.Context, tenantID string) (used, limit int64, err error) {
+	return 0, 1073741824, nil // Return 0 used, 1GB limit
+}
+
+func (n *nilQuotaManager) CheckAndReserve(ctx context.Context, tenantID string, bytes int64) (bool, error) {
+	return true, nil // Always allow for now
+}
+
+func (n *nilQuotaManager) CreateTenant(ctx context.Context, tenantID, plan string, storageLimit int64) error {
+	return nil
+}
+
+func (n *nilQuotaManager) UpdateQuota(ctx context.Context, tenantID string, newLimit int64) error {
+	return nil
+}
+
+func (n *nilQuotaManager) ListQuotas(ctx context.Context) ([]map[string]interface{}, error) {
+	return []map[string]interface{}{}, nil
+}
+
+func (n *nilQuotaManager) DeleteQuota(ctx context.Context, tenantID string) error {
+	return nil
+}
+
 func main() {
 	// Create logger
 	logger, _ := zap.NewProduction()
@@ -92,8 +118,6 @@ func main() {
 		eng.SetPrimary("quotaless")
 		logger.Info("using Quotaless storage")
 
-		// Add this case to main.go's switch statement
-
 	case "lyve":
 		accessKey := os.Getenv("LYVE_ACCESS_KEY")
 		secretKey := os.Getenv("LYVE_SECRET_KEY")
@@ -124,8 +148,8 @@ func main() {
 		logger.Fatal("invalid STORAGE_MODE", zap.String("mode", storageMode))
 	}
 
-	// Create server with engine
-	server := api.NewServer(cfg, logger, eng)
+	// Create server with nil quota manager
+	server := api.NewServer(cfg, logger, eng, &nilQuotaManager{})
 
 	// Handle shutdown gracefully
 	go func() {

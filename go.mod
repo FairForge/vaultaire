@@ -16,7 +16,7 @@ require (
 	github.com/lib/pq v1.10.9
 	github.com/microsoftgraph/msgraph-sdk-go v1.84.0
 	github.com/prometheus/client_golang v1.23.0
-	github.com/stretchr/testify v1.11.0
+	github.com/stretchr/testify v1.11.1
 	github.com/stripe/stripe-go/v75 v75.11.0
 	github.com/tetratelabs/wazero v1.9.0
 	github.com/xeipuuv/gojsonschema v1.2.0
