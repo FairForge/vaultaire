@@ -12,13 +12,13 @@ Every driver must implement this interface:
 type Driver interface {
     // Identification
     Name() string
-    
+
     // Core operations
     Get(ctx context.Context, container, artifact string) (io.ReadCloser, error)
     Put(ctx context.Context, container, artifact string, data io.Reader) error
     Delete(ctx context.Context, container, artifact string) error
     List(ctx context.Context, container string) ([]string, error)
-    
+
     // Health and metrics
     HealthCheck(ctx context.Context) error
     GetMetrics() map[string]interface{}
@@ -60,25 +60,25 @@ func (d *MyCustomDriver) Name() string {
 
 func (d *MyCustomDriver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
     key := d.buildKey(container, artifact)
-    
+
     // Add metrics
     start := time.Now()
     defer func() {
         d.metrics.RecordLatency("get", time.Since(start))
     }()
-    
+
     // Implement your get logic
     reader, err := d.client.Download(ctx, key)
     if err != nil {
         return nil, fmt.Errorf("failed to get %s/%s: %w", container, artifact, err)
     }
-    
+
     return reader, nil
 }
 
 func (d *MyCustomDriver) Put(ctx context.Context, container, artifact string, data io.Reader) error {
     key := d.buildKey(container, artifact)
-    
+
     // Add retry logic
     return retry.Do(func() error {
         return d.client.Upload(ctx, key, data)
@@ -98,7 +98,7 @@ func (d *MyCustomDriver) List(ctx context.Context, container string) ([]string, 
 func (d *MyCustomDriver) HealthCheck(ctx context.Context) error {
     ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
     defer cancel()
-    
+
     return d.client.Ping(ctx)
 }
 
@@ -110,7 +110,7 @@ gofunc (d *MyCustomDriver) handleError(err error) error {
     if err == nil {
         return nil
     }
-    
+
     // Map backend-specific errors to standard errors
     switch {
     case isNotFound(err):
@@ -127,7 +127,7 @@ Step 4: Add Metrics and Logging
 gofunc (d *MyCustomDriver) recordMetric(operation string, success bool, latency time.Duration) {
     d.metrics.Operations.WithLabelValues(operation, fmt.Sprintf("%t", success)).Inc()
     d.metrics.Latency.WithLabelValues(operation).Observe(latency.Seconds())
-    
+
     d.logger.Debug("operation completed",
         zap.String("operation", operation),
         zap.Bool("success", success),
@@ -138,12 +138,12 @@ Testing Your Driver
 Unit Tests
 gofunc TestMyCustomDriver_Get(t *testing.T) {
     driver := NewMyCustomDriver(testConfig, logger)
-    
+
     // Test successful get
     reader, err := driver.Get(context.Background(), "test-container", "test-artifact")
     assert.NoError(t, err)
     assert.NotNil(t, reader)
-    
+
     // Test not found
     _, err = driver.Get(context.Background(), "missing", "artifact")
     assert.ErrorIs(t, err, engine.ErrNotFound)
@@ -153,21 +153,21 @@ gofunc TestMyCustomDriver_Integration(t *testing.T) {
     if testing.Short() {
         t.Skip("skipping integration test")
     }
-    
+
     driver := NewMyCustomDriver(realConfig, logger)
-    
+
     // Full cycle test
     data := bytes.NewReader([]byte("test data"))
     err := driver.Put(ctx, "test", "file.txt", data)
     require.NoError(t, err)
-    
+
     reader, err := driver.Get(ctx, "test", "file.txt")
     require.NoError(t, err)
-    
+
     content, err := io.ReadAll(reader)
     require.NoError(t, err)
     assert.Equal(t, "test data", string(content))
-    
+
     err = driver.Delete(ctx, "test", "file.txt")
     require.NoError(t, err)
 }
@@ -204,7 +204,7 @@ gofunc (d *MyCustomDriver) Get(ctx context.Context, container, artifact string) 
         return nil, ctx.Err()
     default:
     }
-    
+
     // Pass context through
     return d.client.GetWithContext(ctx, key)
 }
@@ -228,7 +228,7 @@ func RegisterDrivers(engine *CoreEngine) {
     // Built-in drivers
     engine.RegisterDriver("s3", drivers.NewS3Driver)
     engine.RegisterDriver("local", drivers.NewLocalDriver)
-    
+
     // Your custom driver
     engine.RegisterDriver("mycustom", drivers.NewMyCustomDriver)
 }
@@ -245,10 +245,10 @@ gofunc (d *MyCustomDriver) List(ctx context.Context, container string) ([]string
     // Use goroutines for parallel listing
     results := make(chan []string)
     errors := make(chan error)
-    
+
     go d.listPartition(ctx, container, 0, results, errors)
     go d.listPartition(ctx, container, 1, results, errors)
-    
+
     // Collect results...
 }
 2. Caching
@@ -258,12 +258,12 @@ gotype MyCustomDriver struct {
 
 func (d *MyCustomDriver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
     key := d.buildKey(container, artifact)
-    
+
     // Check cache first
     if cached, ok := d.cache.Get(key); ok {
         return cached.(io.ReadCloser), nil
     }
-    
+
     // Fetch and cache
     reader, err := d.client.Get(ctx, key)
     if err == nil {

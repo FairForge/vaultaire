@@ -29,7 +29,7 @@ server:
 engine:
   tier_policy: automatic
   cache_size: 1GB
-  
+
 backends:
   - name: primary
     driver: s3
@@ -39,7 +39,7 @@ backends:
       bucket: my-storage
       access_key: ${AWS_ACCESS_KEY}
       secret_key: ${AWS_SECRET_KEY}
-  
+
   - name: backup
     driver: wasabi
     config:
@@ -51,7 +51,7 @@ backends:
 database:
   driver: postgres
   connection: postgres://user:pass@localhost/vaultaire
-  
+
 logging:
   level: info
   format: json
@@ -63,11 +63,11 @@ tiering:
     - name: hot
       age: 0-7d
       backend: primary
-      
+
     - name: warm
       age: 7-30d
       backend: secondary
-      
+
     - name: cold
       age: 30d+
       backend: archive
@@ -87,13 +87,13 @@ performance:
   max_connections: 1000
   worker_threads: 16
   buffer_size: 64MB
-  
+
 # Monitoring
 monitoring:
   prometheus:
     enabled: true
     port: 9090
-  
+
   metrics:
     enabled: true
     interval: 30s
@@ -159,11 +159,11 @@ API Authentication
 yamlauth:
   enabled: true
   type: api_key
-  
+
   # For API key auth
   api_key:
     header: X-API-Key
-    
+
   # For JWT auth
   jwt:
     secret: ${JWT_SECRET}
@@ -174,7 +174,7 @@ yamlencryption:
     enabled: true
     type: aes256
     key: ${ENCRYPTION_KEY}
-    
+
   in_transit:
     enabled: true
     min_tls_version: "1.2"
@@ -184,11 +184,11 @@ yamlcache:
   metadata:
     size: 1GB
     ttl: 1h
-    
+
   data:
     size: 10GB
     strategy: lru
-    
+
   distributed:
     enabled: true
     redis: redis://localhost:6379
@@ -205,12 +205,12 @@ yamlmetrics:
     enabled: true
     port: 9090
     path: /metrics
-    
+
   custom:
     - name: storage_operations_total
       type: counter
       labels: [operation, backend]
-      
+
     - name: storage_latency_seconds
       type: histogram
       labels: [operation]
@@ -221,7 +221,7 @@ yamlhealth:
     - name: database
       interval: 30s
       timeout: 5s
-      
+
     - name: backends
       interval: 60s
       timeout: 10s

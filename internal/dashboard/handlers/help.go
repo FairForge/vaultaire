@@ -26,7 +26,7 @@ func (h *HelpHandler) ShowHelp(w http.ResponseWriter, r *http.Request) {
 <body>
     <div class="terminal">
         <h1>Help & Documentation</h1>
-        
+
         <div class="section">
             <h2>S3 API Endpoints</h2>
             <pre>
@@ -39,19 +39,19 @@ GET    /{bucket}/{key}      - Download object
 DELETE /{bucket}/{key}      - Delete object
             </pre>
         </div>
-        
+
         <div class="section">
             <h2>Authentication</h2>
             <p>Use AWS Signature Version 4 with your API keys:</p>
             <code>aws s3 ls --endpoint-url http://localhost:8000</code>
         </div>
-        
+
         <div class="section">
             <h2>Pricing</h2>
             <p>Storage: $3.99/TB per month</p>
             <p>Bandwidth: Included</p>
         </div>
-        
+
         <div class="section">
             <h2>Support</h2>
             <p>Email: support@vaultaire.io</p>

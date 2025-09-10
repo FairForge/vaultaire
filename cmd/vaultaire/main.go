@@ -11,8 +11,10 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/api"
 	"github.com/FairForge/vaultaire/internal/config"
+	"github.com/FairForge/vaultaire/internal/database"
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
+	"github.com/FairForge/vaultaire/internal/usage"
 	"go.uber.org/zap"
 )
 
@@ -148,8 +150,58 @@ func main() {
 		logger.Fatal("invalid STORAGE_MODE", zap.String("mode", storageMode))
 	}
 
-	// Create server with nil quota manager
-	server := api.NewServer(cfg, logger, eng, &nilQuotaManager{})
+	// Database configuration from environment
+	dbHost := os.Getenv("DB_HOST")
+	if dbHost == "" {
+		dbHost = "localhost"
+	}
+	dbPort := 5432
+	if p := os.Getenv("DB_PORT"); p != "" {
+		_, _ = fmt.Sscanf(p, "%d", &dbPort)
+	}
+	dbName := os.Getenv("DB_NAME")
+	if dbName == "" {
+		dbName = "vaultaire"
+	}
+	dbUser := os.Getenv("DB_USER")
+	if dbUser == "" {
+		dbUser = "vaultaire"
+	}
+	dbPassword := os.Getenv("DB_PASSWORD")
+	if dbPassword == "" {
+		dbPassword = "vaultaire_dev"
+	}
+
+	// Try to connect to database
+	var server *api.Server
+
+	dbConfig := database.Config{
+		Host:     dbHost,
+		Port:     dbPort,
+		Database: dbName,
+		User:     dbUser,
+		Password: dbPassword,
+		SSLMode:  "disable",
+	}
+
+	db, err := database.NewPostgres(dbConfig, logger)
+	if err != nil {
+		logger.Warn("failed to connect to database, running without quota management",
+			zap.Error(err))
+		// Create server with nil quota manager
+		server = api.NewServer(cfg, logger, eng, &nilQuotaManager{})
+	} else {
+		defer func() { _ = db.Close() }()
+		logger.Info("connected to database",
+			zap.String("host", dbHost),
+			zap.String("database", dbName))
+
+		// Create real quota manager - only needs *sql.DB
+		quotaManager := usage.NewQuotaManager(db.DB())
+
+		// Pass real database and quota manager
+		server = api.NewServer(cfg, logger, eng, quotaManager)
+	}
 
 	// Handle shutdown gracefully
 	go func() {

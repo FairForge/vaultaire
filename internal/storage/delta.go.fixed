@@ -8,6 +8,6 @@
     if err := gz.Close(); err != nil {
         return nil
     }
-    
+
     compressed := buf.Bytes()
 // ... rest of the file ...

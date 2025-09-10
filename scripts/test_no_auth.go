@@ -1,23 +1,30 @@
-// cmd/test/main.go
 package main
 
 import (
-    "fmt"
-    "net/http"
+	"fmt"
+	"log"
+	"net/http"
 )
 
 func main() {
-    // Simple S3-like server without auth for testing
-    http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-        if r.Method == "GET" && r.URL.Path == "/" {
-            // ListBuckets
-            w.Header().Set("Content-Type", "application/xml")
-            fmt.Fprintf(w, `<ListAllMyBucketsResult><Buckets></Buckets></ListAllMyBucketsResult>`)
-            return
-        }
-        // Add more handlers as needed
-    })
-    
-    fmt.Println("Test server running on :8001 (no auth)")
-    http.ListenAndServe(":8001", nil)
+	// Mock S3 server for testing without auth
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Printf("Request: %s %s\n", r.Method, r.URL.Path)
+
+		if r.Method == "GET" && r.URL.Path == "/" {
+			w.Header().Set("Content-Type", "application/xml")
+			_, err := fmt.Fprintf(w, `<ListAllMyBucketsResult><Buckets></Buckets></ListAllMyBucketsResult>`)
+			if err != nil {
+				log.Printf("Error writing response: %v", err)
+			}
+			return
+		}
+
+		http.NotFound(w, r)
+	})
+
+	fmt.Println("Mock S3 server on :8001")
+	if err := http.ListenAndServe(":8001", nil); err != nil {
+		log.Fatal(err)
+	}
 }

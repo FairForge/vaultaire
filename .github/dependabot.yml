@@ -14,7 +14,7 @@ updates:
         patterns:
           - "*test*"
           - "*mock*"
-          
+
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
