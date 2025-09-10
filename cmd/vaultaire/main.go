@@ -67,6 +67,24 @@ func main() {
 	// Create engine
 	eng := engine.NewEngine(logger)
 
+	// Configure backend costs (per GB per month)
+	eng.SetCostConfiguration(map[string]float64{
+		"lyve":      0.00637, // Seagate Lyve Cloud
+		"quotaless": 0.001,   // Quotaless bulk
+		"s3":        0.023,   // AWS S3 standard
+		"onedrive":  0.0,     // Already paid for
+		"local":     0.0,     // Local storage
+	})
+
+	// Configure egress costs (per GB)
+	eng.SetEgressCosts(map[string]float64{
+		"lyve":      0.0,  // No egress fees!
+		"s3":        0.09, // AWS egress
+		"quotaless": 0.01, // Minimal egress
+		"onedrive":  0.02, // Estimated
+		"local":     0.0,  // No egress
+	})
+
 	// Add storage driver based on environment
 	storageMode := os.Getenv("STORAGE_MODE")
 	if storageMode == "" {

@@ -17,11 +17,13 @@ type QuotaManager interface {
 
 // CoreEngine implements the Engine interface
 type CoreEngine struct {
-	drivers map[string]Driver
-	primary string
-	backup  string
-	logger  *zap.Logger
-	quota   QuotaManager
+	drivers       map[string]Driver
+	primary       string
+	backup        string
+	logger        *zap.Logger
+	quota         QuotaManager
+	selector      *BackendSelector
+	costOptimizer *CostOptimizer
 
 	// Hidden components (ready but dormant)
 	cache map[string][]byte // Simple cache for now
@@ -46,10 +48,12 @@ type AccessEvent struct {
 // NewEngine creates a new engine instance
 func NewEngine(logger *zap.Logger) *CoreEngine {
 	return &CoreEngine{
-		drivers:   make(map[string]Driver),
-		logger:    logger,
-		cache:     make(map[string][]byte),
-		accessLog: make([]AccessEvent, 0, 10000),
+		drivers:       make(map[string]Driver),
+		selector:      NewBackendSelector(),
+		logger:        logger,
+		cache:         make(map[string][]byte),
+		accessLog:     make([]AccessEvent, 0, 10000),
+		costOptimizer: NewCostOptimizer(),
 	}
 }
 
@@ -73,7 +77,6 @@ func (e *CoreEngine) SetBackup(name string) {
 	e.backup = name
 }
 
-// Get retrieves an artifact (S3 GetObject)
 func (e *CoreEngine) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
 	start := time.Now()
 
@@ -98,13 +101,30 @@ func (e *CoreEngine) Get(ctx context.Context, container, artifact string) (io.Re
 		_ = cached
 	}
 
-	// Try primary driver
-	driver, ok := e.drivers[e.primary]
+	// Select best backend considering cost
+	backendID := e.selectBackendForRead(ctx, artifact)
+	if backendID == "" {
+		return nil, fmt.Errorf("no healthy backends available")
+	}
+
+	driver, ok := e.drivers[backendID]
 	if !ok {
-		return nil, fmt.Errorf("no primary driver configured")
+		// Fallback to primary
+		driver, ok = e.drivers[e.primary]
+		if !ok {
+			return nil, fmt.Errorf("no primary driver configured")
+		}
 	}
 
 	return driver.Get(ctx, container, artifact)
+}
+
+func (e *CoreEngine) selectBackendForRead(ctx context.Context, _ string) string {
+	// Estimate size (would be from metadata in production)
+	estimatedSize := int64(10 * 1024 * 1024) // 10MB default
+
+	// Get cost-optimal backend
+	return e.costOptimizer.SelectOptimal(ctx, "GET", estimatedSize)
 }
 
 // Put stores an artifact (S3 PutObject)
@@ -300,5 +320,17 @@ func (e *CoreEngine) logAccess(event AccessEvent) {
 	// Keep only last 10000 events
 	if len(e.accessLog) > 10000 {
 		e.accessLog = e.accessLog[1:]
+	}
+}
+
+func (e *CoreEngine) SetCostConfiguration(costs map[string]float64) {
+	for backend, cost := range costs {
+		e.costOptimizer.SetCost(backend, cost)
+	}
+}
+
+func (e *CoreEngine) SetEgressCosts(costs map[string]float64) {
+	for backend, cost := range costs {
+		e.costOptimizer.SetEgressCost(backend, cost)
 	}
 }
