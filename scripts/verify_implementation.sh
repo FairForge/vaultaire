@@ -19,12 +19,12 @@ MISSING=0
 check_file() {
     local file=$1
     local component=$2
-    
+
     if [ -f "$file" ]; then
         # Check if file has actual implementation (more than 50 lines, no TODO/STUB markers)
         lines=$(wc -l < "$file")
         todos=$(grep -c "TODO\|STUB\|PLACEHOLDER\|NotImplemented" "$file" 2>/dev/null || echo 0)
-        
+
         if [[[ $lines -gt 50 ]] && [[[ $todos -eq 0 ]]; then
             echo -e "${GREEN}✓${NC} $component - IMPLEMENTED ($lines lines)"
             ((IMPLEMENTED++))

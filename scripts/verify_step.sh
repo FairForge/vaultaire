@@ -8,7 +8,7 @@ if grep -r "return err" internal/ | grep -v "fmt.Errorf" | grep -v test; then
 fi
 
 echo "🔍 Checking test coverage..."
-go test -cover ./... | grep -E "coverage: [0-9]+\.[0-9]%" 
+go test -cover ./... | grep -E "coverage: [0-9]+\.[0-9]%"
 
 echo "🔍 Running linter..."
 golangci-lint run

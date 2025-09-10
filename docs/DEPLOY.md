@@ -29,7 +29,7 @@ services:
       - VAULTAIRE_DATABASE_CONNECTION=postgres://db/vaultaire
     depends_on:
       - postgres
-      
+
   postgres:
     image: postgres:15
     environment:
@@ -138,17 +138,17 @@ hub:
     - postgresql (primary)
     - redis (cache)
     - orchestrator
-    
+
 # Spoke servers (stateless)
 spokes:
   - server: ams-spoke-01
     region: eu-west
     role: worker
-    
+
   - server: sgp-spoke-01
     region: ap-southeast
     role: worker
-    
+
   - server: sfo-spoke-01
     region: us-west
     role: worker
@@ -156,17 +156,17 @@ Load Balancing
 HAProxy Configuration
 global
     maxconn 4096
-    
+
 defaults
     mode http
     timeout connect 5000ms
     timeout client 50000ms
     timeout server 50000ms
-    
+
 frontend vaultaire_frontend
     bind *:443 ssl crt /etc/ssl/vaultaire.pem
     default_backend vaultaire_backend
-    
+
 backend vaultaire_backend
     balance roundrobin
     option httpchk GET /health
@@ -192,7 +192,7 @@ yaml# prometheus.yml
 scrape_configs:
   - job_name: 'vaultaire'
     static_configs:
-      - targets: 
+      - targets:
         - 'hub:9090'
         - 'spoke1:9090'
         - 'spoke2:9090'

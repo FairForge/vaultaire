@@ -6,29 +6,29 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v5
-    
+
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
         go-version: '1.21'
-    
+
     - name: Build
       run: make build
-    
+
     - name: Test S3 Operations
       run: |
         ./bin/vaultaire &
         SERVER_PID=$!
         sleep 2
-        
+
         # Test PUT
         curl -X PUT -H "X-Tenant-ID: test" localhost:8000/test/file.txt -d "test" || exit 1
-        
+
         # Test GET
         curl -H "X-Tenant-ID: test" localhost:8000/test/file.txt || exit 1
-        
+
         # Test DELETE
         curl -X DELETE -H "X-Tenant-ID: test" localhost:8000/test/file.txt || exit 1
-        
+
         kill $SERVER_PID
         echo "✅ All S3 operations working!"

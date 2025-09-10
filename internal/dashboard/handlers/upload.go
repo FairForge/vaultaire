@@ -21,16 +21,16 @@ func (h *UploadHandler) ShowUploadForm(w http.ResponseWriter, r *http.Request) {
     <style>
         body { background: #000; color: #0f0; font-family: monospace; }
         .terminal { border: 1px solid #0f0; padding: 20px; margin: 20px; }
-        input[type="file"] { 
-            background: #111; 
-            color: #0f0; 
-            border: 1px solid #0f0; 
-            padding: 10px; 
+        input[type="file"] {
+            background: #111;
+            color: #0f0;
+            border: 1px solid #0f0;
+            padding: 10px;
             margin: 10px 0;
         }
-        .progress { 
-            border: 1px solid #0f0; 
-            height: 20px; 
+        .progress {
+            border: 1px solid #0f0;
+            height: 20px;
             margin: 10px 0;
         }
     </style>
