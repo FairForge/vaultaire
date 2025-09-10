@@ -12,7 +12,7 @@ Vaultaire uses a layered architecture that separates concerns and enables flexib
 - Manages authentication
 - Returns S3-compliant responses
 
-### 2. Engine Layer  
+### 2. Engine Layer
 - Orchestrates operations across backends
 - Manages tiering policies
 - Handles replication strategies
@@ -29,7 +29,7 @@ Vaultaire uses a layered architecture that separates concerns and enables flexib
 ### The Hub (Stateful Brain)
 **Server**: Intel Special 6 Core - NYC Metro
 **Specs**: 12 Cores @ 3.5GHz, 256GB RAM, 8TB SSD
-**Role**: 
+**Role**:
 - Master PostgreSQL database (source of truth)
 - High-speed RAM cache (hot data)
 - Orchestration logic & decision making

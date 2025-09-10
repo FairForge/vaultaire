@@ -18,7 +18,7 @@ Vaultaire is a storage orchestration engine that provides a single S3-compatible
 - Perfect for indie developers
 - [Sign up at stored.ge](https://stored.ge)
 
-### 🏢 stored.cloud - Enterprise Storage Platform  
+### 🏢 stored.cloud - Enterprise Storage Platform
 - Starting at $19.99/TB/month
 - 100% enterprise infrastructure
 - SLA guarantees & compliance
