@@ -6,14 +6,14 @@ labels: implementation
 ---
 
 ## Step Number
-Step 
+Step
 
 ## Description
 
 
 ## Success Criteria
-- [ ] 
-- [ ] 
+- [ ]
+- [ ]
 
 ## Test Command
 ```bash

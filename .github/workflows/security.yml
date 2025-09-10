@@ -16,7 +16,7 @@ jobs:
       - uses: securego/gosec@master
         with:
           args: '-severity medium ./...'
-          
+
   trivy:
     runs-on: ubuntu-latest
     steps:
@@ -33,7 +33,7 @@ jobs:
         if: always()
         with:
           sarif_file: 'trivy-results.sarif'
-          
+
   dependencies:
     runs-on: ubuntu-latest
     steps:

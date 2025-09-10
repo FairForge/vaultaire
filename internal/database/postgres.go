@@ -265,3 +265,8 @@ func (p *Postgres) DeleteArtifact(ctx context.Context, tenantID, container, name
 
 	return nil
 }
+
+// DB returns the underlying database connection
+func (p *Postgres) DB() *sql.DB {
+	return p.db
+}

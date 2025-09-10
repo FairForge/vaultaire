@@ -6,7 +6,7 @@
    - Impact: Auth system bypassed
    - Fix: Connect PostgreSQL, run migrations
 
-## MEDIUM PRIORITY  
+## MEDIUM PRIORITY
 2. **Auth Validation Bypassed**
    - Location: internal/api/auth.go:45
    - Reason: No database for API key lookup

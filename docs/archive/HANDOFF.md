@@ -4,7 +4,7 @@
 
 ### What's Working:
 - ✅ S3 GET operation (Step 33)
-- ✅ S3 PUT operation (Step 34) 
+- ✅ S3 PUT operation (Step 34)
 - ✅ S3 DELETE operation (Step 35)
 - ✅ S3 LIST operation (Step 46)
 - ✅ Multi-tenancy with data isolation (Step 47)

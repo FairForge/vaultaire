@@ -357,13 +357,13 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 				break
 			}
 		}
-		reader.Close()
+		_ = reader.Close() // Error intentionally ignored
 	}
 
 	// Set the required headers
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("ETag", fmt.Sprintf("\"d41d8cd98f00b204e9800998ecf8427e\"")) // Mock ETag for now
+	w.Header().Set("ETag", "\"d41d8cd98f00b204e9800998ecf8427e\"") // Mock ETag for now
 	w.Header().Set("Last-Modified", time.Now().UTC().Format(time.RFC1123))
 	w.Header().Set("x-amz-storage-class", "STANDARD")
 
