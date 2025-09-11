@@ -28,6 +28,7 @@ type Server struct {
 	quotaManager QuotaManager
 
 	requestCount int64
+	testMode     bool
 	errorCount   int64
 	startTime    time.Time
 }

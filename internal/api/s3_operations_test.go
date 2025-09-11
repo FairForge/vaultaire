@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/FairForge/vaultaire/internal/drivers"
@@ -17,7 +18,7 @@ import (
 )
 
 func TestS3_PutAndGet_WithTenant(t *testing.T) {
-	logger := zap.NewNop()
+	logger, _ := zap.NewDevelopment()
 	eng := engine.NewEngine(logger)
 
 	// Create temp dir for storage
@@ -30,10 +31,16 @@ func TestS3_PutAndGet_WithTenant(t *testing.T) {
 	eng.AddDriver("local", driver)
 	eng.SetPrimary("local") // Assuming this method exists, or check the engine API
 
+	// Create the namespaced bucket directory
+	namespacedBucket := "test-tenant_test-bucket"
+	bucketPath := filepath.Join(tempDir, namespacedBucket)
+	err = os.MkdirAll(bucketPath, 0755)
+	require.NoError(t, err)
 	server := &Server{
-		logger: logger,
-		router: mux.NewRouter(),
-		engine: eng,
+		logger:   logger,
+		router:   mux.NewRouter(),
+		engine:   eng,
+		testMode: true,
 	}
 
 	server.router.PathPrefix("/").HandlerFunc(server.handleS3Request)
@@ -71,13 +78,14 @@ func TestS3_PutAndGet_WithTenant(t *testing.T) {
 }
 
 func TestS3_RequiresTenant(t *testing.T) {
-	logger := zap.NewNop()
+	logger, _ := zap.NewDevelopment()
 	eng := engine.NewEngine(logger)
 
 	server := &Server{
-		logger: logger,
-		router: mux.NewRouter(),
-		engine: eng,
+		logger:   logger,
+		router:   mux.NewRouter(),
+		engine:   eng,
+		testMode: true,
 	}
 
 	req := httptest.NewRequest("PUT", "/test-bucket/test.txt", nil)

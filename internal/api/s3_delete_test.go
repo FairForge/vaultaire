@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/FairForge/vaultaire/internal/drivers"
@@ -16,7 +17,7 @@ import (
 )
 
 func TestS3_DeleteObject(t *testing.T) {
-	logger := zap.NewNop()
+	logger, _ := zap.NewDevelopment()
 	eng := engine.NewEngine(logger)
 
 	// Setup storage
@@ -28,10 +29,16 @@ func TestS3_DeleteObject(t *testing.T) {
 	eng.AddDriver("local", driver)
 	eng.SetPrimary("local")
 
+	// Create the namespaced bucket directory that S3ToEngine expects
+	namespacedBucket := "test-tenant_test-bucket"
+	bucketPath := filepath.Join(tempDir, namespacedBucket)
+	err = os.MkdirAll(bucketPath, 0755)
+	require.NoError(t, err)
 	server := &Server{
-		logger: logger,
-		router: mux.NewRouter(),
-		engine: eng,
+		logger:   logger,
+		router:   mux.NewRouter(),
+		engine:   eng,
+		testMode: true,
 	}
 	server.router.PathPrefix("/").HandlerFunc(server.handleS3Request)
 
