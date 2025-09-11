@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/tenant"
@@ -269,6 +270,11 @@ func (a *S3ToEngine) HandleList(w http.ResponseWriter, r *http.Request, bucket, 
 		}
 		if _, err := fmt.Fprintf(w, "<Size>%d</Size>", artifact.Size); err != nil {
 			a.logger.Error("failed to write size", zap.Error(err))
+			return
+		}
+		if _, err := fmt.Fprintf(w, "<LastModified>%s</LastModified>",
+			time.Now().UTC().Format("2006-01-02T15:04:05.000Z")); err != nil {
+			a.logger.Error("failed to write last modified", zap.Error(err))
 			return
 		}
 		if _, err := w.Write([]byte("<StorageClass>STANDARD</StorageClass>")); err != nil {
