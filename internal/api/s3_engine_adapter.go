@@ -6,9 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/FairForge/vaultaire/internal/engine"
@@ -65,14 +63,9 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	reader, err := a.engine.Get(r.Context(), container, artifact)
 	if err != nil {
 		// Map engine errors to S3 errors
-		if strings.Contains(err.Error(), "no such file or directory") {
-			// Check if it's the container or artifact that's missing
-			containerPath := filepath.Join("/tmp/vaultaire", container)
-			if _, err := os.Stat(containerPath); os.IsNotExist(err) {
-				WriteS3Error(w, ErrNoSuchBucket, r.URL.Path, generateRequestID())
-			} else {
-				WriteS3Error(w, ErrNoSuchKey, r.URL.Path, generateRequestID())
-			}
+		if strings.Contains(err.Error(), "no such file or directory") ||
+			strings.Contains(err.Error(), "not found") {
+			WriteS3Error(w, ErrNoSuchKey, r.URL.Path, generateRequestID())
 		} else {
 			a.logger.Error("engine get failed",
 				zap.Error(err),
@@ -84,42 +77,18 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	}
 	defer func() { _ = reader.Close() }()
 
-	// Get file info for headers
-	filePath := filepath.Join("/tmp/vaultaire", container, artifact)
-	var fileInfo os.FileInfo
-	var etag string
-
-	if info, err := os.Stat(filePath); err == nil {
-		fileInfo = info
-		// Calculate simple ETag using SHA256
-		h := sha256.New()
-		h.Write([]byte(filePath))
-		etag = fmt.Sprintf("%x", h.Sum(nil))[:32] // Use first 32 chars for ETag
-	} else {
-		// Fallback if we can't stat
-		fileInfo = nil
-		etag = "unknown"
-	}
+	// Generate ETag from path (consistent across requests)
+	h := sha256.New()
+	h.Write([]byte(filepath.Join(container, artifact)))
+	etag := fmt.Sprintf("%x", h.Sum(nil))[:32]
 
 	// Set S3-compliant response headers
 	contentType := a.detectContentType(artifact)
 	w.Header().Set("Content-Type", contentType)
-
-	if fileInfo != nil {
-		w.Header().Set("Content-Length", strconv.FormatInt(fileInfo.Size(), 10))
-		w.Header().Set("Last-Modified", fileInfo.ModTime().UTC().Format(http.TimeFormat))
-	}
-
 	w.Header().Set("ETag", fmt.Sprintf(`"%s"`, etag))
 	w.Header().Set("x-amz-request-id", generateRequestID())
 	w.Header().Set("x-amz-version-id", "null")
 	w.Header().Set("Accept-Ranges", "bytes")
-
-	// Handle range requests if present
-	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
-		a.handleRangeRequest(w, r, reader, fileInfo, rangeHeader)
-		return
-	}
 
 	// Stream the content
 	written, err := io.Copy(w, reader)
@@ -131,7 +100,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		return
 	}
 
-	// Log successful retrieval for ML
+	// Log successful retrieval
 	a.logger.Info("artifact retrieved",
 		zap.String("s3.bucket", bucket),
 		zap.String("s3.object", object),
@@ -163,82 +132,6 @@ func (a *S3ToEngine) detectContentType(artifact string) string {
 		return mime
 	}
 	return "application/octet-stream"
-}
-
-// handleRangeRequest handles partial content requests
-func (a *S3ToEngine) handleRangeRequest(w http.ResponseWriter, r *http.Request,
-	reader io.ReadCloser, fileInfo os.FileInfo, rangeHeader string) {
-
-	// Parse range header
-	if !strings.HasPrefix(rangeHeader, "bytes=") {
-		http.Error(w, "Invalid range", http.StatusRequestedRangeNotSatisfiable)
-		return
-	}
-
-	rangeSpec := strings.TrimPrefix(rangeHeader, "bytes=")
-	parts := strings.Split(rangeSpec, "-")
-
-	var start, end int64
-	var err error
-
-	if parts[0] != "" {
-		start, err = strconv.ParseInt(parts[0], 10, 64)
-		if err != nil {
-			http.Error(w, "Invalid range", http.StatusRequestedRangeNotSatisfiable)
-			return
-		}
-	}
-
-	size := int64(-1)
-	if fileInfo != nil {
-		size = fileInfo.Size()
-	}
-
-	if len(parts) > 1 && parts[1] != "" {
-		end, err = strconv.ParseInt(parts[1], 10, 64)
-		if err != nil {
-			http.Error(w, "Invalid range", http.StatusRequestedRangeNotSatisfiable)
-			return
-		}
-	} else if size > 0 {
-		end = size - 1
-	} else {
-		http.Error(w, "Cannot determine range without size", http.StatusRequestedRangeNotSatisfiable)
-		return
-	}
-
-	// Validate range
-	if start < 0 || (size > 0 && end >= size) || start > end {
-		http.Error(w, "Range not satisfiable", http.StatusRequestedRangeNotSatisfiable)
-		return
-	}
-
-	// Try to seek if the reader supports it
-	if seeker, ok := reader.(io.ReadSeeker); ok {
-		if _, err := seeker.Seek(start, io.SeekStart); err != nil {
-			a.logger.Error("failed to seek", zap.Error(err))
-			http.Error(w, "Internal error", http.StatusInternalServerError)
-			return
-		}
-	} else {
-		// If can't seek, skip bytes
-		if _, err := io.CopyN(io.Discard, reader, start); err != nil {
-			a.logger.Error("failed to skip to range start", zap.Error(err))
-			http.Error(w, "Internal error", http.StatusInternalServerError)
-			return
-		}
-	}
-
-	// Set partial content headers
-	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, size))
-	w.Header().Set("Content-Length", strconv.FormatInt(end-start+1, 10))
-	w.WriteHeader(http.StatusPartialContent)
-
-	// Copy the requested range
-	_, err = io.CopyN(w, reader, end-start+1)
-	if err != nil && err != io.EOF {
-		a.logger.Error("failed to copy range", zap.Error(err))
-	}
 }
 
 // HandlePut processes S3 PUT requests using the engine
@@ -275,14 +168,14 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	// Calculate ETag using SHA256 of the path
 	h := sha256.New()
 	h.Write([]byte(filepath.Join(container, artifact)))
-	etag := fmt.Sprintf("%x", h.Sum(nil))[:32] // Use first 32 chars for ETag
+	etag := fmt.Sprintf("%x", h.Sum(nil))[:32]
 
 	// Return S3-compliant response
 	w.Header().Set("ETag", fmt.Sprintf(`"%s"`, etag))
 	w.Header().Set("x-amz-request-id", generateRequestID())
 	w.WriteHeader(http.StatusOK)
 
-	// Log successful upload for ML
+	// Log successful upload
 	a.logger.Info("artifact stored",
 		zap.String("tenant_id", t.ID),
 		zap.String("s3.bucket", bucket),
@@ -306,6 +199,13 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 	container := t.NamespaceContainer(bucket)
 
 	if err := a.engine.Delete(r.Context(), container, object); err != nil {
+		// Check if it's a not found error
+		if strings.Contains(err.Error(), "no such file or directory") ||
+			strings.Contains(err.Error(), "not found") {
+			// For S3 compatibility, DELETE of non-existent object is still success
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		a.logger.Error("delete failed",
 			zap.String("container", container),
 			zap.String("artifact", object),
@@ -331,7 +231,7 @@ func (a *S3ToEngine) HandleList(w http.ResponseWriter, r *http.Request, bucket, 
 	// List using engine with tenant namespace
 	container := t.NamespaceContainer(bucket)
 
-	artifacts, err := a.engine.List(r.Context(), container, "")
+	artifacts, err := a.engine.List(r.Context(), container, prefix)
 	if err != nil {
 		a.logger.Error("list failed",
 			zap.String("container", container),
