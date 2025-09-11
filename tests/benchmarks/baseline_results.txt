@@ -1,0 +1,72 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FairForge/vaultaire/tests/benchmarks
+cpu: Apple M1 Pro
+BenchmarkS3Latency/1KB-10         	   75663	    184003 ns/op	    4924 B/op	      62 allocs/op
+--- BENCH: BenchmarkS3Latency/1KB-10
+    latency_bench_test.go:43: Size: 1KB - P50: 3.908875ms, P95: 3.908875ms, P99: 3.908875ms
+    latency_bench_test.go:43: Size: 1KB - P50: 338.833µs, P95: 684.666µs, P99: 945.833µs
+    latency_bench_test.go:43: Size: 1KB - P50: 135.25µs, P95: 238.875µs, P99: 506.542µs
+    latency_bench_test.go:43: Size: 1KB - P50: 138.75µs, P95: 321.666µs, P99: 834.542µs
+BenchmarkS3Latency/100KB-10       	   54673	    261528 ns/op	   38161 B/op	      65 allocs/op
+--- BENCH: BenchmarkS3Latency/100KB-10
+    latency_bench_test.go:43: Size: 100KB - P50: 687.75µs, P95: 687.75µs, P99: 687.75µs
+    latency_bench_test.go:43: Size: 100KB - P50: 227.292µs, P95: 678.375µs, P99: 1.877ms
+    latency_bench_test.go:43: Size: 100KB - P50: 222.625µs, P95: 1.232083ms, P99: 2.335291ms
+    latency_bench_test.go:43: Size: 100KB - P50: 185.416µs, P95: 322.084µs, P99: 689.917µs
+    latency_bench_test.go:43: Size: 100KB - P50: 188.375µs, P95: 609.167µs, P99: 1.50125ms
+BenchmarkS3Latency/1024KB-10      	   17343	    581373 ns/op	   38573 B/op	      65 allocs/op
+--- BENCH: BenchmarkS3Latency/1024KB-10
+    latency_bench_test.go:43: Size: 1024KB - P50: 567.834µs, P95: 567.834µs, P99: 567.834µs
+    latency_bench_test.go:43: Size: 1024KB - P50: 493.458µs, P95: 1.730875ms, P99: 3.245333ms
+    latency_bench_test.go:43: Size: 1024KB - P50: 487.75µs, P95: 2.15275ms, P99: 3.419458ms
+    latency_bench_test.go:43: Size: 1024KB - P50: 474.125µs, P95: 784.291µs, P99: 2.645ms
+BenchmarkS3Upload/1KB-10          	   69300	    242982 ns/op	   4.21 MB/s	    5669 B/op	      67 allocs/op
+BenchmarkS3Upload/100KB-10        	   43996	    248563 ns/op	 411.97 MB/s	   38879 B/op	      70 allocs/op
+BenchmarkS3Upload/1024KB-10       	   19168	    599937 ns/op	1747.81 MB/s	   39279 B/op	      70 allocs/op
+BenchmarkS3Download-10            	   22740	    536622 ns/op	1954.03 MB/s	    4694 B/op	      64 allocs/op
+BenchmarkS3List-10                	      19	 806172193 ns/op	    5205 B/op	      58 allocs/op
+BenchmarkS3ConcurrentUpload/concurrent-1-10         	  108333	    184028 ns/op	 556.44 MB/s	   45223 B/op	      82 allocs/op
+BenchmarkS3ConcurrentUpload/concurrent-10-10        	--- FAIL: BenchmarkS3ConcurrentUpload/concurrent-10-10
+    s3_operations_bench_test.go:72: Put "http://localhost:8000/bench-bucket/concurrent-326.bin": dial tcp [::1]:8000: connect: resource temporarily unavailable
+    s3_operations_bench_test.go:72: Put "http://localhost:8000/bench-bucket/concurrent-352.bin": dial tcp [::1]:8000: connect: resource temporarily unavailable
+    s3_operations_bench_test.go:72: Put "http://localhost:8000/bench-bucket/concurrent-354.bin": dial tcp [::1]:8000: connect: resource temporarily unavailable
+    s3_operations_bench_test.go:72: Put "http://localhost:8000/bench-bucket/concurrent-350.bin": dial tcp [::1]:8000: connect: resource temporarily unavailable
+    s3_operations_bench_test.go:72: Put "http://localhost:8000/bench-bucket/concurrent-351.bin": dial tcp [::1]:8000: connect: resource temporarily unavailable
+    s3_operations_bench_test.go:72: Put "http://localhost:8000/bench-bucket/concurrent-349.bin": dial tcp [::1]:8000: connect: resource temporarily unavailable
+    s3_operations_bench_test.go:72: Put "http://localhost:8000/bench-bucket/concurrent-361.bin": dial tcp [::1]:8000: connect: resource temporarily unavailable
+    s3_operations_bench_test.go:72: Put "http://localhost:8000/bench-bucket/concurrent-485.bin": dial tcp [::1]:8000: connect: resource temporarily unavailable
+BenchmarkS3ConcurrentUpload/concurrent-50-10        	--- FAIL: BenchmarkS3ConcurrentUpload/concurrent-50-10
+    s3_operations_bench_test.go:72: Put "http://localhost:8000/bench-bucket/concurrent-0.bin": dial tcp [::1]:8000: connect: resource temporarily unavailable
+    s3_operations_bench_test.go:72: Put "http://localhost:8000/bench-bucket/concurrent-1.bin": dial tcp [::1]:8000: connect: resource temporarily unavailable
+    s3_operations_bench_test.go:72: Put "http://localhost:8000/bench-bucket/concurrent-1.bin": dial tcp [::1]:8000: connect: resource temporarily unavailable
+    s3_operations_bench_test.go:72: Put "http://localhost:8000/bench-bucket/concurrent-0.bin": dial tcp [::1]:8000: connect: resource temporarily unavailable
+    s3_operations_bench_test.go:72: Put "http://localhost:8000/bench-bucket/concurrent-1.bin": dial tcp [::1]:8000: connect: resource temporarily unavailable
+    s3_operations_bench_test.go:72: Put "http://localhost:8000/bench-bucket/concurrent-0.bin": dial tcp [::1]:8000: connect: resource temporarily unavailable
+    s3_operations_bench_test.go:72: Put "http://localhost:8000/bench-bucket/concurrent-0.bin": dial tcp [::1]:8000: connect: resource temporarily unavailable
+    s3_operations_bench_test.go:72: Put "http://localhost:8000/bench-bucket/concurrent-7.bin": dial tcp [::1]:8000: connect: resource temporarily unavailable
+BenchmarkS3ConcurrentUpload/concurrent-100-10       	--- FAIL: BenchmarkS3ConcurrentUpload/concurrent-100-10
+    s3_operations_bench_test.go:72: Put "http://localhost:8000/bench-bucket/concurrent-1.bin": dial tcp [::1]:8000: connect: resource temporarily unavailable
+    s3_operations_bench_test.go:72: Put "http://localhost:8000/bench-bucket/concurrent-0.bin": dial tcp [::1]:8000: connect: resource temporarily unavailable
+    s3_operations_bench_test.go:72: Put "http://localhost:8000/bench-bucket/concurrent-0.bin": dial tcp [::1]:8000: connect: resource temporarily unavailable
+    s3_operations_bench_test.go:72: Put "http://localhost:8000/bench-bucket/concurrent-1.bin": dial tcp [::1]:8000: connect: resource temporarily unavailable
+    s3_operations_bench_test.go:72: Put "http://localhost:8000/bench-bucket/concurrent-1.bin": dial tcp [::1]:8000: connect: resource temporarily unavailable
+    s3_operations_bench_test.go:72: Put "http://localhost:8000/bench-bucket/concurrent-0.bin": dial tcp [::1]:8000: connect: resource temporarily unavailable
+    s3_operations_bench_test.go:72: Put "http://localhost:8000/bench-bucket/concurrent-0.bin": dial tcp [::1]:8000: connect: resource temporarily unavailable
+    s3_operations_bench_test.go:72: Put "http://localhost:8000/bench-bucket/concurrent-3.bin": dial tcp [::1]:8000: connect: resource temporarily unavailable
+--- FAIL: BenchmarkS3ConcurrentUpload
+FAIL
+exit status 1
+FAIL	github.com/FairForge/vaultaire/tests/benchmarks	177.504s
+FAIL
+
+## Analysis Summary
+- Sequential performance: Excellent (1.7-1.9 GB/s)
+- Latency: Good (sub-ms P50, low ms P99)
+- Concurrent connections: ISSUE - fails at 10+ concurrent
+- LIST operation: ISSUE - 806ms (needs optimization)
+
+## Next Steps
+- Fix connection pool limits
+- Optimize LIST operation
+- Test with connection pooling in clients
