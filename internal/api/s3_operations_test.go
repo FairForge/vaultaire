@@ -17,7 +17,7 @@ import (
 )
 
 func TestS3_PutAndGet_WithTenant(t *testing.T) {
-	logger := zap.NewNop()
+	logger, _ := zap.NewDevelopment()
 	eng := engine.NewEngine(logger)
 
 	// Create temp dir for storage
@@ -71,7 +71,7 @@ func TestS3_PutAndGet_WithTenant(t *testing.T) {
 }
 
 func TestS3_RequiresTenant(t *testing.T) {
-	logger := zap.NewNop()
+	logger, _ := zap.NewDevelopment()
 	eng := engine.NewEngine(logger)
 
 	server := &Server{
