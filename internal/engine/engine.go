@@ -120,11 +120,23 @@ func (e *CoreEngine) Get(ctx context.Context, container, artifact string) (io.Re
 }
 
 func (e *CoreEngine) selectBackendForRead(ctx context.Context, _ string) string {
+	// If cost optimizer is not configured, use primary
+	if e.costOptimizer == nil {
+		return e.primary
+	}
+
 	// Estimate size (would be from metadata in production)
 	estimatedSize := int64(10 * 1024 * 1024) // 10MB default
 
 	// Get cost-optimal backend
-	return e.costOptimizer.SelectOptimal(ctx, "GET", estimatedSize)
+	backend := e.costOptimizer.SelectOptimal(ctx, "GET", estimatedSize)
+
+	// If optimizer returns empty, fallback to primary
+	if backend == "" {
+		return e.primary
+	}
+
+	return backend
 }
 
 // Put stores an artifact (S3 PutObject)
