@@ -1,3 +1,4 @@
+// internal/api/s3.go
 package api
 
 import (
@@ -189,26 +190,43 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate the request signature FIRST
-	auth := NewAuth(s.db, s.logger) // Create auth instance
-	tenantID, err := auth.ValidateRequest(r)
-	if err != nil {
-		s.logger.Error("authentication failed",
-			zap.Error(err),
-			zap.String("path", r.URL.Path))
+	var tenantID string
+	var err error
 
-		// Return S3-style authentication error
-		w.Header().Set("Content-Type", "application/xml")
-		w.WriteHeader(http.StatusForbidden)
-		if _, err := fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?>
+	// Check if we're in test mode
+	if !s.testMode {
+		// Production mode: validate the request signature
+		auth := NewAuth(s.db, s.logger)
+		tenantID, err = auth.ValidateRequest(r)
+		if err != nil {
+			s.logger.Error("authentication failed",
+				zap.Error(err),
+				zap.String("path", r.URL.Path))
+
+			// Return S3-style authentication error
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(http.StatusForbidden)
+			if _, err := fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?>
 <Error>
     <Code>SignatureDoesNotMatch</Code>
     <Message>%s</Message>
     <RequestId>%d</RequestId>
 </Error>`, err.Error(), time.Now().UnixNano()); err != nil {
-			s.logger.Error("failed to write response", zap.Error(err))
+				s.logger.Error("failed to write response", zap.Error(err))
+			}
+			return
 		}
-		return
+	} else {
+		// Test mode: check if tenant is already in context
+		if t, err := tenant.FromContext(r.Context()); err == nil && t != nil {
+			tenantID = t.ID
+		} else {
+			// Default to "test" tenant for tests
+			tenantID = "test"
+		}
+		s.logger.Debug("test mode - skipping auth",
+			zap.String("tenant_id", tenantID),
+			zap.String("path", r.URL.Path))
 	}
 
 	// Log authentication status
@@ -241,15 +259,36 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		tenantID = "default"
 	}
 
-	t := &tenant.Tenant{
-		ID:                tenantID,
-		Namespace:         fmt.Sprintf("tenant/%s/", tenantID),
-		Plan:              "starter",
-		Status:            "active",
-		StorageQuota:      100 * 1024 * 1024 * 1024,
-		RequestsPerSecond: 100,
+	// Use existing tenant from context in test mode, or create new one
+	var t *tenant.Tenant
+	if s.testMode {
+		// Try to get tenant from context first
+		if existingTenant, err := tenant.FromContext(r.Context()); err == nil && existingTenant != nil {
+			t = existingTenant
+		} else {
+			// Create a test tenant
+			t = &tenant.Tenant{
+				ID:                tenantID,
+				Namespace:         fmt.Sprintf("tenant/%s/", tenantID),
+				Plan:              "starter",
+				Status:            "active",
+				StorageQuota:      100 * 1024 * 1024 * 1024,
+				RequestsPerSecond: 100,
+			}
+		}
+	} else {
+		// Production mode: create tenant normally
+		t = &tenant.Tenant{
+			ID:                tenantID,
+			Namespace:         fmt.Sprintf("tenant/%s/", tenantID),
+			Plan:              "starter",
+			Status:            "active",
+			StorageQuota:      100 * 1024 * 1024 * 1024,
+			RequestsPerSecond: 100,
+		}
 	}
-	// Add tenant to request context
+
+	// Add tenant to request context if not already there
 	ctx := tenant.WithTenant(r.Context(), t)
 	r = r.WithContext(ctx)
 
