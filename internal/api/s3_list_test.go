@@ -39,9 +39,10 @@ func TestS3_ListObjects(t *testing.T) {
 	eng.SetPrimary("local")
 
 	server := &Server{
-		logger: logger,
-		router: mux.NewRouter(),
-		engine: eng,
+		logger:   logger,
+		router:   mux.NewRouter(),
+		engine:   eng,
+		testMode: true,
 	}
 	server.router.PathPrefix("/").HandlerFunc(server.handleS3Request)
 
