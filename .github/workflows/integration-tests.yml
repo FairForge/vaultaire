@@ -1,0 +1,73 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  integration-tests:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: vaultaire
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+
+    - name: Install dependencies
+      run: |
+        go mod download
+        go install github.com/k6io/k6@latest
+
+    - name: Run unit tests
+      run: go test -v ./...
+
+    - name: Start server
+      run: |
+        go build -o vaultaire cmd/vaultaire/main.go
+        ./vaultaire &
+        sleep 5
+      env:
+        DATABASE_URL: postgres://postgres:postgres@localhost/vaultaire?sslmode=disable
+
+    - name: Run benchmarks
+      run: go test -bench=. -benchtime=10s ./tests/benchmarks/
+      continue-on-error: true
+
+    - name: Run k6 load tests
+      run: |
+        k6 run --quiet tests/k6/s3_basic_load.js
+      continue-on-error: true
+
+    - name: Run chaos tests
+      run: |
+        ./tests/chaos/basic_chaos_test.sh
+        go test ./tests/chaos/
+      continue-on-error: true
+
+    - name: Upload test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-results
+        path: |
+          tests/benchmarks/baseline_results.txt
+          tests/k6/*.json
