@@ -16,7 +16,7 @@ import (
 )
 
 func TestS3_DeleteObject(t *testing.T) {
-	logger := zap.NewNop()
+	logger, _ := zap.NewDevelopment()
 	eng := engine.NewEngine(logger)
 
 	// Setup storage
