@@ -64,3 +64,8 @@ vaultaire
 .env
 .env.production
 .private/
+
+# Large test files
+test-*.bin
+tests/k6/*.json
+tests/k6/results/
