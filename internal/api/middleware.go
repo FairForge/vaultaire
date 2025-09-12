@@ -1,5 +1,8 @@
 package api
 
+type contextKey string
+
+const tenantIDKey contextKey = "tenant_id"
 import (
 	"context"
 	"database/sql"
@@ -74,7 +77,7 @@ func ExtractTenant(db *sql.DB, logger *zap.Logger) func(http.Handler) http.Handl
 				tenantID = "test-tenant"
 			}
 
-			ctx := context.WithValue(r.Context(), "tenant_id", tenantID)
+			ctx := context.WithValue(r.Context(), tenantIDKey, tenantID)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

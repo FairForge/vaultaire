@@ -120,7 +120,7 @@ func (p *PersistentCache) SaveToDisk() error {
 	if err != nil {
 		return fmt.Errorf("create cache file: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	encoder := gob.NewEncoder(file)
 
@@ -142,7 +142,7 @@ func (p *PersistentCache) LoadFromDisk() error {
 		}
 		return fmt.Errorf("open cache file: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	decoder := gob.NewDecoder(file)
 	var items map[string][]byte
@@ -198,7 +198,7 @@ type InvalidationAPI struct {
 
 // InvalidateKey removes a specific key
 func (api *InvalidationAPI) InvalidateKey(container, artifact string) error {
-	return api.cache.Delete(nil, container, artifact)
+	return api.cache.Delete(context.TODO(), container, artifact)
 }
 
 // InvalidatePattern removes keys matching pattern
