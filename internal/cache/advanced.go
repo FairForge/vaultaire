@@ -14,7 +14,7 @@ import (
 
 // Step 204: Cache Warming
 type CacheWarmer struct {
-	cache  *SizedLRU
+	//nolint:unused // Reserved for future metrics implementation	// TODO: Following fields reserved for future metrics implementation	cache  *SizedLRU
 	loader func(key string) ([]byte, error)
 }
 
