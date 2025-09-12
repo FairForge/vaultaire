@@ -55,23 +55,17 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	}
 
 	// Add ALL middleware BEFORE any routes
-	if db != nil {
-		// 		s.router.Use(ExtractTenant(db, logger))
-	}
 
 	// Add logging middleware
 	s.router.Use(s.loggingMiddleware)
-
-	if db != nil {
-	}
 
 	// Now set up routes (no middleware should be added in setupRoutes)
 	s.setupRoutes()
 
 	// Add auth routes after main routes
 	if db != nil {
-		// 		authHandler := NewAuthHandler(db, logger)
-		// 		// 		s.router.Post("/auth/register", s.handleRegister)
+		authHandler := NewAuthHandler(db, logger)
+		s.router.Post("/auth/register", authHandler.Register)
 	}
 
 	s.httpServer = &http.Server{

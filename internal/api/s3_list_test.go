@@ -10,7 +10,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/tenant"
-	"github.com/gorilla/mux"
+	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -40,11 +40,11 @@ func TestS3_ListObjects(t *testing.T) {
 
 	server := &Server{
 		logger:   logger,
-		router:   mux.NewRouter(),
+		router:   chi.NewRouter(),
 		engine:   eng,
 		testMode: true,
 	}
-	server.router.PathPrefix("/").HandlerFunc(server.handleS3Request)
+	server.router.HandleFunc("/", server.handleS3Request)
 
 	testTenant := &tenant.Tenant{
 		ID:        "test-tenant",

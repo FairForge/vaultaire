@@ -260,12 +260,12 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 
 	// Return S3-compatible credentials
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"accessKeyId":"%s","secretAccessKey":"%s","endpoint":"http://localhost:8000"}`,
+	_, _ = fmt.Fprintf(w, `{"accessKeyId":"%s","secretAccessKey":"%s","endpoint":"http://localhost:8000"}`,
 		accessKey, secretKey)
 }
 
 func generateID() string {
 	h := sha256.New()
-	fmt.Fprintf(h, "%d-%d", time.Now().UnixNano(), rand.Int())
+	_, _ = fmt.Fprintf(h, "%d-%d", time.Now().UnixNano(), rand.Int())
 	return hex.EncodeToString(h.Sum(nil))[:8]
 }

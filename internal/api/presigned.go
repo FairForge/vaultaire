@@ -11,7 +11,7 @@ import (
 
 func generateToken() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	_ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
 
@@ -26,7 +26,7 @@ func (s *Server) handleGetPresignedURL(w http.ResponseWriter, r *http.Request) {
 		time.Now().Add(time.Hour).Unix())
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
+	_ = json.NewEncoder(w).Encode(map[string]string{
 		"url":     publicURL,
 		"expires": time.Now().Add(time.Hour).Format(time.RFC3339),
 	})

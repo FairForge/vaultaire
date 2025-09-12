@@ -17,7 +17,7 @@ func (s *Server) handleInitiateMultipartUpload(w http.ResponseWriter, r *http.Re
 </InitiateMultipartUploadResult>`, bucket, object, uploadID)
 
 	w.Header().Set("Content-Type", "application/xml")
-	w.Write([]byte(response))
+	_, _ = w.Write([]byte(response))
 }
 
 func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Request, bucket, object string) {
@@ -31,5 +31,5 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 </CompleteMultipartUploadResult>`, bucket, object, bucket, object)
 
 	w.Header().Set("Content-Type", "application/xml")
-	w.Write([]byte(response))
+	_, _ = w.Write([]byte(response))
 }
