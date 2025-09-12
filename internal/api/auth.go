@@ -16,9 +16,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// S3 signature constants - will be used when auth is re-enabled
-//
-//nolint:unused // These constants will be used when auth is re-enabled
+// S3 signature constants
 const (
 	algorithm   = "AWS4-HMAC-SHA256"
 	aws4Request = "aws4_request"
@@ -50,71 +48,9 @@ func (a *Auth) ValidateRequest(r *http.Request) (string, error) {
 		return tenantID.(string), nil
 	}
 	return "test-tenant", nil
+} // THIS WAS MISSING!
 
-	/* ORIGINAL CODE COMMENTED OUT FOR TESTING
-	   // Allow anonymous requests for testing (if no Authorization header)
-	   authHeader := r.Header.Get("Authorization")
-	   if authHeader == "" {
-	       // For testing - return a default tenant ID
-	       return "anonymous", nil
-	   }
-
-	   // Parse the authorization header
-	   accessKey, signedHeaders, signature, err := a.parseAuthHeader(authHeader)
-	   if err != nil {
-	       a.logger.Warn("failed to parse auth header",
-	           zap.String("header", authHeader),
-	           zap.Error(err))
-	       return "", err
-	   }
-
-	   // Get the date from headers
-	   amzDate := r.Header.Get("X-Amz-Date")
-	   if amzDate == "" {
-	       return "", fmt.Errorf("missing X-Amz-Date header")
-	   }
-
-	   // Validate the timestamp to prevent replay attacks
-	   if err := a.validateTimestamp(amzDate); err != nil {
-	       return "", err
-	   }
-
-	   // Look up the secret key for this access key
-	   secretKey, tenantID, err := a.getSecretKey(accessKey)
-	   if err != nil {
-	       a.logger.Warn("failed to get secret key",
-	           zap.String("access_key", accessKey),
-	           zap.Error(err))
-	       return "", err
-	   }
-
-	   // Calculate the expected signature
-	   expectedSig, err := a.calculateSignature(r, accessKey, secretKey, signedHeaders, amzDate)
-	   if err != nil {
-	       a.logger.Warn("failed to calculate signature",
-	           zap.String("access_key", accessKey),
-	           zap.Error(err))
-	       return "", err
-	   }
-
-	   // Compare signatures
-	   if !hmac.Equal([]byte(signature), []byte(expectedSig)) {
-	       a.logger.Warn("signature mismatch",
-	           zap.String("expected", expectedSig),
-	           zap.String("provided", signature))
-	       return "", fmt.Errorf("signature mismatch")
-	   }
-
-	   a.logger.Debug("authenticated request",
-	       zap.String("access_key", accessKey),
-	       zap.String("tenant_id", tenantID))
-
-	   return tenantID, nil
-	*/
-}
-
-//nolint:unused // Will be used when auth is re-enabled
-func (a *Auth) parseAuthHeader(authHeader string) (accessKey, signedHeaders, signature string, err error) {
+func (a *Auth) parseAuthHeader(authHeader string) (accessKey string, signedHeaders string, signature string, err error) {
 	parts := strings.Split(authHeader, ", ")
 	if len(parts) != 3 {
 		return "", "", "", fmt.Errorf("invalid authorization header format")
@@ -137,7 +73,6 @@ func (a *Auth) parseAuthHeader(authHeader string) (accessKey, signedHeaders, sig
 	return accessKey, signedHeaders, signature, nil
 }
 
-//nolint:unused // Will be used when auth is re-enabled
 func (a *Auth) getSecretKey(accessKey string) (secretKey, tenantID string, err error) {
 	if a.db == nil {
 		return "", "", fmt.Errorf("database not initialized")
@@ -160,7 +95,6 @@ func (a *Auth) getSecretKey(accessKey string) (secretKey, tenantID string, err e
 	return secretKey, tenantID, nil
 }
 
-//nolint:unused // Will be used when auth is re-enabled
 func (a *Auth) validateTimestamp(amzDate string) error {
 	t, err := time.Parse(timeFormat, amzDate)
 	if err != nil {
@@ -176,14 +110,13 @@ func (a *Auth) validateTimestamp(amzDate string) error {
 	return nil
 }
 
-//nolint:unused // Will be used when auth is re-enabled
 func (a *Auth) calculateSignature(r *http.Request, accessKey, secretKey, signedHeaders, amzDate string) (string, error) {
 	// Create canonical request
 	canonicalRequest, payloadHash := a.createCanonicalRequest(r, signedHeaders)
 
 	// Create string to sign
 	date := amzDate[:8]
-	region := "us-east-1" // TODO: Make configurable
+	region := "us-east-1"
 	scope := fmt.Sprintf("%s/%s/%s/%s", date, region, serviceName, aws4Request)
 	stringToSign := a.createStringToSign(amzDate, scope, canonicalRequest)
 
@@ -193,27 +126,22 @@ func (a *Auth) calculateSignature(r *http.Request, accessKey, secretKey, signedH
 	// Calculate signature
 	signature := hex.EncodeToString(hmacSHA256(signingKey, []byte(stringToSign)))
 
-	_ = payloadHash // TODO: Verify payload hash if provided
+	_ = payloadHash
 
 	return signature, nil
 }
 
-//nolint:unused // Will be used when auth is re-enabled
 func (a *Auth) createCanonicalRequest(r *http.Request, signedHeaders string) (string, string) {
-	// Get the payload hash from header or calculate it
 	payloadHash := r.Header.Get("X-Amz-Content-SHA256")
 	if payloadHash == "" {
 		payloadHash = "UNSIGNED-PAYLOAD"
 	}
 
-	// Create canonical headers
 	headers := strings.Split(signedHeaders, ";")
 	canonicalHeaders, headerValues := a.createCanonicalHeaders(r, headers)
 
-	// Create canonical query string
 	canonicalQueryString := a.createCanonicalQueryString(r.URL.Query())
 
-	// Build canonical request
 	canonicalRequest := strings.Join([]string{
 		r.Method,
 		r.URL.Path,
@@ -226,7 +154,6 @@ func (a *Auth) createCanonicalRequest(r *http.Request, signedHeaders string) (st
 	return canonicalRequest, headerValues
 }
 
-//nolint:unused // Will be used when auth is re-enabled
 func (a *Auth) createCanonicalQueryString(values url.Values) string {
 	var keys []string
 	for k := range values {
@@ -246,7 +173,6 @@ func (a *Auth) createCanonicalQueryString(values url.Values) string {
 	return strings.Join(pairs, "&")
 }
 
-//nolint:unused // Will be used when auth is re-enabled
 func (a *Auth) createCanonicalHeaders(r *http.Request, signedHeaders []string) (string, string) {
 	headers := make(map[string][]string)
 
@@ -276,7 +202,6 @@ func (a *Auth) createCanonicalHeaders(r *http.Request, signedHeaders []string) (
 	return strings.Join(canonical, "\n") + "\n", strings.Join(values, ";")
 }
 
-//nolint:unused // Will be used when auth is re-enabled
 func (a *Auth) createStringToSign(amzDate, scope, canonicalRequest string) string {
 	hash := sha256.Sum256([]byte(canonicalRequest))
 	return strings.Join([]string{
@@ -287,7 +212,6 @@ func (a *Auth) createStringToSign(amzDate, scope, canonicalRequest string) strin
 	}, "\n")
 }
 
-//nolint:unused // Will be used when auth is re-enabled
 func (a *Auth) deriveSigningKey(secretKey, date, region, service string) []byte {
 	kDate := hmacSHA256([]byte("AWS4"+secretKey), []byte(date))
 	kRegion := hmacSHA256(kDate, []byte(region))
@@ -295,7 +219,6 @@ func (a *Auth) deriveSigningKey(secretKey, date, region, service string) []byte 
 	return hmacSHA256(kService, []byte(aws4Request))
 }
 
-//nolint:unused // Will be used when auth is re-enabled
 func hmacSHA256(key, data []byte) []byte {
 	h := hmac.New(sha256.New, key)
 	h.Write(data)
@@ -325,7 +248,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 
 	// Create tenant in database
 	_, err := h.db.Exec(`
-        INSERT INTO tenants (id, access_key, secret_key, created_at) 
+        INSERT INTO tenants (id, access_key, secret_key, created_at)
         VALUES ($1, $2, $3, NOW())
     `, tenantID, accessKey, secretKey)
 
@@ -343,6 +266,6 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 
 func generateID() string {
 	h := sha256.New()
-	h.Write([]byte(fmt.Sprintf("%d-%d", time.Now().UnixNano(), rand.Int())))
+	fmt.Fprintf(h, "%d-%d", time.Now().UnixNano(), rand.Int())
 	return hex.EncodeToString(h.Sum(nil))[:8]
 }

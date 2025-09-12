@@ -71,7 +71,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// Add auth routes after main routes
 	if db != nil {
 		// 		authHandler := NewAuthHandler(db, logger)
-		s.router.Post("/auth/register", authHandler.Register)
+		// 		// 		s.router.Post("/auth/register", s.handleRegister)
 	}
 
 	s.httpServer = &http.Server{
