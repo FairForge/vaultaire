@@ -1,8 +1,4 @@
 package api
-
-type contextKey string
-
-const tenantIDKey contextKey = "tenant_id"
 import (
 	"context"
 	"database/sql"

@@ -11,7 +11,7 @@ import (
 
 func generateToken() string {
 	b := make([]byte, 16)
-	_ = rand.Read(b)
+	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
 
