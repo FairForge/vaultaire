@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"sort"
@@ -44,6 +45,10 @@ func NewAuth(db *sql.DB, logger *zap.Logger) *Auth {
 // ValidateRequest validates an S3 request signature
 func (a *Auth) ValidateRequest(r *http.Request) (string, error) {
 	// TEMPORARY: Bypass auth for testing
+	// For now, validate from context
+	if tenantID := r.Context().Value("tenant_id"); tenantID != nil {
+		return tenantID.(string), nil
+	}
 	return "test-tenant", nil
 
 	/* ORIGINAL CODE COMMENTED OUT FOR TESTING
@@ -295,4 +300,49 @@ func hmacSHA256(key, data []byte) []byte {
 	h := hmac.New(sha256.New, key)
 	h.Write(data)
 	return h.Sum(nil)
+}
+
+// AuthHandler handles authentication endpoints
+type AuthHandler struct {
+	db     *sql.DB
+	logger *zap.Logger
+}
+
+// NewAuthHandler creates a new auth handler
+func NewAuthHandler(db *sql.DB, logger *zap.Logger) *AuthHandler {
+	return &AuthHandler{
+		db:     db,
+		logger: logger,
+	}
+}
+
+// Register creates a new tenant account
+func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
+	// Generate credentials
+	accessKey := "AK" + generateID()
+	secretKey := "SK" + generateID() + generateID()
+	tenantID := "tenant-" + generateID()
+
+	// Create tenant in database
+	_, err := h.db.Exec(`
+        INSERT INTO tenants (id, access_key, secret_key, created_at) 
+        VALUES ($1, $2, $3, NOW())
+    `, tenantID, accessKey, secretKey)
+
+	if err != nil {
+		h.logger.Error("failed to create tenant", zap.Error(err))
+		http.Error(w, "Failed to create account", http.StatusInternalServerError)
+		return
+	}
+
+	// Return S3-compatible credentials
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"accessKeyId":"%s","secretAccessKey":"%s","endpoint":"http://localhost:8000"}`,
+		accessKey, secretKey)
+}
+
+func generateID() string {
+	h := sha256.New()
+	h.Write([]byte(fmt.Sprintf("%d-%d", time.Now().UnixNano(), rand.Int())))
+	return hex.EncodeToString(h.Sum(nil))[:8]
 }

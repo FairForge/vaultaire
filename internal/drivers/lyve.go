@@ -27,7 +27,7 @@ func NewLyveDriver(accessKey, secretKey, tenantID, region string, logger *zap.Lo
 		region = "us-east-1"
 	}
 
-	endpoint := fmt.Sprintf("https://s3.%s.lyvecloud.seagate.com", region)
+	endpoint := fmt.Sprintf("https://s3.%s.global.lyve.seagate.com", region)
 
 	cfg, err := config.LoadDefaultConfig(context.Background(),
 		config.WithCredentialsProvider(

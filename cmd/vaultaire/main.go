@@ -207,7 +207,7 @@ func main() {
 		logger.Warn("failed to connect to database, running without quota management",
 			zap.Error(err))
 		// Create server with nil quota manager
-		server = api.NewServer(cfg, logger, eng, &nilQuotaManager{})
+		server = api.NewServer(cfg, logger, eng, &nilQuotaManager{}, nil)
 	} else {
 		defer func() { _ = db.Close() }()
 		logger.Info("connected to database",
@@ -218,7 +218,7 @@ func main() {
 		quotaManager := usage.NewQuotaManager(db.DB())
 
 		// Pass real database and quota manager
-		server = api.NewServer(cfg, logger, eng, quotaManager)
+		server = api.NewServer(cfg, logger, eng, quotaManager, db.DB())
 	}
 
 	// Handle shutdown gracefully
@@ -237,6 +237,7 @@ func main() {
 		os.Exit(0)
 	}()
 
+	// Add auth handler and routes
 	// Start server
 	fmt.Printf("\n")
 	fmt.Printf("╔══════════════════════════════════════╗\n")
