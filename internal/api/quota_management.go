@@ -1,4 +1,6 @@
 // internal/api/quota_management.go
+//
+//nolint:unused // Will be used in future implementations
 package api
 
 import (
@@ -10,6 +12,7 @@ import (
 	"go.uber.org/zap"
 )
 
+// QuotaRequest represents a request to create or update a tenant's quota
 type QuotaRequest struct {
 	TenantID       string `json:"tenant_id"`
 	Plan           string `json:"plan"`
