@@ -52,15 +52,15 @@ func (p *S3Parser) ParseRequest(r *http.Request) (*S3Request, error) {
 	// Parse the path
 	p.parsePath(req)
 
-	// Determine operation
-	p.determineOperation(req, r.Method)
-
-	// Parse query parameters
+	// Parse query parameters BEFORE determining operation
 	for key, values := range r.URL.Query() {
 		if len(values) > 0 {
 			req.Query[key] = values[0]
 		}
 	}
+
+	// Determine operation (needs query params for multipart detection)
+	p.determineOperation(req, r.Method)
 
 	// Parse relevant headers
 	p.parseHeaders(req, r)
@@ -129,12 +129,20 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 		return
 	}
 
-	// Object-level operations
+	// Object-level operations with multipart detection
 	switch method {
 	case "GET":
-		req.Operation = "GetObject"
+		if _, ok := req.Query["uploadId"]; ok {
+			req.Operation = "ListParts"
+		} else {
+			req.Operation = "GetObject"
+		}
 	case "PUT":
-		req.Operation = "PutObject"
+		if _, ok := req.Query["partNumber"]; ok {
+			req.Operation = "UploadPart"
+		} else {
+			req.Operation = "PutObject"
+		}
 	case "DELETE":
 		req.Operation = "DeleteObject"
 	case "HEAD":
@@ -328,6 +336,14 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		s.CreateBucket(w, r)
 	case "DeleteBucket":
 		s.DeleteBucket(w, r)
+	case "InitiateMultipartUpload":
+		s.handleInitiateMultipartUpload(w, r, s3Req.Bucket, s3Req.Object)
+	case "UploadPart":
+		s.handleUploadPart(w, r, s3Req.Bucket, s3Req.Object)
+	case "CompleteMultipartUpload":
+		s.handleCompleteMultipartUpload(w, r, s3Req.Bucket, s3Req.Object)
+	case "ListParts":
+		s.handleListParts(w, r, s3Req.Bucket, s3Req.Object)
 	default:
 		s.logger.Warn("operation not implemented",
 			zap.String("operation", s3Req.Operation))

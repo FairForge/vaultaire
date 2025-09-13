@@ -222,7 +222,11 @@ func (rf *RegionalFailover) handleSecondaryError(err error) {
 }
 
 func (rf *RegionalFailover) monitorHealth() {
-	ticker := time.NewTicker(rf.recoveryInterval)
+	rf.mu.RLock()
+	interval := rf.recoveryInterval
+	rf.mu.RUnlock()
+
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {

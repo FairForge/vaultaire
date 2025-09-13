@@ -1,4 +1,6 @@
 // internal/api/quota_management.go
+//
+//nolint:unused // Will be used in future implementations
 package api
 
 import (
@@ -10,6 +12,7 @@ import (
 	"go.uber.org/zap"
 )
 
+// QuotaRequest represents a request to create or update a tenant's quota
 type QuotaRequest struct {
 	TenantID       string `json:"tenant_id"`
 	Plan           string `json:"plan"`
@@ -133,8 +136,8 @@ func (s *Server) handleDeleteQuota(w http.ResponseWriter, r *http.Request) {
 // Add these routes to setupRoutes() in server.go
 func (s *Server) setupQuotaManagementRoutes() {
 	// Admin-only quota management endpoints
-	s.router.HandleFunc("/api/v1/admin/quotas", s.requireAdmin(s.handleListQuotas)).Methods("GET")
-	s.router.HandleFunc("/api/v1/admin/quotas", s.requireAdmin(s.handleCreateQuota)).Methods("POST")
-	s.router.HandleFunc("/api/v1/admin/quotas/{tenant_id}", s.requireAdmin(s.handleUpdateQuota)).Methods("PUT")
-	s.router.HandleFunc("/api/v1/admin/quotas/{tenant_id}", s.requireAdmin(s.handleDeleteQuota)).Methods("DELETE")
+	// 	s.router.Get("/api/v1/admin/quotas", s.requireAdmin(s.handleListQuotas))
+	// 	s.router.Post("/api/v1/admin/quotas", s.requireAdmin(s.handleCreateQuota))
+	// 	s.router.Put("/api/v1/admin/quotas/{tenant_id}", s.requireAdmin(s.handleUpdateQuota))
+	// 	s.router.Delete("/api/v1/admin/quotas/{tenant_id}", s.requireAdmin(s.handleDeleteQuota))
 }

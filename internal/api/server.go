@@ -13,14 +13,14 @@ import (
 	"github.com/FairForge/vaultaire/internal/config"
 	"github.com/FairForge/vaultaire/internal/docs"
 	"github.com/FairForge/vaultaire/internal/engine"
-	"github.com/gorilla/mux"
+	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 )
 
 type Server struct {
 	config       *config.Config
 	logger       *zap.Logger
-	router       *mux.Router
+	router       chi.Router
 	httpServer   *http.Server
 	db           *sql.DB
 	events       chan Event
@@ -42,52 +42,61 @@ type QuotaManager interface {
 	DeleteQuota(ctx context.Context, tenantID string) error
 }
 
-func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, qm QuotaManager) *Server {
+func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, qm QuotaManager, db *sql.DB) *Server {
 	s := &Server{
 		config:       cfg,
 		logger:       logger,
-		db:           nil,
 		engine:       eng,
-		quotaManager: qm, // ADD THIS
+		quotaManager: qm,
+		db:           db,
+		router:       chi.NewRouter(),
 		events:       make(chan Event, 1000),
-		router:       mux.NewRouter(),
 		startTime:    time.Now(),
 	}
 
+	// Add ALL middleware BEFORE any routes
+
+	// Add logging middleware
+	s.router.Use(s.loggingMiddleware)
+
+	// Now set up routes (no middleware should be added in setupRoutes)
 	s.setupRoutes()
+
+	// Add auth routes after main routes
+	if db != nil {
+		authHandler := NewAuthHandler(db, logger)
+		s.router.Post("/auth/register", authHandler.Register)
+	}
 
 	s.httpServer = &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
 		Handler:      s.router,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  120 * time.Second,
 	}
 
 	return s
 }
 
 func (s *Server) setupRoutes() {
-	s.router.HandleFunc("/health", s.handleHealth).Methods("GET")
-	s.router.HandleFunc("/ready", s.handleReady).Methods("GET")
-	s.router.HandleFunc("/metrics", s.handleMetrics).Methods("GET")
-	s.router.HandleFunc("/version", s.handleVersion).Methods("GET")
+	s.router.Get("/health", s.handleHealth)
+	s.router.Get("/ready", s.handleReady)
+	s.router.Get("/metrics", s.handleMetrics)
+	s.router.Get("/version", s.handleVersion)
 
 	// Add usage routes
-	s.router.HandleFunc("/api/v1/usage/stats", s.handleGetUsageStats).Methods("GET")
-	s.router.HandleFunc("/api/v1/usage/alerts", s.handleGetUsageAlerts).Methods("GET")
-
+	s.router.Get("/api/v1/usage/stats", s.handleGetUsageStats)
+	s.router.Get("/api/v1/usage/alerts", s.handleGetUsageAlerts)
+	s.router.Get("/api/v1/presigned", s.handleGetPresignedURL)
 	// Add quota management routes
 	s.setupQuotaManagementRoutes()
 
 	// API Documentation routes
-	s.router.HandleFunc("/docs", docs.SwaggerUIHandler()).Methods("GET")
-	s.router.HandleFunc("/openapi.json", docs.OpenAPIJSONHandler()).Methods("GET")
-
-	s.router.Use(s.loggingMiddleware)
+	s.router.Get("/docs", docs.SwaggerUIHandler())
+	s.router.Get("/openapi.json", docs.OpenAPIJSONHandler())
 
 	// S3 catch-all (MUST be last)
-	s.router.PathPrefix("/").HandlerFunc(s.handleS3Request)
+	s.router.HandleFunc("/*", s.handleS3Request)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -160,4 +169,12 @@ func getMemoryUsageMB() uint64 {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 	return m.Alloc / 1024 / 1024
+}
+
+// GetRouter returns the chi router for adding routes
+// GetRouter returns the chi router for adding routes
+
+// GetRouter returns the chi router for adding routes
+func (s *Server) GetRouter() chi.Router {
+	return s.router
 }
