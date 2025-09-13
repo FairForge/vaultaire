@@ -1,12 +1,14 @@
-package api
-
 // Package api contains the S3-compatible API implementation.
 // NOTE: The following auth functions and constants are preserved for future S3 signature verification.
 // They implement the AWS Signature Version 4 signing process.
 //
-//nolint:unused,deadcode // These will be used when full S3 auth is implemented
 // Package api contains the S3-compatible API implementation.
 // NOTE: Auth functions are preserved for future S3 signature verification implementation.
+//
+//nolint:unused // Will be used in future implementations
+//nolint:unused,deadcode // These will be used when full S3 auth is implemented
+package api
+
 import (
 	"crypto/hmac"
 	"crypto/sha256"

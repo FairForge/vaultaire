@@ -1,3 +1,4 @@
+//nolint:unused // Will be used in future implementations
 package cache
 
 import (
