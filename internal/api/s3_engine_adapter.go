@@ -42,6 +42,15 @@ func (a *S3ToEngine) TranslateRequest(req *S3Request) engine.Operation {
 
 // HandleGet processes S3 GET requests using the engine
 func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, object string) {
+	// Check for Range header early
+	rangeHeader := r.Header.Get("Range")
+	if rangeHeader != "" {
+		// For now, ignore range and return full file
+		// TODO: Implement proper range support
+		a.logger.Debug("Range request ignored",
+			zap.String("range", rangeHeader))
+	}
+
 	// Get tenant from context
 	t, err := tenant.FromContext(r.Context())
 	if err != nil {
