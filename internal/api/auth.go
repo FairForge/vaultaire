@@ -5,6 +5,8 @@
 // Package api contains the S3-compatible API implementation.
 // NOTE: Auth functions are preserved for future S3 signature verification implementation.
 //
+// Package api contains the S3-compatible API implementation.
+//
 //nolint:unused // Will be used in future implementations
 //nolint:unused,deadcode // These will be used when full S3 auth is implemented
 package api
@@ -49,16 +51,72 @@ func NewAuth(db *sql.DB, logger *zap.Logger) *Auth {
 	}
 }
 
-// ValidateRequest validates an S3 request signature
+// ValidateRequest validates an S3 request and returns the tenant ID
 func (a *Auth) ValidateRequest(r *http.Request) (string, error) {
-	// TEMPORARY: Bypass auth for testing
-	// For now, validate from context
-	if tenantID := r.Context().Value("tenant_id"); tenantID != nil {
-		return tenantID.(string), nil
-	}
-	return "test-tenant", nil
-} // THIS WAS MISSING!
+	// Extract Authorization header
+	authHeader := r.Header.Get("Authorization")
 
+	// If no auth header, check for access key in query (for presigned URLs)
+	if authHeader == "" {
+		if accessKey := r.URL.Query().Get("AWSAccessKeyId"); accessKey != "" {
+			return a.validateAccessKey(accessKey)
+		}
+		// For testing without auth, allow but use test-tenant
+		if a.db == nil {
+			return "test-tenant", nil
+		}
+		return "", fmt.Errorf("missing authorization")
+	}
+
+	// Parse AWS Signature v4 format (used by AWS CLI/SDKs)
+	if strings.HasPrefix(authHeader, "AWS4-HMAC-SHA256") {
+		accessKey, _, _, err := a.parseAuthHeader(authHeader)
+		if err != nil {
+			a.logger.Debug("failed to parse auth header", zap.Error(err))
+			return "", err
+		}
+		return a.validateAccessKey(accessKey)
+	}
+
+	// Support basic AWS format (for simpler clients)
+	if strings.HasPrefix(authHeader, "AWS ") {
+		parts := strings.SplitN(strings.TrimPrefix(authHeader, "AWS "), ":", 2)
+		if len(parts) == 2 {
+			return a.validateAccessKey(parts[0])
+		}
+	}
+
+	return "", fmt.Errorf("invalid authorization format")
+}
+
+// validateAccessKey looks up the tenant ID by access key
+func (a *Auth) validateAccessKey(accessKey string) (string, error) {
+	if a.db == nil {
+		// Fallback for testing when DB is not available
+		a.logger.Warn("no database connection, using test-tenant")
+		return "test-tenant", nil
+	}
+
+	var tenantID string
+	query := `SELECT id FROM tenants WHERE access_key = $1`
+	err := a.db.QueryRow(query, accessKey).Scan(&tenantID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			a.logger.Debug("invalid access key", zap.String("access_key", accessKey))
+			return "", fmt.Errorf("invalid access key")
+		}
+		a.logger.Error("database error during auth", zap.Error(err))
+		return "", fmt.Errorf("auth lookup failed: %w", err)
+	}
+
+	a.logger.Debug("authenticated tenant",
+		zap.String("tenant_id", tenantID),
+		zap.String("access_key", accessKey[:6]+"...")) // Log only first 6 chars for security
+
+	return tenantID, nil
+}
+
+// parseAuthHeader parses AWS Signature v4 authorization header
 func (a *Auth) parseAuthHeader(authHeader string) (accessKey string, signedHeaders string, signature string, err error) {
 	parts := strings.Split(authHeader, ", ")
 	if len(parts) != 3 {
@@ -82,17 +140,13 @@ func (a *Auth) parseAuthHeader(authHeader string) (accessKey string, signedHeade
 	return accessKey, signedHeaders, signature, nil
 }
 
+// getSecretKey retrieves the secret key for an access key (for future signature validation)
 func (a *Auth) getSecretKey(accessKey string) (secretKey, tenantID string, err error) {
 	if a.db == nil {
 		return "", "", fmt.Errorf("database not initialized")
 	}
 
-	query := `
-        SELECT secret_key, tenant_id
-        FROM api_keys
-        WHERE access_key = $1 AND active = true
-    `
-
+	query := `SELECT secret_key, id FROM tenants WHERE access_key = $1`
 	err = a.db.QueryRow(query, accessKey).Scan(&secretKey, &tenantID)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -104,6 +158,7 @@ func (a *Auth) getSecretKey(accessKey string) (secretKey, tenantID string, err e
 	return secretKey, tenantID, nil
 }
 
+// validateTimestamp checks if the request timestamp is within acceptable range
 func (a *Auth) validateTimestamp(amzDate string) error {
 	t, err := time.Parse(timeFormat, amzDate)
 	if err != nil {
@@ -119,6 +174,7 @@ func (a *Auth) validateTimestamp(amzDate string) error {
 	return nil
 }
 
+// calculateSignature calculates AWS Signature v4 (for future full validation)
 func (a *Auth) calculateSignature(r *http.Request, accessKey, secretKey, signedHeaders, amzDate string) (string, error) {
 	// Create canonical request
 	canonicalRequest, payloadHash := a.createCanonicalRequest(r, signedHeaders)
