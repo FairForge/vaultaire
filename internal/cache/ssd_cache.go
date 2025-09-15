@@ -1,4 +1,3 @@
-// internal/cache/ssd_cache.go
 package cache
 
 import (
@@ -9,6 +8,13 @@ import (
 	"sync"
 	"time"
 )
+
+// AccessPattern tracks access patterns for cache items
+type AccessPattern struct {
+	Count      int
+	LastAccess time.Time
+	Window     time.Duration
+}
 
 // SSDCache implements a tiered cache with memory and SSD storage
 type SSDCache struct {
@@ -23,6 +29,10 @@ type SSDCache struct {
 	ssdPath     string
 	maxSSDSize  int64
 	currentSize int64
+
+	// Access tracking
+	accessMu  sync.RWMutex
+	accessLog map[string]*AccessPattern
 
 	mu    sync.RWMutex
 	index map[string]*SSDEntry
@@ -57,11 +67,15 @@ func NewSSDCache(memSize, ssdSize int64, ssdPath string) (*SSDCache, error) {
 		ssdPath:     ssdPath,
 		maxSSDSize:  ssdSize,
 		index:       make(map[string]*SSDEntry),
+		accessLog:   make(map[string]*AccessPattern),
 	}, nil
 }
 
 // Get retrieves from memory or SSD
 func (c *SSDCache) Get(key string) ([]byte, bool) {
+	// Track access
+	c.recordAccess(key)
+
 	// Try memory first
 	c.memMu.Lock()
 	if elem, ok := c.memItems[key]; ok {
@@ -93,6 +107,11 @@ func (c *SSDCache) Get(key string) ([]byte, bool) {
 	entry.AccessTime = time.Now()
 	c.mu.Unlock()
 
+	// Check if this should be promoted to memory
+	if c.IsHot(key) {
+		c.promoteToMemory(key, data)
+	}
+
 	return data, true
 }
 
@@ -119,7 +138,7 @@ func (c *SSDCache) Put(key string, data []byte) error {
 	}
 
 	// Evict items if over memory limit
-	for c.memCurrBytes > c.memMaxBytes && c.memLRU.Len() > 1 { // Keep at least 1 item
+	for c.memCurrBytes > c.memMaxBytes && c.memLRU.Len() > 1 {
 		elem := c.memLRU.Back()
 		if elem != nil {
 			item := elem.Value.(*ssdMemItem)
@@ -127,7 +146,7 @@ func (c *SSDCache) Put(key string, data []byte) error {
 			delete(c.memItems, item.key)
 			c.memCurrBytes -= item.size
 
-			// Demote to SSD synchronously so it's available immediately
+			// Demote to SSD synchronously
 			if err := c.demoteToSSD(item.key, item.data); err != nil {
 				return fmt.Errorf("failed to demote to SSD: %w", err)
 			}
@@ -135,6 +154,33 @@ func (c *SSDCache) Put(key string, data []byte) error {
 	}
 
 	return nil
+}
+
+// promoteToMemory moves hot data from SSD to memory
+func (c *SSDCache) promoteToMemory(key string, data []byte) {
+	size := int64(len(data))
+
+	c.memMu.Lock()
+	defer c.memMu.Unlock()
+
+	// Don't promote if it would exceed memory limit by too much
+	if c.memCurrBytes+size > c.memMaxBytes*2 {
+		return
+	}
+
+	// Add to memory
+	elem := c.memLRU.PushFront(&ssdMemItem{key: key, data: data, size: size})
+	c.memItems[key] = elem
+	c.memCurrBytes += size
+
+	// Remove from SSD
+	c.mu.Lock()
+	if entry, ok := c.index[key]; ok {
+		_ = os.Remove(entry.Path)
+		c.currentSize -= entry.Size
+		delete(c.index, key)
+	}
+	c.mu.Unlock()
 }
 
 func (c *SSDCache) demoteToSSD(key string, data []byte) error {
@@ -158,6 +204,47 @@ func (c *SSDCache) demoteToSSD(key string, data []byte) error {
 	c.mu.Unlock()
 
 	return nil
+}
+
+// recordAccess tracks access patterns
+func (c *SSDCache) recordAccess(key string) {
+	c.accessMu.Lock()
+	defer c.accessMu.Unlock()
+
+	now := time.Now()
+	if pattern, ok := c.accessLog[key]; ok {
+		// Reset count if outside window (default 1 minute)
+		if now.Sub(pattern.LastAccess) > time.Minute {
+			pattern.Count = 1
+		} else {
+			pattern.Count++
+		}
+		pattern.LastAccess = now
+	} else {
+		c.accessLog[key] = &AccessPattern{
+			Count:      1,
+			LastAccess: now,
+			Window:     time.Minute,
+		}
+	}
+}
+
+// IsHot returns true if the key has been accessed frequently
+func (c *SSDCache) IsHot(key string) bool {
+	c.accessMu.RLock()
+	defer c.accessMu.RUnlock()
+
+	pattern, ok := c.accessLog[key]
+	if !ok {
+		return false
+	}
+
+	// Hot if accessed >3 times in the last minute
+	if time.Since(pattern.LastAccess) <= pattern.Window && pattern.Count > 3 {
+		return true
+	}
+
+	return false
 }
 
 // Stats returns cache statistics
