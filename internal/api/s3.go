@@ -144,7 +144,12 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 			req.Operation = "PutObject"
 		}
 	case "DELETE":
-		req.Operation = "DeleteObject"
+		// Check if this is an abort multipart upload
+		if _, ok := req.Query["uploadId"]; ok {
+			req.Operation = "AbortMultipartUpload"
+		} else {
+			req.Operation = "DeleteObject"
+		}
 	case "HEAD":
 		req.Operation = "HeadObject"
 	case "POST":
@@ -342,6 +347,8 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		s.handleUploadPart(w, r, s3Req.Bucket, s3Req.Object)
 	case "CompleteMultipartUpload":
 		s.handleCompleteMultipartUpload(w, r, s3Req.Bucket, s3Req.Object)
+	case "AbortMultipartUpload":
+		s.handleAbortMultipartUpload(w, r, s3Req.Bucket, s3Req.Object)
 	case "ListParts":
 		s.handleListParts(w, r, s3Req.Bucket, s3Req.Object)
 	default:
