@@ -30,6 +30,12 @@ type SSDCache struct {
 	maxSSDSize  int64
 	currentSize int64
 
+	// Wear leveling
+	shardCount   int
+	writeCounter int64
+	shardMu      sync.RWMutex
+	shardWrites  map[int]int64 // Track writes per shard
+
 	// Access tracking
 	accessMu  sync.RWMutex
 	accessLog map[string]*AccessPattern
@@ -60,6 +66,15 @@ func NewSSDCache(memSize, ssdSize int64, ssdPath string) (*SSDCache, error) {
 		return nil, fmt.Errorf("failed to create SSD cache dir: %w", err)
 	}
 
+	// Create shard directories for wear leveling
+	shardCount := 8 // Use 8 shards by default
+	for i := 0; i < shardCount; i++ {
+		shardPath := filepath.Join(ssdPath, fmt.Sprintf("shard-%d", i))
+		if err := os.MkdirAll(shardPath, 0755); err != nil {
+			return nil, fmt.Errorf("failed to create shard dir: %w", err)
+		}
+	}
+
 	return &SSDCache{
 		memMaxBytes: memSize,
 		memItems:    make(map[string]*list.Element),
@@ -68,6 +83,8 @@ func NewSSDCache(memSize, ssdSize int64, ssdPath string) (*SSDCache, error) {
 		maxSSDSize:  ssdSize,
 		index:       make(map[string]*SSDEntry),
 		accessLog:   make(map[string]*AccessPattern),
+		shardCount:  shardCount,
+		shardWrites: make(map[int]int64),
 	}, nil
 }
 
@@ -183,14 +200,26 @@ func (c *SSDCache) promoteToMemory(key string, data []byte) {
 	c.mu.Unlock()
 }
 
+// demoteToSSD moves data from memory to SSD with wear leveling
 func (c *SSDCache) demoteToSSD(key string, data []byte) error {
 	size := int64(len(data))
 
-	// Write to SSD
-	path := filepath.Join(c.ssdPath, fmt.Sprintf("%s.cache", key))
+	// Determine shard for this key
+	shard := c.GetShardForKey(key)
+
+	// Write to sharded path
+	shardPath := filepath.Join(c.ssdPath, fmt.Sprintf("shard-%d", shard))
+	path := filepath.Join(shardPath, fmt.Sprintf("%s.cache", key))
+
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		return err
 	}
+
+	// Track writes per shard for monitoring
+	c.shardMu.Lock()
+	c.shardWrites[shard]++
+	c.writeCounter++
+	c.shardMu.Unlock()
 
 	// Update index
 	c.mu.Lock()
@@ -204,6 +233,19 @@ func (c *SSDCache) demoteToSSD(key string, data []byte) error {
 	c.mu.Unlock()
 
 	return nil
+}
+
+// GetShardForKey returns the shard number for a given key
+func (c *SSDCache) GetShardForKey(key string) int {
+	// Simple hash-based sharding
+	hash := 0
+	for _, ch := range key {
+		hash = (hash*31 + int(ch)) % c.shardCount
+	}
+	if hash < 0 {
+		hash = -hash
+	}
+	return hash % c.shardCount
 }
 
 // recordAccess tracks access patterns
@@ -245,6 +287,24 @@ func (c *SSDCache) IsHot(key string) bool {
 	}
 
 	return false
+}
+
+// GetWriteStats returns wear leveling statistics
+func (c *SSDCache) GetWriteStats() map[string]interface{} {
+	c.shardMu.RLock()
+	defer c.shardMu.RUnlock()
+
+	stats := make(map[string]interface{})
+	stats["total_writes"] = c.writeCounter
+	stats["shards"] = c.shardCount
+
+	shardStats := make(map[int]int64)
+	for shard, writes := range c.shardWrites {
+		shardStats[shard] = writes
+	}
+	stats["shard_writes"] = shardStats
+
+	return stats
 }
 
 // Stats returns cache statistics
