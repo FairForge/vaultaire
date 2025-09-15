@@ -16,6 +16,7 @@ type AccessPattern struct {
 	Window     time.Duration
 }
 
+// PromotionPolicy defines when to promote data from SSD to memory
 type PromotionPolicy struct {
 	FrequencyThreshold int           // Min accesses to trigger promotion
 	TimeWindow         time.Duration // Time window for counting accesses
@@ -27,6 +28,22 @@ type DemotionPolicy struct {
 	MaxAge        time.Duration // Max time in memory without access
 	LowWaterMark  int64         // Start demotion when memory usage exceeds this
 	HighWaterMark int64         // Aggressively demote when exceeding this
+}
+
+// PerformanceMetrics tracks cache performance
+type PerformanceMetrics struct {
+	// Latency tracking
+	PutLatencyP50 time.Duration
+	GetLatencyP50 time.Duration
+
+	// Operation counts
+	PutCount int64
+	GetCount int64
+
+	// Hit rate tracking
+	CacheHits   int64
+	CacheMisses int64
+	HitRate     float64
 }
 
 // SSDCache implements a tiered cache with memory and SSD storage
@@ -56,6 +73,16 @@ type SSDCache struct {
 	// Policies
 	promotionPolicy *PromotionPolicy
 	demotionPolicy  *DemotionPolicy
+
+	// Performance monitoring
+	monitoringEnabled bool
+	perfMu            sync.RWMutex
+	putLatencies      []time.Duration
+	getLatencies      []time.Duration
+	putCount          int64
+	getCount          int64
+	cacheHits         int64
+	cacheMisses       int64
 
 	mu    sync.RWMutex
 	index map[string]*SSDEntry
@@ -93,20 +120,29 @@ func NewSSDCache(memSize, ssdSize int64, ssdPath string) (*SSDCache, error) {
 	}
 
 	return &SSDCache{
-		memMaxBytes: memSize,
-		memItems:    make(map[string]*list.Element),
-		memLRU:      list.New(),
-		ssdPath:     ssdPath,
-		maxSSDSize:  ssdSize,
-		index:       make(map[string]*SSDEntry),
-		accessLog:   make(map[string]*AccessPattern),
-		shardCount:  shardCount,
-		shardWrites: make(map[int]int64),
+		memMaxBytes:  memSize,
+		memItems:     make(map[string]*list.Element),
+		memLRU:       list.New(),
+		ssdPath:      ssdPath,
+		maxSSDSize:   ssdSize,
+		index:        make(map[string]*SSDEntry),
+		accessLog:    make(map[string]*AccessPattern),
+		shardCount:   shardCount,
+		shardWrites:  make(map[int]int64),
+		putLatencies: make([]time.Duration, 0, 1000),
+		getLatencies: make([]time.Duration, 0, 1000),
 	}, nil
 }
 
 // Get retrieves from memory or SSD
 func (c *SSDCache) Get(key string) ([]byte, bool) {
+	start := time.Now()
+	defer func() {
+		if c.monitoringEnabled {
+			c.recordLatency("get", time.Since(start))
+		}
+	}()
+
 	// Track access
 	c.recordAccess(key)
 
@@ -117,6 +153,14 @@ func (c *SSDCache) Get(key string) ([]byte, bool) {
 		c.memLRU.MoveToFront(elem)
 		item := elem.Value.(*ssdMemItem)
 		c.memMu.Unlock()
+
+		// Record hit
+		if c.monitoringEnabled {
+			c.perfMu.Lock()
+			c.cacheHits++
+			c.perfMu.Unlock()
+		}
+
 		return item.data, true
 	}
 	c.memMu.Unlock()
@@ -127,12 +171,23 @@ func (c *SSDCache) Get(key string) ([]byte, bool) {
 	c.mu.RUnlock()
 
 	if !exists {
+		// Record miss
+		if c.monitoringEnabled {
+			c.perfMu.Lock()
+			c.cacheMisses++
+			c.perfMu.Unlock()
+		}
 		return nil, false
 	}
 
 	// Read from SSD
 	data, err := os.ReadFile(entry.Path)
 	if err != nil {
+		if c.monitoringEnabled {
+			c.perfMu.Lock()
+			c.cacheMisses++
+			c.perfMu.Unlock()
+		}
 		return nil, false
 	}
 
@@ -140,6 +195,13 @@ func (c *SSDCache) Get(key string) ([]byte, bool) {
 	c.mu.Lock()
 	entry.AccessTime = time.Now()
 	c.mu.Unlock()
+
+	// Record hit
+	if c.monitoringEnabled {
+		c.perfMu.Lock()
+		c.cacheHits++
+		c.perfMu.Unlock()
+	}
 
 	// Check if this should be promoted to memory
 	if c.IsHot(key) {
@@ -151,6 +213,13 @@ func (c *SSDCache) Get(key string) ([]byte, bool) {
 
 // Put stores in memory and potentially demotes to SSD
 func (c *SSDCache) Put(key string, data []byte) error {
+	start := time.Now()
+	defer func() {
+		if c.monitoringEnabled {
+			c.recordLatency("put", time.Since(start))
+		}
+	}()
+
 	size := int64(len(data))
 
 	c.memMu.Lock()
@@ -422,4 +491,88 @@ func (c *SSDCache) ApplyDemotionPolicy() {
 			}(item.key, item.data)
 		}
 	}
+}
+
+// EnableMonitoring turns on performance tracking
+func (c *SSDCache) EnableMonitoring() {
+	c.perfMu.Lock()
+	defer c.perfMu.Unlock()
+	c.monitoringEnabled = true
+}
+
+// recordLatency tracks operation latencies
+func (c *SSDCache) recordLatency(operation string, duration time.Duration) {
+	if !c.monitoringEnabled {
+		return
+	}
+
+	c.perfMu.Lock()
+	defer c.perfMu.Unlock()
+
+	switch operation {
+	case "put":
+		c.putLatencies = append(c.putLatencies, duration)
+		c.putCount++
+		// Keep only last 1000 samples
+		if len(c.putLatencies) > 1000 {
+			c.putLatencies = c.putLatencies[len(c.putLatencies)-1000:]
+		}
+	case "get":
+		c.getLatencies = append(c.getLatencies, duration)
+		c.getCount++
+		if len(c.getLatencies) > 1000 {
+			c.getLatencies = c.getLatencies[len(c.getLatencies)-1000:]
+		}
+	}
+}
+
+// GetPerformanceMetrics returns current performance stats
+func (c *SSDCache) GetPerformanceMetrics() *PerformanceMetrics {
+	c.perfMu.RLock()
+	defer c.perfMu.RUnlock()
+
+	metrics := &PerformanceMetrics{
+		PutCount:    c.putCount,
+		GetCount:    c.getCount,
+		CacheHits:   c.cacheHits,
+		CacheMisses: c.cacheMisses,
+	}
+
+	// Calculate P50 latencies
+	if len(c.putLatencies) > 0 {
+		metrics.PutLatencyP50 = c.calculateP50(c.putLatencies)
+	}
+	if len(c.getLatencies) > 0 {
+		metrics.GetLatencyP50 = c.calculateP50(c.getLatencies)
+	}
+
+	// Calculate hit rate
+	total := float64(c.cacheHits + c.cacheMisses)
+	if total > 0 {
+		metrics.HitRate = float64(c.cacheHits) / total
+	}
+
+	return metrics
+}
+
+// calculateP50 finds the median latency
+func (c *SSDCache) calculateP50(latencies []time.Duration) time.Duration {
+	if len(latencies) == 0 {
+		return 0
+	}
+
+	// Simple median calculation
+	sorted := make([]time.Duration, len(latencies))
+	copy(sorted, latencies)
+
+	// Basic bubble sort for simplicity
+	for i := 0; i < len(sorted); i++ {
+		for j := i + 1; j < len(sorted); j++ {
+			if sorted[i] > sorted[j] {
+				sorted[i], sorted[j] = sorted[j], sorted[i]
+			}
+		}
+	}
+
+	return sorted[len(sorted)/2]
 }
