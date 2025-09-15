@@ -1,12 +1,17 @@
 package cache
 
 import (
+	"bytes"
+	"compress/gzip"
 	"container/list"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/golang/snappy"
 )
 
 // AccessPattern tracks access patterns for cache items
@@ -46,6 +51,14 @@ type PerformanceMetrics struct {
 	HitRate     float64
 }
 
+// CompressionStats tracks compression effectiveness
+type CompressionStats struct {
+	OriginalSize     int64
+	CompressedSize   int64
+	BytesSaved       int64
+	CompressionRatio float64
+}
+
 // SSDCache implements a tiered cache with memory and SSD storage
 type SSDCache struct {
 	// Memory tier
@@ -83,6 +96,13 @@ type SSDCache struct {
 	getCount          int64
 	cacheHits         int64
 	cacheMisses       int64
+
+	// Compression
+	compressionEnabled  bool
+	compressionAlgo     string
+	compressionMu       sync.RWMutex
+	totalOriginalSize   int64
+	totalCompressedSize int64
 
 	mu    sync.RWMutex
 	index map[string]*SSDEntry
@@ -181,7 +201,18 @@ func (c *SSDCache) Get(key string) ([]byte, bool) {
 	}
 
 	// Read from SSD
-	data, err := os.ReadFile(entry.Path)
+	compressedData, err := os.ReadFile(entry.Path)
+	if err != nil {
+		if c.monitoringEnabled {
+			c.perfMu.Lock()
+			c.cacheMisses++
+			c.perfMu.Unlock()
+		}
+		return nil, false
+	}
+
+	// Decompress if needed
+	data, err := c.decompressData(compressedData)
 	if err != nil {
 		if c.monitoringEnabled {
 			c.perfMu.Lock()
@@ -286,9 +317,25 @@ func (c *SSDCache) promoteToMemory(key string, data []byte) {
 	c.mu.Unlock()
 }
 
-// demoteToSSD moves data from memory to SSD with wear leveling
+// demoteToSSD moves data from memory to SSD with wear leveling and compression
 func (c *SSDCache) demoteToSSD(key string, data []byte) error {
-	size := int64(len(data))
+	originalSize := int64(len(data))
+
+	// Compress data if enabled
+	compressed, err := c.compressData(data)
+	if err != nil {
+		return fmt.Errorf("compression failed: %w", err)
+	}
+
+	compressedSize := int64(len(compressed))
+
+	// Track compression stats
+	if c.compressionEnabled {
+		c.compressionMu.Lock()
+		c.totalOriginalSize += originalSize
+		c.totalCompressedSize += compressedSize
+		c.compressionMu.Unlock()
+	}
 
 	// Determine shard for this key
 	shard := c.GetShardForKey(key)
@@ -297,7 +344,7 @@ func (c *SSDCache) demoteToSSD(key string, data []byte) error {
 	shardPath := filepath.Join(c.ssdPath, fmt.Sprintf("shard-%d", shard))
 	path := filepath.Join(shardPath, fmt.Sprintf("%s.cache", key))
 
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := os.WriteFile(path, compressed, 0644); err != nil {
 		return err
 	}
 
@@ -307,18 +354,94 @@ func (c *SSDCache) demoteToSSD(key string, data []byte) error {
 	c.writeCounter++
 	c.shardMu.Unlock()
 
-	// Update index
+	// Update index - store original size for accounting
 	c.mu.Lock()
 	c.index[key] = &SSDEntry{
 		Key:        key,
-		Size:       size,
+		Size:       originalSize, // Store original size
 		Path:       path,
 		AccessTime: time.Now(),
 	}
-	c.currentSize += size
+	c.currentSize += originalSize
 	c.mu.Unlock()
 
 	return nil
+}
+
+// compressData compresses data using the configured algorithm
+func (c *SSDCache) compressData(data []byte) ([]byte, error) {
+	if !c.compressionEnabled || c.compressionAlgo == "none" {
+		return data, nil
+	}
+
+	switch c.compressionAlgo {
+	case "gzip":
+		var buf bytes.Buffer
+		gw := gzip.NewWriter(&buf)
+		if _, err := gw.Write(data); err != nil {
+			return nil, err
+		}
+		if err := gw.Close(); err != nil {
+			return nil, err
+		}
+		return buf.Bytes(), nil
+
+	case "snappy":
+		return snappy.Encode(nil, data), nil
+
+	default:
+		return data, nil
+	}
+}
+
+// decompressData decompresses data using the configured algorithm
+func (c *SSDCache) decompressData(data []byte) ([]byte, error) {
+	if !c.compressionEnabled || c.compressionAlgo == "none" {
+		return data, nil
+	}
+
+	switch c.compressionAlgo {
+	case "gzip":
+		gr, err := gzip.NewReader(bytes.NewReader(data))
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = gr.Close() }()
+		return io.ReadAll(gr)
+
+	case "snappy":
+		return snappy.Decode(nil, data)
+
+	default:
+		return data, nil
+	}
+}
+
+// EnableCompression turns on data compression for SSD storage
+func (c *SSDCache) EnableCompression(algorithm string) {
+	c.compressionMu.Lock()
+	defer c.compressionMu.Unlock()
+
+	c.compressionEnabled = true
+	c.compressionAlgo = algorithm
+}
+
+// GetCompressionStats returns compression statistics
+func (c *SSDCache) GetCompressionStats() *CompressionStats {
+	c.compressionMu.RLock()
+	defer c.compressionMu.RUnlock()
+
+	stats := &CompressionStats{
+		OriginalSize:   c.totalOriginalSize,
+		CompressedSize: c.totalCompressedSize,
+		BytesSaved:     c.totalOriginalSize - c.totalCompressedSize,
+	}
+
+	if c.totalOriginalSize > 0 {
+		stats.CompressionRatio = float64(c.totalCompressedSize) / float64(c.totalOriginalSize)
+	}
+
+	return stats
 }
 
 // GetShardForKey returns the shard number for a given key
