@@ -130,7 +130,11 @@ func main() {
 			logger.Fatal("QUOTALESS_ACCESS_KEY and QUOTALESS_SECRET_KEY required for quotaless mode")
 		}
 
-		quotalessDriver, err := drivers.NewQuotalessDriver(accessKey, secretKey, logger)
+		endpoint := os.Getenv("QUOTALESS_ENDPOINT")
+		if endpoint == "" {
+			endpoint = "https://us.quotaless.cloud:8000"
+		}
+		quotalessDriver, err := drivers.NewQuotalessDriver(accessKey, secretKey, endpoint, logger)
 		if err != nil {
 			logger.Fatal("failed to create Quotaless driver", zap.Error(err))
 		}
