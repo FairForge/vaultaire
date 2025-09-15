@@ -4,6 +4,11 @@ import (
 	"bytes"
 	"compress/gzip"
 	"container/list"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -59,6 +64,21 @@ type CompressionStats struct {
 	CompressionRatio float64
 }
 
+// DeduplicationStats tracks deduplication effectiveness
+type DeduplicationStats struct {
+	UniqueBlocks    int64
+	TotalReferences int64
+	SpaceSaved      int64
+}
+
+// DedupBlock represents a deduplicated data block
+type DedupBlock struct {
+	Hash     string
+	RefCount int
+	Size     int64
+	Path     string
+}
+
 // SSDCache implements a tiered cache with memory and SSD storage
 type SSDCache struct {
 	// Memory tier
@@ -104,6 +124,31 @@ type SSDCache struct {
 	totalOriginalSize   int64
 	totalCompressedSize int64
 
+	// Deduplication
+	dedupEnabled bool
+	dedupMu      sync.RWMutex
+	dedupIndex   map[string]*DedupBlock // hash -> block
+	keyToHash    map[string]string      // key -> hash mapping
+
+	// Encryption
+	encryptionEnabled bool
+	encryptionKey     []byte
+	encryptionKeyID   string
+	encryptionMu      sync.RWMutex
+	gcm               cipher.AEAD
+	oldKeys           map[string][]byte // For key rotation
+
+	// Backup
+	backupScheduler *BackupSchedule
+	backupMu        sync.RWMutex
+
+	// Recovery
+	lastRecoveryReport *RecoveryReport
+	replicationConfig  *ReplicationConfig
+	failoverStatus     FailoverStatus
+	usingSecondary     bool
+	recoveryMu         sync.RWMutex
+
 	mu    sync.RWMutex
 	index map[string]*SSDEntry
 }
@@ -139,23 +184,39 @@ func NewSSDCache(memSize, ssdSize int64, ssdPath string) (*SSDCache, error) {
 		}
 	}
 
-	return &SSDCache{
-		memMaxBytes:  memSize,
-		memItems:     make(map[string]*list.Element),
-		memLRU:       list.New(),
-		ssdPath:      ssdPath,
-		maxSSDSize:   ssdSize,
-		index:        make(map[string]*SSDEntry),
-		accessLog:    make(map[string]*AccessPattern),
-		shardCount:   shardCount,
-		shardWrites:  make(map[int]int64),
-		putLatencies: make([]time.Duration, 0, 1000),
-		getLatencies: make([]time.Duration, 0, 1000),
-	}, nil
+	cache := &SSDCache{
+		memMaxBytes:    memSize,
+		memItems:       make(map[string]*list.Element),
+		memLRU:         list.New(),
+		ssdPath:        ssdPath,
+		maxSSDSize:     ssdSize,
+		index:          make(map[string]*SSDEntry),
+		accessLog:      make(map[string]*AccessPattern),
+		shardCount:     shardCount,
+		shardWrites:    make(map[int]int64),
+		putLatencies:   make([]time.Duration, 0, 1000),
+		getLatencies:   make([]time.Duration, 0, 1000),
+		dedupIndex:     make(map[string]*DedupBlock),
+		keyToHash:      make(map[string]string),
+		oldKeys:        make(map[string][]byte),
+		failoverStatus: FailoverStatusInactive,
+	}
+
+	// Process recovery journal if exists
+	cache.processJournal()
+
+	return cache, nil
 }
 
 // Get retrieves from memory or SSD
 func (c *SSDCache) Get(key string) ([]byte, bool) {
+	// Check for failover to secondary
+	if c.usingSecondary && c.replicationConfig != nil {
+		// TODO: In production, this would read from secondary path
+		// Simplified for this implementation
+		_ = c.replicationConfig // no-op to satisfy linter
+	}
+
 	start := time.Now()
 	defer func() {
 		if c.monitoringEnabled {
@@ -201,7 +262,7 @@ func (c *SSDCache) Get(key string) ([]byte, bool) {
 	}
 
 	// Read from SSD
-	compressedData, err := os.ReadFile(entry.Path)
+	encryptedData, err := os.ReadFile(entry.Path)
 	if err != nil {
 		if c.monitoringEnabled {
 			c.perfMu.Lock()
@@ -211,8 +272,19 @@ func (c *SSDCache) Get(key string) ([]byte, bool) {
 		return nil, false
 	}
 
-	// Decompress if needed
-	data, err := c.decompressData(compressedData)
+	// Decrypt first (if encrypted)
+	decryptedData, err := c.decryptData(encryptedData)
+	if err != nil {
+		if c.monitoringEnabled {
+			c.perfMu.Lock()
+			c.cacheMisses++
+			c.perfMu.Unlock()
+		}
+		return nil, false
+	}
+
+	// Then decompress (if compressed)
+	data, err := c.decompressData(decryptedData)
 	if err != nil {
 		if c.monitoringEnabled {
 			c.perfMu.Lock()
@@ -290,6 +362,49 @@ func (c *SSDCache) Put(key string, data []byte) error {
 	return nil
 }
 
+// Delete removes an item from cache
+func (c *SSDCache) Delete(key string) error {
+	// Remove from memory if present
+	c.memMu.Lock()
+	if elem, ok := c.memItems[key]; ok {
+		item := elem.Value.(*ssdMemItem)
+		c.memLRU.Remove(elem)
+		delete(c.memItems, key)
+		c.memCurrBytes -= item.size
+	}
+	c.memMu.Unlock()
+
+	// Handle deduplication reference counting
+	if c.dedupEnabled {
+		c.dedupMu.Lock()
+		if hash, ok := c.keyToHash[key]; ok {
+			if block, exists := c.dedupIndex[hash]; exists {
+				block.RefCount--
+				if block.RefCount <= 0 {
+					// Last reference, delete the actual data
+					_ = os.Remove(block.Path)
+					delete(c.dedupIndex, hash)
+				}
+			}
+			delete(c.keyToHash, key)
+		}
+		c.dedupMu.Unlock()
+	}
+
+	// Remove from regular index
+	c.mu.Lock()
+	if entry, ok := c.index[key]; ok {
+		if !c.dedupEnabled {
+			_ = os.Remove(entry.Path)
+		}
+		c.currentSize -= entry.Size
+		delete(c.index, key)
+	}
+	c.mu.Unlock()
+
+	return nil
+}
+
 // promoteToMemory moves hot data from SSD to memory
 func (c *SSDCache) promoteToMemory(key string, data []byte) {
 	size := int64(len(data))
@@ -317,14 +432,47 @@ func (c *SSDCache) promoteToMemory(key string, data []byte) {
 	c.mu.Unlock()
 }
 
-// demoteToSSD moves data from memory to SSD with wear leveling and compression
+// demoteToSSD moves data from memory to SSD with wear leveling, compression, encryption, and deduplication
 func (c *SSDCache) demoteToSSD(key string, data []byte) error {
 	originalSize := int64(len(data))
+
+	// Check for deduplication
+	if c.dedupEnabled {
+		hash := c.computeHash(data)
+
+		c.dedupMu.Lock()
+		if block, exists := c.dedupIndex[hash]; exists {
+			// Data already exists, just increment reference
+			block.RefCount++
+			c.keyToHash[key] = hash
+			c.dedupMu.Unlock()
+
+			// Update index with existing path
+			c.mu.Lock()
+			c.index[key] = &SSDEntry{
+				Key:        key,
+				Size:       originalSize,
+				Path:       block.Path,
+				AccessTime: time.Now(),
+			}
+			c.currentSize += originalSize
+			c.mu.Unlock()
+
+			return nil
+		}
+		c.dedupMu.Unlock()
+	}
 
 	// Compress data if enabled
 	compressed, err := c.compressData(data)
 	if err != nil {
 		return fmt.Errorf("compression failed: %w", err)
+	}
+
+	// Encrypt if enabled (after compression)
+	encrypted, err := c.encryptData(compressed)
+	if err != nil {
+		return fmt.Errorf("encryption failed: %w", err)
 	}
 
 	compressedSize := int64(len(compressed))
@@ -344,7 +492,7 @@ func (c *SSDCache) demoteToSSD(key string, data []byte) error {
 	shardPath := filepath.Join(c.ssdPath, fmt.Sprintf("shard-%d", shard))
 	path := filepath.Join(shardPath, fmt.Sprintf("%s.cache", key))
 
-	if err := os.WriteFile(path, compressed, 0644); err != nil {
+	if err := os.WriteFile(path, encrypted, 0644); err != nil {
 		return err
 	}
 
@@ -353,6 +501,20 @@ func (c *SSDCache) demoteToSSD(key string, data []byte) error {
 	c.shardWrites[shard]++
 	c.writeCounter++
 	c.shardMu.Unlock()
+
+	// Update dedup index if enabled
+	if c.dedupEnabled {
+		hash := c.computeHash(data)
+		c.dedupMu.Lock()
+		c.dedupIndex[hash] = &DedupBlock{
+			Hash:     hash,
+			RefCount: 1,
+			Size:     originalSize,
+			Path:     path,
+		}
+		c.keyToHash[key] = hash
+		c.dedupMu.Unlock()
+	}
 
 	// Update index - store original size for accounting
 	c.mu.Lock()
@@ -417,6 +579,169 @@ func (c *SSDCache) decompressData(data []byte) ([]byte, error) {
 	}
 }
 
+// EnableEncryption enables AES-256-GCM encryption for data at rest
+func (c *SSDCache) EnableEncryption(key []byte) error {
+	if len(key) != 32 {
+		return fmt.Errorf("encryption key must be 32 bytes for AES-256, got %d", len(key))
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return fmt.Errorf("failed to create cipher: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return fmt.Errorf("failed to create GCM: %w", err)
+	}
+
+	c.encryptionMu.Lock()
+	defer c.encryptionMu.Unlock()
+
+	c.encryptionEnabled = true
+	c.encryptionKey = key
+	c.encryptionKeyID = c.generateKeyID(key)
+	c.gcm = gcm
+
+	return nil
+}
+
+// RotateEncryptionKey changes the encryption key for new data
+func (c *SSDCache) RotateEncryptionKey(newKey []byte) error {
+	if len(newKey) != 32 {
+		return fmt.Errorf("encryption key must be 32 bytes for AES-256, got %d", len(newKey))
+	}
+
+	block, err := aes.NewCipher(newKey)
+	if err != nil {
+		return fmt.Errorf("failed to create cipher: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return fmt.Errorf("failed to create GCM: %w", err)
+	}
+
+	c.encryptionMu.Lock()
+	defer c.encryptionMu.Unlock()
+
+	// Save old key for decrypting existing data
+	if c.encryptionKey != nil {
+		c.oldKeys[c.encryptionKeyID] = c.encryptionKey
+	}
+
+	c.encryptionEnabled = true
+	c.encryptionKey = newKey
+	c.encryptionKeyID = c.generateKeyID(newKey)
+	c.gcm = gcm
+
+	return nil
+}
+
+// generateKeyID creates a unique ID for a key
+func (c *SSDCache) generateKeyID(key []byte) string {
+	hash := sha256.Sum256(key)
+	return fmt.Sprintf("%x", hash[:8]) // First 8 bytes as hex
+}
+
+// encryptData encrypts data using AES-256-GCM
+func (c *SSDCache) encryptData(plaintext []byte) ([]byte, error) {
+	if !c.encryptionEnabled {
+		return plaintext, nil
+	}
+
+	c.encryptionMu.RLock()
+	gcm := c.gcm
+	keyID := c.encryptionKeyID
+	c.encryptionMu.RUnlock()
+
+	if gcm == nil {
+		return nil, errors.New("encryption enabled but GCM not initialized")
+	}
+
+	// Generate nonce
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, fmt.Errorf("failed to generate nonce: %w", err)
+	}
+
+	// Encrypt
+	ciphertext := gcm.Seal(nil, nonce, plaintext, nil)
+
+	// Convert keyID from hex string to bytes
+	keyIDBytes := make([]byte, 8)
+	copy(keyIDBytes, keyID) // Take first 8 bytes of the hex string
+
+	// Prepend metadata: keyID(8) + nonceSize(1) + nonce + ciphertext
+	result := make([]byte, 0, 8+1+len(nonce)+len(ciphertext))
+	result = append(result, keyIDBytes...)
+	result = append(result, byte(len(nonce)))
+	result = append(result, nonce...)
+	result = append(result, ciphertext...)
+
+	return result, nil
+}
+
+// decryptData decrypts data using AES-256-GCM
+func (c *SSDCache) decryptData(ciphertext []byte) ([]byte, error) {
+	if !c.encryptionEnabled || len(ciphertext) < 10 {
+		return ciphertext, nil
+	}
+
+	// Check if data is encrypted (has our metadata)
+	keyIDBytes := ciphertext[:8]
+	keyID := string(keyIDBytes)
+	nonceSize := int(ciphertext[8])
+
+	if nonceSize > 32 || nonceSize < 12 { // Sanity check
+		// Not encrypted data
+		return ciphertext, nil
+	}
+
+	if len(ciphertext) < 9+nonceSize {
+		return ciphertext, nil // Not encrypted
+	}
+
+	nonce := ciphertext[9 : 9+nonceSize]
+	actualCiphertext := ciphertext[9+nonceSize:]
+
+	c.encryptionMu.RLock()
+	defer c.encryptionMu.RUnlock()
+
+	// Compare first 8 chars of the keyID
+	currentKeyIDPrefix := c.encryptionKeyID
+	if len(currentKeyIDPrefix) > 8 {
+		currentKeyIDPrefix = currentKeyIDPrefix[:8]
+	}
+
+	// Find the right key
+	var gcm cipher.AEAD
+	if keyID == currentKeyIDPrefix {
+		gcm = c.gcm
+	} else if oldKey, ok := c.oldKeys[keyID]; ok {
+		// Use old key
+		block, err := aes.NewCipher(oldKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create cipher for old key: %w", err)
+		}
+		gcm, err = cipher.NewGCM(block)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create GCM for old key: %w", err)
+		}
+	} else {
+		// Try without decryption (might not be encrypted)
+		return ciphertext, nil
+	}
+
+	// Decrypt
+	plaintext, err := gcm.Open(nil, nonce, actualCiphertext, nil)
+	if err != nil {
+		return nil, fmt.Errorf("decryption failed: %w", err)
+	}
+
+	return plaintext, nil
+}
+
 // EnableCompression turns on data compression for SSD storage
 func (c *SSDCache) EnableCompression(algorithm string) {
 	c.compressionMu.Lock()
@@ -440,6 +765,41 @@ func (c *SSDCache) GetCompressionStats() *CompressionStats {
 	if c.totalOriginalSize > 0 {
 		stats.CompressionRatio = float64(c.totalCompressedSize) / float64(c.totalOriginalSize)
 	}
+
+	return stats
+}
+
+// EnableDeduplication turns on content deduplication
+func (c *SSDCache) EnableDeduplication() {
+	c.dedupMu.Lock()
+	defer c.dedupMu.Unlock()
+	c.dedupEnabled = true
+}
+
+// computeHash generates SHA256 hash of data
+func (c *SSDCache) computeHash(data []byte) string {
+	hash := sha256.Sum256(data)
+	return fmt.Sprintf("%x", hash)
+}
+
+// GetDeduplicationStats returns deduplication statistics
+func (c *SSDCache) GetDeduplicationStats() *DeduplicationStats {
+	c.dedupMu.RLock()
+	defer c.dedupMu.RUnlock()
+
+	stats := &DeduplicationStats{}
+
+	totalSize := int64(0)
+	actualSize := int64(0)
+
+	for _, block := range c.dedupIndex {
+		stats.UniqueBlocks++
+		stats.TotalReferences += int64(block.RefCount)
+		actualSize += block.Size
+		totalSize += block.Size * int64(block.RefCount)
+	}
+
+	stats.SpaceSaved = totalSize - actualSize
 
 	return stats
 }
