@@ -69,3 +69,9 @@ vaultaire
 test-*.bin
 tests/k6/*.json
 tests/k6/results/
+debug.log
+*.bin
+*.log
+downloaded.txt
+test.txt
+small-test.bin
