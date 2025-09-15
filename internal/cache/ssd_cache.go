@@ -16,6 +16,19 @@ type AccessPattern struct {
 	Window     time.Duration
 }
 
+type PromotionPolicy struct {
+	FrequencyThreshold int           // Min accesses to trigger promotion
+	TimeWindow         time.Duration // Time window for counting accesses
+	SizeLimit          int64         // Max size to promote (avoid huge files in memory)
+}
+
+// DemotionPolicy defines when to demote data from memory to SSD
+type DemotionPolicy struct {
+	MaxAge        time.Duration // Max time in memory without access
+	LowWaterMark  int64         // Start demotion when memory usage exceeds this
+	HighWaterMark int64         // Aggressively demote when exceeding this
+}
+
 // SSDCache implements a tiered cache with memory and SSD storage
 type SSDCache struct {
 	// Memory tier
@@ -39,6 +52,10 @@ type SSDCache struct {
 	// Access tracking
 	accessMu  sync.RWMutex
 	accessLog map[string]*AccessPattern
+
+	// Policies
+	promotionPolicy *PromotionPolicy
+	demotionPolicy  *DemotionPolicy
 
 	mu    sync.RWMutex
 	index map[string]*SSDEntry
@@ -281,7 +298,18 @@ func (c *SSDCache) IsHot(key string) bool {
 		return false
 	}
 
-	// Hot if accessed >3 times in the last minute
+	// Use promotion policy if configured
+	if c.promotionPolicy != nil {
+		window := c.promotionPolicy.TimeWindow
+		threshold := c.promotionPolicy.FrequencyThreshold
+
+		if time.Since(pattern.LastAccess) <= window && pattern.Count >= threshold {
+			return true
+		}
+		return false
+	}
+
+	// Default behavior
 	if time.Since(pattern.LastAccess) <= pattern.Window && pattern.Count > 3 {
 		return true
 	}
@@ -326,5 +354,72 @@ func (c *SSDCache) Stats() map[string]interface{} {
 		"ssd_capacity":    c.maxSSDSize,
 		"memory_items":    memItems,
 		"ssd_items":       ssdItems,
+	}
+}
+
+// SetPromotionPolicy configures when data moves from SSD to memory
+func (c *SSDCache) SetPromotionPolicy(policy *PromotionPolicy) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.promotionPolicy = policy
+}
+
+// SetDemotionPolicy configures when data moves from memory to SSD
+func (c *SSDCache) SetDemotionPolicy(policy *DemotionPolicy) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.demotionPolicy = policy
+}
+
+// GetMemoryKeys returns keys currently in memory (for testing)
+func (c *SSDCache) GetMemoryKeys() []string {
+	c.memMu.RLock()
+	defer c.memMu.RUnlock()
+
+	keys := make([]string, 0, len(c.memItems))
+	for key := range c.memItems {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+// ApplyDemotionPolicy actively demotes old items based on policy
+func (c *SSDCache) ApplyDemotionPolicy() {
+	if c.demotionPolicy == nil {
+		return
+	}
+
+	c.memMu.Lock()
+	defer c.memMu.Unlock()
+
+	now := time.Now()
+	toEvict := []*ssdMemItem{}
+
+	// Find items older than MaxAge
+	for key, elem := range c.memItems {
+		item := elem.Value.(*ssdMemItem)
+
+		// Check access time from access log
+		c.accessMu.RLock()
+		pattern, exists := c.accessLog[key]
+		c.accessMu.RUnlock()
+
+		if !exists || now.Sub(pattern.LastAccess) > c.demotionPolicy.MaxAge {
+			toEvict = append(toEvict, item)
+		}
+	}
+
+	// Evict old items
+	for _, item := range toEvict {
+		if elem, ok := c.memItems[item.key]; ok {
+			c.memLRU.Remove(elem)
+			delete(c.memItems, item.key)
+			c.memCurrBytes -= item.size
+
+			// Demote to SSD
+			go func(key string, data []byte) {
+				_ = c.demoteToSSD(key, data)
+			}(item.key, item.data)
+		}
 	}
 }
