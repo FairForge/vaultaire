@@ -1,0 +1,8 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FairForge/vaultaire/internal/cache
+cpu: Apple M1 Pro
+BenchmarkSimpleCache_Put-10    	 2806182	       429.2 ns/op	     199 B/op	       4 allocs/op
+BenchmarkSimpleCache_Get-10    	 6508275	       188.3 ns/op	       7 B/op	       1 allocs/op
+PASS
+ok  	github.com/FairForge/vaultaire/internal/cache	5.853s
