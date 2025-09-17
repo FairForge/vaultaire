@@ -2,10 +2,11 @@ package billing
 
 import (
 	"encoding/json"
-	"github.com/stripe/stripe-go/v75"
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/stripe/stripe-go/v75"
 )
 
 type WebhookHandler struct {

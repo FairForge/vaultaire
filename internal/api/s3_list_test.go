@@ -28,7 +28,7 @@ type ListBucketResult struct {
 
 func TestS3_ListObjects(t *testing.T) {
 	logger := zap.NewNop()
-	eng := engine.NewEngine(logger)
+	eng := engine.NewEngine(nil, logger, nil)
 
 	tempDir, err := os.MkdirTemp("", "vaultaire-test-*")
 	require.NoError(t, err)

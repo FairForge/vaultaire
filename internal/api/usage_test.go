@@ -5,11 +5,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"github.com/FairForge/vaultaire/internal/common"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/FairForge/vaultaire/internal/common"
 
 	"github.com/FairForge/vaultaire/internal/database"
 	"github.com/FairForge/vaultaire/internal/usage"

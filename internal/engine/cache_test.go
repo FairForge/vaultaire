@@ -3,11 +3,13 @@ package engine
 import (
 	"context"
 	"testing"
+
+	"go.uber.org/zap"
 )
 
 func TestEngine_AdvancedCache(t *testing.T) {
 	// For now, test with existing engine
-	engine := NewEngine(nil)
+	engine := NewEngine(nil, zap.NewNop(), nil)
 
 	ctx := context.Background()
 	_ = ctx // silence unused warning for now
