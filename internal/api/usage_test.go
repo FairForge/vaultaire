@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"github.com/FairForge/vaultaire/internal/common"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -58,7 +59,7 @@ func TestUsageAPI_GetUsageStats(t *testing.T) {
 	require.True(t, allowed)
 
 	req := httptest.NewRequest("GET", "/api/v1/usage/stats", nil)
-	req = req.WithContext(context.WithValue(req.Context(), tenantIDKey, tenantID)) // Use tenantID, not "tenant-123"
+	req = req.WithContext(context.WithValue(req.Context(), common.TenantIDKey, tenantID)) // Use tenantID, not "tenant-123"
 	w := httptest.NewRecorder()
 
 	server.handleGetUsageStats(w, req)
@@ -87,7 +88,7 @@ func TestUsageAPI_GetUsageAlerts(t *testing.T) {
 	require.True(t, allowed)
 
 	req := httptest.NewRequest("GET", "/api/v1/usage/alerts", nil)
-	req = req.WithContext(context.WithValue(req.Context(), tenantIDKey, "tenant-123"))
+	req = req.WithContext(context.WithValue(req.Context(), common.TenantIDKey, "tenant-123"))
 	w := httptest.NewRecorder()
 
 	server.handleGetUsageAlerts(w, req)
