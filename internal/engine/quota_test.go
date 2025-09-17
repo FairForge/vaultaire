@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 )
 
 // Simple manual mock for quota manager
@@ -69,39 +70,45 @@ func TestCoreEngine_PutWithQuotaEnforcement(t *testing.T) {
 	t.Run("allows put within quota", func(t *testing.T) {
 		// Setup
 		mockQuota := &mockQuotaManager{shouldAllow: true}
-		engine := NewEngine(nil)
-		engine.SetQuotaManager(mockQuota)
+		eng := NewEngine(nil, zap.NewNop(), nil)
+		eng.SetQuotaManager(mockQuota)
 
 		// Add a mock driver
 		mockDriver := &MockDriver{}
-		engine.AddDriver("local", mockDriver)
+		eng.AddDriver("local", mockDriver)
 
 		ctx := context.WithValue(context.Background(), tenantIDKey, "tenant-123")
 		data := strings.NewReader("test data")
 
 		// Act
-		err := engine.Put(ctx, "container", "key", data)
+		err := eng.Put(ctx, "container", "key", data)
 
 		// Assert
 		assert.NoError(t, err)
-		assert.Len(t, mockQuota.calls, 1)
+		// CHANGED: Expect 2 calls now (reserve and release)
+		assert.Len(t, mockQuota.calls, 2)
 		assert.Equal(t, "CheckAndReserve", mockQuota.calls[0].method)
+		assert.Equal(t, "CheckAndReserve", mockQuota.calls[1].method)
+		// First call reserves quota
+		assert.Greater(t, mockQuota.calls[0].bytes, int64(0))
+		// Second call releases quota (negative value)
+		assert.Less(t, mockQuota.calls[1].bytes, int64(0))
 	})
 
 	t.Run("blocks put exceeding quota", func(t *testing.T) {
 		// Setup
 		mockQuota := &mockQuotaManager{shouldAllow: false}
-		engine := NewEngine(nil)
-		engine.SetQuotaManager(mockQuota)
+		eng := NewEngine(nil, zap.NewNop(), nil)
+		eng.SetQuotaManager(mockQuota)
 
 		mockDriver := &MockDriver{}
-		engine.AddDriver("local", mockDriver)
+		eng.AddDriver("local", mockDriver)
 
 		ctx := context.WithValue(context.Background(), tenantIDKey, "tenant-123")
 		data := strings.NewReader("test data")
 
 		// Act
-		err := engine.Put(ctx, "container", "key", data)
+		err := eng.Put(ctx, "container", "key", data)
 
 		// Assert
 		require.Error(t, err)

@@ -2,8 +2,9 @@ package engine
 
 import (
 	"context"
-	"github.com/stretchr/testify/assert"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestCostOptimizer_SelectCheapest(t *testing.T) {

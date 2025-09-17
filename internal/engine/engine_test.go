@@ -2,8 +2,9 @@ package engine
 
 import (
 	"context"
-	"go.uber.org/zap"
 	"testing"
+
+	"go.uber.org/zap"
 )
 
 func TestCoreEngine_ImplementsInterface(t *testing.T) {
@@ -12,7 +13,7 @@ func TestCoreEngine_ImplementsInterface(t *testing.T) {
 
 	// Test construction
 	logger := zap.NewNop()
-	engine := NewEngine(logger)
+	engine := NewEngine(nil, logger, nil)
 
 	if engine == nil {
 		t.Fatal("NewEngine returned nil")

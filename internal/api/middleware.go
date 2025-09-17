@@ -4,11 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"github.com/FairForge/vaultaire/internal/common"
-	"go.uber.org/zap"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/FairForge/vaultaire/internal/common"
+	"go.uber.org/zap"
 )
 
 // Middleware is a function that wraps an HTTP handler
