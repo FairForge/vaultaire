@@ -4,10 +4,11 @@ package api
 import (
 	"context"
 	"fmt"
-	"github.com/FairForge/vaultaire/internal/common"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/FairForge/vaultaire/internal/common"
 
 	"github.com/FairForge/vaultaire/internal/events"
 	"github.com/FairForge/vaultaire/internal/tenant"

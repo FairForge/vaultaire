@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"os/signal"
@@ -21,11 +22,15 @@ import (
 type nilQuotaManager struct{}
 
 func (n *nilQuotaManager) GetUsage(ctx context.Context, tenantID string) (used, limit int64, err error) {
-	return 0, 1073741824, nil // Return 0 used, 1GB limit
+	return 0, 1073741824, nil
 }
 
 func (n *nilQuotaManager) CheckAndReserve(ctx context.Context, tenantID string, bytes int64) (bool, error) {
-	return true, nil // Always allow for now
+	return true, nil
+}
+
+func (n *nilQuotaManager) ReleaseQuota(ctx context.Context, tenantID string, bytes int64) error {
+	return nil
 }
 
 func (n *nilQuotaManager) CreateTenant(ctx context.Context, tenantID, plan string, storageLimit int64) error {
@@ -49,12 +54,12 @@ func main() {
 	logger, _ := zap.NewProduction()
 	defer func() { _ = logger.Sync() }()
 
-	// Create config
+	// Parse config
 	port := 8000
 	if p := os.Getenv("PORT"); p != "" {
 		if _, err := fmt.Sscanf(p, "%d", &port); err != nil {
 			logger.Error("invalid port number", zap.String("port", p), zap.Error(err))
-			port = 8000 // default fallback
+			port = 8000
 		}
 	}
 
@@ -64,111 +69,7 @@ func main() {
 		},
 	}
 
-	// Create engine
-	eng := engine.NewEngine(logger)
-
-	// Configure backend costs (per GB per month)
-	eng.SetCostConfiguration(map[string]float64{
-		"lyve":      0.00637, // Seagate Lyve Cloud
-		"quotaless": 0.001,   // Quotaless bulk
-		"s3":        0.023,   // AWS S3 standard
-		"onedrive":  0.0,     // Already paid for
-		"local":     0.0,     // Local storage
-	})
-
-	// Configure egress costs (per GB)
-	eng.SetEgressCosts(map[string]float64{
-		"lyve":      0.0,  // No egress fees!
-		"s3":        0.09, // AWS egress
-		"quotaless": 0.01, // Minimal egress
-		"onedrive":  0.02, // Estimated
-		"local":     0.0,  // No egress
-	})
-
-	// Add storage driver based on environment
-	storageMode := os.Getenv("STORAGE_MODE")
-	if storageMode == "" {
-		storageMode = "local"
-	}
-
-	switch storageMode {
-	case "local":
-		// Local driver for development
-		dataPath := os.Getenv("LOCAL_STORAGE_PATH")
-		if dataPath == "" {
-			dataPath = "/tmp/vaultaire-data"
-		}
-		if err := os.MkdirAll(dataPath, 0750); err != nil {
-			logger.Fatal("failed to create storage directory", zap.Error(err))
-		}
-		localDriver := drivers.NewLocalDriver(dataPath, logger)
-		eng.AddDriver("local", localDriver)
-		eng.SetPrimary("local")
-		logger.Info("using local storage", zap.String("path", dataPath))
-
-	case "s3":
-		// S3-compatible driver for production
-		accessKey := os.Getenv("S3_ACCESS_KEY")
-		secretKey := os.Getenv("S3_SECRET_KEY")
-		if accessKey == "" || secretKey == "" {
-			logger.Fatal("S3_ACCESS_KEY and S3_SECRET_KEY required for s3 mode")
-		}
-
-		s3CompatDriver, err := drivers.NewS3CompatDriver(accessKey, secretKey, logger)
-		if err != nil {
-			logger.Fatal("failed to create S3 driver", zap.Error(err))
-		}
-		eng.AddDriver("s3", s3CompatDriver)
-		eng.SetPrimary("s3")
-		logger.Info("using S3-compatible storage")
-
-	case "quotaless":
-		// Quotaless driver for production
-		accessKey := os.Getenv("QUOTALESS_ACCESS_KEY")
-		secretKey := os.Getenv("QUOTALESS_SECRET_KEY")
-		if accessKey == "" || secretKey == "" {
-			logger.Fatal("QUOTALESS_ACCESS_KEY and QUOTALESS_SECRET_KEY required for quotaless mode")
-		}
-
-		endpoint := os.Getenv("QUOTALESS_ENDPOINT")
-		if endpoint == "" {
-			endpoint = "https://us.quotaless.cloud:8000"
-		}
-		quotalessDriver, err := drivers.NewQuotalessDriver(accessKey, secretKey, endpoint, logger)
-		if err != nil {
-			logger.Fatal("failed to create Quotaless driver", zap.Error(err))
-		}
-		eng.AddDriver("quotaless", quotalessDriver)
-		eng.SetPrimary("quotaless")
-		logger.Info("using Quotaless storage")
-
-	case "lyve":
-		accessKey := os.Getenv("LYVE_ACCESS_KEY")
-		secretKey := os.Getenv("LYVE_SECRET_KEY")
-		region := os.Getenv("LYVE_REGION")
-		if region == "" {
-			region = "us-east-1"
-		}
-
-		if accessKey == "" || secretKey == "" {
-			logger.Fatal("LYVE_ACCESS_KEY and LYVE_SECRET_KEY required for lyve mode")
-		}
-
-		// IMPORTANT: Don't set a default tenant - it should come from request context
-		// This allows proper multi-tenancy where each request carries its own tenant ID
-		lyveDriver, err := drivers.NewLyveDriver(accessKey, secretKey, "", region, logger)
-		if err != nil {
-			logger.Fatal("failed to create Lyve driver", zap.Error(err))
-		}
-		eng.AddDriver("lyve", lyveDriver)
-		eng.SetPrimary("lyve")
-		logger.Info("using Lyve Cloud storage", zap.String("region", region))
-
-	default:
-		logger.Fatal("invalid STORAGE_MODE", zap.String("mode", storageMode))
-	}
-
-	// Database configuration from environment
+	// Database configuration
 	dbHost := os.Getenv("DB_HOST")
 	if dbHost == "" {
 		dbHost = "localhost"
@@ -191,8 +92,7 @@ func main() {
 	}
 
 	// Try to connect to database
-	var server *api.Server
-
+	var db *sql.DB
 	dbConfig := database.Config{
 		Host:     dbHost,
 		Port:     dbPort,
@@ -202,49 +102,136 @@ func main() {
 		SSLMode:  "disable",
 	}
 
-	db, err := database.NewPostgres(dbConfig, logger)
+	dbConn, err := database.NewPostgres(dbConfig, logger)
 	if err != nil {
-		logger.Warn("failed to connect to database, running without quota management",
+		logger.Warn("failed to connect to database, running without intelligence",
 			zap.Error(err))
-		// Create server with nil quota manager
-		server = api.NewServer(cfg, logger, eng, &nilQuotaManager{}, nil)
+		db = nil
 	} else {
+		db = dbConn.DB()
 		defer func() { _ = db.Close() }()
 		logger.Info("connected to database",
 			zap.String("host", dbHost),
 			zap.String("database", dbName))
-
-		// Create real quota manager - only needs *sql.DB
-		quotaManager := usage.NewQuotaManager(db.DB())
-
-		// Pass real database and quota manager
-		server = api.NewServer(cfg, logger, eng, quotaManager, db.DB())
 	}
 
-	// Handle shutdown gracefully
+	// Create engine with or without DB
+	eng := engine.NewEngine(db, logger, &engine.Config{
+		EnableCaching:  true,
+		EnableML:       db != nil, // Only enable ML if we have DB
+		DefaultBackend: "local",
+	})
+
+	// Configure backend costs
+	eng.SetCostConfiguration(map[string]float64{
+		"lyve":      0.00637,
+		"quotaless": 0.001,
+		"s3":        0.023,
+		"onedrive":  0.0,
+		"local":     0.0,
+	})
+
+	eng.SetEgressCosts(map[string]float64{
+		"lyve":      0.0,
+		"s3":        0.09,
+		"quotaless": 0.01,
+		"onedrive":  0.02,
+		"local":     0.0,
+	})
+
+	// Add storage driver
+	storageMode := os.Getenv("STORAGE_MODE")
+	if storageMode == "" {
+		storageMode = "local"
+	}
+
+	switch storageMode {
+	case "local":
+		dataPath := os.Getenv("LOCAL_STORAGE_PATH")
+		if dataPath == "" {
+			dataPath = "/tmp/vaultaire-data"
+		}
+		if err := os.MkdirAll(dataPath, 0750); err != nil {
+			logger.Fatal("failed to create storage directory", zap.Error(err))
+		}
+		localDriver := drivers.NewLocalDriver(dataPath, logger)
+		eng.AddDriver("local", localDriver)
+		eng.SetPrimary("local")
+		logger.Info("using local storage", zap.String("path", dataPath))
+
+	case "s3":
+		accessKey := os.Getenv("S3_ACCESS_KEY")
+		secretKey := os.Getenv("S3_SECRET_KEY")
+		if accessKey == "" || secretKey == "" {
+			logger.Fatal("S3_ACCESS_KEY and S3_SECRET_KEY required")
+		}
+		s3Driver, err := drivers.NewS3CompatDriver(accessKey, secretKey, logger)
+		if err != nil {
+			logger.Fatal("failed to create S3 driver", zap.Error(err))
+		}
+		eng.AddDriver("s3", s3Driver)
+		eng.SetPrimary("s3")
+		logger.Info("using S3 storage")
+
+	case "lyve":
+		accessKey := os.Getenv("LYVE_ACCESS_KEY")
+		secretKey := os.Getenv("LYVE_SECRET_KEY")
+		region := os.Getenv("LYVE_REGION")
+		if region == "" {
+			region = "us-east-1"
+		}
+		if accessKey == "" || secretKey == "" {
+			logger.Fatal("LYVE credentials required")
+		}
+		lyveDriver, err := drivers.NewLyveDriver(accessKey, secretKey, "", region, logger)
+		if err != nil {
+			logger.Fatal("failed to create Lyve driver", zap.Error(err))
+		}
+		eng.AddDriver("lyve", lyveDriver)
+		eng.SetPrimary("lyve")
+		logger.Info("using Lyve Cloud storage")
+
+	default:
+		logger.Fatal("invalid STORAGE_MODE", zap.String("mode", storageMode))
+	}
+
+	// Create server
+	var server *api.Server
+	if db != nil {
+		quotaManager := usage.NewQuotaManager(db)
+		eng.SetQuotaManager(quotaManager)
+		server = api.NewServer(cfg, logger, eng, quotaManager, db)
+	} else {
+		server = api.NewServer(cfg, logger, eng, &nilQuotaManager{}, nil)
+	}
+
+	// Graceful shutdown
 	go func() {
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 		<-sigChan
 
-		logger.Info("shutting down server...")
+		logger.Info("shutting down...")
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		if err := server.Shutdown(ctx); err != nil {
-			logger.Error("shutdown error", zap.Error(err))
-		}
+		_ = eng.Shutdown(ctx)
+		_ = server.Shutdown(ctx)
 		os.Exit(0)
 	}()
 
-	// Add auth handler and routes
 	// Start server
 	fmt.Printf("\n")
 	fmt.Printf("╔══════════════════════════════════════╗\n")
 	fmt.Printf("║       Vaultaire Server Started       ║\n")
 	fmt.Printf("╠══════════════════════════════════════╣\n")
-	fmt.Printf("║  S3 API: http://localhost:%-10d ║\n", cfg.Server.Port)
+	fmt.Printf("║  S3 API: http://localhost:%-10d ║\n", port)
 	fmt.Printf("║  Storage: %-26s ║\n", storageMode)
+	if db != nil {
+		fmt.Printf("║  Intelligence: ENABLED               ║\n")
+	} else {
+		fmt.Printf("║  Intelligence: DISABLED (no DB)      ║\n")
+	}
 	fmt.Printf("╚══════════════════════════════════════╝\n")
 	fmt.Printf("\n")
 

@@ -19,7 +19,7 @@ import (
 
 func TestS3_PutAndGet_WithTenant(t *testing.T) {
 	logger, _ := zap.NewDevelopment()
-	eng := engine.NewEngine(logger)
+	eng := engine.NewEngine(nil, logger, nil)
 
 	// Create temp dir for storage
 	tempDir, err := os.MkdirTemp("", "vaultaire-test-*")
@@ -36,6 +36,7 @@ func TestS3_PutAndGet_WithTenant(t *testing.T) {
 	bucketPath := filepath.Join(tempDir, namespacedBucket)
 	err = os.MkdirAll(bucketPath, 0755)
 	require.NoError(t, err)
+
 	server := &Server{
 		logger:   logger,
 		router:   chi.NewRouter(),
@@ -79,7 +80,7 @@ func TestS3_PutAndGet_WithTenant(t *testing.T) {
 
 func TestS3_RequiresTenant(t *testing.T) {
 	logger, _ := zap.NewDevelopment()
-	eng := engine.NewEngine(logger)
+	eng := engine.NewEngine(nil, logger, nil)
 
 	server := &Server{
 		logger:   logger,
@@ -93,4 +94,37 @@ func TestS3_RequiresTenant(t *testing.T) {
 
 	server.handleS3Request(w, req)
 	assert.NotEqual(t, 403, w.Code, "Should not fail with tenant error")
+}
+
+func TestS3Operations(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+
+	// Create engine with nil db for testing
+	eng := engine.NewEngine(nil, logger, &engine.Config{
+		EnableCaching:  false,
+		EnableML:       false,
+		DefaultBackend: "local",
+	})
+
+	// Create temp dir for storage
+	tempDir, err := os.MkdirTemp("", "vaultaire-test-*")
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(tempDir) }()
+
+	// Create and register a local driver
+	driver := drivers.NewLocalDriver(tempDir, logger)
+	eng.AddDriver("local", driver)
+
+	server := &Server{
+		logger:   logger,
+		router:   chi.NewRouter(),
+		engine:   eng,
+		testMode: true,
+	}
+
+	req := httptest.NewRequest("PUT", "/test-bucket/test.txt", bytes.NewReader([]byte("test content")))
+	w := httptest.NewRecorder()
+
+	server.handleS3Request(w, req)
+	assert.NotEqual(t, 500, w.Code, "Should not fail with server error")
 }

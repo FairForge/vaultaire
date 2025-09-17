@@ -3,9 +3,10 @@ package drivers
 import (
 	"context"
 
-	"go.uber.org/zap"
 	"io"
 	"sync"
+
+	"go.uber.org/zap"
 )
 
 // ParallelDriver wraps any driver with parallel execution

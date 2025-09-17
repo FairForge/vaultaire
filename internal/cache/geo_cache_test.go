@@ -1,9 +1,10 @@
 package cache
 
 import (
+	"testing"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"testing"
 )
 
 func TestGeoCacheManager_AddEdgeNode(t *testing.T) {
