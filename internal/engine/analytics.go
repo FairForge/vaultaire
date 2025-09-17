@@ -1,3 +1,4 @@
+// Package engine provides the core storage orchestration engine.
 // internal/engine/analytics.go
 package engine
 

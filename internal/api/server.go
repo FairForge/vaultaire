@@ -88,8 +88,12 @@ func (s *Server) setupRoutes() {
 	s.router.Get("/api/v1/usage/stats", s.handleGetUsageStats)
 	s.router.Get("/api/v1/usage/alerts", s.handleGetUsageAlerts)
 	s.router.Get("/api/v1/presigned", s.handleGetPresignedURL)
+
 	// Add quota management routes
 	s.setupQuotaManagementRoutes()
+
+	// Add pattern routes if DB available
+	s.setupPatternRoutes()
 
 	// API Documentation routes
 	s.router.Get("/docs", docs.SwaggerUIHandler())

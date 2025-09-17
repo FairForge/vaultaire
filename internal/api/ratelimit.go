@@ -1,8 +1,9 @@
 package api
 
 import (
-	"golang.org/x/time/rate"
 	"sync"
+
+	"golang.org/x/time/rate"
 )
 
 type RateLimiter struct {
