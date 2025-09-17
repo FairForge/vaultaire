@@ -2,7 +2,9 @@
 package api
 
 import (
+	"context"
 	"fmt"
+	"github.com/FairForge/vaultaire/internal/common"
 	"net/http"
 	"strings"
 	"time"
@@ -264,6 +266,11 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
+	// Put the tenant ID into the context immediately
+	if tenantID != "" {
+		ctx := context.WithValue(r.Context(), common.TenantIDKey, tenantID)
+		r = r.WithContext(ctx)
+	}
 
 	s3Req.TenantID = tenantID
 
@@ -301,8 +308,21 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Get the existing tenant ID from the context FIRST
+	existingTenantID := ""
+	if t := r.Context().Value(common.TenantIDKey); t != nil {
+		if tid, ok := t.(string); ok {
+			existingTenantID = tid
+		}
+	}
+
 	// Add tenant to request context if not already there
 	ctx := tenant.WithTenant(r.Context(), t)
+
+	// Preserve the common.TenantIDKey if it existed
+	if existingTenantID != "" {
+		ctx = context.WithValue(ctx, common.TenantIDKey, existingTenantID)
+	}
 	r = r.WithContext(ctx)
 
 	// Log event for ML training data collection

@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -17,7 +18,7 @@ import (
 
 type LyveDriver struct {
 	client   *s3.Client
-	tenantID string
+	tenantID string // Default tenant, can be overridden by context
 	region   string
 	logger   *zap.Logger
 }
@@ -47,8 +48,23 @@ func NewLyveDriver(accessKey, secretKey, tenantID, region string, logger *zap.Lo
 	}, nil
 }
 
-func (d *LyveDriver) buildTenantKey(container, artifact string) string {
-	return fmt.Sprintf("t-%s/%s/%s", d.tenantID, container, artifact)
+// getTenantID extracts tenant from context or uses default
+func (d *LyveDriver) getTenantID(ctx context.Context) string {
+	if tid := ctx.Value(common.TenantIDKey); tid != nil {
+		if t, ok := tid.(string); ok {
+			return t
+		}
+	}
+	// If no tenant in context and no default, this is an error condition
+	if d.tenantID == "" {
+		// Log warning or panic - requests MUST have tenant context
+		d.logger.Warn("no tenant ID in context or driver")
+		return "default" // Fallback, but this shouldn't happen
+	}
+	return d.tenantID
+}
+func (d *LyveDriver) buildTenantKey(tenantID, container, artifact string) string {
+	return fmt.Sprintf("t-%s/%s/%s", tenantID, container, artifact)
 }
 
 func (d *LyveDriver) getBucket() string {
@@ -56,7 +72,8 @@ func (d *LyveDriver) getBucket() string {
 }
 
 func (d *LyveDriver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
-	key := d.buildTenantKey(container, artifact)
+	tenantID := d.getTenantID(ctx)
+	key := d.buildTenantKey(tenantID, container, artifact)
 	bucket := d.getBucket()
 
 	result, err := d.client.GetObject(ctx, &s3.GetObjectInput{
@@ -71,7 +88,8 @@ func (d *LyveDriver) Get(ctx context.Context, container, artifact string) (io.Re
 }
 
 func (d *LyveDriver) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...engine.PutOption) error {
-	key := d.buildTenantKey(container, artifact)
+	tenantID := d.getTenantID(ctx)
+	key := d.buildTenantKey(tenantID, container, artifact)
 	bucket := d.getBucket()
 
 	// Apply options
@@ -112,7 +130,8 @@ func (d *LyveDriver) Put(ctx context.Context, container, artifact string, data i
 }
 
 func (d *LyveDriver) Delete(ctx context.Context, container, artifact string) error {
-	key := d.buildTenantKey(container, artifact)
+	tenantID := d.getTenantID(ctx)
+	key := d.buildTenantKey(tenantID, container, artifact)
 	bucket := d.getBucket()
 
 	_, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
@@ -127,7 +146,11 @@ func (d *LyveDriver) Delete(ctx context.Context, container, artifact string) err
 }
 
 func (d *LyveDriver) List(ctx context.Context, container string, prefix string) ([]string, error) {
-	keyPrefix := d.buildTenantKey(container, prefix)
+	tenantID := d.getTenantID(ctx)
+	keyPrefix := fmt.Sprintf("t-%s/%s/", tenantID, container)
+	if prefix != "" {
+		keyPrefix = fmt.Sprintf("t-%s/%s/%s", tenantID, container, prefix)
+	}
 	bucket := d.getBucket()
 
 	result, err := d.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
@@ -138,18 +161,19 @@ func (d *LyveDriver) List(ctx context.Context, container string, prefix string) 
 		return nil, fmt.Errorf("list objects: %w", err)
 	}
 
-	var artifacts []string
+	// Strip the tenant/container prefix when returning keys
+	// Use the tenantID we actually used, not d.tenantID
+	tenantPrefix := fmt.Sprintf("t-%s/%s/", tenantID, container)
+	keys := make([]string, 0, len(result.Contents))
 	for _, obj := range result.Contents {
-		key := aws.ToString(obj.Key)
-		// Remove tenant/container prefix to get artifact name
-		parts := strings.Split(key, "/")
-		if len(parts) >= 3 {
-			artifact := strings.Join(parts[2:], "/")
-			artifacts = append(artifacts, artifact)
+		if obj.Key != nil {
+			// Remove the tenant/container prefix to return just the artifact name
+			key := strings.TrimPrefix(*obj.Key, tenantPrefix)
+			keys = append(keys, key)
 		}
 	}
 
-	return artifacts, nil
+	return keys, nil
 }
 
 func (d *LyveDriver) Name() string {
