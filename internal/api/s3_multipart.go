@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"encoding/xml"
 	"fmt"
+	"github.com/FairForge/vaultaire/internal/common"
 	"io"
 	"net/http"
 	"sort"
@@ -48,11 +49,23 @@ func (s *Server) handleInitiateMultipartUpload(w http.ResponseWriter, r *http.Re
 	uploadID := fmt.Sprintf("upload-%d-%d", time.Now().Unix(), time.Now().Nanosecond())
 
 	// Get tenant from context
-	tenantID := "test-tenant"
-	if t := r.Context().Value(tenantIDKey); t != nil {
+	tenantID := "default"
+
+	// DEBUG: Check what's actually in the context
+	ctxValue := r.Context().Value(common.TenantIDKey)
+	s.logger.Info("multipart init context check",
+		zap.Any("raw_value", ctxValue),
+		zap.String("type", fmt.Sprintf("%T", ctxValue)))
+
+	if t := r.Context().Value(common.TenantIDKey); t != nil {
 		if tid, ok := t.(string); ok {
 			tenantID = tid
+			s.logger.Info("extracted tenant", zap.String("tenant", tenantID))
+		} else {
+			s.logger.Info("failed to cast tenant", zap.Any("value", t))
 		}
+	} else {
+		s.logger.Info("no tenant in context")
 	}
 
 	// Store the upload session
@@ -82,7 +95,6 @@ func (s *Server) handleInitiateMultipartUpload(w http.ResponseWriter, r *http.Re
 	w.Header().Set("Content-Type", "application/xml")
 	if err := xml.NewEncoder(w).Encode(response); err != nil {
 		s.logger.Error("failed to encode initiate response", zap.Error(err))
-		// Headers already sent, can't send error response
 		return
 	}
 }
@@ -206,25 +218,26 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 	}
 	sort.Ints(partNumbers)
 
-	// Copy parts slice for streaming (to avoid holding lock during upload)
-	partsToStream := make([]*Part, len(partNumbers))
+	// Copy parts for assembly
+	partsToAssemble := make([]*Part, len(partNumbers))
 	for i, partNum := range partNumbers {
-		partsToStream[i] = upload.Parts[partNum]
+		partsToAssemble[i] = upload.Parts[partNum]
 	}
 	upload.mu.Unlock()
 
-	// STREAMING ASSEMBLY: Use io.Pipe to stream while assembling
+	// Use streaming assembly with pipe
 	pr, pw := io.Pipe()
+
+	// IMPORTANT FIX: Use just the bucket name, not tenant_bucket
+	// The engine/driver will handle tenant isolation internally
 	containerName := fmt.Sprintf("%s_%s", upload.TenantID, bucket)
 
-	// Track assembly progress
-	assemblyStart := time.Now()
 	var assemblyErr error
 	var uploadErr error
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// Goroutine 1: Stream parts to pipe
+	// Goroutine 1: Write parts to pipe
 	go func() {
 		defer wg.Done()
 		defer func() {
@@ -233,22 +246,20 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 			}
 		}()
 
-		for i, part := range partsToStream {
+		for i, part := range partsToAssemble {
 			if _, err := pw.Write(part.Data); err != nil {
 				assemblyErr = fmt.Errorf("failed to write part %d: %w", partNumbers[i], err)
+				pw.CloseWithError(assemblyErr)
 				return
 			}
 		}
 
-		s.logger.Info("assembly complete",
-			zap.Duration("assembly_time", time.Since(assemblyStart)),
+		s.logger.Info("parts assembled",
 			zap.Int64("total_size", totalSize),
 			zap.Int("parts", len(partNumbers)))
 	}()
 
-	// Goroutine 2: Upload from pipe to backend with longer timeout
-	storeStart := time.Now()
-
+	// Goroutine 2: Upload from pipe to backend
 	go func() {
 		defer wg.Done()
 		defer func() {
@@ -257,24 +268,35 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 			}
 		}()
 
-		// Use a longer timeout to avoid client disconnection
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		// Create context with timeout
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 		defer cancel()
 
+		// Add tenant to context for the engine
+		ctx = context.WithValue(ctx, common.TenantIDKey, upload.TenantID)
+
+		// Store to backend
 		uploadErr = s.engine.Put(ctx, containerName, object, pr)
 
-		if uploadErr == nil {
-			s.logger.Info("stored to backend",
-				zap.Duration("store_time", time.Since(storeStart)))
+		if uploadErr != nil {
+			s.logger.Error("failed to store to backend",
+				zap.Error(uploadErr),
+				zap.String("container", containerName),
+				zap.String("key", object))
+		} else {
+			s.logger.Info("stored to backend successfully",
+				zap.String("container", containerName),
+				zap.String("key", object),
+				zap.Int64("size", totalSize))
 		}
 	}()
 
-	// Wait for both goroutines to complete
+	// Wait for both operations to complete
 	wg.Wait()
 
 	// Check for errors
 	if assemblyErr != nil {
-		s.logger.Error("failed to assemble multipart object",
+		s.logger.Error("assembly failed",
 			zap.Error(assemblyErr),
 			zap.String("bucket", bucket),
 			zap.String("key", object))
@@ -283,25 +305,25 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 	}
 
 	if uploadErr != nil {
-		s.logger.Error("failed to store multipart object",
+		s.logger.Error("storage failed",
 			zap.Error(uploadErr),
 			zap.String("bucket", bucket),
 			zap.String("key", object))
-		http.Error(w, "Failed to complete upload", http.StatusInternalServerError)
+		http.Error(w, "Failed to store upload", http.StatusInternalServerError)
 		return
 	}
 
-	// Generate final ETag (simplified - no need to compute over all data)
+	// Generate final ETag
 	finalETag := fmt.Sprintf("\"multipart-%d\"", len(partNumbers))
 
-	// Mark as completed but DON'T delete immediately
+	// Mark as completed
 	upload.mu.Lock()
 	upload.Completed = true
 	upload.CompletedETag = finalETag
 	upload.CompletedAt = time.Now()
 	upload.mu.Unlock()
 
-	// Clean up after 5 minutes
+	// Schedule cleanup
 	go func() {
 		time.Sleep(5 * time.Minute)
 		uploadsMu.Lock()
@@ -310,7 +332,7 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 		s.logger.Debug("cleaned up completed upload", zap.String("uploadID", uploadID))
 	}()
 
-	s.logger.Info("completed multipart upload",
+	s.logger.Info("multipart upload completed",
 		zap.String("bucket", bucket),
 		zap.String("key", object),
 		zap.String("uploadID", uploadID),
@@ -337,7 +359,7 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 func (s *Server) handleAbortMultipartUpload(w http.ResponseWriter, r *http.Request, bucket, object string) {
 	uploadID := r.URL.Query().Get("uploadId")
 
-	// Log the abort operation with all parameters to satisfy linter
+	// Log the abort operation
 	s.logger.Info("aborting multipart upload",
 		zap.String("bucket", bucket),
 		zap.String("object", object),

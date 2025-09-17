@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"github.com/FairForge/vaultaire/internal/common"
 	"go.uber.org/zap"
 	"net/http"
 	"strings"
@@ -74,7 +75,7 @@ func ExtractTenant(db *sql.DB, logger *zap.Logger) func(http.Handler) http.Handl
 				tenantID = "test-tenant"
 			}
 
-			ctx := context.WithValue(r.Context(), tenantIDKey, tenantID)
+			ctx := context.WithValue(r.Context(), common.TenantIDKey, tenantID)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
