@@ -154,13 +154,9 @@ func main() {
 			logger.Fatal("LYVE_ACCESS_KEY and LYVE_SECRET_KEY required for lyve mode")
 		}
 
-		// For now, use a default tenant - in production this would come from auth
-		tenantID := "default"
-		if tid := os.Getenv("TENANT_ID"); tid != "" {
-			tenantID = tid
-		}
-
-		lyveDriver, err := drivers.NewLyveDriver(accessKey, secretKey, tenantID, region, logger)
+		// IMPORTANT: Don't set a default tenant - it should come from request context
+		// This allows proper multi-tenancy where each request carries its own tenant ID
+		lyveDriver, err := drivers.NewLyveDriver(accessKey, secretKey, "", region, logger)
 		if err != nil {
 			logger.Fatal("failed to create Lyve driver", zap.Error(err))
 		}
