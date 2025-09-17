@@ -18,7 +18,7 @@ import (
 
 func TestS3_DeleteObject(t *testing.T) {
 	logger, _ := zap.NewDevelopment()
-	eng := engine.NewEngine(logger)
+	eng := engine.NewEngine(nil, logger, nil)
 
 	// Setup storage
 	tempDir, err := os.MkdirTemp("", "vaultaire-test-*")

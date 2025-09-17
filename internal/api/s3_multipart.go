@@ -5,13 +5,14 @@ import (
 	"crypto/md5"
 	"encoding/xml"
 	"fmt"
-	"github.com/FairForge/vaultaire/internal/common"
 	"io"
 	"net/http"
 	"sort"
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/FairForge/vaultaire/internal/common"
 
 	"go.uber.org/zap"
 )

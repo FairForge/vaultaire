@@ -2,9 +2,10 @@ package api
 
 import (
 	"encoding/json"
-	"github.com/FairForge/vaultaire/internal/common"
 	"net/http"
 	"time"
+
+	"github.com/FairForge/vaultaire/internal/common"
 )
 
 // Define context key locally for api package
