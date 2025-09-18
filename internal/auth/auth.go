@@ -1,3 +1,4 @@
+// internal/auth/auth.go
 package auth
 
 import (
@@ -14,31 +15,44 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// User represents a system user
+// User represents a stored.ge customer
 type User struct {
 	ID           string
 	Email        string
 	PasswordHash string
+	Company      string
+	TenantID     string // Link to their storage tenant
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+}
+
+// Tenant represents an isolated storage namespace
+type Tenant struct {
+	ID        string
+	UserID    string // Owner user
+	AccessKey string // S3 access key
+	SecretKey string // S3 secret key
+	CreatedAt time.Time
 }
 
 // APIKey represents an API key for S3 access
 type APIKey struct {
 	ID        string
 	UserID    string
+	TenantID  string
 	Name      string
 	Key       string // Public key (like AWS Access Key)
-	Secret    string // Secret key (like AWS Secret Key)
+	Secret    string // Secret key (shown once)
 	Hash      string // Hash of secret for storage
 	CreatedAt time.Time
-	LastUsed  time.Time
+	LastUsed  *time.Time
 }
 
 // JWTClaims represents JWT token claims
 type JWTClaims struct {
-	UserID string `json:"user_id"`
-	Email  string `json:"email"`
+	UserID   string `json:"user_id"`
+	Email    string `json:"email"`
+	TenantID string `json:"tenant_id"`
 	jwt.RegisteredClaims
 }
 
@@ -46,8 +60,11 @@ type JWTClaims struct {
 type AuthService struct {
 	db        Database
 	jwtSecret []byte
-	users     map[string]*User   // In-memory for now
-	apiKeys   map[string]*APIKey // In-memory for now
+	users     map[string]*User   // email -> user
+	tenants   map[string]*Tenant // tenantID -> tenant
+	apiKeys   map[string]*APIKey // key -> apikey
+	userIndex map[string]*User   // userID -> user
+	keyIndex  map[string]*Tenant // accessKey -> tenant (for S3 auth)
 }
 
 // Database interface for auth operations
@@ -61,41 +78,82 @@ func NewAuthService(db Database) *AuthService {
 		db:        db,
 		jwtSecret: []byte("change-me-in-production"), // TODO: Use env var
 		users:     make(map[string]*User),
+		tenants:   make(map[string]*Tenant),
 		apiKeys:   make(map[string]*APIKey),
+		userIndex: make(map[string]*User),
+		keyIndex:  make(map[string]*Tenant),
 	}
 }
 
-// CreateUser creates a new user account
+// CreateUser creates a new user account WITH tenant
 func (a *AuthService) CreateUser(ctx context.Context, email, password string) (*User, error) {
+	// This is the original method - calls the new one with empty company
+	user, _, _, err := a.CreateUserWithTenant(ctx, email, password, "")
+	return user, err
+}
+
+// CreateUserWithTenant creates both user and their storage tenant
+func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password, company string) (*User, *Tenant, *APIKey, error) {
 	// Validate email
 	email = strings.ToLower(strings.TrimSpace(email))
 	if !strings.Contains(email, "@") {
-		return nil, fmt.Errorf("invalid email address")
+		return nil, nil, nil, fmt.Errorf("invalid email address")
 	}
 
 	// Check if user exists
 	if _, exists := a.users[email]; exists {
-		return nil, fmt.Errorf("user already exists")
+		return nil, nil, nil, fmt.Errorf("user already exists")
 	}
 
 	// Hash password
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
-		return nil, fmt.Errorf("hash password: %w", err)
+		return nil, nil, nil, fmt.Errorf("hash password: %w", err)
 	}
 
+	// Create user
 	user := &User{
 		ID:           uuid.New().String(),
 		Email:        email,
 		PasswordHash: string(hash),
+		Company:      company,
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
 	}
 
-	// Store in memory (TODO: Use database)
-	a.users[email] = user
+	// Create tenant for this user
+	tenant := &Tenant{
+		ID:        "tenant-" + generateID(),
+		UserID:    user.ID,
+		AccessKey: "VK" + generateID(), // VK = Vaultaire Key
+		SecretKey: "SK" + generateID() + generateID(),
+		CreatedAt: time.Now(),
+	}
 
-	return user, nil
+	// Link tenant to user
+	user.TenantID = tenant.ID
+
+	// Create primary API key
+	secretHash := sha256.Sum256([]byte(tenant.SecretKey))
+	apiKey := &APIKey{
+		ID:        uuid.New().String(),
+		UserID:    user.ID,
+		TenantID:  tenant.ID,
+		Name:      "primary",
+		Key:       tenant.AccessKey,
+		Secret:    tenant.SecretKey, // Only returned on creation
+		Hash:      hex.EncodeToString(secretHash[:]),
+		CreatedAt: time.Now(),
+	}
+
+	// Store everything in memory (TODO: Use database)
+	a.users[email] = user
+	a.userIndex[user.ID] = user
+	a.tenants[tenant.ID] = tenant
+	a.apiKeys[apiKey.Key] = apiKey
+	a.keyIndex[tenant.AccessKey] = tenant // For S3 auth lookup
+
+	return user, tenant, apiKey, nil
 }
 
 // ValidatePassword checks if password is correct
@@ -118,8 +176,23 @@ func (a *AuthService) ValidatePassword(ctx context.Context, email, password stri
 	return true, nil
 }
 
-// GenerateAPIKey creates a new API key
+// GetUserByEmail retrieves a user by email
+func (a *AuthService) GetUserByEmail(ctx context.Context, email string) (*User, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	user, exists := a.users[email]
+	if !exists {
+		return nil, fmt.Errorf("user not found")
+	}
+	return user, nil
+}
+
+// GenerateAPIKey creates a new API key for a user
 func (a *AuthService) GenerateAPIKey(ctx context.Context, userID, name string) (*APIKey, error) {
+	user, exists := a.userIndex[userID]
+	if !exists {
+		return nil, fmt.Errorf("user not found")
+	}
+
 	// Generate random key and secret
 	keyBytes := make([]byte, 20)
 	if _, err := rand.Read(keyBytes); err != nil {
@@ -131,7 +204,7 @@ func (a *AuthService) GenerateAPIKey(ctx context.Context, userID, name string) (
 		return nil, fmt.Errorf("generate secret: %w", err)
 	}
 
-	key := "VK" + strings.ToUpper(hex.EncodeToString(keyBytes)) // VK prefix for Vaultaire Key
+	key := "VK" + strings.ToUpper(hex.EncodeToString(keyBytes))[:20]
 	secret := hex.EncodeToString(secretBytes)
 
 	// Hash secret for storage
@@ -140,6 +213,7 @@ func (a *AuthService) GenerateAPIKey(ctx context.Context, userID, name string) (
 	apiKey := &APIKey{
 		ID:        uuid.New().String(),
 		UserID:    userID,
+		TenantID:  user.TenantID,
 		Name:      name,
 		Key:       key,
 		Secret:    secret,
@@ -153,7 +227,7 @@ func (a *AuthService) GenerateAPIKey(ctx context.Context, userID, name string) (
 	return apiKey, nil
 }
 
-// ValidateAPIKey checks if API key is valid
+// ValidateAPIKey checks if API key is valid (for S3 auth)
 func (a *AuthService) ValidateAPIKey(ctx context.Context, key, secret string) (*User, error) {
 	apiKey, exists := a.apiKeys[key]
 	if !exists {
@@ -167,22 +241,41 @@ func (a *AuthService) ValidateAPIKey(ctx context.Context, key, secret string) (*
 	}
 
 	// Find user
-	for _, user := range a.users {
-		if user.ID == apiKey.UserID {
-			// Update last used
-			apiKey.LastUsed = time.Now()
-			return user, nil
-		}
+	user, exists := a.userIndex[apiKey.UserID]
+	if !exists {
+		return nil, fmt.Errorf("user not found")
 	}
 
-	return nil, fmt.Errorf("user not found")
+	// Update last used
+	now := time.Now()
+	apiKey.LastUsed = &now
+
+	return user, nil
+}
+
+// ValidateS3Request validates S3 API requests and returns tenant
+func (a *AuthService) ValidateS3Request(ctx context.Context, accessKey string) (*Tenant, error) {
+	// Quick lookup by access key
+	tenant, exists := a.keyIndex[accessKey]
+	if !exists {
+		return nil, fmt.Errorf("invalid access key")
+	}
+
+	// Update last used
+	if apiKey, ok := a.apiKeys[accessKey]; ok {
+		now := time.Now()
+		apiKey.LastUsed = &now
+	}
+
+	return tenant, nil
 }
 
 // GenerateJWT creates a JWT token for web access
 func (a *AuthService) GenerateJWT(user *User) (string, error) {
 	claims := JWTClaims{
-		UserID: user.ID,
-		Email:  user.Email,
+		UserID:   user.ID,
+		Email:    user.Email,
+		TenantID: user.TenantID,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -213,4 +306,11 @@ func (a *AuthService) ValidateJWT(tokenString string) (*JWTClaims, error) {
 	}
 
 	return claims, nil
+}
+
+// Helper function to generate IDs
+func generateID() string {
+	bytes := make([]byte, 8)
+	_, _ = rand.Read(bytes)
+	return hex.EncodeToString(bytes)
 }
