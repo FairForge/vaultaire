@@ -67,6 +67,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	if db != nil {
 		authHandler := auth.NewAuthHandler(db, logger)
 		s.router.Post("/auth/register", authHandler.Register)
+		s.router.Post("/auth/login", authHandler.Login)
 	}
 
 	s.httpServer = &http.Server{
