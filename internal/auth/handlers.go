@@ -12,6 +12,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -305,45 +306,84 @@ func hmacSHA256(key, data []byte) []byte {
 
 // AuthHandler handles authentication endpoints
 type AuthHandler struct {
-	db     *sql.DB
-	logger *zap.Logger
+	db          *sql.DB
+	logger      *zap.Logger
+	authService *AuthService
 }
 
 // NewAuthHandler creates a new auth handler
 func NewAuthHandler(db *sql.DB, logger *zap.Logger) *AuthHandler {
 	return &AuthHandler{
-		db:     db,
-		logger: logger,
+		db:          db,
+		logger:      logger,
+		authService: NewAuthService(nil),
 	}
 }
 
 // Register creates a new tenant account
 func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
-	// Generate credentials
-	accessKey := "AK" + generateID()
-	secretKey := "SK" + generateID() + generateID()
-	tenantID := "tenant-" + generateID()
+	var req struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+		Company  string `json:"company"`
+	}
 
-	// Create tenant in database
-	_, err := h.db.Exec(`
-        INSERT INTO tenants (id, access_key, secret_key, created_at)
-        VALUES ($1, $2, $3, NOW())
-    `, tenantID, accessKey, secretKey)
-
-	if err != nil {
-		h.logger.Error("failed to create tenant", zap.Error(err))
-		http.Error(w, "Failed to create account", http.StatusInternalServerError)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
 
-	// Return S3-compatible credentials
+	// Use h.authService instead of creating new one
+	_, tenant, _, err := h.authService.CreateUserWithTenant(
+		r.Context(), req.Email, req.Password, req.Company)
+
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Return credentials
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = fmt.Fprintf(w, `{"accessKeyId":"%s","secretAccessKey":"%s","endpoint":"http://localhost:8000"}`,
-		accessKey, secretKey)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"accessKeyId":     tenant.AccessKey,
+		"secretAccessKey": tenant.SecretKey,
+		"endpoint":        "http://localhost:8000",
+	})
 }
 
 // Helper function to check if we're in a test environment
 func isTestEnvironment() bool {
 	env := os.Getenv("ENV")
 	return env == "" || env == "test" || env == "development"
+}
+
+// Login authenticates a user and returns JWT
+func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	// Use h.authService (same instance as Register)
+	valid, err := h.authService.ValidatePassword(r.Context(), req.Email, req.Password)
+	if err != nil || !valid {
+		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
+		return
+	}
+
+	user, _ := h.authService.GetUserByEmail(r.Context(), req.Email)
+	token, _ := h.authService.GenerateJWT(user)
+
+	response := map[string]string{
+		"token":     token,
+		"tenant_id": user.TenantID,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(response)
 }
