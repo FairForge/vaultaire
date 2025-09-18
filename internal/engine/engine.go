@@ -174,7 +174,6 @@ func (e *CoreEngine) Get(ctx context.Context, container, artifact string) (io.Re
 					Success:   true,
 				})
 			}
-
 			return io.NopCloser(bytes.NewReader(data)), nil
 		}
 	}
@@ -182,13 +181,27 @@ func (e *CoreEngine) Get(ctx context.Context, container, artifact string) (io.Re
 	// Get recommendation from intelligence system
 	backendName := e.primary
 	if e.intelligence != nil {
-		if rec := e.intelligence.GetRecommendation(tenantID, container, artifact); rec != nil {
-			if rec.PreferredBackend != "" {
-				backendName = rec.PreferredBackend
-				e.logger.Debug("using recommended backend",
-					zap.String("backend", backendName),
-					zap.String("reason", rec.Reason))
-			}
+		rec := e.intelligence.GetRecommendation(tenantID, container, artifact)
+
+		// Log backend selection decision
+		e.logger.Info("backend selection",
+			zap.String("default", e.primary),
+			zap.Bool("has_recommendation", rec != nil),
+			zap.String("recommended", func() string {
+				if rec != nil {
+					return rec.PreferredBackend
+				}
+				return "none"
+			}()),
+			zap.String("reason", func() string {
+				if rec != nil {
+					return rec.Reason
+				}
+				return ""
+			}()))
+
+		if rec != nil && rec.PreferredBackend != "" {
+			backendName = rec.PreferredBackend
 		}
 	}
 

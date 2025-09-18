@@ -88,29 +88,54 @@ func (at *AccessTracker) GetRecommendations(tenantID string) ([]Recommendation, 
 
 // GetRecommendation for a specific artifact
 func (at *AccessTracker) GetRecommendation(tenantID, container, artifact string) *Recommendation {
-	// Simple recommendation based on access patterns
 	query := `
-		SELECT access_count, temperature
-		FROM access_patterns
-		WHERE tenant_id = $1 AND container = $2 AND artifact_key = $3
-	`
+        SELECT access_count, temperature, size_bytes, latency_ms
+        FROM access_patterns
+        WHERE tenant_id = $1 AND container = $2 AND artifact_key = $3
+    `
 
 	var count int
 	var temp string
-	err := at.db.QueryRow(query, tenantID, container, artifact).Scan(&count, &temp)
+	var size int64
+	var latency int64
+	err := at.db.QueryRow(query, tenantID, container, artifact).Scan(&count, &temp, &size, &latency)
 	if err != nil {
 		return nil
 	}
 
+	// Smart backend selection based on patterns
 	if temp == "hot" && count > 10 {
 		return &Recommendation{
 			Type:             "use_cache",
-			PreferredBackend: "cache",
-			Reason:           fmt.Sprintf("High access count (%d)", count),
+			PreferredBackend: "local",
+			Reason:           fmt.Sprintf("Hot data with %d accesses", count),
 		}
 	}
 
-	return nil
+	// Large files go to S3
+	if size > 100<<20 { // > 100MB
+		return &Recommendation{
+			Type:             "use_s3",
+			PreferredBackend: "s3",
+			Reason:           "Large file, S3 optimal for bulk storage",
+		}
+	}
+
+	// Cold data to Lyve
+	if temp == "cold" && count < 5 {
+		return &Recommendation{
+			Type:             "use_archive",
+			PreferredBackend: "lyve",
+			Reason:           "Cold data, archive to Lyve",
+		}
+	}
+
+	// Default to local for everything else
+	return &Recommendation{
+		Type:             "use_local",
+		PreferredBackend: "local",
+		Reason:           "Standard access pattern",
+	}
 }
 
 // Flush forces processing of buffered events
