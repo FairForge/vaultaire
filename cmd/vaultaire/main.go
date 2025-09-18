@@ -139,61 +139,52 @@ func main() {
 		"local":     0.0,
 	})
 
-	// Add storage driver
-	storageMode := os.Getenv("STORAGE_MODE")
-	if storageMode == "" {
-		storageMode = "local"
+	// Initialize storage drivers
+	// 1. Always add local driver
+	dataPath := os.Getenv("DATA_PATH")
+	if dataPath == "" {
+		dataPath = "/tmp/vaultaire-data"
+	}
+	if err := os.MkdirAll(dataPath, 0750); err != nil {
+		logger.Fatal("failed to create storage directory", zap.Error(err))
+	}
+	localDriver := drivers.NewLocalDriver(dataPath, logger)
+	eng.AddDriver("local", localDriver)
+	logger.Info("local driver added", zap.String("path", dataPath))
+
+	// 2. Add S3 if credentials available
+	if accessKey := os.Getenv("S3_ACCESS_KEY"); accessKey != "" {
+		secretKey := os.Getenv("S3_SECRET_KEY")
+		if s3Driver, err := drivers.NewS3CompatDriver(accessKey, secretKey, logger); err == nil {
+			eng.AddDriver("s3", s3Driver)
+			logger.Info("S3 driver added")
+		} else {
+			logger.Warn("failed to add S3 driver", zap.Error(err))
+		}
 	}
 
-	switch storageMode {
-	case "local":
-		dataPath := os.Getenv("LOCAL_STORAGE_PATH")
-		if dataPath == "" {
-			dataPath = "/tmp/vaultaire-data"
-		}
-		if err := os.MkdirAll(dataPath, 0750); err != nil {
-			logger.Fatal("failed to create storage directory", zap.Error(err))
-		}
-		localDriver := drivers.NewLocalDriver(dataPath, logger)
-		eng.AddDriver("local", localDriver)
-		eng.SetPrimary("local")
-		logger.Info("using local storage", zap.String("path", dataPath))
-
-	case "s3":
-		accessKey := os.Getenv("S3_ACCESS_KEY")
-		secretKey := os.Getenv("S3_SECRET_KEY")
-		if accessKey == "" || secretKey == "" {
-			logger.Fatal("S3_ACCESS_KEY and S3_SECRET_KEY required")
-		}
-		s3Driver, err := drivers.NewS3CompatDriver(accessKey, secretKey, logger)
-		if err != nil {
-			logger.Fatal("failed to create S3 driver", zap.Error(err))
-		}
-		eng.AddDriver("s3", s3Driver)
-		eng.SetPrimary("s3")
-		logger.Info("using S3 storage")
-
-	case "lyve":
-		accessKey := os.Getenv("LYVE_ACCESS_KEY")
+	// 3. Add Lyve if credentials available
+	if accessKey := os.Getenv("LYVE_ACCESS_KEY"); accessKey != "" {
 		secretKey := os.Getenv("LYVE_SECRET_KEY")
 		region := os.Getenv("LYVE_REGION")
 		if region == "" {
 			region = "us-east-1"
 		}
-		if accessKey == "" || secretKey == "" {
-			logger.Fatal("LYVE credentials required")
+		if lyveDriver, err := drivers.NewLyveDriver(accessKey, secretKey, "", region, logger); err == nil {
+			eng.AddDriver("lyve", lyveDriver)
+			logger.Info("Lyve driver added")
+		} else {
+			logger.Warn("failed to add Lyve driver", zap.Error(err))
 		}
-		lyveDriver, err := drivers.NewLyveDriver(accessKey, secretKey, "", region, logger)
-		if err != nil {
-			logger.Fatal("failed to create Lyve driver", zap.Error(err))
-		}
-		eng.AddDriver("lyve", lyveDriver)
-		eng.SetPrimary("lyve")
-		logger.Info("using Lyve Cloud storage")
-
-	default:
-		logger.Fatal("invalid STORAGE_MODE", zap.String("mode", storageMode))
 	}
+
+	// 4. Set primary backend
+	storageMode := os.Getenv("STORAGE_MODE")
+	if storageMode == "" {
+		storageMode = "local"
+	}
+	eng.SetPrimary(storageMode)
+	logger.Info("primary backend set", zap.String("mode", storageMode))
 
 	// Create server
 	var server *api.Server
