@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/config"
 	"github.com/FairForge/vaultaire/internal/docs"
 	"github.com/FairForge/vaultaire/internal/engine"
@@ -64,7 +65,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 
 	// Add auth routes after main routes
 	if db != nil {
-		authHandler := NewAuthHandler(db, logger)
+		authHandler := auth.NewAuthHandler(db, logger)
 		s.router.Post("/auth/register", authHandler.Register)
 	}
 
