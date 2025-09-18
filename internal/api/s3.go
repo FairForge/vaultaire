@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/common"
 
 	"github.com/FairForge/vaultaire/internal/events"
@@ -212,7 +213,7 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 	// Check if we're in test mode
 	if !s.testMode {
 		// Production mode: validate the request signature
-		auth := NewAuth(s.db, s.logger)
+		auth := auth.NewAuth(s.db, s.logger)
 		tenantID, err = auth.ValidateRequest(r)
 		if err != nil {
 			s.logger.Error("authentication failed",

@@ -5,7 +5,7 @@
 //
 //nolint:unused // Will be used in future implementations
 //nolint:unused,deadcode // These will be used when full S3 auth is implemented
-package api
+package auth
 
 import (
 	"crypto/hmac"
@@ -13,7 +13,6 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
-	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -21,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	_ "github.com/lib/pq"
 	"go.uber.org/zap"
 )
 
@@ -340,12 +340,6 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = fmt.Fprintf(w, `{"accessKeyId":"%s","secretAccessKey":"%s","endpoint":"http://localhost:8000"}`,
 		accessKey, secretKey)
-}
-
-func generateID() string {
-	h := sha256.New()
-	_, _ = fmt.Fprintf(h, "%d-%d", time.Now().UnixNano(), rand.Int())
-	return hex.EncodeToString(h.Sum(nil))[:8]
 }
 
 // Helper function to check if we're in a test environment

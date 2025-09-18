@@ -8,16 +8,23 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 )
 
-func TestRegister(t *testing.T) {
-	// Setup test database
-	db := setupTestDB(t)
-	handler := NewAuthHandler(db, nil)
+func TestAuthHandler_Register(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping database test")
+	}
 
-	// Test registration
+	db := setupTestDB(t)
+	defer func() { _ = db.Close() }()
+
+	logger := zap.NewNop()
+	handler := NewAuthHandler(db, logger)
+
 	reqBody := `{"email":"test@stored.ge","password":"Password123!","company":"Test Corp"}`
 	req := httptest.NewRequest("POST", "/auth/register", bytes.NewBufferString(reqBody))
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
 	handler.Register(w, req)
@@ -29,9 +36,5 @@ func TestRegister(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, resp, "accessKeyId")
 	require.Contains(t, resp, "secretAccessKey")
-}
-
-func TestLogin(t *testing.T) {
-	// Test login after registration
-	// Add test here
+	require.Contains(t, resp, "endpoint")
 }
