@@ -75,3 +75,25 @@ debug.log
 downloaded.txt
 test.txt
 small-test.bin
+
+# Test files
+*.bin
+*.test
+test*.txt
+test*.bin
+downloaded-*.bin
+huge*.bin
+large*.bin
+medium*.bin
+small*.bin
+
+# Logs and debug files
+*.log
+coverage.out
+debug.log
+optimized.log
+original.log
+
+# Cache and temp
+cache_benchmark_results.txt
+compress.txt
