@@ -84,11 +84,11 @@ func main() {
 	}
 	dbUser := os.Getenv("DB_USER")
 	if dbUser == "" {
-		dbUser = "vaultaire"
+		dbUser = "viera"
 	}
 	dbPassword := os.Getenv("DB_PASSWORD")
 	if dbPassword == "" {
-		dbPassword = "vaultaire_dev"
+		dbPassword = ""
 	}
 
 	// Try to connect to database
