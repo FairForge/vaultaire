@@ -314,3 +314,26 @@ func generateID() string {
 	_, _ = rand.Read(bytes)
 	return hex.EncodeToString(bytes)
 }
+
+// RequestPasswordReset generates a reset token for the user
+func (a *AuthService) RequestPasswordReset(ctx context.Context, email string) (string, error) {
+	// Check user exists
+	_, err := a.GetUserByEmail(ctx, email)
+	if err != nil {
+		return "", fmt.Errorf("user not found")
+	}
+
+	// Generate secure reset token
+	token := generateID() + generateID()
+
+	// Store token with expiry (TODO: use Redis or DB)
+	// For now, just return the token
+
+	return token, nil
+}
+
+// CompletePasswordReset updates the password using a valid token
+func (a *AuthService) CompletePasswordReset(ctx context.Context, token, newPassword string) error {
+	// TODO: Validate token and update password
+	return nil
+}

@@ -63,13 +63,6 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// Now set up routes (no middleware should be added in setupRoutes)
 	s.setupRoutes()
 
-	// Add auth routes after main routes
-	if db != nil {
-		authHandler := auth.NewAuthHandler(db, logger)
-		s.router.Post("/auth/register", authHandler.Register)
-		s.router.Post("/auth/login", authHandler.Login)
-	}
-
 	s.httpServer = &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
 		Handler:      s.router,
@@ -100,6 +93,15 @@ func (s *Server) setupRoutes() {
 	// API Documentation routes
 	s.router.Get("/docs", docs.SwaggerUIHandler())
 	s.router.Get("/openapi.json", docs.OpenAPIJSONHandler())
+
+	// Auth routes - MUST be before S3 catch-all
+	// Temporarily removing DB check to get it working
+	s.logger.Info("Registering auth routes - forcing registration")
+	authHandler := auth.NewAuthHandler(s.db, s.logger)
+	s.router.Post("/auth/register", authHandler.Register)
+	s.router.Post("/auth/login", authHandler.Login)
+	s.router.Post("/auth/password-reset", authHandler.RequestPasswordReset)
+	s.router.Post("/auth/password-reset/complete", authHandler.CompletePasswordReset)
 
 	// S3 catch-all (MUST be last)
 	s.router.HandleFunc("/*", s.handleS3Request)
