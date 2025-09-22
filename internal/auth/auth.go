@@ -1,4 +1,3 @@
-// internal/auth/auth.go
 package auth
 
 import (
@@ -58,13 +57,15 @@ type JWTClaims struct {
 
 // AuthService handles authentication
 type AuthService struct {
-	db        Database
-	jwtSecret []byte
-	users     map[string]*User   // email -> user
-	tenants   map[string]*Tenant // tenantID -> tenant
-	apiKeys   map[string]*APIKey // key -> apikey
-	userIndex map[string]*User   // userID -> user
-	keyIndex  map[string]*Tenant // accessKey -> tenant (for S3 auth)
+	db          Database
+	jwtSecret   []byte
+	users       map[string]*User          // email -> user
+	tenants     map[string]*Tenant        // tenantID -> tenant
+	apiKeys     map[string]*APIKey        // key -> apikey
+	userIndex   map[string]*User          // userID -> user
+	keyIndex    map[string]*Tenant        // accessKey -> tenant (for S3 auth)
+	profiles    map[string]*ProfileUpdate // user profiles
+	preferences map[string]*UserPreferences
 }
 
 // Database interface for auth operations
@@ -75,14 +76,15 @@ type Database interface {
 // NewAuthService creates a new auth service
 func NewAuthService(db Database) *AuthService {
 	return &AuthService{
-		db:        db,
-		jwtSecret: []byte("change-me-in-production"), // TODO: Use env var
-		users:     make(map[string]*User),
-		tenants:   make(map[string]*Tenant),
-		apiKeys:   make(map[string]*APIKey),
-		userIndex: make(map[string]*User),
-		keyIndex:  make(map[string]*Tenant),
-	}
+		db:          db,
+		jwtSecret:   []byte("change-me-in-production"), // TODO: Use env var
+		users:       make(map[string]*User),
+		tenants:     make(map[string]*Tenant),
+		apiKeys:     make(map[string]*APIKey),
+		userIndex:   make(map[string]*User),
+		keyIndex:    make(map[string]*Tenant),
+		profiles:    make(map[string]*ProfileUpdate),
+		preferences: make(map[string]*UserPreferences)}
 }
 
 // CreateUser creates a new user account WITH tenant
