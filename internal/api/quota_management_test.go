@@ -10,7 +10,6 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/FairForge/vaultaire/internal/database"
 	"github.com/FairForge/vaultaire/internal/usage"
 	_ "github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
@@ -25,8 +24,13 @@ const (
 )
 
 func TestQuotaManagementAPI_CreateQuota(t *testing.T) {
-	server, db := setupTestQuotaAPI(t)
+	db := setupTestDB(t)
+	if db == nil {
+		return // Test was skipped
+	}
 	defer func() { _ = db.Close() }()
+
+	server := setupTestQuotaAPI(t, db)
 
 	// Create quota request
 	quotaReq := QuotaRequest{
@@ -53,8 +57,13 @@ func TestQuotaManagementAPI_CreateQuota(t *testing.T) {
 }
 
 func TestQuotaManagementAPI_UpdateQuota(t *testing.T) {
-	server, db := setupTestQuotaAPI(t)
+	db := setupTestDB(t)
+	if db == nil {
+		return // Test was skipped
+	}
 	defer func() { _ = db.Close() }()
+
+	server := setupTestQuotaAPI(t, db)
 
 	// First create a quota
 	_ = server.quotaManager.(*usage.QuotaManager).CreateTenant(
@@ -87,8 +96,13 @@ func TestQuotaManagementAPI_UpdateQuota(t *testing.T) {
 }
 
 func TestQuotaManagementAPI_ListQuotas(t *testing.T) {
-	server, db := setupTestQuotaAPI(t)
+	db := setupTestDB(t)
+	if db == nil {
+		return // Test was skipped
+	}
 	defer func() { _ = db.Close() }()
+
+	server := setupTestQuotaAPI(t, db)
 
 	// Create some test quotas
 	ctx := context.Background()
@@ -114,11 +128,7 @@ func TestQuotaManagementAPI_ListQuotas(t *testing.T) {
 	assert.GreaterOrEqual(t, len(quotas), 2)
 }
 
-func setupTestQuotaAPI(t *testing.T) (*Server, *sql.DB) {
-	dsn := database.GetTestDSN()
-	db, err := sql.Open("postgres", dsn)
-	require.NoError(t, err)
-
+func setupTestQuotaAPI(t *testing.T, db *sql.DB) *Server {
 	// Clean and setup
 	_, _ = db.Exec("DROP TABLE IF EXISTS quota_usage_events")
 	_, _ = db.Exec("DROP TABLE IF EXISTS tenant_quotas")
@@ -128,7 +138,7 @@ func setupTestQuotaAPI(t *testing.T) (*Server, *sql.DB) {
 
 	// Create test tenant with some usage
 	require.NoError(t, quotaMgr.CreateTenant(context.Background(), "tenant-123", "starter", 1000000000))
-	_, err = quotaMgr.CheckAndReserve(context.Background(), "tenant-123", 500000000)
+	_, err := quotaMgr.CheckAndReserve(context.Background(), "tenant-123", 500000000)
 	require.NoError(t, err)
 
 	// Add a no-op logger for testing
@@ -139,5 +149,5 @@ func setupTestQuotaAPI(t *testing.T) (*Server, *sql.DB) {
 		logger:       logger,
 	}
 
-	return server, db
+	return server
 }
