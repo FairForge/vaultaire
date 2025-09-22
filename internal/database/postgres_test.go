@@ -21,7 +21,7 @@ func TestPostgres_Connect(t *testing.T) {
 		Host:     "localhost",
 		Port:     5432,
 		Database: "vaultaire_dev",
-		User:     "vaultaire",
+		User:     "viera",
 		Password: "vaultaire_dev",
 	}, logger) // FIX: This needs to be on same line or proper line break
 	if err != nil {
@@ -44,7 +44,7 @@ func TestPostgres_CreateTables(t *testing.T) {
 		Host:     "localhost",
 		Port:     5432,
 		Database: "vaultaire_dev",
-		User:     "vaultaire",
+		User:     "viera",
 		Password: "vaultaire_dev",
 	}, logger) // ADD LOGGER PARAMETER
 	if err != nil {
@@ -67,7 +67,7 @@ func TestPostgres_TenantOperations(t *testing.T) {
 		Host:     "localhost",
 		Port:     5432,
 		Database: "vaultaire_dev",
-		User:     "vaultaire",
+		User:     "viera",
 		Password: "vaultaire_dev",
 	}, logger) // ADD LOGGER PARAMETER
 	if err != nil {
