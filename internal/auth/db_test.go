@@ -31,7 +31,7 @@ func TestDBAuthService_CreateUser(t *testing.T) {
 }
 
 func setupTestDB(t *testing.T) *sql.DB {
-	connStr := "user=vaultaire_user password=vaultaire_pass dbname=vaultaire sslmode=disable"
+	connStr := "user=viera_user password=vaultaire_pass dbname=vaultaire sslmode=disable"
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {
 		t.Fatal(err)
