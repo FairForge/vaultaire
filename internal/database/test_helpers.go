@@ -1,12 +1,20 @@
 package database
 
-import (
-	"os"
-)
+import "fmt"
 
+// GetTestDSN returns the PostgreSQL connection string for testing
 func GetTestDSN() string {
-	if dsn := os.Getenv("TEST_DATABASE_URL"); dsn != "" {
-		return dsn
+	// Get config with correct defaults
+	config := GetTestConfig()
+
+	// Build DSN with explicit parameter names
+	dsn := fmt.Sprintf("host=%s port=%d user=%s dbname=%s sslmode=%s",
+		config.Host, config.Port, config.User, config.Database, config.SSLMode)
+
+	if config.Password != "" {
+		dsn = fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+			config.Host, config.Port, config.User, config.Password, config.Database, config.SSLMode)
 	}
-	return "postgres://vaultaire:vaultaire_dev@localhost/vaultaire_dev?sslmode=disable"
+
+	return dsn
 }
