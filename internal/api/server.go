@@ -41,6 +41,9 @@ type QuotaManager interface {
 	UpdateQuota(ctx context.Context, tenantID string, newLimit int64) error
 	ListQuotas(ctx context.Context) ([]map[string]interface{}, error)
 	DeleteQuota(ctx context.Context, tenantID string) error
+	GetTier(ctx context.Context, tenantID string) (string, error)
+	UpdateTier(ctx context.Context, tenantID, newTier string) error
+	GetUsageHistory(ctx context.Context, tenantID string, days int) ([]map[string]interface{}, error)
 }
 
 func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, qm QuotaManager, db *sql.DB) *Server {
@@ -86,6 +89,9 @@ func (s *Server) setupRoutes() {
 
 	// Add quota management routes
 	s.setupQuotaManagementRoutes()
+
+	// Add user quota API routes
+	s.registerQuotaRoutes()
 
 	// Add pattern routes if DB available
 	s.setupPatternRoutes()
@@ -178,9 +184,6 @@ func getMemoryUsageMB() uint64 {
 	runtime.ReadMemStats(&m)
 	return m.Alloc / 1024 / 1024
 }
-
-// GetRouter returns the chi router for adding routes
-// GetRouter returns the chi router for adding routes
 
 // GetRouter returns the chi router for adding routes
 func (s *Server) GetRouter() chi.Router {
