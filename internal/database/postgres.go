@@ -40,8 +40,16 @@ func NewPostgres(cfg Config, logger *zap.Logger) (*Postgres, error) {
 		cfg.SSLMode = "disable"
 	}
 
-	dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
-		cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.Database, cfg.SSLMode)
+	// Build DSN - CRITICAL: Never include empty password field
+	var dsn string
+	if cfg.Password != "" {
+		dsn = fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+			cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.Database, cfg.SSLMode)
+	} else {
+		// Omit password field entirely when empty
+		dsn = fmt.Sprintf("host=%s port=%d user=%s dbname=%s sslmode=%s",
+			cfg.Host, cfg.Port, cfg.User, cfg.Database, cfg.SSLMode)
+	}
 
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
