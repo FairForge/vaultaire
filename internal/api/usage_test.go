@@ -15,7 +15,7 @@ import (
 )
 
 func setupTestUsageAPI(t *testing.T) (*Server, *sql.DB) {
-	db := setupTestDB(t)
+	db := setupTestDBFixed(t)
 	if db == nil {
 		return nil, nil
 	}
