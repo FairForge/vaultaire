@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/usage"
 	_ "github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
@@ -49,7 +50,7 @@ func TestUsageAPI_GetUsageStats(t *testing.T) {
 	// Use unique tenant ID
 	tenantID := "test-tenant-" + time.Now().Format("20060102150405")
 
-	// Create tenant with proper quota - use server.quotaManager instead of qm
+	// Create tenant with proper quota
 	err := server.quotaManager.CreateTenant(context.Background(), tenantID, "starter", 1073741824) // 1GB
 	require.NoError(t, err)
 
@@ -58,8 +59,10 @@ func TestUsageAPI_GetUsageStats(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, ok)
 
-	// Get usage stats
+	// Get usage stats - Add tenantID to context
 	req := httptest.NewRequest("GET", "/api/v1/usage/stats?tenant_id="+tenantID, nil)
+	ctx := context.WithValue(req.Context(), common.TenantIDKey, tenantID)
+	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 
 	server.handleGetUsageStats(w, req)
@@ -86,8 +89,10 @@ func TestUsageAPI_GetUsageAlerts(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, ok)
 
-	// Get usage alerts
+	// Get usage alerts - Add tenantID to context
 	req := httptest.NewRequest("GET", "/api/v1/usage/alerts?tenant_id="+tenantID, nil)
+	ctx := context.WithValue(req.Context(), common.TenantIDKey, tenantID)
+	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 
 	server.handleGetUsageAlerts(w, req)
