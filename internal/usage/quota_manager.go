@@ -195,3 +195,72 @@ func (qm *QuotaManager) DeleteQuota(ctx context.Context, tenantID string) error 
 	_, err := qm.db.ExecContext(ctx, query, tenantID)
 	return err
 }
+
+// GetTier returns the current tier for a tenant
+func (m *QuotaManager) GetTier(ctx context.Context, tenantID string) (string, error) {
+	var tier string
+	err := m.db.QueryRowContext(ctx,
+		"SELECT tier FROM tenant_quotas WHERE tenant_id = $1", tenantID).Scan(&tier)
+	return tier, err
+}
+
+// UpdateTier updates the tier and associated limits
+func (m *QuotaManager) UpdateTier(ctx context.Context, tenantID, newTier string) error {
+	limits := map[string]int64{
+		"starter":      1099511627776,   // 1TB
+		"professional": 10995116277760,  // 10TB
+		"enterprise":   109951162777600, // 100TB
+	}
+
+	limit, ok := limits[newTier]
+	if !ok {
+		return fmt.Errorf("invalid tier: %s", newTier)
+	}
+
+	_, err := m.db.ExecContext(ctx,
+		`UPDATE tenant_quotas
+		 SET tier = $1, storage_limit_bytes = $2, updated_at = CURRENT_TIMESTAMP
+		 WHERE tenant_id = $3`,
+		newTier, limit, tenantID)
+
+	return err
+}
+
+// GetUsageHistory returns historical usage data
+func (m *QuotaManager) GetUsageHistory(ctx context.Context, tenantID string, days int) ([]map[string]interface{}, error) {
+	rows, err := m.db.QueryContext(ctx,
+		`SELECT DATE(timestamp) as date,
+		        MAX(bytes_delta) as peak_usage,
+		        SUM(CASE WHEN operation = 'PUT' THEN bytes_delta ELSE 0 END) as uploaded,
+		        SUM(CASE WHEN operation = 'DELETE' THEN -bytes_delta ELSE 0 END) as deleted
+		 FROM quota_usage_events
+		 WHERE tenant_id = $1 AND timestamp > NOW() - INTERVAL '%d days'
+		 GROUP BY DATE(timestamp)
+		 ORDER BY date DESC`, tenantID, days)
+
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var history []map[string]interface{}
+	for rows.Next() {
+		var date string
+		var peak, uploaded, deleted int64
+
+		if err := rows.Scan(&date, &peak, &uploaded, &deleted); err != nil {
+			return nil, err
+		}
+
+		history = append(history, map[string]interface{}{
+			"date":       date,
+			"peak_usage": peak,
+			"uploaded":   uploaded,
+			"deleted":    deleted,
+		})
+	}
+
+	return history, nil
+}
+
+// GetTier returns the current tier for a tenant
