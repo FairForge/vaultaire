@@ -24,7 +24,7 @@ const (
 )
 
 func TestQuotaManagementAPI_CreateQuota(t *testing.T) {
-	db := setupTestDB(t)
+	db := setupTestDBFixed(t)
 	if db == nil {
 		return // Test was skipped
 	}
@@ -57,7 +57,7 @@ func TestQuotaManagementAPI_CreateQuota(t *testing.T) {
 }
 
 func TestQuotaManagementAPI_UpdateQuota(t *testing.T) {
-	db := setupTestDB(t)
+	db := setupTestDBFixed(t)
 	if db == nil {
 		return // Test was skipped
 	}
@@ -96,7 +96,7 @@ func TestQuotaManagementAPI_UpdateQuota(t *testing.T) {
 }
 
 func TestQuotaManagementAPI_ListQuotas(t *testing.T) {
-	db := setupTestDB(t)
+	db := setupTestDBFixed(t)
 	if db == nil {
 		return // Test was skipped
 	}
