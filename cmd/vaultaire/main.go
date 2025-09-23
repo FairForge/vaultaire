@@ -49,6 +49,18 @@ func (n *nilQuotaManager) DeleteQuota(ctx context.Context, tenantID string) erro
 	return nil
 }
 
+func (n *nilQuotaManager) GetTier(ctx context.Context, tenantID string) (string, error) {
+	return "starter", nil
+}
+
+func (n *nilQuotaManager) UpdateTier(ctx context.Context, tenantID, newTier string) error {
+	return nil
+}
+
+func (n *nilQuotaManager) GetUsageHistory(ctx context.Context, tenantID string, days int) ([]map[string]interface{}, error) {
+	return []map[string]interface{}{}, nil
+}
+
 func main() {
 	// Create logger
 	logger, _ := zap.NewProduction()
@@ -213,9 +225,9 @@ func main() {
 
 	// Start server
 	fmt.Printf("\n")
-	fmt.Printf("╔══════════════════════════════════════╗\n")
+	fmt.Printf("╔═════════════════════════════════════╗\n")
 	fmt.Printf("║       Vaultaire Server Started       ║\n")
-	fmt.Printf("╠══════════════════════════════════════╣\n")
+	fmt.Printf("╠═════════════════════════════════════╣\n")
 	fmt.Printf("║  S3 API: http://localhost:%-10d ║\n", port)
 	fmt.Printf("║  Storage: %-26s ║\n", storageMode)
 	if db != nil {
@@ -223,7 +235,7 @@ func main() {
 	} else {
 		fmt.Printf("║  Intelligence: DISABLED (no DB)      ║\n")
 	}
-	fmt.Printf("╚══════════════════════════════════════╝\n")
+	fmt.Printf("╚═════════════════════════════════════╝\n")
 	fmt.Printf("\n")
 
 	if err := server.Start(); err != nil {
