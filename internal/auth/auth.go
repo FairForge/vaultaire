@@ -57,15 +57,16 @@ type JWTClaims struct {
 
 // AuthService handles authentication
 type AuthService struct {
-	db          Database
-	jwtSecret   []byte
-	users       map[string]*User          // email -> user
-	tenants     map[string]*Tenant        // tenantID -> tenant
-	apiKeys     map[string]*APIKey        // key -> apikey
-	userIndex   map[string]*User          // userID -> user
-	keyIndex    map[string]*Tenant        // accessKey -> tenant (for S3 auth)
-	profiles    map[string]*ProfileUpdate // user profiles
-	preferences map[string]*UserPreferences
+	db              Database
+	jwtSecret       []byte
+	users           map[string]*User          // email -> user
+	tenants         map[string]*Tenant        // tenantID -> tenant
+	apiKeys         map[string]*APIKey        // key -> apikey
+	userIndex       map[string]*User          // userID -> user
+	keyIndex        map[string]*Tenant        // accessKey -> tenant (for S3 auth)
+	profiles        map[string]*ProfileUpdate // user profiles
+	preferences     map[string]*UserPreferences
+	activityTracker *ActivityTracker
 }
 
 // Database interface for auth operations
@@ -76,15 +77,16 @@ type Database interface {
 // NewAuthService creates a new auth service
 func NewAuthService(db Database) *AuthService {
 	return &AuthService{
-		db:          db,
-		jwtSecret:   []byte("change-me-in-production"), // TODO: Use env var
-		users:       make(map[string]*User),
-		tenants:     make(map[string]*Tenant),
-		apiKeys:     make(map[string]*APIKey),
-		userIndex:   make(map[string]*User),
-		keyIndex:    make(map[string]*Tenant),
-		profiles:    make(map[string]*ProfileUpdate),
-		preferences: make(map[string]*UserPreferences)}
+		db:              db,
+		jwtSecret:       []byte("change-me-in-production"), // TODO: Use env var
+		users:           make(map[string]*User),
+		tenants:         make(map[string]*Tenant),
+		apiKeys:         make(map[string]*APIKey),
+		userIndex:       make(map[string]*User),
+		keyIndex:        make(map[string]*Tenant),
+		profiles:        make(map[string]*ProfileUpdate),
+		preferences:     make(map[string]*UserPreferences),
+		activityTracker: nil}
 }
 
 // CreateUser creates a new user account WITH tenant
@@ -338,4 +340,21 @@ func (a *AuthService) RequestPasswordReset(ctx context.Context, email string) (s
 func (a *AuthService) CompletePasswordReset(ctx context.Context, token, newPassword string) error {
 	// TODO: Validate token and update password
 	return nil
+}
+
+// TrackActivity tracks user activity
+func (a *AuthService) TrackActivity(userID, action, resource, ip, userAgent string) {
+	if a.activityTracker != nil {
+		event := &ActivityEvent{
+			UserID:    userID,
+			Action:    action,
+			Resource:  resource,
+			IP:        ip,
+			UserAgent: userAgent,
+		}
+		// Fire and forget - don't block on activity tracking
+		go func() {
+			_ = a.activityTracker.Track(context.Background(), event)
+		}()
+	}
 }
