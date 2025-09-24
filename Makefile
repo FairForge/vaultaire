@@ -50,3 +50,14 @@ lint:
 	golangci-lint run ./...
 
 .PHONY: fmt lint
+
+# Build the binary
+build:
+	go build -o bin/vaultaire ./cmd/vaultaire
+
+# Clean build artifacts
+clean:
+	rm -rf bin/
+	go clean
+
+.PHONY: build clean
