@@ -1,49 +1,52 @@
-.PHONY: test
+# Professional test organization
+
+# Default: run quick tests
 test:
-	go test -v -short ./...
+	go test -short -race -cover ./...
 
-.PHONY: test-unit
+# Unit tests only (fast)
 test-unit:
-	go test -v -short -short ./...
+	go test -short -race -cover ./internal/...
 
-.PHONY: test-step48
-test-step48:
-	go test -v -short ./internal/api -run TestRateLimiter
+# Integration tests (requires services)
+test-integration:
+	go test -short ./tests/integration
 
-.PHONY: lint
-lint:
-	@echo "Linting..."
-	@golangci-lint run --fix 2>/dev/null || true
+# Load/performance tests (slow)
+test-load:
+	go test -v ./tests/load
 
-.PHONY: fmt
-fmt:
-	@echo "Formatting..."
-	@gofmt -s -w .
-	@go mod tidy
+# All tests including slow ones
+test-all:
+	go test -race -cover ./...
 
-.PHONY: run
-run:
-	go run cmd/vaultaire/main.go
-
-.PHONY: build
-build:
-	go build -o bin/vaultaire cmd/vaultaire/main.go
-
-.PHONY: clean
-clean:
-	rm -rf bin/ coverage.* *.test
-
-.PHONY: test-coverage
+# Test with coverage report
 test-coverage:
-	go test -coverprofile=coverage.out ./...
-	go tool cover -html=coverage.out
+	go test -short -race -coverprofile=coverage.out ./...
+	go tool cover -html=coverage.out -o coverage.html
 
-.PHONY: help
-help:
-	@echo "Available targets:"
-	@echo "  test         - Run all tests"
-	@echo "  test-unit    - Run unit tests"
-	@echo "  lint         - Run linter"
-	@echo "  fmt          - Format code"
-	@echo "  build        - Build binary"
-	@echo "  clean        - Clean artifacts"
+# Benchmark tests
+test-bench:
+	go test -run=^$ -bench=. -benchmem ./...
+
+# Run specific package tests
+test-pkg:
+	@read -p "Package path: " pkg; \
+	go test -v -race ./$$pkg
+
+# Clean test cache
+test-clean:
+	go clean -testcache
+
+.PHONY: test test-unit test-integration test-load test-all test-coverage test-bench test-pkg test-clean
+
+# Code formatting
+fmt:
+	go fmt ./...
+	gofmt -s -w .
+
+# Linting
+lint:
+	golangci-lint run ./...
+
+.PHONY: fmt lint
