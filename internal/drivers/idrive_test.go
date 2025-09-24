@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -445,8 +446,9 @@ func TestCostAdvisor(t *testing.T) {
 
 func TestRegionalFailover(t *testing.T) {
 	t.Run("fails over to secondary region", func(t *testing.T) {
-		primary := &MockIDriveDriver{shouldFail: true}
-		secondary := &MockIDriveDriver{shouldFail: false}
+		primary := &MockIDriveDriver{}
+		primary.SetShouldFail(true)
+		secondary := &MockIDriveDriver{}
 
 		failover := NewRegionalFailover(primary, secondary, zap.NewNop())
 
@@ -478,7 +480,8 @@ func TestRegionalFailover(t *testing.T) {
 	})
 
 	t.Run("automatic recovery probe", func(t *testing.T) {
-		primary := &MockIDriveDriver{shouldFail: true}
+		primary := &MockIDriveDriver{}
+		primary.SetShouldFail(true)
 		secondary := &MockIDriveDriver{}
 
 		failover := NewRegionalFailover(primary, secondary, zap.NewNop())
@@ -489,7 +492,7 @@ func TestRegionalFailover(t *testing.T) {
 		assert.False(t, failover.GetHealthStatus().PrimaryHealthy)
 
 		// Fix primary
-		primary.shouldFail = false
+		primary.SetShouldFail(false)
 
 		// Wait for recovery probe
 		time.Sleep(200 * time.Millisecond)
@@ -502,12 +505,15 @@ func TestRegionalFailover(t *testing.T) {
 
 // MockIDriveDriver for testing
 type MockIDriveDriver struct {
+	mu         sync.Mutex
 	shouldFail bool
 	putCalls   int
 	getCalls   int
 }
 
 func (m *MockIDriveDriver) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...engine.PutOption) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.putCalls++
 	if m.shouldFail {
 		return fmt.Errorf("mock failure")
@@ -516,6 +522,8 @@ func (m *MockIDriveDriver) Put(ctx context.Context, container, artifact string, 
 }
 
 func (m *MockIDriveDriver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.getCalls++
 	if m.shouldFail {
 		return nil, fmt.Errorf("mock failure")
@@ -524,6 +532,8 @@ func (m *MockIDriveDriver) Get(ctx context.Context, container, artifact string) 
 }
 
 func (m *MockIDriveDriver) Delete(ctx context.Context, container, artifact string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.shouldFail {
 		return fmt.Errorf("mock failure")
 	}
@@ -531,6 +541,8 @@ func (m *MockIDriveDriver) Delete(ctx context.Context, container, artifact strin
 }
 
 func (m *MockIDriveDriver) List(ctx context.Context, container string, prefix string) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.shouldFail {
 		return nil, fmt.Errorf("mock failure")
 	}
@@ -538,6 +550,8 @@ func (m *MockIDriveDriver) List(ctx context.Context, container string, prefix st
 }
 
 func (m *MockIDriveDriver) Exists(ctx context.Context, container, artifact string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.shouldFail {
 		return false, fmt.Errorf("mock failure")
 	}
@@ -598,4 +612,10 @@ func TestIDriveIntegration(t *testing.T) {
 		err = driver.Delete(ctx, "test-bucket", "integration.txt")
 		assert.NoError(t, err)
 	})
+}
+
+func (m *MockIDriveDriver) SetShouldFail(fail bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.shouldFail = fail
 }

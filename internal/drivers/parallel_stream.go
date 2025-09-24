@@ -53,9 +53,10 @@ func (s *Stream) Release() {
 
 	s.manager.mu.Lock()
 	s.manager.active--
+	active := s.manager.active // Copy while locked
 	s.manager.mu.Unlock()
 
 	s.manager.logger.Debug("stream released",
 		zap.Int("id", s.id),
-		zap.Int("active", s.manager.active))
+		zap.Int("active", active)) // Use the copy
 }
