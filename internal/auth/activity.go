@@ -65,7 +65,7 @@ func (at *ActivityTracker) InitializeSchema(ctx context.Context) error {
 // Track records an activity event
 func (at *ActivityTracker) Track(ctx context.Context, event *ActivityEvent) error {
 	if event.ID == "" {
-		event.ID = generateID()
+		event.ID = GenerateID()
 	}
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now()

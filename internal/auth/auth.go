@@ -127,10 +127,10 @@ func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password,
 
 	// Create tenant for this user
 	tenant := &Tenant{
-		ID:        "tenant-" + generateID(),
+		ID:        "tenant-" + GenerateID(),
 		UserID:    user.ID,
-		AccessKey: "VK" + generateID(), // VK = Vaultaire Key
-		SecretKey: "SK" + generateID() + generateID(),
+		AccessKey: "VK" + GenerateID(), // VK = Vaultaire Key
+		SecretKey: "SK" + GenerateID() + GenerateID(),
 		CreatedAt: time.Now(),
 	}
 
@@ -313,7 +313,7 @@ func (a *AuthService) ValidateJWT(tokenString string) (*JWTClaims, error) {
 }
 
 // Helper function to generate IDs
-func generateID() string {
+func GenerateID() string {
 	bytes := make([]byte, 8)
 	_, _ = rand.Read(bytes)
 	return hex.EncodeToString(bytes)
@@ -328,7 +328,7 @@ func (a *AuthService) RequestPasswordReset(ctx context.Context, email string) (s
 	}
 
 	// Generate secure reset token
-	token := generateID() + generateID()
+	token := GenerateID() + GenerateID()
 
 	// Store token with expiry (TODO: use Redis or DB)
 	// For now, just return the token

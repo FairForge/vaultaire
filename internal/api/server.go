@@ -92,7 +92,7 @@ func (s *Server) setupRoutes() {
 
 	// Add user quota API routes
 	s.registerQuotaRoutes()
-
+	s.registerUserAPIRoutes()
 	// Add pattern routes if DB available
 	s.setupPatternRoutes()
 
