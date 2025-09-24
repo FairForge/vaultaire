@@ -3,10 +3,14 @@ package common
 
 import "context"
 
-// TenantIDKey is the context key for tenant ID
+// contextKey is the type for context keys
 type contextKey string
 
-const TenantIDKey = contextKey("tenant-id")
+// Context keys for request-scoped values
+const (
+	TenantIDKey contextKey = "tenant-id"
+	UserIDKey   contextKey = "user_id"
+)
 
 // GetTenantID extracts tenant ID from context
 func GetTenantID(ctx context.Context) string {
