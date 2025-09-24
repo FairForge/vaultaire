@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -63,8 +64,12 @@ func TestConfigAPI_ChangeListeners(t *testing.T) {
 	cache, _ := NewSSDCache(1024*1024, 10*1024*1024, t.TempDir())
 	api := NewConfigAPI(cache)
 
+	var mu sync.Mutex
 	notified := false
+
 	api.RegisterChangeListener(func(config *CacheConfig) {
+		mu.Lock()
+		defer mu.Unlock()
 		notified = true
 	})
 
@@ -75,5 +80,9 @@ func TestConfigAPI_ChangeListeners(t *testing.T) {
 
 	// Give callback time to run
 	time.Sleep(10 * time.Millisecond)
-	assert.True(t, notified)
+
+	mu.Lock()
+	wasNotified := notified
+	mu.Unlock()
+	assert.True(t, wasNotified)
 }
