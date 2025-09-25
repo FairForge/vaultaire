@@ -324,6 +324,32 @@ func (drm *DynamicRoleManager) RoleHasPermission(role, permission string) bool {
 	return drm.checker.HasPermission(role, permission)
 }
 
+// RoleHasPermissionWithInheritance checks if a role has permission including inheritance
+func (drm *DynamicRoleManager) RoleHasPermissionWithInheritance(role, permission string) bool {
+	// First check direct permissions
+	if drm.RoleHasPermission(role, permission) {
+		return true
+	}
+
+	// Then check inherited roles
+	inherited := drm.inheritance.GetInheritedRoles(role)
+	for _, parent := range inherited {
+		// Check if parent role has the permission
+		if drm.checker.HasPermission(parent, permission) {
+			return true
+		}
+		// Also check dynamic permissions for parent
+		drm.mu.RLock()
+		if grants, exists := drm.dynamicGrants[parent]; exists && grants[permission] {
+			drm.mu.RUnlock()
+			return true
+		}
+		drm.mu.RUnlock()
+	}
+
+	return false
+}
+
 // EvaluatePermission evaluates a permission with context
 func (drm *DynamicRoleManager) EvaluatePermission(role, permission string, context PermissionContext) bool {
 	drm.mu.RLock()

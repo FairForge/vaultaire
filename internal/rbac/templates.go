@@ -456,3 +456,56 @@ func (tm *TemplateManager) RevertTemplate(name string, version int) error {
 
 	return nil
 }
+
+// UserHasPermission checks if a user has a specific permission
+func (tm *TemplateManager) UserHasPermission(userID uuid.UUID, permission string) bool {
+	// Get user's roles
+	roles := tm.GetUserRoles(userID)
+
+	// Check each role for the permission (including inheritance)
+	for _, role := range roles {
+		// Use inheritance-aware check
+		if tm.RoleHasPermissionWithInheritance(role, permission) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// UserHasRole checks if a user has a specific role
+func (tm *TemplateManager) UserHasRole(userID uuid.UUID, role string) bool {
+	roles := tm.GetUserRoles(userID)
+	for _, r := range roles {
+		if r == role {
+			return true
+		}
+	}
+	return false
+}
+
+// GetEffectivePermissions returns all permissions for a user
+func (tm *TemplateManager) GetEffectivePermissions(userID uuid.UUID) PermissionSet {
+	perms := make(PermissionSet)
+
+	roles := tm.GetUserRoles(userID)
+	for _, role := range roles {
+		// Get dynamic permissions for this role
+		rolePerms := tm.collectRolePermissions(role)
+		for _, p := range rolePerms {
+			perms[Permission(p)] = true
+		}
+
+		// Also check static permissions from matrix
+		matrix := GetDefaultPermissionMatrix()
+		if rolePerms, exists := matrix[role]; exists {
+			for perm, granted := range rolePerms {
+				if granted {
+					perms[perm] = true
+				}
+			}
+		}
+	}
+
+	return perms
+}
