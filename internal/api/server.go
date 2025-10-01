@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -28,7 +29,9 @@ type Server struct {
 	events       chan Event
 	engine       *engine.CoreEngine
 	quotaManager QuotaManager
-	rbacService  *RBACService // Add RBAC service
+	rbacService  *RBACService
+	auth         *auth.AuthService
+	auditLogger  *auth.AuditLogger
 
 	requestCount int64
 	testMode     bool
@@ -60,17 +63,19 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		startTime:    time.Now(),
 	}
 
+	// Initialize auth service and audit logger
+	s.auth = auth.NewAuthService(nil)
+	s.auditLogger = auth.NewAuditLogger()
+	s.auth.SetAuditLogger(s.auditLogger)
+
 	// Initialize RBAC
 	s.rbacService = NewRBACService(logger)
 
 	// Add ALL middleware BEFORE any routes
-	// Add RBAC user context injection first
 	s.router.Use(s.rbacService.InjectUserContext)
-
-	// Add logging middleware
 	s.router.Use(s.loggingMiddleware)
 
-	// Now set up routes (no middleware should be added in setupRoutes)
+	// Set up routes
 	s.setupRoutes()
 
 	s.httpServer = &http.Server{
@@ -84,13 +89,35 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 }
 
 func (s *Server) setupRoutes() {
-	// Public health endpoints (no RBAC needed)
+	// Public health endpoints (no auth needed)
 	s.router.Get("/health", s.handleHealth)
 	s.router.Get("/ready", s.handleReady)
 	s.router.Get("/metrics", s.handleMetrics)
 	s.router.Get("/version", s.handleVersion)
 
-	// Usage routes - require authentication
+	// Auth routes - using server's shared auth service
+	s.logger.Info("Registering auth routes")
+	s.router.Post("/auth/register", s.handleRegister)
+	s.router.Post("/auth/login", s.handleLogin)
+	s.router.Post("/auth/password-reset", s.handlePasswordReset)
+	s.router.Post("/auth/password-reset/complete", s.handlePasswordResetComplete)
+
+	// API Documentation routes
+	s.router.Get("/docs", docs.SwaggerUIHandler())
+	s.router.Get("/openapi.json", docs.OpenAPIJSONHandler())
+
+	// IMPORTANT: Register ALL /api routes BEFORE the S3 catch-all
+	// The order matters! More specific routes must come first
+
+	// User API routes under /api/v1/user - MUST be before catch-all
+	s.logger.Info("Registering user API routes")
+	s.registerUserAPIRoutes()
+
+	// Quota routes under /api/v1/quota - MUST be before catch-all
+	s.logger.Info("Registering quota routes")
+	s.registerQuotaRoutes()
+
+	// Usage routes with RBAC under /api/v1/usage
 	s.router.With(s.rbacService.RequirePermission("quota.read")).
 		Get("/api/v1/usage/stats", s.handleGetUsageStats)
 	s.router.With(s.rbacService.RequirePermission("quota.read")).
@@ -98,17 +125,13 @@ func (s *Server) setupRoutes() {
 	s.router.With(s.rbacService.RequirePermission("storage.read")).
 		Get("/api/v1/presigned", s.handleGetPresignedURL)
 
-	// Add quota management routes with RBAC
+	// Quota management routes
 	s.setupQuotaManagementRoutes()
 
-	// Add user quota API routes with RBAC
-	s.registerQuotaRoutes()
-	s.registerUserAPIRoutes()
-
-	// Add pattern routes if DB available
+	// Pattern routes if DB available
 	s.setupPatternRoutes()
 
-	// RBAC management endpoints
+	// RBAC management endpoints under /api/rbac
 	handlers := rbac.NewRBACHandlers(s.rbacService.manager, s.rbacService.auditor)
 	s.router.Route("/api/rbac", func(r chi.Router) {
 		r.Get("/roles", handlers.HandleGetRoles)
@@ -121,31 +144,156 @@ func (s *Server) setupRoutes() {
 		r.Get("/audit", handlers.HandleGetAuditLogs)
 	})
 
-	// API Documentation routes
-	s.router.Get("/docs", docs.SwaggerUIHandler())
-	s.router.Get("/openapi.json", docs.OpenAPIJSONHandler())
-
-	// Auth routes - MUST be before S3 catch-all
-	s.logger.Info("Registering auth routes - forcing registration")
-	authHandler := auth.NewAuthHandler(s.db, s.logger)
-	s.router.Post("/auth/register", authHandler.Register)
-	s.router.Post("/auth/login", authHandler.Login)
-	s.router.Post("/auth/password-reset", authHandler.RequestPasswordReset)
-	s.router.Post("/auth/password-reset/complete", authHandler.CompletePasswordReset)
-
-	// S3 catch-all with RBAC (MUST be last)
-	// We'll check permissions inside handleS3Request based on operation
+	// S3 catch-all (MUST be ABSOLUTELY LAST)
+	// This catches everything that didn't match above
+	s.logger.Info("Registering S3 catch-all handler")
 	s.router.HandleFunc("/*", s.handleS3Request)
 }
 
-// WrapWithRBACPermission wraps handlers with RBAC permission checks
+// Auth handlers using the server's shared auth service
+
+func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+		Company  string `json:"company"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	// Use server's auth service
+	user, tenant, apiKey, err := s.auth.CreateUserWithTenant(
+		r.Context(), req.Email, req.Password, req.Company)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Return credentials
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]string{
+		"accessKeyId":     apiKey.Key,
+		"secretAccessKey": apiKey.Secret,
+		"endpoint":        fmt.Sprintf("http://localhost:%d", s.config.Server.Port),
+	}); err != nil {
+		s.logger.Error("failed to encode register response", zap.Error(err))
+	}
+
+	s.logger.Info("user registered",
+		zap.String("email", req.Email),
+		zap.String("user_id", user.ID),
+		zap.String("tenant_id", tenant.ID))
+}
+
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	// Use server's auth service
+	valid, err := s.auth.ValidatePassword(r.Context(), req.Email, req.Password)
+	if err != nil || !valid {
+		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
+		return
+	}
+
+	user, err := s.auth.GetUserByEmail(r.Context(), req.Email)
+	if err != nil {
+		http.Error(w, "User not found", http.StatusNotFound)
+		return
+	}
+
+	token, err := s.auth.GenerateJWT(user)
+	if err != nil {
+		http.Error(w, "Failed to generate token", http.StatusInternalServerError)
+		return
+	}
+
+	response := map[string]string{
+		"token":     token,
+		"tenant_id": user.TenantID,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		s.logger.Error("failed to encode login response", zap.Error(err))
+	}
+}
+
+func (s *Server) handlePasswordReset(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Email string `json:"email"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	token, err := s.auth.RequestPasswordReset(r.Context(), req.Email)
+	if err != nil {
+		http.Error(w, "Email not found", http.StatusNotFound)
+		return
+	}
+
+	// In production, email the token. For now, return it
+	response := map[string]string{
+		"message": "Reset token generated",
+		"token":   token, // Don't do this in production!
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		s.logger.Error("failed to encode password reset response", zap.Error(err))
+	}
+}
+
+func (s *Server) handlePasswordResetComplete(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Token       string `json:"token"`
+		NewPassword string `json:"new_password"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	err := s.auth.CompletePasswordReset(r.Context(), req.Token, req.NewPassword)
+	if err != nil {
+		http.Error(w, "Invalid or expired token", http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]string{"message": "Password reset successful"}); err != nil {
+		s.logger.Error("failed to encode password reset complete response", zap.Error(err))
+	}
+}
+
+func (s *Server) SetAuthService(authService *auth.AuthService) {
+	s.auth = authService
+}
+
+func (s *Server) SetAuditLogger(logger *auth.AuditLogger) {
+	s.auditLogger = logger
+}
+
 func (s *Server) WrapWithRBACPermission(permission string, handler http.HandlerFunc) http.HandlerFunc {
 	if s.rbacService == nil {
-		return handler // No RBAC, pass through
+		return handler
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Check permission
 		userID := rbac.GetUserID(r.Context())
 		if userID.String() == "00000000-0000-0000-0000-000000000000" {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -158,9 +306,7 @@ func (s *Server) WrapWithRBACPermission(permission string, handler http.HandlerF
 			return
 		}
 
-		// Log successful permission check
 		s.rbacService.auditor.LogPermissionCheck(userID, permission, true)
-
 		handler(w, r)
 	}
 }
@@ -223,7 +369,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 }
 
 func (s *Server) Start() error {
-	s.logger.Info("Starting server with RBAC enabled", zap.Int("port", s.config.Server.Port))
+	s.logger.Info("Starting server with RBAC and API Key Management", zap.Int("port", s.config.Server.Port))
 	return s.httpServer.ListenAndServe()
 }
 
@@ -237,7 +383,34 @@ func getMemoryUsageMB() uint64 {
 	return m.Alloc / 1024 / 1024
 }
 
-// GetRouter returns the chi router for adding routes
 func (s *Server) GetRouter() chi.Router {
 	return s.router
+}
+
+// requireJWT is middleware to check JWT authentication for API routes
+func (s *Server) requireJWT(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := r.Header.Get("Authorization")
+		if token == "" {
+			http.Error(w, "Unauthorized - missing token", http.StatusUnauthorized)
+			return
+		}
+
+		// Remove "Bearer " prefix if present
+		token = strings.TrimPrefix(token, "Bearer ")
+		token = strings.TrimSpace(token)
+
+		claims, err := s.auth.ValidateJWT(token)
+		if err != nil {
+			http.Error(w, "Invalid token: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+
+		// Use typed context keys
+		ctx := context.WithValue(r.Context(), userIDKey, claims.UserID)
+		ctx = context.WithValue(ctx, emailKey, claims.Email)
+		ctx = context.WithValue(ctx, tenantIDKey, claims.TenantID)
+
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
