@@ -14,6 +14,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/config"
 	"github.com/FairForge/vaultaire/internal/docs"
 	"github.com/FairForge/vaultaire/internal/engine"
+	"github.com/FairForge/vaultaire/internal/rbac"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 )
@@ -27,6 +28,7 @@ type Server struct {
 	events       chan Event
 	engine       *engine.CoreEngine
 	quotaManager QuotaManager
+	rbacService  *RBACService // Add RBAC service
 
 	requestCount int64
 	testMode     bool
@@ -58,7 +60,12 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		startTime:    time.Now(),
 	}
 
+	// Initialize RBAC
+	s.rbacService = NewRBACService(logger)
+
 	// Add ALL middleware BEFORE any routes
+	// Add RBAC user context injection first
+	s.router.Use(s.rbacService.InjectUserContext)
 
 	// Add logging middleware
 	s.router.Use(s.loggingMiddleware)
@@ -77,31 +84,48 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 }
 
 func (s *Server) setupRoutes() {
+	// Public health endpoints (no RBAC needed)
 	s.router.Get("/health", s.handleHealth)
 	s.router.Get("/ready", s.handleReady)
 	s.router.Get("/metrics", s.handleMetrics)
 	s.router.Get("/version", s.handleVersion)
 
-	// Add usage routes
-	s.router.Get("/api/v1/usage/stats", s.handleGetUsageStats)
-	s.router.Get("/api/v1/usage/alerts", s.handleGetUsageAlerts)
-	s.router.Get("/api/v1/presigned", s.handleGetPresignedURL)
+	// Usage routes - require authentication
+	s.router.With(s.rbacService.RequirePermission("quota.read")).
+		Get("/api/v1/usage/stats", s.handleGetUsageStats)
+	s.router.With(s.rbacService.RequirePermission("quota.read")).
+		Get("/api/v1/usage/alerts", s.handleGetUsageAlerts)
+	s.router.With(s.rbacService.RequirePermission("storage.read")).
+		Get("/api/v1/presigned", s.handleGetPresignedURL)
 
-	// Add quota management routes
+	// Add quota management routes with RBAC
 	s.setupQuotaManagementRoutes()
 
-	// Add user quota API routes
+	// Add user quota API routes with RBAC
 	s.registerQuotaRoutes()
 	s.registerUserAPIRoutes()
+
 	// Add pattern routes if DB available
 	s.setupPatternRoutes()
+
+	// RBAC management endpoints
+	handlers := rbac.NewRBACHandlers(s.rbacService.manager, s.rbacService.auditor)
+	s.router.Route("/api/rbac", func(r chi.Router) {
+		r.Get("/roles", handlers.HandleGetRoles)
+		r.Get("/users/{userID}/roles", handlers.HandleGetUserRoles)
+		r.With(s.rbacService.RequireRole(rbac.RoleAdmin)).
+			Post("/users/{userID}/roles", handlers.HandleAssignRole)
+		r.With(s.rbacService.RequireRole(rbac.RoleAdmin)).
+			Delete("/users/{userID}/roles", handlers.HandleRevokeRole)
+		r.Get("/permissions", handlers.HandleGetPermissions)
+		r.Get("/audit", handlers.HandleGetAuditLogs)
+	})
 
 	// API Documentation routes
 	s.router.Get("/docs", docs.SwaggerUIHandler())
 	s.router.Get("/openapi.json", docs.OpenAPIJSONHandler())
 
 	// Auth routes - MUST be before S3 catch-all
-	// Temporarily removing DB check to get it working
 	s.logger.Info("Registering auth routes - forcing registration")
 	authHandler := auth.NewAuthHandler(s.db, s.logger)
 	s.router.Post("/auth/register", authHandler.Register)
@@ -109,8 +133,36 @@ func (s *Server) setupRoutes() {
 	s.router.Post("/auth/password-reset", authHandler.RequestPasswordReset)
 	s.router.Post("/auth/password-reset/complete", authHandler.CompletePasswordReset)
 
-	// S3 catch-all (MUST be last)
+	// S3 catch-all with RBAC (MUST be last)
+	// We'll check permissions inside handleS3Request based on operation
 	s.router.HandleFunc("/*", s.handleS3Request)
+}
+
+// WrapWithRBACPermission wraps handlers with RBAC permission checks
+func (s *Server) WrapWithRBACPermission(permission string, handler http.HandlerFunc) http.HandlerFunc {
+	if s.rbacService == nil {
+		return handler // No RBAC, pass through
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Check permission
+		userID := rbac.GetUserID(r.Context())
+		if userID.String() == "00000000-0000-0000-0000-000000000000" {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		if !s.rbacService.manager.UserHasPermission(userID, permission) {
+			http.Error(w, "Forbidden - insufficient permissions", http.StatusForbidden)
+			s.rbacService.auditor.LogPermissionCheck(userID, permission, false)
+			return
+		}
+
+		// Log successful permission check
+		s.rbacService.auditor.LogPermissionCheck(userID, permission, true)
+
+		handler(w, r)
+	}
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -171,7 +223,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 }
 
 func (s *Server) Start() error {
-	s.logger.Info("Starting server", zap.Int("port", s.config.Server.Port))
+	s.logger.Info("Starting server with RBAC enabled", zap.Int("port", s.config.Server.Port))
 	return s.httpServer.ListenAndServe()
 }
 
