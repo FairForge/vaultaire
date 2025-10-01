@@ -3,7 +3,6 @@ package auth
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -32,19 +31,6 @@ type Tenant struct {
 	AccessKey string // S3 access key
 	SecretKey string // S3 secret key
 	CreatedAt time.Time
-}
-
-// APIKey represents an API key for S3 access
-type APIKey struct {
-	ID        string
-	UserID    string
-	TenantID  string
-	Name      string
-	Key       string // Public key (like AWS Access Key)
-	Secret    string // Secret key (shown once)
-	Hash      string // Hash of secret for storage
-	CreatedAt time.Time
-	LastUsed  *time.Time
 }
 
 // JWTClaims represents JWT token claims
@@ -137,17 +123,19 @@ func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password,
 	// Link tenant to user
 	user.TenantID = tenant.ID
 
-	// Create primary API key
-	secretHash := sha256.Sum256([]byte(tenant.SecretKey))
-	apiKey := &APIKey{
-		ID:        uuid.New().String(),
-		UserID:    user.ID,
-		TenantID:  tenant.ID,
-		Name:      "primary",
-		Key:       tenant.AccessKey,
-		Secret:    tenant.SecretKey, // Only returned on creation
-		Hash:      hex.EncodeToString(secretHash[:]),
-		CreatedAt: time.Now(),
+	// Create primary API key using the new enhanced method
+	apiKey, err := a.GenerateAPIKey(ctx, user.ID, "primary")
+	if err != nil {
+		// If we can't generate API key, still create user/tenant with old format
+		apiKey = &APIKey{
+			ID:        uuid.New().String(),
+			UserID:    user.ID,
+			TenantID:  tenant.ID,
+			Name:      "primary",
+			Key:       tenant.AccessKey,
+			Secret:    tenant.SecretKey,
+			CreatedAt: time.Now(),
+		}
 	}
 
 	// Store everything in memory (TODO: Use database)
@@ -187,73 +175,6 @@ func (a *AuthService) GetUserByEmail(ctx context.Context, email string) (*User, 
 	if !exists {
 		return nil, fmt.Errorf("user not found")
 	}
-	return user, nil
-}
-
-// GenerateAPIKey creates a new API key for a user
-func (a *AuthService) GenerateAPIKey(ctx context.Context, userID, name string) (*APIKey, error) {
-	user, exists := a.userIndex[userID]
-	if !exists {
-		return nil, fmt.Errorf("user not found")
-	}
-
-	// Generate random key and secret
-	keyBytes := make([]byte, 20)
-	if _, err := rand.Read(keyBytes); err != nil {
-		return nil, fmt.Errorf("generate key: %w", err)
-	}
-
-	secretBytes := make([]byte, 40)
-	if _, err := rand.Read(secretBytes); err != nil {
-		return nil, fmt.Errorf("generate secret: %w", err)
-	}
-
-	key := "VK" + strings.ToUpper(hex.EncodeToString(keyBytes))[:20]
-	secret := hex.EncodeToString(secretBytes)
-
-	// Hash secret for storage
-	hash := sha256.Sum256([]byte(secret))
-
-	apiKey := &APIKey{
-		ID:        uuid.New().String(),
-		UserID:    userID,
-		TenantID:  user.TenantID,
-		Name:      name,
-		Key:       key,
-		Secret:    secret,
-		Hash:      hex.EncodeToString(hash[:]),
-		CreatedAt: time.Now(),
-	}
-
-	// Store in memory (TODO: Use database)
-	a.apiKeys[key] = apiKey
-
-	return apiKey, nil
-}
-
-// ValidateAPIKey checks if API key is valid (for S3 auth)
-func (a *AuthService) ValidateAPIKey(ctx context.Context, key, secret string) (*User, error) {
-	apiKey, exists := a.apiKeys[key]
-	if !exists {
-		return nil, fmt.Errorf("invalid API key")
-	}
-
-	// Verify secret
-	hash := sha256.Sum256([]byte(secret))
-	if hex.EncodeToString(hash[:]) != apiKey.Hash {
-		return nil, fmt.Errorf("invalid API secret")
-	}
-
-	// Find user
-	user, exists := a.userIndex[apiKey.UserID]
-	if !exists {
-		return nil, fmt.Errorf("user not found")
-	}
-
-	// Update last used
-	now := time.Now()
-	apiKey.LastUsed = &now
-
 	return user, nil
 }
 
