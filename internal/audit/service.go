@@ -237,3 +237,82 @@ func nullBytes(b []byte) interface{} {
 	}
 	return b
 }
+
+// Search searches audit events with filters
+func (s *AuditService) Search(ctx context.Context, filters *SearchFilters, limit, offset int) ([]*AuditEvent, error) {
+	query := `
+		SELECT id, timestamp, user_id, tenant_id, event_type, action,
+		       resource, result, severity, ip, user_agent, duration_ms,
+		       error_msg, metadata, performed_by
+		FROM audit_logs
+		WHERE 1=1
+	`
+	args := []interface{}{}
+	argCount := 1
+
+	if filters.TenantID != "" {
+		query += fmt.Sprintf(" AND tenant_id = $%d", argCount)
+		args = append(args, filters.TenantID)
+		argCount++
+	}
+
+	if filters.UserID != nil {
+		query += fmt.Sprintf(" AND user_id = $%d", argCount)
+		args = append(args, filters.UserID.String())
+		argCount++
+	}
+
+	if filters.EventType != "" {
+		query += fmt.Sprintf(" AND event_type = $%d", argCount)
+		args = append(args, filters.EventType)
+		argCount++
+	}
+
+	query += " ORDER BY timestamp DESC"
+	query += fmt.Sprintf(" LIMIT $%d OFFSET $%d", argCount, argCount+1)
+	args = append(args, limit, offset)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("search events: %w", err)
+	}
+	defer func() {
+		if err := rows.Close(); err != nil {
+			_ = err
+		}
+	}()
+
+	return s.scanAuditEvents(rows)
+}
+
+// GetEventByID retrieves a single event by ID
+func (s *AuditService) GetEventByID(ctx context.Context, id string) (*AuditEvent, error) {
+	query := `
+		SELECT id, timestamp, user_id, tenant_id, event_type, action,
+		       resource, result, severity, ip, user_agent, duration_ms,
+		       error_msg, metadata, performed_by
+		FROM audit_logs
+		WHERE id = $1
+	`
+
+	rows, err := s.db.QueryContext(ctx, query, id)
+	if err != nil {
+		return nil, fmt.Errorf("get event by id: %w", err)
+	}
+	defer func() {
+		if err := rows.Close(); err != nil {
+			_ = err
+		}
+	}()
+
+	events, err := s.scanAuditEvents(rows)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(events) == 0 {
+		return nil, fmt.Errorf("event not found")
+	}
+
+	return events[0], nil
+}

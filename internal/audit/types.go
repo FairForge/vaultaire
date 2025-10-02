@@ -111,3 +111,14 @@ const (
 	EventTypeConsentGiven   EventType = "consent.given"
 	EventTypeConsentRevoked EventType = "consent.revoked"
 )
+
+// SearchFilters represents search filter parameters
+type SearchFilters struct {
+	TenantID  string
+	UserID    *uuid.UUID
+	EventType EventType
+	Result    Result
+	Severity  Severity
+	StartTime *time.Time
+	EndTime   *time.Time
+}
