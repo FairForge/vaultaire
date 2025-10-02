@@ -147,6 +147,11 @@ func (s *AuditService) Query(ctx context.Context, query *AuditQuery) ([]*AuditEv
 		}
 	}()
 
+	return s.scanAuditEvents(rows)
+}
+
+// scanAuditEvents is a helper that scans rows into AuditEvent structs
+func (s *AuditService) scanAuditEvents(rows *sql.Rows) ([]*AuditEvent, error) {
 	var events []*AuditEvent
 	for rows.Next() {
 		event := &AuditEvent{}
