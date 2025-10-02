@@ -103,3 +103,11 @@ type AuditQuery struct {
 	Limit     int        `json:"limit"`
 	Offset    int        `json:"offset"`
 }
+
+// Additional event types for compliance
+const (
+	EventTypeDataExport     EventType = "data.export"
+	EventTypeDataDeletion   EventType = "data.deletion"
+	EventTypeConsentGiven   EventType = "consent.given"
+	EventTypeConsentRevoked EventType = "consent.revoked"
+)
