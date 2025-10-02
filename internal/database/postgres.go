@@ -278,3 +278,33 @@ func (p *Postgres) DeleteArtifact(ctx context.Context, tenantID, container, name
 func (p *Postgres) DB() *sql.DB {
 	return p.db
 }
+
+// Exec executes a query without returning any rows
+func (p *Postgres) Exec(query string, args ...interface{}) (sql.Result, error) {
+	return p.db.Exec(query, args...)
+}
+
+// ExecContext executes a query without returning any rows with context
+func (p *Postgres) ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
+	return p.db.ExecContext(ctx, query, args...)
+}
+
+// Query executes a query that returns rows
+func (p *Postgres) Query(query string, args ...interface{}) (*sql.Rows, error) {
+	return p.db.Query(query, args...)
+}
+
+// QueryContext executes a query that returns rows with context
+func (p *Postgres) QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error) {
+	return p.db.QueryContext(ctx, query, args...)
+}
+
+// QueryRow executes a query that is expected to return at most one row
+func (p *Postgres) QueryRow(query string, args ...interface{}) *sql.Row {
+	return p.db.QueryRow(query, args...)
+}
+
+// QueryRowContext executes a query that is expected to return at most one row with context
+func (p *Postgres) QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row {
+	return p.db.QueryRowContext(ctx, query, args...)
+}
