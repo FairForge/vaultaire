@@ -97,3 +97,9 @@ original.log
 # Cache and temp
 cache_benchmark_results.txt
 compress.txt
+
+# Permafrost benchmarks (internal only)
+cmd/permafrost-benchmark/
+cmd/permafrost-parallel/
+permafrost-benchmark
+permafrost-parallel
