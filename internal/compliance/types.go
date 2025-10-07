@@ -6,107 +6,132 @@ import (
 	"github.com/google/uuid"
 )
 
-// Legal bases for data processing (GDPR Article 6)
+// GDPR Request Types
 const (
-	LegalBasisConsent            = "consent"
-	LegalBasisContract           = "contract"
-	LegalBasisLegalObligation    = "legal_obligation"
-	LegalBasisVitalInterests     = "vital_interests"
-	LegalBasisPublicTask         = "public_task"
-	LegalBasisLegitimateInterest = "legitimate_interest"
+	RequestTypeAccess   = "access"
+	RequestTypeDeletion = "deletion"
+	RequestTypeExport   = "export"
 )
 
-// SAR statuses
+// Request statuses (backwards compatibility)
 const (
-	StatusPending    = "pending"
-	StatusProcessing = "processing"
-	StatusCompleted  = "completed"
-	StatusFailed     = "failed"
+	StatusPending   = "pending"
+	StatusCompleted = "completed"
+	StatusFailed    = "failed"
 )
 
-// Deletion methods
+// Deletion methods (backwards compatibility)
 const (
-	DeletionMethodSoft      = "soft_delete"
-	DeletionMethodHard      = "hard_delete"
-	DeletionMethodAnonymize = "anonymize"
+	DeletionMethodSoft = "soft" // Mark as deleted
+	DeletionMethodHard = "hard" // Permanent deletion
 )
 
-// ProcessingActivity represents a data processing activity (Article 30)
-type ProcessingActivity struct {
-	ID                   uuid.UUID
-	ActivityName         string
-	Purpose              string
-	LegalBasis           string
-	DataCategories       []string
-	RetentionPeriod      time.Duration
-	ThirdPartyProcessors []string
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
-}
+// Deletion request statuses
+const (
+	DeletionStatusPending    = "pending"
+	DeletionStatusInProgress = "in_progress"
+	DeletionStatusCompleted  = "completed"
+	DeletionStatusFailed     = "failed"
+	DeletionStatusCancelled  = "cancelled"
+)
 
-// SubjectAccessRequest represents a user data export request (Article 15)
+// Deletion scopes
+const (
+	DeletionScopeAll        = "all"        // Delete everything
+	DeletionScopeContainers = "containers" // Delete specific containers
+	DeletionScopeSpecific   = "specific"   // Delete specific files
+)
+
+// Proof types
+const (
+	ProofTypeFileDeleted     = "file_deleted"
+	ProofTypeBackupDeleted   = "backup_deleted"
+	ProofTypeMetadataCleared = "metadata_cleared"
+	ProofTypeVersionDeleted  = "version_deleted"
+)
+
+// SubjectAccessRequest represents a GDPR Article 15 request
 type SubjectAccessRequest struct {
-	ID             uuid.UUID
-	UserID         uuid.UUID
-	RequestDate    time.Time
-	CompletionDate *time.Time
-	Status         string
-	DataExportPath string
-	FileCount      int
-	TotalSizeBytes int64
-	ErrorMessage   string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID          uuid.UUID
+	UserID      uuid.UUID
+	RequestDate time.Time
+	Status      string
+	DataPackage []byte // JSON data package
+	CreatedAt   time.Time
+	CompletedAt *time.Time
 }
 
-// DeletionRequest represents a right to erasure request (Article 17)
+// DeletionRequest represents a GDPR Article 17 deletion request
 type DeletionRequest struct {
-	ID             uuid.UUID
-	UserID         uuid.UUID
-	UserEmail      string
-	RequestDate    time.Time
-	CompletionDate *time.Time
-	Status         string
-	DeletionMethod string
-	FilesDeleted   int
-	ErrorMessage   string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID              uuid.UUID
+	UserID          uuid.UUID
+	RequestedBy     uuid.UUID
+	UserEmail       string // For backwards compatibility with existing code
+	RequestDate     time.Time
+	Reason          string
+	Scope           string
+	ContainerFilter []string
+	IncludeBackups  bool
+	PreserveAudit   bool
+	DeletionMethod  string // For backwards compatibility
+
+	ScheduledFor *time.Time
+	StartedAt    *time.Time
+	CompletedAt  *time.Time
+	Status       string
+
+	ItemsDeleted int64
+	BytesDeleted int64
+	ProofHash    string
+	ErrorMessage string
+
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
-// UserDataExport represents exported user data
-type UserDataExport struct {
-	UserID         uuid.UUID              `json:"user_id"`
-	Email          string                 `json:"email"`
-	Profile        map[string]interface{} `json:"profile"`
-	Files          []FileMetadata         `json:"files"`
-	AuditLogs      []AuditLogEntry        `json:"audit_logs"`
-	BillingHistory []BillingRecord        `json:"billing_history"`
-	ExportDate     time.Time              `json:"export_date"`
+// DeletionProof provides cryptographic evidence of deletion
+type DeletionProof struct {
+	ID        uuid.UUID
+	RequestID uuid.UUID
+	BackendID string
+	Container string
+	Artifact  string
+	DeletedAt time.Time
+	ProofType string
+	ProofData map[string]interface{}
+	CreatedAt time.Time
 }
 
-// FileMetadata for SAR export
-type FileMetadata struct {
-	Path         string    `json:"path"`
-	Size         int64     `json:"size"`
-	CreatedAt    time.Time `json:"created_at"`
-	LastModified time.Time `json:"last_modified"`
+// DeletionCertificate is the final proof document
+type DeletionCertificate struct {
+	RequestID       uuid.UUID
+	UserID          uuid.UUID
+	CompletedAt     time.Time
+	ItemsDeleted    int64
+	BytesDeleted    int64
+	Proofs          []DeletionProof
+	CertificateHash string // SHA-256 of all proofs
 }
 
-// AuditLogEntry for SAR export
-type AuditLogEntry struct {
-	Timestamp time.Time `json:"timestamp"`
-	EventType string    `json:"event_type"`
-	Action    string    `json:"action"`
-	Resource  string    `json:"resource"`
-	IPAddress string    `json:"ip_address"`
-	UserAgent string    `json:"user_agent"`
+// ProcessingActivity represents GDPR Article 30 processing record
+type ProcessingActivity struct {
+	ID          uuid.UUID
+	Name        string
+	Purpose     string
+	DataTypes   []string
+	LegalBasis  string
+	Retention   string
+	Description string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
-// BillingRecord for SAR export
-type BillingRecord struct {
-	Date        time.Time `json:"date"`
-	Description string    `json:"description"`
-	Amount      float64   `json:"amount"`
-	Currency    string    `json:"currency"`
+// DataInventoryItem represents a piece of stored user data
+type DataInventoryItem struct {
+	UserID    uuid.UUID
+	DataType  string
+	Location  string
+	Purpose   string
+	Retention string
+	CreatedAt time.Time
 }
