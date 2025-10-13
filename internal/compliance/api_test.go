@@ -127,3 +127,64 @@ func TestAPIHandler_HandleGetSARStatus(t *testing.T) {
 	// Handler returns 200 with "not found" message in body, not 404
 	assert.Equal(t, http.StatusOK, w.Code)
 }
+
+func TestAPIHandler_HandleCreateExport(t *testing.T) {
+	service := NewGDPRService(nil, zap.NewNop())
+	handler := NewAPIHandler(service, zap.NewNop())
+
+	t.Run("creates export request", func(t *testing.T) {
+		body := map[string]interface{}{
+			"format": "json",
+		}
+		bodyBytes, _ := json.Marshal(body)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/compliance/export", bytes.NewReader(bodyBytes))
+		w := httptest.NewRecorder()
+
+		userID := uuid.New()
+		ctx := context.WithValue(req.Context(), UserIDKey, userID)
+		req = req.WithContext(ctx)
+
+		handler.HandleCreateExport(w, req)
+
+		assert.Equal(t, http.StatusAccepted, w.Code)
+
+		var response map[string]interface{}
+		err := json.NewDecoder(w.Body).Decode(&response)
+		require.NoError(t, err)
+		assert.Equal(t, "pending", response["status"])
+		assert.Equal(t, "json", response["format"])
+	})
+
+	t.Run("requires authentication", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/compliance/export", nil)
+		w := httptest.NewRecorder()
+
+		handler.HandleCreateExport(w, req)
+
+		assert.Equal(t, http.StatusUnauthorized, w.Code)
+	})
+}
+
+func TestAPIHandler_HandleGetExport(t *testing.T) {
+	service := NewGDPRService(nil, zap.NewNop())
+	handler := NewAPIHandler(service, zap.NewNop())
+
+	t.Run("retrieves export status", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/compliance/export/{id}", nil)
+		w := httptest.NewRecorder()
+
+		userID := uuid.New()
+		ctx := context.WithValue(req.Context(), UserIDKey, userID)
+
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", uuid.New().String())
+		ctx = context.WithValue(ctx, chi.RouteCtxKey, rctx)
+		req = req.WithContext(ctx)
+
+		handler.HandleGetExport(w, req)
+
+		// Without database, returns 404
+		assert.Equal(t, http.StatusNotFound, w.Code)
+	})
+}
