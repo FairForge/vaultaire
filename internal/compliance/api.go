@@ -154,3 +154,123 @@ func (h *APIHandler) HandleListProcessingActivities(w http.ResponseWriter, r *ht
 		h.logger.Error("failed to encode response", zap.Error(err))
 	}
 }
+
+// HandleCreateExport handles POST /api/compliance/export
+func (h *APIHandler) HandleCreateExport(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	// Get user ID from context (set by auth middleware)
+	userID, ok := ctx.Value(UserIDKey).(uuid.UUID)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	// Parse request body
+	var req struct {
+		Format string `json:"format"` // json, archive, s3
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Default to JSON if not specified
+	if req.Format == "" {
+		req.Format = "json"
+	}
+
+	// Create portability service with nil database (will be implemented later)
+	// TODO: Inject proper PortabilityDatabase implementation when available
+	portabilityService := NewPortabilityService(nil, nil, h.logger)
+
+	// Create export request
+	exportReq, err := portabilityService.CreateExportRequest(ctx, userID, req.Format)
+	if err != nil {
+		h.logger.Error("failed to create export", zap.Error(err))
+		http.Error(w, "failed to create export request", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
+		"id":         exportReq.ID,
+		"status":     exportReq.Status,
+		"format":     exportReq.Format,
+		"expires_at": exportReq.ExpiresAt,
+		"message":    "Export request created. You will be notified when ready.",
+	}); err != nil {
+		h.logger.Error("failed to encode response", zap.Error(err))
+	}
+}
+
+// HandleGetExport handles GET /api/compliance/export/:id
+func (h *APIHandler) HandleGetExport(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	// Get user ID from context
+	userID, ok := ctx.Value(UserIDKey).(uuid.UUID)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	// Get request ID from URL
+	requestIDStr := chi.URLParam(r, "id")
+	requestID, err := uuid.Parse(requestIDStr)
+	if err != nil {
+		http.Error(w, "invalid request ID", http.StatusBadRequest)
+		return
+	}
+
+	// Create portability service with nil database (will be implemented later)
+	// TODO: Inject proper PortabilityDatabase implementation when available
+	portabilityService := NewPortabilityService(nil, nil, h.logger)
+
+	// Get export request
+	exportReq, err := portabilityService.GetExportRequest(ctx, requestID)
+	if err != nil {
+		http.Error(w, "export request not found", http.StatusNotFound)
+		return
+	}
+
+	// Verify ownership
+	if exportReq.UserID != userID {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(exportReq); err != nil {
+		h.logger.Error("failed to encode response", zap.Error(err))
+	}
+}
+
+// HandleListExports handles GET /api/compliance/exports
+func (h *APIHandler) HandleListExports(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	// Get user ID from context
+	userID, ok := ctx.Value(UserIDKey).(uuid.UUID)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	// For now, return empty list since database implementation is not ready
+	// TODO: Implement proper database query when PortabilityDatabase is available
+	_ = ctx
+	_ = userID
+
+	var requests []*PortabilityRequest
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
+		"requests": requests,
+		"count":    len(requests),
+		"message":  "Portability database not yet implemented",
+	}); err != nil {
+		h.logger.Error("failed to encode response", zap.Error(err))
+	}
+}
