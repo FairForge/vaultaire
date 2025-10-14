@@ -143,7 +143,7 @@ func (s *GDPRService) RecordProcessingActivity(ctx context.Context, activity *Pr
 		`
 		_, err := s.db.ExecContext(ctx, query,
 			activity.ID, activity.Name, activity.Purpose,
-			activity.DataTypes, activity.LegalBasis, activity.Retention,
+			activity.DataCategories, activity.LegalBasis, activity.RetentionPeriod,
 			activity.Description, activity.CreatedAt, activity.UpdatedAt)
 		if err != nil {
 			return fmt.Errorf("failed to record processing activity: %w", err)
@@ -214,7 +214,7 @@ func (s *GDPRService) ListProcessingActivities(ctx context.Context) ([]*Processi
 		var activity ProcessingActivity
 		err := rows.Scan(
 			&activity.ID, &activity.Name, &activity.Purpose,
-			&activity.DataTypes, &activity.LegalBasis, &activity.Retention,
+			&activity.DataCategories, &activity.LegalBasis, &activity.RetentionPeriod,
 			&activity.Description, &activity.CreatedAt, &activity.UpdatedAt)
 		if err != nil {
 			continue
