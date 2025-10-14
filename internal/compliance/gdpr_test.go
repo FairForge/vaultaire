@@ -56,11 +56,11 @@ func TestGDPRService_RecordProcessingActivity(t *testing.T) {
 		ctx := context.Background()
 
 		activity := &ProcessingActivity{
-			Name:       "User Data Processing",
-			Purpose:    "Provide storage services",
-			DataTypes:  []string{"files", "metadata"},
-			LegalBasis: "Contract",
-			Retention:  "7 years",
+			Name:            "User Data Processing",
+			Purpose:         "Provide storage services",
+			DataCategories:  []DataCategory{{Category: "files"}, {Category: "metadata"}},
+			LegalBasis:      "Contract",
+			RetentionPeriod: "7 years",
 		}
 
 		err := service.RecordProcessingActivity(ctx, activity)
