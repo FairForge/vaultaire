@@ -17,6 +17,7 @@ type APIHandler struct {
 	consentService     *ConsentService
 	breachService      *BreachService
 	ropaService        *ROPAService
+	privacyService     *PrivacyService
 	logger             *zap.Logger
 }
 
@@ -27,6 +28,7 @@ func NewAPIHandler(
 	consentService *ConsentService,
 	breachService *BreachService,
 	ropaService *ROPAService,
+	privacyService *PrivacyService,
 	logger *zap.Logger,
 ) *APIHandler {
 	return &APIHandler{
@@ -35,6 +37,7 @@ func NewAPIHandler(
 		consentService:     consentService,
 		breachService:      breachService,
 		ropaService:        ropaService,
+		privacyService:     privacyService,
 		logger:             logger,
 	}
 }
@@ -752,4 +755,161 @@ func (h *APIHandler) HandleGetROPAStats(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(stats)
+}
+
+// ============================================================================
+// Privacy Control Handlers (GDPR Article 25 - Data Protection by Design)
+// ============================================================================
+
+// HandleEnablePrivacyControl handles POST /api/compliance/privacy/controls
+func (h *APIHandler) HandleEnablePrivacyControl(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	userID, ok := ctx.Value(UserIDKey).(uuid.UUID)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var req struct {
+		Type   string                 `json:"type"`
+		Config map[string]interface{} `json:"config"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Validate control type
+	controlType := PrivacyControlType(req.Type)
+	switch controlType {
+	case ControlDataMinimization, ControlPurposeLimitation, ControlAccessControl,
+		ControlPseudonymization, ControlEncryption:
+		// Valid type
+	default:
+		http.Error(w, "invalid control type", http.StatusBadRequest)
+		return
+	}
+
+	if err := h.privacyService.EnableControl(ctx, controlType, req.Config); err != nil {
+		h.logger.Error("failed to enable privacy control",
+			zap.String("user_id", userID.String()),
+			zap.String("type", req.Type),
+			zap.Error(err))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"message": "privacy control enabled",
+		"type":    req.Type,
+	})
+}
+
+// HandleMinimizeData handles POST /api/compliance/privacy/minimize
+func (h *APIHandler) HandleMinimizeData(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	userID, ok := ctx.Value(UserIDKey).(uuid.UUID)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var req struct {
+		Purpose string                 `json:"purpose"`
+		Data    map[string]interface{} `json:"data"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	minimized, err := h.privacyService.MinimizeData(ctx, req.Purpose, req.Data)
+	if err != nil {
+		h.logger.Error("failed to minimize data",
+			zap.String("user_id", userID.String()),
+			zap.String("purpose", req.Purpose),
+			zap.Error(err))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"minimized_data": minimized,
+		"purpose":        req.Purpose,
+	})
+}
+
+// HandleCheckPurpose handles GET /api/compliance/privacy/purpose/:dataId/:purpose
+func (h *APIHandler) HandleCheckPurpose(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	userID, ok := ctx.Value(UserIDKey).(uuid.UUID)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	dataID := chi.URLParam(r, "dataId")
+	purpose := chi.URLParam(r, "purpose")
+
+	if dataID == "" || purpose == "" {
+		http.Error(w, "missing required parameters", http.StatusBadRequest)
+		return
+	}
+
+	allowed, err := h.privacyService.CheckPurpose(ctx, dataID, purpose)
+	if err != nil {
+		h.logger.Error("failed to check purpose",
+			zap.String("user_id", userID.String()),
+			zap.String("data_id", dataID),
+			zap.String("purpose", purpose),
+			zap.Error(err))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"allowed": allowed,
+		"data_id": dataID,
+		"purpose": purpose,
+	})
+}
+
+// HandlePseudonymize handles POST /api/compliance/privacy/pseudonymize
+func (h *APIHandler) HandlePseudonymize(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	userID, ok := ctx.Value(UserIDKey).(uuid.UUID)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var req struct {
+		Data map[string]interface{} `json:"data"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	pseudonymized, mapping, err := h.privacyService.Pseudonymize(ctx, req.Data)
+	if err != nil {
+		h.logger.Error("failed to pseudonymize data",
+			zap.String("user_id", userID.String()),
+			zap.Error(err))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"pseudonymized": pseudonymized,
+		"mapping_count": len(mapping),
+		// Don't return the actual mapping for security
+	})
 }
