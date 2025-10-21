@@ -22,6 +22,7 @@ func setupTestHandler() *APIHandler {
 	consentDB := newMockConsentDB()
 	breachDB := newMockBreachDB()
 	ropaDB := newMockROPADB()
+	privacyDB := NewMockPrivacyDatabase() // Add this
 
 	// Pre-populate consent purposes for testing
 	_ = consentDB.CreateConsentPurpose(context.Background(), &ConsentPurpose{
@@ -41,6 +42,7 @@ func setupTestHandler() *APIHandler {
 	consentService := NewConsentService(consentDB, zap.NewNop())
 	breachService := NewBreachService(breachDB, zap.NewNop())
 	ropaService := NewROPAService(ropaDB, zap.NewNop())
+	privacyService := NewPrivacyService(privacyDB) // Add this
 
 	// Create handler
 	return NewAPIHandler(
@@ -49,10 +51,12 @@ func setupTestHandler() *APIHandler {
 		consentService,
 		breachService,
 		ropaService,
+		privacyService, // Add this
 		zap.NewNop(),
 	)
 }
 
+// [Rest of the file remains the same - all test functions unchanged]
 // ============================================================================
 // GDPR SAR Handler Tests (Article 15)
 // ============================================================================
@@ -399,6 +403,7 @@ func TestAPIHandler_HandleReportBreach(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, w.Code)
 	})
 }
+
 func TestAPIHandler_HandleGetBreach(t *testing.T) {
 	handler := setupTestHandler()
 
