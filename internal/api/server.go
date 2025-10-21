@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/auth"
+	"github.com/FairForge/vaultaire/internal/compliance"
 	"github.com/FairForge/vaultaire/internal/config"
 	"github.com/FairForge/vaultaire/internal/docs"
 	"github.com/FairForge/vaultaire/internal/engine"
@@ -117,6 +118,10 @@ func (s *Server) setupRoutes() {
 	s.logger.Info("Registering quota routes")
 	s.registerQuotaRoutes()
 
+	// Compliance routes under /api/compliance - MUST be before catch-all
+	s.logger.Info("Registering compliance routes")
+	s.registerComplianceRoutes()
+
 	// Usage routes with RBAC under /api/v1/usage
 	s.router.With(s.rbacService.RequirePermission("quota.read")).
 		Get("/api/v1/usage/stats", s.handleGetUsageStats)
@@ -148,6 +153,72 @@ func (s *Server) setupRoutes() {
 	// This catches everything that didn't match above
 	s.logger.Info("Registering S3 catch-all handler")
 	s.router.HandleFunc("/*", s.handleS3Request)
+}
+
+// registerComplianceRoutes sets up all GDPR compliance endpoints
+func (s *Server) registerComplianceRoutes() {
+	// Initialize compliance handler with mock implementations
+	// In production, these would use real database implementations
+	complianceHandler := compliance.NewAPIHandler(
+		compliance.NewGDPRService(nil, s.logger),
+		compliance.NewPortabilityService(nil, nil, s.logger),
+		compliance.NewConsentService(nil, s.logger),
+		compliance.NewBreachService(nil, s.logger),
+		compliance.NewROPAService(nil, s.logger),
+		compliance.NewPrivacyService(nil), // Added privacy service
+		s.logger,
+	)
+
+	s.router.Route("/api/compliance", func(r chi.Router) {
+		// All compliance routes require authentication
+		r.Use(s.requireJWT)
+
+		// GDPR Subject Access Requests (Article 15)
+		r.Post("/sar", complianceHandler.HandleCreateSAR)
+		r.Get("/sar/{id}", complianceHandler.HandleGetSARStatus)
+		r.Get("/inventory", complianceHandler.HandleGetDataInventory)
+		r.Get("/activities", complianceHandler.HandleListProcessingActivities)
+
+		// Right to Erasure (Article 17)
+		r.Post("/deletion", complianceHandler.HandleCreateDeletionRequest)
+
+		// Data Portability (Article 20)
+		r.Post("/export", complianceHandler.HandleCreateExport)
+		r.Get("/export/{id}", complianceHandler.HandleGetExport)
+
+		// Consent Management (Articles 7 & 8)
+		r.Post("/consent", complianceHandler.HandleGrantConsent)
+		r.Delete("/consent/{purpose}", complianceHandler.HandleWithdrawConsent)
+		r.Get("/consent", complianceHandler.HandleGetConsentStatus)
+		r.Get("/consent/{purpose}", complianceHandler.HandleCheckConsent)
+		r.Get("/consent/history", complianceHandler.HandleGetConsentHistory)
+		r.Get("/consent/purposes", complianceHandler.HandleListConsentPurposes)
+
+		// Breach Notification (Articles 33 & 34)
+		r.Post("/breach", complianceHandler.HandleReportBreach)
+		r.Get("/breach/{id}", complianceHandler.HandleGetBreach)
+		r.Get("/breach", complianceHandler.HandleListBreaches)
+		r.Patch("/breach/{id}", complianceHandler.HandleUpdateBreach)
+		r.Post("/breach/{id}/notify", complianceHandler.HandleNotifyBreach)
+		r.Get("/breach/stats", complianceHandler.HandleGetBreachStats)
+
+		// Records of Processing Activities - ROPA (Article 30)
+		r.Post("/ropa/activities", complianceHandler.HandleCreateActivity)
+		r.Get("/ropa/activities/{id}", complianceHandler.HandleGetActivity)
+		r.Get("/ropa/activities", complianceHandler.HandleListActivities)
+		r.Patch("/ropa/activities/{id}", complianceHandler.HandleUpdateActivity)
+		r.Delete("/ropa/activities/{id}", complianceHandler.HandleDeleteActivity)
+		r.Post("/ropa/activities/{id}/review", complianceHandler.HandleReviewActivity)
+		r.Get("/ropa/report", complianceHandler.HandleGetROPAReport)
+		r.Get("/ropa/compliance/{id}", complianceHandler.HandleCheckCompliance)
+		r.Get("/ropa/stats", complianceHandler.HandleGetROPAStats)
+
+		// Privacy Controls (Article 25) - Added routes
+		r.Post("/privacy/controls", complianceHandler.HandleEnablePrivacyControl)
+		r.Post("/privacy/minimize", complianceHandler.HandleMinimizeData)
+		r.Get("/privacy/purpose/{dataId}/{purpose}", complianceHandler.HandleCheckPurpose)
+		r.Post("/privacy/pseudonymize", complianceHandler.HandlePseudonymize)
+	})
 }
 
 // Auth handlers using the server's shared auth service
