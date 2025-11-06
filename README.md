@@ -71,6 +71,7 @@ Supported Backends
 ✅ MinIO
 🔄 Hetzner Storage Box (coming soon)
 🔄 Google Cloud Storage (coming soon)
+🔄 Bring your own storage server 
 
 Documentation
 
@@ -99,8 +100,8 @@ We believe in making enterprise-grade storage accessible to everyone through int
 Status
 
 🚧 Current Phase: MVP Development
-📊 Progress: Step 47 of 500
-🎯 Next Milestone: S3 DELETE/LIST operations
-�� Launch Target: Q1 2025
+📊 Progress: Step 400 of 500
+🎯 Next Milestone: user validation
+�� Launch Target: Q1 2026
 
 Built by @fairforge | Blog | Twitter
