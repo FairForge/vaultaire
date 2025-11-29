@@ -34,6 +34,6 @@ func TestMigrator_BulkMigration(t *testing.T) {
 		})
 
 	assert.NoError(t, err)
-	assert.Greater(t, stats.ObjectsProcessed, 0)
-	assert.Equal(t, stats.Failed, 0)
+	assert.Greater(t, stats.ObjectsProcessed, int64(0))
+	assert.Equal(t, int64(0), stats.Failed)
 }

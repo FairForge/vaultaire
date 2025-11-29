@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -26,9 +27,9 @@ type MigrationOptions struct {
 
 // MigrationStats tracks migration progress
 type MigrationStats struct {
-	ObjectsProcessed int
+	ObjectsProcessed int64
 	BytesTransferred int64
-	Failed           int
+	Failed           int64
 	StartTime        time.Time
 	EndTime          time.Time
 }
@@ -102,10 +103,10 @@ func (m *Migrator) worker(ctx context.Context, wg *sync.WaitGroup,
 
 	for key := range jobs {
 		if err := m.MigrateObject(ctx, source, dest, container, key); err != nil {
-			stats.Failed++
-			// Log error
+			atomic.AddInt64(&stats.Failed, 1)
+			m.logger.Error("migration failed", zap.String("key", key), zap.Error(err))
 		} else {
-			stats.ObjectsProcessed++
+			atomic.AddInt64(&stats.ObjectsProcessed, 1)
 		}
 	}
 }
