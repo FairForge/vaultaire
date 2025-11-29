@@ -51,15 +51,17 @@ func TestBurstHandling(t *testing.T) {
 	})
 
 	t.Run("adaptive burst increases for good tenants", func(t *testing.T) {
-		// Arrange
-		limiter := NewAdaptiveBurstLimiter(100, 10, 50) // 100 req/s (high rate), burst 10->50
+		// Arrange - use lower rate so tokens refill slower
+		limiter := NewAdaptiveBurstLimiter(10, 10, 50) // 10 req/s, burst 10->50
 		tenant := "good-tenant"
 
 		// Make 21 good requests to trigger increase (need >=20)
+		// With 10 req/s rate, we have 100ms per token
+		// Sleep 120ms between requests to stay well under rate limit
 		for i := 0; i < 21; i++ {
 			allowed := limiter.Allow(tenant)
 			assert.True(t, allowed, "Request %d should be allowed", i+1)
-			time.Sleep(5 * time.Millisecond) // Stay well under rate limit
+			time.Sleep(120 * time.Millisecond) // Stay well under rate limit
 		}
 
 		// Check burst increased
