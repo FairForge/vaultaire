@@ -14,6 +14,7 @@ require (
 	github.com/golang/snappy v1.0.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/mux v1.8.1
+	github.com/klauspost/compress v1.18.2
 	github.com/lib/pq v1.10.9
 	github.com/microsoftgraph/msgraph-sdk-go v1.86.0
 	github.com/pquerna/otp v1.5.0
