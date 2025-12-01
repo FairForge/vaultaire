@@ -18,6 +18,7 @@ require (
 	github.com/microsoftgraph/msgraph-sdk-go v1.86.0
 	github.com/pquerna/otp v1.5.0
 	github.com/prometheus/client_golang v1.23.0
+	github.com/restic/chunker v0.4.0
 	github.com/stretchr/testify v1.11.1
 	github.com/stripe/stripe-go/v75 v75.11.0
 	github.com/tetratelabs/wazero v1.9.0
