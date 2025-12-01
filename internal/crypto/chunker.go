@@ -355,9 +355,9 @@ func NewChunkerFromConfig(config PipelineConfig) (Chunker, error) {
 
 	switch config.ChunkingAlgo {
 	case ChunkingFastCDC:
-		return NewFastCDCChunker(config.MinChunkSize, config.AvgChunkSize, config.MaxChunkSize)
+		return NewFastCDCChunker(config.ChunkMinSize, config.ChunkAvgSize, config.ChunkMaxSize)
 	case ChunkingFixed:
-		return NewFixedChunker(config.AvgChunkSize)
+		return NewFixedChunker(config.ChunkAvgSize)
 	default:
 		return nil, fmt.Errorf("unsupported chunking algorithm: %s", config.ChunkingAlgo)
 	}
