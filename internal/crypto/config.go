@@ -7,7 +7,7 @@ import (
 	"fmt"
 )
 
-// ChunkingAlgorithm defines the chunking strategy
+// ChunkingAlgorithm represents supported chunking algorithms
 type ChunkingAlgorithm string
 
 const (
@@ -16,118 +16,111 @@ const (
 	ChunkingFastCDC ChunkingAlgorithm = "fastcdc"
 )
 
-// DedupScope defines deduplication boundaries
-type DedupScope string
+// CompressionAlgorithm represents supported compression algorithms
+type CompressionAlgorithm string
 
 const (
-	DedupScopeNone   DedupScope = "none"
-	DedupScopeBucket DedupScope = "bucket"
-	DedupScopeTenant DedupScope = "tenant"
-	DedupScopeGlobal DedupScope = "global"
+	CompressionNone CompressionAlgorithm = "none"
+	CompressionZstd CompressionAlgorithm = "zstd"
+	CompressionLZ4  CompressionAlgorithm = "lz4"  // Future
+	CompressionGzip CompressionAlgorithm = "gzip" // Future (S3 compat)
 )
 
-// CompressionAlgo defines compression algorithms
-type CompressionAlgo string
+// EncryptionAlgorithm represents supported encryption algorithms
+type EncryptionAlgorithm string
 
 const (
-	CompressionNone   CompressionAlgo = "none"
-	CompressionZstd   CompressionAlgo = "zstd"
-	CompressionLZ4    CompressionAlgo = "lz4"
-	CompressionSnappy CompressionAlgo = "snappy"
+	EncryptionNone     EncryptionAlgorithm = "none"
+	EncryptionAESGCM   EncryptionAlgorithm = "aes-256-gcm"
+	EncryptionChaCha   EncryptionAlgorithm = "chacha20-poly1305"
+	EncryptionAESGCMPQ EncryptionAlgorithm = "aes-256-gcm-pq" // Post-quantum hybrid (future)
 )
 
-// EncryptionAlgo defines encryption algorithms
-type EncryptionAlgo string
-
-const (
-	EncryptionNone      EncryptionAlgo = "none"
-	EncryptionAES256GCM EncryptionAlgo = "aes256gcm"
-	EncryptionChaCha20  EncryptionAlgo = "chacha20poly1305"
-)
-
-// EncryptionMode defines how encryption keys are derived
+// EncryptionMode represents the encryption key derivation mode
 type EncryptionMode string
 
 const (
-	EncryptionModeStandard   EncryptionMode = "standard"   // Random key per object
-	EncryptionModeConvergent EncryptionMode = "convergent" // Key derived from content hash
+	EncryptionModeNone       EncryptionMode = "none"
+	EncryptionModeConvergent EncryptionMode = "convergent" // Key derived from content hash (enables dedup)
+	EncryptionModeRandom     EncryptionMode = "random"     // Random key per chunk (no cross-tenant dedup)
 )
 
-// PipelineConfig controls data processing per bucket
+// PipelineConfig defines the processing pipeline for a storage class or bucket
 type PipelineConfig struct {
-	// Chunking configuration
+	// Chunking settings
 	ChunkingEnabled bool              `json:"chunking_enabled"`
-	ChunkingAlgo    ChunkingAlgorithm `json:"chunking_algo"`
-	MinChunkSize    int               `json:"min_chunk_size"` // bytes
-	AvgChunkSize    int               `json:"avg_chunk_size"` // bytes
-	MaxChunkSize    int               `json:"max_chunk_size"` // bytes
+	ChunkingAlgo    ChunkingAlgorithm `json:"chunking_algo,omitempty"`
+	ChunkMinSize    int               `json:"chunk_min_size,omitempty"` // bytes
+	ChunkAvgSize    int               `json:"chunk_avg_size,omitempty"` // bytes
+	ChunkMaxSize    int               `json:"chunk_max_size,omitempty"` // bytes
 
-	// Deduplication configuration
-	DedupEnabled bool       `json:"dedup_enabled"`
-	DedupScope   DedupScope `json:"dedup_scope"`
+	// Deduplication settings
+	DedupEnabled     bool `json:"dedup_enabled"`
+	DedupCrossTenant bool `json:"dedup_cross_tenant"` // Allow cross-tenant dedup (requires convergent encryption)
 
-	// Compression configuration
-	CompressionEnabled bool            `json:"compression_enabled"`
-	CompressionAlgo    CompressionAlgo `json:"compression_algo"`
-	CompressionLevel   int             `json:"compression_level"` // 1-19 for zstd
+	// Compression settings
+	CompressionEnabled bool                 `json:"compression_enabled"`
+	CompressionAlgo    CompressionAlgorithm `json:"compression_algo,omitempty"`
+	CompressionLevel   int                  `json:"compression_level,omitempty"` // Algorithm-specific level
 
-	// Encryption configuration
-	EncryptionEnabled  bool           `json:"encryption_enabled"`
-	EncryptionAlgo     EncryptionAlgo `json:"encryption_algo"`
-	EncryptionMode     EncryptionMode `json:"encryption_mode"`
-	PostQuantumEnabled bool           `json:"post_quantum_enabled"`
+	// Encryption settings
+	EncryptionEnabled bool                `json:"encryption_enabled"`
+	EncryptionAlgo    EncryptionAlgorithm `json:"encryption_algo,omitempty"`
+	EncryptionMode    EncryptionMode      `json:"encryption_mode,omitempty"`
 
-	// Performance options
-	PassthroughMode bool `json:"passthrough_mode"` // Skip ALL processing
+	// Future: Post-quantum readiness flag
+	PostQuantumReady bool `json:"post_quantum_ready,omitempty"`
 }
 
-// Validate checks if the configuration is valid
-func (c *PipelineConfig) Validate() error {
-	if c.PassthroughMode {
-		return nil // No validation needed for passthrough
-	}
-
+// Validate checks if the pipeline config is valid
+func (c PipelineConfig) Validate() error {
+	// Validate chunking
 	if c.ChunkingEnabled {
-		if c.MinChunkSize <= 0 {
-			return fmt.Errorf("min_chunk_size must be positive")
-		}
-		if c.AvgChunkSize < c.MinChunkSize {
-			return fmt.Errorf("avg_chunk_size must be >= min_chunk_size")
-		}
-		if c.MaxChunkSize < c.AvgChunkSize {
-			return fmt.Errorf("max_chunk_size must be >= avg_chunk_size")
-		}
 		if c.ChunkingAlgo == "" || c.ChunkingAlgo == ChunkingNone {
-			return fmt.Errorf("chunking_algo required when chunking is enabled")
+			return fmt.Errorf("chunking enabled but no algorithm specified")
 		}
-	}
-
-	if c.DedupEnabled && !c.ChunkingEnabled {
-		return fmt.Errorf("dedup requires chunking to be enabled")
-	}
-
-	if c.CompressionEnabled {
-		if c.CompressionAlgo == "" || c.CompressionAlgo == CompressionNone {
-			return fmt.Errorf("compression_algo required when compression is enabled")
-		}
-		if c.CompressionAlgo == CompressionZstd {
-			if c.CompressionLevel < 1 || c.CompressionLevel > 19 {
-				return fmt.Errorf("zstd compression_level must be 1-19")
+		if c.ChunkingAlgo == ChunkingFastCDC || c.ChunkingAlgo == ChunkingFixed {
+			if c.ChunkMinSize <= 0 || c.ChunkAvgSize <= 0 || c.ChunkMaxSize <= 0 {
+				return fmt.Errorf("chunk sizes must be positive")
+			}
+			if c.ChunkMinSize > c.ChunkAvgSize || c.ChunkAvgSize > c.ChunkMaxSize {
+				return fmt.Errorf("chunk sizes must be: min <= avg <= max")
 			}
 		}
 	}
 
-	if c.EncryptionEnabled {
-		if c.EncryptionAlgo == "" || c.EncryptionAlgo == EncryptionNone {
-			return fmt.Errorf("encryption_algo required when encryption is enabled")
+	// Validate dedup
+	if c.DedupEnabled && !c.ChunkingEnabled {
+		return fmt.Errorf("deduplication requires chunking to be enabled")
+	}
+
+	// Validate compression
+	if c.CompressionEnabled {
+		if c.CompressionAlgo == "" || c.CompressionAlgo == CompressionNone {
+			return fmt.Errorf("compression enabled but no algorithm specified")
 		}
-		if c.EncryptionMode == "" {
-			return fmt.Errorf("encryption_mode required when encryption is enabled")
+		if c.CompressionAlgo == CompressionZstd {
+			if c.CompressionLevel < 1 || c.CompressionLevel > 19 {
+				return fmt.Errorf("zstd compression level must be 1-19")
+			}
 		}
 	}
 
-	if c.EncryptionMode == EncryptionModeConvergent && !c.ChunkingEnabled {
-		return fmt.Errorf("convergent encryption requires chunking for content-based key derivation")
+	// Validate encryption
+	if c.EncryptionEnabled {
+		if c.EncryptionAlgo == "" || c.EncryptionAlgo == EncryptionNone {
+			return fmt.Errorf("encryption enabled but no algorithm specified")
+		}
+		if c.EncryptionMode == "" || c.EncryptionMode == EncryptionModeNone {
+			return fmt.Errorf("encryption enabled but no mode specified")
+		}
+	}
+
+	// Validate cross-tenant dedup requirements
+	if c.DedupCrossTenant {
+		if !c.EncryptionEnabled || c.EncryptionMode != EncryptionModeConvergent {
+			return fmt.Errorf("cross-tenant dedup requires convergent encryption")
+		}
 	}
 
 	return nil
@@ -135,74 +128,78 @@ func (c *PipelineConfig) Validate() error {
 
 // Preset configurations for common use cases
 
-// ConfigSmartStorage provides balanced processing for general use
+// ConfigPassthrough is a no-op pipeline (data stored as-is)
+var ConfigPassthrough = PipelineConfig{
+	ChunkingEnabled:    false,
+	DedupEnabled:       false,
+	CompressionEnabled: false,
+	EncryptionEnabled:  false,
+}
+
+// ConfigSmartStorage is the default "smart" pipeline for general storage
 var ConfigSmartStorage = PipelineConfig{
 	ChunkingEnabled:    true,
 	ChunkingAlgo:       ChunkingFastCDC,
-	MinChunkSize:       1 * 1024 * 1024,  // 1MB
-	AvgChunkSize:       4 * 1024 * 1024,  // 4MB
-	MaxChunkSize:       16 * 1024 * 1024, // 16MB
+	ChunkMinSize:       1 * 1024 * 1024,  // 1MB
+	ChunkAvgSize:       4 * 1024 * 1024,  // 4MB
+	ChunkMaxSize:       16 * 1024 * 1024, // 16MB
 	DedupEnabled:       true,
-	DedupScope:         DedupScopeTenant,
+	DedupCrossTenant:   true,
 	CompressionEnabled: true,
 	CompressionAlgo:    CompressionZstd,
 	CompressionLevel:   3,
 	EncryptionEnabled:  true,
-	EncryptionAlgo:     EncryptionAES256GCM,
+	EncryptionAlgo:     EncryptionAESGCM,
 	EncryptionMode:     EncryptionModeConvergent,
-	PostQuantumEnabled: false,
 }
 
-// ConfigArchive provides maximum space savings for archival data
+// ConfigArchive is optimized for cold storage (max compression)
 var ConfigArchive = PipelineConfig{
 	ChunkingEnabled:    true,
 	ChunkingAlgo:       ChunkingFastCDC,
-	MinChunkSize:       2 * 1024 * 1024,  // 2MB
-	AvgChunkSize:       8 * 1024 * 1024,  // 8MB
-	MaxChunkSize:       32 * 1024 * 1024, // 32MB
+	ChunkMinSize:       1 * 1024 * 1024,  // 1MB
+	ChunkAvgSize:       8 * 1024 * 1024,  // 8MB (larger for archive)
+	ChunkMaxSize:       32 * 1024 * 1024, // 32MB
 	DedupEnabled:       true,
-	DedupScope:         DedupScopeGlobal, // Cross-tenant dedup OK for cold storage
+	DedupCrossTenant:   true,
 	CompressionEnabled: true,
 	CompressionAlgo:    CompressionZstd,
-	CompressionLevel:   9, // Higher compression
+	CompressionLevel:   9, // Higher compression for archive
 	EncryptionEnabled:  true,
-	EncryptionAlgo:     EncryptionAES256GCM,
+	EncryptionAlgo:     EncryptionAESGCM,
 	EncryptionMode:     EncryptionModeConvergent,
-	PostQuantumEnabled: false,
 }
 
-// ConfigHPC provides maximum throughput for AI/HPC workloads
+// ConfigHPC is optimized for high-performance computing (minimal overhead)
 var ConfigHPC = PipelineConfig{
-	ChunkingEnabled:    false, // No chunking overhead
-	DedupEnabled:       false, // Skip dedup checks
-	CompressionEnabled: false, // Raw speed
-	EncryptionEnabled:  true,  // Still encrypted
-	EncryptionAlgo:     EncryptionAES256GCM,
-	EncryptionMode:     EncryptionModeStandard, // Faster than convergent
-	PostQuantumEnabled: false,
+	ChunkingEnabled:    true,
+	ChunkingAlgo:       ChunkingFixed, // Fixed is faster than CDC
+	ChunkMinSize:       16 * 1024 * 1024,
+	ChunkAvgSize:       16 * 1024 * 1024,
+	ChunkMaxSize:       16 * 1024 * 1024,
+	DedupEnabled:       false, // Skip dedup for speed
+	CompressionEnabled: false, // Skip compression for speed
+	EncryptionEnabled:  true,
+	EncryptionAlgo:     EncryptionChaCha, // Faster on CPUs without AES-NI
+	EncryptionMode:     EncryptionModeRandom,
 }
 
-// ConfigPassthrough skips all processing (for pre-encrypted data)
-var ConfigPassthrough = PipelineConfig{
-	PassthroughMode: true,
-}
-
-// ConfigEnterprise provides post-quantum security for regulated data
+// ConfigEnterprise is for compliance-focused deployments
 var ConfigEnterprise = PipelineConfig{
 	ChunkingEnabled:    true,
 	ChunkingAlgo:       ChunkingFastCDC,
-	MinChunkSize:       1 * 1024 * 1024,
-	AvgChunkSize:       4 * 1024 * 1024,
-	MaxChunkSize:       16 * 1024 * 1024,
+	ChunkMinSize:       1 * 1024 * 1024,
+	ChunkAvgSize:       4 * 1024 * 1024,
+	ChunkMaxSize:       16 * 1024 * 1024,
 	DedupEnabled:       true,
-	DedupScope:         DedupScopeTenant,
+	DedupCrossTenant:   false, // No cross-tenant for compliance
 	CompressionEnabled: true,
 	CompressionAlgo:    CompressionZstd,
 	CompressionLevel:   3,
 	EncryptionEnabled:  true,
-	EncryptionAlgo:     EncryptionAES256GCM,
-	EncryptionMode:     EncryptionModeConvergent,
-	PostQuantumEnabled: true, // ML-KEM hybrid
+	EncryptionAlgo:     EncryptionAESGCM,
+	EncryptionMode:     EncryptionModeRandom, // Unique keys per tenant
+	PostQuantumReady:   true,                 // Flag for future PQ migration
 }
 
 // GetPreset returns a preset configuration by name
@@ -216,8 +213,12 @@ func GetPreset(name string) (PipelineConfig, error) {
 		return ConfigHPC, nil
 	case "passthrough", "none":
 		return ConfigPassthrough, nil
-	case "enterprise", "compliance", "pq":
+	case "enterprise", "compliance":
 		return ConfigEnterprise, nil
+	case "pq":
+		config := ConfigEnterprise
+		config.PostQuantumReady = true
+		return config, nil
 	default:
 		return PipelineConfig{}, fmt.Errorf("unknown preset: %s", name)
 	}
