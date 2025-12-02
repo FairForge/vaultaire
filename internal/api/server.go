@@ -34,10 +34,11 @@ type Server struct {
 	auth         *auth.AuthService
 	auditLogger  *auth.AuditLogger
 
-	requestCount int64
-	testMode     bool
-	errorCount   int64
-	startTime    time.Time
+	requestCount  int64
+	testMode      bool
+	errorCount    int64
+	healthChecker *BackendHealthChecker
+	startTime     time.Time
 }
 
 type QuotaManager interface {
@@ -63,6 +64,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		events:       make(chan Event, 1000),
 		startTime:    time.Now(),
 	}
+	s.healthChecker = NewBackendHealthChecker()
 
 	// Initialize auth service and audit logger
 	s.auth = auth.NewAuthService(nil)
@@ -90,9 +92,11 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 }
 
 func (s *Server) setupRoutes() {
-	// Public health endpoints (no auth needed)
-	s.router.Get("/health", s.handleHealth)
-	s.router.Get("/ready", s.handleReady)
+	s.router.Get("/health", s.handleHealthEnhanced)
+	s.router.Get("/health/live", s.handleLiveness)
+	s.router.Get("/health/ready", s.handleReadiness)
+	s.router.Get("/health/backends", s.handleBackendsHealth)
+	s.router.Get("/ready", s.handleReadiness) // Keep old endpoint for compatibility
 	s.router.Get("/metrics", s.handleMetrics)
 	s.router.Get("/version", s.handleVersion)
 
@@ -382,27 +386,6 @@ func (s *Server) WrapWithRBACPermission(permission string, handler http.HandlerF
 	}
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	health := map[string]interface{}{
-		"status":  "healthy",
-		"version": "0.1.0",
-		"uptime":  time.Since(s.startTime).Seconds(),
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(health)
-}
-
-func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
-	ready := map[string]interface{}{
-		"ready":     true,
-		"memory_mb": getMemoryUsageMB(),
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(ready)
-}
-
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	metrics := fmt.Sprintf("vaultaire_requests_total %d\nvaultaire_errors_total %d\n",
 		atomic.LoadInt64(&s.requestCount),
@@ -446,12 +429,6 @@ func (s *Server) Start() error {
 
 func (s *Server) Shutdown(ctx context.Context) error {
 	return s.httpServer.Shutdown(ctx)
-}
-
-func getMemoryUsageMB() uint64 {
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	return m.Alloc / 1024 / 1024
 }
 
 func (s *Server) GetRouter() chi.Router {

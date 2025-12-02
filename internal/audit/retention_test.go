@@ -50,11 +50,13 @@ func TestRetentionPolicies(t *testing.T) {
 
 	t.Run("cleanup old logs", func(t *testing.T) {
 		userID := uuid.New()
+		tenantOld := "tenant-old-" + uuid.New().String()[:8]
+		tenantRecent := "tenant-recent-" + uuid.New().String()[:8]
 
 		// Insert old event (35 days ago)
 		oldEvent := &AuditEvent{
 			UserID:    userID,
-			TenantID:  "tenant-old",
+			TenantID:  tenantOld,
 			EventType: EventTypeFileUpload,
 			Action:    "PUT",
 			Resource:  "/old-file.txt",
@@ -67,7 +69,7 @@ func TestRetentionPolicies(t *testing.T) {
 		// Insert recent event (5 days ago)
 		recentEvent := &AuditEvent{
 			UserID:    userID,
-			TenantID:  "tenant-recent",
+			TenantID:  tenantRecent,
 			EventType: EventTypeFileUpload,
 			Action:    "PUT",
 			Resource:  "/recent-file.txt",
@@ -84,7 +86,7 @@ func TestRetentionPolicies(t *testing.T) {
 
 		// Verify old event is gone
 		query := &AuditQuery{
-			TenantID: strPtr("tenant-old"),
+			TenantID: strPtr(tenantOld),
 			Limit:    10,
 		}
 		logs, err := auditor.Query(ctx, query)
@@ -93,7 +95,7 @@ func TestRetentionPolicies(t *testing.T) {
 
 		// Verify recent event still exists
 		query = &AuditQuery{
-			TenantID: strPtr("tenant-recent"),
+			TenantID: strPtr(tenantRecent),
 			Limit:    10,
 		}
 		logs, err = auditor.Query(ctx, query)
@@ -103,11 +105,12 @@ func TestRetentionPolicies(t *testing.T) {
 
 	t.Run("cleanup by event type", func(t *testing.T) {
 		userID := uuid.New()
+		tenantID := "tenant-security-" + uuid.New().String()[:8]
 
 		// Insert old security event (100 days ago)
 		securityEvent := &AuditEvent{
 			UserID:    userID,
-			TenantID:  "tenant-security",
+			TenantID:  tenantID,
 			EventType: EventTypeSecurityAlert,
 			Action:    "alert",
 			Resource:  "/security",
@@ -125,7 +128,7 @@ func TestRetentionPolicies(t *testing.T) {
 
 		// Verify security event is gone
 		query := &AuditQuery{
-			TenantID: strPtr("tenant-security"),
+			TenantID: strPtr(tenantID),
 			Limit:    10,
 		}
 		logs, err := auditor.Query(ctx, query)
@@ -135,6 +138,7 @@ func TestRetentionPolicies(t *testing.T) {
 
 	t.Run("apply retention policies", func(t *testing.T) {
 		userID := uuid.New()
+		tenantID := "tenant-policy-test-" + uuid.New().String()[:8]
 
 		// Insert various old events
 		events := []struct {
@@ -153,7 +157,7 @@ func TestRetentionPolicies(t *testing.T) {
 		for _, e := range events {
 			event := &AuditEvent{
 				UserID:    userID,
-				TenantID:  "tenant-policy-test",
+				TenantID:  tenantID,
 				EventType: e.eventType,
 				Action:    "test",
 				Resource:  e.resource,
@@ -173,7 +177,7 @@ func TestRetentionPolicies(t *testing.T) {
 
 		// Query remaining logs
 		query := &AuditQuery{
-			TenantID: strPtr("tenant-policy-test"),
+			TenantID: strPtr(tenantID),
 			Limit:    100,
 		}
 		logs, err := auditor.Query(ctx, query)
@@ -194,11 +198,12 @@ func TestRetentionPolicies(t *testing.T) {
 
 	t.Run("cleanup by severity", func(t *testing.T) {
 		userID := uuid.New()
+		tenantID := "tenant-critical-" + uuid.New().String()[:8]
 
 		// Insert old critical event (100 days ago)
 		criticalEvent := &AuditEvent{
 			UserID:    userID,
-			TenantID:  "tenant-critical",
+			TenantID:  tenantID,
 			EventType: EventTypeFileUpload,
 			Action:    "PUT",
 			Resource:  "/critical-file.txt",
