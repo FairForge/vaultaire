@@ -64,6 +64,7 @@ const (
 	EventBackendDegraded
 	EventBackendFailed
 	EventBackendRecovered
+	EventBackendRecovering // New: emitted when entering recovery state
 	EventFailoverStarted
 	EventFailoverCompleted
 	EventCircuitOpened
@@ -193,7 +194,15 @@ func (o *HAOrchestrator) ReportHealthCheck(id string, healthy bool, latency time
 
 		switch status.State {
 		case StateFailed, StateDegraded:
+			// Transition to recovering
 			status.State = StateRecovering
+			o.emitEvent(HAEvent{
+				Type:      EventBackendRecovering,
+				Backend:   id,
+				Timestamp: time.Now(),
+				Message:   "Backend entering recovery",
+			})
+			// Check if immediately recovered
 			if status.ConsecutiveOK >= status.Config.RecoveryThreshold {
 				status.State = StateHealthy
 				status.CircuitOpen = false

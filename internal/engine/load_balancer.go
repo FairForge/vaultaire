@@ -134,3 +134,53 @@ func (lb *LoadBalancer) GetActiveConnections(backend string) int {
 	}
 	return 0
 }
+
+// SetWeight updates the weight for a backend
+func (lb *LoadBalancer) SetWeight(id string, weight float64) {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+
+	for i := range lb.backends {
+		if lb.backends[i].ID == id {
+			lb.backends[i].Weight = weight
+			return
+		}
+	}
+}
+
+// GetBackends returns a copy of all backends
+func (lb *LoadBalancer) GetBackends() []BackendWeight {
+	lb.mu.RLock()
+	defer lb.mu.RUnlock()
+
+	result := make([]BackendWeight, len(lb.backends))
+	copy(result, lb.backends)
+	return result
+}
+
+// RemoveBackend removes a backend from the load balancer
+func (lb *LoadBalancer) RemoveBackend(id string) {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+
+	for i := range lb.backends {
+		if lb.backends[i].ID == id {
+			lb.backends = append(lb.backends[:i], lb.backends[i+1:]...)
+			delete(lb.connections, id)
+			return
+		}
+	}
+}
+
+// GetWeight returns the current weight for a backend
+func (lb *LoadBalancer) GetWeight(id string) float64 {
+	lb.mu.RLock()
+	defer lb.mu.RUnlock()
+
+	for _, b := range lb.backends {
+		if b.ID == id {
+			return b.Weight
+		}
+	}
+	return 0
+}
