@@ -1,5 +1,3 @@
-// internal/ha/orchestrator.go
-// Step 362: Automatic Failover Orchestrator
 package ha
 
 import (
