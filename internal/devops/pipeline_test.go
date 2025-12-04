@@ -3,6 +3,7 @@ package devops
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -149,9 +150,9 @@ func TestPipelineRun_Jobs(t *testing.T) {
 func TestPipelineRun_ParallelJobs(t *testing.T) {
 	engine := NewPipelineEngine(nil)
 
-	executed := make(map[string]bool)
+	var executed sync.Map
 	engine.RegisterExecutor("track", func(ctx context.Context, job *Job) error {
-		executed[job.Name()] = true
+		executed.Store(job.Name(), true)
 		time.Sleep(10 * time.Millisecond)
 		return nil
 	})
@@ -177,9 +178,12 @@ func TestPipelineRun_ParallelJobs(t *testing.T) {
 		run, _ := pipeline.Run(ctx, &RunOptions{})
 		_ = run.Wait(ctx)
 
-		assert.True(t, executed["job-1"])
-		assert.True(t, executed["job-2"])
-		assert.True(t, executed["job-3"])
+		_, ok := executed.Load("job-1")
+		assert.True(t, ok)
+		_, ok = executed.Load("job-2")
+		assert.True(t, ok)
+		_, ok = executed.Load("job-3")
+		assert.True(t, ok)
 	})
 }
 
