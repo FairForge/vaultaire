@@ -34,7 +34,7 @@ jobs:
           go test -v -race -coverprofile=coverage.out ./...
           go tool cover -html=coverage.out -o coverage.html
       - name: Upload coverage
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v5
         with:
           name: coverage-${{ matrix.os }}-${{ matrix.go }}
           path: coverage.html
@@ -49,7 +49,7 @@ jobs:
       - name: Run benchmarks
         run: go test -bench=. -benchmem ./internal/drivers | tee bench.txt
       - name: Upload benchmark results
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v5
         with:
           name: benchmark-results
           path: bench.txt
