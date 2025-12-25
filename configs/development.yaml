@@ -1,0 +1,38 @@
+# Vaultaire Development Configuration
+# Environment: development
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  metrics_port: 9090
+
+database:
+  host: "localhost"
+  port: 5432
+  name: "vaultaire_dev"
+  ssl_mode: "disable"
+  max_open_conns: 10
+
+redis:
+  host: "localhost"
+  port: 6379
+
+storage:
+  primary_backend: "local"
+
+security:
+  tls:
+    enabled: false
+  cors:
+    allowed_origins:
+      - "*"
+
+rate_limiting:
+  enabled: false
+
+logging:
+  level: "debug"
+  format: "text"
+
+tracing:
+  enabled: false
