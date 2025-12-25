@@ -1,0 +1,43 @@
+# Vaultaire Staging Configuration
+# Environment: staging
+# Domain: staging.stored.ge
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  metrics_port: 9090
+
+database:
+  host: "${DB_HOST}"
+  port: 5432
+  name: "vaultaire_staging"
+  ssl_mode: "require"
+  max_open_conns: 25
+
+redis:
+  host: "${REDIS_HOST}"
+  port: 6379
+
+storage:
+  primary_backend: "quotaless"
+
+security:
+  tls:
+    enabled: true
+  cors:
+    allowed_origins:
+      - "https://staging.stored.ge"
+      - "http://localhost:3000"
+
+rate_limiting:
+  enabled: true
+  requests_per_second: 100
+  burst: 200
+
+logging:
+  level: "info"
+  format: "json"
+
+tracing:
+  enabled: true
+  sample_rate: 1.0
