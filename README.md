@@ -71,7 +71,7 @@ Supported Backends
 ✅ MinIO
 🔄 Hetzner Storage Box (coming soon)
 🔄 Google Cloud Storage (coming soon)
-🔄 Bring your own storage server 
+🔄 Bring your own storage server
 
 Documentation
 
