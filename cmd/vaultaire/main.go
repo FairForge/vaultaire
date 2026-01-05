@@ -190,10 +190,36 @@ func main() {
 		}
 	}
 
-	// 4. Set primary backend
+	// 4. Add Quotaless if credentials available
+	if accessKey := os.Getenv("QUOTALESS_ACCESS_KEY"); accessKey != "" {
+		secretKey := os.Getenv("QUOTALESS_SECRET_KEY")
+		endpoint := os.Getenv("QUOTALESS_ENDPOINT")
+		if endpoint == "" {
+			endpoint = "https://us.quotaless.cloud:8000"
+		}
+
+		quotalessDriver, err := drivers.NewQuotalessDriver(accessKey, secretKey, endpoint, logger)
+		if err != nil {
+			logger.Warn("failed to create Quotaless driver", zap.Error(err))
+		} else {
+			eng.AddDriver("quotaless", quotalessDriver)
+			logger.Info("quotaless driver added", zap.String("endpoint", endpoint))
+		}
+	}
+
+	// 5. Set primary backend (auto-detect best available)
 	storageMode := os.Getenv("STORAGE_MODE")
 	if storageMode == "" {
-		storageMode = "local"
+		// Auto-detect: prefer Quotaless > Lyve > S3 > local
+		if os.Getenv("QUOTALESS_ACCESS_KEY") != "" {
+			storageMode = "quotaless"
+		} else if os.Getenv("LYVE_ACCESS_KEY") != "" {
+			storageMode = "lyve"
+		} else if os.Getenv("S3_ACCESS_KEY") != "" {
+			storageMode = "s3"
+		} else {
+			storageMode = "local"
+		}
 	}
 	eng.SetPrimary(storageMode)
 	logger.Info("primary backend set", zap.String("mode", storageMode))
@@ -225,9 +251,9 @@ func main() {
 
 	// Start server
 	fmt.Printf("\n")
-	fmt.Printf("╔═════════════════════════════════════╗\n")
+	fmt.Printf("╔══════════════════════════════════════╗\n")
 	fmt.Printf("║       Vaultaire Server Started       ║\n")
-	fmt.Printf("╠═════════════════════════════════════╣\n")
+	fmt.Printf("╠══════════════════════════════════════╣\n")
 	fmt.Printf("║  S3 API: http://localhost:%-10d ║\n", port)
 	fmt.Printf("║  Storage: %-26s ║\n", storageMode)
 	if db != nil {
@@ -235,7 +261,7 @@ func main() {
 	} else {
 		fmt.Printf("║  Intelligence: DISABLED (no DB)      ║\n")
 	}
-	fmt.Printf("╚═════════════════════════════════════╝\n")
+	fmt.Printf("╚══════════════════════════════════════╝\n")
 	fmt.Printf("\n")
 
 	if err := server.Start(); err != nil {
