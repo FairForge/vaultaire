@@ -1,0 +1,85 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Build
+        run: GOOS=linux GOARCH=amd64 go build -o vaultaire-linux ./cmd/vaultaire
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vaultaire-linux
+          path: vaultaire-linux
+
+  deploy-dev:
+    needs: build
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: vaultaire-linux
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H ${{ secrets.DEV_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to Dev
+        run: |
+          scp vaultaire-linux ${{ secrets.SSH_USER_DEV }}@${{ secrets.DEV_HOST }}:/tmp/
+          ssh ${{ secrets.SSH_USER_DEV }}@${{ secrets.DEV_HOST }} << 'EOF'
+            sudo /bin/systemctl stop vaultaire
+            sudo /bin/mv /tmp/vaultaire-linux /opt/vaultaire/bin/vaultaire
+            sudo /bin/chmod +x /opt/vaultaire/bin/vaultaire
+            sudo /bin/systemctl start vaultaire
+            sleep 3
+            curl -s http://localhost:8000/health || echo "Health check pending"
+          EOF
+
+  deploy-prod:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: vaultaire-linux
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H ${{ secrets.PROD_NYC_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to Production (NYC)
+        run: |
+          scp vaultaire-linux ${{ secrets.SSH_USER_PROD }}@${{ secrets.PROD_NYC_HOST }}:/tmp/
+          ssh ${{ secrets.SSH_USER_PROD }}@${{ secrets.PROD_NYC_HOST }} << 'EOF'
+            sudo /bin/systemctl stop vaultaire
+            sudo /bin/mv /tmp/vaultaire-linux /opt/vaultaire/bin/vaultaire
+            sudo /bin/chmod +x /opt/vaultaire/bin/vaultaire
+            sudo /bin/systemctl start vaultaire
+            sleep 3
+            curl -s http://localhost:8000/health || echo "Health check pending"
+          EOF
