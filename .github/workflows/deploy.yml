@@ -41,13 +41,14 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
-      - name: Add known hosts
-        run: ssh-keyscan -H ${{ secrets.DEV_HOST }} >> ~/.ssh/known_hosts
-
       - name: Deploy to Dev
+        env:
+          HOST: ${{ secrets.DEV_HOST }}
+          USER: ${{ secrets.SSH_USER_DEV }}
         run: |
-          scp vaultaire-linux ${{ secrets.SSH_USER_DEV }}@${{ secrets.DEV_HOST }}:/tmp/
-          ssh ${{ secrets.SSH_USER_DEV }}@${{ secrets.DEV_HOST }} 'sudo /bin/systemctl stop vaultaire || true && sudo /bin/mv /tmp/vaultaire-linux /opt/vaultaire/bin/vaultaire && sudo /bin/chmod +x /opt/vaultaire/bin/vaultaire && sudo /bin/systemctl start vaultaire && sleep 3 && curl -s http://localhost:8000/health || echo "Health check pending"'
+          ssh-keyscan -t ed25519 "$HOST" >> ~/.ssh/known_hosts
+          scp vaultaire-linux "${USER}@${HOST}:/tmp/"
+          ssh "${USER}@${HOST}" 'sudo /bin/systemctl stop vaultaire || true && sudo /bin/mv /tmp/vaultaire-linux /opt/vaultaire/bin/vaultaire && sudo /bin/chmod +x /opt/vaultaire/bin/vaultaire && sudo /bin/systemctl start vaultaire && sleep 3 && curl -s http://localhost:8000/health || echo "Health check pending"'
 
   deploy-prod:
     needs: build
@@ -64,10 +65,11 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
-      - name: Add known hosts
-        run: ssh-keyscan -H ${{ secrets.PROD_NYC_HOST }} >> ~/.ssh/known_hosts
-
       - name: Deploy to Production (NYC)
+        env:
+          HOST: ${{ secrets.PROD_NYC_HOST }}
+          USER: ${{ secrets.SSH_USER_PROD }}
         run: |
-          scp vaultaire-linux ${{ secrets.SSH_USER_PROD }}@${{ secrets.PROD_NYC_HOST }}:/tmp/
-          ssh ${{ secrets.SSH_USER_PROD }}@${{ secrets.PROD_NYC_HOST }} 'sudo /bin/systemctl stop vaultaire && sudo /bin/mv /tmp/vaultaire-linux /opt/vaultaire/bin/vaultaire && sudo /bin/chmod +x /opt/vaultaire/bin/vaultaire && sudo /bin/systemctl start vaultaire && sleep 3 && curl -s http://localhost:8000/health || echo "Health check pending"'
+          ssh-keyscan -t ed25519 "$HOST" >> ~/.ssh/known_hosts
+          scp vaultaire-linux "${USER}@${HOST}:/tmp/"
+          ssh "${USER}@${HOST}" 'sudo /bin/systemctl stop vaultaire && sudo /bin/mv /tmp/vaultaire-linux /opt/vaultaire/bin/vaultaire && sudo /bin/chmod +x /opt/vaultaire/bin/vaultaire && sudo /bin/systemctl start vaultaire && sleep 3 && curl -s http://localhost:8000/health || echo "Health check pending"'
