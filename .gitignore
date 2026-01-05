@@ -1,104 +1,98 @@
-# Binaries for programs and plugins
+# ===================
+# Build Artifacts
+# ===================
+bin/
+dist/
+vaultaire
+vaultaire-linux
+vaultaire-darwin
+vaultaire-windows.exe
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
-
-# Test binary, built with go test -c
 *.test
+main
 
-# Output of the go coverage tool
+# ===================
+# Environment & Secrets
+# ===================
+.env
+.env.*
+*.env
+.env.production
+.private/
+configs/*.env
+
+# ===================
+# Test & Coverage
+# ===================
 *.out
+coverage.*
+coverage.out
 
-# Go workspace file
-go.work
+# ===================
+# Test Files
+# ===================
+*.bin
+*.log
+test-*.bin
+test*.txt
+test*.bin
+downloaded*.bin
+downloaded.txt
+huge*.bin
+large*.bin
+medium*.bin
+small*.bin
 
-# Dependency directories
-vendor/
+# ===================
+# Logs & Debug
+# ===================
+*.log
+debug.log
+optimized.log
+original.log
 
-# Build directories
-bin/
-dist/
-
-# IDE specific files
+# ===================
+# IDE & Editor
+# ===================
 .idea/
 .vscode/
 *.swp
 *.swo
 *~
 
-# OS specific files
+# ===================
+# OS Files
+# ===================
 .DS_Store
 Thumbs.db
-docs/BUSINESS.md
 
-# Archives
+# ===================
+# Go Workspace
+# ===================
+go.work
+vendor/
+
+# ===================
+# Project Specific
+# ===================
+# Archived docs
 docs/archive/
+docs/BUSINESS.md
 test/archive/
 
-# Build artifacts
-bin/
-vaultaire
-*.test
-coverage.*
-
-# OS files
-.DS_Store
-.env
-main
-*.test
-bin/
-
-# Binaries
-bin/
-*.test
-main
-vaultaire
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-.env
-.env.production
-.private/
-
-# Large test files
-test-*.bin
+# K6 test results
 tests/k6/*.json
 tests/k6/results/
-debug.log
-*.bin
-*.log
-downloaded.txt
-test.txt
-small-test.bin
 
-# Test files
-*.bin
-*.test
-test*.txt
-test*.bin
-downloaded-*.bin
-huge*.bin
-large*.bin
-medium*.bin
-small*.bin
-
-# Logs and debug files
-*.log
-coverage.out
-debug.log
-optimized.log
-original.log
-
-# Cache and temp
+# Benchmark cache
 cache_benchmark_results.txt
 compress.txt
 
-# Permafrost benchmarks (internal only)
+# Permafrost internal tools
 cmd/permafrost-benchmark/
 cmd/permafrost-parallel/
 permafrost-benchmark
