@@ -12,7 +12,7 @@ import (
 
 func TestAPIKeyGeneration(t *testing.T) {
 	// Create auth service
-	auth := NewAuthService(nil)
+	auth := NewAuthService(nil, nil)
 	ctx := context.Background()
 
 	// Create user first - CreateUser returns (user, error)
@@ -114,7 +114,7 @@ func TestAPIKeyGeneration(t *testing.T) {
 }
 
 func TestCheckRotationNeeded(t *testing.T) {
-	auth := NewAuthService(nil)
+	auth := NewAuthService(nil, nil)
 
 	t.Run("checks age-based rotation", func(t *testing.T) {
 		key := &APIKey{
