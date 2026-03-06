@@ -316,7 +316,7 @@ func NewAuthHandler(db *sql.DB, logger *zap.Logger) *AuthHandler {
 	return &AuthHandler{
 		db:          db,
 		logger:      logger,
-		authService: NewAuthService(nil),
+		authService: NewAuthService(nil, nil),
 	}
 }
 
