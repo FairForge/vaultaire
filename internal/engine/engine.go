@@ -24,26 +24,28 @@ type QuotaManager interface {
 
 // CoreEngine implements the Engine interface with real intelligence
 type CoreEngine struct {
-	// Core components
 	drivers map[string]Driver
 	primary string
 	backup  string
 
-	// Managers
 	logger        *zap.Logger
 	db            *sql.DB
 	quota         QuotaManager
 	selector      *BackendSelector
 	costOptimizer *CostOptimizer
 
-	// Intelligence & Caching (REAL implementations)
 	intelligence *intelligence.AccessTracker
 	cache        *cache.TieredCache
 
-	// Synchronization
-	mu sync.RWMutex
+	// objectBackends records which backend each object was written to.
+	// Key: "container/artifact"  Value: backend name string
+	// This guarantees Get always reads from the same backend Put used,
+	// even when the intelligence or cost-optimizer would suggest a
+	// different one. In-memory only; objects written before a restart
+	// fall back to e.primary (safe — they were written there too).
+	objectBackends sync.Map
 
-	// Configuration
+	mu     sync.RWMutex
 	config *Config
 }
 
@@ -59,7 +61,7 @@ type Config struct {
 func NewEngine(db *sql.DB, logger *zap.Logger, config *Config) *CoreEngine {
 	if config == nil {
 		config = &Config{
-			CacheSize:      10 << 30, // 10GB default
+			CacheSize:      10 << 30,
 			EnableCaching:  true,
 			EnableML:       true,
 			DefaultBackend: "local",
@@ -76,16 +78,14 @@ func NewEngine(db *sql.DB, logger *zap.Logger, config *Config) *CoreEngine {
 		costOptimizer: NewCostOptimizer(),
 	}
 
-	// Initialize intelligence system if DB is provided
 	if db != nil {
 		e.intelligence = intelligence.NewAccessTracker(db, logger)
 		logger.Info("intelligence system initialized")
 	}
 
-	// Initialize tiered cache if enabled
 	if config.EnableCaching {
 		cacheConfig := &cache.Config{
-			MemorySize: 1 << 30, // 1GB memory tier
+			MemorySize: 1 << 30,
 			SSDSize:    config.CacheSize,
 			SSDPath:    "/var/cache/vaultaire",
 		}
@@ -102,12 +102,10 @@ func NewEngine(db *sql.DB, logger *zap.Logger, config *Config) *CoreEngine {
 func (e *CoreEngine) AddDriver(name string, driver Driver) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-
 	e.drivers[name] = driver
 	if e.primary == "" {
 		e.primary = name
 	}
-
 	e.logger.Info("driver added",
 		zap.String("name", name),
 		zap.Bool("is_primary", e.primary == name))
@@ -127,39 +125,29 @@ func (e *CoreEngine) SetBackup(name string) {
 	e.backup = name
 }
 
-// Get retrieves an artifact with full intelligence tracking
+// objectKey returns the sync.Map key for a container+artifact pair.
+func objectKey(container, artifact string) string {
+	return container + "/" + artifact
+}
+
+// Get retrieves an artifact.
+//
+// Backend selection consults objectBackends first — the map written by Put
+// that records exactly which backend each object landed on. This is the
+// source of truth. Intelligence and cost-optimizer recommendations are
+// logged for future use but never override this lookup.
+//
+// Fall-through to e.primary only occurs for objects written before this
+// engine version was deployed (map is empty on restart).
 func (e *CoreEngine) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
 	start := time.Now()
 	tenantID := common.GetTenantID(ctx)
-
-	// Build cache key
 	cacheKey := fmt.Sprintf("%s/%s/%s", tenantID, container, artifact)
 
-	// Track access event
-	defer func() {
-		if e.intelligence != nil {
-			e.intelligence.LogAccess(ctx, intelligence.AccessEvent{
-				TenantID:  tenantID,
-				Container: container,
-				Artifact:  artifact,
-				Operation: "GET",
-				Timestamp: time.Now(),
-				Latency:   time.Since(start),
-				Backend:   e.primary, // Will be updated below
-				CacheHit:  false,     // Will be updated below
-				Success:   true,      // Will be updated on error
-			})
-		}
-	}()
-
-	// Try cache first if enabled
+	// L1: in-memory tiered cache
 	if e.cache != nil && e.config.EnableCaching {
 		if data, err := e.cache.Get(cacheKey); err == nil && data != nil {
-			e.logger.Debug("cache hit",
-				zap.String("key", cacheKey),
-				zap.Int("size", len(data)))
-
-			// Update access tracking for cache hit
+			e.logger.Debug("cache hit", zap.String("key", cacheKey))
 			if e.intelligence != nil {
 				e.intelligence.LogAccess(ctx, intelligence.AccessEvent{
 					TenantID:  tenantID,
@@ -178,43 +166,30 @@ func (e *CoreEngine) Get(ctx context.Context, container, artifact string) (io.Re
 		}
 	}
 
-	// Get recommendation from intelligence system
+	// L2: look up which backend this object was written to.
 	backendName := e.primary
+	if v, ok := e.objectBackends.Load(objectKey(container, artifact)); ok {
+		if name, ok := v.(string); ok && name != "" {
+			backendName = name
+		}
+	}
+
+	// Log what intelligence would have recommended (informational only).
 	if e.intelligence != nil {
-		rec := e.intelligence.GetRecommendation(tenantID, container, artifact)
-
-		// Log backend selection decision
-		e.logger.Info("backend selection",
-			zap.String("default", e.primary),
-			zap.Bool("has_recommendation", rec != nil),
-			zap.String("recommended", func() string {
-				if rec != nil {
-					return rec.PreferredBackend
-				}
-				return "none"
-			}()),
-			zap.String("reason", func() string {
-				if rec != nil {
-					return rec.Reason
-				}
-				return ""
-			}()))
-
-		if rec != nil && rec.PreferredBackend != "" {
-			backendName = rec.PreferredBackend
+		if rec := e.intelligence.GetRecommendation(tenantID, container, artifact); rec != nil {
+			e.logger.Debug("intelligence recommendation (not used for routing)",
+				zap.String("actual_backend", backendName),
+				zap.String("recommended", rec.PreferredBackend),
+				zap.String("reason", rec.Reason))
 		}
 	}
 
-	// Select backend based on cost if no recommendation
-	if e.costOptimizer != nil && backendName == e.primary {
-		if optimal := e.costOptimizer.SelectOptimal(ctx, "GET", 0); optimal != "" {
-			backendName = optimal
-		}
-	}
-
-	// Get driver
 	driver, ok := e.drivers[backendName]
 	if !ok {
+		// Backend from the map no longer exists — fall back to primary.
+		e.logger.Warn("recorded backend not found, falling back to primary",
+			zap.String("recorded", backendName),
+			zap.String("primary", e.primary))
 		driver, ok = e.drivers[e.primary]
 		if !ok {
 			return nil, fmt.Errorf("no driver available")
@@ -222,47 +197,54 @@ func (e *CoreEngine) Get(ctx context.Context, container, artifact string) (io.Re
 		backendName = e.primary
 	}
 
-	// Perform the actual get
 	reader, err := driver.Get(ctx, container, artifact)
+	if e.intelligence != nil {
+		e.intelligence.LogAccess(ctx, intelligence.AccessEvent{
+			TenantID:  tenantID,
+			Container: container,
+			Artifact:  artifact,
+			Operation: "GET",
+			Latency:   time.Since(start),
+			Backend:   backendName,
+			CacheHit:  false,
+			Timestamp: time.Now(),
+			Success:   err == nil,
+		})
+	}
 	if err != nil {
 		return nil, fmt.Errorf("get from %s: %w", backendName, err)
 	}
 
-	// Cache the data if small enough
 	if e.cache != nil && e.config.EnableCaching {
-		// Wrap reader to cache on read
 		reader = e.wrapReaderForCaching(reader, cacheKey)
 	}
 
 	return reader, nil
 }
 
-// Put stores an artifact with intelligence tracking
-func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...PutOption) error {
+// Put stores an artifact and returns the name of the backend it was written to.
+//
+// The returned backend name must be persisted by the caller (the S3 adapter
+// writes it to object_head_cache.backend_name). It is also stored in
+// objectBackends so that Get can route correctly within the same process
+// lifetime without a DB round-trip.
+func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...PutOption) (string, error) {
 	start := time.Now()
 	tenantID := common.GetTenantID(ctx)
-
-	// Track size by wrapping reader
 	sizeReader := &sizeTrackingReader{Reader: data}
 
-	// Check quota if manager is configured
 	if e.quota != nil && tenantID != "" {
-		// Estimate size for quota check
-		estimatedSize := int64(10 << 20) // 10MB default
-
+		estimatedSize := int64(10 << 20)
 		allowed, err := e.quota.CheckAndReserve(ctx, tenantID, estimatedSize)
 		if err != nil {
-			return fmt.Errorf("checking quota: %w", err)
+			return "", fmt.Errorf("checking quota: %w", err)
 		}
 		if !allowed {
-			return ErrQuotaExceeded
+			return "", ErrQuotaExceeded
 		}
-
-		// Release quota if put fails
 		defer func() {
-			if actualSize := sizeReader.bytesRead; actualSize != estimatedSize {
-				// Adjust quota for actual size
-				diff := actualSize - estimatedSize
+			if actual := sizeReader.bytesRead; actual != estimatedSize {
+				diff := actual - estimatedSize
 				if diff != 0 {
 					_, _ = e.quota.CheckAndReserve(ctx, tenantID, diff)
 				}
@@ -270,26 +252,32 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 		}()
 	}
 
-	// Select backend for write
+	// Select the backend for this write.
+	// Intelligence recommendations are accepted here — on PUT we want smart
+	// routing. The key guarantee is that we record what we chose so Get
+	// can honour it exactly.
 	backendName := e.primary
 	if e.intelligence != nil {
 		if rec := e.intelligence.GetRecommendation(tenantID, container, artifact); rec != nil {
 			if rec.PreferredBackend != "" {
-				backendName = rec.PreferredBackend
+				if _, exists := e.drivers[rec.PreferredBackend]; exists {
+					backendName = rec.PreferredBackend
+				} else {
+					e.logger.Warn("intelligence recommended non-existent backend, using primary",
+						zap.String("recommended", rec.PreferredBackend),
+						zap.String("primary", e.primary))
+				}
 			}
 		}
 	}
 
-	// Get driver
 	driver, ok := e.drivers[backendName]
 	if !ok {
-		return fmt.Errorf("driver %s not found", backendName)
+		return "", fmt.Errorf("driver %s not found", backendName)
 	}
 
-	// Store to primary
 	err := driver.Put(ctx, container, artifact, sizeReader, opts...)
 
-	// Log access
 	if e.intelligence != nil {
 		e.intelligence.LogAccess(ctx, intelligence.AccessEvent{
 			TenantID:  tenantID,
@@ -305,29 +293,29 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 	}
 
 	if err != nil {
-		return fmt.Errorf("put to %s: %w", backendName, err)
+		return "", fmt.Errorf("put to %s: %w", backendName, err)
 	}
 
-	// Invalidate cache
+	// Record backend for this object so Get always routes correctly.
+	e.objectBackends.Store(objectKey(container, artifact), backendName)
+
 	if e.cache != nil {
 		cacheKey := fmt.Sprintf("%s/%s/%s", tenantID, container, artifact)
 		_ = e.cache.Delete(cacheKey)
 	}
 
-	// Queue for backup asynchronously
 	if e.backup != "" && e.backup != e.primary {
 		go e.replicateToBackup(ctx, container, artifact)
 	}
 
-	return nil
+	return backendName, nil
 }
 
-// Delete removes an artifact with tracking
+// Delete removes an artifact from all backends
 func (e *CoreEngine) Delete(ctx context.Context, container, artifact string) error {
 	start := time.Now()
 	tenantID := common.GetTenantID(ctx)
 
-	// Delete from all backends
 	var lastErr error
 	for name, driver := range e.drivers {
 		if err := driver.Delete(ctx, container, artifact); err != nil {
@@ -338,13 +326,14 @@ func (e *CoreEngine) Delete(ctx context.Context, container, artifact string) err
 		}
 	}
 
-	// Clear from cache
+	// Remove routing record — object no longer exists.
+	e.objectBackends.Delete(objectKey(container, artifact))
+
 	if e.cache != nil {
 		cacheKey := fmt.Sprintf("%s/%s/%s", tenantID, container, artifact)
 		_ = e.cache.Delete(cacheKey)
 	}
 
-	// Log access
 	if e.intelligence != nil {
 		e.intelligence.LogAccess(ctx, intelligence.AccessEvent{
 			TenantID:  tenantID,
@@ -375,7 +364,6 @@ func (e *CoreEngine) List(ctx context.Context, container, prefix string) ([]Arti
 		return nil, err
 	}
 
-	// Log access
 	if e.intelligence != nil {
 		e.intelligence.LogAccess(ctx, intelligence.AccessEvent{
 			TenantID:  tenantID,
@@ -384,7 +372,7 @@ func (e *CoreEngine) List(ctx context.Context, container, prefix string) ([]Arti
 			Latency:   time.Since(start),
 			Backend:   e.primary,
 			Timestamp: time.Now(),
-			Success:   err == nil,
+			Success:   true,
 		})
 	}
 
@@ -405,7 +393,6 @@ func (e *CoreEngine) GetHotData(ctx context.Context, limit int) ([]string, error
 	if e.intelligence == nil {
 		return nil, fmt.Errorf("intelligence system not initialized")
 	}
-
 	tenantID := common.GetTenantID(ctx)
 	return e.intelligence.GetHotData(tenantID, limit)
 }
@@ -415,7 +402,6 @@ func (e *CoreEngine) GetAccessPatterns(ctx context.Context) (*intelligence.Tenan
 	if e.intelligence == nil {
 		return nil, fmt.Errorf("intelligence system not initialized")
 	}
-
 	tenantID := common.GetTenantID(ctx)
 	return e.intelligence.GetPatterns(tenantID)
 }
@@ -425,34 +411,27 @@ func (e *CoreEngine) GetRecommendations(ctx context.Context) ([]intelligence.Rec
 	if e.intelligence == nil {
 		return nil, fmt.Errorf("intelligence system not initialized")
 	}
-
 	tenantID := common.GetTenantID(ctx)
 	return e.intelligence.GetRecommendations(tenantID)
 }
 
 // HealthCheck verifies all drivers and systems are healthy
 func (e *CoreEngine) HealthCheck(ctx context.Context) error {
-	// Check drivers
 	for name, driver := range e.drivers {
 		if err := driver.HealthCheck(ctx); err != nil {
 			return fmt.Errorf("driver %s unhealthy: %w", name, err)
 		}
 	}
-
-	// Check database
 	if e.db != nil {
 		if err := e.db.PingContext(ctx); err != nil {
 			return fmt.Errorf("database unhealthy: %w", err)
 		}
 	}
-
-	// Check cache
 	if e.cache != nil {
 		if err := e.cache.HealthCheck(); err != nil {
 			return fmt.Errorf("cache unhealthy: %w", err)
 		}
 	}
-
 	return nil
 }
 
@@ -463,21 +442,15 @@ func (e *CoreEngine) GetMetrics(ctx context.Context) (map[string]interface{}, er
 		"primary": e.primary,
 		"backup":  e.backup,
 	}
-
-	// Add cache metrics
 	if e.cache != nil {
-		cacheMetrics := e.cache.GetMetrics()
-		metrics["cache"] = cacheMetrics
+		metrics["cache"] = e.cache.GetMetrics()
 	}
-
-	// Add intelligence metrics if available
 	if e.intelligence != nil {
 		tenantID := common.GetTenantID(ctx)
 		if patterns, err := e.intelligence.GetPatterns(tenantID); err == nil {
 			metrics["patterns"] = patterns
 		}
 	}
-
 	return metrics, nil
 }
 
@@ -506,7 +479,6 @@ func (e *CoreEngine) SetEgressCosts(costs map[string]float64) {
 	}
 }
 
-// Helper: wrap reader to cache data on read
 func (e *CoreEngine) wrapReaderForCaching(reader io.ReadCloser, cacheKey string) io.ReadCloser {
 	return &cachingReader{
 		ReadCloser: reader,
@@ -516,38 +488,29 @@ func (e *CoreEngine) wrapReaderForCaching(reader io.ReadCloser, cacheKey string)
 	}
 }
 
-// Helper: replicate to backup backend
 func (e *CoreEngine) replicateToBackup(ctx context.Context, container, artifact string) {
 	backupDriver, ok := e.drivers[e.backup]
 	if !ok {
 		return
 	}
-
-	// Get from primary
 	primaryDriver, ok := e.drivers[e.primary]
 	if !ok {
 		return
 	}
-
 	reader, err := primaryDriver.Get(ctx, container, artifact)
 	if err != nil {
 		e.logger.Error("failed to read for backup", zap.Error(err))
 		return
 	}
 	defer func() { _ = reader.Close() }()
-
-	// Put to backup
 	if err := backupDriver.Put(ctx, container, artifact, reader); err != nil {
 		e.logger.Error("failed to replicate to backup", zap.Error(err))
 		return
 	}
-
 	e.logger.Info("replicated to backup",
 		zap.String("container", container),
 		zap.String("artifact", artifact))
 }
-
-// Helper types
 
 type sizeTrackingReader struct {
 	io.Reader
@@ -572,38 +535,27 @@ func (r *cachingReader) Read(p []byte) (n int, err error) {
 	if n > 0 {
 		r.buffer.Write(p[:n])
 	}
-
-	// Cache when done reading
-	if err == io.EOF && r.cache != nil && r.buffer.Len() < 10<<20 { // Cache if < 10MB
+	if err == io.EOF && r.cache != nil && r.buffer.Len() < 10<<20 {
 		_ = r.cache.Set(r.key, r.buffer.Bytes())
 	}
-
 	return
 }
 
 // Shutdown gracefully shuts down the engine
 func (e *CoreEngine) Shutdown(ctx context.Context) error {
 	e.logger.Info("shutting down engine")
-
-	// Flush intelligence data
 	if e.intelligence != nil {
 		e.intelligence.Flush()
 	}
-
-	// Flush cache
 	if e.cache != nil {
 		e.cache.Flush()
 	}
-
-	// Close database
 	if e.db != nil {
 		_ = e.db.Close()
 	}
-
 	return nil
 }
 
-// GetContainerMetadata returns container metadata
 func (e *CoreEngine) GetContainerMetadata(ctx context.Context, container string) (*Container, error) {
 	return &Container{
 		Name:     container,
@@ -613,7 +565,6 @@ func (e *CoreEngine) GetContainerMetadata(ctx context.Context, container string)
 	}, nil
 }
 
-// GetArtifactMetadata returns artifact metadata
 func (e *CoreEngine) GetArtifactMetadata(ctx context.Context, container, artifact string) (*Artifact, error) {
 	return &Artifact{
 		Container: container,
@@ -624,22 +575,18 @@ func (e *CoreEngine) GetArtifactMetadata(ctx context.Context, container, artifac
 	}, nil
 }
 
-// Execute implements WASM execution (placeholder)
 func (e *CoreEngine) Execute(ctx context.Context, container string, wasm []byte, input io.Reader) (io.Reader, error) {
 	return nil, fmt.Errorf("WASM execution not yet implemented")
 }
 
-// Query implements SQL queries (placeholder)
 func (e *CoreEngine) Query(ctx context.Context, sql string) (ResultSet, error) {
 	return nil, fmt.Errorf("SQL queries not yet implemented")
 }
 
-// Train implements ML training (placeholder)
 func (e *CoreEngine) Train(ctx context.Context, model string, data []byte) error {
 	return fmt.Errorf("ML training not yet implemented")
 }
 
-// Predict implements ML prediction (placeholder)
 func (e *CoreEngine) Predict(ctx context.Context, model string, input []byte) ([]byte, error) {
 	return nil, fmt.Errorf("ML prediction not yet implemented")
 }

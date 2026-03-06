@@ -277,7 +277,7 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 		ctx = context.WithValue(ctx, common.TenantIDKey, upload.TenantID)
 
 		// Store to backend
-		uploadErr = s.engine.Put(ctx, containerName, object, pr)
+		_, uploadErr = s.engine.Put(ctx, containerName, object, pr)
 
 		if uploadErr != nil {
 			s.logger.Error("failed to store to backend",

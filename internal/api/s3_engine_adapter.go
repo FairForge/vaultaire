@@ -1,12 +1,14 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"crypto/md5"
 	"database/sql"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,9 +18,6 @@ import (
 )
 
 // S3ToEngine adapts S3 requests to engine operations.
-// The db field enables writing object metadata to PostgreSQL on PUT,
-// so HEAD requests can be served from the database instead of fetching
-// the full object from the backend.
 type S3ToEngine struct {
 	engine engine.Engine
 	db     *sql.DB
@@ -38,25 +37,101 @@ func NewS3ToEngine(e engine.Engine, db *sql.DB, logger *zap.Logger) *S3ToEngine 
 func (a *S3ToEngine) TranslateRequest(req *S3Request) engine.Operation {
 	return engine.Operation{
 		Type:      req.Operation,
-		Container: req.Bucket, // Bucket → Container
-		Artifact:  req.Object, // Object → Artifact
+		Container: req.Bucket,
+		Artifact:  req.Object,
 		Context:   context.Background(),
 		Metadata:  make(map[string]interface{}),
 	}
 }
 
+// awsChunkedReader decodes the aws-chunked transfer encoding used by the
+// AWS SDK v2. Each chunk is preceded by a hex size line (optionally followed
+// by a semicolon-delimited chunk extension such as a chunk signature), then
+// the payload bytes, then CRLF. A zero-length chunk terminates the stream.
+// Trailing headers (e.g. x-amz-checksum-*) are discarded.
+//
+// This is distinct from standard HTTP chunked transfer encoding, which Go's
+// net/http server decodes automatically. aws-chunked is an application-level
+// encoding that must be stripped before the payload reaches the storage
+// backend.
+type awsChunkedReader struct {
+	r         *bufio.Reader
+	chunkLeft int  // bytes remaining in the current chunk
+	done      bool // true once the terminal 0-size chunk is seen
+}
+
+func newAWSChunkedReader(r io.Reader) *awsChunkedReader {
+	return &awsChunkedReader{r: bufio.NewReader(r)}
+}
+
+func (a *awsChunkedReader) Read(p []byte) (int, error) {
+	if a.done {
+		return 0, io.EOF
+	}
+
+	// If the current chunk is exhausted, read the next chunk header.
+	for a.chunkLeft == 0 {
+		// Read the chunk size line: "<hex-size>[;chunk-extension]\r\n"
+		line, err := a.r.ReadString('\n')
+		if err != nil {
+			return 0, err
+		}
+		line = strings.TrimRight(line, "\r\n")
+
+		// Strip chunk extensions (e.g. ";chunk-signature=...")
+		if idx := strings.IndexByte(line, ';'); idx >= 0 {
+			line = line[:idx]
+		}
+		line = strings.TrimSpace(line)
+
+		size, err := strconv.ParseInt(line, 16, 64)
+		if err != nil {
+			return 0, fmt.Errorf("aws-chunked: invalid chunk size %q: %w", line, err)
+		}
+
+		if size == 0 {
+			// Terminal chunk — drain trailing headers and signal EOF.
+			a.done = true
+			return 0, io.EOF
+		}
+
+		a.chunkLeft = int(size)
+	}
+
+	// Read up to chunkLeft bytes.
+	if len(p) > a.chunkLeft {
+		p = p[:a.chunkLeft]
+	}
+	n, err := a.r.Read(p)
+	a.chunkLeft -= n
+
+	// When a chunk is fully consumed, read and discard the trailing CRLF.
+	if a.chunkLeft == 0 {
+		_, _ = a.r.ReadString('\n')
+	}
+
+	return n, err
+}
+
+// isAWSChunked returns true when the request body uses aws-chunked encoding.
+// The AWS SDK v2 signals this via the x-amz-content-sha256 header value or
+// the Content-Encoding header.
+func isAWSChunked(r *http.Request) bool {
+	sha := r.Header.Get("x-amz-content-sha256")
+	if strings.HasPrefix(sha, "STREAMING-") {
+		return true
+	}
+	return strings.Contains(r.Header.Get("Content-Encoding"), "aws-chunked")
+}
+
 // HandleGet processes S3 GET requests using the engine
 func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, object string) {
-	// Check for Range header early
 	rangeHeader := r.Header.Get("Range")
 	if rangeHeader != "" {
-		// For now, ignore range and return full file
-		// TODO: Implement proper range support
-		a.logger.Debug("Range request ignored",
+		a.logger.Debug("Range request ignored (not yet implemented)",
 			zap.String("range", rangeHeader))
 	}
 
-	// Get tenant from context
 	t, err := tenant.FromContext(r.Context())
 	if err != nil {
 		a.logger.Warn("no tenant in context", zap.Error(err))
@@ -64,9 +139,8 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		return
 	}
 
-	// Translate S3 terms to Engine terms with tenant namespace
-	container := t.NamespaceContainer(bucket) // S3 Bucket → Namespaced Container
-	artifact := object                        // S3 Object → Engine Artifact
+	container := t.NamespaceContainer(bucket)
+	artifact := object
 
 	a.logger.Debug("GET with tenant isolation",
 		zap.String("tenant_id", t.ID),
@@ -74,10 +148,8 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		zap.String("namespaced_container", container),
 		zap.String("artifact", artifact))
 
-	// Call engine with Container/Artifact terminology
 	reader, err := a.engine.Get(r.Context(), container, artifact)
 	if err != nil {
-		// Map engine errors to S3 errors
 		if strings.Contains(err.Error(), "no such file or directory") ||
 			strings.Contains(err.Error(), "not found") {
 			WriteS3Error(w, ErrNoSuchKey, r.URL.Path, generateRequestID())
@@ -92,17 +164,12 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	}
 	defer func() { _ = reader.Close() }()
 
-	// Set S3-compliant response headers.
-	// ETag is intentionally omitted here — GET does not need it and we
-	// don't have the hash without re-reading the object. HEAD (which does
-	// need ETag) is served from object_head_cache, not this path.
 	contentType := a.detectContentType(artifact)
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("x-amz-request-id", generateRequestID())
 	w.Header().Set("x-amz-version-id", "null")
 	w.Header().Set("Accept-Ranges", "bytes")
 
-	// Stream the content
 	written, err := io.Copy(w, reader)
 	if err != nil {
 		a.logger.Error("failed to stream artifact",
@@ -122,7 +189,6 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 
 // detectContentType determines MIME type from extension
 func (a *S3ToEngine) detectContentType(artifact string) string {
-	// Find the last dot for the extension
 	dotIdx := strings.LastIndex(artifact, ".")
 	if dotIdx == -1 {
 		return "application/octet-stream"
@@ -152,15 +218,17 @@ func (a *S3ToEngine) detectContentType(artifact string) string {
 
 // HandlePut processes S3 PUT requests using the engine.
 //
-// The request body is wrapped in an io.TeeReader that feeds every byte
-// into an MD5 hasher as the data streams through to the engine. This
-// means the ETag is computed in a single pass at zero extra memory cost.
+// The AWS SDK v2 sends uploads using aws-chunked transfer encoding —
+// each chunk is prefixed with a hex size line and may include a chunk
+// signature extension. This is distinct from standard HTTP chunked
+// transfer encoding (which Go decodes automatically). If aws-chunked
+// is detected the body is wrapped in awsChunkedReader to strip the
+// framing before the payload reaches the storage backend.
 //
-// After a successful engine.Put, the size, ETag, and content-type are
-// persisted to object_head_cache so that HEAD requests can be answered
-// from PostgreSQL without touching the storage backend.
+// A TeeReader computes the MD5 ETag in a single streaming pass.
+// The backend name returned by engine.Put is persisted to
+// object_head_cache so GET can route to the same backend after restart.
 func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, object string) {
-	// Get tenant from context
 	t, err := tenant.FromContext(r.Context())
 	if err != nil {
 		a.logger.Warn("no tenant in context", zap.Error(err))
@@ -171,18 +239,39 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	container := t.NamespaceContainer(bucket)
 	artifact := object
 
+	// Determine the actual content length for metadata.
+	// x-amz-decoded-content-length carries the real size when the body
+	// uses aws-chunked encoding (r.ContentLength is the encoded size).
+	size := r.ContentLength
+	if decoded := r.Header.Get("x-amz-decoded-content-length"); decoded != "" {
+		if n, err := strconv.ParseInt(decoded, 10, 64); err == nil {
+			size = n
+		}
+	}
+	if size < 0 {
+		size = 0
+	}
+
+	chunked := isAWSChunked(r)
 	a.logger.Debug("PUT with tenant isolation",
 		zap.String("tenant_id", t.ID),
 		zap.String("original_bucket", bucket),
 		zap.String("namespaced_container", container),
-		zap.String("artifact", artifact))
+		zap.String("artifact", artifact),
+		zap.Bool("aws_chunked", chunked),
+		zap.Int64("size", size))
 
-	// Wrap the request body in a TeeReader so the MD5 hash is computed
-	// as data flows through — no second pass, no buffering in memory.
+	// Wrap body: decode aws-chunked framing if present, then tee into
+	// MD5 hasher so the ETag is computed in a single streaming pass.
+	var body io.Reader = r.Body
+	if chunked {
+		body = newAWSChunkedReader(r.Body)
+	}
+
 	hasher := md5.New()
-	hashingBody := io.TeeReader(r.Body, hasher)
+	hashingBody := io.TeeReader(body, hasher)
 
-	err = a.engine.Put(r.Context(), container, artifact, hashingBody)
+	backendName, err := a.engine.Put(r.Context(), container, artifact, hashingBody)
 	if err != nil {
 		a.logger.Error("engine put failed",
 			zap.Error(err),
@@ -192,47 +281,31 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		return
 	}
 
-	// Compute ETag from the MD5 bytes accumulated during the upload.
-	// S3 standard: ETag = hex-encoded MD5, wrapped in double quotes in headers.
 	etag := fmt.Sprintf("%x", hasher.Sum(nil))
 
-	// Guard against -1, which is what r.ContentLength is set to when the
-	// client uses chunked transfer encoding (no Content-Length header sent).
-	// Persisting -1 causes HEAD to emit "Content-Length: -1", which is
-	// invalid HTTP — HAProxy rejects the response with a 502.
-	// We store 0 as a safe sentinel; it is inaccurate but valid HTTP.
-	size := r.ContentLength
-	if size < 0 {
-		size = 0
-	}
-
-	// Persist metadata to object_head_cache.
-	// This is what makes HEAD O(1) instead of O(file_size).
-	// ON CONFLICT handles re-uploads of the same key.
-	// This INSERT is non-fatal: if it fails the object is still safely
-	// stored; HEAD will return 404 until the next successful upload.
 	contentType := r.Header.Get("Content-Type")
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
+
 	if a.db != nil {
 		_, dbErr := a.db.ExecContext(r.Context(), `
 			INSERT INTO object_head_cache
-				(tenant_id, bucket, object_key, size_bytes, etag, content_type, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, NOW())
+				(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
 			ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
 				size_bytes   = EXCLUDED.size_bytes,
 				etag         = EXCLUDED.etag,
 				content_type = EXCLUDED.content_type,
+				backend_name = EXCLUDED.backend_name,
 				updated_at   = NOW()
-		`, t.ID, bucket, artifact, size, etag, contentType) // size, not r.ContentLength
+		`, t.ID, bucket, artifact, size, etag, contentType, backendName)
 		if dbErr != nil {
-			a.logger.Error("failed to cache object metadata — HEAD will return 404 for this object until next upload",
+			a.logger.Error("failed to cache object metadata",
 				zap.Error(dbErr),
 				zap.String("tenant_id", t.ID),
 				zap.String("bucket", bucket),
 				zap.String("object", artifact))
-			// Do NOT return an error — the object is safely stored.
 		}
 	}
 
@@ -244,8 +317,10 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		zap.String("tenant_id", t.ID),
 		zap.String("s3.bucket", bucket),
 		zap.String("s3.object", object),
+		zap.String("backend", backendName),
 		zap.String("etag", etag),
-		zap.Int64("size", size)) // log the sanitised value, not r.ContentLength
+		zap.Bool("aws_chunked", chunked),
+		zap.Int64("size", size))
 }
 
 // HandleDelete processes S3 DELETE requests
@@ -262,7 +337,6 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 	if err := a.engine.Delete(r.Context(), container, object); err != nil {
 		if strings.Contains(err.Error(), "no such file or directory") ||
 			strings.Contains(err.Error(), "not found") {
-			// S3 compatibility: DELETE of non-existent object is success
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -274,9 +348,6 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 		return
 	}
 
-	// Best-effort: remove from metadata cache.
-	// Non-fatal if this fails — stale cache rows are harmless (HEAD returns
-	// data for a deleted object, which is only a consistency issue, not data loss).
 	if a.db != nil {
 		_, _ = a.db.ExecContext(r.Context(), `
 			DELETE FROM object_head_cache
