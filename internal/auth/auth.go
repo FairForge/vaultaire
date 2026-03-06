@@ -100,10 +100,13 @@ func (a *AuthService) CreateUser(ctx context.Context, email, password string) (*
 // CreateUserWithTenant creates both user and their storage tenant.
 //
 // Credentials are written to the in-memory maps first (so the caller
-// gets them back immediately), then persisted to PostgreSQL. If the
-// SQL writes fail the registration response is still returned — the
-// process will work until restart. A log.Error is emitted so the
-// operator knows persistence failed.
+// gets them back immediately), then persisted to PostgreSQL via three
+// sequential INSERTs: users → tenants → api_keys. Each INSERT is
+// wrapped with ON CONFLICT DO NOTHING for idempotency. If a DB write
+// fails, the error is returned — the in-memory maps are already
+// populated so the current process can serve the new tenant, but the
+// caller should surface the error so the operator knows persistence
+// failed.
 func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password, company string) (*User, *Tenant, *APIKey, error) {
 	// Validate email
 	email = strings.ToLower(strings.TrimSpace(email))
@@ -158,8 +161,7 @@ func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password,
 		}
 	}
 
-	// Write to in-memory maps — this is what the rest of the process
-	// uses for lookups during the current run.
+	// Write to in-memory maps for current-process lookups.
 	a.users[email] = user
 	a.userIndex[user.ID] = user
 	a.tenants[tenant.ID] = tenant
@@ -167,8 +169,6 @@ func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password,
 	a.keyIndex[tenant.AccessKey] = tenant
 
 	// Persist to PostgreSQL so credentials survive restarts.
-	// Each INSERT is non-fatal: log and continue so the caller still
-	// gets their credentials back even if the DB is momentarily down.
 	if a.sqlDB != nil {
 		_, err = a.sqlDB.ExecContext(ctx, `
 			INSERT INTO users (id, email, password_hash, company, created_at, updated_at)
@@ -177,31 +177,44 @@ func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password,
 		`, user.ID, user.Email, user.PasswordHash, user.Company,
 			user.CreatedAt, user.UpdatedAt)
 		if err != nil {
-			// Log but do not return — in-memory state is consistent.
-			fmt.Printf("ERROR: failed to persist user to PostgreSQL: %v\n", err)
+			return nil, nil, nil, fmt.Errorf("persist user: %w", err)
 		}
 
+		// tenants.name = company name; tenants.email = owner email.
+		// Both are NOT NULL in the schema so must always be provided.
 		_, err = a.sqlDB.ExecContext(ctx, `
-			INSERT INTO tenants (id, access_key, secret_key, created_at)
-			VALUES ($1, $2, $3, $4)
+			INSERT INTO tenants (id, name, email, access_key, secret_key, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6)
 			ON CONFLICT (id) DO NOTHING
-		`, tenant.ID, tenant.AccessKey, tenant.SecretKey, tenant.CreatedAt)
+		`, tenant.ID, company, email, tenant.AccessKey, tenant.SecretKey, tenant.CreatedAt)
 		if err != nil {
-			fmt.Printf("ERROR: failed to persist tenant to PostgreSQL: %v\n", err)
+			return nil, nil, nil, fmt.Errorf("persist tenant: %w", err)
 		}
 
-		// Provision a default quota row for this tenant.
-		// The quota check in HandlePut does a hard SELECT on tenant_quotas —
-		// if no row exists it returns "sql: no rows in result set" and every
-		// PUT fails with a 500. All columns have safe DB defaults (1 TB limit,
-		// 0 used, standard tier) so we only need to supply the tenant_id.
+		// api_keys.secret_hash stores a bcrypt hash — the raw secret is
+		// returned to the user once at registration and never stored plaintext.
+		secretHash, err := bcrypt.GenerateFromPassword([]byte(apiKey.Secret), bcrypt.DefaultCost)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("hash api key secret: %w", err)
+		}
+		_, err = a.sqlDB.ExecContext(ctx, `
+			INSERT INTO api_keys (id, user_id, name, key_id, secret_hash, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6)
+			ON CONFLICT (key_id) DO NOTHING
+		`, apiKey.ID, user.ID, apiKey.Name, apiKey.Key, string(secretHash), apiKey.CreatedAt)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("persist api key: %w", err)
+		}
+
+		// Provision a default quota row so HandlePut never sees
+		// "no rows in result set" on the tenant_quotas SELECT.
 		_, err = a.sqlDB.ExecContext(ctx, `
 			INSERT INTO tenant_quotas (tenant_id)
 			VALUES ($1)
 			ON CONFLICT (tenant_id) DO NOTHING
 		`, tenant.ID)
 		if err != nil {
-			fmt.Printf("ERROR: failed to provision tenant quota: %v\n", err)
+			return nil, nil, nil, fmt.Errorf("provision tenant quota: %w", err)
 		}
 	}
 
