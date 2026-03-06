@@ -4,6 +4,7 @@ package loadtest
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -259,23 +260,16 @@ func (f *Framework) buildSummary() *Summary {
 }
 
 // calculatePercentiles computes latency statistics.
+// Uses sort.Slice (O(n log n)) — the previous bubble sort was O(n²) and would
+// hang for several seconds at 10k+ requests before returning results.
 func calculatePercentiles(latencies []time.Duration) (min, max, avg, p50, p95, p99 time.Duration) {
 	if len(latencies) == 0 {
 		return
 	}
 
-	// Sort for percentiles (copy to avoid modifying original)
 	sorted := make([]time.Duration, len(latencies))
 	copy(sorted, latencies)
-
-	// Simple bubble sort for small datasets, would use sort.Slice for production
-	for i := 0; i < len(sorted)-1; i++ {
-		for j := 0; j < len(sorted)-i-1; j++ {
-			if sorted[j] > sorted[j+1] {
-				sorted[j], sorted[j+1] = sorted[j+1], sorted[j]
-			}
-		}
-	}
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
 
 	min = sorted[0]
 	max = sorted[len(sorted)-1]
