@@ -392,7 +392,13 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 		return
 	}
 
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", sizeBytes))
+	// Only emit Content-Length when we have a valid, known size.
+	// A value of 0 means the client uploaded without a Content-Length header
+	// (chunked transfer encoding); we stored 0 as a safe sentinel.
+	// Emitting "Content-Length: -1" is invalid HTTP and causes HAProxy to 502.
+	if sizeBytes >= 0 {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", sizeBytes))
+	}
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("ETag", fmt.Sprintf(`"%s"`, etag))
 	w.Header().Set("Last-Modified", time.Now().UTC().Format("Mon, 02 Jan 2006 15:04:05 GMT"))
