@@ -2,7 +2,7 @@ package auth
 
 import (
 	"context"
-	"database/sql" // Add this import!
+	"database/sql"
 	"testing"
 
 	_ "github.com/lib/pq" // PostgreSQL driver
@@ -37,8 +37,10 @@ func setupTestDB(t *testing.T) *sql.DB {
 		t.Fatal(err)
 	}
 
-	// Clean up test data
+	// Clean up test data in dependency order:
+	// api_keys → tenants → users (foreign keys cascade but be explicit)
 	_, _ = db.Exec("DELETE FROM api_keys WHERE user_id IN (SELECT id FROM users WHERE email LIKE '%@stored.ge')")
+	_, _ = db.Exec("DELETE FROM tenants WHERE email LIKE '%@stored.ge'")
 	_, _ = db.Exec("DELETE FROM users WHERE email LIKE '%@stored.ge'")
 
 	return db
