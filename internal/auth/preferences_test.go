@@ -8,7 +8,7 @@ import (
 )
 
 func TestUserPreferences(t *testing.T) {
-	auth := NewAuthService(nil)
+	auth := NewAuthService(nil, nil)
 	ctx := context.Background()
 
 	user, _, _, err := auth.CreateUserWithTenant(ctx, "prefs@test.com", "password", "TestCo")
