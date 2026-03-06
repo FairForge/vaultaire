@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -220,7 +221,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(map[string]string{
 		"accessKeyId":     apiKey.Key,
 		"secretAccessKey": apiKey.Secret,
-		"endpoint":        fmt.Sprintf("http://localhost:%d", s.config.Server.Port),
+		"endpoint":        getPublicEndpoint(s.config.Server.Port),
 	}); err != nil {
 		s.logger.Error("failed to encode register response", zap.Error(err))
 	}
@@ -229,6 +230,16 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		zap.String("email", req.Email),
 		zap.String("user_id", user.ID),
 		zap.String("tenant_id", tenant.ID))
+}
+
+// getPublicEndpoint returns the public S3 endpoint from the VAULTAIRE_ENDPOINT
+// environment variable. This is set in /opt/vaultaire/configs/.env on the
+// production server. Falls back to localhost for local development.
+func getPublicEndpoint(port int) string {
+	if ep := os.Getenv("VAULTAIRE_ENDPOINT"); ep != "" {
+		return ep
+	}
+	return fmt.Sprintf("http://localhost:%d", port)
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
