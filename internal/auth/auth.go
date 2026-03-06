@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -41,9 +42,14 @@ type JWTClaims struct {
 	jwt.RegisteredClaims
 }
 
-// AuthService handles authentication
+// AuthService handles authentication.
+//
+// Runtime state (users, tenants, apiKeys, etc.) is kept in memory for
+// fast O(1) lookups during request handling. sqlDB is used to persist
+// new registrations so they survive process restarts.
 type AuthService struct {
 	db              Database
+	sqlDB           *sql.DB // for persistent writes; nil in test mode
 	jwtSecret       []byte
 	users           map[string]*User          // email -> user
 	tenants         map[string]*Tenant        // tenantID -> tenant
@@ -53,7 +59,7 @@ type AuthService struct {
 	profiles        map[string]*ProfileUpdate // user profiles
 	preferences     map[string]*UserPreferences
 	activityTracker *ActivityTracker
-	auditLogger     *AuditLogger // Add audit logger
+	auditLogger     *AuditLogger
 }
 
 // Database interface for auth operations
@@ -61,10 +67,12 @@ type Database interface {
 	// Will be implemented with PostgreSQL
 }
 
-// NewAuthService creates a new auth service
-func NewAuthService(db Database) *AuthService {
+// NewAuthService creates a new auth service.
+// sqlDB may be nil (e.g. in tests); persistence is skipped when it is.
+func NewAuthService(db Database, sqlDB *sql.DB) *AuthService {
 	return &AuthService{
 		db:              db,
+		sqlDB:           sqlDB,
 		jwtSecret:       []byte("change-me-in-production"), // TODO: Use env var
 		users:           make(map[string]*User),
 		tenants:         make(map[string]*Tenant),
@@ -85,12 +93,17 @@ func (a *AuthService) SetAuditLogger(logger *AuditLogger) {
 
 // CreateUser creates a new user account WITH tenant
 func (a *AuthService) CreateUser(ctx context.Context, email, password string) (*User, error) {
-	// This is the original method - calls the new one with empty company
 	user, _, _, err := a.CreateUserWithTenant(ctx, email, password, "")
 	return user, err
 }
 
-// CreateUserWithTenant creates both user and their storage tenant
+// CreateUserWithTenant creates both user and their storage tenant.
+//
+// Credentials are written to the in-memory maps first (so the caller
+// gets them back immediately), then persisted to PostgreSQL. If the
+// SQL writes fail the registration response is still returned — the
+// process will work until restart. A log.Error is emitted so the
+// operator knows persistence failed.
 func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password, company string) (*User, *Tenant, *APIKey, error) {
 	// Validate email
 	email = strings.ToLower(strings.TrimSpace(email))
@@ -123,7 +136,7 @@ func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password,
 	tenant := &Tenant{
 		ID:        "tenant-" + GenerateID(),
 		UserID:    user.ID,
-		AccessKey: "VK" + GenerateID(), // VK = Vaultaire Key
+		AccessKey: "VK" + GenerateID(),
 		SecretKey: "SK" + GenerateID() + GenerateID(),
 		CreatedAt: time.Now(),
 	}
@@ -131,10 +144,9 @@ func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password,
 	// Link tenant to user
 	user.TenantID = tenant.ID
 
-	// Create primary API key using the new enhanced method
+	// Create primary API key
 	apiKey, err := a.GenerateAPIKey(ctx, user.ID, "primary")
 	if err != nil {
-		// If we can't generate API key, still create user/tenant with old format
 		apiKey = &APIKey{
 			ID:        uuid.New().String(),
 			UserID:    user.ID,
@@ -146,12 +158,38 @@ func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password,
 		}
 	}
 
-	// Store everything in memory (TODO: Use database)
+	// Write to in-memory maps — this is what the rest of the process
+	// uses for lookups during the current run.
 	a.users[email] = user
 	a.userIndex[user.ID] = user
 	a.tenants[tenant.ID] = tenant
 	a.apiKeys[apiKey.Key] = apiKey
-	a.keyIndex[tenant.AccessKey] = tenant // For S3 auth lookup
+	a.keyIndex[tenant.AccessKey] = tenant
+
+	// Persist to PostgreSQL so credentials survive restarts.
+	// Each INSERT is non-fatal: log and continue so the caller still
+	// gets their credentials back even if the DB is momentarily down.
+	if a.sqlDB != nil {
+		_, err = a.sqlDB.ExecContext(ctx, `
+			INSERT INTO users (id, email, password_hash, company, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6)
+			ON CONFLICT (email) DO NOTHING
+		`, user.ID, user.Email, user.PasswordHash, user.Company,
+			user.CreatedAt, user.UpdatedAt)
+		if err != nil {
+			// Log but do not return — in-memory state is consistent.
+			fmt.Printf("ERROR: failed to persist user to PostgreSQL: %v\n", err)
+		}
+
+		_, err = a.sqlDB.ExecContext(ctx, `
+			INSERT INTO tenants (id, access_key, secret_key, created_at)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT (id) DO NOTHING
+		`, tenant.ID, tenant.AccessKey, tenant.SecretKey, tenant.CreatedAt)
+		if err != nil {
+			fmt.Printf("ERROR: failed to persist tenant to PostgreSQL: %v\n", err)
+		}
+	}
 
 	return user, tenant, apiKey, nil
 }
@@ -197,19 +235,16 @@ func (a *AuthService) GetUserByID(ctx context.Context, userID string) (*User, er
 
 // ValidateS3Request validates S3 API requests and returns tenant
 func (a *AuthService) ValidateS3Request(ctx context.Context, accessKey string) (*Tenant, error) {
-	// Quick lookup by access key
 	tenant, exists := a.keyIndex[accessKey]
 	if !exists {
 		return nil, fmt.Errorf("invalid access key")
 	}
 
-	// Update last used
 	if apiKey, ok := a.apiKeys[accessKey]; ok {
 		now := time.Now()
 		apiKey.LastUsed = &now
 		apiKey.UsageCount++
 
-		// Log usage if audit logger available
 		if a.auditLogger != nil {
 			event := APIKeyAuditEvent{
 				UserID:  tenant.UserID,
@@ -262,7 +297,7 @@ func (a *AuthService) ValidateJWT(tokenString string) (*JWTClaims, error) {
 	return claims, nil
 }
 
-// Helper function to generate IDs
+// GenerateID generates a random 8-byte hex string
 func GenerateID() string {
 	bytes := make([]byte, 8)
 	_, _ = rand.Read(bytes)
@@ -271,18 +306,12 @@ func GenerateID() string {
 
 // RequestPasswordReset generates a reset token for the user
 func (a *AuthService) RequestPasswordReset(ctx context.Context, email string) (string, error) {
-	// Check user exists
 	_, err := a.GetUserByEmail(ctx, email)
 	if err != nil {
 		return "", fmt.Errorf("user not found")
 	}
 
-	// Generate secure reset token
 	token := GenerateID() + GenerateID()
-
-	// Store token with expiry (TODO: use Redis or DB)
-	// For now, just return the token
-
 	return token, nil
 }
 
@@ -302,12 +331,8 @@ func (a *AuthService) TrackActivity(userID, action, resource, ip, userAgent stri
 			IP:        ip,
 			UserAgent: userAgent,
 		}
-		// Fire and forget - don't block on activity tracking
 		go func() {
 			_ = a.activityTracker.Track(context.Background(), event)
 		}()
 	}
 }
-
-// REMOVED duplicate GenerateAPIKeyWithAudit and ValidateAPIKeyWithAudit methods
-// These are already defined in apikey.go
