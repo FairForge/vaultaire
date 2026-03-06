@@ -9,7 +9,7 @@ import (
 
 func TestPasswordReset_RequestReset(t *testing.T) {
 	// Test that requesting a password reset generates a token
-	service := NewAuthService(nil)
+	service := NewAuthService(nil, nil)
 
 	// Create a user first
 	_, _, _, err := service.CreateUserWithTenant(context.TODO(), "test@stored.ge", "OldPass123!", "")
