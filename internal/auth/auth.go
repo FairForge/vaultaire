@@ -189,6 +189,20 @@ func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password,
 		if err != nil {
 			fmt.Printf("ERROR: failed to persist tenant to PostgreSQL: %v\n", err)
 		}
+
+		// Provision a default quota row for this tenant.
+		// The quota check in HandlePut does a hard SELECT on tenant_quotas —
+		// if no row exists it returns "sql: no rows in result set" and every
+		// PUT fails with a 500. All columns have safe DB defaults (1 TB limit,
+		// 0 used, standard tier) so we only need to supply the tenant_id.
+		_, err = a.sqlDB.ExecContext(ctx, `
+			INSERT INTO tenant_quotas (tenant_id)
+			VALUES ($1)
+			ON CONFLICT (tenant_id) DO NOTHING
+		`, tenant.ID)
+		if err != nil {
+			fmt.Printf("ERROR: failed to provision tenant quota: %v\n", err)
+		}
 	}
 
 	return user, tenant, apiKey, nil
