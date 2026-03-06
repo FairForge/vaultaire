@@ -140,7 +140,6 @@ func (at *AccessTracker) GetRecommendation(tenantID, container, artifact string)
 
 // Flush forces processing of buffered events
 func (at *AccessTracker) Flush() {
-	// Process any remaining events
 	for len(at.buffer) > 0 {
 		select {
 		case event := <-at.buffer:
@@ -183,6 +182,7 @@ func (at *AccessTracker) flushBatch(events []AccessEvent) {
 		at.logger.Error("failed to begin transaction", zap.Error(err))
 		return
 	}
+	// Rollback is a no-op if Commit succeeded — safe to always defer.
 	defer func() { _ = tx.Rollback() }()
 
 	query := `
@@ -205,11 +205,21 @@ func (at *AccessTracker) flushBatch(events []AccessEvent) {
 			e.Timestamp, e.Success,
 		)
 		if err != nil {
-			at.logger.Error("failed to log access", zap.Error(err))
+			// Any exec error aborts the PostgreSQL transaction. All subsequent
+			// queries in this transaction will fail with "current transaction is
+			// aborted". Roll back immediately and drop the batch rather than
+			// flooding the logs with hundreds of cascading errors.
+			at.logger.Error("failed to log access batch, rolling back",
+				zap.Error(err),
+				zap.Int("batch_size", len(events)),
+			)
+			return // deferred Rollback fires here
 		}
 	}
 
-	_ = tx.Commit()
+	if err := tx.Commit(); err != nil {
+		at.logger.Error("failed to commit access batch", zap.Error(err))
+	}
 }
 
 // Pattern Analyzer
