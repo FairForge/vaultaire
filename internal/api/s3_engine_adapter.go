@@ -196,6 +196,16 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	// S3 standard: ETag = hex-encoded MD5, wrapped in double quotes in headers.
 	etag := fmt.Sprintf("%x", hasher.Sum(nil))
 
+	// Guard against -1, which is what r.ContentLength is set to when the
+	// client uses chunked transfer encoding (no Content-Length header sent).
+	// Persisting -1 causes HEAD to emit "Content-Length: -1", which is
+	// invalid HTTP — HAProxy rejects the response with a 502.
+	// We store 0 as a safe sentinel; it is inaccurate but valid HTTP.
+	size := r.ContentLength
+	if size < 0 {
+		size = 0
+	}
+
 	// Persist metadata to object_head_cache.
 	// This is what makes HEAD O(1) instead of O(file_size).
 	// ON CONFLICT handles re-uploads of the same key.
@@ -215,7 +225,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 				etag         = EXCLUDED.etag,
 				content_type = EXCLUDED.content_type,
 				updated_at   = NOW()
-		`, t.ID, bucket, artifact, r.ContentLength, etag, contentType)
+		`, t.ID, bucket, artifact, size, etag, contentType) // size, not r.ContentLength
 		if dbErr != nil {
 			a.logger.Error("failed to cache object metadata — HEAD will return 404 for this object until next upload",
 				zap.Error(dbErr),
@@ -235,7 +245,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		zap.String("s3.bucket", bucket),
 		zap.String("s3.object", object),
 		zap.String("etag", etag),
-		zap.Int64("size", r.ContentLength))
+		zap.Int64("size", size)) // log the sanitised value, not r.ContentLength
 }
 
 // HandleDelete processes S3 DELETE requests
