@@ -22,18 +22,17 @@ import (
 )
 
 type Server struct {
-	config       *config.Config
-	logger       *zap.Logger
-	router       chi.Router
-	httpServer   *http.Server
-	db           *sql.DB
-	events       chan Event
-	engine       *engine.CoreEngine
-	quotaManager QuotaManager
-	rbacService  *RBACService
-	auth         *auth.AuthService
-	auditLogger  *auth.AuditLogger
-
+	config        *config.Config
+	logger        *zap.Logger
+	router        chi.Router
+	httpServer    *http.Server
+	db            *sql.DB
+	events        chan Event
+	engine        *engine.CoreEngine
+	quotaManager  QuotaManager
+	rbacService   *RBACService
+	auth          *auth.AuthService
+	auditLogger   *auth.AuditLogger
 	requestCount  int64
 	testMode      bool
 	errorCount    int64
@@ -66,19 +65,18 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	}
 	s.healthChecker = NewBackendHealthChecker()
 
-	// Initialize auth service and audit logger
-	s.auth = auth.NewAuthService(nil)
+	// Pass s.db so registrations are persisted to PostgreSQL.
+	// Previously NewAuthService(nil) left sqlDB nil, so CreateUserWithTenant
+	// wrote only to in-memory maps and credentials vanished on restart.
+	s.auth = auth.NewAuthService(nil, s.db)
 	s.auditLogger = auth.NewAuditLogger()
 	s.auth.SetAuditLogger(s.auditLogger)
 
-	// Initialize RBAC
 	s.rbacService = NewRBACService(logger)
 
-	// Add ALL middleware BEFORE any routes
 	s.router.Use(s.rbacService.InjectUserContext)
 	s.router.Use(s.loggingMiddleware)
 
-	// Set up routes
 	s.setupRoutes()
 
 	s.httpServer = &http.Server{
@@ -96,37 +94,28 @@ func (s *Server) setupRoutes() {
 	s.router.Get("/health/live", s.handleLiveness)
 	s.router.Get("/health/ready", s.handleReadiness)
 	s.router.Get("/health/backends", s.handleBackendsHealth)
-	s.router.Get("/ready", s.handleReadiness) // Keep old endpoint for compatibility
+	s.router.Get("/ready", s.handleReadiness)
 	s.router.Get("/metrics", s.handleMetrics)
 	s.router.Get("/version", s.handleVersion)
 
-	// Auth routes - using server's shared auth service
 	s.logger.Info("Registering auth routes")
 	s.router.Post("/auth/register", s.handleRegister)
 	s.router.Post("/auth/login", s.handleLogin)
 	s.router.Post("/auth/password-reset", s.handlePasswordReset)
 	s.router.Post("/auth/password-reset/complete", s.handlePasswordResetComplete)
 
-	// API Documentation routes
 	s.router.Get("/docs", docs.SwaggerUIHandler())
 	s.router.Get("/openapi.json", docs.OpenAPIJSONHandler())
 
-	// IMPORTANT: Register ALL /api routes BEFORE the S3 catch-all
-	// The order matters! More specific routes must come first
-
-	// User API routes under /api/v1/user - MUST be before catch-all
 	s.logger.Info("Registering user API routes")
 	s.registerUserAPIRoutes()
 
-	// Quota routes under /api/v1/quota - MUST be before catch-all
 	s.logger.Info("Registering quota routes")
 	s.registerQuotaRoutes()
 
-	// Compliance routes under /api/compliance - MUST be before catch-all
 	s.logger.Info("Registering compliance routes")
 	s.registerComplianceRoutes()
 
-	// Usage routes with RBAC under /api/v1/usage
 	s.router.With(s.rbacService.RequirePermission("quota.read")).
 		Get("/api/v1/usage/stats", s.handleGetUsageStats)
 	s.router.With(s.rbacService.RequirePermission("quota.read")).
@@ -134,13 +123,9 @@ func (s *Server) setupRoutes() {
 	s.router.With(s.rbacService.RequirePermission("storage.read")).
 		Get("/api/v1/presigned", s.handleGetPresignedURL)
 
-	// Quota management routes
 	s.setupQuotaManagementRoutes()
-
-	// Pattern routes if DB available
 	s.setupPatternRoutes()
 
-	// RBAC management endpoints under /api/rbac
 	handlers := rbac.NewRBACHandlers(s.rbacService.manager, s.rbacService.auditor)
 	s.router.Route("/api/rbac", func(r chi.Router) {
 		r.Get("/roles", handlers.HandleGetRoles)
@@ -153,44 +138,34 @@ func (s *Server) setupRoutes() {
 		r.Get("/audit", handlers.HandleGetAuditLogs)
 	})
 
-	// S3 catch-all (MUST be ABSOLUTELY LAST)
-	// This catches everything that didn't match above
 	s.logger.Info("Registering S3 catch-all handler")
 	s.router.HandleFunc("/*", s.handleS3Request)
 }
 
-// registerComplianceRoutes sets up all GDPR compliance endpoints
 func (s *Server) registerComplianceRoutes() {
-	// Initialize compliance handler with mock implementations
-	// In production, these would use real database implementations
 	complianceHandler := compliance.NewAPIHandler(
 		compliance.NewGDPRService(nil, s.logger),
 		compliance.NewPortabilityService(nil, nil, s.logger),
 		compliance.NewConsentService(nil, s.logger),
 		compliance.NewBreachService(nil, s.logger),
 		compliance.NewROPAService(nil, s.logger),
-		compliance.NewPrivacyService(nil), // Added privacy service
+		compliance.NewPrivacyService(nil),
 		s.logger,
 	)
 
 	s.router.Route("/api/compliance", func(r chi.Router) {
-		// All compliance routes require authentication
 		r.Use(s.requireJWT)
 
-		// GDPR Subject Access Requests (Article 15)
 		r.Post("/sar", complianceHandler.HandleCreateSAR)
 		r.Get("/sar/{id}", complianceHandler.HandleGetSARStatus)
 		r.Get("/inventory", complianceHandler.HandleGetDataInventory)
 		r.Get("/activities", complianceHandler.HandleListProcessingActivities)
 
-		// Right to Erasure (Article 17)
 		r.Post("/deletion", complianceHandler.HandleCreateDeletionRequest)
 
-		// Data Portability (Article 20)
 		r.Post("/export", complianceHandler.HandleCreateExport)
 		r.Get("/export/{id}", complianceHandler.HandleGetExport)
 
-		// Consent Management (Articles 7 & 8)
 		r.Post("/consent", complianceHandler.HandleGrantConsent)
 		r.Delete("/consent/{purpose}", complianceHandler.HandleWithdrawConsent)
 		r.Get("/consent", complianceHandler.HandleGetConsentStatus)
@@ -198,7 +173,6 @@ func (s *Server) registerComplianceRoutes() {
 		r.Get("/consent/history", complianceHandler.HandleGetConsentHistory)
 		r.Get("/consent/purposes", complianceHandler.HandleListConsentPurposes)
 
-		// Breach Notification (Articles 33 & 34)
 		r.Post("/breach", complianceHandler.HandleReportBreach)
 		r.Get("/breach/{id}", complianceHandler.HandleGetBreach)
 		r.Get("/breach", complianceHandler.HandleListBreaches)
@@ -206,7 +180,6 @@ func (s *Server) registerComplianceRoutes() {
 		r.Post("/breach/{id}/notify", complianceHandler.HandleNotifyBreach)
 		r.Get("/breach/stats", complianceHandler.HandleGetBreachStats)
 
-		// Records of Processing Activities - ROPA (Article 30)
 		r.Post("/ropa/activities", complianceHandler.HandleCreateActivity)
 		r.Get("/ropa/activities/{id}", complianceHandler.HandleGetActivity)
 		r.Get("/ropa/activities", complianceHandler.HandleListActivities)
@@ -217,15 +190,12 @@ func (s *Server) registerComplianceRoutes() {
 		r.Get("/ropa/compliance/{id}", complianceHandler.HandleCheckCompliance)
 		r.Get("/ropa/stats", complianceHandler.HandleGetROPAStats)
 
-		// Privacy Controls (Article 25) - Added routes
 		r.Post("/privacy/controls", complianceHandler.HandleEnablePrivacyControl)
 		r.Post("/privacy/minimize", complianceHandler.HandleMinimizeData)
 		r.Get("/privacy/purpose/{dataId}/{purpose}", complianceHandler.HandleCheckPurpose)
 		r.Post("/privacy/pseudonymize", complianceHandler.HandlePseudonymize)
 	})
 }
-
-// Auth handlers using the server's shared auth service
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -239,7 +209,6 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use server's auth service
 	user, tenant, apiKey, err := s.auth.CreateUserWithTenant(
 		r.Context(), req.Email, req.Password, req.Company)
 	if err != nil {
@@ -247,7 +216,6 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Return credentials
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]string{
 		"accessKeyId":     apiKey.Key,
@@ -274,7 +242,6 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use server's auth service
 	valid, err := s.auth.ValidatePassword(r.Context(), req.Email, req.Password)
 	if err != nil || !valid {
 		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
@@ -293,13 +260,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response := map[string]string{
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]string{
 		"token":     token,
 		"tenant_id": user.TenantID,
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(response); err != nil {
+	}); err != nil {
 		s.logger.Error("failed to encode login response", zap.Error(err))
 	}
 }
@@ -320,14 +285,11 @@ func (s *Server) handlePasswordReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// In production, email the token. For now, return it
-	response := map[string]string{
-		"message": "Reset token generated",
-		"token":   token, // Don't do this in production!
-	}
-
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(response); err != nil {
+	if err := json.NewEncoder(w).Encode(map[string]string{
+		"message": "Reset token generated",
+		"token":   token,
+	}); err != nil {
 		s.logger.Error("failed to encode password reset response", zap.Error(err))
 	}
 }
@@ -343,14 +305,15 @@ func (s *Server) handlePasswordResetComplete(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	err := s.auth.CompletePasswordReset(r.Context(), req.Token, req.NewPassword)
-	if err != nil {
+	if err := s.auth.CompletePasswordReset(r.Context(), req.Token, req.NewPassword); err != nil {
 		http.Error(w, "Invalid or expired token", http.StatusBadRequest)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(map[string]string{"message": "Password reset successful"}); err != nil {
+	if err := json.NewEncoder(w).Encode(map[string]string{
+		"message": "Password reset successful",
+	}); err != nil {
 		s.logger.Error("failed to encode password reset complete response", zap.Error(err))
 	}
 }
@@ -367,20 +330,17 @@ func (s *Server) WrapWithRBACPermission(permission string, handler http.HandlerF
 	if s.rbacService == nil {
 		return handler
 	}
-
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID := rbac.GetUserID(r.Context())
 		if userID.String() == "00000000-0000-0000-0000-000000000000" {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
-
 		if !s.rbacService.manager.UserHasPermission(userID, permission) {
 			http.Error(w, "Forbidden - insufficient permissions", http.StatusForbidden)
 			s.rbacService.auditor.LogPermissionCheck(userID, permission, false)
 			return
 		}
-
 		s.rbacService.auditor.LogPermissionCheck(userID, permission, true)
 		handler(w, r)
 	}
@@ -391,29 +351,24 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		atomic.LoadInt64(&s.requestCount),
 		atomic.LoadInt64(&s.errorCount),
 	)
-
 	w.Header().Set("Content-Type", "text/plain")
 	_, _ = w.Write([]byte(metrics))
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
-	version := map[string]string{
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{
 		"version": "0.1.0",
 		"build":   "2025-08-12",
 		"go":      runtime.Version(),
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(version)
+	})
 }
 
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&s.requestCount, 1)
 		start := time.Now()
-
 		next.ServeHTTP(w, r)
-
 		s.logger.Info("request",
 			zap.String("method", r.Method),
 			zap.String("path", r.URL.Path),
@@ -423,7 +378,8 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 }
 
 func (s *Server) Start() error {
-	s.logger.Info("Starting server with RBAC and API Key Management", zap.Int("port", s.config.Server.Port))
+	s.logger.Info("Starting server with RBAC and API Key Management",
+		zap.Int("port", s.config.Server.Port))
 	return s.httpServer.ListenAndServe()
 }
 
@@ -435,7 +391,6 @@ func (s *Server) GetRouter() chi.Router {
 	return s.router
 }
 
-// requireJWT is middleware to check JWT authentication for API routes
 func (s *Server) requireJWT(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := r.Header.Get("Authorization")
@@ -443,8 +398,6 @@ func (s *Server) requireJWT(next http.Handler) http.Handler {
 			http.Error(w, "Unauthorized - missing token", http.StatusUnauthorized)
 			return
 		}
-
-		// Remove "Bearer " prefix if present
 		token = strings.TrimPrefix(token, "Bearer ")
 		token = strings.TrimSpace(token)
 
@@ -454,11 +407,9 @@ func (s *Server) requireJWT(next http.Handler) http.Handler {
 			return
 		}
 
-		// Use typed context keys
 		ctx := context.WithValue(r.Context(), userIDKey, claims.UserID)
 		ctx = context.WithValue(ctx, emailKey, claims.Email)
 		ctx = context.WithValue(ctx, tenantIDKey, claims.TenantID)
-
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

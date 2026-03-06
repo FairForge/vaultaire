@@ -15,7 +15,7 @@ type DBAuthService struct {
 
 func NewDBAuthService(db *sql.DB) *DBAuthService {
 	return &DBAuthService{
-		AuthService: NewAuthService(nil),
+		AuthService: NewAuthService(nil, nil),
 		db:          db,
 	}
 }

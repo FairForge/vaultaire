@@ -258,16 +258,17 @@ func (s *ConsentService) ListPurposes(ctx context.Context) ([]*ConsentPurpose, e
 	return purposes, nil
 }
 
-// VerifyAge checks if user meets minimum age requirement
+// VerifyAge checks if user meets minimum age requirement.
+//
+// Previous implementation used YearDay() comparison which breaks across
+// leap year boundaries — a birthday on March 1 has YearDay 60 in a
+// non-leap year but 61 in a leap year, causing the "exactly N years"
+// case to fail intermittently.
+//
+// AddDate handles all calendar edge cases correctly: it returns the exact
+// date of the Nth birthday, and we check if that date has been reached.
 func (s *ConsentService) VerifyAge(birthDate time.Time, minimumAge int) bool {
-	age := time.Now().Year() - birthDate.Year()
-
-	// Adjust if birthday hasn't occurred yet this year
-	if time.Now().YearDay() < birthDate.YearDay() {
-		age--
-	}
-
-	return age >= minimumAge
+	return !time.Now().Before(birthDate.AddDate(minimumAge, 0, 0))
 }
 
 // RequiresParentalConsent checks if user requires parental consent (under 16)
