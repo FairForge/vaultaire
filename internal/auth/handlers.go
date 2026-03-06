@@ -311,12 +311,14 @@ type AuthHandler struct {
 	authService *AuthService
 }
 
-// NewAuthHandler creates a new auth handler
+// NewAuthHandler creates a new auth handler.
+// db is passed through to AuthService so that Register persists
+// users, tenants, and quota rows to PostgreSQL.
 func NewAuthHandler(db *sql.DB, logger *zap.Logger) *AuthHandler {
 	return &AuthHandler{
 		db:          db,
 		logger:      logger,
-		authService: NewAuthService(nil, nil),
+		authService: NewAuthService(nil, db), // db was previously nil — registrations never persisted
 	}
 }
 
@@ -333,25 +335,34 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use h.authService instead of creating new one
 	_, tenant, _, err := h.authService.CreateUserWithTenant(
 		r.Context(), req.Email, req.Password, req.Company)
-
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	// Return credentials
+	// Return credentials. Endpoint is read from VAULTAIRE_ENDPOINT so
+	// it works correctly in production without a code change.
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{
 		"accessKeyId":     tenant.AccessKey,
 		"secretAccessKey": tenant.SecretKey,
-		"endpoint":        "http://localhost:8000",
+		"endpoint":        getEndpointURL(),
 	})
 }
 
-// Helper function to check if we're in a test environment
+// getEndpointURL returns the public S3 endpoint.
+// Set VAULTAIRE_ENDPOINT in the systemd service file for production.
+// Falls back to localhost for local development.
+func getEndpointURL() string {
+	if ep := os.Getenv("VAULTAIRE_ENDPOINT"); ep != "" {
+		return ep
+	}
+	return "http://localhost:8000"
+}
+
+// isTestEnvironment returns true when running outside production.
 func isTestEnvironment() bool {
 	env := os.Getenv("ENV")
 	return env == "" || env == "test" || env == "development"
@@ -369,7 +380,6 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use h.authService (same instance as Register)
 	valid, err := h.authService.ValidatePassword(r.Context(), req.Email, req.Password)
 	if err != nil || !valid {
 		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
@@ -379,13 +389,11 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	user, _ := h.authService.GetUserByEmail(r.Context(), req.Email)
 	token, _ := h.authService.GenerateJWT(user)
 
-	response := map[string]string{
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{
 		"token":     token,
 		"tenant_id": user.TenantID,
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(response)
+	})
 }
 
 // RequestPasswordReset initiates password reset flow
@@ -405,14 +413,12 @@ func (h *AuthHandler) RequestPasswordReset(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// In production, email the token. For now, return it
-	response := map[string]string{
-		"message": "Reset token generated",
-		"token":   token, // Don't do this in production!
-	}
-
+	// In production, email the token. For now, return it.
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(response)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"message": "Reset token generated",
+		"token":   token, // TODO: email this instead of returning it
+	})
 }
 
 // CompletePasswordReset completes the reset with new password
@@ -427,8 +433,7 @@ func (h *AuthHandler) CompletePasswordReset(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	err := h.authService.CompletePasswordReset(r.Context(), req.Token, req.NewPassword)
-	if err != nil {
+	if err := h.authService.CompletePasswordReset(r.Context(), req.Token, req.NewPassword); err != nil {
 		http.Error(w, "Invalid or expired token", http.StatusBadRequest)
 		return
 	}
