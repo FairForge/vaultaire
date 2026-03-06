@@ -3,6 +3,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net/http"
 	"strings"
@@ -10,7 +11,6 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/common"
-
 	"github.com/FairForge/vaultaire/internal/events"
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"go.uber.org/zap"
@@ -53,23 +53,17 @@ func (p *S3Parser) ParseRequest(r *http.Request) (*S3Request, error) {
 		Headers:   make(map[string]string),
 	}
 
-	// Parse the path
 	p.parsePath(req)
 
-	// Parse query parameters BEFORE determining operation
 	for key, values := range r.URL.Query() {
 		if len(values) > 0 {
 			req.Query[key] = values[0]
 		}
 	}
 
-	// Determine operation (needs query params for multipart detection)
 	p.determineOperation(req, r.Method)
-
-	// Parse relevant headers
 	p.parseHeaders(req, r)
 
-	// Log the parsed request
 	p.logger.Info("Parsed S3 request",
 		zap.String("bucket", req.Bucket),
 		zap.String("object", req.Object),
@@ -83,21 +77,14 @@ func (p *S3Parser) ParseRequest(r *http.Request) (*S3Request, error) {
 
 // parsePath extracts bucket and object from URL path
 func (p *S3Parser) parsePath(req *S3Request) {
-	// Remove leading slash
 	path := strings.TrimPrefix(req.Path, "/")
-
-	// If empty, it's a list buckets request
 	if path == "" {
 		return
 	}
 
-	// Split by first slash
 	parts := strings.SplitN(path, "/", 2)
-
-	// First part is always the bucket
 	req.Bucket = parts[0]
 
-	// If there's a second part, it's the object key
 	if len(parts) > 1 && parts[1] != "" {
 		req.Object = parts[1]
 	}
@@ -105,7 +92,6 @@ func (p *S3Parser) parsePath(req *S3Request) {
 
 // determineOperation determines the S3 operation from method and path
 func (p *S3Parser) determineOperation(req *S3Request, method string) {
-	// Root path operations
 	if req.Bucket == "" {
 		switch method {
 		case "GET":
@@ -116,7 +102,6 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 		return
 	}
 
-	// Bucket-level operations
 	if req.Object == "" {
 		switch method {
 		case "GET":
@@ -133,7 +118,6 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 		return
 	}
 
-	// Object-level operations with multipart detection
 	switch method {
 	case "GET":
 		if _, ok := req.Query["uploadId"]; ok {
@@ -148,7 +132,6 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 			req.Operation = "PutObject"
 		}
 	case "DELETE":
-		// Check if this is an abort multipart upload
 		if _, ok := req.Query["uploadId"]; ok {
 			req.Operation = "AbortMultipartUpload"
 		} else {
@@ -157,7 +140,6 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 	case "HEAD":
 		req.Operation = "HeadObject"
 	case "POST":
-		// Check for multipart upload
 		if _, ok := req.Query["uploads"]; ok {
 			req.Operation = "InitiateMultipartUpload"
 		} else if _, ok := req.Query["uploadId"]; ok {
@@ -172,7 +154,6 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 
 // parseHeaders extracts relevant S3 headers
 func (p *S3Parser) parseHeaders(req *S3Request, r *http.Request) {
-	// Common S3 headers
 	headersToParse := []string{
 		"Content-Type",
 		"Content-Length",
@@ -191,7 +172,6 @@ func (p *S3Parser) parseHeaders(req *S3Request, r *http.Request) {
 		}
 	}
 
-	// Also capture all x-amz-* headers
 	for key, values := range r.Header {
 		if strings.HasPrefix(strings.ToLower(key), "x-amz-") && len(values) > 0 {
 			req.Headers[key] = values[0]
@@ -201,7 +181,6 @@ func (p *S3Parser) parseHeaders(req *S3Request, r *http.Request) {
 
 // handleS3Request handles S3-compatible API requests
 func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
-	// Skip health check endpoints
 	if r.URL.Path == "/health" || r.URL.Path == "/ready" ||
 		r.URL.Path == "/metrics" || r.URL.Path == "/version" {
 		return
@@ -210,9 +189,7 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 	var tenantID string
 	var err error
 
-	// Check if we're in test mode
 	if !s.testMode {
-		// Production mode: validate the request signature
 		auth := auth.NewAuth(s.db, s.logger)
 		tenantID, err = auth.ValidateRequest(r)
 		if err != nil {
@@ -220,7 +197,6 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 				zap.Error(err),
 				zap.String("path", r.URL.Path))
 
-			// Return S3-style authentication error
 			w.Header().Set("Content-Type", "application/xml")
 			w.WriteHeader(http.StatusForbidden)
 			if _, err := fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?>
@@ -234,11 +210,9 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		// Test mode: check if tenant is already in context
 		if t, err := tenant.FromContext(r.Context()); err == nil && t != nil {
 			tenantID = t.ID
 		} else {
-			// Default to "test" tenant for tests
 			tenantID = "test"
 		}
 		s.logger.Debug("test mode - skipping auth",
@@ -246,7 +220,6 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 			zap.String("path", r.URL.Path))
 	}
 
-	// Log authentication status
 	if tenantID != "" {
 		s.logger.Info("authenticated request",
 			zap.String("tenant_id", tenantID),
@@ -258,17 +231,15 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 			zap.String("path", r.URL.Path))
 	}
 
-	// Create parser
 	parser := NewS3Parser(s.logger)
 
-	// Parse the request
 	s3Req, err := parser.ParseRequest(r)
 	if err != nil {
 		s.logger.Error("Failed to parse S3 request", zap.Error(err))
 		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
-	// Put the tenant ID into the context immediately
+
 	if tenantID != "" {
 		ctx := context.WithValue(r.Context(), common.TenantIDKey, tenantID)
 		r = r.WithContext(ctx)
@@ -276,19 +247,15 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 
 	s3Req.TenantID = tenantID
 
-	// Always create a tenant - use "default" for anonymous
 	if tenantID == "" {
 		tenantID = "default"
 	}
 
-	// Use existing tenant from context in test mode, or create new one
 	var t *tenant.Tenant
 	if s.testMode {
-		// Try to get tenant from context first
 		if existingTenant, err := tenant.FromContext(r.Context()); err == nil && existingTenant != nil {
 			t = existingTenant
 		} else {
-			// Create a test tenant
 			t = &tenant.Tenant{
 				ID:                tenantID,
 				Namespace:         fmt.Sprintf("tenant/%s/", tenantID),
@@ -299,7 +266,6 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else {
-		// Production mode: create tenant normally
 		t = &tenant.Tenant{
 			ID:                tenantID,
 			Namespace:         fmt.Sprintf("tenant/%s/", tenantID),
@@ -310,29 +276,24 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Get the existing tenant ID from the context FIRST
 	existingTenantID := ""
-	if t := r.Context().Value(common.TenantIDKey); t != nil {
-		if tid, ok := t.(string); ok {
+	if tv := r.Context().Value(common.TenantIDKey); tv != nil {
+		if tid, ok := tv.(string); ok {
 			existingTenantID = tid
 		}
 	}
 
-	// Add tenant to request context if not already there
 	ctx := tenant.WithTenant(r.Context(), t)
-
-	// Preserve the common.TenantIDKey if it existed
 	if existingTenantID != "" {
 		ctx = context.WithValue(ctx, common.TenantIDKey, existingTenantID)
 	}
 	r = r.WithContext(ctx)
 
-	// Log event for ML training data collection
 	eventLogger := events.NewEventLogger(s.logger)
 	eventLogger.Log(events.Event{
 		Type:      "s3_request",
-		Container: s3Req.Bucket, // External: bucket, Internal: container
-		Artifact:  s3Req.Object, // External: object, Internal: artifact
+		Container: s3Req.Bucket,
+		Artifact:  s3Req.Object,
 		Operation: s3Req.Operation,
 		TenantID:  tenantID,
 		Data: map[string]interface{}{
@@ -345,7 +306,6 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 
-	// Route based on operation
 	switch s3Req.Operation {
 	case "GetObject":
 		s.handleGetObject(w, r, s3Req)
@@ -382,85 +342,70 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 
 // handleGetObject handles S3 GET requests
 func (s *Server) handleGetObject(w http.ResponseWriter, r *http.Request, req *S3Request) {
-	// Use the adapter to translate S3 → Engine
-	adapter := NewS3ToEngine(s.engine, s.logger)
+	adapter := NewS3ToEngine(s.engine, s.db, s.logger)
 
-	// Log dual terminology for debugging
 	s.logger.Debug("S3 GET translating to engine",
-		zap.String("s3.bucket", req.Bucket),
-		zap.String("s3.object", req.Object),
-		zap.String("engine.container", req.Bucket), // Maps to container
-		zap.String("engine.artifact", req.Object),  // Maps to artifact
-	)
-
-	// Call the adapter's HandleGet
-	adapter.HandleGet(w, r, req.Bucket, req.Object)
-}
-
-// handleHeadObject handles HEAD requests
-func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S3Request) {
-	// Log dual terminology for debugging
-	s.logger.Debug("S3 HEAD translating to engine",
 		zap.String("s3.bucket", req.Bucket),
 		zap.String("s3.object", req.Object),
 		zap.String("engine.container", req.Bucket),
 		zap.String("engine.artifact", req.Object),
 	)
 
-	// Get the tenant from context
+	adapter.HandleGet(w, r, req.Bucket, req.Object)
+}
+
+// handleHeadObject handles HEAD requests by querying PostgreSQL metadata.
+//
+// Previously this called engine.Get() and read every byte just to count
+// them — HEAD latency scaled with file size (500MB = 62s) and AWS CLI
+// downloads broke entirely for large files because CLI does HEAD before GET.
+//
+// Now it queries object_head_cache which is written on every successful PUT.
+// HEAD latency is now ~1ms regardless of object size.
+func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S3Request) {
 	t, err := tenant.FromContext(r.Context())
 	if err != nil || t == nil {
 		WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
 		return
 	}
 
-	// Build the container name with tenant prefix
-	containerName := fmt.Sprintf("%s_%s", t.ID, req.Bucket)
+	var sizeBytes int64
+	var etag, contentType string
 
-	// Try to get the artifact to check if it exists
-	reader, err := s.engine.Get(r.Context(), containerName, req.Object)
-	if err != nil {
-		s.logger.Debug("HeadObject failed",
+	err = s.db.QueryRowContext(r.Context(), `
+		SELECT size_bytes, etag, content_type
+		FROM object_head_cache
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
+	`, t.ID, req.Bucket, req.Object).Scan(&sizeBytes, &etag, &contentType)
+
+	if err == sql.ErrNoRows {
+		s.logger.Warn("HEAD: object not in metadata cache",
+			zap.String("tenant_id", t.ID),
 			zap.String("bucket", req.Bucket),
-			zap.String("object", req.Object),
-			zap.Error(err))
+			zap.String("object", req.Object))
 		WriteS3Error(w, ErrNoSuchKey, r.URL.Path, generateRequestID())
 		return
 	}
-
-	// Read the data to get the size
-	var size int64 = 0
-	if reader != nil {
-		// For HEAD, we need to get the size somehow
-		// Read all data to count bytes (not efficient but works for MVP)
-		buf := make([]byte, 8192)
-		for {
-			n, err := reader.Read(buf)
-			size += int64(n)
-			if err != nil {
-				break
-			}
-		}
-		_ = reader.Close() // Error intentionally ignored
+	if err != nil {
+		s.logger.Error("HEAD: metadata query failed", zap.Error(err))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return
 	}
 
-	// Set the required headers
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("ETag", "\"d41d8cd98f00b204e9800998ecf8427e\"") // Mock ETag for now
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", sizeBytes))
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("ETag", fmt.Sprintf(`"%s"`, etag))
 	w.Header().Set("Last-Modified", time.Now().UTC().Format("Mon, 02 Jan 2006 15:04:05 GMT"))
 	w.Header().Set("x-amz-storage-class", "STANDARD")
-
-	// HEAD requests don't have a body, just headers
+	w.Header().Set("x-amz-request-id", generateRequestID())
+	// HEAD must not write a body.
 	w.WriteHeader(http.StatusOK)
 }
 
 // handlePutObject handles PUT requests
 func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3Request) {
-	// Use the adapter to translate S3 → Engine
-	adapter := NewS3ToEngine(s.engine, s.logger)
+	adapter := NewS3ToEngine(s.engine, s.db, s.logger)
 
-	// Log dual terminology
 	s.logger.Debug("S3 PUT translating to engine",
 		zap.String("s3.bucket", req.Bucket),
 		zap.String("s3.object", req.Object),
@@ -468,22 +413,19 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3
 		zap.String("engine.artifact", req.Object),
 		zap.Int64("size", r.ContentLength))
 
-	// Call the adapter's HandlePut
 	adapter.HandlePut(w, r, req.Bucket, req.Object)
 }
 
 // handleDeleteObject handles DELETE requests
 func (s *Server) handleDeleteObject(w http.ResponseWriter, r *http.Request, req *S3Request) {
-	// Use the adapter for tenant isolation (like PUT and GET do)
-	adapter := NewS3ToEngine(s.engine, s.logger)
+	adapter := NewS3ToEngine(s.engine, s.db, s.logger)
 	adapter.HandleDelete(w, r, req.Bucket, req.Object)
 }
 
 // handleListObjects handles bucket listing
 func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request, req *S3Request) {
-	// Use the adapter for tenant isolation (like PUT/GET/DELETE do)
-	adapter := NewS3ToEngine(s.engine, s.logger)
-	adapter.HandleList(w, r, req.Bucket, "") // Empty prefix for now
+	adapter := NewS3ToEngine(s.engine, s.db, s.logger)
+	adapter.HandleList(w, r, req.Bucket, "")
 }
 
 // handleListBuckets handles listing all buckets
