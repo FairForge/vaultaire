@@ -2,11 +2,11 @@ package api
 
 import (
 	"context"
-	"crypto/sha256"
+	"crypto/md5"
+	"database/sql"
 	"fmt"
 	"io"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -15,16 +15,21 @@ import (
 	"go.uber.org/zap"
 )
 
-// S3ToEngine adapts S3 requests to engine operations
+// S3ToEngine adapts S3 requests to engine operations.
+// The db field enables writing object metadata to PostgreSQL on PUT,
+// so HEAD requests can be served from the database instead of fetching
+// the full object from the backend.
 type S3ToEngine struct {
 	engine engine.Engine
+	db     *sql.DB
 	logger *zap.Logger
 }
 
 // NewS3ToEngine creates a new adapter
-func NewS3ToEngine(e engine.Engine, logger *zap.Logger) *S3ToEngine {
+func NewS3ToEngine(e engine.Engine, db *sql.DB, logger *zap.Logger) *S3ToEngine {
 	return &S3ToEngine{
 		engine: e,
+		db:     db,
 		logger: logger,
 	}
 }
@@ -87,15 +92,12 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	}
 	defer func() { _ = reader.Close() }()
 
-	// Generate ETag from path (consistent across requests)
-	h := sha256.New()
-	h.Write([]byte(filepath.Join(container, artifact)))
-	etag := fmt.Sprintf("%x", h.Sum(nil))[:32]
-
-	// Set S3-compliant response headers
+	// Set S3-compliant response headers.
+	// ETag is intentionally omitted here — GET does not need it and we
+	// don't have the hash without re-reading the object. HEAD (which does
+	// need ETag) is served from object_head_cache, not this path.
 	contentType := a.detectContentType(artifact)
 	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("ETag", fmt.Sprintf(`"%s"`, etag))
 	w.Header().Set("x-amz-request-id", generateRequestID())
 	w.Header().Set("x-amz-version-id", "null")
 	w.Header().Set("Accept-Ranges", "bytes")
@@ -110,7 +112,6 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		return
 	}
 
-	// Log successful retrieval
 	a.logger.Info("artifact retrieved",
 		zap.String("s3.bucket", bucket),
 		zap.String("s3.object", object),
@@ -121,7 +122,12 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 
 // detectContentType determines MIME type from extension
 func (a *S3ToEngine) detectContentType(artifact string) string {
-	ext := strings.ToLower(filepath.Ext(artifact))
+	// Find the last dot for the extension
+	dotIdx := strings.LastIndex(artifact, ".")
+	if dotIdx == -1 {
+		return "application/octet-stream"
+	}
+	ext := strings.ToLower(artifact[dotIdx:])
 
 	mimeTypes := map[string]string{
 		".txt":  "text/plain",
@@ -144,7 +150,15 @@ func (a *S3ToEngine) detectContentType(artifact string) string {
 	return "application/octet-stream"
 }
 
-// HandlePut processes S3 PUT requests using the engine
+// HandlePut processes S3 PUT requests using the engine.
+//
+// The request body is wrapped in an io.TeeReader that feeds every byte
+// into an MD5 hasher as the data streams through to the engine. This
+// means the ETag is computed in a single pass at zero extra memory cost.
+//
+// After a successful engine.Put, the size, ETag, and content-type are
+// persisted to object_head_cache so that HEAD requests can be answered
+// from PostgreSQL without touching the storage backend.
 func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, object string) {
 	// Get tenant from context
 	t, err := tenant.FromContext(r.Context())
@@ -154,8 +168,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		return
 	}
 
-	// Translate S3 terms to Engine terms with tenant namespace
-	container := t.NamespaceContainer(bucket) // Namespaced container
+	container := t.NamespaceContainer(bucket)
 	artifact := object
 
 	a.logger.Debug("PUT with tenant isolation",
@@ -164,8 +177,12 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		zap.String("namespaced_container", container),
 		zap.String("artifact", artifact))
 
-	// Call engine with Container/Artifact terminology
-	err = a.engine.Put(r.Context(), container, artifact, r.Body)
+	// Wrap the request body in a TeeReader so the MD5 hash is computed
+	// as data flows through — no second pass, no buffering in memory.
+	hasher := md5.New()
+	hashingBody := io.TeeReader(r.Body, hasher)
+
+	err = a.engine.Put(r.Context(), container, artifact, hashingBody)
 	if err != nil {
 		a.logger.Error("engine put failed",
 			zap.Error(err),
@@ -175,29 +192,54 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		return
 	}
 
-	// Calculate ETag using SHA256 of the path
-	h := sha256.New()
-	h.Write([]byte(filepath.Join(container, artifact)))
-	etag := fmt.Sprintf("%x", h.Sum(nil))[:32]
+	// Compute ETag from the MD5 bytes accumulated during the upload.
+	// S3 standard: ETag = hex-encoded MD5, wrapped in double quotes in headers.
+	etag := fmt.Sprintf("%x", hasher.Sum(nil))
 
-	// Return S3-compliant response
+	// Persist metadata to object_head_cache.
+	// This is what makes HEAD O(1) instead of O(file_size).
+	// ON CONFLICT handles re-uploads of the same key.
+	// This INSERT is non-fatal: if it fails the object is still safely
+	// stored; HEAD will return 404 until the next successful upload.
+	contentType := r.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	if a.db != nil {
+		_, dbErr := a.db.ExecContext(r.Context(), `
+			INSERT INTO object_head_cache
+				(tenant_id, bucket, object_key, size_bytes, etag, content_type, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, NOW())
+			ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
+				size_bytes   = EXCLUDED.size_bytes,
+				etag         = EXCLUDED.etag,
+				content_type = EXCLUDED.content_type,
+				updated_at   = NOW()
+		`, t.ID, bucket, artifact, r.ContentLength, etag, contentType)
+		if dbErr != nil {
+			a.logger.Error("failed to cache object metadata — HEAD will return 404 for this object until next upload",
+				zap.Error(dbErr),
+				zap.String("tenant_id", t.ID),
+				zap.String("bucket", bucket),
+				zap.String("object", artifact))
+			// Do NOT return an error — the object is safely stored.
+		}
+	}
+
 	w.Header().Set("ETag", fmt.Sprintf(`"%s"`, etag))
 	w.Header().Set("x-amz-request-id", generateRequestID())
 	w.WriteHeader(http.StatusOK)
 
-	// Log successful upload
 	a.logger.Info("artifact stored",
 		zap.String("tenant_id", t.ID),
 		zap.String("s3.bucket", bucket),
 		zap.String("s3.object", object),
-		zap.String("engine.container", container),
-		zap.String("engine.artifact", artifact),
+		zap.String("etag", etag),
 		zap.Int64("size", r.ContentLength))
 }
 
 // HandleDelete processes S3 DELETE requests
 func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket, object string) {
-	// Get tenant from context
 	t, err := tenant.FromContext(r.Context())
 	if err != nil {
 		a.logger.Warn("no tenant in context", zap.Error(err))
@@ -205,14 +247,12 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 		return
 	}
 
-	// Delete using engine with tenant namespace
 	container := t.NamespaceContainer(bucket)
 
 	if err := a.engine.Delete(r.Context(), container, object); err != nil {
-		// Check if it's a not found error
 		if strings.Contains(err.Error(), "no such file or directory") ||
 			strings.Contains(err.Error(), "not found") {
-			// For S3 compatibility, DELETE of non-existent object is still success
+			// S3 compatibility: DELETE of non-existent object is success
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -224,13 +264,21 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 		return
 	}
 
-	// S3 returns 204 No Content for successful DELETE
+	// Best-effort: remove from metadata cache.
+	// Non-fatal if this fails — stale cache rows are harmless (HEAD returns
+	// data for a deleted object, which is only a consistency issue, not data loss).
+	if a.db != nil {
+		_, _ = a.db.ExecContext(r.Context(), `
+			DELETE FROM object_head_cache
+			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
+		`, t.ID, bucket, object)
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // HandleList processes S3 LIST requests
 func (a *S3ToEngine) HandleList(w http.ResponseWriter, r *http.Request, bucket, prefix string) {
-	// Get tenant from context
 	t, err := tenant.FromContext(r.Context())
 	if err != nil {
 		a.logger.Warn("no tenant in context", zap.Error(err))
@@ -238,7 +286,6 @@ func (a *S3ToEngine) HandleList(w http.ResponseWriter, r *http.Request, bucket, 
 		return
 	}
 
-	// List using engine with tenant namespace
 	container := t.NamespaceContainer(bucket)
 
 	artifacts, err := a.engine.List(r.Context(), container, prefix)
@@ -250,19 +297,16 @@ func (a *S3ToEngine) HandleList(w http.ResponseWriter, r *http.Request, bucket, 
 		return
 	}
 
-	// Convert to S3 XML response
 	w.Header().Set("Content-Type", "application/xml")
 
 	if _, err := w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>`)); err != nil {
 		a.logger.Error("failed to write XML header", zap.Error(err))
 		return
 	}
-
 	if _, err := w.Write([]byte(`<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">`)); err != nil {
 		a.logger.Error("failed to write response", zap.Error(err))
 		return
 	}
-
 	if _, err := fmt.Fprintf(w, "<Name>%s</Name>", bucket); err != nil {
 		a.logger.Error("failed to write bucket name", zap.Error(err))
 		return

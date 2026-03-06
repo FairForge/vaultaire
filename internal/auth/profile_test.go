@@ -9,7 +9,7 @@ import (
 )
 
 func TestUserProfile_Get(t *testing.T) {
-	auth := NewAuthService(nil)
+	auth := NewAuthService(nil, nil)
 	ctx := context.Background()
 
 	// Create test user
@@ -28,7 +28,7 @@ func TestUserProfile_Get(t *testing.T) {
 }
 
 func TestUserProfile_Update(t *testing.T) {
-	auth := NewAuthService(nil)
+	auth := NewAuthService(nil, nil)
 	ctx := context.Background()
 
 	user, _, _, err := auth.CreateUserWithTenant(ctx, "update@test.com", "password", "OldCo")
