@@ -105,3 +105,5 @@ vaultaire-bin
 vaultaire-linux
 cmd/geyser-admin-test/
 cmd/geyser-smoke/
+geyser-smoke-bin
+vaultaire-bin
