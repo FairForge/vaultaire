@@ -67,7 +67,7 @@ jobs:
 
       - name: Deploy to Production (NYC)
         env:
-          HOST: ${{ secrets.PROD_NYC_HOST }}
+          HOST: ${{ secrets.PROD_SLC_HOST }}
           USER: ${{ secrets.SSH_USER_PROD }}
         run: |
           ssh-keyscan -t ed25519 "$HOST" >> ~/.ssh/known_hosts

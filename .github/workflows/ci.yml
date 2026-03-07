@@ -1,34 +1,54 @@
 name: CI
+
 on: [push, pull_request]
 
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: vaultaire
+          POSTGRES_USER: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
     steps:
-    - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: '1.21'
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+          cache: true
 
-    - name: Build
-      run: make build
+      - name: Create viera PostgreSQL user
+        run: |
+          psql -h localhost -U postgres -c "CREATE USER viera SUPERUSER;"
+          psql -h localhost -U postgres -c "CREATE DATABASE vaultaire OWNER viera;" || true
 
-    - name: Test S3 Operations
-      run: |
-        ./bin/vaultaire &
-        SERVER_PID=$!
-        sleep 2
+      - name: Build
+        run: go build ./...
 
-        # Test PUT
-        curl -X PUT -H "X-Tenant-ID: test" localhost:8000/test/file.txt -d "test" || exit 1
+      - name: Test
+        run: go test ./...
+        env:
+          DATABASE_URL: postgres://viera@localhost:5432/vaultaire?sslmode=disable
+          JWT_SECRET: ci-test-secret-not-for-production
+          TEST_DB_HOST: localhost
+          TEST_DB_NAME: vaultaire
+          TEST_DB_USER: viera
+          TEST_DB_PASSWORD: ""
 
-        # Test GET
-        curl -H "X-Tenant-ID: test" localhost:8000/test/file.txt || exit 1
-
-        # Test DELETE
-        curl -X DELETE -H "X-Tenant-ID: test" localhost:8000/test/file.txt || exit 1
-
-        kill $SERVER_PID
-        echo "✅ All S3 operations working!"
+      - name: Lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
