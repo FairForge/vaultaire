@@ -97,3 +97,9 @@ cmd/permafrost-benchmark/
 cmd/permafrost-parallel/
 permafrost-benchmark
 permafrost-parallel
+bench-linux
+geyser-test
+loadtest
+loadtest-linux
+vaultaire-bin
+vaultaire-linux

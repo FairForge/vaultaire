@@ -9,7 +9,13 @@ import (
 type Engine interface {
 	// Storage operations (visible to users)
 	Get(ctx context.Context, container, artifact string) (io.ReadCloser, error)
-	Put(ctx context.Context, container, artifact string, data io.Reader, opts ...PutOption) error
+
+	// Put stores an artifact and returns the name of the backend it was
+	// written to. Callers must persist this value alongside object metadata
+	// so that Get can route the read to the same backend, regardless of
+	// what the intelligence / cost-optimizer would otherwise select.
+	Put(ctx context.Context, container, artifact string, data io.Reader, opts ...PutOption) (string, error)
+
 	Delete(ctx context.Context, container, artifact string) error
 	List(ctx context.Context, container, prefix string) ([]Artifact, error)
 
@@ -28,7 +34,7 @@ type Engine interface {
 	GetMetrics(ctx context.Context) (map[string]interface{}, error)
 }
 
-// Driver interface for storage backends - FIXED to use container/artifact
+// Driver interface for storage backends
 type Driver interface {
 	Name() string
 	Get(ctx context.Context, container, artifact string) (io.ReadCloser, error)
