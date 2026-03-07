@@ -5,6 +5,21 @@ on: [push, pull_request]
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: vaultaire
+          POSTGRES_USER: viera
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
     steps:
       - uses: actions/checkout@v4
 
@@ -19,6 +34,9 @@ jobs:
 
       - name: Test
         run: go test ./...
+        env:
+          DATABASE_URL: postgres://viera:postgres@localhost:5432/vaultaire?sslmode=disable
+          JWT_SECRET: ci-test-secret-not-for-production
 
       - name: Lint
         uses: golangci/golangci-lint-action@v6
