@@ -12,6 +12,7 @@ jobs:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: vaultaire
           POSTGRES_USER: viera
+          POSTGRES_HOST_AUTH_METHOD: trust
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
@@ -35,7 +36,7 @@ jobs:
       - name: Test
         run: go test ./...
         env:
-          DATABASE_URL: postgres://viera:postgres@localhost:5432/vaultaire?sslmode=disable
+          DATABASE_URL: postgres://viera@localhost:5432/vaultaire?sslmode=disable
           JWT_SECRET: ci-test-secret-not-for-production
 
       - name: Lint
