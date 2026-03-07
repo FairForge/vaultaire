@@ -5,6 +5,21 @@ on: [push, pull_request]
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: vaultaire
+          POSTGRES_USER: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
 
     steps:
       - uses: actions/checkout@v4
@@ -15,16 +30,19 @@ jobs:
           go-version: '1.21'
           cache: true
 
+      - name: Create viera PostgreSQL user
+        run: |
+          psql -h localhost -U postgres -c "CREATE USER viera SUPERUSER;"
+          psql -h localhost -U postgres -c "CREATE DATABASE vaultaire OWNER viera;" || true
+
       - name: Build
         run: go build ./...
 
       - name: Test
-        # These packages require a real PostgreSQL instance with user 'viera'.
-        # They are excluded here and run in the integration-tests workflow
-        # which provisions a proper DB service. Fix tracked in Step 488.
-        run: |
-          go test $(go list ./... | grep -v \
-            "internal/api$\|internal/audit\|internal/auth/db")
+        run: go test ./...
+        env:
+          DATABASE_URL: postgres://viera@localhost:5432/vaultaire?sslmode=disable
+          JWT_SECRET: ci-test-secret-not-for-production
 
       - name: Lint
         uses: golangci/golangci-lint-action@v6
