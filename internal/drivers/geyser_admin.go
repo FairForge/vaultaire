@@ -19,12 +19,17 @@
 //
 // API endpoints:
 //
-//	GET    /api/keepalive           — extends session, call every 30s
-//	GET    /api/buckets/{id}        — get bucket status
-//	POST   /api/buckets/{id}/airgap — enable airgap on a bucket
-//	POST   /api/buckets             — provision a new bucket
-//	DELETE /api/buckets/{id}        — delete a bucket
-//	GET    /api/invoices            — billing records
+//	GET    /api/keepalive                    — extends session, call every 30s
+//	GET    /api/buckets                      — list all buckets
+//	GET    /api/buckets/{id}                 — get bucket status
+//	POST   /api/buckets                      — provision a new bucket
+//	DELETE /api/buckets/{id}                 — delete a bucket
+//	POST   /api/buckets/{id}/airgap          — enable airgap (one-way, MFA not required)
+//	POST   /api/buckets/{id}/mount           — initiate un-airgap (triggers email MFA)
+//	POST   /api/buckets/{id}/confirmmount    — confirm un-airgap with emailed code
+//	GET    /api/invoices                     — billing records
+//	GET    /api/keys                         — list S3 key IDs (secrets not returned)
+//	GET    /api/tapeCollections              — tape capacity and usage
 package drivers
 
 import (
@@ -74,69 +79,76 @@ type GeyserAdminClient struct {
 
 // GeyserBucketStatus is the operational state of a Geyser bucket.
 type GeyserBucketStatus struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	BucketName  string `json:"bucketName"`
-	Status      string `json:"status"` // "ACTIVE" | "AIRGAPPED" | "PROVISIONING"
-	Endpoint    string `json:"endpoint"`
-	LogicalSize int64  `json:"logicalSize"`
-	Size        int    `json:"size"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	BucketName    string `json:"bucketName"`
+	Status        string `json:"status"` // "ACTIVE" | "AIRGAPPED" | "PROVISIONING"
+	Endpoint      string `json:"endpoint"`
+	LogicalSize   int64  `json:"logicalSize"`
+	Size          int    `json:"size"`
+	Versioning    string `json:"versioning"`
+	ObjectLocking bool   `json:"objectLocking"`
+	CORSEnabled   bool   `json:"corsEnabled"`
+	S3URL         string `json:"s3Url"`
 }
 
 // GeyserTapeCollectionInvoice is the per-collection line item within an invoice.
-// It shows actual TB stored, rate, and any optional add-on costs.
 type GeyserTapeCollectionInvoice struct {
 	ID               string  `json:"id"`
 	Name             string  `json:"name"`
 	TapeCollectionID string  `json:"tapeCollectionId"`
 	DatacenterID     string  `json:"datacenterId"`
 	Geo              string  `json:"geo"`
-	TBCount          float64 `json:"tbCount"`         // actual TB stored this month
-	TBRate           float64 `json:"tbRate"`          // $/TB — currently $1.55
-	TBCost           float64 `json:"tbCost"`          // tbCount * tbRate
-	Compression      bool    `json:"compression"`     // whether compression was enabled
-	CompressionRate  float64 `json:"compressionRate"` // $/TB surcharge if enabled
-	CompressionCost  float64 `json:"compressionCost"` // total compression surcharge
+	TBCount          float64 `json:"tbCount"`
+	TBRate           float64 `json:"tbRate"`
+	TBCost           float64 `json:"tbCost"`
+	Compression      bool    `json:"compression"`
+	CompressionRate  float64 `json:"compressionRate"`
+	CompressionCost  float64 `json:"compressionCost"`
 	Encryption       bool    `json:"encryption"`
 	EncryptionRate   float64 `json:"encryptionRate"`
 	EncryptionCost   float64 `json:"encryptionCost"`
-	Cost             float64 `json:"cost"` // total for this collection line
+	Cost             float64 `json:"cost"`
 }
 
-// GeyserMiscBilling is a catch-all line item, used for the 100TB minimum
-// commitment shortfall charge. If you store less than 100TB, Geyser bills
-// the difference at the standard rate.
-//
-// Example: 18TB used → Amount=82, Rate=1.55, Total=127.10 (shortfall charge)
+// GeyserMiscBilling is the minimum commitment shortfall charge.
+// Geyser bills 100TB minimum at $1.55/TB = $155/month.
+// If you store less than 100TB, Amount = shortfall TB, Total = shortfall cost.
 type GeyserMiscBilling struct {
 	Feature string  `json:"feature"` // "TAPE"
 	Label   string  `json:"label"`   // "Minimum TBs Count Balance"
-	Amount  float64 `json:"amount"`  // TB shortfall against 100TB minimum
+	Amount  float64 `json:"amount"`  // TB shortfall
 	Rate    float64 `json:"rate"`    // $1.55/TB
 	Total   float64 `json:"total"`   // amount * rate
 }
 
 // GeyserInvoice represents a single billing record from GET /api/invoices.
 //
-// Key fields:
-//   - Month is 0-indexed (0=January, 11=December)
-//   - IsInvoice=false means it is a pending estimate, not yet finalised
-//   - Subtotal = tape collection charges only
-//   - Total = subtotal + misc (minimum commitment shortfall)
-//
-// The $155/month minimum reflects the 100TB commitment at $1.55/TB.
-// MiscBilling carries the shortfall charge when actual usage is below 100TB.
+// Month is 0-indexed (0=January, 11=December).
+// IsInvoice=false means it is a pending estimate, not yet finalised.
+// Total = tape collection charges + minimum commitment shortfall.
 type GeyserInvoice struct {
 	ID                     string                        `json:"id"`
 	CreatedAt              string                        `json:"createdAt"`
-	Month                  int                           `json:"month"` // 0-indexed
+	Month                  int                           `json:"month"`
 	Year                   int                           `json:"year"`
-	IsInvoice              bool                          `json:"isInvoice"` // false = estimate
+	IsInvoice              bool                          `json:"isInvoice"`
 	Subtotal               float64                       `json:"subtotal"`
 	Total                  float64                       `json:"total"`
 	Discount               float64                       `json:"discount"`
 	TapeCollectionInvoices []GeyserTapeCollectionInvoice `json:"tapeCollectionInvoices"`
 	MiscBilling            []GeyserMiscBilling           `json:"miscBilling"`
+}
+
+// GeyserKeyInfo is a single S3 keypair entry from GET /api/keys.
+// SecretAccessKey is always null after initial creation — Geyser does not
+// return secrets after the creation response.
+type GeyserKeyInfo struct {
+	ID              string  `json:"id"`
+	Inactive        bool    `json:"inactive"`
+	Initialized     bool    `json:"initialized"`
+	SecretAccessKey *string `json:"secretAccessKey"` // always null
+	UserARN         *string `json:"userARN"`
 }
 
 // geyserEnvelope is the standard Geyser API response wrapper.
@@ -194,7 +206,6 @@ func (c *GeyserAdminClient) StartKeepalive(ctx context.Context) {
 		ticker := time.NewTicker(geyserKeepaliveEvery)
 		defer ticker.Stop()
 
-		// Ping immediately on start to validate the token.
 		if err := c.keepalive(ctx); err != nil {
 			c.logger.Warn("geyser keepalive failed — token may be expired",
 				zap.Error(err))
@@ -240,13 +251,8 @@ func (c *GeyserAdminClient) UpdateToken(accessToken, userID string) {
 // CreateBucket provisions a new Geyser tape bucket and blocks until it reaches
 // ACTIVE status (up to 2 minutes). Returns the fully-populated bucket status.
 //
-// Why we poll: Geyser tape provisioning is asynchronous. The POST returns
-// immediately with status "PROVISIONING"; the bucket becomes usable only
-// after the tape system completes allocation (~10–60 seconds in practice).
-//
 // Name rules: Geyser requires alphanumeric only — no hyphens, underscores,
 // or dots. This method strips all non-alphanumeric characters before sending.
-// Example: "tenant-abc_123" → "tenantabc123"
 func (c *GeyserAdminClient) CreateBucket(ctx context.Context, name string) (*GeyserBucketStatus, error) {
 	safe := sanitizeBucketName(name)
 	if safe == "" {
@@ -282,8 +288,7 @@ func (c *GeyserAdminClient) CreateBucket(ctx context.Context, name string) (*Gey
 	return c.waitForActive(ctx, created.ID, 2*time.Minute, 5*time.Second)
 }
 
-// waitForActive polls GetBucketStatus until the bucket reaches ACTIVE status
-// or the deadline expires. Private helper for CreateBucket.
+// waitForActive polls GetBucketStatus until ACTIVE or deadline. Private helper.
 func (c *GeyserAdminClient) waitForActive(ctx context.Context, bucketID string, maxWait, interval time.Duration) (*GeyserBucketStatus, error) {
 	deadline := time.Now().Add(maxWait)
 	ticker := time.NewTicker(interval)
@@ -296,7 +301,6 @@ func (c *GeyserAdminClient) waitForActive(ctx context.Context, bucketID string, 
 		case <-ticker.C:
 			status, err := c.GetBucketStatus(ctx, bucketID)
 			if err != nil {
-				// Transient error during provisioning — log and keep polling.
 				c.logger.Warn("poll bucket status error",
 					zap.String("bucketID", bucketID),
 					zap.Error(err))
@@ -323,8 +327,7 @@ func (c *GeyserAdminClient) waitForActive(ctx context.Context, bucketID string, 
 }
 
 // DeleteBucket permanently deletes a Geyser bucket by its UUID.
-// There is no undo. Verify the bucket is not airgapped before calling —
-// airgapped buckets cannot be deleted without first removing the airgap.
+// There is no undo. The bucket must not be airgapped.
 func (c *GeyserAdminClient) DeleteBucket(ctx context.Context, bucketID string) error {
 	if err := c.deleteReq(ctx, fmt.Sprintf("/buckets/%s", bucketID)); err != nil {
 		return fmt.Errorf("delete bucket %s: %w", bucketID, err)
@@ -357,9 +360,14 @@ func (c *GeyserAdminClient) IsAirgapped(ctx context.Context, bucketID string) (b
 }
 
 // AirgapBucket enables airgap protection on a bucket.
-// Once airgapped, the bucket is write-protected and cannot be deleted
-// without the airgap password. Store the password securely — losing it
-// means permanent loss of access.
+//
+// Once airgapped, the bucket is write-protected and CANNOT be unlocked via
+// API — removal requires manual action through the Geyser console UI at
+// console.geyserdata.com, which triggers an email MFA challenge.
+//
+// This is intentional: airgap is a one-way compliance commitment providing
+// WORM (Write Once Read Many) guarantees. Store the password securely —
+// losing it means permanent loss of write access.
 func (c *GeyserAdminClient) AirgapBucket(ctx context.Context, bucketID, airgapPassword string) error {
 	var env geyserEnvelope
 	if err := c.post(ctx,
@@ -379,14 +387,63 @@ func (c *GeyserAdminClient) AirgapBucket(ctx context.Context, bucketID, airgapPa
 	return nil
 }
 
+// InitiateMount begins the un-airgap process for a bucket.
+// Geyser sends a one-time verification code to the account email.
+// Pass that code to ConfirmMount to complete the operation.
+//
+// Un-airgapping requires human involvement by design — the email MFA step
+// cannot be bypassed programmatically. This is a Geyser security requirement.
+func (c *GeyserAdminClient) InitiateMount(ctx context.Context, bucketID, airgapPassword string) error {
+	var env geyserEnvelope
+	if err := c.post(ctx,
+		fmt.Sprintf("/buckets/%s/mount", bucketID),
+		map[string]string{"password": airgapPassword},
+		&env,
+	); err != nil {
+		return fmt.Errorf("initiate mount bucket %s: %w", bucketID, err)
+	}
+
+	if env.Status != "OK" {
+		return fmt.Errorf("initiate mount failed for bucket %s: status=%s", bucketID, env.Status)
+	}
+
+	c.logger.Info("mount initiated — check email for verification code",
+		zap.String("bucketID", bucketID))
+	return nil
+}
+
+// ConfirmMount completes the un-airgap process using the code emailed after
+// InitiateMount. On success the bucket transitions from AIRGAPPED to ACTIVE.
+func (c *GeyserAdminClient) ConfirmMount(ctx context.Context, bucketID, emailCode string) (*GeyserBucketStatus, error) {
+	var env geyserEnvelope
+	if err := c.post(ctx,
+		fmt.Sprintf("/buckets/%s/confirmmount", bucketID),
+		map[string]string{"code": emailCode},
+		&env,
+	); err != nil {
+		return nil, fmt.Errorf("confirm mount bucket %s: %w", bucketID, err)
+	}
+
+	if env.Status != "OK" {
+		return nil, fmt.Errorf("confirm mount failed for bucket %s: status=%s", bucketID, env.Status)
+	}
+
+	var bucket GeyserBucketStatus
+	if err := json.Unmarshal(env.Body, &bucket); err != nil {
+		return nil, fmt.Errorf("parse confirm mount response: %w", err)
+	}
+
+	c.logger.Info("bucket successfully un-airgapped",
+		zap.String("bucketID", bucketID),
+		zap.String("status", bucket.Status))
+	return &bucket, nil
+}
+
 // ── Billing ───────────────────────────────────────────────────────────────────
 
 // GetInvoices returns all billing records for the FairForge account.
 // Use this to cross-check Geyser's usage billing against internal quota
 // tracking in PostgreSQL.
-//
-// The response body is a paginated list; this returns all records from the
-// first page (Geyser defaults to pageSize=10, which covers our history).
 func (c *GeyserAdminClient) GetInvoices(ctx context.Context) ([]GeyserInvoice, error) {
 	var env geyserEnvelope
 	if err := c.get(ctx, "/invoices", &env); err != nil {
@@ -398,6 +455,21 @@ func (c *GeyserAdminClient) GetInvoices(ctx context.Context) ([]GeyserInvoice, e
 		return nil, fmt.Errorf("parse invoices response: %w", err)
 	}
 	return invoices, nil
+}
+
+// GetKeys returns all S3 key IDs associated with the account.
+// Secrets are never returned — they are only visible at creation time.
+func (c *GeyserAdminClient) GetKeys(ctx context.Context) ([]GeyserKeyInfo, error) {
+	var env geyserEnvelope
+	if err := c.get(ctx, "/keys", &env); err != nil {
+		return nil, fmt.Errorf("get keys: %w", err)
+	}
+
+	var keys []GeyserKeyInfo
+	if err := json.Unmarshal(env.Body, &keys); err != nil {
+		return nil, fmt.Errorf("parse keys response: %w", err)
+	}
+	return keys, nil
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -448,7 +520,6 @@ func (c *GeyserAdminClient) doRequest(ctx context.Context, method, path string, 
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	// Inject session cookies — both are required by Geyser's auth layer.
 	c.mu.Lock()
 	accessToken := c.accessToken
 	userID := c.userID
@@ -461,13 +532,13 @@ func (c *GeyserAdminClient) doRequest(ctx context.Context, method, path string, 
 	if err != nil {
 		return fmt.Errorf("http %s %s: %w", method, path, err)
 	}
-	defer func() {
-		if cerr := resp.Body.Close(); cerr != nil {
-			// Log but don't override the primary error — body close failures
-			// are non-fatal for the caller.
-			_ = cerr
-		}
-	}()
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("unexpected status %d from %s %s: %s",
+			resp.StatusCode, method, path, string(raw))
+	}
 
 	if out != nil {
 		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
