@@ -100,8 +100,13 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 //
 // Why ping Quotaless directly rather than using the engine's health system?
 // The engine backends are not yet wired into the health checker at startup.
-// This is a pragmatic bridge: a direct HTTP HEAD to the S3 endpoint tells us
+// This is a pragmatic bridge: a direct HTTP GET to the S3 endpoint tells us
 // whether the backend is reachable with near-zero overhead.
+//
+// Quotaless returns EOF on GET / after a successful TLS handshake — it closes
+// the connection without an HTTP response rather than returning 403/404.
+// EOF after TLS success means the host is reachable; we treat it as healthy.
+// A genuinely unreachable host produces a connection error, not EOF.
 func (s *Server) startHealthChecks(ctx context.Context) {
 	endpoint := os.Getenv("QUOTALESS_ENDPOINT")
 	if endpoint == "" {
@@ -124,6 +129,17 @@ func (s *Server) startHealthChecks(ctx context.Context) {
 		latency := time.Since(start)
 
 		if err != nil {
+			// EOF after a successful TLS handshake means Quotaless closed the
+			// connection without sending an HTTP response (its behaviour on GET /).
+			// The TCP+TLS stack succeeded, so the backend is reachable — mark
+			// healthy. A genuinely unreachable host produces a dial/timeout error,
+			// not EOF.
+			if strings.Contains(err.Error(), "EOF") {
+				s.healthChecker.UpdateHealth("quotaless", true, latency, nil)
+				s.logger.Debug("quotaless health check: EOF treated as healthy",
+					zap.Duration("latency", latency))
+				return
+			}
 			s.logger.Warn("quotaless health check failed",
 				zap.Error(err),
 				zap.Duration("latency", latency))
