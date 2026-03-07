@@ -48,6 +48,8 @@ func (m *MockDriver) Get(ctx context.Context, container, artifact string) (io.Re
 	return io.NopCloser(strings.NewReader("")), nil
 }
 
+// Put matches the Driver interface — returns only error.
+// The backend name is surfaced by engine.Put, not the driver itself.
 func (m *MockDriver) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...PutOption) error {
 	m.putCalled = true
 	return nil
@@ -65,38 +67,30 @@ func (m *MockDriver) HealthCheck(ctx context.Context) error {
 	return nil
 }
 
-// SINGLE test function declaration
 func TestCoreEngine_PutWithQuotaEnforcement(t *testing.T) {
 	t.Run("allows put within quota", func(t *testing.T) {
-		// Setup
 		mockQuota := &mockQuotaManager{shouldAllow: true}
 		eng := NewEngine(nil, zap.NewNop(), nil)
 		eng.SetQuotaManager(mockQuota)
 
-		// Add a mock driver
 		mockDriver := &MockDriver{}
 		eng.AddDriver("local", mockDriver)
 
 		ctx := context.WithValue(context.Background(), tenantIDKey, "tenant-123")
 		data := strings.NewReader("test data")
 
-		// Act
-		err := eng.Put(ctx, "container", "key", data)
+		// engine.Put returns (backendName string, err error) — discard name
+		_, err := eng.Put(ctx, "container", "key", data)
 
-		// Assert
 		assert.NoError(t, err)
-		// CHANGED: Expect 2 calls now (reserve and release)
 		assert.Len(t, mockQuota.calls, 2)
 		assert.Equal(t, "CheckAndReserve", mockQuota.calls[0].method)
 		assert.Equal(t, "CheckAndReserve", mockQuota.calls[1].method)
-		// First call reserves quota
 		assert.Greater(t, mockQuota.calls[0].bytes, int64(0))
-		// Second call releases quota (negative value)
 		assert.Less(t, mockQuota.calls[1].bytes, int64(0))
 	})
 
 	t.Run("blocks put exceeding quota", func(t *testing.T) {
-		// Setup
 		mockQuota := &mockQuotaManager{shouldAllow: false}
 		eng := NewEngine(nil, zap.NewNop(), nil)
 		eng.SetQuotaManager(mockQuota)
@@ -107,10 +101,8 @@ func TestCoreEngine_PutWithQuotaEnforcement(t *testing.T) {
 		ctx := context.WithValue(context.Background(), tenantIDKey, "tenant-123")
 		data := strings.NewReader("test data")
 
-		// Act
-		err := eng.Put(ctx, "container", "key", data)
+		_, err := eng.Put(ctx, "container", "key", data)
 
-		// Assert
 		require.Error(t, err)
 		assert.ErrorIs(t, err, ErrQuotaExceeded)
 	})
