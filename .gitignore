@@ -103,3 +103,4 @@ loadtest
 loadtest-linux
 vaultaire-bin
 vaultaire-linux
+cmd/geyser-admin-test/
