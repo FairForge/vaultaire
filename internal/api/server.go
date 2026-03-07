@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"runtime"
 	"strings"
@@ -94,53 +96,98 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	return s
 }
 
-// startHealthChecks runs a background goroutine that pings the Quotaless
-// endpoint every 30 seconds and updates the health checker accordingly.
-// It stops when ctx is cancelled (i.e. on server shutdown).
-//
-// Why ping Quotaless directly rather than using the engine's health system?
-// The engine backends are not yet wired into the health checker at startup.
-// This is a pragmatic bridge: a direct HTTP HEAD to the S3 endpoint tells us
-// whether the backend is reachable with near-zero overhead.
-func (s *Server) startHealthChecks(ctx context.Context) {
-	endpoint := os.Getenv("QUOTALESS_ENDPOINT")
-	if endpoint == "" {
-		endpoint = "https://io.quotaless.cloud:8000"
+// backendCheck holds the config for a single backend health probe.
+// TCP dial is used rather than HTTP because S3 backends have inconsistent
+// behaviour on unauthenticated HTTP requests (EOF, 403, timeout, etc.).
+// A successful TCP connection on the backend port is sufficient to confirm
+// reachability — the same check works for any backend regardless of vendor.
+type backendCheck struct {
+	name    string // key in healthChecker, e.g. "quotaless"
+	address string // host:port, e.g. "io.quotaless.cloud:8000"
+}
+
+// endpointToAddress parses an endpoint URL and returns host:port.
+// If no port is present in the URL, the default for the scheme is used
+// (443 for https, 80 for http).
+func endpointToAddress(endpoint string) (string, error) {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return "", fmt.Errorf("parse endpoint %q: %w", endpoint, err)
 	}
 
-	// Use a dedicated client with a tight timeout so a slow backend doesn't
-	// block the health goroutine for 30 seconds.
-	httpClient := &http.Client{Timeout: 5 * time.Second}
+	host := u.Hostname()
+	port := u.Port()
+	if port == "" {
+		switch u.Scheme {
+		case "https":
+			port = "443"
+		default:
+			port = "80"
+		}
+	}
+	return net.JoinHostPort(host, port), nil
+}
 
+// startHealthChecks runs background goroutines that TCP-dial each backend
+// every 30 seconds and update the health checker accordingly.
+// Goroutines stop when ctx is cancelled (i.e. on server shutdown).
+//
+// Adding a new backend: register it in NewServer with
+// s.healthChecker.RegisterBackend("name"), then add a backendCheck entry
+// here pointing at its endpoint env var.
+func (s *Server) startHealthChecks(ctx context.Context) {
+	quotalessEndpoint := os.Getenv("QUOTALESS_ENDPOINT")
+	if quotalessEndpoint == "" {
+		quotalessEndpoint = "https://io.quotaless.cloud:8000"
+	}
+
+	quotalessAddr, err := endpointToAddress(quotalessEndpoint)
+	if err != nil {
+		s.logger.Error("invalid QUOTALESS_ENDPOINT — health checks disabled",
+			zap.Error(err))
+		return
+	}
+
+	backends := []backendCheck{
+		{name: "quotaless", address: quotalessAddr},
+		// Add future backends here, e.g.:
+		// {name: "lyve", address: "s3.us-east-1.lyvecloud.seagate.com:443"},
+		// {name: "geyser", address: "s3.geyserdata.com:443"},
+	}
+
+	for _, b := range backends {
+		b := b // capture for goroutine
+		go s.runBackendHealthLoop(ctx, b)
+	}
+}
+
+// runBackendHealthLoop probes a single backend on a 30-second ticker until
+// ctx is cancelled.
+func (s *Server) runBackendHealthLoop(ctx context.Context, b backendCheck) {
 	check := func() {
 		start := time.Now()
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-		if err != nil {
-			s.healthChecker.UpdateHealth("quotaless", false, 0, err)
-			return
-		}
 
-		resp, err := httpClient.Do(req)
+		// TCP dial confirms the host is reachable on the expected port.
+		// This is backend-agnostic: works for Quotaless, Lyve Cloud, Geyser,
+		// or any future S3-compatible provider without any HTTP-level quirks.
+		conn, err := net.DialTimeout("tcp", b.address, 3*time.Second)
 		latency := time.Since(start)
 
 		if err != nil {
-			s.logger.Warn("quotaless health check failed",
+			s.logger.Warn("backend health check failed",
+				zap.String("backend", b.name),
+				zap.String("address", b.address),
 				zap.Error(err),
 				zap.Duration("latency", latency))
-			s.healthChecker.UpdateHealth("quotaless", false, latency, err)
+			s.healthChecker.UpdateHealth(b.name, false, latency, err)
 			return
 		}
-		_ = resp.Body.Close()
+		_ = conn.Close()
 
-		// Any HTTP response (even 403/404) means the endpoint is reachable.
-		// A non-reachable endpoint produces a network error above, not an HTTP status.
-		healthy := resp.StatusCode < 500
-		s.healthChecker.UpdateHealth("quotaless", healthy, latency, nil)
-
-		s.logger.Debug("quotaless health check",
-			zap.Int("status", resp.StatusCode),
-			zap.Duration("latency", latency),
-			zap.Bool("healthy", healthy))
+		s.healthChecker.UpdateHealth(b.name, true, latency, nil)
+		s.logger.Debug("backend health check: TCP OK",
+			zap.String("backend", b.name),
+			zap.Duration("latency", latency))
 	}
 
 	// Run immediately so /health is accurate from the first request.
@@ -463,7 +510,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 func (s *Server) Start() error {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Store cancel so Shutdown can stop the health goroutine.
+	// Store cancel so Shutdown can stop the health goroutines.
 	s.httpServer.RegisterOnShutdown(cancel)
 
 	go s.startHealthChecks(ctx)
