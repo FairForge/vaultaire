@@ -7,25 +7,16 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"go.uber.org/zap" // ADD THIS IMPORT
+	"go.uber.org/zap"
 )
 
 func TestPostgres_Connect(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping database tests in short mode")
-	}
+	cfg := GetTestConfig()
+	logger := zap.NewNop()
 
-	logger := zap.NewNop() // No-op logger for tests
-
-	db, err := NewPostgres(Config{
-		Host:     "localhost",
-		Port:     5432,
-		Database: "vaultaire_dev",
-		User:     "viera",
-		Password: "vaultaire_dev",
-	}, logger) // FIX: This needs to be on same line or proper line break
+	db, err := NewPostgres(cfg, logger)
 	if err != nil {
-		t.Fatalf("Failed to create database: %v", err)
+		t.Skip("PostgreSQL not available:", err)
 	}
 	defer func() {
 		if err := db.Close(); err != nil {
@@ -35,20 +26,12 @@ func TestPostgres_Connect(t *testing.T) {
 }
 
 func TestPostgres_CreateTables(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping database tests in short mode")
-	}
+	cfg := GetTestConfig()
+	logger := zap.NewNop()
 
-	logger := zap.NewNop() // ADD THIS
-	db, err := NewPostgres(Config{
-		Host:     "localhost",
-		Port:     5432,
-		Database: "vaultaire_dev",
-		User:     "viera",
-		Password: "vaultaire_dev",
-	}, logger) // ADD LOGGER PARAMETER
+	db, err := NewPostgres(cfg, logger)
 	if err != nil {
-		t.Fatalf("Failed to create database: %v", err)
+		t.Skip("PostgreSQL not available:", err)
 	}
 	defer func() {
 		if err := db.Close(); err != nil {
@@ -58,22 +41,13 @@ func TestPostgres_CreateTables(t *testing.T) {
 }
 
 func TestPostgres_TenantOperations(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping database tests in short mode")
-	}
+	cfg := GetTestConfig()
+	logger := zap.NewNop()
 
-	logger := zap.NewNop() // ADD THIS
-	db, err := NewPostgres(Config{
-		Host:     "localhost",
-		Port:     5432,
-		Database: "vaultaire_dev",
-		User:     "viera",
-		Password: "vaultaire_dev",
-	}, logger) // ADD LOGGER PARAMETER
+	db, err := NewPostgres(cfg, logger)
 	if err != nil {
-		t.Fatalf("Failed to create database: %v", err)
+		t.Skip("PostgreSQL not available:", err)
 	}
-
 	defer func() {
 		if err := db.Close(); err != nil {
 			t.Errorf("failed to close database: %v", err)
@@ -82,7 +56,6 @@ func TestPostgres_TenantOperations(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Create a tenant with unique email using UUID
 	tenantID := uuid.New().String()
 	tenant := &Tenant{
 		ID:        tenantID,
@@ -95,7 +68,6 @@ func TestPostgres_TenantOperations(t *testing.T) {
 		t.Fatalf("Failed to create tenant: %v", err)
 	}
 
-	// Get the tenant back
 	retrieved, err := db.GetTenant(ctx, tenantID)
 	if err != nil {
 		t.Fatalf("Failed to get tenant: %v", err)
@@ -108,7 +80,6 @@ func TestPostgres_TenantOperations(t *testing.T) {
 		t.Errorf("Email mismatch: got %s, want %s", retrieved.Email, tenant.Email)
 	}
 
-	// Clean up - delete the test tenant
 	_, err = db.db.ExecContext(ctx, "DELETE FROM tenants WHERE id = $1", tenantID)
 	if err != nil {
 		t.Logf("Warning: failed to clean up test tenant: %v", err)
@@ -116,9 +87,5 @@ func TestPostgres_TenantOperations(t *testing.T) {
 }
 
 func TestPostgres_ArtifactOperations(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping database tests in short mode")
-	}
-
 	t.Skip("Artifact operations not yet implemented")
 }

@@ -27,16 +27,18 @@ func (d *LocalDriver) CreateSparse(ctx context.Context, container, artifact stri
 	if err != nil {
 		return err
 	}
-	defer file.Close()
 
 	// Use fallocate to create sparse file efficiently
 	err = syscall.Fallocate(int(file.Fd()), 0, 0, size)
 	if err != nil {
 		// Fallback to truncate if fallocate not supported
-		return file.Truncate(size)
+		if truncErr := file.Truncate(size); truncErr != nil {
+			_ = file.Close()
+			return truncErr
+		}
 	}
 
-	return nil
+	return file.Close()
 }
 
 // GetHoles returns actual holes in a sparse file using SEEK_HOLE/SEEK_DATA
@@ -47,7 +49,7 @@ func (d *LocalDriver) GetHoles(ctx context.Context, container, artifact string) 
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer file.Close() //nolint:errcheck // read-only fd, Close error is not actionable
 
 	var holes []HoleInfo
 	var offset int64 = 0

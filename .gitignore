@@ -29,7 +29,7 @@ configs/*.env
 # Test & Coverage
 # ===================
 *.out
-coverage.*
+coverage.html
 coverage.out
 
 # ===================
