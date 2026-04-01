@@ -33,7 +33,7 @@ func (d *LocalDriver) CreateSparse(ctx context.Context, container, artifact stri
 	if err != nil {
 		// Fallback to truncate if fallocate not supported
 		if truncErr := file.Truncate(size); truncErr != nil {
-			file.Close()
+			_ = file.Close()
 			return truncErr
 		}
 	}
