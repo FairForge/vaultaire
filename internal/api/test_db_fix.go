@@ -10,6 +10,9 @@ import (
 )
 
 func setupTestDBFixed(t *testing.T) *sql.DB {
+	if testing.Short() {
+		t.Skip("skipping database test in short mode")
+	}
 	// Explicitly use the correct database
 	cfg := database.Config{
 		Host:     "localhost",
