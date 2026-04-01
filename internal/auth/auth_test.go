@@ -11,6 +11,9 @@ import (
 )
 
 func TestRegister(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping database test in short mode")
+	}
 	// Setup test database
 	db := setupTestDB(t)
 	handler := NewAuthHandler(db, nil)
