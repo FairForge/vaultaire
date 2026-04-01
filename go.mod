@@ -1,6 +1,6 @@
 module github.com/FairForge/vaultaire
 
-go 1.26
+go 1.25
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.12.0
