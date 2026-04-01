@@ -26,12 +26,19 @@ jobs:
       uses: actions/setup-go@v5
       with:
         go-version: '1.25'
+    - name: Set up database
+      run: |
+        psql -h localhost -U postgres -c "CREATE USER viera SUPERUSER;" || true
+        psql -h localhost -U postgres -c "CREATE DATABASE vaultaire OWNER viera;" || true
+        for f in internal/database/migrations/*.sql; do
+          psql -h localhost -U viera -d vaultaire -f "$f"
+        done
     - name: Install dependencies
       run: |
         go mod download
         go install go.k6.io/k6@latest
     - name: Run unit tests
-      run: go test -short ./...
+      run: go test ./...
     - name: Start server
       run: |
         go build -o vaultaire cmd/vaultaire/main.go

@@ -8,15 +8,13 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 )
 
 func TestRegister(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping database test in short mode")
-	}
 	// Setup test database
 	db := setupTestDB(t)
-	handler := NewAuthHandler(db, nil)
+	handler := NewAuthHandler(db, zap.NewNop())
 
 	// Test registration
 	reqBody := `{"email":"test@stored.ge","password":"Password123!","company":"Test Corp"}`
@@ -25,7 +23,7 @@ func TestRegister(t *testing.T) {
 
 	handler.Register(w, req)
 
-	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, http.StatusOK, w.Code, "Response: %s", w.Body.String())
 
 	var resp map[string]string
 	err := json.NewDecoder(w.Body).Decode(&resp)

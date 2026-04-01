@@ -30,16 +30,19 @@ jobs:
           go-version: "1.25"
           cache: true
 
-      - name: Create viera PostgreSQL user
+      - name: Set up database
         run: |
-          psql -h localhost -U postgres -c "CREATE USER viera SUPERUSER;"
+          psql -h localhost -U postgres -c "CREATE USER viera SUPERUSER;" || true
           psql -h localhost -U postgres -c "CREATE DATABASE vaultaire OWNER viera;" || true
+          for f in internal/database/migrations/*.sql; do
+            psql -h localhost -U viera -d vaultaire -f "$f"
+          done
 
       - name: Build
         run: go build ./...
 
       - name: Test
-        run: go test -short ./...
+        run: go test ./...
         env:
           DATABASE_URL: postgres://viera@localhost:5432/vaultaire?sslmode=disable
           JWT_SECRET: ci-test-secret-not-for-production
