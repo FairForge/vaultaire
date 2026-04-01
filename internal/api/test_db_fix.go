@@ -10,18 +10,7 @@ import (
 )
 
 func setupTestDBFixed(t *testing.T) *sql.DB {
-	// Explicitly use the correct database
-	cfg := database.Config{
-		Host:     "localhost",
-		Port:     5432,
-		Database: "vaultaire", // EXPLICIT: always use vaultaire
-		User:     "viera",
-		Password: "",
-		SSLMode:  "disable",
-	}
-
-	t.Logf("Using config: Host=%s, Port=%d, Database=%s, User=%s",
-		cfg.Host, cfg.Port, cfg.Database, cfg.User)
+	cfg := database.GetTestConfig()
 
 	postgres, err := database.NewPostgres(cfg, zap.NewNop())
 	if err != nil {
