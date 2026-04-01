@@ -1,15 +1,12 @@
 name: Integration Tests
-
 on:
   push:
     branches: [ main, develop ]
   pull_request:
     branches: [ main ]
-
 jobs:
   integration-tests:
     runs-on: ubuntu-latest
-
     services:
       postgres:
         image: postgres:15
@@ -23,23 +20,25 @@ jobs:
           --health-retries 5
         ports:
           - 5432:5432
-
     steps:
     - uses: actions/checkout@v4
-
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
-        go-version: '1.21'
-
+        go-version: '1.25'
+    - name: Set up database
+      run: |
+        psql -h localhost -U postgres -c "CREATE USER viera SUPERUSER;" || true
+        psql -h localhost -U postgres -c "CREATE DATABASE vaultaire OWNER viera;" || true
+        for f in internal/database/migrations/*.sql; do
+          psql -h localhost -U viera -d vaultaire -f "$f"
+        done
     - name: Install dependencies
       run: |
         go mod download
-        go install github.com/k6io/k6@latest
-
+        go install go.k6.io/k6@latest
     - name: Run unit tests
-      run: go test -v ./...
-
+      run: go test ./...
     - name: Start server
       run: |
         go build -o vaultaire cmd/vaultaire/main.go
@@ -47,22 +46,19 @@ jobs:
         sleep 5
       env:
         DATABASE_URL: postgres://postgres:postgres@localhost/vaultaire?sslmode=disable
-
+        JWT_SECRET: ci-test-secret-not-for-production
+        PORT: "8000"
     - name: Run benchmarks
       run: go test -bench=. -benchtime=10s ./tests/benchmarks/
       continue-on-error: true
-
     - name: Run k6 load tests
-      run: |
-        k6 run --quiet tests/k6/s3_basic_load.js
+      run: k6 run --quiet tests/k6/s3_basic_load.js
       continue-on-error: true
-
     - name: Run chaos tests
       run: |
         ./tests/chaos/basic_chaos_test.sh
         go test ./tests/chaos/
       continue-on-error: true
-
     - name: Upload test results
       uses: actions/upload-artifact@v4
       if: always()
