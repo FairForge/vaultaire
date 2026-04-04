@@ -99,6 +99,11 @@ GitHub Actions CI (`.github/workflows/ci.yml`) runs on every push/PR:
 - `go test ./...` with DATABASE_URL and JWT_SECRET env vars
 - golangci-lint
 
+GitHub Actions Deploy (`.github/workflows/deploy.yml`):
+- `main` branch → builds, runs migrations, deploys to prod (SLC)
+- `develop` branch → builds, runs migrations, deploys to dev server
+- Migrations are idempotent (CREATE IF NOT EXISTS) — safe to re-run
+
 ## Environment Variables
 
 | Variable | Default | Purpose |
@@ -116,5 +121,8 @@ GitHub Actions CI (`.github/workflows/ci.yml`) runs on every push/PR:
 - Server: `slc-vaultaire-01` (Ubuntu 24.04, Salt Lake City), SSH alias `vaultaire-slc`
 - Binary at `/opt/vaultaire/bin/vaultaire`, config at `/opt/vaultaire/configs/.env`
 - HAProxy fronts the service; Cloudflare proxies stored.ge
+- UFW firewall: ports 22, 80, 443 only
+- Daily PostgreSQL backups at 3am UTC (7-day retention) in `/opt/vaultaire/backups/`
+- Deploy: push to `main` triggers `.github/workflows/deploy.yml` (build → migrate → swap → health check)
 - Health: `curl https://stored.ge/health`
 - Cross-compile: `GOOS=linux GOARCH=amd64 go build -o vaultaire-bin ./cmd/vaultaire`
