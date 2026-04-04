@@ -41,6 +41,11 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
+      - name: Checkout (for migrations)
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: internal/database/migrations
+
       - name: Deploy to Dev
         env:
           HOST: ${{ secrets.DEV_HOST }}
@@ -48,7 +53,21 @@ jobs:
         run: |
           ssh-keyscan -t ed25519 "$HOST" >> ~/.ssh/known_hosts
           scp vaultaire-linux "${USER}@${HOST}:/tmp/"
-          ssh "${USER}@${HOST}" 'sudo /bin/systemctl stop vaultaire || true && sudo /bin/mv /tmp/vaultaire-linux /opt/vaultaire/bin/vaultaire && sudo /bin/chmod +x /opt/vaultaire/bin/vaultaire && sudo /bin/systemctl start vaultaire && sleep 3 && curl -s http://localhost:8000/health || echo "Health check pending"'
+          scp -r internal/database/migrations "${USER}@${HOST}:/tmp/vaultaire-migrations"
+          ssh "${USER}@${HOST}" 'bash -s' <<'EOF'
+          set -e
+          for f in $(ls /tmp/vaultaire-migrations/*.sql | sort); do
+            PGPASSWORD=$(grep DB_PASSWORD /opt/vaultaire/configs/.env | cut -d= -f2) \
+              psql -h 127.0.0.1 -U vaultaire -d vaultaire -f "$f" 2>&1 || true
+          done
+          sudo /bin/systemctl stop vaultaire
+          sudo /bin/mv /tmp/vaultaire-linux /opt/vaultaire/bin/vaultaire
+          sudo /bin/chmod +x /opt/vaultaire/bin/vaultaire
+          sudo /bin/systemctl start vaultaire
+          sleep 3
+          curl -sf http://localhost:8000/health || echo "Health check failed"
+          rm -rf /tmp/vaultaire-migrations
+          EOF
 
   deploy-prod:
     needs: build
@@ -65,11 +84,30 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
-      - name: Deploy to Production (NYC)
+      - name: Checkout (for migrations)
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: internal/database/migrations
+
+      - name: Deploy to Production (SLC)
         env:
           HOST: ${{ secrets.PROD_SLC_HOST }}
           USER: ${{ secrets.SSH_USER_PROD }}
         run: |
           ssh-keyscan -t ed25519 "$HOST" >> ~/.ssh/known_hosts
           scp vaultaire-linux "${USER}@${HOST}:/tmp/"
-          ssh "${USER}@${HOST}" 'sudo /bin/systemctl stop vaultaire && sudo /bin/mv /tmp/vaultaire-linux /opt/vaultaire/bin/vaultaire && sudo /bin/chmod +x /opt/vaultaire/bin/vaultaire && sudo /bin/systemctl start vaultaire && sleep 3 && curl -s http://localhost:8000/health || echo "Health check pending"'
+          scp -r internal/database/migrations "${USER}@${HOST}:/tmp/vaultaire-migrations"
+          ssh "${USER}@${HOST}" 'bash -s' <<'EOF'
+          set -e
+          for f in $(ls /tmp/vaultaire-migrations/*.sql | sort); do
+            PGPASSWORD=$(grep DB_PASSWORD /opt/vaultaire/configs/.env | cut -d= -f2) \
+              psql -h 127.0.0.1 -U vaultaire -d vaultaire -f "$f" 2>&1 || true
+          done
+          sudo /bin/systemctl stop vaultaire
+          sudo /bin/mv /tmp/vaultaire-linux /opt/vaultaire/bin/vaultaire
+          sudo /bin/chmod +x /opt/vaultaire/bin/vaultaire
+          sudo /bin/systemctl start vaultaire
+          sleep 3
+          curl -sf http://localhost:8000/health || echo "Health check failed"
+          rm -rf /tmp/vaultaire-migrations
+          EOF
