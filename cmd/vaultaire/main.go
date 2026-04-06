@@ -157,7 +157,7 @@ func main() {
 	if dataPath == "" {
 		dataPath = "/tmp/vaultaire-data"
 	}
-	if err := os.MkdirAll(dataPath, 0750); err != nil { // #nosec G703 — data directory from config
+	if err := os.MkdirAll(dataPath, 0750); err != nil { // #nosec G703 — TODO: sanitize DATA_PATH to prevent traversal
 		logger.Fatal("failed to create storage directory", zap.Error(err))
 	}
 	localDriver := drivers.NewLocalDriver(dataPath, logger)
