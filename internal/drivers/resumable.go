@@ -56,7 +56,7 @@ func (r *ResumableUpload) StartUpload(ctx context.Context, uploadID, container, 
 		return fmt.Errorf("marshal metadata: %w", err)
 	}
 
-	if err := os.WriteFile(metaPath, data, 0644); err != nil {
+	if err := os.WriteFile(metaPath, data, 0600); err != nil {
 		return fmt.Errorf("write metadata: %w", err)
 	}
 
@@ -92,7 +92,7 @@ func (r *ResumableUpload) UploadChunk(ctx context.Context, uploadID string, offs
 
 	// Write chunk to temp file
 	tempPath := r.getTempPath(uploadID)
-	file, err := os.OpenFile(tempPath, os.O_WRONLY, 0644)
+	file, err := os.OpenFile(tempPath, os.O_WRONLY, 0600)
 	if err != nil {
 		return fmt.Errorf("open temp file: %w", err)
 	}
@@ -194,5 +194,5 @@ func (r *ResumableUpload) saveMetadata(metadata *UploadMetadata) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(r.getMetadataPath(metadata.UploadID), data, 0644)
+	return os.WriteFile(r.getMetadataPath(metadata.UploadID), data, 0600)
 }
