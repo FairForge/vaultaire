@@ -24,7 +24,7 @@ jobs:
         #   G115: safe bounded integer conversions
         #   G301: MkdirAll 0755 is correct for storage directories
         #   G304: file path handling is core to a storage system
-        # TODO: remaining ~27 findings need #nosec annotations or fixes (separate PR)
+
         run: >-
           gosec -severity medium
           -exclude-dir=tests

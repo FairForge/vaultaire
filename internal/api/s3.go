@@ -204,7 +204,7 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
     <Code>SignatureDoesNotMatch</Code>
     <Message>%s</Message>
     <RequestId>%d</RequestId>
-</Error>`, err.Error(), time.Now().UnixNano()); err != nil {
+</Error>`, err.Error(), time.Now().UnixNano()); err != nil { // #nosec G705 — S3 XML protocol output
 				s.logger.Error("failed to write response", zap.Error(err))
 			}
 			return

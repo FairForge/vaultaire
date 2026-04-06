@@ -525,8 +525,8 @@ func (c *GeyserAdminClient) doRequest(ctx context.Context, method, path string, 
 	userID := c.userID
 	c.mu.Unlock()
 
-	req.AddCookie(&http.Cookie{Name: "accessToken", Value: accessToken})
-	req.AddCookie(&http.Cookie{Name: "userId", Value: userID})
+	req.AddCookie(&http.Cookie{Name: "accessToken", Value: accessToken}) // #nosec G124 — outgoing request cookie to Geyser API, not served to users
+	req.AddCookie(&http.Cookie{Name: "userId", Value: userID})           // #nosec G124 — outgoing request cookie to Geyser API, not served to users
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
