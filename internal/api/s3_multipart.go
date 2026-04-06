@@ -2,7 +2,7 @@ package api
 
 import (
 	"context"
-	"crypto/md5" //nolint:gosec // S3 spec requires MD5 for ETags
+	"crypto/md5" // #nosec G501 — S3 spec requires MD5 for ETags
 	"encoding/xml"
 	"fmt"
 	"io"
