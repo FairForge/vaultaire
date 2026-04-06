@@ -5,12 +5,15 @@ import (
 	"html/template"
 	"io/fs"
 	"net/http"
+	"time"
 
 	"github.com/FairForge/vaultaire/internal/auth"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 )
+
+const sessionTTL = 24 * time.Hour
 
 // Deps groups the dependencies the dashboard routes need.
 type Deps struct {
@@ -35,7 +38,9 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 
 	// --- Public auth routes ---
 	r.Get("/login", renderPage(baseTmpl, "login"))
+	r.Post("/login", handleLogin(baseTmpl, deps))
 	r.Get("/register", renderPage(baseTmpl, "register"))
+	r.Post("/register", handleRegister(baseTmpl, deps))
 	r.Get("/logout", handleLogout(deps.Sessions))
 
 	// --- Customer dashboard (session required) ---
@@ -76,6 +81,113 @@ func renderPage(base *template.Template, page string) http.HandlerFunc {
 	}
 }
 
+func handleLogin(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
+	errTmpl := template.Must(baseTmpl.Clone())
+	template.Must(errTmpl.Parse(pageContent("login")))
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		email := r.FormValue("email")
+		password := r.FormValue("password")
+
+		renderErr := func(msg string) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = errTmpl.ExecuteTemplate(w, "base", map[string]any{
+				"Error": msg,
+				"Email": email,
+				"Page":  "login",
+			})
+		}
+
+		valid, err := deps.Auth.ValidatePassword(r.Context(), email, password)
+		if err != nil || !valid {
+			renderErr("Invalid email or password.")
+			return
+		}
+
+		user, err := deps.Auth.GetUserByEmail(r.Context(), email)
+		if err != nil {
+			renderErr("Invalid email or password.")
+			return
+		}
+
+		// Determine role — default to "user" if the DB column isn't loaded yet.
+		role := "user"
+		if deps.DB != nil {
+			_ = deps.DB.QueryRowContext(r.Context(),
+				`SELECT role FROM users WHERE id = $1`, user.ID).Scan(&role)
+		}
+
+		token, err := deps.Sessions.Create(r.Context(), dashauth.SessionData{
+			UserID:   user.ID,
+			TenantID: user.TenantID,
+			Email:    user.Email,
+			Role:     role,
+		}, sessionTTL)
+		if err != nil {
+			deps.Logger.Error("create session", zap.Error(err))
+			renderErr("Something went wrong. Please try again.")
+			return
+		}
+
+		dashauth.SetSessionCookie(w, token, sessionTTL)
+		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
+	}
+}
+
+func handleRegister(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
+	errTmpl := template.Must(baseTmpl.Clone())
+	template.Must(errTmpl.Parse(pageContent("register")))
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		email := r.FormValue("email")
+		password := r.FormValue("password")
+		company := r.FormValue("company")
+
+		renderErr := func(msg string) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = errTmpl.ExecuteTemplate(w, "base", map[string]any{
+				"Error":   msg,
+				"Email":   email,
+				"Company": company,
+				"Page":    "register",
+			})
+		}
+
+		if len(password) < 8 {
+			renderErr("Password must be at least 8 characters.")
+			return
+		}
+
+		user, _, _, err := deps.Auth.CreateUserWithTenant(r.Context(), email, password, company)
+		if err != nil {
+			if err.Error() == "user already exists" {
+				renderErr("An account with that email already exists.")
+			} else {
+				deps.Logger.Error("registration failed", zap.Error(err))
+				renderErr("Registration failed. Please try again.")
+			}
+			return
+		}
+
+		token, err := deps.Sessions.Create(r.Context(), dashauth.SessionData{
+			UserID:   user.ID,
+			TenantID: user.TenantID,
+			Email:    user.Email,
+			Role:     "user",
+		}, sessionTTL)
+		if err != nil {
+			deps.Logger.Error("create session after register", zap.Error(err))
+			renderErr("Account created but login failed. Please sign in.")
+			return
+		}
+
+		dashauth.SetSessionCookie(w, token, sessionTTL)
+		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
+	}
+}
+
 func handleLogout(store dashauth.SessionStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if c, err := r.Cookie("vaultaire_session"); err == nil {
@@ -97,8 +209,9 @@ func pageContent(page string) string {
 			`<div class="auth-page"><div class="auth-card">` +
 			`<div class="auth-brand">stored.ge</div>` +
 			`<h1>Sign In</h1>` +
+			`{{if .Error}}<div class="alert alert-error">{{.Error}}</div>{{end}}` +
 			`<form method="POST" action="/login">` +
-			`<div class="form-group"><label>Email</label><input type="email" name="email" required></div>` +
+			`<div class="form-group"><label>Email</label><input type="email" name="email" value="{{.Email}}" required></div>` +
 			`<div class="form-group"><label>Password</label><input type="password" name="password" required></div>` +
 			`<button type="submit" class="btn btn-primary btn-block">Sign In</button>` +
 			`</form>` +
@@ -111,10 +224,11 @@ func pageContent(page string) string {
 			`<div class="auth-page"><div class="auth-card">` +
 			`<div class="auth-brand">stored.ge</div>` +
 			`<h1>Create Account</h1>` +
+			`{{if .Error}}<div class="alert alert-error">{{.Error}}</div>{{end}}` +
 			`<form method="POST" action="/register">` +
-			`<div class="form-group"><label>Email</label><input type="email" name="email" required></div>` +
+			`<div class="form-group"><label>Email</label><input type="email" name="email" value="{{.Email}}" required></div>` +
 			`<div class="form-group"><label>Password</label><input type="password" name="password" required minlength="8"></div>` +
-			`<div class="form-group"><label>Company</label><input type="text" name="company"></div>` +
+			`<div class="form-group"><label>Company</label><input type="text" name="company" value="{{.Company}}"></div>` +
 			`<button type="submit" class="btn btn-primary btn-block">Create Account</button>` +
 			`</form>` +
 			`<div class="auth-footer">Have an account? <a href="/login">Sign in</a></div>` +
