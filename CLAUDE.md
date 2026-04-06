@@ -78,18 +78,22 @@ Migrations are in `internal/database/migrations/`.
 ## Git Workflow
 
 ```bash
-git checkout -b step-XXX-feature-name   # Branch from main
+git checkout -b phase-X.Y-feature-name  # Branch from main
 # ... TDD cycle ...
-git commit -m "feat(scope): description [Step XXX]"
+git commit -m "feat(scope): description [Phase X]"
+git push origin phase-X.Y-feature-name
 gh pr create --base main
-gh pr merge --squash --delete-branch --admin
+# Wait for CI (build-and-test) to pass, then:
+gh pr merge --squash --delete-branch
 ```
 
-Commit format: `type(scope): description [Step NNN]` where type is feat/fix/refactor/test/docs.
+Commit format: `type(scope): description [Phase NNN]` where type is feat/fix/refactor/test/docs.
 
 Never include `Co-Authored-By` lines mentioning Claude or AI in commit messages.
 
 Branch protection: direct pushes to main are blocked; CI must pass before merge.
+
+**Never use `--admin` to bypass CI.** Wait for `build-and-test` to pass. If CI fails, fix the issue on the branch and push again.
 
 ## CI/CD
 
