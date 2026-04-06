@@ -268,7 +268,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		body = newAWSChunkedReader(r.Body)
 	}
 
-	hasher := md5.New()
+	hasher := md5.New() // #nosec G401 — S3 spec requires MD5 for ETags
 	hashingBody := io.TeeReader(body, hasher)
 
 	backendName, err := a.engine.Put(r.Context(), container, artifact, hashingBody)
@@ -388,7 +388,7 @@ func (a *S3ToEngine) HandleList(w http.ResponseWriter, r *http.Request, bucket, 
 		a.logger.Error("failed to write response", zap.Error(err))
 		return
 	}
-	if _, err := fmt.Fprintf(w, "<Name>%s</Name>", bucket); err != nil {
+	if _, err := fmt.Fprintf(w, "<Name>%s</Name>", bucket); err != nil { // #nosec G705 — S3 XML protocol output, bucket names are validated
 		a.logger.Error("failed to write bucket name", zap.Error(err))
 		return
 	}

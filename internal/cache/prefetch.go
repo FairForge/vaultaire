@@ -49,6 +49,11 @@ func NewPredictivePrefetcher(analyzer *PatternAnalyzer, strategy PrefetchStrateg
 	}
 }
 
+// Stop cancels the prefetcher context and releases resources.
+func (p *PredictivePrefetcher) Stop() {
+	p.cancel()
+}
+
 // TriggerPrefetch analyzes if prefetch should occur
 func (p *PredictivePrefetcher) TriggerPrefetch(key string) {
 	pattern := p.analyzer.GetPattern(key)

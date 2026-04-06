@@ -155,7 +155,7 @@ func (c *SSDCache) CleanOrphanedFiles() (*IntegrityReport, error) {
 	for i := 0; i < c.shardCount; i++ {
 		shardPath := filepath.Join(c.ssdPath, fmt.Sprintf("shard-%d", i))
 
-		err := filepath.Walk(shardPath, func(path string, info os.FileInfo, err error) error {
+		err := filepath.Walk(shardPath, func(path string, info os.FileInfo, err error) error { // #nosec G122 — recovery scan is admin-only, symlink traversal is acceptable
 			if err != nil || info.IsDir() || !strings.HasSuffix(path, ".cache") {
 				return nil
 			}

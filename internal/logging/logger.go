@@ -405,7 +405,7 @@ func (a *LogAggregator) Add(entry *LogEntry) {
 
 	// Sampling
 	if a.config.SampleRate < 1.0 {
-		if rand.Float64() > a.config.SampleRate {
+		if rand.Float64() > a.config.SampleRate { // #nosec G404 — sampling decision, not security
 			a.mu.Lock()
 			a.stats.Sampled++
 			a.mu.Unlock()

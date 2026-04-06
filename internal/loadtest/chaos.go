@@ -136,7 +136,7 @@ func NewChaosTester(config *ChaosConfig, workerFunc WorkerFunc) *ChaosTester {
 	return &ChaosTester{
 		config:     config,
 		workerFunc: workerFunc,
-		rng:        rand.New(rand.NewSource(time.Now().UnixNano())),
+		rng:        rand.New(rand.NewSource(time.Now().UnixNano())), // #nosec G404 — chaos testing randomization, not security
 		latencies:  make([]time.Duration, 0, 10000),
 		events:     make([]ChaosEvent, 0),
 		phase:      "pre",

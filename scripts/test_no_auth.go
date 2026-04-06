@@ -24,7 +24,7 @@ func main() {
 	})
 
 	fmt.Println("Mock S3 server on :8001")
-	if err := http.ListenAndServe(":8001", nil); err != nil {
+	if err := http.ListenAndServe(":8001", nil); err != nil { // #nosec G114 — test utility, not production
 		log.Fatal(err)
 	}
 }
