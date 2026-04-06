@@ -13,19 +13,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: securego/gosec@master
+      - uses: actions/setup-go@v5
         with:
-          args: >-
-            -severity medium
-            -exclude-dir=tests
-            -exclude-dir=internal/testing
-            -exclude=G101,G115,G301,G304
-            ./...
-          # Excluded rules:
-          # G101: false positives on env var names (not hardcoded creds)
-          # G115: integer conversions are safe in our bounded contexts
-          # G301: MkdirAll 0755 is correct for storage directories
-          # G304: file path handling is core to a storage system
+          go-version: '1.25'
+      - name: Install gosec
+        run: go install github.com/securego/gosec/v2/cmd/gosec@latest
+      - name: Run gosec
+        # Excluded rules (false positives for a storage system):
+        #   G101: env var names flagged as hardcoded creds
+        #   G115: safe bounded integer conversions
+        #   G301: MkdirAll 0755 is correct for storage directories
+        #   G304: file path handling is core to a storage system
+        run: >-
+          gosec -severity medium
+          -exclude-dir=tests
+          -exclude-dir=internal/testing
+          -exclude=G101,G115,G301,G304
+          ./...
 
   trivy:
     runs-on: ubuntu-latest
