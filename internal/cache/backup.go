@@ -196,7 +196,7 @@ func (c *SSDCache) CreateBackup(backupDir string, backupType BackupType) (*Backu
 		return nil, fmt.Errorf("failed to marshal manifest: %w", err)
 	}
 
-	if err := os.WriteFile(manifestFile, manifestData, 0644); err != nil {
+	if err := os.WriteFile(manifestFile, manifestData, 0600); err != nil {
 		return nil, fmt.Errorf("failed to write manifest: %w", err)
 	}
 
@@ -291,7 +291,7 @@ func (c *SSDCache) CreateIncrementalBackup(backupDir string, baseBackupID string
 		return nil, err
 	}
 
-	if err := os.WriteFile(manifestFile, manifestData, 0644); err != nil {
+	if err := os.WriteFile(manifestFile, manifestData, 0600); err != nil {
 		return nil, err
 	}
 
@@ -375,7 +375,7 @@ func (c *SSDCache) CreateEncryptedBackup(backupDir string, backupType BackupType
 
 	encrypted := gcm.Seal(nonce, nonce, data, nil)
 
-	if err := os.WriteFile(dataFile, encrypted, 0644); err != nil {
+	if err := os.WriteFile(dataFile, encrypted, 0600); err != nil {
 		return nil, err
 	}
 

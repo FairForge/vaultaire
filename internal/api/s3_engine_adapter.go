@@ -3,7 +3,7 @@ package api
 import (
 	"bufio"
 	"context"
-	"crypto/md5"
+	"crypto/md5" //nolint:gosec // S3 spec requires MD5 for ETags
 	"database/sql"
 	"fmt"
 	"io"

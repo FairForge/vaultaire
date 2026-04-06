@@ -3,7 +3,7 @@ package cache
 
 import (
 	"context"
-	"crypto/md5"
+	"crypto/md5" //nolint:gosec // cache key generation, not security
 	"fmt"
 	"net/http"
 	"sort"
