@@ -364,7 +364,7 @@ func (lb *GlobalLoadBalancer) geoProximity(backends []*Backend, lat, lon float64
 }
 
 func (lb *GlobalLoadBalancer) randomSelect(backends []*Backend) *Backend {
-	return backends[rand.Intn(len(backends))]
+	return backends[rand.Intn(len(backends))] // #nosec G404 — random backend selection, not security
 }
 
 // RecordRequest records a request to a backend

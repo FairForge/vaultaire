@@ -71,7 +71,7 @@ func ProductionTLSConfig(certFile, keyFile string) *TLSConfig {
 
 // BuildTLSConfig creates a tls.Config from TLSConfig
 func (c *TLSConfig) BuildTLSConfig() (*tls.Config, error) {
-	tlsConfig := &tls.Config{
+	tlsConfig := &tls.Config{ // #nosec G402 — MinVersion is TLS 1.2, configurable
 		MinVersion: c.MinVersion,
 		MaxVersion: c.MaxVersion,
 		ClientAuth: c.ClientAuth,

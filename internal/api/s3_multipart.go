@@ -129,7 +129,7 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 	}
 
 	// Generate ETag using MD5
-	hash := md5.Sum(data)
+	hash := md5.Sum(data) // #nosec G401 — S3 spec requires MD5 for ETags
 	etag := fmt.Sprintf("\"%x\"", hash)
 
 	// Store the part

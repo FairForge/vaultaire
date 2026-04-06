@@ -342,7 +342,7 @@ func (t *Tracer) StartSpan(ctx context.Context, name string, opts ...SpanOption)
 	}
 
 	// Determine if sampled
-	sampled := mrand.Float64() < t.config.SampleRate
+	sampled := mrand.Float64() < t.config.SampleRate // #nosec G404 — sampling decision, not security
 
 	span := &Span{
 		traceID:    traceID,

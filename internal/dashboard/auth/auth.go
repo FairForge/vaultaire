@@ -216,7 +216,7 @@ func SetSessionCookie(w http.ResponseWriter, token string, ttl time.Duration) {
 
 // ClearSessionCookie removes the session cookie.
 func ClearSessionCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, &http.Cookie{ // #nosec G124 — Secure, HttpOnly, and SameSite are set on SetSessionCookie; this is ClearSessionCookie
 		Name:     cookieName,
 		Value:    "",
 		Path:     "/",
