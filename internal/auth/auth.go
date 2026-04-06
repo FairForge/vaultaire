@@ -86,6 +86,88 @@ func NewAuthService(db Database, sqlDB *sql.DB) *AuthService {
 	}
 }
 
+// SetJWTSecret overrides the default JWT signing key.
+// Call this from main.go with the value from the JWT_SECRET env var.
+func (a *AuthService) SetJWTSecret(secret string) {
+	if secret != "" {
+		a.jwtSecret = []byte(secret)
+	}
+}
+
+// LoadFromDB populates the in-memory maps from PostgreSQL so that
+// authentication works immediately after a restart/deploy without
+// requiring every user to re-register.
+//
+// It loads users, tenants, and the keyIndex (accessKey → tenant) which
+// is the map ValidateS3Request uses to authorize every S3 call.
+// If sqlDB is nil (tests), this is a no-op.
+func (a *AuthService) LoadFromDB(ctx context.Context) error {
+	if a.sqlDB == nil {
+		return nil
+	}
+
+	// Load users
+	rows, err := a.sqlDB.QueryContext(ctx, `
+		SELECT id, email, password_hash, company, created_at, updated_at
+		FROM users
+	`)
+	if err != nil {
+		return fmt.Errorf("load users: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		u := &User{}
+		if err := rows.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.Company,
+			&u.CreatedAt, &u.UpdatedAt); err != nil {
+			return fmt.Errorf("scan user: %w", err)
+		}
+		a.users[u.Email] = u
+		a.userIndex[u.ID] = u
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate users: %w", err)
+	}
+
+	// Load tenants and link to users
+	trows, err := a.sqlDB.QueryContext(ctx, `
+		SELECT id, name, email, access_key, secret_key, created_at
+		FROM tenants
+	`)
+	if err != nil {
+		return fmt.Errorf("load tenants: %w", err)
+	}
+	defer func() { _ = trows.Close() }()
+
+	for trows.Next() {
+		var (
+			t     Tenant
+			name  string
+			email string
+		)
+		if err := trows.Scan(&t.ID, &name, &email, &t.AccessKey, &t.SecretKey,
+			&t.CreatedAt); err != nil {
+			return fmt.Errorf("scan tenant: %w", err)
+		}
+
+		// Find the owning user by email and link them
+		if u, ok := a.users[email]; ok {
+			t.UserID = u.ID
+			u.TenantID = t.ID
+		}
+
+		a.tenants[t.ID] = &t
+		if t.AccessKey != "" {
+			a.keyIndex[t.AccessKey] = &t
+		}
+	}
+	if err := trows.Err(); err != nil {
+		return fmt.Errorf("iterate tenants: %w", err)
+	}
+
+	return nil
+}
+
 // SetAuditLogger sets the audit logger for the auth service
 func (a *AuthService) SetAuditLogger(logger *AuditLogger) {
 	a.auditLogger = logger
