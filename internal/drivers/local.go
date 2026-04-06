@@ -1185,7 +1185,7 @@ const (
 func (d *LocalDriver) WriteAt(ctx context.Context, container, artifact string, data []byte, offset int64) error {
 	fullPath := filepath.Join(d.basePath, container, artifact)
 
-	file, err := os.OpenFile(fullPath, os.O_RDWR, 0666)
+	file, err := os.OpenFile(fullPath, os.O_RDWR, 0600)
 	if err != nil {
 		return err
 	}
