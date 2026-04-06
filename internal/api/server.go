@@ -17,6 +17,8 @@ import (
 	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/compliance"
 	"github.com/FairForge/vaultaire/internal/config"
+	"github.com/FairForge/vaultaire/internal/dashboard"
+	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/FairForge/vaultaire/internal/docs"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/rbac"
@@ -40,6 +42,7 @@ type Server struct {
 	testMode      bool
 	errorCount    int64
 	healthChecker *BackendHealthChecker
+	sessionStore  dashauth.SessionStore
 	startTime     time.Time
 }
 
@@ -76,8 +79,31 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// Previously NewAuthService(nil) left sqlDB nil, so CreateUserWithTenant
 	// wrote only to in-memory maps and credentials vanished on restart.
 	s.auth = auth.NewAuthService(nil, s.db)
+
+	// Use JWT_SECRET from environment if available.
+	s.auth.SetJWTSecret(os.Getenv("JWT_SECRET"))
+
+	// Populate in-memory maps from PostgreSQL so that existing users
+	// can authenticate immediately after a restart/deploy.
+	if s.db != nil {
+		if err := s.auth.LoadFromDB(context.Background()); err != nil {
+			logger.Error("failed to load auth state from DB — existing users cannot log in",
+				zap.Error(err))
+		} else {
+			logger.Info("auth state loaded from database")
+		}
+	}
+
 	s.auditLogger = auth.NewAuditLogger()
 	s.auth.SetAuditLogger(s.auditLogger)
+
+	// Session store for the dashboard web UI.
+	// Uses PostgreSQL when available, in-memory otherwise.
+	if s.db != nil {
+		s.sessionStore = dashauth.NewDBStore(s.db)
+	} else {
+		s.sessionStore = dashauth.NewMemoryStore()
+	}
 
 	s.rbacService = NewRBACService(logger)
 
@@ -253,6 +279,16 @@ func (s *Server) setupRoutes() {
 			Delete("/users/{userID}/roles", handlers.HandleRevokeRole)
 		r.Get("/permissions", handlers.HandleGetPermissions)
 		r.Get("/audit", handlers.HandleGetAuditLogs)
+	})
+
+	// Dashboard routes must be registered BEFORE the S3 catch-all so that
+	// /login, /dashboard/*, /admin/*, and /static/* are matched first.
+	s.logger.Info("Registering dashboard routes")
+	dashboard.RegisterRoutes(s.router, dashboard.Deps{
+		DB:       s.db,
+		Auth:     s.auth,
+		Sessions: s.sessionStore,
+		Logger:   s.logger,
 	})
 
 	s.logger.Info("Registering S3 catch-all handler")
@@ -514,6 +550,11 @@ func (s *Server) Start() error {
 	s.httpServer.RegisterOnShutdown(cancel)
 
 	go s.startHealthChecks(ctx)
+
+	// Clean up expired dashboard sessions hourly.
+	if ds, ok := s.sessionStore.(*dashauth.DBStore); ok {
+		ds.StartCleanup(ctx)
+	}
 
 	s.logger.Info("Starting server with RBAC and API Key Management",
 		zap.Int("port", s.config.Server.Port))

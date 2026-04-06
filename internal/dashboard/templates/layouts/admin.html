@@ -1,0 +1,37 @@
+{{define "admin"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{block "title" .}}Admin &mdash; stored.ge{{end}}</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <script src="/static/js/htmx.min.js"></script>
+    {{block "head" .}}{{end}}
+</head>
+<body class="admin-body">
+    <div class="admin-layout">
+        <aside class="admin-sidebar">
+            <div class="sidebar-brand">
+                <a href="/admin">stored.ge admin</a>
+            </div>
+            <nav class="sidebar-nav">
+                <a href="/admin" class="sidebar-link">Overview</a>
+                <a href="/admin/users" class="sidebar-link">Users</a>
+                <a href="/admin/tenants" class="sidebar-link">Tenants</a>
+                <a href="/admin/billing" class="sidebar-link">Billing</a>
+                <a href="/admin/backends" class="sidebar-link">Backends</a>
+                <a href="/admin/logs" class="sidebar-link">Logs</a>
+            </nav>
+            <div class="sidebar-footer">
+                <a href="/dashboard" class="sidebar-link">Back to dashboard</a>
+                <a href="/logout" class="sidebar-link">Sign out</a>
+            </div>
+        </aside>
+        <main class="admin-main">
+            {{block "content" .}}{{end}}
+        </main>
+    </div>
+</body>
+</html>
+{{end}}
