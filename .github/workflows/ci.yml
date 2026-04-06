@@ -52,6 +52,6 @@ jobs:
           TEST_DB_PASSWORD: ""
 
       - name: Lint
-        uses: golangci/golangci-lint-action@v7
+        uses: golangci/golangci-lint-action@v9
         with:
           version: v2.4.0
