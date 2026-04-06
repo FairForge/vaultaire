@@ -92,7 +92,11 @@ func TestPipeline_Run(t *testing.T) {
 
 		require.NoError(t, err)
 		assert.NotEmpty(t, run.ID())
-		assert.Equal(t, RunStatusPending, run.Status())
+		// Run() starts a goroutine, so status may already be "running"
+		// by the time we check. Both are valid initial states.
+		status := run.Status()
+		assert.True(t, status == RunStatusPending || status == RunStatusRunning,
+			"expected pending or running, got %s", status)
 	})
 }
 

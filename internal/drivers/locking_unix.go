@@ -15,7 +15,7 @@ import (
 func (d *LocalDriver) LockFile(ctx context.Context, container, artifact string, lockType LockType) (*FileLock, error) {
 	fullPath := filepath.Join(d.basePath, container, artifact)
 
-	file, err := os.OpenFile(fullPath, os.O_RDWR|os.O_CREATE, 0666)
+	file, err := os.OpenFile(fullPath, os.O_RDWR|os.O_CREATE, 0600)
 	if err != nil {
 		return nil, err
 	}

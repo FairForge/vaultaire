@@ -993,7 +993,7 @@ func (g *HelmChartGenerator) WriteToDirectory(baseDir string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(chartDir, "Chart.yaml"), []byte(chartYAML), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(chartDir, "Chart.yaml"), []byte(chartYAML), 0600); err != nil {
 		return fmt.Errorf("failed to write Chart.yaml: %w", err)
 	}
 
@@ -1002,14 +1002,14 @@ func (g *HelmChartGenerator) WriteToDirectory(baseDir string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(chartDir, "values.yaml"), []byte(valuesYAML), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(chartDir, "values.yaml"), []byte(valuesYAML), 0600); err != nil {
 		return fmt.Errorf("failed to write values.yaml: %w", err)
 	}
 
 	// Write templates
 	for _, tpl := range g.GenerateTemplates() {
 		path := filepath.Join(chartDir, "templates", tpl.Name)
-		if err := os.WriteFile(path, []byte(tpl.Content), 0644); err != nil {
+		if err := os.WriteFile(path, []byte(tpl.Content), 0600); err != nil {
 			return fmt.Errorf("failed to write template %s: %w", tpl.Name, err)
 		}
 	}
@@ -1034,7 +1034,7 @@ func (g *HelmChartGenerator) WriteToDirectory(baseDir string) error {
 *.tmproj
 .vscode/
 `
-	if err := os.WriteFile(filepath.Join(chartDir, ".helmignore"), []byte(helmignore), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(chartDir, ".helmignore"), []byte(helmignore), 0600); err != nil {
 		return fmt.Errorf("failed to write .helmignore: %w", err)
 	}
 

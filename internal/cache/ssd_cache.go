@@ -492,7 +492,7 @@ func (c *SSDCache) demoteToSSD(key string, data []byte) error {
 	shardPath := filepath.Join(c.ssdPath, fmt.Sprintf("shard-%d", shard))
 	path := filepath.Join(shardPath, fmt.Sprintf("%s.cache", key))
 
-	if err := os.WriteFile(path, encrypted, 0644); err != nil {
+	if err := os.WriteFile(path, encrypted, 0600); err != nil {
 		return err
 	}
 
