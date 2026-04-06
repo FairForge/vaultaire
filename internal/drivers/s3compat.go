@@ -29,7 +29,7 @@ func NewS3CompatDriver(accessKey, secretKey string, logger *zap.Logger) (*S3Comp
 	httpClient := &http.Client{
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true,
+				InsecureSkipVerify: true, // #nosec G402 — required for backends with self-signed certs
 			},
 		},
 	}

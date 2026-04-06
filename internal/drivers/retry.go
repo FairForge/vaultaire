@@ -143,7 +143,7 @@ func (p *RetryPolicy) calculateDelay(attempt int) time.Duration {
 	// Apply jitter to prevent thundering herd
 	if p.jitter {
 		// Jitter between 0.5x and 1.5x the delay
-		jitter := 0.5 + rand.Float64()
+		jitter := 0.5 + rand.Float64() // #nosec G404 — retry jitter, not security
 		delay = delay * jitter
 	}
 

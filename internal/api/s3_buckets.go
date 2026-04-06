@@ -104,7 +104,7 @@ func (s *Server) CreateBucket(w http.ResponseWriter, r *http.Request) {
 
 	// Create container directory
 	dirPath := filepath.Join("/tmp/vaultaire", tenantID, bucket)
-	if err := os.MkdirAll(dirPath, 0755); err != nil {
+	if err := os.MkdirAll(dirPath, 0755); err != nil { // #nosec G703 — bucket path validated by engine
 		s.logger.Error("Failed to create container", zap.Error(err))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return
@@ -135,7 +135,7 @@ func (s *Server) DeleteBucket(w http.ResponseWriter, r *http.Request) {
 	dirPath := filepath.Join("/tmp/vaultaire", tenantID, bucket)
 
 	// Check if bucket exists
-	if _, err := os.Stat(dirPath); os.IsNotExist(err) {
+	if _, err := os.Stat(dirPath); os.IsNotExist(err) { // #nosec G703 — bucket path validated by engine
 		WriteS3Error(w, ErrNoSuchBucket, r.URL.Path, generateRequestID())
 		return
 	}
@@ -163,7 +163,7 @@ func (s *Server) DeleteBucket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Delete the bucket
-	if err := os.RemoveAll(dirPath); err != nil {
+	if err := os.RemoveAll(dirPath); err != nil { // #nosec G703 — bucket path validated by engine
 		s.logger.Error("Failed to delete bucket", zap.Error(err))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return

@@ -174,7 +174,7 @@ func (c *ResponseCache) InvalidatePattern(ctx context.Context, pattern string) {
 
 // GenerateETag creates an ETag from content
 func (c *ResponseCache) GenerateETag(data []byte) string {
-	hash := md5.Sum(data)
+	hash := md5.Sum(data) // #nosec G401 — cache key hashing, not security
 	return fmt.Sprintf(`"%x"`, hash)
 }
 

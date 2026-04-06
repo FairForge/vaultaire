@@ -68,7 +68,7 @@ func (p *PortabilityService) CreateExportRequest(ctx context.Context, userID uui
 	requestCopy := *request
 
 	// Start async processing with copy
-	go p.processExportRequest(context.Background(), &requestCopy)
+	go p.processExportRequest(context.Background(), &requestCopy) // #nosec G118 — intentionally detached from request lifecycle
 
 	// Return original request (which won't be modified by goroutine)
 	return request, nil
@@ -228,7 +228,7 @@ func (p *PortabilityService) exportS3Credentials(ctx context.Context, userID uui
 	}
 
 	// Store credentials temporarily
-	credsJSON, err := json.Marshal(credentials)
+	credsJSON, err := json.Marshal(credentials) // #nosec G117 — access key in data export payload
 	if err != nil {
 		return "", err
 	}

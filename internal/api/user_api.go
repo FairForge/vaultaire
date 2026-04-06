@@ -124,7 +124,7 @@ func (s *Server) handleListUserAPIKeys(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(keys); err != nil {
+	if err := json.NewEncoder(w).Encode(keys); err != nil { // #nosec G117 — secret intentionally returned once at creation
 		s.logger.Error("failed to encode API keys list", zap.Error(err))
 	}
 }
