@@ -375,7 +375,7 @@ func (c *SSDCache) CreateEncryptedBackup(backupDir string, backupType BackupType
 
 	encrypted := gcm.Seal(nonce, nonce, data, nil)
 
-	if err := os.WriteFile(dataFile, encrypted, 0600); err != nil { // #nosec G703 — backup file path is internally constructed
+	if err := os.WriteFile(dataFile, encrypted, 0600); err != nil { // #nosec G703 — TODO: validate backup file path before write
 		return nil, err
 	}
 
