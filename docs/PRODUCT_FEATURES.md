@@ -111,6 +111,50 @@ Your 10TB on stored.ge:
 **Where:** `internal/dashboard/handlers/team.go`, `internal/auth/invites.go`
 **Phase:** 5.6 (foundation), 18 (full multi-tenant)
 
+## HIGH PRIORITY: CLI/TUI (Pull forward from Phase 26)
+
+The target market (r/datahoarder, r/cloudstorage, self-hosters, devs) strongly prefers terminal over web UI. A post on r/cloudstorage asking for "just storage, nothing more" validates that our customers want minimal, scriptable, no-bloat tools. CLI should ship alongside or shortly after the billing dashboard.
+
+### `stored` CLI
+**What:** Single binary CLI for all stored.ge operations. Pipe-friendly, scriptable, no browser needed.
+**Where:** `cmd/stored/` — Go binary, uses stored.ge API
+**Stack:** cobra (CLI framework) + lipgloss (styled output)
+```
+stored signup                            # register from terminal
+stored login                             # authenticate (stores token in ~/.stored.toml)
+stored keys list|create|revoke           # API key management
+stored buckets list|create|delete        # bucket operations
+stored put <bucket/key> [< stdin]        # upload (pipe-friendly)
+stored get <bucket/key> [> stdout]       # download (pipe-friendly)
+stored ls <bucket> [prefix]              # list objects
+stored rm <bucket/key>                   # delete
+stored usage                             # storage + bandwidth summary
+stored billing                           # plan, invoices, upgrade link
+stored rclone-config                     # output rclone config block
+stored mount <bucket> <mountpoint>       # wrapper for s3fs/JuiceFS
+```
+**Phase:** Originally 26. Recommend pulling to Phase 5.7 or right after security polish.
+
+### `stored` TUI (Interactive Mode)
+**What:** Full-screen terminal UI built with Bubble Tea. Browse buckets/objects with arrow keys, live usage bars, key management. `stored tui` or just `stored` with no args.
+**Where:** `cmd/stored/tui/` — uses bubbletea + bubbles + lipgloss
+**Phase:** Same as CLI, or as a follow-up.
+
+### rclone One-Liner Setup
+**What:** `stored rclone-config >> ~/.config/rclone/rclone.conf` outputs a pre-filled rclone remote config with the user's actual credentials. Zero manual config.
+**Where:** CLI `rclone-config` subcommand
+**Phase:** Ships with CLI
+
+### Shell Completions
+**What:** `stored completion bash|zsh|fish` — tab-complete bucket names, key names, subcommands.
+**Where:** cobra built-in completion support
+**Phase:** Ships with CLI
+
+### "Just Storage" Branding
+**What:** Landing page and docs prominently state: "We don't do collaboration, editing, or social features. Just storage. S3-compatible. Pipe-friendly. That's it." This is the anti-bloat positioning that resonates with the r/cloudstorage, r/datahoarder, and LowEndTalk audience.
+**Where:** Landing page, README, docs
+**Phase:** Pre-launch marketing
+
 ## Phase 7: Storage Intelligence Features
 
 ### Data Residency Picker
