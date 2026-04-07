@@ -17,6 +17,7 @@
         </div>
         <div class="nav-links">
             {{if .Email}}
+            {{if eq .Role "admin"}}<a href="/admin" class="nav-link">Admin</a>{{end}}
             <span class="nav-user">{{.Email}}</span>
             <a href="/logout" class="nav-link">Sign out</a>
             {{else}}

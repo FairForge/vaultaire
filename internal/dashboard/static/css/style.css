@@ -255,6 +255,7 @@ th {
     font-size: 0.9rem;
 }
 .sidebar-link:hover { color: #fff; background: #334155; }
+.sidebar-link--active { color: #fff; background: #334155; font-weight: 600; }
 .sidebar-footer { padding: 0.5rem 0; border-top: 1px solid #334155; }
 .admin-main { flex: 1; padding: 2rem; }
 

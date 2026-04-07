@@ -108,9 +108,14 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 	})
 
 	// --- Admin (session + admin role required) ---
+	adminTmpl := template.Must(template.ParseFS(Templates,
+		"templates/layouts/admin.html",
+		"templates/admin/dashboard.html",
+	))
+
 	r.Route("/admin", func(ar chi.Router) {
 		ar.Use(dashauth.RequireAdmin(deps.Sessions))
-		ar.Get("/", renderPage(baseTmpl, "admin"))
+		ar.Get("/", handlers.HandleAdminOverview(adminTmpl, deps.DB, deps.Logger))
 	})
 }
 
@@ -299,12 +304,6 @@ func pageContent(page string) string {
 			`</form>` +
 			`<div class="auth-footer">Have an account? <a href="/login">Sign in</a></div>` +
 			`</div></div>{{end}}`
-	case "admin":
-		return `{{define "title"}}Admin — stored.ge{{end}}` +
-			`{{define "content"}}` +
-			`<h1>Admin Panel</h1>` +
-			`<p>Admin features coming in Phase 3.</p>` +
-			`{{end}}`
 	default:
 		return `{{define "content"}}<p>Page not found.</p>{{end}}`
 	}
