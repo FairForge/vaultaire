@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/auth"
+	"github.com/FairForge/vaultaire/internal/billing"
 	"github.com/FairForge/vaultaire/internal/compliance"
 	"github.com/FairForge/vaultaire/internal/config"
 	"github.com/FairForge/vaultaire/internal/dashboard"
@@ -27,23 +28,25 @@ import (
 )
 
 type Server struct {
-	config        *config.Config
-	logger        *zap.Logger
-	router        chi.Router
-	httpServer    *http.Server
-	db            *sql.DB
-	events        chan Event
-	engine        *engine.CoreEngine
-	quotaManager  QuotaManager
-	rbacService   *RBACService
-	auth          *auth.AuthService
-	auditLogger   *auth.AuditLogger
-	requestCount  int64
-	testMode      bool
-	errorCount    int64
-	healthChecker *BackendHealthChecker
-	sessionStore  dashauth.SessionStore
-	startTime     time.Time
+	config         *config.Config
+	logger         *zap.Logger
+	router         chi.Router
+	httpServer     *http.Server
+	db             *sql.DB
+	events         chan Event
+	engine         *engine.CoreEngine
+	quotaManager   QuotaManager
+	rbacService    *RBACService
+	auth           *auth.AuthService
+	auditLogger    *auth.AuditLogger
+	stripe         *billing.StripeService
+	webhookHandler *billing.WebhookHandler
+	requestCount   int64
+	testMode       bool
+	errorCount     int64
+	healthChecker  *BackendHealthChecker
+	sessionStore   dashauth.SessionStore
+	startTime      time.Time
 }
 
 type QuotaManager interface {
@@ -103,6 +106,14 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		s.sessionStore = dashauth.NewDBStore(s.db)
 	} else {
 		s.sessionStore = dashauth.NewMemoryStore()
+	}
+
+	// Stripe billing service. Only active when STRIPE_SECRET_KEY is set.
+	if stripeKey := os.Getenv("STRIPE_SECRET_KEY"); stripeKey != "" {
+		s.stripe = billing.NewStripeService(stripeKey, s.db, logger)
+		whSecret := os.Getenv("STRIPE_WEBHOOK_SECRET")
+		s.webhookHandler = billing.NewWebhookHandler(whSecret, s.stripe, logger)
+		logger.Info("stripe billing service initialized")
 	}
 
 	s.rbacService = NewRBACService(logger)
@@ -281,6 +292,12 @@ func (s *Server) setupRoutes() {
 		r.Get("/audit", handlers.HandleGetAuditLogs)
 	})
 
+	// Stripe webhook endpoint. No auth middleware — Stripe verifies via signature.
+	if s.webhookHandler != nil {
+		s.logger.Info("Registering Stripe webhook route")
+		s.router.Post("/webhook/stripe", s.webhookHandler.ServeHTTP)
+	}
+
 	// Dashboard routes must be registered BEFORE the S3 catch-all so that
 	// /login, /dashboard/*, /admin/*, and /static/* are matched first.
 	s.logger.Info("Registering dashboard routes")
@@ -294,6 +311,7 @@ func (s *Server) setupRoutes() {
 		Sessions: s.sessionStore,
 		Logger:   s.logger,
 		DataPath: dataPath,
+		Stripe:   s.stripe,
 	})
 
 	s.logger.Info("Registering S3 catch-all handler")

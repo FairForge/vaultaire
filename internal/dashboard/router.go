@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/auth"
+	"github.com/FairForge/vaultaire/internal/billing"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/FairForge/vaultaire/internal/dashboard/handlers"
 	"github.com/go-chi/chi/v5"
@@ -22,7 +23,8 @@ type Deps struct {
 	Auth     *auth.AuthService
 	Sessions dashauth.SessionStore
 	Logger   *zap.Logger
-	DataPath string // Local storage root for bucket creation.
+	DataPath string                 // Local storage root for bucket creation.
+	Stripe   *billing.StripeService // Nil when STRIPE_SECRET_KEY is not set.
 }
 
 // RegisterRoutes mounts the dashboard, auth, admin, and static-asset

@@ -63,6 +63,19 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		zap.String("type", string(event.Type)),
 		zap.String("id", event.ID))
 
+	// Idempotency: skip if we already processed this event.
+	if h.stripe.db != nil && event.ID != "" {
+		var exists bool
+		_ = h.stripe.db.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM stripe_events WHERE event_id = $1)`,
+			event.ID).Scan(&exists)
+		if exists {
+			h.logger.Debug("duplicate webhook event, skipping", zap.String("id", event.ID))
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+	}
+
 	switch event.Type {
 	case "checkout.session.completed":
 		h.handleCheckoutCompleted(ctx, event)
@@ -76,6 +89,15 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleSubscriptionDeleted(ctx, event)
 	default:
 		h.logger.Debug("unhandled webhook event", zap.String("type", string(event.Type)))
+	}
+
+	// Record event for idempotency.
+	if h.stripe.db != nil && event.ID != "" {
+		_, _ = h.stripe.db.ExecContext(ctx,
+			`INSERT INTO stripe_events (event_id, event_type, data)
+			 VALUES ($1, $2, $3)
+			 ON CONFLICT (event_id) DO NOTHING`,
+			event.ID, string(event.Type), string(body))
 	}
 
 	w.WriteHeader(http.StatusOK)
