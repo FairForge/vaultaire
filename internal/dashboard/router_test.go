@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/FairForge/vaultaire/internal/auth"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
@@ -185,6 +186,98 @@ func TestDashboard_RequiresSession(t *testing.T) {
 
 	assert.Equal(t, http.StatusSeeOther, w.Code)
 	assert.Equal(t, "/login", w.Header().Get("Location"))
+}
+
+func TestDashboard_RendersOverview(t *testing.T) {
+	r, authSvc, sessions := setupTestRouter(t)
+
+	// Register a user and create a session.
+	_, _ = authSvc.CreateUser(context.Background(), "dash@stored.ge", "securepass123")
+	user, _ := authSvc.GetUserByEmail(context.Background(), "dash@stored.ge")
+
+	token, err := sessions.Create(context.Background(), dashauth.SessionData{
+		UserID:   user.ID,
+		TenantID: "tenant-test",
+		Email:    user.Email,
+		Role:     "user",
+	}, 24*time.Hour)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("GET", "/dashboard/", nil)
+	req.AddCookie(&http.Cookie{Name: "vaultaire_session", Value: token})
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	// Should render the real dashboard overview, not the old placeholder.
+	assert.Contains(t, body, "Dashboard")
+	assert.Contains(t, body, "dash@stored.ge")
+	assert.Contains(t, body, "Storage Used")
+	assert.Contains(t, body, "Bandwidth This Month")
+	assert.Contains(t, body, "Buckets")
+	assert.Contains(t, body, "API Keys")
+	assert.Contains(t, body, "starter") // Default tier when no DB
+}
+
+func TestBuckets_RequiresSession(t *testing.T) {
+	r, _, _ := setupTestRouter(t)
+
+	req := httptest.NewRequest("GET", "/dashboard/buckets", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusSeeOther, w.Code)
+	assert.Equal(t, "/login", w.Header().Get("Location"))
+}
+
+func TestBuckets_RendersList(t *testing.T) {
+	r, authSvc, sessions := setupTestRouter(t)
+
+	_, _ = authSvc.CreateUser(context.Background(), "buckets@stored.ge", "securepass123")
+	user, _ := authSvc.GetUserByEmail(context.Background(), "buckets@stored.ge")
+
+	token, err := sessions.Create(context.Background(), dashauth.SessionData{
+		UserID:   user.ID,
+		TenantID: "tenant-test",
+		Email:    user.Email,
+		Role:     "user",
+	}, 24*time.Hour)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("GET", "/dashboard/buckets", nil)
+	req.AddCookie(&http.Cookie{Name: "vaultaire_session", Value: token})
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.Contains(t, body, "Buckets")
+	assert.Contains(t, body, "buckets@stored.ge")
+}
+
+func TestBucketObjects_RendersBrowser(t *testing.T) {
+	r, authSvc, sessions := setupTestRouter(t)
+
+	_, _ = authSvc.CreateUser(context.Background(), "browse@stored.ge", "securepass123")
+	user, _ := authSvc.GetUserByEmail(context.Background(), "browse@stored.ge")
+
+	token, err := sessions.Create(context.Background(), dashauth.SessionData{
+		UserID:   user.ID,
+		TenantID: "tenant-test",
+		Email:    user.Email,
+		Role:     "user",
+	}, 24*time.Hour)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("GET", "/dashboard/buckets/my-bucket", nil)
+	req.AddCookie(&http.Cookie{Name: "vaultaire_session", Value: token})
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.Contains(t, body, "my-bucket")
 }
 
 func TestLogout(t *testing.T) {
