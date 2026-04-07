@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/auth"
+	"github.com/FairForge/vaultaire/internal/billing"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/FairForge/vaultaire/internal/dashboard/handlers"
 	"github.com/go-chi/chi/v5"
@@ -22,7 +23,8 @@ type Deps struct {
 	Auth     *auth.AuthService
 	Sessions dashauth.SessionStore
 	Logger   *zap.Logger
-	DataPath string // Local storage root for bucket creation.
+	DataPath string                 // Local storage root for bucket creation.
+	Stripe   *billing.StripeService // Nil when STRIPE_SECRET_KEY is not set.
 }
 
 // RegisterRoutes mounts the dashboard, auth, admin, and static-asset
@@ -68,6 +70,41 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		dr.Get("/buckets", handlers.HandleBuckets(bucketsTmpl, deps.DB, deps.DataPath, deps.Logger))
 		dr.Post("/buckets", handlers.HandleCreateBucket(bucketsTmpl, deps.DB, deps.DataPath, deps.Logger))
 		dr.Get("/buckets/{name}", handlers.HandleBucketObjects(bucketObjsTmpl, deps.DB, deps.Logger))
+
+		// API key management.
+		apikeysTmpl := template.Must(baseTmpl.Clone())
+		template.Must(apikeysTmpl.ParseFS(Templates,
+			"templates/customer/apikeys.html",
+		))
+		dr.Get("/apikeys", handlers.HandleAPIKeys(apikeysTmpl, deps.Auth, deps.Logger))
+		dr.Post("/apikeys", handlers.HandleGenerateKey(apikeysTmpl, deps.Auth, deps.Logger))
+		dr.Post("/apikeys/{id}/revoke", handlers.HandleRevokeKey(deps.Auth, deps.Logger))
+
+		// Usage page.
+		usageTmpl := template.Must(baseTmpl.Clone())
+		template.Must(usageTmpl.ParseFS(Templates,
+			"templates/customer/usage.html",
+		))
+		dr.Get("/usage", handlers.HandleUsage(usageTmpl, deps.DB, deps.Logger))
+
+		// Settings page.
+		settingsTmpl := template.Must(baseTmpl.Clone())
+		template.Must(settingsTmpl.ParseFS(Templates,
+			"templates/customer/settings.html",
+		))
+		dr.Get("/settings", handlers.HandleSettings(settingsTmpl, deps.Auth, deps.DB, deps.Logger))
+		dr.Post("/settings/profile", handlers.HandleUpdateProfile(settingsTmpl, deps.Auth, deps.DB, deps.Logger))
+		dr.Post("/settings/password", handlers.HandleChangePassword(settingsTmpl, deps.Auth, deps.DB, deps.Logger))
+		dr.Post("/settings/notifications", handlers.HandleUpdateNotifications(settingsTmpl, deps.Auth, deps.DB, deps.Logger))
+
+		// Billing page.
+		billingTmpl := template.Must(baseTmpl.Clone())
+		template.Must(billingTmpl.ParseFS(Templates,
+			"templates/customer/billing.html",
+		))
+		dr.Get("/billing", handlers.HandleBilling(billingTmpl, deps.Stripe, deps.DB, deps.Logger))
+		dr.Post("/billing/upgrade", handlers.HandleUpgrade(deps.Stripe, deps.DB, deps.Logger))
+		dr.Post("/billing/portal", handlers.HandleManageBilling(deps.Stripe, deps.Logger))
 	})
 
 	// --- Admin (session + admin role required) ---
@@ -190,6 +227,14 @@ func handleRegister(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 				renderErr("Registration failed. Please try again.")
 			}
 			return
+		}
+
+		// Create Stripe customer for billing (non-blocking).
+		if deps.Stripe != nil {
+			if _, stripeErr := deps.Stripe.CreateCustomer(r.Context(), email, user.TenantID); stripeErr != nil {
+				deps.Logger.Error("create stripe customer on registration",
+					zap.String("tenant", user.TenantID), zap.Error(stripeErr))
+			}
 		}
 
 		token, err := deps.Sessions.Create(r.Context(), dashauth.SessionData{

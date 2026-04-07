@@ -10,7 +10,7 @@ HTTP handlers for the stored.ge customer dashboard. Each handler receives a pre-
 - Fails gracefully to zeros when DB is nil or tables are empty
 - Template: `templates/customer/dashboard.html`
 
-Helper functions: `formatBytes` (human-readable sizes), `relativeTime` (time ago), `absInt64`.
+Helper functions are in `context.go`: `formatBytes` (human-readable sizes), `relativeTime` (time ago), `absInt64`, `sessionData`.
 
 ## Bucket Browser (`buckets.go`)
 
@@ -21,11 +21,41 @@ Three handlers:
 
 Bucket name validation: `^[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9]$` + path traversal check.
 
-Shared helpers: `sessionData(sd, page)` builds the base template data map. `formatBytes` and `relativeTime` from `overview.go`.
+Shared helpers in `context.go`: `sessionData(sd, page)` builds the base template data map, `formatBytes`, `relativeTime`.
+
+## API Key Management (`apikeys.go`)
+
+Three handlers:
+- `HandleAPIKeys(tmpl, authSvc, logger)` — lists all keys for current user via `auth.ListAPIKeys()`
+- `HandleGenerateKey(tmpl, authSvc, logger)` — creates key via `auth.GenerateAPIKey()`, shows secret once
+- `HandleRevokeKey(authSvc, logger)` — revokes key via `auth.RevokeAPIKey()`, redirects back
+
+Uses `auth.AuthService` directly (not DB queries) since keys are in-memory + DB-backed.
+
+## Usage Page (`usage.go`)
+
+`HandleUsage(tmpl, db, logger)` renders the detailed usage page:
+- Storage gauge with percentage, limit, tier
+- Current month bandwidth (ingress, egress, requests)
+- 30-day SVG bar chart (stacked ingress/egress bars, server-rendered)
+- Daily breakdown table (date, ingress, egress, total, requests)
+- htmx auto-refresh on chart via `hx-trigger="every 30s"`
+
+Queries: `tenant_quotas`, `bandwidth_usage_daily` (30 days). Chart bars are `ChartBar` structs with pre-computed SVG coordinates.
+
+## Settings Page (`settings.go`)
+
+Four handlers:
+- `HandleSettings(tmpl, authSvc, db, logger)` — GET renders profile, password, and notification forms
+- `HandleUpdateProfile(tmpl, authSvc, db, logger)` — POST updates company in DB + in-memory
+- `HandleChangePassword(tmpl, authSvc, db, logger)` — POST validates current password via `authSvc.ChangePassword()`, enforces min length + match + different-from-current
+- `HandleUpdateNotifications(tmpl, authSvc, db, logger)` — POST saves email notification preference via `authSvc.SetUserPreferences()`
+
+Uses both `*auth.AuthService` (password change, preferences) and `*sql.DB` (company column, member-since date).
 
 ## Legacy Handlers
 
-Files like `dashboard.go`, `buckets.go`, `usage.go`, etc. are stubs from before Phase 0 with inline terminal-style templates. They are NOT wired into the router. Phase 1.3+ will rewrite them to follow the `overview.go` pattern.
+Files like `dashboard.go` etc. are stubs from before Phase 0 with inline terminal-style templates. They are NOT wired into the router. Remaining phases will rewrite them.
 
 ## Pattern
 

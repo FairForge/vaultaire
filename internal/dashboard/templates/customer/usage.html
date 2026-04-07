@@ -1,0 +1,103 @@
+{{define "title"}}Usage — stored.ge{{end}}
+{{define "content"}}
+<div class="page-header">
+    <div>
+        <h1>Usage</h1>
+        <p class="text-muted">Storage and bandwidth for your account</p>
+    </div>
+</div>
+
+<div class="card-grid">
+    <div class="card">
+        <div class="card-title">Storage Used</div>
+        <div class="card-value">{{.StorageUsedFmt}}</div>
+        <div class="usage-bar">
+            <div class="usage-bar-fill {{.StorageBarClass}}" style="width: {{.StoragePercent}}%"></div>
+        </div>
+        <div class="card-detail">{{.StoragePercent}}% of {{.StorageLimitFmt}} ({{.Tier}} plan)</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Bandwidth This Month</div>
+        <div class="card-value">{{.BandwidthTotalFmt}}</div>
+        <div class="card-detail">{{.IngressFmt}} in / {{.EgressFmt}} out</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Requests This Month</div>
+        <div class="card-value">{{.RequestsCount}}</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Plan</div>
+        <div class="card-value card-value-plan">{{.Tier}}</div>
+    </div>
+</div>
+
+{{if .HasChartData}}
+<div class="card" hx-get="/dashboard/usage" hx-trigger="every 30s" hx-select=".chart-wrap" hx-swap="innerHTML" hx-target=".chart-wrap">
+    <div class="card-title">Bandwidth — Last 30 Days</div>
+    <div class="chart-wrap">
+        <svg viewBox="0 0 640 240" class="usage-chart" role="img" aria-label="Bandwidth usage chart for the last 30 days">
+            <text x="0" y="12" class="chart-label">{{.ChartMaxLabel}}</text>
+            <text x="0" y="222" class="chart-label">0</text>
+            <line x1="30" y1="15" x2="630" y2="15" class="chart-grid"/>
+            <line x1="30" y1="115" x2="630" y2="115" class="chart-grid"/>
+            <line x1="30" y1="215" x2="630" y2="215" class="chart-grid"/>
+            <g transform="translate(35, 15)">
+                {{range .ChartBars}}
+                <g>
+                    <rect x="{{.X}}" y="{{.InY}}" width="{{.W}}" height="{{.InH}}" class="bar-ingress"><title>{{.Label}} ingress</title></rect>
+                    <rect x="{{.X}}" y="{{.EgY}}" width="{{.W}}" height="{{.EgH}}" class="bar-egress"><title>{{.Label}} egress</title></rect>
+                    {{if .ShowLabel}}
+                    <text x="{{.X}}" y="210" class="chart-date">{{.Label}}</text>
+                    {{end}}
+                </g>
+                {{end}}
+            </g>
+        </svg>
+        <div class="chart-legend">
+            <span class="legend-item"><span class="legend-swatch legend-ingress"></span> Ingress</span>
+            <span class="legend-item"><span class="legend-swatch legend-egress"></span> Egress</span>
+        </div>
+    </div>
+</div>
+{{else}}
+<div class="card">
+    <div class="card-title">Bandwidth — Last 30 Days</div>
+    <p class="text-muted empty-state">No bandwidth data yet. Upload or download objects to see usage.</p>
+</div>
+{{end}}
+
+{{if .UsageHistory}}
+<div class="card">
+    <div class="card-title">Daily Breakdown</div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Date</th>
+                    <th>Ingress</th>
+                    <th>Egress</th>
+                    <th>Total</th>
+                    <th>Requests</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .UsageHistory}}
+                <tr>
+                    <td>{{.Date}}</td>
+                    <td>{{.IngressFmt}}</td>
+                    <td>{{.EgressFmt}}</td>
+                    <td>{{.TotalFmt}}</td>
+                    <td>{{.Requests}}</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+</div>
+{{end}}
+
+<div class="dashboard-actions">
+    <a href="/dashboard/" class="btn">Back to Dashboard</a>
+    <a href="/dashboard/buckets" class="btn">Browse Buckets</a>
+</div>
+{{end}}

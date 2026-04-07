@@ -37,6 +37,17 @@ Cookie: `vaultaire_session`, HttpOnly, Secure, SameSite=Lax.
 | `/dashboard/buckets` | GET | session | Bucket list with counts + sizes |
 | `/dashboard/buckets` | POST | session | Create new bucket (validates name, creates directory) |
 | `/dashboard/buckets/{name}` | GET | session | Object browser with prefix navigation |
+| `/dashboard/apikeys` | GET | session | List API keys with status |
+| `/dashboard/apikeys` | POST | session | Generate new API key (shows secret once) |
+| `/dashboard/apikeys/{id}/revoke` | POST | session | Revoke an API key |
+| `/dashboard/usage` | GET | session | Usage detail: storage, bandwidth, SVG chart, daily table |
+| `/dashboard/settings` | GET | session | Settings: profile, password, notifications |
+| `/dashboard/settings/profile` | POST | session | Update company name |
+| `/dashboard/settings/password` | POST | session | Change password (validates current) |
+| `/dashboard/settings/notifications` | POST | session | Update notification preferences |
+| `/dashboard/billing` | GET | session | Billing: plan, upgrade, value stack, cost comparison |
+| `/dashboard/billing/upgrade` | POST | session | Redirect to Stripe Checkout for chosen plan |
+| `/dashboard/billing/portal` | POST | session | Redirect to Stripe Billing Portal |
 | `/admin/*` | GET | session + admin role | Admin panel |
 
 ## Auth Flow
