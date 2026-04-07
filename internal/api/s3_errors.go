@@ -36,6 +36,7 @@ const (
 	ErrMalformedXML          = "MalformedXML"
 	ErrMethodNotAllowed      = "MethodNotAllowed"
 	ErrSignatureDoesNotMatch = "SignatureDoesNotMatch"
+	ErrAccountSuspended      = "AccountSuspended"
 )
 
 // Error messages
@@ -58,6 +59,7 @@ var errorMessages = map[string]string{
 	ErrMalformedXML:          "The XML you provided was not well-formed or did not validate against our published schema",
 	ErrMethodNotAllowed:      "The specified method is not allowed against this resource",
 	ErrSignatureDoesNotMatch: "The request signature we calculated does not match the signature you provided",
+	ErrAccountSuspended:      "Your account has been suspended. Contact support for assistance.",
 }
 
 // HTTP status codes for errors
@@ -80,6 +82,7 @@ var errorStatusCodes = map[string]int{
 	ErrMalformedXML:          http.StatusBadRequest,
 	ErrMethodNotAllowed:      http.StatusMethodNotAllowed,
 	ErrSignatureDoesNotMatch: http.StatusForbidden,
+	ErrAccountSuspended:      http.StatusForbidden,
 }
 
 // WriteS3Error writes an S3-compatible error response

@@ -225,6 +225,15 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 			zap.String("tenant_id", tenantID),
 			zap.String("method", r.Method),
 			zap.String("path", r.URL.Path))
+
+		// Phase 3.4: check if tenant is suspended before processing request.
+		if s.db != nil && isTenantSuspended(r.Context(), s.db, tenantID) {
+			s.logger.Warn("suspended tenant attempted S3 request",
+				zap.String("tenant_id", tenantID),
+				zap.String("path", r.URL.Path))
+			WriteS3Error(w, ErrAccountSuspended, r.URL.Path, generateRequestID())
+			return
+		}
 	} else {
 		s.logger.Debug("anonymous request",
 			zap.String("method", r.Method),
@@ -437,4 +446,15 @@ func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request, req *
 // handleListBuckets handles listing all buckets
 func (s *Server) handleListBuckets(w http.ResponseWriter, r *http.Request, req *S3Request) {
 	s.ListBuckets(w, r)
+}
+
+// isTenantSuspended checks if a tenant has been suspended by an admin.
+func isTenantSuspended(ctx context.Context, db *sql.DB, tenantID string) bool {
+	var suspendedAt sql.NullTime
+	err := db.QueryRowContext(ctx,
+		`SELECT suspended_at FROM tenants WHERE id = $1`, tenantID).Scan(&suspendedAt)
+	if err != nil {
+		return false // fail open — if we can't check, allow access
+	}
+	return suspendedAt.Valid
 }
