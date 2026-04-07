@@ -119,6 +119,9 @@ GitHub Actions Deploy (`.github/workflows/deploy.yml`):
 | `S3_ACCESS_KEY`, `S3_SECRET_KEY` | — | AWS S3 credentials |
 | `LYVE_ACCESS_KEY`, `LYVE_SECRET_KEY`, `LYVE_REGION` | — | Seagate Lyve Cloud |
 | `QUOTALESS_ACCESS_KEY`, `QUOTALESS_SECRET_KEY`, `QUOTALESS_ENDPOINT` | — | Quotaless storage |
+| `STRIPE_SECRET_KEY` | — | Stripe API key (sk_test_... or sk_live_...) |
+| `STRIPE_WEBHOOK_SECRET` | — | Stripe webhook endpoint secret (whsec_...) |
+| `STRIPE_PRICE_VAULT3`, `STRIPE_PRICE_VAULT9`, etc. | — | Stripe Price IDs for each plan |
 
 ## Production
 

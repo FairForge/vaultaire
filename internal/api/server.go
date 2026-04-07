@@ -113,6 +113,11 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		s.stripe = billing.NewStripeService(stripeKey, s.db, logger)
 		whSecret := os.Getenv("STRIPE_WEBHOOK_SECRET")
 		s.webhookHandler = billing.NewWebhookHandler(whSecret, s.stripe, logger)
+
+		// Register plans. Price IDs come from environment (set in Stripe Dashboard).
+		// If not set, plans won't appear on the billing page but nothing breaks.
+		registerStripePlans(s.stripe)
+
 		logger.Info("stripe billing service initialized")
 	}
 
@@ -414,6 +419,35 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		zap.String("email", req.Email),
 		zap.String("user_id", user.ID),
 		zap.String("tenant_id", tenant.ID))
+}
+
+// registerStripePlans loads plan definitions from environment variables.
+// Each plan needs a STRIPE_PRICE_<ID> env var with the Stripe Price ID.
+// If the env var is empty, the plan is skipped (won't appear on billing page).
+func registerStripePlans(s *billing.StripeService) {
+	plans := []struct {
+		id, envVar, name, priceFmt string
+		storageTB                  int64
+	}{
+		{"vault3", "STRIPE_PRICE_VAULT3", "Vault 3TB", "$2.99/mo", 3},
+		{"vault9", "STRIPE_PRICE_VAULT9", "Vault 9TB", "$9/mo", 9},
+		{"vault18", "STRIPE_PRICE_VAULT18", "Vault 18TB", "$18/mo", 18},
+		{"vault36", "STRIPE_PRICE_VAULT36", "Vault 36TB", "$36/mo", 36},
+		{"standard", "STRIPE_PRICE_STANDARD", "Standard", "$3.99/TB/mo", 0},
+	}
+	for _, p := range plans {
+		priceID := os.Getenv(p.envVar)
+		if priceID == "" {
+			continue
+		}
+		s.RegisterPlan(billing.Plan{
+			ID:        p.id,
+			PriceID:   priceID,
+			Name:      p.name,
+			PriceFmt:  p.priceFmt,
+			StorageTB: p.storageTB,
+		})
+	}
 }
 
 // getPublicEndpoint returns the public S3 endpoint from the VAULTAIRE_ENDPOINT
