@@ -315,37 +315,54 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 
+	// Wrap response writer to count egress bytes for bandwidth tracking.
+	cw := &countingResponseWriter{ResponseWriter: w}
+
+	// Track ingress bytes from PUT/UploadPart request bodies.
+	var ingressBytes int64
+	if s3Req.Operation == "PutObject" || s3Req.Operation == "UploadPart" {
+		ingressBytes = r.ContentLength
+		if ingressBytes < 0 {
+			ingressBytes = 0
+		}
+	}
+
 	switch s3Req.Operation {
 	case "GetObject":
-		s.handleGetObject(w, r, s3Req)
+		s.handleGetObject(cw, r, s3Req)
 	case "HeadObject":
-		s.handleHeadObject(w, r, s3Req)
+		s.handleHeadObject(cw, r, s3Req)
 	case "PutObject":
-		s.handlePutObject(w, r, s3Req)
+		s.handlePutObject(cw, r, s3Req)
 	case "DeleteObject":
-		s.handleDeleteObject(w, r, s3Req)
+		s.handleDeleteObject(cw, r, s3Req)
 	case "ListObjects":
-		s.handleListObjects(w, r, s3Req)
+		s.handleListObjects(cw, r, s3Req)
 	case "ListBuckets":
-		s.handleListBuckets(w, r, s3Req)
+		s.handleListBuckets(cw, r, s3Req)
 	case "CreateBucket":
-		s.CreateBucket(w, r)
+		s.CreateBucket(cw, r)
 	case "DeleteBucket":
-		s.DeleteBucket(w, r)
+		s.DeleteBucket(cw, r)
 	case "InitiateMultipartUpload":
-		s.handleInitiateMultipartUpload(w, r, s3Req.Bucket, s3Req.Object)
+		s.handleInitiateMultipartUpload(cw, r, s3Req.Bucket, s3Req.Object)
 	case "UploadPart":
-		s.handleUploadPart(w, r, s3Req.Bucket, s3Req.Object)
+		s.handleUploadPart(cw, r, s3Req.Bucket, s3Req.Object)
 	case "CompleteMultipartUpload":
-		s.handleCompleteMultipartUpload(w, r, s3Req.Bucket, s3Req.Object)
+		s.handleCompleteMultipartUpload(cw, r, s3Req.Bucket, s3Req.Object)
 	case "AbortMultipartUpload":
-		s.handleAbortMultipartUpload(w, r, s3Req.Bucket, s3Req.Object)
+		s.handleAbortMultipartUpload(cw, r, s3Req.Bucket, s3Req.Object)
 	case "ListParts":
-		s.handleListParts(w, r, s3Req.Bucket, s3Req.Object)
+		s.handleListParts(cw, r, s3Req.Bucket, s3Req.Object)
 	default:
 		s.logger.Warn("operation not implemented",
 			zap.String("operation", s3Req.Operation))
-		WriteS3Error(w, ErrNotImplemented, r.URL.Path, generateRequestID())
+		WriteS3Error(cw, ErrNotImplemented, r.URL.Path, generateRequestID())
+	}
+
+	// Record bandwidth for authenticated requests.
+	if tenantID != "" && tenantID != "default" && s.bandwidthTracker != nil {
+		s.bandwidthTracker.Record(r.Context(), tenantID, ingressBytes, cw.bytesWritten)
 	}
 }
 

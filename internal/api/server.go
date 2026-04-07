@@ -28,25 +28,26 @@ import (
 )
 
 type Server struct {
-	config         *config.Config
-	logger         *zap.Logger
-	router         chi.Router
-	httpServer     *http.Server
-	db             *sql.DB
-	events         chan Event
-	engine         *engine.CoreEngine
-	quotaManager   QuotaManager
-	rbacService    *RBACService
-	auth           *auth.AuthService
-	auditLogger    *auth.AuditLogger
-	stripe         *billing.StripeService
-	webhookHandler *billing.WebhookHandler
-	requestCount   int64
-	testMode       bool
-	errorCount     int64
-	healthChecker  *BackendHealthChecker
-	sessionStore   dashauth.SessionStore
-	startTime      time.Time
+	config           *config.Config
+	logger           *zap.Logger
+	router           chi.Router
+	httpServer       *http.Server
+	db               *sql.DB
+	events           chan Event
+	engine           *engine.CoreEngine
+	quotaManager     QuotaManager
+	rbacService      *RBACService
+	auth             *auth.AuthService
+	auditLogger      *auth.AuditLogger
+	stripe           *billing.StripeService
+	webhookHandler   *billing.WebhookHandler
+	requestCount     int64
+	testMode         bool
+	errorCount       int64
+	healthChecker    *BackendHealthChecker
+	sessionStore     dashauth.SessionStore
+	bandwidthTracker *BandwidthTracker
+	startTime        time.Time
 }
 
 type QuotaManager interface {
@@ -107,6 +108,11 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	} else {
 		s.sessionStore = dashauth.NewMemoryStore()
 	}
+
+	// Bandwidth tracker — buffers S3 bandwidth events and flushes to DB.
+	s.bandwidthTracker = NewBandwidthTracker(s.db)
+	s.bandwidthTracker.SetLogger(logger)
+	s.bandwidthTracker.StartFlusher(context.Background(), 5*time.Second)
 
 	// Stripe billing service. Only active when STRIPE_SECRET_KEY is set.
 	if stripeKey := os.Getenv("STRIPE_SECRET_KEY"); stripeKey != "" {
