@@ -294,14 +294,3 @@ func populateBucketObjects(ctx context.Context, db *sql.DB, tenantID, bucket, pr
 	data["Objects"] = objects
 	data["Prefixes"] = prefixes
 }
-
-// sessionData builds the base template data map from session.
-func sessionData(sd *dashauth.SessionData, page string) map[string]any {
-	return map[string]any{
-		"Email":    sd.Email,
-		"Role":     sd.Role,
-		"UserID":   sd.UserID,
-		"TenantID": sd.TenantID,
-		"Page":     page,
-	}
-}

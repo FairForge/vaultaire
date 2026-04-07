@@ -10,7 +10,7 @@ HTTP handlers for the stored.ge customer dashboard. Each handler receives a pre-
 - Fails gracefully to zeros when DB is nil or tables are empty
 - Template: `templates/customer/dashboard.html`
 
-Helper functions: `formatBytes` (human-readable sizes), `relativeTime` (time ago), `absInt64`.
+Helper functions are in `context.go`: `formatBytes` (human-readable sizes), `relativeTime` (time ago), `absInt64`, `sessionData`.
 
 ## Bucket Browser (`buckets.go`)
 
@@ -21,7 +21,7 @@ Three handlers:
 
 Bucket name validation: `^[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9]$` + path traversal check.
 
-Shared helpers: `sessionData(sd, page)` builds the base template data map. `formatBytes` and `relativeTime` from `overview.go`.
+Shared helpers in `context.go`: `sessionData(sd, page)` builds the base template data map, `formatBytes`, `relativeTime`.
 
 ## API Key Management (`apikeys.go`)
 
