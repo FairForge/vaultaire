@@ -208,6 +208,7 @@ func (m *QuotaManager) GetTier(ctx context.Context, tenantID string) (string, er
 func (m *QuotaManager) UpdateTier(ctx context.Context, tenantID, newTier string) error {
 	limits := map[string]int64{
 		"starter":      1099511627776,   // 1TB
+		"vault18":      19791209299968,  // 18TB (pack size)
 		"professional": 10995116277760,  // 10TB
 		"enterprise":   109951162777600, // 100TB
 	}

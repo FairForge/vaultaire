@@ -141,6 +141,7 @@ func main() {
 		"s3":        0.023,
 		"onedrive":  0.0,
 		"local":     0.0,
+		"geyser":    0.00155, // $1.55/TB
 	})
 
 	eng.SetEgressCosts(map[string]float64{
@@ -149,6 +150,7 @@ func main() {
 		"quotaless": 0.01,
 		"onedrive":  0.02,
 		"local":     0.0,
+		"geyser":    0.0, // No egress fees
 	})
 
 	// Initialize storage drivers
@@ -207,16 +209,38 @@ func main() {
 		}
 	}
 
-	// 5. Set primary backend (auto-detect best available)
+	// 5. Add Geyser if credentials available
+	if accessKey := os.Getenv("GEYSER_ACCESS_KEY"); accessKey != "" {
+		secretKey := os.Getenv("GEYSER_SECRET_KEY")
+		bucket := os.Getenv("GEYSER_BUCKET")
+		if bucket == "" {
+			bucket = "stored3lib-632df558-9627-427b-ab86-9f3ff1eaafe9"
+		}
+		var geyserOpts []drivers.GeyserOption
+		if ep := os.Getenv("GEYSER_ENDPOINT"); ep != "" {
+			geyserOpts = append(geyserOpts, drivers.WithGeyserEndpoint(ep))
+		}
+		geyserDriver, err := drivers.NewGeyserDriver(accessKey, secretKey, bucket, "vaultaire", logger, geyserOpts...)
+		if err != nil {
+			logger.Warn("failed to create Geyser driver", zap.Error(err))
+		} else {
+			eng.AddDriver("geyser", geyserDriver)
+			logger.Info("geyser driver added (LTO-9 tape)", zap.String("bucket", bucket))
+		}
+	}
+
+	// 6. Set primary backend (auto-detect best available)
 	storageMode := os.Getenv("STORAGE_MODE")
 	if storageMode == "" {
-		// Auto-detect: prefer Quotaless > Lyve > S3 > local
+		// Auto-detect: prefer Quotaless > Lyve > S3 > Geyser > local
 		if os.Getenv("QUOTALESS_ACCESS_KEY") != "" {
 			storageMode = "quotaless"
 		} else if os.Getenv("LYVE_ACCESS_KEY") != "" {
 			storageMode = "lyve"
 		} else if os.Getenv("S3_ACCESS_KEY") != "" {
 			storageMode = "s3"
+		} else if os.Getenv("GEYSER_ACCESS_KEY") != "" {
+			storageMode = "geyser"
 		} else {
 			storageMode = "local"
 		}

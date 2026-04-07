@@ -1,0 +1,74 @@
+{{define "title"}}Dashboard — stored.ge{{end}}
+{{define "content"}}
+<div class="dashboard-header">
+    <h1>Dashboard</h1>
+    <p class="text-muted">Welcome back, {{.Email}}</p>
+</div>
+
+<div class="card-grid">
+    <div class="card">
+        <div class="card-title">Storage Used</div>
+        <div class="card-value">{{.StorageUsedFmt}}</div>
+        <div class="usage-bar">
+            <div class="usage-bar-fill {{.StorageBarClass}}" style="width: {{.StoragePercent}}%"></div>
+        </div>
+        <div class="card-detail">{{.StoragePercent}}% of {{.StorageLimitFmt}}</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Bandwidth This Month</div>
+        <div class="card-value">{{.BandwidthTotalFmt}}</div>
+        <div class="card-detail">{{.IngressFmt}} in / {{.EgressFmt}} out</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Buckets</div>
+        <div class="card-value">{{.BucketCount}}</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Objects</div>
+        <div class="card-value">{{.ObjectCount}}</div>
+    </div>
+    <div class="card">
+        <div class="card-title">API Keys</div>
+        <div class="card-value">{{.APIKeyCount}}</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Plan</div>
+        <div class="card-value card-value-plan">{{.Tier}}</div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">Recent Activity</div>
+    {{if .Activity}}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Operation</th>
+                    <th>Object</th>
+                    <th>Size</th>
+                    <th>Time</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .Activity}}
+                <tr>
+                    <td><span class="badge badge-{{.BadgeClass}}">{{.Operation}}</span></td>
+                    <td class="mono">{{.ObjectKey}}</td>
+                    <td>{{.SizeFmt}}</td>
+                    <td>{{.TimeFmt}}</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+    {{else}}
+    <p class="text-muted empty-state">No activity yet. Upload your first object to get started.</p>
+    {{end}}
+</div>
+
+<div class="dashboard-actions">
+    <a href="/dashboard/buckets" class="btn btn-primary">Browse Buckets</a>
+    <a href="/dashboard/apikeys" class="btn">Manage API Keys</a>
+</div>
+{{end}}
