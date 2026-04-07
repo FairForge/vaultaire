@@ -9,6 +9,7 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/auth"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
+	"github.com/FairForge/vaultaire/internal/dashboard/handlers"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 )
@@ -21,6 +22,7 @@ type Deps struct {
 	Auth     *auth.AuthService
 	Sessions dashauth.SessionStore
 	Logger   *zap.Logger
+	DataPath string // Local storage root for bucket creation.
 }
 
 // RegisterRoutes mounts the dashboard, auth, admin, and static-asset
@@ -46,7 +48,26 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 	// --- Customer dashboard (session required) ---
 	r.Route("/dashboard", func(dr chi.Router) {
 		dr.Use(dashauth.RequireSession(deps.Sessions))
-		dr.Get("/", renderPage(baseTmpl, "dashboard"))
+
+		// Overview: parse the real template from embedded FS.
+		overviewTmpl := template.Must(baseTmpl.Clone())
+		template.Must(overviewTmpl.ParseFS(Templates,
+			"templates/customer/dashboard.html",
+		))
+		dr.Get("/", handlers.HandleOverview(overviewTmpl, deps.DB, deps.Logger))
+
+		// Bucket browser.
+		bucketsTmpl := template.Must(baseTmpl.Clone())
+		template.Must(bucketsTmpl.ParseFS(Templates,
+			"templates/customer/buckets.html",
+		))
+		bucketObjsTmpl := template.Must(baseTmpl.Clone())
+		template.Must(bucketObjsTmpl.ParseFS(Templates,
+			"templates/customer/bucket_objects.html",
+		))
+		dr.Get("/buckets", handlers.HandleBuckets(bucketsTmpl, deps.DB, deps.DataPath, deps.Logger))
+		dr.Post("/buckets", handlers.HandleCreateBucket(bucketsTmpl, deps.DB, deps.DataPath, deps.Logger))
+		dr.Get("/buckets/{name}", handlers.HandleBucketObjects(bucketObjsTmpl, deps.DB, deps.Logger))
 	})
 
 	// --- Admin (session + admin role required) ---
@@ -233,12 +254,6 @@ func pageContent(page string) string {
 			`</form>` +
 			`<div class="auth-footer">Have an account? <a href="/login">Sign in</a></div>` +
 			`</div></div>{{end}}`
-	case "dashboard":
-		return `{{define "title"}}Dashboard — stored.ge{{end}}` +
-			`{{define "content"}}` +
-			`<h1>Dashboard</h1>` +
-			`<p>Welcome, {{.Email}}. Your dashboard is coming in Phase 1.</p>` +
-			`{{end}}`
 	case "admin":
 		return `{{define "title"}}Admin — stored.ge{{end}}` +
 			`{{define "content"}}` +

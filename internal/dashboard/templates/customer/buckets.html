@@ -1,0 +1,62 @@
+{{define "title"}}Buckets — stored.ge{{end}}
+{{define "content"}}
+<div class="page-header">
+    <div>
+        <h1>Buckets</h1>
+        <p class="text-muted">{{.BucketCount}} bucket{{if ne .BucketCount 1}}s{{end}}</p>
+    </div>
+    <button class="btn btn-primary" onclick="document.getElementById('create-form').classList.toggle('hidden')">
+        Create Bucket
+    </button>
+</div>
+
+<div id="create-form" class="card hidden">
+    <form method="POST" action="/dashboard/buckets">
+        <div class="form-row">
+            <div class="form-group form-group-inline">
+                <label>Bucket Name</label>
+                <input type="text" name="name" pattern="[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]" required
+                       placeholder="my-bucket" title="Lowercase letters, numbers, hyphens, and dots. 3-63 characters.">
+            </div>
+            <button type="submit" class="btn btn-primary">Create</button>
+        </div>
+        {{if .CreateError}}<div class="alert alert-error">{{.CreateError}}</div>{{end}}
+        {{if .CreateSuccess}}<div class="alert alert-success">Bucket "{{.CreateSuccess}}" created.</div>{{end}}
+    </form>
+</div>
+
+{{if .Buckets}}
+<div class="table-wrap">
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Objects</th>
+                <th>Size</th>
+                <th>Last Modified</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .Buckets}}
+            <tr>
+                <td><a href="/dashboard/buckets/{{.Name}}" class="bucket-link">{{.Name}}</a></td>
+                <td>{{.ObjectCount}}</td>
+                <td>{{.SizeFmt}}</td>
+                <td>{{.LastModifiedFmt}}</td>
+                <td><a href="/dashboard/buckets/{{.Name}}" class="btn btn-sm">Browse</a></td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+</div>
+{{else}}
+<div class="card">
+    <p class="text-muted empty-state">No buckets yet. Create one above or upload via the S3 API.</p>
+</div>
+{{end}}
+
+<div class="dashboard-actions">
+    <a href="/dashboard/" class="btn">Back to Dashboard</a>
+</div>
+{{end}}
