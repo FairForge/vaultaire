@@ -1,0 +1,91 @@
+{{define "title"}}{{.TenantName}} — Admin{{end}}
+{{define "content"}}
+<div class="breadcrumb">
+    <a href="/admin/tenants">Tenants</a> &rsaquo; {{.TenantName}}
+</div>
+
+<div class="dashboard-header">
+    <h1>{{.TenantName}}</h1>
+    <div id="tenant-status">
+        {{if .IsSuspended}}
+        <span class="badge badge-danger">suspended</span>
+        <button class="btn btn-sm btn-primary"
+            hx-post="/admin/tenants/{{.TenantID}}/enable"
+            hx-target="#tenant-status"
+            hx-swap="innerHTML"
+            hx-confirm="Enable this tenant?">Enable</button>
+        {{else}}
+        <span class="badge badge-success">active</span>
+        <button class="btn btn-sm btn-danger"
+            hx-post="/admin/tenants/{{.TenantID}}/suspend"
+            hx-target="#tenant-status"
+            hx-swap="innerHTML"
+            hx-confirm="Suspend this tenant? They will lose API access.">Suspend</button>
+        {{end}}
+    </div>
+</div>
+
+<div class="card-grid">
+    <div class="card">
+        <div class="card-title">Email</div>
+        <div class="card-value" style="font-size:1rem">{{.TenantEmail}}</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Plan</div>
+        <div class="card-value card-value-plan">{{.Plan}}</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Registered</div>
+        <div class="card-value" style="font-size:1rem">{{.CreatedFmt}}</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Subscription</div>
+        <div class="card-value" style="font-size:1rem">
+            <span class="badge badge-{{.SubStatusClass}}">{{.SubStatusLabel}}</span>
+        </div>
+    </div>
+</div>
+
+<div class="card" id="quota-section">
+    <div class="card-title">Storage Quota</div>
+    <div class="card-value">{{.StorageUsedFmt}} / {{.StorageLimitFmt}}</div>
+    <div class="usage-bar">
+        <div class="usage-bar-fill {{.StorageBarClass}}" style="width: {{.StoragePercent}}%"></div>
+    </div>
+    <div class="card-detail">{{.StoragePercent}}% used ({{.Tier}} tier)</div>
+
+    <div id="quota-feedback"></div>
+    <form style="margin-top:1rem"
+        hx-post="/admin/tenants/{{.TenantID}}/quota"
+        hx-target="#quota-feedback"
+        hx-swap="innerHTML">
+        <div class="form-row">
+            <label>Storage Limit (GB)</label>
+            <input type="number" name="storage_limit" value="{{.StorageLimitGB}}" min="1" class="form-input-sm">
+            <button type="submit" class="btn btn-sm btn-primary">Update</button>
+        </div>
+    </form>
+</div>
+
+<div class="card" id="tier-section">
+    <div class="card-title">Change Tier</div>
+    <div id="tier-feedback"></div>
+    <form hx-post="/admin/tenants/{{.TenantID}}/tier"
+          hx-target="#tier-feedback"
+          hx-swap="innerHTML">
+        <div class="form-row">
+            <select name="tier" class="form-input-sm">
+                {{range .AvailableTiers}}
+                <option value="{{.Value}}" {{if eq $.Tier .Value}}selected{{end}}>{{.Label}}</option>
+                {{end}}
+            </select>
+            <button type="submit" class="btn btn-sm btn-primary">Change</button>
+        </div>
+    </form>
+</div>
+
+<div class="dashboard-actions">
+    <a href="/admin/tenants" class="btn">Back to Tenants</a>
+    <a href="/admin" class="btn">Admin Overview</a>
+</div>
+{{end}}

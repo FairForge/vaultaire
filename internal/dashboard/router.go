@@ -112,10 +112,24 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		"templates/layouts/admin.html",
 		"templates/admin/dashboard.html",
 	))
+	tenantListTmpl := template.Must(template.ParseFS(Templates,
+		"templates/layouts/admin.html",
+		"templates/admin/tenants.html",
+	))
+	tenantDetailTmpl := template.Must(template.ParseFS(Templates,
+		"templates/layouts/admin.html",
+		"templates/admin/tenant_detail.html",
+	))
 
 	r.Route("/admin", func(ar chi.Router) {
 		ar.Use(dashauth.RequireAdmin(deps.Sessions))
 		ar.Get("/", handlers.HandleAdminOverview(adminTmpl, deps.DB, deps.Logger))
+		ar.Get("/tenants", handlers.HandleTenantList(tenantListTmpl, deps.DB, deps.Logger))
+		ar.Get("/tenants/{id}", handlers.HandleTenantDetail(tenantDetailTmpl, deps.DB, deps.Logger))
+		ar.Post("/tenants/{id}/suspend", handlers.HandleSuspendTenant(deps.DB, deps.Logger))
+		ar.Post("/tenants/{id}/enable", handlers.HandleEnableTenant(deps.DB, deps.Logger))
+		ar.Post("/tenants/{id}/quota", handlers.HandleUpdateQuota(deps.DB, deps.Logger))
+		ar.Post("/tenants/{id}/tier", handlers.HandleChangeTier(deps.DB, deps.Logger))
 	})
 }
 

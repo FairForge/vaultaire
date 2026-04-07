@@ -1,0 +1,50 @@
+{{define "title"}}Tenants — stored.ge admin{{end}}
+{{define "content"}}
+<div class="dashboard-header">
+    <h1>Tenants</h1>
+    <form method="GET" action="/admin/tenants" class="search-form">
+        <input type="text" name="q" value="{{.SearchQuery}}" placeholder="Search by name or email..." class="search-input">
+        <button type="submit" class="btn btn-sm">Search</button>
+    </form>
+</div>
+
+{{if .Tenants}}
+<div class="card">
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Email</th>
+                    <th>Plan</th>
+                    <th>Storage</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .Tenants}}
+                <tr>
+                    <td><a href="/admin/tenants/{{.ID}}">{{.Name}}</a></td>
+                    <td>{{.Email}}</td>
+                    <td><span class="badge">{{.Plan}}</span></td>
+                    <td>
+                        <div>{{.StorageUsedFmt}} / {{.StorageLimitFmt}}</div>
+                        <div class="usage-bar" style="width:80px">
+                            <div class="usage-bar-fill {{.UsageBarClass}}" style="width: {{.UsagePercent}}%"></div>
+                        </div>
+                    </td>
+                    <td><span class="badge badge-{{.StatusClass}}">{{.Status}}</span></td>
+                    <td><a href="/admin/tenants/{{.ID}}" class="btn btn-sm">View</a></td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+</div>
+{{else}}
+<div class="card">
+    <p class="text-muted empty-state">No tenants found.</p>
+</div>
+{{end}}
+{{end}}
