@@ -37,6 +37,7 @@ const (
 	ErrMethodNotAllowed      = "MethodNotAllowed"
 	ErrSignatureDoesNotMatch = "SignatureDoesNotMatch"
 	ErrAccountSuspended      = "AccountSuspended"
+	ErrSlowDown              = "SlowDown"
 )
 
 // Error messages
@@ -60,6 +61,7 @@ var errorMessages = map[string]string{
 	ErrMethodNotAllowed:      "The specified method is not allowed against this resource",
 	ErrSignatureDoesNotMatch: "The request signature we calculated does not match the signature you provided",
 	ErrAccountSuspended:      "Your account has been suspended. Contact support for assistance.",
+	ErrSlowDown:              "Monthly bandwidth limit exceeded. Upgrade your plan or wait for the next billing cycle.",
 }
 
 // HTTP status codes for errors
@@ -83,6 +85,7 @@ var errorStatusCodes = map[string]int{
 	ErrMethodNotAllowed:      http.StatusMethodNotAllowed,
 	ErrSignatureDoesNotMatch: http.StatusForbidden,
 	ErrAccountSuspended:      http.StatusForbidden,
+	ErrSlowDown:              http.StatusTooManyRequests,
 }
 
 // WriteS3Error writes an S3-compatible error response

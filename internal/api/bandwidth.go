@@ -89,6 +89,37 @@ func (bt *BandwidthTracker) StartFlusher(ctx context.Context, interval time.Dura
 	}()
 }
 
+// IsOverLimit checks if a tenant has exceeded their monthly bandwidth limit.
+// Returns false (allows access) if DB is nil or on any error (fail open).
+func (bt *BandwidthTracker) IsOverLimit(ctx context.Context, tenantID string) bool {
+	if bt.db == nil {
+		return false
+	}
+
+	var usedBytes, limitBytes sql.NullInt64
+	err := bt.db.QueryRowContext(ctx, `
+		SELECT
+			COALESCE(SUM(b.ingress_bytes + b.egress_bytes), 0),
+			q.bandwidth_limit_bytes
+		FROM tenant_quotas q
+		LEFT JOIN bandwidth_usage_daily b
+			ON b.tenant_id = q.tenant_id
+			AND b.date >= date_trunc('month', CURRENT_DATE)
+		WHERE q.tenant_id = $1
+		GROUP BY q.bandwidth_limit_bytes
+	`, tenantID).Scan(&usedBytes, &limitBytes)
+	if err != nil {
+		return false // fail open
+	}
+
+	// No limit set means unlimited bandwidth.
+	if !limitBytes.Valid || limitBytes.Int64 <= 0 {
+		return false
+	}
+
+	return usedBytes.Valid && usedBytes.Int64 >= limitBytes.Int64
+}
+
 // Flush writes all buffered events to the database, aggregated by tenant+date.
 func (bt *BandwidthTracker) Flush() {
 	bt.mu.Lock()

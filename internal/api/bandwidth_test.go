@@ -71,3 +71,18 @@ func TestBandwidthTracker_AggregatesByTenantAndDate(t *testing.T) {
 	assert.Equal(t, int64(400), totalIngress)
 	assert.Equal(t, int64(600), totalEgress)
 }
+
+func TestCheckBandwidthLimit_NilDB(t *testing.T) {
+	// Nil DB should always allow (fail open).
+	bt := NewBandwidthTracker(nil)
+	assert.False(t, bt.IsOverLimit(context.Background(), "tenant-1"))
+}
+
+func TestWriteS3Error_BandwidthExceeded(t *testing.T) {
+	w := httptest.NewRecorder()
+	WriteS3Error(w, ErrSlowDown, "/test", "req-1")
+
+	assert.Equal(t, http.StatusTooManyRequests, w.Code)
+	assert.Contains(t, w.Body.String(), "<Code>SlowDown</Code>")
+	assert.Contains(t, w.Body.String(), "bandwidth")
+}

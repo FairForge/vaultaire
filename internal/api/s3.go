@@ -315,6 +315,19 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 
+	// Phase 4.2: check bandwidth limit before data-transfer operations.
+	if tenantID != "" && tenantID != "default" && s.bandwidthTracker != nil {
+		if s3Req.Operation == "GetObject" || s3Req.Operation == "PutObject" || s3Req.Operation == "UploadPart" {
+			if s.bandwidthTracker.IsOverLimit(r.Context(), tenantID) {
+				s.logger.Warn("bandwidth limit exceeded",
+					zap.String("tenant_id", tenantID),
+					zap.String("operation", s3Req.Operation))
+				WriteS3Error(w, ErrSlowDown, r.URL.Path, generateRequestID())
+				return
+			}
+		}
+	}
+
 	// Wrap response writer to count egress bytes for bandwidth tracking.
 	cw := &countingResponseWriter{ResponseWriter: w}
 
