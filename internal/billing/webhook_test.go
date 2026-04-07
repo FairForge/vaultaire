@@ -2,50 +2,107 @@ package billing
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stripe/stripe-go/v75"
+	"go.uber.org/zap"
 )
 
-func TestStripeWebhook_HandlePaymentSuccess(t *testing.T) {
-	handler := NewWebhookHandler("whsec_test")
+func TestWebhookHandler_InvalidBody(t *testing.T) {
+	svc := NewStripeService("sk_test_fake", nil, zap.NewNop())
+	handler := NewWebhookHandler("", svc, zap.NewNop())
 
-	payload := `{
-        "type": "checkout.session.completed",
-        "data": {
-            "object": {
-                "id": "cs_test_123",
-                "customer": "cus_123",
-                "amount_total": 1299
-            }
-        }
-    }`
-
-	req := httptest.NewRequest("POST", "/webhook/stripe", bytes.NewBufferString(payload))
-	req.Header.Set("Stripe-Signature", "test_sig")
+	req := httptest.NewRequest("POST", "/webhook/stripe", bytes.NewBufferString("not json"))
 	w := httptest.NewRecorder()
-
 	handler.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("Expected 200, got %d", w.Code)
-	}
+	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
-func TestOverageHandler_48HourGrace(t *testing.T) {
+func TestWebhookHandler_UnhandledEvent(t *testing.T) {
+	svc := NewStripeService("sk_test_fake", nil, zap.NewNop())
+	handler := NewWebhookHandler("", svc, zap.NewNop())
+
+	event := stripe.Event{
+		ID:   "evt_test",
+		Type: "balance.available",
+		Data: &stripe.EventData{Raw: json.RawMessage(`{}`)},
+	}
+	body, _ := json.Marshal(event)
+
+	req := httptest.NewRequest("POST", "/webhook/stripe", bytes.NewBuffer(body))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestWebhookHandler_CheckoutCompleted_NoDB(t *testing.T) {
+	// Without a DB, the handler logs an error but still returns 200.
+	svc := NewStripeService("sk_test_fake", nil, zap.NewNop())
+	handler := NewWebhookHandler("", svc, zap.NewNop())
+
+	session := stripe.CheckoutSession{
+		Customer:     &stripe.Customer{ID: "cus_test"},
+		Subscription: &stripe.Subscription{ID: "sub_test"},
+	}
+	sessionJSON, _ := json.Marshal(session)
+
+	event := stripe.Event{
+		ID:   "evt_checkout",
+		Type: "checkout.session.completed",
+		Data: &stripe.EventData{Raw: sessionJSON},
+	}
+	body, _ := json.Marshal(event)
+
+	req := httptest.NewRequest("POST", "/webhook/stripe", bytes.NewBuffer(body))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	// Should not crash — returns 200 even though DB lookup fails.
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestWebhookHandler_PaymentFailed_NoDB(t *testing.T) {
+	svc := NewStripeService("sk_test_fake", nil, zap.NewNop())
+	handler := NewWebhookHandler("", svc, zap.NewNop())
+
+	inv := stripe.Invoice{
+		Customer: &stripe.Customer{ID: "cus_test"},
+	}
+	inv.ID = "in_test"
+	invJSON, _ := json.Marshal(inv)
+
+	event := stripe.Event{
+		ID:   "evt_fail",
+		Type: "invoice.payment_failed",
+		Data: &stripe.EventData{Raw: invJSON},
+	}
+	body, _ := json.Marshal(event)
+
+	req := httptest.NewRequest("POST", "/webhook/stripe", bytes.NewBuffer(body))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestOverageHandler_GracePeriod(t *testing.T) {
 	service := &OverageService{}
 
-	// 1TB in bytes
 	oneTB := int64(1024 * 1024 * 1024 * 1024)
-	// 1.1TB (10% over limit)
 	overageBytes := oneTB + (oneTB / 10)
 
 	action := service.CheckOverage("tenant-123", overageBytes, oneTB)
+	assert.Equal(t, "GRACE_PERIOD", action)
 
-	if action != "GRACE_PERIOD" {
-		t.Errorf("Expected GRACE_PERIOD, got %s", action)
-	}
+	action = service.CheckOverage("tenant-123", oneTB/2, oneTB)
+	assert.Equal(t, "OK", action)
 }
 
 func TestOverageHandler_AutoUpgrade(t *testing.T) {
@@ -55,9 +112,6 @@ func TestOverageHandler_AutoUpgrade(t *testing.T) {
 		},
 	}
 
-	shouldUpgrade := service.ShouldAutoUpgrade("tenant-123", 48*time.Hour)
-
-	if !shouldUpgrade {
-		t.Error("Should auto-upgrade after 48 hour grace period")
-	}
+	assert.True(t, service.ShouldAutoUpgrade("tenant-123", 48*time.Hour))
+	assert.False(t, service.ShouldAutoUpgrade("tenant-456", 48*time.Hour))
 }

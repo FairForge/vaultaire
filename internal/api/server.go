@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/auth"
+	"github.com/FairForge/vaultaire/internal/billing"
 	"github.com/FairForge/vaultaire/internal/compliance"
 	"github.com/FairForge/vaultaire/internal/config"
 	"github.com/FairForge/vaultaire/internal/dashboard"
@@ -27,23 +28,25 @@ import (
 )
 
 type Server struct {
-	config        *config.Config
-	logger        *zap.Logger
-	router        chi.Router
-	httpServer    *http.Server
-	db            *sql.DB
-	events        chan Event
-	engine        *engine.CoreEngine
-	quotaManager  QuotaManager
-	rbacService   *RBACService
-	auth          *auth.AuthService
-	auditLogger   *auth.AuditLogger
-	requestCount  int64
-	testMode      bool
-	errorCount    int64
-	healthChecker *BackendHealthChecker
-	sessionStore  dashauth.SessionStore
-	startTime     time.Time
+	config         *config.Config
+	logger         *zap.Logger
+	router         chi.Router
+	httpServer     *http.Server
+	db             *sql.DB
+	events         chan Event
+	engine         *engine.CoreEngine
+	quotaManager   QuotaManager
+	rbacService    *RBACService
+	auth           *auth.AuthService
+	auditLogger    *auth.AuditLogger
+	stripe         *billing.StripeService
+	webhookHandler *billing.WebhookHandler
+	requestCount   int64
+	testMode       bool
+	errorCount     int64
+	healthChecker  *BackendHealthChecker
+	sessionStore   dashauth.SessionStore
+	startTime      time.Time
 }
 
 type QuotaManager interface {
@@ -103,6 +106,19 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		s.sessionStore = dashauth.NewDBStore(s.db)
 	} else {
 		s.sessionStore = dashauth.NewMemoryStore()
+	}
+
+	// Stripe billing service. Only active when STRIPE_SECRET_KEY is set.
+	if stripeKey := os.Getenv("STRIPE_SECRET_KEY"); stripeKey != "" {
+		s.stripe = billing.NewStripeService(stripeKey, s.db, logger)
+		whSecret := os.Getenv("STRIPE_WEBHOOK_SECRET")
+		s.webhookHandler = billing.NewWebhookHandler(whSecret, s.stripe, logger)
+
+		// Register plans. Price IDs come from environment (set in Stripe Dashboard).
+		// If not set, plans won't appear on the billing page but nothing breaks.
+		registerStripePlans(s.stripe)
+
+		logger.Info("stripe billing service initialized")
 	}
 
 	s.rbacService = NewRBACService(logger)
@@ -281,6 +297,12 @@ func (s *Server) setupRoutes() {
 		r.Get("/audit", handlers.HandleGetAuditLogs)
 	})
 
+	// Stripe webhook endpoint. No auth middleware — Stripe verifies via signature.
+	if s.webhookHandler != nil {
+		s.logger.Info("Registering Stripe webhook route")
+		s.router.Post("/webhook/stripe", s.webhookHandler.ServeHTTP)
+	}
+
 	// Dashboard routes must be registered BEFORE the S3 catch-all so that
 	// /login, /dashboard/*, /admin/*, and /static/* are matched first.
 	s.logger.Info("Registering dashboard routes")
@@ -294,6 +316,7 @@ func (s *Server) setupRoutes() {
 		Sessions: s.sessionStore,
 		Logger:   s.logger,
 		DataPath: dataPath,
+		Stripe:   s.stripe,
 	})
 
 	s.logger.Info("Registering S3 catch-all handler")
@@ -374,6 +397,15 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Create Stripe customer for billing (non-blocking — registration
+	// succeeds even if Stripe is unavailable).
+	if s.stripe != nil {
+		if _, stripeErr := s.stripe.CreateCustomer(r.Context(), req.Email, tenant.ID); stripeErr != nil {
+			s.logger.Error("create stripe customer on registration",
+				zap.String("tenant", tenant.ID), zap.Error(stripeErr))
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]string{
 		"accessKeyId":     apiKey.Key,
@@ -387,6 +419,35 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		zap.String("email", req.Email),
 		zap.String("user_id", user.ID),
 		zap.String("tenant_id", tenant.ID))
+}
+
+// registerStripePlans loads plan definitions from environment variables.
+// Each plan needs a STRIPE_PRICE_<ID> env var with the Stripe Price ID.
+// If the env var is empty, the plan is skipped (won't appear on billing page).
+func registerStripePlans(s *billing.StripeService) {
+	plans := []struct {
+		id, envVar, name, priceFmt string
+		storageTB                  int64
+	}{
+		{"vault3", "STRIPE_PRICE_VAULT3", "Vault 3TB", "$2.99/mo", 3},
+		{"vault9", "STRIPE_PRICE_VAULT9", "Vault 9TB", "$9/mo", 9},
+		{"vault18", "STRIPE_PRICE_VAULT18", "Vault 18TB", "$18/mo", 18},
+		{"vault36", "STRIPE_PRICE_VAULT36", "Vault 36TB", "$36/mo", 36},
+		{"standard", "STRIPE_PRICE_STANDARD", "Standard", "$3.99/TB/mo", 0},
+	}
+	for _, p := range plans {
+		priceID := os.Getenv(p.envVar)
+		if priceID == "" {
+			continue
+		}
+		s.RegisterPlan(billing.Plan{
+			ID:        p.id,
+			PriceID:   priceID,
+			Name:      p.name,
+			PriceFmt:  p.priceFmt,
+			StorageTB: p.storageTB,
+		})
+	}
 }
 
 // getPublicEndpoint returns the public S3 endpoint from the VAULTAIRE_ENDPOINT

@@ -3,9 +3,7 @@ package handlers
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"html/template"
-	"math"
 	"net/http"
 	"time"
 
@@ -193,57 +191,4 @@ func setDefaults(data map[string]any) {
 	data["ObjectCount"] = 0
 	data["APIKeyCount"] = 0
 	data["Activity"] = nil
-}
-
-// formatBytes returns a human-readable size string (e.g. "1.5 GB").
-func formatBytes(b int64) string {
-	if b == 0 {
-		return "0 B"
-	}
-	units := []string{"B", "KB", "MB", "GB", "TB", "PB"}
-	i := int(math.Log(float64(b)) / math.Log(1024))
-	if i >= len(units) {
-		i = len(units) - 1
-	}
-	val := float64(b) / math.Pow(1024, float64(i))
-	if val == math.Trunc(val) {
-		return fmt.Sprintf("%.0f %s", val, units[i])
-	}
-	return fmt.Sprintf("%.1f %s", val, units[i])
-}
-
-func relativeTime(t time.Time) string {
-	d := time.Since(t)
-	switch {
-	case d < time.Minute:
-		return "just now"
-	case d < time.Hour:
-		m := int(d.Minutes())
-		if m == 1 {
-			return "1 minute ago"
-		}
-		return fmt.Sprintf("%d minutes ago", m)
-	case d < 24*time.Hour:
-		h := int(d.Hours())
-		if h == 1 {
-			return "1 hour ago"
-		}
-		return fmt.Sprintf("%d hours ago", h)
-	default:
-		days := int(d.Hours() / 24)
-		if days == 1 {
-			return "1 day ago"
-		}
-		if days < 30 {
-			return fmt.Sprintf("%d days ago", days)
-		}
-		return t.Format("Jan 2, 2006")
-	}
-}
-
-func absInt64(n int64) int64 {
-	if n < 0 {
-		return -n
-	}
-	return n
 }
