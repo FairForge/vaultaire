@@ -120,6 +120,10 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		"templates/layouts/admin.html",
 		"templates/admin/tenant_detail.html",
 	))
+	systemTmpl := template.Must(template.ParseFS(Templates,
+		"templates/layouts/admin.html",
+		"templates/admin/system.html",
+	))
 
 	r.Route("/admin", func(ar chi.Router) {
 		ar.Use(dashauth.RequireAdmin(deps.Sessions))
@@ -130,6 +134,7 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		ar.Post("/tenants/{id}/enable", handlers.HandleEnableTenant(deps.DB, deps.Logger))
 		ar.Post("/tenants/{id}/quota", handlers.HandleUpdateQuota(deps.DB, deps.Logger))
 		ar.Post("/tenants/{id}/tier", handlers.HandleChangeTier(deps.DB, deps.Logger))
+		ar.Get("/system", handlers.HandleAdminSystem(systemTmpl, deps.DB, deps.Logger))
 	})
 }
 
