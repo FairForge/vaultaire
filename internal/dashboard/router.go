@@ -84,6 +84,16 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 			"templates/customer/usage.html",
 		))
 		dr.Get("/usage", handlers.HandleUsage(usageTmpl, deps.DB, deps.Logger))
+
+		// Settings page.
+		settingsTmpl := template.Must(baseTmpl.Clone())
+		template.Must(settingsTmpl.ParseFS(Templates,
+			"templates/customer/settings.html",
+		))
+		dr.Get("/settings", handlers.HandleSettings(settingsTmpl, deps.Auth, deps.DB, deps.Logger))
+		dr.Post("/settings/profile", handlers.HandleUpdateProfile(settingsTmpl, deps.Auth, deps.DB, deps.Logger))
+		dr.Post("/settings/password", handlers.HandleChangePassword(settingsTmpl, deps.Auth, deps.DB, deps.Logger))
+		dr.Post("/settings/notifications", handlers.HandleUpdateNotifications(settingsTmpl, deps.Auth, deps.DB, deps.Logger))
 	})
 
 	// --- Admin (session + admin role required) ---

@@ -327,6 +327,10 @@ th {
 /* Muted text */
 .text-muted { color: var(--text-muted); }
 
+/* Checkbox label */
+.checkbox-label { display: flex; align-items: center; gap: 0.5rem; font-size: 0.9rem; cursor: pointer; }
+.checkbox-label input[type="checkbox"] { width: 1rem; height: 1rem; }
+
 /* SVG usage chart */
 .usage-chart { width: 100%; height: auto; max-height: 260px; }
 .chart-label { font-size: 10px; fill: var(--text-muted); font-family: var(--font); }

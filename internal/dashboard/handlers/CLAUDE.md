@@ -43,9 +43,19 @@ Uses `auth.AuthService` directly (not DB queries) since keys are in-memory + DB-
 
 Queries: `tenant_quotas`, `bandwidth_usage_daily` (30 days). Chart bars are `ChartBar` structs with pre-computed SVG coordinates.
 
+## Settings Page (`settings.go`)
+
+Four handlers:
+- `HandleSettings(tmpl, authSvc, db, logger)` — GET renders profile, password, and notification forms
+- `HandleUpdateProfile(tmpl, authSvc, db, logger)` — POST updates company in DB + in-memory
+- `HandleChangePassword(tmpl, authSvc, db, logger)` — POST validates current password via `authSvc.ChangePassword()`, enforces min length + match + different-from-current
+- `HandleUpdateNotifications(tmpl, authSvc, db, logger)` — POST saves email notification preference via `authSvc.SetUserPreferences()`
+
+Uses both `*auth.AuthService` (password change, preferences) and `*sql.DB` (company column, member-since date).
+
 ## Legacy Handlers
 
-Files like `dashboard.go`, `settings.go`, etc. are stubs from before Phase 0 with inline terminal-style templates. They are NOT wired into the router. Remaining phases will rewrite them.
+Files like `dashboard.go` etc. are stubs from before Phase 0 with inline terminal-style templates. They are NOT wired into the router. Remaining phases will rewrite them.
 
 ## Pattern
 

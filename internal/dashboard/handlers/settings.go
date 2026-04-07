@@ -1,71 +1,196 @@
 package handlers
 
 import (
+	"database/sql"
 	"html/template"
 	"net/http"
+
+	"github.com/FairForge/vaultaire/internal/auth"
+	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
+	"go.uber.org/zap"
 )
 
-type SettingsHandler struct {
-	db interface{}
-}
+// HandleSettings renders the settings page with current profile and preferences.
+func HandleSettings(tmpl *template.Template, authSvc *auth.AuthService, db *sql.DB, logger *zap.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sd := dashauth.GetSession(r.Context())
+		if sd == nil {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
 
-func NewSettingsHandler(db interface{}) *SettingsHandler {
-	return &SettingsHandler{db: db}
-}
+		data := sessionData(sd, "settings")
+		populateProfile(authSvc, db, r, sd, data)
 
-func (h *SettingsHandler) ShowSettings(w http.ResponseWriter, r *http.Request) {
-	tmpl := `<!DOCTYPE html>
-<html>
-<head>
-    <title>Settings</title>
-    <style>
-        body { background: #000; color: #0f0; font-family: monospace; }
-        .terminal { border: 1px solid #0f0; padding: 20px; margin: 20px; }
-        .setting { margin: 15px 0; }
-        input, select { background: #111; color: #0f0; border: 1px solid #0f0; padding: 5px; }
-    </style>
-</head>
-<body>
-    <div class="terminal">
-        <h1>Settings</h1>
-        <form action="/dashboard/settings" method="POST">
-            <div class="setting">
-                <label>Default Region:</label><br>
-                <select name="region">
-                    <option>us-east-1</option>
-                    <option>us-west-2</option>
-                    <option>eu-west-1</option>
-                </select>
-            </div>
-            <div class="setting">
-                <label>Storage Class:</label><br>
-                <select name="storage_class">
-                    <option>STANDARD</option>
-                    <option>REDUCED_REDUNDANCY</option>
-                </select>
-            </div>
-            <div class="setting">
-                <label>Notification Email:</label><br>
-                <input type="email" name="email" value="user@example.com">
-            </div>
-            <div class="setting">
-                <label>Auto-delete after (days):</label><br>
-                <input type="number" name="retention" value="30" min="1" max="365">
-            </div>
-            <button type="submit">Save Settings</button>
-        </form>
-    </div>
-</body>
-</html>`
-
-	t, _ := template.New("settings").Parse(tmpl)
-	if err := t.Execute(w, nil); err != nil {
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := tmpl.ExecuteTemplate(w, "base", data); err != nil {
+			logger.Error("render settings", zap.Error(err))
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		}
 	}
 }
 
-func (h *SettingsHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
-	// In a real implementation, this would save the settings
-	// For now, just redirect back
-	http.Redirect(w, r, "/dashboard/settings", http.StatusSeeOther)
+// HandleUpdateProfile handles POST /dashboard/settings/profile.
+func HandleUpdateProfile(tmpl *template.Template, authSvc *auth.AuthService, db *sql.DB, logger *zap.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sd := dashauth.GetSession(r.Context())
+		if sd == nil {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+
+		company := r.FormValue("company")
+
+		// Update company in DB directly (the authoritative source).
+		if db != nil && company != "" {
+			_, err := db.ExecContext(r.Context(),
+				`UPDATE users SET company = $1, updated_at = NOW() WHERE id = $2`,
+				company, sd.UserID)
+			if err != nil {
+				logger.Error("update company", zap.Error(err))
+			}
+		}
+
+		// Also update in-memory profile if auth service supports it.
+		if authSvc != nil {
+			_ = authSvc.UpdateUserProfile(r.Context(), sd.UserID, auth.ProfileUpdate{
+				Company: company,
+			})
+		}
+
+		data := sessionData(sd, "settings")
+		data["ProfileSuccess"] = "Profile updated."
+		populateProfile(authSvc, db, r, sd, data)
+
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := tmpl.ExecuteTemplate(w, "base", data); err != nil {
+			logger.Error("render settings after profile update", zap.Error(err))
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		}
+	}
+}
+
+// HandleChangePassword handles POST /dashboard/settings/password.
+func HandleChangePassword(tmpl *template.Template, authSvc *auth.AuthService, db *sql.DB, logger *zap.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sd := dashauth.GetSession(r.Context())
+		if sd == nil {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+
+		current := r.FormValue("current_password")
+		newPass := r.FormValue("new_password")
+		confirm := r.FormValue("confirm_password")
+
+		data := sessionData(sd, "settings")
+		populateProfile(authSvc, db, r, sd, data)
+
+		renderWithMsg := func(errMsg, successMsg string) {
+			if errMsg != "" {
+				data["PasswordError"] = errMsg
+			}
+			if successMsg != "" {
+				data["PasswordSuccess"] = successMsg
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			if errMsg != "" {
+				w.WriteHeader(http.StatusBadRequest)
+			}
+			if err := tmpl.ExecuteTemplate(w, "base", data); err != nil {
+				logger.Error("render settings after password change", zap.Error(err))
+				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			}
+		}
+
+		if len(newPass) < 8 {
+			renderWithMsg("New password must be at least 8 characters.", "")
+			return
+		}
+		if newPass != confirm {
+			renderWithMsg("Passwords do not match.", "")
+			return
+		}
+		if current == newPass {
+			renderWithMsg("New password must be different from current password.", "")
+			return
+		}
+
+		if authSvc == nil {
+			renderWithMsg("Password change is not available.", "")
+			return
+		}
+
+		if err := authSvc.ChangePassword(r.Context(), sd.UserID, current, newPass); err != nil {
+			logger.Warn("password change failed", zap.String("user", sd.UserID), zap.Error(err))
+			renderWithMsg("Current password is incorrect.", "")
+			return
+		}
+
+		renderWithMsg("", "Password changed successfully.")
+	}
+}
+
+// HandleUpdateNotifications handles POST /dashboard/settings/notifications.
+func HandleUpdateNotifications(tmpl *template.Template, authSvc *auth.AuthService, db *sql.DB, logger *zap.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sd := dashauth.GetSession(r.Context())
+		if sd == nil {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+
+		emailNotif := r.FormValue("email_notifications") == "on"
+
+		if authSvc != nil {
+			prefs, _ := authSvc.GetUserPreferences(r.Context(), sd.UserID)
+			if prefs == nil {
+				prefs = &auth.UserPreferences{}
+			}
+			prefs.EmailNotifications = emailNotif
+			_ = authSvc.SetUserPreferences(r.Context(), sd.UserID, *prefs)
+		}
+
+		data := sessionData(sd, "settings")
+		data["NotifSuccess"] = "Notification preferences updated."
+		populateProfile(authSvc, db, r, sd, data)
+
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := tmpl.ExecuteTemplate(w, "base", data); err != nil {
+			logger.Error("render settings after notif update", zap.Error(err))
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		}
+	}
+}
+
+func populateProfile(authSvc *auth.AuthService, db *sql.DB, r *http.Request, sd *dashauth.SessionData, data map[string]any) {
+	data["ProfileEmail"] = sd.Email
+	data["ProfileCompany"] = ""
+	data["EmailNotifications"] = true
+	data["MemberSince"] = ""
+
+	// Load company from DB (authoritative).
+	if db != nil {
+		var company sql.NullString
+		var createdAt sql.NullTime
+		err := db.QueryRowContext(r.Context(),
+			`SELECT company, created_at FROM users WHERE id = $1`, sd.UserID).
+			Scan(&company, &createdAt)
+		if err == nil {
+			if company.Valid {
+				data["ProfileCompany"] = company.String
+			}
+			if createdAt.Valid {
+				data["MemberSince"] = createdAt.Time.Format("January 2006")
+			}
+		}
+	}
+
+	// Load notification preferences from auth service.
+	if authSvc != nil {
+		prefs, err := authSvc.GetUserPreferences(r.Context(), sd.UserID)
+		if err == nil && prefs != nil {
+			data["EmailNotifications"] = prefs.EmailNotifications
+		}
+	}
 }

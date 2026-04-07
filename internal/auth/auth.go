@@ -323,6 +323,37 @@ func (a *AuthService) ValidatePassword(ctx context.Context, email, password stri
 	return true, nil
 }
 
+// ChangePassword validates the current password and updates to a new one.
+// Updates both the in-memory map and PostgreSQL (if available).
+func (a *AuthService) ChangePassword(ctx context.Context, userID, currentPassword, newPassword string) error {
+	user, exists := a.userIndex[userID]
+	if !exists {
+		return fmt.Errorf("user not found")
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(currentPassword)); err != nil {
+		return fmt.Errorf("current password is incorrect")
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hash password: %w", err)
+	}
+
+	user.PasswordHash = string(hash)
+
+	if a.sqlDB != nil {
+		_, err = a.sqlDB.ExecContext(ctx,
+			`UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2`,
+			string(hash), userID)
+		if err != nil {
+			return fmt.Errorf("update password in db: %w", err)
+		}
+	}
+
+	return nil
+}
+
 // GetUserByEmail retrieves a user by email
 func (a *AuthService) GetUserByEmail(ctx context.Context, email string) (*User, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
