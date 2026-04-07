@@ -68,6 +68,15 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		dr.Get("/buckets", handlers.HandleBuckets(bucketsTmpl, deps.DB, deps.DataPath, deps.Logger))
 		dr.Post("/buckets", handlers.HandleCreateBucket(bucketsTmpl, deps.DB, deps.DataPath, deps.Logger))
 		dr.Get("/buckets/{name}", handlers.HandleBucketObjects(bucketObjsTmpl, deps.DB, deps.Logger))
+
+		// API key management.
+		apikeysTmpl := template.Must(baseTmpl.Clone())
+		template.Must(apikeysTmpl.ParseFS(Templates,
+			"templates/customer/apikeys.html",
+		))
+		dr.Get("/apikeys", handlers.HandleAPIKeys(apikeysTmpl, deps.Auth, deps.Logger))
+		dr.Post("/apikeys", handlers.HandleGenerateKey(apikeysTmpl, deps.Auth, deps.Logger))
+		dr.Post("/apikeys/{id}/revoke", handlers.HandleRevokeKey(deps.Auth, deps.Logger))
 	})
 
 	// --- Admin (session + admin role required) ---

@@ -23,6 +23,15 @@ Bucket name validation: `^[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9]$` + path traversal c
 
 Shared helpers: `sessionData(sd, page)` builds the base template data map. `formatBytes` and `relativeTime` from `overview.go`.
 
+## API Key Management (`apikeys.go`)
+
+Three handlers:
+- `HandleAPIKeys(tmpl, authSvc, logger)` — lists all keys for current user via `auth.ListAPIKeys()`
+- `HandleGenerateKey(tmpl, authSvc, logger)` — creates key via `auth.GenerateAPIKey()`, shows secret once
+- `HandleRevokeKey(authSvc, logger)` — revokes key via `auth.RevokeAPIKey()`, redirects back
+
+Uses `auth.AuthService` directly (not DB queries) since keys are in-memory + DB-backed.
+
 ## Legacy Handlers
 
 Files like `dashboard.go`, `buckets.go`, `usage.go`, etc. are stubs from before Phase 0 with inline terminal-style templates. They are NOT wired into the router. Phase 1.3+ will rewrite them to follow the `overview.go` pattern.

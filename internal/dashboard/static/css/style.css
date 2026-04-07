@@ -312,6 +312,12 @@ th {
 /* Compact card (less padding) */
 .card-compact { padding: 0.75rem 1rem; }
 
+/* Card highlight (new key reveal) */
+.card-highlight { border-color: var(--success); background: #f0fdf4; }
+.key-reveal { margin: 1rem 0; }
+.key-reveal td { padding: 0.4rem 0.75rem; border: none; }
+.key-reveal td:first-child { font-weight: 600; white-space: nowrap; }
+
 /* Hidden utility */
 .hidden { display: none; }
 

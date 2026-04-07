@@ -1,0 +1,95 @@
+{{define "title"}}API Keys — stored.ge{{end}}
+{{define "content"}}
+<div class="page-header">
+    <div>
+        <h1>API Keys</h1>
+        <p class="text-muted">S3-compatible access keys for your storage</p>
+    </div>
+    <button class="btn btn-primary" onclick="document.getElementById('generate-form').classList.toggle('hidden')">
+        Generate New Key
+    </button>
+</div>
+
+<div id="generate-form" class="card hidden">
+    <form method="POST" action="/dashboard/apikeys">
+        <div class="form-row">
+            <div class="form-group form-group-inline">
+                <label>Key Name</label>
+                <input type="text" name="name" required placeholder="e.g. rclone-backup, ci-deploy">
+            </div>
+            <button type="submit" class="btn btn-primary">Generate</button>
+        </div>
+    </form>
+</div>
+
+{{if .NewKey}}
+<div class="card card-highlight">
+    <div class="card-title">New Key Generated — Save These Now</div>
+    <div class="alert alert-success">Copy these credentials. The secret will not be shown again.</div>
+    <table class="key-reveal">
+        <tr>
+            <td class="text-muted">Access Key</td>
+            <td class="mono">{{.NewKey.Key}}</td>
+        </tr>
+        <tr>
+            <td class="text-muted">Secret Key</td>
+            <td class="mono">{{.NewKey.Secret}}</td>
+        </tr>
+        <tr>
+            <td class="text-muted">Endpoint</td>
+            <td class="mono">https://stored.ge</td>
+        </tr>
+    </table>
+    <div class="code-block">
+aws configure set aws_access_key_id {{.NewKey.Key}}
+aws configure set aws_secret_access_key {{.NewKey.Secret}}
+aws s3 ls --endpoint-url https://stored.ge</div>
+</div>
+{{end}}
+
+{{if .GenerateError}}<div class="alert alert-error">{{.GenerateError}}</div>{{end}}
+
+{{if .Keys}}
+<div class="table-wrap">
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Access Key</th>
+                <th>Created</th>
+                <th>Last Used</th>
+                <th>Status</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .Keys}}
+            <tr>
+                <td>{{.Name}}</td>
+                <td class="mono">{{.KeyID}}</td>
+                <td>{{.CreatedFmt}}</td>
+                <td>{{.LastUsedFmt}}</td>
+                <td><span class="badge badge-{{.StatusClass}}">{{.Status}}</span></td>
+                <td>
+                    {{if eq .Status "active"}}
+                    <form method="POST" action="/dashboard/apikeys/{{.ID}}/revoke"
+                          onsubmit="return confirm('Revoke this key? Any applications using it will stop working.')">
+                        <button type="submit" class="btn btn-sm btn-danger">Revoke</button>
+                    </form>
+                    {{end}}
+                </td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+</div>
+{{else}}
+<div class="card">
+    <p class="text-muted empty-state">No API keys yet. Generate one to start using the S3 API.</p>
+</div>
+{{end}}
+
+<div class="dashboard-actions">
+    <a href="/dashboard/" class="btn">Back to Dashboard</a>
+</div>
+{{end}}
