@@ -155,6 +155,95 @@ stored mount <bucket> <mountpoint>       # wrapper for s3fs/JuiceFS
 **Where:** Landing page, README, docs
 **Phase:** Pre-launch marketing
 
+## Desktop Sync Client (OneDrive/Google Drive/Dropbox Replacement)
+
+### Phase 1: rclone-Powered Mount (Ship with CLI, ~Phase 5.7)
+**What:** `stored mount ~/StoredDrive` wraps rclone under the hood. One command → mounted drive. Also `stored sync ~/folder` for two-way Dropbox-style sync via `rclone bisync`. Branded one-click installer that configures rclone automatically.
+**Where:** `cmd/stored/mount.go` — wraps rclone, auto-downloads if not present
+**Why rclone:** Already supports S3, handles caching, retries, bandwidth limits, and has 50+ backend support. Free, battle-tested, open source. Covers 90% of desktop sync use cases with zero custom sync engine development.
+**Phase:** ~5.7 (ships with CLI)
+
+### Phase 2: Branded Desktop App (Post-launch, if demand)
+**What:** System tray icon + settings panel + selective sync + bandwidth controls. Native feel on Mac/Windows/Linux.
+**Stack:** **Wails** (Go backend + web frontend = single native binary). Natural fit — reuses existing Go codebase. The sync daemon shares S3 client code with the server.
+**Features:**
+- System tray icon with sync status
+- Selective sync (choose which buckets/folders)
+- Bandwidth throttling (don't saturate connection)
+- Conflict resolution UI
+- File versioning browser (when Phase 5.5.6 versioning ships)
+- Pause/resume sync
+- Multi-account support
+**NOT Electron** (too heavy), **NOT WASM** (wrong tool), **NOT Flutter** (different language).
+**Where:** `cmd/stored-desktop/` — Wails app
+**Phase:** Post-launch (Tier 3-4), only if customer demand warrants it
+
+## Mobile App
+
+### stored Mobile (iOS + Android)
+**What:** Mobile file browser and camera backup for stored.ge. Not a full sync client — focused on browse, upload, and photo/video backup.
+**Stack:** **Go Mobile** backend (shared S3/auth code) + **Swift UI** (iOS) / **Jetpack Compose** (Android). OR cross-platform with **Flutter** or **React Native** if one codebase preferred.
+**Core features:**
+- Browse buckets and objects
+- Photo/video auto-backup (like Google Photos but to your own storage)
+- Share files via presigned URLs (tap → copy link)
+- Upload from camera roll or files app
+- Download/offline access for pinned files
+- Push notifications for upload completion, storage alerts
+- Biometric auth (Face ID / fingerprint)
+**Differentiator features:**
+- "Camera backup to YOUR storage" — privacy pitch against Google Photos
+- QR code setup — scan from dashboard, auto-configures the app
+- Widget showing storage usage on home screen
+- Shortcut/Siri integration: "Hey Siri, back up my photos to stored"
+**Where:** `mobile/ios/`, `mobile/android/` (or `mobile/` for cross-platform)
+**Phase:** Tier 3-4. Consider after desktop client proves demand. Camera backup alone could be an MVP — it's the #1 reason normal people use cloud storage.
+
+### Mobile-First Alternative: Progressive Web App (PWA)
+**What:** The dashboard (`stored.ge/dashboard`) as a PWA — installable on phones, works offline for cached data, push notifications. Much cheaper than native apps. Test demand before building native.
+**Where:** `internal/dashboard/` — add PWA manifest, service worker, responsive CSS (Phase 5.4 already has responsive)
+**Phase:** ~5.4 (responsive CSS phase — add PWA manifest at same time)
+
+## What People Expect (Table Stakes)
+
+These are features users take for granted. Missing any one creates friction:
+
+| Feature | Status | Phase |
+|---------|--------|-------|
+| Web dashboard | Done (Phase 1) | 1.x |
+| S3 API compatibility | Working | 5.5 (hardening) |
+| File sharing (presigned URLs) | Partial | 5.6.5 (STS) |
+| Search / find files | Not started | 5.6.3 (metadata) |
+| Trash / undelete | Not started | 5.5.6 (versioning) |
+| File preview (images, PDF) | Not started | Tier 3 |
+| Activity log | Not started | 5.6.6 (events) |
+| 2FA / MFA | Stubbed | 5.1 (security) |
+| Email notifications | Not started | 4.3 (alerts) |
+| API documentation | Stubbed | 5.6.7 (onboarding) |
+| Status page | Not started | Post-launch |
+| CLI tool | Not started | ~5.7 |
+| Desktop sync | Not started | ~5.7 (rclone) |
+| Mobile app | Not started | Tier 3-4 |
+
+## Wow Factor Summary
+
+Things that make people switch or tell their friends:
+
+1. **"Just storage" positioning** — anti-bloat, resonates with technical crowd
+2. **$3.99/TB** — 5-10x cheaper than AWS/Azure/GCP
+3. **Free egress** — nobody else at this price point
+4. **Pipe-friendly CLI** — `cat file | stored put bucket/key`
+5. **rclone one-liner** — `stored rclone-config >> ~/.config/rclone/rclone.conf`
+6. **Pause subscription** — data stays, billing stops
+7. **Bandwidth banking** — unused egress rolls over
+8. **Camera backup to YOUR storage** — privacy pitch vs Google Photos
+9. **Object lock** — ransomware-proof backups
+10. **Transparent value display** — show durability/encryption/redundancy, not costs
+11. **S3 cost comparison** — "This costs $230/mo on AWS" on dashboard
+12. **EU data residency** — GDPR toggle per bucket
+13. **Terminal-first** — everything works without a browser
+14. **Open source core** — trust through transparency
+
 ## Phase 7: Storage Intelligence Features
 
 ### Data Residency Picker
