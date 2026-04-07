@@ -1,0 +1,102 @@
+{{define "title"}}Billing — stored.ge{{end}}
+{{define "content"}}
+<div class="page-header">
+    <div>
+        <h1>Billing</h1>
+        <p class="text-muted">Manage your plan and payment</p>
+    </div>
+    {{if .HasSubscription}}
+    <form method="POST" action="/dashboard/billing/portal">
+        <button type="submit" class="btn">Manage Payment</button>
+    </form>
+    {{end}}
+</div>
+
+{{if .Upgraded}}<div class="alert alert-success">Plan upgraded successfully.</div>{{end}}
+
+<div class="card-grid">
+    <div class="card">
+        <div class="card-title">Current Plan</div>
+        <div class="card-value card-value-plan">{{.Plan}}</div>
+        <div class="card-detail">
+            <span class="badge badge-{{.StatusClass}}">{{.StatusLabel}}</span>
+        </div>
+    </div>
+    <div class="card">
+        <div class="card-title">Storage Used</div>
+        <div class="card-value">{{.StorageUsedFmt}}</div>
+    </div>
+</div>
+
+{{if not .HasSubscription}}
+<div class="card">
+    <div class="card-title">Upgrade Your Plan</div>
+    {{if .AvailablePlans}}
+    <div class="plan-grid">
+        {{range .AvailablePlans}}
+        <div class="plan-card">
+            <div class="plan-name">{{.Name}}</div>
+            <div class="plan-price">{{.PriceFmt}}</div>
+            {{if .StorageTB}}<div class="plan-detail">{{.StorageTB}} TB storage</div>{{end}}
+            <form method="POST" action="/dashboard/billing/upgrade">
+                <input type="hidden" name="plan" value="{{.ID}}">
+                <button type="submit" class="btn btn-primary btn-block">Choose Plan</button>
+            </form>
+        </div>
+        {{end}}
+    </div>
+    {{else}}
+    <p class="text-muted">Plans are being configured. Check back soon.</p>
+    {{end}}
+</div>
+{{end}}
+
+<div class="card">
+    <div class="card-title">What You Get</div>
+    <div class="value-stack">
+        <div class="value-item">
+            <span class="value-check">&#10003;</span>
+            <span>S3-compatible API — works with rclone, JuiceFS, aws-cli</span>
+        </div>
+        <div class="value-item">
+            <span class="value-check">&#10003;</span>
+            <span>AES-256-GCM encryption at rest</span>
+        </div>
+        <div class="value-item">
+            <span class="value-check">&#10003;</span>
+            <span>3-2-1 redundancy across multiple backends</span>
+        </div>
+        <div class="value-item">
+            <span class="value-check">&#10003;</span>
+            <span>Free egress — no download fees, ever</span>
+        </div>
+        <div class="value-item">
+            <span class="value-check">&#10003;</span>
+            <span>No vendor lock-in — standard S3 protocol</span>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">Cost Comparison</div>
+    <div class="comparison-grid">
+        <div class="comparison-item">
+            <div class="card-title">AWS S3</div>
+            <div class="card-value comparison-aws">{{.AWSCost}}</div>
+        </div>
+        <div class="comparison-item">
+            <div class="card-title">stored.ge</div>
+            <div class="card-value comparison-stored">{{.StoredCost}}</div>
+        </div>
+        <div class="comparison-item">
+            <div class="card-title">You Save</div>
+            <div class="card-value comparison-savings">{{.Savings}}</div>
+        </div>
+    </div>
+</div>
+
+<div class="dashboard-actions">
+    <a href="/dashboard/" class="btn">Back to Dashboard</a>
+    <a href="/dashboard/usage" class="btn">View Usage</a>
+</div>
+{{end}}

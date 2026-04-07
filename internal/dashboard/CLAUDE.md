@@ -45,6 +45,9 @@ Cookie: `vaultaire_session`, HttpOnly, Secure, SameSite=Lax.
 | `/dashboard/settings/profile` | POST | session | Update company name |
 | `/dashboard/settings/password` | POST | session | Change password (validates current) |
 | `/dashboard/settings/notifications` | POST | session | Update notification preferences |
+| `/dashboard/billing` | GET | session | Billing: plan, upgrade, value stack, cost comparison |
+| `/dashboard/billing/upgrade` | POST | session | Redirect to Stripe Checkout for chosen plan |
+| `/dashboard/billing/portal` | POST | session | Redirect to Stripe Billing Portal |
 | `/admin/*` | GET | session + admin role | Admin panel |
 
 ## Auth Flow

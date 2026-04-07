@@ -96,6 +96,15 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		dr.Post("/settings/profile", handlers.HandleUpdateProfile(settingsTmpl, deps.Auth, deps.DB, deps.Logger))
 		dr.Post("/settings/password", handlers.HandleChangePassword(settingsTmpl, deps.Auth, deps.DB, deps.Logger))
 		dr.Post("/settings/notifications", handlers.HandleUpdateNotifications(settingsTmpl, deps.Auth, deps.DB, deps.Logger))
+
+		// Billing page.
+		billingTmpl := template.Must(baseTmpl.Clone())
+		template.Must(billingTmpl.ParseFS(Templates,
+			"templates/customer/billing.html",
+		))
+		dr.Get("/billing", handlers.HandleBilling(billingTmpl, deps.Stripe, deps.DB, deps.Logger))
+		dr.Post("/billing/upgrade", handlers.HandleUpgrade(deps.Stripe, deps.DB, deps.Logger))
+		dr.Post("/billing/portal", handlers.HandleManageBilling(deps.Stripe, deps.Logger))
 	})
 
 	// --- Admin (session + admin role required) ---
@@ -218,6 +227,14 @@ func handleRegister(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 				renderErr("Registration failed. Please try again.")
 			}
 			return
+		}
+
+		// Create Stripe customer for billing (non-blocking).
+		if deps.Stripe != nil {
+			if _, stripeErr := deps.Stripe.CreateCustomer(r.Context(), email, user.TenantID); stripeErr != nil {
+				deps.Logger.Error("create stripe customer on registration",
+					zap.String("tenant", user.TenantID), zap.Error(stripeErr))
+			}
 		}
 
 		token, err := deps.Sessions.Create(r.Context(), dashauth.SessionData{

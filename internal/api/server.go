@@ -392,6 +392,15 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Create Stripe customer for billing (non-blocking — registration
+	// succeeds even if Stripe is unavailable).
+	if s.stripe != nil {
+		if _, stripeErr := s.stripe.CreateCustomer(r.Context(), req.Email, tenant.ID); stripeErr != nil {
+			s.logger.Error("create stripe customer on registration",
+				zap.String("tenant", tenant.ID), zap.Error(stripeErr))
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]string{
 		"accessKeyId":     apiKey.Key,
