@@ -77,6 +77,13 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		dr.Get("/apikeys", handlers.HandleAPIKeys(apikeysTmpl, deps.Auth, deps.Logger))
 		dr.Post("/apikeys", handlers.HandleGenerateKey(apikeysTmpl, deps.Auth, deps.Logger))
 		dr.Post("/apikeys/{id}/revoke", handlers.HandleRevokeKey(deps.Auth, deps.Logger))
+
+		// Usage page.
+		usageTmpl := template.Must(baseTmpl.Clone())
+		template.Must(usageTmpl.ParseFS(Templates,
+			"templates/customer/usage.html",
+		))
+		dr.Get("/usage", handlers.HandleUsage(usageTmpl, deps.DB, deps.Logger))
 	})
 
 	// --- Admin (session + admin role required) ---

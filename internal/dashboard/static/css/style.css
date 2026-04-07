@@ -327,6 +327,19 @@ th {
 /* Muted text */
 .text-muted { color: var(--text-muted); }
 
+/* SVG usage chart */
+.usage-chart { width: 100%; height: auto; max-height: 260px; }
+.chart-label { font-size: 10px; fill: var(--text-muted); font-family: var(--font); }
+.chart-date { font-size: 9px; fill: var(--text-muted); font-family: var(--font); }
+.chart-grid { stroke: var(--border); stroke-width: 1; stroke-dasharray: 4 2; }
+.bar-ingress { fill: var(--primary); opacity: 0.85; }
+.bar-egress { fill: var(--success); opacity: 0.85; }
+.chart-legend { display: flex; gap: 1rem; margin-top: 0.5rem; font-size: 0.8rem; color: var(--text-muted); }
+.legend-item { display: flex; align-items: center; gap: 0.3rem; }
+.legend-swatch { display: inline-block; width: 12px; height: 12px; border-radius: 2px; }
+.legend-ingress { background: var(--primary); }
+.legend-egress { background: var(--success); }
+
 /* HTMX indicator */
 .htmx-indicator { opacity: 0; transition: opacity 0.2s; }
 .htmx-request .htmx-indicator { opacity: 1; }

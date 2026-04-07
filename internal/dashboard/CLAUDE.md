@@ -40,6 +40,7 @@ Cookie: `vaultaire_session`, HttpOnly, Secure, SameSite=Lax.
 | `/dashboard/apikeys` | GET | session | List API keys with status |
 | `/dashboard/apikeys` | POST | session | Generate new API key (shows secret once) |
 | `/dashboard/apikeys/{id}/revoke` | POST | session | Revoke an API key |
+| `/dashboard/usage` | GET | session | Usage detail: storage, bandwidth, SVG chart, daily table |
 | `/admin/*` | GET | session + admin role | Admin panel |
 
 ## Auth Flow

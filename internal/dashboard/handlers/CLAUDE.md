@@ -32,9 +32,20 @@ Three handlers:
 
 Uses `auth.AuthService` directly (not DB queries) since keys are in-memory + DB-backed.
 
+## Usage Page (`usage.go`)
+
+`HandleUsage(tmpl, db, logger)` renders the detailed usage page:
+- Storage gauge with percentage, limit, tier
+- Current month bandwidth (ingress, egress, requests)
+- 30-day SVG bar chart (stacked ingress/egress bars, server-rendered)
+- Daily breakdown table (date, ingress, egress, total, requests)
+- htmx auto-refresh on chart via `hx-trigger="every 30s"`
+
+Queries: `tenant_quotas`, `bandwidth_usage_daily` (30 days). Chart bars are `ChartBar` structs with pre-computed SVG coordinates.
+
 ## Legacy Handlers
 
-Files like `dashboard.go`, `buckets.go`, `usage.go`, etc. are stubs from before Phase 0 with inline terminal-style templates. They are NOT wired into the router. Phase 1.3+ will rewrite them to follow the `overview.go` pattern.
+Files like `dashboard.go`, `settings.go`, etc. are stubs from before Phase 0 with inline terminal-style templates. They are NOT wired into the router. Remaining phases will rewrite them.
 
 ## Pattern
 
