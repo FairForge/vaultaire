@@ -284,11 +284,16 @@ func (s *Server) setupRoutes() {
 	// Dashboard routes must be registered BEFORE the S3 catch-all so that
 	// /login, /dashboard/*, /admin/*, and /static/* are matched first.
 	s.logger.Info("Registering dashboard routes")
+	dataPath := os.Getenv("DATA_PATH")
+	if dataPath == "" {
+		dataPath = "/tmp/vaultaire-data"
+	}
 	dashboard.RegisterRoutes(s.router, dashboard.Deps{
 		DB:       s.db,
 		Auth:     s.auth,
 		Sessions: s.sessionStore,
 		Logger:   s.logger,
+		DataPath: dataPath,
 	})
 
 	s.logger.Info("Registering S3 catch-all handler")

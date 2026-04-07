@@ -7,8 +7,9 @@ Web dashboard for stored.ge customers and admins. Uses htmx + Go templates, embe
 - **embed.go** — `//go:embed` bundles `templates/` and `static/` into the binary
 - **router.go** — `RegisterRoutes(r, deps)` mounts all dashboard routes on the chi router. Must be called BEFORE the S3 catch-all in `server.go`.
 - **auth/** — session management (PostgreSQL-backed `DBStore` or in-memory `MemoryStore`)
-- **handlers/** — HTTP handlers (Phase 1 fills these in)
+- **handlers/** — HTTP handlers (`overview.go` renders dashboard with real data from DB)
 - **templates/layouts/** — shared HTML layouts (`base.html`, `admin.html`)
+- **templates/customer/** — customer page templates (`dashboard.html` = overview)
 - **static/css/** — `style.css`
 - **static/js/** — `htmx.min.js` (v2.0.4, vendored)
 
@@ -32,7 +33,10 @@ Cookie: `vaultaire_session`, HttpOnly, Secure, SameSite=Lax.
 | `/register` | GET | none | Registration page |
 | `/register` | POST | none | Create user+tenant, create session, redirect to /dashboard |
 | `/logout` | GET | none | Delete session, clear cookie, redirect to /login |
-| `/dashboard/*` | GET | session | Customer dashboard |
+| `/dashboard/` | GET | session | Overview: storage gauge, bandwidth, stats, activity |
+| `/dashboard/buckets` | GET | session | Bucket list with counts + sizes |
+| `/dashboard/buckets` | POST | session | Create new bucket (validates name, creates directory) |
+| `/dashboard/buckets/{name}` | GET | session | Object browser with prefix navigation |
 | `/admin/*` | GET | session + admin role | Admin panel |
 
 ## Auth Flow
@@ -46,4 +50,14 @@ Cookie: `vaultaire_session`, HttpOnly, Secure, SameSite=Lax.
 
 ## Templates
 
-Base layout defines blocks: `title`, `head`, `nav`, `content`. Pages override these blocks. Phase 1 will add per-page template files in `templates/auth/`, `templates/customer/`, `templates/admin/`.
+Base layout defines blocks: `title`, `head`, `nav`, `content`. Pages override these blocks. Customer page templates are in `templates/customer/`, parsed from embedded FS and combined with base layout in `RegisterRoutes`.
+
+## Dashboard Overview (Phase 1.2)
+
+`handlers/overview.go` queries DB directly (no QuotaManager interface needed — just `*sql.DB`):
+- Storage: `tenant_quotas` (used, limit, tier)
+- Bandwidth: `bandwidth_usage_daily` (current month ingress+egress)
+- Counts: `object_head_cache` (distinct buckets, total objects), `api_keys` (per user)
+- Activity: `quota_usage_events` (last 5, with operation, key, size, time)
+
+Gracefully degrades to zeros when DB is nil (tests, local dev without PostgreSQL).
