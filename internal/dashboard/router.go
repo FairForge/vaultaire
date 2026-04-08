@@ -14,6 +14,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/dashboard/middleware"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
+	"golang.org/x/oauth2"
 )
 
 const sessionTTL = 24 * time.Hour
@@ -26,6 +27,8 @@ type Deps struct {
 	Logger   *zap.Logger
 	DataPath string                 // Local storage root for bucket creation.
 	Stripe   *billing.StripeService // Nil when STRIPE_SECRET_KEY is not set.
+	Google   *oauth2.Config         // Nil when GOOGLE_CLIENT_ID is not set.
+	GitHub   *oauth2.Config         // Nil when GITHUB_CLIENT_ID is not set.
 }
 
 // RegisterRoutes mounts the dashboard, auth, admin, and static-asset
@@ -42,11 +45,25 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 	))
 
 	// --- Public auth routes ---
-	r.Get("/login", renderPage(baseTmpl, "login"))
+	r.Get("/login", renderAuthPage(baseTmpl, "login", deps))
 	r.Post("/login", handleLogin(baseTmpl, deps))
-	r.Get("/register", renderPage(baseTmpl, "register"))
+	r.Get("/register", renderAuthPage(baseTmpl, "register", deps))
 	r.Post("/register", handleRegister(baseTmpl, deps))
 	r.Get("/logout", handleLogout(deps.Sessions))
+
+	// --- OAuth login ---
+	if deps.Google != nil {
+		r.Get("/auth/google", handlers.HandleOAuthLogin(deps.Google, deps.Logger))
+		r.Get("/auth/google/callback", handlers.HandleOAuthCallback(
+			deps.Google, "google", handlers.FetchGoogleUser(deps.Google),
+			deps.Auth, deps.Sessions, deps.DB, deps.Logger))
+	}
+	if deps.GitHub != nil {
+		r.Get("/auth/github", handlers.HandleOAuthLogin(deps.GitHub, deps.Logger))
+		r.Get("/auth/github/callback", handlers.HandleOAuthCallback(
+			deps.GitHub, "github", handlers.FetchGithubUser(deps.GitHub),
+			deps.Auth, deps.Sessions, deps.DB, deps.Logger))
+	}
 
 	// --- Customer dashboard (session required) ---
 	r.Route("/dashboard", func(dr chi.Router) {
@@ -142,24 +159,17 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 	})
 }
 
-// renderPage returns a handler that executes the "base" layout with a
-// page-specific content block. Until Phase 1 templates are built, each
-// page renders a minimal placeholder inside the base layout.
-func renderPage(base *template.Template, page string) http.HandlerFunc {
-	// Clone the base layout and add a page-specific content block.
+// renderAuthPage renders a public auth page (login, register) with OAuth flags.
+func renderAuthPage(base *template.Template, page string, deps Deps) http.HandlerFunc {
 	tmpl := template.Must(base.Clone())
 	template.Must(tmpl.Parse(pageContent(page)))
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		sd := dashauth.GetSession(r.Context())
-		data := map[string]any{}
-		if sd != nil {
-			data["Email"] = sd.Email
-			data["Role"] = sd.Role
-			data["UserID"] = sd.UserID
-			data["TenantID"] = sd.TenantID
+		data := map[string]any{
+			"Page":      page,
+			"HasGoogle": deps.Google != nil,
+			"HasGithub": deps.GitHub != nil,
 		}
-		data["Page"] = page
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := tmpl.ExecuteTemplate(w, "base", data); err != nil {
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
@@ -179,9 +189,11 @@ func handleLogin(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusUnauthorized)
 			_ = errTmpl.ExecuteTemplate(w, "base", map[string]any{
-				"Error": msg,
-				"Email": email,
-				"Page":  "login",
+				"Error":     msg,
+				"Email":     email,
+				"Page":      "login",
+				"HasGoogle": deps.Google != nil,
+				"HasGithub": deps.GitHub != nil,
 			})
 		}
 
@@ -234,10 +246,12 @@ func handleRegister(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusBadRequest)
 			_ = errTmpl.ExecuteTemplate(w, "base", map[string]any{
-				"Error":   msg,
-				"Email":   email,
-				"Company": company,
-				"Page":    "register",
+				"Error":     msg,
+				"Email":     email,
+				"Company":   company,
+				"Page":      "register",
+				"HasGoogle": deps.Google != nil,
+				"HasGithub": deps.GitHub != nil,
 			})
 		}
 
@@ -304,6 +318,13 @@ func pageContent(page string) string {
 			`<div class="auth-brand">stored.ge</div>` +
 			`<h1>Sign In</h1>` +
 			`{{if .Error}}<div class="alert alert-error">{{.Error}}</div>{{end}}` +
+			`{{if or .HasGoogle .HasGithub}}` +
+			`<div class="oauth-buttons">` +
+			`{{if .HasGoogle}}<a href="/auth/google" class="btn btn-oauth btn-google">Sign in with Google</a>{{end}}` +
+			`{{if .HasGithub}}<a href="/auth/github" class="btn btn-oauth btn-github">Sign in with GitHub</a>{{end}}` +
+			`</div>` +
+			`<div class="auth-divider"><span>or</span></div>` +
+			`{{end}}` +
 			`<form method="POST" action="/login">` +
 			`<div class="form-group"><label>Email</label><input type="email" name="email" value="{{.Email}}" required></div>` +
 			`<div class="form-group"><label>Password</label><input type="password" name="password" required></div>` +
@@ -319,6 +340,13 @@ func pageContent(page string) string {
 			`<div class="auth-brand">stored.ge</div>` +
 			`<h1>Create Account</h1>` +
 			`{{if .Error}}<div class="alert alert-error">{{.Error}}</div>{{end}}` +
+			`{{if or .HasGoogle .HasGithub}}` +
+			`<div class="oauth-buttons">` +
+			`{{if .HasGoogle}}<a href="/auth/google" class="btn btn-oauth btn-google">Sign up with Google</a>{{end}}` +
+			`{{if .HasGithub}}<a href="/auth/github" class="btn btn-oauth btn-github">Sign up with GitHub</a>{{end}}` +
+			`</div>` +
+			`<div class="auth-divider"><span>or</span></div>` +
+			`{{end}}` +
 			`<form method="POST" action="/register">` +
 			`<div class="form-group"><label>Email</label><input type="email" name="email" value="{{.Email}}" required></div>` +
 			`<div class="form-group"><label>Password</label><input type="password" name="password" required minlength="8"></div>` +
