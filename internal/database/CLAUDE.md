@@ -21,6 +21,8 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 - **subscriptions** — Stripe subscription state tracking
 - **bandwidth_usage_daily** — per-tenant daily ingress/egress/requests (unique on tenant_id + date)
 - **object_head_cache** — HEAD request cache (size, ETag, content-type stored on PUT)
+- **user_mfa** — `user_id (PK)`, `secret`, `enabled`, `backup_codes` (JSON), `created_at`, `updated_at` — TOTP 2FA settings
+- **mfa_audit_log** — `id (SERIAL)`, `user_id`, `action`, `success`, `ip_address`, `user_agent`, `created_at`
 
 ## Connection
 

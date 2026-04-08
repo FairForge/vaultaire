@@ -23,6 +23,12 @@ func HandleSettings(tmpl *template.Template, authSvc *auth.AuthService, db *sql.
 		withCSRF(r.Context(), data)
 		populateProfile(authSvc, db, r, sd, data)
 
+		// MFA status for the settings page.
+		if authSvc != nil {
+			mfaEnabled, _ := authSvc.IsMFAEnabled(r.Context(), sd.UserID)
+			data["MFAEnabled"] = mfaEnabled
+		}
+
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := tmpl.ExecuteTemplate(w, "base", data); err != nil {
 			logger.Error("render settings", zap.Error(err))

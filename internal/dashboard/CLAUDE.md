@@ -45,20 +45,32 @@ Cookie: `vaultaire_session`, HttpOnly, Secure, SameSite=Lax.
 | `/dashboard/settings/profile` | POST | session | Update company name |
 | `/dashboard/settings/password` | POST | session | Change password (validates current) |
 | `/dashboard/settings/notifications` | POST | session | Update notification preferences |
+| `/dashboard/settings/mfa` | GET | session | 2FA setup page (QR code, backup codes) |
+| `/dashboard/settings/mfa/enable` | POST | session | Confirm TOTP code to enable 2FA |
+| `/dashboard/settings/mfa/disable` | POST | session | Disable 2FA (requires password) |
+| `/login/verify-2fa` | GET | none | 2FA verification page (during login) |
+| `/login/verify-2fa` | POST | none | Validate TOTP/backup code, complete login |
 | `/dashboard/billing` | GET | session | Billing: plan, upgrade, value stack, cost comparison |
 | `/dashboard/billing/upgrade` | POST | session | Redirect to Stripe Checkout for chosen plan |
 | `/dashboard/billing/portal` | POST | session | Redirect to Stripe Billing Portal |
 | `/admin/tenants/{id}/bandwidth-limit` | POST | session + admin | Update tenant bandwidth limit |
+| `/admin/tenants/{id}/reset-mfa` | POST | session + admin | Reset user's 2FA |
 | `/admin/*` | GET | session + admin role | Admin panel |
 
 ## Auth Flow
 
 1. User submits login/register form (POST)
 2. Handler validates credentials / creates account via `deps.Auth`
-3. On success: creates session in `deps.Sessions` with 24h TTL
-4. Sets `vaultaire_session` cookie
-5. Redirects to `/dashboard`
-6. On error: re-renders form with `.Error` message and preserved form values
+3. If MFA enabled: sets `mfa_pending` cookie (5-min TTL), redirects to `/login/verify-2fa`
+4. `/login/verify-2fa` validates TOTP code or backup code, then creates session
+5. On success (no MFA or MFA verified): creates session in `deps.Sessions` with 24h TTL
+6. Sets `vaultaire_session` cookie
+7. Redirects to `/dashboard`
+8. On error: re-renders form with `.Error` message and preserved form values
+
+## MFA Pending Store
+
+`MFAPendingStore` is an in-memory store holding intermediate state between password validation and TOTP verification. Entries expire after 5 minutes. Token is stored in `mfa_pending` cookie (HttpOnly, Secure, SameSite=Lax). Get() consumes the entry (single use). Peek() reads without consuming (for retries).
 
 ## Templates
 

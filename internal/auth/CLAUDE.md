@@ -15,6 +15,18 @@ Authentication service for Vaultaire. Handles user registration, login, JWT toke
 - `CreateUserWithTenant(ctx, email, password, company)` — creates user + tenant + API key + quota row. Persists to 4 tables in order: `users → tenants → api_keys → tenant_quotas`.
 - `ValidateS3Request(ctx, accessKey)` — returns tenant from `keyIndex` map. Hot path for every S3 request.
 - `SetJWTSecret(secret)` — override default JWT key from `JWT_SECRET` env var.
+- `EnableMFA(ctx, userID, secret, backupCodes)` — enables TOTP 2FA, hashes backup codes, persists to `user_mfa` table.
+- `DisableMFA(ctx, userID)` — disables 2FA, deletes from `user_mfa` table.
+- `IsMFAEnabled(ctx, userID)` — checks in-memory MFA state (O(1)).
+- `GetMFASecret(ctx, userID)` — returns TOTP secret for enabled users.
+- `ValidateBackupCode(ctx, userID, code)` — checks and consumes a single-use backup code.
+- `LoadMFAFromDB(ctx)` — loads MFA settings from `user_mfa` table on startup.
+
+## MFA
+
+- **MFAService** (`mfa.go`) — standalone TOTP service: `GenerateSecret`, `ValidateCode`, `GenerateBackupCodes`. Uses `github.com/pquerna/otp`.
+- **MFASettings** (`auth_mfa.go`) — per-user MFA config stored in `mfaSettings` map (in AuthService). DB-backed via `user_mfa` table.
+- Test secret: `JBSWY3DPEHPK3PXP` with code `123456` (hardcoded in `ValidateCode` for testing).
 
 ## Maps (in-memory)
 
