@@ -31,6 +31,7 @@ func HandleUsage(tmpl *template.Template, db *sql.DB, logger *zap.Logger) http.H
 		}
 
 		data := sessionData(sd, "usage")
+		withCSRF(r.Context(), data)
 		ctx := r.Context()
 
 		if db != nil {

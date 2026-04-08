@@ -21,6 +21,7 @@ func HandleAdminOverview(tmpl *template.Template, db *sql.DB, logger *zap.Logger
 		}
 
 		data := sessionData(sd, "admin-overview")
+		withCSRF(r.Context(), data)
 		data["TenantCount"] = 0
 		data["TotalStorageFmt"] = "0 B"
 		data["ActiveSubCount"] = 0

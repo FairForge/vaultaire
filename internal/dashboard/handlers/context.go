@@ -1,11 +1,13 @@
 package handlers
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"time"
 
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
+	"github.com/FairForge/vaultaire/internal/dashboard/middleware"
 )
 
 // sessionData builds the base template data map from the session.
@@ -19,6 +21,11 @@ func sessionData(sd *dashauth.SessionData, page string) map[string]any {
 		"TenantID": sd.TenantID,
 		"Page":     page,
 	}
+}
+
+// withCSRF adds the CSRF token from the request context to the template data map.
+func withCSRF(ctx context.Context, data map[string]any) {
+	data["CSRFToken"] = middleware.Token(ctx)
 }
 
 // formatBytes returns a human-readable size string (e.g. "1.5 GB").

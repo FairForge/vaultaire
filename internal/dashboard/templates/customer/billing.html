@@ -7,6 +7,7 @@
     </div>
     {{if .HasSubscription}}
     <form method="POST" action="/dashboard/billing/portal">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
         <button type="submit" class="btn">Manage Payment</button>
     </form>
     {{end}}
@@ -39,6 +40,7 @@
             <div class="plan-price">{{.PriceFmt}}</div>
             {{if .StorageTB}}<div class="plan-detail">{{.StorageTB}} TB storage</div>{{end}}
             <form method="POST" action="/dashboard/billing/upgrade">
+                <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
                 <input type="hidden" name="plan" value="{{.ID}}">
                 <button type="submit" class="btn btn-primary btn-block">Choose Plan</button>
             </form>

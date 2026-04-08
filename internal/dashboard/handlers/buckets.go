@@ -56,6 +56,7 @@ func HandleBuckets(tmpl *template.Template, db *sql.DB, dataPath string, logger 
 		}
 
 		data := sessionData(sd, "buckets")
+		withCSRF(r.Context(), data)
 
 		if db != nil {
 			buckets := listBuckets(r.Context(), db, sd.TenantID)
@@ -84,6 +85,7 @@ func HandleCreateBucket(tmpl *template.Template, db *sql.DB, dataPath string, lo
 		}
 
 		data := sessionData(sd, "buckets")
+		withCSRF(r.Context(), data)
 
 		name := strings.TrimSpace(r.FormValue("name"))
 		name = strings.ToLower(name)
@@ -143,6 +145,7 @@ func HandleBucketObjects(tmpl *template.Template, db *sql.DB, logger *zap.Logger
 		prefix := r.URL.Query().Get("prefix")
 
 		data := sessionData(sd, "buckets")
+		withCSRF(r.Context(), data)
 		data["BucketName"] = bucketName
 		data["Prefix"] = prefix
 

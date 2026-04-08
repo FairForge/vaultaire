@@ -7,6 +7,7 @@
     <title>{{block "title" .}}Admin &mdash; stored.ge{{end}}</title>
     <link rel="stylesheet" href="/static/css/style.css">
     <script src="/static/js/htmx.min.js"></script>
+    {{if .CSRFToken}}<meta name="csrf-token" content="{{.CSRFToken}}">{{end}}
     {{block "head" .}}{{end}}
 </head>
 <body class="admin-body">
@@ -29,6 +30,12 @@
             {{block "content" .}}{{end}}
         </main>
     </div>
+    <script>
+    document.body.addEventListener('htmx:configRequest', function(evt) {
+        var m = document.querySelector('meta[name="csrf-token"]');
+        if (m) evt.detail.headers['X-CSRF-Token'] = m.content;
+    });
+    </script>
 </body>
 </html>
 {{end}}

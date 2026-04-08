@@ -24,6 +24,7 @@ func HandleAdminSystem(tmpl *template.Template, db *sql.DB, logger *zap.Logger) 
 		}
 
 		data := sessionData(sd, "admin-system")
+		withCSRF(r.Context(), data)
 
 		// Go runtime stats.
 		var mem runtime.MemStats

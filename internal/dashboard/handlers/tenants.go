@@ -46,6 +46,7 @@ func HandleTenantList(tmpl *template.Template, db *sql.DB, logger *zap.Logger) h
 		}
 
 		data := sessionData(sd, "admin-tenants")
+		withCSRF(r.Context(), data)
 		query := r.URL.Query().Get("q")
 		data["SearchQuery"] = query
 
@@ -148,6 +149,7 @@ func HandleTenantDetail(tmpl *template.Template, db *sql.DB, logger *zap.Logger)
 		}
 
 		data := sessionData(sd, "admin-tenants")
+		withCSRF(r.Context(), data)
 		if !loadTenantDetail(r.Context(), db, tenantID, data, logger) {
 			http.NotFound(w, r)
 			return

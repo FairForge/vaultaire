@@ -40,6 +40,7 @@ func HandleAPIKeys(tmpl *template.Template, authSvc *auth.AuthService, logger *z
 		}
 
 		data := sessionData(sd, "apikeys")
+		withCSRF(r.Context(), data)
 		data["Keys"] = listKeys(r, authSvc, sd.UserID)
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -60,6 +61,7 @@ func HandleGenerateKey(tmpl *template.Template, authSvc *auth.AuthService, logge
 		}
 
 		data := sessionData(sd, "apikeys")
+		withCSRF(r.Context(), data)
 
 		name := strings.TrimSpace(r.FormValue("name"))
 		if name == "" {
