@@ -7,6 +7,7 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/auth"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
+	"github.com/FairForge/vaultaire/internal/dashboard/middleware"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 )
@@ -105,6 +106,7 @@ func HandleMFAEnable(settingsTmpl *template.Template, authSvc *auth.AuthService,
 			return
 		}
 
+		middleware.SetFlash(w, "success", "Two-factor authentication enabled.")
 		http.Redirect(w, r, "/dashboard/settings", http.StatusSeeOther)
 	}
 }
@@ -145,6 +147,7 @@ func HandleMFADisable(settingsTmpl *template.Template, authSvc *auth.AuthService
 			return
 		}
 
+		middleware.SetFlash(w, "success", "Two-factor authentication disabled.")
 		http.Redirect(w, r, "/dashboard/settings", http.StatusSeeOther)
 	}
 }

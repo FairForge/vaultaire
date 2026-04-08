@@ -21,6 +21,7 @@ func HandleSettings(tmpl *template.Template, authSvc *auth.AuthService, db *sql.
 
 		data := sessionData(sd, "settings")
 		withCSRF(r.Context(), data)
+		withFlash(r.Context(), data)
 		populateProfile(authSvc, db, r, sd, data)
 
 		// MFA status for the settings page.
