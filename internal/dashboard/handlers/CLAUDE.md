@@ -32,6 +32,15 @@ Three handlers:
 
 Uses `auth.AuthService` directly (not DB queries) since keys are in-memory + DB-backed.
 
+## Bandwidth Chart (`bandwidth_chart.go`)
+
+Shared bandwidth chart logic used by both customer usage page and admin tenant detail:
+- `ChartBar` — SVG bar coordinates struct
+- `BandwidthDay` — date + ingress/egress totals
+- `BuildChartBars(days)` — pure function: converts bandwidth days to SVG bar data (600x200 chart area)
+- `QueryBandwidthDays(ctx, db, tenantID)` — fetches last 30 days from `bandwidth_usage_daily`
+- `QueryMonthBandwidth(ctx, db, tenantID)` — current month ingress/egress/requests totals
+
 ## Usage Page (`usage.go`)
 
 `HandleUsage(tmpl, db, logger)` renders the detailed usage page:
@@ -40,6 +49,7 @@ Uses `auth.AuthService` directly (not DB queries) since keys are in-memory + DB-
 - 30-day SVG bar chart (stacked ingress/egress bars, server-rendered)
 - Daily breakdown table (date, ingress, egress, total, requests)
 - htmx auto-refresh on chart via `hx-trigger="every 30s"`
+- Delegates to shared `bandwidth_chart.go` functions for chart building and bandwidth queries
 
 Queries: `tenant_quotas`, `bandwidth_usage_daily` (30 days). Chart bars are `ChartBar` structs with pre-computed SVG coordinates.
 

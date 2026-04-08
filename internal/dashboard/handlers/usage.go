@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"html/template"
-	"math"
 	"net/http"
 	"time"
 
@@ -19,18 +18,6 @@ type UsageDayRow struct {
 	EgressFmt  string
 	TotalFmt   string
 	Requests   int64
-}
-
-// ChartBar represents a single bar in the SVG bandwidth chart.
-type ChartBar struct {
-	X         float64
-	InH       float64 // Ingress bar height
-	EgH       float64 // Egress bar height (stacked on top)
-	InY       float64
-	EgY       float64
-	W         float64
-	Label     string // Date label (e.g. "Apr 3")
-	ShowLabel bool   // Only show every 5th label to avoid clutter
 }
 
 // HandleUsage renders the usage page with storage, bandwidth, and a
@@ -102,15 +89,7 @@ func populateUsageStorage(ctx context.Context, db *sql.DB, tenantID string, data
 }
 
 func populateUsageBandwidth(ctx context.Context, db *sql.DB, tenantID string, data map[string]any) {
-	// Current month totals.
-	var ingress, egress, requests int64
-	err := db.QueryRowContext(ctx,
-		`SELECT COALESCE(SUM(ingress_bytes), 0),
-		        COALESCE(SUM(egress_bytes), 0),
-		        COALESCE(SUM(requests_count), 0)
-		 FROM bandwidth_usage_daily
-		 WHERE tenant_id = $1 AND date >= date_trunc('month', CURRENT_DATE)`,
-		tenantID).Scan(&ingress, &egress, &requests)
+	ingress, egress, requests, err := QueryMonthBandwidth(ctx, db, tenantID)
 	if err != nil {
 		ingress, egress, requests = 0, 0, 0
 	}
@@ -122,80 +101,25 @@ func populateUsageBandwidth(ctx context.Context, db *sql.DB, tenantID string, da
 }
 
 func populateUsageChart(ctx context.Context, db *sql.DB, tenantID string, data map[string]any) {
-	rows, err := db.QueryContext(ctx,
-		`SELECT date, COALESCE(ingress_bytes, 0), COALESCE(egress_bytes, 0)
-		 FROM bandwidth_usage_daily
-		 WHERE tenant_id = $1 AND date >= CURRENT_DATE - INTERVAL '30 days'
-		 ORDER BY date ASC`, tenantID)
-	if err != nil {
+	days, err := QueryBandwidthDays(ctx, db, tenantID)
+	if err != nil || len(days) == 0 {
 		data["ChartBars"] = nil
 		data["HasChartData"] = false
 		return
 	}
-	defer func() { _ = rows.Close() }()
 
-	type dayData struct {
-		date    time.Time
-		ingress int64
-		egress  int64
-	}
-	var days []dayData
+	bars := BuildChartBars(days)
+	data["ChartBars"] = bars
+	data["HasChartData"] = true
+
+	// Compute max for the chart label.
 	var maxVal int64
-
-	for rows.Next() {
-		var d dayData
-		if err := rows.Scan(&d.date, &d.ingress, &d.egress); err != nil {
-			continue
-		}
-		total := d.ingress + d.egress
+	for _, d := range days {
+		total := d.Ingress + d.Egress
 		if total > maxVal {
 			maxVal = total
 		}
-		days = append(days, d)
 	}
-
-	if len(days) == 0 {
-		data["ChartBars"] = nil
-		data["HasChartData"] = false
-		return
-	}
-
-	// Build SVG bar data. Chart area is 600x200.
-	const chartW, chartH = 600.0, 200.0
-	barW := chartW / float64(len(days)) * 0.8
-	gap := chartW / float64(len(days)) * 0.2
-
-	var bars []ChartBar
-	for i, d := range days {
-		x := float64(i) * (barW + gap)
-		inH, egH := 0.0, 0.0
-		if maxVal > 0 {
-			inH = float64(d.ingress) / float64(maxVal) * chartH
-			egH = float64(d.egress) / float64(maxVal) * chartH
-		}
-		// Minimum visible height for non-zero values.
-		if d.ingress > 0 && inH < 2 {
-			inH = 2
-		}
-		if d.egress > 0 && egH < 2 {
-			egH = 2
-		}
-
-		showLabel := i%5 == 0 || i == len(days)-1
-		bars = append(bars, ChartBar{
-			X:         math.Round(x*100) / 100,
-			InH:       math.Round(inH*100) / 100,
-			EgH:       math.Round(egH*100) / 100,
-			InY:       math.Round((chartH-inH)*100) / 100,
-			EgY:       math.Round((chartH-inH-egH)*100) / 100,
-			W:         math.Round(barW*100) / 100,
-			Label:     d.date.Format("Jan 2"),
-			ShowLabel: showLabel,
-		})
-	}
-
-	data["ChartBars"] = bars
-	data["HasChartData"] = true
 	data["ChartMaxLabel"] = formatBytes(maxVal)
 }
 

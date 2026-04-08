@@ -235,6 +235,43 @@ func loadTenantDetail(ctx context.Context, db *sql.DB, tenantID string, data map
 	data["StorageBarClass"] = usageBarClass(pct)
 	data["Tier"] = tier
 
+	// Bandwidth: current month totals + 30-day chart.
+	ingress, egress, requests, _ := QueryMonthBandwidth(ctx, db, tenantID)
+	data["IngressFmt"] = formatBytes(ingress)
+	data["EgressFmt"] = formatBytes(egress)
+	data["BandwidthTotalFmt"] = formatBytes(ingress + egress)
+	data["RequestsCount"] = requests
+
+	// Bandwidth limit.
+	var bwLimitBytes sql.NullInt64
+	_ = db.QueryRowContext(ctx,
+		`SELECT bandwidth_limit_bytes FROM tenant_quotas WHERE tenant_id = $1`, tenantID).Scan(&bwLimitBytes)
+	if bwLimitBytes.Valid && bwLimitBytes.Int64 > 0 {
+		data["BandwidthLimitFmt"] = formatBytes(bwLimitBytes.Int64)
+		data["BandwidthLimitGB"] = bwLimitBytes.Int64 / (1024 * 1024 * 1024)
+	} else {
+		data["BandwidthLimitFmt"] = "Unlimited"
+		data["BandwidthLimitGB"] = int64(0)
+	}
+
+	days, _ := QueryBandwidthDays(ctx, db, tenantID)
+	if len(days) > 0 {
+		data["ChartBars"] = BuildChartBars(days)
+		data["HasChartData"] = true
+		var maxVal int64
+		for _, d := range days {
+			total := d.Ingress + d.Egress
+			if total > maxVal {
+				maxVal = total
+			}
+		}
+		data["ChartMaxLabel"] = formatBytes(maxVal)
+	} else {
+		data["ChartBars"] = nil
+		data["HasChartData"] = false
+		data["ChartMaxLabel"] = "0 B"
+	}
+
 	return true
 }
 
@@ -375,6 +412,63 @@ func HandleUpdateQuota(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = fmt.Fprintf(w, `<div class="alert alert-success">Storage limit updated to %s.</div>`, formatBytes(limitBytes))
+	}
+}
+
+// HandleUpdateBandwidthLimit sets or clears a tenant's bandwidth limit.
+// A value of 0 means unlimited.
+func HandleUpdateBandwidthLimit(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sd := dashauth.GetSession(r.Context())
+		if sd == nil {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+
+		tenantID := chi.URLParam(r, "id")
+		if tenantID == "" {
+			http.Error(w, "Bad Request", http.StatusBadRequest)
+			return
+		}
+
+		limitGB, err := strconv.ParseInt(r.FormValue("bandwidth_limit"), 10, 64)
+		if err != nil || limitGB < 0 {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = fmt.Fprint(w, `<div class="alert alert-error">Invalid bandwidth limit. Enter a non-negative number in GB (0 = unlimited).</div>`)
+			return
+		}
+
+		if db == nil {
+			http.Error(w, "Database not available", http.StatusInternalServerError)
+			return
+		}
+
+		var limitBytes *int64
+		if limitGB > 0 {
+			v := limitGB * 1024 * 1024 * 1024
+			limitBytes = &v
+		}
+
+		if _, err := db.ExecContext(r.Context(),
+			`UPDATE tenant_quotas SET bandwidth_limit_bytes = $1, updated_at = NOW() WHERE tenant_id = $2`,
+			limitBytes, tenantID); err != nil {
+			logger.Error("update bandwidth limit", zap.String("tenant_id", tenantID), zap.Error(err))
+			http.Error(w, "Failed to update bandwidth limit", http.StatusInternalServerError)
+			return
+		}
+
+		logger.Info("bandwidth limit updated",
+			zap.String("tenant_id", tenantID),
+			zap.Int64("limit_gb", limitGB),
+			zap.String("by", sd.Email))
+
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if limitGB == 0 {
+			_, _ = fmt.Fprint(w, `<div class="alert alert-success">Bandwidth limit removed (unlimited).</div>`)
+		} else {
+			_, _ = fmt.Fprintf(w, `<div class="alert alert-success">Bandwidth limit updated to %s/month.</div>`, formatBytes(*limitBytes))
+		}
 	}
 }
 

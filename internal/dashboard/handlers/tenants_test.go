@@ -235,6 +235,76 @@ func TestHandleUpdateQuota_NoDB(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 }
 
+// --- Bandwidth limit tests ---
+
+func TestHandleUpdateBandwidthLimit_NoSession(t *testing.T) {
+	handler := HandleUpdateBandwidthLimit(nil, zap.NewNop())
+
+	req := httptest.NewRequest("POST", "/admin/tenants/t-1/bandwidth-limit", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusSeeOther, w.Code)
+}
+
+func TestHandleUpdateBandwidthLimit_InvalidInput(t *testing.T) {
+	handler := HandleUpdateBandwidthLimit(nil, zap.NewNop())
+
+	ctx := withChiParam(adminCtx(t), "id", "t-1")
+	body := strings.NewReader("bandwidth_limit=notanumber")
+	req := httptest.NewRequest("POST", "/admin/tenants/t-1/bandwidth-limit", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "Invalid bandwidth limit")
+}
+
+func TestHandleUpdateBandwidthLimit_NegativeInput(t *testing.T) {
+	handler := HandleUpdateBandwidthLimit(nil, zap.NewNop())
+
+	ctx := withChiParam(adminCtx(t), "id", "t-1")
+	body := strings.NewReader("bandwidth_limit=-5")
+	req := httptest.NewRequest("POST", "/admin/tenants/t-1/bandwidth-limit", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestHandleUpdateBandwidthLimit_NoDB(t *testing.T) {
+	handler := HandleUpdateBandwidthLimit(nil, zap.NewNop())
+
+	ctx := withChiParam(adminCtx(t), "id", "t-1")
+	body := strings.NewReader("bandwidth_limit=100")
+	req := httptest.NewRequest("POST", "/admin/tenants/t-1/bandwidth-limit", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+func TestHandleUpdateBandwidthLimit_ZeroMeansUnlimited(t *testing.T) {
+	handler := HandleUpdateBandwidthLimit(nil, zap.NewNop())
+
+	ctx := withChiParam(adminCtx(t), "id", "t-1")
+	body := strings.NewReader("bandwidth_limit=0")
+	req := httptest.NewRequest("POST", "/admin/tenants/t-1/bandwidth-limit", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	// NoDB so it'll be 500, but the handler accepts 0 as valid (unlimited).
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
 // --- Tier change tests ---
 
 func TestHandleChangeTier_NoSession(t *testing.T) {

@@ -134,6 +134,7 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		ar.Post("/tenants/{id}/enable", handlers.HandleEnableTenant(deps.DB, deps.Logger))
 		ar.Post("/tenants/{id}/quota", handlers.HandleUpdateQuota(deps.DB, deps.Logger))
 		ar.Post("/tenants/{id}/tier", handlers.HandleChangeTier(deps.DB, deps.Logger))
+		ar.Post("/tenants/{id}/bandwidth-limit", handlers.HandleUpdateBandwidthLimit(deps.DB, deps.Logger))
 		ar.Get("/system", handlers.HandleAdminSystem(systemTmpl, deps.DB, deps.Logger))
 	})
 }

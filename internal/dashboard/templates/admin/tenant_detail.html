@@ -84,6 +84,65 @@
     </form>
 </div>
 
+<div class="card" id="bandwidth-section">
+    <div class="card-title">Bandwidth (Current Month)</div>
+    <div class="card-grid" style="margin-bottom:1rem">
+        <div>
+            <div class="card-detail">Ingress</div>
+            <div class="card-value" style="font-size:1rem">{{.IngressFmt}}</div>
+        </div>
+        <div>
+            <div class="card-detail">Egress</div>
+            <div class="card-value" style="font-size:1rem">{{.EgressFmt}}</div>
+        </div>
+        <div>
+            <div class="card-detail">Total</div>
+            <div class="card-value" style="font-size:1rem">{{.BandwidthTotalFmt}}</div>
+        </div>
+        <div>
+            <div class="card-detail">Requests</div>
+            <div class="card-value" style="font-size:1rem">{{.RequestsCount}}</div>
+        </div>
+    </div>
+    <div class="card-detail">Limit: {{.BandwidthLimitFmt}}</div>
+
+    {{if .HasChartData}}
+    <div style="margin-top:1rem">
+        <div class="card-detail" style="margin-bottom:0.5rem">30-Day Bandwidth</div>
+        <svg viewBox="0 0 620 240" style="width:100%;max-width:620px;background:#f8f9fa;border-radius:4px">
+            <text x="2" y="12" font-size="10" fill="#666">{{.ChartMaxLabel}}</text>
+            <g transform="translate(10,20)">
+                {{range .ChartBars}}
+                <rect x="{{.X}}" y="{{.InY}}" width="{{.W}}" height="{{.InH}}" fill="#3b82f6" rx="1"/>
+                <rect x="{{.X}}" y="{{.EgY}}" width="{{.W}}" height="{{.EgH}}" fill="#10b981" rx="1"/>
+                {{if .ShowLabel}}
+                <text x="{{.X}}" y="215" font-size="9" fill="#999">{{.Label}}</text>
+                {{end}}
+                {{end}}
+            </g>
+        </svg>
+        <div style="margin-top:0.5rem;font-size:0.8rem;color:#666">
+            <span style="color:#3b82f6">&#9632;</span> Ingress
+            <span style="color:#10b981;margin-left:1rem">&#9632;</span> Egress
+        </div>
+    </div>
+    {{else}}
+    <div class="card-detail" style="margin-top:1rem;color:#999">No bandwidth data yet.</div>
+    {{end}}
+
+    <div id="bandwidth-feedback"></div>
+    <form style="margin-top:1rem"
+        hx-post="/admin/tenants/{{.TenantID}}/bandwidth-limit"
+        hx-target="#bandwidth-feedback"
+        hx-swap="innerHTML">
+        <div class="form-row">
+            <label>Bandwidth Limit (GB, 0 = unlimited)</label>
+            <input type="number" name="bandwidth_limit" value="{{.BandwidthLimitGB}}" min="0" class="form-input-sm">
+            <button type="submit" class="btn btn-sm btn-primary">Update</button>
+        </div>
+    </form>
+</div>
+
 <div class="dashboard-actions">
     <a href="/admin/tenants" class="btn">Back to Tenants</a>
     <a href="/admin" class="btn">Admin Overview</a>
