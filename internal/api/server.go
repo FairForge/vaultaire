@@ -605,7 +605,7 @@ func (s *Server) handlePasswordResetComplete(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if err := s.auth.CompletePasswordReset(r.Context(), req.Token, req.NewPassword); err != nil {
+	if _, err := s.auth.CompletePasswordReset(r.Context(), req.Token, req.NewPassword); err != nil {
 		http.Error(w, "Invalid or expired token", http.StatusBadRequest)
 		return
 	}
