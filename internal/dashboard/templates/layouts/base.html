@@ -29,6 +29,15 @@
     {{end}}
 
     <main class="container">
+        {{if .ShowVerifyBanner}}
+        <div class="alert alert-warning" style="display:flex;align-items:center;justify-content:space-between">
+            <span>Please verify your email address to unlock all features.</span>
+            <form method="POST" action="/dashboard/settings/resend-verify" style="margin:0">
+                <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+                <button type="submit" class="btn btn-sm">Resend verification email</button>
+            </form>
+        </div>
+        {{end}}
         {{if .FlashSuccess}}<div class="alert alert-success">{{.FlashSuccess}}</div>{{end}}
         {{if .FlashError}}<div class="alert alert-error">{{.FlashError}}</div>{{end}}
         {{block "content" .}}{{end}}

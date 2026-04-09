@@ -46,6 +46,7 @@ func HandleOverview(tmpl *template.Template, db *sql.DB, logger *zap.Logger) htt
 			populateBandwidth(ctx, db, sd.TenantID, data)
 			populateCounts(ctx, db, sd.TenantID, sd.UserID, data)
 			populateActivity(ctx, db, sd.TenantID, data)
+			populateEmailVerified(ctx, db, sd.UserID, data)
 		} else {
 			setDefaults(data)
 		}
