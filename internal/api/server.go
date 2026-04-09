@@ -104,6 +104,13 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// Use JWT_SECRET from environment if available.
 	s.auth.SetJWTSecret(os.Getenv("JWT_SECRET"))
 
+	// Email verification HMAC secret — reuses JWT_SECRET if no separate key is set.
+	verifySecret := os.Getenv("VERIFY_SECRET")
+	if verifySecret == "" {
+		verifySecret = os.Getenv("JWT_SECRET")
+	}
+	s.auth.SetVerifySecret(verifySecret)
+
 	// Populate in-memory maps from PostgreSQL so that existing users
 	// can authenticate immediately after a restart/deploy.
 	if s.db != nil {

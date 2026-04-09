@@ -23,6 +23,7 @@ func HandleSettings(tmpl *template.Template, authSvc *auth.AuthService, db *sql.
 		withCSRF(r.Context(), data)
 		withFlash(r.Context(), data)
 		populateProfile(authSvc, db, r, sd, data)
+		populateEmailVerified(r.Context(), db, sd.UserID, data)
 
 		// MFA status for the settings page.
 		if authSvc != nil {
