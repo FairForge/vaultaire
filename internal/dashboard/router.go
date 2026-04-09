@@ -46,16 +46,19 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		"templates/layouts/base.html",
 	))
 
+	// Rate limiter: 5 attempts/min per IP for login and 2FA.
+	loginRL := middleware.NewLoginRateLimiter(5, 5)
+
 	// --- Public auth routes ---
 	r.Get("/login", renderAuthPage(baseTmpl, "login", deps))
-	r.Post("/login", handleLogin(baseTmpl, deps))
+	r.Post("/login", loginRL.Limit(handleLogin(baseTmpl, deps)).ServeHTTP)
 	r.Get("/register", renderAuthPage(baseTmpl, "register", deps))
 	r.Post("/register", handleRegister(baseTmpl, deps))
 	r.Get("/logout", handleLogout(deps.Sessions))
 
 	// --- 2FA verification (public, used during login) ---
 	r.Get("/login/verify-2fa", renderAuthPage(baseTmpl, "verify-2fa", deps))
-	r.Post("/login/verify-2fa", handleVerify2FA(baseTmpl, deps))
+	r.Post("/login/verify-2fa", loginRL.Limit(handleVerify2FA(baseTmpl, deps)).ServeHTTP)
 
 	// --- OAuth login ---
 	if deps.Google != nil {
