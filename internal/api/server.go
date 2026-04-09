@@ -25,28 +25,44 @@ import (
 	"github.com/FairForge/vaultaire/internal/rbac"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
+	"golang.org/x/oauth2"
+)
+
+// OAuth provider endpoints.
+var (
+	googleEndpoint = oauth2.Endpoint{
+		AuthURL:  "https://accounts.google.com/o/oauth2/v2/auth",
+		TokenURL: "https://oauth2.googleapis.com/token",
+	}
+	githubEndpoint = oauth2.Endpoint{
+		AuthURL:  "https://github.com/login/oauth/authorize",
+		TokenURL: "https://github.com/login/oauth/access_token",
+	}
 )
 
 type Server struct {
-	config         *config.Config
-	logger         *zap.Logger
-	router         chi.Router
-	httpServer     *http.Server
-	db             *sql.DB
-	events         chan Event
-	engine         *engine.CoreEngine
-	quotaManager   QuotaManager
-	rbacService    *RBACService
-	auth           *auth.AuthService
-	auditLogger    *auth.AuditLogger
-	stripe         *billing.StripeService
-	webhookHandler *billing.WebhookHandler
-	requestCount   int64
-	testMode       bool
-	errorCount     int64
-	healthChecker  *BackendHealthChecker
-	sessionStore   dashauth.SessionStore
-	startTime      time.Time
+	config           *config.Config
+	logger           *zap.Logger
+	router           chi.Router
+	httpServer       *http.Server
+	db               *sql.DB
+	events           chan Event
+	engine           *engine.CoreEngine
+	quotaManager     QuotaManager
+	rbacService      *RBACService
+	auth             *auth.AuthService
+	auditLogger      *auth.AuditLogger
+	stripe           *billing.StripeService
+	webhookHandler   *billing.WebhookHandler
+	requestCount     int64
+	testMode         bool
+	errorCount       int64
+	healthChecker    *BackendHealthChecker
+	sessionStore     dashauth.SessionStore
+	bandwidthTracker *BandwidthTracker
+	googleOAuth      *oauth2.Config
+	githubOAuth      *oauth2.Config
+	startTime        time.Time
 }
 
 type QuotaManager interface {
@@ -108,6 +124,11 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		s.sessionStore = dashauth.NewMemoryStore()
 	}
 
+	// Bandwidth tracker — buffers S3 bandwidth events and flushes to DB.
+	s.bandwidthTracker = NewBandwidthTracker(s.db)
+	s.bandwidthTracker.SetLogger(logger)
+	s.bandwidthTracker.StartFlusher(context.Background(), 5*time.Second)
+
 	// Stripe billing service. Only active when STRIPE_SECRET_KEY is set.
 	if stripeKey := os.Getenv("STRIPE_SECRET_KEY"); stripeKey != "" {
 		s.stripe = billing.NewStripeService(stripeKey, s.db, logger)
@@ -119,6 +140,32 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		registerStripePlans(s.stripe)
 
 		logger.Info("stripe billing service initialized")
+	}
+
+	// OAuth providers. Only active when client ID+secret are set.
+	baseURL := os.Getenv("VAULTAIRE_BASE_URL")
+	if baseURL == "" {
+		baseURL = fmt.Sprintf("http://localhost:%d", cfg.Server.Port)
+	}
+	if googleID := os.Getenv("GOOGLE_CLIENT_ID"); googleID != "" {
+		s.googleOAuth = &oauth2.Config{
+			ClientID:     googleID,
+			ClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
+			RedirectURL:  baseURL + "/auth/google/callback",
+			Scopes:       []string{"openid", "email", "profile"},
+			Endpoint:     googleEndpoint,
+		}
+		logger.Info("google oauth initialized")
+	}
+	if githubID := os.Getenv("GITHUB_CLIENT_ID"); githubID != "" {
+		s.githubOAuth = &oauth2.Config{
+			ClientID:     githubID,
+			ClientSecret: os.Getenv("GITHUB_CLIENT_SECRET"),
+			RedirectURL:  baseURL + "/auth/github/callback",
+			Scopes:       []string{"user:email"},
+			Endpoint:     githubEndpoint,
+		}
+		logger.Info("github oauth initialized")
 	}
 
 	s.rbacService = NewRBACService(logger)
@@ -317,6 +364,8 @@ func (s *Server) setupRoutes() {
 		Logger:   s.logger,
 		DataPath: dataPath,
 		Stripe:   s.stripe,
+		Google:   s.googleOAuth,
+		GitHub:   s.githubOAuth,
 	})
 
 	s.logger.Info("Registering S3 catch-all handler")

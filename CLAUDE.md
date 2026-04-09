@@ -122,6 +122,11 @@ GitHub Actions Deploy (`.github/workflows/deploy.yml`):
 | `STRIPE_SECRET_KEY` | — | Stripe API key (sk_test_... or sk_live_...) |
 | `STRIPE_WEBHOOK_SECRET` | — | Stripe webhook endpoint secret (whsec_...) |
 | `STRIPE_PRICE_VAULT3`, `STRIPE_PRICE_VAULT9`, etc. | — | Stripe Price IDs for each plan |
+| `GOOGLE_CLIENT_ID` | — | Google OAuth client ID |
+| `GOOGLE_CLIENT_SECRET` | — | Google OAuth client secret |
+| `GITHUB_CLIENT_ID` | — | GitHub OAuth App client ID |
+| `GITHUB_CLIENT_SECRET` | — | GitHub OAuth App client secret |
+| `VAULTAIRE_BASE_URL` | http://localhost:8000 | Base URL for OAuth callbacks |
 
 ## Production
 

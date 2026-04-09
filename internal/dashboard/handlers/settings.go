@@ -20,6 +20,7 @@ func HandleSettings(tmpl *template.Template, authSvc *auth.AuthService, db *sql.
 		}
 
 		data := sessionData(sd, "settings")
+		withCSRF(r.Context(), data)
 		populateProfile(authSvc, db, r, sd, data)
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -59,6 +60,7 @@ func HandleUpdateProfile(tmpl *template.Template, authSvc *auth.AuthService, db 
 		}
 
 		data := sessionData(sd, "settings")
+		withCSRF(r.Context(), data)
 		data["ProfileSuccess"] = "Profile updated."
 		populateProfile(authSvc, db, r, sd, data)
 
@@ -84,6 +86,7 @@ func HandleChangePassword(tmpl *template.Template, authSvc *auth.AuthService, db
 		confirm := r.FormValue("confirm_password")
 
 		data := sessionData(sd, "settings")
+		withCSRF(r.Context(), data)
 		populateProfile(authSvc, db, r, sd, data)
 
 		renderWithMsg := func(errMsg, successMsg string) {
@@ -152,6 +155,7 @@ func HandleUpdateNotifications(tmpl *template.Template, authSvc *auth.AuthServic
 		}
 
 		data := sessionData(sd, "settings")
+		withCSRF(r.Context(), data)
 		data["NotifSuccess"] = "Notification preferences updated."
 		populateProfile(authSvc, db, r, sd, data)
 

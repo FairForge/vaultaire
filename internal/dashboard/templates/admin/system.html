@@ -1,0 +1,69 @@
+{{define "title"}}System Health — stored.ge admin{{end}}
+{{define "content"}}
+<div class="dashboard-header">
+    <h1>System Health</h1>
+</div>
+
+<div class="card-grid">
+    <div class="card">
+        <div class="card-title">Uptime</div>
+        <div class="card-value" style="font-size:1rem">{{.Uptime}}</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Go Version</div>
+        <div class="card-value" style="font-size:1rem">{{.GoVersion}}</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Goroutines</div>
+        <div class="card-value">{{.Goroutines}}</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Memory (Alloc)</div>
+        <div class="card-value">{{.MemAllocFmt}}</div>
+        <div class="card-detail">System: {{.MemSysFmt}}</div>
+    </div>
+    <div class="card">
+        <div class="card-title">GC Cycles</div>
+        <div class="card-value">{{.NumGC}}</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Database</div>
+        <div class="card-value" style="font-size:1rem">
+            <span class="badge badge-{{if eq .DBStatus "connected"}}success{{else}}danger{{end}}">{{.DBStatus}}</span>
+        </div>
+    </div>
+</div>
+
+{{if eq .DBStatus "connected"}}
+<div class="card">
+    <div class="card-title">Database Connection Pool</div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Open</th>
+                    <th>In Use</th>
+                    <th>Idle</th>
+                    <th>Max Open</th>
+                    <th>Wait Count</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>{{.DBOpen}}</td>
+                    <td>{{.DBInUse}}</td>
+                    <td>{{.DBIdle}}</td>
+                    <td>{{.DBMaxOpen}}</td>
+                    <td>{{.DBWaitCount}}</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+{{end}}
+
+<div class="dashboard-actions">
+    <a href="/admin" class="btn">Admin Overview</a>
+    <a href="/admin/tenants" class="btn">Tenants</a>
+</div>
+{{end}}

@@ -197,15 +197,23 @@ func (d *Deployment) setStatusLocked(status, message string) {
 	})
 }
 
+func (d *Deployment) setEndedAt() {
+	d.mu.Lock()
+	d.endedAt = time.Now()
+	d.mu.Unlock()
+}
+
 func (d *Deployment) execute(ctx context.Context) {
 	d.setStatus(DeployStatusRunning, "Deployment started")
+	d.mu.Lock()
 	d.startedAt = time.Now()
+	d.mu.Unlock()
 
 	// Run pre-deploy hook
 	if d.config.Hooks != nil && d.config.Hooks.PreDeploy != nil {
 		if err := d.config.Hooks.PreDeploy(); err != nil {
 			d.setStatus(DeployStatusFailed, fmt.Sprintf("Pre-deploy hook failed: %v", err))
-			d.endedAt = time.Now()
+			d.setEndedAt()
 			return
 		}
 	}
@@ -218,7 +226,7 @@ func (d *Deployment) execute(ctx context.Context) {
 				return // Already canceled
 			}
 			d.setStatus(DeployStatusFailed, fmt.Sprintf("Deployment failed: %v", err))
-			d.endedAt = time.Now()
+			d.setEndedAt()
 			return
 		}
 	}
@@ -227,13 +235,13 @@ func (d *Deployment) execute(ctx context.Context) {
 	if d.config.Hooks != nil && d.config.Hooks.PostDeploy != nil {
 		if err := d.config.Hooks.PostDeploy(); err != nil {
 			d.setStatus(DeployStatusFailed, fmt.Sprintf("Post-deploy hook failed: %v", err))
-			d.endedAt = time.Now()
+			d.setEndedAt()
 			return
 		}
 	}
 
 	d.setStatus(DeployStatusSuccess, "Deployment completed successfully")
-	d.endedAt = time.Now()
+	d.setEndedAt()
 }
 
 // DeployTarget is the interface for deployment targets

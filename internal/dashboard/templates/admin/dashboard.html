@@ -1,0 +1,66 @@
+{{define "title"}}Admin — stored.ge{{end}}
+{{define "content"}}
+<div class="dashboard-header">
+    <h1>Admin Overview</h1>
+    <p class="text-muted">Signed in as {{.Email}}</p>
+</div>
+
+<div class="card-grid">
+    <div class="card">
+        <div class="card-title">Tenants</div>
+        <div class="card-value">{{.TenantCount}}</div>
+        <div class="card-detail">registered accounts</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Total Storage</div>
+        <div class="card-value">{{.TotalStorageFmt}}</div>
+        <div class="card-detail">across all tenants</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Active Subscriptions</div>
+        <div class="card-value">{{.ActiveSubCount}}</div>
+        <div class="card-detail">paying customers</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Monthly Revenue</div>
+        <div class="card-value">{{.MonthlyRevenue}}</div>
+        <div class="card-detail">estimated from active plans</div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">Recent Registrations</div>
+    {{if .RecentUsers}}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Email</th>
+                    <th>Company</th>
+                    <th>Plan</th>
+                    <th>Registered</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .RecentUsers}}
+                <tr>
+                    <td>{{.Email}}</td>
+                    <td>{{.Company}}</td>
+                    <td><span class="badge">{{.Plan}}</span></td>
+                    <td>{{.RegisteredFmt}}</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+    {{else}}
+    <p class="text-muted empty-state">No users registered yet.</p>
+    {{end}}
+</div>
+
+<div class="dashboard-actions">
+    <a href="/admin/tenants" class="btn btn-primary">Manage Tenants</a>
+    <a href="/admin/system" class="btn">System Health</a>
+    <a href="/dashboard" class="btn">Customer View</a>
+</div>
+{{end}}

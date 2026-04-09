@@ -12,6 +12,7 @@
 
 <div id="create-form" class="card hidden">
     <form method="POST" action="/dashboard/buckets">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
         <div class="form-row">
             <div class="form-group form-group-inline">
                 <label>Bucket Name</label>
