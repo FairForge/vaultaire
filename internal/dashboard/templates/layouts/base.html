@@ -29,6 +29,8 @@
     {{end}}
 
     <main class="container">
+        {{if .FlashSuccess}}<div class="alert alert-success">{{.FlashSuccess}}</div>{{end}}
+        {{if .FlashError}}<div class="alert alert-error">{{.FlashError}}</div>{{end}}
         {{block "content" .}}{{end}}
     </main>
 

@@ -28,6 +28,18 @@ func withCSRF(ctx context.Context, data map[string]any) {
 	data["CSRFToken"] = middleware.Token(ctx)
 }
 
+// withFlash injects any flash messages from the context into the template data map.
+func withFlash(ctx context.Context, data map[string]any) {
+	for k, v := range middleware.GetFlashMap(ctx) {
+		switch k {
+		case "success":
+			data["FlashSuccess"] = v
+		case "error":
+			data["FlashError"] = v
+		}
+	}
+}
+
 // formatBytes returns a human-readable size string (e.g. "1.5 GB").
 func formatBytes(b int64) string {
 	if b == 0 {

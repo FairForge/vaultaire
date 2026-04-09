@@ -75,6 +75,7 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 	r.Route("/dashboard", func(dr chi.Router) {
 		dr.Use(dashauth.RequireSession(deps.Sessions))
 		dr.Use(middleware.CSRF)
+		dr.Use(middleware.Flash)
 
 		// Overview: parse the real template from embedded FS.
 		overviewTmpl := template.Must(baseTmpl.Clone())
