@@ -63,6 +63,16 @@ Four handlers:
 
 Uses both `*auth.AuthService` (password change, preferences) and `*sql.DB` (company column, member-since date).
 
+## MFA Handlers (`mfa.go`)
+
+Three customer handlers + one admin handler:
+- `HandleMFASetup(tmpl, authSvc, mfaSvc, logger)` — GET renders QR code, secret, and backup codes. Redirects if already enabled.
+- `HandleMFAEnable(settingsTmpl, authSvc, mfaSvc, logger)` — POST validates TOTP code against pending secret, enables MFA via `authSvc.EnableMFA()`.
+- `HandleMFADisable(settingsTmpl, authSvc, logger)` — POST requires password confirmation, disables MFA via `authSvc.DisableMFA()`.
+- `HandleAdminResetMFA(authSvc, logger)` — POST admin endpoint to reset a user's 2FA.
+
+QR code rendered client-side via `qrcode-generator` CDN library. Backup codes passed as comma-separated hidden field during enable confirmation.
+
 ## Legacy Handlers
 
 Files like `dashboard.go` etc. are stubs from before Phase 0 with inline terminal-style templates. They are NOT wired into the router. Remaining phases will rewrite them.
