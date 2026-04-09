@@ -404,6 +404,8 @@ func handleVerify2FA(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 			Value:    "",
 			Path:     "/",
 			HttpOnly: true,
+			Secure:   true,
+			SameSite: http.SameSiteLaxMode,
 			MaxAge:   -1,
 		})
 
