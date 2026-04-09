@@ -2,8 +2,10 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/xml"
 	"fmt"
 	"net/http"
 	"strings"
@@ -15,6 +17,13 @@ import (
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"go.uber.org/zap"
 )
+
+// xmlEscape escapes a string for safe inclusion in XML element content.
+func xmlEscape(s string) string {
+	var buf bytes.Buffer
+	_ = xml.EscapeText(&buf, []byte(s))
+	return buf.String()
+}
 
 // S3Request represents a parsed S3 API request
 type S3Request struct {
@@ -199,13 +208,15 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 
 			w.Header().Set("Content-Type", "application/xml")
 			w.WriteHeader(http.StatusForbidden)
-			if _, err := fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?>
+			// Escape the error message to prevent XML/XSS injection.
+			safeMsg := xmlEscape(err.Error())
+			if _, werr := fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?>
 <Error>
     <Code>SignatureDoesNotMatch</Code>
     <Message>%s</Message>
     <RequestId>%d</RequestId>
-</Error>`, err.Error(), time.Now().UnixNano()); err != nil { // #nosec G705 — S3 XML protocol output
-				s.logger.Error("failed to write response", zap.Error(err))
+</Error>`, safeMsg, time.Now().UnixNano()); werr != nil {
+				s.logger.Error("failed to write response", zap.Error(werr))
 			}
 			return
 		}

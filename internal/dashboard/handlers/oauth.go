@@ -76,10 +76,13 @@ func HandleOAuthCallback(
 
 		// Clear state cookie.
 		http.SetCookie(w, &http.Cookie{
-			Name:   oauthStateCookie,
-			Value:  "",
-			Path:   "/",
-			MaxAge: -1,
+			Name:     oauthStateCookie,
+			Value:    "",
+			Path:     "/",
+			HttpOnly: true,
+			Secure:   true,
+			SameSite: http.SameSiteLaxMode,
+			MaxAge:   -1,
 		})
 
 		// Check for error from provider.

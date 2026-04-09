@@ -326,7 +326,7 @@ func HandleSuspendTenant(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 			` hx-post="/admin/tenants/%s/enable"`+
 			` hx-target="#tenant-status"`+
 			` hx-swap="innerHTML"`+
-			` hx-confirm="Enable this tenant?">Enable</button>`, tenantID)
+			` hx-confirm="Enable this tenant?">Enable</button>`, template.HTMLEscapeString(tenantID))
 	}
 }
 
@@ -366,7 +366,7 @@ func HandleEnableTenant(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 			` hx-post="/admin/tenants/%s/suspend"`+
 			` hx-target="#tenant-status"`+
 			` hx-swap="innerHTML"`+
-			` hx-confirm="Suspend this tenant? They will lose API access.">Suspend</button>`, tenantID)
+			` hx-confirm="Suspend this tenant? They will lose API access.">Suspend</button>`, template.HTMLEscapeString(tenantID))
 	}
 }
 
@@ -539,6 +539,6 @@ func HandleChangeTier(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = fmt.Fprintf(w, `<div class="alert alert-success">Tier changed to %s (%s limit).</div>`,
-			newTier, formatBytes(limitBytes))
+			template.HTMLEscapeString(newTier), formatBytes(limitBytes))
 	}
 }
