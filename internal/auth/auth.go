@@ -17,13 +17,14 @@ import (
 
 // User represents a stored.ge customer
 type User struct {
-	ID           string
-	Email        string
-	PasswordHash string
-	Company      string
-	TenantID     string // Link to their storage tenant
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID            string
+	Email         string
+	PasswordHash  string
+	Company       string
+	TenantID      string // Link to their storage tenant
+	EmailVerified bool
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
 // Tenant represents an isolated storage namespace
@@ -61,6 +62,8 @@ type AuthService struct {
 	preferences     map[string]*UserPreferences
 	mfaSettings     map[string]*MFASettings // userID -> MFA config
 	mfaMu           sync.RWMutex
+	verifySecret    []byte            // HMAC key for email verification tokens
+	verifyTokens    map[string]string // token -> userID (in-memory lookup)
 	activityTracker *ActivityTracker
 	auditLogger     *AuditLogger
 }
@@ -85,6 +88,7 @@ func NewAuthService(db Database, sqlDB *sql.DB) *AuthService {
 		profiles:        make(map[string]*ProfileUpdate),
 		preferences:     make(map[string]*UserPreferences),
 		mfaSettings:     make(map[string]*MFASettings),
+		verifyTokens:    make(map[string]string),
 		activityTracker: nil,
 		auditLogger:     nil,
 	}
@@ -112,7 +116,8 @@ func (a *AuthService) LoadFromDB(ctx context.Context) error {
 
 	// Load users
 	rows, err := a.sqlDB.QueryContext(ctx, `
-		SELECT id, email, password_hash, company, created_at, updated_at
+		SELECT id, email, password_hash, company, created_at, updated_at,
+		       COALESCE(email_verified, FALSE)
 		FROM users
 	`)
 	if err != nil {
@@ -123,7 +128,7 @@ func (a *AuthService) LoadFromDB(ctx context.Context) error {
 	for rows.Next() {
 		u := &User{}
 		if err := rows.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.Company,
-			&u.CreatedAt, &u.UpdatedAt); err != nil {
+			&u.CreatedAt, &u.UpdatedAt, &u.EmailVerified); err != nil {
 			return fmt.Errorf("scan user: %w", err)
 		}
 		a.users[u.Email] = u
@@ -215,14 +220,15 @@ func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password,
 		hashStr = string(hash)
 	}
 
-	// Create user
+	// Create user. OAuth users (empty password) are auto-verified.
 	user := &User{
-		ID:           uuid.New().String(),
-		Email:        email,
-		PasswordHash: hashStr,
-		Company:      company,
-		CreatedAt:    time.Now(),
-		UpdatedAt:    time.Now(),
+		ID:            uuid.New().String(),
+		Email:         email,
+		PasswordHash:  hashStr,
+		Company:       company,
+		EmailVerified: password == "",
+		CreatedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
 	}
 
 	// Create tenant for this user

@@ -56,6 +56,9 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 	r.Post("/register", handleRegister(baseTmpl, deps))
 	r.Get("/logout", handleLogout(deps.Sessions))
 
+	// --- Email verification (public) ---
+	r.Get("/verify", handleVerifyEmail(baseTmpl, deps))
+
 	// --- 2FA verification (public, used during login) ---
 	r.Get("/login/verify-2fa", renderAuthPage(baseTmpl, "verify-2fa", deps))
 	r.Post("/login/verify-2fa", loginRL.Limit(handleVerify2FA(baseTmpl, deps)).ServeHTTP)
@@ -134,6 +137,9 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		dr.Get("/settings/mfa", handlers.HandleMFASetup(mfaSetupTmpl, deps.Auth, deps.MFA, deps.Logger))
 		dr.Post("/settings/mfa/enable", handlers.HandleMFAEnable(settingsTmpl, deps.Auth, deps.MFA, deps.Logger))
 		dr.Post("/settings/mfa/disable", handlers.HandleMFADisable(settingsTmpl, deps.Auth, deps.Logger))
+
+		// Email verification resend.
+		dr.Post("/settings/resend-verify", handlers.HandleResendVerification(deps.Auth, deps.Logger))
 
 		// Billing page.
 		billingTmpl := template.Must(baseTmpl.Clone())
@@ -344,6 +350,28 @@ func handleRegister(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 	}
 }
 
+func handleVerifyEmail(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
+	tmpl := template.Must(baseTmpl.Clone())
+	template.Must(tmpl.Parse(pageContent("verify-result")))
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := r.URL.Query().Get("token")
+		data := map[string]any{"Page": "verify-result"}
+
+		if token == "" {
+			data["Error"] = "Missing verification token."
+		} else if err := deps.Auth.VerifyEmail(r.Context(), token); err != nil {
+			deps.Logger.Warn("email verify failed", zap.Error(err))
+			data["Error"] = "Invalid or expired verification link."
+		} else {
+			data["Success"] = "Your email has been verified. You can now use all features."
+		}
+
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_ = tmpl.ExecuteTemplate(w, "base", data)
+	}
+}
+
 func handleVerify2FA(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 	errTmpl := template.Must(baseTmpl.Clone())
 	template.Must(errTmpl.Parse(pageContent("verify-2fa")))
@@ -505,6 +533,19 @@ func pageContent(page string) string {
 			`<button type="submit" class="btn btn-primary btn-block">Verify</button>` +
 			`</form>` +
 			`<div class="auth-footer"><a href="/login">Back to sign in</a></div>` +
+			`</div></div>{{end}}`
+	case "verify-result":
+		return `{{define "title"}}Email Verification — stored.ge{{end}}` +
+			`{{define "nav"}}{{end}}` +
+			`{{define "content"}}` +
+			`<div class="auth-page"><div class="auth-card">` +
+			`<div class="auth-brand">stored.ge</div>` +
+			`<h1>Email Verification</h1>` +
+			`{{if .Success}}<div class="alert alert-success">{{.Success}}</div>` +
+			`<div class="auth-footer"><a href="/login">Sign in</a></div>` +
+			`{{else if .Error}}<div class="alert alert-error">{{.Error}}</div>` +
+			`<div class="auth-footer"><a href="/login">Back to sign in</a></div>` +
+			`{{end}}` +
 			`</div></div>{{end}}`
 	default:
 		return `{{define "content"}}<p>Page not found.</p>{{end}}`

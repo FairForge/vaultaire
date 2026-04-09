@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"math"
 	"time"
@@ -37,6 +38,20 @@ func withFlash(ctx context.Context, data map[string]any) {
 		case "error":
 			data["FlashError"] = v
 		}
+	}
+}
+
+// populateEmailVerified checks the DB for the email_verified flag and sets
+// ShowVerifyBanner in template data when the user hasn't verified yet.
+func populateEmailVerified(ctx context.Context, db *sql.DB, userID string, data map[string]any) {
+	if db == nil {
+		return
+	}
+	var verified bool
+	err := db.QueryRowContext(ctx,
+		`SELECT COALESCE(email_verified, FALSE) FROM users WHERE id = $1`, userID).Scan(&verified)
+	if err == nil && !verified {
+		data["ShowVerifyBanner"] = true
 	}
 }
 
