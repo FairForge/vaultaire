@@ -8,6 +8,7 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/auth"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
+	"github.com/FairForge/vaultaire/internal/dashboard/middleware"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 )
@@ -41,6 +42,7 @@ func HandleAPIKeys(tmpl *template.Template, authSvc *auth.AuthService, logger *z
 
 		data := sessionData(sd, "apikeys")
 		withCSRF(r.Context(), data)
+		withFlash(r.Context(), data)
 		data["Keys"] = listKeys(r, authSvc, sd.UserID)
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -110,6 +112,8 @@ func HandleRevokeKey(authSvc *auth.AuthService, logger *zap.Logger) http.Handler
 
 		if err := authSvc.RevokeAPIKey(r.Context(), sd.UserID, keyID); err != nil {
 			logger.Warn("revoke API key", zap.Error(err), zap.String("key_id", keyID))
+		} else {
+			middleware.SetFlash(w, "success", "API key revoked.")
 		}
 
 		http.Redirect(w, r, "/dashboard/apikeys", http.StatusSeeOther)
