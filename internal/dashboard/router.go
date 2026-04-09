@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"database/sql"
+	"errors"
 	"html/template"
 	"io/fs"
 	"net/http"
@@ -58,6 +59,13 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 
 	// --- Email verification (public) ---
 	r.Get("/verify", handleVerifyEmail(baseTmpl, deps))
+
+	// --- Password reset (public) ---
+	resetRL := middleware.NewLoginRateLimiter(5, 5)
+	r.Get("/forgot-password", renderAuthPage(baseTmpl, "forgot-password", deps))
+	r.Post("/forgot-password", resetRL.Limit(handleForgotPassword(baseTmpl, deps)).ServeHTTP)
+	r.Get("/reset-password", handleResetPasswordForm(baseTmpl, deps))
+	r.Post("/reset-password", resetRL.Limit(handleResetPassword(baseTmpl, deps)).ServeHTTP)
 
 	// --- 2FA verification (public, used during login) ---
 	r.Get("/login/verify-2fa", renderAuthPage(baseTmpl, "verify-2fa", deps))
@@ -469,6 +477,117 @@ func handleLogout(store dashauth.SessionStore) http.HandlerFunc {
 	}
 }
 
+// handleForgotPassword handles POST /forgot-password. It always returns the
+// same success message regardless of whether the email exists, to prevent
+// user enumeration. When the email matches a real user, a reset link is
+// generated and (eventually) emailed; for now the link is logged.
+func handleForgotPassword(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
+	tmpl := template.Must(baseTmpl.Clone())
+	template.Must(tmpl.Parse(pageContent("forgot-password")))
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		email := r.FormValue("email")
+
+		// Always show the same success message — never reveal whether the
+		// email is registered.
+		const successMsg = "If that email is registered, you'll receive a reset link shortly."
+
+		token, err := deps.Auth.RequestPasswordReset(r.Context(), email)
+		if err == nil {
+			deps.Logger.Info("password reset token generated",
+				zap.String("email", email),
+				zap.String("reset_url", "/reset-password?token="+token))
+		} else if !errors.Is(err, auth.ErrResetRateLimited) {
+			// "user not found" — log at debug, do NOT reveal to client.
+			deps.Logger.Debug("password reset requested for unknown email",
+				zap.String("email", email), zap.Error(err))
+		}
+		// Rate-limited requests fall through silently — same success message.
+
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_ = tmpl.ExecuteTemplate(w, "base", map[string]any{
+			"Page":    "forgot-password",
+			"Success": successMsg,
+		})
+	}
+}
+
+// handleResetPasswordForm handles GET /reset-password?token=... and renders
+// the new-password form. The token is passed through as a hidden field on
+// the POST.
+func handleResetPasswordForm(baseTmpl *template.Template, _ Deps) http.HandlerFunc {
+	tmpl := template.Must(baseTmpl.Clone())
+	template.Must(tmpl.Parse(pageContent("reset-password")))
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := r.URL.Query().Get("token")
+		data := map[string]any{
+			"Page":  "reset-password",
+			"Token": token,
+		}
+		if token == "" {
+			data["Error"] = "Missing reset token."
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_ = tmpl.ExecuteTemplate(w, "base", data)
+	}
+}
+
+// handleResetPassword handles POST /reset-password. It validates the token
+// and the new password fields, updates the password, and invalidates all
+// existing sessions for the user (forcing re-login on every device).
+func handleResetPassword(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
+	tmpl := template.Must(baseTmpl.Clone())
+	template.Must(tmpl.Parse(pageContent("reset-password")))
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := r.FormValue("token")
+		newPass := r.FormValue("new_password")
+		confirm := r.FormValue("confirm_password")
+
+		renderErr := func(msg string) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = tmpl.ExecuteTemplate(w, "base", map[string]any{
+				"Page":  "reset-password",
+				"Token": token,
+				"Error": msg,
+			})
+		}
+
+		if token == "" {
+			renderErr("Missing reset token.")
+			return
+		}
+		if len(newPass) < 8 {
+			renderErr("Password must be at least 8 characters.")
+			return
+		}
+		if newPass != confirm {
+			renderErr("Passwords do not match.")
+			return
+		}
+
+		userID, err := deps.Auth.CompletePasswordReset(r.Context(), token, newPass)
+		if err != nil {
+			deps.Logger.Warn("password reset failed", zap.Error(err))
+			renderErr("Invalid or expired reset link. Please request a new one.")
+			return
+		}
+
+		// Invalidate all existing sessions for this user (force re-login).
+		if deps.Sessions != nil {
+			if dErr := deps.Sessions.DeleteByUserID(r.Context(), userID); dErr != nil {
+				deps.Logger.Error("invalidate sessions on password reset",
+					zap.String("user", userID), zap.Error(dErr))
+			}
+		}
+
+		middleware.SetFlash(w, "success", "Password reset successful. Please sign in with your new password.")
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+	}
+}
+
 // pageContent returns a small template snippet that defines the "content"
 // block for each page. Phase 1 replaces these with real template files.
 func pageContent(page string) string {
@@ -546,6 +665,38 @@ func pageContent(page string) string {
 			`{{else if .Error}}<div class="alert alert-error">{{.Error}}</div>` +
 			`<div class="auth-footer"><a href="/login">Back to sign in</a></div>` +
 			`{{end}}` +
+			`</div></div>{{end}}`
+	case "forgot-password":
+		return `{{define "title"}}Forgot Password — stored.ge{{end}}` +
+			`{{define "nav"}}{{end}}` +
+			`{{define "content"}}` +
+			`<div class="auth-page"><div class="auth-card">` +
+			`<div class="auth-brand">stored.ge</div>` +
+			`<h1>Reset Password</h1>` +
+			`<p class="auth-subtitle">Enter your email and we'll send you a link to reset your password.</p>` +
+			`{{if .Error}}<div class="alert alert-error">{{.Error}}</div>{{end}}` +
+			`{{if .Success}}<div class="alert alert-success">{{.Success}}</div>{{end}}` +
+			`<form method="POST" action="/forgot-password">` +
+			`<div class="form-group"><label>Email</label><input type="email" name="email" value="{{.Email}}" required autofocus></div>` +
+			`<button type="submit" class="btn btn-primary btn-block">Send Reset Link</button>` +
+			`</form>` +
+			`<div class="auth-footer"><a href="/login">Back to sign in</a></div>` +
+			`</div></div>{{end}}`
+	case "reset-password":
+		return `{{define "title"}}Reset Password — stored.ge{{end}}` +
+			`{{define "nav"}}{{end}}` +
+			`{{define "content"}}` +
+			`<div class="auth-page"><div class="auth-card">` +
+			`<div class="auth-brand">stored.ge</div>` +
+			`<h1>Choose a New Password</h1>` +
+			`{{if .Error}}<div class="alert alert-error">{{.Error}}</div>{{end}}` +
+			`<form method="POST" action="/reset-password">` +
+			`<input type="hidden" name="token" value="{{.Token}}">` +
+			`<div class="form-group"><label>New Password</label><input type="password" name="new_password" required minlength="8" autofocus></div>` +
+			`<div class="form-group"><label>Confirm New Password</label><input type="password" name="confirm_password" required minlength="8"></div>` +
+			`<button type="submit" class="btn btn-primary btn-block">Reset Password</button>` +
+			`</form>` +
+			`<div class="auth-footer"><a href="/login">Back to sign in</a></div>` +
 			`</div></div>{{end}}`
 	default:
 		return `{{define "content"}}<p>Page not found.</p>{{end}}`

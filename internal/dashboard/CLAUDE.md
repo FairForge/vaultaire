@@ -50,6 +50,12 @@ Cookie: `vaultaire_session`, HttpOnly, Secure, SameSite=Lax.
 | `/dashboard/settings/mfa/disable` | POST | session | Disable 2FA (requires password) |
 | `/login/verify-2fa` | GET | none | 2FA verification page (during login) |
 | `/login/verify-2fa` | POST | none | Validate TOTP/backup code, complete login |
+| `/verify` | GET | none | Email verification — validates HMAC token, marks user verified |
+| `/dashboard/settings/resend-verify` | POST | session | Resend email verification link |
+| `/forgot-password` | GET | none | Forgot-password form |
+| `/forgot-password` | POST | none | Issues password reset token (rate-limited, 5/min per IP + 3/hour per email). Always returns generic success to prevent enumeration. |
+| `/reset-password` | GET | none | New-password form (token in query string) |
+| `/reset-password` | POST | none | Validate token + new password, update DB, invalidate ALL sessions for user, redirect to /login with flash |
 | `/dashboard/billing` | GET | session | Billing: plan, upgrade, value stack, cost comparison |
 | `/dashboard/billing/upgrade` | POST | session | Redirect to Stripe Checkout for chosen plan |
 | `/dashboard/billing/portal` | POST | session | Redirect to Stripe Billing Portal |
@@ -67,6 +73,16 @@ Cookie: `vaultaire_session`, HttpOnly, Secure, SameSite=Lax.
 6. Sets `vaultaire_session` cookie
 7. Redirects to `/dashboard`
 8. On error: re-renders form with `.Error` message and preserved form values
+
+## Password Reset Flow
+
+Public flow at `/forgot-password` → email link → `/reset-password?token=...`. Token format and lifetime live in `internal/auth/password_reset.go` (HMAC-signed, 1h expiry, single-use). The handler:
+- Always returns the same success message on POST `/forgot-password` so attackers can't enumerate registered emails
+- Rate-limits POSTs at 5/min per IP via `LoginRateLimiter` (separate instance from login)
+- Auth service additionally rate-limits at 3/hour per email
+- On successful reset, calls `Sessions.DeleteByUserID(userID)` to log the user out of every device, then sets a flash message and redirects to `/login`
+
+The reset email is currently logged (not sent) — wire to a real email provider when one is configured.
 
 ## MFA Pending Store
 

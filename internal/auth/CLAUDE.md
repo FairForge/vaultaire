@@ -21,6 +21,20 @@ Authentication service for Vaultaire. Handles user registration, login, JWT toke
 - `GetMFASecret(ctx, userID)` — returns TOTP secret for enabled users.
 - `ValidateBackupCode(ctx, userID, code)` — checks and consumes a single-use backup code.
 - `LoadMFAFromDB(ctx)` — loads MFA settings from `user_mfa` table on startup.
+- `SetVerifySecret(secret)` — sets HMAC key used for both email verification and password reset tokens.
+- `GenerateEmailVerifyToken(ctx, userID)` — creates HMAC-signed token (24h expiry) for email verification.
+- `VerifyEmail(ctx, token)` — validates token signature/expiry, marks user as verified.
+- `IsEmailVerified(ctx, userID)` — checks in-memory `email_verified` flag.
+- `RequestPasswordReset(ctx, email)` — issues HMAC-signed reset token (1h expiry). Rate-limited to 3 requests/hour per email; returns `ErrResetRateLimited` when exceeded.
+- `CompletePasswordReset(ctx, token, newPassword)` — validates token, updates password, returns userID. Caller must invalidate the user's existing sessions on success.
+
+## Email Verification + Password Reset
+
+Both flows share the `verifySecret` HMAC key but use distinct payload formats so tokens are not interchangeable:
+- Email verify token: `userID|expiry|signature` (24h expiry)
+- Password reset token: `reset|userID|expiry|signature` (1h expiry, single-use, in-memory tracked)
+
+Password reset rate limiting is in-memory (per-email, 3/hour, sliding window). The auth service does not own session state — the dashboard handler invalidates sessions via `SessionStore.DeleteByUserID` after a successful reset.
 
 ## MFA
 
