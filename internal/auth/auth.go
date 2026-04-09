@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -58,6 +59,8 @@ type AuthService struct {
 	keyIndex        map[string]*Tenant        // accessKey -> tenant (for S3 auth)
 	profiles        map[string]*ProfileUpdate // user profiles
 	preferences     map[string]*UserPreferences
+	mfaSettings     map[string]*MFASettings // userID -> MFA config
+	mfaMu           sync.RWMutex
 	activityTracker *ActivityTracker
 	auditLogger     *AuditLogger
 }
@@ -81,6 +84,7 @@ func NewAuthService(db Database, sqlDB *sql.DB) *AuthService {
 		keyIndex:        make(map[string]*Tenant),
 		profiles:        make(map[string]*ProfileUpdate),
 		preferences:     make(map[string]*UserPreferences),
+		mfaSettings:     make(map[string]*MFASettings),
 		activityTracker: nil,
 		auditLogger:     nil,
 	}
@@ -380,6 +384,16 @@ func (a *AuthService) GetUserByID(ctx context.Context, userID string) (*User, er
 		return nil, fmt.Errorf("user not found")
 	}
 	return user, nil
+}
+
+// GetUserIDByTenantID returns the owning user's ID for a given tenant.
+// Returns "" if not found.
+func (a *AuthService) GetUserIDByTenantID(_ context.Context, tenantID string) string {
+	t, exists := a.tenants[tenantID]
+	if !exists {
+		return ""
+	}
+	return t.UserID
 }
 
 // GetUserByOAuth looks up a user by OAuth provider and provider ID.

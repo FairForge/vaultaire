@@ -21,14 +21,16 @@ const sessionTTL = 24 * time.Hour
 
 // Deps groups the dependencies the dashboard routes need.
 type Deps struct {
-	DB       *sql.DB
-	Auth     *auth.AuthService
-	Sessions dashauth.SessionStore
-	Logger   *zap.Logger
-	DataPath string                 // Local storage root for bucket creation.
-	Stripe   *billing.StripeService // Nil when STRIPE_SECRET_KEY is not set.
-	Google   *oauth2.Config         // Nil when GOOGLE_CLIENT_ID is not set.
-	GitHub   *oauth2.Config         // Nil when GITHUB_CLIENT_ID is not set.
+	DB         *sql.DB
+	Auth       *auth.AuthService
+	MFA        *auth.MFAService // TOTP secret generation / validation.
+	MFAPending *MFAPendingStore // Short-lived store for 2FA login challenges.
+	Sessions   dashauth.SessionStore
+	Logger     *zap.Logger
+	DataPath   string                 // Local storage root for bucket creation.
+	Stripe     *billing.StripeService // Nil when STRIPE_SECRET_KEY is not set.
+	Google     *oauth2.Config         // Nil when GOOGLE_CLIENT_ID is not set.
+	GitHub     *oauth2.Config         // Nil when GITHUB_CLIENT_ID is not set.
 }
 
 // RegisterRoutes mounts the dashboard, auth, admin, and static-asset
@@ -50,6 +52,10 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 	r.Get("/register", renderAuthPage(baseTmpl, "register", deps))
 	r.Post("/register", handleRegister(baseTmpl, deps))
 	r.Get("/logout", handleLogout(deps.Sessions))
+
+	// --- 2FA verification (public, used during login) ---
+	r.Get("/login/verify-2fa", renderAuthPage(baseTmpl, "verify-2fa", deps))
+	r.Post("/login/verify-2fa", handleVerify2FA(baseTmpl, deps))
 
 	// --- OAuth login ---
 	if deps.Google != nil {
@@ -116,6 +122,15 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		dr.Post("/settings/password", handlers.HandleChangePassword(settingsTmpl, deps.Auth, deps.DB, deps.Logger))
 		dr.Post("/settings/notifications", handlers.HandleUpdateNotifications(settingsTmpl, deps.Auth, deps.DB, deps.Logger))
 
+		// 2FA settings.
+		mfaSetupTmpl := template.Must(baseTmpl.Clone())
+		template.Must(mfaSetupTmpl.ParseFS(Templates,
+			"templates/customer/mfa_setup.html",
+		))
+		dr.Get("/settings/mfa", handlers.HandleMFASetup(mfaSetupTmpl, deps.Auth, deps.MFA, deps.Logger))
+		dr.Post("/settings/mfa/enable", handlers.HandleMFAEnable(settingsTmpl, deps.Auth, deps.MFA, deps.Logger))
+		dr.Post("/settings/mfa/disable", handlers.HandleMFADisable(settingsTmpl, deps.Auth, deps.Logger))
+
 		// Billing page.
 		billingTmpl := template.Must(baseTmpl.Clone())
 		template.Must(billingTmpl.ParseFS(Templates,
@@ -155,6 +170,7 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		ar.Post("/tenants/{id}/quota", handlers.HandleUpdateQuota(deps.DB, deps.Logger))
 		ar.Post("/tenants/{id}/tier", handlers.HandleChangeTier(deps.DB, deps.Logger))
 		ar.Post("/tenants/{id}/bandwidth-limit", handlers.HandleUpdateBandwidthLimit(deps.DB, deps.Logger))
+		ar.Post("/tenants/{id}/reset-mfa", handlers.HandleAdminResetMFA(deps.Auth, deps.Logger))
 		ar.Get("/system", handlers.HandleAdminSystem(systemTmpl, deps.DB, deps.Logger))
 	})
 }
@@ -214,6 +230,34 @@ func handleLogin(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 		if deps.DB != nil {
 			_ = deps.DB.QueryRowContext(r.Context(),
 				`SELECT role FROM users WHERE id = $1`, user.ID).Scan(&role)
+		}
+
+		// If MFA is enabled, redirect to the 2FA verification page.
+		if mfaEnabled, _ := deps.Auth.IsMFAEnabled(r.Context(), user.ID); mfaEnabled {
+			if deps.MFAPending != nil {
+				pendingToken, pErr := deps.MFAPending.Create(MFAPending{
+					UserID:   user.ID,
+					TenantID: user.TenantID,
+					Email:    user.Email,
+					Role:     role,
+				})
+				if pErr != nil {
+					deps.Logger.Error("create mfa pending", zap.Error(pErr))
+					renderErr("Something went wrong. Please try again.")
+					return
+				}
+				http.SetCookie(w, &http.Cookie{
+					Name:     "mfa_pending",
+					Value:    pendingToken,
+					Path:     "/",
+					HttpOnly: true,
+					SameSite: http.SameSiteLaxMode,
+					Secure:   true,
+					MaxAge:   300, // 5 minutes
+				})
+				http.Redirect(w, r, "/login/verify-2fa", http.StatusSeeOther)
+				return
+			}
 		}
 
 		token, err := deps.Sessions.Create(r.Context(), dashauth.SessionData{
@@ -296,6 +340,93 @@ func handleRegister(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 	}
 }
 
+func handleVerify2FA(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
+	errTmpl := template.Must(baseTmpl.Clone())
+	template.Must(errTmpl.Parse(pageContent("verify-2fa")))
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		renderErr := func(msg string) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = errTmpl.ExecuteTemplate(w, "base", map[string]any{
+				"Error": msg,
+				"Page":  "verify-2fa",
+			})
+		}
+
+		// Read the pending token from the cookie.
+		cookie, err := r.Cookie("mfa_pending")
+		if err != nil || deps.MFAPending == nil {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+
+		// Peek first to keep the token alive for retries.
+		pending := deps.MFAPending.Peek(cookie.Value)
+		if pending == nil {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+
+		code := r.FormValue("totp_code")
+		if code == "" {
+			renderErr("Please enter your authentication code.")
+			return
+		}
+
+		// Try TOTP code first.
+		secret, sErr := deps.Auth.GetMFASecret(r.Context(), pending.UserID)
+		if sErr != nil {
+			renderErr("2FA configuration error. Please contact support.")
+			return
+		}
+
+		valid := deps.MFA.ValidateCode(secret, code)
+
+		// If TOTP fails, try as backup code.
+		if !valid {
+			if ok, _ := deps.Auth.ValidateBackupCode(r.Context(), pending.UserID, code); ok {
+				valid = true
+			}
+		}
+
+		if !valid {
+			renderErr("Invalid code. Please try again.")
+			return
+		}
+
+		// Consume the pending token.
+		deps.MFAPending.Get(cookie.Value)
+
+		// Clear the pending cookie.
+		http.SetCookie(w, &http.Cookie{
+			Name:     "mfa_pending",
+			Value:    "",
+			Path:     "/",
+			HttpOnly: true,
+			Secure:   true,
+			SameSite: http.SameSiteLaxMode,
+			MaxAge:   -1,
+		})
+
+		// Create the real session.
+		token, cErr := deps.Sessions.Create(r.Context(), dashauth.SessionData{
+			UserID:   pending.UserID,
+			TenantID: pending.TenantID,
+			Email:    pending.Email,
+			Role:     pending.Role,
+		}, sessionTTL)
+		if cErr != nil {
+			deps.Logger.Error("create session after 2fa", zap.Error(cErr))
+			renderErr("Something went wrong. Please try again.")
+			return
+		}
+
+		dashauth.SetSessionCookie(w, token, sessionTTL)
+		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
+	}
+}
+
 func handleLogout(store dashauth.SessionStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if c, err := r.Cookie("vaultaire_session"); err == nil {
@@ -354,6 +485,22 @@ func pageContent(page string) string {
 			`<button type="submit" class="btn btn-primary btn-block">Create Account</button>` +
 			`</form>` +
 			`<div class="auth-footer">Have an account? <a href="/login">Sign in</a></div>` +
+			`</div></div>{{end}}`
+	case "verify-2fa":
+		return `{{define "title"}}Verify 2FA — stored.ge{{end}}` +
+			`{{define "nav"}}{{end}}` +
+			`{{define "content"}}` +
+			`<div class="auth-page"><div class="auth-card">` +
+			`<div class="auth-brand">stored.ge</div>` +
+			`<h1>Two-Factor Authentication</h1>` +
+			`<p class="auth-subtitle">Enter the 6-digit code from your authenticator app, or a backup code.</p>` +
+			`{{if .Error}}<div class="alert alert-error">{{.Error}}</div>{{end}}` +
+			`<form method="POST" action="/login/verify-2fa">` +
+			`<div class="form-group"><label>Authentication Code</label>` +
+			`<input type="text" name="totp_code" placeholder="000000" maxlength="8" autocomplete="one-time-code" inputmode="numeric" autofocus required></div>` +
+			`<button type="submit" class="btn btn-primary btn-block">Verify</button>` +
+			`</form>` +
+			`<div class="auth-footer"><a href="/login">Back to sign in</a></div>` +
 			`</div></div>{{end}}`
 	default:
 		return `{{define "content"}}<p>Page not found.</p>{{end}}`

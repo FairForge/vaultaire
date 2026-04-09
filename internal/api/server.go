@@ -62,6 +62,8 @@ type Server struct {
 	bandwidthTracker *BandwidthTracker
 	googleOAuth      *oauth2.Config
 	githubOAuth      *oauth2.Config
+	mfaService       *auth.MFAService
+	mfaPendingStore  *dashboard.MFAPendingStore
 	startTime        time.Time
 }
 
@@ -112,6 +114,17 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 			logger.Info("auth state loaded from database")
 		}
 	}
+
+	// Load MFA state from DB.
+	if s.db != nil {
+		if err := s.auth.LoadMFAFromDB(context.Background()); err != nil {
+			logger.Error("failed to load MFA state from DB", zap.Error(err))
+		}
+	}
+
+	// MFA service for TOTP generation and validation.
+	s.mfaService = auth.NewMFAService("stored.ge")
+	s.mfaPendingStore = dashboard.NewMFAPendingStore()
 
 	s.auditLogger = auth.NewAuditLogger()
 	s.auth.SetAuditLogger(s.auditLogger)
@@ -358,14 +371,16 @@ func (s *Server) setupRoutes() {
 		dataPath = "/tmp/vaultaire-data"
 	}
 	dashboard.RegisterRoutes(s.router, dashboard.Deps{
-		DB:       s.db,
-		Auth:     s.auth,
-		Sessions: s.sessionStore,
-		Logger:   s.logger,
-		DataPath: dataPath,
-		Stripe:   s.stripe,
-		Google:   s.googleOAuth,
-		GitHub:   s.githubOAuth,
+		DB:         s.db,
+		Auth:       s.auth,
+		MFA:        s.mfaService,
+		MFAPending: s.mfaPendingStore,
+		Sessions:   s.sessionStore,
+		Logger:     s.logger,
+		DataPath:   dataPath,
+		Stripe:     s.stripe,
+		Google:     s.googleOAuth,
+		GitHub:     s.githubOAuth,
 	})
 
 	s.logger.Info("Registering S3 catch-all handler")

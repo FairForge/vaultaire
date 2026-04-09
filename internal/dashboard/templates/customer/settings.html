@@ -64,6 +64,25 @@
     </form>
 </div>
 
+<div class="card">
+    <div class="card-title">Two-Factor Authentication</div>
+    {{if .MFAError}}<div class="alert alert-error">{{.MFAError}}</div>{{end}}
+    {{if .MFAEnabled}}
+    <p class="text-muted" style="margin-bottom: 1rem;">2FA is <strong>enabled</strong> for your account.</p>
+    <form method="POST" action="/dashboard/settings/mfa/disable">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <div class="form-group">
+            <label>Enter your password to disable 2FA</label>
+            <input type="password" name="password" required>
+        </div>
+        <button type="submit" class="btn btn-danger">Disable 2FA</button>
+    </form>
+    {{else}}
+    <p class="text-muted" style="margin-bottom: 1rem;">Add an extra layer of security to your account with a TOTP authenticator app.</p>
+    <a href="/dashboard/settings/mfa" class="btn btn-primary">Enable 2FA</a>
+    {{end}}
+</div>
+
 <div class="dashboard-actions">
     <a href="/dashboard/" class="btn">Back to Dashboard</a>
 </div>
