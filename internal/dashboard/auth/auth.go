@@ -42,6 +42,7 @@ type SessionStore interface {
 	Create(ctx context.Context, sd SessionData, ttl time.Duration) (token string, err error)
 	Get(ctx context.Context, token string) (*SessionData, error)
 	Delete(ctx context.Context, token string) error
+	DeleteByUserID(ctx context.Context, userID string) error
 }
 
 // --- In-memory implementation (tests, local dev without DB) ---
@@ -93,6 +94,17 @@ func (m *MemoryStore) Delete(_ context.Context, token string) error {
 	return nil
 }
 
+func (m *MemoryStore) DeleteByUserID(_ context.Context, userID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for token, s := range m.sessions {
+		if s.data.UserID == userID {
+			delete(m.sessions, token)
+		}
+	}
+	return nil
+}
+
 // --- PostgreSQL implementation ---
 
 // DBStore persists sessions in the dashboard_sessions table.
@@ -140,6 +152,14 @@ func (d *DBStore) Delete(ctx context.Context, token string) error {
 	_, err := d.db.ExecContext(ctx, `DELETE FROM dashboard_sessions WHERE id = $1`, token)
 	if err != nil {
 		return fmt.Errorf("delete session: %w", err)
+	}
+	return nil
+}
+
+func (d *DBStore) DeleteByUserID(ctx context.Context, userID string) error {
+	_, err := d.db.ExecContext(ctx, `DELETE FROM dashboard_sessions WHERE user_id = $1`, userID)
+	if err != nil {
+		return fmt.Errorf("delete sessions by user: %w", err)
 	}
 	return nil
 }

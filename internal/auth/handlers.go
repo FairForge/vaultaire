@@ -433,7 +433,7 @@ func (h *AuthHandler) CompletePasswordReset(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	if err := h.authService.CompletePasswordReset(r.Context(), req.Token, req.NewPassword); err != nil {
+	if _, err := h.authService.CompletePasswordReset(r.Context(), req.Token, req.NewPassword); err != nil {
 		http.Error(w, "Invalid or expired token", http.StatusBadRequest)
 		return
 	}
