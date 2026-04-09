@@ -64,6 +64,9 @@ type AuthService struct {
 	mfaMu           sync.RWMutex
 	verifySecret    []byte            // HMAC key for email verification tokens
 	verifyTokens    map[string]string // token -> userID (in-memory lookup)
+	resetTokens     map[string]string // password-reset token -> userID
+	resetRates      map[string][]time.Time
+	resetMu         sync.Mutex
 	activityTracker *ActivityTracker
 	auditLogger     *AuditLogger
 }
@@ -89,6 +92,8 @@ func NewAuthService(db Database, sqlDB *sql.DB) *AuthService {
 		preferences:     make(map[string]*UserPreferences),
 		mfaSettings:     make(map[string]*MFASettings),
 		verifyTokens:    make(map[string]string),
+		resetTokens:     make(map[string]string),
+		resetRates:      make(map[string][]time.Time),
 		activityTracker: nil,
 		auditLogger:     nil,
 	}
@@ -522,23 +527,6 @@ func GenerateID() string {
 	bytes := make([]byte, 8)
 	_, _ = rand.Read(bytes)
 	return hex.EncodeToString(bytes)
-}
-
-// RequestPasswordReset generates a reset token for the user
-func (a *AuthService) RequestPasswordReset(ctx context.Context, email string) (string, error) {
-	_, err := a.GetUserByEmail(ctx, email)
-	if err != nil {
-		return "", fmt.Errorf("user not found")
-	}
-
-	token := GenerateID() + GenerateID()
-	return token, nil
-}
-
-// CompletePasswordReset updates the password using a valid token
-func (a *AuthService) CompletePasswordReset(ctx context.Context, token, newPassword string) error {
-	// TODO: Validate token and update password
-	return nil
 }
 
 // TrackActivity tracks user activity
