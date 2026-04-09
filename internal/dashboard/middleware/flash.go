@@ -46,6 +46,8 @@ func Flash(next http.Handler) http.Handler {
 				Value:    "",
 				Path:     "/",
 				HttpOnly: true,
+				Secure:   true,
+				SameSite: http.SameSiteLaxMode,
 				MaxAge:   -1,
 			})
 		}
