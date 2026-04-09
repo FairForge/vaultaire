@@ -11,6 +11,7 @@
     <div class="card-title">Profile</div>
     {{if .ProfileSuccess}}<div class="alert alert-success">{{.ProfileSuccess}}</div>{{end}}
     <form method="POST" action="/dashboard/settings/profile">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
         <div class="form-group">
             <label>Email</label>
             <input type="email" value="{{.ProfileEmail}}" disabled>
@@ -31,6 +32,7 @@
     {{if .PasswordError}}<div class="alert alert-error">{{.PasswordError}}</div>{{end}}
     {{if .PasswordSuccess}}<div class="alert alert-success">{{.PasswordSuccess}}</div>{{end}}
     <form method="POST" action="/dashboard/settings/password">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
         <div class="form-group">
             <label>Current Password</label>
             <input type="password" name="current_password" required>
@@ -51,6 +53,7 @@
     <div class="card-title">Notifications</div>
     {{if .NotifSuccess}}<div class="alert alert-success">{{.NotifSuccess}}</div>{{end}}
     <form method="POST" action="/dashboard/settings/notifications">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
         <label class="checkbox-label">
             <input type="checkbox" name="email_notifications" {{if .EmailNotifications}}checked{{end}}>
             Email notifications for usage alerts and billing

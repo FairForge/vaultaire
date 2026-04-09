@@ -48,6 +48,7 @@ Cookie: `vaultaire_session`, HttpOnly, Secure, SameSite=Lax.
 | `/dashboard/billing` | GET | session | Billing: plan, upgrade, value stack, cost comparison |
 | `/dashboard/billing/upgrade` | POST | session | Redirect to Stripe Checkout for chosen plan |
 | `/dashboard/billing/portal` | POST | session | Redirect to Stripe Billing Portal |
+| `/admin/tenants/{id}/bandwidth-limit` | POST | session + admin | Update tenant bandwidth limit |
 | `/admin/*` | GET | session + admin role | Admin panel |
 
 ## Auth Flow

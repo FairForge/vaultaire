@@ -201,17 +201,21 @@ func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password,
 		return nil, nil, nil, fmt.Errorf("user already exists")
 	}
 
-	// Hash password
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("hash password: %w", err)
+	// Hash password (empty for OAuth-only users).
+	var hashStr string
+	if password != "" {
+		hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("hash password: %w", err)
+		}
+		hashStr = string(hash)
 	}
 
 	// Create user
 	user := &User{
 		ID:           uuid.New().String(),
 		Email:        email,
-		PasswordHash: string(hash),
+		PasswordHash: hashStr,
 		Company:      company,
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
@@ -312,6 +316,11 @@ func (a *AuthService) ValidatePassword(ctx context.Context, email, password stri
 		return false, nil
 	}
 
+	// OAuth-only users have no password — reject login via password form.
+	if user.PasswordHash == "" {
+		return false, nil
+	}
+
 	err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password))
 	if err == bcrypt.ErrMismatchedHashAndPassword {
 		return false, nil
@@ -371,6 +380,57 @@ func (a *AuthService) GetUserByID(ctx context.Context, userID string) (*User, er
 		return nil, fmt.Errorf("user not found")
 	}
 	return user, nil
+}
+
+// GetUserByOAuth looks up a user by OAuth provider and provider ID.
+// Returns nil, nil if no linked account is found.
+func (a *AuthService) GetUserByOAuth(ctx context.Context, provider, providerID string) (*User, error) {
+	if a.sqlDB == nil {
+		return nil, nil
+	}
+	var userID string
+	err := a.sqlDB.QueryRowContext(ctx,
+		`SELECT user_id FROM oauth_accounts WHERE provider = $1 AND provider_id = $2`,
+		provider, providerID).Scan(&userID)
+	if err != nil {
+		return nil, nil //nolint:nilerr // not found is not an error
+	}
+	user, exists := a.userIndex[userID]
+	if !exists {
+		return nil, nil
+	}
+	return user, nil
+}
+
+// LinkOAuthAccount associates an OAuth provider account with an existing user.
+func (a *AuthService) LinkOAuthAccount(ctx context.Context, userID, provider, providerID, email, name string) error {
+	if a.sqlDB == nil {
+		return nil
+	}
+	_, err := a.sqlDB.ExecContext(ctx,
+		`INSERT INTO oauth_accounts (user_id, provider, provider_id, email, name)
+		 VALUES ($1, $2, $3, $4, $5)
+		 ON CONFLICT (provider, provider_id) DO NOTHING`,
+		userID, provider, providerID, email, name)
+	if err != nil {
+		return fmt.Errorf("link oauth account: %w", err)
+	}
+	return nil
+}
+
+// CreateUserFromOAuth creates a new user+tenant via OAuth (no password).
+// Also links the OAuth account.
+func (a *AuthService) CreateUserFromOAuth(ctx context.Context, email, company, provider, providerID string) (*User, *Tenant, error) {
+	user, tenant, _, err := a.CreateUserWithTenant(ctx, email, "", company)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create oauth user: %w", err)
+	}
+
+	if err := a.LinkOAuthAccount(ctx, user.ID, provider, providerID, email, company); err != nil {
+		return nil, nil, fmt.Errorf("link oauth on create: %w", err)
+	}
+
+	return user, tenant, nil
 }
 
 // ValidateS3Request validates S3 API requests and returns tenant
