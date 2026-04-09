@@ -2,8 +2,10 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/xml"
 	"fmt"
 	"net/http"
 	"strings"
@@ -15,6 +17,13 @@ import (
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"go.uber.org/zap"
 )
+
+// xmlEscape escapes a string for safe inclusion in XML element content.
+func xmlEscape(s string) string {
+	var buf bytes.Buffer
+	_ = xml.EscapeText(&buf, []byte(s))
+	return buf.String()
+}
 
 // S3Request represents a parsed S3 API request
 type S3Request struct {
@@ -199,13 +208,15 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 
 			w.Header().Set("Content-Type", "application/xml")
 			w.WriteHeader(http.StatusForbidden)
-			if _, err := fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?>
+			// Escape the error message to prevent XML/XSS injection.
+			safeMsg := xmlEscape(err.Error())
+			if _, werr := fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?>
 <Error>
     <Code>SignatureDoesNotMatch</Code>
     <Message>%s</Message>
     <RequestId>%d</RequestId>
-</Error>`, err.Error(), time.Now().UnixNano()); err != nil { // #nosec G705 — S3 XML protocol output
-				s.logger.Error("failed to write response", zap.Error(err))
+</Error>`, safeMsg, time.Now().UnixNano()); werr != nil {
+				s.logger.Error("failed to write response", zap.Error(werr))
 			}
 			return
 		}
@@ -225,6 +236,15 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 			zap.String("tenant_id", tenantID),
 			zap.String("method", r.Method),
 			zap.String("path", r.URL.Path))
+
+		// Phase 3.4: check if tenant is suspended before processing request.
+		if s.db != nil && isTenantSuspended(r.Context(), s.db, tenantID) {
+			s.logger.Warn("suspended tenant attempted S3 request",
+				zap.String("tenant_id", tenantID),
+				zap.String("path", r.URL.Path))
+			WriteS3Error(w, ErrAccountSuspended, r.URL.Path, generateRequestID())
+			return
+		}
 	} else {
 		s.logger.Debug("anonymous request",
 			zap.String("method", r.Method),
@@ -306,37 +326,67 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 
+	// Phase 4.2: check bandwidth limit before data-transfer operations.
+	if tenantID != "" && tenantID != "default" && s.bandwidthTracker != nil {
+		if s3Req.Operation == "GetObject" || s3Req.Operation == "PutObject" || s3Req.Operation == "UploadPart" {
+			if s.bandwidthTracker.IsOverLimit(r.Context(), tenantID) {
+				s.logger.Warn("bandwidth limit exceeded",
+					zap.String("tenant_id", tenantID),
+					zap.String("operation", s3Req.Operation))
+				WriteS3Error(w, ErrSlowDown, r.URL.Path, generateRequestID())
+				return
+			}
+		}
+	}
+
+	// Wrap response writer to count egress bytes for bandwidth tracking.
+	cw := &countingResponseWriter{ResponseWriter: w}
+
+	// Track ingress bytes from PUT/UploadPart request bodies.
+	var ingressBytes int64
+	if s3Req.Operation == "PutObject" || s3Req.Operation == "UploadPart" {
+		ingressBytes = r.ContentLength
+		if ingressBytes < 0 {
+			ingressBytes = 0
+		}
+	}
+
 	switch s3Req.Operation {
 	case "GetObject":
-		s.handleGetObject(w, r, s3Req)
+		s.handleGetObject(cw, r, s3Req)
 	case "HeadObject":
-		s.handleHeadObject(w, r, s3Req)
+		s.handleHeadObject(cw, r, s3Req)
 	case "PutObject":
-		s.handlePutObject(w, r, s3Req)
+		s.handlePutObject(cw, r, s3Req)
 	case "DeleteObject":
-		s.handleDeleteObject(w, r, s3Req)
+		s.handleDeleteObject(cw, r, s3Req)
 	case "ListObjects":
-		s.handleListObjects(w, r, s3Req)
+		s.handleListObjects(cw, r, s3Req)
 	case "ListBuckets":
-		s.handleListBuckets(w, r, s3Req)
+		s.handleListBuckets(cw, r, s3Req)
 	case "CreateBucket":
-		s.CreateBucket(w, r)
+		s.CreateBucket(cw, r)
 	case "DeleteBucket":
-		s.DeleteBucket(w, r)
+		s.DeleteBucket(cw, r)
 	case "InitiateMultipartUpload":
-		s.handleInitiateMultipartUpload(w, r, s3Req.Bucket, s3Req.Object)
+		s.handleInitiateMultipartUpload(cw, r, s3Req.Bucket, s3Req.Object)
 	case "UploadPart":
-		s.handleUploadPart(w, r, s3Req.Bucket, s3Req.Object)
+		s.handleUploadPart(cw, r, s3Req.Bucket, s3Req.Object)
 	case "CompleteMultipartUpload":
-		s.handleCompleteMultipartUpload(w, r, s3Req.Bucket, s3Req.Object)
+		s.handleCompleteMultipartUpload(cw, r, s3Req.Bucket, s3Req.Object)
 	case "AbortMultipartUpload":
-		s.handleAbortMultipartUpload(w, r, s3Req.Bucket, s3Req.Object)
+		s.handleAbortMultipartUpload(cw, r, s3Req.Bucket, s3Req.Object)
 	case "ListParts":
-		s.handleListParts(w, r, s3Req.Bucket, s3Req.Object)
+		s.handleListParts(cw, r, s3Req.Bucket, s3Req.Object)
 	default:
 		s.logger.Warn("operation not implemented",
 			zap.String("operation", s3Req.Operation))
-		WriteS3Error(w, ErrNotImplemented, r.URL.Path, generateRequestID())
+		WriteS3Error(cw, ErrNotImplemented, r.URL.Path, generateRequestID())
+	}
+
+	// Record bandwidth for authenticated requests.
+	if tenantID != "" && tenantID != "default" && s.bandwidthTracker != nil {
+		s.bandwidthTracker.Record(r.Context(), tenantID, ingressBytes, cw.bytesWritten)
 	}
 }
 
@@ -437,4 +487,15 @@ func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request, req *
 // handleListBuckets handles listing all buckets
 func (s *Server) handleListBuckets(w http.ResponseWriter, r *http.Request, req *S3Request) {
 	s.ListBuckets(w, r)
+}
+
+// isTenantSuspended checks if a tenant has been suspended by an admin.
+func isTenantSuspended(ctx context.Context, db *sql.DB, tenantID string) bool {
+	var suspendedAt sql.NullTime
+	err := db.QueryRowContext(ctx,
+		`SELECT suspended_at FROM tenants WHERE id = $1`, tenantID).Scan(&suspendedAt)
+	if err != nil {
+		return false // fail open — if we can't check, allow access
+	}
+	return suspendedAt.Valid
 }

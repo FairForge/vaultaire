@@ -12,6 +12,7 @@
 
 <div id="generate-form" class="card hidden">
     <form method="POST" action="/dashboard/apikeys">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
         <div class="form-row">
             <div class="form-group form-group-inline">
                 <label>Key Name</label>
@@ -74,6 +75,7 @@ aws s3 ls --endpoint-url https://stored.ge</div>
                     {{if eq .Status "active"}}
                     <form method="POST" action="/dashboard/apikeys/{{.ID}}/revoke"
                           onsubmit="return confirm('Revoke this key? Any applications using it will stop working.')">
+                        <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
                         <button type="submit" class="btn btn-sm btn-danger">Revoke</button>
                     </form>
                     {{end}}

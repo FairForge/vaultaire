@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -364,9 +365,9 @@ func TestClient_HealthCheck(t *testing.T) {
 }
 
 func TestClient_WaitForReady(t *testing.T) {
-	ready := false
+	var ready atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if ready {
+		if ready.Load() {
 			w.WriteHeader(http.StatusOK)
 		} else {
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -380,7 +381,7 @@ func TestClient_WaitForReady(t *testing.T) {
 	// Make ready after short delay
 	go func() {
 		time.Sleep(200 * time.Millisecond)
-		ready = true
+		ready.Store(true)
 	}()
 
 	err := client.WaitForReady(ctx, "/health", time.Second)

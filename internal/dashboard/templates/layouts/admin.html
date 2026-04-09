@@ -7,6 +7,7 @@
     <title>{{block "title" .}}Admin &mdash; stored.ge{{end}}</title>
     <link rel="stylesheet" href="/static/css/style.css">
     <script src="/static/js/htmx.min.js"></script>
+    {{if .CSRFToken}}<meta name="csrf-token" content="{{.CSRFToken}}">{{end}}
     {{block "head" .}}{{end}}
 </head>
 <body class="admin-body">
@@ -16,12 +17,9 @@
                 <a href="/admin">stored.ge admin</a>
             </div>
             <nav class="sidebar-nav">
-                <a href="/admin" class="sidebar-link">Overview</a>
-                <a href="/admin/users" class="sidebar-link">Users</a>
-                <a href="/admin/tenants" class="sidebar-link">Tenants</a>
-                <a href="/admin/billing" class="sidebar-link">Billing</a>
-                <a href="/admin/backends" class="sidebar-link">Backends</a>
-                <a href="/admin/logs" class="sidebar-link">Logs</a>
+                <a href="/admin" class="sidebar-link{{if eq .Page "admin-overview"}} sidebar-link--active{{end}}">Overview</a>
+                <a href="/admin/tenants" class="sidebar-link{{if eq .Page "admin-tenants"}} sidebar-link--active{{end}}">Tenants</a>
+                <a href="/admin/system" class="sidebar-link{{if eq .Page "admin-system"}} sidebar-link--active{{end}}">System</a>
             </nav>
             <div class="sidebar-footer">
                 <a href="/dashboard" class="sidebar-link">Back to dashboard</a>
@@ -32,6 +30,12 @@
             {{block "content" .}}{{end}}
         </main>
     </div>
+    <script>
+    document.body.addEventListener('htmx:configRequest', function(evt) {
+        var m = document.querySelector('meta[name="csrf-token"]');
+        if (m) evt.detail.headers['X-CSRF-Token'] = m.content;
+    });
+    </script>
 </body>
 </html>
 {{end}}

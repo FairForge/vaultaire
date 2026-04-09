@@ -23,6 +23,7 @@ func HandleBilling(tmpl *template.Template, stripe *billing.StripeService, db *s
 		}
 
 		data := sessionData(sd, "billing")
+		withCSRF(r.Context(), data)
 		ctx := r.Context()
 
 		populateBillingPlan(ctx, db, data, sd.TenantID)

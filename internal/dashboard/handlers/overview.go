@@ -37,6 +37,7 @@ func HandleOverview(tmpl *template.Template, db *sql.DB, logger *zap.Logger) htt
 			"TenantID": sd.TenantID,
 			"Page":     "dashboard",
 		}
+		withCSRF(r.Context(), data)
 
 		ctx := r.Context()
 
