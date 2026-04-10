@@ -13,6 +13,7 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/auth"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
+	"github.com/FairForge/vaultaire/internal/dashboard/middleware"
 	"go.uber.org/zap"
 	"golang.org/x/oauth2"
 )
@@ -137,10 +138,12 @@ func HandleOAuthCallback(
 
 		// Create session.
 		sessionToken, err := sessions.Create(r.Context(), dashauth.SessionData{
-			UserID:   user.ID,
-			TenantID: user.TenantID,
-			Email:    user.Email,
-			Role:     role,
+			UserID:    user.ID,
+			TenantID:  user.TenantID,
+			Email:     user.Email,
+			Role:      role,
+			IPAddress: middleware.ClientIP(r),
+			UserAgent: dashauth.TruncateUserAgent(r.UserAgent()),
 		}, sessionTTL)
 		if err != nil {
 			logger.Error("oauth: create session", zap.Error(err))

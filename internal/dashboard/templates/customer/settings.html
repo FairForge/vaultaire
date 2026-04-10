@@ -65,6 +65,51 @@
 </div>
 
 <div class="card">
+    <div class="card-title">Active Sessions</div>
+    <p class="text-muted" style="margin-bottom: 1rem;">Devices currently signed in to your account. Revoke any you don't recognize.</p>
+    {{if .SessionRows}}
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Device</th>
+                <th>IP address</th>
+                <th>Signed in</th>
+                <th>Last active</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+        {{range .SessionRows}}
+            <tr>
+                <td title="{{.FullUA}}">
+                    {{.Device}}
+                    {{if .IsCurrent}}<span class="badge badge-success">This device</span>{{end}}
+                </td>
+                <td>{{.IPAddress}}</td>
+                <td>{{.CreatedAgo}}</td>
+                <td>{{.ActiveAgo}}</td>
+                <td>
+                    {{if not .IsCurrent}}
+                    <form method="POST" action="/dashboard/settings/sessions/{{.ID}}/revoke" style="display:inline;">
+                        <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                        <button type="submit" class="btn btn-sm btn-danger">Sign out</button>
+                    </form>
+                    {{end}}
+                </td>
+            </tr>
+        {{end}}
+        </tbody>
+    </table>
+    <form method="POST" action="/dashboard/settings/sessions/revoke-all" style="margin-top: 1rem;">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <button type="submit" class="btn btn-danger">Sign out all other devices</button>
+    </form>
+    {{else}}
+    <p class="text-muted">No active sessions recorded.</p>
+    {{end}}
+</div>
+
+<div class="card">
     <div class="card-title">Two-Factor Authentication</div>
     {{if .MFAError}}<div class="alert alert-error">{{.MFAError}}</div>{{end}}
     {{if .MFAEnabled}}

@@ -83,6 +83,113 @@ func TestMemoryStore(t *testing.T) {
 			t.Error("expected deleted session to return nil")
 		}
 	})
+
+	t.Run("persists ip and user agent", func(t *testing.T) {
+		store := NewMemoryStore()
+		ctx := context.Background()
+
+		token, err := store.Create(ctx, SessionData{
+			UserID:    "user123",
+			IPAddress: "203.0.113.5",
+			UserAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X) test",
+		}, time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		sd, err := store.Get(ctx, token)
+		if err != nil || sd == nil {
+			t.Fatalf("expected session, got %+v err=%v", sd, err)
+		}
+		if sd.IPAddress != "203.0.113.5" {
+			t.Errorf("expected IPAddress set, got %q", sd.IPAddress)
+		}
+		if sd.UserAgent == "" {
+			t.Errorf("expected UserAgent set, got empty")
+		}
+	})
+
+	t.Run("list by user id returns all active sessions newest first", func(t *testing.T) {
+		store := NewMemoryStore()
+		ctx := context.Background()
+
+		// Two sessions for the same user, one for a different user.
+		t1, _ := store.Create(ctx, SessionData{
+			UserID: "u1", IPAddress: "10.0.0.1", UserAgent: "deviceA",
+		}, time.Hour)
+		// Nudge a tiny amount so Get updates last_active in a comparable way.
+		time.Sleep(2 * time.Millisecond)
+		t2, _ := store.Create(ctx, SessionData{
+			UserID: "u1", IPAddress: "10.0.0.2", UserAgent: "deviceB",
+		}, time.Hour)
+		_, _ = store.Create(ctx, SessionData{UserID: "u2"}, time.Hour)
+
+		list, err := store.ListByUserID(ctx, "u1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(list) != 2 {
+			t.Fatalf("expected 2 sessions, got %d", len(list))
+		}
+		ids := map[string]bool{list[0].ID: true, list[1].ID: true}
+		if !ids[t1] || !ids[t2] {
+			t.Errorf("expected both tokens in list, got %+v", list)
+		}
+		// Newest first — the second-created session should sort ahead.
+		if list[0].ID != t2 {
+			t.Errorf("expected newest first (%s), got %s", t2, list[0].ID)
+		}
+	})
+
+	t.Run("delete by user id except keeps current session", func(t *testing.T) {
+		store := NewMemoryStore()
+		ctx := context.Background()
+
+		keep, _ := store.Create(ctx, SessionData{UserID: "u1"}, time.Hour)
+		gone1, _ := store.Create(ctx, SessionData{UserID: "u1"}, time.Hour)
+		gone2, _ := store.Create(ctx, SessionData{UserID: "u1"}, time.Hour)
+		otherUser, _ := store.Create(ctx, SessionData{UserID: "u2"}, time.Hour)
+
+		if err := store.DeleteByUserIDExcept(ctx, "u1", keep); err != nil {
+			t.Fatal(err)
+		}
+
+		if sd, _ := store.Get(ctx, keep); sd == nil {
+			t.Error("expected kept session to survive")
+		}
+		if sd, _ := store.Get(ctx, gone1); sd != nil {
+			t.Error("expected other session 1 to be deleted")
+		}
+		if sd, _ := store.Get(ctx, gone2); sd != nil {
+			t.Error("expected other session 2 to be deleted")
+		}
+		if sd, _ := store.Get(ctx, otherUser); sd == nil {
+			t.Error("expected other user's session to survive")
+		}
+	})
+
+	t.Run("get refreshes last_active_at", func(t *testing.T) {
+		store := NewMemoryStore()
+		ctx := context.Background()
+
+		token, _ := store.Create(ctx, SessionData{UserID: "u1"}, time.Hour)
+		list, _ := store.ListByUserID(ctx, "u1")
+		if len(list) != 1 {
+			t.Fatalf("expected 1 session, got %d", len(list))
+		}
+		firstActive := list[0].LastActiveAt
+
+		time.Sleep(5 * time.Millisecond)
+		if _, err := store.Get(ctx, token); err != nil {
+			t.Fatal(err)
+		}
+
+		list, _ = store.ListByUserID(ctx, "u1")
+		if !list[0].LastActiveAt.After(firstActive) {
+			t.Errorf("expected LastActiveAt to advance after Get, was %v now %v",
+				firstActive, list[0].LastActiveAt)
+		}
+	})
 }
 
 func TestRequireSession(t *testing.T) {

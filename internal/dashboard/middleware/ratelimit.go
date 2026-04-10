@@ -35,7 +35,7 @@ func NewLoginRateLimiter(perMinute int, burst int) *LoginRateLimiter {
 // Limit returns middleware that rate-limits requests by client IP.
 func (rl *LoginRateLimiter) Limit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := clientIP(r)
+		ip := ClientIP(r)
 		limiter := rl.getLimiter(ip)
 
 		if !limiter.Allow() {
@@ -78,9 +78,9 @@ func (rl *LoginRateLimiter) Cleanup() {
 	}
 }
 
-// clientIP extracts the client IP, preferring X-Forwarded-For (first entry)
+// ClientIP extracts the client IP, preferring X-Forwarded-For (first entry)
 // since HAProxy sits in front of Vaultaire.
-func clientIP(r *http.Request) string {
+func ClientIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		// Take the first IP (client), ignore proxies.
 		for i := 0; i < len(xff); i++ {
