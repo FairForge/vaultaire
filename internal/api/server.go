@@ -24,6 +24,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/rbac"
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 	"golang.org/x/oauth2"
 )
@@ -190,6 +191,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 
 	s.rbacService = NewRBACService(logger)
 
+	s.router.Use(s.requestIDMiddleware)
 	s.router.Use(s.rbacService.InjectUserContext)
 	s.router.Use(s.loggingMiddleware)
 
@@ -369,6 +371,9 @@ func (s *Server) setupRoutes() {
 		s.logger.Info("Registering Stripe webhook route")
 		s.router.Post("/webhook/stripe", s.webhookHandler.ServeHTTP)
 	}
+
+	// Public status page — no auth, renders HTML.
+	s.router.Get("/status", s.handleStatusPage)
 
 	// Dashboard routes must be registered BEFORE the S3 catch-all so that
 	// /login, /dashboard/*, /admin/*, and /static/* are matched first.
@@ -664,6 +669,61 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleStatusPage(w http.ResponseWriter, r *http.Request) {
+	status, healthy, total := s.healthChecker.GetOverallStatus()
+	uptime := time.Since(s.startTime).Truncate(time.Second)
+
+	statusLabel := "All Systems Operational"
+	statusClass := "operational"
+	if status != "healthy" {
+		statusLabel = "Degraded"
+		statusClass = "degraded"
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = fmt.Fprintf(w, statusPageHTML, statusClass, statusLabel, "0.1.0", uptime, healthy, total)
+}
+
+const statusPageHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Status — stored.ge</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0f172a;color:#e2e8f0;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+.card{background:#1e293b;border-radius:12px;padding:2.5rem;max-width:480px;width:100%%;text-align:center}
+h1{font-size:1.5rem;margin:0 0 1.5rem;color:#e2e8f0}
+.brand{font-size:1.1rem;color:#94a3b8;margin-bottom:1rem}
+.status{font-size:1.25rem;font-weight:700;padding:0.5rem 1rem;border-radius:8px;display:inline-block;margin-bottom:1.5rem}
+.operational{background:#065f46;color:#6ee7b7}
+.degraded{background:#78350f;color:#fcd34d}
+.detail{color:#94a3b8;font-size:0.9rem;margin:0.4rem 0}
+a{color:#60a5fa;text-decoration:none}
+a:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+<div class="card">
+<div class="brand">stored.ge</div>
+<h1>System Status</h1>
+<div class="status %s">%s</div>
+<p class="detail">Version: %s</p>
+<p class="detail">Uptime: %s</p>
+<p class="detail">Backends: %d / %d healthy</p>
+<p class="detail" style="margin-top:1.5rem"><a href="/health?details=true">JSON health endpoint</a></p>
+</div>
+</body>
+</html>`
+
+func (s *Server) requestIDMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Request-Id", uuid.New().String())
+		w.Header().Set("Server", "stored.ge")
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&s.requestCount, 1)
@@ -672,6 +732,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		s.logger.Info("request",
 			zap.String("method", r.Method),
 			zap.String("path", r.URL.Path),
+			zap.String("request_id", w.Header().Get("X-Request-Id")),
 			zap.Duration("latency", time.Since(start)),
 		)
 	})

@@ -7,11 +7,20 @@ Web dashboard for stored.ge customers and admins. Uses htmx + Go templates, embe
 - **embed.go** — `//go:embed` bundles `templates/` and `static/` into the binary
 - **router.go** — `RegisterRoutes(r, deps)` mounts all dashboard routes on the chi router. Must be called BEFORE the S3 catch-all in `server.go`.
 - **auth/** — session management (PostgreSQL-backed `DBStore` or in-memory `MemoryStore`)
-- **handlers/** — HTTP handlers (`overview.go` renders dashboard with real data from DB)
+- **handlers/** — HTTP handlers (`overview.go` renders dashboard with real data from DB, `errors.go` = branded 404)
 - **templates/layouts/** — shared HTML layouts (`base.html`, `admin.html`)
 - **templates/customer/** — customer page templates (`dashboard.html` = overview)
 - **static/css/** — `style.css`
 - **static/js/** — `htmx.min.js` (v2.0.4, vendored)
+- **middleware/recovery.go** — panic recovery middleware, renders self-contained 500 HTML (no template dependency)
+
+## Error Handling (Phase 5.9)
+
+- `/dashboard/*` and `/admin/*` subrouters have `chi.NotFound` handlers that render a branded 404 HTML page (`handlers/errors.go`).
+- Recovery middleware catches panics, logs the stack trace, and renders a self-contained 500 page. Wired into both subrouters.
+- Top-level unknown paths still fall through to the S3 catch-all handler (returns XML errors for API clients). No top-level HTML 404.
+- Every response gets `X-Request-Id` (UUID) and `Server: stored.ge` headers via middleware in `server.go`.
+- `GET /status` is a public (no auth) HTML status page showing operational status, uptime, version, and backend health.
 
 ## Session Auth
 
