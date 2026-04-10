@@ -132,10 +132,14 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		template.Must(settingsTmpl.ParseFS(Templates,
 			"templates/customer/settings.html",
 		))
-		dr.Get("/settings", handlers.HandleSettings(settingsTmpl, deps.Auth, deps.DB, deps.Logger))
+		dr.Get("/settings", handlers.HandleSettings(settingsTmpl, deps.Auth, deps.DB, deps.Sessions, deps.Logger))
 		dr.Post("/settings/profile", handlers.HandleUpdateProfile(settingsTmpl, deps.Auth, deps.DB, deps.Logger))
-		dr.Post("/settings/password", handlers.HandleChangePassword(settingsTmpl, deps.Auth, deps.DB, deps.Logger))
+		dr.Post("/settings/password", handlers.HandleChangePassword(settingsTmpl, deps.Auth, deps.DB, deps.Sessions, deps.Logger))
 		dr.Post("/settings/notifications", handlers.HandleUpdateNotifications(settingsTmpl, deps.Auth, deps.DB, deps.Logger))
+
+		// Active sessions / sign out other devices (Phase 5.8).
+		dr.Post("/settings/sessions/revoke-all", handlers.HandleRevokeAllOtherSessions(deps.Sessions, deps.Logger))
+		dr.Post("/settings/sessions/{id}/revoke", handlers.HandleRevokeSession(deps.Sessions, deps.Logger))
 
 		// 2FA settings.
 		mfaSetupTmpl := template.Must(baseTmpl.Clone())
@@ -279,10 +283,12 @@ func handleLogin(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 		}
 
 		token, err := deps.Sessions.Create(r.Context(), dashauth.SessionData{
-			UserID:   user.ID,
-			TenantID: user.TenantID,
-			Email:    user.Email,
-			Role:     role,
+			UserID:    user.ID,
+			TenantID:  user.TenantID,
+			Email:     user.Email,
+			Role:      role,
+			IPAddress: middleware.ClientIP(r),
+			UserAgent: dashauth.TruncateUserAgent(r.UserAgent()),
 		}, sessionTTL)
 		if err != nil {
 			deps.Logger.Error("create session", zap.Error(err))
@@ -342,10 +348,12 @@ func handleRegister(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 		}
 
 		token, err := deps.Sessions.Create(r.Context(), dashauth.SessionData{
-			UserID:   user.ID,
-			TenantID: user.TenantID,
-			Email:    user.Email,
-			Role:     "user",
+			UserID:    user.ID,
+			TenantID:  user.TenantID,
+			Email:     user.Email,
+			Role:      "user",
+			IPAddress: middleware.ClientIP(r),
+			UserAgent: dashauth.TruncateUserAgent(r.UserAgent()),
 		}, sessionTTL)
 		if err != nil {
 			deps.Logger.Error("create session after register", zap.Error(err))
@@ -449,12 +457,16 @@ func handleVerify2FA(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 			MaxAge:   -1,
 		})
 
-		// Create the real session.
+		// Create the real session. The MFA pending token is single-use
+		// (consumed above) so this is the first real session for this
+		// login — i.e., 2FA verification implicitly rotates the token.
 		token, cErr := deps.Sessions.Create(r.Context(), dashauth.SessionData{
-			UserID:   pending.UserID,
-			TenantID: pending.TenantID,
-			Email:    pending.Email,
-			Role:     pending.Role,
+			UserID:    pending.UserID,
+			TenantID:  pending.TenantID,
+			Email:     pending.Email,
+			Role:      pending.Role,
+			IPAddress: middleware.ClientIP(r),
+			UserAgent: dashauth.TruncateUserAgent(r.UserAgent()),
 		}, sessionTTL)
 		if cErr != nil {
 			deps.Logger.Error("create session after 2fa", zap.Error(cErr))

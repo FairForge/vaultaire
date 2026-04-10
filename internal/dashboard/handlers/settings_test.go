@@ -57,7 +57,7 @@ func settingsSessionCtx(t *testing.T) context.Context {
 
 func TestHandleSettings_NoDB(t *testing.T) {
 	tmpl := testSettingsTemplate(t)
-	handler := HandleSettings(tmpl, nil, nil, zap.NewNop())
+	handler := HandleSettings(tmpl, nil, nil, nil, zap.NewNop())
 
 	req := httptest.NewRequest("GET", "/dashboard/settings", nil)
 	req = req.WithContext(settingsSessionCtx(t))
@@ -73,7 +73,7 @@ func TestHandleSettings_NoDB(t *testing.T) {
 
 func TestHandleSettings_NoSession(t *testing.T) {
 	tmpl := testSettingsTemplate(t)
-	handler := HandleSettings(tmpl, nil, nil, zap.NewNop())
+	handler := HandleSettings(tmpl, nil, nil, nil, zap.NewNop())
 
 	req := httptest.NewRequest("GET", "/dashboard/settings", nil)
 	w := httptest.NewRecorder()
@@ -85,7 +85,7 @@ func TestHandleSettings_NoSession(t *testing.T) {
 
 func TestHandleChangePassword_Validation(t *testing.T) {
 	tmpl := testSettingsTemplate(t)
-	handler := HandleChangePassword(tmpl, nil, nil, zap.NewNop())
+	handler := HandleChangePassword(tmpl, nil, nil, nil, zap.NewNop())
 
 	t.Run("short password", func(t *testing.T) {
 		form := strings.NewReader("current_password=old&new_password=short&confirm_password=short")
@@ -151,4 +151,59 @@ func TestChangePassword_WithAuth(t *testing.T) {
 	// New password should work.
 	valid, _ = authSvc.ValidatePassword(ctx, "pw-test@stored.ge", "newpassword123")
 	assert.True(t, valid)
+}
+
+func TestHandleChangePassword_InvalidatesOtherSessions(t *testing.T) {
+	// Successful password change should wipe every session for the user
+	// except the one that made the request.
+	tmpl := testSettingsTemplate(t)
+	authSvc := auth.NewAuthService(nil, nil)
+	ctx := context.Background()
+
+	user, _, _, err := authSvc.CreateUserWithTenant(ctx, "multi@stored.ge", "oldpassword123", "Test")
+	require.NoError(t, err)
+
+	store := dashauth.NewMemoryStore()
+	// Current device token (will be on the request cookie).
+	currentToken, err := store.Create(ctx, dashauth.SessionData{
+		UserID: user.ID, TenantID: user.TenantID, Email: user.Email, Role: "user",
+	}, time.Hour)
+	require.NoError(t, err)
+	// Two extra devices we expect to be logged out.
+	otherA, err := store.Create(ctx, dashauth.SessionData{
+		UserID: user.ID, TenantID: user.TenantID, Email: user.Email, Role: "user",
+	}, time.Hour)
+	require.NoError(t, err)
+	otherB, err := store.Create(ctx, dashauth.SessionData{
+		UserID: user.ID, TenantID: user.TenantID, Email: user.Email, Role: "user",
+	}, time.Hour)
+	require.NoError(t, err)
+
+	handler := HandleChangePassword(tmpl, authSvc, nil, store, zap.NewNop())
+
+	form := strings.NewReader("current_password=oldpassword123&new_password=newpassword123&confirm_password=newpassword123")
+	req := httptest.NewRequest("POST", "/dashboard/settings/password", form)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: dashauth.SessionCookieName, Value: currentToken})
+
+	sd, _ := store.Get(ctx, currentToken)
+	req = req.WithContext(context.WithValue(context.Background(), dashauth.SessionKey, sd))
+
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "signed out of other devices")
+
+	// Current session must still be valid.
+	if sd, _ := store.Get(ctx, currentToken); sd == nil {
+		t.Error("expected current session to survive")
+	}
+	// Other sessions must be revoked.
+	if sd, _ := store.Get(ctx, otherA); sd != nil {
+		t.Error("expected other device A to be signed out")
+	}
+	if sd, _ := store.Get(ctx, otherB); sd != nil {
+		t.Error("expected other device B to be signed out")
+	}
 }
