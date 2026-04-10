@@ -87,9 +87,11 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 
 	// --- Customer dashboard (session required) ---
 	r.Route("/dashboard", func(dr chi.Router) {
+		dr.Use(middleware.Recovery(deps.Logger))
 		dr.Use(dashauth.RequireSession(deps.Sessions))
 		dr.Use(middleware.CSRF)
 		dr.Use(middleware.Flash)
+		dr.NotFound(handlers.HandleNotFound(deps.Logger))
 
 		// Overview: parse the real template from embedded FS.
 		overviewTmpl := template.Must(baseTmpl.Clone())
@@ -182,8 +184,10 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 	))
 
 	r.Route("/admin", func(ar chi.Router) {
+		ar.Use(middleware.Recovery(deps.Logger))
 		ar.Use(dashauth.RequireAdmin(deps.Sessions))
 		ar.Use(middleware.CSRF)
+		ar.NotFound(handlers.HandleNotFound(deps.Logger))
 		ar.Get("/", handlers.HandleAdminOverview(adminTmpl, deps.DB, deps.Logger))
 		ar.Get("/tenants", handlers.HandleTenantList(tenantListTmpl, deps.DB, deps.Logger))
 		ar.Get("/tenants/{id}", handlers.HandleTenantDetail(tenantDetailTmpl, deps.DB, deps.Logger))
