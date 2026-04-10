@@ -19,9 +19,11 @@ Sessions use the `dashboard_sessions` PostgreSQL table. The `SessionStore` inter
 - `DBStore` — production, PostgreSQL-backed, hourly cleanup goroutine
 - `MemoryStore` — tests and local dev without DB
 
-Session data is injected into request context via `RequireSession` middleware. Handlers call `dashauth.GetSession(r.Context())` to get `{UserID, TenantID, Email, Role}`.
+Session data is injected into request context via `RequireSession` middleware. Handlers call `dashauth.GetSession(r.Context())` to get `{UserID, TenantID, Email, Role, IPAddress, UserAgent}`.
 
-Cookie: `vaultaire_session`, HttpOnly, Secure, SameSite=Lax.
+Cookie: `vaultaire_session`, HttpOnly, Secure, SameSite=Lax. Name is exported as `dashauth.SessionCookieName`.
+
+Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`, `created_at`, `last_active_at`, and `expires_at` so customers can see their active devices on the settings page and revoke individual ones or sign out every other device. `DBStore.Get` atomically refreshes `last_active_at = NOW()` via `UPDATE ... RETURNING` on every session check. New store methods from Phase 5.8: `ListByUserID` (all non-expired sessions for a user, newest first), `DeleteByUserIDExcept` (wipe all sessions except the current token — used by "sign out all other devices" and by password change so the issuing device stays logged in).
 
 ## Routes
 
@@ -48,6 +50,8 @@ Cookie: `vaultaire_session`, HttpOnly, Secure, SameSite=Lax.
 | `/dashboard/settings/mfa` | GET | session | 2FA setup page (QR code, backup codes) |
 | `/dashboard/settings/mfa/enable` | POST | session | Confirm TOTP code to enable 2FA |
 | `/dashboard/settings/mfa/disable` | POST | session | Disable 2FA (requires password) |
+| `/dashboard/settings/sessions/revoke-all` | POST | session | Sign out of all OTHER devices (keeps current session) |
+| `/dashboard/settings/sessions/{id}/revoke` | POST | session | Revoke a specific session owned by the current user |
 | `/login/verify-2fa` | GET | none | 2FA verification page (during login) |
 | `/login/verify-2fa` | POST | none | Validate TOTP/backup code, complete login |
 | `/verify` | GET | none | Email verification — validates HMAC token, marks user verified |

@@ -10,8 +10,9 @@ import (
 	"go.uber.org/zap"
 )
 
-// HandleSettings renders the settings page with current profile and preferences.
-func HandleSettings(tmpl *template.Template, authSvc *auth.AuthService, db *sql.DB, logger *zap.Logger) http.HandlerFunc {
+// HandleSettings renders the settings page with current profile, preferences,
+// and the list of active sessions (devices signed in as this user).
+func HandleSettings(tmpl *template.Template, authSvc *auth.AuthService, db *sql.DB, sessions dashauth.SessionStore, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
 		if sd == nil {
@@ -31,12 +32,34 @@ func HandleSettings(tmpl *template.Template, authSvc *auth.AuthService, db *sql.
 			data["MFAEnabled"] = mfaEnabled
 		}
 
+		// Active sessions list.
+		data["SessionRows"] = loadSessionRows(r, sessions, sd.UserID, logger)
+
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := tmpl.ExecuteTemplate(w, "base", data); err != nil {
 			logger.Error("render settings", zap.Error(err))
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		}
 	}
+}
+
+// loadSessionRows fetches the current user's active sessions for display.
+// Returns an empty slice (not nil) if the store is nil or the query fails
+// so the template can always range over it.
+func loadSessionRows(r *http.Request, sessions dashauth.SessionStore, userID string, logger *zap.Logger) []SessionRow {
+	if sessions == nil {
+		return []SessionRow{}
+	}
+	list, err := sessions.ListByUserID(r.Context(), userID)
+	if err != nil {
+		logger.Error("list sessions for settings", zap.Error(err))
+		return []SessionRow{}
+	}
+	currentToken := ""
+	if c, cErr := r.Cookie(dashauth.SessionCookieName); cErr == nil {
+		currentToken = c.Value
+	}
+	return buildSessionRows(list, currentToken)
 }
 
 // HandleUpdateProfile handles POST /dashboard/settings/profile.
@@ -81,7 +104,11 @@ func HandleUpdateProfile(tmpl *template.Template, authSvc *auth.AuthService, db 
 }
 
 // HandleChangePassword handles POST /dashboard/settings/password.
-func HandleChangePassword(tmpl *template.Template, authSvc *auth.AuthService, db *sql.DB, logger *zap.Logger) http.HandlerFunc {
+// On success it invalidates every OTHER session the user has so stolen
+// devices are signed out, while keeping the issuing session alive so the
+// user doesn't immediately get bounced to /login on the device that just
+// changed the password.
+func HandleChangePassword(tmpl *template.Template, authSvc *auth.AuthService, db *sql.DB, sessions dashauth.SessionStore, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
 		if sd == nil {
@@ -138,7 +165,20 @@ func HandleChangePassword(tmpl *template.Template, authSvc *auth.AuthService, db
 			return
 		}
 
-		renderWithMsg("", "Password changed successfully.")
+		// Revoke every other session the user has. The current session
+		// token is in the vaultaire_session cookie; preserve it.
+		if sessions != nil {
+			currentToken := ""
+			if c, err := r.Cookie(dashauth.SessionCookieName); err == nil {
+				currentToken = c.Value
+			}
+			if err := sessions.DeleteByUserIDExcept(r.Context(), sd.UserID, currentToken); err != nil {
+				logger.Error("invalidate other sessions on password change",
+					zap.String("user", sd.UserID), zap.Error(err))
+			}
+		}
+
+		renderWithMsg("", "Password changed. You have been signed out of other devices.")
 	}
 }
 
