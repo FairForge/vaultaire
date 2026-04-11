@@ -114,7 +114,11 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 	if req.Object == "" {
 		switch method {
 		case "GET":
-			req.Operation = "ListObjects"
+			if _, ok := req.Query["uploads"]; ok {
+				req.Operation = "ListMultipartUploads"
+			} else {
+				req.Operation = "ListObjects"
+			}
 		case "PUT":
 			req.Operation = "CreateBucket"
 		case "DELETE":
@@ -378,6 +382,8 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		s.handleAbortMultipartUpload(cw, r, s3Req.Bucket, s3Req.Object)
 	case "ListParts":
 		s.handleListParts(cw, r, s3Req.Bucket, s3Req.Object)
+	case "ListMultipartUploads":
+		s.handleListMultipartUploads(cw, r, s3Req.Bucket)
 	default:
 		s.logger.Warn("operation not implemented",
 			zap.String("operation", s3Req.Operation))

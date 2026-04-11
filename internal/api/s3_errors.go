@@ -38,6 +38,11 @@ const (
 	ErrSignatureDoesNotMatch = "SignatureDoesNotMatch"
 	ErrAccountSuspended      = "AccountSuspended"
 	ErrSlowDown              = "SlowDown"
+	ErrNoSuchUpload          = "NoSuchUpload"
+	ErrInvalidPart           = "InvalidPart"
+	ErrInvalidPartOrder      = "InvalidPartOrder"
+	ErrEntityTooSmall        = "EntityTooSmall"
+	ErrInvalidPartNumber     = "InvalidPartNumber"
 )
 
 // Error messages
@@ -62,6 +67,11 @@ var errorMessages = map[string]string{
 	ErrSignatureDoesNotMatch: "The request signature we calculated does not match the signature you provided",
 	ErrAccountSuspended:      "Your account has been suspended. Contact support for assistance.",
 	ErrSlowDown:              "Monthly bandwidth limit exceeded. Upgrade your plan or wait for the next billing cycle.",
+	ErrNoSuchUpload:          "The specified multipart upload does not exist. The upload ID may be invalid, or the upload may have been aborted or completed.",
+	ErrInvalidPart:           "One or more of the specified parts could not be found. The part may not have been uploaded, or the specified entity tag may not match the part's entity tag.",
+	ErrInvalidPartOrder:      "The list of parts was not in ascending order. The parts list must be specified in order by part number.",
+	ErrEntityTooSmall:        "Your proposed upload is smaller than the minimum allowed object size. Each part must be at least 5 MB in size, except the last part.",
+	ErrInvalidPartNumber:     "Part number must be an integer between 1 and 10000, inclusive.",
 }
 
 // HTTP status codes for errors
@@ -86,6 +96,11 @@ var errorStatusCodes = map[string]int{
 	ErrSignatureDoesNotMatch: http.StatusForbidden,
 	ErrAccountSuspended:      http.StatusForbidden,
 	ErrSlowDown:              http.StatusTooManyRequests,
+	ErrNoSuchUpload:          http.StatusNotFound,
+	ErrInvalidPart:           http.StatusBadRequest,
+	ErrInvalidPartOrder:      http.StatusBadRequest,
+	ErrEntityTooSmall:        http.StatusBadRequest,
+	ErrInvalidPartNumber:     http.StatusBadRequest,
 }
 
 // WriteS3Error writes an S3-compatible error response
