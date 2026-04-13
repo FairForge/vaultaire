@@ -361,7 +361,11 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 	case "HeadObject":
 		s.handleHeadObject(cw, r, s3Req)
 	case "PutObject":
-		s.handlePutObject(cw, r, s3Req)
+		if r.Header.Get("x-amz-copy-source") != "" {
+			s.handleCopyObject(cw, r, s3Req)
+		} else {
+			s.handlePutObject(cw, r, s3Req)
+		}
 	case "DeleteObject":
 		s.handleDeleteObject(cw, r, s3Req)
 	case "ListObjects":
