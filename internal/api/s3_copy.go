@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -20,11 +21,51 @@ type CopyObjectResult struct {
 	LastModified string   `xml:"LastModified"`
 }
 
+// countingReader wraps an io.Reader and tracks the total bytes read.
+// Used during CopyObject so the destination size can be persisted from the
+// authoritative byte count rather than relying on the source's head_cache row
+// (which can be missing or stale for objects written before the cache existed).
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+// resolveCopyContentType picks the content-type for a CopyObject destination.
+//
+// Per S3 spec: when x-amz-metadata-directive is "REPLACE" the request's own
+// Content-Type header wins; when "COPY" (the default) the source object's
+// content-type is preserved. Either way we fall back to
+// application/octet-stream if the chosen source is empty.
+func resolveCopyContentType(directive, requestCT, sourceCT string) string {
+	if strings.EqualFold(directive, "REPLACE") {
+		if requestCT != "" {
+			return requestCT
+		}
+		return "application/octet-stream"
+	}
+	if sourceCT != "" {
+		return sourceCT
+	}
+	return "application/octet-stream"
+}
+
 // handleCopyObject handles S3 CopyObject requests.
 //
-// S3 spec: PUT /dest-bucket/dest-key with x-amz-copy-source header.
-// The source object is streamed through an io.Pipe so the entire object
-// is never buffered in memory. The head cache is updated for the new object.
+// S3 spec: PUT /dest-bucket/dest-key with x-amz-copy-source header. The source
+// is streamed through a TeeReader into the destination — never buffered in
+// memory. The byte count from the wrapping countingReader is used as the
+// authoritative size for the destination's head_cache row.
+//
+// x-amz-metadata-directive selects whether to preserve source metadata
+// (default, "COPY") or take it from the request ("REPLACE"). Self-copy is now
+// handled by the same Get→Put streaming path because LocalDriver.Put is atomic
+// (writes via temp+rename) and no longer truncates the source mid-read.
 func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S3Request) {
 	t, err := tenant.FromContext(r.Context())
 	if err != nil || t == nil {
@@ -32,7 +73,6 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 		return
 	}
 
-	// Parse the x-amz-copy-source header: /bucket/key or bucket/key
 	copySource := r.Header.Get("x-amz-copy-source")
 	srcBucket, srcKey, err := parseCopySource(copySource)
 	if err != nil {
@@ -49,24 +89,16 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 	srcContainer := t.NamespaceContainer(srcBucket)
 	destContainer := t.NamespaceContainer(destBucket)
 
+	directive := r.Header.Get("x-amz-metadata-directive")
+
 	s.logger.Debug("CopyObject",
 		zap.String("tenant_id", t.ID),
 		zap.String("src_bucket", srcBucket),
 		zap.String("src_key", srcKey),
 		zap.String("dest_bucket", destBucket),
 		zap.String("dest_key", destKey),
-		zap.String("src_container", srcContainer),
-		zap.String("dest_container", destContainer))
+		zap.String("directive", directive))
 
-	// Self-copy (same bucket + key) is a metadata-only operation in S3.
-	// With local filesystem backends, Put truncates before Get completes,
-	// so we handle this as a no-op: verify source exists, return its ETag.
-	if srcBucket == destBucket && srcKey == destKey {
-		s.handleSelfCopy(w, r, t, srcBucket, srcKey, srcContainer)
-		return
-	}
-
-	// Read source object.
 	reader, err := s.engine.Get(r.Context(), srcContainer, srcKey)
 	if err != nil {
 		if strings.Contains(err.Error(), "no such file or directory") ||
@@ -83,9 +115,11 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 	}
 	defer func() { _ = reader.Close() }()
 
-	// Stream source through MD5 hasher into destination — no buffering.
+	// Stream source → MD5 hasher → destination, tallying bytes as we go so
+	// the persisted size never depends on the source cache row being present.
+	counter := &countingReader{r: reader}
 	hasher := md5.New() // #nosec G401 — S3 spec requires MD5 for ETags
-	tee := io.TeeReader(reader, hasher)
+	tee := io.TeeReader(counter, hasher)
 
 	backendName, err := s.engine.Put(r.Context(), destContainer, destKey, tee)
 	if err != nil {
@@ -102,19 +136,16 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 
 	// Update object_head_cache for the copied object.
 	if s.db != nil {
-		// Look up source metadata for size and content type.
-		var sizeBytes int64
-		var contentType string
-		err := s.db.QueryRowContext(r.Context(), `
-			SELECT size_bytes, content_type
+		// Look up source content-type (for COPY directive). Size is now
+		// authoritative from counter.n — no fallback path needed.
+		var sourceCT string
+		_ = s.db.QueryRowContext(r.Context(), `
+			SELECT content_type
 			FROM object_head_cache
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
-		`, t.ID, srcBucket, srcKey).Scan(&sizeBytes, &contentType)
-		if err != nil {
-			// Fallback: we don't know size/content-type from source cache.
-			sizeBytes = 0
-			contentType = "application/octet-stream"
-		}
+		`, t.ID, srcBucket, srcKey).Scan(&sourceCT)
+
+		contentType := resolveCopyContentType(directive, r.Header.Get("Content-Type"), sourceCT)
 
 		_, dbErr := s.db.ExecContext(r.Context(), `
 			INSERT INTO object_head_cache
@@ -126,7 +157,7 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 				content_type = EXCLUDED.content_type,
 				backend_name = EXCLUDED.backend_name,
 				updated_at   = EXCLUDED.updated_at
-		`, t.ID, destBucket, destKey, sizeBytes, etag, contentType, backendName, now)
+		`, t.ID, destBucket, destKey, counter.n, etag, contentType, backendName, now)
 		if dbErr != nil {
 			s.logger.Error("copy: failed to cache object metadata",
 				zap.Error(dbErr),
@@ -136,7 +167,6 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 		}
 	}
 
-	// Return CopyObjectResult XML.
 	result := CopyObjectResult{
 		ETag:         fmt.Sprintf(`"%s"`, etag),
 		LastModified: now.Format("2006-01-02T15:04:05.000Z"),
@@ -160,73 +190,23 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 		zap.String("src", srcBucket+"/"+srcKey),
 		zap.String("dest", destBucket+"/"+destKey),
 		zap.String("backend", backendName),
-		zap.String("etag", etag))
-}
-
-// handleSelfCopy handles the special case where source and destination are
-// the same object. In S3 this is a metadata-refresh no-op. We verify the
-// source exists and return its existing ETag.
-func (s *Server) handleSelfCopy(w http.ResponseWriter, r *http.Request, t *tenant.Tenant, bucket, key, container string) {
-	// Verify the source object exists by reading and computing ETag.
-	reader, err := s.engine.Get(r.Context(), container, key)
-	if err != nil {
-		if strings.Contains(err.Error(), "no such file or directory") ||
-			strings.Contains(err.Error(), "not found") {
-			WriteS3Error(w, ErrNoSuchKey, r.URL.Path, generateRequestID())
-		} else {
-			s.logger.Error("self-copy: get failed", zap.Error(err))
-			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-		}
-		return
-	}
-	defer func() { _ = reader.Close() }()
-
-	hasher := md5.New() // #nosec G401 — S3 spec requires MD5 for ETags
-	if _, err := io.Copy(hasher, reader); err != nil {
-		s.logger.Error("self-copy: read failed", zap.Error(err))
-		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-		return
-	}
-
-	etag := fmt.Sprintf("%x", hasher.Sum(nil))
-	now := time.Now().UTC()
-
-	result := CopyObjectResult{
-		ETag:         fmt.Sprintf(`"%s"`, etag),
-		LastModified: now.Format("2006-01-02T15:04:05.000Z"),
-	}
-
-	xmlData, err := xml.MarshalIndent(result, "", "  ")
-	if err != nil {
-		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/xml")
-	w.Header().Set("x-amz-request-id", generateRequestID())
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(xml.Header))
-	_, _ = w.Write(xmlData)
-
-	s.logger.Info("self-copy (no-op)",
-		zap.String("tenant_id", t.ID),
-		zap.String("bucket", bucket),
-		zap.String("key", key),
+		zap.String("directive", directive),
+		zap.Int64("size", counter.n),
 		zap.String("etag", etag))
 }
 
 // parseCopySource parses the x-amz-copy-source header value.
-// Accepts formats: /bucket/key, bucket/key, /bucket/key?versionId=xxx
-// Returns source bucket and key. URL-encoded keys are not decoded (not yet needed).
+//
+// Accepts: /bucket/key, bucket/key, /bucket/key?versionId=xxx. The key portion
+// is percent-decoded per AWS spec, so x-amz-copy-source: /b/foo%20bar resolves
+// to source key "foo bar" (and %2F resolves to a literal '/' inside the key).
 func parseCopySource(source string) (bucket, key string, err error) {
 	if source == "" {
 		return "", "", fmt.Errorf("empty copy source")
 	}
 
-	// Strip leading slash.
 	source = strings.TrimPrefix(source, "/")
 
-	// Strip query string (e.g. ?versionId=...).
 	if idx := strings.IndexByte(source, '?'); idx >= 0 {
 		source = source[:idx]
 	}
@@ -236,5 +216,10 @@ func parseCopySource(source string) (bucket, key string, err error) {
 		return "", "", fmt.Errorf("invalid copy source format: %q", source)
 	}
 
-	return parts[0], parts[1], nil
+	decodedKey, err := url.PathUnescape(parts[1])
+	if err != nil {
+		return "", "", fmt.Errorf("invalid percent-encoding in copy source key: %w", err)
+	}
+
+	return parts[0], decodedKey, nil
 }
