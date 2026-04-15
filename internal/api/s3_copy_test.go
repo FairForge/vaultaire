@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/FairForge/vaultaire/internal/drivers"
@@ -313,6 +314,12 @@ func TestParseCopySource(t *testing.T) {
 		{"bucket/key.txt", "bucket", "key.txt", false},
 		{"/bucket/path/to/key.txt", "bucket", "path/to/key.txt", false},
 		{"/bucket/key?versionId=123", "bucket", "key", false},
+		// URL-decoded keys (AWS spec compliance).
+		{"/bucket/foo%20bar", "bucket", "foo bar", false},
+		{"/bucket/with%2Fslash", "bucket", "with/slash", false},
+		{"/bucket/path/sub%20dir/file.txt", "bucket", "path/sub dir/file.txt", false},
+		// Invalid percent-encoding.
+		{"/bucket/bad%ZZ", "", "", true},
 		{"", "", "", true},
 		{"/", "", "", true},
 		{"/bucket", "", "", true},
@@ -332,4 +339,100 @@ func TestParseCopySource(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestResolveCopyContentType(t *testing.T) {
+	tests := []struct {
+		name      string
+		directive string
+		requestCT string
+		sourceCT  string
+		want      string
+	}{
+		{"COPY preserves source", "COPY", "text/plain", "image/png", "image/png"},
+		{"default (empty) preserves source", "", "text/plain", "image/png", "image/png"},
+		{"COPY falls back when source empty", "COPY", "text/plain", "", "application/octet-stream"},
+		{"REPLACE uses request", "REPLACE", "image/jpeg", "text/plain", "image/jpeg"},
+		{"REPLACE case-insensitive", "replace", "image/jpeg", "text/plain", "image/jpeg"},
+		{"REPLACE falls back when request empty", "REPLACE", "", "text/plain", "application/octet-stream"},
+		{"both empty falls back", "COPY", "", "", "application/octet-stream"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveCopyContentType(tc.directive, tc.requestCT, tc.sourceCT)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestCountingReader_TracksBytes(t *testing.T) {
+	src := strings.NewReader("hello world")
+	c := &countingReader{r: src}
+	buf := make([]byte, 4)
+
+	n, err := c.Read(buf)
+	require.NoError(t, err)
+	assert.Equal(t, 4, n)
+	assert.Equal(t, int64(4), c.n)
+
+	rest, err := io.ReadAll(c)
+	require.NoError(t, err)
+	assert.Equal(t, "o world", string(rest))
+	assert.Equal(t, int64(11), c.n, "should match total bytes of source")
+}
+
+// TestCopyObject_SelfCopy_LargeFile guards the regression that motivated
+// the self-copy short-circuit removal: with the atomic LocalDriver.Put,
+// self-copying a multi-MB object via the regular Get→Put streaming path
+// must preserve every byte. (Pre-fix, os.Create truncated the source
+// mid-read, leaving the destination empty.)
+func TestCopyObject_SelfCopy_LargeFile(t *testing.T) {
+	server, tnt, tempDir, cleanup := setupCopyTestServer(t)
+	defer cleanup()
+
+	// 2 MiB of repeating bytes — large enough to ensure streaming, small
+	// enough to keep the test fast.
+	original := strings.Repeat("ABCDEFGH", 256*1024)
+	putObject(t, server, tnt, tempDir, "bucket1", "self.bin", original)
+
+	req := httptest.NewRequest("PUT", "/bucket1/self.bin", nil)
+	req.Header.Set("x-amz-copy-source", "/bucket1/self.bin")
+	ctx := tenant.WithTenant(req.Context(), tnt)
+	req = req.WithContext(ctx)
+
+	w := httptest.NewRecorder()
+	server.handleS3Request(w, req)
+	require.Equal(t, 200, w.Code, "self-copy must succeed: %s", w.Body.String())
+
+	code, body := getObject(t, server, tnt, "bucket1", "self.bin")
+	require.Equal(t, 200, code)
+	assert.Equal(t, len(original), len(body),
+		"self-copy must preserve exact byte count")
+	assert.Equal(t, original, body)
+}
+
+// TestCopyObject_URLEncodedSourceKey verifies a copy source with
+// percent-encoded characters resolves to the literal key on disk.
+func TestCopyObject_URLEncodedSourceKey(t *testing.T) {
+	server, tnt, tempDir, cleanup := setupCopyTestServer(t)
+	defer cleanup()
+
+	// Write the source object directly so we can use a key that contains
+	// a literal space (HTTP request URLs can't carry one unescaped).
+	bucketPath := filepath.Join(tempDir, tnt.NamespaceContainer("bucket1"))
+	require.NoError(t, os.MkdirAll(bucketPath, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(bucketPath, "my file.txt"), []byte("spaced content"), 0644))
+
+	req := httptest.NewRequest("PUT", "/bucket1/dest.txt", nil)
+	req.Header.Set("x-amz-copy-source", "/bucket1/my%20file.txt")
+	ctx := tenant.WithTenant(req.Context(), tnt)
+	req = req.WithContext(ctx)
+
+	w := httptest.NewRecorder()
+	server.handleS3Request(w, req)
+	require.Equal(t, 200, w.Code, "encoded copy-source must resolve: %s", w.Body.String())
+
+	code, body := getObject(t, server, tnt, "bucket1", "dest.txt")
+	assert.Equal(t, 200, code)
+	assert.Equal(t, "spaced content", body)
 }

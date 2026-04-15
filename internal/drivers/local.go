@@ -80,17 +80,18 @@ func (d *LocalDriver) Get(ctx context.Context, container, artifact string) (io.R
 	return os.Open(fullPath)
 }
 
-// Put stores an artifact in a container
+// Put stores an artifact in a container.
+//
+// Writes go to a sibling temp file then atomically rename onto the final
+// path. This preserves the inode of any in-flight reader (an `os.Create`
+// would O_TRUNC the live file and corrupt concurrent reads) and gives
+// crash-safety: the destination either has the old bytes or the new ones,
+// never a half-written tail.
 func (d *LocalDriver) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...engine.PutOption) error {
 	// Apply options (but don't use them yet)
 	var options engine.PutOptions
 	for _, opt := range opts {
 		opt(&options)
-	}
-
-	containerPath := filepath.Join(d.basePath, container)
-	if err := os.MkdirAll(containerPath, 0750); err != nil {
-		return fmt.Errorf("create container: %w", err)
 	}
 
 	fullPath := filepath.Join(d.basePath, container, artifact)
@@ -99,24 +100,7 @@ func (d *LocalDriver) Put(ctx context.Context, container, artifact string, data 
 		return fmt.Errorf("path traversal detected: %s", artifact)
 	}
 
-	parentDir := filepath.Dir(fullPath)
-	if err := os.MkdirAll(parentDir, 0750); err != nil {
-		return fmt.Errorf("create parent directory: %w", err)
-	}
-
-	file, err := os.Create(fullPath)
-	if err != nil {
-		return fmt.Errorf("create file: %w", err)
-	}
-	defer func() { _ = file.Close() }()
-
-	// Copy data
-	_, err = io.Copy(file, data)
-	if err != nil {
-		return fmt.Errorf("write data: %w", err)
-	}
-
-	return nil
+	return d.AtomicWrite(ctx, container, artifact, data)
 }
 
 // Delete removes an artifact from a container
