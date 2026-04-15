@@ -125,6 +125,12 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 			req.Operation = "DeleteBucket"
 		case "HEAD":
 			req.Operation = "HeadBucket"
+		case "POST":
+			if _, ok := req.Query["delete"]; ok {
+				req.Operation = "DeleteObjects"
+			} else {
+				req.Operation = "Unknown"
+			}
 		default:
 			req.Operation = "Unknown"
 		}
@@ -368,6 +374,8 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		}
 	case "DeleteObject":
 		s.handleDeleteObject(cw, r, s3Req)
+	case "DeleteObjects":
+		s.handleDeleteObjects(cw, r, s3Req)
 	case "ListObjects":
 		s.handleListObjects(cw, r, s3Req)
 	case "ListBuckets":
