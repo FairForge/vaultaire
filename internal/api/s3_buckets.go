@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"go.uber.org/zap"
 )
@@ -40,43 +41,45 @@ func (s *Server) ListBuckets(w http.ResponseWriter, r *http.Request) {
 		tenantID = t.ID
 	}
 
-	// List containers for this tenant
-	basePath := filepath.Join("/tmp/vaultaire", tenantID)
-
-	entries, err := os.ReadDir(basePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// No buckets yet, return empty list
-			response := ListBucketsResponse{}
-			response.Owner.ID = tenantID
-			response.Owner.DisplayName = tenantID
-
-			w.Header().Set("Content-Type", "application/xml")
-			if err := xml.NewEncoder(w).Encode(response); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-			}
-			return
-		}
-		s.logger.Error("Failed to list containers", zap.Error(err))
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-		return
-	}
-
-	// Build response
 	response := ListBucketsResponse{}
 	response.Owner.ID = tenantID
 	response.Owner.DisplayName = tenantID
 
-	for _, entry := range entries {
-		if entry.IsDir() && !strings.HasPrefix(entry.Name(), ".") {
-			response.Buckets.Bucket = append(response.Buckets.Bucket, BucketInfo{
-				Name:         entry.Name(),
-				CreationDate: time.Now(),
-			})
+	if s.db != nil {
+		rows, dbErr := s.db.QueryContext(ctx,
+			`SELECT name, created_at FROM buckets WHERE tenant_id = $1 ORDER BY name`, tenantID)
+		if dbErr != nil {
+			s.logger.Error("list buckets from DB", zap.Error(dbErr))
+		} else {
+			defer func() { _ = rows.Close() }()
+			for rows.Next() {
+				var bi BucketInfo
+				if err := rows.Scan(&bi.Name, &bi.CreationDate); err != nil {
+					s.logger.Error("scan bucket row", zap.Error(err))
+					continue
+				}
+				response.Buckets.Bucket = append(response.Buckets.Bucket, bi)
+			}
+		}
+	} else {
+		basePath := filepath.Join("/tmp/vaultaire", tenantID)
+		entries, err := os.ReadDir(basePath)
+		if err == nil {
+			for _, entry := range entries {
+				if entry.IsDir() && !strings.HasPrefix(entry.Name(), ".") {
+					response.Buckets.Bucket = append(response.Buckets.Bucket, BucketInfo{
+						Name:         entry.Name(),
+						CreationDate: time.Now(),
+					})
+				}
+			}
+		} else if !os.IsNotExist(err) {
+			s.logger.Error("Failed to list containers", zap.Error(err))
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
 		}
 	}
 
-	// Send XML response
 	w.Header().Set("Content-Type", "application/xml")
 	if err := xml.NewEncoder(w).Encode(response); err != nil {
 		s.logger.Error("Failed to encode response", zap.Error(err))
@@ -108,6 +111,20 @@ func (s *Server) CreateBucket(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("Failed to create container", zap.Error(err))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return
+	}
+
+	if s.db != nil {
+		_, dbErr := s.db.ExecContext(ctx, `
+			INSERT INTO buckets (tenant_id, name, visibility)
+			VALUES ($1, $2, 'private')
+			ON CONFLICT (tenant_id, name) DO NOTHING
+		`, tenantID, bucket)
+		if dbErr != nil {
+			s.logger.Error("failed to persist bucket",
+				zap.Error(dbErr), zap.String("bucket", bucket))
+		}
+
+		auth.EnsureTenantSlug(ctx, s.db, tenantID, s.logger)
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -167,6 +184,12 @@ func (s *Server) DeleteBucket(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("Failed to delete bucket", zap.Error(err))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return
+	}
+
+	if s.db != nil {
+		_, _ = s.db.ExecContext(ctx, `
+			DELETE FROM buckets WHERE tenant_id = $1 AND name = $2
+		`, tenantID, bucket)
 	}
 
 	w.WriteHeader(http.StatusNoContent)
