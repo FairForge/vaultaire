@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -12,6 +13,12 @@ import (
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"go.uber.org/zap"
 )
+
+var s3BucketNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9]$`)
+
+func validateBucketName(name string) bool {
+	return s3BucketNameRe.MatchString(name) && !strings.Contains(name, "..")
+}
 
 // ListBucketsResponse for S3 API
 type ListBucketsResponse struct {
@@ -94,6 +101,11 @@ func (s *Server) CreateBucket(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/")
 	bucket := strings.SplitN(path, "/", 2)[0]
 
+	if !validateBucketName(bucket) {
+		WriteS3Error(w, ErrInvalidBucketName, r.URL.Path, generateRequestID())
+		return
+	}
+
 	// Get tenant from context
 	t, err := tenant.FromContext(ctx)
 	tenantID := "default"
@@ -107,7 +119,7 @@ func (s *Server) CreateBucket(w http.ResponseWriter, r *http.Request) {
 
 	// Create container directory
 	dirPath := filepath.Join("/tmp/vaultaire", tenantID, bucket)
-	if err := os.MkdirAll(dirPath, 0755); err != nil { // #nosec G703 — TODO: add path sanitization to reject ../ in bucket names
+	if err := os.MkdirAll(dirPath, 0755); err != nil {
 		s.logger.Error("Failed to create container", zap.Error(err))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return
@@ -138,6 +150,11 @@ func (s *Server) DeleteBucket(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/")
 	bucket := strings.SplitN(path, "/", 2)[0]
 
+	if !validateBucketName(bucket) {
+		WriteS3Error(w, ErrInvalidBucketName, r.URL.Path, generateRequestID())
+		return
+	}
+
 	// Get tenant from context
 	t, err := tenant.FromContext(ctx)
 	tenantID := "default"
@@ -152,7 +169,7 @@ func (s *Server) DeleteBucket(w http.ResponseWriter, r *http.Request) {
 	dirPath := filepath.Join("/tmp/vaultaire", tenantID, bucket)
 
 	// Check if bucket exists
-	if _, err := os.Stat(dirPath); os.IsNotExist(err) { // #nosec G703 — TODO: add path sanitization to reject ../ in bucket names
+	if _, err := os.Stat(dirPath); os.IsNotExist(err) {
 		WriteS3Error(w, ErrNoSuchBucket, r.URL.Path, generateRequestID())
 		return
 	}
@@ -180,7 +197,7 @@ func (s *Server) DeleteBucket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Delete the bucket
-	if err := os.RemoveAll(dirPath); err != nil { // #nosec G703 — TODO: add path sanitization to reject ../ in bucket names
+	if err := os.RemoveAll(dirPath); err != nil {
 		s.logger.Error("Failed to delete bucket", zap.Error(err))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return
