@@ -32,6 +32,7 @@
         <thead>
             <tr>
                 <th>Name</th>
+                <th>Visibility</th>
                 <th>Objects</th>
                 <th>Size</th>
                 <th>Last Modified</th>
@@ -42,10 +43,14 @@
             {{range .Buckets}}
             <tr>
                 <td><a href="/dashboard/buckets/{{.Name}}" class="bucket-link">{{.Name}}</a></td>
+                <td>{{if eq .Visibility "public-read"}}<span class="badge badge-success">Public</span>{{else}}<span class="badge badge-default">Private</span>{{end}}</td>
                 <td>{{.ObjectCount}}</td>
                 <td>{{.SizeFmt}}</td>
                 <td>{{.LastModifiedFmt}}</td>
-                <td><a href="/dashboard/buckets/{{.Name}}" class="btn btn-sm">Browse</a></td>
+                <td>
+                    <a href="/dashboard/buckets/{{.Name}}" class="btn btn-sm">Browse</a>
+                    <a href="/dashboard/buckets/{{.Name}}/settings" class="btn btn-sm">Settings</a>
+                </td>
             </tr>
             {{end}}
         </tbody>

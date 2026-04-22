@@ -1,0 +1,134 @@
+{{define "title"}}{{.BucketName}} Settings — stored.ge{{end}}
+{{define "content"}}
+<div class="page-header">
+    <div>
+        <h1>{{.BucketName}}</h1>
+        <p class="text-muted">Bucket Settings</p>
+    </div>
+</div>
+
+<nav class="breadcrumb">
+    <a href="/dashboard/">Dashboard</a> /
+    <a href="/dashboard/buckets">Buckets</a> /
+    <a href="/dashboard/buckets/{{.BucketName}}">{{.BucketName}}</a> /
+    <strong>Settings</strong>
+</nav>
+
+{{if .FlashSuccess}}<div class="alert alert-success">{{.FlashSuccess}}</div>{{end}}
+{{if .FlashError}}<div class="alert alert-error">{{.FlashError}}</div>{{end}}
+
+<form method="POST" action="/dashboard/buckets/{{.BucketName}}/settings">
+    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+
+    <div class="card">
+        <div class="card-title">Visibility</div>
+        {{if .ArchiveRestricted}}
+        <div class="alert alert-error" style="margin-top: 0.5rem;">
+            {{.ArchiveReason}}
+        </div>
+        <div class="toggle-group">
+            <label class="toggle-label toggle-disabled">
+                <span class="toggle-switch toggle-off"></span>
+                <span>Private</span>
+            </label>
+        </div>
+        <input type="hidden" name="visibility" value="private">
+        {{else}}
+        <div class="toggle-group">
+            <label class="toggle-label">
+                <input type="radio" name="visibility" value="private" {{if eq .Visibility "private"}}checked{{end}}>
+                <span class="toggle-option{{if eq .Visibility "private"}} toggle-active{{end}}">Private</span>
+            </label>
+            <label class="toggle-label">
+                <input type="radio" name="visibility" value="public-read" {{if eq .Visibility "public-read"}}checked{{end}}>
+                <span class="toggle-option{{if eq .Visibility "public-read"}} toggle-active{{end}}">Public</span>
+            </label>
+        </div>
+        <p class="text-muted" style="margin-top: 0.5rem; font-size: 0.85rem;">
+            Public buckets serve objects without authentication via the CDN.
+        </p>
+        {{end}}
+    </div>
+
+    {{if and (eq .Visibility "public-read") .CDNBaseURL}}
+    <div class="card cdn-card">
+        <div class="card-title">CDN URL</div>
+        <div class="cdn-url-row">
+            <code class="cdn-url">{{.CDNBaseURL}}/</code>
+            <button type="button" class="btn btn-sm" onclick="navigator.clipboard.writeText('{{.CDNBaseURL}}/');this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1500)">Copy</button>
+        </div>
+
+        <div class="code-tabs" style="margin-top: 1rem;">
+            <div class="tab-bar">
+                <button type="button" class="tab-btn tab-active" onclick="showTab(this,'tab-curl')">curl</button>
+                <button type="button" class="tab-btn" onclick="showTab(this,'tab-aws')">AWS CLI</button>
+                <button type="button" class="tab-btn" onclick="showTab(this,'tab-js')">JavaScript</button>
+                <button type="button" class="tab-btn" onclick="showTab(this,'tab-python')">Python</button>
+                <button type="button" class="tab-btn" onclick="showTab(this,'tab-html')">HTML</button>
+            </div>
+            <div id="tab-curl" class="tab-panel tab-visible">
+                <pre class="code-block">curl {{.CDNBaseURL}}/path/to/file.jpg</pre>
+            </div>
+            <div id="tab-aws" class="tab-panel">
+                <pre class="code-block">aws s3 cp s3://{{.BucketName}}/path/to/file.jpg . \
+  --endpoint-url https://stored.ge</pre>
+            </div>
+            <div id="tab-js" class="tab-panel">
+                <pre class="code-block">const url = "{{.CDNBaseURL}}/path/to/file.jpg";
+const res = await fetch(url);
+const blob = await res.blob();</pre>
+            </div>
+            <div id="tab-python" class="tab-panel">
+                <pre class="code-block">import requests
+url = "{{.CDNBaseURL}}/path/to/file.jpg"
+r = requests.get(url)
+with open("file.jpg", "wb") as f:
+    f.write(r.content)</pre>
+            </div>
+            <div id="tab-html" class="tab-panel">
+                <pre class="code-block">&lt;img src="{{.CDNBaseURL}}/photo.jpg" alt="photo"&gt;
+&lt;video src="{{.CDNBaseURL}}/video.mp4" controls&gt;&lt;/video&gt;</pre>
+            </div>
+        </div>
+    </div>
+    {{end}}
+
+    <div class="card">
+        <div class="card-title">Cache Settings</div>
+        <div class="form-group">
+            <label>Cache Max Age (seconds)</label>
+            <input type="number" name="cache_max_age" value="{{.CacheMaxAge}}" min="0" max="86400"
+                   style="max-width: 200px;">
+            <p class="text-muted" style="font-size: 0.8rem; margin-top: 0.25rem;">
+                How long CDN edge servers cache objects (0–86400). Default: 3600 (1 hour).
+            </p>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-title">CORS Origins</div>
+        <div class="form-group">
+            <label>Allowed Origins</label>
+            <input type="text" name="cors_origins" value="{{.CORSOrigins}}"
+                   placeholder="* or https://example.com">
+            <p class="text-muted" style="font-size: 0.8rem; margin-top: 0.25rem;">
+                Use * to allow all origins, or specify domains separated by commas.
+            </p>
+        </div>
+    </div>
+
+    <div class="dashboard-actions">
+        <button type="submit" class="btn btn-primary">Save Settings</button>
+        <a href="/dashboard/buckets/{{.BucketName}}" class="btn">Cancel</a>
+    </div>
+</form>
+
+<script>
+function showTab(btn, id) {
+    btn.closest('.code-tabs').querySelectorAll('.tab-panel').forEach(p => p.classList.remove('tab-visible'));
+    btn.closest('.tab-bar').querySelectorAll('.tab-btn').forEach(b => b.classList.remove('tab-active'));
+    document.getElementById(id).classList.add('tab-visible');
+    btn.classList.add('tab-active');
+}
+</script>
+{{end}}
