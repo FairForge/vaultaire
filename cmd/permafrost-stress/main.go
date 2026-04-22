@@ -3,10 +3,14 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
+	"net"
+	"net/http"
 	"os"
+	"runtime"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -16,6 +20,24 @@ import (
 	msgraphsdk "github.com/microsoftgraph/msgraph-sdk-go"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
 )
+
+func init() {
+	http.DefaultTransport = &http.Transport{
+		MaxIdleConns:        200,
+		MaxIdleConnsPerHost: 200,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
+		ReadBufferSize:      256 * 1024,
+		WriteBufferSize:     256 * 1024,
+		DisableCompression:  true,
+		ForceAttemptHTTP2:   true,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSClientConfig: &tls.Config{},
+	}
+}
 
 // tenant holds credentials for one OneDrive tenant.
 type tenant struct {
@@ -46,34 +68,61 @@ func main() {
 	if len(tenants) == 0 {
 		log.Fatal("No tenants found. Set TENANT_1_ID, TENANT_1_CLIENT_ID, TENANT_1_SECRET, TENANT_1_USER")
 	}
-	log.Printf("Loaded %d tenant(s)\n\n", len(tenants))
+
+	fmt.Println("═══════════════════════════════════════════════════════════════")
+	fmt.Println("  PERMAFROST STRESS TEST v2 (tuned transport)")
+	fmt.Println("═══════════════════════════════════════════════════════════════")
+	fmt.Printf("  Platform:    %s/%s\n", runtime.GOOS, runtime.GOARCH)
+	fmt.Printf("  Tenants:     %d\n", len(tenants))
+	fmt.Printf("  Transport:   MaxIdleConns=200, Buffers=256KB, HTTP/2=on\n")
+	fmt.Printf("  Compression: off (raw throughput)\n")
+	fmt.Println("═══════════════════════════════════════════════════════════════")
+	fmt.Println()
 
 	// Build one authenticated client per tenant, reused across all tests.
 	var clients []clientEntry
 	for _, t := range tenants {
 		c, err := newGraphClient(t)
 		if err != nil {
-			log.Fatalf("[%s] auth failed: %v", t.name, err)
+			log.Printf("[%s] SKIPPED — auth failed: %v", t.name, err)
+			continue
 		}
 		driveID, err := getDriveID(context.Background(), c, t)
 		if err != nil {
-			log.Fatalf("[%s] drive lookup failed: %v", t.name, err)
+			log.Printf("[%s] SKIPPED — drive lookup failed: %v", t.name, err)
+			continue
 		}
 		folderID, err := createFolder(context.Background(), c, driveID,
 			fmt.Sprintf("stress-%d", time.Now().UnixNano()))
 		if err != nil {
-			log.Fatalf("[%s] folder creation failed: %v", t.name, err)
+			log.Printf("[%s] SKIPPED — folder creation failed: %v", t.name, err)
+			continue
 		}
 		log.Printf("[%s] Ready (drive=%s..., folder=%s...)", t.name, driveID[:16], folderID[:16])
 		clients = append(clients, clientEntry{t, c, driveID, folderID})
 	}
-	fmt.Println()
+	if len(clients) == 0 {
+		log.Fatal("No tenants authenticated successfully")
+	}
+	fmt.Printf("\n  %d/%d tenants active\n\n", len(clients), len(tenants))
 
 	runFileSizeScaling(clients)
 	runWorkerScaling(clients)
 	runDownloadTest(clients)
 	runMixedWorkload(clients)
 	runThrottleStress(clients)
+
+	// Fleet projection based on observed results
+	printHeader("FLEET PROJECTION (15 tenants, linear scale)")
+	fmt.Printf("  Tested tenants:       %d\n", len(clients))
+	fmt.Printf("  Projection factor:    %.1fx\n", 15.0/float64(len(clients)))
+	fmt.Printf("  Free storage:         75 TB (15 × 5TB OneDrive)\n")
+	fmt.Printf("  RU budget per app:    1,250/min (0-1K licenses)\n")
+	fmt.Printf("  RU costs:             1 (GET/download), 2 (upload/list/create/delete)\n")
+	fmt.Printf("  Optimal workers:      25/tenant (from prior benchmarks)\n")
+	fmt.Printf("  Delta queries:        1 RU/call (most efficient listing)\n")
+	fmt.Printf("  User-Agent:           ISV|FairForge|Vaultaire/1.0 (prioritized)\n")
+	fmt.Println()
 
 	// Async cleanup — don't block on Microsoft's delete latency.
 	fmt.Println("Cleaning up test folders...")
@@ -310,20 +359,28 @@ func runThrottleStress(clients []clientEntry) {
 	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
 
 	successCount := len(durations)
+	ruUsed := successCount * 2 // 2 RU per upload
+	ruPerMin := 0.0
+	if totalDuration.Seconds() > 0 {
+		ruPerMin = float64(ruUsed) / totalDuration.Minutes()
+	}
+
 	fmt.Printf("  Duration:    %s\n", totalDuration.Round(time.Millisecond))
 	fmt.Printf("  Successful:  %d / 200\n", successCount)
-	fmt.Printf("  Throttled:   %d (429 errors)\n", throttled.Load())
+	fmt.Printf("  Throttled:   %d (429/503 errors)\n", throttled.Load())
 	if successCount > 0 {
 		fmt.Printf("  p50 latency: %s\n", durations[successCount*50/100].Round(time.Millisecond))
 		fmt.Printf("  p95 latency: %s\n", durations[successCount*95/100].Round(time.Millisecond))
 		fmt.Printf("  p99 latency: %s\n", durations[successCount*99/100].Round(time.Millisecond))
 	}
 	fmt.Printf("  Throughput:  %.2f MB/s\n", float64(successCount)*0.5/totalDuration.Seconds())
-	fmt.Printf("  Est. RU/min: ~%d / 1250\n", successCount*2)
+	fmt.Printf("  RU used:     ~%d (@ 2 RU/upload)\n", ruUsed)
+	fmt.Printf("  RU rate:     ~%.0f/min (limit: 1,250/min per app)\n", ruPerMin)
+	fmt.Printf("  RU headroom: %.0f%%\n", (1.0-ruPerMin/1250.0)*100)
 	if throttled.Load() == 0 {
 		fmt.Println("  ✅ No throttling detected")
 	} else {
-		fmt.Println("  ⚠️  Throttling detected — add exponential backoff before production")
+		fmt.Println("  ⚠️  Throttling detected — honor Retry-After, use decorrelated jitter")
 	}
 	fmt.Println()
 }

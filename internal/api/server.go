@@ -130,6 +130,16 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		}
 	}
 
+	// Backfill bucket registry and tenant slugs on startup.
+	if s.db != nil {
+		if err := auth.BackfillBuckets(context.Background(), s.db, logger); err != nil {
+			logger.Error("failed to backfill buckets", zap.Error(err))
+		}
+		if err := auth.BackfillSlugs(context.Background(), s.db, logger); err != nil {
+			logger.Error("failed to backfill slugs", zap.Error(err))
+		}
+	}
+
 	// MFA service for TOTP generation and validation.
 	s.mfaService = auth.NewMFAService("stored.ge")
 	s.mfaPendingStore = dashboard.NewMFAPendingStore()
