@@ -65,6 +65,7 @@ type Server struct {
 	githubOAuth      *oauth2.Config
 	mfaService       *auth.MFAService
 	mfaPendingStore  *dashboard.MFAPendingStore
+	cdnRateLimiter   *RateLimiter
 	startTime        time.Time
 }
 
@@ -140,6 +141,8 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		}
 	}
 
+	s.cdnRateLimiter = NewRateLimiter()
+
 	// MFA service for TOTP generation and validation.
 	s.mfaService = auth.NewMFAService("stored.ge")
 	s.mfaPendingStore = dashboard.NewMFAPendingStore()
@@ -207,9 +210,14 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 
 	s.setupRoutes()
 
+	// CDN host-based router: cdn.stored.ge → CDN handler, everything else → normal router.
+	cdnRouter := chi.NewRouter()
+	cdnRouter.Get("/{slug}/{bucket}/*", s.handleCDNRequest)
+	cdnRouter.Head("/{slug}/{bucket}/*", s.handleCDNRequest)
+
 	s.httpServer = &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
-		Handler:      s.router,
+		Handler:      CDNHostRouter(cdnRouter, s.router),
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
 	}
@@ -384,6 +392,11 @@ func (s *Server) setupRoutes() {
 
 	// Public status page — no auth, renders HTML.
 	s.router.Get("/status", s.handleStatusPage)
+
+	// CDN path-based routes — before dashboard and S3 catch-all.
+	s.logger.Info("Registering CDN routes")
+	s.router.Get("/cdn/{slug}/{bucket}/*", s.handleCDNRequest)
+	s.router.Head("/cdn/{slug}/{bucket}/*", s.handleCDNRequest)
 
 	// Dashboard routes must be registered BEFORE the S3 catch-all so that
 	// /login, /dashboard/*, /admin/*, and /static/* are matched first.
