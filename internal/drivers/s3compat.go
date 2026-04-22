@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path"
+	"strings"
 
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -25,11 +27,16 @@ type S3CompatDriver struct {
 
 // NewS3CompatDriver creates a new S3-compatible storage driver
 func NewS3CompatDriver(accessKey, secretKey string, logger *zap.Logger) (*S3CompatDriver, error) {
-	// Create HTTP client that allows self-signed certs
+	insecure := strings.EqualFold(os.Getenv("S3COMPAT_INSECURE_TLS"), "true") ||
+		os.Getenv("S3COMPAT_INSECURE_TLS") == "1"
+	if insecure {
+		logger.Warn("S3-compatible TLS verification disabled via S3COMPAT_INSECURE_TLS")
+	}
+
 	httpClient := &http.Client{
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true, // #nosec G402 — TODO: make InsecureSkipVerify configurable per backend instead of hardcoded true
+				InsecureSkipVerify: insecure, // #nosec G402 — operator opt-in for self-signed certs
 			},
 		},
 	}
