@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/FairForge/vaultaire/internal/tenant"
@@ -148,6 +149,75 @@ func TestListBuckets_ReadsFromDB(t *testing.T) {
 	assert.Len(t, resp.Buckets.Bucket, 2)
 	assert.Equal(t, "alpha-bucket", resp.Buckets.Bucket[0].Name)
 	assert.Equal(t, "beta-bucket", resp.Buckets.Bucket[1].Name)
+}
+
+func TestCreateBucket_InvalidName_Rejected(t *testing.T) {
+	s := &Server{logger: zap.NewNop(), db: nil}
+
+	invalidNames := []string{
+		"../etc",
+		"..",
+		"../../tmp/pwned",
+		"UPPERCASE",
+		"a",
+		"has%20spaces",
+		strings.Repeat("a", 64),
+		"-leading-dash",
+		"trailing-dash-",
+	}
+
+	for _, name := range invalidNames {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest("PUT", "/"+name, nil)
+			w := httptest.NewRecorder()
+			s.CreateBucket(w, req)
+			assert.Equal(t, http.StatusBadRequest, w.Code, "bucket name %q should be rejected", name)
+			assert.Contains(t, w.Body.String(), "InvalidBucketName")
+		})
+	}
+}
+
+func TestDeleteBucket_InvalidName_Rejected(t *testing.T) {
+	s := &Server{logger: zap.NewNop(), db: nil}
+
+	invalidNames := []string{
+		"../etc",
+		"..",
+		"../../tmp/pwned",
+		"UPPERCASE",
+	}
+
+	for _, name := range invalidNames {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest("DELETE", "/"+name, nil)
+			w := httptest.NewRecorder()
+			s.DeleteBucket(w, req)
+			assert.Equal(t, http.StatusBadRequest, w.Code, "bucket name %q should be rejected", name)
+			assert.Contains(t, w.Body.String(), "InvalidBucketName")
+		})
+	}
+}
+
+func TestCreateBucket_ValidNames(t *testing.T) {
+	s := &Server{logger: zap.NewNop(), db: nil}
+
+	validNames := []string{
+		"my-bucket",
+		"data.2026",
+		"abc",
+		"a-b",
+		"my.long.bucket.name.with.dots",
+	}
+
+	for _, name := range validNames {
+		t.Run(name, func(t *testing.T) {
+			defer func() { _ = os.RemoveAll("/tmp/vaultaire/default/" + name) }()
+			req := httptest.NewRequest("PUT", "/"+name, nil)
+			w := httptest.NewRecorder()
+			s.CreateBucket(w, req)
+			assert.Equal(t, http.StatusOK, w.Code, "bucket name %q should be accepted", name)
+		})
+	}
 }
 
 func TestListBuckets_NoDB_FallsBackToFilesystem(t *testing.T) {
