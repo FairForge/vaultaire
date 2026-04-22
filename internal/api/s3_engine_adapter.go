@@ -144,15 +144,27 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 
 	var cachedContentType string
 	var cachedSize int64
+	var cachedETag string
+	var cachedUpdatedAt time.Time
 	var cacheHit bool
 	if a.db != nil {
 		err := a.db.QueryRowContext(r.Context(), `
-			SELECT content_type, size_bytes
+			SELECT content_type, size_bytes, etag, updated_at
 			FROM object_head_cache
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-			t.ID, bucket, artifact).Scan(&cachedContentType, &cachedSize)
+			t.ID, bucket, artifact).Scan(&cachedContentType, &cachedSize, &cachedETag, &cachedUpdatedAt)
 		if err == nil {
 			cacheHit = true
+		}
+	}
+
+	if cacheHit {
+		if code := evaluateConditionalGET(r, cachedETag, cachedUpdatedAt); code == http.StatusNotModified {
+			writeNotModified(w, cachedETag, cachedUpdatedAt, "private, no-cache")
+			return
+		} else if code == http.StatusPreconditionFailed {
+			w.WriteHeader(http.StatusPreconditionFailed)
+			return
 		}
 	}
 
@@ -199,8 +211,17 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	w.Header().Set("x-amz-request-id", generateRequestID())
 	w.Header().Set("x-amz-version-id", "null")
 	w.Header().Set("Accept-Ranges", "bytes")
-	if cacheHit && cachedSize > 0 {
-		w.Header().Set("Content-Length", strconv.FormatInt(cachedSize, 10))
+	w.Header().Set("Cache-Control", "private, no-cache")
+	if cacheHit {
+		if cachedSize > 0 {
+			w.Header().Set("Content-Length", strconv.FormatInt(cachedSize, 10))
+		}
+		if cachedETag != "" {
+			w.Header().Set("ETag", fmt.Sprintf(`"%s"`, cachedETag))
+		}
+		if !cachedUpdatedAt.IsZero() {
+			w.Header().Set("Last-Modified", cachedUpdatedAt.UTC().Format(http.TimeFormat))
+		}
 	}
 
 	written, err := io.Copy(w, reader)
@@ -283,6 +304,18 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	}
 	if size < 0 {
 		size = 0
+	}
+
+	if r.Header.Get("If-Match") != "" && a.db != nil {
+		var currentETag string
+		err := a.db.QueryRowContext(r.Context(), `
+			SELECT etag FROM object_head_cache
+			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+			t.ID, bucket, artifact).Scan(&currentETag)
+		if err == nil && checkIfMatch(r, currentETag) {
+			w.WriteHeader(http.StatusPreconditionFailed)
+			return
+		}
 	}
 
 	chunked := isAWSChunked(r)
