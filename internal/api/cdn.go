@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
@@ -53,23 +54,37 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 
 	var sizeBytes int64
 	var etag, contentType string
+	var updatedAt time.Time
 	err = s.db.QueryRowContext(ctx, `
-		SELECT size_bytes, etag, content_type
+		SELECT size_bytes, etag, content_type, updated_at
 		FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-		tenantID, bucket, key).Scan(&sizeBytes, &etag, &contentType)
+		tenantID, bucket, key).Scan(&sizeBytes, &etag, &contentType, &updatedAt)
 	if err != nil {
 		http.NotFound(w, r)
+		return
+	}
+
+	cacheControl := fmt.Sprintf("public, max-age=%d, stale-while-revalidate=600", cacheMaxAgeSecs)
+
+	if code := evaluateConditionalGET(r, etag, updatedAt); code == http.StatusNotModified {
+		writeNotModified(w, etag, updatedAt, cacheControl)
+		return
+	} else if code == http.StatusPreconditionFailed {
+		w.WriteHeader(http.StatusPreconditionFailed)
 		return
 	}
 
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", sizeBytes))
 	w.Header().Set("ETag", fmt.Sprintf(`"%s"`, etag))
-	w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d, stale-while-revalidate=600", cacheMaxAgeSecs))
+	w.Header().Set("Cache-Control", cacheControl)
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+	if !updatedAt.IsZero() {
+		w.Header().Set("Last-Modified", updatedAt.UTC().Format(http.TimeFormat))
+	}
 
 	if corsOrigins != "" {
 		w.Header().Set("Access-Control-Allow-Origin", corsOrigins)
