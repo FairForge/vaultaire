@@ -19,6 +19,7 @@ import (
 // BucketRow is a single bucket for the bucket list template.
 type BucketRow struct {
 	Name            string
+	Visibility      string
 	ObjectCount     int
 	TotalSize       int64
 	LastModified    time.Time
@@ -205,6 +206,7 @@ func renderBucketList(w http.ResponseWriter, tmpl *template.Template, db *sql.DB
 func listBuckets(ctx context.Context, db *sql.DB, tenantID string) []BucketRow {
 	rows, err := db.QueryContext(ctx,
 		`SELECT b.name,
+		        b.visibility,
 		        COALESCE(o.object_count, 0),
 		        COALESCE(o.total_size, 0),
 		        COALESCE(o.last_modified, b.created_at)
@@ -229,7 +231,7 @@ func listBuckets(ctx context.Context, db *sql.DB, tenantID string) []BucketRow {
 	for rows.Next() {
 		var b BucketRow
 		var lastMod time.Time
-		if err := rows.Scan(&b.Name, &b.ObjectCount, &b.TotalSize, &lastMod); err != nil {
+		if err := rows.Scan(&b.Name, &b.Visibility, &b.ObjectCount, &b.TotalSize, &lastMod); err != nil {
 			continue
 		}
 		b.LastModified = lastMod

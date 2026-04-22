@@ -5,6 +5,7 @@
         <h1>{{.BucketName}}</h1>
         <p class="text-muted">{{.ObjectCount}} object{{if ne .ObjectCount 1}}s{{end}} &middot; {{.TotalSizeFmt}}</p>
     </div>
+    <a href="/dashboard/buckets/{{.BucketName}}/settings" class="btn">Settings</a>
 </div>
 
 <nav class="breadcrumb">
