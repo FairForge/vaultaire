@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"fmt"
 	"log"
+	"net"
+	"net/http"
 	"os"
 	"sync"
 	"time"
@@ -13,6 +16,24 @@ import (
 	msgraphsdk "github.com/microsoftgraph/msgraph-sdk-go"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
 )
+
+func init() {
+	http.DefaultTransport = &http.Transport{
+		MaxIdleConns:        200,
+		MaxIdleConnsPerHost: 200,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
+		ReadBufferSize:      256 * 1024,
+		WriteBufferSize:     256 * 1024,
+		DisableCompression:  true,
+		ForceAttemptHTTP2:   true,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSClientConfig: &tls.Config{},
+	}
+}
 
 // tenant holds credentials and identity for a single OneDrive tenant.
 type tenant struct {
@@ -34,6 +55,9 @@ type result struct {
 }
 
 func (r result) throughputMBs() float64 {
+	if r.duration == 0 || r.errors >= r.fileCount {
+		return 0
+	}
 	total := float64(r.fileCount-r.errors) * float64(r.fileSizeMB)
 	return total / r.duration.Seconds()
 }

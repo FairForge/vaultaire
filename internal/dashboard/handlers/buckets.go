@@ -121,6 +121,17 @@ func HandleCreateBucket(tmpl *template.Template, db *sql.DB, dataPath string, lo
 			}
 		}
 
+		if db != nil {
+			_, dbErr := db.ExecContext(r.Context(), `
+				INSERT INTO buckets (tenant_id, name, visibility)
+				VALUES ($1, $2, 'private')
+				ON CONFLICT (tenant_id, name) DO NOTHING
+			`, sd.TenantID, name)
+			if dbErr != nil {
+				logger.Error("persist bucket to DB", zap.Error(dbErr))
+			}
+		}
+
 		data["CreateSuccess"] = name
 		renderBucketList(w, tmpl, db, sd, data, logger)
 	}
@@ -193,14 +204,22 @@ func renderBucketList(w http.ResponseWriter, tmpl *template.Template, db *sql.DB
 
 func listBuckets(ctx context.Context, db *sql.DB, tenantID string) []BucketRow {
 	rows, err := db.QueryContext(ctx,
-		`SELECT bucket,
-		        COUNT(*) AS object_count,
-		        COALESCE(SUM(size_bytes), 0) AS total_size,
-		        MAX(updated_at) AS last_modified
-		 FROM object_head_cache
-		 WHERE tenant_id = $1
-		 GROUP BY bucket
-		 ORDER BY bucket`, tenantID)
+		`SELECT b.name,
+		        COALESCE(o.object_count, 0),
+		        COALESCE(o.total_size, 0),
+		        COALESCE(o.last_modified, b.created_at)
+		 FROM buckets b
+		 LEFT JOIN (
+		     SELECT bucket,
+		            COUNT(*) AS object_count,
+		            SUM(size_bytes) AS total_size,
+		            MAX(updated_at) AS last_modified
+		     FROM object_head_cache
+		     WHERE tenant_id = $1
+		     GROUP BY bucket
+		 ) o ON o.bucket = b.name
+		 WHERE b.tenant_id = $1
+		 ORDER BY b.name`, tenantID)
 	if err != nil {
 		return nil
 	}

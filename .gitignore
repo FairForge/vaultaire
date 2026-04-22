@@ -92,18 +92,43 @@ tests/k6/results/
 cache_benchmark_results.txt
 compress.txt
 
-# Permafrost internal tools
+# Permafrost internal tools (legacy)
 cmd/permafrost-benchmark/
 cmd/permafrost-parallel/
-permafrost-benchmark
-permafrost-parallel
-bench-linux
-geyser-test
-loadtest
-loadtest-linux
-vaultaire-bin
-vaultaire-linux
 cmd/geyser-admin-test/
 cmd/geyser-smoke/
-geyser-smoke-bin
-vaultaire-bin
+
+# Compiled benchmark binaries (from cmd/*)
+/bench-compare
+/bench-compare-linux
+/lighthouse-bench
+/permafrost-benchmark
+/permafrost-benchmark-linux
+/permafrost-fleet
+/permafrost-fleet-linux
+/permafrost-parallel
+/permafrost-parallel-linux
+/permafrost-stress
+/permafrost-stress-linux
+/permafrost-v2
+/permafrost-v2-linux
+/permafrost-v3
+/permafrost-v3-linux
+/pixeldrain-bench
+/pixeldrain-bench-linux
+/quotaless-bench-v2
+/quotaless-bench-v2-linux
+/bench-linux
+/geyser-test
+/geyser-smoke-bin
+/loadtest
+/loadtest-linux
+/vaultaire-bin
+
+# Benchmark result data (track .md docs, ignore raw data)
+bench-results/*.json
+bench-results/*.log
+bench-results/**/results.csv
+
+# Claude Code
+.claude/scheduled_tasks.lock

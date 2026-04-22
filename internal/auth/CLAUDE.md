@@ -52,7 +52,21 @@ Password reset rate limiting is in-memory (per-email, 3/hour, sliding window). T
 | `keyIndex` | accessKey | *Tenant | S3 auth (hot path) |
 | `apiKeys` | key | *APIKey | API key validation |
 
+## Slug Generation + Bucket Backfill (`slug.go`, `backfill.go`)
+
+- `GenerateSlug(company)` — URL-safe slug from company name (deterministic, no DB)
+- `IsReservedSlug(slug)` — checks against reserved route paths (admin, cdn, api, etc.)
+- `ValidateSlug(slug)` — validates against `^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$`
+- `EnsureSlugUnique(ctx, db, slug)` — appends `-N` suffix if slug taken in `tenants` table
+- `EnsureTenantSlug(ctx, db, tenantID, logger)` — lazy slug generation on first bucket create
+- `CanEnablePublicRead(tier)` — archive-tier gate for public-read bucket visibility
+- `BackfillBuckets(ctx, db, logger)` — startup backfill: creates `buckets` rows from `object_head_cache`
+- `BackfillSlugs(ctx, db, logger)` — startup slug generation for tenants missing slugs
+
+Both backfill functions run on every startup (called from `server.go`), are idempotent, and log counts.
+
 ## Testing
 
 - Unit tests: `go test ./internal/auth/... -short` (no DB needed)
 - Integration tests: `go test ./internal/auth/... -run TestLoadFromDB -v` (needs local PostgreSQL)
+- Backfill tests: `go test ./internal/auth/... -run TestBackfill -v` (needs local PostgreSQL, skipped with `-short`)
