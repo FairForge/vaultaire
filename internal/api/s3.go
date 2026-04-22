@@ -439,12 +439,13 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 
 	var sizeBytes int64
 	var etag, contentType string
+	var updatedAt time.Time
 
 	err = s.db.QueryRowContext(r.Context(), `
-		SELECT size_bytes, etag, content_type
+		SELECT size_bytes, etag, content_type, updated_at
 		FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
-	`, t.ID, req.Bucket, req.Object).Scan(&sizeBytes, &etag, &contentType)
+	`, t.ID, req.Bucket, req.Object).Scan(&sizeBytes, &etag, &contentType, &updatedAt)
 
 	if err == sql.ErrNoRows {
 		s.logger.Warn("HEAD: object not in metadata cache",
@@ -469,7 +470,11 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	}
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("ETag", fmt.Sprintf(`"%s"`, etag))
-	w.Header().Set("Last-Modified", time.Now().UTC().Format("Mon, 02 Jan 2006 15:04:05 GMT"))
+	if !updatedAt.IsZero() {
+		w.Header().Set("Last-Modified", updatedAt.UTC().Format(http.TimeFormat))
+	} else {
+		w.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
+	}
 	w.Header().Set("x-amz-storage-class", "STANDARD")
 	w.Header().Set("x-amz-request-id", generateRequestID())
 	// HEAD must not write a body.
