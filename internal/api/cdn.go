@@ -91,6 +91,25 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = reader.Close() }()
 
+	rangeHeader := r.Header.Get("Range")
+	if rangeHeader != "" && sizeBytes > 0 {
+		rng, parseErr := parseRangeHeader(rangeHeader, sizeBytes)
+		if parseErr != nil {
+			writeRangeNotSatisfiable(w, sizeBytes)
+			return
+		}
+		if err := serveRange(w, reader, rng, sizeBytes, contentType); err != nil {
+			s.logger.Error("cdn range serve failed",
+				zap.String("key", key),
+				zap.Error(err))
+			return
+		}
+		if s.bandwidthTracker != nil {
+			s.bandwidthTracker.Record(ctx, tenantID, 0, rng.length)
+		}
+		return
+	}
+
 	written, err := io.Copy(w, reader)
 	if err != nil {
 		s.logger.Error("cdn stream failed",
