@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"database/sql"
 	"html/template"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+
+	_ "github.com/lib/pq"
 )
 
 func testBucketsTemplate(t *testing.T) *template.Template {
@@ -203,4 +206,109 @@ func TestBucketNameRegex(t *testing.T) {
 func TestBuckets_SharedHelpers(t *testing.T) {
 	assert.Equal(t, "1 KB", formatBytes(1024))
 	assert.Equal(t, "just now", relativeTime(time.Now()))
+}
+
+func testDashDB(t *testing.T) *sql.DB {
+	t.Helper()
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		dsn = "postgres://viera@localhost:5432/vaultaire?sslmode=disable"
+	}
+	db, err := sql.Open("postgres", dsn)
+	require.NoError(t, err)
+	require.NoError(t, db.Ping())
+	return db
+}
+
+func cleanupDashBucketData(t *testing.T, db *sql.DB) {
+	t.Helper()
+	_, _ = db.Exec(`DELETE FROM buckets WHERE tenant_id LIKE 'test-dash-%'`)
+	_, _ = db.Exec(`DELETE FROM object_head_cache WHERE tenant_id LIKE 'test-dash-%'`)
+	_, _ = db.Exec(`DELETE FROM tenant_quotas WHERE tenant_id LIKE 'test-dash-%'`)
+	_, _ = db.Exec(`DELETE FROM tenants WHERE id LIKE 'test-dash-%'`)
+}
+
+func injectSessionWithTenant(req *http.Request, tenantID string) *http.Request {
+	sd := &dashauth.SessionData{
+		UserID:   "user-123",
+		TenantID: tenantID,
+		Email:    "test@stored.ge",
+		Role:     "user",
+	}
+	ctx := context.WithValue(req.Context(), dashauth.SessionKey, sd)
+	return req.WithContext(ctx)
+}
+
+func TestHandleCreateBucket_PersistsToDB(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires database")
+	}
+	db := testDashDB(t)
+	defer func() { _ = db.Close() }()
+	cleanupDashBucketData(t, db)
+	defer cleanupDashBucketData(t, db)
+
+	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key) VALUES ('test-dash-1', 'Test Co', 'testdash1@test.com', 'VK-d1', 'SK-d1') ON CONFLICT DO NOTHING`)
+	require.NoError(t, err)
+
+	tmpDir := t.TempDir()
+	tmpl := testBucketsTemplate(t)
+	handler := HandleCreateBucket(tmpl, db, tmpDir, zap.NewNop())
+
+	form := url.Values{"name": {"my-dash-bucket"}}
+	req := injectSessionWithTenant(httptest.NewRequest("POST", "/dashboard/buckets",
+		strings.NewReader(form.Encode())), "test-dash-1")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "my-dash-bucket")
+
+	var vis string
+	err = db.QueryRow(`SELECT visibility FROM buckets WHERE tenant_id = 'test-dash-1' AND name = 'my-dash-bucket'`).Scan(&vis)
+	require.NoError(t, err)
+	assert.Equal(t, "private", vis)
+}
+
+func TestHandleCreateBucket_InvalidName_NoDB(t *testing.T) {
+	tmpl := testBucketsTemplate(t)
+	handler := HandleCreateBucket(tmpl, nil, t.TempDir(), zap.NewNop())
+
+	form := url.Values{"name": {"-bad"}}
+	req := injectSession(httptest.NewRequest("POST", "/dashboard/buckets",
+		strings.NewReader(form.Encode())))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "Invalid bucket name")
+}
+
+func TestListBuckets_Dashboard_IncludesEmptyBuckets(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires database")
+	}
+	db := testDashDB(t)
+	defer func() { _ = db.Close() }()
+	cleanupDashBucketData(t, db)
+	defer cleanupDashBucketData(t, db)
+
+	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key) VALUES ('test-dash-2', 'Test Co 2', 'testdash2@test.com', 'VK-d2', 'SK-d2') ON CONFLICT DO NOTHING`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO buckets (tenant_id, name) VALUES ('test-dash-2', 'empty-bucket') ON CONFLICT DO NOTHING`)
+	require.NoError(t, err)
+
+	tmpl := testBucketsTemplate(t)
+	handler := HandleBuckets(tmpl, db, "", zap.NewNop())
+
+	req := injectSessionWithTenant(httptest.NewRequest("GET", "/dashboard/buckets", nil), "test-dash-2")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.Contains(t, body, "empty-bucket")
+	assert.Contains(t, body, `<span class="count">1</span>`)
 }
