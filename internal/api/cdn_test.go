@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -376,6 +377,81 @@ func TestCDNHostRouter_StripsPort(t *testing.T) {
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 	assert.True(t, cdnCalled)
+}
+
+func TestCDN_RangeRequest_PartialContent(t *testing.T) {
+	f := setupCDNFixture(t)
+
+	req := httptest.NewRequest("GET", "/cdn/"+f.slug+"/"+f.bucket+"/"+f.key, nil)
+	req.Header.Set("Range", "bytes=0-4")
+	w := httptest.NewRecorder()
+	f.router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusPartialContent, w.Code)
+
+	body, err := io.ReadAll(w.Body)
+	require.NoError(t, err)
+	assert.Equal(t, f.content[:5], body)
+
+	assert.Equal(t, fmt.Sprintf("bytes 0-4/%d", len(f.content)), w.Header().Get("Content-Range"))
+	assert.Equal(t, "5", w.Header().Get("Content-Length"))
+	assert.Equal(t, "text/plain", w.Header().Get("Content-Type"))
+}
+
+func TestCDN_RangeRequest_MiddleRange(t *testing.T) {
+	f := setupCDNFixture(t)
+
+	req := httptest.NewRequest("GET", "/cdn/"+f.slug+"/"+f.bucket+"/"+f.key, nil)
+	req.Header.Set("Range", "bytes=6-8")
+	w := httptest.NewRecorder()
+	f.router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusPartialContent, w.Code)
+
+	body, err := io.ReadAll(w.Body)
+	require.NoError(t, err)
+	assert.Equal(t, f.content[6:9], body)
+}
+
+func TestCDN_RangeRequest_SuffixRange(t *testing.T) {
+	f := setupCDNFixture(t)
+
+	req := httptest.NewRequest("GET", "/cdn/"+f.slug+"/"+f.bucket+"/"+f.key, nil)
+	req.Header.Set("Range", "bytes=-3")
+	w := httptest.NewRecorder()
+	f.router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusPartialContent, w.Code)
+
+	body, err := io.ReadAll(w.Body)
+	require.NoError(t, err)
+	assert.Equal(t, f.content[len(f.content)-3:], body)
+}
+
+func TestCDN_RangeRequest_Unsatisfiable(t *testing.T) {
+	f := setupCDNFixture(t)
+
+	req := httptest.NewRequest("GET", "/cdn/"+f.slug+"/"+f.bucket+"/"+f.key, nil)
+	req.Header.Set("Range", "bytes=9999-10000")
+	w := httptest.NewRecorder()
+	f.router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusRequestedRangeNotSatisfiable, w.Code)
+	assert.Contains(t, w.Header().Get("Content-Range"), fmt.Sprintf("bytes */%d", len(f.content)))
+}
+
+func TestCDN_RangeRequest_NoRangeHeaderStillReturns200(t *testing.T) {
+	f := setupCDNFixture(t)
+
+	req := httptest.NewRequest("GET", "/cdn/"+f.slug+"/"+f.bucket+"/"+f.key, nil)
+	w := httptest.NewRecorder()
+	f.router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	body, err := io.ReadAll(w.Body)
+	require.NoError(t, err)
+	assert.Equal(t, f.content, body)
 }
 
 func TestCDN_MissingDBReturns404(t *testing.T) {

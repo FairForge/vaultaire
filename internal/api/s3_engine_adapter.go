@@ -126,12 +126,6 @@ func isAWSChunked(r *http.Request) bool {
 
 // HandleGet processes S3 GET requests using the engine
 func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, object string) {
-	rangeHeader := r.Header.Get("Range")
-	if rangeHeader != "" {
-		a.logger.Debug("Range request ignored (not yet implemented)",
-			zap.String("range", rangeHeader))
-	}
-
 	t, err := tenant.FromContext(r.Context())
 	if err != nil {
 		a.logger.Warn("no tenant in context", zap.Error(err))
@@ -147,6 +141,25 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		zap.String("original_bucket", bucket),
 		zap.String("namespaced_container", container),
 		zap.String("artifact", artifact))
+
+	var cachedContentType string
+	var cachedSize int64
+	var cacheHit bool
+	if a.db != nil {
+		err := a.db.QueryRowContext(r.Context(), `
+			SELECT content_type, size_bytes
+			FROM object_head_cache
+			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+			t.ID, bucket, artifact).Scan(&cachedContentType, &cachedSize)
+		if err == nil {
+			cacheHit = true
+		}
+	}
+
+	contentType := cachedContentType
+	if contentType == "" {
+		contentType = a.detectContentType(artifact)
+	}
 
 	reader, err := a.engine.Get(r.Context(), container, artifact)
 	if err != nil {
@@ -164,11 +177,31 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	}
 	defer func() { _ = reader.Close() }()
 
-	contentType := a.detectContentType(artifact)
+	rangeHeader := r.Header.Get("Range")
+	if rangeHeader != "" && cacheHit && cachedSize > 0 {
+		rng, parseErr := parseRangeHeader(rangeHeader, cachedSize)
+		if parseErr != nil {
+			writeRangeNotSatisfiable(w, cachedSize)
+			return
+		}
+		w.Header().Set("x-amz-request-id", generateRequestID())
+		w.Header().Set("x-amz-version-id", "null")
+		if err := serveRange(w, reader, rng, cachedSize, contentType); err != nil {
+			a.logger.Error("range serve failed",
+				zap.Error(err),
+				zap.String("container", container),
+				zap.String("artifact", artifact))
+		}
+		return
+	}
+
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("x-amz-request-id", generateRequestID())
 	w.Header().Set("x-amz-version-id", "null")
 	w.Header().Set("Accept-Ranges", "bytes")
+	if cacheHit && cachedSize > 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(cachedSize, 10))
+	}
 
 	written, err := io.Copy(w, reader)
 	if err != nil {
