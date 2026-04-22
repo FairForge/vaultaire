@@ -109,9 +109,15 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		template.Must(bucketObjsTmpl.ParseFS(Templates,
 			"templates/customer/bucket_objects.html",
 		))
+		bucketSettingsTmpl := template.Must(baseTmpl.Clone())
+		template.Must(bucketSettingsTmpl.ParseFS(Templates,
+			"templates/customer/bucket_settings.html",
+		))
 		dr.Get("/buckets", handlers.HandleBuckets(bucketsTmpl, deps.DB, deps.DataPath, deps.Logger))
 		dr.Post("/buckets", handlers.HandleCreateBucket(bucketsTmpl, deps.DB, deps.DataPath, deps.Logger))
 		dr.Get("/buckets/{name}", handlers.HandleBucketObjects(bucketObjsTmpl, deps.DB, deps.Logger))
+		dr.Get("/buckets/{name}/settings", handlers.HandleBucketSettings(bucketSettingsTmpl, deps.DB, deps.Logger))
+		dr.Post("/buckets/{name}/settings", handlers.HandleUpdateBucketSettings(bucketSettingsTmpl, deps.DB, deps.Logger))
 
 		// API key management.
 		apikeysTmpl := template.Must(baseTmpl.Clone())

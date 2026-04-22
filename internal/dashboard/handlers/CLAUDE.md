@@ -23,6 +23,14 @@ Bucket name validation: `^[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9]$` + path traversal c
 
 Shared helpers in `context.go`: `sessionData(sd, page)` builds the base template data map, `formatBytes`, `relativeTime`.
 
+## Bucket Settings (`bucket_settings.go`)
+
+Two handlers:
+- `HandleBucketSettings(tmpl, db, logger)` — GET renders bucket settings page: visibility toggle (private/public-read), CDN URL card with tabbed code examples, cache TTL, CORS origins. Checks `CanEnablePublicRead(tier)` for archive-tier restriction.
+- `HandleUpdateBucketSettings(tmpl, db, logger)` — POST updates visibility, CORS origins, and cache_max_age_secs in `buckets` table. Validates visibility enum, clamps cache to 0–86400, enforces archive-tier restriction via `auth.CanEnablePublicRead()`. Uses flash messages for feedback.
+
+Template: `templates/customer/bucket_settings.html`. Routes: `GET/POST /dashboard/buckets/{name}/settings`.
+
 ## API Key Management (`apikeys.go`)
 
 Three handlers:
