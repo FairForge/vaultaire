@@ -232,11 +232,9 @@ func main() {
 	// 6. Set primary backend (auto-detect best available)
 	storageMode := os.Getenv("STORAGE_MODE")
 	if storageMode == "" {
-		// Auto-detect: prefer Quotaless > Lyve > S3 > Geyser > local
+		// Auto-detect: prefer Quotaless > S3 > Geyser > local
 		if os.Getenv("QUOTALESS_ACCESS_KEY") != "" {
 			storageMode = "quotaless"
-		} else if os.Getenv("LYVE_ACCESS_KEY") != "" {
-			storageMode = "lyve"
 		} else if os.Getenv("S3_ACCESS_KEY") != "" {
 			storageMode = "s3"
 		} else if os.Getenv("GEYSER_ACCESS_KEY") != "" {

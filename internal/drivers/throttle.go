@@ -76,6 +76,10 @@ func (t *ThrottledDriver) List(ctx context.Context, container, prefix string) ([
 	return t.backend.List(ctx, container, prefix)
 }
 
+func (t *ThrottledDriver) Exists(ctx context.Context, container, artifact string) (bool, error) {
+	return t.backend.Exists(ctx, container, artifact)
+}
+
 func (t *ThrottledDriver) HealthCheck(ctx context.Context) error {
 	return t.backend.HealthCheck(ctx)
 }
