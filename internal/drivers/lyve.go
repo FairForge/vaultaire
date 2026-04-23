@@ -176,6 +176,24 @@ func (d *LyveDriver) List(ctx context.Context, container string, prefix string) 
 	return keys, nil
 }
 
+func (d *LyveDriver) Exists(ctx context.Context, container, artifact string) (bool, error) {
+	tenantID := d.getTenantID(ctx)
+	key := d.buildTenantKey(tenantID, container, artifact)
+	bucket := d.getBucket()
+
+	_, err := d.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		if strings.Contains(err.Error(), "NotFound") || strings.Contains(err.Error(), "404") {
+			return false, nil
+		}
+		return false, fmt.Errorf("lyve exists: %w", err)
+	}
+	return true, nil
+}
+
 func (d *LyveDriver) Name() string {
 	return "lyve"
 }

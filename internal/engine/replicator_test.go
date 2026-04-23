@@ -36,6 +36,10 @@ func (t *TestDriver) HealthCheck(ctx context.Context) error {
 	return nil
 }
 
+func (t *TestDriver) Exists(ctx context.Context, container, artifact string) (bool, error) {
+	return true, nil
+}
+
 func (t *TestDriver) Name() string {
 	return "test"
 }

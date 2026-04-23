@@ -363,6 +363,18 @@ func (d *IDriveDriver) Exists(ctx context.Context, container, artifact string) (
 	return true, nil
 }
 
+func (d *IDriveDriver) Name() string {
+	return "idrive"
+}
+
+func (d *IDriveDriver) HealthCheck(ctx context.Context) error {
+	_, err := d.client.ListBuckets(ctx, &s3.ListBucketsInput{})
+	if err != nil {
+		return fmt.Errorf("idrive health check: %w", err)
+	}
+	return nil
+}
+
 func (d *IDriveDriver) ValidateAuth(ctx context.Context) error {
 	// Try to list buckets - this requires valid authentication
 	_, err := d.client.ListBuckets(ctx, &s3.ListBucketsInput{})

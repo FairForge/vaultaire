@@ -14,8 +14,8 @@ import (
 
 // RegionalFailover implements automatic failover between regions
 type RegionalFailover struct {
-	primary   Driver
-	secondary Driver
+	primary   RegionDriver
+	secondary RegionDriver
 	logger    *zap.Logger
 
 	primaryHealthy   atomic.Bool
