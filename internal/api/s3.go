@@ -118,6 +118,8 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 				req.Operation = "GetBucketVersioning"
 			} else if _, ok := req.Query["notification"]; ok {
 				req.Operation = "GetBucketNotification"
+			} else if _, ok := req.Query["object-lock"]; ok {
+				req.Operation = "GetObjectLockConfiguration"
 			} else if _, ok := req.Query["uploads"]; ok {
 				req.Operation = "ListMultipartUploads"
 			} else {
@@ -128,6 +130,8 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 				req.Operation = "PutBucketVersioning"
 			} else if _, ok := req.Query["notification"]; ok {
 				req.Operation = "PutBucketNotification"
+			} else if _, ok := req.Query["object-lock"]; ok {
+				req.Operation = "PutObjectLockConfiguration"
 			} else {
 				req.Operation = "CreateBucket"
 			}
@@ -149,13 +153,21 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 
 	switch method {
 	case "GET":
-		if _, ok := req.Query["uploadId"]; ok {
+		if _, ok := req.Query["retention"]; ok {
+			req.Operation = "GetObjectRetention"
+		} else if _, ok := req.Query["legal-hold"]; ok {
+			req.Operation = "GetObjectLegalHold"
+		} else if _, ok := req.Query["uploadId"]; ok {
 			req.Operation = "ListParts"
 		} else {
 			req.Operation = "GetObject"
 		}
 	case "PUT":
-		if _, ok := req.Query["partNumber"]; ok {
+		if _, ok := req.Query["retention"]; ok {
+			req.Operation = "PutObjectRetention"
+		} else if _, ok := req.Query["legal-hold"]; ok {
+			req.Operation = "PutObjectLegalHold"
+		} else if _, ok := req.Query["partNumber"]; ok {
 			req.Operation = "UploadPart"
 		} else {
 			req.Operation = "PutObject"
@@ -414,6 +426,18 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		s.handleGetBucketNotification(cw, r, s3Req)
 	case "PutBucketNotification":
 		s.handlePutBucketNotification(cw, r, s3Req)
+	case "GetObjectLockConfiguration":
+		s.handleGetObjectLockConfiguration(cw, r, s3Req)
+	case "PutObjectLockConfiguration":
+		s.handlePutObjectLockConfiguration(cw, r, s3Req)
+	case "GetObjectRetention":
+		s.handleGetObjectRetention(cw, r, s3Req)
+	case "PutObjectRetention":
+		s.handlePutObjectRetention(cw, r, s3Req)
+	case "GetObjectLegalHold":
+		s.handleGetObjectLegalHold(cw, r, s3Req)
+	case "PutObjectLegalHold":
+		s.handlePutObjectLegalHold(cw, r, s3Req)
 	default:
 		s.logger.Warn("operation not implemented",
 			zap.String("operation", s3Req.Operation))
