@@ -116,6 +116,8 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 		case "GET":
 			if _, ok := req.Query["versioning"]; ok {
 				req.Operation = "GetBucketVersioning"
+			} else if _, ok := req.Query["notification"]; ok {
+				req.Operation = "GetBucketNotification"
 			} else if _, ok := req.Query["uploads"]; ok {
 				req.Operation = "ListMultipartUploads"
 			} else {
@@ -124,6 +126,8 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 		case "PUT":
 			if _, ok := req.Query["versioning"]; ok {
 				req.Operation = "PutBucketVersioning"
+			} else if _, ok := req.Query["notification"]; ok {
+				req.Operation = "PutBucketNotification"
 			} else {
 				req.Operation = "CreateBucket"
 			}
@@ -406,6 +410,10 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		s.handleGetBucketVersioning(cw, r, s3Req)
 	case "PutBucketVersioning":
 		s.handlePutBucketVersioning(cw, r, s3Req)
+	case "GetBucketNotification":
+		s.handleGetBucketNotification(cw, r, s3Req)
+	case "PutBucketNotification":
+		s.handlePutBucketNotification(cw, r, s3Req)
 	default:
 		s.logger.Warn("operation not implemented",
 			zap.String("operation", s3Req.Operation))
