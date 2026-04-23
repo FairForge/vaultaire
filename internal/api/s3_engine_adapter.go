@@ -357,15 +357,21 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		size = 0
 	}
 
-	if r.Header.Get("If-Match") != "" && a.db != nil {
-		var currentETag string
-		err := a.db.QueryRowContext(r.Context(), `
+	if a.db != nil {
+		var existingETag string
+		existsErr := a.db.QueryRowContext(r.Context(), `
 			SELECT etag FROM object_head_cache
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-			t.ID, bucket, artifact).Scan(&currentETag)
-		if err == nil && checkIfMatch(r, currentETag) {
-			w.WriteHeader(http.StatusPreconditionFailed)
-			return
+			t.ID, bucket, artifact).Scan(&existingETag)
+		if existsErr == nil {
+			if lockErr := checkObjectLock(r.Context(), a.db, t.ID, bucket, artifact, isObjectLockBypass(r)); lockErr != nil {
+				WriteS3Error(w, ErrObjectLocked, r.URL.Path, generateRequestID())
+				return
+			}
+			if r.Header.Get("If-Match") != "" && checkIfMatch(r, existingETag) {
+				w.WriteHeader(http.StatusPreconditionFailed)
+				return
+			}
 		}
 	}
 
@@ -450,6 +456,8 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 				is_delete_marker = FALSE, backend_name = EXCLUDED.backend_name`,
 			t.ID, bucket, artifact, versionID, size, etag, contentType, backendName)
 	}
+
+	applyObjectLockOnPut(r.Context(), a.db, t.ID, bucket, artifact, r)
 
 	w.Header().Set("ETag", fmt.Sprintf(`"%s"`, etag))
 	w.Header().Set("x-amz-request-id", generateRequestID())
@@ -545,6 +553,11 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 		w.Header().Set("x-amz-delete-marker", "true")
 		w.WriteHeader(http.StatusNoContent)
 		a.notifySvc.Fire(t.ID, bucket, "s3:ObjectRemoved:Delete", object, 0, "")
+		return
+	}
+
+	if lockErr := checkObjectLock(r.Context(), a.db, t.ID, bucket, object, isObjectLockBypass(r)); lockErr != nil {
+		WriteS3Error(w, ErrObjectLocked, r.URL.Path, generateRequestID())
 		return
 	}
 

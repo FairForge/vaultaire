@@ -18,92 +18,98 @@ type S3Error struct {
 
 // S3 Error codes
 const (
-	ErrNoSuchBucket          = "NoSuchBucket"
-	ErrNoSuchKey             = "NoSuchKey"
-	ErrBucketAlreadyExists   = "BucketAlreadyExists"
-	ErrBucketNotEmpty        = "BucketNotEmpty"
-	ErrInvalidBucketName     = "InvalidBucketName"
-	ErrInvalidObjectName     = "InvalidObjectName"
-	ErrAccessDenied          = "AccessDenied"
-	ErrInvalidRequest        = "InvalidRequest"
-	ErrIncompleteBody        = "IncompleteBody"
-	ErrInternalError         = "InternalError"
-	ErrNotImplemented        = "NotImplemented"
-	ErrMissingContentLength  = "MissingContentLength"
-	ErrRequestTimeout        = "RequestTimeout"
-	ErrBadDigest             = "BadDigest"
-	ErrEntityTooLarge        = "EntityTooLarge"
-	ErrMalformedXML          = "MalformedXML"
-	ErrMethodNotAllowed      = "MethodNotAllowed"
-	ErrSignatureDoesNotMatch = "SignatureDoesNotMatch"
-	ErrAccountSuspended      = "AccountSuspended"
-	ErrSlowDown              = "SlowDown"
-	ErrNoSuchUpload          = "NoSuchUpload"
-	ErrInvalidPart           = "InvalidPart"
-	ErrInvalidPartOrder      = "InvalidPartOrder"
-	ErrEntityTooSmall        = "EntityTooSmall"
-	ErrInvalidPartNumber     = "InvalidPartNumber"
-	ErrNoSuchVersion         = "NoSuchVersion"
+	ErrNoSuchBucket           = "NoSuchBucket"
+	ErrNoSuchKey              = "NoSuchKey"
+	ErrBucketAlreadyExists    = "BucketAlreadyExists"
+	ErrBucketNotEmpty         = "BucketNotEmpty"
+	ErrInvalidBucketName      = "InvalidBucketName"
+	ErrInvalidObjectName      = "InvalidObjectName"
+	ErrAccessDenied           = "AccessDenied"
+	ErrInvalidRequest         = "InvalidRequest"
+	ErrIncompleteBody         = "IncompleteBody"
+	ErrInternalError          = "InternalError"
+	ErrNotImplemented         = "NotImplemented"
+	ErrMissingContentLength   = "MissingContentLength"
+	ErrRequestTimeout         = "RequestTimeout"
+	ErrBadDigest              = "BadDigest"
+	ErrEntityTooLarge         = "EntityTooLarge"
+	ErrMalformedXML           = "MalformedXML"
+	ErrMethodNotAllowed       = "MethodNotAllowed"
+	ErrSignatureDoesNotMatch  = "SignatureDoesNotMatch"
+	ErrAccountSuspended       = "AccountSuspended"
+	ErrSlowDown               = "SlowDown"
+	ErrNoSuchUpload           = "NoSuchUpload"
+	ErrInvalidPart            = "InvalidPart"
+	ErrInvalidPartOrder       = "InvalidPartOrder"
+	ErrEntityTooSmall         = "EntityTooSmall"
+	ErrInvalidPartNumber      = "InvalidPartNumber"
+	ErrNoSuchVersion          = "NoSuchVersion"
+	ErrObjectLocked           = "ObjectLocked"
+	ErrInvalidRetentionPeriod = "InvalidRetentionPeriod"
 )
 
 // Error messages
 var errorMessages = map[string]string{
-	ErrNoSuchBucket:          "The specified bucket does not exist",
-	ErrNoSuchKey:             "The specified key does not exist",
-	ErrBucketAlreadyExists:   "The requested bucket name is not available",
-	ErrBucketNotEmpty:        "The bucket you tried to delete is not empty",
-	ErrInvalidBucketName:     "The specified bucket is not valid",
-	ErrInvalidObjectName:     "The specified object name is not valid",
-	ErrAccessDenied:          "Access denied",
-	ErrInvalidRequest:        "Invalid request",
-	ErrIncompleteBody:        "You did not provide the number of bytes specified by the Content-Length HTTP header",
-	ErrInternalError:         "We encountered an internal error. Please try again",
-	ErrNotImplemented:        "A feature you requested is not yet implemented",
-	ErrMissingContentLength:  "You must provide the Content-Length HTTP header",
-	ErrRequestTimeout:        "Your socket connection to the server was not read from or written to within the timeout period",
-	ErrBadDigest:             "The Content-MD5 you specified did not match what we received",
-	ErrEntityTooLarge:        "Your proposed upload exceeds the maximum allowed size",
-	ErrMalformedXML:          "The XML you provided was not well-formed or did not validate against our published schema",
-	ErrMethodNotAllowed:      "The specified method is not allowed against this resource",
-	ErrSignatureDoesNotMatch: "The request signature we calculated does not match the signature you provided",
-	ErrAccountSuspended:      "Your account has been suspended. Contact support for assistance.",
-	ErrSlowDown:              "Monthly bandwidth limit exceeded. Upgrade your plan or wait for the next billing cycle.",
-	ErrNoSuchUpload:          "The specified multipart upload does not exist. The upload ID may be invalid, or the upload may have been aborted or completed.",
-	ErrInvalidPart:           "One or more of the specified parts could not be found. The part may not have been uploaded, or the specified entity tag may not match the part's entity tag.",
-	ErrInvalidPartOrder:      "The list of parts was not in ascending order. The parts list must be specified in order by part number.",
-	ErrEntityTooSmall:        "Your proposed upload is smaller than the minimum allowed object size. Each part must be at least 5 MB in size, except the last part.",
-	ErrInvalidPartNumber:     "Part number must be an integer between 1 and 10000, inclusive.",
-	ErrNoSuchVersion:         "The version ID specified in the request does not match an existing version.",
+	ErrNoSuchBucket:           "The specified bucket does not exist",
+	ErrNoSuchKey:              "The specified key does not exist",
+	ErrBucketAlreadyExists:    "The requested bucket name is not available",
+	ErrBucketNotEmpty:         "The bucket you tried to delete is not empty",
+	ErrInvalidBucketName:      "The specified bucket is not valid",
+	ErrInvalidObjectName:      "The specified object name is not valid",
+	ErrAccessDenied:           "Access denied",
+	ErrInvalidRequest:         "Invalid request",
+	ErrIncompleteBody:         "You did not provide the number of bytes specified by the Content-Length HTTP header",
+	ErrInternalError:          "We encountered an internal error. Please try again",
+	ErrNotImplemented:         "A feature you requested is not yet implemented",
+	ErrMissingContentLength:   "You must provide the Content-Length HTTP header",
+	ErrRequestTimeout:         "Your socket connection to the server was not read from or written to within the timeout period",
+	ErrBadDigest:              "The Content-MD5 you specified did not match what we received",
+	ErrEntityTooLarge:         "Your proposed upload exceeds the maximum allowed size",
+	ErrMalformedXML:           "The XML you provided was not well-formed or did not validate against our published schema",
+	ErrMethodNotAllowed:       "The specified method is not allowed against this resource",
+	ErrSignatureDoesNotMatch:  "The request signature we calculated does not match the signature you provided",
+	ErrAccountSuspended:       "Your account has been suspended. Contact support for assistance.",
+	ErrSlowDown:               "Monthly bandwidth limit exceeded. Upgrade your plan or wait for the next billing cycle.",
+	ErrNoSuchUpload:           "The specified multipart upload does not exist. The upload ID may be invalid, or the upload may have been aborted or completed.",
+	ErrInvalidPart:            "One or more of the specified parts could not be found. The part may not have been uploaded, or the specified entity tag may not match the part's entity tag.",
+	ErrInvalidPartOrder:       "The list of parts was not in ascending order. The parts list must be specified in order by part number.",
+	ErrEntityTooSmall:         "Your proposed upload is smaller than the minimum allowed object size. Each part must be at least 5 MB in size, except the last part.",
+	ErrInvalidPartNumber:      "Part number must be an integer between 1 and 10000, inclusive.",
+	ErrNoSuchVersion:          "The version ID specified in the request does not match an existing version.",
+	ErrObjectLocked:           "Object is protected by Object Lock",
+	ErrInvalidRetentionPeriod: "The retention period specified is not valid",
 }
 
 // HTTP status codes for errors
 var errorStatusCodes = map[string]int{
-	ErrNoSuchBucket:          http.StatusNotFound,
-	ErrNoSuchKey:             http.StatusNotFound,
-	ErrBucketAlreadyExists:   http.StatusConflict,
-	ErrBucketNotEmpty:        http.StatusConflict,
-	ErrInvalidBucketName:     http.StatusBadRequest,
-	ErrInvalidObjectName:     http.StatusBadRequest,
-	ErrAccessDenied:          http.StatusForbidden,
-	ErrInvalidRequest:        http.StatusBadRequest,
-	ErrIncompleteBody:        http.StatusBadRequest,
-	ErrInternalError:         http.StatusInternalServerError,
-	ErrNotImplemented:        http.StatusNotImplemented,
-	ErrMissingContentLength:  http.StatusLengthRequired,
-	ErrRequestTimeout:        http.StatusRequestTimeout,
-	ErrBadDigest:             http.StatusBadRequest,
-	ErrEntityTooLarge:        http.StatusRequestEntityTooLarge,
-	ErrMalformedXML:          http.StatusBadRequest,
-	ErrMethodNotAllowed:      http.StatusMethodNotAllowed,
-	ErrSignatureDoesNotMatch: http.StatusForbidden,
-	ErrAccountSuspended:      http.StatusForbidden,
-	ErrSlowDown:              http.StatusTooManyRequests,
-	ErrNoSuchUpload:          http.StatusNotFound,
-	ErrInvalidPart:           http.StatusBadRequest,
-	ErrInvalidPartOrder:      http.StatusBadRequest,
-	ErrEntityTooSmall:        http.StatusBadRequest,
-	ErrInvalidPartNumber:     http.StatusBadRequest,
-	ErrNoSuchVersion:         http.StatusNotFound,
+	ErrNoSuchBucket:           http.StatusNotFound,
+	ErrNoSuchKey:              http.StatusNotFound,
+	ErrBucketAlreadyExists:    http.StatusConflict,
+	ErrBucketNotEmpty:         http.StatusConflict,
+	ErrInvalidBucketName:      http.StatusBadRequest,
+	ErrInvalidObjectName:      http.StatusBadRequest,
+	ErrAccessDenied:           http.StatusForbidden,
+	ErrInvalidRequest:         http.StatusBadRequest,
+	ErrIncompleteBody:         http.StatusBadRequest,
+	ErrInternalError:          http.StatusInternalServerError,
+	ErrNotImplemented:         http.StatusNotImplemented,
+	ErrMissingContentLength:   http.StatusLengthRequired,
+	ErrRequestTimeout:         http.StatusRequestTimeout,
+	ErrBadDigest:              http.StatusBadRequest,
+	ErrEntityTooLarge:         http.StatusRequestEntityTooLarge,
+	ErrMalformedXML:           http.StatusBadRequest,
+	ErrMethodNotAllowed:       http.StatusMethodNotAllowed,
+	ErrSignatureDoesNotMatch:  http.StatusForbidden,
+	ErrAccountSuspended:       http.StatusForbidden,
+	ErrSlowDown:               http.StatusTooManyRequests,
+	ErrNoSuchUpload:           http.StatusNotFound,
+	ErrInvalidPart:            http.StatusBadRequest,
+	ErrInvalidPartOrder:       http.StatusBadRequest,
+	ErrEntityTooSmall:         http.StatusBadRequest,
+	ErrInvalidPartNumber:      http.StatusBadRequest,
+	ErrNoSuchVersion:          http.StatusNotFound,
+	ErrObjectLocked:           http.StatusForbidden,
+	ErrInvalidRetentionPeriod: http.StatusBadRequest,
 }
 
 // WriteS3Error writes an S3-compatible error response

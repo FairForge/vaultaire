@@ -19,6 +19,7 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 | 025 | Bucket registry: `buckets` table, tenant `slug`+`slug_locked` columns, `backend_name` on `object_head_cache` |
 | 026 | S3 versioning: `versioning_status` on `buckets`, `object_versions` table |
 | 027 | Bucket notifications: `bucket_notifications` table for S3 event webhook config |
+| 028 | Object Lock: `object_lock_enabled`, `default_retention_mode`, `default_retention_days` on `buckets`; `object_locks` table |
 
 ## Key Tables
 
@@ -29,12 +30,13 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 - **dashboard_sessions** — `id (VARCHAR 64)`, `user_id → users`, `tenant_id → tenants`, `email`, `role`, `ip_address`, `user_agent`, `created_at`, `last_active_at`, `expires_at`
 - **subscriptions** — Stripe subscription state tracking
 - **bandwidth_usage_daily** — per-tenant daily ingress/egress/requests (unique on tenant_id + date)
-- **buckets** — `(tenant_id, name) PK`, `visibility` (private/public-read), `cors_origins`, `cache_max_age_secs`, `bandwidth_budget_bytes`, `versioning_status` (disabled/Enabled/Suspended)
+- **buckets** — `(tenant_id, name) PK`, `visibility` (private/public-read), `cors_origins`, `cache_max_age_secs`, `bandwidth_budget_bytes`, `versioning_status`, `object_lock_enabled`, `default_retention_mode`, `default_retention_days`
 - **object_head_cache** — HEAD request cache (size, ETag, content-type, backend_name stored on PUT)
 - **user_mfa** — `user_id (PK)`, `secret`, `enabled`, `backup_codes` (JSON), `created_at`, `updated_at` — TOTP 2FA settings
 - **mfa_audit_log** — `id (SERIAL)`, `user_id`, `action`, `success`, `ip_address`, `user_agent`, `created_at`
 - **object_versions** — `(tenant_id, bucket, object_key, version_id) PK`, `size_bytes`, `etag`, `content_type`, `is_latest`, `is_delete_marker`, `backend_name`, `created_at`
-- **bucket_notifications** — `id (PK)`, `tenant_id`, `bucket`, `event_filter`, `target_type`, `target_url`, `enabled`, `created_at` — S3 event notification webhook config
+- **bucket_notifications** — `id (PK)`, `tenant_id`, `bucket`, `event_filter`, `target_type`, `target_url`, `enabled`, `created_at`
+- **object_locks** — `(tenant_id, bucket, object_key) PK`, `retention_mode`, `retain_until_date`, `legal_hold`, `created_at`, `updated_at`
 
 ## Connection
 
