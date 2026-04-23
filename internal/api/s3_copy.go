@@ -193,6 +193,9 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 		zap.String("directive", directive),
 		zap.Int64("size", counter.n),
 		zap.String("etag", etag))
+
+	notifySvc := NewNotificationDispatcher(s.db, s.logger)
+	notifySvc.Fire(t.ID, destBucket, "s3:ObjectCreated:Copy", destKey, counter.n, etag)
 }
 
 // parseCopySource parses the x-amz-copy-source header value.
