@@ -19,17 +19,19 @@ import (
 
 // S3ToEngine adapts S3 requests to engine operations.
 type S3ToEngine struct {
-	engine engine.Engine
-	db     *sql.DB
-	logger *zap.Logger
+	engine    engine.Engine
+	db        *sql.DB
+	logger    *zap.Logger
+	notifySvc *NotificationDispatcher
 }
 
 // NewS3ToEngine creates a new adapter
 func NewS3ToEngine(e engine.Engine, db *sql.DB, logger *zap.Logger) *S3ToEngine {
 	return &S3ToEngine{
-		engine: e,
-		db:     db,
-		logger: logger,
+		engine:    e,
+		db:        db,
+		logger:    logger,
+		notifySvc: NewNotificationDispatcher(db, logger),
 	}
 }
 
@@ -465,6 +467,8 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		zap.String("version_id", versionID),
 		zap.Bool("aws_chunked", chunked),
 		zap.Int64("size", size))
+
+	a.notifySvc.Fire(t.ID, bucket, "s3:ObjectCreated:Put", object, size, etag)
 }
 
 // HandleDelete processes S3 DELETE requests
@@ -514,6 +518,7 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 
 		w.Header().Set("x-amz-version-id", reqVersionID)
 		w.WriteHeader(http.StatusNoContent)
+		a.notifySvc.Fire(t.ID, bucket, "s3:ObjectRemoved:Delete", object, 0, "")
 		return
 	}
 
@@ -539,6 +544,7 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 		w.Header().Set("x-amz-version-id", markerID)
 		w.Header().Set("x-amz-delete-marker", "true")
 		w.WriteHeader(http.StatusNoContent)
+		a.notifySvc.Fire(t.ID, bucket, "s3:ObjectRemoved:Delete", object, 0, "")
 		return
 	}
 
@@ -564,6 +570,7 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+	a.notifySvc.Fire(t.ID, bucket, "s3:ObjectRemoved:Delete", object, 0, "")
 }
 
 // HandleList processes S3 LIST requests

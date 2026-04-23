@@ -448,6 +448,9 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 	}); err != nil {
 		s.logger.Error("failed to encode complete response", zap.Error(err))
 	}
+
+	notifySvc := NewNotificationDispatcher(s.db, s.logger)
+	notifySvc.Fire(t.ID, bucket, "s3:ObjectCreated:CompleteMultipartUpload", object, totalSize, etagValue)
 }
 
 func (s *Server) handleAbortMultipartUpload(w http.ResponseWriter, r *http.Request, bucket, object string) {
