@@ -63,6 +63,10 @@ func (m *MockDriver) List(ctx context.Context, container, prefix string) ([]stri
 	return nil, nil
 }
 
+func (m *MockDriver) Exists(ctx context.Context, container, artifact string) (bool, error) {
+	return true, nil
+}
+
 func (m *MockDriver) HealthCheck(ctx context.Context) error {
 	return nil
 }

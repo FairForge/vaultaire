@@ -100,6 +100,10 @@ func (c *CompressionDriver) List(ctx context.Context, container, prefix string) 
 	return c.backend.List(ctx, container, prefix)
 }
 
+func (c *CompressionDriver) Exists(ctx context.Context, container, artifact string) (bool, error) {
+	return c.backend.Exists(ctx, container, artifact+".gz")
+}
+
 func (c *CompressionDriver) HealthCheck(ctx context.Context) error {
 	return c.backend.HealthCheck(ctx)
 }

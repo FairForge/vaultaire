@@ -62,6 +62,15 @@ func (m *MockDriver) Exists(ctx context.Context, container, artifact string) (bo
 	return true, nil
 }
 
+func (m *MockDriver) Name() string { return m.name }
+
+func (m *MockDriver) HealthCheck(_ context.Context) error {
+	if m.shouldFail {
+		return errors.New("mock driver failed")
+	}
+	return nil
+}
+
 func TestFallbackDriver(t *testing.T) {
 	t.Run("uses primary when available", func(t *testing.T) {
 		// Arrange
