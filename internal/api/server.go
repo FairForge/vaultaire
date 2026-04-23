@@ -214,6 +214,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	cdnRouter := chi.NewRouter()
 	cdnRouter.Get("/{slug}/{bucket}/*", s.handleCDNRequest)
 	cdnRouter.Head("/{slug}/{bucket}/*", s.handleCDNRequest)
+	cdnRouter.Options("/{slug}/{bucket}/*", s.handleCDNRequest)
 
 	s.httpServer = &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
@@ -397,6 +398,7 @@ func (s *Server) setupRoutes() {
 	s.logger.Info("Registering CDN routes")
 	s.router.Get("/cdn/{slug}/{bucket}/*", s.handleCDNRequest)
 	s.router.Head("/cdn/{slug}/{bucket}/*", s.handleCDNRequest)
+	s.router.Options("/cdn/{slug}/{bucket}/*", s.handleCDNRequest)
 
 	// Dashboard routes must be registered BEFORE the S3 catch-all so that
 	// /login, /dashboard/*, /admin/*, and /static/* are matched first.

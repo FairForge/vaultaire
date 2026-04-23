@@ -47,6 +47,11 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.Method == http.MethodOptions {
+		handleCDNPreflight(w, r, corsOrigins)
+		return
+	}
+
 	if s.cdnRateLimiter != nil && !s.cdnRateLimiter.Allow("cdn:"+slug+":"+bucket) {
 		http.NotFound(w, r)
 		return
@@ -86,9 +91,7 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Last-Modified", updatedAt.UTC().Format(http.TimeFormat))
 	}
 
-	if corsOrigins != "" {
-		w.Header().Set("Access-Control-Allow-Origin", corsOrigins)
-	}
+	setCORSHeaders(w, r, corsOrigins)
 
 	if r.Method == http.MethodHead {
 		return
