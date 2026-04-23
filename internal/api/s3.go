@@ -504,7 +504,7 @@ func (s *Server) handleDeleteObject(w http.ResponseWriter, r *http.Request, req 
 // handleListObjects handles bucket listing
 func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request, req *S3Request) {
 	adapter := NewS3ToEngine(s.engine, s.db, s.logger)
-	adapter.HandleList(w, r, req.Bucket, "")
+	adapter.HandleListV2(w, r, req.Bucket)
 }
 
 // handleListBuckets handles listing all buckets
