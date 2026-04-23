@@ -131,6 +131,7 @@ func setupCDNFixture(t *testing.T) *cdnTestFixture {
 
 	s.router.Get("/cdn/{slug}/{bucket}/*", s.handleCDNRequest)
 	s.router.Head("/cdn/{slug}/{bucket}/*", s.handleCDNRequest)
+	s.router.Options("/cdn/{slug}/{bucket}/*", s.handleCDNRequest)
 
 	return &cdnTestFixture{
 		server:   s,
@@ -165,7 +166,8 @@ func TestCDN_GetPublicObject(t *testing.T) {
 	assert.Equal(t, "bytes", w.Header().Get("Accept-Ranges"))
 	assert.Equal(t, "nosniff", w.Header().Get("X-Content-Type-Options"))
 	assert.Equal(t, "noindex, nofollow", w.Header().Get("X-Robots-Tag"))
-	assert.Equal(t, "https://example.com", w.Header().Get("Access-Control-Allow-Origin"))
+	assert.Empty(t, w.Header().Get("Access-Control-Allow-Origin"),
+		"CORS headers should not be set without an Origin request header")
 }
 
 func TestCDN_HeadPublicObject(t *testing.T) {
@@ -452,6 +454,92 @@ func TestCDN_RangeRequest_NoRangeHeaderStillReturns200(t *testing.T) {
 	body, err := io.ReadAll(w.Body)
 	require.NoError(t, err)
 	assert.Equal(t, f.content, body)
+}
+
+func TestCDN_CORS_PreflightReturnsHeaders(t *testing.T) {
+	f := setupCDNFixture(t)
+
+	req := httptest.NewRequest("OPTIONS", "/cdn/"+f.slug+"/"+f.bucket+"/"+f.key, nil)
+	req.Header.Set("Origin", "https://example.com")
+	w := httptest.NewRecorder()
+	f.router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNoContent, w.Code)
+	assert.Equal(t, "https://example.com", w.Header().Get("Access-Control-Allow-Origin"))
+	assert.Equal(t, "GET, HEAD, OPTIONS", w.Header().Get("Access-Control-Allow-Methods"))
+	assert.Contains(t, w.Header().Get("Access-Control-Expose-Headers"), "ETag")
+	assert.Contains(t, w.Header().Get("Access-Control-Expose-Headers"), "Content-Range")
+	assert.Equal(t, "86400", w.Header().Get("Access-Control-Max-Age"))
+	assert.Equal(t, "0", w.Header().Get("Content-Length"))
+	assert.Equal(t, "Origin", w.Header().Get("Vary"))
+}
+
+func TestCDN_CORS_GetIncludesHeaders(t *testing.T) {
+	f := setupCDNFixture(t)
+
+	req := httptest.NewRequest("GET", "/cdn/"+f.slug+"/"+f.bucket+"/"+f.key, nil)
+	req.Header.Set("Origin", "https://example.com")
+	w := httptest.NewRecorder()
+	f.router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "https://example.com", w.Header().Get("Access-Control-Allow-Origin"))
+	assert.Equal(t, "GET, HEAD, OPTIONS", w.Header().Get("Access-Control-Allow-Methods"))
+	assert.Contains(t, w.Header().Get("Access-Control-Expose-Headers"), "Content-Length")
+	assert.Equal(t, "Origin", w.Header().Get("Vary"))
+}
+
+func TestCDN_CORS_NoOriginHeaderNoCORS(t *testing.T) {
+	f := setupCDNFixture(t)
+
+	req := httptest.NewRequest("GET", "/cdn/"+f.slug+"/"+f.bucket+"/"+f.key, nil)
+	w := httptest.NewRecorder()
+	f.router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Empty(t, w.Header().Get("Access-Control-Allow-Origin"))
+}
+
+func TestCDN_CORS_DisallowedOriginNoCORS(t *testing.T) {
+	f := setupCDNFixture(t)
+
+	req := httptest.NewRequest("GET", "/cdn/"+f.slug+"/"+f.bucket+"/"+f.key, nil)
+	req.Header.Set("Origin", "https://evil.com")
+	w := httptest.NewRecorder()
+	f.router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Empty(t, w.Header().Get("Access-Control-Allow-Origin"))
+}
+
+func TestCDN_CORS_PrivateBucketPreflightReturns404(t *testing.T) {
+	f := setupCDNFixture(t)
+
+	req := httptest.NewRequest("OPTIONS", "/cdn/"+f.slug+"/private-bucket/file.txt", nil)
+	req.Header.Set("Origin", "https://example.com")
+	w := httptest.NewRecorder()
+	f.router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	assert.Empty(t, w.Header().Get("Access-Control-Allow-Origin"))
+}
+
+func TestCDN_CORS_WildcardOrigins(t *testing.T) {
+	f := setupCDNFixture(t)
+
+	_, err := f.db.Exec(`
+		UPDATE buckets SET cors_origins = '*'
+		WHERE tenant_id = $1 AND name = $2`, f.tenantID, f.bucket)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("GET", "/cdn/"+f.slug+"/"+f.bucket+"/"+f.key, nil)
+	req.Header.Set("Origin", "https://any-site.com")
+	w := httptest.NewRecorder()
+	f.router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "*", w.Header().Get("Access-Control-Allow-Origin"))
+	assert.Empty(t, w.Header().Get("Vary"), "wildcard should not set Vary: Origin")
 }
 
 func TestCDN_MissingDBReturns404(t *testing.T) {
