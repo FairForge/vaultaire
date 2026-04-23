@@ -112,6 +112,15 @@ func (s *Server) handleDeleteObjects(w http.ResponseWriter, r *http.Request, req
 			continue
 		}
 
+		if lockErr := checkObjectLock(r.Context(), s.db, t.ID, bucket, key, isObjectLockBypass(r)); lockErr != nil {
+			result.Errors = append(result.Errors, DeleteError{
+				Key:     key,
+				Code:    ErrObjectLocked,
+				Message: errorMessages[ErrObjectLocked],
+			})
+			continue
+		}
+
 		delErr := s.engine.Delete(r.Context(), container, key)
 		isMissing := delErr != nil && (strings.Contains(delErr.Error(), "no such file or directory") ||
 			strings.Contains(delErr.Error(), "not found"))
