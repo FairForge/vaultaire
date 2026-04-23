@@ -136,11 +136,56 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	container := t.NamespaceContainer(bucket)
 	artifact := object
 
+	reqVersionID := r.URL.Query().Get("versionId")
+	vStatus := getBucketVersioningStatus(r.Context(), a.db, t.ID, bucket)
+
 	a.logger.Debug("GET with tenant isolation",
 		zap.String("tenant_id", t.ID),
 		zap.String("original_bucket", bucket),
 		zap.String("namespaced_container", container),
-		zap.String("artifact", artifact))
+		zap.String("artifact", artifact),
+		zap.String("version_id", reqVersionID))
+
+	if reqVersionID != "" && a.db != nil {
+		var isDeleteMarker bool
+		var vETag, vContentType string
+		var vSize int64
+		var vCreatedAt time.Time
+		err := a.db.QueryRowContext(r.Context(), `
+			SELECT is_delete_marker, etag, content_type, size_bytes, created_at
+			FROM object_versions
+			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND version_id = $4`,
+			t.ID, bucket, artifact, reqVersionID).Scan(&isDeleteMarker, &vETag, &vContentType, &vSize, &vCreatedAt)
+		if err != nil {
+			WriteS3Error(w, ErrNoSuchVersion, r.URL.Path, generateRequestID())
+			return
+		}
+		if isDeleteMarker {
+			w.Header().Set("x-amz-version-id", reqVersionID)
+			w.Header().Set("x-amz-delete-marker", "true")
+			WriteS3Error(w, ErrNoSuchKey, r.URL.Path, generateRequestID())
+			return
+		}
+		w.Header().Set("x-amz-version-id", reqVersionID)
+	}
+
+	if a.db != nil && (vStatus == "Enabled" || vStatus == "Suspended") && reqVersionID == "" {
+		var isDeleteMarker bool
+		var latestVersionID string
+		err := a.db.QueryRowContext(r.Context(), `
+			SELECT version_id, is_delete_marker FROM object_versions
+			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND is_latest = TRUE`,
+			t.ID, bucket, artifact).Scan(&latestVersionID, &isDeleteMarker)
+		if err == nil && isDeleteMarker {
+			w.Header().Set("x-amz-version-id", latestVersionID)
+			w.Header().Set("x-amz-delete-marker", "true")
+			WriteS3Error(w, ErrNoSuchKey, r.URL.Path, generateRequestID())
+			return
+		}
+		if err == nil && latestVersionID != "" {
+			w.Header().Set("x-amz-version-id", latestVersionID)
+		}
+	}
 
 	var cachedContentType string
 	var cachedSize int64
@@ -197,7 +242,9 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 			return
 		}
 		w.Header().Set("x-amz-request-id", generateRequestID())
-		w.Header().Set("x-amz-version-id", "null")
+		if w.Header().Get("x-amz-version-id") == "" {
+			w.Header().Set("x-amz-version-id", "null")
+		}
 		if err := serveRange(w, reader, rng, cachedSize, contentType); err != nil {
 			a.logger.Error("range serve failed",
 				zap.Error(err),
@@ -209,7 +256,9 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("x-amz-request-id", generateRequestID())
-	w.Header().Set("x-amz-version-id", "null")
+	if w.Header().Get("x-amz-version-id") == "" {
+		w.Header().Set("x-amz-version-id", "null")
+	}
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Cache-Control", "private, no-cache")
 	if cacheHit {
@@ -375,8 +424,36 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		}
 	}
 
+	versionID := ""
+	vStatus := getBucketVersioningStatus(r.Context(), a.db, t.ID, bucket)
+	if a.db != nil && (vStatus == "Enabled" || vStatus == "Suspended") {
+		if vStatus == "Enabled" {
+			versionID = generateVersionID()
+		} else {
+			versionID = "null"
+		}
+
+		_, _ = a.db.ExecContext(r.Context(), `
+			UPDATE object_versions SET is_latest = FALSE
+			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND is_latest = TRUE`,
+			t.ID, bucket, artifact)
+
+		_, _ = a.db.ExecContext(r.Context(), `
+			INSERT INTO object_versions
+				(tenant_id, bucket, object_key, version_id, size_bytes, etag, content_type, is_latest, is_delete_marker, backend_name)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, FALSE, $8)
+			ON CONFLICT (tenant_id, bucket, object_key, version_id) DO UPDATE SET
+				size_bytes = EXCLUDED.size_bytes, etag = EXCLUDED.etag,
+				content_type = EXCLUDED.content_type, is_latest = TRUE,
+				is_delete_marker = FALSE, backend_name = EXCLUDED.backend_name`,
+			t.ID, bucket, artifact, versionID, size, etag, contentType, backendName)
+	}
+
 	w.Header().Set("ETag", fmt.Sprintf(`"%s"`, etag))
 	w.Header().Set("x-amz-request-id", generateRequestID())
+	if versionID != "" {
+		w.Header().Set("x-amz-version-id", versionID)
+	}
 	w.WriteHeader(http.StatusOK)
 
 	a.logger.Info("artifact stored",
@@ -385,6 +462,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		zap.String("s3.object", object),
 		zap.String("backend", backendName),
 		zap.String("etag", etag),
+		zap.String("version_id", versionID),
 		zap.Bool("aws_chunked", chunked),
 		zap.Int64("size", size))
 }
@@ -399,6 +477,70 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 	}
 
 	container := t.NamespaceContainer(bucket)
+	reqVersionID := r.URL.Query().Get("versionId")
+	vStatus := getBucketVersioningStatus(r.Context(), a.db, t.ID, bucket)
+
+	if a.db != nil && (vStatus == "Enabled" || vStatus == "Suspended") && reqVersionID != "" {
+		result, err := a.db.ExecContext(r.Context(), `
+			DELETE FROM object_versions
+			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND version_id = $4`,
+			t.ID, bucket, object, reqVersionID)
+		if err != nil {
+			a.logger.Error("delete version failed", zap.Error(err))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+		rows, _ := result.RowsAffected()
+		if rows == 0 {
+			WriteS3Error(w, ErrNoSuchVersion, r.URL.Path, generateRequestID())
+			return
+		}
+
+		var hasRemaining bool
+		_ = a.db.QueryRowContext(r.Context(), `
+			SELECT EXISTS(SELECT 1 FROM object_versions
+			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3)`,
+			t.ID, bucket, object).Scan(&hasRemaining)
+
+		if hasRemaining {
+			_, _ = a.db.ExecContext(r.Context(), `
+				UPDATE object_versions SET is_latest = TRUE
+				WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
+				AND created_at = (
+					SELECT MAX(created_at) FROM object_versions
+					WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
+				)`, t.ID, bucket, object)
+		}
+
+		w.Header().Set("x-amz-version-id", reqVersionID)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	if a.db != nil && vStatus == "Enabled" && reqVersionID == "" {
+		markerID := generateVersionID()
+
+		_, _ = a.db.ExecContext(r.Context(), `
+			UPDATE object_versions SET is_latest = FALSE
+			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND is_latest = TRUE`,
+			t.ID, bucket, object)
+
+		_, _ = a.db.ExecContext(r.Context(), `
+			INSERT INTO object_versions
+				(tenant_id, bucket, object_key, version_id, size_bytes, etag, content_type, is_latest, is_delete_marker)
+			VALUES ($1, $2, $3, $4, 0, '', 'application/octet-stream', TRUE, TRUE)`,
+			t.ID, bucket, object, markerID)
+
+		_, _ = a.db.ExecContext(r.Context(), `
+			DELETE FROM object_head_cache
+			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+			t.ID, bucket, object)
+
+		w.Header().Set("x-amz-version-id", markerID)
+		w.Header().Set("x-amz-delete-marker", "true")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 
 	if err := a.engine.Delete(r.Context(), container, object); err != nil {
 		if strings.Contains(err.Error(), "no such file or directory") ||
