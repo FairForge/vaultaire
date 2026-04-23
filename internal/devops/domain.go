@@ -95,6 +95,7 @@ var DefaultDomainConfigs = map[string]*DomainConfig{
 			"https://www.stored.ge",
 			"https://api.stored.ge",
 			"https://dashboard.stored.ge",
+			"https://cdn.stored.ge",
 		},
 		RedirectWWW: true,
 		ForceHTTPS:  true,
