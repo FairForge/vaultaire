@@ -43,6 +43,7 @@ const (
 	ErrInvalidPartOrder      = "InvalidPartOrder"
 	ErrEntityTooSmall        = "EntityTooSmall"
 	ErrInvalidPartNumber     = "InvalidPartNumber"
+	ErrNoSuchVersion         = "NoSuchVersion"
 )
 
 // Error messages
@@ -72,6 +73,7 @@ var errorMessages = map[string]string{
 	ErrInvalidPartOrder:      "The list of parts was not in ascending order. The parts list must be specified in order by part number.",
 	ErrEntityTooSmall:        "Your proposed upload is smaller than the minimum allowed object size. Each part must be at least 5 MB in size, except the last part.",
 	ErrInvalidPartNumber:     "Part number must be an integer between 1 and 10000, inclusive.",
+	ErrNoSuchVersion:         "The version ID specified in the request does not match an existing version.",
 }
 
 // HTTP status codes for errors
@@ -101,6 +103,7 @@ var errorStatusCodes = map[string]int{
 	ErrInvalidPartOrder:      http.StatusBadRequest,
 	ErrEntityTooSmall:        http.StatusBadRequest,
 	ErrInvalidPartNumber:     http.StatusBadRequest,
+	ErrNoSuchVersion:         http.StatusNotFound,
 }
 
 // WriteS3Error writes an S3-compatible error response
