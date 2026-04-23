@@ -146,6 +146,23 @@ func (d *S3CompatDriver) List(ctx context.Context, container, prefix string) ([]
 	return artifacts, nil
 }
 
+// Exists checks if an artifact exists
+func (d *S3CompatDriver) Exists(ctx context.Context, container, artifact string) (bool, error) {
+	key := d.buildKey(container, artifact)
+
+	_, err := d.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(d.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		if strings.Contains(err.Error(), "NotFound") || strings.Contains(err.Error(), "404") {
+			return false, nil
+		}
+		return false, fmt.Errorf("exists %s: %w", key, err)
+	}
+	return true, nil
+}
+
 // HealthCheck verifies connectivity
 func (d *S3CompatDriver) HealthCheck(ctx context.Context) error {
 	// Try to list the bucket root - this should always work

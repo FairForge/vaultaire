@@ -41,6 +41,7 @@ type Driver interface {
 	Put(ctx context.Context, container, artifact string, data io.Reader, opts ...PutOption) error
 	Delete(ctx context.Context, container, artifact string) error
 	List(ctx context.Context, container, prefix string) ([]string, error)
+	Exists(ctx context.Context, container, artifact string) (bool, error)
 	HealthCheck(ctx context.Context) error
 }
 

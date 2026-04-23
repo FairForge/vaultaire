@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 
@@ -120,6 +121,21 @@ func (d *S3Driver) List(ctx context.Context, container, prefix string) ([]string
 		keys = append(keys, *obj.Key)
 	}
 	return keys, nil
+}
+
+// Exists checks if an object exists in S3
+func (d *S3Driver) Exists(ctx context.Context, container, artifact string) (bool, error) {
+	_, err := d.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(container),
+		Key:    aws.String(artifact),
+	})
+	if err != nil {
+		if strings.Contains(err.Error(), "NotFound") || strings.Contains(err.Error(), "404") {
+			return false, nil
+		}
+		return false, fmt.Errorf("exists %s/%s: %w", container, artifact, err)
+	}
+	return true, nil
 }
 
 // S3MultipartUpload represents an S3 multipart upload

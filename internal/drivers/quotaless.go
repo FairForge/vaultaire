@@ -222,6 +222,32 @@ func (d *QuotalessDriver) List(ctx context.Context, container string, prefix str
 	return cleaned, nil
 }
 
+// Exists checks if an object exists with retry logic
+func (d *QuotalessDriver) Exists(ctx context.Context, container, artifact string) (bool, error) {
+	fullPath := fmt.Sprintf("%s/%s/%s", d.rootPath, container, artifact)
+
+	var lastErr error
+	for attempt := 0; attempt < d.maxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(attempt*attempt) * time.Second
+			d.logger.Warn("retrying exists",
+				zap.Int("attempt", attempt+1),
+				zap.String("path", fullPath),
+				zap.Duration("backoff", backoff),
+				zap.Error(lastErr))
+			time.Sleep(backoff)
+		}
+
+		exists, err := d.S3Driver.Exists(ctx, "data", fullPath)
+		if err == nil {
+			return exists, nil
+		}
+		lastErr = err
+	}
+
+	return false, fmt.Errorf("exists failed after %d attempts: %w", d.maxRetries, lastErr)
+}
+
 // HealthCheck with timeout and retry
 func (d *QuotalessDriver) HealthCheck(ctx context.Context) error {
 	// Create a timeout context for health check
