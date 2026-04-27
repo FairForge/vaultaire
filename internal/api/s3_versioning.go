@@ -35,7 +35,12 @@ func (s *Server) handleGetBucketVersioning(w http.ResponseWriter, r *http.Reques
 			`SELECT versioning_status FROM buckets WHERE tenant_id = $1 AND name = $2`,
 			t.ID, req.Bucket).Scan(&dbStatus)
 		if err == sql.ErrNoRows {
-			WriteS3Error(w, ErrNoSuchBucket, r.URL.Path, generateRequestID())
+			reqID := generateRequestID()
+			if suggestion := bucketSuggestion(r.Context(), s.db, t.ID, req.Bucket); suggestion != "" {
+				WriteS3ErrorWithContext(w, ErrNoSuchBucket, r.URL.Path, reqID, WithSuggestion(suggestion))
+			} else {
+				WriteS3Error(w, ErrNoSuchBucket, r.URL.Path, reqID)
+			}
 			return
 		}
 		if err != nil {
@@ -99,7 +104,12 @@ func (s *Server) handlePutBucketVersioning(w http.ResponseWriter, r *http.Reques
 	}
 	rows, _ := result.RowsAffected()
 	if rows == 0 {
-		WriteS3Error(w, ErrNoSuchBucket, r.URL.Path, generateRequestID())
+		reqID := generateRequestID()
+		if suggestion := bucketSuggestion(r.Context(), s.db, t.ID, req.Bucket); suggestion != "" {
+			WriteS3ErrorWithContext(w, ErrNoSuchBucket, r.URL.Path, reqID, WithSuggestion(suggestion))
+		} else {
+			WriteS3Error(w, ErrNoSuchBucket, r.URL.Path, reqID)
+		}
 		return
 	}
 
