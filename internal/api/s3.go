@@ -2,10 +2,8 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
-	"encoding/xml"
 	"fmt"
 	"net/http"
 	"strings"
@@ -17,13 +15,6 @@ import (
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"go.uber.org/zap"
 )
-
-// xmlEscape escapes a string for safe inclusion in XML element content.
-func xmlEscape(s string) string {
-	var buf bytes.Buffer
-	_ = xml.EscapeText(&buf, []byte(s))
-	return buf.String()
-}
 
 // S3Request represents a parsed S3 API request
 type S3Request struct {
@@ -238,17 +229,16 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 				zap.Error(err),
 				zap.String("path", r.URL.Path))
 
-			w.Header().Set("Content-Type", "application/xml")
-			w.WriteHeader(http.StatusForbidden)
-			// Escape the error message to prevent XML/XSS injection.
-			safeMsg := xmlEscape(err.Error())
-			if _, werr := fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?>
-<Error>
-    <Code>SignatureDoesNotMatch</Code>
-    <Message>%s</Message>
-    <RequestId>%d</RequestId>
-</Error>`, safeMsg, time.Now().UnixNano()); werr != nil {
-				s.logger.Error("failed to write response", zap.Error(werr))
+			errCode := ErrAccessDenied
+			if strings.Contains(err.Error(), "invalid authorization format") ||
+				strings.Contains(err.Error(), "parse") {
+				errCode = ErrSignatureDoesNotMatch
+			}
+			reqID := generateRequestID()
+			if hint := authErrorHint(err.Error()); hint != "" {
+				WriteS3ErrorWithContext(w, errCode, r.URL.Path, reqID, WithSuggestion(hint))
+			} else {
+				WriteS3Error(w, errCode, r.URL.Path, reqID)
 			}
 			return
 		}
@@ -494,7 +484,12 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 			zap.String("tenant_id", t.ID),
 			zap.String("bucket", req.Bucket),
 			zap.String("object", req.Object))
-		WriteS3Error(w, ErrNoSuchKey, r.URL.Path, generateRequestID())
+		reqID := generateRequestID()
+		if suggestion := keySuggestion(r.Context(), s.db, t.ID, req.Bucket, req.Object); suggestion != "" {
+			WriteS3ErrorWithContext(w, ErrNoSuchKey, r.URL.Path, reqID, WithSuggestion(suggestion))
+		} else {
+			WriteS3Error(w, ErrNoSuchKey, r.URL.Path, reqID)
+		}
 		return
 	}
 	if err != nil {
