@@ -76,13 +76,21 @@ type Database interface {
 	// Will be implemented with PostgreSQL
 }
 
+func generateRandomSecret() []byte {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return []byte(hex.EncodeToString([]byte("fallback-jwt-secret")))
+	}
+	return []byte(hex.EncodeToString(b))
+}
+
 // NewAuthService creates a new auth service.
 // sqlDB may be nil (e.g. in tests); persistence is skipped when it is.
 func NewAuthService(db Database, sqlDB *sql.DB) *AuthService {
 	return &AuthService{
 		db:              db,
 		sqlDB:           sqlDB,
-		jwtSecret:       []byte("change-me-in-production"), // TODO: Use env var
+		jwtSecret:       generateRandomSecret(),
 		users:           make(map[string]*User),
 		tenants:         make(map[string]*Tenant),
 		apiKeys:         make(map[string]*APIKey),

@@ -1,107 +1,107 @@
-# Vaultaire - Universal Storage Orchestration Engine
+# Vaultaire
 
+[![CI](https://github.com/FairForge/vaultaire/actions/workflows/ci.yml/badge.svg)](https://github.com/FairForge/vaultaire/actions/workflows/ci.yml)
+[![Go 1.24+](https://img.shields.io/badge/go-1.24+-00ADD8.svg)](https://go.dev/)
+[![S3 Compatible](https://img.shields.io/badge/S3-Compatible-orange.svg)](https://docs.aws.amazon.com/AmazonS3/latest/API/Welcome.html)
 [![Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Go 1.21+](https://img.shields.io/badge/go-1.21+-00ADD8.svg)](https://go.dev/)
-[![S3 Compatible](https://img.shields.io/badge/S3-Compatible-orange.svg)](docs/s3-api.md)
 
-> Turn any storage backend into intelligent, unified infrastructure
+Universal storage orchestration engine. One S3-compatible API, multiple storage backends.
 
 ## What is Vaultaire?
 
-Vaultaire is a storage orchestration engine that provides a single S3-compatible API across multiple storage backends. Think of it as a universal translator for storage - use one API, store anywhere.
+Vaultaire provides a single S3-compatible API that routes data across multiple storage backends — local disk, AWS S3, Seagate Lyve Cloud, and more. It handles multi-tenant isolation, streaming I/O, billing, and backend failover so you don't have to.
 
-## Three Ways to Use Vaultaire
-
-### 🚀 stored.ge - Managed Storage for Developers
-- $3.99/TB/month
-- 100GB Seagate Lyve Cloud included
-- Perfect for indie developers
-- [Sign up at stored.ge](https://stored.ge)
-
-### 🏢 stored.cloud - Enterprise Storage Platform
-- Starting at $19.99/TB/month
-- 100% enterprise infrastructure
-- SLA guarantees & compliance
-- [Learn more at stored.cloud](https://stored.cloud)
-
-### ��️ Vaultaire Core - Self-Hosted Solution
-- Open source (Apache 2.0)
-- Bring your own backends
-- Deploy on your infrastructure
-- [Get started below](#quick-start)
-
-## Quick Start (Self-Hosted)
-
-```bash
-# Run with Docker
-docker run -d \
-  -p 9000:9000 \
-  -v /etc/vaultaire:/config \
-  vaultaire/core:latest
-
-# Or build from source
-git clone https://github.com/fairforge/vaultaire
-cd vaultaire
-make build
-./bin/vaultaire serve
-Features
-
-✅ Universal S3 API - Works with any S3 client
-✅ Multi-Backend Support - Mix Wasabi, R2, Hetzner, etc.
-✅ Intelligent Tiering - Automatic hot/cold data management
-✅ Erasure Coding - Built-in redundancy
-✅ Event Streaming - Full audit trail
-✅ ML-Ready - Predictive caching (Enterprise)
-
-Architecture
+```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
 │   S3 API    │────▶│   Engine    │────▶│   Drivers   │
-│  (bucket/   │     │ (container/ │     │  (Multiple  │
-│   object)   │     │  artifact)  │     │  Backends)  │
+│  (bucket/   │     │ (container/ │     │  (local, s3 │
+│   object)   │     │  artifact)  │     │  lyve, ...) │
 └─────────────┘     └─────────────┘     └─────────────┘
-Read full architecture docs →
-Supported Backends
+```
 
-✅ Local filesystem
-✅ S3 / S3-compatible
-✅ Seagate Lyve Cloud
-✅ Wasabi
-✅ Cloudflare R2
-✅ Backblaze B2
-✅ MinIO
-🔄 Hetzner Storage Box (coming soon)
-🔄 Google Cloud Storage (coming soon)
-🔄 Bring your own storage server
+**S3 API** — Standard S3 protocol. Works with AWS CLI, SDKs, rclone, s3cmd, JuiceFS.
 
-Documentation
+**Engine** — Orchestrates routing, tiering, caching, and replication across backends.
 
-Architecture Overview
-API Reference
-Configuration Guide
-Driver Development
-Deployment Guide
-Contributing Guidelines
-Code of Conduct
+**Drivers** — Pluggable storage backends. Add new ones by implementing the `storage.Backend` interface.
 
-Contributing
-See CONTRIBUTING.md for details on our code of conduct and the process for submitting pull requests.
-License
-Apache 2.0 - see LICENSE
-This project uses Apache 2.0 to ensure:
+## Quick Start
 
-✅ Enterprise-friendly usage
-✅ Patent protection for all users
-✅ Clear contribution guidelines
-✅ Compatible with commercial use
+```bash
+# Build from source
+git clone https://github.com/FairForge/vaultaire.git
+cd vaultaire
+make build
 
-Why We Built This
-Storage is fragmented. Every provider has different APIs, pricing, and capabilities. Vaultaire unifies them all behind a single, intelligent interface.
-We believe in making enterprise-grade storage accessible to everyone through intelligent orchestration.
-Status
+# Run (uses local filesystem by default)
+./bin/vaultaire
+```
 
-🚧 Current Phase: MVP Development
-📊 Progress: Step 400 of 500
-🎯 Next Milestone: user validation
-�� Launch Target: Q1 2026
+Vaultaire starts on port 8000. Use any S3 client:
 
-Built by @fairforge | Blog | Twitter
+```bash
+aws s3 mb s3://my-bucket --endpoint-url http://localhost:8000
+aws s3 cp file.txt s3://my-bucket/ --endpoint-url http://localhost:8000
+```
+
+## Features
+
+- **S3-compatible API** — PUT, GET, DELETE, LIST, HEAD, multipart uploads, versioning, object lock
+- **Multi-backend routing** — local filesystem, AWS S3, Seagate Lyve Cloud, Quotaless, OneDrive
+- **Multi-tenant isolation** — namespaced storage with per-tenant quotas and billing
+- **Streaming I/O** — processes 1KB to 1TB files without buffering into memory
+- **Stripe billing** — metered subscriptions, usage-based invoicing, webhook-driven plan changes
+- **Circuit breakers** — exponential backoff, health-check failover across backends
+- **Object versioning** — enable/suspend per bucket, version-aware GET/DELETE
+- **Object lock** — GOVERNANCE/COMPLIANCE retention modes, legal hold
+- **Bucket notifications** — webhook delivery on object events
+- **Redis caching** — LRU metadata cache reducing database load
+- **Monitoring** — Prometheus metrics, structured logging (Zap)
+
+## Configuration
+
+Vaultaire is configured via environment variables. Storage mode is auto-detected based on which credentials are present:
+
+```bash
+# PostgreSQL (optional — degrades gracefully without it)
+DB_HOST=localhost DB_PORT=5432 DB_NAME=vaultaire DB_USER=viera
+
+# Storage backends (set one or more)
+S3_ACCESS_KEY=... S3_SECRET_KEY=...
+LYVE_ACCESS_KEY=... LYVE_SECRET_KEY=... LYVE_REGION=us-east-1
+
+# Billing (optional)
+STRIPE_SECRET_KEY=sk_...
+```
+
+See [CLAUDE.md](CLAUDE.md) for the full environment variable reference.
+
+## Project Structure
+
+```
+cmd/vaultaire/       Entry point — driver init, DB connect, HTTP server
+internal/
+  api/               S3 protocol handlers, auth middleware, error responses
+  engine/            Backend orchestration, tiering, caching
+  drivers/           Storage provider implementations
+  auth/              User registration, JWT, S3 signature validation, MFA
+  billing/           Stripe integration, metered subscriptions
+  database/          PostgreSQL migrations
+  tenant/            Multi-tenant context and isolation
+```
+
+## Development
+
+```bash
+make build          # Build binary
+make test           # Quick tests with race detector
+make test-unit      # Unit tests only
+make lint           # golangci-lint
+make fmt            # Format code
+```
+
+TDD is the standard workflow. Tests use [testify](https://github.com/stretchr/testify) with Arrange/Act/Assert.
+
+## License
+
+[Apache 2.0](LICENSE)
