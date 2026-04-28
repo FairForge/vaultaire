@@ -72,7 +72,12 @@ func (s *Server) handleGetObjectLockConfiguration(w http.ResponseWriter, r *http
 			 FROM buckets WHERE tenant_id = $1 AND name = $2`,
 			t.ID, req.Bucket).Scan(&enabled, &mode, &days)
 		if err == sql.ErrNoRows {
-			WriteS3Error(w, ErrNoSuchBucket, r.URL.Path, generateRequestID())
+			reqID := generateRequestID()
+			if suggestion := bucketSuggestion(r.Context(), s.db, t.ID, req.Bucket); suggestion != "" {
+				WriteS3ErrorWithContext(w, ErrNoSuchBucket, r.URL.Path, reqID, WithSuggestion(suggestion))
+			} else {
+				WriteS3Error(w, ErrNoSuchBucket, r.URL.Path, reqID)
+			}
 			return
 		}
 		if err != nil {
@@ -154,7 +159,12 @@ func (s *Server) handlePutObjectLockConfiguration(w http.ResponseWriter, r *http
 	}
 	rows, _ := result.RowsAffected()
 	if rows == 0 {
-		WriteS3Error(w, ErrNoSuchBucket, r.URL.Path, generateRequestID())
+		reqID := generateRequestID()
+		if suggestion := bucketSuggestion(r.Context(), s.db, t.ID, req.Bucket); suggestion != "" {
+			WriteS3ErrorWithContext(w, ErrNoSuchBucket, r.URL.Path, reqID, WithSuggestion(suggestion))
+		} else {
+			WriteS3Error(w, ErrNoSuchBucket, r.URL.Path, reqID)
+		}
 		return
 	}
 
@@ -189,7 +199,12 @@ func (s *Server) handleGetObjectRetention(w http.ResponseWriter, r *http.Request
 			 WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
 			t.ID, req.Bucket, req.Object).Scan(&mode, &retainUntil)
 		if err == sql.ErrNoRows {
-			WriteS3Error(w, ErrNoSuchKey, r.URL.Path, generateRequestID())
+			reqID := generateRequestID()
+			if suggestion := keySuggestion(r.Context(), s.db, t.ID, req.Bucket, req.Object); suggestion != "" {
+				WriteS3ErrorWithContext(w, ErrNoSuchKey, r.URL.Path, reqID, WithSuggestion(suggestion))
+			} else {
+				WriteS3Error(w, ErrNoSuchKey, r.URL.Path, reqID)
+			}
 			return
 		}
 		if err != nil {

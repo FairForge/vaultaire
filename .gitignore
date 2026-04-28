@@ -38,6 +38,8 @@ coverage.out
 *.bin
 *.log
 test-*.bin
+test-*.sh
+test_*.sh
 test*.txt
 test*.bin
 downloaded*.bin

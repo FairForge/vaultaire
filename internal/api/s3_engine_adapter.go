@@ -165,7 +165,12 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		if isDeleteMarker {
 			w.Header().Set("x-amz-version-id", reqVersionID)
 			w.Header().Set("x-amz-delete-marker", "true")
-			WriteS3Error(w, ErrNoSuchKey, r.URL.Path, generateRequestID())
+			reqID := generateRequestID()
+			if suggestion := keySuggestion(r.Context(), a.db, t.ID, bucket, artifact); suggestion != "" {
+				WriteS3ErrorWithContext(w, ErrNoSuchKey, r.URL.Path, reqID, WithSuggestion(suggestion))
+			} else {
+				WriteS3Error(w, ErrNoSuchKey, r.URL.Path, reqID)
+			}
 			return
 		}
 		w.Header().Set("x-amz-version-id", reqVersionID)
@@ -181,7 +186,12 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		if err == nil && isDeleteMarker {
 			w.Header().Set("x-amz-version-id", latestVersionID)
 			w.Header().Set("x-amz-delete-marker", "true")
-			WriteS3Error(w, ErrNoSuchKey, r.URL.Path, generateRequestID())
+			reqID := generateRequestID()
+			if suggestion := keySuggestion(r.Context(), a.db, t.ID, bucket, artifact); suggestion != "" {
+				WriteS3ErrorWithContext(w, ErrNoSuchKey, r.URL.Path, reqID, WithSuggestion(suggestion))
+			} else {
+				WriteS3Error(w, ErrNoSuchKey, r.URL.Path, reqID)
+			}
 			return
 		}
 		if err == nil && latestVersionID != "" {
@@ -224,7 +234,12 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	if err != nil {
 		if strings.Contains(err.Error(), "no such file or directory") ||
 			strings.Contains(err.Error(), "not found") {
-			WriteS3Error(w, ErrNoSuchKey, r.URL.Path, generateRequestID())
+			reqID := generateRequestID()
+			if suggestion := keySuggestion(r.Context(), a.db, t.ID, bucket, artifact); suggestion != "" {
+				WriteS3ErrorWithContext(w, ErrNoSuchKey, r.URL.Path, reqID, WithSuggestion(suggestion))
+			} else {
+				WriteS3Error(w, ErrNoSuchKey, r.URL.Path, reqID)
+			}
 		} else {
 			a.logger.Error("engine get failed",
 				zap.Error(err),

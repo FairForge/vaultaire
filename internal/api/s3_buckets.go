@@ -170,7 +170,12 @@ func (s *Server) DeleteBucket(w http.ResponseWriter, r *http.Request) {
 
 	// Check if bucket exists
 	if _, err := os.Stat(dirPath); os.IsNotExist(err) {
-		WriteS3Error(w, ErrNoSuchBucket, r.URL.Path, generateRequestID())
+		reqID := generateRequestID()
+		if suggestion := bucketSuggestion(ctx, s.db, tenantID, bucket); suggestion != "" {
+			WriteS3ErrorWithContext(w, ErrNoSuchBucket, r.URL.Path, reqID, WithSuggestion(suggestion))
+		} else {
+			WriteS3Error(w, ErrNoSuchBucket, r.URL.Path, reqID)
+		}
 		return
 	}
 
