@@ -15,6 +15,8 @@ S3-compatible API layer. Translates S3 protocol to engine operations, handles au
 - **s3_notifications.go** — Bucket notification configuration
 - **s3_copy.go** — CopyObject handler
 - **s3_list.go** — ListObjectsV2 handler
+- **s3_presign.go** — Pre-signed URL verification (SigV4 query string auth) and URL generation
+- **presigned.go** — Management API endpoint for generating pre-signed URLs (`/api/v1/presigned`)
 
 ## Error Response Pattern
 
@@ -47,9 +49,20 @@ if suggestion := bucketSuggestion(ctx, s.db, tenantID, bucket); suggestion != ""
 
 ## Auth Flow
 
-1. `handleS3Request` calls `auth.ValidateRequest(r)` which parses the Authorization header
-2. On failure, `authErrorHint` maps the error to a hint, and `WriteS3ErrorWithContext` returns it
-3. On success, tenant context is set and the request is routed to the operation handler
+1. `handleS3Request` checks `isPresignedRequest(r)` — if query has `X-Amz-Algorithm=AWS4-HMAC-SHA256`, routes to `verifyPresignedURL` (SigV4 query string auth)
+2. Otherwise calls `auth.ValidateRequest(r)` which parses the Authorization header
+3. On failure, returns appropriate S3 error (presigned errors: `ExpiredToken`, `AuthorizationQueryParametersError`, `SignatureDoesNotMatch`)
+4. On success, tenant context is set and the request is routed to the operation handler
+
+### Pre-Signed URL Verification (Phase 5.10.16)
+
+`verifyPresignedURL` validates S3 SigV4 query-string auth for browser-direct uploads:
+- Parses X-Amz-Credential to extract access key, then looks up secret key + tenant ID from `tenants` table
+- Validates expiration (X-Amz-Date + X-Amz-Expires), rejects expired requests
+- Rebuilds canonical request (excludes X-Amz-Signature from query string, uses UNSIGNED-PAYLOAD)
+- Computes signature and compares with `hmac.Equal` (constant-time)
+
+Management API at `/api/v1/presigned` (JWT-protected) generates pre-signed URLs for dashboard users without needing an AWS SDK.
 
 ## Tenant Context
 
