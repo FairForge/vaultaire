@@ -222,25 +222,46 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 	var err error
 
 	if !s.testMode {
-		auth := auth.NewAuth(s.db, s.logger)
-		tenantID, err = auth.ValidateRequest(r)
-		if err != nil {
-			s.logger.Error("authentication failed",
-				zap.Error(err),
-				zap.String("path", r.URL.Path))
+		if isPresignedRequest(r) {
+			tenantID, err = s.verifyPresignedURL(r)
+			if err != nil {
+				s.logger.Error("presigned URL verification failed",
+					zap.Error(err),
+					zap.String("path", r.URL.Path))
 
-			errCode := ErrAccessDenied
-			if strings.Contains(err.Error(), "invalid authorization format") ||
-				strings.Contains(err.Error(), "parse") {
-				errCode = ErrSignatureDoesNotMatch
+				errCode := err.Error()
+				reqID := generateRequestID()
+				switch errCode {
+				case ErrExpiredPresignedRequest, ErrSignatureDoesNotMatch,
+					ErrAccessDenied, ErrAuthorizationQueryParametersError,
+					ErrInvalidPresignExpires:
+					WriteS3Error(w, errCode, r.URL.Path, reqID)
+				default:
+					WriteS3Error(w, ErrAccessDenied, r.URL.Path, reqID)
+				}
+				return
 			}
-			reqID := generateRequestID()
-			if hint := authErrorHint(err.Error()); hint != "" {
-				WriteS3ErrorWithContext(w, errCode, r.URL.Path, reqID, WithSuggestion(hint))
-			} else {
-				WriteS3Error(w, errCode, r.URL.Path, reqID)
+		} else {
+			auth := auth.NewAuth(s.db, s.logger)
+			tenantID, err = auth.ValidateRequest(r)
+			if err != nil {
+				s.logger.Error("authentication failed",
+					zap.Error(err),
+					zap.String("path", r.URL.Path))
+
+				errCode := ErrAccessDenied
+				if strings.Contains(err.Error(), "invalid authorization format") ||
+					strings.Contains(err.Error(), "parse") {
+					errCode = ErrSignatureDoesNotMatch
+				}
+				reqID := generateRequestID()
+				if hint := authErrorHint(err.Error()); hint != "" {
+					WriteS3ErrorWithContext(w, errCode, r.URL.Path, reqID, WithSuggestion(hint))
+				} else {
+					WriteS3Error(w, errCode, r.URL.Path, reqID)
+				}
+				return
 			}
-			return
 		}
 	} else {
 		if t, err := tenant.FromContext(r.Context()); err == nil && t != nil {
