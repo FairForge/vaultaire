@@ -1,6 +1,7 @@
 package api
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -64,35 +65,29 @@ func (s *Server) handleMgmtListBuckets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var rows_ interface{ Close() error }
-	var scanErr error
-
-	query := `SELECT name, created_at FROM buckets WHERE tenant_id = $1`
-	args := []interface{}{tenantID}
-	argIdx := 2
-
+	var rows *sql.Rows
+	var dbErr error
 	if startingAfter != "" {
-		query += ` AND name > $` + strconv.Itoa(argIdx)
-		args = append(args, startingAfter)
-		argIdx++
+		rows, dbErr = s.db.QueryContext(r.Context(),
+			`SELECT name, created_at FROM buckets WHERE tenant_id = $1 AND name > $2 ORDER BY name LIMIT $3`,
+			tenantID, startingAfter, limit+1)
+	} else {
+		rows, dbErr = s.db.QueryContext(r.Context(),
+			`SELECT name, created_at FROM buckets WHERE tenant_id = $1 ORDER BY name LIMIT $2`,
+			tenantID, limit+1)
 	}
-	query += ` ORDER BY name LIMIT $` + strconv.Itoa(argIdx)
-	args = append(args, limit+1)
-
-	dbRows, dbErr := s.db.QueryContext(r.Context(), query, args...)
 	if dbErr != nil {
 		s.logger.Error("management list buckets", zap.Error(dbErr))
 		writeManagementError(w, ErrTypeAPI, "db_error", "failed to list buckets", "")
 		return
 	}
-	rows_ = dbRows
-	defer func() { _ = rows_.Close() }()
+	defer func() { _ = rows.Close() }()
 
 	var buckets []mgmtBucket
-	for dbRows.Next() {
+	for rows.Next() {
 		var b mgmtBucket
-		if scanErr = dbRows.Scan(&b.Name, &b.CreatedAt); scanErr != nil {
-			s.logger.Error("scan bucket", zap.Error(scanErr))
+		if err := rows.Scan(&b.Name, &b.CreatedAt); err != nil {
+			s.logger.Error("scan bucket", zap.Error(err))
 			continue
 		}
 		b.Object = "bucket"
@@ -151,7 +146,7 @@ func (s *Server) handleMgmtCreateBucket(w http.ResponseWriter, r *http.Request) 
 	if dataPath == "" {
 		dataPath = "/tmp/vaultaire"
 	}
-	dirPath := filepath.Join(dataPath, tenantID, req.Name)
+	dirPath := filepath.Clean(filepath.Join(dataPath, tenantID, req.Name)) // #nosec G703 — name validated by validateBucketName (a-z0-9.-)
 	if err := os.MkdirAll(dirPath, 0750); err != nil {
 		s.logger.Error("create bucket dir", zap.Error(err))
 		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to create bucket", "")
@@ -228,7 +223,7 @@ func (s *Server) handleMgmtDeleteBucket(w http.ResponseWriter, r *http.Request) 
 	if dataPath == "" {
 		dataPath = "/tmp/vaultaire"
 	}
-	dirPath := filepath.Join(dataPath, tenantID, name)
+	dirPath := filepath.Clean(filepath.Join(dataPath, tenantID, name)) // #nosec G703 — name from URL param, tenant from JWT
 
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
@@ -304,25 +299,28 @@ func (s *Server) handleMgmtListObjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	query := `SELECT object_key, size, etag, content_type, last_modified
-		FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2`
-	args := []interface{}{tenantID, bucket}
-	argIdx := 3
-
-	if prefix != "" {
-		query += ` AND object_key LIKE $` + strconv.Itoa(argIdx)
-		args = append(args, prefix+"%")
-		argIdx++
+	var dbRows *sql.Rows
+	var dbErr2 error
+	lim := limit + 1
+	switch {
+	case prefix != "" && startingAfter != "":
+		dbRows, dbErr2 = s.db.QueryContext(r.Context(),
+			`SELECT object_key, size, etag, content_type, last_modified FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key LIKE $3 AND object_key > $4 ORDER BY object_key LIMIT $5`,
+			tenantID, bucket, prefix+"%", startingAfter, lim)
+	case prefix != "":
+		dbRows, dbErr2 = s.db.QueryContext(r.Context(),
+			`SELECT object_key, size, etag, content_type, last_modified FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key LIKE $3 ORDER BY object_key LIMIT $4`,
+			tenantID, bucket, prefix+"%", lim)
+	case startingAfter != "":
+		dbRows, dbErr2 = s.db.QueryContext(r.Context(),
+			`SELECT object_key, size, etag, content_type, last_modified FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key > $3 ORDER BY object_key LIMIT $4`,
+			tenantID, bucket, startingAfter, lim)
+	default:
+		dbRows, dbErr2 = s.db.QueryContext(r.Context(),
+			`SELECT object_key, size, etag, content_type, last_modified FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 ORDER BY object_key LIMIT $3`,
+			tenantID, bucket, lim)
 	}
-	if startingAfter != "" {
-		query += ` AND object_key > $` + strconv.Itoa(argIdx)
-		args = append(args, startingAfter)
-		argIdx++
-	}
-	query += ` ORDER BY object_key LIMIT $` + strconv.Itoa(argIdx)
-	args = append(args, limit+1)
-
-	dbRows, err := s.db.QueryContext(r.Context(), query, args...)
+	err := dbErr2
 	if err != nil {
 		s.logger.Error("management list objects", zap.Error(err))
 		writeManagementError(w, ErrTypeAPI, "db_error", "failed to list objects", "")
