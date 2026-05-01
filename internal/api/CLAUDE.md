@@ -17,6 +17,11 @@ S3-compatible API layer. Translates S3 protocol to engine operations, handles au
 - **s3_list.go** — ListObjectsV2 handler
 - **s3_presign.go** — Pre-signed URL verification (SigV4 query string auth) and URL generation
 - **presigned.go** — Management API endpoint for generating pre-signed URLs (`/api/v1/presigned`)
+- **management.go** — JSON response helpers: `writeJSON`, `writeListResponse`, `getRequestID` (Stripe-style envelope)
+- **management_errors.go** — 7 typed errors with Stripe-style error envelope (`writeManagementError`)
+- **management_routes.go** — RESTful JSON management API under `/api/v1/manage/` (buckets CRUD, objects list, keys CRUD, usage)
+- **management_ratelimit.go** — Per-tenant rate limiter middleware (100 req/min, token bucket, X-RateLimit-* headers)
+- **llms_txt.go** — Static `/llms.txt` endpoint (plain-text API summary for LLMs)
 
 ## Error Response Pattern
 
@@ -63,6 +68,21 @@ if suggestion := bucketSuggestion(ctx, s.db, tenantID, bucket); suggestion != ""
 - Computes signature and compares with `hmac.Equal` (constant-time)
 
 Management API at `/api/v1/presigned` (JWT-protected) generates pre-signed URLs for dashboard users without needing an AWS SDK.
+
+## Management API (Phase 5.11.0)
+
+JSON REST layer at `/api/v1/manage/` with JWT auth and per-tenant rate limiting. Separate from S3 XML wire protocol.
+
+**Response envelope** (Stripe-style):
+- Single: `{"object": "bucket", "name": "...", "request_id": "..."}`
+- List: `{"object": "list", "data": [...], "has_more": bool, "next_cursor": "...", "total_count": N, "request_id": "..."}`
+- Error: `{"error": {"type": "invalid_request_error", "code": "...", "message": "...", "param": "...", "request_id": "..."}}`
+
+**Error types**: `invalid_request_error` (400), `authentication_error` (401), `permission_error` (403), `not_found_error` (404), `conflict_error` (409), `rate_limit_error` (429), `api_error` (500).
+
+**Rate limiting**: `ManagementRateLimiter` — per-tenant token bucket (100 req/min), separate from the CDN per-IP limiter. Evicts if >10K tenants. Sets `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` headers; returns `Retry-After` on 429.
+
+**Cursor pagination**: queries `LIMIT N+1`; if N+1 results → `has_more=true`, returns first N, `next_cursor` = last item's name/key.
 
 ## Tenant Context
 
