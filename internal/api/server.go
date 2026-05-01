@@ -420,6 +420,11 @@ func (s *Server) setupRoutes() {
 		GitHub:     s.githubOAuth,
 	})
 
+	s.logger.Info("Registering management API routes")
+	s.registerManagementRoutes()
+
+	s.router.Get("/llms.txt", s.handleLlmsTxt)
+
 	s.logger.Info("Registering S3 catch-all handler")
 	s.router.HandleFunc("/*", s.handleS3Request)
 }
