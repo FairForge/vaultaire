@@ -154,7 +154,7 @@ func decorrelatedJitter(base, previous, cap time.Duration) time.Duration {
 		return base
 	}
 	span := int64(high - base)
-	return base + time.Duration(mrand.Int64N(span))
+	return base + time.Duration(mrand.Int64N(span)) // #nosec G404 — jitter backoff, not security
 }
 
 func parseRetryAfter(resp *http.Response) time.Duration {

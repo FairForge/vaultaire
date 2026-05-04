@@ -128,7 +128,7 @@ func HandleUpdateBucketSettings(tmpl *template.Template, db *sql.DB, logger *zap
 
 		if db == nil {
 			middleware.SetFlash(w, "error", "Database not available.")
-			http.Redirect(w, r, fmt.Sprintf("/dashboard/buckets/%s/settings", bucketName), http.StatusSeeOther)
+			http.Redirect(w, r, fmt.Sprintf("/dashboard/buckets/%s/settings", bucketName), http.StatusSeeOther) // #nosec G710 — hardcoded path prefix
 			return
 		}
 
@@ -141,7 +141,7 @@ func HandleUpdateBucketSettings(tmpl *template.Template, db *sql.DB, logger *zap
 			allowed, reason := auth.CanEnablePublicRead(tier)
 			if !allowed {
 				middleware.SetFlash(w, "error", reason)
-				http.Redirect(w, r, fmt.Sprintf("/dashboard/buckets/%s/settings", bucketName), http.StatusSeeOther)
+				http.Redirect(w, r, fmt.Sprintf("/dashboard/buckets/%s/settings", bucketName), http.StatusSeeOther) // #nosec G710 — hardcoded path prefix
 				return
 			}
 		}
@@ -154,18 +154,18 @@ func HandleUpdateBucketSettings(tmpl *template.Template, db *sql.DB, logger *zap
 		if err != nil {
 			logger.Error("update bucket settings", zap.Error(err))
 			middleware.SetFlash(w, "error", "Failed to save settings.")
-			http.Redirect(w, r, fmt.Sprintf("/dashboard/buckets/%s/settings", bucketName), http.StatusSeeOther)
+			http.Redirect(w, r, fmt.Sprintf("/dashboard/buckets/%s/settings", bucketName), http.StatusSeeOther) // #nosec G710 — hardcoded path prefix
 			return
 		}
 
 		rows, _ := result.RowsAffected()
 		if rows == 0 {
 			middleware.SetFlash(w, "error", "Bucket not found.")
-			http.Redirect(w, r, "/dashboard/buckets", http.StatusSeeOther)
+			http.Redirect(w, r, "/dashboard/buckets", http.StatusSeeOther) // #nosec G710 — static path
 			return
 		}
 
 		middleware.SetFlash(w, "success", "Bucket settings saved.")
-		http.Redirect(w, r, fmt.Sprintf("/dashboard/buckets/%s/settings", bucketName), http.StatusSeeOther)
+		http.Redirect(w, r, fmt.Sprintf("/dashboard/buckets/%s/settings", bucketName), http.StatusSeeOther) // #nosec G710 — hardcoded path prefix
 	}
 }

@@ -118,7 +118,7 @@ func (s *Server) CreateBucket(w http.ResponseWriter, r *http.Request) {
 		zap.String("tenant", tenantID))
 
 	// Create container directory
-	dirPath := filepath.Join("/tmp/vaultaire", tenantID, bucket)
+	dirPath := filepath.Join("/tmp/vaultaire", tenantID, bucket) // #nosec G703 — bucket validated by validateBucketName
 	if err := os.MkdirAll(dirPath, 0755); err != nil {
 		s.logger.Error("Failed to create container", zap.Error(err))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
@@ -166,7 +166,7 @@ func (s *Server) DeleteBucket(w http.ResponseWriter, r *http.Request) {
 		zap.String("bucket", bucket),
 		zap.String("tenant", tenantID))
 
-	dirPath := filepath.Join("/tmp/vaultaire", tenantID, bucket)
+	dirPath := filepath.Join("/tmp/vaultaire", tenantID, bucket) // #nosec G703 — bucket validated by validateBucketName
 
 	// Check if bucket exists
 	if _, err := os.Stat(dirPath); os.IsNotExist(err) {
@@ -202,7 +202,7 @@ func (s *Server) DeleteBucket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Delete the bucket
-	if err := os.RemoveAll(dirPath); err != nil {
+	if err := os.RemoveAll(dirPath); err != nil { // #nosec G703 — bucket validated by validateBucketName
 		s.logger.Error("Failed to delete bucket", zap.Error(err))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return

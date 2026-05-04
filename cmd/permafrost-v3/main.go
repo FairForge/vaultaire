@@ -254,7 +254,7 @@ func decorrelatedJitter(base, previous, cap time.Duration) time.Duration {
 	if high <= base {
 		return base
 	}
-	return base + time.Duration(mrand.Int64N(int64(high-base)))
+	return base + time.Duration(mrand.Int64N(int64(high-base))) // #nosec G404 — jitter backoff, not security
 }
 
 // graphDo makes an authenticated Graph API call (HTTP/2)

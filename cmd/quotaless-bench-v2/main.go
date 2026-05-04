@@ -94,7 +94,7 @@ func (c *rawS3Client) signAndDo(ctx context.Context, req *http.Request) (*http.R
 	if err != nil {
 		return nil, fmt.Errorf("sign: %w", err)
 	}
-	return c.http.Do(req)
+	return c.http.Do(req) // #nosec G704 — endpoint from CLI flag
 }
 
 func (c *rawS3Client) objectURL(key string) string {
@@ -155,7 +155,7 @@ func (c *rawS3Client) getRange(ctx context.Context, key string, start, end int64
 }
 
 func (c *rawS3Client) del(ctx context.Context, key string) {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodDelete, c.objectURL(key), nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodDelete, c.objectURL(key), nil) // #nosec G704 — endpoint from CLI flag
 	if req == nil {
 		return
 	}
@@ -647,7 +647,7 @@ func main() {
 
 	run.DurSec = time.Since(overall).Seconds()
 	data, _ := json.MarshalIndent(run, "", "  ")
-	if err := os.WriteFile(*outFile, data, 0o644); err != nil {
+	if err := os.WriteFile(*outFile, data, 0o600); err != nil {
 		fmt.Fprintf(os.Stderr, "write: %v\n", err)
 	}
 	fmt.Printf("\n✅ Done in %s. Results: %s\n", time.Since(overall).Round(time.Second), *outFile)
