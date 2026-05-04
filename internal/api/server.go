@@ -29,6 +29,8 @@ import (
 	"golang.org/x/oauth2"
 )
 
+const APIVersion = "2026-05-01"
+
 // OAuth provider endpoints.
 var (
 	googleEndpoint = oauth2.Endpoint{
@@ -205,6 +207,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	s.rbacService = NewRBACService(logger)
 
 	s.router.Use(s.requestIDMiddleware)
+	s.router.Use(s.versionMiddleware)
 	s.router.Use(s.rbacService.InjectUserContext)
 	s.router.Use(s.loggingMiddleware)
 
@@ -745,6 +748,16 @@ a:hover{text-decoration:underline}
 </div>
 </body>
 </html>`
+
+func (s *Server) versionMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Vaultaire-Version", APIVersion)
+		if cv := r.Header.Get("X-Vaultaire-Version"); cv != "" {
+			s.logger.Debug("client API version", zap.String("client_version", cv))
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
 func (s *Server) requestIDMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

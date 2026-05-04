@@ -52,6 +52,10 @@ if suggestion := bucketSuggestion(ctx, s.db, tenantID, bucket); suggestion != ""
 
 `bucketSuggestion` only queries `WHERE tenant_id = $1` — never leaks bucket names across tenants. A bucket owned by tenant A is invisible to tenant B's suggestion query.
 
+## API Versioning (Phase 5.11.1)
+
+Every response includes `X-Vaultaire-Version: YYYY-MM-DD` (Stripe-style date versioning). The `APIVersion` const in `server.go` is the source of truth. `versionMiddleware` sets the header on all responses and logs the client's version at Debug level if sent. No version translation logic yet — just header plumbing.
+
 ## Auth Flow
 
 1. `handleS3Request` checks `isPresignedRequest(r)` — if query has `X-Amz-Algorithm=AWS4-HMAC-SHA256`, routes to `verifyPresignedURL` (SigV4 query string auth)
