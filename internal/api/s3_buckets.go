@@ -119,7 +119,7 @@ func (s *Server) CreateBucket(w http.ResponseWriter, r *http.Request) {
 
 	// Create container directory
 	dirPath := filepath.Join("/tmp/vaultaire", tenantID, bucket) // #nosec G703 — bucket validated by validateBucketName
-	if err := os.MkdirAll(dirPath, 0755); err != nil {
+	if err := os.MkdirAll(dirPath, 0755); err != nil {           // #nosec G703 — bucket validated by validateBucketName
 		s.logger.Error("Failed to create container", zap.Error(err))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return
@@ -169,7 +169,7 @@ func (s *Server) DeleteBucket(w http.ResponseWriter, r *http.Request) {
 	dirPath := filepath.Join("/tmp/vaultaire", tenantID, bucket) // #nosec G703 — bucket validated by validateBucketName
 
 	// Check if bucket exists
-	if _, err := os.Stat(dirPath); os.IsNotExist(err) {
+	if _, err := os.Stat(dirPath); os.IsNotExist(err) { // #nosec G703 — bucket validated by validateBucketName
 		reqID := generateRequestID()
 		if suggestion := bucketSuggestion(ctx, s.db, tenantID, bucket); suggestion != "" {
 			WriteS3ErrorWithContext(w, ErrNoSuchBucket, r.URL.Path, reqID, WithSuggestion(suggestion))
