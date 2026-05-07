@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 	"go.uber.org/zap"
 )
 
@@ -49,8 +49,10 @@ func NewAuth(db *sql.DB, logger *zap.Logger) *Auth {
 	}
 }
 
-// ValidateRequest validates an S3 request and returns the tenant ID
-func (a *Auth) ValidateRequest(r *http.Request) (string, error) {
+// ValidateRequest validates an S3 request and returns the tenant ID and key scope.
+func (a *Auth) ValidateRequest(r *http.Request) (string, *KeyScope, error) {
+	fullAccess := &KeyScope{Permissions: []string{"*"}}
+
 	// Check for test API key first (only in non-production)
 	apiKey := r.Header.Get("X-API-Key")
 	if apiKey == "test-key-chaos-testing" {
@@ -63,7 +65,7 @@ func (a *Auth) ValidateRequest(r *http.Request) (string, error) {
 			a.logger.Debug("test authentication accepted",
 				zap.String("tenant_id", tenantID),
 				zap.String("api_key", "test-key"))
-			return tenantID, nil
+			return tenantID, fullAccess, nil
 		}
 	}
 
@@ -77,9 +79,9 @@ func (a *Auth) ValidateRequest(r *http.Request) (string, error) {
 		}
 		// For testing without auth, allow but use test-tenant
 		if a.db == nil {
-			return "test-tenant", nil
+			return "test-tenant", fullAccess, nil
 		}
-		return "", fmt.Errorf("missing authorization")
+		return "", nil, fmt.Errorf("missing authorization")
 	}
 
 	// Parse AWS Signature v4 format (used by AWS CLI/SDKs)
@@ -87,7 +89,7 @@ func (a *Auth) ValidateRequest(r *http.Request) (string, error) {
 		accessKey, _, _, err := a.parseAuthHeader(authHeader)
 		if err != nil {
 			a.logger.Debug("failed to parse auth header", zap.Error(err))
-			return "", err
+			return "", nil, err
 		}
 		return a.validateAccessKey(accessKey)
 	}
@@ -100,34 +102,72 @@ func (a *Auth) ValidateRequest(r *http.Request) (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("invalid authorization format")
+	return "", nil, fmt.Errorf("invalid authorization format")
 }
 
-// validateAccessKey looks up the tenant ID by access key
-func (a *Auth) validateAccessKey(accessKey string) (string, error) {
+// validateAccessKey looks up the tenant ID and key scope by access key.
+// Checks the tenants table first (primary keys, full access), then falls
+// back to api_keys for scoped VLT_ keys.
+func (a *Auth) validateAccessKey(accessKey string) (string, *KeyScope, error) {
 	if a.db == nil {
-		// Fallback for testing when DB is not available
 		a.logger.Warn("no database connection, using test-tenant")
-		return "test-tenant", nil
+		return "test-tenant", &KeyScope{Permissions: []string{"*"}}, nil
 	}
 
+	// Try primary tenant key first (full access).
 	var tenantID string
-	query := `SELECT id FROM tenants WHERE access_key = $1`
-	err := a.db.QueryRow(query, accessKey).Scan(&tenantID)
+	err := a.db.QueryRow(`SELECT id FROM tenants WHERE access_key = $1`, accessKey).Scan(&tenantID)
+	if err == nil {
+		a.logger.Debug("authenticated tenant (primary key)",
+			zap.String("tenant_id", tenantID),
+			zap.String("access_key", accessKey[:min(6, len(accessKey))]+"..."))
+		return tenantID, &KeyScope{Permissions: []string{"*"}}, nil
+	}
+	if err != sql.ErrNoRows {
+		a.logger.Error("database error during auth", zap.Error(err))
+		return "", nil, fmt.Errorf("auth lookup failed: %w", err)
+	}
+
+	// Try scoped API key (VLT_ prefix keys from api_keys table).
+	var permJSON []byte
+	var bucketScope, ipAllowlist pq.StringArray
+	var expiresAt sql.NullTime
+	err = a.db.QueryRow(`
+		SELECT t.id,
+		       COALESCE(ak.permissions, '["*"]'::jsonb),
+		       COALESCE(ak.bucket_scope, '{}'),
+		       COALESCE(ak.ip_allowlist, '{}'),
+		       ak.expires_at
+		FROM api_keys ak
+		JOIN users u ON u.id = ak.user_id
+		JOIN tenants t ON t.email = u.email
+		WHERE ak.key_id = $1
+	`, accessKey).Scan(&tenantID, &permJSON, &bucketScope, &ipAllowlist, &expiresAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			a.logger.Debug("invalid access key", zap.String("access_key", accessKey))
-			return "", fmt.Errorf("invalid access key")
+			return "", nil, fmt.Errorf("invalid access key")
 		}
-		a.logger.Error("database error during auth", zap.Error(err))
-		return "", fmt.Errorf("auth lookup failed: %w", err)
+		a.logger.Error("database error during scoped key auth", zap.Error(err))
+		return "", nil, fmt.Errorf("auth lookup failed: %w", err)
 	}
 
-	a.logger.Debug("authenticated tenant",
-		zap.String("tenant_id", tenantID),
-		zap.String("access_key", accessKey[:6]+"...")) // Log only first 6 chars for security
+	scope := &KeyScope{
+		BucketScope: []string(bucketScope),
+		IPAllowlist: []string(ipAllowlist),
+	}
+	if jsonErr := json.Unmarshal(permJSON, &scope.Permissions); jsonErr != nil {
+		scope.Permissions = []string{"*"}
+	}
+	if expiresAt.Valid {
+		scope.ExpiresAt = &expiresAt.Time
+	}
 
-	return tenantID, nil
+	a.logger.Debug("authenticated tenant (scoped key)",
+		zap.String("tenant_id", tenantID),
+		zap.String("access_key", accessKey[:min(6, len(accessKey))]+"..."),
+		zap.Int("permissions", len(scope.Permissions)))
+	return tenantID, scope, nil
 }
 
 // parseAuthHeader parses AWS Signature v4 authorization header

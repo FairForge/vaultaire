@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -187,6 +189,63 @@ func (a *AuthService) LoadFromDB(ctx context.Context) error {
 		return fmt.Errorf("iterate tenants: %w", err)
 	}
 
+	// Load API keys with scope data. Adds each key to apiKeys and keyIndex
+	// so that scoped VLT_ keys can authenticate S3 requests.
+	akRows, err := a.sqlDB.QueryContext(ctx, `
+		SELECT id, user_id, name, key_id, secret_hash,
+		       COALESCE(secret_key, ''),
+		       COALESCE(permissions, '["*"]'::jsonb),
+		       COALESCE(bucket_scope, '{}'),
+		       COALESCE(ip_allowlist, '{}'),
+		       expires_at, last_used, created_at
+		FROM api_keys
+	`)
+	if err != nil {
+		return fmt.Errorf("load api keys: %w", err)
+	}
+	defer func() { _ = akRows.Close() }()
+
+	for akRows.Next() {
+		var (
+			k           APIKey
+			permJSON    []byte
+			bucketScope pq.StringArray
+			ipAllowlist pq.StringArray
+			expiresAt   sql.NullTime
+			lastUsed    sql.NullTime
+		)
+		if err := akRows.Scan(&k.ID, &k.UserID, &k.Name, &k.Key, &k.Hash,
+			&k.Secret, &permJSON, &bucketScope, &ipAllowlist,
+			&expiresAt, &lastUsed, &k.CreatedAt); err != nil {
+			return fmt.Errorf("scan api key: %w", err)
+		}
+
+		if err := json.Unmarshal(permJSON, &k.Permissions); err != nil {
+			k.Permissions = []string{"*"}
+		}
+		k.BucketScope = []string(bucketScope)
+		k.IPAllowlist = []string(ipAllowlist)
+		if expiresAt.Valid {
+			k.ExpiresAt = &expiresAt.Time
+		}
+		if lastUsed.Valid {
+			k.LastUsed = &lastUsed.Time
+		}
+		k.Metadata = make(map[string]string)
+
+		if u, ok := a.userIndex[k.UserID]; ok {
+			k.TenantID = u.TenantID
+			if tenant, ok := a.tenants[u.TenantID]; ok {
+				a.keyIndex[k.Key] = tenant
+			}
+		}
+
+		a.apiKeys[k.Key] = &k
+	}
+	if err := akRows.Err(); err != nil {
+		return fmt.Errorf("iterate api keys: %w", err)
+	}
+
 	return nil
 }
 
@@ -257,7 +316,7 @@ func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password,
 	user.TenantID = tenant.ID
 
 	// Create primary API key
-	apiKey, err := a.GenerateAPIKey(ctx, user.ID, "primary")
+	apiKey, err := a.GenerateAPIKey(ctx, user.ID, "primary", nil)
 	if err != nil {
 		apiKey = &APIKey{
 			ID:        uuid.New().String(),

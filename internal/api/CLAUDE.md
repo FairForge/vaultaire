@@ -78,8 +78,13 @@ Key files: `metadata.go` (extract/set/validate/merge helpers), `s3_engine_adapte
 
 1. `handleS3Request` checks `isPresignedRequest(r)` — if query has `X-Amz-Algorithm=AWS4-HMAC-SHA256`, routes to `verifyPresignedURL` (SigV4 query string auth)
 2. Otherwise calls `auth.ValidateRequest(r)` which parses the Authorization header
-3. On failure, returns appropriate S3 error (presigned errors: `ExpiredToken`, `AuthorizationQueryParametersError`, `SignatureDoesNotMatch`)
-4. On success, tenant context is set and the request is routed to the operation handler
+3. Both paths return `(tenantID, *auth.KeyScope, error)` — scope carries permissions, bucket restrictions, IP allowlist, and expiration
+4. On failure, returns appropriate S3 error (presigned errors: `ExpiredToken`, `AuthorizationQueryParametersError`, `SignatureDoesNotMatch`)
+5. On success, scope enforcement runs before operation routing:
+   - `IsKeyExpired` → 403 `ExpiredToken`
+   - `CheckIPAllowlist` with `extractClientIP(r)` (CF-Connecting-IP > X-Forwarded-For > RemoteAddr) → 403 `AccessDenied`
+   - After `ParseRequest`: `CheckPermission` and `CheckBucketScope` → 403 `AccessDenied` with suggestion hint
+6. Tenant context is set and the request is routed to the operation handler
 
 ### Pre-Signed URL Verification (Phase 5.10.16)
 

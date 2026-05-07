@@ -162,7 +162,7 @@ func TestVerifyPresignedURL_MissingParams(t *testing.T) {
 	r := httptest.NewRequest("GET", "/bucket/key?X-Amz-Algorithm=AWS4-HMAC-SHA256", nil)
 	r.Host = "localhost:8000"
 
-	_, err := s.verifyPresignedURL(r)
+	_, _, err := s.verifyPresignedURL(r)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), ErrAuthorizationQueryParametersError)
 }
@@ -194,7 +194,7 @@ func TestVerifyPresignedURL_ExpiresOutOfRange(t *testing.T) {
 			r := httptest.NewRequest("GET", "/bucket/key?"+q.Encode(), nil)
 			r.Host = "localhost:8000"
 
-			_, err := s.verifyPresignedURL(r)
+			_, _, err := s.verifyPresignedURL(r)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), ErrInvalidPresignExpires)
 		})
@@ -215,7 +215,7 @@ func TestVerifyPresignedURL_InvalidAccessKey(t *testing.T) {
 	r := httptest.NewRequest("GET", "/bucket/key?"+q.Encode(), nil)
 	r.Host = "localhost:8000"
 
-	_, err := s.verifyPresignedURL(r)
+	_, _, err := s.verifyPresignedURL(r)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), ErrAccessDenied)
 }
@@ -232,7 +232,7 @@ func TestVerifyPresignedURL_Expired(t *testing.T) {
 	r := httptest.NewRequest("GET", "/bucket/key?"+q.Encode(), nil)
 	r.Host = "localhost:8000"
 
-	_, err := s.verifyPresignedURL(r)
+	_, _, err := s.verifyPresignedURL(r)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), ErrExpiredPresignedRequest)
 }
@@ -250,7 +250,7 @@ func TestVerifyPresignedURL_InvalidSignature(t *testing.T) {
 	r := httptest.NewRequest("GET", "/bucket/key?"+q.Encode(), nil)
 	r.Host = "localhost:8000"
 
-	_, err := s.verifyPresignedURL(r)
+	_, _, err := s.verifyPresignedURL(r)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), ErrSignatureDoesNotMatch)
 }
@@ -267,7 +267,7 @@ func TestVerifyPresignedURL_ValidGET(t *testing.T) {
 	r := httptest.NewRequest("GET", "/my-bucket/my-object.txt?"+q.Encode(), nil)
 	r.Host = "localhost:8000"
 
-	tenantID, err := s.verifyPresignedURL(r)
+	tenantID, _, err := s.verifyPresignedURL(r)
 	require.NoError(t, err)
 	assert.Equal(t, testPresignTenantID, tenantID)
 }
@@ -284,7 +284,7 @@ func TestVerifyPresignedURL_ValidPUT(t *testing.T) {
 	r := httptest.NewRequest("PUT", "/upload-bucket/data.bin?"+q.Encode(), bytes.NewReader([]byte("file content")))
 	r.Host = "localhost:8000"
 
-	tenantID, err := s.verifyPresignedURL(r)
+	tenantID, _, err := s.verifyPresignedURL(r)
 	require.NoError(t, err)
 	assert.Equal(t, testPresignTenantID, tenantID)
 }
@@ -303,7 +303,7 @@ func TestVerifyPresignedURL_PathWithSpecialChars(t *testing.T) {
 	r := httptest.NewRequest("GET", path+"?"+q.Encode(), nil)
 	r.Host = "localhost:8000"
 
-	tenantID, err := s.verifyPresignedURL(r)
+	tenantID, _, err := s.verifyPresignedURL(r)
 	require.NoError(t, err)
 	assert.Equal(t, testPresignTenantID, tenantID)
 }
@@ -470,7 +470,7 @@ func TestHandleGetPresignedURL(t *testing.T) {
 	verifyReq := httptest.NewRequest("PUT", parsedURL.RequestURI(), bytes.NewReader([]byte("data")))
 	verifyReq.Host = parsedURL.Host
 
-	verifiedTenantID, err := s.verifyPresignedURL(verifyReq)
+	verifiedTenantID, _, err := s.verifyPresignedURL(verifyReq)
 	require.NoError(t, err)
 	assert.Equal(t, testPresignTenantID, verifiedTenantID)
 }

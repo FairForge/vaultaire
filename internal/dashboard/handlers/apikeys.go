@@ -15,13 +15,14 @@ import (
 
 // KeyRow is a single API key for the template.
 type KeyRow struct {
-	ID          string
-	Name        string
-	KeyID       string
-	Status      string
-	StatusClass string
-	CreatedFmt  string
-	LastUsedFmt string
+	ID           string
+	Name         string
+	KeyID        string
+	ScopeSummary string
+	Status       string
+	StatusClass  string
+	CreatedFmt   string
+	LastUsedFmt  string
 }
 
 // NewKeyData holds the just-generated key credentials (shown once).
@@ -70,7 +71,37 @@ func HandleGenerateKey(tmpl *template.Template, authSvc *auth.AuthService, logge
 			name = "default"
 		}
 
-		key, err := authSvc.GenerateAPIKey(r.Context(), sd.UserID, name)
+		var opts *auth.KeyCreateOptions
+		perms := r.Form["permissions"]
+		bucketScope := parseCSV(r.FormValue("bucket_scope"))
+		ipAllowlist := parseCSV(r.FormValue("ip_allowlist"))
+		expiresStr := r.FormValue("expires_at")
+
+		hasScope := len(perms) > 0 || len(bucketScope) > 0 || len(ipAllowlist) > 0 || expiresStr != ""
+		if hasScope {
+			opts = &auth.KeyCreateOptions{
+				Permissions: perms,
+				BucketScope: bucketScope,
+				IPAllowlist: ipAllowlist,
+			}
+			if expiresStr != "" {
+				if t, parseErr := time.Parse("2006-01-02", expiresStr); parseErr == nil {
+					eod := t.Add(24*time.Hour - time.Second)
+					opts.ExpiresAt = &eod
+				}
+			}
+			if len(opts.Permissions) > 0 {
+				if err := auth.ValidatePermissions(opts.Permissions); err != nil {
+					data["GenerateError"] = "Invalid permission: " + err.Error()
+					data["Keys"] = listKeys(r, authSvc, sd.UserID)
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					_ = tmpl.ExecuteTemplate(w, "base", data)
+					return
+				}
+			}
+		}
+
+		key, err := authSvc.GenerateAPIKey(r.Context(), sd.UserID, name, opts)
 		if err != nil {
 			logger.Error("generate API key", zap.Error(err))
 			data["GenerateError"] = "Failed to generate key. Please try again."
@@ -145,14 +176,50 @@ func listKeys(r *http.Request, authSvc *auth.AuthService, userID string) []KeyRo
 		}
 
 		rows = append(rows, KeyRow{
-			ID:          k.ID,
-			Name:        k.Name,
-			KeyID:       k.Key,
-			Status:      status,
-			StatusClass: statusClass,
-			CreatedFmt:  relativeTime(k.CreatedAt),
-			LastUsedFmt: lastUsed,
+			ID:           k.ID,
+			Name:         k.Name,
+			KeyID:        k.Key,
+			ScopeSummary: scopeSummary(k),
+			Status:       status,
+			StatusClass:  statusClass,
+			CreatedFmt:   relativeTime(k.CreatedAt),
+			LastUsedFmt:  lastUsed,
 		})
 	}
 	return rows
+}
+
+func scopeSummary(k *auth.APIKey) string {
+	if len(k.Permissions) == 1 && k.Permissions[0] == "*" && len(k.BucketScope) == 0 && len(k.IPAllowlist) == 0 {
+		return "Full access"
+	}
+	var parts []string
+	if len(k.Permissions) > 0 && (len(k.Permissions) != 1 || k.Permissions[0] != "*") {
+		parts = append(parts, strings.Join(k.Permissions, ", "))
+	}
+	if len(k.BucketScope) > 0 {
+		parts = append(parts, "buckets: "+strings.Join(k.BucketScope, ", "))
+	}
+	if len(k.IPAllowlist) > 0 {
+		parts = append(parts, "IPs: "+strings.Join(k.IPAllowlist, ", "))
+	}
+	if len(parts) == 0 {
+		return "Full access"
+	}
+	return strings.Join(parts, " | ")
+}
+
+func parseCSV(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	var result []string
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			result = append(result, part)
+		}
+	}
+	return result
 }

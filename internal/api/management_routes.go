@@ -446,13 +446,15 @@ func (s *Server) handleMgmtListKeys(w http.ResponseWriter, r *http.Request) {
 	items := make([]interface{}, len(keys))
 	for i, k := range keys {
 		items[i] = map[string]interface{}{
-			"object":      "api_key",
-			"id":          k.ID,
-			"name":        k.Name,
-			"key":         k.Key,
-			"permissions": k.Permissions,
-			"expires_at":  k.ExpiresAt,
-			"created_at":  k.CreatedAt,
+			"object":       "api_key",
+			"id":           k.ID,
+			"name":         k.Name,
+			"key":          k.Key,
+			"permissions":  k.Permissions,
+			"bucket_scope": k.BucketScope,
+			"ip_allowlist": k.IPAllowlist,
+			"expires_at":   k.ExpiresAt,
+			"created_at":   k.CreatedAt,
 		}
 	}
 
@@ -467,34 +469,53 @@ func (s *Server) handleMgmtCreateKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Name        string   `json:"name"`
-		Permissions []string `json:"permissions"`
+		Name        string     `json:"name"`
+		Permissions []string   `json:"permissions"`
+		BucketScope []string   `json:"bucket_scope"`
+		IPAllowlist []string   `json:"ip_allowlist"`
+		ExpiresAt   *time.Time `json:"expires_at"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeManagementError(w, ErrTypeInvalidRequest, "invalid_json", "request body must be valid JSON", "")
 		return
 	}
 
-	key, err := s.auth.GenerateAPIKey(r.Context(), userID, req.Name)
+	if len(req.Permissions) > 0 {
+		if err := auth.ValidatePermissions(req.Permissions); err != nil {
+			writeManagementError(w, ErrTypeInvalidRequest, "invalid_permissions", err.Error(), "permissions")
+			return
+		}
+	}
+
+	var opts *auth.KeyCreateOptions
+	if len(req.Permissions) > 0 || len(req.BucketScope) > 0 || len(req.IPAllowlist) > 0 || req.ExpiresAt != nil {
+		opts = &auth.KeyCreateOptions{
+			Permissions: req.Permissions,
+			BucketScope: req.BucketScope,
+			IPAllowlist: req.IPAllowlist,
+			ExpiresAt:   req.ExpiresAt,
+		}
+	}
+
+	key, err := s.auth.GenerateAPIKey(r.Context(), userID, req.Name, opts)
 	if err != nil {
 		s.logger.Error("management create key", zap.Error(err))
 		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to create API key", "")
 		return
 	}
 
-	if len(req.Permissions) > 0 {
-		key.Permissions = req.Permissions
-	}
-
 	resp := map[string]interface{}{
-		"object":      "api_key",
-		"id":          key.ID,
-		"name":        key.Name,
-		"key":         key.Key,
-		"secret":      key.Secret,
-		"permissions": key.Permissions,
-		"created_at":  key.CreatedAt,
-		"request_id":  getRequestID(w),
+		"object":       "api_key",
+		"id":           key.ID,
+		"name":         key.Name,
+		"key":          key.Key,
+		"secret":       key.Secret,
+		"permissions":  key.Permissions,
+		"bucket_scope": key.BucketScope,
+		"ip_allowlist": key.IPAllowlist,
+		"expires_at":   key.ExpiresAt,
+		"created_at":   key.CreatedAt,
+		"request_id":   getRequestID(w),
 	}
 	writeJSON(w, http.StatusCreated, resp)
 }

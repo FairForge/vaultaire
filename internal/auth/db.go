@@ -65,9 +65,9 @@ func (a *DBAuthService) SaveAPIKey(ctx context.Context, apiKey *APIKey) error {
 	return nil
 }
 
-func (a *DBAuthService) GenerateAPIKey(ctx context.Context, userID, name string) (*APIKey, error) {
+func (a *DBAuthService) GenerateAPIKey(ctx context.Context, userID, name string, opts *KeyCreateOptions) (*APIKey, error) {
 	// Generate using parent method
-	apiKey, err := a.AuthService.GenerateAPIKey(ctx, userID, name)
+	apiKey, err := a.AuthService.GenerateAPIKey(ctx, userID, name, opts)
 	if err != nil {
 		return nil, err
 	}
