@@ -20,6 +20,8 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 | 026 | S3 versioning: `versioning_status` on `buckets`, `object_versions` table |
 | 027 | Bucket notifications: `bucket_notifications` table for S3 event webhook config |
 | 028 | Object Lock: `object_lock_enabled`, `default_retention_mode`, `default_retention_days` on `buckets`; `object_locks` table |
+| 029 | Idempotency cache: `idempotency_cache` table for management API request deduplication (24h TTL) |
+| 030 | Metadata: `metadata JSONB` column on `buckets` and `object_head_cache` |
 
 ## Key Tables
 
@@ -37,6 +39,7 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 - **object_versions** — `(tenant_id, bucket, object_key, version_id) PK`, `size_bytes`, `etag`, `content_type`, `is_latest`, `is_delete_marker`, `backend_name`, `created_at`
 - **bucket_notifications** — `id (PK)`, `tenant_id`, `bucket`, `event_filter`, `target_type`, `target_url`, `enabled`, `created_at`
 - **object_locks** — `(tenant_id, bucket, object_key) PK`, `retention_mode`, `retain_until_date`, `legal_hold`, `created_at`, `updated_at`
+- **idempotency_cache** — `(tenant_id, idempotency_key) PK`, `method`, `path`, `response_status`, `response_headers` (JSONB), `response_body` (BYTEA), `created_at` — 24h TTL, hourly cleanup
 
 ## Connection
 

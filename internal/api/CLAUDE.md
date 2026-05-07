@@ -21,6 +21,8 @@ S3-compatible API layer. Translates S3 protocol to engine operations, handles au
 - **management_errors.go** — 7 typed errors with Stripe-style error envelope (`writeManagementError`)
 - **management_routes.go** — RESTful JSON management API under `/api/v1/manage/` (buckets CRUD, objects list, keys CRUD, usage)
 - **management_ratelimit.go** — Per-tenant rate limiter middleware (100 req/min, token bucket, X-RateLimit-* headers)
+- **idempotency.go** — `Idempotency-Key` header middleware for management API (24h cache, replay with `Idempotency-Replayed: true`)
+- **metadata.go** — S3 user metadata extraction/validation, Stripe-style merge for management API PATCH
 - **llms_txt.go** — Static `/llms.txt` endpoint (plain-text API summary for LLMs)
 
 ## Error Response Pattern
@@ -55,6 +57,22 @@ if suggestion := bucketSuggestion(ctx, s.db, tenantID, bucket); suggestion != ""
 ## API Versioning (Phase 5.11.1)
 
 Every response includes `X-Vaultaire-Version: YYYY-MM-DD` (Stripe-style date versioning). The `APIVersion` const in `server.go` is the source of truth. `versionMiddleware` sets the header on all responses and logs the client's version at Debug level if sent. No version translation logic yet — just header plumbing.
+
+## Idempotency Keys (Phase 5.11.2)
+
+`Idempotency-Key` header on PUT/POST/DELETE management API requests. Opt-in — absent header passes through. Max 256 chars. Cached in `idempotency_cache` table (24h TTL, hourly cleanup goroutine). Only 2xx responses are cached. Replayed responses include `Idempotency-Replayed: true` header. Reusing a key with different method/path returns 409 `idempotency_key_reuse`. GET/HEAD/OPTIONS are always skipped. If db is nil, middleware passes through silently.
+
+## Metadata on Resources (Phase 5.11.3)
+
+User-defined metadata on objects and buckets. Two paths:
+
+**S3 protocol**: `x-amz-meta-*` headers on PUT are extracted (prefix stripped, keys lowercased), validated (max 50 keys, 500 chars/value, 2KB total), stored in `object_head_cache.metadata` JSONB. Returned as `x-amz-meta-*` headers on GET and HEAD.
+
+**Management API**: `GET /api/v1/manage/buckets/{name}` includes `metadata` field. `PATCH /api/v1/manage/buckets/{name}` accepts `{"metadata": {...}}` with Stripe-style merge semantics (null value deletes key).
+
+Key files: `metadata.go` (extract/set/validate/merge helpers), `s3_engine_adapter.go` (PUT stores, GET returns), `s3.go` (HEAD returns), `management_routes.go` (PATCH handler).
+
+**sqlmock note**: JSONB columns must use `[]byte` (not `string`) in `AddRow` to match real PostgreSQL driver behavior when scanning into `[]byte`/`json.RawMessage`.
 
 ## Auth Flow
 

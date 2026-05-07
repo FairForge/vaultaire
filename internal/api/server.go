@@ -797,6 +797,12 @@ func (s *Server) Start() error {
 		ds.StartCleanup(ctx)
 	}
 
+	// Clean up expired idempotency cache entries hourly.
+	if s.db != nil {
+		im := newIdempotencyMiddleware(s.db, s.logger)
+		im.StartCleanup(ctx)
+	}
+
 	s.logger.Info("Starting server with RBAC and API Key Management",
 		zap.Int("port", s.config.Server.Port))
 	return s.httpServer.ListenAndServe()

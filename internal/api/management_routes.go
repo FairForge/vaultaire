@@ -16,14 +16,17 @@ import (
 
 func (s *Server) registerManagementRoutes() {
 	rl := NewManagementRateLimiter()
+	im := newIdempotencyMiddleware(s.db, s.logger)
 
 	s.router.Route("/api/v1/manage", func(r chi.Router) {
 		r.Use(s.requireJWT)
 		r.Use(rl.Middleware)
+		r.Use(im.Middleware)
 
 		r.Get("/buckets", s.handleMgmtListBuckets)
 		r.Post("/buckets", s.handleMgmtCreateBucket)
 		r.Get("/buckets/{name}", s.handleMgmtGetBucket)
+		r.Patch("/buckets/{name}", s.handleMgmtPatchBucket)
 		r.Delete("/buckets/{name}", s.handleMgmtDeleteBucket)
 
 		r.Get("/buckets/{name}/objects", s.handleMgmtListObjects)
@@ -39,10 +42,11 @@ func (s *Server) registerManagementRoutes() {
 // --- Buckets ---
 
 type mgmtBucket struct {
-	Object    string    `json:"object"`
-	Name      string    `json:"name"`
-	CreatedAt time.Time `json:"created_at"`
-	RequestID string    `json:"request_id,omitempty"`
+	Object    string            `json:"object"`
+	Name      string            `json:"name"`
+	Metadata  map[string]string `json:"metadata"`
+	CreatedAt time.Time         `json:"created_at"`
+	RequestID string            `json:"request_id,omitempty"`
 }
 
 func (s *Server) handleMgmtListBuckets(w http.ResponseWriter, r *http.Request) {
@@ -197,16 +201,82 @@ func (s *Server) handleMgmtGetBucket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var b mgmtBucket
+	var metaJSON []byte
 	err := s.db.QueryRowContext(r.Context(),
-		`SELECT name, created_at FROM buckets WHERE tenant_id = $1 AND name = $2`,
-		tenantID, name).Scan(&b.Name, &b.CreatedAt)
+		`SELECT name, COALESCE(metadata, '{}'), created_at FROM buckets WHERE tenant_id = $1 AND name = $2`,
+		tenantID, name).Scan(&b.Name, &metaJSON, &b.CreatedAt)
 	if err != nil {
 		writeManagementError(w, ErrTypeNotFound, "bucket_not_found",
 			"bucket not found", "name")
 		return
 	}
 	b.Object = "bucket"
+	b.Metadata = make(map[string]string)
+	_ = json.Unmarshal(metaJSON, &b.Metadata)
 	b.RequestID = getRequestID(w)
+	writeJSON(w, http.StatusOK, b)
+}
+
+func (s *Server) handleMgmtPatchBucket(w http.ResponseWriter, r *http.Request) {
+	tenantID, _ := r.Context().Value(tenantIDKey).(string)
+	if tenantID == "" {
+		writeManagementError(w, ErrTypeAuthentication, "missing_tenant", "tenant not found in token", "")
+		return
+	}
+
+	name := chi.URLParam(r, "name")
+
+	if s.db == nil {
+		writeManagementError(w, ErrTypeAPI, "no_database", "database unavailable", "")
+		return
+	}
+
+	var req struct {
+		Metadata map[string]interface{} `json:"metadata"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeManagementError(w, ErrTypeInvalidRequest, "invalid_json", "request body must be valid JSON", "")
+		return
+	}
+
+	if req.Metadata == nil {
+		writeManagementError(w, ErrTypeInvalidRequest, "missing_parameter", "metadata field is required", "metadata")
+		return
+	}
+
+	var existing json.RawMessage
+	var createdAt time.Time
+	err := s.db.QueryRowContext(r.Context(),
+		`SELECT COALESCE(metadata, '{}'), created_at FROM buckets WHERE tenant_id = $1 AND name = $2`,
+		tenantID, name).Scan(&existing, &createdAt)
+	if err != nil {
+		writeManagementError(w, ErrTypeNotFound, "bucket_not_found", "bucket not found", "name")
+		return
+	}
+
+	merged, mergeErr := mergeMetadata(existing, req.Metadata)
+	if mergeErr != nil {
+		writeManagementError(w, ErrTypeInvalidRequest, "invalid_metadata", mergeErr.Error(), "metadata")
+		return
+	}
+
+	_, err = s.db.ExecContext(r.Context(),
+		`UPDATE buckets SET metadata = $1, updated_at = NOW() WHERE tenant_id = $2 AND name = $3`,
+		merged, tenantID, name)
+	if err != nil {
+		s.logger.Error("update bucket metadata", zap.Error(err))
+		writeManagementError(w, ErrTypeAPI, "db_error", "failed to update metadata", "")
+		return
+	}
+
+	b := mgmtBucket{
+		Object:    "bucket",
+		Name:      name,
+		Metadata:  make(map[string]string),
+		CreatedAt: createdAt,
+		RequestID: getRequestID(w),
+	}
+	_ = json.Unmarshal(merged, &b.Metadata)
 	writeJSON(w, http.StatusOK, b)
 }
 
