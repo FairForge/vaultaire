@@ -16,10 +16,12 @@ import (
 
 func (s *Server) registerManagementRoutes() {
 	rl := NewManagementRateLimiter()
+	im := newIdempotencyMiddleware(s.db, s.logger)
 
 	s.router.Route("/api/v1/manage", func(r chi.Router) {
 		r.Use(s.requireJWT)
 		r.Use(rl.Middleware)
+		r.Use(im.Middleware)
 
 		r.Get("/buckets", s.handleMgmtListBuckets)
 		r.Post("/buckets", s.handleMgmtCreateBucket)

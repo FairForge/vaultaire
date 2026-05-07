@@ -21,6 +21,7 @@ S3-compatible API layer. Translates S3 protocol to engine operations, handles au
 - **management_errors.go** — 7 typed errors with Stripe-style error envelope (`writeManagementError`)
 - **management_routes.go** — RESTful JSON management API under `/api/v1/manage/` (buckets CRUD, objects list, keys CRUD, usage)
 - **management_ratelimit.go** — Per-tenant rate limiter middleware (100 req/min, token bucket, X-RateLimit-* headers)
+- **idempotency.go** — `Idempotency-Key` header middleware for management API (24h cache, replay with `Idempotency-Replayed: true`)
 - **llms_txt.go** — Static `/llms.txt` endpoint (plain-text API summary for LLMs)
 
 ## Error Response Pattern
@@ -55,6 +56,10 @@ if suggestion := bucketSuggestion(ctx, s.db, tenantID, bucket); suggestion != ""
 ## API Versioning (Phase 5.11.1)
 
 Every response includes `X-Vaultaire-Version: YYYY-MM-DD` (Stripe-style date versioning). The `APIVersion` const in `server.go` is the source of truth. `versionMiddleware` sets the header on all responses and logs the client's version at Debug level if sent. No version translation logic yet — just header plumbing.
+
+## Idempotency Keys (Phase 5.11.2)
+
+`Idempotency-Key` header on PUT/POST/DELETE management API requests. Opt-in — absent header passes through. Max 256 chars. Cached in `idempotency_cache` table (24h TTL, hourly cleanup goroutine). Only 2xx responses are cached. Replayed responses include `Idempotency-Replayed: true` header. Reusing a key with different method/path returns 409 `idempotency_key_reuse`. GET/HEAD/OPTIONS are always skipped. If db is nil, middleware passes through silently.
 
 ## Auth Flow
 
