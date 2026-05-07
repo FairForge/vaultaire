@@ -493,12 +493,13 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	var sizeBytes int64
 	var etag, contentType string
 	var updatedAt time.Time
+	var metadataJSON []byte
 
 	err = s.db.QueryRowContext(r.Context(), `
-		SELECT size_bytes, etag, content_type, updated_at
+		SELECT size_bytes, etag, content_type, updated_at, COALESCE(metadata, '{}')
 		FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
-	`, t.ID, req.Bucket, req.Object).Scan(&sizeBytes, &etag, &contentType, &updatedAt)
+	`, t.ID, req.Bucket, req.Object).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &metadataJSON)
 
 	if err == sql.ErrNoRows {
 		s.logger.Warn("HEAD: object not in metadata cache",
@@ -535,6 +536,7 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	}
 	w.Header().Set("x-amz-storage-class", "STANDARD")
 	w.Header().Set("x-amz-request-id", generateRequestID())
+	setS3MetadataHeaders(w, metadataJSON)
 	// HEAD must not write a body.
 	w.WriteHeader(http.StatusOK)
 }

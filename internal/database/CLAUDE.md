@@ -21,6 +21,7 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 | 027 | Bucket notifications: `bucket_notifications` table for S3 event webhook config |
 | 028 | Object Lock: `object_lock_enabled`, `default_retention_mode`, `default_retention_days` on `buckets`; `object_locks` table |
 | 029 | Idempotency cache: `idempotency_cache` table for management API request deduplication (24h TTL) |
+| 030 | Metadata: `metadata JSONB` column on `buckets` and `object_head_cache` |
 
 ## Key Tables
 

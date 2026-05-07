@@ -222,9 +222,10 @@ func TestManagementGetBucket(t *testing.T) {
 	defer cleanup()
 
 	now := time.Now()
-	mock.ExpectQuery(`SELECT name, created_at FROM buckets WHERE tenant_id`).
+	mock.ExpectQuery(`SELECT name, COALESCE`).
 		WithArgs("test-tenant", "my-bucket").
-		WillReturnRows(sqlmock.NewRows([]string{"name", "created_at"}).AddRow("my-bucket", now))
+		WillReturnRows(sqlmock.NewRows([]string{"name", "metadata", "created_at"}).
+			AddRow("my-bucket", []byte(`{}`), now))
 
 	req := httptest.NewRequest("GET", "/api/v1/manage/buckets/my-bucket", nil)
 	w := httptest.NewRecorder()

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/md5" // #nosec G501 — S3 spec requires MD5 for ETags
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -203,13 +204,14 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	var cachedSize int64
 	var cachedETag string
 	var cachedUpdatedAt time.Time
+	var cachedMetadata []byte
 	var cacheHit bool
 	if a.db != nil {
 		err := a.db.QueryRowContext(r.Context(), `
-			SELECT content_type, size_bytes, etag, updated_at
+			SELECT content_type, size_bytes, etag, updated_at, COALESCE(metadata, '{}')
 			FROM object_head_cache
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-			t.ID, bucket, artifact).Scan(&cachedContentType, &cachedSize, &cachedETag, &cachedUpdatedAt)
+			t.ID, bucket, artifact).Scan(&cachedContentType, &cachedSize, &cachedETag, &cachedUpdatedAt, &cachedMetadata)
 		if err == nil {
 			cacheHit = true
 		}
@@ -288,6 +290,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		if !cachedUpdatedAt.IsZero() {
 			w.Header().Set("Last-Modified", cachedUpdatedAt.UTC().Format(http.TimeFormat))
 		}
+		setS3MetadataHeaders(w, cachedMetadata)
 	}
 
 	written, err := io.Copy(w, reader)
@@ -426,18 +429,26 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		contentType = "application/octet-stream"
 	}
 
+	userMeta := extractS3Metadata(r)
+	if err := validateMetadata(userMeta); err != nil {
+		WriteS3Error(w, ErrInvalidRequest, r.URL.Path, generateRequestID())
+		return
+	}
+	metaJSON, _ := json.Marshal(userMeta)
+
 	if a.db != nil {
 		_, dbErr := a.db.ExecContext(r.Context(), `
 			INSERT INTO object_head_cache
-				(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+				(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
 			ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
 				size_bytes   = EXCLUDED.size_bytes,
 				etag         = EXCLUDED.etag,
 				content_type = EXCLUDED.content_type,
 				backend_name = EXCLUDED.backend_name,
+				metadata     = EXCLUDED.metadata,
 				updated_at   = NOW()
-		`, t.ID, bucket, artifact, size, etag, contentType, backendName)
+		`, t.ID, bucket, artifact, size, etag, contentType, backendName, metaJSON)
 		if dbErr != nil {
 			a.logger.Error("failed to cache object metadata",
 				zap.Error(dbErr),
