@@ -35,20 +35,23 @@ Stripe billing integration for stored.ge subscriptions, payments, and invoices.
 | `customer.subscription.updated` | Sync status and plan |
 | `customer.subscription.deleted` | Downgrade to starter, clear subscription |
 
-## Environment Variables (not yet wired in main.go)
+## Environment Variables (wired in server.go)
 
-- `STRIPE_SECRET_KEY` — Stripe API key
-- `STRIPE_WEBHOOK_SECRET` — webhook endpoint secret (whsec_...)
+- `STRIPE_SECRET_KEY` — Stripe API key (server.go:169)
+- `STRIPE_WEBHOOK_SECRET` — webhook endpoint secret (server.go:171)
+
+## Wiring
+
+- Webhook route: `POST /webhook/stripe` registered in server.go:394
+- Checkout + billing portal: wired in dashboard billing handler
+- Registration → auto-creates Stripe customer (server.go:511-514)
+- Stripe event idempotency via `stripe_events` table (migration 019)
 
 ## Testing
 
 - Unit tests: `go test ./internal/billing/... -short` (no Stripe key needed)
 - Integration tests: set `STRIPE_TEST_KEY` env var + `stripe listen --forward-to localhost:8000/webhook/stripe`
 
-## Next Phases
+## Next: Phase 2.7 (Metered Billing)
 
-- **2.2**: Wire webhook route in server.go
-- **2.3**: Stripe event idempotency (migration 019)
-- **2.4**: Registration → auto-create Stripe customer
-- **2.5**: Billing dashboard page
-- **2.6**: Full server wiring with env vars
+Stripe Billing Meters API for pay-per-TB tiers (Standard, Performance). See plan file.

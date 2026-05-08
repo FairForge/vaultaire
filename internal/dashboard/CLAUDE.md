@@ -12,7 +12,11 @@ Web dashboard for stored.ge customers and admins. Uses htmx + Go templates, embe
 - **templates/customer/** — customer page templates (`dashboard.html` = overview)
 - **static/css/** — `style.css`
 - **static/js/** — `htmx.min.js` (v2.0.4, vendored)
-- **middleware/recovery.go** — panic recovery middleware, renders self-contained 500 HTML (no template dependency)
+- **middleware/** — 4 middleware files:
+  - `csrf.go` — double-submit cookie CSRF on all POST forms
+  - `flash.go` — cookie-based flash messages ("Settings saved", "Key revoked", etc.)
+  - `ratelimit.go` — login rate limiting (5 attempts/min per IP, covers 2FA)
+  - `recovery.go` — panic recovery, renders self-contained 500 HTML (no template dependency)
 
 ## Error Handling (Phase 5.9)
 

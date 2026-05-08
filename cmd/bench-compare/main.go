@@ -346,6 +346,11 @@ var allWorkloads = []workload{
 	{"integrity_16mb", wlIntegrity},
 	{"integrity_robust_16mb", wlIntegrityRobust},
 	{"integrity_chunked_16mb", wlIntegrityChunked},
+	{"consistency_read_after_write", wlConsistencyRAW},
+	{"consistency_overwrite", wlConsistencyOverwrite},
+	{"consistency_list_after_write", wlConsistencyListAfterWrite},
+	{"rate_limit_escalation", wlRateLimitEscalation},
+	{"sustained_upload_60s", wlSustainedUpload},
 }
 
 // Smoke mode: only the small workloads.
@@ -1916,6 +1921,343 @@ func wlIntegrityChunked(c *wlContext) WorkloadResult {
 		DurationMS:  msInt(elapsed),
 		MBps:        mbps(totalSize, elapsed),
 		Note:        fmt.Sprintf("✓ verified chunks (put_retries=%d, get_retries=%d)", putRetries.Load(), getRetries.Load()),
+	}
+}
+
+// consistency_read_after_write — PUT then immediate GET with no delay.
+// Tests whether the backend is strongly consistent (read-your-writes).
+// Runs 20 iterations to detect intermittent failures.
+func wlConsistencyRAW(c *wlContext) WorkloadResult {
+	const iterations = 20
+	const objSize = 64 * 1024 // 64KB
+	overall := time.Now()
+	var (
+		latency []time.Duration
+		errs    int
+		stale   int
+	)
+	for i := 0; i < iterations; i++ {
+		payload := randBytes(objSize)
+		want := sha256hex(payload)
+		key := c.key(fmt.Sprintf("bench/consistency-raw/%d-%d", time.Now().UnixNano(), i))
+		if _, err := putObject(c.ctx, c.client, c.bucket, key, payload); err != nil {
+			errs++
+			continue
+		}
+		c.track(key)
+		start := time.Now()
+		got, _, err := getObject(c.ctx, c.client, c.bucket, key)
+		d := time.Since(start)
+		if err != nil {
+			errs++
+			continue
+		}
+		latency = append(latency, d)
+		if sha256hex(got) != want {
+			stale++
+		}
+	}
+	elapsed := time.Since(overall)
+	p50, p95, p99, mx := percentiles(latency)
+	note := fmt.Sprintf("✓ %d/%d consistent", iterations-stale-errs, iterations)
+	if stale > 0 {
+		note = fmt.Sprintf("⚠ %d/%d STALE reads (eventual consistency detected)", stale, iterations)
+	}
+	return WorkloadResult{
+		Name:        "consistency_read_after_write",
+		Description: fmt.Sprintf("%d × PUT-then-immediate-GET, check SHA256", iterations),
+		Ops:         iterations,
+		Errors:      errs,
+		DurationMS:  msInt(elapsed),
+		P50MS:       msInt(p50),
+		P95MS:       msInt(p95),
+		P99MS:       msInt(p99),
+		MaxMS:       msInt(mx),
+		Note:        note,
+	}
+}
+
+// consistency_overwrite — PUT same key twice with different data, verify second version wins.
+func wlConsistencyOverwrite(c *wlContext) WorkloadResult {
+	const iterations = 10
+	const objSize = 64 * 1024
+	overall := time.Now()
+	var errs, wrong int
+	for i := 0; i < iterations; i++ {
+		key := c.key(fmt.Sprintf("bench/consistency-overwrite/%d", i))
+		payload1 := randBytes(objSize)
+		payload2 := randBytes(objSize)
+		want := sha256hex(payload2)
+		if _, err := putObject(c.ctx, c.client, c.bucket, key, payload1); err != nil {
+			errs++
+			continue
+		}
+		if _, err := putObject(c.ctx, c.client, c.bucket, key, payload2); err != nil {
+			errs++
+			continue
+		}
+		c.track(key)
+		got, _, err := getObject(c.ctx, c.client, c.bucket, key)
+		if err != nil {
+			errs++
+			continue
+		}
+		if sha256hex(got) != want {
+			wrong++
+		}
+	}
+	elapsed := time.Since(overall)
+	note := fmt.Sprintf("✓ %d/%d overwrites correct", iterations-wrong-errs, iterations)
+	if wrong > 0 {
+		note = fmt.Sprintf("⚠ %d/%d returned OLD version after overwrite", wrong, iterations)
+	}
+	return WorkloadResult{
+		Name:        "consistency_overwrite",
+		Description: fmt.Sprintf("%d × PUT-PUT-GET same key, verify latest version", iterations),
+		Ops:         iterations * 3,
+		Errors:      errs,
+		DurationMS:  msInt(elapsed),
+		Note:        note,
+	}
+}
+
+// consistency_list_after_write — PUT then immediate ListObjectsV2, verify object appears.
+func wlConsistencyListAfterWrite(c *wlContext) WorkloadResult {
+	const iterations = 10
+	overall := time.Now()
+	var errs, missing int
+	prefix := fmt.Sprintf("bench/consistency-list/%d/", time.Now().UnixNano())
+	for i := 0; i < iterations; i++ {
+		key := c.key(prefix + fmt.Sprintf("obj-%d", i))
+		payload := randBytes(1024)
+		if _, err := putObject(c.ctx, c.client, c.bucket, key, payload); err != nil {
+			errs++
+			continue
+		}
+		c.track(key)
+		resp, err := c.client.ListObjectsV2(c.ctx, &s3.ListObjectsV2Input{
+			Bucket: aws.String(c.bucket),
+			Prefix: aws.String(key),
+		})
+		if err != nil {
+			errs++
+			continue
+		}
+		found := false
+		for _, obj := range resp.Contents {
+			if aws.ToString(obj.Key) == key {
+				found = true
+				break
+			}
+		}
+		if !found {
+			missing++
+		}
+	}
+	elapsed := time.Since(overall)
+	note := fmt.Sprintf("✓ %d/%d immediately visible in listing", iterations-missing-errs, iterations)
+	if missing > 0 {
+		note = fmt.Sprintf("⚠ %d/%d NOT visible in listing after PUT (eventual consistency)", missing, iterations)
+	}
+	return WorkloadResult{
+		Name:        "consistency_list_after_write",
+		Description: fmt.Sprintf("%d × PUT-then-immediate-List, check object appears", iterations),
+		Ops:         iterations * 2,
+		Errors:      errs,
+		DurationMS:  msInt(elapsed),
+		Note:        note,
+	}
+}
+
+// rate_limit_escalation — escalate concurrency from 8 to 128 workers to find SlowDown threshold.
+// Reports the max concurrency achieved without errors and the first level that produced errors.
+func wlRateLimitEscalation(c *wlContext) WorkloadResult {
+	levels := []int{8, 16, 32, 64, 128}
+	const opsPerLevel = 50
+	const objSize = 4 * 1024 // 4KB to minimize bandwidth, maximize request rate
+	payload := randBytes(objSize)
+	overall := time.Now()
+
+	type levelResult struct {
+		workers int
+		ops     int
+		errs    int
+		dur     time.Duration
+		opsPS   float64
+	}
+	var results []levelResult
+	maxCleanWorkers := 0
+
+	for _, workers := range levels {
+		var ops, errs atomic.Int64
+		start := time.Now()
+		var wg sync.WaitGroup
+		opsPerWorker := opsPerLevel / workers
+		if opsPerWorker < 1 {
+			opsPerWorker = 1
+		}
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func(wid int) {
+				defer wg.Done()
+				for i := 0; i < opsPerWorker; i++ {
+					key := c.key(fmt.Sprintf("bench/ratelimit/w%d-i%d-%d", wid, i, time.Now().UnixNano()))
+					_, err := putObject(c.ctx, c.client, c.bucket, key, payload)
+					if err != nil {
+						errs.Add(1)
+					} else {
+						ops.Add(1)
+						c.track(key)
+					}
+				}
+			}(w)
+		}
+		wg.Wait()
+		dur := time.Since(start)
+		opsCount := int(ops.Load())
+		errCount := int(errs.Load())
+		lr := levelResult{
+			workers: workers,
+			ops:     opsCount,
+			errs:    errCount,
+			dur:     dur,
+			opsPS:   float64(opsCount) / dur.Seconds(),
+		}
+		results = append(results, lr)
+		if errCount == 0 {
+			maxCleanWorkers = workers
+		}
+	}
+
+	elapsed := time.Since(overall)
+	var totalOps, totalErrs int
+	var parts []string
+	for _, r := range results {
+		totalOps += r.ops
+		totalErrs += r.errs
+		status := "✓"
+		if r.errs > 0 {
+			status = "✗"
+		}
+		parts = append(parts, fmt.Sprintf("%s%dw:%.0fops/s(%de)", status, r.workers, r.opsPS, r.errs))
+	}
+	note := fmt.Sprintf("max_clean=%d | %s", maxCleanWorkers, strings.Join(parts, " "))
+	return WorkloadResult{
+		Name:        "rate_limit_escalation",
+		Description: fmt.Sprintf("PUT 4KB at %v workers × %d ops each", levels, opsPerLevel/levels[0]),
+		Ops:         totalOps,
+		Errors:      totalErrs,
+		DurationMS:  msInt(elapsed),
+		OpsPerSec:   float64(totalOps) / elapsed.Seconds(),
+		Note:        note,
+	}
+}
+
+// sustained_upload_60s — 60s sustained upload of 16MB files. Tests connection stability,
+// throughput consistency, and whether the backend throttles after initial burst.
+func wlSustainedUpload(c *wlContext) WorkloadResult {
+	const (
+		workers = 4
+		objSize = 16 * 1024 * 1024
+		maxDur  = 60 * time.Second
+	)
+	payload := randBytes(objSize)
+	ctx, cancel := context.WithTimeout(c.ctx, maxDur)
+	defer cancel()
+
+	var (
+		bytesUp  atomic.Int64
+		ops      atomic.Int64
+		errs     atomic.Int64
+		latencyM sync.Mutex
+		latency  []time.Duration
+	)
+
+	// Track throughput in 10-second windows for stability analysis
+	type window struct {
+		bytes int64
+		ops   int
+	}
+	var windowsMu sync.Mutex
+	windows := make([]window, 6) // 6 × 10s = 60s
+
+	overall := time.Now()
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			i := 0
+			for ctx.Err() == nil {
+				key := c.key(fmt.Sprintf("bench/sustained/w%d-%d", workerID, i))
+				d, err := putObject(ctx, c.client, c.bucket, key, payload)
+				if ctx.Err() != nil {
+					return
+				}
+				if err != nil {
+					errs.Add(1)
+					i++
+					continue
+				}
+				ops.Add(1)
+				bytesUp.Add(int64(objSize))
+				latencyM.Lock()
+				latency = append(latency, d)
+				latencyM.Unlock()
+
+				windowIdx := int(time.Since(overall).Seconds()) / 10
+				if windowIdx >= len(windows) {
+					windowIdx = len(windows) - 1
+				}
+				windowsMu.Lock()
+				windows[windowIdx].bytes += int64(objSize)
+				windows[windowIdx].ops++
+				windowsMu.Unlock()
+
+				c.track(key)
+				i++
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	elapsed := time.Since(overall)
+	p50, p95, p99, mx := percentiles(latency)
+	totalBytes := bytesUp.Load()
+
+	var windowParts []string
+	for i, w := range windows {
+		if w.ops > 0 {
+			mbps := float64(w.bytes) / (1024 * 1024) / 10.0
+			windowParts = append(windowParts, fmt.Sprintf("%d0s:%.0fMB/s", i, mbps))
+		}
+	}
+	note := strings.Join(windowParts, " ")
+	if len(windowParts) >= 2 {
+		first := float64(windows[0].bytes)
+		last := float64(windows[len(windowParts)-1].bytes)
+		if first > 0 {
+			ratio := last / first
+			if ratio < 0.5 {
+				note += fmt.Sprintf(" ⚠ THROTTLED (last window %.0f%% of first)", ratio*100)
+			}
+		}
+	}
+
+	return WorkloadResult{
+		Name:        "sustained_upload_60s",
+		Description: fmt.Sprintf("%d workers × 16MB PUT for 60s", workers),
+		Ops:         int(ops.Load()),
+		Errors:      int(errs.Load()),
+		Bytes:       totalBytes,
+		DurationMS:  msInt(elapsed),
+		P50MS:       msInt(p50),
+		P95MS:       msInt(p95),
+		P99MS:       msInt(p99),
+		MaxMS:       msInt(mx),
+		MBps:        mbps(totalBytes, elapsed),
+		OpsPerSec:   float64(ops.Load()) / elapsed.Seconds(),
+		Note:        note,
 	}
 }
 
