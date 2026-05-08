@@ -90,6 +90,14 @@ QR code rendered client-side via `qrcode-generator` CDN library. Backup codes pa
 
 The onboarding card in `dashboard.html` shows a 3-item checklist (bucket, object, webhook) with tabbed code examples (AWS CLI, Python, JavaScript, cURL) pre-filled with the user's access key. Hidden when `AllDone` or dismissed.
 
+## Free Tier Enforcement (Phase 5.11.10)
+
+**Bucket creation** (`HandleCreateBucket` in `buckets.go`): queries `tenant_quotas` for tier. Free tier tenants with `>= FreeTierLimits.MaxBuckets` existing buckets get a `CreateError` message.
+
+**API key generation** (`HandleGenerateKey` in `apikeys.go`): same pattern — queries tier and key count. Free tier tenants at the limit see `GenerateError`. Signature changed to accept `*sql.DB` as third parameter.
+
+**Dashboard upgrade CTA** (`populateStorageUsage` in `overview.go`): sets `ShowUpgradeCTA = true` when tier is "free" and storage usage is >= 80%. The CTA card in `dashboard.html` links to `/dashboard/billing`.
+
 ## Legacy Handlers
 
 Files like `dashboard.go` etc. are stubs from before Phase 0 with inline terminal-style templates. They are NOT wired into the router. Remaining phases will rewrite them.

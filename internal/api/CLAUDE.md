@@ -104,6 +104,14 @@ Persistent event log + webhook CRUD API for SaaS developer integrations. Three n
 - `GET /api/v1/webhooks/{id}/deliveries` — delivery history with cursor pagination
 - `POST /api/v1/webhooks/{id}/test` — fires synthetic `webhook.test` event
 
+## Free Tier Quota Enforcement (Phase 5.11.10)
+
+`handlePutObject` (s3.go) checks `quotaManager.CheckAndReserve()` before writing. Returns `QuotaExceeded` (403) with upgrade suggestion if quota is full. Size is read from `Content-Length` or `x-amz-decoded-content-length` (chunked uploads).
+
+`CreateBucket` (s3_buckets.go) checks the tenant's tier via `quotaManager.GetTier()`. Free tier tenants are limited to `usage.FreeTierLimits.MaxBuckets` (1). Returns `QuotaExceeded` with bucket-specific suggestion.
+
+Error code `ErrQuotaExceeded` in `s3_errors.go` — 403 status, message includes upgrade hint via `WithSuggestion`.
+
 ## Auth Flow
 
 1. `handleS3Request` checks `isPresignedRequest(r)` — if query has `X-Amz-Algorithm=AWS4-HMAC-SHA256`, routes to `verifyPresignedURL` (SigV4 query string auth)

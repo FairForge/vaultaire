@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"html/template"
 	"net/http"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
+	"github.com/FairForge/vaultaire/internal/usage"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 )
@@ -103,6 +105,23 @@ func HandleCreateBucket(tmpl *template.Template, db *sql.DB, dataPath string, lo
 			data["CreateError"] = "Invalid bucket name."
 			renderBucketList(w, tmpl, db, sd, data, logger)
 			return
+		}
+
+		// Free tier: enforce bucket limit.
+		if db != nil {
+			var tier string
+			_ = db.QueryRowContext(r.Context(),
+				"SELECT tier FROM tenant_quotas WHERE tenant_id = $1", sd.TenantID).Scan(&tier)
+			if usage.IsFreeTier(tier) {
+				var count int
+				_ = db.QueryRowContext(r.Context(),
+					"SELECT COUNT(*) FROM buckets WHERE tenant_id = $1", sd.TenantID).Scan(&count)
+				if count >= usage.FreeTierLimits.MaxBuckets {
+					data["CreateError"] = fmt.Sprintf("Free tier allows %d bucket. Upgrade your plan for more.", usage.FreeTierLimits.MaxBuckets)
+					renderBucketList(w, tmpl, db, sd, data, logger)
+					return
+				}
+			}
 		}
 
 		// Create the directory under the data path.

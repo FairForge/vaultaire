@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"database/sql"
+	"fmt"
 	"html/template"
 	"net/http"
 	"strings"
@@ -9,6 +11,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/auth"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/FairForge/vaultaire/internal/dashboard/middleware"
+	"github.com/FairForge/vaultaire/internal/usage"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 )
@@ -55,7 +58,7 @@ func HandleAPIKeys(tmpl *template.Template, authSvc *auth.AuthService, logger *z
 }
 
 // HandleGenerateKey handles POST /dashboard/apikeys to create a new key.
-func HandleGenerateKey(tmpl *template.Template, authSvc *auth.AuthService, logger *zap.Logger) http.HandlerFunc {
+func HandleGenerateKey(tmpl *template.Template, authSvc *auth.AuthService, db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
 		if sd == nil {
@@ -65,6 +68,24 @@ func HandleGenerateKey(tmpl *template.Template, authSvc *auth.AuthService, logge
 
 		data := sessionData(sd, "apikeys")
 		withCSRF(r.Context(), data)
+
+		if db != nil {
+			var tier string
+			_ = db.QueryRowContext(r.Context(),
+				"SELECT tier FROM tenant_quotas WHERE tenant_id = $1", sd.TenantID).Scan(&tier)
+			if usage.IsFreeTier(tier) {
+				var count int
+				_ = db.QueryRowContext(r.Context(),
+					"SELECT COUNT(*) FROM api_keys WHERE user_id = $1", sd.UserID).Scan(&count)
+				if count >= usage.FreeTierLimits.MaxAPIKeys {
+					data["GenerateError"] = fmt.Sprintf("Free tier allows %d API key. Upgrade your plan for more.", usage.FreeTierLimits.MaxAPIKeys)
+					data["Keys"] = listKeys(r, authSvc, sd.UserID)
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					_ = tmpl.ExecuteTemplate(w, "base", data)
+					return
+				}
+			}
+		}
 
 		name := strings.TrimSpace(r.FormValue("name"))
 		if name == "" {

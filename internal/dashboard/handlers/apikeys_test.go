@@ -90,7 +90,7 @@ func TestHandleAPIKeys_ListWithKeys(t *testing.T) {
 func TestHandleGenerateKey(t *testing.T) {
 	tmpl := testAPIKeysTemplate(t)
 	authSvc, sd := setupAuthWithUser(t)
-	handler := HandleGenerateKey(tmpl, authSvc, zap.NewNop())
+	handler := HandleGenerateKey(tmpl, authSvc, nil, zap.NewNop())
 
 	form := url.Values{"name": {"my-rclone-key"}}
 	req := httptest.NewRequest("POST", "/dashboard/apikeys",
@@ -123,7 +123,7 @@ func TestHandleGenerateKey(t *testing.T) {
 func TestHandleGenerateKey_DefaultName(t *testing.T) {
 	tmpl := testAPIKeysTemplate(t)
 	authSvc, sd := setupAuthWithUser(t)
-	handler := HandleGenerateKey(tmpl, authSvc, zap.NewNop())
+	handler := HandleGenerateKey(tmpl, authSvc, nil, zap.NewNop())
 
 	form := url.Values{"name": {""}}
 	req := httptest.NewRequest("POST", "/dashboard/apikeys",
