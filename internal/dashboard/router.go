@@ -161,6 +161,9 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		// Email verification resend.
 		dr.Post("/settings/resend-verify", handlers.HandleResendVerification(deps.Auth, deps.Logger))
 
+		// Onboarding dismiss.
+		dr.Post("/onboarding/dismiss", handlers.HandleDismissOnboarding(deps.Logger))
+
 		// Billing page.
 		billingTmpl := template.Must(baseTmpl.Clone())
 		template.Must(billingTmpl.ParseFS(Templates,
