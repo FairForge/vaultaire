@@ -47,6 +47,7 @@ func HandleOverview(tmpl *template.Template, db *sql.DB, logger *zap.Logger) htt
 			populateCounts(ctx, db, sd.TenantID, sd.UserID, data)
 			populateActivity(ctx, db, sd.TenantID, data)
 			populateEmailVerified(ctx, db, sd.UserID, data)
+			populateOnboarding(ctx, db, sd.TenantID, r, data)
 		} else {
 			setDefaults(data)
 		}

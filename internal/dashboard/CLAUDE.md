@@ -71,6 +71,7 @@ Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`,
 | `/login/verify-2fa` | POST | none | Validate TOTP/backup code, complete login |
 | `/verify` | GET | none | Email verification — validates HMAC token, marks user verified |
 | `/dashboard/settings/resend-verify` | POST | session | Resend email verification link |
+| `/dashboard/onboarding/dismiss` | POST | session | Dismiss onboarding card (sets 1-year cookie) |
 | `/forgot-password` | GET | none | Forgot-password form |
 | `/forgot-password` | POST | none | Issues password reset token (rate-limited, 5/min per IP + 3/hour per email). Always returns generic success to prevent enumeration. |
 | `/reset-password` | GET | none | New-password form (token in query string) |

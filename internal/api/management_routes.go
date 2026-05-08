@@ -504,6 +504,11 @@ func (s *Server) handleMgmtCreateKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tenantID, _ := r.Context().Value(tenantIDKey).(string)
+	emitEvent(r.Context(), s.db, s.logger, "key.created", tenantID, map[string]interface{}{
+		"key_id": key.ID, "name": key.Name,
+	})
+
 	resp := map[string]interface{}{
 		"object":       "api_key",
 		"id":           key.ID,
@@ -534,6 +539,11 @@ func (s *Server) handleMgmtDeleteKey(w http.ResponseWriter, r *http.Request) {
 		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to revoke API key", "")
 		return
 	}
+
+	tenantID, _ := r.Context().Value(tenantIDKey).(string)
+	emitEvent(r.Context(), s.db, s.logger, "key.revoked", tenantID, map[string]interface{}{
+		"key_id": keyID,
+	})
 
 	resp := map[string]interface{}{
 		"object":     "api_key",

@@ -81,6 +81,14 @@ Three customer handlers + one admin handler:
 
 QR code rendered client-side via `qrcode-generator` CDN library. Backup codes passed as comma-separated hidden field during enable confirmation.
 
+## Onboarding (`onboarding.go`)
+
+`populateOnboarding(ctx, db, tenantID, r, data)` — called from `HandleOverview`, derives checklist state from `COUNT(*)` on `buckets`, `object_head_cache`, `webhook_endpoints`. Reads `access_key` from `tenants` for code examples (never exposes `secret_key`). Skips queries if `onboarding_dismissed=1` cookie is set.
+
+`HandleDismissOnboarding(logger)` — POST `/dashboard/onboarding/dismiss`. Sets a 1-year cookie and returns 200. The dashboard template uses htmx to remove the card on success.
+
+The onboarding card in `dashboard.html` shows a 3-item checklist (bucket, object, webhook) with tabbed code examples (AWS CLI, Python, JavaScript, cURL) pre-filled with the user's access key. Hidden when `AllDone` or dismissed.
+
 ## Legacy Handlers
 
 Files like `dashboard.go` etc. are stubs from before Phase 0 with inline terminal-style templates. They are NOT wired into the router. Remaining phases will rewrite them.

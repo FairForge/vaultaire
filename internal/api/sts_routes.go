@@ -59,6 +59,10 @@ func (s *Server) handleSTSCreateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	emitEvent(r.Context(), s.db, s.logger, "sts.token_created", tenantID, map[string]interface{}{
+		"access_key": token.AccessKey,
+	})
+
 	resp := map[string]interface{}{
 		"object":     "sts_token",
 		"access_key": token.AccessKey,

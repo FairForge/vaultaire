@@ -24,6 +24,8 @@ S3-compatible API layer. Translates S3 protocol to engine operations, handles au
 - **management_ratelimit.go** — Per-tenant rate limiter middleware (100 req/min, token bucket, X-RateLimit-* headers)
 - **idempotency.go** — `Idempotency-Key` header middleware for management API (24h cache, replay with `Idempotency-Replayed: true`)
 - **metadata.go** — S3 user metadata extraction/validation, Stripe-style merge for management API PATCH
+- **events.go** — Event emitter (`emitEvent`), webhook dispatch, HMAC signing, `GET /api/v1/events` list endpoint
+- **webhooks_routes.go** — Webhook CRUD API (`/api/v1/webhooks`): create, list, update, delete, delivery history, test fire
 - **llms_txt.go** — Static `/llms.txt` endpoint (plain-text API summary for LLMs)
 
 ## Error Response Pattern
@@ -82,6 +84,25 @@ Key files: `metadata.go` (extract/set/validate/merge helpers), `s3_engine_adapte
 Scope intersection: requested permissions/buckets are intersected with the parent key's scope (JWT user's first API key, or full access if none). STS tokens can never escalate beyond the parent. IP restrictions are narrowed (request can only restrict further, not broaden).
 
 S3 auth: both `validateAccessKey` (handlers.go) and `verifyPresignedURL` (s3_presign.go) have an ASIA-prefix fallback that queries `sts_tokens` after checking `tenants` and `api_keys`. Expired tokens are rejected. Cleanup: hourly goroutine in `auth.StartSTSCleanup`.
+
+## Event Log + Webhook Management API (Phase 5.11.6)
+
+Persistent event log + webhook CRUD API for SaaS developer integrations. Three new tables: `events`, `webhook_endpoints`, `webhook_deliveries` (migration 033).
+
+**Event types**: `object.created`, `object.deleted`, `object.downloaded`, `bucket.created`, `bucket.deleted`, `key.created`, `key.revoked`, `sts.token_created`, `webhook.test`.
+
+**`emitEvent(ctx, db, logger, eventType, tenantID, data)`** — inserts event row synchronously, dispatches webhooks asynchronously in a goroutine. Nil-safe on db. Wired into S3 handlers (PUT/GET/DELETE), bucket create/delete, key create/revoke, and STS token creation.
+
+**Webhook dispatch**: queries `webhook_endpoints` for tenant, filters by `event_filter` (exact match, `object.*` wildcards, `*` catch-all). Delivers via HTTP POST with `X-Webhook-Signature: sha256=<hmac-hex>` header. Records delivery in `webhook_deliveries` (status, response_code, latency_ms). No retry loop in this phase — `next_retry_at` column reserved for future use.
+
+**Endpoints** (JWT-protected, rate-limited):
+- `GET /api/v1/events` — cursor pagination (created_at), type filter, tenant-scoped
+- `POST /api/v1/webhooks` — create (returns `whsec_` secret, only time it's exposed)
+- `GET /api/v1/webhooks` — list (secret omitted)
+- `PATCH /api/v1/webhooks/{id}` — partial update (url, events, enabled)
+- `DELETE /api/v1/webhooks/{id}` — cascade deletes deliveries
+- `GET /api/v1/webhooks/{id}/deliveries` — delivery history with cursor pagination
+- `POST /api/v1/webhooks/{id}/test` — fires synthetic `webhook.test` event
 
 ## Auth Flow
 
