@@ -139,6 +139,9 @@ func (s *Server) CreateBucket(w http.ResponseWriter, r *http.Request) {
 		auth.EnsureTenantSlug(ctx, s.db, tenantID, s.logger)
 	}
 
+	emitEvent(ctx, s.db, s.logger, "bucket.created", tenantID, map[string]interface{}{
+		"bucket": bucket,
+	})
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -214,5 +217,8 @@ func (s *Server) DeleteBucket(w http.ResponseWriter, r *http.Request) {
 		`, tenantID, bucket)
 	}
 
+	emitEvent(ctx, s.db, s.logger, "bucket.deleted", tenantID, map[string]interface{}{
+		"bucket": bucket,
+	})
 	w.WriteHeader(http.StatusNoContent)
 }

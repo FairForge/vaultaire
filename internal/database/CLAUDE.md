@@ -24,6 +24,7 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 | 030 | Metadata: `metadata JSONB` column on `buckets` and `object_head_cache` |
 | 031 | Scoped API keys: `permissions` (JSONB), `bucket_scope` (TEXT[]), `ip_allowlist` (TEXT[]), `expires_at` (TIMESTAMPTZ), `secret_key` (TEXT) on `api_keys` |
 | 032 | STS temporary credentials: `sts_tokens` table (access_key PK, secret_key, tenant_id, parent_key_id, permissions JSONB, bucket_scope TEXT[], ip_restrict TEXT[], expires_at, created_at) |
+| 033 | Event log + webhooks: `events` table, `webhook_endpoints` table (with secret, event_filter TEXT[]), `webhook_deliveries` table (status, response_code, latency_ms, retry support) |
 
 ## Key Tables
 
@@ -43,6 +44,9 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 - **object_locks** — `(tenant_id, bucket, object_key) PK`, `retention_mode`, `retain_until_date`, `legal_hold`, `created_at`, `updated_at`
 - **idempotency_cache** — `(tenant_id, idempotency_key) PK`, `method`, `path`, `response_status`, `response_headers` (JSONB), `response_body` (BYTEA), `created_at` — 24h TTL, hourly cleanup
 - **sts_tokens** — `access_key (PK)`, `secret_key`, `tenant_id`, `parent_key_id`, `permissions` (JSONB), `bucket_scope` (TEXT[]), `ip_restrict` (TEXT[]), `expires_at`, `created_at` — short-lived S3 creds, hourly cleanup
+- **events** — `id (PK)`, `type`, `tenant_id`, `data` (JSONB), `created_at` — persistent event log
+- **webhook_endpoints** — `id (PK)`, `tenant_id`, `url`, `event_filter` (TEXT[]), `secret`, `enabled`, `created_at`, `updated_at` — webhook subscriptions
+- **webhook_deliveries** — `id (PK)`, `webhook_id → webhook_endpoints`, `event_id → events`, `status`, `response_code`, `response_body`, `latency_ms`, `retry_count`, `next_retry_at`, `created_at` — delivery tracking
 
 ## Connection
 

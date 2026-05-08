@@ -308,6 +308,10 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		zap.String("engine.container", container),
 		zap.String("engine.artifact", artifact),
 		zap.Int64("bytes", written))
+
+	emitEvent(r.Context(), a.db, a.logger, "object.downloaded", t.ID, map[string]interface{}{
+		"bucket": bucket, "key": object, "size": written,
+	})
 }
 
 // detectContentType determines MIME type from extension
@@ -503,6 +507,9 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		zap.Int64("size", size))
 
 	a.notifySvc.Fire(t.ID, bucket, "s3:ObjectCreated:Put", object, size, etag)
+	emitEvent(r.Context(), a.db, a.logger, "object.created", t.ID, map[string]interface{}{
+		"bucket": bucket, "key": object, "size": size, "etag": etag,
+	})
 }
 
 // HandleDelete processes S3 DELETE requests
@@ -553,6 +560,9 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 		w.Header().Set("x-amz-version-id", reqVersionID)
 		w.WriteHeader(http.StatusNoContent)
 		a.notifySvc.Fire(t.ID, bucket, "s3:ObjectRemoved:Delete", object, 0, "")
+		emitEvent(r.Context(), a.db, a.logger, "object.deleted", t.ID, map[string]interface{}{
+			"bucket": bucket, "key": object,
+		})
 		return
 	}
 
@@ -579,6 +589,9 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 		w.Header().Set("x-amz-delete-marker", "true")
 		w.WriteHeader(http.StatusNoContent)
 		a.notifySvc.Fire(t.ID, bucket, "s3:ObjectRemoved:Delete", object, 0, "")
+		emitEvent(r.Context(), a.db, a.logger, "object.deleted", t.ID, map[string]interface{}{
+			"bucket": bucket, "key": object,
+		})
 		return
 	}
 
@@ -610,6 +623,9 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 
 	w.WriteHeader(http.StatusNoContent)
 	a.notifySvc.Fire(t.ID, bucket, "s3:ObjectRemoved:Delete", object, 0, "")
+	emitEvent(r.Context(), a.db, a.logger, "object.deleted", t.ID, map[string]interface{}{
+		"bucket": bucket, "key": object,
+	})
 }
 
 // HandleList processes S3 LIST requests

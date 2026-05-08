@@ -429,6 +429,9 @@ func (s *Server) setupRoutes() {
 	s.logger.Info("Registering STS routes")
 	s.registerSTSRoutes()
 
+	s.logger.Info("Registering webhook and event routes")
+	s.registerWebhookRoutes()
+
 	s.router.Get("/llms.txt", s.handleLlmsTxt)
 
 	s.logger.Info("Registering S3 catch-all handler")
