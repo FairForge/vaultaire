@@ -18,8 +18,60 @@
                 <label>Key Name</label>
                 <input type="text" name="name" required placeholder="e.g. rclone-backup, ci-deploy">
             </div>
-            <button type="submit" class="btn btn-primary">Generate</button>
         </div>
+
+        <div class="form-group">
+            <label>Permissions</label>
+            <div class="checkbox-grid">
+                <label class="checkbox-label">
+                    <input type="checkbox" name="permissions" value="*" checked onchange="togglePermGroups(this)"> Full Access (*)
+                </label>
+            </div>
+            <div id="perm-groups" class="checkbox-grid" style="display:none; margin-top: 0.5rem;">
+                <div>
+                    <strong class="text-muted">Read</strong>
+                    <label class="checkbox-label"><input type="checkbox" name="permissions" value="GetObject"> GetObject</label>
+                    <label class="checkbox-label"><input type="checkbox" name="permissions" value="HeadObject"> HeadObject</label>
+                    <label class="checkbox-label"><input type="checkbox" name="permissions" value="HeadBucket"> HeadBucket</label>
+                    <label class="checkbox-label"><input type="checkbox" name="permissions" value="ListObjects"> ListObjects</label>
+                    <label class="checkbox-label"><input type="checkbox" name="permissions" value="ListBuckets"> ListBuckets</label>
+                </div>
+                <div>
+                    <strong class="text-muted">Write</strong>
+                    <label class="checkbox-label"><input type="checkbox" name="permissions" value="PutObject"> PutObject</label>
+                    <label class="checkbox-label"><input type="checkbox" name="permissions" value="DeleteObject"> DeleteObject</label>
+                    <label class="checkbox-label"><input type="checkbox" name="permissions" value="DeleteObjects"> DeleteObjects</label>
+                    <label class="checkbox-label"><input type="checkbox" name="permissions" value="CreateBucket"> CreateBucket</label>
+                    <label class="checkbox-label"><input type="checkbox" name="permissions" value="DeleteBucket"> DeleteBucket</label>
+                </div>
+                <div>
+                    <strong class="text-muted">Multipart</strong>
+                    <label class="checkbox-label"><input type="checkbox" name="permissions" value="InitiateMultipartUpload"> Initiate</label>
+                    <label class="checkbox-label"><input type="checkbox" name="permissions" value="UploadPart"> UploadPart</label>
+                    <label class="checkbox-label"><input type="checkbox" name="permissions" value="CompleteMultipartUpload"> Complete</label>
+                    <label class="checkbox-label"><input type="checkbox" name="permissions" value="AbortMultipartUpload"> Abort</label>
+                    <label class="checkbox-label"><input type="checkbox" name="permissions" value="ListMultipartUploads"> ListUploads</label>
+                    <label class="checkbox-label"><input type="checkbox" name="permissions" value="ListParts"> ListParts</label>
+                </div>
+            </div>
+        </div>
+
+        <div class="form-row">
+            <div class="form-group form-group-inline">
+                <label>Bucket Scope <span class="text-muted">(optional)</span></label>
+                <input type="text" name="bucket_scope" placeholder="bucket1, bucket2 (empty = all buckets)">
+            </div>
+            <div class="form-group form-group-inline">
+                <label>IP Allowlist <span class="text-muted">(optional)</span></label>
+                <input type="text" name="ip_allowlist" placeholder="10.0.0.0/8, 1.2.3.4 (empty = all IPs)">
+            </div>
+            <div class="form-group form-group-inline">
+                <label>Expires <span class="text-muted">(optional)</span></label>
+                <input type="date" name="expires_at">
+            </div>
+        </div>
+
+        <button type="submit" class="btn btn-primary">Generate</button>
     </form>
 </div>
 
@@ -57,6 +109,7 @@ aws s3 ls --endpoint-url https://stored.ge</div>
             <tr>
                 <th>Name</th>
                 <th>Access Key</th>
+                <th>Scope</th>
                 <th>Created</th>
                 <th>Last Used</th>
                 <th>Status</th>
@@ -68,6 +121,7 @@ aws s3 ls --endpoint-url https://stored.ge</div>
             <tr>
                 <td>{{.Name}}</td>
                 <td class="mono">{{.KeyID}}</td>
+                <td>{{.ScopeSummary}}</td>
                 <td>{{.CreatedFmt}}</td>
                 <td>{{.LastUsedFmt}}</td>
                 <td><span class="badge badge-{{.StatusClass}}">{{.Status}}</span></td>
@@ -94,4 +148,16 @@ aws s3 ls --endpoint-url https://stored.ge</div>
 <div class="dashboard-actions">
     <a href="/dashboard/" class="btn">Back to Dashboard</a>
 </div>
+
+<script>
+function togglePermGroups(fullAccessCheckbox) {
+    var groups = document.getElementById('perm-groups');
+    if (fullAccessCheckbox.checked) {
+        groups.style.display = 'none';
+        groups.querySelectorAll('input[type=checkbox]').forEach(function(cb) { cb.checked = false; });
+    } else {
+        groups.style.display = 'block';
+    }
+}
+</script>
 {{end}}

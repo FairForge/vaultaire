@@ -22,12 +22,13 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 | 028 | Object Lock: `object_lock_enabled`, `default_retention_mode`, `default_retention_days` on `buckets`; `object_locks` table |
 | 029 | Idempotency cache: `idempotency_cache` table for management API request deduplication (24h TTL) |
 | 030 | Metadata: `metadata JSONB` column on `buckets` and `object_head_cache` |
+| 031 | Scoped API keys: `permissions` (JSONB), `bucket_scope` (TEXT[]), `ip_allowlist` (TEXT[]), `expires_at` (TIMESTAMPTZ), `secret_key` (TEXT) on `api_keys` |
 
 ## Key Tables
 
 - **users** — `id (UUID)`, `email`, `password_hash`, `company`, `status`, `role`, `stripe_customer_id`
 - **tenants** — `id`, `name`, `email`, `access_key`, `secret_key`, `slug`, `slug_locked`, `stripe_customer_id`, `stripe_subscription_id`, `subscription_status`, `plan`, `suspended_at`
-- **api_keys** — `id (UUID)`, `user_id → users`, `name`, `key_id`, `secret_hash`
+- **api_keys** — `id (UUID)`, `user_id → users`, `name`, `key_id`, `secret_hash`, `secret_key`, `permissions` (JSONB, default `["*"]`), `bucket_scope` (TEXT[]), `ip_allowlist` (TEXT[]), `expires_at`
 - **tenant_quotas** — `tenant_id (PK)`, `storage_limit_bytes`, `storage_used_bytes`, `tier`
 - **dashboard_sessions** — `id (VARCHAR 64)`, `user_id → users`, `tenant_id → tenants`, `email`, `role`, `ip_address`, `user_agent`, `created_at`, `last_active_at`, `expires_at`
 - **subscriptions** — Stripe subscription state tracking

@@ -14,6 +14,8 @@ Vaultaire is a universal storage orchestration engine providing a unified S3-com
 - **`.private/VAULT_SERIES_ECONOMICS.md`** — Vault1/3/5/10/18/50/100 tiers with overselling, LET marketing, per-tier COGS
 - **`.private/ADVANCED_ARCHITECTURE.md`** — FastCDC, global content index, convergent encryption, federation protocol, seamless node addition
 - **`.private/PRODUCT_LINEUP.md`** — Full 7-product catalog, COGS, margins, use cases, pricing strategy
+- **`.private/IDRIVE_RESELLER_API.md`** — Complete iDrive e2 Reseller API reference, all endpoints, pricing, 6-phase integration plan
+- **`.private/TIER_STRATEGY.md`** — Three-tier GTM: Vault (archive), Standard (smart), Performance (B2 killer). Selling model, use cases, novel features
 - **`.private/PERMAFROST_TESTING_RESULTS.md`** — OneDrive benchmark results v1→v2→v3 (HTTP/1.1 + Range = 214 MB/s fleet)
 - **`internal/drivers/onedrive_README.md`** — OneDrive integration + dual-transport pattern (HTTP/2 for API, HTTP/1.1 for CDN)
 - **`internal/drivers/quotaless_README.md`** — Quotaless backend ops manual
@@ -51,23 +53,34 @@ make fmt                  # go fmt + gofmt -s -w
 ```
 API Layer (internal/api)      S3 protocol translation, auth middleware, HTTP handlers
 Engine Layer (internal/engine) Backend orchestration, tiering, replication, caching, ML routing
-Driver Layer (internal/drivers) Storage provider implementations (local, s3, lyve, quotaless, onedrive)
+Driver Layer (internal/drivers) Storage provider implementations (local, s3, lyve, quotaless, onedrive, geyser, idrive)
 ```
 
 ### Entry Point
 
-`cmd/vaultaire/main.go` — initializes drivers from environment variables, connects to PostgreSQL (optional, degrades gracefully), starts the HTTP server. Storage mode auto-detected: Quotaless > Lyve > S3 > local.
+`cmd/vaultaire/main.go` — initializes drivers from environment variables, connects to PostgreSQL (optional, degrades gracefully), starts the HTTP server. Storage mode auto-detected: Quotaless > S3 > Geyser > local. iDrive requires explicit env vars (not yet in auto-detect).
 
 ### Dual Terminology
 
 External (S3-compatible): Bucket, Object, Key
 Internal: Container, Artifact, Path
 
-The `storage.Backend` interface is the sacred contract all drivers implement.
+The `engine.Driver` interface (in `internal/engine/interface.go`) is the sacred contract all drivers implement: `Name`, `Get`, `Put`, `Delete`, `List`, `Exists`, `HealthCheck`.
 
 ### Key Database Tables
 
-Registration persists to **four tables in order**: `users` -> `tenants` -> `api_keys` -> `tenant_quotas`. Missing any causes failures. S3 auth queries the `tenants` table (not `api_keys` or `users`) — `access_key` and `secret_key` live there.
+Registration persists to **four tables in order**: `users` -> `tenants` -> `api_keys` -> `tenant_quotas`. Missing any causes failures. S3 auth queries `tenants` first (primary key, full access), then falls back to `api_keys` for scoped VLT_ keys.
+
+Other critical tables (31 migrations through `031_scoped_keys.sql`):
+- `object_head_cache` — HEAD/GET metadata cache (~1ms), content-type, ETag, metadata JSONB
+- `buckets` — bucket registry with visibility, CORS, cache TTL, metadata JSONB, slug
+- `multipart_uploads`, `multipart_parts` — in-progress multipart state
+- `object_versions` — versioning support (version_id, is_latest, delete markers)
+- `object_locks` — Object Lock / WORM retention and legal holds
+- `idempotency_cache` — management API idempotency keys (24h TTL)
+- `stripe_events` — webhook event dedup
+- `dashboard_sessions` — PostgreSQL-backed sessions with IP/user-agent tracking
+- `oauth_accounts` — OAuth provider links (Google, GitHub)
 
 Migrations are in `internal/database/migrations/`.
 
@@ -138,6 +151,13 @@ GitHub Actions Deploy (`.github/workflows/deploy.yml`):
 | `GITHUB_CLIENT_ID` | — | GitHub OAuth App client ID |
 | `GITHUB_CLIENT_SECRET` | — | GitHub OAuth App client secret |
 | `VAULTAIRE_BASE_URL` | http://localhost:8000 | Base URL for OAuth callbacks |
+| `JWT_SECRET` | — | **Required** — JWT signing key for API auth |
+| `VERIFY_SECRET` | — | HMAC secret for email verification tokens |
+| `GEYSER_ACCESS_KEY`, `GEYSER_SECRET_KEY` | — | Geyser tape S3 credentials |
+| `GEYSER_BUCKET`, `GEYSER_ENDPOINT` | — | Geyser bucket name and endpoint URL |
+| `IDRIVE_ACCESS_KEY`, `IDRIVE_SECRET_KEY` | — | iDrive E2 S3 credentials |
+| `IDRIVE_ENDPOINT`, `IDRIVE_REGION` | — | iDrive endpoint and region |
+| `ONEDRIVE_CLIENT_ID`, `ONEDRIVE_CLIENT_SECRET`, `ONEDRIVE_TENANT_ID` | — | OneDrive OAuth (future) |
 
 ## Production
 

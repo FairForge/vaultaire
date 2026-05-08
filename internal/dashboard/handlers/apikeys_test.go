@@ -69,7 +69,7 @@ func TestHandleAPIKeys_ListWithKeys(t *testing.T) {
 	tmpl := testAPIKeysTemplate(t)
 	authSvc, sd := setupAuthWithUser(t)
 
-	key, err := authSvc.GenerateAPIKey(context.Background(), sd.UserID, "test-key")
+	key, err := authSvc.GenerateAPIKey(context.Background(), sd.UserID, "test-key", nil)
 	require.NoError(t, err)
 
 	handler := HandleAPIKeys(tmpl, authSvc, zap.NewNop())
@@ -143,7 +143,7 @@ func TestHandleGenerateKey_DefaultName(t *testing.T) {
 func TestHandleRevokeKey(t *testing.T) {
 	authSvc, sd := setupAuthWithUser(t)
 
-	key, err := authSvc.GenerateAPIKey(context.Background(), sd.UserID, "revoke-me")
+	key, err := authSvc.GenerateAPIKey(context.Background(), sd.UserID, "revoke-me", nil)
 	require.NoError(t, err)
 
 	handler := HandleRevokeKey(authSvc, zap.NewNop())

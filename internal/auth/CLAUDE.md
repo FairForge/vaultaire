@@ -7,7 +7,9 @@ Authentication service for Vaultaire. Handles user registration, login, JWT toke
 - **AuthService** — stateful service with in-memory maps for O(1) lookups. Backed by PostgreSQL for persistence.
 - **User** — `{ID, Email, PasswordHash, Company, TenantID}`
 - **Tenant** — `{ID, UserID, AccessKey, SecretKey}` — S3 auth queries `keyIndex[accessKey]`
-- **APIKey** — `{ID, UserID, TenantID, Key, Secret, Hash}`
+- **APIKey** — `{ID, UserID, TenantID, Key, Secret, Hash, Permissions, BucketScope, IPAllowlist, ExpiresAt}`
+- **KeyScope** — `{Permissions, BucketScope, IPAllowlist, ExpiresAt}` — returned from auth lookups for scope enforcement
+- **KeyCreateOptions** — optional scope params for `GenerateAPIKey`
 
 ## Critical Methods
 
@@ -49,8 +51,23 @@ Password reset rate limiting is in-memory (per-email, 3/hour, sliding window). T
 | `users` | email | *User | Login lookup |
 | `userIndex` | userID | *User | ID-based lookup |
 | `tenants` | tenantID | *Tenant | Tenant lookup |
-| `keyIndex` | accessKey | *Tenant | S3 auth (hot path) |
-| `apiKeys` | key | *APIKey | API key validation |
+| `keyIndex` | accessKey | *Tenant | S3 auth (hot path). Includes scoped VLT_ keys mapped to owning tenant. |
+| `apiKeys` | key | *APIKey | API key validation. Carries scope data (Permissions, BucketScope, IPAllowlist, ExpiresAt). |
+
+## Scoped API Keys (Phase 5.11.4)
+
+`scoped_keys.go` — permission check functions reusable by S3 enforcement and future STS (Phase 5.11.5):
+- `CheckPermission(keyPerms, operation)` — `["*"]` allows all; otherwise exact match
+- `CheckBucketScope(scopes, bucket)` — empty = unrestricted
+- `CheckIPAllowlist(allowlist, clientIP)` — supports CIDR and exact IP; empty = unrestricted
+- `IsKeyExpired(expiresAt)` — nil = never expires
+- `ValidatePermissions(perms)` — validates against `ValidPermissions` map (all S3 operation names from `determineOperation`)
+
+`GenerateAPIKey(ctx, userID, name, *KeyCreateOptions)` — accepts scope options. Persists to `api_keys` table with scope columns. Adds key to `keyIndex` so scoped VLT_ keys can authenticate S3 requests.
+
+`LoadFromDB` — loads `api_keys` table with scope columns (permissions JSONB, bucket_scope TEXT[], ip_allowlist TEXT[], expires_at TIMESTAMPTZ, secret_key TEXT). Populates both `apiKeys` and `keyIndex` maps.
+
+`Auth.ValidateRequest` (handlers.go) — returns `(tenantID, *KeyScope, error)`. Queries `tenants` first (primary key, full access), falls back to `api_keys` JOIN users+tenants for scoped keys.
 
 ## Slug Generation + Bucket Backfill (`slug.go`, `backfill.go`)
 

@@ -145,7 +145,7 @@ func (s *Server) handleCreateUserAPIKey(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Generate key
-	key, err := s.auth.GenerateAPIKey(r.Context(), userID, req.Name)
+	key, err := s.auth.GenerateAPIKey(r.Context(), userID, req.Name, nil)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

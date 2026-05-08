@@ -20,7 +20,7 @@ func TestAPIKeyGeneration(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("generates API key with new format", func(t *testing.T) {
-		key, err := auth.GenerateAPIKey(ctx, user.ID, "Test Key")
+		key, err := auth.GenerateAPIKey(ctx, user.ID, "Test Key", nil)
 		require.NoError(t, err)
 
 		assert.NotEmpty(t, key.Key)
@@ -28,11 +28,11 @@ func TestAPIKeyGeneration(t *testing.T) {
 		assert.Len(t, key.Secret, 40)
 		assert.Equal(t, "Test Key", key.Name)
 		assert.Equal(t, user.TenantID, key.TenantID)
-		assert.Equal(t, []string{"s3:*"}, key.Permissions)
+		assert.Equal(t, []string{"*"}, key.Permissions)
 	})
 
 	t.Run("validates API key", func(t *testing.T) {
-		key, err := auth.GenerateAPIKey(ctx, user.ID, "Validate Test")
+		key, err := auth.GenerateAPIKey(ctx, user.ID, "Validate Test", nil)
 		require.NoError(t, err)
 
 		// Valid key
@@ -51,7 +51,7 @@ func TestAPIKeyGeneration(t *testing.T) {
 
 	t.Run("rotates API key", func(t *testing.T) {
 		// Create original key
-		originalKey, err := auth.GenerateAPIKey(ctx, user.ID, "Original")
+		originalKey, err := auth.GenerateAPIKey(ctx, user.ID, "Original", nil)
 		require.NoError(t, err)
 
 		// Rotate it
@@ -65,7 +65,7 @@ func TestAPIKeyGeneration(t *testing.T) {
 	})
 
 	t.Run("revokes API key", func(t *testing.T) {
-		key, err := auth.GenerateAPIKey(ctx, user.ID, "Revoke Test")
+		key, err := auth.GenerateAPIKey(ctx, user.ID, "Revoke Test", nil)
 		require.NoError(t, err)
 
 		// Revoke key
@@ -79,7 +79,7 @@ func TestAPIKeyGeneration(t *testing.T) {
 	})
 
 	t.Run("handles key expiration", func(t *testing.T) {
-		key, err := auth.GenerateAPIKey(ctx, user.ID, "Expire Test")
+		key, err := auth.GenerateAPIKey(ctx, user.ID, "Expire Test", nil)
 		require.NoError(t, err)
 
 		// Set expiration to past
@@ -95,9 +95,9 @@ func TestAPIKeyGeneration(t *testing.T) {
 
 	t.Run("lists user API keys", func(t *testing.T) {
 		// Create a few keys
-		_, err := auth.GenerateAPIKey(ctx, user.ID, "Key 1")
+		_, err := auth.GenerateAPIKey(ctx, user.ID, "Key 1", nil)
 		require.NoError(t, err)
-		_, err = auth.GenerateAPIKey(ctx, user.ID, "Key 2")
+		_, err = auth.GenerateAPIKey(ctx, user.ID, "Key 2", nil)
 		require.NoError(t, err)
 
 		keys, err := auth.ListAPIKeys(ctx, user.ID)

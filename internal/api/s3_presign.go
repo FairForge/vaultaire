@@ -3,7 +3,9 @@ package api
 import (
 	"crypto/hmac"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -11,6 +13,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/FairForge/vaultaire/internal/auth"
+	"github.com/lib/pq"
 )
 
 const (
@@ -27,7 +32,7 @@ func isPresignedRequest(r *http.Request) bool {
 	return r.URL.Query().Get("X-Amz-Algorithm") == presignAlgorithm
 }
 
-func (s *Server) verifyPresignedURL(r *http.Request) (string, error) {
+func (s *Server) verifyPresignedURL(r *http.Request) (string, *auth.KeyScope, error) {
 	q := r.URL.Query()
 
 	algorithm := q.Get("X-Amz-Algorithm")
@@ -39,17 +44,17 @@ func (s *Server) verifyPresignedURL(r *http.Request) (string, error) {
 
 	if algorithm == "" || credential == "" || amzDate == "" ||
 		expiresStr == "" || signedHeaders == "" || signature == "" {
-		return "", fmt.Errorf("%s", ErrAuthorizationQueryParametersError)
+		return "", nil, fmt.Errorf("%s", ErrAuthorizationQueryParametersError)
 	}
 
 	expires, err := strconv.Atoi(expiresStr)
 	if err != nil || expires < 1 || expires > presignMaxExpires {
-		return "", fmt.Errorf("%s", ErrInvalidPresignExpires)
+		return "", nil, fmt.Errorf("%s", ErrInvalidPresignExpires)
 	}
 
 	credParts := strings.Split(credential, "/")
 	if len(credParts) != 5 || credParts[3] != presignService || credParts[4] != presignAWS4Request {
-		return "", fmt.Errorf("%s", ErrAuthorizationQueryParametersError)
+		return "", nil, fmt.Errorf("%s", ErrAuthorizationQueryParametersError)
 	}
 	accessKey := credParts[0]
 	credDate := credParts[1]
@@ -57,23 +62,60 @@ func (s *Server) verifyPresignedURL(r *http.Request) (string, error) {
 
 	reqTime, err := time.Parse(presignTimeFormat, amzDate)
 	if err != nil {
-		return "", fmt.Errorf("%s", ErrAuthorizationQueryParametersError)
+		return "", nil, fmt.Errorf("%s", ErrAuthorizationQueryParametersError)
 	}
 
 	if time.Now().UTC().After(reqTime.Add(time.Duration(expires) * time.Second)) {
-		return "", fmt.Errorf("%s", ErrExpiredPresignedRequest)
+		return "", nil, fmt.Errorf("%s", ErrExpiredPresignedRequest)
 	}
 
 	if s.db == nil {
-		return "", fmt.Errorf("%s: database not available", ErrAccessDenied)
+		return "", nil, fmt.Errorf("%s: database not available", ErrAccessDenied)
 	}
 
+	// Look up credentials and scope. Try primary tenant key first, then scoped API keys.
 	var secretKey, tenantID string
+	var scope *auth.KeyScope
+
 	err = s.db.QueryRow(
 		`SELECT secret_key, id FROM tenants WHERE access_key = $1`, accessKey,
 	).Scan(&secretKey, &tenantID)
-	if err != nil {
-		return "", fmt.Errorf("%s", ErrAccessDenied)
+	if err == sql.ErrNoRows {
+		// Try scoped API key — requires secret_key stored for signature verification.
+		var permJSON []byte
+		var bucketScope, ipAllowlist pq.StringArray
+		var expiresAtDB sql.NullTime
+		err = s.db.QueryRow(`
+			SELECT ak.secret_key, t.id,
+			       COALESCE(ak.permissions, '["*"]'::jsonb),
+			       COALESCE(ak.bucket_scope, '{}'),
+			       COALESCE(ak.ip_allowlist, '{}'),
+			       ak.expires_at
+			FROM api_keys ak
+			JOIN users u ON u.id = ak.user_id
+			JOIN tenants t ON t.email = u.email
+			WHERE ak.key_id = $1
+		`, accessKey).Scan(&secretKey, &tenantID, &permJSON, &bucketScope, &ipAllowlist, &expiresAtDB)
+		if err != nil {
+			return "", nil, fmt.Errorf("%s", ErrAccessDenied)
+		}
+		if secretKey == "" {
+			return "", nil, fmt.Errorf("%s", ErrAccessDenied)
+		}
+		scope = &auth.KeyScope{
+			BucketScope: []string(bucketScope),
+			IPAllowlist: []string(ipAllowlist),
+		}
+		if jsonErr := json.Unmarshal(permJSON, &scope.Permissions); jsonErr != nil {
+			scope.Permissions = []string{"*"}
+		}
+		if expiresAtDB.Valid {
+			scope.ExpiresAt = &expiresAtDB.Time
+		}
+	} else if err != nil {
+		return "", nil, fmt.Errorf("%s", ErrAccessDenied)
+	} else {
+		scope = &auth.KeyScope{Permissions: []string{"*"}}
 	}
 
 	canonicalURI := uriEncodePath(r.URL.Path)
@@ -120,10 +162,10 @@ func (s *Server) verifyPresignedURL(r *http.Request) (string, error) {
 	expectedSig := hex.EncodeToString(presignHMAC(signingKey, []byte(stringToSign)))
 
 	if !hmac.Equal([]byte(expectedSig), []byte(signature)) {
-		return "", fmt.Errorf("%s", ErrSignatureDoesNotMatch)
+		return "", nil, fmt.Errorf("%s", ErrSignatureDoesNotMatch)
 	}
 
-	return tenantID, nil
+	return tenantID, scope, nil
 }
 
 func buildPresignCanonicalQuery(values url.Values) string {

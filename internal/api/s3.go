@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -219,11 +220,12 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var tenantID string
+	var scope *auth.KeyScope
 	var err error
 
 	if !s.testMode {
 		if isPresignedRequest(r) {
-			tenantID, err = s.verifyPresignedURL(r)
+			tenantID, scope, err = s.verifyPresignedURL(r)
 			if err != nil {
 				s.logger.Error("presigned URL verification failed",
 					zap.Error(err),
@@ -242,8 +244,8 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		} else {
-			auth := auth.NewAuth(s.db, s.logger)
-			tenantID, err = auth.ValidateRequest(r)
+			a := auth.NewAuth(s.db, s.logger)
+			tenantID, scope, err = a.ValidateRequest(r)
 			if err != nil {
 				s.logger.Error("authentication failed",
 					zap.Error(err),
@@ -264,14 +266,28 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else {
-		if t, err := tenant.FromContext(r.Context()); err == nil && t != nil {
+		if t, tErr := tenant.FromContext(r.Context()); tErr == nil && t != nil {
 			tenantID = t.ID
 		} else {
 			tenantID = "test"
 		}
+		scope = &auth.KeyScope{Permissions: []string{"*"}}
 		s.logger.Debug("test mode - skipping auth",
 			zap.String("tenant_id", tenantID),
 			zap.String("path", r.URL.Path))
+	}
+
+	// Enforce key expiration and IP allowlist before any further processing.
+	if scope != nil {
+		if auth.IsKeyExpired(scope.ExpiresAt) {
+			WriteS3Error(w, ErrExpiredPresignedRequest, r.URL.Path, generateRequestID())
+			return
+		}
+		if !auth.CheckIPAllowlist(scope.IPAllowlist, extractClientIP(r)) {
+			WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
+				WithSuggestion("This key is restricted by IP address."))
+			return
+		}
 	}
 
 	if tenantID != "" {
@@ -309,6 +325,20 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s3Req.TenantID = tenantID
+
+	// Enforce permission and bucket scope now that we know the operation.
+	if scope != nil {
+		if !auth.CheckPermission(scope.Permissions, s3Req.Operation) {
+			WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
+				WithSuggestion(fmt.Sprintf("This key does not have %s access.", s3Req.Operation)))
+			return
+		}
+		if s3Req.Bucket != "" && !auth.CheckBucketScope(scope.BucketScope, s3Req.Bucket) {
+			WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
+				WithSuggestion(fmt.Sprintf("This key is restricted to buckets: %s", strings.Join(scope.BucketScope, ", "))))
+			return
+		}
+	}
 
 	if tenantID == "" {
 		tenantID = "default"
@@ -581,4 +611,24 @@ func isTenantSuspended(ctx context.Context, db *sql.DB, tenantID string) bool {
 		return false // fail open — if we can't check, allow access
 	}
 	return suspendedAt.Valid
+}
+
+// extractClientIP returns the real client IP, checking proxy headers
+// in priority order: CF-Connecting-IP (Cloudflare) > X-Forwarded-For
+// (HAProxy) > RemoteAddr.
+func extractClientIP(r *http.Request) string {
+	if ip := r.Header.Get("CF-Connecting-IP"); ip != "" {
+		return ip
+	}
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if idx := strings.Index(xff, ","); idx > 0 {
+			return strings.TrimSpace(xff[:idx])
+		}
+		return strings.TrimSpace(xff)
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }

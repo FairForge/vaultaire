@@ -6,11 +6,14 @@ import (
 	"crypto/sha256"
 	"encoding/base32"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // APIKey represents an API key for S3 access
@@ -23,6 +26,8 @@ type APIKey struct {
 	Secret      string            `json:"secret,omitempty"`
 	Hash        string            `json:"-" db:"secret_hash"`
 	Permissions []string          `json:"permissions" db:"permissions"`
+	BucketScope []string          `json:"bucket_scope" db:"bucket_scope"`
+	IPAllowlist []string          `json:"ip_allowlist" db:"ip_allowlist"`
 	ExpiresAt   *time.Time        `json:"expires_at,omitempty" db:"expires_at"`
 	LastUsed    *time.Time        `json:"last_used,omitempty" db:"last_used"`
 	CreatedAt   time.Time         `json:"created_at" db:"created_at"`
@@ -32,8 +37,9 @@ type APIKey struct {
 	LastIP      string            `json:"last_ip,omitempty" db:"last_ip"`
 }
 
-// GenerateAPIKey creates a new API key for a user
-func (a *AuthService) GenerateAPIKey(ctx context.Context, userID, name string) (*APIKey, error) {
+// GenerateAPIKey creates a new API key for a user.
+// opts may be nil for full-access keys.
+func (a *AuthService) GenerateAPIKey(ctx context.Context, userID, name string, opts *KeyCreateOptions) (*APIKey, error) {
 	user, exists := a.userIndex[userID]
 	if !exists {
 		return nil, fmt.Errorf("user not found")
@@ -57,12 +63,45 @@ func (a *AuthService) GenerateAPIKey(ctx context.Context, userID, name string) (
 		Key:         accessKey,
 		Secret:      secretKey,
 		Hash:        hash,
-		Permissions: []string{"s3:*"},
+		Permissions: []string{"*"},
 		CreatedAt:   time.Now(),
 		Metadata:    make(map[string]string),
 	}
 
+	if opts != nil {
+		if len(opts.Permissions) > 0 {
+			apiKey.Permissions = opts.Permissions
+		}
+		apiKey.BucketScope = opts.BucketScope
+		apiKey.IPAllowlist = opts.IPAllowlist
+		apiKey.ExpiresAt = opts.ExpiresAt
+	}
+
 	a.apiKeys[accessKey] = apiKey
+
+	if tenant, ok := a.tenants[user.TenantID]; ok {
+		a.keyIndex[accessKey] = tenant
+	}
+
+	if a.sqlDB != nil {
+		secretHash, hashErr := bcrypt.GenerateFromPassword([]byte(secretKey), bcrypt.DefaultCost)
+		if hashErr != nil {
+			return nil, fmt.Errorf("hash api key secret: %w", hashErr)
+		}
+		permJSON, _ := json.Marshal(apiKey.Permissions)
+		_, err = a.sqlDB.ExecContext(ctx, `
+			INSERT INTO api_keys (id, user_id, name, key_id, secret_hash, secret_key,
+			                      permissions, bucket_scope, ip_allowlist, expires_at, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			ON CONFLICT (key_id) DO NOTHING
+		`, apiKey.ID, userID, name, accessKey, string(secretHash), secretKey,
+			permJSON, pq.Array(apiKey.BucketScope), pq.Array(apiKey.IPAllowlist),
+			apiKey.ExpiresAt, apiKey.CreatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("persist api key: %w", err)
+		}
+	}
+
 	return apiKey, nil
 }
 
@@ -183,7 +222,7 @@ func (a *AuthService) ListAPIKeys(ctx context.Context, userID string) ([]*APIKey
 
 // GenerateAPIKeyWithAudit creates a new API key with audit logging
 func (a *AuthService) GenerateAPIKeyWithAudit(ctx context.Context, userID, name, ip, userAgent string) (*APIKey, error) {
-	key, err := a.GenerateAPIKey(ctx, userID, name)
+	key, err := a.GenerateAPIKey(ctx, userID, name, nil)
 
 	if a.auditLogger != nil {
 		event := APIKeyAuditEvent{
