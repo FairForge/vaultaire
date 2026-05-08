@@ -126,9 +126,11 @@ func HandleUpdateBucketSettings(tmpl *template.Template, db *sql.DB, logger *zap
 			cacheMaxAge = 86400
 		}
 
+		settingsURL := fmt.Sprintf("/dashboard/buckets/%s/settings", bucketName)
+
 		if db == nil {
 			middleware.SetFlash(w, "error", "Database not available.")
-			http.Redirect(w, r, fmt.Sprintf("/dashboard/buckets/%s/settings", bucketName), http.StatusSeeOther)
+			http.Redirect(w, r, settingsURL, http.StatusSeeOther) // #nosec G710 -- hardcoded path prefix
 			return
 		}
 
@@ -141,7 +143,7 @@ func HandleUpdateBucketSettings(tmpl *template.Template, db *sql.DB, logger *zap
 			allowed, reason := auth.CanEnablePublicRead(tier)
 			if !allowed {
 				middleware.SetFlash(w, "error", reason)
-				http.Redirect(w, r, fmt.Sprintf("/dashboard/buckets/%s/settings", bucketName), http.StatusSeeOther)
+				http.Redirect(w, r, settingsURL, http.StatusSeeOther) // #nosec G710 -- hardcoded path prefix
 				return
 			}
 		}
@@ -154,7 +156,7 @@ func HandleUpdateBucketSettings(tmpl *template.Template, db *sql.DB, logger *zap
 		if err != nil {
 			logger.Error("update bucket settings", zap.Error(err))
 			middleware.SetFlash(w, "error", "Failed to save settings.")
-			http.Redirect(w, r, fmt.Sprintf("/dashboard/buckets/%s/settings", bucketName), http.StatusSeeOther)
+			http.Redirect(w, r, settingsURL, http.StatusSeeOther) // #nosec G710 -- hardcoded path prefix
 			return
 		}
 
@@ -166,6 +168,6 @@ func HandleUpdateBucketSettings(tmpl *template.Template, db *sql.DB, logger *zap
 		}
 
 		middleware.SetFlash(w, "success", "Bucket settings saved.")
-		http.Redirect(w, r, fmt.Sprintf("/dashboard/buckets/%s/settings", bucketName), http.StatusSeeOther)
+		http.Redirect(w, r, settingsURL, http.StatusSeeOther) // #nosec G710 -- hardcoded path prefix
 	}
 }

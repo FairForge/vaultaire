@@ -83,7 +83,7 @@ func emitEvent(ctx context.Context, db *sql.DB, logger *zap.Logger, eventType, t
 		return
 	}
 
-	go dispatchWebhooks(db, logger, eventID, eventType, tenantID, dataJSON)
+	go dispatchWebhooks(db, logger, eventID, eventType, tenantID, dataJSON) // #nosec G118 -- intentional fire-and-forget after response
 }
 
 func dispatchWebhooks(db *sql.DB, logger *zap.Logger, eventID, eventType, tenantID string, payload []byte) {

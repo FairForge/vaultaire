@@ -441,7 +441,7 @@ func (s *Server) handleTestWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go dispatchWebhooks(s.db, s.logger, eventID, "webhook.test", tenantID, dataJSON)
+	go dispatchWebhooks(s.db, s.logger, eventID, "webhook.test", tenantID, dataJSON) // #nosec G118 -- intentional fire-and-forget after response
 
 	resp := map[string]interface{}{
 		"object":     "webhook_test",

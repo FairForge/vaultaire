@@ -81,7 +81,7 @@ func HandleUpgrade(stripe *billing.StripeService, db *sql.DB, logger *zap.Logger
 			return
 		}
 
-		http.Redirect(w, r, checkoutURL, http.StatusSeeOther)
+		http.Redirect(w, r, checkoutURL, http.StatusSeeOther) // #nosec G710 -- URL from Stripe API
 	}
 }
 
@@ -185,14 +185,52 @@ func populateValueStack(ctx context.Context, db *sql.DB, data map[string]any, te
 	data["StorageUsedFmt"] = formatBytes(used)
 }
 
+// Competitor pricing — verified Q2 2026.
+const (
+	storedStoragePerTB = 3.99
+	storedEgressPerTB  = 0.0
+	awsStoragePerTB    = 23.0
+	awsEgressPerTB     = 90.0
+	b2StoragePerTB     = 6.0
+	b2EgressPerTB      = 10.0
+	wasabiStoragePerTB = 6.99
+	wasabiEgressPerTB  = 0.0
+)
+
+type ProviderCost struct {
+	Name        string
+	StorageCost string
+	EgressCost  string
+	TotalCost   string
+	Highlight   bool
+}
+
+func providerCost(name string, storageTB, egressTB, storageRate, egressRate float64, highlight bool) ProviderCost {
+	sc := storageTB * storageRate
+	ec := egressTB * egressRate
+	return ProviderCost{
+		Name:        name,
+		StorageCost: fmt.Sprintf("$%.2f", sc),
+		EgressCost:  fmt.Sprintf("$%.2f", ec),
+		TotalCost:   fmt.Sprintf("$%.2f", sc+ec),
+		Highlight:   highlight,
+	}
+}
+
 func populateCostComparison(ctx context.Context, db *sql.DB, data map[string]any, tenantID string) {
-	// Calculate what the same storage would cost on AWS S3 Standard.
-	// AWS S3: ~$23/TB/mo. stored.ge: $3.99/TB/mo.
-	data["AWSCost"] = "$0.00"
-	data["StoredCost"] = "$0.00"
-	data["Savings"] = "$0.00"
+	zero := func() {
+		data["Providers"] = []ProviderCost{
+			{Name: "stored.ge", StorageCost: "$0.00", EgressCost: "$0.00", TotalCost: "$0.00", Highlight: true},
+			{Name: "AWS S3", StorageCost: "$0.00", EgressCost: "$0.00", TotalCost: "$0.00"},
+			{Name: "Backblaze B2", StorageCost: "$0.00", EgressCost: "$0.00", TotalCost: "$0.00"},
+			{Name: "Wasabi", StorageCost: "$0.00", EgressCost: "$0.00", TotalCost: "$0.00"},
+		}
+		data["TotalSavingsVsAWS"] = "$0.00"
+		data["EgressThisMonth"] = "0 B"
+	}
 
 	if db == nil {
+		zero()
 		return
 	}
 
@@ -200,16 +238,38 @@ func populateCostComparison(ctx context.Context, db *sql.DB, data map[string]any
 	err := db.QueryRowContext(ctx,
 		`SELECT storage_used_bytes FROM tenant_quotas WHERE tenant_id = $1`, tenantID).
 		Scan(&usedBytes)
-	if err != nil || usedBytes == 0 {
+	if err != nil {
+		zero()
 		return
 	}
 
-	tbUsed := float64(usedBytes) / (1024 * 1024 * 1024 * 1024)
-	awsCost := tbUsed * 23.0
-	storedCost := tbUsed * 3.99
-	savings := awsCost - storedCost
+	var egressBytes int64
+	err = db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(egress_bytes), 0) FROM bandwidth_usage_daily
+		 WHERE tenant_id = $1 AND date >= date_trunc('month', CURRENT_DATE)`,
+		tenantID).Scan(&egressBytes)
+	if err != nil {
+		zero()
+		return
+	}
 
-	data["AWSCost"] = fmt.Sprintf("$%.2f/mo", awsCost)
-	data["StoredCost"] = fmt.Sprintf("$%.2f/mo", storedCost)
-	data["Savings"] = fmt.Sprintf("$%.2f/mo", savings)
+	if usedBytes == 0 && egressBytes == 0 {
+		zero()
+		return
+	}
+
+	tbStored := float64(usedBytes) / (1024 * 1024 * 1024 * 1024)
+	tbEgress := float64(egressBytes) / (1024 * 1024 * 1024 * 1024)
+
+	stored := providerCost("stored.ge", tbStored, tbEgress, storedStoragePerTB, storedEgressPerTB, true)
+	aws := providerCost("AWS S3", tbStored, tbEgress, awsStoragePerTB, awsEgressPerTB, false)
+	b2 := providerCost("Backblaze B2", tbStored, tbEgress, b2StoragePerTB, b2EgressPerTB, false)
+	wasabi := providerCost("Wasabi", tbStored, tbEgress, wasabiStoragePerTB, wasabiEgressPerTB, false)
+
+	awsTotal := tbStored*awsStoragePerTB + tbEgress*awsEgressPerTB
+	storedTotal := tbStored*storedStoragePerTB + tbEgress*storedEgressPerTB
+
+	data["Providers"] = []ProviderCost{stored, aws, b2, wasabi}
+	data["TotalSavingsVsAWS"] = fmt.Sprintf("$%.2f", awsTotal-storedTotal)
+	data["EgressThisMonth"] = formatBytes(egressBytes)
 }

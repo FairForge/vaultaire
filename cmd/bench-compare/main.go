@@ -27,7 +27,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/md5"
+	"crypto/md5" // #nosec G501 -- MD5 required for S3 ETag verification
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
@@ -816,7 +816,7 @@ func sha256hex(b []byte) string {
 }
 
 func md5Sum(b []byte) []byte {
-	h := md5.Sum(b) //nolint:gosec // MD5 used for S3 ETag comparison, not security
+	h := md5.Sum(b) // #nosec G401 -- MD5 required for S3 ETag verification
 	return h[:]
 }
 

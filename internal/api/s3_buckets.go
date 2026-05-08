@@ -20,6 +20,14 @@ func validateBucketName(name string) bool {
 	return s3BucketNameRe.MatchString(name) && !strings.Contains(name, "..")
 }
 
+func safeBucketPath(base, tenantID, bucket string) (string, bool) {
+	p := filepath.Join(base, tenantID, bucket)
+	if !strings.HasPrefix(filepath.Clean(p), filepath.Clean(base)+string(filepath.Separator)) {
+		return "", false
+	}
+	return p, true
+}
+
 // ListBucketsResponse for S3 API
 type ListBucketsResponse struct {
 	XMLName xml.Name `xml:"ListAllMyBucketsResult"`
@@ -118,8 +126,12 @@ func (s *Server) CreateBucket(w http.ResponseWriter, r *http.Request) {
 		zap.String("tenant", tenantID))
 
 	// Create container directory
-	dirPath := filepath.Join("/tmp/vaultaire", tenantID, bucket)
-	if err := os.MkdirAll(dirPath, 0755); err != nil {
+	dirPath, safe := safeBucketPath("/tmp/vaultaire", tenantID, bucket)
+	if !safe {
+		WriteS3Error(w, ErrInvalidBucketName, r.URL.Path, generateRequestID())
+		return
+	}
+	if err := os.MkdirAll(dirPath, 0755); err != nil { // #nosec G301 -- bucket dirs need read access
 		s.logger.Error("Failed to create container", zap.Error(err))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return
@@ -169,7 +181,11 @@ func (s *Server) DeleteBucket(w http.ResponseWriter, r *http.Request) {
 		zap.String("bucket", bucket),
 		zap.String("tenant", tenantID))
 
-	dirPath := filepath.Join("/tmp/vaultaire", tenantID, bucket)
+	dirPath, safe := safeBucketPath("/tmp/vaultaire", tenantID, bucket)
+	if !safe {
+		WriteS3Error(w, ErrInvalidBucketName, r.URL.Path, generateRequestID())
+		return
+	}
 
 	// Check if bucket exists
 	if _, err := os.Stat(dirPath); os.IsNotExist(err) {

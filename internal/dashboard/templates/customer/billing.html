@@ -1,4 +1,18 @@
 {{define "title"}}Billing — stored.ge{{end}}
+{{define "head"}}
+<style>
+.comparison-table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
+.comparison-table th,
+.comparison-table td { padding: 0.6rem 0.75rem; text-align: right; border-bottom: 1px solid var(--border, #e2e8f0); }
+.comparison-table th:first-child,
+.comparison-table td:first-child { text-align: left; }
+.comparison-table th { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted, #64748b); font-weight: 600; }
+.comparison-highlight td { background: var(--highlight-bg, #f0fdf4); font-weight: 600; }
+.savings-callout { margin-top: 1rem; padding: 0.75rem 1rem; background: var(--highlight-bg, #f0fdf4); border-radius: 0.375rem; font-weight: 600; font-size: 1.1rem; color: var(--success, #16a34a); }
+.comparison-subtitle { margin-top: 0.5rem; font-size: 0.85rem; color: var(--text-muted, #64748b); }
+.comparison-footnote { margin-top: 0.5rem; font-size: 0.75rem; color: var(--text-muted, #94a3b8); }
+</style>
+{{end}}
 {{define "content"}}
 <div class="page-header">
     <div>
@@ -83,20 +97,24 @@
 
 <div class="card">
     <div class="card-title">Cost Comparison</div>
-    <div class="comparison-grid">
-        <div class="comparison-item">
-            <div class="card-title">AWS S3</div>
-            <div class="card-value comparison-aws">{{.AWSCost}}</div>
-        </div>
-        <div class="comparison-item">
-            <div class="card-title">stored.ge</div>
-            <div class="card-value comparison-stored">{{.StoredCost}}</div>
-        </div>
-        <div class="comparison-item">
-            <div class="card-title">You Save</div>
-            <div class="card-value comparison-savings">{{.Savings}}</div>
-        </div>
-    </div>
+    <table class="comparison-table">
+        <thead>
+            <tr><th>Provider</th><th>Storage</th><th>Egress</th><th>Total</th></tr>
+        </thead>
+        <tbody>
+            {{range .Providers}}
+            <tr{{if .Highlight}} class="comparison-highlight"{{end}}>
+                <td>{{.Name}}</td>
+                <td>{{.StorageCost}}</td>
+                <td>{{.EgressCost}}</td>
+                <td>{{.TotalCost}}</td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+    <div class="savings-callout">You save {{.TotalSavingsVsAWS}}/mo vs AWS S3</div>
+    <div class="comparison-subtitle">Based on {{.StorageUsedFmt}} stored + {{.EgressThisMonth}} egress this month</div>
+    <div class="comparison-footnote">Competitor pricing as of Q2 2026. Egress is always free on stored.ge.</div>
 </div>
 
 <div class="dashboard-actions">
