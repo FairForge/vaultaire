@@ -3,13 +3,32 @@ package handlers
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"html/template"
+	"math"
 	"net/http"
 	"time"
 
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"go.uber.org/zap"
 )
+
+// BackendLocation maps a storage backend to its physical location.
+type BackendLocation struct {
+	City    string
+	Country string
+	Lat     float64
+	Lon     float64
+}
+
+var backendLocations = map[string]BackendLocation{
+	"local":     {City: "Salt Lake City", Country: "US", Lat: 40.76, Lon: -111.89},
+	"s3":        {City: "US East (Virginia)", Country: "US", Lat: 39.04, Lon: -77.49},
+	"quotaless": {City: "EU (Germany)", Country: "DE", Lat: 50.11, Lon: 8.68},
+	"geyser":    {City: "London", Country: "GB", Lat: 51.51, Lon: -0.13},
+	"idrive":    {City: "Los Angeles", Country: "US", Lat: 34.05, Lon: -118.24},
+	"lyve":      {City: "US West (Phoenix)", Country: "US", Lat: 33.45, Lon: -112.07},
+}
 
 // ActivityRow is a single recent-activity row for the dashboard template.
 type ActivityRow struct {
@@ -22,7 +41,7 @@ type ActivityRow struct {
 
 // HandleOverview returns an http.HandlerFunc that renders the dashboard
 // overview page with real data from PostgreSQL.
-func HandleOverview(tmpl *template.Template, db *sql.DB, logger *zap.Logger) http.HandlerFunc {
+func HandleOverview(tmpl *template.Template, db *sql.DB, logger *zap.Logger, storageMode string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
 		if sd == nil {
@@ -52,12 +71,31 @@ func HandleOverview(tmpl *template.Template, db *sql.DB, logger *zap.Logger) htt
 			setDefaults(data)
 		}
 
+		populateLocality(storageMode, data)
+
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := tmpl.ExecuteTemplate(w, "base", data); err != nil {
 			logger.Error("render dashboard overview", zap.Error(err))
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		}
 	}
+}
+
+func populateLocality(storageMode string, data map[string]any) {
+	loc, ok := backendLocations[storageMode]
+	if !ok {
+		loc = backendLocations["local"]
+	}
+
+	data["LocalityCity"] = loc.City
+	data["LocalityCountry"] = loc.Country
+	data["LocalityLat"] = loc.Lat
+	data["LocalityLon"] = loc.Lon
+	data["LocalityLabel"] = fmt.Sprintf("%s, %s", loc.City, loc.Country)
+	data["LocalityMultiRegion"] = false
+
+	data["LocalityDotX"] = math.Round((loc.Lon + 180.0) / 360.0 * 200.0)
+	data["LocalityDotY"] = math.Round((90.0 - loc.Lat) / 180.0 * 100.0)
 }
 
 func populateStorageUsage(ctx context.Context, db *sql.DB, tenantID string, data map[string]any) {

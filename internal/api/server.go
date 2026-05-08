@@ -410,17 +410,30 @@ func (s *Server) setupRoutes() {
 	if dataPath == "" {
 		dataPath = "/tmp/vaultaire-data"
 	}
+	storageMode := os.Getenv("STORAGE_MODE")
+	if storageMode == "" {
+		if os.Getenv("QUOTALESS_ACCESS_KEY") != "" {
+			storageMode = "quotaless"
+		} else if os.Getenv("S3_ACCESS_KEY") != "" {
+			storageMode = "s3"
+		} else if os.Getenv("GEYSER_ACCESS_KEY") != "" {
+			storageMode = "geyser"
+		} else {
+			storageMode = "local"
+		}
+	}
 	dashboard.RegisterRoutes(s.router, dashboard.Deps{
-		DB:         s.db,
-		Auth:       s.auth,
-		MFA:        s.mfaService,
-		MFAPending: s.mfaPendingStore,
-		Sessions:   s.sessionStore,
-		Logger:     s.logger,
-		DataPath:   dataPath,
-		Stripe:     s.stripe,
-		Google:     s.googleOAuth,
-		GitHub:     s.githubOAuth,
+		DB:          s.db,
+		Auth:        s.auth,
+		MFA:         s.mfaService,
+		MFAPending:  s.mfaPendingStore,
+		Sessions:    s.sessionStore,
+		Logger:      s.logger,
+		DataPath:    dataPath,
+		Stripe:      s.stripe,
+		Google:      s.googleOAuth,
+		GitHub:      s.githubOAuth,
+		StorageMode: storageMode,
 	})
 
 	s.logger.Info("Registering management API routes")

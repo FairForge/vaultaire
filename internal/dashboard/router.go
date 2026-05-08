@@ -22,16 +22,17 @@ const sessionTTL = 24 * time.Hour
 
 // Deps groups the dependencies the dashboard routes need.
 type Deps struct {
-	DB         *sql.DB
-	Auth       *auth.AuthService
-	MFA        *auth.MFAService // TOTP secret generation / validation.
-	MFAPending *MFAPendingStore // Short-lived store for 2FA login challenges.
-	Sessions   dashauth.SessionStore
-	Logger     *zap.Logger
-	DataPath   string                 // Local storage root for bucket creation.
-	Stripe     *billing.StripeService // Nil when STRIPE_SECRET_KEY is not set.
-	Google     *oauth2.Config         // Nil when GOOGLE_CLIENT_ID is not set.
-	GitHub     *oauth2.Config         // Nil when GITHUB_CLIENT_ID is not set.
+	DB          *sql.DB
+	Auth        *auth.AuthService
+	MFA         *auth.MFAService // TOTP secret generation / validation.
+	MFAPending  *MFAPendingStore // Short-lived store for 2FA login challenges.
+	Sessions    dashauth.SessionStore
+	Logger      *zap.Logger
+	DataPath    string                 // Local storage root for bucket creation.
+	Stripe      *billing.StripeService // Nil when STRIPE_SECRET_KEY is not set.
+	Google      *oauth2.Config         // Nil when GOOGLE_CLIENT_ID is not set.
+	GitHub      *oauth2.Config         // Nil when GITHUB_CLIENT_ID is not set.
+	StorageMode string                 // e.g. "local", "s3", "quotaless", "geyser", "idrive"
 }
 
 // RegisterRoutes mounts the dashboard, auth, admin, and static-asset
@@ -98,7 +99,7 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		template.Must(overviewTmpl.ParseFS(Templates,
 			"templates/customer/dashboard.html",
 		))
-		dr.Get("/", handlers.HandleOverview(overviewTmpl, deps.DB, deps.Logger))
+		dr.Get("/", handlers.HandleOverview(overviewTmpl, deps.DB, deps.Logger, deps.StorageMode))
 
 		// Bucket browser.
 		bucketsTmpl := template.Must(baseTmpl.Clone())
