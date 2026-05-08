@@ -82,6 +82,16 @@ Password reset rate limiting is in-memory (per-email, 3/hour, sliding window). T
 
 Both backfill functions run on every startup (called from `server.go`), are idempotent, and log counts.
 
+## STS Temporary Credentials (Phase 5.11.5)
+
+`sts.go` — AWS STS-compatible short-lived S3 credentials with scope intersection:
+- `STSToken` — access key (ASIA prefix), secret, tenant, parent key ID, scoped permissions/buckets/IPs, expiry
+- `STSRequest` — requested permissions, bucket scope, IP restrictions, TTL (1–43200s, default 3600)
+- `GenerateSTSToken(ctx, db, tenantID, parentKeyID, parentScope, req)` — mints token with scope intersection (permissions = intersection with parent, buckets = intersection, IP = narrowed). Persists to `sts_tokens` table. Secret stored in plaintext (required for SigV4 verification).
+- `StartSTSCleanup(ctx, db, logger)` — hourly goroutine deletes expired tokens
+
+S3 auth integration: `validateAccessKey` (handlers.go) falls back to `sts_tokens` table for ASIA-prefixed keys after checking `tenants` and `api_keys`. `verifyPresignedURL` (s3_presign.go) does the same for pre-signed URL verification. Expired tokens are rejected at auth time.
+
 ## Testing
 
 - Unit tests: `go test ./internal/auth/... -short` (no DB needed)

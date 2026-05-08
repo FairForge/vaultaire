@@ -23,6 +23,7 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 | 029 | Idempotency cache: `idempotency_cache` table for management API request deduplication (24h TTL) |
 | 030 | Metadata: `metadata JSONB` column on `buckets` and `object_head_cache` |
 | 031 | Scoped API keys: `permissions` (JSONB), `bucket_scope` (TEXT[]), `ip_allowlist` (TEXT[]), `expires_at` (TIMESTAMPTZ), `secret_key` (TEXT) on `api_keys` |
+| 032 | STS temporary credentials: `sts_tokens` table (access_key PK, secret_key, tenant_id, parent_key_id, permissions JSONB, bucket_scope TEXT[], ip_restrict TEXT[], expires_at, created_at) |
 
 ## Key Tables
 
@@ -41,6 +42,7 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 - **bucket_notifications** — `id (PK)`, `tenant_id`, `bucket`, `event_filter`, `target_type`, `target_url`, `enabled`, `created_at`
 - **object_locks** — `(tenant_id, bucket, object_key) PK`, `retention_mode`, `retain_until_date`, `legal_hold`, `created_at`, `updated_at`
 - **idempotency_cache** — `(tenant_id, idempotency_key) PK`, `method`, `path`, `response_status`, `response_headers` (JSONB), `response_body` (BYTEA), `created_at` — 24h TTL, hourly cleanup
+- **sts_tokens** — `access_key (PK)`, `secret_key`, `tenant_id`, `parent_key_id`, `permissions` (JSONB), `bucket_scope` (TEXT[]), `ip_restrict` (TEXT[]), `expires_at`, `created_at` — short-lived S3 creds, hourly cleanup
 
 ## Connection
 

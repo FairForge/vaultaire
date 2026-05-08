@@ -69,15 +69,16 @@ The `engine.Driver` interface (in `internal/engine/interface.go`) is the sacred 
 
 ### Key Database Tables
 
-Registration persists to **four tables in order**: `users` -> `tenants` -> `api_keys` -> `tenant_quotas`. Missing any causes failures. S3 auth queries `tenants` first (primary key, full access), then falls back to `api_keys` for scoped VLT_ keys.
+Registration persists to **four tables in order**: `users` -> `tenants` -> `api_keys` -> `tenant_quotas`. Missing any causes failures. S3 auth queries `tenants` first (primary key, full access), then falls back to `api_keys` for scoped VLT_ keys, then `sts_tokens` for ASIA-prefixed temporary credentials.
 
-Other critical tables (31 migrations through `031_scoped_keys.sql`):
+Other critical tables (32 migrations through `032_sts_tokens.sql`):
 - `object_head_cache` — HEAD/GET metadata cache (~1ms), content-type, ETag, metadata JSONB
 - `buckets` — bucket registry with visibility, CORS, cache TTL, metadata JSONB, slug
 - `multipart_uploads`, `multipart_parts` — in-progress multipart state
 - `object_versions` — versioning support (version_id, is_latest, delete markers)
 - `object_locks` — Object Lock / WORM retention and legal holds
 - `idempotency_cache` — management API idempotency keys (24h TTL)
+- `sts_tokens` — STS temporary credentials (ASIA-prefixed, scope-intersected, hourly cleanup)
 - `stripe_events` — webhook event dedup
 - `dashboard_sessions` — PostgreSQL-backed sessions with IP/user-agent tracking
 - `oauth_accounts` — OAuth provider links (Google, GitHub)

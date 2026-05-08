@@ -426,6 +426,9 @@ func (s *Server) setupRoutes() {
 	s.logger.Info("Registering management API routes")
 	s.registerManagementRoutes()
 
+	s.logger.Info("Registering STS routes")
+	s.registerSTSRoutes()
+
 	s.router.Get("/llms.txt", s.handleLlmsTxt)
 
 	s.logger.Info("Registering S3 catch-all handler")
@@ -801,6 +804,11 @@ func (s *Server) Start() error {
 	if s.db != nil {
 		im := newIdempotencyMiddleware(s.db, s.logger)
 		im.StartCleanup(ctx)
+	}
+
+	// Clean up expired STS tokens hourly.
+	if s.db != nil {
+		auth.StartSTSCleanup(ctx, s.db, s.logger)
 	}
 
 	s.logger.Info("Starting server with RBAC and API Key Management",
