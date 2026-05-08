@@ -126,7 +126,7 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 			"templates/customer/apikeys.html",
 		))
 		dr.Get("/apikeys", handlers.HandleAPIKeys(apikeysTmpl, deps.Auth, deps.Logger))
-		dr.Post("/apikeys", handlers.HandleGenerateKey(apikeysTmpl, deps.Auth, deps.Logger))
+		dr.Post("/apikeys", handlers.HandleGenerateKey(apikeysTmpl, deps.Auth, deps.DB, deps.Logger))
 		dr.Post("/apikeys/{id}/revoke", handlers.HandleRevokeKey(deps.Auth, deps.Logger))
 
 		// Usage page.

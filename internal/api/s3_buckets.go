@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/xml"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/tenant"
+	"github.com/FairForge/vaultaire/internal/usage"
 	"go.uber.org/zap"
 )
 
@@ -124,6 +126,20 @@ func (s *Server) CreateBucket(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("Creating bucket",
 		zap.String("bucket", bucket),
 		zap.String("tenant", tenantID))
+
+	if s.db != nil && s.quotaManager != nil && tenantID != "default" {
+		tier, _ := s.quotaManager.GetTier(ctx, tenantID)
+		if usage.IsFreeTier(tier) {
+			var count int
+			_ = s.db.QueryRowContext(ctx,
+				"SELECT COUNT(*) FROM buckets WHERE tenant_id = $1", tenantID).Scan(&count)
+			if count >= usage.FreeTierLimits.MaxBuckets {
+				WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
+					WithSuggestion(fmt.Sprintf("Free tier allows %d bucket. Upgrade at https://stored.ge/dashboard/billing", usage.FreeTierLimits.MaxBuckets)))
+				return
+			}
+		}
+	}
 
 	// Create container directory
 	dirPath, safe := safeBucketPath("/tmp/vaultaire", tenantID, bucket)

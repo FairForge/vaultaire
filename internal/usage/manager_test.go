@@ -78,3 +78,26 @@ func TestQuotaManager_CheckAndUpdateQuota(t *testing.T) {
 		assert.False(t, allowed)
 	})
 }
+
+func TestUpdateTier_Free(t *testing.T) {
+	db := setupTestDB(t)
+	defer func() { _ = db.Close() }()
+
+	m := NewQuotaManager(db)
+	require.NoError(t, m.InitializeSchema(context.Background()))
+
+	tenantID := "tenant-free-" + time.Now().Format("20060102150405")
+	require.NoError(t, m.CreateTenant(context.Background(), tenantID, "starter", 1099511627776))
+
+	err := m.UpdateTier(context.Background(), tenantID, "free")
+	require.NoError(t, err)
+
+	tier, err := m.GetTier(context.Background(), tenantID)
+	require.NoError(t, err)
+	assert.Equal(t, "free", tier)
+
+	used, limit, err := m.GetUsage(context.Background(), tenantID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), used)
+	assert.Equal(t, int64(5368709120), limit) // 5 GB
+}

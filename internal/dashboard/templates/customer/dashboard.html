@@ -192,6 +192,20 @@ curl -X PUT https://stored.ge/my-first-bucket/hello.txt \
     </div>
 </div>
 
+{{if .ShowUpgradeCTA}}
+<div class="card" style="border-color: var(--primary, #3b82f6); background: linear-gradient(135deg, rgba(59,130,246,0.05), rgba(59,130,246,0.02));">
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div>
+            <div style="font-weight:600;font-size:1.1rem;">Running low on storage</div>
+            <div class="text-muted" style="font-size:0.85rem;">
+                You're using {{.StoragePercent}}% of your free 5 GB. Upgrade for more storage, buckets, and API keys.
+            </div>
+        </div>
+        <a href="/dashboard/billing" class="btn btn-primary">Upgrade</a>
+    </div>
+</div>
+{{end}}
+
 <div class="card">
     <div class="card-title">Data Locality</div>
     <div style="display:flex;align-items:center;gap:1.5rem;">

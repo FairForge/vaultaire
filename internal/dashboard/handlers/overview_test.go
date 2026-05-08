@@ -154,3 +154,33 @@ func TestPopulateLocality_Empty(t *testing.T) {
 	assert.Equal(t, "Salt Lake City", data["LocalityCity"])
 	assert.Equal(t, "US", data["LocalityCountry"])
 }
+
+func TestUpgradeCTA_FreeTier80Percent(t *testing.T) {
+	data := make(map[string]any)
+	data["StorageUsedFmt"] = "4.5 GB"
+	data["StorageLimitFmt"] = "5 GB"
+	data["StoragePercent"] = 90
+	data["StorageBarClass"] = "danger"
+	data["Tier"] = "free"
+	data["ShowUpgradeCTA"] = data["Tier"] == "free" && data["StoragePercent"].(int) >= 80
+
+	assert.True(t, data["ShowUpgradeCTA"].(bool))
+}
+
+func TestUpgradeCTA_FreeTierBelow80(t *testing.T) {
+	data := make(map[string]any)
+	data["Tier"] = "free"
+	data["StoragePercent"] = 50
+	data["ShowUpgradeCTA"] = data["Tier"] == "free" && data["StoragePercent"].(int) >= 80
+
+	assert.False(t, data["ShowUpgradeCTA"].(bool))
+}
+
+func TestUpgradeCTA_StarterTier(t *testing.T) {
+	data := make(map[string]any)
+	data["Tier"] = "starter"
+	data["StoragePercent"] = 95
+	data["ShowUpgradeCTA"] = data["Tier"] == "free" && data["StoragePercent"].(int) >= 80
+
+	assert.False(t, data["ShowUpgradeCTA"].(bool))
+}

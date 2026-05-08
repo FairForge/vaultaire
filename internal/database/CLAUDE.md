@@ -25,6 +25,7 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 | 031 | Scoped API keys: `permissions` (JSONB), `bucket_scope` (TEXT[]), `ip_allowlist` (TEXT[]), `expires_at` (TIMESTAMPTZ), `secret_key` (TEXT) on `api_keys` |
 | 032 | STS temporary credentials: `sts_tokens` table (access_key PK, secret_key, tenant_id, parent_key_id, permissions JSONB, bucket_scope TEXT[], ip_restrict TEXT[], expires_at, created_at) |
 | 033 | Event log + webhooks: `events` table, `webhook_endpoints` table (with secret, event_filter TEXT[]), `webhook_deliveries` table (status, response_code, latency_ms, retry support) |
+| 034 | Free tier defaults: `tenant_quotas` column defaults changed to tier='free', storage_limit_bytes=5368709120 (5 GB). Existing rows unchanged. |
 
 ## Key Tables
 

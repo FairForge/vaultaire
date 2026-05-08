@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -573,6 +574,25 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 
 // handlePutObject handles PUT requests
 func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3Request) {
+	if s.quotaManager != nil && req.TenantID != "" {
+		size := r.ContentLength
+		if decoded := r.Header.Get("x-amz-decoded-content-length"); decoded != "" {
+			if n, err := strconv.ParseInt(decoded, 10, 64); err == nil {
+				size = n
+			}
+		}
+		if size > 0 {
+			ok, err := s.quotaManager.CheckAndReserve(r.Context(), req.TenantID, size)
+			if err != nil {
+				s.logger.Error("quota check failed", zap.Error(err))
+			} else if !ok {
+				WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
+					WithSuggestion("Upgrade at https://stored.ge/dashboard/billing"))
+				return
+			}
+		}
+	}
+
 	adapter := NewS3ToEngine(s.engine, s.db, s.logger)
 
 	s.logger.Debug("S3 PUT translating to engine",

@@ -20,11 +20,11 @@ func (m *QuotaManager) InitializeSchema(ctx context.Context) error {
 	schema := `
     CREATE TABLE IF NOT EXISTS tenant_quotas (
         tenant_id TEXT PRIMARY KEY,
-        storage_limit_bytes BIGINT NOT NULL DEFAULT 1099511627776,
+        storage_limit_bytes BIGINT NOT NULL DEFAULT 5368709120,
         storage_used_bytes BIGINT NOT NULL DEFAULT 0,
         bandwidth_limit_bytes BIGINT DEFAULT NULL,
         bandwidth_used_bytes BIGINT NOT NULL DEFAULT 0,
-        tier VARCHAR(50) NOT NULL DEFAULT 'starter',
+        tier VARCHAR(50) NOT NULL DEFAULT 'free',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
@@ -207,6 +207,7 @@ func (m *QuotaManager) GetTier(ctx context.Context, tenantID string) (string, er
 // UpdateTier updates the tier and associated limits
 func (m *QuotaManager) UpdateTier(ctx context.Context, tenantID, newTier string) error {
 	limits := map[string]int64{
+		"free":         5368709120,      // 5GB
 		"starter":      1099511627776,   // 1TB
 		"vault18":      19791209299968,  // 18TB (pack size)
 		"professional": 10995116277760,  // 10TB

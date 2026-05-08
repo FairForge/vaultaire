@@ -131,6 +131,7 @@ func populateStorageUsage(ctx context.Context, db *sql.DB, tenantID string, data
 	data["StoragePercent"] = pct
 	data["StorageBarClass"] = barClass
 	data["Tier"] = tier
+	data["ShowUpgradeCTA"] = tier == "free" && pct >= 80
 }
 
 func populateBandwidth(ctx context.Context, db *sql.DB, tenantID string, data map[string]any) {
