@@ -173,7 +173,7 @@ func HandleAdminResetMFA(authSvc *auth.AuthService, logger *zap.Logger) http.Han
 			return
 		}
 
-		http.Redirect(w, r, "/admin/tenants/"+tenantID, http.StatusSeeOther)
+		http.Redirect(w, r, "/admin/tenants/"+tenantID, http.StatusSeeOther) // #nosec G710 -- hardcoded path prefix
 	}
 }
 

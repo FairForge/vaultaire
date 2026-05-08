@@ -58,6 +58,7 @@ func HandleDismissOnboarding(logger *zap.Logger) http.HandlerFunc {
 			Path:     "/",
 			MaxAge:   365 * 24 * 60 * 60,
 			HttpOnly: true,
+			Secure:   true,
 			SameSite: http.SameSiteLaxMode,
 		})
 		w.WriteHeader(http.StatusOK)

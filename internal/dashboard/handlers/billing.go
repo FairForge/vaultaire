@@ -81,7 +81,7 @@ func HandleUpgrade(stripe *billing.StripeService, db *sql.DB, logger *zap.Logger
 			return
 		}
 
-		http.Redirect(w, r, checkoutURL, http.StatusSeeOther)
+		http.Redirect(w, r, checkoutURL, http.StatusSeeOther) // #nosec G710 -- URL from Stripe API
 	}
 }
 
