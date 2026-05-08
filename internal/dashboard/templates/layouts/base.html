@@ -7,6 +7,7 @@
     <title>{{block "title" .}}stored.ge{{end}}</title>
     <link rel="stylesheet" href="/static/css/style.css">
     <script src="/static/js/htmx.min.js"></script>
+    <script src="/static/js/dashboard.js"></script>
     {{if .CSRFToken}}<meta name="csrf-token" content="{{.CSRFToken}}">{{end}}
     {{block "head" .}}{{end}}
 </head>
