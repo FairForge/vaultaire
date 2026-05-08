@@ -121,3 +121,5 @@ Base layout defines blocks: `title`, `head`, `nav`, `content`. Pages override th
 - Activity: `quota_usage_events` (last 5, with operation, key, size, time)
 
 Gracefully degrades to zeros when DB is nil (tests, local dev without PostgreSQL).
+
+Data Locality card (Phase 5.11.9): `populateLocality(storageMode, data)` maps the active storage backend to a physical location and renders an inline SVG world map with a pulsing dot. `StorageMode` flows through `Deps` from `server.go` env detection. `BackendLocation` is a static lookup table (local/s3/quotaless/geyser/idrive/lyve). SVG coordinates are pre-computed in Go (no template FuncMap needed).

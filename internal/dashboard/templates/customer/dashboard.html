@@ -193,6 +193,40 @@ curl -X PUT https://stored.ge/my-first-bucket/hello.txt \
 </div>
 
 <div class="card">
+    <div class="card-title">Data Locality</div>
+    <div style="display:flex;align-items:center;gap:1.5rem;">
+        <svg viewBox="0 0 200 100" width="200" height="100" style="flex-shrink:0;">
+            <rect width="200" height="100" fill="var(--code-bg, #f1f5f9)" rx="4"/>
+            <!-- North America -->
+            <path d="M30,25 L60,20 L70,30 L65,50 L50,55 L35,50 L25,40Z"
+                  fill="var(--border, #cbd5e1)" stroke="none"/>
+            <!-- South America -->
+            <path d="M55,55 L65,55 L70,75 L60,90 L50,80 L48,65Z"
+                  fill="var(--border, #cbd5e1)" stroke="none"/>
+            <!-- Europe/Africa -->
+            <path d="M90,20 L110,18 L115,30 L110,45 L100,70 L90,85 L85,60 L88,35Z"
+                  fill="var(--border, #cbd5e1)" stroke="none"/>
+            <!-- Asia -->
+            <path d="M115,15 L160,12 L175,30 L170,50 L150,55 L130,45 L115,30Z"
+                  fill="var(--border, #cbd5e1)" stroke="none"/>
+            <!-- Australia -->
+            <path d="M155,65 L175,60 L180,70 L170,80 L155,75Z"
+                  fill="var(--border, #cbd5e1)" stroke="none"/>
+            <circle cx="{{.LocalityDotX}}" cy="{{.LocalityDotY}}"
+                    r="4" fill="var(--primary, #3b82f6)"/>
+            <circle cx="{{.LocalityDotX}}" cy="{{.LocalityDotY}}"
+                    r="7" fill="var(--primary, #3b82f6)" opacity="0.3"/>
+        </svg>
+        <div>
+            <div style="font-size:1.1rem;font-weight:600;">{{.LocalityLabel}}</div>
+            <div class="text-muted" style="font-size:0.85rem;">
+                Your data is stored in {{.LocalityCity}}
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card">
     <div class="card-title">Recent Activity</div>
     {{if .Activity}}
     <div class="table-wrap">

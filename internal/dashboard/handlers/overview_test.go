@@ -33,13 +33,14 @@ func testOverviewTemplate(t *testing.T) *template.Template {
 			`<span class="apikeys">{{.APIKeyCount}}</span>` +
 			`<span class="tier">{{.Tier}}</span>` +
 			`<span class="email">{{.Email}}</span>` +
+			`<span class="locality">{{.LocalityLabel}}</span>` +
 			`{{end}}`))
 	return tmpl
 }
 
 func TestHandleOverview_NoDB(t *testing.T) {
 	tmpl := testOverviewTemplate(t)
-	handler := HandleOverview(tmpl, nil, zap.NewNop())
+	handler := HandleOverview(tmpl, nil, zap.NewNop(), "local")
 
 	// Create a session and inject it into the request context.
 	store := dashauth.NewMemoryStore()
@@ -68,11 +69,12 @@ func TestHandleOverview_NoDB(t *testing.T) {
 	// Default values when no DB.
 	assert.Contains(t, body, "0 B of 1 TB")
 	assert.Contains(t, body, "starter")
+	assert.Contains(t, body, "Salt Lake City, US")
 }
 
 func TestHandleOverview_NoSession(t *testing.T) {
 	tmpl := testOverviewTemplate(t)
-	handler := HandleOverview(tmpl, nil, zap.NewNop())
+	handler := HandleOverview(tmpl, nil, zap.NewNop(), "local")
 
 	req := httptest.NewRequest("GET", "/dashboard/", nil)
 	w := httptest.NewRecorder()
@@ -117,4 +119,38 @@ func TestAbsInt64(t *testing.T) {
 	assert.Equal(t, int64(5), absInt64(5))
 	assert.Equal(t, int64(5), absInt64(-5))
 	assert.Equal(t, int64(0), absInt64(0))
+}
+
+func TestPopulateLocality_Known(t *testing.T) {
+	data := make(map[string]any)
+	populateLocality("quotaless", data)
+
+	assert.Equal(t, "EU (Germany)", data["LocalityCity"])
+	assert.Equal(t, "DE", data["LocalityCountry"])
+	assert.Contains(t, data["LocalityLabel"].(string), "Germany")
+	assert.Equal(t, false, data["LocalityMultiRegion"])
+
+	dotX := data["LocalityDotX"].(float64)
+	dotY := data["LocalityDotY"].(float64)
+	assert.Greater(t, dotX, 90.0)
+	assert.Less(t, dotX, 120.0)
+	assert.Greater(t, dotY, 15.0)
+	assert.Less(t, dotY, 30.0)
+}
+
+func TestPopulateLocality_Unknown(t *testing.T) {
+	data := make(map[string]any)
+	populateLocality("unknown-backend", data)
+
+	assert.Equal(t, "Salt Lake City", data["LocalityCity"])
+	assert.Equal(t, "US", data["LocalityCountry"])
+	assert.Contains(t, data["LocalityLabel"].(string), "Salt Lake City")
+}
+
+func TestPopulateLocality_Empty(t *testing.T) {
+	data := make(map[string]any)
+	populateLocality("", data)
+
+	assert.Equal(t, "Salt Lake City", data["LocalityCity"])
+	assert.Equal(t, "US", data["LocalityCountry"])
 }

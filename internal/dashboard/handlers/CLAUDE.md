@@ -4,10 +4,11 @@ HTTP handlers for the stored.ge customer dashboard. Each handler receives a pre-
 
 ## Overview Handler (`overview.go`)
 
-`HandleOverview(tmpl, db, logger)` renders the main dashboard page:
+`HandleOverview(tmpl, db, logger, storageMode)` renders the main dashboard page:
 - Reads session from context via `dashauth.GetSession(r.Context())`
 - Queries 4 tables: `tenant_quotas`, `bandwidth_usage_daily`, `object_head_cache`, `api_keys`, `quota_usage_events`
 - Fails gracefully to zeros when DB is nil or tables are empty
+- `populateLocality(storageMode, data)` maps the active backend to a physical location (city, country, SVG coordinates) for the Data Locality card. Falls back to "local" (Salt Lake City) for unknown backends. Pre-computes SVG dot coordinates (LocalityDotX/Y) for a 200x100 world map.
 - Template: `templates/customer/dashboard.html`
 
 Helper functions are in `context.go`: `formatBytes` (human-readable sizes), `relativeTime` (time ago), `absInt64`, `sessionData`.
