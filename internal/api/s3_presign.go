@@ -96,21 +96,45 @@ func (s *Server) verifyPresignedURL(r *http.Request) (string, *auth.KeyScope, er
 			JOIN tenants t ON t.email = u.email
 			WHERE ak.key_id = $1
 		`, accessKey).Scan(&secretKey, &tenantID, &permJSON, &bucketScope, &ipAllowlist, &expiresAtDB)
-		if err != nil {
+		if err == nil {
+			if secretKey == "" {
+				return "", nil, fmt.Errorf("%s", ErrAccessDenied)
+			}
+			scope = &auth.KeyScope{
+				BucketScope: []string(bucketScope),
+				IPAllowlist: []string(ipAllowlist),
+			}
+			if jsonErr := json.Unmarshal(permJSON, &scope.Permissions); jsonErr != nil {
+				scope.Permissions = []string{"*"}
+			}
+			if expiresAtDB.Valid {
+				scope.ExpiresAt = &expiresAtDB.Time
+			}
+		} else if err == sql.ErrNoRows && len(accessKey) >= 4 && accessKey[:4] == "ASIA" {
+			// Try STS temporary credential.
+			var stsPermJSON []byte
+			var stsBucketScope, stsIPRestrict pq.StringArray
+			var stsExpiresAt time.Time
+			err = s.db.QueryRow(`
+				SELECT secret_key, tenant_id, permissions, bucket_scope, ip_restrict, expires_at
+				FROM sts_tokens WHERE access_key = $1
+			`, accessKey).Scan(&secretKey, &tenantID, &stsPermJSON, &stsBucketScope, &stsIPRestrict, &stsExpiresAt)
+			if err != nil {
+				return "", nil, fmt.Errorf("%s", ErrAccessDenied)
+			}
+			if time.Now().After(stsExpiresAt) {
+				return "", nil, fmt.Errorf("%s", ErrExpiredPresignedRequest)
+			}
+			scope = &auth.KeyScope{
+				BucketScope: []string(stsBucketScope),
+				IPAllowlist: []string(stsIPRestrict),
+				ExpiresAt:   &stsExpiresAt,
+			}
+			if jsonErr := json.Unmarshal(stsPermJSON, &scope.Permissions); jsonErr != nil {
+				scope.Permissions = []string{"*"}
+			}
+		} else {
 			return "", nil, fmt.Errorf("%s", ErrAccessDenied)
-		}
-		if secretKey == "" {
-			return "", nil, fmt.Errorf("%s", ErrAccessDenied)
-		}
-		scope = &auth.KeyScope{
-			BucketScope: []string(bucketScope),
-			IPAllowlist: []string(ipAllowlist),
-		}
-		if jsonErr := json.Unmarshal(permJSON, &scope.Permissions); jsonErr != nil {
-			scope.Permissions = []string{"*"}
-		}
-		if expiresAtDB.Valid {
-			scope.ExpiresAt = &expiresAtDB.Time
 		}
 	} else if err != nil {
 		return "", nil, fmt.Errorf("%s", ErrAccessDenied)

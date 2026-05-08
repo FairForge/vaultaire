@@ -143,31 +143,64 @@ func (a *Auth) validateAccessKey(accessKey string) (string, *KeyScope, error) {
 		JOIN tenants t ON t.email = u.email
 		WHERE ak.key_id = $1
 	`, accessKey).Scan(&tenantID, &permJSON, &bucketScope, &ipAllowlist, &expiresAt)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			a.logger.Debug("invalid access key", zap.String("access_key", accessKey))
-			return "", nil, fmt.Errorf("invalid access key")
+	if err == nil {
+		scope := &KeyScope{
+			BucketScope: []string(bucketScope),
+			IPAllowlist: []string(ipAllowlist),
 		}
+		if jsonErr := json.Unmarshal(permJSON, &scope.Permissions); jsonErr != nil {
+			scope.Permissions = []string{"*"}
+		}
+		if expiresAt.Valid {
+			scope.ExpiresAt = &expiresAt.Time
+		}
+
+		a.logger.Debug("authenticated tenant (scoped key)",
+			zap.String("tenant_id", tenantID),
+			zap.String("access_key", accessKey[:min(6, len(accessKey))]+"..."),
+			zap.Int("permissions", len(scope.Permissions)))
+		return tenantID, scope, nil
+	}
+	if err != sql.ErrNoRows {
 		a.logger.Error("database error during scoped key auth", zap.Error(err))
 		return "", nil, fmt.Errorf("auth lookup failed: %w", err)
 	}
 
-	scope := &KeyScope{
-		BucketScope: []string(bucketScope),
-		IPAllowlist: []string(ipAllowlist),
-	}
-	if jsonErr := json.Unmarshal(permJSON, &scope.Permissions); jsonErr != nil {
-		scope.Permissions = []string{"*"}
-	}
-	if expiresAt.Valid {
-		scope.ExpiresAt = &expiresAt.Time
+	// Try STS temporary credential (ASIA prefix keys).
+	if len(accessKey) >= 4 && accessKey[:4] == "ASIA" {
+		var stsPermJSON []byte
+		var stsBucketScope, stsIPRestrict pq.StringArray
+		var stsExpiresAt time.Time
+		err = a.db.QueryRow(`
+			SELECT tenant_id, permissions, bucket_scope, ip_restrict, expires_at
+			FROM sts_tokens WHERE access_key = $1
+		`, accessKey).Scan(&tenantID, &stsPermJSON, &stsBucketScope, &stsIPRestrict, &stsExpiresAt)
+		if err == nil {
+			if time.Now().After(stsExpiresAt) {
+				a.logger.Debug("expired STS token", zap.String("access_key", accessKey[:min(6, len(accessKey))]+"..."))
+				return "", nil, fmt.Errorf("expired STS token")
+			}
+			scope := &KeyScope{
+				BucketScope: []string(stsBucketScope),
+				IPAllowlist: []string(stsIPRestrict),
+				ExpiresAt:   &stsExpiresAt,
+			}
+			if jsonErr := json.Unmarshal(stsPermJSON, &scope.Permissions); jsonErr != nil {
+				scope.Permissions = []string{"*"}
+			}
+			a.logger.Debug("authenticated tenant (STS token)",
+				zap.String("tenant_id", tenantID),
+				zap.String("access_key", accessKey[:min(6, len(accessKey))]+"..."))
+			return tenantID, scope, nil
+		}
+		if err != sql.ErrNoRows {
+			a.logger.Error("database error during STS auth", zap.Error(err))
+			return "", nil, fmt.Errorf("auth lookup failed: %w", err)
+		}
 	}
 
-	a.logger.Debug("authenticated tenant (scoped key)",
-		zap.String("tenant_id", tenantID),
-		zap.String("access_key", accessKey[:min(6, len(accessKey))]+"..."),
-		zap.Int("permissions", len(scope.Permissions)))
-	return tenantID, scope, nil
+	a.logger.Debug("invalid access key", zap.String("access_key", accessKey))
+	return "", nil, fmt.Errorf("invalid access key")
 }
 
 // parseAuthHeader parses AWS Signature v4 authorization header

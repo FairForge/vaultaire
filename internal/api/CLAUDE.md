@@ -17,6 +17,7 @@ S3-compatible API layer. Translates S3 protocol to engine operations, handles au
 - **s3_list.go** — ListObjectsV2 handler
 - **s3_presign.go** — Pre-signed URL verification (SigV4 query string auth) and URL generation
 - **presigned.go** — Management API endpoint for generating pre-signed URLs (`/api/v1/presigned`)
+- **sts_routes.go** — STS temporary credential endpoint (`POST /api/v1/sts/token`)
 - **management.go** — JSON response helpers: `writeJSON`, `writeListResponse`, `getRequestID` (Stripe-style envelope)
 - **management_errors.go** — 7 typed errors with Stripe-style error envelope (`writeManagementError`)
 - **management_routes.go** — RESTful JSON management API under `/api/v1/manage/` (buckets CRUD, objects list, keys CRUD, usage)
@@ -74,11 +75,19 @@ Key files: `metadata.go` (extract/set/validate/merge helpers), `s3_engine_adapte
 
 **sqlmock note**: JSONB columns must use `[]byte` (not `string`) in `AddRow` to match real PostgreSQL driver behavior when scanning into `[]byte`/`json.RawMessage`.
 
+## STS Temporary Credentials (Phase 5.11.5)
+
+`POST /api/v1/sts/token` (JWT-protected) mints short-lived S3 credentials. Response: `{"object": "sts_token", "access_key": "ASIA...", "secret_key": "...", "expiration": "...", "request_id": "..."}`.
+
+Scope intersection: requested permissions/buckets are intersected with the parent key's scope (JWT user's first API key, or full access if none). STS tokens can never escalate beyond the parent. IP restrictions are narrowed (request can only restrict further, not broaden).
+
+S3 auth: both `validateAccessKey` (handlers.go) and `verifyPresignedURL` (s3_presign.go) have an ASIA-prefix fallback that queries `sts_tokens` after checking `tenants` and `api_keys`. Expired tokens are rejected. Cleanup: hourly goroutine in `auth.StartSTSCleanup`.
+
 ## Auth Flow
 
 1. `handleS3Request` checks `isPresignedRequest(r)` — if query has `X-Amz-Algorithm=AWS4-HMAC-SHA256`, routes to `verifyPresignedURL` (SigV4 query string auth)
 2. Otherwise calls `auth.ValidateRequest(r)` which parses the Authorization header
-3. Both paths return `(tenantID, *auth.KeyScope, error)` — scope carries permissions, bucket restrictions, IP allowlist, and expiration
+3. Both paths return `(tenantID, *auth.KeyScope, error)` — scope carries permissions, bucket restrictions, IP allowlist, and expiration. Auth lookup order: tenants (primary key) → api_keys (VLT_ scoped) → sts_tokens (ASIA temporary)
 4. On failure, returns appropriate S3 error (presigned errors: `ExpiredToken`, `AuthorizationQueryParametersError`, `SignatureDoesNotMatch`)
 5. On success, scope enforcement runs before operation routing:
    - `IsKeyExpired` → 403 `ExpiredToken`
