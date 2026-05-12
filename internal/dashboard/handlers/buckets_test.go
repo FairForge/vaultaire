@@ -286,6 +286,135 @@ func TestHandleCreateBucket_InvalidName_NoDB(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "Invalid bucket name")
 }
 
+func TestObjectRow_PreviewType(t *testing.T) {
+	tests := []struct {
+		contentType string
+		want        string
+	}{
+		{"image/png", "image"},
+		{"image/jpeg", "image"},
+		{"image/svg+xml", "image"},
+		{"video/mp4", "video"},
+		{"video/webm", "video"},
+		{"audio/mpeg", "audio"},
+		{"audio/ogg", "audio"},
+		{"text/plain", "text"},
+		{"text/html", "text"},
+		{"application/json", "text"},
+		{"application/xml", "text"},
+		{"application/javascript", "text"},
+		{"application/octet-stream", ""},
+		{"application/pdf", ""},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		got := previewTypeFromContentType(tt.contentType)
+		assert.Equal(t, tt.want, got, "contentType=%q", tt.contentType)
+	}
+}
+
+func TestHandleBucketObjects_CDNData(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires database")
+	}
+	db := testDashDB(t)
+	defer func() { _ = db.Close() }()
+	cleanupDashBucketData(t, db)
+	defer cleanupDashBucketData(t, db)
+
+	tenantID := "test-dash-cdn-1"
+	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key, slug)
+		VALUES ($1, 'CDN Co', 'cdn@test.com', 'VK-cdn1', 'SK-cdn1', 'cdnco')
+		ON CONFLICT DO NOTHING`, tenantID)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO buckets (tenant_id, name, visibility)
+		VALUES ($1, 'pub-bucket', 'public-read')
+		ON CONFLICT DO NOTHING`, tenantID)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO object_head_cache (tenant_id, bucket, object_key, size_bytes, content_type, etag)
+		VALUES ($1, 'pub-bucket', 'photo.jpg', 1024, 'image/jpeg', 'abc123')
+		ON CONFLICT DO NOTHING`, tenantID)
+	require.NoError(t, err)
+
+	tmpl := template.Must(template.New("base").Parse(
+		`{{define "base"}}` +
+			`{{block "content" .}}{{end}}` +
+			`{{end}}`))
+	template.Must(tmpl.Parse(
+		`{{define "title"}}Objects{{end}}` +
+			`{{define "content"}}` +
+			`vis={{.Visibility}} cdn={{.CDNBaseURL}}` +
+			`{{range .Objects}}preview={{.PreviewType}} url={{.CDNURL}}{{end}}` +
+			`{{end}}`))
+
+	handler := HandleBucketObjects(tmpl, db, zap.NewNop())
+	req := injectSessionWithTenant(httptest.NewRequest("GET", "/dashboard/buckets/pub-bucket", nil), tenantID)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("name", "pub-bucket")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.Contains(t, body, "vis=public-read")
+	assert.Contains(t, body, "cdn=https://cdn.stored.ge/cdnco/pub-bucket")
+	assert.Contains(t, body, "preview=image")
+	assert.Contains(t, body, "url=https://cdn.stored.ge/cdnco/pub-bucket/photo.jpg")
+}
+
+func TestHandleBucketObjects_NoCDNForPrivate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires database")
+	}
+	db := testDashDB(t)
+	defer func() { _ = db.Close() }()
+	cleanupDashBucketData(t, db)
+	defer cleanupDashBucketData(t, db)
+
+	tenantID := "test-dash-cdn-2"
+	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key, slug)
+		VALUES ($1, 'Private Co', 'priv@test.com', 'VK-cdn2', 'SK-cdn2', 'privco')
+		ON CONFLICT DO NOTHING`, tenantID)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO buckets (tenant_id, name, visibility)
+		VALUES ($1, 'priv-bucket', 'private')
+		ON CONFLICT DO NOTHING`, tenantID)
+	require.NoError(t, err)
+
+	tmpl := template.Must(template.New("base").Parse(
+		`{{define "base"}}` +
+			`{{block "content" .}}{{end}}` +
+			`{{end}}`))
+	template.Must(tmpl.Parse(
+		`{{define "title"}}Objects{{end}}` +
+			`{{define "content"}}` +
+			`vis={{.Visibility}} cdn={{.CDNBaseURL}}` +
+			`{{end}}`))
+
+	handler := HandleBucketObjects(tmpl, db, zap.NewNop())
+	req := injectSessionWithTenant(httptest.NewRequest("GET", "/dashboard/buckets/priv-bucket", nil), tenantID)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("name", "priv-bucket")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.Contains(t, body, "vis=private")
+	assert.NotContains(t, body, "cdn=https://cdn.stored.ge")
+}
+
+func TestDashboardJS_Exists(t *testing.T) {
+	data, err := os.ReadFile("../static/js/dashboard.js")
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "showTab")
+	assert.Contains(t, string(data), "btn-copy")
+}
+
 func TestListBuckets_Dashboard_IncludesEmptyBuckets(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires database")

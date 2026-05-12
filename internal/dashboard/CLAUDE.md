@@ -11,7 +11,7 @@ Web dashboard for stored.ge customers and admins. Uses htmx + Go templates, embe
 - **templates/layouts/** — shared HTML layouts (`base.html`, `admin.html`)
 - **templates/customer/** — customer page templates (`dashboard.html` = overview)
 - **static/css/** — `style.css`
-- **static/js/** — `htmx.min.js` (v2.0.4, vendored)
+- **static/js/** — `htmx.min.js` (v2.0.4, vendored), `dashboard.js` (shared tab switching + copy-to-clipboard)
 - **middleware/** — 4 middleware files:
   - `csrf.go` — double-submit cookie CSRF on all POST forms
   - `flash.go` — cookie-based flash messages ("Settings saved", "Key revoked", etc.)

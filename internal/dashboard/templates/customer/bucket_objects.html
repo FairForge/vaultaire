@@ -31,6 +31,8 @@
                 <th>Size</th>
                 <th>Type</th>
                 <th>Last Modified</th>
+                {{if .CDNBaseURL}}<th>Preview</th>
+                <th>CDN URL</th>{{end}}
             </tr>
         </thead>
         <tbody>
@@ -39,9 +41,11 @@
                 <td>
                     <a href="/dashboard/buckets/{{$.BucketName}}?prefix={{.FullPrefix}}" class="bucket-link">{{.Display}}/</a>
                 </td>
-                <td class="text-muted">—</td>
+                <td class="text-muted">&mdash;</td>
                 <td class="text-muted">prefix</td>
-                <td class="text-muted">—</td>
+                <td class="text-muted">&mdash;</td>
+                {{if $.CDNBaseURL}}<td class="text-muted">&mdash;</td>
+                <td class="text-muted">&mdash;</td>{{end}}
             </tr>
             {{end}}
             {{range .Objects}}
@@ -50,6 +54,8 @@
                 <td>{{.SizeFmt}}</td>
                 <td>{{.ContentType}}</td>
                 <td>{{.LastModifiedFmt}}</td>
+                {{if $.CDNBaseURL}}<td class="preview-cell">{{if eq .PreviewType "image"}}<img src="{{.CDNURL}}" loading="lazy" style="max-width:80px;max-height:60px;border-radius:4px;">{{else if eq .PreviewType "video"}}<video src="{{.CDNURL}}" controls preload="none" style="max-width:120px;max-height:80px;"></video>{{else if eq .PreviewType "audio"}}<audio src="{{.CDNURL}}" controls preload="none" style="max-width:160px;"></audio>{{else if eq .PreviewType "text"}}<span class="text-muted">text</span>{{else}}<span class="text-muted">&mdash;</span>{{end}}</td>
+                <td><button type="button" class="btn btn-sm btn-copy" data-url="{{.CDNURL}}">Copy URL</button></td>{{end}}
             </tr>
             {{end}}
         </tbody>

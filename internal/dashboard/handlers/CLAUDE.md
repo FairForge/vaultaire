@@ -18,7 +18,9 @@ Helper functions are in `context.go`: `formatBytes` (human-readable sizes), `rel
 Three handlers:
 - `HandleBuckets(tmpl, db, dataPath, logger)` — lists buckets from `buckets` table LEFT JOIN `object_head_cache` (includes empty buckets with count=0)
 - `HandleCreateBucket(tmpl, db, dataPath, logger)` — validates S3-compatible name, creates directory at `{dataPath}/{name}`, persists to `buckets` table
-- `HandleBucketObjects(tmpl, db, logger)` — lists objects in a bucket with prefix-based "folder" navigation (uses chi URL param `{name}`)
+- `HandleBucketObjects(tmpl, db, logger)` — lists objects in a bucket with prefix-based "folder" navigation (uses chi URL param `{name}`). Queries bucket visibility and tenant slug; for public-read buckets with a slug, sets `CDNBaseURL` and populates `ObjectRow.CDNURL` and `ObjectRow.PreviewType` fields for inline media previews and CDN copy buttons.
+
+`previewTypeFromContentType(ct)` maps content types to preview categories: `image/*` → "image", `video/*` → "video", `audio/*` → "audio", `text/*`/json/xml/js → "text", everything else → "".
 
 Bucket name validation: `^[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9]$` + path traversal check.
 

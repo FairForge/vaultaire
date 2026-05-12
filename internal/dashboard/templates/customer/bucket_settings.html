@@ -90,6 +90,15 @@ with open("file.jpg", "wb") as f:
 &lt;video src="{{.CDNBaseURL}}/video.mp4" controls&gt;&lt;/video&gt;</pre>
             </div>
         </div>
+
+        <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border);">
+            <div style="font-weight:600;font-size:0.9rem;margin-bottom:0.5rem;">Quick Upload</div>
+            <pre class="code-block">aws s3 cp ./myfile.jpg s3://{{.BucketName}}/ \
+  --endpoint-url https://stored.ge
+
+# After uploading, your file is available at:
+# {{.CDNBaseURL}}/myfile.jpg</pre>
+        </div>
     </div>
     {{end}}
 
@@ -123,12 +132,4 @@ with open("file.jpg", "wb") as f:
     </div>
 </form>
 
-<script>
-function showTab(btn, id) {
-    btn.closest('.code-tabs').querySelectorAll('.tab-panel').forEach(p => p.classList.remove('tab-visible'));
-    btn.closest('.tab-bar').querySelectorAll('.tab-btn').forEach(b => b.classList.remove('tab-active'));
-    document.getElementById(id).classList.add('tab-visible');
-    btn.classList.add('tab-active');
-}
-</script>
 {{end}}

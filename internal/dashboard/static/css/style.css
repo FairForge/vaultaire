@@ -485,6 +485,11 @@ th {
 .tab-visible { display: block; }
 .tab-panel .code-block { margin: 0; border-radius: 0; }
 
+/* Object browser previews */
+.preview-cell img, .preview-cell video { display: block; }
+.preview-cell audio { display: block; height: 32px; }
+.btn-copy { font-size: 0.75rem; padding: 0.15rem 0.5rem; white-space: nowrap; }
+
 /* Responsive */
 @media (max-width: 768px) {
     .admin-layout { flex-direction: column; }

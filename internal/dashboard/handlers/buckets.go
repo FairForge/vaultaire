@@ -38,6 +38,8 @@ type ObjectRow struct {
 	LastModified    time.Time
 	SizeFmt         string
 	LastModifiedFmt string
+	PreviewType     string
+	CDNURL          string
 }
 
 // PrefixRow is a common-prefix "folder" in the bucket browser.
@@ -190,7 +192,20 @@ func HandleBucketObjects(tmpl *template.Template, db *sql.DB, logger *zap.Logger
 		}
 
 		if db != nil {
-			populateBucketObjects(r.Context(), db, sd.TenantID, bucketName, prefix, data)
+			var vis, slug string
+			_ = db.QueryRowContext(r.Context(),
+				`SELECT visibility FROM buckets WHERE tenant_id = $1 AND name = $2`,
+				sd.TenantID, bucketName).Scan(&vis)
+			_ = db.QueryRowContext(r.Context(),
+				`SELECT COALESCE(slug, '') FROM tenants WHERE id = $1`,
+				sd.TenantID).Scan(&slug)
+			data["Visibility"] = vis
+			cdnBase := ""
+			if vis == "public-read" && slug != "" {
+				cdnBase = cdnBaseHost + slug + "/" + bucketName
+				data["CDNBaseURL"] = cdnBase
+			}
+			populateBucketObjects(r.Context(), db, sd.TenantID, bucketName, prefix, cdnBase, data)
 		} else {
 			data["ObjectCount"] = 0
 			data["TotalSizeFmt"] = "0 B"
@@ -261,7 +276,23 @@ func listBuckets(ctx context.Context, db *sql.DB, tenantID string) []BucketRow {
 	return buckets
 }
 
-func populateBucketObjects(ctx context.Context, db *sql.DB, tenantID, bucket, prefix string, data map[string]any) {
+func previewTypeFromContentType(ct string) string {
+	if strings.HasPrefix(ct, "image/") {
+		return "image"
+	}
+	if strings.HasPrefix(ct, "video/") {
+		return "video"
+	}
+	if strings.HasPrefix(ct, "audio/") {
+		return "audio"
+	}
+	if strings.HasPrefix(ct, "text/") || ct == "application/json" || ct == "application/xml" || ct == "application/javascript" {
+		return "text"
+	}
+	return ""
+}
+
+func populateBucketObjects(ctx context.Context, db *sql.DB, tenantID, bucket, prefix, cdnBase string, data map[string]any) {
 	// Query all objects matching the prefix.
 	query := `SELECT object_key, size_bytes, content_type, updated_at
 		 FROM object_head_cache
@@ -310,7 +341,7 @@ func populateBucketObjects(ctx context.Context, db *sql.DB, tenantID, bucket, pr
 			continue
 		}
 
-		objects = append(objects, ObjectRow{
+		obj := ObjectRow{
 			Key:             key,
 			Display:         rel,
 			Size:            size,
@@ -318,7 +349,12 @@ func populateBucketObjects(ctx context.Context, db *sql.DB, tenantID, bucket, pr
 			LastModified:    lastMod,
 			SizeFmt:         formatBytes(size),
 			LastModifiedFmt: relativeTime(lastMod),
-		})
+			PreviewType:     previewTypeFromContentType(contentType),
+		}
+		if cdnBase != "" {
+			obj.CDNURL = cdnBase + "/" + key
+		}
+		objects = append(objects, obj)
 	}
 
 	// Build sorted prefix list.
