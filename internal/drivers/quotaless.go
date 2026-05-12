@@ -3,133 +3,196 @@ package drivers
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"encoding/xml"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
+	"net/url"
 	"strings"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 
 	"github.com/FairForge/vaultaire/internal/engine"
 	"go.uber.org/zap"
 )
 
-// QuotalessDriver wraps S3Driver with Quotaless-specific optimizations
-type QuotalessDriver struct {
-	*S3Driver
-	rootPath     string
-	endpoint     string
-	useMultipart bool
-	maxRetries   int
-	chunkSize    int64
-	uploadCutoff int64
-	logger       *zap.Logger
+type listResult struct {
+	XMLName  xml.Name `xml:"ListBucketResult"`
+	Contents []struct {
+		Key string `xml:"Key"`
+	} `xml:"Contents"`
 }
 
-// NewQuotalessDriver creates a Quotaless-optimized driver
+// QuotalessDriver uses raw HTTP + SigV4 signing with UNSIGNED-PAYLOAD.
+// The AWS SDK v2 S3 client is incompatible with Quotaless's Minio gateway
+// (flexible checksums corrupt downloads, streaming payload signing resets connections).
+type QuotalessDriver struct {
+	httpClient *http.Client
+	signer     *v4.Signer
+	creds      aws.CredentialsProvider
+	endpoint   string
+	bucket     string
+	rootPath   string
+	region     string
+	maxRetries int
+	logger     *zap.Logger
+}
+
 func NewQuotalessDriver(accessKey, secretKey, endpoint string, logger *zap.Logger) (*QuotalessDriver, error) {
-	// Default to US endpoint if not specified
 	if endpoint == "" {
-		endpoint = "https://us.quotaless.cloud:8000"
+		endpoint = "https://srv1.quotaless.cloud:8000"
 	}
 
-	// Determine if this is a static (single-server) or dynamic (multi-server) endpoint
 	isStaticEndpoint := strings.Contains(endpoint, "srv") ||
 		strings.Contains(endpoint, "nl.") ||
 		strings.Contains(endpoint, "us.") ||
 		strings.Contains(endpoint, "sg.")
 
-	// Create base S3 driver with Quotaless-specific settings
-	s3Driver, err := NewS3Driver(
-		endpoint,
-		accessKey,
-		secretKey,
-		"us-east-1", // Quotaless doesn't use regions
-		logger,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("create S3 driver: %w", err)
+	transport := &http.Transport{
+		MaxIdleConns:        200,
+		MaxIdleConnsPerHost: 200,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
+		ReadBufferSize:      256 * 1024,
+		WriteBufferSize:     256 * 1024,
+		DisableCompression:  true,
+		ForceAttemptHTTP2:   true,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSClientConfig: &tls.Config{
+			MinVersion:         tls.VersionTLS12,
+			ClientSessionCache: tls.NewLRUClientSessionCache(128),
+		},
 	}
-
-	// Configure based on endpoint type (per Quotaless documentation)
-	driver := &QuotalessDriver{
-		S3Driver:     s3Driver,
-		rootPath:     "personal-files",
-		endpoint:     endpoint,
-		maxRetries:   3,
-		chunkSize:    50 * 1024 * 1024,  // 50MB chunks as recommended
-		uploadCutoff: 100 * 1024 * 1024, // 100MB cutoff as recommended
-		logger:       logger,
-	}
-
-	// Static endpoints support multipart, dynamic endpoints don't
-	driver.useMultipart = isStaticEndpoint
 
 	if isStaticEndpoint {
-		logger.Info("Quotaless using static endpoint with multipart",
+		logger.Info("Quotaless using static endpoint",
 			zap.String("endpoint", endpoint))
 	} else {
-		logger.Info("Quotaless using dynamic endpoint without multipart",
+		logger.Info("Quotaless using dynamic endpoint",
 			zap.String("endpoint", endpoint))
 	}
 
-	return driver, nil
+	return &QuotalessDriver{
+		httpClient: &http.Client{Transport: transport},
+		signer:     v4.NewSigner(),
+		creds:      credentials.NewStaticCredentialsProvider(accessKey, secretKey, ""),
+		endpoint:   strings.TrimRight(endpoint, "/"),
+		bucket:     "data",
+		rootPath:   "personal-files",
+		region:     "us-east-1",
+		maxRetries: 3,
+		logger:     logger,
+	}, nil
 }
 
-// Put implements optimized upload for Quotaless with retry logic
-func (d *QuotalessDriver) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...engine.PutOption) error {
-	fullPath := fmt.Sprintf("%s/%s/%s", d.rootPath, container, artifact)
+func (d *QuotalessDriver) signAndDo(ctx context.Context, req *http.Request) (*http.Response, error) {
+	creds, err := d.creds.Retrieve(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("retrieve credentials: %w", err)
+	}
+	req.Header.Set("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
+	if err := d.signer.SignHTTP(ctx, creds, req, "UNSIGNED-PAYLOAD", "s3", d.region, time.Now()); err != nil {
+		return nil, fmt.Errorf("sign request: %w", err)
+	}
+	return d.httpClient.Do(req)
+}
 
-	// Buffer the data for retries if it's not already seekable
-	var buffer *bytes.Buffer
-	if _, ok := data.(io.Seeker); !ok {
-		// Read into buffer for retry capability
-		buf, err := io.ReadAll(data)
+func (d *QuotalessDriver) objectURL(container, artifact string) string {
+	return fmt.Sprintf("%s/%s/%s/%s/%s", d.endpoint, d.bucket, d.rootPath, container, artifact)
+}
+
+func (d *QuotalessDriver) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...engine.PutOption) error {
+	var (
+		buf    []byte
+		seeker io.ReadSeeker
+		size   int64
+	)
+
+	if rs, ok := data.(io.ReadSeeker); ok {
+		seeker = rs
+		cur, err := rs.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return fmt.Errorf("seek current: %w", err)
+		}
+		end, err := rs.Seek(0, io.SeekEnd)
+		if err != nil {
+			return fmt.Errorf("seek end: %w", err)
+		}
+		size = end - cur
+		if _, err := rs.Seek(cur, io.SeekStart); err != nil {
+			return fmt.Errorf("seek start: %w", err)
+		}
+	} else {
+		var err error
+		buf, err = io.ReadAll(data)
 		if err != nil {
 			return fmt.Errorf("buffer data: %w", err)
 		}
-		buffer = bytes.NewBuffer(buf)
-		data = buffer
+		size = int64(len(buf))
 	}
 
-	// Retry logic for resilience
+	objURL := d.objectURL(container, artifact)
 	var lastErr error
 	for attempt := 0; attempt < d.maxRetries; attempt++ {
 		if attempt > 0 {
-			// Exponential backoff
 			backoff := time.Duration(attempt*attempt) * time.Second
 			d.logger.Warn("retrying upload",
 				zap.Int("attempt", attempt+1),
-				zap.String("path", fullPath),
+				zap.String("path", container+"/"+artifact),
 				zap.Duration("backoff", backoff),
 				zap.Error(lastErr))
 			time.Sleep(backoff)
+		}
 
-			// Reset reader if we buffered it
-			if buffer != nil {
-				data = bytes.NewReader(buffer.Bytes())
-			} else if seeker, ok := data.(io.Seeker); ok {
-				_, _ = seeker.Seek(0, io.SeekStart)
+		var reqBody io.Reader
+		if buf != nil {
+			reqBody = bytes.NewReader(buf)
+		} else {
+			if _, err := seeker.Seek(0, io.SeekStart); err != nil {
+				return fmt.Errorf("reset reader: %w", err)
 			}
+			reqBody = seeker
 		}
 
-		// Use the S3Driver's Put method directly
-		// Note: S3Driver.Put doesn't take variadic options, just the reader
-		lastErr = d.S3Driver.Put(ctx, "data", fullPath, data)
-
-		if lastErr == nil {
-			d.logger.Debug("upload successful",
-				zap.String("container", container),
-				zap.String("artifact", artifact),
-				zap.Int("attempts", attempt+1))
-			return nil
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, objURL, reqBody)
+		if err != nil {
+			return fmt.Errorf("create request: %w", err)
 		}
+		req.ContentLength = size
+
+		resp, err := d.signAndDo(ctx, req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+
+		if resp.StatusCode >= 300 {
+			lastErr = fmt.Errorf("PUT %d", resp.StatusCode)
+			continue
+		}
+
+		d.logger.Debug("upload successful",
+			zap.String("container", container),
+			zap.String("artifact", artifact),
+			zap.Int("attempts", attempt+1))
+		return nil
 	}
 
 	return fmt.Errorf("upload failed after %d attempts: %w", d.maxRetries, lastErr)
 }
 
-// Get retrieves data with retry logic
 func (d *QuotalessDriver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
-	fullPath := fmt.Sprintf("%s/%s/%s", d.rootPath, container, artifact)
+	objURL := d.objectURL(container, artifact)
 
 	var lastErr error
 	for attempt := 0; attempt < d.maxRetries; attempt++ {
@@ -137,25 +200,42 @@ func (d *QuotalessDriver) Get(ctx context.Context, container, artifact string) (
 			backoff := time.Duration(attempt*attempt) * time.Second
 			d.logger.Warn("retrying get",
 				zap.Int("attempt", attempt+1),
-				zap.String("path", fullPath),
+				zap.String("path", container+"/"+artifact),
 				zap.Duration("backoff", backoff),
 				zap.Error(lastErr))
 			time.Sleep(backoff)
 		}
 
-		reader, err := d.S3Driver.Get(ctx, "data", fullPath)
-		if err == nil {
-			return reader, nil
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, objURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("create request: %w", err)
 		}
-		lastErr = err
+
+		resp, err := d.signAndDo(ctx, req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		if resp.StatusCode == http.StatusNotFound {
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("object not found: %s/%s", container, artifact)
+		}
+
+		if resp.StatusCode >= 300 {
+			_ = resp.Body.Close()
+			lastErr = fmt.Errorf("GET %d", resp.StatusCode)
+			continue
+		}
+
+		return resp.Body, nil
 	}
 
 	return nil, fmt.Errorf("get failed after %d attempts: %w", d.maxRetries, lastErr)
 }
 
-// Delete with retry logic
 func (d *QuotalessDriver) Delete(ctx context.Context, container, artifact string) error {
-	fullPath := fmt.Sprintf("%s/%s/%s", d.rootPath, container, artifact)
+	objURL := d.objectURL(container, artifact)
 
 	var lastErr error
 	for attempt := 0; attempt < d.maxRetries; attempt++ {
@@ -163,32 +243,53 @@ func (d *QuotalessDriver) Delete(ctx context.Context, container, artifact string
 			backoff := time.Duration(attempt*attempt) * time.Second
 			d.logger.Warn("retrying delete",
 				zap.Int("attempt", attempt+1),
-				zap.String("path", fullPath),
+				zap.String("path", container+"/"+artifact),
 				zap.Duration("backoff", backoff),
 				zap.Error(lastErr))
 			time.Sleep(backoff)
 		}
 
-		err := d.S3Driver.Delete(ctx, "data", fullPath)
-		if err == nil {
-			return nil
+		req, err := http.NewRequestWithContext(ctx, http.MethodDelete, objURL, nil)
+		if err != nil {
+			return fmt.Errorf("create request: %w", err)
 		}
-		lastErr = err
+
+		resp, err := d.signAndDo(ctx, req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+
+		if resp.StatusCode >= 300 && resp.StatusCode != http.StatusNotFound {
+			lastErr = fmt.Errorf("DELETE %d", resp.StatusCode)
+			continue
+		}
+
+		return nil
 	}
 
 	return fmt.Errorf("delete failed after %d attempts: %w", d.maxRetries, lastErr)
 }
 
-// List with proper prefix handling for Quotaless structure
 func (d *QuotalessDriver) List(ctx context.Context, container string, prefix string) ([]string, error) {
 	fullPrefix := fmt.Sprintf("%s/%s/", d.rootPath, container)
 	if prefix != "" {
-		fullPrefix = fmt.Sprintf("%s%s", fullPrefix, prefix)
+		fullPrefix += prefix
 	}
 
-	var results []string
-	var lastErr error
+	u, err := url.Parse(fmt.Sprintf("%s/%s", d.endpoint, d.bucket))
+	if err != nil {
+		return nil, fmt.Errorf("parse endpoint: %w", err)
+	}
+	q := u.Query()
+	q.Set("list-type", "2")
+	q.Set("prefix", fullPrefix)
+	q.Set("max-keys", "1000")
+	u.RawQuery = q.Encode()
 
+	var lastErr error
 	for attempt := 0; attempt < d.maxRetries; attempt++ {
 		if attempt > 0 {
 			backoff := time.Duration(attempt*attempt) * time.Second
@@ -200,82 +301,114 @@ func (d *QuotalessDriver) List(ctx context.Context, container string, prefix str
 			time.Sleep(backoff)
 		}
 
-		results, lastErr = d.S3Driver.List(ctx, "data", fullPrefix)
-		if lastErr == nil {
-			break
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+		if err != nil {
+			return nil, fmt.Errorf("create request: %w", err)
 		}
-	}
 
-	if lastErr != nil {
-		return nil, fmt.Errorf("list failed after %d attempts: %w", d.maxRetries, lastErr)
-	}
-
-	// Strip the prefix to return relative paths
-	prefixLen := len(fullPrefix)
-	cleaned := make([]string, 0, len(results))
-	for _, result := range results {
-		if len(result) > prefixLen {
-			cleaned = append(cleaned, result[prefixLen:])
+		resp, err := d.signAndDo(ctx, req)
+		if err != nil {
+			lastErr = err
+			continue
 		}
+
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+			lastErr = fmt.Errorf("LIST %d", resp.StatusCode)
+			continue
+		}
+
+		var result listResult
+		if err := xml.NewDecoder(resp.Body).Decode(&result); err != nil {
+			_ = resp.Body.Close()
+			lastErr = fmt.Errorf("parse list response: %w", err)
+			continue
+		}
+		_ = resp.Body.Close()
+
+		cleaned := make([]string, 0, len(result.Contents))
+		for _, entry := range result.Contents {
+			rel := strings.TrimPrefix(entry.Key, fullPrefix)
+			if rel != "" {
+				cleaned = append(cleaned, rel)
+			}
+		}
+
+		return cleaned, nil
 	}
 
-	return cleaned, nil
+	return nil, fmt.Errorf("list failed after %d attempts: %w", d.maxRetries, lastErr)
 }
 
-// Exists checks if an object exists with retry logic
 func (d *QuotalessDriver) Exists(ctx context.Context, container, artifact string) (bool, error) {
-	fullPath := fmt.Sprintf("%s/%s/%s", d.rootPath, container, artifact)
+	objURL := d.objectURL(container, artifact)
 
 	var lastErr error
 	for attempt := 0; attempt < d.maxRetries; attempt++ {
 		if attempt > 0 {
 			backoff := time.Duration(attempt*attempt) * time.Second
-			d.logger.Warn("retrying exists",
+			d.logger.Warn("retrying exists check",
 				zap.Int("attempt", attempt+1),
-				zap.String("path", fullPath),
+				zap.String("path", container+"/"+artifact),
 				zap.Duration("backoff", backoff),
 				zap.Error(lastErr))
 			time.Sleep(backoff)
 		}
 
-		exists, err := d.S3Driver.Exists(ctx, "data", fullPath)
-		if err == nil {
-			return exists, nil
+		req, err := http.NewRequestWithContext(ctx, http.MethodHead, objURL, nil)
+		if err != nil {
+			return false, fmt.Errorf("create request: %w", err)
 		}
-		lastErr = err
+
+		resp, err := d.signAndDo(ctx, req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		_ = resp.Body.Close()
+
+		if resp.StatusCode == http.StatusOK {
+			return true, nil
+		}
+		if resp.StatusCode == http.StatusNotFound {
+			return false, nil
+		}
+
+		lastErr = fmt.Errorf("HEAD %d", resp.StatusCode)
 	}
 
-	return false, fmt.Errorf("exists failed after %d attempts: %w", d.maxRetries, lastErr)
+	return false, fmt.Errorf("exists check failed after %d attempts: %w", d.maxRetries, lastErr)
 }
 
-// HealthCheck with timeout and retry
 func (d *QuotalessDriver) HealthCheck(ctx context.Context) error {
-	// Create a timeout context for health check
-	checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	// Try a simple list operation with minimal results
-	_, err := d.S3Driver.List(checkCtx, "data", d.rootPath+"/")
+	u, err := url.Parse(d.endpoint)
 	if err != nil {
-		return fmt.Errorf("health check failed: %w", err)
+		return fmt.Errorf("parse endpoint: %w", err)
 	}
-
-	return nil
+	host := u.Host
+	if !strings.Contains(host, ":") {
+		if u.Scheme == "https" {
+			host += ":443"
+		} else {
+			host += ":80"
+		}
+	}
+	conn, err := net.DialTimeout("tcp", host, 5*time.Second)
+	if err != nil {
+		return fmt.Errorf("quotaless health check: %w", err)
+	}
+	return conn.Close()
 }
 
-// GetMetrics returns performance metrics
 func (d *QuotalessDriver) GetMetrics() map[string]interface{} {
 	return map[string]interface{}{
-		"endpoint":         d.endpoint,
-		"multipart":        d.useMultipart,
-		"chunk_size_mb":    d.chunkSize / (1024 * 1024),
-		"upload_cutoff_mb": d.uploadCutoff / (1024 * 1024),
-		"max_retries":      d.maxRetries,
-		"root_path":        d.rootPath,
+		"endpoint":    d.endpoint,
+		"bucket":      d.bucket,
+		"max_retries": d.maxRetries,
+		"root_path":   d.rootPath,
 	}
 }
 
-// Name returns the driver name
 func (d *QuotalessDriver) Name() string {
 	return "quotaless"
 }

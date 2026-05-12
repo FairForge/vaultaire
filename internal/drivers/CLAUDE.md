@@ -27,14 +27,14 @@ type Driver interface {
 | `LocalDriver` | `local.go` | `NewLocalDriver(basePath, logger)` | Local filesystem | `DATA_PATH` env var; reader/file pools; transactions; buffered writes; multipart uploads; file locking; sparse files; xattrs; directory indexing |
 | `S3CompatDriver` | `s3compat.go` | `NewS3CompatDriver(accessKey, secretKey, logger)` | S3-compatible (maps to Quotaless endpoint) | Hardcoded `us.s3compat.cloud:8000`; optional `S3COMPAT_INSECURE_TLS` for self-signed certs |
 | `LyveDriver` | `lyve.go` | `NewLyveDriver(accessKey, secretKey, tenantID, region, logger)` | Seagate Lyve Cloud | Auto-builds `s3.{region}.global.lyve.seagate.com` endpoint; tenant isolation via context key |
-| `QuotalessDriver` | `quotaless.go` | `NewQuotalessDriver(accessKey, secretKey, endpoint, logger)` | Quotaless | Embeds `*S3Driver`; 50 MB chunks; 100 MB multipart cutoff; static vs dynamic endpoint detection |
+| `QuotalessDriver` | `quotaless.go` | `NewQuotalessDriver(accessKey, secretKey, endpoint, logger)` | Quotaless | Raw HTTP + SigV4 (UNSIGNED-PAYLOAD); fixed bucket `data`; `personal-files/` prefix; TCP dial health check; default srv1 endpoint |
 | `GeyserDriver` | `geyser.go` | `NewGeyserDriver(accessKey, secretKey, bucket, tenantID, logger, ...GeyserOption)` | Spectra Logic Vail (LTO-9 tape) | Default LA endpoint; `WithGeyserEndpoint` for London; 64 MB spill threshold (RAM vs temp file); generous HTTP timeouts for tape ops |
 
 ### Not wired in main.go (scaffolds / future)
 
 | Driver | File | Constructor | Backend | Status |
 |--------|------|-------------|---------|--------|
-| `S3Driver` | `s3.go` | `NewS3Driver(endpoint, accessKey, secretKey, region, logger)` | Generic AWS S3 | Used as base for `QuotalessDriver` (embedded); not directly wired |
+| `S3Driver` | `s3.go` | `NewS3Driver(endpoint, accessKey, secretKey, region, logger)` | Generic AWS S3 | Not directly wired; legacy |
 | `IDriveDriver` | `idrive.go` | `NewIDriveDriver(accessKey, secretKey, endpoint, region, logger)` | iDrive E2 | Standalone S3-compatible driver with built-in `EgressTracker`; not yet wired |
 | `OneDriveDriver` | `onedrive.go` | `NewOneDriveDriver(clientID, clientSecret, refreshToken, tenantID, logger)` | Microsoft OneDrive (Graph API) | Scaffold only; Put/Get return "not implemented" |
 

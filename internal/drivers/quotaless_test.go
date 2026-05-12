@@ -20,10 +20,12 @@ import (
 
 // s3Mock is a minimal S3-compatible HTTP handler for unit tests.
 type s3Mock struct {
-	mu       sync.RWMutex
-	objects  map[string][]byte // bucket/key -> data
-	requests atomic.Int32
-	failN    int // fail the first N requests
+	mu          sync.RWMutex
+	objects     map[string][]byte // bucket/key -> data
+	requests    atomic.Int32
+	failN       int // fail the first N requests
+	headerMu    sync.Mutex
+	lastHeaders http.Header
 }
 
 type listBucketResult struct {
@@ -48,6 +50,10 @@ func newS3Mock() *s3Mock {
 }
 
 func (m *s3Mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	m.headerMu.Lock()
+	m.lastHeaders = r.Header.Clone()
+	m.headerMu.Unlock()
+
 	n := int(m.requests.Add(1))
 	if n <= m.failN {
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -161,27 +167,22 @@ func newTestQuotalessDriver(t *testing.T, mock *s3Mock) (*QuotalessDriver, *http
 
 func TestQuotaless_EndpointDiscrimination(t *testing.T) {
 	logger, _ := zap.NewDevelopment()
-	mock := newS3Mock()
-	srv := httptest.NewServer(mock)
-	defer srv.Close()
 
 	cases := []struct {
-		endpoint  string
-		wantMulti bool
+		endpoint string
 	}{
-		{"https://srv1.quotaless.cloud:8000", true},
-		{"https://us.quotaless.cloud:8000", true},
-		{"https://nl.quotaless.cloud:8000", true},
-		{"https://sg.quotaless.cloud:8000", true},
-		{"https://quotaless.cloud:8000", false},
+		{"https://srv1.quotaless.cloud:8000"},
+		{"https://us.quotaless.cloud:8000"},
+		{"https://nl.quotaless.cloud:8000"},
+		{"https://sg.quotaless.cloud:8000"},
+		{"https://quotaless.cloud:8000"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.endpoint, func(t *testing.T) {
 			driver, err := NewQuotalessDriver("k", "s", tc.endpoint, logger)
 			require.NoError(t, err)
-			assert.Equal(t, tc.wantMulti, driver.useMultipart,
-				"endpoint %s: useMultipart", tc.endpoint)
+			assert.Equal(t, tc.endpoint, driver.endpoint)
 		})
 	}
 }
@@ -201,7 +202,33 @@ func TestQuotaless_RootPathPrefix(t *testing.T) {
 	assert.True(t, ok, "expected key with personal-files prefix in mock store")
 }
 
-// ── Retry on failure ─────────────────────────────────────────────────────────
+// ── Path construction ────────────────────────────────────────────────────────
+
+func TestQuotaless_PathConstruction(t *testing.T) {
+	mock := newS3Mock()
+	driver, _ := newTestQuotalessDriver(t, mock)
+	ctx := context.Background()
+
+	cases := []struct {
+		container, artifact, wantKey string
+	}{
+		{"mybucket", "myfile.txt", "data/personal-files/mybucket/myfile.txt"},
+		{"tenant1", "docs/report.pdf", "data/personal-files/tenant1/docs/report.pdf"},
+		{"bucket", "a/b/c/deep.bin", "data/personal-files/bucket/a/b/c/deep.bin"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.wantKey, func(t *testing.T) {
+			require.NoError(t, driver.Put(ctx, tc.container, tc.artifact, strings.NewReader("x")))
+			mock.mu.RLock()
+			_, ok := mock.objects[tc.wantKey]
+			mock.mu.RUnlock()
+			assert.True(t, ok, "expected key %s in mock store", tc.wantKey)
+		})
+	}
+}
+
+// ── Retry on failure ────────────────────────────────────────────────────────
 
 func TestQuotaless_RetryOnFailure(t *testing.T) {
 	mock := newS3Mock()
@@ -214,7 +241,7 @@ func TestQuotaless_RetryOnFailure(t *testing.T) {
 	assert.GreaterOrEqual(t, int(mock.requests.Load()), 3)
 }
 
-// ── Exhausted retries ────────────────────────────────────────────────────────
+// ── Exhausted retries ───────────────────────────────────────────────────────
 
 func TestQuotaless_ExhaustedRetries(t *testing.T) {
 	mock := newS3Mock()
@@ -227,27 +254,22 @@ func TestQuotaless_ExhaustedRetries(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed after 3 attempts")
 }
 
-// ── Chunk size defaults ──────────────────────────────────────────────────────
+// ── Health check (TCP dial) ─────────────────────────────────────────────────
 
-func TestQuotaless_ChunkSizeDefaults(t *testing.T) {
+func TestQuotaless_HealthCheck_TCPDial(t *testing.T) {
 	mock := newS3Mock()
-	driver, _ := newTestQuotalessDriver(t, mock)
-
-	assert.Equal(t, int64(50*1024*1024), driver.chunkSize)
-	assert.Equal(t, int64(100*1024*1024), driver.uploadCutoff)
-}
-
-// ── Health check ─────────────────────────────────────────────────────────────
-
-func TestQuotaless_HealthCheck(t *testing.T) {
-	mock := newS3Mock()
-	driver, _ := newTestQuotalessDriver(t, mock)
+	driver, srv := newTestQuotalessDriver(t, mock)
 
 	err := driver.HealthCheck(context.Background())
 	require.NoError(t, err)
+
+	srv.Close()
+	err = driver.HealthCheck(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "health check")
 }
 
-// ── List strips prefix ───────────────────────────────────────────────────────
+// ── List strips prefix ──────────────────────────────────────────────────────
 
 func TestQuotaless_ListStripsPrefix(t *testing.T) {
 	mock := newS3Mock()
@@ -262,7 +284,7 @@ func TestQuotaless_ListStripsPrefix(t *testing.T) {
 	assert.ElementsMatch(t, []string{"a.txt", "b.txt"}, results)
 }
 
-// ── Get round-trip ───────────────────────────────────────────────────────────
+// ── Get round-trip ──────────────────────────────────────────────────────────
 
 func TestQuotaless_GetRoundtrip(t *testing.T) {
 	mock := newS3Mock()
@@ -280,7 +302,7 @@ func TestQuotaless_GetRoundtrip(t *testing.T) {
 	assert.Equal(t, "world", string(data))
 }
 
-// ── Delete ───────────────────────────────────────────────────────────────────
+// ── Delete ──────────────────────────────────────────────────────────────────
 
 func TestQuotaless_Delete(t *testing.T) {
 	mock := newS3Mock()
@@ -296,7 +318,7 @@ func TestQuotaless_Delete(t *testing.T) {
 	assert.False(t, ok, "object should be deleted")
 }
 
-// ── Exists ───────────────────────────────────────────────────────────────────
+// ── Exists ──────────────────────────────────────────────────────────────────
 
 func TestQuotaless_Exists(t *testing.T) {
 	mock := newS3Mock()
@@ -314,7 +336,7 @@ func TestQuotaless_Exists(t *testing.T) {
 	assert.False(t, exists)
 }
 
-// ── Name ─────────────────────────────────────────────────────────────────────
+// ── Name ────────────────────────────────────────────────────────────────────
 
 func TestQuotaless_Name(t *testing.T) {
 	mock := newS3Mock()
@@ -322,7 +344,7 @@ func TestQuotaless_Name(t *testing.T) {
 	assert.Equal(t, "quotaless", driver.Name())
 }
 
-// ── Get retry ────────────────────────────────────────────────────────────────
+// ── Get retry ───────────────────────────────────────────────────────────────
 
 func TestQuotaless_GetRetryOnFailure(t *testing.T) {
 	mock := newS3Mock()
@@ -340,4 +362,20 @@ func TestQuotaless_GetRetryOnFailure(t *testing.T) {
 
 	data, _ := io.ReadAll(rc)
 	assert.Equal(t, "retried", string(data))
+}
+
+// ── UNSIGNED-PAYLOAD header ─────────────────────────────────────────────────
+
+func TestQuotaless_UnsignedPayloadHeader(t *testing.T) {
+	mock := newS3Mock()
+	driver, _ := newTestQuotalessDriver(t, mock)
+	ctx := context.Background()
+
+	require.NoError(t, driver.Put(ctx, "bucket", "file.txt", strings.NewReader("data")))
+
+	mock.headerMu.Lock()
+	h := mock.lastHeaders.Get("X-Amz-Content-Sha256")
+	mock.headerMu.Unlock()
+
+	assert.Equal(t, "UNSIGNED-PAYLOAD", h)
 }
