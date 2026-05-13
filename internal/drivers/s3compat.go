@@ -2,7 +2,6 @@ package drivers
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
@@ -33,15 +32,13 @@ func NewS3CompatDriver(accessKey, secretKey string, logger *zap.Logger) (*S3Comp
 		logger.Warn("S3-compatible TLS verification disabled via S3COMPAT_INSECURE_TLS")
 	}
 
-	httpClient := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: insecure, // #nosec G402 — operator opt-in for self-signed certs
-			},
-		},
+	var httpClient *http.Client
+	if insecure {
+		httpClient = TunedHTTPClient(WithInsecureTLS())
+	} else {
+		httpClient = TunedHTTPClient()
 	}
 
-	// Create S3 client directly with minimal config
 	client := s3.New(s3.Options{
 		BaseEndpoint: aws.String("https://us.s3compat.cloud:8000"),
 		Region:       "us-east-1",

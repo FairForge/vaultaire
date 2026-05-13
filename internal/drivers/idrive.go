@@ -60,12 +60,12 @@ func NewIDriveDriver(accessKey, secretKey, endpoint, region string, logger *zap.
 		region = "us-west-1" // Default region
 	}
 
-	// Configure AWS SDK for iDrive E2
 	cfg, err := config.LoadDefaultConfig(context.Background(),
 		config.WithRegion(region),
 		config.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(accessKey, secretKey, ""),
 		),
+		config.WithHTTPClient(TunedHTTPClient()),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("idrive: load aws config: %w", err)
