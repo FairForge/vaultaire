@@ -93,7 +93,7 @@ func TunedHTTPClient(opts ...TransportOption) *http.Client {
 		TLSClientConfig: &tls.Config{
 			MinVersion:         tls.VersionTLS12,
 			ClientSessionCache: tls.NewLRUClientSessionCache(128),
-			InsecureSkipVerify: cfg.insecureTLS, //nolint:gosec // operator opt-in via WithInsecureTLS or S3COMPAT_INSECURE_TLS
+			InsecureSkipVerify: cfg.insecureTLS, // #nosec G402 -- operator opt-in via WithInsecureTLS or S3COMPAT_INSECURE_TLS
 		},
 	}
 
