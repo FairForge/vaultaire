@@ -15,7 +15,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -23,7 +22,6 @@ import (
 	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -68,19 +66,12 @@ func NewGeyserDriver(accessKey, secretKey, bucket, tenantID string, logger *zap.
 		o(opts)
 	}
 
-	// Tape operations can be slow — use generous timeouts.
-	httpClient := awshttp.NewBuildableClient().WithTransportOptions(func(t *http.Transport) {
-		t.ResponseHeaderTimeout = 5 * time.Minute
-		t.MaxIdleConnsPerHost = 10
-		t.IdleConnTimeout = 90 * time.Second
-	})
-
 	cfg, err := config.LoadDefaultConfig(context.Background(),
 		config.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(accessKey, secretKey, ""),
 		),
 		config.WithRegion("us-west-2"),
-		config.WithHTTPClient(httpClient),
+		config.WithHTTPClient(TunedHTTPClient(WithResponseHeaderTimeout(5*time.Minute))),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)

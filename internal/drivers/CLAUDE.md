@@ -30,15 +30,22 @@ type Driver interface {
 | `QuotalessDriver` | `quotaless.go` | `NewQuotalessDriver(accessKey, secretKey, endpoint, logger)` | Quotaless | Embeds `*S3Driver`; 50 MB chunks; 100 MB multipart cutoff; static vs dynamic endpoint detection |
 | `GeyserDriver` | `geyser.go` | `NewGeyserDriver(accessKey, secretKey, bucket, tenantID, logger, ...GeyserOption)` | Spectra Logic Vail (LTO-9 tape) | Default LA endpoint; `WithGeyserEndpoint` for London; 64 MB spill threshold (RAM vs temp file); generous HTTP timeouts for tape ops |
 
+| `IDriveDriver` | `idrive.go` | `NewIDriveDriver(accessKey, secretKey, endpoint, region, logger)` | iDrive E2 | Fixed-bucket + key-prefix pattern (like Geyser); `IDRIVE_BUCKET` env var (default `vaultaire`); materialize for Content-Length; ContentLength passthrough skips materialize when size known; `EgressTracker` field (not wired) |
+| `OneDriveDriver` | `onedrive.go` | `NewOneDriveFleetDriver(logger)` | Microsoft OneDrive (Graph API) | Multi-tenant fleet (TENANT_N_* env vars, N=1..15); raw HTTP + azidentity (no Graph SDK); dual transport (HTTP/2 API, HTTP/1.1 CDN); 60MB chunked uploads; streaming uploads (ContentLength passthrough); parallel byte-range downloads (adaptive 1/2/4/8 streams); fleet-wide TLS cache + DNS cache; token refresh mutex; RateLimit header tracking; pooled 1MB drain buffers |
+
 ### Not wired in main.go (scaffolds / future)
 
 | Driver | File | Constructor | Backend | Status |
 |--------|------|-------------|---------|--------|
 | `S3Driver` | `s3.go` | `NewS3Driver(endpoint, accessKey, secretKey, region, logger)` | Generic AWS S3 | Used as base for `QuotalessDriver` (embedded); not directly wired |
-| `IDriveDriver` | `idrive.go` | `NewIDriveDriver(accessKey, secretKey, endpoint, region, logger)` | iDrive E2 | Standalone S3-compatible driver with built-in `EgressTracker`; not yet wired |
-| `OneDriveDriver` | `onedrive.go` | `NewOneDriveDriver(clientID, clientSecret, refreshToken, tenantID, logger)` | Microsoft OneDrive (Graph API) | Scaffold only; Put/Get return "not implemented" |
 
 ## Shared Utilities
+
+### Transport
+
+| File | Type | Purpose |
+|------|------|---------|
+| `transport.go` | `TunedHTTPClient` | Shared HTTP client factory with connection pooling (200 conns), 4MB I/O buffers, DNS caching, TLS session resumption. Used by all S3-compatible drivers (Lyve, Geyser, iDrive, S3, S3compat). Options: `WithInsecureTLS()`, `WithResponseHeaderTimeout()`, `WithHTTP1Only()`. Disable via `VAULTAIRE_TUNED_TRANSPORT=false`. OneDrive has its own transports (odGraphTransport, odCDNTransport). |
 
 ### Resilience & Orchestration
 

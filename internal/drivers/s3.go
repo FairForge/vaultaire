@@ -1,7 +1,6 @@
 package drivers
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -31,10 +30,10 @@ func NewS3Driver(endpoint, accessKey, secretKey, region string, logger *zap.Logg
 	// Create custom credentials provider
 	creds := credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")
 
-	// Create config - use us-east-1 for Lyve Cloud regardless of actual region
 	cfg, err := config.LoadDefaultConfig(context.TODO(),
 		config.WithCredentialsProvider(creds),
-		config.WithRegion("us-east-1"), // Lyve Cloud requires us-east-1 for signature
+		config.WithRegion("us-east-1"),
+		config.WithHTTPClient(TunedHTTPClient()),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
@@ -56,21 +55,21 @@ func NewS3Driver(endpoint, accessKey, secretKey, region string, logger *zap.Logg
 	}, nil
 }
 
-// Put stores data in S3
+// Put stores data in S3. Uses materialize() to determine Content-Length
+// without buffering the entire body in memory for large objects.
 func (d *S3Driver) Put(ctx context.Context, container, artifact string, data io.Reader) error {
-	// Buffer the data to get its size
-	buf, err := io.ReadAll(data)
+	body, contentLength, cleanup, err := materialize(data)
 	if err != nil {
-		return fmt.Errorf("read data: %w", err)
+		return fmt.Errorf("read data for %s/%s: %w", container, artifact, err)
 	}
+	defer cleanup()
 
 	_, err = d.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:        aws.String(container),
 		Key:           aws.String(artifact),
-		Body:          bytes.NewReader(buf),
-		ContentLength: aws.Int64(int64(len(buf))),
+		Body:          body,
+		ContentLength: &contentLength,
 	})
-
 	if err != nil {
 		return fmt.Errorf("put object %s/%s: %w", container, artifact, err)
 	}

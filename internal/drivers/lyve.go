@@ -35,6 +35,7 @@ func NewLyveDriver(accessKey, secretKey, tenantID, region string, logger *zap.Lo
 			credentials.NewStaticCredentialsProvider(accessKey, secretKey, ""),
 		),
 		config.WithRegion(region),
+		config.WithHTTPClient(TunedHTTPClient()),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
