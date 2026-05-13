@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/tenant"
 
 	"go.uber.org/zap"
@@ -381,7 +382,8 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 
 	// Upload assembled stream to backend
 	go func() {
-		_, putErr := s.engine.Put(r.Context(), containerName, object, pr)
+		_, putErr := s.engine.Put(r.Context(), containerName, object, pr,
+			engine.WithContentLength(totalSize))
 		_ = pr.Close()
 		errCh <- putErr
 	}()

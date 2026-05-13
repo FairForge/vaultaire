@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"go.uber.org/zap"
 
+	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/engine"
 )
 
@@ -26,22 +27,28 @@ const (
 	TenantIDKey ContextKey = "tenant_id"
 )
 
-// IDriveDriver implements Driver interface for iDrive E2 storage
+// IDriveDriver implements Driver interface for iDrive E2 storage.
+// Uses a fixed bucket with tenant-prefixed keys (like GeyserDriver).
 type IDriveDriver struct {
 	accessKey          string
 	secretKey          string
 	endpoint           string
 	region             string
+	bucket             string
 	client             *s3.Client
 	logger             *zap.Logger
 	multipartThreshold int64          // Size threshold for multipart uploads
 	partSize           int64          // Size of each part in multipart upload
 	egressTracker      *EgressTracker // Track bandwidth usage
-
 }
 
-// NewIDriveDriver creates a new iDrive E2 storage driver
+// NewIDriveDriver creates a new iDrive E2 storage driver.
+// All objects are stored in `bucket` with keys prefixed by tenant ID.
 func NewIDriveDriver(accessKey, secretKey, endpoint, region string, logger *zap.Logger) (*IDriveDriver, error) {
+	bucket := os.Getenv("IDRIVE_BUCKET")
+	if bucket == "" {
+		bucket = "vaultaire"
+	}
 	// Validate required parameters
 	if endpoint == "" {
 		return nil, fmt.Errorf("idrive: endpoint required")
@@ -80,19 +87,33 @@ func NewIDriveDriver(accessKey, secretKey, endpoint, region string, logger *zap.
 		secretKey:          secretKey,
 		endpoint:           endpoint,
 		region:             region,
+		bucket:             bucket,
 		client:             client,
 		logger:             logger,
-		multipartThreshold: 5 * 1024 * 1024, // 5MB default
-		partSize:           5 * 1024 * 1024, // 5MB parts
-
+		multipartThreshold: 5 * 1024 * 1024,
+		partSize:           5 * 1024 * 1024,
 	}, nil
+}
+
+func (d *IDriveDriver) getTenantID(ctx context.Context) string {
+	if tid, ok := ctx.Value(common.TenantIDKey).(string); ok && tid != "" {
+		return tid
+	}
+	return "default"
+}
+
+func (d *IDriveDriver) buildKey(tenantID, container, artifact string) string {
+	return fmt.Sprintf("t-%s/%s/%s", tenantID, container, artifact)
 }
 
 // Get retrieves an artifact from iDrive
 func (d *IDriveDriver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
+	tenantID := d.getTenantID(ctx)
+	key := d.buildKey(tenantID, container, artifact)
+
 	result, err := d.client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(container),
-		Key:    aws.String(artifact),
+		Bucket: aws.String(d.bucket),
+		Key:    aws.String(key),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("idrive get %s/%s: %w", container, artifact, err)
@@ -140,52 +161,64 @@ func (d *IDriveDriver) SetEgressTracker(tracker *EgressTracker) {
 	d.egressTracker = tracker
 }
 
-// Put stores an artifact in iDrive
+// Put stores an artifact in iDrive.
+// iDrive E2 requires Content-Length on every PUT (HTTP 411 otherwise).
+// When ContentLength is passed via PutOptions (from the S3 API adapter),
+// we stream directly without buffering. Otherwise we fall back to
+// materialize() to determine size.
 func (d *IDriveDriver) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...engine.PutOption) error {
-	input := &s3.PutObjectInput{
-		Bucket: aws.String(container),
-		Key:    aws.String(artifact),
-		Body:   data,
-	}
+	tenantID := d.getTenantID(ctx)
+	key := d.buildKey(tenantID, container, artifact)
+	options := engine.ApplyPutOptions(opts...)
 
-	// If we can determine the size, add it for better performance
-	if seeker, ok := data.(io.Seeker); ok {
-		size, err := seeker.Seek(0, io.SeekEnd)
-		if err == nil {
-			_, _ = seeker.Seek(0, io.SeekStart) // Fixed: use underscores to ignore returns
-			input.ContentLength = aws.Int64(size)
+	if options.ContentLength > 0 {
+		cl := options.ContentLength
+		_, err := d.client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket:        aws.String(d.bucket),
+			Key:           aws.String(key),
+			Body:          data,
+			ContentLength: &cl,
+		})
+		if err != nil {
+			return fmt.Errorf("idrive put %s: %w", key, err)
 		}
+		return nil
 	}
 
-	_, err := d.client.PutObject(ctx, input)
+	body, contentLength, cleanup, err := materialize(data)
 	if err != nil {
-		return fmt.Errorf("idrive put %s/%s: %w", container, artifact, err)
+		return fmt.Errorf("idrive buffer %s: %w", key, err)
 	}
+	defer cleanup()
 
-	d.logger.Debug("artifact stored",
-		zap.String("container", container),
-		zap.String("artifact", artifact),
-	)
+	_, err = d.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:        aws.String(d.bucket),
+		Key:           aws.String(key),
+		Body:          body,
+		ContentLength: &contentLength,
+	})
+	if err != nil {
+		return fmt.Errorf("idrive put %s: %w", key, err)
+	}
 	return nil
 }
 
 // PutWithSize handles uploads with known size, using multipart for large files
 func (d *IDriveDriver) PutWithSize(ctx context.Context, container, artifact string, reader io.Reader, size int64) error {
-	// Use multipart for large files
 	if size > d.multipartThreshold {
 		return d.putMultipart(ctx, container, artifact, reader, size)
 	}
-
-	// Regular upload for small files
 	return d.Put(ctx, container, artifact, reader)
 }
 
 // putMultipart handles multipart uploads for large files
 func (d *IDriveDriver) putMultipart(ctx context.Context, container, artifact string, reader io.Reader, size int64) error {
-	// Start multipart upload
+	tenantID := d.getTenantID(ctx)
+	key := d.buildKey(tenantID, container, artifact)
+
 	createResp, err := d.client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
-		Bucket: aws.String(container),
-		Key:    aws.String(artifact),
+		Bucket: aws.String(d.bucket),
+		Key:    aws.String(key),
 	})
 	if err != nil {
 		return fmt.Errorf("idrive create multipart %s/%s: %w", container, artifact, err)
@@ -210,16 +243,15 @@ func (d *IDriveDriver) putMultipart(ctx context.Context, container, artifact str
 			break
 		}
 
-		// Upload part
 		uploadResp, err := d.client.UploadPart(ctx, &s3.UploadPartInput{
-			Bucket:     aws.String(container),
-			Key:        aws.String(artifact),
+			Bucket:     aws.String(d.bucket),
+			Key:        aws.String(key),
 			PartNumber: aws.Int32(partNumber),
 			UploadId:   aws.String(uploadID),
 			Body:       bytes.NewReader(partData[:n]),
 		})
 		if err != nil {
-			d.abortMultipartUpload(ctx, container, artifact, uploadID)
+			d.abortMultipartUpload(ctx, d.bucket, key, uploadID)
 			return fmt.Errorf("idrive upload part %d: %w", partNumber, err)
 		}
 
@@ -235,23 +267,22 @@ func (d *IDriveDriver) putMultipart(ctx context.Context, container, artifact str
 		}
 	}
 
-	// Complete multipart upload
 	_, err = d.client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
-		Bucket:   aws.String(container),
-		Key:      aws.String(artifact),
+		Bucket:   aws.String(d.bucket),
+		Key:      aws.String(key),
 		UploadId: aws.String(uploadID),
 		MultipartUpload: &types.CompletedMultipartUpload{
 			Parts: parts,
 		},
 	})
 	if err != nil {
-		d.abortMultipartUpload(ctx, container, artifact, uploadID)
-		return fmt.Errorf("idrive complete multipart %s/%s: %w", container, artifact, err)
+		d.abortMultipartUpload(ctx, d.bucket, key, uploadID)
+		return fmt.Errorf("idrive complete multipart %s: %w", key, err)
 	}
 
 	d.logger.Info("multipart upload completed",
-		zap.String("container", container),
-		zap.String("artifact", artifact),
+		zap.String("bucket", d.bucket),
+		zap.String("key", key),
 		zap.Int("parts", len(parts)),
 	)
 
@@ -277,9 +308,12 @@ func (d *IDriveDriver) abortMultipartUpload(ctx context.Context, container, arti
 
 // GetStream returns a streaming reader for downloads
 func (d *IDriveDriver) GetStream(ctx context.Context, container, artifact string, offset, length int64) (io.ReadCloser, error) {
+	tenantID := d.getTenantID(ctx)
+	key := d.buildKey(tenantID, container, artifact)
+
 	input := &s3.GetObjectInput{
-		Bucket: aws.String(container),
-		Key:    aws.String(artifact),
+		Bucket: aws.String(d.bucket),
+		Key:    aws.String(key),
 	}
 
 	// Add range header if specified
@@ -301,65 +335,59 @@ func (d *IDriveDriver) GetStream(ctx context.Context, container, artifact string
 
 // Delete removes an artifact from iDrive
 func (d *IDriveDriver) Delete(ctx context.Context, container, artifact string) error {
+	tenantID := d.getTenantID(ctx)
+	key := d.buildKey(tenantID, container, artifact)
+
 	_, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(container),
-		Key:    aws.String(artifact),
+		Bucket: aws.String(d.bucket),
+		Key:    aws.String(key),
 	})
 	if err != nil {
-		return fmt.Errorf("idrive delete %s/%s: %w", container, artifact, err)
+		return fmt.Errorf("idrive delete %s: %w", key, err)
 	}
-
-	d.logger.Debug("artifact deleted",
-		zap.String("container", container),
-		zap.String("artifact", artifact),
-	)
 	return nil
 }
 
 // List returns artifacts in a container with optional prefix
 func (d *IDriveDriver) List(ctx context.Context, container string, prefix string) ([]string, error) {
-	var artifacts []string
+	tenantID := d.getTenantID(ctx)
+	fullPrefix := d.buildKey(tenantID, container, prefix)
+	basePrefix := d.buildKey(tenantID, container, "")
 
+	var artifacts []string
 	paginator := s3.NewListObjectsV2Paginator(d.client, &s3.ListObjectsV2Input{
-		Bucket: aws.String(container),
-		Prefix: aws.String(prefix),
+		Bucket: aws.String(d.bucket),
+		Prefix: aws.String(fullPrefix),
 	})
 
 	for paginator.HasMorePages() {
 		output, err := paginator.NextPage(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("idrive list %s/%s: %w", container, prefix, err)
+			return nil, fmt.Errorf("idrive list %s: %w", fullPrefix, err)
 		}
-
 		for _, obj := range output.Contents {
-			artifacts = append(artifacts, *obj.Key)
+			name := strings.TrimPrefix(*obj.Key, basePrefix)
+			artifacts = append(artifacts, name)
 		}
 	}
-
-	d.logger.Debug("artifacts listed",
-		zap.String("container", container),
-		zap.String("prefix", prefix),
-		zap.Int("count", len(artifacts)),
-	)
 	return artifacts, nil
 }
 
 // Exists checks if an artifact exists
 func (d *IDriveDriver) Exists(ctx context.Context, container, artifact string) (bool, error) {
-	_, err := d.client.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(container),
-		Key:    aws.String(artifact),
-	})
+	tenantID := d.getTenantID(ctx)
+	key := d.buildKey(tenantID, container, artifact)
 
+	_, err := d.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(d.bucket),
+		Key:    aws.String(key),
+	})
 	if err != nil {
-		// Check if it's a "not found" error
-		if strings.Contains(err.Error(), "NotFound") ||
-			strings.Contains(err.Error(), "404") {
+		if strings.Contains(err.Error(), "NotFound") || strings.Contains(err.Error(), "404") {
 			return false, nil
 		}
-		return false, fmt.Errorf("idrive exists %s/%s: %w", container, artifact, err)
+		return false, fmt.Errorf("idrive exists %s: %w", key, err)
 	}
-
 	return true, nil
 }
 
@@ -368,7 +396,9 @@ func (d *IDriveDriver) Name() string {
 }
 
 func (d *IDriveDriver) HealthCheck(ctx context.Context) error {
-	_, err := d.client.ListBuckets(ctx, &s3.ListBucketsInput{})
+	_, err := d.client.HeadBucket(ctx, &s3.HeadBucketInput{
+		Bucket: aws.String(d.bucket),
+	})
 	if err != nil {
 		return fmt.Errorf("idrive health check: %w", err)
 	}

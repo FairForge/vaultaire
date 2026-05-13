@@ -316,18 +316,26 @@ func (e *CoreEngine) Delete(ctx context.Context, container, artifact string) err
 	start := time.Now()
 	tenantID := common.GetTenantID(ctx)
 
+	// Delete from the backend where the object was stored, not all backends.
+	// Scatter-delete across all drivers causes slow retries on backends that
+	// don't have the object (e.g. locked Quotaless returns 401 with retries).
+	key := objectKey(container, artifact)
+	targetBackend := e.primary
+	if stored, ok := e.objectBackends.Load(key); ok {
+		targetBackend = stored.(string)
+	}
+
 	var lastErr error
-	for name, driver := range e.drivers {
+	if driver, ok := e.drivers[targetBackend]; ok {
 		if err := driver.Delete(ctx, container, artifact); err != nil {
 			e.logger.Warn("delete failed",
-				zap.String("driver", name),
+				zap.String("driver", targetBackend),
 				zap.Error(err))
 			lastErr = err
 		}
 	}
 
-	// Remove routing record — object no longer exists.
-	e.objectBackends.Delete(objectKey(container, artifact))
+	e.objectBackends.Delete(key)
 
 	if e.cache != nil {
 		cacheKey := fmt.Sprintf("%s/%s/%s", tenantID, container, artifact)

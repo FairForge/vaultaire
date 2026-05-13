@@ -416,7 +416,8 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	hasher := md5.New() // #nosec G401 — S3 spec requires MD5 for ETags
 	hashingBody := io.TeeReader(body, hasher)
 
-	backendName, err := a.engine.Put(r.Context(), container, artifact, hashingBody)
+	backendName, err := a.engine.Put(r.Context(), container, artifact, hashingBody,
+		engine.WithContentLength(size))
 	if err != nil {
 		a.logger.Error("engine put failed",
 			zap.Error(err),

@@ -136,6 +136,7 @@ func main() {
 
 	// Configure backend costs
 	eng.SetCostConfiguration(map[string]float64{
+		"idrive":    0.0033, // $3.30/TB
 		"lyve":      0.00637,
 		"quotaless": 0.001,
 		"s3":        0.023,
@@ -145,12 +146,13 @@ func main() {
 	})
 
 	eng.SetEgressCosts(map[string]float64{
+		"idrive":    0.0,
 		"lyve":      0.0,
 		"s3":        0.09,
 		"quotaless": 0.01,
 		"onedrive":  0.02,
 		"local":     0.0,
-		"geyser":    0.0, // No egress fees
+		"geyser":    0.0,
 	})
 
 	// Initialize storage drivers
@@ -229,11 +231,44 @@ func main() {
 		}
 	}
 
-	// 6. Set primary backend (auto-detect best available)
+	// 6. Add iDrive if credentials available
+	if accessKey := os.Getenv("IDRIVE_ACCESS_KEY"); accessKey != "" {
+		secretKey := os.Getenv("IDRIVE_SECRET_KEY")
+		endpoint := os.Getenv("IDRIVE_ENDPOINT")
+		if endpoint == "" {
+			endpoint = "https://e2-us-west-1.idrive.com"
+		}
+		region := os.Getenv("IDRIVE_REGION")
+		if region == "" {
+			region = "us-west-1"
+		}
+		idriveDriver, err := drivers.NewIDriveDriver(accessKey, secretKey, endpoint, region, logger)
+		if err != nil {
+			logger.Warn("failed to add iDrive driver", zap.Error(err))
+		} else {
+			eng.AddDriver("idrive", idriveDriver)
+			logger.Info("iDrive driver added", zap.String("endpoint", endpoint), zap.String("region", region))
+		}
+	}
+
+	// 7. Add OneDrive fleet if tenant credentials available
+	if os.Getenv("TENANT_1_ID") != "" {
+		onedriveDriver, err := drivers.NewOneDriveFleetDriver(logger)
+		if err != nil {
+			logger.Warn("failed to add OneDrive driver", zap.Error(err))
+		} else {
+			eng.AddDriver("onedrive", onedriveDriver)
+			logger.Info("OneDrive fleet driver added", zap.Int("tenants", onedriveDriver.TenantCount()))
+		}
+	}
+
+	// 8. Set primary backend (auto-detect best available)
 	storageMode := os.Getenv("STORAGE_MODE")
 	if storageMode == "" {
-		// Auto-detect: prefer Quotaless > S3 > Geyser > local
-		if os.Getenv("QUOTALESS_ACCESS_KEY") != "" {
+		// Auto-detect: prefer iDrive > Quotaless > S3 > Geyser > local
+		if os.Getenv("IDRIVE_ACCESS_KEY") != "" {
+			storageMode = "idrive"
+		} else if os.Getenv("QUOTALESS_ACCESS_KEY") != "" {
 			storageMode = "quotaless"
 		} else if os.Getenv("S3_ACCESS_KEY") != "" {
 			storageMode = "s3"
