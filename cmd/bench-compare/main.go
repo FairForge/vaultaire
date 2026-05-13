@@ -86,14 +86,15 @@ var endpoints = []Endpoint{
 	{Name: "lyve-ap-northeast-1", Provider: "lyve", URL: "https://s3.ap-northeast-1.global.lyve.seagate.com", Region: "ap-northeast-1", AccessKeyEnv: "LYVE_ACCESS_KEY", SecretKeyEnv: "LYVE_SECRET_KEY", PathStyle: true},
 	{Name: "r2-default", Provider: "r2", URLEnv: "R2_ENDPOINT", Region: "auto", AccessKeyEnv: "R2_ACCESS_KEY", SecretKeyEnv: "R2_SECRET_KEY"},
 	{Name: "r2-eu", Provider: "r2", URLEnv: "R2_EU_ENDPOINT", Region: "auto", AccessKeyEnv: "R2_ACCESS_KEY", SecretKeyEnv: "R2_SECRET_KEY"},
-	// Quotaless: Minio gateway over Storj. Requires UNSIGNED-PAYLOAD (see newClient).
+	// Quotaless: Pydio Cells with Minio S3 gateway (Storj backend). Requires UNSIGNED-PAYLOAD.
 	// Fixed bucket `data` with key prefix `personal-files/` per quotaless_README.md.
-	// srv1-srv8 = specific servers. io. = dynamic LB (slower). us./nl./sg. = regional.
-	{Name: "quotaless-srv1", Provider: "quotaless", URL: "https://srv1.quotaless.cloud:8000", Region: "us-east-1", AccessKeyEnv: "QUOTALESS_ACCESS_KEY", SecretKeyEnv: "QUOTALESS_SECRET_KEY", PathStyle: true, FixedBucket: "data", KeyPrefix: "personal-files/"},
-	{Name: "quotaless-srv2", Provider: "quotaless", URL: "https://srv2.quotaless.cloud:8000", Region: "us-east-1", AccessKeyEnv: "QUOTALESS_ACCESS_KEY", SecretKeyEnv: "QUOTALESS_SECRET_KEY", PathStyle: true, FixedBucket: "data", KeyPrefix: "personal-files/"},
-	{Name: "quotaless-us", Provider: "quotaless", URL: "https://us.quotaless.cloud:8000", Region: "us-east-1", AccessKeyEnv: "QUOTALESS_ACCESS_KEY", SecretKeyEnv: "QUOTALESS_SECRET_KEY", PathStyle: true, FixedBucket: "data", KeyPrefix: "personal-files/"},
+	// As of 2026-05-11: srv1-8, us, nl, sg DNS records removed. Only io. survives.
+	// Account locked as of 2026-05-12 — contact Quotaless support to re-enable.
 	{Name: "quotaless-io", Provider: "quotaless", URL: "https://io.quotaless.cloud:8000", Region: "us-east-1", AccessKeyEnv: "QUOTALESS_ACCESS_KEY", SecretKeyEnv: "QUOTALESS_SECRET_KEY", PathStyle: true, FixedBucket: "data", KeyPrefix: "personal-files/"},
-	{Name: "geyser-la", Provider: "geyser", URL: "https://la1.geyserdata.com", Region: "us-west-1", AccessKeyEnv: "GEYSER_ACCESS_KEY", SecretKeyEnv: "GEYSER_SECRET_KEY", PathStyle: true, InsecureTLS: true, BucketEnv: "GEYSER_LA_BUCKET"},
+	// {Name: "quotaless-srv1", Provider: "quotaless", URL: "https://srv1.quotaless.cloud:8000", Region: "us-east-1", AccessKeyEnv: "QUOTALESS_ACCESS_KEY", SecretKeyEnv: "QUOTALESS_SECRET_KEY", PathStyle: true, FixedBucket: "data", KeyPrefix: "personal-files/"},
+	// {Name: "quotaless-srv2", Provider: "quotaless", URL: "https://srv2.quotaless.cloud:8000", Region: "us-east-1", AccessKeyEnv: "QUOTALESS_ACCESS_KEY", SecretKeyEnv: "QUOTALESS_SECRET_KEY", PathStyle: true, FixedBucket: "data", KeyPrefix: "personal-files/"},
+	// {Name: "quotaless-us", Provider: "quotaless", URL: "https://us.quotaless.cloud:8000", Region: "us-east-1", AccessKeyEnv: "QUOTALESS_ACCESS_KEY", SecretKeyEnv: "QUOTALESS_SECRET_KEY", PathStyle: true, FixedBucket: "data", KeyPrefix: "personal-files/"},
+	{Name: "geyser-la", Provider: "geyser", URL: "https://la1.geyserdata.com", Region: "us-west-1", AccessKeyEnv: "GEYSER_ACCESS_KEY", SecretKeyEnv: "GEYSER_SECRET_KEY", PathStyle: true, BucketEnv: "GEYSER_LA_BUCKET"},
 	// geyser-london: bucket deleted 2026-04-20, re-enable when recreated
 	// {Name: "geyser-london", Provider: "geyser", URL: "https://lon1.geyserdata.com", Region: "eu-west-1", AccessKeyEnv: "GEYSER_ACCESS_KEY", SecretKeyEnv: "GEYSER_SECRET_KEY", PathStyle: true, InsecureTLS: true, BucketEnv: "GEYSER_LONDON_BUCKET"},
 	// iDrive e2 — per-region keypairs (auth DB isolated per region)
@@ -110,6 +111,8 @@ var endpoints = []Endpoint{
 	{Name: "idrive-eu-west-4", Provider: "idrive", URL: "https://s3.eu-west-4.idrivee2.com", Region: "eu-west-4", AccessKeyEnv: "IDRIVE_EU_WEST_4_ACCESS_KEY", SecretKeyEnv: "IDRIVE_EU_WEST_4_SECRET_KEY", PathStyle: true, FixedBucket: "vaultaire-bench"},
 	{Name: "idrive-eu-central-2", Provider: "idrive", URL: "https://s3.eu-central-2.idrivee2.com", Region: "eu-central-2", AccessKeyEnv: "IDRIVE_EU_CENTRAL_2_ACCESS_KEY", SecretKeyEnv: "IDRIVE_EU_CENTRAL_2_SECRET_KEY", PathStyle: true, FixedBucket: "vaultaire-bench"},
 	{Name: "idrive-ap-southeast-1", Provider: "idrive", URL: "https://s3.ap-southeast-1.idrivee2.com", Region: "ap-southeast-1", AccessKeyEnv: "IDRIVE_AP_SOUTHEAST_1_ACCESS_KEY", SecretKeyEnv: "IDRIVE_AP_SOUTHEAST_1_SECRET_KEY", PathStyle: true, FixedBucket: "vaultaire-bench"},
+	// Vaultaire end-to-end (tests full S3 stack overhead vs direct-to-backend)
+	{Name: "vaultaire-local", Provider: "vaultaire", URL: "http://localhost:8001", Region: "us-east-1", AccessKeyEnv: "VAULTAIRE_BENCH_ACCESS_KEY", SecretKeyEnv: "VAULTAIRE_BENCH_SECRET_KEY", PathStyle: true},
 }
 
 // — Result types -------------------------------------------------------------
@@ -196,7 +199,7 @@ func main() {
 
 	fmt.Printf("Host:      %s (%s/%s)\n", hostName, runtime.GOOS, runtime.GOARCH)
 	fmt.Printf("Output:    %s\n", *outFile)
-	fmt.Printf("Transport: tuned (MaxIdleConnsPerHost=200, compression=off)\n")
+	fmt.Printf("Transport: tuned (MaxIdleConnsPerHost=200, 4MB buffers, compression=off)\n")
 	fmt.Printf("Endpoints: %d (smoke=%v)\n", len(eps), *smoke)
 
 	run := RunResult{
@@ -338,6 +341,9 @@ var allWorkloads = []workload{
 	{"large_put_64mb", wlLargePut64MB},
 	{"large_get_64mb", wlLargeGet64MB},
 	{"multipart_put_256mb", wlMultipart256MB},
+	{"multipart_put_256mb_16p", wlMultipart256MB16P},
+	{"large_put_64mb_h1", wlLargePut64MBH1},
+	{"multipart_put_256mb_h1_16p", wlMultipart256MBH1_16P},
 	{"mpu_abort", wlMpuAbort},
 	{"concurrent_ingest_20s", wlConcurrentIngest},
 	{"concurrent_download_20s", wlConcurrentDownload},
@@ -507,8 +513,8 @@ func tunedHTTPClient(insecureTLS bool) *http.Client {
 		MaxIdleConnsPerHost: 200,
 		IdleConnTimeout:     90 * time.Second,
 		TLSHandshakeTimeout: 10 * time.Second,
-		ReadBufferSize:      1 << 20,
-		WriteBufferSize:     1 << 20,
+		ReadBufferSize:      4 << 20,
+		WriteBufferSize:     4 << 20,
 		DisableCompression:  true,
 		ForceAttemptHTTP2:   true,
 		DialContext:         cachedDialContext(dialer),
@@ -521,6 +527,66 @@ func tunedHTTPClient(insecureTLS bool) *http.Client {
 		transport.TLSClientConfig.InsecureSkipVerify = true //nolint:gosec // benchmark tool, Geyser certs untrusted
 	}
 	return &http.Client{Transport: transport}
+}
+
+// h1HTTPClient returns an HTTP/1.1-only client (no HTTP/2 multiplexing).
+// Some backends are faster with dedicated connections per request.
+func h1HTTPClient(insecureTLS bool) *http.Client {
+	dialer := &net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+	transport := &http.Transport{
+		MaxIdleConns:        200,
+		MaxIdleConnsPerHost: 200,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
+		ReadBufferSize:      4 << 20,
+		WriteBufferSize:     4 << 20,
+		DisableCompression:  true,
+		ForceAttemptHTTP2:   false,
+		DialContext:         cachedDialContext(dialer),
+		TLSClientConfig: &tls.Config{
+			MinVersion:         tls.VersionTLS12,
+			ClientSessionCache: tls.NewLRUClientSessionCache(128),
+		},
+		// Disable ALPN h2 negotiation — force HTTP/1.1 at TLS level
+		TLSNextProto: make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+	}
+	if insecureTLS {
+		transport.TLSClientConfig.InsecureSkipVerify = true //nolint:gosec
+	}
+	return &http.Client{Transport: transport}
+}
+
+// newH1Client creates an HTTP/1.1-only S3 client for A/B testing against HTTP/2.
+func newH1Client(ep Endpoint) (*s3.Client, error) {
+	ak := os.Getenv(ep.AccessKeyEnv)
+	sk := os.Getenv(ep.SecretKeyEnv)
+	if ak == "" || sk == "" {
+		return nil, fmt.Errorf("missing %s or %s", ep.AccessKeyEnv, ep.SecretKeyEnv)
+	}
+	hc := h1HTTPClient(ep.InsecureTLS)
+	cfg, err := awsconfig.LoadDefaultConfig(context.Background(),
+		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(ak, sk, "")),
+		awsconfig.WithRegion(ep.Region),
+		awsconfig.WithLogger(smithylog.Nop{}),
+		awsconfig.WithHTTPClient(hc),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return s3.NewFromConfig(cfg, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(ep.URL)
+		o.UsePathStyle = ep.PathStyle
+		o.Logger = smithylog.Nop{}
+		o.ClientLogMode = 0
+		o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
+		o.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
+		if ep.Provider == "quotaless" {
+			o.APIOptions = append(o.APIOptions, v4.SwapComputePayloadSHA256ForUnsignedPayloadMiddleware)
+		}
+	}), nil
 }
 
 func newClient(ep Endpoint) (*s3.Client, *http.Client, error) {
@@ -1222,6 +1288,221 @@ func wlMultipart256MB(c *wlContext) WorkloadResult {
 	return WorkloadResult{
 		Name:        "multipart_put_256mb",
 		Description: fmt.Sprintf("256MB MPU, %d×%dMB parts, parallel=%d", parts, partSize/(1024*1024), parallel),
+		Ops:         parts,
+		Bytes:       total,
+		DurationMS:  msInt(elapsed),
+		MBps:        mbps(total, elapsed),
+	}
+}
+
+// multipart_put_256mb_16p — same as multipart_put_256mb but with 16 parallel parts.
+// Tests whether higher parallelism closes the gap to concurrent_ingest throughput.
+func wlMultipart256MB16P(c *wlContext) WorkloadResult {
+	const (
+		total    = 256 * 1024 * 1024
+		partSize = 16 * 1024 * 1024
+		parallel = 16
+	)
+	parts := total / partSize
+	payload := randBytes(partSize)
+	key := c.key(fmt.Sprintf("bench/mpu16p/%d", time.Now().UnixNano()))
+
+	mctx, cancel := context.WithTimeout(c.ctx, 10*time.Minute)
+	defer cancel()
+
+	overall := time.Now()
+	cmu, err := c.client.CreateMultipartUpload(mctx, &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return WorkloadResult{Name: "multipart_put_256mb_16p", Error: "create: " + err.Error()}
+	}
+	uploadID := cmu.UploadId
+
+	completed := make([]s3types.CompletedPart, parts)
+	var failed atomic.Int32
+	sem := make(chan struct{}, parallel)
+	var wg sync.WaitGroup
+	for i := 0; i < parts; i++ {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			partNum := int32(idx + 1)
+			out, err := c.client.UploadPart(mctx, &s3.UploadPartInput{
+				Bucket:        aws.String(c.bucket),
+				Key:           aws.String(key),
+				UploadId:      uploadID,
+				PartNumber:    aws.Int32(partNum),
+				Body:          bytes.NewReader(payload),
+				ContentLength: aws.Int64(int64(partSize)),
+			})
+			if err != nil {
+				failed.Add(1)
+				return
+			}
+			completed[idx] = s3types.CompletedPart{
+				ETag:       out.ETag,
+				PartNumber: aws.Int32(partNum),
+			}
+		}(i)
+	}
+	wg.Wait()
+	if failed.Load() > 0 {
+		_, _ = c.client.AbortMultipartUpload(mctx, &s3.AbortMultipartUploadInput{
+			Bucket:   aws.String(c.bucket),
+			Key:      aws.String(key),
+			UploadId: uploadID,
+		})
+		return WorkloadResult{
+			Name:       "multipart_put_256mb_16p",
+			Error:      fmt.Sprintf("%d parts failed", failed.Load()),
+			DurationMS: msInt(time.Since(overall)),
+		}
+	}
+
+	_, err = c.client.CompleteMultipartUpload(mctx, &s3.CompleteMultipartUploadInput{
+		Bucket:          aws.String(c.bucket),
+		Key:             aws.String(key),
+		UploadId:        uploadID,
+		MultipartUpload: &s3types.CompletedMultipartUpload{Parts: completed},
+	})
+	elapsed := time.Since(overall)
+	if err != nil {
+		return WorkloadResult{Name: "multipart_put_256mb_16p", Error: "complete: " + err.Error(), DurationMS: msInt(elapsed)}
+	}
+	c.track(key)
+	return WorkloadResult{
+		Name:        "multipart_put_256mb_16p",
+		Description: fmt.Sprintf("256MB MPU, %d×%dMB parts, parallel=%d", parts, partSize/(1024*1024), parallel),
+		Ops:         parts,
+		Bytes:       total,
+		DurationMS:  msInt(elapsed),
+		MBps:        mbps(total, elapsed),
+	}
+}
+
+// large_put_64mb_h1 — 64MB single PUT over HTTP/1.1 (no HTTP/2 multiplexing).
+func wlLargePut64MBH1(c *wlContext) WorkloadResult {
+	h1, err := newH1Client(c.ep)
+	if err != nil {
+		return WorkloadResult{Name: "large_put_64mb_h1", Error: err.Error()}
+	}
+	const sz = 64 * 1024 * 1024
+	payload := randBytes(sz)
+	key := c.key(fmt.Sprintf("bench/h1-large/%d", time.Now().UnixNano()))
+	pctx, cancel := context.WithTimeout(c.ctx, 5*time.Minute)
+	defer cancel()
+	start := time.Now()
+	_, err = h1.PutObject(pctx, &s3.PutObjectInput{
+		Bucket:        aws.String(c.bucket),
+		Key:           aws.String(key),
+		Body:          bytes.NewReader(payload),
+		ContentLength: aws.Int64(sz),
+	})
+	elapsed := time.Since(start)
+	if err != nil {
+		return WorkloadResult{Name: "large_put_64mb_h1", Error: err.Error(), DurationMS: msInt(elapsed)}
+	}
+	c.track(key)
+	return WorkloadResult{
+		Name:        "large_put_64mb_h1",
+		Description: "1× 64MB PUT (HTTP/1.1)",
+		Ops:         1,
+		Bytes:       sz,
+		DurationMS:  msInt(elapsed),
+		MBps:        mbps(sz, elapsed),
+	}
+}
+
+// multipart_put_256mb_h1_16p — 256MB MPU over HTTP/1.1, 16 parallel parts.
+// Combines HTTP/1.1 (no head-of-line blocking) with high parallelism.
+func wlMultipart256MBH1_16P(c *wlContext) WorkloadResult {
+	h1, err := newH1Client(c.ep)
+	if err != nil {
+		return WorkloadResult{Name: "multipart_put_256mb_h1_16p", Error: err.Error()}
+	}
+	const (
+		total    = 256 * 1024 * 1024
+		partSize = 16 * 1024 * 1024
+		parallel = 16
+	)
+	parts := total / partSize
+	payload := randBytes(partSize)
+	key := c.key(fmt.Sprintf("bench/h1-mpu16p/%d", time.Now().UnixNano()))
+
+	mctx, cancel := context.WithTimeout(c.ctx, 10*time.Minute)
+	defer cancel()
+
+	overall := time.Now()
+	cmu, err := h1.CreateMultipartUpload(mctx, &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return WorkloadResult{Name: "multipart_put_256mb_h1_16p", Error: "create: " + err.Error()}
+	}
+	uploadID := cmu.UploadId
+
+	completed := make([]s3types.CompletedPart, parts)
+	var failed atomic.Int32
+	sem := make(chan struct{}, parallel)
+	var wg sync.WaitGroup
+	for i := 0; i < parts; i++ {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			partNum := int32(idx + 1)
+			out, err := h1.UploadPart(mctx, &s3.UploadPartInput{
+				Bucket:        aws.String(c.bucket),
+				Key:           aws.String(key),
+				UploadId:      uploadID,
+				PartNumber:    aws.Int32(partNum),
+				Body:          bytes.NewReader(payload),
+				ContentLength: aws.Int64(int64(partSize)),
+			})
+			if err != nil {
+				failed.Add(1)
+				return
+			}
+			completed[idx] = s3types.CompletedPart{
+				ETag:       out.ETag,
+				PartNumber: aws.Int32(partNum),
+			}
+		}(i)
+	}
+	wg.Wait()
+	if failed.Load() > 0 {
+		_, _ = h1.AbortMultipartUpload(mctx, &s3.AbortMultipartUploadInput{
+			Bucket:   aws.String(c.bucket),
+			Key:      aws.String(key),
+			UploadId: uploadID,
+		})
+		return WorkloadResult{
+			Name:       "multipart_put_256mb_h1_16p",
+			Error:      fmt.Sprintf("%d parts failed", failed.Load()),
+			DurationMS: msInt(time.Since(overall)),
+		}
+	}
+
+	_, err = h1.CompleteMultipartUpload(mctx, &s3.CompleteMultipartUploadInput{
+		Bucket:          aws.String(c.bucket),
+		Key:             aws.String(key),
+		UploadId:        uploadID,
+		MultipartUpload: &s3types.CompletedMultipartUpload{Parts: completed},
+	})
+	elapsed := time.Since(overall)
+	if err != nil {
+		return WorkloadResult{Name: "multipart_put_256mb_h1_16p", Error: "complete: " + err.Error(), DurationMS: msInt(elapsed)}
+	}
+	c.track(key)
+	return WorkloadResult{
+		Name:        "multipart_put_256mb_h1_16p",
+		Description: fmt.Sprintf("256MB MPU (HTTP/1.1), %d×%dMB parts, parallel=%d", parts, partSize/(1024*1024), parallel),
 		Ops:         parts,
 		Bytes:       total,
 		DurationMS:  msInt(elapsed),

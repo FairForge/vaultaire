@@ -74,7 +74,17 @@ type PutOptions struct {
 	CacheControl    string
 	ContentEncoding string
 	ContentLanguage string
+	ContentLength   int64
 	UserMetadata    map[string]string
+}
+
+// ApplyPutOptions applies functional options and returns the result.
+func ApplyPutOptions(opts ...PutOption) PutOptions {
+	var o PutOptions
+	for _, fn := range opts {
+		fn(&o)
+	}
+	return o
 }
 
 // WithContentType sets the content type
@@ -88,5 +98,14 @@ func WithContentType(ct string) PutOption {
 func WithUserMetadata(meta map[string]string) PutOption {
 	return func(o *PutOptions) {
 		o.UserMetadata = meta
+	}
+}
+
+// WithContentLength passes the known body size to drivers that require
+// Content-Length (iDrive, Geyser). When set, drivers can stream directly
+// without buffering the entire body to determine size.
+func WithContentLength(n int64) PutOption {
+	return func(o *PutOptions) {
+		o.ContentLength = n
 	}
 }
