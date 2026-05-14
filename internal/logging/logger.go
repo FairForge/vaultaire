@@ -97,6 +97,7 @@ type LogEntry struct {
 	Timestamp time.Time              `json:"timestamp"`
 	Logger    string                 `json:"logger,omitempty"`
 	Fields    map[string]interface{} `json:"fields,omitempty"`
+	syncDone  chan struct{}          // barrier for Sync(); nil for normal entries
 }
 
 // Logger is a structured logger
@@ -130,18 +131,23 @@ func NewLogger(config *LoggerConfig) *Logger {
 
 func (l *Logger) asyncWriter() {
 	for entry := range l.asyncCh {
+		if entry.syncDone != nil {
+			close(entry.syncDone)
+			continue
+		}
 		l.writeEntry(entry)
 	}
 }
 
-// Sync flushes async logs
+// Sync flushes async logs by sending a barrier through the channel
+// and waiting for it to be processed by the writer goroutine.
 func (l *Logger) Sync() {
-	if l.asyncCh != nil {
-		// Wait for channel to drain
-		for len(l.asyncCh) > 0 {
-			time.Sleep(10 * time.Millisecond)
-		}
+	if l.asyncCh == nil {
+		return
 	}
+	done := make(chan struct{})
+	l.asyncCh <- &LogEntry{syncDone: done}
+	<-done
 }
 
 // With returns a logger with additional fields
