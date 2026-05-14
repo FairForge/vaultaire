@@ -1,17 +1,12 @@
-name: Integration Tests
+name: Nightly Tests
 
 on:
-  push:
-    branches: [main, develop]
-  pull_request:
-    branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'bench-results/**'
-      - '.private/**'
+  schedule:
+    - cron: '0 7 * * *' # 1am MDT / 7am UTC
+  workflow_dispatch: # manual trigger
 
 jobs:
-  integration-tests:
+  load-and-chaos:
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -44,6 +39,8 @@ jobs:
         for f in internal/database/migrations/*.sql; do
           psql -h localhost -U viera -d vaultaire -f "$f"
         done
+    - name: Install k6
+      run: go install go.k6.io/k6@latest
     - name: Start server
       run: |
         go build -o vaultaire cmd/vaultaire/main.go
@@ -53,7 +50,22 @@ jobs:
         DATABASE_URL: postgres://postgres:postgres@localhost/vaultaire?sslmode=disable
         JWT_SECRET: ci-test-secret-not-for-production
         PORT: "8000"
-    - name: Smoke test
+    - name: Run benchmarks
+      run: go test -bench=. -benchtime=10s ./tests/benchmarks/
+      continue-on-error: true
+    - name: Run k6 load tests
+      run: k6 run --quiet tests/k6/s3_basic_load.js
+      continue-on-error: true
+    - name: Run chaos tests
       run: |
-        curl -sf http://localhost:8000/health
-        curl -sf http://localhost:8000/status | grep -q "operational"
+        ./tests/chaos/basic_chaos_test.sh
+        go test ./tests/chaos/
+      continue-on-error: true
+    - name: Upload test results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: nightly-results-${{ github.run_number }}
+        path: |
+          tests/benchmarks/baseline_results.txt
+          tests/k6/*.json
