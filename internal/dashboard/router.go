@@ -13,6 +13,7 @@ import (
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/FairForge/vaultaire/internal/dashboard/handlers"
 	"github.com/FairForge/vaultaire/internal/dashboard/middleware"
+	"github.com/FairForge/vaultaire/internal/email"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 	"golang.org/x/oauth2"
@@ -33,6 +34,8 @@ type Deps struct {
 	Google      *oauth2.Config         // Nil when GOOGLE_CLIENT_ID is not set.
 	GitHub      *oauth2.Config         // Nil when GITHUB_CLIENT_ID is not set.
 	StorageMode string                 // e.g. "local", "s3", "quotaless", "geyser", "idrive"
+	Email       email.Sender           // Email sender (LogSender if unconfigured).
+	BaseURL     string                 // Base URL for email links (e.g. "https://stored.ge").
 }
 
 // RegisterRoutes mounts the dashboard, auth, admin, and static-asset
@@ -160,7 +163,7 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		dr.Post("/settings/mfa/disable", handlers.HandleMFADisable(settingsTmpl, deps.Auth, deps.Logger))
 
 		// Email verification resend.
-		dr.Post("/settings/resend-verify", handlers.HandleResendVerification(deps.Auth, deps.Logger))
+		dr.Post("/settings/resend-verify", handlers.HandleResendVerification(deps.Auth, deps.Logger, deps.Email, deps.BaseURL))
 
 		// Onboarding dismiss.
 		dr.Post("/onboarding/dismiss", handlers.HandleDismissOnboarding(deps.Logger))
@@ -505,30 +508,28 @@ func handleLogout(store dashauth.SessionStore) http.HandlerFunc {
 
 // handleForgotPassword handles POST /forgot-password. It always returns the
 // same success message regardless of whether the email exists, to prevent
-// user enumeration. When the email matches a real user, a reset link is
-// generated and (eventually) emailed; for now the link is logged.
+// user enumeration.
 func handleForgotPassword(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 	tmpl := template.Must(baseTmpl.Clone())
 	template.Must(tmpl.Parse(pageContent("forgot-password")))
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		email := r.FormValue("email")
+		addr := r.FormValue("email")
 
-		// Always show the same success message — never reveal whether the
-		// email is registered.
 		const successMsg = "If that email is registered, you'll receive a reset link shortly."
 
-		token, err := deps.Auth.RequestPasswordReset(r.Context(), email)
+		token, err := deps.Auth.RequestPasswordReset(r.Context(), addr)
 		if err == nil {
-			deps.Logger.Info("password reset token generated",
-				zap.String("email", email),
-				zap.String("reset_url", "/reset-password?token="+token))
+			htmlBody, textBody, renderErr := email.RenderPasswordReset(deps.BaseURL, token, addr)
+			if renderErr != nil {
+				deps.Logger.Error("render password reset email", zap.Error(renderErr))
+			} else if sendErr := deps.Email.Send(r.Context(), addr, "Reset your password — stored.ge", htmlBody, textBody); sendErr != nil {
+				deps.Logger.Error("send password reset email", zap.String("to", addr), zap.Error(sendErr))
+			}
 		} else if !errors.Is(err, auth.ErrResetRateLimited) {
-			// "user not found" — log at debug, do NOT reveal to client.
 			deps.Logger.Debug("password reset requested for unknown email",
-				zap.String("email", email), zap.Error(err))
+				zap.String("email", addr), zap.Error(err))
 		}
-		// Rate-limited requests fall through silently — same success message.
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_ = tmpl.ExecuteTemplate(w, "base", map[string]any{

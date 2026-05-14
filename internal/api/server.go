@@ -21,6 +21,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/dashboard"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/FairForge/vaultaire/internal/docs"
+	"github.com/FairForge/vaultaire/internal/email"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/rbac"
 	"github.com/go-chi/chi/v5"
@@ -68,6 +69,8 @@ type Server struct {
 	mfaService       *auth.MFAService
 	mfaPendingStore  *dashboard.MFAPendingStore
 	cdnRateLimiter   *RateLimiter
+	emailSender      email.Sender
+	baseURL          string
 	startTime        time.Time
 }
 
@@ -178,11 +181,13 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		logger.Info("stripe billing service initialized")
 	}
 
-	// OAuth providers. Only active when client ID+secret are set.
+	// Base URL for OAuth callbacks and email links.
 	baseURL := os.Getenv("VAULTAIRE_BASE_URL")
 	if baseURL == "" {
 		baseURL = fmt.Sprintf("http://localhost:%d", cfg.Server.Port)
 	}
+	s.baseURL = baseURL
+	s.emailSender = email.NewSender(logger)
 	if googleID := os.Getenv("GOOGLE_CLIENT_ID"); googleID != "" {
 		s.googleOAuth = &oauth2.Config{
 			ClientID:     googleID,
@@ -434,6 +439,8 @@ func (s *Server) setupRoutes() {
 		Google:      s.googleOAuth,
 		GitHub:      s.githubOAuth,
 		StorageMode: storageMode,
+		Email:       s.emailSender,
+		BaseURL:     s.baseURL,
 	})
 
 	s.logger.Info("Registering management API routes")
@@ -637,15 +644,18 @@ func (s *Server) handlePasswordReset(w http.ResponseWriter, r *http.Request) {
 	}
 
 	token, err := s.auth.RequestPasswordReset(r.Context(), req.Email)
-	if err != nil {
-		http.Error(w, "Email not found", http.StatusNotFound)
-		return
+	if err == nil {
+		htmlBody, textBody, renderErr := email.RenderPasswordReset(s.baseURL, token, req.Email)
+		if renderErr != nil {
+			s.logger.Error("render password reset email", zap.Error(renderErr))
+		} else if sendErr := s.emailSender.Send(r.Context(), req.Email, "Reset your password — stored.ge", htmlBody, textBody); sendErr != nil {
+			s.logger.Error("send password reset email", zap.String("to", req.Email), zap.Error(sendErr))
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]string{
-		"message": "Reset token generated",
-		"token":   token,
+		"message": "If that email is registered, a reset link has been sent.",
 	}); err != nil {
 		s.logger.Error("failed to encode password reset response", zap.Error(err))
 	}
