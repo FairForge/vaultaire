@@ -1,6 +1,13 @@
 name: CI
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'bench-results/**'
+      - '.private/**'
 
 jobs:
   build-and-test:
