@@ -241,14 +241,15 @@ func (cm *ConfigMapManager) DeleteConfigMap(name string) error {
 	return nil
 }
 
-// ListConfigMaps lists all ConfigMaps
-func (cm *ConfigMapManager) ListConfigMaps() []*ConfigMapData {
+// ListConfigMaps lists all ConfigMaps. Returns shallow copies so callers
+// can safely read fields without holding the manager's lock.
+func (cm *ConfigMapManager) ListConfigMaps() []ConfigMapData {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
 
-	result := make([]*ConfigMapData, 0, len(cm.configs))
+	result := make([]ConfigMapData, 0, len(cm.configs))
 	for _, config := range cm.configs {
-		result = append(result, config)
+		result = append(result, *config)
 	}
 
 	sort.Slice(result, func(i, j int) bool {
@@ -490,14 +491,15 @@ func (sm *SecretManager) DeleteSecret(name string) error {
 	return nil
 }
 
-// ListSecrets lists all Secrets
-func (sm *SecretManager) ListSecrets() []*SecretData {
+// ListSecrets lists all Secrets. Returns shallow copies so callers
+// can safely read fields without holding the manager's lock.
+func (sm *SecretManager) ListSecrets() []SecretData {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
-	result := make([]*SecretData, 0, len(sm.secrets))
+	result := make([]SecretData, 0, len(sm.secrets))
 	for _, secret := range sm.secrets {
-		result = append(result, secret)
+		result = append(result, *secret)
 	}
 
 	sort.Slice(result, func(i, j int) bool {

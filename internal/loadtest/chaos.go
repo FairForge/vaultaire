@@ -99,7 +99,6 @@ type RecoveryMetrics struct {
 type ChaosTester struct {
 	config     *ChaosConfig
 	workerFunc WorkerFunc
-	rng        *rand.Rand
 
 	// Metrics
 	totalRequests atomic.Int64
@@ -136,7 +135,6 @@ func NewChaosTester(config *ChaosConfig, workerFunc WorkerFunc) *ChaosTester {
 	return &ChaosTester{
 		config:     config,
 		workerFunc: workerFunc,
-		rng:        rand.New(rand.NewSource(time.Now().UnixNano())), // #nosec G404 — chaos testing randomization, not security
 		latencies:  make([]time.Duration, 0, 10000),
 		events:     make([]ChaosEvent, 0),
 		phase:      "pre",
@@ -242,7 +240,7 @@ func (c *ChaosTester) handleChaosTick() {
 
 // startChaosEvent begins a new chaos injection.
 func (c *ChaosTester) startChaosEvent() {
-	chaosType := c.config.ChaosTypes[c.rng.Intn(len(c.config.ChaosTypes))]
+	chaosType := c.config.ChaosTypes[rand.Intn(len(c.config.ChaosTypes))] // #nosec G404
 
 	c.chaosActive = true
 	c.currentChaos = chaosType
@@ -275,7 +273,7 @@ func (c *ChaosTester) executeWithChaos(ctx context.Context, id int) Result {
 	c.mu.RUnlock()
 
 	// Decide if this request should be affected by chaos
-	shouldInjectChaos := chaosActive && c.rng.Float64() < c.config.ChaosProbability
+	shouldInjectChaos := chaosActive && rand.Float64() < c.config.ChaosProbability // #nosec G404
 
 	if shouldInjectChaos {
 		c.chaosAffected.Add(1)
@@ -292,7 +290,7 @@ func (c *ChaosTester) injectChaos(ctx context.Context, id int, chaosType ChaosTy
 	switch chaosType {
 	case ChaosLatency:
 		// Add artificial latency
-		latency := c.config.LatencyMin + time.Duration(c.rng.Int63n(int64(c.config.LatencyMax-c.config.LatencyMin)))
+		latency := c.config.LatencyMin + time.Duration(rand.Int63n(int64(c.config.LatencyMax-c.config.LatencyMin))) // #nosec G404
 		select {
 		case <-time.After(latency):
 		case <-ctx.Done():
@@ -311,7 +309,7 @@ func (c *ChaosTester) injectChaos(ctx context.Context, id int, chaosType ChaosTy
 		// Inject an error
 		var err error
 		if len(c.config.ErrorTypes) > 0 {
-			err = c.config.ErrorTypes[c.rng.Intn(len(c.config.ErrorTypes))]
+			err = c.config.ErrorTypes[rand.Intn(len(c.config.ErrorTypes))] // #nosec G404
 		} else {
 			err = fmt.Errorf("chaos: injected error")
 		}
@@ -344,7 +342,7 @@ func (c *ChaosTester) injectChaos(ctx context.Context, id int, chaosType ChaosTy
 	case ChaosResourceExhaustion:
 		// Simulate resource exhaustion - slow response with possible error
 		time.Sleep(c.config.LatencyMax)
-		if c.rng.Float64() < 0.5 {
+		if rand.Float64() < 0.5 { // #nosec G404
 			return Result{
 				StartTime: start,
 				Duration:  time.Since(start),
