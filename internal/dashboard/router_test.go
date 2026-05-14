@@ -11,6 +11,7 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/auth"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
+	"github.com/FairForge/vaultaire/internal/email"
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -19,13 +20,16 @@ import (
 
 func setupTestRouter(t *testing.T) (chi.Router, *auth.AuthService, dashauth.SessionStore) {
 	t.Helper()
+	logger := zap.NewNop()
 	authSvc := auth.NewAuthService(nil, nil)
 	sessions := dashauth.NewMemoryStore()
 	r := chi.NewRouter()
 	RegisterRoutes(r, Deps{
 		Auth:     authSvc,
 		Sessions: sessions,
-		Logger:   zap.NewNop(),
+		Logger:   logger,
+		Email:    email.NewSender(logger),
+		BaseURL:  "http://localhost:8000",
 	})
 	return r, authSvc, sessions
 }

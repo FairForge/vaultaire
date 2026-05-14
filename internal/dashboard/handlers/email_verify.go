@@ -6,13 +6,13 @@ import (
 	"github.com/FairForge/vaultaire/internal/auth"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/FairForge/vaultaire/internal/dashboard/middleware"
+	"github.com/FairForge/vaultaire/internal/email"
 	"go.uber.org/zap"
 )
 
 // HandleResendVerification handles POST /dashboard/settings/resend-verify.
-// Generates a new verification token (the actual email sending is deferred
-// to when an email service is configured — for now the token is logged).
-func HandleResendVerification(authSvc *auth.AuthService, logger *zap.Logger) http.HandlerFunc {
+// Generates a new verification token and sends the verification email.
+func HandleResendVerification(authSvc *auth.AuthService, logger *zap.Logger, sender email.Sender, baseURL string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
 		if sd == nil {
@@ -34,11 +34,17 @@ func HandleResendVerification(authSvc *auth.AuthService, logger *zap.Logger) htt
 			return
 		}
 
-		// TODO: Send email with verification link when email service is configured.
-		// For now, log the verification URL.
-		logger.Info("email verification token generated",
-			zap.String("user", sd.Email),
-			zap.String("verify_url", "/verify?token="+token))
+		htmlBody, textBody, err := email.RenderVerification(baseURL, token, sd.Email)
+		if err != nil {
+			logger.Error("render verification email", zap.Error(err))
+			middleware.SetFlash(w, "error", "Could not send verification email.")
+			http.Redirect(w, r, "/dashboard/settings", http.StatusSeeOther)
+			return
+		}
+
+		if err := sender.Send(r.Context(), sd.Email, "Verify your email — stored.ge", htmlBody, textBody); err != nil {
+			logger.Error("send verification email", zap.String("to", sd.Email), zap.Error(err))
+		}
 
 		middleware.SetFlash(w, "success", "Verification email sent. Check your inbox.")
 		http.Redirect(w, r, "/dashboard/settings", http.StatusSeeOther)
