@@ -57,6 +57,16 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.cdnAnalytics != nil {
+		if _, _, exceeded := s.cdnAnalytics.CheckBudget(ctx, tenantID, bucket); exceeded {
+			w.Header().Set("Retry-After", "3600")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":"bandwidth budget exceeded for this bucket"}`))
+			return
+		}
+	}
+
 	var sizeBytes int64
 	var etag, contentType string
 	var updatedAt time.Time
@@ -125,6 +135,10 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 		if s.bandwidthTracker != nil {
 			s.bandwidthTracker.Record(ctx, tenantID, 0, rng.length)
 		}
+		if s.cdnAnalytics != nil {
+			s.cdnAnalytics.Record(ctx, tenantID, bucket, key, rng.length,
+				r.Header.Get("CF-IPCountry"), r.Referer())
+		}
 		return
 	}
 
@@ -138,6 +152,10 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 
 	if s.bandwidthTracker != nil {
 		s.bandwidthTracker.Record(ctx, tenantID, 0, written)
+	}
+	if s.cdnAnalytics != nil {
+		s.cdnAnalytics.Record(ctx, tenantID, bucket, key, written,
+			r.Header.Get("CF-IPCountry"), r.Referer())
 	}
 
 	s.logger.Debug("cdn served",

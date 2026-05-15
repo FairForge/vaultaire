@@ -54,6 +54,7 @@ Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`,
 | `/dashboard/buckets/{name}` | GET | session | Object browser with prefix navigation |
 | `/dashboard/buckets/{name}/settings` | GET | session | Bucket settings: visibility, CDN URL, cache, CORS |
 | `/dashboard/buckets/{name}/settings` | POST | session | Update bucket visibility, cache TTL, CORS origins |
+| `/dashboard/buckets/{name}/analytics` | GET | session | CDN analytics: downloads, bandwidth, top objects, geo |
 | `/dashboard/apikeys` | GET | session | List API keys with status |
 | `/dashboard/apikeys` | POST | session | Generate new API key (shows secret once) |
 | `/dashboard/apikeys/{id}/revoke` | POST | session | Revoke an API key |

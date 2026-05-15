@@ -123,6 +123,13 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		dr.Get("/buckets/{name}/settings", handlers.HandleBucketSettings(bucketSettingsTmpl, deps.DB, deps.Logger))
 		dr.Post("/buckets/{name}/settings", handlers.HandleUpdateBucketSettings(bucketSettingsTmpl, deps.DB, deps.Logger))
 
+		// Bucket CDN analytics.
+		analyticsTmpl := template.Must(baseTmpl.Clone())
+		template.Must(analyticsTmpl.ParseFS(Templates,
+			"templates/customer/bucket_analytics.html",
+		))
+		dr.Get("/buckets/{name}/analytics", handlers.HandleBucketAnalytics(analyticsTmpl, deps.DB, deps.Logger))
+
 		// API key management.
 		apikeysTmpl := template.Must(baseTmpl.Clone())
 		template.Must(apikeysTmpl.ParseFS(Templates,

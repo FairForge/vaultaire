@@ -26,6 +26,7 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 | 032 | STS temporary credentials: `sts_tokens` table (access_key PK, secret_key, tenant_id, parent_key_id, permissions JSONB, bucket_scope TEXT[], ip_restrict TEXT[], expires_at, created_at) |
 | 033 | Event log + webhooks: `events` table, `webhook_endpoints` table (with secret, event_filter TEXT[]), `webhook_deliveries` table (status, response_code, latency_ms, retry support) |
 | 034 | Free tier defaults: `tenant_quotas` column defaults changed to tier='free', storage_limit_bytes=5368709120 (5 GB). Existing rows unchanged. |
+| 035 | CDN analytics: `cdn_access_log` (per-request log), `cdn_stats_daily` (tenant+bucket+date rollup) |
 
 ## Key Tables
 
@@ -48,6 +49,8 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 - **events** — `id (PK)`, `type`, `tenant_id`, `data` (JSONB), `created_at` — persistent event log
 - **webhook_endpoints** — `id (PK)`, `tenant_id`, `url`, `event_filter` (TEXT[]), `secret`, `enabled`, `created_at`, `updated_at` — webhook subscriptions
 - **webhook_deliveries** — `id (PK)`, `webhook_id → webhook_endpoints`, `event_id → events`, `status`, `response_code`, `response_body`, `latency_ms`, `retry_count`, `next_retry_at`, `created_at` — delivery tracking
+- **cdn_access_log** — `id (BIGSERIAL PK)`, `tenant_id`, `bucket`, `object_key`, `bytes_sent`, `country`, `referer`, `accessed_at` — raw CDN access events
+- **cdn_stats_daily** — `(tenant_id, bucket, date) PK`, `requests`, `bytes_sent`, `unique_objects` — daily CDN rollup
 
 ## Connection
 

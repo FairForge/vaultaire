@@ -100,6 +100,12 @@ The onboarding card in `dashboard.html` shows a 3-item checklist (bucket, object
 
 **Dashboard upgrade CTA** (`populateStorageUsage` in `overview.go`): sets `ShowUpgradeCTA = true` when tier is "free" and storage usage is >= 80%. The CTA card in `dashboard.html` links to `/dashboard/billing`.
 
+## Bucket Analytics (`bucket_analytics.go`)
+
+`HandleBucketAnalytics(tmpl, db, logger)` renders the CDN analytics page at `/dashboard/buckets/{name}/analytics`. Queries `cdn_stats_daily` for 24h/7d/30d download counts and bandwidth, `cdn_access_log` for top objects and geographic breakdown, and `buckets.bandwidth_budget_bytes` for budget gauge. Degrades to zero-state when DB is nil or tables are empty. Template: `templates/customer/bucket_analytics.html`.
+
+Analytics link only appears in `bucket_objects.html` for public-read buckets (gated on `{{if .CDNBaseURL}}`).
+
 ## Legacy Handlers
 
 Files like `dashboard.go` etc. are stubs from before Phase 0 with inline terminal-style templates. They are NOT wired into the router. Remaining phases will rewrite them.

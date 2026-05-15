@@ -1,0 +1,115 @@
+{{define "title"}}{{.BucketName}} Analytics — stored.ge{{end}}
+{{define "content"}}
+<div class="page-header">
+    <div>
+        <h1>{{.BucketName}}</h1>
+        <p class="text-muted">CDN Analytics</p>
+    </div>
+    <a href="/dashboard/buckets/{{.BucketName}}/settings" class="btn">Settings</a>
+</div>
+
+<nav class="breadcrumb">
+    <a href="/dashboard/">Dashboard</a> /
+    <a href="/dashboard/buckets">Buckets</a> /
+    <a href="/dashboard/buckets/{{.BucketName}}">{{.BucketName}}</a> /
+    <strong>Analytics</strong>
+</nav>
+
+{{if not .HasData}}
+<div class="card" style="text-align:center;padding:3rem 1.5rem;">
+    <div style="font-size:2rem;margin-bottom:0.75rem;">&#128202;</div>
+    <h2 style="margin-bottom:0.5rem;">No CDN traffic yet</h2>
+    <p class="text-muted">Analytics will appear once objects in this bucket are accessed via the CDN.</p>
+    <a href="/dashboard/buckets/{{.BucketName}}/settings" class="btn btn-primary" style="margin-top:1rem;">Configure CDN</a>
+</div>
+{{else}}
+
+<div class="stats-grid stats-grid-3">
+    <div class="stat-card">
+        <div class="stat-label">Downloads (24h)</div>
+        <div class="stat-value">{{.Downloads24h}}</div>
+        <div class="stat-sub">{{.Bandwidth24h}} transferred</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Downloads (7d)</div>
+        <div class="stat-value">{{.Downloads7d}}</div>
+        <div class="stat-sub">{{.Bandwidth7d}} transferred</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Downloads (30d)</div>
+        <div class="stat-value">{{.Downloads30d}}</div>
+        <div class="stat-sub">{{.Bandwidth30d}} transferred</div>
+    </div>
+</div>
+
+{{if .HasBudget}}
+<div class="card">
+    <div class="card-title">Bandwidth Budget</div>
+    <div class="gauge-row">
+        <div class="gauge-bar">
+            <div class="gauge-fill{{if ge .BudgetPct 90}} gauge-danger{{else if ge .BudgetPct 75}} gauge-warn{{end}}" style="width:{{.BudgetPct}}%"></div>
+        </div>
+        <span class="gauge-text">{{.BudgetUsed}} / {{.BudgetLimit}} ({{.BudgetPct}}%)</span>
+    </div>
+    {{if ge .BudgetPct 90}}
+    <p class="text-muted" style="margin-top:0.5rem;color:var(--danger);">
+        Approaching budget limit. CDN serving will pause when the budget is exceeded.
+    </p>
+    {{end}}
+</div>
+{{end}}
+
+{{if .TopObjects}}
+<div class="card">
+    <div class="card-title">Top Objects (30 days)</div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Object Key</th>
+                    <th style="text-align:right">Downloads</th>
+                    <th style="text-align:right">Bandwidth</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .TopObjects}}
+                <tr>
+                    <td><code style="font-size:0.85rem;word-break:break-all;">{{.Key}}</code></td>
+                    <td style="text-align:right">{{.Downloads}}</td>
+                    <td style="text-align:right">{{.Bandwidth}}</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+</div>
+{{end}}
+
+{{if .Countries}}
+<div class="card">
+    <div class="card-title">Geographic Breakdown (30 days)</div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Country</th>
+                    <th style="text-align:right">Requests</th>
+                    <th style="text-align:right">Bandwidth</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .Countries}}
+                <tr>
+                    <td>{{.Code}}</td>
+                    <td style="text-align:right">{{.Requests}}</td>
+                    <td style="text-align:right">{{.Bandwidth}}</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+</div>
+{{end}}
+
+{{end}}
+{{end}}

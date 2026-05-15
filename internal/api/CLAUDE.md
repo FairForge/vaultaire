@@ -18,6 +18,7 @@ S3-compatible API layer. Translates S3 protocol to engine operations, handles au
 - **s3_presign.go** — Pre-signed URL verification (SigV4 query string auth) and URL generation
 - **presigned.go** — Management API endpoint for generating pre-signed URLs (`/api/v1/presigned`)
 - **sts_routes.go** — STS temporary credential endpoint (`POST /api/v1/sts/token`)
+- **cdn_analytics.go** — CDNAnalyticsTracker: buffered CDN access event writer (Record/Flush/CheckBudget) + hourly rollup
 - **management.go** — JSON response helpers: `writeJSON`, `writeListResponse`, `getRequestID` (Stripe-style envelope)
 - **management_errors.go** — 7 typed errors with Stripe-style error envelope (`writeManagementError`)
 - **management_routes.go** — RESTful JSON management API under `/api/v1/manage/` (buckets CRUD, objects list, keys CRUD, usage)
@@ -148,6 +149,18 @@ JSON REST layer at `/api/v1/manage/` with JWT auth and per-tenant rate limiting.
 **Rate limiting**: `ManagementRateLimiter` — per-tenant token bucket (100 req/min), separate from the CDN per-IP limiter. Evicts if >10K tenants. Sets `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` headers; returns `Retry-After` on 429.
 
 **Cursor pagination**: queries `LIMIT N+1`; if N+1 results → `has_more=true`, returns first N, `next_cursor` = last item's name/key.
+
+## CDN Access Analytics (Phase 5.11.12)
+
+`CDNAnalyticsTracker` in `cdn_analytics.go` buffers CDN access events in memory and flushes them to `cdn_access_log` every 5 seconds (or at 100 events). Follows the same pattern as `BandwidthTracker`. Initialized in `NewServer()`, nil-safe throughout.
+
+- **Record()** — called from `handleCDNRequest` after successful GET (both full and range). Captures tenant, bucket, key, bytes, country (CF-IPCountry header), referer. Skips HEAD/OPTIONS.
+- **CheckBudget()** — called before object lookup in `handleCDNRequest`. Queries `buckets.bandwidth_budget_bytes` and `cdn_stats_daily` for current month total (plus in-memory buffer). Returns 429 with `Retry-After: 3600` if exceeded. Budget of 0 = unlimited.
+- **StartRollup()** — hourly goroutine aggregates `cdn_access_log` into `cdn_stats_daily` (requests, bytes_sent, unique_objects per tenant/bucket/date).
+
+Dashboard analytics page at `/dashboard/buckets/{name}/analytics` (handler in `internal/dashboard/handlers/bucket_analytics.go`). Shows 24h/7d/30d downloads + bandwidth, top objects, geographic breakdown, budget gauge. Only linked from bucket objects page for public-read buckets.
+
+Tables: `cdn_access_log`, `cdn_stats_daily` (migration 035).
 
 ## Tenant Context
 
