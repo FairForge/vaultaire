@@ -69,6 +69,7 @@ type Server struct {
 	mfaService       *auth.MFAService
 	mfaPendingStore  *dashboard.MFAPendingStore
 	cdnRateLimiter   *RateLimiter
+	cdnAnalytics     *CDNAnalyticsTracker
 	emailSender      email.Sender
 	baseURL          string
 	startTime        time.Time
@@ -167,6 +168,12 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	s.bandwidthTracker = NewBandwidthTracker(s.db)
 	s.bandwidthTracker.SetLogger(logger)
 	s.bandwidthTracker.StartFlusher(context.Background(), 5*time.Second)
+
+	// CDN analytics tracker — buffers CDN access events and flushes to DB.
+	s.cdnAnalytics = NewCDNAnalyticsTracker(s.db)
+	s.cdnAnalytics.SetLogger(logger)
+	s.cdnAnalytics.StartFlusher(context.Background(), 5*time.Second)
+	s.cdnAnalytics.StartRollup(context.Background())
 
 	// Stripe billing service. Only active when STRIPE_SECRET_KEY is set.
 	if stripeKey := os.Getenv("STRIPE_SECRET_KEY"); stripeKey != "" {
