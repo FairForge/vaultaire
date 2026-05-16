@@ -53,6 +53,7 @@ const (
 	ErrAuthorizationQueryParametersError = "AuthorizationQueryParametersError"
 	ErrInvalidPresignExpires             = "AuthorizationQueryParametersError_Expires"
 	ErrQuotaExceeded                     = "QuotaExceeded"
+	ErrServiceUnavailable                = "ServiceUnavailable"
 )
 
 // Error messages
@@ -89,6 +90,7 @@ var errorMessages = map[string]string{
 	ErrAuthorizationQueryParametersError: "Query-string authentication requires the X-Amz-Algorithm, X-Amz-Credential, X-Amz-Date, X-Amz-Expires, X-Amz-SignedHeaders, and X-Amz-Signature parameters",
 	ErrInvalidPresignExpires:             "X-Amz-Expires must be between 1 and 604800 seconds",
 	ErrQuotaExceeded:                     "Storage quota exceeded. Upgrade your plan for more storage.",
+	ErrServiceUnavailable:                "All storage backends are temporarily unavailable. Please retry.",
 }
 
 // HTTP status codes for errors
@@ -125,6 +127,7 @@ var errorStatusCodes = map[string]int{
 	ErrAuthorizationQueryParametersError: http.StatusBadRequest,
 	ErrInvalidPresignExpires:             http.StatusBadRequest,
 	ErrQuotaExceeded:                     http.StatusForbidden,
+	ErrServiceUnavailable:                http.StatusServiceUnavailable,
 }
 
 // WriteS3Error writes an S3-compatible error response

@@ -75,6 +75,7 @@ type PutOptions struct {
 	ContentEncoding string
 	ContentLanguage string
 	ContentLength   int64
+	StorageClass    string
 	UserMetadata    map[string]string
 }
 
@@ -107,5 +108,12 @@ func WithUserMetadata(meta map[string]string) PutOption {
 func WithContentLength(n int64) PutOption {
 	return func(o *PutOptions) {
 		o.ContentLength = n
+	}
+}
+
+// WithStorageClass sets the S3 storage class hint for backend routing.
+func WithStorageClass(class string) PutOption {
+	return func(o *PutOptions) {
+		o.StorageClass = class
 	}
 }

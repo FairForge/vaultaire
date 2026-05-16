@@ -11,9 +11,9 @@ Core orchestration layer — connects the API layer to storage drivers. This is 
 
 ## Request Flow
 
-- **Put**: cost optimizer recommends backend → write to chosen driver → record mapping in `objectBackends` sync.Map → invalidate cache → optionally replicate to backup async
-- **Get**: check `objectBackends` map for backend name → check tiered cache (L1) → fetch from driver → cache result
-- **Delete**: delete from ALL backends → remove from `objectBackends` → invalidate cache
+- **Put**: resolve storage class → build candidate list (target, primary, others) → failover.Execute tries in order → record mapping in `objectBackends` sync.Map → invalidate cache → optionally replicate to backup async
+- **Get**: check `objectBackends` map for backend name → check tiered cache (L1) → failover.Execute with candidate list → cache result
+- **Delete**: failover.Execute against recorded backend (+ primary fallback) → remove from `objectBackends` → invalidate cache
 - **List**: delegates to primary driver only
 
 ## Important: objectBackends is in-memory
@@ -25,7 +25,7 @@ Core orchestration layer — connects the API layer to storage drivers. This is 
 | File | Type | Purpose |
 |------|------|---------|
 | `types.go` | `Container`, `Artifact` | Domain types (internal names for bucket/object) |
-| `errors.go` | `NotFoundError`, `PermissionError` | Error types + sentinels (`ErrQuotaExceeded`, `ErrInvalidInput`) |
+| `errors.go` | `NotFoundError`, `PermissionError` | Error types + sentinels (`ErrQuotaExceeded`, `ErrInvalidInput`, `ErrAllBackendsUnavailable`) |
 | `context.go` | helpers | `WithTenantID`, `TenantIDFromContext`, `WithRequestID` |
 | `selector.go` | `BackendSelector` | Chooses backend by health score (≥50 = healthy) |
 | `cost_optimizer.go` | `CostOptimizer` | Routes by size: small→fastest, large→cheapest |
@@ -37,6 +37,27 @@ Core orchestration layer — connects the API layer to storage drivers. This is 
 | `capacity.go` | `CapacityPlanner` | Linear regression to predict when backends fill |
 | `disaster_recovery.go` | `DisasterRecovery` | Failover configs, recovery plans (RTO/RPO) |
 | `sla.go` | `SLAMonitor` | SLA compliance tracking, violation detection |
+| `failover.go` | `FailoverManager`, `BackendCircuitBreaker` | Per-backend circuit breaker (5 failures/60s → open, 30s → half-open → probe) + ordered failover execution |
+| `storage_class.go` | `ResolveStorageClass`, `BackendToStorageClass` | S3 storage class ↔ backend name mapping (STANDARD→idrive, GLACIER→geyser, etc.) |
+
+## Circuit Breaker (Phase 5.12.4)
+
+Each registered backend gets an independent `BackendCircuitBreaker`:
+- **Closed** (healthy): all requests pass through
+- **Open** (broken): after 5 consecutive failures within 60s — all requests rejected
+- **Half-Open** (probing): after 30s in open state — allows one probe; success → closed, failure → open
+
+`FailoverManager.Execute(ctx, candidates, fn)` iterates the candidate list in order, skipping backends with open breakers, recording success/failure. Returns the first successful backend name.
+
+## Storage Class Routing (Phase 5.12.4)
+
+`x-amz-storage-class` header on PUT maps to a target backend:
+- STANDARD → idrive, STANDARD_IA → lyve, GLACIER/DEEP_ARCHIVE → geyser
+- ONEZONE_IA → onedrive, REDUCED_REDUNDANCY → local
+
+If the target backend isn't registered, falls back to primary silently. Storage class is a hint, never an error.
+
+`BackendToStorageClass(backendName)` provides the reverse mapping for GET/HEAD responses.
 
 ## Connection to Other Layers
 
