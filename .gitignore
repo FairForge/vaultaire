@@ -128,9 +128,9 @@ cmd/geyser-smoke/
 /vaultaire-bin
 
 # Benchmark result data (track .md docs, ignore raw data)
-bench-results/*.json
-bench-results/*.json.tmp
-bench-results/*.log
+bench-results/**/*.json
+bench-results/**/*.json.tmp
+bench-results/**/*.log
 bench-results/**/results.csv
 
 # Claude Code
