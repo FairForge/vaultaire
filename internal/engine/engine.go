@@ -33,6 +33,7 @@ type CoreEngine struct {
 	quota         QuotaManager
 	selector      *BackendSelector
 	costOptimizer *CostOptimizer
+	failover      *FailoverManager
 
 	intelligence *intelligence.AccessTracker
 	cache        *cache.TieredCache
@@ -76,6 +77,7 @@ func NewEngine(db *sql.DB, logger *zap.Logger, config *Config) *CoreEngine {
 		config:        config,
 		selector:      NewBackendSelector(),
 		costOptimizer: NewCostOptimizer(),
+		failover:      NewFailoverManager(logger),
 	}
 
 	if db != nil {
@@ -106,6 +108,7 @@ func (e *CoreEngine) AddDriver(name string, driver Driver) {
 	if e.primary == "" {
 		e.primary = name
 	}
+	e.failover.Register(name)
 	e.logger.Info("driver added",
 		zap.String("name", name),
 		zap.Bool("is_primary", e.primary == name))
@@ -167,10 +170,10 @@ func (e *CoreEngine) Get(ctx context.Context, container, artifact string) (io.Re
 	}
 
 	// L2: look up which backend this object was written to.
-	backendName := e.primary
+	preferredBackend := e.primary
 	if v, ok := e.objectBackends.Load(objectKey(container, artifact)); ok {
 		if name, ok := v.(string); ok && name != "" {
-			backendName = name
+			preferredBackend = name
 		}
 	}
 
@@ -178,26 +181,26 @@ func (e *CoreEngine) Get(ctx context.Context, container, artifact string) (io.Re
 	if e.intelligence != nil {
 		if rec := e.intelligence.GetRecommendation(tenantID, container, artifact); rec != nil {
 			e.logger.Debug("intelligence recommendation (not used for routing)",
-				zap.String("actual_backend", backendName),
+				zap.String("actual_backend", preferredBackend),
 				zap.String("recommended", rec.PreferredBackend),
 				zap.String("reason", rec.Reason))
 		}
 	}
 
-	driver, ok := e.drivers[backendName]
-	if !ok {
-		// Backend from the map no longer exists — fall back to primary.
-		e.logger.Warn("recorded backend not found, falling back to primary",
-			zap.String("recorded", backendName),
-			zap.String("primary", e.primary))
-		driver, ok = e.drivers[e.primary]
-		if !ok {
-			return nil, fmt.Errorf("no driver available")
-		}
-		backendName = e.primary
-	}
+	// Build candidate list: preferred backend first, then primary, then others.
+	candidates := e.buildCandidateList(preferredBackend)
 
-	reader, err := driver.Get(ctx, container, artifact)
+	var reader io.ReadCloser
+	usedBackend, err := e.failover.Execute(ctx, candidates, func(driverName string) error {
+		d, ok := e.drivers[driverName]
+		if !ok {
+			return fmt.Errorf("driver %s not found", driverName)
+		}
+		var getErr error
+		reader, getErr = d.Get(ctx, container, artifact)
+		return getErr
+	})
+
 	if e.intelligence != nil {
 		e.intelligence.LogAccess(ctx, intelligence.AccessEvent{
 			TenantID:  tenantID,
@@ -205,14 +208,14 @@ func (e *CoreEngine) Get(ctx context.Context, container, artifact string) (io.Re
 			Artifact:  artifact,
 			Operation: "GET",
 			Latency:   time.Since(start),
-			Backend:   backendName,
+			Backend:   usedBackend,
 			CacheHit:  false,
 			Timestamp: time.Now(),
 			Success:   err == nil,
 		})
 	}
 	if err != nil {
-		return nil, fmt.Errorf("get from %s: %w", backendName, err)
+		return nil, fmt.Errorf("get %s/%s: %w", container, artifact, err)
 	}
 
 	if e.cache != nil && e.config.EnableCaching {
@@ -252,16 +255,16 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 		}()
 	}
 
-	// Select the backend for this write.
-	// Intelligence recommendations are accepted here — on PUT we want smart
-	// routing. The key guarantee is that we record what we chose so Get
-	// can honour it exactly.
-	backendName := e.primary
-	if e.intelligence != nil {
+	// Resolve storage class from options to determine target backend.
+	options := ApplyPutOptions(opts...)
+	targetBackend, _ := ResolveStorageClass(options.StorageClass, e.primary, e.drivers)
+
+	// Intelligence recommendations override if no explicit storage class was set.
+	if options.StorageClass == "" && e.intelligence != nil {
 		if rec := e.intelligence.GetRecommendation(tenantID, container, artifact); rec != nil {
 			if rec.PreferredBackend != "" {
 				if _, exists := e.drivers[rec.PreferredBackend]; exists {
-					backendName = rec.PreferredBackend
+					targetBackend = rec.PreferredBackend
 				} else {
 					e.logger.Warn("intelligence recommended non-existent backend, using primary",
 						zap.String("recommended", rec.PreferredBackend),
@@ -271,12 +274,16 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 		}
 	}
 
-	driver, ok := e.drivers[backendName]
-	if !ok {
-		return "", fmt.Errorf("driver %s not found", backendName)
-	}
+	// Build candidate list: target first, then primary, then others.
+	candidates := e.buildCandidateList(targetBackend)
 
-	err := driver.Put(ctx, container, artifact, sizeReader, opts...)
+	usedBackend, err := e.failover.Execute(ctx, candidates, func(driverName string) error {
+		d, ok := e.drivers[driverName]
+		if !ok {
+			return fmt.Errorf("driver %s not found", driverName)
+		}
+		return d.Put(ctx, container, artifact, sizeReader, opts...)
+	})
 
 	if e.intelligence != nil {
 		e.intelligence.LogAccess(ctx, intelligence.AccessEvent{
@@ -286,18 +293,17 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 			Operation: "PUT",
 			Size:      sizeReader.bytesRead,
 			Latency:   time.Since(start),
-			Backend:   backendName,
+			Backend:   usedBackend,
 			Timestamp: time.Now(),
 			Success:   err == nil,
 		})
 	}
 
 	if err != nil {
-		return "", fmt.Errorf("put to %s: %w", backendName, err)
+		return "", fmt.Errorf("put %s/%s: %w", container, artifact, err)
 	}
 
-	// Record backend for this object so Get always routes correctly.
-	e.objectBackends.Store(objectKey(container, artifact), backendName)
+	e.objectBackends.Store(objectKey(container, artifact), usedBackend)
 
 	if e.cache != nil {
 		cacheKey := fmt.Sprintf("%s/%s/%s", tenantID, container, artifact)
@@ -308,7 +314,7 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 		go e.replicateToBackup(ctx, container, artifact)
 	}
 
-	return backendName, nil
+	return usedBackend, nil
 }
 
 // Delete removes an artifact from all backends
@@ -316,24 +322,24 @@ func (e *CoreEngine) Delete(ctx context.Context, container, artifact string) err
 	start := time.Now()
 	tenantID := common.GetTenantID(ctx)
 
-	// Delete from the backend where the object was stored, not all backends.
-	// Scatter-delete across all drivers causes slow retries on backends that
-	// don't have the object (e.g. locked Quotaless returns 401 with retries).
 	key := objectKey(container, artifact)
 	targetBackend := e.primary
 	if stored, ok := e.objectBackends.Load(key); ok {
 		targetBackend = stored.(string)
 	}
 
-	var lastErr error
-	if driver, ok := e.drivers[targetBackend]; ok {
-		if err := driver.Delete(ctx, container, artifact); err != nil {
-			e.logger.Warn("delete failed",
-				zap.String("driver", targetBackend),
-				zap.Error(err))
-			lastErr = err
-		}
+	candidates := []string{targetBackend}
+	if targetBackend != e.primary {
+		candidates = append(candidates, e.primary)
 	}
+
+	_, lastErr := e.failover.Execute(ctx, candidates, func(driverName string) error {
+		d, ok := e.drivers[driverName]
+		if !ok {
+			return fmt.Errorf("driver %s not found", driverName)
+		}
+		return d.Delete(ctx, container, artifact)
+	})
 
 	e.objectBackends.Delete(key)
 
@@ -547,6 +553,34 @@ func (r *cachingReader) Read(p []byte) (n int, err error) {
 		_ = r.cache.Set(r.key, r.buffer.Bytes())
 	}
 	return
+}
+
+// buildCandidateList returns an ordered list of backends to try: preferred
+// first, then primary (if different), then any remaining registered backends.
+func (e *CoreEngine) buildCandidateList(preferred string) []string {
+	seen := make(map[string]bool)
+	var candidates []string
+
+	add := func(name string) {
+		if name != "" && !seen[name] {
+			if _, ok := e.drivers[name]; ok {
+				candidates = append(candidates, name)
+				seen[name] = true
+			}
+		}
+	}
+
+	add(preferred)
+	add(e.primary)
+	for name := range e.drivers {
+		add(name)
+	}
+	return candidates
+}
+
+// GetFailoverStatus returns circuit breaker states for all backends.
+func (e *CoreEngine) GetFailoverStatus() map[string]string {
+	return e.failover.GetAllStatuses()
 }
 
 // Shutdown gracefully shuts down the engine

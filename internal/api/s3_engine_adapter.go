@@ -6,6 +6,7 @@ import (
 	"crypto/md5" // #nosec G501 — S3 spec requires MD5 for ETags
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -205,13 +206,14 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	var cachedETag string
 	var cachedUpdatedAt time.Time
 	var cachedMetadata []byte
+	var cachedBackendName string
 	var cacheHit bool
 	if a.db != nil {
 		err := a.db.QueryRowContext(r.Context(), `
-			SELECT content_type, size_bytes, etag, updated_at, COALESCE(metadata, '{}')
+			SELECT content_type, size_bytes, etag, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, '')
 			FROM object_head_cache
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-			t.ID, bucket, artifact).Scan(&cachedContentType, &cachedSize, &cachedETag, &cachedUpdatedAt, &cachedMetadata)
+			t.ID, bucket, artifact).Scan(&cachedContentType, &cachedSize, &cachedETag, &cachedUpdatedAt, &cachedMetadata, &cachedBackendName)
 		if err == nil {
 			cacheHit = true
 		}
@@ -234,7 +236,10 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 
 	reader, err := a.engine.Get(r.Context(), container, artifact)
 	if err != nil {
-		if strings.Contains(err.Error(), "no such file or directory") ||
+		if errors.Is(err, engine.ErrAllBackendsUnavailable) {
+			w.Header().Set("Retry-After", "30")
+			WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
+		} else if strings.Contains(err.Error(), "no such file or directory") ||
 			strings.Contains(err.Error(), "not found") {
 			reqID := generateRequestID()
 			if suggestion := keySuggestion(r.Context(), a.db, t.ID, bucket, artifact); suggestion != "" {
@@ -280,6 +285,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	}
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Cache-Control", "private, no-cache")
+	w.Header().Set("x-amz-storage-class", engine.BackendToStorageClass(cachedBackendName))
 	if cacheHit {
 		if cachedSize > 0 {
 			w.Header().Set("Content-Length", strconv.FormatInt(cachedSize, 10))
@@ -416,14 +422,24 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	hasher := md5.New() // #nosec G401 — S3 spec requires MD5 for ETags
 	hashingBody := io.TeeReader(body, hasher)
 
-	backendName, err := a.engine.Put(r.Context(), container, artifact, hashingBody,
-		engine.WithContentLength(size))
+	storageClass := r.Header.Get("x-amz-storage-class")
+	putOpts := []engine.PutOption{engine.WithContentLength(size)}
+	if storageClass != "" {
+		putOpts = append(putOpts, engine.WithStorageClass(storageClass))
+	}
+
+	backendName, err := a.engine.Put(r.Context(), container, artifact, hashingBody, putOpts...)
 	if err != nil {
-		a.logger.Error("engine put failed",
-			zap.Error(err),
-			zap.String("container", container),
-			zap.String("artifact", artifact))
-		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		if errors.Is(err, engine.ErrAllBackendsUnavailable) {
+			w.Header().Set("Retry-After", "30")
+			WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
+		} else {
+			a.logger.Error("engine put failed",
+				zap.Error(err),
+				zap.String("container", container),
+				zap.String("artifact", artifact))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		}
 		return
 	}
 

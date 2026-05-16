@@ -155,6 +155,10 @@ func (s *Server) handleHealthEnhanced(w http.ResponseWriter, r *http.Request) {
 		"backends_total":   total,
 	}
 
+	if s.engine != nil {
+		resp["circuit_breakers"] = s.engine.GetFailoverStatus()
+	}
+
 	// Add backend details if requested
 	if r.URL.Query().Get("details") == "true" {
 		backends := make(map[string]interface{})

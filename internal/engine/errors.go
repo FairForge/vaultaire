@@ -34,7 +34,8 @@ func WrapError(err error, message string) error {
 
 // Common errors
 var (
-	ErrQuotaExceeded = fmt.Errorf("quota exceeded")
-	ErrInvalidInput  = fmt.Errorf("invalid input")
-	ErrTimeout       = fmt.Errorf("operation timeout")
+	ErrQuotaExceeded          = fmt.Errorf("quota exceeded")
+	ErrInvalidInput           = fmt.Errorf("invalid input")
+	ErrTimeout                = fmt.Errorf("operation timeout")
+	ErrAllBackendsUnavailable = fmt.Errorf("all backends unavailable")
 )

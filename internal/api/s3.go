@@ -13,6 +13,7 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/common"
+	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/events"
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"go.uber.org/zap"
@@ -525,12 +526,13 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	var etag, contentType string
 	var updatedAt time.Time
 	var metadataJSON []byte
+	var backendName string
 
 	err = s.db.QueryRowContext(r.Context(), `
-		SELECT size_bytes, etag, content_type, updated_at, COALESCE(metadata, '{}')
+		SELECT size_bytes, etag, content_type, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, '')
 		FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
-	`, t.ID, req.Bucket, req.Object).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &metadataJSON)
+	`, t.ID, req.Bucket, req.Object).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &metadataJSON, &backendName)
 
 	if err == sql.ErrNoRows {
 		s.logger.Warn("HEAD: object not in metadata cache",
@@ -565,7 +567,7 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	} else {
 		w.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
 	}
-	w.Header().Set("x-amz-storage-class", "STANDARD")
+	w.Header().Set("x-amz-storage-class", engine.BackendToStorageClass(backendName))
 	w.Header().Set("x-amz-request-id", generateRequestID())
 	setS3MetadataHeaders(w, metadataJSON)
 	// HEAD must not write a body.
