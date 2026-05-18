@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	dashhandlers "github.com/FairForge/vaultaire/internal/dashboard/handlers"
 	"github.com/FairForge/vaultaire/internal/engine"
 )
 
@@ -234,6 +235,27 @@ func (s *Server) handleBackendsHealth(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(backends)
+}
+
+// healthCheckerAdapter adapts BackendHealthChecker to the dashboard
+// handlers.HealthChecker interface (different BackendState types).
+type healthCheckerAdapter struct {
+	inner *BackendHealthChecker
+}
+
+func (a *healthCheckerAdapter) GetBackendStates() map[string]*dashhandlers.BackendState {
+	raw := a.inner.GetBackendStates()
+	out := make(map[string]*dashhandlers.BackendState, len(raw))
+	for k, v := range raw {
+		out[k] = &dashhandlers.BackendState{
+			Healthy:   v.Healthy,
+			Score:     v.Score,
+			Latency:   v.Latency,
+			LastCheck: v.LastCheck,
+			LastError: v.LastError,
+		}
+	}
+	return out
 }
 
 // Helper functions

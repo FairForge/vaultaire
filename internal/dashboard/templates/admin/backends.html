@@ -1,0 +1,80 @@
+{{define "title"}}Storage Backends — stored.ge admin{{end}}
+{{define "content"}}
+<div class="dashboard-header">
+    <h1>Storage Backends <span class="badge">{{.BackendCount}} backends</span></h1>
+</div>
+
+{{if .FlashSuccess}}<div class="alert alert-success">{{.FlashSuccess}}</div>{{end}}
+{{if .FlashError}}<div class="alert alert-error">{{.FlashError}}</div>{{end}}
+
+{{if not .Backends}}
+<div class="card">
+    <div class="card-title">No backends registered</div>
+    <div class="card-detail">Storage drivers have not been initialized yet.</div>
+</div>
+{{else}}
+<div class="card-grid">
+    {{range .Backends}}
+    <div class="card">
+        <div class="card-title">
+            {{.Name}}
+            {{if .IsPrimary}} <span class="badge badge-success">primary</span>{{end}}
+            {{if .IsBackup}} <span class="badge badge-warning">backup</span>{{end}}
+        </div>
+
+        <div style="margin:0.75rem 0">
+            {{if .Healthy}}
+                <span class="badge badge-success">healthy</span>
+            {{else}}
+                <span class="badge badge-danger">unhealthy</span>
+            {{end}}
+
+            {{if eq .CircuitState "closed"}}
+                <span class="badge badge-success">circuit closed</span>
+            {{else if eq .CircuitState "open"}}
+                <span class="badge badge-danger">circuit open</span>
+            {{else if eq .CircuitState "half-open"}}
+                <span class="badge badge-warning">circuit half-open</span>
+            {{else}}
+                <span class="badge">circuit {{.CircuitState}}</span>
+            {{end}}
+        </div>
+
+        <div class="card-detail">
+            <strong>Score:</strong> {{printf "%.0f" .Score}}%
+            &nbsp;&middot;&nbsp;
+            <strong>Latency:</strong> {{.LatencyMs}}ms
+            &nbsp;&middot;&nbsp;
+            <strong>Class:</strong> {{.StorageClass}}
+        </div>
+
+        {{if .LastCheck}}
+        <div class="card-detail"><strong>Last checked:</strong> {{.LastCheck}}</div>
+        {{end}}
+
+        {{if .LastError}}
+        <div class="card-detail" style="color:var(--color-danger,#e74c3c)"><strong>Error:</strong> {{.LastError}}</div>
+        {{end}}
+
+        <div style="margin-top:0.75rem;display:flex;gap:0.5rem">
+            {{if not .IsPrimary}}
+            <form method="POST" action="/admin/backends/{{.Name}}/primary" style="margin:0">
+                <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                <button type="submit" class="btn btn-sm">Set as Primary</button>
+            </form>
+            {{end}}
+            <form method="POST" action="/admin/backends/{{.Name}}/check" style="margin:0">
+                <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                <button type="submit" class="btn btn-sm">Check Now</button>
+            </form>
+        </div>
+    </div>
+    {{end}}
+</div>
+{{end}}
+
+<div class="dashboard-actions">
+    <a href="/admin" class="btn">Admin Overview</a>
+    <a href="/admin/system" class="btn">System Health</a>
+</div>
+{{end}}

@@ -435,19 +435,21 @@ func (s *Server) setupRoutes() {
 		}
 	}
 	dashboard.RegisterRoutes(s.router, dashboard.Deps{
-		DB:          s.db,
-		Auth:        s.auth,
-		MFA:         s.mfaService,
-		MFAPending:  s.mfaPendingStore,
-		Sessions:    s.sessionStore,
-		Logger:      s.logger,
-		DataPath:    dataPath,
-		Stripe:      s.stripe,
-		Google:      s.googleOAuth,
-		GitHub:      s.githubOAuth,
-		StorageMode: storageMode,
-		Email:       s.emailSender,
-		BaseURL:     s.baseURL,
+		DB:            s.db,
+		Auth:          s.auth,
+		MFA:           s.mfaService,
+		MFAPending:    s.mfaPendingStore,
+		Sessions:      s.sessionStore,
+		Logger:        s.logger,
+		DataPath:      dataPath,
+		Stripe:        s.stripe,
+		Google:        s.googleOAuth,
+		GitHub:        s.githubOAuth,
+		StorageMode:   storageMode,
+		Email:         s.emailSender,
+		BaseURL:       s.baseURL,
+		Engine:        s.engine,
+		HealthChecker: &healthCheckerAdapter{s.healthChecker},
 	})
 
 	s.logger.Info("Registering management API routes")

@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"sort"
 	"sync"
 	"time"
 
@@ -126,6 +127,43 @@ func (e *CoreEngine) SetBackup(name string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.backup = name
+}
+
+// GetDriverNames returns a sorted list of registered driver names.
+func (e *CoreEngine) GetDriverNames() []string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	names := make([]string, 0, len(e.drivers))
+	for name := range e.drivers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// GetPrimary returns the current primary backend name.
+func (e *CoreEngine) GetPrimary() string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.primary
+}
+
+// GetBackup returns the current backup backend name.
+func (e *CoreEngine) GetBackup() string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.backup
+}
+
+// CheckDriver runs HealthCheck on a single named driver.
+func (e *CoreEngine) CheckDriver(ctx context.Context, name string) error {
+	e.mu.RLock()
+	driver, exists := e.drivers[name]
+	e.mu.RUnlock()
+	if !exists {
+		return fmt.Errorf("driver %q not found", name)
+	}
+	return driver.HealthCheck(ctx)
 }
 
 // objectKey returns the sync.Map key for a container+artifact pair.
