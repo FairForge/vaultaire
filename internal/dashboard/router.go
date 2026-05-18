@@ -14,6 +14,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/dashboard/handlers"
 	"github.com/FairForge/vaultaire/internal/dashboard/middleware"
 	"github.com/FairForge/vaultaire/internal/email"
+	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 	"golang.org/x/oauth2"
@@ -23,19 +24,21 @@ const sessionTTL = 24 * time.Hour
 
 // Deps groups the dependencies the dashboard routes need.
 type Deps struct {
-	DB          *sql.DB
-	Auth        *auth.AuthService
-	MFA         *auth.MFAService // TOTP secret generation / validation.
-	MFAPending  *MFAPendingStore // Short-lived store for 2FA login challenges.
-	Sessions    dashauth.SessionStore
-	Logger      *zap.Logger
-	DataPath    string                 // Local storage root for bucket creation.
-	Stripe      *billing.StripeService // Nil when STRIPE_SECRET_KEY is not set.
-	Google      *oauth2.Config         // Nil when GOOGLE_CLIENT_ID is not set.
-	GitHub      *oauth2.Config         // Nil when GITHUB_CLIENT_ID is not set.
-	StorageMode string                 // e.g. "local", "s3", "quotaless", "geyser", "idrive"
-	Email       email.Sender           // Email sender (LogSender if unconfigured).
-	BaseURL     string                 // Base URL for email links (e.g. "https://stored.ge").
+	DB            *sql.DB
+	Auth          *auth.AuthService
+	MFA           *auth.MFAService // TOTP secret generation / validation.
+	MFAPending    *MFAPendingStore // Short-lived store for 2FA login challenges.
+	Sessions      dashauth.SessionStore
+	Logger        *zap.Logger
+	DataPath      string                 // Local storage root for bucket creation.
+	Stripe        *billing.StripeService // Nil when STRIPE_SECRET_KEY is not set.
+	Google        *oauth2.Config         // Nil when GOOGLE_CLIENT_ID is not set.
+	GitHub        *oauth2.Config         // Nil when GITHUB_CLIENT_ID is not set.
+	StorageMode   string                 // e.g. "local", "s3", "quotaless", "geyser", "idrive"
+	Email         email.Sender           // Email sender (LogSender if unconfigured).
+	BaseURL       string                 // Base URL for email links (e.g. "https://stored.ge").
+	Engine        *engine.CoreEngine     // Nil-safe; used by admin backends page.
+	HealthChecker handlers.HealthChecker // Nil-safe; backend health state provider.
 }
 
 // RegisterRoutes mounts the dashboard, auth, admin, and static-asset
@@ -202,6 +205,10 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		"templates/layouts/admin.html",
 		"templates/admin/system.html",
 	))
+	backendsTmpl := template.Must(template.ParseFS(Templates,
+		"templates/layouts/admin.html",
+		"templates/admin/backends.html",
+	))
 
 	r.Route("/admin", func(ar chi.Router) {
 		ar.Use(middleware.Recovery(deps.Logger))
@@ -218,6 +225,11 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		ar.Post("/tenants/{id}/bandwidth-limit", handlers.HandleUpdateBandwidthLimit(deps.DB, deps.Logger))
 		ar.Post("/tenants/{id}/reset-mfa", handlers.HandleAdminResetMFA(deps.Auth, deps.Logger))
 		ar.Get("/system", handlers.HandleAdminSystem(systemTmpl, deps.DB, deps.Logger))
+		if deps.Engine != nil {
+			ar.Get("/backends", handlers.HandleAdminBackends(backendsTmpl, deps.Engine, deps.HealthChecker, deps.Logger))
+			ar.Post("/backends/{name}/primary", handlers.HandleSetPrimary(deps.Engine, deps.Logger))
+			ar.Post("/backends/{name}/check", handlers.HandleForceHealthCheck(deps.Engine, deps.Logger))
+		}
 	})
 }
 
