@@ -29,6 +29,8 @@ S3-compatible API layer. Translates S3 protocol to engine operations, handles au
 - **events.go** — Event emitter (`emitEvent`), webhook dispatch, HMAC signing, `GET /api/v1/events` list endpoint
 - **webhooks_routes.go** — Webhook CRUD API (`/api/v1/webhooks`): create, list, update, delete, delivery history, test fire
 - **llms_txt.go** — Static `/llms.txt` endpoint (plain-text API summary for LLMs)
+- **account_export.go** — `AccountExporter`: GDPR data export service (CreateExport collects user/tenant/quota/buckets/objects/keys/bandwidth/events into JSON)
+- **account_deletion.go** — `AccountDeletionService`: 30-day grace period deletion (ScheduleDeletion, CancelDeletion, GetDeletionStatus, ExecuteDeletion)
 
 ## Error Response Pattern
 

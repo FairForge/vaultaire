@@ -128,6 +128,42 @@
     {{end}}
 </div>
 
+<div class="card">
+    <div class="card-title">Export My Data</div>
+    <p class="text-muted" style="margin-bottom: 1rem;">Download all your data (profile, buckets, objects, usage, API keys) as a JSON file.</p>
+    <form method="POST" action="/dashboard/settings/export">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <button type="submit" class="btn btn-primary">Export Data</button>
+    </form>
+</div>
+
+<div class="card" style="border: 1px solid var(--danger, #dc3545);">
+    <div class="card-title" style="color: var(--danger, #dc3545);">Delete Account</div>
+    {{if .DeletionScheduled}}
+    <div class="alert alert-error" style="margin-bottom: 1rem;">
+        Your account is scheduled for deletion on <strong>{{.DeletionDate}}</strong>. All data will be permanently removed after this date.
+    </div>
+    <form method="POST" action="/dashboard/settings/cancel-deletion">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <button type="submit" class="btn btn-primary">Cancel Deletion</button>
+    </form>
+    {{else}}
+    <p class="text-muted" style="margin-bottom: 1rem;">Permanently delete your account and all associated data. You will have a 30-day grace period to change your mind.</p>
+    <form method="POST" action="/dashboard/settings/delete-account">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <div class="form-group">
+            <label>Confirm your password</label>
+            <input type="password" name="password" required>
+        </div>
+        <div class="form-group">
+            <label>Reason for leaving (optional)</label>
+            <textarea name="reason" rows="2" placeholder="Help us improve..."></textarea>
+        </div>
+        <button type="submit" class="btn btn-danger" onclick="return confirm('Are you sure? Your account will be scheduled for deletion in 30 days.');">Delete Account</button>
+    </form>
+    {{end}}
+</div>
+
 <div class="dashboard-actions">
     <a href="/dashboard/" class="btn">Back to Dashboard</a>
 </div>

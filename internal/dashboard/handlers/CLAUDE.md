@@ -106,6 +106,15 @@ The onboarding card in `dashboard.html` shows a 3-item checklist (bucket, object
 
 Analytics link only appears in `bucket_objects.html` for public-read buckets (gated on `{{if .CDNBaseURL}}`).
 
+## Account / GDPR (`account.go`)
+
+Three handlers for GDPR compliance (Phase 5.14.1):
+- `HandleExportData(db, logger)` — POST `/dashboard/settings/export`. Collects user profile, tenant, quota, buckets, objects, API keys, bandwidth (90d) into JSON. Returns as `Content-Disposition: attachment` download.
+- `HandleRequestDeletion(db, sessions, logger)` — POST `/dashboard/settings/delete-account`. Requires password confirmation via bcrypt. Sets `deletion_scheduled_at` 30 days out and `status = 'pending_deletion'`. Flash message with scheduled date.
+- `HandleCancelDeletion(db, logger)` — POST `/dashboard/settings/cancel-deletion`. Nulls `deletion_scheduled_at`/`deletion_reason`, sets `status = 'active'`.
+
+`populateDeletionStatus(ctx, db, userID, data)` in `settings.go` queries `deletion_scheduled_at` from users and populates `DeletionScheduled` + `DeletionDate` template data.
+
 ## Legacy Handlers
 
 Files like `dashboard.go` etc. are stubs from before Phase 0 with inline terminal-style templates. They are NOT wired into the router. Remaining phases will rewrite them.

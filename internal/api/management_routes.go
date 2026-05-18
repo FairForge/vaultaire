@@ -36,6 +36,11 @@ func (s *Server) registerManagementRoutes() {
 		r.Delete("/keys/{id}", s.handleMgmtDeleteKey)
 
 		r.Get("/usage", s.handleMgmtGetUsage)
+
+		r.Post("/account/export", s.handleMgmtExportData)
+		r.Get("/account/export/{id}", s.handleMgmtGetExport)
+		r.Delete("/account", s.handleMgmtDeleteAccount)
+		r.Post("/account/cancel-deletion", s.handleMgmtCancelDeletion)
 	})
 }
 
@@ -580,6 +585,120 @@ func (s *Server) handleMgmtGetUsage(w http.ResponseWriter, r *http.Request) {
 		"usage_percent": float64(used) / float64(limit) * 100,
 		"tier":          tier,
 		"request_id":    getRequestID(w),
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// --- Account (GDPR) ---
+
+func (s *Server) handleMgmtExportData(w http.ResponseWriter, r *http.Request) {
+	userID, _ := r.Context().Value(userIDKey).(string)
+	tenantID, _ := r.Context().Value(tenantIDKey).(string)
+	if userID == "" || tenantID == "" {
+		writeManagementError(w, ErrTypeAuthentication, "missing_credentials", "user or tenant not found in token", "")
+		return
+	}
+
+	exporter := NewAccountExporter(s.db, s.logger)
+	result, err := exporter.CreateExport(r.Context(), userID, tenantID)
+	if err != nil {
+		s.logger.Error("management export data", zap.Error(err))
+		writeManagementError(w, ErrTypeAPI, "export_failed", "failed to create data export", "")
+		return
+	}
+
+	resp := map[string]interface{}{
+		"object":     "data_export",
+		"id":         result.ID,
+		"data":       json.RawMessage(result.Data),
+		"request_id": getRequestID(w),
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleMgmtGetExport(w http.ResponseWriter, r *http.Request) {
+	userID, _ := r.Context().Value(userIDKey).(string)
+	if userID == "" {
+		writeManagementError(w, ErrTypeAuthentication, "missing_user", "user not found in token", "")
+		return
+	}
+
+	exportID := chi.URLParam(r, "id")
+	exporter := NewAccountExporter(s.db, s.logger)
+	result, err := exporter.GetExport(r.Context(), exportID, userID)
+	if err != nil {
+		writeManagementError(w, ErrTypeNotFound, "export_not_found", "export not found", "id")
+		return
+	}
+
+	resp := map[string]interface{}{
+		"object":          "data_export",
+		"id":              result.ID,
+		"status":          result.Status,
+		"file_size_bytes": result.SizeBytes,
+		"created_at":      result.CreatedAt,
+		"request_id":      getRequestID(w),
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleMgmtDeleteAccount(w http.ResponseWriter, r *http.Request) {
+	userID, _ := r.Context().Value(userIDKey).(string)
+	tenantID, _ := r.Context().Value(tenantIDKey).(string)
+	if userID == "" || tenantID == "" {
+		writeManagementError(w, ErrTypeAuthentication, "missing_credentials", "user or tenant not found in token", "")
+		return
+	}
+
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeManagementError(w, ErrTypeInvalidRequest, "invalid_json", "request body must be valid JSON", "")
+		return
+	}
+
+	if req.Reason == "" {
+		writeManagementError(w, ErrTypeInvalidRequest, "missing_parameter", "reason is required", "reason")
+		return
+	}
+
+	svc := NewAccountDeletionService(s.db, s.logger)
+	scheduledAt, err := svc.ScheduleDeletion(r.Context(), userID, tenantID, req.Reason)
+	if err != nil {
+		s.logger.Error("management delete account", zap.Error(err))
+		writeManagementError(w, ErrTypeAPI, "deletion_failed", "failed to schedule account deletion", "")
+		return
+	}
+
+	resp := map[string]interface{}{
+		"object":       "account_deletion",
+		"scheduled_at": scheduledAt,
+		"message":      "Account scheduled for deletion. You have 30 days to cancel.",
+		"request_id":   getRequestID(w),
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleMgmtCancelDeletion(w http.ResponseWriter, r *http.Request) {
+	userID, _ := r.Context().Value(userIDKey).(string)
+	if userID == "" {
+		writeManagementError(w, ErrTypeAuthentication, "missing_user", "user not found in token", "")
+		return
+	}
+
+	svc := NewAccountDeletionService(s.db, s.logger)
+	if err := svc.CancelDeletion(r.Context(), userID); err != nil {
+		s.logger.Error("management cancel deletion", zap.Error(err))
+		writeManagementError(w, ErrTypeAPI, "cancel_failed", "failed to cancel account deletion", "")
+		return
+	}
+
+	resp := map[string]interface{}{
+		"object":     "account_deletion",
+		"cancelled":  true,
+		"message":    "Account deletion has been cancelled.",
+		"request_id": getRequestID(w),
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
