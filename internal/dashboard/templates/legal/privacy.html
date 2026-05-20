@@ -1,0 +1,94 @@
+{{define "title"}}Privacy Policy — stored.ge{{end}}
+{{define "content"}}
+<div class="card">
+    <p class="text-muted">Last updated: June 1, 2026</p>
+    <h1>Privacy Policy</h1>
+    <p>This Privacy Policy describes how FairForge LLC ("<strong>stored.ge</strong>", "we", "us") collects, uses, and protects your personal data when you use our S3-compatible object storage service.</p>
+
+    <h2 id="contents">Contents</h2>
+    <ul>
+        <li><a href="#lawful-basis">Lawful Basis for Processing</a></li>
+        <li><a href="#data-categories">Data Categories</a></li>
+        <li><a href="#retention">Retention Periods</a></li>
+        <li><a href="#data-subject-rights">Data Subject Rights</a></li>
+        <li><a href="#sub-processors">Sub-processors</a></li>
+        <li><a href="#international-transfers">International Transfers</a></li>
+        <li><a href="#security">Security Measures</a></li>
+        <li><a href="#changes">Changes to This Policy</a></li>
+        <li><a href="#contact">Contact</a></li>
+    </ul>
+
+    <h2 id="lawful-basis">Lawful Basis for Processing</h2>
+    <p>We process your personal data under the following lawful bases as defined by the General Data Protection Regulation (GDPR):</p>
+    <ul>
+        <li><strong>Performance of a contract</strong> — processing necessary to provide the storage service you signed up for, including account management, billing, and service delivery.</li>
+        <li><strong>Legitimate interest</strong> — processing necessary for service security, fraud prevention, abuse detection, and service improvement, where these interests are not overridden by your rights.</li>
+    </ul>
+
+    <h2 id="data-categories">Data Categories</h2>
+    <p>We collect and process the following categories of personal data:</p>
+    <ul>
+        <li><strong>Account data</strong> — email address, company name, hashed password, account creation date, email verification status.</li>
+        <li><strong>Usage data</strong> — storage consumption, bandwidth usage, API request counts, bucket and object metadata (names, sizes, content types, ETags). We never access or process the content of your stored objects.</li>
+        <li><strong>Billing data</strong> — subscription plan, payment method (processed by Stripe; we do not store card numbers), invoice history, Stripe customer ID.</li>
+        <li><strong>Session data</strong> — IP address, user agent, session creation and last-active timestamps, used for active session management and security.</li>
+    </ul>
+    <p><strong>Important:</strong> We never access, read, analyze, or process the content of objects you store in our service. Object content is encrypted in transit (TLS) and treated as opaque data.</p>
+
+    <h2 id="retention">Retention Periods</h2>
+    <ul>
+        <li><strong>Account data</strong> — retained for the lifetime of your account plus 30 days after account deletion (grace period for recovery).</li>
+        <li><strong>Session and access logs</strong> — retained for 90 days, then automatically purged.</li>
+        <li><strong>Billing records</strong> — retained for 7 years to comply with financial reporting and tax obligations.</li>
+        <li><strong>Object metadata</strong> — deleted immediately when you delete the corresponding object, or within 30 days of account deletion.</li>
+    </ul>
+
+    <h2 id="data-subject-rights">Data Subject Rights</h2>
+    <p>Under the GDPR, you have the following rights regarding your personal data:</p>
+    <ul>
+        <li><strong>Right of access</strong> — request a copy of all personal data we hold about you.</li>
+        <li><strong>Right to data portability</strong> — receive your data in a structured, machine-readable format (JSON export).</li>
+        <li><strong>Right to erasure</strong> — request deletion of your account and all associated personal data, subject to a 30-day grace period.</li>
+        <li><strong>Right to rectification</strong> — correct inaccurate personal data (e.g., update your email or company name via account settings).</li>
+        <li><strong>Right to restrict processing</strong> — request that we limit how we use your data while a dispute is resolved.</li>
+        <li><strong>Right to object</strong> — object to processing based on legitimate interest.</li>
+    </ul>
+    <p>To exercise any of these rights, contact us at <strong>privacy@stored.ge</strong>. We will respond within 30 days.</p>
+
+    <h2 id="sub-processors">Sub-processors</h2>
+    <p>We use the following third-party sub-processors to deliver our service:</p>
+    <ul>
+        <li><strong>iDrive Inc.</strong> — object storage infrastructure (data storage and retrieval).</li>
+        <li><strong>Stripe Inc.</strong> — payment processing and subscription management.</li>
+        <li><strong>Cloudflare Inc.</strong> — CDN, DDoS protection, and TLS termination.</li>
+    </ul>
+    <p>Each sub-processor is bound by a Data Processing Agreement that requires GDPR-equivalent protections.</p>
+
+    <h2 id="international-transfers">International Transfers</h2>
+    <p>Your data may be transferred to and processed in the United States. We ensure adequate protection for international transfers through:</p>
+    <ul>
+        <li>Standard Contractual Clauses (SCCs) approved by the European Commission.</li>
+        <li>Sub-processor agreements that incorporate GDPR-equivalent data protection terms.</li>
+    </ul>
+
+    <h2 id="security">Security Measures</h2>
+    <ul>
+        <li>All data in transit is protected by TLS 1.2 or higher.</li>
+        <li>Passwords are hashed using bcrypt with a cost factor of 12.</li>
+        <li>Sessions use cryptographically random tokens with HttpOnly, Secure, and SameSite cookies.</li>
+        <li>Two-factor authentication (TOTP) is available for all accounts.</li>
+        <li>Access to production systems is restricted to authorized personnel with SSH key authentication.</li>
+    </ul>
+
+    <h2 id="changes">Changes to This Policy</h2>
+    <p>We may update this Privacy Policy from time to time. Material changes will be communicated via email to registered users at least 30 days before they take effect. The "Last updated" date at the top of this page reflects the most recent revision.</p>
+
+    <h2 id="contact">Contact</h2>
+    <p>For privacy-related inquiries, data subject requests, or complaints:</p>
+    <ul>
+        <li><strong>Email:</strong> privacy@stored.ge</li>
+        <li><strong>Entity:</strong> FairForge LLC</li>
+        <li><strong>Jurisdiction:</strong> State of Utah, United States</li>
+    </ul>
+</div>
+{{end}}

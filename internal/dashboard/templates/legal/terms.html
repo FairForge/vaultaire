@@ -1,0 +1,110 @@
+{{define "title"}}Terms of Service — stored.ge{{end}}
+{{define "content"}}
+<div class="card">
+    <p class="text-muted">Last updated: June 1, 2026</p>
+    <h1>Terms of Service</h1>
+    <p>These Terms of Service ("Terms") govern your use of the stored.ge object storage service operated by FairForge LLC ("we", "us", "stored.ge"). By creating an account or using our service, you agree to these Terms.</p>
+
+    <h2 id="contents">Contents</h2>
+    <ul>
+        <li><a href="#service-description">Service Description</a></li>
+        <li><a href="#account-requirements">Account Requirements</a></li>
+        <li><a href="#acceptable-use">Acceptable Use</a></li>
+        <li><a href="#usage-limits">Usage Limits</a></li>
+        <li><a href="#service-level">Service Level Agreement</a></li>
+        <li><a href="#data-ownership">Data Ownership</a></li>
+        <li><a href="#billing">Billing and Payment</a></li>
+        <li><a href="#termination">Termination</a></li>
+        <li><a href="#liability">Limitation of Liability</a></li>
+        <li><a href="#governing-law">Governing Law and Disputes</a></li>
+        <li><a href="#changes">Changes to These Terms</a></li>
+        <li><a href="#contact">Contact</a></li>
+    </ul>
+
+    <h2 id="service-description">Service Description</h2>
+    <p>stored.ge provides S3-compatible object storage. You can store, retrieve, and manage objects (files) via our API, dashboard, or any S3-compatible client. The service includes:</p>
+    <ul>
+        <li>S3-compatible API for object operations (GET, PUT, DELETE, LIST, HEAD).</li>
+        <li>Web dashboard for account management, bucket configuration, and usage monitoring.</li>
+        <li>API key management with scoped access control.</li>
+        <li>CDN delivery for public buckets.</li>
+    </ul>
+
+    <h2 id="account-requirements">Account Requirements</h2>
+    <ul>
+        <li>You must provide a valid email address to create an account.</li>
+        <li>You are responsible for maintaining the security of your account credentials, API keys, and access tokens.</li>
+        <li>You must be at least 16 years old (or the minimum age in your jurisdiction) to use this service.</li>
+        <li>One person or entity may maintain multiple accounts, but each account must have a unique email address.</li>
+    </ul>
+
+    <h2 id="acceptable-use">Acceptable Use</h2>
+    <p>Your use of stored.ge is subject to our <a href="/legal/aup">Acceptable Use Policy</a>, which prohibits storing illegal content, distributing malware, and other abusive activities. Violations may result in immediate suspension or termination.</p>
+
+    <h2 id="usage-limits">Usage Limits</h2>
+    <p>Your storage, bandwidth, and API usage are subject to the limits of your subscription plan. Current plan limits are displayed on your dashboard. If you exceed your plan limits:</p>
+    <ul>
+        <li>Additional storage usage may be billed at the overage rate specified in your plan.</li>
+        <li>We may throttle API requests that exceed rate limits.</li>
+        <li>We will notify you before taking any action that affects your ability to access stored data.</li>
+    </ul>
+
+    <h2 id="service-level">Service Level Agreement</h2>
+    <p>We target <strong>99.9% monthly uptime</strong> for the stored.ge API, measured as the percentage of successful requests (non-5xx responses) relative to total requests in a calendar month. This excludes:</p>
+    <ul>
+        <li>Scheduled maintenance windows (announced at least 48 hours in advance).</li>
+        <li>Force majeure events.</li>
+        <li>Issues caused by client-side misconfiguration or abuse.</li>
+    </ul>
+    <p>If we fail to meet the 99.9% target in a given month, affected paid customers may request a service credit by contacting support within 30 days. Credits are applied as a percentage of that month's charges proportional to the downtime experienced.</p>
+
+    <h2 id="data-ownership">Data Ownership</h2>
+    <p><strong>You own your data.</strong> We claim no ownership rights over any content you upload to stored.ge. You retain all rights, title, and interest in your objects and metadata. We will not access, use, or disclose the content of your stored objects except:</p>
+    <ul>
+        <li>As necessary to provide the service (storage, delivery, caching).</li>
+        <li>As required by law (with notice to you where permitted).</li>
+    </ul>
+
+    <h2 id="billing">Billing and Payment</h2>
+    <ul>
+        <li>Paid plans are billed monthly in advance via Stripe.</li>
+        <li>You may upgrade or downgrade your plan at any time through the billing page.</li>
+        <li>Refunds are handled on a case-by-case basis; contact support within 14 days of a charge.</li>
+        <li>If payment fails, we will attempt to collect for up to 14 days before suspending your account. Your data is preserved during suspension.</li>
+    </ul>
+
+    <h2 id="termination">Termination</h2>
+    <ul>
+        <li><strong>By you:</strong> You may delete your account at any time through your account settings. Account deletion enters a 30-day grace period during which you can cancel the deletion and recover your data. After the grace period, all data is permanently deleted.</li>
+        <li><strong>By us (AUP violation):</strong> We may suspend or terminate your account immediately for Acceptable Use Policy violations. For severe violations (malware, CSAM, phishing), data may be deleted immediately without a grace period.</li>
+        <li><strong>By us (non-payment):</strong> Accounts suspended for non-payment are retained for 30 days. If payment is not resolved, the account enters the standard deletion process.</li>
+    </ul>
+
+    <h2 id="liability">Limitation of Liability</h2>
+    <p>To the maximum extent permitted by applicable law:</p>
+    <ul>
+        <li>stored.ge is provided "as is" without warranties of any kind, express or implied.</li>
+        <li>Our total liability for any claims arising from or related to this service shall not exceed the amount you paid us in the 12 months preceding the claim.</li>
+        <li>We are not liable for indirect, incidental, special, consequential, or punitive damages, including loss of data, revenue, or business opportunities.</li>
+        <li>We recommend maintaining independent backups of critical data.</li>
+    </ul>
+
+    <h2 id="governing-law">Governing Law and Disputes</h2>
+    <p>These Terms are governed by the laws of the <strong>State of Utah</strong>, United States, without regard to conflict of law principles. Any disputes shall be resolved through:</p>
+    <ol>
+        <li>Good-faith negotiation between the parties (30-day period).</li>
+        <li>If unresolved, binding arbitration under the rules of the American Arbitration Association, conducted in Salt Lake City, Utah.</li>
+    </ol>
+
+    <h2 id="changes">Changes to These Terms</h2>
+    <p>We may update these Terms from time to time. Material changes will be communicated via email at least 30 days before they take effect. Continued use of the service after the effective date constitutes acceptance of the updated Terms.</p>
+
+    <h2 id="contact">Contact</h2>
+    <p>For questions about these Terms:</p>
+    <ul>
+        <li><strong>Email:</strong> support@stored.ge</li>
+        <li><strong>Entity:</strong> FairForge LLC</li>
+        <li><strong>Jurisdiction:</strong> State of Utah, United States</li>
+    </ul>
+</div>
+{{end}}

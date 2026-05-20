@@ -1,0 +1,77 @@
+{{define "title"}}Cookie Policy — stored.ge{{end}}
+{{define "content"}}
+<div class="card">
+    <p class="text-muted">Last updated: June 1, 2026</p>
+    <h1>Cookie Policy</h1>
+    <p>This Cookie Policy explains how FairForge LLC ("stored.ge", "we", "us") uses cookies on the stored.ge website and dashboard.</p>
+
+    <h2 id="contents">Contents</h2>
+    <ul>
+        <li><a href="#what-are-cookies">What Are Cookies</a></li>
+        <li><a href="#cookies-we-use">Cookies We Use</a></li>
+        <li><a href="#no-tracking">No Tracking Cookies</a></li>
+        <li><a href="#lawful-basis">Lawful Basis</a></li>
+        <li><a href="#managing-cookies">Managing Cookies</a></li>
+        <li><a href="#contact">Contact</a></li>
+    </ul>
+
+    <h2 id="what-are-cookies">What Are Cookies</h2>
+    <p>Cookies are small text files placed on your device by your web browser when you visit a website. They are used to remember your preferences, maintain sessions, and provide security features.</p>
+
+    <h2 id="cookies-we-use">Cookies We Use</h2>
+    <p>stored.ge uses only strictly necessary cookies required for the service to function. We use the following cookies:</p>
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Cookie Name</th>
+                <th>Purpose</th>
+                <th>Type</th>
+                <th>Duration</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><code>vaultaire_session</code></td>
+                <td>Maintains your authenticated session after login.</td>
+                <td>HttpOnly, Secure, SameSite=Lax</td>
+                <td>24 hours</td>
+            </tr>
+            <tr>
+                <td><code>csrf_token</code></td>
+                <td>Protects against cross-site request forgery attacks using the double-submit cookie pattern.</td>
+                <td>Secure, SameSite=Lax</td>
+                <td>Session (browser close)</td>
+            </tr>
+            <tr>
+                <td><code>flash</code></td>
+                <td>Displays one-time feedback messages (e.g., "Settings saved") after form submissions.</td>
+                <td>HttpOnly, SameSite=Lax</td>
+                <td>60 seconds</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <h2 id="no-tracking">No Tracking Cookies</h2>
+    <p>stored.ge does <strong>not</strong> use:</p>
+    <ul>
+        <li>Analytics cookies (no Google Analytics, no Plausible, no Matomo).</li>
+        <li>Advertising or remarketing cookies.</li>
+        <li>Third-party cookies of any kind.</li>
+        <li>Fingerprinting or any other cross-site tracking technology.</li>
+    </ul>
+    <p>We do not track your browsing behavior, build advertising profiles, or share any data with ad networks.</p>
+
+    <h2 id="lawful-basis">Lawful Basis</h2>
+    <p>All cookies used by stored.ge are <strong>strictly necessary</strong> for the operation of the service (session management, security, and user feedback). Under GDPR and the ePrivacy Directive, strictly necessary cookies do not require consent. Therefore, no cookie consent banner is displayed.</p>
+
+    <h2 id="managing-cookies">Managing Cookies</h2>
+    <p>You can control cookies through your browser settings. Note that disabling cookies will prevent you from logging in to the stored.ge dashboard, as the session cookie is required for authentication. Clearing cookies will log you out of your current session.</p>
+
+    <h2 id="contact">Contact</h2>
+    <p>For questions about our use of cookies:</p>
+    <ul>
+        <li><strong>Email:</strong> privacy@stored.ge</li>
+        <li><strong>Entity:</strong> FairForge LLC</li>
+    </ul>
+</div>
+{{end}}

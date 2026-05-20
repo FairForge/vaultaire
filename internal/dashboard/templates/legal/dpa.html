@@ -1,0 +1,164 @@
+{{define "title"}}Data Processing Agreement — stored.ge{{end}}
+{{define "content"}}
+<div class="card">
+    <p class="text-muted">Last updated: June 1, 2026</p>
+    <h1>Data Processing Agreement</h1>
+    <p>This Data Processing Agreement ("DPA") supplements the <a href="/legal/terms">Terms of Service</a> and is entered into between the customer identified below ("Controller") and FairForge LLC ("Processor", "stored.ge") pursuant to Article 28 of the General Data Protection Regulation (EU) 2016/679 ("GDPR").</p>
+
+    <h2 id="contents">Contents</h2>
+    <ul>
+        <li><a href="#definitions">Definitions and Roles</a></li>
+        <li><a href="#processing-purposes">Processing Purposes</a></li>
+        <li><a href="#obligations">Processor Obligations</a></li>
+        <li><a href="#security">Security Measures</a></li>
+        <li><a href="#sub-processors">Sub-processors</a></li>
+        <li><a href="#breach-notification">Breach Notification</a></li>
+        <li><a href="#audit-rights">Audit Rights</a></li>
+        <li><a href="#data-return">Data Return and Deletion</a></li>
+        <li><a href="#international-transfers">International Transfers</a></li>
+        <li><a href="#term">Term and Termination</a></li>
+        <li><a href="#countersign">Countersignature</a></li>
+    </ul>
+
+    <h2 id="definitions">Definitions and Roles</h2>
+    <ul>
+        <li><strong>Controller:</strong> The customer who determines the purposes and means of processing personal data by using the stored.ge service.</li>
+        <li><strong>Processor:</strong> FairForge LLC (stored.ge), which processes personal data on behalf of the Controller solely to provide the object storage service.</li>
+        <li><strong>Data Subjects:</strong> Individuals whose personal data is stored as objects or metadata within the Controller's stored.ge account.</li>
+    </ul>
+
+    <h2 id="processing-purposes">Processing Purposes</h2>
+    <p>The Processor processes personal data solely for the following purposes, as instructed by the Controller:</p>
+    <ul>
+        <li><strong>Storage</strong> — persisting objects uploaded by the Controller via the S3-compatible API.</li>
+        <li><strong>Delivery</strong> — serving objects to authorized requesters via API or CDN.</li>
+        <li><strong>Caching</strong> — temporarily caching object metadata for performance optimization.</li>
+    </ul>
+    <p>The Processor does not access, analyze, profile, or otherwise process the content of stored objects beyond the technical operations listed above.</p>
+
+    <h2 id="obligations">Processor Obligations</h2>
+    <p>The Processor shall:</p>
+    <ul>
+        <li>Process personal data only on documented instructions from the Controller.</li>
+        <li>Ensure that personnel authorized to process personal data are bound by confidentiality obligations.</li>
+        <li>Implement appropriate technical and organizational security measures.</li>
+        <li>Assist the Controller in responding to data subject requests (access, portability, erasure, rectification).</li>
+        <li>Assist the Controller with data protection impact assessments where required.</li>
+        <li>Delete or return all personal data upon termination of the service, at the Controller's choice.</li>
+        <li>Make available all information necessary to demonstrate compliance with Article 28.</li>
+    </ul>
+
+    <h2 id="security">Security Measures</h2>
+    <p>The Processor implements the following technical and organizational measures:</p>
+    <ul>
+        <li><strong>Encryption in transit</strong> — all API and dashboard traffic is encrypted via TLS 1.2 or higher.</li>
+        <li><strong>Encryption at rest</strong> — objects are stored on encrypted storage volumes.</li>
+        <li><strong>Access controls</strong> — production access is limited to authorized personnel via SSH key authentication. Customer data access requires S3 credentials (access key + secret key) or authenticated dashboard session.</li>
+        <li><strong>Authentication</strong> — passwords hashed with bcrypt (cost 12), TOTP two-factor authentication available, session tokens are cryptographically random.</li>
+        <li><strong>Monitoring</strong> — access logs retained for 90 days, anomaly detection on API usage patterns.</li>
+        <li><strong>Backups</strong> — daily PostgreSQL backups with 7-day retention, stored in a separate location from production data.</li>
+    </ul>
+
+    <h2 id="sub-processors">Sub-processors</h2>
+    <p>The Controller authorizes the Processor to engage the following sub-processors:</p>
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Sub-processor</th>
+                <th>Purpose</th>
+                <th>Location</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>iDrive Inc.</td>
+                <td>Object storage infrastructure</td>
+                <td>United States</td>
+            </tr>
+            <tr>
+                <td>Stripe Inc.</td>
+                <td>Payment processing</td>
+                <td>United States</td>
+            </tr>
+            <tr>
+                <td>Cloudflare Inc.</td>
+                <td>CDN and DDoS protection</td>
+                <td>Global (edge network)</td>
+            </tr>
+        </tbody>
+    </table>
+    <p>The Processor will notify the Controller at least 30 days before adding or replacing a sub-processor, giving the Controller the opportunity to object.</p>
+
+    <h2 id="breach-notification">Breach Notification</h2>
+    <p>In the event of a personal data breach, the Processor shall:</p>
+    <ul>
+        <li>Notify the Controller without undue delay, and in any event within <strong>72 hours</strong> of becoming aware of the breach.</li>
+        <li>Provide details of the nature of the breach, categories and approximate number of data subjects affected, likely consequences, and measures taken or proposed to mitigate the breach.</li>
+        <li>Cooperate with the Controller in notifying the relevant supervisory authority and affected data subjects where required.</li>
+    </ul>
+
+    <h2 id="audit-rights">Audit Rights</h2>
+    <p>The Controller has the right to audit the Processor's compliance with this DPA. Audits may be conducted:</p>
+    <ul>
+        <li>No more than once per calendar year, with at least 30 days' written notice.</li>
+        <li>During normal business hours, at the Controller's expense.</li>
+        <li>By the Controller or a mutually agreed independent third-party auditor bound by confidentiality.</li>
+    </ul>
+    <p>The Processor will provide reasonable cooperation, including access to relevant documentation, facilities, and personnel.</p>
+
+    <h2 id="data-return">Data Return and Deletion</h2>
+    <p>Upon termination of the service agreement:</p>
+    <ul>
+        <li>The Controller may export all stored data via the S3-compatible API or the data export feature in account settings.</li>
+        <li>After a 30-day grace period following account deletion, the Processor will permanently delete all Controller data from production and backup systems within 90 days.</li>
+        <li>The Processor will provide written confirmation of deletion upon request.</li>
+    </ul>
+
+    <h2 id="international-transfers">International Transfers</h2>
+    <p>Where personal data is transferred outside the European Economic Area, the Processor ensures adequate protection through Standard Contractual Clauses (SCCs) as approved by the European Commission (Commission Implementing Decision (EU) 2021/914). The applicable SCCs are incorporated by reference into this DPA.</p>
+
+    <h2 id="term">Term and Termination</h2>
+    <p>This DPA takes effect when the Controller begins using the stored.ge service and remains in effect for the duration of the service agreement. The data protection obligations in this DPA survive termination of the service agreement until all personal data has been deleted or returned.</p>
+
+    <h2 id="countersign">Countersignature</h2>
+    <p>To execute this DPA, please complete the following and send a signed copy to <strong>privacy@stored.ge</strong>:</p>
+    <table class="table">
+        <tbody>
+            <tr>
+                <td><strong>Customer Name:</strong></td>
+                <td>________________________________________</td>
+            </tr>
+            <tr>
+                <td><strong>Customer Address:</strong></td>
+                <td>________________________________________</td>
+            </tr>
+            <tr>
+                <td><strong>Authorized Signatory:</strong></td>
+                <td>________________________________________</td>
+            </tr>
+            <tr>
+                <td><strong>Signature Date:</strong></td>
+                <td>________________________________________</td>
+            </tr>
+        </tbody>
+    </table>
+    <br>
+    <p><strong>For FairForge LLC:</strong></p>
+    <table class="table">
+        <tbody>
+            <tr>
+                <td><strong>Entity:</strong></td>
+                <td>FairForge LLC</td>
+            </tr>
+            <tr>
+                <td><strong>Address:</strong></td>
+                <td>Salt Lake City, Utah, United States</td>
+            </tr>
+            <tr>
+                <td><strong>Contact:</strong></td>
+                <td>privacy@stored.ge</td>
+            </tr>
+        </tbody>
+    </table>
+</div>
+{{end}}
