@@ -609,6 +609,10 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3
 
 // handleDeleteObject handles DELETE requests
 func (s *Server) handleDeleteObject(w http.ResponseWriter, r *http.Request, req *S3Request) {
+	if err := checkMFADelete(r.Context(), s.db, s.auth, s.mfaService, req.TenantID, req.Bucket, r); err != nil {
+		WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
+		return
+	}
 	adapter := NewS3ToEngine(s.engine, s.db, s.logger)
 	adapter.HandleDelete(w, r, req.Bucket, req.Object)
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"go.uber.org/zap"
@@ -16,9 +17,10 @@ import (
 const maxVersioningBodyBytes = 4096
 
 type VersioningConfiguration struct {
-	XMLName xml.Name `xml:"VersioningConfiguration"`
-	Xmlns   string   `xml:"xmlns,attr,omitempty"`
-	Status  string   `xml:"Status,omitempty"`
+	XMLName   xml.Name `xml:"VersioningConfiguration"`
+	Xmlns     string   `xml:"xmlns,attr,omitempty"`
+	Status    string   `xml:"Status,omitempty"`
+	MfaDelete string   `xml:"MfaDelete,omitempty"`
 }
 
 func (s *Server) handleGetBucketVersioning(w http.ResponseWriter, r *http.Request, req *S3Request) {
@@ -29,11 +31,12 @@ func (s *Server) handleGetBucketVersioning(w http.ResponseWriter, r *http.Reques
 	}
 
 	status := "disabled"
+	var mfaDeleteEnabled bool
 	if s.db != nil {
 		var dbStatus string
 		err := s.db.QueryRowContext(r.Context(),
-			`SELECT versioning_status FROM buckets WHERE tenant_id = $1 AND name = $2`,
-			t.ID, req.Bucket).Scan(&dbStatus)
+			`SELECT versioning_status, mfa_delete_enabled FROM buckets WHERE tenant_id = $1 AND name = $2`,
+			t.ID, req.Bucket).Scan(&dbStatus, &mfaDeleteEnabled)
 		if err == sql.ErrNoRows {
 			reqID := generateRequestID()
 			if suggestion := bucketSuggestion(r.Context(), s.db, t.ID, req.Bucket); suggestion != "" {
@@ -56,6 +59,9 @@ func (s *Server) handleGetBucketVersioning(w http.ResponseWriter, r *http.Reques
 	}
 	if status == "Enabled" || status == "Suspended" {
 		resp.Status = status
+	}
+	if mfaDeleteEnabled {
+		resp.MfaDelete = "Enabled"
 	}
 
 	w.Header().Set("Content-Type", "application/xml")
@@ -83,7 +89,12 @@ func (s *Server) handlePutBucketVersioning(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if config.Status != "Enabled" && config.Status != "Suspended" {
+	if config.Status != "Enabled" && config.Status != "Suspended" && config.Status != "" {
+		WriteS3Error(w, ErrMalformedXML, r.URL.Path, generateRequestID())
+		return
+	}
+
+	if config.Status == "" && config.MfaDelete == "" {
 		WriteS3Error(w, ErrMalformedXML, r.URL.Path, generateRequestID())
 		return
 	}
@@ -93,30 +104,124 @@ func (s *Server) handlePutBucketVersioning(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	result, err := s.db.ExecContext(r.Context(),
-		`UPDATE buckets SET versioning_status = $1, updated_at = NOW()
-		 WHERE tenant_id = $2 AND name = $3`,
-		config.Status, t.ID, req.Bucket)
-	if err != nil {
-		s.logger.Error("update versioning status", zap.Error(err))
-		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-		return
-	}
-	rows, _ := result.RowsAffected()
-	if rows == 0 {
-		reqID := generateRequestID()
-		if suggestion := bucketSuggestion(r.Context(), s.db, t.ID, req.Bucket); suggestion != "" {
-			WriteS3ErrorWithContext(w, ErrNoSuchBucket, r.URL.Path, reqID, WithSuggestion(suggestion))
-		} else {
-			WriteS3Error(w, ErrNoSuchBucket, r.URL.Path, reqID)
+	if config.MfaDelete == "Enabled" {
+		var objectLockEnabled bool
+		err := s.db.QueryRowContext(r.Context(),
+			`SELECT object_lock_enabled FROM buckets WHERE tenant_id = $1 AND name = $2`,
+			t.ID, req.Bucket).Scan(&objectLockEnabled)
+		if err == sql.ErrNoRows {
+			WriteS3Error(w, ErrNoSuchBucket, r.URL.Path, generateRequestID())
+			return
 		}
-		return
+		if err != nil {
+			s.logger.Error("query object lock status", zap.Error(err))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+		if !objectLockEnabled {
+			WriteS3Error(w, ErrInvalidBucketState, r.URL.Path, generateRequestID())
+			return
+		}
+
+		if err := checkMFADelete(r.Context(), s.db, s.auth, s.mfaService, t.ID, req.Bucket, r); err != nil {
+			mfaHeader := r.Header.Get("x-amz-mfa")
+			if mfaHeader == "" {
+				WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
+				return
+			}
+			userID := ""
+			if s.auth != nil {
+				userID = s.auth.GetUserIDByTenantID(r.Context(), t.ID)
+			}
+			if userID == "" {
+				WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
+				return
+			}
+			enabled, _ := s.auth.IsMFAEnabled(r.Context(), userID)
+			if !enabled {
+				WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
+				return
+			}
+			secret, serr := s.auth.GetMFASecret(r.Context(), userID)
+			if serr != nil {
+				WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
+				return
+			}
+			parts := strings.Fields(mfaHeader)
+			code := parts[len(parts)-1]
+			if s.mfaService == nil || !s.mfaService.ValidateCode(secret, code) {
+				WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
+				return
+			}
+		}
+
+		_, err = s.db.ExecContext(r.Context(),
+			`UPDATE buckets SET mfa_delete_enabled = TRUE, updated_at = NOW()
+			 WHERE tenant_id = $1 AND name = $2`,
+			t.ID, req.Bucket)
+		if err != nil {
+			s.logger.Error("enable mfa delete", zap.Error(err))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
 	}
 
-	s.logger.Info("versioning status updated",
-		zap.String("tenant_id", t.ID),
-		zap.String("bucket", req.Bucket),
-		zap.String("status", config.Status))
+	if config.MfaDelete == "Disabled" {
+		if err := checkMFADelete(r.Context(), s.db, s.auth, s.mfaService, t.ID, req.Bucket, r); err != nil {
+			WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
+			return
+		}
+
+		_, err := s.db.ExecContext(r.Context(),
+			`UPDATE buckets SET mfa_delete_enabled = FALSE, updated_at = NOW()
+			 WHERE tenant_id = $1 AND name = $2`,
+			t.ID, req.Bucket)
+		if err != nil {
+			s.logger.Error("disable mfa delete", zap.Error(err))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+	}
+
+	if config.Status != "" {
+		if config.Status == "Suspended" {
+			var mfaDeleteOn bool
+			_ = s.db.QueryRowContext(r.Context(),
+				`SELECT mfa_delete_enabled FROM buckets WHERE tenant_id = $1 AND name = $2`,
+				t.ID, req.Bucket).Scan(&mfaDeleteOn)
+			if mfaDeleteOn {
+				if err := checkMFADelete(r.Context(), s.db, s.auth, s.mfaService, t.ID, req.Bucket, r); err != nil {
+					WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
+					return
+				}
+			}
+		}
+
+		result, err := s.db.ExecContext(r.Context(),
+			`UPDATE buckets SET versioning_status = $1, updated_at = NOW()
+			 WHERE tenant_id = $2 AND name = $3`,
+			config.Status, t.ID, req.Bucket)
+		if err != nil {
+			s.logger.Error("update versioning status", zap.Error(err))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+		rows, _ := result.RowsAffected()
+		if rows == 0 {
+			reqID := generateRequestID()
+			if suggestion := bucketSuggestion(r.Context(), s.db, t.ID, req.Bucket); suggestion != "" {
+				WriteS3ErrorWithContext(w, ErrNoSuchBucket, r.URL.Path, reqID, WithSuggestion(suggestion))
+			} else {
+				WriteS3Error(w, ErrNoSuchBucket, r.URL.Path, reqID)
+			}
+			return
+		}
+
+		s.logger.Info("versioning status updated",
+			zap.String("tenant_id", t.ID),
+			zap.String("bucket", req.Bucket),
+			zap.String("status", config.Status))
+	}
 
 	w.WriteHeader(http.StatusOK)
 }

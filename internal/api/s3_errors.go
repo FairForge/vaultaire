@@ -54,6 +54,7 @@ const (
 	ErrInvalidPresignExpires             = "AuthorizationQueryParametersError_Expires"
 	ErrQuotaExceeded                     = "QuotaExceeded"
 	ErrServiceUnavailable                = "ServiceUnavailable"
+	ErrInvalidBucketState                = "InvalidBucketState"
 )
 
 // Error messages
@@ -91,6 +92,7 @@ var errorMessages = map[string]string{
 	ErrInvalidPresignExpires:             "X-Amz-Expires must be between 1 and 604800 seconds",
 	ErrQuotaExceeded:                     "Storage quota exceeded. Upgrade your plan for more storage.",
 	ErrServiceUnavailable:                "All storage backends are temporarily unavailable. Please retry.",
+	ErrInvalidBucketState:                "The request is not valid for the current state of the bucket.",
 }
 
 // HTTP status codes for errors
@@ -128,6 +130,7 @@ var errorStatusCodes = map[string]int{
 	ErrInvalidPresignExpires:             http.StatusBadRequest,
 	ErrQuotaExceeded:                     http.StatusForbidden,
 	ErrServiceUnavailable:                http.StatusServiceUnavailable,
+	ErrInvalidBucketState:                http.StatusConflict,
 }
 
 // WriteS3Error writes an S3-compatible error response
