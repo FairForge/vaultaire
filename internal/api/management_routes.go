@@ -3,6 +3,7 @@ package api
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -471,6 +472,19 @@ func (s *Server) handleMgmtCreateKey(w http.ResponseWriter, r *http.Request) {
 	if userID == "" {
 		writeManagementError(w, ErrTypeAuthentication, "missing_user", "user not found in token", "")
 		return
+	}
+
+	const maxKeysPerTenant = 50
+	tenantIDForLimit, _ := r.Context().Value(tenantIDKey).(string)
+	if s.db != nil && tenantIDForLimit != "" {
+		var keyCount int
+		_ = s.db.QueryRowContext(r.Context(),
+			"SELECT COUNT(*) FROM api_keys WHERE tenant_id = $1", tenantIDForLimit).Scan(&keyCount)
+		if keyCount >= maxKeysPerTenant {
+			writeManagementError(w, ErrTypeConflict, "key_limit_exceeded",
+				fmt.Sprintf("maximum %d API keys per account", maxKeysPerTenant), "")
+			return
+		}
 	}
 
 	var req struct {

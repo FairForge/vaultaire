@@ -164,8 +164,8 @@ func TestAuditMiddleware(t *testing.T) {
 			{"POST", "/auth/login", EventTypeLogin},
 			{"POST", "/auth/logout", EventTypeLogout},
 			{"POST", "/api-keys", EventTypeAPIKeyCreated},
-			{"PUT", "/bucket/file.txt", EventTypeFileUpload},
-			{"DELETE", "/bucket/file.txt", EventTypeFileDelete},
+			{"PUT", "/bucket/upload.txt", EventTypeFileUpload},
+			{"DELETE", "/bucket/remove.txt", EventTypeFileDelete},
 		}
 
 		for _, tc := range testCases {
