@@ -99,6 +99,7 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		"dpa":     "templates/legal/dpa.html",
 		"cookies": "templates/legal/cookies.html",
 		"aup":     "templates/legal/aup.html",
+		"baa":     "templates/legal/baa.html",
 	}
 	for slug, tmplPath := range legalPages {
 		pageTmpl := template.Must(baseTmpl.Clone())

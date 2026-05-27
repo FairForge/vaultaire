@@ -137,3 +137,27 @@ func TestLegalAUP_ContainsProhibited(t *testing.T) {
 	assert.Contains(t, body, "Prohibited Content")
 	assert.Contains(t, body, "Enforcement")
 }
+
+func TestHandleLegalPage_BAA(t *testing.T) {
+	// Arrange
+	tmpl := legalTmpl(t, `{{define "content"}}`+
+		`<h1>Business Associate Agreement</h1>`+
+		`<h2 id="definitions">1. Definitions</h2>`+
+		`<h2 id="safeguards">3. Safeguards</h2>`+
+		`<h2 id="breach-notification">4. Breach Notification</h2>`+
+		`{{end}}`)
+	handler := handlers.HandleLegalPage(tmpl)
+	req := httptest.NewRequest(http.MethodGet, "/legal/baa", nil)
+	rec := httptest.NewRecorder()
+
+	// Act
+	handler.ServeHTTP(rec, req)
+
+	// Assert
+	require.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.Contains(t, body, "Business Associate")
+	assert.Contains(t, body, "Definitions")
+	assert.Contains(t, body, "Safeguards")
+	assert.Contains(t, body, "Breach Notification")
+}
