@@ -11,6 +11,7 @@ S3-compatible API layer. Translates S3 protocol to engine operations, handles au
 - **s3_buckets.go** — CreateBucket, DeleteBucket, ListBuckets
 - **s3_versioning.go** — Bucket versioning enable/suspend
 - **s3_lock.go** — Object Lock, retention, legal hold
+- **s3_mfa_delete.go** — MFA Delete enforcement (`checkMFADelete` helper, `errMFARequired` sentinel)
 - **s3_multipart.go** — Multipart upload lifecycle
 - **s3_notifications.go** — Bucket notification configuration
 - **s3_copy.go** — CopyObject handler
@@ -161,6 +162,25 @@ JSON REST layer at `/api/v1/manage/` with JWT auth and per-tenant rate limiting.
 Dashboard analytics page at `/dashboard/buckets/{name}/analytics` (handler in `internal/dashboard/handlers/bucket_analytics.go`). Shows 24h/7d/30d downloads + bandwidth, top objects, geographic breakdown, budget gauge. Only linked from bucket objects page for public-read buckets.
 
 Tables: `cdn_access_log`, `cdn_stats_daily` (migration 035).
+
+## MFA Delete (Phase 5.14.3)
+
+S3-compatible MFA Delete enforcement for Object Lock buckets. When `mfa_delete_enabled = TRUE` on a bucket, DELETE operations and versioning suspension require a valid TOTP code in the `x-amz-mfa` header.
+
+**Header format**: `x-amz-mfa: <serial-or-anything> <6-digit-totp-code>` — the serial portion is ignored (tenant already authenticated via S3 credentials); only the last space-separated token is used as the TOTP code.
+
+**`checkMFADelete(ctx, db, authSvc, mfaSvc, tenantID, bucket, r)`** — called from Server-level handlers (not the adapter) to validate MFA before destructive operations. Returns nil if MFA Delete is not enabled or verification succeeds.
+
+**Wiring**:
+- `handleDeleteObject` (s3.go) — checks before creating the adapter (Option B: minimal blast radius)
+- `handlePutBucketVersioning` (s3_versioning.go) — enforces MFA when enabling/disabling MFA Delete or suspending versioning on an MFA-enabled bucket
+- `handleGetBucketVersioning` (s3_versioning.go) — returns `<MfaDelete>Enabled</MfaDelete>` in XML when set
+
+**Constraints**: MFA Delete can only be enabled on buckets with `object_lock_enabled = TRUE`. Attempting to enable on a non-lock bucket returns `InvalidBucketState` (409).
+
+**Error types**: `errMFARequired` (sentinel, maps to AccessDenied), `mfaNotConfiguredError` (MFA not set up on the user account).
+
+Table: `buckets.mfa_delete_enabled` (migration 036).
 
 ## Tenant Context
 
