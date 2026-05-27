@@ -29,6 +29,18 @@ func checkMFADelete(ctx context.Context, db *sql.DB, authSvc *auth.AuthService,
 		return nil
 	}
 
+	return validateMFAHeader(ctx, authSvc, mfaSvc, tenantID, r)
+}
+
+// validateMFAHeader verifies the x-amz-mfa header contains a valid TOTP code
+// for the tenant's owning user. Used both by checkMFADelete (for already-enabled
+// buckets) and directly by PutBucketVersioning when enabling/disabling MFA Delete.
+func validateMFAHeader(ctx context.Context, authSvc *auth.AuthService,
+	mfaSvc *auth.MFAService, tenantID string, r *http.Request) error {
+	if authSvc == nil || mfaSvc == nil {
+		return errMFARequired
+	}
+
 	mfaHeader := r.Header.Get("x-amz-mfa")
 	if mfaHeader == "" {
 		return errMFARequired

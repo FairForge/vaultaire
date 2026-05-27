@@ -235,6 +235,44 @@ func TestMFADelete_Enabled_InvalidCode_Denied(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code)
 }
 
+func TestMFADelete_EnableRequiresMFA(t *testing.T) {
+	f := setupMFADeleteFixture(t)
+	f.enableUserMFA(t)
+
+	s3Req := &S3Request{Bucket: f.bucket, TenantID: f.tenantID}
+
+	// Without MFA header — should be denied
+	body := `<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+		<MfaDelete>Enabled</MfaDelete>
+	</VersioningConfiguration>`
+
+	req := httptest.NewRequest("PUT", "/"+f.bucket+"?versioning", bytes.NewReader([]byte(body)))
+	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	req = req.WithContext(ctx)
+
+	w := httptest.NewRecorder()
+	f.server.handlePutBucketVersioning(w, req, s3Req)
+	assert.Equal(t, http.StatusForbidden, w.Code, "enable MFA Delete without header should be denied")
+
+	// With valid MFA header — should succeed
+	req = httptest.NewRequest("PUT", "/"+f.bucket+"?versioning", bytes.NewReader([]byte(body)))
+	req.Header.Set("x-amz-mfa", "arn:aws:iam::serial 123456")
+	ctx = tenant.WithTenant(req.Context(), f.tenant)
+	req = req.WithContext(ctx)
+
+	w = httptest.NewRecorder()
+	f.server.handlePutBucketVersioning(w, req, s3Req)
+	assert.Equal(t, http.StatusOK, w.Code, "enable MFA Delete with valid MFA should succeed")
+
+	// Verify it's actually enabled
+	var enabled bool
+	err := f.db.QueryRow(
+		`SELECT mfa_delete_enabled FROM buckets WHERE tenant_id = $1 AND name = $2`,
+		f.tenantID, f.bucket).Scan(&enabled)
+	require.NoError(t, err)
+	assert.True(t, enabled, "mfa_delete_enabled should be TRUE after enable")
+}
+
 func TestMFADelete_EnableRequiresObjectLock(t *testing.T) {
 	f := setupMFADeleteFixture(t)
 	f.enableUserMFA(t)

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"go.uber.org/zap"
@@ -123,36 +122,9 @@ func (s *Server) handlePutBucketVersioning(w http.ResponseWriter, r *http.Reques
 			return
 		}
 
-		if err := checkMFADelete(r.Context(), s.db, s.auth, s.mfaService, t.ID, req.Bucket, r); err != nil {
-			mfaHeader := r.Header.Get("x-amz-mfa")
-			if mfaHeader == "" {
-				WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
-				return
-			}
-			userID := ""
-			if s.auth != nil {
-				userID = s.auth.GetUserIDByTenantID(r.Context(), t.ID)
-			}
-			if userID == "" {
-				WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
-				return
-			}
-			enabled, _ := s.auth.IsMFAEnabled(r.Context(), userID)
-			if !enabled {
-				WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
-				return
-			}
-			secret, serr := s.auth.GetMFASecret(r.Context(), userID)
-			if serr != nil {
-				WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
-				return
-			}
-			parts := strings.Fields(mfaHeader)
-			code := parts[len(parts)-1]
-			if s.mfaService == nil || !s.mfaService.ValidateCode(secret, code) {
-				WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
-				return
-			}
+		if err := validateMFAHeader(r.Context(), s.auth, s.mfaService, t.ID, r); err != nil {
+			WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
+			return
 		}
 
 		_, err = s.db.ExecContext(r.Context(),
@@ -167,7 +139,7 @@ func (s *Server) handlePutBucketVersioning(w http.ResponseWriter, r *http.Reques
 	}
 
 	if config.MfaDelete == "Disabled" {
-		if err := checkMFADelete(r.Context(), s.db, s.auth, s.mfaService, t.ID, req.Bucket, r); err != nil {
+		if err := validateMFAHeader(r.Context(), s.auth, s.mfaService, t.ID, r); err != nil {
 			WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
 			return
 		}
