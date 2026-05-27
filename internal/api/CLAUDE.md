@@ -210,6 +210,39 @@ Transparent server-side encryption at rest using ML-KEM-768 (post-quantum key en
 
 **Tables**: `tenant_encryption_keys` (keypairs), `buckets.sse_enabled`, `object_head_cache.encryption_algorithm` (migration 037)
 
+## SSE-C Customer-Provided Encryption (Phase 5.14.8)
+
+Server-side encryption with customer-provided 256-bit AES keys. Stateless — key is never stored or logged.
+
+**S3 headers** (required on PUT, GET, HEAD for SSE-C objects):
+- `x-amz-server-side-encryption-customer-algorithm: AES256`
+- `x-amz-server-side-encryption-customer-key: <base64-encoded 32-byte key>`
+- `x-amz-server-side-encryption-customer-key-MD5: <base64-encoded MD5 of raw key>`
+
+**PUT flow** (s3_engine_adapter.go HandlePut):
+1. `HasSSECHeaders(r)` check runs BEFORE SSE-S3 check (mutually exclusive)
+2. `ParseSSECHeaders(r)` validates algorithm, decodes key, verifies MD5
+3. ReadAll plaintext through TeeReader (ETag on plaintext)
+4. `SSECEncrypt(key, plaintext)` → AES-256-GCM ciphertext (28B overhead)
+5. Key zeroed immediately after encryption
+6. `encryption_algorithm = "AES256-SSE-C"` stored in object_head_cache
+
+**GET flow** (s3_engine_adapter.go HandleGet):
+1. If `encryption_algorithm == "AES256-SSE-C"` and no SSE-C headers → 403
+2. Parse headers, decrypt with `SSECDecrypt`, key zeroed after
+3. Wrong key → 403 with "does not match" message
+4. Response header: `x-amz-server-side-encryption-customer-algorithm: AES256`
+
+**HEAD flow** (s3.go handleHeadObject):
+- If `encryption_algorithm == "AES256-SSE-C"` and no SSE-C headers → 403
+- With headers → 200 + `x-amz-server-side-encryption-customer-algorithm: AES256`
+
+**Multipart**: SSE-C headers on InitiateMultipartUpload → 501 NotImplemented
+
+**CopyObject**: SSE-C not handled — deferred to future phase
+
+**Key files**: `internal/crypto/ssec.go` (encrypt/decrypt/header parsing), `internal/crypto/CLAUDE.md`
+
 ## Per-Bucket Region Selection (Phase 5.14.7)
 
 Each bucket has a `region` column (default `us-west-1`). Region is immutable after creation.

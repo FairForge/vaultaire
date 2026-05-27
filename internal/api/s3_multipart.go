@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/tenant"
 
@@ -61,6 +62,12 @@ func (s *Server) handleInitiateMultipartUpload(w http.ResponseWriter, r *http.Re
 	t, err := tenant.FromContext(r.Context())
 	if err != nil || t == nil {
 		WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
+		return
+	}
+
+	if crypto.HasSSECHeaders(r) {
+		WriteS3ErrorWithContext(w, ErrNotImplemented, r.URL.Path, generateRequestID(),
+			WithSuggestion("SSE-C is not yet supported for multipart uploads."))
 		return
 	}
 
