@@ -1,0 +1,165 @@
+{{define "title"}}GDPR Compliance — stored.ge{{end}}
+{{define "content"}}
+<div class="card">
+    <p class="text-muted">Last updated: June 1, 2026</p>
+    <h1>GDPR Compliance</h1>
+    <p>stored.ge is committed to compliance with the General Data Protection Regulation (EU) 2016/679 ("GDPR"). This page describes how our service maps to GDPR requirements. For the full legal framework, see our <a href="/legal/privacy">Privacy Policy</a> and <a href="/legal/dpa">Data Processing Agreement</a>.</p>
+
+    <h2 id="contents">Contents</h2>
+    <ul>
+        <li><a href="#principles">Article 5 — Data Processing Principles</a></li>
+        <li><a href="#erasure">Article 17 — Right to Erasure</a></li>
+        <li><a href="#portability">Article 20 — Data Portability</a></li>
+        <li><a href="#by-design">Article 25 — Data Protection by Design</a></li>
+        <li><a href="#processing">Article 28 — Data Processing</a></li>
+        <li><a href="#security">Article 32 — Security of Processing</a></li>
+        <li><a href="#breach-notification">Articles 33/34 — Breach Notification</a></li>
+        <li><a href="#data-residency">Data Residency</a></li>
+        <li><a href="#sub-processors">Sub-processors</a></li>
+        <li><a href="#contact">Contact</a></li>
+    </ul>
+
+    <h2 id="principles">Article 5 — Data Processing Principles</h2>
+    <p>stored.ge adheres to the core GDPR principles in the design and operation of our service:</p>
+    <ul>
+        <li><strong>Data minimization:</strong> We store only the objects you upload and the minimal account metadata required to operate the service (email, hashed password, billing information). We do not collect analytics, behavioral data, or advertising profiles.</li>
+        <li><strong>Purpose limitation:</strong> Your data is processed solely for the purpose of providing object storage and delivery. We do not access, analyze, or profile the content of stored objects.</li>
+        <li><strong>Storage limitation:</strong> Account data is retained only for the duration of your account. Upon account deletion, a 30-day grace period allows data recovery, after which all data is permanently destroyed.</li>
+    </ul>
+
+    <h2 id="erasure">Article 17 — Right to Erasure</h2>
+    <p>Data subjects have the right to request deletion of their personal data. stored.ge supports this through:</p>
+    <ul>
+        <li><strong>Account deletion:</strong> Available via the dashboard settings page or the management API (<code>DELETE /account</code>). Initiates a 30-day grace period, after which all account data, stored objects, and metadata are permanently deleted.</li>
+        <li><strong>Object deletion:</strong> Individual objects can be deleted at any time via the S3-compatible API (<code>DELETE</code> operation) or dashboard.</li>
+        <li><strong>Cancellation:</strong> Account deletion can be cancelled during the 30-day grace period via the dashboard settings page.</li>
+    </ul>
+    <p><strong>Object Lock exemption:</strong> Objects protected by Object Lock (WORM retention) cannot be deleted until the retention period expires. This is a legal compliance mechanism — if you use Object Lock for regulatory retention, erasure requests are deferred until the retention period concludes.</p>
+
+    <h2 id="portability">Article 20 — Data Portability</h2>
+    <p>stored.ge provides full data portability through multiple channels:</p>
+    <ul>
+        <li><strong>S3-compatible API:</strong> All stored objects are accessible via the standard S3 protocol. You can export your entire data set using any S3-compatible tool — <code>aws-cli</code>, <code>boto3</code>, <code>rclone</code>, <code>s3cmd</code>, Cyberduck, and others — with zero modification.</li>
+        <li><strong>GDPR data export:</strong> The dashboard settings page includes a one-click data export that downloads a JSON file containing all account data: profile, tenant information, quotas, buckets, objects, API keys, and 90 days of bandwidth history.</li>
+        <li><strong>No proprietary formats:</strong> Objects are stored as-is. We do not wrap, transform, or encode your data in any proprietary format.</li>
+    </ul>
+
+    <h2 id="by-design">Article 25 — Data Protection by Design</h2>
+    <p>Privacy and security are built into stored.ge from the ground up:</p>
+    <ul>
+        <li><strong>Encryption at rest:</strong> All stored objects are encrypted using server-side encryption (SSE-S3) with AES-256-GCM. Key encapsulation uses ML-KEM-768, a post-quantum key encapsulation mechanism standardized by NIST.</li>
+        <li><strong>Encryption in transit:</strong> All connections are encrypted via TLS 1.2 or higher. HSTS headers are enforced on all responses.</li>
+        <li><strong>Scoped API keys:</strong> API keys can be scoped to specific buckets and operations, following the principle of least privilege.</li>
+        <li><strong>Two-factor authentication:</strong> TOTP-based 2FA is available for all accounts and enforced for administrative access.</li>
+        <li><strong>No tracking:</strong> stored.ge does not use analytics cookies, advertising trackers, or third-party behavioral tracking scripts.</li>
+    </ul>
+
+    <h2 id="processing">Article 28 — Data Processing</h2>
+    <p>When you use stored.ge, FairForge LLC acts as a <strong>Data Processor</strong> on your behalf. Our processing obligations are formalized in our <a href="/legal/dpa">Data Processing Agreement</a>, which covers:</p>
+    <ul>
+        <li>Processing only on documented instructions from the Controller.</li>
+        <li>Confidentiality obligations for all authorized personnel.</li>
+        <li>Technical and organizational security measures.</li>
+        <li>Assistance with data subject requests and data protection impact assessments.</li>
+        <li>Audit rights for the Controller.</li>
+    </ul>
+    <p>To execute a DPA for your organization, visit our <a href="/legal/dpa">DPA page</a> or contact <strong>privacy@stored.ge</strong>.</p>
+
+    <h2 id="security">Article 32 — Security of Processing</h2>
+    <p>stored.ge implements appropriate technical and organizational measures to ensure a level of security appropriate to the risk:</p>
+    <ul>
+        <li><strong>Encryption:</strong> AES-256-GCM at rest with ML-KEM-768 key encapsulation; TLS 1.2+ in transit.</li>
+        <li><strong>Access controls:</strong> Per-tenant credentials, scoped API keys, role-based dashboard access.</li>
+        <li><strong>Integrity:</strong> ETag (MD5) verification on every upload, Object Lock (WORM) for immutable retention, MFA Delete for versioned objects.</li>
+        <li><strong>Audit logging:</strong> API operations, account access, and administrative actions are logged.</li>
+        <li><strong>Breach notification:</strong> Automated breach tracking with 72-hour notification deadline, severity assessment, and affected user notification (see below).</li>
+        <li><strong>Backups:</strong> Daily PostgreSQL backups with 7-day retention in a separate location.</li>
+    </ul>
+
+    <h2 id="breach-notification">Articles 33/34 — Breach Notification</h2>
+    <p>stored.ge maintains a breach response workflow compliant with GDPR Articles 33 and 34:</p>
+    <ul>
+        <li><strong>72-hour notification:</strong> In the event of a personal data breach, we will notify affected Controllers without undue delay, and in no case later than 72 hours after becoming aware of the breach.</li>
+        <li><strong>Severity assessment:</strong> Each incident is assessed for severity and scope to determine notification obligations to supervisory authorities and affected individuals.</li>
+        <li><strong>Notification content:</strong> Breach notifications include the nature of the breach, categories and approximate number of affected data subjects, likely consequences, and measures taken or proposed to address the breach.</li>
+        <li><strong>Data subject notification:</strong> When a breach is likely to result in a high risk to the rights and freedoms of individuals, affected data subjects are notified directly.</li>
+    </ul>
+    <p>For HIPAA-covered entities, our <a href="/legal/baa">Business Associate Agreement</a> provides additional breach notification commitments.</p>
+
+    <h2 id="data-residency">Data Residency</h2>
+    <p>stored.ge currently offers storage in the following regions through our infrastructure partner iDrive e2:</p>
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Region</th>
+                <th>Location</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>us-west-1</td>
+                <td>United States (West)</td>
+            </tr>
+            <tr>
+                <td>us-east-1</td>
+                <td>United States (East)</td>
+            </tr>
+            <tr>
+                <td>eu-west-1</td>
+                <td>Ireland</td>
+            </tr>
+            <tr>
+                <td>eu-central-2</td>
+                <td>Frankfurt, Germany</td>
+            </tr>
+            <tr>
+                <td>eu-west-2</td>
+                <td>London, United Kingdom</td>
+            </tr>
+            <tr>
+                <td>eu-south-1</td>
+                <td>Paris, France</td>
+            </tr>
+        </tbody>
+    </table>
+    <p>Per-bucket region selection is planned to allow EU-only storage for organizations that require data to remain within the European Economic Area. International data transfers are governed by Standard Contractual Clauses as described in our <a href="/legal/dpa">DPA</a>.</p>
+
+    <h2 id="sub-processors">Sub-processors</h2>
+    <p>stored.ge engages the following sub-processors in delivering the service:</p>
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Sub-processor</th>
+                <th>Purpose</th>
+                <th>Location</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>iDrive Inc.</td>
+                <td>Object storage infrastructure</td>
+                <td>United States / EU</td>
+            </tr>
+            <tr>
+                <td>Stripe Inc.</td>
+                <td>Payment processing and billing</td>
+                <td>United States</td>
+            </tr>
+            <tr>
+                <td>Resend Inc.</td>
+                <td>Transactional email delivery</td>
+                <td>United States</td>
+            </tr>
+        </tbody>
+    </table>
+    <p>Changes to sub-processors are communicated with at least 30 days' notice. The full sub-processor list and notification process are documented in our <a href="/legal/dpa">DPA</a>.</p>
+
+    <h2 id="contact">Contact</h2>
+    <p>For GDPR-related inquiries, data subject requests, or to exercise your rights:</p>
+    <ul>
+        <li><strong>Data Protection Officer:</strong> dpo@stored.ge</li>
+        <li><strong>Compliance:</strong> compliance@stored.ge</li>
+        <li><strong>Entity:</strong> FairForge LLC, Salt Lake City, Utah, United States</li>
+    </ul>
+</div>
+{{end}}

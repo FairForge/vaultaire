@@ -138,6 +138,50 @@ func TestLegalAUP_ContainsProhibited(t *testing.T) {
 	assert.Contains(t, body, "Enforcement")
 }
 
+func TestHandleLegalPage_GDPR(t *testing.T) {
+	// Arrange
+	tmpl := legalTmpl(t, `{{define "content"}}`+
+		`<h1>GDPR Compliance</h1>`+
+		`<h2 id="portability">Article 20 — Data Portability</h2>`+
+		`<h2 id="breach-notification">Articles 33/34 — Breach Notification</h2>`+
+		`{{end}}`)
+	handler := handlers.HandleLegalPage(tmpl)
+	req := httptest.NewRequest(http.MethodGet, "/legal/gdpr", nil)
+	rec := httptest.NewRecorder()
+
+	// Act
+	handler.ServeHTTP(rec, req)
+
+	// Assert
+	require.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.Contains(t, body, "GDPR")
+	assert.Contains(t, body, "Data Portability")
+	assert.Contains(t, body, "Breach Notification")
+}
+
+func TestHandleLegalPage_DataAct(t *testing.T) {
+	// Arrange
+	tmpl := legalTmpl(t, `{{define "content"}}`+
+		`<h1>EU Data Act Compliance</h1>`+
+		`<h2 id="switching">Article 23 — Switching Between Providers</h2>`+
+		`<h2 id="interoperability">Article 25 — Interoperability</h2>`+
+		`{{end}}`)
+	handler := handlers.HandleLegalPage(tmpl)
+	req := httptest.NewRequest(http.MethodGet, "/legal/data-act", nil)
+	rec := httptest.NewRecorder()
+
+	// Act
+	handler.ServeHTTP(rec, req)
+
+	// Assert
+	require.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.Contains(t, body, "Data Act")
+	assert.Contains(t, body, "Switching")
+	assert.Contains(t, body, "Interoperability")
+}
+
 func TestHandleLegalPage_BAA(t *testing.T) {
 	// Arrange
 	tmpl := legalTmpl(t, `{{define "content"}}`+
