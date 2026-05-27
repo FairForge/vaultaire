@@ -28,10 +28,11 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 | 034 | Free tier defaults: `tenant_quotas` column defaults changed to tier='free', storage_limit_bytes=5368709120 (5 GB). Existing rows unchanged. |
 | 035 | CDN analytics: `cdn_access_log` (per-request log), `cdn_stats_daily` (tenant+bucket+date rollup) |
 | 036 | MFA Delete: `mfa_delete_enabled` BOOLEAN on `buckets` (default FALSE) |
+| 038 | Account deletion: `deletion_scheduled_at` + `deletion_reason` on users, `account_exports` table |
 
 ## Key Tables
 
-- **users** — `id (UUID)`, `email`, `password_hash`, `company`, `status`, `role`, `stripe_customer_id`
+- **users** — `id (UUID)`, `email`, `password_hash`, `company`, `status`, `role`, `stripe_customer_id`, `deletion_scheduled_at`, `deletion_reason`
 - **tenants** — `id`, `name`, `email`, `access_key`, `secret_key`, `slug`, `slug_locked`, `stripe_customer_id`, `stripe_subscription_id`, `subscription_status`, `plan`, `suspended_at`
 - **api_keys** — `id (UUID)`, `user_id → users`, `name`, `key_id`, `secret_hash`, `secret_key`, `permissions` (JSONB, default `["*"]`), `bucket_scope` (TEXT[]), `ip_allowlist` (TEXT[]), `expires_at`
 - **tenant_quotas** — `tenant_id (PK)`, `storage_limit_bytes`, `storage_used_bytes`, `tier`
@@ -52,6 +53,7 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 - **webhook_deliveries** — `id (PK)`, `webhook_id → webhook_endpoints`, `event_id → events`, `status`, `response_code`, `response_body`, `latency_ms`, `retry_count`, `next_retry_at`, `created_at` — delivery tracking
 - **cdn_access_log** — `id (BIGSERIAL PK)`, `tenant_id`, `bucket`, `object_key`, `bytes_sent`, `country`, `referer`, `accessed_at` — raw CDN access events
 - **cdn_stats_daily** — `(tenant_id, bucket, date) PK`, `requests`, `bytes_sent`, `unique_objects` — daily CDN rollup
+- **account_exports** — `id (UUID PK)`, `user_id → users`, `tenant_id`, `status` (pending/processing/completed/failed), `format`, `file_path`, `file_size_bytes`, `error_message`, `created_at`, `completed_at`, `expires_at` — GDPR data export tracking
 
 ## Connection
 

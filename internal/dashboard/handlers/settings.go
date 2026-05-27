@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"database/sql"
 	"html/template"
 	"net/http"
@@ -34,6 +35,9 @@ func HandleSettings(tmpl *template.Template, authSvc *auth.AuthService, db *sql.
 
 		// Active sessions list.
 		data["SessionRows"] = loadSessionRows(r, sessions, sd.UserID, logger)
+
+		// Account deletion status.
+		populateDeletionStatus(r.Context(), db, sd.UserID, data)
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := tmpl.ExecuteTemplate(w, "base", data); err != nil {
@@ -244,5 +248,18 @@ func populateProfile(authSvc *auth.AuthService, db *sql.DB, r *http.Request, sd 
 		if err == nil && prefs != nil {
 			data["EmailNotifications"] = prefs.EmailNotifications
 		}
+	}
+}
+
+func populateDeletionStatus(ctx context.Context, db *sql.DB, userID string, data map[string]any) {
+	if db == nil {
+		return
+	}
+	var scheduledAt sql.NullTime
+	err := db.QueryRowContext(ctx,
+		`SELECT deletion_scheduled_at FROM users WHERE id = $1`, userID).Scan(&scheduledAt)
+	if err == nil && scheduledAt.Valid {
+		data["DeletionScheduled"] = true
+		data["DeletionDate"] = scheduledAt.Time.Format("January 2, 2006")
 	}
 }

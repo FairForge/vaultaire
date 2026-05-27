@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
@@ -309,15 +310,16 @@ func TestVerifyPresignedURL_PathWithSpecialChars(t *testing.T) {
 }
 
 func TestPresignedURL_Integration(t *testing.T) {
-	db, mock, err := sqlmock.New()
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
+	mock.MatchExpectationsInOrder(false)
 
 	tempDir, err := os.MkdirTemp("", "presign-integration-*")
 	require.NoError(t, err)
 	defer func() { _ = os.RemoveAll(tempDir) }()
 
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	driver := drivers.NewLocalDriver(tempDir, logger)
 	eng := engine.NewEngine(nil, logger, nil)
 	eng.AddDriver("local", driver)
@@ -340,15 +342,59 @@ func TestPresignedURL_Integration(t *testing.T) {
 	testContent := "hello from presigned upload"
 	objectKey := "test-upload.txt"
 
-	// PUT
+	tenantRow := sqlmock.NewRows([]string{"secret_key", "id"}).
+		AddRow(testSecretKey, testPresignTenantID)
+	suspendedRow := sqlmock.NewRows([]string{"suspended_at"})
+
+	// Auth expectations (PUT + GET each do tenant lookup + suspended check)
 	mock.ExpectQuery(`SELECT secret_key, id FROM tenants WHERE access_key`).
 		WithArgs(testAccessKey).
-		WillReturnRows(sqlmock.NewRows([]string{"secret_key", "id"}).
-			AddRow(testSecretKey, testPresignTenantID))
+		WillReturnRows(tenantRow)
 	mock.ExpectQuery(`SELECT suspended_at FROM tenants WHERE id`).
 		WithArgs(testPresignTenantID).
-		WillReturnRows(sqlmock.NewRows([]string{"suspended_at"}))
+		WillReturnRows(suspendedRow)
 
+	tenantRow2 := sqlmock.NewRows([]string{"secret_key", "id"}).
+		AddRow(testSecretKey, testPresignTenantID)
+	suspendedRow2 := sqlmock.NewRows([]string{"suspended_at"})
+	mock.ExpectQuery(`SELECT secret_key, id FROM tenants WHERE access_key`).
+		WithArgs(testAccessKey).
+		WillReturnRows(tenantRow2)
+	mock.ExpectQuery(`SELECT suspended_at FROM tenants WHERE id`).
+		WithArgs(testPresignTenantID).
+		WillReturnRows(suspendedRow2)
+
+	// HandlePut internals: object_head_cache lookup, versioning check, cache upsert
+	mock.ExpectQuery(`SELECT etag FROM object_head_cache`).
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery(`SELECT versioning_status FROM buckets`).
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec(`INSERT INTO object_head_cache`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	// HandleGet internals: versioning check, object_head_cache lookup
+	mock.ExpectQuery(`SELECT versioning_status FROM buckets`).
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery(`SELECT content_type, size_bytes, etag`).
+		WillReturnError(sql.ErrNoRows)
+
+	// Async fire-and-forget: emitEvent inserts, notification/webhook dispatch queries.
+	// These may or may not execute before the test ends. Pre-register expectations
+	// so async goroutines don't race with mock setup on the main goroutine.
+	mock.ExpectExec(`INSERT INTO events`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`INSERT INTO events`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT target_url, event_filter FROM bucket_notifications`).
+		WillReturnRows(sqlmock.NewRows([]string{"target_url", "event_filter"}))
+	mock.ExpectQuery(`SELECT target_url, event_filter FROM bucket_notifications`).
+		WillReturnRows(sqlmock.NewRows([]string{"target_url", "event_filter"}))
+	mock.ExpectQuery(`SELECT id, url, event_filter, secret FROM webhook_endpoints`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "url", "event_filter", "secret"}))
+	mock.ExpectQuery(`SELECT id, url, event_filter, secret FROM webhook_endpoints`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "url", "event_filter", "secret"}))
+
+	// PUT
 	now := time.Now().UTC()
 	putQ := signPresignedURL("PUT", "/"+bucket+"/"+objectKey, "localhost:8000", testAccessKey, testSecretKey, 3600, now)
 
@@ -362,14 +408,6 @@ func TestPresignedURL_Integration(t *testing.T) {
 	assert.Equal(t, http.StatusOK, putW.Code, "PUT via presigned URL should succeed")
 
 	// GET
-	mock.ExpectQuery(`SELECT secret_key, id FROM tenants WHERE access_key`).
-		WithArgs(testAccessKey).
-		WillReturnRows(sqlmock.NewRows([]string{"secret_key", "id"}).
-			AddRow(testSecretKey, testPresignTenantID))
-	mock.ExpectQuery(`SELECT suspended_at FROM tenants WHERE id`).
-		WithArgs(testPresignTenantID).
-		WillReturnRows(sqlmock.NewRows([]string{"suspended_at"}))
-
 	now = time.Now().UTC()
 	getQ := signPresignedURL("GET", "/"+bucket+"/"+objectKey, "localhost:8000", testAccessKey, testSecretKey, 3600, now)
 

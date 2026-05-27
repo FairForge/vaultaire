@@ -186,6 +186,11 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		dr.Post("/settings/mfa/enable", handlers.HandleMFAEnable(settingsTmpl, deps.Auth, deps.MFA, deps.Logger))
 		dr.Post("/settings/mfa/disable", handlers.HandleMFADisable(settingsTmpl, deps.Auth, deps.Logger))
 
+		// GDPR: data export + account deletion.
+		dr.Post("/settings/export", handlers.HandleExportData(deps.DB, deps.Logger))
+		dr.Post("/settings/delete-account", handlers.HandleRequestDeletion(deps.DB, deps.Sessions, deps.Logger))
+		dr.Post("/settings/cancel-deletion", handlers.HandleCancelDeletion(deps.DB, deps.Logger))
+
 		// Email verification resend.
 		dr.Post("/settings/resend-verify", handlers.HandleResendVerification(deps.Auth, deps.Logger, deps.Email, deps.BaseURL))
 
