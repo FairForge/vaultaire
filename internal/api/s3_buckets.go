@@ -127,13 +127,21 @@ func (s *Server) CreateBucket(w http.ResponseWriter, r *http.Request) {
 		zap.String("bucket", bucket),
 		zap.String("tenant", tenantID))
 
-	if s.db != nil && s.quotaManager != nil && tenantID != "default" {
-		tier, _ := s.quotaManager.GetTier(ctx, tenantID)
-		if usage.IsFreeTier(tier) {
-			var count int
-			_ = s.db.QueryRowContext(ctx,
-				"SELECT COUNT(*) FROM buckets WHERE tenant_id = $1", tenantID).Scan(&count)
-			if count >= usage.FreeTierLimits.MaxBuckets {
+	if s.db != nil && tenantID != "default" {
+		var count int
+		_ = s.db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM buckets WHERE tenant_id = $1", tenantID).Scan(&count)
+
+		const maxBucketsPerTenant = 1000
+		if count >= maxBucketsPerTenant {
+			WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
+				WithSuggestion(fmt.Sprintf("Maximum %d buckets per account", maxBucketsPerTenant)))
+			return
+		}
+
+		if s.quotaManager != nil {
+			tier, _ := s.quotaManager.GetTier(ctx, tenantID)
+			if usage.IsFreeTier(tier) && count >= usage.FreeTierLimits.MaxBuckets {
 				WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
 					WithSuggestion(fmt.Sprintf("Free tier allows %d bucket. Upgrade at https://stored.ge/dashboard/billing", usage.FreeTierLimits.MaxBuckets)))
 				return

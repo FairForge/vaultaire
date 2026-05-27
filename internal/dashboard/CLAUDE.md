@@ -12,11 +12,13 @@ Web dashboard for stored.ge customers and admins. Uses htmx + Go templates, embe
 - **templates/customer/** — customer page templates (`dashboard.html` = overview)
 - **static/css/** — `style.css`
 - **static/js/** — `htmx.min.js` (v2.0.4, vendored), `dashboard.js` (shared tab switching + copy-to-clipboard)
-- **middleware/** — 4 middleware files:
+- **middleware/** — 6 middleware files:
   - `csrf.go` — double-submit cookie CSRF on all POST forms
   - `flash.go` — cookie-based flash messages ("Settings saved", "Key revoked", etc.)
   - `ratelimit.go` — login rate limiting (5 attempts/min per IP, covers 2FA)
   - `recovery.go` — panic recovery, renders self-contained 500 HTML (no template dependency)
+  - `security_headers.go` — CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy on dashboard/admin routes only
+  - `admin_mfa.go` — RequireAdminMFA redirects admins without TOTP to MFA setup (SOC 2 CC6.1)
 
 ## Error Handling (Phase 5.9)
 

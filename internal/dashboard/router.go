@@ -109,6 +109,7 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 	// --- Customer dashboard (session required) ---
 	r.Route("/dashboard", func(dr chi.Router) {
 		dr.Use(middleware.Recovery(deps.Logger))
+		dr.Use(middleware.SecurityHeaders)
 		dr.Use(dashauth.RequireSession(deps.Sessions))
 		dr.Use(middleware.CSRF)
 		dr.Use(middleware.Flash)
@@ -231,8 +232,10 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 
 	r.Route("/admin", func(ar chi.Router) {
 		ar.Use(middleware.Recovery(deps.Logger))
+		ar.Use(middleware.SecurityHeaders)
 		ar.Use(dashauth.RequireAdmin(deps.Sessions))
 		ar.Use(middleware.CSRF)
+		ar.Use(middleware.RequireAdminMFA(deps.Auth))
 		ar.NotFound(handlers.HandleNotFound(deps.Logger))
 		ar.Get("/", handlers.HandleAdminOverview(adminTmpl, deps.DB, deps.Logger))
 		ar.Get("/tenants", handlers.HandleTenantList(tenantListTmpl, deps.DB, deps.Logger))

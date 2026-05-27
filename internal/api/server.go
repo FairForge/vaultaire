@@ -231,6 +231,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	s.rbacService = NewRBACService(logger)
 
 	s.router.Use(s.requestIDMiddleware)
+	s.router.Use(s.requestLimitsMiddleware)
 	s.router.Use(s.versionMiddleware)
 	s.router.Use(s.rbacService.InjectUserContext)
 	s.router.Use(s.loggingMiddleware)
@@ -244,10 +245,11 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	cdnRouter.Options("/{slug}/{bucket}/*", s.handleCDNRequest)
 
 	s.httpServer = &http.Server{
-		Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
-		Handler:      CDNHostRouter(cdnRouter, s.router),
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		Addr:           fmt.Sprintf(":%d", cfg.Server.Port),
+		Handler:        CDNHostRouter(cdnRouter, s.router),
+		ReadTimeout:    30 * time.Second,
+		WriteTimeout:   30 * time.Second,
+		MaxHeaderBytes: 1 << 20, // 1 MB
 	}
 
 	return s
@@ -805,6 +807,46 @@ func (s *Server) versionMiddleware(next http.Handler) http.Handler {
 		if cv := r.Header.Get("X-Vaultaire-Version"); cv != "" {
 			s.logger.Debug("client API version", zap.String("client_version", cv))
 		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// requestLimitsMiddleware caps request body sizes to prevent resource
+// exhaustion. S3 PUT/POST uploads are exempt (bounded by engine + quota).
+// Management API mutations get 10 MB. Everything else gets 64 KB.
+func (s *Server) requestLimitsMiddleware(next http.Handler) http.Handler {
+	const (
+		defaultLimit    int64 = 64 << 10 // 64 KB
+		managementLimit int64 = 10 << 20 // 10 MB
+	)
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body == nil || r.Body == http.NoBody {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		path := r.URL.Path
+		method := r.Method
+
+		isS3Upload := (method == "PUT" || method == "POST") &&
+			!strings.HasPrefix(path, "/api/") &&
+			!strings.HasPrefix(path, "/dashboard") &&
+			!strings.HasPrefix(path, "/admin") &&
+			!strings.HasPrefix(path, "/auth/") &&
+			!strings.HasPrefix(path, "/webhook/")
+
+		if isS3Upload {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		limit := defaultLimit
+		if strings.HasPrefix(path, "/api/") && (method == "PUT" || method == "POST" || method == "PATCH") {
+			limit = managementLimit
+		}
+
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
 		next.ServeHTTP(w, r)
 	})
 }
