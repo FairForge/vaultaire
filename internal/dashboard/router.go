@@ -92,6 +92,20 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 			deps.Auth, deps.Sessions, deps.DB, deps.Logger))
 	}
 
+	// --- Legal pages (public) ---
+	legalPages := map[string]string{
+		"privacy": "templates/legal/privacy.html",
+		"terms":   "templates/legal/terms.html",
+		"dpa":     "templates/legal/dpa.html",
+		"cookies": "templates/legal/cookies.html",
+		"aup":     "templates/legal/aup.html",
+	}
+	for slug, tmplPath := range legalPages {
+		pageTmpl := template.Must(baseTmpl.Clone())
+		template.Must(pageTmpl.ParseFS(Templates, tmplPath))
+		r.Get("/legal/"+slug, handlers.HandleLegalPage(pageTmpl))
+	}
+
 	// --- Customer dashboard (session required) ---
 	r.Route("/dashboard", func(dr chi.Router) {
 		dr.Use(middleware.Recovery(deps.Logger))

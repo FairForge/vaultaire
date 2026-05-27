@@ -48,6 +48,11 @@ Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`,
 | `/register` | GET | none | Registration page |
 | `/register` | POST | none | Create user+tenant, create session, redirect to /dashboard |
 | `/logout` | GET | none | Delete session, clear cookie, redirect to /login |
+| `/legal/privacy` | GET | none | Privacy Policy (GDPR-compliant) |
+| `/legal/terms` | GET | none | Terms of Service |
+| `/legal/dpa` | GET | none | Data Processing Agreement (Article 28) |
+| `/legal/cookies` | GET | none | Cookie Policy |
+| `/legal/aup` | GET | none | Acceptable Use Policy |
 | `/dashboard/` | GET | session | Overview: storage gauge, bandwidth, stats, activity |
 | `/dashboard/buckets` | GET | session | Bucket list with counts + sizes |
 | `/dashboard/buckets` | POST | session | Create new bucket (validates name, creates directory) |
