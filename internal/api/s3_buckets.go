@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/xml"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/auth"
+	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/FairForge/vaultaire/internal/usage"
 	"go.uber.org/zap"
@@ -149,6 +151,31 @@ func (s *Server) CreateBucket(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Parse region: header takes precedence, then XML body, then default.
+	region := r.Header.Get("X-Stored-Region")
+	if region == "" {
+		region = r.Header.Get("x-amz-bucket-region")
+	}
+	if region == "" && r.ContentLength > 0 {
+		body, readErr := io.ReadAll(io.LimitReader(r.Body, 4096))
+		if readErr == nil && len(body) > 0 {
+			var cfg struct {
+				XMLName            xml.Name `xml:"CreateBucketConfiguration"`
+				LocationConstraint string   `xml:"LocationConstraint"`
+			}
+			if xml.Unmarshal(body, &cfg) == nil && cfg.LocationConstraint != "" {
+				region = cfg.LocationConstraint
+			}
+		}
+	}
+	if region == "" {
+		region = "us-west-1"
+	}
+	if !drivers.IsValidRegion(region) {
+		WriteS3Error(w, ErrInvalidLocationConstraint, r.URL.Path, generateRequestID())
+		return
+	}
+
 	// Create container directory
 	dirPath, safe := safeBucketPath("/tmp/vaultaire", tenantID, bucket)
 	if !safe {
@@ -164,10 +191,10 @@ func (s *Server) CreateBucket(w http.ResponseWriter, r *http.Request) {
 	if s.db != nil {
 		sseDefault := s.sseService != nil
 		_, dbErr := s.db.ExecContext(ctx, `
-			INSERT INTO buckets (tenant_id, name, visibility, sse_enabled)
-			VALUES ($1, $2, 'private', $3)
+			INSERT INTO buckets (tenant_id, name, visibility, sse_enabled, region)
+			VALUES ($1, $2, 'private', $3, $4)
 			ON CONFLICT (tenant_id, name) DO NOTHING
-		`, tenantID, bucket, sseDefault)
+		`, tenantID, bucket, sseDefault, region)
 		if dbErr != nil {
 			s.logger.Error("failed to persist bucket",
 				zap.Error(dbErr), zap.String("bucket", bucket))
@@ -176,9 +203,68 @@ func (s *Server) CreateBucket(w http.ResponseWriter, r *http.Request) {
 		auth.EnsureTenantSlug(ctx, s.db, tenantID, s.logger)
 	}
 
+	w.Header().Set("x-amz-bucket-region", region)
 	emitEvent(ctx, s.db, s.logger, "bucket.created", tenantID, map[string]interface{}{
 		"bucket": bucket,
+		"region": region,
 	})
+	w.WriteHeader(http.StatusOK)
+}
+
+// LocationConstraintResponse is the S3 GetBucketLocation response.
+type LocationConstraintResponse struct {
+	XMLName  xml.Name `xml:"LocationConstraint"`
+	Location string   `xml:",chardata"`
+}
+
+// handleGetBucketLocation returns the region constraint for a bucket.
+func (s *Server) handleGetBucketLocation(w http.ResponseWriter, r *http.Request, req *S3Request) {
+	t, err := tenant.FromContext(r.Context())
+	if err != nil || t == nil {
+		WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
+		return
+	}
+
+	var region string
+	if s.db != nil {
+		err := s.db.QueryRowContext(r.Context(),
+			`SELECT region FROM buckets WHERE tenant_id = $1 AND name = $2`,
+			t.ID, req.Bucket).Scan(&region)
+		if err != nil {
+			WriteS3Error(w, ErrNoSuchBucket, r.URL.Path, generateRequestID())
+			return
+		}
+	} else {
+		region = "us-west-1"
+	}
+
+	resp := LocationConstraintResponse{Location: region}
+	w.Header().Set("Content-Type", "application/xml")
+	w.Header().Set("x-amz-bucket-region", region)
+	if err := xml.NewEncoder(w).Encode(resp); err != nil {
+		s.logger.Error("encode location response", zap.Error(err))
+	}
+}
+
+// handleHeadBucket handles S3 HEAD bucket — returns 200 if bucket exists.
+func (s *Server) handleHeadBucket(w http.ResponseWriter, r *http.Request, req *S3Request) {
+	t, err := tenant.FromContext(r.Context())
+	if err != nil || t == nil {
+		WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
+		return
+	}
+
+	if s.db != nil {
+		var region string
+		err := s.db.QueryRowContext(r.Context(),
+			`SELECT region FROM buckets WHERE tenant_id = $1 AND name = $2`,
+			t.ID, req.Bucket).Scan(&region)
+		if err != nil {
+			WriteS3Error(w, ErrNoSuchBucket, r.URL.Path, generateRequestID())
+			return
+		}
+		w.Header().Set("x-amz-bucket-region", region)
+	}
 	w.WriteHeader(http.StatusOK)
 }
 

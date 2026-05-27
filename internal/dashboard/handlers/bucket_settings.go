@@ -11,6 +11,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/auth"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/FairForge/vaultaire/internal/dashboard/middleware"
+	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 )
@@ -40,12 +41,13 @@ func HandleBucketSettings(tmpl *template.Template, db *sql.DB, logger *zap.Logge
 		corsOrigins := "*"
 		cacheMaxAge := 3600
 		slug := ""
+		region := "us-west-1"
 
 		if db != nil {
 			_ = db.QueryRowContext(r.Context(),
-				`SELECT visibility, cors_origins, cache_max_age_secs
+				`SELECT visibility, cors_origins, cache_max_age_secs, region
 				 FROM buckets WHERE tenant_id = $1 AND name = $2`,
-				sd.TenantID, bucketName).Scan(&vis, &corsOrigins, &cacheMaxAge)
+				sd.TenantID, bucketName).Scan(&vis, &corsOrigins, &cacheMaxAge, &region)
 
 			_ = db.QueryRowContext(r.Context(),
 				`SELECT COALESCE(slug, '') FROM tenants WHERE id = $1`,
@@ -67,6 +69,9 @@ func HandleBucketSettings(tmpl *template.Template, db *sql.DB, logger *zap.Logge
 		data["CORSOrigins"] = corsOrigins
 		data["CacheMaxAge"] = cacheMaxAge
 		data["Slug"] = slug
+		data["Region"] = region
+		data["RegionDisplay"] = drivers.RegionDisplayName(region)
+		data["IsEURegion"] = drivers.IsEURegion(region)
 
 		if vis == "public-read" && slug != "" {
 			data["CDNBaseURL"] = cdnBaseHost + slug + "/" + bucketName

@@ -40,6 +40,12 @@ Core orchestration layer — connects the API layer to storage drivers. This is 
 | `failover.go` | `FailoverManager`, `BackendCircuitBreaker` | Per-backend circuit breaker (5 failures/60s → open, 30s → half-open → probe) + ordered failover execution |
 | `storage_class.go` | `ResolveStorageClass`, `BackendToStorageClass` | S3 storage class ↔ backend name mapping (STANDARD→idrive, GLACIER→geyser, etc.) |
 
+## Per-Bucket Region Routing (Phase 5.14.7)
+
+`GetDriver(name string) (Driver, bool)` — returns a named driver from the registry. Used by the S3 adapter to route PUT operations directly to a region-specific iDrive driver (e.g., `idrive-eu-west-1`) when a bucket has a non-default region.
+
+`HintBackend(container, artifact, backend string)` — seeds `objectBackends` so GET routes to the correct backend without a failed failover attempt. The S3 adapter calls this with `backend_name` from `object_head_cache` on every GET to ensure correct routing after restart.
+
 ## Circuit Breaker (Phase 5.12.4)
 
 Each registered backend gets an independent `BackendCircuitBreaker`:

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
+	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/usage"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
@@ -126,6 +127,17 @@ func HandleCreateBucket(tmpl *template.Template, db *sql.DB, dataPath string, lo
 			}
 		}
 
+		// Validate region selection.
+		region := strings.TrimSpace(r.FormValue("region"))
+		if region == "" {
+			region = "us-west-1"
+		}
+		if !drivers.IsValidRegion(region) {
+			data["CreateError"] = "Invalid region."
+			renderBucketList(w, tmpl, db, sd, data, logger)
+			return
+		}
+
 		// Create the directory under the data path.
 		if dataPath != "" {
 			dirPath := filepath.Join(dataPath, name)
@@ -145,10 +157,10 @@ func HandleCreateBucket(tmpl *template.Template, db *sql.DB, dataPath string, lo
 
 		if db != nil {
 			_, dbErr := db.ExecContext(r.Context(), `
-				INSERT INTO buckets (tenant_id, name, visibility)
-				VALUES ($1, $2, 'private')
+				INSERT INTO buckets (tenant_id, name, visibility, region)
+				VALUES ($1, $2, 'private', $3)
 				ON CONFLICT (tenant_id, name) DO NOTHING
-			`, sd.TenantID, name)
+			`, sd.TenantID, name, region)
 			if dbErr != nil {
 				logger.Error("persist bucket to DB", zap.Error(dbErr))
 			}

@@ -415,6 +415,53 @@ func TestDashboardJS_Exists(t *testing.T) {
 	assert.Contains(t, string(data), "btn-copy")
 }
 
+func TestHandleCreateBucket_WithRegion(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires database")
+	}
+	db := testDashDB(t)
+	defer func() { _ = db.Close() }()
+	cleanupDashBucketData(t, db)
+	defer cleanupDashBucketData(t, db)
+
+	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key) VALUES ('test-dash-r1', 'Region Co', 'r1@test.com', 'VK-dr1', 'SK-dr1') ON CONFLICT DO NOTHING`)
+	require.NoError(t, err)
+
+	tmpDir := t.TempDir()
+	tmpl := testBucketsTemplate(t)
+	handler := HandleCreateBucket(tmpl, db, tmpDir, zap.NewNop())
+
+	form := url.Values{"name": {"eu-dash-bucket"}, "region": {"eu-west-1"}}
+	req := injectSessionWithTenant(httptest.NewRequest("POST", "/dashboard/buckets",
+		strings.NewReader(form.Encode())), "test-dash-r1")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "eu-dash-bucket")
+
+	var region string
+	err = db.QueryRow(`SELECT region FROM buckets WHERE tenant_id = 'test-dash-r1' AND name = 'eu-dash-bucket'`).Scan(&region)
+	require.NoError(t, err)
+	assert.Equal(t, "eu-west-1", region)
+}
+
+func TestHandleCreateBucket_InvalidRegion(t *testing.T) {
+	tmpl := testBucketsTemplate(t)
+	handler := HandleCreateBucket(tmpl, nil, t.TempDir(), zap.NewNop())
+
+	form := url.Values{"name": {"bad-region-bucket"}, "region": {"ap-southeast-1"}}
+	req := injectSession(httptest.NewRequest("POST", "/dashboard/buckets",
+		strings.NewReader(form.Encode())))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "Invalid region")
+}
+
 func TestListBuckets_Dashboard_IncludesEmptyBuckets(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires database")

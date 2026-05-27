@@ -110,6 +110,8 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 		case "GET":
 			if _, ok := req.Query["versioning"]; ok {
 				req.Operation = "GetBucketVersioning"
+			} else if _, ok := req.Query["location"]; ok {
+				req.Operation = "GetBucketLocation"
 			} else if _, ok := req.Query["notification"]; ok {
 				req.Operation = "GetBucketNotification"
 			} else if _, ok := req.Query["object-lock"]; ok {
@@ -461,6 +463,10 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		s.handleListParts(cw, r, s3Req.Bucket, s3Req.Object)
 	case "ListMultipartUploads":
 		s.handleListMultipartUploads(cw, r, s3Req.Bucket)
+	case "GetBucketLocation":
+		s.handleGetBucketLocation(cw, r, s3Req)
+	case "HeadBucket":
+		s.handleHeadBucket(cw, r, s3Req)
 	case "GetBucketVersioning":
 		s.handleGetBucketVersioning(cw, r, s3Req)
 	case "PutBucketVersioning":

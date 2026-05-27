@@ -616,6 +616,23 @@ func (e *CoreEngine) buildCandidateList(preferred string) []string {
 	return candidates
 }
 
+// GetDriver returns a named driver if it is registered.
+func (e *CoreEngine) GetDriver(name string) (Driver, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	d, ok := e.drivers[name]
+	return d, ok
+}
+
+// HintBackend seeds the objectBackends map so Get routes to the correct
+// backend without a failed attempt against the primary. The S3 adapter
+// calls this with the backend_name read from object_head_cache on GET.
+func (e *CoreEngine) HintBackend(container, artifact, backend string) {
+	if backend != "" {
+		e.objectBackends.Store(objectKey(container, artifact), backend)
+	}
+}
+
 // GetFailoverStatus returns circuit breaker states for all backends.
 func (e *CoreEngine) GetFailoverStatus() map[string]string {
 	return e.failover.GetAllStatuses()

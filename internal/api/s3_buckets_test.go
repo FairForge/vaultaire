@@ -220,6 +220,144 @@ func TestCreateBucket_ValidNames(t *testing.T) {
 	}
 }
 
+func TestCreateBucket_WithRegionHeader(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires database")
+	}
+	db := testS3DB(t)
+	defer func() { _ = db.Close() }()
+	cleanupS3BucketData(t, db)
+	defer cleanupS3BucketData(t, db)
+
+	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key) VALUES ('test-s3-r1', 'Region Co', 'r1@test.com', 'VK-r1', 'SK-r1') ON CONFLICT DO NOTHING`)
+	require.NoError(t, err)
+
+	s := s3ServerWithDB(t, db)
+	defer func() { _ = os.RemoveAll("/tmp/vaultaire/test-s3-r1") }()
+
+	req := httptest.NewRequest("PUT", "/eu-region-bucket", nil)
+	req.Header.Set("X-Stored-Region", "eu-west-1")
+	req = withTenantCtx(req, "test-s3-r1")
+	w := httptest.NewRecorder()
+
+	s.CreateBucket(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "eu-west-1", w.Header().Get("x-amz-bucket-region"))
+
+	var region string
+	err = db.QueryRow(`SELECT region FROM buckets WHERE tenant_id = 'test-s3-r1' AND name = 'eu-region-bucket'`).Scan(&region)
+	require.NoError(t, err)
+	assert.Equal(t, "eu-west-1", region)
+}
+
+func TestCreateBucket_InvalidRegion(t *testing.T) {
+	s := &Server{logger: zap.NewNop(), db: nil}
+	defer func() { _ = os.RemoveAll("/tmp/vaultaire/default/bad-region-bucket") }()
+
+	req := httptest.NewRequest("PUT", "/bad-region-bucket", nil)
+	req.Header.Set("X-Stored-Region", "ap-southeast-1")
+	w := httptest.NewRecorder()
+
+	s.CreateBucket(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "InvalidLocationConstraint")
+}
+
+func TestCreateBucket_DefaultRegion(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires database")
+	}
+	db := testS3DB(t)
+	defer func() { _ = db.Close() }()
+	cleanupS3BucketData(t, db)
+	defer cleanupS3BucketData(t, db)
+
+	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key) VALUES ('test-s3-r2', 'Default Co', 'r2@test.com', 'VK-r2', 'SK-r2') ON CONFLICT DO NOTHING`)
+	require.NoError(t, err)
+
+	s := s3ServerWithDB(t, db)
+	defer func() { _ = os.RemoveAll("/tmp/vaultaire/test-s3-r2") }()
+
+	req := httptest.NewRequest("PUT", "/default-region-bucket", nil)
+	req = withTenantCtx(req, "test-s3-r2")
+	w := httptest.NewRecorder()
+
+	s.CreateBucket(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var region string
+	err = db.QueryRow(`SELECT region FROM buckets WHERE tenant_id = 'test-s3-r2' AND name = 'default-region-bucket'`).Scan(&region)
+	require.NoError(t, err)
+	assert.Equal(t, "us-west-1", region)
+}
+
+func TestCreateBucket_XMLLocationConstraint(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires database")
+	}
+	db := testS3DB(t)
+	defer func() { _ = db.Close() }()
+	cleanupS3BucketData(t, db)
+	defer cleanupS3BucketData(t, db)
+
+	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key) VALUES ('test-s3-r3', 'XML Co', 'r3@test.com', 'VK-r3', 'SK-r3') ON CONFLICT DO NOTHING`)
+	require.NoError(t, err)
+
+	s := s3ServerWithDB(t, db)
+	defer func() { _ = os.RemoveAll("/tmp/vaultaire/test-s3-r3") }()
+
+	body := `<CreateBucketConfiguration><LocationConstraint>eu-central-2</LocationConstraint></CreateBucketConfiguration>`
+	req := httptest.NewRequest("PUT", "/xml-region-bucket", strings.NewReader(body))
+	req.Header.Set("Content-Length", "100")
+	req = withTenantCtx(req, "test-s3-r3")
+	w := httptest.NewRecorder()
+
+	s.CreateBucket(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var region string
+	err = db.QueryRow(`SELECT region FROM buckets WHERE tenant_id = 'test-s3-r3' AND name = 'xml-region-bucket'`).Scan(&region)
+	require.NoError(t, err)
+	assert.Equal(t, "eu-central-2", region)
+}
+
+func TestGetBucketLocation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires database")
+	}
+	db := testS3DB(t)
+	defer func() { _ = db.Close() }()
+	cleanupS3BucketData(t, db)
+	defer cleanupS3BucketData(t, db)
+
+	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key) VALUES ('test-s3-r4', 'Loc Co', 'r4@test.com', 'VK-r4', 'SK-r4') ON CONFLICT DO NOTHING`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO buckets (tenant_id, name, region) VALUES ('test-s3-r4', 'located-bucket', 'eu-south-1') ON CONFLICT DO NOTHING`)
+	require.NoError(t, err)
+
+	s := s3ServerWithDB(t, db)
+
+	req := httptest.NewRequest("GET", "/located-bucket?location", nil)
+	req = withTenantCtx(req, "test-s3-r4")
+	w := httptest.NewRecorder()
+
+	s3Req := &S3Request{Bucket: "located-bucket", Operation: "GetBucketLocation"}
+	s.handleGetBucketLocation(w, req, s3Req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Header().Get("Content-Type"), "application/xml")
+	assert.Equal(t, "eu-south-1", w.Header().Get("x-amz-bucket-region"))
+
+	var resp LocationConstraintResponse
+	err = xml.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.Equal(t, "eu-south-1", resp.Location)
+}
+
 func TestListBuckets_NoDB_FallsBackToFilesystem(t *testing.T) {
 	s := &Server{logger: zap.NewNop(), db: nil}
 
