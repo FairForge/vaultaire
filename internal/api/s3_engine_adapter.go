@@ -2,6 +2,7 @@ package api
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/md5" // #nosec G501 — S3 spec requires MD5 for ETags
 	"database/sql"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"go.uber.org/zap"
@@ -21,10 +23,11 @@ import (
 
 // S3ToEngine adapts S3 requests to engine operations.
 type S3ToEngine struct {
-	engine    engine.Engine
-	db        *sql.DB
-	logger    *zap.Logger
-	notifySvc *NotificationDispatcher
+	engine     engine.Engine
+	db         *sql.DB
+	logger     *zap.Logger
+	notifySvc  *NotificationDispatcher
+	sseService *crypto.SSEService
 }
 
 // NewS3ToEngine creates a new adapter
@@ -207,13 +210,14 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	var cachedUpdatedAt time.Time
 	var cachedMetadata []byte
 	var cachedBackendName string
+	var cachedEncAlgo string
 	var cacheHit bool
 	if a.db != nil {
 		err := a.db.QueryRowContext(r.Context(), `
-			SELECT content_type, size_bytes, etag, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, '')
+			SELECT content_type, size_bytes, etag, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, '')
 			FROM object_head_cache
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-			t.ID, bucket, artifact).Scan(&cachedContentType, &cachedSize, &cachedETag, &cachedUpdatedAt, &cachedMetadata, &cachedBackendName)
+			t.ID, bucket, artifact).Scan(&cachedContentType, &cachedSize, &cachedETag, &cachedUpdatedAt, &cachedMetadata, &cachedBackendName, &cachedEncAlgo)
 		if err == nil {
 			cacheHit = true
 		}
@@ -258,6 +262,27 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	}
 	defer func() { _ = reader.Close() }()
 
+	var dataReader io.Reader = reader
+	if a.sseService != nil && cachedEncAlgo != "" {
+		encBytes, readErr := io.ReadAll(reader)
+		if readErr != nil {
+			a.logger.Error("failed to read encrypted object", zap.Error(readErr))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+		plaintext, decErr := a.sseService.DecryptBytes(r.Context(), t.ID, encBytes)
+		if decErr != nil {
+			a.logger.Error("SSE-S3 decryption failed", zap.Error(decErr))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+		dataReader = bytes.NewReader(plaintext)
+	}
+
+	if cachedEncAlgo != "" {
+		w.Header().Set("x-amz-server-side-encryption", "AES256")
+	}
+
 	rangeHeader := r.Header.Get("Range")
 	if rangeHeader != "" && cacheHit && cachedSize > 0 {
 		rng, parseErr := parseRangeHeader(rangeHeader, cachedSize)
@@ -269,7 +294,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		if w.Header().Get("x-amz-version-id") == "" {
 			w.Header().Set("x-amz-version-id", "null")
 		}
-		if err := serveRange(w, reader, rng, cachedSize, contentType); err != nil {
+		if err := serveRange(w, dataReader, rng, cachedSize, contentType); err != nil {
 			a.logger.Error("range serve failed",
 				zap.Error(err),
 				zap.String("container", container),
@@ -299,7 +324,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		setS3MetadataHeaders(w, cachedMetadata)
 	}
 
-	written, err := io.Copy(w, reader)
+	written, err := io.Copy(w, dataReader)
 	if err != nil {
 		a.logger.Error("failed to stream artifact",
 			zap.Error(err),
@@ -422,6 +447,38 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	hasher := md5.New() // #nosec G401 — S3 spec requires MD5 for ETags
 	hashingBody := io.TeeReader(body, hasher)
 
+	metadataSize := size
+	var encryptionAlgorithm string
+	shouldEncrypt := a.sseService != nil && size > 0 && size <= crypto.MaxEncryptableSize &&
+		(r.Header.Get("x-amz-server-side-encryption") == "AES256" ||
+			isBucketSSEEnabled(r.Context(), a.db, t.ID, bucket))
+
+	if shouldEncrypt {
+		if err := a.sseService.EnsureTenantKey(r.Context(), t.ID); err != nil {
+			a.logger.Error("failed to ensure tenant encryption key", zap.Error(err))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+
+		plaintext, readErr := io.ReadAll(hashingBody)
+		if readErr != nil {
+			a.logger.Error("failed to read plaintext for encryption", zap.Error(readErr))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+
+		ciphertext, encErr := a.sseService.EncryptBytes(r.Context(), t.ID, plaintext)
+		if encErr != nil {
+			a.logger.Error("SSE-S3 encryption failed", zap.Error(encErr))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+
+		hashingBody = bytes.NewReader(ciphertext)
+		size = int64(len(ciphertext))
+		encryptionAlgorithm = crypto.SSEAlgorithm
+	}
+
 	storageClass := r.Header.Get("x-amz-storage-class")
 	putOpts := []engine.PutOption{engine.WithContentLength(size)}
 	if storageClass != "" {
@@ -460,16 +517,17 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	if a.db != nil {
 		_, dbErr := a.db.ExecContext(r.Context(), `
 			INSERT INTO object_head_cache
-				(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+				(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
 			ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
-				size_bytes   = EXCLUDED.size_bytes,
-				etag         = EXCLUDED.etag,
-				content_type = EXCLUDED.content_type,
-				backend_name = EXCLUDED.backend_name,
-				metadata     = EXCLUDED.metadata,
-				updated_at   = NOW()
-		`, t.ID, bucket, artifact, size, etag, contentType, backendName, metaJSON)
+				size_bytes            = EXCLUDED.size_bytes,
+				etag                  = EXCLUDED.etag,
+				content_type          = EXCLUDED.content_type,
+				backend_name          = EXCLUDED.backend_name,
+				metadata              = EXCLUDED.metadata,
+				encryption_algorithm  = EXCLUDED.encryption_algorithm,
+				updated_at            = NOW()
+		`, t.ID, bucket, artifact, metadataSize, etag, contentType, backendName, metaJSON, encryptionAlgorithm)
 		if dbErr != nil {
 			a.logger.Error("failed to cache object metadata",
 				zap.Error(dbErr),
@@ -501,13 +559,16 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 				size_bytes = EXCLUDED.size_bytes, etag = EXCLUDED.etag,
 				content_type = EXCLUDED.content_type, is_latest = TRUE,
 				is_delete_marker = FALSE, backend_name = EXCLUDED.backend_name`,
-			t.ID, bucket, artifact, versionID, size, etag, contentType, backendName)
+			t.ID, bucket, artifact, versionID, metadataSize, etag, contentType, backendName)
 	}
 
 	applyObjectLockOnPut(r.Context(), a.db, t.ID, bucket, artifact, r)
 
 	w.Header().Set("ETag", fmt.Sprintf(`"%s"`, etag))
 	w.Header().Set("x-amz-request-id", generateRequestID())
+	if encryptionAlgorithm != "" {
+		w.Header().Set("x-amz-server-side-encryption", "AES256")
+	}
 	if versionID != "" {
 		w.Header().Set("x-amz-version-id", versionID)
 	}
@@ -521,7 +582,8 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		zap.String("etag", etag),
 		zap.String("version_id", versionID),
 		zap.Bool("aws_chunked", chunked),
-		zap.Int64("size", size))
+		zap.Bool("encrypted", encryptionAlgorithm != ""),
+		zap.Int64("size", metadataSize))
 
 	a.notifySvc.Fire(t.ID, bucket, "s3:ObjectCreated:Put", object, size, etag)
 	emitEvent(r.Context(), a.db, a.logger, "object.created", t.ID, map[string]interface{}{
@@ -643,6 +705,17 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 	emitEvent(r.Context(), a.db, a.logger, "object.deleted", t.ID, map[string]interface{}{
 		"bucket": bucket, "key": object,
 	})
+}
+
+func isBucketSSEEnabled(ctx context.Context, db *sql.DB, tenantID, bucket string) bool {
+	if db == nil {
+		return false
+	}
+	var enabled bool
+	err := db.QueryRowContext(ctx,
+		"SELECT sse_enabled FROM buckets WHERE tenant_id = $1 AND name = $2",
+		tenantID, bucket).Scan(&enabled)
+	return err == nil && enabled
 }
 
 // HandleList processes S3 LIST requests

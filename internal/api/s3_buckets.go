@@ -154,11 +154,12 @@ func (s *Server) CreateBucket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.db != nil {
+		sseDefault := s.sseService != nil
 		_, dbErr := s.db.ExecContext(ctx, `
-			INSERT INTO buckets (tenant_id, name, visibility)
-			VALUES ($1, $2, 'private')
+			INSERT INTO buckets (tenant_id, name, visibility, sse_enabled)
+			VALUES ($1, $2, 'private', $3)
 			ON CONFLICT (tenant_id, name) DO NOTHING
-		`, tenantID, bucket)
+		`, tenantID, bucket, sseDefault)
 		if dbErr != nil {
 			s.logger.Error("failed to persist bucket",
 				zap.Error(dbErr), zap.String("bucket", bucket))

@@ -18,6 +18,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/billing"
 	"github.com/FairForge/vaultaire/internal/compliance"
 	"github.com/FairForge/vaultaire/internal/config"
+	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/dashboard"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/FairForge/vaultaire/internal/docs"
@@ -68,6 +69,7 @@ type Server struct {
 	githubOAuth      *oauth2.Config
 	mfaService       *auth.MFAService
 	mfaPendingStore  *dashboard.MFAPendingStore
+	sseService       *crypto.SSEService
 	cdnRateLimiter   *RateLimiter
 	cdnAnalytics     *CDNAnalyticsTracker
 	emailSender      email.Sender
@@ -152,6 +154,16 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// MFA service for TOTP generation and validation.
 	s.mfaService = auth.NewMFAService("stored.ge")
 	s.mfaPendingStore = dashboard.NewMFAPendingStore()
+
+	if masterKey := os.Getenv("ENCRYPTION_MASTER_KEY"); masterKey != "" && s.db != nil {
+		sseSvc, sseErr := crypto.NewSSEService(s.db, masterKey)
+		if sseErr != nil {
+			logger.Error("failed to initialize SSE-S3 service", zap.Error(sseErr))
+		} else {
+			s.sseService = sseSvc
+			logger.Info("SSE-S3 encryption service initialized (ML-KEM-768+AES-256-GCM)")
+		}
+	}
 
 	s.auditLogger = auth.NewAuditLogger()
 	s.auth.SetAuditLogger(s.auditLogger)

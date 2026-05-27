@@ -182,6 +182,32 @@ S3-compatible MFA Delete enforcement for Object Lock buckets. When `mfa_delete_e
 
 Table: `buckets.mfa_delete_enabled` (migration 036).
 
+## SSE-S3 Server-Side Encryption (Phase 5.14.4)
+
+Transparent server-side encryption at rest using ML-KEM-768 (post-quantum key encapsulation) + AES-256-GCM. Activated by setting `ENCRYPTION_MASTER_KEY` env var.
+
+**Activation**: per-request via `x-amz-server-side-encryption: AES256` header, or per-bucket via `sse_enabled` column (defaults to TRUE for new buckets when SSE is available).
+
+**PUT flow** (s3_engine_adapter.go HandlePut):
+1. Check `shouldEncrypt`: sseService != nil AND (header present OR bucket sse_enabled) AND size > 0 AND size <= 256 MiB
+2. EnsureTenantKey (idempotent — creates ML-KEM-768 keypair if missing)
+3. ReadAll plaintext through TeeReader (computes ETag on plaintext)
+4. EncryptBytes → ciphertext (plaintext + 1117B overhead)
+5. engine.Put with ciphertext; object_head_cache stores plaintext size + encryption_algorithm
+
+**GET flow** (s3_engine_adapter.go HandleGet):
+1. Query encryption_algorithm from object_head_cache
+2. engine.Get → encrypted blob
+3. If encrypted: ReadAll + DecryptBytes → plaintext reader
+4. Serve plaintext (range requests work on decrypted data)
+
+**HEAD flow** (s3.go handleHeadObject):
+- Returns plaintext size from cache + `x-amz-server-side-encryption: AES256` header
+
+**Key files**: `internal/crypto/sse_s3.go` (service), `internal/crypto/CLAUDE.md` (crypto docs)
+
+**Tables**: `tenant_encryption_keys` (keypairs), `buckets.sse_enabled`, `object_head_cache.encryption_algorithm` (migration 037)
+
 ## Tenant Context
 
 Most handlers use `tenant.FromContext(r.Context())` to get the authenticated tenant. The `S3Request.TenantID` field is also set for convenience.

@@ -496,6 +496,7 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 // handleGetObject handles S3 GET requests
 func (s *Server) handleGetObject(w http.ResponseWriter, r *http.Request, req *S3Request) {
 	adapter := NewS3ToEngine(s.engine, s.db, s.logger)
+	adapter.sseService = s.sseService
 
 	s.logger.Debug("S3 GET translating to engine",
 		zap.String("s3.bucket", req.Bucket),
@@ -527,12 +528,13 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	var updatedAt time.Time
 	var metadataJSON []byte
 	var backendName string
+	var encAlgo string
 
 	err = s.db.QueryRowContext(r.Context(), `
-		SELECT size_bytes, etag, content_type, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, '')
+		SELECT size_bytes, etag, content_type, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, '')
 		FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
-	`, t.ID, req.Bucket, req.Object).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &metadataJSON, &backendName)
+	`, t.ID, req.Bucket, req.Object).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &metadataJSON, &backendName, &encAlgo)
 
 	if err == sql.ErrNoRows {
 		s.logger.Warn("HEAD: object not in metadata cache",
@@ -569,6 +571,9 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	}
 	w.Header().Set("x-amz-storage-class", engine.BackendToStorageClass(backendName))
 	w.Header().Set("x-amz-request-id", generateRequestID())
+	if encAlgo != "" {
+		w.Header().Set("x-amz-server-side-encryption", "AES256")
+	}
 	setS3MetadataHeaders(w, metadataJSON)
 	// HEAD must not write a body.
 	w.WriteHeader(http.StatusOK)
@@ -596,6 +601,7 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3
 	}
 
 	adapter := NewS3ToEngine(s.engine, s.db, s.logger)
+	adapter.sseService = s.sseService
 
 	s.logger.Debug("S3 PUT translating to engine",
 		zap.String("s3.bucket", req.Bucket),
