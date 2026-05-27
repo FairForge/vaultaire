@@ -159,6 +159,7 @@ GitHub Actions Deploy (`.github/workflows/deploy.yml`):
 | `IDRIVE_ACCESS_KEY`, `IDRIVE_SECRET_KEY` | — | iDrive E2 S3 credentials |
 | `IDRIVE_ENDPOINT`, `IDRIVE_REGION` | — | iDrive endpoint and region |
 | `ONEDRIVE_CLIENT_ID`, `ONEDRIVE_CLIENT_SECRET`, `ONEDRIVE_TENANT_ID` | — | OneDrive OAuth (future) |
+| `ENCRYPTION_MASTER_KEY` | — | SSE-S3 master key (64 hex chars = 32 bytes). Absent = encryption disabled |
 
 ## Production
 
