@@ -20,6 +20,9 @@ S3-compatible API layer. Translates S3 protocol to engine operations, handles au
 - **presigned.go** — Management API endpoint for generating pre-signed URLs (`/api/v1/presigned`)
 - **sts_routes.go** — STS temporary credential endpoint (`POST /api/v1/sts/token`)
 - **cdn_analytics.go** — CDNAnalyticsTracker: buffered CDN access event writer (Record/Flush/CheckBudget) + hourly rollup
+- **access_log.go** — S3AccessLogTracker: buffered S3 access event writer (Record/Flush) + log delivery to target buckets
+- **s3_logging.go** — GET/PUT ?logging handlers for per-bucket server access logging config
+- **s3_inventory.go** — GET/PUT/DELETE ?inventory handlers + InventoryRunner background job for CSV reports
 - **management.go** — JSON response helpers: `writeJSON`, `writeListResponse`, `getRequestID` (Stripe-style envelope)
 - **management_errors.go** — 7 typed errors with Stripe-style error envelope (`writeManagementError`)
 - **management_routes.go** — RESTful JSON management API under `/api/v1/manage/` (buckets CRUD, objects list, keys CRUD, usage)
@@ -258,6 +261,44 @@ Each bucket has a `region` column (default `us-west-1`). Region is immutable aft
 **GET routing**: `HintBackend()` seeds the engine's `objectBackends` map from `cachedBackendName` so GET routes directly to the correct region driver without a failed failover attempt.
 
 **Table**: `buckets.region` (migration 039). **Error**: `ErrInvalidLocationConstraint` in s3_errors.go.
+
+## S3 Server Access Logging (Phase 5.14.9)
+
+Per-bucket server access logging with buffered writes and asynchronous log delivery to a target bucket.
+
+**Architecture**: Two-stage pipeline. All S3 requests are recorded to `s3_access_log` via `S3AccessLogTracker` (buffered, 5s flush interval, 100-event auto-flush). A delivery goroutine (every 5 min) queries logging-enabled buckets, formats records as S3-compatible access log lines, and writes them as objects to the target bucket via `engine.Put`. Delivered records are deleted from the table.
+
+**S3 API operations**:
+- `GET /{bucket}?logging` → `handleGetBucketLogging` — returns `<BucketLoggingStatus>` XML
+- `PUT /{bucket}?logging` → `handlePutBucketLogging` — sets logging target; rejects self-referential logging (same bucket → 400)
+
+**Access log format** (one line per request, space-separated):
+`{tenant_id} {bucket} [{time}] {source_ip} {operation} {key} {status} {error} {bytes_sent} {bytes_received} {request_id} "{user_agent}"`
+
+**Log object key**: `{prefix}{YYYY-MM-DD-HH-MM-SS}-{random6hex}`
+
+**Validation**: Target bucket must exist and belong to the same tenant. Source bucket cannot log to itself (prevents infinite loops).
+
+**Status code capture**: `countingResponseWriter` now captures HTTP status code via `WriteHeader` override (used by access log recording).
+
+**Tables**: `s3_access_log` (buffered records), `buckets.logging_enabled`, `buckets.logging_target_bucket`, `buckets.logging_prefix` (migration 040).
+
+## S3 Inventory Reports (Phase 5.14.9)
+
+Per-bucket inventory reports (daily/weekly CSV export of all objects to a destination bucket).
+
+**S3 API operations**:
+- `GET /{bucket}?inventory` → `handleGetBucketInventory` — returns `<InventoryConfiguration>` XML
+- `PUT /{bucket}?inventory` → `handlePutBucketInventory` — sets inventory config (schedule, target, format)
+- `DELETE /{bucket}?inventory` → `handleDeleteBucketInventory` — disables inventory (204)
+
+**InventoryRunner**: Background goroutine checks hourly; runs at midnight UTC. Daily schedules run every night; weekly schedules run only on Sunday. Reads from `object_head_cache` (not backend storage), so inventory generation is fast regardless of object count.
+
+**CSV columns**: Key, SizeBytes, ETag, ContentType, LastModified, EncryptionAlgorithm, BackendName
+
+**Inventory object key**: `{prefix}{source_bucket}/{YYYY-MM-DD}T00-00Z/manifest.csv`
+
+**Tables**: `buckets.inventory_enabled`, `buckets.inventory_schedule`, `buckets.inventory_target_bucket`, `buckets.inventory_prefix`, `buckets.inventory_format` (migration 040).
 
 ## Tenant Context
 

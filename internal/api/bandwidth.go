@@ -10,13 +10,28 @@ import (
 	"go.uber.org/zap"
 )
 
-// countingResponseWriter wraps http.ResponseWriter to count bytes written.
+// countingResponseWriter wraps http.ResponseWriter to count bytes written
+// and capture the HTTP status code for access logging.
 type countingResponseWriter struct {
 	http.ResponseWriter
 	bytesWritten int64
+	statusCode   int
+	wroteHeader  bool
+}
+
+func (cw *countingResponseWriter) WriteHeader(code int) {
+	if !cw.wroteHeader {
+		cw.statusCode = code
+		cw.wroteHeader = true
+	}
+	cw.ResponseWriter.WriteHeader(code)
 }
 
 func (cw *countingResponseWriter) Write(b []byte) (int, error) {
+	if !cw.wroteHeader {
+		cw.statusCode = http.StatusOK
+		cw.wroteHeader = true
+	}
 	n, err := cw.ResponseWriter.Write(b)
 	cw.bytesWritten += int64(n)
 	return n, err

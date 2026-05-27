@@ -117,6 +117,10 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 				req.Operation = "GetBucketNotification"
 			} else if _, ok := req.Query["object-lock"]; ok {
 				req.Operation = "GetObjectLockConfiguration"
+			} else if _, ok := req.Query["logging"]; ok {
+				req.Operation = "GetBucketLogging"
+			} else if _, ok := req.Query["inventory"]; ok {
+				req.Operation = "GetBucketInventory"
 			} else if _, ok := req.Query["uploads"]; ok {
 				req.Operation = "ListMultipartUploads"
 			} else {
@@ -129,11 +133,19 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 				req.Operation = "PutBucketNotification"
 			} else if _, ok := req.Query["object-lock"]; ok {
 				req.Operation = "PutObjectLockConfiguration"
+			} else if _, ok := req.Query["logging"]; ok {
+				req.Operation = "PutBucketLogging"
+			} else if _, ok := req.Query["inventory"]; ok {
+				req.Operation = "PutBucketInventory"
 			} else {
 				req.Operation = "CreateBucket"
 			}
 		case "DELETE":
-			req.Operation = "DeleteBucket"
+			if _, ok := req.Query["inventory"]; ok {
+				req.Operation = "DeleteBucketInventory"
+			} else {
+				req.Operation = "DeleteBucket"
+			}
 		case "HEAD":
 			req.Operation = "HeadBucket"
 		case "POST":
@@ -488,10 +500,41 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		s.handleGetObjectLegalHold(cw, r, s3Req)
 	case "PutObjectLegalHold":
 		s.handlePutObjectLegalHold(cw, r, s3Req)
+	case "GetBucketLogging":
+		s.handleGetBucketLogging(cw, r, s3Req)
+	case "PutBucketLogging":
+		s.handlePutBucketLogging(cw, r, s3Req)
+	case "GetBucketInventory":
+		s.handleGetBucketInventory(cw, r, s3Req)
+	case "PutBucketInventory":
+		s.handlePutBucketInventory(cw, r, s3Req)
+	case "DeleteBucketInventory":
+		s.handleDeleteBucketInventory(cw, r, s3Req)
 	default:
 		s.logger.Warn("operation not implemented",
 			zap.String("operation", s3Req.Operation))
 		WriteS3Error(cw, ErrNotImplemented, r.URL.Path, generateRequestID())
+	}
+
+	// Record S3 access log for authenticated requests.
+	if tenantID != "" && tenantID != "default" && s.accessLogTracker != nil {
+		statusCode := cw.statusCode
+		if statusCode == 0 {
+			statusCode = http.StatusOK
+		}
+		s.accessLogTracker.Record(r.Context(), s3AccessEvent{
+			tenantID:      tenantID,
+			bucket:        s3Req.Bucket,
+			objectKey:     s3Req.Object,
+			operation:     s3Req.Operation,
+			statusCode:    statusCode,
+			bytesSent:     cw.bytesWritten,
+			bytesReceived: ingressBytes,
+			sourceIP:      extractClientIP(r),
+			userAgent:     r.UserAgent(),
+			requestID:     r.Header.Get("X-Request-Id"),
+			loggedAt:      time.Now(),
+		})
 	}
 
 	// Record bandwidth for authenticated requests.
