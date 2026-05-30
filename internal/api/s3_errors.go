@@ -56,6 +56,7 @@ const (
 	ErrServiceUnavailable                = "ServiceUnavailable"
 	ErrInvalidBucketState                = "InvalidBucketState"
 	ErrInvalidLocationConstraint         = "InvalidLocationConstraint"
+	ErrInvalidTag                        = "InvalidTag"
 )
 
 // Error messages
@@ -95,6 +96,7 @@ var errorMessages = map[string]string{
 	ErrServiceUnavailable:                "All storage backends are temporarily unavailable. Please retry.",
 	ErrInvalidBucketState:                "The request is not valid for the current state of the bucket.",
 	ErrInvalidLocationConstraint:         "The specified location constraint is not valid.",
+	ErrInvalidTag:                        "The tag provided was not valid.",
 }
 
 // HTTP status codes for errors
@@ -134,6 +136,7 @@ var errorStatusCodes = map[string]int{
 	ErrServiceUnavailable:                http.StatusServiceUnavailable,
 	ErrInvalidBucketState:                http.StatusConflict,
 	ErrInvalidLocationConstraint:         http.StatusBadRequest,
+	ErrInvalidTag:                        http.StatusBadRequest,
 }
 
 // WriteS3Error writes an S3-compatible error response

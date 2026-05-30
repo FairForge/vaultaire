@@ -168,6 +168,8 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 			req.Operation = "GetObjectLegalHold"
 		} else if _, ok := req.Query["uploadId"]; ok {
 			req.Operation = "ListParts"
+		} else if _, ok := req.Query["tagging"]; ok {
+			req.Operation = "GetObjectTagging"
 		} else {
 			req.Operation = "GetObject"
 		}
@@ -178,12 +180,16 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 			req.Operation = "PutObjectLegalHold"
 		} else if _, ok := req.Query["partNumber"]; ok {
 			req.Operation = "UploadPart"
+		} else if _, ok := req.Query["tagging"]; ok {
+			req.Operation = "PutObjectTagging"
 		} else {
 			req.Operation = "PutObject"
 		}
 	case "DELETE":
 		if _, ok := req.Query["uploadId"]; ok {
 			req.Operation = "AbortMultipartUpload"
+		} else if _, ok := req.Query["tagging"]; ok {
+			req.Operation = "DeleteObjectTagging"
 		} else {
 			req.Operation = "DeleteObject"
 		}
@@ -510,6 +516,12 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		s.handlePutBucketInventory(cw, r, s3Req)
 	case "DeleteBucketInventory":
 		s.handleDeleteBucketInventory(cw, r, s3Req)
+	case "GetObjectTagging":
+		s.handleGetObjectTagging(cw, r, s3Req)
+	case "PutObjectTagging":
+		s.handlePutObjectTagging(cw, r, s3Req)
+	case "DeleteObjectTagging":
+		s.handleDeleteObjectTagging(cw, r, s3Req)
 	default:
 		s.logger.Warn("operation not implemented",
 			zap.String("operation", s3Req.Operation))
@@ -579,12 +591,13 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	var metadataJSON []byte
 	var backendName string
 	var encAlgo string
+	var tagsJSON []byte
 
 	err = s.db.QueryRowContext(r.Context(), `
-		SELECT size_bytes, etag, content_type, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, '')
+		SELECT size_bytes, etag, content_type, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(tags, '{}')
 		FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
-	`, t.ID, req.Bucket, req.Object).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &metadataJSON, &backendName, &encAlgo)
+	`, t.ID, req.Bucket, req.Object).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &metadataJSON, &backendName, &encAlgo, &tagsJSON)
 
 	if err == sql.ErrNoRows {
 		s.logger.Warn("HEAD: object not in metadata cache",
@@ -632,6 +645,9 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 		w.Header().Set("x-amz-server-side-encryption", "AES256")
 	}
 	setS3MetadataHeaders(w, metadataJSON)
+	if n := tagCount(tagsJSON); n > 0 {
+		w.Header().Set("x-amz-tagging-count", strconv.Itoa(n))
+	}
 	// HEAD must not write a body.
 	w.WriteHeader(http.StatusOK)
 }

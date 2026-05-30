@@ -30,6 +30,7 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 | 036 | MFA Delete: `mfa_delete_enabled` BOOLEAN on `buckets` (default FALSE) |
 | 038 | Account deletion: `deletion_scheduled_at` + `deletion_reason` on users, `account_exports` table |
 | 040 | S3 access logging + inventory: `logging_enabled`, `logging_target_bucket`, `logging_prefix`, `inventory_enabled`, `inventory_schedule`, `inventory_target_bucket`, `inventory_prefix`, `inventory_format` on `buckets`; `s3_access_log` table |
+| 041 | Object tagging: `tags JSONB` (default `{}`) on `object_head_cache` — per-object S3 `?tagging` sub-resource (flat key/value map) |
 
 ## Key Tables
 
@@ -41,7 +42,7 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 - **subscriptions** — Stripe subscription state tracking
 - **bandwidth_usage_daily** — per-tenant daily ingress/egress/requests (unique on tenant_id + date)
 - **buckets** — `(tenant_id, name) PK`, `visibility` (private/public-read), `cors_origins`, `cache_max_age_secs`, `bandwidth_budget_bytes`, `versioning_status`, `object_lock_enabled`, `default_retention_mode`, `default_retention_days`, `mfa_delete_enabled`, `logging_enabled`, `logging_target_bucket`, `logging_prefix`, `inventory_enabled`, `inventory_schedule`, `inventory_target_bucket`, `inventory_prefix`, `inventory_format`
-- **object_head_cache** — HEAD request cache (size, ETag, content-type, backend_name stored on PUT)
+- **object_head_cache** — HEAD request cache (size, ETag, content-type, backend_name stored on PUT); `tags` JSONB holds per-object S3 tags (separate from `metadata`)
 - **user_mfa** — `user_id (PK)`, `secret`, `enabled`, `backup_codes` (JSON), `created_at`, `updated_at` — TOTP 2FA settings
 - **mfa_audit_log** — `id (SERIAL)`, `user_id`, `action`, `success`, `ip_address`, `user_agent`, `created_at`
 - **object_versions** — `(tenant_id, bucket, object_key, version_id) PK`, `size_bytes`, `etag`, `content_type`, `is_latest`, `is_delete_marker`, `backend_name`, `created_at`
