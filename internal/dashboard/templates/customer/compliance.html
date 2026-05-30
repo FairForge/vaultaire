@@ -1,0 +1,83 @@
+{{define "title"}}Compliance — stored.ge{{end}}
+{{define "content"}}
+<div class="page-header">
+    <div>
+        <h1>Compliance</h1>
+        <p class="text-muted">Security posture across all buckets</p>
+    </div>
+    {{if .HasBuckets}}
+    <a href="/dashboard/compliance/export" class="btn">Download Report</a>
+    {{end}}
+</div>
+
+<nav class="breadcrumb">
+    <a href="/dashboard/">Dashboard</a> /
+    <strong>Compliance</strong>
+</nav>
+
+{{if not .HasBuckets}}
+<div class="card" style="text-align:center;padding:3rem 1.5rem;">
+    <div style="font-size:2rem;margin-bottom:0.75rem;">&#128274;</div>
+    <h2 style="margin-bottom:0.5rem;">No buckets yet</h2>
+    <p class="text-muted">Create a bucket to see its compliance status here.</p>
+    <a href="/dashboard/buckets" class="btn btn-primary" style="margin-top:1rem;">Create Bucket</a>
+</div>
+{{else}}
+
+<div class="stats-grid stats-grid-3">
+    <div class="stat-card">
+        <div class="stat-label">Compliance Score</div>
+        <div class="stat-value" style="color:{{if ge .ComplianceScore 80}}var(--success){{else if ge .ComplianceScore 50}}var(--warning, #e6a817){{else}}var(--danger){{end}}">{{.ComplianceScore}}%</div>
+        <div class="stat-sub">{{if ge .ComplianceScore 80}}Good standing{{else if ge .ComplianceScore 50}}Needs attention{{else}}Action required{{end}}</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Total Buckets</div>
+        <div class="stat-value">{{.TotalBuckets}}</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Fully Compliant</div>
+        <div class="stat-value">{{.CompliantBuckets}}</div>
+        <div class="stat-sub">Encryption + Logging + Versioning</div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">Bucket Security Posture</div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Bucket</th>
+                    <th>Region</th>
+                    <th style="text-align:center">Encryption</th>
+                    <th style="text-align:center">Object Lock</th>
+                    <th style="text-align:center">Versioning</th>
+                    <th style="text-align:center">Logging</th>
+                    <th style="text-align:center">Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .Buckets}}
+                <tr>
+                    <td><a href="/dashboard/buckets/{{.Name}}/settings">{{.Name}}</a></td>
+                    <td>{{.RegionDisplay}}{{if .IsEURegion}} <span class="badge badge-info" style="font-size:0.7rem;">EU</span>{{end}}</td>
+                    <td style="text-align:center">{{if .SSEEnabled}}<span style="color:var(--success)">&#10003;</span>{{else}}<span style="color:var(--danger)">&#10007;</span>{{end}}</td>
+                    <td style="text-align:center">{{if .ObjectLockEnabled}}<span style="color:var(--success)">&#10003;</span>{{else}}<span style="color:var(--danger)">&#10007;</span>{{end}}</td>
+                    <td style="text-align:center">{{if .VersioningEnabled}}<span style="color:var(--success)">&#10003;</span>{{else}}<span style="color:var(--danger)">&#10007;</span>{{end}}</td>
+                    <td style="text-align:center">{{if .LoggingEnabled}}<span style="color:var(--success)">&#10003;</span>{{else}}<span style="color:var(--danger)">&#10007;</span>{{end}}</td>
+                    <td style="text-align:center">
+                        {{if .IsFullyCompliant}}
+                        <span class="badge badge-success">Compliant</span>
+                        {{else}}
+                        <span class="badge badge-warning">Non-compliant</span>
+                        {{end}}
+                    </td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{{end}}
+{{end}}

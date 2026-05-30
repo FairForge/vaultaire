@@ -87,6 +87,8 @@ Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`,
 | `/dashboard/billing` | GET | session | Billing: plan, upgrade, value stack, cost comparison |
 | `/dashboard/billing/upgrade` | POST | session | Redirect to Stripe Checkout for chosen plan |
 | `/dashboard/billing/portal` | POST | session | Redirect to Stripe Billing Portal |
+| `/dashboard/compliance` | GET | session | Compliance dashboard: per-bucket security posture, score |
+| `/dashboard/compliance/export` | GET | session | Download compliance report as JSON |
 | `/dashboard/settings/export` | POST | session | Download all user data as JSON (GDPR Article 20) |
 | `/dashboard/settings/delete-account` | POST | session | Schedule account deletion with 30-day grace (GDPR Article 17) |
 | `/dashboard/settings/cancel-deletion` | POST | session | Cancel pending account deletion |

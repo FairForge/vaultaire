@@ -115,6 +115,14 @@ Three handlers for GDPR compliance (Phase 5.14.1):
 
 `populateDeletionStatus(ctx, db, userID, data)` in `settings.go` queries `deletion_scheduled_at` from users and populates `DeletionScheduled` + `DeletionDate` template data.
 
+## Compliance Dashboard (`compliance.go`)
+
+Two handlers:
+- `HandleCompliance(tmpl, db, logger)` — GET `/dashboard/compliance`. Queries all buckets for the tenant with compliance-relevant columns (SSE, Object Lock, versioning, logging, inventory, MFA delete). Computes per-bucket `IsFullyCompliant` (SSE + logging + versioning) and overall `ComplianceScore` (percentage of compliant buckets). Degrades to empty state when DB is nil.
+- `HandleComplianceExport(db, logger)` — GET `/dashboard/compliance/export`. Same data as above, serialized as JSON with `Content-Disposition: attachment` header. Filename: `compliance-report-{date}.json`.
+
+Shared `queryComplianceData(r, db, tenantID)` helper queries buckets table + `object_head_cache` for encryption percentages. Template: `templates/customer/compliance.html`.
+
 ## Legacy Handlers
 
 Files like `dashboard.go` etc. are stubs from before Phase 0 with inline terminal-style templates. They are NOT wired into the router. Remaining phases will rewrite them.
