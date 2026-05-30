@@ -1,0 +1,113 @@
+{{define "title"}}Business Associate Agreement — stored.ge{{end}}
+{{define "content"}}
+<div class="card">
+    <p class="text-muted">Last updated: June 1, 2026</p>
+    <h1>Business Associate Agreement</h1>
+    <p>This Business Associate Agreement ("BAA") is entered into between you, the Covered Entity or Business Associate ("Covered Entity"), and FairForge LLC, operating as stored.ge ("Business Associate"), and supplements the <a href="/legal/terms">Terms of Service</a> and <a href="/legal/dpa">Data Processing Agreement</a>.</p>
+    <p>This BAA is required under the Health Insurance Portability and Accountability Act of 1996 ("HIPAA"), the Health Information Technology for Economic and Clinical Health Act ("HITECH"), and their implementing regulations at 45 CFR Parts 160 and 164 (collectively, "HIPAA Rules").</p>
+
+    <h2 id="contents">Contents</h2>
+    <ul>
+        <li><a href="#definitions">Definitions</a></li>
+        <li><a href="#permitted-uses">Permitted Uses and Disclosures of PHI</a></li>
+        <li><a href="#safeguards">Safeguards</a></li>
+        <li><a href="#breach-notification">Breach Notification</a></li>
+        <li><a href="#subcontractors">Subcontractors</a></li>
+        <li><a href="#access-records">Access to Records</a></li>
+        <li><a href="#return-destruction">Return or Destruction of PHI</a></li>
+        <li><a href="#term-termination">Term and Termination</a></li>
+        <li><a href="#contact">Contact</a></li>
+    </ul>
+
+    <h2 id="definitions">1. Definitions</h2>
+    <p>Capitalized terms used but not defined in this BAA have the meanings assigned to them in the HIPAA Rules. For purposes of this BAA:</p>
+    <ul>
+        <li><strong>Covered Entity</strong> means the customer who is subject to HIPAA and enters into this BAA in connection with the use of stored.ge services.</li>
+        <li><strong>Business Associate</strong> means FairForge LLC, operating as stored.ge, which creates, receives, maintains, or transmits Protected Health Information on behalf of the Covered Entity.</li>
+        <li><strong>Protected Health Information (PHI)</strong> means individually identifiable health information as defined in 45 CFR §160.103, including electronic PHI (ePHI).</li>
+        <li><strong>Electronic Protected Health Information (ePHI)</strong> means PHI that is transmitted by or maintained in electronic media, as defined in 45 CFR §160.103.</li>
+        <li><strong>Breach</strong> means the acquisition, access, use, or disclosure of PHI in a manner not permitted under the HIPAA Privacy Rule which compromises the security or privacy of the PHI, as defined in 45 CFR §164.402.</li>
+        <li><strong>Security Incident</strong> means the attempted or successful unauthorized access, use, disclosure, modification, or destruction of information or interference with system operations in an information system, as defined in 45 CFR §164.304.</li>
+    </ul>
+
+    <h2 id="permitted-uses">2. Permitted Uses and Disclosures of PHI</h2>
+    <p>Business Associate may use or disclose PHI only as follows:</p>
+    <ul>
+        <li><strong>Service performance:</strong> As necessary to perform obligations under the Terms of Service, including storage, retrieval, and delivery of objects via the S3-compatible API.</li>
+        <li><strong>Management and administration:</strong> For Business Associate's proper management and administration, or to carry out legal responsibilities, provided that any disclosure is required by law or Business Associate obtains reasonable assurances from the recipient that the information will be held confidentially.</li>
+        <li><strong>As required by law:</strong> As required by applicable federal, state, or local law, provided that Business Associate will notify Covered Entity of such requirement where permitted.</li>
+    </ul>
+    <p>Business Associate shall not use or disclose PHI in any manner that would violate the HIPAA Rules if done by Covered Entity, except as permitted above.</p>
+
+    <h2 id="safeguards">3. Safeguards</h2>
+    <p>Business Associate shall implement administrative, physical, and technical safeguards that reasonably and appropriately protect the confidentiality, integrity, and availability of ePHI, as required by 45 CFR §164.306 and §164.312. stored.ge provides the following safeguards:</p>
+
+    <h3>3.1 Encryption at Rest</h3>
+    <p>All stored objects are encrypted at rest using server-side encryption (SSE-S3) with AES-256-GCM. Key encapsulation uses ML-KEM-768, a post-quantum key encapsulation mechanism. Per-tenant encryption keys are derived and managed automatically.</p>
+
+    <h3>3.2 Encryption in Transit</h3>
+    <p>All data in transit is encrypted via TLS 1.2 or higher. HSTS headers are enforced on all connections. API endpoints are accessible only over HTTPS.</p>
+
+    <h3>3.3 Access Controls</h3>
+    <ul>
+        <li><strong>Unique user identification:</strong> Each tenant receives unique access credentials. Scoped API keys provide granular, per-bucket, per-operation access control.</li>
+        <li><strong>Two-factor authentication:</strong> TOTP-based two-factor authentication is available for all accounts and enforced for administrative access.</li>
+        <li><strong>Automatic logoff:</strong> Dashboard sessions expire after 24 hours of inactivity, with hourly session cleanup.</li>
+        <li><strong>Emergency access:</strong> Administrators can reset two-factor authentication and manage account status for emergency access procedures.</li>
+    </ul>
+
+    <h3>3.4 Integrity Controls</h3>
+    <ul>
+        <li>ETag (MD5) verification computed on every upload to ensure data integrity.</li>
+        <li>Object Lock (WORM) support for immutable retention of records.</li>
+        <li>MFA Delete enforcement prevents unauthorized deletion of versioned objects.</li>
+    </ul>
+
+    <h3>3.5 Audit Controls</h3>
+    <p>stored.ge maintains audit logs for account access, API operations, and administrative actions. Event logging and webhook notifications are available for real-time monitoring of object operations.</p>
+
+    <h2 id="breach-notification">4. Breach Notification</h2>
+    <p>Business Associate shall comply with the breach notification requirements of 45 CFR §§164.400–414:</p>
+    <ul>
+        <li><strong>Discovery and notification:</strong> Business Associate shall report to Covered Entity any Breach of Unsecured PHI without unreasonable delay, and in no case later than <strong>72 hours</strong> after discovery of the Breach.</li>
+        <li><strong>Content of notification:</strong> Notification shall include, to the extent available: (a) identification of each individual whose PHI has been or is reasonably believed to have been affected; (b) a description of the type of PHI involved; (c) a description of what Business Associate is doing to investigate, mitigate, and prevent recurrence; (d) contact information for questions.</li>
+        <li><strong>Cooperation:</strong> Business Associate shall cooperate with Covered Entity in meeting Covered Entity's obligations to notify affected individuals and the Secretary of the U.S. Department of Health and Human Services ("HHS").</li>
+        <li><strong>Security incidents:</strong> Business Associate shall report to Covered Entity any Security Incident of which it becomes aware. Reports of unsuccessful Security Incidents (e.g., pings, port scans, failed login attempts) may be provided in summary or aggregate form.</li>
+    </ul>
+
+    <h2 id="subcontractors">5. Subcontractors</h2>
+    <p>Business Associate shall ensure that any subcontractors that create, receive, maintain, or transmit PHI on behalf of Business Associate agree to the same restrictions, conditions, and requirements that apply to Business Associate under this BAA, in accordance with 45 CFR §164.502(e)(1)(ii) and §164.308(b)(2).</p>
+
+    <h2 id="access-records">6. Access to Records</h2>
+    <ul>
+        <li><strong>Individual access:</strong> Business Associate shall make PHI maintained in Designated Record Sets available to Covered Entity as necessary to satisfy Covered Entity's obligations under 45 CFR §164.524. stored.ge's S3-compatible API provides direct access to all stored objects.</li>
+        <li><strong>Amendment:</strong> Business Associate shall make PHI available for amendment and incorporate any amendments to PHI as directed by Covered Entity, pursuant to 45 CFR §164.526.</li>
+        <li><strong>Accounting of disclosures:</strong> Business Associate shall make information available to Covered Entity as required to provide an accounting of disclosures under 45 CFR §164.528.</li>
+        <li><strong>HHS access:</strong> Business Associate shall make its internal practices, books, and records relating to the use and disclosure of PHI available to the Secretary of HHS for purposes of determining Covered Entity's compliance with the HIPAA Rules.</li>
+    </ul>
+
+    <h2 id="return-destruction">7. Return or Destruction of PHI</h2>
+    <p>Upon termination of this BAA or the underlying Terms of Service, Business Associate shall:</p>
+    <ul>
+        <li>Return or destroy all PHI received from Covered Entity, or created or received by Business Associate on behalf of Covered Entity, if feasible.</li>
+        <li>If return or destruction is not feasible, extend the protections of this BAA to the PHI retained and limit further uses and disclosures to those purposes that make return or destruction infeasible.</li>
+        <li>Account deletion follows the process described in our <a href="/legal/terms">Terms of Service</a>: a 30-day grace period followed by permanent data destruction.</li>
+    </ul>
+
+    <h2 id="term-termination">8. Term and Termination</h2>
+    <ul>
+        <li><strong>Term:</strong> This BAA is effective upon execution by both parties and remains in effect for the duration of the underlying Terms of Service, unless terminated earlier as provided herein.</li>
+        <li><strong>Termination for cause:</strong> Either party may terminate this BAA if the other party materially breaches any provision and fails to cure the breach within 30 days of written notice.</li>
+        <li><strong>Effect of termination:</strong> The obligations of Business Associate under Section 7 (Return or Destruction of PHI) shall survive termination.</li>
+        <li><strong>Regulatory changes:</strong> The parties agree to negotiate in good faith any amendments to this BAA necessary to comply with changes to the HIPAA Rules or other applicable law.</li>
+    </ul>
+
+    <h2 id="contact">Contact</h2>
+    <p>For questions about this Business Associate Agreement or to execute a BAA for your organization:</p>
+    <ul>
+        <li><strong>Email:</strong> compliance@stored.ge</li>
+        <li><strong>Entity:</strong> FairForge LLC</li>
+        <li><strong>Jurisdiction:</strong> State of Utah, United States</li>
+    </ul>
+</div>
+{{end}}

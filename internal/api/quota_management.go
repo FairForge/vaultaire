@@ -34,15 +34,23 @@ type QuotaResponse struct {
 	BandwidthUsed  int64  `json:"bandwidth_used,omitempty"`
 }
 
-// Middleware to check admin privileges
 func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		isAdmin, ok := r.Context().Value("is_admin").(bool)
-		if !ok || !isAdmin {
-			http.Error(w, "admin access required", http.StatusForbidden)
+		if isAdmin, ok := r.Context().Value("is_admin").(bool); ok && isAdmin {
+			next(w, r)
 			return
 		}
-		next(w, r)
+		userID, _ := r.Context().Value(userIDKey).(string)
+		if userID != "" && s.db != nil {
+			var role string
+			if err := s.db.QueryRowContext(r.Context(),
+				"SELECT COALESCE(role, '') FROM users WHERE id = $1", userID,
+			).Scan(&role); err == nil && role == "admin" {
+				next(w, r)
+				return
+			}
+		}
+		http.Error(w, "admin access required", http.StatusForbidden)
 	}
 }
 

@@ -482,11 +482,17 @@ func (s *Server) setupRoutes() {
 }
 
 func (s *Server) registerComplianceRoutes() {
+	var breachDB compliance.BreachDatabase
+	if s.db != nil {
+		breachDB = compliance.NewBreachPgStore(s.db)
+	}
+	breachService := compliance.NewBreachService(breachDB, s.logger)
+
 	complianceHandler := compliance.NewAPIHandler(
 		compliance.NewGDPRService(nil, s.logger),
 		compliance.NewPortabilityService(nil, nil, s.logger),
 		compliance.NewConsentService(nil, s.logger),
-		compliance.NewBreachService(nil, s.logger),
+		breachService,
 		compliance.NewROPAService(nil, s.logger),
 		compliance.NewPrivacyService(nil),
 		s.logger,
@@ -533,6 +539,14 @@ func (s *Server) registerComplianceRoutes() {
 		r.Post("/privacy/minimize", complianceHandler.HandleMinimizeData)
 		r.Get("/privacy/purpose/{dataId}/{purpose}", complianceHandler.HandleCheckPurpose)
 		r.Post("/privacy/pseudonymize", complianceHandler.HandlePseudonymize)
+	})
+
+	s.router.Route("/api/v1/admin", func(r chi.Router) {
+		r.Use(s.requireJWT)
+
+		r.Post("/breach", s.requireAdmin(complianceHandler.HandleReportBreach))
+		r.Get("/breaches", s.requireAdmin(complianceHandler.HandleListBreaches))
+		r.Patch("/breach/{id}", s.requireAdmin(complianceHandler.HandleUpdateBreach))
 	})
 }
 
