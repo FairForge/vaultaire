@@ -31,6 +31,16 @@ func isInlineRenderable(contentType string) bool {
 	if i := strings.IndexByte(ct, ';'); i >= 0 {
 		ct = strings.TrimSpace(ct[:i])
 	}
+	// Never inline active/scriptable types on the shared-origin public CDN
+	// (cdn.stored.ge/{slug}/...): text/html and image/svg+xml execute
+	// JavaScript in that origin, so a tenant could host stored XSS / phishing
+	// on the branded domain. Force them to attachment regardless of prefix.
+	// X-Content-Type-Options: nosniff does not help — these are correctly
+	// typed, not sniffed.
+	switch ct {
+	case "text/html", "application/xhtml+xml", "image/svg+xml":
+		return false
+	}
 	return strings.HasPrefix(ct, "image/") ||
 		strings.HasPrefix(ct, "video/") ||
 		strings.HasPrefix(ct, "text/") ||

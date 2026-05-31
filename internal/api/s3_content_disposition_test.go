@@ -165,6 +165,28 @@ func TestCDN_ForceDownload(t *testing.T) {
 	assert.Equal(t, `attachment; filename="forced.png"`, w.Header().Get("Content-Disposition"))
 }
 
+// TestCDN_ActiveContentNotInline verifies scriptable types (HTML, SVG) are never
+// served inline on the shared-origin public CDN — inline rendering would execute
+// JavaScript in the cdn.stored.ge origin (stored XSS / hosted phishing). They
+// must be forced to attachment even though text/* and image/* are otherwise
+// renderable.
+func TestCDN_ActiveContentNotInline(t *testing.T) {
+	f := setupCDNFixture(t)
+	seedCDNObject(t, f, "evil.html", "text/html", []byte("<script>alert(document.domain)</script>"))
+	seedCDNObject(t, f, "evil.svg", "image/svg+xml", []byte(`<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>`))
+
+	for _, tc := range []struct{ key, want string }{
+		{"evil.html", `attachment; filename="evil.html"`},
+		{"evil.svg", `attachment; filename="evil.svg"`},
+	} {
+		req := httptest.NewRequest("GET", "/cdn/"+f.slug+"/"+f.bucket+"/"+tc.key, nil)
+		w := httptest.NewRecorder()
+		f.router.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, "key=%s", tc.key)
+		assert.Equal(t, tc.want, w.Header().Get("Content-Disposition"), "key=%s", tc.key)
+	}
+}
+
 // seedCDNObject inserts an object into the head cache and writes it to the
 // fixture's local storage backend.
 func seedCDNObject(t *testing.T, f *cdnTestFixture, key, contentType string, content []byte) {
