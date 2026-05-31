@@ -52,6 +52,11 @@ jobs:
           USER: ${{ secrets.SSH_USER_DEV }}
         run: |
           ssh-keyscan -t ed25519 "$HOST" >> ~/.ssh/known_hosts
+          # Clear stale staging artifacts before uploading. A prior failed deploy or a
+          # stray instance can leave /tmp/vaultaire-linux behind; unlinking frees the
+          # path even when the file is still held by a running process, which otherwise
+          # makes scp fail with "dest open ... Failure" (ETXTBSY).
+          ssh "${USER}@${HOST}" 'rm -f /tmp/vaultaire-linux; rm -rf /tmp/vaultaire-migrations'
           scp vaultaire-linux "${USER}@${HOST}:/tmp/"
           scp -r internal/database/migrations "${USER}@${HOST}:/tmp/vaultaire-migrations"
           ssh "${USER}@${HOST}" 'bash -s' <<'EOF'
@@ -95,6 +100,11 @@ jobs:
           USER: ${{ secrets.SSH_USER_PROD }}
         run: |
           ssh-keyscan -t ed25519 "$HOST" >> ~/.ssh/known_hosts
+          # Clear stale staging artifacts before uploading. A prior failed deploy or a
+          # stray instance can leave /tmp/vaultaire-linux behind; unlinking frees the
+          # path even when the file is still held by a running process, which otherwise
+          # makes scp fail with "dest open ... Failure" (ETXTBSY).
+          ssh "${USER}@${HOST}" 'rm -f /tmp/vaultaire-linux; rm -rf /tmp/vaultaire-migrations'
           scp vaultaire-linux "${USER}@${HOST}:/tmp/"
           scp -r internal/database/migrations "${USER}@${HOST}:/tmp/vaultaire-migrations"
           ssh "${USER}@${HOST}" 'bash -s' <<'EOF'
