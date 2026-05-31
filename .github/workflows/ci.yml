@@ -68,8 +68,12 @@ jobs:
           go build -o vaultaire cmd/vaultaire/main.go
           ./vaultaire &
           sleep 5
-          curl -sf http://localhost:8000/health
-          curl -sf http://localhost:8000/status | grep -q "operational"
+          # Retry to ride out transient startup hiccups. The server runs a
+          # backend health check that TCP-dials an external host at boot; when
+          # that DNS is slow in CI it can briefly perturb request handling, so
+          # we retry rather than fail the whole build on a flake.
+          curl -sf --retry 5 --retry-delay 2 --retry-all-errors --retry-connrefused http://localhost:8000/health
+          curl -sf --retry 5 --retry-delay 2 --retry-all-errors --retry-connrefused http://localhost:8000/status | grep -q "operational"
         env:
           DATABASE_URL: postgres://viera@localhost:5432/vaultaire?sslmode=disable
           JWT_SECRET: ci-test-secret-not-for-production
