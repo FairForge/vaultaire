@@ -29,6 +29,7 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 | 035 | CDN analytics: `cdn_access_log` (per-request log), `cdn_stats_daily` (tenant+bucket+date rollup) |
 | 036 | MFA Delete: `mfa_delete_enabled` BOOLEAN on `buckets` (default FALSE) |
 | 038 | Account deletion: `deletion_scheduled_at` + `deletion_reason` on users, `account_exports` table |
+| 040 | S3 access logging + inventory: `logging_enabled`, `logging_target_bucket`, `logging_prefix`, `inventory_enabled`, `inventory_schedule`, `inventory_target_bucket`, `inventory_prefix`, `inventory_format` on `buckets`; `s3_access_log` table |
 
 ## Key Tables
 
@@ -39,7 +40,7 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 - **dashboard_sessions** — `id (VARCHAR 64)`, `user_id → users`, `tenant_id → tenants`, `email`, `role`, `ip_address`, `user_agent`, `created_at`, `last_active_at`, `expires_at`
 - **subscriptions** — Stripe subscription state tracking
 - **bandwidth_usage_daily** — per-tenant daily ingress/egress/requests (unique on tenant_id + date)
-- **buckets** — `(tenant_id, name) PK`, `visibility` (private/public-read), `cors_origins`, `cache_max_age_secs`, `bandwidth_budget_bytes`, `versioning_status`, `object_lock_enabled`, `default_retention_mode`, `default_retention_days`, `mfa_delete_enabled`
+- **buckets** — `(tenant_id, name) PK`, `visibility` (private/public-read), `cors_origins`, `cache_max_age_secs`, `bandwidth_budget_bytes`, `versioning_status`, `object_lock_enabled`, `default_retention_mode`, `default_retention_days`, `mfa_delete_enabled`, `logging_enabled`, `logging_target_bucket`, `logging_prefix`, `inventory_enabled`, `inventory_schedule`, `inventory_target_bucket`, `inventory_prefix`, `inventory_format`
 - **object_head_cache** — HEAD request cache (size, ETag, content-type, backend_name stored on PUT)
 - **user_mfa** — `user_id (PK)`, `secret`, `enabled`, `backup_codes` (JSON), `created_at`, `updated_at` — TOTP 2FA settings
 - **mfa_audit_log** — `id (SERIAL)`, `user_id`, `action`, `success`, `ip_address`, `user_agent`, `created_at`
@@ -54,6 +55,7 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 - **cdn_access_log** — `id (BIGSERIAL PK)`, `tenant_id`, `bucket`, `object_key`, `bytes_sent`, `country`, `referer`, `accessed_at` — raw CDN access events
 - **cdn_stats_daily** — `(tenant_id, bucket, date) PK`, `requests`, `bytes_sent`, `unique_objects` — daily CDN rollup
 - **account_exports** — `id (UUID PK)`, `user_id → users`, `tenant_id`, `status` (pending/processing/completed/failed), `format`, `file_path`, `file_size_bytes`, `error_message`, `created_at`, `completed_at`, `expires_at` — GDPR data export tracking
+- **s3_access_log** — `id (BIGSERIAL PK)`, `tenant_id`, `bucket`, `object_key`, `operation`, `status_code`, `bytes_sent`, `bytes_received`, `source_ip`, `user_agent`, `request_id`, `error_code`, `logged_at` — buffered S3 access events, delivered as log objects to target buckets
 
 ## Connection
 

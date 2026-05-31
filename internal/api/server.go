@@ -72,6 +72,8 @@ type Server struct {
 	sseService       *crypto.SSEService
 	cdnRateLimiter   *RateLimiter
 	cdnAnalytics     *CDNAnalyticsTracker
+	accessLogTracker *S3AccessLogTracker
+	inventoryRunner  *InventoryRunner
 	emailSender      email.Sender
 	baseURL          string
 	startTime        time.Time
@@ -186,6 +188,16 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	s.cdnAnalytics.SetLogger(logger)
 	s.cdnAnalytics.StartFlusher(context.Background(), 5*time.Second)
 	s.cdnAnalytics.StartRollup(context.Background())
+
+	// S3 access log tracker — buffers access events, delivers log objects to target buckets.
+	s.accessLogTracker = NewS3AccessLogTracker(s.db)
+	s.accessLogTracker.SetLogger(logger)
+	s.accessLogTracker.StartFlusher(context.Background(), 5*time.Second)
+	s.accessLogTracker.StartLogDelivery(context.Background(), s.engine)
+
+	// Inventory report runner — generates CSV inventory reports on schedule.
+	s.inventoryRunner = NewInventoryRunner(s.db, s.engine, logger)
+	s.inventoryRunner.StartInventoryJob(context.Background())
 
 	// Stripe billing service. Only active when STRIPE_SECRET_KEY is set.
 	if stripeKey := os.Getenv("STRIPE_SECRET_KEY"); stripeKey != "" {
