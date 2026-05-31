@@ -271,7 +271,42 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	defer func() { _ = reader.Close() }()
 
 	var dataReader io.Reader = reader
-	if a.sseService != nil && cachedEncAlgo != "" {
+	if cachedEncAlgo == crypto.SSECAlgorithm {
+		if !crypto.HasSSECHeaders(r) {
+			WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
+				WithSuggestion("This object was encrypted with SSE-C. Provide the encryption key."))
+			return
+		}
+		ssecKey, parseErr := crypto.ParseSSECHeaders(r)
+		if parseErr != nil {
+			WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(),
+				WithSuggestion(parseErr.Error()))
+			return
+		}
+
+		encBytes, readErr := io.ReadAll(reader)
+		if readErr != nil {
+			a.logger.Error("failed to read SSE-C encrypted object", zap.Error(readErr))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+		plaintext, decErr := crypto.SSECDecrypt(ssecKey, encBytes)
+		for i := range ssecKey {
+			ssecKey[i] = 0
+		}
+		if decErr != nil {
+			if errors.Is(decErr, crypto.ErrSSECKeyMismatch) {
+				WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
+					WithSuggestion("The provided encryption key does not match."))
+				return
+			}
+			a.logger.Error("SSE-C decryption failed", zap.Error(decErr))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+		dataReader = bytes.NewReader(plaintext)
+		w.Header().Set("x-amz-server-side-encryption-customer-algorithm", "AES256")
+	} else if cachedEncAlgo != "" && a.sseService != nil {
 		encBytes, readErr := io.ReadAll(reader)
 		if readErr != nil {
 			a.logger.Error("failed to read encrypted object", zap.Error(readErr))
@@ -285,9 +320,6 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 			return
 		}
 		dataReader = bytes.NewReader(plaintext)
-	}
-
-	if cachedEncAlgo != "" {
 		w.Header().Set("x-amz-server-side-encryption", "AES256")
 	}
 
@@ -457,34 +489,76 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 
 	metadataSize := size
 	var encryptionAlgorithm string
-	shouldEncrypt := a.sseService != nil && size > 0 && size <= crypto.MaxEncryptableSize &&
-		(r.Header.Get("x-amz-server-side-encryption") == "AES256" ||
-			isBucketSSEEnabled(r.Context(), a.db, t.ID, bucket))
 
-	if shouldEncrypt {
-		if err := a.sseService.EnsureTenantKey(r.Context(), t.ID); err != nil {
-			a.logger.Error("failed to ensure tenant encryption key", zap.Error(err))
-			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+	if crypto.HasSSECHeaders(r) {
+		if r.Header.Get("x-amz-server-side-encryption") != "" {
+			WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(),
+				WithSuggestion("Cannot use SSE-S3 and SSE-C simultaneously."))
+			return
+		}
+		if size <= 0 || size > crypto.MaxEncryptableSize {
+			WriteS3Error(w, ErrEntityTooLarge, r.URL.Path, generateRequestID())
+			return
+		}
+
+		ssecKey, parseErr := crypto.ParseSSECHeaders(r)
+		if parseErr != nil {
+			WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(),
+				WithSuggestion(parseErr.Error()))
 			return
 		}
 
 		plaintext, readErr := io.ReadAll(hashingBody)
 		if readErr != nil {
-			a.logger.Error("failed to read plaintext for encryption", zap.Error(readErr))
+			a.logger.Error("failed to read plaintext for SSE-C encryption", zap.Error(readErr))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 			return
 		}
 
-		ciphertext, encErr := a.sseService.EncryptBytes(r.Context(), t.ID, plaintext)
+		ciphertext, encErr := crypto.SSECEncrypt(ssecKey, plaintext)
 		if encErr != nil {
-			a.logger.Error("SSE-S3 encryption failed", zap.Error(encErr))
+			a.logger.Error("SSE-C encryption failed", zap.Error(encErr))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 			return
+		}
+
+		for i := range ssecKey {
+			ssecKey[i] = 0
 		}
 
 		hashingBody = bytes.NewReader(ciphertext)
 		size = int64(len(ciphertext))
-		encryptionAlgorithm = crypto.SSEAlgorithm
+		encryptionAlgorithm = crypto.SSECAlgorithm
+	} else {
+		shouldEncrypt := a.sseService != nil && size > 0 && size <= crypto.MaxEncryptableSize &&
+			(r.Header.Get("x-amz-server-side-encryption") == "AES256" ||
+				isBucketSSEEnabled(r.Context(), a.db, t.ID, bucket))
+
+		if shouldEncrypt {
+			if err := a.sseService.EnsureTenantKey(r.Context(), t.ID); err != nil {
+				a.logger.Error("failed to ensure tenant encryption key", zap.Error(err))
+				WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+				return
+			}
+
+			plaintext, readErr := io.ReadAll(hashingBody)
+			if readErr != nil {
+				a.logger.Error("failed to read plaintext for encryption", zap.Error(readErr))
+				WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+				return
+			}
+
+			ciphertext, encErr := a.sseService.EncryptBytes(r.Context(), t.ID, plaintext)
+			if encErr != nil {
+				a.logger.Error("SSE-S3 encryption failed", zap.Error(encErr))
+				WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+				return
+			}
+
+			hashingBody = bytes.NewReader(ciphertext)
+			size = int64(len(ciphertext))
+			encryptionAlgorithm = crypto.SSEAlgorithm
+		}
 	}
 
 	storageClass := r.Header.Get("x-amz-storage-class")
@@ -598,7 +672,9 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 
 	w.Header().Set("ETag", fmt.Sprintf(`"%s"`, etag))
 	w.Header().Set("x-amz-request-id", generateRequestID())
-	if encryptionAlgorithm != "" {
+	if encryptionAlgorithm == crypto.SSECAlgorithm {
+		w.Header().Set("x-amz-server-side-encryption-customer-algorithm", "AES256")
+	} else if encryptionAlgorithm != "" {
 		w.Header().Set("x-amz-server-side-encryption", "AES256")
 	}
 	if versionID != "" {

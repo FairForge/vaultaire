@@ -13,6 +13,7 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/common"
+	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/events"
 	"github.com/FairForge/vaultaire/internal/tenant"
@@ -577,7 +578,14 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	}
 	w.Header().Set("x-amz-storage-class", engine.BackendToStorageClass(backendName))
 	w.Header().Set("x-amz-request-id", generateRequestID())
-	if encAlgo != "" {
+	if encAlgo == crypto.SSECAlgorithm {
+		if !crypto.HasSSECHeaders(r) {
+			WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
+				WithSuggestion("This object was encrypted with SSE-C. Provide the encryption key to access metadata."))
+			return
+		}
+		w.Header().Set("x-amz-server-side-encryption-customer-algorithm", "AES256")
+	} else if encAlgo != "" {
 		w.Header().Set("x-amz-server-side-encryption", "AES256")
 	}
 	setS3MetadataHeaders(w, metadataJSON)
