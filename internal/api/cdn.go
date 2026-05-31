@@ -38,10 +38,11 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 
 	var visibility, corsOrigins string
 	var cacheMaxAgeSecs int
+	var forceDownload bool
 	err = s.db.QueryRowContext(ctx, `
-		SELECT visibility, cors_origins, cache_max_age_secs
+		SELECT visibility, cors_origins, cache_max_age_secs, COALESCE(cdn_force_download, FALSE)
 		FROM buckets WHERE tenant_id = $1 AND name = $2`,
-		tenantID, bucket).Scan(&visibility, &corsOrigins, &cacheMaxAgeSecs)
+		tenantID, bucket).Scan(&visibility, &corsOrigins, &cacheMaxAgeSecs, &forceDownload)
 	if err != nil || visibility != "public-read" {
 		http.NotFound(w, r)
 		return
@@ -70,11 +71,12 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 	var sizeBytes int64
 	var etag, contentType string
 	var updatedAt time.Time
+	var contentDisposition string
 	err = s.db.QueryRowContext(ctx, `
-		SELECT size_bytes, etag, content_type, updated_at
+		SELECT size_bytes, etag, content_type, updated_at, COALESCE(content_disposition, '')
 		FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-		tenantID, bucket, key).Scan(&sizeBytes, &etag, &contentType, &updatedAt)
+		tenantID, bucket, key).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &contentDisposition)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -91,6 +93,7 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", cdnContentDisposition(forceDownload, contentDisposition, contentType, key))
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", sizeBytes))
 	w.Header().Set("ETag", fmt.Sprintf(`"%s"`, etag))
 	w.Header().Set("Cache-Control", cacheControl)
