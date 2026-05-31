@@ -592,12 +592,13 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	var backendName string
 	var encAlgo string
 	var tagsJSON []byte
+	var contentDisposition string
 
 	err = s.db.QueryRowContext(r.Context(), `
-		SELECT size_bytes, etag, content_type, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(tags, '{}')
+		SELECT size_bytes, etag, content_type, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(tags, '{}'), COALESCE(content_disposition, '')
 		FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
-	`, t.ID, req.Bucket, req.Object).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &metadataJSON, &backendName, &encAlgo, &tagsJSON)
+	`, t.ID, req.Bucket, req.Object).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &metadataJSON, &backendName, &encAlgo, &tagsJSON, &contentDisposition)
 
 	if err == sql.ErrNoRows {
 		s.logger.Warn("HEAD: object not in metadata cache",
@@ -647,6 +648,9 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	setS3MetadataHeaders(w, metadataJSON)
 	if n := tagCount(tagsJSON); n > 0 {
 		w.Header().Set("x-amz-tagging-count", strconv.Itoa(n))
+	}
+	if cd := sanitizeContentDisposition(contentDisposition); cd != "" {
+		w.Header().Set("Content-Disposition", cd)
 	}
 	// HEAD must not write a body.
 	w.WriteHeader(http.StatusOK)

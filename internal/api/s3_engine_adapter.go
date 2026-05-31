@@ -212,13 +212,14 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	var cachedBackendName string
 	var cachedEncAlgo string
 	var cachedTags []byte
+	var cachedContentDisposition string
 	var cacheHit bool
 	if a.db != nil {
 		err := a.db.QueryRowContext(r.Context(), `
-			SELECT content_type, size_bytes, etag, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(tags, '{}')
+			SELECT content_type, size_bytes, etag, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(tags, '{}'), COALESCE(content_disposition, '')
 			FROM object_head_cache
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-			t.ID, bucket, artifact).Scan(&cachedContentType, &cachedSize, &cachedETag, &cachedUpdatedAt, &cachedMetadata, &cachedBackendName, &cachedEncAlgo, &cachedTags)
+			t.ID, bucket, artifact).Scan(&cachedContentType, &cachedSize, &cachedETag, &cachedUpdatedAt, &cachedMetadata, &cachedBackendName, &cachedEncAlgo, &cachedTags, &cachedContentDisposition)
 		if err == nil {
 			cacheHit = true
 		}
@@ -322,6 +323,18 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		}
 		dataReader = bytes.NewReader(plaintext)
 		w.Header().Set("x-amz-server-side-encryption", "AES256")
+	}
+
+	// Content-Disposition: ?response-content-disposition overrides the stored
+	// value (applies to both presigned and plain authenticated GET, since it's
+	// part of the signed request). Set before the range branch so both 200 and
+	// 206 responses carry it.
+	disposition := r.URL.Query().Get("response-content-disposition")
+	if disposition == "" {
+		disposition = cachedContentDisposition
+	}
+	if disposition = sanitizeContentDisposition(disposition); disposition != "" {
+		w.Header().Set("Content-Disposition", disposition)
 	}
 
 	rangeHeader := r.Header.Get("Range")
@@ -617,6 +630,8 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		contentType = "application/octet-stream"
 	}
 
+	contentDisposition := sanitizeContentDisposition(r.Header.Get("Content-Disposition"))
+
 	userMeta := extractS3Metadata(r)
 	if err := validateMetadata(userMeta); err != nil {
 		WriteS3Error(w, ErrInvalidRequest, r.URL.Path, generateRequestID())
@@ -627,8 +642,8 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	if a.db != nil {
 		_, dbErr := a.db.ExecContext(r.Context(), `
 			INSERT INTO object_head_cache
-				(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+				(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
 			ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
 				size_bytes            = EXCLUDED.size_bytes,
 				etag                  = EXCLUDED.etag,
@@ -636,8 +651,9 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 				backend_name          = EXCLUDED.backend_name,
 				metadata              = EXCLUDED.metadata,
 				encryption_algorithm  = EXCLUDED.encryption_algorithm,
+				content_disposition   = EXCLUDED.content_disposition,
 				updated_at            = NOW()
-		`, t.ID, bucket, artifact, metadataSize, etag, contentType, backendName, metaJSON, encryptionAlgorithm)
+		`, t.ID, bucket, artifact, metadataSize, etag, contentType, backendName, metaJSON, encryptionAlgorithm, contentDisposition)
 		if dbErr != nil {
 			a.logger.Error("failed to cache object metadata",
 				zap.Error(dbErr),

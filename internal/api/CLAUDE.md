@@ -24,6 +24,7 @@ S3-compatible API layer. Translates S3 protocol to engine operations, handles au
 - **s3_logging.go** — GET/PUT ?logging handlers for per-bucket server access logging config
 - **s3_inventory.go** — GET/PUT/DELETE ?inventory handlers + InventoryRunner background job for CSV reports
 - **s3_tagging.go** — GET/PUT/DELETE ?tagging handlers for per-object tags + `tagCount` helper for x-amz-tagging-count
+- **s3_content_disposition.go** — Content-Disposition helpers: `sanitizeContentDisposition` (header-injection guard), `isInlineRenderable`, `attachmentDisposition`, `cdnContentDisposition` (CDN precedence logic)
 - **management.go** — JSON response helpers: `writeJSON`, `writeListResponse`, `getRequestID` (Stripe-style envelope)
 - **management_errors.go** — 7 typed errors with Stripe-style error envelope (`writeManagementError`)
 - **management_routes.go** — RESTful JSON management API under `/api/v1/manage/` (buckets CRUD, objects list, keys CRUD, usage)
@@ -323,6 +324,37 @@ and count via the `tagCount` helper.
 **Error code**: `ErrInvalidTag` in `s3_errors.go` (400, "The tag provided was not valid.").
 
 **Table**: `object_head_cache.tags` JSONB (migration 041).
+
+## Content-Disposition (Phase 5.10.18)
+
+Stored Content-Disposition response header, plus the `?response-content-disposition`
+query override and CDN inline-vs-attachment defaults. Helpers live in
+`s3_content_disposition.go`. Content-Disposition rides on `object_head_cache` like
+content_type — it is not metadata (x-amz-meta-*) or a tag.
+
+**Store on PUT** (`s3_engine_adapter.go HandlePut`): the request `Content-Disposition`
+header is sanitized (`sanitizeContentDisposition` drops any value containing control
+chars — CR/LF/NUL/DEL — to prevent header injection) and stored in
+`object_head_cache.content_disposition`.
+
+**Return on GET** (`s3_engine_adapter.go HandleGet`): `?response-content-disposition`
+(part of the signed request → works for both presigned and plain authenticated GET)
+overrides the stored value; otherwise the stored value is used. The header is set
+**before** the range branch so both 200 and 206 responses carry it. The query value is
+re-sanitized (dropped, not 400'd, on control chars).
+
+**Return on HEAD** (`s3.go handleHeadObject`): returns the stored value (no override).
+
+**CDN defaults** (`cdn.go handleCDNRequest`): `cdnContentDisposition` precedence —
+(1) bucket `cdn_force_download=TRUE` → `attachment; filename="<base>"`; (2) stored
+disposition → use it; (3) renderable content type (`image/`, `video/`, `text/`,
+`application/pdf`) → `inline`; (4) otherwise → attachment. Unknown types default to
+attachment (safe for a CDN serving arbitrary tenant content — avoids inline rendering
+of untrusted HTML/SVG). Filename is `path.Base(key)` with quotes/backslashes/control
+chars stripped.
+
+**Tables**: `object_head_cache.content_disposition` TEXT, `buckets.cdn_force_download`
+BOOLEAN (migration 042).
 
 ## Tenant Context
 
