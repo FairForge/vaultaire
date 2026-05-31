@@ -223,6 +223,14 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		}
 	}
 
+	// Seed the engine's in-memory routing map so GET goes directly to the
+	// correct backend instead of failing over from primary on restart.
+	if cacheHit && cachedBackendName != "" {
+		if ce, ok := a.engine.(*engine.CoreEngine); ok {
+			ce.HintBackend(container, artifact, cachedBackendName)
+		}
+	}
+
 	if cacheHit {
 		if code := evaluateConditionalGET(r, cachedETag, cachedUpdatedAt); code == http.StatusNotModified {
 			writeNotModified(w, cachedETag, cachedUpdatedAt, "private, no-cache")
@@ -485,7 +493,31 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		putOpts = append(putOpts, engine.WithStorageClass(storageClass))
 	}
 
-	backendName, err := a.engine.Put(r.Context(), container, artifact, hashingBody, putOpts...)
+	// Region-aware routing: if the bucket has a non-default region and
+	// a region-specific driver is registered, route directly to it.
+	var backendName string
+	regionDriver := bucketRegionDriver(r.Context(), a.db, a.engine, t.ID, bucket)
+	if regionDriver != "" {
+		if ce, ok := a.engine.(*engine.CoreEngine); ok {
+			if drv, exists := ce.GetDriver(regionDriver); exists {
+				putErr := drv.Put(r.Context(), container, artifact, hashingBody, putOpts...)
+				if putErr != nil {
+					a.logger.Error("region driver put failed",
+						zap.Error(putErr),
+						zap.String("driver", regionDriver))
+					WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+					return
+				}
+				backendName = regionDriver
+				ce.HintBackend(container, artifact, regionDriver)
+			}
+		}
+	}
+	if backendName == "" {
+		var putErr error
+		backendName, putErr = a.engine.Put(r.Context(), container, artifact, hashingBody, putOpts...)
+		err = putErr
+	}
 	if err != nil {
 		if errors.Is(err, engine.ErrAllBackendsUnavailable) {
 			w.Header().Set("Retry-After", "30")
@@ -705,6 +737,31 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 	emitEvent(r.Context(), a.db, a.logger, "object.deleted", t.ID, map[string]interface{}{
 		"bucket": bucket, "key": object,
 	})
+}
+
+// bucketRegionDriver returns the engine driver name for a bucket's region.
+// Returns "" if the bucket uses the default region or if no region-specific
+// driver is registered (non-iDrive backends).
+func bucketRegionDriver(ctx context.Context, db *sql.DB, eng engine.Engine, tenantID, bucket string) string {
+	if db == nil {
+		return ""
+	}
+	var region string
+	err := db.QueryRowContext(ctx,
+		"SELECT region FROM buckets WHERE tenant_id = $1 AND name = $2",
+		tenantID, bucket).Scan(&region)
+	if err != nil || region == "" || region == "us-west-1" {
+		return ""
+	}
+	driverName := "idrive-" + region
+	ce, ok := eng.(*engine.CoreEngine)
+	if !ok {
+		return ""
+	}
+	if _, exists := ce.GetDriver(driverName); exists {
+		return driverName
+	}
+	return ""
 }
 
 func isBucketSSEEnabled(ctx context.Context, db *sql.DB, tenantID, bucket string) bool {

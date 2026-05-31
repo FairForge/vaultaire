@@ -17,7 +17,7 @@ Helper functions are in `context.go`: `formatBytes` (human-readable sizes), `rel
 
 Three handlers:
 - `HandleBuckets(tmpl, db, dataPath, logger)` — lists buckets from `buckets` table LEFT JOIN `object_head_cache` (includes empty buckets with count=0)
-- `HandleCreateBucket(tmpl, db, dataPath, logger)` — validates S3-compatible name, creates directory at `{dataPath}/{name}`, persists to `buckets` table
+- `HandleCreateBucket(tmpl, db, dataPath, logger)` — validates S3-compatible name and region (via `drivers.IsValidRegion`, default `us-west-1`), creates directory at `{dataPath}/{name}`, persists to `buckets` table with region
 - `HandleBucketObjects(tmpl, db, logger)` — lists objects in a bucket with prefix-based "folder" navigation (uses chi URL param `{name}`). Queries bucket visibility and tenant slug; for public-read buckets with a slug, sets `CDNBaseURL` and populates `ObjectRow.CDNURL` and `ObjectRow.PreviewType` fields for inline media previews and CDN copy buttons.
 
 `previewTypeFromContentType(ct)` maps content types to preview categories: `image/*` → "image", `video/*` → "video", `audio/*` → "audio", `text/*`/json/xml/js → "text", everything else → "".
@@ -29,8 +29,8 @@ Shared helpers in `context.go`: `sessionData(sd, page)` builds the base template
 ## Bucket Settings (`bucket_settings.go`)
 
 Two handlers:
-- `HandleBucketSettings(tmpl, db, logger)` — GET renders bucket settings page: visibility toggle (private/public-read), CDN URL card with tabbed code examples, cache TTL, CORS origins. Checks `CanEnablePublicRead(tier)` for archive-tier restriction.
-- `HandleUpdateBucketSettings(tmpl, db, logger)` — POST updates visibility, CORS origins, and cache_max_age_secs in `buckets` table. Validates visibility enum, clamps cache to 0–86400, enforces archive-tier restriction via `auth.CanEnablePublicRead()`. Uses flash messages for feedback.
+- `HandleBucketSettings(tmpl, db, logger)` — GET renders bucket settings page: visibility toggle (private/public-read), CDN URL card with tabbed code examples, cache TTL, CORS origins, **region** (read-only card showing region + display name + EU badge). Checks `CanEnablePublicRead(tier)` for archive-tier restriction. Region data: `Region`, `RegionDisplay`, `IsEURegion`.
+- `HandleUpdateBucketSettings(tmpl, db, logger)` — POST updates visibility, CORS origins, and cache_max_age_secs in `buckets` table. Validates visibility enum, clamps cache to 0–86400, enforces archive-tier restriction via `auth.CanEnablePublicRead()`. Uses flash messages for feedback. Region is NOT updatable.
 
 Template: `templates/customer/bucket_settings.html`. Routes: `GET/POST /dashboard/buckets/{name}/settings`.
 

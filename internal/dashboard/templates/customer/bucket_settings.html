@@ -17,6 +17,18 @@
 {{if .FlashSuccess}}<div class="alert alert-success">{{.FlashSuccess}}</div>{{end}}
 {{if .FlashError}}<div class="alert alert-error">{{.FlashError}}</div>{{end}}
 
+<div class="card">
+    <div class="card-title">Region</div>
+    <div style="display:flex;align-items:center;gap:0.5rem;">
+        <strong>{{.RegionDisplay}}</strong>
+        <span class="badge badge-default">{{.Region}}</span>
+        {{if .IsEURegion}}<span class="badge badge-success">EU Data Residency</span>{{end}}
+    </div>
+    <p class="text-muted" style="font-size: 0.8rem; margin-top: 0.5rem;">
+        Region is set at bucket creation and cannot be changed. All objects in this bucket are stored in this region.
+    </p>
+</div>
+
 <form method="POST" action="/dashboard/buckets/{{.BucketName}}/settings">
     <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
 

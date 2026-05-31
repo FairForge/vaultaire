@@ -8,7 +8,7 @@ S3-compatible API layer. Translates S3 protocol to engine operations, handles au
 - **s3.go** — Request parsing, auth, routing to operation handlers
 - **s3_errors.go** — Error codes, messages, and response writing
 - **s3_engine_adapter.go** — GET/PUT/DELETE/LIST handlers bridging S3 to engine
-- **s3_buckets.go** — CreateBucket, DeleteBucket, ListBuckets
+- **s3_buckets.go** — CreateBucket (with region), DeleteBucket, ListBuckets, GetBucketLocation, HeadBucket
 - **s3_versioning.go** — Bucket versioning enable/suspend
 - **s3_lock.go** — Object Lock, retention, legal hold
 - **s3_mfa_delete.go** — MFA Delete enforcement (`checkMFADelete` helper, `errMFARequired` sentinel)
@@ -209,6 +209,22 @@ Transparent server-side encryption at rest using ML-KEM-768 (post-quantum key en
 **Key files**: `internal/crypto/sse_s3.go` (service), `internal/crypto/CLAUDE.md` (crypto docs)
 
 **Tables**: `tenant_encryption_keys` (keypairs), `buckets.sse_enabled`, `object_head_cache.encryption_algorithm` (migration 037)
+
+## Per-Bucket Region Selection (Phase 5.14.7)
+
+Each bucket has a `region` column (default `us-west-1`). Region is immutable after creation.
+
+**CreateBucket** reads region from (in priority order): `X-Stored-Region` header, `x-amz-bucket-region` header, `<CreateBucketConfiguration><LocationConstraint>` XML body, or defaults to `us-west-1`. Validated against `drivers.IsValidRegion()`. Invalid region returns `InvalidLocationConstraint` (400). Response includes `x-amz-bucket-region` header.
+
+**GetBucketLocation** (`GET /{bucket}?location`): returns `<LocationConstraint>region</LocationConstraint>` XML + `x-amz-bucket-region` header.
+
+**HeadBucket** (`HEAD /{bucket}`): returns 200 + `x-amz-bucket-region` header.
+
+**PUT routing** (s3_engine_adapter.go): `bucketRegionDriver()` looks up bucket region from DB. If non-default and an `idrive-{region}` driver exists, PUT goes directly to that driver, bypassing the engine's normal routing. Backend name stored as `idrive-{region}` in `object_head_cache`.
+
+**GET routing**: `HintBackend()` seeds the engine's `objectBackends` map from `cachedBackendName` so GET routes directly to the correct region driver without a failed failover attempt.
+
+**Table**: `buckets.region` (migration 039). **Error**: `ErrInvalidLocationConstraint` in s3_errors.go.
 
 ## Tenant Context
 

@@ -33,6 +33,12 @@ type Driver interface {
 | `IDriveDriver` | `idrive.go` | `NewIDriveDriver(accessKey, secretKey, endpoint, region, logger)` | iDrive E2 | Fixed-bucket + key-prefix pattern (like Geyser); `IDRIVE_BUCKET` env var (default `vaultaire`); materialize for Content-Length; ContentLength passthrough skips materialize when size known; `EgressTracker` field (not wired) |
 | `OneDriveDriver` | `onedrive.go` | `NewOneDriveFleetDriver(logger)` | Microsoft OneDrive (Graph API) | Multi-tenant fleet (TENANT_N_* env vars, N=1..15); raw HTTP + azidentity (no Graph SDK); dual transport (HTTP/2 API, HTTP/1.1 CDN); 60MB chunked uploads; streaming uploads (ContentLength passthrough); parallel byte-range downloads (adaptive 1/2/4/8 streams); fleet-wide TLS cache + DNS cache; token refresh mutex; RateLimit header tracking; pooled 1MB drain buffers |
 
+### iDrive Region Registry (Phase 5.14.7)
+
+`idrive_regions.go` — static map of iDrive e2 region identifiers to S3-compatible endpoints. Used by `cmd/vaultaire/main.go` to register one `IDriveDriver` per region (`idrive-{region}`), enabling per-bucket data residency.
+
+Helpers: `IsValidRegion(region)`, `IsEURegion(region)` (true for `eu-*`), `RegionDisplayName(region)`. Called from S3 API (`CreateBucket` validation), dashboard (`HandleCreateBucket`, `HandleBucketSettings`), and engine adapter (`bucketRegionDriver` routing).
+
 ### Not wired in main.go (scaffolds / future)
 
 | Driver | File | Constructor | Backend | Status |

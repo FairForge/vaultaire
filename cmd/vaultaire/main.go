@@ -231,24 +231,39 @@ func main() {
 		}
 	}
 
-	// 6. Add iDrive if credentials available
+	// 6. Add iDrive if credentials available — register one driver per region
 	if accessKey := os.Getenv("IDRIVE_ACCESS_KEY"); accessKey != "" {
 		secretKey := os.Getenv("IDRIVE_SECRET_KEY")
-		endpoint := os.Getenv("IDRIVE_ENDPOINT")
-		if endpoint == "" {
-			endpoint = "https://e2-us-west-1.idrive.com"
+		defaultEndpoint := os.Getenv("IDRIVE_ENDPOINT")
+		if defaultEndpoint == "" {
+			defaultEndpoint = "https://e2-us-west-1.idrive.com"
 		}
-		region := os.Getenv("IDRIVE_REGION")
-		if region == "" {
-			region = "us-west-1"
+		defaultRegion := os.Getenv("IDRIVE_REGION")
+		if defaultRegion == "" {
+			defaultRegion = "us-west-1"
 		}
-		idriveDriver, err := drivers.NewIDriveDriver(accessKey, secretKey, endpoint, region, logger)
+
+		// Register default driver (backward compat alias).
+		idriveDriver, err := drivers.NewIDriveDriver(accessKey, secretKey, defaultEndpoint, defaultRegion, logger)
 		if err != nil {
 			logger.Warn("failed to add iDrive driver", zap.Error(err))
 		} else {
 			eng.AddDriver("idrive", idriveDriver)
-			logger.Info("iDrive driver added", zap.String("endpoint", endpoint), zap.String("region", region))
+			logger.Info("iDrive driver added", zap.String("endpoint", defaultEndpoint), zap.String("region", defaultRegion))
 		}
+
+		// Register per-region drivers for bucket-level region routing.
+		for region, endpoint := range drivers.IDriveRegions {
+			driverName := "idrive-" + region
+			drv, drvErr := drivers.NewIDriveDriver(accessKey, secretKey, endpoint, region, logger)
+			if drvErr != nil {
+				logger.Warn("failed to add region iDrive driver",
+					zap.String("region", region), zap.Error(drvErr))
+				continue
+			}
+			eng.AddDriver(driverName, drv)
+		}
+		logger.Info("iDrive per-region drivers registered", zap.Int("regions", len(drivers.IDriveRegions)))
 	}
 
 	// 7. Add OneDrive fleet if tenant credentials available
