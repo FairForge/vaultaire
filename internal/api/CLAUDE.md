@@ -23,6 +23,7 @@ S3-compatible API layer. Translates S3 protocol to engine operations, handles au
 - **access_log.go** — S3AccessLogTracker: buffered S3 access event writer (Record/Flush) + log delivery to target buckets
 - **s3_logging.go** — GET/PUT ?logging handlers for per-bucket server access logging config
 - **s3_inventory.go** — GET/PUT/DELETE ?inventory handlers + InventoryRunner background job for CSV reports
+- **s3_tagging.go** — GET/PUT/DELETE ?tagging handlers for per-object tags + `tagCount` helper for x-amz-tagging-count
 - **management.go** — JSON response helpers: `writeJSON`, `writeListResponse`, `getRequestID` (Stripe-style envelope)
 - **management_errors.go** — 7 typed errors with Stripe-style error envelope (`writeManagementError`)
 - **management_routes.go** — RESTful JSON management API under `/api/v1/manage/` (buckets CRUD, objects list, keys CRUD, usage)
@@ -299,6 +300,29 @@ Per-bucket inventory reports (daily/weekly CSV export of all objects to a destin
 **Inventory object key**: `{prefix}{source_bucket}/{YYYY-MM-DD}T00-00Z/manifest.csv`
 
 **Tables**: `buckets.inventory_enabled`, `buckets.inventory_schedule`, `buckets.inventory_target_bucket`, `buckets.inventory_prefix`, `buckets.inventory_format` (migration 040).
+
+## Object Tagging (Phase 5.10.17)
+
+S3-compatible per-object tagging via the `?tagging` sub-resource. Tags are a flat
+key/value map stored in `object_head_cache.tags` (JSONB), distinct from `metadata`
+(x-amz-meta-* headers). Used by rclone, lifecycle policies, cost allocation, and IAM
+policy conditions.
+
+**S3 API operations** (handlers in `s3_tagging.go`):
+- `GET /{bucket}/{key}?tagging` → `handleGetObjectTagging` — returns `<Tagging><TagSet>` XML; NoSuchKey (404) if object absent
+- `PUT /{bucket}/{key}?tagging` → `handlePutObjectTagging` — **replaces** the entire tag set (not a merge); returns 200 + `x-amz-version-id: null`
+- `DELETE /{bucket}/{key}?tagging` → `handleDeleteObjectTagging` — resets tags to `'{}'`; returns 204
+
+**Validation** (PUT, returns `InvalidTag` 400 on failure): max 10 tags, key ≤ 128 chars,
+value ≤ 256 chars, no empty keys, no duplicate keys.
+
+**x-amz-tagging-count**: HEAD (`s3.go handleHeadObject`) and GET (`s3_engine_adapter.go HandleGet`)
+emit this header (count of tags) only when > 0, matching AWS. Both SELECT `COALESCE(tags, '{}')`
+and count via the `tagCount` helper.
+
+**Error code**: `ErrInvalidTag` in `s3_errors.go` (400, "The tag provided was not valid.").
+
+**Table**: `object_head_cache.tags` JSONB (migration 041).
 
 ## Tenant Context
 

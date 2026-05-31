@@ -211,13 +211,14 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	var cachedMetadata []byte
 	var cachedBackendName string
 	var cachedEncAlgo string
+	var cachedTags []byte
 	var cacheHit bool
 	if a.db != nil {
 		err := a.db.QueryRowContext(r.Context(), `
-			SELECT content_type, size_bytes, etag, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, '')
+			SELECT content_type, size_bytes, etag, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(tags, '{}')
 			FROM object_head_cache
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-			t.ID, bucket, artifact).Scan(&cachedContentType, &cachedSize, &cachedETag, &cachedUpdatedAt, &cachedMetadata, &cachedBackendName, &cachedEncAlgo)
+			t.ID, bucket, artifact).Scan(&cachedContentType, &cachedSize, &cachedETag, &cachedUpdatedAt, &cachedMetadata, &cachedBackendName, &cachedEncAlgo, &cachedTags)
 		if err == nil {
 			cacheHit = true
 		}
@@ -362,6 +363,9 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 			w.Header().Set("Last-Modified", cachedUpdatedAt.UTC().Format(http.TimeFormat))
 		}
 		setS3MetadataHeaders(w, cachedMetadata)
+		if n := tagCount(cachedTags); n > 0 {
+			w.Header().Set("x-amz-tagging-count", strconv.Itoa(n))
+		}
 	}
 
 	written, err := io.Copy(w, dataReader)
