@@ -211,6 +211,14 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		dr.Get("/billing", handlers.HandleBilling(billingTmpl, deps.Stripe, deps.DB, deps.Logger))
 		dr.Post("/billing/upgrade", handlers.HandleUpgrade(deps.Stripe, deps.DB, deps.Logger))
 		dr.Post("/billing/portal", handlers.HandleManageBilling(deps.Stripe, deps.Logger))
+
+		// Compliance dashboard.
+		complianceTmpl := template.Must(baseTmpl.Clone())
+		template.Must(complianceTmpl.ParseFS(Templates,
+			"templates/customer/compliance.html",
+		))
+		dr.Get("/compliance", handlers.HandleCompliance(complianceTmpl, deps.DB, deps.Logger))
+		dr.Get("/compliance/export", handlers.HandleComplianceExport(deps.DB, deps.Logger))
 	})
 
 	// --- Admin (session + admin role required) ---
