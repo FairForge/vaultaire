@@ -59,6 +59,7 @@ type Server struct {
 	auditLogger      *auth.AuditLogger
 	stripe           *billing.StripeService
 	webhookHandler   *billing.WebhookHandler
+	meteredReporter  *billing.MeteredReporter
 	requestCount     int64
 	testMode         bool
 	errorCount       int64
@@ -210,6 +211,18 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		registerStripePlans(s.stripe)
 
 		logger.Info("stripe billing service initialized")
+
+		// Metered usage reporter (Phase 2.7). Dormant unless both meter event-name
+		// envs are set — these are the Stripe Billing Meter names configured in the
+		// dashboard. Without them, no-op (correct: nothing is reported).
+		storageMeter := os.Getenv("STRIPE_METER_STORAGE")
+		egressMeter := os.Getenv("STRIPE_METER_EGRESS")
+		if storageMeter != "" && egressMeter != "" {
+			s.meteredReporter = billing.NewMeteredReporter(s.stripe, s.db, logger, storageMeter, egressMeter)
+			logger.Info("metered billing reporter initialized")
+		} else {
+			logger.Info("metered billing dormant (STRIPE_METER_STORAGE/STRIPE_METER_EGRESS not set)")
+		}
 	}
 
 	// Base URL for OAuth callbacks and email links.
@@ -219,6 +232,9 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	}
 	s.baseURL = baseURL
 	s.emailSender = email.NewSender(logger)
+	if s.meteredReporter != nil {
+		s.meteredReporter.SetEmailSender(s.emailSender)
+	}
 	if googleID := os.Getenv("GOOGLE_CLIENT_ID"); googleID != "" {
 		s.googleOAuth = &oauth2.Config{
 			ClientID:     googleID,
@@ -924,6 +940,11 @@ func (s *Server) Start() error {
 	// Clean up expired STS tokens hourly.
 	if s.db != nil {
 		auth.StartSTSCleanup(ctx, s.db, s.logger)
+	}
+
+	// Report metered usage to Stripe daily + check spending caps hourly.
+	if s.meteredReporter != nil {
+		s.meteredReporter.StartMeteredReporting(ctx)
 	}
 
 	s.logger.Info("Starting server with RBAC and API Key Management",

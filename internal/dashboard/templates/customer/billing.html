@@ -43,6 +43,15 @@
         <div class="card-title">Storage Used</div>
         <div class="card-value">{{.StorageUsedFmt}}</div>
     </div>
+    {{if .IsMetered}}
+    <div class="card">
+        <div class="card-title">Accrued This Month</div>
+        <div class="card-value">&approx; {{.AccruedCharges}}</div>
+        <div class="card-detail">
+            <span class="text-muted">metered usage, billed monthly</span>
+        </div>
+    </div>
+    {{end}}
 </div>
 
 {{if not .HasSubscription}}
