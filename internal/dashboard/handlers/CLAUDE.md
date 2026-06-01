@@ -123,6 +123,20 @@ Two handlers:
 
 Shared `queryComplianceData(r, db, tenantID)` helper queries buckets table + `object_head_cache` for encryption percentages. Template: `templates/customer/compliance.html`.
 
+## Billing (`billing.go`)
+
+`HandleBilling`, `HandleUpgrade` (Stripe Checkout), `HandleManageBilling` (Stripe
+Billing Portal). Renders plan, subscription status, value stack, and cost
+comparison.
+
+**Accrued charges (Phase 2.7)**: `populateAccruedCharges(ctx, db, data, tenantID)`
+shows "≈ $X.XX this month" for metered-tier tenants (`standard`/`performance`
+only). Storage is the live `tenant_quotas.storage_used_bytes` gauge; egress is the
+current month's sum from `bandwidth_usage_daily`. Charge math reuses
+`billing.AccruedCents(tier, storageBytes, egressBytes)`. Sets `IsMetered=false`
+for fixed-price (Vault/free) tenants, so the card is hidden. Template card gated on
+`{{if .IsMetered}}` in `billing.html`.
+
 ## Legacy Handlers
 
 Files like `dashboard.go` etc. are stubs from before Phase 0 with inline terminal-style templates. They are NOT wired into the router. Remaining phases will rewrite them.

@@ -27,6 +27,7 @@ func HandleBilling(tmpl *template.Template, stripe *billing.StripeService, db *s
 		ctx := r.Context()
 
 		populateBillingPlan(ctx, db, data, sd.TenantID)
+		populateAccruedCharges(ctx, db, data, sd.TenantID)
 		populateBillingPlans(stripe, data)
 		populateValueStack(ctx, db, data, sd.TenantID)
 		populateCostComparison(ctx, db, data, sd.TenantID)
@@ -158,6 +159,39 @@ func populateBillingPlan(ctx context.Context, db *sql.DB, data map[string]any, t
 		data["StatusClass"] = "default"
 		data["StatusLabel"] = "Free"
 	}
+}
+
+// populateAccruedCharges shows the month-to-date metered charge for Standard /
+// Performance tenants. Fixed-price Vault packs and the free tier show nothing.
+// Storage is the live gauge; egress is the current month's sum — the same live
+// tables the rest of the page reads, so the estimate tracks current usage.
+func populateAccruedCharges(ctx context.Context, db *sql.DB, data map[string]any, tenantID string) {
+	data["IsMetered"] = false
+	if db == nil {
+		return
+	}
+
+	var tier string
+	var storageBytes int64
+	if err := db.QueryRowContext(ctx,
+		`SELECT tier, storage_used_bytes FROM tenant_quotas WHERE tenant_id = $1`, tenantID).
+		Scan(&tier, &storageBytes); err != nil {
+		return
+	}
+	if tier != "standard" && tier != "performance" {
+		return // not a metered tier — fixed-price subscription
+	}
+
+	var egressBytes int64
+	_ = db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(egress_bytes), 0) FROM bandwidth_usage_daily
+		 WHERE tenant_id = $1 AND date >= date_trunc('month', CURRENT_DATE)`,
+		tenantID).Scan(&egressBytes)
+
+	cents := billing.AccruedCents(tier, storageBytes, egressBytes)
+	data["IsMetered"] = true
+	data["MeteredTier"] = tier
+	data["AccruedCharges"] = fmt.Sprintf("$%.2f", float64(cents)/100)
 }
 
 func populateBillingPlans(stripe *billing.StripeService, data map[string]any) {
