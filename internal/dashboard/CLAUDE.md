@@ -96,6 +96,7 @@ Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`,
 | `/admin/tenants/{id}/reset-mfa` | POST | session + admin | Reset user's 2FA |
 | `/admin/waitlist` | GET | session + admin | Pre-launch waitlist signups (count + list) |
 | `/admin/waitlist/export` | GET | session + admin | Download all waitlist signups as CSV |
+| `/admin/revenue` | GET | session + admin | Revenue dashboard: MRR, tier breakdown, churn, top customers |
 | `/admin/*` | GET | session + admin role | Admin panel |
 
 ## Auth Flow

@@ -55,7 +55,7 @@ func queryAdminStats(ctx context.Context, db *sql.DB, logger *zap.Logger) (int, 
 	}
 
 	var totalBytes int64
-	if err := db.QueryRowContext(ctx, `SELECT COALESCE(SUM(used_bytes), 0) FROM tenant_quotas`).Scan(&totalBytes); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(SUM(storage_used_bytes), 0) FROM tenant_quotas`).Scan(&totalBytes); err != nil {
 		logger.Debug("admin: sum storage", zap.Error(err))
 	}
 

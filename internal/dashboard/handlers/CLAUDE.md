@@ -148,6 +148,26 @@ in the api package → `waitlist_signups`, migration 044).
 Both redirect to `/login` without a session; nil-DB degrades to empty/zero. Linked
 from the admin sidebar nav. Template: `templates/admin/waitlist.html`.
 
+## Admin Revenue Dashboard (`admin_revenue.go`)
+
+`HandleAdminRevenue(tmpl, db, logger)` — GET `/admin/revenue`: real MRR from two
+sources: fixed-price Vault plans (`planMonthlyCents` lookup, prices from
+VAULT_SERIES_ECONOMICS.md) + metered tiers (standard/performance via
+`billing.AccruedCents`). Cards: MRR, Active Subs, New This Month, Churn
+(count + rate from `subscriptions` table). Revenue-by-tier table groups fixed plans
+and metered tiers separately. Top 10 customers by storage, ordered DESC. Optional
+SVG bar chart of new MRR added per month (last 12 months, derived from
+`subscriptions.created_at` — no historical MRR snapshot table exists).
+
+Also fixes `admin.go:queryAdminStats` which previously used the non-existent
+`used_bytes` column — corrected to `storage_used_bytes`.
+
+Helper: `planMonthlyCents(plan)` covers vault1/3/5/10/18/50/100; free/starter/metered
+return 0. `formatCents(cents)` → "$X.XX".
+
+Template: `templates/admin/revenue.html`. Nil-DB and empty-state both render 200
+with "$0.00 MRR" zero-state.
+
 ## Legacy Handlers
 
 Files like `dashboard.go` etc. are stubs from before Phase 0 with inline terminal-style templates. They are NOT wired into the router. Remaining phases will rewrite them.

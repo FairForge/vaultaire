@@ -1,0 +1,97 @@
+{{define "title"}}Revenue — stored.ge admin{{end}}
+{{define "content"}}
+<div class="dashboard-header">
+    <h1>Revenue</h1>
+</div>
+
+<div class="card-grid">
+    <div class="card">
+        <div class="card-title">Monthly Recurring Revenue</div>
+        <div class="card-value">{{.MRRFmt}}</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Active Subscriptions</div>
+        <div class="card-value">{{.ActiveSubs}}</div>
+    </div>
+    <div class="card">
+        <div class="card-title">New This Month</div>
+        <div class="card-value">{{.NewThisMonth}}</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Churn</div>
+        <div class="card-value">{{.ChurnedThisMonth}} <span style="font-size:0.7em;color:#94a3b8">({{.ChurnRateFmt}})</span></div>
+    </div>
+</div>
+
+{{if .TrendBars}}
+<div class="card" style="margin-bottom:1.5rem">
+    <div class="card-title" style="margin-bottom:0.75rem">New MRR Added (Last 12 Months)</div>
+    <svg viewBox="0 0 600 200" style="width:100%;max-width:600px;height:auto">
+        {{range .TrendBars}}
+        <rect x="{{.X}}" y="{{.Y}}" width="{{.W}}" height="{{.H}}" rx="3" fill="#6366f1" opacity="0.85">
+            <title>{{.Label}}: {{.Fmt}}</title>
+        </rect>
+        <text x="{{.X}}" y="195" fill="#94a3b8" font-size="11" font-family="system-ui,sans-serif">{{.Label}}</text>
+        {{end}}
+    </svg>
+</div>
+{{end}}
+
+<div class="card" style="margin-bottom:1.5rem">
+    <div class="card-title" style="margin-bottom:0.75rem">Revenue by Tier</div>
+    {{if .ByTier}}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Tier / Plan</th>
+                    <th style="text-align:right">Subscribers</th>
+                    <th style="text-align:right">MRR</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .ByTier}}
+                <tr>
+                    <td><code>{{.Tier}}</code></td>
+                    <td style="text-align:right">{{.Count}}</td>
+                    <td style="text-align:right">{{.MRRFmt}}</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+    {{else}}
+    <p class="text-muted">No active subscriptions.</p>
+    {{end}}
+</div>
+
+<div class="card">
+    <div class="card-title" style="margin-bottom:0.75rem">Top Customers</div>
+    {{if .TopCustomers}}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Email</th>
+                    <th>Plan</th>
+                    <th style="text-align:right">MRR</th>
+                    <th style="text-align:right">Storage</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .TopCustomers}}
+                <tr>
+                    <td>{{.Email}}</td>
+                    <td><code>{{.Plan}}</code></td>
+                    <td style="text-align:right">{{.MRRFmt}}</td>
+                    <td style="text-align:right">{{.StorageFmt}}</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+    {{else}}
+    <p class="text-muted">No active customers.</p>
+    {{end}}
+</div>
+{{end}}
