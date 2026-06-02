@@ -52,6 +52,7 @@ Helpers: `IsValidRegion(region)`, `IsEURegion(region)` (true for `eu-*`), `Regio
 | File | Type | Purpose |
 |------|------|---------|
 | `transport.go` | `TunedHTTPClient` | Shared HTTP client factory with connection pooling (200 conns), 4MB I/O buffers, DNS caching, TLS session resumption. Used by all S3-compatible drivers (Lyve, Geyser, iDrive, S3, S3compat). Options: `WithInsecureTLS()`, `WithResponseHeaderTimeout()`, `WithHTTP1Only()`. Disable via `VAULTAIRE_TUNED_TRANSPORT=false`. OneDrive has its own transports (odGraphTransport, odCDNTransport). |
+| `s3upload.go` | `s3ParallelUpload` | Shared parallel multipart upload via the AWS SDK `manager.Uploader` (16 MiB parts, 8 concurrent). Large files upload as concurrent parts instead of one PutObject stream; small files still go as a single PutObject; no full-object buffering. Used by `s3compat.go` + `idrive.go` `Put`. Uses stable `feature/s3/manager` (v1) — not the pre-1.0 `transfermanager`. (OneDrive uploads are non-S3; parallel upload there is deferred to the EC layer.) |
 
 ### Resilience & Orchestration
 
