@@ -1,0 +1,72 @@
+{{define "title"}}Audit Log — stored.ge admin{{end}}
+{{define "content"}}
+<div class="dashboard-header">
+    <h1>Audit Log</h1>
+    <a href="{{.ExportURL}}" class="btn btn-sm">Export CSV</a>
+</div>
+
+<div class="card" style="margin-bottom:1.5rem">
+    <form action="/admin/audit" method="GET" style="display:flex;gap:0.75rem;flex-wrap:wrap;align-items:end">
+        <div>
+            <label style="display:block;font-size:0.85rem;color:#94a3b8;margin-bottom:0.25rem">Tenant ID</label>
+            <input type="text" name="tenant" value="{{.Filters.Tenant}}" placeholder="All tenants" style="padding:0.4rem 0.6rem;border:1px solid #334155;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:0.9rem">
+        </div>
+        <div>
+            <label style="display:block;font-size:0.85rem;color:#94a3b8;margin-bottom:0.25rem">Event Type</label>
+            <select name="type" style="padding:0.4rem 0.6rem;border:1px solid #334155;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:0.9rem">
+                <option value="">All types</option>
+                {{range .EventTypes}}<option value="{{.}}"{{if eq . $.Filters.Type}} selected{{end}}>{{.}}</option>
+                {{end}}
+            </select>
+        </div>
+        <div>
+            <label style="display:block;font-size:0.85rem;color:#94a3b8;margin-bottom:0.25rem">From</label>
+            <input type="date" name="from" value="{{.Filters.From}}" style="padding:0.4rem 0.6rem;border:1px solid #334155;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:0.9rem">
+        </div>
+        <div>
+            <label style="display:block;font-size:0.85rem;color:#94a3b8;margin-bottom:0.25rem">To</label>
+            <input type="date" name="to" value="{{.Filters.To}}" style="padding:0.4rem 0.6rem;border:1px solid #334155;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:0.9rem">
+        </div>
+        <button type="submit" class="btn btn-sm">Filter</button>
+    </form>
+</div>
+
+<div class="card">
+    {{if .Events}}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Type</th>
+                    <th>Tenant</th>
+                    <th>Data</th>
+                    <th>Time</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .Events}}
+                <tr>
+                    <td><code>{{.Type}}</code></td>
+                    <td style="font-family:monospace;font-size:0.85rem">{{.TenantID}}</td>
+                    <td>
+                        <details>
+                            <summary style="cursor:pointer;max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{.DataSummary}}</summary>
+                            <pre style="margin-top:0.5rem;padding:0.75rem;background:#0f172a;border-radius:6px;overflow-x:auto;font-size:0.8rem;white-space:pre-wrap;word-break:break-all">{{.DataJSON}}</pre>
+                        </details>
+                    </td>
+                    <td style="white-space:nowrap">{{.CreatedFmt}}</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+    {{if .HasMore}}
+    <div style="padding:1rem;text-align:center">
+        <a href="{{.NextURL}}" class="btn btn-sm">Next page &rarr;</a>
+    </div>
+    {{end}}
+    {{else}}
+    <p class="text-muted">No events found.</p>
+    {{end}}
+</div>
+{{end}}
