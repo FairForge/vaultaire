@@ -505,6 +505,15 @@ func (s *Server) setupRoutes() {
 
 	s.router.Get("/llms.txt", s.handleLlmsTxt)
 
+	// Public pre-launch waitlist signup from the landing page (no auth).
+	s.router.Post("/api/waitlist", s.handleWaitlistSignup)
+
+	// Public marketing landing page at "/" for browsers. Authenticated S3
+	// ListBuckets (GET / with SigV4 auth) is delegated to the catch-all inside
+	// handleRoot, so the S3 API is unaffected. Registered before the catch-all.
+	s.router.Get("/", s.handleRoot)
+	s.router.Head("/", s.handleRoot)
+
 	s.logger.Info("Registering S3 catch-all handler")
 	s.router.HandleFunc("/*", s.handleS3Request)
 }
