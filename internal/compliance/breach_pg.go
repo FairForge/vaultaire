@@ -144,11 +144,13 @@ func (s *BreachPgStore) ListBreaches(ctx context.Context, filters map[string]int
 	argIdx := 1
 
 	if severity, ok := filters["severity"].(string); ok && severity != "" {
+		// #nosec G202 -- builds a $N placeholder only; the value is parameterized via args
 		query += fmt.Sprintf(" AND severity = $%d", argIdx)
 		args = append(args, severity)
 		argIdx++
 	}
 	if status, ok := filters["status"].(string); ok && status != "" {
+		// #nosec G202 -- builds a $N placeholder only; the value is parameterized via args
 		query += fmt.Sprintf(" AND status = $%d", argIdx)
 		args = append(args, status)
 	}

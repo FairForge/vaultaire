@@ -3,7 +3,7 @@ package crypto
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/md5" // #nosec G401 — S3 spec requires MD5 for SSE-C key validation
+	"crypto/md5" // #nosec G401 G501 — S3 spec requires MD5 for SSE-C key validation
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
