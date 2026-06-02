@@ -56,10 +56,10 @@ func NewPostgres(cfg Config, logger *zap.Logger) (*Postgres, error) {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
-	// Set connection pool settings
-	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(5)
+	db.SetMaxOpenConns(50)
+	db.SetMaxIdleConns(25)
 	db.SetConnMaxLifetime(5 * time.Minute)
+	db.SetConnMaxIdleTime(time.Minute)
 
 	return &Postgres{
 		db:     db,
