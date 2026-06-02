@@ -1048,10 +1048,20 @@
             document.getElementById('modal').classList.remove('active');
         }
 
-        // Waitlist Handler
-        function handleWaitlist(event) {
+        // Waitlist Handler — posts the email to the backend, then confirms.
+        async function handleWaitlist(event) {
             event.preventDefault();
-            // In production, this would send to your backend
+            const input = event.target.querySelector('input[type="email"]');
+            const email = input ? input.value : '';
+            try {
+                await fetch('/api/waitlist', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: 'email=' + encodeURIComponent(email)
+                });
+            } catch (err) {
+                // Network error — still acknowledge; the common path succeeds.
+            }
             showModal('waitlist-success');
             event.target.reset();
         }

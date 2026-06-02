@@ -505,6 +505,9 @@ func (s *Server) setupRoutes() {
 
 	s.router.Get("/llms.txt", s.handleLlmsTxt)
 
+	// Public pre-launch waitlist signup from the landing page (no auth).
+	s.router.Post("/api/waitlist", s.handleWaitlistSignup)
+
 	// Public marketing landing page at "/" for browsers. Authenticated S3
 	// ListBuckets (GET / with SigV4 auth) is delegated to the catch-all inside
 	// handleRoot, so the S3 API is unaffected. Registered before the catch-all.

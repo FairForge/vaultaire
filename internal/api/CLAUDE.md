@@ -356,6 +356,23 @@ chars stripped.
 **Tables**: `object_head_cache.content_disposition` TEXT, `buckets.cdn_force_download`
 BOOLEAN (migration 042).
 
+## Marketing Landing Page + Waitlist (Phase: launch)
+
+`stored.ge/` previously returned an S3 `AccessDenied` XML error to browsers (anonymous
+`GET /` hit the S3 catch-all). Now:
+
+- **`landing.go`** — `handleRoot` serves the marketing page (`//go:embed landing.html`,
+  the `stored-ge-website` content) for anonymous browser GET/HEAD on `/`. Authenticated
+  S3 `ListBuckets` (GET `/` with a SigV4 `Authorization` header or presigned `X-Amz-*`
+  query) is delegated to `handleS3Request` untouched — `isS3RootRequest` is the
+  discriminator. Registered as exact `Get("/")`/`Head("/")` before the `/*` catch-all.
+  No storage backend — served from the embedded binary.
+- **`waitlist.go`** — `POST /api/waitlist` (public, no auth) captures a pre-launch email
+  into `waitlist_signups` (migration 044, `ON CONFLICT (email) DO NOTHING`). Validates via
+  `mail.ParseAddress`, lowercases, per-IP sliding-window rate limit (`waitlistLimiter`,
+  10/hour). Accepts form-encoded or JSON. Nil-DB degrades to 200 (dev). The landing form's
+  `handleWaitlist` JS POSTs here then shows the success modal.
+
 ## Tenant Context
 
 Most handlers use `tenant.FromContext(r.Context())` to get the authenticated tenant. The `S3Request.TenantID` field is also set for convenience.

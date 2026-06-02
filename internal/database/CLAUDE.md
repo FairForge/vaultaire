@@ -33,6 +33,7 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 | 041 | Object tagging: `tags JSONB` (default `{}`) on `object_head_cache` — per-object S3 `?tagging` sub-resource (flat key/value map) |
 | 042 | Content-Disposition: `content_disposition TEXT` (default `''`) on `object_head_cache` — stored response header; `cdn_force_download BOOLEAN` (default FALSE) on `buckets` — CDN force-attachment toggle |
 | 043 | Metered billing: `metered_usage_reports` table (daily Stripe meter reports + idempotency guard); `spending_cap_cents BIGINT` (default 0) on `tenant_quotas` |
+| 044 | Waitlist: `waitlist_signups` table (email UNIQUE, source, ip, user_agent) — pre-launch landing-page email capture |
 
 ## Key Tables
 
