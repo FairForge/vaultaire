@@ -102,7 +102,7 @@ func HandleAdminAuditExport(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 
 		f := parseAuditFilters(r)
 		where, args := auditWhere(f, false)
-		q := "SELECT id, type, tenant_id, data, created_at FROM events" + where + " ORDER BY created_at DESC"
+		q := "SELECT id, type, tenant_id, data, created_at FROM events" + where + " ORDER BY created_at DESC" // #nosec G202 -- parameterized $N placeholders only
 
 		rows, err := db.QueryContext(r.Context(), q, args...)
 		if err != nil {
@@ -167,7 +167,7 @@ func auditWhere(f auditFilters, withCursor bool) (string, []interface{}) {
 
 func queryAuditEvents(r *http.Request, db *sql.DB, f auditFilters, logger *zap.Logger) ([]auditEventRow, bool, string) {
 	where, args := auditWhere(f, true)
-	q := "SELECT id, type, tenant_id, data, created_at FROM events" + where +
+	q := "SELECT id, type, tenant_id, data, created_at FROM events" + where + // #nosec G202 -- parameterized $N placeholders only
 		fmt.Sprintf(" ORDER BY created_at DESC LIMIT %d", auditPageSize+1)
 
 	rows, err := db.QueryContext(r.Context(), q, args...)
