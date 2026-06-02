@@ -137,6 +137,17 @@ current month's sum from `bandwidth_usage_daily`. Charge math reuses
 for fixed-price (Vault/free) tenants, so the card is hidden. Template card gated on
 `{{if .IsMetered}}` in `billing.html`.
 
+## Admin Waitlist (`waitlist.go`)
+
+Admin-only view of pre-launch waitlist signups (captured by `POST /api/waitlist`
+in the api package → `waitlist_signups`, migration 044).
+- `HandleAdminWaitlist(tmpl, db, logger)` — GET `/admin/waitlist`: total count + the
+  1000 most recent signups (email, source, date). Renders the `admin` layout.
+- `HandleAdminWaitlistExport(db, logger)` — GET `/admin/waitlist/export`: streams **all**
+  signups as a CSV download (`encoding/csv`, `Content-Disposition: attachment`).
+Both redirect to `/login` without a session; nil-DB degrades to empty/zero. Linked
+from the admin sidebar nav. Template: `templates/admin/waitlist.html`.
+
 ## Legacy Handlers
 
 Files like `dashboard.go` etc. are stubs from before Phase 0 with inline terminal-style templates. They are NOT wired into the router. Remaining phases will rewrite them.

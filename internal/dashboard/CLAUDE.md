@@ -94,6 +94,8 @@ Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`,
 | `/dashboard/settings/cancel-deletion` | POST | session | Cancel pending account deletion |
 | `/admin/tenants/{id}/bandwidth-limit` | POST | session + admin | Update tenant bandwidth limit |
 | `/admin/tenants/{id}/reset-mfa` | POST | session + admin | Reset user's 2FA |
+| `/admin/waitlist` | GET | session + admin | Pre-launch waitlist signups (count + list) |
+| `/admin/waitlist/export` | GET | session + admin | Download all waitlist signups as CSV |
 | `/admin/*` | GET | session + admin role | Admin panel |
 
 ## Auth Flow

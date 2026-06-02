@@ -242,6 +242,10 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		"templates/layouts/admin.html",
 		"templates/admin/backends.html",
 	))
+	waitlistTmpl := template.Must(template.ParseFS(Templates,
+		"templates/layouts/admin.html",
+		"templates/admin/waitlist.html",
+	))
 
 	r.Route("/admin", func(ar chi.Router) {
 		ar.Use(middleware.Recovery(deps.Logger))
@@ -260,6 +264,8 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		ar.Post("/tenants/{id}/bandwidth-limit", handlers.HandleUpdateBandwidthLimit(deps.DB, deps.Logger))
 		ar.Post("/tenants/{id}/reset-mfa", handlers.HandleAdminResetMFA(deps.Auth, deps.Logger))
 		ar.Get("/system", handlers.HandleAdminSystem(systemTmpl, deps.DB, deps.Logger))
+		ar.Get("/waitlist", handlers.HandleAdminWaitlist(waitlistTmpl, deps.DB, deps.Logger))
+		ar.Get("/waitlist/export", handlers.HandleAdminWaitlistExport(deps.DB, deps.Logger))
 		if deps.Engine != nil {
 			ar.Get("/backends", handlers.HandleAdminBackends(backendsTmpl, deps.Engine, deps.HealthChecker, deps.Logger))
 			ar.Post("/backends/{name}/primary", handlers.HandleSetPrimary(deps.Engine, deps.Logger))

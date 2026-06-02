@@ -1,0 +1,44 @@
+{{define "title"}}Waitlist — stored.ge admin{{end}}
+{{define "content"}}
+<div class="dashboard-header">
+    <h1>Waitlist Signups</h1>
+    <a href="/admin/waitlist/export" class="btn btn-sm">Download CSV</a>
+</div>
+
+<div class="card-grid">
+    <div class="card">
+        <div class="card-title">Total Signups</div>
+        <div class="card-value">{{.SignupCount}}</div>
+    </div>
+</div>
+
+<div class="card">
+    {{if .Signups}}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Email</th>
+                    <th>Source</th>
+                    <th>Signed Up</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .Signups}}
+                <tr>
+                    <td>{{.Email}}</td>
+                    <td>{{.Source}}</td>
+                    <td>{{.CreatedFmt}}</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+    {{if gt .SignupCount 1000}}
+    <p class="text-muted">Showing the 1000 most recent of {{.SignupCount}}. Use “Download CSV” for the full list.</p>
+    {{end}}
+    {{else}}
+    <p class="text-muted">No signups yet.</p>
+    {{end}}
+</div>
+{{end}}
