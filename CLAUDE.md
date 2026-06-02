@@ -154,6 +154,7 @@ GitHub Actions Deploy (`.github/workflows/deploy.yml`):
 | `GITHUB_CLIENT_SECRET` | — | GitHub OAuth App client secret |
 | `VAULTAIRE_BASE_URL` | http://localhost:8000 | Base URL for OAuth callbacks |
 | `JWT_SECRET` | — | **Required** — JWT signing key for API auth |
+| `SIGNUPS_ENABLED` | true | Set to `false` to close public signups (gates web form, `/auth/register` API, and OAuth signup at `auth.CreateUserWithTenant`); existing-user login still works |
 | `VERIFY_SECRET` | — | HMAC secret for email verification tokens |
 | `GEYSER_ACCESS_KEY`, `GEYSER_SECRET_KEY` | — | Geyser tape S3 credentials |
 | `GEYSER_BUCKET`, `GEYSER_ENDPOINT` | — | Geyser bucket name and endpoint URL |

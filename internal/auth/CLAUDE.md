@@ -69,6 +69,25 @@ Password reset rate limiting is in-memory (per-email, 3/hour, sliding window). T
 
 `Auth.ValidateRequest` (handlers.go) — returns `(tenantID, *KeyScope, error)`. Queries `tenants` first (primary key, full access), falls back to `api_keys` JOIN users+tenants for scoped keys.
 
+## Signup Gate (pre-launch)
+
+Public account creation can be closed with a single switch. `CreateUserWithTenant`
+is the **sole chokepoint** for every signup path — the dashboard `/register` form,
+the JSON `POST /auth/register` API, **and** OAuth signup (`CreateUserFromOAuth`
+calls `CreateUserWithTenant` internally). Gating that one function blocks all three.
+
+- `SetSignupsEnabled(bool)` / `SignupsEnabled() bool` — toggle/read. Default **true**.
+- When disabled, `CreateUserWithTenant` returns `ErrSignupsDisabled` before any work
+  (no DB write, no in-memory entry). OAuth wraps it with `%w`, so callers use
+  `errors.Is(err, auth.ErrSignupsDisabled)`.
+- **Existing-user login is unaffected** — only *new account creation* is gated.
+  Password login and OAuth login for already-linked users still work (those paths
+  don't call `CreateUserWithTenant`).
+- Wired in `server.go`: `SIGNUPS_ENABLED` env (parsed with `strconv.ParseBool`;
+  unset = enabled). Handlers respond gracefully: dashboard `/register` shows
+  "Signups are closed — join the waitlist" (and the GET page redirects to `/`),
+  `/auth/register` returns 403, OAuth callback redirects would-be new signups to `/`.
+
 ## Slug Generation + Bucket Backfill (`slug.go`, `backfill.go`)
 
 - `GenerateSlug(company)` — URL-safe slug from company name (deterministic, no DB)

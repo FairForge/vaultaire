@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -71,7 +72,15 @@ type AuthService struct {
 	resetMu         sync.Mutex
 	activityTracker *ActivityTracker
 	auditLogger     *AuditLogger
+	signupsEnabled  bool // when false, all account creation is rejected
 }
+
+// ErrSignupsDisabled is returned by CreateUserWithTenant — the single chokepoint
+// for the web form (/register), the JSON API (/auth/register), AND OAuth signup
+// (CreateUserFromOAuth calls CreateUserWithTenant) — when public signups are
+// turned off via SetSignupsEnabled(false). Gating this one function blocks every
+// account-creation path at the source.
+var ErrSignupsDisabled = errors.New("signups are currently disabled")
 
 // Database interface for auth operations
 type Database interface {
@@ -106,8 +115,18 @@ func NewAuthService(db Database, sqlDB *sql.DB) *AuthService {
 		resetRates:      make(map[string][]time.Time),
 		activityTracker: nil,
 		auditLogger:     nil,
+		signupsEnabled:  true, // default: signups allowed (prod sets SIGNUPS_ENABLED=false to close)
 	}
 }
+
+// SetSignupsEnabled toggles public account creation. When disabled,
+// CreateUserWithTenant rejects new accounts — which closes the web form, the
+// /auth/register API, and OAuth signup, since all three funnel through it.
+// Existing-user login (password or OAuth) is unaffected.
+func (a *AuthService) SetSignupsEnabled(enabled bool) { a.signupsEnabled = enabled }
+
+// SignupsEnabled reports whether public account creation is currently allowed.
+func (a *AuthService) SignupsEnabled() bool { return a.signupsEnabled }
 
 // SetJWTSecret overrides the default JWT signing key.
 // Call this from main.go with the value from the JWT_SECRET env var.
@@ -271,6 +290,12 @@ func (a *AuthService) CreateUser(ctx context.Context, email, password string) (*
 // caller should surface the error so the operator knows persistence
 // failed.
 func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password, company string) (*User, *Tenant, *APIKey, error) {
+	// Single chokepoint: when signups are disabled, reject before any work so
+	// the web form, /auth/register API, and OAuth signup are all blocked here.
+	if !a.signupsEnabled {
+		return nil, nil, nil, ErrSignupsDisabled
+	}
+
 	// Validate email
 	email = strings.ToLower(strings.TrimSpace(email))
 	if !strings.Contains(email, "@") {

@@ -60,7 +60,15 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 	// --- Public auth routes ---
 	r.Get("/login", renderAuthPage(baseTmpl, "login", deps))
 	r.Post("/login", loginRL.Limit(handleLogin(baseTmpl, deps)).ServeHTTP)
-	r.Get("/register", renderAuthPage(baseTmpl, "register", deps))
+	// When signups are closed, the register page redirects to the homepage
+	// (waitlist). The POST is still gated server-side at CreateUserWithTenant.
+	r.Get("/register", func(w http.ResponseWriter, r *http.Request) {
+		if deps.Auth != nil && !deps.Auth.SignupsEnabled() {
+			http.Redirect(w, r, "/", http.StatusSeeOther)
+			return
+		}
+		renderAuthPage(baseTmpl, "register", deps)(w, r)
+	})
 	r.Post("/register", handleRegister(baseTmpl, deps))
 	r.Get("/logout", handleLogout(deps.Sessions))
 
@@ -407,9 +415,12 @@ func handleRegister(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 
 		user, _, _, err := deps.Auth.CreateUserWithTenant(r.Context(), email, password, company)
 		if err != nil {
-			if err.Error() == "user already exists" {
+			switch {
+			case errors.Is(err, auth.ErrSignupsDisabled):
+				renderErr("Signups are closed for now — join the waitlist on our homepage.")
+			case err.Error() == "user already exists":
 				renderErr("An account with that email already exists.")
-			} else {
+			default:
 				deps.Logger.Error("registration failed", zap.Error(err))
 				renderErr("Registration failed. Please try again.")
 			}
