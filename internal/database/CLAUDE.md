@@ -65,3 +65,5 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 ## Connection
 
 `NewPostgres(cfg, logger)` returns a `*Postgres` with a `DB() *sql.DB` accessor. Config comes from `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` env vars.
+
+Pool settings: `MaxOpenConns=50`, `MaxIdleConns=25`, `ConnMaxLifetime=5m`, `ConnMaxIdleTime=1m`. Sized for 100+ concurrent S3 requests (each runs 5-6 DB queries through the auth + head-cache path).

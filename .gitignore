@@ -90,6 +90,9 @@ test/archive/
 tests/k6/*.json
 tests/k6/results/
 
+# Load test results
+tests/load/results/
+
 # Benchmark cache
 cache_benchmark_results.txt
 compress.txt
