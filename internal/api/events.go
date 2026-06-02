@@ -30,6 +30,7 @@ var validEventTypes = []string{
 	"key.revoked",
 	"sts.token_created",
 	"webhook.test",
+	"bandwidth.alert",
 }
 
 func isValidEventType(t string) bool {
