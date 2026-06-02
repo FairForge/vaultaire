@@ -168,6 +168,30 @@ return 0. `formatCents(cents)` → "$X.XX".
 Template: `templates/admin/revenue.html`. Nil-DB and empty-state both render 200
 with "$0.00 MRR" zero-state.
 
+## Admin Cost Dashboard (`admin_costs.go`)
+
+`HandleAdminCosts(tmpl, db, logger)` — GET `/admin/costs`: estimated backend spend,
+per-tenant margin (revenue minus cost), and negative-margin alerts.
+
+Cost model: `backendCostPerTBCents` map (geyser=155, idrive=330, hetzner=381,
+onedrive/gorilla/local/edge=0) + fixed costs (Geyser $155/mo floor, Gorilla
+configurable). `tierBackend(plan, tier)` maps vault*→geyser, standard/performance→idrive,
+free→local. Egress cost is a first-class column (currently $0 — matters when BYOB/edge
+land).
+
+Revenue side reuses `planMonthlyCents` (fixed plans) and `billing.AccruedCents`
+(metered tiers) from admin_revenue.go. Margin = revenue − cost per tenant.
+
+Cards: Est. Monthly Spend (sum + fixed floors), Blended COGS/TB, Gross Margin %,
+Negative-Margin Tenants. Tables: cost-by-backend (storage, variable, fixed, total)
+and per-tenant margin table with negative margins highlighted in red.
+
+Projected month-end: linear extrapolation from current day-of-month. Caption notes
+estimates are from intended tier→backend mapping, not live backend.
+
+Template: `templates/admin/costs.html`. Nil-DB and empty-state both render 200
+with $0.00 zero-state.
+
 ## Legacy Handlers
 
 Files like `dashboard.go` etc. are stubs from before Phase 0 with inline terminal-style templates. They are NOT wired into the router. Remaining phases will rewrite them.

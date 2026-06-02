@@ -1,0 +1,104 @@
+{{define "title"}}Costs — stored.ge admin{{end}}
+{{define "content"}}
+<div class="dashboard-header">
+    <h1>Backend Costs</h1>
+</div>
+
+<p class="text-muted" style="margin-bottom:1.5rem">Estimated from intended tier&rarr;backend mapping. Real costs apply once prod is on a configured backend (5.15.5).</p>
+
+<div class="card-grid">
+    <div class="card">
+        <div class="card-title">Est. Monthly Spend</div>
+        <div class="card-value">{{.EstSpendFmt}}</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Blended COGS</div>
+        <div class="card-value">{{.BlendedCOGSFmt}}</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Gross Margin</div>
+        <div class="card-value">{{.GrossMarginFmt}}</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Negative-Margin Tenants</div>
+        <div class="card-value"{{if gt .NegativeMarginCount 0}} style="color:#ef4444"{{end}}>{{.NegativeMarginCount}}</div>
+    </div>
+</div>
+
+<div class="card-grid" style="grid-template-columns:1fr">
+    <div class="card">
+        <div class="card-title">Projected Month-End Spend</div>
+        <div class="card-value">{{.ProjectedSpendFmt}}</div>
+    </div>
+</div>
+
+<div class="card" style="margin-bottom:1.5rem">
+    <div class="card-title" style="margin-bottom:0.75rem">Cost by Backend</div>
+    {{if .ByBackend}}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Backend</th>
+                    <th style="text-align:right">Storage</th>
+                    <th style="text-align:right">Variable Cost</th>
+                    <th style="text-align:right">Fixed Cost</th>
+                    <th style="text-align:right">Total</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .ByBackend}}
+                <tr>
+                    <td><code>{{.Backend}}</code></td>
+                    <td style="text-align:right">{{.StorageFmt}}</td>
+                    <td style="text-align:right">{{.CostFmt}}</td>
+                    <td style="text-align:right">{{.FixedFmt}}</td>
+                    <td style="text-align:right">{{.TotalFmt}}</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+    {{else}}
+    <p class="text-muted">No backend usage data.</p>
+    {{end}}
+</div>
+
+<div class="card">
+    <div class="card-title" style="margin-bottom:0.75rem">Tenant Margins</div>
+    {{if .MarginTable}}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Email</th>
+                    <th>Plan</th>
+                    <th>Backend</th>
+                    <th style="text-align:right">Storage</th>
+                    <th style="text-align:right">Revenue</th>
+                    <th style="text-align:right">Cost</th>
+                    <th style="text-align:right">Egress Cost</th>
+                    <th style="text-align:right">Margin</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .MarginTable}}
+                <tr{{if .IsNegative}} style="background:rgba(239,68,68,0.1)"{{end}}>
+                    <td>{{.Email}}</td>
+                    <td><code>{{.Plan}}</code></td>
+                    <td><code>{{.Backend}}</code></td>
+                    <td style="text-align:right">{{.StorageFmt}}</td>
+                    <td style="text-align:right">{{.RevenueFmt}}</td>
+                    <td style="text-align:right">{{.CostFmt}}</td>
+                    <td style="text-align:right">{{.EgressCostFmt}}</td>
+                    <td style="text-align:right{{if .IsNegative}};color:#ef4444;font-weight:600{{end}}">{{.MarginFmt}}</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+    {{else}}
+    <p class="text-muted">No active tenants.</p>
+    {{end}}
+</div>
+{{end}}
