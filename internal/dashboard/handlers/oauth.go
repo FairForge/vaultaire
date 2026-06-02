@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -121,9 +122,15 @@ func HandleOAuthCallback(
 			return
 		}
 
-		// Find or create user.
+		// Find or create user. Existing users log in; new accounts are created
+		// unless signups are closed (CreateUserFromOAuth → CreateUserWithTenant).
 		user, err := findOrCreateOAuthUser(r.Context(), authSvc, db, provider, ou)
 		if err != nil {
+			if errors.Is(err, auth.ErrSignupsDisabled) {
+				// Would-be new signup while closed — send them to the waitlist.
+				http.Redirect(w, r, "/", http.StatusSeeOther)
+				return
+			}
 			logger.Error("oauth: find or create user", zap.String("provider", provider), zap.Error(err))
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return

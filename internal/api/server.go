@@ -4,12 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -123,6 +125,18 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		verifySecret = os.Getenv("JWT_SECRET")
 	}
 	s.auth.SetVerifySecret(verifySecret)
+
+	// Public signups: enabled by default; set SIGNUPS_ENABLED=false to close them
+	// (pre-launch). Gated at CreateUserWithTenant, so the web form, /auth/register
+	// API, and OAuth signup are all blocked; existing-user login still works.
+	if v := os.Getenv("SIGNUPS_ENABLED"); v != "" {
+		if enabled, parseErr := strconv.ParseBool(v); parseErr == nil {
+			s.auth.SetSignupsEnabled(enabled)
+			if !enabled {
+				logger.Info("public signups DISABLED (SIGNUPS_ENABLED=false)")
+			}
+		}
+	}
 
 	// Populate in-memory maps from PostgreSQL so that existing users
 	// can authenticate immediately after a restart/deploy.
@@ -602,6 +616,10 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	user, tenant, apiKey, err := s.auth.CreateUserWithTenant(
 		r.Context(), req.Email, req.Password, req.Company)
 	if err != nil {
+		if errors.Is(err, auth.ErrSignupsDisabled) {
+			http.Error(w, "Signups are currently closed. Join the waitlist at https://stored.ge", http.StatusForbidden)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
