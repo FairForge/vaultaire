@@ -68,6 +68,7 @@ type Server struct {
 	healthChecker    *BackendHealthChecker
 	sessionStore     dashauth.SessionStore
 	bandwidthTracker *BandwidthTracker
+	bandwidthAlerter *BandwidthAlerter
 	googleOAuth      *oauth2.Config
 	githubOAuth      *oauth2.Config
 	mfaService       *auth.MFAService
@@ -239,6 +240,10 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		}
 	}
 
+	// Bandwidth threshold alerter (Phase 4.3). Active whenever a DB is present;
+	// the alerter skips tenants with no bandwidth_limit_bytes.
+	s.bandwidthAlerter = NewBandwidthAlerter(s.db, logger)
+
 	// Base URL for OAuth callbacks and email links.
 	baseURL := os.Getenv("VAULTAIRE_BASE_URL")
 	if baseURL == "" {
@@ -249,6 +254,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	if s.meteredReporter != nil {
 		s.meteredReporter.SetEmailSender(s.emailSender)
 	}
+	s.bandwidthAlerter.SetEmailSender(s.emailSender)
 	if googleID := os.Getenv("GOOGLE_CLIENT_ID"); googleID != "" {
 		s.googleOAuth = &oauth2.Config{
 			ClientID:     googleID,
@@ -973,6 +979,9 @@ func (s *Server) Start() error {
 	if s.meteredReporter != nil {
 		s.meteredReporter.StartMeteredReporting(ctx)
 	}
+
+	// Check bandwidth thresholds hourly + seed default alerts for new tenants.
+	s.bandwidthAlerter.StartBandwidthAlerts(ctx)
 
 	s.logger.Info("Starting server with RBAC and API Key Management",
 		zap.Int("port", s.config.Server.Port))
