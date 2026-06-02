@@ -665,6 +665,7 @@ func main() {
 	runBatchPrefetch(clients)
 	runUploadChunkAB(clients)
 	runFleetDownload(clients)
+	runFleetUpload(clients)
 
 	fmt.Println("\nCleaning up...")
 	for _, ce := range clients {
@@ -931,6 +932,58 @@ func runUploadChunkAB(clients []clientEntry) {
 
 	diff := (d1.Seconds() - d2.Seconds()) / d1.Seconds() * 100
 	fmt.Printf("\n  60MB chunks are %+.1f%% faster (fewer round trips)\n\n", diff)
+}
+
+// ── Test 7: Fleet Upload — concurrent files across all tenants ───────────────
+// This is the multi-file backup-ingest number. Vaultaire's pickTenant round-robins,
+// so a parallel backup (many files) spreads across all tenants. Single-file ~12 MB/s
+// is per-tenant; this measures the aggregate the fleet actually delivers.
+func runFleetUpload(clients []clientEntry) {
+	printHeader("TEST 7: Fleet Upload — concurrent files across ALL tenants")
+
+	data := randomData(50 * 1024 * 1024)
+	const fileCount = 4 // per tenant
+
+	fmt.Printf("  %d tenants × %d × 50MB = %d MB per pass\n\n",
+		len(clients), fileCount, len(clients)*fileCount*50)
+	fmt.Printf("  %-26s  %-12s  %-12s\n", "Per-tenant concurrency", "Fleet MB/s", "Per-tenant")
+	fmt.Println("  ──────────────────────────────────────────────")
+
+	// conc=1: one upload per tenant at a time (pure round-robin, the safe default).
+	// conc=3: parallel uploads per tenant (tests whether per-tenant concurrency helps
+	// or just trips throttling).
+	for _, conc := range []int{1, 3} {
+		var totalBytes atomic.Int64
+		var wg sync.WaitGroup
+		start := time.Now()
+		for ti, ce := range clients {
+			wg.Add(1)
+			go func(ti int, ce clientEntry) {
+				defer wg.Done()
+				sem := make(chan struct{}, conc)
+				var innerWg sync.WaitGroup
+				for i := 0; i < fileCount; i++ {
+					innerWg.Add(1)
+					go func(n int) {
+						defer innerWg.Done()
+						sem <- struct{}{}
+						defer func() { <-sem }()
+						name := fmt.Sprintf("up-c%d-t%d-%02d.bin", conc, ti, n)
+						if err := ce.a.upload(context.Background(), ce.driveID, ce.folder, name, data); err == nil {
+							totalBytes.Add(int64(len(data)))
+						}
+					}(i)
+				}
+				innerWg.Wait()
+			}(ti, ce)
+		}
+		wg.Wait()
+		elapsed := time.Since(start).Seconds()
+		mbps := float64(totalBytes.Load()) / 1024 / 1024 / elapsed
+		fmt.Printf("  %-26d  %-12.2f  %-12.2f\n", conc, mbps, mbps/float64(len(clients)))
+	}
+	fmt.Printf("\n  Fleet upload = aggregate across tenants (multi-file backup-ingest number).\n")
+	fmt.Printf("  A parallel backup gets the fleet number, not the per-tenant ~12 MB/s.\n\n")
 }
 
 // ── Test 6: Fleet Download with all v3 optimizations ─────────────────────────
