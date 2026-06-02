@@ -85,14 +85,12 @@ func (d *S3CompatDriver) Get(ctx context.Context, container, artifact string) (i
 // Put stores an artifact
 func (d *S3CompatDriver) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...engine.PutOption) error {
 	key := d.buildKey(container, artifact)
+	options := engine.ApplyPutOptions(opts...)
 
-	_, err := d.client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(d.bucket),
-		Key:    aws.String(key),
-		Body:   data,
-	})
-	if err != nil {
-		return fmt.Errorf("put object %s: %w", key, err)
+	// Parallel multipart upload: large files upload as concurrent parts instead of
+	// a single PutObject stream; small files still go as one PutObject.
+	if err := s3ParallelUpload(ctx, d.client, d.bucket, key, options.ContentType, data); err != nil {
+		return err
 	}
 
 	d.logger.Debug("stored artifact in S3-compatible",

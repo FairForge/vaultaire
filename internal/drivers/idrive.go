@@ -171,34 +171,12 @@ func (d *IDriveDriver) Put(ctx context.Context, container, artifact string, data
 	key := d.buildKey(tenantID, container, artifact)
 	options := engine.ApplyPutOptions(opts...)
 
-	if options.ContentLength > 0 {
-		cl := options.ContentLength
-		_, err := d.client.PutObject(ctx, &s3.PutObjectInput{
-			Bucket:        aws.String(d.bucket),
-			Key:           aws.String(key),
-			Body:          data,
-			ContentLength: &cl,
-		})
-		if err != nil {
-			return fmt.Errorf("idrive put %s: %w", key, err)
-		}
-		return nil
-	}
-
-	body, contentLength, cleanup, err := materialize(data)
-	if err != nil {
-		return fmt.Errorf("idrive buffer %s: %w", key, err)
-	}
-	defer cleanup()
-
-	_, err = d.client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:        aws.String(d.bucket),
-		Key:           aws.String(key),
-		Body:          body,
-		ContentLength: &contentLength,
-	})
-	if err != nil {
-		return fmt.Errorf("idrive put %s: %w", key, err)
+	// Parallel multipart upload: large files upload as concurrent parts. The
+	// uploader streams parts on the fly, so it also avoids the full-object
+	// buffering the old unknown-length path did via materialize. Small files
+	// still go as a single PutObject.
+	if err := s3ParallelUpload(ctx, d.client, d.bucket, key, options.ContentType, data); err != nil {
+		return err
 	}
 	return nil
 }
