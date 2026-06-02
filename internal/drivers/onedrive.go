@@ -920,8 +920,14 @@ func odCDNTransport(dial func(ctx context.Context, network, addr string) (net.Co
 	}
 }
 
+// HTTP/1.1 for bulk chunk uploads. The upload session's large fragment PUTs hit
+// the same Go HTTP/2 flow-control window bug that throttled CDN downloads (which
+// is why downloads moved to HTTP/1.1 for a +60% fleet gain). Forcing HTTP/1.1 here
+// (TLSNextProto disables the h2 upgrade) applies the same fix to the write path.
+// The Graph API calls (small, multiplexed) stay on HTTP/2 via odGraphTransport.
 func odUploadTransport(dial func(ctx context.Context, network, addr string) (net.Conn, error), tlsCache tls.ClientSessionCache) *http.Transport {
-	t := &http.Transport{
+	return &http.Transport{
+		TLSNextProto:        make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
 		MaxIdleConns:        200,
 		MaxIdleConnsPerHost: 200,
 		IdleConnTimeout:     90 * time.Second,
@@ -929,15 +935,12 @@ func odUploadTransport(dial func(ctx context.Context, network, addr string) (net
 		ReadBufferSize:      4 * 1024 * 1024,
 		WriteBufferSize:     4 * 1024 * 1024,
 		DisableCompression:  true,
-		ForceAttemptHTTP2:   true,
 		DialContext:         dial,
 		TLSClientConfig: &tls.Config{
 			MinVersion:         tls.VersionTLS12,
 			ClientSessionCache: tlsCache,
 		},
 	}
-	_ = http2.ConfigureTransport(t)
-	return t
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────

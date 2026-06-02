@@ -162,9 +162,12 @@ func cdnTransport() *http.Transport {
 	}
 }
 
-// uploadTransport: HTTP/2 for uploads (multiplexing helps here)
+// uploadTransport: HTTP/1.1 for uploads. Benchmarked 2026-06-02 on SLC — H1 beats
+// H2 (+6% at 60MB chunks, +20% at 10MB) by avoiding Go's HTTP/2 flow-control window
+// bug, same reason CDN downloads use H1. Matches the production OneDrive driver.
 func uploadTransport() *http.Transport {
 	t := &http.Transport{
+		TLSNextProto:        make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
 		MaxIdleConns:        200,
 		MaxIdleConnsPerHost: 200,
 		IdleConnTimeout:     90 * time.Second,
@@ -172,14 +175,12 @@ func uploadTransport() *http.Transport {
 		ReadBufferSize:      4 * 1024 * 1024,
 		WriteBufferSize:     4 * 1024 * 1024,
 		DisableCompression:  true,
-		ForceAttemptHTTP2:   true,
 		DialContext:         sharedDialContext(),
 		TLSClientConfig: &tls.Config{
 			MinVersion:         tls.VersionTLS12,
 			ClientSessionCache: tlsSessionCache,
 		},
 	}
-	_ = http2.ConfigureTransport(t)
 	return t
 }
 
