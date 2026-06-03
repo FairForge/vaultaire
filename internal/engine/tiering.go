@@ -166,6 +166,24 @@ func (t *TieringEngine) findCandidates(ctx context.Context, p tieringPolicy) ([]
 		  )`
 	args := []any{p.minAgeDays, p.targetBackend}
 
+	targetRegion := BackendRegion(p.targetBackend)
+	if targetRegion != "eu" {
+		query += ` AND NOT EXISTS (
+			SELECT 1 FROM buckets
+			WHERE buckets.tenant_id = object_locations.tenant_id
+			  AND buckets.name = object_locations.bucket
+			  AND buckets.data_residency = 'eu'
+		)`
+	}
+	if targetRegion != "us" {
+		query += ` AND NOT EXISTS (
+			SELECT 1 FROM buckets
+			WHERE buckets.tenant_id = object_locations.tenant_id
+			  AND buckets.name = object_locations.bucket
+			  AND buckets.data_residency = 'us'
+		)`
+	}
+
 	argIdx := 3
 	if p.tenantID != nil {
 		query += fmt.Sprintf(" AND tenant_id = $%d", argIdx)

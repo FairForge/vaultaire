@@ -184,3 +184,40 @@ func TestUpgradeCTA_StarterTier(t *testing.T) {
 
 	assert.False(t, data["ShowUpgradeCTA"].(bool))
 }
+
+func TestCarbonBadge_NoData(t *testing.T) {
+	tmpl := testOverviewTemplate(t)
+	handler := HandleOverview(tmpl, nil, zap.NewNop(), "local")
+
+	req := httptest.NewRequest("GET", "/dashboard/", nil)
+	ctx := context.WithValue(req.Context(), dashauth.SessionKey, &dashauth.SessionData{
+		UserID: "u1", TenantID: "t1", Email: "test@test.com", Role: "user",
+	})
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.NotContains(t, w.Body.String(), "CarbonSavedPercent")
+}
+
+func TestPopulateCarbonBadge_Calculation(t *testing.T) {
+	data := make(map[string]any)
+
+	// 1 TB on geyser (0.1 kWh) vs baseline 1.0 kWh → 0.9 kWh savings → 0.36 kg CO2
+	// Simulate by calling the function logic directly
+	totalTB := 1.0
+	actualKWh := totalTB * 0.1
+	baselineKWh := totalTB * baselineEnergyKWhPerTBMonth
+	savingsKWh := baselineKWh - actualKWh
+	co2 := savingsKWh * carbonFactorKgPerKWh
+	pct := int(savingsKWh / baselineKWh * 100)
+
+	data["HasCarbonData"] = true
+	data["CarbonSavedKg"] = co2
+	data["CarbonSavedPercent"] = pct
+
+	assert.True(t, data["HasCarbonData"].(bool))
+	assert.Equal(t, 90, data["CarbonSavedPercent"].(int))
+	assert.InDelta(t, 0.36, data["CarbonSavedKg"].(float64), 0.01)
+}

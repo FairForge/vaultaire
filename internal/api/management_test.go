@@ -89,6 +89,7 @@ func newMgmtTestServer(t *testing.T) (*Server, sqlmock.Sqlmock, func()) {
 		r.Delete("/buckets/{name}", s.handleMgmtDeleteBucket)
 		r.Get("/buckets/{name}/objects", s.handleMgmtListObjects)
 		r.Put("/buckets/{name}/tier", s.handleMgmtSetBucketTier)
+		r.Put("/buckets/{name}/residency", s.handleMgmtSetBucketResidency)
 		r.Get("/keys", s.handleMgmtListKeys)
 		r.Post("/keys", s.handleMgmtCreateKey)
 		r.Delete("/keys/{id}", s.handleMgmtDeleteKey)
@@ -576,6 +577,93 @@ func TestMgmtSetBucketTier_NotFound(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	errBody := resp["error"].(map[string]interface{})
 	assert.Equal(t, "not_found_error", errBody["type"])
+}
+
+func TestMgmtSetBucketResidency(t *testing.T) {
+	s, mock, cleanup := newMgmtTestServer(t)
+	defer cleanup()
+
+	mock.ExpectExec(`UPDATE buckets SET data_residency`).
+		WithArgs(sqlmock.AnyArg(), "test-tenant", "my-bucket").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	body := bytes.NewBufferString(`{"residency":"eu"}`)
+	req := httptest.NewRequest("PUT", "/api/v1/manage/buckets/my-bucket/residency", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	s.router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "bucket", resp["object"])
+	assert.Equal(t, "my-bucket", resp["name"])
+	assert.Equal(t, "eu", resp["data_residency"])
+	assert.NotEmpty(t, resp["request_id"])
+}
+
+func TestMgmtSetBucketResidency_Invalid(t *testing.T) {
+	s, _, cleanup := newMgmtTestServer(t)
+	defer cleanup()
+
+	body := bytes.NewBufferString(`{"residency":"bogus"}`)
+	req := httptest.NewRequest("PUT", "/api/v1/manage/buckets/my-bucket/residency", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	s.router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	errBody := resp["error"].(map[string]interface{})
+	assert.Equal(t, "invalid_request_error", errBody["type"])
+	assert.Equal(t, "residency", errBody["param"])
+}
+
+func TestMgmtSetBucketResidency_NotFound(t *testing.T) {
+	s, mock, cleanup := newMgmtTestServer(t)
+	defer cleanup()
+
+	mock.ExpectExec(`UPDATE buckets SET data_residency`).
+		WithArgs(sqlmock.AnyArg(), "test-tenant", "ghost-bucket").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	body := bytes.NewBufferString(`{"residency":"us"}`)
+	req := httptest.NewRequest("PUT", "/api/v1/manage/buckets/ghost-bucket/residency", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	s.router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	errBody := resp["error"].(map[string]interface{})
+	assert.Equal(t, "not_found_error", errBody["type"])
+}
+
+func TestMgmtSetBucketResidency_Null(t *testing.T) {
+	s, mock, cleanup := newMgmtTestServer(t)
+	defer cleanup()
+
+	mock.ExpectExec(`UPDATE buckets SET data_residency`).
+		WithArgs(sqlmock.AnyArg(), "test-tenant", "my-bucket").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	body := bytes.NewBufferString(`{"residency":null}`)
+	req := httptest.NewRequest("PUT", "/api/v1/manage/buckets/my-bucket/residency", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	s.router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "bucket", resp["object"])
+	assert.Nil(t, resp["data_residency"])
 }
 
 func mkdirAll(path string) error {

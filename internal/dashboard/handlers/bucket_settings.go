@@ -43,12 +43,13 @@ func HandleBucketSettings(tmpl *template.Template, db *sql.DB, logger *zap.Logge
 		slug := ""
 		region := "us-west-1"
 		tierPref := "auto"
+		var dataResidency sql.NullString
 
 		if db != nil {
 			_ = db.QueryRowContext(r.Context(),
-				`SELECT visibility, cors_origins, cache_max_age_secs, region, tier_preference
+				`SELECT visibility, cors_origins, cache_max_age_secs, region, tier_preference, data_residency
 				 FROM buckets WHERE tenant_id = $1 AND name = $2`,
-				sd.TenantID, bucketName).Scan(&vis, &corsOrigins, &cacheMaxAge, &region, &tierPref)
+				sd.TenantID, bucketName).Scan(&vis, &corsOrigins, &cacheMaxAge, &region, &tierPref, &dataResidency)
 
 			_ = db.QueryRowContext(r.Context(),
 				`SELECT COALESCE(slug, '') FROM tenants WHERE id = $1`,
@@ -74,6 +75,9 @@ func HandleBucketSettings(tmpl *template.Template, db *sql.DB, logger *zap.Logge
 		data["TierPreference"] = tierPref
 		data["RegionDisplay"] = drivers.RegionDisplayName(region)
 		data["IsEURegion"] = drivers.IsEURegion(region)
+		if dataResidency.Valid {
+			data["DataResidency"] = dataResidency.String
+		}
 
 		if vis == "public-read" && slug != "" {
 			data["CDNBaseURL"] = cdnBaseHost + slug + "/" + bucketName

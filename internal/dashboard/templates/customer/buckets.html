@@ -39,7 +39,7 @@
             <button type="submit" class="btn btn-primary">Create</button>
         </div>
         <p class="text-muted" style="font-size: 0.8rem; margin-top: 0.25rem;">
-            Region cannot be changed after creation. EU regions ensure GDPR data residency.
+            Region cannot be changed after creation. EU regions enforce EU-only data residency; US regions enforce US-only.
         </p>
         {{if .CreateError}}<div class="alert alert-error">{{.CreateError}}</div>{{end}}
         {{if .CreateSuccess}}<div class="alert alert-success">Bucket "{{.CreateSuccess}}" created.</div>{{end}}

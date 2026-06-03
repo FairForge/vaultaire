@@ -42,3 +42,12 @@ func BackendToStorageClass(backendName string) string {
 	}
 	return "STANDARD"
 }
+
+// BackendRegion returns "eu" or "us" for a given backend name.
+// iDrive backends registered as "idrive-eu-*" are EU; everything else is US.
+func BackendRegion(name string) string {
+	if len(name) > 10 && name[:10] == "idrive-eu-" {
+		return "eu"
+	}
+	return "us"
+}

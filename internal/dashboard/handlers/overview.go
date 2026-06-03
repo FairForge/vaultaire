@@ -67,6 +67,7 @@ func HandleOverview(tmpl *template.Template, db *sql.DB, logger *zap.Logger, sto
 			populateActivity(ctx, db, sd.TenantID, data)
 			populateEmailVerified(ctx, db, sd.UserID, data)
 			populateOnboarding(ctx, db, sd.TenantID, r, data)
+			populateCarbonBadge(ctx, db, sd.TenantID, data)
 		} else {
 			setDefaults(data)
 		}
@@ -218,6 +219,67 @@ func populateActivity(ctx context.Context, db *sql.DB, tenantID string, data map
 		})
 	}
 	data["Activity"] = activity
+}
+
+// backendEnergyKWhPerTBMonth maps backends to energy consumption in kWh/TB/month.
+var backendEnergyKWhPerTBMonth = map[string]float64{
+	"geyser":   0.1, // tape, powered off
+	"idrive":   1.0, // spinning disk
+	"s3":       1.0,
+	"lyve":     1.0,
+	"onedrive": 0.5, // SSD
+	"local":    1.0,
+}
+
+const (
+	baselineEnergyKWhPerTBMonth = 1.0 // all spinning disk
+	carbonFactorKgPerKWh        = 0.4
+)
+
+func populateCarbonBadge(ctx context.Context, db *sql.DB, tenantID string, data map[string]any) {
+	rows, err := db.QueryContext(ctx,
+		`SELECT backend_name, COALESCE(SUM(size_bytes), 0)
+		 FROM object_locations WHERE tenant_id = $1
+		 GROUP BY backend_name`, tenantID)
+	if err != nil {
+		return
+	}
+	defer func() { _ = rows.Close() }()
+
+	var totalBytes int64
+	var actualKWh float64
+	for rows.Next() {
+		var backend string
+		var sizeBytes int64
+		if err := rows.Scan(&backend, &sizeBytes); err != nil {
+			continue
+		}
+		totalBytes += sizeBytes
+		energy := baselineEnergyKWhPerTBMonth
+		if e, ok := backendEnergyKWhPerTBMonth[backend]; ok {
+			energy = e
+		}
+		tb := float64(sizeBytes) / (1024 * 1024 * 1024 * 1024)
+		actualKWh += tb * energy
+	}
+
+	if totalBytes == 0 {
+		return
+	}
+
+	totalTB := float64(totalBytes) / (1024 * 1024 * 1024 * 1024)
+	baselineKWh := totalTB * baselineEnergyKWhPerTBMonth
+	savingsKWh := baselineKWh - actualKWh
+	if savingsKWh <= 0 {
+		return
+	}
+
+	co2SavedKg := savingsKWh * carbonFactorKgPerKWh
+	pct := int(savingsKWh / baselineKWh * 100)
+
+	data["HasCarbonData"] = true
+	data["CarbonSavedKg"] = fmt.Sprintf("%.1f", co2SavedKg)
+	data["CarbonSavedPercent"] = pct
 }
 
 func setDefaults(data map[string]any) {

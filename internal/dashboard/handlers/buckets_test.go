@@ -488,3 +488,49 @@ func TestListBuckets_Dashboard_IncludesEmptyBuckets(t *testing.T) {
 	assert.Contains(t, body, "empty-bucket")
 	assert.Contains(t, body, `<span class="count">1</span>`)
 }
+
+func TestHandleCreateBucket_DerivesResidency(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires database")
+	}
+	db := testDashDB(t)
+	defer func() { _ = db.Close() }()
+	cleanupDashBucketData(t, db)
+	defer cleanupDashBucketData(t, db)
+
+	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key)
+		VALUES ('test-dash-dr2', 'Residency Co', 'dr2@test.com', 'VK-dr2', 'SK-dr2')
+		ON CONFLICT DO NOTHING`)
+	require.NoError(t, err)
+
+	tmpDir := t.TempDir()
+	tmpl := testBucketsTemplate(t)
+	handler := HandleCreateBucket(tmpl, db, tmpDir, zap.NewNop())
+
+	// EU region → 'eu' residency
+	form := url.Values{"name": {"res-eu-bucket"}, "region": {"eu-west-1"}}
+	req := injectSessionWithTenant(httptest.NewRequest("POST", "/dashboard/buckets",
+		strings.NewReader(form.Encode())), "test-dash-dr2")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var residency string
+	err = db.QueryRow(`SELECT data_residency FROM buckets WHERE tenant_id = 'test-dash-dr2' AND name = 'res-eu-bucket'`).Scan(&residency)
+	require.NoError(t, err)
+	assert.Equal(t, "eu", residency)
+
+	// US region → 'us' residency
+	form = url.Values{"name": {"res-us-bucket"}, "region": {"us-west-1"}}
+	req = injectSessionWithTenant(httptest.NewRequest("POST", "/dashboard/buckets",
+		strings.NewReader(form.Encode())), "test-dash-dr2")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	err = db.QueryRow(`SELECT data_residency FROM buckets WHERE tenant_id = 'test-dash-dr2' AND name = 'res-us-bucket'`).Scan(&residency)
+	require.NoError(t, err)
+	assert.Equal(t, "us", residency)
+}
