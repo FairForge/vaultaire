@@ -32,6 +32,7 @@ func testBucketSettingsTemplate(t *testing.T) *template.Template {
 			`<span class="cors">{{.CORSOrigins}}</span>` +
 			`<span class="cache">{{.CacheMaxAge}}</span>` +
 			`<span class="tier">{{.TierPreference}}</span>` +
+			`{{if .DataResidency}}<span class="residency">{{.DataResidency}}</span>{{end}}` +
 			`{{if .FlashSuccess}}<span class="flash-ok">{{.FlashSuccess}}</span>{{end}}` +
 			`{{if .FlashError}}<span class="flash-err">{{.FlashError}}</span>{{end}}` +
 			`{{end}}`))
@@ -568,4 +569,37 @@ func TestHandleUpdateBucketSettings_BucketNotFound(t *testing.T) {
 	handler.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusSeeOther, w.Code)
+}
+
+func TestHandleBucketSettings_DataResidency(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires database")
+	}
+	db := testDashDB(t)
+	defer func() { _ = db.Close() }()
+	cleanupDashBucketData(t, db)
+	defer cleanupDashBucketData(t, db)
+
+	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key, slug)
+		VALUES ('test-dash-dr1', 'EU Co', 'eu@test.com', 'VK-dr1', 'SK-dr1', 'eu-co')
+		ON CONFLICT DO NOTHING`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO buckets (tenant_id, name, visibility, region, data_residency)
+		VALUES ('test-dash-dr1', 'eu-bucket', 'private', 'eu-west-1', 'eu')
+		ON CONFLICT DO NOTHING`)
+	require.NoError(t, err)
+
+	tmpl := testBucketSettingsTemplate(t)
+	handler := HandleBucketSettings(tmpl, db, zap.NewNop())
+
+	req := injectSessionWithTenant(
+		httptest.NewRequest("GET", "/dashboard/buckets/eu-bucket/settings", nil),
+		"test-dash-dr1")
+	req = injectBucketRoute(req, "eu-bucket")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.Contains(t, body, `<span class="residency">eu</span>`)
 }

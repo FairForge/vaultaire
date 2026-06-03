@@ -155,12 +155,17 @@ func HandleCreateBucket(tmpl *template.Template, db *sql.DB, dataPath string, lo
 			}
 		}
 
+		residency := "us"
+		if drivers.IsEURegion(region) {
+			residency = "eu"
+		}
+
 		if db != nil {
 			_, dbErr := db.ExecContext(r.Context(), `
-				INSERT INTO buckets (tenant_id, name, visibility, region)
-				VALUES ($1, $2, 'private', $3)
+				INSERT INTO buckets (tenant_id, name, visibility, region, data_residency)
+				VALUES ($1, $2, 'private', $3, $4)
 				ON CONFLICT (tenant_id, name) DO NOTHING
-			`, sd.TenantID, name, region)
+			`, sd.TenantID, name, region, residency)
 			if dbErr != nil {
 				logger.Error("persist bucket to DB", zap.Error(dbErr))
 			}

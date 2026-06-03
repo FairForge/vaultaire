@@ -32,6 +32,7 @@ func (s *Server) registerManagementRoutes() {
 
 		r.Get("/buckets/{name}/objects", s.handleMgmtListObjects)
 		r.Put("/buckets/{name}/tier", s.handleMgmtSetBucketTier)
+		r.Put("/buckets/{name}/residency", s.handleMgmtSetBucketResidency)
 
 		r.Get("/keys", s.handleMgmtListKeys)
 		r.Post("/keys", s.handleMgmtCreateKey)
@@ -776,6 +777,75 @@ func (s *Server) handleMgmtSetBucketTier(w http.ResponseWriter, r *http.Request)
 		"name":            name,
 		"tier_preference": req.Tier,
 		"request_id":      getRequestID(w),
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// --- Bucket Data Residency ---
+
+var validResidencyValues = map[string]bool{
+	"us": true,
+	"eu": true,
+}
+
+func (s *Server) handleMgmtSetBucketResidency(w http.ResponseWriter, r *http.Request) {
+	tenantID, _ := r.Context().Value(tenantIDKey).(string)
+	if tenantID == "" {
+		writeManagementError(w, ErrTypeAuthentication, "missing_tenant", "tenant not found in token", "")
+		return
+	}
+
+	name := chi.URLParam(r, "name")
+
+	if s.db == nil {
+		writeManagementError(w, ErrTypeAPI, "no_database", "database unavailable", "")
+		return
+	}
+
+	var req struct {
+		Residency *string `json:"residency"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeManagementError(w, ErrTypeInvalidRequest, "invalid_json", "request body must be valid JSON", "")
+		return
+	}
+
+	var residency sql.NullString
+	if req.Residency != nil {
+		if !validResidencyValues[*req.Residency] {
+			writeManagementError(w, ErrTypeInvalidRequest, "invalid_residency",
+				"residency must be one of: us, eu, or null", "residency")
+			return
+		}
+		residency = sql.NullString{String: *req.Residency, Valid: true}
+	}
+
+	result, err := s.db.ExecContext(r.Context(),
+		`UPDATE buckets SET data_residency = $1, updated_at = NOW()
+		 WHERE tenant_id = $2 AND name = $3`,
+		residency, tenantID, name)
+	if err != nil {
+		s.logger.Error("set bucket residency", zap.Error(err))
+		writeManagementError(w, ErrTypeAPI, "db_error", "failed to update data residency", "")
+		return
+	}
+
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		writeManagementError(w, ErrTypeNotFound, "bucket_not_found", "bucket not found", "name")
+		return
+	}
+
+	respResidency := interface{}(nil)
+	if residency.Valid {
+		respResidency = residency.String
+	}
+
+	resp := map[string]interface{}{
+		"object":         "bucket",
+		"name":           name,
+		"data_residency": respResidency,
+		"request_id":     getRequestID(w),
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
