@@ -34,6 +34,31 @@ Encryption, key management, and post-quantum cryptography for Vaultaire.
 - `postquantum.go` — cloudflare/circl (pipeline encryption, existing)
 - `sse_s3.go` — Go stdlib crypto/mlkem (SSE-S3, new)
 
+## Chunking + Dedup Architecture (Phase 8.3-8.4)
+
+**FastCDC chunking** splits large objects (>64 MB, unencrypted) into content-defined chunks. The **Global Content Index** (GCI) deduplicates chunks across all tenants — identical content is stored once.
+
+- **chunker.go** — FastCDC chunker (1 MB min / 4 MB avg / 16 MB max) using `restic/chunker`. `ChunkBytes()` for sync, `Chunk()` for streaming. SHA-256 per chunk.
+- **gci.go** — `GlobalContentIndex`: DB-backed dedup index with 100K-entry in-memory cache. Batch lookups (`LookupChunks`), ref counting (`IncrementRef`/`DecrementRef`), tenant chunk manifests (`AddTenantChunkRef`), object metadata (`SaveObjectMetadata`), transactional delete (`DeleteObjectChunks`).
+
+**PUT flow** (s3_engine_adapter.go `handleChunkedPut`):
+1. Gate: `gci != nil && size > threshold && no encryption`
+2. Parse tenant UUID (skip chunking if non-UUID tenant)
+3. `ReadAll` through MD5 hasher → `ChunkBytes` → batch `LookupChunks`
+4. For each chunk: if new → `engine.Put("_chunks/{sha256}")` + `InsertChunk`; if existing → `IncrementRef`
+5. `AddTenantChunkRef` per chunk, `SaveObjectMetadata`, `object_head_cache` with `is_chunked=TRUE`
+
+**DELETE flow** (s3_engine_adapter.go `HandleDelete`):
+1. Query `is_chunked` from `object_head_cache`
+2. If chunked → `gci.DeleteObjectChunks` (transactional: deletes refs, decrements counts, deletes object_metadata)
+3. Chunk data stays until GC (Phase 8.7) — `marked_for_deletion=TRUE` when `ref_count=0`
+
+**GET flow**: not yet wired — chunked objects are not retrievable until Phase 8.5 (download pipeline).
+
+**Constraints**: chunking is mutually exclusive with SSE-S3/SSE-C in this phase. Convergent encryption (Phase 10) will enable per-chunk encryption + dedup.
+
+**Tables**: `global_content_index`, `tenant_chunk_refs`, `object_metadata` (migration 051). `object_head_cache.is_chunked` flag.
+
 ## SSE-C Architecture (Phase 5.14.8)
 
 **Stateless** customer-provided key encryption. No DB, no key management — the customer sends a raw 256-bit AES key with each PUT/GET/HEAD request.

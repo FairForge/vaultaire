@@ -39,6 +39,7 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 | 047 | Abuse reports: `abuse_reports` table (reporter, tenant, bucket, key, type, description, status) — public abuse reporting + admin moderation queue |
 | 048 | Object location tracking: `object_locations` (durable backend routing), `tiering_policies` (age-based tiering config), `tenant_cost_daily` (per-tenant cost rollup); `last_accessed` column on `object_head_cache` |
 | 049 | Bucket tier preference: `tier_preference TEXT NOT NULL DEFAULT 'auto'` on `buckets` — pins a bucket to a specific storage tier (auto/performance/standard/archive) |
+| 051 | Chunking + dedup: `global_content_index` (dedup hash→backend), `tenant_chunk_refs` (per-tenant chunk manifest), `object_metadata` (pipeline metadata); PL/pgSQL functions `increment_chunk_ref`, `decrement_chunk_ref`, `get_tenant_dedup_ratio`; `is_chunked BOOLEAN` on `object_head_cache` |
 
 ## Key Tables
 
@@ -50,7 +51,10 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 - **subscriptions** — Stripe subscription state tracking
 - **bandwidth_usage_daily** — per-tenant daily ingress/egress/requests (unique on tenant_id + date)
 - **buckets** — `(tenant_id, name) PK`, `visibility` (private/public-read), `cors_origins`, `cache_max_age_secs`, `bandwidth_budget_bytes`, `versioning_status`, `object_lock_enabled`, `default_retention_mode`, `default_retention_days`, `mfa_delete_enabled`, `logging_enabled`, `logging_target_bucket`, `logging_prefix`, `inventory_enabled`, `inventory_schedule`, `inventory_target_bucket`, `inventory_prefix`, `inventory_format`, `cdn_force_download`, `tier_preference` (auto/performance/standard/archive, default auto)
-- **object_head_cache** — HEAD request cache (size, ETag, content-type, backend_name stored on PUT); `tags` JSONB holds per-object S3 tags (separate from `metadata`); `content_disposition` TEXT holds the stored Content-Disposition response header
+- **object_head_cache** — HEAD request cache (size, ETag, content-type, backend_name stored on PUT); `tags` JSONB holds per-object S3 tags (separate from `metadata`); `content_disposition` TEXT holds the stored Content-Disposition response header; `is_chunked` BOOLEAN (default FALSE) flags objects stored via content-defined chunking
+- **global_content_index** — `plaintext_hash (VARCHAR(64) PK)`, `backend_id`, `storage_key`, `size_bytes`, `compressed_size`, `compression_algo`, `ref_count` (default 1), `first_seen_at`, `last_accessed_at`, `marked_for_deletion` (default FALSE), `marked_at` — global dedup hash-to-backend mapping; partial index on `marked_for_deletion` for GC
+- **tenant_chunk_refs** — `id (UUID PK)`, `tenant_id (UUID)`, `bucket_name`, `object_key`, `chunk_index`, `chunk_offset`, `plaintext_hash` → `global_content_index`, `encryption_key_version`, `ciphertext_hash`, `created_at`; UNIQUE(tenant_id, bucket_name, object_key, chunk_index) — per-tenant chunk manifest
+- **object_metadata** — `id (UUID PK)`, `tenant_id (UUID)`, `bucket_name`, `object_key`, `total_size`, `chunk_count`, `content_hash`, `content_type`, `logical_size`, `physical_size`, `dedup_ratio`, `pipeline_config (JSONB)`, `created_at`, `updated_at`; UNIQUE(tenant_id, bucket_name, object_key) — pipeline metadata per chunked object
 - **user_mfa** — `user_id (PK)`, `secret`, `enabled`, `backup_codes` (JSON), `created_at`, `updated_at` — TOTP 2FA settings
 - **mfa_audit_log** — `id (SERIAL)`, `user_id`, `action`, `success`, `ip_address`, `user_agent`, `created_at`
 - **object_versions** — `(tenant_id, bucket, object_key, version_id) PK`, `size_bytes`, `etag`, `content_type`, `is_latest`, `is_delete_marker`, `backend_name`, `created_at`

@@ -559,6 +559,7 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetObject(w http.ResponseWriter, r *http.Request, req *S3Request) {
 	adapter := NewS3ToEngine(s.engine, s.db, s.logger)
 	adapter.sseService = s.sseService
+	adapter.gci = s.gci
 
 	s.logger.Debug("S3 GET translating to engine",
 		zap.String("s3.bucket", req.Bucket),
@@ -679,6 +680,7 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3
 
 	adapter := NewS3ToEngine(s.engine, s.db, s.logger)
 	adapter.sseService = s.sseService
+	adapter.gci = s.gci
 
 	s.logger.Debug("S3 PUT translating to engine",
 		zap.String("s3.bucket", req.Bucket),
@@ -697,6 +699,7 @@ func (s *Server) handleDeleteObject(w http.ResponseWriter, r *http.Request, req 
 		return
 	}
 	adapter := NewS3ToEngine(s.engine, s.db, s.logger)
+	adapter.gci = s.gci
 	adapter.HandleDelete(w, r, req.Bucket, req.Object)
 }
 
