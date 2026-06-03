@@ -610,10 +610,15 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		err = putErr
 	}
 	if err != nil {
-		if errors.Is(err, engine.ErrAllBackendsUnavailable) {
+		switch {
+		case errors.Is(err, engine.ErrAllBackendsUnavailable):
 			w.Header().Set("Retry-After", "30")
 			WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
-		} else {
+		case errors.Is(err, engine.ErrQuotaExceeded):
+			// Quota exhaustion is a client condition, never a 500.
+			WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
+				WithSuggestion("Storage quota exceeded. Upgrade at https://stored.ge/dashboard/billing"))
+		default:
 			a.logger.Error("engine put failed",
 				zap.Error(err),
 				zap.String("container", container),

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -388,4 +389,68 @@ func (d *mockDriver) Exists(_ context.Context, _, _ string) (bool, error) {
 
 func (d *mockDriver) HealthCheck(_ context.Context) error {
 	return nil
+}
+
+// TestIsBackendFailure_ClassifiesErrors documents which errors count toward
+// opening the circuit breaker. Client-level outcomes must not.
+func TestIsBackendFailure_ClassifiesErrors(t *testing.T) {
+	benign := []error{
+		os.ErrNotExist,
+		&os.PathError{Op: "remove", Path: "/x/y", Err: os.ErrNotExist},
+		NotFoundError{Container: "c", Artifact: "a"},
+		ErrQuotaExceeded,
+		ErrInvalidInput,
+		PermissionError{TenantID: "t", Action: "write"},
+		fmt.Errorf("remove /data/c/k: no such file or directory"),
+		fmt.Errorf("operation error S3: GetObject, NoSuchKey: key does not exist"),
+		fmt.Errorf("api error NotFound: ... https response error status code: 404"),
+		fmt.Errorf("all backends failed: %w", NotFoundError{Container: "c", Artifact: "a"}),
+	}
+	for _, err := range benign {
+		assert.False(t, isBackendFailure(err), "should NOT trip breaker: %v", err)
+	}
+
+	realFailures := []error{
+		fmt.Errorf("dial tcp: connection refused"),
+		fmt.Errorf("lookup e2-us-east-1.idrive.com: no such host"),
+		fmt.Errorf("context deadline exceeded"),
+		fmt.Errorf("https response error status code: 503"),
+		fmt.Errorf("unexpected EOF"),
+		ErrTimeout,
+	}
+	for _, err := range realFailures {
+		assert.True(t, isBackendFailure(err), "SHOULD trip breaker: %v", err)
+	}
+}
+
+// TestFailoverManager_NotFoundDoesNotOpenBreaker is the regression test for the
+// load-test finding: a burst of not-found deletes on a single backend must not
+// open its breaker (which would 503 every subsequent request for openDuration).
+func TestFailoverManager_NotFoundDoesNotOpenBreaker(t *testing.T) {
+	fm := NewFailoverManager(zap.NewNop())
+	fm.Register("local")
+
+	notFound := &os.PathError{Op: "remove", Path: "/data/load-test/k", Err: os.ErrNotExist}
+	for i := 0; i < 3*failureThreshold; i++ {
+		_, err := fm.Execute(context.Background(), []string{"local"}, func(string) error { return notFound })
+		require.Error(t, err) // caller still sees the not-found
+	}
+
+	// Breaker must still be CLOSED — a real op should be attempted, not rejected.
+	attempted := false
+	used, err := fm.Execute(context.Background(), []string{"local"}, func(string) error {
+		attempted = true
+		return nil
+	})
+	require.NoError(t, err)
+	assert.True(t, attempted, "breaker wrongly opened: real request was rejected after a 404 burst")
+	assert.Equal(t, "local", used)
+
+	// A genuine backend failure SHOULD still open it.
+	for i := 0; i < failureThreshold; i++ {
+		_, _ = fm.Execute(context.Background(), []string{"local"}, func(string) error {
+			return fmt.Errorf("connection refused")
+		})
+	}
+	assert.Equal(t, "open", fm.GetStatus("local"), "real failures must still open the breaker")
 }
