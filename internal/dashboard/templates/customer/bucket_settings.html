@@ -33,6 +33,35 @@
     <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
 
     <div class="card">
+        <div class="card-title">Storage Tier</div>
+        <div class="toggle-group">
+            <label class="toggle-label">
+                <input type="radio" name="tier_preference" value="auto" {{if eq .TierPreference "auto"}}checked{{end}}>
+                <span class="toggle-option{{if eq .TierPreference "auto"}} toggle-active{{end}}">Auto</span>
+            </label>
+            <label class="toggle-label">
+                <input type="radio" name="tier_preference" value="performance" {{if eq .TierPreference "performance"}}checked{{end}}>
+                <span class="toggle-option{{if eq .TierPreference "performance"}} toggle-active{{end}}">Performance</span>
+            </label>
+            <label class="toggle-label">
+                <input type="radio" name="tier_preference" value="standard" {{if eq .TierPreference "standard"}}checked{{end}}>
+                <span class="toggle-option{{if eq .TierPreference "standard"}} toggle-active{{end}}">Standard</span>
+            </label>
+            <label class="toggle-label">
+                <input type="radio" name="tier_preference" value="archive" {{if eq .TierPreference "archive"}}checked{{end}}>
+                <span class="toggle-option{{if eq .TierPreference "archive"}} toggle-active{{end}}">Archive</span>
+            </label>
+        </div>
+        <div class="text-muted" style="margin-top: 0.5rem; font-size: 0.85rem;">
+            {{if eq .TierPreference "auto"}}Objects are automatically tiered based on access patterns.
+            {{else if eq .TierPreference "performance"}}Low-latency storage for frequently accessed data.
+            {{else if eq .TierPreference "standard"}}Balanced cost and performance.
+            {{else if eq .TierPreference "archive"}}Lowest cost for rarely accessed data.
+            {{end}}
+        </div>
+    </div>
+
+    <div class="card">
         <div class="card-title">Visibility</div>
         {{if .ArchiveRestricted}}
         <div class="alert alert-error" style="margin-top: 0.5rem;">

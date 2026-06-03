@@ -158,6 +158,8 @@ JSON REST layer at `/api/v1/manage/` with JWT auth and per-tenant rate limiting.
 
 **Cursor pagination**: queries `LIMIT N+1`; if N+1 results → `has_more=true`, returns first N, `next_cursor` = last item's name/key.
 
+**Bucket tier preference** (Phase 7.5): `PUT /api/v1/manage/buckets/{name}/tier` (`handleMgmtSetBucketTier`) — sets the bucket's `tier_preference` column. Request body: `{"tier": "auto|performance|standard|archive"}`. Returns 400 for invalid tier, 404 for missing bucket, 200 with `tier_preference` in the response envelope.
+
 ## CDN Access Analytics (Phase 5.11.12)
 
 `CDNAnalyticsTracker` in `cdn_analytics.go` buffers CDN access events in memory and flushes them to `cdn_access_log` every 5 seconds (or at 100 events). Follows the same pattern as `BandwidthTracker`. Initialized in `NewServer()`, nil-safe throughout.

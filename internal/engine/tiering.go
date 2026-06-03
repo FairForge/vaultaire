@@ -157,7 +157,13 @@ func (t *TieringEngine) findCandidates(ctx context.Context, p tieringPolicy) ([]
 		SELECT tenant_id, bucket, object_key, backend_name, size_bytes
 		FROM object_locations
 		WHERE last_accessed < NOW() - INTERVAL '1 day' * $1
-		  AND backend_name != $2`
+		  AND backend_name != $2
+		  AND NOT EXISTS (
+		      SELECT 1 FROM buckets
+		      WHERE buckets.tenant_id = object_locations.tenant_id
+		        AND buckets.name = object_locations.bucket
+		        AND buckets.tier_preference != 'auto'
+		  )`
 	args := []any{p.minAgeDays, p.targetBackend}
 
 	argIdx := 3

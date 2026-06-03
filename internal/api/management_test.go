@@ -88,6 +88,7 @@ func newMgmtTestServer(t *testing.T) (*Server, sqlmock.Sqlmock, func()) {
 		r.Get("/buckets/{name}", s.handleMgmtGetBucket)
 		r.Delete("/buckets/{name}", s.handleMgmtDeleteBucket)
 		r.Get("/buckets/{name}/objects", s.handleMgmtListObjects)
+		r.Put("/buckets/{name}/tier", s.handleMgmtSetBucketTier)
 		r.Get("/keys", s.handleMgmtListKeys)
 		r.Post("/keys", s.handleMgmtCreateKey)
 		r.Delete("/keys/{id}", s.handleMgmtDeleteKey)
@@ -510,6 +511,71 @@ func TestManagementKeys(t *testing.T) {
 	var delResp map[string]interface{}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &delResp))
 	assert.Equal(t, true, delResp["deleted"])
+}
+
+func TestMgmtSetBucketTier(t *testing.T) {
+	s, mock, cleanup := newMgmtTestServer(t)
+	defer cleanup()
+
+	mock.ExpectExec(`UPDATE buckets SET tier_preference`).
+		WithArgs("archive", "test-tenant", "my-bucket").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	body := bytes.NewBufferString(`{"tier":"archive"}`)
+	req := httptest.NewRequest("PUT", "/api/v1/manage/buckets/my-bucket/tier", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	s.router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "bucket", resp["object"])
+	assert.Equal(t, "my-bucket", resp["name"])
+	assert.Equal(t, "archive", resp["tier_preference"])
+	assert.NotEmpty(t, resp["request_id"])
+}
+
+func TestMgmtSetBucketTier_InvalidTier(t *testing.T) {
+	s, _, cleanup := newMgmtTestServer(t)
+	defer cleanup()
+
+	body := bytes.NewBufferString(`{"tier":"bogus"}`)
+	req := httptest.NewRequest("PUT", "/api/v1/manage/buckets/my-bucket/tier", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	s.router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	errBody := resp["error"].(map[string]interface{})
+	assert.Equal(t, "invalid_request_error", errBody["type"])
+	assert.Equal(t, "tier", errBody["param"])
+}
+
+func TestMgmtSetBucketTier_NotFound(t *testing.T) {
+	s, mock, cleanup := newMgmtTestServer(t)
+	defer cleanup()
+
+	mock.ExpectExec(`UPDATE buckets SET tier_preference`).
+		WithArgs("performance", "test-tenant", "ghost-bucket").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	body := bytes.NewBufferString(`{"tier":"performance"}`)
+	req := httptest.NewRequest("PUT", "/api/v1/manage/buckets/ghost-bucket/tier", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	s.router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	errBody := resp["error"].(map[string]interface{})
+	assert.Equal(t, "not_found_error", errBody["type"])
 }
 
 func mkdirAll(path string) error {
