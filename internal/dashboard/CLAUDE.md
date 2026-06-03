@@ -105,6 +105,11 @@ Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`,
 | `/admin/notifications/read-all` | POST | session + admin | Mark all notifications as read (flash + redirect) |
 | `/admin/notifications/{id}/read` | POST | session + admin | Mark single notification read (htmx fragment response) |
 | `/admin/notifications/count` | GET | session + admin | Unread count badge fragment (htmx, loaded on every admin page) |
+| `/abuse` | GET | none | Public abuse report form |
+| `/abuse` | POST | none | Submit abuse report (rate-limited 5/min per IP) |
+| `/admin/abuse` | GET | session + admin | Abuse queue with status filter tabs |
+| `/admin/abuse/{id}` | GET | session + admin | Abuse report detail with action buttons |
+| `/admin/abuse/{id}/action` | POST | session + admin | Change abuse report status (reviewing/actioned/dismissed) |
 | `/admin/*` | GET | session + admin role | Admin panel |
 
 ## Auth Flow

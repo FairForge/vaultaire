@@ -27,6 +27,7 @@
                 <a href="/admin/revenue" class="sidebar-link{{if eq .Page "admin-revenue"}} sidebar-link--active{{end}}">Revenue</a>
                 <a href="/admin/costs" class="sidebar-link{{if eq .Page "admin-costs"}} sidebar-link--active{{end}}">Costs</a>
                 <a href="/admin/notifications" class="sidebar-link{{if eq .Page "admin-notifications"}} sidebar-link--active{{end}}">Notifications <span hx-get="/admin/notifications/count" hx-trigger="load" hx-swap="innerHTML"></span></a>
+                <a href="/admin/abuse" class="sidebar-link{{if eq .Page "admin-abuse"}} sidebar-link--active{{end}}">Abuse Queue</a>
             </nav>
             <div class="sidebar-footer">
                 <a href="/dashboard" class="sidebar-link">Back to dashboard</a>

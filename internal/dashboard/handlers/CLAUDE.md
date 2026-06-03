@@ -236,6 +236,39 @@ Types: `notificationRow`. Helper: `notifBadgeClass` maps type to badge-success/d
 
 Template: `templates/admin/notifications.html`. Migration: `046_admin_notifications.sql`.
 
+## Public Abuse Report (`abuse_report.go`)
+
+Two handlers for the public abuse reporting form (Phase 3.11):
+- `HandleAbuseForm(tmpl, logger)` — GET `/abuse`: renders the public report form using the
+  "base" layout (no session required, same pattern as legal pages).
+- `HandleAbuseSubmit(tmpl, db, logger)` — POST `/abuse`: validates reporter email, report type
+  (one of 6 enum values), and description (non-empty, max 5000 chars). Inserts into
+  `abuse_reports` table and calls `CreateNotification` to alert admins. Rate-limited at 5/min
+  per IP via a dedicated `LoginRateLimiter` instance. Re-renders form with `.Error` on
+  validation failure; renders `.Submitted=true` confirmation on success.
+
+Helper: `validReportTypes` map for enum validation.
+
+Template: `templates/public/abuse.html`. Migration: `047_abuse_reports.sql`.
+
+## Admin Abuse Queue (`admin_abuse.go`)
+
+Three handlers for the admin abuse moderation queue (Phase 3.11):
+- `HandleAdminAbuse(tmpl, db, logger)` — GET `/admin/abuse`: lists abuse reports filtered by
+  status (default: "open") via `?status=` query param. Status tabs: Open, Reviewing, Actioned,
+  Dismissed, All. Page identifier "admin-abuse" for sidebar highlighting.
+- `HandleAdminAbuseDetail(tmpl, db, logger)` — GET `/admin/abuse/{id}`: full report view with
+  reporter info, description, URL, status badge, and action buttons. Links to tenant support
+  page if `tenant_id` is set.
+- `HandleAbuseAction(db, logger)` — POST `/admin/abuse/{id}/action`: validates action is one
+  of "reviewing"/"actioned"/"dismissed", updates status + resolved_by (admin email) + resolved_at.
+  Flash + redirect.
+
+Types: `abuseReportRow`, `abuseReportDetail`. Helper: `abuseBadgeClass` maps status to
+badge-warning/info/success/default.
+
+Templates: `templates/admin/abuse.html` (list), `templates/admin/abuse_detail.html` (detail).
+
 ## Legacy Handlers
 
 Files like `dashboard.go` etc. are stubs from before Phase 0 with inline terminal-style templates. They are NOT wired into the router. Remaining phases will rewrite them.

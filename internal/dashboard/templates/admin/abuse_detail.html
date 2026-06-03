@@ -1,0 +1,87 @@
+{{define "title"}}Report #{{.Report.ID}} — Abuse Queue{{end}}
+{{define "content"}}
+<div class="breadcrumb">
+    <a href="/admin/abuse">Abuse Queue</a> &rsaquo; Report #{{.Report.ID}}
+</div>
+
+{{if .FlashSuccess}}<div class="alert alert-success">{{.FlashSuccess}}</div>{{end}}
+{{if .FlashError}}<div class="alert alert-error">{{.FlashError}}</div>{{end}}
+
+<div class="dashboard-header">
+    <h1>Report #{{.Report.ID}}</h1>
+    <span class="badge badge-{{.Report.BadgeClass}}">{{.Report.Status}}</span>
+</div>
+
+<div class="card-grid">
+    <div class="card">
+        <div class="card-title">Reporter</div>
+        <div class="card-value" style="font-size:1rem">{{.Report.ReporterEmail}}</div>
+        {{if .Report.ReporterName}}<div class="card-detail">{{.Report.ReporterName}}</div>{{end}}
+    </div>
+    <div class="card">
+        <div class="card-title">Type</div>
+        <div class="card-value" style="font-size:1rem">{{.Report.ReportType}}</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Submitted</div>
+        <div class="card-value" style="font-size:1rem">{{.Report.RelTime}}</div>
+    </div>
+    {{if .Report.TenantID}}
+    <div class="card">
+        <div class="card-title">Tenant</div>
+        <div class="card-value" style="font-size:0.85rem"><a href="/admin/support/{{.Report.TenantID}}" style="color:#60a5fa">{{.Report.TenantID}}</a></div>
+    </div>
+    {{end}}
+</div>
+
+{{if .Report.URL}}
+<div class="card">
+    <div class="card-title">Reported URL</div>
+    <div style="font-size:0.9rem;word-break:break-all"><a href="{{.Report.URL}}" target="_blank" rel="noopener noreferrer" style="color:#60a5fa">{{.Report.URL}}</a></div>
+</div>
+{{end}}
+
+<div class="card">
+    <div class="card-title">Description</div>
+    <div style="font-size:0.9rem;white-space:pre-wrap">{{.Report.Description}}</div>
+</div>
+
+{{if .Report.ResolvedBy}}
+<div class="card">
+    <div class="card-title">Resolution</div>
+    <div style="font-size:0.9rem">
+        Resolved by <strong>{{.Report.ResolvedBy}}</strong>
+        {{if .Report.ResolvedAt}} on {{.Report.ResolvedAt}}{{end}}
+    </div>
+</div>
+{{end}}
+
+<div class="card">
+    <div class="card-title">Actions</div>
+    <div style="display:flex;gap:0.75rem;flex-wrap:wrap">
+        {{if eq .Report.Status "open"}}
+        <form action="/admin/abuse/{{.Report.ID}}/action" method="POST" style="margin:0">
+            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+            <input type="hidden" name="action" value="reviewing">
+            <button type="submit" class="btn btn-sm">Mark Reviewing</button>
+        </form>
+        {{end}}
+        {{if eq .Report.Status "reviewing"}}
+        <form action="/admin/abuse/{{.Report.ID}}/action" method="POST" style="margin:0">
+            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+            <input type="hidden" name="action" value="actioned">
+            <button type="submit" class="btn btn-sm btn-primary">Action Taken</button>
+        </form>
+        <form action="/admin/abuse/{{.Report.ID}}/action" method="POST" style="margin:0">
+            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+            <input type="hidden" name="action" value="dismissed">
+            <button type="submit" class="btn btn-sm">Dismiss</button>
+        </form>
+        {{end}}
+    </div>
+</div>
+
+<div class="dashboard-actions">
+    <a href="/admin/abuse" class="btn">Back to Abuse Queue</a>
+</div>
+{{end}}
