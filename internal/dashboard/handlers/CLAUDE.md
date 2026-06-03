@@ -189,6 +189,12 @@ and per-tenant margin table with negative margins highlighted in red.
 Projected month-end: linear extrapolation from current day-of-month. Caption notes
 estimates are from intended tier→backend mapping, not live backend.
 
+**Actual Backend Distribution (Phase 7.4)**: `populateActualBackends` queries
+`object_locations` grouped by `backend_name` to show ground-truth object counts and
+storage per backend. Rendered as `ActualByBackend` (type `actualBackendRow`: Backend,
+ObjectCount, StorageFmt, StorageTB) in a separate "Storage by Backend (Actual)" card.
+Hidden when `object_locations` is empty. Complements the estimated ByBackend table.
+
 Template: `templates/admin/costs.html`. Nil-DB and empty-state both render 200
 with $0.00 zero-state.
 

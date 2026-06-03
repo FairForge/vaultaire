@@ -233,6 +233,15 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		}
 	}
 
+	if cacheHit && a.db != nil {
+		go func() {
+			_, _ = a.db.ExecContext(context.Background(), `
+				UPDATE object_head_cache SET last_accessed = NOW()
+				WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+				t.ID, bucket, artifact)
+		}()
+	}
+
 	if cacheHit {
 		if code := evaluateConditionalGET(r, cachedETag, cachedUpdatedAt); code == http.StatusNotModified {
 			writeNotModified(w, cachedETag, cachedUpdatedAt, "private, no-cache")

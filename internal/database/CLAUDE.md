@@ -36,6 +36,8 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 | 044 | Waitlist: `waitlist_signups` table (email UNIQUE, source, ip, user_agent) — pre-launch landing-page email capture |
 | 045 | Admin notes: `admin_notes` table (tenant_id, admin_user_id → users, note) — internal support notes on customer accounts |
 | 046 | Admin notifications: `admin_notifications` table (type, message, tenant_id, read_at) — admin notification system with partial index on unread |
+| 047 | Abuse reports: `abuse_reports` table (reporter, tenant, bucket, key, type, description, status) — public abuse reporting + admin moderation queue |
+| 048 | Object location tracking: `object_locations` (durable backend routing), `tiering_policies` (age-based tiering config), `tenant_cost_daily` (per-tenant cost rollup); `last_accessed` column on `object_head_cache` |
 
 ## Key Tables
 
@@ -65,6 +67,10 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 - **metered_usage_reports** — `id (BIGSERIAL PK)`, `tenant_id`, `meter`, `period_date`, `value`, `stripe_event_id`, `reported_at`, `UNIQUE(tenant_id, meter, period_date)` — daily Stripe Billing Meter reports; the unique constraint is the no-double-billing guard and also gates once-per-month spending-cap alerts (synthetic `alert:80`/`alert:95` meters)
 - **admin_notes** — `id (BIGSERIAL PK)`, `tenant_id`, `admin_user_id → users`, `note`, `created_at` — internal support notes on customer accounts, indexed by (tenant_id, created_at DESC)
 - **admin_notifications** — `id (BIGSERIAL PK)`, `type`, `message`, `tenant_id` (nullable), `read_at` (nullable), `created_at` — admin notification system; partial index on `(created_at DESC) WHERE read_at IS NULL` for fast unread count
+- **abuse_reports** — `id (BIGSERIAL PK)`, `reporter_email`, `reporter_name`, `tenant_id`, `bucket`, `object_key`, `report_type`, `description`, `url`, `status`, `resolved_by`, `resolved_at`, `created_at` — public abuse report intake + admin moderation
+- **object_locations** — `(tenant_id, bucket, object_key) PK`, `backend_name`, `storage_class`, `size_bytes`, `stored_at`, `last_accessed` — durable object-to-backend routing; source of truth for which backend holds each object
+- **tiering_policies** — `id (BIGSERIAL PK)`, `tenant_id`, `bucket`, `min_age_days`, `target_backend`, `target_class`, `enabled`, `created_at`, `UNIQUE(tenant_id, bucket, target_backend)` — age-based tier migration config (Phase 7.3)
+- **tenant_cost_daily** — `(tenant_id, date, backend_name) PK`, `storage_bytes`, `cost_microcents` — daily per-tenant storage cost rollup (Phase 7.4)
 
 ## Connection
 

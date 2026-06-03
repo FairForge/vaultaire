@@ -75,6 +75,13 @@ type backendCostRow struct {
 	TotalFmt   string
 }
 
+type actualBackendRow struct {
+	Backend     string
+	ObjectCount int64
+	StorageFmt  string
+	StorageTB   float64
+}
+
 type marginRow struct {
 	Email           string
 	Plan            string
@@ -109,9 +116,11 @@ func HandleAdminCosts(tmpl *template.Template, db *sql.DB, logger *zap.Logger) h
 		data["ProjectedSpendFmt"] = "$0.00"
 		data["ByBackend"] = []backendCostRow{}
 		data["MarginTable"] = []marginRow{}
+		data["ActualByBackend"] = []actualBackendRow{}
 
 		if db != nil {
 			populateCosts(r.Context(), db, data, logger)
+			populateActualBackends(r.Context(), db, data, logger)
 		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -309,6 +318,36 @@ func formatSignedCents(cents int64) string {
 		return fmt.Sprintf("-$%.2f", float64(-cents)/100)
 	}
 	return fmt.Sprintf("$%.2f", float64(cents)/100)
+}
+
+func populateActualBackends(ctx context.Context, db *sql.DB, data map[string]any, logger *zap.Logger) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT backend_name, COUNT(*), COALESCE(SUM(size_bytes), 0)
+		FROM object_locations GROUP BY backend_name
+		ORDER BY SUM(size_bytes) DESC`)
+	if err != nil {
+		logger.Debug("costs: query object_locations", zap.Error(err))
+		return
+	}
+	defer func() { _ = rows.Close() }()
+
+	var actual []actualBackendRow
+	for rows.Next() {
+		var r actualBackendRow
+		var storageBytes int64
+		if err := rows.Scan(&r.Backend, &r.ObjectCount, &storageBytes); err != nil {
+			logger.Debug("costs: scan actual backend", zap.Error(err))
+			continue
+		}
+		storageTB := float64(storageBytes) / bytesPerTBCost
+		r.StorageTB = math.Round(storageTB*100) / 100
+		r.StorageFmt = formatBytes(storageBytes)
+		actual = append(actual, r)
+	}
+
+	if len(actual) > 0 {
+		data["ActualByBackend"] = actual
+	}
 }
 
 func daysInCurrentMonth(t time.Time) int {
