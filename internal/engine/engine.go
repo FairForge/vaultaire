@@ -38,6 +38,7 @@ type CoreEngine struct {
 
 	intelligence *intelligence.AccessTracker
 	cache        *cache.TieredCache
+	locations    *LocationStore
 
 	// objectBackends records which backend each object was written to.
 	// Key: "container/artifact"  Value: backend name string
@@ -80,6 +81,8 @@ func NewEngine(db *sql.DB, logger *zap.Logger, config *Config) *CoreEngine {
 		costOptimizer: NewCostOptimizer(),
 		failover:      NewFailoverManager(logger),
 	}
+
+	e.locations = NewLocationStore(db, logger)
 
 	if db != nil {
 		e.intelligence = intelligence.NewAccessTracker(db, logger)
@@ -213,6 +216,11 @@ func (e *CoreEngine) Get(ctx context.Context, container, artifact string) (io.Re
 		if name, ok := v.(string); ok && name != "" {
 			preferredBackend = name
 		}
+	} else if e.locations != nil {
+		if name, err := e.locations.LookupBackend(ctx, tenantID, container, artifact); err == nil && name != "" {
+			preferredBackend = name
+			e.objectBackends.Store(objectKey(container, artifact), name)
+		}
 	}
 
 	// Log what intelligence would have recommended (informational only).
@@ -343,6 +351,16 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 
 	e.objectBackends.Store(objectKey(container, artifact), usedBackend)
 
+	if e.locations != nil {
+		resolvedClass := options.StorageClass
+		if resolvedClass == "" {
+			resolvedClass = "STANDARD"
+		}
+		go func() {
+			_ = e.locations.RecordLocation(context.Background(), tenantID, container, artifact, usedBackend, resolvedClass, sizeReader.bytesRead)
+		}()
+	}
+
 	if e.cache != nil {
 		cacheKey := fmt.Sprintf("%s/%s/%s", tenantID, container, artifact)
 		_ = e.cache.Delete(cacheKey)
@@ -380,6 +398,10 @@ func (e *CoreEngine) Delete(ctx context.Context, container, artifact string) err
 	})
 
 	e.objectBackends.Delete(key)
+
+	if e.locations != nil {
+		_ = e.locations.RemoveLocation(ctx, tenantID, container, artifact)
+	}
 
 	if e.cache != nil {
 		cacheKey := fmt.Sprintf("%s/%s/%s", tenantID, container, artifact)

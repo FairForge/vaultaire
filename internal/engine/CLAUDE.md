@@ -16,9 +16,13 @@ Core orchestration layer — connects the API layer to storage drivers. This is 
 - **Delete**: failover.Execute against recorded backend (+ primary fallback) → remove from `objectBackends` → invalidate cache
 - **List**: delegates to primary driver only
 
-## Important: objectBackends is in-memory
+## Object Location Routing (Phase 7.1-7.2)
 
-`objectBackends sync.Map` maps object keys to backend names. Lost on restart — falls through to primary driver for objects written before the restart. Phase 7 (Smart Tiering) replaces this with PostgreSQL-backed `object_locations`.
+Two-tier backend lookup: `objectBackends sync.Map` (L1, in-memory hot cache) → `LocationStore` / `object_locations` table (L2, PostgreSQL durable). On sync.Map miss, the engine queries `object_locations` and seeds the sync.Map so subsequent GETs are fast. Put records to both layers. Delete removes from both.
+
+`LocationStore` (`routing.go`) wraps `*sql.DB` for object location CRUD. All methods are nil-DB safe (degrade to no-op). `last_accessed` is updated on every LookupBackend call (fire-and-forget goroutine) for tiering age tracking.
+
+Tables created in migration 048: `object_locations` (routing source of truth), `tiering_policies` (Phase 7.3), `tenant_cost_daily` (Phase 7.4). Also adds `last_accessed` column to `object_head_cache`.
 
 ## Supporting Files
 
@@ -39,6 +43,7 @@ Core orchestration layer — connects the API layer to storage drivers. This is 
 | `sla.go` | `SLAMonitor` | SLA compliance tracking, violation detection |
 | `failover.go` | `FailoverManager`, `BackendCircuitBreaker` | Per-backend circuit breaker (5 failures/60s → open, 30s → half-open → probe) + ordered failover execution |
 | `storage_class.go` | `ResolveStorageClass`, `BackendToStorageClass` | S3 storage class ↔ backend name mapping (STANDARD→idrive, GLACIER→geyser, etc.) |
+| `routing.go` | `LocationStore` | PostgreSQL-backed object location CRUD (RecordLocation, LookupBackend, RemoveLocation, CountByBackend, TouchLastAccessed) — nil-DB safe |
 
 ## Per-Bucket Region Routing (Phase 5.14.7)
 
