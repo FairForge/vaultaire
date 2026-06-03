@@ -1,0 +1,143 @@
+{{define "title"}}{{.TenantName}} — Support{{end}}
+{{define "content"}}
+<div class="breadcrumb">
+    <a href="/admin/support">Support</a> &rsaquo; {{.TenantName}}
+</div>
+
+{{if .FlashSuccess}}<div class="alert alert-success">{{.FlashSuccess}}</div>{{end}}
+{{if .FlashError}}<div class="alert alert-error">{{.FlashError}}</div>{{end}}
+
+<div class="dashboard-header">
+    <h1>{{.TenantName}}</h1>
+    <span class="badge badge-{{.StatusClass}}">{{.Status}}</span>
+</div>
+
+<div class="card-grid">
+    <div class="card">
+        <div class="card-title">Email</div>
+        <div class="card-value" style="font-size:1rem">{{.TenantEmail}}</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Plan / Tier</div>
+        <div class="card-value" style="font-size:1rem">{{.Plan}} ({{.Tier}})</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Registered</div>
+        <div class="card-value" style="font-size:1rem">{{.CreatedFmt}}</div>
+    </div>
+    {{if .StripeCustomerID}}
+    <div class="card">
+        <div class="card-title">Stripe Customer</div>
+        <div class="card-value" style="font-size:0.85rem;font-family:monospace">{{.StripeCustomerID}}</div>
+    </div>
+    {{end}}
+</div>
+
+<div class="card-grid">
+    <div class="card">
+        <div class="card-title">Storage</div>
+        <div class="card-value" style="font-size:1rem">{{.StorageUsedFmt}} / {{.StorageLimitFmt}}</div>
+        <div class="usage-bar">
+            <div class="usage-bar-fill {{.StorageBarClass}}" style="width: {{.StoragePercent}}%"></div>
+        </div>
+        <div class="card-detail">{{.StoragePercent}}% used</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Bandwidth (Month)</div>
+        <div class="card-value" style="font-size:1rem">{{.IngressFmt}} in / {{.EgressFmt}} out</div>
+        <div class="card-detail">{{.RequestsCount}} requests</div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">Timeline (Last 50 Events)</div>
+    {{if .Timeline}}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Type</th>
+                    <th>Summary</th>
+                    <th>Time</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .Timeline}}
+                <tr>
+                    <td><code>{{.Type}}</code></td>
+                    <td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{.Summary}}</td>
+                    <td style="white-space:nowrap">{{.RelTime}}</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+    {{else}}
+    <p class="text-muted">No events yet.</p>
+    {{end}}
+</div>
+
+<div class="card">
+    <div class="card-title">S3 Error Log (Last 20)</div>
+    {{if .Errors}}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Operation</th>
+                    <th>Bucket</th>
+                    <th>Key</th>
+                    <th>Status</th>
+                    <th>Error</th>
+                    <th>IP</th>
+                    <th>Time</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .Errors}}
+                <tr>
+                    <td><code>{{.Operation}}</code></td>
+                    <td>{{.Bucket}}</td>
+                    <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{.Key}}</td>
+                    <td>{{.StatusCode}}</td>
+                    <td><code>{{.ErrorCode}}</code></td>
+                    <td style="font-family:monospace;font-size:0.85rem">{{.SourceIP}}</td>
+                    <td style="white-space:nowrap">{{.RelTime}}</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+    {{else}}
+    <p class="text-muted">No recent errors.</p>
+    {{end}}
+</div>
+
+<div class="card">
+    <div class="card-title">Internal Notes</div>
+    {{if .Notes}}
+    {{range .Notes}}
+    <div style="border-bottom:1px solid #1e293b;padding:0.75rem 0">
+        <div style="font-size:0.9rem">{{.Note}}</div>
+        <div style="font-size:0.8rem;color:#94a3b8;margin-top:0.25rem">{{.AdminEmail}} &mdash; {{.RelTime}}</div>
+    </div>
+    {{end}}
+    {{end}}
+    <form action="/admin/support/{{.TenantID}}/notes" method="POST" style="margin-top:1rem">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <textarea name="note" rows="3" maxlength="2000" placeholder="Add a note..." style="width:100%;padding:0.5rem;border:1px solid #334155;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:0.9rem;resize:vertical;box-sizing:border-box"></textarea>
+        <button type="submit" class="btn btn-sm btn-primary" style="margin-top:0.5rem">Add Note</button>
+    </form>
+</div>
+
+<div class="card">
+    <div class="card-title">Quick Actions</div>
+    <div style="display:flex;gap:0.75rem;flex-wrap:wrap">
+        <a href="/admin/tenants/{{.TenantID}}" class="btn btn-sm">Tenant Management</a>
+    </div>
+</div>
+
+<div class="dashboard-actions">
+    <a href="/admin/support" class="btn">Back to Support</a>
+</div>
+{{end}}

@@ -192,6 +192,28 @@ estimates are from intended tier→backend mapping, not live backend.
 Template: `templates/admin/costs.html`. Nil-DB and empty-state both render 200
 with $0.00 zero-state.
 
+## Admin Customer Support (`admin_support.go`)
+
+Three handlers for the admin customer support view (Phase 3.7):
+- `HandleAdminSupport(tmpl, db, logger)` — GET `/admin/support`: unified customer search
+  across `tenants.email` (ILIKE), `tenants.id`, `tenants.access_key`, and
+  `tenants.stripe_customer_id` (exact match). Returns up to 50 results.
+- `HandleCustomerDetail(tmpl, db, logger)` — GET `/admin/support/{id}`: full customer
+  context page. Reuses `loadTenantDetail` for the info card + bandwidth, then adds:
+  **Timeline** (UNION ALL of `events` + `stripe_events`, last 50), **S3 Error Log**
+  (status_code >= 400 from `s3_access_log`, last 20), **Internal Notes** (`admin_notes`
+  JOIN `users`), and **Quick Actions** (link to tenant management).
+- `HandleAddNote(db, logger)` — POST `/admin/support/{id}/notes`: inserts into
+  `admin_notes`, validates non-empty + max 2000 chars, flash + redirect.
+
+Helper functions: `searchCustomers`, `queryTimeline`, `queryS3Errors`, `queryNotes`.
+Types: `supportResult`, `timelineEvent`, `errorLogEntry`, `adminNote`.
+
+Templates: `templates/admin/support.html` (search page),
+`templates/admin/support_detail.html` (customer detail).
+
+Migration: `045_admin_notes.sql` — `admin_notes` table (tenant_id, admin_user_id → users, note, created_at).
+
 ## Legacy Handlers
 
 Files like `dashboard.go` etc. are stubs from before Phase 0 with inline terminal-style templates. They are NOT wired into the router. Remaining phases will rewrite them.

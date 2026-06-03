@@ -1,0 +1,55 @@
+{{define "title"}}Customer Support — stored.ge admin{{end}}
+{{define "content"}}
+<div class="dashboard-header">
+    <h1>Customer Support</h1>
+</div>
+
+<div class="card" style="margin-bottom:1.5rem">
+    <form action="/admin/support" method="GET" style="display:flex;gap:0.75rem;align-items:end">
+        <div style="flex:1">
+            <label style="display:block;font-size:0.85rem;color:#94a3b8;margin-bottom:0.25rem">Search customers</label>
+            <input type="text" name="q" value="{{.Query}}" placeholder="Email, tenant ID, access key, or Stripe customer ID" style="width:100%;padding:0.4rem 0.6rem;border:1px solid #334155;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:0.9rem">
+        </div>
+        <button type="submit" class="btn btn-sm">Search</button>
+    </form>
+</div>
+
+{{if .Searched}}
+{{if .Results}}
+<div class="card">
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Email</th>
+                    <th>Name</th>
+                    <th>Plan</th>
+                    <th>Status</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .Results}}
+                <tr>
+                    <td>{{.Email}}</td>
+                    <td>{{.Name}}</td>
+                    <td><span class="badge">{{.Plan}}</span></td>
+                    <td><span class="badge badge-{{.StatusClass}}">{{.Status}}</span></td>
+                    <td><a href="/admin/support/{{.ID}}" class="btn btn-sm">View &rarr;</a></td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+</div>
+{{else}}
+<div class="card">
+    <p class="text-muted">No customers found.</p>
+</div>
+{{end}}
+{{else}}
+<div class="card">
+    <p class="text-muted">Search for a customer by email, tenant ID, access key, or Stripe customer ID.</p>
+</div>
+{{end}}
+{{end}}
