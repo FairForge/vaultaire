@@ -14,7 +14,7 @@ require (
 	github.com/aws/smithy-go v1.25.1
 	github.com/cloudflare/circl v1.6.3
 	github.com/fsnotify/fsnotify v1.9.0
-	github.com/go-chi/chi/v5 v5.2.5
+	github.com/go-chi/chi/v5 v5.3.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/golang/snappy v1.0.0
 	github.com/google/uuid v1.6.0
