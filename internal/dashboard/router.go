@@ -119,6 +119,13 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 	r.Get("/compliance/gdpr", http.RedirectHandler("/legal/gdpr", http.StatusMovedPermanently).ServeHTTP)
 	r.Get("/compliance/data-act", http.RedirectHandler("/legal/data-act", http.StatusMovedPermanently).ServeHTTP)
 
+	// --- Public abuse report form ---
+	abusePubTmpl := template.Must(baseTmpl.Clone())
+	template.Must(abusePubTmpl.ParseFS(Templates, "templates/public/abuse.html"))
+	r.Get("/abuse", handlers.HandleAbuseForm(abusePubTmpl, deps.Logger))
+	abuseRL := middleware.NewLoginRateLimiter(5, 5)
+	r.Post("/abuse", abuseRL.Limit(handlers.HandleAbuseSubmit(abusePubTmpl, deps.DB, deps.Logger)).ServeHTTP)
+
 	// --- Customer dashboard (session required) ---
 	r.Route("/dashboard", func(dr chi.Router) {
 		dr.Use(middleware.Recovery(deps.Logger))
@@ -278,6 +285,14 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		"templates/layouts/admin.html",
 		"templates/admin/notifications.html",
 	))
+	adminAbuseTmpl := template.Must(template.ParseFS(Templates,
+		"templates/layouts/admin.html",
+		"templates/admin/abuse.html",
+	))
+	abuseDetailTmpl := template.Must(template.ParseFS(Templates,
+		"templates/layouts/admin.html",
+		"templates/admin/abuse_detail.html",
+	))
 
 	r.Route("/admin", func(ar chi.Router) {
 		ar.Use(middleware.Recovery(deps.Logger))
@@ -307,6 +322,9 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		ar.Post("/notifications/read-all", handlers.HandleMarkAllRead(deps.DB, deps.Logger))
 		ar.Post("/notifications/{id}/read", handlers.HandleMarkRead(deps.DB, deps.Logger))
 		ar.Get("/notifications/count", handlers.HandleNotifCount(deps.DB, deps.Logger))
+		ar.Get("/abuse", handlers.HandleAdminAbuse(adminAbuseTmpl, deps.DB, deps.Logger))
+		ar.Get("/abuse/{id}", handlers.HandleAdminAbuseDetail(abuseDetailTmpl, deps.DB, deps.Logger))
+		ar.Post("/abuse/{id}/action", handlers.HandleAbuseAction(deps.DB, deps.Logger))
 		ar.Get("/support", handlers.HandleAdminSupport(supportTmpl, deps.DB, deps.Logger))
 		ar.Get("/support/{id}", handlers.HandleCustomerDetail(customerDetailTmpl, deps.DB, deps.Logger))
 		ar.Post("/support/{id}/notes", handlers.HandleAddNote(deps.DB, deps.Logger))

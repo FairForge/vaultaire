@@ -1,0 +1,50 @@
+{{define "title"}}Abuse Queue — stored.ge admin{{end}}
+{{define "content"}}
+<div class="dashboard-header">
+    <h1>Abuse Queue</h1>
+</div>
+
+{{if .FlashSuccess}}<div class="alert alert-success">{{.FlashSuccess}}</div>{{end}}
+{{if .FlashError}}<div class="alert alert-error">{{.FlashError}}</div>{{end}}
+
+<div style="display:flex;gap:0.5rem;margin-bottom:1.5rem;flex-wrap:wrap">
+    <a href="/admin/abuse?status=open" class="btn btn-sm{{if eq .FilterStatus "open"}} btn-primary{{end}}">Open</a>
+    <a href="/admin/abuse?status=reviewing" class="btn btn-sm{{if eq .FilterStatus "reviewing"}} btn-primary{{end}}">Reviewing</a>
+    <a href="/admin/abuse?status=actioned" class="btn btn-sm{{if eq .FilterStatus "actioned"}} btn-primary{{end}}">Actioned</a>
+    <a href="/admin/abuse?status=dismissed" class="btn btn-sm{{if eq .FilterStatus "dismissed"}} btn-primary{{end}}">Dismissed</a>
+    <a href="/admin/abuse?status=all" class="btn btn-sm{{if eq .FilterStatus "all"}} btn-primary{{end}}">All</a>
+</div>
+
+<div class="card">
+    {{if .Reports}}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Reporter</th>
+                    <th>Type</th>
+                    <th>URL</th>
+                    <th>Status</th>
+                    <th>Time</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .Reports}}
+                <tr>
+                    <td>{{.ReporterEmail}}</td>
+                    <td><span class="badge">{{.ReportType}}</span></td>
+                    <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{.URL}}</td>
+                    <td><span class="badge badge-{{.BadgeClass}}">{{.Status}}</span></td>
+                    <td style="white-space:nowrap">{{.RelTime}}</td>
+                    <td><a href="/admin/abuse/{{.ID}}" class="btn btn-sm">View &rarr;</a></td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+    {{else}}
+    <p class="text-muted">No reports found.</p>
+    {{end}}
+</div>
+{{end}}

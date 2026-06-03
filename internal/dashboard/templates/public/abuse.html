@@ -1,0 +1,51 @@
+{{define "title"}}Report Abuse — stored.ge{{end}}
+{{define "nav"}}{{end}}
+{{define "content"}}
+<div class="auth-page">
+    <div class="auth-card" style="max-width:540px">
+        <div class="auth-brand">stored.ge</div>
+        <h1>Report Abuse</h1>
+        {{if .Submitted}}
+        <div class="alert alert-success">
+            Thank you for your report. We'll review it within 24 hours.
+        </div>
+        <div class="auth-footer"><a href="/">Back to homepage</a></div>
+        {{else}}
+        <p class="auth-subtitle">If you believe content hosted on stored.ge violates our Acceptable Use Policy, please let us know.</p>
+        {{if .Error}}<div class="alert alert-error">{{.Error}}</div>{{end}}
+        <form method="POST" action="/abuse">
+            <div class="form-group">
+                <label>Your email <span style="color:var(--danger)">*</span></label>
+                <input type="email" name="reporter_email" value="{{.ReporterEmail}}" required>
+            </div>
+            <div class="form-group">
+                <label>Your name</label>
+                <input type="text" name="reporter_name" value="{{.ReporterName}}">
+            </div>
+            <div class="form-group">
+                <label>Report type <span style="color:var(--danger)">*</span></label>
+                <select name="report_type" required>
+                    <option value="">Select a type...</option>
+                    <option value="copyright"{{if eq .ReportType "copyright"}} selected{{end}}>Copyright / DMCA</option>
+                    <option value="csam"{{if eq .ReportType "csam"}} selected{{end}}>CSAM</option>
+                    <option value="malware"{{if eq .ReportType "malware"}} selected{{end}}>Malware</option>
+                    <option value="spam"{{if eq .ReportType "spam"}} selected{{end}}>Spam</option>
+                    <option value="harassment"{{if eq .ReportType "harassment"}} selected{{end}}>Harassment</option>
+                    <option value="other"{{if eq .ReportType "other"}} selected{{end}}>Other</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>URL of content</label>
+                <input type="url" name="url" value="{{.URL}}" placeholder="https://...">
+            </div>
+            <div class="form-group">
+                <label>Description <span style="color:var(--danger)">*</span></label>
+                <textarea name="description" rows="5" maxlength="5000" required placeholder="Describe the abuse you've encountered...">{{.Description}}</textarea>
+            </div>
+            <button type="submit" class="btn btn-primary btn-block">Submit Report</button>
+        </form>
+        <div class="auth-footer"><a href="/">Back to homepage</a></div>
+        {{end}}
+    </div>
+</div>
+{{end}}
