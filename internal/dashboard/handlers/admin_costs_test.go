@@ -27,6 +27,7 @@ func testCostsTemplate(t *testing.T) *template.Template {
 			`<span class="projected">{{.ProjectedSpendFmt}}</span>` +
 			`{{range .ByBackend}}<span class="backend">{{.Backend}} {{.StorageFmt}} {{.CostFmt}} {{.FixedFmt}} {{.TotalFmt}}</span>{{end}}` +
 			`{{range .MarginTable}}<span class="tenant-margin{{if .IsNegative}} negative{{end}}">{{.Email}} {{.Plan}} {{.Backend}} {{.RevenueFmt}} {{.CostFmt}} {{.EgressCostFmt}} {{.MarginFmt}}</span>{{end}}` +
+			`{{range .ActualByBackend}}<span class="actual-backend">{{.Backend}} {{.ObjectCount}} {{.StorageFmt}}</span>{{end}}` +
 			`{{if not .ByBackend}}<p>No backends</p>{{end}}` +
 			`{{if not .MarginTable}}<p>No margins</p>{{end}}` +
 			`{{end}}`))
@@ -35,6 +36,11 @@ func testCostsTemplate(t *testing.T) *template.Template {
 
 func costsQueryRows(mock sqlmock.Sqlmock, rows *sqlmock.Rows) {
 	mock.ExpectQuery(`SELECT t.email, COALESCE\(t.plan, ''\)`).WillReturnRows(rows)
+}
+
+func emptyActualBackendRows(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery(`SELECT backend_name, COUNT`).
+		WillReturnRows(sqlmock.NewRows([]string{"backend_name", "count", "sum"}))
 }
 
 func TestCosts_PerBackendSpend(t *testing.T) {
@@ -46,6 +52,7 @@ func TestCosts_PerBackendSpend(t *testing.T) {
 	costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage_used_bytes", "egress"}).
 		AddRow("alice@example.com", "vault5", "", oneTB, int64(0)).
 		AddRow("bob@example.com", "vault3", "", oneTB, int64(0)))
+	emptyActualBackendRows(mock)
 
 	handler := HandleAdminCosts(testCostsTemplate(t), db, zap.NewNop())
 	req := httptest.NewRequest("GET", "/admin/costs", nil)
@@ -73,6 +80,7 @@ func TestCosts_MarginPerTenant(t *testing.T) {
 	oneTB := int64(1024 * 1024 * 1024 * 1024)
 	costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage_used_bytes", "egress"}).
 		AddRow("alice@example.com", "vault5", "", oneTB, int64(0)))
+	emptyActualBackendRows(mock)
 
 	handler := HandleAdminCosts(testCostsTemplate(t), db, zap.NewNop())
 	req := httptest.NewRequest("GET", "/admin/costs", nil)
@@ -102,6 +110,7 @@ func TestCosts_NegativeMarginFlagged(t *testing.T) {
 	eighteenTB := int64(18 * 1024 * 1024 * 1024 * 1024)
 	costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage_used_bytes", "egress"}).
 		AddRow("whale@example.com", "vault18", "", eighteenTB, int64(0)))
+	emptyActualBackendRows(mock)
 
 	handler := HandleAdminCosts(testCostsTemplate(t), db, zap.NewNop())
 	req := httptest.NewRequest("GET", "/admin/costs", nil)
@@ -129,6 +138,7 @@ func TestCosts_BlendedCOGS(t *testing.T) {
 	twoTB := int64(2 * 1024 * 1024 * 1024 * 1024)
 	costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage_used_bytes", "egress"}).
 		AddRow("a@test.com", "vault5", "", twoTB, int64(0)))
+	emptyActualBackendRows(mock)
 
 	handler := HandleAdminCosts(testCostsTemplate(t), db, zap.NewNop())
 	req := httptest.NewRequest("GET", "/admin/costs", nil)
@@ -152,6 +162,7 @@ func TestCosts_FixedCostsIncluded(t *testing.T) {
 	oneTB := int64(1024 * 1024 * 1024 * 1024)
 	costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage_used_bytes", "egress"}).
 		AddRow("a@test.com", "vault5", "", oneTB, int64(0)))
+	emptyActualBackendRows(mock)
 
 	handler := HandleAdminCosts(testCostsTemplate(t), db, zap.NewNop())
 	req := httptest.NewRequest("GET", "/admin/costs", nil)
@@ -173,6 +184,7 @@ func TestCosts_ZeroState(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage_used_bytes", "egress"}))
+	emptyActualBackendRows(mock)
 
 	handler := HandleAdminCosts(testCostsTemplate(t), db, zap.NewNop())
 	req := httptest.NewRequest("GET", "/admin/costs", nil)
@@ -265,6 +277,7 @@ func TestProjectedCosts(t *testing.T) {
 	oneTB := int64(1024 * 1024 * 1024 * 1024)
 	costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage_used_bytes", "egress"}).
 		AddRow("a@test.com", "vault5", "", oneTB, int64(0)))
+	emptyActualBackendRows(mock)
 
 	handler := HandleAdminCosts(testCostsTemplate(t), db, zap.NewNop())
 	req := httptest.NewRequest("GET", "/admin/costs", nil)
@@ -298,4 +311,33 @@ func TestDaysInCurrentMonth(t *testing.T) {
 			time.Date(tc.year, time.Month(tc.month), 15, 0, 0, 0, 0, time.UTC))
 		assert.Equal(t, tc.want, got, "month=%d year=%d", tc.month, tc.year)
 	}
+}
+
+func TestAdminCosts_ActualBackendData(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage_used_bytes", "egress"}))
+
+	oneTB := int64(1024 * 1024 * 1024 * 1024)
+	mock.ExpectQuery(`SELECT backend_name, COUNT`).
+		WillReturnRows(sqlmock.NewRows([]string{"backend_name", "count", "sum"}).
+			AddRow("idrive", int64(500), oneTB).
+			AddRow("geyser", int64(200), int64(2)*oneTB))
+
+	handler := HandleAdminCosts(testCostsTemplate(t), db, zap.NewNop())
+	req := httptest.NewRequest("GET", "/admin/costs", nil)
+	req = req.WithContext(adminCtx(t))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.Contains(t, body, "idrive")
+	assert.Contains(t, body, "500")
+	assert.Contains(t, body, "geyser")
+	assert.Contains(t, body, "200")
+	assert.Contains(t, body, "actual-backend")
+	require.NoError(t, mock.ExpectationsWereMet())
 }

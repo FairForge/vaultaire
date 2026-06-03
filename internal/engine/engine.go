@@ -39,6 +39,7 @@ type CoreEngine struct {
 	intelligence *intelligence.AccessTracker
 	cache        *cache.TieredCache
 	locations    *LocationStore
+	tiering      *TieringEngine
 
 	// objectBackends records which backend each object was written to.
 	// Key: "container/artifact"  Value: backend name string
@@ -83,6 +84,7 @@ func NewEngine(db *sql.DB, logger *zap.Logger, config *Config) *CoreEngine {
 	}
 
 	e.locations = NewLocationStore(db, logger)
+	e.tiering = NewTieringEngine(db, e.drivers, e.locations, &e.objectBackends, logger)
 
 	if db != nil {
 		e.intelligence = intelligence.NewAccessTracker(db, logger)
@@ -660,9 +662,20 @@ func (e *CoreEngine) GetFailoverStatus() map[string]string {
 	return e.failover.GetAllStatuses()
 }
 
+// StartTiering launches the background tiering goroutine.
+// Call after all drivers are registered.
+func (e *CoreEngine) StartTiering(ctx context.Context) {
+	if e.tiering != nil {
+		go e.tiering.Start(ctx)
+	}
+}
+
 // Shutdown gracefully shuts down the engine
 func (e *CoreEngine) Shutdown(ctx context.Context) error {
 	e.logger.Info("shutting down engine")
+	if e.tiering != nil {
+		e.tiering.Stop()
+	}
 	if e.intelligence != nil {
 		e.intelligence.Flush()
 	}

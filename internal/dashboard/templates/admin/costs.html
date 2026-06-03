@@ -64,6 +64,35 @@
     {{end}}
 </div>
 
+{{if .ActualByBackend}}
+<div class="card" style="margin-bottom:1.5rem">
+    <div class="card-title" style="margin-bottom:0.75rem">Storage by Backend (Actual)</div>
+    <p class="text-muted" style="margin-bottom:0.75rem;font-size:0.85rem">Ground truth from object location tracking.</p>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Backend</th>
+                    <th style="text-align:right">Objects</th>
+                    <th style="text-align:right">Storage</th>
+                    <th style="text-align:right">TB</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .ActualByBackend}}
+                <tr>
+                    <td><code>{{.Backend}}</code></td>
+                    <td style="text-align:right">{{.ObjectCount}}</td>
+                    <td style="text-align:right">{{.StorageFmt}}</td>
+                    <td style="text-align:right">{{printf "%.2f" .StorageTB}}</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+</div>
+{{end}}
+
 <div class="card">
     <div class="card-title" style="margin-bottom:0.75rem">Tenant Margins</div>
     {{if .MarginTable}}

@@ -24,6 +24,17 @@ Two-tier backend lookup: `objectBackends sync.Map` (L1, in-memory hot cache) →
 
 Tables created in migration 048: `object_locations` (routing source of truth), `tiering_policies` (Phase 7.3), `tenant_cost_daily` (Phase 7.4). Also adds `last_accessed` column to `object_head_cache`.
 
+## Tiering Engine (Phase 7.3)
+
+`TieringEngine` (`tiering.go`) runs a background goroutine that periodically scans `object_locations` for objects eligible for tier migration based on `tiering_policies`. Follows the BackendMonitor Start/Stop pattern (ticker + stop chan + ctx.Done select loop).
+
+- `Start(ctx)` — background loop, default 1-hour interval. No-op if DB is nil.
+- `Stop()` — close(stop)
+- `runScan(ctx)` — loads policies from `tiering_policies`, falls back to hardcoded default (90-day→geyser/GLACIER) if no policies exist. Finds candidates via `object_locations` WHERE `last_accessed < NOW() - min_age_days`. Processes up to 100 per policy per tick.
+- `migrateObject(...)` — crash-safe sequence: Get→Put→UpdateDB→UpdateSyncMap→Delete. Never deletes source until routing update succeeds. If put fails, source is untouched (safe).
+
+Integrated into CoreEngine: `tiering` field, created in `NewEngine()`, started via `StartTiering(ctx)` (call after drivers are registered), stopped in `Shutdown()`.
+
 ## Supporting Files
 
 | File | Type | Purpose |
@@ -44,6 +55,7 @@ Tables created in migration 048: `object_locations` (routing source of truth), `
 | `failover.go` | `FailoverManager`, `BackendCircuitBreaker` | Per-backend circuit breaker (5 failures/60s → open, 30s → half-open → probe) + ordered failover execution |
 | `storage_class.go` | `ResolveStorageClass`, `BackendToStorageClass` | S3 storage class ↔ backend name mapping (STANDARD→idrive, GLACIER→geyser, etc.) |
 | `routing.go` | `LocationStore` | PostgreSQL-backed object location CRUD (RecordLocation, LookupBackend, RemoveLocation, CountByBackend, TouchLastAccessed) — nil-DB safe |
+| `tiering.go` | `TieringEngine` | Background age-based object migration between backends (1h interval, crash-safe Get→Put→UpdateDB→Delete) |
 
 ## Per-Bucket Region Routing (Phase 5.14.7)
 
