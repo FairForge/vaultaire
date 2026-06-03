@@ -42,12 +42,13 @@ func HandleBucketSettings(tmpl *template.Template, db *sql.DB, logger *zap.Logge
 		cacheMaxAge := 3600
 		slug := ""
 		region := "us-west-1"
+		tierPref := "auto"
 
 		if db != nil {
 			_ = db.QueryRowContext(r.Context(),
-				`SELECT visibility, cors_origins, cache_max_age_secs, region
+				`SELECT visibility, cors_origins, cache_max_age_secs, region, tier_preference
 				 FROM buckets WHERE tenant_id = $1 AND name = $2`,
-				sd.TenantID, bucketName).Scan(&vis, &corsOrigins, &cacheMaxAge, &region)
+				sd.TenantID, bucketName).Scan(&vis, &corsOrigins, &cacheMaxAge, &region, &tierPref)
 
 			_ = db.QueryRowContext(r.Context(),
 				`SELECT COALESCE(slug, '') FROM tenants WHERE id = $1`,
@@ -70,6 +71,7 @@ func HandleBucketSettings(tmpl *template.Template, db *sql.DB, logger *zap.Logge
 		data["CacheMaxAge"] = cacheMaxAge
 		data["Slug"] = slug
 		data["Region"] = region
+		data["TierPreference"] = tierPref
 		data["RegionDisplay"] = drivers.RegionDisplayName(region)
 		data["IsEURegion"] = drivers.IsEURegion(region)
 
@@ -111,6 +113,14 @@ func HandleUpdateBucketSettings(tmpl *template.Template, db *sql.DB, logger *zap
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			_ = tmpl.ExecuteTemplate(w, "base", data)
 			return
+		}
+
+		tierPref := r.FormValue("tier_preference")
+		if tierPref == "" {
+			tierPref = "auto"
+		}
+		if tierPref != "auto" && tierPref != "performance" && tierPref != "standard" && tierPref != "archive" {
+			tierPref = "auto"
 		}
 
 		corsOrigins := strings.TrimSpace(r.FormValue("cors_origins"))
@@ -155,9 +165,9 @@ func HandleUpdateBucketSettings(tmpl *template.Template, db *sql.DB, logger *zap
 
 		result, err := db.ExecContext(r.Context(),
 			`UPDATE buckets
-			 SET visibility = $1, cors_origins = $2, cache_max_age_secs = $3, updated_at = NOW()
-			 WHERE tenant_id = $4 AND name = $5`,
-			visibility, corsOrigins, cacheMaxAge, sd.TenantID, bucketName)
+			 SET visibility = $1, cors_origins = $2, cache_max_age_secs = $3, tier_preference = $4, updated_at = NOW()
+			 WHERE tenant_id = $5 AND name = $6`,
+			visibility, corsOrigins, cacheMaxAge, tierPref, sd.TenantID, bucketName)
 		if err != nil {
 			logger.Error("update bucket settings", zap.Error(err))
 			middleware.SetFlash(w, "error", "Failed to save settings.")

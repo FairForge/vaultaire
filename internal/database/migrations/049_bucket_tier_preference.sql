@@ -1,0 +1,1 @@
+ALTER TABLE buckets ADD COLUMN IF NOT EXISTS tier_preference TEXT NOT NULL DEFAULT 'auto';

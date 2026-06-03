@@ -31,6 +31,7 @@ func testBucketSettingsTemplate(t *testing.T) *template.Template {
 			`{{if .ArchiveReason}}<span class="reason">{{.ArchiveReason}}</span>{{end}}` +
 			`<span class="cors">{{.CORSOrigins}}</span>` +
 			`<span class="cache">{{.CacheMaxAge}}</span>` +
+			`<span class="tier">{{.TierPreference}}</span>` +
 			`{{if .FlashSuccess}}<span class="flash-ok">{{.FlashSuccess}}</span>{{end}}` +
 			`{{if .FlashError}}<span class="flash-err">{{.FlashError}}</span>{{end}}` +
 			`{{end}}`))
@@ -412,6 +413,131 @@ func TestHandleUpdateBucketSettings_CacheMaxAgeClamped(t *testing.T) {
 	err = db.QueryRow(`SELECT cache_max_age_secs FROM buckets WHERE tenant_id = 'test-dash-s7' AND name = 'clamp-bucket'`).Scan(&cache)
 	require.NoError(t, err)
 	assert.Equal(t, 86400, cache)
+}
+
+func TestHandleBucketSettings_TierPreference(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires database")
+	}
+	db := testDashDB(t)
+	defer func() { _ = db.Close() }()
+	cleanupDashBucketData(t, db)
+	defer cleanupDashBucketData(t, db)
+
+	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key, slug)
+		VALUES ('test-dash-tp1', 'Tier Co', 'tier@test.com', 'VK-tp1', 'SK-tp1', 'tier-co')
+		ON CONFLICT DO NOTHING`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO buckets (tenant_id, name, visibility, tier_preference)
+		VALUES ('test-dash-tp1', 'archive-bucket', 'private', 'archive')
+		ON CONFLICT DO NOTHING`)
+	require.NoError(t, err)
+
+	tmpl := testBucketSettingsTemplate(t)
+	handler := HandleBucketSettings(tmpl, db, zap.NewNop())
+
+	req := injectSessionWithTenant(
+		httptest.NewRequest("GET", "/dashboard/buckets/archive-bucket/settings", nil),
+		"test-dash-tp1")
+	req = injectBucketRoute(req, "archive-bucket")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.Contains(t, body, `<span class="tier">archive</span>`)
+}
+
+func TestHandleUpdateBucketSettings_TierPreference(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires database")
+	}
+	db := testDashDB(t)
+	defer func() { _ = db.Close() }()
+	cleanupDashBucketData(t, db)
+	defer cleanupDashBucketData(t, db)
+
+	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key, slug)
+		VALUES ('test-dash-tp2', 'Update Tier Co', 'utier@test.com', 'VK-tp2', 'SK-tp2', 'utier-co')
+		ON CONFLICT DO NOTHING`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO tenant_quotas (tenant_id, storage_limit_bytes, storage_used_bytes, tier)
+		VALUES ('test-dash-tp2', 1099511627776, 0, 'starter')
+		ON CONFLICT DO NOTHING`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO buckets (tenant_id, name, visibility, tier_preference)
+		VALUES ('test-dash-tp2', 'tier-bucket', 'private', 'auto')
+		ON CONFLICT DO NOTHING`)
+	require.NoError(t, err)
+
+	tmpl := testBucketSettingsTemplate(t)
+	handler := HandleUpdateBucketSettings(tmpl, db, zap.NewNop())
+
+	form := url.Values{
+		"visibility":      {"private"},
+		"tier_preference": {"performance"},
+	}
+	req := injectSessionWithTenant(
+		httptest.NewRequest("POST", "/dashboard/buckets/tier-bucket/settings",
+			strings.NewReader(form.Encode())),
+		"test-dash-tp2")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req = injectBucketRoute(req, "tier-bucket")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusSeeOther, w.Code)
+
+	var pref string
+	err = db.QueryRow(`SELECT tier_preference FROM buckets WHERE tenant_id = 'test-dash-tp2' AND name = 'tier-bucket'`).Scan(&pref)
+	require.NoError(t, err)
+	assert.Equal(t, "performance", pref)
+}
+
+func TestHandleUpdateBucketSettings_InvalidTier(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires database")
+	}
+	db := testDashDB(t)
+	defer func() { _ = db.Close() }()
+	cleanupDashBucketData(t, db)
+	defer cleanupDashBucketData(t, db)
+
+	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key, slug)
+		VALUES ('test-dash-tp3', 'Bad Tier Co', 'btier@test.com', 'VK-tp3', 'SK-tp3', 'btier-co')
+		ON CONFLICT DO NOTHING`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO tenant_quotas (tenant_id, storage_limit_bytes, storage_used_bytes, tier)
+		VALUES ('test-dash-tp3', 1099511627776, 0, 'starter')
+		ON CONFLICT DO NOTHING`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO buckets (tenant_id, name, visibility, tier_preference)
+		VALUES ('test-dash-tp3', 'bad-tier-bucket', 'private', 'archive')
+		ON CONFLICT DO NOTHING`)
+	require.NoError(t, err)
+
+	tmpl := testBucketSettingsTemplate(t)
+	handler := HandleUpdateBucketSettings(tmpl, db, zap.NewNop())
+
+	form := url.Values{
+		"visibility":      {"private"},
+		"tier_preference": {"bogus"},
+	}
+	req := injectSessionWithTenant(
+		httptest.NewRequest("POST", "/dashboard/buckets/bad-tier-bucket/settings",
+			strings.NewReader(form.Encode())),
+		"test-dash-tp3")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req = injectBucketRoute(req, "bad-tier-bucket")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusSeeOther, w.Code)
+
+	var pref string
+	err = db.QueryRow(`SELECT tier_preference FROM buckets WHERE tenant_id = 'test-dash-tp3' AND name = 'bad-tier-bucket'`).Scan(&pref)
+	require.NoError(t, err)
+	assert.Equal(t, "auto", pref, "invalid tier should fall back to auto")
 }
 
 func TestHandleUpdateBucketSettings_BucketNotFound(t *testing.T) {

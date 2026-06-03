@@ -38,6 +38,7 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 | 046 | Admin notifications: `admin_notifications` table (type, message, tenant_id, read_at) — admin notification system with partial index on unread |
 | 047 | Abuse reports: `abuse_reports` table (reporter, tenant, bucket, key, type, description, status) — public abuse reporting + admin moderation queue |
 | 048 | Object location tracking: `object_locations` (durable backend routing), `tiering_policies` (age-based tiering config), `tenant_cost_daily` (per-tenant cost rollup); `last_accessed` column on `object_head_cache` |
+| 049 | Bucket tier preference: `tier_preference TEXT NOT NULL DEFAULT 'auto'` on `buckets` — pins a bucket to a specific storage tier (auto/performance/standard/archive) |
 
 ## Key Tables
 
@@ -48,7 +49,7 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 - **dashboard_sessions** — `id (VARCHAR 64)`, `user_id → users`, `tenant_id → tenants`, `email`, `role`, `ip_address`, `user_agent`, `created_at`, `last_active_at`, `expires_at`
 - **subscriptions** — Stripe subscription state tracking
 - **bandwidth_usage_daily** — per-tenant daily ingress/egress/requests (unique on tenant_id + date)
-- **buckets** — `(tenant_id, name) PK`, `visibility` (private/public-read), `cors_origins`, `cache_max_age_secs`, `bandwidth_budget_bytes`, `versioning_status`, `object_lock_enabled`, `default_retention_mode`, `default_retention_days`, `mfa_delete_enabled`, `logging_enabled`, `logging_target_bucket`, `logging_prefix`, `inventory_enabled`, `inventory_schedule`, `inventory_target_bucket`, `inventory_prefix`, `inventory_format`, `cdn_force_download`
+- **buckets** — `(tenant_id, name) PK`, `visibility` (private/public-read), `cors_origins`, `cache_max_age_secs`, `bandwidth_budget_bytes`, `versioning_status`, `object_lock_enabled`, `default_retention_mode`, `default_retention_days`, `mfa_delete_enabled`, `logging_enabled`, `logging_target_bucket`, `logging_prefix`, `inventory_enabled`, `inventory_schedule`, `inventory_target_bucket`, `inventory_prefix`, `inventory_format`, `cdn_force_download`, `tier_preference` (auto/performance/standard/archive, default auto)
 - **object_head_cache** — HEAD request cache (size, ETag, content-type, backend_name stored on PUT); `tags` JSONB holds per-object S3 tags (separate from `metadata`); `content_disposition` TEXT holds the stored Content-Disposition response header
 - **user_mfa** — `user_id (PK)`, `secret`, `enabled`, `backup_codes` (JSON), `created_at`, `updated_at` — TOTP 2FA settings
 - **mfa_audit_log** — `id (SERIAL)`, `user_id`, `action`, `success`, `ip_address`, `user_agent`, `created_at`

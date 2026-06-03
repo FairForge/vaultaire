@@ -31,6 +31,7 @@ func (s *Server) registerManagementRoutes() {
 		r.Delete("/buckets/{name}", s.handleMgmtDeleteBucket)
 
 		r.Get("/buckets/{name}/objects", s.handleMgmtListObjects)
+		r.Put("/buckets/{name}/tier", s.handleMgmtSetBucketTier)
 
 		r.Get("/keys", s.handleMgmtListKeys)
 		r.Post("/keys", s.handleMgmtCreateKey)
@@ -713,6 +714,68 @@ func (s *Server) handleMgmtCancelDeletion(w http.ResponseWriter, r *http.Request
 		"cancelled":  true,
 		"message":    "Account deletion has been cancelled.",
 		"request_id": getRequestID(w),
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// --- Bucket Tier ---
+
+var validTierPreferences = map[string]bool{
+	"auto":        true,
+	"performance": true,
+	"standard":    true,
+	"archive":     true,
+}
+
+func (s *Server) handleMgmtSetBucketTier(w http.ResponseWriter, r *http.Request) {
+	tenantID, _ := r.Context().Value(tenantIDKey).(string)
+	if tenantID == "" {
+		writeManagementError(w, ErrTypeAuthentication, "missing_tenant", "tenant not found in token", "")
+		return
+	}
+
+	name := chi.URLParam(r, "name")
+
+	if s.db == nil {
+		writeManagementError(w, ErrTypeAPI, "no_database", "database unavailable", "")
+		return
+	}
+
+	var req struct {
+		Tier string `json:"tier"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeManagementError(w, ErrTypeInvalidRequest, "invalid_json", "request body must be valid JSON", "")
+		return
+	}
+
+	if !validTierPreferences[req.Tier] {
+		writeManagementError(w, ErrTypeInvalidRequest, "invalid_tier",
+			"tier must be one of: auto, performance, standard, archive", "tier")
+		return
+	}
+
+	result, err := s.db.ExecContext(r.Context(),
+		`UPDATE buckets SET tier_preference = $1, updated_at = NOW()
+		 WHERE tenant_id = $2 AND name = $3`,
+		req.Tier, tenantID, name)
+	if err != nil {
+		s.logger.Error("set bucket tier", zap.Error(err))
+		writeManagementError(w, ErrTypeAPI, "db_error", "failed to update tier preference", "")
+		return
+	}
+
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		writeManagementError(w, ErrTypeNotFound, "bucket_not_found", "bucket not found", "name")
+		return
+	}
+
+	resp := map[string]interface{}{
+		"object":          "bucket",
+		"name":            name,
+		"tier_preference": req.Tier,
+		"request_id":      getRequestID(w),
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

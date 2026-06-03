@@ -588,6 +588,9 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	}
 
 	storageClass := r.Header.Get("x-amz-storage-class")
+	if storageClass == "" {
+		storageClass = bucketTierStorageClass(r.Context(), a.db, t.ID, bucket)
+	}
 	putOpts := []engine.PutOption{engine.WithContentLength(size)}
 	if storageClass != "" {
 		putOpts = append(putOpts, engine.WithStorageClass(storageClass))
@@ -872,6 +875,26 @@ func bucketRegionDriver(ctx context.Context, db *sql.DB, eng engine.Engine, tena
 		return driverName
 	}
 	return ""
+}
+
+var tierPreferenceToStorageClass = map[string]string{
+	"performance": "STANDARD",
+	"standard":    "STANDARD",
+	"archive":     "GLACIER",
+}
+
+func bucketTierStorageClass(ctx context.Context, db *sql.DB, tenantID, bucket string) string {
+	if db == nil {
+		return ""
+	}
+	var pref string
+	err := db.QueryRowContext(ctx,
+		"SELECT tier_preference FROM buckets WHERE tenant_id = $1 AND name = $2",
+		tenantID, bucket).Scan(&pref)
+	if err != nil || pref == "auto" || pref == "" {
+		return ""
+	}
+	return tierPreferenceToStorageClass[pref]
 }
 
 func isBucketSSEEnabled(ctx context.Context, db *sql.DB, tenantID, bucket string) bool {

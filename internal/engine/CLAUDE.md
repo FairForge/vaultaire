@@ -30,7 +30,7 @@ Tables created in migration 048: `object_locations` (routing source of truth), `
 
 - `Start(ctx)` — background loop, default 1-hour interval. No-op if DB is nil.
 - `Stop()` — close(stop)
-- `runScan(ctx)` — loads policies from `tiering_policies`, falls back to hardcoded default (90-day→geyser/GLACIER) if no policies exist. Finds candidates via `object_locations` WHERE `last_accessed < NOW() - min_age_days`. Processes up to 100 per policy per tick.
+- `runScan(ctx)` — loads policies from `tiering_policies`, falls back to hardcoded default (90-day→geyser/GLACIER) if no policies exist. Finds candidates via `object_locations` WHERE `last_accessed < NOW() - min_age_days`. Excludes objects in buckets with a non-auto `tier_preference` (`AND NOT EXISTS (SELECT 1 FROM buckets WHERE ... tier_preference != 'auto')`) so pinned buckets are never age-migrated. Processes up to 100 per policy per tick.
 - `migrateObject(...)` — crash-safe sequence: Get→Put→UpdateDB→UpdateSyncMap→Delete. Never deletes source until routing update succeeds. If put fails, source is untouched (safe).
 
 Integrated into CoreEngine: `tiering` field, created in `NewEngine()`, started via `StartTiering(ctx)` (call after drivers are registered), stopped in `Shutdown()`.
@@ -56,6 +56,10 @@ Integrated into CoreEngine: `tiering` field, created in `NewEngine()`, started v
 | `storage_class.go` | `ResolveStorageClass`, `BackendToStorageClass` | S3 storage class ↔ backend name mapping (STANDARD→idrive, GLACIER→geyser, etc.) |
 | `routing.go` | `LocationStore` | PostgreSQL-backed object location CRUD (RecordLocation, LookupBackend, RemoveLocation, CountByBackend, TouchLastAccessed) — nil-DB safe |
 | `tiering.go` | `TieringEngine` | Background age-based object migration between backends (1h interval, crash-safe Get→Put→UpdateDB→Delete) |
+
+## Bucket Tier Preference (Phase 7.5)
+
+`bucketTierStorageClass()` in `s3_engine_adapter.go` queries `tier_preference` from `buckets` and maps it to an S3 storage class: performance→STANDARD, standard→STANDARD, archive→GLACIER. Used in HandlePut when no explicit `x-amz-storage-class` header is present — does not override explicit headers. `auto` returns empty string (normal routing applies).
 
 ## Per-Bucket Region Routing (Phase 5.14.7)
 

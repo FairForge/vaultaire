@@ -29,10 +29,10 @@ Shared helpers in `context.go`: `sessionData(sd, page)` builds the base template
 ## Bucket Settings (`bucket_settings.go`)
 
 Two handlers:
-- `HandleBucketSettings(tmpl, db, logger)` — GET renders bucket settings page: visibility toggle (private/public-read), CDN URL card with tabbed code examples, cache TTL, CORS origins, **region** (read-only card showing region + display name + EU badge). Checks `CanEnablePublicRead(tier)` for archive-tier restriction. Region data: `Region`, `RegionDisplay`, `IsEURegion`.
-- `HandleUpdateBucketSettings(tmpl, db, logger)` — POST updates visibility, CORS origins, and cache_max_age_secs in `buckets` table. Validates visibility enum, clamps cache to 0–86400, enforces archive-tier restriction via `auth.CanEnablePublicRead()`. Uses flash messages for feedback. Region is NOT updatable.
+- `HandleBucketSettings(tmpl, db, logger)` — GET renders bucket settings page: visibility toggle (private/public-read), CDN URL card with tabbed code examples, cache TTL, CORS origins, **region** (read-only card showing region + display name + EU badge), **storage tier** preference (auto/performance/standard/archive radio buttons). Checks `CanEnablePublicRead(tier)` for archive-tier restriction. Region data: `Region`, `RegionDisplay`, `IsEURegion`. Reads `tier_preference` from `buckets` and passes `TierPreference` to template.
+- `HandleUpdateBucketSettings(tmpl, db, logger)` — POST updates visibility, CORS origins, cache_max_age_secs, and `tier_preference` in `buckets` table. Validates visibility enum, clamps cache to 0–86400, enforces archive-tier restriction via `auth.CanEnablePublicRead()`. Validates `tier_preference` is one of auto/performance/standard/archive (invalid values fall back to auto). Uses flash messages for feedback. Region is NOT updatable.
 
-Template: `templates/customer/bucket_settings.html`. Routes: `GET/POST /dashboard/buckets/{name}/settings`.
+Template: `templates/customer/bucket_settings.html` — includes a "Storage Tier" card with 4 radio buttons (Auto, Performance, Standard, Archive) between Region and Visibility cards. Routes: `GET/POST /dashboard/buckets/{name}/settings`.
 
 ## API Key Management (`apikeys.go`)
 
