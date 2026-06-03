@@ -101,6 +101,10 @@ Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`,
 | `/admin/support` | GET | session + admin | Customer support search (email, tenant ID, access key, Stripe ID) |
 | `/admin/support/{id}` | GET | session + admin | Customer detail: info, timeline, S3 errors, notes, quick actions |
 | `/admin/support/{id}/notes` | POST | session + admin | Add internal admin note on a customer |
+| `/admin/notifications` | GET | session + admin | Notification list with unread badge and mark-read actions |
+| `/admin/notifications/read-all` | POST | session + admin | Mark all notifications as read (flash + redirect) |
+| `/admin/notifications/{id}/read` | POST | session + admin | Mark single notification read (htmx fragment response) |
+| `/admin/notifications/count` | GET | session + admin | Unread count badge fragment (htmx, loaded on every admin page) |
 | `/admin/*` | GET | session + admin role | Admin panel |
 
 ## Auth Flow

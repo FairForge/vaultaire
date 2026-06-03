@@ -35,6 +35,7 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 | 043 | Metered billing: `metered_usage_reports` table (daily Stripe meter reports + idempotency guard); `spending_cap_cents BIGINT` (default 0) on `tenant_quotas` |
 | 044 | Waitlist: `waitlist_signups` table (email UNIQUE, source, ip, user_agent) — pre-launch landing-page email capture |
 | 045 | Admin notes: `admin_notes` table (tenant_id, admin_user_id → users, note) — internal support notes on customer accounts |
+| 046 | Admin notifications: `admin_notifications` table (type, message, tenant_id, read_at) — admin notification system with partial index on unread |
 
 ## Key Tables
 
@@ -63,6 +64,7 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 - **s3_access_log** — `id (BIGSERIAL PK)`, `tenant_id`, `bucket`, `object_key`, `operation`, `status_code`, `bytes_sent`, `bytes_received`, `source_ip`, `user_agent`, `request_id`, `error_code`, `logged_at` — buffered S3 access events, delivered as log objects to target buckets
 - **metered_usage_reports** — `id (BIGSERIAL PK)`, `tenant_id`, `meter`, `period_date`, `value`, `stripe_event_id`, `reported_at`, `UNIQUE(tenant_id, meter, period_date)` — daily Stripe Billing Meter reports; the unique constraint is the no-double-billing guard and also gates once-per-month spending-cap alerts (synthetic `alert:80`/`alert:95` meters)
 - **admin_notes** — `id (BIGSERIAL PK)`, `tenant_id`, `admin_user_id → users`, `note`, `created_at` — internal support notes on customer accounts, indexed by (tenant_id, created_at DESC)
+- **admin_notifications** — `id (BIGSERIAL PK)`, `type`, `message`, `tenant_id` (nullable), `read_at` (nullable), `created_at` — admin notification system; partial index on `(created_at DESC) WHERE read_at IS NULL` for fast unread count
 
 ## Connection
 
