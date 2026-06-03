@@ -10,12 +10,49 @@ import (
 	"testing"
 
 	"github.com/FairForge/vaultaire/internal/tenant"
+	"github.com/FairForge/vaultaire/internal/usage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
 	_ "github.com/lib/pq"
 )
+
+// TestCreateBucket_IdempotentReCreate_AtFreeTierLimit is the regression test for
+// the load-test finding: a free-tier tenant AT its 1-bucket limit must still be
+// able to re-create a bucket it already owns (S3 BucketAlreadyOwnedByYou), while
+// a genuinely new bucket beyond the limit is still rejected.
+func TestCreateBucket_IdempotentReCreate_AtFreeTierLimit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires database")
+	}
+	db := testS3DB(t)
+	defer func() { _ = db.Close() }()
+	cleanupS3BucketData(t, db)
+	defer cleanupS3BucketData(t, db)
+
+	const tid = "test-s3-idem"
+	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key) VALUES ($1,'Idem Co','idem@test.com','VK-idem','SK-idem') ON CONFLICT DO NOTHING`, tid)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO tenant_quotas (tenant_id, tier, storage_limit_bytes) VALUES ($1,'free',5368709120) ON CONFLICT (tenant_id) DO UPDATE SET tier='free'`, tid)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO buckets (tenant_id, name, visibility) VALUES ($1,'owned-bucket','private') ON CONFLICT DO NOTHING`, tid)
+	require.NoError(t, err)
+
+	s := s3ServerWithDB(t, db)
+	s.quotaManager = usage.NewQuotaManager(db)
+	defer func() { _ = os.RemoveAll("/tmp/vaultaire/" + tid) }()
+
+	// Re-creating a bucket you already own must succeed even at the free-tier limit.
+	w := httptest.NewRecorder()
+	s.CreateBucket(w, withTenantCtx(httptest.NewRequest("PUT", "/owned-bucket", nil), tid))
+	assert.Equal(t, http.StatusOK, w.Code, "re-creating an owned bucket at the limit must succeed, not 403")
+
+	// A genuinely new bucket beyond the limit must still be rejected.
+	w2 := httptest.NewRecorder()
+	s.CreateBucket(w2, withTenantCtx(httptest.NewRequest("PUT", "/second-bucket", nil), tid))
+	assert.Equal(t, http.StatusForbidden, w2.Code, "a new bucket beyond the free-tier limit must still 403")
+}
 
 func testS3DB(t *testing.T) *sql.DB {
 	t.Helper()

@@ -130,23 +130,35 @@ func (s *Server) CreateBucket(w http.ResponseWriter, r *http.Request) {
 		zap.String("tenant", tenantID))
 
 	if s.db != nil && tenantID != "default" {
-		var count int
+		// Idempotent re-creation: if the tenant already owns this bucket, skip
+		// the quota gate entirely. CreateBucket on a bucket you own is a no-op
+		// (BucketAlreadyOwnedByYou) in S3 — it must not 403 just because you're
+		// at the bucket limit, or `aws s3 mb`/terraform/rclone ensure-bucket
+		// calls break once a free-tier tenant has their one bucket.
+		var alreadyOwned bool
 		_ = s.db.QueryRowContext(ctx,
-			"SELECT COUNT(*) FROM buckets WHERE tenant_id = $1", tenantID).Scan(&count)
+			"SELECT EXISTS(SELECT 1 FROM buckets WHERE tenant_id = $1 AND name = $2)",
+			tenantID, bucket).Scan(&alreadyOwned)
 
-		const maxBucketsPerTenant = 1000
-		if count >= maxBucketsPerTenant {
-			WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
-				WithSuggestion(fmt.Sprintf("Maximum %d buckets per account", maxBucketsPerTenant)))
-			return
-		}
+		if !alreadyOwned {
+			var count int
+			_ = s.db.QueryRowContext(ctx,
+				"SELECT COUNT(*) FROM buckets WHERE tenant_id = $1", tenantID).Scan(&count)
 
-		if s.quotaManager != nil {
-			tier, _ := s.quotaManager.GetTier(ctx, tenantID)
-			if usage.IsFreeTier(tier) && count >= usage.FreeTierLimits.MaxBuckets {
+			const maxBucketsPerTenant = 1000
+			if count >= maxBucketsPerTenant {
 				WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
-					WithSuggestion(fmt.Sprintf("Free tier allows %d bucket. Upgrade at https://stored.ge/dashboard/billing", usage.FreeTierLimits.MaxBuckets)))
+					WithSuggestion(fmt.Sprintf("Maximum %d buckets per account", maxBucketsPerTenant)))
 				return
+			}
+
+			if s.quotaManager != nil {
+				tier, _ := s.quotaManager.GetTier(ctx, tenantID)
+				if usage.IsFreeTier(tier) && count >= usage.FreeTierLimits.MaxBuckets {
+					WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
+						WithSuggestion(fmt.Sprintf("Free tier allows %d bucket. Upgrade at https://stored.ge/dashboard/billing", usage.FreeTierLimits.MaxBuckets)))
+					return
+				}
 			}
 		}
 	}

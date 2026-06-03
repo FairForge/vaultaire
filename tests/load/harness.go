@@ -93,9 +93,13 @@ func newUploader(client *s3.Client) *manager.Uploader {
 	})
 }
 
-// patternReader produces size bytes from a repeating 4KB pattern.
+// patternReader produces size bytes from a repeating 4KB pattern. It implements
+// io.ReadSeeker (zero-alloc) because the AWS SDK must seek the body to compute
+// the SigV4 payload hash and to retry — a plain io.Reader fails PUT with
+// "request stream is not seekable".
 type patternReader struct {
 	pattern []byte
+	size    int64
 	remain  int64
 	pos     int
 }
@@ -105,7 +109,30 @@ func newPatternReader(size int64) *patternReader {
 	for i := range pat {
 		pat[i] = byte(i % 251) // prime avoids alignment artifacts
 	}
-	return &patternReader{pattern: pat, remain: size}
+	return &patternReader{pattern: pat, size: size, remain: size}
+}
+
+func (r *patternReader) Seek(offset int64, whence int) (int64, error) {
+	var abs int64
+	switch whence {
+	case io.SeekStart:
+		abs = offset
+	case io.SeekCurrent:
+		abs = (r.size - r.remain) + offset
+	case io.SeekEnd:
+		abs = r.size + offset
+	default:
+		return 0, fmt.Errorf("patternReader.Seek: invalid whence %d", whence)
+	}
+	if abs < 0 {
+		return 0, fmt.Errorf("patternReader.Seek: negative position %d", abs)
+	}
+	if abs > r.size {
+		abs = r.size
+	}
+	r.remain = r.size - abs
+	r.pos = int(abs % int64(len(r.pattern)))
+	return abs, nil
 }
 
 func (r *patternReader) Read(p []byte) (int, error) {
