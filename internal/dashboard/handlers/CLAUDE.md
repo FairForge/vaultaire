@@ -214,6 +214,28 @@ Templates: `templates/admin/support.html` (search page),
 
 Migration: `045_admin_notes.sql` — `admin_notes` table (tenant_id, admin_user_id → users, note, created_at).
 
+## Admin Notifications (`admin_notifications.go`)
+
+Five functions for the admin notification system (Phase 3.10):
+- `HandleAdminNotifications(tmpl, db, logger)` — GET `/admin/notifications`: lists last 100
+  notifications (newest first), with unread count badge and "Mark all as read" button. Each row
+  shows a color-coded type badge, message, optional tenant link, relative time, and mark-read button.
+- `HandleMarkRead(db, logger)` — POST `/admin/notifications/{id}/read`: marks a single
+  notification as read and returns an htmx fragment (the updated row with dimmed "read" styling,
+  `hx-swap="outerHTML"`).
+- `HandleMarkAllRead(db, logger)` — POST `/admin/notifications/read-all`: marks all unread
+  notifications as read, flash message + redirect.
+- `HandleNotifCount(db, logger)` — GET `/admin/notifications/count`: returns a small HTML
+  fragment (`<span class="notif-badge">N</span>`) for the sidebar badge. Called via
+  `hx-trigger="load"` on every admin page.
+- `CreateNotification(ctx, db, notifType, message, tenantID)` — exported helper for other code
+  to insert notifications. Nil-DB safe. Not wired into event sources yet (Phase 3.10.1).
+
+Types: `notificationRow`. Helper: `notifBadgeClass` maps type to badge-success/danger/warning/info/default,
+`renderNotifRow` builds the htmx fragment HTML.
+
+Template: `templates/admin/notifications.html`. Migration: `046_admin_notifications.sql`.
+
 ## Legacy Handlers
 
 Files like `dashboard.go` etc. are stubs from before Phase 0 with inline terminal-style templates. They are NOT wired into the router. Remaining phases will rewrite them.

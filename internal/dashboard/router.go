@@ -274,6 +274,10 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		"templates/layouts/admin.html",
 		"templates/admin/support_detail.html",
 	))
+	notificationsTmpl := template.Must(template.ParseFS(Templates,
+		"templates/layouts/admin.html",
+		"templates/admin/notifications.html",
+	))
 
 	r.Route("/admin", func(ar chi.Router) {
 		ar.Use(middleware.Recovery(deps.Logger))
@@ -299,6 +303,10 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		ar.Get("/waitlist/export", handlers.HandleAdminWaitlistExport(deps.DB, deps.Logger))
 		ar.Get("/revenue", handlers.HandleAdminRevenue(revenueTmpl, deps.DB, deps.Logger))
 		ar.Get("/costs", handlers.HandleAdminCosts(costsTmpl, deps.DB, deps.Logger))
+		ar.Get("/notifications", handlers.HandleAdminNotifications(notificationsTmpl, deps.DB, deps.Logger))
+		ar.Post("/notifications/read-all", handlers.HandleMarkAllRead(deps.DB, deps.Logger))
+		ar.Post("/notifications/{id}/read", handlers.HandleMarkRead(deps.DB, deps.Logger))
+		ar.Get("/notifications/count", handlers.HandleNotifCount(deps.DB, deps.Logger))
 		ar.Get("/support", handlers.HandleAdminSupport(supportTmpl, deps.DB, deps.Logger))
 		ar.Get("/support/{id}", handlers.HandleCustomerDetail(customerDetailTmpl, deps.DB, deps.Logger))
 		ar.Post("/support/{id}/notes", handlers.HandleAddNote(deps.DB, deps.Logger))

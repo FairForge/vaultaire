@@ -1,0 +1,39 @@
+{{define "title"}}Notifications — stored.ge admin{{end}}
+{{define "content"}}
+<div class="dashboard-header">
+    <h1>Notifications{{if .UnreadCount}} <span class="notif-badge" style="font-size:0.9rem;padding:0.15rem 0.5rem">{{.UnreadCount}}</span>{{end}}</h1>
+    {{if .UnreadCount}}
+    <form action="/admin/notifications/read-all" method="POST" style="margin:0">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <button type="submit" class="btn btn-sm">Mark all as read</button>
+    </form>
+    {{end}}
+</div>
+
+{{if .FlashSuccess}}<div class="alert alert-success">{{.FlashSuccess}}</div>{{end}}
+{{if .FlashError}}<div class="alert alert-error">{{.FlashError}}</div>{{end}}
+
+<div class="card">
+    {{if .Notifications}}
+    {{range .Notifications}}
+    <div class="notif-row{{if .IsRead}} notif-row--read{{end}}" id="notif-{{.ID}}">
+        <div style="display:flex;justify-content:space-between;align-items:start">
+            <div>
+                <span class="badge badge-{{.BadgeClass}}">{{.Type}}</span>
+                <span style="margin-left:0.5rem">{{.Message}}</span>
+                {{if .TenantID}} <a href="/admin/support/{{.TenantID}}" style="font-size:0.85rem;color:#60a5fa">{{.TenantID}}</a>{{end}}
+            </div>
+            <div style="display:flex;align-items:center;gap:0.75rem;white-space:nowrap">
+                <span style="font-size:0.85rem;color:#94a3b8">{{.RelTime}}</span>
+                {{if not .IsRead}}
+                <button hx-post="/admin/notifications/{{.ID}}/read" hx-target="#notif-{{.ID}}" hx-swap="outerHTML" class="btn btn-sm">Mark read</button>
+                {{end}}
+            </div>
+        </div>
+    </div>
+    {{end}}
+    {{else}}
+    <p class="text-muted">No notifications yet.</p>
+    {{end}}
+</div>
+{{end}}
