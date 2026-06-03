@@ -266,6 +266,14 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		"templates/layouts/admin.html",
 		"templates/admin/costs.html",
 	))
+	supportTmpl := template.Must(template.ParseFS(Templates,
+		"templates/layouts/admin.html",
+		"templates/admin/support.html",
+	))
+	customerDetailTmpl := template.Must(template.ParseFS(Templates,
+		"templates/layouts/admin.html",
+		"templates/admin/support_detail.html",
+	))
 
 	r.Route("/admin", func(ar chi.Router) {
 		ar.Use(middleware.Recovery(deps.Logger))
@@ -273,6 +281,7 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		ar.Use(dashauth.RequireAdmin(deps.Sessions))
 		ar.Use(middleware.CSRF)
 		ar.Use(middleware.RequireAdminMFA(deps.Auth))
+		ar.Use(middleware.Flash)
 		ar.NotFound(handlers.HandleNotFound(deps.Logger))
 		ar.Get("/", handlers.HandleAdminOverview(adminTmpl, deps.DB, deps.Logger))
 		ar.Get("/tenants", handlers.HandleTenantList(tenantListTmpl, deps.DB, deps.Logger))
@@ -290,6 +299,9 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		ar.Get("/waitlist/export", handlers.HandleAdminWaitlistExport(deps.DB, deps.Logger))
 		ar.Get("/revenue", handlers.HandleAdminRevenue(revenueTmpl, deps.DB, deps.Logger))
 		ar.Get("/costs", handlers.HandleAdminCosts(costsTmpl, deps.DB, deps.Logger))
+		ar.Get("/support", handlers.HandleAdminSupport(supportTmpl, deps.DB, deps.Logger))
+		ar.Get("/support/{id}", handlers.HandleCustomerDetail(customerDetailTmpl, deps.DB, deps.Logger))
+		ar.Post("/support/{id}/notes", handlers.HandleAddNote(deps.DB, deps.Logger))
 		if deps.Engine != nil {
 			ar.Get("/backends", handlers.HandleAdminBackends(backendsTmpl, deps.Engine, deps.HealthChecker, deps.Logger))
 			ar.Post("/backends/{name}/primary", handlers.HandleSetPrimary(deps.Engine, deps.Logger))
