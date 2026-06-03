@@ -6,6 +6,8 @@ import (
 	"crypto/rand"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/FairForge/vaultaire/internal/crypto"
@@ -13,22 +15,45 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 
 	_ "github.com/lib/pq"
 )
 
 func setupChunkingFixture(t *testing.T) *adapterTestFixture {
 	t.Helper()
-	f := setupAdapterFixture(t)
 
+	// Chunking requires UUID tenant IDs (GCI uses uuid.UUID).
+	// Override the text-based tenant ID from setupAdapterFixture with a real UUID.
+	f := setupAdapterFixture(t)
+	tenantUUID := uuid.New()
+	f.tenantID = tenantUUID.String()
+	f.tenant = &tenant.Tenant{
+		ID:        tenantUUID.String(),
+		Namespace: "tenant/" + tenantUUID.String() + "/",
+	}
+
+	// Re-create tenant row with UUID ID
+	_, err := f.db.Exec(`
+		INSERT INTO tenants (id, name, email, access_key, secret_key)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (id) DO NOTHING
+	`, f.tenantID, "Chunking Test", "chunking@test.local", "AK-"+f.tenantID[:8], "SK-"+f.tenantID[:8])
+	require.NoError(t, err)
+
+	// Create the namespaced container directory
+	container := f.tenant.NamespaceContainer("test-bucket")
+	require.NoError(t, os.MkdirAll(filepath.Join(f.tempDir, container), 0755))
+
+	f.adapter = NewS3ToEngine(f.eng, f.db, zap.NewNop())
 	f.adapter.gci = crypto.NewGlobalContentIndex(f.db)
-	// Use a low threshold (1 KB) so tests don't need 64 MB of data.
 	f.adapter.chunkingThreshold = 1024
 
 	t.Cleanup(func() {
-		_, _ = f.db.Exec("DELETE FROM tenant_chunk_refs WHERE tenant_id = $1::text::uuid", f.tenantID)
-		_, _ = f.db.Exec("DELETE FROM object_metadata WHERE tenant_id = $1::text::uuid", f.tenantID)
-		_, _ = f.db.Exec("DELETE FROM global_content_index WHERE plaintext_hash LIKE 'test_%' OR plaintext_hash IN (SELECT plaintext_hash FROM tenant_chunk_refs WHERE tenant_id = $1::text::uuid)", f.tenantID)
+		_, _ = f.db.Exec("DELETE FROM tenant_chunk_refs WHERE tenant_id = $1", tenantUUID)
+		_, _ = f.db.Exec("DELETE FROM object_metadata WHERE tenant_id = $1", tenantUUID)
+		_, _ = f.db.Exec("DELETE FROM object_head_cache WHERE tenant_id = $1", f.tenantID)
+		_, _ = f.db.Exec("DELETE FROM tenants WHERE id = $1", f.tenantID)
 	})
 
 	return f
