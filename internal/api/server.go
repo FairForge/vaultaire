@@ -74,6 +74,7 @@ type Server struct {
 	mfaService       *auth.MFAService
 	mfaPendingStore  *dashboard.MFAPendingStore
 	sseService       *crypto.SSEService
+	gci              *crypto.GlobalContentIndex
 	cdnRateLimiter   *RateLimiter
 	cdnAnalytics     *CDNAnalyticsTracker
 	accessLogTracker *S3AccessLogTracker
@@ -181,6 +182,11 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 			s.sseService = sseSvc
 			logger.Info("SSE-S3 encryption service initialized (ML-KEM-768+AES-256-GCM)")
 		}
+	}
+
+	if s.db != nil {
+		s.gci = crypto.NewGlobalContentIndex(s.db)
+		logger.Info("global content index initialized (chunking + dedup)")
 	}
 
 	s.auditLogger = auth.NewAuditLogger()

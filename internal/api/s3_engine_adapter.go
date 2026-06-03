@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"strconv"
@@ -18,16 +19,19 @@ import (
 	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/tenant"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
 // S3ToEngine adapts S3 requests to engine operations.
 type S3ToEngine struct {
-	engine     engine.Engine
-	db         *sql.DB
-	logger     *zap.Logger
-	notifySvc  *NotificationDispatcher
-	sseService *crypto.SSEService
+	engine            engine.Engine
+	db                *sql.DB
+	logger            *zap.Logger
+	notifySvc         *NotificationDispatcher
+	sseService        *crypto.SSEService
+	gci               *crypto.GlobalContentIndex
+	chunkingThreshold int64 // minimum object size for chunking (default 64 MB)
 }
 
 // NewS3ToEngine creates a new adapter
@@ -587,6 +591,25 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		}
 	}
 
+	// Chunked upload path: objects above the threshold that are NOT encrypted
+	// are split into content-defined chunks and deduplicated via the GCI.
+	// Chunked objects skip the normal engine.Put — each chunk is stored
+	// individually. GET reassembly is Phase 8.5.
+	chunkThreshold := a.chunkingThreshold
+	if chunkThreshold <= 0 {
+		chunkThreshold = 64 * 1024 * 1024 // 64 MB default
+	}
+	if a.gci != nil && metadataSize > chunkThreshold && encryptionAlgorithm == "" {
+		if tenantUUID, parseErr := uuid.Parse(t.ID); parseErr == nil {
+			chunkErr := a.handleChunkedPut(r, w, t, tenantUUID, bucket, artifact, container, metadataSize, hashingBody, hasher)
+			if chunkErr == nil {
+				return
+			}
+			a.logger.Warn("chunked upload failed, falling through to normal path",
+				zap.Error(chunkErr))
+		}
+	}
+
 	storageClass := r.Header.Get("x-amz-storage-class")
 	if storageClass == "" {
 		storageClass = bucketTierStorageClass(r.Context(), a.db, t.ID, bucket)
@@ -659,8 +682,8 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	if a.db != nil {
 		_, dbErr := a.db.ExecContext(r.Context(), `
 			INSERT INTO object_head_cache
-				(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+				(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, is_chunked, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, FALSE, NOW())
 			ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
 				size_bytes            = EXCLUDED.size_bytes,
 				etag                  = EXCLUDED.etag,
@@ -669,6 +692,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 				metadata              = EXCLUDED.metadata,
 				encryption_algorithm  = EXCLUDED.encryption_algorithm,
 				content_disposition   = EXCLUDED.content_disposition,
+				is_chunked            = EXCLUDED.is_chunked,
 				updated_at            = NOW()
 		`, t.ID, bucket, artifact, metadataSize, etag, contentType, backendName, metaJSON, encryptionAlgorithm, contentDisposition)
 		if dbErr != nil {
@@ -734,6 +758,193 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	emitEvent(r.Context(), a.db, a.logger, "object.created", t.ID, map[string]interface{}{
 		"bucket": bucket, "key": object, "size": size, "etag": etag,
 	})
+}
+
+// handleChunkedPut splits a large object into content-defined chunks,
+// deduplicates via the Global Content Index, and stores each unique chunk
+// individually. Returns nil on success (response already written) or an
+// error to signal fallback to the normal path.
+func (a *S3ToEngine) handleChunkedPut(
+	r *http.Request, w http.ResponseWriter,
+	t *tenant.Tenant, tenantUUID uuid.UUID,
+	bucket, artifact, container string,
+	metadataSize int64,
+	hashingBody io.Reader,
+	hasher hash.Hash,
+) error {
+	ctx := r.Context()
+
+	plaintext, err := io.ReadAll(hashingBody)
+	if err != nil {
+		return fmt.Errorf("read body for chunking: %w", err)
+	}
+
+	chunker, err := crypto.DefaultFastCDCChunker()
+	if err != nil {
+		return fmt.Errorf("create chunker: %w", err)
+	}
+
+	chunks, err := chunker.ChunkBytes(plaintext)
+	if err != nil {
+		return fmt.Errorf("chunk bytes: %w", err)
+	}
+
+	hashes := make([]string, len(chunks))
+	for i, c := range chunks {
+		hashes[i] = c.Hash
+	}
+
+	lookups, err := a.gci.LookupChunks(ctx, hashes)
+	if err != nil {
+		return fmt.Errorf("lookup chunks: %w", err)
+	}
+
+	var physicalSize int64
+	backendName := "chunked"
+
+	for _, chunk := range chunks {
+		result := lookups[chunk.Hash]
+		storageKey := "_chunks/" + chunk.Hash
+
+		if result.IsNewChunk {
+			chunkOpts := []engine.PutOption{engine.WithContentLength(int64(chunk.Size))}
+			bn, putErr := a.engine.Put(ctx, container, storageKey, bytes.NewReader(chunk.Data), chunkOpts...)
+			if putErr != nil {
+				return fmt.Errorf("store chunk %s: %w", chunk.Hash[:16], putErr)
+			}
+			if backendName == "chunked" {
+				backendName = bn
+			}
+
+			if insertErr := a.gci.InsertChunk(ctx, &crypto.GCIEntry{
+				PlaintextHash: chunk.Hash,
+				BackendID:     bn,
+				StorageKey:    storageKey,
+				SizeBytes:     int64(chunk.Size),
+				RefCount:      1,
+			}); insertErr != nil {
+				return fmt.Errorf("insert chunk index %s: %w", chunk.Hash[:16], insertErr)
+			}
+			physicalSize += int64(chunk.Size)
+		} else {
+			if incErr := a.gci.IncrementRef(ctx, chunk.Hash); incErr != nil {
+				return fmt.Errorf("increment ref %s: %w", chunk.Hash[:16], incErr)
+			}
+		}
+
+		if refErr := a.gci.AddTenantChunkRef(ctx, &crypto.TenantChunkRef{
+			TenantID:             tenantUUID,
+			BucketName:           bucket,
+			ObjectKey:            artifact,
+			ChunkIndex:           chunk.Index,
+			ChunkOffset:          chunk.Offset,
+			PlaintextHash:        chunk.Hash,
+			EncryptionKeyVersion: 1,
+		}); refErr != nil {
+			return fmt.Errorf("add tenant chunk ref: %w", refErr)
+		}
+	}
+
+	if physicalSize == 0 {
+		physicalSize = metadataSize
+	}
+	dedupRatio := float32(1.0)
+	if physicalSize > 0 {
+		dedupRatio = float32(metadataSize) / float32(physicalSize)
+	}
+
+	contentType := r.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+
+	if metaErr := a.gci.SaveObjectMetadata(ctx, &crypto.ObjectMeta{
+		TenantID:     tenantUUID,
+		BucketName:   bucket,
+		ObjectKey:    artifact,
+		TotalSize:    metadataSize,
+		ChunkCount:   len(chunks),
+		ContentType:  &contentType,
+		LogicalSize:  metadataSize,
+		PhysicalSize: &physicalSize,
+		DedupRatio:   &dedupRatio,
+	}); metaErr != nil {
+		return fmt.Errorf("save object metadata: %w", metaErr)
+	}
+
+	etag := fmt.Sprintf("%x", hasher.Sum(nil))
+
+	contentDisposition := sanitizeContentDisposition(r.Header.Get("Content-Disposition"))
+	userMeta := extractS3Metadata(r)
+	_ = validateMetadata(userMeta)
+	metaJSON, _ := json.Marshal(userMeta)
+
+	if a.db != nil {
+		_, _ = a.db.ExecContext(ctx, `
+			INSERT INTO object_head_cache
+				(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, is_chunked, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '', $9, TRUE, NOW())
+			ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
+				size_bytes            = EXCLUDED.size_bytes,
+				etag                  = EXCLUDED.etag,
+				content_type          = EXCLUDED.content_type,
+				backend_name          = EXCLUDED.backend_name,
+				metadata              = EXCLUDED.metadata,
+				encryption_algorithm  = EXCLUDED.encryption_algorithm,
+				content_disposition   = EXCLUDED.content_disposition,
+				is_chunked            = EXCLUDED.is_chunked,
+				updated_at            = NOW()
+		`, t.ID, bucket, artifact, metadataSize, etag, contentType, backendName, metaJSON, contentDisposition)
+	}
+
+	versionID := ""
+	vStatus := getBucketVersioningStatus(ctx, a.db, t.ID, bucket)
+	if a.db != nil && (vStatus == "Enabled" || vStatus == "Suspended") {
+		if vStatus == "Enabled" {
+			versionID = generateVersionID()
+		} else {
+			versionID = "null"
+		}
+		_, _ = a.db.ExecContext(ctx, `
+			UPDATE object_versions SET is_latest = FALSE
+			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND is_latest = TRUE`,
+			t.ID, bucket, artifact)
+		_, _ = a.db.ExecContext(ctx, `
+			INSERT INTO object_versions
+				(tenant_id, bucket, object_key, version_id, size_bytes, etag, content_type, is_latest, is_delete_marker, backend_name)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, FALSE, $8)
+			ON CONFLICT (tenant_id, bucket, object_key, version_id) DO UPDATE SET
+				size_bytes = EXCLUDED.size_bytes, etag = EXCLUDED.etag,
+				content_type = EXCLUDED.content_type, is_latest = TRUE,
+				is_delete_marker = FALSE, backend_name = EXCLUDED.backend_name`,
+			t.ID, bucket, artifact, versionID, metadataSize, etag, contentType, backendName)
+	}
+
+	applyObjectLockOnPut(ctx, a.db, t.ID, bucket, artifact, r)
+
+	w.Header().Set("ETag", fmt.Sprintf(`"%s"`, etag))
+	w.Header().Set("x-amz-request-id", generateRequestID())
+	if versionID != "" {
+		w.Header().Set("x-amz-version-id", versionID)
+	}
+	w.WriteHeader(http.StatusOK)
+
+	a.logger.Info("chunked artifact stored",
+		zap.String("tenant_id", t.ID),
+		zap.String("s3.bucket", bucket),
+		zap.String("s3.object", artifact),
+		zap.String("backend", backendName),
+		zap.String("etag", etag),
+		zap.Int("chunks", len(chunks)),
+		zap.Float32("dedup_ratio", dedupRatio),
+		zap.Int64("size", metadataSize))
+
+	a.notifySvc.Fire(t.ID, bucket, "s3:ObjectCreated:Put", artifact, metadataSize, etag)
+	emitEvent(ctx, a.db, a.logger, "object.created", t.ID, map[string]interface{}{
+		"bucket": bucket, "key": artifact, "size": metadataSize, "etag": etag, "chunked": true,
+	})
+
+	return nil
 }
 
 // HandleDelete processes S3 DELETE requests
@@ -824,18 +1035,41 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 		return
 	}
 
-	if err := a.engine.Delete(r.Context(), container, object); err != nil {
-		if strings.Contains(err.Error(), "no such file or directory") ||
-			strings.Contains(err.Error(), "not found") {
-			w.WriteHeader(http.StatusNoContent)
+	// Chunked objects: decrement chunk ref counts via GCI instead of
+	// deleting from the backend. Actual chunk data stays until GC (Phase 8.7).
+	var isChunked bool
+	if a.db != nil {
+		_ = a.db.QueryRowContext(r.Context(),
+			`SELECT is_chunked FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+			t.ID, bucket, object).Scan(&isChunked)
+	}
+
+	if isChunked && a.gci != nil {
+		if tenantUUID, parseErr := uuid.Parse(t.ID); parseErr == nil {
+			if delErr := a.gci.DeleteObjectChunks(r.Context(), tenantUUID, bucket, object); delErr != nil {
+				a.logger.Error("chunked delete failed",
+					zap.Error(delErr),
+					zap.String("tenant_id", t.ID),
+					zap.String("bucket", bucket),
+					zap.String("object", object))
+				WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+				return
+			}
+		}
+	} else {
+		if err := a.engine.Delete(r.Context(), container, object); err != nil {
+			if strings.Contains(err.Error(), "no such file or directory") ||
+				strings.Contains(err.Error(), "not found") {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			a.logger.Error("delete failed",
+				zap.String("container", container),
+				zap.String("artifact", object),
+				zap.Error(err))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 			return
 		}
-		a.logger.Error("delete failed",
-			zap.String("container", container),
-			zap.String("artifact", object),
-			zap.Error(err))
-		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-		return
 	}
 
 	if a.db != nil {
