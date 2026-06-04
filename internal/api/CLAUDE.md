@@ -205,6 +205,8 @@ Transparent server-side encryption at rest using ML-KEM-768 (post-quantum key en
 4. EncryptBytes → ciphertext (plaintext + 1117B overhead)
 5. engine.Put with ciphertext; object_head_cache stores plaintext size + encryption_algorithm
 
+**Oversize guard**: when encryption is required (header `x-amz-server-side-encryption: AES256` OR bucket `sse_enabled`) but the object exceeds `crypto.MaxEncryptableSize` (256 MiB), SSE is skipped (whole-object GCM can't buffer it) — the request is **rejected with `EntityTooLarge` (413)** rather than silently stored as plaintext, which would violate the bucket's encryption guarantee. (SSE-C rejects oversize in its own branch.) The real fix is streaming/chunk-level encryption (future phase).
+
 **GET flow** (s3_engine_adapter.go HandleGet):
 1. Query encryption_algorithm from object_head_cache
 2. engine.Get → encrypted blob
