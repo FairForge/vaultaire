@@ -217,13 +217,14 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	var cachedEncAlgo string
 	var cachedTags []byte
 	var cachedContentDisposition string
+	var cachedIsChunked bool
 	var cacheHit bool
 	if a.db != nil {
 		err := a.db.QueryRowContext(r.Context(), `
-			SELECT content_type, size_bytes, etag, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(tags, '{}'), COALESCE(content_disposition, '')
+			SELECT content_type, size_bytes, etag, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(tags, '{}'), COALESCE(content_disposition, ''), is_chunked
 			FROM object_head_cache
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-			t.ID, bucket, artifact).Scan(&cachedContentType, &cachedSize, &cachedETag, &cachedUpdatedAt, &cachedMetadata, &cachedBackendName, &cachedEncAlgo, &cachedTags, &cachedContentDisposition)
+			t.ID, bucket, artifact).Scan(&cachedContentType, &cachedSize, &cachedETag, &cachedUpdatedAt, &cachedMetadata, &cachedBackendName, &cachedEncAlgo, &cachedTags, &cachedContentDisposition, &cachedIsChunked)
 		if err == nil {
 			cacheHit = true
 		}
@@ -259,6 +260,24 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	contentType := cachedContentType
 	if contentType == "" {
 		contentType = a.detectContentType(artifact)
+	}
+
+	// Chunked objects are reassembled from their individual chunk storage keys
+	// rather than fetched as a single artifact. On any failure we fall through
+	// to the normal path (which will surface NoSuchKey, since no whole-object
+	// blob exists at this key). The full object is buffered before any response
+	// bytes are written, so fallthrough is always safe.
+	if cacheHit && cachedIsChunked && a.gci != nil {
+		chunkErr := a.handleChunkedGet(w, r, t, bucket, artifact,
+			cachedSize, cachedETag, cachedContentType, cachedUpdatedAt,
+			cachedMetadata, cachedTags, cachedContentDisposition, cachedBackendName)
+		if chunkErr == nil {
+			return
+		}
+		a.logger.Warn("chunked get failed, falling through to normal path",
+			zap.Error(chunkErr),
+			zap.String("bucket", bucket),
+			zap.String("artifact", artifact))
 	}
 
 	reader, err := a.engine.Get(r.Context(), container, artifact)
@@ -942,6 +961,160 @@ func (a *S3ToEngine) handleChunkedPut(
 	a.notifySvc.Fire(t.ID, bucket, "s3:ObjectCreated:Put", artifact, metadataSize, etag)
 	emitEvent(ctx, a.db, a.logger, "object.created", t.ID, map[string]interface{}{
 		"bucket": bucket, "key": artifact, "size": metadataSize, "etag": etag, "chunked": true,
+	})
+
+	return nil
+}
+
+// handleChunkedGet reassembles a chunked object from its individual chunk
+// storage keys and serves it. The object was stored by handleChunkedPut as an
+// ordered sequence of content-defined chunks under "_chunks/{sha256}" keys,
+// deduplicated through the GCI. Chunks are concatenated in chunk_index order so
+// the result is byte-identical to the original upload (its plaintext ETag).
+//
+// The full object is buffered in memory before any response bytes are written:
+// every error path returns before the first header is set, so the caller can
+// safely fall through to the normal GET path. SSE-C/SSE-S3 decryption is not
+// handled — chunking is mutually exclusive with encryption by construction in
+// HandlePut, so chunked objects are never encrypted.
+func (a *S3ToEngine) handleChunkedGet(
+	w http.ResponseWriter, r *http.Request,
+	t *tenant.Tenant,
+	bucket, artifact string,
+	cachedSize int64,
+	cachedETag string,
+	cachedContentType string,
+	cachedUpdatedAt time.Time,
+	cachedMetadata []byte,
+	cachedTags []byte,
+	cachedContentDisposition string,
+	cachedBackendName string,
+) error {
+	ctx := r.Context()
+
+	tenantUUID, err := uuid.Parse(t.ID)
+	if err != nil {
+		return fmt.Errorf("parse tenant UUID: %w", err)
+	}
+
+	container := t.NamespaceContainer(bucket)
+
+	refs, err := a.gci.GetObjectChunks(ctx, tenantUUID, bucket, artifact)
+	if err != nil {
+		return fmt.Errorf("get object chunks: %w", err)
+	}
+	if len(refs) == 0 {
+		return fmt.Errorf("no chunk references for %s/%s", bucket, artifact)
+	}
+
+	// Reassemble in chunk_index order (GetObjectChunks sorts ASC). Sequential
+	// fetch is fine for launch — typical chunked objects have 4-16 chunks.
+	// Parallel prefetch is a future optimization.
+	var buf bytes.Buffer
+	if cachedSize > 0 {
+		buf.Grow(int(cachedSize))
+	}
+	for _, ref := range refs {
+		lookup, lookupErr := a.gci.LookupChunk(ctx, ref.PlaintextHash)
+		if lookupErr != nil {
+			return fmt.Errorf("lookup chunk %s: %w", ref.PlaintextHash[:16], lookupErr)
+		}
+		storageKey := "_chunks/" + ref.PlaintextHash
+		if lookup != nil && lookup.Entry != nil && lookup.Entry.StorageKey != "" {
+			storageKey = lookup.Entry.StorageKey
+		}
+
+		chunkReader, getErr := a.engine.Get(ctx, container, storageKey)
+		if getErr != nil {
+			return fmt.Errorf("fetch chunk %s: %w", ref.PlaintextHash[:16], getErr)
+		}
+		_, copyErr := io.Copy(&buf, chunkReader)
+		_ = chunkReader.Close()
+		if copyErr != nil {
+			return fmt.Errorf("read chunk %s: %w", ref.PlaintextHash[:16], copyErr)
+		}
+	}
+
+	data := buf.Bytes()
+
+	contentType := cachedContentType
+	if contentType == "" {
+		contentType = a.detectContentType(artifact)
+	}
+
+	// Content-Disposition: ?response-content-disposition overrides the stored
+	// value (part of the signed request). Set before the range branch so both
+	// 200 and 206 responses carry it. From here on every path writes a response,
+	// so no caller fallthrough occurs.
+	disposition := r.URL.Query().Get("response-content-disposition")
+	if disposition == "" {
+		disposition = cachedContentDisposition
+	}
+	if disposition = sanitizeContentDisposition(disposition); disposition != "" {
+		w.Header().Set("Content-Disposition", disposition)
+	}
+
+	// Range requests: serve a slice of the already-materialized object.
+	rangeHeader := r.Header.Get("Range")
+	if rangeHeader != "" && cachedSize > 0 {
+		rng, parseErr := parseRangeHeader(rangeHeader, cachedSize)
+		if parseErr != nil {
+			writeRangeNotSatisfiable(w, cachedSize)
+			return nil
+		}
+		w.Header().Set("x-amz-request-id", generateRequestID())
+		if w.Header().Get("x-amz-version-id") == "" {
+			w.Header().Set("x-amz-version-id", "null")
+		}
+		if serveErr := serveRange(w, bytes.NewReader(data), rng, cachedSize, contentType); serveErr != nil {
+			a.logger.Error("chunked range serve failed",
+				zap.Error(serveErr),
+				zap.String("container", container),
+				zap.String("artifact", artifact))
+		}
+		return nil
+	}
+
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("x-amz-request-id", generateRequestID())
+	if w.Header().Get("x-amz-version-id") == "" {
+		w.Header().Set("x-amz-version-id", "null")
+	}
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Cache-Control", "private, no-cache")
+	w.Header().Set("x-amz-storage-class", engine.BackendToStorageClass(cachedBackendName))
+	if cachedSize > 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(cachedSize, 10))
+	}
+	if cachedETag != "" {
+		w.Header().Set("ETag", fmt.Sprintf(`"%s"`, cachedETag))
+	}
+	if !cachedUpdatedAt.IsZero() {
+		w.Header().Set("Last-Modified", cachedUpdatedAt.UTC().Format(http.TimeFormat))
+	}
+	setS3MetadataHeaders(w, cachedMetadata)
+	if n := tagCount(cachedTags); n > 0 {
+		w.Header().Set("x-amz-tagging-count", strconv.Itoa(n))
+	}
+
+	written, err := io.Copy(w, bytes.NewReader(data))
+	if err != nil {
+		a.logger.Error("failed to stream chunked artifact",
+			zap.Error(err),
+			zap.String("container", container),
+			zap.String("artifact", artifact))
+		return nil
+	}
+
+	a.logger.Info("chunked artifact retrieved",
+		zap.String("s3.bucket", bucket),
+		zap.String("s3.object", artifact),
+		zap.String("engine.container", container),
+		zap.Int("chunks", len(refs)),
+		zap.Int64("bytes", written))
+
+	emitEvent(ctx, a.db, a.logger, "object.downloaded", t.ID, map[string]interface{}{
+		"bucket": bucket, "key": artifact, "size": written, "chunked": true,
 	})
 
 	return nil

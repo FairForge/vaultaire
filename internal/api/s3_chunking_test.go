@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/FairForge/vaultaire/internal/crypto"
@@ -19,6 +22,172 @@ import (
 
 	_ "github.com/lib/pq"
 )
+
+// putChunkedObject is a helper that uploads content above the chunking
+// threshold via the adapter and returns the resulting ETag.
+func putChunkedObject(t *testing.T, f *adapterTestFixture, key string, content []byte, contentType string) string {
+	t.Helper()
+	req := httptest.NewRequest("PUT", "/test-bucket/"+key, bytes.NewReader(content))
+	req.ContentLength = int64(len(content))
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	w := httptest.NewRecorder()
+	f.adapter.HandlePut(w, req, "test-bucket", key)
+	require.Equal(t, http.StatusOK, w.Code, "chunked PUT should succeed")
+	return w.Header().Get("ETag")
+}
+
+func TestHandleGet_ChunkedObject(t *testing.T) {
+	f := setupChunkingFixture(t)
+
+	content := generateTestData(8 * 1024) // 8 KB — above 1 KB threshold
+	putETag := putChunkedObject(t, f, "chunked-get.bin", content, "application/octet-stream")
+
+	// Sanity: the object is actually stored chunked.
+	var isChunked bool
+	require.NoError(t, f.db.QueryRow(`
+		SELECT is_chunked FROM object_head_cache
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+		f.tenantID, "test-bucket", "chunked-get.bin").Scan(&isChunked))
+	require.True(t, isChunked, "object should be chunked for this test to be meaningful")
+
+	getReq := httptest.NewRequest("GET", "/test-bucket/chunked-get.bin", nil)
+	getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+	gw := httptest.NewRecorder()
+	f.adapter.HandleGet(gw, getReq, "test-bucket", "chunked-get.bin")
+
+	require.Equal(t, http.StatusOK, gw.Code)
+	body, _ := io.ReadAll(gw.Body)
+	assert.Equal(t, content, body, "reassembled body must match uploaded content")
+	assert.Equal(t, strconv.Itoa(len(content)), gw.Header().Get("Content-Length"))
+	assert.Equal(t, putETag, gw.Header().Get("ETag"), "ETag must match the PUT ETag")
+	assert.Equal(t, "application/octet-stream", gw.Header().Get("Content-Type"))
+}
+
+func TestHandleGet_ChunkedObject_RangeRequest(t *testing.T) {
+	f := setupChunkingFixture(t)
+
+	content := generateTestData(8 * 1024)
+	putChunkedObject(t, f, "range.bin", content, "application/octet-stream")
+
+	getReq := httptest.NewRequest("GET", "/test-bucket/range.bin", nil)
+	getReq.Header.Set("Range", "bytes=0-99")
+	getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+	gw := httptest.NewRecorder()
+	f.adapter.HandleGet(gw, getReq, "test-bucket", "range.bin")
+
+	require.Equal(t, http.StatusPartialContent, gw.Code)
+	body, _ := io.ReadAll(gw.Body)
+	assert.Equal(t, content[0:100], body, "range slice must match")
+	assert.Equal(t, "100", gw.Header().Get("Content-Length"))
+	assert.Equal(t, fmt.Sprintf("bytes 0-99/%d", len(content)), gw.Header().Get("Content-Range"))
+}
+
+func TestHandleGet_ChunkedDedup_SharedContent(t *testing.T) {
+	f := setupChunkingFixture(t)
+
+	content := generateTestData(8 * 1024)
+	keys := []string{"dup-a.bin", "dup-b.bin"}
+	for _, key := range keys {
+		putChunkedObject(t, f, key, content, "application/octet-stream")
+	}
+
+	bodies := make([][]byte, 0, len(keys))
+	for _, key := range keys {
+		getReq := httptest.NewRequest("GET", "/test-bucket/"+key, nil)
+		getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+		gw := httptest.NewRecorder()
+		f.adapter.HandleGet(gw, getReq, "test-bucket", key)
+		require.Equal(t, http.StatusOK, gw.Code)
+		b, _ := io.ReadAll(gw.Body)
+		bodies = append(bodies, b)
+	}
+
+	assert.Equal(t, content, bodies[0])
+	assert.Equal(t, content, bodies[1])
+	assert.Equal(t, bodies[0], bodies[1], "deduplicated objects must return identical content")
+}
+
+func TestHandleGet_SmallObject_NotChunked(t *testing.T) {
+	f := setupChunkingFixture(t)
+
+	content := []byte("small object below the chunking threshold")
+	putReq := httptest.NewRequest("PUT", "/test-bucket/small-get.txt", bytes.NewReader(content))
+	putReq.ContentLength = int64(len(content))
+	putReq.Header.Set("Content-Type", "text/plain")
+	putReq = putReq.WithContext(tenant.WithTenant(putReq.Context(), f.tenant))
+	pw := httptest.NewRecorder()
+	f.adapter.HandlePut(pw, putReq, "test-bucket", "small-get.txt")
+	require.Equal(t, http.StatusOK, pw.Code)
+
+	var isChunked bool
+	require.NoError(t, f.db.QueryRow(`
+		SELECT is_chunked FROM object_head_cache
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+		f.tenantID, "test-bucket", "small-get.txt").Scan(&isChunked))
+	require.False(t, isChunked, "small object should use the normal path")
+
+	getReq := httptest.NewRequest("GET", "/test-bucket/small-get.txt", nil)
+	getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+	gw := httptest.NewRecorder()
+	f.adapter.HandleGet(gw, getReq, "test-bucket", "small-get.txt")
+
+	require.Equal(t, http.StatusOK, gw.Code)
+	body, _ := io.ReadAll(gw.Body)
+	assert.Equal(t, content, body)
+	assert.Equal(t, "text/plain", gw.Header().Get("Content-Type"))
+}
+
+func TestHandleHead_ChunkedObject(t *testing.T) {
+	f := setupChunkingFixture(t)
+
+	content := generateTestData(8 * 1024)
+	putETag := putChunkedObject(t, f, "head-chunked.bin", content, "application/octet-stream")
+
+	srv := &Server{db: f.db, logger: zap.NewNop()}
+	headReq := httptest.NewRequest("HEAD", "/test-bucket/head-chunked.bin", nil)
+	headReq = headReq.WithContext(tenant.WithTenant(headReq.Context(), f.tenant))
+	hw := httptest.NewRecorder()
+	srv.handleHeadObject(hw, headReq, &S3Request{Bucket: "test-bucket", Object: "head-chunked.bin"})
+
+	require.Equal(t, http.StatusOK, hw.Code)
+	assert.Equal(t, strconv.Itoa(len(content)), hw.Header().Get("Content-Length"),
+		"HEAD should report the plaintext size")
+	assert.Equal(t, putETag, hw.Header().Get("ETag"))
+	body, _ := io.ReadAll(hw.Body)
+	assert.Empty(t, body, "HEAD must not return a body")
+}
+
+func TestChunkedRoundTrip_PutDeletePut(t *testing.T) {
+	f := setupChunkingFixture(t)
+
+	content := generateTestData(8 * 1024)
+	key := "roundtrip.bin"
+
+	etag1 := putChunkedObject(t, f, key, content, "application/octet-stream")
+
+	// DELETE the chunked object (decrements chunk refs; data stays until GC).
+	delReq := httptest.NewRequest("DELETE", "/test-bucket/"+key, nil)
+	delReq = delReq.WithContext(tenant.WithTenant(delReq.Context(), f.tenant))
+	dw := httptest.NewRecorder()
+	f.adapter.HandleDelete(dw, delReq, "test-bucket", key)
+	require.Equal(t, http.StatusNoContent, dw.Code)
+
+	// PUT the same content again — chunks are re-referenced from the index.
+	etag2 := putChunkedObject(t, f, key, content, "application/octet-stream")
+	assert.Equal(t, etag1, etag2, "same content must yield the same ETag")
+
+	// GET and verify the data round-trips intact.
+	getReq := httptest.NewRequest("GET", "/test-bucket/"+key, nil)
+	getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+	gw := httptest.NewRecorder()
+	f.adapter.HandleGet(gw, getReq, "test-bucket", key)
+	require.Equal(t, http.StatusOK, gw.Code)
+	body, _ := io.ReadAll(gw.Body)
+	assert.Equal(t, content, body, "data must survive PUT → DELETE → PUT round-trip")
+}
 
 func setupChunkingFixture(t *testing.T) *adapterTestFixture {
 	t.Helper()
