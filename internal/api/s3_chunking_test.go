@@ -374,6 +374,72 @@ func TestHandleGet_ChunkedObject_CorruptChunk(t *testing.T) {
 	assert.NotEqual(t, content, gw.Body.Bytes(), "original/correct bytes must not be served")
 }
 
+// TestChunkedOverwrite_FewerChunks_ReplacesManifest verifies that overwriting a
+// chunked object with a smaller one fully replaces the manifest — stale
+// higher-index chunk refs from the previous version must not linger and corrupt
+// the GET.
+func TestChunkedOverwrite_FewerChunks_ReplacesManifest(t *testing.T) {
+	f := setupChunkingFixture(t)
+	key := "overwrite.bin"
+
+	big := generateTestData(20 * 1024 * 1024) // many chunks
+	putChunkedObject(t, f, key, big, "application/octet-stream")
+
+	small := generateTestData(8 * 1024) // single chunk, still > 1KB threshold
+	putChunkedObject(t, f, key, small, "application/octet-stream")
+
+	gw := getChunkedAs(t, f, f.tenant, "test-bucket", key)
+	require.Equal(t, http.StatusOK, gw.Code)
+	require.Equal(t, small, gw.Body.Bytes(),
+		"overwrite must replace the manifest, not append stale chunks from the previous version")
+
+	// The new manifest must contain exactly the new object's chunk count.
+	tenantUUID, err := uuid.Parse(f.tenantID)
+	require.NoError(t, err)
+	var refCount int
+	require.NoError(t, f.db.QueryRow(`
+		SELECT COUNT(*) FROM tenant_chunk_refs
+		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = $3`,
+		tenantUUID, "test-bucket", key).Scan(&refCount))
+	assert.Equal(t, 1, refCount, "8 KB object should leave exactly one chunk ref")
+}
+
+// TestChunkedOverwrite_ReleasesOldChunkRefs verifies that overwriting a chunked
+// object decrements the previous version's chunk references (no ref-count leak).
+func TestChunkedOverwrite_ReleasesOldChunkRefs(t *testing.T) {
+	f := setupChunkingFixture(t)
+	key := "release.bin"
+
+	contentA := generateTestData(8 * 1024)
+	putChunkedObject(t, f, key, contentA, "application/octet-stream")
+
+	tenantUUID, err := uuid.Parse(f.tenantID)
+	require.NoError(t, err)
+	var oldHash string
+	require.NoError(t, f.db.QueryRow(`
+		SELECT plaintext_hash FROM tenant_chunk_refs
+		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = $3 ORDER BY chunk_index LIMIT 1`,
+		tenantUUID, "test-bucket", key).Scan(&oldHash))
+
+	// Overwrite with different content (different chunk hash).
+	contentB := generateTestData(8 * 1024)
+	putChunkedObject(t, f, key, contentB, "application/octet-stream")
+
+	// The old version's chunk should have been released (ref_count 0 → marked).
+	var refCount int
+	var marked bool
+	require.NoError(t, f.db.QueryRow(`
+		SELECT ref_count, marked_for_deletion FROM global_content_index WHERE plaintext_hash = $1`,
+		oldHash).Scan(&refCount, &marked))
+	assert.Equal(t, 0, refCount, "overwritten object's old chunk must be released, not leaked")
+	assert.True(t, marked, "released chunk (ref_count 0) should be marked_for_deletion")
+
+	// New content still round-trips.
+	gw := getChunkedAs(t, f, f.tenant, "test-bucket", key)
+	require.Equal(t, http.StatusOK, gw.Code)
+	assert.Equal(t, contentB, gw.Body.Bytes())
+}
+
 func setupChunkingFixture(t *testing.T) *adapterTestFixture {
 	t.Helper()
 

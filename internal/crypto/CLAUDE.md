@@ -41,14 +41,14 @@ Encryption, key management, and post-quantum cryptography for Vaultaire.
 **Global chunk store** (Phase 8.5.1): chunks are stored in a shared, tenant-independent container `_global` (const `chunkContainer` in s3_engine_adapter.go), NOT the per-tenant/bucket namespace. Because dedup spans tenants, a chunk first written by tenant A / bucket X must be reachable when tenant B / bucket Y dedups against it — storing in the writer's namespace made cross-bucket/cross-tenant GETs 404. Isolation is preserved at the manifest layer: a tenant reaches a chunk only through its own `tenant_chunk_refs` (queried by `tenant_id`), and `_global` is not addressable via the S3 API (all S3 paths route through `tenant/{id}/{bucket}`).
 
 - **chunker.go** — FastCDC chunker (1 MB min / 4 MB avg / 16 MB max) using `restic/chunker`. `ChunkBytes()` for sync, `Chunk()` for streaming. SHA-256 per chunk.
-- **gci.go** — `GlobalContentIndex`: DB-backed dedup index with 100K-entry in-memory cache. Batch lookups (`LookupChunks`), ref counting (`IncrementRef`/`DecrementRef`), tenant chunk manifests (`AddTenantChunkRef`), object metadata (`SaveObjectMetadata`), transactional delete (`DeleteObjectChunks`).
+- **gci.go** — `GlobalContentIndex`: DB-backed dedup index with 100K-entry in-memory cache. Batch lookups (`LookupChunks`), ref counting (`IncrementRef`/`DecrementRef`), tenant chunk manifests (`AddTenantChunkRef`), object metadata (`SaveObjectMetadata`), transactional delete (`DeleteObjectChunks`), atomic manifest swap on overwrite (`ReplaceObjectManifest` — releases old refs + installs new manifest + metadata in one tx).
 
 **PUT flow** (s3_engine_adapter.go `handleChunkedPut`):
 1. Gate: `gci != nil && size > threshold && no encryption`
 2. Parse tenant UUID (skip chunking if non-UUID tenant)
 3. `ReadAll` through MD5 hasher → `ChunkBytes` → batch `LookupChunks`
-4. For each chunk: if new → `engine.Put(_global, "_chunks/{sha256}")` + `InsertChunk`; if existing → `IncrementRef`
-5. `AddTenantChunkRef` per chunk, `SaveObjectMetadata`, `object_head_cache` with `is_chunked=TRUE`
+4. For each chunk: if new → `engine.Put(_global, "_chunks/{sha256}")` + `InsertChunk`; if existing → `IncrementRef`. Collect the new manifest refs.
+5. `ReplaceObjectManifest` (single tx): release the previous version's chunk refs (decrement counts) + install the new manifest + upsert `object_metadata` — **atomic**, so overwriting a key never leaves stale higher-index refs (GET corruption) or leaks old chunk refs. New chunks are IncrementRef'd in step 4 *before* this, so a chunk shared between old and new versions never transiently hits ref_count 0. Then `object_head_cache` with `is_chunked=TRUE`.
 
 **DELETE flow** (s3_engine_adapter.go `HandleDelete`):
 1. Query `is_chunked` from `object_head_cache`

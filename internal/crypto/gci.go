@@ -407,6 +407,110 @@ func (g *GlobalContentIndex) DeleteObjectChunks(ctx context.Context, tenantID uu
 	return tx.Commit()
 }
 
+// ReplaceObjectManifest atomically swaps an object's chunk manifest. In a single
+// transaction it releases the previous version's chunk references (decrementing
+// their global ref counts), installs the new manifest, and upserts the object
+// metadata — so a reader never observes a mixed or partial manifest and an
+// overwritten object's old chunks do not leak their references.
+//
+// The NEW chunks' data and global_content_index entries (InsertChunk/IncrementRef)
+// must already be persisted before calling this. Callers should IncrementRef new
+// chunks BEFORE this call so that a chunk shared between the old and new versions
+// never transiently drops to ref_count 0 (which would mark it for deletion).
+func (g *GlobalContentIndex) ReplaceObjectManifest(ctx context.Context, tenantID uuid.UUID, bucket, key string, newRefs []TenantChunkRef, meta *ObjectMeta) error {
+	tx, err := g.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin manifest swap: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Capture the previous version's chunk hashes so we can release them.
+	rows, err := tx.QueryContext(ctx, `
+		SELECT plaintext_hash FROM tenant_chunk_refs
+		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = $3
+	`, tenantID, bucket, key)
+	if err != nil {
+		return fmt.Errorf("read previous manifest: %w", err)
+	}
+	var oldHashes []string
+	for rows.Next() {
+		var h string
+		if scanErr := rows.Scan(&h); scanErr != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan previous hash: %w", scanErr)
+		}
+		oldHashes = append(oldHashes, h)
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate previous manifest: %w", err)
+	}
+
+	// Remove the old manifest and release its chunk references.
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM tenant_chunk_refs
+		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = $3
+	`, tenantID, bucket, key); err != nil {
+		return fmt.Errorf("delete previous manifest: %w", err)
+	}
+	for _, h := range oldHashes {
+		if _, err := tx.ExecContext(ctx, `SELECT decrement_chunk_ref($1)`, h); err != nil {
+			return fmt.Errorf("release chunk %s: %w", h, err)
+		}
+	}
+
+	// Install the new manifest.
+	for i := range newRefs {
+		ref := &newRefs[i]
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO tenant_chunk_refs
+			(tenant_id, bucket_name, object_key, chunk_index, chunk_offset,
+			 plaintext_hash, encryption_key_version, ciphertext_hash)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			ON CONFLICT (tenant_id, bucket_name, object_key, chunk_index) DO UPDATE SET
+				chunk_offset = EXCLUDED.chunk_offset,
+				plaintext_hash = EXCLUDED.plaintext_hash,
+				encryption_key_version = EXCLUDED.encryption_key_version,
+				ciphertext_hash = EXCLUDED.ciphertext_hash
+		`, ref.TenantID, ref.BucketName, ref.ObjectKey, ref.ChunkIndex,
+			ref.ChunkOffset, ref.PlaintextHash, ref.EncryptionKeyVersion, ref.CiphertextHash); err != nil {
+			return fmt.Errorf("insert chunk ref %d: %w", ref.ChunkIndex, err)
+		}
+	}
+
+	// Upsert object metadata.
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO object_metadata
+		(tenant_id, bucket_name, object_key, total_size, chunk_count, content_hash,
+		 content_type, logical_size, physical_size, dedup_ratio, pipeline_config)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		ON CONFLICT (tenant_id, bucket_name, object_key) DO UPDATE SET
+			total_size = EXCLUDED.total_size,
+			chunk_count = EXCLUDED.chunk_count,
+			content_hash = EXCLUDED.content_hash,
+			content_type = EXCLUDED.content_type,
+			logical_size = EXCLUDED.logical_size,
+			physical_size = EXCLUDED.physical_size,
+			dedup_ratio = EXCLUDED.dedup_ratio,
+			pipeline_config = EXCLUDED.pipeline_config,
+			updated_at = NOW()
+	`, meta.TenantID, meta.BucketName, meta.ObjectKey, meta.TotalSize,
+		meta.ChunkCount, meta.ContentHash, meta.ContentType, meta.LogicalSize,
+		meta.PhysicalSize, meta.DedupRatio, meta.PipelineConfig); err != nil {
+		return fmt.Errorf("save object metadata: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit manifest swap: %w", err)
+	}
+
+	// Released chunks' ref counts changed — drop their cache entries.
+	for _, h := range oldHashes {
+		g.cache.delete(h)
+	}
+	return nil
+}
+
 // SaveObjectMetadata saves or updates object metadata
 func (g *GlobalContentIndex) SaveObjectMetadata(ctx context.Context, meta *ObjectMeta) error {
 	_, err := g.db.ExecContext(ctx, `
