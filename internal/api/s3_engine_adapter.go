@@ -625,6 +625,22 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		}
 	}
 
+	// Encryption-required guard: SSE-S3 encrypts the whole object in memory and
+	// is capped at crypto.MaxEncryptableSize. When encryption is required (an
+	// explicit x-amz-server-side-encryption header, or a bucket that defaults to
+	// SSE) but the object exceeds that cap, SSE was skipped above
+	// (encryptionAlgorithm == ""). Silently storing such an object as plaintext
+	// would violate the bucket's encryption guarantee, so reject it instead.
+	// (SSE-C already rejects oversize objects in its own branch above.)
+	// The real fix — streaming/chunk-level encryption — is a future phase.
+	if a.sseService != nil && encryptionAlgorithm == "" && metadataSize > crypto.MaxEncryptableSize &&
+		(r.Header.Get("x-amz-server-side-encryption") == "AES256" ||
+			isBucketSSEEnabled(r.Context(), a.db, t.ID, bucket)) {
+		WriteS3ErrorWithContext(w, ErrEntityTooLarge, r.URL.Path, generateRequestID(),
+			WithSuggestion("Objects larger than 256 MiB cannot yet be server-side encrypted. Upload without encryption, or split the object."))
+		return
+	}
+
 	// Chunked upload path: objects above the threshold that are NOT encrypted
 	// are split into content-defined chunks and deduplicated via the GCI.
 	// Chunked objects skip the normal engine.Put — each chunk is stored
