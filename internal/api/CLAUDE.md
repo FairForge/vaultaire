@@ -7,7 +7,7 @@ S3-compatible API layer. Translates S3 protocol to engine operations, handles au
 - **server.go** — Server struct, router setup, middleware chain
 - **s3.go** — Request parsing, auth, routing to operation handlers
 - **s3_errors.go** — Error codes, messages, and response writing
-- **s3_engine_adapter.go** — GET/PUT/DELETE/LIST handlers bridging S3 to engine; `handleChunkedPut` for content-defined chunking + dedup on large objects, `handleChunkedGet` reassembles chunked objects on GET (buffers full object, supports range; falls through to normal path on failure)
+- **s3_engine_adapter.go** — GET/PUT/DELETE/LIST handlers bridging S3 to engine; `handleChunkedPut` for content-defined chunking + dedup on large objects, `handleChunkedGet` reassembles chunked objects on GET (buffers full object, supports range; falls through to normal path on failure). Chunks live in the shared `_global` container (const `chunkContainer`) so cross-bucket/cross-tenant dedup is retrievable
 - **s3_chunking_test.go** — Integration tests for chunked upload, dedup, delete, and GCI operations
 - **s3_buckets.go** — CreateBucket (with region), DeleteBucket, ListBuckets, GetBucketLocation, HeadBucket
 - **s3_versioning.go** — Bucket versioning enable/suspend

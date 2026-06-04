@@ -23,6 +23,19 @@ import (
 	"go.uber.org/zap"
 )
 
+// chunkContainer is the shared, tenant-independent container that stores
+// deduplicated content-defined chunks. Dedup is global — identical content is
+// stored once across all tenants — so chunks must live outside any tenant's
+// namespace, otherwise an object that dedups against a chunk first written by a
+// different tenant or bucket would have no reachable copy.
+//
+// Isolation is preserved at the manifest layer: a tenant can only reach a chunk
+// through its own tenant_chunk_refs rows (queried by tenant_id in
+// GetObjectChunks). The container itself is not addressable via the S3 API,
+// since every S3 request is routed through the tenant namespace
+// ("tenant/{id}/{bucket}"), never the bare "_global" prefix.
+const chunkContainer = "_global"
+
 // S3ToEngine adapts S3 requests to engine operations.
 type S3ToEngine struct {
 	engine            engine.Engine
@@ -620,7 +633,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	}
 	if a.gci != nil && metadataSize > chunkThreshold && encryptionAlgorithm == "" {
 		if tenantUUID, parseErr := uuid.Parse(t.ID); parseErr == nil {
-			chunkErr := a.handleChunkedPut(r, w, t, tenantUUID, bucket, artifact, container, metadataSize, hashingBody, hasher)
+			chunkErr := a.handleChunkedPut(r, w, t, tenantUUID, bucket, artifact, metadataSize, hashingBody, hasher)
 			if chunkErr == nil {
 				return
 			}
@@ -786,7 +799,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 func (a *S3ToEngine) handleChunkedPut(
 	r *http.Request, w http.ResponseWriter,
 	t *tenant.Tenant, tenantUUID uuid.UUID,
-	bucket, artifact, container string,
+	bucket, artifact string,
 	metadataSize int64,
 	hashingBody io.Reader,
 	hasher hash.Hash,
@@ -827,7 +840,7 @@ func (a *S3ToEngine) handleChunkedPut(
 
 		if result.IsNewChunk {
 			chunkOpts := []engine.PutOption{engine.WithContentLength(int64(chunk.Size))}
-			bn, putErr := a.engine.Put(ctx, container, storageKey, bytes.NewReader(chunk.Data), chunkOpts...)
+			bn, putErr := a.engine.Put(ctx, chunkContainer, storageKey, bytes.NewReader(chunk.Data), chunkOpts...)
 			if putErr != nil {
 				return fmt.Errorf("store chunk %s: %w", chunk.Hash[:16], putErr)
 			}
@@ -1024,7 +1037,17 @@ func (a *S3ToEngine) handleChunkedGet(
 			storageKey = lookup.Entry.StorageKey
 		}
 
-		chunkReader, getErr := a.engine.Get(ctx, container, storageKey)
+		// Chunks live in the shared global container (dedup spans tenants), not
+		// this tenant's namespace. Hint the backend that actually holds the
+		// chunk so retrieval is deterministic after a restart (when the engine's
+		// in-memory routing map is cold).
+		if lookup != nil && lookup.Entry != nil && lookup.Entry.BackendID != "" {
+			if ce, ok := a.engine.(*engine.CoreEngine); ok {
+				ce.HintBackend(chunkContainer, storageKey, lookup.Entry.BackendID)
+			}
+		}
+
+		chunkReader, getErr := a.engine.Get(ctx, chunkContainer, storageKey)
 		if getErr != nil {
 			return fmt.Errorf("fetch chunk %s: %w", ref.PlaintextHash[:16], getErr)
 		}

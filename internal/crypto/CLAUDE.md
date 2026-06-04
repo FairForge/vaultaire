@@ -34,9 +34,11 @@ Encryption, key management, and post-quantum cryptography for Vaultaire.
 - `postquantum.go` — cloudflare/circl (pipeline encryption, existing)
 - `sse_s3.go` — Go stdlib crypto/mlkem (SSE-S3, new)
 
-## Chunking + Dedup Architecture (Phase 8.3-8.4)
+## Chunking + Dedup Architecture (Phase 8.3-8.5)
 
 **FastCDC chunking** splits large objects (>64 MB, unencrypted) into content-defined chunks. The **Global Content Index** (GCI) deduplicates chunks across all tenants — identical content is stored once.
+
+**Global chunk store** (Phase 8.5.1): chunks are stored in a shared, tenant-independent container `_global` (const `chunkContainer` in s3_engine_adapter.go), NOT the per-tenant/bucket namespace. Because dedup spans tenants, a chunk first written by tenant A / bucket X must be reachable when tenant B / bucket Y dedups against it — storing in the writer's namespace made cross-bucket/cross-tenant GETs 404. Isolation is preserved at the manifest layer: a tenant reaches a chunk only through its own `tenant_chunk_refs` (queried by `tenant_id`), and `_global` is not addressable via the S3 API (all S3 paths route through `tenant/{id}/{bucket}`).
 
 - **chunker.go** — FastCDC chunker (1 MB min / 4 MB avg / 16 MB max) using `restic/chunker`. `ChunkBytes()` for sync, `Chunk()` for streaming. SHA-256 per chunk.
 - **gci.go** — `GlobalContentIndex`: DB-backed dedup index with 100K-entry in-memory cache. Batch lookups (`LookupChunks`), ref counting (`IncrementRef`/`DecrementRef`), tenant chunk manifests (`AddTenantChunkRef`), object metadata (`SaveObjectMetadata`), transactional delete (`DeleteObjectChunks`).
@@ -45,18 +47,18 @@ Encryption, key management, and post-quantum cryptography for Vaultaire.
 1. Gate: `gci != nil && size > threshold && no encryption`
 2. Parse tenant UUID (skip chunking if non-UUID tenant)
 3. `ReadAll` through MD5 hasher → `ChunkBytes` → batch `LookupChunks`
-4. For each chunk: if new → `engine.Put("_chunks/{sha256}")` + `InsertChunk`; if existing → `IncrementRef`
+4. For each chunk: if new → `engine.Put(_global, "_chunks/{sha256}")` + `InsertChunk`; if existing → `IncrementRef`
 5. `AddTenantChunkRef` per chunk, `SaveObjectMetadata`, `object_head_cache` with `is_chunked=TRUE`
 
 **DELETE flow** (s3_engine_adapter.go `HandleDelete`):
 1. Query `is_chunked` from `object_head_cache`
 2. If chunked → `gci.DeleteObjectChunks` (transactional: deletes refs, decrements counts, deletes object_metadata)
-3. Chunk data stays until GC (Phase 8.7) — `marked_for_deletion=TRUE` when `ref_count=0`
+3. Chunk data stays until GC (Phase 8.7) — `marked_for_deletion=TRUE` when `ref_count=0`. GC must delete from the `_global` container (using each GCI entry's `storage_key`/`backend_id`), not a tenant namespace.
 
 **GET flow** (s3_engine_adapter.go `handleChunkedGet`, Phase 8.5):
 1. `HandleGet` reads `is_chunked` from `object_head_cache`; if set and `gci != nil`, branches before the normal `engine.Get`
-2. `GetObjectChunks` → ordered manifest; per chunk `LookupChunk` → `_chunks/{sha256}` storage key
-3. Sequential `engine.Get` per chunk, concatenated into a buffer in `chunk_index` order (byte-identical to upload → plaintext ETag matches)
+2. `GetObjectChunks` → ordered manifest; per chunk `LookupChunk` → storage key + `BackendID` (used to `HintBackend` so retrieval is deterministic after a cold restart)
+3. Sequential `engine.Get(_global, "_chunks/{sha256}")` per chunk, concatenated into a buffer in `chunk_index` order (byte-identical to upload → plaintext ETag matches). Cross-bucket and cross-tenant dedup retrieval both work because chunks live in the shared `_global` container.
 4. Serves with full headers + range support (range = slice of the buffered object). On any pre-write failure, falls through to the normal path (→ NoSuchKey). HEAD needs no chunk-aware logic — `object_head_cache` already holds plaintext size/ETag.
 
 **Constraints**: chunking is mutually exclusive with SSE-S3/SSE-C in this phase. Convergent encryption (Phase 10) will enable per-chunk encryption + dedup.
