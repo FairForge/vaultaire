@@ -189,6 +189,129 @@ func TestChunkedRoundTrip_PutDeletePut(t *testing.T) {
 	assert.Equal(t, content, body, "data must survive PUT → DELETE → PUT round-trip")
 }
 
+// putChunkedAs uploads content for an explicit tenant (not just f.tenant), used
+// by the cross-tenant dedup test.
+func putChunkedAs(t *testing.T, f *adapterTestFixture, tn *tenant.Tenant, bucket, key string, content []byte) {
+	t.Helper()
+	req := httptest.NewRequest("PUT", "/"+bucket+"/"+key, bytes.NewReader(content))
+	req.ContentLength = int64(len(content))
+	req = req.WithContext(tenant.WithTenant(req.Context(), tn))
+	w := httptest.NewRecorder()
+	f.adapter.HandlePut(w, req, bucket, key)
+	require.Equal(t, http.StatusOK, w.Code)
+}
+
+func getChunkedAs(t *testing.T, f *adapterTestFixture, tn *tenant.Tenant, bucket, key string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/"+bucket+"/"+key, nil)
+	req = req.WithContext(tenant.WithTenant(req.Context(), tn))
+	w := httptest.NewRecorder()
+	f.adapter.HandleGet(w, req, bucket, key)
+	return w
+}
+
+// TestHandleGet_ChunkedObject_MultiChunk forces an object large enough to split
+// into multiple chunks (>16 MB max chunk size) and verifies that reassembly is
+// byte-identical and in chunk_index order — the core of handleChunkedGet that
+// the 8 KB tests (single chunk) never exercise.
+func TestHandleGet_ChunkedObject_MultiChunk(t *testing.T) {
+	f := setupChunkingFixture(t)
+
+	content := generateTestData(20 * 1024 * 1024) // 20 MB → multiple chunks (16 MB max)
+	putETag := putChunkedObject(t, f, "multi.bin", content, "application/octet-stream")
+
+	tenantUUID, err := uuid.Parse(f.tenantID)
+	require.NoError(t, err)
+	var chunkCount int
+	require.NoError(t, f.db.QueryRow(`
+		SELECT COUNT(*) FROM tenant_chunk_refs
+		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = $3`,
+		tenantUUID, "test-bucket", "multi.bin").Scan(&chunkCount))
+	require.GreaterOrEqual(t, chunkCount, 2, "20 MB object must split into multiple chunks for this test to be meaningful")
+
+	gw := getChunkedAs(t, f, f.tenant, "test-bucket", "multi.bin")
+	require.Equal(t, http.StatusOK, gw.Code)
+	require.Equal(t, content, gw.Body.Bytes(), "multi-chunk reassembly must be byte-identical and in order")
+	assert.Equal(t, putETag, gw.Header().Get("ETag"))
+
+	// Range straddling a chunk boundary (~1 MB).
+	rangeReq := httptest.NewRequest("GET", "/test-bucket/multi.bin", nil)
+	rangeReq.Header.Set("Range", "bytes=1048570-1048580")
+	rangeReq = rangeReq.WithContext(tenant.WithTenant(rangeReq.Context(), f.tenant))
+	rw := httptest.NewRecorder()
+	f.adapter.HandleGet(rw, rangeReq, "test-bucket", "multi.bin")
+	require.Equal(t, http.StatusPartialContent, rw.Code)
+	assert.Equal(t, content[1048570:1048581], rw.Body.Bytes())
+}
+
+// TestHandleGet_ChunkedDedup_CrossBucket verifies that an object which dedups
+// against a chunk first stored under a *different bucket* (same tenant) is still
+// retrievable. Chunks must live in a shared store, not the per-bucket namespace.
+func TestHandleGet_ChunkedDedup_CrossBucket(t *testing.T) {
+	f := setupChunkingFixture(t)
+	content := generateTestData(8 * 1024)
+
+	bucket2 := "second-bucket"
+	require.NoError(t, os.MkdirAll(filepath.Join(f.tempDir, f.tenant.NamespaceContainer(bucket2)), 0755))
+	t.Cleanup(func() {
+		_, _ = f.db.Exec("DELETE FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2", f.tenantID, bucket2)
+		tenantUUID, _ := uuid.Parse(f.tenantID)
+		_, _ = f.db.Exec("DELETE FROM tenant_chunk_refs WHERE tenant_id = $1 AND bucket_name = $2", tenantUUID, bucket2)
+		_, _ = f.db.Exec("DELETE FROM object_metadata WHERE tenant_id = $1 AND bucket_name = $2", tenantUUID, bucket2)
+	})
+
+	putChunkedObject(t, f, "obj1", content, "application/octet-stream") // test-bucket
+	putChunkedAs(t, f, f.tenant, bucket2, "obj2", content)              // second-bucket, dedup hit
+
+	gw := getChunkedAs(t, f, f.tenant, bucket2, "obj2")
+	require.Equal(t, http.StatusOK, gw.Code, "cross-bucket dedup GET must return the object")
+	assert.Equal(t, content, gw.Body.Bytes())
+}
+
+// TestHandleGet_ChunkedDedup_CrossTenant verifies the GCI's headline capability:
+// global dedup across tenants. Tenant B's object dedups against a chunk first
+// uploaded by tenant A, and B can still GET it.
+func TestHandleGet_ChunkedDedup_CrossTenant(t *testing.T) {
+	f := setupChunkingFixture(t)
+	content := generateTestData(8 * 1024)
+
+	// Tenant A (the fixture tenant) uploads first.
+	putChunkedObject(t, f, "objA", content, "application/octet-stream")
+
+	// Tenant B shares the same db + engine + data dir.
+	bUUID := uuid.New()
+	_, err := f.db.Exec(`
+		INSERT INTO tenants (id, name, email, access_key, secret_key)
+		VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING`,
+		bUUID.String(), "Chunk Tenant B", "chunk-b@test.local", "AK-"+bUUID.String()[:8], "SK-"+bUUID.String()[:8])
+	require.NoError(t, err)
+	tB := &tenant.Tenant{ID: bUUID.String(), Namespace: "tenant/" + bUUID.String() + "/"}
+	require.NoError(t, os.MkdirAll(filepath.Join(f.tempDir, tB.NamespaceContainer("test-bucket")), 0755))
+	t.Cleanup(func() {
+		_, _ = f.db.Exec("DELETE FROM tenant_chunk_refs WHERE tenant_id = $1", bUUID)
+		_, _ = f.db.Exec("DELETE FROM object_metadata WHERE tenant_id = $1", bUUID)
+		_, _ = f.db.Exec("DELETE FROM object_head_cache WHERE tenant_id = $1", bUUID.String())
+		_, _ = f.db.Exec("DELETE FROM tenants WHERE id = $1", bUUID.String())
+	})
+
+	// Tenant B uploads identical content — must dedup against A's chunk.
+	putChunkedAs(t, f, tB, "test-bucket", "objB", content)
+
+	// Confirm a real dedup happened (ref_count == 2 across A + B).
+	var maxRef int
+	require.NoError(t, f.db.QueryRow(`
+		SELECT MAX(gci.ref_count) FROM global_content_index gci
+		INNER JOIN tenant_chunk_refs tcr ON tcr.plaintext_hash = gci.plaintext_hash
+		WHERE tcr.tenant_id = $1 AND tcr.bucket_name = $2 AND tcr.object_key = $3`,
+		bUUID, "test-bucket", "objB").Scan(&maxRef))
+	require.Equal(t, 2, maxRef, "tenant B's chunk must be deduplicated against tenant A's (ref_count=2)")
+
+	// Tenant B GETs — must reassemble from the globally-stored chunk.
+	gw := getChunkedAs(t, f, tB, "test-bucket", "objB")
+	require.Equal(t, http.StatusOK, gw.Code, "cross-tenant dedup GET must return the object")
+	assert.Equal(t, content, gw.Body.Bytes())
+}
+
 func setupChunkingFixture(t *testing.T) *adapterTestFixture {
 	t.Helper()
 
