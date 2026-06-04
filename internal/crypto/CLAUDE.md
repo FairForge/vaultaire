@@ -55,11 +55,12 @@ Encryption, key management, and post-quantum cryptography for Vaultaire.
 2. If chunked → `gci.DeleteObjectChunks` (transactional: deletes refs, decrements counts, deletes object_metadata)
 3. Chunk data stays until GC (Phase 8.7) — `marked_for_deletion=TRUE` when `ref_count=0`. GC must delete from the `_global` container (using each GCI entry's `storage_key`/`backend_id`), not a tenant namespace.
 
-**GET flow** (s3_engine_adapter.go `handleChunkedGet`, Phase 8.5):
+**GET flow** (s3_engine_adapter.go `handleChunkedGet`, Phase 8.5 → streaming in 8.6):
 1. `HandleGet` reads `is_chunked` from `object_head_cache`; if set and `gci != nil`, branches before the normal `engine.Get`
-2. `GetObjectChunks` → ordered manifest; per chunk `LookupChunk` → storage key + `BackendID` (used to `HintBackend` so retrieval is deterministic after a cold restart)
-3. Sequential `engine.Get(_global, "_chunks/{sha256}")` per chunk, concatenated into a buffer in `chunk_index` order (byte-identical to upload → plaintext ETag matches). Cross-bucket and cross-tenant dedup retrieval both work because chunks live in the shared `_global` container.
-4. Serves with full headers + range support (range = slice of the buffered object). On any pre-write failure, falls through to the normal path (→ NoSuchKey). HEAD needs no chunk-aware logic — `object_head_cache` already holds plaintext size/ETag.
+2. Preflight: `GetObjectChunks` → ordered manifest; per chunk `LookupChunk` resolves storage key + `BackendID` + `SizeBytes` WITHOUT reading data. A missing index entry → return error → caller falls through (→ NoSuchKey). Done before any byte is written.
+3. **Bounded streaming** (8.6): each chunk is read into a bounded buffer (≤ max chunk size, ~16 MB) via `fetchAndVerifyChunk` (`HintBackend` → `engine.Get(_global, "_chunks/{sha256}")`), its SHA-256 verified against the expected plaintext hash, then written to the response. Peak memory is ONE chunk, not the whole object (was a full `bytes.Buffer` in 8.5 — violated "always stream"). Order is `chunk_index` ASC → byte-identical to upload → plaintext ETag matches. Cross-bucket/cross-tenant retrieval works because chunks live in shared `_global`.
+4. Range requests touch only chunks overlapping `[start,end]`, located via `tenant_chunk_refs.chunk_offset` + per-chunk `SizeBytes`; the first/last overlapping chunks are trimmed (`skip`/`take`). No whole-object materialization.
+5. **Integrity** (8.6): corrupt chunk (sha256 mismatch) → never served. First-chunk corruption → clean 500 (`errChunkIntegrity`, handled here, NOT a fallthrough to 404 — corrupt ≠ missing). Mid-stream failure → body aborted (short read the client detects), status already committed. HEAD needs no chunk-aware logic — `object_head_cache` already holds plaintext size/ETag.
 
 **Constraints**: chunking is mutually exclusive with SSE-S3/SSE-C in this phase. Convergent encryption (Phase 10) will enable per-chunk encryption + dedup.
 
