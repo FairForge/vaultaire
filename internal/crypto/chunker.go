@@ -1,6 +1,7 @@
 package crypto
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -107,8 +108,16 @@ func (c *FastCDCChunker) Polynomial() uint64 {
 	return uint64(c.pol)
 }
 
-// Chunk splits a reader into content-defined chunks
+// Chunk splits a reader into content-defined chunks.
+// Delegates to ChunkContext with a background context.
 func (c *FastCDCChunker) Chunk(r io.Reader) (<-chan ChunkResult, error) {
+	return c.ChunkContext(context.Background(), r)
+}
+
+// ChunkContext splits a reader into content-defined chunks, respecting ctx
+// cancellation. If ctx is cancelled the goroutine exits promptly instead of
+// blocking on a full channel send.
+func (c *FastCDCChunker) ChunkContext(ctx context.Context, r io.Reader) (<-chan ChunkResult, error) {
 	ch := make(chan ChunkResult, 10) // Buffer for smooth streaming
 
 	go func() {
@@ -126,7 +135,10 @@ func (c *FastCDCChunker) Chunk(r io.Reader) (<-chan ChunkResult, error) {
 				break
 			}
 			if err != nil {
-				ch <- ChunkResult{Err: fmt.Errorf("chunking failed at offset %d: %w", offset, err)}
+				select {
+				case ch <- ChunkResult{Err: fmt.Errorf("chunking failed at offset %d: %w", offset, err)}:
+				case <-ctx.Done():
+				}
 				return
 			}
 
@@ -137,7 +149,8 @@ func (c *FastCDCChunker) Chunk(r io.Reader) (<-chan ChunkResult, error) {
 			// Calculate hash
 			hash := sha256.Sum256(data)
 
-			ch <- ChunkResult{
+			select {
+			case ch <- ChunkResult{
 				Chunk: Chunk{
 					Data:   data,
 					Hash:   hex.EncodeToString(hash[:]),
@@ -145,15 +158,14 @@ func (c *FastCDCChunker) Chunk(r io.Reader) (<-chan ChunkResult, error) {
 					Offset: offset,
 					Index:  index,
 				},
+			}:
+			case <-ctx.Done():
+				return
 			}
 
 			offset += int64(chunk.Length)
 			index++
 		}
-
-		// Mark final chunk if we produced any
-		// Note: The channel is already closed by defer, so we can't modify sent chunks
-		// Instead, consumers should check for channel close as the "final" signal
 	}()
 
 	return ch, nil

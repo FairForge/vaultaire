@@ -2,6 +2,7 @@ package crypto
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -485,6 +486,47 @@ func BenchmarkFixedChunker_10MB(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		_, _ = chunker.ChunkBytes(data)
 	}
+}
+
+func TestChunker_ChunkContext_Cancellation(t *testing.T) {
+	chunker, err := NewFastCDCChunker(512, 1024, 2048)
+	if err != nil {
+		t.Fatalf("Failed to create chunker: %v", err)
+	}
+
+	data := make([]byte, 50*1024)
+	if _, err := rand.Read(data); err != nil {
+		t.Fatalf("Failed to generate random data: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ch, err := chunker.ChunkContext(ctx, bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("ChunkContext failed: %v", err)
+	}
+
+	// Read exactly one chunk, then cancel.
+	result, ok := <-ch
+	if !ok {
+		t.Fatal("channel closed before first chunk")
+	}
+	if result.Err != nil {
+		t.Fatalf("first chunk error: %v", result.Err)
+	}
+	if result.Chunk.Index != 0 {
+		t.Errorf("first chunk index = %d, want 0", result.Chunk.Index)
+	}
+
+	cancel()
+
+	// Drain remaining — channel must close promptly (goroutine exits).
+	drained := 0
+	for range ch {
+		drained++
+	}
+	// We don't assert drained == 0 because a few buffered results may already
+	// be in the channel. The important thing is the channel closes (no deadlock).
+	t.Logf("drained %d buffered results after cancel", drained)
 }
 
 func BenchmarkFastCDCChunker_Streaming_100MB(b *testing.B) {
