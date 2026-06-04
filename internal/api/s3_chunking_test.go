@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/FairForge/vaultaire/internal/crypto"
+	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -866,3 +867,107 @@ func TestGCI_IntegrationWithMigration(t *testing.T) {
 		_, _ = f.db.Exec("DELETE FROM global_content_index WHERE plaintext_hash = $1", hash)
 	})
 }
+
+// TestHandlePut_ChunkedUpload_LazyReader drives HandlePut with an io.LimitReader
+// over a repeating pattern — the TEST never holds the whole object in a single
+// buffer. Verifies the streaming upload path doesn't materialise the whole body.
+func TestHandlePut_ChunkedUpload_LazyReader(t *testing.T) {
+	f := setupChunkingFixture(t)
+
+	// patternReader repeats a small seed indefinitely; wrapping it in
+	// io.LimitReader gives a stream of known bytes with no large allocation.
+	seed := make([]byte, 4096)
+	_, _ = rand.Read(seed)
+	objSize := int64(32 * 1024) // 32 KB — well above the 1 KB threshold
+	body := io.LimitReader(&patternReader{seed: seed}, objSize)
+
+	req := httptest.NewRequest("PUT", "/test-bucket/lazy.bin", body)
+	req.ContentLength = objSize
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	w := httptest.NewRecorder()
+	f.adapter.HandlePut(w, req, "test-bucket", "lazy.bin")
+
+	require.Equal(t, http.StatusOK, w.Code, "streaming chunked PUT from lazy reader must succeed")
+	assert.NotEmpty(t, w.Header().Get("ETag"))
+
+	var isChunked bool
+	require.NoError(t, f.db.QueryRow(`
+		SELECT is_chunked FROM object_head_cache
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+		f.tenantID, "test-bucket", "lazy.bin").Scan(&isChunked))
+	require.True(t, isChunked)
+
+	// GET and verify content hash matches what LimitReader would produce.
+	expected := makeLimitedPattern(seed, int(objSize))
+	gw := getChunkedAs(t, f, f.tenant, "test-bucket", "lazy.bin")
+	require.Equal(t, http.StatusOK, gw.Code)
+	assert.Equal(t, expected, gw.Body.Bytes(), "GET must return the exact lazy-reader bytes")
+}
+
+// patternReader repeats seed forever — for use with io.LimitReader.
+type patternReader struct {
+	seed []byte
+	pos  int
+}
+
+func (r *patternReader) Read(p []byte) (int, error) {
+	n := 0
+	for n < len(p) {
+		copied := copy(p[n:], r.seed[r.pos:])
+		n += copied
+		r.pos = (r.pos + copied) % len(r.seed)
+	}
+	return n, nil
+}
+
+func makeLimitedPattern(seed []byte, size int) []byte {
+	out := make([]byte, size)
+	for i := 0; i < size; {
+		i += copy(out[i:], seed)
+	}
+	return out
+}
+
+// TestHandlePut_ChunkedUpload_BackendFailureReturns5xx verifies that when the
+// backend engine.Put fails mid-stream, HandlePut returns 5xx and does NOT
+// create a 0-byte object_head_cache row (the old fallthrough bug).
+func TestHandlePut_ChunkedUpload_BackendFailureReturns5xx(t *testing.T) {
+	f := setupChunkingFixture(t)
+
+	// Replace the primary driver with one that always fails on Put.
+	f.eng.AddDriver("local", &failingPutDriver{})
+	f.eng.SetPrimary("local")
+
+	content := generateTestData(8 * 1024)
+	req := httptest.NewRequest("PUT", "/test-bucket/fail.bin", bytes.NewReader(content))
+	req.ContentLength = int64(len(content))
+	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	w := httptest.NewRecorder()
+	f.adapter.HandlePut(w, req, "test-bucket", "fail.bin")
+
+	require.GreaterOrEqual(t, w.Code, 500, "backend failure must yield 5xx, not 200")
+
+	// Must NOT have created a 0-byte or any object_head_cache row.
+	var count int
+	require.NoError(t, f.db.QueryRow(`
+		SELECT COUNT(*) FROM object_head_cache
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+		f.tenantID, "test-bucket", "fail.bin").Scan(&count))
+	assert.Equal(t, 0, count, "failed chunked upload must not leave a cache row")
+}
+
+// failingPutDriver wraps engine.Driver with a Put that always errors.
+type failingPutDriver struct{}
+
+func (d *failingPutDriver) Name() string { return "failing" }
+func (d *failingPutDriver) Get(_ context.Context, _, _ string) (io.ReadCloser, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+func (d *failingPutDriver) Put(_ context.Context, _, _ string, _ io.Reader, _ ...engine.PutOption) error {
+	return fmt.Errorf("injected backend failure")
+}
+func (d *failingPutDriver) Delete(_ context.Context, _, _ string) error           { return nil }
+func (d *failingPutDriver) List(_ context.Context, _, _ string) ([]string, error) { return nil, nil }
+func (d *failingPutDriver) Exists(_ context.Context, _, _ string) (bool, error)   { return false, nil }
+func (d *failingPutDriver) HealthCheck(_ context.Context) error                   { return nil }

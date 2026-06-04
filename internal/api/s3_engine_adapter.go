@@ -655,8 +655,16 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 			if chunkErr == nil {
 				return
 			}
-			a.logger.Warn("chunked upload failed, falling through to normal path",
-				zap.Error(chunkErr))
+			a.logger.Error("chunked upload failed",
+				zap.Error(chunkErr),
+				zap.String("bucket", bucket),
+				zap.String("key", artifact))
+			if errors.Is(chunkErr, engine.ErrAllBackendsUnavailable) {
+				WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
+			} else {
+				WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			}
+			return
 		}
 	}
 
@@ -824,44 +832,39 @@ func (a *S3ToEngine) handleChunkedPut(
 ) error {
 	ctx := r.Context()
 
-	plaintext, err := io.ReadAll(hashingBody)
-	if err != nil {
-		return fmt.Errorf("read body for chunking: %w", err)
-	}
-
 	chunker, err := crypto.DefaultFastCDCChunker()
 	if err != nil {
 		return fmt.Errorf("create chunker: %w", err)
 	}
 
-	chunks, err := chunker.ChunkBytes(plaintext)
+	chunkCh, err := chunker.ChunkContext(ctx, hashingBody)
 	if err != nil {
-		return fmt.Errorf("chunk bytes: %w", err)
-	}
-
-	hashes := make([]string, len(chunks))
-	for i, c := range chunks {
-		hashes[i] = c.Hash
-	}
-
-	lookups, err := a.gci.LookupChunks(ctx, hashes)
-	if err != nil {
-		return fmt.Errorf("lookup chunks: %w", err)
+		return fmt.Errorf("start streaming chunker: %w", err)
 	}
 
 	var physicalSize int64
+	var measuredSize int64
+	var chunkCount int
 	backendName := "chunked"
 
-	// Store/dedup each chunk's data and global index entry, and collect the new
-	// manifest. New chunks are ref-counted up front (InsertChunk/IncrementRef);
-	// the manifest itself is swapped in atomically below so an overwrite never
-	// leaves stale refs or leaks the previous version's chunk references.
-	newRefs := make([]crypto.TenantChunkRef, 0, len(chunks))
-	for _, chunk := range chunks {
-		result := lookups[chunk.Hash]
+	newRefs := make([]crypto.TenantChunkRef, 0, 16)
+	for result := range chunkCh {
+		if result.Err != nil {
+			return fmt.Errorf("chunking stream: %w", result.Err)
+		}
+
+		chunk := &result.Chunk
+		measuredSize += int64(chunk.Size)
+		chunkCount++
+
+		lookup, lookupErr := a.gci.LookupChunk(ctx, chunk.Hash)
+		if lookupErr != nil {
+			return fmt.Errorf("lookup chunk %s: %w", chunk.Hash[:16], lookupErr)
+		}
+
 		storageKey := "_chunks/" + chunk.Hash
 
-		if result.IsNewChunk {
+		if lookup.IsNewChunk {
 			chunkOpts := []engine.PutOption{engine.WithContentLength(int64(chunk.Size))}
 			bn, putErr := a.engine.Put(ctx, chunkContainer, storageKey, bytes.NewReader(chunk.Data), chunkOpts...)
 			if putErr != nil {
@@ -899,11 +902,11 @@ func (a *S3ToEngine) handleChunkedPut(
 	}
 
 	if physicalSize == 0 {
-		physicalSize = metadataSize
+		physicalSize = measuredSize
 	}
 	dedupRatio := float32(1.0)
 	if physicalSize > 0 {
-		dedupRatio = float32(metadataSize) / float32(physicalSize)
+		dedupRatio = float32(measuredSize) / float32(physicalSize)
 	}
 
 	contentType := r.Header.Get("Content-Type")
@@ -917,10 +920,10 @@ func (a *S3ToEngine) handleChunkedPut(
 		TenantID:     tenantUUID,
 		BucketName:   bucket,
 		ObjectKey:    artifact,
-		TotalSize:    metadataSize,
-		ChunkCount:   len(chunks),
+		TotalSize:    measuredSize,
+		ChunkCount:   chunkCount,
 		ContentType:  &contentType,
-		LogicalSize:  metadataSize,
+		LogicalSize:  measuredSize,
 		PhysicalSize: &physicalSize,
 		DedupRatio:   &dedupRatio,
 	}); metaErr != nil {
@@ -949,7 +952,7 @@ func (a *S3ToEngine) handleChunkedPut(
 				content_disposition   = EXCLUDED.content_disposition,
 				is_chunked            = EXCLUDED.is_chunked,
 				updated_at            = NOW()
-		`, t.ID, bucket, artifact, metadataSize, etag, contentType, backendName, metaJSON, contentDisposition)
+		`, t.ID, bucket, artifact, measuredSize, etag, contentType, backendName, metaJSON, contentDisposition)
 	}
 
 	versionID := ""
@@ -972,7 +975,7 @@ func (a *S3ToEngine) handleChunkedPut(
 				size_bytes = EXCLUDED.size_bytes, etag = EXCLUDED.etag,
 				content_type = EXCLUDED.content_type, is_latest = TRUE,
 				is_delete_marker = FALSE, backend_name = EXCLUDED.backend_name`,
-			t.ID, bucket, artifact, versionID, metadataSize, etag, contentType, backendName)
+			t.ID, bucket, artifact, versionID, measuredSize, etag, contentType, backendName)
 	}
 
 	applyObjectLockOnPut(ctx, a.db, t.ID, bucket, artifact, r)
@@ -984,19 +987,19 @@ func (a *S3ToEngine) handleChunkedPut(
 	}
 	w.WriteHeader(http.StatusOK)
 
-	a.logger.Info("chunked artifact stored",
+	a.logger.Info("chunked artifact stored (streaming)",
 		zap.String("tenant_id", t.ID),
 		zap.String("s3.bucket", bucket),
 		zap.String("s3.object", artifact),
 		zap.String("backend", backendName),
 		zap.String("etag", etag),
-		zap.Int("chunks", len(chunks)),
+		zap.Int("chunks", chunkCount),
 		zap.Float32("dedup_ratio", dedupRatio),
-		zap.Int64("size", metadataSize))
+		zap.Int64("size", measuredSize))
 
-	a.notifySvc.Fire(t.ID, bucket, "s3:ObjectCreated:Put", artifact, metadataSize, etag)
+	a.notifySvc.Fire(t.ID, bucket, "s3:ObjectCreated:Put", artifact, measuredSize, etag)
 	emitEvent(ctx, a.db, a.logger, "object.created", t.ID, map[string]interface{}{
-		"bucket": bucket, "key": artifact, "size": metadataSize, "etag": etag, "chunked": true,
+		"bucket": bucket, "key": artifact, "size": measuredSize, "etag": etag, "chunked": true,
 	})
 
 	return nil
