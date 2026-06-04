@@ -852,6 +852,11 @@ func (a *S3ToEngine) handleChunkedPut(
 	var physicalSize int64
 	backendName := "chunked"
 
+	// Store/dedup each chunk's data and global index entry, and collect the new
+	// manifest. New chunks are ref-counted up front (InsertChunk/IncrementRef);
+	// the manifest itself is swapped in atomically below so an overwrite never
+	// leaves stale refs or leaks the previous version's chunk references.
+	newRefs := make([]crypto.TenantChunkRef, 0, len(chunks))
 	for _, chunk := range chunks {
 		result := lookups[chunk.Hash]
 		storageKey := "_chunks/" + chunk.Hash
@@ -882,7 +887,7 @@ func (a *S3ToEngine) handleChunkedPut(
 			}
 		}
 
-		if refErr := a.gci.AddTenantChunkRef(ctx, &crypto.TenantChunkRef{
+		newRefs = append(newRefs, crypto.TenantChunkRef{
 			TenantID:             tenantUUID,
 			BucketName:           bucket,
 			ObjectKey:            artifact,
@@ -890,9 +895,7 @@ func (a *S3ToEngine) handleChunkedPut(
 			ChunkOffset:          chunk.Offset,
 			PlaintextHash:        chunk.Hash,
 			EncryptionKeyVersion: 1,
-		}); refErr != nil {
-			return fmt.Errorf("add tenant chunk ref: %w", refErr)
-		}
+		})
 	}
 
 	if physicalSize == 0 {
@@ -908,7 +911,9 @@ func (a *S3ToEngine) handleChunkedPut(
 		contentType = "application/octet-stream"
 	}
 
-	if metaErr := a.gci.SaveObjectMetadata(ctx, &crypto.ObjectMeta{
+	// Atomically install the new manifest and release any previous version's
+	// chunk references (single transaction — no stale refs, no ref leak).
+	if metaErr := a.gci.ReplaceObjectManifest(ctx, tenantUUID, bucket, artifact, newRefs, &crypto.ObjectMeta{
 		TenantID:     tenantUUID,
 		BucketName:   bucket,
 		ObjectKey:    artifact,
@@ -919,7 +924,7 @@ func (a *S3ToEngine) handleChunkedPut(
 		PhysicalSize: &physicalSize,
 		DedupRatio:   &dedupRatio,
 	}); metaErr != nil {
-		return fmt.Errorf("save object metadata: %w", metaErr)
+		return fmt.Errorf("replace object manifest: %w", metaErr)
 	}
 
 	etag := fmt.Sprintf("%x", hasher.Sum(nil))
