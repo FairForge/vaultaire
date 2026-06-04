@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/md5" // #nosec G501 — S3 spec requires MD5 for ETags
+	"crypto/md5"    // #nosec G501 — S3 spec requires MD5 for ETags
+	"crypto/sha256" // chunk integrity verification on read
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -979,17 +981,68 @@ func (a *S3ToEngine) handleChunkedPut(
 	return nil
 }
 
-// handleChunkedGet reassembles a chunked object from its individual chunk
-// storage keys and serves it. The object was stored by handleChunkedPut as an
-// ordered sequence of content-defined chunks under "_chunks/{sha256}" keys,
-// deduplicated through the GCI. Chunks are concatenated in chunk_index order so
-// the result is byte-identical to the original upload (its plaintext ETag).
+// errChunkIntegrity signals that a fetched chunk's bytes did not hash to its
+// expected plaintext hash. The object exists but is corrupt — this is distinct
+// from a missing/unresolvable manifest (which falls through to NoSuchKey).
+var errChunkIntegrity = errors.New("chunk integrity verification failed")
+
+// chunkDesc is a resolved chunk location + its byte position within the object.
+type chunkDesc struct {
+	storageKey    string
+	backendID     string
+	plaintextHash string
+	offset        int64 // byte offset of this chunk within the object
+	size          int64 // chunk size in bytes
+}
+
+// fetchAndVerifyChunk reads one chunk from the global container into a bounded
+// buffer (≤ max chunk size, ~16 MB) and verifies its SHA-256 matches the
+// expected plaintext hash before returning it. Verifying before the bytes are
+// written guarantees corrupt data is never served, and the per-chunk read keeps
+// peak memory at one chunk regardless of object size.
+func (a *S3ToEngine) fetchAndVerifyChunk(ctx context.Context, d chunkDesc) ([]byte, error) {
+	// Hint the backend that holds this chunk so retrieval is deterministic after
+	// a restart (when the engine's in-memory routing map is cold).
+	if d.backendID != "" {
+		if ce, ok := a.engine.(*engine.CoreEngine); ok {
+			ce.HintBackend(chunkContainer, d.storageKey, d.backendID)
+		}
+	}
+
+	rdr, err := a.engine.Get(ctx, chunkContainer, d.storageKey)
+	if err != nil {
+		return nil, fmt.Errorf("fetch chunk %s: %w", d.plaintextHash[:16], err)
+	}
+	defer func() { _ = rdr.Close() }()
+
+	data, err := io.ReadAll(rdr)
+	if err != nil {
+		return nil, fmt.Errorf("read chunk %s: %w", d.plaintextHash[:16], err)
+	}
+
+	sum := sha256.Sum256(data)
+	if hex.EncodeToString(sum[:]) != d.plaintextHash {
+		return nil, fmt.Errorf("%w: chunk %s (%d bytes)", errChunkIntegrity, d.plaintextHash[:16], len(data))
+	}
+	return data, nil
+}
+
+// handleChunkedGet serves a chunked object by streaming its content-defined
+// chunks one at a time, in chunk_index order, directly to the response writer.
+// Each chunk is read into a bounded buffer (~16 MB max) and integrity-verified
+// before its bytes are written, so peak memory is one chunk — not the whole
+// object — and corrupt data is never served. Range requests touch only the
+// chunks that overlap the requested byte range (located via chunk_offset).
 //
-// The full object is buffered in memory before any response bytes are written:
-// every error path returns before the first header is set, so the caller can
-// safely fall through to the normal GET path. SSE-C/SSE-S3 decryption is not
-// handled — chunking is mutually exclusive with encryption by construction in
-// HandlePut, so chunked objects are never encrypted.
+// Fallthrough contract: the manifest is fully resolved (all chunk index entries
+// present) BEFORE any byte is written, so a resolution failure returns an error
+// and the caller falls through to the normal GET path. Once the first chunk is
+// committed the status is fixed; a later integrity/fetch failure aborts the body
+// (a short read the client detects) rather than serving bad bytes. A corrupt
+// FIRST chunk yields a clean 500 (handled here — never a fallthrough to 404).
+//
+// SSE-C/SSE-S3 decryption is not handled — chunking is mutually exclusive with
+// encryption by construction in HandlePut, so chunked objects are never encrypted.
 func (a *S3ToEngine) handleChunkedGet(
 	w http.ResponseWriter, r *http.Request,
 	t *tenant.Tenant,
@@ -1020,45 +1073,30 @@ func (a *S3ToEngine) handleChunkedGet(
 		return fmt.Errorf("no chunk references for %s/%s", bucket, artifact)
 	}
 
-	// Reassemble in chunk_index order (GetObjectChunks sorts ASC). Sequential
-	// fetch is fine for launch — typical chunked objects have 4-16 chunks.
-	// Parallel prefetch is a future optimization.
-	var buf bytes.Buffer
-	if cachedSize > 0 {
-		buf.Grow(int(cachedSize))
-	}
-	for _, ref := range refs {
+	// Preflight: resolve every chunk's location from the index without reading
+	// data. A missing index entry means the manifest is unresolvable — return an
+	// error so HandleGet falls through (→ NoSuchKey) before any byte is written.
+	descs := make([]chunkDesc, len(refs))
+	for i, ref := range refs {
 		lookup, lookupErr := a.gci.LookupChunk(ctx, ref.PlaintextHash)
 		if lookupErr != nil {
 			return fmt.Errorf("lookup chunk %s: %w", ref.PlaintextHash[:16], lookupErr)
 		}
-		storageKey := "_chunks/" + ref.PlaintextHash
-		if lookup != nil && lookup.Entry != nil && lookup.Entry.StorageKey != "" {
-			storageKey = lookup.Entry.StorageKey
+		if lookup == nil || lookup.Entry == nil {
+			return fmt.Errorf("chunk %s missing from index", ref.PlaintextHash[:16])
 		}
-
-		// Chunks live in the shared global container (dedup spans tenants), not
-		// this tenant's namespace. Hint the backend that actually holds the
-		// chunk so retrieval is deterministic after a restart (when the engine's
-		// in-memory routing map is cold).
-		if lookup != nil && lookup.Entry != nil && lookup.Entry.BackendID != "" {
-			if ce, ok := a.engine.(*engine.CoreEngine); ok {
-				ce.HintBackend(chunkContainer, storageKey, lookup.Entry.BackendID)
-			}
+		storageKey := lookup.Entry.StorageKey
+		if storageKey == "" {
+			storageKey = "_chunks/" + ref.PlaintextHash
 		}
-
-		chunkReader, getErr := a.engine.Get(ctx, chunkContainer, storageKey)
-		if getErr != nil {
-			return fmt.Errorf("fetch chunk %s: %w", ref.PlaintextHash[:16], getErr)
-		}
-		_, copyErr := io.Copy(&buf, chunkReader)
-		_ = chunkReader.Close()
-		if copyErr != nil {
-			return fmt.Errorf("read chunk %s: %w", ref.PlaintextHash[:16], copyErr)
+		descs[i] = chunkDesc{
+			storageKey:    storageKey,
+			backendID:     lookup.Entry.BackendID,
+			plaintextHash: ref.PlaintextHash,
+			offset:        ref.ChunkOffset,
+			size:          lookup.Entry.SizeBytes,
 		}
 	}
-
-	data := buf.Bytes()
 
 	contentType := cachedContentType
 	if contentType == "" {
@@ -1066,9 +1104,8 @@ func (a *S3ToEngine) handleChunkedGet(
 	}
 
 	// Content-Disposition: ?response-content-disposition overrides the stored
-	// value (part of the signed request). Set before the range branch so both
-	// 200 and 206 responses carry it. From here on every path writes a response,
-	// so no caller fallthrough occurs.
+	// value (part of the signed request). Header mutations before the first
+	// WriteHeader are buffered, so this is safe to set up front.
 	disposition := r.URL.Query().Get("response-content-disposition")
 	if disposition == "" {
 		disposition = cachedContentDisposition
@@ -1077,63 +1114,154 @@ func (a *S3ToEngine) handleChunkedGet(
 		w.Header().Set("Content-Disposition", disposition)
 	}
 
-	// Range requests: serve a slice of the already-materialized object.
-	rangeHeader := r.Header.Get("Range")
-	if rangeHeader != "" && cachedSize > 0 {
-		rng, parseErr := parseRangeHeader(rangeHeader, cachedSize)
+	// Build the byte plan: which chunks to read and the (skip, take) slice within
+	// each. Full GET takes every chunk whole; a range takes only overlapping
+	// chunks, trimmed to the requested bounds.
+	type chunkSlice struct {
+		desc chunkDesc
+		skip int64
+		take int64
+	}
+	var (
+		plan    []chunkSlice
+		rng     *httpRange
+		isRange bool
+	)
+	if rh := r.Header.Get("Range"); rh != "" && cachedSize > 0 {
+		parsed, parseErr := parseRangeHeader(rh, cachedSize)
 		if parseErr != nil {
 			writeRangeNotSatisfiable(w, cachedSize)
 			return nil
 		}
+		rng = parsed
+		isRange = true
+		for _, d := range descs {
+			chunkStart := d.offset
+			chunkEnd := d.offset + d.size - 1
+			if chunkEnd < rng.start {
+				continue
+			}
+			if chunkStart > rng.end {
+				break
+			}
+			skip := int64(0)
+			if rng.start > chunkStart {
+				skip = rng.start - chunkStart
+			}
+			takeEnd := chunkEnd
+			if rng.end < takeEnd {
+				takeEnd = rng.end
+			}
+			plan = append(plan, chunkSlice{desc: d, skip: skip, take: takeEnd - (chunkStart + skip) + 1})
+		}
+	} else {
+		for _, d := range descs {
+			plan = append(plan, chunkSlice{desc: d, skip: 0, take: d.size})
+		}
+	}
+
+	write200Headers := func() {
+		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("x-amz-request-id", generateRequestID())
 		if w.Header().Get("x-amz-version-id") == "" {
 			w.Header().Set("x-amz-version-id", "null")
 		}
-		if serveErr := serveRange(w, bytes.NewReader(data), rng, cachedSize, contentType); serveErr != nil {
-			a.logger.Error("chunked range serve failed",
-				zap.Error(serveErr),
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Cache-Control", "private, no-cache")
+		w.Header().Set("x-amz-storage-class", engine.BackendToStorageClass(cachedBackendName))
+		if cachedSize > 0 {
+			w.Header().Set("Content-Length", strconv.FormatInt(cachedSize, 10))
+		}
+		if cachedETag != "" {
+			w.Header().Set("ETag", fmt.Sprintf(`"%s"`, cachedETag))
+		}
+		if !cachedUpdatedAt.IsZero() {
+			w.Header().Set("Last-Modified", cachedUpdatedAt.UTC().Format(http.TimeFormat))
+		}
+		setS3MetadataHeaders(w, cachedMetadata)
+		if n := tagCount(cachedTags); n > 0 {
+			w.Header().Set("x-amz-tagging-count", strconv.Itoa(n))
+		}
+	}
+	write206Headers := func() {
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", rng.start, rng.end, cachedSize))
+		w.Header().Set("Content-Length", strconv.FormatInt(rng.length, 10))
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("x-amz-request-id", generateRequestID())
+		if w.Header().Get("x-amz-version-id") == "" {
+			w.Header().Set("x-amz-version-id", "null")
+		}
+		w.WriteHeader(http.StatusPartialContent)
+	}
+
+	// Stream the plan. The first chunk is fetched + verified BEFORE headers are
+	// committed, so a corrupt first chunk produces a clean 500. After that the
+	// status is fixed; a failure aborts the body without serving bad bytes.
+	headersWritten := false
+	var written int64
+	for _, p := range plan {
+		data, ferr := a.fetchAndVerifyChunk(ctx, p.desc)
+		if ferr != nil {
+			if !headersWritten {
+				if errors.Is(ferr, errChunkIntegrity) {
+					a.logger.Error("chunk integrity verification failed",
+						zap.Error(ferr),
+						zap.String("bucket", bucket),
+						zap.String("artifact", artifact),
+						zap.String("chunk", p.desc.plaintextHash))
+					WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+					return nil
+				}
+				// Unresolved/unavailable before any byte is written — fall through.
+				return ferr
+			}
+			a.logger.Error("chunk failure mid-stream; aborting response",
+				zap.Error(ferr),
+				zap.String("bucket", bucket),
+				zap.String("artifact", artifact))
+			return nil
+		}
+
+		if !headersWritten {
+			if isRange {
+				write206Headers()
+			} else {
+				write200Headers()
+			}
+			headersWritten = true
+		}
+
+		slice := data
+		if p.skip != 0 || p.take != int64(len(data)) {
+			end := p.skip + p.take
+			if end > int64(len(data)) {
+				end = int64(len(data))
+			}
+			slice = data[p.skip:end]
+		}
+		n, werr := w.Write(slice)
+		written += int64(n)
+		if werr != nil {
+			a.logger.Error("failed to stream chunk to client",
+				zap.Error(werr),
 				zap.String("container", container),
 				zap.String("artifact", artifact))
+			return nil
 		}
-		return nil
 	}
 
-	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("x-amz-request-id", generateRequestID())
-	if w.Header().Get("x-amz-version-id") == "" {
-		w.Header().Set("x-amz-version-id", "null")
-	}
-	w.Header().Set("Accept-Ranges", "bytes")
-	w.Header().Set("Cache-Control", "private, no-cache")
-	w.Header().Set("x-amz-storage-class", engine.BackendToStorageClass(cachedBackendName))
-	if cachedSize > 0 {
-		w.Header().Set("Content-Length", strconv.FormatInt(cachedSize, 10))
-	}
-	if cachedETag != "" {
-		w.Header().Set("ETag", fmt.Sprintf(`"%s"`, cachedETag))
-	}
-	if !cachedUpdatedAt.IsZero() {
-		w.Header().Set("Last-Modified", cachedUpdatedAt.UTC().Format(http.TimeFormat))
-	}
-	setS3MetadataHeaders(w, cachedMetadata)
-	if n := tagCount(cachedTags); n > 0 {
-		w.Header().Set("x-amz-tagging-count", strconv.Itoa(n))
-	}
-
-	written, err := io.Copy(w, bytes.NewReader(data))
-	if err != nil {
-		a.logger.Error("failed to stream chunked artifact",
-			zap.Error(err),
-			zap.String("container", container),
-			zap.String("artifact", artifact))
-		return nil
+	// Defensive: a zero-length object/plan still gets a valid response.
+	if !headersWritten {
+		write200Headers()
+		w.WriteHeader(http.StatusOK)
 	}
 
 	a.logger.Info("chunked artifact retrieved",
 		zap.String("s3.bucket", bucket),
 		zap.String("s3.object", artifact),
 		zap.String("engine.container", container),
-		zap.Int("chunks", len(refs)),
+		zap.Int("chunks", len(plan)),
 		zap.Int64("bytes", written))
 
 	emitEvent(ctx, a.db, a.logger, "object.downloaded", t.ID, map[string]interface{}{

@@ -312,6 +312,68 @@ func TestHandleGet_ChunkedDedup_CrossTenant(t *testing.T) {
 	assert.Equal(t, content, gw.Body.Bytes())
 }
 
+// TestHandleGet_ChunkedObject_MultiChunkRanges exercises range requests that
+// span chunk boundaries on a multi-chunk (20 MB) object — the streaming range
+// path that selects only overlapping chunks via chunk_offset.
+func TestHandleGet_ChunkedObject_MultiChunkRanges(t *testing.T) {
+	f := setupChunkingFixture(t)
+	content := generateTestData(20 * 1024 * 1024)
+	putChunkedObject(t, f, "ranges.bin", content, "application/octet-stream")
+	total := len(content)
+
+	cases := []struct {
+		name   string
+		hdr    string
+		lo, hi int // [lo, hi)
+	}{
+		{"spans-multiple-chunks", "bytes=500000-15000000", 500000, 15000001},
+		{"suffix", "bytes=-1048576", total - 1048576, total},
+		{"open-ended", "bytes=18000000-", 18000000, total},
+		{"single-byte", "bytes=10000000-10000000", 10000000, 10000001},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/test-bucket/ranges.bin", nil)
+			req.Header.Set("Range", tc.hdr)
+			req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+			w := httptest.NewRecorder()
+			f.adapter.HandleGet(w, req, "test-bucket", "ranges.bin")
+
+			require.Equal(t, http.StatusPartialContent, w.Code)
+			assert.Equal(t, content[tc.lo:tc.hi], w.Body.Bytes(), "range slice must be exact")
+			assert.Equal(t, strconv.Itoa(tc.hi-tc.lo), w.Header().Get("Content-Length"))
+			assert.Equal(t, fmt.Sprintf("bytes %d-%d/%d", tc.lo, tc.hi-1, total), w.Header().Get("Content-Range"))
+		})
+	}
+}
+
+// TestHandleGet_ChunkedObject_CorruptChunk verifies read-time integrity: if a
+// stored chunk's bytes no longer hash to its plaintext_hash, the corrupt data
+// must NOT be served (200), and the failure is surfaced as 500 (the object
+// exists but is corrupt) rather than falling through to 404.
+func TestHandleGet_ChunkedObject_CorruptChunk(t *testing.T) {
+	f := setupChunkingFixture(t)
+	content := generateTestData(8 * 1024) // single chunk
+	putChunkedObject(t, f, "corrupt.bin", content, "application/octet-stream")
+
+	tenantUUID, err := uuid.Parse(f.tenantID)
+	require.NoError(t, err)
+	var hashHex string
+	require.NoError(t, f.db.QueryRow(`
+		SELECT plaintext_hash FROM tenant_chunk_refs
+		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = $3
+		ORDER BY chunk_index LIMIT 1`,
+		tenantUUID, "test-bucket", "corrupt.bin").Scan(&hashHex))
+
+	// Overwrite the chunk's bytes in the shared global container on disk.
+	chunkPath := filepath.Join(f.tempDir, "_global", "_chunks", hashHex)
+	require.NoError(t, os.WriteFile(chunkPath, []byte("corrupted chunk payload — wrong bytes"), 0600))
+
+	gw := getChunkedAs(t, f, f.tenant, "test-bucket", "corrupt.bin")
+	require.Equal(t, http.StatusInternalServerError, gw.Code, "corrupt chunk must not be served as 200")
+	assert.NotEqual(t, content, gw.Body.Bytes(), "original/correct bytes must not be served")
+}
+
 func setupChunkingFixture(t *testing.T) *adapterTestFixture {
 	t.Helper()
 
