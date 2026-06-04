@@ -53,7 +53,11 @@ Encryption, key management, and post-quantum cryptography for Vaultaire.
 2. If chunked → `gci.DeleteObjectChunks` (transactional: deletes refs, decrements counts, deletes object_metadata)
 3. Chunk data stays until GC (Phase 8.7) — `marked_for_deletion=TRUE` when `ref_count=0`
 
-**GET flow**: not yet wired — chunked objects are not retrievable until Phase 8.5 (download pipeline).
+**GET flow** (s3_engine_adapter.go `handleChunkedGet`, Phase 8.5):
+1. `HandleGet` reads `is_chunked` from `object_head_cache`; if set and `gci != nil`, branches before the normal `engine.Get`
+2. `GetObjectChunks` → ordered manifest; per chunk `LookupChunk` → `_chunks/{sha256}` storage key
+3. Sequential `engine.Get` per chunk, concatenated into a buffer in `chunk_index` order (byte-identical to upload → plaintext ETag matches)
+4. Serves with full headers + range support (range = slice of the buffered object). On any pre-write failure, falls through to the normal path (→ NoSuchKey). HEAD needs no chunk-aware logic — `object_head_cache` already holds plaintext size/ETag.
 
 **Constraints**: chunking is mutually exclusive with SSE-S3/SSE-C in this phase. Convergent encryption (Phase 10) will enable per-chunk encryption + dedup.
 
