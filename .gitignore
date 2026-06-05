@@ -140,3 +140,5 @@ bench-results/**/results.csv
 .claude/scheduled_tasks.lock
 cmd/pipeline-bench/
 pipeline-bench
+/dedup-migrate
+/dedup-migrate-linux
