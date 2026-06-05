@@ -33,6 +33,13 @@
     </div>
 </div>
 
+{{if .DedupSavings}}
+<div class="card" style="margin-bottom:1.5rem">
+    <div class="card-title">Deduplication</div>
+    <div class="card-detail">{{.DedupSavings}}</div>
+</div>
+{{end}}
+
 {{if .HasChartData}}
 <div class="card" hx-get="/dashboard/usage" hx-trigger="every 30s" hx-select=".chart-wrap" hx-swap="innerHTML" hx-target=".chart-wrap">
     <div class="card-title">Bandwidth — Last 30 Days</div>

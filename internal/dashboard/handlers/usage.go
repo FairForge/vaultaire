@@ -3,11 +3,14 @@ package handlers
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"html/template"
 	"net/http"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/crypto"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
@@ -39,6 +42,7 @@ func HandleUsage(tmpl *template.Template, db *sql.DB, logger *zap.Logger) http.H
 			populateUsageBandwidth(ctx, db, sd.TenantID, data)
 			populateUsageChart(ctx, db, sd.TenantID, data)
 			populateUsageHistory(ctx, db, sd.TenantID, data)
+			populateDedupSavings(ctx, db, sd.TenantID, data, logger)
 		} else {
 			setUsageDefaults(data)
 		}
@@ -155,6 +159,24 @@ func populateUsageHistory(ctx context.Context, db *sql.DB, tenantID string, data
 		})
 	}
 	data["UsageHistory"] = history
+}
+
+func populateDedupSavings(ctx context.Context, db *sql.DB, tenantID string, data map[string]any, logger *zap.Logger) {
+	tid, err := uuid.Parse(tenantID)
+	if err != nil {
+		return
+	}
+	gci := crypto.NewGlobalContentIndex(db)
+	stats, err := gci.GetTenantDedupStats(ctx, tid)
+	if err != nil {
+		logger.Debug("usage: dedup savings", zap.Error(err))
+		return
+	}
+	if stats.BytesSaved <= 0 {
+		return
+	}
+	pct := float64(stats.BytesSaved) / float64(stats.BytesLogical) * 100
+	data["DedupSavings"] = fmt.Sprintf("You've saved %s (%.0f%%) via deduplication", formatBytes(stats.BytesSaved), pct)
 }
 
 func setUsageDefaults(data map[string]any) {
