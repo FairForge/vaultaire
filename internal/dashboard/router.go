@@ -273,6 +273,10 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		"templates/layouts/admin.html",
 		"templates/admin/costs.html",
 	))
+	dedupTmpl := template.Must(template.ParseFS(Templates,
+		"templates/layouts/admin.html",
+		"templates/admin/dedup.html",
+	))
 	supportTmpl := template.Must(template.ParseFS(Templates,
 		"templates/layouts/admin.html",
 		"templates/admin/support.html",
@@ -318,6 +322,7 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		ar.Get("/waitlist/export", handlers.HandleAdminWaitlistExport(deps.DB, deps.Logger))
 		ar.Get("/revenue", handlers.HandleAdminRevenue(revenueTmpl, deps.DB, deps.Logger))
 		ar.Get("/costs", handlers.HandleAdminCosts(costsTmpl, deps.DB, deps.Logger))
+		ar.Get("/dedup", handlers.HandleAdminDedup(dedupTmpl, deps.DB, deps.Logger))
 		ar.Get("/notifications", handlers.HandleAdminNotifications(notificationsTmpl, deps.DB, deps.Logger))
 		ar.Post("/notifications/read-all", handlers.HandleMarkAllRead(deps.DB, deps.Logger))
 		ar.Post("/notifications/{id}/read", handlers.HandleMarkRead(deps.DB, deps.Logger))

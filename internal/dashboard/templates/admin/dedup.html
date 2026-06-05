@@ -1,0 +1,68 @@
+{{define "title"}}Dedup — stored.ge admin{{end}}
+{{define "content"}}
+<div class="dashboard-header">
+    <h1>Deduplication</h1>
+</div>
+
+<p class="text-muted" style="margin-bottom:1.5rem">Global Content Index deduplication statistics across all chunked objects.</p>
+
+<div class="card-grid">
+    <div class="card">
+        <div class="card-title">Dedup Ratio</div>
+        <div class="card-value">{{.DedupRatio}}</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Storage Saved</div>
+        <div class="card-value">{{.StorageSaved}}</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Logical Size</div>
+        <div class="card-value">{{.LogicalBytes}}</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Physical Size</div>
+        <div class="card-value">{{.PhysicalBytes}}</div>
+    </div>
+</div>
+
+<div class="card-grid" style="grid-template-columns:1fr">
+    <div class="card">
+        <div class="card-title">Chunks in Index</div>
+        <div class="card-value">{{.ChunksProcessed}}</div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title" style="margin-bottom:0.75rem">Per-Tenant Deduplication</div>
+    {{if .TenantTable}}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Tenant</th>
+                    <th style="text-align:right">Logical</th>
+                    <th style="text-align:right">Physical</th>
+                    <th style="text-align:right">Saved</th>
+                    <th style="text-align:right">Saved %</th>
+                    <th style="text-align:right">Ratio</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .TenantTable}}
+                <tr>
+                    <td>{{.Email}}</td>
+                    <td style="text-align:right">{{.LogicalFmt}}</td>
+                    <td style="text-align:right">{{.PhysicalFmt}}</td>
+                    <td style="text-align:right">{{.SavedFmt}}</td>
+                    <td style="text-align:right">{{.SavedPct}}</td>
+                    <td style="text-align:right">{{.DedupRatio}}</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+    {{else}}
+    <p class="text-muted">No tenants with chunked objects.</p>
+    {{end}}
+</div>
+{{end}}

@@ -198,6 +198,26 @@ Hidden when `object_locations` is empty. Complements the estimated ByBackend tab
 Template: `templates/admin/costs.html`. Nil-DB and empty-state both render 200
 with $0.00 zero-state.
 
+## Admin Dedup Dashboard (`admin_dedup.go`)
+
+`HandleAdminDedup(tmpl, db, logger)` — GET `/admin/dedup`: GCI deduplication stats.
+
+Global cards: dedup ratio, storage saved, logical vs physical bytes, chunk count.
+Per-tenant table: queries tenants with `object_metadata` rows, calls
+`crypto.GetTenantDedupStats` per tenant for logical/physical/saved/ratio.
+
+No migration — reads existing `global_content_index`, `object_metadata`, and the
+`get_tenant_dedup_ratio` SQL function from migration 051.
+
+DB errors or nil-DB degrade to zero-state (1.0x ratio, 0 B saved), never 500.
+
+Template: `templates/admin/dedup.html`. Types: `tenantDedupRow`.
+
+**Customer-facing dedup savings** (Phase 8.6): `populateDedupSavings` in `usage.go`
+adds a `DedupSavings` string to the usage page template data (e.g. "You've saved
+4.2 GB (32%) via deduplication") when the tenant has positive `BytesSaved`. Hidden
+when there's no chunked data or the tenant ID isn't a UUID.
+
 ## Admin Customer Support (`admin_support.go`)
 
 Three handlers for the admin customer support view (Phase 3.7):

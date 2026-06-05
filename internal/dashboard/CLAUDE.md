@@ -98,6 +98,7 @@ Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`,
 | `/admin/waitlist/export` | GET | session + admin | Download all waitlist signups as CSV |
 | `/admin/revenue` | GET | session + admin | Revenue dashboard: MRR, tier breakdown, churn, top customers |
 | `/admin/costs` | GET | session + admin | Cost dashboard: backend spend, per-tenant margin, negative-margin alerts |
+| `/admin/dedup` | GET | session + admin | GCI dedup dashboard: global ratio, savings, per-tenant breakdown |
 | `/admin/support` | GET | session + admin | Customer support search (email, tenant ID, access key, Stripe ID) |
 | `/admin/support/{id}` | GET | session + admin | Customer detail: info, timeline, S3 errors, notes, quick actions |
 | `/admin/support/{id}/notes` | POST | session + admin | Add internal admin note on a customer |
