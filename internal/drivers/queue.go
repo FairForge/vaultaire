@@ -81,6 +81,14 @@ func (q *RequestQueue) Submit(ctx context.Context, priority int, fn func() error
 	// Priority is ignored in this simple implementation
 	// Could be added with a heap-based priority queue
 
+	// Reject an already-cancelled context deterministically. Without this, the
+	// enqueue select below races the `q.jobs <- job` case against `<-ctx.Done()`
+	// when both are ready, so a pre-cancelled context would sometimes enqueue the
+	// job and return nil instead of the cancellation error (the CI flake).
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	job := &job{
 		fn:     fn,
 		result: make(chan error, 1),

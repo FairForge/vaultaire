@@ -87,16 +87,17 @@ func TestPipeline_Run(t *testing.T) {
 	})
 
 	t.Run("executes pipeline", func(t *testing.T) {
-		ctx := context.Background()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
 		run, err := pipeline.Run(ctx, &RunOptions{})
 
 		require.NoError(t, err)
 		assert.NotEmpty(t, run.ID())
-		// Run() starts a goroutine, so status may already be "running"
-		// by the time we check. Both are valid initial states.
-		status := run.Status()
-		assert.True(t, status == RunStatusPending || status == RunStatusRunning,
-			"expected pending or running, got %s", status)
+		// Run() executes asynchronously. Wait for it to finish, then assert the
+		// terminal status. Asserting a transient pending/running status here was
+		// racy — the run can complete before the check (the CI flake).
+		require.NoError(t, run.Wait(ctx))
+		assert.Equal(t, RunStatusSuccess, run.Status())
 	})
 }
 
