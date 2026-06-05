@@ -79,6 +79,7 @@ type Server struct {
 	cdnAnalytics     *CDNAnalyticsTracker
 	accessLogTracker *S3AccessLogTracker
 	inventoryRunner  *InventoryRunner
+	dedupGCRunner    *DedupGCRunner
 	emailSender      email.Sender
 	baseURL          string
 	startTime        time.Time
@@ -220,6 +221,10 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// Inventory report runner — generates CSV inventory reports on schedule.
 	s.inventoryRunner = NewInventoryRunner(s.db, s.engine, logger)
 	s.inventoryRunner.StartInventoryJob(context.Background())
+
+	// Dedup GC runner — reconciles ref counts and reclaims orphaned chunks.
+	s.dedupGCRunner = NewDedupGCRunner(s.db, s.engine, logger)
+	s.dedupGCRunner.StartDedupGC(context.Background())
 
 	// Stripe billing service. Only active when STRIPE_SECRET_KEY is set.
 	if stripeKey := os.Getenv("STRIPE_SECRET_KEY"); stripeKey != "" {
@@ -610,6 +615,8 @@ func (s *Server) registerComplianceRoutes() {
 		r.Post("/breach", s.requireAdmin(complianceHandler.HandleReportBreach))
 		r.Get("/breaches", s.requireAdmin(complianceHandler.HandleListBreaches))
 		r.Patch("/breach/{id}", s.requireAdmin(complianceHandler.HandleUpdateBreach))
+
+		r.Post("/dedup-gc", s.requireAdmin(s.handleDedupGCTrigger))
 	})
 }
 

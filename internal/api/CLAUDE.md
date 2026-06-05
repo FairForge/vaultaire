@@ -9,6 +9,8 @@ S3-compatible API layer. Translates S3 protocol to engine operations, handles au
 - **s3_errors.go** — Error codes, messages, and response writing
 - **s3_engine_adapter.go** — GET/PUT/DELETE/LIST handlers bridging S3 to engine; `handleChunkedPut` streams uploads through `ChunkContext` for bounded-memory chunking + dedup (peak ~16 MB regardless of object size; on failure returns 5xx, never falls through to normal path), `handleChunkedGet` streams chunked objects on GET one chunk at a time (`fetchAndVerifyChunk`: bounded ~16 MB buffer + SHA-256 integrity check per chunk; range via `chunk_offset`; corrupt first chunk → 500, never serves bad bytes). Chunks live in the shared `_global` container (const `chunkContainer`) so cross-bucket/cross-tenant dedup is retrievable
 - **s3_chunking_test.go** — Integration tests for chunked upload, dedup, delete, and GCI operations
+- **dedup_gc.go** — `DedupGCRunner`: background nightly job that (A) reconciles GCI ref counts against actual `tenant_chunk_refs`, (B) sweeps+deletes orphaned chunks past grace period from `_global` container. Manual trigger via `POST /api/v1/admin/dedup-gc` (admin-only). Grace period guards in-flight streaming PUTs via `last_accessed_at`
+- **dedup_gc_test.go** — Integration tests for dedup GC: deletion, grace period, reconciliation, fresh-chunk safety, end-to-end shared-chunk lifecycle
 - **s3_buckets.go** — CreateBucket (with region), DeleteBucket, ListBuckets, GetBucketLocation, HeadBucket
 - **s3_versioning.go** — Bucket versioning enable/suspend
 - **s3_lock.go** — Object Lock, retention, legal hold
