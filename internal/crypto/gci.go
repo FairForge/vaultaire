@@ -629,6 +629,50 @@ func (g *GlobalContentIndex) GetGlobalDedupStats(ctx context.Context) (*DedupSta
 	return &stats, nil
 }
 
+// CompressionStatsResult holds global compression statistics from the GCI.
+type CompressionStatsResult struct {
+	ChunksCompressed   int64   `json:"chunks_compressed"`
+	ChunksUncompressed int64   `json:"chunks_uncompressed"`
+	TotalPlaintext     int64   `json:"total_plaintext"`
+	TotalStored        int64   `json:"total_stored"`
+	BytesSaved         int64   `json:"bytes_saved"`
+	CompressionRatio   float64 `json:"compression_ratio"`
+}
+
+// GetGlobalCompressionStats retrieves compression statistics across all chunks.
+func (g *GlobalContentIndex) GetGlobalCompressionStats(ctx context.Context) (*CompressionStatsResult, error) {
+	var stats CompressionStatsResult
+
+	err := g.db.QueryRowContext(ctx, `
+		SELECT
+			COUNT(*) FILTER (WHERE compression_algo IS NOT NULL) as chunks_compressed,
+			COUNT(*) FILTER (WHERE compression_algo IS NULL) as chunks_uncompressed,
+			COALESCE(SUM(size_bytes), 0) as total_plaintext,
+			COALESCE(SUM(CASE WHEN compressed_size IS NOT NULL
+				THEN compressed_size ELSE size_bytes END), 0) as total_stored,
+			COALESCE(SUM(size_bytes) - SUM(CASE WHEN compressed_size IS NOT NULL
+				THEN compressed_size ELSE size_bytes END), 0) as bytes_saved
+		FROM global_content_index
+	`).Scan(
+		&stats.ChunksCompressed,
+		&stats.ChunksUncompressed,
+		&stats.TotalPlaintext,
+		&stats.TotalStored,
+		&stats.BytesSaved,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get compression stats: %w", err)
+	}
+
+	if stats.TotalStored > 0 {
+		stats.CompressionRatio = float64(stats.TotalPlaintext) / float64(stats.TotalStored)
+	} else {
+		stats.CompressionRatio = 1.0
+	}
+
+	return &stats, nil
+}
+
 // Cache methods
 
 func (c *gciCache) get(hash string) *GCIEntry {

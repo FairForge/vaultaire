@@ -40,6 +40,10 @@ func HandleAdminDedup(tmpl *template.Template, db *sql.DB, logger *zap.Logger) h
 		data["PhysicalBytes"] = "0 B"
 		data["ChunksProcessed"] = int64(0)
 		data["TenantTable"] = []tenantDedupRow{}
+		data["CompressionRatio"] = "1.0x"
+		data["CompressionSaved"] = "0 B"
+		data["ChunksCompressed"] = int64(0)
+		data["ChunksUncompressed"] = int64(0)
 
 		if db != nil {
 			populateDedupStats(r.Context(), db, data, logger)
@@ -67,6 +71,16 @@ func populateDedupStats(ctx context.Context, db *sql.DB, data map[string]any, lo
 	data["LogicalBytes"] = formatBytes(stats.BytesLogical)
 	data["PhysicalBytes"] = formatBytes(stats.BytesPhysical)
 	data["ChunksProcessed"] = stats.ChunksProcessed
+
+	cstats, cerr := gci.GetGlobalCompressionStats(ctx)
+	if cerr != nil {
+		logger.Debug("dedup: compression stats", zap.Error(cerr))
+	} else {
+		data["CompressionRatio"] = fmt.Sprintf("%.1fx", cstats.CompressionRatio)
+		data["CompressionSaved"] = formatBytes(cstats.BytesSaved)
+		data["ChunksCompressed"] = cstats.ChunksCompressed
+		data["ChunksUncompressed"] = cstats.ChunksUncompressed
+	}
 
 	populateTenantDedup(ctx, db, gci, data, logger)
 }
