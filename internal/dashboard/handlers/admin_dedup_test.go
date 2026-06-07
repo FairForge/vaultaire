@@ -24,6 +24,10 @@ func testDedupTemplate(t *testing.T) *template.Template {
 			`<span class="logical">{{.LogicalBytes}}</span>` +
 			`<span class="physical">{{.PhysicalBytes}}</span>` +
 			`<span class="chunks">{{.ChunksProcessed}}</span>` +
+			`<span class="comp-ratio">{{.CompressionRatio}}</span>` +
+			`<span class="comp-saved">{{.CompressionSaved}}</span>` +
+			`<span class="comp-chunks">{{.ChunksCompressed}}</span>` +
+			`<span class="comp-skipped">{{.ChunksUncompressed}}</span>` +
 			`{{range .TenantTable}}<span class="tenant">{{.Email}} {{.LogicalFmt}} {{.PhysicalFmt}} {{.SavedFmt}} {{.SavedPct}} {{.DedupRatio}}</span>{{end}}` +
 			`{{if not .TenantTable}}<p>No tenants</p>{{end}}` +
 			`{{end}}`))
@@ -39,6 +43,11 @@ func TestHandleAdminDedup_RendersGlobalStats(t *testing.T) {
 	mock.ExpectQuery(`SELECT\s+COUNT\(\*\) as total_chunks`).
 		WillReturnRows(sqlmock.NewRows([]string{"total_chunks", "total_bytes", "bytes_saved"}).
 			AddRow(int64(100), int64(1024*1024*1024), int64(512*1024*1024)))
+
+	// Compression stats query
+	mock.ExpectQuery(`COUNT\(\*\) FILTER \(WHERE compression_algo IS NOT NULL\)`).
+		WillReturnRows(sqlmock.NewRows([]string{"chunks_compressed", "chunks_uncompressed", "total_plaintext", "total_stored", "bytes_saved"}).
+			AddRow(int64(60), int64(40), int64(1024*1024*1024), int64(800*1024*1024), int64(224*1024*1024)))
 
 	// Per-tenant query: no tenants with chunks
 	mock.ExpectQuery(`SELECT DISTINCT t.id, t.email`).
@@ -68,6 +77,11 @@ func TestHandleAdminDedup_PerTenantTable(t *testing.T) {
 	mock.ExpectQuery(`SELECT\s+COUNT\(\*\) as total_chunks`).
 		WillReturnRows(sqlmock.NewRows([]string{"total_chunks", "total_bytes", "bytes_saved"}).
 			AddRow(int64(200), int64(2*1024*1024*1024), int64(1024*1024*1024)))
+
+	// Compression stats query
+	mock.ExpectQuery(`COUNT\(\*\) FILTER \(WHERE compression_algo IS NOT NULL\)`).
+		WillReturnRows(sqlmock.NewRows([]string{"chunks_compressed", "chunks_uncompressed", "total_plaintext", "total_stored", "bytes_saved"}).
+			AddRow(int64(0), int64(200), int64(2*1024*1024*1024), int64(2*1024*1024*1024), int64(0)))
 
 	// Tenants with chunked objects
 	mock.ExpectQuery(`SELECT DISTINCT t.id, t.email`).
@@ -109,6 +123,11 @@ func TestHandleAdminDedup_EmptyNoChunks(t *testing.T) {
 	mock.ExpectQuery(`SELECT\s+COUNT\(\*\) as total_chunks`).
 		WillReturnRows(sqlmock.NewRows([]string{"total_chunks", "total_bytes", "bytes_saved"}).
 			AddRow(int64(0), int64(0), int64(0)))
+
+	// Compression stats: empty
+	mock.ExpectQuery(`COUNT\(\*\) FILTER \(WHERE compression_algo IS NOT NULL\)`).
+		WillReturnRows(sqlmock.NewRows([]string{"chunks_compressed", "chunks_uncompressed", "total_plaintext", "total_stored", "bytes_saved"}).
+			AddRow(int64(0), int64(0), int64(0), int64(0), int64(0)))
 
 	// No tenants
 	mock.ExpectQuery(`SELECT DISTINCT t.id, t.email`).
@@ -172,4 +191,39 @@ func TestHandleAdminDedup_DBErrorDegrades(t *testing.T) {
 	body := w.Body.String()
 	assert.Contains(t, body, `<span class="ratio">1.0x</span>`)
 	assert.Contains(t, body, `<span class="saved">0 B</span>`)
+}
+
+func TestHandleAdminDedup_CompressionStats(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	// Global dedup stats
+	mock.ExpectQuery(`SELECT\s+COUNT\(\*\) as total_chunks`).
+		WillReturnRows(sqlmock.NewRows([]string{"total_chunks", "total_bytes", "bytes_saved"}).
+			AddRow(int64(50), int64(500*1024*1024), int64(0)))
+
+	// Compression stats: 30 compressed, 20 uncompressed, good ratio
+	mock.ExpectQuery(`COUNT\(\*\) FILTER \(WHERE compression_algo IS NOT NULL\)`).
+		WillReturnRows(sqlmock.NewRows([]string{"chunks_compressed", "chunks_uncompressed", "total_plaintext", "total_stored", "bytes_saved"}).
+			AddRow(int64(30), int64(20), int64(500*1024*1024), int64(300*1024*1024), int64(200*1024*1024)))
+
+	// No tenants
+	mock.ExpectQuery(`SELECT DISTINCT t.id, t.email`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "email"}))
+
+	handler := HandleAdminDedup(testDedupTemplate(t), db, zap.NewNop())
+	req := httptest.NewRequest("GET", "/admin/dedup", nil)
+	req = req.WithContext(adminCtx(t))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	// 500 MB / 300 MB = 1.67x
+	assert.Contains(t, body, `<span class="comp-ratio">1.7x</span>`)
+	assert.Contains(t, body, `<span class="comp-saved">200 MB</span>`)
+	assert.Contains(t, body, `<span class="comp-chunks">30</span>`)
+	assert.Contains(t, body, `<span class="comp-skipped">20</span>`)
+	require.NoError(t, mock.ExpectationsWereMet())
 }

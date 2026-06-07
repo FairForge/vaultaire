@@ -847,6 +847,11 @@ func (a *S3ToEngine) handleChunkedPut(
 	var chunkCount int
 	backendName := "chunked"
 
+	contentType := r.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+
 	newRefs := make([]crypto.TenantChunkRef, 0, 16)
 	for result := range chunkCh {
 		if result.Err != nil {
@@ -865,8 +870,24 @@ func (a *S3ToEngine) handleChunkedPut(
 		storageKey := "_chunks/" + chunk.Hash
 
 		if lookup.IsNewChunk {
-			chunkOpts := []engine.PutOption{engine.WithContentLength(int64(chunk.Size))}
-			bn, putErr := a.engine.Put(ctx, chunkContainer, storageKey, bytes.NewReader(chunk.Data), chunkOpts...)
+			storeData := chunk.Data
+			var compressedSize *int64
+			var compressionAlgo *string
+
+			if crypto.ShouldCompress(chunk.Data, contentType) {
+				compressed, compErr := crypto.CompressBuffer(chunk.Data)
+				if compErr == nil && len(compressed) < chunk.Size {
+					storeData = compressed
+					cs := int64(len(compressed))
+					compressedSize = &cs
+					algo := "zstd"
+					compressionAlgo = &algo
+				}
+			}
+
+			storedBytes := int64(len(storeData))
+			chunkOpts := []engine.PutOption{engine.WithContentLength(storedBytes)}
+			bn, putErr := a.engine.Put(ctx, chunkContainer, storageKey, bytes.NewReader(storeData), chunkOpts...)
 			if putErr != nil {
 				return fmt.Errorf("store chunk %s: %w", chunk.Hash[:16], putErr)
 			}
@@ -875,15 +896,17 @@ func (a *S3ToEngine) handleChunkedPut(
 			}
 
 			if insertErr := a.gci.InsertChunk(ctx, &crypto.GCIEntry{
-				PlaintextHash: chunk.Hash,
-				BackendID:     bn,
-				StorageKey:    storageKey,
-				SizeBytes:     int64(chunk.Size),
-				RefCount:      1,
+				PlaintextHash:   chunk.Hash,
+				BackendID:       bn,
+				StorageKey:      storageKey,
+				SizeBytes:       int64(chunk.Size),
+				CompressedSize:  compressedSize,
+				CompressionAlgo: compressionAlgo,
+				RefCount:        1,
 			}); insertErr != nil {
 				return fmt.Errorf("insert chunk index %s: %w", chunk.Hash[:16], insertErr)
 			}
-			physicalSize += int64(chunk.Size)
+			physicalSize += storedBytes
 		} else {
 			if incErr := a.gci.IncrementRef(ctx, chunk.Hash); incErr != nil {
 				return fmt.Errorf("increment ref %s: %w", chunk.Hash[:16], incErr)
@@ -907,11 +930,6 @@ func (a *S3ToEngine) handleChunkedPut(
 	dedupRatio := float32(1.0)
 	if physicalSize > 0 {
 		dedupRatio = float32(measuredSize) / float32(physicalSize)
-	}
-
-	contentType := r.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = "application/octet-stream"
 	}
 
 	// Atomically install the new manifest and release any previous version's
@@ -1016,7 +1034,8 @@ type chunkDesc struct {
 	backendID     string
 	plaintextHash string
 	offset        int64 // byte offset of this chunk within the object
-	size          int64 // chunk size in bytes
+	size          int64 // chunk size in bytes (plaintext)
+	compressed    bool  // true if chunk is stored compressed (needs decompression on read)
 }
 
 // fetchAndVerifyChunk reads one chunk from the global container into a bounded
@@ -1042,6 +1061,13 @@ func (a *S3ToEngine) fetchAndVerifyChunk(ctx context.Context, d chunkDesc) ([]by
 	data, err := io.ReadAll(rdr)
 	if err != nil {
 		return nil, fmt.Errorf("read chunk %s: %w", d.plaintextHash[:16], err)
+	}
+
+	if d.compressed {
+		data, err = crypto.DecompressBuffer(data)
+		if err != nil {
+			return nil, fmt.Errorf("decompress chunk %s: %w", d.plaintextHash[:16], err)
+		}
 	}
 
 	sum := sha256.Sum256(data)
@@ -1119,6 +1145,7 @@ func (a *S3ToEngine) handleChunkedGet(
 			plaintextHash: ref.PlaintextHash,
 			offset:        ref.ChunkOffset,
 			size:          lookup.Entry.SizeBytes,
+			compressed:    lookup.Entry.CompressionAlgo != nil,
 		}
 	}
 

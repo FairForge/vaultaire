@@ -32,6 +32,30 @@
     </div>
 </div>
 
+<div class="dashboard-header" style="margin-top:2rem">
+    <h2>Compression</h2>
+</div>
+<p class="text-muted" style="margin-bottom:1.5rem">Zstd lossless compression applied to compressible chunks before storage.</p>
+
+<div class="card-grid">
+    <div class="card">
+        <div class="card-title">Compression Ratio</div>
+        <div class="card-value">{{.CompressionRatio}}</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Bytes Saved</div>
+        <div class="card-value">{{.CompressionSaved}}</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Chunks Compressed</div>
+        <div class="card-value">{{.ChunksCompressed}}</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Chunks Skipped</div>
+        <div class="card-value">{{.ChunksUncompressed}}</div>
+    </div>
+</div>
+
 <div class="card">
     <div class="card-title" style="margin-bottom:0.75rem">Per-Tenant Deduplication</div>
     {{if .TenantTable}}

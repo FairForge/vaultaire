@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/FairForge/vaultaire/internal/crypto"
@@ -971,3 +972,139 @@ func (d *failingPutDriver) Delete(_ context.Context, _, _ string) error         
 func (d *failingPutDriver) List(_ context.Context, _, _ string) ([]string, error) { return nil, nil }
 func (d *failingPutDriver) Exists(_ context.Context, _, _ string) (bool, error)   { return false, nil }
 func (d *failingPutDriver) HealthCheck(_ context.Context) error                   { return nil }
+
+// --- Phase 9: Compression tests ---
+
+func TestHandlePut_CompressesTextChunks(t *testing.T) {
+	f := setupChunkingFixture(t)
+
+	// Highly compressible text data above chunking threshold
+	content := []byte(strings.Repeat("The quick brown fox jumps over the lazy dog. ", 200))
+	putChunkedObject(t, f, "compressible.txt", content, "text/plain")
+
+	tenantUUID, err := uuid.Parse(f.tenantID)
+	require.NoError(t, err)
+
+	rows, err := f.db.Query(`
+		SELECT g.compressed_size, g.compression_algo, g.size_bytes
+		FROM tenant_chunk_refs r
+		JOIN global_content_index g ON g.plaintext_hash = r.plaintext_hash
+		WHERE r.tenant_id = $1 AND r.bucket_name = $2 AND r.object_key = $3`,
+		tenantUUID, "test-bucket", "compressible.txt")
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+
+	var found int
+	for rows.Next() {
+		var compressedSize *int64
+		var algo *string
+		var sizeBytes int64
+		require.NoError(t, rows.Scan(&compressedSize, &algo, &sizeBytes))
+		found++
+		require.NotNil(t, compressedSize, "compressed_size should be set for compressible text")
+		require.NotNil(t, algo, "compression_algo should be set")
+		assert.Equal(t, "zstd", *algo)
+		assert.Less(t, *compressedSize, sizeBytes, "compressed size should be smaller than plaintext")
+	}
+	require.NoError(t, rows.Err())
+	assert.Greater(t, found, 0, "should have at least one chunk")
+}
+
+func TestHandlePut_SkipsCompressionForImages(t *testing.T) {
+	f := setupChunkingFixture(t)
+
+	// JPEG magic bytes + random data (incompressible)
+	content := make([]byte, 4*1024)
+	content[0] = 0xFF
+	content[1] = 0xD8
+	content[2] = 0xFF
+	content[3] = 0xE0
+	_, _ = rand.Read(content[4:])
+	putChunkedObject(t, f, "photo.jpg", content, "image/jpeg")
+
+	tenantUUID, err := uuid.Parse(f.tenantID)
+	require.NoError(t, err)
+
+	rows, err := f.db.Query(`
+		SELECT g.compressed_size, g.compression_algo
+		FROM tenant_chunk_refs r
+		JOIN global_content_index g ON g.plaintext_hash = r.plaintext_hash
+		WHERE r.tenant_id = $1 AND r.bucket_name = $2 AND r.object_key = $3`,
+		tenantUUID, "test-bucket", "photo.jpg")
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var compressedSize *int64
+		var algo *string
+		require.NoError(t, rows.Scan(&compressedSize, &algo))
+		assert.Nil(t, compressedSize, "compressed_size should be NULL for image content")
+		assert.Nil(t, algo, "compression_algo should be NULL for image content")
+	}
+	require.NoError(t, rows.Err())
+}
+
+func TestHandleGet_DecompressesCompressedChunks(t *testing.T) {
+	f := setupChunkingFixture(t)
+
+	content := []byte(strings.Repeat("Compression test payload for decompression verification. ", 200))
+	putChunkedObject(t, f, "compressed-get.txt", content, "text/plain")
+
+	getReq := httptest.NewRequest("GET", "/test-bucket/compressed-get.txt", nil)
+	getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+	gw := httptest.NewRecorder()
+	f.adapter.HandleGet(gw, getReq, "test-bucket", "compressed-get.txt")
+
+	require.Equal(t, http.StatusOK, gw.Code)
+	body, _ := io.ReadAll(gw.Body)
+	assert.Equal(t, content, body, "decompressed body must match original plaintext")
+}
+
+func TestHandleGet_RangeOnCompressedChunks(t *testing.T) {
+	f := setupChunkingFixture(t)
+
+	content := []byte(strings.Repeat("Range request on compressed data works correctly. ", 200))
+	putChunkedObject(t, f, "compressed-range.txt", content, "text/plain")
+
+	getReq := httptest.NewRequest("GET", "/test-bucket/compressed-range.txt", nil)
+	getReq.Header.Set("Range", "bytes=50-149")
+	getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+	gw := httptest.NewRecorder()
+	f.adapter.HandleGet(gw, getReq, "test-bucket", "compressed-range.txt")
+
+	require.Equal(t, http.StatusPartialContent, gw.Code)
+	body, _ := io.ReadAll(gw.Body)
+	assert.Equal(t, content[50:150], body, "range slice must match original plaintext range")
+	assert.Equal(t, "100", gw.Header().Get("Content-Length"))
+}
+
+func TestHandlePut_CompressionExpansionSkipped(t *testing.T) {
+	f := setupChunkingFixture(t)
+
+	// Purely random data — compression would expand it
+	content := generateTestData(4 * 1024)
+	putChunkedObject(t, f, "random.bin", content, "application/octet-stream")
+
+	tenantUUID, err := uuid.Parse(f.tenantID)
+	require.NoError(t, err)
+
+	rows, err := f.db.Query(`
+		SELECT g.compressed_size, g.compression_algo, g.size_bytes
+		FROM tenant_chunk_refs r
+		JOIN global_content_index g ON g.plaintext_hash = r.plaintext_hash
+		WHERE r.tenant_id = $1 AND r.bucket_name = $2 AND r.object_key = $3`,
+		tenantUUID, "test-bucket", "random.bin")
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var compressedSize *int64
+		var algo *string
+		var sizeBytes int64
+		require.NoError(t, rows.Scan(&compressedSize, &algo, &sizeBytes))
+		// Random data should NOT be compressed (expansion skipped)
+		assert.Nil(t, compressedSize, "compressed_size should be NULL for incompressible data")
+		assert.Nil(t, algo, "compression_algo should be NULL for incompressible data")
+	}
+	require.NoError(t, rows.Err())
+}
