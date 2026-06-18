@@ -18,6 +18,8 @@ type GCIEntry struct {
 	SizeBytes       int64     `json:"size_bytes"`
 	CompressedSize  *int64    `json:"compressed_size,omitempty"`
 	CompressionAlgo *string   `json:"compression_algo,omitempty"`
+	Encrypted       bool      `json:"encrypted"`
+	EncryptionAlgo  *string   `json:"encryption_algo,omitempty"`
 	RefCount        int       `json:"ref_count"`
 	FirstSeenAt     time.Time `json:"first_seen_at"`
 	LastAccessedAt  time.Time `json:"last_accessed_at"`
@@ -112,11 +114,12 @@ func (g *GlobalContentIndex) LookupChunk(ctx context.Context, plaintextHash stri
 	var entry GCIEntry
 	var compressedSize sql.NullInt64
 	var compressionAlgo sql.NullString
+	var encryptionAlgo sql.NullString
 
 	err := g.db.QueryRowContext(ctx, `
 		SELECT plaintext_hash, backend_id, storage_key, size_bytes,
-		       compressed_size, compression_algo, ref_count,
-		       first_seen_at, last_accessed_at
+		       compressed_size, compression_algo, encrypted, encryption_algo,
+		       ref_count, first_seen_at, last_accessed_at
 		FROM global_content_index
 		WHERE plaintext_hash = $1
 	`, plaintextHash).Scan(
@@ -126,6 +129,8 @@ func (g *GlobalContentIndex) LookupChunk(ctx context.Context, plaintextHash stri
 		&entry.SizeBytes,
 		&compressedSize,
 		&compressionAlgo,
+		&entry.Encrypted,
+		&encryptionAlgo,
 		&entry.RefCount,
 		&entry.FirstSeenAt,
 		&entry.LastAccessedAt,
@@ -147,6 +152,9 @@ func (g *GlobalContentIndex) LookupChunk(ctx context.Context, plaintextHash stri
 	}
 	if compressionAlgo.Valid {
 		entry.CompressionAlgo = &compressionAlgo.String
+	}
+	if encryptionAlgo.Valid {
+		entry.EncryptionAlgo = &encryptionAlgo.String
 	}
 
 	// Add to cache
@@ -190,8 +198,8 @@ func (g *GlobalContentIndex) LookupChunks(ctx context.Context, hashes []string) 
 	// Query database for uncached hashes
 	rows, err := g.db.QueryContext(ctx, `
 		SELECT plaintext_hash, backend_id, storage_key, size_bytes,
-		       compressed_size, compression_algo, ref_count,
-		       first_seen_at, last_accessed_at
+		       compressed_size, compression_algo, encrypted, encryption_algo,
+		       ref_count, first_seen_at, last_accessed_at
 		FROM global_content_index
 		WHERE plaintext_hash = ANY($1)
 	`, uncachedHashes)
@@ -204,6 +212,7 @@ func (g *GlobalContentIndex) LookupChunks(ctx context.Context, hashes []string) 
 		var entry GCIEntry
 		var compressedSize sql.NullInt64
 		var compressionAlgo sql.NullString
+		var encryptionAlgo sql.NullString
 
 		err := rows.Scan(
 			&entry.PlaintextHash,
@@ -212,6 +221,8 @@ func (g *GlobalContentIndex) LookupChunks(ctx context.Context, hashes []string) 
 			&entry.SizeBytes,
 			&compressedSize,
 			&compressionAlgo,
+			&entry.Encrypted,
+			&encryptionAlgo,
 			&entry.RefCount,
 			&entry.FirstSeenAt,
 			&entry.LastAccessedAt,
@@ -225,6 +236,9 @@ func (g *GlobalContentIndex) LookupChunks(ctx context.Context, hashes []string) 
 		}
 		if compressionAlgo.Valid {
 			entry.CompressionAlgo = &compressionAlgo.String
+		}
+		if encryptionAlgo.Valid {
+			entry.EncryptionAlgo = &encryptionAlgo.String
 		}
 
 		// Update result
@@ -245,13 +259,13 @@ func (g *GlobalContentIndex) LookupChunks(ctx context.Context, hashes []string) 
 func (g *GlobalContentIndex) InsertChunk(ctx context.Context, entry *GCIEntry) error {
 	_, err := g.db.ExecContext(ctx, `
 		INSERT INTO global_content_index
-		(plaintext_hash, backend_id, storage_key, size_bytes, compressed_size, compression_algo, ref_count)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		(plaintext_hash, backend_id, storage_key, size_bytes, compressed_size, compression_algo, encrypted, encryption_algo, ref_count)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (plaintext_hash) DO UPDATE SET
 			ref_count = global_content_index.ref_count + 1,
 			last_accessed_at = NOW()
 	`, entry.PlaintextHash, entry.BackendID, entry.StorageKey, entry.SizeBytes,
-		entry.CompressedSize, entry.CompressionAlgo, entry.RefCount)
+		entry.CompressedSize, entry.CompressionAlgo, entry.Encrypted, entry.EncryptionAlgo, entry.RefCount)
 
 	if err != nil {
 		return fmt.Errorf("failed to insert chunk: %w", err)

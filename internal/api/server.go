@@ -74,6 +74,7 @@ type Server struct {
 	mfaService       *auth.MFAService
 	mfaPendingStore  *dashboard.MFAPendingStore
 	sseService       *crypto.SSEService
+	chunkEncSvc      *crypto.ChunkEncryptionService
 	gci              *crypto.GlobalContentIndex
 	cdnRateLimiter   *RateLimiter
 	cdnAnalytics     *CDNAnalyticsTracker
@@ -182,6 +183,15 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		} else {
 			s.sseService = sseSvc
 			logger.Info("SSE-S3 encryption service initialized (ML-KEM-768+AES-256-GCM)")
+		}
+
+		kmConfig := &crypto.KeyManagerConfig{MasterKeyHex: masterKey, CacheMaxAge: 1 * time.Hour, EnableCaching: true}
+		km, kmErr := crypto.NewKeyManager(kmConfig)
+		if kmErr != nil {
+			logger.Error("failed to initialize key manager for chunk encryption", zap.Error(kmErr))
+		} else {
+			s.chunkEncSvc = crypto.NewChunkEncryptionService(km)
+			logger.Info("chunk encryption service initialized (AES-256-GCM convergent)")
 		}
 	}
 

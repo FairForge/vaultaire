@@ -6,6 +6,7 @@ Encryption, key management, and post-quantum cryptography for Vaultaire.
 
 - **ssec.go** — SSE-C (customer-provided keys): stateless AES-256-GCM encrypt/decrypt with customer's 32-byte key. S3 header parsing (algorithm, key, MD5 validation). No DB, no key storage
 - **sse_s3.go** — SSE-S3 service: ML-KEM-768 key encapsulation + AES-256-GCM data encryption. Per-tenant keypairs in DB, per-object DEKs via KEM encapsulation
+- **chunk_encryption.go** — `ChunkEncryptionService`: per-chunk convergent encryption (AES-256-GCM with HKDF-derived deterministic nonce). Same tenant + same content → same ciphertext (dedup-safe). Ciphertext format: `[nonce 12B][GCM ciphertext+tag]` (28B overhead)
 - **encryption.go** — Core Encryptor interface: AES-256-GCM, ChaCha20-Poly1305, Noop implementations. Chunk-level encrypt/decrypt for pipeline
 - **keymanager.go** — Multi-tenant HKDF key derivation with version tracking and TTL cache
 - **postquantum.go** — ML-KEM-768 via cloudflare/circl (pipeline encryption). SSE-S3 uses Go stdlib crypto/mlkem instead
@@ -36,7 +37,7 @@ Encryption, key management, and post-quantum cryptography for Vaultaire.
 
 ## Chunking + Dedup Architecture (Phase 8.3-8.5)
 
-**FastCDC chunking** splits large objects (>64 MB, unencrypted) into content-defined chunks. The **Global Content Index** (GCI) deduplicates chunks across all tenants — identical content is stored once.
+**FastCDC chunking** splits large objects (>64 MB) into content-defined chunks. The **Global Content Index** (GCI) deduplicates chunks across all tenants — identical content is stored once. Since Phase 10, chunking and encryption are no longer mutually exclusive: per-chunk convergent encryption (AES256-CE) is applied when `ENCRYPTION_MASTER_KEY` is set.
 
 **Global chunk store** (Phase 8.5.1): chunks are stored in a shared, tenant-independent container `_global` (const `chunkContainer` in s3_engine_adapter.go), NOT the per-tenant/bucket namespace. Because dedup spans tenants, a chunk first written by tenant A / bucket X must be reachable when tenant B / bucket Y dedups against it — storing in the writer's namespace made cross-bucket/cross-tenant GETs 404. Isolation is preserved at the manifest layer: a tenant reaches a chunk only through its own `tenant_chunk_refs` (queried by `tenant_id`), and `_global` is not addressable via the S3 API (all S3 paths route through `tenant/{id}/{bucket}`).
 
@@ -44,7 +45,7 @@ Encryption, key management, and post-quantum cryptography for Vaultaire.
 - **gci.go** — `GlobalContentIndex`: DB-backed dedup index with 100K-entry in-memory cache. Batch lookups (`LookupChunks`), ref counting (`IncrementRef`/`DecrementRef`), tenant chunk manifests (`AddTenantChunkRef`), object metadata (`SaveObjectMetadata`), transactional delete (`DeleteObjectChunks`), atomic manifest swap on overwrite (`ReplaceObjectManifest` — releases old refs + installs new manifest + metadata in one tx).
 
 **PUT flow** (s3_engine_adapter.go `handleChunkedPut`, streaming since Phase 8.4.1):
-1. Gate: `gci != nil && size > threshold && no encryption`
+1. Gate: `gci != nil && size > threshold && (no whole-object encryption OR chunkEncSvc available)`
 2. Parse tenant UUID (skip chunking if non-UUID tenant). On chunked-path error, return 5xx (never fall through — the body is consumed).
 3. `ChunkContext(ctx, hashingBody)` streams through the MD5 hasher+chunker — peak memory is one chunk (~16 MB) regardless of object size. Per-chunk: `LookupChunk` → if new → `engine.Put(_global, "_chunks/{sha256}")` + `InsertChunk`; if existing → `IncrementRef`. Collect the new manifest refs and accumulate `measuredSize`.
 4. `ReplaceObjectManifest` (single tx): release the previous version's chunk refs (decrement counts) + install the new manifest + upsert `object_metadata` — **atomic**, so overwriting a key never leaves stale higher-index refs (GET corruption) or leaks old chunk refs. New chunks are IncrementRef'd in step 3 *before* this, so a chunk shared between old and new versions never transiently hits ref_count 0. Then `object_head_cache` with `is_chunked=TRUE` using `measuredSize` (true byte count from streaming).
@@ -61,7 +62,7 @@ Encryption, key management, and post-quantum cryptography for Vaultaire.
 4. Range requests touch only chunks overlapping `[start,end]`, located via `tenant_chunk_refs.chunk_offset` + per-chunk `SizeBytes`; the first/last overlapping chunks are trimmed (`skip`/`take`). No whole-object materialization.
 5. **Integrity** (8.6): corrupt chunk (sha256 mismatch) → never served. First-chunk corruption → clean 500 (`errChunkIntegrity`, handled here, NOT a fallthrough to 404 — corrupt ≠ missing). Mid-stream failure → body aborted (short read the client detects), status already committed. HEAD needs no chunk-aware logic — `object_head_cache` already holds plaintext size/ETag.
 
-**Constraints**: chunking is mutually exclusive with SSE-S3/SSE-C in this phase. Convergent encryption (Phase 10) will enable per-chunk encryption + dedup.
+**Constraints**: chunking is mutually exclusive with SSE-C (customer keys). SSE-S3 objects >256 MiB now route through per-chunk convergent encryption (Phase 10) when `chunkEncSvc` is available. Cross-tenant dedup of encrypted chunks is not supported — same-tenant dedup works via convergent determinism.
 
 **Tables**: `global_content_index`, `tenant_chunk_refs`, `object_metadata` (migration 051). `object_head_cache.is_chunked` flag.
 

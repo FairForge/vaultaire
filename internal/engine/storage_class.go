@@ -5,17 +5,16 @@ var storageClassToBackend = map[string]string{
 	"STANDARD_IA":        "lyve",
 	"GLACIER":            "geyser",
 	"DEEP_ARCHIVE":       "geyser",
-	"ONEZONE_IA":         "onedrive",
 	"REDUCED_REDUNDANCY": "local",
 }
 
 var backendToStorageClass = map[string]string{
-	"idrive":   "STANDARD",
-	"lyve":     "STANDARD_IA",
-	"geyser":   "GLACIER",
-	"onedrive": "ONEZONE_IA",
-	"local":    "REDUCED_REDUNDANCY",
-	"s3":       "STANDARD",
+	"idrive":     "STANDARD",
+	"lyve":       "STANDARD_IA",
+	"geyser":     "GLACIER",
+	"permafrost": "STANDARD",
+	"local":      "REDUCED_REDUNDANCY",
+	"s3":         "STANDARD",
 }
 
 func ResolveStorageClass(class string, primaryBackend string, availableDrivers map[string]Driver) (driverName, resolvedClass string) {

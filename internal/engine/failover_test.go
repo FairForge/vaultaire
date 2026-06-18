@@ -175,11 +175,11 @@ func TestFailoverManager_GetAllStatuses(t *testing.T) {
 
 func TestResolveStorageClass_Mapping(t *testing.T) {
 	drivers := map[string]Driver{
-		"idrive":   &mockDriver{name: "idrive"},
-		"lyve":     &mockDriver{name: "lyve"},
-		"geyser":   &mockDriver{name: "geyser"},
-		"onedrive": &mockDriver{name: "onedrive"},
-		"local":    &mockDriver{name: "local"},
+		"idrive":     &mockDriver{name: "idrive"},
+		"lyve":       &mockDriver{name: "lyve"},
+		"geyser":     &mockDriver{name: "geyser"},
+		"permafrost": &mockDriver{name: "permafrost"},
+		"local":      &mockDriver{name: "local"},
 	}
 
 	tests := []struct {
@@ -191,7 +191,6 @@ func TestResolveStorageClass_Mapping(t *testing.T) {
 		{"STANDARD_IA", "lyve", "STANDARD_IA"},
 		{"GLACIER", "geyser", "GLACIER"},
 		{"DEEP_ARCHIVE", "geyser", "DEEP_ARCHIVE"},
-		{"ONEZONE_IA", "onedrive", "ONEZONE_IA"},
 		{"REDUCED_REDUNDANCY", "local", "REDUCED_REDUNDANCY"},
 		{"", "idrive", "STANDARD"},
 	}
@@ -229,7 +228,7 @@ func TestBackendToStorageClass(t *testing.T) {
 	assert.Equal(t, "STANDARD", BackendToStorageClass("idrive"))
 	assert.Equal(t, "STANDARD_IA", BackendToStorageClass("lyve"))
 	assert.Equal(t, "GLACIER", BackendToStorageClass("geyser"))
-	assert.Equal(t, "ONEZONE_IA", BackendToStorageClass("onedrive"))
+	assert.Equal(t, "STANDARD", BackendToStorageClass("permafrost"))
 	assert.Equal(t, "REDUCED_REDUNDANCY", BackendToStorageClass("local"))
 	assert.Equal(t, "STANDARD", BackendToStorageClass("s3"))
 	assert.Equal(t, "STANDARD", BackendToStorageClass("unknown"))

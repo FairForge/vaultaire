@@ -65,7 +65,7 @@ type Config struct {
 func NewEngine(db *sql.DB, logger *zap.Logger, config *Config) *CoreEngine {
 	if config == nil {
 		config = &Config{
-			CacheSize:      10 << 30,
+			CacheSize:      500 << 30,
 			EnableCaching:  true,
 			EnableML:       true,
 			DefaultBackend: "local",
@@ -93,7 +93,7 @@ func NewEngine(db *sql.DB, logger *zap.Logger, config *Config) *CoreEngine {
 
 	if config.EnableCaching {
 		cacheConfig := &cache.Config{
-			MemorySize: 1 << 30,
+			MemorySize: 16 << 30,
 			SSDSize:    config.CacheSize,
 			SSDPath:    "/var/cache/vaultaire",
 		}
@@ -270,6 +270,56 @@ func (e *CoreEngine) Get(ctx context.Context, container, artifact string) (io.Re
 		reader = e.wrapReaderForCaching(reader, cacheKey)
 	}
 
+	return reader, nil
+}
+
+// GetRange reads a byte range directly from the backend without downloading
+// the full object. Falls back to full Get + discard if the driver doesn't
+// implement RangeGetter.
+func (e *CoreEngine) GetRange(ctx context.Context, container, artifact string, offset, length int64) (io.ReadCloser, error) {
+	preferredBackend := e.primary
+	if v, ok := e.objectBackends.Load(objectKey(container, artifact)); ok {
+		if name, ok := v.(string); ok && name != "" {
+			preferredBackend = name
+		}
+	} else if e.locations != nil {
+		tenantID := common.GetTenantID(ctx)
+		if name, err := e.locations.LookupBackend(ctx, tenantID, container, artifact); err == nil && name != "" {
+			preferredBackend = name
+			e.objectBackends.Store(objectKey(container, artifact), name)
+		}
+	}
+
+	candidates := e.buildCandidateList(preferredBackend)
+
+	var reader io.ReadCloser
+	_, err := e.failover.Execute(ctx, candidates, func(driverName string) error {
+		d, ok := e.drivers[driverName]
+		if !ok {
+			return fmt.Errorf("driver %s not found", driverName)
+		}
+		if rg, ok := d.(RangeGetter); ok {
+			var getErr error
+			reader, getErr = rg.GetRange(ctx, container, artifact, offset, length)
+			return getErr
+		}
+		// Fallback: full GET + seek/discard (existing slow path)
+		full, getErr := d.Get(ctx, container, artifact)
+		if getErr != nil {
+			return getErr
+		}
+		if offset > 0 {
+			if _, discardErr := io.CopyN(io.Discard, full, offset); discardErr != nil {
+				_ = full.Close()
+				return discardErr
+			}
+		}
+		reader = full
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get range %s/%s [%d-%d]: %w", container, artifact, offset, offset+length-1, err)
+	}
 	return reader, nil
 }
 
