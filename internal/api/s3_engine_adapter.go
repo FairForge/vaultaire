@@ -45,6 +45,7 @@ type S3ToEngine struct {
 	logger            *zap.Logger
 	notifySvc         *NotificationDispatcher
 	sseService        *crypto.SSEService
+	chunkEncSvc       *crypto.ChunkEncryptionService
 	gci               *crypto.GlobalContentIndex
 	chunkingThreshold int64 // minimum object size for chunking (default 64 MB)
 }
@@ -391,11 +392,35 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 			writeRangeNotSatisfiable(w, cachedSize)
 			return
 		}
+
+		// Use backend-native range GET when available (avoids downloading the
+		// full object and discarding prefix bytes — 10-50× faster for large files).
+		rangeReader := io.Reader(dataReader)
+		if ce, ok := a.engine.(*engine.CoreEngine); ok {
+			if rr, rangeErr := ce.GetRange(r.Context(), container, artifact, rng.start, rng.length); rangeErr == nil {
+				defer func() { _ = rr.Close() }()
+				rangeReader = rr
+				// rangeReader already positioned at rng.start — write headers and copy directly
+				w.Header().Set("Content-Type", contentType)
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", rng.start, rng.end, cachedSize))
+				w.Header().Set("Content-Length", strconv.FormatInt(rng.length, 10))
+				w.Header().Set("Accept-Ranges", "bytes")
+				w.Header().Set("x-amz-request-id", generateRequestID())
+				if w.Header().Get("x-amz-version-id") == "" {
+					w.Header().Set("x-amz-version-id", "null")
+				}
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = io.CopyN(w, rangeReader, rng.length)
+				return
+			}
+		}
+
+		// Fallback: serveRange with full-object reader (old path)
 		w.Header().Set("x-amz-request-id", generateRequestID())
 		if w.Header().Get("x-amz-version-id") == "" {
 			w.Header().Set("x-amz-version-id", "null")
 		}
-		if err := serveRange(w, dataReader, rng, cachedSize, contentType); err != nil {
+		if err := serveRange(w, rangeReader, rng, cachedSize, contentType); err != nil {
 			a.logger.Error("range serve failed",
 				zap.Error(err),
 				zap.String("container", container),
@@ -632,8 +657,9 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	// (encryptionAlgorithm == ""). Silently storing such an object as plaintext
 	// would violate the bucket's encryption guarantee, so reject it instead.
 	// (SSE-C already rejects oversize objects in its own branch above.)
-	// The real fix — streaming/chunk-level encryption — is a future phase.
-	if a.sseService != nil && encryptionAlgorithm == "" && metadataSize > crypto.MaxEncryptableSize &&
+	// When chunkEncSvc is set, per-chunk convergent encryption handles oversize
+	// objects via the chunked path — no 256 MiB limit applies.
+	if a.sseService != nil && a.chunkEncSvc == nil && encryptionAlgorithm == "" && metadataSize > crypto.MaxEncryptableSize &&
 		(r.Header.Get("x-amz-server-side-encryption") == "AES256" ||
 			isBucketSSEEnabled(r.Context(), a.db, t.ID, bucket)) {
 		WriteS3ErrorWithContext(w, ErrEntityTooLarge, r.URL.Path, generateRequestID(),
@@ -641,15 +667,16 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		return
 	}
 
-	// Chunked upload path: objects above the threshold that are NOT encrypted
-	// are split into content-defined chunks and deduplicated via the GCI.
-	// Chunked objects skip the normal engine.Put — each chunk is stored
-	// individually. GET reassembly is Phase 8.5.
+	// Chunked upload path: objects above the threshold are split into
+	// content-defined chunks and deduplicated via the GCI. When chunkEncSvc
+	// is set, per-chunk convergent encryption is applied (Phase 10) —
+	// chunking and encryption are no longer mutually exclusive.
 	chunkThreshold := a.chunkingThreshold
 	if chunkThreshold <= 0 {
 		chunkThreshold = 64 * 1024 * 1024 // 64 MB default
 	}
-	if a.gci != nil && metadataSize > chunkThreshold && encryptionAlgorithm == "" {
+	chunkEncryptionAvailable := a.chunkEncSvc != nil
+	if a.gci != nil && metadataSize > chunkThreshold && (encryptionAlgorithm == "" || chunkEncryptionAvailable) {
 		if tenantUUID, parseErr := uuid.Parse(t.ID); parseErr == nil {
 			chunkErr := a.handleChunkedPut(r, w, t, tenantUUID, bucket, artifact, metadataSize, hashingBody, hasher)
 			if chunkErr == nil {
@@ -868,11 +895,14 @@ func (a *S3ToEngine) handleChunkedPut(
 		}
 
 		storageKey := "_chunks/" + chunk.Hash
+		var ciphertextHash string
 
 		if lookup.IsNewChunk {
 			storeData := chunk.Data
 			var compressedSize *int64
 			var compressionAlgo *string
+			var encrypted bool
+			var encryptionAlgo *string
 
 			if crypto.ShouldCompress(chunk.Data, contentType) {
 				compressed, compErr := crypto.CompressBuffer(chunk.Data)
@@ -883,6 +913,18 @@ func (a *S3ToEngine) handleChunkedPut(
 					algo := "zstd"
 					compressionAlgo = &algo
 				}
+			}
+
+			if a.chunkEncSvc != nil {
+				ct, ctHash, encErr := a.chunkEncSvc.EncryptChunkData(t.ID, chunk.Hash, storeData)
+				if encErr != nil {
+					return fmt.Errorf("encrypt chunk %s: %w", chunk.Hash[:16], encErr)
+				}
+				storeData = ct
+				ciphertextHash = ctHash
+				encrypted = true
+				algo := "AES256-CE"
+				encryptionAlgo = &algo
 			}
 
 			storedBytes := int64(len(storeData))
@@ -902,14 +944,36 @@ func (a *S3ToEngine) handleChunkedPut(
 				SizeBytes:       int64(chunk.Size),
 				CompressedSize:  compressedSize,
 				CompressionAlgo: compressionAlgo,
+				Encrypted:       encrypted,
+				EncryptionAlgo:  encryptionAlgo,
 				RefCount:        1,
 			}); insertErr != nil {
 				return fmt.Errorf("insert chunk index %s: %w", chunk.Hash[:16], insertErr)
 			}
 			physicalSize += storedBytes
+
 		} else {
 			if incErr := a.gci.IncrementRef(ctx, chunk.Hash); incErr != nil {
 				return fmt.Errorf("increment ref %s: %w", chunk.Hash[:16], incErr)
+			}
+		}
+
+		var refCiphertextHash *string
+		if a.chunkEncSvc != nil {
+			if ciphertextHash != "" {
+				refCiphertextHash = &ciphertextHash
+			} else {
+				// Dedup hit: recompute the deterministic ciphertextHash for the ref.
+				reData := chunk.Data
+				if crypto.ShouldCompress(chunk.Data, contentType) {
+					if c, e := crypto.CompressBuffer(chunk.Data); e == nil && len(c) < chunk.Size {
+						reData = c
+					}
+				}
+				_, ctHash, encErr := a.chunkEncSvc.EncryptChunkData(t.ID, chunk.Hash, reData)
+				if encErr == nil {
+					refCiphertextHash = &ctHash
+				}
 			}
 		}
 
@@ -921,6 +985,7 @@ func (a *S3ToEngine) handleChunkedPut(
 			ChunkOffset:          chunk.Offset,
 			PlaintextHash:        chunk.Hash,
 			EncryptionKeyVersion: 1,
+			CiphertextHash:       refCiphertextHash,
 		})
 	}
 
@@ -955,11 +1020,16 @@ func (a *S3ToEngine) handleChunkedPut(
 	_ = validateMetadata(userMeta)
 	metaJSON, _ := json.Marshal(userMeta)
 
+	chunkEncAlgo := ""
+	if a.chunkEncSvc != nil {
+		chunkEncAlgo = "AES256-CE"
+	}
+
 	if a.db != nil {
 		_, _ = a.db.ExecContext(ctx, `
 			INSERT INTO object_head_cache
 				(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, is_chunked, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '', $9, TRUE, NOW())
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE, NOW())
 			ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
 				size_bytes            = EXCLUDED.size_bytes,
 				etag                  = EXCLUDED.etag,
@@ -970,7 +1040,7 @@ func (a *S3ToEngine) handleChunkedPut(
 				content_disposition   = EXCLUDED.content_disposition,
 				is_chunked            = EXCLUDED.is_chunked,
 				updated_at            = NOW()
-		`, t.ID, bucket, artifact, measuredSize, etag, contentType, backendName, metaJSON, contentDisposition)
+		`, t.ID, bucket, artifact, measuredSize, etag, contentType, backendName, metaJSON, chunkEncAlgo, contentDisposition)
 	}
 
 	versionID := ""
@@ -1030,12 +1100,14 @@ var errChunkIntegrity = errors.New("chunk integrity verification failed")
 
 // chunkDesc is a resolved chunk location + its byte position within the object.
 type chunkDesc struct {
-	storageKey    string
-	backendID     string
-	plaintextHash string
-	offset        int64 // byte offset of this chunk within the object
-	size          int64 // chunk size in bytes (plaintext)
-	compressed    bool  // true if chunk is stored compressed (needs decompression on read)
+	storageKey     string
+	backendID      string
+	plaintextHash  string
+	offset         int64  // byte offset of this chunk within the object
+	size           int64  // chunk size in bytes (plaintext)
+	compressed     bool   // true if chunk is stored compressed (needs decompression on read)
+	encrypted      bool   // true if chunk is stored encrypted (needs decryption on read)
+	ciphertextHash string // SHA-256 of encrypted blob for integrity verification
 }
 
 // fetchAndVerifyChunk reads one chunk from the global container into a bounded
@@ -1043,7 +1115,9 @@ type chunkDesc struct {
 // expected plaintext hash before returning it. Verifying before the bytes are
 // written guarantees corrupt data is never served, and the per-chunk read keeps
 // peak memory at one chunk regardless of object size.
-func (a *S3ToEngine) fetchAndVerifyChunk(ctx context.Context, d chunkDesc) ([]byte, error) {
+//
+// Pipeline order: fetch → decrypt → decompress → verify.
+func (a *S3ToEngine) fetchAndVerifyChunk(ctx context.Context, d chunkDesc, tenantID string) ([]byte, error) {
 	// Hint the backend that holds this chunk so retrieval is deterministic after
 	// a restart (when the engine's in-memory routing map is cold).
 	if d.backendID != "" {
@@ -1061,6 +1135,13 @@ func (a *S3ToEngine) fetchAndVerifyChunk(ctx context.Context, d chunkDesc) ([]by
 	data, err := io.ReadAll(rdr)
 	if err != nil {
 		return nil, fmt.Errorf("read chunk %s: %w", d.plaintextHash[:16], err)
+	}
+
+	if d.encrypted && a.chunkEncSvc != nil {
+		data, err = a.chunkEncSvc.DecryptChunkData(tenantID, d.plaintextHash, data, d.ciphertextHash)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt chunk %s: %w", d.plaintextHash[:16], err)
+		}
 	}
 
 	if d.compressed {
@@ -1091,8 +1172,9 @@ func (a *S3ToEngine) fetchAndVerifyChunk(ctx context.Context, d chunkDesc) ([]by
 // (a short read the client detects) rather than serving bad bytes. A corrupt
 // FIRST chunk yields a clean 500 (handled here — never a fallthrough to 404).
 //
-// SSE-C/SSE-S3 decryption is not handled — chunking is mutually exclusive with
-// encryption by construction in HandlePut, so chunked objects are never encrypted.
+// Per-chunk convergent encryption (AES256-CE) is handled via fetchAndVerifyChunk
+// when chunkEncSvc is set. SSE-C/SSE-S3 whole-object encryption remains mutually
+// exclusive with chunking for objects that don't use the per-chunk path.
 func (a *S3ToEngine) handleChunkedGet(
 	w http.ResponseWriter, r *http.Request,
 	t *tenant.Tenant,
@@ -1139,13 +1221,19 @@ func (a *S3ToEngine) handleChunkedGet(
 		if storageKey == "" {
 			storageKey = "_chunks/" + ref.PlaintextHash
 		}
+		var ctHash string
+		if ref.CiphertextHash != nil {
+			ctHash = *ref.CiphertextHash
+		}
 		descs[i] = chunkDesc{
-			storageKey:    storageKey,
-			backendID:     lookup.Entry.BackendID,
-			plaintextHash: ref.PlaintextHash,
-			offset:        ref.ChunkOffset,
-			size:          lookup.Entry.SizeBytes,
-			compressed:    lookup.Entry.CompressionAlgo != nil,
+			storageKey:     storageKey,
+			backendID:      lookup.Entry.BackendID,
+			plaintextHash:  ref.PlaintextHash,
+			offset:         ref.ChunkOffset,
+			size:           lookup.Entry.SizeBytes,
+			compressed:     lookup.Entry.CompressionAlgo != nil,
+			encrypted:      lookup.Entry.Encrypted,
+			ciphertextHash: ctHash,
 		}
 	}
 
@@ -1252,7 +1340,7 @@ func (a *S3ToEngine) handleChunkedGet(
 	headersWritten := false
 	var written int64
 	for _, p := range plan {
-		data, ferr := a.fetchAndVerifyChunk(ctx, p.desc)
+		data, ferr := a.fetchAndVerifyChunk(ctx, p.desc, t.ID)
 		if ferr != nil {
 			if !headersWritten {
 				if errors.Is(ferr, errChunkIntegrity) {

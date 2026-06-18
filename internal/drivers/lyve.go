@@ -88,6 +88,31 @@ func (d *LyveDriver) Get(ctx context.Context, container, artifact string) (io.Re
 	return result.Body, nil
 }
 
+// GetRange reads a byte range directly from Lyve. Implements engine.RangeGetter.
+func (d *LyveDriver) GetRange(ctx context.Context, container, artifact string, offset, length int64) (io.ReadCloser, error) {
+	tenantID := d.getTenantID(ctx)
+	key := d.buildTenantKey(tenantID, container, artifact)
+	bucket := d.getBucket()
+
+	input := &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	}
+	if offset > 0 || length > 0 {
+		rangeHeader := fmt.Sprintf("bytes=%d-", offset)
+		if length > 0 {
+			rangeHeader = fmt.Sprintf("bytes=%d-%d", offset, offset+length-1)
+		}
+		input.Range = aws.String(rangeHeader)
+	}
+
+	result, err := d.client.GetObject(ctx, input)
+	if err != nil {
+		return nil, fmt.Errorf("get range: %w", err)
+	}
+	return result.Body, nil
+}
+
 func (d *LyveDriver) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...engine.PutOption) error {
 	tenantID := d.getTenantID(ctx)
 	key := d.buildTenantKey(tenantID, container, artifact)

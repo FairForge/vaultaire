@@ -136,23 +136,23 @@ func main() {
 
 	// Configure backend costs
 	eng.SetCostConfiguration(map[string]float64{
-		"idrive":    0.0033, // $3.30/TB
-		"lyve":      0.00637,
-		"quotaless": 0.001,
-		"s3":        0.023,
-		"onedrive":  0.0,
-		"local":     0.0,
-		"geyser":    0.00155, // $1.55/TB
+		"idrive":     0.0033, // $3.30/TB
+		"lyve":       0.00637,
+		"quotaless":  0.001,
+		"s3":         0.023,
+		"permafrost": 0.0,
+		"local":      0.0,
+		"geyser":     0.00155, // $1.55/TB
 	})
 
 	eng.SetEgressCosts(map[string]float64{
-		"idrive":    0.0,
-		"lyve":      0.0,
-		"s3":        0.09,
-		"quotaless": 0.01,
-		"onedrive":  0.02,
-		"local":     0.0,
-		"geyser":    0.0,
+		"idrive":     0.0,
+		"lyve":       0.0,
+		"s3":         0.09,
+		"quotaless":  0.01,
+		"permafrost": 0.0,
+		"local":      0.0,
+		"geyser":     0.0,
 	})
 
 	// Initialize storage drivers
@@ -266,14 +266,14 @@ func main() {
 		logger.Info("iDrive per-region drivers registered", zap.Int("regions", len(drivers.IDriveRegions)))
 	}
 
-	// 7. Add OneDrive fleet if tenant credentials available
+	// 7. Add Permafrost (OneDrive fleet) — internal parity tier, not customer-facing
 	if os.Getenv("TENANT_1_ID") != "" {
 		onedriveDriver, err := drivers.NewOneDriveFleetDriver(logger)
 		if err != nil {
-			logger.Warn("failed to add OneDrive driver", zap.Error(err))
+			logger.Warn("failed to add Permafrost driver", zap.Error(err))
 		} else {
-			eng.AddDriver("onedrive", onedriveDriver)
-			logger.Info("OneDrive fleet driver added", zap.Int("tenants", onedriveDriver.TenantCount()))
+			eng.AddDriver("permafrost", onedriveDriver)
+			logger.Info("Permafrost fleet driver added", zap.Int("tenants", onedriveDriver.TenantCount()))
 		}
 	}
 

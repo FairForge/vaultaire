@@ -284,8 +284,9 @@ func (d *IDriveDriver) abortMultipartUpload(ctx context.Context, container, arti
 	}
 }
 
-// GetStream returns a streaming reader for downloads
-func (d *IDriveDriver) GetStream(ctx context.Context, container, artifact string, offset, length int64) (io.ReadCloser, error) {
+// GetRange reads a byte range directly from iDrive without downloading the
+// full object. Implements engine.RangeGetter.
+func (d *IDriveDriver) GetRange(ctx context.Context, container, artifact string, offset, length int64) (io.ReadCloser, error) {
 	tenantID := d.getTenantID(ctx)
 	key := d.buildKey(tenantID, container, artifact)
 

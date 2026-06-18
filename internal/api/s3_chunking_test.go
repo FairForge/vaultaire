@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/engine"
@@ -1107,4 +1108,178 @@ func TestHandlePut_CompressionExpansionSkipped(t *testing.T) {
 		assert.Nil(t, algo, "compression_algo should be NULL for incompressible data")
 	}
 	require.NoError(t, rows.Err())
+}
+
+// setupEncryptedChunkingFixture creates a chunking fixture with per-chunk
+// convergent encryption enabled (chunkEncSvc set).
+func setupEncryptedChunkingFixture(t *testing.T) *adapterTestFixture {
+	t.Helper()
+	f := setupChunkingFixture(t)
+
+	masterHex := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	km, err := crypto.NewKeyManager(&crypto.KeyManagerConfig{
+		MasterKeyHex:  masterHex,
+		CacheMaxAge:   1 * time.Hour,
+		EnableCaching: true,
+	})
+	require.NoError(t, err)
+	f.adapter.chunkEncSvc = crypto.NewChunkEncryptionService(km)
+	return f
+}
+
+func TestHandlePut_ChunkedWithEncryption(t *testing.T) {
+	f := setupEncryptedChunkingFixture(t)
+
+	content := generateTestData(8 * 1024) // 8 KB — above 1 KB threshold
+	req := httptest.NewRequest("PUT", "/test-bucket/encrypted-chunked.bin", bytes.NewReader(content))
+	req.ContentLength = int64(len(content))
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+
+	w := httptest.NewRecorder()
+	f.adapter.HandlePut(w, req, "test-bucket", "encrypted-chunked.bin")
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.NotEmpty(t, w.Header().Get("ETag"))
+
+	// Verify is_chunked = TRUE and encryption_algorithm = 'AES256-CE'
+	var isChunked bool
+	var encAlgo string
+	err := f.db.QueryRow(`
+		SELECT is_chunked, encryption_algorithm FROM object_head_cache
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+		f.tenantID, "test-bucket", "encrypted-chunked.bin").Scan(&isChunked, &encAlgo)
+	require.NoError(t, err)
+	assert.True(t, isChunked)
+	assert.Equal(t, "AES256-CE", encAlgo)
+
+	// Verify GCI entries are marked encrypted
+	tenantUUID, _ := uuid.Parse(f.tenantID)
+	rows, err := f.db.Query(`
+		SELECT gci.encrypted, gci.encryption_algo FROM global_content_index gci
+		INNER JOIN tenant_chunk_refs tcr ON tcr.plaintext_hash = gci.plaintext_hash
+		WHERE tcr.tenant_id = $1 AND tcr.bucket_name = $2 AND tcr.object_key = $3`,
+		tenantUUID, "test-bucket", "encrypted-chunked.bin")
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var encrypted bool
+		var algo *string
+		require.NoError(t, rows.Scan(&encrypted, &algo))
+		assert.True(t, encrypted, "GCI entry must be marked encrypted")
+		require.NotNil(t, algo)
+		assert.Equal(t, "AES256-CE", *algo)
+	}
+	require.NoError(t, rows.Err())
+
+	// Verify tenant_chunk_refs have ciphertext_hash set
+	var refCount int
+	err = f.db.QueryRow(`
+		SELECT COUNT(*) FROM tenant_chunk_refs
+		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = $3 AND ciphertext_hash IS NOT NULL`,
+		tenantUUID, "test-bucket", "encrypted-chunked.bin").Scan(&refCount)
+	require.NoError(t, err)
+	assert.Greater(t, refCount, 0, "all chunk refs should have ciphertext_hash")
+
+	// Verify raw stored data is NOT plaintext
+	refs, err := f.adapter.gci.GetObjectChunks(context.Background(), tenantUUID, "test-bucket", "encrypted-chunked.bin")
+	require.NoError(t, err)
+	require.NotEmpty(t, refs)
+
+	lookup, err := f.adapter.gci.LookupChunk(context.Background(), refs[0].PlaintextHash)
+	require.NoError(t, err)
+	require.NotNil(t, lookup.Entry)
+
+	raw, err := f.eng.Get(context.Background(), "_global", lookup.Entry.StorageKey)
+	require.NoError(t, err)
+	rawBytes, _ := io.ReadAll(raw)
+	_ = raw.Close()
+	assert.NotEqual(t, content, rawBytes[:len(content)], "stored data must be encrypted, not plaintext")
+}
+
+func TestHandleGet_ChunkedEncryptedRoundTrip(t *testing.T) {
+	f := setupEncryptedChunkingFixture(t)
+
+	content := generateTestData(8 * 1024)
+	putETag := putChunkedObject(t, f, "enc-roundtrip.bin", content, "application/octet-stream")
+
+	getReq := httptest.NewRequest("GET", "/test-bucket/enc-roundtrip.bin", nil)
+	getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+	gw := httptest.NewRecorder()
+	f.adapter.HandleGet(gw, getReq, "test-bucket", "enc-roundtrip.bin")
+
+	require.Equal(t, http.StatusOK, gw.Code)
+	body, _ := io.ReadAll(gw.Body)
+	assert.Equal(t, content, body, "decrypted body must match original plaintext")
+	assert.Equal(t, putETag, gw.Header().Get("ETag"))
+}
+
+func TestHandleGet_EncryptedCompressedRoundTrip(t *testing.T) {
+	f := setupEncryptedChunkingFixture(t)
+
+	// Use compressible data (repeating pattern) to exercise compress+encrypt path
+	content := bytes.Repeat([]byte("compressible data pattern! "), 400)
+	putETag := putChunkedObject(t, f, "comp-enc.bin", content, "text/plain")
+
+	getReq := httptest.NewRequest("GET", "/test-bucket/comp-enc.bin", nil)
+	getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+	gw := httptest.NewRecorder()
+	f.adapter.HandleGet(gw, getReq, "test-bucket", "comp-enc.bin")
+
+	require.Equal(t, http.StatusOK, gw.Code)
+	body, _ := io.ReadAll(gw.Body)
+	assert.Equal(t, content, body, "decrypt+decompress must yield original content")
+	assert.Equal(t, putETag, gw.Header().Get("ETag"))
+
+	// Verify that compression was applied (stored size < plaintext)
+	tenantUUID, _ := uuid.Parse(f.tenantID)
+	var physicalSize *int64
+	_ = f.db.QueryRow(`
+		SELECT physical_size FROM object_metadata
+		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = $3`,
+		tenantUUID, "test-bucket", "comp-enc.bin").Scan(&physicalSize)
+	// Physical includes encryption overhead but compression should still reduce size
+	// for highly compressible data
+	if physicalSize != nil {
+		assert.Less(t, *physicalSize, int64(len(content)),
+			"compressed+encrypted size should still be less than plaintext for compressible data")
+	}
+}
+
+func TestHandlePut_ChunkedEncryptedDedup(t *testing.T) {
+	f := setupEncryptedChunkingFixture(t)
+
+	content := generateTestData(8 * 1024)
+
+	// Upload same content twice under different keys
+	putChunkedObject(t, f, "enc-dedup-1.bin", content, "application/octet-stream")
+	putChunkedObject(t, f, "enc-dedup-2.bin", content, "application/octet-stream")
+
+	// Verify dedup: ref_count should be 2 for all chunks (same tenant → same ciphertext)
+	tenantUUID, _ := uuid.Parse(f.tenantID)
+	rows, err := f.db.Query(`
+		SELECT gci.ref_count FROM global_content_index gci
+		INNER JOIN tenant_chunk_refs tcr ON tcr.plaintext_hash = gci.plaintext_hash
+		WHERE tcr.tenant_id = $1 AND tcr.bucket_name = $2 AND tcr.object_key = $3`,
+		tenantUUID, "test-bucket", "enc-dedup-1.bin")
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var refCount int
+		require.NoError(t, rows.Scan(&refCount))
+		assert.Equal(t, 2, refCount, "same-tenant dedup must increment ref_count")
+	}
+	require.NoError(t, rows.Err())
+
+	// Both objects must be retrievable
+	for _, key := range []string{"enc-dedup-1.bin", "enc-dedup-2.bin"} {
+		getReq := httptest.NewRequest("GET", "/test-bucket/"+key, nil)
+		getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+		gw := httptest.NewRecorder()
+		f.adapter.HandleGet(gw, getReq, "test-bucket", key)
+		require.Equal(t, http.StatusOK, gw.Code)
+		body, _ := io.ReadAll(gw.Body)
+		assert.Equal(t, content, body, "deduped encrypted object %s must be retrievable", key)
+	}
 }

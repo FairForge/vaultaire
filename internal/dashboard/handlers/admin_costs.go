@@ -24,25 +24,25 @@ const (
 // backendCostPerTBCents maps backend names to their per-TB storage cost in cents.
 // Zero means free (contributed, local, or fixed-only).
 var backendCostPerTBCents = map[string]int64{
-	"geyser":   155, // $1.55/TB
-	"idrive":   330, // $3.30/TB
-	"hetzner":  381, // ~€3.81/TB
-	"onedrive": 0,
-	"gorilla":  0,
-	"local":    0,
-	"edge":     0,
+	"geyser":     155, // $1.55/TB
+	"idrive":     330, // $3.30/TB
+	"hetzner":    381, // ~€3.81/TB
+	"permafrost": 0,
+	"gorilla":    0,
+	"local":      0,
+	"edge":       0,
 }
 
 // egressCostPerTBCents maps backend names to their per-TB egress cost in cents.
 // Currently $0 across the board — will matter once BYOB/edge nodes are wired.
 var egressCostPerTBCents = map[string]int64{
-	"geyser":   0,
-	"idrive":   0,
-	"hetzner":  0,
-	"onedrive": 0,
-	"gorilla":  0,
-	"local":    0,
-	"edge":     0,
+	"geyser":     0,
+	"idrive":     0,
+	"hetzner":    0,
+	"permafrost": 0,
+	"gorilla":    0,
+	"local":      0,
+	"edge":       0,
 }
 
 // tierBackend maps a tenant's plan/tier to the intended storage backend.
@@ -214,7 +214,7 @@ func populateCosts(ctx context.Context, db *sql.DB, data map[string]any, logger 
 	totalCostCents += geyserFloorCents + gorillaFixedCents
 
 	// Build backend table rows.
-	backendOrder := []string{"geyser", "idrive", "hetzner", "onedrive", "gorilla", "local", "edge"}
+	backendOrder := []string{"geyser", "idrive", "hetzner", "permafrost", "gorilla", "local", "edge"}
 	var byBackend []backendCostRow
 	for _, name := range backendOrder {
 		agg := backends[name]

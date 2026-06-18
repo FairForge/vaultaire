@@ -116,6 +116,30 @@ func (d *GeyserDriver) Get(ctx context.Context, container, artifact string) (io.
 	return resp.Body, nil
 }
 
+// GetRange reads a byte range from Geyser tape. Implements engine.RangeGetter.
+func (d *GeyserDriver) GetRange(ctx context.Context, container, artifact string, offset, length int64) (io.ReadCloser, error) {
+	tenantID := d.getTenantID(ctx)
+	key := d.buildKey(tenantID, container, artifact)
+
+	input := &s3.GetObjectInput{
+		Bucket: aws.String(d.bucket),
+		Key:    aws.String(key),
+	}
+	if offset > 0 || length > 0 {
+		rangeHeader := fmt.Sprintf("bytes=%d-", offset)
+		if length > 0 {
+			rangeHeader = fmt.Sprintf("bytes=%d-%d", offset, offset+length-1)
+		}
+		input.Range = aws.String(rangeHeader)
+	}
+
+	resp, err := d.client.GetObject(ctx, input)
+	if err != nil {
+		return nil, fmt.Errorf("geyser get range %s: %w", key, err)
+	}
+	return resp.Body, nil
+}
+
 func (d *GeyserDriver) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...engine.PutOption) error {
 	tenantID := d.getTenantID(ctx)
 	key := d.buildKey(tenantID, container, artifact)

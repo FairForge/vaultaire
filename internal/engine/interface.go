@@ -45,6 +45,14 @@ type Driver interface {
 	HealthCheck(ctx context.Context) error
 }
 
+// RangeGetter is an optional interface for drivers that support byte-range
+// reads directly (avoiding full-object download + discard). Drivers that
+// implement this will be used for range GETs, dramatically improving download
+// speed for large objects accessed via multipart/range clients.
+type RangeGetter interface {
+	GetRange(ctx context.Context, container, artifact string, offset, length int64) (io.ReadCloser, error)
+}
+
 // ResultSet for query operations (future use)
 type ResultSet interface {
 	Next() bool
