@@ -1,9 +1,13 @@
 # Vaultaire Complete Implementation Plan
 
-**Last updated**: 2026-06-04
-**Status**: Phase 5.14 COMPLETE through 5.14.11 — all shipped & deployed to SLC prod: 5.14.1-5.14.4 (#253-256), 5.14.11 security hardening (#257), 5.14.5 HIPAA (#258), 5.14.6 GDPR/EU Data Act (#259), 5.14.7 per-bucket regions (#260), 5.14.8 SSE-C (#261), 5.14.9 access logging + inventory (#262), 5.14.10 compliance dashboard (#263). 5.11.0-5.11.12, 5.12.3-5.12.7, 5.13 complete. Gap-fill 5.10.17 object tagging shipped (#264). 5.15.1 graceful shutdown already in main.go (verify systemd TimeoutStopSec=45). **ALL gap-fills + 5.15 code COMPLETE:** 5.10.18 (#267), 2.7 (#269), 4.3 (#275), 3.6 (#276), 3.8 (#277), 3.9 (#278), landing 5.15.3 (#272), load-test gate 5.15.2 code (PR #282). **Remaining before launch = OPS only (no more code blocks Tier 1):** run the 5.15.2 load harness against live + fix what it surfaces; 5.15.4 smoke checklist; **5.15.5 prod backend/durability + Stripe meter activation + reopen signups (the true launch blocker)**; 5.14.12 status page (hosted). 5.14.12 status page = ops (hosted), not code.
+**Last updated**: 2026-07-07 <!-- reconstructed: status + audit pass 2026-07-07 — verified against git log (#173-#312), .private/ docs; changes marked with "reconstructed:" comments -->
+**Status (2026-07-07)**: **Tier 1 code-complete. Launch (end of July 2026) is gated on 5.15.5 (ops) + 5.15.6 (front-door UX) + 5.15.7 (code/billing/security). ⚠️ The "ops only, no code" framing below is SUPERSEDED by two 2026-07-08 reviews that found real code blockers — see Phase 5.15.6 and Phase 5.15.7. Day-to-day driver: `.private/LAUNCH_EXECUTION_SEQUENCE.md`; ops steps: `.private/LAUNCH_RUNBOOK.md`.** Last merged work: PR #312 (2026-06-17) — range-GET passthrough (`RangeGetter` interface on iDrive/Lyve/Geyser, 5× download: 6→30 MB/s single, 106 MB/s concurrent), **convergent chunk encryption [Phase 10.1-10.3]** (HKDF deterministic nonces, dedup-safe, migration 052), OneDrive fleet renamed **"permafrost"** (admin-only, removed from user-selectable storage classes), NVMe cache enlarged (16 GB RAM / 500 GB SSD, <1ms hot reads), and `cmd/validate` 22-test E2E suite (iDrive/Lyve/Geyser all 20/20 from SLC). Before that: **Phase 9 compression COMPLETE** (#311), **Phase 8 COMPLETE** (#300-309), **Phase 7 COMPLETE** (#297-299), admin gap-fills 3.7/3.10/3.11 (#294-296). Tier 2 has shipped AHEAD of launch through Phase 10.1-10.3.
+**Launch blockers (ops — SUPERSEDED 2026-07-08: now ALSO code, see Phases 5.15.6 + 5.15.7)**: **5.15.5** — prod on a durable backend (currently falls back to local disk), create + attach Stripe Billing Meters, set `STRIPE_METER_*` in prod .env, reopen signups (`SIGNUPS_ENABLED=true`), **TLS auto-renewal check (cert expires 2026-07-28 — launch week)**, Cloudflare cache/rate rules. **5.15.4** — smoke checklist run. **5.14.12** — hosted status page. **V18.7-minimal** — Stripe products for the Vault packs sold on day one + LET2026 coupon (launch posts ready in `.private/launch/`). **5.15.2** — confirm the load harness was run against live after #283, or run it.
+**Next code phase**: post-launch — see **"Post-Launch 90-Day Priority Stack"** (before the Tier 2 heading). In the Tier-2 pipeline sequence: Phase 10 remainder (10.4-10.7), then Phase 11 erasure coding → P2-P6 permafrost parity.
+**Status (2026-06-04, superseded)**: Phase 5.14 COMPLETE through 5.14.11 — all shipped & deployed to SLC prod: 5.14.1-5.14.4 (#253-256), 5.14.11 security hardening (#257), 5.14.5 HIPAA (#258), 5.14.6 GDPR/EU Data Act (#259), 5.14.7 per-bucket regions (#260), 5.14.8 SSE-C (#261), 5.14.9 access logging + inventory (#262), 5.14.10 compliance dashboard (#263). 5.11.0-5.11.12, 5.12.3-5.12.7, 5.13 complete. Gap-fill 5.10.17 object tagging shipped (#264). 5.15.1 graceful shutdown already in main.go (verify systemd TimeoutStopSec=45). **ALL gap-fills + 5.15 code COMPLETE:** 5.10.18 (#267), 2.7 (#269), 4.3 (#275), 3.6 (#276), 3.8 (#277), 3.9 (#278), landing 5.15.3 (#272), load-test gate 5.15.2 code (PR #282). **Remaining before launch = OPS only (no more code blocks Tier 1):** run the 5.15.2 load harness against live + fix what it surfaces; 5.15.4 smoke checklist; **5.15.5 prod backend/durability + Stripe meter activation + reopen signups (the true launch blocker)**; 5.14.12 status page (hosted). 5.14.12 status page = ops (hosted), not code.
 **Before 5.15 (launch gate)**: gap-fills — ✅ 5.10.17 object tagging (#264); REMAINING: 5.10.18 (Content-Disposition, next), 2.7 (metered billing — revenue-critical, pay-per-TB tiers can't bill without it), 4.3 (bandwidth alerts — table exists, alert logic missing), 3.6 (audit viewer), 3.8 (revenue dashboard — only an estimate exists), 3.9 (cost dashboard). Then 5.15.3 landing page (code) + ops gates 5.15.2/5.15.4/5.14.12 + **5.15.5 (prod backend/durability + billing activation — the true launch blockers)** = launch ready. (5.15.1 done.)
-**Post-launch, first 2 weeks**: 3.7 (customer support view), 3.10 (admin notifications), 3.11 (abuse queue).
+**Post-launch, first 2 weeks**: ✅ ALREADY DONE ahead of schedule — 3.7 customer support view (#294), 3.10 admin notifications (#295), 3.11 abuse queue (#296). <!-- reconstructed: verified against git log -->
+**Recent (2026-06-17)**: PR #312 merged (see Status line): range-GET passthrough, Phase 10.1-10.3 convergent encryption, permafrost rename, NVMe cache, `cmd/validate` + `scripts/validate-backends.sh`. PR #311 (2026-06-05+): Phase 9 zstd compression on chunked PUT/GET — Phase 9 COMPLETE.
 **Cleanup**: delete orphan branch `phase-5.11.6-event-log-webhooks` (code is on main, merged via PRs #238/#239).
 **Recent (2026-06-05)**: **Phase 8 COMPLETE.** Shipped 8.4.1 streaming PUT (#306), 8.6 GCI dedup dashboard (#307), 8.7 dedup GC with orphan reconciliation (#308), 8.8 dedup migration CLI (#309). Each reviewed by reading the actual code (the streaming/GC/migration phases carried real data-loss surfaces — all verified correct, e.g. GC's `last_accessed_at` grace guard protects in-flight PUTs, migration's verify-before-delete + flag-before-delete ordering). Also root-caused + fixed two recurring CI flakes (#310): `TestRequestQueue` (a real select race in `RequestQueue.Submit`) and `TestPipeline_Run` (racy transient-status assert). Chunking pipeline is now end-to-end + self-cleaning but **still ahead of launch** — 5.15.5 (prod durable backend + Stripe meter activation + reopen signups) remains the unstarted revenue blocker. Next in Tier-2 sequence: Phase 9 (compression).
 **Recent (2026-06-04)**: Phase 8 chunking/dedup train shipped — **AHEAD of the launch sequence** (Phase 8 is post-launch on the roadmap; launch remains ops-gated on 5.15.4/5.15.5, unchanged by this work). PRs: 8.3-8.4 chunking migration (051) + dedup upload (#300), 8.5 dedup download (#301), `_global` shared chunk store fixing cross-tenant/cross-bucket dedup retrieval (#302), 8.6 bounded-streaming GET + per-chunk SHA-256 integrity (#303), SSE >256 MiB reject-guard — was silently storing plaintext (#304), 8.6.1 atomic manifest replacement on overwrite (#305). Three latent data-corruption/security bugs found & fixed by verification (cross-tenant 404, overwrite corruption, silent-plaintext). See the Phase 8 STATUS block for the sketch-vs-shipped map. Remaining chunking: **8.4.1 PUT-side streaming** (gap, now in plan as next), 8.6 GCI dashboard, 8.7 GC (delete from `_global`), Phase 10 real large-object encryption (interim: >256 MiB SSE rejected). Note: git "Phase 8.6/8.6.1" labels = 8.5 hardening, NOT plan 8.6.
@@ -12,7 +16,7 @@
 **Previous (2026-05-13)**: Phase 5.12.3 complete — iDrive + OneDrive fleet wired, end-to-end benchmarked on Mac + SLC. Pipeline components benchmarked (RS, FastCDC, zstd, AES-GCM). ContentLength passthrough added to engine PutOptions. Engine Delete fixed to target known backend only. Quotaless removed from SLC prod .env (account locked). OneDrive driver: streaming uploads (+150% concurrent), parallel range downloads (+28% single-file), DNS cache, fleet-wide TLS cache, token mutex, RateLimit tracking. iDrive driver: fixed-bucket pattern, materialize for Content-Length. Benchmark automation: `scripts/bench-vaultaire.sh`. Pipeline benchmark tool: `cmd/pipeline-bench/`.
 **Previous (2026-05-12)**: Benchmark-driven optimizations — added Phase 5.12.7 (production transport tuning with adaptive MPU strategy: H1 vs H2, 4-16 parallel parts, 4MB buffers). Storage class routing added to 5.12.4. SSE-S3 managed encryption added to 5.14.4 (critical for Geyser multi-tenant). MFA Delete added to 5.14.3. Inventory reports added to 5.14.9. Cross-account access + IAM evaluator wiring added to 19.1. Lifecycle rules (12.1) expanded with S3 XML API compatibility. Quotaless endpoints updated (srv1/srv2/us DNS removed, account locked). Geyser: TLS certs now valid (InsecureTLS removable), H1 is 4.2x faster than H2 (Vail gateway preference).
 **Recent (2026-06-02)**: Closed out all Tier-1 gap-fills + the 5.15 code gate. Shipped OneDrive/S3 upload perf (#279 parallel MPU for S3 backends, #280 HTTP/1.1 OneDrive upload +6-20%, #281 fleet-upload bench TEST 7). Key finding: OneDrive "12 MB/s" is per-single-file — multi-file + per-tenant concurrency (2.3x) gives 24-58 MB/s @ 3 tenants, ~100-200 fleet (NIC-bound); customers must parallelize. Landed 5.15.2 load-test gate (PR #282): SigV4 harness, 5 env-gated scenarios, pg pool 25→50. **Tier 1 is now code-complete; only ops gates (5.15.4/5.15.5) remain before launch.**
-**Plan file**: `/Users/viera/.claude/plans/zazzy-growing-treasure.md`
+**Plan file**: THIS file (`docs/IMPLEMENTATION_PLAN.md`) is now canonical. <!-- reconstructed: the copies at /Users/viera/.claude/plans/zazzy-growing-treasure.md and .private/ZAZZY_PLAN_BACKUP.md are BOTH truncated at Phase 21.4 (1,980 lines) — Phases 21.5-30 below were rebuilt 2026-07-07 from internal cross-references, MASTER_PLAN_SUMMARY.md, and memory. Do not resume from the old copies. -->
 **Master plan (historical)**: `/Users/viera/fairforge/vaultaire/.private/VAULTAIRE_MASTER_PLAN.md`
 
 ## Context
@@ -37,7 +41,9 @@ Each handoff is a natural stopping point where the codebase is in a clean, commi
 
 ### How to resume
 
-Say: **"Continue from Phase X.Y — [sub-step name]. Plan: /Users/viera/.claude/plans/zazzy-growing-treasure.md"**
+Say: **"Continue from Phase X.Y — [sub-step name]. Plan: docs/IMPLEMENTATION_PLAN.md"** — or use `/next` (generates the next-phase prompt from this file) or `/next-step` (implements the next phase in-session). <!-- reconstructed: updated plan path; old ~/.claude/plans copy is truncated -->
+
+Both `/next` and `/next-step` should derive "the next phase" from the **Status** line at the top of this file: first unfinished launch-blocker if pre-launch, otherwise the top unstarted item in the Post-Launch 90-Day Priority Stack.
 
 The new session should:
 1. Read this plan file (check Status line for where we are)
@@ -96,7 +102,7 @@ The per-directory `CLAUDE.md` files carry most of the context automatically. The
 
 ## Migration Numbering
 
-Migration numbers in this plan are **planning references**, not assignments. Existing migrations go up to `030_metadata.sql`. The next migration built gets `031`, regardless of which phase it comes from. Assign sequentially at build time — multiple phases reference the same numbers but only one migration can have each number. When starting a phase, check `ls internal/database/migrations/` for the latest number and use the next one.
+Migration numbers in this plan are **planning references**, not assignments. Existing migrations go up to `052_chunk_encryption.sql` (as of 2026-07-07). <!-- reconstructed: verified against internal/database/migrations/ --> The next migration built gets `053`, regardless of which phase it comes from. Assign sequentially at build time — multiple phases reference the same numbers but only one migration can have each number. When starting a phase, check `ls internal/database/migrations/` for the latest number and use the next one.
 
 ## Documentation Practice
 
@@ -127,6 +133,7 @@ These were evaluated and deliberately postponed. Revisit at the noted trigger po
 - **Full API version translation** — header-only versioning ships in 5.11.1 (`X-Vaultaire-Version` on every response). Full version translation (old API shapes → current format, like Stripe's version pinning) deferred to Phase 26.2. **Revisit when**: you need to make a breaking change to the management API. S3 wire protocol is version-less by design (AWS has never versioned S3), so this only applies to the JSON management API.
 - **Custom S3 SDKs** — NOT building them. boto3, aws-cli, rclone, and every language's AWS SDK already work with stored.ge because we're S3-compatible. Only the management API needs custom SDKs (Phase 26.6). This is a strength: developers don't learn a new SDK, they use the one they already know.
 - **LET community presence** — start lurking on LET during Tier 1. Comment on storage threads. Build credibility before posting offers. Don't wait for Phase 27 (GTM) to start community engagement.
+- **kTLS + io_uring zero-copy I/O** — kernel TLS offload for the CDN path (Netflix pattern: CPU 15%→2%) and io_uring for cache reads. Spec'd in `.private/ADVANCED_ARCHITECTURE.md` §"I/O Architecture". **Revisit when**: CDN has real sustained traffic and CPU becomes measurable; Go io_uring libraries need maturity. Not a launch or 90-day item. <!-- reconstructed: added from ADVANCED_ARCHITECTURE.md — was missing from plan -->
 
 ## Known Gaps (implemented but incomplete — fill in when revisiting those areas)
 
@@ -719,8 +726,9 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 **Test**: Create scoped key → verify it can only access allowed buckets → generate STS token → verify scope intersection → use STS token for browser upload → verify token expires correctly.
 
 ### 5.11.6: Event Log + Webhook Management API
-**File**: `internal/api/events.go`, `internal/api/webhooks_api.go`, new migration
+**File**: `internal/api/events.go`, `internal/api/webhooks_routes.go`, new migration
 **Depends on**: 5.11.0 (management API for route registration and response envelope)
+> **Phase 5.11.6 COMPLETE** — merged to main alongside PRs #238/#239 (no standalone PR; orphan branch `phase-5.11.6-event-log-webhooks` is stale). Code verified present: `internal/api/events.go`, `event_type.go`, `webhooks_routes.go`, `webhook_endpoints` table. <!-- reconstructed: verified against codebase 2026-07-07 -->
 - Migration: `events` table (id, type, tenant_id, data JSONB, created_at). `webhook_endpoints` table (id, tenant_id, url, event_filter TEXT[], secret, enabled, created/updated_at). `webhook_deliveries` table (id, webhook_id FK CASCADE, event_id FK, status, response_code, response_body, latency_ms, retry_count, next_retry_at, created_at).
 - Event types: object.created, object.deleted, object.downloaded, bucket.created, bucket.deleted, key.created, key.revoked, sts.token_created
 - `emitEvent(ctx, type, tenantID, data)` — INSERT into events, dispatch to matching webhooks asynchronously (goroutine with buffered channel, same pattern as notification dispatcher in s3_notifications.go)
@@ -812,8 +820,9 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 ## Phase 5.12: Backend Readiness (Parallel Track)
 *Independent of 5.10/5.11. Can run alongside. Required before multi-backend tiering in Phase 7.*
 
-### 5.12.1: Quotaless Production Driver Fix ⏸ BLOCKED (account locked 2026-05-12)
+### 5.12.1: Quotaless Production Driver Fix ⏸ DEPRIORITIZED (account locked 2026-05-12; removal deferred to M12 exit)
 **Files**: `internal/drivers/quotaless.go`
+- **2026-07-07**: Quotaless is deprioritized, not just blocked — LAUNCH_STRATEGY plans a full exit by M9-12 (own Gorilla fleet, Phase 6.6). Don't invest here. Known follow-up: the unconditional boot health check against `io.quotaless.cloud` (`server.go`) is a CI-flake source — make it conditional on creds being present. <!-- reconstructed: verified against LAUNCH_STRATEGY.md §5 + memory -->
 - Account locked as of 2026-05-12 — contact Quotaless support to re-enable
 - Quotaless removed from SLC production .env (was causing 401 retry storms on every Delete)
 - Still wired in main.go code but won't activate without QUOTALESS_ACCESS_KEY in env
@@ -844,6 +853,7 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 
 ### 5.12.4: Multi-Backend Failover + Storage Class Routing
 **Files**: `internal/engine/failover.go` (new), `internal/engine/engine.go`
+> **Phase 5.12.4 COMPLETE** — PR #251. Hardened under load in #283. <!-- reconstructed: verified against git log -->
 - Engine currently selects primary/backup but failover is manual
 - Automatic failover: if primary returns error or health check fails, retry on backup
 - Backend priority list per operation type (read vs write)
@@ -851,9 +861,11 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 - Prometheus metrics: `vaultaire_backend_failover_total{from, to}`, `vaultaire_backend_health{name}`
 - Graceful degradation: if all backends down, return 503 with `Retry-After` header
 - **Storage class mapping**: honor `x-amz-storage-class` header on PUT — `STANDARD` → iDrive, `STANDARD_IA` → Lyve (zero egress), `GLACIER` → Geyser, `DEEP_ARCHIVE` → Geyser+airgap, `ONEZONE_IA` → OneDrive (parity-only, not customer-facing). Return correct class on HEAD/GET. Default `STANDARD` if omitted. Enables S3-compatible lifecycle transitions and customer tier control via standard AWS tooling. (Quotaless mapping removed — account locked.)
+- ⚠ **Stale-dependency note (2026-07-07)**: Lyve is strategically DROPPED (Wasabi acquisition, 90-day minimum billing — see `.private/CLAUDE.md`), though the driver remains wired and passed validation 20/20 in #312. Don't route customer `STANDARD_IA` to Lyve; treat it as an alias for `STANDARD` until an own-fleet warm tier exists. The permafrost (OneDrive) class was removed from user-selectable classes in #312. <!-- reconstructed: verified against .private/CLAUDE.md + PR #312 -->
 
 ### 5.12.5: Backend Health Dashboard
 **Files**: `internal/dashboard/handlers/admin_backends.go` (new), `templates/admin/backends.html` (new)
+> **Phase 5.12.5 COMPLETE** — PR #252. <!-- reconstructed: verified against git log -->
 - Admin page: all registered backends with health status, latency, last-checked timestamp
 - Per-backend: endpoint, region, capacity, current usage, health history (last 24h)
 - Failover log: recent failover events with timestamps and reason
@@ -884,6 +896,7 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 
 ### 5.12.8: Backend Cost Tracking
 **Files**: `internal/engine/cost_optimizer.go`, `internal/dashboard/handlers/admin_costs.go`
+> **Largely superseded** — per-backend COGS + margin dashboard shipped as Phase 3.9 (#278) and blended-cost tracking as Phase 7.4 (#297); `admin_costs.go` further updated in #312. Remaining: automated cost input via iDrive reseller API (folds into R4). <!-- reconstructed: verified against git log -->
 - Track per-backend storage and egress costs from provider billing
 - Input: manual entry or API polling (iDrive reseller API when available)
 - Output: blended cost per TB, per-backend breakdown, margin calculation
@@ -948,11 +961,12 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 - Comparison table: stored.ge Vault18 vs Glacier vs Glacier Deep Archive vs Wasabi vs B2
 - Highlight: "$0 retrieval" vs Glacier's $90/TB retrieval fee
 
-### V18.7: Pack Pricing Integration
+### V18.7: Pack Pricing Integration ⚠ LAUNCH-CRITICAL (minimal version)
 **Files**: `internal/billing/stripe.go`
-- Stripe products for Vault packs: Vault3 ($7.47/mo), Vault9 ($22.41/mo), Vault18 ($44.82/mo)
-- Launch promo: $1/TB for first 5 packs (first 100TB total)
+- Stripe products for Vault packs per `.private/VAULT_SERIES_ECONOMICS.md`: Vault1 $4.99, Vault3 $7.99, Vault5 $9.99 (⭐ LET star), Vault10 $12.99, Vault18 $17.99, Vault50 $44.99, Vault100 $84.99 <!-- reconstructed: corrected pricing against VAULT_SERIES_ECONOMICS.md — previous reconstruction had Vault3 $7.47 / "Vault9" $22.41 / Vault18 $44.82, which match no reference doc (Vault9 doesn't exist) -->
+- Launch promo: Vault18 at $1/TB, CAPPED (see `.private/launch/PRICING_VALIDATION.md`) + LET2026 coupon (10% off 3 months)
 - Pack subscription management in dashboard
+- **Minimal launch scope**: create the Stripe products/prices for the packs actually sold day one (Vault1/3/5/18 per launch posts) — the rest of V18.1-V18.8 can follow post-launch on existing plumbing (tiering engine #297 + storage-class routing #251 already route archive data to Geyser)
 
 ### V18.8: Deep Archive Dashboard
 **Files**: `internal/dashboard/handlers/archive.go` (new), templates
@@ -1177,6 +1191,82 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 - **Cloudflare:** cache rule for `/` (offload landing spikes) + a rate-limit/bot rule on `/api/waitlist` and `/auth/register`.
 - **Why**: 5.15.2 + 5.15.4 gate *behavior*; this gates *the operational substrate*. Finishing 5.15.1-5.15.4 without this = "feature-complete" but customer data lands on a single unbacked disk. This is the true "can I charge a customer" line.
 
+### 5.15.6: Day-1 Customer Experience Audit Fixes
+*Added 2026-07-08 (day-1 UX audit — walked the LET-reader path from landing → signup → first PUT → docs). The engine is launch-ready; the **front door is not**. Almost every item is wiring/copy on top of working code, so most are hours not weeks. The LET post promises "Signup: https://stored.ge — 5GB free, no card… keys are on the dashboard, works in under a minute" — these items make that promise true.*
+
+**🚨 LAUNCH BLOCKERS**
+
+- **B1 — Replace the waitlist landing page (patches 5.15.3, supersedes PR #272/#274).** The served `internal/api/landing.html` is a *pre-launch waitlist for the wrong product*: "Enterprise S3 + VPS" bundles (2GB RAM / 2 vCPU for $3.99/mo), branded on **Seagate Lyve Cloud** (a dropped backend), fabricated trust stats (10PB+, "decades of experience", 99.99% SLA), a countdown to July 31, and a **"Sign In Coming Soon"** modal. It links to `/login`, `/register`, `/dashboard` **nowhere** — the working product is reachable only by URL-guessing. Ship the 5.15.3 real homepage: hero ("$3.99/TB S3-compatible storage"), honest pitch (reuse `.private/launch/LET_LAUNCH_POST.md` copy), pricing table (Standard/Performance/Vault), CTAs → `/register` + `/login`, footer linking `/pricing` + `/status` + `/legal/*`. Kill the fake VPS/RAM/vCPU product entirely.
+- **B2 — Web signup must surface S3 credentials (patches 5.11.7).** `handleRegister` (`internal/dashboard/router.go:475`) does `user, _, _, err :=` — **discards the minted tenant + secret key** and redirects to `/dashboard`, which only ever shows the *access* key (`onboarding.go:38-40`). A web user must independently discover `/dashboard/apikeys` and mint a *second* key to get anything usable. Fix: show the secret once on a post-signup screen, OR make the onboarding checklist's first step "Create your API key" linking to `/dashboard/apikeys`. (JSON `/auth/register` already returns creds — web path is the gap.)
+- **B3 — Actually serve customer docs.** All nine `internal/docs/*` packages are **empty scaffolding** (builders, zero content, imported nowhere). The only doc route is `GET /docs` → a **mis-branded** Swagger ("Vaultaire", `support@vaultaire.io`, MIT) covering **7 of ~40** operations (`internal/docs/openapi.go:216`). A complete `docs/guides/rclone-setup.md` exists on disk but is **not served**. Serve, at minimum: getting-started, rclone, FAQ — **launch-ready copy for all three drafted 2026-07-08 (this session)**; drop into `internal/docs` + link from dashboard and landing footer. Add aws-cli + restic pages as fast-follow.
+- **B4 — Copy-pasteable, runnable connection config in the dashboard.** Onboarding tabs (`dashboard.html`) hardcode `region: "us-east-1"` and a literal `YOUR_SECRET_KEY`, have **no copy buttons**, and **no rclone tab** (5.11.7 planned one; it's absent) — so the "getting started" code can't run as-is. Fix: inject the user's real access key (never secret in HTML — reveal-once elsewhere per B2), add rclone + s3cmd blocks, add copy buttons (extend the `.btn-copy` handler already used for CDN URLs).
+
+**📚 DOCS AUTO-SYNC ("update automatically like Stripe") — the launch tier**
+*Stripe's property that matters: docs can never silently drift from the API. Reference + code samples are derived from one source; only prose is hand-written. Get the property cheaply — don't build spec-generation for launch.*
+
+- **Tier 0 — Drift guard (do first, ~½ day).** CI test that walks the registered chi routes and asserts every S3/management route appears in the OpenAPI spec and vice-versa. Generates nothing; just **fails the build** when spec and code disagree. Catches the exact bug already live (7-of-40, mis-branded). Fits existing "CI must pass" discipline.
+- **Tier 1 — One source for volatile values (~½ day).** Centralize endpoint (`https://stored.ge`), region, and the pricing table in a single Go config, injected into the OpenAPI spec + dashboard onboarding tabs + doc pages. One edit updates every snippet/page at once. **Also permanently fixes the region inconsistency** (`us-east-1` signing/examples at `handlers.go:271` vs `us-west-1` bucket default at `buckets.go:133`) — pick `us-east-1`, document it, reconcile the bucket default.
+- *(Tier 2 generated per-user code samples + Tier 3 spec-from-handlers → Phase 26.5.)*
+
+**🔶 FAST-FOLLOW (days after launch)**
+
+- **Billing reads as $0 on day 1.** Zero-usage zeroes every provider in the comparison (`billing.go:255-293`) → "You save **$0.00**/mo vs AWS" — the marquee value prop looks broken. Plan cards render only if Stripe is configured (`billing.html:60-76`), else "Plans are being configured." Show list pricing / a "what will N TB cost" estimate even at zero usage.
+- **Tier-name inconsistency:** `starter` (dashboard/usage) vs `free` (quota logic) vs `standard`/`vault*` (billing) — user can't tell what plan they're on. Normalize.
+- **Link the trust pages you already built.** `/legal/{terms,privacy,aup,dpa,gdpr,cookies,baa,data-act}` and the in-app `/status` page (`server.go:493`) **work but are orphaned** (footer links are all `#`; footer "SLA" link has no backing route). Link them from the new footer; add `/legal/sla` or drop the link. Reconcile with 5.14.12 (decide in-app `/status` vs hosted `status.stored.ge` — don't ship both unlinked).
+- **Wire a real contact/support channel.** Footer "Contact" is dead; OpenAPI support email is the wrong domain. Surface `support@stored.ge` (LET post promises founder-direct <4h).
+- **OpenAPI rebrand + expand** (`openapi.go`): stored.ge branding, `support@stored.ge`, and cover the implemented ops beyond the current 7.
+- **Email verification is never sent at signup and gates nothing** (`auth.go:326`; only manual resend in settings). Either enforce it or remove the dead "unverified" banner.
+- **Onboarding dead items:** "Upload a file" + "Set up a webhook" checklist entries have no backing UI (no browser upload, no webhook settings page). Wire them or cut them; add a persistent "Connect / Quickstart" page so the info doesn't vanish permanently on dismiss.
+
+**Test**: Anonymous browser hits `/` → sees real homepage with working Sign up / Sign in → register → **sees usable credentials without hunting** → dashboard quickstart has copy-paste rclone + aws-cli that run as-is → `/docs` serves getting-started + rclone + FAQ, all correctly branded → footer links reach `/pricing`, `/status`, `/legal/terms` → CI drift-guard test fails if a route is missing from the spec.
+
+---
+
+## Phase 5.15.7: Pre-Launch Hardening — Code / Billing / Security Correctness
+*Added 2026-07-08 (deep correctness + billing + ops review). Peer of 5.15.6 — 5.15.6 fixes the front door, 5.15.7 fixes the engine/billing/security. The happy path works; real traffic exposes blockers the phase-completion checklists missed.*
+
+> **Security note:** the detailed findings (exploit specifics, file:line, prod state) are kept **out of this public repo** and live only in the local, gitignored `.private/` bundle — `.private/LAUNCH_READINESS_REVIEW.md`, `.private/FABLE_FIX_PLAN.md` (ordered work packages WP-1…WP-15 with tests), `.private/LAUNCH_EXECUTION_SEQUENCE.md` (**the day-by-day driver — work from this**), and `.private/LAUNCH_RUNBOOK.md` (ops + first-week monitoring). This section is the high-level launch-gate summary only.
+
+**🚨 CRITICAL — must land before launch (details in `.private/`):**
+- **WP-1 — Billing/quota accounting correctness.** Single-source reservation, release-on-delete, reconciliation job. Today's accounting misreports usage, which feeds the metered Stripe charge — the top launch blocker.
+- **WP-2 — Bound GET memory / caching.** The read path can retain object bytes in RAM without eviction; cap it so the single box can't OOM under real load.
+- **WP-3 — Fail loudly on metadata-write failure.** A swallowed head-cache write can return success on an object that then can't be read; return 5xx instead.
+- **WP-4 — Harden S3 request authentication.** Verify request signatures on the header-auth path (staged; validate against the rclone/JuiceFS/aws-cli compat suite before merge).
+- **WP-5 — Remove the non-production test-credential path** from the auth code; ensure prod runs with `ENV=production`.
+- **WP-6 / WP-7 — Dedup pipeline integrity.** Make GC coherent with the in-memory index; use a deterministic chunking polynomial with tenant-scoped dedup when encryption is on (both together). Fixes silent-data-loss + correctness edges on the >64 MB chunked path.
+- **WP-8 / WP-9 — Migrations.** Add the runtime-only tables (schema must rebuild from migrations alone — DR), fix GDPR-deletion FK cascades, make all migrations idempotent, and make the runner fail on error instead of swallowing it.
+- **Ops (Phase 0 in `.private/LAUNCH_RUNBOOK.md`):** the nightly Postgres backup pipeline is currently producing empty dumps — repair + restore-test before launch. Plus 5.15.5 (durable backend + billing activation).
+
+**🔶 HIGH (fix if clean, else document — WP-10…WP-15):** abandoned-multipart reaper + per-part quota; batch hot-path writes + wire shutdown flush; tiering-migration revalidation; gate self-service tier changes on verified subscription; collapse the PUT bucket-config query storm; retention job for per-request tables.
+
+**MEDIUM: do NOT touch pre-launch.** Notable: ~35 of 48 `internal/` packages are unreferenced by any binary — candidate cleanup post-launch.
+
+**Test**: WP TDD tests pass (PUT→DELETE→quota baseline, concurrent-PUT-at-limit → one 403, cross-tenant encrypted round-trip, metadata-write-failure → 5xx); then load-test (5.15.2) against fixed+backed prod → RSS flat, no 5xx; then the Phase 0 backup restore-test and a fresh-DB migration rebuild both pass.
+
+---
+
+# POST-LAUNCH 90-DAY PRIORITY STACK (added 2026-07-07)
+<!-- reconstructed: new section — Tier 2 shipped ahead of schedule (Phases 7-10.3 done), so the original "build after first customers" order no longer applies. Ranked by revenue impact × retention × effort, targeting what LET/Reddit users and the first 50 customers will actually hit. -->
+
+*Assumes launch end of July 2026 with Standard + Vault packs per `.private/LAUNCH_STRATEGY.md`. Re-rank monthly against actual customer signal.*
+
+| # | Item | Phase | Why this rank | Effort |
+|---|------|-------|---------------|--------|
+| 1 | **Launch-week ops + incident readiness** — fix what smoke/load surface, watch error rates, honest status page updates | 5.15.x fallout | Every early churn story starts with a bad first week. LET users stress-test harder than enterprises and post publicly about it. | ops |
+| 2 | **Vault restore experience** — staged retrieval + restore-status UI (`x-amz-restore` compat, webhook on ready) | V18.2 + V18.8 | Vault packs are the day-one differentiator; the first thing a backup buyer does after uploading is **test a restore**. A confusing tape-restore UX = refunds + bad LET thread. | M (2-3 sessions) |
+| 3 | **`stored` CLI + rclone one-liner** (`stored rclone-config`) | 26.4 (pulled forward) | #1 predicted LET/datahoarder ask — this market prefers terminal over dashboard. Each guide doubles as a marketing post. Costs little: wraps the existing management API. | M |
+| 4 | **S3 lifecycle rules (XML API)** | 12.1 | Veeam/rclone/backup tooling expects `?lifecycle` for expiration; needed for the Week 4-8 B2-migration campaign. Tiering engine (#297) already does transitions — this is the S3-compatible surface. | M |
+| 5 | **No-surprises billing** — real-time spend on dashboard, hard spending caps, pre-overage alerts | TIER_STRATEGY feature #9 (extends 2.7/4.3) | Trust feature that prevents the viral "surprise bill" complaint; protects revenue quality. Most pieces (meters, alerts) exist — this is assembly. | S-M |
+| 6 | **Backup verification reports** | 14.4 | Cheap (cron over existing checksums), unique at this price point, closes deals with the exact compliance/backup crowd the launch targets. | S |
+| 7 | **Phase 10 remainder** — key management UI, proof-of-ownership, security testing | 10.5-10.7 | Encryption is on the pricing page; 10.7's cross-tenant isolation audit + timing hardening should land before dedup+encryption carries real customer volume. | M |
+| 8 | **Erasure coding + permafrost parity** | 11 + P2-P6 | The durability story ("survives 6 failures") and the margin story (free OneDrive parity) — but big engineering. Start ~day 45 once launch stabilizes; prerequisite for own-fleet migration. | L (multi-week) |
+| 9 | **Own-fleet testbed (R130 + MinIO driver)** | 6.6 | LAUNCH_STRATEGY says buy the R130 early ($69/mo) and prove the ops model long before the ~M9 STOR-OGD purchase. Driver is mostly config on `s3compat`. | S code + ops |
+| 10 | **stored-cache agent** | 16.5 | High LET delight ("your $3/yr VPS caches your data"), independent of everything else — good month-2/3 community moment. | M |
+| 11 | **Smart egress routing** | R4 bullet | Build trigger-based: ship the *detection* (usage poller alert) now, the routing only when the first tenant actually approaches 3× egress. | S then M |
+| 12 | **iDrive reseller R1-R3** | R1-R6 | Per-tenant sub-accounts matter at ~50+ customers (isolation, white-label, cost attribution). Not before. | L |
+
+**What the first 50 customers will hit that isn't feature work**: slow first-byte on tape-tier reads (mitigated by NVMe cache #312 — watch hit rates), multipart edge cases from exotic clients (keep `cmd/validate` growing), quota/suspension edge cases, and support load (3.7 support view + 3.11 abuse queue are already live — use them).
+
 ---
 
 # TIER 2: COST OPTIMIZATION (Build after first customers)
@@ -1243,8 +1333,16 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 > - **Quotaless** = Bulk/Egress tier (393 MB/s, €0.60/TB at 100TB, FREE unlimited egress) — replaces Lyve gap
 > - **Geyser** = Archive ($1.55/TB tape), **Vault18** = Deep Archive ($1/TB)
 - **Pixeldrain** = CDN cache layer (808 MB/s download, not a storage tier)
-- **Lyve Cloud** = High-throughput egress-free tier (380 MB/s sustained)
+- ~~**Lyve Cloud** = High-throughput egress-free tier~~ **DROPPED** (Wasabi acquisition, 90-day minimum billing kills smart tiering — 2026-04-18). Driver still wired and validated (#312) but not a customer tier. <!-- reconstructed: verified against .private/CLAUDE.md + PROGRESS.md -->
 - See `.private/TIER_STRATEGY.md` for the three-tier GTM: Vault (archive), Standard (smart), Performance (B2 killer).
+
+### 6.6: Own-Fleet Backend Driver (Gorilla/Hetzner boxes) <!-- reconstructed: added from LAUNCH_STRATEGY.md §9 "Code you need to build" + §2 fleet buying sequence — had no plan phase -->
+*From `.private/LAUNCH_STRATEGY.md`: buy Gorilla R130 ($69/mo, 20TB) early post-launch, STOR-LA at ~200TB customers, STOR-OGD 24x28 ($729/mo, 560TB) at ~400TB to begin the Quotaless exit (M9-12).*
+**Files**: `internal/drivers/ownfleet.go` (new)
+- Run MinIO or SeaweedFS on the box; driver is standard S3-compatible (reuse `s3compat` + tuned transport from 5.12.7)
+- Week 1-4 plan per LAUNCH_STRATEGY §7: install MinIO → register as backend → erasure-coding tests → production canary (1% of new writes)
+- This is the prerequisite for the Quotaless exit and for Phase 11 shard placement on own fleet
+- **Depends on**: buying the R130 (ops decision, ~100TB paying customers or earlier as testbed)
 
 ---
 
@@ -1283,6 +1381,7 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
   - Hot: accessed in last 7 days → keep on iDrive (fast)
   - Warm: accessed 7-30 days ago → eligible for Lyve (egress-free) or stay on iDrive
   - Cold: not accessed in 30+ days → migrate to Geyser (tape, cheapest)
+- ⚠ Note (2026-07-07): `.private/TIER_STRATEGY.md` specifies 0-30d hot (iDrive) / 30-90d warm (Quotaless) / 90d+ cold (Geyser) brackets, and Lyve is dropped. The shipped engine (#297) classifies by age/access generically — align the configured brackets + warm-tier target with TIER_STRATEGY before marketing the "Day 0-30/30-90/90+" story. Warm tier is currently unresolved (Quotaless deferred to M12 exit, Lyve dropped) → warm = stay on iDrive until own-fleet (6.6) exists. <!-- reconstructed: verified against TIER_STRATEGY.md -->
 - Migration queue: objects flagged for tier change are migrated in background
 - Rate limiting: max 10 GB/hour migration to avoid backend overload
 
@@ -1342,6 +1441,7 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 - Poll iDrive API for per-sub-account usage
 - Cross-reference with stored.ge bandwidth tracking
 - Cost reconciliation: iDrive invoice vs. customer revenue
+- **Smart egress routing** (from `.private/TIER_STRATEGY.md` novel feature #1): when a tenant's egress approaches the 3× free iDrive ratio, replicate their hot objects to a free-egress backend and shift reads there transparently — avoids the $10/TB overage, invisible to the customer. Detection lives here (usage poller); routing in the engine. <!-- reconstructed: added from TIER_STRATEGY.md — doc says "Build when: Phase R4-R5" but plan had no mention -->
 
 ### R5: Driver Pool (Multi-Account)
 **Files**: `internal/drivers/idrive_pool.go` (new)
@@ -1370,6 +1470,7 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 - **8.5 download** ✅ `handleChunkedGet` (PR #301), then bounded per-chunk streaming + SHA-256 integrity verification (PR #303). Fetch is **sequential** — the sketch's parallel fetch + prefetch are DEFERRED.
 - **SSE interaction**: a >256 MiB object in an SSE-required context is now **rejected with 413** instead of silently stored plaintext (PR #304). The real fix (actually encrypting large objects) is **Phase 10** convergent encryption.
 - **⚠ Numbering note**: git commits labeled the streaming/integrity/overwrite work "Phase 8.6 / 8.6.1" — that was **8.5 hardening**, NOT the 8.6 below. Plan **8.6 (GCI Dashboard) ✅ DONE (#307); 8.7 (GC) ✅ DONE (#308); 8.8 (migration tool) ✅ DONE (#309). Phase 8 COMPLETE. Next in Tier-2 sequence: Phase 9 (compression).**
+- **Divergence from `.private/ADVANCED_ARCHITECTURE.md` (deliberate)**: the spec calls for 2/8/64 KB chunks + **chunk packing** (aggregate ~8KB chunks into 100MB packs, read via Range) + Bloom-filter/Redis GCI lookup. Shipped: 1/4/16 MB chunks, no packing (unneeded at 4MB avg — per-request overhead is amortized), Postgres GCI + 100K in-memory cache. **Revisit packing + small chunks only if** backup-workload dedup ratios disappoint (small chunks dedup better) — that change would also demand the Bloom/Redis lookup path. <!-- reconstructed: verified against ADVANCED_ARCHITECTURE.md §1/§3/§4 -->
 
 ### 8.1: FastCDC Chunker
 **File**: `internal/crypto/chunker.go`
@@ -1430,6 +1531,8 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 ## Phase 9: Lossless Compression
 *Depends on: Phase 8 (compression operates on chunks)*
 
+> **Phase 9 COMPLETE** — PR #311 (lossless zstd compression on chunked PUT/GET). Content-type-aware skip, per-chunk ratio tracked in GCI. <!-- reconstructed: verified against git log -->
+
 ### 9.1: Compression Layer
 **File**: `internal/crypto/compressor.go`
 - zstd level 3 (fast, good ratio)
@@ -1451,6 +1554,8 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 
 ## Phase 10: Post-Quantum Encryption
 *Depends on: Phase 8 (encryption operates on chunks). Phase 9 (compression) should come first — compress then encrypt, not the reverse.*
+
+**STATUS (2026-07-07):** 10.1-10.3 ✅ SHIPPED in PR #312 — `ChunkEncryptionService` (`internal/crypto/chunk_encryption.go`) with HKDF-derived deterministic nonces; same tenant + same content → identical ciphertext (dedup-safe convergent encryption, matches `.private/ADVANCED_ARCHITECTURE.md` §2). Pipeline: chunk → compress → encrypt → store. Migration shipped as **052** (`encrypted` + `encryption_algo` on `global_content_index`), NOT the `022` sketched in 10.4. This also closes the ">256 MiB SSE gap" from Phase 8 (#304's 413-reject was the interim). **Remaining open: 10.5 (customer key management UI), 10.6 (proof-of-ownership), 10.7 (security testing)** — cross-tenant dedup derivation (10.3's opt-in shared namespace) also unshipped. <!-- reconstructed: verified against PR #312 + ADVANCED_ARCHITECTURE.md -->
 
 ### 10.1: Hybrid PQ Encryption
 **File**: `internal/crypto/encryptor.go`
@@ -1499,13 +1604,14 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 
 ### 11.1: Reed-Solomon Implementation
 **File**: `internal/crypto/erasure.go`
-- RS(14, 10): 10 data + 4 parity shards
-- 1.4x overhead (vs 3x replication)
-- Uses `klauspost/reedsolomon` (SIMD-optimized)
+- RS(10, 6): 10 data + 6 parity = 16 shards, tolerates 6 losses <!-- reconstructed: corrected against ADVANCED_ARCHITECTURE.md §5 and LAUNCH_STRATEGY.md §6 — previous reconstruction said RS(14,10)=10+4, which matches no reference doc -->
+- 1.6x overhead (vs 3x replication); evolves to (10,14) then (10,13) as own fleet grows, per LAUNCH_STRATEGY §6 OneDrive-conservative plan
+- Uses `klauspost/reedsolomon` (SIMD-optimized, 200+ GB/s encode — effectively free vs network)
 
 ### 11.2: Shard Placement Strategy
-- Spread 14 shards across backends: Lyve (5), iDrive (4), Geyser LA (3), Geyser London (2)
-- No single backend failure loses >5 shards → data survives
+- Per `.private/ADVANCED_ARCHITECTURE.md` §4/§6 launch placement (16 shards): own fleet 6 data (needs Phase 6.6), iDrive 4 data, Geyser LA + London 2 parity, permafrost/OneDrive fleet 4 parity across 4 different tenants <!-- reconstructed: corrected — previous placement included Lyve (5 shards), but Lyve is dropped -->
+- Until own fleet exists: iDrive carries the data shards; adjust scheme accordingly
+- No single backend loses enough shards to break reconstruction; permafrost never holds enough to reconstruct alone (privacy by design)
 - Placement considers: health score, latency, cost, region
 
 ### 11.3: Pipeline Integration
@@ -1544,6 +1650,8 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 *Depends on: Phase 8 (FastCDC chunking) + Phase 10 (encryption). Uses consumer OneDrive accounts (5TB each) as a free durability replication layer. NOT a primary storage tier — async replication only.*
 
 *Reference: `internal/drivers/onedrive_README.md` (dual-transport pattern), `.private/PERMAFROST_TESTING_RESULTS.md` (v1→v3.1 benchmarks). Fleet status: 3 active tenants (viera.fun, viera.pics, fromhis.com), Strategy F = 183 MB/s fleet download.*
+
+> **Update 2026-06-17 (#312)**: the fleet driver is now named **"permafrost"** throughout the codebase and was removed from user-selectable storage classes — it is an internal, admin-only parity tier, exactly as this phase intends. P1 remains the only completed sub-phase. <!-- reconstructed: verified against PR #312 -->
 
 ### P1: OneDrive Production Driver ✅ COMPLETE (done in Phase 5.12.3, PR #244)
 **Implemented ahead of schedule in 5.12.3.** Full rewrite from scaffold:
@@ -1683,7 +1791,15 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 - Storage growth forecast (linear extrapolation)
 - Cost forecast based on current growth + tier mix
 
-**Test**: Upload mix of objects → access some frequently, leave others untouched → analyzer classifies correctly → cost advisor suggests tier changes → apply suggestion → verify cost reduction.
+### 14.4: Customer Backup Verification Reports <!-- reconstructed: added from TIER_STRATEGY.md novel feature #4 — was missing from plan (P5 covers only internal shard verification, not the customer-facing feature) -->
+**Files**: `internal/engine/backup_verify.go` (shares machinery with P5), dashboard + email template
+- Weekly/monthly per-bucket integrity check: sample N random objects, GET, verify checksum vs `object_head_cache`
+- Report on dashboard: "All 15,247 objects in 'db-backups' verified intact. Last check: 2h ago."
+- Email/webhook alert on ANY verification failure (uses 5.11.6 events + 5.13 email)
+- This is a $10K+/yr enterprise feature (Veeam SureBackup) offered built-in — the deciding feature for compliance-sensitive backup buyers
+- **Can be pulled forward** — simple cron over existing primitives; see Post-Launch 90-Day Priority Stack
+
+**Test**: Upload mix of objects → access some frequently, leave others untouched → analyzer classifies correctly → cost advisor suggests tier changes → apply suggestion → verify cost reduction. Corrupt one object on the backend → verification run flags it → alert fires.
 
 ---
 
@@ -1978,3 +2094,170 @@ Anyone runs a Vaultaire spoke node on their VPS → joins the stored.ge network:
 
 ### 21.4: Peer Discovery + Trust
 - DHT-based peer discovery (libp2p)
+- Trust scores extend the Phase 20.3 reputation system to community-run nodes
+- Sybil resistance: new nodes earn placement slowly (72h minimum uptime, probation)
+- NAT traversal for home-network spokes (most LET NAT VPS boxes)
+
+<!-- ============================================================
+     reconstructed 2026-07-07: EVERYTHING BELOW THIS LINE was lost in the
+     truncation (all three copies of the plan end mid-21.4 at 1,980 lines).
+     Rebuilt from: this file's own internal cross-references (26.2/26.4/26.5/
+     26.6/26.8, 27.1, 28.1/28.2/28.3/28.5), the Tier 3-4 handoff table
+     ("21.6 Cooperative + BYOS + LET Network → 22.1"), MASTER_PLAN_SUMMARY.md
+     step-phases 8/9/11/12/15, and memory (Tier 4 = "multi-tenant/reseller,
+     smart buckets, federation, cooperative, BYOS, edge, ML, blockchain,
+     advanced DX, integrations"). Sub-phase breakdowns are best-effort
+     approximations, NOT the original text — re-scope each before building.
+     ============================================================ -->
+
+### 21.5: LET Guides + WHMCS Module
+- Standalone guides, each doubling as a community post: "Turn your $15/yr VPS into a storage tier", "Earn credits with a spoke node", JuiceFS/rclone + BYOS recipes
+- WHMCS provisioning module so LET hosts can resell stored.ge (pairs with Phase 18 reseller platform)
+- `curl | sh` spoke installer polished + documented
+
+### 21.6: Cooperative Network Launch
+- Public network stats page (nodes, regions, storage contributed, bandwidth served)
+- Credit dashboard GA; payout/credit redemption flow hardened
+- LET launch thread for the spoke program; admission throttled via admin approval (20.6)
+
+**Test**: End-to-end: stranger installs spoke on a VPS → probation → earns credits → credits reduce invoice → BYOS backend registered → hybrid tiering works → WHMCS reseller provisions a sub-tenant.
+
+---
+
+## Phase 22: Edge Compute (WASM Functions)
+*Depends on: Phase 20 (spoke nodes as execution locations), Phase 16.5 (cache agent). From MASTER_PLAN steps 711-810.*
+
+### 22.1: WASM Runtime
+- Wasmtime embedded in hub + spoke agents; functions triggered on object events (uses 5.10.12/5.11.6 event plumbing)
+### 22.2: Built-in Functions
+- Image resize/thumbnail, video transcode probe, virus scan, metadata extraction — run on upload, results to metadata/webhooks
+### 22.3: Customer Functions
+- Upload WASM module, bind to bucket events, resource limits + sandboxing, per-invocation metering
+### 22.4: Edge Placement
+- Run functions on the spoke nearest the data (federation-aware scheduling)
+
+---
+
+## Phase 23: ML Intelligence
+*Depends on: Phase 14 (access analytics as training data). From MASTER_PLAN steps 611-710.*
+
+### 23.1: Access Prediction
+- Predict object heat (next-7-day access probability) → feed tiering engine; start with simple heuristics, LSTM only if it earns its keep
+### 23.2: Smart Cache Admission
+- Cache admission/eviction informed by prediction (extends the NVMe cache shipped in #312)
+### 23.3: Anomaly Detection
+- Per-tenant behavioral baselines: exfiltration spikes, ransomware-pattern writes (mass overwrite), credential abuse → abuse queue (3.11)
+### 23.4: Capacity Forecasting
+- Fleet-wide growth forecasting driving the LAUNCH_STRATEGY buy-sequence triggers
+
+---
+
+## Phase 24: Data Query Engine
+*Depends on: Phase 8 (chunk layout), Phase 13 (protocol layer). From MASTER_PLAN steps 1201-1240 "data-aware orchestration".*
+
+### 24.1: S3 Select
+- SQL over CSV/JSON/Parquet objects in place (DuckDB embedded), S3 Select API compatibility
+### 24.2: Bucket Catalog + SQL
+- Schema inference, zone maps/data-skipping indexes, cross-bucket queries
+### 24.3: Query API
+- GraphQL endpoint + management API surface; streamed results; per-tenant query metering (billable feature)
+
+---
+
+## Phase 25: Web3 / Proof-of-Storage (OPTIONAL — demand-gated)
+*Depends on: Phase 6.5 verdict — "premium proof-of-storage feature, not a cost play. Build only if customers ask." From MASTER_PLAN steps 911-1000.*
+
+- Cryptographic storage proofs (Merkle challenges — shares machinery with 10.6)
+- Filecoin anchoring via Lighthouse/Filebase for compliance certificates (Phase 6.5.x plan: `logical-hugging-muffin.md`)
+- IPFS gateway for public buckets
+- **Do not build speculatively** — every sub-item here needs a paying customer asking first
+
+---
+
+## Phase 26: Advanced Developer Experience
+*Depends on: 5.11 (management API). The plan's internal references pin: 26.2 version translation, 26.4 CLI, 26.5 docs, 26.6 SDKs, 26.8 AI-native DX.*
+
+### 26.1: API Sandbox
+- Test-mode tenants (Stripe-style): fake backend, real API shapes, instant reset
+### 26.2: Full API Version Translation
+- Stripe-style version pinning for the management API (deferred from 5.11.1 — build at first breaking change)
+### 26.3: Embeddable Elements
+- Drop-in JS components: upload widget, file browser, usage meter (white-label ready for Phase 18)
+### 26.4: `stored` CLI/TUI ⚠ PULLED FORWARD to post-launch month 1 (see 90-Day Stack #3)
+- `stored login/buckets/cp/usage/rclone-config/mount`; "just storage, no bloat" branding; spec in `docs/PRODUCT_FEATURES.md`
+### 26.5: Developer Docs Portal
+- Built from the per-directory CLAUDE.md discipline + tested code examples (TIER_STRATEGY feature #8: every example pulled from passing tests)
+- **Stripe-style docs auto-sync (Tiers 2-3; Tiers 0-1 land pre-launch in 5.15.6).** The property to reach: reference + code samples are *derived*, never hand-typed, so they can't drift. Prose (getting-started, FAQ) stays hand-written — Stripe hand-writes theirs too.
+  - **Tier 2 — Generated per-user code samples.** Generate the aws-cli/boto3/rclone/curl/Go blocks from the OpenAPI spec + the logged-in user's *actual* key (reveal-once, copy buttons), so dashboard/docs snippets are genuinely runnable — not `YOUR_SECRET_KEY`. This is the "copy, paste, it works" moment customers feel. (~1-2 days.)
+  - **Tier 3 — Spec generated from handlers.** True auto-derivation (swaggo/swag annotations, or generate the spec from handler tests) so the OpenAPI spec is never hand-written. Highest effort, awkward in Go, and the 5.15.6 Tier-0 drift guard already prevents the stale-reference failure mode — so **defer until docs volume justifies it**.
+  - Pairs with 26.6 (SDKs generated from the same spec) and 26.7 (Scalar/Swagger explorer over the complete spec).
+### 26.6: Management API SDKs
+- Go + TypeScript + Python SDKs generated from the OpenAPI spec (S3 SDKs explicitly NOT built — see Deferred Decisions)
+### 26.7: Interactive API Explorer
+- Swagger/Scalar UI over the complete OpenAPI spec
+### 26.8: AI-Native DX
+- llms.txt (shipped), MCP server + plugin manifests as optional bonuses — "the CLI IS the AI integration"
+
+---
+
+## Phase 27: Go-to-Market Execution
+*Runs continuously post-launch — sequence from `.private/TIER_STRATEGY.md` GTM section. 27.1 (legal docs) already shipped early as 5.14.2 (#254).*
+
+### 27.2: LET/Reddit Launch (Week 1-4) — posts ready in `.private/launch/`
+### 27.3: B2 Migration Campaign (Week 4-8) — "B2 raised prices to $6.95. Here's faster for less." + rclone migration guide + calculator
+### 27.4: Backup & Compliance Campaign (Week 8-16) — Veeam/MSP360/Duplicati guides, immutability/ransomware angle (needs 5.10.13 ✅ + 14.4)
+### 27.5: Developer/SaaS Campaign (Week 16+) — OpenAPI/llms.txt, "file upload service in 10 minutes", honest comparison posts
+
+---
+
+## Phase 28: Enterprise Operations
+*28.5 (data export) shipped early as 5.14.1 (#253); 28.1 evidence collection started in 5.14.3 (#255).*
+
+### 28.1: SOC 2 Formal Audit
+- Type I targeted Q4 2026, Type II observation H1 2027 (per 5.14.3); evidence tracker: `internal/compliance/soc2.go` + `.private/SOC2_EVIDENCE.md`
+### 28.2: SLA Definition + Enforcement
+- Published SLA (99.9%), credit policy, automated uptime accounting from health checks
+### 28.3: Multi-Region Hub
+- Hub replica (PG streaming replication) in second region; Cloudflare DNS failover; kills the single-server SPOF (RISK_REGISTER top item; see DISASTER_RECOVERY.md §1 hub-standby as the interim step)
+### 28.4: DR Drills + Runbooks
+- Quarterly restore + failover drills per `DISASTER_RECOVERY.md`; PG restore test is also a 5.15.4 checklist item
+
+---
+
+## Phase 29: Ecosystem Integrations
+*Demand-ordered — each integration is also a marketing channel.*
+
+- Veeam Ready certification; MSP360/Duplicati/Arq/Kopia/restic guides (backup vertical from 27.4)
+- Nextcloud/ownCloud external-storage integration
+- WHMCS module (with 21.5) for the reseller channel
+- Terraform provider + Pulumi for bucket/key management
+- Zapier/n8n triggers on the 5.11.6 event log
+
+---
+
+## Phase 30: Platform & stored.cloud
+*The MASTER_PLAN endgame: Phase 2 (stored.cloud enterprise, $15-50/TB, 99.99% SLA) and Phase 3 ("Stripe for Storage" platform licensing: Starter $500/mo → Enterprise $5,000/mo). Everything in Tiers 1-4 is a prerequisite; this phase is packaging, not new engine work.*
+
+- stored.cloud brand: enterprise SLA tier on the same engine (multi-region from 28.3, IAM from 19, compliance from 5.14)
+- Self-hosted/white-label licensing of the Vaultaire engine (builds on Phase 15 distribution + 18 multi-tenancy)
+- Enterprise sales motion: RFP templates, security questionnaire pack (SOC 2 from 28.1), custom contracts
+
+---
+
+# SESSION HANDOFF (end of plan)
+<!-- reconstructed 2026-07-07: the original closing handoff section was lost in the truncation; rewritten to match current state and the /next + /next-step skills -->
+
+## How to end a session
+1. Commit/merge all work (CI must pass — never `--admin`).
+2. Update the **Status** line at the top of THIS file (`docs/IMPLEMENTATION_PLAN.md`) — it is the single source of truth `/next` and `/next-step` read.
+3. Mark the finished phase with a `> **Phase X.Y COMPLETE** — PR #NNN` line in its section.
+4. Add a dated `**Recent (YYYY-MM-DD)**` entry at the top if the session shipped something notable.
+5. Update `.private/PROGRESS.md` (one line per PR) and the per-directory `CLAUDE.md` files you touched.
+6. Note uncommitted decisions, known issues, and external state changes (Stripe products, server config, GitHub secrets) in the Status block or `.private/CLAUDE.md`.
+
+## How to resume (for /next and /next-step)
+1. Read the **Status** line at the top of this file — it names the last completed phase, the launch blockers, and the next code phase.
+2. Pre-launch: the next work item is the first unfinished **launch blocker** (5.15.5 → 5.15.4 → 5.14.12 → V18.7-minimal). Post-launch: take the top unstarted row of the **Post-Launch 90-Day Priority Stack**.
+3. Read `.private/CLAUDE.md` (infra/creds), the per-directory `CLAUDE.md` files for packages you'll touch, and check `git log --oneline -5` + `git status`.
+4. Migration numbers: `ls internal/database/migrations/` and take the next sequential (052 is the latest as of 2026-07-07).
+5. Branch per phase: `phase-X.Y-feature-name`, commit format `type(scope): description [Phase X.Y]`, squash-merge after CI.
