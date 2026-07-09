@@ -62,9 +62,15 @@ jobs:
           ssh "${USER}@${HOST}" 'bash -s' <<'EOF'
           set -e
           for f in $(ls /tmp/vaultaire-migrations/*.sql | sort); do
+            # -w + </dev/null: if the DB password is unavailable, psql must FAIL,
+            # not prompt — a prompt reads the rest of this script off stdin as
+            # password attempts, silently skipping the binary swap below while
+            # the job still exits 0 (observed 2026-06-08..07-09 on prod).
             PGPASSWORD=$(grep DB_PASSWORD /opt/vaultaire/configs/.env | cut -d= -f2) \
-              psql -h 127.0.0.1 -U vaultaire -d vaultaire -f "$f" 2>&1 || true
+              psql -w -h 127.0.0.1 -U vaultaire -d vaultaire -f "$f" < /dev/null 2>&1 || true
           done
+          # Keep the previous binary for one-command rollback.
+          cp -f /opt/vaultaire/bin/vaultaire /opt/vaultaire/bin/vaultaire.prev 2>/dev/null || true
           sudo /bin/systemctl stop vaultaire
           sudo /bin/mv /tmp/vaultaire-linux /opt/vaultaire/bin/vaultaire
           sudo /bin/chmod +x /opt/vaultaire/bin/vaultaire
@@ -110,9 +116,15 @@ jobs:
           ssh "${USER}@${HOST}" 'bash -s' <<'EOF'
           set -e
           for f in $(ls /tmp/vaultaire-migrations/*.sql | sort); do
+            # -w + </dev/null: if the DB password is unavailable, psql must FAIL,
+            # not prompt — a prompt reads the rest of this script off stdin as
+            # password attempts, silently skipping the binary swap below while
+            # the job still exits 0 (observed 2026-06-08..07-09 on prod).
             PGPASSWORD=$(grep DB_PASSWORD /opt/vaultaire/configs/.env | cut -d= -f2) \
-              psql -h 127.0.0.1 -U vaultaire -d vaultaire -f "$f" 2>&1 || true
+              psql -w -h 127.0.0.1 -U vaultaire -d vaultaire -f "$f" < /dev/null 2>&1 || true
           done
+          # Keep the previous binary for one-command rollback.
+          cp -f /opt/vaultaire/bin/vaultaire /opt/vaultaire/bin/vaultaire.prev 2>/dev/null || true
           sudo /bin/systemctl stop vaultaire
           sudo /bin/mv /tmp/vaultaire-linux /opt/vaultaire/bin/vaultaire
           sudo /bin/chmod +x /opt/vaultaire/bin/vaultaire
