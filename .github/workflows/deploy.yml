@@ -75,7 +75,7 @@ jobs:
           sudo /bin/mv /tmp/vaultaire-linux /opt/vaultaire/bin/vaultaire
           sudo /bin/chmod +x /opt/vaultaire/bin/vaultaire
           sudo /bin/systemctl start vaultaire
-          sleep 3
+          sleep 15
           curl -sf http://localhost:8000/health || echo "Health check failed"
           rm -rf /tmp/vaultaire-migrations
           EOF
@@ -129,7 +129,7 @@ jobs:
           sudo /bin/mv /tmp/vaultaire-linux /opt/vaultaire/bin/vaultaire
           sudo /bin/chmod +x /opt/vaultaire/bin/vaultaire
           sudo /bin/systemctl start vaultaire
-          sleep 3
+          sleep 15
           curl -sf http://localhost:8000/health || echo "Health check failed"
           rm -rf /tmp/vaultaire-migrations
           EOF
