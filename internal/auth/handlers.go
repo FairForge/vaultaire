@@ -53,22 +53,6 @@ func NewAuth(db *sql.DB, logger *zap.Logger) *Auth {
 func (a *Auth) ValidateRequest(r *http.Request) (string, *KeyScope, error) {
 	fullAccess := &KeyScope{Permissions: []string{"*"}}
 
-	// Check for test API key first (only in non-production)
-	apiKey := r.Header.Get("X-API-Key")
-	if apiKey == "test-key-chaos-testing" {
-		// Only allow in test/development environments
-		if a.db == nil || isTestEnvironment() {
-			tenantID := r.Header.Get("X-Tenant-ID")
-			if tenantID == "" {
-				tenantID = "chaos-test-tenant"
-			}
-			a.logger.Debug("test authentication accepted",
-				zap.String("tenant_id", tenantID),
-				zap.String("api_key", "test-key"))
-			return tenantID, fullAccess, nil
-		}
-	}
-
 	// Extract Authorization header
 	authHeader := r.Header.Get("Authorization")
 
@@ -433,12 +417,6 @@ func getEndpointURL() string {
 		return ep
 	}
 	return "http://localhost:8000"
-}
-
-// isTestEnvironment returns true when running outside production.
-func isTestEnvironment() bool {
-	env := os.Getenv("ENV")
-	return env == "" || env == "test" || env == "development"
 }
 
 // Login authenticates a user and returns JWT
