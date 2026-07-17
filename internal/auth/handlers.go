@@ -89,6 +89,15 @@ func (a *Auth) ValidateRequest(r *http.Request) (string, *KeyScope, error) {
 			return "", nil, err
 		}
 		if enforce {
+			// A key whose plaintext secret was never stored (legacy rows with
+			// only a bcrypt secret_hash) can never verify: fail closed, but
+			// leave an actionable trail — the key must be regenerated.
+			if cred.secretKey == "" {
+				a.logger.Warn("access key has no stored secret — cannot verify SigV4 signature; regenerate this API key",
+					zap.String("access_key", params.AccessKey[:min(6, len(params.AccessKey))]+"..."),
+					zap.String("tenant_id", cred.tenantID))
+				return "", nil, fmt.Errorf("%w: key has no stored secret for signature verification; regenerate this API key", ErrSignatureMismatch)
+			}
 			if err := a.verifySigV4(r, params, cred.secretKey); err != nil {
 				a.logger.Debug("signature verification failed",
 					zap.String("access_key", params.AccessKey[:min(6, len(params.AccessKey))]+"..."),

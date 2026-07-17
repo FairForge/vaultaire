@@ -306,4 +306,38 @@ func TestValidateRequest_SigV4Enforcement(t *testing.T) {
 		_, _, err := a.ValidateRequest(r)
 		require.Error(t, err)
 	})
+
+	t.Run("scoped key without stored secret fails with actionable error", func(t *testing.T) {
+		// Legacy api_keys rows carry only a bcrypt secret_hash (secret_key
+		// NULL) — their signature can never be verified. They must fail
+		// closed with a message telling the operator to regenerate the key.
+		db := setupTestDB(t)
+		t.Cleanup(func() { _ = db.Close() })
+		a := NewAuth(db, zap.NewNop())
+
+		const ak = "VLT_legacy_hashonly"
+		var userID string
+		require.NoError(t, db.QueryRow(`INSERT INTO users (email, password_hash)
+			VALUES ('sigv4-legacy@stored.ge', 'x') RETURNING id`).Scan(&userID))
+		_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key)
+			VALUES ('sigv4-legacy-tenant', 'Legacy', 'sigv4-legacy@stored.ge', 'VKLEGACYPRIMARY', 'primary-secret')
+			ON CONFLICT (id) DO NOTHING`)
+		require.NoError(t, err)
+		_, err = db.Exec(`INSERT INTO api_keys (user_id, name, key_id, secret_hash)
+			VALUES ($1, 'legacy', $2, 'bcrypt-hash-only') ON CONFLICT (key_id) DO NOTHING`, userID, ak)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_, _ = db.Exec(`DELETE FROM api_keys WHERE key_id = $1`, ak)
+			_, _ = db.Exec(`DELETE FROM tenants WHERE id = 'sigv4-legacy-tenant'`)
+			_, _ = db.Exec(`DELETE FROM users WHERE id = $1`, userID)
+		})
+
+		r := httptest.NewRequest("GET", "http://stored.ge/some-bucket", nil)
+		signV4(t, r, ak, "the-real-secret-the-user-still-has", "us-east-1", sha256Hex(""), now)
+
+		_, _, err = a.ValidateRequest(r)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, ErrSignatureMismatch))
+		assert.Contains(t, err.Error(), "regenerate", "error must tell the operator how to fix the key")
+	})
 }
