@@ -2,6 +2,7 @@ package api
 
 import (
 	"crypto/md5" // #nosec G501 — S3 spec requires MD5 for ETags
+	"database/sql"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -99,6 +100,26 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 		zap.String("dest_key", destKey),
 		zap.String("directive", directive))
 
+	// Copy streams the source's raw stored bytes: for encrypted sources that
+	// would hand back undecryptable ciphertext (and bill physical, not
+	// logical, size); chunked sources are not stored at container/key at
+	// all. Refuse both cleanly rather than corrupt or 500.
+	var srcSize int64
+	var srcEnc string
+	var srcChunked bool
+	if s.db != nil {
+		_ = s.db.QueryRowContext(r.Context(), `
+			SELECT size_bytes, COALESCE(encryption_algorithm, ''), is_chunked
+			FROM object_head_cache
+			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+			t.ID, srcBucket, srcKey).Scan(&srcSize, &srcEnc, &srcChunked)
+	}
+	if srcEnc != "" || srcChunked {
+		WriteS3ErrorWithContext(w, ErrNotImplemented, r.URL.Path, generateRequestID(),
+			WithSuggestion("Copying encrypted or chunked objects is not yet supported. Download and re-upload instead."))
+		return
+	}
+
 	reader, err := s.engine.Get(r.Context(), srcContainer, srcKey)
 	if err != nil {
 		if strings.Contains(err.Error(), "no such file or directory") ||
@@ -118,12 +139,11 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 	// WP-1: copy bypasses the PUT handler's reservation, so reserve the
 	// source's recorded size before writing the destination. The reservation
 	// is settled against the actual streamed byte count after the write, and
-	// an overwritten destination's bytes are released.
+	// an overwritten destination's bytes (captured atomically by the upsert)
+	// are released.
 	quotaOn := s.quotaManager != nil
-	var reservedBytes, overwrittenSize int64
+	var reservedBytes int64
 	if quotaOn {
-		srcSize := s.headCacheSize(r.Context(), t.ID, srcBucket, srcKey)
-		overwrittenSize = s.headCacheSize(r.Context(), t.ID, destBucket, destKey)
 		if srcSize > 0 {
 			ok, qErr := s.quotaManager.CheckAndReserve(r.Context(), t.ID, srcSize)
 			if qErr != nil {
@@ -138,6 +158,16 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 				return
 			}
 			reservedBytes = srcSize
+		} else {
+			// Unknown source size (drifted or missing head-cache row): the
+			// bytes are accounted after the stream, but refuse outright when
+			// the tenant is already at their limit.
+			used, limit, uErr := s.quotaManager.GetUsage(r.Context(), t.ID)
+			if uErr == nil && limit > 0 && used >= limit {
+				WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
+					WithSuggestion("Upgrade at https://stored.ge/dashboard/billing"))
+				return
+			}
 		}
 	}
 
@@ -162,16 +192,11 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 		return
 	}
 
-	if quotaOn {
-		ctx, cancel := quotaCtx(r)
-		s.settlePutQuota(ctx, t.ID, reservedBytes, counter.n, overwrittenSize)
-		cancel()
-	}
-
 	etag := fmt.Sprintf("%x", hasher.Sum(nil))
 	now := time.Now().UTC()
 
 	// Update object_head_cache for the copied object.
+	var displacedSize int64
 	if s.db != nil {
 		// Look up source content-type (for COPY directive). Size is now
 		// authoritative from counter.n — no fallback path needed.
@@ -184,24 +209,36 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 
 		contentType := resolveCopyContentType(directive, r.Header.Get("Content-Type"), sourceCT)
 
-		_, dbErr := s.db.ExecContext(r.Context(), `
-			INSERT INTO object_head_cache
-				(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-			ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
-				size_bytes   = EXCLUDED.size_bytes,
-				etag         = EXCLUDED.etag,
-				content_type = EXCLUDED.content_type,
-				backend_name = EXCLUDED.backend_name,
-				updated_at   = EXCLUDED.updated_at
-		`, t.ID, destBucket, destKey, counter.n, etag, contentType, backendName, now)
+		// atomicHeadUpsert captures the overwritten row's size (WP-1).
+		var dbErr error
+		displacedSize, dbErr = atomicHeadUpsert(r.Context(), s.db, t.ID, destBucket, destKey, func(tx *sql.Tx) error {
+			_, execErr := tx.ExecContext(r.Context(), `
+				INSERT INTO object_head_cache
+					(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, updated_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+				ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
+					size_bytes   = EXCLUDED.size_bytes,
+					etag         = EXCLUDED.etag,
+					content_type = EXCLUDED.content_type,
+					backend_name = EXCLUDED.backend_name,
+					updated_at   = EXCLUDED.updated_at
+			`, t.ID, destBucket, destKey, counter.n, etag, contentType, backendName, now)
+			return execErr
+		})
 		if dbErr != nil {
+			displacedSize = 0
 			s.logger.Error("copy: failed to cache object metadata",
 				zap.Error(dbErr),
 				zap.String("tenant_id", t.ID),
 				zap.String("bucket", destBucket),
 				zap.String("key", destKey))
 		}
+	}
+
+	if quotaOn {
+		ctx, cancel := quotaCtx(r)
+		s.settlePutQuota(ctx, t.ID, reservedBytes, counter.n, displacedSize)
+		cancel()
 	}
 
 	result := CopyObjectResult{

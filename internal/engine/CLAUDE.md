@@ -7,7 +7,6 @@ Core orchestration layer — connects the API layer to storage drivers. This is 
 - **`CoreEngine`** (`engine.go`) — the main orchestrator. Holds `map[string]Driver` (named drivers), primary/backup selection, access tracking, tiered cache, cost optimizer. Implements the `Engine` interface.
 - **`Engine`** interface (`interface.go:9`) — top-level contract: `Get`, `Put`, `Delete`, `List`, `HealthCheck`, `GetMetrics`, plus future stubs (`Execute`, `Query`, `Train`, `Predict`).
 - **`Driver`** interface (`interface.go:38`) — the sacred backend contract: `Name`, `Get`, `Put`, `Delete`, `List`, `Exists`, `HealthCheck`. All storage drivers implement this.
-- **`QuotaManager`** interface (`engine.go:20`) — `CheckAndReserve(ctx, tenantID, bytes)` and `ReleaseQuota(ctx, tenantID, bytes)`.
 
 ## Request Flow
 
@@ -90,4 +89,4 @@ If the target backend isn't registered, falls back to primary silently. Storage 
 
 - **API layer** (`internal/api/s3_engine_adapter.go`) wraps `CoreEngine` to translate S3 protocol → engine calls
 - **Drivers** (`internal/drivers/`) implement the `Driver` interface; registered via `eng.AddDriver(name, driver)` in `main.go`
-- **Quota** (`internal/usage/`) implements `QuotaManager`; injected via `eng.SetQuotaManager()`
+- **Quota** (`internal/usage/`) — quota accounting lives entirely in the API layer since WP-1 (single reservation site in `handlePutObject`, atomic displaced-size capture on head-cache upserts, releases on delete). The engine does no quota work.

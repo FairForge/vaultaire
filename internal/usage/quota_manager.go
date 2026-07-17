@@ -136,6 +136,10 @@ func (m *QuotaManager) ReleaseQuota(ctx context.Context, tenantID string, bytes 
 // sum of logical object sizes in object_head_cache — the billing source of
 // truth. Returns the number of tenant rows updated. Run once before enabling
 // metered billing (Gate C), and any time drift is suspected.
+//
+// Run only while writes are quiesced: an in-flight PUT's reservation is not
+// yet reflected in object_head_cache, so reconciling during live traffic
+// erases that reservation and under-counts until the next reconcile.
 func (m *QuotaManager) ReconcileStorageUsage(ctx context.Context) (int64, error) {
 	res, err := m.db.ExecContext(ctx, `
 		UPDATE tenant_quotas tq

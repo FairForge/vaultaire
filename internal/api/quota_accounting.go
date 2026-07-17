@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -93,19 +95,42 @@ func (a *S3ToEngine) releaseQuotaForDelete(r *http.Request, tenantID string, siz
 	}
 }
 
-// headCacheSize returns the logical size recorded for an object, or 0 if the
-// object does not exist (or the lookup fails — callers treat that as "no
-// previous object", which under-releases rather than over-releases).
-func (s *Server) headCacheSize(ctx context.Context, tenantID, bucket, key string) int64 {
-	if s.db == nil {
-		return 0
+// atomicHeadUpsert captures the size of an existing object_head_cache row
+// (locking it), runs the caller's upsert in the same transaction, and
+// returns the displaced size — 0 when the key did not exist. Holding the
+// row lock across the upsert means a concurrent DELETE ... RETURNING (or
+// another writer) serializes against it, so the same bytes can never be
+// released twice.
+//
+// A single-statement CTE (WITH old AS (SELECT ... FOR UPDATE) INSERT ...
+// RETURNING (SELECT FROM old)) does NOT work here: the CTE is pulled lazily
+// during RETURNING, after the upsert has already self-updated the row, so
+// the FOR UPDATE scan finds no visible tuple and reports no previous size.
+func atomicHeadUpsert(ctx context.Context, db *sql.DB, tenantID, bucket, key string,
+	upsert func(tx *sql.Tx) error) (int64, error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin head-cache upsert: %w", err)
 	}
-	var size int64
-	_ = s.db.QueryRowContext(ctx, `
+	defer func() { _ = tx.Rollback() }()
+
+	var displaced int64
+	err = tx.QueryRowContext(ctx, `
 		SELECT size_bytes FROM object_head_cache
-		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-		tenantID, bucket, key).Scan(&size)
-	return size
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
+		FOR UPDATE`,
+		tenantID, bucket, key).Scan(&displaced)
+	if err != nil && err != sql.ErrNoRows {
+		return 0, fmt.Errorf("lock head-cache row: %w", err)
+	}
+
+	if err := upsert(tx); err != nil {
+		return 0, fmt.Errorf("upsert head-cache row: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit head-cache upsert: %w", err)
+	}
+	return displaced, nil
 }
 
 // storageReconciler is implemented by usage.QuotaManager; the nil quota
@@ -117,6 +142,10 @@ type storageReconciler interface {
 // handleQuotaReconcile rewrites every tenant's storage_used_bytes from the
 // object_head_cache sum (admin-only; Gate C runs this once before enabling
 // metered billing).
+//
+// Run only while writes are quiesced: an in-flight PUT's reservation is not
+// yet reflected in object_head_cache, so reconciling during live traffic
+// erases it and under-counts until the next reconcile.
 func (s *Server) handleQuotaReconcile(w http.ResponseWriter, r *http.Request) {
 	rec, ok := s.quotaManager.(storageReconciler)
 	if !ok {

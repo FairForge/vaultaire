@@ -434,6 +434,133 @@ func TestQuotaAccounting_ChunkedPutDeleteLogicalSize(t *testing.T) {
 		"chunked DELETE must release the logical size")
 }
 
+// awsChunkedFrame wraps data in aws-chunked wire framing:
+// "<hex-size>\r\n<data>\r\n0\r\n\r\n".
+func awsChunkedFrame(data []byte) []byte {
+	var b bytes.Buffer
+	fmt.Fprintf(&b, "%x\r\n", len(data))
+	b.Write(data)
+	b.WriteString("\r\n0\r\n\r\n")
+	return b.Bytes()
+}
+
+// A client that under-declares x-amz-decoded-content-length while streaming
+// more decoded bytes must be rejected — otherwise it stores data billed at
+// the declared (tiny) size and poisons object_head_cache so reconciliation
+// can never detect the theft.
+func TestQuotaAccounting_AwsChunkedSizeLieRejected(t *testing.T) {
+	f := setupQuotaAccountingFixture(t, 100<<20)
+
+	payload := testBytes(64 << 10) // streams 64 KiB
+	framed := awsChunkedFrame(payload)
+	req := httptest.NewRequest("PUT", "/test-bucket/liar.bin", bytes.NewReader(framed))
+	req.ContentLength = int64(len(framed))
+	req.Header.Set("Content-Encoding", "aws-chunked")
+	req.Header.Set("x-amz-decoded-content-length", "10") // declares 10 bytes
+	req = req.WithContext(f.ctx(req.Context()))
+	w := httptest.NewRecorder()
+	f.server.handlePutObject(w, req, f.s3Req("test-bucket", "liar.bin"))
+
+	assert.Equal(t, 400, w.Code, "under-declared aws-chunked PUT must be rejected")
+	var rows int
+	require.NoError(t, f.db.QueryRow(`
+		SELECT COUNT(*) FROM object_head_cache
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+		f.tenantID, "test-bucket", "liar.bin").Scan(&rows))
+	assert.Equal(t, 0, rows, "no head-cache row may record the lied-about size")
+	assert.Equal(t, int64(0), f.used(t), "rejected PUT must not consume quota")
+}
+
+// An honest aws-chunked PUT (declared == streamed) still works and bills once.
+func TestQuotaAccounting_AwsChunkedHonestPutCounts(t *testing.T) {
+	f := setupQuotaAccountingFixture(t, 100<<20)
+
+	payload := testBytes(64 << 10)
+	framed := awsChunkedFrame(payload)
+	req := httptest.NewRequest("PUT", "/test-bucket/honest.bin", bytes.NewReader(framed))
+	req.ContentLength = int64(len(framed))
+	req.Header.Set("Content-Encoding", "aws-chunked")
+	req.Header.Set("x-amz-decoded-content-length", fmt.Sprintf("%d", len(payload)))
+	req = req.WithContext(f.ctx(req.Context()))
+	w := httptest.NewRecorder()
+	f.server.handlePutObject(w, req, f.s3Req("test-bucket", "honest.bin"))
+
+	require.Equal(t, 200, w.Code)
+	assert.Equal(t, int64(len(payload)), f.used(t))
+}
+
+// A PUT with no determinable size (no Content-Length, no
+// x-amz-decoded-content-length) must be rejected with MissingContentLength —
+// it cannot be quota-checked before storage.
+func TestQuotaAccounting_UnknownLengthPutRejected(t *testing.T) {
+	f := setupQuotaAccountingFixture(t, 100<<20)
+
+	req := httptest.NewRequest("PUT", "/test-bucket/nolen.bin",
+		io.NopCloser(bytes.NewReader(testBytes(4<<10))))
+	req.ContentLength = -1
+	req = req.WithContext(f.ctx(req.Context()))
+	w := httptest.NewRecorder()
+	f.server.handlePutObject(w, req, f.s3Req("test-bucket", "nolen.bin"))
+
+	assert.Equal(t, 411, w.Code, "unknown-length PUT must return 411 MissingContentLength")
+	assert.Equal(t, int64(0), f.used(t))
+}
+
+// Batch delete of a chunked object must decrement GCI chunk refs (not just
+// drop the head-cache row) and release the logical size.
+func TestQuotaAccounting_BatchDeleteChunkedReleasesRefs(t *testing.T) {
+	f := setupQuotaAccountingFixture(t, 500<<20)
+	f.server.gci = crypto.NewGlobalContentIndex(f.db)
+
+	size := 65 << 20
+	require.Equal(t, 200, f.put(t, "chunk-batch.bin", testBytes(size)))
+	require.Equal(t, int64(size), f.used(t))
+
+	body := `<Delete><Object><Key>chunk-batch.bin</Key></Object></Delete>`
+	req := httptest.NewRequest("POST", "/test-bucket?delete", bytes.NewReader([]byte(body)))
+	req = req.WithContext(f.ctx(req.Context()))
+	w := httptest.NewRecorder()
+	f.server.handleDeleteObjects(w, req, f.s3Req("test-bucket", ""))
+	require.Equal(t, 200, w.Code)
+	require.Contains(t, w.Body.String(), "<Deleted>")
+
+	assert.Equal(t, int64(0), f.used(t), "batch delete must release the chunked object's logical size")
+
+	tenantUUID, err := uuid.Parse(f.tenantID)
+	require.NoError(t, err)
+	var refs int
+	require.NoError(t, f.db.QueryRow(`
+		SELECT COUNT(*) FROM tenant_chunk_refs
+		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = $3`,
+		tenantUUID, "test-bucket", "chunk-batch.bin").Scan(&refs))
+	assert.Equal(t, 0, refs, "batch delete must decrement GCI chunk refs like single delete does")
+}
+
+// Copying an encrypted source must be refused (NotImplemented): the copy
+// path streams raw stored bytes, so it would both bill ciphertext size and
+// hand back undecryptable data on GET.
+func TestQuotaAccounting_CopyEncryptedSourceRejected(t *testing.T) {
+	f := setupQuotaAccountingFixture(t, 100<<20)
+
+	content := testBytes(4 << 10)
+	container := f.tenant.NamespaceContainer("test-bucket")
+	_, err := f.server.engine.Put(context.Background(), container, "enc-src.bin", bytes.NewReader(content))
+	require.NoError(t, err)
+	_, err = f.db.Exec(`
+		INSERT INTO object_head_cache (tenant_id, bucket, object_key, size_bytes, etag, content_type, encryption_algorithm, updated_at)
+		VALUES ($1, $2, $3, $4, 'etag', 'application/octet-stream', 'AES256', NOW())`,
+		f.tenantID, "test-bucket", "enc-src.bin", len(content))
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("PUT", "/test-bucket/enc-copy.bin", nil)
+	req.Header.Set("x-amz-copy-source", "/test-bucket/enc-src.bin")
+	req = req.WithContext(f.ctx(req.Context()))
+	w := httptest.NewRecorder()
+	f.server.handleCopyObject(w, req, f.s3Req("test-bucket", "enc-copy.bin"))
+
+	assert.Equal(t, 501, w.Code, "copying an encrypted source must be NotImplemented, not silent corruption")
+}
+
 // The reconciliation job rewrites storage_used_bytes from the
 // object_head_cache sum (Gate C runs this once before metered billing).
 func TestQuotaAccounting_ReconcileRepairsdrift(t *testing.T) {

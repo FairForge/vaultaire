@@ -670,18 +670,26 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3Request) {
 	// WP-1: single quota reservation site. Reserve the declared size before
 	// the write, settle to the recorded logical size after it succeeds,
-	// release on failure, release the overwritten object's size on overwrite.
+	// release on failure, release the overwritten object's size on overwrite
+	// (the overwritten size is captured atomically by the head-cache upsert).
 	quotaOn := s.quotaManager != nil && req.TenantID != ""
-	var reserved, oldSize int64
-	if quotaOn {
+	var reserved int64
+	{
 		size := r.ContentLength
 		if decoded := r.Header.Get("x-amz-decoded-content-length"); decoded != "" {
 			if n, err := strconv.ParseInt(decoded, 10, 64); err == nil {
 				size = n
 			}
 		}
-		oldSize = s.headCacheSize(r.Context(), req.TenantID, req.Bucket, req.Object)
-		if size > 0 {
+		if size < 0 {
+			// No determinable size (chunked transfer without a decoded-length
+			// header): the write cannot be quota-checked before storage, and
+			// its head-cache row would record size 0 for real bytes. AWS S3
+			// requires a length on PUT for the same reason.
+			WriteS3Error(w, ErrMissingContentLength, r.URL.Path, generateRequestID())
+			return
+		}
+		if quotaOn && size > 0 {
 			ok, err := s.quotaManager.CheckAndReserve(r.Context(), req.TenantID, size)
 			if err != nil {
 				// Fail closed: an unmetered write would corrupt billing.
@@ -720,7 +728,7 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3
 	ctx, cancel := quotaCtx(r)
 	defer cancel()
 	if rec.statusCode >= 200 && rec.statusCode < 300 {
-		s.settlePutQuota(ctx, req.TenantID, reserved, adapter.putLogicalBytes, oldSize)
+		s.settlePutQuota(ctx, req.TenantID, reserved, adapter.putLogicalBytes, adapter.displacedBytes)
 	} else {
 		s.releaseQuota(ctx, req.TenantID, reserved)
 	}
