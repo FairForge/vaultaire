@@ -1350,3 +1350,29 @@ func TestHandlePut_ChunkedEncryptedDedup(t *testing.T) {
 		assert.Equal(t, content, body, "deduped encrypted object %s must be retrievable", key)
 	}
 }
+
+// A chunk's stored blob is compressed (or not) based on the FIRST upload's
+// Content-Type. A later dedup hit on the same chunk must record the ciphertext
+// hash of that stored blob — not one recomputed under the current request's
+// Content-Type, which can differ and make the second object unreadable.
+func TestHandleGet_EncryptedDedup_DifferentContentType(t *testing.T) {
+	f := setupEncryptedChunkingFixture(t)
+
+	// Compressible content: text/plain compresses on first store;
+	// application/pdf is on the compression skip-list, so a recomputed hash
+	// would describe a blob that was never stored.
+	content := bytes.Repeat([]byte("dedup across content types! "), 400)
+	putChunkedObject(t, f, "ct-first.txt", content, "text/plain")
+	putChunkedObject(t, f, "ct-second.pdf", content, "application/pdf")
+
+	for _, key := range []string{"ct-first.txt", "ct-second.pdf"} {
+		getReq := httptest.NewRequest("GET", "/test-bucket/"+key, nil)
+		getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+		gw := httptest.NewRecorder()
+		f.adapter.HandleGet(gw, getReq, "test-bucket", key)
+		require.Equal(t, http.StatusOK, gw.Code,
+			"deduped object %s must be readable regardless of upload Content-Type", key)
+		body, _ := io.ReadAll(gw.Body)
+		assert.Equal(t, content, body, "object %s must round-trip", key)
+	}
+}

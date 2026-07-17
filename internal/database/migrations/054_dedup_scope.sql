@@ -42,6 +42,17 @@ BEGIN
     END IF;
 END $$;
 
+-- The ciphertext hash of an encrypted chunk's stored blob is a property of the
+-- chunk row (scope + plaintext hash fix the convergent key, and the compression
+-- decision is made once, at first store). It is recorded here so dedup hits can
+-- copy it instead of recomputing it — recomputing depended on the current
+-- request's Content-Type matching the first uploader's (the compression
+-- decision consults Content-Type) and on zstd output being byte-stable across
+-- library versions; either mismatch made the new ref's hash describe a blob
+-- that was never stored, failing the integrity check on every subsequent GET.
+ALTER TABLE global_content_index
+    ADD COLUMN IF NOT EXISTS ciphertext_hash VARCHAR(64);
+
 -- Ref-count helpers become scope-aware. The single-arg versions are dropped so
 -- callers must pass a scope (a same-hash chunk can now exist in several scopes).
 DROP FUNCTION IF EXISTS increment_chunk_ref(VARCHAR);

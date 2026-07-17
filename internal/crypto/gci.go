@@ -27,6 +27,7 @@ type GCIEntry struct {
 	CompressionAlgo *string   `json:"compression_algo,omitempty"`
 	Encrypted       bool      `json:"encrypted"`
 	EncryptionAlgo  *string   `json:"encryption_algo,omitempty"`
+	CiphertextHash  *string   `json:"ciphertext_hash,omitempty"` // SHA-256 of the stored (encrypted) blob; nil for unencrypted chunks
 	RefCount        int       `json:"ref_count"`
 	FirstSeenAt     time.Time `json:"first_seen_at"`
 	LastAccessedAt  time.Time `json:"last_accessed_at"`
@@ -131,11 +132,12 @@ func (g *GlobalContentIndex) LookupChunk(ctx context.Context, scope, plaintextHa
 	var compressedSize sql.NullInt64
 	var compressionAlgo sql.NullString
 	var encryptionAlgo sql.NullString
+	var ciphertextHash sql.NullString
 
 	err := g.db.QueryRowContext(ctx, `
 		SELECT dedup_scope, plaintext_hash, backend_id, storage_key, size_bytes,
 		       compressed_size, compression_algo, encrypted, encryption_algo,
-		       ref_count, first_seen_at, last_accessed_at
+		       ciphertext_hash, ref_count, first_seen_at, last_accessed_at
 		FROM global_content_index
 		WHERE dedup_scope = $1 AND plaintext_hash = $2
 	`, scope, plaintextHash).Scan(
@@ -148,6 +150,7 @@ func (g *GlobalContentIndex) LookupChunk(ctx context.Context, scope, plaintextHa
 		&compressionAlgo,
 		&entry.Encrypted,
 		&encryptionAlgo,
+		&ciphertextHash,
 		&entry.RefCount,
 		&entry.FirstSeenAt,
 		&entry.LastAccessedAt,
@@ -172,6 +175,9 @@ func (g *GlobalContentIndex) LookupChunk(ctx context.Context, scope, plaintextHa
 	}
 	if encryptionAlgo.Valid {
 		entry.EncryptionAlgo = &encryptionAlgo.String
+	}
+	if ciphertextHash.Valid {
+		entry.CiphertextHash = &ciphertextHash.String
 	}
 
 	// Add to cache
@@ -217,7 +223,7 @@ func (g *GlobalContentIndex) LookupChunks(ctx context.Context, scope string, has
 	rows, err := g.db.QueryContext(ctx, `
 		SELECT dedup_scope, plaintext_hash, backend_id, storage_key, size_bytes,
 		       compressed_size, compression_algo, encrypted, encryption_algo,
-		       ref_count, first_seen_at, last_accessed_at
+		       ciphertext_hash, ref_count, first_seen_at, last_accessed_at
 		FROM global_content_index
 		WHERE dedup_scope = $1 AND plaintext_hash = ANY($2)
 	`, scope, uncachedHashes)
@@ -231,6 +237,7 @@ func (g *GlobalContentIndex) LookupChunks(ctx context.Context, scope string, has
 		var compressedSize sql.NullInt64
 		var compressionAlgo sql.NullString
 		var encryptionAlgo sql.NullString
+		var ciphertextHash sql.NullString
 
 		err := rows.Scan(
 			&entry.DedupScope,
@@ -242,6 +249,7 @@ func (g *GlobalContentIndex) LookupChunks(ctx context.Context, scope string, has
 			&compressionAlgo,
 			&entry.Encrypted,
 			&encryptionAlgo,
+			&ciphertextHash,
 			&entry.RefCount,
 			&entry.FirstSeenAt,
 			&entry.LastAccessedAt,
@@ -258,6 +266,9 @@ func (g *GlobalContentIndex) LookupChunks(ctx context.Context, scope string, has
 		}
 		if encryptionAlgo.Valid {
 			entry.EncryptionAlgo = &encryptionAlgo.String
+		}
+		if ciphertextHash.Valid {
+			entry.CiphertextHash = &ciphertextHash.String
 		}
 
 		// Update result
@@ -283,13 +294,13 @@ func (g *GlobalContentIndex) InsertChunk(ctx context.Context, entry *GCIEntry) e
 	}
 	_, err := g.db.ExecContext(ctx, `
 		INSERT INTO global_content_index
-		(dedup_scope, plaintext_hash, backend_id, storage_key, size_bytes, compressed_size, compression_algo, encrypted, encryption_algo, ref_count)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		(dedup_scope, plaintext_hash, backend_id, storage_key, size_bytes, compressed_size, compression_algo, encrypted, encryption_algo, ciphertext_hash, ref_count)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		ON CONFLICT (dedup_scope, plaintext_hash) DO UPDATE SET
 			ref_count = global_content_index.ref_count + 1,
 			last_accessed_at = NOW()
 	`, entry.DedupScope, entry.PlaintextHash, entry.BackendID, entry.StorageKey, entry.SizeBytes,
-		entry.CompressedSize, entry.CompressionAlgo, entry.Encrypted, entry.EncryptionAlgo, entry.RefCount)
+		entry.CompressedSize, entry.CompressionAlgo, entry.Encrypted, entry.EncryptionAlgo, entry.CiphertextHash, entry.RefCount)
 
 	if err != nil {
 		return fmt.Errorf("failed to insert chunk: %w", err)

@@ -965,6 +965,10 @@ func (a *S3ToEngine) handleChunkedPut(
 				backendName = bn
 			}
 
+			var entryCiphertextHash *string
+			if ciphertextHash != "" {
+				entryCiphertextHash = &ciphertextHash
+			}
 			if insertErr := a.gci.InsertChunk(ctx, &crypto.GCIEntry{
 				DedupScope:      dedupScope,
 				PlaintextHash:   chunk.Hash,
@@ -975,6 +979,7 @@ func (a *S3ToEngine) handleChunkedPut(
 				CompressionAlgo: compressionAlgo,
 				Encrypted:       encrypted,
 				EncryptionAlgo:  encryptionAlgo,
+				CiphertextHash:  entryCiphertextHash,
 				RefCount:        1,
 			}); insertErr != nil {
 				return fmt.Errorf("insert chunk index %s: %w", chunk.Hash[:16], insertErr)
@@ -987,23 +992,17 @@ func (a *S3ToEngine) handleChunkedPut(
 			}
 		}
 
+		// The ciphertext hash describes the blob that is actually stored, so on
+		// a dedup hit it is copied from the index row — never recomputed. The
+		// stored blob's compression was decided by the FIRST upload's
+		// Content-Type; recomputing under the current request's Content-Type
+		// (or a different zstd version) can hash a blob that was never stored,
+		// making the object fail its integrity check on every GET.
 		var refCiphertextHash *string
-		if a.chunkEncSvc != nil {
-			if ciphertextHash != "" {
-				refCiphertextHash = &ciphertextHash
-			} else {
-				// Dedup hit: recompute the deterministic ciphertextHash for the ref.
-				reData := chunk.Data
-				if crypto.ShouldCompress(chunk.Data, contentType) {
-					if c, e := crypto.CompressBuffer(chunk.Data); e == nil && len(c) < chunk.Size {
-						reData = c
-					}
-				}
-				_, ctHash, encErr := a.chunkEncSvc.EncryptChunkData(t.ID, chunk.Hash, reData)
-				if encErr == nil {
-					refCiphertextHash = &ctHash
-				}
-			}
+		if ciphertextHash != "" {
+			refCiphertextHash = &ciphertextHash
+		} else if lookup.Entry != nil && lookup.Entry.CiphertextHash != nil {
+			refCiphertextHash = lookup.Entry.CiphertextHash
 		}
 
 		newRefs = append(newRefs, crypto.TenantChunkRef{
@@ -1255,8 +1254,13 @@ func (a *S3ToEngine) handleChunkedGet(
 		if storageKey == "" {
 			storageKey = "_chunks/" + ref.PlaintextHash
 		}
+		// The GCI row's ciphertext hash is authoritative (it was computed from
+		// the blob actually stored); per-ref copies are a fallback for rows
+		// written before the hash lived on the index.
 		var ctHash string
-		if ref.CiphertextHash != nil {
+		if lookup.Entry.CiphertextHash != nil {
+			ctHash = *lookup.Entry.CiphertextHash
+		} else if ref.CiphertextHash != nil {
 			ctHash = *ref.CiphertextHash
 		}
 		descs[i] = chunkDesc{
