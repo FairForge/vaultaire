@@ -7,6 +7,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -59,6 +60,17 @@ type ListV2Entry struct {
 // CommonPrefixEntry represents a grouped prefix when delimiter is used.
 type CommonPrefixEntry struct {
 	Prefix string `xml:"Prefix"`
+}
+
+// s3URLEncode encodes a key/prefix for an encoding-type=url list response the
+// way AWS does: query-style escaping (space → '+', '+' → %2B, control and
+// non-ASCII bytes percent-encoded) with '/' kept literal so prefixes stay
+// readable. Clients decode with unquote_plus/QueryUnescape equivalents.
+// Without this, keys containing XML-illegal bytes (e.g. control characters)
+// are silently replaced with U+FFFD by the XML encoder and the client sees a
+// different key than it stored.
+func s3URLEncode(s string) string {
+	return strings.ReplaceAll(url.QueryEscape(s), "%2F", "/")
 }
 
 func encodeContinuationToken(key string) string {
@@ -115,6 +127,12 @@ func (a *S3ToEngine) HandleListV2(w http.ResponseWriter, r *http.Request, bucket
 
 	params := parseListV2Params(r, bucket)
 
+	// AWS accepts only "url" (or absence) for encoding-type.
+	if params.EncodingType != "" && params.EncodingType != "url" {
+		WriteS3Error(w, ErrInvalidArgument, r.URL.Path, generateRequestID())
+		return
+	}
+
 	cursor := ""
 	if params.ContinuationToken != "" {
 		cursor, err = decodeContinuationToken(params.ContinuationToken)
@@ -162,11 +180,23 @@ func (a *S3ToEngine) HandleListV2(w http.ResponseWriter, r *http.Request, bucket
 	if params.StartAfter != "" {
 		result.StartAfter = params.StartAfter
 	}
-	if params.EncodingType != "" {
-		result.EncodingType = params.EncodingType
-	}
 	if isTruncated && lastKey != "" {
 		result.NextContinuationToken = encodeContinuationToken(lastKey)
+	}
+
+	// encoding-type=url: percent-encode every field that carries a key or
+	// prefix. Continuation tokens are already base64url and stay as-is.
+	if params.EncodingType == "url" {
+		result.EncodingType = "url"
+		result.Prefix = s3URLEncode(result.Prefix)
+		result.Delimiter = s3URLEncode(result.Delimiter)
+		result.StartAfter = s3URLEncode(result.StartAfter)
+		for i := range result.Contents {
+			result.Contents[i].Key = s3URLEncode(result.Contents[i].Key)
+		}
+		for i := range result.CommonPrefixes {
+			result.CommonPrefixes[i].Prefix = s3URLEncode(result.CommonPrefixes[i].Prefix)
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/xml")
