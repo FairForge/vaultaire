@@ -39,6 +39,7 @@ const (
 	ErrMalformedXML                      = "MalformedXML"
 	ErrMethodNotAllowed                  = "MethodNotAllowed"
 	ErrSignatureDoesNotMatch             = "SignatureDoesNotMatch"
+	ErrInvalidArgument                   = "InvalidArgument"
 	ErrAccountSuspended                  = "AccountSuspended"
 	ErrSlowDown                          = "SlowDown"
 	ErrNoSuchUpload                      = "NoSuchUpload"
@@ -79,6 +80,7 @@ var errorMessages = map[string]string{
 	ErrMalformedXML:                      "The XML you provided was not well-formed or did not validate against our published schema",
 	ErrMethodNotAllowed:                  "The specified method is not allowed against this resource",
 	ErrSignatureDoesNotMatch:             "The request signature we calculated does not match the signature you provided",
+	ErrInvalidArgument:                   "Invalid argument",
 	ErrAccountSuspended:                  "Your account has been suspended. Contact support for assistance.",
 	ErrSlowDown:                          "Monthly bandwidth limit exceeded. Upgrade your plan or wait for the next billing cycle.",
 	ErrNoSuchUpload:                      "The specified multipart upload does not exist. The upload ID may be invalid, or the upload may have been aborted or completed.",
@@ -119,6 +121,7 @@ var errorStatusCodes = map[string]int{
 	ErrMalformedXML:                      http.StatusBadRequest,
 	ErrMethodNotAllowed:                  http.StatusMethodNotAllowed,
 	ErrSignatureDoesNotMatch:             http.StatusForbidden,
+	ErrInvalidArgument:                   http.StatusBadRequest,
 	ErrAccountSuspended:                  http.StatusForbidden,
 	ErrSlowDown:                          http.StatusTooManyRequests,
 	ErrNoSuchUpload:                      http.StatusNotFound,

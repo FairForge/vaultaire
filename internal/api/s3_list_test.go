@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"testing"
 
@@ -28,6 +29,7 @@ type listV2Result struct {
 	ContinuationToken     string   `xml:"ContinuationToken"`
 	NextContinuationToken string   `xml:"NextContinuationToken"`
 	StartAfter            string   `xml:"StartAfter"`
+	EncodingType          string   `xml:"EncodingType"`
 	Contents              []struct {
 		Key          string `xml:"Key"`
 		Size         int64  `xml:"Size"`
@@ -379,4 +381,82 @@ func TestContinuationToken_RoundTrip(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, key, decoded)
 	}
+}
+
+// putEscapedListObject PUTs a key whose raw form may not be legal in a URL
+// (control chars, unicode) by percent-encoding the request path — the server
+// decodes r.URL.Path back to the original key.
+func putEscapedListObject(server *Server, t *tenant.Tenant, bucket, key string) {
+	req := httptest.NewRequest("PUT", "/"+bucket+"/"+url.PathEscape(key),
+		bytes.NewReader([]byte("x")))
+	req = req.WithContext(tenant.WithTenant(req.Context(), t))
+	server.handleS3Request(httptest.NewRecorder(), req)
+}
+
+// JuiceFS (and other aws-sdk-go clients) always request encoding-type=url and
+// URL-decode the returned keys. Keys carrying XML-illegal bytes (control
+// chars) or unicode MUST come back percent-encoded — Go's XML encoder
+// otherwise replaces them with U+FFFD and the client sees a different key.
+func TestListV2_EncodingTypeURL(t *testing.T) {
+	server, testTenant, cleanup := setupListTestServer(t)
+	defer cleanup()
+
+	special := "dir/测试 key+plus\u001f.txt"
+	putEscapedListObject(server, testTenant, "enc-bucket", special)
+
+	w := listObjects(server, testTenant, "/enc-bucket?list-type=2&encoding-type=url")
+	require.Equal(t, 200, w.Code)
+	result := parseListResult(t, w)
+	require.Len(t, result.Contents, 1)
+
+	assert.Equal(t, "url", result.EncodingType)
+	assert.Equal(t, "dir/%E6%B5%8B%E8%AF%95+key%2Bplus%1F.txt", result.Contents[0].Key,
+		"key must be URL-encoded (space→'+', '/' literal, control chars percent-encoded)")
+
+	decoded, err := url.QueryUnescape(result.Contents[0].Key)
+	require.NoError(t, err)
+	assert.Equal(t, special, decoded, "client-side decode must round-trip the original key")
+}
+
+func TestListV2_EncodingTypeURL_PrefixDelimiterCommonPrefixes(t *testing.T) {
+	server, testTenant, cleanup := setupListTestServer(t)
+	defer cleanup()
+
+	for _, key := range []string{"my docs/a.txt", "my docs/b.txt", "my docs/sub dir/c.txt"} {
+		putEscapedListObject(server, testTenant, "enc-bucket", key)
+	}
+
+	w := listObjects(server, testTenant,
+		"/enc-bucket?list-type=2&encoding-type=url&delimiter=%2F&prefix="+url.QueryEscape("my docs/"))
+	require.Equal(t, 200, w.Code)
+	result := parseListResult(t, w)
+
+	assert.Equal(t, "my+docs/", result.Prefix, "prefix must be encoded in the response")
+	require.Len(t, result.CommonPrefixes, 1)
+	assert.Equal(t, "my+docs/sub+dir/", result.CommonPrefixes[0].Prefix)
+	require.Len(t, result.Contents, 2)
+	assert.Equal(t, "my+docs/a.txt", result.Contents[0].Key)
+}
+
+func TestListV2_NoEncodingTypeLeavesKeysRaw(t *testing.T) {
+	server, testTenant, cleanup := setupListTestServer(t)
+	defer cleanup()
+
+	putEscapedListObject(server, testTenant, "enc-bucket", "plain dir/plain.txt")
+
+	w := listObjects(server, testTenant, "/enc-bucket?list-type=2")
+	require.Equal(t, 200, w.Code)
+	result := parseListResult(t, w)
+	require.Len(t, result.Contents, 1)
+	assert.Equal(t, "plain dir/plain.txt", result.Contents[0].Key)
+	assert.Empty(t, result.EncodingType)
+}
+
+func TestListV2_InvalidEncodingTypeRejected(t *testing.T) {
+	server, testTenant, cleanup := setupListTestServer(t)
+	defer cleanup()
+
+	w := listObjects(server, testTenant, "/enc-bucket?list-type=2&encoding-type=base64")
+	assert.Equal(t, 400, w.Code)
+	assert.Contains(t, w.Body.String(), "InvalidArgument")
 }
