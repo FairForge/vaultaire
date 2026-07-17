@@ -162,7 +162,7 @@ func TestGCI_LookupChunk_NotFound(t *testing.T) {
 	gci := NewGlobalContentIndex(db)
 	ctx := context.Background()
 
-	result, err := gci.LookupChunk(ctx, "nonexistent_hash_abc123")
+	result, err := gci.LookupChunk(ctx, GlobalDedupScope, "nonexistent_hash_abc123")
 	if err != nil {
 		t.Fatalf("LookupChunk failed: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestGCI_InsertAndLookup(t *testing.T) {
 	}
 
 	// Lookup the chunk
-	result, err := gci.LookupChunk(ctx, entry.PlaintextHash)
+	result, err := gci.LookupChunk(ctx, GlobalDedupScope, entry.PlaintextHash)
 	if err != nil {
 		t.Fatalf("LookupChunk failed: %v", err)
 	}
@@ -258,7 +258,7 @@ func TestGCI_InsertDuplicate_IncrementsRefCount(t *testing.T) {
 	gci.cache.clear()
 
 	// Check ref count
-	result, err := gci.LookupChunk(ctx, hash)
+	result, err := gci.LookupChunk(ctx, GlobalDedupScope, hash)
 	if err != nil {
 		t.Fatalf("LookupChunk failed: %v", err)
 	}
@@ -301,7 +301,7 @@ func TestGCI_BatchLookup(t *testing.T) {
 	gci.cache.clear()
 
 	// Batch lookup all 3 (2 exist, 1 doesn't)
-	results, err := gci.LookupChunks(ctx, hashes)
+	results, err := gci.LookupChunks(ctx, GlobalDedupScope, hashes)
 	if err != nil {
 		t.Fatalf("LookupChunks failed: %v", err)
 	}
@@ -350,19 +350,19 @@ func TestGCI_RefCounting(t *testing.T) {
 	}
 
 	// Increment ref
-	if err := gci.IncrementRef(ctx, hash); err != nil {
+	if err := gci.IncrementRef(ctx, GlobalDedupScope, hash); err != nil {
 		t.Fatalf("IncrementRef failed: %v", err)
 	}
 
 	// Check ref count is 2
 	gci.cache.clear()
-	result, _ := gci.LookupChunk(ctx, hash)
+	result, _ := gci.LookupChunk(ctx, GlobalDedupScope, hash)
 	if result.Entry.RefCount != 2 {
 		t.Errorf("RefCount after increment = %d, want 2", result.Entry.RefCount)
 	}
 
 	// Decrement ref
-	newCount, err := gci.DecrementRef(ctx, hash)
+	newCount, err := gci.DecrementRef(ctx, GlobalDedupScope, hash)
 	if err != nil {
 		t.Fatalf("DecrementRef failed: %v", err)
 	}
@@ -371,7 +371,7 @@ func TestGCI_RefCounting(t *testing.T) {
 	}
 
 	// Decrement again - should hit 0 and mark for deletion
-	newCount, err = gci.DecrementRef(ctx, hash)
+	newCount, err = gci.DecrementRef(ctx, GlobalDedupScope, hash)
 	if err != nil {
 		t.Fatalf("Second DecrementRef failed: %v", err)
 	}
@@ -606,7 +606,7 @@ func TestGCI_DeleteObjectChunks(t *testing.T) {
 
 	// Verify chunk ref count decremented and marked for deletion
 	gci.cache.clear()
-	result, _ := gci.LookupChunk(ctx, hash)
+	result, _ := gci.LookupChunk(ctx, GlobalDedupScope, hash)
 	if result.Entry.RefCount != 0 {
 		t.Errorf("RefCount = %d, want 0", result.Entry.RefCount)
 	}
@@ -645,7 +645,7 @@ func TestGCI_Cache(t *testing.T) {
 	}
 
 	// Lookup should use cache (won't hit DB)
-	result, err := gci.LookupChunk(ctx, hash)
+	result, err := gci.LookupChunk(ctx, GlobalDedupScope, hash)
 	if err != nil {
 		t.Fatalf("LookupChunk failed: %v", err)
 	}
@@ -655,7 +655,7 @@ func TestGCI_Cache(t *testing.T) {
 
 	// Clear cache and lookup again (will hit DB)
 	gci.cache.clear()
-	result, err = gci.LookupChunk(ctx, hash)
+	result, err = gci.LookupChunk(ctx, GlobalDedupScope, hash)
 	if err != nil {
 		t.Fatalf("LookupChunk after cache clear failed: %v", err)
 	}
