@@ -116,9 +116,16 @@ Persistent event log + webhook CRUD API for SaaS developer integrations. Three n
 - `GET /api/v1/webhooks/{id}/deliveries` — delivery history with cursor pagination
 - `POST /api/v1/webhooks/{id}/test` — fires synthetic `webhook.test` event
 
-## Free Tier Quota Enforcement (Phase 5.11.10)
+## Quota Accounting (WP-1) + Free Tier Enforcement (Phase 5.11.10)
 
-`handlePutObject` (s3.go) checks `quotaManager.CheckAndReserve()` before writing. Returns `QuotaExceeded` (403) with upgrade suggestion if quota is full. Size is read from `Content-Length` or `x-amz-decoded-content-length` (chunked uploads).
+**Invariant:** `tenant_quotas.storage_used_bytes == SUM(object_head_cache.size_bytes)` per tenant, in LOGICAL bytes (chunked/deduped objects bill logical size, not physical). Helpers live in `quota_accounting.go`.
+
+- **PUT** (`handlePutObject`, s3.go) is the single reservation site: reserves the declared size atomically via `CheckAndReserve` (403 `QuotaExceeded` when over; DB error fails closed with 500), settles to `adapter.putLogicalBytes` after a 2xx, releases the reservation on failure, and releases `adapter.displacedBytes` (the overwritten row's size) on overwrite. Unknown-length PUTs (no Content-Length, no `x-amz-decoded-content-length`) are rejected 411 `MissingContentLength`. aws-chunked bodies whose measured decoded bytes disagree with the declared decoded length are rejected 400 `IncompleteBody` — billing never trusts client-declared sizes alone.
+- **Atomic displaced-size capture:** `atomicHeadUpsert` (quota_accounting.go) locks the existing head-cache row (`SELECT ... FOR UPDATE`), runs the upsert in the same transaction, and returns the previous size. Delete paths use `DELETE ... RETURNING size_bytes`. This is what makes concurrent PUT/DELETE on the same key unable to double-release. (A single-statement CTE version does NOT work — the CTE is pulled lazily after the upsert self-updates the row.)
+- **Multipart complete / CopyObject** reserve explicitly (they bypass the PUT handler). Copy refuses encrypted or chunked sources with 501 `NotImplemented` (the copy path streams raw stored bytes — copying those would corrupt and bill ciphertext size).
+- **Deletes** (single, batch `?delete`, delete-marker) release the removed row's bytes via `DELETE ... RETURNING`; batch delete decrements GCI refs for chunked objects like single delete. Version-specific delete releases nothing (versions are metadata rows; only the head row is billed).
+- **Known limitation:** versioned buckets bill only the latest object; a delete-marker unbills while `object_versions` rows (and backend bytes until overwrite) persist — version-aware billing is a follow-up.
+- **Reconciliation:** `usage.QuotaManager.ReconcileStorageUsage` / admin `POST /api/v1/admin/quota-reconcile` rewrites usage from the head-cache sum. Run only while writes are quiesced (in-flight reservations aren't in head cache yet).
 
 `CreateBucket` (s3_buckets.go) checks the tenant's tier via `quotaManager.GetTier()`. Free tier tenants are limited to `usage.FreeTierLimits.MaxBuckets` (1). Returns `QuotaExceeded` with bucket-specific suggestion.
 

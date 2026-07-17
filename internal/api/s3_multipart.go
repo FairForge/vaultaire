@@ -370,6 +370,28 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 	}
 	finalETag := fmt.Sprintf("\"%x-%d\"", etagHasher.Sum(nil), len(parts))
 
+	// WP-1: multipart bypasses the PUT handler's reservation, so reserve the
+	// assembled size here before streaming to the backend. If the object
+	// overwrites an existing key, the overwritten bytes are captured
+	// atomically by the head-cache upsert and released after success.
+	quotaOn := s.quotaManager != nil
+	var reservedBytes int64
+	if quotaOn {
+		ok, qErr := s.quotaManager.CheckAndReserve(r.Context(), t.ID, totalSize)
+		if qErr != nil {
+			s.logger.Error("multipart complete: quota check failed",
+				zap.Error(qErr), zap.String("tenant_id", t.ID))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+		if !ok {
+			WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
+				WithSuggestion("Upgrade at https://stored.ge/dashboard/billing"))
+			return
+		}
+		reservedBytes = totalSize
+	}
+
 	// Stream assembled parts to backend via pipe
 	pr, pw := io.Pipe()
 	containerName := t.NamespaceContainer(bucket)
@@ -408,6 +430,11 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 	}()
 
 	if uploadErr := <-errCh; uploadErr != nil {
+		if quotaOn {
+			ctx, cancel := quotaCtx(r)
+			s.releaseQuota(ctx, t.ID, reservedBytes)
+			cancel()
+		}
 		s.logger.Error("multipart backend storage failed",
 			zap.Error(uploadErr),
 			zap.String("bucket", bucket),
@@ -418,6 +445,7 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 
 	// Mark completed and update head cache
 	etagValue := strings.Trim(finalETag, "\"")
+	var displacedSize int64
 	if s.db != nil {
 		_, _ = s.db.ExecContext(r.Context(), `
 			UPDATE multipart_uploads SET status = 'completed' WHERE upload_id = $1
@@ -427,17 +455,24 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 		if contentType == "" {
 			contentType = "application/octet-stream"
 		}
-		_, dbErr := s.db.ExecContext(r.Context(), `
-			INSERT INTO object_head_cache
-				(tenant_id, bucket, object_key, size_bytes, etag, content_type, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, NOW())
-			ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
-				size_bytes   = EXCLUDED.size_bytes,
-				etag         = EXCLUDED.etag,
-				content_type = EXCLUDED.content_type,
-				updated_at   = NOW()
-		`, t.ID, bucket, object, totalSize, etagValue, contentType)
+		// atomicHeadUpsert captures the overwritten row's size in the same
+		// transaction (WP-1) — released below only if the upsert succeeded.
+		var dbErr error
+		displacedSize, dbErr = atomicHeadUpsert(r.Context(), s.db, t.ID, bucket, object, func(tx *sql.Tx) error {
+			_, execErr := tx.ExecContext(r.Context(), `
+				INSERT INTO object_head_cache
+					(tenant_id, bucket, object_key, size_bytes, etag, content_type, updated_at)
+				VALUES ($1, $2, $3, $4, $5, $6, NOW())
+				ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
+					size_bytes   = EXCLUDED.size_bytes,
+					etag         = EXCLUDED.etag,
+					content_type = EXCLUDED.content_type,
+					updated_at   = NOW()
+			`, t.ID, bucket, object, totalSize, etagValue, contentType)
+			return execErr
+		})
 		if dbErr != nil {
+			displacedSize = 0
 			s.logger.Error("failed to update head cache after multipart complete", zap.Error(dbErr))
 		}
 	} else {
@@ -446,6 +481,12 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 			mu.Status = "completed"
 		}
 		memUploadsMu.Unlock()
+	}
+
+	if quotaOn && displacedSize > 0 {
+		ctx, cancel := quotaCtx(r)
+		s.releaseQuota(ctx, t.ID, displacedSize)
+		cancel()
 	}
 
 	// Clean up temp files

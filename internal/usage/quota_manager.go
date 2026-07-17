@@ -114,6 +114,9 @@ func (m *QuotaManager) CheckAndReserve(ctx context.Context, tenantID string, byt
 	return true, tx.Commit()
 }
 
+// ReleaseQuota subtracts bytes from the tenant's usage, clamped at zero.
+// A negative value adds the bytes unconditionally (no limit check) — used to
+// account data that is already durably stored.
 func (m *QuotaManager) ReleaseQuota(ctx context.Context, tenantID string, bytes int64) error {
 	_, err := m.db.ExecContext(ctx,
 		`UPDATE tenant_quotas
@@ -127,6 +130,27 @@ func (m *QuotaManager) ReleaseQuota(ctx context.Context, tenantID string, bytes 
 	}
 
 	return nil
+}
+
+// ReconcileStorageUsage rewrites every tenant's storage_used_bytes to the
+// sum of logical object sizes in object_head_cache — the billing source of
+// truth. Returns the number of tenant rows updated. Run once before enabling
+// metered billing (Gate C), and any time drift is suspected.
+//
+// Run only while writes are quiesced: an in-flight PUT's reservation is not
+// yet reflected in object_head_cache, so reconciling during live traffic
+// erases that reservation and under-counts until the next reconcile.
+func (m *QuotaManager) ReconcileStorageUsage(ctx context.Context) (int64, error) {
+	res, err := m.db.ExecContext(ctx, `
+		UPDATE tenant_quotas tq
+		SET storage_used_bytes = COALESCE(
+			(SELECT SUM(o.size_bytes) FROM object_head_cache o
+			 WHERE o.tenant_id = tq.tenant_id), 0),
+		    updated_at = NOW()`)
+	if err != nil {
+		return 0, fmt.Errorf("reconciling storage usage: %w", err)
+	}
+	return res.RowsAffected()
 }
 
 func (m *QuotaManager) GetUsage(ctx context.Context, tenantID string) (used, limit int64, err error) {

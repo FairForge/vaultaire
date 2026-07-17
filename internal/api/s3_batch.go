@@ -1,6 +1,7 @@
 package api
 
 import (
+	"database/sql"
 	"encoding/xml"
 	"errors"
 	"io"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/tenant"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
@@ -127,12 +129,34 @@ func (s *Server) handleDeleteObjects(w http.ResponseWriter, r *http.Request, req
 			continue
 		}
 
-		delErr := s.engine.Delete(r.Context(), container, key)
-		isMissing := delErr != nil && (strings.Contains(delErr.Error(), "no such file or directory") ||
-			strings.Contains(delErr.Error(), "not found"))
+		// Chunked objects live under _chunks/, not container/key: their
+		// delete decrements GCI ref counts (mirrors single-key HandleDelete)
+		// so dedup GC can reclaim the physical chunks.
+		var isChunked bool
+		if s.db != nil {
+			_ = s.db.QueryRowContext(r.Context(),
+				`SELECT is_chunked FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+				t.ID, bucket, key).Scan(&isChunked)
+		}
 
-		if delErr != nil && !isMissing {
-			s.logger.Error("batch delete: engine delete failed",
+		var delErr error
+		chunkedHandled := false
+		if isChunked && s.gci != nil {
+			if tenantUUID, parseErr := uuid.Parse(t.ID); parseErr == nil {
+				delErr = s.gci.DeleteObjectChunks(r.Context(), tenantUUID, bucket, key)
+				chunkedHandled = true
+			}
+		}
+		if !chunkedHandled {
+			delErr = s.engine.Delete(r.Context(), container, key)
+			if delErr != nil && (strings.Contains(delErr.Error(), "no such file or directory") ||
+				strings.Contains(delErr.Error(), "not found")) {
+				delErr = nil // idempotent miss, matches AWS behavior
+			}
+		}
+
+		if delErr != nil {
+			s.logger.Error("batch delete: delete failed",
 				zap.Error(delErr),
 				zap.String("container", container),
 				zap.String("key", key))
@@ -144,12 +168,23 @@ func (s *Server) handleDeleteObjects(w http.ResponseWriter, r *http.Request, req
 			continue
 		}
 
-		// Success (or idempotent miss) — clear head cache and record as Deleted.
+		// Success (or idempotent miss) — remove the billing record and
+		// release exactly the bytes it held (atomic via RETURNING, WP-1).
 		if s.db != nil {
-			_, _ = s.db.ExecContext(r.Context(), `
+			var deletedSize int64
+			cacheErr := s.db.QueryRowContext(r.Context(), `
 				DELETE FROM object_head_cache
 				WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
-			`, t.ID, bucket, key)
+				RETURNING size_bytes
+			`, t.ID, bucket, key).Scan(&deletedSize)
+			if cacheErr == nil && deletedSize > 0 {
+				ctx, cancel := quotaCtx(r)
+				s.releaseQuota(ctx, t.ID, deletedSize)
+				cancel()
+			} else if cacheErr != nil && cacheErr != sql.ErrNoRows {
+				s.logger.Error("batch delete: head cache delete failed",
+					zap.Error(cacheErr), zap.String("key", key))
+			}
 		}
 
 		if !delReq.Quiet {
