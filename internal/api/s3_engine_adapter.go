@@ -48,6 +48,14 @@ type S3ToEngine struct {
 	chunkEncSvc       *crypto.ChunkEncryptionService
 	gci               *crypto.GlobalContentIndex
 	chunkingThreshold int64 // minimum object size for chunking (default 64 MB)
+
+	// quota, when set, is used by HandleDelete to release the deleted
+	// object's logical bytes (WP-1). PUT reservation/settlement lives in the
+	// Server layer, which reads putLogicalBytes after a successful HandlePut:
+	// the logical size recorded in object_head_cache (measured size for
+	// chunked objects, declared size otherwise).
+	quota           QuotaManager
+	putLogicalBytes int64
 }
 
 // NewS3ToEngine creates a new adapter
@@ -762,6 +770,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	}
 
 	etag := fmt.Sprintf("%x", hasher.Sum(nil))
+	a.putLogicalBytes = metadataSize
 
 	contentType := r.Header.Get("Content-Type")
 	if contentType == "" {
@@ -1043,6 +1052,7 @@ func (a *S3ToEngine) handleChunkedPut(
 	}
 
 	etag := fmt.Sprintf("%x", hasher.Sum(nil))
+	a.putLogicalBytes = measuredSize
 
 	contentDisposition := sanitizeContentDisposition(r.Header.Get("Content-Disposition"))
 	userMeta := extractS3Metadata(r)
@@ -1516,10 +1526,23 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 			VALUES ($1, $2, $3, $4, 0, '', 'application/octet-stream', TRUE, TRUE)`,
 			t.ID, bucket, object, markerID)
 
-		_, _ = a.db.ExecContext(r.Context(), `
+		// The head-cache row is the billing record (WP-1): capture its size,
+		// and release it only if this request actually removed the row.
+		var markedSize int64
+		_ = a.db.QueryRowContext(r.Context(), `
+			SELECT size_bytes FROM object_head_cache
+			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+			t.ID, bucket, object).Scan(&markedSize)
+
+		res, delErr := a.db.ExecContext(r.Context(), `
 			DELETE FROM object_head_cache
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
 			t.ID, bucket, object)
+		if delErr == nil && res != nil {
+			if n, _ := res.RowsAffected(); n > 0 {
+				a.releaseQuotaForDelete(r, t.ID, markedSize)
+			}
+		}
 
 		w.Header().Set("x-amz-version-id", markerID)
 		w.Header().Set("x-amz-delete-marker", "true")
@@ -1538,11 +1561,13 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 
 	// Chunked objects: decrement chunk ref counts via GCI instead of
 	// deleting from the backend. Actual chunk data stays until GC (Phase 8.7).
+	// size_bytes is the LOGICAL size — the billing unit released below (WP-1).
 	var isChunked bool
+	var sizeBytes int64
 	if a.db != nil {
 		_ = a.db.QueryRowContext(r.Context(),
-			`SELECT is_chunked FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-			t.ID, bucket, object).Scan(&isChunked)
+			`SELECT is_chunked, size_bytes FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+			t.ID, bucket, object).Scan(&isChunked, &sizeBytes)
 	}
 
 	if isChunked && a.gci != nil {
@@ -1559,25 +1584,32 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 		}
 	} else {
 		if err := a.engine.Delete(r.Context(), container, object); err != nil {
-			if strings.Contains(err.Error(), "no such file or directory") ||
-				strings.Contains(err.Error(), "not found") {
-				w.WriteHeader(http.StatusNoContent)
+			isMissing := strings.Contains(err.Error(), "no such file or directory") ||
+				strings.Contains(err.Error(), "not found")
+			if !isMissing {
+				a.logger.Error("delete failed",
+					zap.String("container", container),
+					zap.String("artifact", object),
+					zap.Error(err))
+				WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 				return
 			}
-			a.logger.Error("delete failed",
-				zap.String("container", container),
-				zap.String("artifact", object),
-				zap.Error(err))
-			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-			return
+			// Missing on the backend: fall through so a drifted head-cache
+			// row is still removed (and its bytes released) — S3 DELETE is
+			// idempotent either way.
 		}
 	}
 
 	if a.db != nil {
-		_, _ = a.db.ExecContext(r.Context(), `
+		res, delErr := a.db.ExecContext(r.Context(), `
 			DELETE FROM object_head_cache
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
 		`, t.ID, bucket, object)
+		if delErr == nil && res != nil {
+			if n, _ := res.RowsAffected(); n > 0 {
+				a.releaseQuotaForDelete(r, t.ID, sizeBytes)
+			}
+		}
 	}
 
 	w.WriteHeader(http.StatusNoContent)

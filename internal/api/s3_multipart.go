@@ -370,6 +370,28 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 	}
 	finalETag := fmt.Sprintf("\"%x-%d\"", etagHasher.Sum(nil), len(parts))
 
+	// WP-1: multipart bypasses the PUT handler's reservation, so reserve the
+	// assembled size here before streaming to the backend. If the object
+	// overwrites an existing key, that key's bytes are released on success.
+	quotaOn := s.quotaManager != nil
+	var reservedBytes, overwrittenSize int64
+	if quotaOn {
+		overwrittenSize = s.headCacheSize(r.Context(), t.ID, bucket, object)
+		ok, qErr := s.quotaManager.CheckAndReserve(r.Context(), t.ID, totalSize)
+		if qErr != nil {
+			s.logger.Error("multipart complete: quota check failed",
+				zap.Error(qErr), zap.String("tenant_id", t.ID))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+		if !ok {
+			WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
+				WithSuggestion("Upgrade at https://stored.ge/dashboard/billing"))
+			return
+		}
+		reservedBytes = totalSize
+	}
+
 	// Stream assembled parts to backend via pipe
 	pr, pw := io.Pipe()
 	containerName := t.NamespaceContainer(bucket)
@@ -408,6 +430,11 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 	}()
 
 	if uploadErr := <-errCh; uploadErr != nil {
+		if quotaOn {
+			ctx, cancel := quotaCtx(r)
+			s.releaseQuota(ctx, t.ID, reservedBytes)
+			cancel()
+		}
 		s.logger.Error("multipart backend storage failed",
 			zap.Error(uploadErr),
 			zap.String("bucket", bucket),
@@ -446,6 +473,12 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 			mu.Status = "completed"
 		}
 		memUploadsMu.Unlock()
+	}
+
+	if quotaOn && overwrittenSize > 0 {
+		ctx, cancel := quotaCtx(r)
+		s.releaseQuota(ctx, t.ID, overwrittenSize)
+		cancel()
 	}
 
 	// Clean up temp files

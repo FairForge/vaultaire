@@ -300,7 +300,6 @@ func main() {
 	var server *api.Server
 	if db != nil {
 		quotaManager := usage.NewQuotaManager(db)
-		eng.SetQuotaManager(quotaManager)
 		server = api.NewServer(cfg, logger, eng, quotaManager, db)
 	} else {
 		server = api.NewServer(cfg, logger, eng, &nilQuotaManager{}, nil)

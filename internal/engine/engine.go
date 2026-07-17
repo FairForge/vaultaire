@@ -17,12 +17,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// QuotaManager interface for quota operations
-type QuotaManager interface {
-	CheckAndReserve(ctx context.Context, tenantID string, bytes int64) (bool, error)
-	ReleaseQuota(ctx context.Context, tenantID string, bytes int64) error
-}
-
 // CoreEngine implements the Engine interface with real intelligence
 type CoreEngine struct {
 	drivers map[string]Driver
@@ -31,7 +25,6 @@ type CoreEngine struct {
 
 	logger        *zap.Logger
 	db            *sql.DB
-	quota         QuotaManager
 	selector      *BackendSelector
 	costOptimizer *CostOptimizer
 	failover      *FailoverManager
@@ -334,24 +327,10 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 	tenantID := common.GetTenantID(ctx)
 	sizeReader := &sizeTrackingReader{Reader: data}
 
-	if e.quota != nil && tenantID != "" {
-		estimatedSize := int64(10 << 20)
-		allowed, err := e.quota.CheckAndReserve(ctx, tenantID, estimatedSize)
-		if err != nil {
-			return "", fmt.Errorf("checking quota: %w", err)
-		}
-		if !allowed {
-			return "", ErrQuotaExceeded
-		}
-		defer func() {
-			if actual := sizeReader.bytesRead; actual != estimatedSize {
-				diff := actual - estimatedSize
-				if diff != 0 {
-					_, _ = e.quota.CheckAndReserve(ctx, tenantID, diff)
-				}
-			}
-		}()
-	}
+	// Quota accounting deliberately does NOT happen here (WP-1): the API
+	// layer is the single reservation site — it knows the real logical size,
+	// the overwrite delta, and the failure outcome. An engine-level estimate
+	// double-counted every PUT and re-counted each deduplicated chunk store.
 
 	// Resolve storage class from options to determine target backend.
 	options := ApplyPutOptions(opts...)
@@ -578,13 +557,6 @@ func (e *CoreEngine) GetMetrics(ctx context.Context) (map[string]interface{}, er
 		}
 	}
 	return metrics, nil
-}
-
-// SetQuotaManager sets the quota manager
-func (e *CoreEngine) SetQuotaManager(qm QuotaManager) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.quota = qm
 }
 
 // SetCostConfiguration updates cost optimizer

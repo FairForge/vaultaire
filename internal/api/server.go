@@ -89,6 +89,10 @@ type Server struct {
 type QuotaManager interface {
 	GetUsage(ctx context.Context, tenantID string) (used, limit int64, err error)
 	CheckAndReserve(ctx context.Context, tenantID string, bytes int64) (bool, error)
+	// ReleaseQuota subtracts bytes from the tenant's usage (clamped at 0).
+	// A negative value adds unconditionally — used to force-account bytes
+	// that are already durably stored.
+	ReleaseQuota(ctx context.Context, tenantID string, bytes int64) error
 	CreateTenant(ctx context.Context, tenantID, plan string, storageLimit int64) error
 	UpdateQuota(ctx context.Context, tenantID string, newLimit int64) error
 	ListQuotas(ctx context.Context) ([]map[string]interface{}, error)
@@ -627,6 +631,7 @@ func (s *Server) registerComplianceRoutes() {
 		r.Patch("/breach/{id}", s.requireAdmin(complianceHandler.HandleUpdateBreach))
 
 		r.Post("/dedup-gc", s.requireAdmin(s.handleDedupGCTrigger))
+		r.Post("/quota-reconcile", s.requireAdmin(s.handleQuotaReconcile))
 	})
 }
 

@@ -127,6 +127,10 @@ func (s *Server) handleDeleteObjects(w http.ResponseWriter, r *http.Request, req
 			continue
 		}
 
+		// Capture the billing record before deleting it (WP-1): the head-cache
+		// row's size is released once the row is actually removed.
+		sizeBytes := s.headCacheSize(r.Context(), t.ID, bucket, key)
+
 		delErr := s.engine.Delete(r.Context(), container, key)
 		isMissing := delErr != nil && (strings.Contains(delErr.Error(), "no such file or directory") ||
 			strings.Contains(delErr.Error(), "not found"))
@@ -146,10 +150,17 @@ func (s *Server) handleDeleteObjects(w http.ResponseWriter, r *http.Request, req
 
 		// Success (or idempotent miss) — clear head cache and record as Deleted.
 		if s.db != nil {
-			_, _ = s.db.ExecContext(r.Context(), `
+			res, cacheErr := s.db.ExecContext(r.Context(), `
 				DELETE FROM object_head_cache
 				WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
 			`, t.ID, bucket, key)
+			if cacheErr == nil && res != nil && sizeBytes > 0 {
+				if n, _ := res.RowsAffected(); n > 0 {
+					ctx, cancel := quotaCtx(r)
+					s.releaseQuota(ctx, t.ID, sizeBytes)
+					cancel()
+				}
+			}
 		}
 
 		if !delReq.Quiet {

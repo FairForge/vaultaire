@@ -32,6 +32,7 @@ func (m *stubQuotaManager) GetUsage(_ context.Context, _ string) (int64, int64, 
 func (m *stubQuotaManager) CheckAndReserve(_ context.Context, _ string, _ int64) (bool, error) {
 	return true, nil
 }
+func (m *stubQuotaManager) ReleaseQuota(_ context.Context, _ string, _ int64) error    { return nil }
 func (m *stubQuotaManager) CreateTenant(_ context.Context, _, _ string, _ int64) error { return nil }
 func (m *stubQuotaManager) UpdateQuota(_ context.Context, _ string, _ int64) error     { return nil }
 func (m *stubQuotaManager) ListQuotas(_ context.Context) ([]map[string]interface{}, error) {

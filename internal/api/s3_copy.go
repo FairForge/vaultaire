@@ -115,6 +115,32 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 	}
 	defer func() { _ = reader.Close() }()
 
+	// WP-1: copy bypasses the PUT handler's reservation, so reserve the
+	// source's recorded size before writing the destination. The reservation
+	// is settled against the actual streamed byte count after the write, and
+	// an overwritten destination's bytes are released.
+	quotaOn := s.quotaManager != nil
+	var reservedBytes, overwrittenSize int64
+	if quotaOn {
+		srcSize := s.headCacheSize(r.Context(), t.ID, srcBucket, srcKey)
+		overwrittenSize = s.headCacheSize(r.Context(), t.ID, destBucket, destKey)
+		if srcSize > 0 {
+			ok, qErr := s.quotaManager.CheckAndReserve(r.Context(), t.ID, srcSize)
+			if qErr != nil {
+				s.logger.Error("copy: quota check failed",
+					zap.Error(qErr), zap.String("tenant_id", t.ID))
+				WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+				return
+			}
+			if !ok {
+				WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
+					WithSuggestion("Upgrade at https://stored.ge/dashboard/billing"))
+				return
+			}
+			reservedBytes = srcSize
+		}
+	}
+
 	// Stream source → MD5 hasher → destination, tallying bytes as we go so
 	// the persisted size never depends on the source cache row being present.
 	counter := &countingReader{r: reader}
@@ -123,12 +149,23 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 
 	backendName, err := s.engine.Put(r.Context(), destContainer, destKey, tee)
 	if err != nil {
+		if quotaOn {
+			ctx, cancel := quotaCtx(r)
+			s.releaseQuota(ctx, t.ID, reservedBytes)
+			cancel()
+		}
 		s.logger.Error("copy: dest put failed",
 			zap.Error(err),
 			zap.String("container", destContainer),
 			zap.String("key", destKey))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return
+	}
+
+	if quotaOn {
+		ctx, cancel := quotaCtx(r)
+		s.settlePutQuota(ctx, t.ID, reservedBytes, counter.n, overwrittenSize)
+		cancel()
 	}
 
 	etag := fmt.Sprintf("%x", hasher.Sum(nil))
