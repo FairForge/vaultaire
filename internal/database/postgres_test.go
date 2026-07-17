@@ -61,6 +61,8 @@ func TestPostgres_TenantOperations(t *testing.T) {
 		ID:        tenantID,
 		Name:      "Test Tenant",
 		Email:     fmt.Sprintf("test-%s@example.com", tenantID[:8]),
+		AccessKey: "AK-" + tenantID[:8],
+		SecretKey: "SK-" + tenantID[:8],
 		CreatedAt: time.Now(),
 	}
 

@@ -177,8 +177,10 @@ func NewEncryptorFromConfig(config PipelineConfig) (Encryptor, error) {
 
 // KeyDerivation handles key generation for different encryption modes
 
-// DeriveConvergentKey derives a key from content hash (enables cross-tenant dedup)
-// Uses HKDF-like construction: SHA256(tenantKey || contentHash)
+// DeriveConvergentKey derives a deterministic per-content key from the tenant
+// key and content hash: SHA256(tenantKey || contentHash). Because the tenant
+// key is an input, identical content encrypts identically only WITHIN a tenant
+// (same-tenant dedup); two tenants produce distinct ciphertext.
 func DeriveConvergentKey(tenantKey []byte, contentHash []byte) []byte {
 	h := sha256.New()
 	h.Write(tenantKey)

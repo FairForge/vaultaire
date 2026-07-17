@@ -95,9 +95,9 @@ func (g *DedupGCRunner) reconcile(ctx context.Context) (int, error) {
 	graceSecs := int(g.GracePeriod.Seconds())
 	res, err := g.db.ExecContext(ctx, `
 		WITH actual AS (
-			SELECT plaintext_hash, COUNT(*) AS cnt
+			SELECT dedup_scope, plaintext_hash, COUNT(*) AS cnt
 			FROM tenant_chunk_refs
-			GROUP BY plaintext_hash
+			GROUP BY dedup_scope, plaintext_hash
 		)
 		UPDATE global_content_index g
 		SET ref_count = COALESCE(a.cnt, 0),
@@ -108,8 +108,9 @@ func (g *DedupGCRunner) reconcile(ctx context.Context) (int, error) {
 		        ELSE g.marked_at
 		    END
 		FROM global_content_index g2
-		LEFT JOIN actual a ON g2.plaintext_hash = a.plaintext_hash
-		WHERE g.plaintext_hash = g2.plaintext_hash
+		LEFT JOIN actual a
+		       ON g2.dedup_scope = a.dedup_scope AND g2.plaintext_hash = a.plaintext_hash
+		WHERE g.dedup_scope = g2.dedup_scope AND g.plaintext_hash = g2.plaintext_hash
 		  AND g.last_accessed_at < NOW() - make_interval(secs => $1)
 		  AND g.ref_count <> COALESCE(a.cnt, 0)
 	`, graceSecs)
@@ -125,7 +126,7 @@ func (g *DedupGCRunner) reconcile(ctx context.Context) (int, error) {
 func (g *DedupGCRunner) sweep(ctx context.Context) (int, int64, error) {
 	graceSecs := int(g.GracePeriod.Seconds())
 	rows, err := g.db.QueryContext(ctx, `
-		SELECT plaintext_hash, backend_id, storage_key, size_bytes
+		SELECT dedup_scope, plaintext_hash, backend_id, storage_key, size_bytes
 		FROM global_content_index
 		WHERE marked_for_deletion = TRUE
 		  AND ref_count = 0
@@ -137,6 +138,7 @@ func (g *DedupGCRunner) sweep(ctx context.Context) (int, int64, error) {
 	defer func() { _ = rows.Close() }()
 
 	type candidate struct {
+		scope     string
 		hash      string
 		backendID string
 		key       string
@@ -145,7 +147,7 @@ func (g *DedupGCRunner) sweep(ctx context.Context) (int, int64, error) {
 	var candidates []candidate
 	for rows.Next() {
 		var c candidate
-		if err := rows.Scan(&c.hash, &c.backendID, &c.key, &c.size); err != nil {
+		if err := rows.Scan(&c.scope, &c.hash, &c.backendID, &c.key, &c.size); err != nil {
 			return 0, 0, fmt.Errorf("scan candidate: %w", err)
 		}
 		candidates = append(candidates, c)
@@ -159,10 +161,11 @@ func (g *DedupGCRunner) sweep(ctx context.Context) (int, int64, error) {
 	for _, c := range candidates {
 		res, err := g.db.ExecContext(ctx, `
 			DELETE FROM global_content_index
-			WHERE plaintext_hash = $1
+			WHERE dedup_scope = $1
+			  AND plaintext_hash = $2
 			  AND ref_count = 0
 			  AND marked_for_deletion = TRUE
-		`, c.hash)
+		`, c.scope, c.hash)
 		if err != nil {
 			g.logger.Error("delete gci row",
 				zap.String("hash", c.hash), zap.Error(err))

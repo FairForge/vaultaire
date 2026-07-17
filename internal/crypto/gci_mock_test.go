@@ -30,11 +30,20 @@ func (m *MockGCI) objectKey(tenantID uuid.UUID, bucket, key string) string {
 	return fmt.Sprintf("%s/%s/%s", tenantID, bucket, key)
 }
 
-func (m *MockGCI) LookupChunk(_ context.Context, plaintextHash string) (*ChunkLookupResult, error) {
+// scopedKey namespaces a chunk hash by its dedup scope, mirroring the composite
+// (dedup_scope, plaintext_hash) primary key of the real index.
+func scopedKey(scope, plaintextHash string) string {
+	if scope == "" {
+		scope = GlobalDedupScope
+	}
+	return scope + "\x00" + plaintextHash
+}
+
+func (m *MockGCI) LookupChunk(_ context.Context, scope, plaintextHash string) (*ChunkLookupResult, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	entry, exists := m.chunks[plaintextHash]
+	entry, exists := m.chunks[scopedKey(scope, plaintextHash)]
 	if !exists {
 		return &ChunkLookupResult{
 			Exists:     false,
@@ -50,10 +59,10 @@ func (m *MockGCI) LookupChunk(_ context.Context, plaintextHash string) (*ChunkLo
 	}, nil
 }
 
-func (m *MockGCI) LookupChunks(ctx context.Context, hashes []string) (map[string]*ChunkLookupResult, error) {
+func (m *MockGCI) LookupChunks(ctx context.Context, scope string, hashes []string) (map[string]*ChunkLookupResult, error) {
 	results := make(map[string]*ChunkLookupResult)
 	for _, hash := range hashes {
-		result, _ := m.LookupChunk(ctx, hash)
+		result, _ := m.LookupChunk(ctx, scope, hash)
 		results[hash] = result
 	}
 	return results, nil
@@ -63,32 +72,33 @@ func (m *MockGCI) InsertChunk(_ context.Context, entry *GCIEntry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if existing, exists := m.chunks[entry.PlaintextHash]; exists {
+	k := scopedKey(entry.DedupScope, entry.PlaintextHash)
+	if existing, exists := m.chunks[k]; exists {
 		existing.RefCount++
 		return nil
 	}
 
 	// Copy entry
 	newEntry := *entry
-	m.chunks[entry.PlaintextHash] = &newEntry
+	m.chunks[k] = &newEntry
 	return nil
 }
 
-func (m *MockGCI) IncrementRef(_ context.Context, plaintextHash string) error {
+func (m *MockGCI) IncrementRef(_ context.Context, scope, plaintextHash string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if entry, exists := m.chunks[plaintextHash]; exists {
+	if entry, exists := m.chunks[scopedKey(scope, plaintextHash)]; exists {
 		entry.RefCount++
 	}
 	return nil
 }
 
-func (m *MockGCI) DecrementRef(_ context.Context, plaintextHash string) (int, error) {
+func (m *MockGCI) DecrementRef(_ context.Context, scope, plaintextHash string) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if entry, exists := m.chunks[plaintextHash]; exists {
+	if entry, exists := m.chunks[scopedKey(scope, plaintextHash)]; exists {
 		entry.RefCount--
 		return entry.RefCount, nil
 	}
@@ -140,7 +150,7 @@ func TestMockGCI_LookupChunk_NotFound(t *testing.T) {
 	gci := NewMockGCI()
 	ctx := context.Background()
 
-	result, err := gci.LookupChunk(ctx, "nonexistent_hash")
+	result, err := gci.LookupChunk(ctx, GlobalDedupScope, "nonexistent_hash")
 	if err != nil {
 		t.Fatalf("LookupChunk failed: %v", err)
 	}
@@ -171,7 +181,7 @@ func TestMockGCI_InsertAndLookup(t *testing.T) {
 	}
 
 	// Lookup
-	result, err := gci.LookupChunk(ctx, entry.PlaintextHash)
+	result, err := gci.LookupChunk(ctx, GlobalDedupScope, entry.PlaintextHash)
 	if err != nil {
 		t.Fatalf("LookupChunk failed: %v", err)
 	}
@@ -201,7 +211,7 @@ func TestMockGCI_DuplicateIncrementsRefCount(t *testing.T) {
 	_ = gci.InsertChunk(ctx, entry)
 
 	// Check ref count
-	result, _ := gci.LookupChunk(ctx, entry.PlaintextHash)
+	result, _ := gci.LookupChunk(ctx, GlobalDedupScope, entry.PlaintextHash)
 	if result.Entry.RefCount != 2 {
 		t.Errorf("RefCount = %d, want 2", result.Entry.RefCount)
 	}
@@ -224,7 +234,7 @@ func TestMockGCI_BatchLookup(t *testing.T) {
 	}
 
 	// Batch lookup all 3
-	results, err := gci.LookupChunks(ctx, hashes)
+	results, err := gci.LookupChunks(ctx, GlobalDedupScope, hashes)
 	if err != nil {
 		t.Fatalf("LookupChunks failed: %v", err)
 	}
@@ -254,14 +264,14 @@ func TestMockGCI_RefCounting(t *testing.T) {
 	})
 
 	// Increment
-	_ = gci.IncrementRef(ctx, hash)
-	result, _ := gci.LookupChunk(ctx, hash)
+	_ = gci.IncrementRef(ctx, GlobalDedupScope, hash)
+	result, _ := gci.LookupChunk(ctx, GlobalDedupScope, hash)
 	if result.Entry.RefCount != 2 {
 		t.Errorf("After increment: RefCount = %d, want 2", result.Entry.RefCount)
 	}
 
 	// Decrement
-	newCount, _ := gci.DecrementRef(ctx, hash)
+	newCount, _ := gci.DecrementRef(ctx, GlobalDedupScope, hash)
 	if newCount != 1 {
 		t.Errorf("After decrement: RefCount = %d, want 1", newCount)
 	}
@@ -358,7 +368,7 @@ func TestMockGCI_DeduplicationScenario(t *testing.T) {
 	// Tenant 1 uploads first
 	for i, c := range chunks {
 		// Check if exists
-		result, _ := gci.LookupChunk(ctx, c.hash)
+		result, _ := gci.LookupChunk(ctx, GlobalDedupScope, c.hash)
 
 		if result.IsNewChunk {
 			// New chunk - store it
@@ -371,7 +381,7 @@ func TestMockGCI_DeduplicationScenario(t *testing.T) {
 			})
 		} else {
 			// Existing chunk - just increment ref
-			_ = gci.IncrementRef(ctx, c.hash)
+			_ = gci.IncrementRef(ctx, GlobalDedupScope, c.hash)
 		}
 
 		// Add tenant ref
@@ -386,7 +396,7 @@ func TestMockGCI_DeduplicationScenario(t *testing.T) {
 
 	// Tenant 2 uploads same file
 	for i, c := range chunks {
-		result, _ := gci.LookupChunk(ctx, c.hash)
+		result, _ := gci.LookupChunk(ctx, GlobalDedupScope, c.hash)
 
 		if result.IsNewChunk {
 			_ = gci.InsertChunk(ctx, &GCIEntry{
@@ -398,7 +408,7 @@ func TestMockGCI_DeduplicationScenario(t *testing.T) {
 			})
 		} else {
 			// Should hit this path - chunks already exist!
-			_ = gci.IncrementRef(ctx, c.hash)
+			_ = gci.IncrementRef(ctx, GlobalDedupScope, c.hash)
 		}
 
 		_ = gci.AddTenantChunkRef(ctx, &TenantChunkRef{
@@ -412,7 +422,7 @@ func TestMockGCI_DeduplicationScenario(t *testing.T) {
 
 	// Verify ref counts are 2 for all chunks
 	for _, c := range chunks {
-		result, _ := gci.LookupChunk(ctx, c.hash)
+		result, _ := gci.LookupChunk(ctx, GlobalDedupScope, c.hash)
 		if result.Entry.RefCount != 2 {
 			t.Errorf("Chunk %s RefCount = %d, want 2", c.hash, result.Entry.RefCount)
 		}
@@ -459,6 +469,6 @@ func BenchmarkMockGCI_LookupChunk(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		hash := fmt.Sprintf("hash_%d", i%10000)
-		_, _ = gci.LookupChunk(ctx, hash)
+		_, _ = gci.LookupChunk(ctx, GlobalDedupScope, hash)
 	}
 }
