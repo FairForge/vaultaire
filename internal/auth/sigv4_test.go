@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -339,5 +340,129 @@ func TestValidateRequest_SigV4Enforcement(t *testing.T) {
 		require.Error(t, err)
 		assert.True(t, errors.Is(err, ErrSignatureMismatch))
 		assert.Contains(t, err.Error(), "regenerate", "error must tell the operator how to fix the key")
+	})
+}
+
+func TestWrapPayloadVerification(t *testing.T) {
+	newReq := func(body, declared string) *http.Request {
+		r := httptest.NewRequest("PUT", "http://stored.ge/b/k", strings.NewReader(body))
+		if declared != "" {
+			r.Header.Set("X-Amz-Content-Sha256", declared)
+		}
+		return r
+	}
+
+	t.Run("matching hash reads cleanly", func(t *testing.T) {
+		body := "the genuine payload"
+		r := newReq(body, sha256Hex(body))
+		require.NoError(t, wrapPayloadVerification(r))
+		got, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		assert.Equal(t, body, string(got))
+	})
+
+	t.Run("empty body with empty-body hash verifies", func(t *testing.T) {
+		r := newReq("", sha256Hex(""))
+		require.NoError(t, wrapPayloadVerification(r))
+		_, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+	})
+
+	t.Run("uppercase declared hash accepted", func(t *testing.T) {
+		body := "case insensitive hex"
+		r := newReq(body, strings.ToUpper(sha256Hex(body)))
+		require.NoError(t, wrapPayloadVerification(r))
+		_, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+	})
+
+	t.Run("tampered body fails at EOF", func(t *testing.T) {
+		r := newReq("tampered payload!!", sha256Hex("the genuine payload"))
+		require.NoError(t, wrapPayloadVerification(r))
+		_, err := io.ReadAll(r.Body)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, ErrContentSHA256Mismatch), "want ErrContentSHA256Mismatch, got %v", err)
+	})
+
+	t.Run("UNSIGNED-PAYLOAD is not verified", func(t *testing.T) {
+		r := newReq("anything at all", "UNSIGNED-PAYLOAD")
+		require.NoError(t, wrapPayloadVerification(r))
+		_, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+	})
+
+	t.Run("streaming marker is not verified", func(t *testing.T) {
+		r := newReq("chunk framing bytes", "STREAMING-AWS4-HMAC-SHA256-PAYLOAD")
+		require.NoError(t, wrapPayloadVerification(r))
+		_, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+	})
+
+	t.Run("absent header is not verified", func(t *testing.T) {
+		r := newReq("no declaration", "")
+		require.NoError(t, wrapPayloadVerification(r))
+		_, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+	})
+
+	t.Run("malformed declared value is rejected", func(t *testing.T) {
+		for _, bad := range []string{
+			"not-a-hash",
+			"deadbeef",              // too short
+			strings.Repeat("g", 64), // right length, not hex
+			sha256Hex("x") + "00",   // too long
+		} {
+			r := newReq("body", bad)
+			err := wrapPayloadVerification(r)
+			require.Error(t, err, "value %q must be rejected", bad)
+			assert.True(t, errors.Is(err, ErrInvalidContentSHA256), "want ErrInvalidContentSHA256 for %q, got %v", bad, err)
+		}
+	})
+}
+
+func TestValidateRequest_SignedHashBindsBody(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping database test")
+	}
+	now := time.Now().UTC()
+
+	t.Run("body matching the signed hash is served intact", func(t *testing.T) {
+		a, ak, sk := setupSigV4Tenant(t)
+		body := "genuine payload"
+		r := httptest.NewRequest("PUT", "http://stored.ge/some-bucket/obj", strings.NewReader(body))
+		signV4(t, r, ak, sk, "us-east-1", sha256Hex(body), now)
+
+		_, _, err := a.ValidateRequest(r)
+		require.NoError(t, err)
+		got, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		assert.Equal(t, body, string(got))
+	})
+
+	t.Run("body differing from the signed hash fails on read", func(t *testing.T) {
+		// The signature is valid — it covers the DECLARED hash — but the body
+		// bytes do not match the declaration (post-TLS tamper or client bug).
+		// Auth passes; the wrapped body must fail before the payload is
+		// accepted as genuine.
+		a, ak, sk := setupSigV4Tenant(t)
+		r := httptest.NewRequest("PUT", "http://stored.ge/some-bucket/obj",
+			strings.NewReader("tampered payload!!!"))
+		signV4(t, r, ak, sk, "us-east-1", sha256Hex("genuine payload"), now)
+
+		_, _, err := a.ValidateRequest(r)
+		require.NoError(t, err, "signature over the declared hash is valid — auth itself passes")
+		_, err = io.ReadAll(r.Body)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, ErrContentSHA256Mismatch), "want ErrContentSHA256Mismatch, got %v", err)
+	})
+
+	t.Run("malformed declared hash is rejected at auth time", func(t *testing.T) {
+		a, ak, sk := setupSigV4Tenant(t)
+		r := httptest.NewRequest("PUT", "http://stored.ge/some-bucket/obj", strings.NewReader("body"))
+		signV4(t, r, ak, sk, "us-east-1", "totally-not-a-valid-hash-value", now)
+
+		_, _, err := a.ValidateRequest(r)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, ErrInvalidContentSHA256), "want ErrInvalidContentSHA256, got %v", err)
 	})
 }

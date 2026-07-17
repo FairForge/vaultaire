@@ -172,9 +172,12 @@ func (a *AuthService) LoadFromDB(ctx context.Context) error {
 		return fmt.Errorf("iterate users: %w", err)
 	}
 
-	// Load tenants and link to users
+	// Load tenants and link to users. COALESCE matches the api_keys load
+	// below: one malformed row (NULL text column) must not abort the whole
+	// credential load — that would leave auth empty after a restart.
 	trows, err := a.sqlDB.QueryContext(ctx, `
-		SELECT id, name, email, access_key, secret_key, created_at
+		SELECT id, COALESCE(name, ''), COALESCE(email, ''),
+		       COALESCE(access_key, ''), COALESCE(secret_key, ''), created_at
 		FROM tenants
 	`)
 	if err != nil {
@@ -384,17 +387,18 @@ func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password,
 			return nil, nil, nil, fmt.Errorf("persist tenant: %w", err)
 		}
 
-		// api_keys.secret_hash stores a bcrypt hash — the raw secret is
-		// returned to the user once at registration and never stored plaintext.
+		// secret_key must be stored (not just the bcrypt secret_hash) — SigV4
+		// verification recomputes the request signature from the raw secret,
+		// so a hash-only row can never authenticate and must be regenerated.
 		secretHash, err := bcrypt.GenerateFromPassword([]byte(apiKey.Secret), bcrypt.DefaultCost)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("hash api key secret: %w", err)
 		}
 		_, err = a.sqlDB.ExecContext(ctx, `
-			INSERT INTO api_keys (id, user_id, name, key_id, secret_hash, created_at)
-			VALUES ($1, $2, $3, $4, $5, $6)
+			INSERT INTO api_keys (id, user_id, name, key_id, secret_hash, secret_key, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
 			ON CONFLICT (key_id) DO NOTHING
-		`, apiKey.ID, user.ID, apiKey.Name, apiKey.Key, string(secretHash), apiKey.CreatedAt)
+		`, apiKey.ID, user.ID, apiKey.Name, apiKey.Key, string(secretHash), apiKey.Secret, apiKey.CreatedAt)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("persist api key: %w", err)
 		}

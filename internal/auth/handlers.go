@@ -104,6 +104,11 @@ func (a *Auth) ValidateRequest(r *http.Request) (string, *KeyScope, error) {
 					zap.Error(err))
 				return "", nil, err
 			}
+			// The signature proves the DECLARED payload hash is authentic;
+			// wrapping the body makes the received bytes live up to it.
+			if err := wrapPayloadVerification(r); err != nil {
+				return "", nil, err
+			}
 		}
 		return cred.tenantID, cred.scope, nil
 	}

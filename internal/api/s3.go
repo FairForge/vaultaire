@@ -281,6 +281,8 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 					errCode = ErrSignatureDoesNotMatch
 				case errors.Is(err, auth.ErrRequestTimeSkewed):
 					errCode = ErrRequestTimeTooSkewed
+				case errors.Is(err, auth.ErrInvalidContentSHA256):
+					errCode = ErrInvalidArgument
 				case strings.Contains(err.Error(), "invalid authorization format"),
 					strings.Contains(err.Error(), "parse"):
 					errCode = ErrSignatureDoesNotMatch

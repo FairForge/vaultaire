@@ -179,7 +179,7 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 	if err != nil {
 		_ = os.Remove(pp)
 		s.logger.Error("failed to write part data", zap.Error(err))
-		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		WriteS3Error(w, bodyReadErrorCode(err), r.URL.Path, generateRequestID())
 		return
 	}
 
