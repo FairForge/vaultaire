@@ -162,7 +162,16 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 		}
 	}
 
-	// Stream part data to temp file while computing MD5 ETag
+	// Stream part data to temp file while computing MD5 ETag.
+	// Decode aws-chunked framing first — aws-cli v2 over HTTPS sends parts
+	// as STREAMING-UNSIGNED-PAYLOAD-TRAILER; storing the raw framed body
+	// corrupts the assembled object (wire framing embedded in the data) and
+	// records framed sizes/ETags for the parts.
+	var body io.Reader = r.Body
+	if isAWSChunked(r) {
+		body = newAWSChunkedReader(r.Body)
+	}
+
 	pp := partFilePath(uploadID, partNumber)
 	f, err := os.Create(pp) // #nosec G304 — path derived from validated uploadID + partNumber
 	if err != nil {
@@ -172,7 +181,7 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 	}
 
 	hasher := md5.New() // #nosec G401 — S3 spec requires MD5 for ETags
-	size, err := io.Copy(f, io.TeeReader(r.Body, hasher))
+	size, err := io.Copy(f, io.TeeReader(body, hasher))
 	if closeErr := f.Close(); closeErr != nil && err == nil {
 		err = closeErr
 	}
