@@ -42,6 +42,7 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 | 051 | Chunking + dedup: `global_content_index` (dedup hash→backend), `tenant_chunk_refs` (per-tenant chunk manifest), `object_metadata` (pipeline metadata); PL/pgSQL functions `increment_chunk_ref`, `decrement_chunk_ref`, `get_tenant_dedup_ratio`; `is_chunked BOOLEAN` on `object_head_cache` |
 | 052 | Chunk encryption: `encrypted BOOLEAN` (default FALSE) + `encryption_algo VARCHAR(32)` on `global_content_index` — tracks per-chunk convergent encryption state for the GET path |
 | 054 | Tenant-scoped dedup (WP-7): `dedup_scope VARCHAR(64)` (default `'_global'`) on `global_content_index` + `tenant_chunk_refs`; GCI primary key promoted to `(dedup_scope, plaintext_hash)` and the `tenant_chunk_refs` FK re-pointed at the composite key; `increment_chunk_ref`/`decrement_chunk_ref` take `(scope, hash)`. Encrypted chunks scope to the tenant UUID; unencrypted chunks stay `'_global'` (cross-tenant dedup preserved). The PK/FK swap is guarded on the PK still being single-column, so re-apply is a no-op |
+| 055 | Access patterns: `access_patterns` table for the ML access tracker (`internal/intelligence`) — per-object access upsert (PK tenant_id+container+artifact_key), temperature/frequency columns, hot-data + CSV-export indexes. Table was referenced by code since the intelligence phases but never migrated (prod errored on every batch flush) |
 
 ## Key Tables
 
