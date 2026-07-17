@@ -466,3 +466,111 @@ func TestValidateRequest_SignedHashBindsBody(t *testing.T) {
 		assert.True(t, errors.Is(err, ErrInvalidContentSHA256), "want ErrInvalidContentSHA256, got %v", err)
 	})
 }
+
+// Regression tests for the Gate D code-review findings.
+
+func TestVerifySigV4_MalformedDateIsNotSkew(t *testing.T) {
+	r := httptest.NewRequest("GET", "http://stored.ge/b", nil)
+	signV4(t, r, testAK, testSecret, "us-east-1", sha256Hex(""), time.Now().UTC())
+	r.Header.Set("X-Amz-Date", "Thu, 17 Jul 2026 12:00:00 GMT") // wrong format
+
+	err := verify(t, r, testSecret)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrSignatureMismatch), "malformed date is a malformed request, got %v", err)
+	assert.False(t, errors.Is(err, ErrRequestTimeSkewed), "must not be misreported as clock skew")
+	assert.Contains(t, err.Error(), "X-Amz-Date")
+}
+
+func TestVerifySigV4_DateHeaderFallback(t *testing.T) {
+	// A client may sign using the standard Date header instead of X-Amz-Date.
+	// The signature won't match here (the SDK signed x-amz-date into the
+	// canonical headers), but verification must proceed past the timestamp
+	// stage — not fail with "missing X-Amz-Date".
+	now := time.Now().UTC()
+	r := httptest.NewRequest("GET", "http://stored.ge/b", nil)
+	signV4(t, r, testAK, testSecret, "us-east-1", sha256Hex(""), now)
+	r.Header.Del("X-Amz-Date")
+	r.Header.Set("Date", now.Format(http.TimeFormat))
+
+	err := verify(t, r, testSecret)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "missing X-Amz-Date",
+		"Date header must be accepted as the timestamp source")
+}
+
+func TestVerifySigV4_EncodedSlashInKey(t *testing.T) {
+	// S3 spec: the canonical URI is the path AS SENT, un-normalized. A client
+	// storing a key that it percent-encodes as %2F signs the wire form; Go
+	// decodes it in URL.Path, so verification must fall back to EscapedPath.
+	r := httptest.NewRequest("GET", "http://stored.ge/my-bucket/reports%2F2026", nil)
+	require.Equal(t, "/my-bucket/reports%2F2026", r.URL.EscapedPath())
+	signV4(t, r, testAK, testSecret, "us-east-1", sha256Hex(""), time.Now().UTC())
+	require.NoError(t, verify(t, r, testSecret),
+		"wire-form %%2F path signed by the client must verify")
+}
+
+func TestVerifySigV4_QuerySortOrderVariants(t *testing.T) {
+	// Keys 'a:' and 'a-' sort differently raw vs encoded ('%'=0x25 < '-'=0x2D
+	// < ':'=0x3A). aws-sdk-go signs the raw-key order; botocore signs the
+	// encoded order. Both must verify.
+	r := httptest.NewRequest("GET", "http://stored.ge/b?a%3A=1&a-=2", nil)
+	signV4(t, r, testAK, testSecret, "us-east-1", sha256Hex(""), time.Now().UTC())
+	require.NoError(t, verify(t, r, testSecret),
+		"aws-sdk-go raw-sort query order must verify via the fallback variant")
+}
+
+func TestWrapPayloadVerification_SkipsAWSChunked(t *testing.T) {
+	// With aws-chunked framing the declared digest covers the DECODED
+	// payload; hashing the framed bytes would guarantee a false mismatch.
+	framed := "3;chunk-signature=deadbeef\r\nabc\r\n0;chunk-signature=beef\r\n\r\n"
+	r := httptest.NewRequest("PUT", "http://stored.ge/b/k", strings.NewReader(framed))
+	r.Header.Set("X-Amz-Content-Sha256", sha256Hex("abc"))
+	r.Header.Set("Content-Encoding", "aws-chunked")
+	require.NoError(t, wrapPayloadVerification(r))
+	_, err := io.ReadAll(r.Body)
+	require.NoError(t, err, "framed body must not be digest-checked")
+}
+
+func TestValidateRequest_NullSecretKeyTenant(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping database test")
+	}
+	now := time.Now().UTC()
+	db := setupTestDB(t)
+	t.Cleanup(func() { _ = db.Close() })
+	a := NewAuth(db, zap.NewNop())
+
+	// Migration 005 leaves tenants.secret_key nullable; some environments have
+	// since added NOT NULL. Prefer a real NULL (the reviewed failure mode);
+	// fall back to '' where the schema forbids NULL — both must resolve to the
+	// empty-secret fail-closed path, never a scan error.
+	const ak = "VKNULLSECRET01"
+	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key)
+		VALUES ('sigv4-nullsecret-tenant', 'NullSecret', 'nullsecret@stored.ge', $1, NULL)
+		ON CONFLICT (id) DO UPDATE SET access_key = $1, secret_key = NULL`, ak)
+	if err != nil {
+		_, err = db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key)
+			VALUES ('sigv4-nullsecret-tenant', 'NullSecret', 'nullsecret@stored.ge', $1, '')
+			ON CONFLICT (id) DO UPDATE SET access_key = $1, secret_key = ''`, ak)
+	}
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM tenants WHERE id = 'sigv4-nullsecret-tenant'`) })
+
+	t.Run("enforced: fails closed with actionable error", func(t *testing.T) {
+		r := httptest.NewRequest("GET", "http://stored.ge/some-bucket", nil)
+		signV4(t, r, ak, "whatever-secret", "us-east-1", sha256Hex(""), now)
+		_, _, err := a.ValidateRequest(r)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, ErrSignatureMismatch))
+		assert.Contains(t, err.Error(), "regenerate", "must hit the regenerate-key path, not a scan error")
+	})
+
+	t.Run("SIGV4_ENFORCE=false: still authenticates", func(t *testing.T) {
+		t.Setenv("SIGV4_ENFORCE", "false")
+		r := httptest.NewRequest("GET", "http://stored.ge/some-bucket", nil)
+		signV4(t, r, ak, "whatever-secret", "us-east-1", sha256Hex(""), now)
+		tenantID, _, err := a.ValidateRequest(r)
+		require.NoError(t, err, "kill-switch must restore pre-verification behavior for NULL-secret tenants")
+		assert.Equal(t, "sigv4-nullsecret-tenant", tenantID)
+	})
+}

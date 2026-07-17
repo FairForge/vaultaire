@@ -119,7 +119,7 @@ func (s *Server) handlePutObjectLockConfiguration(w http.ResponseWriter, r *http
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxLockBodyBytes))
 	if err != nil {
-		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		WriteS3Error(w, bodyReadErrorCode(err), r.URL.Path, generateRequestID())
 		return
 	}
 
@@ -238,7 +238,7 @@ func (s *Server) handlePutObjectRetention(w http.ResponseWriter, r *http.Request
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxLockBodyBytes))
 	if err != nil {
-		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		WriteS3Error(w, bodyReadErrorCode(err), r.URL.Path, generateRequestID())
 		return
 	}
 
@@ -350,7 +350,7 @@ func (s *Server) handlePutObjectLegalHold(w http.ResponseWriter, r *http.Request
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxLockBodyBytes))
 	if err != nil {
-		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		WriteS3Error(w, bodyReadErrorCode(err), r.URL.Path, generateRequestID())
 		return
 	}
 

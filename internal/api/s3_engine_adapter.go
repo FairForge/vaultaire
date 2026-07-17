@@ -729,7 +729,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 					a.logger.Error("region driver put failed",
 						zap.Error(putErr),
 						zap.String("driver", regionDriver))
-					WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+					WriteS3Error(w, bodyReadErrorCode(putErr), r.URL.Path, generateRequestID())
 					return
 				}
 				backendName = regionDriver

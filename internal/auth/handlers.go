@@ -160,7 +160,10 @@ func (a *Auth) lookupCredential(accessKey string) (*credential, error) {
 
 	// Try primary tenant key first (full access).
 	var tenantID, secretKey string
-	err := a.db.QueryRow(`SELECT id, secret_key FROM tenants WHERE access_key = $1`, accessKey).
+	// COALESCE: a NULL secret_key must resolve to the empty-secret fail-closed
+	// path ("regenerate this API key"), not a scan error that hard-locks the
+	// tenant out even under SIGV4_ENFORCE=false.
+	err := a.db.QueryRow(`SELECT id, COALESCE(secret_key, '') FROM tenants WHERE access_key = $1`, accessKey).
 		Scan(&tenantID, &secretKey)
 	if err == nil {
 		a.logger.Debug("authenticated tenant (primary key)",
@@ -217,7 +220,7 @@ func (a *Auth) lookupCredential(accessKey string) (*credential, error) {
 		var stsBucketScope, stsIPRestrict pq.StringArray
 		var stsExpiresAt time.Time
 		err = a.db.QueryRow(`
-			SELECT tenant_id, secret_key, permissions, bucket_scope, ip_restrict, expires_at
+			SELECT tenant_id, COALESCE(secret_key, ''), permissions, bucket_scope, ip_restrict, expires_at
 			FROM sts_tokens WHERE access_key = $1
 		`, accessKey).Scan(&tenantID, &secretKey, &stsPermJSON, &stsBucketScope, &stsIPRestrict, &stsExpiresAt)
 		if err == nil {

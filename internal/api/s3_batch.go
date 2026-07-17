@@ -2,10 +2,12 @@ package api
 
 import (
 	"encoding/xml"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
 
+	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"go.uber.org/zap"
 )
@@ -65,7 +67,11 @@ func (s *Server) handleDeleteObjects(w http.ResponseWriter, r *http.Request, req
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBatchDeleteBodyBytes+1))
 	if err != nil {
 		s.logger.Warn("batch delete: body read failed", zap.Error(err))
-		WriteS3Error(w, ErrIncompleteBody, r.URL.Path, generateRequestID())
+		code := ErrIncompleteBody
+		if errors.Is(err, auth.ErrContentSHA256Mismatch) {
+			code = ErrXAmzContentSHA256Mismatch
+		}
+		WriteS3Error(w, code, r.URL.Path, generateRequestID())
 		return
 	}
 	if len(body) > maxBatchDeleteBodyBytes {

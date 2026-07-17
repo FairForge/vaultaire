@@ -39,6 +39,13 @@ func wrapPayloadVerification(r *http.Request) error {
 	if declared == "" || declared == unsignedPayload || strings.HasPrefix(declared, "STREAMING-") {
 		return nil
 	}
+	// aws-chunked framing: the declared digest covers the DECODED payload,
+	// but this wrapper sees the framed bytes (chunk-size lines, CRLFs,
+	// trailers) — hashing them guarantees a false mismatch. Skip; the framed
+	// path's integrity is the aws-chunked layer's concern.
+	if strings.Contains(r.Header.Get("Content-Encoding"), "aws-chunked") {
+		return nil
+	}
 	if !isSHA256Hex(declared) {
 		return fmt.Errorf("%w: %q", ErrInvalidContentSHA256, declared)
 	}

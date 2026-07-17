@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // ErrSignatureMismatch is returned when a request's SigV4 signature does not
@@ -81,31 +82,73 @@ func parseSigV4AuthHeader(h string) (*sigV4Params, error) {
 // scope's date/region/service are used verbatim so any region string a
 // client signs with is accepted.
 func (a *Auth) verifySigV4(r *http.Request, p *sigV4Params, secretKey string) error {
+	// The signed timestamp comes from X-Amz-Date, or — as the SigV4 spec
+	// permits — the standard Date header, converted to ISO8601 basic.
 	amzDate := r.Header.Get("X-Amz-Date")
 	if amzDate == "" {
-		return fmt.Errorf("%w: missing X-Amz-Date header", ErrSignatureMismatch)
+		if httpDate := r.Header.Get("Date"); httpDate != "" {
+			if t, err := http.ParseTime(httpDate); err == nil {
+				amzDate = t.UTC().Format(timeFormat)
+			}
+		}
 	}
-	if err := a.validateTimestamp(amzDate); err != nil {
-		return fmt.Errorf("%w: %s", ErrRequestTimeSkewed, err)
+	if amzDate == "" {
+		return fmt.Errorf("%w: missing X-Amz-Date (or Date) header", ErrSignatureMismatch)
+	}
+	// A malformed date is a malformed request, not clock skew — reporting it
+	// as RequestTimeTooSkewed sends the user chasing a nonexistent clock
+	// problem.
+	ts, parseErr := time.Parse(timeFormat, amzDate)
+	if parseErr != nil {
+		return fmt.Errorf("%w: malformed X-Amz-Date %q (want YYYYMMDDTHHMMSSZ)", ErrSignatureMismatch, amzDate)
+	}
+	if diff := time.Now().UTC().Sub(ts); diff < -maxTimeSkew || diff > maxTimeSkew {
+		return fmt.Errorf("%w: request timestamp too old or too far in future", ErrRequestTimeSkewed)
 	}
 	if !strings.HasPrefix(amzDate, p.Date) {
 		return fmt.Errorf("%w: credential scope date %s does not match request date %s",
 			ErrSignatureMismatch, p.Date, amzDate)
 	}
 
-	canonical := canonicalRequestV4(r, p.SignedHeaders)
 	scope := strings.Join([]string{p.Date, p.Region, p.Service, aws4Request}, "/")
-	stringToSign := a.createStringToSign(amzDate, scope, canonical)
 	signingKey := a.deriveSigningKey(secretKey, p.Date, p.Region, p.Service)
-	expected := hex.EncodeToString(hmacSHA256(signingKey, []byte(stringToSign)))
 
-	if !hmac.Equal([]byte(expected), []byte(p.Signature)) {
-		return fmt.Errorf("%w", ErrSignatureMismatch)
+	verify := func(canonicalURI, canonicalQuery string) bool {
+		canonical := canonicalRequestV4(r, p.SignedHeaders, canonicalURI, canonicalQuery)
+		stringToSign := a.createStringToSign(amzDate, scope, canonical)
+		expected := hex.EncodeToString(hmacSHA256(signingKey, []byte(stringToSign)))
+		return hmac.Equal([]byte(expected), []byte(p.Signature))
 	}
-	return nil
+
+	// Clients canonicalize ambiguously-specified corners differently, so a
+	// small set of equivalent canonical forms is accepted — all derived from
+	// THIS request, so a valid signature over any of them still requires the
+	// secret. URI: the re-encoded decoded path (what spec-compliant clients
+	// sign regardless of Go's wire normalization) or the raw wire path (S3
+	// spec "as sent, un-normalized" — differs when the wire held encodings
+	// that don't round-trip, most concretely %2F inside an object key).
+	// Query: spec/botocore encoded-pair sort order, or aws-sdk-go's raw-key
+	// sort order (they diverge when a key/value byte sorts differently from
+	// its %-encoding).
+	uris := []string{canonicalURIV4(r.URL.Path)}
+	if wire := r.URL.EscapedPath(); wire != "" && wire != uris[0] {
+		uris = append(uris, wire)
+	}
+	queries := []string{canonicalQueryV4(r.URL.Query())}
+	if raw := canonicalQueryV4RawSort(r.URL.Query()); raw != queries[0] {
+		queries = append(queries, raw)
+	}
+	for _, u := range uris {
+		for _, q := range queries {
+			if verify(u, q) {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("%w", ErrSignatureMismatch)
 }
 
-func canonicalRequestV4(r *http.Request, signedHeaders string) string {
+func canonicalRequestV4(r *http.Request, signedHeaders, canonicalURI, canonicalQuery string) string {
 	// The payload hash the client declared is used verbatim — including the
 	// UNSIGNED-PAYLOAD and STREAMING-AWS4-HMAC-SHA256-PAYLOAD markers. The
 	// seed signature covers the declaration, not the body bytes.
@@ -126,8 +169,8 @@ func canonicalRequestV4(r *http.Request, signedHeaders string) string {
 
 	return strings.Join([]string{
 		r.Method,
-		canonicalURIV4(r.URL.Path),
-		canonicalQueryV4(r.URL.Query()),
+		canonicalURI,
+		canonicalQuery,
 		hdrs.String(),
 		signedHeaders,
 		payloadHash,
@@ -185,9 +228,38 @@ func canonicalURIV4(path string) string {
 	return strings.Join(segs, "/")
 }
 
-// canonicalQueryV4 builds the canonical query string: keys sorted, repeated
-// values sorted, AWS percent-encoding (space is %20 — never '+').
+// canonicalQueryV4 builds the canonical query string per the SigV4 spec (and
+// botocore): URI-encode each name/value with AWS percent-encoding (space is
+// %20 — never '+'), then sort by the ENCODED (name, value) pair. Sorting the
+// decoded form inverts the order whenever a name/value contains a byte whose
+// encoding ('%' = 0x25) sorts differently from the raw byte (e.g. ':' vs '-').
 func canonicalQueryV4(q url.Values) string {
+	type pair struct{ k, v string }
+	var pairs []pair
+	for k, vs := range q {
+		ek := awsURIEncode(k)
+		for _, v := range vs {
+			pairs = append(pairs, pair{ek, awsURIEncode(v)})
+		}
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].k != pairs[j].k {
+			return pairs[i].k < pairs[j].k
+		}
+		return pairs[i].v < pairs[j].v
+	})
+	parts := make([]string, len(pairs))
+	for i, p := range pairs {
+		parts[i] = p.k + "=" + p.v
+	}
+	return strings.Join(parts, "&")
+}
+
+// canonicalQueryV4RawSort is the aws-sdk-go-v2 variant: url.Values.Encode
+// sorts by the RAW (decoded) key before encoding, so Go-SDK clients sign this
+// order when it differs from the spec order above. Values within a key keep
+// raw-sorted order.
+func canonicalQueryV4RawSort(q url.Values) string {
 	keys := make([]string, 0, len(q))
 	for k := range q {
 		keys = append(keys, k)
