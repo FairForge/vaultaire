@@ -113,7 +113,7 @@ func (s *Server) handlePutBucketNotification(w http.ResponseWriter, r *http.Requ
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxNotificationBodyBytes))
 	if err != nil {
-		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		WriteS3Error(w, bodyReadErrorCode(err), r.URL.Path, generateRequestID())
 		return
 	}
 

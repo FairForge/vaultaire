@@ -118,7 +118,7 @@ func (s *Server) handlePutBucketInventory(w http.ResponseWriter, r *http.Request
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxInventoryBodyBytes))
 	if err != nil {
-		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		WriteS3Error(w, bodyReadErrorCode(err), r.URL.Path, generateRequestID())
 		return
 	}
 

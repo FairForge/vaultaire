@@ -179,7 +179,7 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 	if err != nil {
 		_ = os.Remove(pp)
 		s.logger.Error("failed to write part data", zap.Error(err))
-		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		WriteS3Error(w, bodyReadErrorCode(err), r.URL.Path, generateRequestID())
 		return
 	}
 
@@ -262,11 +262,23 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 		}
 	}
 
-	// Parse the CompleteMultipartUpload XML body (AWS clients send this)
+	// Parse the CompleteMultipartUpload XML body (AWS clients send this).
+	// Read to EOF before decoding: a streaming xml.Decoder stops at the
+	// closing element and never drains the body, which would silently skip
+	// the signed x-amz-content-sha256 verification — a truncated-but-well-
+	// formed part list would commit a shorter object undetected.
 	var completeReq CompleteMultipartUploadRequest
 	if r.Body != nil {
-		if decErr := xml.NewDecoder(r.Body).Decode(&completeReq); decErr != nil {
-			s.logger.Debug("no complete request body, using all uploaded parts", zap.Error(decErr))
+		body, readErr := io.ReadAll(r.Body)
+		if readErr != nil {
+			s.logger.Warn("complete multipart: body read failed", zap.Error(readErr))
+			WriteS3Error(w, bodyReadErrorCode(readErr), r.URL.Path, generateRequestID())
+			return
+		}
+		if len(body) > 0 {
+			if decErr := xml.Unmarshal(body, &completeReq); decErr != nil {
+				s.logger.Debug("no parseable complete request body, using all uploaded parts", zap.Error(decErr))
+			}
 		}
 	}
 

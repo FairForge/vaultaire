@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -170,6 +171,10 @@ func (s *Server) CreateBucket(w http.ResponseWriter, r *http.Request) {
 	}
 	if region == "" && r.ContentLength > 0 {
 		body, readErr := io.ReadAll(io.LimitReader(r.Body, 4096))
+		if readErr != nil && errors.Is(readErr, auth.ErrContentSHA256Mismatch) {
+			WriteS3Error(w, ErrXAmzContentSHA256Mismatch, r.URL.Path, generateRequestID())
+			return
+		}
 		if readErr == nil && len(body) > 0 {
 			var cfg struct {
 				XMLName            xml.Name `xml:"CreateBucketConfiguration"`

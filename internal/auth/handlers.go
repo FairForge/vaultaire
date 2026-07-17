@@ -15,9 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
@@ -50,8 +48,12 @@ func NewAuth(db *sql.DB, logger *zap.Logger) *Auth {
 }
 
 // ValidateRequest validates an S3 request and returns the tenant ID and key scope.
+// With SIGV4_ENFORCE active (the default), AWS4-HMAC-SHA256 requests must carry a
+// valid signature; legacy formats that prove only possession of the access key ID
+// (SigV2 "AWS ak:sig" and the bare AWSAccessKeyId query parameter) are rejected.
 func (a *Auth) ValidateRequest(r *http.Request) (string, *KeyScope, error) {
 	fullAccess := &KeyScope{Permissions: []string{"*"}}
+	enforce := sigV4Enforced()
 
 	// Extract Authorization header
 	authHeader := r.Header.Get("Authorization")
@@ -59,6 +61,9 @@ func (a *Auth) ValidateRequest(r *http.Request) (string, *KeyScope, error) {
 	// If no auth header, check for access key in query (for presigned URLs)
 	if authHeader == "" {
 		if accessKey := r.URL.Query().Get("AWSAccessKeyId"); accessKey != "" {
+			if enforce && a.db != nil {
+				return "", nil, fmt.Errorf("%w: unsigned AWSAccessKeyId query authentication is not supported", ErrSignatureMismatch)
+			}
 			return a.validateAccessKey(accessKey)
 		}
 		// For testing without auth, allow but use test-tenant
@@ -68,18 +73,52 @@ func (a *Auth) ValidateRequest(r *http.Request) (string, *KeyScope, error) {
 		return "", nil, fmt.Errorf("missing authorization")
 	}
 
-	// Parse AWS Signature v4 format (used by AWS CLI/SDKs)
-	if strings.HasPrefix(authHeader, "AWS4-HMAC-SHA256") {
-		accessKey, _, _, err := a.parseAuthHeader(authHeader)
+	// AWS Signature v4 format (used by AWS CLI/SDKs)
+	if strings.HasPrefix(authHeader, algorithm) {
+		params, err := parseSigV4AuthHeader(authHeader)
 		if err != nil {
 			a.logger.Debug("failed to parse auth header", zap.Error(err))
 			return "", nil, err
 		}
-		return a.validateAccessKey(accessKey)
+		if a.db == nil {
+			a.logger.Warn("no database connection, using test-tenant")
+			return "test-tenant", fullAccess, nil
+		}
+		cred, err := a.lookupCredential(params.AccessKey)
+		if err != nil {
+			return "", nil, err
+		}
+		if enforce {
+			// A key whose plaintext secret was never stored (legacy rows with
+			// only a bcrypt secret_hash) can never verify: fail closed, but
+			// leave an actionable trail — the key must be regenerated.
+			if cred.secretKey == "" {
+				a.logger.Warn("access key has no stored secret — cannot verify SigV4 signature; regenerate this API key",
+					zap.String("access_key", params.AccessKey[:min(6, len(params.AccessKey))]+"..."),
+					zap.String("tenant_id", cred.tenantID))
+				return "", nil, fmt.Errorf("%w: key has no stored secret for signature verification; regenerate this API key", ErrSignatureMismatch)
+			}
+			if err := a.verifySigV4(r, params, cred.secretKey); err != nil {
+				a.logger.Debug("signature verification failed",
+					zap.String("access_key", params.AccessKey[:min(6, len(params.AccessKey))]+"..."),
+					zap.Error(err))
+				return "", nil, err
+			}
+			// The signature proves the DECLARED payload hash is authentic;
+			// wrapping the body makes the received bytes live up to it.
+			if err := wrapPayloadVerification(r); err != nil {
+				return "", nil, err
+			}
+		}
+		return cred.tenantID, cred.scope, nil
 	}
 
-	// Support basic AWS format (for simpler clients)
+	// Basic AWS format (SigV2-era clients) — key-existence only, so it is
+	// disabled while signatures are enforced.
 	if strings.HasPrefix(authHeader, "AWS ") {
+		if enforce && a.db != nil {
+			return "", nil, fmt.Errorf("%w: AWS signature version 2 is not supported", ErrSignatureMismatch)
+		}
 		parts := strings.SplitN(strings.TrimPrefix(authHeader, "AWS "), ":", 2)
 		if len(parts) == 2 {
 			return a.validateAccessKey(parts[0])
@@ -89,27 +128,52 @@ func (a *Auth) ValidateRequest(r *http.Request) (string, *KeyScope, error) {
 	return "", nil, fmt.Errorf("invalid authorization format")
 }
 
-// validateAccessKey looks up the tenant ID and key scope by access key.
-// Checks the tenants table first (primary keys, full access), then falls
-// back to api_keys for scoped VLT_ keys.
+// credential is the result of an access-key lookup: the owning tenant, the
+// secret used for signature verification, and the key's scope.
+type credential struct {
+	tenantID  string
+	secretKey string
+	scope     *KeyScope
+}
+
+// validateAccessKey looks up the tenant ID and key scope by access key,
+// without signature verification (legacy paths and SIGV4_ENFORCE=false).
 func (a *Auth) validateAccessKey(accessKey string) (string, *KeyScope, error) {
 	if a.db == nil {
 		a.logger.Warn("no database connection, using test-tenant")
 		return "test-tenant", &KeyScope{Permissions: []string{"*"}}, nil
 	}
+	cred, err := a.lookupCredential(accessKey)
+	if err != nil {
+		return "", nil, err
+	}
+	return cred.tenantID, cred.scope, nil
+}
+
+// lookupCredential resolves an access key to its secret, tenant and scope.
+// Checks the tenants table first (primary keys, full access), then falls
+// back to api_keys for scoped VLT_ keys, then sts_tokens for ASIA keys.
+func (a *Auth) lookupCredential(accessKey string) (*credential, error) {
+	if a.db == nil {
+		return nil, fmt.Errorf("database not initialized")
+	}
 
 	// Try primary tenant key first (full access).
-	var tenantID string
-	err := a.db.QueryRow(`SELECT id FROM tenants WHERE access_key = $1`, accessKey).Scan(&tenantID)
+	var tenantID, secretKey string
+	// COALESCE: a NULL secret_key must resolve to the empty-secret fail-closed
+	// path ("regenerate this API key"), not a scan error that hard-locks the
+	// tenant out even under SIGV4_ENFORCE=false.
+	err := a.db.QueryRow(`SELECT id, COALESCE(secret_key, '') FROM tenants WHERE access_key = $1`, accessKey).
+		Scan(&tenantID, &secretKey)
 	if err == nil {
 		a.logger.Debug("authenticated tenant (primary key)",
 			zap.String("tenant_id", tenantID),
 			zap.String("access_key", accessKey[:min(6, len(accessKey))]+"..."))
-		return tenantID, &KeyScope{Permissions: []string{"*"}}, nil
+		return &credential{tenantID, secretKey, &KeyScope{Permissions: []string{"*"}}}, nil
 	}
 	if err != sql.ErrNoRows {
 		a.logger.Error("database error during auth", zap.Error(err))
-		return "", nil, fmt.Errorf("auth lookup failed: %w", err)
+		return nil, fmt.Errorf("auth lookup failed: %w", err)
 	}
 
 	// Try scoped API key (VLT_ prefix keys from api_keys table).
@@ -117,7 +181,7 @@ func (a *Auth) validateAccessKey(accessKey string) (string, *KeyScope, error) {
 	var bucketScope, ipAllowlist pq.StringArray
 	var expiresAt sql.NullTime
 	err = a.db.QueryRow(`
-		SELECT t.id,
+		SELECT t.id, COALESCE(ak.secret_key, ''),
 		       COALESCE(ak.permissions, '["*"]'::jsonb),
 		       COALESCE(ak.bucket_scope, '{}'),
 		       COALESCE(ak.ip_allowlist, '{}'),
@@ -126,7 +190,7 @@ func (a *Auth) validateAccessKey(accessKey string) (string, *KeyScope, error) {
 		JOIN users u ON u.id = ak.user_id
 		JOIN tenants t ON t.email = u.email
 		WHERE ak.key_id = $1
-	`, accessKey).Scan(&tenantID, &permJSON, &bucketScope, &ipAllowlist, &expiresAt)
+	`, accessKey).Scan(&tenantID, &secretKey, &permJSON, &bucketScope, &ipAllowlist, &expiresAt)
 	if err == nil {
 		scope := &KeyScope{
 			BucketScope: []string(bucketScope),
@@ -143,11 +207,11 @@ func (a *Auth) validateAccessKey(accessKey string) (string, *KeyScope, error) {
 			zap.String("tenant_id", tenantID),
 			zap.String("access_key", accessKey[:min(6, len(accessKey))]+"..."),
 			zap.Int("permissions", len(scope.Permissions)))
-		return tenantID, scope, nil
+		return &credential{tenantID, secretKey, scope}, nil
 	}
 	if err != sql.ErrNoRows {
 		a.logger.Error("database error during scoped key auth", zap.Error(err))
-		return "", nil, fmt.Errorf("auth lookup failed: %w", err)
+		return nil, fmt.Errorf("auth lookup failed: %w", err)
 	}
 
 	// Try STS temporary credential (ASIA prefix keys).
@@ -156,13 +220,13 @@ func (a *Auth) validateAccessKey(accessKey string) (string, *KeyScope, error) {
 		var stsBucketScope, stsIPRestrict pq.StringArray
 		var stsExpiresAt time.Time
 		err = a.db.QueryRow(`
-			SELECT tenant_id, permissions, bucket_scope, ip_restrict, expires_at
+			SELECT tenant_id, COALESCE(secret_key, ''), permissions, bucket_scope, ip_restrict, expires_at
 			FROM sts_tokens WHERE access_key = $1
-		`, accessKey).Scan(&tenantID, &stsPermJSON, &stsBucketScope, &stsIPRestrict, &stsExpiresAt)
+		`, accessKey).Scan(&tenantID, &secretKey, &stsPermJSON, &stsBucketScope, &stsIPRestrict, &stsExpiresAt)
 		if err == nil {
 			if time.Now().After(stsExpiresAt) {
 				a.logger.Debug("expired STS token", zap.String("access_key", accessKey[:min(6, len(accessKey))]+"..."))
-				return "", nil, fmt.Errorf("expired STS token")
+				return nil, fmt.Errorf("expired STS token")
 			}
 			scope := &KeyScope{
 				BucketScope: []string(stsBucketScope),
@@ -175,58 +239,16 @@ func (a *Auth) validateAccessKey(accessKey string) (string, *KeyScope, error) {
 			a.logger.Debug("authenticated tenant (STS token)",
 				zap.String("tenant_id", tenantID),
 				zap.String("access_key", accessKey[:min(6, len(accessKey))]+"..."))
-			return tenantID, scope, nil
+			return &credential{tenantID, secretKey, scope}, nil
 		}
 		if err != sql.ErrNoRows {
 			a.logger.Error("database error during STS auth", zap.Error(err))
-			return "", nil, fmt.Errorf("auth lookup failed: %w", err)
+			return nil, fmt.Errorf("auth lookup failed: %w", err)
 		}
 	}
 
 	a.logger.Debug("invalid access key", zap.String("access_key", accessKey))
-	return "", nil, fmt.Errorf("invalid access key")
-}
-
-// parseAuthHeader parses AWS Signature v4 authorization header
-func (a *Auth) parseAuthHeader(authHeader string) (accessKey string, signedHeaders string, signature string, err error) {
-	parts := strings.Split(authHeader, ", ")
-	if len(parts) != 3 {
-		return "", "", "", fmt.Errorf("invalid authorization header format")
-	}
-
-	// Extract Credential
-	credPart := strings.TrimPrefix(parts[0], "AWS4-HMAC-SHA256 Credential=")
-	credParts := strings.Split(credPart, "/")
-	if len(credParts) < 1 {
-		return "", "", "", fmt.Errorf("invalid credential format")
-	}
-	accessKey = credParts[0]
-
-	// Extract SignedHeaders
-	signedHeaders = strings.TrimPrefix(parts[1], "SignedHeaders=")
-
-	// Extract Signature
-	signature = strings.TrimPrefix(parts[2], "Signature=")
-
-	return accessKey, signedHeaders, signature, nil
-}
-
-// getSecretKey retrieves the secret key for an access key (for future signature validation)
-func (a *Auth) getSecretKey(accessKey string) (secretKey, tenantID string, err error) {
-	if a.db == nil {
-		return "", "", fmt.Errorf("database not initialized")
-	}
-
-	query := `SELECT secret_key, id FROM tenants WHERE access_key = $1`
-	err = a.db.QueryRow(query, accessKey).Scan(&secretKey, &tenantID)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return "", "", fmt.Errorf("invalid access key")
-		}
-		return "", "", fmt.Errorf("database error: %w", err)
-	}
-
-	return secretKey, tenantID, nil
+	return nil, fmt.Errorf("invalid access key")
 }
 
 // validateTimestamp checks if the request timestamp is within acceptable range
@@ -243,99 +265,6 @@ func (a *Auth) validateTimestamp(amzDate string) error {
 	}
 
 	return nil
-}
-
-// calculateSignature calculates AWS Signature v4 (for future full validation)
-func (a *Auth) calculateSignature(r *http.Request, accessKey, secretKey, signedHeaders, amzDate string) (string, error) {
-	// Create canonical request
-	canonicalRequest, payloadHash := a.createCanonicalRequest(r, signedHeaders)
-
-	// Create string to sign
-	date := amzDate[:8]
-	region := "us-east-1"
-	scope := fmt.Sprintf("%s/%s/%s/%s", date, region, serviceName, aws4Request)
-	stringToSign := a.createStringToSign(amzDate, scope, canonicalRequest)
-
-	// Derive signing key
-	signingKey := a.deriveSigningKey(secretKey, date, region, serviceName)
-
-	// Calculate signature
-	signature := hex.EncodeToString(hmacSHA256(signingKey, []byte(stringToSign)))
-
-	_ = payloadHash
-
-	return signature, nil
-}
-
-func (a *Auth) createCanonicalRequest(r *http.Request, signedHeaders string) (string, string) {
-	payloadHash := r.Header.Get("X-Amz-Content-SHA256")
-	if payloadHash == "" {
-		payloadHash = "UNSIGNED-PAYLOAD"
-	}
-
-	headers := strings.Split(signedHeaders, ";")
-	canonicalHeaders, headerValues := a.createCanonicalHeaders(r, headers)
-
-	canonicalQueryString := a.createCanonicalQueryString(r.URL.Query())
-
-	canonicalRequest := strings.Join([]string{
-		r.Method,
-		r.URL.Path,
-		canonicalQueryString,
-		canonicalHeaders,
-		signedHeaders,
-		payloadHash,
-	}, "\n")
-
-	return canonicalRequest, headerValues
-}
-
-func (a *Auth) createCanonicalQueryString(values url.Values) string {
-	var keys []string
-	for k := range values {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	var pairs []string
-	for _, k := range keys {
-		for _, v := range values[k] {
-			pairs = append(pairs, fmt.Sprintf("%s=%s",
-				url.QueryEscape(k),
-				url.QueryEscape(v)))
-		}
-	}
-
-	return strings.Join(pairs, "&")
-}
-
-func (a *Auth) createCanonicalHeaders(r *http.Request, signedHeaders []string) (string, string) {
-	headers := make(map[string][]string)
-
-	for _, h := range signedHeaders {
-		key := strings.ToLower(h)
-		if key == "host" {
-			headers[key] = []string{r.Host}
-		} else {
-			headers[key] = r.Header[http.CanonicalHeaderKey(h)]
-		}
-	}
-
-	var keys []string
-	for k := range headers {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	var canonical []string
-	var values []string
-	for _, k := range keys {
-		vals := headers[k]
-		canonical = append(canonical, fmt.Sprintf("%s:%s", k, strings.Join(vals, ",")))
-		values = append(values, strings.Join(vals, ","))
-	}
-
-	return strings.Join(canonical, "\n") + "\n", strings.Join(values, ";")
 }
 
 func (a *Auth) createStringToSign(amzDate, scope, canonicalRequest string) string {

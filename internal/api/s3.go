@@ -4,6 +4,7 @@ package api
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -275,8 +276,15 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 					zap.String("path", r.URL.Path))
 
 				errCode := ErrAccessDenied
-				if strings.Contains(err.Error(), "invalid authorization format") ||
-					strings.Contains(err.Error(), "parse") {
+				switch {
+				case errors.Is(err, auth.ErrSignatureMismatch):
+					errCode = ErrSignatureDoesNotMatch
+				case errors.Is(err, auth.ErrRequestTimeSkewed):
+					errCode = ErrRequestTimeTooSkewed
+				case errors.Is(err, auth.ErrInvalidContentSHA256):
+					errCode = ErrInvalidArgument
+				case strings.Contains(err.Error(), "invalid authorization format"),
+					strings.Contains(err.Error(), "parse"):
 					errCode = ErrSignatureDoesNotMatch
 				}
 				reqID := generateRequestID()

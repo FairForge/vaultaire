@@ -616,7 +616,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		plaintext, readErr := io.ReadAll(hashingBody)
 		if readErr != nil {
 			a.logger.Error("failed to read plaintext for SSE-C encryption", zap.Error(readErr))
-			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			WriteS3Error(w, bodyReadErrorCode(readErr), r.URL.Path, generateRequestID())
 			return
 		}
 
@@ -649,7 +649,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 			plaintext, readErr := io.ReadAll(hashingBody)
 			if readErr != nil {
 				a.logger.Error("failed to read plaintext for encryption", zap.Error(readErr))
-				WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+				WriteS3Error(w, bodyReadErrorCode(readErr), r.URL.Path, generateRequestID())
 				return
 			}
 
@@ -702,7 +702,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 			if errors.Is(chunkErr, engine.ErrAllBackendsUnavailable) {
 				WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
 			} else {
-				WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+				WriteS3Error(w, bodyReadErrorCode(chunkErr), r.URL.Path, generateRequestID())
 			}
 			return
 		}
@@ -729,7 +729,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 					a.logger.Error("region driver put failed",
 						zap.Error(putErr),
 						zap.String("driver", regionDriver))
-					WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+					WriteS3Error(w, bodyReadErrorCode(putErr), r.URL.Path, generateRequestID())
 					return
 				}
 				backendName = regionDriver
@@ -756,7 +756,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 				zap.Error(err),
 				zap.String("container", container),
 				zap.String("artifact", artifact))
-			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			WriteS3Error(w, bodyReadErrorCode(err), r.URL.Path, generateRequestID())
 		}
 		return
 	}
