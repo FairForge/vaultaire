@@ -47,28 +47,24 @@ type FastCDCChunker struct {
 	pol     resticchunker.Pol
 }
 
-// NewFastCDCChunker creates a new FastCDC chunker
+// DefaultChunkerPolynomial is THE chunking polynomial, fixed forever.
+//
+// PERMANENT — NEVER CHANGE THIS VALUE. Chunk boundaries (and therefore every
+// chunk hash in global_content_index and every manifest in tenant_chunk_refs)
+// are defined by this polynomial. Changing it means newly uploaded content
+// chunks at different boundaries: nothing would ever dedup against existing
+// chunks again, and any code path that re-chunks to locate data would fail to
+// find it — every stored chunk is effectively orphaned.
+//
+// Irreducible, degree 53 (generated once via restic/chunker.RandomPolynomial
+// for WP-7; pinned by TestFastCDCChunker_PermanentPolynomial).
+const DefaultChunkerPolynomial = 0x2ADD89E3B790BB
+
+// NewFastCDCChunker creates a new FastCDC chunker using the permanent
+// DefaultChunkerPolynomial, so chunk boundaries are deterministic across
+// instances, restarts and deploys — the precondition for dedup to ever hit.
 func NewFastCDCChunker(minSize, avgSize, maxSize int) (*FastCDCChunker, error) {
-	if minSize <= 0 || avgSize <= 0 || maxSize <= 0 {
-		return nil, fmt.Errorf("chunk sizes must be positive")
-	}
-	if minSize > avgSize || avgSize > maxSize {
-		return nil, fmt.Errorf("chunk sizes must be: min <= avg <= max")
-	}
-
-	// Use a fixed polynomial for deterministic chunking
-	// This ensures the same content always produces the same chunks
-	pol, err := resticchunker.RandomPolynomial()
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate polynomial: %w", err)
-	}
-
-	return &FastCDCChunker{
-		minSize: minSize,
-		avgSize: avgSize,
-		maxSize: maxSize,
-		pol:     pol,
-	}, nil
+	return NewFastCDCChunkerWithPol(minSize, avgSize, maxSize, DefaultChunkerPolynomial)
 }
 
 // NewFastCDCChunkerWithPol creates a chunker with a specific polynomial

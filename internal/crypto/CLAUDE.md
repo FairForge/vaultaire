@@ -64,6 +64,12 @@ Encryption, key management, and post-quantum cryptography for Vaultaire.
 
 **Constraints**: chunking is mutually exclusive with SSE-C (customer keys). SSE-S3 objects >256 MiB now route through per-chunk convergent encryption (Phase 10) when `chunkEncSvc` is available. Cross-tenant dedup of encrypted chunks is not supported — same-tenant dedup works via convergent determinism.
 
+**Deterministic chunking (WP-7)**: `NewFastCDCChunker` uses a single fixed polynomial, `DefaultChunkerPolynomial` (`0x2ADD89E3B790BB`). This value is **PERMANENT** — changing it re-defines every chunk boundary, so nothing would dedup against existing chunks and re-chunking to locate data would fail (every stored chunk orphaned). Pinned by `TestFastCDCChunker_PermanentPolynomial`. Before WP-7 each chunker drew a fresh `RandomPolynomial`, so identical content never produced matching chunk hashes and dedup could never hit.
+
+**Tenant-scoped encrypted dedup (WP-7)**: the GCI is partitioned by a `dedup_scope`. Unencrypted chunks use `crypto.GlobalDedupScope` (`"_global"`) — shared across tenants. Encrypted chunks use the **tenant ID** as the scope, and are stored under `_chunks/{tenantID}/{hash}`; their `tenant_chunk_refs.dedup_scope` records this so GET/DELETE/GC resolve the right row. This is why deterministic chunking is safe: identical plaintext from two tenants yields identical plaintext hashes but distinct scoped GCI rows, each encrypted with that tenant's convergent key — so tenant B never receives tenant A's undecryptable ciphertext. `LookupChunk`/`IncrementRef`/`DecrementRef`/`LookupChunks` all take a scope argument; `GCIEntry`/`TenantChunkRef` carry `DedupScope`.
+
+**SSE-S3 ↔ chunk-encryption mutual exclusion (WP-7)**: whole-object SSE-S3 (`sseService`) is skipped when an object will take the chunked per-chunk-encryption path (`chunkEncSvc` set, size > chunk threshold, UUID tenant). Otherwise the object would be encrypted twice (SSE-S3 whole-object, then per-chunk) and GET — which only peels the per-chunk layer — would return SSE ciphertext. SSE-S3 is also non-deterministic (random ML-KEM ciphertext + nonce), which would defeat chunk-dedup determinism. Guarded by `TestChunkedEncryption_SkipsWholeObjectSSE`.
+
 **Tables**: `global_content_index`, `tenant_chunk_refs`, `object_metadata` (migration 051). `object_head_cache.is_chunked` flag.
 
 ## SSE-C Architecture (Phase 5.14.8)

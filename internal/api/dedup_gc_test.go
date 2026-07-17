@@ -139,10 +139,12 @@ func TestDedupGC_ReconcilesOrphan(t *testing.T) {
 	require.NoError(t, gcErr)
 	assert.Greater(t, result.Reconciled, 0, "should reconcile drifted ref counts")
 
-	// Verify ref counts now match actual refs.
+	// Verify ref counts now match actual refs, counted within each dedup scope
+	// (ref counting is per (dedup_scope, plaintext_hash) since WP-7).
 	rows, err := f.db.Query(`
 		SELECT g.plaintext_hash, g.ref_count,
-		       (SELECT COUNT(*) FROM tenant_chunk_refs r WHERE r.plaintext_hash = g.plaintext_hash)
+		       (SELECT COUNT(*) FROM tenant_chunk_refs r
+		        WHERE r.dedup_scope = g.dedup_scope AND r.plaintext_hash = g.plaintext_hash)
 		FROM global_content_index g`)
 	require.NoError(t, err)
 	defer func() { _ = rows.Close() }()
