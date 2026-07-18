@@ -412,10 +412,13 @@ func (g *GlobalContentIndex) DeleteObjectChunks(ctx context.Context, tenantID st
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Get all chunks (scope + hash) for this object.
+	// Get all chunks (scope + hash) for this object. FOR UPDATE for the same
+	// reason as ReplaceObjectManifestTx: a delete racing an overwrite must not
+	// both release the same manifest's refs.
 	rows, err := tx.QueryContext(ctx, `
 		SELECT dedup_scope, plaintext_hash FROM tenant_chunk_refs
 		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = $3
+		FOR UPDATE
 	`, tenantID, bucket, key)
 	if err != nil {
 		return fmt.Errorf("failed to get chunk hashes: %w", err)
@@ -480,10 +483,31 @@ func (g *GlobalContentIndex) ReplaceObjectManifest(ctx context.Context, tenantID
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Capture the previous version's chunks (scope + hash) so we can release them.
+	if err := g.ReplaceObjectManifestTx(ctx, tx, tenantID, bucket, key, newRefs, meta); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit manifest swap: %w", err)
+	}
+	return nil
+}
+
+// ReplaceObjectManifestTx is ReplaceObjectManifest running inside a
+// caller-owned transaction, so the manifest swap can commit atomically with
+// the caller's other writes (the PUT path pairs it with the head-cache
+// upsert — committing the swap alone and then failing the upsert destroyed
+// the old manifest while the head cache still advertised the old object).
+// The caller commits; on error the caller must roll back.
+func (g *GlobalContentIndex) ReplaceObjectManifestTx(ctx context.Context, tx *sql.Tx, tenantID string, bucket, key string, newRefs []TenantChunkRef, meta *ObjectMeta) error {
+	// Capture the previous version's chunks (scope + hash) so we can release
+	// them. FOR UPDATE: two concurrent overwrites of one key otherwise both
+	// snapshot the same old manifest and both decrement — the loser deletes
+	// zero rows but still releases refs, driving shared chunks toward
+	// premature sweep (ref_count 0 with live references).
 	rows, err := tx.QueryContext(ctx, `
 		SELECT dedup_scope, plaintext_hash FROM tenant_chunk_refs
 		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = $3
+		FOR UPDATE
 	`, tenantID, bucket, key)
 	if err != nil {
 		return fmt.Errorf("read previous manifest: %w", err)
@@ -562,11 +586,10 @@ func (g *GlobalContentIndex) ReplaceObjectManifest(ctx context.Context, tenantID
 		return fmt.Errorf("save object metadata: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit manifest swap: %w", err)
-	}
-
-	// Released chunks' ref counts changed — drop their cache entries.
+	// Released chunks' ref counts changed — drop their cache entries. Done
+	// here (pre-commit) rather than after: a stale cache entry only causes an
+	// extra DB lookup, while skipping invalidation on a committed swap would
+	// leave wrong ref state cached. The caller owns the commit.
 	for _, c := range oldChunks {
 		g.cache.delete(cacheKey(c.scope, c.hash))
 	}

@@ -294,22 +294,25 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		contentType = a.detectContentType(artifact)
 	}
 
-	// Chunked objects are reassembled from their individual chunk storage keys
-	// rather than fetched as a single artifact. On any failure we fall through
-	// to the normal path (which will surface NoSuchKey, since no whole-object
-	// blob exists at this key). The full object is buffered before any response
-	// bytes are written, so fallthrough is always safe.
+	// Chunked objects are reassembled from their individual chunk storage
+	// keys. A failure here must FAIL the request — never fall through to the
+	// plain path: a whole-object blob can exist at this key from before the
+	// object was chunked (or before an overwrite), and falling through served
+	// the previous object's bytes under the current version's ETag/size. The
+	// preflight resolves every chunk before any byte is written, so the 500
+	// is always clean.
 	if cacheHit && cachedIsChunked && a.gci != nil {
 		chunkErr := a.handleChunkedGet(w, r, t, bucket, artifact,
 			cachedSize, cachedETag, cachedContentType, cachedUpdatedAt,
 			cachedMetadata, cachedTags, cachedContentDisposition, cachedBackendName)
-		if chunkErr == nil {
-			return
+		if chunkErr != nil {
+			a.logger.Error("chunked get failed",
+				zap.Error(chunkErr),
+				zap.String("bucket", bucket),
+				zap.String("artifact", artifact))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		}
-		a.logger.Warn("chunked get failed, falling through to normal path",
-			zap.Error(chunkErr),
-			zap.String("bucket", bucket),
-			zap.String("artifact", artifact))
+		return
 	}
 
 	reader, err := a.engine.Get(r.Context(), container, artifact)
@@ -610,8 +613,20 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	if chunkThreshold <= 0 {
 		chunkThreshold = 64 * 1024 * 1024 // 64 MB default
 	}
+	// Versioned buckets keep the plain path: tenant_chunk_refs has no
+	// version_id, so a chunked overwrite destroys the previous version's
+	// manifest while object_versions still advertises it as retrievable —
+	// silent version data loss. Until manifests are version-aware (post-launch
+	// WP), versioning-enabled/suspended buckets store whole objects exactly as
+	// they did before chunking existed. Must match the gate below so SSE-S3
+	// still applies where chunking is skipped.
+	chunkingDisabledByVersioning := false
+	if a.db != nil {
+		vs := getBucketVersioningStatus(r.Context(), a.db, t.ID, bucket)
+		chunkingDisabledByVersioning = vs == "Enabled" || vs == "Suspended"
+	}
 	willChunkEncrypt := a.gci != nil && a.chunkEncSvc != nil &&
-		metadataSize > chunkThreshold
+		metadataSize > chunkThreshold && !chunkingDisabledByVersioning
 
 	if crypto.HasSSECHeaders(r) {
 		if r.Header.Get("x-amz-server-side-encryption") != "" {
@@ -715,7 +730,8 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	// chunking and encryption are no longer mutually exclusive. (chunkThreshold
 	// was computed above, where it also gates SSE-S3 skip.)
 	chunkEncryptionAvailable := a.chunkEncSvc != nil
-	if a.gci != nil && metadataSize > chunkThreshold && (encryptionAlgorithm == "" || chunkEncryptionAvailable) {
+	if a.gci != nil && metadataSize > chunkThreshold && !chunkingDisabledByVersioning &&
+		(encryptionAlgorithm == "" || chunkEncryptionAvailable) {
 		{
 			// WP-C: no uuid.Parse gate — tenant IDs are strings ("tenant-<hex>"
 			// from registration). The old gate silently skipped chunking for
@@ -1087,33 +1103,16 @@ func (a *S3ToEngine) handleChunkedPut(
 			metadataSize, measuredSize, errDecodedLengthMismatch)
 	}
 
-	if physicalSize == 0 {
-		physicalSize = measuredSize
-	}
-	dedupRatio := float32(1.0)
+	// physicalSize stays truthful: 0 means fully deduplicated — this upload
+	// added no new physical bytes. (It was previously forced to measuredSize,
+	// which reported a perfect dedup as "no dedup" and poisoned any COGS math
+	// built on physical_size.) dedup_ratio 0 is the fully-deduped sentinel.
+	dedupRatio := float32(0)
 	if physicalSize > 0 {
 		dedupRatio = float32(measuredSize) / float32(physicalSize)
 	}
 
-	// Atomically install the new manifest and release any previous version's
-	// chunk references (single transaction — no stale refs, no ref leak).
-	if metaErr := a.gci.ReplaceObjectManifest(ctx, tenantID, bucket, artifact, newRefs, &crypto.ObjectMeta{
-		TenantID:     tenantID,
-		BucketName:   bucket,
-		ObjectKey:    artifact,
-		TotalSize:    measuredSize,
-		ChunkCount:   chunkCount,
-		ContentType:  &contentType,
-		LogicalSize:  measuredSize,
-		PhysicalSize: &physicalSize,
-		DedupRatio:   &dedupRatio,
-	}); metaErr != nil {
-		return fmt.Errorf("replace object manifest: %w", metaErr)
-	}
-
 	etag := fmt.Sprintf("%x", hasher.Sum(nil))
-	a.putLogicalBytes = measuredSize
-
 	contentDisposition := sanitizeContentDisposition(r.Header.Get("Content-Disposition"))
 	userMeta := extractS3Metadata(r)
 	_ = validateMetadata(userMeta)
@@ -1124,35 +1123,69 @@ func (a *S3ToEngine) handleChunkedPut(
 		chunkEncAlgo = "AES256-CE"
 	}
 
-	if a.db != nil {
-		// atomicHeadUpsert captures the overwritten row's size (see HandlePut).
-		displaced, dbErr := atomicHeadUpsert(ctx, a.db, t.ID, bucket, artifact, func(tx *sql.Tx) error {
-			_, execErr := tx.ExecContext(ctx, `
-				INSERT INTO object_head_cache
-					(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, is_chunked, updated_at)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE, NOW())
-				ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
-					size_bytes            = EXCLUDED.size_bytes,
-					etag                  = EXCLUDED.etag,
-					content_type          = EXCLUDED.content_type,
-					backend_name          = EXCLUDED.backend_name,
-					metadata              = EXCLUDED.metadata,
-					encryption_algorithm  = EXCLUDED.encryption_algorithm,
-					content_disposition   = EXCLUDED.content_disposition,
-					is_chunked            = EXCLUDED.is_chunked,
-					updated_at            = NOW()
-			`, t.ID, bucket, artifact, measuredSize, etag, contentType, backendName, metaJSON, chunkEncAlgo, contentDisposition)
-			return execErr
-		})
-		a.displacedBytes = displaced
-		if dbErr != nil {
-			// Same contract as the non-chunked path: no head-cache row means
-			// 404-after-200 and unbilled bytes. Chunks + manifest are durable;
-			// the retry re-runs the upsert. Fail the request.
-			a.displacedBytes = 0
-			a.putLogicalBytes = 0
-			return fmt.Errorf("cache chunked object metadata for %s/%s: %w", bucket, artifact, dbErr)
+	if a.db == nil {
+		return fmt.Errorf("chunked path requires a database")
+	}
+
+	// Manifest swap and head-cache upsert commit in ONE transaction. Split
+	// across two, a failed upsert left the old manifest already destroyed
+	// while the head cache still advertised the old ETag/size — split-brain
+	// with no compensating action. atomicHeadUpsert locks the head row first,
+	// so concurrent overwrites of the same key serialize before touching the
+	// manifest (consistent lock order: head row → manifest tables).
+	displaced, dbErr := atomicHeadUpsert(ctx, a.db, t.ID, bucket, artifact, func(tx *sql.Tx) error {
+		if metaErr := a.gci.ReplaceObjectManifestTx(ctx, tx, tenantID, bucket, artifact, newRefs, &crypto.ObjectMeta{
+			TenantID:     tenantID,
+			BucketName:   bucket,
+			ObjectKey:    artifact,
+			TotalSize:    measuredSize,
+			ChunkCount:   chunkCount,
+			ContentType:  &contentType,
+			LogicalSize:  measuredSize,
+			PhysicalSize: &physicalSize,
+			DedupRatio:   &dedupRatio,
+		}); metaErr != nil {
+			return fmt.Errorf("replace object manifest: %w", metaErr)
 		}
+		_, execErr := tx.ExecContext(ctx, `
+			INSERT INTO object_head_cache
+				(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, is_chunked, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE, NOW())
+			ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
+				size_bytes            = EXCLUDED.size_bytes,
+				etag                  = EXCLUDED.etag,
+				content_type          = EXCLUDED.content_type,
+				backend_name          = EXCLUDED.backend_name,
+				metadata              = EXCLUDED.metadata,
+				encryption_algorithm  = EXCLUDED.encryption_algorithm,
+				content_disposition   = EXCLUDED.content_disposition,
+				is_chunked            = EXCLUDED.is_chunked,
+				updated_at            = NOW()
+		`, t.ID, bucket, artifact, measuredSize, etag, contentType, backendName, metaJSON, chunkEncAlgo, contentDisposition)
+		return execErr
+	})
+	a.displacedBytes = displaced
+	if dbErr != nil {
+		// Manifest swap and head upsert rolled back together: the previous
+		// version is fully intact (old manifest, old head row) and the retry
+		// re-runs the whole swap. New chunks stored this request are healed
+		// by dedup GC.
+		a.displacedBytes = 0
+		a.putLogicalBytes = 0
+		return fmt.Errorf("install chunked object %s/%s: %w", bucket, artifact, dbErr)
+	}
+	a.putLogicalBytes = measuredSize
+
+	// A whole-object blob may exist at this key from before the object was
+	// chunked (every pre-WP-C large object, or a plain-path overwrite). It is
+	// now stale — remove it so nothing can ever serve those bytes. Best-effort:
+	// the chunked GET path no longer falls through to the plain path, so a
+	// failed delete costs orphaned disk, not wrong data.
+	if blobErr := a.engine.Delete(ctx, t.NamespaceContainer(bucket), artifact); blobErr != nil &&
+		!strings.Contains(blobErr.Error(), "no such file or directory") &&
+		!strings.Contains(blobErr.Error(), "not found") {
+		a.logger.Warn("stale whole-object blob delete failed after chunked PUT",
+			zap.Error(blobErr), zap.String("bucket", bucket), zap.String("object", artifact))
 	}
 
 	versionID := ""
@@ -1468,7 +1501,9 @@ func (a *S3ToEngine) handleChunkedGet(
 					WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 					return nil
 				}
-				// Unresolved/unavailable before any byte is written — fall through.
+				// Unresolved/unavailable before any byte is written — the
+				// caller turns this into a clean 500 (never a fallthrough
+				// to the plain path, which could hold a stale blob).
 				return ferr
 			}
 			a.logger.Error("chunk failure mid-stream; aborting response",
