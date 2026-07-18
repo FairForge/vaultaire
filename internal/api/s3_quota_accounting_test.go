@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/md5" // #nosec G501 — asserting S3 ETag semantics
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -534,6 +535,66 @@ func TestQuotaAccounting_BatchDeleteChunkedReleasesRefs(t *testing.T) {
 		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = $3`,
 		tenantUUID, "test-bucket", "chunk-batch.bin").Scan(&refs))
 	assert.Equal(t, 0, refs, "batch delete must decrement GCI chunk refs like single delete does")
+}
+
+// UploadPart must decode aws-chunked framing (aws-cli v2 over HTTPS sends
+// STREAMING-UNSIGNED-PAYLOAD-TRAILER parts): storing the raw framed body
+// corrupts the assembled object and bills the framing overhead.
+func TestMultipart_AwsChunkedPartsDecoded(t *testing.T) {
+	f := setupQuotaAccountingFixture(t, 100<<20)
+
+	initReq := httptest.NewRequest("POST", "/test-bucket/framed.bin?uploads", nil)
+	initReq = initReq.WithContext(f.ctx(initReq.Context()))
+	iw := httptest.NewRecorder()
+	f.server.handleInitiateMultipartUpload(iw, initReq, "test-bucket", "framed.bin")
+	require.Equal(t, 200, iw.Code)
+	var initRes InitiateMultipartUploadResult
+	require.NoError(t, xml.Unmarshal(iw.Body.Bytes(), &initRes))
+
+	partData := testBytes(256 << 10)
+	framed := awsChunkedFrame(partData)
+	pReq := httptest.NewRequest("PUT",
+		fmt.Sprintf("/test-bucket/framed.bin?uploadId=%s&partNumber=1", initRes.UploadID),
+		bytes.NewReader(framed))
+	pReq.ContentLength = int64(len(framed))
+	pReq.Header.Set("Content-Encoding", "aws-chunked")
+	pReq.Header.Set("x-amz-decoded-content-length", fmt.Sprintf("%d", len(partData)))
+	pReq = pReq.WithContext(f.ctx(pReq.Context()))
+	pw := httptest.NewRecorder()
+	f.server.handleUploadPart(pw, pReq, "test-bucket", "framed.bin")
+	require.Equal(t, 200, pw.Code)
+
+	// The recorded part must be the DECODED payload, not the wire framing.
+	var partSize int64
+	var partETag string
+	require.NoError(t, f.db.QueryRow(`
+		SELECT size_bytes, etag FROM multipart_parts WHERE upload_id = $1 AND part_number = 1`,
+		initRes.UploadID).Scan(&partSize, &partETag))
+	assert.Equal(t, int64(len(partData)), partSize,
+		"part size must be the decoded payload size, not framed wire bytes")
+	wantETag := fmt.Sprintf("\"%x\"", md5.Sum(partData))
+	assert.Equal(t, wantETag, partETag, "part ETag must hash the decoded payload")
+
+	cReq := httptest.NewRequest("POST",
+		fmt.Sprintf("/test-bucket/framed.bin?uploadId=%s", initRes.UploadID), nil)
+	cReq = cReq.WithContext(f.ctx(cReq.Context()))
+	cw := httptest.NewRecorder()
+	f.server.handleCompleteMultipartUpload(cw, cReq, "test-bucket", "framed.bin")
+	require.Equal(t, 200, cw.Code)
+
+	// The assembled object must round-trip byte-identical to the payload.
+	gReq := httptest.NewRequest("GET", "/test-bucket/framed.bin", nil)
+	gReq = gReq.WithContext(f.ctx(gReq.Context()))
+	gw := httptest.NewRecorder()
+	f.server.handleGetObject(gw, gReq, f.s3Req("test-bucket", "framed.bin"))
+	require.Equal(t, 200, gw.Code)
+	body, err := io.ReadAll(gw.Body)
+	require.NoError(t, err)
+	assert.Equal(t, len(partData), len(body), "assembled object must not contain wire framing")
+	assert.Equal(t, partData, body, "assembled object must round-trip byte-identical")
+
+	assert.Equal(t, int64(len(partData)), f.used(t),
+		"multipart must bill the decoded logical size")
 }
 
 // Copying an encrypted source must be refused (NotImplemented): the copy
