@@ -96,11 +96,9 @@ func TestCrossTenantEncryptedDedup_Isolation(t *testing.T) {
 	// Isolation invariant: identical plaintext under encryption must be stored
 	// as TWO physically distinct chunk sets — one per tenant scope — never one
 	// shared row. (Cross-tenant dedup of encrypted data is deliberately off.)
-	aUUID, _ := uuid.Parse(tenantA.ID)
-	bUUID, _ := uuid.Parse(tenantB.ID)
-	refsA, err := f.adapter.gci.GetObjectChunks(context.Background(), aUUID, "test-bucket", "shared.bin")
+	refsA, err := f.adapter.gci.GetObjectChunks(context.Background(), tenantA.ID, "test-bucket", "shared.bin")
 	require.NoError(t, err)
-	refsB, err := f.adapter.gci.GetObjectChunks(context.Background(), bUUID, "test-bucket", "shared.bin")
+	refsB, err := f.adapter.gci.GetObjectChunks(context.Background(), tenantB.ID, "test-bucket", "shared.bin")
 	require.NoError(t, err)
 	require.NotEmpty(t, refsA)
 	require.Len(t, refsB, len(refsA))

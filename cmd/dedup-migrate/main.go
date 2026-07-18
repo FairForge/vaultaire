@@ -19,7 +19,6 @@ import (
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/tenant"
 
-	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 	"go.uber.org/zap"
 )
@@ -178,11 +177,6 @@ func selectCandidates(ctx context.Context, db *sql.DB, minSize int64, tenantFilt
 }
 
 func migrateObject(ctx context.Context, d *deps, c candidate, dryRun, keepOriginal bool) (*Result, error) {
-	tenantUUID, err := uuid.Parse(c.tenantID)
-	if err != nil {
-		return &Result{Skipped: true, FailReason: "non-UUID tenant"}, nil
-	}
-
 	t := &tenant.Tenant{ID: c.tenantID}
 	container := t.NamespaceContainer(c.bucket)
 
@@ -257,7 +251,7 @@ func migrateObject(ctx context.Context, d *deps, c candidate, dryRun, keepOrigin
 		}
 
 		newRefs = append(newRefs, crypto.TenantChunkRef{
-			TenantID:             tenantUUID,
+			TenantID:             c.tenantID,
 			BucketName:           c.bucket,
 			ObjectKey:            c.key,
 			ChunkIndex:           chunk.Index,
@@ -297,8 +291,8 @@ func migrateObject(ctx context.Context, d *deps, c candidate, dryRun, keepOrigin
 	if physicalNew > 0 {
 		dedupRatio = float32(measuredSize) / float32(physicalNew)
 	}
-	if err := d.gci.ReplaceObjectManifest(ctx, tenantUUID, c.bucket, c.key, newRefs, &crypto.ObjectMeta{
-		TenantID:     tenantUUID,
+	if err := d.gci.ReplaceObjectManifest(ctx, c.tenantID, c.bucket, c.key, newRefs, &crypto.ObjectMeta{
+		TenantID:     c.tenantID,
 		BucketName:   c.bucket,
 		ObjectKey:    c.key,
 		TotalSize:    measuredSize,

@@ -21,7 +21,6 @@ import (
 	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/tenant"
-	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
@@ -611,9 +610,8 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	if chunkThreshold <= 0 {
 		chunkThreshold = 64 * 1024 * 1024 // 64 MB default
 	}
-	_, tenantUUIDErr := uuid.Parse(t.ID)
 	willChunkEncrypt := a.gci != nil && a.chunkEncSvc != nil &&
-		metadataSize > chunkThreshold && tenantUUIDErr == nil
+		metadataSize > chunkThreshold
 
 	if crypto.HasSSECHeaders(r) {
 		if r.Header.Get("x-amz-server-side-encryption") != "" {
@@ -718,8 +716,11 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	// was computed above, where it also gates SSE-S3 skip.)
 	chunkEncryptionAvailable := a.chunkEncSvc != nil
 	if a.gci != nil && metadataSize > chunkThreshold && (encryptionAlgorithm == "" || chunkEncryptionAvailable) {
-		if tenantUUID, parseErr := uuid.Parse(t.ID); parseErr == nil {
-			chunkErr := a.handleChunkedPut(r, w, t, tenantUUID, bucket, artifact, metadataSize, hashingBody, hasher)
+		{
+			// WP-C: no uuid.Parse gate — tenant IDs are strings ("tenant-<hex>"
+			// from registration). The old gate silently skipped chunking for
+			// every real tenant.
+			chunkErr := a.handleChunkedPut(r, w, t, t.ID, bucket, artifact, metadataSize, hashingBody, hasher)
 			if chunkErr == nil {
 				return
 			}
@@ -924,7 +925,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 // error to signal fallback to the normal path.
 func (a *S3ToEngine) handleChunkedPut(
 	r *http.Request, w http.ResponseWriter,
-	t *tenant.Tenant, tenantUUID uuid.UUID,
+	t *tenant.Tenant, tenantID string,
 	bucket, artifact string,
 	metadataSize int64,
 	hashingBody io.Reader,
@@ -1066,7 +1067,7 @@ func (a *S3ToEngine) handleChunkedPut(
 		}
 
 		newRefs = append(newRefs, crypto.TenantChunkRef{
-			TenantID:             tenantUUID,
+			TenantID:             tenantID,
 			BucketName:           bucket,
 			ObjectKey:            artifact,
 			ChunkIndex:           chunk.Index,
@@ -1096,8 +1097,8 @@ func (a *S3ToEngine) handleChunkedPut(
 
 	// Atomically install the new manifest and release any previous version's
 	// chunk references (single transaction — no stale refs, no ref leak).
-	if metaErr := a.gci.ReplaceObjectManifest(ctx, tenantUUID, bucket, artifact, newRefs, &crypto.ObjectMeta{
-		TenantID:     tenantUUID,
+	if metaErr := a.gci.ReplaceObjectManifest(ctx, tenantID, bucket, artifact, newRefs, &crypto.ObjectMeta{
+		TenantID:     tenantID,
 		BucketName:   bucket,
 		ObjectKey:    artifact,
 		TotalSize:    measuredSize,
@@ -1301,14 +1302,9 @@ func (a *S3ToEngine) handleChunkedGet(
 ) error {
 	ctx := r.Context()
 
-	tenantUUID, err := uuid.Parse(t.ID)
-	if err != nil {
-		return fmt.Errorf("parse tenant UUID: %w", err)
-	}
-
 	container := t.NamespaceContainer(bucket)
 
-	refs, err := a.gci.GetObjectChunks(ctx, tenantUUID, bucket, artifact)
+	refs, err := a.gci.GetObjectChunks(ctx, t.ID, bucket, artifact)
 	if err != nil {
 		return fmt.Errorf("get object chunks: %w", err)
 	}
@@ -1638,16 +1634,14 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 	}
 
 	if isChunked && a.gci != nil {
-		if tenantUUID, parseErr := uuid.Parse(t.ID); parseErr == nil {
-			if delErr := a.gci.DeleteObjectChunks(r.Context(), tenantUUID, bucket, object); delErr != nil {
-				a.logger.Error("chunked delete failed",
-					zap.Error(delErr),
-					zap.String("tenant_id", t.ID),
-					zap.String("bucket", bucket),
-					zap.String("object", object))
-				WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-				return
-			}
+		if delErr := a.gci.DeleteObjectChunks(r.Context(), t.ID, bucket, object); delErr != nil {
+			a.logger.Error("chunked delete failed",
+				zap.Error(delErr),
+				zap.String("tenant_id", t.ID),
+				zap.String("bucket", bucket),
+				zap.String("object", object))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
 		}
 	} else {
 		if err := a.engine.Delete(r.Context(), container, object); err != nil {

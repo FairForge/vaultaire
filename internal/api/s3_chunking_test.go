@@ -834,10 +834,10 @@ func TestGCI_IntegrationWithMigration(t *testing.T) {
 		hash).Scan(&marked))
 	assert.True(t, marked)
 
-	// Tenant chunk ref + object metadata
-	tenantUUID := uuid.New()
+	// Tenant chunk ref + object metadata (string tenant IDs since WP-C)
+	tenantID := uuid.New().String()
 	require.NoError(t, gci.AddTenantChunkRef(ctx, &crypto.TenantChunkRef{
-		TenantID:             tenantUUID,
+		TenantID:             tenantID,
 		BucketName:           "test-bucket",
 		ObjectKey:            "test-key",
 		ChunkIndex:           0,
@@ -850,7 +850,7 @@ func TestGCI_IntegrationWithMigration(t *testing.T) {
 	physSize := int64(4096)
 	dedupRatio := float32(1.0)
 	require.NoError(t, gci.SaveObjectMetadata(ctx, &crypto.ObjectMeta{
-		TenantID:     tenantUUID,
+		TenantID:     tenantID,
 		BucketName:   "test-bucket",
 		ObjectKey:    "test-key",
 		TotalSize:    4096,
@@ -861,20 +861,20 @@ func TestGCI_IntegrationWithMigration(t *testing.T) {
 		DedupRatio:   &dedupRatio,
 	}))
 
-	meta, err := gci.GetObjectMetadata(ctx, tenantUUID, "test-bucket", "test-key")
+	meta, err := gci.GetObjectMetadata(ctx, tenantID, "test-bucket", "test-key")
 	require.NoError(t, err)
 	require.NotNil(t, meta)
 	assert.Equal(t, int64(4096), meta.TotalSize)
 
 	// Dedup stats
-	stats, err := gci.GetTenantDedupStats(ctx, tenantUUID)
+	stats, err := gci.GetTenantDedupStats(ctx, tenantID)
 	require.NoError(t, err)
 	assert.Equal(t, int64(4096), stats.BytesLogical)
 
 	// Cleanup
 	t.Cleanup(func() {
-		_, _ = f.db.Exec("DELETE FROM tenant_chunk_refs WHERE tenant_id = $1", tenantUUID)
-		_, _ = f.db.Exec("DELETE FROM object_metadata WHERE tenant_id = $1", tenantUUID)
+		_, _ = f.db.Exec("DELETE FROM tenant_chunk_refs WHERE tenant_id = $1", tenantID)
+		_, _ = f.db.Exec("DELETE FROM object_metadata WHERE tenant_id = $1", tenantID)
 		_, _ = f.db.Exec("DELETE FROM global_content_index WHERE plaintext_hash = $1", hash)
 	})
 }
@@ -1247,7 +1247,7 @@ func TestHandlePut_ChunkedWithEncryption(t *testing.T) {
 	assert.Greater(t, refCount, 0, "all chunk refs should have ciphertext_hash")
 
 	// Verify raw stored data is NOT plaintext
-	refs, err := f.adapter.gci.GetObjectChunks(context.Background(), tenantUUID, "test-bucket", "encrypted-chunked.bin")
+	refs, err := f.adapter.gci.GetObjectChunks(context.Background(), f.tenantID, "test-bucket", "encrypted-chunked.bin")
 	require.NoError(t, err)
 	require.NotEmpty(t, refs)
 

@@ -36,7 +36,7 @@ type GCIEntry struct {
 // TenantChunkRef represents a tenant's reference to a global chunk
 type TenantChunkRef struct {
 	ID                   uuid.UUID `json:"id"`
-	TenantID             uuid.UUID `json:"tenant_id"`
+	TenantID             string    `json:"tenant_id"`
 	BucketName           string    `json:"bucket_name"`
 	ObjectKey            string    `json:"object_key"`
 	ChunkIndex           int       `json:"chunk_index"`
@@ -51,7 +51,7 @@ type TenantChunkRef struct {
 // ObjectMeta represents object-level metadata
 type ObjectMeta struct {
 	ID             uuid.UUID       `json:"id"`
-	TenantID       uuid.UUID       `json:"tenant_id"`
+	TenantID       string          `json:"tenant_id"`
 	BucketName     string          `json:"bucket_name"`
 	ObjectKey      string          `json:"object_key"`
 	TotalSize      int64           `json:"total_size"`
@@ -68,13 +68,13 @@ type ObjectMeta struct {
 
 // DedupStats holds deduplication statistics
 type DedupStats struct {
-	TenantID           *uuid.UUID `json:"tenant_id,omitempty"`
-	ChunksProcessed    int64      `json:"chunks_processed"`
-	ChunksDeduplicated int64      `json:"chunks_deduplicated"`
-	BytesLogical       int64      `json:"bytes_logical"`
-	BytesPhysical      int64      `json:"bytes_physical"`
-	BytesSaved         int64      `json:"bytes_saved"`
-	DedupRatio         float64    `json:"dedup_ratio"`
+	TenantID           *string `json:"tenant_id,omitempty"`
+	ChunksProcessed    int64   `json:"chunks_processed"`
+	ChunksDeduplicated int64   `json:"chunks_deduplicated"`
+	BytesLogical       int64   `json:"bytes_logical"`
+	BytesPhysical      int64   `json:"bytes_physical"`
+	BytesSaved         int64   `json:"bytes_saved"`
+	DedupRatio         float64 `json:"dedup_ratio"`
 }
 
 // ChunkLookupResult represents the result of looking up a chunk
@@ -367,7 +367,7 @@ func (g *GlobalContentIndex) AddTenantChunkRef(ctx context.Context, ref *TenantC
 }
 
 // GetObjectChunks retrieves all chunk references for an object
-func (g *GlobalContentIndex) GetObjectChunks(ctx context.Context, tenantID uuid.UUID, bucket, key string) ([]TenantChunkRef, error) {
+func (g *GlobalContentIndex) GetObjectChunks(ctx context.Context, tenantID string, bucket, key string) ([]TenantChunkRef, error) {
 	rows, err := g.db.QueryContext(ctx, `
 		SELECT id, tenant_id, bucket_name, object_key, chunk_index, chunk_offset,
 		       plaintext_hash, dedup_scope, encryption_key_version, ciphertext_hash, created_at
@@ -405,7 +405,7 @@ func (g *GlobalContentIndex) GetObjectChunks(ctx context.Context, tenantID uuid.
 }
 
 // DeleteObjectChunks removes all chunk references for an object and decrements ref counts
-func (g *GlobalContentIndex) DeleteObjectChunks(ctx context.Context, tenantID uuid.UUID, bucket, key string) error {
+func (g *GlobalContentIndex) DeleteObjectChunks(ctx context.Context, tenantID string, bucket, key string) error {
 	tx, err := g.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
@@ -473,7 +473,7 @@ func (g *GlobalContentIndex) DeleteObjectChunks(ctx context.Context, tenantID uu
 // must already be persisted before calling this. Callers should IncrementRef new
 // chunks BEFORE this call so that a chunk shared between the old and new versions
 // never transiently drops to ref_count 0 (which would mark it for deletion).
-func (g *GlobalContentIndex) ReplaceObjectManifest(ctx context.Context, tenantID uuid.UUID, bucket, key string, newRefs []TenantChunkRef, meta *ObjectMeta) error {
+func (g *GlobalContentIndex) ReplaceObjectManifest(ctx context.Context, tenantID string, bucket, key string, newRefs []TenantChunkRef, meta *ObjectMeta) error {
 	tx, err := g.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin manifest swap: %w", err)
@@ -602,7 +602,7 @@ func (g *GlobalContentIndex) SaveObjectMetadata(ctx context.Context, meta *Objec
 }
 
 // GetObjectMetadata retrieves object metadata
-func (g *GlobalContentIndex) GetObjectMetadata(ctx context.Context, tenantID uuid.UUID, bucket, key string) (*ObjectMeta, error) {
+func (g *GlobalContentIndex) GetObjectMetadata(ctx context.Context, tenantID string, bucket, key string) (*ObjectMeta, error) {
 	var meta ObjectMeta
 	var contentHash, contentType sql.NullString
 	var physicalSize sql.NullInt64
@@ -646,7 +646,7 @@ func (g *GlobalContentIndex) GetObjectMetadata(ctx context.Context, tenantID uui
 }
 
 // GetTenantDedupStats retrieves deduplication statistics for a tenant
-func (g *GlobalContentIndex) GetTenantDedupStats(ctx context.Context, tenantID uuid.UUID) (*DedupStats, error) {
+func (g *GlobalContentIndex) GetTenantDedupStats(ctx context.Context, tenantID string) (*DedupStats, error) {
 	var stats DedupStats
 	var logical, physical int64
 
