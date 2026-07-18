@@ -399,7 +399,7 @@ func TestGCI_TenantChunkRefs(t *testing.T) {
 	gci := NewGlobalContentIndex(db)
 	ctx := context.Background()
 
-	tenantID := uuid.New()
+	tenantID := uuid.New().String()
 	bucket := "test-bucket"
 	objectKey := "path/to/file.txt"
 
@@ -479,7 +479,7 @@ func TestGCI_ObjectMetadata(t *testing.T) {
 	gci := NewGlobalContentIndex(db)
 	ctx := context.Background()
 
-	tenantID := uuid.New()
+	tenantID := uuid.New().String()
 	bucket := "test-bucket"
 	objectKey := "path/to/document.pdf"
 
@@ -537,7 +537,7 @@ func TestGCI_DeleteObjectChunks(t *testing.T) {
 	gci := NewGlobalContentIndex(db)
 	ctx := context.Background()
 
-	tenantID := uuid.New()
+	tenantID := uuid.New().String()
 	bucket := "delete-test-bucket"
 	objectKey := "to-be-deleted.txt"
 

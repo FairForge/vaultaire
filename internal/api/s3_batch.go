@@ -10,7 +10,6 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/tenant"
-	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
@@ -142,10 +141,8 @@ func (s *Server) handleDeleteObjects(w http.ResponseWriter, r *http.Request, req
 		var delErr error
 		chunkedHandled := false
 		if isChunked && s.gci != nil {
-			if tenantUUID, parseErr := uuid.Parse(t.ID); parseErr == nil {
-				delErr = s.gci.DeleteObjectChunks(r.Context(), tenantUUID, bucket, key)
-				chunkedHandled = true
-			}
+			delErr = s.gci.DeleteObjectChunks(r.Context(), t.ID, bucket, key)
+			chunkedHandled = true
 		}
 		if !chunkedHandled {
 			delErr = s.engine.Delete(r.Context(), container, key)

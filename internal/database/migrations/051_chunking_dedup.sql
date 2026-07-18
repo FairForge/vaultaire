@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS global_content_index (
 -- 2. Tenant chunk references — per-tenant chunk manifest
 CREATE TABLE IF NOT EXISTS tenant_chunk_refs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL,
+    tenant_id TEXT NOT NULL,
     bucket_name VARCHAR(255) NOT NULL,
     object_key VARCHAR(1024) NOT NULL,
     chunk_index INTEGER NOT NULL,
@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS tenant_chunk_refs (
 -- 3. Object metadata — object-level pipeline metadata
 CREATE TABLE IF NOT EXISTS object_metadata (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL,
+    tenant_id TEXT NOT NULL,
     bucket_name VARCHAR(255) NOT NULL,
     object_key VARCHAR(1024) NOT NULL,
     total_size BIGINT NOT NULL,
@@ -84,7 +84,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE FUNCTION get_tenant_dedup_ratio(p_tenant_id UUID)
+CREATE OR REPLACE FUNCTION get_tenant_dedup_ratio(p_tenant_id TEXT)
 RETURNS TABLE(logical_bytes BIGINT, physical_bytes BIGINT, ratio REAL) AS $$
 BEGIN
     RETURN QUERY

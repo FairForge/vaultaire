@@ -9,7 +9,6 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/crypto"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
-	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
@@ -104,11 +103,7 @@ func populateTenantDedup(ctx context.Context, db *sql.DB, gci *crypto.GlobalCont
 			logger.Debug("dedup: scan tenant", zap.Error(err))
 			continue
 		}
-		tid, err := uuid.Parse(tidStr)
-		if err != nil {
-			continue
-		}
-		ts, err := gci.GetTenantDedupStats(ctx, tid)
+		ts, err := gci.GetTenantDedupStats(ctx, tidStr)
 		if err != nil {
 			logger.Debug("dedup: tenant stats", zap.String("tenant", tidStr), zap.Error(err))
 			continue

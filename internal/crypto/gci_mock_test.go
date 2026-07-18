@@ -26,7 +26,7 @@ func NewMockGCI() *MockGCI {
 	}
 }
 
-func (m *MockGCI) objectKey(tenantID uuid.UUID, bucket, key string) string {
+func (m *MockGCI) objectKey(tenantID string, bucket, key string) string {
 	return fmt.Sprintf("%s/%s/%s", tenantID, bucket, key)
 }
 
@@ -114,7 +114,7 @@ func (m *MockGCI) AddTenantChunkRef(_ context.Context, ref *TenantChunkRef) erro
 	return nil
 }
 
-func (m *MockGCI) GetObjectChunks(_ context.Context, tenantID uuid.UUID, bucket, objectKey string) ([]TenantChunkRef, error) {
+func (m *MockGCI) GetObjectChunks(_ context.Context, tenantID string, bucket, objectKey string) ([]TenantChunkRef, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -136,7 +136,7 @@ func (m *MockGCI) SaveObjectMetadata(_ context.Context, meta *ObjectMeta) error 
 	return nil
 }
 
-func (m *MockGCI) GetObjectMetadata(_ context.Context, tenantID uuid.UUID, bucket, objectKey string) (*ObjectMeta, error) {
+func (m *MockGCI) GetObjectMetadata(_ context.Context, tenantID string, bucket, objectKey string) (*ObjectMeta, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -281,7 +281,7 @@ func TestMockGCI_TenantChunkRefs(t *testing.T) {
 	gci := NewMockGCI()
 	ctx := context.Background()
 
-	tenantID := uuid.New()
+	tenantID := uuid.New().String()
 	bucket := "test-bucket"
 	objectKey := "file.txt"
 
@@ -312,7 +312,7 @@ func TestMockGCI_ObjectMetadata(t *testing.T) {
 	gci := NewMockGCI()
 	ctx := context.Background()
 
-	tenantID := uuid.New()
+	tenantID := uuid.New().String()
 	physicalSize := int64(800)
 	meta := &ObjectMeta{
 		TenantID:     tenantID,
@@ -352,8 +352,8 @@ func TestMockGCI_DeduplicationScenario(t *testing.T) {
 	ctx := context.Background()
 
 	// Simulate: Two tenants upload the same file
-	tenant1 := uuid.New()
-	tenant2 := uuid.New()
+	tenant1 := uuid.New().String()
+	tenant2 := uuid.New().String()
 
 	// Common chunk hashes (same content)
 	chunks := []struct {
