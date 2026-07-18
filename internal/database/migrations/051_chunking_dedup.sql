@@ -102,14 +102,6 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- 5. Indexes
-CREATE INDEX IF NOT EXISTS idx_tenant_chunk_refs_object
-    ON tenant_chunk_refs (tenant_id, bucket_name, object_key);
-CREATE INDEX IF NOT EXISTS idx_tenant_chunk_refs_hash
-    ON tenant_chunk_refs (plaintext_hash);
-CREATE INDEX IF NOT EXISTS idx_gci_marked_for_deletion
-    ON global_content_index (marked_for_deletion) WHERE marked_for_deletion = TRUE;
-CREATE INDEX IF NOT EXISTS idx_object_metadata_tenant_bucket
-    ON object_metadata (tenant_id, bucket_name);
 
 -- 6. Add is_chunked flag to object_head_cache
 ALTER TABLE object_head_cache ADD COLUMN IF NOT EXISTS is_chunked BOOLEAN NOT NULL DEFAULT FALSE;

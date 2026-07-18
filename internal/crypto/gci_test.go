@@ -58,7 +58,7 @@ func setupTestTables(t *testing.T, db *sql.DB) {
 
 	CREATE TABLE IF NOT EXISTS tenant_chunk_refs (
 		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-		tenant_id UUID NOT NULL,
+		tenant_id TEXT NOT NULL,
 		bucket_name VARCHAR(255) NOT NULL,
 		object_key VARCHAR(1024) NOT NULL,
 		chunk_index INTEGER NOT NULL,
@@ -72,7 +72,7 @@ func setupTestTables(t *testing.T, db *sql.DB) {
 
 	CREATE TABLE IF NOT EXISTS object_metadata (
 		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-		tenant_id UUID NOT NULL,
+		tenant_id TEXT NOT NULL,
 		bucket_name VARCHAR(255) NOT NULL,
 		object_key VARCHAR(1024) NOT NULL,
 		total_size BIGINT NOT NULL,
@@ -122,7 +122,7 @@ func setupTestTables(t *testing.T, db *sql.DB) {
 	END;
 	$$ LANGUAGE plpgsql;
 
-	CREATE OR REPLACE FUNCTION get_tenant_dedup_ratio(p_tenant_id UUID)
+	CREATE OR REPLACE FUNCTION get_tenant_dedup_ratio(p_tenant_id TEXT)
 	RETURNS TABLE(logical_bytes BIGINT, physical_bytes BIGINT, ratio REAL) AS $$
 	BEGIN
 		RETURN QUERY

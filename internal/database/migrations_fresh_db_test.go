@@ -90,6 +90,33 @@ func TestMigrations_FreshDatabaseBootstrap(t *testing.T) {
 		assert.True(t, reg.Valid, "table %s must be created by the migration set", table)
 	}
 
+	// WP-C guards: the chunk tables' tenant_id must be TEXT (registration
+	// mints string IDs). These tables are created by migration 016 — which
+	// sorts before 051, so 051's IF NOT EXISTS never fires — and a UUID here
+	// silently disables chunking for every real tenant (the pre-#339 bug).
+	for _, table := range []string{"tenant_chunk_refs", "object_metadata"} {
+		var dataType string
+		err := fdb.QueryRowContext(ctx, `
+			SELECT data_type FROM information_schema.columns
+			WHERE table_name = $1 AND column_name = 'tenant_id'`, table).Scan(&dataType)
+		require.NoError(t, err)
+		assert.Equal(t, "text", dataType,
+			"%s.tenant_id must be TEXT — UUID silently disables chunking for real tenants", table)
+	}
+
+	// Exactly one get_tenant_dedup_ratio overload, taking TEXT. The UUID
+	// overload being resurrected by an old migration broke the dedup admin
+	// panel on every deploy.
+	var overloads int
+	require.NoError(t, fdb.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM pg_proc WHERE proname = 'get_tenant_dedup_ratio'`).Scan(&overloads))
+	assert.Equal(t, 1, overloads, "get_tenant_dedup_ratio must have exactly one overload")
+	var args string
+	require.NoError(t, fdb.QueryRowContext(ctx, `
+		SELECT pg_get_function_identity_arguments(oid) FROM pg_proc
+		WHERE proname = 'get_tenant_dedup_ratio' LIMIT 1`).Scan(&args))
+	assert.Contains(t, args, "text", "get_tenant_dedup_ratio must take TEXT")
+
 	// Registration — the 4-table persist (users → tenants → api_keys →
 	// tenant_quotas) — must succeed against the migrated schema.
 	svc := auth.NewAuthService(nil, fdb)

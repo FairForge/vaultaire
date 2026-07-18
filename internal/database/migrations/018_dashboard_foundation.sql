@@ -44,7 +44,6 @@ CREATE TABLE IF NOT EXISTS bandwidth_usage_daily (
     UNIQUE (tenant_id, date)
 );
 
-CREATE INDEX IF NOT EXISTS idx_bandwidth_tenant_date ON bandwidth_usage_daily(tenant_id, date);
 
 -- Dashboard sessions: PostgreSQL-backed sessions replace in-memory map
 CREATE TABLE IF NOT EXISTS dashboard_sessions (

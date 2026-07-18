@@ -44,8 +44,9 @@ CREATE INDEX IF NOT EXISTS idx_gci_last_accessed ON global_content_index(last_ac
 CREATE TABLE IF NOT EXISTS tenant_chunk_refs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
-    -- Tenant and object identification
-    tenant_id UUID NOT NULL,
+    -- Tenant and object identification. TEXT, not UUID: registration mints
+    -- string IDs ("tenant-<hex>") — see WP-C (#339) + migration 058.
+    tenant_id TEXT NOT NULL,
     bucket_name VARCHAR(255) NOT NULL,
     object_key VARCHAR(1024) NOT NULL,
 
@@ -68,21 +69,15 @@ CREATE TABLE IF NOT EXISTS tenant_chunk_refs (
     UNIQUE(tenant_id, bucket_name, object_key, chunk_index)
 );
 
--- Index for reconstructing objects (get all chunks for an object)
-CREATE INDEX IF NOT EXISTS idx_tcr_object ON tenant_chunk_refs(tenant_id, bucket_name, object_key, chunk_index);
-
 -- Index for finding all references to a chunk (for ref counting)
 CREATE INDEX IF NOT EXISTS idx_tcr_hash ON tenant_chunk_refs(plaintext_hash);
-
--- Index for tenant cleanup (delete all chunks for a tenant)
-CREATE INDEX IF NOT EXISTS idx_tcr_tenant ON tenant_chunk_refs(tenant_id);
 
 -- Object metadata: stores object-level info (separate from chunks)
 CREATE TABLE IF NOT EXISTS object_metadata (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
-    -- Object identification
-    tenant_id UUID NOT NULL,
+    -- Object identification. TEXT, not UUID — see WP-C (#339) + migration 058.
+    tenant_id TEXT NOT NULL,
     bucket_name VARCHAR(255) NOT NULL,
     object_key VARCHAR(1024) NOT NULL,
 
@@ -107,9 +102,6 @@ CREATE TABLE IF NOT EXISTS object_metadata (
     -- Composite unique constraint
     UNIQUE(tenant_id, bucket_name, object_key)
 );
-
--- Index for listing objects
-CREATE INDEX IF NOT EXISTS idx_om_listing ON object_metadata(tenant_id, bucket_name, object_key);
 
 -- Index for finding large objects (for tiering decisions)
 CREATE INDEX IF NOT EXISTS idx_om_size ON object_metadata(total_size);
@@ -186,7 +178,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Function to get dedup ratio for a tenant
-CREATE OR REPLACE FUNCTION get_tenant_dedup_ratio(p_tenant_id UUID)
+CREATE OR REPLACE FUNCTION get_tenant_dedup_ratio(p_tenant_id TEXT)
 RETURNS TABLE(logical_bytes BIGINT, physical_bytes BIGINT, ratio REAL) AS $$
 BEGIN
     RETURN QUERY
