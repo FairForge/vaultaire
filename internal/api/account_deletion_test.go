@@ -117,6 +117,7 @@ func TestExecuteDeletion_RemovesAllData(t *testing.T) {
 	mock.ExpectExec(`DELETE FROM user_activities WHERE user_id`).WithArgs("user-1").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`DELETE FROM bandwidth_usage_daily WHERE tenant_id`).WithArgs("tenant-1").WillReturnResult(sqlmock.NewResult(0, 30))
 	mock.ExpectExec(`DELETE FROM account_exports WHERE user_id`).WithArgs("user-1").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`DELETE FROM admin_notes WHERE admin_user_id`).WithArgs("user-1").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`DELETE FROM users WHERE id`).WithArgs("user-1").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`DELETE FROM tenants WHERE id`).WithArgs("tenant-1").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()

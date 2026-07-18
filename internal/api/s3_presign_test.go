@@ -373,7 +373,7 @@ func TestPresignedURL_Integration(t *testing.T) {
 	mock.ExpectQuery(`SELECT versioning_status FROM buckets`).
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectBegin()
-	mock.ExpectQuery(`SELECT size_bytes FROM object_head_cache`).
+	mock.ExpectQuery(`SELECT size_bytes, is_chunked FROM object_head_cache`).
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectExec(`INSERT INTO object_head_cache`).
 		WillReturnResult(sqlmock.NewResult(0, 1))

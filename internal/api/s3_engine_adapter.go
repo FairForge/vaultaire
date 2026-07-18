@@ -729,9 +729,16 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	// is set, per-chunk convergent encryption is applied (Phase 10) —
 	// chunking and encryption are no longer mutually exclusive. (chunkThreshold
 	// was computed above, where it also gates SSE-S3 skip.)
-	chunkEncryptionAvailable := a.chunkEncSvc != nil
+	// Only UNENCRYPTED bodies may enter the chunked path. At this point
+	// encryptionAlgorithm != "" means the body is already ciphertext:
+	// SSE-C always (encrypted above with the customer's key — chunking it
+	// would chunk ciphertext, then stamp AES256-CE over the SSE-C marker and
+	// serve raw ciphertext on GET with no key check), or SSE-S3 when the
+	// per-chunk service wasn't available. Per-chunk encryption (AES256-CE)
+	// happens INSIDE handleChunkedPut on plaintext; whole-object SSE-S3 was
+	// deliberately skipped above (willChunkEncrypt) for bodies heading here.
 	if a.gci != nil && metadataSize > chunkThreshold && !chunkingDisabledByVersioning &&
-		(encryptionAlgorithm == "" || chunkEncryptionAvailable) {
+		encryptionAlgorithm == "" {
 		{
 			// WP-C: no uuid.Parse gate — tenant IDs are strings ("tenant-<hex>"
 			// from registration). The old gate silently skipped chunking for
@@ -843,7 +850,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		// atomicHeadUpsert locks the previous row and returns its size in
 		// the same transaction as the upsert, so the overwritten bytes are
 		// captured atomically — a concurrent DELETE cannot double-release.
-		displaced, dbErr := atomicHeadUpsert(r.Context(), a.db, t.ID, bucket, artifact, func(tx *sql.Tx) error {
+		displaced, dbErr := atomicHeadUpsertReleasing(r.Context(), a.db, manifestReleaser(a.gci), t.ID, bucket, artifact, func(tx *sql.Tx) error {
 			_, execErr := tx.ExecContext(r.Context(), `
 				INSERT INTO object_head_cache
 					(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, is_chunked, updated_at)
@@ -976,6 +983,13 @@ func (a *S3ToEngine) handleChunkedPut(
 	encrypting := a.chunkEncSvc != nil
 	dedupScope := crypto.GlobalDedupScope
 	if encrypting {
+		// The tenant ID becomes the dedup-scope partition. Nothing else
+		// validates that a tenant ID can't equal the "_global" sentinel
+		// (registration never mints one, but the property is load-bearing
+		// enough to enforce here rather than assume).
+		if t.ID == crypto.GlobalDedupScope {
+			return fmt.Errorf("tenant ID collides with the global dedup scope sentinel")
+		}
 		dedupScope = t.ID
 	}
 

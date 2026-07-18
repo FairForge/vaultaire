@@ -412,6 +412,18 @@ func (g *GlobalContentIndex) DeleteObjectChunks(ctx context.Context, tenantID st
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if err := g.DeleteObjectChunksTx(ctx, tx, tenantID, bucket, key); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// DeleteObjectChunksTx is DeleteObjectChunks inside a caller-owned
+// transaction — used when releasing a chunked object's manifest must commit
+// atomically with the caller's other writes (e.g. a plain PUT/copy/multipart
+// overwriting a chunked object: flipping is_chunked to FALSE without
+// releasing the manifest leaks the refs forever). The caller commits.
+func (g *GlobalContentIndex) DeleteObjectChunksTx(ctx context.Context, tx *sql.Tx, tenantID string, bucket, key string) error {
 	// Get all chunks (scope + hash) for this object. FOR UPDATE for the same
 	// reason as ReplaceObjectManifestTx: a delete racing an overwrite must not
 	// both release the same manifest's refs.
@@ -463,7 +475,7 @@ func (g *GlobalContentIndex) DeleteObjectChunks(ctx context.Context, tenantID st
 		return fmt.Errorf("failed to delete object metadata: %w", err)
 	}
 
-	return tx.Commit()
+	return nil
 }
 
 // ReplaceObjectManifest atomically swaps an object's chunk manifest. In a single

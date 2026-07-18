@@ -19,17 +19,32 @@
 -- already TEXT). The fresh-DB test asserts the resulting column types, so a
 -- future migration reintroducing UUID here fails CI.
 
+-- Bounded wait: the ALTERs take ACCESS EXCLUSIVE and run while the previous
+-- binary is still serving (deploys migrate before the binary swap). The
+-- tables are empty-to-tiny wherever this conversion actually fires, so the
+-- rewrite is milliseconds — the timeout only guards against queueing behind
+-- a long-running query. On timeout the deploy fails before the swap (safe).
+SET lock_timeout = '5s';
+
+-- Note on values: the UUID column stored canonical lowercase text. Real
+-- tenant IDs ("tenant-<hex>") are already lowercase; UUID-string tenants
+-- were only ever minted via uuid.New().String() (canonical lowercase), so
+-- the switch to exact string comparison changes no existing lookups.
 DO $$
 BEGIN
     IF (SELECT data_type FROM information_schema.columns
-        WHERE table_name = 'tenant_chunk_refs' AND column_name = 'tenant_id') = 'uuid' THEN
+        WHERE table_schema = current_schema()
+          AND table_name = 'tenant_chunk_refs' AND column_name = 'tenant_id') = 'uuid' THEN
         ALTER TABLE tenant_chunk_refs ALTER COLUMN tenant_id TYPE TEXT USING tenant_id::text;
     END IF;
     IF (SELECT data_type FROM information_schema.columns
-        WHERE table_name = 'object_metadata' AND column_name = 'tenant_id') = 'uuid' THEN
+        WHERE table_schema = current_schema()
+          AND table_name = 'object_metadata' AND column_name = 'tenant_id') = 'uuid' THEN
         ALTER TABLE object_metadata ALTER COLUMN tenant_id TYPE TEXT USING tenant_id::text;
     END IF;
 END $$;
+
+RESET lock_timeout;
 
 -- 051 (pre-WP-C) created the UUID overload; 051 now creates the TEXT one.
 -- Drop the stale UUID overload so callers bind unambiguously.
