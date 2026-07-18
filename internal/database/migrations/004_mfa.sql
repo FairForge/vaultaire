@@ -19,5 +19,5 @@ CREATE TABLE IF NOT EXISTS mfa_audit_log (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX idx_mfa_audit_user ON mfa_audit_log(user_id);
-CREATE INDEX idx_mfa_audit_created ON mfa_audit_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_mfa_audit_user ON mfa_audit_log(user_id);
+CREATE INDEX IF NOT EXISTS idx_mfa_audit_created ON mfa_audit_log(created_at);

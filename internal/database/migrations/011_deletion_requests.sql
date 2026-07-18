@@ -43,10 +43,10 @@ CREATE TABLE IF NOT EXISTS deletion_proofs (
 );
 
 -- Indexes for performance
-CREATE INDEX idx_deletion_requests_user ON deletion_requests(user_id, status);
-CREATE INDEX idx_deletion_requests_scheduled ON deletion_requests(scheduled_for) WHERE status = 'pending' AND scheduled_for IS NOT NULL;
-CREATE INDEX idx_deletion_requests_status ON deletion_requests(status, created_at DESC);
-CREATE INDEX idx_deletion_proofs_request ON deletion_proofs(request_id);
+CREATE INDEX IF NOT EXISTS idx_deletion_requests_user ON deletion_requests(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_deletion_requests_scheduled ON deletion_requests(scheduled_for) WHERE status = 'pending' AND scheduled_for IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_deletion_requests_status ON deletion_requests(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_deletion_proofs_request ON deletion_proofs(request_id);
 
 -- Comments
 COMMENT ON TABLE deletion_requests IS 'GDPR Article 17: Right to erasure requests';
