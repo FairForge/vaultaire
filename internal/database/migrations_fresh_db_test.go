@@ -79,20 +79,8 @@ func TestMigrations_FreshDatabaseBootstrap(t *testing.T) {
 	})
 	require.NoError(t, fdb.PingContext(ctx))
 
-	// Apply every migration IN ORDER against the empty database. Each file is
-	// executed as a single batch, so any failing statement fails the file —
-	// the same strictness as `psql -v ON_ERROR_STOP=1` (Runbook 0.6).
-	files, err := filepath.Glob(filepath.Join("migrations", "*.sql"))
-	require.NoError(t, err)
-	require.NotEmpty(t, files, "no migration files found")
-	sort.Strings(files)
-
-	for _, f := range files {
-		content, err := os.ReadFile(f)
-		require.NoError(t, err)
-		_, err = fdb.ExecContext(ctx, string(content))
-		require.NoError(t, err, "migration %s must apply cleanly to an empty database", filepath.Base(f))
-	}
+	// Apply every migration IN ORDER against the empty database.
+	applyAllMigrations(ctx, t, fdb, "to an empty database")
 
 	// Every runtime table must now exist from migrations alone.
 	for _, table := range runtimeTables {
@@ -142,6 +130,61 @@ func TestMigrations_FreshDatabaseBootstrap(t *testing.T) {
 	require.NoError(t, err, "metered-billing SELECT must succeed on a fresh migrations-only database")
 	require.NoError(t, rows.Err())
 	_ = rows.Close()
+}
+
+// applyAllMigrations runs every migration file in sorted order. Each file is
+// executed as a single batch, so any failing statement fails the file — the
+// same strictness as `psql -v ON_ERROR_STOP=1` (Runbook 0.6).
+func applyAllMigrations(ctx context.Context, t *testing.T, db *sql.DB, when string) {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join("migrations", "*.sql"))
+	require.NoError(t, err)
+	require.NotEmpty(t, files, "no migration files found")
+	sort.Strings(files)
+
+	for _, f := range files {
+		content, err := os.ReadFile(f)
+		require.NoError(t, err)
+		_, err = db.ExecContext(ctx, string(content))
+		require.NoError(t, err, "migration %s must apply cleanly %s", filepath.Base(f), when)
+	}
+}
+
+// TestMigrations_Reapply — WP-9 (CR-10): the deploy pipeline re-applies the
+// ENTIRE migration set on every deploy. Under an honest runner
+// (ON_ERROR_STOP=1, no `|| true`) every statement must therefore be
+// idempotent — a second full pass against an already-migrated database has to
+// come back clean, or every deploy after WP-9's runner change would fail.
+func TestMigrations_Reapply(t *testing.T) {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		t.Skip("DATABASE_URL not set — skipping integration test")
+	}
+	ctx := context.Background()
+
+	admin, err := sql.Open("postgres", dsn)
+	require.NoError(t, err)
+	defer func() { _ = admin.Close() }()
+	require.NoError(t, admin.PingContext(ctx))
+
+	const dbName = freshDBName + "_reapply"
+	_, err = admin.ExecContext(ctx, "DROP DATABASE IF EXISTS "+dbName)
+	require.NoError(t, err)
+	_, err = admin.ExecContext(ctx, "CREATE DATABASE "+dbName)
+	require.NoError(t, err)
+
+	reapplyDSN, err := replaceDBName(dsn, dbName)
+	require.NoError(t, err)
+	fdb, err := sql.Open("postgres", reapplyDSN)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = fdb.Close()
+		_, _ = admin.Exec("DROP DATABASE IF EXISTS " + dbName + " WITH (FORCE)")
+	})
+	require.NoError(t, fdb.PingContext(ctx))
+
+	applyAllMigrations(ctx, t, fdb, "on the first pass")
+	applyAllMigrations(ctx, t, fdb, "on the second pass (deploys re-run every file — all statements must be idempotent)")
 }
 
 func replaceDBName(dsn, name string) (string, error) {

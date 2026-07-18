@@ -10,8 +10,8 @@ CREATE TABLE IF NOT EXISTS privacy_controls (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_privacy_controls_type ON privacy_controls(type);
-CREATE INDEX idx_privacy_controls_enabled ON privacy_controls(enabled);
+CREATE INDEX IF NOT EXISTS idx_privacy_controls_type ON privacy_controls(type);
+CREATE INDEX IF NOT EXISTS idx_privacy_controls_enabled ON privacy_controls(enabled);
 
 -- Data Minimization Policies
 CREATE TABLE IF NOT EXISTS data_minimization_policies (
@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS data_minimization_policies (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_minimization_purpose ON data_minimization_policies(purpose);
+CREATE INDEX IF NOT EXISTS idx_minimization_purpose ON data_minimization_policies(purpose);
 
 -- Purpose Bindings (enforce purpose limitation)
 CREATE TABLE IF NOT EXISTS purpose_bindings (
@@ -37,8 +37,8 @@ CREATE TABLE IF NOT EXISTS purpose_bindings (
     UNIQUE(data_id, purpose)
 );
 
-CREATE INDEX idx_purpose_bindings_data ON purpose_bindings(data_id);
-CREATE INDEX idx_purpose_bindings_expires ON purpose_bindings(expires_at) WHERE expires_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_purpose_bindings_data ON purpose_bindings(data_id);
+CREATE INDEX IF NOT EXISTS idx_purpose_bindings_expires ON purpose_bindings(expires_at) WHERE expires_at IS NOT NULL;
 
 -- Pseudonymization Mappings (reversible anonymization)
 CREATE TABLE IF NOT EXISTS pseudonym_mappings (
@@ -48,4 +48,4 @@ CREATE TABLE IF NOT EXISTS pseudonym_mappings (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_pseudonym_field ON pseudonym_mappings(field_name);
+CREATE INDEX IF NOT EXISTS idx_pseudonym_field ON pseudonym_mappings(field_name);

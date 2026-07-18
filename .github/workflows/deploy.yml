@@ -67,7 +67,7 @@ jobs:
             # password attempts, silently skipping the binary swap below while
             # the job still exits 0 (observed 2026-06-08..07-09 on prod).
             PGPASSWORD=$(grep DB_PASSWORD /opt/vaultaire/configs/.env | cut -d= -f2) \
-              psql -w -h 127.0.0.1 -U vaultaire -d vaultaire -f "$f" < /dev/null 2>&1 || true
+              psql -w -v ON_ERROR_STOP=1 -h 127.0.0.1 -U vaultaire -d vaultaire -f "$f" < /dev/null
           done
           # Keep the previous binary for one-command rollback.
           cp -f /opt/vaultaire/bin/vaultaire /opt/vaultaire/bin/vaultaire.prev 2>/dev/null || true
@@ -121,7 +121,7 @@ jobs:
             # password attempts, silently skipping the binary swap below while
             # the job still exits 0 (observed 2026-06-08..07-09 on prod).
             PGPASSWORD=$(grep DB_PASSWORD /opt/vaultaire/configs/.env | cut -d= -f2) \
-              psql -w -h 127.0.0.1 -U vaultaire -d vaultaire -f "$f" < /dev/null 2>&1 || true
+              psql -w -v ON_ERROR_STOP=1 -h 127.0.0.1 -U vaultaire -d vaultaire -f "$f" < /dev/null
           done
           # Keep the previous binary for one-command rollback.
           cp -f /opt/vaultaire/bin/vaultaire /opt/vaultaire/bin/vaultaire.prev 2>/dev/null || true

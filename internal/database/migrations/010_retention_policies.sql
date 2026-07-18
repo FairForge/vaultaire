@@ -74,12 +74,12 @@ CREATE TABLE IF NOT EXISTS retention_jobs (
 );
 
 -- Indexes
-CREATE INDEX idx_retention_policy_backend ON retention_policies(backend_id, enabled)
+CREATE INDEX IF NOT EXISTS idx_retention_policy_backend ON retention_policies(backend_id, enabled)
     WHERE backend_id IS NOT NULL AND enabled = true;
-CREATE INDEX idx_retention_policy_scope ON retention_policies(tenant_id, backend_id, container_name);
-CREATE INDEX idx_legal_holds_backend ON legal_holds(backend_id, status)
+CREATE INDEX IF NOT EXISTS idx_retention_policy_scope ON retention_policies(tenant_id, backend_id, container_name);
+CREATE INDEX IF NOT EXISTS idx_legal_holds_backend ON legal_holds(backend_id, status)
     WHERE status = 'active';
-CREATE INDEX idx_retention_jobs_backend ON retention_jobs(backend_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_retention_jobs_backend ON retention_jobs(backend_id, created_at DESC);
 
 -- Comments
 COMMENT ON TABLE retention_policies IS 'Backend-aware retention policies with feature toggles';

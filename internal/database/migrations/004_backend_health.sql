@@ -12,5 +12,5 @@ CREATE TABLE IF NOT EXISTS backend_health (
     created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_backend_health_backend_time ON backend_health(backend_id, timestamp DESC);
-CREATE INDEX idx_backend_health_score ON backend_health(score);
+CREATE INDEX IF NOT EXISTS idx_backend_health_backend_time ON backend_health(backend_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_backend_health_score ON backend_health(score);
