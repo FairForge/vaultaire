@@ -38,7 +38,7 @@ S3-compatible API layer. Translates S3 protocol to engine operations, handles au
 - **webhooks_routes.go** — Webhook CRUD API (`/api/v1/webhooks`): create, list, update, delete, delivery history, test fire
 - **llms_txt.go** — Static `/llms.txt` endpoint (plain-text API summary for LLMs)
 - **account_export.go** — `AccountExporter`: GDPR data export service (CreateExport collects user/tenant/quota/buckets/objects/keys/bandwidth/events into JSON)
-- **account_deletion.go** — `AccountDeletionService`: 30-day grace period deletion (ScheduleDeletion, CancelDeletion, GetDeletionStatus, ExecuteDeletion)
+- **account_deletion.go** — `AccountDeletionService`: 30-day grace period deletion (ScheduleDeletion, CancelDeletion, GetDeletionStatus, ExecuteDeletion). WP-8: ExecuteDeletion covers 23 tables in FK-safe order — webhook_endpoints before events (deliveries cascade via webhook_id), quota_usage_events before tenant_quotas, plus object_versions/locks/locations, tenant_chunk_refs + object_metadata (UUID tenant_id columns — compared via `::text` because tenant IDs are strings), artifacts, sts_tokens, tenant_encryption_keys, user_mfa, oauth_accounts, user_activities. Deliberately NOT deleted: `global_content_index` rows (shared dedup — GC reaps orphans) and `billing_charges` (financial ledger). DB-backed completeness test: account_deletion_db_test.go
 
 ## Error Response Pattern
 

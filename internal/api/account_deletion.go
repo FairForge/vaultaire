@@ -116,17 +116,36 @@ func (s *AccountDeletionService) ExecuteDeletion(ctx context.Context, userID, te
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// Order is FK-safe: children before parents. webhook_endpoints goes
+	// before events so deliveries cascade away via webhook_id before the
+	// events they reference are deleted (works even on schemas that predate
+	// migration 056's ON DELETE CASCADE on webhook_deliveries.event_id).
+	// quota_usage_events goes before tenant_quotas for the same reason.
+	// tenant_chunk_refs/object_metadata have UUID tenant_id columns while
+	// tenant IDs are strings ("tenant-..." or UUID) — compare as text.
 	deletes := []struct {
 		query string
 		arg   string
 	}{
-		{`DELETE FROM object_head_cache WHERE tenant_id = $1`, tenantID},
-		{`DELETE FROM buckets WHERE tenant_id = $1`, tenantID},
-		{`DELETE FROM api_keys WHERE user_id = $1`, userID},
-		{`DELETE FROM tenant_quotas WHERE tenant_id = $1`, tenantID},
-		{`DELETE FROM dashboard_sessions WHERE user_id = $1`, userID},
-		{`DELETE FROM events WHERE tenant_id = $1`, tenantID},
 		{`DELETE FROM webhook_endpoints WHERE tenant_id = $1`, tenantID},
+		{`DELETE FROM events WHERE tenant_id = $1`, tenantID},
+		{`DELETE FROM object_head_cache WHERE tenant_id = $1`, tenantID},
+		{`DELETE FROM object_versions WHERE tenant_id = $1`, tenantID},
+		{`DELETE FROM object_locks WHERE tenant_id = $1`, tenantID},
+		{`DELETE FROM object_locations WHERE tenant_id = $1`, tenantID},
+		{`DELETE FROM tenant_chunk_refs WHERE tenant_id::text = $1`, tenantID},
+		{`DELETE FROM object_metadata WHERE tenant_id::text = $1`, tenantID},
+		{`DELETE FROM artifacts WHERE tenant_id = $1`, tenantID},
+		{`DELETE FROM buckets WHERE tenant_id = $1`, tenantID},
+		{`DELETE FROM sts_tokens WHERE tenant_id = $1`, tenantID},
+		{`DELETE FROM api_keys WHERE user_id = $1`, userID},
+		{`DELETE FROM quota_usage_events WHERE tenant_id = $1`, tenantID},
+		{`DELETE FROM tenant_quotas WHERE tenant_id = $1`, tenantID},
+		{`DELETE FROM tenant_encryption_keys WHERE tenant_id = $1`, tenantID},
+		{`DELETE FROM dashboard_sessions WHERE user_id = $1`, userID},
+		{`DELETE FROM user_mfa WHERE user_id = $1`, userID},
+		{`DELETE FROM oauth_accounts WHERE user_id::text = $1`, userID},
+		{`DELETE FROM user_activities WHERE user_id = $1`, userID},
 		{`DELETE FROM bandwidth_usage_daily WHERE tenant_id = $1`, tenantID},
 		{`DELETE FROM account_exports WHERE user_id = $1`, userID},
 		{`DELETE FROM users WHERE id = $1`, userID},
