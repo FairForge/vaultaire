@@ -846,12 +846,19 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		})
 		a.displacedBytes = displaced
 		if dbErr != nil {
+			// HEAD serves exclusively from object_head_cache — returning 200
+			// without the row means every subsequent HEAD/GET 404s and the
+			// bytes are never billed. The blob is already durable, so the
+			// client's retry is safe and idempotent (upsert). Fail loudly.
 			a.displacedBytes = 0
-			a.logger.Error("failed to cache object metadata",
+			a.putLogicalBytes = 0
+			a.logger.Error("failed to cache object metadata — failing PUT",
 				zap.Error(dbErr),
 				zap.String("tenant_id", t.ID),
 				zap.String("bucket", bucket),
 				zap.String("object", artifact))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
 		}
 	}
 
@@ -1138,12 +1145,12 @@ func (a *S3ToEngine) handleChunkedPut(
 		})
 		a.displacedBytes = displaced
 		if dbErr != nil {
+			// Same contract as the non-chunked path: no head-cache row means
+			// 404-after-200 and unbilled bytes. Chunks + manifest are durable;
+			// the retry re-runs the upsert. Fail the request.
 			a.displacedBytes = 0
-			a.logger.Error("failed to cache chunked object metadata",
-				zap.Error(dbErr),
-				zap.String("tenant_id", t.ID),
-				zap.String("bucket", bucket),
-				zap.String("object", artifact))
+			a.putLogicalBytes = 0
+			return fmt.Errorf("cache chunked object metadata for %s/%s: %w", bucket, artifact, dbErr)
 		}
 	}
 

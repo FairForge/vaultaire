@@ -364,13 +364,20 @@ func TestPresignedURL_Integration(t *testing.T) {
 		WithArgs(testPresignTenantID).
 		WillReturnRows(suspendedRow2)
 
-	// HandlePut internals: object_head_cache lookup, versioning check, cache upsert
+	// HandlePut internals: object_head_cache lookup, versioning check, then the
+	// WP-1 atomicHeadUpsert transaction (Begin → SELECT ... FOR UPDATE →
+	// INSERT → Commit). WP-3 made a failing upsert fail the PUT, so the mock
+	// must model the real transactional flow or the handler correctly 500s.
 	mock.ExpectQuery(`SELECT etag FROM object_head_cache`).
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery(`SELECT versioning_status FROM buckets`).
 		WillReturnError(sql.ErrNoRows)
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT size_bytes FROM object_head_cache`).
+		WillReturnError(sql.ErrNoRows)
 	mock.ExpectExec(`INSERT INTO object_head_cache`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
 
 	// HandleGet internals: versioning check, object_head_cache lookup
 	mock.ExpectQuery(`SELECT versioning_status FROM buckets`).
