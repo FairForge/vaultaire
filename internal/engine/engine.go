@@ -621,19 +621,31 @@ func (r *sizeTrackingReader) Read(p []byte) (n int, err error) {
 	return
 }
 
+// maxCacheableObjectSize caps how much a cachingReader may hold in memory.
+// Objects past this size are streamed through uncached — buffering the whole
+// body "to decide at EOF" held entire multi-GB objects in RAM per concurrent
+// reader (CR-2 OOM).
+const maxCacheableObjectSize = 10 << 20
+
 type cachingReader struct {
 	io.ReadCloser
 	cache  *cache.TieredCache
 	key    string
 	buffer *bytes.Buffer
+	skip   bool // object exceeded maxCacheableObjectSize — stop buffering
 }
 
 func (r *cachingReader) Read(p []byte) (n int, err error) {
 	n, err = r.ReadCloser.Read(p)
-	if n > 0 {
-		r.buffer.Write(p[:n])
+	if n > 0 && !r.skip {
+		if r.buffer.Len()+n > maxCacheableObjectSize {
+			r.skip = true
+			r.buffer = nil // release what was buffered so far
+		} else {
+			r.buffer.Write(p[:n])
+		}
 	}
-	if err == io.EOF && r.cache != nil && r.buffer.Len() < 10<<20 {
+	if err == io.EOF && !r.skip && r.cache != nil {
 		_ = r.cache.Set(r.key, r.buffer.Bytes())
 	}
 	return
