@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/crypto"
 	"go.uber.org/zap"
 )
 
@@ -108,6 +109,33 @@ func (a *S3ToEngine) releaseQuotaForDelete(r *http.Request, tenantID string, siz
 // the FOR UPDATE scan finds no visible tuple and reports no previous size.
 func atomicHeadUpsert(ctx context.Context, db *sql.DB, tenantID, bucket, key string,
 	upsert func(tx *sql.Tx) error) (int64, error) {
+	return atomicHeadUpsertReleasing(ctx, db, nil, tenantID, bucket, key, upsert)
+}
+
+// chunkManifestReleaser is the slice of GlobalContentIndex the head-upsert
+// path needs; an interface so quota_accounting stays mock-testable.
+type chunkManifestReleaser interface {
+	DeleteObjectChunksTx(ctx context.Context, tx *sql.Tx, tenantID, bucket, key string) error
+}
+
+// manifestReleaser adapts a possibly-nil *crypto.GlobalContentIndex to the
+// interface without producing a typed-nil (which would panic on call).
+func manifestReleaser(g *crypto.GlobalContentIndex) chunkManifestReleaser {
+	if g == nil {
+		return nil
+	}
+	return g
+}
+
+// atomicHeadUpsertReleasing is atomicHeadUpsert for writers that store a
+// NON-chunked row: when the displaced row was a chunked object, its manifest
+// is released in the same transaction. Without this, a plain PUT / copy /
+// multipart-complete overwriting a chunked object flips (or worse, fails to
+// flip) is_chunked while the old tenant_chunk_refs and their GCI refcounts
+// leak forever — and a row left is_chunked=TRUE over a plain blob makes GET
+// serve the OLD object's bytes from the stale manifest.
+func atomicHeadUpsertReleasing(ctx context.Context, db *sql.DB, gci chunkManifestReleaser,
+	tenantID, bucket, key string, upsert func(tx *sql.Tx) error) (int64, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("begin head-cache upsert: %w", err)
@@ -115,13 +143,20 @@ func atomicHeadUpsert(ctx context.Context, db *sql.DB, tenantID, bucket, key str
 	defer func() { _ = tx.Rollback() }()
 
 	var displaced int64
+	var displacedChunked bool
 	err = tx.QueryRowContext(ctx, `
-		SELECT size_bytes FROM object_head_cache
+		SELECT size_bytes, is_chunked FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
 		FOR UPDATE`,
-		tenantID, bucket, key).Scan(&displaced)
+		tenantID, bucket, key).Scan(&displaced, &displacedChunked)
 	if err != nil && err != sql.ErrNoRows {
 		return 0, fmt.Errorf("lock head-cache row: %w", err)
+	}
+
+	if displacedChunked && gci != nil {
+		if relErr := gci.DeleteObjectChunksTx(ctx, tx, tenantID, bucket, key); relErr != nil {
+			return 0, fmt.Errorf("release displaced chunk manifest: %w", relErr)
+		}
 	}
 
 	if err := upsert(tx); err != nil {

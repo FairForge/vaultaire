@@ -219,16 +219,20 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 
 		// atomicHeadUpsert captures the overwritten row's size (WP-1).
 		var dbErr error
-		displacedSize, dbErr = atomicHeadUpsert(r.Context(), s.db, t.ID, destBucket, destKey, func(tx *sql.Tx) error {
+		displacedSize, dbErr = atomicHeadUpsertReleasing(r.Context(), s.db, manifestReleaser(s.gci), t.ID, destBucket, destKey, func(tx *sql.Tx) error {
+			// is_chunked=FALSE explicitly: overwriting a chunked destination
+			// must flip the flag (and the releaser above frees its manifest),
+			// or GET keeps reading the stale manifest.
 			_, execErr := tx.ExecContext(r.Context(), `
 				INSERT INTO object_head_cache
-					(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, updated_at)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+					(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, is_chunked, updated_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, $8)
 				ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
 					size_bytes   = EXCLUDED.size_bytes,
 					etag         = EXCLUDED.etag,
 					content_type = EXCLUDED.content_type,
 					backend_name = EXCLUDED.backend_name,
+					is_chunked   = FALSE,
 					updated_at   = EXCLUDED.updated_at
 			`, t.ID, destBucket, destKey, counter.n, etag, contentType, backendName, now)
 			return execErr

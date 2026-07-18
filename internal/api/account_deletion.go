@@ -148,6 +148,11 @@ func (s *AccountDeletionService) ExecuteDeletion(ctx context.Context, userID, te
 		{`DELETE FROM user_activities WHERE user_id = $1`, userID},
 		{`DELETE FROM bandwidth_usage_daily WHERE tenant_id = $1`, tenantID},
 		{`DELETE FROM account_exports WHERE user_id = $1`, userID},
+		// admin_notes.admin_user_id → users(id) has no ON DELETE action, so an
+		// admin who authored support notes could never be deleted (the whole
+		// GDPR transaction rolled back on the FK). The author's identity is
+		// their PII — remove the notes with the account.
+		{`DELETE FROM admin_notes WHERE admin_user_id::text = $1`, userID},
 		{`DELETE FROM users WHERE id = $1`, userID},
 		{`DELETE FROM tenants WHERE id = $1`, tenantID},
 	}

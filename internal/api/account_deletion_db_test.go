@@ -149,6 +149,11 @@ func TestExecuteDeletion_RemovesAllTenantData(t *testing.T) {
 	          VALUES ($1, $2, 'login')`, uuid.New().String(), userID)
 	mustExec(`INSERT INTO artifacts (tenant_id, container, name, size)
 	          VALUES ($1, $2, 'wp8/key', 1024)`, tenantID, bucket)
+	// review-D G2: an admin note AUTHORED BY this user — its FK to users has
+	// no ON DELETE action, so before the fix this row made the entire GDPR
+	// deletion roll back.
+	mustExec(`INSERT INTO admin_notes (tenant_id, admin_user_id, note)
+	          VALUES ($1, $2, 'wp8 note')`, tenantID, userID)
 
 	// --- Act ---
 	svc := NewAccountDeletionService(db, zap.NewNop())
@@ -185,6 +190,7 @@ func TestExecuteDeletion_RemovesAllTenantData(t *testing.T) {
 		"user_mfa":        "user_id = $1",
 		"oauth_accounts":  "user_id::text = $1",
 		"user_activities": "user_id = $1",
+		"admin_notes":     "admin_user_id::text = $1",
 	}
 	for table, where := range userScoped {
 		var n int

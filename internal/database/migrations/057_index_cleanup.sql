@@ -7,7 +7,11 @@
 --   idx_ohc_lookup                     = object_head_cache PK
 --   idx_tcr_object / idx_tcr_tenant    = old 016-era tenant_chunk_refs indexes
 --   idx_tenant_chunk_refs_object       = prefix of UNIQUE(tenant_id, bucket_name, object_key, chunk_index)
---   idx_tenant_chunk_refs_hash         = covered by the 054 scoped FK/lookup path
+--   idx_tenant_chunk_refs_hash         = duplicate of 016's idx_tcr_hash on the
+--                                        same column (an FK indexes only the
+--                                        referenced side, never the referencing
+--                                        side — idx_tcr_hash is what keeps hash
+--                                        lookups on tenant_chunk_refs indexed)
 --   idx_om_listing / idx_object_metadata_tenant_bucket
 --                                      = prefix of UNIQUE(tenant_id, bucket_name, object_key)
 --   idx_bandwidth_tenant_date          = duplicate of UNIQUE(tenant_id, date)

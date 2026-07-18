@@ -467,15 +467,18 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 		// atomicHeadUpsert captures the overwritten row's size in the same
 		// transaction (WP-1) — released below only if the upsert succeeded.
 		var dbErr error
-		displacedSize, dbErr = atomicHeadUpsert(r.Context(), s.db, t.ID, bucket, object, func(tx *sql.Tx) error {
+		displacedSize, dbErr = atomicHeadUpsertReleasing(r.Context(), s.db, manifestReleaser(s.gci), t.ID, bucket, object, func(tx *sql.Tx) error {
+			// is_chunked=FALSE explicitly: a multipart object overwriting a
+			// chunked one must flip the flag (releaser frees the manifest).
 			_, execErr := tx.ExecContext(r.Context(), `
 				INSERT INTO object_head_cache
-					(tenant_id, bucket, object_key, size_bytes, etag, content_type, updated_at)
-				VALUES ($1, $2, $3, $4, $5, $6, NOW())
+					(tenant_id, bucket, object_key, size_bytes, etag, content_type, is_chunked, updated_at)
+				VALUES ($1, $2, $3, $4, $5, $6, FALSE, NOW())
 				ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
 					size_bytes   = EXCLUDED.size_bytes,
 					etag         = EXCLUDED.etag,
 					content_type = EXCLUDED.content_type,
+					is_chunked   = FALSE,
 					updated_at   = NOW()
 			`, t.ID, bucket, object, totalSize, etagValue, contentType)
 			return execErr
