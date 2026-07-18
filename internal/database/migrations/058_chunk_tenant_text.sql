@@ -10,9 +10,14 @@
 -- tenants can chunk. UUID values already stored (bench tenants) survive as
 -- their text form.
 --
--- Migration 051 now creates these columns as TEXT on fresh databases; this
--- migration converts pre-existing databases in place. The DO-block guards
--- make re-runs free (no table rewrite when already TEXT).
+-- These tables are FIRST created by migration 016 (which sorts before 051 —
+-- 051's CREATE IF NOT EXISTS has always been a no-op), so 016 and 051 both
+-- carry the TEXT definition now. This migration converts databases whose
+-- tables were created by the pre-fix 016 (UUID) in place, and is therefore
+-- load-bearing for every database created before 2026-07-18 — not a one-time
+-- backfill. The DO-block guards make re-runs free (no table rewrite when
+-- already TEXT). The fresh-DB test asserts the resulting column types, so a
+-- future migration reintroducing UUID here fails CI.
 
 DO $$
 BEGIN
