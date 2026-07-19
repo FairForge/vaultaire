@@ -96,6 +96,9 @@ func TestExecuteDeletion_RemovesAllData(t *testing.T) {
 	// webhook_endpoints before events, quota_usage_events before tenant_quotas,
 	// all object/credential/identity tables covered, users/tenants last.
 	mock.ExpectBegin()
+	// WP-6/F5: GCI ref counts are released set-based before the tenant's
+	// chunk refs are deleted.
+	mock.ExpectExec(`UPDATE global_content_index g`).WithArgs("tenant-1").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`DELETE FROM webhook_endpoints WHERE tenant_id`).WithArgs("tenant-1").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(`DELETE FROM events WHERE tenant_id`).WithArgs("tenant-1").WillReturnResult(sqlmock.NewResult(0, 10))
 	mock.ExpectExec(`DELETE FROM object_head_cache WHERE tenant_id`).WithArgs("tenant-1").WillReturnResult(sqlmock.NewResult(0, 5))

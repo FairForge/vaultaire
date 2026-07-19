@@ -350,8 +350,12 @@ func TestGCI_RefCounting(t *testing.T) {
 	}
 
 	// Increment ref
-	if err := gci.IncrementRef(ctx, GlobalDedupScope, hash); err != nil {
+	rows, err := gci.IncrementRef(ctx, GlobalDedupScope, hash)
+	if err != nil {
 		t.Fatalf("IncrementRef failed: %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("IncrementRef rows = %d, want 1", rows)
 	}
 
 	// Check ref count is 2

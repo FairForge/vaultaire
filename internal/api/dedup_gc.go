@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"go.uber.org/zap"
 )
@@ -18,6 +19,7 @@ import (
 type DedupGCRunner struct {
 	db          *sql.DB
 	eng         *engine.CoreEngine
+	gci         *crypto.GlobalContentIndex
 	logger      *zap.Logger
 	GracePeriod time.Duration
 }
@@ -29,13 +31,18 @@ type DedupGCResult struct {
 	BytesReclaimed int64 `json:"bytes_reclaimed"`
 }
 
-func NewDedupGCRunner(db *sql.DB, eng *engine.CoreEngine, logger *zap.Logger) *DedupGCRunner {
+// NewDedupGCRunner builds the GC runner. gci must be the SAME instance the PUT
+// path dedups through — the sweep invalidates its in-memory cache before
+// deleting rows, and a runner wired to a different (or nil) GCI leaves stale
+// cache entries pointing at deleted chunks (WP-6).
+func NewDedupGCRunner(db *sql.DB, eng *engine.CoreEngine, gci *crypto.GlobalContentIndex, logger *zap.Logger) *DedupGCRunner {
 	if db == nil || eng == nil {
 		return nil
 	}
 	return &DedupGCRunner{
 		db:          db,
 		eng:         eng,
+		gci:         gci,
 		logger:      logger,
 		GracePeriod: 7 * 24 * time.Hour,
 	}
@@ -159,37 +166,93 @@ func (g *DedupGCRunner) sweep(ctx context.Context) (int, int64, error) {
 	var deleted int
 	var reclaimed int64
 	for _, c := range candidates {
-		res, err := g.db.ExecContext(ctx, `
-			DELETE FROM global_content_index
-			WHERE dedup_scope = $1
-			  AND plaintext_hash = $2
-			  AND ref_count = 0
-			  AND marked_for_deletion = TRUE
-		`, c.scope, c.hash)
+		ok, err := g.sweepOne(ctx, c.scope, c.hash, c.backendID, c.key)
 		if err != nil {
-			g.logger.Error("delete gci row",
+			g.logger.Error("sweep chunk",
 				zap.String("hash", c.hash), zap.Error(err))
 			continue
 		}
-		affected, _ := res.RowsAffected()
-		if affected == 0 {
-			continue
+		if ok {
+			deleted++
+			reclaimed += c.size
 		}
-
-		g.eng.HintBackend(chunkContainer, c.key, c.backendID)
-		if err := g.eng.Delete(ctx, chunkContainer, c.key); err != nil {
-			g.logger.Error("delete chunk data (leaked, not corrupt)",
-				zap.String("hash", c.hash),
-				zap.String("key", c.key),
-				zap.Error(err))
-			continue
-		}
-
-		deleted++
-		reclaimed += c.size
 	}
 
 	return deleted, reclaimed, nil
+}
+
+// sweepOne deletes a single candidate's GCI row and its backing blob while
+// holding an advisory lock keyed on (scope, hash) — the same lock the chunked
+// PUT path takes (as pg_advisory_xact_lock) before storing a chunk (WP-6).
+// Without it, the delete-vs-reref race loses data: sweep deletes the row, a
+// concurrent PUT re-inserts it and re-stores the blob, then sweep deletes the
+// blob out from under the live row.
+//
+// A SESSION-level lock on a dedicated connection (not a transaction lock) so
+// the row delete can commit BEFORE the blob delete while the lock is still
+// held: with a single tx, a commit failure after the blob delete would leave a
+// live row pointing at deleted data. Ordering here is row-commit → blob delete
+// → unlock; every failure mode leaks at most a blob, never corrupts a manifest.
+// The connection close releases the lock even on a crash.
+//
+// The cache entry is invalidated before the row delete (a stale entry makes a
+// later PUT dedup-hit a chunk that no longer exists) and again after the blob
+// delete (a concurrent LookupChunk may re-cache the row in the window before
+// the delete commits).
+func (g *DedupGCRunner) sweepOne(ctx context.Context, scope, hash, backendID, key string) (bool, error) {
+	conn, err := g.db.Conn(ctx)
+	if err != nil {
+		return false, fmt.Errorf("acquire sweep conn: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if _, err := conn.ExecContext(ctx,
+		`SELECT pg_advisory_lock(hashtext($1), hashtext($2))`, scope, hash); err != nil {
+		return false, fmt.Errorf("advisory lock: %w", err)
+	}
+	defer func() {
+		_, _ = conn.ExecContext(ctx,
+			`SELECT pg_advisory_unlock(hashtext($1), hashtext($2))`, scope, hash)
+	}()
+
+	if g.gci != nil {
+		g.gci.InvalidateCache(scope, hash)
+	}
+
+	res, err := conn.ExecContext(ctx, `
+		DELETE FROM global_content_index
+		WHERE dedup_scope = $1
+		  AND plaintext_hash = $2
+		  AND ref_count = 0
+		  AND marked_for_deletion = TRUE
+	`, scope, hash)
+	if err != nil {
+		return false, fmt.Errorf("delete gci row: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		// Re-referenced since the candidate scan — nothing to do.
+		return false, nil
+	}
+
+	if g.gci != nil {
+		g.gci.InvalidateCache(scope, hash)
+	}
+
+	// Blob delete happens under the same lock, after the row delete committed:
+	// a concurrent PUT re-storing this chunk blocks on the lock, then finds no
+	// row and stores fresh data. A failed blob delete leaks the blob (same as
+	// before WP-6), never corrupts a live object.
+	g.eng.HintBackend(chunkContainer, key, backendID)
+	if err := g.eng.Delete(ctx, chunkContainer, key); err != nil {
+		g.logger.Error("delete chunk data (leaked, not corrupt)",
+			zap.String("hash", hash),
+			zap.String("key", key),
+			zap.Error(err))
+		return false, nil
+	}
+
+	return true, nil
 }
 
 func (s *Server) handleDedupGCTrigger(w http.ResponseWriter, r *http.Request) {

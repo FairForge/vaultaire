@@ -817,7 +817,9 @@ func TestGCI_IntegrationWithMigration(t *testing.T) {
 	assert.Equal(t, "local", result.Entry.BackendID)
 
 	// Increment + decrement
-	require.NoError(t, gci.IncrementRef(ctx, crypto.GlobalDedupScope, hash))
+	incRows, incErr := gci.IncrementRef(ctx, crypto.GlobalDedupScope, hash)
+	require.NoError(t, incErr)
+	require.Equal(t, int64(1), incRows)
 	newCount, err := gci.DecrementRef(ctx, crypto.GlobalDedupScope, hash)
 	require.NoError(t, err)
 	assert.Equal(t, 1, newCount)

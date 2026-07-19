@@ -993,6 +993,29 @@ func (a *S3ToEngine) handleChunkedPut(
 		dedupScope = t.ID
 	}
 
+	// Every chunk this loop processes takes one GCI reference (fresh insert at
+	// ref_count 1, ON CONFLICT increment, or IncrementRef on a dedup hit). If
+	// the PUT aborts before the manifest install commits, those references are
+	// orphaned — nothing ever releases them, so shared chunks become
+	// unsweepable forever (F10). Compensate on every error path; after a
+	// successful install the manifest owns the references. Decrements run on a
+	// cancellation-immune context: the abort may BE a cancellation.
+	type takenRef struct{ scope, hash string }
+	var takenRefs []takenRef
+	manifestInstalled := false
+	defer func() {
+		if manifestInstalled {
+			return
+		}
+		compCtx := context.WithoutCancel(ctx)
+		for _, ref := range takenRefs {
+			if _, decErr := a.gci.DecrementRef(compCtx, ref.scope, ref.hash); decErr != nil {
+				a.logger.Warn("compensating ref decrement failed after aborted chunked PUT (reconcile will heal)",
+					zap.String("hash", ref.hash), zap.Error(decErr))
+			}
+		}
+	}()
+
 	newRefs := make([]crypto.TenantChunkRef, 0, 16)
 	for result := range chunkCh {
 		if result.Err != nil {
@@ -1016,7 +1039,27 @@ func (a *S3ToEngine) handleChunkedPut(
 		}
 		var ciphertextHash string
 
-		if lookup.IsNewChunk {
+		mustStore := lookup.IsNewChunk
+		if !mustStore {
+			rows, incErr := a.gci.IncrementRef(ctx, dedupScope, chunk.Hash)
+			if incErr != nil {
+				return fmt.Errorf("increment ref %s: %w", chunk.Hash[:16], incErr)
+			}
+			if rows == 0 {
+				// The chunk vanished between lookup and increment — GC swept
+				// it (the lookup was likely served from a stale cache entry).
+				// Treat it as new: re-store the data and re-insert the row.
+				// Proceeding without this installs a manifest pointing at
+				// deleted data (WP-6).
+				a.logger.Warn("dedup hit on vanished chunk — re-storing",
+					zap.String("hash", chunk.Hash[:16]),
+					zap.String("scope", dedupScope))
+				mustStore = true
+				lookup.Entry = nil
+			}
+		}
+
+		if mustStore {
 			storeData := chunk.Data
 			var compressedSize *int64
 			var compressionAlgo *string
@@ -1046,24 +1089,13 @@ func (a *S3ToEngine) handleChunkedPut(
 				encryptionAlgo = &algo
 			}
 
-			storedBytes := int64(len(storeData))
-			chunkOpts := []engine.PutOption{engine.WithContentLength(storedBytes)}
-			bn, putErr := a.engine.Put(ctx, chunkContainer, storageKey, bytes.NewReader(storeData), chunkOpts...)
-			if putErr != nil {
-				return fmt.Errorf("store chunk %s: %w", chunk.Hash[:16], putErr)
-			}
-			if backendName == "chunked" {
-				backendName = bn
-			}
-
 			var entryCiphertextHash *string
 			if ciphertextHash != "" {
 				entryCiphertextHash = &ciphertextHash
 			}
-			if insertErr := a.gci.InsertChunk(ctx, &crypto.GCIEntry{
+			bn, storeErr := a.storeChunkLocked(ctx, dedupScope, storageKey, storeData, &crypto.GCIEntry{
 				DedupScope:      dedupScope,
 				PlaintextHash:   chunk.Hash,
-				BackendID:       bn,
 				StorageKey:      storageKey,
 				SizeBytes:       int64(chunk.Size),
 				CompressedSize:  compressedSize,
@@ -1072,16 +1104,16 @@ func (a *S3ToEngine) handleChunkedPut(
 				EncryptionAlgo:  encryptionAlgo,
 				CiphertextHash:  entryCiphertextHash,
 				RefCount:        1,
-			}); insertErr != nil {
-				return fmt.Errorf("insert chunk index %s: %w", chunk.Hash[:16], insertErr)
+			})
+			if storeErr != nil {
+				return fmt.Errorf("store chunk %s: %w", chunk.Hash[:16], storeErr)
 			}
-			physicalSize += storedBytes
-
-		} else {
-			if incErr := a.gci.IncrementRef(ctx, dedupScope, chunk.Hash); incErr != nil {
-				return fmt.Errorf("increment ref %s: %w", chunk.Hash[:16], incErr)
+			if backendName == "chunked" {
+				backendName = bn
 			}
+			physicalSize += int64(len(storeData))
 		}
+		takenRefs = append(takenRefs, takenRef{scope: dedupScope, hash: chunk.Hash})
 
 		// The ciphertext hash describes the blob that is actually stored, so on
 		// a dedup hit it is copied from the index row — never recomputed. The
@@ -1182,12 +1214,14 @@ func (a *S3ToEngine) handleChunkedPut(
 	if dbErr != nil {
 		// Manifest swap and head upsert rolled back together: the previous
 		// version is fully intact (old manifest, old head row) and the retry
-		// re-runs the whole swap. New chunks stored this request are healed
-		// by dedup GC.
+		// re-runs the whole swap. This request's ref increments are released
+		// by the deferred compensator (F10); chunk blobs whose refs drop to
+		// zero are reclaimed by dedup GC.
 		a.displacedBytes = 0
 		a.putLogicalBytes = 0
 		return fmt.Errorf("install chunked object %s/%s: %w", bucket, artifact, dbErr)
 	}
+	manifestInstalled = true
 	a.putLogicalBytes = measuredSize
 
 	// A whole-object blob may exist at this key from before the object was
@@ -1250,6 +1284,43 @@ func (a *S3ToEngine) handleChunkedPut(
 	})
 
 	return nil
+}
+
+// storeChunkLocked stores a chunk's blob and inserts its GCI row while holding
+// pg_advisory_xact_lock(hashtext(scope), hashtext(hash)) — the same lock the
+// dedup GC sweep takes around its row-delete + blob-delete (WP-6). Without it
+// the delete-vs-reref race interleaves: sweep deletes the row, this path
+// re-stores blob + row, sweep then deletes the blob out from under the live
+// row. The lock serializes the two so the sweep either finishes first (this
+// path stores fresh) or sees the re-inserted row's ref_count and skips.
+// Returns the backend that stored the blob.
+func (a *S3ToEngine) storeChunkLocked(ctx context.Context, scope, storageKey string, storeData []byte, entry *crypto.GCIEntry) (string, error) {
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("begin chunk store tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))`, scope, entry.PlaintextHash); err != nil {
+		return "", fmt.Errorf("advisory lock: %w", err)
+	}
+
+	storedBytes := int64(len(storeData))
+	chunkOpts := []engine.PutOption{engine.WithContentLength(storedBytes)}
+	bn, putErr := a.engine.Put(ctx, chunkContainer, storageKey, bytes.NewReader(storeData), chunkOpts...)
+	if putErr != nil {
+		return "", putErr
+	}
+	entry.BackendID = bn
+
+	if insertErr := a.gci.InsertChunkTx(ctx, tx, entry); insertErr != nil {
+		return "", fmt.Errorf("insert chunk index: %w", insertErr)
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("commit chunk store: %w", err)
+	}
+	return bn, nil
 }
 
 // errChunkIntegrity signals that a fetched chunk's bytes did not hash to its
