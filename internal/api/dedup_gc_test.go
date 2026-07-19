@@ -24,7 +24,7 @@ func setupGCFixture(t *testing.T) (*DedupGCRunner, *adapterTestFixture) {
 	t.Helper()
 	f := setupChunkingFixture(t)
 
-	runner := NewDedupGCRunner(f.db, f.eng, zap.NewNop())
+	runner := NewDedupGCRunner(f.db, f.eng, f.adapter.gci, zap.NewNop())
 	require.NotNil(t, runner)
 	runner.GracePeriod = 0
 
@@ -259,8 +259,8 @@ func TestNewDedupGCRunner_NilGuards(t *testing.T) {
 	logger := zap.NewNop()
 	eng := engine.NewEngine(nil, logger, nil)
 
-	assert.Nil(t, NewDedupGCRunner(nil, eng, logger), "nil db should return nil")
-	assert.Nil(t, NewDedupGCRunner(nil, nil, logger), "nil both should return nil")
+	assert.Nil(t, NewDedupGCRunner(nil, eng, nil, logger), "nil db should return nil")
+	assert.Nil(t, NewDedupGCRunner(nil, nil, nil, logger), "nil both should return nil")
 
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {

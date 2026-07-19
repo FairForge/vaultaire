@@ -240,7 +240,7 @@ func migrateObject(ctx context.Context, d *deps, c candidate, dryRun, keepOrigin
 				}
 				physicalNew += int64(chunk.Size)
 			} else {
-				if incErr := d.gci.IncrementRef(ctx, crypto.GlobalDedupScope, chunk.Hash); incErr != nil {
+				if _, incErr := d.gci.IncrementRef(ctx, crypto.GlobalDedupScope, chunk.Hash); incErr != nil {
 					return nil, fmt.Errorf("increment ref: %w", incErr)
 				}
 			}

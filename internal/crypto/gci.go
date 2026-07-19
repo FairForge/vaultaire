@@ -285,6 +285,19 @@ func (g *GlobalContentIndex) LookupChunks(ctx context.Context, scope string, has
 	return results, rows.Err()
 }
 
+// insertChunkSQL is shared by InsertChunk and InsertChunkTx. On conflict the
+// row already exists (a concurrent writer stored the same chunk first) — take
+// a reference on it instead.
+const insertChunkSQL = `
+	INSERT INTO global_content_index
+	(dedup_scope, plaintext_hash, backend_id, storage_key, size_bytes, compressed_size, compression_algo, encrypted, encryption_algo, ciphertext_hash, ref_count)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+	ON CONFLICT (dedup_scope, plaintext_hash) DO UPDATE SET
+		ref_count = global_content_index.ref_count + 1,
+		marked_for_deletion = FALSE,
+		marked_at = NULL,
+		last_accessed_at = NOW()`
+
 // InsertChunk adds a new chunk to the index. entry.DedupScope defaults to
 // GlobalDedupScope when unset so callers storing unencrypted chunks need not
 // set it explicitly.
@@ -292,14 +305,8 @@ func (g *GlobalContentIndex) InsertChunk(ctx context.Context, entry *GCIEntry) e
 	if entry.DedupScope == "" {
 		entry.DedupScope = GlobalDedupScope
 	}
-	_, err := g.db.ExecContext(ctx, `
-		INSERT INTO global_content_index
-		(dedup_scope, plaintext_hash, backend_id, storage_key, size_bytes, compressed_size, compression_algo, encrypted, encryption_algo, ciphertext_hash, ref_count)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-		ON CONFLICT (dedup_scope, plaintext_hash) DO UPDATE SET
-			ref_count = global_content_index.ref_count + 1,
-			last_accessed_at = NOW()
-	`, entry.DedupScope, entry.PlaintextHash, entry.BackendID, entry.StorageKey, entry.SizeBytes,
+	_, err := g.db.ExecContext(ctx, insertChunkSQL,
+		entry.DedupScope, entry.PlaintextHash, entry.BackendID, entry.StorageKey, entry.SizeBytes,
 		entry.CompressedSize, entry.CompressionAlgo, entry.Encrypted, entry.EncryptionAlgo, entry.CiphertextHash, entry.RefCount)
 
 	if err != nil {
@@ -312,17 +319,70 @@ func (g *GlobalContentIndex) InsertChunk(ctx context.Context, entry *GCIEntry) e
 	return nil
 }
 
-// IncrementRef increments the reference count for a chunk in the given scope.
-func (g *GlobalContentIndex) IncrementRef(ctx context.Context, scope, plaintextHash string) error {
-	_, err := g.db.ExecContext(ctx, `SELECT increment_chunk_ref($1, $2)`, scope, plaintextHash)
+// InsertChunkTx is InsertChunk inside a caller-owned transaction — used by the
+// chunked PUT path so the row insert can share a transaction with the
+// pg_advisory_xact_lock that serializes it against the GC sweep's
+// row-delete + blob-delete (WP-6). The caller commits.
+//
+// The cache entry is invalidated rather than set: the caller may still roll
+// back, and caching an entry for a row that never committed would recreate the
+// exact stale-cache bug WP-6 closes.
+func (g *GlobalContentIndex) InsertChunkTx(ctx context.Context, tx *sql.Tx, entry *GCIEntry) error {
+	if entry.DedupScope == "" {
+		entry.DedupScope = GlobalDedupScope
+	}
+	_, err := tx.ExecContext(ctx, insertChunkSQL,
+		entry.DedupScope, entry.PlaintextHash, entry.BackendID, entry.StorageKey, entry.SizeBytes,
+		entry.CompressedSize, entry.CompressionAlgo, entry.Encrypted, entry.EncryptionAlgo, entry.CiphertextHash, entry.RefCount)
+
 	if err != nil {
-		return fmt.Errorf("failed to increment ref: %w", err)
+		return fmt.Errorf("failed to insert chunk: %w", err)
+	}
+
+	g.cache.delete(cacheKey(entry.DedupScope, entry.PlaintextHash))
+
+	return nil
+}
+
+// IncrementRef increments the reference count for a chunk in the given scope
+// and reports how many rows were updated. Zero rows means the chunk row no
+// longer exists — GC swept it between the caller's lookup and this increment
+// (the lookup may have been served from a stale cache entry). Callers MUST
+// check for 0 and re-store the chunk; proceeding as if the ref was taken
+// installs a manifest that points at deleted data. (WP-6)
+//
+// Runs as a direct UPDATE rather than the increment_chunk_ref() SQL function
+// because the function returns VOID, which hides the rows-affected count.
+func (g *GlobalContentIndex) IncrementRef(ctx context.Context, scope, plaintextHash string) (int64, error) {
+	res, err := g.db.ExecContext(ctx, `
+		UPDATE global_content_index
+		SET ref_count = ref_count + 1,
+		    last_accessed_at = NOW(),
+		    marked_for_deletion = FALSE,
+		    marked_at = NULL
+		WHERE dedup_scope = $1 AND plaintext_hash = $2
+	`, scope, plaintextHash)
+	if err != nil {
+		return 0, fmt.Errorf("failed to increment ref: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("increment ref rows affected: %w", err)
 	}
 
 	// Invalidate cache entry (will be refreshed on next lookup)
 	g.cache.delete(cacheKey(scope, plaintextHash))
 
-	return nil
+	return rows, nil
+}
+
+// InvalidateCache drops the in-memory cache entry for a chunk. The dedup GC
+// sweep calls this before (and after) deleting a GCI row: without it, a stale
+// cache entry keeps reporting the chunk as present, a later PUT dedup-hits it,
+// and the resulting manifest points at data the sweep already deleted. Keyed
+// on BOTH scope and hash — the GCI is partitioned by dedup_scope. (WP-6)
+func (g *GlobalContentIndex) InvalidateCache(scope, plaintextHash string) {
+	g.cache.delete(cacheKey(scope, plaintextHash))
 }
 
 // DecrementRef decrements the reference count for a chunk in the given scope.

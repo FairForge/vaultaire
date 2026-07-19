@@ -121,12 +121,39 @@ func (s *AccountDeletionService) ExecuteDeletion(ctx context.Context, userID, te
 	// events they reference are deleted (works even on schemas that predate
 	// migration 056's ON DELETE CASCADE on webhook_deliveries.event_id).
 	// quota_usage_events goes before tenant_quotas for the same reason.
-	// tenant_chunk_refs/object_metadata have UUID tenant_id columns while
-	// tenant IDs are strings ("tenant-..." or UUID) — compare as text.
+	// tenant_chunk_refs/object_metadata tenant_id columns are TEXT since
+	// migration 058 (WP-C); the ::text casts are no-op-safe either way.
+	//
+	// WP-6/F5: before the tenant's chunk refs are deleted, release their GCI
+	// references set-based — one decrement per ref the tenant held. Without
+	// this, the raw DELETE below leaves ref counts inflated forever: the
+	// deleted tenant's chunks (including its tenant-scoped encrypted chunks,
+	// which remain decryptable because the key derives from
+	// ENCRYPTION_MASTER_KEY + tenant ID, not the deleted key row) are never
+	// marked and never swept. Rows that drop to zero are marked for GC here;
+	// the grace-period sweep reclaims the blobs.
 	deletes := []struct {
 		query string
 		arg   string
 	}{
+		{`WITH refs AS (
+			SELECT dedup_scope, plaintext_hash, COUNT(*) AS cnt
+			FROM tenant_chunk_refs
+			WHERE tenant_id::text = $1
+			GROUP BY dedup_scope, plaintext_hash
+		)
+		UPDATE global_content_index g
+		SET ref_count = GREATEST(g.ref_count - refs.cnt, 0),
+		    marked_for_deletion = CASE
+		        WHEN GREATEST(g.ref_count - refs.cnt, 0) = 0 THEN TRUE
+		        ELSE g.marked_for_deletion END,
+		    marked_at = CASE
+		        WHEN GREATEST(g.ref_count - refs.cnt, 0) = 0 AND NOT g.marked_for_deletion THEN NOW()
+		        WHEN GREATEST(g.ref_count - refs.cnt, 0) > 0 THEN g.marked_at
+		        ELSE g.marked_at END
+		FROM refs
+		WHERE g.dedup_scope = refs.dedup_scope
+		  AND g.plaintext_hash = refs.plaintext_hash`, tenantID},
 		{`DELETE FROM webhook_endpoints WHERE tenant_id = $1`, tenantID},
 		{`DELETE FROM events WHERE tenant_id = $1`, tenantID},
 		{`DELETE FROM object_head_cache WHERE tenant_id = $1`, tenantID},

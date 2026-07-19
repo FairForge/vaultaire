@@ -237,7 +237,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	s.inventoryRunner.StartInventoryJob(context.Background())
 
 	// Dedup GC runner — reconciles ref counts and reclaims orphaned chunks.
-	s.dedupGCRunner = NewDedupGCRunner(s.db, s.engine, logger)
+	s.dedupGCRunner = NewDedupGCRunner(s.db, s.engine, s.gci, logger)
 	s.dedupGCRunner.StartDedupGC(context.Background())
 
 	// Stripe billing service. Only active when STRIPE_SECRET_KEY is set.
