@@ -14,5 +14,16 @@ document.addEventListener('click', function(e) {
             btn.textContent = 'Copied!';
             setTimeout(function() { btn.textContent = 'Copy URL'; }, 1500);
         });
+        return;
+    }
+    // B4: copy a code snippet by element id (onboarding quickstart tabs).
+    var targetId = btn.getAttribute('data-copy-target');
+    if (targetId) {
+        var el = document.getElementById(targetId);
+        if (!el) return;
+        navigator.clipboard.writeText(el.innerText).then(function() {
+            btn.textContent = 'Copied!';
+            setTimeout(function() { btn.textContent = 'Copy'; }, 1500);
+        });
     }
 });
