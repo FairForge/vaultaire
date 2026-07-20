@@ -162,6 +162,38 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 		}
 	}
 
+	// Per-upload in-flight byte cap (WP-10-minimal, H-1): part data sits
+	// unbilled on local disk until complete, so without a cap one upload can
+	// fill the production disk at zero quota cost. Checked twice: against the
+	// DECLARED size here (reject before reading gigabytes we will discard)
+	// and against the MEASURED size after the write (declared sizes are
+	// client-controlled). Sum excludes this part number — re-uploading an
+	// existing part replaces its bytes, it does not add.
+	var existingBytes int64
+	if s.db != nil && s.multipartMaxUploadBytes > 0 {
+		if err := s.db.QueryRowContext(r.Context(), `
+			SELECT COALESCE(SUM(size_bytes), 0) FROM multipart_parts
+			WHERE upload_id = $1 AND part_number <> $2
+		`, uploadID, partNumber).Scan(&existingBytes); err != nil {
+			s.logger.Error("failed to sum in-flight part bytes", zap.Error(err))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+		declared := r.ContentLength
+		if isAWSChunked(r) {
+			if v, perr := strconv.ParseInt(r.Header.Get("x-amz-decoded-content-length"), 10, 64); perr == nil {
+				declared = v
+			}
+		}
+		if declared > 0 && existingBytes+declared > s.multipartMaxUploadBytes {
+			WriteS3ErrorWithContext(w, ErrEntityTooLarge, r.URL.Path, generateRequestID(),
+				WithSuggestion(fmt.Sprintf(
+					"This part would push the upload past the %d-byte in-flight limit. Complete or abort the upload, or use fewer/smaller parts.",
+					s.multipartMaxUploadBytes)))
+			return
+		}
+	}
+
 	// Stream part data to temp file while computing MD5 ETag.
 	// Decode aws-chunked framing first — aws-cli v2 over HTTPS sends parts
 	// as STREAMING-UNSIGNED-PAYLOAD-TRAILER; storing the raw framed body
@@ -189,6 +221,18 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 		_ = os.Remove(pp)
 		s.logger.Error("failed to write part data", zap.Error(err))
 		WriteS3Error(w, bodyReadErrorCode(err), r.URL.Path, generateRequestID())
+		return
+	}
+
+	// Measured-size cap check: the declared pre-check above can be defeated
+	// by lying (or absent) length headers; what actually landed on disk is
+	// authoritative. Remove the file so the rejected bytes don't leak.
+	if s.db != nil && s.multipartMaxUploadBytes > 0 && existingBytes+size > s.multipartMaxUploadBytes {
+		_ = os.Remove(pp)
+		WriteS3ErrorWithContext(w, ErrEntityTooLarge, r.URL.Path, generateRequestID(),
+			WithSuggestion(fmt.Sprintf(
+				"This part pushed the upload past the %d-byte in-flight limit. Complete or abort the upload, or use fewer/smaller parts.",
+				s.multipartMaxUploadBytes)))
 		return
 	}
 

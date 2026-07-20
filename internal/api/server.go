@@ -81,9 +81,14 @@ type Server struct {
 	accessLogTracker *S3AccessLogTracker
 	inventoryRunner  *InventoryRunner
 	dedupGCRunner    *DedupGCRunner
-	emailSender      email.Sender
-	baseURL          string
-	startTime        time.Time
+	multipartReaper  *MultipartReaper
+	// multipartMaxUploadBytes caps a single multipart upload's accumulated
+	// in-flight part bytes (0 = unlimited). Part data lives unbilled on local
+	// disk until complete — without a cap one upload can fill the disk.
+	multipartMaxUploadBytes int64
+	emailSender             email.Sender
+	baseURL                 string
+	startTime               time.Time
 }
 
 type QuotaManager interface {
@@ -239,6 +244,33 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// Dedup GC runner — reconciles ref counts and reclaims orphaned chunks.
 	s.dedupGCRunner = NewDedupGCRunner(s.db, s.engine, s.gci, logger)
 	s.dedupGCRunner.StartDedupGC(context.Background())
+
+	// Multipart reaper + per-upload byte cap (WP-10-minimal): part data sits
+	// unbilled on local disk until complete — the reaper aborts abandoned
+	// uploads and purges terminal rows; the cap bounds any single upload's
+	// in-flight bytes. MULTIPART_MAX_UPLOAD_BYTES=0 disables the cap.
+	s.multipartMaxUploadBytes = 50 << 30 // 50 GiB default
+	if v := os.Getenv("MULTIPART_MAX_UPLOAD_BYTES"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
+			s.multipartMaxUploadBytes = n
+		} else {
+			logger.Warn("invalid MULTIPART_MAX_UPLOAD_BYTES, keeping default", zap.String("value", v))
+		}
+	}
+	s.multipartReaper = NewMultipartReaper(s.db, logger)
+	if s.multipartReaper != nil {
+		if v := os.Getenv("MULTIPART_ABANDON_HOURS"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				s.multipartReaper.AbandonAge = time.Duration(n) * time.Hour
+			}
+		}
+		if v := os.Getenv("MULTIPART_TERMINAL_RETENTION_DAYS"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				s.multipartReaper.TerminalRetention = time.Duration(n) * 24 * time.Hour
+			}
+		}
+		s.multipartReaper.Start(context.Background())
+	}
 
 	// Stripe billing service. Only active when STRIPE_SECRET_KEY is set.
 	if stripeKey := os.Getenv("STRIPE_SECRET_KEY"); stripeKey != "" {
