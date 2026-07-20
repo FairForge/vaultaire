@@ -9,6 +9,7 @@ import (
 	"io"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/cache"
@@ -41,6 +42,10 @@ type CoreEngine struct {
 	// different one. In-memory only; objects written before a restart
 	// fall back to e.primary (safe — they were written there too).
 	objectBackends sync.Map
+
+	// writeFailures counts PUTs that failed on every eligible durable
+	// backend (WP-F fail-loudly). Exposed via GetMetrics for alerting.
+	writeFailures atomic.Int64
 
 	mu     sync.RWMutex
 	config *Config
@@ -351,8 +356,9 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 		}
 	}
 
-	// Build candidate list: target first, then primary, then others.
-	candidates := e.buildCandidateList(targetBackend)
+	// Build candidate list: target first, then primary, then other DURABLE
+	// backends — local is excluded unless targeted or primary (WP-F).
+	candidates := e.buildWriteCandidateList(targetBackend)
 
 	usedBackend, err := e.failover.Execute(ctx, candidates, func(driverName string) error {
 		d, ok := e.drivers[driverName]
@@ -377,6 +383,20 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 	}
 
 	if err != nil {
+		// WP-F fail-loudly: a genuine backend failure becomes a 5xx to the
+		// client (the API layer maps ErrAllBackendsUnavailable to 503 with
+		// Retry-After) — clients retry; data is never silently stranded.
+		// Client-level outcomes (quota, invalid input) keep their identity.
+		if isBackendFailure(err) {
+			e.writeFailures.Add(1)
+			e.logger.Error("durable backend write failed — rejecting request, no local fallback",
+				zap.String("container", container),
+				zap.String("artifact", artifact),
+				zap.String("target_backend", targetBackend),
+				zap.Strings("candidates", candidates),
+				zap.Error(err))
+			err = fmt.Errorf("%w: %w", ErrAllBackendsUnavailable, err)
+		}
 		return "", fmt.Errorf("put %s/%s: %w", container, artifact, err)
 	}
 
@@ -543,9 +563,10 @@ func (e *CoreEngine) HealthCheck(ctx context.Context) error {
 // GetMetrics returns comprehensive metrics
 func (e *CoreEngine) GetMetrics(ctx context.Context) (map[string]interface{}, error) {
 	metrics := map[string]interface{}{
-		"drivers": len(e.drivers),
-		"primary": e.primary,
-		"backup":  e.backup,
+		"drivers":        len(e.drivers),
+		"primary":        e.primary,
+		"backup":         e.backup,
+		"write_failures": e.writeFailures.Load(),
 	}
 	if e.cache != nil {
 		metrics["cache"] = e.cache.GetMetrics()
@@ -672,6 +693,28 @@ func (e *CoreEngine) buildCandidateList(preferred string) []string {
 		add(name)
 	}
 	return candidates
+}
+
+// nonDurableBackends are backends whose writes do not survive loss of the hub
+// machine. WP-F (1.14): they may receive writes only when explicitly targeted
+// (REDUCED_REDUNDANCY) or configured as the primary (STORAGE_MODE=local) —
+// never as a silent failover destination for customer data.
+var nonDurableBackends = map[string]bool{"local": true}
+
+// buildWriteCandidateList is buildCandidateList restricted to backends that
+// are safe write targets. A failing durable backend must surface as a 5xx to
+// the client, not as a silent write to the hub's local disk (which lies about
+// durability, fills the single box, and bills the wrong tier).
+func (e *CoreEngine) buildWriteCandidateList(target string) []string {
+	all := e.buildCandidateList(target)
+	writable := make([]string, 0, len(all))
+	for _, name := range all {
+		if nonDurableBackends[name] && name != target && name != e.primary {
+			continue
+		}
+		writable = append(writable, name)
+	}
+	return writable
 }
 
 // GetDriver returns a named driver if it is registered.

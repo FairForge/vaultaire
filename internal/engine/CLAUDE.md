@@ -10,7 +10,7 @@ Core orchestration layer — connects the API layer to storage drivers. This is 
 
 ## Request Flow
 
-- **Put**: resolve storage class → build candidate list (target, primary, others) → failover.Execute tries in order → record mapping in `objectBackends` sync.Map → invalidate cache → optionally replicate to backup async
+- **Put**: resolve storage class → build WRITE candidate list (`buildWriteCandidateList`: target, primary, other DURABLE backends — WP-F fail-loudly excludes `local` unless it is the target or the configured primary) → failover.Execute tries in order → record mapping in `objectBackends` sync.Map → invalidate cache → optionally replicate to backup async. If every eligible backend fails with a genuine backend failure (`isBackendFailure`), Put wraps the error in `ErrAllBackendsUnavailable` (API layer → 503 + Retry-After), logs at Error level, and bumps the `write_failures` counter (exposed in GetMetrics) — customer data is never silently stranded on the hub's local disk. Client-level outcomes (quota, invalid input) keep their error identity (403/400, not 503).
 - **Get**: check `objectBackends` map for backend name → check tiered cache (L1) → failover.Execute with candidate list → cache result
 - **Delete**: failover.Execute against recorded backend (+ primary fallback) → remove from `objectBackends` → invalidate cache
 - **List**: delegates to primary driver only
