@@ -295,6 +295,15 @@ badge-warning/info/success/default.
 
 Templates: `templates/admin/abuse.html` (list), `templates/admin/abuse_detail.html` (detail).
 
+## Admin Feature Flags (`admin_flags.go`)
+
+Three handlers for the 1.13 feature-flags page:
+- `HandleAdminFlags(tmpl, flagsSvc, logger)` — GET `/admin/flags`: renders `flags.Service.Resolved()` (key, default, global row, effective state, per-tenant overrides) with toggle buttons and a tenant-override form.
+- `HandleAdminFlagSet(flagsSvc, logger)` — POST `/admin/flags/{key}/set`: form fields `enabled` (bool, required) + optional `tenant_id` (empty = global row). `updated_by` = session email. Redirects back to the page.
+- `HandleAdminFlagClear(flagsSvc, logger)` — POST `/admin/flags/{key}/clear`: removes the row for `tenant_id` (empty = global), reverting to global/default.
+
+Routes mount in router.go only when `deps.Flags != nil`. Template: `templates/admin/flags.html`. Flips are write-through — live on the next request.
+
 ## Legacy Handlers
 
 Files like `dashboard.go` etc. are stubs from before Phase 0 with inline terminal-style templates. They are NOT wired into the router. Remaining phases will rewrite them.

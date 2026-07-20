@@ -73,6 +73,10 @@ type AuthService struct {
 	activityTracker *ActivityTracker
 	auditLogger     *AuditLogger
 	signupsEnabled  bool // when false, all account creation is rejected
+	// signupsEnabledFn, when set, overrides signupsEnabled — 1.13 wires the
+	// feature-flag service here so the `signups` flag (env default + DB
+	// override) decides, flippable at runtime with no deploy.
+	signupsEnabledFn func() bool
 }
 
 // ErrSignupsDisabled is returned by CreateUserWithTenant — the single chokepoint
@@ -125,8 +129,19 @@ func NewAuthService(db Database, sqlDB *sql.DB) *AuthService {
 // Existing-user login (password or OAuth) is unaffected.
 func (a *AuthService) SetSignupsEnabled(enabled bool) { a.signupsEnabled = enabled }
 
+// SetSignupsEnabledFunc wires a dynamic source (the feature-flag service) as
+// the authority on signups. Once set it overrides the static bool everywhere:
+// the CreateUserWithTenant gate and the SignupsEnabled read path. Set during
+// server construction, before any request is served.
+func (a *AuthService) SetSignupsEnabledFunc(fn func() bool) { a.signupsEnabledFn = fn }
+
 // SignupsEnabled reports whether public account creation is currently allowed.
-func (a *AuthService) SignupsEnabled() bool { return a.signupsEnabled }
+func (a *AuthService) SignupsEnabled() bool {
+	if a.signupsEnabledFn != nil {
+		return a.signupsEnabledFn()
+	}
+	return a.signupsEnabled
+}
 
 // SetJWTSecret overrides the default JWT signing key.
 // Call this from main.go with the value from the JWT_SECRET env var.
@@ -295,7 +310,7 @@ func (a *AuthService) CreateUser(ctx context.Context, email, password string) (*
 func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password, company string) (*User, *Tenant, *APIKey, error) {
 	// Single chokepoint: when signups are disabled, reject before any work so
 	// the web form, /auth/register API, and OAuth signup are all blocked here.
-	if !a.signupsEnabled {
+	if !a.SignupsEnabled() {
 		return nil, nil, nil, ErrSignupsDisabled
 	}
 

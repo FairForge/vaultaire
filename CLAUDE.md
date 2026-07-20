@@ -71,7 +71,7 @@ The `engine.Driver` interface (in `internal/engine/interface.go`) is the sacred 
 
 Registration persists to **four tables in order**: `users` -> `tenants` -> `api_keys` -> `tenant_quotas`. Missing any causes failures. S3 auth queries `tenants` first (primary key, full access), then falls back to `api_keys` for scoped VLT_ keys, then `sts_tokens` for ASIA-prefixed temporary credentials.
 
-Other critical tables (45 migrations through `045_admin_notes.sql`):
+Other critical tables (59 migrations through `059_feature_flags.sql`):
 - `object_head_cache` — HEAD/GET metadata cache (~1ms), content-type, ETag, metadata JSONB
 - `buckets` — bucket registry with visibility, CORS, cache TTL, metadata JSONB, slug
 - `multipart_uploads`, `multipart_parts` — in-progress multipart state
@@ -82,6 +82,7 @@ Other critical tables (45 migrations through `045_admin_notes.sql`):
 - `stripe_events` — webhook event dedup
 - `dashboard_sessions` — PostgreSQL-backed sessions with IP/user-agent tracking
 - `oauth_accounts` — OAuth provider links (Google, GitHub)
+- `feature_flags` — runtime flags (1.13): global kill-switches + per-tenant overrides, `'*'` = global row; served via `internal/flags` (~15s cache, admin API + dashboard `/admin/flags`)
 
 Migrations are in `internal/database/migrations/`.
 
@@ -154,7 +155,7 @@ GitHub Actions Deploy (`.github/workflows/deploy.yml`):
 | `GITHUB_CLIENT_SECRET` | — | GitHub OAuth App client secret |
 | `VAULTAIRE_BASE_URL` | http://localhost:8000 | Base URL for OAuth callbacks |
 | `JWT_SECRET` | — | **Required** — JWT signing key for API auth |
-| `SIGNUPS_ENABLED` | true | Set to `false` to close public signups (gates web form, `/auth/register` API, and OAuth signup at `auth.CreateUserWithTenant`); existing-user login still works |
+| `SIGNUPS_ENABLED` | true | Default for the `signups` feature flag (1.13): `false` closes public signups (web form, `/auth/register` API, OAuth signup — all gated at `auth.CreateUserWithTenant`); a `feature_flags` DB row overrides this env in either direction at runtime. Existing-user login always works |
 | `VERIFY_SECRET` | — | HMAC secret for email verification tokens |
 | `GEYSER_ACCESS_KEY`, `GEYSER_SECRET_KEY` | — | Geyser tape S3 credentials |
 | `GEYSER_BUCKET`, `GEYSER_ENDPOINT` | — | Geyser bucket name and endpoint URL |

@@ -20,6 +20,7 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/engine"
+	"github.com/FairForge/vaultaire/internal/flags"
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"go.uber.org/zap"
 )
@@ -47,6 +48,11 @@ type S3ToEngine struct {
 	chunkEncSvc       *crypto.ChunkEncryptionService
 	gci               *crypto.GlobalContentIndex
 	chunkingThreshold int64 // minimum object size for chunking (default 64 MB)
+
+	// flags gates the chunked PUT path (1.13 `chunking` kill-switch +
+	// per-tenant override). Nil (tests, callers that never set it) means
+	// chunking stays on — the pre-flag behavior.
+	flags *flags.Service
 
 	// quota, when set, is used by HandleDelete to release the deleted
 	// object's logical bytes (WP-1). PUT reservation/settlement lives in the
@@ -738,7 +744,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	// happens INSIDE handleChunkedPut on plaintext; whole-object SSE-S3 was
 	// deliberately skipped above (willChunkEncrypt) for bodies heading here.
 	if a.gci != nil && metadataSize > chunkThreshold && !chunkingDisabledByVersioning &&
-		encryptionAlgorithm == "" {
+		encryptionAlgorithm == "" && a.chunkingEnabled(t.ID) {
 		{
 			// WP-C: no uuid.Parse gate — tenant IDs are strings ("tenant-<hex>"
 			// from registration). The old gate silently skipped chunking for
@@ -940,6 +946,18 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	emitEvent(r.Context(), a.db, a.logger, "object.created", t.ID, map[string]interface{}{
 		"bucket": bucket, "key": object, "size": size, "etag": etag,
 	})
+}
+
+// chunkingEnabled resolves the `chunking` feature flag for a tenant
+// (tenant override → global row → default true). A nil flag service —
+// tests and callers predating 1.13 — behaves as flag-on. Flag off routes
+// PUTs down the plain whole-object path; GETs of already-chunked objects
+// are unaffected (manifests are self-describing).
+func (a *S3ToEngine) chunkingEnabled(tenantID string) bool {
+	if a.flags == nil {
+		return true
+	}
+	return a.flags.Enabled(flagChunking, tenantID)
 }
 
 // handleChunkedPut splits a large object into content-defined chunks,

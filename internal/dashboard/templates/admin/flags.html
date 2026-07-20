@@ -1,0 +1,90 @@
+{{define "title"}}Feature Flags — stored.ge admin{{end}}
+{{define "content"}}
+<div class="dashboard-header">
+    <h1>Feature Flags</h1>
+</div>
+
+{{if .FlashSuccess}}<div class="alert alert-success">{{.FlashSuccess}}</div>{{end}}
+{{if .FlashError}}<div class="alert alert-error">{{.FlashError}}</div>{{end}}
+
+<div class="card" style="margin-bottom:1rem">
+    <div class="card-detail">
+        Flags flip live — no deploy, no restart (visible on this node instantly,
+        on other nodes within ~15s). Resolution: tenant override → global state →
+        in-code default. Clearing a row reverts to the next level up.
+    </div>
+</div>
+
+{{if not .Flags}}
+<div class="card">
+    <div class="card-title">No flags registered</div>
+    <div class="card-detail">Flags are registered in code (internal/api/flags_wiring.go).</div>
+</div>
+{{else}}
+{{range .Flags}}
+{{$flag := .}}
+<div class="card" style="margin-bottom:1rem">
+    <div class="card-title">
+        {{.Key}}
+        {{if .Enabled}}<span class="badge badge-success">enabled</span>
+        {{else}}<span class="badge badge-danger">disabled</span>{{end}}
+        {{if not .Registered}}<span class="badge badge-warning">unregistered (leftover DB row)</span>{{end}}
+    </div>
+
+    <div class="card-detail" style="margin:0.5rem 0">
+        Default: <strong>{{if .Default}}on{{else}}off{{end}}</strong>
+        {{if .HasGlobal}} · Global row: <strong>{{if .Global}}on{{else}}off{{end}}</strong>
+        {{else}} · No global row (default applies){{end}}
+    </div>
+
+    <div style="display:flex;gap:0.5rem;margin:0.75rem 0">
+        <form method="POST" action="/admin/flags/{{.Key}}/set" style="margin:0">
+            <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+            <input type="hidden" name="enabled" value="{{if .Enabled}}false{{else}}true{{end}}">
+            <button type="submit" class="btn btn-primary btn-sm">
+                Turn {{if .Enabled}}OFF{{else}}ON{{end}} globally
+            </button>
+        </form>
+        {{if .HasGlobal}}
+        <form method="POST" action="/admin/flags/{{.Key}}/clear" style="margin:0">
+            <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+            <button type="submit" class="btn btn-sm">Clear global row (revert to default)</button>
+        </form>
+        {{end}}
+    </div>
+
+    {{if .Overrides}}
+    <table class="data-table" style="margin:0.75rem 0">
+        <thead><tr><th>Tenant override</th><th>State</th><th>Updated by</th><th></th></tr></thead>
+        <tbody>
+        {{range .Overrides}}
+        <tr>
+            <td><code>{{.TenantID}}</code></td>
+            <td>{{if .Enabled}}<span class="badge badge-success">on</span>{{else}}<span class="badge badge-danger">off</span>{{end}}</td>
+            <td>{{.UpdatedBy}}</td>
+            <td>
+                <form method="POST" action="/admin/flags/{{$flag.Key}}/clear" style="margin:0">
+                    <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                    <input type="hidden" name="tenant_id" value="{{.TenantID}}">
+                    <button type="submit" class="btn btn-sm">Remove override</button>
+                </form>
+            </td>
+        </tr>
+        {{end}}
+        </tbody>
+    </table>
+    {{end}}
+
+    <form method="POST" action="/admin/flags/{{.Key}}/set" style="display:flex;gap:0.5rem;align-items:center;margin:0.5rem 0 0">
+        <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+        <input type="text" name="tenant_id" placeholder="tenant-…" required style="max-width:280px">
+        <select name="enabled">
+            <option value="true">on</option>
+            <option value="false">off</option>
+        </select>
+        <button type="submit" class="btn btn-sm">Set tenant override</button>
+    </form>
+</div>
+{{end}}
+{{end}}
+{{end}}

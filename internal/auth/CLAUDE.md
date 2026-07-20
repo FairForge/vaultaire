@@ -83,6 +83,10 @@ the JSON `POST /auth/register` API, **and** OAuth signup (`CreateUserFromOAuth`
 calls `CreateUserWithTenant` internally). Gating that one function blocks all three.
 
 - `SetSignupsEnabled(bool)` / `SignupsEnabled() bool` — toggle/read. Default **true**.
+- `SetSignupsEnabledFunc(func() bool)` — 1.13: wires a dynamic source (the
+  feature-flag service) as the authority; once set it overrides the static bool
+  for both the gate and the read path. server.go points it at the `signups`
+  flag (in-code default = `SIGNUPS_ENABLED` env, DB row overrides at runtime).
 - When disabled, `CreateUserWithTenant` returns `ErrSignupsDisabled` before any work
   (no DB write, no in-memory entry). OAuth wraps it with `%w`, so callers use
   `errors.Is(err, auth.ErrSignupsDisabled)`.
