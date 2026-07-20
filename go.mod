@@ -21,7 +21,7 @@ require (
 	github.com/gorilla/mux v1.8.1
 	github.com/klauspost/compress v1.18.6
 	github.com/lib/pq v1.12.3
-	github.com/microsoftgraph/msgraph-sdk-go v1.99.0
+	github.com/microsoftgraph/msgraph-sdk-go v1.100.0
 	github.com/pquerna/otp v1.5.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/restic/chunker v0.4.0
@@ -29,6 +29,7 @@ require (
 	github.com/stripe/stripe-go/v75 v75.11.0
 	github.com/tetratelabs/wazero v1.12.0
 	github.com/xeipuuv/gojsonschema v1.2.0
+	github.com/yuin/goldmark v1.8.4
 	go.uber.org/zap v1.28.0
 	golang.org/x/crypto v0.52.0
 	golang.org/x/net v0.55.0
@@ -79,7 +80,6 @@ require (
 	github.com/std-uritemplate/std-uritemplate/go/v2 v2.0.3 // indirect
 	github.com/xeipuuv/gojsonpointer v0.0.0-20180127040702-4e3ac2762d5f // indirect
 	github.com/xeipuuv/gojsonreference v0.0.0-20180127040603-bd5ef7bd5415 // indirect
-	github.com/yuin/goldmark v1.8.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel v1.43.0 // indirect
 	go.opentelemetry.io/otel/metric v1.43.0 // indirect
