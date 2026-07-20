@@ -55,7 +55,9 @@
     font-size: 0.8rem;
     line-height: 1.5;
 }
+#onboard-tab-rclone:checked ~ .tab-labels .tab-label[for="onboard-tab-rclone"],
 #onboard-tab-cli:checked ~ .tab-labels .tab-label[for="onboard-tab-cli"],
+#onboard-tab-s3cmd:checked ~ .tab-labels .tab-label[for="onboard-tab-s3cmd"],
 #onboard-tab-python:checked ~ .tab-labels .tab-label[for="onboard-tab-python"],
 #onboard-tab-js:checked ~ .tab-labels .tab-label[for="onboard-tab-js"],
 #onboard-tab-curl:checked ~ .tab-labels .tab-label[for="onboard-tab-curl"] {
@@ -63,10 +65,21 @@
     color: var(--text, #1e293b);
     font-weight: 600;
 }
+#onboard-tab-rclone:checked ~ .panel-rclone,
 #onboard-tab-cli:checked ~ .panel-cli,
+#onboard-tab-s3cmd:checked ~ .panel-s3cmd,
 #onboard-tab-python:checked ~ .panel-python,
 #onboard-tab-js:checked ~ .panel-js,
 #onboard-tab-curl:checked ~ .panel-curl { display: block; }
+.onboarding-tabs .btn-copy {
+    margin-top: 0.75rem;
+    padding: 0.35rem 0.75rem;
+    font-size: 0.8rem;
+    border: 1px solid var(--border, #e2e8f0);
+    border-radius: 6px;
+    background: var(--card-bg, #fff);
+    cursor: pointer;
+}
 .btn-dismiss {
     background: none;
     border: 1px solid var(--border, #e2e8f0);
@@ -110,21 +123,46 @@
     </ul>
 
     <div class="onboarding-tabs">
-        <input type="radio" name="onboard-tab" id="onboard-tab-cli" checked>
+        <input type="radio" name="onboard-tab" id="onboard-tab-rclone" checked>
+        <input type="radio" name="onboard-tab" id="onboard-tab-cli">
+        <input type="radio" name="onboard-tab" id="onboard-tab-s3cmd">
         <input type="radio" name="onboard-tab" id="onboard-tab-python">
         <input type="radio" name="onboard-tab" id="onboard-tab-js">
         <input type="radio" name="onboard-tab" id="onboard-tab-curl">
         <div class="tab-labels">
+            <label class="tab-label" for="onboard-tab-rclone">rclone</label>
             <label class="tab-label" for="onboard-tab-cli">AWS CLI</label>
+            <label class="tab-label" for="onboard-tab-s3cmd">s3cmd</label>
             <label class="tab-label" for="onboard-tab-python">Python</label>
             <label class="tab-label" for="onboard-tab-js">JavaScript</label>
             <label class="tab-label" for="onboard-tab-curl">cURL</label>
         </div>
-        <div class="tab-panel panel-cli"><pre>aws configure set aws_access_key_id {{.Onboarding.AccessKey}}
+        <div class="tab-panel panel-rclone"><pre id="snippet-rclone">rclone config create storedge s3 \
+  provider=Other \
+  access_key_id={{.Onboarding.AccessKey}} \
+  secret_access_key=YOUR_SECRET_KEY \
+  endpoint=https://stored.ge \
+  region=us-east-1
+
+rclone mkdir storedge:my-first-bucket
+rclone copy ./hello.txt storedge:my-first-bucket/</pre>
+            <button type="button" class="btn-copy" data-copy-target="snippet-rclone">Copy</button></div>
+        <div class="tab-panel panel-cli"><pre id="snippet-cli">aws configure set aws_access_key_id {{.Onboarding.AccessKey}}
 aws configure set aws_secret_access_key YOUR_SECRET_KEY
 aws --endpoint-url https://stored.ge s3 mb s3://my-first-bucket
-aws --endpoint-url https://stored.ge s3 cp ./hello.txt s3://my-first-bucket/</pre></div>
-        <div class="tab-panel panel-python"><pre>import boto3
+aws --endpoint-url https://stored.ge s3 cp ./hello.txt s3://my-first-bucket/</pre>
+            <button type="button" class="btn-copy" data-copy-target="snippet-cli">Copy</button></div>
+        <div class="tab-panel panel-s3cmd"><pre id="snippet-s3cmd">s3cmd --access_key={{.Onboarding.AccessKey}} \
+  --secret_key=YOUR_SECRET_KEY \
+  --host=stored.ge --host-bucket=stored.ge \
+  mb s3://my-first-bucket
+
+s3cmd --access_key={{.Onboarding.AccessKey}} \
+  --secret_key=YOUR_SECRET_KEY \
+  --host=stored.ge --host-bucket=stored.ge \
+  put ./hello.txt s3://my-first-bucket/</pre>
+            <button type="button" class="btn-copy" data-copy-target="snippet-s3cmd">Copy</button></div>
+        <div class="tab-panel panel-python"><pre id="snippet-python">import boto3
 
 s3 = boto3.client('s3',
     endpoint_url='https://stored.ge',
@@ -132,8 +170,9 @@ s3 = boto3.client('s3',
     aws_secret_access_key='YOUR_SECRET_KEY')
 
 s3.create_bucket(Bucket='my-first-bucket')
-s3.put_object(Bucket='my-first-bucket', Key='hello.txt', Body=b'Hello!')</pre></div>
-        <div class="tab-panel panel-js"><pre>import { S3Client, CreateBucketCommand, PutObjectCommand } from "@aws-sdk/client-s3";
+s3.put_object(Bucket='my-first-bucket', Key='hello.txt', Body=b'Hello!')</pre>
+            <button type="button" class="btn-copy" data-copy-target="snippet-python">Copy</button></div>
+        <div class="tab-panel panel-js"><pre id="snippet-js">import { S3Client, CreateBucketCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 
 const client = new S3Client({
   endpoint: "https://stored.ge",
@@ -149,14 +188,20 @@ await client.send(new PutObjectCommand({
   Bucket: "my-first-bucket",
   Key: "hello.txt",
   Body: "Hello!",
-}));</pre></div>
-        <div class="tab-panel panel-curl"><pre>curl -X PUT https://stored.ge/my-first-bucket \
+}));</pre>
+            <button type="button" class="btn-copy" data-copy-target="snippet-js">Copy</button></div>
+        <div class="tab-panel panel-curl"><pre id="snippet-curl">curl -X PUT https://stored.ge/my-first-bucket \
   --user "{{.Onboarding.AccessKey}}:YOUR_SECRET_KEY"
 
 curl -X PUT https://stored.ge/my-first-bucket/hello.txt \
   --user "{{.Onboarding.AccessKey}}:YOUR_SECRET_KEY" \
-  -d "Hello!"</pre></div>
+  -d "Hello!"</pre>
+            <button type="button" class="btn-copy" data-copy-target="snippet-curl">Copy</button></div>
     </div>
+    <p style="font-size:0.8rem;color:var(--text-secondary,#64748b);margin:0.5rem 0 0">
+        Replace <code>YOUR_SECRET_KEY</code> with the secret key shown when you signed up
+        (or generate a new key under <a href="/dashboard/apikeys">API Keys</a>).
+    </p>
 </div>
 {{end}}
 
