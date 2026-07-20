@@ -459,6 +459,8 @@ func handleLogin(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 func handleRegister(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 	errTmpl := template.Must(baseTmpl.Clone())
 	template.Must(errTmpl.Parse(pageContent("register")))
+	credsTmpl := template.Must(baseTmpl.Clone())
+	template.Must(credsTmpl.Parse(pageContent("credentials")))
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		email := r.FormValue("email")
@@ -483,7 +485,7 @@ func handleRegister(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 			return
 		}
 
-		user, _, _, err := deps.Auth.CreateUserWithTenant(r.Context(), email, password, company)
+		user, _, apiKey, err := deps.Auth.CreateUserWithTenant(r.Context(), email, password, company)
 		if err != nil {
 			switch {
 			case errors.Is(err, auth.ErrSignupsDisabled):
@@ -520,7 +522,20 @@ func handleRegister(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 		}
 
 		dashauth.SetSessionCookie(w, token, sessionTTL)
-		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
+
+		// B2 (5.15.6): render the minted S3 credentials ONCE instead of
+		// redirecting. The secret is never shown again anywhere — the old
+		// redirect discarded it, leaving web signups with no usable keys.
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		if err := credsTmpl.ExecuteTemplate(w, "base", map[string]any{
+			"Page":      "credentials",
+			"AccessKey": apiKey.Key,
+			"SecretKey": apiKey.Secret,
+			"Endpoint":  deps.BaseURL,
+		}); err != nil {
+			deps.Logger.Error("render signup credentials", zap.Error(err))
+		}
 	}
 }
 
@@ -804,6 +819,29 @@ func pageContent(page string) string {
 			`<button type="submit" class="btn btn-primary btn-block">Create Account</button>` +
 			`</form>` +
 			`<div class="auth-footer">Have an account? <a href="/login">Sign in</a></div>` +
+			`</div></div>{{end}}`
+	case "credentials":
+		// B2: post-signup reveal-once S3 credentials. The secret exists only
+		// in this response — refreshing or navigating away loses it for good
+		// (a replacement key can be minted at /dashboard/apikeys).
+		return `{{define "title"}}Your S3 Credentials — stored.ge{{end}}` +
+			`{{define "nav"}}{{end}}` +
+			`{{define "content"}}` +
+			`<div class="auth-page"><div class="auth-card">` +
+			`<div class="auth-brand">stored.ge</div>` +
+			`<h1>Your S3 Credentials</h1>` +
+			`<div class="alert alert-error"><strong>Save these now.</strong> ` +
+			`Your secret key is shown only once — it cannot be recovered. ` +
+			`If you lose it, generate a new key from the dashboard.</div>` +
+			`<div class="form-group"><label>Access Key ID</label>` +
+			`<input type="text" id="cred-access" value="{{.AccessKey}}" readonly onclick="this.select()">` +
+			`<button type="button" class="btn btn-block" onclick="navigator.clipboard.writeText(document.getElementById('cred-access').value);this.textContent='Copied ✓'">Copy access key</button></div>` +
+			`<div class="form-group"><label>Secret Access Key</label>` +
+			`<input type="text" id="cred-secret" value="{{.SecretKey}}" readonly onclick="this.select()">` +
+			`<button type="button" class="btn btn-block" onclick="navigator.clipboard.writeText(document.getElementById('cred-secret').value);this.textContent='Copied ✓'">Copy secret key</button></div>` +
+			`<div class="form-group"><label>Endpoint</label>` +
+			`<input type="text" id="cred-endpoint" value="{{.Endpoint}}" readonly onclick="this.select()"></div>` +
+			`<a href="/dashboard" class="btn btn-primary btn-block">I saved my keys — go to dashboard</a>` +
 			`</div></div>{{end}}`
 	case "verify-2fa":
 		return `{{define "title"}}Verify 2FA — stored.ge{{end}}` +
