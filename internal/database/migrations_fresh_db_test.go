@@ -90,6 +90,15 @@ func TestMigrations_FreshDatabaseBootstrap(t *testing.T) {
 		assert.True(t, reg.Valid, "table %s must be created by the migration set", table)
 	}
 
+	// 1.13: feature_flags (migration 059) must exist so the live-iteration
+	// kit (kill-switches + per-tenant enablement) works on a fresh DB.
+	{
+		var reg sql.NullString
+		err := fdb.QueryRowContext(ctx, "SELECT to_regclass('feature_flags')::text").Scan(&reg)
+		require.NoError(t, err)
+		assert.True(t, reg.Valid, "feature_flags must be created by migration 059")
+	}
+
 	// WP-C guards: the chunk tables' tenant_id must be TEXT (registration
 	// mints string IDs). These tables are created by migration 016 — which
 	// sorts before 051, so 051's IF NOT EXISTS never fires — and a UUID here

@@ -15,6 +15,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/dashboard/middleware"
 	"github.com/FairForge/vaultaire/internal/email"
 	"github.com/FairForge/vaultaire/internal/engine"
+	"github.com/FairForge/vaultaire/internal/flags"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 	"golang.org/x/oauth2"
@@ -39,6 +40,7 @@ type Deps struct {
 	BaseURL       string                 // Base URL for email links (e.g. "https://stored.ge").
 	Engine        *engine.CoreEngine     // Nil-safe; used by admin backends page.
 	HealthChecker handlers.HealthChecker // Nil-safe; backend health state provider.
+	Flags         *flags.Service         // Nil-safe; admin feature-flags page (1.13).
 }
 
 // RegisterRoutes mounts the dashboard, auth, admin, and static-asset
@@ -297,6 +299,10 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		"templates/layouts/admin.html",
 		"templates/admin/abuse_detail.html",
 	))
+	flagsTmpl := template.Must(template.ParseFS(Templates,
+		"templates/layouts/admin.html",
+		"templates/admin/flags.html",
+	))
 
 	r.Route("/admin", func(ar chi.Router) {
 		ar.Use(middleware.Recovery(deps.Logger))
@@ -337,6 +343,11 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 			ar.Get("/backends", handlers.HandleAdminBackends(backendsTmpl, deps.Engine, deps.HealthChecker, deps.Logger))
 			ar.Post("/backends/{name}/primary", handlers.HandleSetPrimary(deps.Engine, deps.Logger))
 			ar.Post("/backends/{name}/check", handlers.HandleForceHealthCheck(deps.Engine, deps.Logger))
+		}
+		if deps.Flags != nil {
+			ar.Get("/flags", handlers.HandleAdminFlags(flagsTmpl, deps.Flags, deps.Logger))
+			ar.Post("/flags/{key}/set", handlers.HandleAdminFlagSet(deps.Flags, deps.Logger))
+			ar.Post("/flags/{key}/clear", handlers.HandleAdminFlagClear(deps.Flags, deps.Logger))
 		}
 	})
 }

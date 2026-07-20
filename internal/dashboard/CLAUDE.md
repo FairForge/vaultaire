@@ -111,6 +111,9 @@ Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`,
 | `/admin/abuse` | GET | session + admin | Abuse queue with status filter tabs |
 | `/admin/abuse/{id}` | GET | session + admin | Abuse report detail with action buttons |
 | `/admin/abuse/{id}/action` | POST | session + admin | Change abuse report status (reviewing/actioned/dismissed) |
+| `/admin/flags` | GET | session + admin | Feature flags: defaults, global state, per-tenant overrides (1.13) |
+| `/admin/flags/{key}/set` | POST | session + admin | Set global row or tenant override (form: enabled, tenant_id?) |
+| `/admin/flags/{key}/clear` | POST | session + admin | Remove a row → revert to global/default |
 | `/admin/*` | GET | session + admin role | Admin panel |
 
 ## Auth Flow

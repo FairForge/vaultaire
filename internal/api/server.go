@@ -26,6 +26,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/docs"
 	"github.com/FairForge/vaultaire/internal/email"
 	"github.com/FairForge/vaultaire/internal/engine"
+	"github.com/FairForge/vaultaire/internal/flags"
 	"github.com/FairForge/vaultaire/internal/rbac"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -89,6 +90,10 @@ type Server struct {
 	emailSender             email.Sender
 	baseURL                 string
 	startTime               time.Time
+	// flags is the runtime feature-flag service (1.13): DB table + ~15s
+	// cache, global kill-switches + per-tenant enablement, flipped via the
+	// admin API / dashboard with no deploy or restart.
+	flags *flags.Service
 }
 
 type QuotaManager interface {
@@ -139,16 +144,25 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	}
 	s.auth.SetVerifySecret(verifySecret)
 
-	// Public signups: enabled by default; set SIGNUPS_ENABLED=false to close them
-	// (pre-launch). Gated at CreateUserWithTenant, so the web form, /auth/register
-	// API, and OAuth signup are all blocked; existing-user login still works.
-	if v := os.Getenv("SIGNUPS_ENABLED"); v != "" {
-		if enabled, parseErr := strconv.ParseBool(v); parseErr == nil {
-			s.auth.SetSignupsEnabled(enabled)
-			if !enabled {
-				logger.Info("public signups DISABLED (SIGNUPS_ENABLED=false)")
-			}
-		}
+	// Runtime feature flags (1.13): feature_flags table + ~15s cache.
+	// Day-one flags:
+	//   signups  — default from SIGNUPS_ENABLED (deploy never reopens
+	//              signups); a DB row overrides env with no deploy. Gated at
+	//              CreateUserWithTenant, so the web form, /auth/register API,
+	//              and OAuth signup are all covered; login is unaffected.
+	//   chunking — default on; global kill-switch + per-tenant override for
+	//              the chunked/dedup PUT path (reads unaffected).
+	s.flags = flags.New(s.db, logger)
+	s.flags.Register(flagSignups, signupsDefaultFromEnv())
+	s.flags.Register(flagChunking, true)
+	if err := s.flags.Refresh(context.Background()); err != nil {
+		logger.Warn("initial feature flag refresh failed — serving in-code defaults until the background refresh succeeds",
+			zap.Error(err))
+	}
+	s.flags.Start(context.Background())
+	s.auth.SetSignupsEnabledFunc(func() bool { return s.flags.Enabled(flagSignups, "") })
+	if !s.flags.Enabled(flagSignups, "") {
+		logger.Info("public signups DISABLED (signups flag off — env default or DB override)")
 	}
 
 	// Populate in-memory maps from PostgreSQL so that existing users
@@ -569,6 +583,7 @@ func (s *Server) setupRoutes() {
 		BaseURL:       s.baseURL,
 		Engine:        s.engine,
 		HealthChecker: &healthCheckerAdapter{s.healthChecker},
+		Flags:         s.flags,
 	})
 
 	s.logger.Info("Registering management API routes")
@@ -590,6 +605,12 @@ func (s *Server) setupRoutes() {
 	// handleRoot, so the S3 API is unaffected. Registered before the catch-all.
 	s.router.Get("/", s.handleRoot)
 	s.router.Head("/", s.handleRoot)
+
+	// Public customer-facing changelog (1.13): rendered once at boot from
+	// the embedded changelog.md. Registered before the catch-all so the
+	// path never reaches the S3 handler.
+	s.router.Get("/changelog", s.handleChangelog)
+	s.router.Head("/changelog", s.handleChangelog)
 
 	s.logger.Info("Registering S3 catch-all handler")
 	s.router.HandleFunc("/*", s.handleS3Request)
@@ -664,6 +685,12 @@ func (s *Server) registerComplianceRoutes() {
 
 		r.Post("/dedup-gc", s.requireAdmin(s.handleDedupGCTrigger))
 		r.Post("/quota-reconcile", s.requireAdmin(s.handleQuotaReconcile))
+
+		// Feature flags (1.13): flip kill-switches / per-tenant enablement
+		// at runtime. updated_by comes from the JWT.
+		r.Get("/flags", s.requireAdmin(s.handleAdminFlagsList))
+		r.Put("/flags/{key}", s.requireAdmin(s.handleAdminFlagSet))
+		r.Delete("/flags/{key}", s.requireAdmin(s.handleAdminFlagUnset))
 	})
 }
 
