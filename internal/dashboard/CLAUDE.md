@@ -48,7 +48,7 @@ Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`,
 | `/login` | GET | none | Login page |
 | `/login` | POST | none | Validate credentials, create session, redirect to /dashboard |
 | `/register` | GET | none | Registration page (redirects to `/` when signups closed) |
-| `/register` | POST | none | Create user+tenant, create session, redirect to /dashboard (gated by `SIGNUPS_ENABLED`) |
+| `/register` | POST | none | Create user+tenant, create session, then render the minted S3 credentials ONCE (B2 — access key, secret, endpoint, copy buttons; secret never shown again) with a continue link to /dashboard. Gated by the `signups` flag |
 | `/logout` | GET | none | Delete session, clear cookie, redirect to /login |
 | `/legal/privacy` | GET | none | Privacy Policy (GDPR-compliant) |
 | `/legal/terms` | GET | none | Terms of Service |
