@@ -55,7 +55,7 @@ func TestGetRegister(t *testing.T) {
 }
 
 func TestPostRegister(t *testing.T) {
-	r, _, _ := setupTestRouter(t)
+	r, authSvc, _ := setupTestRouter(t)
 
 	form := url.Values{
 		"email":    {"test@stored.ge"},
@@ -67,11 +67,24 @@ func TestPostRegister(t *testing.T) {
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
-	// Should redirect to /dashboard
-	assert.Equal(t, http.StatusSeeOther, w.Code)
-	assert.Equal(t, "/dashboard", w.Header().Get("Location"))
+	// B2 (5.15.6): signup renders the minted S3 credentials ONCE — no blind
+	// redirect that discards the secret. The page shows both keys and a way on.
+	assert.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.Regexp(t, `VK[0-9a-f]+`, body, "access key must be shown")
+	assert.Regexp(t, `SK[0-9a-f]+`, body, "secret key must be shown — this is the only time it is visible")
+	assert.Contains(t, body, "/dashboard", "must link on to the dashboard")
+	assert.Contains(t, body, "once", "must warn the secret is shown only once")
 
-	// Should have a session cookie
+	// The shown access key is the real one minted for this account.
+	user, err := authSvc.GetUserByEmail(context.Background(), "test@stored.ge")
+	require.NoError(t, err)
+	keys, err := authSvc.ListAPIKeys(context.Background(), user.ID)
+	require.NoError(t, err)
+	require.NotEmpty(t, keys)
+	assert.Contains(t, body, keys[0].Key, "page must show the account's actual access key")
+
+	// Should have a session cookie (user is logged in behind the reveal page).
 	cookies := w.Result().Cookies()
 	var sessionCookie *http.Cookie
 	for _, c := range cookies {
