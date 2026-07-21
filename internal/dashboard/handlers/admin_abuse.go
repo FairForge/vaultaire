@@ -234,11 +234,11 @@ func HandleAbuseAction(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 		if err != nil {
 			logger.Error("update abuse report", zap.Error(err))
 			middleware.SetFlash(w, "error", "Failed to update report.")
-			http.Redirect(w, r, "/admin/abuse/"+idStr, http.StatusSeeOther)
+			http.Redirect(w, r, "/admin/abuse/"+strconv.FormatInt(id, 10), http.StatusSeeOther)
 			return
 		}
 
 		middleware.SetFlash(w, "success", "Report status updated to "+action+".")
-		http.Redirect(w, r, "/admin/abuse/"+idStr, http.StatusSeeOther)
+		http.Redirect(w, r, "/admin/abuse/"+strconv.FormatInt(id, 10), http.StatusSeeOther)
 	}
 }

@@ -3,1075 +3,640 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>stored.ge - Enterprise S3-Compatible Storage + VPS Platform</title>
-    <meta name="description" content="Enterprise S3 storage with integrated VPS compute. 7 global regions, full IAM, persistent storage. Launching July 2026.">
-    <meta property="og:title" content="stored.ge - Enterprise Storage Platform">
-    <meta property="og:description" content="Next-generation S3-compatible storage with integrated compute. Join the waitlist for early access.">
-    <meta property="og:image" content="https://stored.ge/preview.png">
+    <title>stored.ge — S3-compatible storage that optimizes itself. $3.99/TB, archive from $1/TB</title>
+    <meta name="description" content="S3-compatible object storage with automatic tiering across hot storage and tape. $3.99/TB, tape-backed archive from $1/TB. No API fees, 3× free egress, no minimum duration.">
+    <meta property="og:title" content="stored.ge — S3-compatible storage that optimizes itself">
+    <meta property="og:description" content="One endpoint. Your data auto-tiers across hot storage and tape — $3.99/TB, archive from $1/TB. No API fees.">
     <meta property="og:url" content="https://stored.ge">
 
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
 
         :root {
             --primary: #5B21B6;
             --primary-dark: #4C1D95;
             --secondary: #8B5CF6;
             --accent: #10B981;
-            --danger: #EF4444;
-            --dark: #111827;
-            --gray: #6B7280;
-            --light: #F9FAFB;
-            --white: #FFFFFF;
+            --bg: #FFFFFF;
+            --bg-alt: #F9FAFB;
             --card-bg: #FFFFFF;
             --text-primary: #111827;
             --text-secondary: #6B7280;
             --border-color: #E5E7EB;
+            --code-bg: #F3F4F6;
         }
 
-        [data-theme="dark"] {
-            --dark: #F9FAFB;
-            --light: #1F2937;
-            --white: #111827;
-            --card-bg: #1F2937;
-            --text-primary: #F9FAFB;
-            --text-secondary: #9CA3AF;
-            --border-color: #374151;
-            --primary: #7C3AED;
-            --secondary: #A78BFA;
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --primary: #7C3AED;
+                --primary-dark: #6D28D9;
+                --secondary: #A78BFA;
+                --bg: #111827;
+                --bg-alt: #1F2937;
+                --card-bg: #1F2937;
+                --text-primary: #F9FAFB;
+                --text-secondary: #9CA3AF;
+                --border-color: #374151;
+                --code-bg: #0F172A;
+            }
         }
 
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
             line-height: 1.6;
             color: var(--text-primary);
-            background: var(--white);
-            transition: background 0.3s, color 0.3s;
+            background: var(--bg);
         }
 
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 0 20px;
-        }
+        .container { max-width: 1100px; margin: 0 auto; padding: 0 20px; }
 
-        /* Announcement Bar */
-        .announcement-bar {
-            background: var(--primary);
-            color: white;
-            text-align: center;
-            padding: 0.75rem;
-            font-size: 0.9rem;
-        }
+        a { color: var(--secondary); text-decoration: none; }
+        a:hover { text-decoration: underline; }
 
-        .announcement-bar a {
-            color: white;
-            text-decoration: underline;
-            margin-left: 0.5rem;
-        }
-
-        /* Header */
-        header {
-            background: var(--card-bg);
-            border-bottom: 1px solid var(--border-color);
-            position: sticky;
-            top: 0;
-            z-index: 100;
-        }
-
+        /* ---------- Nav ---------- */
         nav {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 1rem 0;
+            position: sticky; top: 0; z-index: 50;
+            background: var(--bg);
+            border-bottom: 1px solid var(--border-color);
         }
-
-        .logo {
-            font-size: 1.5rem;
-            font-weight: 800;
-            background: linear-gradient(135deg, var(--primary), var(--secondary));
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
+        .nav-inner {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 0.9rem 20px; max-width: 1100px; margin: 0 auto;
         }
-
-        .nav-links {
-            display: flex;
-            gap: 2rem;
-            list-style: none;
-            align-items: center;
-        }
-
-        .nav-links a {
-            color: var(--text-secondary);
-            text-decoration: none;
-            font-weight: 500;
-            transition: color 0.3s;
-        }
-
-        .nav-links a:hover {
-            color: var(--primary);
-        }
-
-        .theme-toggle {
-            background: none;
-            border: none;
-            color: var(--text-secondary);
-            cursor: pointer;
-            font-size: 1.25rem;
-            padding: 0.5rem;
-            border-radius: 0.5rem;
-            transition: background 0.3s;
-        }
-
-        .theme-toggle:hover {
-            background: var(--light);
-        }
-
-        /* Countdown Timer */
-        .countdown-section {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            padding: 3rem 0;
-            text-align: center;
-            color: white;
-        }
-
-        .countdown-title {
-            font-size: 1.5rem;
-            margin-bottom: 1rem;
-            opacity: 0.9;
-        }
-
-        .countdown {
-            display: flex;
-            justify-content: center;
-            gap: 2rem;
-            margin-bottom: 2rem;
-        }
-
-        .countdown-item {
-            text-align: center;
-        }
-
-        .countdown-number {
-            font-size: 3rem;
-            font-weight: 800;
-            display: block;
-            line-height: 1;
-        }
-
-        .countdown-label {
-            font-size: 0.875rem;
-            text-transform: uppercase;
-            opacity: 0.8;
-            margin-top: 0.5rem;
-        }
-
-        /* Hero Section */
-        .hero {
-            padding: 5rem 0;
-            background: var(--light);
-            text-align: center;
-        }
-
-        .hero h1 {
-            font-size: 3.5rem;
-            margin-bottom: 1rem;
-            font-weight: 800;
-            color: var(--text-primary);
-        }
-
-        .hero p {
-            font-size: 1.25rem;
-            margin-bottom: 2rem;
-            color: var(--text-secondary);
-            max-width: 800px;
-            margin-left: auto;
-            margin-right: auto;
-        }
-
-        .status-badge {
-            display: inline-block;
-            background: var(--accent);
-            color: white;
-            padding: 0.5rem 1rem;
-            border-radius: 2rem;
-            font-size: 0.875rem;
-            font-weight: 600;
-            margin-bottom: 2rem;
-        }
-
-        .waitlist-form {
-            max-width: 500px;
-            margin: 0 auto;
-            display: flex;
-            gap: 1rem;
-        }
-
-        .waitlist-form input {
-            flex: 1;
-            padding: 0.875rem 1.5rem;
-            border: 2px solid var(--border-color);
-            border-radius: 0.5rem;
-            font-size: 1rem;
-            background: var(--card-bg);
-            color: var(--text-primary);
-        }
+        .logo { font-size: 1.25rem; font-weight: 800; color: var(--text-primary); }
+        .logo span { color: var(--secondary); }
+        .nav-links { display: flex; align-items: center; gap: 1.4rem; list-style: none; }
+        .nav-links a { color: var(--text-secondary); font-size: 0.95rem; }
+        .nav-links a:hover { color: var(--text-primary); text-decoration: none; }
+        @media (max-width: 720px) { .nav-links .hide-sm { display: none; } }
 
         .btn {
-            padding: 0.875rem 2rem;
-            border-radius: 0.5rem;
-            text-decoration: none;
-            font-weight: 600;
-            transition: all 0.3s;
-            display: inline-block;
-            border: none;
-            cursor: pointer;
-            font-size: 1rem;
+            display: inline-block; padding: 0.6rem 1.3rem; border-radius: 8px;
+            font-weight: 600; font-size: 0.95rem; border: none; cursor: pointer;
         }
-
-        .btn-primary {
-            background: var(--primary);
-            color: white;
-        }
-
-        .btn-primary:hover {
-            background: var(--primary-dark);
-            transform: translateY(-2px);
-        }
-
-        .btn-secondary {
+        .btn-primary { background: var(--primary); color: #fff; }
+        .btn-primary:hover { background: var(--primary-dark); text-decoration: none; }
+        .btn-outline {
+            border: 1px solid var(--border-color); color: var(--text-primary);
             background: transparent;
-            color: var(--primary);
-            border: 2px solid var(--primary);
         }
+        .btn-outline:hover { border-color: var(--secondary); text-decoration: none; }
 
-        .btn-secondary:hover {
-            background: var(--primary);
-            color: white;
+        /* ---------- Hero ---------- */
+        .hero { padding: 4.5rem 0 3.5rem; text-align: center; }
+        .hero-badge {
+            display: inline-block; padding: 0.3rem 0.9rem; border-radius: 999px;
+            border: 1px solid var(--border-color); color: var(--text-secondary);
+            font-size: 0.85rem; margin-bottom: 1.4rem;
         }
-
-        .btn-coming-soon {
-            background: var(--gray);
-            color: white;
-            cursor: not-allowed;
-            opacity: 0.7;
+        .hero-badge strong { color: var(--accent); }
+        .hero h1 { font-size: 2.7rem; line-height: 1.15; letter-spacing: -0.02em; }
+        .hero .sub {
+            margin: 1.2rem auto 0; max-width: 640px;
+            color: var(--text-secondary); font-size: 1.15rem;
         }
+        .hero-cta { margin-top: 2rem; display: flex; gap: 0.8rem; justify-content: center; flex-wrap: wrap; }
+        .trust-line { margin-top: 1.6rem; color: var(--text-secondary); font-size: 0.85rem; }
 
-        /* Features */
-        .features {
-            padding: 5rem 0;
-            background: var(--white);
-        }
-
-        .features h2 {
-            text-align: center;
-            font-size: 2.5rem;
-            margin-bottom: 1rem;
-            color: var(--text-primary);
-        }
-
-        .section-subtitle {
-            text-align: center;
-            color: var(--text-secondary);
-            margin-bottom: 3rem;
-            max-width: 600px;
-            margin-left: auto;
-            margin-right: auto;
-        }
-
-        .feature-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 2rem;
-        }
-
-        .feature-card {
-            background: var(--card-bg);
-            padding: 2rem;
-            border-radius: 1rem;
+        .waitlist-form { display: flex; gap: 0.6rem; justify-content: center; flex-wrap: wrap; }
+        .waitlist-form input {
+            padding: 0.6rem 1rem; border-radius: 8px; min-width: 260px;
             border: 1px solid var(--border-color);
-            transition: transform 0.3s, box-shadow 0.3s;
+            background: var(--card-bg); color: var(--text-primary); font-size: 0.95rem;
         }
+        .waitlist-ok { color: var(--accent); font-weight: 600; }
 
-        .feature-card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+        /* ---------- Sections ---------- */
+        section { padding: 3.5rem 0; }
+        section.alt { background: var(--bg-alt); }
+        .section-head { text-align: center; max-width: 640px; margin: 0 auto 2.5rem; }
+        .section-head h2 { font-size: 1.9rem; letter-spacing: -0.01em; }
+        .section-head p { margin-top: 0.6rem; color: var(--text-secondary); }
+
+        /* ---------- Tier ladder ---------- */
+        .ladder { display: flex; flex-direction: column; align-items: center; gap: 1rem; }
+        .rung {
+            border: 1px solid var(--border-color); border-radius: 12px;
+            background: var(--card-bg); padding: 1.4rem 1.6rem; width: 100%;
         }
-
-        .feature-icon {
-            width: 50px;
-            height: 50px;
-            background: linear-gradient(135deg, var(--primary), var(--secondary));
-            border-radius: 0.75rem;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: white;
-            font-size: 1.5rem;
-            margin-bottom: 1rem;
+        .rung.perf { max-width: 620px; }
+        .rung.standard { max-width: 800px; border-color: var(--secondary); position: relative; }
+        .rung.vault { max-width: 980px; }
+        .rung-head { display: flex; align-items: baseline; gap: 0.8rem; flex-wrap: wrap; }
+        .rung-head h3 { font-size: 1.2rem; }
+        .rung-price { color: var(--secondary); font-weight: 700; }
+        .rung-tag {
+            font-size: 0.72rem; font-weight: 700; letter-spacing: 0.06em;
+            color: #fff; background: var(--secondary); border-radius: 999px;
+            padding: 0.15rem 0.7rem; position: absolute; top: -0.7rem; left: 1.4rem;
         }
-
-        .feature-card h3 {
-            margin-bottom: 0.5rem;
-            color: var(--text-primary);
+        .rung p { color: var(--text-secondary); margin-top: 0.4rem; font-size: 0.95rem; }
+        .rung .for { margin-top: 0.7rem; display: flex; gap: 0.5rem; flex-wrap: wrap; }
+        .chip {
+            font-size: 0.8rem; color: var(--text-secondary);
+            border: 1px solid var(--border-color); border-radius: 999px; padding: 0.15rem 0.7rem;
         }
+        .ladder-note { text-align: center; color: var(--text-secondary); font-size: 0.9rem; margin-top: 1.4rem; }
 
-        .feature-card p {
-            color: var(--text-secondary);
+        /* ---------- How it works ---------- */
+        .timeline { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.2rem; }
+        @media (max-width: 720px) { .timeline { grid-template-columns: 1fr; } }
+        .stage {
+            border: 1px solid var(--border-color); border-radius: 12px;
+            padding: 1.3rem; background: var(--card-bg);
         }
+        .stage .when { font-size: 0.8rem; font-weight: 700; letter-spacing: 0.05em; color: var(--secondary); }
+        .stage h3 { margin-top: 0.3rem; font-size: 1.05rem; }
+        .stage p { color: var(--text-secondary); font-size: 0.92rem; margin-top: 0.4rem; }
+        .how-note { text-align: center; color: var(--text-secondary); margin: 1.6rem auto 0; max-width: 620px; }
 
-        /* Pricing */
-        .pricing {
-            padding: 5rem 0;
-            background: var(--light);
+        .quickstart { max-width: 720px; margin: 2.2rem auto 0; }
+        .quickstart-head {
+            display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;
         }
-
-        .pricing h2 {
-            text-align: center;
-            font-size: 2.5rem;
-            margin-bottom: 1rem;
-            color: var(--text-primary);
+        .quickstart-head span { font-weight: 600; font-size: 0.95rem; }
+        .copy-btn {
+            font-size: 0.8rem; padding: 0.25rem 0.8rem; border-radius: 6px;
+            border: 1px solid var(--border-color); background: transparent;
+            color: var(--text-secondary); cursor: pointer;
         }
-
-        .pricing-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 2rem;
-            margin-top: 3rem;
+        .copy-btn:hover { color: var(--text-primary); border-color: var(--secondary); }
+        pre {
+            background: var(--code-bg); border: 1px solid var(--border-color);
+            border-radius: 10px; padding: 1rem 1.2rem; overflow-x: auto;
+            font-size: 0.85rem; line-height: 1.55;
         }
+        .quickstart .after { color: var(--text-secondary); font-size: 0.88rem; margin-top: 0.6rem; }
 
-        .pricing-card {
-            border: 2px solid var(--border-color);
-            border-radius: 1rem;
-            padding: 2rem;
-            text-align: center;
-            position: relative;
-            background: var(--card-bg);
-        }
-
-        .pricing-card.featured {
-            border-color: var(--primary);
-            transform: scale(1.05);
-        }
-
-        .badge {
-            position: absolute;
-            top: -12px;
-            left: 50%;
-            transform: translateX(-50%);
-            background: var(--primary);
-            color: white;
-            padding: 0.25rem 1rem;
-            border-radius: 1rem;
-            font-size: 0.875rem;
-            font-weight: 600;
-        }
-
-        .price {
-            font-size: 3rem;
-            font-weight: 800;
-            color: var(--text-primary);
-            margin: 1rem 0;
-        }
-
-        .price-period {
-            font-size: 1rem;
-            color: var(--text-secondary);
-            font-weight: 400;
-        }
-
-        .pricing-features {
-            list-style: none;
-            margin: 2rem 0;
-        }
-
-        .pricing-features li {
-            padding: 0.5rem 0;
-            color: var(--text-secondary);
-        }
-
-        .pricing-features li:before {
-            content: "✓ ";
-            color: var(--accent);
-            font-weight: bold;
-        }
-
-        /* Technical Specs */
-        .specs {
-            padding: 5rem 0;
-            background: var(--white);
-        }
-
-        .specs-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 2rem;
-            margin-top: 3rem;
-        }
-
-        .spec-item {
-            text-align: center;
-            padding: 1.5rem;
-            border-radius: 0.5rem;
-            background: var(--card-bg);
-            border: 1px solid var(--border-color);
-        }
-
-        .spec-item h4 {
-            color: var(--text-primary);
-            margin-bottom: 0.5rem;
-        }
-
-        .spec-item p {
-            color: var(--text-secondary);
-            font-size: 0.875rem;
-        }
-
-        .upgrade-badge {
-            display: inline-block;
-            background: var(--accent);
-            color: white;
-            padding: 0.2rem 0.5rem;
-            border-radius: 0.5rem;
-            font-size: 0.7rem;
-            margin-left: 0.5rem;
-        }
-
-        /* Company Info */
-        .company {
-            padding: 5rem 0;
-            background: var(--light);
-        }
-
-        .company-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 4rem;
-            align-items: center;
-        }
-
-        .company-content h2 {
-            font-size: 2.5rem;
-            margin-bottom: 1rem;
-            color: var(--text-primary);
-        }
-
-        .company-content p {
-            color: var(--text-secondary);
-            margin-bottom: 1rem;
-        }
-
-        .company-stats {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 2rem;
-            margin-top: 2rem;
-        }
-
+        /* ---------- Numbers ---------- */
+        .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1.2rem; }
+        @media (max-width: 860px) { .stats { grid-template-columns: repeat(2, 1fr); } }
         .stat {
-            text-align: center;
-            padding: 1.5rem;
-            background: var(--card-bg);
-            border-radius: 0.5rem;
-            border: 1px solid var(--border-color);
+            text-align: center; border: 1px solid var(--border-color);
+            border-radius: 12px; padding: 1.4rem 1rem; background: var(--card-bg);
+        }
+        .stat .big { font-size: 1.7rem; font-weight: 800; color: var(--secondary); }
+        .stat p { color: var(--text-secondary); font-size: 0.85rem; margin-top: 0.4rem; }
+
+        /* ---------- Pricing ---------- */
+        .pricing-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.2rem; align-items: start; }
+        @media (max-width: 860px) { .pricing-grid { grid-template-columns: 1fr; } }
+        .plan {
+            border: 1px solid var(--border-color); border-radius: 12px;
+            background: var(--card-bg); padding: 1.6rem; position: relative;
+        }
+        .plan.popular { border-color: var(--secondary); }
+        .plan h3 { font-size: 1.1rem; }
+        .plan .price { font-size: 1.9rem; font-weight: 800; margin-top: 0.5rem; }
+        .plan .price small { font-size: 0.9rem; font-weight: 500; color: var(--text-secondary); }
+        .plan .alt-price { color: var(--text-secondary); font-size: 0.85rem; margin-top: 0.15rem; }
+        .plan ul { list-style: none; margin-top: 1rem; }
+        .plan li { padding: 0.3rem 0; color: var(--text-secondary); font-size: 0.92rem; }
+        .plan li::before { content: "✓  "; color: var(--accent); font-weight: 700; }
+        .plan .plan-cta { margin-top: 1.2rem; }
+
+        .packs { max-width: 980px; margin: 1.6rem auto 0; text-align: center; }
+        .packs-title { font-weight: 600; font-size: 0.95rem; margin-bottom: 0.7rem; }
+        .packs-row { display: flex; gap: 0.7rem; flex-wrap: wrap; justify-content: center; }
+        .pack {
+            border: 1px solid var(--border-color); border-radius: 10px;
+            padding: 0.6rem 1rem; background: var(--card-bg); font-size: 0.88rem;
+        }
+        .pack strong { display: block; }
+        .pack span { color: var(--text-secondary); font-size: 0.8rem; }
+        .packs .fine { color: var(--text-secondary); font-size: 0.8rem; margin-top: 0.8rem; }
+
+        .includes {
+            text-align: center; color: var(--text-secondary); font-size: 0.9rem;
+            margin-top: 2rem; padding-top: 1.4rem; border-top: 1px solid var(--border-color);
         }
 
-        .stat-number {
-            font-size: 2rem;
-            font-weight: 800;
-            color: var(--primary);
-        }
+        .compare { margin-top: 2.5rem; overflow-x: auto; }
+        table { border-collapse: collapse; width: 100%; font-size: 0.9rem; min-width: 640px; }
+        th, td { padding: 0.6rem 0.8rem; text-align: left; border-bottom: 1px solid var(--border-color); }
+        th { color: var(--text-secondary); font-weight: 600; }
+        td.us { font-weight: 700; }
+        .compare .fine { color: var(--text-secondary); font-size: 0.78rem; margin-top: 0.6rem; }
 
-        .stat-label {
-            color: var(--text-secondary);
-            font-size: 0.875rem;
+        /* ---------- Straight answers ---------- */
+        .answers { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.2rem; }
+        @media (max-width: 720px) { .answers { grid-template-columns: 1fr; } }
+        .answer {
+            border: 1px solid var(--border-color); border-radius: 12px;
+            padding: 1.3rem; background: var(--card-bg);
         }
+        .answer h3 { font-size: 1rem; }
+        .answer p { color: var(--text-secondary); font-size: 0.92rem; margin-top: 0.5rem; }
 
-        /* Partners */
-        .partners {
-            padding: 3rem 0;
-            background: var(--white);
-            border-top: 1px solid var(--border-color);
-            border-bottom: 1px solid var(--border-color);
-        }
+        /* ---------- Final CTA ---------- */
+        .final { text-align: center; }
+        .final h2 { font-size: 1.8rem; }
+        .final p { color: var(--text-secondary); margin: 0.8rem 0 1.6rem; }
 
-        .partners h3 {
-            text-align: center;
-            color: var(--text-secondary);
-            font-size: 1rem;
-            font-weight: 500;
-            margin-bottom: 2rem;
-            text-transform: uppercase;
-            letter-spacing: 0.1em;
-        }
-
-        .partners-grid {
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            gap: 4rem;
-            flex-wrap: wrap;
-        }
-
-        .partner-logo {
-            color: var(--text-secondary);
-            font-weight: 600;
-            font-size: 1.25rem;
-            opacity: 0.7;
-        }
-
-        /* Footer */
-        footer {
-            background: var(--card-bg);
-            color: var(--text-primary);
-            padding: 4rem 0 2rem;
-            border-top: 1px solid var(--border-color);
-        }
-
+        /* ---------- Footer ---------- */
+        footer { border-top: 1px solid var(--border-color); padding: 3rem 0 2rem; }
         .footer-grid {
-            display: grid;
-            grid-template-columns: 2fr 1fr 1fr 1fr;
-            gap: 3rem;
-            margin-bottom: 3rem;
+            display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 2rem;
         }
-
-        .footer-brand .logo {
-            font-size: 1.5rem;
-            margin-bottom: 1rem;
-        }
-
-        .footer-brand p {
-            color: var(--text-secondary);
-            margin-bottom: 1.5rem;
-        }
-
-        .footer-section h4 {
-            margin-bottom: 1rem;
-            color: var(--text-primary);
-        }
-
-        .footer-links {
-            list-style: none;
-        }
-
-        .footer-links a {
-            color: var(--text-secondary);
-            text-decoration: none;
-            display: block;
-            padding: 0.25rem 0;
-        }
-
-        .footer-links a:hover {
-            color: var(--primary);
-        }
-
+        @media (max-width: 720px) { .footer-grid { grid-template-columns: 1fr 1fr; } }
+        .footer-brand p { color: var(--text-secondary); font-size: 0.9rem; margin-top: 0.5rem; max-width: 260px; }
+        footer h4 { font-size: 0.85rem; letter-spacing: 0.04em; margin-bottom: 0.7rem; }
+        .footer-links { list-style: none; }
+        .footer-links li { margin: 0.35rem 0; }
+        .footer-links a { color: var(--text-secondary); font-size: 0.9rem; }
+        .footer-links a:hover { color: var(--text-primary); }
         .footer-bottom {
-            padding-top: 2rem;
-            border-top: 1px solid var(--border-color);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        .social-links {
-            display: flex;
-            gap: 1rem;
-        }
-
-        .social-links a {
-            color: var(--text-secondary);
-            text-decoration: none;
-            padding: 0.5rem;
-        }
-
-        /* Modal */
-        .modal {
-            display: none;
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: rgba(0,0,0,0.5);
-            z-index: 1000;
-            align-items: center;
-            justify-content: center;
-        }
-
-        .modal.active {
-            display: flex;
-        }
-
-        .modal-content {
-            background: var(--card-bg);
-            padding: 2rem;
-            border-radius: 1rem;
-            max-width: 500px;
-            width: 90%;
-            text-align: center;
-        }
-
-        .modal-content h3 {
-            color: var(--text-primary);
-            margin-bottom: 1rem;
-        }
-
-        .modal-content p {
-            color: var(--text-secondary);
-            margin-bottom: 1.5rem;
-        }
-
-        /* Mobile */
-        @media (max-width: 768px) {
-            .hero h1 {
-                font-size: 2rem;
-            }
-
-            .countdown {
-                gap: 1rem;
-            }
-
-            .countdown-number {
-                font-size: 2rem;
-            }
-
-            .nav-links {
-                display: none;
-            }
-
-            .company-grid,
-            .footer-grid {
-                grid-template-columns: 1fr;
-            }
-
-            .pricing-card.featured {
-                transform: none;
-            }
-
-            .waitlist-form {
-                flex-direction: column;
-            }
-
-            .footer-bottom {
-                flex-direction: column;
-                gap: 1rem;
-            }
+            margin-top: 2.5rem; padding-top: 1.2rem; border-top: 1px solid var(--border-color);
+            color: var(--text-secondary); font-size: 0.85rem;
+            display: flex; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem;
         }
     </style>
 </head>
 <body>
-    <!-- Announcement Bar -->
-    <div class="announcement-bar">
-        🚀 Early Access Registration Now Open - Limited Spots Available
-        <a href="#waitlist">Join Waitlist</a>
+
+<nav>
+    <div class="nav-inner">
+        <div class="logo">stored<span>.ge</span></div>
+        <ul class="nav-links">
+            <li class="hide-sm"><a href="#pricing">Pricing</a></li>
+            <li class="hide-sm"><a href="/docs">Docs</a></li>
+            <li class="hide-sm"><a href="/changelog">Changelog</a></li>
+            <li class="hide-sm"><a href="/status">Status</a></li>
+            <li><a href="/login">Sign in</a></li>
+            {{if .SignupsOpen}}
+            <li><a class="btn btn-primary" href="/register">Start free</a></li>
+            {{else}}
+            <li><a class="btn btn-primary" href="#waitlist">Join the waitlist</a></li>
+            {{end}}
+        </ul>
     </div>
+</nav>
 
-    <!-- Header -->
-    <header>
-        <nav class="container">
-            <div class="logo">stored.ge</div>
-            <ul class="nav-links">
-                <li><a href="#features">Features</a></li>
-                <li><a href="#pricing">Pricing</a></li>
-                <li><a href="#specs">Infrastructure</a></li>
-                <li><a href="#company">Company</a></li>
-                <li><a href="#" onclick="showModal('signin')">Sign In</a></li>
-                <li><button class="theme-toggle" onclick="toggleTheme()">🌙</button></li>
-            </ul>
-        </nav>
-    </header>
-
-    <!-- Countdown Section -->
-    <section class="countdown-section">
-        <div class="container">
-            <h2 class="countdown-title">Platform Launch In:</h2>
-            <div class="countdown" id="countdown">
-                <div class="countdown-item">
-                    <span class="countdown-number" id="days">316</span>
-                    <span class="countdown-label">Days</span>
-                </div>
-                <div class="countdown-item">
-                    <span class="countdown-number" id="hours">12</span>
-                    <span class="countdown-label">Hours</span>
-                </div>
-                <div class="countdown-item">
-                    <span class="countdown-number" id="minutes">45</span>
-                    <span class="countdown-label">Minutes</span>
-                </div>
-                <div class="countdown-item">
-                    <span class="countdown-number" id="seconds">30</span>
-                    <span class="countdown-label">Seconds</span>
-                </div>
-            </div>
-            <p style="opacity: 0.9;">July 31st, 2026 - Be Part of the Storage Revolution</p>
-        </div>
-    </section>
-
-    <!-- Hero Section -->
-    <section class="hero" id="waitlist">
-        <div class="container">
-            <div class="status-badge">PRE-LAUNCH</div>
-            <h1>Enterprise S3 Storage + VPS Platform</h1>
-            <p>The most advanced S3-compatible object storage with integrated compute. 7 global regions, full IAM support, persistent storage that survives VPS rebuilds.</p>
-
-            <form class="waitlist-form" onsubmit="handleWaitlist(event)">
-                <input type="email" placeholder="Enter your email for early access" required>
-                <button type="submit" class="btn btn-primary">Join Waitlist</button>
+<header class="hero" id="waitlist">
+    <div class="container">
+        {{if .SignupsOpen}}
+        <div class="hero-badge"><strong>Live</strong> — 5 GB free, no credit card</div>
+        {{else}}
+        <div class="hero-badge">Launching <strong>July 31, 2026</strong></div>
+        {{end}}
+        <h1>S3-compatible storage<br>that optimizes itself.</h1>
+        <p class="sub">
+            One endpoint. Your data automatically tiers across hot storage and tape —
+            <strong>$3.99/TB</strong>, archive from <strong>$1/TB</strong>.
+            No API fees. 3× free egress. No minimum storage duration.
+        </p>
+        <div class="hero-cta">
+            {{if .SignupsOpen}}
+            <a class="btn btn-primary" href="/register">Start free — 5 GB, no card</a>
+            <a class="btn btn-outline" href="#pricing">See pricing</a>
+            {{else}}
+            <form class="waitlist-form" data-waitlist>
+                <input type="email" name="email" placeholder="you@example.com" required aria-label="Email address">
+                <button type="submit" class="btn btn-primary">Join the waitlist</button>
             </form>
-
-            <p style="margin-top: 1rem; font-size: 0.875rem; color: var(--text-secondary);">
-                Be among the first 100 users to get 50% off for life
-            </p>
+            {{end}}
         </div>
-    </section>
+        {{if not .SignupsOpen}}
+        <div class="hero-cta" style="margin-top:0.9rem"><a class="btn btn-outline" href="#pricing">See launch pricing</a></div>
+        {{end}}
+        <p class="trust-line">Open-source engine · measured benchmarks · founder-direct support</p>
+    </div>
+</header>
 
-    <!-- Features -->
-    <section class="features" id="features">
-        <div class="container">
-            <h2>Enterprise Features, Startup Pricing</h2>
-            <p class="section-subtitle">Everything you need to build, deploy, and scale your applications</p>
-
-            <div class="feature-grid">
-                <div class="feature-card">
-                    <div class="feature-icon">🚀</div>
-                    <h3>S3-Compatible API</h3>
-                    <p>Full S3 API compatibility with IAM policies, CORS, versioning, lifecycle management, and multipart uploads.</p>
+<section>
+    <div class="container">
+        <div class="section-head">
+            <h2>Pick your rung</h2>
+            <p>Three tiers, one S3 API. Start where your workload lives — move buckets between tiers whenever you like.</p>
+        </div>
+        <div class="ladder">
+            <div class="rung perf">
+                <div class="rung-head">
+                    <h3>Performance</h3>
+                    <span class="rung-price">$5.99/TB/mo</span>
                 </div>
-                <div class="feature-card">
-                    <div class="feature-icon">🌍</div>
-                    <h3>7 Global Regions</h3>
-                    <p>Deploy across US West, US Central, US East, EU West, EU Central, Asia Tokyo, or Asia Singapore.</p>
+                <p>Always hot. ~24 ms reads, data never ages to a slower tier, egress served direct.</p>
+                <div class="for">
+                    <span class="chip">latency-sensitive apps</span>
+                    <span class="chip">media &amp; API assets</span>
+                    <span class="chip">fast-restore backups</span>
+                    <span class="chip">B2 migrations</span>
                 </div>
-                <div class="feature-card">
-                    <div class="feature-icon">💾</div>
-                    <h3>Persistent Storage</h3>
-                    <p>Your data survives VPS rebuilds. Reinstall OS, change distributions, your storage remains intact.</p>
+            </div>
+            <div class="rung standard">
+                <span class="rung-tag">MOST POPULAR</span>
+                <div class="rung-head">
+                    <h3>Standard</h3>
+                    <span class="rung-price">$3.99/TB/mo annual · $4.99 monthly</span>
                 </div>
-                <div class="feature-card">
-                    <div class="feature-icon">⚡</div>
-                    <h3>High Performance</h3>
-                    <p>SSD storage with NVMe upgrade path. Sub-millisecond latency for hot data with intelligent caching.</p>
+                <p>Smart storage that optimizes itself. Hot data stays fast, cold data moves to cheaper, more durable tiers — you store, we optimize.</p>
+                <div class="for">
+                    <span class="chip">general S3 storage</span>
+                    <span class="chip">SaaS backends</span>
+                    <span class="chip">backup targets</span>
+                    <span class="chip">data lakes</span>
                 </div>
-                <div class="feature-card">
-                    <div class="feature-icon">🔒</div>
-                    <h3>Enterprise Security</h3>
-                    <p>AES-256 encryption at rest, TLS 1.3 in transit, SOC 2 compliance, and comprehensive audit logging.</p>
+            </div>
+            <div class="rung vault">
+                <div class="rung-head">
+                    <h3>Vault packs</h3>
+                    <span class="rung-price">from $1/TB/mo</span>
                 </div>
-                <div class="feature-card">
-                    <div class="feature-icon">🤖</div>
-                    <h3>AI & ML Ready</h3>
-                    <p>Optimized for AI workloads. Run Llama, Stable Diffusion, Whisper models with GPU acceleration support.</p>
+                <p>Tape-backed archive in prepaid packs. Glacier pricing with gigabit ingest — and Vault packs bill on their own, so if you ever need to cut costs, the archive keeps running.</p>
+                <div class="for">
+                    <span class="chip">3-2-1 backups</span>
+                    <span class="chip">compliance &amp; WORM</span>
+                    <span class="chip">homelab archives</span>
+                    <span class="chip">datahoarders</span>
                 </div>
             </div>
         </div>
-    </section>
+        <p class="ladder-note">Not sure? Start on Standard — it self-optimizes, and you can move any bucket up or down later.</p>
+    </div>
+</section>
 
-    <!-- Pricing -->
-    <section class="pricing" id="pricing">
-        <div class="container">
-            <h2>Simple, Transparent Pricing</h2>
-            <p class="section-subtitle">No hidden fees. No egress charges. No API call fees. Just honest pricing.</p>
-
-            <div class="pricing-grid">
-                <div class="pricing-card">
-                    <h3>Starter</h3>
-                    <div class="price">$3.99<span class="price-period">/month</span></div>
-                    <ul class="pricing-features">
-                        <li>50GB S3 Storage</li>
-                        <li>2GB RAM VPS</li>
-                        <li>2 vCPU Cores</li>
-                        <li>NAT IPv4 (10 ports)</li>
-                        <li>5TB Bandwidth</li>
-                        <li>99.9% Uptime SLA</li>
-                        <li>Email Support</li>
-                    </ul>
-                    <button class="btn btn-coming-soon" style="width: 100%;">Coming July 2026</button>
-                </div>
-
-                <div class="pricing-card featured">
-                    <span class="badge">MOST POPULAR</span>
-                    <h3>Growth</h3>
-                    <div class="price">$7.99<span class="price-period">/month</span></div>
-                    <ul class="pricing-features">
-                        <li>100GB S3 Storage</li>
-                        <li>4GB RAM VPS</li>
-                        <li>4 vCPU Cores</li>
-                        <li>NAT IPv4 (20 ports)</li>
-                        <li>10TB Bandwidth</li>
-                        <li>99.95% Uptime SLA</li>
-                        <li>Priority Support</li>
-                        <li>Dedicated IPv4 Option</li>
-                    </ul>
-                    <button class="btn btn-coming-soon" style="width: 100%;">Coming July 2026</button>
-                </div>
-
-                <div class="pricing-card">
-                    <h3>Power</h3>
-                    <div class="price">$19.99<span class="price-period">/month</span></div>
-                    <ul class="pricing-features">
-                        <li>500GB S3 Storage</li>
-                        <li>8GB RAM VPS</li>
-                        <li>8 vCPU Cores</li>
-                        <li>Dedicated IPv4 Included</li>
-                        <li>20TB Bandwidth</li>
-                        <li>99.99% Uptime SLA</li>
-                        <li>24/7 Phone Support</li>
-                        <li>Custom Configurations</li>
-                    </ul>
-                    <button class="btn btn-coming-soon" style="width: 100%;">Contact Sales</button>
-                </div>
+<section class="alt">
+    <div class="container">
+        <div class="section-head">
+            <h2>How it works</h2>
+            <p>You upload to one S3 endpoint. The engine handles placement, migration, and retrieval.</p>
+        </div>
+        <div class="timeline">
+            <div class="stage">
+                <div class="when">DAY 0–30</div>
+                <h3>Hot</h3>
+                <p>Performance storage on enterprise S3 infrastructure. Sub-30 ms reads, full-speed multipart uploads.</p>
+            </div>
+            <div class="stage">
+                <div class="when">DAY 30–90</div>
+                <h3>Optimized</h3>
+                <p>Objects you stop touching migrate to cheaper storage with free egress. Still online, still fast.</p>
+            </div>
+            <div class="stage">
+                <div class="when">DAY 90+</div>
+                <h3>Archive</h3>
+                <p>Cold data lands on tape libraries for maximum durability at archive economics.</p>
             </div>
         </div>
-    </section>
-
-    <!-- Technical Specs -->
-    <section class="specs" id="specs">
-        <div class="container">
-            <h2>Enterprise Infrastructure</h2>
-            <p class="section-subtitle">Built on industry-leading hardware and software</p>
-
-            <div class="specs-grid">
-                <div class="spec-item">
-                    <h4>Seagate Lyve Cloud</h4>
-                    <p>Enterprise S3 storage backend with 11 nines durability</p>
-                </div>
-                <div class="spec-item">
-                    <h4>Intel Xeon E5<span class="upgrade-badge">AMD 7950X Soon</span></h4>
-                    <p>Enterprise processors with upgrade to latest AMD planned</p>
-                </div>
-                <div class="spec-item">
-                    <h4>256GB DDR3<span class="upgrade-badge">DDR5 Soon</span></h4>
-                    <p>Massive memory capacity with DDR5 upgrade coming</p>
-                </div>
-                <div class="spec-item">
-                    <h4>SSD Storage<span class="upgrade-badge">NVMe Soon</span></h4>
-                    <p>Fast SSD with PCIe 4.0 NVMe upgrade planned</p>
-                </div>
-                <div class="spec-item">
-                    <h4>10Gbps Network</h4>
-                    <p>Unmetered bandwidth on premium network</p>
-                </div>
-                <div class="spec-item">
-                    <h4>DDoS Protection</h4>
-                    <p>Always-on mitigation up to 500Gbps</p>
-                </div>
-                <div class="spec-item">
-                    <h4>ReliableSite DC</h4>
-                    <p>Tier 3+ data centers with N+1 redundancy</p>
-                </div>
-                <div class="spec-item">
-                    <h4>24/7 Monitoring</h4>
-                    <p>Proactive monitoring and instant alerts</p>
-                </div>
+        <p class="how-note">
+            Access any object anytime — the engine serves from the fastest available copy.
+            You never configure lifecycle policies unless you want to.
+        </p>
+        <div class="quickstart">
+            <div class="quickstart-head">
+                <span>Quickstart — works in under a minute</span>
+                <button class="copy-btn" data-copy="rclone-snippet">Copy</button>
             </div>
-        </div>
-    </section>
+            <pre id="rclone-snippet">rclone config create stored s3 \
+  provider=Other \
+  access_key_id=YOUR_ACCESS_KEY \
+  secret_access_key=YOUR_SECRET_KEY \
+  endpoint=https://stored.ge \
+  region=us-east-1
 
-    <!-- Partners -->
-    <section class="partners">
-        <div class="container">
-            <h3>Infrastructure Partners</h3>
-            <div class="partners-grid">
-                <div class="partner-logo">Seagate Lyve Cloud</div>
-                <div class="partner-logo">ReliableSite</div>
-                <div class="partner-logo">Cloudflare</div>
-                <div class="partner-logo">Let's Encrypt</div>
-            </div>
-        </div>
-    </section>
-
-    <!-- Company -->
-    <section class="company" id="company">
-        <div class="container">
-            <div class="company-grid">
-                <div class="company-content">
-                    <h2>Built for the Future of Storage</h2>
-                    <p>stored.ge is a next-generation storage platform designed from the ground up to meet the demands of modern applications. We combine enterprise-grade reliability with developer-friendly simplicity.</p>
-                    <p>Our unique architecture allows persistent storage that survives VPS rebuilds, making it perfect for containerized applications, CI/CD pipelines, and development workflows.</p>
-                    <p>Founded by infrastructure engineers with decades of combined experience at leading tech companies, we're building the storage platform we wished existed.</p>
-                </div>
-                <div class="company-stats">
-                    <div class="stat">
-                        <div class="stat-number">7</div>
-                        <div class="stat-label">Global Regions</div>
-                    </div>
-                    <div class="stat">
-                        <div class="stat-number">99.99%</div>
-                        <div class="stat-label">Uptime SLA</div>
-                    </div>
-                    <div class="stat">
-                        <div class="stat-number">10PB+</div>
-                        <div class="stat-label">Storage Capacity</div>
-                    </div>
-                    <div class="stat">
-                        <div class="stat-number">24/7</div>
-                        <div class="stat-label">Support Available</div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </section>
-
-    <!-- Footer -->
-    <footer>
-        <div class="container">
-            <div class="footer-grid">
-                <div class="footer-brand">
-                    <div class="logo">stored.ge</div>
-                    <p>Enterprise S3 Storage + VPS Platform</p>
-                    <p style="font-size: 0.875rem;">© 2024 stored.ge - A Division of Fairforge LLC</p>
-                </div>
-
-                <div class="footer-section">
-                    <h4>Product</h4>
-                    <ul class="footer-links">
-                        <li><a href="#features">Features</a></li>
-                        <li><a href="#pricing">Pricing</a></li>
-                        <li><a href="#specs">Infrastructure</a></li>
-                        <li><a href="#">Documentation</a></li>
-                        <li><a href="#">API Reference</a></li>
-                    </ul>
-                </div>
-
-                <div class="footer-section">
-                    <h4>Company</h4>
-                    <ul class="footer-links">
-                        <li><a href="#company">About Us</a></li>
-                        <li><a href="#">Blog</a></li>
-                        <li><a href="#">Careers</a></li>
-                        <li><a href="#">Partners</a></li>
-                        <li><a href="#">Contact</a></li>
-                    </ul>
-                </div>
-
-                <div class="footer-section">
-                    <h4>Legal</h4>
-                    <ul class="footer-links">
-                        <li><a href="#">Terms of Service</a></li>
-                        <li><a href="#">Privacy Policy</a></li>
-                        <li><a href="#">SLA</a></li>
-                        <li><a href="#">DPA</a></li>
-                        <li><a href="#">Compliance</a></li>
-                    </ul>
-                </div>
-            </div>
-
-            <div class="footer-bottom">
-                <p style="color: var(--text-secondary); font-size: 0.875rem;">
-                    Powered by Seagate Lyve Cloud and ReliableSite Infrastructure
-                </p>
-                <div class="social-links">
-                    <a href="#">Twitter</a>
-                    <a href="#">GitHub</a>
-                    <a href="#">LinkedIn</a>
-                </div>
-            </div>
-        </div>
-    </footer>
-
-    <!-- Modal -->
-    <div class="modal" id="modal">
-        <div class="modal-content">
-            <h3 id="modal-title">Coming Soon</h3>
-            <p id="modal-message">This feature will be available when we launch in July 2026.</p>
-            <button class="btn btn-primary" onclick="closeModal()">Got It</button>
+rclone copy ~/backups stored:my-bucket -P</pre>
+            <p class="after">Prefer restic? <code>restic -r s3:https://stored.ge/my-bucket init</code> — aws-cli, s3cmd, Cyberduck, and anything else that speaks S3 works too.</p>
         </div>
     </div>
+</section>
 
-    <script>
-        // Dark Mode Toggle
-        function toggleTheme() {
-            const html = document.documentElement;
-            const currentTheme = html.getAttribute('data-theme');
-            const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
-            html.setAttribute('data-theme', newTheme);
-            localStorage.setItem('theme', newTheme);
+<section>
+    <div class="container">
+        <div class="section-head">
+            <h2>Measured, not projected</h2>
+            <p>Numbers from real benchmarks on the production stack.</p>
+        </div>
+        <div class="stats">
+            <div class="stat">
+                <div class="big">22/22</div>
+                <p>S3 compatibility tests passing — verified with aws-cli, boto3, rclone, restic, and JuiceFS</p>
+            </div>
+            <div class="stat">
+                <div class="big">320 MB/s</div>
+                <p>sustained multipart upload, measured from a datacenter host</p>
+            </div>
+            <div class="stat">
+                <div class="big">&lt;1 ms</div>
+                <p>metadata reads — HEAD served from a PostgreSQL cache, never a backend round-trip</p>
+            </div>
+            <div class="stat">
+                <div class="big">0 bytes</div>
+                <p>buffered in memory — everything streams, so a 500 GB PUT uses the same RAM as a 5 MB one</p>
+            </div>
+        </div>
+    </div>
+</section>
 
-            // Update toggle button
-            const toggle = document.querySelector('.theme-toggle');
-            toggle.textContent = newTheme === 'dark' ? '☀️' : '🌙';
-        }
+<section class="alt" id="pricing">
+    <div class="container">
+        <div class="section-head">
+            <h2>Pricing</h2>
+            <p>Pay per TB. No API fees, no request classes, no minimum storage duration.</p>
+        </div>
+        <div class="pricing-grid">
+            <div class="plan">
+                <h3>Vault</h3>
+                <div class="price">from $1<small>/TB/mo</small></div>
+                <div class="alt-price">prepaid packs, 1–18 TB</div>
+                <ul>
+                    <li>Tape-backed archive</li>
+                    <li>Full-speed S3 ingest</li>
+                    <li>1× free egress</li>
+                    <li>Billed separately — survives downgrades</li>
+                </ul>
+                <div class="plan-cta"><a class="btn btn-outline" href="#packs">View packs</a></div>
+            </div>
+            <div class="plan popular">
+                <span class="rung-tag">MOST POPULAR</span>
+                <h3>Standard</h3>
+                <div class="price">$3.99<small>/TB/mo</small></div>
+                <div class="alt-price">annual · $4.99 monthly</div>
+                <ul>
+                    <li>Automatic tiering built in</li>
+                    <li>3× free egress, then $0.01/GB</li>
+                    <li>Global dedup + compression</li>
+                    <li>6× cheaper than AWS S3</li>
+                </ul>
+                {{if .SignupsOpen}}
+                <div class="plan-cta"><a class="btn btn-primary" href="/register">Start free</a></div>
+                {{else}}
+                <div class="plan-cta"><a class="btn btn-primary" href="#waitlist">Join the waitlist</a></div>
+                {{end}}
+            </div>
+            <div class="plan">
+                <h3>Performance</h3>
+                <div class="price">$5.99<small>/TB/mo</small></div>
+                <div class="alt-price">pure hot storage</div>
+                <ul>
+                    <li>~24 ms reads, always</li>
+                    <li>Data never ages out</li>
+                    <li>3× free egress</li>
+                    <li>Cheaper than B2's $6.95</li>
+                </ul>
+                {{if .SignupsOpen}}
+                <div class="plan-cta"><a class="btn btn-outline" href="/register">Start free</a></div>
+                {{else}}
+                <div class="plan-cta"><a class="btn btn-outline" href="#waitlist">Join the waitlist</a></div>
+                {{end}}
+            </div>
+        </div>
 
-        // Load saved theme
-        const savedTheme = localStorage.getItem('theme') || 'light';
-        document.documentElement.setAttribute('data-theme', savedTheme);
-        if (savedTheme === 'dark') {
-            document.querySelector('.theme-toggle').textContent = '☀️';
-        }
+        <div class="packs" id="packs">
+            <div class="packs-title">Vault packs — fixed-price, tape-backed archive</div>
+            <div class="packs-row">
+                <div class="pack"><strong>Vault1</strong><span>1 TB · $4.99/mo</span></div>
+                <div class="pack"><strong>Vault3</strong><span>3 TB · $7.99/mo</span></div>
+                <div class="pack"><strong>Vault5</strong><span>5 TB · $9.99/mo</span></div>
+                <div class="pack"><strong>Vault10</strong><span>10 TB · $12.99/mo</span></div>
+                <div class="pack"><strong>Vault18</strong><span>18 TB · $17.99/mo = $1.00/TB</span></div>
+            </div>
+            <p class="fine">Vault18 at $1/TB is a launch promo for the first 100 packs, price-locked for 12 months (then $2.49/TB — still a third of B2).</p>
+        </div>
 
-        // Countdown Timer
-        function updateCountdown() {
-            const launchDate = new Date('July 31, 2026 00:00:00').getTime();
-            const now = new Date().getTime();
-            const distance = launchDate - now;
+        <p class="includes">
+            Every tier includes: real S3 API (multipart, versioning, Object Lock/WORM, presigned URLs) ·
+            $0 API fees · no minimum duration · encryption at rest · scoped API keys &amp; STS
+        </p>
 
-            const days = Math.floor(distance / (1000 * 60 * 60 * 24));
-            const hours = Math.floor((distance % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
-            const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
-            const seconds = Math.floor((distance % (1000 * 60)) / 1000);
+        <div class="compare">
+            <table>
+                <thead>
+                    <tr><th></th><th>stored.ge</th><th>Backblaze B2</th><th>Wasabi</th><th>Cloudflare R2</th><th>AWS S3</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td>$/TB/mo</td><td class="us">$3.99</td><td>$6.95</td><td>$6.99</td><td>$15.00</td><td>$23.00</td></tr>
+                    <tr><td>API/request fees</td><td class="us">$0</td><td>Class B/C fees</td><td>$0</td><td>ops-based</td><td>per-request</td></tr>
+                    <tr><td>Egress</td><td class="us">3× free, then $0.01/GB</td><td>3× free, then $0.01/GB</td><td>"Free" (fair-use policy)</td><td>Free</td><td>$0.09/GB</td></tr>
+                    <tr><td>Min storage duration</td><td class="us">None</td><td>None</td><td>90 days</td><td>None</td><td>None</td></tr>
+                    <tr><td>Archive tier</td><td class="us">$1/TB (tape)</td><td>—</td><td>—</td><td>—</td><td>Glacier (retrieval fees)</td></tr>
+                    <tr><td>Auto-tiering</td><td class="us">Built in</td><td>No</td><td>No</td><td>No</td><td>Manual lifecycle</td></tr>
+                </tbody>
+            </table>
+            <p class="fine">Competitor pricing as published July 2026. Wasabi's free egress is subject to their fair-use ratio policy.</p>
+        </div>
+    </div>
+</section>
 
-            document.getElementById('days').textContent = days;
-            document.getElementById('hours').textContent = hours.toString().padStart(2, '0');
-            document.getElementById('minutes').textContent = minutes.toString().padStart(2, '0');
-            document.getElementById('seconds').textContent = seconds.toString().padStart(2, '0');
+<section>
+    <div class="container">
+        <div class="section-head">
+            <h2>Straight answers</h2>
+            <p>The parts most storage pages won't tell you. More in the <a href="/docs/faq">full FAQ</a>.</p>
+        </div>
+        <div class="answers">
+            <div class="answer">
+                <h3>Is there an SLA?</h3>
+                <p>Not a contractual one yet — we won't sell one we can't back. The target is 99.5%+, the <a href="/status">status page</a> is real, and incident reports are written by a human. SLA credits ship with the second site.</p>
+            </div>
+            <div class="answer">
+                <h3>Where does my data actually live?</h3>
+                <p>On established storage providers — enterprise S3 infrastructure for hot data, professional tape libraries for archive. The control plane runs on our own hardware with tested daily off-site backups; your data doesn't depend on that one box.</p>
+            </div>
+            <div class="answer">
+                <h3>How fast are cold reads?</h3>
+                <p>Data that's aged to tape spools to cache on first read — seconds to a couple of minutes to first byte, longer for multi-TB restores. Hot data is &lt;50 ms. Need everything hot forever? That's the Performance tier.</p>
+            </div>
+            <div class="answer">
+                <h3>What if you disappear?</h3>
+                <p>It's standard S3 — <code>rclone sync</code> your data out any time, free, no proprietary format. Documented wind-down commitment: minimum 60 days notice and free unlimited egress. The <a href="https://github.com/FairForge/vaultaire">engine is open source</a>, so the software outlives us too.</p>
+            </div>
+        </div>
+    </div>
+</section>
 
-            if (distance < 0) {
-                document.getElementById('countdown').innerHTML = '<h2>We are LIVE!</h2>';
-            }
-        }
+<section class="alt final">
+    <div class="container">
+        {{if .SignupsOpen}}
+        <h2>Try it in the next five minutes</h2>
+        <p>5 GB free, no credit card. Keys on signup, rclone config ready to paste.</p>
+        <a class="btn btn-primary" href="/register">Start free</a>
+        {{else}}
+        <h2>Launching July 31, 2026</h2>
+        <p>Join the waitlist and we'll email you once — on launch day, with a founding-member code.</p>
+        <form class="waitlist-form" data-waitlist>
+            <input type="email" name="email" placeholder="you@example.com" required aria-label="Email address">
+            <button type="submit" class="btn btn-primary">Join the waitlist</button>
+        </form>
+        {{end}}
+    </div>
+</section>
 
-        setInterval(updateCountdown, 1000);
-        updateCountdown();
+<footer>
+    <div class="container">
+        <div class="footer-grid">
+            <div class="footer-brand">
+                <div class="logo">stored<span>.ge</span></div>
+                <p>S3-compatible storage orchestration across hot storage and tape. Built in the open by FairForge.</p>
+            </div>
+            <div>
+                <h4>PRODUCT</h4>
+                <ul class="footer-links">
+                    <li><a href="#pricing">Pricing</a></li>
+                    <li><a href="/docs">Docs</a></li>
+                    <li><a href="/changelog">Changelog</a></li>
+                    <li><a href="/status">Status</a></li>
+                    <li><a href="https://github.com/FairForge/vaultaire">GitHub</a></li>
+                </ul>
+            </div>
+            <div>
+                <h4>LEGAL</h4>
+                <ul class="footer-links">
+                    <li><a href="/legal/terms">Terms of Service</a></li>
+                    <li><a href="/legal/privacy">Privacy Policy</a></li>
+                    <li><a href="/legal/aup">Acceptable Use</a></li>
+                    <li><a href="/legal/cookies">Cookie Policy</a></li>
+                    <li><a href="/legal/dpa">DPA</a></li>
+                    <li><a href="/legal/gdpr">GDPR</a></li>
+                    <li><a href="/legal/baa">BAA</a></li>
+                    <li><a href="/legal/data-act">EU Data Act</a></li>
+                </ul>
+            </div>
+            <div>
+                <h4>SUPPORT</h4>
+                <ul class="footer-links">
+                    <li><a href="mailto:support@stored.ge">support@stored.ge</a></li>
+                    <li><a href="/abuse">Report abuse</a></li>
+                    <li><a href="/login">Sign in</a></li>
+                </ul>
+            </div>
+        </div>
+        <div class="footer-bottom">
+            <span>© 2026 FairForge LLC. All rights reserved.</span>
+            <span>Founder-direct support — replies target &lt;4 h.</span>
+        </div>
+    </div>
+</footer>
 
-        // Modal Functions
-        function showModal(type) {
-            const modal = document.getElementById('modal');
-            const title = document.getElementById('modal-title');
-            const message = document.getElementById('modal-message');
-
-            if (type === 'signin') {
-                title.textContent = 'Sign In Coming Soon';
-                message.textContent = 'Customer portal will be available at launch. Join the waitlist to be notified!';
-            } else if (type === 'waitlist-success') {
-                title.textContent = 'Welcome to the Waitlist!';
-                message.textContent = 'You\'re on the list! We\'ll notify you when early access opens.';
-            }
-
-            modal.classList.add('active');
-        }
-
-        function closeModal() {
-            document.getElementById('modal').classList.remove('active');
-        }
-
-        // Waitlist Handler — posts the email to the backend, then confirms.
-        async function handleWaitlist(event) {
+<script>
+    {{if not .SignupsOpen}}
+    // Waitlist forms post to the existing /api/waitlist endpoint, then swap to
+    // an inline confirmation. Both hero and footer forms share this handler.
+    document.querySelectorAll('[data-waitlist]').forEach(function (form) {
+        form.addEventListener('submit', async function (event) {
             event.preventDefault();
-            const input = event.target.querySelector('input[type="email"]');
-            const email = input ? input.value : '';
+            var email = form.querySelector('input[name=email]').value;
             try {
                 await fetch('/api/waitlist', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                    body: 'email=' + encodeURIComponent(email)
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email: email })
                 });
-            } catch (err) {
-                // Network error — still acknowledge; the common path succeeds.
-            }
-            showModal('waitlist-success');
-            event.target.reset();
-        }
-
-        // Click outside modal to close
-        document.getElementById('modal').addEventListener('click', function(e) {
-            if (e.target === this) {
-                closeModal();
-            }
+            } catch (e) { /* endpoint degrades to 200; confirmation is best-effort */ }
+            form.innerHTML = '<span class="waitlist-ok">You\'re on the list — see you July 31.</span>';
         });
-    </script>
+    });
+    {{end}}
+
+    document.querySelectorAll('[data-copy]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            var target = document.getElementById(btn.getAttribute('data-copy'));
+            navigator.clipboard.writeText(target.innerText).then(function () {
+                btn.textContent = 'Copied!';
+                setTimeout(function () { btn.textContent = 'Copy'; }, 1500);
+            });
+        });
+    });
+</script>
+
 </body>
 </html>

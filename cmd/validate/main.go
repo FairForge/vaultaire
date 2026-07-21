@@ -3,7 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/md5"
+	"crypto/md5" // #nosec G501 -- S3 ETags are MD5 by spec; not used for security
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -370,13 +370,13 @@ func (s *suite) testMultipart() (string, map[string]string, error) {
 	data := make([]byte, size)
 	_, _ = rand.Read(data)
 
-	uploader := manager.NewUploader(s.client, func(u *manager.Uploader) {
+	uploader := manager.NewUploader(s.client, func(u *manager.Uploader) { //nolint:staticcheck // manager.Uploader is deprecated in favor of transfermanager; migration is a post-launch WP
 		u.PartSize = 5 * 1024 * 1024
 		u.Concurrency = 4
 	})
 
 	start := time.Now()
-	_, err := uploader.Upload(ctx, &s3.PutObjectInput{
+	_, err := uploader.Upload(ctx, &s3.PutObjectInput{ //nolint:staticcheck // manager.Uploader is deprecated in favor of transfermanager; migration is a post-launch WP
 		Bucket: aws.String(s.bkt),
 		Key:    aws.String("test/multipart-100mb.bin"),
 		Body:   bytes.NewReader(data),
@@ -753,7 +753,7 @@ func (s *suite) testOverwrite() (string, map[string]string, error) {
 		return "", nil, fmt.Errorf("got old content after overwrite")
 	}
 
-	expectedETag := fmt.Sprintf("%x", md5.Sum(data2))
+	expectedETag := fmt.Sprintf("%x", md5.Sum(data2)) // #nosec G401 -- S3 ETag comparison, not a security hash
 	if out.ETag != nil && strings.Trim(*out.ETag, `"`) != expectedETag {
 		return "", nil, fmt.Errorf("ETag mismatch: want %s, got %s", expectedETag, *out.ETag)
 	}
@@ -816,7 +816,7 @@ force_path_style = true
 	_ = tmpConfig.Close()
 
 	// rclone lsd (list buckets)
-	cmd := exec.Command(bin, "--config", tmpConfig.Name(), "lsd", "validate:")
+	cmd := exec.Command(bin, "--config", tmpConfig.Name(), "lsd", "validate:") // #nosec G204 -- validation harness deliberately drives the rclone binary
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", nil, fmt.Errorf("rclone lsd: %s (%w)", string(out), err)
@@ -831,14 +831,14 @@ force_path_style = true
 	_ = tmpFile.Close()
 	defer func() { _ = os.Remove(tmpFile.Name()) }()
 
-	cmd = exec.Command(bin, "--config", tmpConfig.Name(), "copyto",
+	cmd = exec.Command(bin, "--config", tmpConfig.Name(), "copyto", // #nosec G204 -- validation harness deliberately drives the rclone binary
 		tmpFile.Name(), fmt.Sprintf("validate:%s/test/rclone-upload.txt", s.bkt))
 	if out, err = cmd.CombinedOutput(); err != nil {
 		return "", nil, fmt.Errorf("rclone copyto: %s (%w)", string(out), err)
 	}
 
 	// rclone cat (read back)
-	cmd = exec.Command(bin, "--config", tmpConfig.Name(), "cat",
+	cmd = exec.Command(bin, "--config", tmpConfig.Name(), "cat", // #nosec G204 -- validation harness deliberately drives the rclone binary
 		fmt.Sprintf("validate:%s/test/rclone-upload.txt", s.bkt))
 	out, err = cmd.CombinedOutput()
 	if err != nil {
