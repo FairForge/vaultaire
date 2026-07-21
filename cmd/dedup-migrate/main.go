@@ -3,7 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/md5" // #nosec G401 — S3 spec requires MD5
+	"crypto/md5" // #nosec G401 G501 -- S3 ETags are MD5 by spec; not used for security
 	"database/sql"
 	"flag"
 	"fmt"
@@ -147,7 +147,7 @@ func selectCandidates(ctx context.Context, db *sql.DB, minSize int64, tenantFilt
 		argN++
 	}
 	if bucketFilter != "" {
-		query += fmt.Sprintf(" AND bucket = $%d", argN)
+		query += fmt.Sprintf(" AND bucket = $%d", argN) // #nosec G202 -- appends a $n placeholder only; the value is parameterized
 		args = append(args, bucketFilter)
 		argN++
 	}
@@ -155,7 +155,7 @@ func selectCandidates(ctx context.Context, db *sql.DB, minSize int64, tenantFilt
 	query += " ORDER BY size_bytes DESC"
 
 	if limit > 0 {
-		query += fmt.Sprintf(" LIMIT $%d", argN)
+		query += fmt.Sprintf(" LIMIT $%d", argN) // #nosec G202 -- appends a $n placeholder only; the value is parameterized
 		args = append(args, limit)
 	}
 
@@ -377,7 +377,7 @@ func bootstrap(logger *zap.Logger) (*sql.DB, *engine.CoreEngine) {
 	if dataPath == "" {
 		dataPath = "/tmp/vaultaire-data"
 	}
-	if mkErr := os.MkdirAll(dataPath, 0750); mkErr != nil {
+	if mkErr := os.MkdirAll(dataPath, 0750); mkErr != nil { // #nosec G703 -- DATA_PATH is operator-supplied config for this admin CLI, not request input
 		logger.Fatal("create data dir", zap.Error(mkErr))
 	}
 	localDriver := drivers.NewLocalDriver(dataPath, logger)
