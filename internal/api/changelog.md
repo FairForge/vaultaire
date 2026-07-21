@@ -5,6 +5,16 @@ what you need and it shows up here.
 
 ---
 
+## 2026-07-20 — New homepage
+
+- **The real stored.ge front page is live.** Tier ladder (Vault archive →
+  Standard → Performance), honest measured numbers, full pricing with the
+  Vault packs, and a straight-answers section covering the questions most
+  storage providers dodge. The old pre-launch placeholder page is gone.
+- **The footer now links everything.** Terms, privacy, acceptable use, DPA,
+  GDPR, BAA, EU Data Act, the status page, this changelog, and abuse
+  reporting — all reachable from the homepage at last.
+
 ## 2026-07-20 — Live-iteration kit
 
 - **Runtime feature flags.** New capabilities now roll out flag-dark and get
