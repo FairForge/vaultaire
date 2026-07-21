@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"html/template"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -260,22 +261,25 @@ func HandleAddNote(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 			http.Error(w, "Bad Request", http.StatusBadRequest)
 			return
 		}
+		// Redirect target is path-escaped so a crafted id can never break out
+		// of the /admin/support/ prefix.
+		detailPath := "/admin/support/" + url.PathEscape(tenantID)
 
 		note := strings.TrimSpace(r.FormValue("note"))
 		if note == "" {
 			middleware.SetFlash(w, "error", "Note cannot be empty.")
-			http.Redirect(w, r, "/admin/support/"+tenantID, http.StatusSeeOther)
+			http.Redirect(w, r, detailPath, http.StatusSeeOther)
 			return
 		}
 		if len(note) > 2000 {
 			middleware.SetFlash(w, "error", "Note is too long (max 2000 characters).")
-			http.Redirect(w, r, "/admin/support/"+tenantID, http.StatusSeeOther)
+			http.Redirect(w, r, detailPath, http.StatusSeeOther)
 			return
 		}
 
 		if db == nil {
 			middleware.SetFlash(w, "error", "Database not available.")
-			http.Redirect(w, r, "/admin/support/"+tenantID, http.StatusSeeOther)
+			http.Redirect(w, r, detailPath, http.StatusSeeOther)
 			return
 		}
 
@@ -285,11 +289,11 @@ func HandleAddNote(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 		if err != nil {
 			logger.Error("add admin note", zap.Error(err))
 			middleware.SetFlash(w, "error", "Failed to save note.")
-			http.Redirect(w, r, "/admin/support/"+tenantID, http.StatusSeeOther)
+			http.Redirect(w, r, detailPath, http.StatusSeeOther)
 			return
 		}
 
 		middleware.SetFlash(w, "success", "Note added.")
-		http.Redirect(w, r, "/admin/support/"+tenantID, http.StatusSeeOther)
+		http.Redirect(w, r, detailPath, http.StatusSeeOther)
 	}
 }

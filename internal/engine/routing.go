@@ -54,7 +54,7 @@ func (s *LocationStore) LookupBackend(ctx context.Context, tenant, bucket, key s
 	if err != nil {
 		return "", err
 	}
-	go func() {
+	go func() { // #nosec G118 -- fire-and-forget access-time touch; must outlive the request, request ctx would cancel it
 		_, _ = s.db.ExecContext(context.Background(), `
 			UPDATE object_locations SET last_accessed = NOW()
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
