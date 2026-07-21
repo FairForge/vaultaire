@@ -499,7 +499,16 @@ func (s *Server) setupRoutes() {
 	s.router.Post("/auth/password-reset", s.handlePasswordReset)
 	s.router.Post("/auth/password-reset/complete", s.handlePasswordResetComplete)
 
-	s.router.Get("/docs", docs.SwaggerUIHandler())
+	// Customer docs (1B.3): hub + goldmark-rendered guides; the Swagger API
+	// reference moved from /docs to /docs/api.
+	for slug, path := range map[string]string{
+		"": "/docs", "getting-started": "/docs/getting-started",
+		"rclone": "/docs/rclone", "faq": "/docs/faq",
+	} {
+		s.router.Get(path, s.handleDocsPage(slug))
+		s.router.Head(path, s.handleDocsPage(slug))
+	}
+	s.router.Get("/docs/api", docs.SwaggerUIHandler())
 	s.router.Get("/openapi.json", docs.OpenAPIJSONHandler())
 
 	s.logger.Info("Registering user API routes")
