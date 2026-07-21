@@ -174,12 +174,12 @@ func GenerateOpenAPISpec() *OpenAPISpec {
 	return &OpenAPISpec{
 		OpenAPI: "3.0.3",
 		Info: Info{
-			Title:       "Vaultaire Storage API",
-			Description: "S3-compatible distributed storage API",
+			Title:       "stored.ge Storage API",
+			Description: "S3-compatible object storage API. Endpoint https://stored.ge, region us-east-1, path-style addressing.",
 			Version:     "1.0.0",
 			Contact: Contact{
-				Name:  "Vaultaire Team",
-				Email: "support@vaultaire.io",
+				Name:  "stored.ge Support",
+				Email: "support@stored.ge",
 			},
 			License: License{
 				Name: "MIT",
@@ -188,12 +188,12 @@ func GenerateOpenAPISpec() *OpenAPISpec {
 		},
 		Servers: []Server{
 			{
-				URL:         "https://api.stored.ge",
-				Description: "Production server",
+				URL:         "https://stored.ge",
+				Description: "Production",
 			},
 			{
-				URL:         "http://localhost:8080",
-				Description: "Development server",
+				URL:         "http://localhost:8000",
+				Description: "Local development",
 			},
 		},
 		Tags: []Tag{
@@ -646,7 +646,7 @@ const swaggerUIHTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Vaultaire API Documentation</title>
+    <title>API Reference — stored.ge</title>
     <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.10.3/swagger-ui.css">
     <style>
         html { box-sizing: border-box; overflow: -moz-scrollbars-vertical; overflow-y: scroll; }

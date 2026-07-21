@@ -16,7 +16,7 @@ func TestOpenAPISpec_Generation(t *testing.T) {
 		spec := GenerateOpenAPISpec()
 
 		assert.Equal(t, "3.0.3", spec.OpenAPI)
-		assert.Equal(t, "Vaultaire Storage API", spec.Info.Title)
+		assert.Equal(t, "stored.ge Storage API", spec.Info.Title)
 		assert.NotEmpty(t, spec.Info.Version)
 		assert.NotEmpty(t, spec.Paths)
 		assert.NotEmpty(t, spec.Components.Schemas)
