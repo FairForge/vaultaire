@@ -191,7 +191,7 @@ func (t *TieringEngine) findCandidates(ctx context.Context, p tieringPolicy) ([]
 		argIdx++
 	}
 	if p.bucket != nil {
-		query += fmt.Sprintf(" AND bucket = $%d", argIdx)
+		query += fmt.Sprintf(" AND bucket = $%d", argIdx) // #nosec G202 -- appends a $n placeholder only; the value is parameterized
 		args = append(args, *p.bucket)
 	}
 	query += " LIMIT 100"
