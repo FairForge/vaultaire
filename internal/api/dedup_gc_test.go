@@ -24,7 +24,7 @@ func setupGCFixture(t *testing.T) (*DedupGCRunner, *adapterTestFixture) {
 	t.Helper()
 	f := setupChunkingFixture(t)
 
-	runner := NewDedupGCRunner(f.db, f.eng, zap.NewNop())
+	runner := NewDedupGCRunner(f.db, f.eng, f.adapter.gci, zap.NewNop())
 	require.NotNil(t, runner)
 	runner.GracePeriod = 0
 
@@ -139,10 +139,12 @@ func TestDedupGC_ReconcilesOrphan(t *testing.T) {
 	require.NoError(t, gcErr)
 	assert.Greater(t, result.Reconciled, 0, "should reconcile drifted ref counts")
 
-	// Verify ref counts now match actual refs.
+	// Verify ref counts now match actual refs, counted within each dedup scope
+	// (ref counting is per (dedup_scope, plaintext_hash) since WP-7).
 	rows, err := f.db.Query(`
 		SELECT g.plaintext_hash, g.ref_count,
-		       (SELECT COUNT(*) FROM tenant_chunk_refs r WHERE r.plaintext_hash = g.plaintext_hash)
+		       (SELECT COUNT(*) FROM tenant_chunk_refs r
+		        WHERE r.dedup_scope = g.dedup_scope AND r.plaintext_hash = g.plaintext_hash)
 		FROM global_content_index g`)
 	require.NoError(t, err)
 	defer func() { _ = rows.Close() }()
@@ -257,8 +259,8 @@ func TestNewDedupGCRunner_NilGuards(t *testing.T) {
 	logger := zap.NewNop()
 	eng := engine.NewEngine(nil, logger, nil)
 
-	assert.Nil(t, NewDedupGCRunner(nil, eng, logger), "nil db should return nil")
-	assert.Nil(t, NewDedupGCRunner(nil, nil, logger), "nil both should return nil")
+	assert.Nil(t, NewDedupGCRunner(nil, eng, nil, logger), "nil db should return nil")
+	assert.Nil(t, NewDedupGCRunner(nil, nil, nil, logger), "nil both should return nil")
 
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {

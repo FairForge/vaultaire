@@ -26,6 +26,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/docs"
 	"github.com/FairForge/vaultaire/internal/email"
 	"github.com/FairForge/vaultaire/internal/engine"
+	"github.com/FairForge/vaultaire/internal/flags"
 	"github.com/FairForge/vaultaire/internal/rbac"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -81,14 +82,27 @@ type Server struct {
 	accessLogTracker *S3AccessLogTracker
 	inventoryRunner  *InventoryRunner
 	dedupGCRunner    *DedupGCRunner
-	emailSender      email.Sender
-	baseURL          string
-	startTime        time.Time
+	multipartReaper  *MultipartReaper
+	// multipartMaxUploadBytes caps a single multipart upload's accumulated
+	// in-flight part bytes (0 = unlimited). Part data lives unbilled on local
+	// disk until complete — without a cap one upload can fill the disk.
+	multipartMaxUploadBytes int64
+	emailSender             email.Sender
+	baseURL                 string
+	startTime               time.Time
+	// flags is the runtime feature-flag service (1.13): DB table + ~15s
+	// cache, global kill-switches + per-tenant enablement, flipped via the
+	// admin API / dashboard with no deploy or restart.
+	flags *flags.Service
 }
 
 type QuotaManager interface {
 	GetUsage(ctx context.Context, tenantID string) (used, limit int64, err error)
 	CheckAndReserve(ctx context.Context, tenantID string, bytes int64) (bool, error)
+	// ReleaseQuota subtracts bytes from the tenant's usage (clamped at 0).
+	// A negative value adds unconditionally — used to force-account bytes
+	// that are already durably stored.
+	ReleaseQuota(ctx context.Context, tenantID string, bytes int64) error
 	CreateTenant(ctx context.Context, tenantID, plan string, storageLimit int64) error
 	UpdateQuota(ctx context.Context, tenantID string, newLimit int64) error
 	ListQuotas(ctx context.Context) ([]map[string]interface{}, error)
@@ -130,16 +144,25 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	}
 	s.auth.SetVerifySecret(verifySecret)
 
-	// Public signups: enabled by default; set SIGNUPS_ENABLED=false to close them
-	// (pre-launch). Gated at CreateUserWithTenant, so the web form, /auth/register
-	// API, and OAuth signup are all blocked; existing-user login still works.
-	if v := os.Getenv("SIGNUPS_ENABLED"); v != "" {
-		if enabled, parseErr := strconv.ParseBool(v); parseErr == nil {
-			s.auth.SetSignupsEnabled(enabled)
-			if !enabled {
-				logger.Info("public signups DISABLED (SIGNUPS_ENABLED=false)")
-			}
-		}
+	// Runtime feature flags (1.13): feature_flags table + ~15s cache.
+	// Day-one flags:
+	//   signups  — default from SIGNUPS_ENABLED (deploy never reopens
+	//              signups); a DB row overrides env with no deploy. Gated at
+	//              CreateUserWithTenant, so the web form, /auth/register API,
+	//              and OAuth signup are all covered; login is unaffected.
+	//   chunking — default on; global kill-switch + per-tenant override for
+	//              the chunked/dedup PUT path (reads unaffected).
+	s.flags = flags.New(s.db, logger)
+	s.flags.Register(flagSignups, signupsDefaultFromEnv())
+	s.flags.Register(flagChunking, true)
+	if err := s.flags.Refresh(context.Background()); err != nil {
+		logger.Warn("initial feature flag refresh failed — serving in-code defaults until the background refresh succeeds",
+			zap.Error(err))
+	}
+	s.flags.Start(context.Background())
+	s.auth.SetSignupsEnabledFunc(func() bool { return s.flags.Enabled(flagSignups, "") })
+	if !s.flags.Enabled(flagSignups, "") {
+		logger.Info("public signups DISABLED (signups flag off — env default or DB override)")
 	}
 
 	// Populate in-memory maps from PostgreSQL so that existing users
@@ -233,8 +256,35 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	s.inventoryRunner.StartInventoryJob(context.Background())
 
 	// Dedup GC runner — reconciles ref counts and reclaims orphaned chunks.
-	s.dedupGCRunner = NewDedupGCRunner(s.db, s.engine, logger)
+	s.dedupGCRunner = NewDedupGCRunner(s.db, s.engine, s.gci, logger)
 	s.dedupGCRunner.StartDedupGC(context.Background())
+
+	// Multipart reaper + per-upload byte cap (WP-10-minimal): part data sits
+	// unbilled on local disk until complete — the reaper aborts abandoned
+	// uploads and purges terminal rows; the cap bounds any single upload's
+	// in-flight bytes. MULTIPART_MAX_UPLOAD_BYTES=0 disables the cap.
+	s.multipartMaxUploadBytes = 50 << 30 // 50 GiB default
+	if v := os.Getenv("MULTIPART_MAX_UPLOAD_BYTES"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
+			s.multipartMaxUploadBytes = n
+		} else {
+			logger.Warn("invalid MULTIPART_MAX_UPLOAD_BYTES, keeping default", zap.String("value", v))
+		}
+	}
+	s.multipartReaper = NewMultipartReaper(s.db, logger)
+	if s.multipartReaper != nil {
+		if v := os.Getenv("MULTIPART_ABANDON_HOURS"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				s.multipartReaper.AbandonAge = time.Duration(n) * time.Hour
+			}
+		}
+		if v := os.Getenv("MULTIPART_TERMINAL_RETENTION_DAYS"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				s.multipartReaper.TerminalRetention = time.Duration(n) * 24 * time.Hour
+			}
+		}
+		s.multipartReaper.Start(context.Background())
+	}
 
 	// Stripe billing service. Only active when STRIPE_SECRET_KEY is set.
 	if stripeKey := os.Getenv("STRIPE_SECRET_KEY"); stripeKey != "" {
@@ -533,6 +583,7 @@ func (s *Server) setupRoutes() {
 		BaseURL:       s.baseURL,
 		Engine:        s.engine,
 		HealthChecker: &healthCheckerAdapter{s.healthChecker},
+		Flags:         s.flags,
 	})
 
 	s.logger.Info("Registering management API routes")
@@ -554,6 +605,12 @@ func (s *Server) setupRoutes() {
 	// handleRoot, so the S3 API is unaffected. Registered before the catch-all.
 	s.router.Get("/", s.handleRoot)
 	s.router.Head("/", s.handleRoot)
+
+	// Public customer-facing changelog (1.13): rendered once at boot from
+	// the embedded changelog.md. Registered before the catch-all so the
+	// path never reaches the S3 handler.
+	s.router.Get("/changelog", s.handleChangelog)
+	s.router.Head("/changelog", s.handleChangelog)
 
 	s.logger.Info("Registering S3 catch-all handler")
 	s.router.HandleFunc("/*", s.handleS3Request)
@@ -627,6 +684,13 @@ func (s *Server) registerComplianceRoutes() {
 		r.Patch("/breach/{id}", s.requireAdmin(complianceHandler.HandleUpdateBreach))
 
 		r.Post("/dedup-gc", s.requireAdmin(s.handleDedupGCTrigger))
+		r.Post("/quota-reconcile", s.requireAdmin(s.handleQuotaReconcile))
+
+		// Feature flags (1.13): flip kill-switches / per-tenant enablement
+		// at runtime. updated_by comes from the JWT.
+		r.Get("/flags", s.requireAdmin(s.handleAdminFlagsList))
+		r.Put("/flags/{key}", s.requireAdmin(s.handleAdminFlagSet))
+		r.Delete("/flags/{key}", s.requireAdmin(s.handleAdminFlagUnset))
 	})
 }
 

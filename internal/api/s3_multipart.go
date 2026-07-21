@@ -162,7 +162,48 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 		}
 	}
 
-	// Stream part data to temp file while computing MD5 ETag
+	// Per-upload in-flight byte cap (WP-10-minimal, H-1): part data sits
+	// unbilled on local disk until complete, so without a cap one upload can
+	// fill the production disk at zero quota cost. Checked twice: against the
+	// DECLARED size here (reject before reading gigabytes we will discard)
+	// and against the MEASURED size after the write (declared sizes are
+	// client-controlled). Sum excludes this part number — re-uploading an
+	// existing part replaces its bytes, it does not add.
+	var existingBytes int64
+	if s.db != nil && s.multipartMaxUploadBytes > 0 {
+		if err := s.db.QueryRowContext(r.Context(), `
+			SELECT COALESCE(SUM(size_bytes), 0) FROM multipart_parts
+			WHERE upload_id = $1 AND part_number <> $2
+		`, uploadID, partNumber).Scan(&existingBytes); err != nil {
+			s.logger.Error("failed to sum in-flight part bytes", zap.Error(err))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+		declared := r.ContentLength
+		if isAWSChunked(r) {
+			if v, perr := strconv.ParseInt(r.Header.Get("x-amz-decoded-content-length"), 10, 64); perr == nil {
+				declared = v
+			}
+		}
+		if declared > 0 && existingBytes+declared > s.multipartMaxUploadBytes {
+			WriteS3ErrorWithContext(w, ErrEntityTooLarge, r.URL.Path, generateRequestID(),
+				WithSuggestion(fmt.Sprintf(
+					"This part would push the upload past the %d-byte in-flight limit. Complete or abort the upload, or use fewer/smaller parts.",
+					s.multipartMaxUploadBytes)))
+			return
+		}
+	}
+
+	// Stream part data to temp file while computing MD5 ETag.
+	// Decode aws-chunked framing first — aws-cli v2 over HTTPS sends parts
+	// as STREAMING-UNSIGNED-PAYLOAD-TRAILER; storing the raw framed body
+	// corrupts the assembled object (wire framing embedded in the data) and
+	// records framed sizes/ETags for the parts.
+	var body io.Reader = r.Body
+	if isAWSChunked(r) {
+		body = newAWSChunkedReader(r.Body)
+	}
+
 	pp := partFilePath(uploadID, partNumber)
 	f, err := os.Create(pp) // #nosec G304 — path derived from validated uploadID + partNumber
 	if err != nil {
@@ -172,14 +213,26 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 	}
 
 	hasher := md5.New() // #nosec G401 — S3 spec requires MD5 for ETags
-	size, err := io.Copy(f, io.TeeReader(r.Body, hasher))
+	size, err := io.Copy(f, io.TeeReader(body, hasher))
 	if closeErr := f.Close(); closeErr != nil && err == nil {
 		err = closeErr
 	}
 	if err != nil {
 		_ = os.Remove(pp)
 		s.logger.Error("failed to write part data", zap.Error(err))
-		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		WriteS3Error(w, bodyReadErrorCode(err), r.URL.Path, generateRequestID())
+		return
+	}
+
+	// Measured-size cap check: the declared pre-check above can be defeated
+	// by lying (or absent) length headers; what actually landed on disk is
+	// authoritative. Remove the file so the rejected bytes don't leak.
+	if s.db != nil && s.multipartMaxUploadBytes > 0 && existingBytes+size > s.multipartMaxUploadBytes {
+		_ = os.Remove(pp)
+		WriteS3ErrorWithContext(w, ErrEntityTooLarge, r.URL.Path, generateRequestID(),
+			WithSuggestion(fmt.Sprintf(
+				"This part pushed the upload past the %d-byte in-flight limit. Complete or abort the upload, or use fewer/smaller parts.",
+				s.multipartMaxUploadBytes)))
 		return
 	}
 
@@ -262,11 +315,23 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 		}
 	}
 
-	// Parse the CompleteMultipartUpload XML body (AWS clients send this)
+	// Parse the CompleteMultipartUpload XML body (AWS clients send this).
+	// Read to EOF before decoding: a streaming xml.Decoder stops at the
+	// closing element and never drains the body, which would silently skip
+	// the signed x-amz-content-sha256 verification — a truncated-but-well-
+	// formed part list would commit a shorter object undetected.
 	var completeReq CompleteMultipartUploadRequest
 	if r.Body != nil {
-		if decErr := xml.NewDecoder(r.Body).Decode(&completeReq); decErr != nil {
-			s.logger.Debug("no complete request body, using all uploaded parts", zap.Error(decErr))
+		body, readErr := io.ReadAll(r.Body)
+		if readErr != nil {
+			s.logger.Warn("complete multipart: body read failed", zap.Error(readErr))
+			WriteS3Error(w, bodyReadErrorCode(readErr), r.URL.Path, generateRequestID())
+			return
+		}
+		if len(body) > 0 {
+			if decErr := xml.Unmarshal(body, &completeReq); decErr != nil {
+				s.logger.Debug("no parseable complete request body, using all uploaded parts", zap.Error(decErr))
+			}
 		}
 	}
 
@@ -358,6 +423,28 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 	}
 	finalETag := fmt.Sprintf("\"%x-%d\"", etagHasher.Sum(nil), len(parts))
 
+	// WP-1: multipart bypasses the PUT handler's reservation, so reserve the
+	// assembled size here before streaming to the backend. If the object
+	// overwrites an existing key, the overwritten bytes are captured
+	// atomically by the head-cache upsert and released after success.
+	quotaOn := s.quotaManager != nil
+	var reservedBytes int64
+	if quotaOn {
+		ok, qErr := s.quotaManager.CheckAndReserve(r.Context(), t.ID, totalSize)
+		if qErr != nil {
+			s.logger.Error("multipart complete: quota check failed",
+				zap.Error(qErr), zap.String("tenant_id", t.ID))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+		if !ok {
+			WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
+				WithSuggestion("Upgrade at https://stored.ge/dashboard/billing"))
+			return
+		}
+		reservedBytes = totalSize
+	}
+
 	// Stream assembled parts to backend via pipe
 	pr, pw := io.Pipe()
 	containerName := t.NamespaceContainer(bucket)
@@ -396,6 +483,11 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 	}()
 
 	if uploadErr := <-errCh; uploadErr != nil {
+		if quotaOn {
+			ctx, cancel := quotaCtx(r)
+			s.releaseQuota(ctx, t.ID, reservedBytes)
+			cancel()
+		}
 		s.logger.Error("multipart backend storage failed",
 			zap.Error(uploadErr),
 			zap.String("bucket", bucket),
@@ -406,6 +498,7 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 
 	// Mark completed and update head cache
 	etagValue := strings.Trim(finalETag, "\"")
+	var displacedSize int64
 	if s.db != nil {
 		_, _ = s.db.ExecContext(r.Context(), `
 			UPDATE multipart_uploads SET status = 'completed' WHERE upload_id = $1
@@ -415,17 +508,27 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 		if contentType == "" {
 			contentType = "application/octet-stream"
 		}
-		_, dbErr := s.db.ExecContext(r.Context(), `
-			INSERT INTO object_head_cache
-				(tenant_id, bucket, object_key, size_bytes, etag, content_type, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, NOW())
-			ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
-				size_bytes   = EXCLUDED.size_bytes,
-				etag         = EXCLUDED.etag,
-				content_type = EXCLUDED.content_type,
-				updated_at   = NOW()
-		`, t.ID, bucket, object, totalSize, etagValue, contentType)
+		// atomicHeadUpsert captures the overwritten row's size in the same
+		// transaction (WP-1) — released below only if the upsert succeeded.
+		var dbErr error
+		displacedSize, dbErr = atomicHeadUpsertReleasing(r.Context(), s.db, manifestReleaser(s.gci), t.ID, bucket, object, func(tx *sql.Tx) error {
+			// is_chunked=FALSE explicitly: a multipart object overwriting a
+			// chunked one must flip the flag (releaser frees the manifest).
+			_, execErr := tx.ExecContext(r.Context(), `
+				INSERT INTO object_head_cache
+					(tenant_id, bucket, object_key, size_bytes, etag, content_type, is_chunked, updated_at)
+				VALUES ($1, $2, $3, $4, $5, $6, FALSE, NOW())
+				ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
+					size_bytes   = EXCLUDED.size_bytes,
+					etag         = EXCLUDED.etag,
+					content_type = EXCLUDED.content_type,
+					is_chunked   = FALSE,
+					updated_at   = NOW()
+			`, t.ID, bucket, object, totalSize, etagValue, contentType)
+			return execErr
+		})
 		if dbErr != nil {
+			displacedSize = 0
 			s.logger.Error("failed to update head cache after multipart complete", zap.Error(dbErr))
 		}
 	} else {
@@ -434,6 +537,12 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 			mu.Status = "completed"
 		}
 		memUploadsMu.Unlock()
+	}
+
+	if quotaOn && displacedSize > 0 {
+		ctx, cancel := quotaCtx(r)
+		s.releaseQuota(ctx, t.ID, displacedSize)
+		cancel()
 	}
 
 	// Clean up temp files

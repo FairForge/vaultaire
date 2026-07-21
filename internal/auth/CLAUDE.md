@@ -69,6 +69,12 @@ Password reset rate limiting is in-memory (per-email, 3/hour, sliding window). T
 
 `Auth.ValidateRequest` (handlers.go) — returns `(tenantID, *KeyScope, error)`. Queries `tenants` first (primary key, full access), falls back to `api_keys` JOIN users+tenants for scoped keys.
 
+## SigV4 Signature Verification (WP-4)
+
+`sigv4.go` — full AWS Signature V4 verification for header-auth requests (`verifySigV4`): canonical request rebuilt with AWS URI/query encoding, string-to-sign, HMAC chain, constant-time compare. 15-min clock skew (`ErrRequestTimeSkewed`), credential-scope date bound to X-Amz-Date. `SIGV4_ENFORCE=false` is the emergency fallback to key-existence-only auth; SigV2 and bare `AWSAccessKeyId` query auth are rejected while enforcing. Keys whose plaintext secret was never stored (legacy bcrypt-hash-only `api_keys` rows) fail closed with a "regenerate this API key" error — `CreateUserWithTenant` and `GenerateAPIKey` both store `secret_key` so new keys always verify.
+
+`sigv4_payload.go` — payload binding (`wrapPayloadVerification`, called from `ValidateRequest` after a signature verifies): the signature proves the DECLARED `x-amz-content-sha256`; the body is wrapped in a reader that hashes bytes as the handler consumes them and fails the final read with `ErrContentSHA256Mismatch` when the digest differs (API layer maps it to `XAmzContentSHA256Mismatch`, 400, via `bodyReadErrorCode`). `UNSIGNED-PAYLOAD` and `STREAMING-*` markers pass through unverified (per-chunk signatures of aws-chunked framing are NOT yet verified — future work); other non-digest values are rejected at auth time with `ErrInvalidContentSHA256` (→ `InvalidArgument`, 400).
+
 ## Signup Gate (pre-launch)
 
 Public account creation can be closed with a single switch. `CreateUserWithTenant`
@@ -77,6 +83,10 @@ the JSON `POST /auth/register` API, **and** OAuth signup (`CreateUserFromOAuth`
 calls `CreateUserWithTenant` internally). Gating that one function blocks all three.
 
 - `SetSignupsEnabled(bool)` / `SignupsEnabled() bool` — toggle/read. Default **true**.
+- `SetSignupsEnabledFunc(func() bool)` — 1.13: wires a dynamic source (the
+  feature-flag service) as the authority; once set it overrides the static bool
+  for both the gate and the read path. server.go points it at the `signups`
+  flag (in-code default = `SIGNUPS_ENABLED` env, DB row overrides at runtime).
 - When disabled, `CreateUserWithTenant` returns `ErrSignupsDisabled` before any work
   (no DB write, no in-memory entry). OAuth wraps it with `%w`, so callers use
   `errors.Is(err, auth.ErrSignupsDisabled)`.

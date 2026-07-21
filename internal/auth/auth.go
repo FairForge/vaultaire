@@ -73,6 +73,10 @@ type AuthService struct {
 	activityTracker *ActivityTracker
 	auditLogger     *AuditLogger
 	signupsEnabled  bool // when false, all account creation is rejected
+	// signupsEnabledFn, when set, overrides signupsEnabled — 1.13 wires the
+	// feature-flag service here so the `signups` flag (env default + DB
+	// override) decides, flippable at runtime with no deploy.
+	signupsEnabledFn func() bool
 }
 
 // ErrSignupsDisabled is returned by CreateUserWithTenant — the single chokepoint
@@ -125,8 +129,19 @@ func NewAuthService(db Database, sqlDB *sql.DB) *AuthService {
 // Existing-user login (password or OAuth) is unaffected.
 func (a *AuthService) SetSignupsEnabled(enabled bool) { a.signupsEnabled = enabled }
 
+// SetSignupsEnabledFunc wires a dynamic source (the feature-flag service) as
+// the authority on signups. Once set it overrides the static bool everywhere:
+// the CreateUserWithTenant gate and the SignupsEnabled read path. Set during
+// server construction, before any request is served.
+func (a *AuthService) SetSignupsEnabledFunc(fn func() bool) { a.signupsEnabledFn = fn }
+
 // SignupsEnabled reports whether public account creation is currently allowed.
-func (a *AuthService) SignupsEnabled() bool { return a.signupsEnabled }
+func (a *AuthService) SignupsEnabled() bool {
+	if a.signupsEnabledFn != nil {
+		return a.signupsEnabledFn()
+	}
+	return a.signupsEnabled
+}
 
 // SetJWTSecret overrides the default JWT signing key.
 // Call this from main.go with the value from the JWT_SECRET env var.
@@ -172,9 +187,12 @@ func (a *AuthService) LoadFromDB(ctx context.Context) error {
 		return fmt.Errorf("iterate users: %w", err)
 	}
 
-	// Load tenants and link to users
+	// Load tenants and link to users. COALESCE matches the api_keys load
+	// below: one malformed row (NULL text column) must not abort the whole
+	// credential load — that would leave auth empty after a restart.
 	trows, err := a.sqlDB.QueryContext(ctx, `
-		SELECT id, name, email, access_key, secret_key, created_at
+		SELECT id, COALESCE(name, ''), COALESCE(email, ''),
+		       COALESCE(access_key, ''), COALESCE(secret_key, ''), created_at
 		FROM tenants
 	`)
 	if err != nil {
@@ -292,7 +310,7 @@ func (a *AuthService) CreateUser(ctx context.Context, email, password string) (*
 func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password, company string) (*User, *Tenant, *APIKey, error) {
 	// Single chokepoint: when signups are disabled, reject before any work so
 	// the web form, /auth/register API, and OAuth signup are all blocked here.
-	if !a.signupsEnabled {
+	if !a.SignupsEnabled() {
 		return nil, nil, nil, ErrSignupsDisabled
 	}
 
@@ -384,17 +402,18 @@ func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password,
 			return nil, nil, nil, fmt.Errorf("persist tenant: %w", err)
 		}
 
-		// api_keys.secret_hash stores a bcrypt hash — the raw secret is
-		// returned to the user once at registration and never stored plaintext.
+		// secret_key must be stored (not just the bcrypt secret_hash) — SigV4
+		// verification recomputes the request signature from the raw secret,
+		// so a hash-only row can never authenticate and must be regenerated.
 		secretHash, err := bcrypt.GenerateFromPassword([]byte(apiKey.Secret), bcrypt.DefaultCost)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("hash api key secret: %w", err)
 		}
 		_, err = a.sqlDB.ExecContext(ctx, `
-			INSERT INTO api_keys (id, user_id, name, key_id, secret_hash, created_at)
-			VALUES ($1, $2, $3, $4, $5, $6)
+			INSERT INTO api_keys (id, user_id, name, key_id, secret_hash, secret_key, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
 			ON CONFLICT (key_id) DO NOTHING
-		`, apiKey.ID, user.ID, apiKey.Name, apiKey.Key, string(secretHash), apiKey.CreatedAt)
+		`, apiKey.ID, user.ID, apiKey.Name, apiKey.Key, string(secretHash), apiKey.Secret, apiKey.CreatedAt)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("persist api key: %w", err)
 		}

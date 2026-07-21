@@ -4,6 +4,8 @@ on:
   push:
     branches: [main, develop]
   pull_request:
+  # Manual lever for dropped/delayed push triggers (see deploy.yml note).
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -41,8 +43,11 @@ jobs:
         run: |
           psql -h localhost -U postgres -c "CREATE USER viera SUPERUSER;" || true
           psql -h localhost -U postgres -c "CREATE DATABASE vaultaire OWNER viera;" || true
+          # ON_ERROR_STOP: without it psql exits 0 even when statements fail,
+          # so a broken migration sails through CI and only detonates on the
+          # (equally strict since WP-9) prod deploy runner.
           for f in internal/database/migrations/*.sql; do
-            psql -h localhost -U viera -d vaultaire -f "$f"
+            psql -v ON_ERROR_STOP=1 -h localhost -U viera -d vaultaire -f "$f"
           done
 
       - name: Build

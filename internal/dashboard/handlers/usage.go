@@ -10,7 +10,6 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/crypto"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
-	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
@@ -162,12 +161,8 @@ func populateUsageHistory(ctx context.Context, db *sql.DB, tenantID string, data
 }
 
 func populateDedupSavings(ctx context.Context, db *sql.DB, tenantID string, data map[string]any, logger *zap.Logger) {
-	tid, err := uuid.Parse(tenantID)
-	if err != nil {
-		return
-	}
 	gci := crypto.NewGlobalContentIndex(db)
-	stats, err := gci.GetTenantDedupStats(ctx, tid)
+	stats, err := gci.GetTenantDedupStats(ctx, tenantID)
 	if err != nil {
 		logger.Debug("usage: dedup savings", zap.Error(err))
 		return

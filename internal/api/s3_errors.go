@@ -4,11 +4,24 @@ import (
 	"context"
 	"database/sql"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/FairForge/vaultaire/internal/auth"
 )
+
+// bodyReadErrorCode maps a request-body read failure to its S3 error code: a
+// payload that does not hash to its signed x-amz-content-sha256 declaration is
+// the client's error (400), anything else is internal (500).
+func bodyReadErrorCode(err error) string {
+	if errors.Is(err, auth.ErrContentSHA256Mismatch) {
+		return ErrXAmzContentSHA256Mismatch
+	}
+	return ErrInternalError
+}
 
 // S3Error represents an S3 error response
 type S3Error struct {
@@ -39,6 +52,9 @@ const (
 	ErrMalformedXML                      = "MalformedXML"
 	ErrMethodNotAllowed                  = "MethodNotAllowed"
 	ErrSignatureDoesNotMatch             = "SignatureDoesNotMatch"
+	ErrRequestTimeTooSkewed              = "RequestTimeTooSkewed"
+	ErrXAmzContentSHA256Mismatch         = "XAmzContentSHA256Mismatch"
+	ErrInvalidArgument                   = "InvalidArgument"
 	ErrAccountSuspended                  = "AccountSuspended"
 	ErrSlowDown                          = "SlowDown"
 	ErrNoSuchUpload                      = "NoSuchUpload"
@@ -79,6 +95,9 @@ var errorMessages = map[string]string{
 	ErrMalformedXML:                      "The XML you provided was not well-formed or did not validate against our published schema",
 	ErrMethodNotAllowed:                  "The specified method is not allowed against this resource",
 	ErrSignatureDoesNotMatch:             "The request signature we calculated does not match the signature you provided",
+	ErrRequestTimeTooSkewed:              "The difference between the request time and the server's time is too large",
+	ErrXAmzContentSHA256Mismatch:         "The provided 'x-amz-content-sha256' header does not match what was computed",
+	ErrInvalidArgument:                   "Invalid argument",
 	ErrAccountSuspended:                  "Your account has been suspended. Contact support for assistance.",
 	ErrSlowDown:                          "Monthly bandwidth limit exceeded. Upgrade your plan or wait for the next billing cycle.",
 	ErrNoSuchUpload:                      "The specified multipart upload does not exist. The upload ID may be invalid, or the upload may have been aborted or completed.",
@@ -119,6 +138,9 @@ var errorStatusCodes = map[string]int{
 	ErrMalformedXML:                      http.StatusBadRequest,
 	ErrMethodNotAllowed:                  http.StatusMethodNotAllowed,
 	ErrSignatureDoesNotMatch:             http.StatusForbidden,
+	ErrRequestTimeTooSkewed:              http.StatusForbidden,
+	ErrXAmzContentSHA256Mismatch:         http.StatusBadRequest,
+	ErrInvalidArgument:                   http.StatusBadRequest,
 	ErrAccountSuspended:                  http.StatusForbidden,
 	ErrSlowDown:                          http.StatusTooManyRequests,
 	ErrNoSuchUpload:                      http.StatusNotFound,
@@ -367,6 +389,8 @@ func authErrorHint(errMsg string) string {
 		return "The AWS access key ID you provided does not exist in our records."
 	case strings.Contains(errMsg, "invalid authorization format"):
 		return "Invalid signature — check your secret key and signing method."
+	case strings.Contains(errMsg, "signature does not match"):
+		return "The request signature is invalid — check your secret key. If you use a SigV2-era client, switch to Signature Version 4."
 	default:
 		return ""
 	}

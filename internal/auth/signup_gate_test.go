@@ -48,6 +48,31 @@ func TestCreateUserFromOAuth_BlockedWhenSignupsDisabled(t *testing.T) {
 	assert.Nil(t, tenant)
 }
 
+func TestSignupsEnabledFunc_OverridesStaticBool(t *testing.T) {
+	// 1.13: when a dynamic source (the feature-flag service) is wired in,
+	// it overrides the static bool for BOTH the read path and the gate.
+	svc := NewAuthService(nil, nil)
+	svc.SetSignupsEnabled(true) // static says open...
+
+	enabled := false
+	svc.SetSignupsEnabledFunc(func() bool { return enabled })
+
+	// ...but the func says closed.
+	assert.False(t, svc.SignupsEnabled())
+	_, _, _, err := svc.CreateUserWithTenant(
+		context.Background(), "fn-blocked@example.com", "pw-123456", "Co")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrSignupsDisabled)
+
+	// Flipping the dynamic source opens signups with no other call.
+	enabled = true
+	assert.True(t, svc.SignupsEnabled())
+	user, _, _, err := svc.CreateUserWithTenant(
+		context.Background(), "fn-open@example.com", "pw-123456", "Co")
+	require.NoError(t, err)
+	require.NotNil(t, user)
+}
+
 func TestCreateUserWithTenant_AllowedWhenEnabled(t *testing.T) {
 	svc := NewAuthService(nil, nil) // default enabled
 

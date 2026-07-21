@@ -293,21 +293,12 @@ func TestMigrate_KeepOriginal(t *testing.T) {
 	_ = reader.Close()
 }
 
-func TestMigrate_SkipsEncryptedAndBelowMinAndNonUUID(t *testing.T) {
+func TestMigrate_SkipsEncryptedAndBelowMin(t *testing.T) {
 	f := setupFixture(t)
 	ctx := context.Background()
 
-	// Non-UUID tenant → skipped
-	nonUUID := candidate{
-		tenantID: "not-a-uuid",
-		bucket:   "test-bucket",
-		key:      "nope.bin",
-		size:     128 * 1024,
-		etag:     "abc",
-	}
-	res, err := migrateObject(ctx, f.d, nonUUID, false, false)
-	require.NoError(t, err)
-	assert.True(t, res.Skipped, "non-UUID tenant should be skipped")
+	// WP-C: non-UUID (string) tenant IDs are first-class — the migrator no
+	// longer skips them. (Real registration tenants are "tenant-<hex>".)
 
 	// Encrypted objects are excluded by the SQL query, not by migrateObject.
 	// Below-min-size is also excluded by SQL. Verify SQL filtering:
@@ -316,7 +307,7 @@ func TestMigrate_SkipsEncryptedAndBelowMinAndNonUUID(t *testing.T) {
 	seedObject(t, f, "small.bin", content)
 
 	// Mark it encrypted
-	_, err = f.db.ExecContext(ctx, `
+	_, err := f.db.ExecContext(ctx, `
 		UPDATE object_head_cache SET encryption_algorithm = 'AES256'
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
 	`, f.tenantID, "test-bucket", "small.bin")

@@ -5,6 +5,16 @@ on:
     branches:
       - develop
       - main
+  # Manual lever: GitHub occasionally drops/delays push triggers (observed
+  # 2026-07-19, ~25 min with zero runs for the merge SHA). This also gives a
+  # clean re-deploy button for DR drills: gh workflow run deploy.yml --ref main
+  workflow_dispatch:
+
+# Queue deploys per branch, never cancel one mid-flight: two quick merges to
+# main must not interleave their SSH stop/swap/start sequences on the box.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -67,7 +77,7 @@ jobs:
             # password attempts, silently skipping the binary swap below while
             # the job still exits 0 (observed 2026-06-08..07-09 on prod).
             PGPASSWORD=$(grep DB_PASSWORD /opt/vaultaire/configs/.env | cut -d= -f2) \
-              psql -w -h 127.0.0.1 -U vaultaire -d vaultaire -f "$f" < /dev/null 2>&1 || true
+              psql -w -v ON_ERROR_STOP=1 -h 127.0.0.1 -U vaultaire -d vaultaire -f "$f" < /dev/null
           done
           # Keep the previous binary for one-command rollback.
           cp -f /opt/vaultaire/bin/vaultaire /opt/vaultaire/bin/vaultaire.prev 2>/dev/null || true
@@ -76,7 +86,27 @@ jobs:
           sudo /bin/chmod +x /opt/vaultaire/bin/vaultaire
           sudo /bin/systemctl start vaultaire
           sleep 15
-          curl -sf http://localhost:8000/health || echo "Health check failed"
+          # Gate on LIVENESS (/health/live), not readiness (/health): /health
+          # returns 503 when an external backend is unreachable, which a
+          # rollback cannot fix — the old binary would 503 too. /health/live
+          # answers the only question a binary swap can affect: does the new
+          # process boot and serve HTTP.
+          if ! curl -sf --retry 5 --retry-delay 2 --retry-connrefused http://localhost:8000/health/live; then
+            echo "Health check FAILED — rolling back to previous binary"
+            # Rollback reuses exactly the NOPASSWD'd commands (systemctl,
+            # mv /tmp/vaultaire-linux, chmod): stage .prev via /tmp because
+            # 'sudo cp' is not in the sudoers allowlist.
+            sudo /bin/systemctl stop vaultaire
+            cp -f /opt/vaultaire/bin/vaultaire.prev /tmp/vaultaire-linux
+            sudo /bin/mv /tmp/vaultaire-linux /opt/vaultaire/bin/vaultaire
+            sudo /bin/chmod +x /opt/vaultaire/bin/vaultaire
+            sudo /bin/systemctl start vaultaire
+            sleep 5
+            curl -sf http://localhost:8000/health/live \
+              && echo "Rollback binary is serving" \
+              || echo "Rollback ALSO unhealthy — manual intervention required"
+            exit 1
+          fi
           rm -rf /tmp/vaultaire-migrations
           EOF
 
@@ -121,7 +151,7 @@ jobs:
             # password attempts, silently skipping the binary swap below while
             # the job still exits 0 (observed 2026-06-08..07-09 on prod).
             PGPASSWORD=$(grep DB_PASSWORD /opt/vaultaire/configs/.env | cut -d= -f2) \
-              psql -w -h 127.0.0.1 -U vaultaire -d vaultaire -f "$f" < /dev/null 2>&1 || true
+              psql -w -v ON_ERROR_STOP=1 -h 127.0.0.1 -U vaultaire -d vaultaire -f "$f" < /dev/null
           done
           # Keep the previous binary for one-command rollback.
           cp -f /opt/vaultaire/bin/vaultaire /opt/vaultaire/bin/vaultaire.prev 2>/dev/null || true
@@ -130,6 +160,26 @@ jobs:
           sudo /bin/chmod +x /opt/vaultaire/bin/vaultaire
           sudo /bin/systemctl start vaultaire
           sleep 15
-          curl -sf http://localhost:8000/health || echo "Health check failed"
+          # Gate on LIVENESS (/health/live), not readiness (/health): /health
+          # returns 503 when an external backend is unreachable, which a
+          # rollback cannot fix — the old binary would 503 too. /health/live
+          # answers the only question a binary swap can affect: does the new
+          # process boot and serve HTTP.
+          if ! curl -sf --retry 5 --retry-delay 2 --retry-connrefused http://localhost:8000/health/live; then
+            echo "Health check FAILED — rolling back to previous binary"
+            # Rollback reuses exactly the NOPASSWD'd commands (systemctl,
+            # mv /tmp/vaultaire-linux, chmod): stage .prev via /tmp because
+            # 'sudo cp' is not in the sudoers allowlist.
+            sudo /bin/systemctl stop vaultaire
+            cp -f /opt/vaultaire/bin/vaultaire.prev /tmp/vaultaire-linux
+            sudo /bin/mv /tmp/vaultaire-linux /opt/vaultaire/bin/vaultaire
+            sudo /bin/chmod +x /opt/vaultaire/bin/vaultaire
+            sudo /bin/systemctl start vaultaire
+            sleep 5
+            curl -sf http://localhost:8000/health/live \
+              && echo "Rollback binary is serving" \
+              || echo "Rollback ALSO unhealthy — manual intervention required"
+            exit 1
+          fi
           rm -rf /tmp/vaultaire-migrations
           EOF

@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS global_content_index (
 -- 2. Tenant chunk references — per-tenant chunk manifest
 CREATE TABLE IF NOT EXISTS tenant_chunk_refs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL,
+    tenant_id TEXT NOT NULL,
     bucket_name VARCHAR(255) NOT NULL,
     object_key VARCHAR(1024) NOT NULL,
     chunk_index INTEGER NOT NULL,
@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS tenant_chunk_refs (
 -- 3. Object metadata — object-level pipeline metadata
 CREATE TABLE IF NOT EXISTS object_metadata (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL,
+    tenant_id TEXT NOT NULL,
     bucket_name VARCHAR(255) NOT NULL,
     object_key VARCHAR(1024) NOT NULL,
     total_size BIGINT NOT NULL,
@@ -84,7 +84,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE FUNCTION get_tenant_dedup_ratio(p_tenant_id UUID)
+CREATE OR REPLACE FUNCTION get_tenant_dedup_ratio(p_tenant_id TEXT)
 RETURNS TABLE(logical_bytes BIGINT, physical_bytes BIGINT, ratio REAL) AS $$
 BEGIN
     RETURN QUERY
@@ -102,14 +102,6 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- 5. Indexes
-CREATE INDEX IF NOT EXISTS idx_tenant_chunk_refs_object
-    ON tenant_chunk_refs (tenant_id, bucket_name, object_key);
-CREATE INDEX IF NOT EXISTS idx_tenant_chunk_refs_hash
-    ON tenant_chunk_refs (plaintext_hash);
-CREATE INDEX IF NOT EXISTS idx_gci_marked_for_deletion
-    ON global_content_index (marked_for_deletion) WHERE marked_for_deletion = TRUE;
-CREATE INDEX IF NOT EXISTS idx_object_metadata_tenant_bucket
-    ON object_metadata (tenant_id, bucket_name);
 
 -- 6. Add is_chunked flag to object_head_cache
 ALTER TABLE object_head_cache ADD COLUMN IF NOT EXISTS is_chunked BOOLEAN NOT NULL DEFAULT FALSE;

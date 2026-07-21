@@ -21,4 +21,12 @@ CREATE INDEX IF NOT EXISTS idx_metered_usage_tenant_period
     ON metered_usage_reports (tenant_id, period_date);
 
 -- Optional per-tenant monthly spending cap, in cents. 0 = no cap (the default).
-ALTER TABLE tenant_quotas ADD COLUMN IF NOT EXISTS spending_cap_cents BIGINT NOT NULL DEFAULT 0;
+-- WP-8: guarded — on a FRESH database tenant_quotas doesn't exist until
+-- migration 056 (which includes this column); unguarded, this ALTER aborts
+-- the set under ON_ERROR_STOP=1.
+DO $$
+BEGIN
+    IF to_regclass('tenant_quotas') IS NOT NULL THEN
+        ALTER TABLE tenant_quotas ADD COLUMN IF NOT EXISTS spending_cap_cents BIGINT NOT NULL DEFAULT 0;
+    END IF;
+END $$;

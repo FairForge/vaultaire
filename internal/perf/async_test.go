@@ -3,6 +3,7 @@ package perf
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -97,17 +98,29 @@ func TestAsyncProcessorClose(t *testing.T) {
 }
 
 func TestAsyncProcessorQueueFull(t *testing.T) {
+	// Deterministic setup: the worker signals when it has dequeued the first
+	// task and then blocks, so the single queue slot is provably empty before
+	// we fill it. (Sleeping instead was flaky: if the worker hadn't dequeued
+	// task 1 yet, task 2 was the one dropped and task 3 took the freed slot.)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
 	process := func(n int) (int, error) {
-		time.Sleep(100 * time.Millisecond)
+		once.Do(func() { close(started) })
+		<-release
 		return n, nil
 	}
 
 	config := &AsyncConfig{WorkerCount: 1, QueueSize: 1}
 	ap := NewAsyncProcessor[int, int](config, process)
 	defer func() { _ = ap.Close() }()
+	defer close(release)
 
-	// Fill queue
+	// Occupy the worker, then wait until it has taken the task off the queue.
 	ap.Submit(1)
+	<-started
+
+	// Fill the (now empty) queue slot.
 	ap.Submit(2)
 
 	// This should be dropped

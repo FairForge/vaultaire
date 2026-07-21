@@ -7,11 +7,10 @@ Core orchestration layer — connects the API layer to storage drivers. This is 
 - **`CoreEngine`** (`engine.go`) — the main orchestrator. Holds `map[string]Driver` (named drivers), primary/backup selection, access tracking, tiered cache, cost optimizer. Implements the `Engine` interface.
 - **`Engine`** interface (`interface.go:9`) — top-level contract: `Get`, `Put`, `Delete`, `List`, `HealthCheck`, `GetMetrics`, plus future stubs (`Execute`, `Query`, `Train`, `Predict`).
 - **`Driver`** interface (`interface.go:38`) — the sacred backend contract: `Name`, `Get`, `Put`, `Delete`, `List`, `Exists`, `HealthCheck`. All storage drivers implement this.
-- **`QuotaManager`** interface (`engine.go:20`) — `CheckAndReserve(ctx, tenantID, bytes)` and `ReleaseQuota(ctx, tenantID, bytes)`.
 
 ## Request Flow
 
-- **Put**: resolve storage class → build candidate list (target, primary, others) → failover.Execute tries in order → record mapping in `objectBackends` sync.Map → invalidate cache → optionally replicate to backup async
+- **Put**: resolve storage class → build WRITE candidate list (`buildWriteCandidateList`: target, primary, other DURABLE backends — WP-F fail-loudly excludes `local` unless it is the target or the configured primary) → failover.Execute tries in order → record mapping in `objectBackends` sync.Map → invalidate cache → optionally replicate to backup async. If every eligible backend fails with a genuine backend failure (`isBackendFailure`), Put wraps the error in `ErrAllBackendsUnavailable` (API layer → 503 + Retry-After), logs at Error level, and bumps the `write_failures` counter (exposed in GetMetrics) — customer data is never silently stranded on the hub's local disk. Client-level outcomes (quota, invalid input) keep their error identity (403/400, not 503).
 - **Get**: check `objectBackends` map for backend name → check tiered cache (L1) → failover.Execute with candidate list → cache result
 - **Delete**: failover.Execute against recorded backend (+ primary fallback) → remove from `objectBackends` → invalidate cache
 - **List**: delegates to primary driver only
@@ -90,4 +89,4 @@ If the target backend isn't registered, falls back to primary silently. Storage 
 
 - **API layer** (`internal/api/s3_engine_adapter.go`) wraps `CoreEngine` to translate S3 protocol → engine calls
 - **Drivers** (`internal/drivers/`) implement the `Driver` interface; registered via `eng.AddDriver(name, driver)` in `main.go`
-- **Quota** (`internal/usage/`) implements `QuotaManager`; injected via `eng.SetQuotaManager()`
+- **Quota** (`internal/usage/`) — quota accounting lives entirely in the API layer since WP-1 (single reservation site in `handlePutObject`, atomic displaced-size capture on head-cache upserts, releases on delete). The engine does no quota work.

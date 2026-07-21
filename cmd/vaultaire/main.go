@@ -129,7 +129,11 @@ func main() {
 
 	// Create engine with or without DB
 	eng := engine.NewEngine(db, logger, &engine.Config{
-		EnableCaching:  true,
+		// Caching stays OFF until a bounded LRU replaces TieredCache — its
+		// memory map never evicts, so even per-object-capped entries
+		// accumulate without bound across distinct keys (WP-2 / CR-2).
+		// Re-enable when internal/cache/lru.go is wired with a size bound.
+		EnableCaching:  false,
 		EnableML:       db != nil, // Only enable ML if we have DB
 		DefaultBackend: "local",
 	})
@@ -300,7 +304,6 @@ func main() {
 	var server *api.Server
 	if db != nil {
 		quotaManager := usage.NewQuotaManager(db)
-		eng.SetQuotaManager(quotaManager)
 		server = api.NewServer(cfg, logger, eng, quotaManager, db)
 	} else {
 		server = api.NewServer(cfg, logger, eng, &nilQuotaManager{}, nil)

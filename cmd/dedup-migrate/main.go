@@ -19,7 +19,6 @@ import (
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/tenant"
 
-	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 	"go.uber.org/zap"
 )
@@ -178,11 +177,6 @@ func selectCandidates(ctx context.Context, db *sql.DB, minSize int64, tenantFilt
 }
 
 func migrateObject(ctx context.Context, d *deps, c candidate, dryRun, keepOriginal bool) (*Result, error) {
-	tenantUUID, err := uuid.Parse(c.tenantID)
-	if err != nil {
-		return &Result{Skipped: true, FailReason: "non-UUID tenant"}, nil
-	}
-
 	t := &tenant.Tenant{ID: c.tenantID}
 	container := t.NamespaceContainer(c.bucket)
 
@@ -217,7 +211,9 @@ func migrateObject(ctx context.Context, d *deps, c candidate, dryRun, keepOrigin
 		measuredSize += int64(chunk.Size)
 		chunkCount++
 
-		lookup, lookupErr := d.gci.LookupChunk(ctx, chunk.Hash)
+		// dedup-migrate stores plaintext chunks only (no per-chunk encryption),
+		// so they live in the globally shared dedup scope.
+		lookup, lookupErr := d.gci.LookupChunk(ctx, crypto.GlobalDedupScope, chunk.Hash)
 		if lookupErr != nil {
 			return nil, fmt.Errorf("lookup chunk: %w", lookupErr)
 		}
@@ -233,6 +229,7 @@ func migrateObject(ctx context.Context, d *deps, c candidate, dryRun, keepOrigin
 					return nil, fmt.Errorf("store chunk %s: %w", chunk.Hash[:16], putErr)
 				}
 				if insertErr := d.gci.InsertChunk(ctx, &crypto.GCIEntry{
+					DedupScope:    crypto.GlobalDedupScope,
 					PlaintextHash: chunk.Hash,
 					BackendID:     bn,
 					StorageKey:    storageKey,
@@ -243,7 +240,7 @@ func migrateObject(ctx context.Context, d *deps, c candidate, dryRun, keepOrigin
 				}
 				physicalNew += int64(chunk.Size)
 			} else {
-				if incErr := d.gci.IncrementRef(ctx, chunk.Hash); incErr != nil {
+				if _, incErr := d.gci.IncrementRef(ctx, crypto.GlobalDedupScope, chunk.Hash); incErr != nil {
 					return nil, fmt.Errorf("increment ref: %w", incErr)
 				}
 			}
@@ -254,12 +251,13 @@ func migrateObject(ctx context.Context, d *deps, c candidate, dryRun, keepOrigin
 		}
 
 		newRefs = append(newRefs, crypto.TenantChunkRef{
-			TenantID:             tenantUUID,
+			TenantID:             c.tenantID,
 			BucketName:           c.bucket,
 			ObjectKey:            c.key,
 			ChunkIndex:           chunk.Index,
 			ChunkOffset:          chunk.Offset,
 			PlaintextHash:        chunk.Hash,
+			DedupScope:           crypto.GlobalDedupScope,
 			EncryptionKeyVersion: 1,
 		})
 	}
@@ -293,8 +291,8 @@ func migrateObject(ctx context.Context, d *deps, c candidate, dryRun, keepOrigin
 	if physicalNew > 0 {
 		dedupRatio = float32(measuredSize) / float32(physicalNew)
 	}
-	if err := d.gci.ReplaceObjectManifest(ctx, tenantUUID, c.bucket, c.key, newRefs, &crypto.ObjectMeta{
-		TenantID:     tenantUUID,
+	if err := d.gci.ReplaceObjectManifest(ctx, c.tenantID, c.bucket, c.key, newRefs, &crypto.ObjectMeta{
+		TenantID:     c.tenantID,
 		BucketName:   c.bucket,
 		ObjectKey:    c.key,
 		TotalSize:    measuredSize,

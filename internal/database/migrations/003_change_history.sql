@@ -11,6 +11,6 @@ CREATE TABLE IF NOT EXISTS change_history (
     size_bytes BIGINT
 );
 
-CREATE INDEX idx_change_history_tenant ON change_history(tenant_id);
-CREATE INDEX idx_change_history_timestamp ON change_history(timestamp);
-CREATE INDEX idx_change_history_artifact ON change_history(tenant_id, container, artifact);
+CREATE INDEX IF NOT EXISTS idx_change_history_tenant ON change_history(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_change_history_timestamp ON change_history(timestamp);
+CREATE INDEX IF NOT EXISTS idx_change_history_artifact ON change_history(tenant_id, container, artifact);

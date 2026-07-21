@@ -474,6 +474,15 @@ func setupChunkingFixture(t *testing.T) *adapterTestFixture {
 
 	t.Cleanup(func() {
 		_, _ = f.db.Exec("DELETE FROM tenant_chunk_refs WHERE tenant_id = $1", tenantUUID)
+		// Reclaim GCI rows this fixture created: its tenant-scoped (encrypted)
+		// rows, plus any now-orphaned rows (global chunks whose only refs were
+		// just deleted). Keeps table-wide GC assertions from seeing leaked rows.
+		_, _ = f.db.Exec(`DELETE FROM global_content_index g
+			WHERE g.dedup_scope = $1
+			   OR NOT EXISTS (
+				SELECT 1 FROM tenant_chunk_refs r
+				WHERE r.dedup_scope = g.dedup_scope AND r.plaintext_hash = g.plaintext_hash)`,
+			tenantUUID)
 		_, _ = f.db.Exec("DELETE FROM object_metadata WHERE tenant_id = $1", tenantUUID)
 		_, _ = f.db.Exec("DELETE FROM object_head_cache WHERE tenant_id = $1", f.tenantID)
 		_, _ = f.db.Exec("DELETE FROM tenants WHERE id = $1", f.tenantID)
@@ -802,19 +811,21 @@ func TestGCI_IntegrationWithMigration(t *testing.T) {
 	require.NoError(t, gci.InsertChunk(ctx, entry))
 
 	// Lookup
-	result, err := gci.LookupChunk(ctx, hash)
+	result, err := gci.LookupChunk(ctx, crypto.GlobalDedupScope, hash)
 	require.NoError(t, err)
 	assert.True(t, result.Exists)
 	assert.Equal(t, "local", result.Entry.BackendID)
 
 	// Increment + decrement
-	require.NoError(t, gci.IncrementRef(ctx, hash))
-	newCount, err := gci.DecrementRef(ctx, hash)
+	incRows, incErr := gci.IncrementRef(ctx, crypto.GlobalDedupScope, hash)
+	require.NoError(t, incErr)
+	require.Equal(t, int64(1), incRows)
+	newCount, err := gci.DecrementRef(ctx, crypto.GlobalDedupScope, hash)
 	require.NoError(t, err)
 	assert.Equal(t, 1, newCount)
 
 	// Decrement to 0
-	newCount, err = gci.DecrementRef(ctx, hash)
+	newCount, err = gci.DecrementRef(ctx, crypto.GlobalDedupScope, hash)
 	require.NoError(t, err)
 	assert.Equal(t, 0, newCount)
 
@@ -825,10 +836,10 @@ func TestGCI_IntegrationWithMigration(t *testing.T) {
 		hash).Scan(&marked))
 	assert.True(t, marked)
 
-	// Tenant chunk ref + object metadata
-	tenantUUID := uuid.New()
+	// Tenant chunk ref + object metadata (string tenant IDs since WP-C)
+	tenantID := uuid.New().String()
 	require.NoError(t, gci.AddTenantChunkRef(ctx, &crypto.TenantChunkRef{
-		TenantID:             tenantUUID,
+		TenantID:             tenantID,
 		BucketName:           "test-bucket",
 		ObjectKey:            "test-key",
 		ChunkIndex:           0,
@@ -841,7 +852,7 @@ func TestGCI_IntegrationWithMigration(t *testing.T) {
 	physSize := int64(4096)
 	dedupRatio := float32(1.0)
 	require.NoError(t, gci.SaveObjectMetadata(ctx, &crypto.ObjectMeta{
-		TenantID:     tenantUUID,
+		TenantID:     tenantID,
 		BucketName:   "test-bucket",
 		ObjectKey:    "test-key",
 		TotalSize:    4096,
@@ -852,20 +863,20 @@ func TestGCI_IntegrationWithMigration(t *testing.T) {
 		DedupRatio:   &dedupRatio,
 	}))
 
-	meta, err := gci.GetObjectMetadata(ctx, tenantUUID, "test-bucket", "test-key")
+	meta, err := gci.GetObjectMetadata(ctx, tenantID, "test-bucket", "test-key")
 	require.NoError(t, err)
 	require.NotNil(t, meta)
 	assert.Equal(t, int64(4096), meta.TotalSize)
 
 	// Dedup stats
-	stats, err := gci.GetTenantDedupStats(ctx, tenantUUID)
+	stats, err := gci.GetTenantDedupStats(ctx, tenantID)
 	require.NoError(t, err)
 	assert.Equal(t, int64(4096), stats.BytesLogical)
 
 	// Cleanup
 	t.Cleanup(func() {
-		_, _ = f.db.Exec("DELETE FROM tenant_chunk_refs WHERE tenant_id = $1", tenantUUID)
-		_, _ = f.db.Exec("DELETE FROM object_metadata WHERE tenant_id = $1", tenantUUID)
+		_, _ = f.db.Exec("DELETE FROM tenant_chunk_refs WHERE tenant_id = $1", tenantID)
+		_, _ = f.db.Exec("DELETE FROM object_metadata WHERE tenant_id = $1", tenantID)
 		_, _ = f.db.Exec("DELETE FROM global_content_index WHERE plaintext_hash = $1", hash)
 	})
 }
@@ -1127,6 +1138,62 @@ func setupEncryptedChunkingFixture(t *testing.T) *adapterTestFixture {
 	return f
 }
 
+// TestChunkedEncryption_SkipsWholeObjectSSE guards the WP-7 fix that makes
+// whole-object SSE-S3 and per-chunk convergent encryption mutually exclusive.
+//
+// Before the fix, a chunk-sized object on an SSE-enabled path was encrypted
+// TWICE: SSE-S3 wrapped the whole object (+1117 bytes, and non-determin-
+// istically), then the result was chunked and per-chunk encrypted. GET peeled
+// only the per-chunk layer and returned SSE ciphertext (silent corruption),
+// and the non-deterministic SSE layer defeated chunk dedup entirely.
+func TestChunkedEncryption_SkipsWholeObjectSSE(t *testing.T) {
+	f := setupChunkingFixture(t) // chunkThreshold = 1024
+
+	masterHex := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	sse, err := crypto.NewSSEService(f.db, masterHex)
+	require.NoError(t, err)
+	f.adapter.sseService = sse
+	km, err := crypto.NewKeyManager(&crypto.KeyManagerConfig{
+		MasterKeyHex: masterHex, CacheMaxAge: time.Hour, EnableCaching: true,
+	})
+	require.NoError(t, err)
+	f.adapter.chunkEncSvc = crypto.NewChunkEncryptionService(km)
+
+	content := generateTestData(8 * 1024) // > 1 KB threshold → chunks
+
+	// Explicit SSE-S3 header: this is exactly the case that used to double-encrypt.
+	req := httptest.NewRequest("PUT", "/test-bucket/sse-and-chunk.bin", bytes.NewReader(content))
+	req.ContentLength = int64(len(content))
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("x-amz-server-side-encryption", "AES256")
+	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	w := httptest.NewRecorder()
+	f.adapter.HandlePut(w, req, "test-bucket", "sse-and-chunk.bin")
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// Stored via the chunked per-chunk path, NOT whole-object SSE-S3.
+	var isChunked bool
+	var encAlgo string
+	var storedSize int64
+	require.NoError(t, f.db.QueryRow(`
+		SELECT is_chunked, encryption_algorithm, size_bytes FROM object_head_cache
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+		f.tenantID, "test-bucket", "sse-and-chunk.bin").Scan(&isChunked, &encAlgo, &storedSize))
+	assert.True(t, isChunked, "large SSE object must take the chunked path")
+	assert.Equal(t, "AES256-CE", encAlgo, "encryption must be per-chunk, not whole-object SSE-S3")
+	assert.Equal(t, int64(len(content)), storedSize,
+		"size must be plaintext size — a +1117 delta means SSE-S3 also wrapped it")
+
+	// The decisive check: GET must return the original plaintext, not ciphertext.
+	getReq := httptest.NewRequest("GET", "/test-bucket/sse-and-chunk.bin", nil)
+	getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+	gw := httptest.NewRecorder()
+	f.adapter.HandleGet(gw, getReq, "test-bucket", "sse-and-chunk.bin")
+	require.Equal(t, http.StatusOK, gw.Code)
+	body, _ := io.ReadAll(gw.Body)
+	assert.Equal(t, content, body, "round-trip must yield the original plaintext (no double-encryption)")
+}
+
 func TestHandlePut_ChunkedWithEncryption(t *testing.T) {
 	f := setupEncryptedChunkingFixture(t)
 
@@ -1182,11 +1249,13 @@ func TestHandlePut_ChunkedWithEncryption(t *testing.T) {
 	assert.Greater(t, refCount, 0, "all chunk refs should have ciphertext_hash")
 
 	// Verify raw stored data is NOT plaintext
-	refs, err := f.adapter.gci.GetObjectChunks(context.Background(), tenantUUID, "test-bucket", "encrypted-chunked.bin")
+	refs, err := f.adapter.gci.GetObjectChunks(context.Background(), f.tenantID, "test-bucket", "encrypted-chunked.bin")
 	require.NoError(t, err)
 	require.NotEmpty(t, refs)
 
-	lookup, err := f.adapter.gci.LookupChunk(context.Background(), refs[0].PlaintextHash)
+	// Encrypted chunks live in the tenant's dedup scope, not the global one.
+	require.Equal(t, f.tenantID, refs[0].DedupScope, "encrypted chunk must be tenant-scoped")
+	lookup, err := f.adapter.gci.LookupChunk(context.Background(), refs[0].DedupScope, refs[0].PlaintextHash)
 	require.NoError(t, err)
 	require.NotNil(t, lookup.Entry)
 
@@ -1281,5 +1350,31 @@ func TestHandlePut_ChunkedEncryptedDedup(t *testing.T) {
 		require.Equal(t, http.StatusOK, gw.Code)
 		body, _ := io.ReadAll(gw.Body)
 		assert.Equal(t, content, body, "deduped encrypted object %s must be retrievable", key)
+	}
+}
+
+// A chunk's stored blob is compressed (or not) based on the FIRST upload's
+// Content-Type. A later dedup hit on the same chunk must record the ciphertext
+// hash of that stored blob — not one recomputed under the current request's
+// Content-Type, which can differ and make the second object unreadable.
+func TestHandleGet_EncryptedDedup_DifferentContentType(t *testing.T) {
+	f := setupEncryptedChunkingFixture(t)
+
+	// Compressible content: text/plain compresses on first store;
+	// application/pdf is on the compression skip-list, so a recomputed hash
+	// would describe a blob that was never stored.
+	content := bytes.Repeat([]byte("dedup across content types! "), 400)
+	putChunkedObject(t, f, "ct-first.txt", content, "text/plain")
+	putChunkedObject(t, f, "ct-second.pdf", content, "application/pdf")
+
+	for _, key := range []string{"ct-first.txt", "ct-second.pdf"} {
+		getReq := httptest.NewRequest("GET", "/test-bucket/"+key, nil)
+		getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+		gw := httptest.NewRecorder()
+		f.adapter.HandleGet(gw, getReq, "test-bucket", key)
+		require.Equal(t, http.StatusOK, gw.Code,
+			"deduped object %s must be readable regardless of upload Content-Type", key)
+		body, _ := io.ReadAll(gw.Body)
+		assert.Equal(t, content, body, "object %s must round-trip", key)
 	}
 }

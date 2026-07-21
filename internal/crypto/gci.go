@@ -10,8 +10,15 @@ import (
 	"github.com/google/uuid"
 )
 
+// GlobalDedupScope is the dedup scope for unencrypted chunks: they are shared
+// across all tenants (cross-tenant dedup). Encrypted chunks instead use their
+// tenant's ID as the scope, so a chunk encrypted with one tenant's convergent
+// key is never handed to another tenant. See migration 054.
+const GlobalDedupScope = "_global"
+
 // GCIEntry represents an entry in the Global Content Index
 type GCIEntry struct {
+	DedupScope      string    `json:"dedup_scope"`
 	PlaintextHash   string    `json:"plaintext_hash"`
 	BackendID       string    `json:"backend_id"`
 	StorageKey      string    `json:"storage_key"`
@@ -20,6 +27,7 @@ type GCIEntry struct {
 	CompressionAlgo *string   `json:"compression_algo,omitempty"`
 	Encrypted       bool      `json:"encrypted"`
 	EncryptionAlgo  *string   `json:"encryption_algo,omitempty"`
+	CiphertextHash  *string   `json:"ciphertext_hash,omitempty"` // SHA-256 of the stored (encrypted) blob; nil for unencrypted chunks
 	RefCount        int       `json:"ref_count"`
 	FirstSeenAt     time.Time `json:"first_seen_at"`
 	LastAccessedAt  time.Time `json:"last_accessed_at"`
@@ -28,12 +36,13 @@ type GCIEntry struct {
 // TenantChunkRef represents a tenant's reference to a global chunk
 type TenantChunkRef struct {
 	ID                   uuid.UUID `json:"id"`
-	TenantID             uuid.UUID `json:"tenant_id"`
+	TenantID             string    `json:"tenant_id"`
 	BucketName           string    `json:"bucket_name"`
 	ObjectKey            string    `json:"object_key"`
 	ChunkIndex           int       `json:"chunk_index"`
 	ChunkOffset          int64     `json:"chunk_offset"`
 	PlaintextHash        string    `json:"plaintext_hash"`
+	DedupScope           string    `json:"dedup_scope"`
 	EncryptionKeyVersion int       `json:"encryption_key_version"`
 	CiphertextHash       *string   `json:"ciphertext_hash,omitempty"`
 	CreatedAt            time.Time `json:"created_at"`
@@ -42,7 +51,7 @@ type TenantChunkRef struct {
 // ObjectMeta represents object-level metadata
 type ObjectMeta struct {
 	ID             uuid.UUID       `json:"id"`
-	TenantID       uuid.UUID       `json:"tenant_id"`
+	TenantID       string          `json:"tenant_id"`
 	BucketName     string          `json:"bucket_name"`
 	ObjectKey      string          `json:"object_key"`
 	TotalSize      int64           `json:"total_size"`
@@ -59,13 +68,13 @@ type ObjectMeta struct {
 
 // DedupStats holds deduplication statistics
 type DedupStats struct {
-	TenantID           *uuid.UUID `json:"tenant_id,omitempty"`
-	ChunksProcessed    int64      `json:"chunks_processed"`
-	ChunksDeduplicated int64      `json:"chunks_deduplicated"`
-	BytesLogical       int64      `json:"bytes_logical"`
-	BytesPhysical      int64      `json:"bytes_physical"`
-	BytesSaved         int64      `json:"bytes_saved"`
-	DedupRatio         float64    `json:"dedup_ratio"`
+	TenantID           *string `json:"tenant_id,omitempty"`
+	ChunksProcessed    int64   `json:"chunks_processed"`
+	ChunksDeduplicated int64   `json:"chunks_deduplicated"`
+	BytesLogical       int64   `json:"bytes_logical"`
+	BytesPhysical      int64   `json:"bytes_physical"`
+	BytesSaved         int64   `json:"bytes_saved"`
+	DedupRatio         float64 `json:"dedup_ratio"`
 }
 
 // ChunkLookupResult represents the result of looking up a chunk
@@ -99,10 +108,18 @@ func NewGlobalContentIndex(db *sql.DB) *GlobalContentIndex {
 	}
 }
 
-// LookupChunk checks if a chunk exists in the index
-func (g *GlobalContentIndex) LookupChunk(ctx context.Context, plaintextHash string) (*ChunkLookupResult, error) {
+// cacheKey namespaces a hash by its dedup scope so an unencrypted global chunk
+// and a tenant's encrypted chunk with the same plaintext hash never alias.
+func cacheKey(scope, plaintextHash string) string {
+	return scope + "\x00" + plaintextHash
+}
+
+// LookupChunk checks if a chunk exists in the index within the given dedup
+// scope (GlobalDedupScope for unencrypted chunks, the tenant ID for encrypted
+// chunks).
+func (g *GlobalContentIndex) LookupChunk(ctx context.Context, scope, plaintextHash string) (*ChunkLookupResult, error) {
 	// Check cache first
-	if entry := g.cache.get(plaintextHash); entry != nil {
+	if entry := g.cache.get(cacheKey(scope, plaintextHash)); entry != nil {
 		return &ChunkLookupResult{
 			Exists:     true,
 			Entry:      entry,
@@ -115,14 +132,16 @@ func (g *GlobalContentIndex) LookupChunk(ctx context.Context, plaintextHash stri
 	var compressedSize sql.NullInt64
 	var compressionAlgo sql.NullString
 	var encryptionAlgo sql.NullString
+	var ciphertextHash sql.NullString
 
 	err := g.db.QueryRowContext(ctx, `
-		SELECT plaintext_hash, backend_id, storage_key, size_bytes,
+		SELECT dedup_scope, plaintext_hash, backend_id, storage_key, size_bytes,
 		       compressed_size, compression_algo, encrypted, encryption_algo,
-		       ref_count, first_seen_at, last_accessed_at
+		       ciphertext_hash, ref_count, first_seen_at, last_accessed_at
 		FROM global_content_index
-		WHERE plaintext_hash = $1
-	`, plaintextHash).Scan(
+		WHERE dedup_scope = $1 AND plaintext_hash = $2
+	`, scope, plaintextHash).Scan(
+		&entry.DedupScope,
 		&entry.PlaintextHash,
 		&entry.BackendID,
 		&entry.StorageKey,
@@ -131,6 +150,7 @@ func (g *GlobalContentIndex) LookupChunk(ctx context.Context, plaintextHash stri
 		&compressionAlgo,
 		&entry.Encrypted,
 		&encryptionAlgo,
+		&ciphertextHash,
 		&entry.RefCount,
 		&entry.FirstSeenAt,
 		&entry.LastAccessedAt,
@@ -156,9 +176,12 @@ func (g *GlobalContentIndex) LookupChunk(ctx context.Context, plaintextHash stri
 	if encryptionAlgo.Valid {
 		entry.EncryptionAlgo = &encryptionAlgo.String
 	}
+	if ciphertextHash.Valid {
+		entry.CiphertextHash = &ciphertextHash.String
+	}
 
 	// Add to cache
-	g.cache.set(plaintextHash, &entry)
+	g.cache.set(cacheKey(scope, plaintextHash), &entry)
 
 	return &ChunkLookupResult{
 		Exists:     true,
@@ -167,14 +190,15 @@ func (g *GlobalContentIndex) LookupChunk(ctx context.Context, plaintextHash stri
 	}, nil
 }
 
-// LookupChunks performs batch lookup for multiple chunks (more efficient)
-func (g *GlobalContentIndex) LookupChunks(ctx context.Context, hashes []string) (map[string]*ChunkLookupResult, error) {
+// LookupChunks performs a batch lookup for multiple chunks within one dedup
+// scope (more efficient than per-chunk LookupChunk).
+func (g *GlobalContentIndex) LookupChunks(ctx context.Context, scope string, hashes []string) (map[string]*ChunkLookupResult, error) {
 	results := make(map[string]*ChunkLookupResult)
 	var uncachedHashes []string
 
 	// Check cache first
 	for _, hash := range hashes {
-		if entry := g.cache.get(hash); entry != nil {
+		if entry := g.cache.get(cacheKey(scope, hash)); entry != nil {
 			results[hash] = &ChunkLookupResult{
 				Exists:     true,
 				Entry:      entry,
@@ -197,12 +221,12 @@ func (g *GlobalContentIndex) LookupChunks(ctx context.Context, hashes []string) 
 
 	// Query database for uncached hashes
 	rows, err := g.db.QueryContext(ctx, `
-		SELECT plaintext_hash, backend_id, storage_key, size_bytes,
+		SELECT dedup_scope, plaintext_hash, backend_id, storage_key, size_bytes,
 		       compressed_size, compression_algo, encrypted, encryption_algo,
-		       ref_count, first_seen_at, last_accessed_at
+		       ciphertext_hash, ref_count, first_seen_at, last_accessed_at
 		FROM global_content_index
-		WHERE plaintext_hash = ANY($1)
-	`, uncachedHashes)
+		WHERE dedup_scope = $1 AND plaintext_hash = ANY($2)
+	`, scope, uncachedHashes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to batch lookup chunks: %w", err)
 	}
@@ -213,8 +237,10 @@ func (g *GlobalContentIndex) LookupChunks(ctx context.Context, hashes []string) 
 		var compressedSize sql.NullInt64
 		var compressionAlgo sql.NullString
 		var encryptionAlgo sql.NullString
+		var ciphertextHash sql.NullString
 
 		err := rows.Scan(
+			&entry.DedupScope,
 			&entry.PlaintextHash,
 			&entry.BackendID,
 			&entry.StorageKey,
@@ -223,6 +249,7 @@ func (g *GlobalContentIndex) LookupChunks(ctx context.Context, hashes []string) 
 			&compressionAlgo,
 			&entry.Encrypted,
 			&encryptionAlgo,
+			&ciphertextHash,
 			&entry.RefCount,
 			&entry.FirstSeenAt,
 			&entry.LastAccessedAt,
@@ -240,6 +267,9 @@ func (g *GlobalContentIndex) LookupChunks(ctx context.Context, hashes []string) 
 		if encryptionAlgo.Valid {
 			entry.EncryptionAlgo = &encryptionAlgo.String
 		}
+		if ciphertextHash.Valid {
+			entry.CiphertextHash = &ciphertextHash.String
+		}
 
 		// Update result
 		results[entry.PlaintextHash] = &ChunkLookupResult{
@@ -249,74 +279,145 @@ func (g *GlobalContentIndex) LookupChunks(ctx context.Context, hashes []string) 
 		}
 
 		// Add to cache
-		g.cache.set(entry.PlaintextHash, &entry)
+		g.cache.set(cacheKey(entry.DedupScope, entry.PlaintextHash), &entry)
 	}
 
 	return results, rows.Err()
 }
 
-// InsertChunk adds a new chunk to the index
+// insertChunkSQL is shared by InsertChunk and InsertChunkTx. On conflict the
+// row already exists (a concurrent writer stored the same chunk first) — take
+// a reference on it instead.
+const insertChunkSQL = `
+	INSERT INTO global_content_index
+	(dedup_scope, plaintext_hash, backend_id, storage_key, size_bytes, compressed_size, compression_algo, encrypted, encryption_algo, ciphertext_hash, ref_count)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+	ON CONFLICT (dedup_scope, plaintext_hash) DO UPDATE SET
+		ref_count = global_content_index.ref_count + 1,
+		marked_for_deletion = FALSE,
+		marked_at = NULL,
+		last_accessed_at = NOW()`
+
+// InsertChunk adds a new chunk to the index. entry.DedupScope defaults to
+// GlobalDedupScope when unset so callers storing unencrypted chunks need not
+// set it explicitly.
 func (g *GlobalContentIndex) InsertChunk(ctx context.Context, entry *GCIEntry) error {
-	_, err := g.db.ExecContext(ctx, `
-		INSERT INTO global_content_index
-		(plaintext_hash, backend_id, storage_key, size_bytes, compressed_size, compression_algo, encrypted, encryption_algo, ref_count)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		ON CONFLICT (plaintext_hash) DO UPDATE SET
-			ref_count = global_content_index.ref_count + 1,
-			last_accessed_at = NOW()
-	`, entry.PlaintextHash, entry.BackendID, entry.StorageKey, entry.SizeBytes,
-		entry.CompressedSize, entry.CompressionAlgo, entry.Encrypted, entry.EncryptionAlgo, entry.RefCount)
+	if entry.DedupScope == "" {
+		entry.DedupScope = GlobalDedupScope
+	}
+	_, err := g.db.ExecContext(ctx, insertChunkSQL,
+		entry.DedupScope, entry.PlaintextHash, entry.BackendID, entry.StorageKey, entry.SizeBytes,
+		entry.CompressedSize, entry.CompressionAlgo, entry.Encrypted, entry.EncryptionAlgo, entry.CiphertextHash, entry.RefCount)
 
 	if err != nil {
 		return fmt.Errorf("failed to insert chunk: %w", err)
 	}
 
 	// Update cache
-	g.cache.set(entry.PlaintextHash, entry)
+	g.cache.set(cacheKey(entry.DedupScope, entry.PlaintextHash), entry)
 
 	return nil
 }
 
-// IncrementRef increments the reference count for a chunk
-func (g *GlobalContentIndex) IncrementRef(ctx context.Context, plaintextHash string) error {
-	_, err := g.db.ExecContext(ctx, `SELECT increment_chunk_ref($1)`, plaintextHash)
+// InsertChunkTx is InsertChunk inside a caller-owned transaction — used by the
+// chunked PUT path so the row insert can share a transaction with the
+// pg_advisory_xact_lock that serializes it against the GC sweep's
+// row-delete + blob-delete (WP-6). The caller commits.
+//
+// The cache entry is invalidated rather than set: the caller may still roll
+// back, and caching an entry for a row that never committed would recreate the
+// exact stale-cache bug WP-6 closes.
+func (g *GlobalContentIndex) InsertChunkTx(ctx context.Context, tx *sql.Tx, entry *GCIEntry) error {
+	if entry.DedupScope == "" {
+		entry.DedupScope = GlobalDedupScope
+	}
+	_, err := tx.ExecContext(ctx, insertChunkSQL,
+		entry.DedupScope, entry.PlaintextHash, entry.BackendID, entry.StorageKey, entry.SizeBytes,
+		entry.CompressedSize, entry.CompressionAlgo, entry.Encrypted, entry.EncryptionAlgo, entry.CiphertextHash, entry.RefCount)
+
 	if err != nil {
-		return fmt.Errorf("failed to increment ref: %w", err)
+		return fmt.Errorf("failed to insert chunk: %w", err)
+	}
+
+	g.cache.delete(cacheKey(entry.DedupScope, entry.PlaintextHash))
+
+	return nil
+}
+
+// IncrementRef increments the reference count for a chunk in the given scope
+// and reports how many rows were updated. Zero rows means the chunk row no
+// longer exists — GC swept it between the caller's lookup and this increment
+// (the lookup may have been served from a stale cache entry). Callers MUST
+// check for 0 and re-store the chunk; proceeding as if the ref was taken
+// installs a manifest that points at deleted data. (WP-6)
+//
+// Runs as a direct UPDATE rather than the increment_chunk_ref() SQL function
+// because the function returns VOID, which hides the rows-affected count.
+func (g *GlobalContentIndex) IncrementRef(ctx context.Context, scope, plaintextHash string) (int64, error) {
+	res, err := g.db.ExecContext(ctx, `
+		UPDATE global_content_index
+		SET ref_count = ref_count + 1,
+		    last_accessed_at = NOW(),
+		    marked_for_deletion = FALSE,
+		    marked_at = NULL
+		WHERE dedup_scope = $1 AND plaintext_hash = $2
+	`, scope, plaintextHash)
+	if err != nil {
+		return 0, fmt.Errorf("failed to increment ref: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("increment ref rows affected: %w", err)
 	}
 
 	// Invalidate cache entry (will be refreshed on next lookup)
-	g.cache.delete(plaintextHash)
+	g.cache.delete(cacheKey(scope, plaintextHash))
 
-	return nil
+	return rows, nil
 }
 
-// DecrementRef decrements the reference count for a chunk
-func (g *GlobalContentIndex) DecrementRef(ctx context.Context, plaintextHash string) (int, error) {
+// InvalidateCache drops the in-memory cache entry for a chunk. The dedup GC
+// sweep calls this before (and after) deleting a GCI row: without it, a stale
+// cache entry keeps reporting the chunk as present, a later PUT dedup-hits it,
+// and the resulting manifest points at data the sweep already deleted. Keyed
+// on BOTH scope and hash — the GCI is partitioned by dedup_scope. (WP-6)
+func (g *GlobalContentIndex) InvalidateCache(scope, plaintextHash string) {
+	g.cache.delete(cacheKey(scope, plaintextHash))
+}
+
+// DecrementRef decrements the reference count for a chunk in the given scope.
+func (g *GlobalContentIndex) DecrementRef(ctx context.Context, scope, plaintextHash string) (int, error) {
 	var newCount int
-	err := g.db.QueryRowContext(ctx, `SELECT decrement_chunk_ref($1)`, plaintextHash).Scan(&newCount)
+	err := g.db.QueryRowContext(ctx, `SELECT decrement_chunk_ref($1, $2)`, scope, plaintextHash).Scan(&newCount)
 	if err != nil {
 		return 0, fmt.Errorf("failed to decrement ref: %w", err)
 	}
 
 	// Invalidate cache entry
-	g.cache.delete(plaintextHash)
+	g.cache.delete(cacheKey(scope, plaintextHash))
 
 	return newCount, nil
 }
 
-// AddTenantChunkRef adds a tenant's reference to a chunk
+// AddTenantChunkRef adds a tenant's reference to a chunk. ref.DedupScope
+// defaults to GlobalDedupScope when unset.
 func (g *GlobalContentIndex) AddTenantChunkRef(ctx context.Context, ref *TenantChunkRef) error {
+	scope := ref.DedupScope
+	if scope == "" {
+		scope = GlobalDedupScope
+	}
 	_, err := g.db.ExecContext(ctx, `
 		INSERT INTO tenant_chunk_refs
 		(tenant_id, bucket_name, object_key, chunk_index, chunk_offset,
-		 plaintext_hash, encryption_key_version, ciphertext_hash)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		 plaintext_hash, dedup_scope, encryption_key_version, ciphertext_hash)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (tenant_id, bucket_name, object_key, chunk_index) DO UPDATE SET
 			plaintext_hash = EXCLUDED.plaintext_hash,
+			dedup_scope = EXCLUDED.dedup_scope,
 			encryption_key_version = EXCLUDED.encryption_key_version,
 			ciphertext_hash = EXCLUDED.ciphertext_hash
 	`, ref.TenantID, ref.BucketName, ref.ObjectKey, ref.ChunkIndex,
-		ref.ChunkOffset, ref.PlaintextHash, ref.EncryptionKeyVersion, ref.CiphertextHash)
+		ref.ChunkOffset, ref.PlaintextHash, scope, ref.EncryptionKeyVersion, ref.CiphertextHash)
 
 	if err != nil {
 		return fmt.Errorf("failed to add tenant chunk ref: %w", err)
@@ -326,10 +427,10 @@ func (g *GlobalContentIndex) AddTenantChunkRef(ctx context.Context, ref *TenantC
 }
 
 // GetObjectChunks retrieves all chunk references for an object
-func (g *GlobalContentIndex) GetObjectChunks(ctx context.Context, tenantID uuid.UUID, bucket, key string) ([]TenantChunkRef, error) {
+func (g *GlobalContentIndex) GetObjectChunks(ctx context.Context, tenantID string, bucket, key string) ([]TenantChunkRef, error) {
 	rows, err := g.db.QueryContext(ctx, `
 		SELECT id, tenant_id, bucket_name, object_key, chunk_index, chunk_offset,
-		       plaintext_hash, encryption_key_version, ciphertext_hash, created_at
+		       plaintext_hash, dedup_scope, encryption_key_version, ciphertext_hash, created_at
 		FROM tenant_chunk_refs
 		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = $3
 		ORDER BY chunk_index ASC
@@ -347,7 +448,7 @@ func (g *GlobalContentIndex) GetObjectChunks(ctx context.Context, tenantID uuid.
 		err := rows.Scan(
 			&ref.ID, &ref.TenantID, &ref.BucketName, &ref.ObjectKey,
 			&ref.ChunkIndex, &ref.ChunkOffset, &ref.PlaintextHash,
-			&ref.EncryptionKeyVersion, &ciphertextHash, &ref.CreatedAt,
+			&ref.DedupScope, &ref.EncryptionKeyVersion, &ciphertextHash, &ref.CreatedAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan chunk ref: %w", err)
@@ -364,30 +465,46 @@ func (g *GlobalContentIndex) GetObjectChunks(ctx context.Context, tenantID uuid.
 }
 
 // DeleteObjectChunks removes all chunk references for an object and decrements ref counts
-func (g *GlobalContentIndex) DeleteObjectChunks(ctx context.Context, tenantID uuid.UUID, bucket, key string) error {
+func (g *GlobalContentIndex) DeleteObjectChunks(ctx context.Context, tenantID string, bucket, key string) error {
 	tx, err := g.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Get all chunk hashes for this object
+	if err := g.DeleteObjectChunksTx(ctx, tx, tenantID, bucket, key); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// DeleteObjectChunksTx is DeleteObjectChunks inside a caller-owned
+// transaction — used when releasing a chunked object's manifest must commit
+// atomically with the caller's other writes (e.g. a plain PUT/copy/multipart
+// overwriting a chunked object: flipping is_chunked to FALSE without
+// releasing the manifest leaks the refs forever). The caller commits.
+func (g *GlobalContentIndex) DeleteObjectChunksTx(ctx context.Context, tx *sql.Tx, tenantID string, bucket, key string) error {
+	// Get all chunks (scope + hash) for this object. FOR UPDATE for the same
+	// reason as ReplaceObjectManifestTx: a delete racing an overwrite must not
+	// both release the same manifest's refs.
 	rows, err := tx.QueryContext(ctx, `
-		SELECT plaintext_hash FROM tenant_chunk_refs
+		SELECT dedup_scope, plaintext_hash FROM tenant_chunk_refs
 		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = $3
+		FOR UPDATE
 	`, tenantID, bucket, key)
 	if err != nil {
 		return fmt.Errorf("failed to get chunk hashes: %w", err)
 	}
 
-	var hashes []string
+	type scopedHash struct{ scope, hash string }
+	var chunks []scopedHash
 	for rows.Next() {
-		var hash string
-		if err := rows.Scan(&hash); err != nil {
+		var c scopedHash
+		if err := rows.Scan(&c.scope, &c.hash); err != nil {
 			_ = rows.Close()
 			return fmt.Errorf("failed to scan hash: %w", err)
 		}
-		hashes = append(hashes, hash)
+		chunks = append(chunks, c)
 	}
 	_ = rows.Close()
 
@@ -400,13 +517,13 @@ func (g *GlobalContentIndex) DeleteObjectChunks(ctx context.Context, tenantID uu
 		return fmt.Errorf("failed to delete chunk refs: %w", err)
 	}
 
-	// Decrement ref counts for each chunk
-	for _, hash := range hashes {
-		_, err = tx.ExecContext(ctx, `SELECT decrement_chunk_ref($1)`, hash)
+	// Decrement ref counts for each chunk in its own dedup scope.
+	for _, c := range chunks {
+		_, err = tx.ExecContext(ctx, `SELECT decrement_chunk_ref($1, $2)`, c.scope, c.hash)
 		if err != nil {
-			return fmt.Errorf("failed to decrement ref for %s: %w", hash, err)
+			return fmt.Errorf("failed to decrement ref for %s: %w", c.hash, err)
 		}
-		g.cache.delete(hash)
+		g.cache.delete(cacheKey(c.scope, c.hash))
 	}
 
 	// Delete object metadata
@@ -418,7 +535,7 @@ func (g *GlobalContentIndex) DeleteObjectChunks(ctx context.Context, tenantID uu
 		return fmt.Errorf("failed to delete object metadata: %w", err)
 	}
 
-	return tx.Commit()
+	return nil
 }
 
 // ReplaceObjectManifest atomically swaps an object's chunk manifest. In a single
@@ -431,29 +548,51 @@ func (g *GlobalContentIndex) DeleteObjectChunks(ctx context.Context, tenantID uu
 // must already be persisted before calling this. Callers should IncrementRef new
 // chunks BEFORE this call so that a chunk shared between the old and new versions
 // never transiently drops to ref_count 0 (which would mark it for deletion).
-func (g *GlobalContentIndex) ReplaceObjectManifest(ctx context.Context, tenantID uuid.UUID, bucket, key string, newRefs []TenantChunkRef, meta *ObjectMeta) error {
+func (g *GlobalContentIndex) ReplaceObjectManifest(ctx context.Context, tenantID string, bucket, key string, newRefs []TenantChunkRef, meta *ObjectMeta) error {
 	tx, err := g.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin manifest swap: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Capture the previous version's chunk hashes so we can release them.
+	if err := g.ReplaceObjectManifestTx(ctx, tx, tenantID, bucket, key, newRefs, meta); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit manifest swap: %w", err)
+	}
+	return nil
+}
+
+// ReplaceObjectManifestTx is ReplaceObjectManifest running inside a
+// caller-owned transaction, so the manifest swap can commit atomically with
+// the caller's other writes (the PUT path pairs it with the head-cache
+// upsert — committing the swap alone and then failing the upsert destroyed
+// the old manifest while the head cache still advertised the old object).
+// The caller commits; on error the caller must roll back.
+func (g *GlobalContentIndex) ReplaceObjectManifestTx(ctx context.Context, tx *sql.Tx, tenantID string, bucket, key string, newRefs []TenantChunkRef, meta *ObjectMeta) error {
+	// Capture the previous version's chunks (scope + hash) so we can release
+	// them. FOR UPDATE: two concurrent overwrites of one key otherwise both
+	// snapshot the same old manifest and both decrement — the loser deletes
+	// zero rows but still releases refs, driving shared chunks toward
+	// premature sweep (ref_count 0 with live references).
 	rows, err := tx.QueryContext(ctx, `
-		SELECT plaintext_hash FROM tenant_chunk_refs
+		SELECT dedup_scope, plaintext_hash FROM tenant_chunk_refs
 		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = $3
+		FOR UPDATE
 	`, tenantID, bucket, key)
 	if err != nil {
 		return fmt.Errorf("read previous manifest: %w", err)
 	}
-	var oldHashes []string
+	type scopedHash struct{ scope, hash string }
+	var oldChunks []scopedHash
 	for rows.Next() {
-		var h string
-		if scanErr := rows.Scan(&h); scanErr != nil {
+		var c scopedHash
+		if scanErr := rows.Scan(&c.scope, &c.hash); scanErr != nil {
 			_ = rows.Close()
 			return fmt.Errorf("scan previous hash: %w", scanErr)
 		}
-		oldHashes = append(oldHashes, h)
+		oldChunks = append(oldChunks, c)
 	}
 	_ = rows.Close()
 	if err := rows.Err(); err != nil {
@@ -467,27 +606,32 @@ func (g *GlobalContentIndex) ReplaceObjectManifest(ctx context.Context, tenantID
 	`, tenantID, bucket, key); err != nil {
 		return fmt.Errorf("delete previous manifest: %w", err)
 	}
-	for _, h := range oldHashes {
-		if _, err := tx.ExecContext(ctx, `SELECT decrement_chunk_ref($1)`, h); err != nil {
-			return fmt.Errorf("release chunk %s: %w", h, err)
+	for _, c := range oldChunks {
+		if _, err := tx.ExecContext(ctx, `SELECT decrement_chunk_ref($1, $2)`, c.scope, c.hash); err != nil {
+			return fmt.Errorf("release chunk %s: %w", c.hash, err)
 		}
 	}
 
 	// Install the new manifest.
 	for i := range newRefs {
 		ref := &newRefs[i]
+		scope := ref.DedupScope
+		if scope == "" {
+			scope = GlobalDedupScope
+		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO tenant_chunk_refs
 			(tenant_id, bucket_name, object_key, chunk_index, chunk_offset,
-			 plaintext_hash, encryption_key_version, ciphertext_hash)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			 plaintext_hash, dedup_scope, encryption_key_version, ciphertext_hash)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			ON CONFLICT (tenant_id, bucket_name, object_key, chunk_index) DO UPDATE SET
 				chunk_offset = EXCLUDED.chunk_offset,
 				plaintext_hash = EXCLUDED.plaintext_hash,
+				dedup_scope = EXCLUDED.dedup_scope,
 				encryption_key_version = EXCLUDED.encryption_key_version,
 				ciphertext_hash = EXCLUDED.ciphertext_hash
 		`, ref.TenantID, ref.BucketName, ref.ObjectKey, ref.ChunkIndex,
-			ref.ChunkOffset, ref.PlaintextHash, ref.EncryptionKeyVersion, ref.CiphertextHash); err != nil {
+			ref.ChunkOffset, ref.PlaintextHash, scope, ref.EncryptionKeyVersion, ref.CiphertextHash); err != nil {
 			return fmt.Errorf("insert chunk ref %d: %w", ref.ChunkIndex, err)
 		}
 	}
@@ -514,13 +658,12 @@ func (g *GlobalContentIndex) ReplaceObjectManifest(ctx context.Context, tenantID
 		return fmt.Errorf("save object metadata: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit manifest swap: %w", err)
-	}
-
-	// Released chunks' ref counts changed — drop their cache entries.
-	for _, h := range oldHashes {
-		g.cache.delete(h)
+	// Released chunks' ref counts changed — drop their cache entries. Done
+	// here (pre-commit) rather than after: a stale cache entry only causes an
+	// extra DB lookup, while skipping invalidation on a committed swap would
+	// leave wrong ref state cached. The caller owns the commit.
+	for _, c := range oldChunks {
+		g.cache.delete(cacheKey(c.scope, c.hash))
 	}
 	return nil
 }
@@ -554,7 +697,7 @@ func (g *GlobalContentIndex) SaveObjectMetadata(ctx context.Context, meta *Objec
 }
 
 // GetObjectMetadata retrieves object metadata
-func (g *GlobalContentIndex) GetObjectMetadata(ctx context.Context, tenantID uuid.UUID, bucket, key string) (*ObjectMeta, error) {
+func (g *GlobalContentIndex) GetObjectMetadata(ctx context.Context, tenantID string, bucket, key string) (*ObjectMeta, error) {
 	var meta ObjectMeta
 	var contentHash, contentType sql.NullString
 	var physicalSize sql.NullInt64
@@ -598,7 +741,7 @@ func (g *GlobalContentIndex) GetObjectMetadata(ctx context.Context, tenantID uui
 }
 
 // GetTenantDedupStats retrieves deduplication statistics for a tenant
-func (g *GlobalContentIndex) GetTenantDedupStats(ctx context.Context, tenantID uuid.UUID) (*DedupStats, error) {
+func (g *GlobalContentIndex) GetTenantDedupStats(ctx context.Context, tenantID string) (*DedupStats, error) {
 	var stats DedupStats
 	var logical, physical int64
 

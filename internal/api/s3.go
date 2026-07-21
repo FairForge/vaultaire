@@ -4,6 +4,7 @@ package api
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -275,8 +276,15 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 					zap.String("path", r.URL.Path))
 
 				errCode := ErrAccessDenied
-				if strings.Contains(err.Error(), "invalid authorization format") ||
-					strings.Contains(err.Error(), "parse") {
+				switch {
+				case errors.Is(err, auth.ErrSignatureMismatch):
+					errCode = ErrSignatureDoesNotMatch
+				case errors.Is(err, auth.ErrRequestTimeSkewed):
+					errCode = ErrRequestTimeTooSkewed
+				case errors.Is(err, auth.ErrInvalidContentSHA256):
+					errCode = ErrInvalidArgument
+				case strings.Contains(err.Error(), "invalid authorization format"),
+					strings.Contains(err.Error(), "parse"):
 					errCode = ErrSignatureDoesNotMatch
 				}
 				reqID := generateRequestID()
@@ -660,22 +668,42 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 
 // handlePutObject handles PUT requests
 func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3Request) {
-	if s.quotaManager != nil && req.TenantID != "" {
+	// WP-1: single quota reservation site. Reserve the declared size before
+	// the write, settle to the recorded logical size after it succeeds,
+	// release on failure, release the overwritten object's size on overwrite
+	// (the overwritten size is captured atomically by the head-cache upsert).
+	quotaOn := s.quotaManager != nil && req.TenantID != ""
+	var reserved int64
+	{
 		size := r.ContentLength
 		if decoded := r.Header.Get("x-amz-decoded-content-length"); decoded != "" {
 			if n, err := strconv.ParseInt(decoded, 10, 64); err == nil {
 				size = n
 			}
 		}
-		if size > 0 {
+		if size < 0 {
+			// No determinable size (chunked transfer without a decoded-length
+			// header): the write cannot be quota-checked before storage, and
+			// its head-cache row would record size 0 for real bytes. AWS S3
+			// requires a length on PUT for the same reason.
+			WriteS3Error(w, ErrMissingContentLength, r.URL.Path, generateRequestID())
+			return
+		}
+		if quotaOn && size > 0 {
 			ok, err := s.quotaManager.CheckAndReserve(r.Context(), req.TenantID, size)
 			if err != nil {
-				s.logger.Error("quota check failed", zap.Error(err))
-			} else if !ok {
+				// Fail closed: an unmetered write would corrupt billing.
+				s.logger.Error("quota check failed",
+					zap.Error(err), zap.String("tenant_id", req.TenantID))
+				WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+				return
+			}
+			if !ok {
 				WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
 					WithSuggestion("Upgrade at https://stored.ge/dashboard/billing"))
 				return
 			}
+			reserved = size
 		}
 	}
 
@@ -683,6 +711,7 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3
 	adapter.sseService = s.sseService
 	adapter.chunkEncSvc = s.chunkEncSvc
 	adapter.gci = s.gci
+	adapter.flags = s.flags
 
 	s.logger.Debug("S3 PUT translating to engine",
 		zap.String("s3.bucket", req.Bucket),
@@ -691,7 +720,19 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3
 		zap.String("engine.artifact", req.Object),
 		zap.Int64("size", r.ContentLength))
 
-	adapter.HandlePut(w, r, req.Bucket, req.Object)
+	rec := &countingResponseWriter{ResponseWriter: w}
+	adapter.HandlePut(rec, r, req.Bucket, req.Object)
+
+	if !quotaOn {
+		return
+	}
+	ctx, cancel := quotaCtx(r)
+	defer cancel()
+	if rec.statusCode >= 200 && rec.statusCode < 300 {
+		s.settlePutQuota(ctx, req.TenantID, reserved, adapter.putLogicalBytes, adapter.displacedBytes)
+	} else {
+		s.releaseQuota(ctx, req.TenantID, reserved)
+	}
 }
 
 // handleDeleteObject handles DELETE requests
@@ -702,6 +743,7 @@ func (s *Server) handleDeleteObject(w http.ResponseWriter, r *http.Request, req 
 	}
 	adapter := NewS3ToEngine(s.engine, s.db, s.logger)
 	adapter.gci = s.gci
+	adapter.quota = s.quotaManager
 	adapter.HandleDelete(w, r, req.Bucket, req.Object)
 }
 

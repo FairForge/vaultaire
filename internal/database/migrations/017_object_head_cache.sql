@@ -15,6 +15,3 @@ CREATE TABLE IF NOT EXISTS object_head_cache (
     updated_at  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     PRIMARY KEY (tenant_id, bucket, object_key)
 );
-
-CREATE INDEX IF NOT EXISTS idx_ohc_lookup
-    ON object_head_cache(tenant_id, bucket, object_key);

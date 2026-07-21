@@ -90,7 +90,7 @@ QR code rendered client-side via `qrcode-generator` CDN library. Backup codes pa
 
 `HandleDismissOnboarding(logger)` — POST `/dashboard/onboarding/dismiss`. Sets a 1-year cookie and returns 200. The dashboard template uses htmx to remove the card on success.
 
-The onboarding card in `dashboard.html` shows a 3-item checklist (bucket, object, webhook) with tabbed code examples (AWS CLI, Python, JavaScript, cURL) pre-filled with the user's access key. Hidden when `AllDone` or dismissed.
+The onboarding card in `dashboard.html` shows a 3-item checklist (bucket, object, webhook) with tabbed code examples (rclone first, AWS CLI, s3cmd, Python, JavaScript, cURL) pre-filled with the user's access key. B4 (5.15.6): every panel has a copy button (`.btn-copy` with `data-copy-target` pointing at the snippet's `<pre id>`; handler in `static/js/dashboard.js`), and the secret NEVER appears in dashboard HTML — snippets carry the `YOUR_SECRET_KEY` placeholder with a pointer to the signup reveal-once screen (B2) / API Keys page. Template-level test: `onboarding_template_test.go` (package dashboard). Hidden when `AllDone` or dismissed.
 
 ## Free Tier Enforcement (Phase 5.11.10)
 
@@ -294,6 +294,15 @@ Types: `abuseReportRow`, `abuseReportDetail`. Helper: `abuseBadgeClass` maps sta
 badge-warning/info/success/default.
 
 Templates: `templates/admin/abuse.html` (list), `templates/admin/abuse_detail.html` (detail).
+
+## Admin Feature Flags (`admin_flags.go`)
+
+Three handlers for the 1.13 feature-flags page:
+- `HandleAdminFlags(tmpl, flagsSvc, logger)` — GET `/admin/flags`: renders `flags.Service.Resolved()` (key, default, global row, effective state, per-tenant overrides) with toggle buttons and a tenant-override form.
+- `HandleAdminFlagSet(flagsSvc, logger)` — POST `/admin/flags/{key}/set`: form fields `enabled` (bool, required) + optional `tenant_id` (empty = global row). `updated_by` = session email. Redirects back to the page.
+- `HandleAdminFlagClear(flagsSvc, logger)` — POST `/admin/flags/{key}/clear`: removes the row for `tenant_id` (empty = global), reverting to global/default.
+
+Routes mount in router.go only when `deps.Flags != nil`. Template: `templates/admin/flags.html`. Flips are write-through — live on the next request.
 
 ## Legacy Handlers
 

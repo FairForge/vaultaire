@@ -61,16 +61,16 @@ CREATE TABLE IF NOT EXISTS gdpr_breach_log (
 );
 
 -- Indexes for performance
-CREATE INDEX idx_sar_user_id ON gdpr_subject_access_requests(user_id);
-CREATE INDEX idx_sar_status ON gdpr_subject_access_requests(status) WHERE status IN ('pending', 'processing');
-CREATE INDEX idx_sar_date ON gdpr_subject_access_requests(request_date DESC);
+CREATE INDEX IF NOT EXISTS idx_sar_user_id ON gdpr_subject_access_requests(user_id);
+CREATE INDEX IF NOT EXISTS idx_sar_status ON gdpr_subject_access_requests(status) WHERE status IN ('pending', 'processing');
+CREATE INDEX IF NOT EXISTS idx_sar_date ON gdpr_subject_access_requests(request_date DESC);
 
-CREATE INDEX idx_deletion_user_id ON gdpr_deletion_requests(user_id);
-CREATE INDEX idx_deletion_status ON gdpr_deletion_requests(status) WHERE status IN ('pending', 'processing');
-CREATE INDEX idx_deletion_date ON gdpr_deletion_requests(request_date DESC);
+CREATE INDEX IF NOT EXISTS idx_deletion_user_id ON gdpr_deletion_requests(user_id);
+CREATE INDEX IF NOT EXISTS idx_deletion_status ON gdpr_deletion_requests(status) WHERE status IN ('pending', 'processing');
+CREATE INDEX IF NOT EXISTS idx_deletion_date ON gdpr_deletion_requests(request_date DESC);
 
-CREATE INDEX idx_breach_date ON gdpr_breach_log(breach_date DESC);
-CREATE INDEX idx_breach_severity ON gdpr_breach_log(severity) WHERE severity IN ('high', 'critical');
+CREATE INDEX IF NOT EXISTS idx_breach_date ON gdpr_breach_log(breach_date DESC);
+CREATE INDEX IF NOT EXISTS idx_breach_severity ON gdpr_breach_log(severity) WHERE severity IN ('high', 'critical');
 
 -- Comments for documentation
 COMMENT ON TABLE gdpr_processing_activities IS 'Article 30 GDPR: Records of processing activities';

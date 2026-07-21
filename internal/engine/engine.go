@@ -9,6 +9,7 @@ import (
 	"io"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/cache"
@@ -16,12 +17,6 @@ import (
 	"github.com/FairForge/vaultaire/internal/intelligence"
 	"go.uber.org/zap"
 )
-
-// QuotaManager interface for quota operations
-type QuotaManager interface {
-	CheckAndReserve(ctx context.Context, tenantID string, bytes int64) (bool, error)
-	ReleaseQuota(ctx context.Context, tenantID string, bytes int64) error
-}
 
 // CoreEngine implements the Engine interface with real intelligence
 type CoreEngine struct {
@@ -31,7 +26,6 @@ type CoreEngine struct {
 
 	logger        *zap.Logger
 	db            *sql.DB
-	quota         QuotaManager
 	selector      *BackendSelector
 	costOptimizer *CostOptimizer
 	failover      *FailoverManager
@@ -48,6 +42,10 @@ type CoreEngine struct {
 	// different one. In-memory only; objects written before a restart
 	// fall back to e.primary (safe — they were written there too).
 	objectBackends sync.Map
+
+	// writeFailures counts PUTs that failed on every eligible durable
+	// backend (WP-F fail-loudly). Exposed via GetMetrics for alerting.
+	writeFailures atomic.Int64
 
 	mu     sync.RWMutex
 	config *Config
@@ -334,24 +332,10 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 	tenantID := common.GetTenantID(ctx)
 	sizeReader := &sizeTrackingReader{Reader: data}
 
-	if e.quota != nil && tenantID != "" {
-		estimatedSize := int64(10 << 20)
-		allowed, err := e.quota.CheckAndReserve(ctx, tenantID, estimatedSize)
-		if err != nil {
-			return "", fmt.Errorf("checking quota: %w", err)
-		}
-		if !allowed {
-			return "", ErrQuotaExceeded
-		}
-		defer func() {
-			if actual := sizeReader.bytesRead; actual != estimatedSize {
-				diff := actual - estimatedSize
-				if diff != 0 {
-					_, _ = e.quota.CheckAndReserve(ctx, tenantID, diff)
-				}
-			}
-		}()
-	}
+	// Quota accounting deliberately does NOT happen here (WP-1): the API
+	// layer is the single reservation site — it knows the real logical size,
+	// the overwrite delta, and the failure outcome. An engine-level estimate
+	// double-counted every PUT and re-counted each deduplicated chunk store.
 
 	// Resolve storage class from options to determine target backend.
 	options := ApplyPutOptions(opts...)
@@ -372,8 +356,9 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 		}
 	}
 
-	// Build candidate list: target first, then primary, then others.
-	candidates := e.buildCandidateList(targetBackend)
+	// Build candidate list: target first, then primary, then other DURABLE
+	// backends — local is excluded unless targeted or primary (WP-F).
+	candidates := e.buildWriteCandidateList(targetBackend)
 
 	usedBackend, err := e.failover.Execute(ctx, candidates, func(driverName string) error {
 		d, ok := e.drivers[driverName]
@@ -398,6 +383,20 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 	}
 
 	if err != nil {
+		// WP-F fail-loudly: a genuine backend failure becomes a 5xx to the
+		// client (the API layer maps ErrAllBackendsUnavailable to 503 with
+		// Retry-After) — clients retry; data is never silently stranded.
+		// Client-level outcomes (quota, invalid input) keep their identity.
+		if isBackendFailure(err) {
+			e.writeFailures.Add(1)
+			e.logger.Error("durable backend write failed — rejecting request, no local fallback",
+				zap.String("container", container),
+				zap.String("artifact", artifact),
+				zap.String("target_backend", targetBackend),
+				zap.Strings("candidates", candidates),
+				zap.Error(err))
+			err = fmt.Errorf("%w: %w", ErrAllBackendsUnavailable, err)
+		}
 		return "", fmt.Errorf("put %s/%s: %w", container, artifact, err)
 	}
 
@@ -564,9 +563,10 @@ func (e *CoreEngine) HealthCheck(ctx context.Context) error {
 // GetMetrics returns comprehensive metrics
 func (e *CoreEngine) GetMetrics(ctx context.Context) (map[string]interface{}, error) {
 	metrics := map[string]interface{}{
-		"drivers": len(e.drivers),
-		"primary": e.primary,
-		"backup":  e.backup,
+		"drivers":        len(e.drivers),
+		"primary":        e.primary,
+		"backup":         e.backup,
+		"write_failures": e.writeFailures.Load(),
 	}
 	if e.cache != nil {
 		metrics["cache"] = e.cache.GetMetrics()
@@ -578,13 +578,6 @@ func (e *CoreEngine) GetMetrics(ctx context.Context) (map[string]interface{}, er
 		}
 	}
 	return metrics, nil
-}
-
-// SetQuotaManager sets the quota manager
-func (e *CoreEngine) SetQuotaManager(qm QuotaManager) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.quota = qm
 }
 
 // SetCostConfiguration updates cost optimizer
@@ -649,19 +642,31 @@ func (r *sizeTrackingReader) Read(p []byte) (n int, err error) {
 	return
 }
 
+// maxCacheableObjectSize caps how much a cachingReader may hold in memory.
+// Objects past this size are streamed through uncached — buffering the whole
+// body "to decide at EOF" held entire multi-GB objects in RAM per concurrent
+// reader (CR-2 OOM).
+const maxCacheableObjectSize = 10 << 20
+
 type cachingReader struct {
 	io.ReadCloser
 	cache  *cache.TieredCache
 	key    string
 	buffer *bytes.Buffer
+	skip   bool // object exceeded maxCacheableObjectSize — stop buffering
 }
 
 func (r *cachingReader) Read(p []byte) (n int, err error) {
 	n, err = r.ReadCloser.Read(p)
-	if n > 0 {
-		r.buffer.Write(p[:n])
+	if n > 0 && !r.skip {
+		if r.buffer.Len()+n > maxCacheableObjectSize {
+			r.skip = true
+			r.buffer = nil // release what was buffered so far
+		} else {
+			r.buffer.Write(p[:n])
+		}
 	}
-	if err == io.EOF && r.cache != nil && r.buffer.Len() < 10<<20 {
+	if err == io.EOF && !r.skip && r.cache != nil {
 		_ = r.cache.Set(r.key, r.buffer.Bytes())
 	}
 	return
@@ -688,6 +693,28 @@ func (e *CoreEngine) buildCandidateList(preferred string) []string {
 		add(name)
 	}
 	return candidates
+}
+
+// nonDurableBackends are backends whose writes do not survive loss of the hub
+// machine. WP-F (1.14): they may receive writes only when explicitly targeted
+// (REDUCED_REDUNDANCY) or configured as the primary (STORAGE_MODE=local) —
+// never as a silent failover destination for customer data.
+var nonDurableBackends = map[string]bool{"local": true}
+
+// buildWriteCandidateList is buildCandidateList restricted to backends that
+// are safe write targets. A failing durable backend must surface as a 5xx to
+// the client, not as a silent write to the hub's local disk (which lies about
+// durability, fills the single box, and bills the wrong tier).
+func (e *CoreEngine) buildWriteCandidateList(target string) []string {
+	all := e.buildCandidateList(target)
+	writable := make([]string, 0, len(all))
+	for _, name := range all {
+		if nonDurableBackends[name] && name != target && name != e.primary {
+			continue
+		}
+		writable = append(writable, name)
+	}
+	return writable
 }
 
 // GetDriver returns a named driver if it is registered.
