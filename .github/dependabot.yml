@@ -6,6 +6,10 @@ updates:
       interval: "weekly"
       day: "monday"
     open-pull-requests-limit: 10
+    ignore:
+      # FastCDC chunking core — 0.5.0 breaks build-and-test (PR #319).
+      # Revisit after launch; do not auto-bump a dedup-critical dependency.
+      - dependency-name: "github.com/restic/chunker"
     groups:
       aws:
         patterns:
