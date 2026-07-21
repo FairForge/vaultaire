@@ -5,6 +5,13 @@ what you need and it shows up here.
 
 ---
 
+## 2026-07-20 — Customer docs are live
+
+- **Real documentation at [/docs](/docs).** Getting Started (signup to first
+  upload in two minutes), a full rclone guide, and an honest FAQ covering
+  pricing, trust, and the technical details. The interactive API reference
+  moved to /docs/api and now carries the right name and support address.
+
 ## 2026-07-20 — New homepage
 
 - **The real stored.ge front page is live.** Tier ladder (Vault archive →
