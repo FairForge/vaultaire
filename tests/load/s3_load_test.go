@@ -161,7 +161,7 @@ func TestLoad_Multipart(t *testing.T) {
 		go func(key string) {
 			defer wg.Done()
 			start := time.Now()
-			_, err := uploader.Upload(ctx, &s3.PutObjectInput{
+			_, err := uploader.Upload(ctx, &s3.PutObjectInput{ //nolint:staticcheck // manager.Uploader is deprecated in favor of transfermanager; migration is a post-launch WP
 				Bucket: aws.String(bucket),
 				Key:    aws.String(key),
 				Body:   newPatternReader(objectSize),
@@ -361,7 +361,7 @@ func TestLoad_ManagementBurst(t *testing.T) {
 
 // TestLoad_Uploader_PartSize verifies the harness uploader matches production tuning.
 func TestLoad_Uploader_PartSize(t *testing.T) {
-	uploader := manager.NewUploader(nil, func(u *manager.Uploader) {
+	uploader := manager.NewUploader(nil, func(u *manager.Uploader) { //nolint:staticcheck // manager.Uploader is deprecated in favor of transfermanager; migration is a post-launch WP
 		u.PartSize = 16 << 20
 		u.Concurrency = 8
 	})

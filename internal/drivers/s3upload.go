@@ -34,7 +34,7 @@ const (
 // interface, which *s3.Client satisfies (and tests can mock). On any failure the
 // uploader aborts the multipart upload so no orphaned parts are billed.
 func s3ParallelUpload(ctx context.Context, client manager.UploadAPIClient, bucket, key, contentType string, body io.Reader) error {
-	uploader := manager.NewUploader(client, func(u *manager.Uploader) {
+	uploader := manager.NewUploader(client, func(u *manager.Uploader) { //nolint:staticcheck // manager.Uploader is deprecated in favor of transfermanager; migration is a post-launch WP
 		u.PartSize = s3UploadPartSize
 		u.Concurrency = s3UploadConcurrency
 	})
@@ -48,7 +48,7 @@ func s3ParallelUpload(ctx context.Context, client manager.UploadAPIClient, bucke
 		in.ContentType = aws.String(contentType)
 	}
 
-	if _, err := uploader.Upload(ctx, in); err != nil {
+	if _, err := uploader.Upload(ctx, in); err != nil { //nolint:staticcheck // manager.Uploader is deprecated in favor of transfermanager; migration is a post-launch WP
 		return fmt.Errorf("s3 parallel upload %s/%s: %w", bucket, key, err)
 	}
 	return nil
