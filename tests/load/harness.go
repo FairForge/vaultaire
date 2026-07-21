@@ -86,8 +86,8 @@ func newS3Client() *s3.Client {
 	})
 }
 
-func newUploader(client *s3.Client) *manager.Uploader {
-	return manager.NewUploader(client, func(u *manager.Uploader) {
+func newUploader(client *s3.Client) *manager.Uploader { //nolint:staticcheck // manager.Uploader is deprecated in favor of transfermanager; migration is a post-launch WP
+	return manager.NewUploader(client, func(u *manager.Uploader) { //nolint:staticcheck // manager.Uploader is deprecated in favor of transfermanager; migration is a post-launch WP
 		u.PartSize = 16 << 20 // 16 MiB, matches production
 		u.Concurrency = 8
 	})
