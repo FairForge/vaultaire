@@ -277,7 +277,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	}
 
 	if cacheHit && a.db != nil {
-		go func() {
+		go func() { // #nosec G118 -- fire-and-forget access-time touch; must outlive the request, request ctx would cancel it
 			_, _ = a.db.ExecContext(context.Background(), `
 				UPDATE object_head_cache SET last_accessed = NOW()
 				WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,

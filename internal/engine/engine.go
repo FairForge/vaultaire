@@ -407,7 +407,7 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 		if resolvedClass == "" {
 			resolvedClass = "STANDARD"
 		}
-		go func() {
+		go func() { // #nosec G118 -- fire-and-forget location record; must outlive the request, request ctx would cancel it
 			_ = e.locations.RecordLocation(context.Background(), tenantID, container, artifact, usedBackend, resolvedClass, sizeReader.bytesRead)
 		}()
 	}
