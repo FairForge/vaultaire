@@ -12,6 +12,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# upload-sarif needs security-events:write; without an explicit block the
+# push-event token is read-only and the trivy job fails on every main push.
+permissions:
+  contents: read
+  security-events: write
+
 jobs:
   gosec:
     runs-on: ubuntu-latest
