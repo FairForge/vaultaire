@@ -1,379 +1,569 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>stored.ge — S3-compatible storage that optimizes itself. $3.99/TB, archive from $1/TB</title>
-    <meta name="description" content="S3-compatible object storage with automatic tiering across hot storage and tape. $3.99/TB, tape-backed archive from $1/TB. No API fees, 3× free egress, no minimum duration.">
-    <meta property="og:title" content="stored.ge — S3-compatible storage that optimizes itself">
-    <meta property="og:description" content="One endpoint. Your data auto-tiers across hot storage and tape — $3.99/TB, archive from $1/TB. No API fees.">
-    <meta property="og:url" content="https://stored.ge">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>stored.ge — S3-compatible storage that optimizes itself. $3.99/TB, archive from $1/TB</title>
+<meta name="description" content="S3-compatible object storage with automatic tiering across hot storage and tape. $3.99/TB, tape-backed archive from $1/TB. No API fees, 3× free egress, no minimum duration.">
+<meta property="og:title" content="stored.ge — S3-compatible storage that optimizes itself">
+<meta property="og:description" content="One endpoint. Your data auto-tiers across hot storage and tape — $3.99/TB, archive from $1/TB. No API fees.">
+<meta property="og:url" content="https://stored.ge">
+<meta name="theme-color" content="#141210" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f5f1e9" media="(prefers-color-scheme: light)">
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'%3E%3Crect%20width='32'%20height='32'%20rx='6'%20fill='%23141210'/%3E%3Ctext%20x='16'%20y='23'%20text-anchor='middle'%20font-family='monospace'%20font-size='19'%20font-weight='700'%20fill='%23e0a458'%3Es%3C/text%3E%3C/svg%3E">
 
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
+<style>
+    /* ============================================================
+       stored.ge — hand-set in one file on purpose.
+       Warm dark by default, paper if you ask for light.
+       Serif for prose, mono for anything with a number in it.
+       ============================================================ */
 
+    :root {
+        --bg: #141210;
+        --bg-raise: #1b1815;
+        --ink: #ece7de;
+        --dim: #a49d90;
+        --line: #2c2824;
+        --accent: #e0a458;
+        --accent-down: #c78d43;
+        --accent-ink: #191307;
+        --ok: #6fbf8f;
+        --term-bg: #0c0e11;
+        --term-line: #23282e;
+        --term-ink: #c9d1d9;
+        --term-dim: #828b95;
+        --serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, Georgia, "Times New Roman", serif;
+        --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    }
+
+    @media (prefers-color-scheme: light) {
         :root {
-            --primary: #5B21B6;
-            --primary-dark: #4C1D95;
-            --secondary: #8B5CF6;
-            --accent: #10B981;
-            --bg: #FFFFFF;
-            --bg-alt: #F9FAFB;
-            --card-bg: #FFFFFF;
-            --text-primary: #111827;
-            --text-secondary: #6B7280;
-            --border-color: #E5E7EB;
-            --code-bg: #F3F4F6;
+            --bg: #f5f1e9;
+            --bg-raise: #fbf8f2;
+            --ink: #241f17;
+            --dim: #6e6455;
+            --line: #ddd4c4;
+            --accent: #8a5a12;
+            --accent-down: #6f4a10;
+            --accent-ink: #fdf9f1;
+            --ok: #3c7a5a;
         }
+    }
 
-        @media (prefers-color-scheme: dark) {
-            :root {
-                --primary: #7C3AED;
-                --primary-dark: #6D28D9;
-                --secondary: #A78BFA;
-                --bg: #111827;
-                --bg-alt: #1F2937;
-                --card-bg: #1F2937;
-                --text-primary: #F9FAFB;
-                --text-secondary: #9CA3AF;
-                --border-color: #374151;
-                --code-bg: #0F172A;
-            }
-        }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
 
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            line-height: 1.6;
-            color: var(--text-primary);
-            background: var(--bg);
-        }
+    html { scroll-behavior: smooth; }
+    @media (prefers-reduced-motion: reduce) {
+        html { scroll-behavior: auto; }
+        .blink { animation: none; }
+    }
 
-        .container { max-width: 1100px; margin: 0 auto; padding: 0 20px; }
+    body {
+        font-family: var(--serif);
+        font-size: 17px;
+        line-height: 1.65;
+        color: var(--ink);
+        background: var(--bg);
+        -webkit-font-smoothing: antialiased;
+    }
 
-        a { color: var(--secondary); text-decoration: none; }
-        a:hover { text-decoration: underline; }
+    ::selection { background: var(--accent); color: var(--accent-ink); }
 
-        /* ---------- Nav ---------- */
-        nav {
-            position: sticky; top: 0; z-index: 50;
-            background: var(--bg);
-            border-bottom: 1px solid var(--border-color);
-        }
-        .nav-inner {
-            display: flex; align-items: center; justify-content: space-between;
-            padding: 0.9rem 20px; max-width: 1100px; margin: 0 auto;
-        }
-        .logo { font-size: 1.25rem; font-weight: 800; color: var(--text-primary); }
-        .logo span { color: var(--secondary); }
-        .nav-links { display: flex; align-items: center; gap: 1.4rem; list-style: none; }
-        .nav-links a { color: var(--text-secondary); font-size: 0.95rem; }
-        .nav-links a:hover { color: var(--text-primary); text-decoration: none; }
-        @media (max-width: 720px) { .nav-links .hide-sm { display: none; } }
+    a { color: var(--ink); text-decoration: underline; text-decoration-color: var(--accent); text-underline-offset: 3px; }
+    a:hover { color: var(--accent); }
 
-        .btn {
-            display: inline-block; padding: 0.6rem 1.3rem; border-radius: 8px;
-            font-weight: 600; font-size: 0.95rem; border: none; cursor: pointer;
-        }
-        .btn-primary { background: var(--primary); color: #fff; }
-        .btn-primary:hover { background: var(--primary-dark); text-decoration: none; }
-        .btn-outline {
-            border: 1px solid var(--border-color); color: var(--text-primary);
-            background: transparent;
-        }
-        .btn-outline:hover { border-color: var(--secondary); text-decoration: none; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-        /* ---------- Hero ---------- */
-        .hero { padding: 4.5rem 0 3.5rem; text-align: center; }
-        .hero-badge {
-            display: inline-block; padding: 0.3rem 0.9rem; border-radius: 999px;
-            border: 1px solid var(--border-color); color: var(--text-secondary);
-            font-size: 0.85rem; margin-bottom: 1.4rem;
-        }
-        .hero-badge strong { color: var(--accent); }
-        .hero h1 { font-size: 2.7rem; line-height: 1.15; letter-spacing: -0.02em; }
-        .hero .sub {
-            margin: 1.2rem auto 0; max-width: 640px;
-            color: var(--text-secondary); font-size: 1.15rem;
-        }
-        .hero-cta { margin-top: 2rem; display: flex; gap: 0.8rem; justify-content: center; flex-wrap: wrap; }
-        .trust-line { margin-top: 1.6rem; color: var(--text-secondary); font-size: 0.85rem; }
+    .container { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
 
-        .waitlist-form { display: flex; gap: 0.6rem; justify-content: center; flex-wrap: wrap; }
-        .waitlist-form input {
-            padding: 0.6rem 1rem; border-radius: 8px; min-width: 260px;
-            border: 1px solid var(--border-color);
-            background: var(--card-bg); color: var(--text-primary); font-size: 0.95rem;
-        }
-        .waitlist-ok { color: var(--accent); font-weight: 600; }
+    .mono { font-family: var(--mono); }
 
-        /* ---------- Sections ---------- */
-        section { padding: 3.5rem 0; }
-        section.alt { background: var(--bg-alt); }
-        .section-head { text-align: center; max-width: 640px; margin: 0 auto 2.5rem; }
-        .section-head h2 { font-size: 1.9rem; letter-spacing: -0.01em; }
-        .section-head p { margin-top: 0.6rem; color: var(--text-secondary); }
+    .skip {
+        position: absolute; left: -9999px; top: 0; z-index: 99;
+        background: var(--accent); color: var(--accent-ink);
+        padding: 0.5rem 1rem; font-family: var(--mono); font-size: 0.85rem;
+    }
+    .skip:focus { left: 0; }
 
-        /* ---------- Tier ladder ---------- */
-        .ladder { display: flex; flex-direction: column; align-items: center; gap: 1rem; }
-        .rung {
-            border: 1px solid var(--border-color); border-radius: 12px;
-            background: var(--card-bg); padding: 1.4rem 1.6rem; width: 100%;
-        }
-        .rung.perf { max-width: 620px; }
-        .rung.standard { max-width: 800px; border-color: var(--secondary); position: relative; }
-        .rung.vault { max-width: 980px; }
-        .rung-head { display: flex; align-items: baseline; gap: 0.8rem; flex-wrap: wrap; }
-        .rung-head h3 { font-size: 1.2rem; }
-        .rung-price { color: var(--secondary); font-weight: 700; }
-        .rung-tag {
-            font-size: 0.72rem; font-weight: 700; letter-spacing: 0.06em;
-            color: #fff; background: var(--secondary); border-radius: 999px;
-            padding: 0.15rem 0.7rem; position: absolute; top: -0.7rem; left: 1.4rem;
-        }
-        .rung p { color: var(--text-secondary); margin-top: 0.4rem; font-size: 0.95rem; }
-        .rung .for { margin-top: 0.7rem; display: flex; gap: 0.5rem; flex-wrap: wrap; }
-        .chip {
-            font-size: 0.8rem; color: var(--text-secondary);
-            border: 1px solid var(--border-color); border-radius: 999px; padding: 0.15rem 0.7rem;
-        }
-        .ladder-note { text-align: center; color: var(--text-secondary); font-size: 0.9rem; margin-top: 1.4rem; }
+    /* ---------- buttons ---------- */
+    .btn {
+        display: inline-block; padding: 0.72rem 1.25rem;
+        font-family: var(--mono); font-size: 0.8rem; font-weight: 700;
+        letter-spacing: 0.07em; text-transform: uppercase;
+        text-decoration: none; border-radius: 4px; border: none; cursor: pointer;
+    }
+    .btn-primary { background: var(--accent); color: var(--accent-ink); }
+    .btn-primary:hover { background: var(--accent-down); color: var(--accent-ink); }
+    .btn-ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+    .btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
 
-        /* ---------- How it works ---------- */
-        .timeline { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.2rem; }
-        @media (max-width: 720px) { .timeline { grid-template-columns: 1fr; } }
-        .stage {
-            border: 1px solid var(--border-color); border-radius: 12px;
-            padding: 1.3rem; background: var(--card-bg);
-        }
-        .stage .when { font-size: 0.8rem; font-weight: 700; letter-spacing: 0.05em; color: var(--secondary); }
-        .stage h3 { margin-top: 0.3rem; font-size: 1.05rem; }
-        .stage p { color: var(--text-secondary); font-size: 0.92rem; margin-top: 0.4rem; }
-        .how-note { text-align: center; color: var(--text-secondary); margin: 1.6rem auto 0; max-width: 620px; }
+    .arrow-link {
+        font-family: var(--mono); font-size: 0.85rem; color: var(--dim);
+        text-decoration: none;
+    }
+    .arrow-link:hover { color: var(--accent); }
+    .arrow-link::after { content: " ↓"; }
 
-        .quickstart { max-width: 720px; margin: 2.2rem auto 0; }
-        .quickstart-head {
-            display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;
-        }
-        .quickstart-head span { font-weight: 600; font-size: 0.95rem; }
-        .copy-btn {
-            font-size: 0.8rem; padding: 0.25rem 0.8rem; border-radius: 6px;
-            border: 1px solid var(--border-color); background: transparent;
-            color: var(--text-secondary); cursor: pointer;
-        }
-        .copy-btn:hover { color: var(--text-primary); border-color: var(--secondary); }
-        pre {
-            background: var(--code-bg); border: 1px solid var(--border-color);
-            border-radius: 10px; padding: 1rem 1.2rem; overflow-x: auto;
-            font-size: 0.85rem; line-height: 1.55;
-        }
-        .quickstart .after { color: var(--text-secondary); font-size: 0.88rem; margin-top: 0.6rem; }
+    /* ---------- top bar ---------- */
+    .topbar {
+        position: sticky; top: 0; z-index: 50;
+        background: color-mix(in srgb, var(--bg) 88%, transparent);
+        -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+        border-bottom: 1px solid var(--line);
+    }
+    @supports not (background: color-mix(in srgb, red 50%, blue)) {
+        .topbar { background: var(--bg); }
+    }
+    .topbar-inner {
+        max-width: 1080px; margin: 0 auto; padding: 0.85rem 24px;
+        display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+    }
+    .logo {
+        font-family: var(--mono); font-size: 1.05rem; font-weight: 700;
+        color: var(--ink); text-decoration: none; letter-spacing: -0.02em;
+    }
+    .logo b { color: var(--accent); font-weight: 700; }
+    .topnav { display: flex; align-items: center; gap: 1.35rem; list-style: none; }
+    .topnav a:not(.btn) {
+        font-family: var(--mono); font-size: 0.82rem; color: var(--dim);
+        text-decoration: none;
+    }
+    .topnav a:not(.btn):hover { color: var(--ink); }
+    @media (max-width: 760px) { .topnav .hide-sm { display: none; } }
 
-        /* ---------- Numbers ---------- */
-        .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1.2rem; }
-        @media (max-width: 860px) { .stats { grid-template-columns: repeat(2, 1fr); } }
-        .stat {
-            text-align: center; border: 1px solid var(--border-color);
-            border-radius: 12px; padding: 1.4rem 1rem; background: var(--card-bg);
-        }
-        .stat .big { font-size: 1.7rem; font-weight: 800; color: var(--secondary); }
-        .stat p { color: var(--text-secondary); font-size: 0.85rem; margin-top: 0.4rem; }
+    /* ---------- hero ---------- */
+    .hero { position: relative; padding: 5rem 0 4.5rem; overflow: hidden; }
+    .hero::before {
+        content: ""; position: absolute; inset: 0; pointer-events: none;
+        background-image: radial-gradient(var(--line) 1px, transparent 1px);
+        background-size: 26px 26px;
+        opacity: 0.5;
+        -webkit-mask-image: linear-gradient(to bottom, rgba(0,0,0,0.9), transparent 75%);
+        mask-image: linear-gradient(to bottom, rgba(0,0,0,0.9), transparent 75%);
+    }
+    .hero-grid {
+        position: relative; display: grid; grid-template-columns: 1.05fr 0.95fr;
+        gap: 3.5rem; align-items: center;
+    }
+    @media (max-width: 900px) { .hero-grid { grid-template-columns: 1fr; gap: 2.5rem; } }
+    .hero-grid > * { min-width: 0; }
 
-        /* ---------- Pricing ---------- */
-        .pricing-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.2rem; align-items: start; }
-        @media (max-width: 860px) { .pricing-grid { grid-template-columns: 1fr; } }
-        .plan {
-            border: 1px solid var(--border-color); border-radius: 12px;
-            background: var(--card-bg); padding: 1.6rem; position: relative;
-        }
-        .plan.popular { border-color: var(--secondary); }
-        .plan h3 { font-size: 1.1rem; }
-        .plan .price { font-size: 1.9rem; font-weight: 800; margin-top: 0.5rem; }
-        .plan .price small { font-size: 0.9rem; font-weight: 500; color: var(--text-secondary); }
-        .plan .alt-price { color: var(--text-secondary); font-size: 0.85rem; margin-top: 0.15rem; }
-        .plan ul { list-style: none; margin-top: 1rem; }
-        .plan li { padding: 0.3rem 0; color: var(--text-secondary); font-size: 0.92rem; }
-        .plan li::before { content: "✓  "; color: var(--accent); font-weight: 700; }
-        .plan .plan-cta { margin-top: 1.2rem; }
+    .hero-flag {
+        font-family: var(--mono); font-size: 0.8rem; letter-spacing: 0.05em;
+        text-transform: uppercase; color: var(--dim); margin-bottom: 1.5rem;
+    }
+    .hero-flag .dot {
+        display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+        background: var(--ok); margin-right: 0.5rem; vertical-align: baseline;
+    }
+    .hero-flag strong { color: var(--accent); font-weight: 700; }
 
-        .packs { max-width: 980px; margin: 1.6rem auto 0; text-align: center; }
-        .packs-title { font-weight: 600; font-size: 0.95rem; margin-bottom: 0.7rem; }
-        .packs-row { display: flex; gap: 0.7rem; flex-wrap: wrap; justify-content: center; }
-        .pack {
-            border: 1px solid var(--border-color); border-radius: 10px;
-            padding: 0.6rem 1rem; background: var(--card-bg); font-size: 0.88rem;
-        }
-        .pack strong { display: block; }
-        .pack span { color: var(--text-secondary); font-size: 0.8rem; }
-        .packs .fine { color: var(--text-secondary); font-size: 0.8rem; margin-top: 0.8rem; }
+    .hero h1 {
+        font-size: clamp(2.3rem, 5vw, 3.3rem); line-height: 1.12;
+        font-weight: 600; letter-spacing: -0.015em;
+    }
+    .hero h1 em { font-style: italic; color: var(--accent); }
+    .hero .sub {
+        margin-top: 1.3rem; max-width: 34em; color: var(--dim); font-size: 1.1rem;
+    }
+    .hero .sub strong { color: var(--ink); font-family: var(--mono); font-size: 0.95em; font-weight: 700; }
+    .hero-cta { margin-top: 2.1rem; display: flex; align-items: center; gap: 1.4rem; flex-wrap: wrap; }
+    .trust-line {
+        margin-top: 2rem; font-family: var(--mono); font-size: 0.78rem;
+        color: var(--dim); letter-spacing: 0.02em;
+    }
 
-        .includes {
-            text-align: center; color: var(--text-secondary); font-size: 0.9rem;
-            margin-top: 2rem; padding-top: 1.4rem; border-top: 1px solid var(--border-color);
-        }
+    .waitlist-form { display: flex; gap: 0.6rem; flex-wrap: wrap; }
+    .waitlist-form input {
+        font-family: var(--mono); font-size: 0.88rem;
+        padding: 0.68rem 0.9rem; min-width: 240px;
+        border: 1px solid var(--line); border-radius: 4px;
+        background: var(--bg-raise); color: var(--ink);
+    }
+    .waitlist-form input::placeholder { color: var(--dim); }
+    .waitlist-form input:focus { border-color: var(--accent); outline: none; }
+    .waitlist-ok { font-family: var(--mono); font-size: 0.9rem; color: var(--ok); }
 
-        .compare { margin-top: 2.5rem; overflow-x: auto; }
-        table { border-collapse: collapse; width: 100%; font-size: 0.9rem; min-width: 640px; }
-        th, td { padding: 0.6rem 0.8rem; text-align: left; border-bottom: 1px solid var(--border-color); }
-        th { color: var(--text-secondary); font-weight: 600; }
-        td.us { font-weight: 700; }
-        .compare .fine { color: var(--text-secondary); font-size: 0.78rem; margin-top: 0.6rem; }
+    /* ---------- terminal ---------- */
+    .term {
+        background: var(--term-bg); border: 1px solid var(--term-line);
+        border-radius: 8px; overflow: hidden;
+        box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+    }
+    .term-bar {
+        display: flex; align-items: center; gap: 6px;
+        padding: 0.6rem 0.85rem; border-bottom: 1px solid var(--term-line);
+    }
+    .term-dot { width: 10px; height: 10px; border-radius: 50%; background: #363c44; }
+    .term-title {
+        margin-left: auto; margin-right: auto;
+        font-family: var(--mono); font-size: 0.72rem; color: var(--term-dim);
+    }
+    .term-bar .copy-btn { margin-left: auto; }
+    .term pre {
+        margin: 0; padding: 1.05rem 1.15rem; overflow-x: auto;
+        font-family: var(--mono); font-size: 0.8rem; line-height: 1.7;
+        color: var(--term-ink); background: transparent; border: none;
+        font-variant-ligatures: none;
+    }
+    .term .p { color: #e0a458; }
+    .term .out { color: var(--term-dim); }
+    .blink { animation: blink 1.2s steps(2, start) infinite; }
+    @keyframes blink { to { visibility: hidden; } }
 
-        /* ---------- Straight answers ---------- */
-        .answers { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.2rem; }
-        @media (max-width: 720px) { .answers { grid-template-columns: 1fr; } }
-        .answer {
-            border: 1px solid var(--border-color); border-radius: 12px;
-            padding: 1.3rem; background: var(--card-bg);
-        }
-        .answer h3 { font-size: 1rem; }
-        .answer p { color: var(--text-secondary); font-size: 0.92rem; margin-top: 0.5rem; }
+    .copy-btn {
+        font-family: var(--mono); font-size: 0.72rem; padding: 0.2rem 0.7rem;
+        border-radius: 4px; border: 1px solid var(--term-line);
+        background: transparent; color: var(--term-dim); cursor: pointer;
+    }
+    .copy-btn:hover { color: #e0a458; border-color: #e0a458; }
 
-        /* ---------- Final CTA ---------- */
-        .final { text-align: center; }
-        .final h2 { font-size: 1.8rem; }
-        .final p { color: var(--text-secondary); margin: 0.8rem 0 1.6rem; }
+    /* ---------- facts strip ---------- */
+    .facts { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+    .facts-kicker {
+        text-align: center; font-family: var(--mono); font-size: 0.72rem;
+        letter-spacing: 0.14em; text-transform: uppercase; color: var(--dim);
+        padding: 1.3rem 24px 0;
+    }
+    .facts-row { display: grid; grid-template-columns: repeat(4, 1fr); }
+    @media (max-width: 860px) { .facts-row { grid-template-columns: repeat(2, 1fr); } }
+    .fact { padding: 1.4rem 1.5rem 1.7rem; border-left: 1px solid var(--line); }
+    .fact:first-child { border-left: none; }
+    @media (max-width: 860px) { .fact:nth-child(3) { border-left: none; } .fact { border-top: 1px solid var(--line); } .facts-row { margin-top: 0.6rem; } }
+    .fact .n {
+        font-family: var(--mono); font-size: 1.55rem; font-weight: 700;
+        font-variant-numeric: tabular-nums; letter-spacing: -0.02em;
+    }
+    .fact .l { color: var(--dim); font-size: 0.85rem; margin-top: 0.3rem; line-height: 1.5; }
 
-        /* ---------- Footer ---------- */
-        footer { border-top: 1px solid var(--border-color); padding: 3rem 0 2rem; }
-        .footer-grid {
-            display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 2rem;
-        }
-        @media (max-width: 720px) { .footer-grid { grid-template-columns: 1fr 1fr; } }
-        .footer-brand p { color: var(--text-secondary); font-size: 0.9rem; margin-top: 0.5rem; max-width: 260px; }
-        footer h4 { font-size: 0.85rem; letter-spacing: 0.04em; margin-bottom: 0.7rem; }
-        .footer-links { list-style: none; }
-        .footer-links li { margin: 0.35rem 0; }
-        .footer-links a { color: var(--text-secondary); font-size: 0.9rem; }
-        .footer-links a:hover { color: var(--text-primary); }
-        .footer-bottom {
-            margin-top: 2.5rem; padding-top: 1.2rem; border-top: 1px solid var(--border-color);
-            color: var(--text-secondary); font-size: 0.85rem;
-            display: flex; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem;
-        }
-    </style>
+    /* ---------- sections ---------- */
+    section { padding: 4.5rem 0; }
+    .kicker {
+        font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.14em;
+        text-transform: uppercase; color: var(--dim); margin-bottom: 0.8rem;
+    }
+    .kicker b { color: var(--accent); margin-right: 0.6rem; font-weight: 700; }
+    .section-head h2 { font-size: 1.9rem; font-weight: 600; letter-spacing: -0.01em; }
+    .section-head .lede { margin-top: 0.6rem; color: var(--dim); max-width: 40em; }
+
+    /* ---------- tiers ---------- */
+    .tiers { margin-top: 2.4rem; }
+    .tier {
+        display: grid; grid-template-columns: 220px 1fr auto;
+        gap: 0.4rem 2.5rem; align-items: baseline;
+        padding: 1.7rem 0; border-top: 1px solid var(--line);
+    }
+    .tier:last-child { border-bottom: 1px solid var(--line); }
+    @media (max-width: 760px) { .tier { grid-template-columns: 1fr; gap: 0.4rem; } }
+    .tier.pop { box-shadow: inset 3px 0 0 var(--accent); padding-left: 1.5rem; }
+    .tier-name h3 { font-size: 1.25rem; font-weight: 600; display: inline; }
+    .tier-tag {
+        display: inline-block; margin-left: 0.6rem; vertical-align: middle;
+        font-family: var(--mono); font-size: 0.62rem; font-weight: 700;
+        letter-spacing: 0.1em; color: var(--accent);
+        border: 1px solid var(--accent); border-radius: 3px; padding: 0.1rem 0.45rem;
+    }
+    .tier-body p { color: var(--dim); font-size: 0.98rem; max-width: 36em; }
+    .tier-for {
+        margin-top: 0.55rem; font-family: var(--mono); font-size: 0.75rem;
+        color: var(--dim); letter-spacing: 0.01em;
+    }
+    .tier-for b { color: var(--accent); font-weight: 700; }
+    .tier-price {
+        font-family: var(--mono); font-weight: 700; font-size: 1.45rem;
+        font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap;
+    }
+    .tier-price small { display: block; font-size: 0.72rem; font-weight: 400; color: var(--dim); }
+    @media (max-width: 760px) { .tier-price { text-align: left; margin-top: 0.4rem; } }
+    .tiers-note { margin-top: 1.5rem; color: var(--dim); font-size: 0.92rem; font-style: italic; }
+
+    /* ---------- how it works ---------- */
+    .stages {
+        margin-top: 2.6rem; display: grid; grid-template-columns: repeat(3, 1fr);
+        gap: 2.5rem; border-top: 1px solid var(--line);
+    }
+    @media (max-width: 760px) { .stages { grid-template-columns: 1fr; gap: 1.8rem; border-top: none; } }
+    .stage { position: relative; padding-top: 1.3rem; }
+    .stage::before {
+        content: ""; position: absolute; top: -4.5px; left: 0;
+        width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
+    }
+    @media (max-width: 760px) {
+        .stage { border-top: 1px solid var(--line); }
+        .stage::before { top: -4.5px; }
+    }
+    .stage .when {
+        font-family: var(--mono); font-size: 0.72rem; font-weight: 700;
+        letter-spacing: 0.1em; color: var(--accent);
+    }
+    .stage h3 { margin-top: 0.35rem; font-size: 1.1rem; font-weight: 600; }
+    .stage p { margin-top: 0.4rem; color: var(--dim); font-size: 0.93rem; }
+    .how-note { margin-top: 2rem; color: var(--dim); max-width: 42em; font-size: 0.95rem; }
+
+    .quickstart { margin-top: 2.8rem; max-width: 760px; }
+    .quickstart-label {
+        font-family: var(--mono); font-size: 0.78rem; color: var(--dim);
+        margin-bottom: 0.6rem; letter-spacing: 0.03em;
+    }
+    .quickstart .after { margin-top: 0.7rem; color: var(--dim); font-size: 0.9rem; }
+    .quickstart .after code {
+        font-family: var(--mono); font-size: 0.82em; background: var(--bg-raise);
+        border: 1px solid var(--line); border-radius: 3px; padding: 0.08em 0.35em;
+    }
+
+    /* ---------- pricing ---------- */
+    .plans { margin-top: 2.4rem; display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.4rem; align-items: start; }
+    @media (max-width: 860px) { .plans { grid-template-columns: 1fr; } }
+    .plan {
+        border: 1px solid var(--line); border-radius: 6px;
+        background: var(--bg-raise); padding: 1.6rem 1.5rem;
+    }
+    .plan.pop { border-top: 3px solid var(--accent); }
+    .plan-kicker {
+        font-family: var(--mono); font-size: 0.7rem; font-weight: 700;
+        letter-spacing: 0.12em; text-transform: uppercase; color: var(--dim);
+    }
+    .plan.pop .plan-kicker { color: var(--accent); }
+    .plan .price {
+        margin-top: 0.7rem; font-family: var(--mono); font-size: 2rem; font-weight: 700;
+        font-variant-numeric: tabular-nums; letter-spacing: -0.02em;
+    }
+    .plan .price small { font-size: 0.8rem; font-weight: 400; color: var(--dim); letter-spacing: 0; }
+    .plan .alt-price { font-family: var(--mono); font-size: 0.75rem; color: var(--dim); margin-top: 0.15rem; }
+    .plan ul { list-style: none; margin-top: 1.15rem; }
+    .plan li {
+        padding: 0.32rem 0 0.32rem 1.3rem; position: relative;
+        color: var(--dim); font-size: 0.93rem;
+    }
+    .plan li::before {
+        content: "+"; position: absolute; left: 0;
+        font-family: var(--mono); font-weight: 700; color: var(--accent);
+    }
+    .plan .plan-cta { margin-top: 1.4rem; }
+
+    .packs { margin: 3rem auto 0; max-width: 640px; }
+    .packs-title { font-family: var(--mono); font-size: 0.78rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); margin-bottom: 0.8rem; }
+    .packs table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+    .packs td { padding: 0.55rem 0.4rem; border-bottom: 1px solid var(--line); }
+    .packs tr:first-child td { border-top: 1px solid var(--line); }
+    .packs td:first-child { font-weight: 700; }
+    .packs td:nth-child(2) { color: var(--dim); }
+    .packs td:nth-child(3), .packs td:nth-child(4) { text-align: right; }
+    .packs td:nth-child(4) { color: var(--dim); }
+    .packs .best td { color: var(--accent); }
+    .packs .best td:nth-child(2), .packs .best td:nth-child(4) { color: var(--accent); }
+    .packs .fine { margin-top: 0.8rem; font-family: var(--serif); color: var(--dim); font-size: 0.85rem; }
+
+    .includes {
+        margin-top: 2.6rem; padding-top: 1.5rem; border-top: 1px solid var(--line);
+        color: var(--dim); font-size: 0.9rem; max-width: 52em;
+    }
+
+    .compare { margin-top: 2.8rem; overflow-x: auto; }
+    .compare table {
+        border-collapse: collapse; width: 100%; min-width: 680px;
+        font-size: 0.88rem; font-variant-numeric: tabular-nums;
+    }
+    .compare th, .compare td { padding: 0.65rem 0.9rem; text-align: left; border-bottom: 1px solid var(--line); }
+    .compare th {
+        font-family: var(--mono); font-size: 0.72rem; font-weight: 700;
+        letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim);
+    }
+    .compare th.us, .compare td.us { color: var(--accent); font-weight: 700; background: rgba(224, 164, 88, 0.06); }
+    .compare .fine { margin-top: 0.7rem; color: var(--dim); font-size: 0.8rem; }
+
+    /* ---------- straight answers ---------- */
+    .answers { margin-top: 2.4rem; display: grid; grid-template-columns: 1fr 1fr; gap: 2.2rem 3rem; }
+    @media (max-width: 760px) { .answers { grid-template-columns: 1fr; } }
+    .answer { border-top: 1px solid var(--line); padding-top: 1.2rem; }
+    .answer h3 { font-size: 1.05rem; font-weight: 600; }
+    .answer p { margin-top: 0.5rem; color: var(--dim); font-size: 0.93rem; }
+    .answer code {
+        font-family: var(--mono); font-size: 0.82em; background: var(--bg-raise);
+        border: 1px solid var(--line); border-radius: 3px; padding: 0.08em 0.35em;
+    }
+
+    /* ---------- final ---------- */
+    .final {
+        border-top: 1px solid var(--line); background: var(--bg-raise);
+        text-align: center; padding: 4.5rem 0;
+    }
+    .final h2 { font-size: 1.9rem; font-weight: 600; letter-spacing: -0.01em; }
+    .final p { margin: 0.8rem auto 1.8rem; color: var(--dim); max-width: 36em; }
+    .final .waitlist-form { justify-content: center; }
+
+    /* ---------- footer ---------- */
+    footer { border-top: 1px solid var(--line); padding: 3.5rem 0 2rem; }
+    .footer-grid { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 2rem; }
+    @media (max-width: 760px) { .footer-grid { grid-template-columns: 1fr 1fr; } }
+    .footer-brand p { margin-top: 0.7rem; color: var(--dim); font-size: 0.9rem; max-width: 17em; }
+    footer h4 {
+        font-family: var(--mono); font-size: 0.7rem; font-weight: 700;
+        letter-spacing: 0.12em; text-transform: uppercase; color: var(--dim);
+        margin-bottom: 0.8rem;
+    }
+    .footer-links { list-style: none; }
+    .footer-links li { margin: 0.4rem 0; }
+    .footer-links a { color: var(--dim); font-size: 0.9rem; text-decoration: none; }
+    .footer-links a:hover { color: var(--accent); }
+    .footer-bottom {
+        margin-top: 3rem; padding-top: 1.3rem; border-top: 1px solid var(--line);
+        display: flex; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem;
+        font-family: var(--mono); font-size: 0.75rem; color: var(--dim);
+    }
+</style>
 </head>
 <body>
 
-<nav>
-    <div class="nav-inner">
-        <div class="logo">stored<span>.ge</span></div>
-        <ul class="nav-links">
-            <li class="hide-sm"><a href="#pricing">Pricing</a></li>
-            <li class="hide-sm"><a href="/docs">Docs</a></li>
-            <li class="hide-sm"><a href="/changelog">Changelog</a></li>
-            <li class="hide-sm"><a href="/status">Status</a></li>
-            <li><a href="/login">Sign in</a></li>
-            {{if .SignupsOpen}}
-            <li><a class="btn btn-primary" href="/register">Start free</a></li>
-            {{else}}
-            <li><a class="btn btn-primary" href="#waitlist">Join the waitlist</a></li>
-            {{end}}
-        </ul>
-    </div>
-</nav>
+<a class="skip" href="#main">Skip to content</a>
 
-<header class="hero" id="waitlist">
-    <div class="container">
-        {{if .SignupsOpen}}
-        <div class="hero-badge"><strong>Live</strong> — 5 GB free, no credit card</div>
-        {{else}}
-        <div class="hero-badge">Launching <strong>July 31, 2026</strong></div>
-        {{end}}
-        <h1>S3-compatible storage<br>that optimizes itself.</h1>
-        <p class="sub">
-            One endpoint. Your data automatically tiers across hot storage and tape —
-            <strong>$3.99/TB</strong>, archive from <strong>$1/TB</strong>.
-            No API fees. 3× free egress. No minimum storage duration.
-        </p>
-        <div class="hero-cta">
-            {{if .SignupsOpen}}
-            <a class="btn btn-primary" href="/register">Start free — 5 GB, no card</a>
-            <a class="btn btn-outline" href="#pricing">See pricing</a>
-            {{else}}
-            <form class="waitlist-form" data-waitlist>
-                <input type="email" name="email" placeholder="you@example.com" required aria-label="Email address">
-                <button type="submit" class="btn btn-primary">Join the waitlist</button>
-            </form>
-            {{end}}
-        </div>
-        {{if not .SignupsOpen}}
-        <div class="hero-cta" style="margin-top:0.9rem"><a class="btn btn-outline" href="#pricing">See launch pricing</a></div>
-        {{end}}
-        <p class="trust-line">Open-source engine · measured benchmarks · founder-direct support</p>
+<header class="topbar">
+    <div class="topbar-inner">
+        <a class="logo" href="/">stored<b>.ge</b></a>
+        <nav aria-label="Main">
+            <ul class="topnav">
+                <li class="hide-sm"><a href="#pricing">Pricing</a></li>
+                <li class="hide-sm"><a href="/docs">Docs</a></li>
+                <li class="hide-sm"><a href="/changelog">Changelog</a></li>
+                <li class="hide-sm"><a href="/status">Status</a></li>
+                <li><a href="/login">Sign in</a></li>
+                {{if .SignupsOpen}}
+                <li><a class="btn btn-primary" href="/register">Start free</a></li>
+                {{else}}
+                <li><a class="btn btn-primary" href="#waitlist">Join waitlist</a></li>
+                {{end}}
+            </ul>
+        </nav>
     </div>
 </header>
+
+<main id="main">
+
+<section class="hero" id="waitlist">
+    <div class="container hero-grid">
+        <div>
+            {{if .SignupsOpen}}
+            <p class="hero-flag"><span class="dot"></span>Live — 5 GB free, no credit card</p>
+            {{else}}
+            <p class="hero-flag">Launching <strong>July 31, 2026</strong></p>
+            {{end}}
+            <h1>S3-compatible storage that <em>optimizes itself.</em></h1>
+            <p class="sub">
+                One endpoint. Your data automatically tiers across hot storage and tape —
+                <strong>$3.99/TB</strong>, archive from <strong>$1/TB</strong>.
+                No API fees. 3× free egress. No minimum storage duration.
+            </p>
+            <div class="hero-cta">
+                {{if .SignupsOpen}}
+                <a class="btn btn-primary" href="/register">Start free — 5 GB, no card</a>
+                <a class="arrow-link" href="#pricing">see pricing</a>
+                {{else}}
+                <form class="waitlist-form" data-waitlist>
+                    <input type="email" name="email" placeholder="you@example.com" required aria-label="Email address">
+                    <button type="submit" class="btn btn-primary">Join waitlist</button>
+                </form>
+                <a class="arrow-link" href="#pricing">see launch pricing</a>
+                {{end}}
+            </div>
+            <p class="trust-line">open-source engine &middot; measured benchmarks &middot; founder-direct support</p>
+        </div>
+        <div class="term" aria-label="Terminal session showing an rclone upload to stored.ge">
+            <div class="term-bar">
+                <span class="term-dot"></span><span class="term-dot"></span><span class="term-dot"></span>
+                <span class="term-title">~ — zsh</span>
+            </div>
+            <pre><span class="p">$</span> rclone copy ~/backups stored:archive -P
+<span class="out">Transferred:   63.921 GiB / 63.921 GiB, 100%, 312.4 MiB/s
+Elapsed time:      3m29.5s</span>
+<span class="p">$</span> aws s3 ls --endpoint-url https://stored.ge
+<span class="out">2026-06-30 03:00:12 postgres-wal
+2026-07-12 21:44:08 archive
+2026-07-23 09:15:51 family-photos</span>
+<span class="p">$</span> <span class="blink">█</span></pre>
+        </div>
+    </div>
+</section>
+
+<aside class="facts" aria-label="Measured benchmarks">
+    <p class="facts-kicker">Measured, not projected — numbers from the production stack</p>
+    <div class="container facts-row">
+        <div class="fact">
+            <div class="n">22/22</div>
+            <p class="l">S3 compatibility tests passing — verified with aws-cli, boto3, rclone, restic, and JuiceFS</p>
+        </div>
+        <div class="fact">
+            <div class="n">320 MB/s</div>
+            <p class="l">sustained multipart upload, measured from a datacenter host</p>
+        </div>
+        <div class="fact">
+            <div class="n">&lt;1 ms</div>
+            <p class="l">metadata reads — HEAD served from a PostgreSQL cache, never a backend round-trip</p>
+        </div>
+        <div class="fact">
+            <div class="n">0 bytes</div>
+            <p class="l">buffered in memory — everything streams, so a 500 GB PUT uses the same RAM as a 5 MB one</p>
+        </div>
+    </div>
+</aside>
 
 <section>
     <div class="container">
         <div class="section-head">
-            <h2>Pick your rung</h2>
-            <p>Three tiers, one S3 API. Start where your workload lives — move buckets between tiers whenever you like.</p>
+            <p class="kicker"><b>01</b>Tiers</p>
+            <h2>Three tiers, one API.</h2>
+            <p class="lede">Start where your workload lives — move buckets between tiers whenever you like.</p>
         </div>
-        <div class="ladder">
-            <div class="rung perf">
-                <div class="rung-head">
-                    <h3>Performance</h3>
-                    <span class="rung-price">$5.99/TB/mo</span>
+        <div class="tiers">
+            <div class="tier">
+                <div class="tier-name"><h3>Performance</h3></div>
+                <div class="tier-body">
+                    <p>Always hot. ~24 ms reads, data never ages to a slower tier, egress served direct.</p>
+                    <p class="tier-for"><b>for</b> latency-sensitive apps &middot; media &amp; API assets &middot; fast-restore backups &middot; B2 migrations</p>
                 </div>
-                <p>Always hot. ~24 ms reads, data never ages to a slower tier, egress served direct.</p>
-                <div class="for">
-                    <span class="chip">latency-sensitive apps</span>
-                    <span class="chip">media &amp; API assets</span>
-                    <span class="chip">fast-restore backups</span>
-                    <span class="chip">B2 migrations</span>
-                </div>
+                <div class="tier-price">$5.99<small>/TB/mo</small></div>
             </div>
-            <div class="rung standard">
-                <span class="rung-tag">MOST POPULAR</span>
-                <div class="rung-head">
-                    <h3>Standard</h3>
-                    <span class="rung-price">$3.99/TB/mo annual · $4.99 monthly</span>
+            <div class="tier pop">
+                <div class="tier-name"><h3>Standard</h3><span class="tier-tag">MOST POPULAR</span></div>
+                <div class="tier-body">
+                    <p>Smart storage that optimizes itself. Hot data stays fast, cold data moves to cheaper, more durable tiers — you store, we optimize.</p>
+                    <p class="tier-for"><b>for</b> general S3 storage &middot; SaaS backends &middot; backup targets &middot; data lakes</p>
                 </div>
-                <p>Smart storage that optimizes itself. Hot data stays fast, cold data moves to cheaper, more durable tiers — you store, we optimize.</p>
-                <div class="for">
-                    <span class="chip">general S3 storage</span>
-                    <span class="chip">SaaS backends</span>
-                    <span class="chip">backup targets</span>
-                    <span class="chip">data lakes</span>
-                </div>
+                <div class="tier-price">$3.99<small>/TB/mo annual &middot; $4.99 monthly</small></div>
             </div>
-            <div class="rung vault">
-                <div class="rung-head">
-                    <h3>Vault packs</h3>
-                    <span class="rung-price">from $1/TB/mo</span>
+            <div class="tier">
+                <div class="tier-name"><h3>Vault packs</h3></div>
+                <div class="tier-body">
+                    <p>Tape-backed archive in prepaid packs. Glacier pricing with gigabit ingest — and Vault packs bill on their own, so if you ever need to cut costs, the archive keeps running.</p>
+                    <p class="tier-for"><b>for</b> 3-2-1 backups &middot; compliance &amp; WORM &middot; homelab archives &middot; datahoarders</p>
                 </div>
-                <p>Tape-backed archive in prepaid packs. Glacier pricing with gigabit ingest — and Vault packs bill on their own, so if you ever need to cut costs, the archive keeps running.</p>
-                <div class="for">
-                    <span class="chip">3-2-1 backups</span>
-                    <span class="chip">compliance &amp; WORM</span>
-                    <span class="chip">homelab archives</span>
-                    <span class="chip">datahoarders</span>
-                </div>
+                <div class="tier-price">from $1<small>/TB/mo</small></div>
             </div>
         </div>
-        <p class="ladder-note">Not sure? Start on Standard — it self-optimizes, and you can move any bucket up or down later.</p>
+        <p class="tiers-note">Not sure? Start on Standard — it self-optimizes, and you can move any bucket up or down later.</p>
     </div>
 </section>
 
-<section class="alt">
+<section>
     <div class="container">
         <div class="section-head">
-            <h2>How it works</h2>
-            <p>You upload to one S3 endpoint. The engine handles placement, migration, and retrieval.</p>
+            <p class="kicker"><b>02</b>How it works</p>
+            <h2>You upload. The engine handles placement.</h2>
+            <p class="lede">One S3 endpoint in front of hot storage and tape libraries — placement, migration, and retrieval are the engine's problem, not yours.</p>
         </div>
-        <div class="timeline">
+        <div class="stages">
             <div class="stage">
-                <div class="when">DAY 0–30</div>
+                <p class="when">DAY 0–30</p>
                 <h3>Hot</h3>
                 <p>Performance storage on enterprise S3 infrastructure. Sub-30 ms reads, full-speed multipart uploads.</p>
             </div>
             <div class="stage">
-                <div class="when">DAY 30–90</div>
+                <p class="when">DAY 30–90</p>
                 <h3>Optimized</h3>
                 <p>Objects you stop touching migrate to cheaper storage with free egress. Still online, still fast.</p>
             </div>
             <div class="stage">
-                <div class="when">DAY 90+</div>
+                <p class="when">DAY 90+</p>
                 <h3>Archive</h3>
                 <p>Cold data lands on tape libraries for maximum durability at archive economics.</p>
             </div>
@@ -383,11 +573,13 @@
             You never configure lifecycle policies unless you want to.
         </p>
         <div class="quickstart">
-            <div class="quickstart-head">
-                <span>Quickstart — works in under a minute</span>
-                <button class="copy-btn" data-copy="rclone-snippet">Copy</button>
-            </div>
-            <pre id="rclone-snippet">rclone config create stored s3 \
+            <p class="quickstart-label">quickstart — works in under a minute</p>
+            <div class="term">
+                <div class="term-bar">
+                    <span class="term-dot"></span><span class="term-dot"></span><span class="term-dot"></span>
+                    <button class="copy-btn" data-copy="rclone-snippet">copy</button>
+                </div>
+                <pre id="rclone-snippet">rclone config create stored s3 \
   provider=Other \
   access_key_id=YOUR_ACCESS_KEY \
   secret_access_key=YOUR_SECRET_KEY \
@@ -395,62 +587,36 @@
   region=us-east-1
 
 rclone copy ~/backups stored:my-bucket -P</pre>
+            </div>
             <p class="after">Prefer restic? <code>restic -r s3:https://stored.ge/my-bucket init</code> — aws-cli, s3cmd, Cyberduck, and anything else that speaks S3 works too.</p>
         </div>
     </div>
 </section>
 
-<section>
+<section id="pricing">
     <div class="container">
         <div class="section-head">
-            <h2>Measured, not projected</h2>
-            <p>Numbers from real benchmarks on the production stack.</p>
+            <p class="kicker"><b>03</b>Pricing</p>
+            <h2>Pay per TB. That's the whole model.</h2>
+            <p class="lede">No API fees, no request classes, no retrieval surcharges, no minimum storage duration.</p>
         </div>
-        <div class="stats">
-            <div class="stat">
-                <div class="big">22/22</div>
-                <p>S3 compatibility tests passing — verified with aws-cli, boto3, rclone, restic, and JuiceFS</p>
-            </div>
-            <div class="stat">
-                <div class="big">320 MB/s</div>
-                <p>sustained multipart upload, measured from a datacenter host</p>
-            </div>
-            <div class="stat">
-                <div class="big">&lt;1 ms</div>
-                <p>metadata reads — HEAD served from a PostgreSQL cache, never a backend round-trip</p>
-            </div>
-            <div class="stat">
-                <div class="big">0 bytes</div>
-                <p>buffered in memory — everything streams, so a 500 GB PUT uses the same RAM as a 5 MB one</p>
-            </div>
-        </div>
-    </div>
-</section>
-
-<section class="alt" id="pricing">
-    <div class="container">
-        <div class="section-head">
-            <h2>Pricing</h2>
-            <p>Pay per TB. No API fees, no request classes, no minimum storage duration.</p>
-        </div>
-        <div class="pricing-grid">
+        <div class="plans">
             <div class="plan">
-                <h3>Vault</h3>
+                <p class="plan-kicker">Vault</p>
                 <div class="price">from $1<small>/TB/mo</small></div>
-                <div class="alt-price">prepaid packs, 1–18 TB</div>
+                <p class="alt-price">prepaid packs, 1–18 TB</p>
                 <ul>
                     <li>Tape-backed archive</li>
                     <li>Full-speed S3 ingest</li>
                     <li>1× free egress</li>
                     <li>Billed separately — survives downgrades</li>
                 </ul>
-                <div class="plan-cta"><a class="btn btn-outline" href="#packs">View packs</a></div>
+                <div class="plan-cta"><a class="btn btn-ghost" href="#packs">View packs</a></div>
             </div>
-            <div class="plan popular">
-                <span class="rung-tag">MOST POPULAR</span>
-                <h3>Standard</h3>
+            <div class="plan pop">
+                <p class="plan-kicker">Standard — most popular</p>
                 <div class="price">$3.99<small>/TB/mo</small></div>
-                <div class="alt-price">annual · $4.99 monthly</div>
+                <p class="alt-price">annual &middot; $4.99 monthly</p>
                 <ul>
                     <li>Automatic tiering built in</li>
                     <li>3× free egress, then $0.01/GB</li>
@@ -460,13 +626,13 @@ rclone copy ~/backups stored:my-bucket -P</pre>
                 {{if .SignupsOpen}}
                 <div class="plan-cta"><a class="btn btn-primary" href="/register">Start free</a></div>
                 {{else}}
-                <div class="plan-cta"><a class="btn btn-primary" href="#waitlist">Join the waitlist</a></div>
+                <div class="plan-cta"><a class="btn btn-primary" href="#waitlist">Join waitlist</a></div>
                 {{end}}
             </div>
             <div class="plan">
-                <h3>Performance</h3>
+                <p class="plan-kicker">Performance</p>
                 <div class="price">$5.99<small>/TB/mo</small></div>
-                <div class="alt-price">pure hot storage</div>
+                <p class="alt-price">pure hot storage</p>
                 <ul>
                     <li>~24 ms reads, always</li>
                     <li>Data never ages out</li>
@@ -474,34 +640,34 @@ rclone copy ~/backups stored:my-bucket -P</pre>
                     <li>Cheaper than B2's $6.95</li>
                 </ul>
                 {{if .SignupsOpen}}
-                <div class="plan-cta"><a class="btn btn-outline" href="/register">Start free</a></div>
+                <div class="plan-cta"><a class="btn btn-ghost" href="/register">Start free</a></div>
                 {{else}}
-                <div class="plan-cta"><a class="btn btn-outline" href="#waitlist">Join the waitlist</a></div>
+                <div class="plan-cta"><a class="btn btn-ghost" href="#waitlist">Join waitlist</a></div>
                 {{end}}
             </div>
         </div>
 
         <div class="packs" id="packs">
-            <div class="packs-title">Vault packs — fixed-price, tape-backed archive</div>
-            <div class="packs-row">
-                <div class="pack"><strong>Vault1</strong><span>1 TB · $4.99/mo</span></div>
-                <div class="pack"><strong>Vault3</strong><span>3 TB · $7.99/mo</span></div>
-                <div class="pack"><strong>Vault5</strong><span>5 TB · $9.99/mo</span></div>
-                <div class="pack"><strong>Vault10</strong><span>10 TB · $12.99/mo</span></div>
-                <div class="pack"><strong>Vault18</strong><span>18 TB · $17.99/mo = $1.00/TB</span></div>
-            </div>
+            <p class="packs-title">Vault packs — fixed-price, tape-backed archive</p>
+            <table>
+                <tr><td>Vault1</td><td>1 TB</td><td>$4.99/mo</td><td>$4.99/TB</td></tr>
+                <tr><td>Vault3</td><td>3 TB</td><td>$7.99/mo</td><td>$2.66/TB</td></tr>
+                <tr><td>Vault5</td><td>5 TB</td><td>$9.99/mo</td><td>$2.00/TB</td></tr>
+                <tr><td>Vault10</td><td>10 TB</td><td>$12.99/mo</td><td>$1.30/TB</td></tr>
+                <tr class="best"><td>Vault18</td><td>18 TB</td><td>$17.99/mo</td><td>$1.00/TB</td></tr>
+            </table>
             <p class="fine">Vault18 at $1/TB is a launch promo for the first 100 packs, price-locked for 12 months (then $2.49/TB — still a third of B2).</p>
         </div>
 
         <p class="includes">
-            Every tier includes: real S3 API (multipart, versioning, Object Lock/WORM, presigned URLs) ·
-            $0 API fees · no minimum duration · encryption at rest · scoped API keys &amp; STS
+            Every tier includes: real S3 API (multipart, versioning, Object Lock/WORM, presigned URLs) &middot;
+            $0 API fees &middot; no minimum duration &middot; encryption at rest &middot; scoped API keys &amp; STS
         </p>
 
         <div class="compare">
             <table>
                 <thead>
-                    <tr><th></th><th>stored.ge</th><th>Backblaze B2</th><th>Wasabi</th><th>Cloudflare R2</th><th>AWS S3</th></tr>
+                    <tr><th></th><th class="us">stored.ge</th><th>Backblaze B2</th><th>Wasabi</th><th>Cloudflare R2</th><th>AWS S3</th></tr>
                 </thead>
                 <tbody>
                     <tr><td>$/TB/mo</td><td class="us">$3.99</td><td>$6.95</td><td>$6.99</td><td>$15.00</td><td>$23.00</td></tr>
@@ -520,8 +686,9 @@ rclone copy ~/backups stored:my-bucket -P</pre>
 <section>
     <div class="container">
         <div class="section-head">
-            <h2>Straight answers</h2>
-            <p>The parts most storage pages won't tell you. More in the <a href="/docs/faq">full FAQ</a>.</p>
+            <p class="kicker"><b>04</b>Straight answers</p>
+            <h2>The parts most storage pages won't tell you.</h2>
+            <p class="lede">More in the <a href="/docs/faq">full FAQ</a>.</p>
         </div>
         <div class="answers">
             <div class="answer">
@@ -544,32 +711,34 @@ rclone copy ~/backups stored:my-bucket -P</pre>
     </div>
 </section>
 
-<section class="alt final">
+<section class="final">
     <div class="container">
         {{if .SignupsOpen}}
-        <h2>Try it in the next five minutes</h2>
+        <h2>Try it in the next five minutes.</h2>
         <p>5 GB free, no credit card. Keys on signup, rclone config ready to paste.</p>
         <a class="btn btn-primary" href="/register">Start free</a>
         {{else}}
-        <h2>Launching July 31, 2026</h2>
+        <h2>Launching July 31, 2026.</h2>
         <p>Join the waitlist and we'll email you once — on launch day, with a founding-member code.</p>
         <form class="waitlist-form" data-waitlist>
             <input type="email" name="email" placeholder="you@example.com" required aria-label="Email address">
-            <button type="submit" class="btn btn-primary">Join the waitlist</button>
+            <button type="submit" class="btn btn-primary">Join waitlist</button>
         </form>
         {{end}}
     </div>
 </section>
 
+</main>
+
 <footer>
     <div class="container">
         <div class="footer-grid">
             <div class="footer-brand">
-                <div class="logo">stored<span>.ge</span></div>
+                <a class="logo" href="/">stored<b>.ge</b></a>
                 <p>S3-compatible storage orchestration across hot storage and tape. Built in the open by FairForge.</p>
             </div>
             <div>
-                <h4>PRODUCT</h4>
+                <h4>Product</h4>
                 <ul class="footer-links">
                     <li><a href="#pricing">Pricing</a></li>
                     <li><a href="/docs">Docs</a></li>
@@ -579,7 +748,7 @@ rclone copy ~/backups stored:my-bucket -P</pre>
                 </ul>
             </div>
             <div>
-                <h4>LEGAL</h4>
+                <h4>Legal</h4>
                 <ul class="footer-links">
                     <li><a href="/legal/terms">Terms of Service</a></li>
                     <li><a href="/legal/privacy">Privacy Policy</a></li>
@@ -592,7 +761,7 @@ rclone copy ~/backups stored:my-bucket -P</pre>
                 </ul>
             </div>
             <div>
-                <h4>SUPPORT</h4>
+                <h4>Support</h4>
                 <ul class="footer-links">
                     <li><a href="mailto:support@stored.ge">support@stored.ge</a></li>
                     <li><a href="/abuse">Report abuse</a></li>
@@ -602,7 +771,7 @@ rclone copy ~/backups stored:my-bucket -P</pre>
         </div>
         <div class="footer-bottom">
             <span>© 2026 FairForge LLC. All rights reserved.</span>
-            <span>Founder-direct support — replies target &lt;4 h.</span>
+            <span>founder-direct support — replies target &lt;4h</span>
         </div>
     </div>
 </footer>
@@ -631,8 +800,8 @@ rclone copy ~/backups stored:my-bucket -P</pre>
         btn.addEventListener('click', function () {
             var target = document.getElementById(btn.getAttribute('data-copy'));
             navigator.clipboard.writeText(target.innerText).then(function () {
-                btn.textContent = 'Copied!';
-                setTimeout(function () { btn.textContent = 'Copy'; }, 1500);
+                btn.textContent = 'copied';
+                setTimeout(function () { btn.textContent = 'copy'; }, 1500);
             });
         });
     });
