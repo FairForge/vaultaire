@@ -8,31 +8,35 @@
 <meta property="og:title" content="stored.ge — S3-compatible storage that optimizes itself">
 <meta property="og:description" content="One endpoint. Your data auto-tiers across hot storage and tape — $3.99/TB, archive from $1/TB. No API fees.">
 <meta property="og:url" content="https://stored.ge">
-<meta name="theme-color" content="#141210" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#191919" media="(prefers-color-scheme: dark)">
 <meta name="theme-color" content="#f5f1e9" media="(prefers-color-scheme: light)">
-<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'%3E%3Crect%20width='32'%20height='32'%20rx='6'%20fill='%23141210'/%3E%3Ctext%20x='16'%20y='23'%20text-anchor='middle'%20font-family='monospace'%20font-size='19'%20font-weight='700'%20fill='%23e0a458'%3Es%3C/text%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'%3E%3Crect%20width='32'%20height='32'%20rx='8'%20fill='%23191919'/%3E%3Ctext%20x='16'%20y='23'%20text-anchor='middle'%20font-family='monospace'%20font-size='19'%20font-weight='700'%20fill='%23DFB23E'%3Es%3C/text%3E%3C/svg%3E">
 
 <style>
     /* ============================================================
        stored.ge — hand-set in one file on purpose.
-       Warm dark by default, paper if you ask for light.
+       Near-black + cream/gold/terracotta, pill buttons, ring charts.
        Serif for prose, mono for anything with a number in it.
        ============================================================ */
 
     :root {
-        --bg: #141210;
-        --bg-raise: #1b1815;
-        --ink: #ece7de;
-        --dim: #a49d90;
-        --line: #2c2824;
-        --accent: #e0a458;
-        --accent-down: #c78d43;
-        --accent-ink: #191307;
+        --bg: #191919;
+        --bg-raise: #212020;
+        --ink: #ece7db;
+        --dim: #948f85;
+        --line: #343230;
+        --cream: #F5EDCE;
+        --accent: #DFB23E;
+        --accent-down: #c89a2e;
+        --terra: #AD5A5A;
         --ok: #6fbf8f;
-        --term-bg: #0c0e11;
-        --term-line: #23282e;
-        --term-ink: #c9d1d9;
-        --term-dim: #828b95;
+        --cta-bg: #F5EDCE;
+        --cta-ink: #191919;
+        --panel-dark: #1e1d1b;
+        --term-bg: #101010;
+        --term-line: #2b2926;
+        --term-ink: #cfc9bd;
+        --term-dim: #847e73;
         --serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, Georgia, "Times New Roman", serif;
         --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
     }
@@ -46,8 +50,10 @@
             --line: #ddd4c4;
             --accent: #8a5a12;
             --accent-down: #6f4a10;
-            --accent-ink: #fdf9f1;
             --ok: #3c7a5a;
+            --cta-bg: #241f15;
+            --cta-ink: #f5edce;
+            --panel-dark: #191919;
         }
     }
 
@@ -57,6 +63,8 @@
     @media (prefers-reduced-motion: reduce) {
         html { scroll-behavior: auto; }
         .blink { animation: none; }
+        .ring circle { transition: none !important; }
+        .leg-bar i { transition: none !important; }
     }
 
     body {
@@ -68,7 +76,7 @@
         -webkit-font-smoothing: antialiased;
     }
 
-    ::selection { background: var(--accent); color: var(--accent-ink); }
+    ::selection { background: var(--accent); color: #191919; }
 
     a { color: var(--ink); text-decoration: underline; text-decoration-color: var(--accent); text-underline-offset: 3px; }
     a:hover { color: var(--accent); }
@@ -77,24 +85,22 @@
 
     .container { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
 
-    .mono { font-family: var(--mono); }
-
     .skip {
         position: absolute; left: -9999px; top: 0; z-index: 99;
-        background: var(--accent); color: var(--accent-ink);
+        background: var(--accent); color: #191919;
         padding: 0.5rem 1rem; font-family: var(--mono); font-size: 0.85rem;
     }
     .skip:focus { left: 0; }
 
     /* ---------- buttons ---------- */
     .btn {
-        display: inline-block; padding: 0.72rem 1.25rem;
+        display: inline-block; padding: 0.78rem 1.5rem;
         font-family: var(--mono); font-size: 0.8rem; font-weight: 700;
         letter-spacing: 0.07em; text-transform: uppercase;
-        text-decoration: none; border-radius: 4px; border: none; cursor: pointer;
+        text-decoration: none; border-radius: 999px; border: none; cursor: pointer;
     }
-    .btn-primary { background: var(--accent); color: var(--accent-ink); }
-    .btn-primary:hover { background: var(--accent-down); color: var(--accent-ink); }
+    .btn-primary { background: var(--cta-bg); color: var(--cta-ink); }
+    .btn-primary:hover { background: var(--accent); color: #191919; }
     .btn-ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
     .btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
 
@@ -130,6 +136,7 @@
         text-decoration: none;
     }
     .topnav a:not(.btn):hover { color: var(--ink); }
+    .topnav .btn { padding: 0.55rem 1.2rem; }
     @media (max-width: 760px) { .topnav .hide-sm { display: none; } }
 
     /* ---------- hero ---------- */
@@ -177,25 +184,25 @@
     .waitlist-form { display: flex; gap: 0.6rem; flex-wrap: wrap; }
     .waitlist-form input {
         font-family: var(--mono); font-size: 0.88rem;
-        padding: 0.68rem 0.9rem; min-width: 240px;
-        border: 1px solid var(--line); border-radius: 4px;
+        padding: 0.72rem 1.1rem; min-width: 240px;
+        border: 1px solid var(--line); border-radius: 999px;
         background: var(--bg-raise); color: var(--ink);
     }
     .waitlist-form input::placeholder { color: var(--dim); }
     .waitlist-form input:focus { border-color: var(--accent); outline: none; }
     .waitlist-ok { font-family: var(--mono); font-size: 0.9rem; color: var(--ok); }
 
-    /* ---------- terminal ---------- */
+    /* ---------- terminal / code ---------- */
     .term {
         background: var(--term-bg); border: 1px solid var(--term-line);
-        border-radius: 8px; overflow: hidden;
+        border-radius: 14px; overflow: hidden;
         box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
     }
     .term-bar {
         display: flex; align-items: center; gap: 6px;
-        padding: 0.6rem 0.85rem; border-bottom: 1px solid var(--term-line);
+        padding: 0.6rem 0.9rem; border-bottom: 1px solid var(--term-line);
     }
-    .term-dot { width: 10px; height: 10px; border-radius: 50%; background: #363c44; }
+    .term-dot { width: 10px; height: 10px; border-radius: 50%; background: #3a3733; }
     .term-title {
         margin-left: auto; margin-right: auto;
         font-family: var(--mono); font-size: 0.72rem; color: var(--term-dim);
@@ -207,17 +214,29 @@
         color: var(--term-ink); background: transparent; border: none;
         font-variant-ligatures: none;
     }
-    .term .p { color: #e0a458; }
+    .term .p { color: #DFB23E; }
     .term .out { color: var(--term-dim); }
     .blink { animation: blink 1.2s steps(2, start) infinite; }
     @keyframes blink { to { visibility: hidden; } }
 
     .copy-btn {
-        font-family: var(--mono); font-size: 0.72rem; padding: 0.2rem 0.7rem;
-        border-radius: 4px; border: 1px solid var(--term-line);
+        font-family: var(--mono); font-size: 0.72rem; padding: 0.2rem 0.75rem;
+        border-radius: 999px; border: 1px solid var(--term-line);
         background: transparent; color: var(--term-dim); cursor: pointer;
     }
-    .copy-btn:hover { color: #e0a458; border-color: #e0a458; }
+    .copy-btn:hover { color: #DFB23E; border-color: #DFB23E; }
+
+    .snippet { margin-top: 1.1rem; background: var(--term-bg); border: 1px solid var(--term-line); border-radius: 12px; overflow: hidden; }
+    .snippet-head {
+        display: flex; justify-content: space-between; align-items: center;
+        padding: 0.45rem 0.9rem; border-bottom: 1px solid var(--term-line);
+        font-family: var(--mono); font-size: 0.72rem; color: var(--term-dim);
+    }
+    .snippet pre {
+        margin: 0; padding: 0.9rem 1rem; overflow-x: auto;
+        font-family: var(--mono); font-size: 0.78rem; line-height: 1.65;
+        color: var(--term-ink); font-variant-ligatures: none;
+    }
 
     /* ---------- facts strip ---------- */
     .facts { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
@@ -245,7 +264,7 @@
     }
     .kicker b { color: var(--accent); margin-right: 0.6rem; font-weight: 700; }
     .section-head h2 { font-size: 1.9rem; font-weight: 600; letter-spacing: -0.01em; }
-    .section-head .lede { margin-top: 0.6rem; color: var(--dim); max-width: 40em; }
+    .section-head .lede { margin-top: 0.6rem; color: var(--dim); max-width: 42em; }
 
     /* ---------- tiers ---------- */
     .tiers { margin-top: 2.4rem; }
@@ -262,7 +281,7 @@
         display: inline-block; margin-left: 0.6rem; vertical-align: middle;
         font-family: var(--mono); font-size: 0.62rem; font-weight: 700;
         letter-spacing: 0.1em; color: var(--accent);
-        border: 1px solid var(--accent); border-radius: 3px; padding: 0.1rem 0.45rem;
+        border: 1px solid var(--accent); border-radius: 999px; padding: 0.12rem 0.55rem;
     }
     .tier-body p { color: var(--dim); font-size: 0.98rem; max-width: 36em; }
     .tier-for {
@@ -278,45 +297,188 @@
     @media (max-width: 760px) { .tier-price { text-align: left; margin-top: 0.4rem; } }
     .tiers-note { margin-top: 1.5rem; color: var(--dim); font-size: 0.92rem; font-style: italic; }
 
-    /* ---------- how it works ---------- */
-    .stages {
-        margin-top: 2.6rem; display: grid; grid-template-columns: repeat(3, 1fr);
-        gap: 2.5rem; border-top: 1px solid var(--line);
+    /* ---------- tiering panel (donut) ---------- */
+    .panel-dark {
+        margin-top: 2.6rem; background: var(--panel-dark);
+        border: 1px solid #343230; border-radius: 20px;
+        padding: 2.2rem; color: #ece7db;
+        display: grid; grid-template-columns: auto 1fr; gap: 2.8rem; align-items: center;
     }
-    @media (max-width: 760px) { .stages { grid-template-columns: 1fr; gap: 1.8rem; border-top: none; } }
-    .stage { position: relative; padding-top: 1.3rem; }
-    .stage::before {
-        content: ""; position: absolute; top: -4.5px; left: 0;
-        width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
+    @media (max-width: 860px) { .panel-dark { grid-template-columns: 1fr; padding: 1.6rem; } }
+    .panel-dark > * { min-width: 0; }
+
+    .donut-wrap { display: flex; flex-direction: column; align-items: center; gap: 1.4rem; }
+    .donut { position: relative; width: 240px; max-width: 100%; }
+    .donut svg { display: block; width: 100%; height: auto; }
+    .ring circle {
+        fill: none; stroke-width: 20; stroke-linecap: butt;
+        transition: stroke-dasharray 0.45s ease, stroke-dashoffset 0.45s ease;
     }
-    @media (max-width: 760px) {
-        .stage { border-top: 1px solid var(--line); }
-        .stage::before { top: -4.5px; }
+    .ring .track { stroke: #2b2a28; }
+    .donut-center {
+        position: absolute; inset: 0; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; text-align: center;
     }
+    .donut-center .big {
+        font-family: var(--mono); font-size: 2rem; font-weight: 700;
+        font-variant-numeric: tabular-nums; letter-spacing: -0.02em; color: #F5EDCE;
+    }
+    .donut-center .small { font-family: var(--mono); font-size: 0.68rem; color: #948f85; margin-top: 0.15rem; }
+
+    .scrub { width: 100%; max-width: 300px; }
+    .scrub label {
+        display: flex; justify-content: space-between; align-items: baseline;
+        font-family: var(--mono); font-size: 0.75rem; color: #948f85; margin-bottom: 0.5rem;
+    }
+    .scrub label output { color: #F5EDCE; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .scrub input[type=range] { width: 100%; accent-color: #DFB23E; }
+    .scrub-presets { display: flex; gap: 0.45rem; margin-top: 0.7rem; flex-wrap: wrap; justify-content: center; }
+    .scrub-presets button {
+        font-family: var(--mono); font-size: 0.7rem; padding: 0.22rem 0.75rem;
+        border-radius: 999px; border: 1px solid #343230; background: transparent;
+        color: #948f85; cursor: pointer;
+    }
+    .scrub-presets button:hover { color: #DFB23E; border-color: #DFB23E; }
+
+    .legend { display: flex; flex-direction: column; gap: 1.1rem; }
+    .leg { }
+    .leg-row { display: flex; align-items: baseline; gap: 0.6rem; font-size: 0.95rem; }
+    .leg-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; align-self: center; }
+    .leg-name { color: #ece7db; }
+    .leg-name small { color: #948f85; font-size: 0.82em; }
+    .leg-val {
+        margin-left: auto; font-family: var(--mono); font-size: 0.9rem; font-weight: 700;
+        font-variant-numeric: tabular-nums; color: #F5EDCE; white-space: nowrap;
+    }
+    .leg-bar { margin-top: 0.45rem; height: 4px; border-radius: 2px; background: #2b2a28; overflow: hidden; }
+    .leg-bar i { display: block; height: 100%; border-radius: 2px; transition: width 0.45s ease; }
+    .legend .note { color: #948f85; font-size: 0.85rem; margin-top: 0.4rem; }
+    .legend .note strong { color: #F5EDCE; font-family: var(--mono); font-size: 0.92em; }
+
+    .stage-list { margin-top: 1.6rem; display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.1rem; }
+    @media (max-width: 760px) { .stage-list { grid-template-columns: 1fr; } }
+    .stage {
+        border: 1px solid var(--line); border-radius: 14px; padding: 1.1rem 1.2rem;
+        opacity: 0.55; transition: opacity 0.3s ease, border-color 0.3s ease;
+    }
+    .stage.active { opacity: 1; border-color: var(--accent); }
     .stage .when {
-        font-family: var(--mono); font-size: 0.72rem; font-weight: 700;
+        font-family: var(--mono); font-size: 0.7rem; font-weight: 700;
         letter-spacing: 0.1em; color: var(--accent);
     }
-    .stage h3 { margin-top: 0.35rem; font-size: 1.1rem; font-weight: 600; }
-    .stage p { margin-top: 0.4rem; color: var(--dim); font-size: 0.93rem; }
-    .how-note { margin-top: 2rem; color: var(--dim); max-width: 42em; font-size: 0.95rem; }
+    .stage h3 { margin-top: 0.3rem; font-size: 1.05rem; font-weight: 600; }
+    .stage p { margin-top: 0.35rem; color: var(--dim); font-size: 0.9rem; }
+    .panel-caption { margin-top: 1.2rem; color: var(--dim); font-size: 0.85rem; font-style: italic; }
 
-    .quickstart { margin-top: 2.8rem; max-width: 760px; }
-    .quickstart-label {
-        font-family: var(--mono); font-size: 0.78rem; color: var(--dim);
-        margin-bottom: 0.6rem; letter-spacing: 0.03em;
+    /* ---------- use cases ---------- */
+    .uc-tabs { margin-top: 2.2rem; display: flex; gap: 0.6rem; flex-wrap: wrap; }
+    .uc-tab {
+        font-family: var(--mono); font-size: 0.78rem; font-weight: 700;
+        letter-spacing: 0.04em; padding: 0.55rem 1.15rem; border-radius: 999px;
+        border: 1px solid var(--line); background: transparent; color: var(--dim); cursor: pointer;
     }
-    .quickstart .after { margin-top: 0.7rem; color: var(--dim); font-size: 0.9rem; }
-    .quickstart .after code {
-        font-family: var(--mono); font-size: 0.82em; background: var(--bg-raise);
-        border: 1px solid var(--line); border-radius: 3px; padding: 0.08em 0.35em;
+    .uc-tab:hover { color: var(--ink); border-color: var(--dim); }
+    .uc-tab.active { background: var(--cta-bg); color: var(--cta-ink); border-color: var(--cta-bg); }
+    .uc-panel { display: none; margin-top: 2rem; }
+    .uc-panel.active { display: grid; grid-template-columns: 1fr 1fr; gap: 2.5rem; align-items: start; }
+    @media (max-width: 860px) { .uc-panel.active { grid-template-columns: 1fr; } }
+    .uc-panel > * { min-width: 0; }
+    .uc-panel h3 { font-size: 1.3rem; font-weight: 600; }
+    .uc-panel .uc-desc { margin-top: 0.6rem; color: var(--dim); }
+    .uc-panel ul { list-style: none; margin-top: 1rem; }
+    .uc-panel li {
+        padding: 0.3rem 0 0.3rem 1.3rem; position: relative;
+        color: var(--dim); font-size: 0.93rem;
     }
+    .uc-panel li::before {
+        content: "+"; position: absolute; left: 0;
+        font-family: var(--mono); font-weight: 700; color: var(--accent);
+    }
+    .uc-rec {
+        margin-top: 1.2rem; font-family: var(--mono); font-size: 0.75rem; color: var(--dim);
+    }
+    .uc-rec b {
+        color: var(--accent); border: 1px solid var(--accent); border-radius: 999px;
+        padding: 0.15rem 0.7rem; font-weight: 700; margin-left: 0.4rem;
+    }
+
+    /* ---------- attach / resources ---------- */
+    .res-grid {
+        margin-top: 2.4rem; display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 1.1rem 0.6rem;
+    }
+    .res-chip {
+        display: flex; flex-direction: column; align-items: center; gap: 0.55rem;
+        background: none; border: none; cursor: pointer; padding: 0.4rem 0.2rem;
+        font-family: var(--mono); font-size: 0.72rem; color: var(--dim); border-radius: 12px;
+    }
+    .res-chip:hover { color: var(--ink); }
+    .res-chip .circle {
+        width: 62px; height: 62px; border-radius: 50%;
+        display: flex; align-items: center; justify-content: center;
+        font-family: var(--mono); font-size: 0.82rem; font-weight: 700;
+        border: 2px solid transparent; transition: transform 0.15s ease;
+    }
+    .res-chip:hover .circle { transform: translateY(-2px); }
+    .res-chip.active { color: var(--ink); }
+    .res-chip.active .circle { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(223, 178, 62, 0.25); }
+    .c-cream { background: #F5EDCE; color: #191919; }
+    .c-gold { background: #DFB23E; color: #191919; }
+    .c-terra { background: #AD5A5A; color: #F5EDCE; }
+    .c-gray { background: #373737; color: #ece7db; }
+
+    .res-detail {
+        margin-top: 2rem; border: 1px solid var(--line); border-radius: 16px;
+        background: var(--bg-raise); padding: 1.6rem 1.7rem;
+    }
+    .res-card { display: none; }
+    .res-card.active { display: block; }
+    .res-card h3 { font-size: 1.15rem; font-weight: 600; }
+    .res-card h3 small {
+        font-family: var(--mono); font-size: 0.68rem; font-weight: 700; letter-spacing: 0.08em;
+        text-transform: uppercase; color: var(--accent); margin-left: 0.7rem;
+    }
+    .res-card > p { margin-top: 0.5rem; color: var(--dim); font-size: 0.95rem; max-width: 56em; }
+    .res-card > p a { color: var(--ink); }
+    .res-legend {
+        margin-top: 1.6rem; display: flex; gap: 1.6rem; flex-wrap: wrap;
+        font-family: var(--mono); font-size: 0.72rem; color: var(--dim);
+    }
+    .res-legend span::before {
+        content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+        margin-right: 0.45rem;
+    }
+    .res-legend .k-cream::before { background: #F5EDCE; }
+    .res-legend .k-gold::before { background: #DFB23E; }
+    .res-legend .k-terra::before { background: #AD5A5A; }
+    .res-legend .k-gray::before { background: #373737; border: 1px solid #555; }
 
     /* ---------- pricing ---------- */
-    .plans { margin-top: 2.4rem; display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.4rem; align-items: start; }
+    .calc {
+        margin: 2.4rem 0 0; border: 1px solid var(--line); border-radius: 16px;
+        background: var(--bg-raise); padding: 1.6rem 1.7rem; max-width: 680px;
+    }
+    .calc label {
+        display: flex; justify-content: space-between; align-items: baseline;
+        font-family: var(--mono); font-size: 0.78rem; color: var(--dim);
+    }
+    .calc label output { color: var(--ink); font-size: 1.05rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .calc input[type=range] { width: 100%; margin-top: 0.7rem; accent-color: var(--accent); }
+    .calc-rows { margin-top: 1.1rem; font-family: var(--mono); font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+    .calc-row {
+        display: flex; justify-content: space-between; gap: 1rem;
+        padding: 0.5rem 0.2rem; border-top: 1px solid var(--line);
+    }
+    .calc-row:first-child { border-top: none; }
+    .calc-row .who { color: var(--dim); }
+    .calc-row.us .who, .calc-row.us .amt { color: var(--accent); font-weight: 700; }
+    .calc-note { margin-top: 0.8rem; font-size: 0.85rem; color: var(--dim); }
+    .calc-note strong { color: var(--ink); font-family: var(--mono); font-size: 0.92em; }
+
+    .plans { margin-top: 2.6rem; display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.4rem; align-items: start; }
     @media (max-width: 860px) { .plans { grid-template-columns: 1fr; } }
     .plan {
-        border: 1px solid var(--line); border-radius: 6px;
+        border: 1px solid var(--line); border-radius: 16px;
         background: var(--bg-raise); padding: 1.6rem 1.5rem;
     }
     .plan.pop { border-top: 3px solid var(--accent); }
@@ -370,7 +532,7 @@
         font-family: var(--mono); font-size: 0.72rem; font-weight: 700;
         letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim);
     }
-    .compare th.us, .compare td.us { color: var(--accent); font-weight: 700; background: rgba(224, 164, 88, 0.06); }
+    .compare th.us, .compare td.us { color: var(--accent); font-weight: 700; background: rgba(223, 178, 62, 0.07); }
     .compare .fine { margin-top: 0.7rem; color: var(--dim); font-size: 0.8rem; }
 
     /* ---------- straight answers ---------- */
@@ -379,9 +541,9 @@
     .answer { border-top: 1px solid var(--line); padding-top: 1.2rem; }
     .answer h3 { font-size: 1.05rem; font-weight: 600; }
     .answer p { margin-top: 0.5rem; color: var(--dim); font-size: 0.93rem; }
-    .answer code {
+    .answer code, .uc-panel code {
         font-family: var(--mono); font-size: 0.82em; background: var(--bg-raise);
-        border: 1px solid var(--line); border-radius: 3px; padding: 0.08em 0.35em;
+        border: 1px solid var(--line); border-radius: 4px; padding: 0.08em 0.35em;
     }
 
     /* ---------- final ---------- */
@@ -456,12 +618,12 @@
             </p>
             <div class="hero-cta">
                 {{if .SignupsOpen}}
-                <a class="btn btn-primary" href="/register">Start free — 5 GB, no card</a>
+                <a class="btn btn-primary" href="/register">Start free — 5 GB, no card →</a>
                 <a class="arrow-link" href="#pricing">see pricing</a>
                 {{else}}
                 <form class="waitlist-form" data-waitlist>
                     <input type="email" name="email" placeholder="you@example.com" required aria-label="Email address">
-                    <button type="submit" class="btn btn-primary">Join waitlist</button>
+                    <button type="submit" class="btn btn-primary">Join waitlist →</button>
                 </form>
                 <a class="arrow-link" href="#pricing">see launch pricing</a>
                 {{end}}
@@ -548,58 +710,412 @@ Elapsed time:      3m29.5s</span>
     <div class="container">
         <div class="section-head">
             <p class="kicker"><b>02</b>How it works</p>
-            <h2>You upload. The engine handles placement.</h2>
-            <p class="lede">One S3 endpoint in front of hot storage and tape libraries — placement, migration, and retrieval are the engine's problem, not yours.</p>
+            <h2>Watch a workload age.</h2>
+            <p class="lede">Drag the timeline. The ring is where your bytes live; the number in the middle is what you pay. Only one of them moves.</p>
         </div>
-        <div class="stages">
-            <div class="stage">
-                <p class="when">DAY 0–30</p>
-                <h3>Hot</h3>
+        <div class="panel-dark">
+            <div class="donut-wrap">
+                <div class="donut">
+                    <svg viewBox="0 0 200 200" aria-hidden="true">
+                        <g class="ring">
+                            <circle class="track" cx="100" cy="100" r="78" stroke-width="20"></circle>
+                            <circle id="seg-hot"  cx="100" cy="100" r="78" stroke="#F5EDCE" transform="rotate(-90 100 100)"
+                                    style="stroke-dasharray:281.25 490.09;stroke-dashoffset:0"></circle>
+                            <circle id="seg-warm" cx="100" cy="100" r="78" stroke="#DFB23E" transform="rotate(-90 100 100)"
+                                    style="stroke-dasharray:183.23 490.09;stroke-dashoffset:-284.25"></circle>
+                            <circle id="seg-tape" cx="100" cy="100" r="78" stroke="#AD5A5A" transform="rotate(-90 100 100)"
+                                    style="stroke-dasharray:16.60 490.09;stroke-dashoffset:-470.48"></circle>
+                        </g>
+                    </svg>
+                    <div class="donut-center">
+                        <span class="big">$3.99</span>
+                        <span class="small">/TB/mo — fixed</span>
+                    </div>
+                </div>
+                <div class="scrub">
+                    <label for="age-slider">days since upload <output id="age-out">30</output></label>
+                    <input type="range" id="age-slider" min="0" max="120" step="1" value="30">
+                    <div class="scrub-presets" role="group" aria-label="Timeline presets">
+                        <button type="button" data-day="0">day 0</button>
+                        <button type="button" data-day="30">day 30</button>
+                        <button type="button" data-day="60">day 60</button>
+                        <button type="button" data-day="90">day 90</button>
+                        <button type="button" data-day="120">day 120</button>
+                    </div>
+                </div>
+            </div>
+            <div class="legend" aria-live="polite">
+                <div class="leg">
+                    <div class="leg-row">
+                        <span class="leg-dot" style="background:#F5EDCE"></span>
+                        <span class="leg-name">Hot <small>— performance S3, sub-30 ms</small></span>
+                        <span class="leg-val" id="val-hot">14.5 TB</span>
+                    </div>
+                    <div class="leg-bar"><i id="bar-hot" style="width:58%;background:#F5EDCE"></i></div>
+                </div>
+                <div class="leg">
+                    <div class="leg-row">
+                        <span class="leg-dot" style="background:#DFB23E"></span>
+                        <span class="leg-name">Optimized <small>— cheaper backends, free egress</small></span>
+                        <span class="leg-val" id="val-warm">9.5 TB</span>
+                    </div>
+                    <div class="leg-bar"><i id="bar-warm" style="width:38%;background:#DFB23E"></i></div>
+                </div>
+                <div class="leg">
+                    <div class="leg-row">
+                        <span class="leg-dot" style="background:#AD5A5A"></span>
+                        <span class="leg-name">Archive <small>— tape libraries</small></span>
+                        <span class="leg-val" id="val-tape">1.0 TB</span>
+                    </div>
+                    <div class="leg-bar"><i id="bar-tape" style="width:4%;background:#AD5A5A"></i></div>
+                </div>
+                <p class="note">Any object is readable at any time — the engine serves from the fastest copy.
+                Your bill never mentions tiers: <strong>one price, our problem.</strong></p>
+            </div>
+        </div>
+        <div class="stage-list">
+            <div class="stage active" id="stage-0">
+                <p class="when">DAY 0–30 · HOT</p>
+                <h3>Everything fast</h3>
                 <p>Performance storage on enterprise S3 infrastructure. Sub-30 ms reads, full-speed multipart uploads.</p>
             </div>
-            <div class="stage">
-                <p class="when">DAY 30–90</p>
-                <h3>Optimized</h3>
-                <p>Objects you stop touching migrate to cheaper storage with free egress. Still online, still fast.</p>
+            <div class="stage" id="stage-1">
+                <p class="when">DAY 30–90 · OPTIMIZED</p>
+                <h3>Cold data migrates</h3>
+                <p>Objects you stop touching move to cheaper storage with free egress. Still online, still fast.</p>
             </div>
-            <div class="stage">
-                <p class="when">DAY 90+</p>
-                <h3>Archive</h3>
-                <p>Cold data lands on tape libraries for maximum durability at archive economics.</p>
+            <div class="stage" id="stage-2">
+                <p class="when">DAY 90+ · ARCHIVE</p>
+                <h3>Deep cold hits tape</h3>
+                <p>Long-untouched data lands on tape libraries for maximum durability at archive economics.</p>
             </div>
         </div>
-        <p class="how-note">
-            Access any object anytime — the engine serves from the fastest available copy.
-            You never configure lifecycle policies unless you want to.
-        </p>
-        <div class="quickstart">
-            <p class="quickstart-label">quickstart — works in under a minute</p>
-            <div class="term">
-                <div class="term-bar">
-                    <span class="term-dot"></span><span class="term-dot"></span><span class="term-dot"></span>
-                    <button class="copy-btn" data-copy="rclone-snippet">copy</button>
-                </div>
-                <pre id="rclone-snippet">rclone config create stored s3 \
-  provider=Other \
-  access_key_id=YOUR_ACCESS_KEY \
-  secret_access_key=YOUR_SECRET_KEY \
-  endpoint=https://stored.ge \
-  region=us-east-1
+        <p class="panel-caption">Illustrative 25 TB workload with a typical access pattern. You never configure lifecycle policies unless you want to.</p>
+    </div>
+</section>
 
-rclone copy ~/backups stored:my-bucket -P</pre>
-            </div>
-            <p class="after">Prefer restic? <code>restic -r s3:https://stored.ge/my-bucket init</code> — aws-cli, s3cmd, Cyberduck, and anything else that speaks S3 works too.</p>
+<section>
+    <div class="container">
+        <div class="section-head">
+            <p class="kicker"><b>03</b>Use cases</p>
+            <h2>What are you building on it?</h2>
+            <p class="lede">Pick your workload — each one is a paste-ready start, not a brochure.</p>
         </div>
+        <div class="uc-tabs" role="tablist" aria-label="Use cases">
+            <button class="uc-tab active" data-uc="backup" role="tab" aria-selected="true">Backups</button>
+            <button class="uc-tab" data-uc="app" role="tab" aria-selected="false">App storage</button>
+            <button class="uc-tab" data-uc="media" role="tab" aria-selected="false">Media &amp; delivery</button>
+            <button class="uc-tab" data-uc="worm" role="tab" aria-selected="false">Archive &amp; compliance</button>
+            <button class="uc-tab" data-uc="lake" role="tab" aria-selected="false">Data lakes</button>
+        </div>
+
+        <div class="uc-panel active" data-panel="backup">
+            <div>
+                <h3>3-2-1 backups that actually finish</h3>
+                <p class="uc-desc">Point restic, rclone, or any S3-speaking backup tool at a bucket. Encrypted client-side if you want, versioned server-side if you ask.</p>
+                <ul>
+                    <li>No minimum storage duration — rotate nightlies without penalty fees</li>
+                    <li>Bucket versioning + Object Lock stop ransomware from rewriting history</li>
+                    <li>Add a Vault pack as the off-site deep copy — it bills separately, so it survives budget cuts</li>
+                </ul>
+                <p class="uc-rec">recommended tier<b>Standard</b></p>
+            </div>
+            <div class="snippet">
+                <div class="snippet-head"><span>restic — nightly backup</span><button class="copy-btn" data-copy="uc-backup-snip">copy</button></div>
+                <pre id="uc-backup-snip">export AWS_ACCESS_KEY_ID=YOUR_KEY
+export AWS_SECRET_ACCESS_KEY=YOUR_SECRET
+
+restic -r s3:https://stored.ge/backups init
+restic -r s3:https://stored.ge/backups backup /home /etc
+
+# verify what you'd restore
+restic -r s3:https://stored.ge/backups snapshots</pre>
+            </div>
+        </div>
+
+        <div class="uc-panel" data-panel="app">
+            <div>
+                <h3>The storage layer behind your app</h3>
+                <p class="uc-desc">Use any AWS SDK with one changed line — the endpoint. Scoped keys and temporary STS credentials keep your blast radius small.</p>
+                <ul>
+                    <li>Per-key permissions and bucket scoping — the upload service can't read billing exports</li>
+                    <li>Presigned URLs let browsers upload/download directly, no proxy bandwidth</li>
+                    <li>Webhooks fire on <code>object.created</code> — trigger thumbnails, virus scans, pipelines</li>
+                </ul>
+                <p class="uc-rec">recommended tier<b>Standard</b></p>
+            </div>
+            <div class="snippet">
+                <div class="snippet-head"><span>python — boto3</span><button class="copy-btn" data-copy="uc-app-snip">copy</button></div>
+                <pre id="uc-app-snip">import boto3
+
+s3 = boto3.client(
+    "s3",
+    endpoint_url="https://stored.ge",
+    aws_access_key_id="YOUR_KEY",
+    aws_secret_access_key="YOUR_SECRET",
+)
+
+s3.upload_file("avatar.png", "user-uploads", "u/42/avatar.png")
+url = s3.generate_presigned_url(
+    "get_object",
+    Params={"Bucket": "user-uploads", "Key": "u/42/avatar.png"},
+    ExpiresIn=3600,
+)</pre>
+            </div>
+        </div>
+
+        <div class="uc-panel" data-panel="media">
+            <div>
+                <h3>Serve files to the whole internet</h3>
+                <p class="uc-desc">Make a bucket public-read and its objects are directly fetchable — with content-type, range requests, and inline/attachment handling done right.</p>
+                <ul>
+                    <li>Range requests + presigned URLs for video seeking and paid downloads</li>
+                    <li>Per-bucket bandwidth budgets so a viral file can't torch your bill</li>
+                    <li>Performance tier keeps every read hot — media never ages to a slower backend</li>
+                </ul>
+                <p class="uc-rec">recommended tier<b>Performance</b></p>
+            </div>
+            <div class="snippet">
+                <div class="snippet-head"><span>aws-cli — public assets</span><button class="copy-btn" data-copy="uc-media-snip">copy</button></div>
+                <pre id="uc-media-snip">aws s3 cp ./dist s3://site-assets/ --recursive \
+  --endpoint-url https://stored.ge
+
+# time-limited download link for a paid file
+aws s3 presign s3://downloads/album.zip \
+  --endpoint-url https://stored.ge --expires-in 86400</pre>
+            </div>
+        </div>
+
+        <div class="uc-panel" data-panel="worm">
+            <div>
+                <h3>Write once, prove it forever</h3>
+                <p class="uc-desc">Object Lock retention and legal holds at the S3 API level — plus MFA Delete on top for the buckets that really matter.</p>
+                <ul>
+                    <li>WORM retention: nobody — including you — deletes inside the window</li>
+                    <li>Tape-backed Vault packs put an air-gap-grade copy behind the same API</li>
+                    <li>Versioning keeps every revision; delete markers instead of destruction</li>
+                </ul>
+                <p class="uc-rec">recommended tier<b>Vault</b></p>
+            </div>
+            <div class="snippet">
+                <div class="snippet-head"><span>aws-cli — object lock</span><button class="copy-btn" data-copy="uc-worm-snip">copy</button></div>
+                <pre id="uc-worm-snip">aws s3api put-object-retention \
+  --bucket audit-logs --key 2026/07/ledger.csv \
+  --retention Mode=COMPLIANCE,RetainUntilDate=2027-07-25T00:00:00Z \
+  --endpoint-url https://stored.ge</pre>
+            </div>
+        </div>
+
+        <div class="uc-panel" data-panel="lake">
+            <div>
+                <h3>A data lake without the AWS bill</h3>
+                <p class="uc-desc">Multipart uploads stream at full speed, and there are no per-request fees — so millions of small objects don't become a line item.</p>
+                <ul>
+                    <li>$0 API fees: LIST-heavy query engines (DuckDB, Spark, Athena-style) run free</li>
+                    <li>JuiceFS mounts a bucket as a POSIX filesystem for tools that want files</li>
+                    <li>Cold partitions age to cheaper tiers automatically — no lifecycle YAML</li>
+                </ul>
+                <p class="uc-rec">recommended tier<b>Standard</b></p>
+            </div>
+            <div class="snippet">
+                <div class="snippet-head"><span>duckdb — query in place</span><button class="copy-btn" data-copy="uc-lake-snip">copy</button></div>
+                <pre id="uc-lake-snip">-- duckdb
+INSTALL httpfs; LOAD httpfs;
+SET s3_endpoint='stored.ge';
+SET s3_access_key_id='YOUR_KEY';
+SET s3_secret_access_key='YOUR_SECRET';
+
+SELECT count(*) FROM 's3://lake/events/2026/*.parquet';</pre>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section>
+    <div class="container">
+        <div class="section-head">
+            <p class="kicker"><b>04</b>Attach anything</p>
+            <h2>If it speaks S3, it plugs in.</h2>
+            <p class="lede">Tools, SDKs, and platform features all hit the same endpoint with the same keys — mix them freely on the same bucket. Click around.</p>
+        </div>
+
+        <div class="res-grid" role="tablist" aria-label="Attachable tools and features">
+            <button class="res-chip active" data-res="rclone"><span class="circle c-cream">rc</span>rclone</button>
+            <button class="res-chip" data-res="restic"><span class="circle c-cream">rs</span>restic</button>
+            <button class="res-chip" data-res="awscli"><span class="circle c-cream">aws</span>aws-cli</button>
+            <button class="res-chip" data-res="cyberduck"><span class="circle c-gold">gui</span>Cyberduck</button>
+            <button class="res-chip" data-res="juicefs"><span class="circle c-gold">fs</span>JuiceFS</button>
+            <button class="res-chip" data-res="sdk"><span class="circle c-gold">{ }</span>SDKs</button>
+            <button class="res-chip" data-res="presign"><span class="circle c-terra">url</span>Presigned</button>
+            <button class="res-chip" data-res="keys"><span class="circle c-terra">key</span>Keys &amp; STS</button>
+            <button class="res-chip" data-res="hooks"><span class="circle c-terra">hook</span>Webhooks</button>
+            <button class="res-chip" data-res="public"><span class="circle c-gray">www</span>Public buckets</button>
+            <button class="res-chip" data-res="lock"><span class="circle c-gray">worm</span>Object Lock</button>
+        </div>
+
+        <div class="res-detail">
+            <div class="res-card active" data-card="rclone">
+                <h3>rclone<small>sync · mount · migrate</small></h3>
+                <p>The Swiss-army knife: sync directories, mount buckets as drives, and migrate straight off B2/S3/Drive into stored.ge with one command. Full walkthrough in the <a href="/docs/rclone">rclone guide</a>.</p>
+                <div class="snippet">
+                    <div class="snippet-head"><span>shell</span><button class="copy-btn" data-copy="res-rclone-snip">copy</button></div>
+                    <pre id="res-rclone-snip">rclone config create stored s3 provider=Other \
+  access_key_id=YOUR_KEY secret_access_key=YOUR_SECRET \
+  endpoint=https://stored.ge region=us-east-1
+
+rclone sync ~/photos stored:photos -P      # keep in sync
+rclone mount stored:photos ~/mnt/photos    # use as a drive
+rclone sync b2:old-bucket stored:photos    # leave your old provider</pre>
+                </div>
+            </div>
+            <div class="res-card" data-card="restic">
+                <h3>restic<small>encrypted backups</small></h3>
+                <p>Client-side encrypted, deduplicated, incremental backups. Your keys never leave your machine — we store ciphertext and can't read a byte of it.</p>
+                <div class="snippet">
+                    <div class="snippet-head"><span>shell</span><button class="copy-btn" data-copy="res-restic-snip">copy</button></div>
+                    <pre id="res-restic-snip">restic -r s3:https://stored.ge/backups init
+restic -r s3:https://stored.ge/backups backup /srv/data
+restic -r s3:https://stored.ge/backups forget --keep-daily 7 --keep-weekly 8 --prune</pre>
+                </div>
+            </div>
+            <div class="res-card" data-card="awscli">
+                <h3>aws-cli<small>scriptable everything</small></h3>
+                <p>Every S3 operation we support, from cron jobs and CI pipelines. Multipart, versioning, tagging, lock — it's all the same flags you already know, plus <code>--endpoint-url</code>.</p>
+                <div class="snippet">
+                    <div class="snippet-head"><span>shell</span><button class="copy-btn" data-copy="res-awscli-snip">copy</button></div>
+                    <pre id="res-awscli-snip">alias s3ge='aws --endpoint-url https://stored.ge'
+
+s3ge s3 mb s3://ci-artifacts
+s3ge s3 cp build.tar.gz s3://ci-artifacts/v1.4.2/
+s3ge s3api list-object-versions --bucket ci-artifacts --prefix v1.4.2/</pre>
+                </div>
+            </div>
+            <div class="res-card" data-card="cyberduck">
+                <h3>Cyberduck &amp; friends<small>point-and-click</small></h3>
+                <p>Any S3-capable GUI works: Cyberduck, Mountain Duck, S3 Browser, Transmit. Add a connection with server <code>stored.ge</code>, port 443, and your keys — then drag and drop. Handy for the team members who are never going to open a terminal.</p>
+                <div class="snippet">
+                    <div class="snippet-head"><span>cyberduck — connection settings</span><button class="copy-btn" data-copy="res-duck-snip">copy</button></div>
+                    <pre id="res-duck-snip">Protocol:   Amazon S3
+Server:     stored.ge
+Port:       443
+Access Key: YOUR_KEY
+Secret Key: YOUR_SECRET</pre>
+                </div>
+            </div>
+            <div class="res-card" data-card="juicefs">
+                <h3>JuiceFS<small>POSIX filesystem</small></h3>
+                <p>Mount a bucket as a real filesystem — rename, append, chmod — for tools that insist on files. We're in its compatibility matrix; the facts strip above wasn't decorative.</p>
+                <div class="snippet">
+                    <div class="snippet-head"><span>shell</span><button class="copy-btn" data-copy="res-juicefs-snip">copy</button></div>
+                    <pre id="res-juicefs-snip">juicefs format --storage s3 \
+  --bucket https://stored.ge/myfs \
+  --access-key YOUR_KEY --secret-key YOUR_SECRET \
+  redis://localhost/1 myfs
+
+juicefs mount redis://localhost/1 ~/jfs</pre>
+                </div>
+            </div>
+            <div class="res-card" data-card="sdk">
+                <h3>Every AWS SDK<small>one changed line</small></h3>
+                <p>boto3, aws-sdk-js, aws-sdk-go, Rust, PHP — set the endpoint and everything else is stock. No vendor SDK to install, no lock-in to us either.</p>
+                <div class="snippet">
+                    <div class="snippet-head"><span>node — @aws-sdk/client-s3</span><button class="copy-btn" data-copy="res-sdk-snip">copy</button></div>
+                    <pre id="res-sdk-snip">import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+
+const s3 = new S3Client({
+  endpoint: "https://stored.ge",
+  region: "us-east-1",
+  credentials: { accessKeyId: KEY, secretAccessKey: SECRET },
+});
+
+await s3.send(new PutObjectCommand({
+  Bucket: "user-uploads", Key: "report.pdf", Body: buf,
+}));</pre>
+                </div>
+            </div>
+            <div class="res-card" data-card="presign">
+                <h3>Presigned URLs<small>direct browser traffic</small></h3>
+                <p>Hand a browser a time-limited URL and it uploads or downloads straight to storage — your server never proxies the bytes. Generate them with any SDK, the CLI, or the dashboard API.</p>
+                <div class="snippet">
+                    <div class="snippet-head"><span>shell</span><button class="copy-btn" data-copy="res-presign-snip">copy</button></div>
+                    <pre id="res-presign-snip"># 24h download link
+aws s3 presign s3://downloads/build.zip \
+  --endpoint-url https://stored.ge --expires-in 86400</pre>
+                </div>
+            </div>
+            <div class="res-card" data-card="keys">
+                <h3>Scoped keys &amp; STS<small>least privilege</small></h3>
+                <p>Mint API keys locked to specific buckets and permissions, with optional IP allowlists and expiry. Need something shorter-lived? STS issues temporary credentials that can only narrow — never escalate — the parent key's scope.</p>
+                <div class="snippet">
+                    <div class="snippet-head"><span>shell — temporary credentials</span><button class="copy-btn" data-copy="res-keys-snip">copy</button></div>
+                    <pre id="res-keys-snip">curl -X POST https://stored.ge/api/v1/sts/token \
+  -H "Authorization: Bearer $JWT" \
+  -d '{"duration_seconds": 3600,
+       "buckets": ["user-uploads"],
+       "permissions": ["read", "write"]}'</pre>
+                </div>
+            </div>
+            <div class="res-card" data-card="hooks">
+                <h3>Webhooks &amp; events<small>react to storage</small></h3>
+                <p>Subscribe an HTTPS endpoint to <code>object.created</code>, <code>object.deleted</code>, bucket and key events. Deliveries are HMAC-signed and logged with response codes, so you can actually debug them.</p>
+                <div class="snippet">
+                    <div class="snippet-head"><span>shell</span><button class="copy-btn" data-copy="res-hooks-snip">copy</button></div>
+                    <pre id="res-hooks-snip">curl -X POST https://stored.ge/api/v1/webhooks \
+  -H "Authorization: Bearer $JWT" \
+  -d '{"url": "https://api.example.com/on-upload",
+       "events": ["object.created"]}'</pre>
+                </div>
+            </div>
+            <div class="res-card" data-card="public">
+                <h3>Public buckets<small>serve the internet</small></h3>
+                <p>Flip a bucket to public-read and objects are fetchable at a plain URL — correct content types, range requests for video seeking, and per-bucket bandwidth budgets so surprise traffic can't run up a surprise bill.</p>
+                <div class="snippet">
+                    <div class="snippet-head"><span>what a visitor fetches</span><button class="copy-btn" data-copy="res-public-snip">copy</button></div>
+                    <pre id="res-public-snip">https://stored.ge/site-assets/logo.svg
+https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
+                </div>
+            </div>
+            <div class="res-card" data-card="lock">
+                <h3>Object Lock / WORM<small>immutability</small></h3>
+                <p>Retention windows and legal holds enforced at the API — compliance mode means nobody, including the account owner, deletes early. Add MFA Delete for a second factor on the destructive paths.</p>
+                <div class="snippet">
+                    <div class="snippet-head"><span>shell</span><button class="copy-btn" data-copy="res-lock-snip">copy</button></div>
+                    <pre id="res-lock-snip">aws s3api put-object-legal-hold \
+  --bucket evidence --key case-1138/disk.img \
+  --legal-hold Status=ON \
+  --endpoint-url https://stored.ge</pre>
+                </div>
+            </div>
+        </div>
+
+        <p class="res-legend">
+            <span class="k-cream">command-line tools</span>
+            <span class="k-gold">apps &amp; code</span>
+            <span class="k-terra">platform features</span>
+            <span class="k-gray">publishing &amp; compliance</span>
+        </p>
     </div>
 </section>
 
 <section id="pricing">
     <div class="container">
         <div class="section-head">
-            <p class="kicker"><b>03</b>Pricing</p>
+            <p class="kicker"><b>05</b>Pricing</p>
             <h2>Pay per TB. That's the whole model.</h2>
             <p class="lede">No API fees, no request classes, no retrieval surcharges, no minimum storage duration.</p>
         </div>
+
+        <div class="calc">
+            <label for="calc-tb">how much are you storing? <output id="calc-out">20 TB</output></label>
+            <input type="range" id="calc-tb" min="1" max="100" step="1" value="20">
+            <div class="calc-rows">
+                <div class="calc-row us"><span class="who">stored.ge Standard (annual)</span><span class="amt" id="calc-us">$79.80/mo</span></div>
+                <div class="calc-row"><span class="who">Backblaze B2</span><span class="amt" id="calc-b2">$139.00/mo</span></div>
+                <div class="calc-row"><span class="who">AWS S3</span><span class="amt" id="calc-aws">$460.00/mo</span></div>
+            </div>
+            <p class="calc-note" id="calc-note">That's <strong>$4,562/yr</strong> kept out of AWS's pocket.</p>
+        </div>
+
         <div class="plans">
             <div class="plan">
                 <p class="plan-kicker">Vault</p>
@@ -686,7 +1202,7 @@ rclone copy ~/backups stored:my-bucket -P</pre>
 <section>
     <div class="container">
         <div class="section-head">
-            <p class="kicker"><b>04</b>Straight answers</p>
+            <p class="kicker"><b>06</b>Straight answers</p>
             <h2>The parts most storage pages won't tell you.</h2>
             <p class="lede">More in the <a href="/docs/faq">full FAQ</a>.</p>
         </div>
@@ -716,13 +1232,13 @@ rclone copy ~/backups stored:my-bucket -P</pre>
         {{if .SignupsOpen}}
         <h2>Try it in the next five minutes.</h2>
         <p>5 GB free, no credit card. Keys on signup, rclone config ready to paste.</p>
-        <a class="btn btn-primary" href="/register">Start free</a>
+        <a class="btn btn-primary" href="/register">Start free →</a>
         {{else}}
         <h2>Launching July 31, 2026.</h2>
         <p>Join the waitlist and we'll email you once — on launch day, with a founding-member code.</p>
         <form class="waitlist-form" data-waitlist>
             <input type="email" name="email" placeholder="you@example.com" required aria-label="Email address">
-            <button type="submit" class="btn btn-primary">Join waitlist</button>
+            <button type="submit" class="btn btn-primary">Join waitlist →</button>
         </form>
         {{end}}
     </div>
@@ -805,6 +1321,125 @@ rclone copy ~/backups stored:my-bucket -P</pre>
             });
         });
     });
+
+    // ---- 02: tiering ring. Illustrative 25 TB workload; segments animate as
+    // the age slider moves, the centre price deliberately never changes.
+    (function () {
+        var slider = document.getElementById('age-slider');
+        if (!slider) return;
+        var TOTAL_TB = 25, R = 78, GAP = 3;
+        var C = 2 * Math.PI * R;
+        // keyframes: [day, hot%, optimized%, tape%]
+        var KF = [[0, 100, 0, 0], [30, 58, 38, 4], [60, 36, 44, 20], [90, 22, 36, 42], [120, 14, 28, 58]];
+        var segs = {
+            hot:  document.getElementById('seg-hot'),
+            warm: document.getElementById('seg-warm'),
+            tape: document.getElementById('seg-tape')
+        };
+        function mix(day) {
+            var a = KF[0], b = KF[KF.length - 1], i;
+            for (i = 0; i < KF.length - 1; i++) {
+                if (day >= KF[i][0] && day <= KF[i + 1][0]) { a = KF[i]; b = KF[i + 1]; break; }
+            }
+            var t = (b[0] === a[0]) ? 0 : (day - a[0]) / (b[0] - a[0]);
+            return [1, 2, 3].map(function (k) { return a[k] + (b[k] - a[k]) * t; });
+        }
+        function setSeg(el, frac, offsetFrac) {
+            var len = Math.max(0, C * frac - (frac > 0.004 ? GAP : 0));
+            el.style.strokeDasharray = len + ' ' + C;
+            el.style.strokeDashoffset = String(-C * offsetFrac);
+        }
+        function fmtTB(frac) {
+            var tb = TOTAL_TB * frac;
+            return (tb >= 10 ? tb.toFixed(0) : tb.toFixed(1)) + ' TB';
+        }
+        function render(day) {
+            var p = mix(day);
+            var hot = p[0] / 100, warm = p[1] / 100, tape = p[2] / 100;
+            setSeg(segs.hot, hot, 0);
+            setSeg(segs.warm, warm, hot);
+            setSeg(segs.tape, tape, hot + warm);
+            document.getElementById('age-out').textContent = String(day);
+            document.getElementById('val-hot').textContent = fmtTB(hot);
+            document.getElementById('val-warm').textContent = fmtTB(warm);
+            document.getElementById('val-tape').textContent = fmtTB(tape);
+            document.getElementById('bar-hot').style.width = p[0] + '%';
+            document.getElementById('bar-warm').style.width = p[1] + '%';
+            document.getElementById('bar-tape').style.width = p[2] + '%';
+            var idx = day < 30 ? 0 : (day < 90 ? 1 : 2);
+            [0, 1, 2].forEach(function (i) {
+                document.getElementById('stage-' + i).classList.toggle('active', i === idx);
+            });
+        }
+        slider.addEventListener('input', function () { render(Number(slider.value)); });
+        document.querySelectorAll('.scrub-presets button').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                slider.value = btn.getAttribute('data-day');
+                render(Number(slider.value));
+            });
+        });
+        render(Number(slider.value));
+    })();
+
+    // ---- 03: use-case tabs
+    document.querySelectorAll('.uc-tab').forEach(function (tab) {
+        tab.addEventListener('click', function () {
+            document.querySelectorAll('.uc-tab').forEach(function (t) {
+                t.classList.toggle('active', t === tab);
+                t.setAttribute('aria-selected', t === tab ? 'true' : 'false');
+            });
+            var key = tab.getAttribute('data-uc');
+            document.querySelectorAll('.uc-panel').forEach(function (p) {
+                p.classList.toggle('active', p.getAttribute('data-panel') === key);
+            });
+        });
+    });
+
+    // ---- 04: resource chips
+    document.querySelectorAll('.res-chip').forEach(function (chip) {
+        chip.addEventListener('click', function () {
+            document.querySelectorAll('.res-chip').forEach(function (c) {
+                c.classList.toggle('active', c === chip);
+            });
+            var key = chip.getAttribute('data-res');
+            document.querySelectorAll('.res-card').forEach(function (card) {
+                card.classList.toggle('active', card.getAttribute('data-card') === key);
+            });
+        });
+    });
+
+    // ---- 05: pricing slider. Rates from the comparison table below it.
+    (function () {
+        var slider = document.getElementById('calc-tb');
+        if (!slider) return;
+        var PACKS = [[1, 4.99, 'Vault1'], [3, 7.99, 'Vault3'], [5, 9.99, 'Vault5'], [10, 12.99, 'Vault10'], [18, 17.99, 'Vault18']];
+        function money(n) {
+            return '$' + n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+        }
+        function moneyWhole(n) {
+            return '$' + Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+        }
+        function render() {
+            var tb = Number(slider.value);
+            document.getElementById('calc-out').textContent = tb + ' TB';
+            document.getElementById('calc-us').textContent = money(tb * 3.99) + '/mo';
+            document.getElementById('calc-b2').textContent = money(tb * 6.95) + '/mo';
+            document.getElementById('calc-aws').textContent = money(tb * 23.00) + '/mo';
+            var saved = moneyWhole((23.00 - 3.99) * tb * 12);
+            var note = 'That’s <strong>' + saved + '/yr</strong> kept out of AWS’s pocket.';
+            var i, pack = null;
+            for (i = 0; i < PACKS.length; i++) {
+                if (tb <= PACKS[i][0]) { pack = PACKS[i]; break; }
+            }
+            if (pack) {
+                note += ' Archive-only? <strong>' + pack[2] + '</strong> holds ' + pack[0] +
+                    ' TB for <strong>' + money(pack[1]) + '/mo</strong> flat.';
+            }
+            document.getElementById('calc-note').innerHTML = note;
+        }
+        slider.addEventListener('input', render);
+        render();
+    })();
 </script>
 
 </body>
