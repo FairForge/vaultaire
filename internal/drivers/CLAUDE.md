@@ -26,7 +26,7 @@ type Driver interface {
 |--------|------|-------------|---------|------------|
 | `LocalDriver` | `local.go` | `NewLocalDriver(basePath, logger)` | Local filesystem | `DATA_PATH` env var; reader/file pools; transactions; buffered writes; multipart uploads; file locking; sparse files; xattrs; directory indexing |
 | `S3CompatDriver` | `s3compat.go` | `NewS3CompatDriver(accessKey, secretKey, logger)` | S3-compatible (maps to Quotaless endpoint) | Hardcoded `us.s3compat.cloud:8000`; optional `S3COMPAT_INSECURE_TLS` for self-signed certs |
-| `LyveDriver` | `lyve.go` | `NewLyveDriver(accessKey, secretKey, tenantID, region, logger)` | Seagate Lyve Cloud | Auto-builds `s3.{region}.global.lyve.seagate.com` endpoint; tenant isolation via context key |
+| `LyveDriver` | `lyve.go` | `NewLyveDriver(accessKey, secretKey, tenantID, region, logger)` | Seagate Lyve Cloud 2 | Auto-builds `s3.{region}.global.lyve.seagate.com` endpoint; region defaults to us-west-1 (closest to SLC); buckets are HOMED per region — create `stored-<region>` via that region's endpoint or every op pays a cross-region proxy penalty (see `lyve_README.md`); parallel multipart via `s3ParallelUploadInput`; paginated List; tenant isolation via context key |
 | `QuotalessDriver` | `quotaless.go` | `NewQuotalessDriver(accessKey, secretKey, endpoint, logger)` | Quotaless | Embeds `*S3Driver`; 50 MB chunks; 100 MB multipart cutoff; static vs dynamic endpoint detection |
 | `GeyserDriver` | `geyser.go` | `NewGeyserDriver(accessKey, secretKey, bucket, tenantID, logger, ...GeyserOption)` | Spectra Logic Vail (LTO-9 tape) | Default LA endpoint; `WithGeyserEndpoint` for London; 64 MB spill threshold (RAM vs temp file); generous HTTP timeouts for tape ops |
 
@@ -129,6 +129,7 @@ Helpers: `IsValidRegion(region)`, `IsEURegion(region)` (true for `eu-*`), `Regio
 ## Existing READMEs
 
 - `idrive_README.md` -- iDrive E2 integration + reseller API reference
+- `lyve_README.md` -- Lyve Cloud 2 ops manual: bucket homing/replication-policy trap, probe recipes, benchmarks
 - `onedrive_README.md` -- OneDrive integration + dual-transport pattern (HTTP/2 for API, HTTP/1.1 for CDN)
 - `quotaless_README.md` -- Quotaless backend ops manual
 - `pixeldrain_README.md` -- Pixeldrain benchmarks (CDN option, not a storage tier)

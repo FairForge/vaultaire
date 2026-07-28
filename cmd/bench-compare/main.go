@@ -76,14 +76,23 @@ type Endpoint struct {
 }
 
 // Order matters — printed and tested in this order.
+//
+// Lyve buckets are FIXED PER REGION: on Lyve Cloud 2 a bucket is homed in the
+// region whose endpoint created it, and every other regional endpoint proxies
+// to that home (~500ms/op cross-US). A shared auto-named bucket therefore
+// benchmarks the proxy path, not the region (the 2026-07-28 "us-west
+// degradation" artifact). The vbench-lyve-<region> buckets are pre-provisioned
+// (2026-07-28), each created through its own region's endpoint so it is homed
+// there. To re-provision: PUT the bucket via s3.<region>.global.lyve.seagate.com
+// and verify homing with a GET carrying `x-rstor-replication-status: true`.
 var endpoints = []Endpoint{
-	{Name: "lyve-us-east-1", Provider: "lyve", URL: "https://s3.us-east-1.global.lyve.seagate.com", Region: "us-east-1", AccessKeyEnv: "LYVE_ACCESS_KEY", SecretKeyEnv: "LYVE_SECRET_KEY", PathStyle: true},
-	{Name: "lyve-us-west-1", Provider: "lyve", URL: "https://s3.us-west-1.global.lyve.seagate.com", Region: "us-west-1", AccessKeyEnv: "LYVE_ACCESS_KEY", SecretKeyEnv: "LYVE_SECRET_KEY", PathStyle: true},
-	{Name: "lyve-us-central-2", Provider: "lyve", URL: "https://s3.us-central-2.global.lyve.seagate.com", Region: "us-central-2", AccessKeyEnv: "LYVE_ACCESS_KEY", SecretKeyEnv: "LYVE_SECRET_KEY", PathStyle: true},
-	{Name: "lyve-eu-west-1", Provider: "lyve", URL: "https://s3.eu-west-1.global.lyve.seagate.com", Region: "eu-west-1", AccessKeyEnv: "LYVE_ACCESS_KEY", SecretKeyEnv: "LYVE_SECRET_KEY", PathStyle: true},
-	{Name: "lyve-eu-central-1", Provider: "lyve", URL: "https://s3.eu-central-1.global.lyve.seagate.com", Region: "eu-central-1", AccessKeyEnv: "LYVE_ACCESS_KEY", SecretKeyEnv: "LYVE_SECRET_KEY", PathStyle: true},
-	{Name: "lyve-ap-southeast-1", Provider: "lyve", URL: "https://s3.ap-southeast-1.global.lyve.seagate.com", Region: "ap-southeast-1", AccessKeyEnv: "LYVE_ACCESS_KEY", SecretKeyEnv: "LYVE_SECRET_KEY", PathStyle: true},
-	{Name: "lyve-ap-northeast-1", Provider: "lyve", URL: "https://s3.ap-northeast-1.global.lyve.seagate.com", Region: "ap-northeast-1", AccessKeyEnv: "LYVE_ACCESS_KEY", SecretKeyEnv: "LYVE_SECRET_KEY", PathStyle: true},
+	{Name: "lyve-us-east-1", Provider: "lyve", URL: "https://s3.us-east-1.global.lyve.seagate.com", Region: "us-east-1", AccessKeyEnv: "LYVE_ACCESS_KEY", SecretKeyEnv: "LYVE_SECRET_KEY", PathStyle: true, FixedBucket: "vbench-lyve-us-east-1"},
+	{Name: "lyve-us-west-1", Provider: "lyve", URL: "https://s3.us-west-1.global.lyve.seagate.com", Region: "us-west-1", AccessKeyEnv: "LYVE_ACCESS_KEY", SecretKeyEnv: "LYVE_SECRET_KEY", PathStyle: true, FixedBucket: "vbench-lyve-us-west-1"},
+	{Name: "lyve-us-central-2", Provider: "lyve", URL: "https://s3.us-central-2.global.lyve.seagate.com", Region: "us-central-2", AccessKeyEnv: "LYVE_ACCESS_KEY", SecretKeyEnv: "LYVE_SECRET_KEY", PathStyle: true, FixedBucket: "vbench-lyve-us-central-2"},
+	{Name: "lyve-eu-west-1", Provider: "lyve", URL: "https://s3.eu-west-1.global.lyve.seagate.com", Region: "eu-west-1", AccessKeyEnv: "LYVE_ACCESS_KEY", SecretKeyEnv: "LYVE_SECRET_KEY", PathStyle: true, FixedBucket: "vbench-lyve-eu-west-1"},
+	{Name: "lyve-eu-central-1", Provider: "lyve", URL: "https://s3.eu-central-1.global.lyve.seagate.com", Region: "eu-central-1", AccessKeyEnv: "LYVE_ACCESS_KEY", SecretKeyEnv: "LYVE_SECRET_KEY", PathStyle: true, FixedBucket: "vbench-lyve-eu-central-1"},
+	{Name: "lyve-ap-southeast-1", Provider: "lyve", URL: "https://s3.ap-southeast-1.global.lyve.seagate.com", Region: "ap-southeast-1", AccessKeyEnv: "LYVE_ACCESS_KEY", SecretKeyEnv: "LYVE_SECRET_KEY", PathStyle: true, FixedBucket: "vbench-lyve-ap-southeast-1"},
+	{Name: "lyve-ap-northeast-1", Provider: "lyve", URL: "https://s3.ap-northeast-1.global.lyve.seagate.com", Region: "ap-northeast-1", AccessKeyEnv: "LYVE_ACCESS_KEY", SecretKeyEnv: "LYVE_SECRET_KEY", PathStyle: true, FixedBucket: "vbench-lyve-ap-northeast-1"},
 	{Name: "r2-default", Provider: "r2", URLEnv: "R2_ENDPOINT", Region: "auto", AccessKeyEnv: "R2_ACCESS_KEY", SecretKeyEnv: "R2_SECRET_KEY"},
 	{Name: "r2-eu", Provider: "r2", URLEnv: "R2_EU_ENDPOINT", Region: "auto", AccessKeyEnv: "R2_ACCESS_KEY", SecretKeyEnv: "R2_SECRET_KEY"},
 	// Quotaless: Pydio Cells with Minio S3 gateway (Storj backend). Requires UNSIGNED-PAYLOAD.

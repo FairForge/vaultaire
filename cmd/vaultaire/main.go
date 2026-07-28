@@ -188,7 +188,9 @@ func main() {
 		secretKey := os.Getenv("LYVE_SECRET_KEY")
 		region := os.Getenv("LYVE_REGION")
 		if region == "" {
-			region = "us-east-1"
+			// Closest Lyve region to the SLC prod box. Buckets are homed per
+			// region on Lyve Cloud 2 — see internal/drivers/lyve.go.
+			region = "us-west-1"
 		}
 		if lyveDriver, err := drivers.NewLyveDriver(accessKey, secretKey, "", region, logger); err == nil {
 			eng.AddDriver("lyve", lyveDriver)

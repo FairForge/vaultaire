@@ -1,0 +1,167 @@
+# Lyve Cloud 2 Driver — Ops Manual
+
+Status (2026-07-28): **tested and usable, not a launch tier.** Lyve was
+"dropped" in July 2026 partly on a perf verdict that turned out to be a
+benchmarking artifact (see *The bucket-homing trap* below). Pricing/strategy
+still keep it out of the launch lineup, but the driver is fully functional and
+benchmarked if we ever want it (e.g. as an extra replication target).
+
+## Platform architecture (Lyve Cloud 2 / RSTOR)
+
+Seagate's current platform (endpoints `s3.<region>.global.lyve.seagate.com`)
+is the RSTOR-derived "Lyve Cloud 2". API reference PDF: *Lyve Cloud Object
+Storage API User Guide* (extracted highlights below). Key facts:
+
+- **Path-style requests only**, SigV4 (or V2) signing.
+- **Every bucket is homed in the region(s) of its replication policy.** The
+  policy is set at bucket creation (`PUT /bucket?replication-policy=US-WEST-1`,
+  comma-separated list); with no policy the bucket is homed in the region
+  whose endpoint created it (the PDF claims "replicated to every region" by
+  default — account behavior says otherwise; trust the probe, not the PDF).
+- **Any regional endpoint accepts requests for any bucket and transparently
+  proxies to the bucket's home region.** No error, no redirect — just
+  ~500 ms/op added latency for cross-US proxying.
+- Check an object's home: `GET` it with header `x-rstor-replication-status:
+  true`; the response header lists the region(s) holding it.
+- Our account: all 7 regions available, `ReplicationEnforcement: false`
+  (query `POST /?Action=RSAvailableRegions&Version=2010-05-08` on
+  `iam.global.lyve.seagate.com`, service `iam`, root S3 creds).
+- Multipart uploads must be **completed in the DC where they were initiated**
+  (fine for this driver — it pins one regional endpoint).
+- SSE is on at rest (`X-Rstor-Sse-Encryption-Status: true` on responses).
+- Known wart: malformed-auth PUTs hang ~9 s then return 502 (healthy paths
+  return fast 403s). Reads/writes with valid auth are unaffected.
+
+### Quick probes (curl ≥7.75)
+
+```bash
+# Where does this object live?
+curl -sS -o /dev/null --aws-sigv4 "aws:amz:us-west-1:s3" --user "$AK:$SK" \
+  "https://s3.us-west-1.global.lyve.seagate.com/BUCKET/KEY" \
+  -H "x-rstor-replication-status: true" -D - | grep -i rstor
+
+# Create a bucket homed in a specific region (do this from that region's endpoint)
+curl -sS --aws-sigv4 "aws:amz:us-west-1:s3" --user "$AK:$SK" -X PUT \
+  -H "Content-Length: 0" "https://s3.us-west-1.global.lyve.seagate.com/BUCKET"
+```
+
+## Admin (RS) API — tested 2025-11-28, still valid
+
+Account identity (`RSGetUserInfo`): we are customer **v01** under reseller
+**global** (root user isaacv17@gmail.com) — customer-level RS access, not
+reseller-level. IAM and STS share one endpoint:
+`iam.global.lyve.seagate.com` (per Seagate support; the per-account
+`sts.<account>` host in the PDF does not apply to us). Sign IAM-endpoint
+calls with service `iam`, S3-endpoint calls with service `s3`.
+
+**Working with our root S3 creds:**
+
+```bash
+# Per-bucket size/objects/REPLICATION POLICY for the whole account — THE
+# homing audit tool (S3 endpoint, service s3):
+curl -s --aws-sigv4 "aws:amz:us-west-1:s3" --user "$AK:$SK" \
+  "https://s3.us-west-1.global.lyve.seagate.com/?rs-bucket-stats"
+
+# Account info / regions / billing (IAM endpoint, service iam, POST form):
+curl -s -X POST --aws-sigv4 "aws:amz:us-east-1:iam" --user "$AK:$SK" \
+  -d "Action=RSGetUserInfo&Version=2010-05-08" https://iam.global.lyve.seagate.com/
+# Also working: Action=RSAvailableRegions (7 regions, ReplicationEnforcement:false),
+# Action=RSListBillingData&From=<ISO>&Till=<ISO> (per-region daily
+# upload/download/delete bytes + UsedSpace + ObjectCount — usable for COGS
+# reconciliation), and standard IAM CreateUser/ListPolicies (sub-user mgmt).
+```
+
+**Not available to us** (reseller-only or unsupported): `RSLiveBilling`,
+`RSListCustomer`, `RSWhitelist*` ("Dripd-iam: Unauthorized" / "Action not
+supported"). STS `AssumeRole` against the shared IAM host errored with
+"Missing Action or Version param" in the 2025-11 test — unresolved, retest
+with the PDF's exact STS wire format if temp credentials are ever needed.
+
+## Prior art & where the old tooling lives
+
+- `~/fairforge/vaultaire-benchmark/lyve-*.sh` — Nov 2025 API sweeps:
+  `lyve-correct-endpoints.sh` (the canonical RS/IAM test, correct global
+  endpoints — results in `lyve-correct-test-20251128-123805.log`),
+  `lyve-full-api-test.sh` + `lyve-rs-commands-test.sh` (older, use the
+  RETIRED `s3.<region>.lyvecloud.seagate.com` v1 endpoints; SSE-S3/SSE-C
+  test sections still useful as recipes). Scripts contain hardcoded root
+  creds — do not commit them.
+- `.private/lyve-advanced-test.js` (+ report JSON) — Node SDK perf suite
+  (versioning, tagging, lifecycle, CORS, presign, multipart tuning
+  configs), Oct 2025, v1 endpoints.
+- `docs/references/lyve-cloud-2-api-en_US.pdf` — the LC2 API guide,
+  committed in-repo (same doc as the Downloads copies).
+- Seagate legal/portal docs in `~/Downloads`: LYVE CUSTOMER AGREEMENT,
+  LYVE SERVICES TERMS, `lyve-management-portal-en_US.pdf` (console admin).
+- `test-lyve-live.sh` (deleted from repo Sep 2025) — trivial pre-auth
+  smoke, superseded; recover with `git show d997410:test-lyve-live.sh`.
+- SLC: `~/vaultaire-bench/bench-lyve-west.sh` (E2E smoke wrapper),
+  `drivers-test-linux` (integration-test binary), full/smoke JSONs in
+  `~/vaultaire-bench/bench-results/`.
+
+## The bucket-homing trap (root-caused 2026-07-28)
+
+The July "us-west-1 write degradation" (warm 4 KB PUT p50 ~580 ms, 2 ops/s,
+cold dial ~740 ms) was **entirely** the proxy path: the shared bench bucket
+was homed in US-EAST-1, so every us-west op crossed the country. Controlled
+A/B from SLC (warm connection): west-homed bucket via west endpoint
+**50–80 ms**; east-homed via east 60–90 ms; east-homed via west 500–700 ms.
+Even the cold-dial asymmetry was this artifact (that workload includes a PUT).
+
+Rules that follow:
+
+1. **Create every bucket through the endpoint of the region it should live
+   in** (or pass `replication-policy` explicitly).
+2. **Never benchmark or serve a bucket through a non-home endpoint** unless
+   you intend to measure the proxy path.
+3. E2E-through-Vaultaire numbers cannot assess backend health while
+   `engine/failover.go` can land PUTs locally — verify objects actually
+   reached Lyve with a direct probe.
+
+## Driver specifics (`lyve.go`)
+
+- Region default **us-west-1** (closest to SLC; `LYVE_REGION` overrides —
+  also defaulted in `cmd/vaultaire/main.go` and `scripts/bench-vaultaire.sh`).
+- Bucket layout: one `stored-<region>` bucket per region, keys
+  `t-<tenant>/<container>/<artifact>`. `stored-us-west-1` and
+  `stored-us-east-1` exist and are verified correctly homed (2026-07-28).
+- Uploads go through the shared parallel multipart uploader
+  (`s3ParallelUploadInput`, 16 MiB parts × 8 concurrent) with full metadata
+  passthrough; small objects are a single PutObject.
+- `List` paginates (ListObjectsV2 paginator) — no 1000-key truncation.
+- `HealthCheck` = HeadBucket, which deliberately also catches a missing
+  `stored-<region>` bucket before the engine can fail over writes to disk.
+- Not in `STORAGE_MODE` auto-detect; enable explicitly with
+  `STORAGE_MODE=lyve` + `LYVE_ACCESS_KEY`/`LYVE_SECRET_KEY`.
+
+## Benchmarks (SLC, 2026-07-28, direct via bench-compare, west-homed bucket)
+
+Full run: `bench-results/lyve-uswest-full-0728.json` on the SLC box.
+
+| Workload | Result |
+|---|---|
+| cold dial + 1 KB PUT | p50 170 ms |
+| warm 4 KB PUT / GET / HEAD | p50 50 / 42 / 38 ms |
+| 64 MB PUT / GET single-stream | 112.6 / 95.0 MB/s |
+| 256 MB multipart (16 parallel parts) | 213.7 MB/s |
+| concurrent ingest / download (20 s) | 778 / 496 MB/s |
+| sustained upload 60 s | 442 MB/s, steady (no Geyser-style collapse) |
+| burst 500 small files | 194 ops/s |
+| worker escalation 8→128 | 602 ops/s at 128 workers, **0 errors** |
+| read-after-write / overwrite / list consistency | 20/20, 10/10, 10/10 |
+
+Comparison vs iDrive (launch hot tier, 2026-07 numbers): iDrive wins
+single-stream 64 MB GET (225 vs 95 MB/s); **Lyve wins multipart (214 vs
+183 MB/s) and concurrency (ingest 778 vs 512, download 496 vs 349 MB/s)**
+and has no rate-limit errors up to 128 workers. Integration test
+(`TestLyveDriver_Integration`, env-guarded) passes from SLC including a
+20 MB multipart round-trip.
+
+Bench gotchas:
+- `bench-compare -only lyve` matches **all 7** regional endpoints (~15 min);
+  use `-only lyve-us-west`.
+- Per-region bench buckets `vbench-lyve-<region>` are pre-provisioned and
+  correctly homed; the legacy shared `vbench-user1-lyve` bucket is
+  **east-homed** — do not reuse it for west benches.
+- Set `AWS_DEFAULT_REGION` when using aws-cli on SLC or every op burns ~2 s
+  on IMDS probes.

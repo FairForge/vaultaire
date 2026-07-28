@@ -34,11 +34,6 @@ const (
 // interface, which *s3.Client satisfies (and tests can mock). On any failure the
 // uploader aborts the multipart upload so no orphaned parts are billed.
 func s3ParallelUpload(ctx context.Context, client manager.UploadAPIClient, bucket, key, contentType string, body io.Reader) error {
-	uploader := manager.NewUploader(client, func(u *manager.Uploader) { //nolint:staticcheck // manager.Uploader is deprecated in favor of transfermanager; migration is a post-launch WP
-		u.PartSize = s3UploadPartSize
-		u.Concurrency = s3UploadConcurrency
-	})
-
 	in := &s3.PutObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
@@ -47,9 +42,20 @@ func s3ParallelUpload(ctx context.Context, client manager.UploadAPIClient, bucke
 	if contentType != "" {
 		in.ContentType = aws.String(contentType)
 	}
+	return s3ParallelUploadInput(ctx, client, in)
+}
+
+// s3ParallelUploadInput is the full-input variant of s3ParallelUpload for
+// callers that need to carry extra object metadata (CacheControl,
+// ContentEncoding, user metadata, ...) through the parallel uploader.
+func s3ParallelUploadInput(ctx context.Context, client manager.UploadAPIClient, in *s3.PutObjectInput) error {
+	uploader := manager.NewUploader(client, func(u *manager.Uploader) { //nolint:staticcheck // manager.Uploader is deprecated in favor of transfermanager; migration is a post-launch WP
+		u.PartSize = s3UploadPartSize
+		u.Concurrency = s3UploadConcurrency
+	})
 
 	if _, err := uploader.Upload(ctx, in); err != nil { //nolint:staticcheck // manager.Uploader is deprecated in favor of transfermanager; migration is a post-launch WP
-		return fmt.Errorf("s3 parallel upload %s/%s: %w", bucket, key, err)
+		return fmt.Errorf("s3 parallel upload %s/%s: %w", aws.ToString(in.Bucket), aws.ToString(in.Key), err)
 	}
 	return nil
 }
