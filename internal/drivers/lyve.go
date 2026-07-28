@@ -23,9 +23,20 @@ type LyveDriver struct {
 	logger   *zap.Logger
 }
 
+// NewLyveDriver builds a driver for one Lyve Cloud 2 region.
+//
+// Lyve Cloud 2 gotcha (root-caused 2026-07-28): every bucket is homed in the
+// region(s) of its replication policy, and ANY regional endpoint transparently
+// proxies requests to the bucket's home region (~500ms/op cross-US penalty).
+// The stored-<region> bucket this driver targets must therefore be created
+// through that same region's endpoint (default policy homes a bucket in the
+// creating region). Verify homing with a GET carrying the
+// `x-rstor-replication-status: true` header.
 func NewLyveDriver(accessKey, secretKey, tenantID, region string, logger *zap.Logger) (*LyveDriver, error) {
 	if region == "" {
-		region = "us-east-1"
+		// Closest region to the SLC prod box; us-east-1 here once routed
+		// every op cross-country and read as a backend degradation.
+		region = "us-west-1"
 	}
 
 	endpoint := fmt.Sprintf("https://s3.%s.global.lyve.seagate.com", region)
@@ -147,8 +158,11 @@ func (d *LyveDriver) Put(ctx context.Context, container, artifact string, data i
 		input.Metadata = options.UserMetadata
 	}
 
-	_, err := d.client.PutObject(ctx, input)
-	if err != nil {
+	// Parallel multipart for large objects, single PutObject for small ones —
+	// same path as iDrive/s3compat. Lyve requires multipart uploads to be
+	// completed in the DC where they were initiated; that holds here because
+	// the driver only ever talks to one regional endpoint.
+	if err := s3ParallelUploadInput(ctx, d.client, input); err != nil {
 		return fmt.Errorf("put object: %w", err)
 	}
 
@@ -179,23 +193,24 @@ func (d *LyveDriver) List(ctx context.Context, container string, prefix string) 
 	}
 	bucket := d.getBucket()
 
-	result, err := d.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket: aws.String(bucket),
-		Prefix: aws.String(keyPrefix),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("list objects: %w", err)
-	}
-
 	// Strip the tenant/container prefix when returning keys
 	// Use the tenantID we actually used, not d.tenantID
 	tenantPrefix := fmt.Sprintf("t-%s/%s/", tenantID, container)
-	keys := make([]string, 0, len(result.Contents))
-	for _, obj := range result.Contents {
-		if obj.Key != nil {
-			// Remove the tenant/container prefix to return just the artifact name
-			key := strings.TrimPrefix(*obj.Key, tenantPrefix)
-			keys = append(keys, key)
+	var keys []string
+	paginator := s3.NewListObjectsV2Paginator(d.client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(bucket),
+		Prefix: aws.String(keyPrefix),
+	})
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list objects: %w", err)
+		}
+		for _, obj := range page.Contents {
+			if obj.Key != nil {
+				// Remove the tenant/container prefix to return just the artifact name
+				keys = append(keys, strings.TrimPrefix(*obj.Key, tenantPrefix))
+			}
 		}
 	}
 

@@ -121,7 +121,9 @@ isolate_backend_env() {
             ;;
         lyve)
             export LYVE_ACCESS_KEY="$save_lyve_ak" LYVE_SECRET_KEY="$save_lyve_sk"
-            export LYVE_REGION="${save_lyve_rg:-us-east-1}"
+            # us-west-1 = closest to SLC; buckets are homed per region on
+            # Lyve Cloud 2 (see internal/drivers/lyve.go).
+            export LYVE_REGION="${save_lyve_rg:-us-west-1}"
             ;;
         geyser)
             export GEYSER_ACCESS_KEY="$save_geyser_ak" GEYSER_SECRET_KEY="$save_geyser_sk"

@@ -18,6 +18,7 @@ Vaultaire is a universal storage orchestration engine providing a unified S3-com
 - **`.private/TIER_STRATEGY.md`** — Three-tier GTM: Vault (archive), Standard (smart), Performance (B2 killer). Selling model, use cases, novel features
 - **`.private/PERMAFROST_TESTING_RESULTS.md`** — OneDrive benchmark results v1→v2→v3 (HTTP/1.1 + Range = 214 MB/s fleet)
 - **`internal/drivers/onedrive_README.md`** — OneDrive integration + dual-transport pattern (HTTP/2 for API, HTTP/1.1 for CDN)
+- **`internal/drivers/lyve_README.md`** — Lyve Cloud 2 ops manual: per-region bucket homing, replication-policy, probe recipes
 - **`internal/drivers/quotaless_README.md`** — Quotaless backend ops manual
 - **`internal/drivers/pixeldrain_README.md`** — Pixeldrain benchmarks (CDN option)
 
@@ -143,7 +144,7 @@ GitHub Actions Deploy (`.github/workflows/deploy.yml`):
 | `DATA_PATH` | /tmp/vaultaire-data | Local storage directory |
 | `STORAGE_MODE` | auto-detect | Force specific backend |
 | `S3_ACCESS_KEY`, `S3_SECRET_KEY` | — | AWS S3 credentials |
-| `LYVE_ACCESS_KEY`, `LYVE_SECRET_KEY`, `LYVE_REGION` | — | Seagate Lyve Cloud |
+| `LYVE_ACCESS_KEY`, `LYVE_SECRET_KEY`, `LYVE_REGION` | region: us-west-1 | Seagate Lyve Cloud 2 — buckets are homed per region; see `internal/drivers/lyve_README.md` |
 | `QUOTALESS_ACCESS_KEY`, `QUOTALESS_SECRET_KEY`, `QUOTALESS_ENDPOINT` | — | Quotaless storage |
 | `STRIPE_SECRET_KEY` | — | Stripe API key (sk_test_... or sk_live_...) |
 | `STRIPE_WEBHOOK_SECRET` | — | Stripe webhook endpoint secret (whsec_...) |
