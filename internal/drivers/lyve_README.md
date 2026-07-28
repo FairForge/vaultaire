@@ -82,11 +82,26 @@ Rules that follow:
 
 ## Benchmarks (SLC, 2026-07-28, direct via bench-compare, west-homed bucket)
 
-See `bench-results/lyve-uswest-full-0728.json` on the SLC box, summarized in
-the `benchmark-results-2026-07` session memory. Headlines: warm 4 KB PUT p50
-~60 ms / GET ~60 ms against the home region; us-east-1 equivalent from SLC
-~64/60 ms. Integration test (`TestLyveDriver_Integration`, env-guarded) passes
-from SLC including a 20 MB multipart round-trip.
+Full run: `bench-results/lyve-uswest-full-0728.json` on the SLC box.
+
+| Workload | Result |
+|---|---|
+| cold dial + 1 KB PUT | p50 170 ms |
+| warm 4 KB PUT / GET / HEAD | p50 50 / 42 / 38 ms |
+| 64 MB PUT / GET single-stream | 112.6 / 95.0 MB/s |
+| 256 MB multipart (16 parallel parts) | 213.7 MB/s |
+| concurrent ingest / download (20 s) | 778 / 496 MB/s |
+| sustained upload 60 s | 442 MB/s, steady (no Geyser-style collapse) |
+| burst 500 small files | 194 ops/s |
+| worker escalation 8→128 | 602 ops/s at 128 workers, **0 errors** |
+| read-after-write / overwrite / list consistency | 20/20, 10/10, 10/10 |
+
+Comparison vs iDrive (launch hot tier, 2026-07 numbers): iDrive wins
+single-stream 64 MB GET (225 vs 95 MB/s); **Lyve wins multipart (214 vs
+183 MB/s) and concurrency (ingest 778 vs 512, download 496 vs 349 MB/s)**
+and has no rate-limit errors up to 128 workers. Integration test
+(`TestLyveDriver_Integration`, env-guarded) passes from SLC including a
+20 MB multipart round-trip.
 
 Bench gotchas:
 - `bench-compare -only lyve` matches **all 7** regional endpoints (~15 min);
