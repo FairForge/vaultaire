@@ -45,6 +45,60 @@ curl -sS --aws-sigv4 "aws:amz:us-west-1:s3" --user "$AK:$SK" -X PUT \
   -H "Content-Length: 0" "https://s3.us-west-1.global.lyve.seagate.com/BUCKET"
 ```
 
+## Admin (RS) API — tested 2025-11-28, still valid
+
+Account identity (`RSGetUserInfo`): we are customer **v01** under reseller
+**global** (root user isaacv17@gmail.com) — customer-level RS access, not
+reseller-level. IAM and STS share one endpoint:
+`iam.global.lyve.seagate.com` (per Seagate support; the per-account
+`sts.<account>` host in the PDF does not apply to us). Sign IAM-endpoint
+calls with service `iam`, S3-endpoint calls with service `s3`.
+
+**Working with our root S3 creds:**
+
+```bash
+# Per-bucket size/objects/REPLICATION POLICY for the whole account — THE
+# homing audit tool (S3 endpoint, service s3):
+curl -s --aws-sigv4 "aws:amz:us-west-1:s3" --user "$AK:$SK" \
+  "https://s3.us-west-1.global.lyve.seagate.com/?rs-bucket-stats"
+
+# Account info / regions / billing (IAM endpoint, service iam, POST form):
+curl -s -X POST --aws-sigv4 "aws:amz:us-east-1:iam" --user "$AK:$SK" \
+  -d "Action=RSGetUserInfo&Version=2010-05-08" https://iam.global.lyve.seagate.com/
+# Also working: Action=RSAvailableRegions (7 regions, ReplicationEnforcement:false),
+# Action=RSListBillingData&From=<ISO>&Till=<ISO> (per-region daily
+# upload/download/delete bytes + UsedSpace + ObjectCount — usable for COGS
+# reconciliation), and standard IAM CreateUser/ListPolicies (sub-user mgmt).
+```
+
+**Not available to us** (reseller-only or unsupported): `RSLiveBilling`,
+`RSListCustomer`, `RSWhitelist*` ("Dripd-iam: Unauthorized" / "Action not
+supported"). STS `AssumeRole` against the shared IAM host errored with
+"Missing Action or Version param" in the 2025-11 test — unresolved, retest
+with the PDF's exact STS wire format if temp credentials are ever needed.
+
+## Prior art & where the old tooling lives
+
+- `~/fairforge/vaultaire-benchmark/lyve-*.sh` — Nov 2025 API sweeps:
+  `lyve-correct-endpoints.sh` (the canonical RS/IAM test, correct global
+  endpoints — results in `lyve-correct-test-20251128-123805.log`),
+  `lyve-full-api-test.sh` + `lyve-rs-commands-test.sh` (older, use the
+  RETIRED `s3.<region>.lyvecloud.seagate.com` v1 endpoints; SSE-S3/SSE-C
+  test sections still useful as recipes). Scripts contain hardcoded root
+  creds — do not commit them.
+- `.private/lyve-advanced-test.js` (+ report JSON) — Node SDK perf suite
+  (versioning, tagging, lifecycle, CORS, presign, multipart tuning
+  configs), Oct 2025, v1 endpoints.
+- `docs/references/lyve-cloud-2-api-en_US.pdf` — the LC2 API guide,
+  committed in-repo (same doc as the Downloads copies).
+- Seagate legal/portal docs in `~/Downloads`: LYVE CUSTOMER AGREEMENT,
+  LYVE SERVICES TERMS, `lyve-management-portal-en_US.pdf` (console admin).
+- `test-lyve-live.sh` (deleted from repo Sep 2025) — trivial pre-auth
+  smoke, superseded; recover with `git show d997410:test-lyve-live.sh`.
+- SLC: `~/vaultaire-bench/bench-lyve-west.sh` (E2E smoke wrapper),
+  `drivers-test-linux` (integration-test binary), full/smoke JSONs in
+  `~/vaultaire-bench/bench-results/`.
+
 ## The bucket-homing trap (root-caused 2026-07-28)
 
 The July "us-west-1 write degradation" (warm 4 KB PUT p50 ~580 ms, 2 ops/s,
