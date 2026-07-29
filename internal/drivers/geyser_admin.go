@@ -434,8 +434,8 @@ func (c *GeyserAdminClient) seedSessionCookies(accessToken, userID string) {
 		return
 	}
 	c.httpClient.Jar.SetCookies(u, []*http.Cookie{
-		{Name: "accessToken", Value: accessToken, Path: "/"},
-		{Name: "userId", Value: userID, Path: "/"},
+		{Name: "accessToken", Value: accessToken, Path: "/"}, // #nosec G124 — outgoing request cookie to Geyser API, not served to users
+		{Name: "userId", Value: userID, Path: "/"},           // #nosec G124 — outgoing request cookie to Geyser API, not served to users
 	})
 }
 
