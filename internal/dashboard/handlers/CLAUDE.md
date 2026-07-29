@@ -173,11 +173,17 @@ with "$0.00 MRR" zero-state.
 `HandleAdminCosts(tmpl, db, logger)` — GET `/admin/costs`: estimated backend spend,
 per-tenant margin (revenue minus cost), and negative-margin alerts.
 
-Cost model: `backendCostPerTBCents` map (geyser=155, idrive=330, hetzner=381,
-onedrive/gorilla/local/edge=0) + fixed costs (Geyser $155/mo floor, Gorilla
-configurable). `tierBackend(plan, tier)` maps vault*→geyser, standard/performance→idrive,
-free→local. Egress cost is a first-class column (currently $0 — matters when BYOB/edge
-land).
+Cost model: `backendCostPerTBCents` map (geyser=155, idrive=330, lyve=799,
+hetzner=381, onedrive/gorilla/local/edge=0) + fixed costs (Geyser $155/mo floor,
+Gorilla configurable). `tierBackend(plan, tier)` maps vault*→geyser,
+standard/performance→idrive, free→local. `egressCostPerTBCents` carries MODELLED
+market rates (lyve=1000 = $10/TB); `subsidizedBackends` (lyve) marks backends
+invoiced at $0 under a promo. `?costs=invoiced` zeroes subsidized backends
+(`parseCostMode`/`ratesFor`); the default "modelled" view charges full rates. The
+Actual table costs real bytes from `object_locations` plus this month's
+per-backend egress from `backend_bandwidth_daily` (migration 060, attributed
+engine→BackendNote→RecordWithBackend), and the header reports modelled total,
+invoiced total, and the subsidy delta.
 
 Revenue side reuses `planMonthlyCents` (fixed plans) and `billing.AccruedCents`
 (metered tiers) from admin_revenue.go. Margin = revenue − cost per tenant.

@@ -88,6 +88,8 @@
                     <th style="text-align:right">TB</th>
                     <th style="text-align:right">Cost{{if .IsInvoicedView}} (invoiced){{end}}</th>
                     <th style="text-align:right">At full rates</th>
+                    <th style="text-align:right">Egress (mo)</th>
+                    <th style="text-align:right">Egress cost</th>
                 </tr>
             </thead>
             <tbody>
@@ -99,6 +101,8 @@
                     <td style="text-align:right">{{printf "%.2f" .StorageTB}}</td>
                     <td style="text-align:right">{{.CostFmt}}</td>
                     <td style="text-align:right" class="text-muted">{{.ModelledFmt}}</td>
+                    <td style="text-align:right">{{.EgressFmt}}</td>
+                    <td style="text-align:right">{{.EgressCostFmt}}</td>
                 </tr>
                 {{end}}
             </tbody>

@@ -28,7 +28,7 @@ func testCostsTemplate(t *testing.T) *template.Template {
 			`<span class="projected">{{.ProjectedSpendFmt}}</span>` +
 			`{{range .ByBackend}}<span class="backend">{{.Backend}} {{.StorageFmt}} {{.CostFmt}} {{.FixedFmt}} {{.TotalFmt}}</span>{{end}}` +
 			`{{range .MarginTable}}<span class="tenant-margin{{if .IsNegative}} negative{{end}}">{{.Email}} {{.Plan}} {{.Backend}} {{.RevenueFmt}} {{.CostFmt}} {{.EgressCostFmt}} {{.MarginFmt}}</span>{{end}}` +
-			`{{range .ActualByBackend}}<span class="actual-backend">{{.Backend}} {{.ObjectCount}} {{.StorageFmt}} {{.CostFmt}} modelled:{{.ModelledFmt}}</span>{{end}}` +
+			`{{range .ActualByBackend}}<span class="actual-backend">{{.Backend}} {{.ObjectCount}} {{.StorageFmt}} {{.CostFmt}} modelled:{{.ModelledFmt}} egress:{{.EgressFmt}}={{.EgressCostFmt}}</span>{{end}}` +
 			`<span class="subsidy">subsidy:{{.SubsidyFmt}}</span><span class="mode">{{.CostMode}}</span>` +
 			`{{if not .ByBackend}}<p>No backends</p>{{end}}` +
 			`{{if not .MarginTable}}<p>No margins</p>{{end}}` +
@@ -434,4 +434,61 @@ func TestLyveRatesArePresent(t *testing.T) {
 	assert.Equal(t, int64(799), backendCostPerTBCents["lyve"], "Lyve tracked at $7.99/TB")
 	assert.Positive(t, egressCostPerTBCents["lyve"], "Lyve needs a modelled egress rate")
 	assert.True(t, subsidizedBackends["lyve"], "Lyve is invoiced at $0 during the promo")
+}
+
+// --- Per-backend egress attribution (backend_bandwidth_daily) ---
+
+func backendEgressRows(mock sqlmock.Sqlmock, rows *sqlmock.Rows) {
+	mock.ExpectQuery(`SELECT backend_name, COALESCE\(SUM\(egress_bytes\)`).WillReturnRows(rows)
+}
+
+func TestActualBackends_EgressCostedAtModelledRate(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage", "egress"}))
+	backendEgressRows(mock, sqlmock.NewRows([]string{"backend_name", "egress"}).
+		AddRow("lyve", tbBytes))
+	actualBackendRows(mock, sqlmock.NewRows([]string{"backend_name", "count", "sum"}).
+		AddRow("lyve", 10, tbBytes))
+
+	body := renderCosts(t, db, "/admin/costs")
+
+	// 1 TB stored ($7.99) + 1 TB egress at the modelled $10/TB.
+	assert.Contains(t, body, "egress:1 TB=$10.00")
+	// Subsidy covers storage + egress: the whole Lyve line is free today.
+	assert.Contains(t, body, "subsidy:$17.99")
+}
+
+func TestActualBackends_EgressZeroedInInvoicedMode(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage", "egress"}))
+	backendEgressRows(mock, sqlmock.NewRows([]string{"backend_name", "egress"}).
+		AddRow("lyve", tbBytes))
+	actualBackendRows(mock, sqlmock.NewRows([]string{"backend_name", "count", "sum"}).
+		AddRow("lyve", 10, tbBytes))
+
+	body := renderCosts(t, db, "/admin/costs?costs=invoiced")
+
+	assert.Contains(t, body, "egress:1 TB=$0.00")
+	assert.Contains(t, body, "subsidy:$17.99", "subsidy is mode-independent")
+}
+
+func TestActualBackends_EgressQueryFailureDegrades(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage", "egress"}))
+	actualBackendRows(mock, sqlmock.NewRows([]string{"backend_name", "count", "sum"}).
+		AddRow("lyve", 10, tbBytes))
+	// No egress expectation: table missing (pre-migration) → query errors.
+
+	body := renderCosts(t, db, "/admin/costs")
+
+	assert.Contains(t, body, "lyve 10 1 TB $7.99", "storage costing survives egress failure")
 }
