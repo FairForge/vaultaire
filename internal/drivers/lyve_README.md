@@ -191,19 +191,58 @@ expire-all rule and one object planted 2026-07-29 — check whether it
 actually expired before relying on lifecycle for retention. Delete the
 bucket after the check.
 
-## Account API v2 — endpoint DEAD (probed 2026-07-29)
+## Account API v2 — unreachable, but NOT a dead platform (re-probed 2026-07-29)
 
 Spec: `docs/references/lyve-account-api-v2-en_US.pdf` (dated 3/1/24, original
-Lyve Cloud console era). **`api.lyvecloud.seagate.com` resolves
-(192.55.9.26) but nothing answers on 443** — timeouts from both SLC and a
-residential network; LC2-style hostname variants
-(`api|account|accounts.global.lyve.seagate.com`) don't exist. Consistent
-with the original platform being wound down post-Wasabi-acquisition. The doc
-is kept for reference (its permission model — write-only actions,
-prefix-condition policies, expiring service accounts — describes what to
-rebuild on the IAM path), but the API itself is a dead end for our account.
-Consequence: **no expiring service accounts** — per-tenant credentials are
-LC2 IAM users + our own rotation, or STS AssumeRole temp creds.
+Lyve Cloud console era). The API is unreachable for us, but the earlier
+"the original platform is wound down" reading was **wrong** — corrected here.
+
+**Root cause is network scope, not decommissioning.** The two families split
+by IP range, not by liveness:
+
+| Hostname | Resolves to | Owner | Reachable |
+|---|---|---|---|
+| `api.lyvecloud.seagate.com` | 192.55.6.21 | `SEAGATE-1` **corporate** | TCP 443 blackholed (no SYN-ACK) |
+| `console.lyvecloud.seagate.com` | 192.55.6.18 | `SEAGATE-1` **corporate** | TCP 443 blackholed |
+| `s3.<region>.lyvecloud.seagate.com` | CNAME `<dc>.geo.lyve.seagate.com` → 134.204.252.1 | storage fabric | **live, serves our data** |
+| `s3.<region>.global.lyve.seagate.com` | CNAME `<dc>.geo.lyve.seagate.com` → 134.204.255.1 | storage fabric | live (what we use) |
+
+`192.55.0.0/16` is Seagate's corporate netblock (ARIN `NetName: SEAGATE-1`),
+firewalled to the public internet — which is why 443 times out identically
+from every vantage point. It is not evidence the service is gone. Per-account
+subdomains from the signup flow (`<accountid>.console.lyvecloud.seagate.com`,
+found in the archived console JS) are **wildcard DNS onto the same firewalled
+corporate IP** — `v01.` and a nonsense label both resolve to 192.55.6.20 and
+both blackhole, so there is no per-account API host to find.
+
+**The `lyvecloud.seagate.com` S3 names are legacy aliases of the platform we
+already use — one account, one namespace.** Verified 2026-07-29: our current
+key authenticates against `s3.us-east-1.lyvecloud.seagate.com` and
+`list-buckets` there returns the **identical** bucket set as
+`s3.us-west-1.global.lyve.seagate.com`. There is no separate "LC1 account"
+holding stranded data. Their DigiCert cert (CN matches, genuine Seagate)
+**expired 2026-07-19**, so the legacy names now need `--no-verify-ssl` — an
+unmaintained alias on a live fabric. Don't build on them; use `global.`.
+
+Practical consequence is unchanged: the Account API's conveniences —
+**expiring service accounts** above all — are not available to us, so
+per-tenant credentials are LC2 IAM users plus our own rotation, or STS
+AssumeRole temp creds. The doc stays as the reference for what to rebuild on
+the IAM path. What changed is the prognosis: if Seagate ever exposes the
+Account API outside corporate (or we get reseller-level access), it is a
+config change on their side, not a resurrection.
+
+### Account inventory (`?rs-bucket-stats`, 2026-07-29)
+
+**402 buckets account-wide, 299 of them completely empty**, 103 holding
+33.0 GB / 20,676 objects — accumulated benchmark and probe litter from
+Aug 2025 onward. Largest: `stored-us-east-1` (8.9 GB), five
+`lyve-test-*` buckets at 2.24 GB each, `vaultaire-test-1757847421` (3.3 GB).
+Note `list-buckets` on a regional endpoint returned only 111 — it is
+region-scoped, while `rs-bucket-stats` covers the whole account, so **audit
+with `rs-bucket-stats`, not `list-buckets`.** Harmless while Lyve is on the
+free interim, but this is the cleanup list if it ever goes metered (and the
+299 empties should go regardless — they are pure namespace noise).
 
 ## IAM credential-scoping probes (2026-07-29, live from SLC)
 
