@@ -1,0 +1,49 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root { color-scheme: dark light; }
+  body {
+    width: 620px; max-height: 600px; overflow-y: auto; margin: 0;
+    padding: 14px 16px 20px;
+    font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #14161a; color: #e6e8eb;
+  }
+  h1 { font-size: 14px; margin: 0 0 4px; letter-spacing: .2px; }
+  .sub { color: #8b93a1; font-size: 11px; margin: 0 0 14px; }
+  .status { padding: 8px 10px; border-radius: 6px; margin-bottom: 12px; font-size: 12px; }
+  .status.warn { background: #3a2a12; color: #f0b866; }
+  .status.err  { background: #3a1a1a; color: #f08585; }
+  .status.ok   { background: #16301f; color: #6fd08c; }
+  section { border: 1px solid #262a31; border-radius: 8px; margin-bottom: 10px; overflow: hidden; }
+  .head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 7px 10px; background: #1b1e24;
+  }
+  .title { font-weight: 600; font-size: 12px; }
+  .count { color: #8b93a1; font-weight: 400; font-size: 11px; margin-left: 6px; }
+  button {
+    font: 600 11px/1 -apple-system, sans-serif; padding: 5px 10px; border-radius: 5px;
+    border: 1px solid #3a4150; background: #262b34; color: #e6e8eb; cursor: pointer;
+  }
+  button:hover { background: #313845; }
+  button.copied { background: #1d4230; border-color: #2c6b4a; color: #7ee0a0; }
+  pre {
+    margin: 0; padding: 9px 10px; white-space: pre-wrap; word-break: break-all;
+    font: 11px/1.5 "SF Mono", Menlo, monospace; color: #c9d1d9;
+    background: #0f1115; max-height: 170px; overflow-y: auto;
+  }
+  pre.empty { color: #6b7280; font-style: italic; }
+  #all { width: 100%; margin-top: 4px; padding: 8px; }
+</style>
+</head>
+<body>
+  <h1>Geyser Console Grabber</h1>
+  <p class="sub">Open on <code>console.geyserdata.com</code> while logged in, then click a block to copy it.</p>
+  <div id="status" class="status warn">Reading page…</div>
+  <div id="blocks"></div>
+  <button id="all">Copy everything as one report</button>
+  <script src="popup.js"></script>
+</body>
+</html>

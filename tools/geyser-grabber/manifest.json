@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Geyser Console Grabber",
+  "version": "1.0.0",
+  "description": "One-click extraction of Geyser console session credentials, discovered API endpoints, S3 keys, and ready-to-paste shell commands.",
+  "permissions": ["cookies", "scripting", "activeTab"],
+  "host_permissions": [
+    "https://console.geyserdata.com/*",
+    "https://*.geyserdata.com/*"
+  ],
+  "action": {
+    "default_title": "Geyser Grabber",
+    "default_popup": "popup.html"
+  }
+}
