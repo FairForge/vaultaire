@@ -21,11 +21,25 @@ Measured 2026-07-29 against the prod bucket:
   `HEAD` always works (metadata/ETag intact).
 - `RestoreObject` recalls it: **<3 min** measured (idle library), bulk-friendly
   (24 objects submitted at 17.6 req/s, all recalled together). Re-restoring
-  **extends** the expiry. Restored copies read ~4–5 MB/s per stream and
-  aggregate toward the same ~27 MB/s gateway ceiling as ingest
-  (3×256 MB in parallel → 11.6 MB/s), i.e. **rehydration ≈ 2 TB/day fleet-wide**.
-- Ingest: **27.7 MB/s aggregate account-wide**, flat, degrades gracefully
-  (slow, never errors). Small-file burst 118 ops/s.
+  **extends** the expiry.
+- **Ingest (corrected 2026-07-29): the infamous "27.7 MB/s account-wide
+  ceiling" was OUR bug, not Geyser's.** The Vail gateway negotiates HTTP/2
+  and Go multiplexes all concurrent uploads onto one TCP connection. Over
+  HTTP/1.1 (one connection per request): **235–276 MB/s** burst (256 MB
+  multipart, 16 parts), **227 MB/s sustained** (2.5 GB, 5 rounds, aws-cli
+  control confirmed 251 MB/s independently — no QoS kick-in). ≈ **19+ TB/day
+  to staging**. `geyser.go` now forces h1 via `WithHTTP1Only()`. Single
+  connection is still ~25–30 MB/s (TCP-window bound) — throughput comes from
+  concurrent objects/parts, so drain many objects in parallel.
+- **Reads are genuinely slow per-stream, but scale with fan-out**
+  (h1, staging-disk objects, 2026-07-29): ~2.5–3 MB/s per stream; 8 streams
+  → 25 MB/s, 32 streams → 76 MB/s aggregate (≈6.4 TB/day; more streams
+  untested — keep widening). The old "rehydration ≈ 2 TB/day" figure was
+  h2 + low-concurrency; V18.2's orchestrator should restore with 32-64
+  parallel streams. Small-file burst 118 ops/s.
+- **Bench caveat**: `bench-compare`'s default client forces h2, so its
+  `sustained_upload`/`concurrent_ingest` numbers under-report Geyser ~9×.
+  Trust the `*_h1_*` workloads (or aws-cli) for this backend.
 - Safe on archived objects: `DELETE` (so restic prune works), `PUT` overwrite
   (immediately readable), range-GET on *restored* copies (so restic pack reads
   work post-restore).
@@ -229,8 +243,9 @@ attestation — a "we prove your backup restores" primitive).
    control plane (read-through restore, object lock, clone-as-restore).
 2. Copy the **second key's secret** (`AKIALIVSFQ8EFI4ITBL4`) out of the
    console UI — the key already exists and is active; the API never returns
-   secrets. Enables rotation and testing whether the 27.7 MB/s ceiling is
-   per-key or per-account.
+   secrets. Enables key rotation. (The old reason — testing whether the
+   27.7 MB/s ceiling is per-key — is moot: that ceiling was our HTTP/2
+   client bug, fixed 2026-07-29.)
 3. Ask Geyser: object-lock-enabled bucket (Vail returns proper
    `ObjectLockConfigurationNotFoundError`, so the semantics exist); whether
    `cloudIntegrationType: AWS` accepts custom endpoints (decides if
