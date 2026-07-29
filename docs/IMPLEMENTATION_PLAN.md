@@ -142,6 +142,8 @@ These were evaluated and deliberately postponed. Revisit at the noted trigger po
 Audit 2026-04-24 found these partial completions. Core functionality works; these are polish items to address before launch.
 - **Phase 2.5 billing page gaps** — Invoice history not rendered (template doesn't call `GetInvoices()` despite it existing in `stripe.go`). No "Pause Subscription" toggle, predictive billing, add-on management, or prepaid credit display. Stripe Portal covers invoices/pause for now. **Fill in during**: 5.11.8 (Cost Comparison Widget) when the billing page is already being expanded.
 - **Phase 4.3 bandwidth banking + alerts** — DB schema exists (migration 020: `bandwidth_rollover`, `bandwidth_alerts` tables) but zero application code for rollover calculation, alert threshold checking, or overage warnings. **Fill in during**: 5.11.10 (Free Tier) or 5.11.12 (Bandwidth Budgets) when quota enforcement is being refined.
+- **GLACIER storage class routes but can't restore (found 2026-07-29)** — storage-class routing (5.12.4) sends `GLACIER`/`DEEP_ARCHIVE` to Geyser, but the engine has zero `InvalidObjectState` handling: any GET on data past the ~13-day Vail staging window surfaces as a raw error (or worse, the failover path). **Fill in during**: V18.2 (restore orchestration — promoted to first post-launch WP).
+- **Lyve backend follow-ups (2026-07-29, from the readiness pass — all small)** — (1) homing guard: `HealthCheck` should compare `?rs-info` replicationPolicy against the driver region to catch misprovisioned buckets at boot; (2) wire Lyve as a replication/DR target (server-side cross-region copy measured ~47 MB/s, UploadPartCopy works for any-size objects); (3) per-region Lyve drivers mirroring `idrive_regions.go` for EU/APAC residency; (4) `RSListBillingData` → COGS reconciliation cron (pairs with meters work). Full capability matrix: `internal/drivers/lyve_README.md`. **Fill in during**: 5.12.5 (failover/routing) or a dedicated post-launch WP.
 
 ## Compliance Audit (2026-05-07) — Items Pulled Forward
 
@@ -168,16 +170,19 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 
 *Vault18 is the "Anti-Glacier" product: $1/TB launch promo, zero retrieval fees, dual-site tape (LA + London). Sits between Phase 5.14 and Phase 5.15 in the Tier 1 sequence. Full plan: `.private/VAULT18_LAUNCH.md`.*
 
+**Measured reality (2026-07-29 Geyser probes — full data in `benchmark-results-2026-07` memory):** Geyser is TRUE Glacier — objects past the Vail disk-staging window (≤13 days) are `StorageClass: GLACIER` and refuse direct GET (`InvalidObjectState`); the engine currently has NO handling for this, so V18.2 is promoted to the first post-launch WP. RestoreObject works (bulk-friendly); **tape recall measured <3 min** (idle library) — "restores begin in minutes" is honest copy. Restored copies read ~5 MB/s/stream from staging and expire per `Days` → rehydrate to a hot tier instead of serving from staging (the Geyser×Wasabi integration pattern). Ingest ceiling re-confirmed 27.7 MB/s aggregate, degrades gracefully (slow, never errors). **Access prereqs (owner):** fetch 2nd Geyser API key (rotation + test if ceiling is per-key), console session for `geyser_admin.go` (per-tier buckets, London recreation, billing endpoint), ask Geyser support for object-lock-enabled bucket (Vail returns proper object-lock error codes — V18.5 may be a provisioning flag), restore SLA under contention, contract restore/egress pricing.
+
 | Phase | Description | Status |
 |-------|-------------|--------|
 | V18.1 | Geyser tape ingest buffer pipeline (iDrive hot → Geyser cold) | NOT STARTED |
-| V18.2 | Staged retrieval with SLA guarantees (1h standard, 5min expedited) | NOT STARTED |
+| V18.2 | Restore orchestration + hot rehydration (InvalidObjectState → RestoreObject → rehydrate to hot tier; Glacier-compatible wire semantics) | NOT STARTED — **first post-launch WP** (blocks all >13-day Vault restores) |
 | V18.3 | Dual-site tape replication (LA + London Geyser endpoints) | NOT STARTED |
 | V18.4 | Glacier migration tooling (`aws s3 sync` from Glacier → stored.ge) | NOT STARTED |
-| V18.5 | Retention policies + immutability certificates (WORM integration) | NOT STARTED |
+| V18.5 | Retention policies + immutability certificates (WORM integration) | NOT STARTED — ask Geyser for lock-enabled bucket first |
 | V18.6 | Cost calculator (vs Glacier, Wasabi, B2 — show $0 retrieval savings) | NOT STARTED |
 | V18.7 | Pack pricing integration (Vault3/9/18/36 Stripe products) | NOT STARTED |
 | V18.8 | Customer-facing deep archive experience (dashboard, restore status) | NOT STARTED |
+| V18.9 | Backup-tool-aware routing (restic/borg index+snapshot keys hot, data packs to tape) | NOT STARTED |
 
 ---
 
@@ -923,19 +928,22 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 
 ### V18.1: Ingest Buffer Pipeline
 **Files**: `internal/engine/ingest_buffer.go` (new)
-- Hot ingest to iDrive (fast, 852 MB/s) → background migration to Geyser tape (slow, 22 MB/s)
+- Hot ingest to iDrive (fast, 852 MB/s) → background migration to Geyser tape (27.7 MB/s aggregate account-wide, re-confirmed 2026-07-29; degrades gracefully — slow, never errors)
 - Customer sees immediate upload completion; tape write is async
 - Progress tracking: `ingest_buffer_status` with per-object state (ingested, migrating, archived)
 - Retry logic for Geyser failures (tape seek timeout, connection reset)
 
-### V18.2: Staged Retrieval with SLA
-**Files**: `internal/engine/retrieval.go` (new), `internal/api/s3_handler.go`
-- Standard retrieval: 1 hour (queue + Geyser fetch)
-- Expedited retrieval: 5 minutes (pre-cached hot copies for frequent restores)
-- `x-amz-restore` header compatibility (like Glacier RestoreObject)
-- Webhook notification when retrieval completes (uses Phase 5.11.6 webhook system)
+### V18.2: Restore Orchestration + Hot Rehydration ⚠ FIRST POST-LAUNCH WP
+**Files**: `internal/engine/retrieval.go` (new), `internal/api/s3_handler.go`, `internal/drivers/geyser.go`
 
-- Webhook notification when bulk retrieval completes (uses Phase 5.11.6 webhook system)
+*Rewritten 2026-07-29 after live probes. Old assumption (direct Geyser reads at 4 MB/s) is wrong: objects past the Vail staging window (≤13 days) are `StorageClass: GLACIER` and GET returns 403 `InvalidObjectState`. Measured: RestoreObject accepted (incl. bulk batches), tape recall <3 min on an idle library, restored copy reads ~5 MB/s/stream from staging and expires per `Days`.*
+
+**The rehydration design (the Geyser×Wasabi pattern — restore INTO the hot tier, never serve from staging):**
+1. Driver: `geyser.go` detects `InvalidObjectState` → surfaces typed `ErrArchived` (never a 500).
+2. Engine restore worker: issue `RestoreObject` (Days=2), poll HEAD `x-amz-restore` until `ongoing-request="false"` (poll interval 30s; measured completion ~3 min), then **pull once from staging and rehydrate**: ≤1 GB objects → NVMe cache; bulk → iDrive under a `restore/<tenant>/` prefix with TTL (7 days, extendable from dashboard). All customer reads then serve at hot line-rate — optionally via presigned direct links to skip the SLC proxy path.
+3. S3 wire compatibility = exactly AWS Glacier semantics, so rclone/Cyberduck/aws-cli restore workflows work unmodified: GET on archived → `InvalidObjectState`; accept `RestoreObject` passthrough; HEAD returns `x-amz-restore` status; `s3:ObjectRestore:Completed` event → webhook (Phase 5.11.6).
+4. Bulk "thaw": restore-by-prefix API (one call → server-side RestoreObject fan-out, measured fine in batches) with progress in `restore_jobs` table + dashboard bar + completion webhook/email. This is the "restore a whole restic snapshot" UX.
+5. SLA copy (honest, measured): "restores begin within minutes" (recall <3 min idle — re-verify under contention before printing an SLA number); drain from staging parallelized across N workers, sized against the shared gateway.
 
 ### V18.3: Dual-Site Tape Replication
 **Files**: `internal/drivers/geyser.go`
@@ -953,6 +961,7 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 
 ### V18.5: Retention Policies + Immutability
 **Files**: `internal/api/s3_handler.go` (extends Object Lock from 5.10.13)
+- *2026-07-29: Vail returns proper `ObjectLockConfigurationNotFoundError` — the gateway speaks WORM semantics. Ask Geyser support for an object-lock-enabled bucket before building; backend-native lock would make immutability real end-to-end, not just Vaultaire-layer.*
 - Vault18-specific retention templates: 1yr, 3yr, 7yr, 10yr
 - Immutability certificates: cryptographic proof that an object hasn't been modified
 - Integration with Object Lock COMPLIANCE mode
@@ -977,7 +986,13 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 - Immutability certificate download per object
 - Tape location indicator (LA / London / both)
 
-**Test**: Upload to Vault18 tier → verify ingest buffer accepts immediately → background migration to Geyser starts → request restore → receive webhook when ready → download → verify retention policy prevents deletion → cost calculator shows savings vs Glacier.
+### V18.9: Backup-Tool-Aware Routing
+**Files**: `internal/engine/routing.go` (extends storage-class routing from 5.12.4)
+- restic/borg/kopia CANNOT run against Glacier-class storage directly (prune/check need reads). Route by key pattern within a Vault bucket: restic `config`, `keys/`, `index/`, `snapshots/`, `locks/` → hot backend (iDrive); `data/` packs → Geyser tape. Borg/kopia equivalents.
+- Makes Vault the only $1/TB tier restic works against out of the box — flagship differentiator, pairs with V18.2 for `data/` pack restores.
+- Document per-tool golden paths in the docs hub (B3).
+
+**Test**: Upload to Vault18 tier → verify ingest buffer accepts immediately → background migration to Geyser starts → wait past staging eviction → GET returns InvalidObjectState → request restore (rclone + dashboard) → recall completes, rehydrated to hot tier → webhook fires → download at hot line-rate → verify retention policy prevents deletion → restic init/backup/restore round-trip against a Vault bucket (V18.9 routing) → cost calculator shows savings vs Glacier.
 
 ---
 
