@@ -191,33 +191,41 @@ expire-all rule and one object planted 2026-07-29 — check whether it
 actually expired before relying on lifecycle for retention. Delete the
 bucket after the check.
 
-## Account API v2 (doc reviewed 2026-07-29 — NOT yet tested against our account)
+## Account API v2 — endpoint DEAD (probed 2026-07-29)
 
 Spec: `docs/references/lyve-account-api-v2-en_US.pdf` (dated 3/1/24, original
-Lyve Cloud console era — may or may not be live for our LC2/RSTOR account).
-Base `https://api.lyvecloud.seagate.com/v2`, auth `POST /auth/token` with
-`{accountId, accessKey, secret}` (credentials generated in the Lyve console —
-**[YOU]: generate a set and probe**; every admin user can mint one set).
+Lyve Cloud console era). **`api.lyvecloud.seagate.com` resolves
+(192.55.9.26) but nothing answers on 443** — timeouts from both SLC and a
+residential network; LC2-style hostname variants
+(`api|account|accounts.global.lyve.seagate.com`) don't exist. Consistent
+with the original platform being wound down post-Wasabi-acquisition. The doc
+is kept for reference (its permission model — write-only actions,
+prefix-condition policies, expiring service accounts — describes what to
+rebuild on the IAM path), but the API itself is a dead end for our account.
+Consequence: **no expiring service accounts** — per-tenant credentials are
+LC2 IAM users + our own rotation, or STS AssumeRole temp creds.
 
-What it adds over the LC2 RS/IAM path if it works:
+## IAM credential-scoping probes (2026-07-29, live from SLC)
 
-- **`POST /service-accounts` → `{accessKey, secret, expirationDate}`** —
-  programmatic S3 credentials **with expiry** + enable/disable toggle
-  (`PUT|DELETE /service-accounts/{id}/enabled`). Per-tenant credential
-  lifecycle without IAM-user janitoring.
-- **Permissions** with types `all-buckets` | `bucket-prefix` | `bucket-names`
-  | `policy` (full AWS IAM policy file incl. `s3:prefix` Conditions) and
-  actions `all-operations` | `read-only` | **`write-only`**. Write-only +
-  no-delete = ransomware-resistant backup ingest credentials.
-- **`GET /usage/monthly` + `/usage/current`** — per-bucket usage for billing
-  reconciliation (overlaps `RSListBillingData`, friendlier shape).
+Script pattern: create user → create policy → attach → create key → wait
+~8-10 s for async provisioning → test → full cleanup. Results:
 
-Equivalents already verified on LC2 without this API: IAM
-CreateUser/CreatePolicy/AttachUserPolicy/CreateAccessKey (bucket-scoped
-enforcement confirmed; **prefix-Condition enforcement inside a bucket is
-unverified — probe before relying**), STS AssumeRole temp creds,
-`rs-bucket-stats`. No S3 event notifications exist on LC2 (word absent from
-the guide) — drain/replication scheduling must poll or track writes.
+| Probe | Result |
+|---|---|
+| **Write-only creds** (`s3:PutObject` only) | **ENFORCED** — PUT ok; GET, DELETE, LIST all denied. Ransomware-resistant backup ingest credentials work today. |
+| Object-level prefix scoping (`Resource: bucket/tenant-a/*`) | **ENFORCED** — PUT/GET own prefix ok, PUT other prefix denied |
+| **`s3:prefix` Condition on ListBucket** | **BROKEN** — allow-with-condition denies every variant (`tenant-a`, `tenant-a/`, `tenant-a/*`, exact-match list). LC2 does not honor conditions on List allows. |
+
+Design consequence: a tenant inside a shared bucket can be write/read-scoped
+but can never LIST its own keys — which restic/rclone need. **Per-tenant
+staging buckets are therefore the multi-tenancy unit** (bucket-scoped
+policies incl. ListBucket verified enforced 2026-07-28; `rs-bucket-stats`
+gives per-tenant usage; no documented bucket cap).
+
+No S3 event notifications exist on LC2 (word absent from the guide) —
+drain/replication scheduling must poll or track writes. ALPN: the S3
+endpoint negotiates **http/1.1** (h2 refused) — the Geyser-style h2
+single-connection trap cannot occur on Lyve.
 
 ## Vault-tier pairing (Lyve staging ↔ Geyser tape), 2026-07-29
 
@@ -313,6 +321,11 @@ Rules that follow:
 ## Benchmarks (SLC, 2026-07-28, direct via bench-compare, west-homed bucket)
 
 Full run: `bench-results/lyve-uswest-full-0728.json` on the SLC box.
+**Refresh 2026-07-29** (`lyve-uswest-0729-refresh.json`): numbers hold or
+improve — concurrent ingest **820 MB/s** (was 778), sustained upload
+**446 MB/s** steady across all 60 s windows, concurrent download 443 MB/s,
+multipart 256 MB 159 MB/s with h1 ≈ h2 as expected (server is h1-only at
+ALPN), 64 MB single-stream GET 101 MB/s / PUT-h1 98 MB/s.
 
 | Workload | Result |
 |---|---|
