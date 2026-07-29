@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"database/sql"
 	"html/template"
 	"net/http"
 	"net/http/httptest"
@@ -27,7 +28,8 @@ func testCostsTemplate(t *testing.T) *template.Template {
 			`<span class="projected">{{.ProjectedSpendFmt}}</span>` +
 			`{{range .ByBackend}}<span class="backend">{{.Backend}} {{.StorageFmt}} {{.CostFmt}} {{.FixedFmt}} {{.TotalFmt}}</span>{{end}}` +
 			`{{range .MarginTable}}<span class="tenant-margin{{if .IsNegative}} negative{{end}}">{{.Email}} {{.Plan}} {{.Backend}} {{.RevenueFmt}} {{.CostFmt}} {{.EgressCostFmt}} {{.MarginFmt}}</span>{{end}}` +
-			`{{range .ActualByBackend}}<span class="actual-backend">{{.Backend}} {{.ObjectCount}} {{.StorageFmt}}</span>{{end}}` +
+			`{{range .ActualByBackend}}<span class="actual-backend">{{.Backend}} {{.ObjectCount}} {{.StorageFmt}} {{.CostFmt}} modelled:{{.ModelledFmt}}</span>{{end}}` +
+			`<span class="subsidy">subsidy:{{.SubsidyFmt}}</span><span class="mode">{{.CostMode}}</span>` +
 			`{{if not .ByBackend}}<p>No backends</p>{{end}}` +
 			`{{if not .MarginTable}}<p>No margins</p>{{end}}` +
 			`{{end}}`))
@@ -340,4 +342,96 @@ func TestAdminCosts_ActualBackendData(t *testing.T) {
 	assert.Contains(t, body, "200")
 	assert.Contains(t, body, "actual-backend")
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// --- Modelled vs invoiced cost view (Lyve promo tracking) ---
+
+func actualBackendRows(mock sqlmock.Sqlmock, rows *sqlmock.Rows) {
+	mock.ExpectQuery(`SELECT backend_name, COUNT`).WillReturnRows(rows)
+}
+
+// tbBytes makes the per-TB rate arithmetic exact in these tests.
+const tbBytes = int64(1024) * 1024 * 1024 * 1024
+
+func renderCosts(t *testing.T, db *sql.DB, url string) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	req = req.WithContext(adminCtx(t))
+	rec := httptest.NewRecorder()
+	HandleAdminCosts(testCostsTemplate(t), db, zap.NewNop()).ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	return rec.Body.String()
+}
+
+func TestActualBackends_ModelledCostForSubsidizedBackend(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage", "egress"}))
+	actualBackendRows(mock, sqlmock.NewRows([]string{"backend_name", "count", "sum"}).
+		AddRow("lyve", 10, tbBytes))
+
+	body := renderCosts(t, db, "/admin/costs")
+
+	// 1 TB on Lyve at the modelled $7.99/TB, even though Lyve invoices $0.
+	assert.Contains(t, body, "lyve 10 1 TB $7.99 modelled:$7.99")
+}
+
+func TestActualBackends_InvoicedModeZeroesSubsidizedBackend(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage", "egress"}))
+	actualBackendRows(mock, sqlmock.NewRows([]string{"backend_name", "count", "sum"}).
+		AddRow("lyve", 10, tbBytes))
+
+	body := renderCosts(t, db, "/admin/costs?costs=invoiced")
+
+	// Cost column zeroed, but the modelled figure stays visible so the page
+	// still shows what this footprint will cost once the promo ends.
+	assert.Contains(t, body, "lyve 10 1 TB $0.00 modelled:$7.99")
+}
+
+func TestActualBackends_UnsubsidizedBackendCostedInBothModes(t *testing.T) {
+	for _, mode := range []string{"/admin/costs", "/admin/costs?costs=invoiced"} {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+
+		costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage", "egress"}))
+		actualBackendRows(mock, sqlmock.NewRows([]string{"backend_name", "count", "sum"}).
+			AddRow("geyser", 5, tbBytes))
+
+		body := renderCosts(t, db, mode)
+		assert.Contains(t, body, "geyser 5 1 TB $1.55", "geyser is really invoiced, so it is costed in %s", mode)
+		_ = db.Close()
+	}
+}
+
+func TestCosts_SubsidyIsModelledMinusInvoiced(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage", "egress"}))
+	actualBackendRows(mock, sqlmock.NewRows([]string{"backend_name", "count", "sum"}).
+		AddRow("lyve", 10, tbBytes))
+
+	body := renderCosts(t, db, "/admin/costs")
+
+	// The whole Lyve line is currently free, so the subsidy equals its modelled cost.
+	assert.Contains(t, body, `subsidy:$7.99`)
+}
+
+func TestCostMode_DefaultsToModelled(t *testing.T) {
+	assert.Equal(t, costModeModelled, parseCostMode(""))
+	assert.Equal(t, costModeModelled, parseCostMode("garbage"))
+	assert.Equal(t, costModeInvoiced, parseCostMode("invoiced"))
+}
+
+func TestLyveRatesArePresent(t *testing.T) {
+	assert.Equal(t, int64(799), backendCostPerTBCents["lyve"], "Lyve tracked at $7.99/TB")
+	assert.Positive(t, egressCostPerTBCents["lyve"], "Lyve needs a modelled egress rate")
+	assert.True(t, subsidizedBackends["lyve"], "Lyve is invoiced at $0 during the promo")
 }
