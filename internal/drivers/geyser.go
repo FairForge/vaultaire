@@ -71,7 +71,12 @@ func NewGeyserDriver(accessKey, secretKey, bucket, tenantID string, logger *zap.
 			credentials.NewStaticCredentialsProvider(accessKey, secretKey, ""),
 		),
 		config.WithRegion("us-west-2"),
-		config.WithHTTPClient(TunedHTTPClient(WithResponseHeaderTimeout(5*time.Minute))),
+		// HTTP/1.1 only: Geyser's Vail gateway negotiates h2, and Go then
+		// multiplexes every concurrent upload onto ONE TCP connection, capping
+		// aggregate ingest at ~27 MB/s. Forcing h1 gives each request its own
+		// connection: measured 2026-07-29 from SLC, 256MB multipart went
+		// 25 MB/s (h2) → 235-276 MB/s (h1), sustained 227 MB/s over 2.5 GB.
+		config.WithHTTPClient(TunedHTTPClient(WithHTTP1Only(), WithResponseHeaderTimeout(5*time.Minute))),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
