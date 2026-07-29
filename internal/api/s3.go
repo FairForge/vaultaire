@@ -446,6 +446,12 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 	// Wrap response writer to count egress bytes for bandwidth tracking.
 	cw := &countingResponseWriter{ResponseWriter: w}
 
+	// Install a backend-attribution slot: the engine records which storage
+	// backend actually served this request, and bandwidth tracking below
+	// attributes the bytes to it (backend_bandwidth_daily).
+	noteCtx, _ := common.WithBackendNote(r.Context())
+	r = r.WithContext(noteCtx)
+
 	// Track ingress bytes from PUT/UploadPart request bodies.
 	var ingressBytes int64
 	if s3Req.Operation == "PutObject" || s3Req.Operation == "UploadPart" {
@@ -557,9 +563,11 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// Record bandwidth for authenticated requests.
+	// Record bandwidth for authenticated requests, attributed to the backend
+	// the engine reports having served the bytes ("" if none was touched).
 	if tenantID != "" && tenantID != "default" && s.bandwidthTracker != nil {
-		s.bandwidthTracker.Record(r.Context(), tenantID, ingressBytes, cw.bytesWritten)
+		s.bandwidthTracker.RecordWithBackend(r.Context(), tenantID,
+			common.BackendUsed(r.Context()), ingressBytes, cw.bytesWritten)
 	}
 }
 

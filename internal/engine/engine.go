@@ -206,6 +206,7 @@ func (e *CoreEngine) Get(ctx context.Context, container, artifact string) (io.Re
 					Success:   true,
 				})
 			}
+			common.SetBackendUsed(ctx, "cache")
 			return io.NopCloser(bytes.NewReader(data)), nil
 		}
 	}
@@ -263,6 +264,7 @@ func (e *CoreEngine) Get(ctx context.Context, container, artifact string) (io.Re
 	if err != nil {
 		return nil, fmt.Errorf("get %s/%s: %w", container, artifact, err)
 	}
+	common.SetBackendUsed(ctx, usedBackend)
 
 	if e.cache != nil && e.config.EnableCaching {
 		reader = e.wrapReaderForCaching(reader, cacheKey)
@@ -367,6 +369,9 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 		}
 		return d.Put(ctx, container, artifact, sizeReader, opts...)
 	})
+	if err == nil {
+		common.SetBackendUsed(ctx, usedBackend)
+	}
 
 	if e.intelligence != nil {
 		e.intelligence.LogAccess(ctx, intelligence.AccessEvent{

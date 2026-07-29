@@ -38,8 +38,11 @@ func (cw *countingResponseWriter) Write(b []byte) (int, error) {
 }
 
 // bandwidthEvent represents a single ingress/egress event for a tenant.
+// backend is the storage backend that served the bytes ("" when the request
+// never touched one — errors, listings, cache hits without attribution).
 type bandwidthEvent struct {
 	tenantID string
+	backend  string
 	ingress  int64
 	egress   int64
 }
@@ -66,8 +69,13 @@ func (bt *BandwidthTracker) SetLogger(logger *zap.Logger) {
 	bt.logger = logger
 }
 
-// Record adds a bandwidth event to the buffer.
-func (bt *BandwidthTracker) Record(_ context.Context, tenantID string, ingress, egress int64) {
+// Record adds a bandwidth event to the buffer with no backend attribution.
+func (bt *BandwidthTracker) Record(ctx context.Context, tenantID string, ingress, egress int64) {
+	bt.RecordWithBackend(ctx, tenantID, "", ingress, egress)
+}
+
+// RecordWithBackend adds a bandwidth event attributed to a storage backend.
+func (bt *BandwidthTracker) RecordWithBackend(_ context.Context, tenantID, backend string, ingress, egress int64) {
 	if tenantID == "" || (ingress == 0 && egress == 0) {
 		return
 	}
@@ -75,6 +83,7 @@ func (bt *BandwidthTracker) Record(_ context.Context, tenantID string, ingress, 
 	bt.mu.Lock()
 	bt.buffer = append(bt.buffer, bandwidthEvent{
 		tenantID: tenantID,
+		backend:  backend,
 		ingress:  ingress,
 		egress:   egress,
 	})
@@ -157,6 +166,7 @@ func (bt *BandwidthTracker) Flush() {
 		requests int
 	}
 	totals := make(map[string]*agg)
+	byBackend := make(map[string]*agg)
 	for _, e := range events {
 		a, ok := totals[e.tenantID]
 		if !ok {
@@ -166,6 +176,17 @@ func (bt *BandwidthTracker) Flush() {
 		a.ingress += e.ingress
 		a.egress += e.egress
 		a.requests++
+
+		if e.backend != "" {
+			b, ok := byBackend[e.backend]
+			if !ok {
+				b = &agg{}
+				byBackend[e.backend] = b
+			}
+			b.ingress += e.ingress
+			b.egress += e.egress
+			b.requests++
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -184,6 +205,22 @@ func (bt *BandwidthTracker) Flush() {
 		if err != nil && bt.logger != nil {
 			bt.logger.Error("flush bandwidth",
 				zap.String("tenant_id", tenantID), zap.Error(err))
+		}
+	}
+
+	for backend, a := range byBackend {
+		_, err := bt.db.ExecContext(ctx, `
+			INSERT INTO backend_bandwidth_daily (backend_name, date, ingress_bytes, egress_bytes, requests_count)
+			VALUES ($1, CURRENT_DATE, $2, $3, $4)
+			ON CONFLICT (backend_name, date)
+			DO UPDATE SET
+				ingress_bytes = backend_bandwidth_daily.ingress_bytes + EXCLUDED.ingress_bytes,
+				egress_bytes = backend_bandwidth_daily.egress_bytes + EXCLUDED.egress_bytes,
+				requests_count = backend_bandwidth_daily.requests_count + EXCLUDED.requests_count
+		`, backend, a.ingress, a.egress, a.requests)
+		if err != nil && bt.logger != nil {
+			bt.logger.Error("flush backend bandwidth",
+				zap.String("backend", backend), zap.Error(err))
 		}
 	}
 }
