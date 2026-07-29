@@ -117,7 +117,7 @@ Helpers: `IsValidRegion(region)`, `IsEURegion(region)` (true for `eu-*`), `Regio
 
 | File | Type | Purpose |
 |------|------|---------|
-| `geyser_admin.go` | `GeyserAdminClient` | Console API client for bucket provisioning, airgap, billing, keepalive. Reverse-engineered; requires manual session cookie setup. |
+| `geyser_admin.go` | `GeyserAdminClient` | Console API client: programmatic login (`Login` → `VerifyMFA`, cookie jar for httpOnly session cookies), bucket provisioning, airgap, restore (`RestoreToCache` to staging, `RestoreToCloud` to a cloud integration), cloud-integration CRUD, `cloudSync` server-side ingest, billing, tape/site/event info, keepalive. Reverse-engineered — ground truth in `geyser_README.md` ("Console API map"). Responses are dual-framed (envelope or bare JSON), handled by `geyserBody`. |
 
 ### Test Helpers
 
