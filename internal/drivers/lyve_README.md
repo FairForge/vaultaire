@@ -56,6 +56,83 @@ works (geo-DNS to the nearest DC; the 2025 note claiming "STS = IAM host"
 was wrong — STS actions 400 on the IAM host), and
 `s3.<region>.global.lyve.seagate.com` (service `s3`).
 
+### Endpoint list (Seagate support, 2026-07-29) — one correction
+
+Seagate support supplied the official endpoints. All check out except STS:
+
+| Service | Seagate's answer | Verdict |
+|---|---|---|
+| S3 | `https://s3.<region>.global.lyve.seagate.com` | correct |
+| Console | `https://console.global.lyve.seagate.com` | correct — **live, and new to us** (see below) |
+| IAM | `https://iam.global.lyve.seagate.com` | correct |
+| STS | `https://iam.global.lyve.seagate.com` | **wrong — STS is not on the IAM host** |
+
+Re-verified 2026-07-29: `AssumeRole` against `iam.global…` returns
+`400 IAM: Missing Action or Version param` under **either** signing service
+(`iam` or `sts`) — the IAM vhost does not route STS actions. It succeeds only
+on `sts.global.lyve.seagate.com` signed with service **`sts`** (200,
+`AssumeRoleResult`); that same host signed as `iam` returns 401. Seagate's own
+console config agrees with us (`userEndpoint: 'https://sts.global…'`), so
+treat the support answer as a slip and keep using the `sts.` host.
+
+Note `console`, `iam`, and `sts` are three vhosts on **one IP**
+(134.204.253.1, `dfw01.geo.lyve.seagate.com`), which is likely why they get
+conflated. Also live: **`s3.global.lyve.seagate.com`** — a *non-regional* S3
+endpoint (not in the support list, but what the console itself uses);
+`list-buckets` there returns the full account. Per bucket homing it still
+proxies to each bucket's home region, so it is a convenience alias, not an
+escape from the homing trap.
+
+Their advice to drive IAM with a **dedicated admin user's** access key rather
+than the root key is worth taking — it matches the lockout risk already noted
+below under the RS actions we don't touch.
+
+## LC2 console — reachable and enumerable (2026-07-29)
+
+`https://console.global.lyve.seagate.com` returns 200: an Angular SPA
+(`gui_version v0.19.92`) whose runtime config is world-readable at
+**`/assets/config.js`** — no auth needed. That file is the fastest way to see
+what our account actually has switched on, and it is how the two findings
+below were discovered. Auth is Auth0-backed (`externalAuth0: true`,
+`auth.lyve.seagate.com`), so a Geyser-style programmatic login is a bigger
+lift than Geyser's was — not attempted yet.
+
+Flags worth knowing (fetch the file again rather than trusting this list to
+stay current):
+
+| Flag | Value | Why it matters |
+|---|---|---|
+| `storageClassEnabled` / `storageConfiguration` | `true`, STANDARD → STANDARD_IA | a colder class exists — see below |
+| `disableMultitenancy` | `false` | multitenancy is on for our account |
+| `rprotectEnabled` | `true` | ransomware-protection feature present |
+| `sessionDurationSeconds` | `900` | matches the 15 min `AssumeRole` default |
+| `bucketCorsEnabled` | `false` | console won't manage CORS for us |
+| `hasTransporter` | `false` | the `rramp.global.lyve.seagate.com` migration service is off for our account |
+
+## Storage classes — STANDARD_IA works (probed 2026-07-29)
+
+Undocumented in the API guide we extracted, but **live on our account**:
+
+- `put-object --storage-class STANDARD_IA` is accepted, and `list-objects-v2`
+  reports the class back as `STANDARD_IA` (STANDARD objects stay `STANDARD`).
+- A lifecycle rule with `Transitions: [{Days: 30, StorageClass: STANDARD_IA}]`
+  is accepted by `put-bucket-lifecycle-configuration` and reads back intact.
+- Console config declares the only legal move is **STANDARD → STANDARD_IA**;
+  `STANDARD_IA` has an empty transition list, so there is no colder class and
+  no documented path back up.
+
+Verified with a throwaway bucket (created, both classes PUT, lifecycle set and
+read back, then fully deleted incl. versions). Both objects also came back
+`ServerSideEncryption: AES256` with a `VersionId`, consistent with the
+account-wide SSE and versioning notes above.
+
+**We have no STANDARD_IA pricing** — the tier economics in
+`.private/VAULT_SERIES_ECONOMICS.md` assume a single Lyve rate. Worth asking
+Seagate what IA costs and whether it carries the usual IA penalties (minimum
+object size, minimum storage duration, per-GB retrieval fee) before building
+any tiering on it; a transition that silently adds retrieval charges would
+hurt the Vault path specifically, since that path is read-rarely-but-fully.
+
 **Working with our root S3 creds:**
 
 ```bash
