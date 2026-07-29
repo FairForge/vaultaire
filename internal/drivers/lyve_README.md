@@ -49,10 +49,12 @@ curl -sS --aws-sigv4 "aws:amz:us-west-1:s3" --user "$AK:$SK" -X PUT \
 
 Account identity (`RSGetUserInfo`): we are customer **v01** under reseller
 **global** (root user isaacv17@gmail.com) — customer-level RS access, not
-reseller-level. IAM and STS share one endpoint:
-`iam.global.lyve.seagate.com` (per Seagate support; the per-account
-`sts.<account>` host in the PDF does not apply to us). Sign IAM-endpoint
-calls with service `iam`, S3-endpoint calls with service `s3`.
+reseller-level. Three service hosts, each with its own signing service:
+`iam.global.lyve.seagate.com` (service `iam`),
+**`sts.global.lyve.seagate.com` (service `sts`)** — this host exists and
+works (geo-DNS to the nearest DC; the 2025 note claiming "STS = IAM host"
+was wrong — STS actions 400 on the IAM host), and
+`s3.<region>.global.lyve.seagate.com` (service `s3`).
 
 **Working with our root S3 creds:**
 
@@ -71,11 +73,48 @@ curl -s -X POST --aws-sigv4 "aws:amz:us-east-1:iam" --user "$AK:$SK" \
 # reconciliation), and standard IAM CreateUser/ListPolicies (sub-user mgmt).
 ```
 
+**STS works** (2026-07-29): `AssumeRole` on `sts.global.lyve.seagate.com`
+(sign service `sts`, `Version=2011-06-15`, RoleArn/RoleSessionName required
+but ignored) returns temp credentials that work against S3 with the session
+token. The 2025-11 failure was just the wrong host.
+
 **Not available to us** (reseller-only or unsupported): `RSLiveBilling`,
-`RSListCustomer`, `RSWhitelist*` ("Dripd-iam: Unauthorized" / "Action not
-supported"). STS `AssumeRole` against the shared IAM host errored with
-"Missing Action or Version param" in the 2025-11 test — unresolved, retest
-with the PDF's exact STS wire format if temp credentials are ever needed.
+`RSListCustomer`, `RSCustomerDetails`, `RSWhitelist*`, `RSSAML*`
+(Unauthorized / BadRequest / not supported).
+
+## API coverage sweep (2026-07-29) — everything in the LC2 guide checked
+
+Every customer-scoped action in `docs/references/lyve-cloud-2-api-en_US.pdf`
+has now been live-verified except the deliberate skips below.
+
+**Verified working** (beyond everything already listed above): full IAM
+policy versioning (CreatePolicyVersion/List/Get/SetDefault/Delete — version
+ids are non-standard strings like `vH92BC9A0V5YE`, not `v2`),
+ListAttachedUserPolicies, ListEntitiesForPolicy; STS AssumeRole end-to-end;
+bucket encryption retrieve (AES256 default confirmed at bucket level);
+**bucket policy set/delete with real anonymous access** (public buckets
+work; `rs-info` reflects `isPublic`); object-tag delete;
+`response-content-type`/`-disposition` GET overrides; ListMultipartUploads
++ ListParts; **browser-style POST form uploads** (SigV4 policy via
+`generate_presigned_post` → 204); Content-MD5 enforcement (BadDigest on
+mismatch); trailing-slash empty-directory keys; delimiter `/` listing.
+
+**Broken / quirks found in the sweep:** bucket *tagging* is accepted but
+silently dropped (PutBucketTagging 200 → GetBucketTagging NoSuchTagSet —
+object tagging works fine); PutBucketLogging → InvalidRequest (logging
+likely unsupported); GetBucketPolicyStatus → NotImplemented;
+`GET /speedtest/*` → 404 NoSuchBucket on LC2 (v1 relic in the doc);
+`?metadata` on a bucket just returns a listing. Plus the earlier finds:
+replication-policy param ignored, `If-None-Match: *` overwrites, SigV2
+presigned PUT 403s.
+
+**Deliberately untested:** Object Lock / legal hold / retention (WORM —
+confirmed working separately; a lock would make test buckets undeletable);
+root-auth mutators (ChangePassword, UpdateLoginProfile, RSSetUserInfo,
+RSResetPassword/GetPasswordResetToken, RS*TFA, RSSetUserAuthMethod —
+lockout risk on the root account); RSLogin (needs console password);
+reseller-only management (RSCreate/ModifyCustomer,
+RSSetCustomerServiceAccessLevel).
 
 ## Feature matrix (probed live from SLC, 2026-07-28)
 
