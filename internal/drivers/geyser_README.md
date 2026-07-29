@@ -246,12 +246,19 @@ attestation — a "we prove your backup restores" primitive).
    secrets. Enables key rotation. (The old reason — testing whether the
    27.7 MB/s ceiling is per-key — is moot: that ceiling was our HTTP/2
    client bug, fixed 2026-07-29.)
-3. Ask Geyser: object-lock-enabled bucket (Vail returns proper
-   `ObjectLockConfigurationNotFoundError`, so the semantics exist); whether
-   `cloudIntegrationType: AWS` accepts custom endpoints (decides if
-   rehydration can bypass our bandwidth entirely); São Paulo availability and
-   dual-copy pricing; recall latency under real contention; restore/egress
-   contract pricing; staging-window length.
+3. **Object lock: per Isaac (2026-07-29) it is accessible through the
+   console** — not a support ask. Console bucket responses carry
+   `objectLocking` (see `GeyserBucketStatus`), so it's likely a
+   creation-time toggle. On the next authenticated session: create a test
+   bucket with locking on (probe an `objectLocking: true` field in the
+   create payload / check the UI), and wire the flag into
+   `geyser_admin.go`'s `createBucketRequest` once the wire name is
+   confirmed.
+4. Ask Geyser: whether `cloudIntegrationType: AWS` accepts custom endpoints
+   (decides if rehydration can bypass our bandwidth entirely); São Paulo
+   availability and dual-copy pricing; recall latency under real contention;
+   restore/egress contract pricing; staging-window length; whether internal
+   staging→tape flush sustains ~19 TB/day of ingest.
 
 ## Bench recipes
 
