@@ -6,8 +6,8 @@ deployment — responses carry `HostId: SpectraLogicVail-lavail/1.1` — which
 means Spectra's published API surface applies even where Geyser's own docs are
 silent. Vail spec: `docs/references/vail-api-guide.pdf`.
 
-Driver: `geyser.go`. Console client: `geyser_admin.go` (session-cookie flow is
-**stale**, see Auth below).
+Driver: `geyser.go`. Console client: `geyser_admin.go` (programmatic login
+flow as of WP-Geyser-Admin 2026-07-29, see Auth below).
 
 ## Storage semantics — it is true Glacier, not slow S3
 
@@ -55,10 +55,32 @@ Wix cookies from the marketing site, and header capture shows the app sends
 is not exposed to extensions.
 
 **Therefore: don't scrape a cookie — log in.** `POST /api/login` exists
-(with `/api/login/regenerate` and `/api/logout`), so `geyser_admin.go` should
-authenticate with a real login call, keep the returned session in a cookie
-jar, and continue pinging `/api/keepalive`. That removes the manual DevTools
-step entirely and is the fix for the driver's stale doc comment.
+(with `/api/login/regenerate` and `/api/logout`), so `geyser_admin.go`
+authenticates with a real login call, keeps the returned session in a cookie
+jar, and continues pinging `/api/keepalive`. That removes the manual DevTools
+step entirely.
+
+**IMPLEMENTED (WP-Geyser-Admin, 2026-07-29).** The verified flow, now in
+`geyser_admin.go`:
+
+1. `Login(ctx, email, password)` — `POST /api/login` with
+   `{emailAddress, password}` + `X-Source: UI` → 201 MFA challenge
+   `{hash, id, responseType:"MFA", totpUser}`. The `id` is the challenge id,
+   NOT a session token.
+2. Geyser emails a one-time code (`totpUser:false`) or expects a TOTP code.
+3. `VerifyMFA(ctx, hash, code)` — `PUT /api/login` with `{hash, token}` →
+   200 session `{id, user:{id,...}}`. The session id/user id become the
+   `accessToken`/`userId` cookies on every call; httpOnly cookies the server
+   sets ride along via the client's cookie jar.
+4. `StartKeepalive(ctx)` as before (session ~1h idle expiry).
+
+`NewGeyserAdminClientWithLogin` bundles steps 1+3 for TOTP accounts (code
+known upfront); email-MFA accounts drive the two steps separately.
+`NewGeyserAdminClient(accessToken, userID, ...)` remains as a direct-injection
+fallback. The client also wires `RestoreToCache`, `RestoreToCloud`,
+cloud-integration CRUD, `cloudSync` create/status, `GetTapeCollections`,
+`GetSites`, and `GetEvents`. Response-shape caveat: tape/event field names in
+Go structs are inferred — verify against a live capture on first real use.
 
 The Vail token endpoint is live and validating — a deliberately fake login
 returns a proper field-level `400 Invalid username or password`, so real

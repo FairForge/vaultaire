@@ -950,8 +950,11 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
      `AWS` type accepts a custom endpoint, Geyser can rehydrate directly into
      iDrive/Lyve and the ~2 TB/day drain never touches our bandwidth — build
      the polling path first (S3-only, no new auth), then swap the transfer
-     leg once console-API auth is wired. Blocked on: console auth
-     (`POST /api/login`) + confirming custom-endpoint support.
+     leg. **Console auth WIRED (2026-07-29, WP-Geyser-Admin): `geyser_admin.go`
+     now does programmatic `POST /api/login` + MFA verify + cookie jar, and
+     exposes `RestoreToCache`/`RestoreToCloud`/cloud-integration CRUD/
+     `cloudSync`/tape/site/event endpoints.** Remaining blocker: confirming
+     custom-endpoint support on the `AWS` integration type (ask Geyser).
    - **Rehydrate target is pluggable** — any registered `engine.Driver`, one config knob (`RESTORE_REHYDRATE_BACKEND`). For the current OneDrive+Geyser primary stack, **permafrost is the natural bulk target**: $0 marginal cost (Business subs already paid), fleet download 200+ MB/s for customer-facing restores, and TTL'd temporary data suits OneDrive quota churn. Write-side match is fine: staging drains at ~5 MB/s/object anyway, well under permafrost's 12 MB/s/file (fleet-parallel ~100-200 MB/s aggregate across objects). **Two gates before permafrost backs customer-visible restores**: root-cause the 10/100 GET errors from the 2026-07-15 E2E smoke (fleet propagation/throttle — flagged in benchmark memory), and accept the Graph-API rate-limit/ToS posture (restored copies are transient, which lowers but doesn't eliminate it). iDrive remains the boring fallback target; NVMe stays the first hop for small restores either way.
 3. S3 wire compatibility = exactly AWS Glacier semantics, so rclone/Cyberduck/aws-cli restore workflows work unmodified: GET on archived → `InvalidObjectState`; accept `RestoreObject` passthrough; HEAD returns `x-amz-restore` status; `s3:ObjectRestore:Completed` event → webhook (Phase 5.11.6).
 4. Bulk "thaw": restore-by-prefix API (one call → server-side RestoreObject fan-out, measured fine in batches) with progress in `restore_jobs` table + dashboard bar + completion webhook/email. This is the "restore a whole restic snapshot" UX.
