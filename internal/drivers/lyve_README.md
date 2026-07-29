@@ -191,6 +191,50 @@ expire-all rule and one object planted 2026-07-29 — check whether it
 actually expired before relying on lifecycle for retention. Delete the
 bucket after the check.
 
+## Account API v2 (doc reviewed 2026-07-29 — NOT yet tested against our account)
+
+Spec: `docs/references/lyve-account-api-v2-en_US.pdf` (dated 3/1/24, original
+Lyve Cloud console era — may or may not be live for our LC2/RSTOR account).
+Base `https://api.lyvecloud.seagate.com/v2`, auth `POST /auth/token` with
+`{accountId, accessKey, secret}` (credentials generated in the Lyve console —
+**[YOU]: generate a set and probe**; every admin user can mint one set).
+
+What it adds over the LC2 RS/IAM path if it works:
+
+- **`POST /service-accounts` → `{accessKey, secret, expirationDate}`** —
+  programmatic S3 credentials **with expiry** + enable/disable toggle
+  (`PUT|DELETE /service-accounts/{id}/enabled`). Per-tenant credential
+  lifecycle without IAM-user janitoring.
+- **Permissions** with types `all-buckets` | `bucket-prefix` | `bucket-names`
+  | `policy` (full AWS IAM policy file incl. `s3:prefix` Conditions) and
+  actions `all-operations` | `read-only` | **`write-only`**. Write-only +
+  no-delete = ransomware-resistant backup ingest credentials.
+- **`GET /usage/monthly` + `/usage/current`** — per-bucket usage for billing
+  reconciliation (overlaps `RSListBillingData`, friendlier shape).
+
+Equivalents already verified on LC2 without this API: IAM
+CreateUser/CreatePolicy/AttachUserPolicy/CreateAccessKey (bucket-scoped
+enforcement confirmed; **prefix-Condition enforcement inside a bucket is
+unverified — probe before relying**), STS AssumeRole temp creds,
+`rs-bucket-stats`. No S3 event notifications exist on LC2 (word absent from
+the guide) — drain/replication scheduling must poll or track writes.
+
+## Vault-tier pairing (Lyve staging ↔ Geyser tape), 2026-07-29
+
+Target data path — SLC carries control plane only:
+customer → Lyve (presigned PUT / scoped short-lived creds, 0× SLC budget) →
+Geyser pulls via console `cloudSync` (0× SLC) → tape; restore =
+`RestoreToCloud` into a Lyve-targeted integration → customer presigned GET
+(130 MB/s measured, 0× SLC). Both server-side legs gate on ONE unknown:
+whether Geyser's `AWS` integration type takes a custom endpoint (or the
+`WASABI` type accepts Lyve post-acquisition). Next console session: `GET
+/api/supportedregions/wasabi|oracle` + probe `CreateCloudIntegration`
+validation. Hand Geyser only a read-only, expiring, staging-scoped service
+account — never root creds. Fallback if refused: SLC-mediated drain (2×
+budget; customer→Lyve stays 0×, so worst case still halves the 4× buffered
+path). Staging cleanup via lifecycle expiration once the canary verdict is
+in (due Jul 31); until then use our own reaper.
+
 ## Product fit
 
 - **Best fit: second-vendor DR/replication target for the Standard tier** —
