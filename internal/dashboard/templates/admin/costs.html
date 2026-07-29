@@ -67,7 +67,17 @@
 {{if .ActualByBackend}}
 <div class="card" style="margin-bottom:1.5rem">
     <div class="card-title" style="margin-bottom:0.75rem">Storage by Backend (Actual)</div>
-    <p class="text-muted" style="margin-bottom:0.75rem;font-size:0.85rem">Ground truth from object location tracking.</p>
+    <p class="text-muted" style="margin-bottom:0.75rem;font-size:0.85rem">
+        Ground truth from object location tracking.
+        Viewing <strong>{{if .IsInvoicedView}}what we are invoiced today{{else}}full market rates{{end}}</strong> &mdash;
+        {{if .IsInvoicedView}}<a href="/admin/costs">show full rates</a>{{else}}<a href="/admin/costs?costs=invoiced">show invoiced only</a>{{end}}.
+    </p>
+    <p class="text-muted" style="margin-bottom:0.75rem;font-size:0.85rem">
+        At full rates <strong>{{.ModelledSpendFmt}}</strong> &middot;
+        actually invoiced <strong>{{.InvoicedSpendFmt}}</strong> &middot;
+        currently subsidised <strong>{{.SubsidyFmt}}</strong>/mo.
+        The subsidy is the bar self-hosted storage has to beat.
+    </p>
     <div class="table-wrap">
         <table>
             <thead>
@@ -76,15 +86,19 @@
                     <th style="text-align:right">Objects</th>
                     <th style="text-align:right">Storage</th>
                     <th style="text-align:right">TB</th>
+                    <th style="text-align:right">Cost{{if .IsInvoicedView}} (invoiced){{end}}</th>
+                    <th style="text-align:right">At full rates</th>
                 </tr>
             </thead>
             <tbody>
                 {{range .ActualByBackend}}
                 <tr>
-                    <td><code>{{.Backend}}</code></td>
+                    <td><code>{{.Backend}}</code>{{if .Subsidized}} <span class="badge badge-warning" title="Billed at $0 today under a promo; the full-rate column is what it costs when that ends">promo</span>{{end}}</td>
                     <td style="text-align:right">{{.ObjectCount}}</td>
                     <td style="text-align:right">{{.StorageFmt}}</td>
                     <td style="text-align:right">{{printf "%.2f" .StorageTB}}</td>
+                    <td style="text-align:right">{{.CostFmt}}</td>
+                    <td style="text-align:right" class="text-muted">{{.ModelledFmt}}</td>
                 </tr>
                 {{end}}
             </tbody>
