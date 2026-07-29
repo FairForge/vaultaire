@@ -26,6 +26,7 @@ const (
 var backendCostPerTBCents = map[string]int64{
 	"geyser":     155, // $1.55/TB
 	"idrive":     330, // $3.30/TB
+	"lyve":       799, // $7.99/TB — see note in internal/usage/cost_tracker.go
 	"hetzner":    381, // ~€3.81/TB
 	"permafrost": 0,
 	"gorilla":    0,
@@ -35,9 +36,17 @@ var backendCostPerTBCents = map[string]int64{
 
 // egressCostPerTBCents maps backend names to their per-TB egress cost in cents.
 // Currently $0 across the board — will matter once BYOB/edge nodes are wired.
+//
+// Lyve stays 0 deliberately: the Lyve contract defines no egress fee at all
+// (the words "egress" and "bandwidth" appear nowhere in it). Lyve's limit on
+// heavy reads is a fair-use *throughput* allocation that scales with stored
+// volume, not a charge — so the exposure is throttling, not dollars, and
+// pricing it here would model the wrong failure mode. Track the egress:stored
+// ratio instead.
 var egressCostPerTBCents = map[string]int64{
 	"geyser":     0,
 	"idrive":     0,
+	"lyve":       0,
 	"hetzner":    0,
 	"permafrost": 0,
 	"gorilla":    0,
@@ -214,7 +223,7 @@ func populateCosts(ctx context.Context, db *sql.DB, data map[string]any, logger 
 	totalCostCents += geyserFloorCents + gorillaFixedCents
 
 	// Build backend table rows.
-	backendOrder := []string{"geyser", "idrive", "hetzner", "permafrost", "gorilla", "local", "edge"}
+	backendOrder := []string{"geyser", "idrive", "lyve", "hetzner", "permafrost", "gorilla", "local", "edge"}
 	var byBackend []backendCostRow
 	for _, name := range backendOrder {
 		agg := backends[name]

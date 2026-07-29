@@ -420,6 +420,7 @@ func TestConvertPeerPodSelector(t *testing.T) {
 
 	if spec.PodSelector == nil {
 		t.Fatal("expected pod selector")
+		return
 	}
 	if spec.PodSelector.MatchLabels["app"] != "frontend" {
 		t.Error("expected app=frontend")
@@ -435,6 +436,7 @@ func TestConvertPeerNamespaceSelector(t *testing.T) {
 
 	if spec.NamespaceSelector == nil {
 		t.Fatal("expected namespace selector")
+		return
 	}
 	if spec.NamespaceSelector.MatchLabels["name"] != "monitoring" {
 		t.Error("expected name=monitoring")

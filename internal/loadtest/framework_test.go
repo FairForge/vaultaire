@@ -80,6 +80,7 @@ func TestFramework_Run_Success(t *testing.T) {
 	}
 	if summary == nil {
 		t.Fatal("expected summary, got nil")
+		return
 	}
 	if summary.TestName != "success-test" {
 		t.Errorf("expected test name 'success-test', got %q", summary.TestName)

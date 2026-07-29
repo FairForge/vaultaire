@@ -263,6 +263,7 @@ func TestBaselineSecurityContext(t *testing.T) {
 	}
 	if ctx.Capabilities == nil {
 		t.Fatal("expected capabilities")
+		return
 	}
 	if len(ctx.Capabilities.Add) != 1 || ctx.Capabilities.Add[0] != "NET_BIND_SERVICE" {
 		t.Error("expected NET_BIND_SERVICE capability")
@@ -275,6 +276,7 @@ func TestContainerSecurityContextToSpec(t *testing.T) {
 
 	if spec == nil {
 		t.Fatal("expected spec")
+		return
 	}
 	if spec.RunAsNonRoot == nil || !*spec.RunAsNonRoot {
 		t.Error("expected runAsNonRoot in spec")
@@ -317,6 +319,7 @@ func TestPodSecurityContextToSpec(t *testing.T) {
 
 	if spec == nil {
 		t.Fatal("expected spec")
+		return
 	}
 	if *spec.RunAsUser != 1000 {
 		t.Error("expected runAsUser 1000")
@@ -352,6 +355,7 @@ func TestContainerSecurityContextWithSELinux(t *testing.T) {
 
 	if spec.SELinuxOptions == nil {
 		t.Fatal("expected SELinux options")
+		return
 	}
 	if spec.SELinuxOptions.Type != "container_t" {
 		t.Error("expected SELinux type")

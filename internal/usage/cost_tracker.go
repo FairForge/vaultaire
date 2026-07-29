@@ -11,8 +11,13 @@ import (
 
 // BackendCostPerTBCents maps backend names to their per-TB storage cost in cents.
 var BackendCostPerTBCents = map[string]int64{
-	"geyser":   155,
-	"idrive":   330,
+	"geyser": 155,
+	"idrive": 330,
+	// Lyve bills us $0 today under a 1-year SaaS promo, but we deliberately
+	// track it at a conservative $7.99/TB so the promo cannot hide the
+	// liability that appears when it ends. See the "Contract terms" and
+	// "post-promo rate" notes in internal/drivers/lyve_README.md.
+	"lyve":     799,
 	"hetzner":  381,
 	"onedrive": 0,
 	"gorilla":  0,

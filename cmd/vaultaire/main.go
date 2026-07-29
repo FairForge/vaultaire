@@ -140,8 +140,10 @@ func main() {
 
 	// Configure backend costs
 	eng.SetCostConfiguration(map[string]float64{
-		"idrive":     0.0033, // $3.30/TB
-		"lyve":       0.00637,
+		"idrive": 0.0033, // $3.30/TB
+		// $7.99/TB. Lyve invoices us $0 under a 1-year SaaS promo; we track a
+		// conservative rate so the promo cannot mask the post-promo liability.
+		"lyve":       0.00799,
 		"quotaless":  0.001,
 		"s3":         0.023,
 		"permafrost": 0.0,

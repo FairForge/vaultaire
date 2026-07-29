@@ -47,6 +47,7 @@ func TestCreateBucket_EmptyNameAfterSanitize(t *testing.T) {
 	_, err := client.CreateBucket(context.Background(), "---")
 	if err == nil {
 		t.Fatal("expected error for unsanitizable name, got nil")
+		return
 	}
 }
 
@@ -59,6 +60,7 @@ func TestCreateBucket_MissingConfig(t *testing.T) {
 	_, err := client.CreateBucket(context.Background(), "validname")
 	if err == nil {
 		t.Fatal("expected error for empty provisioning config, got nil")
+		return
 	}
 }
 
@@ -333,6 +335,7 @@ func TestVerifyMFA_InvalidCode(t *testing.T) {
 	err := client.VerifyMFA(context.Background(), "challenge-hash", "000000")
 	if err == nil {
 		t.Fatal("expected error for invalid MFA code, got nil")
+		return
 	}
 }
 

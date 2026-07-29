@@ -81,6 +81,7 @@ func TestStressTester_Run_RampUp(t *testing.T) {
 	}
 	if result == nil {
 		t.Fatal("expected result, got nil")
+		return
 	}
 	if result.MaxRPSAchieved < config.InitialRPS {
 		t.Errorf("expected MaxRPSAchieved >= %d, got %d", config.InitialRPS, result.MaxRPSAchieved)

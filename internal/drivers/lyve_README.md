@@ -614,6 +614,79 @@ with `rs-bucket-stats`, not `list-buckets`.** Harmless while Lyve is on the
 free interim, but this is the cleanup list if it ever goes metered (and the
 299 empties should go regardless — they are pure namespace noise).
 
+### Historical billing (`RSListBillingData`, pulled 2026-07-29)
+
+Reseller live-billing is gated behind 1 PB, but **customer-level
+`RSListBillingData` works and is the usage history we do have.** Gotcha: the
+dates need **milliseconds** — `2026-07-29T00:00:00.000Z`. Without them the API
+returns `IAM: Invalid request params`.
+
+```bash
+curl -s --aws-sigv4 "aws:amz:us-east-1:iam" --user "$AK:$SK" \
+  -X POST https://iam.global.lyve.seagate.com/ \
+  --data-urlencode "Action=RSListBillingData" \
+  --data-urlencode "Version=2010-05-08" \
+  --data-urlencode "From=2025-06-01T00:00:00.000Z" \
+  --data-urlencode "Till=2026-07-29T00:00:00.000Z"
+```
+
+Returns `Stats` (per-datacenter daily upload/download/delete bytes),
+`UsedSpace` (used/expired/ghost) and `ObjectCount` — 424 daily entries each,
+in *chronological* order despite the guide saying reverse. `UseDecimalByte:
+true`.
+
+14 months of history (Jul 2025 → Jul 2026), 182 active days across all 7 DCs:
+
+| Datacenter | Upload GB | Download GB | Delete GB |
+|---|---|---|---|
+| US-EAST-1 | 341.6 | 25.0 | 310.3 |
+| US-WEST-1 | 86.5 | 20.5 | 76.2 |
+| US-CENTRAL-2 | 25.9 | 16.0 | 44.3 |
+| EU-WEST-1 | 14.7 | 14.4 | 12.3 |
+| AP-SOUTHEAST-1 / AP-NORTHEAST-1 / EU-CENTRAL-1 | 20.1 | 26.5 | 19.1 |
+| **Total** | **488.7** | **102.4** | **462.3** |
+
+Current stored **46.6 GiB / 19,576 objects**, peak 50.2 GiB (2025-07-16),
+**zero ghost space**. Upload ≈ delete (489 vs 462 GB) confirms this is
+benchmark churn, not accumulation.
+
+**The number that matters for the egress question: lifetime egress is
+102 GB against 489 GB ingest — a 0.21× read:write ratio, ~7 GB/month.** We
+have never come close to stressing Lyve's read path.
+
+At the tracked $7.99/TB, today's 46.6 GiB would cost **$0.36/mo** — which is
+the point of tracking it: the number is currently trivial, so wire it up now
+and let it grow visibly rather than discovering it at renewal.
+
+## Egress: not priced, but rate-allocated (contract, 2026-07-29)
+
+**The words "egress" and "bandwidth" appear nowhere in either contract.** There
+is no egress fee to model — Lyve's no-egress-fees positioning is consistent
+with the paperwork. What exists instead is a **Fair-use Policy**:
+
+> "Seagate dynamically controls the amount of concurrent API requests as well
+> as the upload, download, and Services resources. The resource allocations
+> for each account depend on the storage volume. For example, an account with
+> **1 PB or more** of Lyve Cloud Services storage will receive a **higher
+> resource allocation** than an account with 1 TB."
+
+So heavy reads are **throttled, not billed**, and our allocation scales with
+how much we store — at ~47 GB we sit at the bottom of that ladder. (Same 1 PB
+threshold as the reseller-API gate; it is Seagate's recurring tier boundary.)
+
+Consequence for cost modelling: **egress stays at $0 in the cost maps, because
+that is the truth.** Pricing it would model the wrong failure mode — budgeting
+dollars against a risk that actually manifests as slow transfers. The metric
+to watch is the **egress:stored ratio and observed throughput**, not a dollar
+figure. Two supporting facts: `CostOptimizer.egress` is currently written by
+`SetEgressCosts` but never read, so a non-zero value would change no routing
+today; and `egressCostPerTBCents` feeds the admin *actual-spend* table, where
+a fictional cost would make real margin reporting wrong.
+
+The one place a non-zero egress number belongs is **replacement planning** —
+if Lyve is swapped for a vendor that does meter egress, model that in the tier
+economics docs, not in the live cost map.
+
 ## IAM credential-scoping probes (2026-07-29, live from SLC)
 
 Script pattern: create user → create policy → attach → create key → wait

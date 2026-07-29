@@ -20,6 +20,7 @@ func TestNewPipeline_Presets(t *testing.T) {
 			}
 			if p == nil {
 				t.Fatal("Pipeline is nil")
+				return
 			}
 		})
 	}
