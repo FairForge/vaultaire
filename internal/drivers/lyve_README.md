@@ -1,11 +1,17 @@
 # Lyve Cloud 2 Driver — Ops Manual
 
-Status (2026-07-29): **technically ready; blocked on contract, not on code.**
+Status (2026-07-29): **technically ready; two contract questions outstanding.**
+Reseller authorization — the one hard legal blocker — is **resolved** (we are an
+authorized reseller). Prefix-based multi-tenancy, previously believed broken, is
+**working** (see *Prefix scoping DOES work*), so Lyve bucket counts are not a
+tenant ceiling.
+
 Lyve was "dropped" in July 2026 partly on a perf verdict that turned out to be
-a benchmarking artifact (see *The bucket-homing trap* below), and the driver is
-fully functional and benchmarked. But promoting it to a customer-facing launch
-tier runs into **contractual limits, read for the first time on 2026-07-29** —
-see *Contract terms* immediately below. Read that section before designing
+a benchmarking artifact (see *The bucket-homing trap* below); the driver is
+fully functional and benchmarked on both the direct and engine paths. What
+remains before it can back a customer-facing tier is **two questions for
+Seagate** — account status and post-interim price — plus the absence of any
+durability warranty. Read *Contract terms* immediately below before designing
 anything customer-facing on Lyve.
 
 ## Contract terms (extracted 2026-07-29 — READ THIS FIRST)
@@ -25,11 +31,18 @@ API guide. **Not legal advice — quotes are verbatim so they can be checked.**
 
 That definition covers exactly what stored.ge does: storing paying customers'
 data on Lyve and selling it as our product **is resale**, even though we never
-resell a Lyve login. `RSGetUserInfo` reports us as customer **v01** under
-reseller **global** with *customer-level* access, which is not Solution
-Provider authorization. **Unless we hold that written authorization, Lyve
-cannot lawfully back a customer-facing tier.** This is the top blocker and no
-amount of benchmarking changes it.
+resell a Lyve login.
+
+**Status: we are an authorized reseller** (owner, 2026-07-29), so this
+requirement is satisfied and is *not* a blocker. Two things still worth doing,
+because the API view disagrees with that: `RSGetUserInfo` reports us as
+customer **v01** under reseller **global** with *customer-level* RS access,
+and reseller-level calls (`RSLiveBilling`, `RSListCustomer`,
+`RSCustomerDetails`) return Unauthorized. So (a) keep the written
+authorization and the Solution Provider Plan acceptance on file with the
+launch records, and (b) ask Seagate whether the account should be re-scoped to
+reseller level — today's API access does not reflect reseller status, which
+also blocks the billing reconciliation we want.
 
 ### 2. There is no durability warranty — at all
 
@@ -105,11 +118,19 @@ arrangement is upside and its collapse is survivable. Turning it into a
 customer-facing tier inverts the risk — customer data would sit on a backend
 with no durability warranty, quite possibly no SLA, a resale restriction we
 may not satisfy, and a deletion clock we do not control. The gating questions
-are for Seagate and a lawyer, not for the benchmark suite:
+are for Seagate, not for the benchmark suite. Reseller authorization is
+**resolved** (see §1); two remain, and both are cheap to ask:
 
-1. Do we have (or can we get) **Solution Provider authorization** in writing?
-2. Is our account a **Non-paid Service Account**, and when does it expire?
-3. What is the **post-interim rate**, and is there a minimum term or commit?
+1. Is our account a **Non-paid Service Account**, and when does it expire?
+   This is the sharpest one — it decides whether an SLA exists at all and
+   whether a 30-day deletion clock applies.
+2. What is the **post-interim rate**, and is there a minimum term or commit?
+   The `$6.37/TB` we model is above every tier's selling price, so the answer
+   determines whether Lyve can back a tier at all or stays an internal buffer.
+
+Worth pairing with the account-scope question in §1 — reseller-level API
+access would also unlock the billing reconciliation (`RSLiveBilling`) we
+currently can't run.
 
 ## Launch-tier readiness — technical side (assessed 2026-07-29)
 
@@ -126,13 +147,14 @@ what the code and the platform actually support.
 | IAM sub-users | 25 bulk-created, no cap hit | never pushed higher |
 | Concurrency | 128 workers, **0 errors**, 602 ops/s | see benchmark table |
 
-**Bucket-count limits do not currently bind us**, because the driver keys
+**Bucket-count limits never bind us.** On the proxied path the driver keys
 objects as `t-{tenant}/{container}/{artifact}` inside **one** bucket per region
-(`lyve.go:78`, `getBucket()` → `stored-{region}`). Tenant separation is
-Vaultaire's, in Postgres — Lyve sees a single credential. The broken
-`s3:prefix` ListBucket condition and the per-tenant-bucket ceiling therefore
-only matter if we ever hand tenants **direct** Lyve credentials (the
-direct-upload Vault design), not on the proxied path.
+(`lyve.go:78`, `getBucket()` → `stored-{region}`), so tenant separation is
+Vaultaire's, in Postgres, and Lyve sees a single credential. And on the
+*direct*-credential path, **prefix scoping works** via resource ARNs (see
+*Prefix scoping DOES work* below) — so per-tenant buckets are not needed there
+either. The 3.4 s bucket-creation cost is therefore an admin-provisioning
+detail, not a per-tenant signup cost.
 
 ### Quirks that are harmless to us, and why
 
@@ -574,13 +596,63 @@ Script pattern: create user → create policy → attach → create key → wait
 |---|---|
 | **Write-only creds** (`s3:PutObject` only) | **ENFORCED** — PUT ok; GET, DELETE, LIST all denied. Ransomware-resistant backup ingest credentials work today. |
 | Object-level prefix scoping (`Resource: bucket/tenant-a/*`) | **ENFORCED** — PUT/GET own prefix ok, PUT other prefix denied |
-| **`s3:prefix` Condition on ListBucket** | **BROKEN** — allow-with-condition denies every variant (`tenant-a`, `tenant-a/`, `tenant-a/*`, exact-match list). LC2 does not honor conditions on List allows. |
+| **`s3:prefix` Condition on ListBucket** | **Not implemented** — allow-with-condition denies every variant. But conditions are the wrong tool; see below. |
 
-Design consequence: a tenant inside a shared bucket can be write/read-scoped
-but can never LIST its own keys — which restic/rclone need. **Per-tenant
-staging buckets are therefore the multi-tenancy unit** (bucket-scoped
-policies incl. ListBucket verified enforced 2026-07-28; `rs-bucket-stats`
-gives per-tenant usage; no documented bucket cap).
+### Prefix scoping DOES work — via Resource ARNs, not Conditions (2026-07-29)
+
+**This supersedes the earlier "per-tenant staging buckets are the
+multi-tenancy unit" conclusion.** That conclusion was drawn from testing only
+`s3:prefix` *Conditions*, which LC2 does not implement at all — the LC2 API
+guide documents **zero** IAM condition keys, and its own policy examples scope
+with wildcard resource ARNs (`"Resource":"arn:aws:s3:::abc-bucket*"`). Scope by
+**resource ARN** and prefix isolation works today:
+
+```json
+{"Version":"2012-10-17","Statement":[{
+  "Effect":"Allow",
+  "Action":["s3:ListBucket","s3:GetObject","s3:PutObject","s3:DeleteObject"],
+  "Resource":["arn:aws:s3:::BUCKET/tenant-a/*"]}]}
+```
+
+Measured with that policy on a sub-user (reproduced 4×, 15 s propagation):
+
+| Operation | Result |
+|---|---|
+| `list-objects-v2 --prefix tenant-a/` | **OK** |
+| `list-objects-v2 --prefix tenant-b/` | **DENIED** |
+| GET / PUT under `tenant-a/` | **OK** |
+| GET / PUT under `tenant-b/` | **DENIED** |
+| `list-objects-v2` with **no prefix** | **OK — returns every key in the bucket** ⚠ |
+
+So **per-tenant buckets are not required**, and Lyve bucket counts never
+become a tenant ceiling. Note `ListBucket` must be granted on the *object*
+ARN (`bucket/tenant-a/*`), which is not how AWS models it — on AWS, ListBucket
+takes the bucket ARN. Granting only the bare bucket ARN gives the inverse:
+root listing works, prefixed listing is denied. The wildcard form
+`bucket/tenant-a*` (no slash) is **rejected** by `CreatePolicy`; use
+`bucket/tenant-a/*`.
+
+**The one hole: an unprefixed LIST returns every key in the bucket.** An
+explicit `Deny` on `s3:ListBucket` for the bare bucket ARN does *not* close it
+(verified twice). The tenant still cannot read or write anything outside its
+prefix — this is a **key-name disclosure, not a data leak** — but it does mean
+a tenant holding raw Lyve credentials can enumerate other tenants' object
+names. Three ways to live with that, in order of preference:
+
+1. **Don't hand out Lyve credentials at all.** Presigned URLs work for both
+   GET and PUT (SigV4, `addressing_style: path` — verified 200; the earlier
+   "presigned PUT 403s" note was an artifact of `aws s3 presign`, which only
+   ever emits GET URLs). Vaultaire already holds the listing in Postgres, so
+   it can serve LIST itself and hand out presigned URLs for data — zero
+   disclosure, zero per-tenant IAM to manage, and still zero SLC bandwidth on
+   the data path.
+2. **Make key names non-revealing** (opaque/hashed keys), which renders the
+   enumeration useless.
+3. **Accept it** where tenants are not mutually untrusted.
+
+None of this affects the **proxied** path we run today, where Vaultaire holds
+one credential and keys objects `t-{tenant}/…` inside one bucket — tenant
+isolation there is ours, in Postgres, and was never dependent on Lyve IAM.
 
 No S3 event notifications exist on LC2 (word absent from the guide) —
 drain/replication scheduling must poll or track writes. ALPN: the S3
