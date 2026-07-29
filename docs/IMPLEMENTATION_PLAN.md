@@ -176,7 +176,7 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 |-------|-------------|--------|
 | V18.1 | Geyser tape ingest buffer pipeline (iDrive hot → Geyser cold) | NOT STARTED |
 | V18.2 | Restore orchestration + hot rehydration (InvalidObjectState → RestoreObject → rehydrate to hot tier; Glacier-compatible wire semantics) | NOT STARTED — **first post-launch WP** (blocks all >13-day Vault restores) |
-| V18.3 | Dual-site tape replication (LA + London Geyser endpoints) | NOT STARTED |
+| V18.3 | Dual-site tape replication (LA + London + **São Paulo** — 3 sites confirmed via `/api/sites` 2026-07-29; our collection is currently **5 TB "Single Copy" LA**, so this is a provisioning/cost change, not code) | NOT STARTED |
 | V18.4 | Glacier migration tooling (`aws s3 sync` from Glacier → stored.ge) | NOT STARTED |
 | V18.5 | Retention policies + immutability certificates (WORM integration) | NOT STARTED — ask Geyser for lock-enabled bucket first |
 | V18.6 | Cost calculator (vs Glacier, Wasabi, B2 — show $0 retrieval savings) | NOT STARTED |
@@ -941,6 +941,17 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 **The rehydration design (the Geyser×Wasabi pattern — restore INTO the hot tier, never serve from staging):**
 1. Driver: `geyser.go` detects `InvalidObjectState` → surfaces typed `ErrArchived` (never a 500).
 2. Engine restore worker: issue `RestoreObject` (Days=2), poll HEAD `x-amz-restore` until `ongoing-request="false"` (poll interval 30s; measured completion ~3 min), then **pull once from staging and rehydrate**: ≤1 GB objects → NVMe cache; bulk → the configured rehydrate backend under a `restore/<tenant>/` prefix with TTL (7 days, extendable from dashboard). All customer reads then serve at hot line-rate — optionally via presigned direct links to skip the SLC proxy path.
+   - **Geyser may be able to do the rehydration itself.** The console API
+     (mapped 2026-07-29, full detail in `internal/drivers/geyser_README.md`)
+     exposes `POST /api/buckets/{id}/restoreToCache {path,versionId}` *and*
+     `POST /api/buckets/{id}/restore {path,integrationId,versionId}` — the
+     latter pushes a recalled object straight into a configured cloud
+     integration (`cloudIntegrationType` ∈ AWS|WASABI|ORACLE|GEYSER). If the
+     `AWS` type accepts a custom endpoint, Geyser can rehydrate directly into
+     iDrive/Lyve and the ~2 TB/day drain never touches our bandwidth — build
+     the polling path first (S3-only, no new auth), then swap the transfer
+     leg once console-API auth is wired. Blocked on: console auth
+     (`POST /api/login`) + confirming custom-endpoint support.
    - **Rehydrate target is pluggable** — any registered `engine.Driver`, one config knob (`RESTORE_REHYDRATE_BACKEND`). For the current OneDrive+Geyser primary stack, **permafrost is the natural bulk target**: $0 marginal cost (Business subs already paid), fleet download 200+ MB/s for customer-facing restores, and TTL'd temporary data suits OneDrive quota churn. Write-side match is fine: staging drains at ~5 MB/s/object anyway, well under permafrost's 12 MB/s/file (fleet-parallel ~100-200 MB/s aggregate across objects). **Two gates before permafrost backs customer-visible restores**: root-cause the 10/100 GET errors from the 2026-07-15 E2E smoke (fleet propagation/throttle — flagged in benchmark memory), and accept the Graph-API rate-limit/ToS posture (restored copies are transient, which lowers but doesn't eliminate it). iDrive remains the boring fallback target; NVMe stays the first hop for small restores either way.
 3. S3 wire compatibility = exactly AWS Glacier semantics, so rclone/Cyberduck/aws-cli restore workflows work unmodified: GET on archived → `InvalidObjectState`; accept `RestoreObject` passthrough; HEAD returns `x-amz-restore` status; `s3:ObjectRestore:Completed` event → webhook (Phase 5.11.6).
 4. Bulk "thaw": restore-by-prefix API (one call → server-side RestoreObject fan-out, measured fine in batches) with progress in `restore_jobs` table + dashboard bar + completion webhook/email. This is the "restore a whole restic snapshot" UX.
@@ -954,6 +965,13 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 - London bucket re-creation needed (deleted 2026-04-20)
 
 ### V18.4: Glacier Migration Tooling
+*2026-07-29: Geyser already ships server-side ingest-from-cloud —
+`POST /api/cloudSync {source:{type,region,bucket,accessKey,secretKey},action:"SYNC",bucketId}`
+with `PENDING|QUEUED|INPROGRESS|COMPLETED` status and an SNS completion topic
+(`/api/cloudSync/confirm`). This is the published "Wasabi cold archiving"
+integration. For AWS/Wasabi/Oracle sources a migration may need zero
+bandwidth from us — wrap cloudSync instead of proxying bytes.*
+
 **Files**: `cmd/glacier-migrate/` (new)
 - CLI tool: `glacier-migrate --source s3://bucket --dest stored.ge/bucket`
 - Wraps `aws s3 sync` with Glacier restore orchestration
