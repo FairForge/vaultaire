@@ -118,6 +118,40 @@ tested** — a lock would make the bucket undeletable.
   ×6, `servertest`) — left in place, audit before deleting. The 2025 test
   users were cleaned up 2026-07-28.
 
+## Extended probes (2026-07-29)
+
+**APAC regions work** (smoke, from SLC, correctly-homed buckets — latency is
+RTT-bound, so APAC-local clients would see local latencies):
+
+| Region | warm PUT/GET/HEAD p50 | cold dial p50 (p95) |
+|---|---|---|
+| ap-southeast-1 (Singapore) | 337 / 216 / 215 ms | 2.1 s (9.0 s) |
+| ap-northeast-1 (Tokyo) | 332 / 216 / 214 ms | 1.2 s (4.1 s) |
+
+Lyve is the only backend in our lineup with an APAC footprint.
+
+**IAM capacity / per-tenant credentials:** bulk-created 25 sub-users with no
+cap hit (~1.2 s per create — provision async), bucket-scoped managed policies
+(CreatePolicy → AttachUserPolicy) enforce correctly, and the full
+create→scope→key→delete lifecycle is clean. No documented user/bucket caps
+in the API guide. This makes **per-tenant direct S3 credentials** viable:
+Vaultaire as control plane, tenants reading/writing Lyve directly.
+
+**Presigned offload:** 256 MB via presigned GET = **130 MB/s** single-stream,
+unauthenticated — full egress offload with zero Vaultaire bandwidth.
+Presigned PUT works **only with SigV4** URLs (SigV2 presigned PUTs 403;
+SigV2 presigned GETs work). Direct client upload is therefore possible.
+
+**Cross-region replication at scale:** 256 MB server-side copy west→east in
+5.5 s (**~47 MB/s** — the 16 MB number was overhead-dominated), and
+**UploadPartCopy works cross-region** (32 MB parts, completed MPU verified),
+so objects of any size can replicate server-side in parallel parts.
+
+**Lifecycle canary:** bucket `lyve-lifecycle-canary` (us-west-1) has a 1-day
+expire-all rule and one object planted 2026-07-29 — check whether it
+actually expired before relying on lifecycle for retention. Delete the
+bucket after the check.
+
 ## Product fit
 
 - **Best fit: second-vendor DR/replication target for the Standard tier** —
@@ -125,7 +159,13 @@ tested** — a lock would make the bucket undeletable.
   (778 MB/s ingest), Seagate-grade durability, and server-side cross-region
   copy for a cheap geo story. Wire as a `ReplicationDriver` target.
 - **EU data residency option** (eu-west-1, eu-central-1 already in our
-  account) without onboarding a new vendor.
+  account) without onboarding a new vendor — and the only APAC footprint
+  (Singapore, Tokyo) in the stack.
+- **Direct-access data plane** (candidate, needs pricing confirmation):
+  per-tenant sub-users + scoped policies + SigV4 presigned URLs would let
+  bandwidth-heavy tenants hit Lyve directly with Vaultaire as control plane
+  only. Verify our contract's egress/API pricing first — Lyve markets no
+  egress fees, which would make presigned offload free bandwidth.
 - **Not** a primary hot tier (iDrive is cheaper with faster single-stream
   GET) and **not** archive (Geyser is ~4× cheaper per TB). Lyve ≈
   $6.37/TB (cost map in `cmd/vaultaire/main.go`).
