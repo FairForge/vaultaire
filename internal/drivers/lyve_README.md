@@ -109,7 +109,47 @@ stay current):
 | `bucketCorsEnabled` | `false` | console won't manage CORS for us |
 | `hasTransporter` | `false` | the `rramp.global.lyve.seagate.com` migration service is off for our account |
 
+## Object Lock / WORM — fully enforced (probed 2026-07-29)
+
+Previously skipped on the theory that a lock makes the test bucket
+undeletable. It doesn't have to: **set a ~3-minute `retain-until` and clean up
+after it lapses.** That makes WORM safe to probe, and it now is. All of the
+following was verified live and the bucket fully removed afterward.
+
+| Probe | Result |
+|---|---|
+| `create-bucket --object-lock-enabled-for-bucket` | works; `get-object-lock-configuration` → `Enabled` |
+| PUT with `COMPLIANCE` + retain-until | accepted; retention reads back exactly |
+| DELETE a COMPLIANCE version in-window | **AccessDenied — even with root credentials** |
+| DELETE a GOVERNANCE version, no bypass | **AccessDenied** |
+| DELETE a GOVERNANCE version, `--bypass-governance-retention` | succeeds |
+| PUT with `--object-lock-legal-hold-status ON` | accepted; reads back `ON` |
+| DELETE under legal hold | **AccessDenied** |
+| legal hold → `OFF`, then DELETE | succeeds |
+| DELETE a COMPLIANCE version *after* retain-until lapses | succeeds |
+
+So Lyve implements real S3 WORM: COMPLIANCE is genuinely un-overridable while
+the window is open (root can't escape it), GOVERNANCE is overridable only with
+the explicit bypass flag, and legal hold is an independent, releasable lock.
+COMPLIANCE is time-bound rather than permanent — the object deleted normally
+once the window closed, which is what makes the short-window technique safe.
+
+This is the concrete backing for the Vault immutability pitch (3-2-1-0, the
+"0" being zero-errors/immutable copies) and it composes with the write-only
+credentials proved above: ingest creds that can PUT but not GET/DELETE/LIST,
+writing into a COMPLIANCE-locked bucket, is a ransomware-resistant path with
+no override short of waiting out the retention.
+
+Caveat: `rprotectEnabled: true` in the console config suggests Seagate also
+ships a *proprietary* ransomware-protection feature distinct from S3 Object
+Lock. Not probed — the S3-standard path above is what the driver would use,
+and it works, so the proprietary one is only worth chasing if it offers
+something the standard API can't express.
+
 ## Storage classes — STANDARD_IA works (probed 2026-07-29)
+
+**Not a tier we intend to use** (decision 2026-07-29 — no IA in the lineup);
+recorded only so the capability isn't re-discovered later.
 
 Undocumented in the API guide we extracted, but **live on our account**:
 
@@ -126,12 +166,10 @@ read back, then fully deleted incl. versions). Both objects also came back
 `ServerSideEncryption: AES256` with a `VersionId`, consistent with the
 account-wide SSE and versioning notes above.
 
-**We have no STANDARD_IA pricing** — the tier economics in
-`.private/VAULT_SERIES_ECONOMICS.md` assume a single Lyve rate. Worth asking
-Seagate what IA costs and whether it carries the usual IA penalties (minimum
-object size, minimum storage duration, per-GB retrieval fee) before building
-any tiering on it; a transition that silently adds retrieval charges would
-hurt the Vault path specifically, since that path is read-rarely-but-fully.
+We never priced it, and won't: IA's usual penalties (minimum object size,
+minimum storage duration, per-GB retrieval fee) land badly on the Vault path,
+which is read rarely but read *in full*. If that calculus ever changes, get
+those three terms from Seagate before designing around a transition.
 
 **Working with our root S3 creds:**
 
@@ -185,9 +223,7 @@ likely unsupported); GetBucketPolicyStatus → NotImplemented;
 replication-policy param ignored, `If-None-Match: *` overwrites, SigV2
 presigned PUT 403s.
 
-**Deliberately untested:** Object Lock / legal hold / retention (WORM —
-confirmed working separately; a lock would make test buckets undeletable);
-root-auth mutators (ChangePassword, UpdateLoginProfile, RSSetUserInfo,
+**Deliberately untested:** root-auth mutators (ChangePassword, UpdateLoginProfile, RSSetUserInfo,
 RSResetPassword/GetPasswordResetToken, RS*TFA, RSSetUserAuthMethod —
 lockout risk on the root account); RSLogin (needs console password);
 reseller-only management (RSCreate/ModifyCustomer,
@@ -196,8 +232,8 @@ RSSetCustomerServiceAccessLevel).
 ## Feature matrix (probed live from SLC, 2026-07-28)
 
 Everything below was verified against real us-west-1/us-east-1 buckets, all
-probe buckets deleted afterward. Object Lock / WORM deliberately **not
-tested** — a lock would make the bucket undeletable.
+probe buckets deleted afterward. Object Lock / WORM is covered separately
+below (2026-07-29) — it *is* now tested, safely.
 
 **Works, full S3 semantics:**
 
