@@ -1,10 +1,187 @@
 # Lyve Cloud 2 Driver — Ops Manual
 
-Status (2026-07-28): **tested and usable, not a launch tier.** Lyve was
-"dropped" in July 2026 partly on a perf verdict that turned out to be a
-benchmarking artifact (see *The bucket-homing trap* below). Pricing/strategy
-still keep it out of the launch lineup, but the driver is fully functional and
-benchmarked if we ever want it (e.g. as an extra replication target).
+Status (2026-07-29): **technically ready; blocked on contract, not on code.**
+Lyve was "dropped" in July 2026 partly on a perf verdict that turned out to be
+a benchmarking artifact (see *The bucket-homing trap* below), and the driver is
+fully functional and benchmarked. But promoting it to a customer-facing launch
+tier runs into **contractual limits, read for the first time on 2026-07-29** —
+see *Contract terms* immediately below. Read that section before designing
+anything customer-facing on Lyve.
+
+## Contract terms (extracted 2026-07-29 — READ THIS FIRST)
+
+Sources: `~/Downloads/LYVE CUSTOMER AGREEMENT.pdf` (58pp) and
+`LYVE SERVICES TERMS.pdf` (65pp, version 2024-12-10), both dated 2025-08-16.
+They had sat unread since acquisition; these are the operative terms, not the
+API guide. **Not legal advice — quotes are verbatim so they can be checked.**
+
+### 1. Reselling requires Seagate's prior written authorization
+
+> "Company's resale of the Services to its customers is conditioned on
+> Seagate's **prior written authorization** and Company's compliance with the
+> Solution Provider plan terms… **Resale includes use of the Services for
+> purposes of providing the Solution Provider's services, offerings, or
+> solutions … to its resellers or end-user business customers.**"
+
+That definition covers exactly what stored.ge does: storing paying customers'
+data on Lyve and selling it as our product **is resale**, even though we never
+resell a Lyve login. `RSGetUserInfo` reports us as customer **v01** under
+reseller **global** with *customer-level* access, which is not Solution
+Provider authorization. **Unless we hold that written authorization, Lyve
+cannot lawfully back a customer-facing tier.** This is the top blocker and no
+amount of benchmarking changes it.
+
+### 2. There is no durability warranty — at all
+
+> "The warranties in this Agreement do not apply to Company Data or any other
+> data, **or any data integrity or loss**, or costs related to retrieving and
+> returning any data. **Seagate does not warrant the complete security,
+> accessibility, or inalterability of Company Data.**"
+
+No durability figure ("eleven nines" or otherwise) appears anywhere in either
+document. The only durability language we have ever had is our own qualitative
+note, "Seagate-grade durability" — which is marketing, not a commitment. Any
+customer-facing durability claim backed by Lyve would be unsupported.
+
+### 3. The SLA is uptime-only, credit-only — and excludes non-paid accounts
+
+Monthly Uptime = 100% − Error Rate, averaged over 5-minute intervals
+(request-based; intervals with no requests count as 0% error):
+
+| Monthly Uptime | Service Credit |
+|---|---|
+| < 99.5% and ≥ 99.0% | 10% |
+| < 99.0% and ≥ 95.0% | 25% |
+| < 95.0% | 100% |
+
+Credits are applied against amounts owed, are **not refundable**, are the
+**sole remedy**, and must be claimed in writing by the end of the second month
+after they accrue, with our own request logs attached. Excluded: force
+majeure, our own or third-party causes, planned downtime, and any period of
+suspension. Note the implied commitment threshold is only **99.5%**, and that
+a credit against a **$0** invoice is worth exactly nothing.
+
+### 4. Our free arrangement is almost certainly a "Non-paid Service Account"
+
+> "…evaluation accounts including, but not limited to, 'Evaluation', 'Proof of
+> Concept', 'Trial', 'Try-to-buy', **or similar non-paid offers** (each, a
+> 'Non-paid Service Account'). Non-Paid Service Account deployments are
+> **time-bound**… Seagate reserves the right to **immediately suspend** the
+> account… Seagate shall **delete all the Company Data** from the Non-paid
+> Services Account **approximately 30 days** after the earlier of termination
+> or expiration. **Non-paid Service Accounts are not covered by the Lyve Cloud
+> Service Level Requirements.**"
+
+We pay $0, so "similar non-paid offers" fits us unless Seagate says otherwise.
+If so: no SLA, time-bound by definition, suspension possible on expiry, and a
+**~30-day data-deletion clock**. This is the contractual form of the warning
+already in the strategy docs ("free deals end", "never the sole copy") — and
+it is sharper than that phrasing implies, because the deletion is automatic
+rather than a negotiation. **Confirm our account's status with Seagate in
+writing** — it is the single cheapest de-risking action available.
+
+### 5. Other terms worth knowing
+
+- **Termination for inactivity:** no active subscription for 6 months → Seagate
+  may terminate on **10 days' notice**.
+- **Termination for cause:** either party, on material breach, **30 days** to
+  cure.
+- **Warranty claims** must be raised through the Portal support menu within
+  **30 days** of discovery; SLA procedures must be exhausted first.
+- **No fee-change clause** was found in either document — pricing lives in the
+  Order, which we do not have a copy of. So the post-interim rate is
+  genuinely unknown; the `$6.37/TB` in `cmd/vaultaire/main.go:144` is our own
+  modelling constant, never a quoted or invoiced price.
+- **Infrequent Access supplement** (we are not adopting IA — recorded for
+  completeness): 180-day minimum retention, **128 KB** minimum object size,
+  monthly retrievals capped at average objects stored, US-Central and APAC
+  only, no cross-DC replication by default.
+
+### What this means in practice
+
+Lyve is excellent as what the strategy docs already make it: an internal
+buffer, restore-staging target, and a never-sole second copy, where the free
+arrangement is upside and its collapse is survivable. Turning it into a
+customer-facing tier inverts the risk — customer data would sit on a backend
+with no durability warranty, quite possibly no SLA, a resale restriction we
+may not satisfy, and a deletion clock we do not control. The gating questions
+are for Seagate and a lawyer, not for the benchmark suite:
+
+1. Do we have (or can we get) **Solution Provider authorization** in writing?
+2. Is our account a **Non-paid Service Account**, and when does it expire?
+3. What is the **post-interim rate**, and is there a minimum term or commit?
+
+## Launch-tier readiness — technical side (assessed 2026-07-29)
+
+Separate from the contract question above: *if* the contract clears, here is
+what the code and the platform actually support.
+
+### Capacity limits, measured
+
+| Limit | Measured | Notes |
+|---|---|---|
+| Bucket count | **no cap found at 211** (402 account-wide via `rs-bucket-stats`) | created 99/100 in one run; the single failure was transient, not a cap |
+| Bucket creation latency | **p50 3.4 s, p95 5.2 s, max 8.0 s** | slow. Fine for admin provisioning, far too slow to sit in a signup request |
+| `ListBuckets` latency | **~540 ms, flat** at 111 and 211 buckets | does not degrade with bucket count, but is slow for a control-plane call — don't put it on a request path |
+| IAM sub-users | 25 bulk-created, no cap hit | never pushed higher |
+| Concurrency | 128 workers, **0 errors**, 602 ops/s | see benchmark table |
+
+**Bucket-count limits do not currently bind us**, because the driver keys
+objects as `t-{tenant}/{container}/{artifact}` inside **one** bucket per region
+(`lyve.go:78`, `getBucket()` → `stored-{region}`). Tenant separation is
+Vaultaire's, in Postgres — Lyve sees a single credential. The broken
+`s3:prefix` ListBucket condition and the per-tenant-bucket ceiling therefore
+only matter if we ever hand tenants **direct** Lyve credentials (the
+direct-upload Vault design), not on the proxied path.
+
+### Quirks that are harmless to us, and why
+
+- **`If-None-Match: *` overwrites instead of 412.** Harmless: conditional
+  requests are implemented at our API layer (`internal/api/conditional.go`)
+  against our own metadata, and `engine.Driver` has no conditional-write path
+  at all, so backend conditional semantics are never relied on.
+- **No S3 event notifications.** Drain/replication scheduling must poll or
+  track writes — already the design.
+- **Bucket tagging silently dropped; `PutBucketLogging` unsupported.** We use
+  neither.
+
+### Real technical constraints
+
+- **No multi-region replication on our account** — `replication-policy` is
+  silently ignored. Data lives in exactly one region. Geo-redundancy must be
+  client-side (server-side cross-region `CopyObject` works, no client egress)
+  and **doubles stored bytes**. Any customer-facing durability or
+  regional-failover story has to account for this.
+- **Cross-region access costs ~28 ms/op warm** (39 ms home vs 67 ms wrong
+  region) — the homing trap, quantified.
+- **Lifecycle expiration is unverified** — canary due Jul 31; use our own
+  reaper until it's confirmed.
+
+### Code gaps if it becomes a selectable tier
+
+The driver itself needs nothing — it already implements the full `Driver`
+contract plus `RangeGetter` and parallel multipart, is registered in
+`cmd/vaultaire/main.go` on `LYVE_ACCESS_KEY`, and is already treated as
+durable/failover-eligible. The gaps are in the surfaces around it:
+
+- **`STANDARD_IA → lyve` routing is already live** (`internal/engine/storage_class.go`),
+  but **unreachable** — no `tier_preference` value maps to `STANDARD_IA`, so no
+  customer can select it. Note this directly contradicts
+  `docs/IMPLEMENTATION_PLAN.md:871` ("Don't route customer `STANDARD_IA` to
+  Lyve"); **the code and the plan disagree today** and one of them must change.
+- **Cost tracking would bill Lyve at $0** — `internal/usage/cost_tracker.go`
+  has no `lyve` key, and `admin_costs.go` omits it from the cost/egress/order
+  maps.
+- **Health check is commented out** (`internal/api/server.go`) and points at a
+  stale `lyvecloud.seagate.com` host.
+- **`bucketRegionDriver` hardcodes `"idrive-" + region`**, and `IsValidRegion`
+  is an iDrive-only registry — Lyve's region names differ, so bucket-region
+  routing cannot currently express a Lyve tier.
+- **`TestLanding_NoDeadProduct` asserts the landing page never contains
+  "Lyve"** — putting Lyve in customer-facing copy **fails CI** until that test
+  is revised.
+- Auto-detect omits Lyve (explicit `STORAGE_MODE=lyve` works, which is what
+  the E2E bench harness uses).
 
 ## Platform architecture (Lyve Cloud 2 / RSTOR)
 
