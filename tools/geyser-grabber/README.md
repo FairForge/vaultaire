@@ -20,13 +20,20 @@ that lift, and also fingerprints the console's API surface while it's there.
 
 | Block | Contents |
 |---|---|
-| Shell env | `export GEYSER_ACCESS_TOKEN/_USER_ID/_COOKIE` for `.env.bench` |
-| Vail API test | ready curl testing whether the console token is a Vail JWT (200 = full control plane) |
-| Console API calls | cookie-authenticated curls for `/api/buckets`, `/api/keys`, `/api/invoices`, `/api/tapeCollections` |
-| Discovered endpoints | every `/api/` or `/sl/` URL this page actually fetched, via resource timing — API discovery without DevTools |
-| Access keys / tables | rendered table contents (the S3 keypairs on `/access-keys`) |
-| Key-shaped strings | 20-char IDs and 40-char secrets found in the page text |
-| Storage + cookies | full localStorage/sessionStorage dump and raw cookie JSON |
+| Endpoint probe | GETs ~18 candidate `/api/*` paths **from inside the page**, so whatever auth the app uses applies automatically — status + response snippet each |
+| Captured auth headers | hooks `fetch`/`XHR` and records the app's own outgoing auth. `/api/keepalive` fires on a timer, so reopen the popup ~30s later to see the real scheme |
+| IndexedDB | full dump — where SPAs commonly park tokens |
+| Discovered endpoints | every `/api/` or `/sl/` URL the page actually fetched, via resource timing |
+| Tables / grids | rendered `<table>` **and** div/aria grid contents (the console's access-key list is not a real table) |
+| Key-shaped strings | 20-char IDs and 40-char secrets found in page text |
+| Shell env + cookies | `GEYSER_COOKIE` export where applicable, plus raw cookie JSON |
+| Storage dump | localStorage / sessionStorage |
+
+**Finding (2026-07-29):** the console does *not* authenticate with readable
+cookies — the only cookies on `geyserdata.com` are Wix cookies from the
+marketing site. The `accessToken`/`userId` cookie flow documented in
+`internal/drivers/geyser_admin.go` is therefore **stale**. Hence the
+probe-and-capture approach above rather than credential extraction.
 
 "Copy everything as one report" concatenates all blocks.
 
