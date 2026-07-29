@@ -77,6 +77,59 @@ supported"). STS `AssumeRole` against the shared IAM host errored with
 "Missing Action or Version param" in the 2025-11 test — unresolved, retest
 with the PDF's exact STS wire format if temp credentials are ever needed.
 
+## Feature matrix (probed live from SLC, 2026-07-28)
+
+Everything below was verified against real us-west-1/us-east-1 buckets, all
+probe buckets deleted afterward. Object Lock / WORM deliberately **not
+tested** — a lock would make the bucket undeletable.
+
+**Works, full S3 semantics:**
+
+| Feature | Notes |
+|---|---|
+| Versioning | Enable/suspend, old-version GET, delete markers, marker removal restores. Purge all versions before bucket delete. |
+| Server-side copy | 16 MB: same-bucket 0.6 s, cross-bucket 0.7 s, **cross-region 1.9 s** (west→east, zero client bandwidth) |
+| Presigned URLs | Standard SigV4 (`aws s3 presign`) AND native `POST /b/k?rs-presign=` + `ExpirationDate` (≤720 h) → JSON `{"link": ...}` |
+| Lifecycle | Expiration rules set/get/delete (don't add lock-adjacent rules) |
+| Object tagging | `x-amz-tagging` on PUT + Put/GetObjectTagging |
+| Bucket CORS | Set/get/delete |
+| SSE-S3 | On by default account-wide (AES256 on every response) |
+| SSE-C | Correct enforcement — GET without the key is rejected |
+| Checksums | `--checksum-algorithm SHA256` honored, ChecksumSHA256 returned |
+| Conditional GET | `If-None-Match` → 304 |
+| IAM sub-users | Default-deny until policy attached; CreateUser/CreateAccessKey/Delete* all work (delete keys before user or DeleteConflict) |
+| `GET /<bucket>?rs-info` | `{bucketSize, replicationPolicy, versionStatus, isPublic}` |
+
+**Broken / unavailable — the gotchas that matter:**
+
+- **Multi-region replication is NOT available to our account.** The
+  `replication-policy` bucket-create parameter is silently ignored as a
+  query param and as a header (bucket homes in the creation region no
+  matter what you pass), and 400s as a form body. `ReplicationEnforcement:
+  false` from RSAvailableRegions suggests we may choose — reality says no.
+  Geo-redundancy must be client-side: write the home region, then async
+  **server-side cross-region CopyObject** to a second-region bucket (works,
+  no client egress).
+- **No atomic create:** `PUT` with `If-None-Match: *` on an existing key
+  returns 200 and overwrites (real S3 would 412). Do not build
+  concurrency control on Lyve conditional writes.
+- `GET /speedtest/download` returns ~200 bytes, not a stream — dud.
+- Stale IAM sub-users exist from earlier experiments (`stored-*@stored.ge`
+  ×6, `servertest`) — left in place, audit before deleting. The 2025 test
+  users were cleaned up 2026-07-28.
+
+## Product fit
+
+- **Best fit: second-vendor DR/replication target for the Standard tier** —
+  real S3 semantics (versioning, copy, presign), strong concurrency
+  (778 MB/s ingest), Seagate-grade durability, and server-side cross-region
+  copy for a cheap geo story. Wire as a `ReplicationDriver` target.
+- **EU data residency option** (eu-west-1, eu-central-1 already in our
+  account) without onboarding a new vendor.
+- **Not** a primary hot tier (iDrive is cheaper with faster single-stream
+  GET) and **not** archive (Geyser is ~4× cheaper per TB). Lyve ≈
+  $6.37/TB (cost map in `cmd/vaultaire/main.go`).
+
 ## Prior art & where the old tooling lives
 
 - `~/fairforge/vaultaire-benchmark/lyve-*.sh` — Nov 2025 API sweeps:
