@@ -13,6 +13,7 @@ func TestNewReplicationManager(t *testing.T) {
 
 	if rm == nil {
 		t.Fatal("expected non-nil manager")
+		return
 	}
 	if rm.config == nil {
 		t.Error("expected default config")

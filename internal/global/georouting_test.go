@@ -13,6 +13,7 @@ func TestNewGeoRouter(t *testing.T) {
 
 	if router == nil {
 		t.Fatal("expected non-nil router")
+		return
 	}
 	if router.config == nil {
 		t.Error("expected default config")

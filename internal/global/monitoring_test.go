@@ -14,6 +14,7 @@ func TestNewGlobalMonitor(t *testing.T) {
 
 	if gm == nil {
 		t.Fatal("expected non-nil monitor")
+		return
 	}
 	if gm.config == nil {
 		t.Error("expected default config")

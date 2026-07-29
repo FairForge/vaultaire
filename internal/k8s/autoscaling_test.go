@@ -102,6 +102,7 @@ func TestGenerateHPAWithBehavior(t *testing.T) {
 
 	if hpa.Spec.Behavior == nil {
 		t.Fatal("expected behavior to be set")
+		return
 	}
 	if *hpa.Spec.Behavior.ScaleUp.StabilizationWindowSeconds != 0 {
 		t.Error("expected scale up stabilization window 0")
@@ -195,6 +196,7 @@ func TestHPABuilderWithBehavior(t *testing.T) {
 
 	if hpa.Spec.Behavior == nil {
 		t.Fatal("expected behavior to be set")
+		return
 	}
 	if len(hpa.Spec.Behavior.ScaleUp.Policies) != 2 {
 		t.Error("expected 2 scale up policies")
@@ -267,6 +269,7 @@ func TestGenerateVPAWithContainerPolicies(t *testing.T) {
 
 	if vpa.Spec.ResourcePolicy == nil {
 		t.Fatal("expected resource policy")
+		return
 	}
 	if len(vpa.Spec.ResourcePolicy.ContainerPolicies) != 1 {
 		t.Fatal("expected 1 container policy")

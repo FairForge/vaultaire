@@ -392,6 +392,7 @@ func TestIngressBuilderWithDefaultBackend(t *testing.T) {
 
 	if ingress.Spec.DefaultBackend == nil {
 		t.Fatal("expected default backend")
+		return
 	}
 	if ingress.Spec.DefaultBackend.Service.Name != "default-service" {
 		t.Error("expected default-service name")

@@ -33,6 +33,7 @@ func TestNewBatchProcessor(t *testing.T) {
 
 	if bp == nil {
 		t.Fatal("expected non-nil")
+		return
 	}
 }
 

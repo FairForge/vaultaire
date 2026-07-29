@@ -13,6 +13,7 @@ func TestNewComplianceManager(t *testing.T) {
 
 	if cm == nil {
 		t.Fatal("expected non-nil manager")
+		return
 	}
 
 	// Should have default requirements loaded
@@ -222,6 +223,7 @@ func TestComplianceManagerFindCompliantLocation(t *testing.T) {
 	loc := cm.FindCompliantLocation(48.86, 2.35, []ComplianceFramework{ComplianceGDPR})
 	if loc == nil {
 		t.Fatal("expected to find location")
+		return
 	}
 	// Frankfurt is closer to Paris than Dublin
 	if loc.ID != "eu-central-1" {

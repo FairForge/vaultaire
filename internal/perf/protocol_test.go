@@ -25,6 +25,7 @@ func TestNewProtocolOptimizer(t *testing.T) {
 
 	if opt == nil {
 		t.Fatal("expected non-nil optimizer")
+		return
 	}
 	if opt.config == nil {
 		t.Error("expected default config")

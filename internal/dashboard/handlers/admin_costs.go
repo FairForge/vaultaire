@@ -26,6 +26,7 @@ const (
 var backendCostPerTBCents = map[string]int64{
 	"geyser":     155, // $1.55/TB
 	"idrive":     330, // $3.30/TB
+	"lyve":       799, // $7.99/TB — see note in internal/usage/cost_tracker.go
 	"hetzner":    381, // ~€3.81/TB
 	"permafrost": 0,
 	"gorilla":    0,
@@ -34,15 +35,59 @@ var backendCostPerTBCents = map[string]int64{
 }
 
 // egressCostPerTBCents maps backend names to their per-TB egress cost in cents.
-// Currently $0 across the board — will matter once BYOB/edge nodes are wired.
+//
+// These are MODELLED market rates, not invoices. Lyve's own contract defines no
+// egress fee (the words "egress" and "bandwidth" appear nowhere in it) — its
+// limit on heavy reads is a fair-use throughput allocation, not a charge. We
+// still carry a rate here so the dashboard can answer "what would this traffic
+// cost at market rates", which is the bar self-hosted storage has to beat.
+// $10/TB ($0.01/GB) matches the iDrive and Quotaless overage rate.
+// Switch the dashboard to ?costs=invoiced to see what we are actually billed.
 var egressCostPerTBCents = map[string]int64{
 	"geyser":     0,
 	"idrive":     0,
+	"lyve":       1000, // $10/TB modelled — see subsidizedBackends
 	"hetzner":    0,
 	"permafrost": 0,
 	"gorilla":    0,
 	"local":      0,
 	"edge":       0,
+}
+
+// subsidizedBackends are backends that carry a modelled rate above but bill us
+// nothing today, so the two cost views diverge. Lyve is $0 under a 1-year SaaS
+// promo whose end date we do not yet have in writing; when it ends, the
+// modelled figure is what we start paying. The gap between the two views is
+// the subsidy we are currently living on.
+var subsidizedBackends = map[string]bool{
+	"lyve": true,
+}
+
+// costMode selects which rate card the admin costs page applies.
+type costMode string
+
+const (
+	// costModeModelled charges every backend its full rate card, including
+	// backends currently on a promo. This is the planning number.
+	costModeModelled costMode = "modelled"
+	// costModeInvoiced zeroes subsidized backends to show real current spend.
+	costModeInvoiced costMode = "invoiced"
+)
+
+func parseCostMode(s string) costMode {
+	if s == string(costModeInvoiced) {
+		return costModeInvoiced
+	}
+	return costModeModelled
+}
+
+// ratesFor returns the storage and egress rate to apply to a backend under the
+// given mode. In invoiced mode a subsidized backend costs nothing.
+func ratesFor(backend string, mode costMode) (storagePerTB, egressPerTB int64) {
+	if mode == costModeInvoiced && subsidizedBackends[backend] {
+		return 0, 0
+	}
+	return backendCostPerTBCents[backend], egressCostPerTBCents[backend]
 }
 
 // tierBackend maps a tenant's plan/tier to the intended storage backend.
@@ -80,6 +125,12 @@ type actualBackendRow struct {
 	ObjectCount int64
 	StorageFmt  string
 	StorageTB   float64
+	// CostFmt is the storage cost of these real bytes under the active mode.
+	CostFmt string
+	// ModelledFmt is always the full-rate-card cost, regardless of mode, so a
+	// subsidized backend still shows what it will cost when the promo ends.
+	ModelledFmt string
+	Subsidized  bool
 }
 
 type marginRow struct {
@@ -117,10 +168,17 @@ func HandleAdminCosts(tmpl *template.Template, db *sql.DB, logger *zap.Logger) h
 		data["ByBackend"] = []backendCostRow{}
 		data["MarginTable"] = []marginRow{}
 		data["ActualByBackend"] = []actualBackendRow{}
+		data["ModelledSpendFmt"] = "$0.00"
+		data["InvoicedSpendFmt"] = "$0.00"
+		data["SubsidyFmt"] = "$0.00"
+
+		mode := parseCostMode(r.URL.Query().Get("costs"))
+		data["CostMode"] = string(mode)
+		data["IsInvoicedView"] = mode == costModeInvoiced
 
 		if db != nil {
 			populateCosts(r.Context(), db, data, logger)
-			populateActualBackends(r.Context(), db, data, logger)
+			populateActualBackends(r.Context(), db, data, logger, mode)
 		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -214,7 +272,7 @@ func populateCosts(ctx context.Context, db *sql.DB, data map[string]any, logger 
 	totalCostCents += geyserFloorCents + gorillaFixedCents
 
 	// Build backend table rows.
-	backendOrder := []string{"geyser", "idrive", "hetzner", "permafrost", "gorilla", "local", "edge"}
+	backendOrder := []string{"geyser", "idrive", "lyve", "hetzner", "permafrost", "gorilla", "local", "edge"}
 	var byBackend []backendCostRow
 	for _, name := range backendOrder {
 		agg := backends[name]
@@ -320,7 +378,7 @@ func formatSignedCents(cents int64) string {
 	return fmt.Sprintf("$%.2f", float64(cents)/100)
 }
 
-func populateActualBackends(ctx context.Context, db *sql.DB, data map[string]any, logger *zap.Logger) {
+func populateActualBackends(ctx context.Context, db *sql.DB, data map[string]any, logger *zap.Logger, mode costMode) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT backend_name, COUNT(*), COALESCE(SUM(size_bytes), 0)
 		FROM object_locations GROUP BY backend_name
@@ -332,6 +390,7 @@ func populateActualBackends(ctx context.Context, db *sql.DB, data map[string]any
 	defer func() { _ = rows.Close() }()
 
 	var actual []actualBackendRow
+	var modelledTotal, invoicedTotal int64
 	for rows.Next() {
 		var r actualBackendRow
 		var storageBytes int64
@@ -342,8 +401,29 @@ func populateActualBackends(ctx context.Context, db *sql.DB, data map[string]any
 		storageTB := float64(storageBytes) / bytesPerTBCost
 		r.StorageTB = math.Round(storageTB*100) / 100
 		r.StorageFmt = formatBytes(storageBytes)
+
+		perTB, _ := ratesFor(r.Backend, mode)
+		modelledPerTB := backendCostPerTBCents[r.Backend]
+		costCents := int64(math.Round(storageTB * float64(perTB)))
+		modelledCents := int64(math.Round(storageTB * float64(modelledPerTB)))
+
+		r.CostFmt = formatCents(costCents)
+		r.ModelledFmt = formatCents(modelledCents)
+		r.Subsidized = subsidizedBackends[r.Backend]
+
+		modelledTotal += modelledCents
+		if mode == costModeInvoiced {
+			invoicedTotal += costCents
+		} else if !r.Subsidized {
+			invoicedTotal += costCents
+		}
+
 		actual = append(actual, r)
 	}
+
+	data["ModelledSpendFmt"] = formatCents(modelledTotal)
+	data["InvoicedSpendFmt"] = formatCents(invoicedTotal)
+	data["SubsidyFmt"] = formatCents(modelledTotal - invoicedTotal)
 
 	if len(actual) > 0 {
 		data["ActualByBackend"] = actual

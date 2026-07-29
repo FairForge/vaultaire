@@ -16,6 +16,7 @@ func TestMetrics_Initialization(t *testing.T) {
 
 	if metrics == nil {
 		t.Fatal("Metrics should not be nil")
+		return
 	}
 
 	// Should have request counter

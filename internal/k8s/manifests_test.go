@@ -352,6 +352,7 @@ func TestDeploymentSecurityContext(t *testing.T) {
 	// Verify container security context
 	if container.SecurityContext == nil {
 		t.Fatal("expected container security context")
+		return
 	}
 	if container.SecurityContext.RunAsNonRoot == nil || !*container.SecurityContext.RunAsNonRoot {
 		t.Error("expected runAsNonRoot to be true")
@@ -370,6 +371,7 @@ func TestDeploymentSecurityContext(t *testing.T) {
 	podSecurity := spec.Template.Spec.SecurityContext
 	if podSecurity == nil {
 		t.Fatal("expected pod security context")
+		return
 	}
 	if podSecurity.RunAsNonRoot == nil || !*podSecurity.RunAsNonRoot {
 		t.Error("expected pod runAsNonRoot to be true")
@@ -396,6 +398,7 @@ func TestDeploymentProbes(t *testing.T) {
 
 	if container.LivenessProbe == nil {
 		t.Fatal("expected liveness probe")
+		return
 	}
 	if container.LivenessProbe.HTTPGet.Path != "/healthz" {
 		t.Errorf("expected liveness path '/healthz', got '%s'", container.LivenessProbe.HTTPGet.Path)
@@ -406,6 +409,7 @@ func TestDeploymentProbes(t *testing.T) {
 
 	if container.ReadinessProbe == nil {
 		t.Fatal("expected readiness probe")
+		return
 	}
 	if container.ReadinessProbe.HTTPGet.Path != "/healthz" {
 		t.Errorf("expected readiness path '/healthz', got '%s'", container.ReadinessProbe.HTTPGet.Path)

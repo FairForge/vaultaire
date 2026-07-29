@@ -13,6 +13,7 @@ func TestNewBackupManager(t *testing.T) {
 
 	if bm == nil {
 		t.Fatal("BackupManager is nil")
+		return
 	}
 	if bm.configs == nil {
 		t.Error("configs map not initialized")
@@ -437,6 +438,7 @@ func TestDefaultBackupConfigs(t *testing.T) {
 
 	if dailyFull == nil {
 		t.Fatal("daily-full config not found")
+		return
 	}
 	if dailyFull.Type != BackupFull {
 		t.Errorf("Expected full backup, got %s", dailyFull.Type)

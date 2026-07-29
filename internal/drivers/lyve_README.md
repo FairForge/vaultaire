@@ -1,10 +1,236 @@
 # Lyve Cloud 2 Driver — Ops Manual
 
-Status (2026-07-28): **tested and usable, not a launch tier.** Lyve was
-"dropped" in July 2026 partly on a perf verdict that turned out to be a
-benchmarking artifact (see *The bucket-homing trap* below). Pricing/strategy
-still keep it out of the launch lineup, but the driver is fully functional and
-benchmarked if we ever want it (e.g. as an extra replication target).
+Status (2026-07-29): **cleared for launch-tier use; one commercial unknown.**
+
+- **Legal:** authorized reseller, **paid** account, Non-paid deletion clause
+  does **not** apply, SLA in force. Lyve can back a customer-facing tier.
+- **Multi-tenancy:** prefix scoping **works** via resource ARNs (previously
+  recorded as broken — see *Prefix scoping DOES work*). Per-tenant buckets are
+  unnecessary and bucket counts are not a tenant ceiling.
+- **Performance:** benchmarked on **both** the direct and engine paths.
+- **The open question:** the account is at $0 under a **1-year SaaS promo whose
+  end date and renewal rate we do not have in writing**. That date is when
+  Lyve COGS goes from $0 to an unknown number, and our modelled $6.37/TB is
+  above every tier's selling price. Get it in writing before committing large
+  volumes of customer data (§4).
+- **Design around:** no durability warranty at all, and no multi-region
+  replication on our account — so Lyve should not hold the only copy.
+
+Lyve was "dropped" in July 2026 partly on a perf verdict that turned out to be
+a benchmarking artifact (see *The bucket-homing trap* below). Read *Contract
+terms* below before designing anything customer-facing on Lyve.
+
+## Contract terms (extracted 2026-07-29 — READ THIS FIRST)
+
+Sources: `~/Downloads/LYVE CUSTOMER AGREEMENT.pdf` (58pp) and
+`LYVE SERVICES TERMS.pdf` (65pp, version 2024-12-10), both dated 2025-08-16.
+They had sat unread since acquisition; these are the operative terms, not the
+API guide. **Not legal advice — quotes are verbatim so they can be checked.**
+
+### 1. Reselling requires Seagate's prior written authorization
+
+> "Company's resale of the Services to its customers is conditioned on
+> Seagate's **prior written authorization** and Company's compliance with the
+> Solution Provider plan terms… **Resale includes use of the Services for
+> purposes of providing the Solution Provider's services, offerings, or
+> solutions … to its resellers or end-user business customers.**"
+
+That definition covers exactly what stored.ge does: storing paying customers'
+data on Lyve and selling it as our product **is resale**, even though we never
+resell a Lyve login.
+
+**Status: we are an authorized reseller** (owner, 2026-07-29), so this
+requirement is satisfied and is *not* a blocker. Keep the written
+authorization and the Solution Provider Plan acceptance filed with the launch
+records.
+
+**Reseller-level *API* access is a separate thing, and it is gated on a 1 PB
+commitment** (owner, 2026-07-29). That is why `RSGetUserInfo` reports us as
+customer **v01** under reseller **global** with *customer-level* RS access, and
+why `RSLiveBilling` / `RSListCustomer` / `RSCustomerDetails` return
+Unauthorized. Being an authorized reseller does not by itself unlock them.
+Treat this as settled rather than as a support ticket to chase — at ~33 GB
+stored today, 1 PB is not a near-term threshold.
+
+The practical consequence: **`RSListBillingData` is the only usage/billing API
+we can reach, and reseller live-billing is unavailable, so automated COGS
+reconciliation against a Lyve invoice is off the table.** If we need
+invoice-level reconciliation before 1 PB, it has to come from the console
+billing view or the invoices themselves, not the API.
+
+### 2. There is no durability warranty — at all
+
+> "The warranties in this Agreement do not apply to Company Data or any other
+> data, **or any data integrity or loss**, or costs related to retrieving and
+> returning any data. **Seagate does not warrant the complete security,
+> accessibility, or inalterability of Company Data.**"
+
+No durability figure ("eleven nines" or otherwise) appears anywhere in either
+document. The only durability language we have ever had is our own qualitative
+note, "Seagate-grade durability" — which is marketing, not a commitment. Any
+customer-facing durability claim backed by Lyve would be unsupported.
+
+### 3. The SLA is uptime-only and credit-only (it does apply to us — see §4)
+
+Monthly Uptime = 100% − Error Rate, averaged over 5-minute intervals
+(request-based; intervals with no requests count as 0% error):
+
+| Monthly Uptime | Service Credit |
+|---|---|
+| < 99.5% and ≥ 99.0% | 10% |
+| < 99.0% and ≥ 95.0% | 25% |
+| < 95.0% | 100% |
+
+Credits are applied against amounts owed, are **not refundable**, are the
+**sole remedy**, and must be claimed in writing by the end of the second month
+after they accrue, with our own request logs attached. Excluded: force
+majeure, our own or third-party causes, planned downtime, and any period of
+suspension. Note the implied commitment threshold is only **99.5%**, and that
+a credit against a **$0** invoice is worth exactly nothing.
+
+### 4. Account status: PAID, on a 1-year SaaS promo (owner, 2026-07-29)
+
+**We are a paid account currently at $0 under a 1-year SaaS promotional
+offer** — *not* a Non-paid Service Account. That materially improves the
+picture, and supersedes the earlier reading in this file:
+
+- The **Non-paid Service Account clause does not apply**. No automatic ~30-day
+  data deletion, no "time-bound evaluation" suspension right. Those were the
+  scariest terms and they are off the table.
+- **The SLA in §3 is in force**, since that exclusion only covers non-paid
+  accounts.
+
+Two caveats survive, and they are the ones to plan around:
+
+- **Service credits are computed as a percentage of fees owed.** At $0 during
+  the promo, a 100%-credit month is still worth **$0**. The SLA applies but its
+  remedy is nil until we are paying — so uptime risk during the promo year is
+  economically uncompensated, whatever the contract says.
+- **The promo is a one-year term, so it has an end date, and we do not have
+  it written down.** `RSGetUserInfo` reports the account created
+  **2025-06-13**; if the promo ran from creation it would already have lapsed,
+  so it evidently starts later or renewed. **Get the exact promo end date and
+  the renewal rate in writing** and record them here — that date is when COGS
+  for anything sitting on Lyve changes from $0 to an unknown number, and it is
+  the single most important unknown left about this backend.
+
+### 5. Other terms worth knowing
+
+- **Termination for inactivity:** no active subscription for 6 months → Seagate
+  may terminate on **10 days' notice**.
+- **Termination for cause:** either party, on material breach, **30 days** to
+  cure.
+- **Warranty claims** must be raised through the Portal support menu within
+  **30 days** of discovery; SLA procedures must be exhausted first.
+- **No fee-change clause** was found in either document — pricing lives in the
+  Order, which we do not have a copy of. So the post-interim rate is
+  genuinely unknown; the `$6.37/TB` in `cmd/vaultaire/main.go:144` is our own
+  modelling constant, never a quoted or invoiced price.
+- **Infrequent Access supplement** (we are not adopting IA — recorded for
+  completeness): 180-day minimum retention, **128 KB** minimum object size,
+  monthly retrievals capped at average objects stored, US-Central and APAC
+  only, no cross-DC replication by default.
+
+### What this means in practice
+
+As of 2026-07-29 the legal picture is **clear enough to build on**: we are an
+authorized reseller, the account is paid, the Non-paid deletion clause does not
+apply, and the SLA is in force. Lyve can back a customer-facing tier.
+
+What remains is **one commercial unknown and two facts to design around**:
+
+1. **The promo end date and renewal rate are not written down** (§4). This is
+   the only real blocker left, and it is a question, not a risk we can engineer
+   away. Everything on Lyve has $0 COGS until that date and an unknown COGS
+   after it. The `$6.37/TB` we model is *above every tier's selling price*
+   ($4.49 Standard annual, $5.99 Performance), so if the renewal lands near
+   that number, any tier backed solely by Lyve is negative-margin the day the
+   promo ends. **Get the date and the rate before sizing how much customer data
+   goes here.**
+2. **No durability warranty** (§2), so no customer-facing durability claim can
+   cite Lyve, and Lyve should not hold the only copy of anything. That is
+   already the strategy-doc position and it should stay.
+3. **Service credits are worth $0 while we pay $0** (§3–4), so uptime risk is
+   economically uncompensated during the promo year even though the SLA
+   nominally applies.
+
+Read together: Lyve is now safe to use as a *replicated* tier or a
+second-copy/staging path, and the sensible sequencing is to grow data on it in
+step with confidence about the renewal rate rather than committing the whole
+Vault path to it before that date is known.
+
+## Launch-tier readiness — technical side (assessed 2026-07-29)
+
+Separate from the contract question above: *if* the contract clears, here is
+what the code and the platform actually support.
+
+### Capacity limits, measured
+
+| Limit | Measured | Notes |
+|---|---|---|
+| Bucket count | **no cap found at 211** (402 account-wide via `rs-bucket-stats`) | created 99/100 in one run; the single failure was transient, not a cap |
+| Bucket creation latency | **p50 3.4 s, p95 5.2 s, max 8.0 s** | slow. Fine for admin provisioning, far too slow to sit in a signup request |
+| `ListBuckets` latency | **~540 ms, flat** at 111 and 211 buckets | does not degrade with bucket count, but is slow for a control-plane call — don't put it on a request path |
+| IAM sub-users | 25 bulk-created, no cap hit | never pushed higher |
+| Concurrency | 128 workers, **0 errors**, 602 ops/s | see benchmark table |
+
+**Bucket-count limits never bind us.** On the proxied path the driver keys
+objects as `t-{tenant}/{container}/{artifact}` inside **one** bucket per region
+(`lyve.go:78`, `getBucket()` → `stored-{region}`), so tenant separation is
+Vaultaire's, in Postgres, and Lyve sees a single credential. And on the
+*direct*-credential path, **prefix scoping works** via resource ARNs (see
+*Prefix scoping DOES work* below) — so per-tenant buckets are not needed there
+either. The 3.4 s bucket-creation cost is therefore an admin-provisioning
+detail, not a per-tenant signup cost.
+
+### Quirks that are harmless to us, and why
+
+- **`If-None-Match: *` overwrites instead of 412.** Harmless: conditional
+  requests are implemented at our API layer (`internal/api/conditional.go`)
+  against our own metadata, and `engine.Driver` has no conditional-write path
+  at all, so backend conditional semantics are never relied on.
+- **No S3 event notifications.** Drain/replication scheduling must poll or
+  track writes — already the design.
+- **Bucket tagging silently dropped; `PutBucketLogging` unsupported.** We use
+  neither.
+
+### Real technical constraints
+
+- **No multi-region replication on our account** — `replication-policy` is
+  silently ignored. Data lives in exactly one region. Geo-redundancy must be
+  client-side (server-side cross-region `CopyObject` works, no client egress)
+  and **doubles stored bytes**. Any customer-facing durability or
+  regional-failover story has to account for this.
+- **Cross-region access costs ~28 ms/op warm** (39 ms home vs 67 ms wrong
+  region) — the homing trap, quantified.
+- **Lifecycle expiration is unverified** — canary due Jul 31; use our own
+  reaper until it's confirmed.
+
+### Code gaps if it becomes a selectable tier
+
+The driver itself needs nothing — it already implements the full `Driver`
+contract plus `RangeGetter` and parallel multipart, is registered in
+`cmd/vaultaire/main.go` on `LYVE_ACCESS_KEY`, and is already treated as
+durable/failover-eligible. The gaps are in the surfaces around it:
+
+- **`STANDARD_IA → lyve` routing is already live** (`internal/engine/storage_class.go`),
+  but **unreachable** — no `tier_preference` value maps to `STANDARD_IA`, so no
+  customer can select it. Note this directly contradicts
+  `docs/IMPLEMENTATION_PLAN.md:871` ("Don't route customer `STANDARD_IA` to
+  Lyve"); **the code and the plan disagree today** and one of them must change.
+- **Cost tracking would bill Lyve at $0** — `internal/usage/cost_tracker.go`
+  has no `lyve` key, and `admin_costs.go` omits it from the cost/egress/order
+  maps.
+- **Health check is commented out** (`internal/api/server.go`) and points at a
+  stale `lyvecloud.seagate.com` host.
+- **`bucketRegionDriver` hardcodes `"idrive-" + region`**, and `IsValidRegion`
+  is an iDrive-only registry — Lyve's region names differ, so bucket-region
+  routing cannot currently express a Lyve tier.
+- **`TestLanding_NoDeadProduct` asserts the landing page never contains
+  "Lyve"** — putting Lyve in customer-facing copy **fails CI** until that test
+  is revised.
+- Auto-detect omits Lyve (explicit `STORAGE_MODE=lyve` works, which is what
+  the E2E bench harness uses).
 
 ## Platform architecture (Lyve Cloud 2 / RSTOR)
 
@@ -388,6 +614,79 @@ with `rs-bucket-stats`, not `list-buckets`.** Harmless while Lyve is on the
 free interim, but this is the cleanup list if it ever goes metered (and the
 299 empties should go regardless — they are pure namespace noise).
 
+### Historical billing (`RSListBillingData`, pulled 2026-07-29)
+
+Reseller live-billing is gated behind 1 PB, but **customer-level
+`RSListBillingData` works and is the usage history we do have.** Gotcha: the
+dates need **milliseconds** — `2026-07-29T00:00:00.000Z`. Without them the API
+returns `IAM: Invalid request params`.
+
+```bash
+curl -s --aws-sigv4 "aws:amz:us-east-1:iam" --user "$AK:$SK" \
+  -X POST https://iam.global.lyve.seagate.com/ \
+  --data-urlencode "Action=RSListBillingData" \
+  --data-urlencode "Version=2010-05-08" \
+  --data-urlencode "From=2025-06-01T00:00:00.000Z" \
+  --data-urlencode "Till=2026-07-29T00:00:00.000Z"
+```
+
+Returns `Stats` (per-datacenter daily upload/download/delete bytes),
+`UsedSpace` (used/expired/ghost) and `ObjectCount` — 424 daily entries each,
+in *chronological* order despite the guide saying reverse. `UseDecimalByte:
+true`.
+
+14 months of history (Jul 2025 → Jul 2026), 182 active days across all 7 DCs:
+
+| Datacenter | Upload GB | Download GB | Delete GB |
+|---|---|---|---|
+| US-EAST-1 | 341.6 | 25.0 | 310.3 |
+| US-WEST-1 | 86.5 | 20.5 | 76.2 |
+| US-CENTRAL-2 | 25.9 | 16.0 | 44.3 |
+| EU-WEST-1 | 14.7 | 14.4 | 12.3 |
+| AP-SOUTHEAST-1 / AP-NORTHEAST-1 / EU-CENTRAL-1 | 20.1 | 26.5 | 19.1 |
+| **Total** | **488.7** | **102.4** | **462.3** |
+
+Current stored **46.6 GiB / 19,576 objects**, peak 50.2 GiB (2025-07-16),
+**zero ghost space**. Upload ≈ delete (489 vs 462 GB) confirms this is
+benchmark churn, not accumulation.
+
+**The number that matters for the egress question: lifetime egress is
+102 GB against 489 GB ingest — a 0.21× read:write ratio, ~7 GB/month.** We
+have never come close to stressing Lyve's read path.
+
+At the tracked $7.99/TB, today's 46.6 GiB would cost **$0.36/mo** — which is
+the point of tracking it: the number is currently trivial, so wire it up now
+and let it grow visibly rather than discovering it at renewal.
+
+## Egress: not priced, but rate-allocated (contract, 2026-07-29)
+
+**The words "egress" and "bandwidth" appear nowhere in either contract.** There
+is no egress fee to model — Lyve's no-egress-fees positioning is consistent
+with the paperwork. What exists instead is a **Fair-use Policy**:
+
+> "Seagate dynamically controls the amount of concurrent API requests as well
+> as the upload, download, and Services resources. The resource allocations
+> for each account depend on the storage volume. For example, an account with
+> **1 PB or more** of Lyve Cloud Services storage will receive a **higher
+> resource allocation** than an account with 1 TB."
+
+So heavy reads are **throttled, not billed**, and our allocation scales with
+how much we store — at ~47 GB we sit at the bottom of that ladder. (Same 1 PB
+threshold as the reseller-API gate; it is Seagate's recurring tier boundary.)
+
+Consequence for cost modelling: **egress stays at $0 in the cost maps, because
+that is the truth.** Pricing it would model the wrong failure mode — budgeting
+dollars against a risk that actually manifests as slow transfers. The metric
+to watch is the **egress:stored ratio and observed throughput**, not a dollar
+figure. Two supporting facts: `CostOptimizer.egress` is currently written by
+`SetEgressCosts` but never read, so a non-zero value would change no routing
+today; and `egressCostPerTBCents` feeds the admin *actual-spend* table, where
+a fictional cost would make real margin reporting wrong.
+
+The one place a non-zero egress number belongs is **replacement planning** —
+if Lyve is swapped for a vendor that does meter egress, model that in the tier
+economics docs, not in the live cost map.
+
 ## IAM credential-scoping probes (2026-07-29, live from SLC)
 
 Script pattern: create user → create policy → attach → create key → wait
@@ -397,13 +696,63 @@ Script pattern: create user → create policy → attach → create key → wait
 |---|---|
 | **Write-only creds** (`s3:PutObject` only) | **ENFORCED** — PUT ok; GET, DELETE, LIST all denied. Ransomware-resistant backup ingest credentials work today. |
 | Object-level prefix scoping (`Resource: bucket/tenant-a/*`) | **ENFORCED** — PUT/GET own prefix ok, PUT other prefix denied |
-| **`s3:prefix` Condition on ListBucket** | **BROKEN** — allow-with-condition denies every variant (`tenant-a`, `tenant-a/`, `tenant-a/*`, exact-match list). LC2 does not honor conditions on List allows. |
+| **`s3:prefix` Condition on ListBucket** | **Not implemented** — allow-with-condition denies every variant. But conditions are the wrong tool; see below. |
 
-Design consequence: a tenant inside a shared bucket can be write/read-scoped
-but can never LIST its own keys — which restic/rclone need. **Per-tenant
-staging buckets are therefore the multi-tenancy unit** (bucket-scoped
-policies incl. ListBucket verified enforced 2026-07-28; `rs-bucket-stats`
-gives per-tenant usage; no documented bucket cap).
+### Prefix scoping DOES work — via Resource ARNs, not Conditions (2026-07-29)
+
+**This supersedes the earlier "per-tenant staging buckets are the
+multi-tenancy unit" conclusion.** That conclusion was drawn from testing only
+`s3:prefix` *Conditions*, which LC2 does not implement at all — the LC2 API
+guide documents **zero** IAM condition keys, and its own policy examples scope
+with wildcard resource ARNs (`"Resource":"arn:aws:s3:::abc-bucket*"`). Scope by
+**resource ARN** and prefix isolation works today:
+
+```json
+{"Version":"2012-10-17","Statement":[{
+  "Effect":"Allow",
+  "Action":["s3:ListBucket","s3:GetObject","s3:PutObject","s3:DeleteObject"],
+  "Resource":["arn:aws:s3:::BUCKET/tenant-a/*"]}]}
+```
+
+Measured with that policy on a sub-user (reproduced 4×, 15 s propagation):
+
+| Operation | Result |
+|---|---|
+| `list-objects-v2 --prefix tenant-a/` | **OK** |
+| `list-objects-v2 --prefix tenant-b/` | **DENIED** |
+| GET / PUT under `tenant-a/` | **OK** |
+| GET / PUT under `tenant-b/` | **DENIED** |
+| `list-objects-v2` with **no prefix** | **OK — returns every key in the bucket** ⚠ |
+
+So **per-tenant buckets are not required**, and Lyve bucket counts never
+become a tenant ceiling. Note `ListBucket` must be granted on the *object*
+ARN (`bucket/tenant-a/*`), which is not how AWS models it — on AWS, ListBucket
+takes the bucket ARN. Granting only the bare bucket ARN gives the inverse:
+root listing works, prefixed listing is denied. The wildcard form
+`bucket/tenant-a*` (no slash) is **rejected** by `CreatePolicy`; use
+`bucket/tenant-a/*`.
+
+**The one hole: an unprefixed LIST returns every key in the bucket.** An
+explicit `Deny` on `s3:ListBucket` for the bare bucket ARN does *not* close it
+(verified twice). The tenant still cannot read or write anything outside its
+prefix — this is a **key-name disclosure, not a data leak** — but it does mean
+a tenant holding raw Lyve credentials can enumerate other tenants' object
+names. Three ways to live with that, in order of preference:
+
+1. **Don't hand out Lyve credentials at all.** Presigned URLs work for both
+   GET and PUT (SigV4, `addressing_style: path` — verified 200; the earlier
+   "presigned PUT 403s" note was an artifact of `aws s3 presign`, which only
+   ever emits GET URLs). Vaultaire already holds the listing in Postgres, so
+   it can serve LIST itself and hand out presigned URLs for data — zero
+   disclosure, zero per-tenant IAM to manage, and still zero SLC bandwidth on
+   the data path.
+2. **Make key names non-revealing** (opaque/hashed keys), which renders the
+   enumeration useless.
+3. **Accept it** where tenants are not mutually untrusted.
+
+None of this affects the **proxied** path we run today, where Vaultaire holds
+one credential and keys objects `t-{tenant}/…` inside one bucket — tenant
+isolation there is ours, in Postgres, and was never dependent on Lyve IAM.
 
 No S3 event notifications exist on LC2 (word absent from the guide) —
 drain/replication scheduling must poll or track writes. ALPN: the S3

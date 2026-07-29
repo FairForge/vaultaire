@@ -76,6 +76,7 @@ func TestSpikeTester_Run_SingleSpike(t *testing.T) {
 	}
 	if result == nil {
 		t.Fatal("expected result, got nil")
+		return
 	}
 	if result.TotalRequests == 0 {
 		t.Error("expected some requests")

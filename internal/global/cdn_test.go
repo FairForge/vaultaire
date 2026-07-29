@@ -14,6 +14,7 @@ func TestNewCDNManager(t *testing.T) {
 	m := NewCDNManager()
 	if m == nil {
 		t.Fatal("expected non-nil manager")
+		return
 	}
 	if m.clients == nil {
 		t.Error("expected initialized clients map")
@@ -164,6 +165,7 @@ func TestCloudflarePurge(t *testing.T) {
 
 	if client == nil {
 		t.Fatal("expected non-nil client")
+		return
 	}
 }
 
@@ -413,6 +415,7 @@ func TestCDNManagerGetMetrics(t *testing.T) {
 	metrics := m.GetMetrics()
 	if metrics == nil {
 		t.Fatal("expected non-nil metrics")
+		return
 	}
 
 	cfMetrics, ok := metrics[CDNCloudflare]

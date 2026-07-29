@@ -21,6 +21,7 @@ func TestNewKeyManager(t *testing.T) {
 	}
 	if km == nil {
 		t.Fatal("KeyManager is nil")
+		return
 	}
 }
 
@@ -37,6 +38,7 @@ func TestNewKeyManager_HexKey(t *testing.T) {
 	}
 	if km == nil {
 		t.Fatal("KeyManager is nil")
+		return
 	}
 }
 

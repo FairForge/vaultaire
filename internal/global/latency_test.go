@@ -13,6 +13,7 @@ func TestNewLatencyOptimizer(t *testing.T) {
 
 	if lo == nil {
 		t.Fatal("expected non-nil optimizer")
+		return
 	}
 	if lo.config == nil {
 		t.Error("expected default config")
@@ -218,6 +219,7 @@ func TestLatencyOptimizerGetOptimalLocation(t *testing.T) {
 	loc := lo.GetOptimalLocation(41, -73) // Near NYC
 	if loc == nil {
 		t.Fatal("expected location")
+		return
 	}
 	if loc.ID != "loc-1" {
 		t.Errorf("expected loc-1 (closer), got %s", loc.ID)

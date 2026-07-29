@@ -28,6 +28,7 @@ func TestS3Driver_NewS3Driver(t *testing.T) {
 	}
 	if driver == nil {
 		t.Fatal("driver should not be nil")
+		return
 	}
 }
 
@@ -87,6 +88,7 @@ func TestS3Driver_Delete(t *testing.T) {
 	_, err = driver.Get(ctx, "data", "personal-files/delete-test.txt")
 	if err == nil {
 		t.Fatal("file should be deleted")
+		return
 	}
 }
 

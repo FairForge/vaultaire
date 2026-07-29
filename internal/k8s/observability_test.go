@@ -62,6 +62,7 @@ func TestGenerateServiceMonitorWithNamespaceSelector(t *testing.T) {
 
 	if sm.Spec.NamespaceSelector == nil {
 		t.Fatal("expected namespace selector")
+		return
 	}
 	if len(sm.Spec.NamespaceSelector.MatchNames) != 2 {
 		t.Error("expected 2 namespace matches")
