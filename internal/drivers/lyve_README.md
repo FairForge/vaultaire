@@ -1,18 +1,24 @@
 # Lyve Cloud 2 Driver — Ops Manual
 
-Status (2026-07-29): **technically ready; two contract questions outstanding.**
-Reseller authorization — the one hard legal blocker — is **resolved** (we are an
-authorized reseller). Prefix-based multi-tenancy, previously believed broken, is
-**working** (see *Prefix scoping DOES work*), so Lyve bucket counts are not a
-tenant ceiling.
+Status (2026-07-29): **cleared for launch-tier use; one commercial unknown.**
+
+- **Legal:** authorized reseller, **paid** account, Non-paid deletion clause
+  does **not** apply, SLA in force. Lyve can back a customer-facing tier.
+- **Multi-tenancy:** prefix scoping **works** via resource ARNs (previously
+  recorded as broken — see *Prefix scoping DOES work*). Per-tenant buckets are
+  unnecessary and bucket counts are not a tenant ceiling.
+- **Performance:** benchmarked on **both** the direct and engine paths.
+- **The open question:** the account is at $0 under a **1-year SaaS promo whose
+  end date and renewal rate we do not have in writing**. That date is when
+  Lyve COGS goes from $0 to an unknown number, and our modelled $6.37/TB is
+  above every tier's selling price. Get it in writing before committing large
+  volumes of customer data (§4).
+- **Design around:** no durability warranty at all, and no multi-region
+  replication on our account — so Lyve should not hold the only copy.
 
 Lyve was "dropped" in July 2026 partly on a perf verdict that turned out to be
-a benchmarking artifact (see *The bucket-homing trap* below); the driver is
-fully functional and benchmarked on both the direct and engine paths. What
-remains before it can back a customer-facing tier is **two questions for
-Seagate** — account status and post-interim price — plus the absence of any
-durability warranty. Read *Contract terms* immediately below before designing
-anything customer-facing on Lyve.
+a benchmarking artifact (see *The bucket-homing trap* below). Read *Contract
+terms* below before designing anything customer-facing on Lyve.
 
 ## Contract terms (extracted 2026-07-29 — READ THIS FIRST)
 
@@ -34,15 +40,23 @@ data on Lyve and selling it as our product **is resale**, even though we never
 resell a Lyve login.
 
 **Status: we are an authorized reseller** (owner, 2026-07-29), so this
-requirement is satisfied and is *not* a blocker. Two things still worth doing,
-because the API view disagrees with that: `RSGetUserInfo` reports us as
-customer **v01** under reseller **global** with *customer-level* RS access,
-and reseller-level calls (`RSLiveBilling`, `RSListCustomer`,
-`RSCustomerDetails`) return Unauthorized. So (a) keep the written
-authorization and the Solution Provider Plan acceptance on file with the
-launch records, and (b) ask Seagate whether the account should be re-scoped to
-reseller level — today's API access does not reflect reseller status, which
-also blocks the billing reconciliation we want.
+requirement is satisfied and is *not* a blocker. Keep the written
+authorization and the Solution Provider Plan acceptance filed with the launch
+records.
+
+**Reseller-level *API* access is a separate thing, and it is gated on a 1 PB
+commitment** (owner, 2026-07-29). That is why `RSGetUserInfo` reports us as
+customer **v01** under reseller **global** with *customer-level* RS access, and
+why `RSLiveBilling` / `RSListCustomer` / `RSCustomerDetails` return
+Unauthorized. Being an authorized reseller does not by itself unlock them.
+Treat this as settled rather than as a support ticket to chase — at ~33 GB
+stored today, 1 PB is not a near-term threshold.
+
+The practical consequence: **`RSListBillingData` is the only usage/billing API
+we can reach, and reseller live-billing is unavailable, so automated COGS
+reconciliation against a Lyve invoice is off the table.** If we need
+invoice-level reconciliation before 1 PB, it has to come from the console
+billing view or the invoices themselves, not the API.
 
 ### 2. There is no durability warranty — at all
 
@@ -56,7 +70,7 @@ document. The only durability language we have ever had is our own qualitative
 note, "Seagate-grade durability" — which is marketing, not a commitment. Any
 customer-facing durability claim backed by Lyve would be unsupported.
 
-### 3. The SLA is uptime-only, credit-only — and excludes non-paid accounts
+### 3. The SLA is uptime-only and credit-only (it does apply to us — see §4)
 
 Monthly Uptime = 100% − Error Rate, averaged over 5-minute intervals
 (request-based; intervals with no requests count as 0% error):
@@ -74,24 +88,31 @@ majeure, our own or third-party causes, planned downtime, and any period of
 suspension. Note the implied commitment threshold is only **99.5%**, and that
 a credit against a **$0** invoice is worth exactly nothing.
 
-### 4. Our free arrangement is almost certainly a "Non-paid Service Account"
+### 4. Account status: PAID, on a 1-year SaaS promo (owner, 2026-07-29)
 
-> "…evaluation accounts including, but not limited to, 'Evaluation', 'Proof of
-> Concept', 'Trial', 'Try-to-buy', **or similar non-paid offers** (each, a
-> 'Non-paid Service Account'). Non-Paid Service Account deployments are
-> **time-bound**… Seagate reserves the right to **immediately suspend** the
-> account… Seagate shall **delete all the Company Data** from the Non-paid
-> Services Account **approximately 30 days** after the earlier of termination
-> or expiration. **Non-paid Service Accounts are not covered by the Lyve Cloud
-> Service Level Requirements.**"
+**We are a paid account currently at $0 under a 1-year SaaS promotional
+offer** — *not* a Non-paid Service Account. That materially improves the
+picture, and supersedes the earlier reading in this file:
 
-We pay $0, so "similar non-paid offers" fits us unless Seagate says otherwise.
-If so: no SLA, time-bound by definition, suspension possible on expiry, and a
-**~30-day data-deletion clock**. This is the contractual form of the warning
-already in the strategy docs ("free deals end", "never the sole copy") — and
-it is sharper than that phrasing implies, because the deletion is automatic
-rather than a negotiation. **Confirm our account's status with Seagate in
-writing** — it is the single cheapest de-risking action available.
+- The **Non-paid Service Account clause does not apply**. No automatic ~30-day
+  data deletion, no "time-bound evaluation" suspension right. Those were the
+  scariest terms and they are off the table.
+- **The SLA in §3 is in force**, since that exclusion only covers non-paid
+  accounts.
+
+Two caveats survive, and they are the ones to plan around:
+
+- **Service credits are computed as a percentage of fees owed.** At $0 during
+  the promo, a 100%-credit month is still worth **$0**. The SLA applies but its
+  remedy is nil until we are paying — so uptime risk during the promo year is
+  economically uncompensated, whatever the contract says.
+- **The promo is a one-year term, so it has an end date, and we do not have
+  it written down.** `RSGetUserInfo` reports the account created
+  **2025-06-13**; if the promo ran from creation it would already have lapsed,
+  so it evidently starts later or renewed. **Get the exact promo end date and
+  the renewal rate in writing** and record them here — that date is when COGS
+  for anything sitting on Lyve changes from $0 to an unknown number, and it is
+  the single most important unknown left about this backend.
 
 ### 5. Other terms worth knowing
 
@@ -112,25 +133,31 @@ writing** — it is the single cheapest de-risking action available.
 
 ### What this means in practice
 
-Lyve is excellent as what the strategy docs already make it: an internal
-buffer, restore-staging target, and a never-sole second copy, where the free
-arrangement is upside and its collapse is survivable. Turning it into a
-customer-facing tier inverts the risk — customer data would sit on a backend
-with no durability warranty, quite possibly no SLA, a resale restriction we
-may not satisfy, and a deletion clock we do not control. The gating questions
-are for Seagate, not for the benchmark suite. Reseller authorization is
-**resolved** (see §1); two remain, and both are cheap to ask:
+As of 2026-07-29 the legal picture is **clear enough to build on**: we are an
+authorized reseller, the account is paid, the Non-paid deletion clause does not
+apply, and the SLA is in force. Lyve can back a customer-facing tier.
 
-1. Is our account a **Non-paid Service Account**, and when does it expire?
-   This is the sharpest one — it decides whether an SLA exists at all and
-   whether a 30-day deletion clock applies.
-2. What is the **post-interim rate**, and is there a minimum term or commit?
-   The `$6.37/TB` we model is above every tier's selling price, so the answer
-   determines whether Lyve can back a tier at all or stays an internal buffer.
+What remains is **one commercial unknown and two facts to design around**:
 
-Worth pairing with the account-scope question in §1 — reseller-level API
-access would also unlock the billing reconciliation (`RSLiveBilling`) we
-currently can't run.
+1. **The promo end date and renewal rate are not written down** (§4). This is
+   the only real blocker left, and it is a question, not a risk we can engineer
+   away. Everything on Lyve has $0 COGS until that date and an unknown COGS
+   after it. The `$6.37/TB` we model is *above every tier's selling price*
+   ($4.49 Standard annual, $5.99 Performance), so if the renewal lands near
+   that number, any tier backed solely by Lyve is negative-margin the day the
+   promo ends. **Get the date and the rate before sizing how much customer data
+   goes here.**
+2. **No durability warranty** (§2), so no customer-facing durability claim can
+   cite Lyve, and Lyve should not hold the only copy of anything. That is
+   already the strategy-doc position and it should stay.
+3. **Service credits are worth $0 while we pay $0** (§3–4), so uptime risk is
+   economically uncompensated during the promo year even though the SLA
+   nominally applies.
+
+Read together: Lyve is now safe to use as a *replicated* tier or a
+second-copy/staging path, and the sensible sequencing is to grow data on it in
+step with confidence about the renewal rate rather than committing the whole
+Vault path to it before that date is known.
 
 ## Launch-tier readiness — technical side (assessed 2026-07-29)
 
