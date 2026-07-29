@@ -14,6 +14,7 @@ func TestNewGlobalLoadBalancer(t *testing.T) {
 
 	if lb == nil {
 		t.Fatal("expected non-nil load balancer")
+		return
 	}
 	if lb.config == nil {
 		t.Error("expected default config")

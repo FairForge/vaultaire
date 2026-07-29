@@ -215,6 +215,7 @@ func TestGCI_InsertAndLookup(t *testing.T) {
 	}
 	if result.Entry == nil {
 		t.Fatal("Expected Entry to not be nil")
+		return
 	}
 	if result.Entry.BackendID != entry.BackendID {
 		t.Errorf("BackendID = %s, want %s", result.Entry.BackendID, entry.BackendID)
@@ -516,6 +517,7 @@ func TestGCI_ObjectMetadata(t *testing.T) {
 
 	if retrieved == nil {
 		t.Fatal("Expected metadata to be found")
+		return
 	}
 
 	if retrieved.TotalSize != meta.TotalSize {
@@ -643,6 +645,7 @@ func TestGCI_Cache(t *testing.T) {
 	cached := gci.cache.get(hash)
 	if cached == nil {
 		t.Fatal("Expected chunk to be cached")
+		return
 	}
 	if cached.SizeBytes != 2048 {
 		t.Errorf("Cached SizeBytes = %d, want 2048", cached.SizeBytes)

@@ -23,6 +23,7 @@ func TestLocalDriver_CreateMultipartUpload(t *testing.T) {
 	}
 	if upload == nil {
 		t.Fatal("upload should not be nil")
+		return
 	}
 	if upload.ID == "" {
 		t.Error("upload ID should not be empty")

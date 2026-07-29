@@ -27,6 +27,7 @@ func TestNewAsyncProcessor(t *testing.T) {
 
 	if ap == nil {
 		t.Fatal("expected non-nil")
+		return
 	}
 }
 

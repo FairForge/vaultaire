@@ -12,6 +12,7 @@ func TestNewEdgeManager(t *testing.T) {
 	m := NewEdgeManager(nil)
 	if m == nil {
 		t.Fatal("expected non-nil manager")
+		return
 	}
 	if m.config == nil {
 		t.Error("expected default config")
@@ -207,6 +208,7 @@ func TestEdgeManagerFindNearestLocation(t *testing.T) {
 	nearest := m.FindNearestLocation(42.3601, -71.0589)
 	if nearest == nil {
 		t.Fatal("expected to find nearest")
+		return
 	}
 	if nearest.ID != "nyc" {
 		t.Errorf("expected nyc, got %s", nearest.ID)
@@ -216,6 +218,7 @@ func TestEdgeManagerFindNearestLocation(t *testing.T) {
 	nearest = m.FindNearestLocation(48.8566, 2.3522)
 	if nearest == nil {
 		t.Fatal("expected to find nearest")
+		return
 	}
 	if nearest.ID != "london" {
 		t.Errorf("expected london, got %s", nearest.ID)
@@ -245,6 +248,7 @@ func TestEdgeManagerFindNearestLocationSkipsUnhealthy(t *testing.T) {
 	nearest := m.FindNearestLocation(40.7128, -74.0060)
 	if nearest == nil {
 		t.Fatal("expected to find nearest")
+		return
 	}
 	if nearest.ID != "far-healthy" {
 		t.Errorf("expected far-healthy, got %s", nearest.ID)
@@ -294,6 +298,7 @@ func TestEdgeManagerSelectLocation(t *testing.T) {
 	selected := m.SelectLocation(40.5, -73.5, opts)
 	if selected == nil {
 		t.Fatal("expected selection")
+		return
 	}
 	if selected.ID != "loc-1" {
 		t.Errorf("expected loc-1, got %s", selected.ID)
@@ -544,6 +549,7 @@ func TestSelectLocationWithCapacityWeight(t *testing.T) {
 	selected := m.SelectLocation(40.0, -74.0, opts)
 	if selected == nil {
 		t.Fatal("expected selection")
+		return
 	}
 	// Should prefer empty even though full is closer
 	if selected.ID != "empty" {

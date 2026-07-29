@@ -83,6 +83,7 @@ func TestNewProcessingBackend(t *testing.T) {
 	}
 	if pb == nil {
 		t.Fatal("ProcessingBackend is nil")
+		return
 	}
 }
 

@@ -15,6 +15,7 @@ func TestNewGeoManager(t *testing.T) {
 		}
 		if gm == nil {
 			t.Fatal("GeoManager is nil")
+			return
 		}
 	})
 

@@ -337,6 +337,7 @@ func TestMockGCI_ObjectMetadata(t *testing.T) {
 
 	if retrieved == nil {
 		t.Fatal("Expected metadata to exist")
+		return
 	}
 	if retrieved.TotalSize != 1000 {
 		t.Errorf("TotalSize = %d, want 1000", retrieved.TotalSize)

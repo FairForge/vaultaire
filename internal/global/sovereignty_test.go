@@ -14,6 +14,7 @@ func TestNewSovereigntyManager(t *testing.T) {
 
 	if sm == nil {
 		t.Fatal("expected non-nil manager")
+		return
 	}
 
 	// Should have default rules
@@ -230,6 +231,7 @@ func TestSovereigntyManagerFindNearestAllowedLocation(t *testing.T) {
 	loc := sm.FindNearestAllowedLocation("DE", 48.86, 2.35)
 	if loc == nil {
 		t.Fatal("expected to find location")
+		return
 	}
 	// Frankfurt should be closer to Paris than Dublin
 	if loc.ID != "eu-central-1" {

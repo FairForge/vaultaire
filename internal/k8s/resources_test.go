@@ -197,6 +197,7 @@ func TestGenerateResourceQuotaWithScopeSelector(t *testing.T) {
 
 	if rq.Spec.ScopeSelector == nil {
 		t.Fatal("expected scope selector")
+		return
 	}
 	if len(rq.Spec.ScopeSelector.MatchExpressions) != 1 {
 		t.Error("expected 1 match expression")

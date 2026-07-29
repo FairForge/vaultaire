@@ -19,6 +19,7 @@ func TestCoreEngine_ImplementsInterface(t *testing.T) {
 
 	if engine == nil {
 		t.Fatal("NewEngine returned nil")
+		return
 	}
 
 	// Test health check

@@ -13,6 +13,7 @@ func TestNewFailoverManager(t *testing.T) {
 
 	if fm == nil {
 		t.Fatal("expected non-nil manager")
+		return
 	}
 	if fm.config == nil {
 		t.Error("expected default config")

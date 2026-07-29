@@ -12,6 +12,7 @@ func TestNewLRUCache(t *testing.T) {
 
 	if cache == nil {
 		t.Fatal("expected non-nil cache")
+		return
 	}
 	if cache.Len() != 0 {
 		t.Error("expected empty cache")
