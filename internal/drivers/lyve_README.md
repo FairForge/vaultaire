@@ -79,9 +79,27 @@ Note `console`, `iam`, and `sts` are three vhosts on **one IP**
 (134.204.253.1, `dfw01.geo.lyve.seagate.com`), which is likely why they get
 conflated. Also live: **`s3.global.lyve.seagate.com`** — a *non-regional* S3
 endpoint (not in the support list, but what the console itself uses);
-`list-buckets` there returns the full account. Per bucket homing it still
-proxies to each bucket's home region, so it is a convenience alias, not an
-escape from the homing trap.
+`list-buckets` there returns the full account.
+
+Measured from SLC against a **west-homed** bucket (HEAD, one pooled
+connection, 6 requests):
+
+| Endpoint | cold (incl. DNS+TCP+TLS) | warm (reused conn) |
+|---|---|---|
+| `s3.us-west-1.global…` | 128 ms | **39 ms** |
+| `s3.global…` | 128 ms | **39 ms** |
+| `s3.us-east-1.global…` | 219 ms | **67 ms** |
+
+So the global alias is exactly equivalent to naming the home region — no
+penalty, no benefit — while a *wrong*-region endpoint costs ~28 ms/op warm on
+the same object. That is the homing trap quantified, and it confirms the
+alias does not escape it. The warm 39 ms also independently reproduces the
+38 ms warm HEAD in the benchmark table below.
+
+Measure this way or not at all: naive one-connection-per-request loops report
+250–770 ms and swing wildly by DC, because they measure TLS setup, not the
+service. The driver pools connections (`TunedHTTPClient`), so warm is the
+number that describes production.
 
 Their advice to drive IAM with a **dedicated admin user's** access key rather
 than the root key is worth taking — it matches the lockout risk already noted
@@ -310,23 +328,36 @@ Spec: `docs/references/lyve-account-api-v2-en_US.pdf` (dated 3/1/24, original
 Lyve Cloud console era). The API is unreachable for us, but the earlier
 "the original platform is wound down" reading was **wrong** — corrected here.
 
-**Root cause is network scope, not decommissioning.** The two families split
-by IP range, not by liveness:
+**It is specific hosts that don't answer, not a dead platform.** Observed
+behaviour, from two vantage points (a residential Mac and SLC):
 
-| Hostname | Resolves to | Owner | Reachable |
-|---|---|---|---|
-| `api.lyvecloud.seagate.com` | 192.55.6.21 | `SEAGATE-1` **corporate** | TCP 443 blackholed (no SYN-ACK) |
-| `console.lyvecloud.seagate.com` | 192.55.6.18 | `SEAGATE-1` **corporate** | TCP 443 blackholed |
-| `s3.<region>.lyvecloud.seagate.com` | CNAME `<dc>.geo.lyve.seagate.com` → 134.204.252.1 | storage fabric | **live, serves our data** |
-| `s3.<region>.global.lyve.seagate.com` | CNAME `<dc>.geo.lyve.seagate.com` → 134.204.255.1 | storage fabric | live (what we use) |
+| Hostname | Reachable |
+|---|---|
+| `api.lyvecloud.seagate.com` | TCP 443 blackholed (no SYN-ACK) |
+| `console.lyvecloud.seagate.com` | TCP 443 blackholed |
+| `s3.<region>.lyvecloud.seagate.com` | **live, serves our data** (legacy alias — see below) |
+| `s3.<region>.global.lyve.seagate.com` | live (what we use) |
+| `console`/`iam`/`sts.global.lyve.seagate.com` | live |
 
-`192.55.0.0/16` is Seagate's corporate netblock (ARIN `NetName: SEAGATE-1`),
-firewalled to the public internet — which is why 443 times out identically
-from every vantage point. It is not evidence the service is gone. Per-account
-subdomains from the signup flow (`<accountid>.console.lyvecloud.seagate.com`,
-found in the archived console JS) are **wildcard DNS onto the same firewalled
-corporate IP** — `v01.` and a nonsense label both resolve to 192.55.6.20 and
-both blackhole, so there is no per-account API host to find.
+**Do not read the IP range as the cause** (an earlier revision of this file
+did, and was wrong). It is true that `api.`/`console.lyvecloud` land in
+`192.55.0.0/16` (ARIN `NetName: SEAGATE-1`), but so do serving hosts: from
+SLC, `s3.global.lyve.seagate.com` resolves via `sjc01.geo.lyve.seagate.com`
+to **192.55.8.1** and answers normally. Seagate runs production storage DCs
+and unreachable control-plane hosts inside the same registration, so the
+netblock predicts nothing.
+
+Two related traps when probing this: the names are **geo-DNS**, so the same
+hostname resolves to different DCs from different places (`s3.global` →
+134.204.253.1 `dfw01` from a Mac, 192.55.8.1 `sjc01` from SLC) — never treat
+one resolution as canonical. And the `.lyvecloud` control-plane names are
+**wildcard DNS**: `v01.console.lyvecloud.seagate.com` and a nonsense label
+both resolve and both blackhole, so a "resolves!" result proves nothing and
+there is no per-account API host to find.
+
+All we can honestly say is that those two hosts refuse connections everywhere
+we've looked. Firewalled per-host, retired listener, or IP-allowlisted are all
+consistent with the evidence; we can't distinguish them from outside.
 
 **The `lyvecloud.seagate.com` S3 names are legacy aliases of the platform we
 already use — one account, one namespace.** Verified 2026-07-29: our current
@@ -341,9 +372,9 @@ Practical consequence is unchanged: the Account API's conveniences —
 **expiring service accounts** above all — are not available to us, so
 per-tenant credentials are LC2 IAM users plus our own rotation, or STS
 AssumeRole temp creds. The doc stays as the reference for what to rebuild on
-the IAM path. What changed is the prognosis: if Seagate ever exposes the
-Account API outside corporate (or we get reseller-level access), it is a
-config change on their side, not a resurrection.
+the IAM path. What changed is the prognosis: the platform is plainly alive, so
+if Seagate ever opens those hosts to us (or we get reseller-level access) it
+is a config change on their side, not a resurrection.
 
 ### Account inventory (`?rs-bucket-stats`, 2026-07-29)
 
