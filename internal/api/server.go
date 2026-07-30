@@ -125,9 +125,8 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	}
 	s.healthChecker = NewBackendHealthChecker()
 
-	// Register the Quotaless backend so /health reports meaningful data.
-	// Without this the backends map is empty and status is always "unknown".
-	s.healthChecker.RegisterBackend("quotaless")
+	// Backends are registered by startHealthChecks, and only when their
+	// credentials are configured — see configuredBackends.
 
 	// Pass s.db so registrations are persisted to PostgreSQL.
 	// Previously NewAuthService(nil) left sqlDB nil, so CreateUserWithTenant
@@ -414,29 +413,49 @@ func endpointToAddress(endpoint string) (string, error) {
 // s.healthChecker.RegisterBackend("name"), then add a backendCheck entry
 // here pointing at its endpoint env var.
 func (s *Server) startHealthChecks(ctx context.Context) {
-	quotalessEndpoint := os.Getenv("QUOTALESS_ENDPOINT")
-	if quotalessEndpoint == "" {
-		quotalessEndpoint = "https://io.quotaless.cloud:8000"
-	}
-
-	quotalessAddr, err := endpointToAddress(quotalessEndpoint)
-	if err != nil {
-		s.logger.Error("invalid QUOTALESS_ENDPOINT — health checks disabled",
-			zap.Error(err))
-		return
-	}
-
-	backends := []backendCheck{
-		{name: "quotaless", address: quotalessAddr},
-		// Add future backends here, e.g.:
-		// {name: "lyve", address: "s3.us-east-1.lyvecloud.seagate.com:443"},
-		// {name: "geyser", address: "s3.geyserdata.com:443"},
-	}
-
-	for _, b := range backends {
+	for _, b := range configuredBackends(os.Getenv) {
 		b := b // capture for goroutine
+		s.healthChecker.RegisterBackend(b.name)
 		go s.runBackendHealthLoop(ctx, b)
 	}
+}
+
+// configuredBackends returns the backends that should be health-probed, based
+// on whether their credentials are actually configured. getenv is injected so
+// this is testable without touching process environment.
+//
+// Only configured backends are probed: an unconditional probe makes startup
+// depend on a third party that may not even be in use, which has been a source
+// of CI flakes. A backend with an unparseable endpoint is skipped rather than
+// disabling health checks for everything else.
+func configuredBackends(getenv func(string) string) []backendCheck {
+	var backends []backendCheck
+
+	if getenv("QUOTALESS_ACCESS_KEY") != "" {
+		endpoint := getenv("QUOTALESS_ENDPOINT")
+		if endpoint == "" {
+			endpoint = "https://io.quotaless.cloud:8000"
+		}
+		if addr, err := endpointToAddress(endpoint); err == nil {
+			backends = append(backends, backendCheck{name: "quotaless", address: addr})
+		}
+	}
+
+	if getenv("LYVE_ACCESS_KEY") != "" {
+		// Lyve Cloud 2 lives on s3.<region>.global.lyve.seagate.com. The older
+		// lyvecloud.seagate.com names are legacy aliases whose TLS certificate
+		// expired 2026-07-19 — see internal/drivers/lyve_README.md.
+		region := getenv("LYVE_REGION")
+		if region == "" {
+			region = "us-west-1" // matches the driver default (closest to SLC)
+		}
+		backends = append(backends, backendCheck{
+			name:    "lyve",
+			address: fmt.Sprintf("s3.%s.global.lyve.seagate.com:443", region),
+		})
+	}
+
+	return backends
 }
 
 // runBackendHealthLoop probes a single backend on a 30-second ticker until
