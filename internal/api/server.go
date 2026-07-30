@@ -87,9 +87,13 @@ type Server struct {
 	// in-flight part bytes (0 = unlimited). Part data lives unbilled on local
 	// disk until complete — without a cap one upload can fill the disk.
 	multipartMaxUploadBytes int64
-	emailSender             email.Sender
-	baseURL                 string
-	startTime               time.Time
+
+	// chunkPutConcurrency, when > 0, overrides the adapter's default
+	// parallel chunk-store worker count (env CHUNK_PUT_CONCURRENCY).
+	chunkPutConcurrency int
+	emailSender         email.Sender
+	baseURL             string
+	startTime           time.Time
 	// flags is the runtime feature-flag service (1.13): DB table + ~15s
 	// cache, global kill-switches + per-tenant enablement, flipped via the
 	// admin API / dashboard with no deploy or restart.
@@ -270,6 +274,16 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 			logger.Warn("invalid MULTIPART_MAX_UPLOAD_BYTES, keeping default", zap.String("value", v))
 		}
 	}
+	// Parallel chunk-store workers per chunked PUT. 0 keeps the adapter
+	// default; 1 is the sequential-store escape hatch.
+	if v := os.Getenv("CHUNK_PUT_CONCURRENCY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			s.chunkPutConcurrency = n
+		} else {
+			logger.Warn("invalid CHUNK_PUT_CONCURRENCY, keeping default", zap.String("value", v))
+		}
+	}
+
 	s.multipartReaper = NewMultipartReaper(s.db, logger)
 	if s.multipartReaper != nil {
 		if v := os.Getenv("MULTIPART_ABANDON_HOURS"); v != "" {

@@ -49,6 +49,11 @@ type S3ToEngine struct {
 	gci               *crypto.GlobalContentIndex
 	chunkingThreshold int64 // minimum object size for chunking (default 64 MB)
 
+	// chunkStoreConcurrency bounds the parallel chunk-store workers of one
+	// chunked PUT (default defaultChunkStoreConcurrency; env
+	// CHUNK_PUT_CONCURRENCY via the Server; 1 = sequential stores).
+	chunkStoreConcurrency int
+
 	// flags gates the chunked PUT path (1.13 `chunking` kill-switch +
 	// per-tenant override). Nil (tests, callers that never set it) means
 	// chunking stays on — the pre-flag behavior.
@@ -75,10 +80,11 @@ var errDecodedLengthMismatch = errors.New("aws-chunked decoded length does not m
 // NewS3ToEngine creates a new adapter
 func NewS3ToEngine(e engine.Engine, db *sql.DB, logger *zap.Logger) *S3ToEngine {
 	return &S3ToEngine{
-		engine:    e,
-		db:        db,
-		logger:    logger,
-		notifySvc: NewNotificationDispatcher(db, logger),
+		engine:                e,
+		db:                    db,
+		logger:                logger,
+		notifySvc:             NewNotificationDispatcher(db, logger),
+		chunkStoreConcurrency: defaultChunkStoreConcurrency,
 	}
 }
 
@@ -974,12 +980,17 @@ func (a *S3ToEngine) handleChunkedPut(
 ) error {
 	ctx := r.Context()
 
+	// pctx cancels the chunker, the store workers, and their DB work as one
+	// unit: the first error anywhere stops the whole upload promptly.
+	pctx, cancelStores := context.WithCancel(ctx)
+	defer cancelStores()
+
 	chunker, err := crypto.DefaultFastCDCChunker()
 	if err != nil {
 		return fmt.Errorf("create chunker: %w", err)
 	}
 
-	chunkCh, err := chunker.ChunkContext(ctx, hashingBody)
+	chunkCh, err := chunker.ChunkContext(pctx, hashingBody)
 	if err != nil {
 		return fmt.Errorf("start streaming chunker: %w", err)
 	}
@@ -1011,22 +1022,29 @@ func (a *S3ToEngine) handleChunkedPut(
 		dedupScope = t.ID
 	}
 
-	// Every chunk this loop processes takes one GCI reference (fresh insert at
+	// New-chunk stores fan out to a bounded worker pool — the store step is a
+	// full HTTPS round-trip to the backend, and running stores one at a time
+	// capped engine-path uploads at chunk_size ÷ round-trip (~19 MB/s to
+	// iDrive). This dispatcher loop stays sequential for every dedup
+	// decision; only compress → encrypt → storeChunkLocked runs on workers.
+	pool := newChunkStorePool(a, pctx, cancelStores,
+		tenantID, t.ID, bucket, artifact, dedupScope, contentType, encrypting)
+
+	// Every chunk processed takes one GCI reference (fresh insert at
 	// ref_count 1, ON CONFLICT increment, or IncrementRef on a dedup hit). If
 	// the PUT aborts before the manifest install commits, those references are
 	// orphaned — nothing ever releases them, so shared chunks become
 	// unsweepable forever (F10). Compensate on every error path; after a
 	// successful install the manifest owns the references. Decrements run on a
-	// cancellation-immune context: the abort may BE a cancellation.
-	type takenRef struct{ scope, hash string }
-	var takenRefs []takenRef
+	// cancellation-immune context: the abort may BE a cancellation. This defer
+	// only reads pool state after join() — every return below joins first.
 	manifestInstalled := false
 	defer func() {
 		if manifestInstalled {
 			return
 		}
 		compCtx := context.WithoutCancel(ctx)
-		for _, ref := range takenRefs {
+		for _, ref := range pool.compensationRefs() {
 			if _, decErr := a.gci.DecrementRef(compCtx, ref.scope, ref.hash); decErr != nil {
 				a.logger.Warn("compensating ref decrement failed after aborted chunked PUT (reconcile will heal)",
 					zap.String("hash", ref.hash), zap.Error(decErr))
@@ -1034,34 +1052,38 @@ func (a *S3ToEngine) handleChunkedPut(
 		}
 	}()
 
-	newRefs := make([]crypto.TenantChunkRef, 0, 16)
 	for result := range chunkCh {
 		if result.Err != nil {
-			return fmt.Errorf("chunking stream: %w", result.Err)
+			pool.fail(fmt.Errorf("chunking stream: %w", result.Err))
+			break
 		}
 
-		chunk := &result.Chunk
+		chunk := result.Chunk
 		measuredSize += int64(chunk.Size)
 		chunkCount++
 
-		lookup, lookupErr := a.gci.LookupChunk(ctx, dedupScope, chunk.Hash)
-		if lookupErr != nil {
-			return fmt.Errorf("lookup chunk %s: %w", chunk.Hash[:16], lookupErr)
+		if pool.failed() {
+			break
 		}
 
-		// Encrypted chunks are namespaced by tenant in the object store too, so
-		// two tenants' ciphertexts for the same plaintext never collide.
-		storageKey := "_chunks/" + chunk.Hash
-		if encrypting {
-			storageKey = "_chunks/" + t.ID + "/" + chunk.Hash
+		// A duplicate of a hash that is being stored right now waits for that
+		// store instead of racing it into a second store of the same blob.
+		if pool.noteDuplicate(&chunk) {
+			continue
 		}
-		var ciphertextHash string
+
+		lookup, lookupErr := a.gci.LookupChunk(pctx, dedupScope, chunk.Hash)
+		if lookupErr != nil {
+			pool.fail(fmt.Errorf("lookup chunk %s: %w", chunk.Hash[:16], lookupErr))
+			break
+		}
 
 		mustStore := lookup.IsNewChunk
 		if !mustStore {
-			rows, incErr := a.gci.IncrementRef(ctx, dedupScope, chunk.Hash)
+			rows, incErr := a.gci.IncrementRef(pctx, dedupScope, chunk.Hash)
 			if incErr != nil {
-				return fmt.Errorf("increment ref %s: %w", chunk.Hash[:16], incErr)
+				pool.fail(fmt.Errorf("increment ref %s: %w", chunk.Hash[:16], incErr))
+				break
 			}
 			if rows == 0 {
 				// The chunk vanished between lookup and increment — GC swept
@@ -1077,87 +1099,33 @@ func (a *S3ToEngine) handleChunkedPut(
 			}
 		}
 
-		if mustStore {
-			storeData := chunk.Data
-			var compressedSize *int64
-			var compressionAlgo *string
-			var encrypted bool
-			var encryptionAlgo *string
-
-			if crypto.ShouldCompress(chunk.Data, contentType) {
-				compressed, compErr := crypto.CompressBuffer(chunk.Data)
-				if compErr == nil && len(compressed) < chunk.Size {
-					storeData = compressed
-					cs := int64(len(compressed))
-					compressedSize = &cs
-					algo := "zstd"
-					compressionAlgo = &algo
-				}
+		if !mustStore {
+			// The ciphertext hash describes the blob that is actually stored,
+			// so on a dedup hit it is copied from the index row — never
+			// recomputed. The stored blob's compression was decided by the
+			// FIRST upload's Content-Type; recomputing under the current
+			// request's Content-Type (or a different zstd version) can hash a
+			// blob that was never stored, making the object fail its
+			// integrity check on every GET.
+			var refCiphertextHash *string
+			if lookup.Entry != nil && lookup.Entry.CiphertextHash != nil {
+				refCiphertextHash = lookup.Entry.CiphertextHash
 			}
-
-			if a.chunkEncSvc != nil {
-				ct, ctHash, encErr := a.chunkEncSvc.EncryptChunkData(t.ID, chunk.Hash, storeData)
-				if encErr != nil {
-					return fmt.Errorf("encrypt chunk %s: %w", chunk.Hash[:16], encErr)
-				}
-				storeData = ct
-				ciphertextHash = ctHash
-				encrypted = true
-				algo := "AES256-CE"
-				encryptionAlgo = &algo
-			}
-
-			var entryCiphertextHash *string
-			if ciphertextHash != "" {
-				entryCiphertextHash = &ciphertextHash
-			}
-			bn, storeErr := a.storeChunkLocked(ctx, dedupScope, storageKey, storeData, &crypto.GCIEntry{
-				DedupScope:      dedupScope,
-				PlaintextHash:   chunk.Hash,
-				StorageKey:      storageKey,
-				SizeBytes:       int64(chunk.Size),
-				CompressedSize:  compressedSize,
-				CompressionAlgo: compressionAlgo,
-				Encrypted:       encrypted,
-				EncryptionAlgo:  encryptionAlgo,
-				CiphertextHash:  entryCiphertextHash,
-				RefCount:        1,
-			})
-			if storeErr != nil {
-				return fmt.Errorf("store chunk %s: %w", chunk.Hash[:16], storeErr)
-			}
-			if backendName == "chunked" {
-				backendName = bn
-			}
-			physicalSize += int64(len(storeData))
-		}
-		takenRefs = append(takenRefs, takenRef{scope: dedupScope, hash: chunk.Hash})
-
-		// The ciphertext hash describes the blob that is actually stored, so on
-		// a dedup hit it is copied from the index row — never recomputed. The
-		// stored blob's compression was decided by the FIRST upload's
-		// Content-Type; recomputing under the current request's Content-Type
-		// (or a different zstd version) can hash a blob that was never stored,
-		// making the object fail its integrity check on every GET.
-		var refCiphertextHash *string
-		if ciphertextHash != "" {
-			refCiphertextHash = &ciphertextHash
-		} else if lookup.Entry != nil && lookup.Entry.CiphertextHash != nil {
-			refCiphertextHash = lookup.Entry.CiphertextHash
+			pool.addRef(chunk.Index, chunk.Offset, chunk.Hash, refCiphertextHash)
+			continue
 		}
 
-		newRefs = append(newRefs, crypto.TenantChunkRef{
-			TenantID:             tenantID,
-			BucketName:           bucket,
-			ObjectKey:            artifact,
-			ChunkIndex:           chunk.Index,
-			ChunkOffset:          chunk.Offset,
-			PlaintextHash:        chunk.Hash,
-			DedupScope:           dedupScope,
-			EncryptionKeyVersion: 1,
-			CiphertextHash:       refCiphertextHash,
-		})
+		pool.submit(chunk)
 	}
+
+	if joinErr := pool.join(); joinErr != nil {
+		return joinErr
+	}
+	physicalSize = pool.physicalSize
+	if pool.backendName != "" {
+		backendName = pool.backendName
+	}
+	newRefs := pool.sortedRefs()
 
 	// Reject declared-vs-measured mismatch before installing the manifest:
 	// stored chunks without refs are swept by dedup GC, but a manifest with
