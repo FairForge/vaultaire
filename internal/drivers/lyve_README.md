@@ -934,20 +934,24 @@ Three things to take from this:
   were also dropping the `ContentLength` the API adapter already passes, which
   is what the fast path needs. Re-measured on SLC, two runs:
 
-  | Workload | Before | After (r1 / r2) |
+  | Workload | Before | After (3 runs) |
   |---|---|---|
-  | `sustained_upload_60s` | 67.7 MB/s | **373.6 / 551.1 MB/s** |
-  | `medium_put_16mb` | 16.3 MB/s | **43.9 / 83.4 MB/s** |
-  | `multipart_put_256mb` | 115.1 MB/s | **156.5 / 160.5 MB/s** |
+  | `sustained_upload_60s` | 67.7 MB/s | **373.6 / 551.1 / 792.7 MB/s** |
+  | `medium_put_16mb` | 16.3 MB/s | **43.9 / 83.4 / 75.2 MB/s** |
+  | `multipart_put_256mb` | 115.1 MB/s | **156.5 / 160.5 / 143.9 MB/s** |
+  | `concurrent_ingest_20s` | 734.9 MB/s | 831.3 / 740.8 / **925.3 MB/s** |
 
-  Sustained upload now matches or beats the *direct-driver* 446 MB/s baseline.
+  The third run is the merged code; the first two still carried a since-removed
+  probe read. Sustained upload now comfortably beats the *direct-driver*
+  446 MB/s baseline — the engine path is no longer the constraint on writes.
 
   **Read this table with the variance in mind.** Small-op workloads on a live
-  network backend swing hard run to run: `medium_put_1mb` read 2.2 then
-  9.4 MB/s against a 10.9 baseline (±77% between post-fix runs), and read-path
-  numbers moved ±25% despite nothing on the read path changing. Only differences
-  that reproduce across both runs — the three above — are real. A single run of
-  this bench cannot support a performance claim.
+  network backend swing hard run to run: `medium_put_1mb` read 2.2, then 9.4,
+  then 11.0 MB/s against a 10.9 baseline — the first of those looked like an
+  80% regression and was noise. Read-path numbers moved ±25% despite nothing on
+  the read path changing. Only differences that reproduce across runs are real.
+  **A single run of this bench cannot support a performance claim**, in either
+  direction.
 
 Bench gotchas:
 - `bench-compare -only lyve` matches **all 7** regional endpoints (~15 min);
