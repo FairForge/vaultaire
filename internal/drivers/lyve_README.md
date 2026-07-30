@@ -965,6 +965,26 @@ Three things to take from this:
   **A single run of this bench cannot support a performance claim**, in either
   direction.
 
+### Never benchmark uploads from the Mac (measured 2026-07-30)
+
+The Mac's uplink caps every upload test at roughly **10.4 MB/s**, so any
+"backend upload throughput" number taken from a laptop is really a measurement
+of the laptop. Confirmed three ways: Lyve and Geyser — completely unrelated
+providers — both landed on *exactly* 10.4 MB/s, and four concurrent streams
+totalled 11.1 MB/s, i.e. no better than one. Downloads are backend-dependent
+and less constrained (Lyve 16.1 MB/s, Geyser 6.4 MB/s from cache).
+
+**Upload benchmarking has to run on SLC**, which is why `bench-vaultaire.sh`
+lives there. The Mac is fine for correctness probes, IAM/policy work, API
+exploration and download spot-checks.
+
+Getting a binary onto SLC is its own trap: the link is clean (0% loss, ~64 ms
+RTT) but SSH's per-channel window throttles one long stream to ~2.7 MB/s and
+tears it down partway — plain `scp`/`rsync` of the ~38 MB binary failed six
+times in a row. Use **`scripts/push-to-slc.sh`**, which splits into 4 MB
+chunks, retries each, reassembles and verifies SHA-256. SLC has git but **no
+Go**, so it cannot build for itself; cross-compile locally and push.
+
 Bench gotchas:
 - `bench-compare -only lyve` matches **all 7** regional endpoints (~15 min);
   use `-only lyve-us-west`.
