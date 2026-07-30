@@ -911,14 +911,47 @@ Three things to take from this:
 - **Concurrency survives the engine.** Ingest loses only 6%, download is
   *faster* than direct, and 128 workers still produce zero errors. Multi-client
   workloads are not the problem.
-- **Sustained single-stream upload is the bottleneck: 446 → 67.7 MB/s.** It is
-  a stable ceiling, not a collapse (per-10 s windows: 64/64/69/67/53/70 MB/s),
-  and single-shot 64 MB PUT shows the same shape (112.6 → 43.3 MB/s, recovering
-  to 66.5 on h1). So one client pushing one big object gets roughly
-  **50–70 MB/s**, whatever the backend can do. This is an *engine* limit, not a
-  Lyve limit — the direct path proves the backend has ~6× more headroom — and
-  it applies to any backend behind the write path. Worth its own investigation
-  before promising large-single-file throughput to anyone.
+- **Sustained upload measured 446 → 67.7 MB/s here — since FIXED, and the
+  cause was not what this section originally claimed.** The first reading was
+  "an engine write-path limit affecting every backend". That was wrong: the
+  same harness against the *local* backend sustains **1378 MB/s** through the
+  identical path (auth, quota, MD5 ETag tee, head-cache), so the engine was
+  never the ceiling.
+
+  The real cause was in the shared S3 upload helper. `sustained_upload_60s`
+  uses **16 MiB** objects and `s3UploadPartSize` is **16 MiB**, so every write
+  landed exactly on the part boundary. Given a non-seekable body — which is
+  what the engine always hands drivers — `manager.Uploader` reads one full
+  part, cannot tell the stream ended, and commits to multipart:
+  `CreateMultipartUpload` + `UploadPart` + `CompleteMultipartUpload` where one
+  `PutObject` would do. At Lyve's ~40 ms warm RTT the two extra round trips
+  dominate the transfer. Compounding it, a fresh `manager.Uploader` was built
+  per PUT, discarding the SDK part-buffer pool that exists precisely to be
+  reused between calls.
+
+  Fixed by short-circuiting known-size objects that fit in one part into a
+  single `PutObject`, and caching the uploader per client. All three S3 drivers
+  were also dropping the `ContentLength` the API adapter already passes, which
+  is what the fast path needs. Re-measured on SLC, two runs:
+
+  | Workload | Before | After (3 runs) |
+  |---|---|---|
+  | `sustained_upload_60s` | 67.7 MB/s | **373.6 / 551.1 / 792.7 MB/s** |
+  | `medium_put_16mb` | 16.3 MB/s | **43.9 / 83.4 / 75.2 MB/s** |
+  | `multipart_put_256mb` | 115.1 MB/s | **156.5 / 160.5 / 143.9 MB/s** |
+  | `concurrent_ingest_20s` | 734.9 MB/s | 831.3 / 740.8 / **925.3 MB/s** |
+
+  The third run is the merged code; the first two still carried a since-removed
+  probe read. Sustained upload now comfortably beats the *direct-driver*
+  446 MB/s baseline — the engine path is no longer the constraint on writes.
+
+  **Read this table with the variance in mind.** Small-op workloads on a live
+  network backend swing hard run to run: `medium_put_1mb` read 2.2, then 9.4,
+  then 11.0 MB/s against a 10.9 baseline — the first of those looked like an
+  80% regression and was noise. Read-path numbers moved ±25% despite nothing on
+  the read path changing. Only differences that reproduce across runs are real.
+  **A single run of this bench cannot support a performance claim**, in either
+  direction.
 
 Bench gotchas:
 - `bench-compare -only lyve` matches **all 7** regional endpoints (~15 min);
