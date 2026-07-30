@@ -720,6 +720,9 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3
 	adapter.chunkEncSvc = s.chunkEncSvc
 	adapter.gci = s.gci
 	adapter.flags = s.flags
+	if s.chunkPutConcurrency > 0 {
+		adapter.chunkStoreConcurrency = s.chunkPutConcurrency
+	}
 
 	s.logger.Debug("S3 PUT translating to engine",
 		zap.String("s3.bucket", req.Bucket),

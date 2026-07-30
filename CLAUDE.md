@@ -165,6 +165,7 @@ GitHub Actions Deploy (`.github/workflows/deploy.yml`):
 | `ONEDRIVE_CLIENT_ID`, `ONEDRIVE_CLIENT_SECRET`, `ONEDRIVE_TENANT_ID` | — | OneDrive OAuth (future) |
 | `ENCRYPTION_MASTER_KEY` | — | SSE-S3 master key (64 hex chars = 32 bytes). Absent = encryption disabled |
 | `MULTIPART_MAX_UPLOAD_BYTES` | 53687091200 (50 GiB) | Per-upload in-flight byte cap for multipart parts (0 = unlimited) |
+| `CHUNK_PUT_CONCURRENCY` | 8 | Parallel chunk-store workers per chunked PUT (1 = sequential stores) |
 | `MULTIPART_ABANDON_HOURS` | 48 | Reaper aborts active multipart uploads idle longer than this |
 | `MULTIPART_TERMINAL_RETENTION_DAYS` | 7 | Reaper purges completed/aborted multipart rows older than this |
 
