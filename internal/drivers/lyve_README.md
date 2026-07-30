@@ -965,6 +965,26 @@ Three things to take from this:
   **A single run of this bench cannot support a performance claim**, in either
   direction.
 
+### Chunked engine path (>64 MB single PUT) — WP-ChunkPerf (measured 2026-07-30)
+
+The E2E table above never exercised the *chunked* PUT path: its 64 MB
+single-stream sits exactly at the threshold (chunking requires size >64 MB)
+and the 256 MB workload is multipart, which bypasses chunking. Measured
+directly after PR #400 (parallel chunk-store workers): 256 MB of urandom via
+`s3api put-object` through a Lyve-only instance on SLC (`STORAGE_MODE=lyve`,
+port 8001, prod binary + prod DB), server-side latency from the request log:
+
+| Chunk-store mode | 256 MB, ~125 fresh chunks | Throughput |
+|---|---|---|
+| `CHUNK_PUT_CONCURRENCY=1` (old sequential behavior) | 33.7 s | **7.6 MB/s** |
+| default (8 workers) | 1.59 s | **~161 MB/s** |
+
+Roundtrip md5-verified. The gain exceeds 8× because the sequential loop also
+paid HTTPS connection churn per chunk (~274 ms/chunk); the worker pool keeps
+the connection pool hot. Same single-run caveat as above — but a 21×
+difference in the same instance configuration is not noise. iDrive measured
+the same way: 18.7 → 175 MB/s (prod, localhost client).
+
 ### Never benchmark uploads from the Mac (measured 2026-07-30)
 
 The Mac's uplink caps every upload test at roughly **10.4 MB/s**, so any

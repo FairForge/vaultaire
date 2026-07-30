@@ -362,12 +362,48 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 	// backends — local is excluded unless targeted or primary (WP-F).
 	candidates := e.buildWriteCandidateList(targetBackend)
 
+	// Failover body safety: retries share ONE reader, so an attempt that
+	// consumed bytes leaves the next backend a drained stream. Seekable
+	// bodies (chunk stores hand us a *bytes.Reader) are rewound to their
+	// starting offset before each retry, which makes failover genuinely
+	// work. Non-seekable bodies that have been partially consumed must NOT
+	// be retried at all — a length-validating backend fails pointlessly and
+	// gets breaker-charged for it, and a lax backend stores a truncated
+	// object as success. ErrNoFailover stops the candidate walk.
+	seeker, seekable := data.(io.Seeker)
+	var bodyStart int64
+	if seekable {
+		if off, serr := seeker.Seek(0, io.SeekCurrent); serr == nil {
+			bodyStart = off
+		} else {
+			seekable = false
+		}
+	}
+	firstAttempt := true
+
 	usedBackend, err := e.failover.Execute(ctx, candidates, func(driverName string) error {
 		d, ok := e.drivers[driverName]
 		if !ok {
 			return fmt.Errorf("driver %s not found", driverName)
 		}
-		return d.Put(ctx, container, artifact, sizeReader, opts...)
+		if !firstAttempt && sizeReader.bytesRead > 0 {
+			if !seekable {
+				// Unreachable in practice — the previous attempt already
+				// returned ErrNoFailover — but kept as a hard guard so no
+				// future Execute change can replay a drained stream.
+				return fmt.Errorf("%w: non-rewindable body", ErrNoFailover)
+			}
+			if _, serr := seeker.Seek(bodyStart, io.SeekStart); serr != nil {
+				return fmt.Errorf("%w: rewind failed: %v", ErrNoFailover, serr)
+			}
+			sizeReader.bytesRead = 0
+		}
+		firstAttempt = false
+		perr := d.Put(ctx, container, artifact, sizeReader, opts...)
+		if perr != nil && !seekable && sizeReader.bytesRead > 0 {
+			return fmt.Errorf("%w: %w", ErrNoFailover, perr)
+		}
+		return perr
 	})
 	if err == nil {
 		common.SetBackendUsed(ctx, usedBackend)
