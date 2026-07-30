@@ -602,17 +602,29 @@ the IAM path. What changed is the prognosis: the platform is plainly alive, so
 if Seagate ever opens those hosts to us (or we get reseller-level access) it
 is a config change on their side, not a resurrection.
 
-### Account inventory (`?rs-bucket-stats`, 2026-07-29)
+### Account inventory (corrected 2026-07-30)
 
-**402 buckets account-wide, 299 of them completely empty**, 103 holding
-33.0 GB / 20,676 objects — accumulated benchmark and probe litter from
-Aug 2025 onward. Largest: `stored-us-east-1` (8.9 GB), five
+**111 live buckets: 51 empty, 60 holding 29.2 GB** — accumulated benchmark and
+probe litter from Aug 2025 onward. Largest: `stored-us-east-1` (8.9 GB), five
 `lyve-test-*` buckets at 2.24 GB each, `vaultaire-test-1757847421` (3.3 GB).
-Note `list-buckets` on a regional endpoint returned only 111 — it is
-region-scoped, while `rs-bucket-stats` covers the whole account, so **audit
-with `rs-bucket-stats`, not `list-buckets`.** Harmless while Lyve is on the
-free interim, but this is the cleanup list if it ever goes metered (and the
-299 empties should go regardless — they are pure namespace noise).
+
+**`rs-bucket-stats` keeps reporting buckets after they are deleted.** It listed
+416 entries against 111 that actually exist — **305 ghosts**. Proven rather than
+inferred: nine `vaultest-*` buckets created and deleted during the 2026-07-29
+probes still appear in `rs-bucket-stats` today while `list-buckets` shows none
+of them, in any region.
+
+This **reverses the earlier guidance in this file**, which said `list-buckets`
+was region-scoped and `rs-bucket-stats` was the account-wide source of truth.
+Both halves were wrong: `list-buckets` returns the *same* 111 buckets from
+every regional endpoint (us-west-1, us-east-1 and eu-west-1 all agree), so it
+is already account-wide, and `rs-bucket-stats` over-reports. **Audit existence
+with `list-buckets`; use `rs-bucket-stats` only for the size/object/replication
+figures of buckets you already know exist.**
+
+The practical consequence is that the cleanup job is far smaller than recorded:
+**51 empty buckets, not 299.** Still harmless while Lyve bills $0, and still
+worth doing before it doesn't.
 
 ### Historical billing (`RSListBillingData`, pulled 2026-07-29)
 
