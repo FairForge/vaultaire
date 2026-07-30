@@ -202,6 +202,15 @@ func (f *FailoverManager) Execute(ctx context.Context, backends []string, fn fun
 					zap.Error(err))
 			}
 			lastErr = err
+			// A consumed non-rewindable body makes every further attempt a
+			// doomed retry against a drained stream: it would charge healthy
+			// backends' breakers for a failure that is not theirs — or worse,
+			// silently store a truncated object on a backend that does not
+			// validate Content-Length. Stop here; the client retries the
+			// whole request.
+			if errors.Is(err, ErrNoFailover) {
+				break
+			}
 			continue
 		}
 
