@@ -602,17 +602,29 @@ the IAM path. What changed is the prognosis: the platform is plainly alive, so
 if Seagate ever opens those hosts to us (or we get reseller-level access) it
 is a config change on their side, not a resurrection.
 
-### Account inventory (`?rs-bucket-stats`, 2026-07-29)
+### Account inventory (corrected 2026-07-30)
 
-**402 buckets account-wide, 299 of them completely empty**, 103 holding
-33.0 GB / 20,676 objects — accumulated benchmark and probe litter from
-Aug 2025 onward. Largest: `stored-us-east-1` (8.9 GB), five
+**111 live buckets: 51 empty, 60 holding 29.2 GB** — accumulated benchmark and
+probe litter from Aug 2025 onward. Largest: `stored-us-east-1` (8.9 GB), five
 `lyve-test-*` buckets at 2.24 GB each, `vaultaire-test-1757847421` (3.3 GB).
-Note `list-buckets` on a regional endpoint returned only 111 — it is
-region-scoped, while `rs-bucket-stats` covers the whole account, so **audit
-with `rs-bucket-stats`, not `list-buckets`.** Harmless while Lyve is on the
-free interim, but this is the cleanup list if it ever goes metered (and the
-299 empties should go regardless — they are pure namespace noise).
+
+**`rs-bucket-stats` keeps reporting buckets after they are deleted.** It listed
+416 entries against 111 that actually exist — **305 ghosts**. Proven rather than
+inferred: nine `vaultest-*` buckets created and deleted during the 2026-07-29
+probes still appear in `rs-bucket-stats` today while `list-buckets` shows none
+of them, in any region.
+
+This **reverses the earlier guidance in this file**, which said `list-buckets`
+was region-scoped and `rs-bucket-stats` was the account-wide source of truth.
+Both halves were wrong: `list-buckets` returns the *same* 111 buckets from
+every regional endpoint (us-west-1, us-east-1 and eu-west-1 all agree), so it
+is already account-wide, and `rs-bucket-stats` over-reports. **Audit existence
+with `list-buckets`; use `rs-bucket-stats` only for the size/object/replication
+figures of buckets you already know exist.**
+
+The practical consequence is that the cleanup job is far smaller than recorded:
+**51 empty buckets, not 299.** Still harmless while Lyve bills $0, and still
+worth doing before it doesn't.
 
 ### Historical billing (`RSListBillingData`, pulled 2026-07-29)
 
@@ -911,14 +923,47 @@ Three things to take from this:
 - **Concurrency survives the engine.** Ingest loses only 6%, download is
   *faster* than direct, and 128 workers still produce zero errors. Multi-client
   workloads are not the problem.
-- **Sustained single-stream upload is the bottleneck: 446 → 67.7 MB/s.** It is
-  a stable ceiling, not a collapse (per-10 s windows: 64/64/69/67/53/70 MB/s),
-  and single-shot 64 MB PUT shows the same shape (112.6 → 43.3 MB/s, recovering
-  to 66.5 on h1). So one client pushing one big object gets roughly
-  **50–70 MB/s**, whatever the backend can do. This is an *engine* limit, not a
-  Lyve limit — the direct path proves the backend has ~6× more headroom — and
-  it applies to any backend behind the write path. Worth its own investigation
-  before promising large-single-file throughput to anyone.
+- **Sustained upload measured 446 → 67.7 MB/s here — since FIXED, and the
+  cause was not what this section originally claimed.** The first reading was
+  "an engine write-path limit affecting every backend". That was wrong: the
+  same harness against the *local* backend sustains **1378 MB/s** through the
+  identical path (auth, quota, MD5 ETag tee, head-cache), so the engine was
+  never the ceiling.
+
+  The real cause was in the shared S3 upload helper. `sustained_upload_60s`
+  uses **16 MiB** objects and `s3UploadPartSize` is **16 MiB**, so every write
+  landed exactly on the part boundary. Given a non-seekable body — which is
+  what the engine always hands drivers — `manager.Uploader` reads one full
+  part, cannot tell the stream ended, and commits to multipart:
+  `CreateMultipartUpload` + `UploadPart` + `CompleteMultipartUpload` where one
+  `PutObject` would do. At Lyve's ~40 ms warm RTT the two extra round trips
+  dominate the transfer. Compounding it, a fresh `manager.Uploader` was built
+  per PUT, discarding the SDK part-buffer pool that exists precisely to be
+  reused between calls.
+
+  Fixed by short-circuiting known-size objects that fit in one part into a
+  single `PutObject`, and caching the uploader per client. All three S3 drivers
+  were also dropping the `ContentLength` the API adapter already passes, which
+  is what the fast path needs. Re-measured on SLC, two runs:
+
+  | Workload | Before | After (3 runs) |
+  |---|---|---|
+  | `sustained_upload_60s` | 67.7 MB/s | **373.6 / 551.1 / 792.7 MB/s** |
+  | `medium_put_16mb` | 16.3 MB/s | **43.9 / 83.4 / 75.2 MB/s** |
+  | `multipart_put_256mb` | 115.1 MB/s | **156.5 / 160.5 / 143.9 MB/s** |
+  | `concurrent_ingest_20s` | 734.9 MB/s | 831.3 / 740.8 / **925.3 MB/s** |
+
+  The third run is the merged code; the first two still carried a since-removed
+  probe read. Sustained upload now comfortably beats the *direct-driver*
+  446 MB/s baseline — the engine path is no longer the constraint on writes.
+
+  **Read this table with the variance in mind.** Small-op workloads on a live
+  network backend swing hard run to run: `medium_put_1mb` read 2.2, then 9.4,
+  then 11.0 MB/s against a 10.9 baseline — the first of those looked like an
+  80% regression and was noise. Read-path numbers moved ±25% despite nothing on
+  the read path changing. Only differences that reproduce across runs are real.
+  **A single run of this bench cannot support a performance claim**, in either
+  direction.
 
 ### Never benchmark uploads from the Mac (measured 2026-07-30)
 
