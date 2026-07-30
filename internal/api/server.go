@@ -91,9 +91,12 @@ type Server struct {
 	// chunkPutConcurrency, when > 0, overrides the adapter's default
 	// parallel chunk-store worker count (env CHUNK_PUT_CONCURRENCY).
 	chunkPutConcurrency int
-	emailSender         email.Sender
-	baseURL             string
-	startTime           time.Time
+	// chunkGetPrefetch, when > 0, overrides the adapter's default chunked-GET
+	// prefetch depth (env CHUNK_GET_PREFETCH).
+	chunkGetPrefetch int
+	emailSender      email.Sender
+	baseURL          string
+	startTime        time.Time
 	// flags is the runtime feature-flag service (1.13): DB table + ~15s
 	// cache, global kill-switches + per-tenant enablement, flipped via the
 	// admin API / dashboard with no deploy or restart.
@@ -281,6 +284,16 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 			s.chunkPutConcurrency = n
 		} else {
 			logger.Warn("invalid CHUNK_PUT_CONCURRENCY, keeping default", zap.String("value", v))
+		}
+	}
+
+	// Chunk prefetch depth per chunked GET. 0 keeps the adapter default;
+	// 1 is the sequential-fetch escape hatch.
+	if v := os.Getenv("CHUNK_GET_PREFETCH"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			s.chunkGetPrefetch = n
+		} else {
+			logger.Warn("invalid CHUNK_GET_PREFETCH, keeping default", zap.String("value", v))
 		}
 	}
 

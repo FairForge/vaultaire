@@ -577,6 +577,9 @@ func (s *Server) handleGetObject(w http.ResponseWriter, r *http.Request, req *S3
 	adapter.sseService = s.sseService
 	adapter.chunkEncSvc = s.chunkEncSvc
 	adapter.gci = s.gci
+	if s.chunkGetPrefetch > 0 {
+		adapter.chunkGetPrefetch = s.chunkGetPrefetch
+	}
 
 	s.logger.Debug("S3 GET translating to engine",
 		zap.String("s3.bucket", req.Bucket),
