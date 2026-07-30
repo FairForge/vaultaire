@@ -54,6 +54,11 @@ type S3ToEngine struct {
 	// CHUNK_PUT_CONCURRENCY via the Server; 1 = sequential stores).
 	chunkStoreConcurrency int
 
+	// chunkGetPrefetch bounds how many chunks a chunked GET fetches ahead of
+	// the write cursor (default defaultChunkGetPrefetch; env
+	// CHUNK_GET_PREFETCH via the Server; 1 = sequential fetches).
+	chunkGetPrefetch int
+
 	// flags gates the chunked PUT path (1.13 `chunking` kill-switch +
 	// per-tenant override). Nil (tests, callers that never set it) means
 	// chunking stays on — the pre-flag behavior.
@@ -85,6 +90,7 @@ func NewS3ToEngine(e engine.Engine, db *sql.DB, logger *zap.Logger) *S3ToEngine 
 		logger:                logger,
 		notifySvc:             NewNotificationDispatcher(db, logger),
 		chunkStoreConcurrency: defaultChunkStoreConcurrency,
+		chunkGetPrefetch:      defaultChunkGetPrefetch,
 	}
 }
 
@@ -637,8 +643,20 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		vs := getBucketVersioningStatus(r.Context(), a.db, t.ID, bucket)
 		chunkingDisabledByVersioning = vs == "Enabled" || vs == "Suspended"
 	}
+	// Resolve the storage class once: explicit x-amz-storage-class header wins,
+	// then the bucket's tier_preference. Needed this early because a RESILIENT
+	// resolution must keep the object on the PLAIN path — chunk blobs always
+	// land on the engine's primary backend (the GCI's `_global` container is
+	// shared across tenants and tiers), so a chunked object would silently
+	// break the resilient tier's placement promise. Whole objects on Lyve are
+	// fine: the driver multiparts at 214 MB/s.
+	resolvedStorageClass := r.Header.Get("x-amz-storage-class")
+	if resolvedStorageClass == "" {
+		resolvedStorageClass = bucketTierStorageClass(r.Context(), a.db, t.ID, bucket)
+	}
+	chunkingDisabledByTier := resolvedStorageClass == "RESILIENT"
 	willChunkEncrypt := a.gci != nil && a.chunkEncSvc != nil &&
-		metadataSize > chunkThreshold && !chunkingDisabledByVersioning
+		metadataSize > chunkThreshold && !chunkingDisabledByVersioning && !chunkingDisabledByTier
 
 	if crypto.HasSSECHeaders(r) {
 		if r.Header.Get("x-amz-server-side-encryption") != "" {
@@ -750,7 +768,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	// happens INSIDE handleChunkedPut on plaintext; whole-object SSE-S3 was
 	// deliberately skipped above (willChunkEncrypt) for bodies heading here.
 	if a.gci != nil && metadataSize > chunkThreshold && !chunkingDisabledByVersioning &&
-		encryptionAlgorithm == "" && a.chunkingEnabled(t.ID) {
+		!chunkingDisabledByTier && encryptionAlgorithm == "" && a.chunkingEnabled(t.ID) {
 		{
 			// WP-C: no uuid.Parse gate — tenant IDs are strings ("tenant-<hex>"
 			// from registration). The old gate silently skipped chunking for
@@ -775,10 +793,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		}
 	}
 
-	storageClass := r.Header.Get("x-amz-storage-class")
-	if storageClass == "" {
-		storageClass = bucketTierStorageClass(r.Context(), a.db, t.ID, bucket)
-	}
+	storageClass := resolvedStorageClass // header ?: bucket tier, computed above
 	putOpts := []engine.PutOption{engine.WithContentLength(size)}
 	if storageClass != "" {
 		putOpts = append(putOpts, engine.WithStorageClass(storageClass))
@@ -1554,13 +1569,54 @@ func (a *S3ToEngine) handleChunkedGet(
 		w.WriteHeader(http.StatusPartialContent)
 	}
 
-	// Stream the plan. The first chunk is fetched + verified BEFORE headers are
-	// committed, so a corrupt first chunk produces a clean 500. After that the
-	// status is fixed; a failure aborts the body without serving bad bytes.
+	// Stream the plan with bounded prefetch: while chunk i streams to the
+	// client, up to `prefetch` later chunks are already being fetched and
+	// verified — the sequential loop paid one full backend round-trip per
+	// chunk, the same ceiling the parallel chunk-store pool removed on PUT.
+	// A slot is held from fetch-start until the writer consumes the chunk,
+	// so in-flight + fetched-but-unwritten buffers never exceed `prefetch`
+	// chunks (≤16 MB each). Results arrive per-index on buffered channels;
+	// the writer consumes strictly in index order, so ordering, verification
+	// (inside fetchAndVerifyChunk, before any byte is written), and the
+	// error contract below are identical to the sequential loop.
+	prefetch := a.chunkGetPrefetch
+	if prefetch < 1 {
+		prefetch = 1
+	}
+	type fetchOut struct {
+		data []byte
+		err  error
+	}
+	fctx, cancelFetch := context.WithCancel(ctx)
+	defer cancelFetch()
+	results := make([]chan fetchOut, len(plan))
+	for i := range results {
+		results[i] = make(chan fetchOut, 1) // buffered: a cancelled writer never strands the fetcher
+	}
+	slots := make(chan struct{}, prefetch)
+	go func() {
+		for i := range plan {
+			select {
+			case slots <- struct{}{}:
+			case <-fctx.Done():
+				return
+			}
+			go func(i int) {
+				data, ferr := a.fetchAndVerifyChunk(fctx, plan[i].desc, t.ID)
+				results[i] <- fetchOut{data: data, err: ferr}
+			}(i)
+		}
+	}()
+
+	// The first chunk is fetched + verified BEFORE headers are committed, so
+	// a corrupt first chunk produces a clean 500. After that the status is
+	// fixed; a failure aborts the body without serving bad bytes.
 	headersWritten := false
 	var written int64
-	for _, p := range plan {
-		data, ferr := a.fetchAndVerifyChunk(ctx, p.desc, t.ID)
+	for i, p := range plan {
+		out := <-results[i]
+		data, ferr := out.data, out.err
+		<-slots
 		if ferr != nil {
 			if !headersWritten {
 				if errors.Is(ferr, errChunkIntegrity) {
@@ -1819,6 +1875,7 @@ var tierPreferenceToStorageClass = map[string]string{
 	"performance": "STANDARD",
 	"standard":    "STANDARD",
 	"archive":     "GLACIER",
+	"resilient":   "RESILIENT", // → lyve (engine/storage_class.go)
 }
 
 func bucketTierStorageClass(ctx context.Context, db *sql.DB, tenantID, bucket string) string {

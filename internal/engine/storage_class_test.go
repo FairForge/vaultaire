@@ -27,3 +27,17 @@ func TestBackendRegion(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveStorageClass_ResilientRoutesToLyve(t *testing.T) {
+	drivers := map[string]Driver{"local": nil, "lyve": nil}
+	backend, class := ResolveStorageClass("RESILIENT", "local", drivers)
+	if backend != "lyve" || class != "RESILIENT" {
+		t.Fatalf("RESILIENT with lyve registered: got (%s,%s), want (lyve,RESILIENT)", backend, class)
+	}
+
+	// Without a lyve driver registered, fall back to primary — never error.
+	backend, class = ResolveStorageClass("RESILIENT", "local", map[string]Driver{"local": nil})
+	if backend != "local" || class != "RESILIENT" {
+		t.Fatalf("RESILIENT without lyve: got (%s,%s), want (local,RESILIENT)", backend, class)
+	}
+}
