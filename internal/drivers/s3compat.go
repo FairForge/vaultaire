@@ -89,7 +89,7 @@ func (d *S3CompatDriver) Put(ctx context.Context, container, artifact string, da
 
 	// Parallel multipart upload: large files upload as concurrent parts instead of
 	// a single PutObject stream; small files still go as one PutObject.
-	if err := s3ParallelUpload(ctx, d.client, d.bucket, key, options.ContentType, data); err != nil {
+	if err := s3ParallelUpload(ctx, d.client, d.bucket, key, options.ContentType, data, options.ContentLength); err != nil {
 		return err
 	}
 
