@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 )
@@ -111,6 +112,9 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	container := fmt.Sprintf("%s_%s", tenantID, bucket)
+	// Backend-attribution slot: the engine records which backend served the
+	// bytes so CDN egress lands in backend_bandwidth_daily too.
+	ctx, _ = common.WithBackendNote(ctx)
 	reader, err := s.engine.Get(ctx, container, key)
 	if err != nil {
 		s.logger.Error("cdn engine.Get failed",
@@ -136,7 +140,7 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if s.bandwidthTracker != nil {
-			s.bandwidthTracker.Record(ctx, tenantID, 0, rng.length)
+			s.bandwidthTracker.RecordWithBackend(ctx, tenantID, common.BackendUsed(ctx), 0, rng.length)
 		}
 		if s.cdnAnalytics != nil {
 			s.cdnAnalytics.Record(ctx, tenantID, bucket, key, rng.length,
@@ -154,7 +158,7 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.bandwidthTracker != nil {
-		s.bandwidthTracker.Record(ctx, tenantID, 0, written)
+		s.bandwidthTracker.RecordWithBackend(ctx, tenantID, common.BackendUsed(ctx), 0, written)
 	}
 	if s.cdnAnalytics != nil {
 		s.cdnAnalytics.Record(ctx, tenantID, bucket, key, written,

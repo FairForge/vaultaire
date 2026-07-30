@@ -131,6 +131,10 @@ type actualBackendRow struct {
 	// subsidized backend still shows what it will cost when the promo ends.
 	ModelledFmt string
 	Subsidized  bool
+	// EgressFmt / EgressCostFmt cover this month's attributed egress
+	// (backend_bandwidth_daily); the cost follows the active mode.
+	EgressFmt     string
+	EgressCostFmt string
 }
 
 type marginRow struct {
@@ -379,6 +383,8 @@ func formatSignedCents(cents int64) string {
 }
 
 func populateActualBackends(ctx context.Context, db *sql.DB, data map[string]any, logger *zap.Logger, mode costMode) {
+	egress := queryBackendEgress(ctx, db, logger)
+
 	rows, err := db.QueryContext(ctx, `
 		SELECT backend_name, COUNT(*), COALESCE(SUM(size_bytes), 0)
 		FROM object_locations GROUP BY backend_name
@@ -402,20 +408,27 @@ func populateActualBackends(ctx context.Context, db *sql.DB, data map[string]any
 		r.StorageTB = math.Round(storageTB*100) / 100
 		r.StorageFmt = formatBytes(storageBytes)
 
-		perTB, _ := ratesFor(r.Backend, mode)
+		perTB, egressPerTB := ratesFor(r.Backend, mode)
 		modelledPerTB := backendCostPerTBCents[r.Backend]
 		costCents := int64(math.Round(storageTB * float64(perTB)))
 		modelledCents := int64(math.Round(storageTB * float64(modelledPerTB)))
 
+		egressBytes := egress[r.Backend]
+		egressTB := float64(egressBytes) / bytesPerTBCost
+		egressCostCents := int64(math.Round(egressTB * float64(egressPerTB)))
+		egressModelledCents := int64(math.Round(egressTB * float64(egressCostPerTBCents[r.Backend])))
+
 		r.CostFmt = formatCents(costCents)
 		r.ModelledFmt = formatCents(modelledCents)
 		r.Subsidized = subsidizedBackends[r.Backend]
+		r.EgressFmt = formatBytes(egressBytes)
+		r.EgressCostFmt = formatCents(egressCostCents)
 
-		modelledTotal += modelledCents
+		modelledTotal += modelledCents + egressModelledCents
 		if mode == costModeInvoiced {
-			invoicedTotal += costCents
+			invoicedTotal += costCents + egressCostCents
 		} else if !r.Subsidized {
-			invoicedTotal += costCents
+			invoicedTotal += costCents + egressCostCents
 		}
 
 		actual = append(actual, r)
@@ -428,6 +441,33 @@ func populateActualBackends(ctx context.Context, db *sql.DB, data map[string]any
 	if len(actual) > 0 {
 		data["ActualByBackend"] = actual
 	}
+}
+
+// queryBackendEgress returns this month's attributed egress bytes per backend
+// from backend_bandwidth_daily (migration 060). Degrades to an empty map when
+// the table is missing or the query fails — storage costing must survive.
+func queryBackendEgress(ctx context.Context, db *sql.DB, logger *zap.Logger) map[string]int64 {
+	out := map[string]int64{}
+	rows, err := db.QueryContext(ctx, `
+		SELECT backend_name, COALESCE(SUM(egress_bytes), 0)
+		FROM backend_bandwidth_daily
+		WHERE date >= date_trunc('month', CURRENT_DATE)
+		GROUP BY backend_name`)
+	if err != nil {
+		logger.Debug("costs: query backend egress", zap.Error(err))
+		return out
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var name string
+		var bytes int64
+		if err := rows.Scan(&name, &bytes); err != nil {
+			logger.Debug("costs: scan backend egress", zap.Error(err))
+			continue
+		}
+		out[name] = bytes
+	}
+	return out
 }
 
 func daysInCurrentMonth(t time.Time) int {
