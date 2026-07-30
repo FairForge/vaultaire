@@ -1,8 +1,22 @@
 package engine
 
+// These keys are OUR S3 API's storage-class names — what a client sends us in
+// x-amz-storage-class — and the values pick which backend driver handles the
+// object. They are not the backend's own storage class: no driver sets
+// StorageClass on its upstream request, so an object routed here is stored at
+// whatever class that backend defaults to.
+//
+// STANDARD_IA is deliberately absent. We do not sell an infrequent-access tier
+// (decision 2026-07-29) and IMPLEMENTATION_PLAN.md:871 forbids routing customer
+// STANDARD_IA to Lyve. A client sending it gets the primary backend at
+// STANDARD, the same as any unrecognized class.
+//
+// Note this is distinct from Seagate's own Lyve Infrequent Access service tier
+// (180-day minimum retention, 128 KB minimum object size, retrieval caps — see
+// internal/drivers/lyve_README.md). We have never used that: the old mapping
+// sent objects to the Lyve *backend* at its default class, not to Lyve IA.
 var storageClassToBackend = map[string]string{
 	"STANDARD":           "idrive",
-	"STANDARD_IA":        "lyve",
 	"GLACIER":            "geyser",
 	"DEEP_ARCHIVE":       "geyser",
 	"REDUCED_REDUNDANCY": "local",
@@ -10,7 +24,7 @@ var storageClassToBackend = map[string]string{
 
 var backendToStorageClass = map[string]string{
 	"idrive":     "STANDARD",
-	"lyve":       "STANDARD_IA",
+	"lyve":       "STANDARD",
 	"geyser":     "GLACIER",
 	"permafrost": "STANDARD",
 	"local":      "REDUCED_REDUNDANCY",
