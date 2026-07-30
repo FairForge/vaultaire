@@ -423,6 +423,15 @@ func (c *GeyserAdminClient) VerifyMFA(ctx context.Context, hash, code string) er
 	return nil
 }
 
+// SessionCookies returns the current console session pair (accessToken,
+// userId) — what probe tooling needs to issue raw requests against console
+// endpoints the typed surface doesn't cover yet.
+func (c *GeyserAdminClient) SessionCookies() (accessToken, userID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.accessToken, c.userID
+}
+
 // seedSessionCookies writes the session cookies into the jar so they are sent
 // on every request (and overwrite any stale jar entries from a prior session).
 func (c *GeyserAdminClient) seedSessionCookies(accessToken, userID string) {
