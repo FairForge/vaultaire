@@ -17,6 +17,12 @@ import (
 // ≤ ~19 chunks of ≤ 16 MB). Override via CHUNK_PUT_CONCURRENCY.
 const defaultChunkStoreConcurrency = 8
 
+// defaultChunkGetPrefetch bounds how many chunks a chunked GET fetches ahead
+// of the write cursor. Each buffered chunk holds up to 16 MB and GETs are
+// typically more concurrent than PUTs, so the default is smaller than the
+// store pool's. Override via CHUNK_GET_PREFETCH.
+const defaultChunkGetPrefetch = 4
+
 // takenChunkRef identifies one GCI reference taken during a chunked PUT so
 // an aborted upload can compensate it (F10).
 type takenChunkRef struct{ scope, hash string }
