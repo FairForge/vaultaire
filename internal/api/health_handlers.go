@@ -176,12 +176,19 @@ func (s *Server) handleHealthEnhanced(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 
-	// Set appropriate status code
-	httpStatus := http.StatusOK
-	if status == "unhealthy" {
-		httpStatus = http.StatusServiceUnavailable
-	}
-	w.WriteHeader(httpStatus)
+	// Always 200 while this instance is serving, even when every backend probe
+	// is failing. HAProxy health-checks this endpoint, so a 503 evicts the
+	// instance from rotation — which turns one unreachable third-party backend
+	// into a total outage. That happened in production on 2026-07-30: Lyve was
+	// the only registered backend, its DNS lookups intermittently timed out,
+	// and stored.ge served "503 No server is available" from HAProxy each time.
+	//
+	// The instance can still serve auth, listings, cached reads, and every
+	// other backend, so it belongs in rotation. Backend trouble is reported in
+	// the body (status + backends_healthy/backends_total) for operators and
+	// dashboards; it must not be signalled by failing the load-balancer check.
+	// Process-level liveness is /health/live, which the deploy gate uses.
+	w.WriteHeader(http.StatusOK)
 
 	_ = json.NewEncoder(w).Encode(resp)
 }
