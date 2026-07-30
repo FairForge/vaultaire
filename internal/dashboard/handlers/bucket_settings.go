@@ -123,7 +123,7 @@ func HandleUpdateBucketSettings(tmpl *template.Template, db *sql.DB, logger *zap
 		if tierPref == "" {
 			tierPref = "auto"
 		}
-		if tierPref != "auto" && tierPref != "performance" && tierPref != "standard" && tierPref != "archive" {
+		if tierPref != "auto" && tierPref != "performance" && tierPref != "standard" && tierPref != "archive" && tierPref != "resilient" {
 			tierPref = "auto"
 		}
 

@@ -643,8 +643,20 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		vs := getBucketVersioningStatus(r.Context(), a.db, t.ID, bucket)
 		chunkingDisabledByVersioning = vs == "Enabled" || vs == "Suspended"
 	}
+	// Resolve the storage class once: explicit x-amz-storage-class header wins,
+	// then the bucket's tier_preference. Needed this early because a RESILIENT
+	// resolution must keep the object on the PLAIN path — chunk blobs always
+	// land on the engine's primary backend (the GCI's `_global` container is
+	// shared across tenants and tiers), so a chunked object would silently
+	// break the resilient tier's placement promise. Whole objects on Lyve are
+	// fine: the driver multiparts at 214 MB/s.
+	resolvedStorageClass := r.Header.Get("x-amz-storage-class")
+	if resolvedStorageClass == "" {
+		resolvedStorageClass = bucketTierStorageClass(r.Context(), a.db, t.ID, bucket)
+	}
+	chunkingDisabledByTier := resolvedStorageClass == "RESILIENT"
 	willChunkEncrypt := a.gci != nil && a.chunkEncSvc != nil &&
-		metadataSize > chunkThreshold && !chunkingDisabledByVersioning
+		metadataSize > chunkThreshold && !chunkingDisabledByVersioning && !chunkingDisabledByTier
 
 	if crypto.HasSSECHeaders(r) {
 		if r.Header.Get("x-amz-server-side-encryption") != "" {
@@ -756,7 +768,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	// happens INSIDE handleChunkedPut on plaintext; whole-object SSE-S3 was
 	// deliberately skipped above (willChunkEncrypt) for bodies heading here.
 	if a.gci != nil && metadataSize > chunkThreshold && !chunkingDisabledByVersioning &&
-		encryptionAlgorithm == "" && a.chunkingEnabled(t.ID) {
+		!chunkingDisabledByTier && encryptionAlgorithm == "" && a.chunkingEnabled(t.ID) {
 		{
 			// WP-C: no uuid.Parse gate — tenant IDs are strings ("tenant-<hex>"
 			// from registration). The old gate silently skipped chunking for
@@ -781,10 +793,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		}
 	}
 
-	storageClass := r.Header.Get("x-amz-storage-class")
-	if storageClass == "" {
-		storageClass = bucketTierStorageClass(r.Context(), a.db, t.ID, bucket)
-	}
+	storageClass := resolvedStorageClass // header ?: bucket tier, computed above
 	putOpts := []engine.PutOption{engine.WithContentLength(size)}
 	if storageClass != "" {
 		putOpts = append(putOpts, engine.WithStorageClass(storageClass))
@@ -1866,6 +1875,7 @@ var tierPreferenceToStorageClass = map[string]string{
 	"performance": "STANDARD",
 	"standard":    "STANDARD",
 	"archive":     "GLACIER",
+	"resilient":   "RESILIENT", // → lyve (engine/storage_class.go)
 }
 
 func bucketTierStorageClass(ctx context.Context, db *sql.DB, tenantID, bucket string) string {
