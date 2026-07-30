@@ -494,12 +494,15 @@ func TestRegionalFailover(t *testing.T) {
 		// Fix primary
 		primary.SetShouldFail(false)
 
-		// Wait for recovery probe
-		time.Sleep(200 * time.Millisecond)
-
-		// Should detect primary is healthy again
-		status := failover.GetHealthStatus()
-		assert.True(t, status.PrimaryHealthy)
+		// Poll for the recovery probe rather than sleeping a fixed 200ms for a
+		// 100ms interval: on a loaded CI runner the probe goroutine may not have
+		// been scheduled yet, which made this test flake (seen 2026-07-30 on a
+		// docs-only PR). Eventually still fails fast when recovery is genuinely
+		// broken — it just stops racing the scheduler.
+		require.Eventually(t, func() bool {
+			return failover.GetHealthStatus().PrimaryHealthy
+		}, 5*time.Second, 10*time.Millisecond,
+			"primary should be probed healthy again after it recovers")
 	})
 }
 
