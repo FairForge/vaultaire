@@ -38,4 +38,13 @@ var (
 	ErrInvalidInput           = fmt.Errorf("invalid input")
 	ErrTimeout                = fmt.Errorf("operation timeout")
 	ErrAllBackendsUnavailable = fmt.Errorf("all backends unavailable")
+
+	// ErrNoFailover marks a failure after which no further backend may be
+	// attempted: the request body is a non-rewindable stream that has already
+	// been partially consumed, so any retry would receive a drained reader —
+	// a length-validating backend fails pointlessly (and gets its breaker
+	// charged for a failure that is not its own), and a lax one silently
+	// stores a TRUNCATED object as success. FailoverManager.Execute stops
+	// iterating when it sees this sentinel.
+	ErrNoFailover = fmt.Errorf("request body already consumed — failover unavailable")
 )
