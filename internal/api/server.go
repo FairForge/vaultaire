@@ -362,12 +362,27 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	cdnRouter.Head("/{slug}/{bucket}/*", s.handleCDNRequest)
 	cdnRouter.Options("/{slug}/{bucket}/*", s.handleCDNRequest)
 
+	// ReadTimeout and WriteTimeout are deliberately UNSET.
+	//
+	// Go applies ReadTimeout to the entire request including the body, and
+	// WriteTimeout to the entire response. On a storage service those are not
+	// safety limits, they are data-size limits in disguise: whatever the
+	// object size, an upload that takes longer than the deadline to stream
+	// through to the backend is killed mid-flight, and a download slower than
+	// the deadline is truncated. At 30s this rejected 50 MB uploads in
+	// production with a 502 (the body read failed, then every backend in the
+	// failover list retried against the already-dead body).
+	//
+	// Slowloris is still bounded, by ReadHeaderTimeout — it covers the headers,
+	// which is where that attack lives, and leaves body streaming untimed.
+	// IdleTimeout reaps idle keep-alive connections. Per-operation deadlines
+	// belong in the handlers via context, not on the whole server.
 	s.httpServer = &http.Server{
-		Addr:           fmt.Sprintf(":%d", cfg.Server.Port),
-		Handler:        CDNHostRouter(cdnRouter, s.router),
-		ReadTimeout:    30 * time.Second,
-		WriteTimeout:   30 * time.Second,
-		MaxHeaderBytes: 1 << 20, // 1 MB
+		Addr:              fmt.Sprintf(":%d", cfg.Server.Port),
+		Handler:           CDNHostRouter(cdnRouter, s.router),
+		ReadHeaderTimeout: 15 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1 MB
 	}
 
 	return s
