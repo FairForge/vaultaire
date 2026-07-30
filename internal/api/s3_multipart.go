@@ -474,10 +474,16 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 		}
 	}()
 
-	// Upload assembled stream to backend
+	// Upload assembled stream to backend. Multipart bypasses the tier-aware
+	// plain-PUT path, so resolve the bucket's tier here too — without this,
+	// aws-cli's default multipart uploads would ignore tier placement (a
+	// resilient-tier bucket would silently store on the primary backend).
+	completeOpts := []engine.PutOption{engine.WithContentLength(totalSize)}
+	if tierClass := bucketTierStorageClass(r.Context(), s.db, t.ID, bucket); tierClass != "" {
+		completeOpts = append(completeOpts, engine.WithStorageClass(tierClass))
+	}
 	go func() {
-		_, putErr := s.engine.Put(r.Context(), containerName, object, pr,
-			engine.WithContentLength(totalSize))
+		_, putErr := s.engine.Put(r.Context(), containerName, object, pr, completeOpts...)
 		_ = pr.Close()
 		errCh <- putErr
 	}()

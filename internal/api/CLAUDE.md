@@ -179,7 +179,7 @@ JSON REST layer at `/api/v1/manage/` with JWT auth and per-tenant rate limiting.
 
 **Cursor pagination**: queries `LIMIT N+1`; if N+1 results → `has_more=true`, returns first N, `next_cursor` = last item's name/key.
 
-**Bucket tier preference** (Phase 7.5): `PUT /api/v1/manage/buckets/{name}/tier` (`handleMgmtSetBucketTier`) — sets the bucket's `tier_preference` column. Request body: `{"tier": "auto|performance|standard|archive"}`. Returns 400 for invalid tier, 404 for missing bucket, 200 with `tier_preference` in the response envelope.
+**Bucket tier preference** (Phase 7.5, `resilient` added by WP-ResilientTier): `PUT /api/v1/manage/buckets/{name}/tier` (`handleMgmtSetBucketTier`) — sets the bucket's `tier_preference` column. Request body: `{"tier": "auto|performance|standard|archive|resilient"}`. Returns 400 for invalid tier, 404 for missing bucket, 200 with `tier_preference` in the response envelope. `resilient` maps to the internal `RESILIENT` storage class → Lyve backend (the $7.99 tier). Resilient-tier buckets **skip the chunked PUT path** (chunk blobs always land on the engine primary via the shared `_global` container, which would silently defeat the tier's placement promise) — objects store whole on Lyve, and multipart complete resolves the tier class too (`s3_multipart.go` passes `bucketTierStorageClass` to the assembled-object Put, so aws-cli default multipart uploads respect tier placement).
 
 ## CDN Access Analytics (Phase 5.11.12)
 

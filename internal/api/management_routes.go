@@ -726,6 +726,7 @@ var validTierPreferences = map[string]bool{
 	"performance": true,
 	"standard":    true,
 	"archive":     true,
+	"resilient":   true, // Lyve-backed tier (engine/storage_class.go RESILIENT)
 }
 
 func (s *Server) handleMgmtSetBucketTier(w http.ResponseWriter, r *http.Request) {
@@ -752,7 +753,7 @@ func (s *Server) handleMgmtSetBucketTier(w http.ResponseWriter, r *http.Request)
 
 	if !validTierPreferences[req.Tier] {
 		writeManagementError(w, ErrTypeInvalidRequest, "invalid_tier",
-			"tier must be one of: auto, performance, standard, archive", "tier")
+			"tier must be one of: auto, performance, standard, archive, resilient", "tier")
 		return
 	}
 

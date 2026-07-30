@@ -20,6 +20,14 @@ var storageClassToBackend = map[string]string{
 	"GLACIER":            "geyser",
 	"DEEP_ARCHIVE":       "geyser",
 	"REDUCED_REDUNDANCY": "local",
+
+	// RESILIENT is OUR tier name, not an AWS storage class — it is what the
+	// `resilient` bucket tier_preference resolves to (the $7.99 Lyve-backed
+	// tier: WORM, write-only creds, no egress fees, 3-AZ-free concurrency).
+	// This is NOT the removed STANDARD_IA mapping: objects land on the Lyve
+	// backend at its default (STANDARD) class — Lyve's IA service tier with
+	// its retention/size penalties is never used.
+	"RESILIENT": "lyve",
 }
 
 var backendToStorageClass = map[string]string{
