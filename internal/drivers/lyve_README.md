@@ -878,6 +878,48 @@ and has no rate-limit errors up to 128 workers. Integration test
 (`TestLyveDriver_Integration`, env-guarded) passes from SLC including a
 20 MB multipart round-trip.
 
+## Benchmarks — ENGINE PATH (E2E through Vaultaire, SLC, 2026-07-29)
+
+The table above is the **direct driver path**. This is the same backend
+measured *through* Vaultaire's S3 API — the path a real customer takes, with
+auth, metadata, chunking and encryption in the way. Run:
+`./bench-vaultaire.sh lyve` (2m26s), result
+`bench-results/vaultaire-e2e/slc-vaultaire-01-vaultaire-lyve.json`.
+This closes the long-standing gap where Lyve had only ever been benched direct.
+
+| Workload | Direct | **Engine (E2E)** | Engine cost |
+|---|---|---|---|
+| warm 4 KB PUT | 50 ms | **87 ms** | +37 ms |
+| warm 4 KB GET | 42 ms | **45 ms** | +3 ms |
+| warm 4 KB HEAD | 38 ms | **0.23 ms** (4276 ops/s) | **200× faster** |
+| 64 MB PUT single-stream | 112.6 MB/s | **43.3** (h1 **66.5**) | **−62%** |
+| 64 MB GET single-stream | 95.0 MB/s | **91.7 MB/s** | −3% |
+| 256 MB multipart, 16 parts | 213.7 MB/s | **147.7 MB/s** | −31% |
+| concurrent ingest (20 s) | 778–820 MB/s | **734.9 MB/s** | −6% |
+| concurrent download (20 s) | 443–496 MB/s | **601.0 MB/s** | **+21%** |
+| **sustained upload (60 s)** | **442–446 MB/s** | **67.7 MB/s** | **−85%** |
+| burst 500 small files | 194 ops/s | **180.5 ops/s** | −7% |
+| worker escalation 8→128 | 602 ops/s, 0 err | **460 ops/s, 0 err** | −24%, still clean |
+| integrity (16 MB, robust, chunked) | — | ✓ all pass, 0 retries | |
+| read-after-write / overwrite / list | 20/20, 10/10, 10/10 | ✓ same | |
+
+Three things to take from this:
+
+- **HEAD is ~200× faster through the engine** (0.23 ms vs 38 ms) because it
+  serves from `object_head_cache` and never touches the backend. That is the
+  architecture decision paying off exactly as intended.
+- **Concurrency survives the engine.** Ingest loses only 6%, download is
+  *faster* than direct, and 128 workers still produce zero errors. Multi-client
+  workloads are not the problem.
+- **Sustained single-stream upload is the bottleneck: 446 → 67.7 MB/s.** It is
+  a stable ceiling, not a collapse (per-10 s windows: 64/64/69/67/53/70 MB/s),
+  and single-shot 64 MB PUT shows the same shape (112.6 → 43.3 MB/s, recovering
+  to 66.5 on h1). So one client pushing one big object gets roughly
+  **50–70 MB/s**, whatever the backend can do. This is an *engine* limit, not a
+  Lyve limit — the direct path proves the backend has ~6× more headroom — and
+  it applies to any backend behind the write path. Worth its own investigation
+  before promising large-single-file throughput to anyone.
+
 Bench gotchas:
 - `bench-compare -only lyve` matches **all 7** regional endpoints (~15 min);
   use `-only lyve-us-west`.
