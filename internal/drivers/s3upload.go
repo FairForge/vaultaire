@@ -126,19 +126,13 @@ func putSinglePartIfSmall(ctx context.Context, client manager.UploadAPIClient, i
 			aws.ToString(in.Bucket), aws.ToString(in.Key), err)
 	}
 
-	// The declared length may understate the body. Peek one byte: if more
-	// remains, hand the whole stream back to the multipart uploader instead
-	// of silently truncating.
-	var probe [1]byte
-	if pn, perr := in.Body.Read(probe[:]); pn > 0 {
-		in.Body = io.MultiReader(bytes.NewReader(buf), bytes.NewReader(probe[:pn]), in.Body)
-		in.ContentLength = nil
-		return false, nil
-	} else if perr != nil && !errors.Is(perr, io.EOF) {
-		return true, fmt.Errorf("s3 upload %s/%s: read body: %w",
-			aws.ToString(in.Bucket), aws.ToString(in.Key), perr)
-	}
-
+	// Deliberately NO read past ContentLength to check for a longer body: a
+	// producer that has delivered exactly Content-Length but has not yet
+	// signalled EOF would block that read forever and hang the upload — see
+	// TestS3Upload_DoesNotBlockProbingPastContentLength, which caught this.
+	// ContentLength is authoritative: HTTP frames the request body by it, the
+	// S3 layer already rejects bodies whose measured length disagrees with the
+	// declared one, and the SDK would itself send exactly ContentLength bytes.
 	in.Body = bytes.NewReader(buf)
 	if _, err := client.PutObject(ctx, in); err != nil {
 		return true, fmt.Errorf("s3 upload %s/%s: %w",
