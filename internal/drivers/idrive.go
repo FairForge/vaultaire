@@ -175,7 +175,7 @@ func (d *IDriveDriver) Put(ctx context.Context, container, artifact string, data
 	// uploader streams parts on the fly, so it also avoids the full-object
 	// buffering the old unknown-length path did via materialize. Small files
 	// still go as a single PutObject.
-	if err := s3ParallelUpload(ctx, d.client, d.bucket, key, options.ContentType, data); err != nil {
+	if err := s3ParallelUpload(ctx, d.client, d.bucket, key, options.ContentType, data, options.ContentLength); err != nil {
 		return err
 	}
 	return nil
