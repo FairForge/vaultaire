@@ -168,4 +168,118 @@ func main() {
 	fmt.Println("\nDone. The verdict is in the responses above: an 'endpoint' field that is",
 		"accepted (or an error complaining about credentials rather than the field)",
 		"means Geyser can target Lyve; 'unknown field'/enum errors mean AWS-pinned.")
+
+	if os.Getenv("GEYSER_FUNCTIONAL") == "1" {
+		runFunctional(ctx, client, bucketID)
+	}
+}
+
+// runFunctional is the decisive test: real scoped Lyve creds, a real
+// RestoreToCloud, and direct verification that the object lands on Lyve —
+// plus the cloudSync ingest-leg probe. Requires (set by the wrapper script):
+//
+//	LYVE_PROBE_BUCKET   public-read Lyve bucket (us-west-1 homed)
+//	LYVE_PROBE_AK/SK    scoped creds (Put/Get/List on that bucket only)
+//	GEYSER_STAGED_KEY   object already staged on Geyser's staging disk
+//	LYVE_SYNC_SRC_KEY   object already present in the Lyve probe bucket
+func runFunctional(ctx context.Context, client *drivers.GeyserAdminClient, bucketID string) {
+	lyveBucket := os.Getenv("LYVE_PROBE_BUCKET")
+	ak, sk := os.Getenv("LYVE_PROBE_AK"), os.Getenv("LYVE_PROBE_SK")
+	stagedKey := os.Getenv("GEYSER_STAGED_KEY")
+	syncSrcKey := os.Getenv("LYVE_SYNC_SRC_KEY")
+	if lyveBucket == "" || ak == "" || sk == "" || stagedKey == "" {
+		log.Fatal("functional mode needs LYVE_PROBE_BUCKET, LYVE_PROBE_AK/SK, GEYSER_STAGED_KEY")
+	}
+
+	fmt.Println("\n== F1. RESTORE LEG: RestoreToCloud into Lyve, verified by public GET")
+	restored := false
+	for _, typ := range []string{"AWS", "WASABI"} {
+		fmt.Printf("-- integration type=%s endpoint=%s bucket=%s\n", typ, lyveEndpoint, lyveBucket)
+		integ, err := client.CreateCloudIntegration(ctx, bucketID, drivers.CreateCloudIntegrationRequest{
+			CloudIntegrationType: typ, Region: "us-west-1", Bucket: lyveBucket,
+			AccessKey: ak, SecretKey: sk, Endpoint: lyveEndpoint,
+		})
+		if err != nil {
+			fmt.Printf("   create rejected: %v\n", err)
+			continue
+		}
+		fmt.Printf("   integration %s created\n", integ.ID)
+
+		if rerr := client.RestoreToCloud(ctx, bucketID, stagedKey, integ.ID, ""); rerr != nil {
+			fmt.Printf("   RestoreToCloud error: %v — trying RestoreToCache first\n", rerr)
+			if cerr := client.RestoreToCache(ctx, bucketID, stagedKey, ""); cerr != nil {
+				fmt.Printf("   RestoreToCache error: %v\n", cerr)
+			}
+			if rerr2 := client.RestoreToCloud(ctx, bucketID, stagedKey, integ.ID, ""); rerr2 != nil {
+				fmt.Printf("   RestoreToCloud retry error: %v\n", rerr2)
+			}
+		} else {
+			fmt.Println("   RestoreToCloud accepted, polling Lyve for the object (5m)…")
+		}
+
+		// The probe bucket is public-read: poll without credentials.
+		u := fmt.Sprintf("%s/%s/%s", lyveEndpoint, lyveBucket, stagedKey)
+		deadline := time.Now().Add(5 * time.Minute)
+		for time.Now().Before(deadline) && !restored {
+			resp, gerr := http.Get(u) // #nosec G107 -- URL built from our own env
+			if gerr == nil {
+				_, _ = io.Copy(io.Discard, resp.Body)
+				_ = resp.Body.Close()
+				if resp.StatusCode == 200 {
+					fmt.Printf("   ✅ OBJECT LANDED ON LYVE: %s (via %s integration)\n", u, typ)
+					restored = true
+					break
+				}
+			}
+			time.Sleep(10 * time.Second)
+		}
+		if derr := client.DeleteCloudIntegration(ctx, bucketID, integ.ID); derr != nil {
+			fmt.Printf("   !! integration cleanup failed (%s): %v\n", integ.ID, derr)
+		}
+		if restored {
+			break
+		}
+		fmt.Printf("   no object appeared within 5m via type=%s\n", typ)
+	}
+	if !restored {
+		fmt.Println("   ❌ RESTORE LEG NOT CONFIRMED — endpoint may be dropped, or restore targets real AWS")
+	}
+
+	if syncSrcKey != "" {
+		fmt.Println("\n== F2. INGEST LEG: cloudSync pulling FROM Lyve (endpoint injected)")
+		err := client.CreateCloudSync(ctx, drivers.CreateCloudSyncRequest{
+			Source: drivers.CloudSyncSource{
+				Type: "AWS", Region: "us-west-1", Bucket: lyveBucket,
+				AccessKey: ak, SecretKey: sk, Endpoint: lyveEndpoint,
+			},
+			Action:   "SYNC",
+			BucketID: bucketID,
+		})
+		if err != nil {
+			fmt.Printf("   cloudSync create rejected: %v\n", err)
+		} else {
+			fmt.Println("   cloudSync created, polling job status (5m)…")
+			deadline := time.Now().Add(5 * time.Minute)
+			for time.Now().Before(deadline) {
+				jobs, jerr := client.GetCloudSyncStatus(ctx, bucketID)
+				if jerr != nil {
+					fmt.Printf("   status error: %v\n", jerr)
+					break
+				}
+				if len(jobs) > 0 {
+					last := jobs[len(jobs)-1]
+					fmt.Printf("   job %s status=%s\n", last.ID, last.Status)
+					if last.Status == "COMPLETED" {
+						fmt.Println("   ✅ INGEST SYNC COMPLETED — wrapper verifies the object on Geyser")
+						break
+					}
+					if last.Status == "FAILED" || last.Status == "ERROR" {
+						break
+					}
+				}
+				time.Sleep(15 * time.Second)
+			}
+		}
+	}
+	fmt.Println("\nFUNCTIONAL DONE")
 }

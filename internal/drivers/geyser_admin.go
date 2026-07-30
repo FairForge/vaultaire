@@ -221,12 +221,15 @@ type CreateCloudIntegrationRequest struct {
 
 // CloudSyncSource identifies the external bucket Geyser pulls from during a
 // cloud sync (server-side ingest — the bytes never transit our infrastructure).
+// Endpoint is not in the observed console schema; the cloudsync probe sends it
+// to learn whether the ingest leg can target a custom S3 endpoint (Lyve).
 type CloudSyncSource struct {
 	Type      string `json:"type"` // AWS | WASABI | ORACLE
 	Region    string `json:"region"`
 	Bucket    string `json:"bucket"`
 	AccessKey string `json:"accessKey"`
 	SecretKey string `json:"secretKey"`
+	Endpoint  string `json:"endpoint,omitempty"`
 }
 
 // CreateCloudSyncRequest is the payload for POST /api/cloudSync.
