@@ -188,7 +188,11 @@ func TestResolveStorageClass_Mapping(t *testing.T) {
 		expectedClass   string
 	}{
 		{"STANDARD", "idrive", "STANDARD"},
-		{"STANDARD_IA", "lyve", "STANDARD_IA"},
+		// STANDARD_IA is deliberately unmapped (decision 2026-07-29: no IA
+		// tier, and IMPLEMENTATION_PLAN.md:871 forbids routing customer
+		// STANDARD_IA to Lyve). It degrades to the primary like any other
+		// unknown class rather than silently selecting a backend.
+		{"STANDARD_IA", "idrive", "STANDARD"},
 		{"GLACIER", "geyser", "GLACIER"},
 		{"DEEP_ARCHIVE", "geyser", "DEEP_ARCHIVE"},
 		{"REDUCED_REDUNDANCY", "local", "REDUCED_REDUNDANCY"},
@@ -226,7 +230,8 @@ func TestResolveStorageClass_UnknownClass(t *testing.T) {
 
 func TestBackendToStorageClass(t *testing.T) {
 	assert.Equal(t, "STANDARD", BackendToStorageClass("idrive"))
-	assert.Equal(t, "STANDARD_IA", BackendToStorageClass("lyve"))
+	// Objects on Lyve are standard-tier objects; the IA class is not in use.
+	assert.Equal(t, "STANDARD", BackendToStorageClass("lyve"))
 	assert.Equal(t, "GLACIER", BackendToStorageClass("geyser"))
 	assert.Equal(t, "STANDARD", BackendToStorageClass("permafrost"))
 	assert.Equal(t, "REDUCED_REDUNDANCY", BackendToStorageClass("local"))

@@ -95,7 +95,7 @@ func TestS3ParallelUpload_SmallFile_SinglePut(t *testing.T) {
 	data := bytes.Repeat([]byte("a"), 1<<20) // 1 MiB < 16 MiB part size
 	m := newMockUploadClient()
 
-	err := s3ParallelUpload(context.Background(), m, "bucket", "key", "text/plain", bytes.NewReader(data))
+	err := s3ParallelUpload(context.Background(), m, "bucket", "key", "text/plain", bytes.NewReader(data), -1)
 
 	require.NoError(t, err)
 	assert.Equal(t, 1, m.putObjectCalls, "small file should be a single PutObject")
@@ -107,7 +107,7 @@ func TestS3ParallelUpload_LargeFile_ParallelMultipart(t *testing.T) {
 	data := bytes.Repeat([]byte("x"), 40<<20) // 40 MiB > 16 MiB → 3 parts
 	m := newMockUploadClient()
 
-	err := s3ParallelUpload(context.Background(), m, "bucket", "key", "", bytes.NewReader(data))
+	err := s3ParallelUpload(context.Background(), m, "bucket", "key", "", bytes.NewReader(data), -1)
 
 	require.NoError(t, err)
 	assert.Equal(t, 0, m.putObjectCalls, "large file should not use a single PutObject")
@@ -121,9 +121,133 @@ func TestS3ParallelUpload_Error_Wrapped(t *testing.T) {
 	m := newMockUploadClient()
 	m.putErr = errors.New("backend down")
 
-	err := s3ParallelUpload(context.Background(), m, "bucket", "key", "", bytes.NewReader([]byte("small")))
+	err := s3ParallelUpload(context.Background(), m, "bucket", "key", "", bytes.NewReader([]byte("small")), -1)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "s3 parallel upload bucket/key")
 	assert.Contains(t, err.Error(), "backend down")
+}
+
+// --- Write-path efficiency: exactly-part-size objects (WP-EngineWrite) ---
+
+// nonSeekableReader hides Seek/ReadAt so the SDK takes its streaming path —
+// this is what the engine actually hands drivers (http body → counting →
+// TeeReader for the MD5 ETag), and it behaves very differently from the
+// bytes.Reader a direct benchmark passes.
+type nonSeekableReader struct{ r io.Reader }
+
+func (n nonSeekableReader) Read(p []byte) (int, error) { return n.r.Read(p) }
+
+func TestS3Upload_ExactPartSizeObjectUsesSinglePut(t *testing.T) {
+	// A 16 MiB object is exactly s3UploadPartSize. With an unknown-length,
+	// non-seekable body the SDK cannot tell it is the whole object, so it
+	// commits to multipart: Create + UploadPart + Complete = 3 round trips
+	// where 1 PutObject would do. Passing ContentLength must collapse it.
+	body := bytes.Repeat([]byte("x"), s3UploadPartSize)
+	m := newMockUploadClient()
+
+	in := &s3.PutObjectInput{
+		Bucket:        aws.String("b"),
+		Key:           aws.String("k"),
+		Body:          nonSeekableReader{bytes.NewReader(body)},
+		ContentLength: aws.Int64(int64(len(body))),
+	}
+	require.NoError(t, s3ParallelUploadInput(context.Background(), m, in))
+
+	assert.Equal(t, 1, m.putObjectCalls, "exact-part-size object should be a single PutObject")
+	assert.Equal(t, 0, m.createCalls, "should not open a multipart upload")
+	assert.Equal(t, 0, m.completeCalls)
+	assert.Equal(t, body, m.putBody, "bytes must round-trip intact")
+}
+
+func TestS3Upload_BelowPartSizeStillSinglePut(t *testing.T) {
+	body := bytes.Repeat([]byte("y"), 5<<20)
+	m := newMockUploadClient()
+
+	in := &s3.PutObjectInput{
+		Bucket:        aws.String("b"),
+		Key:           aws.String("k"),
+		Body:          nonSeekableReader{bytes.NewReader(body)},
+		ContentLength: aws.Int64(int64(len(body))),
+	}
+	require.NoError(t, s3ParallelUploadInput(context.Background(), m, in))
+
+	assert.Equal(t, 1, m.putObjectCalls)
+	assert.Equal(t, 0, m.createCalls)
+	assert.Equal(t, body, m.putBody)
+}
+
+func TestS3Upload_AbovePartSizeStillMultipart(t *testing.T) {
+	// Genuinely large objects must keep the parallel multipart path — that is
+	// what makes big uploads fast. 40 MiB over a 16 MiB part size = 3 parts.
+	body := bytes.Repeat([]byte("z"), 40<<20)
+	m := newMockUploadClient()
+
+	in := &s3.PutObjectInput{
+		Bucket:        aws.String("b"),
+		Key:           aws.String("k"),
+		Body:          nonSeekableReader{bytes.NewReader(body)},
+		ContentLength: aws.Int64(int64(len(body))),
+	}
+	require.NoError(t, s3ParallelUploadInput(context.Background(), m, in))
+
+	assert.Equal(t, 0, m.putObjectCalls, "large object must not collapse to PutObject")
+	assert.Equal(t, 1, m.createCalls)
+	assert.Equal(t, 3, m.uploadParts)
+	assert.Equal(t, body, m.reassemble())
+}
+
+func TestS3Upload_UnknownLengthFallsBackToStreaming(t *testing.T) {
+	// No ContentLength: behaviour must stay correct even if not optimal.
+	body := bytes.Repeat([]byte("w"), 3<<20)
+	m := newMockUploadClient()
+
+	in := &s3.PutObjectInput{
+		Bucket: aws.String("b"),
+		Key:    aws.String("k"),
+		Body:   nonSeekableReader{bytes.NewReader(body)},
+	}
+	require.NoError(t, s3ParallelUploadInput(context.Background(), m, in))
+
+	assert.Equal(t, 1, m.putObjectCalls)
+	assert.Equal(t, body, m.putBody)
+}
+
+// TestDrivers_PropagateContentLength guards the plumbing that makes the
+// single-part fast path reachable. The S3 API adapter already passes
+// engine.WithContentLength(size) on every PUT; if a driver drops it, every
+// exactly-part-size object silently costs three round trips instead of one.
+func TestS3Upload_KnownSizeAvoidsMultipartRoundTrips(t *testing.T) {
+	sizes := []struct {
+		name string
+		n    int
+	}{
+		{"1MiB", 1 << 20},
+		{"exactly 16MiB part size", s3UploadPartSize},
+	}
+	for _, tc := range sizes {
+		t.Run(tc.name, func(t *testing.T) {
+			body := bytes.Repeat([]byte("q"), tc.n)
+			m := newMockUploadClient()
+
+			require.NoError(t, s3ParallelUpload(context.Background(), m, "b", "k", "text/plain",
+				nonSeekableReader{bytes.NewReader(body)}, int64(len(body))))
+
+			assert.Equal(t, 1, m.putObjectCalls, "known size must collapse to one PutObject")
+			assert.Equal(t, 0, m.createCalls, "no multipart ceremony")
+			assert.Equal(t, body, m.putBody)
+		})
+	}
+}
+
+func TestS3Upload_UnknownSizeSentinelKeepsStreaming(t *testing.T) {
+	body := bytes.Repeat([]byte("r"), 20<<20)
+	m := newMockUploadClient()
+
+	// -1 means "size unknown" — must not take the buffered fast path.
+	require.NoError(t, s3ParallelUpload(context.Background(), m, "b", "k", "",
+		nonSeekableReader{bytes.NewReader(body)}, -1))
+
+	assert.Equal(t, 1, m.createCalls, "unknown size still streams via multipart")
+	assert.Equal(t, body, m.reassemble())
 }

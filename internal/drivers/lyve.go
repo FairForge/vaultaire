@@ -140,6 +140,11 @@ func (d *LyveDriver) Put(ctx context.Context, container, artifact string, data i
 		Key:    aws.String(key),
 		Body:   data,
 	}
+	// Pass the known size through: objects that fit in one part then skip the
+	// three-round-trip multipart path (see s3upload.go).
+	if options.ContentLength > 0 {
+		input.ContentLength = aws.Int64(options.ContentLength)
+	}
 
 	// Apply metadata from options
 	if options.ContentType != "" {
