@@ -221,12 +221,15 @@ type CreateCloudIntegrationRequest struct {
 
 // CloudSyncSource identifies the external bucket Geyser pulls from during a
 // cloud sync (server-side ingest — the bytes never transit our infrastructure).
+// Endpoint is not in the observed console schema; the cloudsync probe sends it
+// to learn whether the ingest leg can target a custom S3 endpoint (Lyve).
 type CloudSyncSource struct {
 	Type      string `json:"type"` // AWS | WASABI | ORACLE
 	Region    string `json:"region"`
 	Bucket    string `json:"bucket"`
 	AccessKey string `json:"accessKey"`
 	SecretKey string `json:"secretKey"`
+	Endpoint  string `json:"endpoint,omitempty"`
 }
 
 // CreateCloudSyncRequest is the payload for POST /api/cloudSync.
@@ -421,6 +424,15 @@ func (c *GeyserAdminClient) VerifyMFA(ctx context.Context, hash, code string) er
 	c.logger.Info("geyser console session established",
 		zap.String("userID", sess.User.ID))
 	return nil
+}
+
+// SessionCookies returns the current console session pair (accessToken,
+// userId) — what probe tooling needs to issue raw requests against console
+// endpoints the typed surface doesn't cover yet.
+func (c *GeyserAdminClient) SessionCookies() (accessToken, userID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.accessToken, c.userID
 }
 
 // seedSessionCookies writes the session cookies into the jar so they are sent
