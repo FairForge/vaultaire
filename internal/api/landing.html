@@ -653,7 +653,7 @@
             {{if .SignupsOpen}}
             <p class="hero-flag"><span class="dot"></span>Live — 5 GB free, no credit card</p>
             {{else}}
-            <p class="hero-flag">Launching <strong>July 31, 2026</strong></p>
+            <p class="hero-flag">Launching <strong>August 31, 2026</strong></p>
             {{end}}
             <h1>S3-compatible storage that <em>optimizes itself.</em></h1>
             <p class="sub">
@@ -1279,7 +1279,7 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
         <p>5 GB free, no credit card. Keys on signup, rclone config ready to paste.</p>
         <a class="btn btn-primary" href="/register">Start free →</a>
         {{else}}
-        <h2>Launching July 31, 2026.</h2>
+        <h2>Launching August 31, 2026.</h2>
         <p>Join the waitlist and we'll email you once — on launch day, with a founding-member code.</p>
         <form class="waitlist-form" data-waitlist>
             <input type="email" name="email" placeholder="you@example.com" required aria-label="Email address">
@@ -1352,7 +1352,7 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
                     body: JSON.stringify({ email: email })
                 });
             } catch (e) { /* endpoint degrades to 200; confirmation is best-effort */ }
-            form.innerHTML = '<span class="waitlist-ok">You\'re on the list — see you July 31.</span>';
+            form.innerHTML = '<span class="waitlist-ok">You\'re on the list — see you August 31.</span>';
         });
     });
     {{end}}

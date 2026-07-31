@@ -19,7 +19,7 @@ Storage charge = `TB_stored * €4 / 30.4375` per day.
 
 | Provider     | Storage    | Egress        | Notes                              |
 |--------------|------------|---------------|------------------------------------|
-| iDrive E2    | $3.30/TB   | 3× free       | $0.01/GB beyond 3× stored          |
+| iDrive E2    | $4.125/TB   | 3× free       | $0.01/GB beyond 3× stored          |
 | Lyve Cloud   | $6.50/TB   | free          | 7 regions, S3-compatible           |
 | Geyser       | $1.55/TB   | free          | Tape, LA + London                  |
 | Quotaless    | ~$2/TB     | free          | Storj-based                        |
