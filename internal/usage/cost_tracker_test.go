@@ -46,7 +46,7 @@ func TestCostTracker_Aggregate(t *testing.T) {
 			AddRow("t2", "idrive", int64(549755813888)))  // 0.5 TB
 
 	mock.ExpectExec("INSERT INTO tenant_cost_daily").
-		WithArgs("t1", "idrive", int64(1099511627776), int64(3300000)).
+		WithArgs("t1", "idrive", int64(1099511627776), int64(4130000)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	mock.ExpectExec("INSERT INTO tenant_cost_daily").
@@ -54,7 +54,7 @@ func TestCostTracker_Aggregate(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	mock.ExpectExec("INSERT INTO tenant_cost_daily").
-		WithArgs("t2", "idrive", int64(549755813888), int64(1650000)).
+		WithArgs("t2", "idrive", int64(549755813888), int64(2065000)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	ct.Aggregate(context.Background())
@@ -69,7 +69,7 @@ func TestComputeCostMicrocents(t *testing.T) {
 		bytes    int64
 		expected int64
 	}{
-		{"1 TB on idrive", "idrive", 1099511627776, 3300000},
+		{"1 TB on idrive", "idrive", 1099511627776, 4130000},
 		{"1 TB on geyser", "geyser", 1099511627776, 1550000},
 		{"0 bytes", "idrive", 0, 0},
 		{"free backend", "local", 1099511627776, 0},

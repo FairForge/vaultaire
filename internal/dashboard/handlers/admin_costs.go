@@ -25,7 +25,7 @@ const (
 // Zero means free (contributed, local, or fixed-only).
 var backendCostPerTBCents = map[string]int64{
 	"geyser":     155, // $1.55/TB
-	"idrive":     330, // $3.30/TB
+	"idrive":     413, // $4.125/TB annual-plan Y2+ rate, rounded up from 412.5
 	"lyve":       799, // $7.99/TB — see note in internal/usage/cost_tracker.go
 	"hetzner":    381, // ~€3.81/TB
 	"permafrost": 0,

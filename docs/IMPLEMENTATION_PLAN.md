@@ -1368,7 +1368,7 @@ bandwidth from us — wrap cloudSync instead of proxying bytes.*
 
 ### 6.5: Backend Research & Tier Architecture (Filecoin, Sia, Pixeldrain, Quotaless)
 > **UPDATED 2026-04-18**: Comprehensive benchmarking of ALL providers completed. Tier architecture finalized:
-> - **iDrive E2** = Performance tier (579 MB/s, $3.30/TB, default)
+> - **iDrive E2** = Performance tier (579 MB/s, $4.125/TB, default)
 > - **Quotaless** = Bulk/Egress tier (393 MB/s, €0.60/TB at 100TB, FREE unlimited egress) — replaces Lyve gap
 > - **Geyser** = Archive ($1.55/TB tape), **Vault18** = Deep Archive ($1/TB)
 - **Pixeldrain** = CDN cache layer (808 MB/s download, not a storage tier)
