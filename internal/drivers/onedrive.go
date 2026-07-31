@@ -497,32 +497,39 @@ func (d *OneDriveDriver) List(ctx context.Context, container string, prefix stri
 		if err != nil {
 			return nil, fmt.Errorf("onedrive get drive: %w", err)
 		}
-		u := fmt.Sprintf("%s/drives/%s/items/root:/%s:/children",
+		// Graph pages children (default 200). Follow @odata.nextLink to the
+		// end — a single-page read silently truncated every listing of a
+		// container with more objects than one page.
+		u := fmt.Sprintf("%s/drives/%s/items/root:/%s:/children?$top=999",
 			graphBase, driveID, odEscapePath(folderPath))
-		req, _ := http.NewRequestWithContext(ctx, "GET", u, nil)
-		resp, err := t.graphDo(ctx, req)
-		if err != nil {
-			if strings.Contains(err.Error(), "404") {
-				continue // this account holds nothing under the container
+		for u != "" {
+			req, _ := http.NewRequestWithContext(ctx, "GET", u, nil)
+			resp, err := t.graphDo(ctx, req)
+			if err != nil {
+				if strings.Contains(err.Error(), "404") {
+					break // this account holds nothing under the container
+				}
+				return nil, fmt.Errorf("onedrive list %s: %w", folderPath, err)
 			}
-			return nil, fmt.Errorf("onedrive list %s: %w", folderPath, err)
-		}
 
-		var result struct {
-			Value []struct {
-				Name string `json:"name"`
-			} `json:"value"`
-		}
-		decodeErr := json.NewDecoder(resp.Body).Decode(&result)
-		_ = resp.Body.Close()
-		if decodeErr != nil {
-			return nil, fmt.Errorf("onedrive list decode: %w", decodeErr)
-		}
-		for _, item := range result.Value {
-			if (prefix == "" || strings.HasPrefix(item.Name, prefix)) && !seen[item.Name] {
-				seen[item.Name] = true
-				artifacts = append(artifacts, item.Name)
+			var result struct {
+				Value []struct {
+					Name string `json:"name"`
+				} `json:"value"`
+				NextLink string `json:"@odata.nextLink"`
 			}
+			decodeErr := json.NewDecoder(resp.Body).Decode(&result)
+			_ = resp.Body.Close()
+			if decodeErr != nil {
+				return nil, fmt.Errorf("onedrive list decode: %w", decodeErr)
+			}
+			for _, item := range result.Value {
+				if (prefix == "" || strings.HasPrefix(item.Name, prefix)) && !seen[item.Name] {
+					seen[item.Name] = true
+					artifacts = append(artifacts, item.Name)
+				}
+			}
+			u = result.NextLink
 		}
 	}
 	return artifacts, nil

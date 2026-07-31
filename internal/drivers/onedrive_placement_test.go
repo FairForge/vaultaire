@@ -1,8 +1,15 @@
 package drivers
 
 import (
+	"context"
+	"io"
+	"net/http"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -64,4 +71,52 @@ func TestOneDrivePlacement_Spreads(t *testing.T) {
 	for idx, c := range counts {
 		assert.Greater(t, c, 300, "tenant %d starved: %d of 3000", idx, c)
 	}
+}
+
+// odStubRoundTripper serves canned Graph responses so List can be driven
+// without credentials or network.
+type odStubRoundTripper struct {
+	mu    sync.Mutex
+	calls []string
+	pages map[string]string // request URL -> JSON body
+}
+
+func (rt *odStubRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	rt.mu.Lock()
+	rt.calls = append(rt.calls, req.URL.String())
+	rt.mu.Unlock()
+	body, ok := rt.pages[req.URL.String()]
+	if !ok {
+		return &http.Response{StatusCode: 404, Body: io.NopCloser(strings.NewReader(`{"error":"not found"}`)),
+			Header: make(http.Header), Request: req}, nil
+	}
+	return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)),
+		Header: make(http.Header), Request: req}, nil
+}
+
+// Graph pages children (default 200/page). Listing only the first page
+// silently truncated every container with more objects than one page.
+func TestOneDriveList_FollowsPagination(t *testing.T) {
+	page1 := graphBase + "/drives/DRIVE1/items/root:/vaultaire/t-tenant-x/bucket:/children?$top=999"
+	page2 := graphBase + "/drives/DRIVE1/items/root:/next-page-token"
+	rt := &odStubRoundTripper{pages: map[string]string{
+		page1: `{"value":[{"name":"a.bin"},{"name":"b.bin"}],"@odata.nextLink":"` + page2 + `"}`,
+		page2: `{"value":[{"name":"c.bin"}]}`,
+	}}
+
+	tn := &odTenant{
+		name:      "tenant-1",
+		driveID:   "DRIVE1",
+		cachedTok: "stub-token",
+		tokExpiry: time.Now().Add(time.Hour),
+		graphHTTP: &http.Client{Transport: rt},
+	}
+	d := &OneDriveDriver{tenants: []*odTenant{tn}, logger: zap.NewNop()}
+
+	ctx := common.WithTenantID(context.Background(), "tenant-x")
+	got, err := d.List(ctx, "bucket", "")
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"a.bin", "b.bin", "c.bin"}, got,
+		"List must return objects from every page, not just the first")
+	assert.Len(t, rt.calls, 2, "should have followed exactly one nextLink")
 }
