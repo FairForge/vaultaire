@@ -12,7 +12,11 @@ import (
 // BackendCostPerTBCents maps backend names to their per-TB storage cost in cents.
 var BackendCostPerTBCents = map[string]int64{
 	"geyser": 155,
-	"idrive": 330,
+	// iDrive e2 annual-plan rate, Y2+ ($49.50/TB/yr = $4.125/TB/mo). The old
+	// $3.30 negotiated rate is gone (2026-07). Rounded up from 412.5 cents —
+	// this map is integer cents. Year 1 is half this under the 50%-off-first-
+	// year promo; treat that as one-time, not the planning rate.
+	"idrive": 413,
 	// Lyve bills us $0 today under a 1-year SaaS promo, but we deliberately
 	// track it at a conservative $7.99/TB so the promo cannot hide the
 	// liability that appears when it ends. See the "Contract terms" and

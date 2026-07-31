@@ -18,7 +18,7 @@ copies across Microsoft's infrastructure" at $0 cost.
 
 | Tier | Backend | Cost | Role |
 |------|---------|------|------|
-| Performance | iDrive E2 | $3.30/TB | Default hot, <50TB |
+| Performance | iDrive E2 | $4.125/TB | Default hot, <50TB |
 | Bulk/Egress | Quotaless | ~€0.60/TB | >50TB, free egress |
 | Archive | Geyser | $1.55/TB | Cold tape, compliance |
 | Deep Archive | Vault18 | $1/TB | 7+ year retention |

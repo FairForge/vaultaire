@@ -256,7 +256,7 @@ Raw HTTP eliminates subprocess fork/exec overhead and enables connection reuse.
 ### Primary use: Egress backstop
 
 ```
-Tenant uploads 50TB → stored on iDrive ($3.30/TB)
+Tenant uploads 50TB → stored on iDrive ($4.125/TB)
 Tenant downloads 300TB/mo (6x ratio)
 
 WITHOUT Quotaless:
@@ -276,7 +276,7 @@ WITH Quotaless backstop:
 
 | Tier | Backend | $/TB | When |
 |------|---------|------|------|
-| Standard | iDrive E2 | $3.30 | Default, <50TB, latency-sensitive |
+| Standard | iDrive E2 | $4.125 | Default, <50TB, latency-sensitive |
 | **Bulk/Egress** | **Quotaless** | **€0.60** | **>50TB total OR high-egress tenants** |
 | Archive | Geyser | $1.55 | Cold backups, compliance |
 | Deep Archive | Vault18 | $1.00 | 7+ year retention |

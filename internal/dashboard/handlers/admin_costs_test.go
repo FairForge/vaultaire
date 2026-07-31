@@ -234,7 +234,7 @@ func TestBackendCostPerTB(t *testing.T) {
 		want    int64
 	}{
 		{"geyser", 155},
-		{"idrive", 330},
+		{"idrive", 413},
 		{"hetzner", 381},
 		{"onedrive", 0},
 		{"gorilla", 0},
