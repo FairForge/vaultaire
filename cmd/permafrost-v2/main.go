@@ -606,19 +606,25 @@ func runFileSizeScaling(clients []clientEntry) {
 		if sizeMB*1024*1024 > simpleMax {
 			method = "chunked"
 		}
-		var totalMBs float64
+		var totalRate, totalMB float64
 		var totalErrors int
 
+		// Tenants run sequentially here — the honest fleet number is total
+		// MB over the whole pass's wall clock, not a sum of per-tenant rates
+		// (which no sequential run can actually deliver).
+		start := time.Now()
 		for _, ce := range clients {
-			mbs, errs := uploadN(context.Background(), ce.a, ce.driveID, ce.folder,
+			rate, successMB, errs := uploadN(context.Background(), ce.a, ce.driveID, ce.folder,
 				fmt.Sprintf("size-%dmb", sizeMB), data, filesPerSize, 5)
-			totalMBs += mbs
+			totalRate += rate
+			totalMB += successMB
 			totalErrors += errs
 		}
+		fleetMBs := totalMB / time.Since(start).Seconds()
 
-		avgMBs := totalMBs / float64(len(clients))
+		avgMBs := totalRate / float64(len(clients))
 		fmt.Printf("  %-10s  %-14.2f  %-14.2f  %-10s  %-8d\n",
-			fmt.Sprintf("%d MB", sizeMB), avgMBs, totalMBs, method, totalErrors)
+			fmt.Sprintf("%d MB", sizeMB), avgMBs, fleetMBs, method, totalErrors)
 	}
 	fmt.Println()
 }
@@ -636,26 +642,33 @@ func runWorkerScaling(clients []clientEntry) {
 
 	for _, w := range workerCounts {
 		var totalMBs float64
+		var totalMB float64
 		var totalErrors int
 		var mu sync.Mutex
 		var wg sync.WaitGroup
 
+		// Tenants run concurrently but finish at different times — fleet
+		// rate is total MB over the shared wall-clock window, not the sum
+		// of each tenant's rate over its own (shorter) window.
+		start := time.Now()
 		for _, ce := range clients {
 			wg.Add(1)
 			go func(ce clientEntry) {
 				defer wg.Done()
-				mbs, errs := uploadN(context.Background(), ce.a, ce.driveID, ce.folder,
+				mbs, successMB, errs := uploadN(context.Background(), ce.a, ce.driveID, ce.folder,
 					fmt.Sprintf("workers-%d", w), data, fileCount, w)
 				mu.Lock()
 				totalMBs += mbs
+				totalMB += successMB
 				totalErrors += errs
 				mu.Unlock()
 			}(ce)
 		}
 		wg.Wait()
+		fleetMBs := totalMB / time.Since(start).Seconds()
 
 		avgMBs := totalMBs / float64(len(clients))
-		fmt.Printf("  %-10d  %-14.2f  %-14.2f  %-8d\n", w, avgMBs, totalMBs, totalErrors)
+		fmt.Printf("  %-10d  %-14.2f  %-14.2f  %-8d\n", w, avgMBs, fleetMBs, totalErrors)
 	}
 	fmt.Println()
 }
@@ -804,7 +817,7 @@ func runMixedWorkload(clients []clientEntry) {
 	}
 	fmt.Printf("  Seeded %d × 5MB files. Starting mixed workload...\n", len(seedFiles))
 
-	var uploadMBs float64
+	var uploadMB float64
 	var downloadBytes atomic.Int64
 	var uploadErrors, downloadErrors atomic.Int64
 	var uploadMu sync.Mutex
@@ -815,10 +828,10 @@ func runMixedWorkload(clients []clientEntry) {
 		wg.Add(1)
 		go func(ce clientEntry) {
 			defer wg.Done()
-			mbs, errs := uploadN(context.Background(), ce.a, ce.driveID, ce.folder,
+			_, successMB, errs := uploadN(context.Background(), ce.a, ce.driveID, ce.folder,
 				"mixed-up", data, 20, 10)
 			uploadMu.Lock()
-			uploadMBs += mbs
+			uploadMB += successMB
 			uploadMu.Unlock()
 			uploadErrors.Add(int64(errs))
 		}(ce)
@@ -839,6 +852,10 @@ func runMixedWorkload(clients []clientEntry) {
 
 	wg.Wait()
 	d := time.Since(start)
+	// Upload and download rates over the SAME wall-clock window, so their
+	// sum is a real aggregate (previously upload was a sum of per-tenant
+	// rates over different windows — not commensurable with the download rate).
+	uploadMBs := uploadMB / d.Seconds()
 	downloadMBs := float64(downloadBytes.Load()) / (1024 * 1024) / d.Seconds()
 
 	fmt.Printf("  Duration:       %s\n", d.Round(time.Millisecond))
@@ -992,8 +1009,12 @@ func runSummary(clients []clientEntry) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+// uploadN returns (rate over this tenant's own window, successfully uploaded
+// MB, error count). Fleet-wide rates must NOT sum the per-tenant rates —
+// tenants finish at different times, so sum-of-rates over-reports. Sum the
+// successMB and divide by the shared wall-clock window instead.
 func uploadN(ctx context.Context, a *authClient, driveID, folderID, prefix string,
-	data []byte, count, workers int) (float64, int) {
+	data []byte, count, workers int) (float64, float64, int) {
 
 	var errCount atomic.Int64
 	sem := make(chan struct{}, workers)
@@ -1017,7 +1038,7 @@ func uploadN(ctx context.Context, a *authClient, driveID, folderID, prefix strin
 
 	errs := int(errCount.Load())
 	successMB := float64((count-errs)*len(data)) / (1024 * 1024)
-	return successMB / d.Seconds(), errs
+	return successMB / d.Seconds(), successMB, errs
 }
 
 func randomData(size int) []byte {

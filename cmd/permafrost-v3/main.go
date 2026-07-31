@@ -935,9 +935,12 @@ func runUploadChunkAB(clients []clientEntry) {
 }
 
 // ── Test 7: Fleet Upload — concurrent files across all tenants ───────────────
-// This is the multi-file backup-ingest number. Vaultaire's pickTenant round-robins,
-// so a parallel backup (many files) spreads across all tenants. Single-file ~12 MB/s
-// is per-tenant; this measures the aggregate the fleet actually delivers.
+// This is the multi-file backup-ingest number, but note it is an UPPER BOUND
+// on the driver: this tool hand-places exactly fileCount files per tenant.
+// The real driver (2026-07-30+) places deterministically — FNV-1a(path) picks
+// each object's home account — so a real workload gets a balls-in-bins spread,
+// not this even split, and a single-key stream is capped at one account's rate.
+// Single-file ~12 MB/s is per-tenant; this measures the fleet ceiling.
 func runFleetUpload(clients []clientEntry) {
 	printHeader("TEST 7: Fleet Upload — concurrent files across ALL tenants")
 

@@ -292,16 +292,22 @@ net.ipv4.tcp_tw_reuse = 1                   # reuse TIME_WAIT sockets for burst 
 
 ## Benchmark Tools
 
-6 tools in `cmd/permafrost-*/`, all gitignored.
+| Tool | Purpose |
+|------|---------|
+| `onedrive-bench` | **Driver-path bench** — the only tool that measures production behavior. Constructs `NewOneDriveFleetDriver` and drives Put/Get/List/Delete through the `engine.Driver` contract: FNV placement, home-first probes, List union, Delete sweep all on the measured path. Prints the real placement histogram. |
+| `permafrost-v2` | Raw HTTP transport explorer (no SDK), chunked uploads, RU tracking, 7 tests |
+| `permafrost-v3` | Transport explorer — HTTP/1.1 CDN + Range downloads, dual transport, 60MB chunks, batch prefetch |
 
-| Tool | Purpose | Lines |
-|------|---------|-------|
-| `permafrost-benchmark` | Sequential upload/download (baseline) | ~120 |
-| `permafrost-parallel` | Parallel upload (10 workers) | ~135 |
-| `permafrost-fleet` | Multi-tenant concurrent (25 workers/tenant), uses Graph SDK | ~280 |
-| `permafrost-stress` | Full stress: file size scaling, worker scaling, downloads, mixed, throttle (SDK) | ~536 |
-| `permafrost-v2` | Raw HTTP (no SDK), chunked uploads, RU tracking, 7 tests | ~1036 |
-| `permafrost-v3` | **Best** — HTTP/1.1 CDN + Range downloads, dual transport, 60MB chunks, batch prefetch, 6 tests | ~1067 |
+**The permafrost tools do not measure the driver.** They hand-roll auth and
+spread files evenly across accounts themselves — their "fleet" numbers are a
+transport ceiling, not the production number. Use `onedrive-bench` for
+driver numbers; keep v2/v3 for isolating transport-level questions.
+
+Retired 2026-07-31: `permafrost-fleet` + `permafrost-stress` (Graph-SDK-based,
+superseded; removing them dropped msgraph-sdk-go and 8 kiota deps from
+go.mod). The pre-fleet `permafrost-benchmark` + `permafrost-parallel`
+(single-tenant, `AZURE_*` env vars) were local-only; source archived in
+`.private/retired-bench/`.
 
 ### Build & Deploy
 
@@ -340,7 +346,13 @@ grep "^export TENANT" .env.bench | ssh vaultaire-slc 'cat >> /tmp/.env.bench'
 ssh vaultaire-slc 'grep -c TENANT /tmp/.env.bench'  # should be 12 (4 vars × 3 tenants)
 ```
 
-### Benchmark Tests (stress tool)
+### Benchmark Tests (historical — retired stress tool)
+
+The results below were produced by `permafrost-stress` (retired 2026-07-31);
+kept for context on the prior-results tables that follow. Note the March/April
+"Aggregate"/"Fleet" numbers summed per-tenant rates over different time
+windows, which over-reports — treat them as directional, not comparable to
+wall-clock numbers from current tools.
 
 1. **File Size Scaling** — 1/4/10/50/100 MB files, 5 each, measures throughput vs file size
 2. **Worker Count Scaling** — 10/25/50/75/100 workers, 50 × 1MB files, finds optimal concurrency
