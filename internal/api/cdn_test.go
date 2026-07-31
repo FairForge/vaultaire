@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/go-chi/chi/v5"
@@ -558,4 +559,66 @@ func TestCDN_MissingDBReturns404(t *testing.T) {
 	s.router.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+// tenantScopedStubDriver serves an object ONLY when the request context
+// carries the expected tenant ID — the addressing contract of the iDrive and
+// Geyser drivers (fixed bucket + "t-{tenant}/..." key prefix from ctx). A
+// handler that forgets to inject the tenant gets a not-found from every such
+// backend even though the object exists.
+type tenantScopedStubDriver struct {
+	tenant  string
+	content []byte
+}
+
+func (d *tenantScopedStubDriver) Name() string { return "scoped" }
+func (d *tenantScopedStubDriver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
+	if tid, ok := ctx.Value(common.TenantIDKey).(string); !ok || tid != d.tenant {
+		return nil, fmt.Errorf("scoped get %s/%s: StatusCode: 404, wrong tenant prefix", container, artifact)
+	}
+	return io.NopCloser(bytes.NewReader(d.content)), nil
+}
+func (d *tenantScopedStubDriver) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...engine.PutOption) error {
+	return fmt.Errorf("read-only stub")
+}
+func (d *tenantScopedStubDriver) Delete(ctx context.Context, container, artifact string) error {
+	return fmt.Errorf("read-only stub")
+}
+func (d *tenantScopedStubDriver) List(ctx context.Context, container string, prefix string) ([]string, error) {
+	return nil, nil
+}
+func (d *tenantScopedStubDriver) Exists(ctx context.Context, container, artifact string) (bool, error) {
+	return false, nil
+}
+func (d *tenantScopedStubDriver) HealthCheck(ctx context.Context) error { return nil }
+
+// The 2026-07-31 CDN 404 bug: handleCDNRequest resolved the tenant from the
+// slug but never put it into the request context, so tenant-scoped backends
+// (iDrive — the prod PRIMARY — and Geyser) built their keys under tenant
+// "default" and 404'd every public object. The S3 GET path injects the
+// tenant; the CDN path must too.
+func TestCDN_TenantScopedBackend_ServesPublicObject(t *testing.T) {
+	f := setupCDNFixture(t)
+
+	// Re-point the engine at a backend that requires the ctx tenant,
+	// mirroring prod (primary = iDrive).
+	content := []byte("bytes from a tenant-scoped backend")
+	eng := engine.NewEngine(nil, zap.NewNop(), nil)
+	eng.AddDriver("scoped", &tenantScopedStubDriver{tenant: f.tenantID, content: content})
+	eng.SetPrimary("scoped")
+	f.server.engine = eng
+
+	_, err := f.db.Exec(`
+		UPDATE object_head_cache SET size_bytes = $4, backend_name = 'scoped'
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+		f.tenantID, f.bucket, f.key, len(content))
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("GET", "/cdn/"+f.slug+"/"+f.bucket+"/"+f.key, nil)
+	w := httptest.NewRecorder()
+	f.router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code,
+		"tenant-scoped backend must receive the tenant via context")
+	assert.Equal(t, string(content), w.Body.String())
 }
