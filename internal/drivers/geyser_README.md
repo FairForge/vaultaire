@@ -185,10 +185,39 @@ DELETE /api/buckets/{id}/cloudIntegrations/{integrationId}
 ```
 
 `cloudIntegrationType` ∈ **`AWS` | `WASABI` | `ORACLE` | `GEYSER`**; buckets
-carry `s3Enabled` / `wasabiEnabled` flags. **Open question:** whether the
-`AWS` type accepts a custom endpoint (which would let us target iDrive or
-Lyve) or is pinned to real AWS — this decides whether V18.2 can offload
-rehydration entirely to Geyser.
+carry `s3Enabled` / `wasabiEnabled` flags. **Probed live 2026-07-30**
+(`cmd/geyser-cloudsync-probe`, dummy-cred create → immediate delete on the
+Stored3Lib bucket): `CreateCloudIntegration` **accepts an `endpoint` field on
+both the `AWS` and `WASABI` types** — a Lyve endpoint
+(`s3.us-west-1.global.lyve.seagate.com`) passed validation and the
+integration was created and deleted cleanly. Credentials are NOT validated at
+create time. Caveat: the create response does not echo the endpoint back, so
+silent field-drop is not yet excluded — the conclusive test is a functional
+one: an integration with real scoped Lyve creds + a small `RestoreToCloud`,
+verified by reading the object off Lyve directly. Same session should probe
+the ingest leg: whether `POST /api/cloudSync`'s source (`type, region,
+bucket, accessKey, secretKey` — no endpoint field in the observed schema)
+accepts an endpoint too, which is what the customer→Lyve→Geyser Vault path
+needs. Auth for probe sessions: email-MFA login (password + emailed code;
+see the probe cmd's `GEYSER_MFA_CODE_FILE` wait flow).
+
+**FUNCTIONAL VERDICT (2026-07-30, same day, GEYSER_FUNCTIONAL=1 run): the
+endpoint field is SILENTLY DROPPED — integrations and cloudSync are pinned
+to real AWS/Wasabi/Oracle.** Two proofs from the live run with real scoped
+Lyve creds: (1) `RestoreToCloud` was accepted on both AWS and WASABI
+integrations targeting a public-read Lyve bucket, and no object ever
+appeared (polled 5 min per type + a late check); (2) the cloudSync create
+failed with "Credentials have insufficient access to list objects" while
+the *same* scoped creds list the Lyve bucket fine directly — Geyser was
+listing `stored-geyser-probe` on real AWS, where our Lyve key means
+nothing. Consequence for the Vault path: **no Geyser-side server-side leg
+to/from Lyve.** Ingest = SLC-mediated drain (customer→Lyve stays 0× SLC;
+Lyve→SLC→Geyser costs 2× — still half the old 4× buffered path). Restores
+= `RestoreToCache` + 32-64 parallel S3 streams off staging (~76+ MB/s
+aggregate). Geyser CAN still push restores server-side to real AWS/Wasabi
+if we ever hold an account there. All probe resources were deleted
+(Lyve probe bucket/IAM user; the staged Geyser object leaves a delete
+marker — versioning suspended).
 
 **cloudSync — server-side ingest from another cloud** (this is the published
 "Wasabi cold data archiving" integration):

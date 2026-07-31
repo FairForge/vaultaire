@@ -78,8 +78,8 @@ Each registered backend gets an independent `BackendCircuitBreaker`:
 ## Storage Class Routing (Phase 5.12.4)
 
 `x-amz-storage-class` header on PUT maps to a target backend:
-- STANDARD → idrive, STANDARD_IA → lyve, GLACIER/DEEP_ARCHIVE → geyser
-- ONEZONE_IA → onedrive, REDUCED_REDUNDANCY → local
+- STANDARD → idrive, GLACIER/DEEP_ARCHIVE → geyser, REDUCED_REDUNDANCY → local
+- RESILIENT → lyve (internal class — what the `resilient` bucket tier resolves to; NOT the removed STANDARD_IA mapping: objects land on Lyve at its default class, never Lyve's IA service tier)
 
 If the target backend isn't registered, falls back to primary silently. Storage class is a hint, never an error.
 
