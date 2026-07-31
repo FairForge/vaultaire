@@ -338,8 +338,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		if errors.Is(err, engine.ErrAllBackendsUnavailable) {
 			w.Header().Set("Retry-After", "30")
 			WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
-		} else if strings.Contains(err.Error(), "no such file or directory") ||
-			strings.Contains(err.Error(), "not found") {
+		} else if isObjectMissingErr(err) {
 			reqID := generateRequestID()
 			if suggestion := keySuggestion(r.Context(), a.db, t.ID, bucket, artifact); suggestion != "" {
 				WriteS3ErrorWithContext(w, ErrNoSuchKey, r.URL.Path, reqID, WithSuggestion(suggestion))
@@ -1231,8 +1230,7 @@ func (a *S3ToEngine) handleChunkedPut(
 	// the chunked GET path no longer falls through to the plain path, so a
 	// failed delete costs orphaned disk, not wrong data.
 	if blobErr := a.engine.Delete(ctx, t.NamespaceContainer(bucket), artifact); blobErr != nil &&
-		!strings.Contains(blobErr.Error(), "no such file or directory") &&
-		!strings.Contains(blobErr.Error(), "not found") {
+		!isObjectMissingErr(blobErr) {
 		a.logger.Warn("stale whole-object blob delete failed after chunked PUT",
 			zap.Error(blobErr), zap.String("bucket", bucket), zap.String("object", artifact))
 	}
@@ -1807,9 +1805,7 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 		}
 	} else {
 		if err := a.engine.Delete(r.Context(), container, object); err != nil {
-			isMissing := strings.Contains(err.Error(), "no such file or directory") ||
-				strings.Contains(err.Error(), "not found")
-			if !isMissing {
+			if !isObjectMissingErr(err) {
 				a.logger.Error("delete failed",
 					zap.String("container", container),
 					zap.String("artifact", object),
