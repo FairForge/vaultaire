@@ -19,6 +19,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"net"
 	"net/http"
@@ -189,6 +190,12 @@ func (d *OneDriveDriver) Name() string { return "onedrive" }
 
 func (d *OneDriveDriver) TenantCount() int { return len(d.tenants) }
 
+// pickTenant rotates across the fleet, skipping throttled tenants. Only safe
+// for operations with no placement affinity (HealthCheck). Data operations
+// MUST use tenantsFor: an object lives on exactly ONE fleet account, and
+// rotating reads was the root cause of the 2026-07-30 read-after-write
+// failure — Get asked a different account than Put stored on, and 404'd on
+// data that existed.
 func (d *OneDriveDriver) pickTenant() *odTenant {
 	now := time.Now().Unix()
 	n := len(d.tenants)
@@ -202,6 +209,40 @@ func (d *OneDriveDriver) pickTenant() *odTenant {
 	return d.tenants[start%n]
 }
 
+// homeTenantIndex is the deterministic fleet placement for a path: FNV-1a of
+// the full storage path mod fleet size. Every operation on the same path
+// lands on the same account, restart-stable and config-order-stable as long
+// as the TENANT_N ordering doesn't change.
+func (d *OneDriveDriver) homeTenantIndex(path string) int {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(path))
+	return int(h.Sum32() % uint32(len(d.tenants)))
+}
+
+// tenantsFor returns the fleet ordered for a data operation on path: the
+// deterministic home tenant first, then the rest as fallbacks. The fallback
+// probe exists for data written before deterministic placement (the old
+// round-robin Put scattered objects across accounts) — reads walk the fleet
+// on 404 instead of failing.
+func (d *OneDriveDriver) tenantsFor(path string) []*odTenant {
+	home := d.homeTenantIndex(path)
+	ordered := make([]*odTenant, 0, len(d.tenants))
+	ordered = append(ordered, d.tenants[home])
+	for i, t := range d.tenants {
+		if i != home {
+			ordered = append(ordered, t)
+		}
+	}
+	return ordered
+}
+
+// odIsNotFound reports whether a Graph error is an item-absence (the wrapped
+// errors carry the HTTP status in their text — the driver's existing
+// convention, see List/Exists).
+func odIsNotFound(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "404")
+}
+
 func (d *OneDriveDriver) buildPath(ctx context.Context, container, artifact string) string {
 	tenantID := "default"
 	if tid, ok := ctx.Value(common.TenantIDKey).(string); ok && tid != "" {
@@ -213,7 +254,12 @@ func (d *OneDriveDriver) buildPath(ctx context.Context, container, artifact stri
 // Put stores an artifact via OneDrive Graph API.
 // Files <4MB use simple PUT; larger files use chunked upload sessions.
 func (d *OneDriveDriver) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...engine.PutOption) error {
-	t := d.pickTenant()
+	path := d.buildPath(ctx, container, artifact)
+	// Deterministic placement: the path's home tenant, always — never the
+	// rotation. A throttled home tenant still receives the write (graphDo
+	// retries with backoff); writing elsewhere would strand the object where
+	// deterministic reads don't look first.
+	t := d.tenantsFor(path)[0]
 	driveID, err := t.getDriveID(ctx)
 	if err != nil {
 		return fmt.Errorf("onedrive get drive: %w", err)
@@ -222,8 +268,6 @@ func (d *OneDriveDriver) Put(ctx context.Context, container, artifact string, da
 	if err != nil {
 		return fmt.Errorf("onedrive ensure folder: %w", err)
 	}
-
-	path := d.buildPath(ctx, container, artifact)
 	options := engine.ApplyPutOptions(opts...)
 
 	// When ContentLength is known (from S3 API adapter), stream directly
@@ -277,16 +321,34 @@ func (d *OneDriveDriver) Put(ctx context.Context, container, artifact string, da
 // Fetches the pre-authenticated CDN URL from item metadata, then downloads
 // via HTTP/1.1 (bypassing Go's HTTP/2 flow-control bugs).
 func (d *OneDriveDriver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
-	t := d.pickTenant()
-	driveID, err := t.getDriveID(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("onedrive get drive: %w", err)
-	}
-
 	path := d.buildPath(ctx, container, artifact)
-	dlURL, fileSize, err := t.getDownloadURL(ctx, driveID, path)
-	if err != nil {
-		return nil, fmt.Errorf("onedrive get metadata %s: %w", path, err)
+
+	// Home tenant first, then probe the fleet: pre-placement data may live
+	// on any account (the old round-robin Put).
+	var (
+		t        *odTenant
+		dlURL    string
+		fileSize int64
+	)
+	var lastErr error
+	for _, cand := range d.tenantsFor(path) {
+		driveID, err := cand.getDriveID(ctx)
+		if err != nil {
+			lastErr = fmt.Errorf("onedrive get drive: %w", err)
+			continue
+		}
+		dlURL, fileSize, err = cand.getDownloadURL(ctx, driveID, path)
+		if err == nil {
+			t = cand
+			break
+		}
+		lastErr = fmt.Errorf("onedrive get metadata %s: %w", path, err)
+		if !odIsNotFound(err) {
+			return nil, lastErr
+		}
+	}
+	if t == nil {
+		return nil, lastErr
 	}
 
 	streams := odAdaptiveStreams(fileSize)
@@ -386,95 +448,117 @@ func (t *odTenant) downloadRanges(ctx context.Context, dlURL string, fileSize in
 
 // Delete removes an artifact from OneDrive.
 func (d *OneDriveDriver) Delete(ctx context.Context, container, artifact string) error {
-	t := d.pickTenant()
-	driveID, err := t.getDriveID(ctx)
-	if err != nil {
-		return fmt.Errorf("onedrive get drive: %w", err)
-	}
-
 	path := d.buildPath(ctx, container, artifact)
-	itemID, err := t.getItemID(ctx, driveID, path)
-	if err != nil {
-		return fmt.Errorf("onedrive resolve %s: %w", path, err)
-	}
 
-	u := fmt.Sprintf("%s/drives/%s/items/%s", graphBase, driveID, itemID)
-	req, _ := http.NewRequestWithContext(ctx, "DELETE", u, nil)
-	resp, err := t.graphDo(ctx, req)
-	if err != nil {
-		return fmt.Errorf("onedrive delete %s: %w", path, err)
+	var lastErr error
+	for _, t := range d.tenantsFor(path) {
+		driveID, err := t.getDriveID(ctx)
+		if err != nil {
+			lastErr = fmt.Errorf("onedrive get drive: %w", err)
+			continue
+		}
+		itemID, err := t.getItemID(ctx, driveID, path)
+		if err != nil {
+			lastErr = fmt.Errorf("onedrive resolve %s: %w", path, err)
+			if odIsNotFound(err) {
+				continue // may live on another fleet account (pre-placement data)
+			}
+			return lastErr
+		}
+
+		u := fmt.Sprintf("%s/drives/%s/items/%s", graphBase, driveID, itemID)
+		req, _ := http.NewRequestWithContext(ctx, "DELETE", u, nil)
+		resp, err := t.graphDo(ctx, req)
+		if err != nil {
+			return fmt.Errorf("onedrive delete %s: %w", path, err)
+		}
+		odPooledDrain(resp.Body)
+		_ = resp.Body.Close()
+		return nil
 	}
-	odPooledDrain(resp.Body)
-	_ = resp.Body.Close()
-	return nil
+	return lastErr
 }
 
 // List returns artifacts under a container with optional prefix filtering.
+// Placement scatters a container's objects across the WHOLE fleet (each
+// object hashes to its own home tenant), so a listing must union every
+// account — the old single-tenant listing showed a third of the namespace.
 func (d *OneDriveDriver) List(ctx context.Context, container string, prefix string) ([]string, error) {
-	t := d.pickTenant()
-	driveID, err := t.getDriveID(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("onedrive get drive: %w", err)
-	}
-
 	tenantID := "default"
 	if tid, ok := ctx.Value(common.TenantIDKey).(string); ok && tid != "" {
 		tenantID = tid
 	}
 	folderPath := fmt.Sprintf("%s/t-%s/%s", odRootFolder, tenantID, container)
 
-	u := fmt.Sprintf("%s/drives/%s/items/root:/%s:/children",
-		graphBase, driveID, odEscapePath(folderPath))
-	req, _ := http.NewRequestWithContext(ctx, "GET", u, nil)
-	resp, err := t.graphDo(ctx, req)
-	if err != nil {
-		if strings.Contains(err.Error(), "404") {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("onedrive list %s: %w", folderPath, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	var result struct {
-		Value []struct {
-			Name string `json:"name"`
-		} `json:"value"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("onedrive list decode: %w", err)
-	}
-
+	seen := make(map[string]bool)
 	var artifacts []string
-	for _, item := range result.Value {
-		if prefix == "" || strings.HasPrefix(item.Name, prefix) {
-			artifacts = append(artifacts, item.Name)
+	for _, t := range d.tenants {
+		driveID, err := t.getDriveID(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("onedrive get drive: %w", err)
+		}
+		// Graph pages children (default 200). Follow @odata.nextLink to the
+		// end — a single-page read silently truncated every listing of a
+		// container with more objects than one page.
+		u := fmt.Sprintf("%s/drives/%s/items/root:/%s:/children?$top=999",
+			graphBase, driveID, odEscapePath(folderPath))
+		for u != "" {
+			req, _ := http.NewRequestWithContext(ctx, "GET", u, nil)
+			resp, err := t.graphDo(ctx, req)
+			if err != nil {
+				if strings.Contains(err.Error(), "404") {
+					break // this account holds nothing under the container
+				}
+				return nil, fmt.Errorf("onedrive list %s: %w", folderPath, err)
+			}
+
+			var result struct {
+				Value []struct {
+					Name string `json:"name"`
+				} `json:"value"`
+				NextLink string `json:"@odata.nextLink"`
+			}
+			decodeErr := json.NewDecoder(resp.Body).Decode(&result)
+			_ = resp.Body.Close()
+			if decodeErr != nil {
+				return nil, fmt.Errorf("onedrive list decode: %w", decodeErr)
+			}
+			for _, item := range result.Value {
+				if (prefix == "" || strings.HasPrefix(item.Name, prefix)) && !seen[item.Name] {
+					seen[item.Name] = true
+					artifacts = append(artifacts, item.Name)
+				}
+			}
+			u = result.NextLink
 		}
 	}
 	return artifacts, nil
 }
 
-// Exists checks if an artifact exists in OneDrive.
+// Exists checks if an artifact exists in OneDrive (home tenant first, then
+// the fleet — pre-placement data may live on any account).
 func (d *OneDriveDriver) Exists(ctx context.Context, container, artifact string) (bool, error) {
-	t := d.pickTenant()
-	driveID, err := t.getDriveID(ctx)
-	if err != nil {
-		return false, fmt.Errorf("onedrive get drive: %w", err)
-	}
-
 	path := d.buildPath(ctx, container, artifact)
-	u := fmt.Sprintf("%s/drives/%s/items/root:/%s/%s",
-		graphBase, driveID, odRootFolder, odEscapePath(path))
-	req, _ := http.NewRequestWithContext(ctx, "GET", u, nil)
-	resp, err := t.graphDo(ctx, req)
-	if err != nil {
-		if strings.Contains(err.Error(), "404") {
-			return false, nil
+	for _, t := range d.tenantsFor(path) {
+		driveID, err := t.getDriveID(ctx)
+		if err != nil {
+			return false, fmt.Errorf("onedrive get drive: %w", err)
 		}
-		return false, fmt.Errorf("onedrive exists %s: %w", path, err)
+		u := fmt.Sprintf("%s/drives/%s/items/root:/%s/%s",
+			graphBase, driveID, odRootFolder, odEscapePath(path))
+		req, _ := http.NewRequestWithContext(ctx, "GET", u, nil)
+		resp, err := t.graphDo(ctx, req)
+		if err != nil {
+			if strings.Contains(err.Error(), "404") {
+				continue
+			}
+			return false, fmt.Errorf("onedrive exists %s: %w", path, err)
+		}
+		odPooledDrain(resp.Body)
+		_ = resp.Body.Close()
+		return true, nil
 	}
-	odPooledDrain(resp.Body)
-	_ = resp.Body.Close()
-	return true, nil
+	return false, nil
 }
 
 // HealthCheck validates connectivity by querying the drive metadata.
