@@ -46,7 +46,7 @@ func TestHandleRoot_HeadReturnsNoBody(t *testing.T) {
 }
 
 // The landing page is rendered in two variants from the signups flag: closed →
-// waitlist capture ("Launching July 31"), open → working /register CTA. Nil
+// waitlist capture ("Launching August 31"), open → working /register CTA. Nil
 // flags (zero-value Server, tests) must fall back to the closed variant.
 func TestHandleRoot_SignupsClosed_ShowsWaitlist(t *testing.T) {
 	s := &Server{} // nil flags = closed
@@ -58,7 +58,7 @@ func TestHandleRoot_SignupsClosed_ShowsWaitlist(t *testing.T) {
 	body := w.Body.String()
 	require.Equal(t, http.StatusOK, w.Result().StatusCode)
 	assert.Contains(t, body, "/api/waitlist", "closed variant posts to the waitlist")
-	assert.Contains(t, body, "July 31", "closed variant announces the launch date")
+	assert.Contains(t, body, "August 31", "closed variant announces the launch date")
 	assert.NotContains(t, body, `href="/register"`, "closed variant must not link a gated register page")
 }
 
