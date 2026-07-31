@@ -7,7 +7,9 @@
 //   - Raw HTTP + azidentity (no Graph SDK — binary -77% smaller)
 //   - Dual transport: HTTP/2 for Graph API, HTTP/1.1 for CDN downloads
 //     (Go HTTP/2 flow-control bugs #54330, #47840, #63520)
-//   - Multi-tenant fleet: round-robin with throttle tracking
+//   - Multi-tenant fleet: deterministic placement (FNV-1a of path picks the
+//     home account; reads probe home first, then the fleet for pre-placement
+//     data), throttle tracking on every Graph call
 //   - 60MB upload chunks (Microsoft's max, 35% faster than 10MB)
 //   - 4MB read/write buffers
 //   - Decorrelated jitter backoff on 429/503
@@ -243,6 +245,18 @@ func odIsNotFound(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "404")
 }
 
+// logFallbackHit records an operation that found its object on a non-home
+// account — pre-placement (round-robin era) data. These are the migration
+// signal: when fallback hits stop appearing, the fleet-wide probe on misses
+// can be retired and reads become single-account again.
+func (d *OneDriveDriver) logFallbackHit(op, path string, t *odTenant) {
+	d.logger.Info("onedrive fallback hit",
+		zap.String("op", op),
+		zap.String("path", path),
+		zap.String("tenant", t.name),
+	)
+}
+
 func (d *OneDriveDriver) buildPath(ctx context.Context, container, artifact string) string {
 	tenantID := "default"
 	if tid, ok := ctx.Value(common.TenantIDKey).(string); ok && tid != "" {
@@ -259,7 +273,7 @@ func (d *OneDriveDriver) Put(ctx context.Context, container, artifact string, da
 	// rotation. A throttled home tenant still receives the write (graphDo
 	// retries with backoff); writing elsewhere would strand the object where
 	// deterministic reads don't look first.
-	t := d.tenantsFor(path)[0]
+	t := d.tenants[d.homeTenantIndex(path)]
 	driveID, err := t.getDriveID(ctx)
 	if err != nil {
 		return fmt.Errorf("onedrive get drive: %w", err)
@@ -331,7 +345,7 @@ func (d *OneDriveDriver) Get(ctx context.Context, container, artifact string) (i
 		fileSize int64
 	)
 	var lastErr error
-	for _, cand := range d.tenantsFor(path) {
+	for i, cand := range d.tenantsFor(path) {
 		driveID, err := cand.getDriveID(ctx)
 		if err != nil {
 			lastErr = fmt.Errorf("onedrive get drive: %w", err)
@@ -340,6 +354,9 @@ func (d *OneDriveDriver) Get(ctx context.Context, container, artifact string) (i
 		dlURL, fileSize, err = cand.getDownloadURL(ctx, driveID, path)
 		if err == nil {
 			t = cand
+			if i > 0 {
+				d.logFallbackHit("get", path, cand)
+			}
 			break
 		}
 		lastErr = fmt.Errorf("onedrive get metadata %s: %w", path, err)
@@ -446,37 +463,56 @@ func (t *odTenant) downloadRanges(ctx context.Context, dlURL string, fileSize in
 	return pr, nil
 }
 
-// Delete removes an artifact from OneDrive.
+// Delete removes an artifact from OneDrive. It sweeps the WHOLE fleet, not
+// just the first copy found: the old round-robin Put could leave copies of
+// the same path on several accounts (every overwrite landed wherever the
+// rotation pointed), and deleting only one of them leaves a stale duplicate
+// that the next Get's fleet probe resurrects.
 func (d *OneDriveDriver) Delete(ctx context.Context, container, artifact string) error {
 	path := d.buildPath(ctx, container, artifact)
 
-	var lastErr error
-	for _, t := range d.tenantsFor(path) {
+	deleted := false
+	var hardErr error  // an account we could not fully check — a copy may survive there
+	var probeErr error // 404s from the sweep, reported only if nothing was deleted
+	for i, t := range d.tenantsFor(path) {
 		driveID, err := t.getDriveID(ctx)
 		if err != nil {
-			lastErr = fmt.Errorf("onedrive get drive: %w", err)
+			hardErr = fmt.Errorf("onedrive get drive: %w", err)
 			continue
 		}
 		itemID, err := t.getItemID(ctx, driveID, path)
 		if err != nil {
-			lastErr = fmt.Errorf("onedrive resolve %s: %w", path, err)
 			if odIsNotFound(err) {
-				continue // may live on another fleet account (pre-placement data)
+				probeErr = fmt.Errorf("onedrive resolve %s: %w", path, err)
+				continue
 			}
-			return lastErr
+			hardErr = fmt.Errorf("onedrive resolve %s: %w", path, err)
+			continue
 		}
 
 		u := fmt.Sprintf("%s/drives/%s/items/%s", graphBase, driveID, itemID)
 		req, _ := http.NewRequestWithContext(ctx, "DELETE", u, nil)
 		resp, err := t.graphDo(ctx, req)
 		if err != nil {
-			return fmt.Errorf("onedrive delete %s: %w", path, err)
+			hardErr = fmt.Errorf("onedrive delete %s: %w", path, err)
+			continue
 		}
 		odPooledDrain(resp.Body)
 		_ = resp.Body.Close()
+		deleted = true
+		if i > 0 {
+			d.logFallbackHit("delete", path, t)
+		}
+	}
+	// A hard error means an account may still hold a copy — surface it so the
+	// engine retries (Delete is idempotent; re-deleting swept accounts is safe).
+	if hardErr != nil {
+		return hardErr
+	}
+	if deleted {
 		return nil
 	}
-	return lastErr
+	return probeErr
 }
 
 // List returns artifacts under a container with optional prefix filtering.
@@ -539,24 +575,36 @@ func (d *OneDriveDriver) List(ctx context.Context, container string, prefix stri
 // the fleet — pre-placement data may live on any account).
 func (d *OneDriveDriver) Exists(ctx context.Context, container, artifact string) (bool, error) {
 	path := d.buildPath(ctx, container, artifact)
-	for _, t := range d.tenantsFor(path) {
+	var downErr error // an account we could not check — absence is not provable past it
+	for i, t := range d.tenantsFor(path) {
 		driveID, err := t.getDriveID(ctx)
 		if err != nil {
-			return false, fmt.Errorf("onedrive get drive: %w", err)
+			// A down account must not abort the probe (same as Get) — the
+			// object may be reachable on a healthy account.
+			downErr = fmt.Errorf("onedrive get drive: %w", err)
+			continue
 		}
 		u := fmt.Sprintf("%s/drives/%s/items/root:/%s/%s",
 			graphBase, driveID, odRootFolder, odEscapePath(path))
 		req, _ := http.NewRequestWithContext(ctx, "GET", u, nil)
 		resp, err := t.graphDo(ctx, req)
 		if err != nil {
-			if strings.Contains(err.Error(), "404") {
+			if odIsNotFound(err) {
 				continue
 			}
 			return false, fmt.Errorf("onedrive exists %s: %w", path, err)
 		}
 		odPooledDrain(resp.Body)
 		_ = resp.Body.Close()
+		if i > 0 {
+			d.logFallbackHit("exists", path, t)
+		}
 		return true, nil
+	}
+	// Not found on any reachable account. If one was unreachable we cannot
+	// honestly answer "false" — the object may live there.
+	if downErr != nil {
+		return false, downErr
 	}
 	return false, nil
 }
