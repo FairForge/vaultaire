@@ -47,6 +47,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -208,7 +209,11 @@ func main() {
 
 	fmt.Printf("Host:      %s (%s/%s)\n", hostName, runtime.GOOS, runtime.GOARCH)
 	fmt.Printf("Output:    %s\n", *outFile)
-	fmt.Printf("Transport: tuned (MaxIdleConnsPerHost=200, 4MB buffers, compression=off)\n")
+	sndbufNote := ""
+	if runtime.GOOS == "darwin" {
+		sndbufNote = fmt.Sprintf(", SO_SNDBUF=%dMB", macSndBuf>>20)
+	}
+	fmt.Printf("Transport: tuned (MaxIdleConnsPerHost=200, 4MB buffers, compression=off%s)\n", sndbufNote)
 	fmt.Printf("Endpoints: %d (smoke=%v)\n", len(eps), *smoke)
 
 	run := RunResult{
@@ -510,13 +515,39 @@ func cachedDialContext(base *net.Dialer) func(ctx context.Context, network, addr
 	}
 }
 
-// tunedHTTPClient returns an HTTP client with connection pooling, keep-alive,
-// DNS caching, and TLS session resumption tuned for high-concurrency benchmarks.
-func tunedHTTPClient(insecureTLS bool) *http.Client {
-	dialer := &net.Dialer{
+// macSndBuf is the SO_SNDBUF forced on darwin sockets. macOS starts every
+// connection at a 128KB send buffer and autotunes upward in 8KB steps
+// (net.inet.tcp.autosndbufinc), so a long single-stream upload spends most of
+// its life window-starved: measured 2026-07-31, a 128MB single-stream upload
+// did 20 MB/s with the default buffer vs 38.8 MB/s with SO_SNDBUF=6MB. Linux
+// autotunes properly (and SLC's tcp_wmem max is 64MB — forcing 6MB there
+// would cap it), so this is darwin-only. 6MB fits under the default
+// kern.ipc.maxsockbuf of 8MB.
+const macSndBuf = 6 << 20
+
+func benchDialer() *net.Dialer {
+	d := &net.Dialer{
 		Timeout:   10 * time.Second,
 		KeepAlive: 30 * time.Second,
 	}
+	if runtime.GOOS == "darwin" {
+		d.Control = func(network, address string, c syscall.RawConn) error {
+			var soErr error
+			if err := c.Control(func(fd uintptr) {
+				soErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_SNDBUF, macSndBuf)
+			}); err != nil {
+				return err
+			}
+			return soErr
+		}
+	}
+	return d
+}
+
+// tunedHTTPClient returns an HTTP client with connection pooling, keep-alive,
+// DNS caching, and TLS session resumption tuned for high-concurrency benchmarks.
+func tunedHTTPClient(insecureTLS bool) *http.Client {
+	dialer := benchDialer()
 	transport := &http.Transport{
 		MaxIdleConns:        200,
 		MaxIdleConnsPerHost: 200,
@@ -541,10 +572,7 @@ func tunedHTTPClient(insecureTLS bool) *http.Client {
 // h1HTTPClient returns an HTTP/1.1-only client (no HTTP/2 multiplexing).
 // Some backends are faster with dedicated connections per request.
 func h1HTTPClient(insecureTLS bool) *http.Client {
-	dialer := &net.Dialer{
-		Timeout:   10 * time.Second,
-		KeepAlive: 30 * time.Second,
-	}
+	dialer := benchDialer()
 	transport := &http.Transport{
 		MaxIdleConns:        200,
 		MaxIdleConnsPerHost: 200,
