@@ -347,13 +347,7 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 	if options.StorageClass == "" && e.intelligence != nil {
 		if rec := e.intelligence.GetRecommendation(tenantID, container, artifact); rec != nil {
 			if rec.PreferredBackend != "" {
-				if _, exists := e.drivers[rec.PreferredBackend]; exists {
-					targetBackend = rec.PreferredBackend
-				} else {
-					e.logger.Warn("intelligence recommended non-existent backend, using primary",
-						zap.String("recommended", rec.PreferredBackend),
-						zap.String("primary", e.primary))
-				}
+				targetBackend = e.applyBackendRecommendation(targetBackend, rec.PreferredBackend)
 			}
 		}
 	}
@@ -741,6 +735,35 @@ func (e *CoreEngine) buildCandidateList(preferred string) []string {
 // (REDUCED_REDUNDANCY) or configured as the primary (STORAGE_MODE=local) —
 // never as a silent failover destination for customer data.
 var nonDurableBackends = map[string]bool{"local": true}
+
+// applyBackendRecommendation accepts an intelligence-recommended backend only
+// when it is registered AND a safe write target, otherwise it keeps the
+// already-resolved target.
+//
+// The access tracker names "local" for almost anything it has seen before —
+// its "hot data" branch and its catch-all default both do — so applying
+// recommendations verbatim silently relocated any previously-accessed object
+// onto the hub's single unreplicated disk on its next write. That is exactly
+// what nonDurableBackends/WP-F keeps off the failover path, for exactly the
+// same reasons: it lies about durability, fills the single box, and bills the
+// wrong tier. A non-durable recommendation is honoured only where that
+// backend is already the configured primary (STORAGE_MODE=local).
+func (e *CoreEngine) applyBackendRecommendation(current, recommended string) string {
+	if _, exists := e.drivers[recommended]; !exists {
+		e.logger.Warn("intelligence recommended non-existent backend, keeping target",
+			zap.String("recommended", recommended),
+			zap.String("target", current),
+			zap.String("primary", e.primary))
+		return current
+	}
+	if nonDurableBackends[recommended] && recommended != e.primary {
+		e.logger.Debug("ignoring non-durable backend recommendation",
+			zap.String("recommended", recommended),
+			zap.String("target", current))
+		return current
+	}
+	return recommended
+}
 
 // buildWriteCandidateList is buildCandidateList restricted to backends that
 // are safe write targets. A failing durable backend must surface as a 5xx to
