@@ -27,7 +27,7 @@ copies across Microsoft's infrastructure" at $0 cost.
 
 ## Azure App Registration
 
-- Client ID: see `.env.bench` (`AZURE_CLIENT_ID`)
+- Client ID: see `.env.bench` (`TENANT_N_CLIENT_ID` — one app registration per fleet account; the old single-tenant `AZURE_*` vars are dead, read only by the retired gitignored tools)
 - Auth: Client credentials (service principal), not user-delegated
 - Permissions: `Files.ReadWrite.All`, `User.Read.All`, `Sites.Read.All`
 - Scopes: `https://graph.microsoft.com/.default`
@@ -407,18 +407,54 @@ ssh vaultaire-slc 'grep -c TENANT /tmp/.env.bench'  # should be 12 (4 vars × 3 
 
 ## Production Driver Status
 
-`internal/drivers/onedrive.go` — 191 lines, scaffold only. All methods return
-"not implemented". Has `BatchOperation`, `SplitIntoBatches`, `DriveInfo` structs.
+`internal/drivers/onedrive.go` — fully implemented (~1,100 lines), wired in
+`cmd/vaultaire/main.go`. Complete `engine.Driver` contract: Put (simple <4MB,
+chunked upload sessions above, streaming when ContentLength is known), Get
+(CDN download URL + HTTP/1.1 parallel byte ranges, adaptive 1/2/4/8 streams),
+List (all-fleet union with Graph pagination), Delete (whole-fleet sweep),
+Exists (home-first probe), HealthCheck (rotation), RateLimit-header throttle
+tracking with decorrelated-jitter backoff, token refresh mutex.
 
-### Implementation priorities (when ready):
+### Fleet placement (deterministic, 2026-07-30)
 
-1. **Put** — Simple upload (<250MB) + upload session (>=250MB), path-based addressing
-2. **Get** — Download via `@microsoft.graph.downloadUrl` (pre-authenticated, no redirect)
-3. **List** — Delta queries with token (1 RU vs 2 RU)
-4. **Delete** — Batch deletes (20 per batch request)
-5. **Throttle handler** — `_graphFetch` wrapper tracking RateLimit headers, decorrelated jitter
-6. **Multi-tenant orchestrator** — Health-weighted load balancing, proactive throttle avoidance (80% threshold)
-7. **Token management** — Auto-refresh with mutex (prevent concurrent refresh storms)
+An object's home account is a pure function of its storage path:
+
+```
+home = FNV-1a(path) % fleetSize     // path = t-<tenant>/<container>/<artifact>
+```
+
+- **Put** always writes to the home account — even a throttled one (`graphDo`
+  backs off and retries). Writing elsewhere would strand the object where
+  reads don't look first.
+- **Get / Exists / Delete** try the home account first, then probe the rest
+  of the fleet: data written in the round-robin era (pre-2026-07-30) may live
+  on any account. **Delete sweeps ALL accounts** — round-robin overwrites
+  could leave copies of one path on several accounts, and deleting only the
+  first copy found lets the next Get resurrect a stale duplicate.
+- **List** unions every account (placement scatters each container across
+  the whole fleet) and follows `@odata.nextLink` pagination.
+- **Fallback hits are logged** (`onedrive fallback hit`, Info level, with
+  op/path/tenant). They mark pre-placement data being served off its home
+  account. When they stop appearing in prod, the fleet-wide probe on misses
+  (and Delete's full sweep) can be retired — reads become single-account.
+
+**⚠️ Never reorder or remove `TENANT_N_*` entries.** Placement is
+`hash % fleetSize` over config order — reordering remaps every object's home
+and demotes all reads to fallback probes. Appending new accounts also
+changes the modulus and remaps most objects: correctness survives (the probe
+finds them) but every remapped read pays the fleet-walk penalty. A rebalance
+or consistent-hashing scheme is a prerequisite for growing the fleet to 15 —
+planned, not built.
+
+### Bench caveat
+
+No `permafrost-*` tool goes through this driver — they hand-roll their own
+auth and spread files evenly across accounts themselves. Their "fleet"
+numbers are an upper bound on the driver: real placement is hash-based
+(balls-in-bins imbalance; a single-key stream is capped at one account's
+rate), and the tools skip the driver's per-Put folder-ensure overhead.
+Driver-path numbers need a bench that constructs `NewOneDriveFleetDriver`
+and calls `Put`/`Get`/`List` directly.
 
 ### Patterns from SnapShelter (Node.js reference implementation)
 

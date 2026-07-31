@@ -7,7 +7,9 @@
 //   - Raw HTTP + azidentity (no Graph SDK — binary -77% smaller)
 //   - Dual transport: HTTP/2 for Graph API, HTTP/1.1 for CDN downloads
 //     (Go HTTP/2 flow-control bugs #54330, #47840, #63520)
-//   - Multi-tenant fleet: round-robin with throttle tracking
+//   - Multi-tenant fleet: deterministic placement (FNV-1a of path picks the
+//     home account; reads probe home first, then the fleet for pre-placement
+//     data), throttle tracking on every Graph call
 //   - 60MB upload chunks (Microsoft's max, 35% faster than 10MB)
 //   - 4MB read/write buffers
 //   - Decorrelated jitter backoff on 429/503
