@@ -97,9 +97,7 @@ tests/load/results/
 cache_benchmark_results.txt
 compress.txt
 
-# Permafrost internal tools (legacy)
-cmd/permafrost-benchmark/
-cmd/permafrost-parallel/
+# Local-only internal tools (untracked source)
 cmd/geyser-admin-test/
 cmd/geyser-smoke/
 
@@ -107,6 +105,8 @@ cmd/geyser-smoke/
 /bench-compare
 /bench-compare-linux
 /lighthouse-bench
+/onedrive-bench
+/onedrive-bench-linux
 /permafrost-benchmark
 /permafrost-benchmark-linux
 /permafrost-fleet
