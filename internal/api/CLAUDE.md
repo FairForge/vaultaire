@@ -27,6 +27,7 @@ S3-compatible API layer. Translates S3 protocol to engine operations, handles au
 - **s3_notifications.go** — Bucket notification configuration
 - **s3_copy.go** — CopyObject handler. **Chunked sources (review-C, #342):** copying a chunked object is a pure manifest copy — per chunk `increment_chunk_ref` + ref-row insert + head upsert in ONE tx, no data movement; source ETag kept; the copy survives source delete (refs are independent); quota reserves the logical size. Encrypted (SSE-S3/SSE-C) sources still 501; versioned destinations refused 501. Plain copy OVER a chunked destination releases the displaced manifest in-tx and flips `is_chunked` (via `atomicHeadUpsertReleasing`)
 - **s3_list.go** — ListObjectsV2 handler
+- **s3_list_versions.go** — ListObjectVersions handler (`GET /{bucket}?versions`): merges `object_versions` rows with head-cache-only objects surfaced as S3 "null" versions (written while versioning was off); key-asc / newest-first ordering, prefix + max-keys + key-marker/version-id-marker pagination (version marker resolves to that row's created_at). No delimiter support yet. Tests: s3_list_versions_test.go (DB-backed, reuses versioningFixture)
 - **s3_presign.go** — Pre-signed URL verification (SigV4 query string auth) and URL generation
 - **presigned.go** — Management API endpoint for generating pre-signed URLs (`/api/v1/presigned`)
 - **sts_routes.go** — STS temporary credential endpoint (`POST /api/v1/sts/token`)
