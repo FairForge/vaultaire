@@ -89,17 +89,20 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 	r.Post("/login/verify-2fa", loginRL.Limit(handleVerify2FA(baseTmpl, deps)).ServeHTTP)
 
 	// --- OAuth login ---
+	// New OAuth signups get the same reveal-once credentials page as the
+	// web register form (B2) — without it the minted secret was discarded.
+	oauthCreds := signupCredsRenderer(baseTmpl, deps)
 	if deps.Google != nil {
 		r.Get("/auth/google", handlers.HandleOAuthLogin(deps.Google, deps.Logger))
 		r.Get("/auth/google/callback", handlers.HandleOAuthCallback(
 			deps.Google, "google", handlers.FetchGoogleUser(deps.Google),
-			deps.Auth, deps.Sessions, deps.DB, deps.Logger))
+			deps.Auth, deps.Sessions, deps.DB, deps.Logger, oauthCreds))
 	}
 	if deps.GitHub != nil {
 		r.Get("/auth/github", handlers.HandleOAuthLogin(deps.GitHub, deps.Logger))
 		r.Get("/auth/github/callback", handlers.HandleOAuthCallback(
 			deps.GitHub, "github", handlers.FetchGithubUser(deps.GitHub),
-			deps.Auth, deps.Sessions, deps.DB, deps.Logger))
+			deps.Auth, deps.Sessions, deps.DB, deps.Logger, oauthCreds))
 	}
 
 	// --- Legal pages (public) ---
@@ -456,11 +459,32 @@ func handleLogin(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 	}
 }
 
+// signupCredsRenderer builds the reveal-once S3 credentials renderer (B2),
+// shared by the web register handler and the OAuth signup callbacks. The
+// secret exists only in the rendered response — never persisted, never
+// shown again.
+func signupCredsRenderer(baseTmpl *template.Template, deps Deps) func(w http.ResponseWriter, accessKey, secret string) {
+	credsTmpl := template.Must(baseTmpl.Clone())
+	template.Must(credsTmpl.Parse(pageContent("credentials")))
+
+	return func(w http.ResponseWriter, accessKey, secret string) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		if err := credsTmpl.ExecuteTemplate(w, "base", map[string]any{
+			"Page":      "credentials",
+			"AccessKey": accessKey,
+			"SecretKey": secret,
+			"Endpoint":  deps.BaseURL,
+		}); err != nil {
+			deps.Logger.Error("render signup credentials", zap.Error(err))
+		}
+	}
+}
+
 func handleRegister(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 	errTmpl := template.Must(baseTmpl.Clone())
 	template.Must(errTmpl.Parse(pageContent("register")))
-	credsTmpl := template.Must(baseTmpl.Clone())
-	template.Must(credsTmpl.Parse(pageContent("credentials")))
+	renderCreds := signupCredsRenderer(baseTmpl, deps)
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		email := r.FormValue("email")
@@ -526,16 +550,7 @@ func handleRegister(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 		// B2 (5.15.6): render the minted S3 credentials ONCE instead of
 		// redirecting. The secret is never shown again anywhere — the old
 		// redirect discarded it, leaving web signups with no usable keys.
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
-		if err := credsTmpl.ExecuteTemplate(w, "base", map[string]any{
-			"Page":      "credentials",
-			"AccessKey": apiKey.Key,
-			"SecretKey": apiKey.Secret,
-			"Endpoint":  deps.BaseURL,
-		}); err != nil {
-			deps.Logger.Error("render signup credentials", zap.Error(err))
-		}
+		renderCreds(w, apiKey.Key, apiKey.Secret)
 	}
 }
 

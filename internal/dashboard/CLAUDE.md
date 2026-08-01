@@ -120,6 +120,7 @@ Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`,
 
 1. User submits login/register form (POST)
 2. Handler validates credentials / creates account via `deps.Auth`
+2a. OAuth callback (`/auth/{google,github}/callback`): existing users are redirected to `/dashboard`; a BRAND-NEW OAuth account renders the same reveal-once S3 credentials page as the web register form (B2, via `signupCredsRenderer` — shared by `handleRegister` and both OAuth callbacks; secret never persisted or re-shown)
 3. If MFA enabled: sets `mfa_pending` cookie (5-min TTL), redirects to `/login/verify-2fa`
 4. `/login/verify-2fa` validates TOTP code or backup code, then creates session
 5. On success (no MFA or MFA verified): creates session in `deps.Sessions` with 24h TTL

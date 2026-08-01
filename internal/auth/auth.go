@@ -555,18 +555,19 @@ func (a *AuthService) LinkOAuthAccount(ctx context.Context, userID, provider, pr
 }
 
 // CreateUserFromOAuth creates a new user+tenant via OAuth (no password).
-// Also links the OAuth account.
-func (a *AuthService) CreateUserFromOAuth(ctx context.Context, email, company, provider, providerID string) (*User, *Tenant, error) {
-	user, tenant, _, err := a.CreateUserWithTenant(ctx, email, "", company)
+// Also links the OAuth account. The returned APIKey carries the plaintext
+// secret — the only chance to show it to the user (B2 reveal-once).
+func (a *AuthService) CreateUserFromOAuth(ctx context.Context, email, company, provider, providerID string) (*User, *Tenant, *APIKey, error) {
+	user, tenant, apiKey, err := a.CreateUserWithTenant(ctx, email, "", company)
 	if err != nil {
-		return nil, nil, fmt.Errorf("create oauth user: %w", err)
+		return nil, nil, nil, fmt.Errorf("create oauth user: %w", err)
 	}
 
 	if err := a.LinkOAuthAccount(ctx, user.ID, provider, providerID, email, company); err != nil {
-		return nil, nil, fmt.Errorf("link oauth on create: %w", err)
+		return nil, nil, nil, fmt.Errorf("link oauth on create: %w", err)
 	}
 
-	return user, tenant, nil
+	return user, tenant, apiKey, nil
 }
 
 // ValidateS3Request validates S3 API requests and returns tenant

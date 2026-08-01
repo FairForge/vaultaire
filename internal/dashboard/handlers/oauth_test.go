@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/FairForge/vaultaire/internal/auth"
+	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -61,7 +62,7 @@ func TestHandleOAuthCallback_MissingStateCookie(t *testing.T) {
 		func(ctx context.Context, token *oauth2.Token) (oauthUser, error) {
 			return oauthUser{}, nil
 		},
-		nil, nil, nil, zap.NewNop())
+		nil, nil, nil, zap.NewNop(), nil)
 
 	req := httptest.NewRequest("GET", "/auth/test/callback?state=abc&code=xyz", nil)
 	w := httptest.NewRecorder()
@@ -77,7 +78,7 @@ func TestHandleOAuthCallback_StateMismatch(t *testing.T) {
 		func(ctx context.Context, token *oauth2.Token) (oauthUser, error) {
 			return oauthUser{}, nil
 		},
-		nil, nil, nil, zap.NewNop())
+		nil, nil, nil, zap.NewNop(), nil)
 
 	req := httptest.NewRequest("GET", "/auth/test/callback?state=wrong&code=xyz", nil)
 	req.AddCookie(&http.Cookie{Name: "oauth_state", Value: "correct"})
@@ -94,7 +95,7 @@ func TestHandleOAuthCallback_ProviderError(t *testing.T) {
 		func(ctx context.Context, token *oauth2.Token) (oauthUser, error) {
 			return oauthUser{}, nil
 		},
-		nil, nil, nil, zap.NewNop())
+		nil, nil, nil, zap.NewNop(), nil)
 
 	req := httptest.NewRequest("GET", "/auth/test/callback?state=abc&error=access_denied", nil)
 	req.AddCookie(&http.Cookie{Name: "oauth_state", Value: "abc"})
@@ -111,7 +112,7 @@ func TestHandleOAuthCallback_MissingCode(t *testing.T) {
 		func(ctx context.Context, token *oauth2.Token) (oauthUser, error) {
 			return oauthUser{}, nil
 		},
-		nil, nil, nil, zap.NewNop())
+		nil, nil, nil, zap.NewNop(), nil)
 
 	req := httptest.NewRequest("GET", "/auth/test/callback?state=abc", nil)
 	req.AddCookie(&http.Cookie{Name: "oauth_state", Value: "abc"})
@@ -126,13 +127,19 @@ func TestFindOrCreateOAuthUser_NewUser(t *testing.T) {
 	authSvc := createTestAuthSvc(t)
 
 	ou := oauthUser{ID: "google-123", Email: "new@example.com", Name: "New User"}
-	user, err := findOrCreateOAuthUser(context.Background(), authSvc, nil, "google", ou)
+	user, apiKey, err := findOrCreateOAuthUser(context.Background(), authSvc, nil, "google", ou)
 
 	require.NoError(t, err)
 	require.NotNil(t, user)
 	assert.Equal(t, "new@example.com", user.Email)
 	assert.Equal(t, "", user.PasswordHash) // OAuth user, no password
 	assert.NotEmpty(t, user.TenantID)
+
+	// B2: a brand-new signup must surface its minted S3 credentials so the
+	// callback can reveal them once.
+	require.NotNil(t, apiKey)
+	assert.NotEmpty(t, apiKey.Key)
+	assert.NotEmpty(t, apiKey.Secret)
 }
 
 func TestFindOrCreateOAuthUser_ExistingEmail(t *testing.T) {
@@ -144,11 +151,12 @@ func TestFindOrCreateOAuthUser_ExistingEmail(t *testing.T) {
 
 	// OAuth login with same email.
 	ou := oauthUser{ID: "google-456", Email: "existing@example.com", Name: "Existing User"}
-	user, err := findOrCreateOAuthUser(context.Background(), authSvc, nil, "google", ou)
+	user, apiKey, err := findOrCreateOAuthUser(context.Background(), authSvc, nil, "google", ou)
 
 	require.NoError(t, err)
 	require.NotNil(t, user)
 	assert.Equal(t, existing.ID, user.ID) // Same user, not a new one
+	assert.Nil(t, apiKey)                 // No new key minted — nothing to reveal
 }
 
 func TestFindOrCreateOAuthUser_ExistingOAuth(t *testing.T) {
@@ -156,15 +164,92 @@ func TestFindOrCreateOAuthUser_ExistingOAuth(t *testing.T) {
 
 	// Create user via OAuth.
 	ou := oauthUser{ID: "github-789", Email: "oauth@example.com", Name: "OAuth User"}
-	first, err := findOrCreateOAuthUser(context.Background(), authSvc, nil, "github", ou)
+	first, firstKey, err := findOrCreateOAuthUser(context.Background(), authSvc, nil, "github", ou)
 	require.NoError(t, err)
+	require.NotNil(t, firstKey)
 
 	// Login again with same OAuth.
-	second, err := findOrCreateOAuthUser(context.Background(), authSvc, nil, "github", ou)
+	second, secondKey, err := findOrCreateOAuthUser(context.Background(), authSvc, nil, "github", ou)
 	require.NoError(t, err)
 
 	// Should be the same user (looked up by email since no DB for GetUserByOAuth).
 	assert.Equal(t, first.ID, second.ID)
+	assert.Nil(t, secondKey) // Repeat login is not a signup — no reveal
+}
+
+// oauthCallbackFixture wires HandleOAuthCallback against a fake token
+// endpoint so the exchange succeeds without a real provider.
+func oauthCallbackFixture(t *testing.T, authSvc *auth.AuthService, email string, renderCreds func(w http.ResponseWriter, accessKey, secret string)) http.HandlerFunc {
+	t.Helper()
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"test-token","token_type":"bearer"}`))
+	}))
+	t.Cleanup(tokenSrv.Close)
+
+	cfg := testOAuthConfig()
+	cfg.Endpoint.TokenURL = tokenSrv.URL
+
+	return HandleOAuthCallback(cfg, "test",
+		func(ctx context.Context, token *oauth2.Token) (oauthUser, error) {
+			return oauthUser{ID: "prov-1", Email: email, Name: "Cb User"}, nil
+		},
+		authSvc, dashauth.NewMemoryStore(), nil, zap.NewNop(), renderCreds)
+}
+
+func TestHandleOAuthCallback_NewUserShowsCredentialsOnce(t *testing.T) {
+	authSvc := createTestAuthSvc(t)
+
+	var gotAccess, gotSecret string
+	handler := oauthCallbackFixture(t, authSvc, "newsignup@example.com",
+		func(w http.ResponseWriter, accessKey, secret string) {
+			gotAccess, gotSecret = accessKey, secret
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("CREDENTIALS PAGE " + accessKey + " " + secret))
+		})
+
+	req := httptest.NewRequest("GET", "/auth/test/callback?state=abc&code=xyz", nil)
+	req.AddCookie(&http.Cookie{Name: "oauth_state", Value: "abc"})
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	// B2: a fresh OAuth signup renders the reveal-once credentials page
+	// instead of bouncing straight to the dashboard.
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.NotEmpty(t, gotAccess)
+	assert.NotEmpty(t, gotSecret)
+	assert.Contains(t, w.Body.String(), gotSecret)
+
+	// Session must still be established so "go to dashboard" works.
+	var sessionCookie *http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == dashauth.SessionCookieName {
+			sessionCookie = c
+		}
+	}
+	require.NotNil(t, sessionCookie)
+	assert.NotEmpty(t, sessionCookie.Value)
+}
+
+func TestHandleOAuthCallback_ExistingUserRedirectsToDashboard(t *testing.T) {
+	authSvc := createTestAuthSvc(t)
+	_, _, _, err := authSvc.CreateUserWithTenant(context.Background(), "returning@example.com", "password123", "Co")
+	require.NoError(t, err)
+
+	credsShown := false
+	handler := oauthCallbackFixture(t, authSvc, "returning@example.com",
+		func(w http.ResponseWriter, accessKey, secret string) {
+			credsShown = true
+		})
+
+	req := httptest.NewRequest("GET", "/auth/test/callback?state=abc&code=xyz", nil)
+	req.AddCookie(&http.Cookie{Name: "oauth_state", Value: "abc"})
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusSeeOther, w.Code)
+	assert.Equal(t, "/dashboard", w.Header().Get("Location"))
+	assert.False(t, credsShown, "existing user must never see a credentials reveal")
 }
 
 func createTestAuthSvc(t *testing.T) *auth.AuthService {

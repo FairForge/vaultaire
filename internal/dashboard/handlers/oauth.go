@@ -52,7 +52,10 @@ func HandleOAuthLogin(cfg *oauth2.Config, logger *zap.Logger) http.HandlerFunc {
 
 // HandleOAuthCallback processes the OAuth callback from a provider.
 // It exchanges the code for a token, fetches user info, and creates or links
-// the user account.
+// the user account. When the callback creates a BRAND-NEW account,
+// renderCreds (if non-nil) is invoked with the minted S3 access key and
+// secret to show them once (B2) — existing users are redirected to
+// /dashboard as before.
 func HandleOAuthCallback(
 	cfg *oauth2.Config,
 	provider string,
@@ -61,6 +64,7 @@ func HandleOAuthCallback(
 	sessions dashauth.SessionStore,
 	db *sql.DB,
 	logger *zap.Logger,
+	renderCreds func(w http.ResponseWriter, accessKey, secret string),
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Validate state.
@@ -124,7 +128,8 @@ func HandleOAuthCallback(
 
 		// Find or create user. Existing users log in; new accounts are created
 		// unless signups are closed (CreateUserFromOAuth → CreateUserWithTenant).
-		user, err := findOrCreateOAuthUser(r.Context(), authSvc, db, provider, ou)
+		// apiKey is non-nil only when a new account was just created.
+		user, apiKey, err := findOrCreateOAuthUser(r.Context(), authSvc, db, provider, ou)
 		if err != nil {
 			if errors.Is(err, auth.ErrSignupsDisabled) {
 				// Would-be new signup while closed — send them to the waitlist.
@@ -159,6 +164,14 @@ func HandleOAuthCallback(
 		}
 
 		dashauth.SetSessionCookie(w, sessionToken, sessionTTL)
+
+		// B2: a fresh signup sees its S3 credentials exactly once. The
+		// secret exists only in this response — it is never persisted or
+		// re-displayed.
+		if apiKey != nil && renderCreds != nil {
+			renderCreds(w, apiKey.Key, apiKey.Secret)
+			return
+		}
 		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 	}
 }
@@ -174,11 +187,13 @@ type oauthUser struct {
 // 1. Existing OAuth link → return user
 // 2. Existing email match → link OAuth + return user
 // 3. No match → create new user + link OAuth
-func findOrCreateOAuthUser(ctx context.Context, authSvc *auth.AuthService, db *sql.DB, provider string, ou oauthUser) (*auth.User, error) {
+// The returned APIKey is non-nil ONLY in case 3 (a brand-new account) so
+// the caller can reveal the minted S3 credentials once (B2).
+func findOrCreateOAuthUser(ctx context.Context, authSvc *auth.AuthService, db *sql.DB, provider string, ou oauthUser) (*auth.User, *auth.APIKey, error) {
 	// Check for existing OAuth link.
 	user, err := authSvc.GetUserByOAuth(ctx, provider, ou.ID)
 	if err == nil && user != nil {
-		return user, nil
+		return user, nil, nil
 	}
 
 	// Check for existing user with same email.
@@ -186,18 +201,18 @@ func findOrCreateOAuthUser(ctx context.Context, authSvc *auth.AuthService, db *s
 	if err == nil && user != nil {
 		// Link this OAuth account to the existing user.
 		if linkErr := authSvc.LinkOAuthAccount(ctx, user.ID, provider, ou.ID, ou.Email, ou.Name); linkErr != nil {
-			return nil, fmt.Errorf("link oauth: %w", linkErr)
+			return nil, nil, fmt.Errorf("link oauth: %w", linkErr)
 		}
-		return user, nil
+		return user, nil, nil
 	}
 
 	// Create new user via OAuth.
-	user, _, err = authSvc.CreateUserFromOAuth(ctx, ou.Email, ou.Name, provider, ou.ID)
+	user, _, apiKey, err := authSvc.CreateUserFromOAuth(ctx, ou.Email, ou.Name, provider, ou.ID)
 	if err != nil {
-		return nil, fmt.Errorf("create oauth user: %w", err)
+		return nil, nil, fmt.Errorf("create oauth user: %w", err)
 	}
 
-	return user, nil
+	return user, apiKey, nil
 }
 
 // --- Google ---
