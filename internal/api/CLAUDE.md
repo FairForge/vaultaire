@@ -4,7 +4,7 @@ S3-compatible API layer. Translates S3 protocol to engine operations, handles au
 
 ## Key Files
 
-- **server.go** — Server struct, router setup, middleware chain
+- **server.go** — Server struct, router setup, middleware chain. **H-3:** `Shutdown` drains HTTP then synchronously flushes the three buffered trackers (bandwidth/CDN-analytics/access-log) — their goroutines run on `context.Background()` so the ticker's ctx.Done final-flush never fires; without this every deploy dropped up to 5s of buffered events (egress metering = billing data). Test: shutdown_flush_test.go (DB-backed; note `bandwidth_usage_daily.tenant_id` FK → seed a real tenants row, flushers swallow insert errors)
 - **s3.go** — Request parsing, auth, routing to operation handlers
 - **s3_errors.go** — Error codes, messages, and response writing
 - **not_found.go** — `isObjectMissingErr`: classifies engine errors as object-miss vs backend-failure across ALL driver error shapes (typed `engine.NotFoundError`, `os.ErrNotExist`, local-driver path errors, AWS-SDK `NoSuchKey`/`NotFound`/`StatusCode: 404` text). Used by GET/DELETE handlers so a miss on an S3-class backend maps to 404 `NoSuchKey`, never 500 (prod bug found 2026-07-31). Mirrors `engine.isBackendFailure` — keep in sync

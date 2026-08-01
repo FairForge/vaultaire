@@ -1145,8 +1145,27 @@ func (s *Server) Start() error {
 	return s.httpServer.ListenAndServe()
 }
 
+// Shutdown drains in-flight HTTP requests, then synchronously flushes the
+// buffered write trackers (H-3). The flushers' own ctx.Done final-flush never
+// runs — they are started with context.Background() and the process exits
+// right after Shutdown returns — so this is the only path that saves up to 5s
+// of buffered bandwidth (egress metering = billing data once Stripe meters
+// are on), CDN analytics, and access-log events on every deploy. Flush order
+// matters: drain first so in-flight requests can't record behind the flush.
 func (s *Server) Shutdown(ctx context.Context) error {
-	return s.httpServer.Shutdown(ctx)
+	err := s.httpServer.Shutdown(ctx)
+
+	if s.bandwidthTracker != nil {
+		s.bandwidthTracker.Flush()
+	}
+	if s.cdnAnalytics != nil {
+		s.cdnAnalytics.Flush()
+	}
+	if s.accessLogTracker != nil {
+		s.accessLogTracker.Flush()
+	}
+
+	return err
 }
 
 func (s *Server) GetRouter() chi.Router {
