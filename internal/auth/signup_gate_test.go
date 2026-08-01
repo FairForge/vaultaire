@@ -38,7 +38,7 @@ func TestCreateUserFromOAuth_BlockedWhenSignupsDisabled(t *testing.T) {
 
 	// OAuth signup funnels through CreateUserWithTenant, so it is blocked at the
 	// same chokepoint; the wrapped error still matches via errors.Is.
-	user, tenant, err := svc.CreateUserFromOAuth(
+	user, tenant, apiKey, err := svc.CreateUserFromOAuth(
 		context.Background(), "oauth@example.com", "Name", "google", "g-123")
 
 	require.Error(t, err)
@@ -46,6 +46,7 @@ func TestCreateUserFromOAuth_BlockedWhenSignupsDisabled(t *testing.T) {
 		"OAuth signup must be blocked via the chokepoint")
 	assert.Nil(t, user)
 	assert.Nil(t, tenant)
+	assert.Nil(t, apiKey)
 }
 
 func TestSignupsEnabledFunc_OverridesStaticBool(t *testing.T) {

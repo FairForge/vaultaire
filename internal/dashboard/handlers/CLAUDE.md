@@ -310,6 +310,10 @@ Three handlers for the 1.13 feature-flags page:
 
 Routes mount in router.go only when `deps.Flags != nil`. Template: `templates/admin/flags.html`. Flips are write-through — live on the next request.
 
+## OAuth (`oauth.go`)
+
+`HandleOAuthLogin(cfg, logger)` — redirects to the provider consent screen with a state cookie (10-min TTL). `HandleOAuthCallback(cfg, provider, fetchUser, authSvc, sessions, db, logger, renderCreds)` — validates state, exchanges the code, resolves the user via `findOrCreateOAuthUser` (existing OAuth link → existing email match+link → create new account), creates a session. **B2:** `findOrCreateOAuthUser` returns the minted `*auth.APIKey` ONLY for a brand-new account; the callback then calls `renderCreds(w, key, secret)` (wired in router.go to the shared `signupCredsRenderer` reveal-once credentials page) instead of redirecting — existing users still redirect to `/dashboard`. `FetchGoogleUser` / `FetchGithubUser` normalize provider user info (GitHub falls back to `/user/emails` for private emails). Tests: `oauth_test.go` (fake token endpoint via httptest, no real provider).
+
 ## Legacy Handlers
 
 Files like `dashboard.go` etc. are stubs from before Phase 0 with inline terminal-style templates. They are NOT wired into the router. Remaining phases will rewrite them.

@@ -82,6 +82,10 @@ is the **sole chokepoint** for every signup path — the dashboard `/register` f
 the JSON `POST /auth/register` API, **and** OAuth signup (`CreateUserFromOAuth`
 calls `CreateUserWithTenant` internally). Gating that one function blocks all three.
 
+`CreateUserFromOAuth` returns `(*User, *Tenant, *APIKey, error)` — the APIKey
+carries the plaintext secret so the OAuth callback can reveal it once (B2);
+it is non-nil only when a new account was actually created.
+
 - `SetSignupsEnabled(bool)` / `SignupsEnabled() bool` — toggle/read. Default **true**.
 - `SetSignupsEnabledFunc(func() bool)` — 1.13: wires a dynamic source (the
   feature-flag service) as the authority; once set it overrides the static bool
