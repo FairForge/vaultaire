@@ -837,7 +837,8 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 - Auto-detect priority in main.go is now: `iDrive > Quotaless > S3 > Geyser > local`
 - Reference: `cmd/quotaless-bench-v2/main.go`, `internal/drivers/quotaless_README.md`
 
-### 5.12.2: Cloudflare R2 Driver
+### 5.12.2: Cloudflare R2 Driver — ✖ DROPPED (2026-08-01)
+*Superseded by the tier architecture: public/CDN delivery is Cloudflare-in-front (`cdn.stored.ge`) over the existing backends, and the launch lineup (iDrive/Quotaless/Geyser/Lyve) has no R2 slot. Revisit only if a zero-egress replication target is needed post-launch.*
 **Files**: `internal/drivers/r2.go` (new), `internal/drivers/r2_test.go` (new)
 - S3-compatible driver for Cloudflare R2 ($15/TB storage, zero egress, 330 PoPs)
 - Used for public CDN buckets — when tenant toggles bucket to public, replicate to R2
@@ -1506,7 +1507,7 @@ bandwidth from us — wrap cloudSync instead of proxying bytes.*
 - **8.2 GCI** ✅ `crypto/gci.go` — Postgres-backed with a 100K-entry in-memory cache (NOT Redis/Bloom as sketched; revisit only if lookup latency bites at scale).
 - **8.3 migration** ✅ shipped as `051_chunking_dedup.sql` (not `021`), tables `global_content_index` / `tenant_chunk_refs` / `object_metadata` + `object_head_cache.is_chunked` (not `chunk_manifests`/`chunk_locations`).
 - **8.4 upload** ✅ `api/s3_engine_adapter.go handleChunkedPut` (PR #300). Hardened: chunks live in a shared `_global` container so cross-tenant/cross-bucket dedup is retrievable (PR #302); atomic manifest replacement on overwrite via `ReplaceObjectManifest` (PR #305). **Open gap → 8.4.1 (PUT still buffers the whole object).**
-- **8.5 download** ✅ `handleChunkedGet` (PR #301), then bounded per-chunk streaming + SHA-256 integrity verification (PR #303). Fetch is **sequential** — the sketch's parallel fetch + prefetch are DEFERRED.
+- **8.5 download** ✅ `handleChunkedGet` (PR #301), then bounded per-chunk streaming + SHA-256 integrity verification (PR #303); bounded prefetch shipped 2026-07-30 (PR #403, `CHUNK_GET_PREFETCH`). 8.4.1 streaming PUT shipped same sprint (PR #400).
 - **SSE interaction**: a >256 MiB object in an SSE-required context is now **rejected with 413** instead of silently stored plaintext (PR #304). The real fix (actually encrypting large objects) is **Phase 10** convergent encryption.
 - **⚠ Numbering note**: git commits labeled the streaming/integrity/overwrite work "Phase 8.6 / 8.6.1" — that was **8.5 hardening**, NOT the 8.6 below. Plan **8.6 (GCI Dashboard) ✅ DONE (#307); 8.7 (GC) ✅ DONE (#308); 8.8 (migration tool) ✅ DONE (#309). Phase 8 COMPLETE. Next in Tier-2 sequence: Phase 9 (compression).**
 - **Divergence from `.private/ADVANCED_ARCHITECTURE.md` (deliberate)**: the spec calls for 2/8/64 KB chunks + **chunk packing** (aggregate ~8KB chunks into 100MB packs, read via Range) + Bloom-filter/Redis GCI lookup. Shipped: 1/4/16 MB chunks, no packing (unneeded at 4MB avg — per-request overhead is amortized), Postgres GCI + 100K in-memory cache. **Revisit packing + small chunks only if** backup-workload dedup ratios disappoint (small chunks dedup better) — that change would also demand the Bloom/Redis lookup path. <!-- reconstructed: verified against ADVANCED_ARCHITECTURE.md §1/§3/§4 -->
@@ -1532,8 +1533,8 @@ bandwidth from us — wrap cloudSync instead of proxying bytes.*
 - On Delete: decrement ref_count → if 0, mark for garbage collection
 - Chunk manifests: object_key → ordered list of chunk hashes
 
-### 8.4.1: Streaming Chunked Upload (memory) — NOT DONE
-*Gap flagged 2026-06-04. Not urgent while chunking sits behind the 64 MB threshold and out of prod traffic; do BEFORE large-object uploads go to production.*
+### 8.4.1: Streaming Chunked Upload (memory) — ✅ DONE (WP-ChunkPerf PR #400, 2026-07-30)
+*Shipped: `handleChunkedPut` streams the body through `ChunkContext` with a bounded worker pool (`CHUNK_PUT_CONCURRENCY`, default 8) — peak memory is workers + chunker buffer (≤ ~19 chunks of ≤ 16 MB) regardless of object size; dedup decisions stay sequential in the dispatcher; measured size used, no fallthrough (5xx on failure). Original gap description follows.*
 - **Problem**: `handleChunkedPut` does `io.ReadAll` of the whole object before chunking, so peak memory scales with object size (a 2 GB upload = 2 GB RAM) — violates the "always stream, never buffer" architecture decision. (GET was fixed to bounded streaming in PR #303; PUT is the remaining half.)
 - Feed the existing `hashingBody` (TeeReader→MD5) into the chunker's streaming `Chunk(ctx, r)` API; **add context cancellation to `Chunk()`** so an aborted upload doesn't leak its goroutine.
 - **Commit to the chunked path** once the gate fires — do NOT fall through. (The current fallthrough is already broken: `ReadAll` drains the body, so the normal-path retry would store 0 bytes.) Return 5xx on failure; the client retries.
@@ -1543,7 +1544,7 @@ bandwidth from us — wrap cloudSync instead of proxying bytes.*
 ### 8.5: Dedup-Aware Download Pipeline
 - On Get: read manifest → fetch chunks (parallel) → reassemble → stream to client
 - Chunk prefetching for sequential reads
-- **DONE 2026-06-04** (PR #301 + #303): `handleChunkedGet` streams chunk-by-chunk into a bounded ~16 MB buffer, verifies each chunk's SHA-256 before serving, and serves ranges by selecting only overlapping chunks via `chunk_offset`. **Fetch is sequential — parallel fetch + prefetch above are DEFERRED** (revisit when chunked objects are large/hot enough to matter).
+- **DONE 2026-06-04** (PR #301 + #303): `handleChunkedGet` streams chunk-by-chunk into a bounded ~16 MB buffer, verifies each chunk's SHA-256 before serving, and serves ranges by selecting only overlapping chunks via `chunk_offset`. **Prefetch shipped 2026-07-30 (WP-ChunkPerf PR #403)**: up to `CHUNK_GET_PREFETCH` chunks (default 4) fetch+verify ahead of the write cursor; writer consumes strictly in order (Lyve GET 11–15s → 5.5s on 70 MB).
 
 ### 8.6: GCI Dashboard ✅ DONE (PR #307)
 - Admin: global dedup ratio, storage savings (logical vs physical) — `/admin/dedup` (`admin_dedup.go`)
