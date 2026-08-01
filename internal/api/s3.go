@@ -124,6 +124,8 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 				req.Operation = "GetBucketInventory"
 			} else if _, ok := req.Query["uploads"]; ok {
 				req.Operation = "ListMultipartUploads"
+			} else if _, ok := req.Query["versions"]; ok {
+				req.Operation = "ListObjectVersions"
 			} else {
 				req.Operation = "ListObjects"
 			}
@@ -478,6 +480,8 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		s.handleDeleteObjects(cw, r, s3Req)
 	case "ListObjects":
 		s.handleListObjects(cw, r, s3Req)
+	case "ListObjectVersions":
+		s.handleListObjectVersions(cw, r, s3Req)
 	case "ListBuckets":
 		s.handleListBuckets(cw, r, s3Req)
 	case "CreateBucket":
