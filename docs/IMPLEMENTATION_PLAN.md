@@ -1298,6 +1298,7 @@ bandwidth from us — wrap cloudSync instead of proxying bytes.*
 | 4 | **S3 lifecycle rules (XML API)** | 12.1 | Veeam/rclone/backup tooling expects `?lifecycle` for expiration; needed for the Week 4-8 B2-migration campaign. Tiering engine (#297) already does transitions — this is the S3-compatible surface. | M |
 | 5 | **No-surprises billing** — real-time spend on dashboard, hard spending caps, pre-overage alerts | TIER_STRATEGY feature #9 (extends 2.7/4.3) | Trust feature that prevents the viral "surprise bill" complaint; protects revenue quality. Most pieces (meters, alerts) exist — this is assembly. | S-M |
 | 6 | **Backup verification reports** | 14.4 | Cheap (cron over existing checksums), unique at this price point, closes deals with the exact compliance/backup crowd the launch targets. | S |
+| 6b | **Privacy quick wins** — "Built to Forget" log TTLs (purge raw s3/cdn access-log rows + IPs on a ~7d clock AFTER billing rollups + 5.14.9 customer log delivery consume them; disclose the schedule), public LE-request policy page + "what we can produce" doc (Signal-style: enumerate per tier exactly what a subpoena yields), `rclone crypt` guide (encrypted names+content over stored.ge today, zero code — doubles as LET marketing) | `.private/PRIVACY_NORTH_STAR.md` (2026-08-02) | Trust features for exactly the LET audience; each is writing or a small WP; moves protections from policy to architecture (Proton-2021 lesson: policy can be compelled, architecture can't). | S |
 | 7 | **Phase 10 remainder** — key management UI, proof-of-ownership, security testing | 10.5-10.7 | Encryption is on the pricing page; 10.7's cross-tenant isolation audit + timing hardening should land before dedup+encryption carries real customer volume. | M |
 | 8 | **Erasure coding + permafrost parity** | 11 + P2-P6 | The durability story ("survives 6 failures") and the margin story (free OneDrive parity) — but big engineering. Start ~day 45 once launch stabilizes; prerequisite for own-fleet migration. | L (multi-week) |
 | 9 | **Own-fleet testbed (R130 + MinIO driver)** | 6.6 | LAUNCH_STRATEGY says buy the R130 early ($69/mo) and prove the ops model long before the ~M9 STOR-OGD purchase. Driver is mostly config on `s3compat`. | S code + ops |
@@ -1316,12 +1317,14 @@ bandwidth from us — wrap cloudSync instead of proxying bytes.*
 ## Phase 10.0: True End-to-End Encryption (Client-Side, Zero-Knowledge)
 *Depends on: 5.14.4 (PQ encryption primitives). Separate from Phase 10 convergent encryption — this is client-side, that is server-side. Both coexist.*
 
+**DECISION 2026-08-02 (privacy north star — full doc: `.private/PRIVACY_NORTH_STAR.md`):** the SDK's DEFAULT derivation is **per-tenant convergent chunk keys** — `K_chunk = HKDF(tenant_master_key, SHA-256(chunk))`, master key never leaves the client (10.2's sketch, made client-side) — so the E2EE tier keeps intra-tenant dedup (the ratios that drive the margin model are intra-tenant: own backup history, own VM images) with true zero-knowledge (nothing server-side to steal or compel; Tarsnap/restic/borg precedent). The random-per-object-DEK mode below survives as a per-bucket "paranoid" opt-in (no dedup). Binding implementation notes: **wrapped DEKs in the encrypted manifest** (GET cannot re-derive keys from plaintext it doesn't have — each chunk ref carries its DEK wrapped under the tenant master key), **pinned zstd version/params** (convergence needs byte-identical compression; divergence degrades dedup, never corrupts), **frozen FastCDC polynomial** (0x2ADD89E3B790BB, WP-7) as a published client contract. Marketing rule: the words "zero-knowledge" wait for an external audit of the SDK (10.7 extension). Interim for encrypted-names demand: document `rclone crypt` over stored.ge (works today, zero code). Cross-tenant blind dedup = 10.8, demand-gated.
+
 ### 10.0.1: Client-Side Encryption SDK
 **Files**: `sdk/go/e2ee/` (new), `sdk/js/e2ee/` (new)
 - Go + JavaScript libraries for client-side encryption
 - ML-KEM-768 + AES-256-GCM (same primitives as 5.14.4, but runs on client)
 - Encrypt-then-upload pattern: data never leaves client unencrypted
-- Key derivation: `HKDF(user_password, salt)` → master key → per-object DEK
+- Key derivation: `HKDF(user_password, salt)` → master key → **per-tenant convergent chunk DEKs by default (2026-08-02 decision above); random per-object DEK = paranoid per-bucket opt-in**
 - Streaming encryption: `io.Reader` wrapper, AES-256-GCM with 64KB blocks
 - `x-amz-meta-e2ee-version: 1` metadata tag on encrypted objects (server can't read content but can route/store)
 - Key backup: encrypted key blob stored on server, recoverable with password
@@ -1622,6 +1625,7 @@ bandwidth from us — wrap cloudSync instead of proxying bytes.*
 - Dashboard: enable/disable E2EE per bucket
 - Key backup/recovery (show recovery phrase once)
 - Key rotation (background re-encryption job)
+- **Crypto-shredding prerequisite (2026-08-02):** server-side per-tenant chunk keys currently derive from `ENCRYPTION_MASTER_KEY` + tenant ID — re-derivable, so deleting a key row shreds nothing. Switch to **stored-random per-tenant keys** (random, wrapped by master key, deleted on account deletion) so key deletion = cryptographic erasure. Small migration + derivation change; makes GDPR Art. 17 exact. E2EE-tier data shreds trivially (client holds the only key).
 
 ### 10.6: Proof-of-Ownership Protocol
 - Client uploads Merkle tree of chunk hashes
@@ -1638,10 +1642,13 @@ bandwidth from us — wrap cloudSync instead of proxying bytes.*
 
 **Test**: Verify raw chunks on backend are unreadable ciphertext. Upload same file twice → verify dedup still works despite encryption.
 
-### 10.8: Blind Dedup — Server-Aided Convergent Encryption (OPRF / DupLESS-style) <!-- added 2026-07-16: bridges 10.0 and 10.3 — pure E2EE (random keys) kills dedup, server-side convergent means the hub sees plaintext; this gives both -->
+### 10.8: Blind Dedup — Server-Aided Convergent Encryption (OPRF / DupLESS-style) — ⏸ DEMAND-GATED (decided 2026-08-02)
 *Depends on: 10.3 (convergent scheme), 10.0.1 (client-side SDK), 10.6 (proof-of-ownership — mandatory at cross-tenant scope), WP-7 (tenant-scoped encrypted dedup stays the safe default this opts out of).*
 
-**Goal**: cross-tenant dedup where the server NEVER sees plaintext — client-side chunking + encryption, chunk keys derived via an oblivious PRF against the hub, so identical chunks converge to identical ciphertext across tenants while the hub learns nothing about content and dictionary/confirmation attacks are rate-limit-bound (DupLESS, Bellare et al. 2013).
+**⏸ DECISION 2026-08-02 (see `.private/PRIVACY_NORTH_STAR.md` for full rationale): DO NOT BUILD unless the measurement trigger fires.** The E2EE tier ships with **per-tenant convergent keys derived client-side** (10.2's `HKDF(tenant_master_key, chunk_hash)` as the 10.0 SDK default) — strictly stronger zero-knowledge than OPRF (no server-held secret to steal/compel; OPRF's `k` theft is silent and retroactively breaks confirmation-resistance for all tenants), no new critical-path service, and the WP-7 tenant-scoped GCI machinery already shipped. The dedup OPRF would add back is only *cross-tenant* convergence on encrypted data — but the ratio drivers in the margin model (backups 10–50x, VM images 5–15x) are intra-tenant and fully preserved. OPRF's security boundary is also sybil-attackable rate limiting (N free signups = N×budget dictionary oracle), i.e. an abuse arms race, not cryptography. Precedent for the chosen scheme: Tarsnap (2008–present), restic, borg.
+**Measurement trigger**: instrument the plaintext GCI for the fraction of dedup hits that are cross-tenant vs intra-tenant (that fraction is the empirical ceiling on what blind dedup could recover). Build 10.8 only if it is large AND E2EE-tier margins need it.
+
+**Goal (if triggered)**: cross-tenant dedup where the server NEVER sees plaintext — client-side chunking + encryption, chunk keys derived via an oblivious PRF against the hub, so identical chunks converge to identical ciphertext across tenants while the hub learns nothing about content and dictionary/confirmation attacks are rate-limit-bound (DupLESS, Bellare et al. 2013).
 
 **Files**: `internal/crypto/oprf.go` (new), `sdk/go/e2ee/blinddedup.go` (new), extension to `internal/crypto/chunk_encryption.go`
 
