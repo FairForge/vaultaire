@@ -55,6 +55,12 @@ go test ./tests/load/ -v -run TestLoad_ConcurrentPut -timeout 5m
 
 ## Results
 
+**Production run — 2026-08-03, slc-vaultaire-01 origin (launch sequence 3.1/3.2): ALL GATES PASS.**
+See `bench-results/LOADTEST-2026-08-03.md` for the full table, the RSS
+transient analysis (6.2 GB peak during 50 concurrent multipart completes —
+per-upload chunk buffers × concurrency, released ~5 min later; the #400
+deferred global memory cap, not a leak), and rerun instructions.
+
 **First run — 2026-06-02, local server (macOS, local-disk backend, PostgreSQL).**
 The run surfaced three production bugs (all fixed in the same change) before going green:
 

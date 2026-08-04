@@ -1,0 +1,22 @@
+[Unit]
+Description=Alertmanager to ntfy.sh bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# /etc/default/ntfy-bridge sets NTFY_TOPIC (and optionally NTFY_BASE,
+# ALERT_SERVER_NAME). It is not in the repo — the topic name is the only
+# access control on a public ntfy.sh topic.
+EnvironmentFile=/etc/default/ntfy-bridge
+ExecStart=/usr/bin/python3 /opt/vaultaire/monitoring/ntfy-bridge.py
+Restart=always
+RestartSec=5
+DynamicUser=yes
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

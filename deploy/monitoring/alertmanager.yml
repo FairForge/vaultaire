@@ -1,0 +1,22 @@
+# Vaultaire production Alertmanager config (slc-vaultaire-01).
+# Lives at /etc/prometheus/alertmanager.yml (Debian package path).
+# Delivery: webhook -> ntfy-bridge (127.0.0.1:9095) -> ntfy.sh push.
+# Installed 2026-08-03 (launch sequence 5.2). Replaces the Debian sample config.
+
+route:
+  receiver: ntfy
+  group_by: ['alertname']
+  group_wait: 10s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  - name: ntfy
+    webhook_configs:
+      - url: 'http://127.0.0.1:9095/'
+        send_resolved: true
+
+inhibit_rules:
+  - source_matchers: [severity="critical"]
+    target_matchers: [severity="warning"]
+    equal: [alertname]
