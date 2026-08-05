@@ -98,6 +98,14 @@ func (s *Server) handleRestoreObject(w http.ResponseWriter, r *http.Request, req
 		switch {
 		case errors.Is(restoreErr, engine.ErrRestoreAlreadyInProgress):
 			WriteS3Error(w, ErrRestoreAlreadyInProgress, r.URL.Path, generateRequestID())
+		case errors.Is(restoreErr, engine.ErrArchived):
+			// Vail answers InvalidObjectState here too — but for RestoreObject
+			// it means the OPPOSITE state: the object is fresh on the staging
+			// disk and directly readable, so there is nothing to recall
+			// (found live 2026-08-04; used to surface as a 500). AWS parity:
+			// 403 InvalidObjectState, same as restoring a STANDARD object.
+			WriteS3ErrorWithContext(w, ErrInvalidObjectState, r.URL.Path, generateRequestID(),
+				WithSuggestion("This object is directly readable right now — no restore needed. Objects only need a restore after they migrate to tape (~13 days after upload)."))
 		case isObjectMissingErr(restoreErr):
 			WriteS3Error(w, ErrNoSuchKey, r.URL.Path, generateRequestID())
 		default:
