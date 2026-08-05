@@ -203,6 +203,8 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 			req.Operation = "InitiateMultipartUpload"
 		} else if _, ok := req.Query["uploadId"]; ok {
 			req.Operation = "CompleteMultipartUpload"
+		} else if _, ok := req.Query["restore"]; ok {
+			req.Operation = "RestoreObject"
 		} else {
 			req.Operation = "PostObject"
 		}
@@ -534,6 +536,8 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		s.handlePutBucketInventory(cw, r, s3Req)
 	case "DeleteBucketInventory":
 		s.handleDeleteBucketInventory(cw, r, s3Req)
+	case "RestoreObject":
+		s.handleRestoreObject(cw, r, s3Req)
 	case "GetObjectTagging":
 		s.handleGetObjectTagging(cw, r, s3Req)
 	case "PutObjectTagging":
@@ -660,6 +664,25 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	}
 	w.Header().Set("x-amz-storage-class", engine.BackendToStorageClass(backendName))
 	w.Header().Set("x-amz-request-id", generateRequestID())
+	// V18.2: archive-class objects carry live restore state so Glacier restore
+	// pollers (rclone, aws-cli s3api head-object) work unmodified. This is the
+	// one deliberate exception to "HEAD never touches the backend" — the
+	// x-amz-restore value only exists on the backend, and only GLACIER-class
+	// objects pay the round trip. Failure just omits the header (HEAD itself
+	// must stay reliable).
+	if engine.BackendToStorageClass(backendName) == "GLACIER" && s.engine != nil {
+		if drv, exists := s.engine.GetDriver(backendName); exists {
+			if restorer, isRestorer := drv.(engine.Restorer); isRestorer {
+				if st, stErr := restorer.RestoreStatus(r.Context(), t.NamespaceContainer(req.Bucket), req.Object); stErr == nil {
+					if st.Restore != "" {
+						w.Header().Set("x-amz-restore", st.Restore)
+					}
+				} else {
+					s.logger.Debug("HEAD: restore status unavailable", zap.Error(stErr))
+				}
+			}
+		}
+	}
 	if encAlgo == crypto.SSECAlgorithm {
 		if !crypto.HasSSECHeaders(r) {
 			WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
