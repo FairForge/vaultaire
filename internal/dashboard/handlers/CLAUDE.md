@@ -22,6 +22,8 @@ Three handlers:
 
 `previewTypeFromContentType(ct)` maps content types to preview categories: `image/*` → "image", `video/*` → "video", `audio/*` → "audio", `text/*`/json/xml/js → "text", everything else → "".
 
+**Archive restore (V18.2, `bucket_restore.go`)**: the object browser marks GLACIER-backed objects (`ObjectRow.IsArchived`, from `backend_name` via `engine.BackendToStorageClass`; the `Archive` column renders only when the page has archived objects — `HasArchived`). Each archived row gets a Restore button (POST `/dashboard/buckets/{name}/restore`, form: key + optional prefix, Days=2) handled by `HandleRestoreObject(eng, db, logger)` — resolves the backend from `object_head_cache`, asserts `engine.Restorer`, flashes success/already-running/error — and a live status span htmx-loaded from `HandleObjectRestoreStatus` (GET `/dashboard/buckets/{name}/restore-status?key=`) which maps the raw `x-amz-restore` value to "on tape" / "restoring…" / "restored ✓". Both handlers set `common.TenantIDKey` on the driver ctx so Geyser keys build as `t-{tenantID}/...`.
+
 Bucket name validation: `^[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9]$` + path traversal check.
 
 Shared helpers in `context.go`: `sessionData(sd, page)` builds the base template data map, `formatBytes`, `relativeTime`.

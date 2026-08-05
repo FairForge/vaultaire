@@ -46,9 +46,12 @@ Measured 2026-07-29 against the prod bucket:
 - Server-side lifecycle auto-aborts multipart uploads older than 7 days (set by
   Geyser during provisioning — we cannot modify lifecycle rules via S3).
 
-**Engine gap:** nothing in Vaultaire handles `InvalidObjectState` today, so any
-GET on data past the staging window fails. That is plan item **V18.2**, the
-first post-launch WP.
+**Engine gap CLOSED (V18.2 minimum recall slice, 2026-08-04):** `geyser.go`
+maps `InvalidObjectState` → typed `engine.ErrArchived` (API answers 403
+`InvalidObjectState`, Glacier wire semantics), `RestoreObject` passthrough is
+live at `POST ?restore`, HEAD carries `x-amz-restore`, and the dashboard
+object browser has a Restore button + live status. The full V18.2
+(rehydration worker, bulk thaw, webhooks) remains the first post-launch WP.
 
 ## Three API layers
 

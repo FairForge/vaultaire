@@ -14,6 +14,7 @@ import (
 
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/FairForge/vaultaire/internal/drivers"
+	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/usage"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
@@ -41,6 +42,10 @@ type ObjectRow struct {
 	LastModifiedFmt string
 	PreviewType     string
 	CDNURL          string
+	// IsArchived: the object lives on an archive-class backend (Geyser tape)
+	// and may need a restore before it is readable (V18.2). Drives the
+	// Restore button + live status fragment in the object browser.
+	IsArchived bool
 }
 
 // PrefixRow is a common-prefix "folder" in the bucket browser.
@@ -311,7 +316,7 @@ func previewTypeFromContentType(ct string) string {
 
 func populateBucketObjects(ctx context.Context, db *sql.DB, tenantID, bucket, prefix, cdnBase string, data map[string]any) {
 	// Query all objects matching the prefix.
-	query := `SELECT object_key, size_bytes, content_type, updated_at
+	query := `SELECT object_key, size_bytes, content_type, updated_at, COALESCE(backend_name, '')
 		 FROM object_head_cache
 		 WHERE tenant_id = $1 AND bucket = $2`
 	args := []any{tenantID, bucket}
@@ -338,11 +343,12 @@ func populateBucketObjects(ctx context.Context, db *sql.DB, tenantID, bucket, pr
 	var totalSize int64
 	var totalCount int
 
+	hasArchived := false
 	for rows.Next() {
-		var key, contentType string
+		var key, contentType, backendName string
 		var size int64
 		var lastMod time.Time
-		if err := rows.Scan(&key, &size, &contentType, &lastMod); err != nil {
+		if err := rows.Scan(&key, &size, &contentType, &lastMod, &backendName); err != nil {
 			continue
 		}
 		totalCount++
@@ -367,6 +373,10 @@ func populateBucketObjects(ctx context.Context, db *sql.DB, tenantID, bucket, pr
 			SizeFmt:         formatBytes(size),
 			LastModifiedFmt: relativeTime(lastMod),
 			PreviewType:     previewTypeFromContentType(contentType),
+			IsArchived:      engine.BackendToStorageClass(backendName) == "GLACIER",
+		}
+		if obj.IsArchived {
+			hasArchived = true
 		}
 		if cdnBase != "" {
 			obj.CDNURL = cdnBase + "/" + key
@@ -389,4 +399,5 @@ func populateBucketObjects(ctx context.Context, db *sql.DB, tenantID, bucket, pr
 	data["TotalSizeFmt"] = formatBytes(totalSize)
 	data["Objects"] = objects
 	data["Prefixes"] = prefixes
+	data["HasArchived"] = hasArchived
 }

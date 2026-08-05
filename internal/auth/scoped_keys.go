@@ -58,6 +58,7 @@ var ValidPermissions = map[string]bool{
 	"PutObjectLegalHold":         true,
 	"GetObjectLegalHold":         true,
 	"PostObject":                 true,
+	"RestoreObject":              true,
 }
 
 // CheckPermission returns true if keyPerms authorizes the given operation.

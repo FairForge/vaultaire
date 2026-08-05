@@ -338,6 +338,13 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		if errors.Is(err, engine.ErrAllBackendsUnavailable) {
 			w.Header().Set("Retry-After", "30")
 			WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
+		} else if errors.Is(err, engine.ErrArchived) {
+			// Archive-tier object past the staging window (V18.2): Glacier
+			// wire semantics — 403 InvalidObjectState, never a raw 500.
+			// rclone/aws-cli recognize this and drive their restore flows.
+			w.Header().Set("x-amz-storage-class", "GLACIER")
+			WriteS3ErrorWithContext(w, ErrInvalidObjectState, r.URL.Path, generateRequestID(),
+				WithSuggestion("This object is archived on tape. Request a restore (POST ?restore or the dashboard Restore button), then retry — restores typically begin within minutes."))
 		} else if isObjectMissingErr(err) {
 			reqID := generateRequestID()
 			if suggestion := keySuggestion(r.Context(), a.db, t.ID, bucket, artifact); suggestion != "" {

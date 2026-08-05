@@ -47,4 +47,16 @@ var (
 	// stores a TRUNCATED object as success. FailoverManager.Execute stops
 	// iterating when it sees this sentinel.
 	ErrNoFailover = fmt.Errorf("request body already consumed — failover unavailable")
+
+	// ErrArchived: the object exists but is in archive storage (tape) and must
+	// be restored before it can be read — Geyser/Vail returns InvalidObjectState
+	// for GETs past the staging window. This is a definitive per-object state,
+	// not a backend failure: FailoverManager.Execute stops iterating on it
+	// (trying other backends would mask it as NotFound), and it never trips a
+	// circuit breaker. The API layer maps it to 403 InvalidObjectState. (V18.2)
+	ErrArchived = fmt.Errorf("object is archived — restore it before access")
+
+	// ErrRestoreAlreadyInProgress: a RestoreObject was issued for an object
+	// whose recall is already running. API layer maps it to 409.
+	ErrRestoreAlreadyInProgress = fmt.Errorf("object restore already in progress")
 )

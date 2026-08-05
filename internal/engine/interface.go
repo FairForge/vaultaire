@@ -53,6 +53,33 @@ type RangeGetter interface {
 	GetRange(ctx context.Context, container, artifact string, offset, length int64) (io.ReadCloser, error)
 }
 
+// Restorer is an optional interface for archive-class drivers (Geyser tape)
+// whose objects can be evicted to cold storage and need an explicit recall
+// before Get succeeds (V18.2 minimum recall slice). Wire semantics mirror
+// AWS Glacier so rclone/aws-cli restore workflows work unmodified.
+type Restorer interface {
+	// RestoreObject requests a recall of an archived object; the restored
+	// copy stays readable for the given number of days. Returns
+	// ErrRestoreAlreadyInProgress when a recall is already running.
+	RestoreObject(ctx context.Context, container, artifact string, days int32) error
+	// RestoreStatus reports the backend's view of the object's restore state
+	// (the raw x-amz-restore header value, empty when no restore was
+	// requested) and its storage class.
+	RestoreStatus(ctx context.Context, container, artifact string) (*RestoreStatus, error)
+}
+
+// RestoreStatus is a Restorer's per-object recall state.
+type RestoreStatus struct {
+	// Restore is the raw x-amz-restore value from the backend, e.g.
+	// `ongoing-request="true"` or `ongoing-request="false", expiry-date="..."`.
+	// Empty when the object is archived with no restore requested (matching
+	// AWS, where the header is absent in that state).
+	Restore string
+	// StorageClass is the backend-reported class (e.g. "GLACIER"; empty for
+	// objects still on the staging disk).
+	StorageClass string
+}
+
 // ResultSet for query operations (future use)
 type ResultSet interface {
 	Next() bool

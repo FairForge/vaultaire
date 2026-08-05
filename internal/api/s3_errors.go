@@ -73,6 +73,8 @@ const (
 	ErrInvalidBucketState                = "InvalidBucketState"
 	ErrInvalidLocationConstraint         = "InvalidLocationConstraint"
 	ErrInvalidTag                        = "InvalidTag"
+	ErrInvalidObjectState                = "InvalidObjectState"
+	ErrRestoreAlreadyInProgress          = "RestoreAlreadyInProgress"
 )
 
 // Error messages
@@ -116,6 +118,8 @@ var errorMessages = map[string]string{
 	ErrInvalidBucketState:                "The request is not valid for the current state of the bucket.",
 	ErrInvalidLocationConstraint:         "The specified location constraint is not valid.",
 	ErrInvalidTag:                        "The tag provided was not valid.",
+	ErrInvalidObjectState:                "The operation is not valid for the object's storage class",
+	ErrRestoreAlreadyInProgress:          "Object restore is already in progress",
 }
 
 // HTTP status codes for errors
@@ -159,6 +163,8 @@ var errorStatusCodes = map[string]int{
 	ErrInvalidBucketState:                http.StatusConflict,
 	ErrInvalidLocationConstraint:         http.StatusBadRequest,
 	ErrInvalidTag:                        http.StatusBadRequest,
+	ErrInvalidObjectState:                http.StatusForbidden,
+	ErrRestoreAlreadyInProgress:          http.StatusConflict,
 }
 
 // WriteS3Error writes an S3-compatible error response

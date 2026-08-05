@@ -13,6 +13,7 @@ package drivers
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -25,6 +26,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 	"go.uber.org/zap"
 )
 
@@ -107,6 +110,23 @@ func (d *GeyserDriver) buildKey(tenantID, container, artifact string) string {
 	return fmt.Sprintf("t-%s/%s/%s", tenantID, container, artifact)
 }
 
+// geyserWireErr maps Vail's Glacier-state error codes onto the engine's typed
+// sentinels so the API layer can answer 403 InvalidObjectState / 409 instead
+// of a raw 500 (V18.2). Objects past the ~13-day staging window are
+// StorageClass GLACIER and refuse direct GET with InvalidObjectState.
+func geyserWireErr(err error) error {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.ErrorCode() {
+		case "InvalidObjectState":
+			return fmt.Errorf("%w (%s)", engine.ErrArchived, apiErr.ErrorMessage())
+		case "RestoreAlreadyInProgress":
+			return fmt.Errorf("%w (%s)", engine.ErrRestoreAlreadyInProgress, apiErr.ErrorMessage())
+		}
+	}
+	return err
+}
+
 func (d *GeyserDriver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
 	tenantID := d.getTenantID(ctx)
 	key := d.buildKey(tenantID, container, artifact)
@@ -116,7 +136,7 @@ func (d *GeyserDriver) Get(ctx context.Context, container, artifact string) (io.
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("geyser get %s: %w", key, err)
+		return nil, fmt.Errorf("geyser get %s: %w", key, geyserWireErr(err))
 	}
 	return resp.Body, nil
 }
@@ -140,10 +160,65 @@ func (d *GeyserDriver) GetRange(ctx context.Context, container, artifact string,
 
 	resp, err := d.client.GetObject(ctx, input)
 	if err != nil {
-		return nil, fmt.Errorf("geyser get range %s: %w", key, err)
+		return nil, fmt.Errorf("geyser get range %s: %w", key, geyserWireErr(err))
 	}
 	return resp.Body, nil
 }
+
+// RestoreObject requests a tape recall (V18.2 minimum slice). Implements
+// engine.Restorer. Measured on the live library: recall <3 min idle,
+// bulk-friendly; re-restoring extends the staging expiry.
+func (d *GeyserDriver) RestoreObject(ctx context.Context, container, artifact string, days int32) error {
+	tenantID := d.getTenantID(ctx)
+	key := d.buildKey(tenantID, container, artifact)
+	if days < 1 {
+		days = 1
+	}
+
+	d.logger.Info("geyser restore requested",
+		zap.String("tenant_id", tenantID),
+		zap.String("key", key),
+		zap.Int32("days", days),
+	)
+
+	_, err := d.client.RestoreObject(ctx, &s3.RestoreObjectInput{
+		Bucket: aws.String(d.bucket),
+		Key:    aws.String(key),
+		RestoreRequest: &types.RestoreRequest{
+			Days: aws.Int32(days),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("geyser restore %s: %w", key, geyserWireErr(err))
+	}
+	return nil
+}
+
+// RestoreStatus reports the object's recall state via HEAD (which always
+// works on archived objects — metadata stays intact). Implements
+// engine.Restorer. The raw x-amz-restore value is passed through so our own
+// HEAD responses are wire-identical to AWS Glacier.
+func (d *GeyserDriver) RestoreStatus(ctx context.Context, container, artifact string) (*engine.RestoreStatus, error) {
+	tenantID := d.getTenantID(ctx)
+	key := d.buildKey(tenantID, container, artifact)
+
+	resp, err := d.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(d.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("geyser restore status %s: %w", key, geyserWireErr(err))
+	}
+
+	st := &engine.RestoreStatus{StorageClass: string(resp.StorageClass)}
+	if resp.Restore != nil {
+		st.Restore = *resp.Restore
+	}
+	return st, nil
+}
+
+// Compile-time check: GeyserDriver is the archive tier's Restorer.
+var _ engine.Restorer = (*GeyserDriver)(nil)
 
 func (d *GeyserDriver) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...engine.PutOption) error {
 	tenantID := d.getTenantID(ctx)

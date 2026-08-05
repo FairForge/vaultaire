@@ -163,6 +163,8 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		dr.Get("/buckets", handlers.HandleBuckets(bucketsTmpl, deps.DB, deps.DataPath, deps.Logger))
 		dr.Post("/buckets", handlers.HandleCreateBucket(bucketsTmpl, deps.DB, deps.DataPath, deps.Logger))
 		dr.Get("/buckets/{name}", handlers.HandleBucketObjects(bucketObjsTmpl, deps.DB, deps.Logger))
+		dr.Post("/buckets/{name}/restore", handlers.HandleRestoreObject(deps.Engine, deps.DB, deps.Logger))
+		dr.Get("/buckets/{name}/restore-status", handlers.HandleObjectRestoreStatus(deps.Engine, deps.DB, deps.Logger))
 		dr.Get("/buckets/{name}/settings", handlers.HandleBucketSettings(bucketSettingsTmpl, deps.DB, deps.Logger))
 		dr.Post("/buckets/{name}/settings", handlers.HandleUpdateBucketSettings(bucketSettingsTmpl, deps.DB, deps.Logger))
 
