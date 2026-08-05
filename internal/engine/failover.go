@@ -130,8 +130,10 @@ func isBackendFailure(err error) bool {
 	if errors.As(err, &nf) {
 		return false
 	}
-	// Other client-level engine errors.
-	if errors.Is(err, ErrQuotaExceeded) || errors.Is(err, ErrInvalidInput) {
+	// Other client-level engine errors. Archived-on-tape is an object state,
+	// not a backend health signal (V18.2).
+	if errors.Is(err, ErrQuotaExceeded) || errors.Is(err, ErrInvalidInput) ||
+		errors.Is(err, ErrArchived) {
 		return false
 	}
 	var perr PermissionError
@@ -209,6 +211,13 @@ func (f *FailoverManager) Execute(ctx context.Context, backends []string, fn fun
 			// validate Content-Length. Stop here; the client retries the
 			// whole request.
 			if errors.Is(err, ErrNoFailover) {
+				break
+			}
+			// Archived is definitive: the object EXISTS on this backend but
+			// needs a restore. Trying other backends would fail NotFound and
+			// mask the archived state as a 404 (or 500). Stop here so the API
+			// layer can answer 403 InvalidObjectState. (V18.2)
+			if errors.Is(err, ErrArchived) {
 				break
 			}
 			continue
