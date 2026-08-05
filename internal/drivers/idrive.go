@@ -65,7 +65,10 @@ func NewIDriveDriver(accessKey, secretKey, endpoint, region string, logger *zap.
 		config.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(accessKey, secretKey, ""),
 		),
-		config.WithHTTPClient(TunedHTTPClient()),
+		// HTTP/1.1 pinned (2026-08-05 ALPN audit): iDrive gateways refuse h2
+		// at ALPN today — no-op now, insurance against a silent vendor flip
+		// onto h2 single-connection multiplexing (see lyve.go / geyser.go).
+		config.WithHTTPClient(TunedHTTPClient(WithHTTP1Only())),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("idrive: load aws config: %w", err)
