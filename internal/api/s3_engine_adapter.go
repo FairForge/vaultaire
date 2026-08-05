@@ -644,16 +644,20 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	}
 	// Resolve the storage class once: explicit x-amz-storage-class header wins,
 	// then the bucket's tier_preference. Needed this early because a RESILIENT
-	// resolution must keep the object on the PLAIN path — chunk blobs always
-	// land on the engine's primary backend (the GCI's `_global` container is
-	// shared across tenants and tiers), so a chunked object would silently
-	// break the resilient tier's placement promise. Whole objects on Lyve are
-	// fine: the driver multiparts at 214 MB/s.
+	// or archive-class (GLACIER/DEEP_ARCHIVE) resolution must keep the object
+	// on the PLAIN path — chunk blobs always land on the engine's primary
+	// backend (the GCI's `_global` container is shared across tenants and
+	// tiers), so a chunked object would silently break the tier's placement
+	// promise. For archive that meant >64 MB objects got hot-tier COGS on
+	// iDrive while sold as "on tape". Whole objects on Lyve/Geyser are fine
+	// (Lyve multiparts at 214 MB/s, Geyser ingests 227 MB/s sustained).
+	// Deliberate trade: resilient/archive objects skip dedup.
 	resolvedStorageClass := r.Header.Get("x-amz-storage-class")
 	if resolvedStorageClass == "" {
 		resolvedStorageClass = bucketTierStorageClass(r.Context(), a.db, t.ID, bucket)
 	}
-	chunkingDisabledByTier := resolvedStorageClass == "RESILIENT"
+	chunkingDisabledByTier := resolvedStorageClass == "RESILIENT" ||
+		resolvedStorageClass == "GLACIER" || resolvedStorageClass == "DEEP_ARCHIVE"
 	willChunkEncrypt := a.gci != nil && a.chunkEncSvc != nil &&
 		metadataSize > chunkThreshold && !chunkingDisabledByVersioning && !chunkingDisabledByTier
 
