@@ -46,7 +46,13 @@ func NewLyveDriver(accessKey, secretKey, tenantID, region string, logger *zap.Lo
 			credentials.NewStaticCredentialsProvider(accessKey, secretKey, ""),
 		),
 		config.WithRegion(region),
-		config.WithHTTPClient(TunedHTTPClient()),
+		// HTTP/1.1 pinned (2026-08-05 ALPN audit): every Lyve gateway
+		// currently REFUSES h2 at ALPN, so this changes nothing today — it
+		// guards against a vendor-side gateway upgrade silently flipping us
+		// onto h2, where Go multiplexes all concurrent transfers onto one
+		// TCP connection (measured 9× ingest collapse on Geyser, the one
+		// gateway that does speak h2).
+		config.WithHTTPClient(TunedHTTPClient(WithHTTP1Only())),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
