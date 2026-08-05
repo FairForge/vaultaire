@@ -84,6 +84,10 @@ func HandleRestoreObject(eng *engine.CoreEngine, db *sql.DB, logger *zap.Logger)
 		if restoreErr := restorer.RestoreObject(ctx, archiveContainer(sd.TenantID, bucket), key, dashboardRestoreDays); restoreErr != nil {
 			if errors.Is(restoreErr, engine.ErrRestoreAlreadyInProgress) {
 				middleware.SetFlash(w, "success", "A restore for this object is already running — check back in a few minutes.")
+			} else if errors.Is(restoreErr, engine.ErrArchived) {
+				// Vail's InvalidObjectState on a RestoreObject means the object
+				// is still on the staging disk — readable as-is, nothing to recall.
+				middleware.SetFlash(w, "success", "This object is directly downloadable right now — no restore needed.")
 			} else {
 				logger.Error("dashboard restore failed",
 					zap.Error(restoreErr), zap.String("bucket", bucket), zap.String("key", key))

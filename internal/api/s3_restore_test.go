@@ -26,6 +26,7 @@ type stubArchiveDriver struct {
 	data         map[string][]byte
 	archived     bool
 	inProgress   bool
+	staged       bool // fresh on staging disk: Vail refuses restore with InvalidObjectState
 	restoreCalls int
 	lastDays     int32
 	restoreState string
@@ -86,6 +87,13 @@ func (d *stubArchiveDriver) RestoreObject(_ context.Context, _, _ string, days i
 	defer d.mu.Unlock()
 	if d.inProgress {
 		return fmt.Errorf("geyser restore: %w", engine.ErrRestoreAlreadyInProgress)
+	}
+	if d.staged {
+		// geyserWireErr maps Vail's InvalidObjectState onto ErrArchived
+		// regardless of operation — for RestoreObject it means "restore is
+		// not allowed for the object's current storage class" (fresh object
+		// still on the staging disk, found live 2026-08-04).
+		return fmt.Errorf("geyser restore: %w (Restore is not allowed for the object's current storage class)", engine.ErrArchived)
 	}
 	d.restoreCalls++
 	d.lastDays = days
@@ -187,6 +195,25 @@ func TestRestoreObject_AlreadyInProgress409(t *testing.T) {
 
 	assert.Equal(t, http.StatusConflict, w.Code)
 	assert.Contains(t, w.Body.String(), "<Code>RestoreAlreadyInProgress</Code>")
+}
+
+// TestRestoreObject_StagedObject403: Vail refuses to restore a fresh object
+// still on its staging disk (it is directly readable — nothing to recall)
+// with InvalidObjectState. Found live 2026-08-04: this surfaced as a 500.
+// AWS parity: 403 InvalidObjectState, matching restore-of-STANDARD.
+func TestRestoreObject_StagedObject403(t *testing.T) {
+	f, stub, s := restoreFixture(t)
+	putArchiveObject(t, f, "fresh.bin", generateTestData(512))
+	stub.staged = true
+
+	req := httptest.NewRequest("POST", "/test-bucket/fresh.bin?restore", nil)
+	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	w := httptest.NewRecorder()
+	s.handleRestoreObject(w, req, &S3Request{Bucket: "test-bucket", Object: "fresh.bin", TenantID: f.tenantID})
+
+	assert.Equal(t, http.StatusForbidden, w.Code,
+		"restore of a staged (directly readable) object must be 403, not 500")
+	assert.Contains(t, w.Body.String(), "<Code>InvalidObjectState</Code>")
 }
 
 // TestRestoreObject_HotBackend403: restore on a hot-tier object is
