@@ -3,10 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>stored.ge — S3-compatible storage that optimizes itself. $3.99/TB, archive from $1/TB</title>
-<meta name="description" content="S3-compatible object storage with automatic tiering across hot storage and tape. $3.99/TB, tape-backed archive from $1/TB. No API fees, 3× free egress, no minimum duration.">
+<title>stored.ge — S3-compatible storage that optimizes itself. $3.99/TB, tape archive $2/TB</title>
+<meta name="description" content="S3-compatible object storage with automatic tiering across hot storage and tape. $3.99/TB, tape-backed archive at $2/TB. No API fees, 3× free egress, no retrieval fees.">
 <meta property="og:title" content="stored.ge — S3-compatible storage that optimizes itself">
-<meta property="og:description" content="One endpoint. Your data auto-tiers across hot storage and tape — $3.99/TB, archive from $1/TB. No API fees.">
+<meta property="og:description" content="One endpoint. Your data auto-tiers across hot storage and tape — $3.99/TB, archive at $2/TB. No API fees.">
 <meta property="og:url" content="https://stored.ge">
 <meta name="theme-color" content="#191919" media="(prefers-color-scheme: dark)">
 <meta name="theme-color" content="#f5f1e9" media="(prefers-color-scheme: light)">
@@ -653,13 +653,13 @@
             {{if .SignupsOpen}}
             <p class="hero-flag"><span class="dot"></span>Live — 5 GB free, no credit card</p>
             {{else}}
-            <p class="hero-flag">Launching <strong>August 31, 2026</strong></p>
+            <p class="hero-flag">Launching <strong>October 31, 2026</strong></p>
             {{end}}
             <h1>S3-compatible storage that <em>optimizes itself.</em></h1>
             <p class="sub">
                 One endpoint. Your data automatically tiers across hot storage and tape —
-                <strong>$3.99/TB</strong>, archive from <strong>$1/TB</strong>.
-                No API fees. 3× free egress. No minimum storage duration.
+                <strong>$3.99/TB</strong>, tape archive at <strong>$2/TB</strong>.
+                No API fees. 3× free egress. No retrieval fees.
             </p>
             <div class="hero-cta">
                 {{if .SignupsOpen}}
@@ -739,12 +739,12 @@ Elapsed time:      3m29.5s</span>
                 <div class="tier-price">$3.99<small>/TB/mo annual &middot; $4.99 monthly</small></div>
             </div>
             <div class="tier">
-                <div class="tier-name"><h3>Vault packs</h3></div>
+                <div class="tier-name"><h3>Vault</h3></div>
                 <div class="tier-body">
-                    <p>Tape-backed archive in prepaid packs. Glacier pricing with gigabit ingest — and Vault packs bill on their own, so if you ever need to cut costs, the archive keeps running.</p>
+                    <p>Tape-backed archive, any size. Glacier economics with restores that start in minutes — and Vault bills on its own, so if you ever need to cut costs, the archive keeps running.</p>
                     <p class="tier-for"><b>for</b> 3-2-1 backups &middot; compliance &amp; WORM &middot; homelab archives &middot; datahoarders</p>
                 </div>
-                <div class="tier-price">from $1<small>/TB/mo</small></div>
+                <div class="tier-price">$2<small>/TB/mo annual &middot; $2.55 monthly</small></div>
             </div>
         </div>
         <p class="tiers-note">Not sure? Start on Standard — it self-optimizes, and you can move any bucket up or down later.</p>
@@ -1147,7 +1147,7 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
         <div class="section-head">
             <p class="kicker"><b>05</b>Pricing</p>
             <h2>Pay per TB. That's the whole model.</h2>
-            <p class="lede">No API fees, no request classes, no retrieval surcharges, no minimum storage duration.</p>
+            <p class="lede">No API fees, no request classes, no retrieval surcharges — and the archive tier's limits are printed on this page, not in a PDF.</p>
         </div>
 
         <div class="calc">
@@ -1164,15 +1164,15 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
         <div class="plans">
             <div class="plan">
                 <p class="plan-kicker">Vault</p>
-                <div class="price">from $1<small>/TB/mo</small></div>
-                <p class="alt-price">prepaid packs, 1–18 TB</p>
+                <div class="price">$2<small>/TB/mo</small></div>
+                <p class="alt-price">annual &middot; $2.55 monthly &middot; any size</p>
                 <ul>
                     <li>Tape-backed archive</li>
-                    <li>Full-speed S3 ingest</li>
-                    <li>1× free egress</li>
+                    <li>Restores start in minutes</li>
+                    <li>1× free restore allowance every month</li>
                     <li>Billed separately — survives downgrades</li>
                 </ul>
-                <div class="plan-cta"><a class="btn btn-ghost" href="#packs">View packs</a></div>
+                <div class="plan-cta"><a class="btn btn-ghost" href="#packs">Vault details</a></div>
             </div>
             <div class="plan pop">
                 <p class="plan-kicker">Standard — most popular</p>
@@ -1209,20 +1209,18 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
         </div>
 
         <div class="packs" id="packs">
-            <p class="packs-title">Vault packs — fixed-price, tape-backed archive</p>
+            <p class="packs-title">Vault — tape-backed archive, any size</p>
             <table>
-                <tr><td>Vault1</td><td>1 TB</td><td>$4.99/mo</td><td>$4.99/TB</td></tr>
-                <tr><td>Vault3</td><td>3 TB</td><td>$7.99/mo</td><td>$2.66/TB</td></tr>
-                <tr><td>Vault5</td><td>5 TB</td><td>$9.99/mo</td><td>$2.00/TB</td></tr>
-                <tr><td>Vault10</td><td>10 TB</td><td>$12.99/mo</td><td>$1.30/TB</td></tr>
-                <tr class="best"><td>Vault18</td><td>18 TB</td><td>$17.99/mo</td><td>$1.00/TB</td></tr>
+                <tr><td>Monthly</td><td>$2.55/TB/mo</td><td>$4.99 monthly minimum</td></tr>
+                <tr class="best"><td>Annual, prepaid</td><td>$2.00/TB/mo</td><td>any size — 5 TB is $10/mo, billed yearly</td></tr>
+                <tr><td>Founders slots</td><td>$1.00/TB/mo</td><td>first 100 TB &middot; annual only &middot; 3–10 TB per account &middot; lifetime rate</td></tr>
             </table>
-            <p class="fine">Vault18 at $1/TB is a launch promo for the first 100 packs, price-locked for 12 months (then $2.49/TB — still a third of B2).</p>
+            <p class="fine">Pick an allocation in TB, change it whenever. The honest fine print: one durable tape copy (we're the offsite leg of <em>your</em> 3-2-1) &middot; 30-day minimum per object &middot; restore up to 1× your stored bytes free every month — a free monthly restore drill — then $2.99/TB &middot; restored copies stay hot 7 days. Never: retrieval fees or egress fees. Founders slots are numbered and hard-capped — when they're gone, they're gone.</p>
         </div>
 
         <p class="includes">
             Every tier includes: real S3 API (multipart, versioning, Object Lock/WORM, presigned URLs) &middot;
-            $0 API fees &middot; no minimum duration &middot; encryption at rest &middot; scoped API keys &amp; STS
+            $0 API fees &middot; no retrieval fees &middot; encryption at rest &middot; scoped API keys &amp; STS
         </p>
 
         <div class="compare">
@@ -1231,15 +1229,15 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
                     <tr><th></th><th class="us">stored.ge</th><th>Backblaze B2</th><th>Wasabi</th><th>Cloudflare R2</th><th>AWS S3</th></tr>
                 </thead>
                 <tbody>
-                    <tr><td>$/TB/mo</td><td class="us">$3.99</td><td>$6.95</td><td>$6.99</td><td>$15.00</td><td>$23.00</td></tr>
+                    <tr><td>$/TB/mo</td><td class="us">$3.99</td><td>$6.95</td><td>$7.99</td><td>$15.00</td><td>$23.00</td></tr>
                     <tr><td>API/request fees</td><td class="us">$0</td><td>Class B/C fees</td><td>$0</td><td>ops-based</td><td>per-request</td></tr>
                     <tr><td>Egress</td><td class="us">3× free, then $0.01/GB</td><td>3× free, then $0.01/GB</td><td>"Free" (fair-use policy)</td><td>Free</td><td>$0.09/GB</td></tr>
-                    <tr><td>Min storage duration</td><td class="us">None</td><td>None</td><td>90 days</td><td>None</td><td>None</td></tr>
-                    <tr><td>Archive tier</td><td class="us">$1/TB (tape)</td><td>—</td><td>—</td><td>—</td><td>Glacier (retrieval fees)</td></tr>
+                    <tr><td>Min storage duration</td><td class="us">None (Vault: 30 days)</td><td>None</td><td>90 days</td><td>None</td><td>None</td></tr>
+                    <tr><td>Archive tier</td><td class="us">$2/TB (tape)</td><td>—</td><td>—</td><td>—</td><td>Glacier (retrieval fees)</td></tr>
                     <tr><td>Auto-tiering</td><td class="us">Built in</td><td>No</td><td>No</td><td>No</td><td>Manual lifecycle</td></tr>
                 </tbody>
             </table>
-            <p class="fine">Competitor pricing as published July 2026. Wasabi's free egress is subject to their fair-use ratio policy.</p>
+            <p class="fine">Competitor pricing as published August 2026 — Backblaze and Wasabi both raised prices earlier this year. Wasabi's free egress is subject to their fair-use ratio policy.</p>
         </div>
     </div>
 </section>
@@ -1279,7 +1277,7 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
         <p>5 GB free, no credit card. Keys on signup, rclone config ready to paste.</p>
         <a class="btn btn-primary" href="/register">Start free →</a>
         {{else}}
-        <h2>Launching August 31, 2026.</h2>
+        <h2>Launching October 31, 2026.</h2>
         <p>Join the waitlist and we'll email you once — on launch day, with a founding-member code.</p>
         <form class="waitlist-form" data-waitlist>
             <input type="email" name="email" placeholder="you@example.com" required aria-label="Email address">
@@ -1352,7 +1350,7 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
                     body: JSON.stringify({ email: email })
                 });
             } catch (e) { /* endpoint degrades to 200; confirmation is best-effort */ }
-            form.innerHTML = '<span class="waitlist-ok">You\'re on the list — see you August 31.</span>';
+            form.innerHTML = '<span class="waitlist-ok">You\'re on the list — see you October 31.</span>';
         });
     });
     {{end}}
@@ -1457,7 +1455,6 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
     (function () {
         var slider = document.getElementById('calc-tb');
         if (!slider) return;
-        var PACKS = [[1, 4.99, 'Vault1'], [3, 7.99, 'Vault3'], [5, 9.99, 'Vault5'], [10, 12.99, 'Vault10'], [18, 17.99, 'Vault18']];
         function money(n) {
             return '$' + n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
         }
@@ -1472,14 +1469,8 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
             document.getElementById('calc-aws').textContent = money(tb * 23.00) + '/mo';
             var saved = moneyWhole((23.00 - 3.99) * tb * 12);
             var note = 'That’s <strong>' + saved + '/yr</strong> kept out of AWS’s pocket.';
-            var i, pack = null;
-            for (i = 0; i < PACKS.length; i++) {
-                if (tb <= PACKS[i][0]) { pack = PACKS[i]; break; }
-            }
-            if (pack) {
-                note += ' Archive-only? <strong>' + pack[2] + '</strong> holds ' + pack[0] +
-                    ' TB for <strong>' + money(pack[1]) + '/mo</strong> flat.';
-            }
+            note += ' Archive-only? <strong>Vault</strong> holds ' + tb +
+                ' TB on tape for <strong>' + money(tb * 2.00) + '/mo</strong> billed yearly.';
             document.getElementById('calc-note').innerHTML = note;
         }
         slider.addEventListener('input', render);
