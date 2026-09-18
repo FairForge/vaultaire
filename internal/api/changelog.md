@@ -5,6 +5,23 @@ what you need and it shows up here.
 
 ---
 
+## 2026-09-16 — Simpler Vault pricing: $2/TB, any size
+
+- **Vault is now linear.** The prepaid pack ladder (Vault1–Vault18) is gone;
+  the tape-backed archive tier is simply **$2.00/TB/mo annual prepaid** or
+  $2.55/TB/mo monthly, at whatever allocation size you want. 5 TB of tape
+  archive is $10/mo billed yearly. Packs punished small archives and made
+  you buy sizes you didn't need — linear pricing fixes both.
+- **The limits, stated plainly** (they're what make the price honest): one
+  durable tape copy — we're the offsite leg of *your* 3-2-1; 30-day minimum
+  per object; free restores up to 1× your stored bytes each month (run a
+  restore drill monthly, free), then $2.99/TB; restored copies stay hot for
+  7 days. Never retrieval fees, never egress fees.
+- **Founders slots.** The first 100 TB sold go at $1/TB/mo, annual prepaid,
+  3–10 TB per account, lifetime rate, numbered slots. Hard-capped — when
+  they're gone, they're gone.
+- **Launch date is October 31, 2026.**
+
 ## 2026-07-20 — Customer docs are live
 
 - **Real documentation at [/docs](/docs).** Getting Started (signup to first

@@ -26,10 +26,13 @@ the secret is shown once; copy it then.
 |------|-------|----------|
 | Standard | **$3.99/TB/mo** (annual) / $4.99 (monthly) | General storage, auto-tiered |
 | Performance | $5.99/TB/mo | Always-hot, ~24 ms reads |
-| Vault packs (archive) | from **$1/TB/mo** | Tape-backed deep archive |
+| Vault (archive) | **$2.00/TB/mo** (annual, prepaid) / $2.55 (monthly) | Tape-backed archive, any size |
 
-No API/request fees, ever. No minimum storage duration. Egress is free up to 3×
-your stored volume each month, then $0.01/GB (9× cheaper than AWS).
+No API/request fees, ever. No retrieval fees. No minimum storage duration on
+Standard or Performance; Vault has a 30-day per-object minimum (a third of
+Wasabi's 90). Egress is free up to 3× your stored volume each month, then
+$0.01/GB (9× cheaper than AWS). Vault restores are free up to 1× your stored
+bytes each month — test your restores monthly at no cost — then $2.99/TB.
 
 **How is $3.99/TB sustainable? Is this VC-subsidized?**
 No. Three things make the math work: (1) **tiering** — cold data migrates to tape
