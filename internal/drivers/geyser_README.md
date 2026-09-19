@@ -144,6 +144,38 @@ provisioned via console.
 
 ## Console API map
 
+**2026-09-19: the console publishes its own OpenAPI 3.1 spec** at
+`GET /api/v3/api-docs` (authenticated) — 104 paths, 127 schemas. That spec is
+now the ground truth; the JS-bundle archaeology below survives for context.
+Endpoints declare a required `auth` header carrying the `accessToken` value;
+plain cookie auth also works for most routes.
+
+Key spec findings (2026-09-19, live-verified):
+
+- **Keys**: `POST /api/keys` returns the secret once; **max 2 keys per user**
+  (a third POST → 400). `GET /api/keys/{accessKey}` would return the secret
+  but is provider-role only (403 for customers) — a lost secret is
+  unrecoverable self-serve. `DELETE /api/keys/{accessKey}` (the documented
+  rotation path) is **broken for our account**: it hangs 5+ minutes
+  server-side, then 400 `Invalid value for field: token` regardless of auth
+  header/body/query variants — the UI issues the identical call, so this is
+  a Geyser-side bug. Key rotation is currently impossible self-serve.
+- **`POST /api/estimates`** = the reseller quote engine (bucket list of
+  `{dualCopy,size,datacenterId,compression,encryption,s3Enabled}` +
+  `discount`/`newCustomer`) — returns subtotal/total/margin/misc lines.
+  `GET /api/datacenterpricing` returns the per-datacenter price table.
+- **`POST /api/login/token`** mints a session from a partner UUID token with
+  no MFA — the automation-friendly login we lack; a partner token is an ask.
+- Hardware telemetry (`/api/storageengines/{id}/tapeDrives` with QoS-ish
+  fields like `minimum_task_priority`), `/api/tasks`, `/api/domainengines`
+  exist but are provider/no-access for the customer role.
+- `/api/tapeCollections/{id}` and `.../tapes/{tapeId}` return **hourly
+  tapeUsage time-series** (barcode, serial, capacity, lastAccessed) —
+  per-cartridge attestation history is self-serve.
+- `/api/datacenters` lists only datacenters open for new provisioning
+  (LON1, LA2, SP1); our collection's LA1 no longer appears — new LA buckets
+  land in LA2. la1.geyserdata.com still serves existing data.
+
 Extracted from the console's own JS bundles (74 page chunks under
 `console.geyserdata.com/assets/entries/`, publicly served), then **live-probed
 from inside an authenticated session** on 2026-07-29.
@@ -164,9 +196,11 @@ Confirmed **404** (do not exist): `cloudLibraries`, `userGroups`, `orgs`,
   compression disabled. Single Copy means there is no second tape today —
   dual-site redundancy is a provisioning/cost change, not a code change.
 - **Both S3 keypairs already exist**: `AKIA0ZGZX7E5NTXN1PKN` (the one in
-  `.env.bench`) and `AKIALIVSFQ8EFI4ITBL4`, both active. The API returns key
-  IDs only — the second secret must come from the console UI. So the "get a
-  second key" item is really "retrieve the existing second secret."
+  `.env.bench`) and `AKIALIVSFQ8EFI4ITBL4`, both active. 2026-09-19 update:
+  the second secret is **unrecoverable** (secret-read endpoint is
+  provider-only, the UI shows secrets only at creation, and key DELETE — the
+  rotation path — is server-side broken; see spec findings above). Key #2 is
+  dead weight until Geyser fixes deletion; nothing of ours uses it.
 - Buckets carry `corsEnabled`, `color`, `customer`, `createdAt`.
 
 **Restore — the important part.** The console exposes *two* restore modes:
