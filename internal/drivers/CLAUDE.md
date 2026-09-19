@@ -117,7 +117,7 @@ Helpers: `IsValidRegion(region)`, `IsEURegion(region)` (true for `eu-*`), `Regio
 
 | File | Type | Purpose |
 |------|------|---------|
-| `geyser_admin.go` | `GeyserAdminClient` | Console API client: programmatic login (`Login` → `VerifyMFA`, cookie jar for httpOnly session cookies), bucket provisioning, airgap, restore (`RestoreToCache` to staging, `RestoreToCloud` to a cloud integration), cloud-integration CRUD, `cloudSync` server-side ingest, billing, tape/site/event info, keepalive. Reverse-engineered — ground truth in `geyser_README.md` ("Console API map"). Responses are dual-framed (envelope or bare JSON), handled by `geyserBody`. |
+| `geyser_admin.go` | `GeyserAdminClient` | Console API client: programmatic login (`Login` → `VerifyMFA`, cookie jar for httpOnly session cookies), bucket provisioning (terminal status is `CREATED` on the live wire), airgap, restore (`RestoreToCache` to staging, `RestoreToCloud` to a cloud integration), cloud-integration CRUD, `cloudSync` server-side ingest, billing, tape/site/event info, keepalive. Spec-synced 2026-09-19 to the console's own OpenAPI (`/api/v3/api-docs`, saved at `.private/geyser-console-openapi.json`): adds `GetBucketAccess`, `BrowseBucket` (per-object `location` — CACHE vs tape), `PresignUpload`/`PresignDownload` (no-S3-creds data path), `GetBucketSizeHistory`, `GetDatacenters`, `GetDatacenterPricing` (list vs reseller wholesale), `Estimate` (quote engine), `CreateTapeCollection`/`UpdateTapeCollection` (resize works both directions = billing lever). Responses are triple-framed (envelope, bare JSON, or Spring `{content,page}` pagination) — `geyserBody` + `doList` handle all three. |
 
 ### Test Helpers
 
