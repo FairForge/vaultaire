@@ -114,6 +114,9 @@ jobs:
     needs: build
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # Secrets resolve from the environment first: prod SSH key/host/user live as
+    # environment secrets deployable only from main, not as repo-level secrets.
+    environment: production
     steps:
       - name: Checkout (for migrations)
         uses: actions/checkout@v7
