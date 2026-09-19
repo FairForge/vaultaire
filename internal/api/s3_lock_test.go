@@ -276,7 +276,8 @@ func TestObjectLock_ComplianceBlocksDelete(t *testing.T) {
 
 	var s3Err S3Error
 	require.NoError(t, xml.Unmarshal(w.Body.Bytes(), &s3Err))
-	assert.Equal(t, ErrObjectLocked, s3Err.Code)
+	assert.Equal(t, ErrAccessDenied, s3Err.Code) // AWS wire code for lock-protected deletes; lock detail rides in the message
+	assert.Contains(t, s3Err.Message, "Object Lock")
 }
 
 // --- Test: GOVERNANCE bypass ---
@@ -327,7 +328,8 @@ func TestObjectLock_LegalHoldBlocksDelete(t *testing.T) {
 
 	var s3Err S3Error
 	require.NoError(t, xml.Unmarshal(w.Body.Bytes(), &s3Err))
-	assert.Equal(t, ErrObjectLocked, s3Err.Code)
+	assert.Equal(t, ErrAccessDenied, s3Err.Code) // AWS wire code for lock-protected deletes; lock detail rides in the message
+	assert.Contains(t, s3Err.Message, "Object Lock")
 
 	// Even with governance bypass, legal hold blocks
 	w = f.deleteObject(t, key, map[string]string{

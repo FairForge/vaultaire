@@ -267,14 +267,17 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	var cachedEncAlgo string
 	var cachedTags []byte
 	var cachedContentDisposition string
+	var cachedContentEncoding string
+	var cachedContentLanguage string
+	var cachedEcho putEchoHeaders
 	var cachedIsChunked bool
 	var cacheHit bool
 	if a.db != nil {
 		err := a.db.QueryRowContext(r.Context(), `
-			SELECT content_type, size_bytes, etag, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(tags, '{}'), COALESCE(content_disposition, ''), is_chunked
+			SELECT content_type, size_bytes, etag, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(tags, '{}'), COALESCE(content_disposition, ''), COALESCE(content_encoding, ''), COALESCE(content_language, ''), COALESCE(cache_control, ''), COALESCE(http_expires, ''), COALESCE(website_redirect_location, ''), is_chunked
 			FROM object_head_cache
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-			t.ID, bucket, artifact).Scan(&cachedContentType, &cachedSize, &cachedETag, &cachedUpdatedAt, &cachedMetadata, &cachedBackendName, &cachedEncAlgo, &cachedTags, &cachedContentDisposition, &cachedIsChunked)
+			t.ID, bucket, artifact).Scan(&cachedContentType, &cachedSize, &cachedETag, &cachedUpdatedAt, &cachedMetadata, &cachedBackendName, &cachedEncAlgo, &cachedTags, &cachedContentDisposition, &cachedContentEncoding, &cachedContentLanguage, &cachedEcho.CacheControl, &cachedEcho.Expires, &cachedEcho.WebsiteRedirect, &cachedIsChunked)
 		if err == nil {
 			cacheHit = true
 		}
@@ -322,7 +325,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	if cacheHit && cachedIsChunked && a.gci != nil {
 		chunkErr := a.handleChunkedGet(w, r, t, bucket, artifact,
 			cachedSize, cachedETag, cachedContentType, cachedUpdatedAt,
-			cachedMetadata, cachedTags, cachedContentDisposition, cachedBackendName)
+			cachedMetadata, cachedTags, cachedContentDisposition, cachedContentEncoding, cachedContentLanguage, cachedEcho, cachedBackendName)
 		if chunkErr != nil {
 			a.logger.Error("chunked get failed",
 				zap.Error(chunkErr),
@@ -427,6 +430,13 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	if disposition = sanitizeContentDisposition(disposition); disposition != "" {
 		w.Header().Set("Content-Disposition", disposition)
 	}
+	if cachedContentEncoding != "" {
+		w.Header().Set("Content-Encoding", cachedContentEncoding)
+	}
+	if cachedContentLanguage != "" {
+		w.Header().Set("Content-Language", cachedContentLanguage)
+	}
+	setEchoHeaders(w.Header(), cachedEcho.CacheControl, cachedEcho.Expires, cachedEcho.WebsiteRedirect)
 
 	rangeHeader := r.Header.Get("Range")
 	if rangeHeader != "" && cacheHit && cachedSize > 0 {
@@ -478,7 +488,11 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		w.Header().Set("x-amz-version-id", "null")
 	}
 	w.Header().Set("Accept-Ranges", "bytes")
-	w.Header().Set("Cache-Control", "private, no-cache")
+	// The stored per-object Cache-Control (set earlier from head cache) wins;
+	// "private, no-cache" is only the default for objects without one.
+	if w.Header().Get("Cache-Control") == "" {
+		w.Header().Set("Cache-Control", "private, no-cache")
+	}
 	w.Header().Set("x-amz-storage-class", engine.BackendToStorageClass(cachedBackendName))
 	if cacheHit {
 		if cachedSize > 0 {
@@ -590,7 +604,8 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 			t.ID, bucket, artifact).Scan(&existingETag)
 		if existsErr == nil {
 			if lockErr := checkObjectLock(r.Context(), a.db, t.ID, bucket, artifact, isObjectLockBypass(r)); lockErr != nil {
-				WriteS3Error(w, ErrObjectLocked, r.URL.Path, generateRequestID())
+				WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
+					WithSuggestion("Object is protected by Object Lock."))
 				return
 			}
 			if r.Header.Get("If-Match") != "" && checkIfMatch(r, existingETag) {
@@ -875,6 +890,9 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	}
 
 	contentDisposition := sanitizeContentDisposition(r.Header.Get("Content-Disposition"))
+	contentEncoding := requestContentEncoding(r)
+	contentLanguage := requestContentLanguage(r)
+	echoHdrs := requestEchoHeaders(r)
 
 	userMeta := extractS3Metadata(r)
 	if err := validateMetadata(userMeta); err != nil {
@@ -890,8 +908,8 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		displaced, dbErr := atomicHeadUpsertReleasing(r.Context(), a.db, manifestReleaser(a.gci), t.ID, bucket, artifact, func(tx *sql.Tx) error {
 			_, execErr := tx.ExecContext(r.Context(), `
 				INSERT INTO object_head_cache
-					(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, is_chunked, updated_at)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, FALSE, NOW())
+					(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, content_encoding, content_language, cache_control, http_expires, website_redirect_location, is_chunked, updated_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, FALSE, NOW())
 				ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
 					size_bytes            = EXCLUDED.size_bytes,
 					etag                  = EXCLUDED.etag,
@@ -900,9 +918,14 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 					metadata              = EXCLUDED.metadata,
 					encryption_algorithm  = EXCLUDED.encryption_algorithm,
 					content_disposition   = EXCLUDED.content_disposition,
+					content_encoding      = EXCLUDED.content_encoding,
+					content_language      = EXCLUDED.content_language,
+					cache_control         = EXCLUDED.cache_control,
+					http_expires          = EXCLUDED.http_expires,
+					website_redirect_location = EXCLUDED.website_redirect_location,
 					is_chunked            = EXCLUDED.is_chunked,
 					updated_at            = NOW()
-			`, t.ID, bucket, artifact, metadataSize, etag, contentType, backendName, metaJSON, encryptionAlgorithm, contentDisposition)
+			`, t.ID, bucket, artifact, metadataSize, etag, contentType, backendName, metaJSON, encryptionAlgorithm, contentDisposition, contentEncoding, contentLanguage, echoHdrs.CacheControl, echoHdrs.Expires, echoHdrs.WebsiteRedirect)
 			return execErr
 		})
 		a.displacedBytes = displaced
@@ -952,6 +975,9 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 
 	w.Header().Set("ETag", fmt.Sprintf(`"%s"`, etag))
 	w.Header().Set("x-amz-request-id", generateRequestID())
+	// Object size on the PutObject response (newer AWS surface; SDKs expose
+	// it as PutObjectOutput.Size and test suites assert it).
+	w.Header().Set("x-amz-object-size", strconv.FormatInt(metadataSize, 10))
 	if encryptionAlgorithm == crypto.SSECAlgorithm {
 		w.Header().Set("x-amz-server-side-encryption-customer-algorithm", "AES256")
 	} else if encryptionAlgorithm != "" {
@@ -1171,6 +1197,9 @@ func (a *S3ToEngine) handleChunkedPut(
 
 	etag := fmt.Sprintf("%x", hasher.Sum(nil))
 	contentDisposition := sanitizeContentDisposition(r.Header.Get("Content-Disposition"))
+	contentEncoding := requestContentEncoding(r)
+	contentLanguage := requestContentLanguage(r)
+	echoHdrs := requestEchoHeaders(r)
 	userMeta := extractS3Metadata(r)
 	_ = validateMetadata(userMeta)
 	metaJSON, _ := json.Marshal(userMeta)
@@ -1206,8 +1235,8 @@ func (a *S3ToEngine) handleChunkedPut(
 		}
 		_, execErr := tx.ExecContext(ctx, `
 			INSERT INTO object_head_cache
-				(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, is_chunked, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE, NOW())
+				(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, content_encoding, content_language, cache_control, http_expires, website_redirect_location, is_chunked, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, TRUE, NOW())
 			ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
 				size_bytes            = EXCLUDED.size_bytes,
 				etag                  = EXCLUDED.etag,
@@ -1216,9 +1245,14 @@ func (a *S3ToEngine) handleChunkedPut(
 				metadata              = EXCLUDED.metadata,
 				encryption_algorithm  = EXCLUDED.encryption_algorithm,
 				content_disposition   = EXCLUDED.content_disposition,
+				content_encoding      = EXCLUDED.content_encoding,
+				content_language      = EXCLUDED.content_language,
+				cache_control         = EXCLUDED.cache_control,
+				http_expires          = EXCLUDED.http_expires,
+				website_redirect_location = EXCLUDED.website_redirect_location,
 				is_chunked            = EXCLUDED.is_chunked,
 				updated_at            = NOW()
-		`, t.ID, bucket, artifact, measuredSize, etag, contentType, backendName, metaJSON, chunkEncAlgo, contentDisposition)
+		`, t.ID, bucket, artifact, measuredSize, etag, contentType, backendName, metaJSON, chunkEncAlgo, contentDisposition, contentEncoding, contentLanguage, echoHdrs.CacheControl, echoHdrs.Expires, echoHdrs.WebsiteRedirect)
 		return execErr
 	})
 	a.displacedBytes = displaced
@@ -1273,6 +1307,7 @@ func (a *S3ToEngine) handleChunkedPut(
 
 	w.Header().Set("ETag", fmt.Sprintf(`"%s"`, etag))
 	w.Header().Set("x-amz-request-id", generateRequestID())
+	w.Header().Set("x-amz-object-size", strconv.FormatInt(measuredSize, 10))
 	if versionID != "" {
 		w.Header().Set("x-amz-version-id", versionID)
 	}
@@ -1426,6 +1461,9 @@ func (a *S3ToEngine) handleChunkedGet(
 	cachedMetadata []byte,
 	cachedTags []byte,
 	cachedContentDisposition string,
+	cachedContentEncoding string,
+	cachedContentLanguage string,
+	cachedEcho putEchoHeaders,
 	cachedBackendName string,
 ) error {
 	ctx := r.Context()
@@ -1496,6 +1534,13 @@ func (a *S3ToEngine) handleChunkedGet(
 	if disposition = sanitizeContentDisposition(disposition); disposition != "" {
 		w.Header().Set("Content-Disposition", disposition)
 	}
+	if cachedContentEncoding != "" {
+		w.Header().Set("Content-Encoding", cachedContentEncoding)
+	}
+	if cachedContentLanguage != "" {
+		w.Header().Set("Content-Language", cachedContentLanguage)
+	}
+	setEchoHeaders(w.Header(), cachedEcho.CacheControl, cachedEcho.Expires, cachedEcho.WebsiteRedirect)
 
 	// Build the byte plan: which chunks to read and the (skip, take) slice within
 	// each. Full GET takes every chunk whole; a range takes only overlapping
@@ -1550,7 +1595,11 @@ func (a *S3ToEngine) handleChunkedGet(
 			w.Header().Set("x-amz-version-id", "null")
 		}
 		w.Header().Set("Accept-Ranges", "bytes")
-		w.Header().Set("Cache-Control", "private, no-cache")
+		// The stored per-object Cache-Control (set earlier from head cache) wins;
+		// "private, no-cache" is only the default for objects without one.
+		if w.Header().Get("Cache-Control") == "" {
+			w.Header().Set("Cache-Control", "private, no-cache")
+		}
 		w.Header().Set("x-amz-storage-class", engine.BackendToStorageClass(cachedBackendName))
 		if cachedSize > 0 {
 			w.Header().Set("Content-Length", strconv.FormatInt(cachedSize, 10))
@@ -1791,7 +1840,8 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 	}
 
 	if lockErr := checkObjectLock(r.Context(), a.db, t.ID, bucket, object, isObjectLockBypass(r)); lockErr != nil {
-		WriteS3Error(w, ErrObjectLocked, r.URL.Path, generateRequestID())
+		WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
+			WithSuggestion("Object is protected by Object Lock."))
 		return
 	}
 

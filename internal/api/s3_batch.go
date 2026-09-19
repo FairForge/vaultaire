@@ -122,8 +122,8 @@ func (s *Server) handleDeleteObjects(w http.ResponseWriter, r *http.Request, req
 		if lockErr := checkObjectLock(r.Context(), s.db, t.ID, bucket, key, isObjectLockBypass(r)); lockErr != nil {
 			result.Errors = append(result.Errors, DeleteError{
 				Key:     key,
-				Code:    ErrObjectLocked,
-				Message: errorMessages[ErrObjectLocked],
+				Code:    ErrAccessDenied,
+				Message: errorMessages[ErrAccessDenied] + " Object is protected by Object Lock.",
 			})
 			continue
 		}
