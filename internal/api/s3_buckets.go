@@ -221,6 +221,7 @@ func (s *Server) CreateBucket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("x-amz-bucket-region", region)
+	w.Header().Set("Location", "/"+bucket)
 	emitEvent(ctx, s.db, s.logger, "bucket.created", tenantID, map[string]interface{}{
 		"bucket": bucket,
 		"region": region,

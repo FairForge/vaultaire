@@ -126,6 +126,8 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 				req.Operation = "ListMultipartUploads"
 			} else if _, ok := req.Query["versions"]; ok {
 				req.Operation = "ListObjectVersions"
+			} else if _, ok := req.Query["acl"]; ok {
+				req.Operation = "GetBucketAcl"
 			} else {
 				req.Operation = "ListObjects"
 			}
@@ -140,6 +142,8 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 				req.Operation = "PutBucketLogging"
 			} else if _, ok := req.Query["inventory"]; ok {
 				req.Operation = "PutBucketInventory"
+			} else if _, ok := req.Query["acl"]; ok {
+				req.Operation = "PutBucketAcl"
 			} else {
 				req.Operation = "CreateBucket"
 			}
@@ -173,6 +177,8 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 			req.Operation = "ListParts"
 		} else if _, ok := req.Query["tagging"]; ok {
 			req.Operation = "GetObjectTagging"
+		} else if _, ok := req.Query["acl"]; ok {
+			req.Operation = "GetObjectAcl"
 		} else {
 			req.Operation = "GetObject"
 		}
@@ -185,6 +191,10 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 			req.Operation = "UploadPart"
 		} else if _, ok := req.Query["tagging"]; ok {
 			req.Operation = "PutObjectTagging"
+		} else if _, ok := req.Query["acl"]; ok {
+			// Before A1 (2026-09-18) this fell through to PutObject and
+			// overwrote the object's bytes with the ACL XML body.
+			req.Operation = "PutObjectAcl"
 		} else {
 			req.Operation = "PutObject"
 		}
@@ -502,6 +512,14 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		s.handleListParts(cw, r, s3Req.Bucket, s3Req.Object)
 	case "ListMultipartUploads":
 		s.handleListMultipartUploads(cw, r, s3Req.Bucket)
+	case "GetBucketAcl":
+		s.handleGetBucketAcl(cw, r, s3Req)
+	case "PutBucketAcl":
+		s.handlePutBucketAcl(cw, r, s3Req)
+	case "GetObjectAcl":
+		s.handleGetObjectAcl(cw, r, s3Req)
+	case "PutObjectAcl":
+		s.handlePutObjectAcl(cw, r, s3Req)
 	case "GetBucketLocation":
 		s.handleGetBucketLocation(cw, r, s3Req)
 	case "HeadBucket":
@@ -622,12 +640,15 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	var encAlgo string
 	var tagsJSON []byte
 	var contentDisposition string
+	var contentEncoding string
+	var contentLanguage string
+	var echo putEchoHeaders
 
 	err = s.db.QueryRowContext(r.Context(), `
-		SELECT size_bytes, etag, content_type, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(tags, '{}'), COALESCE(content_disposition, '')
+		SELECT size_bytes, etag, content_type, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(tags, '{}'), COALESCE(content_disposition, ''), COALESCE(content_encoding, ''), COALESCE(content_language, ''), COALESCE(cache_control, ''), COALESCE(http_expires, ''), COALESCE(website_redirect_location, '')
 		FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
-	`, t.ID, req.Bucket, req.Object).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &metadataJSON, &backendName, &encAlgo, &tagsJSON, &contentDisposition)
+	`, t.ID, req.Bucket, req.Object).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &metadataJSON, &backendName, &encAlgo, &tagsJSON, &contentDisposition, &contentEncoding, &contentLanguage, &echo.CacheControl, &echo.Expires, &echo.WebsiteRedirect)
 
 	if err == sql.ErrNoRows {
 		s.logger.Warn("HEAD: object not in metadata cache",
@@ -700,6 +721,13 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	if cd := sanitizeContentDisposition(contentDisposition); cd != "" {
 		w.Header().Set("Content-Disposition", cd)
 	}
+	if contentEncoding != "" {
+		w.Header().Set("Content-Encoding", contentEncoding)
+	}
+	if contentLanguage != "" {
+		w.Header().Set("Content-Language", contentLanguage)
+	}
+	setEchoHeaders(w.Header(), echo.CacheControl, echo.Expires, echo.WebsiteRedirect)
 	// HEAD must not write a body.
 	w.WriteHeader(http.StatusOK)
 }

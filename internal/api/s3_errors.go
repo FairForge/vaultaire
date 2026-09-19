@@ -34,36 +34,39 @@ type S3Error struct {
 
 // S3 Error codes
 const (
-	ErrNoSuchBucket                      = "NoSuchBucket"
-	ErrNoSuchKey                         = "NoSuchKey"
-	ErrBucketAlreadyExists               = "BucketAlreadyExists"
-	ErrBucketNotEmpty                    = "BucketNotEmpty"
-	ErrInvalidBucketName                 = "InvalidBucketName"
-	ErrInvalidObjectName                 = "InvalidObjectName"
-	ErrAccessDenied                      = "AccessDenied"
-	ErrInvalidRequest                    = "InvalidRequest"
-	ErrIncompleteBody                    = "IncompleteBody"
-	ErrInternalError                     = "InternalError"
-	ErrNotImplemented                    = "NotImplemented"
-	ErrMissingContentLength              = "MissingContentLength"
-	ErrRequestTimeout                    = "RequestTimeout"
-	ErrBadDigest                         = "BadDigest"
-	ErrEntityTooLarge                    = "EntityTooLarge"
-	ErrMalformedXML                      = "MalformedXML"
-	ErrMethodNotAllowed                  = "MethodNotAllowed"
-	ErrSignatureDoesNotMatch             = "SignatureDoesNotMatch"
-	ErrRequestTimeTooSkewed              = "RequestTimeTooSkewed"
-	ErrXAmzContentSHA256Mismatch         = "XAmzContentSHA256Mismatch"
-	ErrInvalidArgument                   = "InvalidArgument"
-	ErrAccountSuspended                  = "AccountSuspended"
-	ErrSlowDown                          = "SlowDown"
-	ErrNoSuchUpload                      = "NoSuchUpload"
-	ErrInvalidPart                       = "InvalidPart"
-	ErrInvalidPartOrder                  = "InvalidPartOrder"
-	ErrEntityTooSmall                    = "EntityTooSmall"
-	ErrInvalidPartNumber                 = "InvalidPartNumber"
-	ErrNoSuchVersion                     = "NoSuchVersion"
-	ErrObjectLocked                      = "ObjectLocked"
+	ErrNoSuchBucket              = "NoSuchBucket"
+	ErrNoSuchKey                 = "NoSuchKey"
+	ErrBucketAlreadyExists       = "BucketAlreadyExists"
+	ErrBucketNotEmpty            = "BucketNotEmpty"
+	ErrInvalidBucketName         = "InvalidBucketName"
+	ErrInvalidObjectName         = "InvalidObjectName"
+	ErrAccessDenied              = "AccessDenied"
+	ErrInvalidRequest            = "InvalidRequest"
+	ErrIncompleteBody            = "IncompleteBody"
+	ErrInternalError             = "InternalError"
+	ErrNotImplemented            = "NotImplemented"
+	ErrMissingContentLength      = "MissingContentLength"
+	ErrRequestTimeout            = "RequestTimeout"
+	ErrBadDigest                 = "BadDigest"
+	ErrEntityTooLarge            = "EntityTooLarge"
+	ErrMalformedXML              = "MalformedXML"
+	ErrMethodNotAllowed          = "MethodNotAllowed"
+	ErrSignatureDoesNotMatch     = "SignatureDoesNotMatch"
+	ErrRequestTimeTooSkewed      = "RequestTimeTooSkewed"
+	ErrXAmzContentSHA256Mismatch = "XAmzContentSHA256Mismatch"
+	ErrInvalidArgument           = "InvalidArgument"
+	ErrAccountSuspended          = "AccountSuspended"
+	ErrSlowDown                  = "SlowDown"
+	ErrNoSuchUpload              = "NoSuchUpload"
+	ErrInvalidPart               = "InvalidPart"
+	ErrInvalidPartOrder          = "InvalidPartOrder"
+	ErrEntityTooSmall            = "EntityTooSmall"
+	ErrInvalidPartNumber         = "InvalidPartNumber"
+	ErrNoSuchVersion             = "NoSuchVersion"
+	// A1 conformance (2026-09-18): the former "ObjectLocked" code was not an
+	// AWS error code — lock-protected operations answer AccessDenied on the
+	// wire, with the lock detail appended to the message via WithSuggestion.
+	ErrAccessControlListNotSupported     = "AccessControlListNotSupported"
 	ErrInvalidRetentionPeriod            = "InvalidRetentionPeriod"
 	ErrExpiredPresignedRequest           = "ExpiredToken"
 	ErrAuthorizationQueryParametersError = "AuthorizationQueryParametersError"
@@ -108,7 +111,7 @@ var errorMessages = map[string]string{
 	ErrEntityTooSmall:                    "Your proposed upload is smaller than the minimum allowed object size. Each part must be at least 5 MB in size, except the last part.",
 	ErrInvalidPartNumber:                 "Part number must be an integer between 1 and 10000, inclusive.",
 	ErrNoSuchVersion:                     "The version ID specified in the request does not match an existing version.",
-	ErrObjectLocked:                      "Object is protected by Object Lock",
+	ErrAccessControlListNotSupported:     "The bucket does not allow ACLs.",
 	ErrInvalidRetentionPeriod:            "The retention period specified is not valid",
 	ErrExpiredPresignedRequest:           "Request has expired",
 	ErrAuthorizationQueryParametersError: "Query-string authentication requires the X-Amz-Algorithm, X-Amz-Credential, X-Amz-Date, X-Amz-Expires, X-Amz-SignedHeaders, and X-Amz-Signature parameters",
@@ -153,7 +156,7 @@ var errorStatusCodes = map[string]int{
 	ErrEntityTooSmall:                    http.StatusBadRequest,
 	ErrInvalidPartNumber:                 http.StatusBadRequest,
 	ErrNoSuchVersion:                     http.StatusNotFound,
-	ErrObjectLocked:                      http.StatusForbidden,
+	ErrAccessControlListNotSupported:     http.StatusBadRequest,
 	ErrInvalidRetentionPeriod:            http.StatusBadRequest,
 	ErrExpiredPresignedRequest:           http.StatusForbidden,
 	ErrAuthorizationQueryParametersError: http.StatusBadRequest,

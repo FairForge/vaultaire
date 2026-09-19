@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"go.uber.org/zap"
 )
@@ -233,21 +234,21 @@ func (a *S3ToEngine) fetchListBatch(ctx context.Context, tenantID, bucket, prefi
 	switch {
 	case prefix == "" && cursor == "":
 		rows, err = a.db.QueryContext(ctx,
-			`SELECT object_key, size_bytes, etag, content_type, updated_at
+			`SELECT object_key, size_bytes, etag, content_type, updated_at, COALESCE(backend_name, '')
 			 FROM object_head_cache
 			 WHERE tenant_id = $1 AND bucket = $2
 			 ORDER BY object_key ASC
 			 LIMIT $3`, tenantID, bucket, fetchLimit)
 	case prefix == "":
 		rows, err = a.db.QueryContext(ctx,
-			`SELECT object_key, size_bytes, etag, content_type, updated_at
+			`SELECT object_key, size_bytes, etag, content_type, updated_at, COALESCE(backend_name, '')
 			 FROM object_head_cache
 			 WHERE tenant_id = $1 AND bucket = $2 AND object_key > $3
 			 ORDER BY object_key ASC
 			 LIMIT $4`, tenantID, bucket, cursor, fetchLimit)
 	case cursor == "":
 		rows, err = a.db.QueryContext(ctx,
-			`SELECT object_key, size_bytes, etag, content_type, updated_at
+			`SELECT object_key, size_bytes, etag, content_type, updated_at, COALESCE(backend_name, '')
 			 FROM object_head_cache
 			 WHERE tenant_id = $1 AND bucket = $2
 			   AND object_key LIKE $3 ESCAPE '\'
@@ -255,7 +256,7 @@ func (a *S3ToEngine) fetchListBatch(ctx context.Context, tenantID, bucket, prefi
 			 LIMIT $4`, tenantID, bucket, likePattern, fetchLimit)
 	default:
 		rows, err = a.db.QueryContext(ctx,
-			`SELECT object_key, size_bytes, etag, content_type, updated_at
+			`SELECT object_key, size_bytes, etag, content_type, updated_at, COALESCE(backend_name, '')
 			 FROM object_head_cache
 			 WHERE tenant_id = $1 AND bucket = $2
 			   AND object_key LIKE $3 ESCAPE '\'
@@ -270,10 +271,10 @@ func (a *S3ToEngine) fetchListBatch(ctx context.Context, tenantID, bucket, prefi
 
 	var entries []ListV2Entry
 	for rows.Next() {
-		var key, etag, contentType string
+		var key, etag, contentType, backendName string
 		var size int64
 		var updatedAt time.Time
-		if scanErr := rows.Scan(&key, &size, &etag, &contentType, &updatedAt); scanErr != nil {
+		if scanErr := rows.Scan(&key, &size, &etag, &contentType, &updatedAt, &backendName); scanErr != nil {
 			return nil, fmt.Errorf("scan object_head_cache: %w", scanErr)
 		}
 		if etag != "" && !strings.HasPrefix(etag, `"`) {
@@ -284,7 +285,11 @@ func (a *S3ToEngine) fetchListBatch(ctx context.Context, tenantID, bucket, prefi
 			Size:         size,
 			ETag:         etag,
 			LastModified: updatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
-			StorageClass: "STANDARD",
+			// Same backend→class mapping HEAD uses — the versitygw sweep
+			// caught listings saying STANDARD while HEAD said GLACIER/RR for
+			// the same object. Backup tools plan restores off the listed
+			// class, so the two must agree.
+			StorageClass: engine.BackendToStorageClass(backendName),
 		})
 	}
 	if rowErr := rows.Err(); rowErr != nil {
