@@ -260,10 +260,15 @@ func main() {
 			logger.Info("iDrive driver added", zap.String("endpoint", defaultEndpoint), zap.String("region", defaultRegion))
 		}
 
-		// Register per-region drivers for bucket-level region routing.
-		for region, endpoint := range drivers.IDriveRegions {
+		// Register per-region drivers for bucket-level region routing. The
+		// reseller account mints one key pair per region, so each region
+		// takes IDRIVE_<REGION>_ACCESS_KEY/_SECRET_KEY (+ optional _ENDPOINT)
+		// when set and falls back to the primary pair otherwise.
+		for region := range drivers.IDriveRegions {
 			driverName := "idrive-" + region
-			drv, drvErr := drivers.NewIDriveDriver(accessKey, secretKey, endpoint, region, logger)
+			regionAK, regionSK := drivers.IDriveRegionCredentials(os.Getenv, region)
+			endpoint := drivers.IDriveRegionEndpoint(os.Getenv, region)
+			drv, drvErr := drivers.NewIDriveDriver(regionAK, regionSK, endpoint, region, logger)
 			if drvErr != nil {
 				logger.Warn("failed to add region iDrive driver",
 					zap.String("region", region), zap.Error(drvErr))

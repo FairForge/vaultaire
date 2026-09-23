@@ -41,3 +41,45 @@ func RegionDisplayName(region string) string {
 	}
 	return region
 }
+
+// IDriveRegionEnvKey returns the env var name for a per-region override, e.g.
+// IDriveRegionEnvKey("us-central-1", "ACCESS_KEY") = "IDRIVE_US_CENTRAL_1_ACCESS_KEY".
+func IDriveRegionEnvKey(region, suffix string) string {
+	upper := make([]byte, 0, len(region))
+	for i := 0; i < len(region); i++ {
+		c := region[i]
+		switch {
+		case c == '-':
+			upper = append(upper, '_')
+		case c >= 'a' && c <= 'z':
+			upper = append(upper, c-'a'+'A')
+		default:
+			upper = append(upper, c)
+		}
+	}
+	return "IDRIVE_" + string(upper) + "_" + suffix
+}
+
+// IDriveRegionCredentials returns the key pair for a region: the per-region
+// override (IDRIVE_<REGION>_ACCESS_KEY / _SECRET_KEY, both required) when set,
+// else the primary IDRIVE_ACCESS_KEY / IDRIVE_SECRET_KEY pair.
+//
+// The reseller account mints one key pair per region, so without overrides
+// every idrive-<region> driver runs on the primary region's key and 403s.
+func IDriveRegionCredentials(getenv func(string) string, region string) (accessKey, secretKey string) {
+	ak := getenv(IDriveRegionEnvKey(region, "ACCESS_KEY"))
+	sk := getenv(IDriveRegionEnvKey(region, "SECRET_KEY"))
+	if ak != "" && sk != "" {
+		return ak, sk
+	}
+	return getenv("IDRIVE_ACCESS_KEY"), getenv("IDRIVE_SECRET_KEY")
+}
+
+// IDriveRegionEndpoint returns IDRIVE_<REGION>_ENDPOINT when set, else the
+// default endpoint from IDriveRegions.
+func IDriveRegionEndpoint(getenv func(string) string, region string) string {
+	if ep := getenv(IDriveRegionEnvKey(region, "ENDPOINT")); ep != "" {
+		return ep
+	}
+	return IDriveRegions[region]
+}
