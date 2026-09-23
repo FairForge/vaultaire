@@ -410,3 +410,11 @@ BOOLEAN (migration 042).
 ## Tenant Context
 
 Most handlers use `tenant.FromContext(r.Context())` to get the authenticated tenant. The `S3Request.TenantID` field is also set for convenience.
+
+## Backend Health Probes + Prometheus `/metrics` (alerting WP, 2026-09-22)
+
+- `backend_probes.go` — `buildBackendProbes(getenv, engine)` decides what gets probed: `configuredBackends` still yields the env-driven TCP entries (quotaless, lyve), then entries are upgraded to **authenticated** probes: `idrive`/`geyser` → `engine.CheckDriver` (the driver's signed HeadBucket), `lyve` → `drivers.LyveConsoleClient.CustomerDetails` (root key via `LYVE_PROBE_*` → falls back to `LYVE_*`; one 403 retry; paced at 60s). A driver that failed to register at boot is skipped. `probeBackendOnce` bounds every probe with a timeout (15s; 45s for the Lyve console) and records the result in `BackendHealthChecker` (`Failures` is monotonic).
+- **Why**: a TCP dial cannot see a revoked key. Prod's iDrive key was dead for two weeks in Sep 2026 while `/health` said healthy and only Lyve was ever probed.
+- `prom_metrics.go` — `/metrics` is a real Prometheus registry (`initMetrics`, once). Keeps the legacy unlabeled `vaultaire_requests_total` / `vaultaire_errors_total` (the live prod rules reference them; `errorCount` now increments on 5xx in `loggingMiddleware`, it was a never-incremented stub), plus `backendCollector`: `vaultaire_backend_health{backend}`, `_probe_failures_total`, `_probe_latency_seconds`, `_circuit_open{backend}` (engine breaker not closed), `vaultaire_backend_write_failures_total` (engine fail-loudly counter). Go + process collectors included (RSS is `process_resident_memory_bytes`). Rules: `deploy/monitoring/vaultaire-backends.yml`.
+- `/health` still always returns 200 (HAProxy) — alerting is Prometheus's job, not the health endpoint's.
+- Tests: `backend_probes_test.go`, `prom_metrics_test.go`, `internal/drivers/lyve_console_test.go`.

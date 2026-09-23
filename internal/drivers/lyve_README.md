@@ -438,8 +438,17 @@ but ignored) returns temp credentials that work against S3 with the session
 token. The 2025-11 failure was just the wrong host.
 
 **Not available to us** (reseller-only or unsupported): `RSLiveBilling`,
-`RSListCustomer`, `RSCustomerDetails`, `RSWhitelist*`, `RSSAML*`
-(Unauthorized / BadRequest / not supported).
+`RSListCustomer`, `RSWhitelist*`, `RSSAML*` (Unauthorized / BadRequest /
+not supported).
+
+**Correction (2026-09-20):** `RSCustomerDetails` DOES work for the ROOT key
+when called with our own id — `Action=RSCustomerDetails&CustomerName=v01` →
+200 with NumBuckets/NumFiles/UsedSpace. It is root-only (scoped IAM users get
+"Action not supported", admin-role users 403) and intermittently 403s for
+root in ~5-minute windows after IAM mutations. It is the authenticated
+liveness probe in production (`internal/drivers/lyve_console.go`,
+`LyveConsoleClient.CustomerDetails`, one 403 retry). Full RS* catalogue:
+`.private/lyve-console-rs-actions.md`.
 
 ## API coverage sweep (2026-07-29) — everything in the LC2 guide checked
 

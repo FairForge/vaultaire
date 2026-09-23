@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -66,6 +67,8 @@ type Server struct {
 	requestCount     int64
 	testMode         bool
 	errorCount       int64
+	metricsOnce      sync.Once
+	promHandler      http.Handler
 	healthChecker    *BackendHealthChecker
 	sessionStore     dashauth.SessionStore
 	bandwidthTracker *BandwidthTracker
@@ -422,7 +425,13 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 // reachability — the same check works for any backend regardless of vendor.
 type backendCheck struct {
 	name    string // key in healthChecker, e.g. "quotaless"
-	address string // host:port, e.g. "io.quotaless.cloud:8000"
+	address string // host:port, e.g. "io.quotaless.cloud:8000" (TCP fallback + diagnostics)
+	// probe, when set, is the authenticated check used instead of the TCP
+	// dial (signed HeadBucket via the driver, Lyve console action, …).
+	probe func(ctx context.Context) error
+	// interval overrides defaultProbeInterval; timeout overrides defaultProbeTimeout.
+	interval time.Duration
+	timeout  time.Duration
 }
 
 // endpointToAddress parses an endpoint URL and returns host:port.
@@ -447,15 +456,19 @@ func endpointToAddress(endpoint string) (string, error) {
 	return net.JoinHostPort(host, port), nil
 }
 
-// startHealthChecks runs background goroutines that TCP-dial each backend
-// every 30 seconds and update the health checker accordingly.
+// startHealthChecks runs one background probe loop per configured backend
+// (authenticated where possible, TCP dial otherwise — see backend_probes.go)
+// and updates the health checker accordingly.
 // Goroutines stop when ctx is cancelled (i.e. on server shutdown).
 //
-// Adding a new backend: register it in NewServer with
-// s.healthChecker.RegisterBackend("name"), then add a backendCheck entry
-// here pointing at its endpoint env var.
+// Adding a new backend: give it a driver HealthCheck and add it to the
+// driver table in buildBackendProbes, or add a TCP entry in configuredBackends.
 func (s *Server) startHealthChecks(ctx context.Context) {
-	for _, b := range configuredBackends(os.Getenv) {
+	var eng driverChecker
+	if s.engine != nil {
+		eng = s.engine
+	}
+	for _, b := range buildBackendProbes(os.Getenv, eng) {
 		b := b // capture for goroutine
 		s.healthChecker.RegisterBackend(b.name)
 		go s.runBackendHealthLoop(ctx, b)
@@ -500,39 +513,17 @@ func configuredBackends(getenv func(string) string) []backendCheck {
 	return backends
 }
 
-// runBackendHealthLoop probes a single backend on a 30-second ticker until
-// ctx is cancelled.
+// runBackendHealthLoop probes a single backend on its interval until ctx is
+// cancelled. The first probe runs immediately so /health is accurate from
+// the first request.
 func (s *Server) runBackendHealthLoop(ctx context.Context, b backendCheck) {
-	check := func() {
-		start := time.Now()
+	s.probeBackendOnce(ctx, b)
 
-		// TCP dial confirms the host is reachable on the expected port.
-		// This is backend-agnostic: works for Quotaless, Lyve Cloud, Geyser,
-		// or any future S3-compatible provider without any HTTP-level quirks.
-		conn, err := net.DialTimeout("tcp", b.address, 3*time.Second)
-		latency := time.Since(start)
-
-		if err != nil {
-			s.logger.Warn("backend health check failed",
-				zap.String("backend", b.name),
-				zap.String("address", b.address),
-				zap.Error(err),
-				zap.Duration("latency", latency))
-			s.healthChecker.UpdateHealth(b.name, false, latency, err)
-			return
-		}
-		_ = conn.Close()
-
-		s.healthChecker.UpdateHealth(b.name, true, latency, nil)
-		s.logger.Debug("backend health check: TCP OK",
-			zap.String("backend", b.name),
-			zap.Duration("latency", latency))
+	interval := b.interval
+	if interval == 0 {
+		interval = defaultProbeInterval
 	}
-
-	// Run immediately so /health is accurate from the first request.
-	check()
-
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -540,7 +531,7 @@ func (s *Server) runBackendHealthLoop(ctx context.Context, b backendCheck) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			check()
+			s.probeBackendOnce(ctx, b)
 		}
 	}
 }
@@ -968,15 +959,6 @@ func (s *Server) WrapWithRBACPermission(permission string, handler http.HandlerF
 	}
 }
 
-func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	metrics := fmt.Sprintf("vaultaire_requests_total %d\nvaultaire_errors_total %d\n",
-		atomic.LoadInt64(&s.requestCount),
-		atomic.LoadInt64(&s.errorCount),
-	)
-	w.Header().Set("Content-Type", "text/plain")
-	_, _ = w.Write([]byte(metrics))
-}
-
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{
@@ -1095,10 +1077,15 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&s.requestCount, 1)
 		start := time.Now()
-		next.ServeHTTP(w, r)
+		cw := &countingResponseWriter{ResponseWriter: w}
+		next.ServeHTTP(cw, r)
+		if cw.statusCode >= http.StatusInternalServerError {
+			atomic.AddInt64(&s.errorCount, 1)
+		}
 		s.logger.Info("request",
 			zap.String("method", r.Method),
 			zap.String("path", r.URL.Path),
+			zap.Int("status", cw.statusCode),
 			zap.String("request_id", w.Header().Get("X-Request-Id")),
 			zap.Duration("latency", time.Since(start)),
 		)

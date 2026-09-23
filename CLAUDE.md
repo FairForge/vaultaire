@@ -89,7 +89,7 @@ Migrations are in `internal/database/migrations/`.
 
 ## Architecture Decisions (Non-Negotiable)
 
-1. **TCP dial for health checks** — HTTP health checks against S3 backends are unreliable (EOF, 403 vary by vendor). TCP dial is backend-agnostic.
+1. **Authenticated health probes, TCP dial as fallback** — unauthenticated HTTP checks against S3 backends are unreliable (EOF, 403 vary by vendor), so never probe with a bare GET. Backends with a driver are probed with a *signed* HeadBucket (iDrive, Geyser) or the Lyve console action (root key); anything else gets a backend-agnostic TCP dial. Signed probes are what catch a dead key (`internal/api/backend_probes.go`).
 2. **HEAD serves from `object_head_cache`** — never fetches from backend. Size/ETag/content-type stored on PUT, queried on HEAD (~1ms).
 3. **ETags computed via MD5 stream on upload** — never return MD5 of empty string.
 4. **Always stream, never buffer** — use `io.Reader`, never `[]byte` in memory for large data.
@@ -145,6 +145,7 @@ GitHub Actions Deploy (`.github/workflows/deploy.yml`):
 | `STORAGE_MODE` | auto-detect | Force specific backend |
 | `S3_ACCESS_KEY`, `S3_SECRET_KEY` | — | AWS S3 credentials |
 | `LYVE_ACCESS_KEY`, `LYVE_SECRET_KEY`, `LYVE_REGION` | region: us-west-1 | Seagate Lyve Cloud 2 — buckets are homed per region; see `internal/drivers/lyve_README.md` |
+| `LYVE_PROBE_ACCESS_KEY`, `LYVE_PROBE_SECRET_KEY`, `LYVE_PROBE_CUSTOMER` | falls back to `LYVE_*`; customer `v01` | Root key for the authenticated Lyve health probe (console `RSCustomerDetails` is root-only); see `deploy/monitoring/README.md` |
 | `QUOTALESS_ACCESS_KEY`, `QUOTALESS_SECRET_KEY`, `QUOTALESS_ENDPOINT` | — | Quotaless storage |
 | `STRIPE_SECRET_KEY` | — | Stripe API key (sk_test_... or sk_live_...) |
 | `STRIPE_WEBHOOK_SECRET` | — | Stripe webhook endpoint secret (whsec_...) |
