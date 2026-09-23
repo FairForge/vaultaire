@@ -72,7 +72,7 @@ The `engine.Driver` interface (in `internal/engine/interface.go`) is the sacred 
 
 Registration persists to **four tables in order**: `users` -> `tenants` -> `api_keys` -> `tenant_quotas`. Missing any causes failures. S3 auth queries `tenants` first (primary key, full access), then falls back to `api_keys` for scoped VLT_ keys, then `sts_tokens` for ASIA-prefixed temporary credentials.
 
-Other critical tables (62 migrations through `062_smart_demotions.sql`):
+Other critical tables (63 migrations through `063_smart_promotions.sql`):
 - `object_head_cache` — HEAD/GET metadata cache (~1ms), content-type, ETag, metadata JSONB
 - `buckets` — bucket registry with visibility, CORS, cache TTL, metadata JSONB, slug
 - `multipart_uploads`, `multipart_parts` — in-progress multipart state
@@ -83,7 +83,7 @@ Other critical tables (62 migrations through `062_smart_demotions.sql`):
 - `stripe_events` — webhook event dedup
 - `dashboard_sessions` — PostgreSQL-backed sessions with IP/user-agent tracking
 - `oauth_accounts` — OAuth provider links (Google, GitHub)
-- `smart_demotions` — Smart-tier demotion ledger (5.15.8): one row per hot→cold move, hot copy reclaimed after a grace period under an etag guard
+- `smart_demotions` — Smart-tier demotion ledger (5.15.8): one row per hot→cold move, hot copy reclaimed after a grace period under an etag guard; read-time promotion state (063)
 - `feature_flags` — runtime flags (1.13): global kill-switches + per-tenant overrides, `'*'` = global row; served via `internal/flags` (~15s cache, admin API + dashboard `/admin/flags`)
 
 Migrations are in `internal/database/migrations/`.

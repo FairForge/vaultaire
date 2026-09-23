@@ -86,6 +86,7 @@ type Server struct {
 	inventoryRunner  *InventoryRunner
 	dedupGCRunner    *DedupGCRunner
 	smartDemotion    *SmartDemotionRunner
+	smartPromoter    *SmartPromoter
 	multipartReaper  *MultipartReaper
 	// multipartMaxUploadBytes caps a single multipart upload's accumulated
 	// in-flight part bytes (0 = unlimited). Part data lives unbilled on local
@@ -278,7 +279,9 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		fc = s.flags
 	}
 	s.smartDemotion = NewSmartDemotionRunner(s.db, s.engine, fc, logger)
+	s.smartPromoter = NewSmartPromoter(s.db, s.engine, logger)
 	if s.smartDemotion != nil {
+		s.smartDemotion.Promoter = s.smartPromoter
 		if v := os.Getenv("SMART_DEMOTION_HOT_FRACTION"); v != "" {
 			if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 && f <= 1 {
 				s.smartDemotion.HotFraction = f
