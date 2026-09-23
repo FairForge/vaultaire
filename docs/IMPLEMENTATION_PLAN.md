@@ -1,14 +1,23 @@
 # Vaultaire Complete Implementation Plan
 
-**Last updated**: 2026-09-18
+**Last updated**: 2026-09-22
+**Status (2026-09-22)**: **Launch = October 31, 2026 (T-39). ALL launch-blocking CODE is shipped** — Stages 0, 1, 1B and 3 done; backend-outage alerting live (5.12.10, #457); quota-sold pricing copy (#458). Prod = iDrive primary (NEW reseller acct d15e6040, Dallas key swapped in 2026-09-22) + Geyser archive + Lyve `resilient`/fallback leg; **no `ENCRYPTION_MASTER_KEY` in prod yet**. Pricing is QUOTA-SOLD on every tier (section below): Vault Flex $2.55/$2.00 per TB, Standard $4.49/$4.99, Performance PARKED, no Stripe Billing Meters at launch.
+**Remaining critical path = OWNER items, in stage order per `.private/LAUNCH_EXECUTION_SEQUENCE.md`:**
+- **Stage 2** — confirm iDrive payment on the new acct; generate + escrow `ENCRYPTION_MASTER_KEY` → prod (runbook `.private/STAGE2_RUNBOOK.md`).
+- **Stage 3** — load-test rerun after the Stage-2 cutover (scripted; baseline `bench-results/LOADTEST-2026-08-03.md`).
+- **Stage 4 (week of Oct 5)** — Stripe LIVE quota prices (price × TB: Standard monthly/annual, Vault monthly/annual, Founders + LET2026 coupons) + Stripe Tax + one real-card cycle. NO meters (V18.7-minimal, rescoped).
+- **Stage 5 (week of Oct 12)** — Cloudflare rules incl. S3 bypass-cache, hosted status page (5.14.12), cold-standby VPS + PG replication, email provider (5.6/5.13.4), subscribe to the ntfy alert topic.
+- **Stage 5.5** — DMCA agent, CSAM scanning tool (HARD blocker before signups open), single-copy disclosure, `security.txt`, insurance.
+- **Stage 6 (week of Oct 19)** — flip the `signups` flag, canary E2E, LET post, code freeze.
+**Next CODE item**: Smart demotion job WP (Phase 5.15.8 below) → per-region iDrive keys (small, stack row 13). Lyve hygiene ✅ DONE 2026-09-23 (ops): scoped IAM service user `vaultaire-prod` (s3:* on `stored-*` only) is prod's data-plane key, root key demoted to `LYVE_PROBE_*` (console probe only), 4 policy-less `stored-*@stored.ge` users deleted, bucket-wide abort-MPU-7d lifecycle on both `stored-*` buckets + 5 stale July MPUs aborted, 99 junk/test buckets purged (keep: `stored-*`, `vaultaire-bench-2026`, `vbench-*`, the one live-COMPLIANCE-locked bucket). Migrations: `061_content_encoding.sql` is the latest (2026-09-18).
 **Status (2026-09-18, addendum — plan unchanged otherwise)**: Versity evaluation complete (versitygw @ 1246a08 studied as a parallel-implementation reference + free conformance suite; full findings in `.private/VERSITY_EVALUATION.md`). **Correction of record: Versity is NOT in our stack — Geyser's S3 layer is Spectra Logic Vail** (`internal/drivers/geyser_README.md`). Takes captured as **WP-VG1..VG4** in the new "Versity takes" section after the Post-Launch 90-Day Priority Stack: WP-VG1 (pre-launch, small) = run versitygw's 523-test BATS S3 suite against a local vaultaire → triaged gap report; WP-VG2 (post-launch) = SigV4-streaming + checksum hardening sweep (per-chunk signatures, trailer checksum validation — aws-cli v2's default path currently gets zero server-side integrity check — plus full `x-amz-checksum-*` surface); WP-VG3 (folds into full V18.2) = restore wire-fidelity checklist (we're already MORE AWS-faithful than versitygw's glacier mode); WP-VG4 (M12+) = add versitygw-posix techniques to the own-fleet eval set.
 **Status (2026-07-09)**: **Launch-sequence Stage 0 (live ops triage) COMPLETE.** Root cause of three separate 2026-07-08 review findings was a single event: prod `.env` went unreadable (root:root 600) on Jun 7 — (a) daily pg_dump backups were empty 20-byte gzips while logging success (fixed: perms + hardened pg-backup.sh with fail-loud asserts; fresh 71-table dump restore-tested), (b) CI deploys were silent no-ops reporting green — psql password prompts consumed the deploy script from stdin, so prod ran a Jun 8 binary for a month and migration 052 was never applied (fixed: PR #316 `psql -w </dev/null` + pre-swap rollback binary; verified live — prod now runs main @ c41d355 with 052 applied), (c) `ENV` was absent entirely (now `production`, chaos endpoints gated). Cert-expiry blocker was stale (origin cert valid to 2041). Prod primary backend is already iDrive — Stage 2 shrinks to verify + `ENCRYPTION_MASTER_KEY`. Test baseline on main: only known `TestPostgres_TenantOperations` fails. **Next: Stage 1 code fixes (WP-5 → WP-9 → WP-2 → WP-3 → WP-1 → WP-6 → WP-7 → WP-4) per `.private/LAUNCH_EXECUTION_SEQUENCE.md`.**
 <!-- reconstructed: status + audit pass 2026-07-07 — verified against git log (#173-#312), .private/ docs; changes marked with "reconstructed:" comments -->
 **Status (2026-07-07, superseded)**: **Tier 1 code-complete. Launch (end of July 2026) is gated on 5.15.5 (ops) + 5.15.6 (front-door UX) + 5.15.7 (code/billing/security). ⚠️ The "ops only, no code" framing below is SUPERSEDED by two 2026-07-08 reviews that found real code blockers — see Phase 5.15.6 and Phase 5.15.7. Day-to-day driver: `.private/LAUNCH_EXECUTION_SEQUENCE.md`; ops steps: `.private/LAUNCH_RUNBOOK.md`.** Last merged work: PR #312 (2026-06-17) — range-GET passthrough (`RangeGetter` interface on iDrive/Lyve/Geyser, 5× download: 6→30 MB/s single, 106 MB/s concurrent), **convergent chunk encryption [Phase 10.1-10.3]** (HKDF deterministic nonces, dedup-safe, migration 052), OneDrive fleet renamed **"permafrost"** (admin-only, removed from user-selectable storage classes), NVMe cache enlarged (16 GB RAM / 500 GB SSD, <1ms hot reads), and `cmd/validate` 22-test E2E suite (iDrive/Lyve/Geyser all 20/20 from SLC). Before that: **Phase 9 compression COMPLETE** (#311), **Phase 8 COMPLETE** (#300-309), **Phase 7 COMPLETE** (#297-299), admin gap-fills 3.7/3.10/3.11 (#294-296). Tier 2 has shipped AHEAD of launch through Phase 10.1-10.3.
-**Launch blockers (ops — SUPERSEDED 2026-07-08: now ALSO code, see Phases 5.15.6 + 5.15.7)**: **5.15.5** — prod on a durable backend (currently falls back to local disk), create + attach Stripe Billing Meters, set `STRIPE_METER_*` in prod .env, reopen signups (`SIGNUPS_ENABLED=true`), **TLS auto-renewal check (cert expires 2026-07-28 — launch week)**, Cloudflare cache/rate rules. **5.15.4** — smoke checklist run. **5.14.12** — hosted status page. **V18.7-minimal** — Stripe products for the Vault packs sold on day one + LET2026 coupon (launch posts ready in `.private/launch/`). **5.15.2** — confirm the load harness was run against live after #283, or run it.
+**Launch blockers (HISTORICAL — see Status 2026-09-22 for the quota-sold / Oct-31 truth; ops — SUPERSEDED 2026-07-08: now ALSO code, see Phases 5.15.6 + 5.15.7)**: **5.15.5** — prod on a durable backend (✅ iDrive since Stage 0; was local-disk fallback), ~~create + attach Stripe Billing Meters, set `STRIPE_METER_*` in prod .env~~ (NOT needed — quota-sold decision 2026-09-21), reopen signups (`signups` flag), ~~TLS auto-renewal check (cert expires 2026-07-28 — launch week)~~ (stale: origin cert valid to 2041; launch is Oct 31, 2026), Cloudflare cache/rate rules. **5.15.4** — smoke checklist run. **5.14.12** — hosted status page. **V18.7-minimal** — Stripe LIVE quota prices (price × TB for Standard/Vault monthly+annual — NO Vault packs, NO meters) + Founders + LET2026 coupons (launch posts in `.private/launch/`). **5.15.2** — ✅ run against prod 2026-08-03 (#423).
 **Next code phase**: post-launch — see **"Post-Launch 90-Day Priority Stack"** (before the Tier 2 heading). In the Tier-2 pipeline sequence: Phase 10 remainder (10.4-10.8, incl. new 10.8 blind dedup/OPRF), then Phase 11 erasure coding → P2-P6 permafrost parity.
 **Status (2026-06-04, superseded)**: Phase 5.14 COMPLETE through 5.14.11 — all shipped & deployed to SLC prod: 5.14.1-5.14.4 (#253-256), 5.14.11 security hardening (#257), 5.14.5 HIPAA (#258), 5.14.6 GDPR/EU Data Act (#259), 5.14.7 per-bucket regions (#260), 5.14.8 SSE-C (#261), 5.14.9 access logging + inventory (#262), 5.14.10 compliance dashboard (#263). 5.11.0-5.11.12, 5.12.3-5.12.7, 5.13 complete. Gap-fill 5.10.17 object tagging shipped (#264). 5.15.1 graceful shutdown already in main.go (verify systemd TimeoutStopSec=45). **ALL gap-fills + 5.15 code COMPLETE:** 5.10.18 (#267), 2.7 (#269), 4.3 (#275), 3.6 (#276), 3.8 (#277), 3.9 (#278), landing 5.15.3 (#272), load-test gate 5.15.2 code (PR #282). **Remaining before launch = OPS only (no more code blocks Tier 1):** run the 5.15.2 load harness against live + fix what it surfaces; 5.15.4 smoke checklist; **5.15.5 prod backend/durability + Stripe meter activation + reopen signups (the true launch blocker)**; 5.14.12 status page (hosted). 5.14.12 status page = ops (hosted), not code.
-**Before 5.15 (launch gate)**: gap-fills — ✅ 5.10.17 object tagging (#264); REMAINING: 5.10.18 (Content-Disposition, next), 2.7 (metered billing — SUPERSEDED as a launch gate by the 2026-09-21 quota-sold pricing decision; reporter stays dormant), 4.3 (bandwidth alerts — table exists, alert logic missing), 3.6 (audit viewer), 3.8 (revenue dashboard — only an estimate exists), 3.9 (cost dashboard). Then 5.15.3 landing page (code) + ops gates 5.15.2/5.15.4/5.14.12 + **5.15.5 (prod backend/durability + billing activation — the true launch blockers)** = launch ready. (5.15.1 done.)
+**Before 5.15 (launch gate) (HISTORICAL, 2026-06 — every item below shipped: 5.10.18 #267, 2.7 #269, 4.3 #275, 3.6 #276, 3.8 #277, 3.9 #278)**: gap-fills — ✅ 5.10.17 object tagging (#264); REMAINING: 5.10.18 (Content-Disposition, next), 2.7 (metered billing — SUPERSEDED as a launch gate by the 2026-09-21 quota-sold pricing decision; reporter stays dormant), 4.3 (bandwidth alerts — table exists, alert logic missing), 3.6 (audit viewer), 3.8 (revenue dashboard — only an estimate exists), 3.9 (cost dashboard). Then 5.15.3 landing page (code) + ops gates 5.15.2/5.15.4/5.14.12 + **5.15.5 (prod backend/durability + billing activation — the true launch blockers)** = launch ready. (5.15.1 done.)
 **Post-launch, first 2 weeks**: ✅ ALREADY DONE ahead of schedule — 3.7 customer support view (#294), 3.10 admin notifications (#295), 3.11 abuse queue (#296). <!-- reconstructed: verified against git log -->
 **Recent (2026-06-17)**: PR #312 merged (see Status line): range-GET passthrough, Phase 10.1-10.3 convergent encryption, permafrost rename, NVMe cache, `cmd/validate` + `scripts/validate-backends.sh`. PR #311 (2026-06-05+): Phase 9 zstd compression on chunked PUT/GET — Phase 9 COMPLETE.
 **Cleanup**: delete orphan branch `phase-5.11.6-event-log-webhooks` (code is on main, merged via PRs #238/#239).
@@ -124,7 +133,7 @@ what shipped, but activation is no longer a launch gate.
 
 ## Migration Numbering
 
-Migration numbers in this plan are **planning references**, not assignments. Existing migrations go up to `052_chunk_encryption.sql` (as of 2026-07-07). <!-- reconstructed: verified against internal/database/migrations/ --> The next migration built gets `053`, regardless of which phase it comes from. Assign sequentially at build time — multiple phases reference the same numbers but only one migration can have each number. When starting a phase, check `ls internal/database/migrations/` for the latest number and use the next one.
+Migration numbers in this plan are **planning references**, not assignments. Existing migrations go up to `061_content_encoding.sql` (as of 2026-09-18; was `052_chunk_encryption.sql` on 2026-07-07). <!-- reconstructed: verified against internal/database/migrations/ --> The next migration built gets `062`, regardless of which phase it comes from. Assign sequentially at build time — multiple phases reference the same numbers but only one migration can have each number. When starting a phase, check `ls internal/database/migrations/` for the latest number and use the next one.
 
 ## Documentation Practice
 
@@ -161,10 +170,10 @@ These were evaluated and deliberately postponed. Revisit at the noted trigger po
 
 Audit 2026-04-24 found these partial completions. Core functionality works; these are polish items to address before launch.
 - **Phase 2.5 billing page gaps** — Invoice history not rendered (template doesn't call `GetInvoices()` despite it existing in `stripe.go`). No "Pause Subscription" toggle, predictive billing, add-on management, or prepaid credit display. Stripe Portal covers invoices/pause for now. **Fill in during**: 5.11.8 (Cost Comparison Widget) when the billing page is already being expanded.
-- **Phase 4.3 bandwidth banking + alerts** — DB schema exists (migration 020: `bandwidth_rollover`, `bandwidth_alerts` tables) but zero application code for rollover calculation, alert threshold checking, or overage warnings. **Fill in during**: 5.11.10 (Free Tier) or 5.11.12 (Bandwidth Budgets) when quota enforcement is being refined.
+- **Phase 4.3 bandwidth banking + alerts** — DB schema exists (migration 020: `bandwidth_rollover`, `bandwidth_alerts` tables). ✅ Alert threshold checking + 80%/95% email/event alerts SHIPPED as 4.3 (#275). Still missing: rollover calculation + overage warnings (quota-sold launch = throttle-first at the allowance; overage billing is post-launch). **Fill in during**: stack #5 no-surprises billing / 5.11.12 (Bandwidth Budgets).
 - **GLACIER storage class routes but can't restore (found 2026-07-29)** — storage-class routing (5.12.4) sends `GLACIER`/`DEEP_ARCHIVE` to Geyser, but the engine has zero `InvalidObjectState` handling: any GET on data past the ~13-day Vail staging window surfaces as a raw error (or worse, the failover path). **Fill in during**: V18.2. **2026-08-04 REPRICE DECISION (VAULT_SERIES_ECONOMICS.md, condition 4): the V18.2 MINIMUM recall slice is promoted to PRE-LAUNCH — and SHIPPED same day (#427 + #428, deployed + live-verified against the real tape library, incl. the restore-of-staged-object 403 found by the E2E). Option A holds; the ~Aug 22 Option B checkpoint is moot.** Minimum slice = typed `ErrArchived` in geyser.go, GET on archived → 403 `InvalidObjectState` XML, RestoreObject passthrough (`POST ?restore`), HEAD `x-amz-restore` status, dashboard Restore button + status — Glacier-compatible wire semantics so rclone/aws-cli restore workflows work unmodified. The full V18.2 (rehydration worker, bulk thaw, webhooks) stays first post-launch.
 - **Archive-tier placement hole for >64 MB objects (confirmed 2026-07-30 E2E, flagged for plan 2026-08-04)** — archive/GLACIER-class objects **above the 64 MB chunking threshold enter the chunked path and land on the engine primary (iDrive), not Geyser** — the exact hole the `resilient` tier closed in #405 by skipping chunking (chunk blobs always live in the shared `_global` container on the primary). Consequence: the archive tier's core buyers (media archives — RAW batches, video masters, i.e. almost exclusively >64 MB files) silently get hot-tier COGS ($4.125/TB iDrive) under a $2/TB archive price, and the "it's on tape" claim is false for exactly those objects. Fix is the same gate resilient ships: archive-class skips chunking, stores whole on Geyser (deliberate trade: archive objects skip dedup — acceptable, tape economics don't need it). **This + V18.2 are the only two code gaps between the three-tier base layer and "build everything on top" (assessment 2026-08-04). CLOSED 2026-08-04 (PR #425)**: `chunkingDisabledByTier` now matches `GLACIER`/`DEEP_ARCHIVE` like `RESILIENT` — archive objects store whole on Geyser. Residual: an explicit `x-amz-storage-class` header at multipart *initiate* is not persisted (no storage_class column on `multipart_uploads`), so header-classed multiparts into an `auto` bucket still land on the primary; archive-tier *buckets* are covered (complete resolves `bucketTierStorageClass`).
-- **"Smart" mid-tier hot→cold mover unverified (flagged 2026-08-04)** — the Standard-tier margin model (interim pricing 2026-07-29) assumes a 14-day hot window capping the iDrive share at ~15%, but no automated age-based migration job is confirmed to exist (smart tiering = Phase 7.6/8.1 milestone). Until it runs, tier placement is static and the ~54-59% Standard margin claim is aspirational. Not launch-blocking (margin protection, not correctness). **Fill in during**: 8.1 (smart tiering), pulled forward when Standard volume makes the iDrive share material.
+- **"Smart" mid-tier hot→cold mover unverified (flagged 2026-08-04)** — the Standard-tier margin model assumes a 14-day hot window capping the iDrive share at ~15%, but no automated demotion job exists yet (7.3's hourly TieringEngine classifies generically; 7.6/8.1 are data-residency and the FastCDC chunker, NOT smart tiering — earlier mislabel). Until it runs, tier placement is static and the ~54-59% Standard margin claim is aspirational. Not launch-blocking (margin protection, not correctness), but it is the **next CODE item**: **Phase 5.15.8 Smart demotion job WP** (hot budget = 0.15 × quota, idle ≥14d or over-budget LRU, never <3d; spec `.private/SMART_TIER_DESIGN.md`).
 - **Lyve backend follow-ups (2026-07-29, from the readiness pass — all small)** — (1) homing guard: `HealthCheck` should compare `?rs-info` replicationPolicy against the driver region to catch misprovisioned buckets at boot; (2) wire Lyve as a replication/DR target (server-side cross-region copy measured ~47 MB/s, UploadPartCopy works for any-size objects); (3) per-region Lyve drivers mirroring `idrive_regions.go` for EU/APAC residency; (4) `RSListBillingData` → COGS reconciliation cron (pairs with meters work). Full capability matrix: `internal/drivers/lyve_README.md`. **Fill in during**: 5.12.5 (failover/routing) or a dedicated post-launch WP.
 
 ## Compliance Audit (2026-05-07) — Items Pulled Forward
@@ -190,7 +199,7 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 
 ## Vault18 Deep Archive Sub-Phases
 
-*Vault18 is the "Anti-Glacier" product: $1/TB launch promo, zero retrieval fees, dual-site tape (LA + London). Sits between Phase 5.14 and Phase 5.15 in the Tier 1 sequence. Full plan: `.private/VAULT18_LAUNCH.md`.*
+*Vault18 is the "Anti-Glacier" product — now sold as **Vault Flex**: $2.55/TB/mo monthly · $2.00/TB annual prepaid, any size, quota-sold (Founders $1/TB capped at 100 TB, 3–10 TB/acct; the Vault1/3/5/10/18/50/100 pack ladder is GONE — 2026-08-04 linear reprice + 2026-09-21 quota-sold decision), zero retrieval fees, dual-site tape (LA + London). Sits between Phase 5.14 and Phase 5.15 in the Tier 1 sequence. Full plan: `.private/VAULT18_LAUNCH.md`.*
 
 **Measured reality (2026-07-29 Geyser probes — full data in `benchmark-results-2026-07` memory):** Geyser is TRUE Glacier — objects past the Vail disk-staging window (≤13 days) are `StorageClass: GLACIER` and refuse direct GET (`InvalidObjectState`); the engine currently has NO handling for this, so V18.2 is promoted to the first post-launch WP. RestoreObject works (bulk-friendly); **tape recall measured <3 min** (idle library) — "restores begin in minutes" is honest copy. Restored copies read ~5 MB/s/stream from staging and expire per `Days` → rehydrate to a hot tier instead of serving from staging (the Geyser×Wasabi integration pattern). Ingest re-measured 2026-07-29: **227 MB/s sustained over HTTP/1.1 multi-connection** (the earlier 27.7 MB/s "ceiling" was our forced-h2 client, fixed in `geyser.go`); reads ~2.5-3 MB/s/stream, scale with fan-out (76 MB/s @ 32 streams). **Access prereqs (owner):** fetch 2nd Geyser API key (rotation + test if ceiling is per-key), console session for `geyser_admin.go` (per-tier buckets, London recreation, billing endpoint), ask Geyser support for object-lock-enabled bucket (Vail returns proper object-lock error codes — V18.5 may be a provisioning flag), restore SLA under contention, contract restore/egress pricing. **Vail management API DISCOVERED (2026-07-29): live at `la1.geyserdata.com/sl/api/` (401 = present, needs auth) — full spec committed at `docs/references/vail-api-guide.pdf`. It exposes per-bucket `locking` (object lock), `restore` (automatic read-through recall — could delete half of V18.2's orchestration), `versioning`, lifecycles, per-object `createObjectClone` (clone to another storage "as a restore that persists N days" = rehydration as a management primitive), and clone verification (integrity attestation). Auth: `POST /sl/api/tokens` with console username/password (+MFA challenge) → JWT. [YOU]: try your Geyser console creds there; if they work we get the whole control plane, else ask Geyser for scoped API access.**
 
@@ -202,7 +211,7 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 | V18.4 | Glacier migration tooling (`aws s3 sync` from Glacier → stored.ge) | NOT STARTED |
 | V18.5 | Retention policies + immutability certificates (WORM integration) | NOT STARTED — ask Geyser for lock-enabled bucket first |
 | V18.6 | Cost calculator (vs Glacier, Wasabi, B2 — show $0 retrieval savings) | NOT STARTED |
-| V18.7 | Pack pricing integration (Vault3/9/18/36 Stripe products) | NOT STARTED |
+| V18.7 | Quota pricing integration — Stripe price × TB quantity for Standard-monthly/annual + Vault-monthly/annual, Founders + LET2026 coupons (NO packs, NO meters; rescoped 2026-09-21) | OWNER: Stage 4 (week of Oct 5) — create LIVE prices + one real-card cycle |
 | V18.8 | Customer-facing deep archive experience (dashboard, restore status) | NOT STARTED |
 | V18.9 | Backup-tool-aware routing (restic/borg index+snapshot keys hot, data packs to tape) | NOT STARTED |
 
@@ -324,7 +333,7 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 ### 2.4: Quota Adjustment
 **File**: `internal/billing/stripe.go`, `internal/api/quota_management.go`
 - On plan change webhook: look up plan limits → update `tenant_quotas` row
-- Plan mapping: free (5GB), Vault3 (3TB), Standard (per-TB metered), Performance (per-TB metered)
+- Plan mapping: free (5GB), Vault Flex (quota × TB, hard cap), Standard (quota × TB, hard cap), Performance (parked — post-launch at $6.99). <!-- 2026-09-21: was "Vault3 (3TB), Standard/Performance (per-TB metered)" — quota-sold on all tiers now -->
 - Downgrade guard: if current usage > new plan limit, warn but don't delete data
 
 ### 2.5: Billing Dashboard Page
@@ -335,7 +344,7 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 
 ### 2.6: Plan Upgrade/Downgrade
 **File**: `internal/dashboard/handlers/billing.go`
-- Three-column pricing card (Vault / Standard / Performance)
+- Three-column pricing card (Vault / Standard / Performance) — Performance is PARKED at launch (no Stripe product; launches post-launch at $6.99), so the launch card set is Vault Flex + Standard
 - "Current plan" badge, "Upgrade" / "Downgrade" buttons
 - Stripe Checkout for upgrades, Stripe Portal for downgrades
 
@@ -856,11 +865,11 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 - Quotaless removed from SLC production .env (was causing 401 retry storms on every Delete)
 - Still wired in main.go code but won't activate without QUOTALESS_ACCESS_KEY in env
 - When re-enabled: apply `SwapComputePayloadSHA256ForUnsignedPayloadMiddleware`, fix incompatible S3 ops
-- Auto-detect priority in main.go is now: `iDrive > Quotaless > S3 > Geyser > local`
+- Auto-detect priority in main.go is now: `iDrive > Quotaless > S3 > Geyser > local` (describes the code; Quotaless creds have been 401-dead since 2026-08 and are unused in prod)
 - Reference: `cmd/quotaless-bench-v2/main.go`, `internal/drivers/quotaless_README.md`
 
 ### 5.12.2: Cloudflare R2 Driver — ✖ DROPPED (2026-08-01)
-*Superseded by the tier architecture: public/CDN delivery is Cloudflare-in-front (`cdn.stored.ge`) over the existing backends, and the launch lineup (iDrive/Quotaless/Geyser/Lyve) has no R2 slot. Revisit only if a zero-egress replication target is needed post-launch.*
+*Superseded by the tier architecture: public/CDN delivery is Cloudflare-in-front (`cdn.stored.ge`) over the existing backends, and the launch lineup (iDrive/Geyser/Lyve + OneDrive permafrost second copy; Quotaless creds dead, removal deferred to M12) has no R2 slot. Revisit only if a zero-egress replication target is needed post-launch.*
 **Files**: `internal/drivers/r2.go` (new), `internal/drivers/r2_test.go` (new)
 - S3-compatible driver for Cloudflare R2 ($15/TB storage, zero egress, 330 PoPs)
 - Used for public CDN buckets — when tenant toggles bucket to public, replicate to R2
@@ -891,7 +900,7 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 - Prometheus metrics: `vaultaire_backend_failover_total{from, to}`, `vaultaire_backend_health{name}`
 - Graceful degradation: if all backends down, return 503 with `Retry-After` header
 - **Storage class mapping**: honor `x-amz-storage-class` header on PUT — `STANDARD` → iDrive, `STANDARD_IA` → Lyve (zero egress), `GLACIER` → Geyser, `DEEP_ARCHIVE` → Geyser+airgap, `ONEZONE_IA` → OneDrive (parity-only, not customer-facing). Return correct class on HEAD/GET. Default `STANDARD` if omitted. Enables S3-compatible lifecycle transitions and customer tier control via standard AWS tooling. (Quotaless mapping removed — account locked.)
-- ⚠ **Stale-dependency note (2026-07-07)**: Lyve is strategically DROPPED (Wasabi acquisition, 90-day minimum billing — see `.private/CLAUDE.md`), though the driver remains wired and passed validation 20/20 in #312. Don't route customer `STANDARD_IA` to Lyve; treat it as an alias for `STANDARD` until an own-fleet warm tier exists. The permafrost (OneDrive) class was removed from user-selectable classes in #312. <!-- reconstructed: verified against .private/CLAUDE.md + PR #312 -->
+- ⚠ **Stale-dependency note (2026-07-07, CORRECTED 2026-09-22)**: Lyve is **IN the stack** — not a default customer tier, but the `resilient` storage class + DR/fallback hot leg + Vault second copy, closed in #405 (promo = $0 COGS through mid-2028; the 2026-07-07 "strategically DROPPED" call is superseded). Driver wired, validated 20/20 in #312, paired benches 250/206 MB/s (2026-09-19). Don't route customer `STANDARD_IA` to Lyve by default; treat it as an alias for `STANDARD` — `RESILIENT` is the Lyve-backed class. The permafrost (OneDrive) class was removed from user-selectable classes in #312. <!-- reconstructed: verified against .private/CLAUDE.md + PR #312; Lyve status corrected against #405 -->
 
 ### 5.12.5: Backend Health Dashboard
 **Files**: `internal/dashboard/handlers/admin_backends.go` (new), `templates/admin/backends.html` (new)
@@ -942,6 +951,12 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 
 **Test**: Check admin backend dashboard shows all backends with correct health/latency → verify cost tracking aggregates correctly → capacity alerts fire at threshold.
 
+### 5.12.10: Backend-Outage Alerting ✅ SHIPPED 2026-09-22 (#457)
+**Files**: `internal/api/metrics.go`, `internal/engine/health*.go`, `deploy/monitoring/vaultaire-backends.yml`
+- Authenticated backend probes replace the TCP-only check where a vendor can answer honestly: iDrive/Geyser = signed HeadBucket via the engine; Lyve = console `RSCustomerDetails` with the root key (one 403 retry); TCP dial stays the fallback (architecture decision #1 still holds for the unauthenticated path)
+- Real Prometheus `/metrics` exposition — the legacy 2 series are kept; `vaultaire_errors_total` now counts 5xx (it was a never-incremented stub); new `vaultaire_backend_*` series (up/latency/probe result per backend)
+- `deploy/monitoring/vaultaire-backends.yml` — 6 alert rules, installed on SLC 2026-09-23 → Alertmanager (#423) → ntfy bridge. [YOU]: subscribe to the ntfy topic (Stage 5)
+
 ---
 
 ## Phase V18: Vault18 Deep Archive Experience
@@ -959,7 +974,7 @@ These were scattered across Tiers 2-4 but are required at or near launch. Consol
 ### V18.2: Restore Orchestration + Hot Rehydration ⚠ MINIMUM SLICE PRE-LAUNCH, REST FIRST POST-LAUNCH
 **Files**: `internal/engine/retrieval.go` (new), `internal/api/s3_handler.go`, `internal/drivers/geyser.go`
 
-> **2026-08-04 (reprice decision, condition 4): the MINIMUM recall slice below ships PRE-LAUNCH** — GET on an archived object must never surface a raw error while Vault leads the Aug 31 launch. Scope: items 1 and 3 only, no restore worker — (a) `geyser.go` detects `InvalidObjectState` → typed `ErrArchived` (never a 500); (b) GET on archived → 403 `InvalidObjectState` proper S3 error XML; (c) `RestoreObject` passthrough (`POST ?restore` forwarded to Geyser); (d) HEAD returns `x-amz-restore` (`ongoing-request="true"/"false"`); (e) dashboard Restore button + status on the bucket objects page. rclone/aws-cli restore workflows work unmodified; the customer polls and re-GETs within the staging window (≤13 days) — no rehydration, no bulk thaw, no webhooks. Everything else in this section stays the first post-launch WP.
+> **2026-08-04 (reprice decision, condition 4): the MINIMUM recall slice below ships PRE-LAUNCH** — GET on an archived object must never surface a raw error while Vault leads the launch (Aug 31 at decision time; launch moved to **Oct 31, 2026** on 2026-09-14). Scope: items 1 and 3 only, no restore worker — (a) `geyser.go` detects `InvalidObjectState` → typed `ErrArchived` (never a 500); (b) GET on archived → 403 `InvalidObjectState` proper S3 error XML; (c) `RestoreObject` passthrough (`POST ?restore` forwarded to Geyser); (d) HEAD returns `x-amz-restore` (`ongoing-request="true"/"false"`); (e) dashboard Restore button + status on the bucket objects page. rclone/aws-cli restore workflows work unmodified; the customer polls and re-GETs within the staging window (≤13 days) — no rehydration, no bulk thaw, no webhooks. Everything else in this section stays the first post-launch WP.
 
 *Rewritten 2026-07-29 after live probes. Old assumption (direct Geyser reads at 4 MB/s) is wrong: objects past the Vail staging window (≤13 days) are `StorageClass: GLACIER` and GET returns 403 `InvalidObjectState`. Measured: RestoreObject accepted (incl. bulk batches), tape recall <3 min on an idle library, restored copy reads ~5 MB/s/stream from staging and expires per `Days`.*
 
@@ -1019,12 +1034,13 @@ bandwidth from us — wrap cloudSync instead of proxying bytes.*
 - Comparison table: stored.ge Vault18 vs Glacier vs Glacier Deep Archive vs Wasabi vs B2
 - Highlight: "$0 retrieval" vs Glacier's $90/TB retrieval fee
 
-### V18.7: Pack Pricing Integration ⚠ LAUNCH-CRITICAL (minimal version)
+### V18.7: Quota Pricing Integration ⚠ LAUNCH-CRITICAL (minimal version = Stage 4, week of Oct 5)
 **Files**: `internal/billing/stripe.go`
-- Stripe products for Vault packs per `.private/VAULT_SERIES_ECONOMICS.md`: Vault1 $4.99, Vault3 $7.99, Vault5 $9.99 (⭐ LET star), Vault10 $12.99, Vault18 $17.99, Vault50 $44.99, Vault100 $84.99 <!-- reconstructed: corrected pricing against VAULT_SERIES_ECONOMICS.md — previous reconstruction had Vault3 $7.47 / "Vault9" $22.41 / Vault18 $44.82, which match no reference doc (Vault9 doesn't exist) -->
-- Launch promo: Vault18 at $1/TB, CAPPED (see `.private/launch/PRICING_VALIDATION.md`) + LET2026 coupon (10% off 3 months)
-- Pack subscription management in dashboard
-- **Minimal launch scope**: create the Stripe products/prices for the packs actually sold day one (Vault1/3/5/18 per launch posts) — the rest of V18.1-V18.8 can follow post-launch on existing plumbing (tiering engine #297 + storage-class routing #251 already route archive data to Geyser)
+> **RESCOPED 2026-09-21 (quota-sold decision, "Pricing Shape Decision" section above).** The Vault1/3/5/10/18/50/100 pack ladder is GONE (2026-08-04 linear reprice: **Vault Flex** $2.55/TB/mo monthly · $2.00/TB annual prepaid, any size; **Founders** $1/TB capped at 100 TB, 3–10 TB/acct). **Standard** $4.49/TB/mo annual · $4.99 monthly (the old $3.99 survives only as the LET2026 coupon). **Performance PARKED** — no Stripe product at launch, launches post-launch at $6.99. No Stripe Billing Meters at launch.
+- Stripe LIVE prices, one plain subscription price × TB quantity each: Standard-monthly ($4.99), Standard-annual ($4.49), Vault-monthly ($2.55), Vault-annual ($2.00) — hard quota via WP-1 + `tenant_quotas`, prorated resize via the existing plan-change webhook; allowances keyed to quota (hot 15%, egress 0.5× quota/mo Standard, 1× restore Vault)
+- Founders coupon/price ($1/TB, 100 TB cap) + LET2026 coupon (10% off 3 months)
+- Optional add-on: pin-hot at $3/TB-mo × pinned quantity
+- **Minimal launch scope**: create those prices + coupons in Stripe LIVE, wire the price IDs into prod `.env` (`STRIPE_PRICE_*`), enable Stripe Tax, run one real-card cycle — NO Vault packs, NO meters (2.7's reporter stays dormant). The rest of V18.1-V18.8 follows post-launch on existing plumbing (tiering engine #297 + storage-class routing #251 + #425 archive-whole-on-Geyser already route archive data to tape)
 
 ### V18.8: Deep Archive Dashboard
 **Files**: `internal/dashboard/handlers/archive.go` (new), templates
@@ -1036,7 +1052,7 @@ bandwidth from us — wrap cloudSync instead of proxying bytes.*
 ### V18.9: Backup-Tool-Aware Routing
 **Files**: `internal/engine/routing.go` (extends storage-class routing from 5.12.4)
 - restic/borg/kopia CANNOT run against Glacier-class storage directly (prune/check need reads). Route by key pattern within a Vault bucket: restic `config`, `keys/`, `index/`, `snapshots/`, `locks/` → hot backend (iDrive); `data/` packs → Geyser tape. Borg/kopia equivalents.
-- Makes Vault the only $1/TB tier restic works against out of the box — flagship differentiator, pairs with V18.2 for `data/` pack restores.
+- Makes Vault the only ~$2/TB archive tier restic works against out of the box — flagship differentiator, pairs with V18.2 for `data/` pack restores.
 - Document per-tool golden paths in the docs hub (B3).
 
 **Test**: Upload to Vault18 tier → verify ingest buffer accepts immediately → background migration to Geyser starts → wait past staging eviction → GET returns InvalidObjectState → request restore (rclone + dashboard) → recall completes, rehydrated to hot tier → webhook fires → download at hot line-rate → verify retention policy prevents deletion → restic init/backup/restore round-trip against a Vault bucket (V18.9 routing) → cost calculator shows savings vs Glacier.
@@ -1210,6 +1226,7 @@ bandwidth from us — wrap cloudSync instead of proxying bytes.*
 
 ### 5.15.1: Graceful Shutdown
 **Files**: `cmd/vaultaire/main.go`, `internal/api/server.go`
+> **Phase 5.15.1 COMPLETE** — shipped in main.go (systemd `TimeoutStopSec` verified); H-3 shutdown flush (#419) drains the batched hot-path trackers on the same signal path.
 - `os.Signal` handler (SIGTERM, SIGINT) → stop accepting new connections → drain in-flight requests (30s timeout) → close DB pool → close Redis → exit cleanly
 - Without this, every deploy drops active uploads mid-stream
 - Systemd: `TimeoutStopSec=45` in vaultaire.service (gives 30s drain + 15s buffer)
@@ -1217,6 +1234,7 @@ bandwidth from us — wrap cloudSync instead of proxying bytes.*
 
 ### 5.15.2: Load Testing
 **Files**: `tests/load/` (new, gitignored results)
+> **Phase 5.15.2 COMPLETE** — harness #282; ✅ RUN against prod 2026-08-03 (#423): all gates pass, results in `bench-results/LOADTEST-2026-08-03.md` (RSS transient = the #400 deferred memory cap, quantified). Rerun scheduled after the Stage-2 cutover (Stage 3, scripted).
 - Use `k6` or `hey` against staging (or SLC with test tenant)
 - Scenarios: 100 concurrent S3 PUT (1MB), 100 concurrent GET, 50 concurrent multipart (100MB), mixed read/write, management API burst (100 req/s per tenant)
 - Validate: no 5xx under load, p99 latency < 500ms for GET, rate limiter kicks in correctly, DB connection pool doesn't exhaust, memory stays bounded
@@ -1225,8 +1243,9 @@ bandwidth from us — wrap cloudSync instead of proxying bytes.*
 
 ### 5.15.3: Landing Page
 **Files**: `internal/dashboard/templates/public/landing.html` (new), `internal/dashboard/handlers/public.go` (new)
+> **Phase 5.15.3 COMPLETE** — PR #272 (waitlist page), superseded by the real homepage in 5.15.6 B1 (#354) + the #439 Vault Flex / Oct-31 copy refresh.
 - `GET /` for unauthenticated users → marketing landing page (authenticated users redirect to `/dashboard`)
-- Single page: hero ("$3.99/TB S3-compatible storage"), feature grid (zero egress, PQ encryption, S3 compatible), pricing table (Standard/Performance/Vault tiers), "Get Started" CTA → `/register`
+- Single page: hero ("$4.49/TB S3-compatible storage" — quota-sold; $3.99 is now only the LET2026 coupon), feature grid (zero egress, PQ encryption, S3 compatible), pricing table (Standard/Performance/Vault tiers), "Get Started" CTA → `/register`
 - htmx + Go templates (consistent with dashboard, no separate frontend)
 - Open Graph meta tags for social sharing
 - `stored.ge/pricing` route for direct link to pricing section
@@ -1247,11 +1266,12 @@ bandwidth from us — wrap cloudSync instead of proxying bytes.*
 
 ### 5.15.5: Production Backend & Activation Gate
 *Added 2026-06-02 (prod audit). The real blockers to accepting paying customers — NOT covered by 5.15.2 (load) or 5.15.4 (pg backup/SSL/smoke). Prod must be in this state before signups reopen.*
-- **Prod on a real backend, NOT local disk.** Currently `/opt/vaultaire/configs/.env` has `STORAGE_MODE=quotaless` but no backend credentials, so the app falls back to the `local` filesystem (`/opt/vaultaire/data` on the single SLC box). Before launch: set real backend creds (iDrive/Geyser/whichever tier), confirm `/health` shows the active backend is not `local`, and migrate or discard the bench/test data.
+- **Prod on a real backend, NOT local disk.** ✅ Prod primary = iDrive (NEW reseller acct d15e6040 since 2026-09-21; Dallas key swapped into prod 2026-09-22 after the old acct lapsed and 2 weeks of silent `InvalidAccessKeyId` PUT failures) + Geyser (archive) + Lyve (`resilient`/fallback). Historical: the 2026-06-02 audit found `STORAGE_MODE=quotaless` with no creds → `local` fallback on the single SLC box. Remaining (Stage 2, owner): confirm iDrive payment on the new acct, `ENCRYPTION_MASTER_KEY` escrow → prod, migrate or discard bench/test data.
 - **Object-data durability.** 5.15.4's backup test covers Postgres only. Objects on local disk have NO backup/redundancy — a disk/box loss = total data loss. Confirm objects live on a durable backend (the cloud tier replicates) before taking customer data.
-- **Metered billing activated.** 2.7 (#269) built the reporter but it's DORMANT. Create the two Stripe Billing Meters (storage = "last value" aggregation, egress = "sum"), attach to the Standard/Performance metered prices, set `STRIPE_METER_STORAGE` / `STRIPE_METER_EGRESS` in prod `.env`. Without this, metered tiers accrue usage but never bill.
-- **Reopen signups.** Public signups are CLOSED pre-launch (`SIGNUPS_ENABLED=false`, gated at `auth.CreateUserWithTenant`; PR #274). Set `SIGNUPS_ENABLED=true` + restart — but ONLY after the backend/durability items above are done. Never take customer data onto an unbacked local disk.
-- **TLS auto-renewal.** 5.15.4 checks the cert is valid; also confirm auto-renewal is configured (current cert expires 2026-07-28 — ~launch week — via Cloudflare/Google; normally auto-renews, verify).
+- **Stripe LIVE quota prices created + one real-card cycle (decision 2026-09-21 — replaces "metered billing activated").** All tiers are quota-sold: plain subscription price × TB quantity (V18.7-minimal, Stage 4 week of Oct 5) + Stripe Tax. 2.7's reporter (#269) stays DORMANT — Billing Meters are NOT needed at launch; `STRIPE_METER_*` stays unset.
+- **Reopen signups.** Public signups are CLOSED pre-launch (`SIGNUPS_ENABLED=false`, gated at `auth.CreateUserWithTenant`; PR #274). Set `SIGNUPS_ENABLED=true` + restart — but ONLY after the backend/durability items above are done. Never take customer data onto an unbacked local disk. (Now a runtime `signups` feature flag via 1.13 — flip in Stage 6.)
+- **5.5.1 CSAM scanning (Cloudflare CSAM Scanning Tool + NCMEC runbook) is a HARD blocker before signups open** — see `.private/LAUNCH_EXECUTION_SEQUENCE.md` Stage 5.5.
+- **TLS auto-renewal.** ✅ Resolved 2026-07-09 (Stage 0): the "cert expires 2026-07-28 — launch week" blocker was stale — the Cloudflare origin cert is valid to 2041; launch is Oct 31, 2026. 5.15.4 still checks validity + HSTS.
 - **Cloudflare:** cache rule for `/` (offload landing spikes) + a rate-limit/bot rule on `/api/waitlist` and `/auth/register`.
 - **Why**: 5.15.2 + 5.15.4 gate *behavior*; this gates *the operational substrate*. Finishing 5.15.1-5.15.4 without this = "feature-complete" but customer data lands on a single unbacked disk. This is the true "can I charge a customer" line.
 
@@ -1260,15 +1280,15 @@ bandwidth from us — wrap cloudSync instead of proxying bytes.*
 
 **🚨 LAUNCH BLOCKERS**
 
-- **B1 — Replace the waitlist landing page (patches 5.15.3, supersedes PR #272/#274).** The served `internal/api/landing.html` is a *pre-launch waitlist for the wrong product*: "Enterprise S3 + VPS" bundles (2GB RAM / 2 vCPU for $3.99/mo), branded on **Seagate Lyve Cloud** (a dropped backend), fabricated trust stats (10PB+, "decades of experience", 99.99% SLA), a countdown to July 31, and a **"Sign In Coming Soon"** modal. It links to `/login`, `/register`, `/dashboard` **nowhere** — the working product is reachable only by URL-guessing. Ship the 5.15.3 real homepage: hero ("$3.99/TB S3-compatible storage"), honest pitch (reuse `.private/launch/LET_LAUNCH_POST.md` copy), pricing table (Standard/Performance/Vault), CTAs → `/register` + `/login`, footer linking `/pricing` + `/status` + `/legal/*`. Kill the fake VPS/RAM/vCPU product entirely.
+- **B1 — Replace the waitlist landing page (patches 5.15.3, supersedes PR #272/#274). ✅ DONE — #354 (+#360-362), refreshed for Vault Flex / Oct 31 / 2026 competitor prices in #439.** The served `internal/api/landing.html` *was* a *pre-launch waitlist for the wrong product*: "Enterprise S3 + VPS" bundles (2GB RAM / 2 vCPU for $3.99/mo), branded on **Seagate Lyve Cloud** (not a customer tier — it is the `resilient`/DR leg), fabricated trust stats (10PB+, "decades of experience", 99.99% SLA), a countdown to July 31, and a **"Sign In Coming Soon"** modal. It links to `/login`, `/register`, `/dashboard` **nowhere** — the working product is reachable only by URL-guessing. Ship the 5.15.3 real homepage: hero (now "$4.49/TB S3-compatible storage" — quota-sold; $3.99 only via LET2026), honest pitch (reuse `.private/launch/LET_LAUNCH_POST.md` copy), pricing table (Standard/Performance/Vault), CTAs → `/register` + `/login`, footer linking `/pricing` + `/status` + `/legal/*`. Kill the fake VPS/RAM/vCPU product entirely.
 - **B2 — Web signup must surface S3 credentials (patches 5.11.7). ✅ DONE.** Web form: PR #350 (2026-07-20) renders the minted access key + secret ONCE on a post-signup credentials page (`signupCredsRenderer`, `pageContent("credentials")`). OAuth signup: PR #417 (2026-07-31) closes the last gap — `CreateUserFromOAuth` now returns the minted APIKey, and a brand-new OAuth account gets the same reveal-once credentials page instead of a bare `/dashboard` redirect (existing-user OAuth logins still redirect; secret never persisted or re-shown). JSON `/auth/register` already returned creds. All three signup paths now surface the secret exactly once.
-- **B3 — Actually serve customer docs.** All nine `internal/docs/*` packages are **empty scaffolding** (builders, zero content, imported nowhere). The only doc route is `GET /docs` → a **mis-branded** Swagger ("Vaultaire", `support@vaultaire.io`, MIT) covering **7 of ~40** operations (`internal/docs/openapi.go:216`). A complete `docs/guides/rclone-setup.md` exists on disk but is **not served**. Serve, at minimum: getting-started, rclone, FAQ — **launch-ready copy for all three drafted 2026-07-08 (this session)**; drop into `internal/docs` + link from dashboard and landing footer. Add aws-cli + restic pages as fast-follow.
-- **B4 — Copy-pasteable, runnable connection config in the dashboard.** Onboarding tabs (`dashboard.html`) hardcode `region: "us-east-1"` and a literal `YOUR_SECRET_KEY`, have **no copy buttons**, and **no rclone tab** (5.11.7 planned one; it's absent) — so the "getting started" code can't run as-is. Fix: inject the user's real access key (never secret in HTML — reveal-once elsewhere per B2), add rclone + s3cmd blocks, add copy buttons (extend the `.btn-copy` handler already used for CDN URLs).
+- **B3 — Actually serve customer docs. ✅ DONE — #355.** All nine `internal/docs/*` packages are **empty scaffolding** (builders, zero content, imported nowhere). The only doc route is `GET /docs` → a **mis-branded** Swagger ("Vaultaire", `support@vaultaire.io`, MIT) covering **7 of ~40** operations (`internal/docs/openapi.go:216`). A complete `docs/guides/rclone-setup.md` exists on disk but is **not served**. Serve, at minimum: getting-started, rclone, FAQ — **launch-ready copy for all three drafted 2026-07-08 (this session)**; drop into `internal/docs` + link from dashboard and landing footer. Add aws-cli + restic pages as fast-follow.
+- **B4 — Copy-pasteable, runnable connection config in the dashboard. ✅ DONE — #351.** Onboarding tabs (`dashboard.html`) hardcode `region: "us-east-1"` and a literal `YOUR_SECRET_KEY`, have **no copy buttons**, and **no rclone tab** (5.11.7 planned one; it's absent) — so the "getting started" code can't run as-is. Fix: inject the user's real access key (never secret in HTML — reveal-once elsewhere per B2), add rclone + s3cmd blocks, add copy buttons (extend the `.btn-copy` handler already used for CDN URLs).
 
 **📚 DOCS AUTO-SYNC ("update automatically like Stripe") — the launch tier**
 *Stripe's property that matters: docs can never silently drift from the API. Reference + code samples are derived from one source; only prose is hand-written. Get the property cheaply — don't build spec-generation for launch.*
 
-- **Tier 0 — Drift guard (do first, ~½ day).** CI test that walks the registered chi routes and asserts every S3/management route appears in the OpenAPI spec and vice-versa. Generates nothing; just **fails the build** when spec and code disagree. Catches the exact bug already live (7-of-40, mis-branded). Fits existing "CI must pass" discipline.
+- **Tier 0 — Drift guard (do first, ~½ day). ✅ DONE — #351 (route↔OpenAPI drift guard in CI).** CI test that walks the registered chi routes and asserts every S3/management route appears in the OpenAPI spec and vice-versa. Generates nothing; just **fails the build** when spec and code disagree. Catches the exact bug already live (7-of-40, mis-branded). Fits existing "CI must pass" discipline.
 - **Tier 1 — One source for volatile values (~½ day).** Centralize endpoint (`https://stored.ge`), region, and the pricing table in a single Go config, injected into the OpenAPI spec + dashboard onboarding tabs + doc pages. One edit updates every snippet/page at once. **Also permanently fixes the region inconsistency** (`us-east-1` signing/examples at `handlers.go:271` vs `us-west-1` bucket default at `buckets.go:133`) — pick `us-east-1`, document it, reconcile the bucket default.
 - *(Tier 2 generated per-user code samples + Tier 3 spec-from-handlers → Phase 26.5.)*
 
@@ -1291,17 +1311,17 @@ bandwidth from us — wrap cloudSync instead of proxying bytes.*
 
 > **Security note:** the detailed findings (exploit specifics, file:line, prod state) are kept **out of this public repo** and live only in the local, gitignored `.private/` bundle — `.private/LAUNCH_READINESS_REVIEW.md`, `.private/FABLE_FIX_PLAN.md` (ordered work packages WP-1…WP-15 with tests), `.private/LAUNCH_EXECUTION_SEQUENCE.md` (**the day-by-day driver — work from this**), and `.private/LAUNCH_RUNBOOK.md` (ops + first-week monitoring). This section is the high-level launch-gate summary only.
 
-**🚨 CRITICAL — must land before launch (details in `.private/`):**
-- **WP-1 — Billing/quota accounting correctness.** Single-source reservation, release-on-delete, reconciliation job. Today's accounting misreports usage, which feeds the metered Stripe charge — the top launch blocker.
-- **WP-2 — Bound GET memory / caching.** The read path can retain object bytes in RAM without eviction; cap it so the single box can't OOM under real load.
-- **WP-3 — Fail loudly on metadata-write failure.** A swallowed head-cache write can return success on an object that then can't be read; return 5xx instead.
-- **WP-4 — Harden S3 request authentication.** Verify request signatures on the header-auth path (staged; validate against the rclone/JuiceFS/aws-cli compat suite before merge).
-- **WP-5 — Remove the non-production test-credential path** from the auth code; ensure prod runs with `ENV=production`.
-- **WP-6 / WP-7 — Dedup pipeline integrity.** Make GC coherent with the in-memory index; use a deterministic chunking polynomial with tenant-scoped dedup when encryption is on (both together). Fixes silent-data-loss + correctness edges on the >64 MB chunked path.
-- **WP-8 / WP-9 — Migrations.** Add the runtime-only tables (schema must rebuild from migrations alone — DR), fix GDPR-deletion FK cascades, make all migrations idempotent, and make the runner fail on error instead of swallowing it.
-- **Ops (Phase 0 in `.private/LAUNCH_RUNBOOK.md`):** the nightly Postgres backup pipeline is currently producing empty dumps — repair + restore-test before launch. Plus 5.15.5 (durable backend + billing activation).
+**🚨 CRITICAL — must land before launch (details in `.private/`) — ✅ ALL SHIPPED + DEPLOYED (Stage 1, 2026-07-17 → 07-20):**
+- **WP-1 — Billing/quota accounting correctness.** ✅ SHIPPED #333 (2026-07-17; deployed, Gate C reconciliation run). Single-source reservation, release-on-delete, reconciliation job. It enforces the hard quota that quota-sold billing depends on (originally framed as "feeds the metered Stripe charge").
+- **WP-2 — Bound GET memory / caching.** ✅ #337. The read path can retain object bytes in RAM without eviction; cap it so the single box can't OOM under real load.
+- **WP-3 — Fail loudly on metadata-write failure.** ✅ #338. A swallowed head-cache write can return success on an object that then can't be read; return 5xx instead.
+- **WP-4 — Harden S3 request authentication.** ✅ #329 (header-auth path; STREAMING-* per-chunk signatures deferred to WP-VG2). Verify request signatures on the header-auth path (staged; validate against the rclone/JuiceFS/aws-cli compat suite before merge).
+- **WP-5 — Remove the non-production test-credential path** ✅ #328 — from the auth code; ensure prod runs with `ENV=production`.
+- **WP-6 / WP-7 — Dedup pipeline integrity.** ✅ WP-7 #330, WP-6 #344. Make GC coherent with the in-memory index; use a deterministic chunking polynomial with tenant-scoped dedup when encryption is on (both together). Fixes silent-data-loss + correctness edges on the >64 MB chunked path.
+- **WP-8 / WP-9 — Migrations.** ✅ WP-8 #335 (Gate A closed, DR restore test passed), WP-9 #336. Add the runtime-only tables (schema must rebuild from migrations alone — DR), fix GDPR-deletion FK cascades, make all migrations idempotent, and make the runner fail on error instead of swallowing it.
+- **Ops (Phase 0 in `.private/LAUNCH_RUNBOOK.md`):** ✅ FIXED 2026-07-09 — the nightly Postgres backups were producing empty dumps because prod `.env` had gone root:root (Stage 0, see Status 2026-07-09); pg-backup.sh hardened + restore-tested. 5.15.5 remainder = Stage 2 owner items (see Status 2026-09-22).
 
-**🔶 HIGH (fix if clean, else document — WP-10…WP-15):** abandoned-multipart reaper + per-part quota; batch hot-path writes + wire shutdown flush; tiering-migration revalidation; gate self-service tier changes on verified subscription; collapse the PUT bucket-config query storm; retention job for per-request tables.
+**🔶 HIGH (WP-10…WP-15):** ✅ WP-10-minimal abandoned-multipart reaper + per-upload byte cap (#346); ✅ WP-11/H-3 batched hot-path writes + shutdown flush (#419); remaining (fix if clean, else document): tiering-migration revalidation; gate self-service tier changes on verified subscription; collapse the PUT bucket-config query storm; retention job for per-request tables.
 
 **MEDIUM: do NOT touch pre-launch.** Notable: ~35 of 48 `internal/` packages are unreferenced by any binary — candidate cleanup post-launch.
 
@@ -1309,18 +1329,32 @@ bandwidth from us — wrap cloudSync instead of proxying bytes.*
 
 ---
 
+## Phase 5.15.8: Smart Demotion Job WP — PRE-LAUNCH, the next CODE item (added 2026-09-22)
+*Spec: `.private/SMART_TIER_DESIGN.md` (+ 2026-09-21 quota-sold addendum). Makes the Standard-tier margin model real: today tier placement is static, so the ~15% iDrive-share assumption is aspirational (Known Gaps above).*
+**Files**: `internal/engine/tiering.go` (extend), `internal/api/` background runner (same pattern as `dedup_gc.go`), feature flag via 1.13
+- Per-tenant **hot budget = 0.15 × quota_tb** (keyed to QUOTA, not stored bytes — quota-sold decision); pin-hot add-on bytes are exempt beyond the allowance
+- Demote from iDrive → Geyser when **idle ≥ 14 days OR over-budget (LRU order)**; never demote an object < 3 days old
+- Daily batch (not hourly); rate-limited like 7.3's migration queue; feature-flagged via `feature_flags` (1.13) so it can be killed per-tenant or globally
+- Reuses: `object_locations` + LocationStore (7.1/7.2) for placement + `last_accessed_at`; V18.2's staged-restore path for promotion back to hot; H-3 batched trackers (#419) for egress accounting
+- **NO overage billing** — egress is throttle-first at the allowance; overage billing is post-launch (stack #5)
+- Supersedes Phase 7.3's hot<7d / warm 7-30d / cold 30+ brackets
+
+**Test**: tenant with 10 TB quota → hot budget 1.5 TB → upload 2 TB → daily run demotes the LRU 0.5 TB (skipping anything <3 d old) → GET on a demoted object follows the V18.2 recall path → flag off → run is a no-op; idle-14d object on an under-budget tenant is still demoted.
+
+---
+
 # POST-LAUNCH 90-DAY PRIORITY STACK (added 2026-07-07)
 <!-- reconstructed: new section — Tier 2 shipped ahead of schedule (Phases 7-10.3 done), so the original "build after first customers" order no longer applies. Ranked by revenue impact × retention × effort, targeting what LET/Reddit users and the first 50 customers will actually hit. -->
 
-*Assumes launch end of July 2026 with Standard + Vault packs per `.private/LAUNCH_STRATEGY.md`. Re-rank monthly against actual customer signal.*
+*Assumes launch **Oct 31, 2026** (moved Jul 31 → Aug 31 via #414 → Oct 31 on 2026-09-14) with Standard + Vault Flex, all quota-sold (2026-09-21 decision above). Re-rank monthly against actual customer signal.*
 
 | # | Item | Phase | Why this rank | Effort |
 |---|------|-------|---------------|--------|
-| 1 | **Launch-week ops + incident readiness** — fix what smoke/load surface, watch error rates, honest status page updates | 5.15.x fallout | Every early churn story starts with a bad first week. LET users stress-test harder than enterprises and post publicly about it. | ops |
-| 2 | **Vault restore experience** — staged retrieval + restore-status UI (`x-amz-restore` compat, webhook on ready) | V18.2 + V18.8 | Vault packs are the day-one differentiator; the first thing a backup buyer does after uploading is **test a restore**. A confusing tape-restore UX = refunds + bad LET thread. | M (2-3 sessions) |
+| 1 | **Launch-week ops + incident readiness** — fix what smoke/load surface, watch error rates, honest status page updates. Backend-outage alerting is already live (5.12.10, #457: authenticated probes → Prometheus `/metrics` → Alertmanager → ntfy) — subscribe to the topic | 5.15.x fallout + 5.12.10 | Every early churn story starts with a bad first week. LET users stress-test harder than enterprises and post publicly about it. | ops |
+| 2 | **Vault restore experience** — staged retrieval + restore-status UI (`x-amz-restore` compat, webhook on ready) | V18.2 + V18.8 | Vault Flex is the day-one differentiator; the first thing a backup buyer does after uploading is **test a restore**. A confusing tape-restore UX = refunds + bad LET thread. | M (2-3 sessions) |
 | 3 | **`stored` CLI + rclone one-liner** (`stored rclone-config`) | 26.4 (pulled forward) | #1 predicted LET/datahoarder ask — this market prefers terminal over dashboard. Each guide doubles as a marketing post. Costs little: wraps the existing management API. | M |
 | 4 | **S3 lifecycle rules (XML API)** | 12.1 | Veeam/rclone/backup tooling expects `?lifecycle` for expiration; needed for the Week 4-8 B2-migration campaign. Tiering engine (#297) already does transitions — this is the S3-compatible surface. | M |
-| 5 | **No-surprises billing** — real-time spend on dashboard, hard spending caps, pre-overage alerts | TIER_STRATEGY feature #9 (extends 2.7/4.3) | Trust feature that prevents the viral "surprise bill" complaint; protects revenue quality. Most pieces (meters, alerts) exist — this is assembly. | S-M |
+| 5 | **No-surprises billing** — real-time spend on dashboard, hard spending caps, pre-overage alerts | TIER_STRATEGY feature #9 (extends 2.7/4.3) | Trust feature that prevents the viral "surprise bill" complaint; protects revenue quality. Most pieces (WP-1 hard-quota enforcement, 4.3 alerts, the dormant 2.7 reporter) exist — this is assembly; at launch egress is throttle-first at the quota-keyed allowance, overage billing is post-launch. | S-M |
 | 6 | **Backup verification reports** | 14.4 | Cheap (cron over existing checksums), unique at this price point, closes deals with the exact compliance/backup crowd the launch targets. | S |
 | 6b | **Privacy quick wins** — "Built to Forget" log TTLs (purge raw s3/cdn access-log rows + IPs on a ~7d clock AFTER billing rollups + 5.14.9 customer log delivery consume them; disclose the schedule), public LE-request policy page + "what we can produce" doc (Signal-style: enumerate per tier exactly what a subpoena yields), `rclone crypt` guide (encrypted names+content over stored.ge today, zero code — doubles as LET marketing) | `.private/PRIVACY_NORTH_STAR.md` (2026-08-02) | Trust features for exactly the LET audience; each is writing or a small WP; moves protections from policy to architecture (Proton-2021 lesson: policy can be compelled, architecture can't). | S |
 | 7 | **Phase 10 remainder** — key management UI, proof-of-ownership, security testing | 10.5-10.7 | Encryption is on the pricing page; 10.7's cross-tenant isolation audit + timing hardening should land before dedup+encryption carries real customer volume. | M |
@@ -1329,6 +1363,7 @@ bandwidth from us — wrap cloudSync instead of proxying bytes.*
 | 10 | **stored-cache agent** | 16.5 | High LET delight ("your $3/yr VPS caches your data"), independent of everything else — good month-2/3 community moment. | M |
 | 11 | **Smart egress routing** | R4 bullet | Build trigger-based: ship the *detection* (usage poller alert) now, the routing only when the first tenant actually approaches 3× egress. | S then M |
 | 12 | **iDrive reseller R1-R3** | R1-R6 | Per-tenant sub-accounts matter at ~50+ customers (isolation, white-label, cost attribution). Not before. | L |
+| 13 | **Per-region iDrive key support** (small — may land pre-launch after 5.15.8) | 5.14.7 follow-up | `main.go` registers `idrive-<region>` drivers with the single primary key; the NEW reseller acct (d15e6040) mints per-region keys. Add `IDRIVE_<REGION>_ACCESS_KEY` / `IDRIVE_<REGION>_SECRET_KEY` overrides (fall back to the primary pair). | S |
 
 **What the first 50 customers will hit that isn't feature work**: slow first-byte on tape-tier reads (mitigated by NVMe cache #312 — watch hit rates), multipart edge cases from exotic clients (keep `cmd/validate` growing), quota/suspension edge cases, and support load (3.7 support view + 3.11 abuse queue are already live — use them).
 
@@ -1336,7 +1371,9 @@ bandwidth from us — wrap cloudSync instead of proxying bytes.*
 
 *Source: versitygw @ 1246a08 (Apache-2.0, Go) studied as a **parallel-implementation reference**, not a dependency — Geyser's S3 layer is Spectra Logic Vail, not Versity. Full evaluation (what to take/skip and why, file-level pointers, license discipline): `.private/VERSITY_EVALUATION.md`. Apache-2.0 code may be adapted with attribution; scoutfs is GPL-2 — concepts only, never code.*
 
-### WP-VG1: versitygw BATS conformance run → triaged gap report — **PRE-LAUNCH, the only pre-launch item here** (S, 1 session)
+### WP-VG1: versitygw BATS conformance run → triaged gap report — **✅ DONE (#442)** — was the only pre-launch item here
+
+> **Shipped 2026-09-18 (#442)**: gap sweep RUN (841 tests), report triaged; the (A) real-bug class — A1 conformance fixes (`?acl` routing incl. the PUT-acl-overwrote-object bug, header round-trip via migration 061, `Location`, listings=HEAD class mapping, ObjectLocked→AccessDenied) — SHIPPED in the same PR. A2-A4 fold into WP-VG2 (post-launch).
 
 Run versitygw's BATS S3 compatibility suite (523 tests, 54 suites, wire-level) against a local vaultaire via the `/verify` harness. Third-party-endpoint mode is documented: `RUN_VERSITYGW=false` + `AWS_ENDPOINT_URL` + `SKIP_USERS_TESTS/SKIP_ACL_TESTING/SKIP_POLICY/SKIP_BUCKET_OWNERSHIP_CONTROLS=true` (NOT `DIRECT=true` — that mode hits real AWS IAM). Cheapest first probe before any bats setup: `./versitygw test full-flow -a KEY -s SECRET -e http://127.0.0.1:PORT` (their Go integration suite; versitygw-specific tail failures expected). Attack order, skip list, and harness landmines (TLS needed for the openssl-driven `rest-chunked` suite, unguarded user-helper tests that fail-not-skip, ListBuckets-with-prefix teardown dependency) are in the eval doc. **Deliverable = `.private/VERSITY_GAP_REPORT.md` with every failure triaged into (A) real bug → fix WP, (B) deliberate non-feature → documented won't-fix, (C) harness artifact. Triage, don't chase a pass rate — failures may be deliberate non-features.** Expect `rest-checksum` (20 tests) to fail wholesale — that's WP-VG2's baseline measurement.
 
@@ -1403,7 +1440,7 @@ Add to the Garage/SeaweedFS/Ceph/MinIO candidate set: (a) vaultaire-over-versity
 
 > **✅ Phases 6.1-6.4 COMPLETE** — done out-of-order via Phase 5.12.3 (PR #244, 2026-05-13).
 > All drivers (Lyve, iDrive, Geyser, OneDrive) implement `engine.Driver` and are wired in `main.go`.
-> Auto-detect priority: `iDrive > Quotaless > S3 > Geyser > local`. Full end-to-end benchmarks on Mac + SLC.
+> Auto-detect priority: `iDrive > Quotaless > S3 > Geyser > local` (code order; Quotaless creds 401-dead since 2026-08, unused). Full end-to-end benchmarks on Mac + SLC.
 > Skip to Phase 6.5 (Filecoin) or Phase 7 (Smart Tiering) when ready.
 
 ### 6.1: Wire Seagate Lyve Cloud ✅ (pre-existing, benchmarked in 5.12.3)
@@ -1417,10 +1454,10 @@ Add to the Garage/SeaweedFS/Ceph/MinIO candidate set: (a) vaultaire-over-versity
 ### 6.5: Backend Research & Tier Architecture (Filecoin, Sia, Pixeldrain, Quotaless)
 > **UPDATED 2026-04-18**: Comprehensive benchmarking of ALL providers completed. Tier architecture finalized:
 > - **iDrive E2** = Performance tier (579 MB/s, $4.125/TB, default)
-> - **Quotaless** = Bulk/Egress tier (393 MB/s, €0.60/TB at 100TB, FREE unlimited egress) — replaces Lyve gap
-> - **Geyser** = Archive ($1.55/TB tape), **Vault18** = Deep Archive ($1/TB)
+> - ~~**Quotaless** = Bulk/Egress tier (393 MB/s, €0.60/TB at 100TB, FREE unlimited egress)~~ **DEAD** — account locked 2026-05, creds 401-dead since 2026-08, unused; driver removal deferred to the M12 exit
+> - **Geyser** = Archive ($1.55/TB tape COGS), **Vault Flex** = Deep Archive sold at $2.55/$2.00 per TB, quota-sold (Founders $1/TB capped; "Vault18 $1/TB" is the superseded 2026-04 framing)
 - **Pixeldrain** = CDN cache layer (808 MB/s download, not a storage tier)
-- ~~**Lyve Cloud** = High-throughput egress-free tier~~ **DROPPED** (Wasabi acquisition, 90-day minimum billing kills smart tiering — 2026-04-18). Driver still wired and validated (#312) but not a customer tier. <!-- reconstructed: verified against .private/CLAUDE.md + PROGRESS.md -->
+- **Lyve Cloud** = `resilient` storage class + DR/fallback hot leg + Vault second copy (**IN the stack** — closed in #405; promo $0 COGS through mid-2028, no egress fees). Not a default customer tier: the 2026-04-18 "DROPPED" call (Wasabi acquisition, 90-day minimum billing) still rules it out as the smart-tier warm leg. Driver wired and validated (#312, #366). <!-- reconstructed: verified against .private/CLAUDE.md + PROGRESS.md; corrected 2026-09-22 against #405 -->
 - See `.private/TIER_STRATEGY.md` for the three-tier GTM: Vault (archive), Standard (smart), Performance (B2 killer).
 
 ### 6.6: Own-Fleet Backend Driver (Gorilla/Hetzner boxes) <!-- reconstructed: added from LAUNCH_STRATEGY.md §9 "Code you need to build" + §2 fleet buying sequence — had no plan phase -->
@@ -1468,7 +1505,7 @@ Add to the Garage/SeaweedFS/Ceph/MinIO candidate set: (a) vaultaire-over-versity
   - Hot: accessed in last 7 days → keep on iDrive (fast)
   - Warm: accessed 7-30 days ago → eligible for Lyve (egress-free) or stay on iDrive
   - Cold: not accessed in 30+ days → migrate to Geyser (tape, cheapest)
-- ⚠ Note (2026-07-07): `.private/TIER_STRATEGY.md` specifies 0-30d hot (iDrive) / 30-90d warm (Quotaless) / 90d+ cold (Geyser) brackets, and Lyve is dropped. The shipped engine (#297) classifies by age/access generically — align the configured brackets + warm-tier target with TIER_STRATEGY before marketing the "Day 0-30/30-90/90+" story. Warm tier is currently unresolved (Quotaless deferred to M12 exit, Lyve dropped) → warm = stay on iDrive until own-fleet (6.6) exists. <!-- reconstructed: verified against TIER_STRATEGY.md -->
+- ⚠ Note (2026-07-07, updated 2026-09-22): the hot<7d / warm 7-30d / cold 30+ brackets above (and TIER_STRATEGY's 0-30/30-90/90+) are **SUPERSEDED by the Smart demotion policy** — per-tenant hot budget = 15% × quota, demote idle ≥14d or over-budget LRU (never <3d old); see Phase 5.15.8 + `.private/SMART_TIER_DESIGN.md`. The shipped engine (#297) classifies by age/access generically. Warm tier: Quotaless is dead (M12 removal), Lyve is the `resilient` class / DR leg (not the smart-tier warm leg) → warm = stay on iDrive until own-fleet (6.6) exists. <!-- reconstructed: verified against TIER_STRATEGY.md; policy updated 2026-09-22 -->
 - Migration queue: objects flagged for tier change are migrated in background
 - Rate limiting: max 10 GB/hour migration to avoid backend overload
 
@@ -1718,7 +1755,7 @@ Add to the Garage/SeaweedFS/Ceph/MinIO candidate set: (a) vaultaire-over-versity
 - Uses `klauspost/reedsolomon` (SIMD-optimized, 200+ GB/s encode — effectively free vs network)
 
 ### 11.2: Shard Placement Strategy
-- Per `.private/ADVANCED_ARCHITECTURE.md` §4/§6 launch placement (16 shards): own fleet 6 data (needs Phase 6.6), iDrive 4 data, Geyser LA + London 2 parity, permafrost/OneDrive fleet 4 parity across 4 different tenants <!-- reconstructed: corrected — previous placement included Lyve (5 shards), but Lyve is dropped -->
+- Per `.private/ADVANCED_ARCHITECTURE.md` §4/§6 launch placement (16 shards): own fleet 6 data (needs Phase 6.6), iDrive 4 data, Geyser LA + London 2 parity, permafrost/OneDrive fleet 4 parity across 4 different tenants <!-- reconstructed: corrected — previous placement included Lyve (5 shards); Lyve is the `resilient`/DR leg (#405), not part of the shard plan -->
 - Until own fleet exists: iDrive carries the data shards; adjust scheme accordingly
 - No single backend loses enough shards to break reconstruction; permafrost never holds enough to reconstruct alone (privacy by design)
 - Placement considers: health score, latency, cost, region
@@ -2366,7 +2403,7 @@ Anyone runs a Vaultaire spoke node on their VPS → joins the stored.ge network:
 
 ## How to resume (for /next and /next-step)
 1. Read the **Status** line at the top of this file — it names the last completed phase, the launch blockers, and the next code phase.
-2. Pre-launch: the next work item is the first unfinished **launch blocker** (5.15.5 → 5.15.4 → 5.14.12 → V18.7-minimal). Post-launch: take the top unstarted row of the **Post-Launch 90-Day Priority Stack**.
+2. Pre-launch: the next work item is the first unfinished **launch stage** — Stage 2 → 3 → 4 (V18.7-minimal = Stripe quota prices) → 5 (5.14.12 status page, 5.6 email) → 5.5 → 6 (5.15.4 smoke) per `.private/LAUNCH_EXECUTION_SEQUENCE.md`; these are OWNER items. Next CODE item: Smart demotion WP (Phase 5.15.8). Post-launch: take the top unstarted row of the **Post-Launch 90-Day Priority Stack**.
 3. Read `.private/CLAUDE.md` (infra/creds), the per-directory `CLAUDE.md` files for packages you'll touch, and check `git log --oneline -5` + `git status`.
-4. Migration numbers: `ls internal/database/migrations/` and take the next sequential (052 is the latest as of 2026-07-07).
+4. Migration numbers: `ls internal/database/migrations/` and take the next sequential (`061_content_encoding.sql` is the latest as of 2026-09-18).
 5. Branch per phase: `phase-X.Y-feature-name`, commit format `type(scope): description [Phase X.Y]`, squash-merge after CI.
