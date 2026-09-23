@@ -1,10 +1,10 @@
 // internal/drivers/geyser_admin.go
 //
 // GeyserAdmin provides programmatic access to Geyser's console API
-// (console.geyserdata.com). Reverse-engineered from the console's JS bundles
-// and live-probed 2026-07-29 — monitor for breakage after console updates.
-// Ground truth for endpoints and payloads: internal/drivers/geyser_README.md
-// ("Console API map").
+// (console.geyserdata.com). Originally reverse-engineered from the console's
+// JS bundles (2026-07-29); since 2026-09-19 the console's own OpenAPI 3.1 spec
+// (GET /api/v3/api-docs, authenticated) is the ground truth, alongside
+// internal/drivers/geyser_README.md ("Console API map").
 //
 // Authentication — programmatic login (preferred):
 //
@@ -248,41 +248,157 @@ type CloudSyncJob struct {
 	CreatedAt string `json:"createdAt"`
 }
 
-// GeyserTape is a single physical tape within a collection.
-//
-// Field tags are inferred from console UI values (barcode 140241L9, serial
-// HPE-1925523288, LTO-9, 17.5 TB) — verify against a live capture and adjust
-// if the wire names differ.
+// GeyserTape is a single physical tape usage entry within a collection.
+// Field names live-verified 2026-09-19 (barcode 140241L9, serial
+// HPE-1925523288, type "lto9"). Collections return an hourly time-series of
+// these entries under tapeUsage, so the same tape can appear repeatedly with
+// different start/end times.
 type GeyserTape struct {
-	Barcode        string `json:"barcode"`
-	Serial         string `json:"serial"`
-	Type           string `json:"type"` // e.g. "LTO-9"
-	AvailableBytes int64  `json:"available"`
-	TotalBytes     int64  `json:"total"`
-	WriteProtected bool   `json:"writeProtected"`
+	TapeID            string `json:"tapeId"`
+	Barcode           string `json:"barcode"`
+	SerialNumber      string `json:"serialNumber"`
+	Type              string `json:"type"` // e.g. "lto9"
+	AvailableCapacity int64  `json:"availableCapacity"`
+	TotalCapacity     int64  `json:"totalCapacity"`
+	WriteProtected    bool   `json:"writeProtected"`
+	LastAccessed      string `json:"lastAccessed"`
+	StartTime         string `json:"startTime"`
+	EndTime           string `json:"endTime"`
+}
+
+// GeyserDatacenter is a datacenter reference (nested in collections/buckets,
+// and the row shape of GET /api/datacenters, which lists only datacenters
+// currently open for new provisioning).
+type GeyserDatacenter struct {
+	ID   string `json:"id"`
+	Name string `json:"name"` // e.g. "LA1", "LA2", "LON1", "SP1"
+	Geo  string `json:"geo"`
+}
+
+// GeyserSustainability is Geyser's per-collection carbon-savings metric.
+type GeyserSustainability struct {
+	PercentSaved float64 `json:"percentSaved"`
 }
 
 // GeyserTapeCollection is a tape collection from GET /api/tapeCollections.
+// Size is the provisioned capacity in TB — the number Geyser bills on.
 type GeyserTapeCollection struct {
-	ID    string       `json:"id"`
-	Name  string       `json:"name"`
-	Tapes []GeyserTape `json:"tapes"`
+	ID             string               `json:"id"`
+	Name           string               `json:"name"`
+	Size           int                  `json:"size"` // provisioned TB
+	TapeCount      int                  `json:"tapeCount"`
+	DualCopy       bool                 `json:"dualCopy"`
+	Compression    bool                 `json:"compression"`
+	Encryption     bool                 `json:"encryption"`
+	CreatedAt      string               `json:"createdAt"`
+	Datacenter     GeyserDatacenter     `json:"datacenter"`
+	Sustainability GeyserSustainability `json:"sustainability"`
+	TapeUsage      []GeyserTape         `json:"tapeUsage"`
 }
 
-// GeyserSite is a Geyser datacenter from GET /api/sites.
-// Live-confirmed sites: Los Angeles US, London UK, São Paulo, Brazil.
+// GeyserSite is a Geyser site from GET /api/sites. The wire carries only the
+// geography string and id (live-confirmed: London UK, Los Angeles US,
+// Sao Paulo Brazil).
 type GeyserSite struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID  string `json:"id"`
+	Geo string `json:"geo"`
 }
 
-// GeyserEvent is an audit-log entry from GET /api/events (logins, actions).
+// GeyserEvent is an audit-log entry from GET /api/events.
+// Field names live-verified 2026-09-19: Name is the event kind ("login",
+// "bucketCreated", "tapeCollectionCreated", ...), Result is SUCCESS/FAILURE.
 type GeyserEvent struct {
-	ID        string `json:"id"`
-	Type      string `json:"type"`
-	Message   string `json:"message,omitempty"`
-	UserID    string `json:"userId,omitempty"`
-	CreatedAt string `json:"createdAt"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Result      string `json:"result,omitempty"`
+	Severity    string `json:"severity,omitempty"`
+	Created     string `json:"created"`
+}
+
+// GeyserBrowseEntry is one row of GET /api/buckets/{id}/browse. Location is
+// the console's per-object storage location ("CACHE" while staged) — a cleaner
+// signal than parsing the spectra-storage S3 metadata header.
+type GeyserBrowseEntry struct {
+	Key          string `json:"key"`
+	IsFolder     bool   `json:"isFolder"`
+	Size         int64  `json:"size"`
+	Location     string `json:"location,omitempty"` // e.g. "CACHE"
+	LastModified string `json:"lastModified,omitempty"`
+	VersionID    string `json:"versionId,omitempty"`
+}
+
+// GeyserBucketSizePoint is one point of the windowed logical-size time-series
+// from GET /api/buckets/{id}/size (not a lifetime total).
+type GeyserBucketSizePoint struct {
+	ID          string `json:"id"`
+	BucketID    string `json:"bucketId"`
+	StartTime   string `json:"startTime"`
+	EndTime     string `json:"endTime"`
+	LogicalSize int64  `json:"logicalSize"`
+}
+
+// GeyserFeaturePricing is a per-TB price triple (base storage plus the
+// compression and encryption add-ons).
+type GeyserFeaturePricing struct {
+	TB          float64 `json:"tb"`
+	Compression float64 `json:"compression"`
+	Encryption  float64 `json:"encryption"`
+}
+
+// GeyserDatacenterPricing is one row of GET /api/datacenterpricing: the
+// customer list price and our reseller wholesale cost for a datacenter.
+type GeyserDatacenterPricing struct {
+	ID           string               `json:"id"`
+	DatacenterID string               `json:"datacenterId"`
+	ListPrice    GeyserFeaturePricing `json:"datacenterCustomerListPrice"`
+	ResellerCost GeyserFeaturePricing `json:"datacenterResellerCost"`
+}
+
+// GeyserEstimateBucketParams is one bucket line in an estimate request.
+// DualCopy is a string ("true"/"false") on the wire, matching the console UI.
+type GeyserEstimateBucketParams struct {
+	DualCopy     string  `json:"dualCopy"`
+	Size         float64 `json:"size"` // TB; fractional values accepted
+	DatacenterID string  `json:"datacenterId"`
+	Compression  bool    `json:"compression"`
+	Encryption   bool    `json:"encryption"`
+	S3Enabled    bool    `json:"s3Enabled"`
+}
+
+// GeyserEstimateRequest is the payload for POST /api/estimates (the reseller
+// quote engine). Discount is a percentage; negative values are surcharges.
+type GeyserEstimateRequest struct {
+	BucketParamsList []GeyserEstimateBucketParams `json:"bucketParamsList"`
+	Discount         float64                      `json:"discount"`
+	NewCustomer      bool                         `json:"newCustomer"`
+	SendEmail        bool                         `json:"sendEmail"`
+	EmailMe          bool                         `json:"emailMe"`
+}
+
+// GeyserEstimate is the response to POST /api/estimates. ResellerMargin is our
+// cut in percent; Geyser's wholesale take is Total × (1 − ResellerMargin/100).
+type GeyserEstimate struct {
+	Subtotal       float64             `json:"subtotal"`
+	Total          float64             `json:"total"`
+	Discount       float64             `json:"discount"`
+	ResellerMargin float64             `json:"resellerMargin"`
+	MiscBilling    []GeyserMiscBilling `json:"miscBilling"`
+}
+
+// GeyserTapeCollectionRequest is the payload for POST /api/tapeCollections and
+// PUT /api/tapeCollections/{id} (resize — both grow and shrink are accepted,
+// live-verified 2026-09-19). All fields are required by the console API.
+type GeyserTapeCollectionRequest struct {
+	Name         string `json:"name"`
+	Size         int    `json:"size"` // provisioned TB
+	DatacenterID string `json:"datacenterId"`
+	CustomerID   string `json:"customerId"`
+	DualCopy     bool   `json:"dualCopy"`
+	Compression  bool   `json:"compression"`
+	Encryption   bool   `json:"encryption"`
+	Color        string `json:"color"`
+	Icon         string `json:"icon"`
 }
 
 // geyserEnvelope is the response wrapper some console endpoints use.
@@ -294,13 +410,21 @@ type geyserEnvelope struct {
 	} `json:"headers"`
 }
 
-// createBucketRequest is the payload for POST /api/buckets.
+// createBucketRequest is the payload for POST /api/buckets. The console
+// OpenAPI spec marks versioning, icon and color required; live-verified
+// values 2026-09-19. Versioning stays SUSPENDED (prod guidance — Geyser
+// leaves delete markers on every delete when enabled); Object Lock requires
+// versioning ENABLED at creation.
 type createBucketRequest struct {
 	Name             string `json:"name"`
 	TapeCollectionID string `json:"tapeCollectionId"`
 	Size             int    `json:"size"`
 	DatacenterID     string `json:"datacenterId"`
 	CustomerID       string `json:"customerId"`
+	Versioning       string `json:"versioning"`
+	ObjectLocking    bool   `json:"objectLocking"`
+	Icon             string `json:"icon"`
+	Color            string `json:"color"`
 }
 
 // createBucketResponse is what Geyser returns immediately after POST /api/buckets.
@@ -527,6 +651,9 @@ func (c *GeyserAdminClient) CreateBucket(ctx context.Context, name string) (*Gey
 		Size:             1,
 		DatacenterID:     c.provConfig.DatacenterID,
 		CustomerID:       c.provConfig.CustomerID,
+		Versioning:       "SUSPENDED",
+		Icon:             "hard-drive-icon-outline",
+		Color:            "#3146FF",
 	}
 
 	var created createBucketResponse
@@ -564,9 +691,12 @@ func (c *GeyserAdminClient) waitForActive(ctx context.Context, bucketID string, 
 				zap.String("bucketID", bucketID),
 				zap.String("status", status.Status))
 
-			if status.Status == "ACTIVE" {
-				c.logger.Info("bucket is active",
+			// "CREATED" is the terminal status on the live wire (2026-09-19);
+			// "ACTIVE" is kept in case older spheres still report it.
+			if status.Status == "ACTIVE" || status.Status == "CREATED" {
+				c.logger.Info("bucket is provisioned",
 					zap.String("bucketID", bucketID),
+					zap.String("status", status.Status),
 					zap.String("bucketName", status.BucketName))
 				return status, nil
 			}
@@ -796,7 +926,7 @@ func (c *GeyserAdminClient) GetCloudSyncStatus(ctx context.Context, bucketID str
 // tracking in PostgreSQL.
 func (c *GeyserAdminClient) GetInvoices(ctx context.Context) ([]GeyserInvoice, error) {
 	var invoices []GeyserInvoice
-	if err := c.doJSON(ctx, http.MethodGet, "/invoices", nil, &invoices); err != nil {
+	if err := c.doList(ctx, http.MethodGet, "/invoices", nil, &invoices); err != nil {
 		return nil, fmt.Errorf("get invoices: %w", err)
 	}
 	return invoices, nil
@@ -816,7 +946,7 @@ func (c *GeyserAdminClient) GetKeys(ctx context.Context) ([]GeyserKeyInfo, error
 // detail (barcode, serial, capacity, write protection).
 func (c *GeyserAdminClient) GetTapeCollections(ctx context.Context) ([]GeyserTapeCollection, error) {
 	var collections []GeyserTapeCollection
-	if err := c.doJSON(ctx, http.MethodGet, "/tapeCollections", nil, &collections); err != nil {
+	if err := c.doList(ctx, http.MethodGet, "/tapeCollections", nil, &collections); err != nil {
 		return nil, fmt.Errorf("get tape collections: %w", err)
 	}
 	return collections, nil
@@ -826,7 +956,7 @@ func (c *GeyserAdminClient) GetTapeCollections(ctx context.Context) ([]GeyserTap
 // London UK, São Paulo Brazil).
 func (c *GeyserAdminClient) GetSites(ctx context.Context) ([]GeyserSite, error) {
 	var sites []GeyserSite
-	if err := c.doJSON(ctx, http.MethodGet, "/sites", nil, &sites); err != nil {
+	if err := c.doList(ctx, http.MethodGet, "/sites", nil, &sites); err != nil {
 		return nil, fmt.Errorf("get sites: %w", err)
 	}
 	return sites, nil
@@ -835,16 +965,172 @@ func (c *GeyserAdminClient) GetSites(ctx context.Context) ([]GeyserSite, error) 
 // GetEvents returns the account audit log (logins, actions, timestamps).
 func (c *GeyserAdminClient) GetEvents(ctx context.Context) ([]GeyserEvent, error) {
 	var events []GeyserEvent
-	if err := c.doJSON(ctx, http.MethodGet, "/events", nil, &events); err != nil {
+	if err := c.doList(ctx, http.MethodGet, "/events", nil, &events); err != nil {
 		return nil, fmt.Errorf("get events: %w", err)
 	}
 	return events, nil
+}
+
+// ── Console OpenAPI additions (live-verified 2026-09-19) ─────────────────────
+
+// GetBucketAccess returns the S3 keypairs valid for a bucket
+// (GET /api/buckets/{id}/access). An empty result for a reachable bucket has
+// been observed to mean the bucket's site is unreachable, not "no keys".
+func (c *GeyserAdminClient) GetBucketAccess(ctx context.Context, bucketID string) ([]GeyserKeyInfo, error) {
+	var keys []GeyserKeyInfo
+	if err := c.doList(ctx, http.MethodGet, fmt.Sprintf("/buckets/%s/access", bucketID), nil, &keys); err != nil {
+		return nil, fmt.Errorf("get bucket access %s: %w", bucketID, err)
+	}
+	return keys, nil
+}
+
+// BrowseBucket lists a bucket's contents under prefix via the console
+// (GET /api/buckets/{id}/browse). Unlike S3 ListObjectsV2 it carries each
+// object's storage Location ("CACHE" while staged) — the per-object
+// tape-vs-staged signal the dashboard wants.
+func (c *GeyserAdminClient) BrowseBucket(ctx context.Context, bucketID, prefix string) ([]GeyserBrowseEntry, error) {
+	var resp struct {
+		Contents []GeyserBrowseEntry `json:"contents"`
+	}
+	path := fmt.Sprintf("/buckets/%s/browse?prefix=%s", bucketID, url.QueryEscape(prefix))
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, &resp); err != nil {
+		return nil, fmt.Errorf("browse bucket %s prefix %q: %w", bucketID, prefix, err)
+	}
+	return resp.Contents, nil
+}
+
+// PresignUpload mints a presigned PUT URL for path via the console
+// (POST /api/buckets/{id}/upload) — a data path that needs no S3 credentials.
+func (c *GeyserAdminClient) PresignUpload(ctx context.Context, bucketID, path string) (string, error) {
+	return c.presign(ctx, bucketID, "upload", path)
+}
+
+// PresignDownload mints a presigned GET URL for path via the console
+// (POST /api/buckets/{id}/download).
+func (c *GeyserAdminClient) PresignDownload(ctx context.Context, bucketID, path string) (string, error) {
+	return c.presign(ctx, bucketID, "download", path)
+}
+
+func (c *GeyserAdminClient) presign(ctx context.Context, bucketID, direction, path string) (string, error) {
+	payload := struct {
+		Path string `json:"path"`
+	}{Path: path}
+	var resp struct {
+		URL string `json:"url"`
+	}
+	if err := c.doJSON(ctx, http.MethodPost, fmt.Sprintf("/buckets/%s/%s", bucketID, direction), payload, &resp); err != nil {
+		return "", fmt.Errorf("presign %s %s in bucket %s: %w", direction, path, bucketID, err)
+	}
+	return resp.URL, nil
+}
+
+// GetBucketSizeHistory returns the windowed logical-size time-series for a
+// bucket (GET /api/buckets/{id}/size). Points cover a window, not lifetime.
+func (c *GeyserAdminClient) GetBucketSizeHistory(ctx context.Context, bucketID string) ([]GeyserBucketSizePoint, error) {
+	var points []GeyserBucketSizePoint
+	if err := c.doList(ctx, http.MethodGet, fmt.Sprintf("/buckets/%s/size", bucketID), nil, &points); err != nil {
+		return nil, fmt.Errorf("get bucket size history %s: %w", bucketID, err)
+	}
+	return points, nil
+}
+
+// GetDatacenters returns the datacenters currently open for new provisioning
+// (GET /api/datacenters). Note: a datacenter hosting existing collections can
+// be absent here once closed to new buckets (LA1 disappeared when LA2 opened).
+func (c *GeyserAdminClient) GetDatacenters(ctx context.Context) ([]GeyserDatacenter, error) {
+	var dcs []GeyserDatacenter
+	if err := c.doList(ctx, http.MethodGet, "/datacenters", nil, &dcs); err != nil {
+		return nil, fmt.Errorf("get datacenters: %w", err)
+	}
+	return dcs, nil
+}
+
+// GetDatacenterPricing returns the per-datacenter price table — customer list
+// price and our reseller wholesale cost (GET /api/datacenterpricing).
+func (c *GeyserAdminClient) GetDatacenterPricing(ctx context.Context) ([]GeyserDatacenterPricing, error) {
+	var rows []GeyserDatacenterPricing
+	if err := c.doList(ctx, http.MethodGet, "/datacenterpricing", nil, &rows); err != nil {
+		return nil, fmt.Errorf("get datacenter pricing: %w", err)
+	}
+	return rows, nil
+}
+
+// Estimate runs Geyser's reseller quote engine (POST /api/estimates). It is a
+// pure calculation — nothing is provisioned. Set SendEmail/EmailMe to false
+// (the zero value) unless the quote should actually be emailed.
+func (c *GeyserAdminClient) Estimate(ctx context.Context, req GeyserEstimateRequest) (*GeyserEstimate, error) {
+	var est GeyserEstimate
+	if err := c.doJSON(ctx, http.MethodPost, "/estimates", req, &est); err != nil {
+		return nil, fmt.Errorf("estimate: %w", err)
+	}
+	return &est, nil
+}
+
+// CreateTapeCollection provisions a new tape collection
+// (POST /api/tapeCollections). Billing is on provisioned TBs, so Size is a
+// billing commitment — within the account minimum, extra collections are $0
+// marginal.
+func (c *GeyserAdminClient) CreateTapeCollection(ctx context.Context, req GeyserTapeCollectionRequest) (*GeyserTapeCollection, error) {
+	var col GeyserTapeCollection
+	if err := c.doJSON(ctx, http.MethodPost, "/tapeCollections", req, &col); err != nil {
+		return nil, fmt.Errorf("create tape collection %q: %w", req.Name, err)
+	}
+	c.logger.Info("tape collection created",
+		zap.String("id", col.ID),
+		zap.String("name", col.Name),
+		zap.Int("sizeTB", col.Size))
+	return &col, nil
+}
+
+// UpdateTapeCollection updates a collection in place
+// (PUT /api/tapeCollections/{id}). Resizing works in both directions
+// (live-verified 1→2→1 TB, 2026-09-19), making provisioned capacity — and
+// therefore the bill — adjustable month to month.
+func (c *GeyserAdminClient) UpdateTapeCollection(ctx context.Context, id string, req GeyserTapeCollectionRequest) (*GeyserTapeCollection, error) {
+	var col GeyserTapeCollection
+	if err := c.doJSON(ctx, http.MethodPut, fmt.Sprintf("/tapeCollections/%s", id), req, &col); err != nil {
+		return nil, fmt.Errorf("update tape collection %s: %w", id, err)
+	}
+	c.logger.Info("tape collection updated",
+		zap.String("id", id),
+		zap.Int("sizeTB", col.Size))
+	return &col, nil
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 func (c *GeyserAdminClient) keepalive(ctx context.Context) error {
 	return c.doJSON(ctx, http.MethodGet, "/keepalive", nil, nil)
+}
+
+// doList performs a request against a list endpoint and decodes the rows into
+// out (a pointer to a slice). It tolerates every wrapper the console mixes:
+// the {body, status, headers} envelope, Spring's {content, page} pagination
+// (the live shape of /buckets, /tapeCollections, /sites, /events, /invoices,
+// /datacenters, /datacenterpricing as of 2026-09-19), both nested, or a bare
+// JSON array (/keys).
+func (c *GeyserAdminClient) doList(ctx context.Context, method, path string, payload, out interface{}) error {
+	raw, err := c.doRaw(ctx, method, path, payload)
+	if err != nil {
+		return err
+	}
+	body, err := geyserBody(raw)
+	if err != nil {
+		return err
+	}
+	if out == nil || len(body) == 0 {
+		return nil
+	}
+	var paged struct {
+		Content json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(body, &paged); err == nil && paged.Content != nil {
+		body = paged.Content
+	}
+	if err := json.Unmarshal(body, out); err != nil {
+		return fmt.Errorf("decode list response from %s %s: %w", method, path, err)
+	}
+	return nil
 }
 
 // doJSON performs a request and decodes the response payload — unwrapping the
