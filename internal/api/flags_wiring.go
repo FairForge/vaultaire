@@ -19,6 +19,12 @@ const (
 	// entry check. Off ⇒ plain whole-object PUTs; reads are unaffected
 	// (manifests are self-describing, chunked GETs keep working).
 	flagChunking = "chunking"
+
+	// flagSmartDemotion enables the Smart-tier demotion job (Phase 5.15.8)
+	// per tenant (tenant row) or globally ('*' row). Default OFF: the job
+	// ships flag-dark and is enabled tenant-by-tenant first. Checked per
+	// tenant inside SmartDemotionRunner.RunOnce.
+	flagSmartDemotion = "smart_demotion"
 )
 
 // signupsDefaultFromEnv is the `signups` flag's in-code default: the

@@ -72,7 +72,7 @@ The `engine.Driver` interface (in `internal/engine/interface.go`) is the sacred 
 
 Registration persists to **four tables in order**: `users` -> `tenants` -> `api_keys` -> `tenant_quotas`. Missing any causes failures. S3 auth queries `tenants` first (primary key, full access), then falls back to `api_keys` for scoped VLT_ keys, then `sts_tokens` for ASIA-prefixed temporary credentials.
 
-Other critical tables (61 migrations through `061_content_encoding.sql`):
+Other critical tables (62 migrations through `062_smart_demotions.sql`):
 - `object_head_cache` — HEAD/GET metadata cache (~1ms), content-type, ETag, metadata JSONB
 - `buckets` — bucket registry with visibility, CORS, cache TTL, metadata JSONB, slug
 - `multipart_uploads`, `multipart_parts` — in-progress multipart state
@@ -83,6 +83,7 @@ Other critical tables (61 migrations through `061_content_encoding.sql`):
 - `stripe_events` — webhook event dedup
 - `dashboard_sessions` — PostgreSQL-backed sessions with IP/user-agent tracking
 - `oauth_accounts` — OAuth provider links (Google, GitHub)
+- `smart_demotions` — Smart-tier demotion ledger (5.15.8): one row per hot→cold move, hot copy reclaimed after a grace period under an etag guard
 - `feature_flags` — runtime flags (1.13): global kill-switches + per-tenant overrides, `'*'` = global row; served via `internal/flags` (~15s cache, admin API + dashboard `/admin/flags`)
 
 Migrations are in `internal/database/migrations/`.
@@ -170,6 +171,7 @@ GitHub Actions Deploy (`.github/workflows/deploy.yml`):
 | `CHUNK_GET_PREFETCH` | 4 | Chunks fetched ahead of the write cursor per chunked GET (1 = sequential) |
 | `MULTIPART_ABANDON_HOURS` | 48 | Reaper aborts active multipart uploads idle longer than this |
 | `MULTIPART_TERMINAL_RETENTION_DAYS` | 7 | Reaper purges completed/aborted multipart rows older than this |
+| `SMART_DEMOTION_HOT_FRACTION`, `SMART_DEMOTION_IDLE_DAYS`, `SMART_DEMOTION_MIN_AGE_DAYS`, `SMART_DEMOTION_MAX_GB_PER_RUN`, `SMART_DEMOTION_TIERS` | 0.15, 14, 3, 500, standard | Smart-tier demotion job (5.15.8) knobs; the job itself is gated by the `smart_demotion` feature flag (default OFF) |
 
 ## Production
 
