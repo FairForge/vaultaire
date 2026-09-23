@@ -105,6 +105,30 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println(u)
+	case "rawpost", "rawput", "rawdelete":
+		// rawpost <path> <json> | rawput <path> <json> | rawdelete <path>
+		if st.AccessToken == "" || flag.NArg() < 2 {
+			fmt.Fprintln(os.Stderr, "need a saved session and a path")
+			os.Exit(2)
+		}
+		c := drivers.NewGeyserAdminClient(st.AccessToken, st.UserID, cfg, logger)
+		method := map[string]string{"rawpost": "POST", "rawput": "PUT", "rawdelete": "DELETE"}[flag.Arg(0)]
+		var payload any
+		if flag.NArg() > 2 {
+			var m map[string]any
+			if err := json.Unmarshal([]byte(flag.Arg(2)), &m); err != nil {
+				fmt.Fprintln(os.Stderr, "bad json:", err)
+				os.Exit(2)
+			}
+			payload = m
+		}
+		raw, err := c.RawDo(ctx, method, flag.Arg(1), payload)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "raw:", err)
+			os.Exit(1)
+		}
+		_, _ = os.Stdout.Write(raw)
+		fmt.Println()
 	case "dump":
 		var c *drivers.GeyserAdminClient
 		if st.AccessToken != "" && *code == "" {

@@ -1274,3 +1274,9 @@ func (c *GeyserAdminClient) ListBuckets(ctx context.Context) ([]GeyserBucketStat
 func (c *GeyserAdminClient) RawGet(ctx context.Context, path string) ([]byte, error) {
 	return c.doRaw(ctx, http.MethodGet, path, nil)
 }
+
+// RawDo performs an authenticated request with an optional JSON payload and
+// returns the raw body (probe tooling).
+func (c *GeyserAdminClient) RawDo(ctx context.Context, method, path string, payload interface{}) ([]byte, error) {
+	return c.doRaw(ctx, method, path, payload)
+}
