@@ -122,11 +122,11 @@ func TestCostComparison_WithUsage(t *testing.T) {
 	providers := data["Providers"].([]ProviderCost)
 	require.Len(t, providers, 4)
 
-	// stored.ge: 1 TB * $3.99 = $3.99, egress = $0.00
+	// stored.ge: 1 TB * $4.49 = $4.49, egress = $0.00
 	assert.Equal(t, "stored.ge", providers[0].Name)
-	assert.Equal(t, "$3.99", providers[0].StorageCost)
+	assert.Equal(t, "$4.49", providers[0].StorageCost)
 	assert.Equal(t, "$0.00", providers[0].EgressCost)
-	assert.Equal(t, "$3.99", providers[0].TotalCost)
+	assert.Equal(t, "$4.49", providers[0].TotalCost)
 	assert.True(t, providers[0].Highlight)
 
 	// AWS S3: 1 TB * $23.00 = $23.00, 0.5 TB * $90 = $45.00 (approx, float)
@@ -135,16 +135,16 @@ func TestCostComparison_WithUsage(t *testing.T) {
 	assert.Contains(t, providers[1].EgressCost, "$4") // ~$44.96 (500GB = 0.4997 TB)
 	assert.False(t, providers[1].Highlight)
 
-	// B2: 1 TB * $6.00 = $6.00
+	// B2: 1 TB * $6.95 = $6.95
 	assert.Equal(t, "Backblaze B2", providers[2].Name)
-	assert.Equal(t, "$6.00", providers[2].StorageCost)
+	assert.Equal(t, "$6.95", providers[2].StorageCost)
 
-	// Wasabi: 1 TB * $6.99 = $6.99, egress = $0.00
+	// Wasabi: 1 TB * $7.99 = $7.99, egress = $0.00
 	assert.Equal(t, "Wasabi", providers[3].Name)
-	assert.Equal(t, "$6.99", providers[3].StorageCost)
+	assert.Equal(t, "$7.99", providers[3].StorageCost)
 	assert.Equal(t, "$0.00", providers[3].EgressCost)
 
-	// Savings vs AWS: (23 + ~45) - (3.99 + 0) = ~$64
+	// Savings vs AWS: (23 + ~45) - (4.49 + 0) = ~$64
 	savings := data["TotalSavingsVsAWS"].(string)
 	assert.Contains(t, savings, "$")
 
@@ -210,23 +210,23 @@ func TestCostComparison_StorageOnly(t *testing.T) {
 	providers := data["Providers"].([]ProviderCost)
 	require.Len(t, providers, 4)
 
-	assert.Equal(t, "$3.99", providers[0].StorageCost)
+	assert.Equal(t, "$4.49", providers[0].StorageCost)
 	assert.Equal(t, "$0.00", providers[0].EgressCost)
-	assert.Equal(t, "$3.99", providers[0].TotalCost)
+	assert.Equal(t, "$4.49", providers[0].TotalCost)
 
 	assert.Equal(t, "$23.00", providers[1].StorageCost)
 	assert.Equal(t, "$0.00", providers[1].EgressCost)
 	assert.Equal(t, "$23.00", providers[1].TotalCost)
 
-	assert.Equal(t, "$6.00", providers[2].StorageCost)
+	assert.Equal(t, "$6.95", providers[2].StorageCost)
 	assert.Equal(t, "$0.00", providers[2].EgressCost)
-	assert.Equal(t, "$6.00", providers[2].TotalCost)
+	assert.Equal(t, "$6.95", providers[2].TotalCost)
 
-	assert.Equal(t, "$6.99", providers[3].StorageCost)
+	assert.Equal(t, "$7.99", providers[3].StorageCost)
 	assert.Equal(t, "$0.00", providers[3].EgressCost)
-	assert.Equal(t, "$6.99", providers[3].TotalCost)
+	assert.Equal(t, "$7.99", providers[3].TotalCost)
 
-	assert.Equal(t, "$19.01", data["TotalSavingsVsAWS"])
+	assert.Equal(t, "$18.51", data["TotalSavingsVsAWS"])
 	assert.Equal(t, "0 B", data["EgressThisMonth"])
 	assert.NoError(t, mock.ExpectationsWereMet())
 }

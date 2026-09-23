@@ -70,7 +70,7 @@ out of the box: `restic -r s3:https://stored.ge/my-bucket init`.
 - **Encrypted at rest** by default (SSE-S3). Want to hold your own keys? Use SSE-C.
 - **Auto-tiered**: hot for the first ~30 days on fast enterprise S3, then migrated
   toward tape-backed archive. You don't configure lifecycle rules unless you want to.
-- **Deduplicated and compressed** transparently — you're billed for logical bytes.
+- **Deduplicated and compressed** transparently — your quota counts logical bytes (what you see); the savings are ours.
 
 ## Next steps
 

@@ -24,23 +24,36 @@ the secret is shown once; copy it then.
 
 | Tier | Price | Best for |
 |------|-------|----------|
-| Standard | **$3.99/TB/mo** (annual) / $4.99 (monthly) | General storage, auto-tiered |
-| Performance | $5.99/TB/mo | Always-hot, ~24 ms reads |
+| Standard | **$4.49/TB/mo** (annual) / $4.99 (monthly) | General storage, auto-tiered |
+| Performance | $6.99/TB/mo — launches after Oct 31, not for sale on day one | Always-hot, ~24 ms reads |
 | Vault (archive) | **$2.00/TB/mo** (annual, prepaid) / $2.55 (monthly) | Tape-backed archive, any size |
 
-No API/request fees, ever. No retrieval fees. No minimum storage duration on
-Standard or Performance; Vault has a 30-day per-object minimum (a third of
-Wasabi's 90). Egress is free up to 3× your stored volume each month, then
-$0.01/GB (9× cheaper than AWS). Vault restores are free up to 1× your stored
-bytes each month — test your restores monthly at no cost — then $2.99/TB.
+**Every tier is sold as a quota.** You pick a size in whole TB (any size), pay the
+flat per-TB rate, and resize up or down whenever you like (prorated). The quota is a
+hard cap — a write past it returns a clear quota error until you resize — so the
+bill never moves on its own: no meters, no overage charges.
 
-**How is $3.99/TB sustainable? Is this VC-subsidized?**
-No. Three things make the math work: (1) **tiering** — cold data migrates to tape
-that costs us a fraction of hot storage; (2) **deduplication** — backup workloads
-dedupe 30–50%, and we bill logical bytes while paying for physical; (3) **zstd
-compression** on every chunk. Blended cost on realistic workloads lands well under
-our price. If you store incompressible, unique, constantly-hot data, that belongs on
-the Performance tier (still cheaper than B2).
+No API/request fees, ever. No retrieval fees. No minimum storage duration on
+Standard; Vault has a 30-day per-object minimum (a third of Wasabi's 90). Egress
+is free up to 0.5× your quota each month; beyond that throughput is throttled
+rather than billed — no surprise egress bills. Vault restores are free up to 1×
+your quota each month — test your restores monthly at no cost — and restores
+beyond that are queued, never billed.
+
+**What stays hot on Standard?**
+About 15% of your quota lives on hot storage. Data idle for 14+ days moves to tape
+automatically; reading it brings it back hot within minutes (and it stays hot for
+7 days). Need specific data to never demote? The **pin-hot add-on** is $3/TB/mo for
+the pinned amount.
+
+**How is $4.49/TB sustainable? Is this VC-subsidized?**
+No. The tiering math alone is a real margin: at full fill, ~15% on hot storage and
+~85% on tape blends our cost to about $1.94/TB against $4.49 revenue. On top of
+that, **deduplication** (backup workloads dedupe 30–50%) and **zstd compression**
+on every chunk are upside — your quota counts the bytes you see (logical), the
+savings are ours; that's how the price works, not a fee you pay. If you store
+incompressible, unique, constantly-hot data, pin it hot ($3/TB/mo) or wait for the
+Performance tier after launch.
 
 **Will my price change at renewal?**
 No renewal-price roulette. The rate you sign up at is the rate you pay.
@@ -61,7 +74,8 @@ standby in a second city is the first thing new revenue buys.
 
 **What if you disappear? / bus factor of one?**
 Three answers: (1) It's standard S3 — `rclone sync` your data out anytime, egress
-is free, there's no proprietary format and no lock-in. (2) Your data lives on
+is never billed (a full exit past your monthly allowance is throttled, not charged),
+there's no proprietary format and no lock-in. (2) Your data lives on
 established providers that don't depend on us. (3) The core engine is
 [open source](https://github.com/FairForge/vaultaire). Documented wind-down
 commitment: minimum 60 days' notice and free unlimited egress before any shutdown.
@@ -90,8 +104,9 @@ encryption and you keep dedup on everything else.
 
 **Cold data retrieval — is it instant?**
 Hot data is <50ms. Data aged to tape spools to cache on first read — seconds to a
-couple of minutes for first byte, longer for multi-TB restores. Need everything hot
-forever? That's the Performance tier.
+couple of minutes for first byte, longer for multi-TB restores. Need specific data
+hot forever? The pin-hot add-on ($3/TB/mo) keeps it from ever demoting; a full
+always-hot Performance tier launches after October 31.
 
 **Which S3 features are supported?**
 Multipart, versioning, Object Lock (governance + compliance/WORM), presigned URLs,

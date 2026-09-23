@@ -219,15 +219,18 @@ func populateValueStack(ctx context.Context, db *sql.DB, data map[string]any, te
 	data["StorageUsedFmt"] = formatBytes(used)
 }
 
-// Competitor pricing — verified Q2 2026.
+// Pricing — stored.ge Standard quota rate (annual, 2026-09-21 quota-sold
+// decision) vs competitor list prices as published August 2026 (Wasabi raised
+// to $7.99 Jul 1, B2 to $6.95 May 1). Egress on stored.ge is allowance-based
+// (throttled past 0.5× quota/mo), never billed.
 const (
-	storedStoragePerTB = 3.99
+	storedStoragePerTB = 4.49
 	storedEgressPerTB  = 0.0
 	awsStoragePerTB    = 23.0
 	awsEgressPerTB     = 90.0
-	b2StoragePerTB     = 6.0
+	b2StoragePerTB     = 6.95
 	b2EgressPerTB      = 10.0
-	wasabiStoragePerTB = 6.99
+	wasabiStoragePerTB = 7.99
 	wasabiEgressPerTB  = 0.0
 )
 

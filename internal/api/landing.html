@@ -3,10 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>stored.ge — S3-compatible storage that optimizes itself. $3.99/TB, tape archive $2/TB</title>
-<meta name="description" content="S3-compatible object storage with automatic tiering across hot storage and tape. $3.99/TB, tape-backed archive at $2/TB. No API fees, 3× free egress, no retrieval fees.">
+<title>stored.ge — S3-compatible storage that optimizes itself. $4.49/TB, tape archive $2/TB</title>
+<meta name="description" content="S3-compatible object storage with automatic tiering across hot storage and tape. $4.49/TB, tape-backed archive at $2/TB. Flat per-TB quota, no API fees, no retrieval fees.">
 <meta property="og:title" content="stored.ge — S3-compatible storage that optimizes itself">
-<meta property="og:description" content="One endpoint. Your data auto-tiers across hot storage and tape — $3.99/TB, archive at $2/TB. No API fees.">
+<meta property="og:description" content="One endpoint. Your data auto-tiers across hot storage and tape — $4.49/TB, archive at $2/TB. Flat quota, no API fees.">
 <meta property="og:url" content="https://stored.ge">
 <meta name="theme-color" content="#191919" media="(prefers-color-scheme: dark)">
 <meta name="theme-color" content="#f5f1e9" media="(prefers-color-scheme: light)">
@@ -658,8 +658,8 @@
             <h1>S3-compatible storage that <em>optimizes itself.</em></h1>
             <p class="sub">
                 One endpoint. Your data automatically tiers across hot storage and tape —
-                <strong>$3.99/TB</strong>, tape archive at <strong>$2/TB</strong>.
-                No API fees. 3× free egress. No retrieval fees.
+                <strong>$4.49/TB</strong>, tape archive at <strong>$2/TB</strong>.
+                You buy a quota in whole TB at a flat rate — no meters, no API fees, no retrieval fees.
             </p>
             <div class="hero-cta">
                 {{if .SignupsOpen}}
@@ -725,18 +725,18 @@ Elapsed time:      3m29.5s</span>
             <div class="tier">
                 <div class="tier-name"><h3>Performance</h3></div>
                 <div class="tier-body">
-                    <p>Always hot. ~24 ms reads, data never ages to a slower tier, egress served direct.</p>
+                    <p>Always hot. ~24 ms reads, data never ages to a slower tier, egress served direct. <strong>Launches after October 31</strong> — not for sale on day one; until then, the pin-hot add-on on Standard keeps chosen data permanently hot.</p>
                     <p class="tier-for"><b>for</b> latency-sensitive apps &middot; media &amp; API assets &middot; fast-restore backups &middot; B2 migrations</p>
                 </div>
-                <div class="tier-price">$5.99<small>/TB/mo</small></div>
+                <div class="tier-price">$6.99<small>/TB/mo &middot; coming later</small></div>
             </div>
             <div class="tier pop">
                 <div class="tier-name"><h3>Standard</h3><span class="tier-tag">MOST POPULAR</span></div>
                 <div class="tier-body">
-                    <p>Smart storage that optimizes itself. Hot data stays fast, cold data moves to cheaper, more durable tiers — you store, we optimize.</p>
+                    <p>Smart storage that optimizes itself. About 15% of your quota stays on hot storage; data idle for 14+ days moves to tape and comes back hot within minutes when you read it — you store, we optimize. Pin-hot add-on ($3/TB/mo) for bytes that must never demote.</p>
                     <p class="tier-for"><b>for</b> general S3 storage &middot; SaaS backends &middot; backup targets &middot; data lakes</p>
                 </div>
-                <div class="tier-price">$3.99<small>/TB/mo annual &middot; $4.99 monthly</small></div>
+                <div class="tier-price">$4.49<small>/TB/mo annual &middot; $4.99 monthly</small></div>
             </div>
             <div class="tier">
                 <div class="tier-name"><h3>Vault</h3></div>
@@ -773,7 +773,7 @@ Elapsed time:      3m29.5s</span>
                         </g>
                     </svg>
                     <div class="donut-center">
-                        <span class="big">$3.99</span>
+                        <span class="big">$4.49</span>
                         <span class="small">/TB/mo — fixed</span>
                     </div>
                 </div>
@@ -782,6 +782,7 @@ Elapsed time:      3m29.5s</span>
                     <input type="range" id="age-slider" min="0" max="120" step="1" value="30">
                     <div class="scrub-presets" role="group" aria-label="Timeline presets">
                         <button type="button" data-day="0">day 0</button>
+                        <button type="button" data-day="14">day 14</button>
                         <button type="button" data-day="30">day 30</button>
                         <button type="button" data-day="60">day 60</button>
                         <button type="button" data-day="90">day 90</button>
@@ -801,7 +802,7 @@ Elapsed time:      3m29.5s</span>
                 <div class="leg">
                     <div class="leg-row">
                         <span class="leg-dot" style="background:#DFB23E"></span>
-                        <span class="leg-name">Optimized <small>— cheaper backends, free egress</small></span>
+                        <span class="leg-name">Restored <small>— read from tape, hot again for 7 days</small></span>
                         <span class="leg-val" id="val-warm">9.5 TB</span>
                     </div>
                     <div class="leg-bar"><i id="bar-warm" style="width:38%;background:#DFB23E"></i></div>
@@ -820,22 +821,22 @@ Elapsed time:      3m29.5s</span>
         </div>
         <div class="stage-list">
             <div class="stage active" id="stage-0">
-                <p class="when">DAY 0–30 · HOT</p>
+                <p class="when">DAY 0–14 · HOT</p>
                 <h3>Everything fast</h3>
-                <p>Performance storage on enterprise S3 infrastructure. Sub-30 ms reads, full-speed multipart uploads.</p>
+                <p>New writes land on performance S3 infrastructure. Sub-30 ms reads, full-speed multipart uploads.</p>
             </div>
             <div class="stage" id="stage-1">
-                <p class="when">DAY 30–90 · OPTIMIZED</p>
-                <h3>Cold data migrates</h3>
-                <p>Objects you stop touching move to cheaper storage with free egress. Still online, still fast.</p>
+                <p class="when">DAY 14+ · TAPE</p>
+                <h3>Idle data moves to tape</h3>
+                <p>Objects untouched for 14 days migrate to tape libraries automatically. Still listed, still yours — a read brings them back hot within minutes.</p>
             </div>
             <div class="stage" id="stage-2">
-                <p class="when">DAY 90+ · ARCHIVE</p>
-                <h3>Deep cold hits tape</h3>
-                <p>Long-untouched data lands on tape libraries for maximum durability at archive economics.</p>
+                <p class="when">DAY 60+ · SETTLED</p>
+                <h3>~15% hot, the rest on tape</h3>
+                <p>The working set stays on hot storage (about 15% of your quota); everything else sits on tape at archive economics. Your price never moved.</p>
             </div>
         </div>
-        <p class="panel-caption">Illustrative 25 TB workload with a typical access pattern. You never configure lifecycle policies unless you want to.</p>
+        <p class="panel-caption">Illustrative 25 TB quota with a typical access pattern. You never configure lifecycle policies unless you want to.</p>
     </div>
 </section>
 
@@ -1147,18 +1148,18 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
         <div class="section-head">
             <p class="kicker"><b>05</b>Pricing</p>
             <h2>Pay per TB. That's the whole model.</h2>
-            <p class="lede">No API fees, no request classes, no retrieval surcharges — and the archive tier's limits are printed on this page, not in a PDF.</p>
+            <p class="lede">You buy a quota in whole TB at a flat per-TB rate and resize it whenever you like (prorated). The bill never moves on its own: no meters, no overage, no API fees, no request classes, no retrieval surcharges — and every limit is printed on this page, not in a PDF.</p>
         </div>
 
         <div class="calc">
-            <label for="calc-tb">how much are you storing? <output id="calc-out">20 TB</output></label>
+            <label for="calc-tb">how much quota do you need? <output id="calc-out">20 TB</output></label>
             <input type="range" id="calc-tb" min="1" max="100" step="1" value="20">
             <div class="calc-rows">
-                <div class="calc-row us"><span class="who">stored.ge Standard (annual)</span><span class="amt" id="calc-us">$79.80/mo</span></div>
+                <div class="calc-row us"><span class="who">stored.ge Standard (annual)</span><span class="amt" id="calc-us">$89.80/mo</span></div>
                 <div class="calc-row"><span class="who">Backblaze B2</span><span class="amt" id="calc-b2">$139.00/mo</span></div>
                 <div class="calc-row"><span class="who">AWS S3</span><span class="amt" id="calc-aws">$460.00/mo</span></div>
             </div>
-            <p class="calc-note" id="calc-note">That's <strong>$4,562/yr</strong> kept out of AWS's pocket.</p>
+            <p class="calc-note" id="calc-note">That's <strong>$4,442/yr</strong> kept out of AWS's pocket.</p>
         </div>
 
         <div class="plans">
@@ -1176,13 +1177,13 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
             </div>
             <div class="plan pop">
                 <p class="plan-kicker">Standard — most popular</p>
-                <div class="price">$3.99<small>/TB/mo</small></div>
-                <p class="alt-price">annual &middot; $4.99 monthly</p>
+                <div class="price">$4.49<small>/TB/mo</small></div>
+                <p class="alt-price">annual &middot; $4.99 monthly &middot; any whole-TB quota</p>
                 <ul>
-                    <li>Automatic tiering built in</li>
-                    <li>3× free egress, then $0.01/GB</li>
-                    <li>Global dedup + compression</li>
-                    <li>6× cheaper than AWS S3</li>
+                    <li>Automatic tiering built in (~15% hot, rest on tape)</li>
+                    <li>Egress free to 0.5× your quota/mo, then throttled — never billed</li>
+                    <li>Hard quota, resize any time — no overage, no meters</li>
+                    <li>5× cheaper than AWS S3</li>
                 </ul>
                 {{if .SignupsOpen}}
                 <div class="plan-cta"><a class="btn btn-primary" href="/register">Start free</a></div>
@@ -1191,20 +1192,16 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
                 {{end}}
             </div>
             <div class="plan">
-                <p class="plan-kicker">Performance</p>
-                <div class="price">$5.99<small>/TB/mo</small></div>
-                <p class="alt-price">pure hot storage</p>
+                <p class="plan-kicker">Performance — coming after launch</p>
+                <div class="price">$6.99<small>/TB/mo</small></div>
+                <p class="alt-price">pure hot storage &middot; not for sale on launch day</p>
                 <ul>
                     <li>~24 ms reads, always</li>
                     <li>Data never ages out</li>
-                    <li>3× free egress</li>
-                    <li>Cheaper than B2's $6.95</li>
+                    <li>Egress free to 1× your quota/mo</li>
+                    <li>Until then: pin-hot add-on on Standard, $3/TB/mo</li>
                 </ul>
-                {{if .SignupsOpen}}
-                <div class="plan-cta"><a class="btn btn-ghost" href="/register">Start free</a></div>
-                {{else}}
-                <div class="plan-cta"><a class="btn btn-ghost" href="#waitlist">Join waitlist</a></div>
-                {{end}}
+                <div class="plan-cta"><span class="btn btn-ghost" aria-disabled="true">Launches after Oct 31</span></div>
             </div>
         </div>
 
@@ -1215,7 +1212,7 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
                 <tr class="best"><td>Annual, prepaid</td><td>$2.00/TB/mo</td><td>any size — 5 TB is $10/mo, billed yearly</td></tr>
                 <tr><td>Founders slots</td><td>$1.00/TB/mo</td><td>first 100 TB &middot; annual only &middot; 3–10 TB per account &middot; lifetime rate</td></tr>
             </table>
-            <p class="fine">Pick an allocation in TB, change it whenever. The honest fine print: one durable tape copy (we're the offsite leg of <em>your</em> 3-2-1) &middot; 30-day minimum per object &middot; restore up to 1× your stored bytes free every month — a free monthly restore drill — then $2.99/TB &middot; restored copies stay hot 7 days. Never: retrieval fees or egress fees. Founders slots are numbered and hard-capped — when they're gone, they're gone.</p>
+            <p class="fine">Pick a quota in TB, change it whenever. The honest fine print: one durable tape copy (we're the offsite leg of <em>your</em> 3-2-1) &middot; 30-day minimum per object &middot; restore up to 1× your quota free every month — a free monthly restore drill — beyond that, restores are queued, never billed &middot; restored copies stay hot 7 days. Never: retrieval fees or egress fees. Founders slots are numbered and hard-capped — when they're gone, they're gone.</p>
         </div>
 
         <p class="includes">
@@ -1229,9 +1226,10 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
                     <tr><th></th><th class="us">stored.ge</th><th>Backblaze B2</th><th>Wasabi</th><th>Cloudflare R2</th><th>AWS S3</th></tr>
                 </thead>
                 <tbody>
-                    <tr><td>$/TB/mo</td><td class="us">$3.99</td><td>$6.95</td><td>$7.99</td><td>$15.00</td><td>$23.00</td></tr>
+                    <tr><td>$/TB/mo</td><td class="us">$4.49</td><td>$6.95</td><td>$7.99</td><td>$15.00</td><td>$23.00</td></tr>
                     <tr><td>API/request fees</td><td class="us">$0</td><td>Class B/C fees</td><td>$0</td><td>ops-based</td><td>per-request</td></tr>
-                    <tr><td>Egress</td><td class="us">3× free, then $0.01/GB</td><td>3× free, then $0.01/GB</td><td>"Free" (fair-use policy)</td><td>Free</td><td>$0.09/GB</td></tr>
+                    <tr><td>Egress</td><td class="us">0.5× quota free/mo, then throttled — never billed</td><td>3× free, then $0.01/GB</td><td>"Free" (fair-use policy)</td><td>Free</td><td>$0.09/GB</td></tr>
+                    <tr><td>Billing</td><td class="us">Flat quota, no meters</td><td>Metered</td><td>Metered (90-day min)</td><td>Metered</td><td>Metered</td></tr>
                     <tr><td>Min storage duration</td><td class="us">None (Vault: 30 days)</td><td>None</td><td>90 days</td><td>None</td><td>None</td></tr>
                     <tr><td>Archive tier</td><td class="us">$2/TB (tape)</td><td>—</td><td>—</td><td>—</td><td>Glacier (retrieval fees)</td></tr>
                     <tr><td>Auto-tiering</td><td class="us">Built in</td><td>No</td><td>No</td><td>No</td><td>Manual lifecycle</td></tr>
@@ -1373,7 +1371,8 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
         var TOTAL_TB = 25, R = 78, GAP = 3;
         var C = 2 * Math.PI * R;
         // keyframes: [day, hot%, optimized%, tape%]
-        var KF = [[0, 100, 0, 0], [30, 58, 38, 4], [60, 36, 44, 20], [90, 22, 36, 42], [120, 14, 28, 58]];
+        // keyframes: [day, hot%, restored%, tape%] — idle ≥14d demotes; ~15% hot at steady state
+        var KF = [[0, 100, 0, 0], [14, 100, 0, 0], [30, 45, 3, 52], [60, 24, 4, 72], [120, 15, 5, 80]];
         var segs = {
             hot:  document.getElementById('seg-hot'),
             warm: document.getElementById('seg-warm'),
@@ -1409,7 +1408,7 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
             document.getElementById('bar-hot').style.width = p[0] + '%';
             document.getElementById('bar-warm').style.width = p[1] + '%';
             document.getElementById('bar-tape').style.width = p[2] + '%';
-            var idx = day < 30 ? 0 : (day < 90 ? 1 : 2);
+            var idx = day < 14 ? 0 : (day < 60 ? 1 : 2);
             [0, 1, 2].forEach(function (i) {
                 document.getElementById('stage-' + i).classList.toggle('active', i === idx);
             });
@@ -1464,10 +1463,10 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
         function render() {
             var tb = Number(slider.value);
             document.getElementById('calc-out').textContent = tb + ' TB';
-            document.getElementById('calc-us').textContent = money(tb * 3.99) + '/mo';
+            document.getElementById('calc-us').textContent = money(tb * 4.49) + '/mo';
             document.getElementById('calc-b2').textContent = money(tb * 6.95) + '/mo';
             document.getElementById('calc-aws').textContent = money(tb * 23.00) + '/mo';
-            var saved = moneyWhole((23.00 - 3.99) * tb * 12);
+            var saved = moneyWhole((23.00 - 4.49) * tb * 12);
             var note = 'That’s <strong>' + saved + '/yr</strong> kept out of AWS’s pocket.';
             note += ' Archive-only? <strong>Vault</strong> holds ' + tb +
                 ' TB on tape for <strong>' + money(tb * 2.00) + '/mo</strong> billed yearly.';

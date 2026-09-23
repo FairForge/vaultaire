@@ -43,7 +43,7 @@ func TestDocsGuides_RenderMarkdown(t *testing.T) {
 			"<h1", "rclone", "rclone config create stored s3", "endpoint=https://stored.ge",
 		}},
 		{"faq", []string{
-			"<h1", "Frequently Asked", "$3.99/TB", "$5.99/TB", "support@stored.ge",
+			"<h1", "Frequently Asked", "$4.49/TB", "$6.99/TB", "sold as a quota", "support@stored.ge",
 		}},
 	}
 	for _, tt := range tests {
