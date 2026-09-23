@@ -595,6 +595,11 @@ func (e *CoreEngine) HealthCheck(ctx context.Context) error {
 	return nil
 }
 
+// WriteFailures returns the number of PUTs rejected because every eligible
+// durable backend failed (the fail-loudly path). Exported to Prometheus as
+// vaultaire_backend_write_failures_total.
+func (e *CoreEngine) WriteFailures() int64 { return e.writeFailures.Load() }
+
 // GetMetrics returns comprehensive metrics
 func (e *CoreEngine) GetMetrics(ctx context.Context) (map[string]interface{}, error) {
 	metrics := map[string]interface{}{

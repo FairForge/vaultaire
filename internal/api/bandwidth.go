@@ -37,6 +37,21 @@ func (cw *countingResponseWriter) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// Flush passes through to the underlying writer when it supports it, so
+// wrapping a streaming handler does not silently disable flushing.
+func (cw *countingResponseWriter) Flush() {
+	if f, ok := cw.ResponseWriter.(http.Flusher); ok {
+		if !cw.wroteHeader {
+			cw.statusCode = http.StatusOK
+			cw.wroteHeader = true
+		}
+		f.Flush()
+	}
+}
+
+// Unwrap lets http.ResponseController reach the underlying writer.
+func (cw *countingResponseWriter) Unwrap() http.ResponseWriter { return cw.ResponseWriter }
+
 // bandwidthEvent represents a single ingress/egress event for a tenant.
 // backend is the storage backend that served the bytes ("" when the request
 // never touched one — errors, listings, cache hits without attribution).
