@@ -8,7 +8,7 @@
 **Launch blockers (ops — SUPERSEDED 2026-07-08: now ALSO code, see Phases 5.15.6 + 5.15.7)**: **5.15.5** — prod on a durable backend (currently falls back to local disk), create + attach Stripe Billing Meters, set `STRIPE_METER_*` in prod .env, reopen signups (`SIGNUPS_ENABLED=true`), **TLS auto-renewal check (cert expires 2026-07-28 — launch week)**, Cloudflare cache/rate rules. **5.15.4** — smoke checklist run. **5.14.12** — hosted status page. **V18.7-minimal** — Stripe products for the Vault packs sold on day one + LET2026 coupon (launch posts ready in `.private/launch/`). **5.15.2** — confirm the load harness was run against live after #283, or run it.
 **Next code phase**: post-launch — see **"Post-Launch 90-Day Priority Stack"** (before the Tier 2 heading). In the Tier-2 pipeline sequence: Phase 10 remainder (10.4-10.8, incl. new 10.8 blind dedup/OPRF), then Phase 11 erasure coding → P2-P6 permafrost parity.
 **Status (2026-06-04, superseded)**: Phase 5.14 COMPLETE through 5.14.11 — all shipped & deployed to SLC prod: 5.14.1-5.14.4 (#253-256), 5.14.11 security hardening (#257), 5.14.5 HIPAA (#258), 5.14.6 GDPR/EU Data Act (#259), 5.14.7 per-bucket regions (#260), 5.14.8 SSE-C (#261), 5.14.9 access logging + inventory (#262), 5.14.10 compliance dashboard (#263). 5.11.0-5.11.12, 5.12.3-5.12.7, 5.13 complete. Gap-fill 5.10.17 object tagging shipped (#264). 5.15.1 graceful shutdown already in main.go (verify systemd TimeoutStopSec=45). **ALL gap-fills + 5.15 code COMPLETE:** 5.10.18 (#267), 2.7 (#269), 4.3 (#275), 3.6 (#276), 3.8 (#277), 3.9 (#278), landing 5.15.3 (#272), load-test gate 5.15.2 code (PR #282). **Remaining before launch = OPS only (no more code blocks Tier 1):** run the 5.15.2 load harness against live + fix what it surfaces; 5.15.4 smoke checklist; **5.15.5 prod backend/durability + Stripe meter activation + reopen signups (the true launch blocker)**; 5.14.12 status page (hosted). 5.14.12 status page = ops (hosted), not code.
-**Before 5.15 (launch gate)**: gap-fills — ✅ 5.10.17 object tagging (#264); REMAINING: 5.10.18 (Content-Disposition, next), 2.7 (metered billing — revenue-critical, pay-per-TB tiers can't bill without it), 4.3 (bandwidth alerts — table exists, alert logic missing), 3.6 (audit viewer), 3.8 (revenue dashboard — only an estimate exists), 3.9 (cost dashboard). Then 5.15.3 landing page (code) + ops gates 5.15.2/5.15.4/5.14.12 + **5.15.5 (prod backend/durability + billing activation — the true launch blockers)** = launch ready. (5.15.1 done.)
+**Before 5.15 (launch gate)**: gap-fills — ✅ 5.10.17 object tagging (#264); REMAINING: 5.10.18 (Content-Disposition, next), 2.7 (metered billing — SUPERSEDED as a launch gate by the 2026-09-21 quota-sold pricing decision; reporter stays dormant), 4.3 (bandwidth alerts — table exists, alert logic missing), 3.6 (audit viewer), 3.8 (revenue dashboard — only an estimate exists), 3.9 (cost dashboard). Then 5.15.3 landing page (code) + ops gates 5.15.2/5.15.4/5.14.12 + **5.15.5 (prod backend/durability + billing activation — the true launch blockers)** = launch ready. (5.15.1 done.)
 **Post-launch, first 2 weeks**: ✅ ALREADY DONE ahead of schedule — 3.7 customer support view (#294), 3.10 admin notifications (#295), 3.11 abuse queue (#296). <!-- reconstructed: verified against git log -->
 **Recent (2026-06-17)**: PR #312 merged (see Status line): range-GET passthrough, Phase 10.1-10.3 convergent encryption, permafrost rename, NVMe cache, `cmd/validate` + `scripts/validate-backends.sh`. PR #311 (2026-06-05+): Phase 9 zstd compression on chunked PUT/GET — Phase 9 COMPLETE.
 **Cleanup**: delete orphan branch `phase-5.11.6-event-log-webhooks` (code is on main, merged via PRs #238/#239).
@@ -102,6 +102,25 @@ The per-directory `CLAUDE.md` files carry most of the context automatically. The
 - **Known issues**: if tests revealed a bug you didn't fix, note it here
 - **External state changes**: if you created Stripe products, changed server config, added GitHub secrets, etc. — note it here or in `.private/CLAUDE.md`
 - **Pre-existing test failures**: `internal/testing/api/TestClient_WaitForReady` has a pre-existing race condition (not from our work)
+
+## Pricing Shape Decision (2026-09-21) — QUOTA-SOLD, ALL TIERS
+
+**Decided by owner 2026-09-21**: all tiers sell whole-TB **quota** (Stripe plain subscription
+price × TB quantity — the original Vault Flex mechanic, now universal), NOT metered stored
+bytes. Rates unchanged (Vault $2.55/$2.00 · Smart/Standard $4.99/$4.49 · Performance parked
+until $6.99). **Rate-discipline rule (load-bearing): quota is priced AT the linear per-TB
+rates — never below** (S3/LET buyers are high-fill; discounted quota = adverse selection).
+Launch mechanics: HARD quota (WP-1 enforcement + `tenant_quotas`, already live) + self-serve
+prorated resize via the existing plan-change webhook; **no Stripe Billing Meters required at
+launch** — 2.7's reporter stays dormant (egress = throttle-first at allowance, overage billing
+= post-launch). Allowances key off QUOTA, not stored bytes: hot = 15% × quota (Smart), egress
+= 0.5× quota/mo (Smart) / 1× restore allowance (Vault) / 1× (Performance). Optional add-on:
+**pin-hot at $3/TB-mo × pinned quantity** (bytes exempt from demotion beyond the allowance;
+crossover math intentionally pushes >⅔-pinned tenants to Performance). Full rationale +
+margin-vs-fill tables: `.private/SMART_TIER_DESIGN.md` addendum 2026-09-21.
+Supersedes: 2.7-as-launch-blocker (line above), 5.15.5 "create + attach Stripe Billing
+Meters", and any "per-TB metered" plan mapping in 2.x — those stay accurate as HISTORY of
+what shipped, but activation is no longer a launch gate.
 
 ## Migration Numbering
 
