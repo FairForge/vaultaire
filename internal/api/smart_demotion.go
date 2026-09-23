@@ -66,6 +66,10 @@ type SmartDemotionRunner struct {
 	MaxBytesPerRun      int64
 	Interval            time.Duration
 
+	// Promoter, when set, runs pending copy-backs (read-time promotion,
+	// PR B) at the start of every run.
+	Promoter *SmartPromoter
+
 	now        func() time.Time
 	beforeFlip func(bucket, key string) // test hook: runs after the cold copy, before the routing flip
 }
@@ -79,6 +83,7 @@ type SmartDemotionResult struct {
 	Skipped        int                   `json:"skipped"`
 	BytesDemoted   int64                 `json:"bytes_demoted"`
 	HotReclaimed   int                   `json:"hot_reclaimed"`
+	Promoted       int                   `json:"promoted"`
 	Errors         []string              `json:"errors,omitempty"`
 	Tenants        []TenantDemotionStats `json:"tenants,omitempty"`
 }
@@ -167,6 +172,11 @@ func (r *SmartDemotionRunner) RunOnce(ctx context.Context, dryRun bool) (SmartDe
 	}
 
 	if !dryRun {
+		if r.Promoter != nil {
+			n, errs := r.Promoter.PromotePending(ctx)
+			res.Promoted = n
+			res.Errors = append(res.Errors, errs...)
+		}
 		n, errs := r.reclaimHotCopies(ctx, hot)
 		res.HotReclaimed = n
 		res.Errors = append(res.Errors, errs...)
@@ -348,10 +358,16 @@ func (r *SmartDemotionRunner) demote(ctx context.Context, hot, cold engine.Drive
 	}
 	n, _ := upd.RowsAffected()
 	if n == 0 {
-		// Changed under us: the cold copy holds stale bytes — remove it.
-		if delErr := cold.Delete(tctx, container, c.key); delErr != nil {
-			r.logger.Warn("smart demotion: stale cold copy not removed",
-				zap.String("tenant", tenantID), zap.String("bucket", c.bucket), zap.String("key", c.key), zap.Error(delErr))
+		// Changed under us. Our cold copy is stale garbage UNLESS the new
+		// version itself landed on the cold backend at this key (a PUT with
+		// an archive storage class) — then the blob there is theirs.
+		var cur string
+		qerr := r.db.QueryRowContext(ctx, `SELECT COALESCE(backend_name,'') FROM object_head_cache WHERE tenant_id=$1 AND bucket=$2 AND object_key=$3`, tenantID, c.bucket, c.key).Scan(&cur)
+		if qerr == nil && cur != r.ColdBackend {
+			if delErr := cold.Delete(tctx, container, c.key); delErr != nil {
+				r.logger.Warn("smart demotion: stale cold copy not removed",
+					zap.String("tenant", tenantID), zap.String("bucket", c.bucket), zap.String("key", c.key), zap.Error(delErr))
+			}
 		}
 		return false, nil
 	}

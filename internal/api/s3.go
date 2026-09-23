@@ -603,6 +603,7 @@ func (s *Server) handleGetObject(w http.ResponseWriter, r *http.Request, req *S3
 	adapter.sseService = s.sseService
 	adapter.chunkEncSvc = s.chunkEncSvc
 	adapter.gci = s.gci
+	adapter.smartPromoter = s.smartPromoter
 	if s.chunkGetPrefetch > 0 {
 		adapter.chunkGetPrefetch = s.chunkGetPrefetch
 	}
