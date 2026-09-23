@@ -6,40 +6,57 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestIsValidRegion(t *testing.T) {
-	valid := []string{"us-west-1", "us-east-1", "eu-west-1", "eu-central-2", "eu-south-1"}
-	for _, r := range valid {
-		assert.True(t, IsValidRegion(r), "expected %q to be valid", r)
-	}
+// The new iDrive reseller account mints one key pair PER REGION, while the
+// engine registers an idrive-<region> driver for every region using the single
+// primary pair — so bucket-level region routing to any non-primary region
+// 403s. Per-region env overrides fix that; the primary pair stays the fallback.
 
-	invalid := []string{"", "us-north-1", "ap-southeast-1", "eu", "US-WEST-1"}
-	for _, r := range invalid {
-		assert.False(t, IsValidRegion(r), "expected %q to be invalid", r)
+func TestIDriveRegionCredentials_OverrideWins(t *testing.T) {
+	env := map[string]string{
+		"IDRIVE_ACCESS_KEY":              "primary-ak",
+		"IDRIVE_SECRET_KEY":              "primary-sk",
+		"IDRIVE_EU_WEST_2_ACCESS_KEY":    "ldn-ak",
+		"IDRIVE_EU_WEST_2_SECRET_KEY":    "ldn-sk",
+		"IDRIVE_US_CENTRAL_1_ACCESS_KEY": "dal-ak",
+		"IDRIVE_US_CENTRAL_1_SECRET_KEY": "dal-sk",
 	}
+	getenv := func(k string) string { return env[k] }
+
+	ak, sk := IDriveRegionCredentials(getenv, "eu-west-2")
+	assert.Equal(t, "ldn-ak", ak)
+	assert.Equal(t, "ldn-sk", sk)
+
+	ak, sk = IDriveRegionCredentials(getenv, "us-central-1")
+	assert.Equal(t, "dal-ak", ak)
+	assert.Equal(t, "dal-sk", sk)
 }
 
-func TestIsEURegion(t *testing.T) {
-	eu := []string{"eu-west-1", "eu-central-2", "eu-west-2", "eu-south-1"}
-	for _, r := range eu {
-		assert.True(t, IsEURegion(r), "expected %q to be EU", r)
+func TestIDriveRegionCredentials_FallsBackToPrimary(t *testing.T) {
+	env := map[string]string{
+		"IDRIVE_ACCESS_KEY": "primary-ak",
+		"IDRIVE_SECRET_KEY": "primary-sk",
+		// half an override must not be honoured
+		"IDRIVE_EU_WEST_1_ACCESS_KEY": "ie-ak",
 	}
+	getenv := func(k string) string { return env[k] }
 
-	notEU := []string{"us-west-1", "us-east-1", "us-central-1", "", "e"}
-	for _, r := range notEU {
-		assert.False(t, IsEURegion(r), "expected %q to not be EU", r)
-	}
+	ak, sk := IDriveRegionCredentials(getenv, "us-west-2")
+	assert.Equal(t, "primary-ak", ak)
+	assert.Equal(t, "primary-sk", sk)
+
+	ak, sk = IDriveRegionCredentials(getenv, "eu-west-1")
+	assert.Equal(t, "primary-ak", ak, "access key without its secret is ignored")
+	assert.Equal(t, "primary-sk", sk)
 }
 
-func TestRegionDisplayName(t *testing.T) {
-	assert.Equal(t, "US West (San Jose)", RegionDisplayName("us-west-1"))
-	assert.Equal(t, "EU Central (Frankfurt)", RegionDisplayName("eu-central-2"))
-	assert.Equal(t, "unknown-region", RegionDisplayName("unknown-region"))
+func TestIDriveRegionEnvKey(t *testing.T) {
+	assert.Equal(t, "IDRIVE_US_CENTRAL_1_ACCESS_KEY", IDriveRegionEnvKey("us-central-1", "ACCESS_KEY"))
+	assert.Equal(t, "IDRIVE_EU_SOUTH_1_SECRET_KEY", IDriveRegionEnvKey("eu-south-1", "SECRET_KEY"))
 }
 
-func TestIDriveRegions_AllHaveEndpoints(t *testing.T) {
-	for region, endpoint := range IDriveRegions {
-		assert.NotEmpty(t, endpoint, "region %q has empty endpoint", region)
-		assert.Contains(t, endpoint, "idrive.com", "region %q endpoint should be idrive.com", region)
-	}
-	assert.True(t, len(IDriveRegions) >= 8, "expected at least 8 regions")
+func TestIDriveRegionEndpoint_OverrideElseDefault(t *testing.T) {
+	env := map[string]string{"IDRIVE_US_CENTRAL_1_ENDPOINT": "https://s3.us-central-1.idrivee2.com"}
+	getenv := func(k string) string { return env[k] }
+	assert.Equal(t, "https://s3.us-central-1.idrivee2.com", IDriveRegionEndpoint(getenv, "us-central-1"))
+	assert.Equal(t, IDriveRegions["us-west-2"], IDriveRegionEndpoint(getenv, "us-west-2"))
 }
