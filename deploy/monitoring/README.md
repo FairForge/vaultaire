@@ -69,6 +69,41 @@ Real end-to-end (VaultaireDown; ~90s of prod downtime):
 10s group_wait ≈ 85s), `systemctl start vaultaire`. Verified 2026-08-03:
 delivered at ~85s, RESOLVED notice followed after restart.
 
+## Alert rules in this directory
+
+`vaultaire-backends.yml` — backend-outage rules (BackendProbeFailing,
+LyveProbeFailing, BackendWriteFailures warning/critical, BackendCircuitOpen,
+VaultaireServerErrorRatio). They key off the `vaultaire_backend_*` series the
+app exports from `/metrics` (`internal/api/prom_metrics.go`); the probes
+behind `vaultaire_backend_health` are AUTHENTICATED (signed HeadBucket for
+idrive/geyser via the driver, console `RSCustomerDetails` for lyve — root key,
+one 403 retry), so a dead access key fires them. A TCP dial never did.
+
+The original rules (`VaultaireDown`, `VaultaireHighErrorRate`, node rules)
+live only on the box in `/etc/prometheus/rules/vaultaire-alerts.yml`.
+`vaultaire_errors_total` counts 5xx responses since 2026-09-22 (it was a
+never-incremented stub before), so `VaultaireHighErrorRate` can now fire.
+
+### Adding / updating a rule
+
+1. Edit the YAML here, merge (rules are not deployed automatically).
+2. On the box:
+   ```bash
+   sudo cp deploy/monitoring/vaultaire-backends.yml /etc/prometheus/rules/
+   sudo promtool check rules /etc/prometheus/rules/*.yml
+   sudo systemctl reload prometheus      # SIGHUP re-reads rule_files
+   curl -s localhost:9090/api/v1/rules | jq '.data.groups[].name'
+   ```
+3. Every rule needs `labels.severity` + `annotations.summary/description` —
+   the ntfy bridge builds the push from exactly those.
+
+### Env knobs for the Lyve probe
+
+`LYVE_PROBE_ACCESS_KEY` / `LYVE_PROBE_SECRET_KEY` (root key; falls back to
+`LYVE_ACCESS_KEY`/`LYVE_SECRET_KEY`, which IS root until the Lyve hygiene
+pass moves prod to a service user) and `LYVE_PROBE_CUSTOMER` (default `v01`).
+Without a secret the Lyve probe degrades to the old TCP dial.
+
 ## Known limits
 
 - **Push only.** ntfy.sh rejects anonymous email publishing, and the box has

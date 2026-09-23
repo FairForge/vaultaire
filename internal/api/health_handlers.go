@@ -29,6 +29,9 @@ type BackendHealthState struct {
 	Latency   time.Duration
 	LastCheck time.Time
 	LastError string
+	// Failures counts failed probes since process start (monotonic; exported
+	// as vaultaire_backend_probe_failures_total).
+	Failures int64
 }
 
 // NewBackendHealthChecker creates a health checker
@@ -66,6 +69,9 @@ func (b *BackendHealthChecker) UpdateHealth(id string, healthy bool, latency tim
 	state.Healthy = healthy
 	state.Latency = latency
 	state.LastCheck = time.Now()
+	if !healthy {
+		state.Failures++
+	}
 	if err != nil {
 		state.LastError = err.Error()
 	} else {

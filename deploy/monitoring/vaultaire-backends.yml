@@ -1,0 +1,78 @@
+# Backend-outage alerting — install to /etc/prometheus/rules/ (see README).
+#
+# Series come from the app's /metrics (internal/api/prom_metrics.go):
+#   vaultaire_backend_health{backend}              1/0, last probe result
+#   vaultaire_backend_probe_failures_total{backend}
+#   vaultaire_backend_circuit_open{backend}        engine breaker not closed
+#   vaultaire_backend_write_failures_total         PUTs rejected, all durable backends failed
+#
+# Probes are AUTHENTICATED (signed HeadBucket for idrive/geyser, console
+# RSCustomerDetails for lyve) — a revoked key trips these; a TCP dial never did.
+groups:
+  - name: vaultaire-backends
+    rules:
+      # Primary/durable backends: a failing signed probe for 5 minutes means
+      # PUTs are 503ing (fail-loudly) or reads are failing. Page.
+      - alert: BackendProbeFailing
+        expr: vaultaire_backend_health{backend!="lyve"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Backend {{ $labels.backend }} failing authenticated probe"
+          description: "{{ $labels.backend }} has failed its signed health probe for 5+ minutes (dead key? account suspended? outage?). Check `curl -s localhost:8000/health/backends` on the box for last_error."
+
+      # Lyve is the fallback leg, and its console action intermittently 403s
+      # for root in ~5-minute windows — so a longer `for` and a warning.
+      - alert: LyveProbeFailing
+        expr: vaultaire_backend_health{backend="lyve"} == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Lyve console probe failing"
+          description: "RSCustomerDetails (root key) has failed for 15+ minutes — beyond the known 403 propagation windows. Check the Lyve console / key status."
+
+      # Durable writes are being rejected. One in 10 minutes is worth a
+      # heads-up (letshow writes every minute, so a real outage produces
+      # several quickly); five is a page. Same alertname so the critical
+      # inhibits the warning.
+      - alert: BackendWriteFailures
+        expr: increase(vaultaire_backend_write_failures_total[10m]) >= 1
+        labels:
+          severity: warning
+        annotations:
+          summary: "Durable backend write failures"
+          description: "{{ $value | printf \"%.0f\" }} PUT(s) rejected in the last 10 minutes because every eligible durable backend failed (503 to clients)."
+
+      - alert: BackendWriteFailures
+        expr: increase(vaultaire_backend_write_failures_total[10m]) >= 5
+        labels:
+          severity: critical
+        annotations:
+          summary: "Durable backend write failures (sustained)"
+          description: "{{ $value | printf \"%.0f\" }} PUTs rejected in the last 10 minutes — the primary backend is effectively down for writes."
+
+      # A breaker that stays open means the engine is routing around a
+      # backend; usually accompanied by one of the above, but not always
+      # (reads-only failures).
+      - alert: BackendCircuitOpen
+        expr: vaultaire_backend_circuit_open == 1
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Circuit breaker open for {{ $labels.backend }}"
+          description: "The engine's circuit breaker for {{ $labels.backend }} has been open/half-open for 3+ minutes (5 backend failures within 60s trips it)."
+
+      # The legacy HighErrorRate rule keyed off vaultaire_errors_total, which
+      # never incremented before 2026-09-22. It now counts 5xx responses; this
+      # ratio form is less noisy than the absolute rate at low traffic.
+      - alert: VaultaireServerErrorRatio
+        expr: (increase(vaultaire_errors_total[10m]) / clamp_min(increase(vaultaire_requests_total[10m]), 1)) > 0.05 and increase(vaultaire_errors_total[10m]) >= 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "5xx ratio above 5%"
+          description: "{{ $value | humanizePercentage }} of requests returned 5xx over the last 10 minutes (≥10 errors)."
