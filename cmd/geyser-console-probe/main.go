@@ -28,7 +28,7 @@ func main() {
 	browsePrefix := flag.String("prefix", "canary-20260919/", "object prefix to browse")
 	flag.Parse()
 	if flag.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: geyser-console-probe login | -code N dump | dump | raw <path>")
+		fmt.Fprintln(os.Stderr, "usage: geyser-console-probe login | -code N dump | dump | raw <path> | restore-cache <bucketId> <path> [versionId] | presign <bucketId> <path>")
 		os.Exit(2)
 	}
 	logger := zap.NewNop()
@@ -77,6 +77,34 @@ func main() {
 		}
 		_, _ = os.Stdout.Write(raw)
 		fmt.Println()
+	case "restore-cache":
+		// restore-cache <bucketId> <path> [versionId] — console-side recall to cache.
+		if st.AccessToken == "" || flag.NArg() < 3 {
+			fmt.Fprintln(os.Stderr, "need a saved session, bucket id and path")
+			os.Exit(2)
+		}
+		c := drivers.NewGeyserAdminClient(st.AccessToken, st.UserID, cfg, logger)
+		ver := ""
+		if flag.NArg() > 3 {
+			ver = flag.Arg(3)
+		}
+		if err := c.RestoreToCache(ctx, flag.Arg(1), flag.Arg(2), ver); err != nil {
+			fmt.Fprintln(os.Stderr, "restore-cache:", err)
+			os.Exit(1)
+		}
+		fmt.Println("restore-to-cache accepted")
+	case "presign":
+		if st.AccessToken == "" || flag.NArg() < 3 {
+			fmt.Fprintln(os.Stderr, "need a saved session, bucket id and path")
+			os.Exit(2)
+		}
+		c := drivers.NewGeyserAdminClient(st.AccessToken, st.UserID, cfg, logger)
+		u, err := c.PresignDownload(ctx, flag.Arg(1), flag.Arg(2))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "presign:", err)
+			os.Exit(1)
+		}
+		fmt.Println(u)
 	case "dump":
 		var c *drivers.GeyserAdminClient
 		if st.AccessToken != "" && *code == "" {
