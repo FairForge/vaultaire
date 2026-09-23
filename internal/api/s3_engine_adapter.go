@@ -59,6 +59,10 @@ type S3ToEngine struct {
 	// CHUNK_GET_PREFETCH via the Server; 1 = sequential fetches).
 	chunkGetPrefetch int
 
+	// smartPromoter brings Smart-demoted objects back hot on read (5.15.8
+	// PR B). Nil = no promotion (tests, callers that never set it).
+	smartPromoter *SmartPromoter
+
 	// flags gates the chunked PUT path (1.13 `chunking` kill-switch +
 	// per-tenant override). Nil (tests, callers that never set it) means
 	// chunking stays on — the pre-flag behavior.
@@ -283,6 +287,12 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		}
 	}
 
+	// Smart-tier read-time promotion: a demoted object being read comes
+	// back hot (routing flip inside the grace window, async copy-back after).
+	if cacheHit && a.smartPromoter != nil && cachedBackendName == a.smartPromoter.ColdBackend && !cachedIsChunked {
+		cachedBackendName = a.smartPromoter.OnRead(r.Context(), t.ID, bucket, artifact, cachedETag)
+	}
+
 	// Seed the engine's in-memory routing map so GET goes directly to the
 	// correct backend instead of failing over from primary on restart.
 	if cacheHit && cachedBackendName != "" {
@@ -342,6 +352,16 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 			w.Header().Set("Retry-After", "30")
 			WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
 		} else if errors.Is(err, engine.ErrArchived) {
+			// Smart-demoted object evicted to tape: the restore is submitted
+			// on the reader's behalf and the answer is a retryable 503, not
+			// Glacier's 403 — Smart customers never issue restores themselves.
+			if a.smartPromoter != nil && a.smartPromoter.OnArchived(r.Context(), t.ID, bucket, artifact) {
+				w.Header().Set("Retry-After", "120")
+				w.Header().Set("x-amz-storage-class", "GLACIER")
+				WriteS3ErrorWithContext(w, ErrServiceUnavailable, r.URL.Path, generateRequestID(),
+					WithSuggestion("This object is being brought back from the archive tier automatically — retry in a few minutes."))
+				return
+			}
 			// Archive-tier object past the staging window (V18.2): Glacier
 			// wire semantics — 403 InvalidObjectState, never a raw 500.
 			// rclone/aws-cli recognize this and drive their restore flows.

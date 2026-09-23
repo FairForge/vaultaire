@@ -85,6 +85,8 @@ type Server struct {
 	accessLogTracker *S3AccessLogTracker
 	inventoryRunner  *InventoryRunner
 	dedupGCRunner    *DedupGCRunner
+	smartDemotion    *SmartDemotionRunner
+	smartPromoter    *SmartPromoter
 	multipartReaper  *MultipartReaper
 	// multipartMaxUploadBytes caps a single multipart upload's accumulated
 	// in-flight part bytes (0 = unlimited). Part data lives unbilled on local
@@ -164,6 +166,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	s.flags = flags.New(s.db, logger)
 	s.flags.Register(flagSignups, signupsDefaultFromEnv())
 	s.flags.Register(flagChunking, true)
+	s.flags.Register(flagSmartDemotion, false)
 	if err := s.flags.Refresh(context.Background()); err != nil {
 		logger.Warn("initial feature flag refresh failed — serving in-code defaults until the background refresh succeeds",
 			zap.Error(err))
@@ -267,6 +270,43 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// Dedup GC runner — reconciles ref counts and reclaims orphaned chunks.
 	s.dedupGCRunner = NewDedupGCRunner(s.db, s.engine, s.gci, logger)
 	s.dedupGCRunner.StartDedupGC(context.Background())
+
+	// Smart-tier demotion job (5.15.8): keeps ≤15% of a Standard tenant's
+	// quota on the hot backend, flag-gated per tenant (smart_demotion,
+	// default OFF). Env knobs override the defaults for the whole runner.
+	var fc flagChecker
+	if s.flags != nil {
+		fc = s.flags
+	}
+	s.smartDemotion = NewSmartDemotionRunner(s.db, s.engine, fc, logger)
+	s.smartPromoter = NewSmartPromoter(s.db, s.engine, logger)
+	if s.smartDemotion != nil {
+		s.smartDemotion.Promoter = s.smartPromoter
+		if v := os.Getenv("SMART_DEMOTION_HOT_FRACTION"); v != "" {
+			if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 && f <= 1 {
+				s.smartDemotion.HotFraction = f
+			}
+		}
+		if v := os.Getenv("SMART_DEMOTION_IDLE_DAYS"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				s.smartDemotion.IdleAfter = time.Duration(n) * 24 * time.Hour
+			}
+		}
+		if v := os.Getenv("SMART_DEMOTION_MIN_AGE_DAYS"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				s.smartDemotion.MinAge = time.Duration(n) * 24 * time.Hour
+			}
+		}
+		if v := os.Getenv("SMART_DEMOTION_MAX_GB_PER_RUN"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				s.smartDemotion.MaxBytesPerRun = int64(n) << 30
+			}
+		}
+		if v := os.Getenv("SMART_DEMOTION_TIERS"); v != "" {
+			s.smartDemotion.Tiers = strings.Split(v, ",")
+		}
+		s.smartDemotion.Start(context.Background())
+	}
 
 	// Multipart reaper + per-upload byte cap (WP-10-minimal): part data sits
 	// unbilled on local disk until complete — the reaper aborts abandoned
@@ -745,6 +785,7 @@ func (s *Server) registerComplianceRoutes() {
 		r.Patch("/breach/{id}", s.requireAdmin(complianceHandler.HandleUpdateBreach))
 
 		r.Post("/dedup-gc", s.requireAdmin(s.handleDedupGCTrigger))
+		r.Post("/smart-demotion", s.requireAdmin(s.handleSmartDemotionTrigger))
 		r.Post("/quota-reconcile", s.requireAdmin(s.handleQuotaReconcile))
 
 		// Feature flags (1.13): flip kill-switches / per-tenant enablement
