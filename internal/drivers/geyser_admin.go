@@ -1259,3 +1259,18 @@ func sanitizeBucketName(name string) string {
 	}
 	return string(result)
 }
+
+// ListBuckets returns every bucket visible to the console session (GET /api/buckets).
+func (c *GeyserAdminClient) ListBuckets(ctx context.Context) ([]GeyserBucketStatus, error) {
+	var out []GeyserBucketStatus
+	if err := c.doList(ctx, http.MethodGet, "/buckets", nil, &out); err != nil {
+		return nil, fmt.Errorf("geyser list buckets: %w", err)
+	}
+	return out, nil
+}
+
+// RawGet performs an authenticated GET and returns the raw body — for probing
+// endpoints the typed client does not model yet (e.g. /tasks).
+func (c *GeyserAdminClient) RawGet(ctx context.Context, path string) ([]byte, error) {
+	return c.doRaw(ctx, http.MethodGet, path, nil)
+}
