@@ -218,6 +218,7 @@ var knownUndocumented = map[string]bool{
 	"POST /api/rbac/users/{userID}/roles":                    true,
 	"POST /api/v1/admin/breach":                              true,
 	"POST /api/v1/admin/dedup-gc":                            true,
+	"POST /api/v1/admin/smart-demotion":                      true,
 	"POST /api/v1/admin/quota-reconcile":                     true,
 	"POST /api/v1/manage/account/cancel-deletion":            true,
 	"POST /api/v1/manage/account/export":                     true,
