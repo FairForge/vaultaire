@@ -5,6 +5,24 @@ what you need and it shows up here.
 
 ---
 
+## 2026-09-22 — Quota pricing: pick your TB, flat rate, every tier
+
+- **Every tier is now sold as a quota.** You choose a size in whole TB (any
+  size), pay a flat per-TB rate, and resize up or down whenever you like
+  (prorated). The quota is a hard cap — writes past it return a clear quota
+  error until you resize — so your bill never moves on its own. No meters,
+  no overage charges. Vault already worked this way; now Standard does too.
+- **Standard is $4.49/TB/mo annual prepaid, $4.99 monthly.** About 15% of
+  your quota stays on hot storage; data idle for 14+ days moves to tape and
+  comes back hot within minutes when read. New **pin-hot add-on** ($3/TB/mo)
+  for data that must never demote.
+- **Egress allowances are keyed to your quota**: Standard egress is free up
+  to 0.5× your quota per month, then throttled rather than billed. Vault
+  restores are free up to 1× your quota per month; beyond that they queue,
+  never billed. (The old "3× stored" and "$2.99/TB" overage lines are gone.)
+- **Performance tier is parked** until after launch — it returns at $6.99/TB/mo.
+  Until then, pin-hot on Standard covers always-hot needs.
+
 ## 2026-09-16 — Simpler Vault pricing: $2/TB, any size
 
 - **Vault is now linear.** The prepaid pack ladder (Vault1–Vault18) is gone;

@@ -48,8 +48,8 @@ DELETE /{bucket}/{key}      - Delete object
 
         <div class="section">
             <h2>Pricing</h2>
-            <p>Storage: $3.99/TB per month</p>
-            <p>Bandwidth: Included</p>
+            <p>Storage: $4.49/TB per month (annual quota) / $4.99 monthly</p>
+            <p>Bandwidth: allowance included, never billed</p>
         </div>
 
         <div class="section">
