@@ -431,3 +431,7 @@ Most handlers use `tenant.FromContext(r.Context())` to get the authenticated ten
 - Migration 063 adds `promote_requested_at` / `restore_requested_at` to the ledger.
 - Out of scope v1: chunked objects, versioned buckets; HEAD of a demoted object still reports `x-amz-storage-class: GLACIER` (BackendToStorageClass) — cosmetic, revisit.
 - Tests: `smart_demotion_test.go`, `smart_promotion_test.go` (DB-backed via `DATABASE_URL`; LocalDrivers / `stubArchiveDriver` stand in for idrive/geyser).
+
+## Public-bucket placement → R2 (2026-09-24)
+
+`resolvePutStorageClass` (`s3_engine_adapter.go`) is the single placement resolution for plain PUT and multipart-complete: explicit `x-amz-storage-class` header → bucket `tier_preference` (cold/resilient classes keep their promise) → **`PUBLIC`** when the bucket is `public-read` AND an `r2` driver is registered (`publicBucketStorageClass`) → `""` (engine primary). `PUBLIC` maps to the `r2` backend in `engine/storage_class.go` and is never shown to clients (r2 reports STANDARD). `storageClassDisablesChunking` keeps PUBLIC/RESILIENT/GLACIER/DEEP_ARCHIVE objects whole. Objects that landed elsewhere before a bucket went public stay where they are (head-cache `backend_name` routes the CDN read); region-pinned buckets (`bucketRegionDriver`) bypass this entirely. Without an r2 driver (dev/CI) nothing changes. Probe: `r2` gets the signed HeadBucket probe like idrive/geyser. Tests: `public_placement_test.go` (DB-backed).

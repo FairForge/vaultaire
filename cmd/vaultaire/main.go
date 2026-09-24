@@ -149,6 +149,7 @@ func main() {
 		"permafrost": 0.0,
 		"local":      0.0,
 		"geyser":     0.00155, // $1.55/TB
+		"r2":         0.01536, // $15.36/TB — public buckets only, paid for by $0 egress
 	})
 
 	eng.SetEgressCosts(map[string]float64{
@@ -159,6 +160,7 @@ func main() {
 		"permafrost": 0.0,
 		"local":      0.0,
 		"geyser":     0.0,
+		"r2":         0.0,
 	})
 
 	// Initialize storage drivers
@@ -277,6 +279,23 @@ func main() {
 			eng.AddDriver(driverName, drv)
 		}
 		logger.Info("iDrive per-region drivers registered", zap.Int("regions", len(drivers.IDriveRegions)))
+	}
+
+	// 6b. Cloudflare R2 — PUBLIC BUCKETS / CDN ORIGIN ONLY, never a tier
+	// (SMART_TIER_DESIGN.md, revised 2026-09-19). Public-read buckets resolve
+	// to the PUBLIC storage class → this driver; everything else ignores it.
+	if r2Account := os.Getenv("R2_ACCOUNT_ID"); r2Account != "" {
+		r2Driver, err := drivers.NewR2Driver(r2Account,
+			os.Getenv("R2_ACCESS_KEY"), os.Getenv("R2_SECRET_KEY"),
+			os.Getenv("R2_JURISDICTION"), os.Getenv("R2_BUCKET"), logger)
+		if err != nil {
+			logger.Warn("failed to add R2 driver", zap.Error(err))
+		} else {
+			eng.AddDriver("r2", r2Driver)
+			logger.Info("R2 driver added (public buckets / CDN origin)",
+				zap.String("jurisdiction", os.Getenv("R2_JURISDICTION")),
+				zap.String("bucket", r2Driver.Bucket()))
+		}
 	}
 
 	// 7. Add Permafrost (OneDrive fleet) — internal parity tier, not customer-facing
