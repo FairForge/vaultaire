@@ -194,3 +194,22 @@ func TestProbeBackendOnce_ProbeIsBoundedByTimeout(t *testing.T) {
 	assert.False(t, st.Healthy)
 	assert.Contains(t, st.LastError, "deadline")
 }
+
+func TestBuildBackendProbes_R2UsesSignedDriverCheck(t *testing.T) {
+	// R2 (public-bucket/CDN backend) is probed with the driver's signed
+	// HeadBucket like idrive/geyser — a revoked R2 token must trip the alert.
+	eng := &fakeDriverChecker{drivers: map[string]error{"r2": nil}}
+	env := map[string]string{"R2_ACCOUNT_ID": "acct", "R2_ACCESS_KEY": "ak", "R2_SECRET_KEY": "sk"}
+
+	got := buildBackendProbes(envOf(env), eng)
+	c := findCheck(t, got, "r2")
+	require.NotNil(t, c.probe, "r2 must get an authenticated probe")
+	require.NoError(t, c.probe(context.Background()))
+	assert.Equal(t, []string{"r2"}, eng.calls)
+
+	// Not registered (boot failure) → no probe.
+	got = buildBackendProbes(envOf(env), &fakeDriverChecker{drivers: map[string]error{}})
+	for _, c := range got {
+		assert.NotEqual(t, "r2", c.name)
+	}
+}

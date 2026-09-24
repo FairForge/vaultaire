@@ -165,6 +165,8 @@ GitHub Actions Deploy (`.github/workflows/deploy.yml`):
 | `IDRIVE_ACCESS_KEY`, `IDRIVE_SECRET_KEY` | — | iDrive E2 S3 credentials |
 | `IDRIVE_ENDPOINT`, `IDRIVE_REGION` | — | iDrive endpoint and region |
 | `IDRIVE_<REGION>_ACCESS_KEY`, `IDRIVE_<REGION>_SECRET_KEY`, `IDRIVE_<REGION>_ENDPOINT` | falls back to the primary `IDRIVE_*` pair / `IDriveRegions` default | Per-region overrides for the `idrive-<region>` drivers (region id upper-cased, `-`→`_`, e.g. `IDRIVE_US_CENTRAL_1_ACCESS_KEY`); the reseller account mints one key per region |
+| `R2_ACCOUNT_ID`, `R2_ACCESS_KEY`, `R2_SECRET_KEY` | — | Cloudflare R2 S3 credentials. Registers the `r2` driver — **public buckets / CDN origin only, never a tier**: public-read buckets resolve to the internal `PUBLIC` storage class → R2 (`api.resolvePutStorageClass`); no other placement touches it |
+| `R2_JURISDICTION`, `R2_BUCKET` | default, `vaultaire-public` | R2 jurisdiction endpoint (`default`\|`eu`\|`us`\|`fedramp`; `us` endpoint fails TLS as of 2026-09-24) and the single fixed bucket public objects live in (tenant-prefixed keys) |
 | `ONEDRIVE_CLIENT_ID`, `ONEDRIVE_CLIENT_SECRET`, `ONEDRIVE_TENANT_ID` | — | OneDrive OAuth (future) |
 | `ENCRYPTION_MASTER_KEY` | — | SSE-S3 master key (64 hex chars = 32 bytes). Absent = encryption disabled |
 | `MULTIPART_MAX_UPLOAD_BYTES` | 53687091200 (50 GiB) | Per-upload in-flight byte cap for multipart parts (0 = unlimited) |

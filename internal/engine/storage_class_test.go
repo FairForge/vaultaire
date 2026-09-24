@@ -41,3 +41,22 @@ func TestResolveStorageClass_ResilientRoutesToLyve(t *testing.T) {
 		t.Fatalf("RESILIENT without lyve: got (%s,%s), want (local,RESILIENT)", backend, class)
 	}
 }
+
+// PUBLIC is our internal class for public-read buckets: it routes to the
+// Cloudflare R2 backend (public-bucket/CDN-origin role only — never a tier)
+// when one is registered, and otherwise falls back to the primary exactly like
+// every other unavailable mapping. Clients never see "PUBLIC": r2 reports
+// STANDARD on HEAD/LIST like the other hot backends.
+func TestResolveStorageClass_PublicRoutesToR2(t *testing.T) {
+	backend, class := ResolveStorageClass("PUBLIC", "idrive", map[string]Driver{"idrive": nil, "r2": nil})
+	if backend != "r2" || class != "PUBLIC" {
+		t.Fatalf("PUBLIC with r2 registered: got (%s,%s), want (r2,PUBLIC)", backend, class)
+	}
+
+	backend, class = ResolveStorageClass("PUBLIC", "idrive", map[string]Driver{"idrive": nil})
+	if backend != "idrive" || class != "PUBLIC" {
+		t.Fatalf("PUBLIC without r2: got (%s,%s), want (idrive,PUBLIC)", backend, class)
+	}
+
+	assert.Equal(t, "STANDARD", BackendToStorageClass("r2"))
+}

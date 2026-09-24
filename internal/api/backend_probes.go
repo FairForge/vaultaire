@@ -83,6 +83,7 @@ func buildBackendProbes(getenv func(string) string, eng driverChecker) []backend
 	for _, d := range []struct{ name, envKey string }{
 		{"idrive", "IDRIVE_ACCESS_KEY"},
 		{"geyser", "GEYSER_ACCESS_KEY"},
+		{"r2", "R2_ACCESS_KEY"},
 	} {
 		if getenv(d.envKey) == "" || !registered[d.name] {
 			continue

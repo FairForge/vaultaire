@@ -28,6 +28,14 @@ var storageClassToBackend = map[string]string{
 	// backend at its default (STANDARD) class — Lyve's IA service tier with
 	// its retention/size penalties is never used.
 	"RESILIENT": "lyve",
+
+	// PUBLIC is OUR internal class for public-read buckets (never sent by
+	// clients): it routes to the Cloudflare R2 backend, whose only role is
+	// public buckets / CDN origin ($0 egress, next to the proxied
+	// cdn.stored.ge host). Not a tier — nothing else resolves here. Set by
+	// api.resolvePutStorageClass when the bucket is public-read and an r2
+	// driver is registered; falls back to the primary like every mapping.
+	"PUBLIC": "r2",
 }
 
 var backendToStorageClass = map[string]string{
@@ -37,6 +45,7 @@ var backendToStorageClass = map[string]string{
 	"permafrost": "STANDARD",
 	"local":      "REDUCED_REDUNDANCY",
 	"s3":         "STANDARD",
+	"r2":         "STANDARD",
 }
 
 func ResolveStorageClass(class string, primaryBackend string, availableDrivers map[string]Driver) (driverName, resolvedClass string) {
