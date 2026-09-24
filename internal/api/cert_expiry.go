@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
@@ -27,8 +28,10 @@ import (
 // `sni@host:port` (or just `sni`, meaning `sni@sni:443`). On SLC that is
 // `stored.ge@127.0.0.1:443,stored.cloud@127.0.0.1:443` — dial the local
 // HAProxy with the public SNI so the probe sees the ORIGIN cert, not
-// Cloudflare's edge cert. Verification is deliberately skipped: an expired
-// or mis-issued cert must still report its NotAfter (that is the alert).
+// Cloudflare's edge cert. The handshake is fully verified; when verification
+// fails (expired, wrong name, unknown CA) the leaf is taken from the x509
+// error itself, so an expired or mis-issued cert still reports its NotAfter
+// (that is the alert) without ever disabling verification.
 
 const (
 	defaultCertProbeInterval = time.Hour
@@ -65,20 +68,25 @@ func parseCertProbeTargets(spec string) []certProbeTarget {
 	return out
 }
 
-// probeCertNotAfter performs the TLS handshake and returns the leaf's NotAfter.
+// probeCertNotAfter performs a verified TLS handshake and returns the leaf's
+// NotAfter. A verification failure that carries the certificate (expired,
+// hostname mismatch, unknown authority) still yields NotAfter — the whole
+// point of the probe is to see an expiring or already-expired cert.
 func probeCertNotAfter(ctx context.Context, t certProbeTarget) (time.Time, error) {
 	d := &tls.Dialer{
 		NetDialer: &net.Dialer{Timeout: certProbeTimeout},
 		Config: &tls.Config{
-			ServerName:         t.ServerName,
-			InsecureSkipVerify: true, // #nosec G402 -- read-only expiry probe; an expired cert must still be observable, we never send data
-			MinVersion:         tls.VersionTLS12,
+			ServerName: t.ServerName,
+			MinVersion: tls.VersionTLS12,
 		},
 	}
 	ctx, cancel := context.WithTimeout(ctx, certProbeTimeout)
 	defer cancel()
 	conn, err := d.DialContext(ctx, "tcp", t.Addr)
 	if err != nil {
+		if leaf := certFromVerifyError(err); leaf != nil {
+			return leaf.NotAfter, nil
+		}
 		return time.Time{}, fmt.Errorf("tls dial %s (sni %s): %w", t.Addr, t.ServerName, err)
 	}
 	defer func() { _ = conn.Close() }()
@@ -91,6 +99,25 @@ func probeCertNotAfter(ctx context.Context, t certProbeTarget) (time.Time, error
 		return time.Time{}, errors.New("no peer certificate presented")
 	}
 	return certs[0].NotAfter, nil
+}
+
+// certFromVerifyError extracts the presented leaf from the x509 verification
+// errors that carry it. Returns nil for anything else (network errors,
+// protocol errors) so those still surface as probe failures.
+func certFromVerifyError(err error) *x509.Certificate {
+	var invalid x509.CertificateInvalidError // expired, not yet valid, …
+	if errors.As(err, &invalid) && invalid.Cert != nil {
+		return invalid.Cert
+	}
+	var unknownCA x509.UnknownAuthorityError
+	if errors.As(err, &unknownCA) && unknownCA.Cert != nil {
+		return unknownCA.Cert
+	}
+	var hostname x509.HostnameError
+	if errors.As(err, &hostname) && hostname.Certificate != nil {
+		return hostname.Certificate
+	}
+	return nil
 }
 
 type certExpiryState struct {

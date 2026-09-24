@@ -38,9 +38,9 @@ func TestProbeCertNotAfter_ReadsLeafFromHandshake(t *testing.T) {
 	defer srv.Close()
 	addr := srv.Listener.Addr().String()
 
-	// The httptest cert is for example.com/127.0.0.1 and self-signed —
-	// verification would fail, and that is exactly why the probe skips it:
-	// an expired or wrong cert must still report its NotAfter.
+	// The httptest cert is self-signed and not for this SNI — verification
+	// fails, and the probe must still report the leaf's NotAfter (taken from
+	// the x509 error) without disabling verification.
 	got, err := probeCertNotAfter(context.Background(), certProbeTarget{ServerName: "stored.ge", Addr: addr})
 	require.NoError(t, err)
 	assert.True(t, got.Equal(srv.Certificate().NotAfter), "must be the served leaf's NotAfter")
