@@ -112,3 +112,26 @@ Without a secret the Lyve probe degrades to the old TCP dial.
   in the bridge.
 - Alertmanager web UI is loopback-only; reach it via SSH tunnel
   (`ssh -L 9093:localhost:9093 vaultaire-slc`).
+
+`vaultaire-tls.yml` — origin certificate expiry (TLSCertExpiringSoon <14d
+warning, TLSCertExpiryCritical <7d critical, TLSCertProbeFailing). Keys off
+`vaultaire_tls_cert_expiry_timestamp_seconds{sni}` from `/metrics`
+(`internal/api/cert_expiry.go`), which needs `TLS_CERT_PROBE_TARGETS` in the
+prod `.env` — on SLC: `stored.ge@127.0.0.1:443,stored.cloud@127.0.0.1:443`
+(dial local HAProxy with the public SNI = the origin Let's Encrypt cert, not
+Cloudflare's edge cert). Installed on SLC 2026-09-24 alongside the backend
+rules. If it fires: `sudo certbot renew --cert-name <sni> --force-renewal`
+(the deploy hook rebuilds `/etc/haproxy/certs/*-le.pem` and reloads haproxy).
+Note `certbot renew --dry-run` is NOT a valid renewal test on this box:
+certbot 2.9 asks the STAGING CA about the production cert and fails with
+"Certificate not found"; query ARI on the production directory instead
+(`/acme/renewal-info/<certID>` → `suggestedWindow`).
+
+## Installing a rules file
+
+```bash
+sudo install -m 0644 vaultaire-<name>.yml /etc/prometheus/rules/
+promtool check rules /etc/prometheus/rules/vaultaire-<name>.yml
+sudo systemctl reload prometheus
+curl -s localhost:9090/api/v1/rules | python3 -c 'import sys,json; print([g["name"] for g in json.load(sys.stdin)["data"]["groups"]])'
+```

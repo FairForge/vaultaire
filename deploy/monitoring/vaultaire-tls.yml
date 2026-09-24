@@ -1,0 +1,47 @@
+# Origin TLS certificate expiry — install to /etc/prometheus/rules/ (see README).
+#
+# Series come from the app's /metrics (internal/api/cert_expiry.go), driven by
+# TLS_CERT_PROBE_TARGETS in /opt/vaultaire/configs/.env:
+#   vaultaire_tls_cert_expiry_timestamp_seconds{sni}  leaf NotAfter (unix), last good value kept
+#   vaultaire_tls_cert_probe_ok{sni}                  1 = last handshake succeeded
+#
+# The probe dials the LOCAL HAProxy with the public SNI, so it sees the origin
+# Let's Encrypt cert (not Cloudflare's edge cert). certbot.timer + the haproxy
+# deploy hook renew ~30 days before expiry; ARI's suggested window for the
+# current certs is 2026-09-28/30. If the renewal silently fails these rules
+# are the safety net — the cert expires 2026-10-29, two days before launch.
+#
+# Manual fix if either alert fires:
+#   sudo certbot renew --cert-name stored.ge --force-renewal   (hook reloads haproxy)
+groups:
+  - name: vaultaire-tls
+    rules:
+      - alert: TLSCertExpiringSoon
+        expr: (vaultaire_tls_cert_expiry_timestamp_seconds - time()) < 14 * 86400
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Origin TLS cert for {{ $labels.sni }} expires in < 14 days"
+          description: "{{ $labels.sni }} leaf expires in {{ $value | humanizeDuration }}. certbot renewal has NOT landed — check `journalctl -u certbot` and `certbot certificates`, then `certbot renew --cert-name {{ $labels.sni }} --force-renewal`."
+
+      - alert: TLSCertExpiryCritical
+        expr: (vaultaire_tls_cert_expiry_timestamp_seconds - time()) < 7 * 86400
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Origin TLS cert for {{ $labels.sni }} expires in < 7 days"
+          description: "{{ $labels.sni }} leaf expires in {{ $value | humanizeDuration }}. Renew NOW: `sudo certbot renew --cert-name {{ $labels.sni }} --force-renewal` (deploy hook rebuilds /etc/haproxy/certs and reloads haproxy)."
+
+      # The handshake against local HAProxy failing for two hours means either
+      # HAProxy is not serving that SNI or the probe config is wrong — in both
+      # cases the expiry series is stale.
+      - alert: TLSCertProbeFailing
+        expr: vaultaire_tls_cert_probe_ok == 0
+        for: 2h
+        labels:
+          severity: warning
+        annotations:
+          summary: "TLS cert probe failing for {{ $labels.sni }}"
+          description: "The app cannot complete a TLS handshake to the configured address for {{ $labels.sni }} (see TLS_CERT_PROBE_TARGETS). Expiry data for it is stale."
