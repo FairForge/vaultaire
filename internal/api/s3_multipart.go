@@ -479,7 +479,7 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 	// aws-cli's default multipart uploads would ignore tier placement (a
 	// resilient-tier bucket would silently store on the primary backend).
 	completeOpts := []engine.PutOption{engine.WithContentLength(totalSize)}
-	if tierClass := bucketTierStorageClass(r.Context(), s.db, t.ID, bucket); tierClass != "" {
+	if tierClass := resolvePutStorageClass(r.Context(), s.db, s.engine, t.ID, bucket, ""); tierClass != "" {
 		completeOpts = append(completeOpts, engine.WithStorageClass(tierClass))
 	}
 	go func() {

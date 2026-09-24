@@ -694,12 +694,13 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	// iDrive while sold as "on tape". Whole objects on Lyve/Geyser are fine
 	// (Lyve multiparts at 214 MB/s, Geyser ingests 227 MB/s sustained).
 	// Deliberate trade: resilient/archive objects skip dedup.
-	resolvedStorageClass := r.Header.Get("x-amz-storage-class")
-	if resolvedStorageClass == "" {
-		resolvedStorageClass = bucketTierStorageClass(r.Context(), a.db, t.ID, bucket)
-	}
-	chunkingDisabledByTier := resolvedStorageClass == "RESILIENT" ||
-		resolvedStorageClass == "GLACIER" || resolvedStorageClass == "DEEP_ARCHIVE"
+	// Public-read buckets resolve to PUBLIC (→ the R2 public-bucket/CDN
+	// backend) when no cold/resilient tier or explicit header says otherwise;
+	// PUBLIC objects stay whole too, so the CDN path can address them as one
+	// R2 key.
+	resolvedStorageClass := resolvePutStorageClass(r.Context(), a.db, a.engine, t.ID, bucket,
+		r.Header.Get("x-amz-storage-class"))
+	chunkingDisabledByTier := storageClassDisablesChunking(resolvedStorageClass)
 	willChunkEncrypt := a.gci != nil && a.chunkEncSvc != nil &&
 		metadataSize > chunkThreshold && !chunkingDisabledByVersioning && !chunkingDisabledByTier
 
@@ -1967,6 +1968,66 @@ func bucketTierStorageClass(ctx context.Context, db *sql.DB, tenantID, bucket st
 		return ""
 	}
 	return tierPreferenceToStorageClass[pref]
+}
+
+// publicBucketStorageClass returns "PUBLIC" when the bucket is public-read and
+// an r2 driver is registered on the engine, else "". R2's role of record is
+// public buckets / CDN origin only (SMART_TIER_DESIGN.md, 2026-09-19): $0
+// egress behind the Cloudflare-proxied cdn.stored.ge host. Without an r2
+// driver (dev, CI, R2 outage at boot) public objects land on the primary
+// exactly as before.
+func publicBucketStorageClass(ctx context.Context, db *sql.DB, eng engine.Engine, tenantID, bucket string) string {
+	if db == nil || eng == nil {
+		return ""
+	}
+	ce, ok := eng.(*engine.CoreEngine)
+	if !ok || ce == nil {
+		return ""
+	}
+	if _, exists := ce.GetDriver("r2"); !exists {
+		return ""
+	}
+	var visibility string
+	err := db.QueryRowContext(ctx,
+		"SELECT visibility FROM buckets WHERE tenant_id = $1 AND name = $2",
+		tenantID, bucket).Scan(&visibility)
+	if err != nil || visibility != "public-read" {
+		return ""
+	}
+	return "PUBLIC"
+}
+
+// resolvePutStorageClass is the single placement resolution for PUT and
+// multipart-complete: explicit x-amz-storage-class header → bucket
+// tier_preference → PUBLIC for public-read buckets → "" (engine primary).
+// Hot tiers (standard/performance both map to STANDARD) do not override the
+// public role; cold/resilient tiers keep their placement promise even on a
+// public bucket.
+func resolvePutStorageClass(ctx context.Context, db *sql.DB, eng engine.Engine, tenantID, bucket, header string) string {
+	if header != "" {
+		return header
+	}
+	class := bucketTierStorageClass(ctx, db, tenantID, bucket)
+	if class != "" && class != "STANDARD" {
+		return class
+	}
+	if pub := publicBucketStorageClass(ctx, db, eng, tenantID, bucket); pub != "" {
+		return pub
+	}
+	return class
+}
+
+// storageClassDisablesChunking reports classes whose objects must be stored
+// WHOLE on their backend: chunk blobs always land on the engine's primary
+// (the GCI `_global` container is shared across tenants and tiers), which
+// would silently break the tier's placement promise — and PUBLIC objects
+// must be addressable as one R2 key for the CDN / direct-serve path.
+func storageClassDisablesChunking(class string) bool {
+	switch class {
+	case "RESILIENT", "GLACIER", "DEEP_ARCHIVE", "PUBLIC":
+		return true
+	}
+	return false
 }
 
 func isBucketSSEEnabled(ctx context.Context, db *sql.DB, tenantID, bucket string) bool {
