@@ -44,6 +44,9 @@ func (s *Server) initMetrics() {
 		if s.healthChecker != nil {
 			reg.MustRegister(newBackendCollector(s.healthChecker, src))
 		}
+		if s.certMonitor != nil {
+			reg.MustRegister(newCertExpiryCollector(s.certMonitor))
+		}
 		reg.MustRegister(collectors.NewGoCollector())
 		reg.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 

@@ -172,6 +172,8 @@ GitHub Actions Deploy (`.github/workflows/deploy.yml`):
 | `CHUNK_GET_PREFETCH` | 4 | Chunks fetched ahead of the write cursor per chunked GET (1 = sequential) |
 | `MULTIPART_ABANDON_HOURS` | 48 | Reaper aborts active multipart uploads idle longer than this |
 | `MULTIPART_TERMINAL_RETENTION_DAYS` | 7 | Reaper purges completed/aborted multipart rows older than this |
+| `TLS_CERT_PROBE_TARGETS` | — (off) | Comma-separated `sni@host:port` (or bare `sni` = `sni:443`) whose served leaf certificate expiry is exported as `vaultaire_tls_cert_expiry_timestamp_seconds{sni}` (hourly TLS handshake, verification skipped so an expired cert still reports). Prod: `stored.ge@127.0.0.1:443,stored.cloud@127.0.0.1:443` = the origin LE cert behind HAProxy. Rules: `deploy/monitoring/vaultaire-tls.yml` |
+| `SECURITY_POLICY_URL` | https://stored.ge/legal/aup | `Policy:` line of `/.well-known/security.txt` (RFC 9116, 5.5.6); contact is fixed to security@stored.ge |
 | `SMART_DEMOTION_HOT_FRACTION`, `SMART_DEMOTION_IDLE_DAYS`, `SMART_DEMOTION_MIN_AGE_DAYS`, `SMART_DEMOTION_MAX_GB_PER_RUN`, `SMART_DEMOTION_TIERS` | 0.15, 14, 3, 500, standard | Smart-tier demotion job (5.15.8) knobs; the job itself is gated by the `smart_demotion` feature flag (default OFF) |
 
 ## Production

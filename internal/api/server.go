@@ -70,6 +70,8 @@ type Server struct {
 	metricsOnce      sync.Once
 	promHandler      http.Handler
 	healthChecker    *BackendHealthChecker
+	certMonitor      *certExpiryMonitor // TLS_CERT_PROBE_TARGETS; nil = off
+	securityTxt      string             // rendered once at boot (security_txt.go)
 	sessionStore     dashauth.SessionStore
 	bandwidthTracker *BandwidthTracker
 	bandwidthAlerter *BandwidthAlerter
@@ -136,6 +138,8 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		startTime:    time.Now(),
 	}
 	s.healthChecker = NewBackendHealthChecker()
+	s.certMonitor = newCertExpiryMonitorFromEnv(os.Getenv, logger)
+	s.initSecurityTxt()
 
 	// Backends are registered by startHealthChecks, and only when their
 	// credentials are configured — see configuredBackends.
@@ -513,6 +517,10 @@ func (s *Server) startHealthChecks(ctx context.Context) {
 		s.healthChecker.RegisterBackend(b.name)
 		go s.runBackendHealthLoop(ctx, b)
 	}
+	// Origin TLS certificate expiry (cert_expiry.go) rides the same lifecycle.
+	if s.certMonitor != nil {
+		go s.certMonitor.run(ctx)
+	}
 }
 
 // configuredBackends returns the backends that should be health-probed, based
@@ -697,6 +705,11 @@ func (s *Server) setupRoutes() {
 	s.registerWebhookRoutes()
 
 	s.router.Get("/llms.txt", s.handleLlmsTxt)
+
+	// RFC 9116 disclosure contact (5.5.6). Before the S3 catch-all — it used
+	// to fall through and answer 403 AccessDenied.
+	s.router.Get("/.well-known/security.txt", s.handleSecurityTxt)
+	s.router.Head("/.well-known/security.txt", s.handleSecurityTxt)
 
 	// Public pre-launch waitlist signup from the landing page (no auth).
 	s.router.Post("/api/waitlist", s.handleWaitlistSignup)
