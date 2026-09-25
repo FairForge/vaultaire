@@ -153,3 +153,28 @@ the corrected fleet size there is no OneDrive capacity ceiling.
   for the fourth paid leg to prove the mechanics.
 - All Geyser reads are disk cache. Tape-cold reads are minutes.
 - Bench holds the payload in memory; engine must stream per pack.
+
+## Rerun with the fixes — async parity + retries (04:30 UTC, `ec-best-0925-0430.log`)
+
+Tool changes: `-retries 1` (a failed shard PUT/GET is retried once before it
+counts as lost) and `-sync lyve` (only Lyve's six shards gate the commit; the
+other legs land asynchronously; commit and fully-protected walls reported
+separately). RS(12,12) Lyve 6 data / OneDrive 6 data / Geyser 6 parity /
+iDrive 6 parity (iDrive standing in for Deep Archive), two runs each.
+
+| Payload | Commit (Lyve gate) | Fully protected | first-12 read | Worst single-leg loss | Retries |
+|---|---|---|---|---|---|
+| 256 MiB | 1.0–1.2 s = **220–257 MB/s** | 4.3–4.4 s (OneDrive) | 137–179 MB/s | 133 MB/s | 0 |
+| 1 GiB | 1.8 s = **578–584 MB/s** | 10.4–10.6 s (OneDrive) | 119–140 MB/s | 90 MB/s | 0 |
+
+Same layout gated on Lyve **and** OneDrive: commit 3.6–4.3 s = 59–72 MB/s.
+The commit rule is therefore "the six Lyve shards, nothing else".
+
+Five legs, RS(12,8) × 4 (Lyve / OneDrive / Geyser / iDrive / Wasabi), Lyve
+gate: commit 0.8–1.0 s = 248–304 MB/s, protected 3.9–13.3 s (OneDrive), reads
+100–144 MB/s, any single-leg loss 98–215 MB/s, 0 retries, all hash ok.
+
+Client-visible PUT is now bounded by Lyve alone (about 580 MB/s at 1 GiB from
+SLC), which is faster than today's single-backend Vault write. Nothing in this
+pass needed a retry, so the earlier EOF was a rare transient; the retry path is
+exercised by unit tests only until it fires live.

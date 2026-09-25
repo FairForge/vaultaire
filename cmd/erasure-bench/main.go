@@ -11,6 +11,12 @@
 //	lose:<b>  every shard on backend b is treated as lost (backend outage)
 //	          and the payload is rebuilt from the survivors
 //
+// -sync names the legs that gate the PUT commit (the engine's synchronous
+// data legs); the rest are written asynchronously and the "protected" time
+// is reported separately. -retries retries a failed shard PUT/GET before the
+// shard counts as lost (the bench without it turned one transient EOF into a
+// failed read).
+//
 // Layout syntax: "lyve:6,geyser:4,onedrive:6" — shard slots are handed out
 // in layout order, data shards (0..k-1) first, so the last entries carry the
 // parity. Any backend holding more than m shards is a single point of
@@ -41,6 +47,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/common"
@@ -105,7 +112,16 @@ func main() {
 	runs := flag.Int("runs", 1, "repetitions (pair runs — single Lyve runs are noise)")
 	timeout := flag.Duration("timeout", 10*time.Minute, "per-shard transfer timeout")
 	keep := flag.Bool("keep", false, "leave shards on the backends")
+	syncLegs := flag.String("sync", "", "comma-separated legs whose shards gate the PUT commit; the rest land asynchronously (empty = all sync)")
+	retries := flag.Int("retries", 1, "per-shard retries on a failed PUT or GET before the shard counts as lost")
 	flag.Parse()
+	maxRetries = *retries
+	syncSet := map[string]bool{}
+	for _, n := range strings.Split(*syncLegs, ",") {
+		if n = strings.TrimSpace(n); n != "" {
+			syncSet[n] = true
+		}
+	}
 	logger := zap.NewNop()
 	n := *k + *m
 
@@ -134,17 +150,22 @@ func main() {
 	fmt.Printf("scheme RS(%d,%d) = %d shards, payload %d MiB, shard %.1f MiB, overhead %.2fx\n",
 		*k, *m, n, *sizeMB, float64(size)/float64(*k)/(1<<20), float64(n)/float64(*k))
 	fmt.Printf("layout: %s\n", describe(slots, *k))
+	if len(syncSet) > 0 {
+		fmt.Printf("commit gate: %s (other legs async)  retries/shard: %d\n", fmtSet(syncSet), *retries)
+	} else {
+		fmt.Printf("commit gate: all legs sync  retries/shard: %d\n", *retries)
+	}
 
 	ctx := common.WithTenantID(context.Background(), "ecbench")
 	container := fmt.Sprintf("ec-%d", time.Now().Unix())
 
 	for r := 1; r <= *runs; r++ {
 		fmt.Printf("\n== run %d/%d ==\n", r, *runs)
-		runOnce(ctx, enc, bes, slots, *k, size, container, r, *timeout, *keep)
+		runOnce(ctx, enc, bes, slots, *k, size, container, r, *timeout, *keep, syncSet)
 	}
 }
 
-func runOnce(ctx context.Context, enc reedsolomon.Encoder, bes map[string]engine.Driver, slots []slot, k int, size int64, container string, run int, timeout time.Duration, keep bool) {
+func runOnce(ctx context.Context, enc reedsolomon.Encoder, bes map[string]engine.Driver, slots []slot, k int, size int64, container string, run int, timeout time.Duration, keep bool, syncSet map[string]bool) {
 	payload := make([]byte, size)
 	_, _ = rand.Read(payload)
 	sum := sha256.Sum256(payload)
@@ -167,25 +188,35 @@ func runOnce(ctx context.Context, enc reedsolomon.Encoder, bes map[string]engine
 
 	key := func(i int) string { return fmt.Sprintf("r%d-shard-%02d.bin", run, i) }
 
-	// Store all shards in parallel.
+	// Store all shards in parallel. Every shard records when it landed so the
+	// commit (sync legs only) and fully-protected (all legs) walls can be
+	// reported separately — the async-parity shape the engine will use.
 	putRes := make([]result, len(slots))
+	done := make([]time.Duration, len(slots))
 	var wg sync.WaitGroup
+	putRetries.Store(0)
 	t1 := time.Now()
 	for _, s := range slots {
 		wg.Add(1)
 		go func(s slot) {
 			defer wg.Done()
-			c, cancel := context.WithTimeout(ctx, timeout)
-			defer cancel()
 			st := time.Now()
-			e := bes[s.backend].Put(c, container, key(s.idx), bytes.NewReader(shards[s.idx]), engine.WithContentLength(shardLen))
+			e := putRetry(ctx, bes[s.backend], container, key(s.idx), shards[s.idx], shardLen, timeout)
 			putRes[s.idx] = result{time.Since(st), e}
+			done[s.idx] = time.Since(t1)
 		}(s)
 	}
 	wg.Wait()
 	putWall := time.Since(t1)
-	fmt.Printf("PUT all %2d  %6s  payload %s, wire %s   %s\n", len(slots), fmtDur(putWall),
-		mbps(size, putWall), mbps(shardLen*int64(len(slots)), putWall), perBackendSummary(slots, putRes))
+	commit := commitWall(slots, done, putRes, syncSet)
+	if len(syncSet) > 0 {
+		fmt.Printf("PUT commit  %6s  payload %s (gate %s)   protected %6s  wire %s   %s  retries %d\n",
+			fmtDur(commit), mbps(size, commit), fmtSet(syncSet), fmtDur(putWall), mbps(shardLen*int64(len(slots)), putWall),
+			perBackendSummary(slots, putRes), putRetries.Load())
+	} else {
+		fmt.Printf("PUT all %2d  %6s  payload %s, wire %s   %s  retries %d\n", len(slots), fmtDur(putWall),
+			mbps(size, putWall), mbps(shardLen*int64(len(slots)), putWall), perBackendSummary(slots, putRes), putRetries.Load())
+	}
 	failed := 0
 	for i, pr := range putRes {
 		if pr.err != nil {
@@ -213,6 +244,72 @@ func runOnce(ctx context.Context, enc reedsolomon.Encoder, bes map[string]engine
 	}
 
 	cleanup(ctx, bes, slots, container, key, keep)
+}
+
+var (
+	maxRetries int
+	putRetries atomic.Int64
+	getRetries atomic.Int64
+	retryPause = 500 * time.Millisecond
+)
+
+// putRetry writes one shard, retrying a failed attempt up to maxRetries
+// times with a fresh reader. Context expiry is not retried.
+func putRetry(ctx context.Context, d engine.Driver, container, key string, data []byte, shardLen int64, timeout time.Duration) error {
+	var err error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			putRetries.Add(1)
+			time.Sleep(retryPause)
+		}
+		c, cancel := context.WithTimeout(ctx, timeout)
+		err = d.Put(c, container, key, bytes.NewReader(data), engine.WithContentLength(shardLen))
+		cancel()
+		if err == nil || ctx.Err() != nil {
+			return err
+		}
+	}
+	return err
+}
+
+// fetchRetry reads one shard, retrying a failed or short read up to
+// maxRetries times. A cancelled parent context (the race is already won)
+// is never retried.
+func fetchRetry(ctx context.Context, d engine.Driver, container, key string, shardLen int64) ([]byte, error) {
+	var data []byte
+	var err error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			getRetries.Add(1)
+			time.Sleep(retryPause)
+		}
+		data, err = fetch(ctx, d, container, key, shardLen)
+		if err == nil {
+			return data, nil
+		}
+	}
+	return nil, err
+}
+
+// commitWall is when the last shard on a sync leg landed; with no sync set
+// it is when the last shard of all landed. Failed shards do not count.
+func commitWall(slots []slot, done []time.Duration, res []result, syncSet map[string]bool) time.Duration {
+	var wall time.Duration
+	for i, s := range slots {
+		if res[i].err != nil {
+			continue
+		}
+		if len(syncSet) > 0 && !syncSet[s.backend] {
+			continue
+		}
+		if done[i] > wall {
+			wall = done[i]
+		}
+	}
+	return wall
 }
 
 // fetch pulls one shard; returns the bytes or an error.
@@ -246,11 +343,12 @@ func readFirstK(ctx context.Context, enc reedsolomon.Encoder, bes map[string]eng
 	rctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	ch := make(chan fetched, len(slots))
+	getRetries.Store(0)
 	t0 := time.Now()
 	for _, s := range slots {
 		go func(s slot) {
 			st := time.Now()
-			data, err := fetch(rctx, bes[s.backend], container, key(s.idx), shardLen)
+			data, err := fetchRetry(rctx, bes[s.backend], container, key(s.idx), shardLen)
 			ch <- fetched{s.idx, data, time.Since(st), err}
 		}(s)
 	}
@@ -276,8 +374,8 @@ func readFirstK(ctx context.Context, enc reedsolomon.Encoder, bes map[string]eng
 		return
 	}
 	dec, ok := reconstruct(enc, have, k, shardLen, size, want)
-	fmt.Printf("READ first-%d %6s  %s  fetch %s + decode %s  winners %s  %s\n", k, fmtDur(fetchWall+dec),
-		mbps(int64(k)*shardLen, fetchWall+dec), fmtDur(fetchWall), fmtDur(dec), fmtMap(winners), okStr(ok))
+	fmt.Printf("READ first-%d %6s  %s  fetch %s + decode %s  winners %s  retries %d  %s\n", k, fmtDur(fetchWall+dec),
+		mbps(int64(k)*shardLen, fetchWall+dec), fmtDur(fetchWall), fmtDur(dec), fmtMap(winners), getRetries.Load(), okStr(ok))
 }
 
 // readDegraded rebuilds the payload with every shard on `lost` missing.
@@ -296,11 +394,12 @@ func readDegraded(ctx context.Context, enc reedsolomon.Encoder, bes map[string]e
 	rctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	ch := make(chan fetched, len(survivors))
+	getRetries.Store(0)
 	t0 := time.Now()
 	for _, s := range survivors {
 		go func(s slot) {
 			st := time.Now()
-			data, err := fetch(rctx, bes[s.backend], container, key(s.idx), shardLen)
+			data, err := fetchRetry(rctx, bes[s.backend], container, key(s.idx), shardLen)
 			ch <- fetched{s.idx, data, time.Since(st), err}
 		}(s)
 	}
@@ -326,8 +425,8 @@ func readDegraded(ctx context.Context, enc reedsolomon.Encoder, bes map[string]e
 		return
 	}
 	dec, ok := reconstruct(enc, have, k, shardLen, size, want)
-	fmt.Printf("READ lose:%-8s %6s  %s  fetch %s + decode %s  from %s  %s\n", lost, fmtDur(fetchWall+dec),
-		mbps(int64(k)*shardLen, fetchWall+dec), fmtDur(fetchWall), fmtDur(dec), fmtMap(winners), okStr(ok))
+	fmt.Printf("READ lose:%-8s %6s  %s  fetch %s + decode %s  from %s  retries %d  %s\n", lost, fmtDur(fetchWall+dec),
+		mbps(int64(k)*shardLen, fetchWall+dec), fmtDur(fetchWall), fmtDur(dec), fmtMap(winners), getRetries.Load(), okStr(ok))
 }
 
 // reconstruct fills missing shards, joins the data shards and checks the hash.
@@ -468,6 +567,15 @@ func perBackendSummary(slots []slot, res []result) string {
 		parts = append(parts, fmt.Sprintf("%s slowest %s", n, fmtDur(maxd[n])))
 	}
 	return "[" + strings.Join(parts, ", ") + "]"
+}
+
+func fmtSet(m map[string]bool) string {
+	names := make([]string, 0, len(m))
+	for n := range m {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ",")
 }
 
 func fmtMap(m map[string]int) string {
