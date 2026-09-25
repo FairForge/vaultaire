@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"testing"
+	"time"
 
 	"github.com/klauspost/reedsolomon"
 	"github.com/stretchr/testify/assert"
@@ -38,6 +39,17 @@ func TestDescribe_LabelsDataAndParityRuns(t *testing.T) {
 	mixed, err := parseLayout("a:12,b:4", 16)
 	require.NoError(t, err)
 	assert.Equal(t, "a=0-11(data+parity) b=12-15(parity)", describe(mixed, 10))
+}
+
+func TestCommitWall_GatesOnSyncLegsOnly(t *testing.T) {
+	slots, err := parseLayout("lyve:2,onedrive:2", 4)
+	require.NoError(t, err)
+	done := []time.Duration{1 * time.Second, 2 * time.Second, 9 * time.Second, 10 * time.Second}
+	res := make([]result, 4)
+	assert.Equal(t, 10*time.Second, commitWall(slots, done, res, nil), "no sync set: everything gates")
+	assert.Equal(t, 2*time.Second, commitWall(slots, done, res, map[string]bool{"lyve": true}), "sync=lyve ignores onedrive")
+	res[1].err = assert.AnError
+	assert.Equal(t, 1*time.Second, commitWall(slots, done, res, map[string]bool{"lyve": true}), "failed shards do not count")
 }
 
 func TestReconstruct_RebuildsFromAnyKShards(t *testing.T) {
