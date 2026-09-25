@@ -1762,6 +1762,8 @@ Add to the Garage/SeaweedFS/Ceph/MinIO candidate set: (a) vaultaire-over-versity
 - No single backend loses enough shards to break reconstruction; permafrost never holds enough to reconstruct alone (privacy by design)
 - Placement considers: health score, latency, cost, region
 
+> **Bench of record (2026-09-24, `bench-results/ERASURE-2026-09-24.md`, tool `cmd/erasure-bench`)**: RS(10,6) rehearsed on the real drivers across Lyve + Geyser + OneDrive fleet from SLC, every read shape hash-verified. Findings that bind 11.2/11.3/11.6: (1) writes are gated by OneDrive (~6 MB/s per shard → 59 MB/s client-visible at 1 GiB) → **parity shards to OneDrive/Geyser must be written asynchronously**, sync PUT commits on the 10 data shards; (2) first-k-with-cancel reads deliver 170–211 MB/s at 256 MiB–1 GiB and never wait on Geyser; (3) Geyser is parity-only: even from its disk cache it is the read bottleneck (27 s for 4 shards at 1 GiB), and tape-cold shards need RestoreObject → the 11.6 repair path issues restores, not GETs; (4) losing any one backend reconstructs (no backend holds > m shards); (5) encode 12 GB/s / decode ~1.5 GB/s — CPU is free.
+
 ### 11.3: Pipeline Integration
 - After encryption: `chunk → compress → encrypt → erasure encode → store shards`
 - On read: `fetch ≥10 shards (parallel) → decode → decrypt → decompress → reassemble`
