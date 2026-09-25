@@ -6,7 +6,9 @@
 //
 // Backends come from env (same vars as prod): local (DATA_PATH or a temp dir),
 // idrive (IDRIVE_*), lyve (LYVE_*), geyser (GEYSER_*), onedrive/permafrost
-// (TENANT_1_*...). Missing creds = backend skipped. Tooling only.
+// (TENANT_1_*...), wasabi (WASABI_*), r2 (R2_ACCOUNT_ID + R2_ACCESS_KEY/SECRET +
+// R2_BENCH_BUCKET — a scratch bucket, never the public one). Missing creds =
+// backend skipped. Tooling only.
 package main
 
 import (
@@ -82,12 +84,26 @@ func main() {
 	if ak := os.Getenv("WASABI_ACCESS_KEY"); ak != "" {
 		d, err := drivers.NewS3Driver(os.Getenv("WASABI_ENDPOINT"), ak, os.Getenv("WASABI_SECRET_KEY"), os.Getenv("WASABI_REGION"), logger)
 		if err == nil {
-			add("wasabi", s3WithHealth{d, os.Getenv("WASABI_BUCKET")}, nil)
+			add("wasabi", s3WithHealth{d, os.Getenv("WASABI_BUCKET"), "wasabi"}, nil)
 		} else {
 			add("wasabi", nil, err)
 		}
 	} else {
 		fmt.Println("skip wasabi    no WASABI_ACCESS_KEY")
+	}
+	if acct := os.Getenv("R2_ACCOUNT_ID"); acct != "" && os.Getenv("R2_ACCESS_KEY") != "" {
+		bucket := os.Getenv("R2_BENCH_BUCKET")
+		if bucket == "" {
+			bucket = "vt-ecbench"
+		}
+		d, err := drivers.NewS3Driver("https://"+acct+".r2.cloudflarestorage.com", os.Getenv("R2_ACCESS_KEY"), os.Getenv("R2_SECRET_KEY"), "auto", logger)
+		if err == nil {
+			add("r2", s3WithHealth{d, bucket, "r2"}, nil)
+		} else {
+			add("r2", nil, err)
+		}
+	} else {
+		fmt.Println("skip r2        no R2_ACCOUNT_ID/R2_ACCESS_KEY")
 	}
 	inc := map[string]bool{}
 	for _, n := range strings.Split(*only, ",") {
@@ -257,9 +273,10 @@ func trunc(err error) string {
 type s3WithHealth struct {
 	*drivers.S3Driver
 	bucket string
+	name   string
 }
 
-func (s s3WithHealth) Name() string { return "wasabi" }
+func (s s3WithHealth) Name() string { return s.name }
 func (s s3WithHealth) HealthCheck(ctx context.Context) error {
 	_, err := s.S3Driver.List(ctx, s.bucket, "")
 	return err
