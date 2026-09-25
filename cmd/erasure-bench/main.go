@@ -26,7 +26,8 @@
 // (GEYSER_* + GEYSER_BUCKET or GEYSER_LA_BUCKET), onedrive/permafrost
 // (TENANT_N_*), idrive (IDRIVE_*), wasabi (WASABI_* + WASABI_BUCKET), r2
 // (R2_ACCOUNT_ID + R2_ACCESS_KEY/R2_SECRET_KEY + R2_BENCH_BUCKET, never the
-// public bucket), local.
+// public bucket), pixeldrain (PIXELDRAIN_API_KEY, REST adapter in
+// pixeldrain.go), local.
 // Usage on SLC:
 //
 //	set -a; . ~/vaultaire-bench/.env.bench; set +a
@@ -114,8 +115,12 @@ func main() {
 	keep := flag.Bool("keep", false, "leave shards on the backends")
 	syncLegs := flag.String("sync", "", "comma-separated legs whose shards gate the PUT commit; the rest land asynchronously (empty = all sync)")
 	retries := flag.Int("retries", 1, "per-shard retries on a failed PUT or GET before the shard counts as lost")
+	hedge := flag.Bool("hedge", false, "hedged PUTs: duplicate a shard write that runs past hedge-factor × the leg's median, first to land wins")
+	hedgeFactor := flag.Float64("hedge-factor", 2.0, "straggler threshold as a multiple of the leg's median completed PUT")
+	hedgeMin := flag.Duration("hedge-min", 3*time.Second, "never hedge before this much elapsed")
 	flag.Parse()
 	maxRetries = *retries
+	hedgeOn, hedgeMul, hedgeFloor = *hedge, *hedgeFactor, *hedgeMin
 	syncSet := map[string]bool{}
 	for _, n := range strings.Split(*syncLegs, ",") {
 		if n = strings.TrimSpace(n); n != "" {
@@ -151,9 +156,9 @@ func main() {
 		*k, *m, n, *sizeMB, float64(size)/float64(*k)/(1<<20), float64(n)/float64(*k))
 	fmt.Printf("layout: %s\n", describe(slots, *k))
 	if len(syncSet) > 0 {
-		fmt.Printf("commit gate: %s (other legs async)  retries/shard: %d\n", fmtSet(syncSet), *retries)
+		fmt.Printf("commit gate: %s (other legs async)  retries/shard: %d  hedge: %v\n", fmtSet(syncSet), *retries, *hedge)
 	} else {
-		fmt.Printf("commit gate: all legs sync  retries/shard: %d\n", *retries)
+		fmt.Printf("commit gate: all legs sync  retries/shard: %d  hedge: %v\n", *retries, *hedge)
 	}
 
 	ctx := common.WithTenantID(context.Background(), "ecbench")
@@ -195,15 +200,21 @@ func runOnce(ctx context.Context, enc reedsolomon.Encoder, bes map[string]engine
 	done := make([]time.Duration, len(slots))
 	var wg sync.WaitGroup
 	putRetries.Store(0)
+	hedgesLaunched.Store(0)
+	hedgesWon.Store(0)
+	stats := newLegStats()
 	t1 := time.Now()
 	for _, s := range slots {
 		wg.Add(1)
 		go func(s slot) {
 			defer wg.Done()
 			st := time.Now()
-			e := putRetry(ctx, bes[s.backend], container, key(s.idx), shards[s.idx], shardLen, timeout)
+			e := putHedged(ctx, stats, s.backend, bes[s.backend], container, key(s.idx), shards[s.idx], shardLen, timeout)
 			putRes[s.idx] = result{time.Since(st), e}
 			done[s.idx] = time.Since(t1)
+			if e == nil {
+				stats.record(s.backend, time.Since(st))
+			}
 		}(s)
 	}
 	wg.Wait()
@@ -216,6 +227,9 @@ func runOnce(ctx context.Context, enc reedsolomon.Encoder, bes map[string]engine
 	} else {
 		fmt.Printf("PUT all %2d  %6s  payload %s, wire %s   %s  retries %d\n", len(slots), fmtDur(putWall),
 			mbps(size, putWall), mbps(shardLen*int64(len(slots)), putWall), perBackendSummary(slots, putRes), putRetries.Load())
+	}
+	if hedgeOn {
+		fmt.Printf("  hedges launched %d, won %d\n", hedgesLaunched.Load(), hedgesWon.Load())
 	}
 	failed := 0
 	for i, pr := range putRes {
@@ -252,6 +266,110 @@ var (
 	getRetries atomic.Int64
 	retryPause = 500 * time.Millisecond
 )
+
+var (
+	hedgeOn        bool
+	hedgeMul       float64
+	hedgeFloor     time.Duration
+	hedgesLaunched atomic.Int64
+	hedgesWon      atomic.Int64
+)
+
+// legStats tracks completed PUT durations per leg so a straggler can be
+// recognised relative to its siblings.
+type legStats struct {
+	mu   sync.Mutex
+	durs map[string][]time.Duration
+}
+
+func newLegStats() *legStats { return &legStats{durs: map[string][]time.Duration{}} }
+
+func (l *legStats) record(leg string, d time.Duration) {
+	l.mu.Lock()
+	l.durs[leg] = append(l.durs[leg], d)
+	l.mu.Unlock()
+}
+
+// threshold is when a PUT on leg counts as a straggler: hedgeMul × the
+// median of that leg's completed PUTs, never below hedgeFloor. With fewer
+// than two completions there is no median yet, so it returns 0 = never.
+func (l *legStats) threshold(leg string) time.Duration {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	ds := append([]time.Duration(nil), l.durs[leg]...)
+	if len(ds) < 2 {
+		return 0
+	}
+	sort.Slice(ds, func(i, j int) bool { return ds[i] < ds[j] })
+	med := ds[len(ds)/2]
+	if len(ds)%2 == 0 {
+		med = (ds[len(ds)/2-1] + ds[len(ds)/2]) / 2
+	}
+	t := time.Duration(float64(med) * hedgeMul)
+	if t < hedgeFloor {
+		t = hedgeFloor
+	}
+	return t
+}
+
+// putHedged runs putRetry and, when hedging is on and the write outlives
+// the leg's straggler threshold, starts one duplicate write of the same
+// shard. The first success wins and the other attempt is cancelled.
+func putHedged(ctx context.Context, stats *legStats, leg string, d engine.Driver, container, key string, data []byte, shardLen int64, timeout time.Duration) error {
+	if !hedgeOn {
+		return putRetry(ctx, d, container, key, data, shardLen, timeout)
+	}
+	type outcome struct {
+		err   error
+		hedge bool
+	}
+	res := make(chan outcome, 2)
+	// Each attempt owns its context and cancels it when it finishes; the
+	// loser is cancelled explicitly by the winner.
+	pctx, pcancel := context.WithCancel(ctx)
+	go func() {
+		defer pcancel()
+		res <- outcome{putRetry(pctx, d, container, key, data, shardLen, timeout), false}
+	}()
+	hcancel := context.CancelFunc(func() {})
+	start := time.Now()
+	tick := time.NewTicker(250 * time.Millisecond)
+	defer tick.Stop()
+	launched, pending := false, 1
+	for {
+		select {
+		case o := <-res:
+			pending--
+			if o.err == nil {
+				if o.hedge {
+					hedgesWon.Add(1)
+					pcancel()
+				} else {
+					hcancel()
+				}
+				return nil
+			}
+			if pending == 0 {
+				return o.err
+			}
+		case <-tick.C:
+			if launched {
+				continue
+			}
+			if th := stats.threshold(leg); th > 0 && time.Since(start) > th {
+				launched = true
+				pending++
+				hedgesLaunched.Add(1)
+				hctx, cancelH := context.WithCancel(ctx)
+				hcancel = cancelH
+				go func() {
+					defer cancelH()
+					res <- outcome{putRetry(hctx, d, container, key, data, shardLen, timeout), true}
+				}()
+			}
+		}
+	}
+}
 
 // putRetry writes one shard, retrying a failed attempt up to maxRetries
 // times with a fresh reader. Context expiry is not retried.
@@ -507,6 +625,9 @@ func buildBackends(logger *zap.Logger) map[string]engine.Driver {
 		} else {
 			add("r2", nil, err)
 		}
+	}
+	if ak := os.Getenv("PIXELDRAIN_API_KEY"); ak != "" {
+		add("pixeldrain", newPixeldrainLeg(ak), nil)
 	}
 	if ak := os.Getenv("WASABI_ACCESS_KEY"); ak != "" {
 		d, err := drivers.NewS3Driver(os.Getenv("WASABI_ENDPOINT"), ak, os.Getenv("WASABI_SECRET_KEY"), os.Getenv("WASABI_REGION"), logger)

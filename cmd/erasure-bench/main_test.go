@@ -52,6 +52,19 @@ func TestCommitWall_GatesOnSyncLegsOnly(t *testing.T) {
 	assert.Equal(t, 1*time.Second, commitWall(slots, done, res, map[string]bool{"lyve": true}), "failed shards do not count")
 }
 
+func TestLegStats_ThresholdNeedsTwoSamplesAndRespectsFloor(t *testing.T) {
+	hedgeMul, hedgeFloor = 2.0, 3*time.Second
+	st := newLegStats()
+	assert.Equal(t, time.Duration(0), st.threshold("x"), "no median yet")
+	st.record("x", 1*time.Second)
+	assert.Equal(t, time.Duration(0), st.threshold("x"), "one sample is not a median")
+	st.record("x", 1*time.Second)
+	assert.Equal(t, 3*time.Second, st.threshold("x"), "2×1 s is below the 3 s floor")
+	st.record("x", 5*time.Second)
+	st.record("x", 5*time.Second)
+	assert.Equal(t, 6*time.Second, st.threshold("x"), "median 3 s × 2")
+}
+
 func TestReconstruct_RebuildsFromAnyKShards(t *testing.T) {
 	enc, err := reedsolomon.New(10, 6)
 	require.NoError(t, err)
