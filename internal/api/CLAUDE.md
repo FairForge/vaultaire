@@ -414,18 +414,25 @@ BOOLEAN (migration 042).
   substring — re-run that test after swapping fonts. Both stored.ge and stored.cloud serve this page.
 - **Room builder (#build, section 02) + pick-up-able pieces:** every `.piece` (`<g>` + transparent
   `.hit` rect + `<use>`) inside an `svg[data-play]` (hero room, final CTA) can be dragged, snapped to the
-  pixel grid. The builder (`#room`, viewBox 128x72, floor line y=64) maps pieces to REAL quota at the
-  landing's published prices (box 1 TB Standard, dresser 5 TB Standard, tape shelf 10 TB Vault, lamp
-  1 TB pin-hot capped at Standard TB; everything else is free decor) and prices it on a café-receipt
-  card. Wall/fit "vibes" are site-wide CSS vars (`--wall-a/-b/-deep`, `--fit`: mascot hoodie, band,
-  scenes). State persists in localStorage `sg-room` and travels in `#room=v1.<wall>.<fit>.<name>.<k-x-y_…>`
-  links; `decode` whitelists piece keys/vibes, clamps coords, caps 30 pieces / one mascot, and the name
-  is filtered to letters/digits/space/_'- (16 chars) and only ever set via textContent. "Save image"
-  rebuilds the room as a standalone SVG → canvas → PNG. If prices change, update the `PRICE`/tray
-  labels in the builder script AND the pricing section. The page script has NO template literals
-  (html/template parses `<script>`).
+  pixel grid. In the builder (`#room`, viewBox 128x72, floor line y=64) furniture IS storage at the
+  published annual prices: Standard = storage box 1 TB / dresser 5 TB / bookcase 10 TB ($4.49/TB),
+  Vault = lockbox 1 TB / safe 10 TB ($2/TB), fireplace = always-hot add-on, 1 TB of Standard ($3/TB,
+  capped at the room's Standard TB); everything else is free decor. Storage pieces carry colour-coded
+  TB tags in a top `#room-tags` layer; the tray groups pieces by tier with a plain-words blurb; a
+  three-step strip, a TB-to-photos line (~4 MB a photo), a remove button on the selected piece with
+  undo, and a receipt that lists which pieces make each line. Wall/fit "vibes" are site-wide CSS vars
+  (`--wall-a/-b/-deep`, `--fit`). State persists in localStorage `sg-room` and travels in
+  `#room=v1.<wall>.<fit>.<name>.<k-x-y_…>` links; `decode` whitelists piece keys (`shelf` aliases to
+  `safe` for first-version links), clamps coords, caps 30 pieces / one mascot, and the name is
+  filtered to letters/digits/space/_'- (16 chars) and only ever set via textContent. "Save image"
+  rebuilds the room as a standalone SVG, rasterises it and letters the sign/tags/caption on canvas.
+  Sprites are 3D pixel cuboids from the scratch generator (fireplace + mascot have two animated
+  frames). If prices change, update `PRICE` + the tray labels in the builder script AND the pricing
+  section. The page script has NO template literals (html/template parses `<script>`).
 - **site_shell.go** — shared favicon + `<style>` + pixel-mark brand bar for the /docs/* and
-  /changelog shells, so the sub-pages match the landing page (system fonts, no embeds).
+  /changelog shells, so the sub-pages match the landing page (system fonts, no embeds), plus the
+  light/dark toggle and `siteMarkdown` (goldmark + table extension: the FAQ price table rendered as
+  raw pipes before).
 - **`waitlist.go`** — `POST /api/waitlist` (public, no auth) captures a pre-launch email
   into `waitlist_signups` (migration 044, `ON CONFLICT (email) DO NOTHING`). Validates via
   `mail.ParseAddress`, lowercases, per-IP sliding-window rate limit (`waitlistLimiter`,

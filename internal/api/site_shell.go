@@ -1,5 +1,14 @@
 package api
 
+import (
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/extension"
+)
+
+// siteMarkdown renders the docs and changelog markdown. GitHub-style tables
+// need the extension; plain goldmark printed the FAQ price table as raw pipes.
+var siteMarkdown = goldmark.New(goldmark.WithExtensions(extension.Table))
+
 // Shared chrome for the server-rendered public sub-pages (/docs/*, /changelog)
 // so they match the landing page: charcoal app bar with the pixel box mark,
 // light-grey canvas, square white card, bold-then-light headings, yellow

@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/yuin/goldmark"
 	"go.uber.org/zap"
 )
 
@@ -78,7 +77,7 @@ func renderDocsPages(logger *zap.Logger) map[string][]byte {
 		render := func(title string, md []byte) []byte {
 			var buf bytes.Buffer
 			buf.WriteString(shell(title))
-			if err := goldmark.Convert(md, &buf); err != nil {
+			if err := siteMarkdown.Convert(md, &buf); err != nil {
 				logger.Error("render docs markdown", zap.String("title", title), zap.Error(err))
 				buf.Reset()
 				buf.WriteString(shell(title))
