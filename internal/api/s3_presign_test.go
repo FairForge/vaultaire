@@ -368,6 +368,10 @@ func TestPresignedURL_Integration(t *testing.T) {
 	// WP-1 atomicHeadUpsert transaction (Begin → SELECT ... FOR UPDATE →
 	// INSERT → Commit). WP-3 made a failing upsert fail the PUT, so the mock
 	// must model the real transactional flow or the handler correctly 500s.
+	// R2-01: the Object Lock check runs before the head-row lookup and no
+	// longer depends on a head row existing.
+	mock.ExpectQuery(`SELECT retention_mode, retain_until_date, legal_hold FROM object_locks`).
+		WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery(`SELECT etag FROM object_head_cache`).
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery(`SELECT versioning_status FROM buckets`).

@@ -639,6 +639,15 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 		return
 	}
 
+	if s.db == nil {
+		// HEAD is served from object_head_cache and nowhere else (never a
+		// backend round trip); without the database it cannot be answered.
+		// R1-05: this used to dereference the nil pool.
+		s.logger.Error("HEAD without a metadata database", zap.String("path", r.URL.Path))
+		WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
+		return
+	}
+
 	var sizeBytes int64
 	var etag, contentType string
 	var updatedAt time.Time
@@ -749,7 +758,9 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3
 	var reserved int64
 	{
 		size := r.ContentLength
-		if decoded := r.Header.Get("x-amz-decoded-content-length"); decoded != "" {
+		// The decoded length is only meaningful inside aws-chunked framing;
+		// on a plain body it is a client-invented number (R2-06).
+		if decoded := r.Header.Get("x-amz-decoded-content-length"); decoded != "" && isAWSChunked(r) {
 			if n, err := strconv.ParseInt(decoded, 10, 64); err == nil {
 				size = n
 			}

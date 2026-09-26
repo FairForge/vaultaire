@@ -251,3 +251,22 @@ func TestS3Upload_UnknownSizeSentinelKeepsStreaming(t *testing.T) {
 	assert.Equal(t, 1, m.createCalls, "unknown size still streams via multipart")
 	assert.Equal(t, body, m.reassemble())
 }
+
+// R2-06: a body that ends before its declared ContentLength (the client went
+// away mid-upload) must fail the upload, never be committed as a shorter
+// object — the API layer records the declared size and the previous object
+// at that key has already been replaced.
+func TestS3Upload_ShortBodyIsAnError(t *testing.T) {
+	client := newMockUploadClient()
+	body := io.MultiReader(bytes.NewReader([]byte("only-half")), errReader{err: io.ErrUnexpectedEOF})
+
+	err := s3ParallelUpload(context.Background(), client, "b", "k", "", body, 1024)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, io.ErrUnexpectedEOF), "error must keep the short-body cause: %v", err)
+	assert.Equal(t, 0, client.putObjectCalls, "nothing may be committed")
+	assert.Equal(t, 0, client.createCalls)
+}
+
+type errReader struct{ err error }
+
+func (e errReader) Read([]byte) (int, error) { return 0, e.err }

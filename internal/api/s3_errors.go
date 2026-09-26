@@ -48,6 +48,7 @@ const (
 	ErrMissingContentLength      = "MissingContentLength"
 	ErrRequestTimeout            = "RequestTimeout"
 	ErrBadDigest                 = "BadDigest"
+	ErrInvalidDigest             = "InvalidDigest"
 	ErrEntityTooLarge            = "EntityTooLarge"
 	ErrMalformedXML              = "MalformedXML"
 	ErrMethodNotAllowed          = "MethodNotAllowed"
@@ -96,6 +97,7 @@ var errorMessages = map[string]string{
 	ErrMissingContentLength:              "You must provide the Content-Length HTTP header",
 	ErrRequestTimeout:                    "Your socket connection to the server was not read from or written to within the timeout period",
 	ErrBadDigest:                         "The Content-MD5 you specified did not match what we received",
+	ErrInvalidDigest:                     "The Content-MD5 you specified is not valid",
 	ErrEntityTooLarge:                    "Your proposed upload exceeds the maximum allowed size",
 	ErrMalformedXML:                      "The XML you provided was not well-formed or did not validate against our published schema",
 	ErrMethodNotAllowed:                  "The specified method is not allowed against this resource",
@@ -141,6 +143,7 @@ var errorStatusCodes = map[string]int{
 	ErrMissingContentLength:              http.StatusLengthRequired,
 	ErrRequestTimeout:                    http.StatusRequestTimeout,
 	ErrBadDigest:                         http.StatusBadRequest,
+	ErrInvalidDigest:                     http.StatusBadRequest,
 	ErrEntityTooLarge:                    http.StatusRequestEntityTooLarge,
 	ErrMalformedXML:                      http.StatusBadRequest,
 	ErrMethodNotAllowed:                  http.StatusMethodNotAllowed,
