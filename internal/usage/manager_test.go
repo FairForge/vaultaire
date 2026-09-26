@@ -7,14 +7,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/FairForge/vaultaire/internal/database"
+	"github.com/FairForge/vaultaire/internal/testutil"
 	_ "github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func setupTestDB(t *testing.T) *sql.DB {
-	dsn := database.GetTestDSN()
+	dsn := testutil.DSN()
 
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {

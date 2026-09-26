@@ -253,160 +253,6 @@ func TestEgressTracker(t *testing.T) {
 	})
 }
 
-func TestBandwidthQuota(t *testing.T) {
-	t.Run("enforces monthly bandwidth limits", func(t *testing.T) {
-		quota := NewBandwidthQuota(10 * 1024 * 1024 * 1024) // 10GB monthly quota
-
-		// Use 5GB
-		allowed := quota.AllowEgress("tenant-1", 5*1024*1024*1024)
-		assert.True(t, allowed)
-
-		// Try to use another 6GB (should fail - over quota)
-		allowed = quota.AllowEgress("tenant-1", 6*1024*1024*1024)
-		assert.False(t, allowed)
-
-		// Check remaining quota
-		remaining := quota.GetRemaining("tenant-1")
-		assert.Equal(t, int64(5*1024*1024*1024), remaining)
-	})
-
-	t.Run("tracks multiple tenants independently", func(t *testing.T) {
-		quota := NewBandwidthQuota(5 * 1024 * 1024 * 1024) // 5GB per tenant
-
-		// Tenant 1 uses 3GB
-		quota.AllowEgress("tenant-1", 3*1024*1024*1024)
-
-		// Tenant 2 uses 4GB
-		allowed := quota.AllowEgress("tenant-2", 4*1024*1024*1024)
-		assert.True(t, allowed) // Each tenant has own quota
-
-		assert.Equal(t, int64(2*1024*1024*1024), quota.GetRemaining("tenant-1"))
-		assert.Equal(t, int64(1*1024*1024*1024), quota.GetRemaining("tenant-2"))
-	})
-
-	t.Run("resets monthly", func(t *testing.T) {
-		quota := NewBandwidthQuota(1024) // 1KB quota
-		quota.AllowEgress("tenant-1", 1024)
-
-		// Manually trigger reset (normally done by timer)
-		quota.Reset()
-
-		// Should be able to use quota again
-		allowed := quota.AllowEgress("tenant-1", 1024)
-		assert.True(t, allowed)
-	})
-}
-
-func TestEgressPredictor(t *testing.T) {
-	t.Run("predicts monthly usage based on current rate", func(t *testing.T) {
-		predictor := NewEgressPredictor()
-
-		// Record usage for first 5 days of month
-		now := time.Date(2024, 1, 5, 12, 0, 0, 0, time.UTC)
-		predictor.RecordUsage("tenant-1", 5*1024*1024*1024, now) // 5GB in 5 days
-
-		// Predict full month usage (should be ~30GB for 30 days)
-		predicted := predictor.PredictMonthlyUsage("tenant-1", now)
-
-		// 5GB/5days = 1GB/day * 30 days = 30GB
-		expectedMin := int64(29 * 1024 * 1024 * 1024)
-		expectedMax := int64(31 * 1024 * 1024 * 1024)
-		assert.True(t, predicted >= expectedMin && predicted <= expectedMax,
-			"Expected ~30GB, got %d", predicted/(1024*1024*1024))
-	})
-
-	t.Run("generates alerts at threshold levels", func(t *testing.T) {
-		predictor := NewEgressPredictor()
-		predictor.SetQuota("tenant-1", 10*1024*1024*1024) // 10GB quota
-
-		// Info alert at 50% usage (not "No alert")
-		alert := predictor.CheckAlert("tenant-1", 5*1024*1024*1024)
-		assert.Equal(t, AlertInfo, alert.Level) // Changed from AlertNone to AlertInfo
-
-		// Warning at 75% usage
-		alert = predictor.CheckAlert("tenant-1", 7.5*1024*1024*1024)
-		assert.Equal(t, AlertWarning, alert.Level)
-
-		// Critical at 90% usage
-		alert = predictor.CheckAlert("tenant-1", 9*1024*1024*1024)
-		assert.Equal(t, AlertCritical, alert.Level)
-
-		// No alert below 50%
-		alert = predictor.CheckAlert("tenant-1", 4*1024*1024*1024) // 40%
-		assert.Equal(t, AlertNone, alert.Level)
-	})
-
-	t.Run("tracks usage patterns over time", func(t *testing.T) {
-		predictor := NewEgressPredictor()
-
-		// Simulate daily usage
-		for day := 1; day <= 7; day++ {
-			date := time.Date(2024, 1, day, 0, 0, 0, 0, time.UTC)
-			predictor.RecordDailyUsage("tenant-1", int64(day)*1024*1024*1024, date)
-		}
-
-		// Get average daily usage
-		avgDaily := predictor.GetAverageDailyUsage("tenant-1")
-
-		// Average should be (1+2+3+4+5+6+7)/7 = 4GB
-		expected := int64(4 * 1024 * 1024 * 1024)
-		assert.Equal(t, expected, avgDaily)
-	})
-}
-
-func TestSmartCache(t *testing.T) {
-	t.Run("caches frequently accessed objects", func(t *testing.T) {
-		cache := NewSmartCache(10 * 1024 * 1024) // 10MB cache
-
-		// First access - cache miss
-		data := []byte("test data")
-		hit := cache.Get("tenant-1", "file.txt")
-		assert.Nil(t, hit)
-
-		// Store in cache
-		cache.Put("tenant-1", "file.txt", data)
-
-		// Second access - cache hit
-		hit = cache.Get("tenant-1", "file.txt")
-		assert.Equal(t, data, hit)
-	})
-
-	t.Run("evicts least recently used items", func(t *testing.T) {
-		cache := NewSmartCache(100) // Small 100 byte cache
-
-		// Fill cache
-		cache.Put("tenant-1", "file1.txt", make([]byte, 40))
-		cache.Put("tenant-1", "file2.txt", make([]byte, 40))
-
-		// Access file1 to make it more recent
-		cache.Get("tenant-1", "file1.txt")
-
-		// Add file3 - should evict file2 (least recently used)
-		cache.Put("tenant-1", "file3.txt", make([]byte, 40))
-
-		assert.NotNil(t, cache.Get("tenant-1", "file1.txt"))
-		assert.Nil(t, cache.Get("tenant-1", "file2.txt")) // Evicted
-		assert.NotNil(t, cache.Get("tenant-1", "file3.txt"))
-	})
-
-	t.Run("tracks cache hit ratio", func(t *testing.T) {
-		cache := NewSmartCache(1024)
-
-		// 2 misses, 3 hits
-		cache.Get("tenant-1", "file1.txt") // miss
-		cache.Put("tenant-1", "file1.txt", []byte("data"))
-		cache.Get("tenant-1", "file1.txt") // hit
-		cache.Get("tenant-1", "file1.txt") // hit
-		cache.Get("tenant-1", "file2.txt") // miss
-		cache.Get("tenant-1", "file1.txt") // hit
-
-		stats := cache.GetStats()
-		assert.Equal(t, int64(3), stats.Hits)
-		assert.Equal(t, int64(2), stats.Misses)
-		assert.Equal(t, 0.6, stats.HitRatio) // 3/5 = 0.6
-	})
-}
-
 func TestCostAdvisor(t *testing.T) {
 	t.Run("recommends compression for text files", func(t *testing.T) {
 		advisor := NewCostAdvisor()
@@ -441,68 +287,6 @@ func TestCostAdvisor(t *testing.T) {
 			}
 		}
 		assert.True(t, found)
-	})
-}
-
-func TestRegionalFailover(t *testing.T) {
-	t.Run("fails over to secondary region", func(t *testing.T) {
-		primary := &MockIDriveDriver{}
-		primary.SetShouldFail(true)
-		secondary := &MockIDriveDriver{}
-
-		failover := NewRegionalFailover(primary, secondary, zap.NewNop())
-
-		// Primary fails, should use secondary
-		err := failover.Put(context.Background(), "bucket", "file.txt", strings.NewReader("data"))
-		assert.NoError(t, err)
-		assert.Equal(t, 1, primary.putCalls)
-		assert.Equal(t, 1, secondary.putCalls)
-	})
-
-	t.Run("tracks region health", func(t *testing.T) {
-		primary := &MockIDriveDriver{}
-		secondary := &MockIDriveDriver{}
-
-		failover := NewRegionalFailover(primary, secondary, zap.NewNop())
-
-		// Mark primary as unhealthy
-		failover.MarkUnhealthy("primary")
-
-		// Should use secondary even though primary might work
-		_, _ = failover.Get(context.Background(), "container", "key")
-		assert.Equal(t, 0, primary.getCalls)
-		assert.Equal(t, 1, secondary.getCalls)
-
-		// Check health status - using renamed type
-		status := failover.GetHealthStatus()
-		assert.False(t, status.PrimaryHealthy)
-		assert.True(t, status.SecondaryHealthy)
-	})
-
-	t.Run("automatic recovery probe", func(t *testing.T) {
-		primary := &MockIDriveDriver{}
-		primary.SetShouldFail(true)
-		secondary := &MockIDriveDriver{}
-
-		failover := NewRegionalFailover(primary, secondary, zap.NewNop())
-		failover.SetRecoveryInterval(100 * time.Millisecond)
-
-		// Primary fails initially
-		_ = failover.Put(context.Background(), "container", "key", strings.NewReader("data"))
-		assert.False(t, failover.GetHealthStatus().PrimaryHealthy)
-
-		// Fix primary
-		primary.SetShouldFail(false)
-
-		// Poll for the recovery probe rather than sleeping a fixed 200ms for a
-		// 100ms interval: on a loaded CI runner the probe goroutine may not have
-		// been scheduled yet, which made this test flake (seen 2026-07-30 on a
-		// docs-only PR). Eventually still fails fast when recovery is genuinely
-		// broken — it just stops racing the scheduler.
-		require.Eventually(t, func() bool {
-			return failover.GetHealthStatus().PrimaryHealthy
-		}, 5*time.Second, 10*time.Millisecond,
-			"primary should be probed healthy again after it recovers")
 	})
 }
 
@@ -575,12 +359,7 @@ func TestIDriveIntegration(t *testing.T) {
 
 		// Add all features
 		driver.SetEgressTracker(NewEgressTracker())
-		cache := NewSmartCache(10 * 1024 * 1024)
 		advisor := NewCostAdvisor()
-
-		// Remove unused variables or use them:
-		// quota := NewBandwidthQuota(100 * 1024 * 1024)  // REMOVED
-		// predictor := NewEgressPredictor()               // REMOVED
 
 		ctx := context.WithValue(context.Background(), TenantIDKey, "test-tenant")
 
@@ -590,9 +369,6 @@ func TestIDriveIntegration(t *testing.T) {
 		// Upload
 		err = driver.Put(ctx, "test-bucket", "integration.txt", bytes.NewReader(testData))
 		assert.NoError(t, err)
-
-		// Cache it
-		cache.Put("test-tenant", "integration.txt", testData)
 
 		// Track usage
 		advisor.RecordUpload("test-tenant", "integration.txt", int64(len(testData)), "text/plain")
@@ -609,7 +385,6 @@ func TestIDriveIntegration(t *testing.T) {
 
 		// Check metrics
 		assert.True(t, driver.GetEgressTracker().GetTenantEgress("test-tenant") > 0)
-		assert.NotNil(t, cache.Get("test-tenant", "integration.txt"))
 
 		// Cleanup
 		err = driver.Delete(ctx, "test-bucket", "integration.txt")

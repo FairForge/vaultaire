@@ -40,14 +40,11 @@ Integrated into CoreEngine: `tiering` field, created in `NewEngine()`, started v
 |------|------|---------|
 | `types.go` | `Container`, `Artifact` | Domain types (internal names for bucket/object) |
 | `errors.go` | `NotFoundError`, `PermissionError` | Error types + sentinels (`ErrQuotaExceeded`, `ErrInvalidInput`, `ErrAllBackendsUnavailable`) |
-| `context.go` | helpers | `WithTenantID`, `TenantIDFromContext`, `WithRequestID` |
 | `selector.go` | `BackendSelector` | Chooses backend by health score (≥50 = healthy) |
 | `cost_optimizer.go` | `CostOptimizer` | Routes by size: small→fastest, large→cheapest |
 | `health.go` | `HealthScorer` | Weighted 0-100 score (latency 0.3, errors 0.3, uptime 0.2, throughput 0.2) |
 | `load_balancer.go` | `LoadBalancer` | 4 strategies: RoundRobin, LeastConn, WeightedRandom, Adaptive |
-| `monitor.go` | `BackendMonitor` | Periodic health probes (30s), stores to `backend_health` table |
 | `replicator.go` | `Replicator` | Cross-backend replication: Sync, Async (5 workers), Quorum |
-| `migrator.go` | `Migrator` | Data migration between backends with worker pools |
 | `capacity.go` | `CapacityPlanner` | Linear regression to predict when backends fill |
 | `disaster_recovery.go` | `DisasterRecovery` | Failover configs, recovery plans (RTO/RPO) |
 | `sla.go` | `SLAMonitor` | SLA compliance tracking, violation detection |

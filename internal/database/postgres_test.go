@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -11,7 +12,7 @@ import (
 )
 
 func TestPostgres_Connect(t *testing.T) {
-	cfg := GetTestConfig()
+	cfg := testConfig()
 	logger := zap.NewNop()
 
 	db, err := NewPostgres(cfg, logger)
@@ -26,7 +27,7 @@ func TestPostgres_Connect(t *testing.T) {
 }
 
 func TestPostgres_CreateTables(t *testing.T) {
-	cfg := GetTestConfig()
+	cfg := testConfig()
 	logger := zap.NewNop()
 
 	db, err := NewPostgres(cfg, logger)
@@ -41,7 +42,7 @@ func TestPostgres_CreateTables(t *testing.T) {
 }
 
 func TestPostgres_TenantOperations(t *testing.T) {
-	cfg := GetTestConfig()
+	cfg := testConfig()
 	logger := zap.NewNop()
 
 	db, err := NewPostgres(cfg, logger)
@@ -90,4 +91,23 @@ func TestPostgres_TenantOperations(t *testing.T) {
 
 func TestPostgres_ArtifactOperations(t *testing.T) {
 	t.Skip("Artifact operations not yet implemented")
+}
+
+// testConfig mirrors testutil.DBConfig; duplicated here because testutil imports
+// this package and an in-package _test.go cannot import it back.
+func testConfig() Config {
+	env := func(key, def string) string {
+		if v := os.Getenv(key); v != "" {
+			return v
+		}
+		return def
+	}
+	return Config{
+		Host:     env("TEST_DB_HOST", "localhost"),
+		Port:     5432,
+		Database: env("TEST_DB_NAME", "vaultaire"),
+		User:     env("TEST_DB_USER", "viera"),
+		Password: env("TEST_DB_PASSWORD", ""),
+		SSLMode:  "disable",
+	}
 }
