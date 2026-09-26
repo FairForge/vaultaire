@@ -13,7 +13,7 @@ Update this table at the end of every session.
 
 | # | Section | Depends on | Status | Findings file | PRs |
 |---|---------|-----------|--------|---------------|-----|
-| R0 | Dead code & scaffolding triage | — | **done 2026-09-26** — 41 pkgs + 62 files deleted (−83.5k LOC); 6 pkgs + 15 files await decisions D-1..D-10 | [R0-dead-code.md](reviews/R0-dead-code.md) | PR pending |
+| R0 | Dead code & scaffolding triage | — | **done 2026-09-26** — 41 pkgs + 62 files deleted (−83.5k LOC); 6 pkgs + 15 files await decisions D-1..D-10 | [R0-dead-code.md](reviews/R0-dead-code.md) | #473 |
 | R1 | Entry point, server wiring, config, shutdown | R0 | not started | | |
 | R2 | S3 object data path (GET/PUT/HEAD/DELETE, chunked) | R0 | not started | | |
 | R3 | S3 multipart, copy, batch, reaper | R2 | not started | | |
