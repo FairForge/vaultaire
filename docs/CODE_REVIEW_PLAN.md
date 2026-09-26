@@ -18,7 +18,7 @@ Update this table at the end of every session.
 | R2 | S3 object data path (GET/PUT/HEAD/DELETE, chunked) | R0 | not started | | |
 | R3 | S3 multipart, copy, batch, reaper | R2 | not started | | |
 | R4 | S3 bucket-level features | R2 | not started | | |
-| R5 | Auth, SigV4, keys, STS, sessions, RBAC, tenant isolation | R0 | not started | | |
+| R5 | Auth, SigV4, keys, STS, sessions, RBAC, tenant isolation | R0 | **done 2026-09-26** — 28 findings (1 P0 key revocation never persisted, 6 P1 — copy-source scope bypass, reset-token replay, MFA disable without password, scoped-key create failure, OAuth MFA bypass, Google unverified-email link; 5 of 7 P0/P1 fixed here, OAuth-MFA → WP-R5-2); SigV4 verified with real aws-cli + rclone captures; 10 tenant-isolation invariants for R15; RBAC stub decision D-11 for Isaac | [R5-auth.md](reviews/R5-auth.md) | (pending) |
 | R6 | Engine core (routing, failover, tiering, replication) | R0 | not started | | |
 | R7 | Storage drivers | R6 | not started | | |
 | R8 | Crypto, chunking, GCI dedup, GC | R2 | not started | | |
