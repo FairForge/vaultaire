@@ -222,7 +222,7 @@ Verified by `go mod tidy` on this branch after the class A/C/D deletions (`go.mo
 | `internal/` non-test LOC | 131,819 | 81,962 | **−49,857** |
 | `internal/` test LOC | 103,392 | 69,747 | **−33,645** |
 | Files | — | 341 deleted, 4 added, 13 modified, 2 renamed | |
-| `go.mod` direct requires | 33 | 31 | −2 (+1 promoted) |
+| `go.mod` direct requires | 33 | 32 | −2 dropped, +1 promoted from indirect |
 
 Product (non-test) code edits beyond file deletion — all removals of dead members that referenced
 deleted types:
