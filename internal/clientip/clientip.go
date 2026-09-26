@@ -69,18 +69,29 @@ func IsCloudflare(ip net.IP) bool {
 func FromRequest(r *http.Request) string {
 	peer := trustedPeer(r)
 	if IsCloudflare(net.ParseIP(peer)) {
-		if cf := net.ParseIP(strings.TrimSpace(r.Header.Get("CF-Connecting-IP"))); cf != nil {
-			return cf.String()
+		// Cloudflare sets exactly one CF-Connecting-IP. Two occurrences mean
+		// a client line survived alongside it — ambiguous, so use the peer.
+		if vals := r.Header.Values("CF-Connecting-IP"); len(vals) == 1 {
+			if cf := net.ParseIP(strings.TrimSpace(vals[0])); cf != nil {
+				return cf.String()
+			}
 		}
 	}
 	return peer
 }
 
 // trustedPeer is the address HAProxy accepted the connection from: the last
-// X-Forwarded-For entry (appended by `option forwardfor`), or RemoteAddr when
-// no proxy header is present.
+// X-Forwarded-For entry of the LAST X-Forwarded-For header occurrence, or
+// RemoteAddr when no proxy header is present.
+//
+// `option forwardfor` does not merge into an existing header: it adds a new
+// X-Forwarded-For occurrence at the end of the header list, and the HAProxy
+// manual says "the server must be configured to always use the last
+// occurrence of this header only". Go's Header.Get returns the FIRST
+// occurrence, which is whatever the client sent — hence Header.Values.
 func trustedPeer(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+	if vals := r.Header.Values("X-Forwarded-For"); len(vals) > 0 {
+		xff := vals[len(vals)-1]
 		entries := strings.Split(xff, ",")
 		for i := len(entries) - 1; i >= 0; i-- {
 			last := strings.TrimSpace(entries[i])

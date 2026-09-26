@@ -102,3 +102,41 @@ func TestIsCloudflare_PublishedRangesParse(t *testing.T) {
 	assert.False(t, IsCloudflare(net.ParseIP("127.0.0.1")))
 	assert.False(t, IsCloudflare(nil))
 }
+
+// HAProxy `option forwardfor` adds X-Forwarded-For as a NEW header occurrence
+// at the end of the header list ("the server must be configured to always use
+// the last occurrence of this header only" — HAProxy 2.8 manual). Go's
+// Header.Get returns only the FIRST occurrence, so a client that sends its own
+// X-Forwarded-For line would otherwise be read instead of the peer HAProxy
+// appended.
+func TestFromRequest_ClientSuppliedForwardedForLineIsIgnored(t *testing.T) {
+	r := req("127.0.0.1:1", nil)
+	r.Header.Add("X-Forwarded-For", "9.9.9.9")      // client-supplied line
+	r.Header.Add("X-Forwarded-For", "198.51.100.4") // HAProxy-appended line
+	assert.Equal(t, "198.51.100.4", FromRequest(r))
+
+	// Same behind Cloudflare: the peer is the edge from the LAST line, and a
+	// CF-Connecting-IP forged on a client line is not the one honoured.
+	r = req("127.0.0.1:1", nil)
+	r.Header.Add("X-Forwarded-For", "9.9.9.9")
+	r.Header.Add("X-Forwarded-For", "203.0.113.7, 104.16.1.1")
+	r.Header.Set("CF-Connecting-IP", "203.0.113.7")
+	assert.Equal(t, "203.0.113.7", FromRequest(r))
+
+	// A client line that HAProxy followed with a bare peer line must not be
+	// promoted just because the peer line has fewer entries.
+	r = req("127.0.0.1:1", nil)
+	r.Header.Add("X-Forwarded-For", "9.9.9.9, 8.8.8.8")
+	r.Header.Add("X-Forwarded-For", "198.51.100.4")
+	assert.Equal(t, "198.51.100.4", FromRequest(r))
+}
+
+// Two CF-Connecting-IP occurrences are ambiguous (one may be client-supplied);
+// fall back to the trusted peer rather than guess.
+func TestFromRequest_AmbiguousCloudflareHeaderFallsBackToPeer(t *testing.T) {
+	r := req("127.0.0.1:1", nil)
+	r.Header.Add("X-Forwarded-For", "104.16.1.1")
+	r.Header.Add("CF-Connecting-IP", "9.9.9.9")
+	r.Header.Add("CF-Connecting-IP", "203.0.113.7")
+	assert.Equal(t, "104.16.1.1", FromRequest(r))
+}
