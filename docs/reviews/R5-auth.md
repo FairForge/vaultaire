@@ -1,6 +1,6 @@
 # R5 Auth, SigV4, keys, STS, sessions, RBAC, tenant isolation — 2026-09-26
 
-**Repo state reviewed:** `main` @ `d839e75` (#476). Branch: `review/R5-auth`.
+**Repo state reviewed:** `main` @ `d839e75` (#476). Branch: `review/R5-auth` → PR #477.
 **Depends on:** [R0-dead-code.md](R0-dead-code.md) (R5 handoff row confirmed below),
 [R1-server-wiring.md](R1-server-wiring.md) (client IP via `internal/clientip` only; R1-20 lesson applied —
 every fix here has a negative test for the header/encoding rule it depends on).
