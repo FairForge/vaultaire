@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/FairForge/vaultaire/internal/testutil"
+
 	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
@@ -37,10 +39,7 @@ type testFixture struct {
 func setupFixture(t *testing.T) *testFixture {
 	t.Helper()
 
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set — skipping integration test")
-	}
+	dsn := testutil.DSN() // R9: vaultaire_test by default; DATABASE_URL still wins
 	db, err := sql.Open("postgres", dsn)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
@@ -80,10 +79,22 @@ func setupFixture(t *testing.T) *testFixture {
 	require.NoError(t, os.MkdirAll(filepath.Join(tempDir, "_global", "_chunks"), 0755))
 
 	t.Cleanup(func() {
-		_, _ = db.Exec("DELETE FROM tenant_chunk_refs WHERE tenant_id = $1", tenantUUID)
-		_, _ = db.Exec("DELETE FROM object_metadata WHERE tenant_id = $1", tenantUUID)
+		// Scope the GCI cleanup to chunks THIS tenant referenced. The previous
+		// `storage_key LIKE '_chunks/%'` clause deleted every real chunk row in
+		// the shared database and broke internal/api's dedup tests whenever
+		// the two packages ran concurrently (Review R9).
+		_, _ = db.Exec(`
+			DELETE FROM global_content_index g
+			USING tenant_chunk_refs r
+			WHERE r.tenant_id = $1
+			  AND g.dedup_scope = r.dedup_scope AND g.plaintext_hash = r.plaintext_hash
+			  AND NOT EXISTS (SELECT 1 FROM tenant_chunk_refs o
+			                  WHERE o.dedup_scope = g.dedup_scope AND o.plaintext_hash = g.plaintext_hash
+			                    AND o.tenant_id <> $1)`, tenantIDStr)
+		_, _ = db.Exec("DELETE FROM tenant_chunk_refs WHERE tenant_id = $1", tenantIDStr)
+		_, _ = db.Exec("DELETE FROM object_metadata WHERE tenant_id = $1", tenantIDStr)
 		_, _ = db.Exec("DELETE FROM object_head_cache WHERE tenant_id = $1", tenantIDStr)
-		_, _ = db.Exec("DELETE FROM global_content_index WHERE plaintext_hash LIKE 'test-%' OR storage_key LIKE '_chunks/%'")
+		_, _ = db.Exec("DELETE FROM global_content_index WHERE plaintext_hash LIKE 'test-%'")
 		_, _ = db.Exec("DELETE FROM tenants WHERE id = $1", tenantIDStr)
 	})
 

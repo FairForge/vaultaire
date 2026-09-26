@@ -262,10 +262,6 @@ func TestNewDedupGCRunner_NilGuards(t *testing.T) {
 	assert.Nil(t, NewDedupGCRunner(nil, eng, nil, logger), "nil db should return nil")
 	assert.Nil(t, NewDedupGCRunner(nil, nil, nil, logger), "nil both should return nil")
 
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
 	// Not checking db-only since eng=nil also returns nil — tested above.
 }
 
@@ -311,11 +307,6 @@ func TestDedupGC_GlobalContainerCleanup(t *testing.T) {
 }
 
 func TestDedupGC_ManualTrigger(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set — skipping integration test")
-	}
-
 	runner, _ := setupGCFixture(t)
 
 	// Just test that RunOnce works on an empty GCI.

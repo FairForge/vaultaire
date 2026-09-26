@@ -12,12 +12,13 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"testing"
 	"time"
+
+	"github.com/FairForge/vaultaire/internal/testutil"
 
 	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/stretchr/testify/assert"
@@ -51,13 +52,10 @@ var runtimeTables = []string{
 }
 
 func TestMigrations_FreshDatabaseBootstrap(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set — skipping integration test")
-	}
+	cfg := testutil.DBConfig() // R9: vaultaire_test by default; DATABASE_URL still wins
 	ctx := context.Background()
 
-	admin, err := sql.Open("postgres", dsn)
+	admin, err := sql.Open("postgres", testutil.DSNFor(cfg))
 	require.NoError(t, err)
 	defer func() { _ = admin.Close() }()
 	require.NoError(t, admin.PingContext(ctx))
@@ -67,10 +65,9 @@ func TestMigrations_FreshDatabaseBootstrap(t *testing.T) {
 	_, err = admin.ExecContext(ctx, "CREATE DATABASE "+freshDBName)
 	require.NoError(t, err, "create fresh database")
 
-	freshDSN, err := replaceDBName(dsn, freshDBName)
-	require.NoError(t, err)
-
-	fdb, err := sql.Open("postgres", freshDSN)
+	freshCfg := cfg
+	freshCfg.Database = freshDBName
+	fdb, err := sql.Open("postgres", testutil.DSNFor(freshCfg))
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		_ = fdb.Close()
@@ -192,13 +189,10 @@ func applyAllMigrations(ctx context.Context, t *testing.T, db *sql.DB, when stri
 // idempotent — a second full pass against an already-migrated database has to
 // come back clean, or every deploy after WP-9's runner change would fail.
 func TestMigrations_Reapply(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set — skipping integration test")
-	}
+	cfg := testutil.DBConfig() // R9: vaultaire_test by default; DATABASE_URL still wins
 	ctx := context.Background()
 
-	admin, err := sql.Open("postgres", dsn)
+	admin, err := sql.Open("postgres", testutil.DSNFor(cfg))
 	require.NoError(t, err)
 	defer func() { _ = admin.Close() }()
 	require.NoError(t, admin.PingContext(ctx))
@@ -209,9 +203,9 @@ func TestMigrations_Reapply(t *testing.T) {
 	_, err = admin.ExecContext(ctx, "CREATE DATABASE "+dbName)
 	require.NoError(t, err)
 
-	reapplyDSN, err := replaceDBName(dsn, dbName)
-	require.NoError(t, err)
-	fdb, err := sql.Open("postgres", reapplyDSN)
+	reapplyCfg := cfg
+	reapplyCfg.Database = dbName
+	fdb, err := sql.Open("postgres", testutil.DSNFor(reapplyCfg))
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		_ = fdb.Close()
@@ -221,13 +215,4 @@ func TestMigrations_Reapply(t *testing.T) {
 
 	applyAllMigrations(ctx, t, fdb, "on the first pass")
 	applyAllMigrations(ctx, t, fdb, "on the second pass (deploys re-run every file — all statements must be idempotent)")
-}
-
-func replaceDBName(dsn, name string) (string, error) {
-	u, err := url.Parse(dsn)
-	if err != nil {
-		return "", fmt.Errorf("parse dsn: %w", err)
-	}
-	u.Path = "/" + name
-	return u.String(), nil
 }

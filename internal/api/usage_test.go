@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -21,16 +22,14 @@ func setupTestUsageAPI(t *testing.T) (*Server, *sql.DB) {
 		return nil, nil
 	}
 
-	// Clean and setup
-	_, _ = db.Exec("DROP TABLE IF EXISTS quota_usage_events")
-	_, _ = db.Exec("DROP TABLE IF EXISTS tenant_quotas")
-
+	// Migrated schema only (R9 / WP-R0-7): no DROP TABLE, no Go DDL. Rows are
+	// per-test and removed on cleanup (usage events cascade with the quota row).
 	quotaMgr := usage.NewQuotaManager(db)
-	require.NoError(t, quotaMgr.InitializeSchema(context.Background()))
 
 	// Create test tenant with some usage
-	require.NoError(t, quotaMgr.CreateTenant(context.Background(), "tenant-123", "starter", 1073741824)) // 1GB
-	_, err := quotaMgr.CheckAndReserve(context.Background(), "tenant-123", 524288000)
+	seed := uniqueQuotaTenant(t, db, "test-usage-seed")
+	require.NoError(t, quotaMgr.CreateTenant(context.Background(), seed, "starter", 1073741824)) // 1GB
+	_, err := quotaMgr.CheckAndReserve(context.Background(), seed, 524288000)
 	require.NoError(t, err)
 
 	server := &Server{
@@ -48,7 +47,7 @@ func TestUsageAPI_GetUsageStats(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	// Use unique tenant ID
-	tenantID := "test-tenant-" + time.Now().Format("20060102150405")
+	tenantID := uniqueQuotaTenant(t, db, "test-tenant")
 
 	// Create tenant with proper quota
 	err := server.quotaManager.CreateTenant(context.Background(), tenantID, "starter", 1073741824) // 1GB
@@ -78,7 +77,7 @@ func TestUsageAPI_GetUsageAlerts(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	// Use unique tenant ID
-	tenantID := "test-alert-tenant-" + time.Now().Format("20060102150405")
+	tenantID := uniqueQuotaTenant(t, db, "test-alert-tenant")
 
 	// Create tenant near limit
 	err := server.quotaManager.CreateTenant(context.Background(), tenantID, "starter", 100000) // 100KB limit
@@ -98,4 +97,14 @@ func TestUsageAPI_GetUsageAlerts(t *testing.T) {
 	server.handleGetUsageAlerts(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+// uniqueQuotaTenant returns a tenant ID that cannot collide with any other
+// test or package sharing the database, and deletes its quota row (and, by
+// cascade, its usage events) when the test ends.
+func uniqueQuotaTenant(t *testing.T, db *sql.DB, prefix string) string {
+	t.Helper()
+	id := fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
+	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM tenant_quotas WHERE tenant_id = $1`, id) })
+	return id
 }

@@ -10,6 +10,8 @@ import (
 	"os"
 	"testing"
 
+	"github.com/FairForge/vaultaire/internal/testutil"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -72,10 +74,7 @@ func TestSSEService_SeedDecryptWrongKey(t *testing.T) {
 }
 
 func TestSSEService_EncryptDecrypt_RoundTrip(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
+	dsn := testutil.DSN() // R9: vaultaire_test by default; DATABASE_URL still wins
 
 	db, err := sql.Open("postgres", dsn)
 	require.NoError(t, err)
@@ -104,10 +103,7 @@ func TestSSEService_EncryptDecrypt_RoundTrip(t *testing.T) {
 }
 
 func TestSSEService_EncryptedFormat(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
+	dsn := testutil.DSN() // R9: vaultaire_test by default; DATABASE_URL still wins
 
 	db, err := sql.Open("postgres", dsn)
 	require.NoError(t, err)
@@ -138,10 +134,7 @@ func TestSSEService_EncryptedFormat(t *testing.T) {
 }
 
 func TestSSEService_EncryptedSizeOverhead(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
+	dsn := testutil.DSN() // R9: vaultaire_test by default; DATABASE_URL still wins
 
 	db, err := sql.Open("postgres", dsn)
 	require.NoError(t, err)
@@ -171,10 +164,7 @@ func TestSSEService_EncryptedSizeOverhead(t *testing.T) {
 }
 
 func TestSSEService_DecryptWrongTenant(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
+	dsn := testutil.DSN() // R9: vaultaire_test by default; DATABASE_URL still wins
 
 	db, err := sql.Open("postgres", dsn)
 	require.NoError(t, err)
@@ -202,10 +192,7 @@ func TestSSEService_DecryptWrongTenant(t *testing.T) {
 }
 
 func TestSSEService_DecryptCorruptedData(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
+	dsn := testutil.DSN() // R9: vaultaire_test by default; DATABASE_URL still wins
 
 	db, err := sql.Open("postgres", dsn)
 	require.NoError(t, err)
@@ -238,10 +225,7 @@ func TestSSEService_DecryptBadVersion(t *testing.T) {
 	data := make([]byte, 1+mlkem.CiphertextSize768+12+32)
 	data[0] = 0xFF
 
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
+	dsn := testutil.DSN() // R9: vaultaire_test by default; DATABASE_URL still wins
 
 	db, err := sql.Open("postgres", dsn)
 	require.NoError(t, err)
@@ -262,10 +246,7 @@ func TestSSEService_DecryptBadVersion(t *testing.T) {
 }
 
 func TestSSEService_DecryptTooShort(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
+	dsn := testutil.DSN() // R9: vaultaire_test by default; DATABASE_URL still wins
 
 	db, err := sql.Open("postgres", dsn)
 	require.NoError(t, err)
@@ -286,10 +267,7 @@ func TestSSEService_DecryptTooShort(t *testing.T) {
 }
 
 func TestSSEService_EnsureTenantKey_Idempotent(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
+	dsn := testutil.DSN() // R9: vaultaire_test by default; DATABASE_URL still wins
 
 	db, err := sql.Open("postgres", dsn)
 	require.NoError(t, err)
@@ -315,10 +293,7 @@ func TestSSEService_EnsureTenantKey_Idempotent(t *testing.T) {
 }
 
 func TestSSEService_EmptyPlaintext(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
+	dsn := testutil.DSN() // R9: vaultaire_test by default; DATABASE_URL still wins
 
 	db, err := sql.Open("postgres", dsn)
 	require.NoError(t, err)

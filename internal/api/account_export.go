@@ -202,7 +202,7 @@ func (e *AccountExporter) collectBuckets(ctx context.Context, tenantID string) [
 
 func (e *AccountExporter) collectObjects(ctx context.Context, tenantID string) []map[string]interface{} {
 	rows, err := e.db.QueryContext(ctx,
-		`SELECT bucket, object_key, size, content_type, last_modified FROM object_head_cache WHERE tenant_id = $1 ORDER BY bucket, object_key`, tenantID)
+		`SELECT bucket, object_key, size_bytes, content_type, updated_at FROM object_head_cache WHERE tenant_id = $1 ORDER BY bucket, object_key`, tenantID)
 	if err != nil {
 		e.logger.Warn("export: failed to query objects", zap.Error(err))
 		return []map[string]interface{}{}
@@ -267,7 +267,7 @@ func (e *AccountExporter) collectAPIKeys(ctx context.Context, userID string) []m
 
 func (e *AccountExporter) collectBandwidth(ctx context.Context, tenantID string) []map[string]interface{} {
 	rows, err := e.db.QueryContext(ctx,
-		`SELECT date, ingress_bytes, egress_bytes, requests FROM bandwidth_usage_daily WHERE tenant_id = $1 AND date >= NOW() - INTERVAL '90 days' ORDER BY date DESC`, tenantID)
+		`SELECT date, ingress_bytes, egress_bytes, requests_count FROM bandwidth_usage_daily WHERE tenant_id = $1 AND date >= NOW() - INTERVAL '90 days' ORDER BY date DESC`, tenantID)
 	if err != nil {
 		e.logger.Warn("export: failed to query bandwidth", zap.Error(err))
 		return []map[string]interface{}{}

@@ -16,40 +16,12 @@ func NewQuotaManager(db *sql.DB) *QuotaManager {
 	return &QuotaManager{db: db}
 }
 
-func (m *QuotaManager) InitializeSchema(ctx context.Context) error {
-	schema := `
-    CREATE TABLE IF NOT EXISTS tenant_quotas (
-        tenant_id TEXT PRIMARY KEY,
-        storage_limit_bytes BIGINT NOT NULL DEFAULT 5368709120,
-        storage_used_bytes BIGINT NOT NULL DEFAULT 0,
-        bandwidth_limit_bytes BIGINT DEFAULT NULL,
-        bandwidth_used_bytes BIGINT NOT NULL DEFAULT 0,
-        tier VARCHAR(50) NOT NULL DEFAULT 'free',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-
-    CREATE TABLE IF NOT EXISTS quota_usage_events (
-        id SERIAL PRIMARY KEY,
-        tenant_id TEXT NOT NULL REFERENCES tenant_quotas(tenant_id),
-        operation VARCHAR(20) NOT NULL,
-        bytes_delta BIGINT NOT NULL,
-        object_key TEXT NOT NULL,
-        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_usage_events_tenant_time
-        ON quota_usage_events(tenant_id, timestamp);
-    CREATE INDEX IF NOT EXISTS idx_usage_events_operation
-        ON quota_usage_events(operation);
-    `
-
-	_, err := m.db.ExecContext(ctx, schema)
-	if err != nil {
-		return fmt.Errorf("initializing quota schema: %w", err)
-	}
-	return nil
-}
+// The quota schema (tenant_quotas, quota_usage_events) is owned by the
+// migration set — see internal/database/migrations/056_runtime_tables_and_deletion.sql.
+// There is deliberately no Go DDL here (Review R9 / WP-R0-7): the previous
+// InitializeSchema had drifted from the migrations (no spending_cap_cents, no
+// ON DELETE CASCADE) and the tests that rebuilt from it corrupted every
+// database they ran against.
 
 func (m *QuotaManager) CreateTenant(ctx context.Context, tenantID, tier string, limitBytes int64) error {
 	_, err := m.db.ExecContext(ctx,
@@ -260,7 +232,7 @@ func (m *QuotaManager) GetUsageHistory(ctx context.Context, tenantID string, day
 		        SUM(CASE WHEN operation = 'PUT' THEN bytes_delta ELSE 0 END) as uploaded,
 		        SUM(CASE WHEN operation = 'DELETE' THEN -bytes_delta ELSE 0 END) as deleted
 		 FROM quota_usage_events
-		 WHERE tenant_id = $1 AND timestamp > NOW() - INTERVAL '%d days'
+		 WHERE tenant_id = $1 AND timestamp > NOW() - make_interval(days => $2)
 		 GROUP BY DATE(timestamp)
 		 ORDER BY date DESC`, tenantID, days)
 

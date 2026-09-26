@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/FairForge/vaultaire/internal/testutil"
+
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/tenant"
@@ -37,10 +39,7 @@ type loggingFixture struct {
 func setupLoggingFixture(t *testing.T) *loggingFixture {
 	t.Helper()
 
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set — skipping integration test")
-	}
+	dsn := testutil.DSN() // R9: vaultaire_test by default; DATABASE_URL still wins
 	db, err := sql.Open("postgres", dsn)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
