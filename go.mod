@@ -27,7 +27,7 @@ require (
 	github.com/stretchr/testify v1.12.0
 	github.com/stripe/stripe-go/v75 v75.11.0
 	github.com/tetratelabs/wazero v1.12.0
-	github.com/yuin/goldmark v1.8.5
+	github.com/yuin/goldmark v1.8.6
 	go.uber.org/zap v1.28.0
 	golang.org/x/crypto v0.55.0
 	golang.org/x/net v0.58.0
