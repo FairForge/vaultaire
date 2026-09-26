@@ -189,15 +189,21 @@ func (a *Auth) lookupCredential(accessKey string) (*credential, error) {
 		FROM api_keys ak
 		JOIN users u ON u.id = ak.user_id
 		JOIN tenants t ON t.email = u.email
-		WHERE ak.key_id = $1
+		WHERE ak.key_id = $1 AND ak.revoked_at IS NULL
 	`, accessKey).Scan(&tenantID, &secretKey, &permJSON, &bucketScope, &ipAllowlist, &expiresAt)
 	if err == nil {
 		scope := &KeyScope{
 			BucketScope: []string(bucketScope),
 			IPAllowlist: []string(ipAllowlist),
 		}
+		// A permissions column that is not a JSON array of strings grants
+		// NOTHING — it used to grant everything (R5-14).
 		if jsonErr := json.Unmarshal(permJSON, &scope.Permissions); jsonErr != nil {
-			scope.Permissions = []string{"*"}
+			// Log the DB-derived tenant, never the request-derived key (CodeQL
+			// clear-text-logging taint from the Authorization header).
+			a.logger.Warn("api key has unparsable permissions — treating as no permissions",
+				zap.String("tenant_id", tenantID), zap.Error(jsonErr))
+			scope.Permissions = nil
 		}
 		if expiresAt.Valid {
 			scope.ExpiresAt = &expiresAt.Time
@@ -234,7 +240,9 @@ func (a *Auth) lookupCredential(accessKey string) (*credential, error) {
 				ExpiresAt:   &stsExpiresAt,
 			}
 			if jsonErr := json.Unmarshal(stsPermJSON, &scope.Permissions); jsonErr != nil {
-				scope.Permissions = []string{"*"}
+				a.logger.Warn("sts token has unparsable permissions — treating as no permissions",
+					zap.String("tenant_id", tenantID), zap.Error(jsonErr))
+				scope.Permissions = nil
 			}
 			a.logger.Debug("authenticated tenant (STS token)",
 				zap.String("tenant_id", tenantID),

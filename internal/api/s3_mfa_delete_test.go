@@ -11,12 +11,14 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/go-chi/chi/v5"
+	"github.com/pquerna/otp/totp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -204,7 +206,7 @@ func TestMFADelete_Enabled_ValidCode_Succeeds(t *testing.T) {
 	f.putObject(t, key, "data with MFA")
 
 	req := httptest.NewRequest("DELETE", "/"+f.bucket+"/"+key, nil)
-	req.Header.Set("x-amz-mfa", "arn:aws:iam::serial 123456")
+	req.Header.Set("x-amz-mfa", "arn:aws:iam::serial "+testMFACode(t))
 	ctx := tenant.WithTenant(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
@@ -256,7 +258,7 @@ func TestMFADelete_EnableRequiresMFA(t *testing.T) {
 
 	// With valid MFA header — should succeed
 	req = httptest.NewRequest("PUT", "/"+f.bucket+"?versioning", bytes.NewReader([]byte(body)))
-	req.Header.Set("x-amz-mfa", "arn:aws:iam::serial 123456")
+	req.Header.Set("x-amz-mfa", "arn:aws:iam::serial "+testMFACode(t))
 	ctx = tenant.WithTenant(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
@@ -295,7 +297,7 @@ func TestMFADelete_EnableRequiresObjectLock(t *testing.T) {
 	</VersioningConfiguration>`
 
 	req := httptest.NewRequest("PUT", "/"+noLockBucket+"?versioning", bytes.NewReader([]byte(body)))
-	req.Header.Set("x-amz-mfa", "arn:aws:iam::serial 123456")
+	req.Header.Set("x-amz-mfa", "arn:aws:iam::serial "+testMFACode(t))
 	ctx := tenant.WithTenant(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
@@ -335,7 +337,7 @@ func TestMFADelete_PutVersioning_SuspendRequiresMFA(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code, "suspend without MFA should be denied")
 
 	req = httptest.NewRequest("PUT", "/"+f.bucket+"?versioning", bytes.NewReader([]byte(body)))
-	req.Header.Set("x-amz-mfa", "arn:aws:iam::serial 123456")
+	req.Header.Set("x-amz-mfa", "arn:aws:iam::serial "+testMFACode(t))
 	ctx = tenant.WithTenant(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
@@ -373,4 +375,13 @@ func TestMFADelete_GetVersioning_ReturnsMfaDeleteStatus(t *testing.T) {
 
 	require.NoError(t, xml.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "Enabled", resp.MfaDelete)
+}
+
+// testMFACode mints a real TOTP for the fixture's secret: ValidateCode no
+// longer has a test shortcut (review R5-15).
+func testMFACode(t *testing.T) string {
+	t.Helper()
+	code, err := totp.GenerateCode("JBSWY3DPEHPK3PXP", time.Now())
+	require.NoError(t, err)
+	return code
 }

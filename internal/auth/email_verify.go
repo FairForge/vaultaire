@@ -20,6 +20,9 @@ func (a *AuthService) SetVerifySecret(secret string) {
 // GenerateEmailVerifyToken creates an HMAC-signed token for email verification.
 // Token format: base64(userID|expiry|signature)
 func (a *AuthService) GenerateEmailVerifyToken(ctx context.Context, userID string) (string, error) {
+	if len(a.verifySecret) == 0 {
+		return "", ErrNoVerifySecret
+	}
 	user, exists := a.userIndex[userID]
 	if !exists {
 		return "", fmt.Errorf("user not found")
@@ -54,6 +57,9 @@ func (a *AuthService) GenerateEmailVerifyToken(ctx context.Context, userID strin
 
 // VerifyEmail validates the token and marks the user's email as verified.
 func (a *AuthService) VerifyEmail(ctx context.Context, token string) error {
+	if len(a.verifySecret) == 0 {
+		return ErrNoVerifySecret
+	}
 	// Decode the token.
 	decoded, err := base64.RawURLEncoding.DecodeString(token)
 	if err != nil {

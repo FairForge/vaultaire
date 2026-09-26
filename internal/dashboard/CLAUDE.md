@@ -72,7 +72,7 @@ Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`,
 | `/dashboard/settings/notifications` | POST | session | Update notification preferences |
 | `/dashboard/settings/mfa` | GET | session | 2FA setup page (QR code, backup codes) |
 | `/dashboard/settings/mfa/enable` | POST | session | Confirm TOTP code to enable 2FA |
-| `/dashboard/settings/mfa/disable` | POST | session | Disable 2FA (requires password) |
+| `/dashboard/settings/mfa/disable` | POST | session | Disable 2FA — the password is required and verified server-side (an empty field used to skip the check, R5-04); OAuth-only accounts (no password) are told to use the admin reset |
 | `/dashboard/settings/sessions/revoke-all` | POST | session | Sign out of all OTHER devices (keeps current session) |
 | `/dashboard/settings/sessions/{id}/revoke` | POST | session | Revoke a specific session owned by the current user |
 | `/login/verify-2fa` | GET | none | 2FA verification page (during login) |

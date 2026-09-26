@@ -144,26 +144,28 @@ func (s *Server) handleCreateUserAPIKey(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Generate key
-	key, err := s.auth.GenerateAPIKey(r.Context(), userID, req.Name, nil)
+	// The requested scope goes INTO the key (R5-13): it used to be echoed in
+	// the response while the stored key stayed full-access.
+	var opts *auth.KeyCreateOptions
+	if len(req.Permissions) > 0 || (req.ExpiryDays != nil && *req.ExpiryDays > 0) {
+		opts = &auth.KeyCreateOptions{}
+		if len(req.Permissions) > 0 {
+			if err := auth.ValidatePermissions(req.Permissions); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			opts.Permissions = req.Permissions
+		}
+		if req.ExpiryDays != nil && *req.ExpiryDays > 0 {
+			expiresAt := time.Now().AddDate(0, 0, *req.ExpiryDays)
+			opts.ExpiresAt = &expiresAt
+		}
+	}
+
+	key, err := s.auth.GenerateAPIKey(r.Context(), userID, req.Name, opts)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
-	}
-
-	// Set permissions if provided
-	if len(req.Permissions) > 0 {
-		key.Permissions = req.Permissions
-	}
-
-	// Set expiration if provided
-	if req.ExpiryDays != nil && *req.ExpiryDays > 0 {
-		expiresAt := time.Now().AddDate(0, 0, *req.ExpiryDays)
-		if err := s.auth.SetAPIKeyExpiration(r.Context(), userID, key.ID, expiresAt); err != nil {
-			s.logger.Error("failed to set key expiration", zap.Error(err))
-		} else {
-			key.ExpiresAt = &expiresAt
-		}
 	}
 
 	// Return with secret (only time it's shown)

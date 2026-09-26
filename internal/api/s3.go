@@ -383,6 +383,12 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 				WithSuggestion(fmt.Sprintf("This key is restricted to buckets: %s", strings.Join(scope.BucketScope, ", "))))
 			return
 		}
+		// CopyObject reads the SOURCE with this key too (R5-02). Only the
+		// PutObject dispatch honours x-amz-copy-source, so only it is gated.
+		if hint, denied := copySourceScopeDenied(scope, r); denied && s3Req.Operation == "PutObject" {
+			WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(), WithSuggestion(hint))
+			return
+		}
 	}
 
 	if tenantID == "" {

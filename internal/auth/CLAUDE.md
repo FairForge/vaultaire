@@ -34,7 +34,7 @@ Authentication service for Vaultaire. Handles user registration, login, JWT toke
 
 Both flows share the `verifySecret` HMAC key but use distinct payload formats so tokens are not interchangeable:
 - Email verify token: `userID|expiry|signature` (24h expiry)
-- Password reset token: `reset|userID|expiry|signature` (1h expiry, single-use, in-memory tracked)
+- Password reset token: `reset|userID|expiry|fingerprint|signature` (1h expiry). `fingerprint` = first 16 hex of SHA-256(current password hash), so the token is **single-use by construction**: the reset itself (or any password change) changes the hash and every outstanding token stops verifying — no server-side state, restart-safe (R5-03). Minting or verifying with an empty HMAC secret returns `ErrNoVerifySecret` (fail closed; `VERIFY_SECRET` falls back to `JWT_SECRET` in server.go)
 
 Password reset rate limiting is in-memory (per-email, 3/hour, sliding window). The auth service does not own session state — the dashboard handler invalidates sessions via `SessionStore.DeleteByUserID` after a successful reset.
 
@@ -42,7 +42,7 @@ Password reset rate limiting is in-memory (per-email, 3/hour, sliding window). T
 
 - **MFAService** (`mfa.go`) — standalone TOTP service: `GenerateSecret`, `ValidateCode`, `GenerateBackupCodes`. Uses `github.com/pquerna/otp`.
 - **MFASettings** (`auth_mfa.go`) — per-user MFA config stored in `mfaSettings` map (in AuthService). DB-backed via `user_mfa` table.
-- Test secret: `JBSWY3DPEHPK3PXP` with code `123456` (hardcoded in `ValidateCode` for testing).
+- There is **no** test shortcut in `ValidateCode` (the former `JBSWY3DPEHPK3PXP`/`123456` pair was removed in R5-15 — it could be enrolled via the setup form). Tests mint real codes with `totp.GenerateCode`.
 
 ## Maps (in-memory)
 
@@ -63,7 +63,9 @@ Password reset rate limiting is in-memory (per-email, 3/hour, sliding window). T
 - `IsKeyExpired(expiresAt)` — nil = never expires
 - `ValidatePermissions(perms)` — validates against `ValidPermissions` map (all S3 operation names from `determineOperation`)
 
-`GenerateAPIKey(ctx, userID, name, *KeyCreateOptions)` — accepts scope options. Persists to `api_keys` table with scope columns. Adds key to `keyIndex` so scoped VLT_ keys can authenticate S3 requests.
+`GenerateAPIKey(ctx, userID, name, *KeyCreateOptions)` — accepts scope options. Persists to `api_keys` FIRST (nil scope slices are normalised to `{}` — `bucket_scope`/`ip_allowlist` are NOT NULL, R5-05), then publishes to `apiKeys`/`keyIndex`; a failed INSERT leaves no in-memory key.
+
+**Key lifecycle is persisted (R5-01, migration 064):** `RevokeAPIKey` and `RotateAPIKey` stamp `api_keys.revoked_at` (rotate also INSERTs the replacement with the old scope); `SetAPIKeyExpiration` writes `expires_at`. The S3 auth path (`Auth.lookupCredential`, `verifyPresignedURL`) reads `api_keys` per request with `revoked_at IS NULL` — the in-memory `RevokedAt` is only a mirror for listings. Corrupt `permissions` JSON resolves to NO permissions, never `["*"]` (R5-14).
 
 `LoadFromDB` — loads `api_keys` table with scope columns (permissions JSONB, bucket_scope TEXT[], ip_allowlist TEXT[], expires_at TIMESTAMPTZ, secret_key TEXT). Populates both `apiKeys` and `keyIndex` maps.
 

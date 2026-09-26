@@ -157,12 +157,12 @@ Error code `ErrQuotaExceeded` in `s3_errors.go` — 403 status, message includes
 
 1. `handleS3Request` checks `isPresignedRequest(r)` — if query has `X-Amz-Algorithm=AWS4-HMAC-SHA256`, routes to `verifyPresignedURL` (SigV4 query string auth)
 2. Otherwise calls `auth.ValidateRequest(r)` which parses the Authorization header
-3. Both paths return `(tenantID, *auth.KeyScope, error)` — scope carries permissions, bucket restrictions, IP allowlist, and expiration. Auth lookup order: tenants (primary key) → api_keys (VLT_ scoped) → sts_tokens (ASIA temporary)
+3. Both paths return `(tenantID, *auth.KeyScope, error)` — scope carries permissions, bucket restrictions, IP allowlist, and expiration; `api_keys` rows with `revoked_at` set are never returned (R5-01). Auth lookup order: tenants (primary key) → api_keys (VLT_ scoped) → sts_tokens (ASIA temporary)
 4. On failure, returns appropriate S3 error (presigned errors: `ExpiredToken`, `AuthorizationQueryParametersError`, `SignatureDoesNotMatch`)
 5. On success, scope enforcement runs before operation routing:
    - `IsKeyExpired` → 403 `ExpiredToken`
    - `CheckIPAllowlist` with `extractClientIP(r)` (CF-Connecting-IP > X-Forwarded-For > RemoteAddr) → 403 `AccessDenied`
-   - After `ParseRequest`: `CheckPermission` and `CheckBucketScope` → 403 `AccessDenied` with suggestion hint
+   - After `ParseRequest`: `CheckPermission` and `CheckBucketScope` → 403 `AccessDenied` with suggestion hint; for a PutObject carrying `x-amz-copy-source`, `copySourceScopeDenied` (`s3_copy_scope.go`) also requires `GetObject` and the SOURCE bucket in scope — CopyObject is dispatched as PutObject, so the generic check only saw the destination (R5-02)
 6. Tenant context is set and the request is routed to the operation handler
 
 ### Pre-Signed URL Verification (Phase 5.10.16)

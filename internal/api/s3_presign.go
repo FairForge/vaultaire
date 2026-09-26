@@ -94,7 +94,7 @@ func (s *Server) verifyPresignedURL(r *http.Request) (string, *auth.KeyScope, er
 			FROM api_keys ak
 			JOIN users u ON u.id = ak.user_id
 			JOIN tenants t ON t.email = u.email
-			WHERE ak.key_id = $1
+			WHERE ak.key_id = $1 AND ak.revoked_at IS NULL
 		`, accessKey).Scan(&secretKey, &tenantID, &permJSON, &bucketScope, &ipAllowlist, &expiresAtDB)
 		if err == nil {
 			if secretKey == "" {
@@ -105,7 +105,7 @@ func (s *Server) verifyPresignedURL(r *http.Request) (string, *auth.KeyScope, er
 				IPAllowlist: []string(ipAllowlist),
 			}
 			if jsonErr := json.Unmarshal(permJSON, &scope.Permissions); jsonErr != nil {
-				scope.Permissions = []string{"*"}
+				scope.Permissions = nil // fail closed (R5-14)
 			}
 			if expiresAtDB.Valid {
 				scope.ExpiresAt = &expiresAtDB.Time
@@ -131,7 +131,7 @@ func (s *Server) verifyPresignedURL(r *http.Request) (string, *auth.KeyScope, er
 				ExpiresAt:   &stsExpiresAt,
 			}
 			if jsonErr := json.Unmarshal(stsPermJSON, &scope.Permissions); jsonErr != nil {
-				scope.Permissions = []string{"*"}
+				scope.Permissions = nil // fail closed (R5-14)
 			}
 		} else {
 			return "", nil, fmt.Errorf("%s", ErrAccessDenied)

@@ -126,16 +126,33 @@ func HandleMFADisable(settingsTmpl *template.Template, authSvc *auth.AuthService
 		data := sessionData(sd, "settings")
 		withCSRF(r.Context(), data)
 
-		// Verify password before disabling MFA.
-		if password != "" && authSvc != nil {
-			valid, err := authSvc.ValidatePassword(r.Context(), sd.Email, password)
-			if err != nil || !valid {
-				data["MFAError"] = "Incorrect password."
-				data["MFAEnabled"] = true
-				populateProfileForMFA(authSvc, r, sd, data)
-				renderMFATemplate(w, settingsTmpl, data, logger)
-				return
-			}
+		// The password is REQUIRED to disable MFA. An empty field used to
+		// skip the check entirely (review R5-04): a hijacked session could
+		// strip the second factor without knowing the password.
+		fail := func(msg string) {
+			data["MFAError"] = msg
+			data["MFAEnabled"] = true
+			populateProfileForMFA(authSvc, r, sd, data)
+			renderMFATemplate(w, settingsTmpl, data, logger)
+		}
+		if authSvc == nil {
+			fail("Two-factor settings are not available.")
+			return
+		}
+		if password == "" {
+			fail("Enter your password to disable two-factor authentication.")
+			return
+		}
+		if u, err := authSvc.GetUserByID(r.Context(), sd.UserID); err == nil && u.PasswordHash == "" {
+			// OAuth-only account: nothing to verify against, and accepting
+			// any input would be the bypass again. Admin reset is the path.
+			fail("This account signs in with Google/GitHub and has no password; contact support to reset two-factor authentication.")
+			return
+		}
+		valid, err := authSvc.ValidatePassword(r.Context(), sd.Email, password)
+		if err != nil || !valid {
+			fail("Incorrect password.")
+			return
 		}
 
 		if err := authSvc.DisableMFA(r.Context(), sd.UserID); err != nil {

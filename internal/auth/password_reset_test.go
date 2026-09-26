@@ -85,11 +85,47 @@ func TestPasswordReset_TokenSingleUse(t *testing.T) {
 	_, err = svc.CompletePasswordReset(context.Background(), token, "NewPass456!")
 	require.NoError(t, err)
 
-	// Token should not be in resetTokens map anymore.
-	svc.resetMu.Lock()
-	_, exists := svc.resetTokens[token]
-	svc.resetMu.Unlock()
-	assert.False(t, exists, "token should be cleared after use")
+	// R5-03: replaying the same token must fail, and must not change the
+	// password again. The old test only checked an in-memory map that the
+	// verifier never consulted.
+	_, err = svc.CompletePasswordReset(context.Background(), token, "Attacker789!")
+	require.Error(t, err, "a used reset token must be rejected")
+
+	ok, _ := svc.ValidatePassword(context.Background(), "single@stored.ge", "NewPass456!")
+	assert.True(t, ok, "the first reset must stand")
+	ok, _ = svc.ValidatePassword(context.Background(), "single@stored.ge", "Attacker789!")
+	assert.False(t, ok, "the replayed reset must not have taken effect")
+}
+
+func TestPasswordReset_OutstandingTokenDiesWithPasswordChange(t *testing.T) {
+	svc := NewAuthService(nil, nil)
+	svc.SetVerifySecret("test-secret-key")
+	user, _, _, err := svc.CreateUserWithTenant(context.Background(), "change@stored.ge", "OldPass123!", "")
+	require.NoError(t, err)
+
+	token, err := svc.RequestPasswordReset(context.Background(), "change@stored.ge")
+	require.NoError(t, err)
+
+	// The user changes their password through settings before the link is used.
+	require.NoError(t, svc.ChangePassword(context.Background(), user.ID, "OldPass123!", "Fresh789!"))
+
+	_, err = svc.CompletePasswordReset(context.Background(), token, "Attacker000!")
+	assert.Error(t, err, "a token issued before a password change must be dead")
+}
+
+func TestPasswordReset_EmptySecretFailsClosed(t *testing.T) {
+	svc := NewAuthService(nil, nil) // no SetVerifySecret
+	_, _, _, err := svc.CreateUserWithTenant(context.Background(), "nosecret@stored.ge", "OldPass123!", "")
+	require.NoError(t, err)
+
+	_, err = svc.RequestPasswordReset(context.Background(), "nosecret@stored.ge")
+	assert.Error(t, err, "must not mint tokens signed with an empty key")
+
+	// A token forged with the empty key must not verify either.
+	forged := NewAuthService(nil, nil)
+	forged.SetVerifySecret("")
+	_, err = svc.CompletePasswordReset(context.Background(), "cmVzZXR8eHx8", "NewPass456!")
+	assert.Error(t, err)
 }
 
 func TestPasswordReset_TokenWithWrongSecret(t *testing.T) {

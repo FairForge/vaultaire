@@ -77,32 +77,85 @@ func (a *AuthService) GenerateAPIKey(ctx context.Context, userID, name string, o
 		apiKey.ExpiresAt = opts.ExpiresAt
 	}
 
-	a.apiKeys[accessKey] = apiKey
-
-	if tenant, ok := a.tenants[user.TenantID]; ok {
-		a.keyIndex[accessKey] = tenant
+	// Persist FIRST, then publish to the in-memory maps: a key whose INSERT
+	// failed must not exist anywhere (R5-05 — it used to authenticate until
+	// the next restart).
+	if err := a.persistAPIKey(ctx, apiKey); err != nil {
+		return nil, err
 	}
-
-	if a.sqlDB != nil {
-		secretHash, hashErr := bcrypt.GenerateFromPassword([]byte(secretKey), bcrypt.DefaultCost)
-		if hashErr != nil {
-			return nil, fmt.Errorf("hash api key secret: %w", hashErr)
-		}
-		permJSON, _ := json.Marshal(apiKey.Permissions)
-		_, err = a.sqlDB.ExecContext(ctx, `
-			INSERT INTO api_keys (id, user_id, name, key_id, secret_hash, secret_key,
-			                      permissions, bucket_scope, ip_allowlist, expires_at, created_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-			ON CONFLICT (key_id) DO NOTHING
-		`, apiKey.ID, userID, name, accessKey, string(secretHash), secretKey,
-			permJSON, pq.Array(apiKey.BucketScope), pq.Array(apiKey.IPAllowlist),
-			apiKey.ExpiresAt, apiKey.CreatedAt)
-		if err != nil {
-			return nil, fmt.Errorf("persist api key: %w", err)
-		}
-	}
+	a.indexAPIKey(apiKey)
 
 	return apiKey, nil
+}
+
+// persistAPIKey inserts the key row. Scope slices are normalised to empty
+// (never NULL): bucket_scope and ip_allowlist are NOT NULL DEFAULT '{}', and
+// pq.Array(nil) encodes SQL NULL — the "permissions-only key" case (R5-05).
+func (a *AuthService) persistAPIKey(ctx context.Context, k *APIKey) error {
+	if k.BucketScope == nil {
+		k.BucketScope = []string{}
+	}
+	if k.IPAllowlist == nil {
+		k.IPAllowlist = []string{}
+	}
+	if a.sqlDB == nil {
+		return nil
+	}
+	secretHash, err := bcrypt.GenerateFromPassword([]byte(k.Secret), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hash api key secret: %w", err)
+	}
+	permJSON, err := json.Marshal(k.Permissions)
+	if err != nil {
+		return fmt.Errorf("encode api key permissions: %w", err)
+	}
+	_, err = a.sqlDB.ExecContext(ctx, `
+		INSERT INTO api_keys (id, user_id, name, key_id, secret_hash, secret_key,
+		                      permissions, bucket_scope, ip_allowlist, expires_at, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		ON CONFLICT (key_id) DO NOTHING
+	`, k.ID, k.UserID, k.Name, k.Key, string(secretHash), k.Secret,
+		permJSON, pq.Array(k.BucketScope), pq.Array(k.IPAllowlist),
+		k.ExpiresAt, k.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("persist api key: %w", err)
+	}
+	return nil
+}
+
+// indexAPIKey publishes a persisted key to the in-memory maps.
+func (a *AuthService) indexAPIKey(k *APIKey) {
+	a.apiKeys[k.Key] = k
+	if tenant, ok := a.tenants[k.TenantID]; ok {
+		a.keyIndex[k.Key] = tenant
+	}
+}
+
+// findOwnedKey returns the in-memory key with this id owned by userID.
+func (a *AuthService) findOwnedKey(userID, keyID string) *APIKey {
+	for _, key := range a.apiKeys {
+		if key.ID == keyID && key.UserID == userID {
+			return key
+		}
+	}
+	return nil
+}
+
+// persistRevocation stamps revoked_at on the row. The S3 auth path reads
+// api_keys per request and filters on revoked_at IS NULL, so this — not the
+// in-memory field — is what actually stops a key (R5-01).
+func (a *AuthService) persistRevocation(ctx context.Context, userID, keyID string) error {
+	if a.sqlDB == nil {
+		return nil
+	}
+	_, err := a.sqlDB.ExecContext(ctx, `
+		UPDATE api_keys SET revoked_at = NOW()
+		WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL
+	`, keyID, userID)
+	if err != nil {
+		return fmt.Errorf("persist api key revocation %s: %w", keyID, err)
+	}
+	return nil
 }
 
 // ValidateAPIKey checks if API key is valid
@@ -137,18 +190,15 @@ func (a *AuthService) ValidateAPIKey(ctx context.Context, key, secret string) (*
 	return user, nil
 }
 
-// RotateAPIKey rotates an existing API key
+// RotateAPIKey mints a replacement key with the old key's scope, persists
+// it, and revokes the old key — in the database as well as in memory.
 func (a *AuthService) RotateAPIKey(ctx context.Context, userID, keyID string) (*APIKey, error) {
-	var oldKey *APIKey
-	for _, key := range a.apiKeys {
-		if key.ID == keyID && key.UserID == userID {
-			oldKey = key
-			break
-		}
-	}
-
+	oldKey := a.findOwnedKey(userID, keyID)
 	if oldKey == nil {
 		return nil, fmt.Errorf("API key not found")
+	}
+	if oldKey.RevokedAt != nil {
+		return nil, fmt.Errorf("API key already revoked")
 	}
 
 	accessKey, err := generateAccessKey()
@@ -170,41 +220,60 @@ func (a *AuthService) RotateAPIKey(ctx context.Context, userID, keyID string) (*
 		Secret:      secretKey,
 		Hash:        hash,
 		Permissions: oldKey.Permissions,
+		BucketScope: oldKey.BucketScope,
+		IPAllowlist: oldKey.IPAllowlist,
+		ExpiresAt:   oldKey.ExpiresAt,
 		CreatedAt:   time.Now(),
 		Metadata:    oldKey.Metadata,
 	}
 
+	if err := a.persistAPIKey(ctx, newKey); err != nil {
+		return nil, err
+	}
+	if err := a.persistRevocation(ctx, userID, oldKey.ID); err != nil {
+		return nil, err
+	}
 	now := time.Now()
 	oldKey.RevokedAt = &now
-	a.apiKeys[accessKey] = newKey
+	a.indexAPIKey(newKey)
 
 	return newKey, nil
 }
 
-// RevokeAPIKey revokes an API key
+// RevokeAPIKey revokes an API key: the row gets revoked_at (the S3 auth
+// path's source of truth) and the in-memory copy is marked.
 func (a *AuthService) RevokeAPIKey(ctx context.Context, userID, keyID string) error {
-	for _, key := range a.apiKeys {
-		if key.ID == keyID && key.UserID == userID {
-			if key.RevokedAt != nil {
-				return fmt.Errorf("API key already revoked")
-			}
-			now := time.Now()
-			key.RevokedAt = &now
-			return nil
-		}
+	key := a.findOwnedKey(userID, keyID)
+	if key == nil {
+		return fmt.Errorf("API key not found")
 	}
-	return fmt.Errorf("API key not found")
+	if key.RevokedAt != nil {
+		return fmt.Errorf("API key already revoked")
+	}
+	if err := a.persistRevocation(ctx, userID, keyID); err != nil {
+		return err
+	}
+	now := time.Now()
+	key.RevokedAt = &now
+	return nil
 }
 
-// SetAPIKeyExpiration sets expiration for an API key
+// SetAPIKeyExpiration sets expiration for an API key, persisted so the S3
+// auth path enforces it.
 func (a *AuthService) SetAPIKeyExpiration(ctx context.Context, userID, keyID string, expiresAt time.Time) error {
-	for _, key := range a.apiKeys {
-		if key.ID == keyID && key.UserID == userID {
-			key.ExpiresAt = &expiresAt
-			return nil
+	key := a.findOwnedKey(userID, keyID)
+	if key == nil {
+		return fmt.Errorf("API key not found")
+	}
+	if a.sqlDB != nil {
+		if _, err := a.sqlDB.ExecContext(ctx,
+			`UPDATE api_keys SET expires_at = $1 WHERE id = $2 AND user_id = $3`,
+			expiresAt, keyID, userID); err != nil {
+			return fmt.Errorf("persist api key expiration %s: %w", keyID, err)
 		}
 	}
-	return fmt.Errorf("API key not found")
+	key.ExpiresAt = &expiresAt
+	return nil
 }
 
 // ListAPIKeys lists all API keys for a user

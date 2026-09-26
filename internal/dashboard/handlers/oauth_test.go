@@ -256,3 +256,30 @@ func createTestAuthSvc(t *testing.T) *auth.AuthService {
 	t.Helper()
 	return auth.NewAuthService(nil, nil)
 }
+
+// R5-07: Google's userinfo carries verified_email; linking an unverified
+// address to an existing account by email match is an account takeover.
+func TestParseGoogleUser_RequiresVerifiedEmail(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		ok   bool
+	}{
+		{"verified", `{"id":"1","email":"a@example.com","verified_email":true,"name":"A"}`, true},
+		{"unverified", `{"id":"1","email":"a@example.com","verified_email":false,"name":"A"}`, false},
+		{"field absent", `{"id":"1","email":"a@example.com","name":"A"}`, false},
+		{"no email", `{"id":"1","verified_email":true}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			u, err := parseGoogleUser([]byte(tc.body))
+			if tc.ok {
+				require.NoError(t, err)
+				assert.Equal(t, "a@example.com", u.Email)
+				assert.Equal(t, "1", u.ID)
+			} else {
+				assert.Error(t, err)
+			}
+		})
+	}
+}
