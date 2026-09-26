@@ -6,13 +6,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/auth"
+	"github.com/FairForge/vaultaire/internal/clientip"
 	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/engine"
@@ -839,22 +839,9 @@ func isTenantSuspended(ctx context.Context, db *sql.DB, tenantID string) bool {
 	return suspendedAt.Valid
 }
 
-// extractClientIP returns the real client IP, checking proxy headers
-// in priority order: CF-Connecting-IP (Cloudflare) > X-Forwarded-For
-// (HAProxy) > RemoteAddr.
+// extractClientIP returns the real client IP. All proxy-header trust rules
+// live in internal/clientip (last X-Forwarded-For entry = the peer HAProxy
+// appended; CF-Connecting-IP only behind a Cloudflare edge) — see R1-01.
 func extractClientIP(r *http.Request) string {
-	if ip := r.Header.Get("CF-Connecting-IP"); ip != "" {
-		return ip
-	}
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if idx := strings.Index(xff, ","); idx > 0 {
-			return strings.TrimSpace(xff[:idx])
-		}
-		return strings.TrimSpace(xff)
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
+	return clientip.FromRequest(r)
 }

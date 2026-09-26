@@ -1,11 +1,11 @@
 package middleware
 
 import (
-	"net"
 	"net/http"
 	"sync"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/clientip"
 	"golang.org/x/time/rate"
 )
 
@@ -78,21 +78,9 @@ func (rl *LoginRateLimiter) Cleanup() {
 	}
 }
 
-// ClientIP extracts the client IP, preferring X-Forwarded-For (first entry)
-// since HAProxy sits in front of Vaultaire.
+// ClientIP returns the client IP used to key the login/reset/abuse limiters
+// and session records. Proxy-header trust lives in internal/clientip (the
+// first X-Forwarded-For entry this used to take is client-writable — R1-01).
 func ClientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		// Take the first IP (client), ignore proxies.
-		for i := 0; i < len(xff); i++ {
-			if xff[i] == ',' {
-				return xff[:i]
-			}
-		}
-		return xff
-	}
-	ip, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return ip
+	return clientip.FromRequest(r)
 }

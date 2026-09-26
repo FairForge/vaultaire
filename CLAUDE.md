@@ -102,6 +102,7 @@ Migrations are in `internal/database/migrations/`.
 4. **Always stream, never buffer** — use `io.Reader`, never `[]byte` in memory for large data.
 5. **Always propagate context** — every service method takes `ctx context.Context` as first parameter.
 6. **Always wrap errors with context** — `return fmt.Errorf("create bucket %s: %w", name, err)`
+7. **Client IP comes from `internal/clientip` only** — HAProxy appends the real peer as the *last* `X-Forwarded-For` entry; `CF-Connecting-IP` is trusted only behind a Cloudflare edge. Reading those headers anywhere else reopened an API-key IP-allowlist bypass (review R1-01). Shutdown order is fixed too: HTTP drain + tracker flush, then engine (which closes the DB) — `cmd/vaultaire/main.go`.
 
 ## Development Methodology
 
