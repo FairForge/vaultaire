@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/common"
+	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 )
@@ -133,7 +135,17 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 			zap.String("container", container),
 			zap.String("key", key),
 			zap.Error(err))
-		http.NotFound(w, r)
+		switch {
+		case errors.Is(err, engine.ErrAllBackendsUnavailable):
+			// The backend holding the bytes is unreachable: clients retry a
+			// 503, they treat a 404 as a deletion (R6-25).
+			w.Header().Set("Retry-After", "30")
+			http.Error(w, "storage backend temporarily unavailable", http.StatusServiceUnavailable)
+		case isObjectMissingErr(err):
+			http.NotFound(w, r)
+		default:
+			http.Error(w, "internal error", http.StatusInternalServerError)
+		}
 		return
 	}
 	defer func() { _ = reader.Close() }()

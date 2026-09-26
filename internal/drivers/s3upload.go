@@ -117,10 +117,12 @@ func putSinglePartIfSmall(ctx context.Context, client manager.UploadAPIClient, i
 	case err == nil || errors.Is(err, io.EOF):
 		// Exactly the declared length (or an empty body declared as 0).
 	case errors.Is(err, io.ErrUnexpectedEOF):
-		// Body was shorter than declared — upload what actually arrived
-		// rather than sending a padded object.
-		buf = buf[:n]
-		in.ContentLength = aws.Int64(int64(n))
+		// Body was shorter than declared: the client went away mid-upload
+		// (Go's server body reports a short Content-Length body this way).
+		// Committing the bytes that arrived would store a truncated object
+		// under the declared size and the MD5 of the partial stream (R2-06).
+		return true, fmt.Errorf("s3 upload %s/%s: body ended after %d of %d declared bytes: %w",
+			aws.ToString(in.Bucket), aws.ToString(in.Key), n, size, err)
 	default:
 		return true, fmt.Errorf("s3 upload %s/%s: read body: %w",
 			aws.ToString(in.Bucket), aws.ToString(in.Key), err)

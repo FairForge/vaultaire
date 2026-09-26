@@ -7,6 +7,7 @@ import (
 	"crypto/md5"    // #nosec G501 — S3 spec requires MD5 for ETags
 	"crypto/sha256" // chunk integrity verification on read
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -85,6 +86,32 @@ type S3ToEngine struct {
 // request — recording the declared size for different actual bytes would
 // let a client store data billed at an arbitrary self-declared size.
 var errDecodedLengthMismatch = errors.New("aws-chunked decoded length does not match x-amz-decoded-content-length")
+
+// errBadDigest signals a body whose MD5 differs from the Content-MD5 the
+// client sent (S3: 400 BadDigest).
+var errBadDigest = errors.New("content-md5 does not match the received body")
+
+// putSizeDeclared reports whether the request carries a logical body size at
+// all — a Content-Length, or the aws-chunked decoded length. The S3 handler
+// refuses PUTs without one (411), so this is false only for internal callers
+// and tests handing HandlePut an unsized reader.
+func putSizeDeclared(r *http.Request) bool {
+	return r.ContentLength >= 0 || (isAWSChunked(r) && r.Header.Get("x-amz-decoded-content-length") != "")
+}
+
+// parseContentMD5 returns the hex MD5 a client declared in Content-MD5 ("" when
+// absent). A value that is not the base64 of 16 bytes is S3's InvalidDigest.
+func parseContentMD5(r *http.Request) (string, error) {
+	v := strings.TrimSpace(r.Header.Get("Content-MD5"))
+	if v == "" {
+		return "", nil
+	}
+	raw, err := base64.StdEncoding.DecodeString(v)
+	if err != nil || len(raw) != md5.Size {
+		return "", fmt.Errorf("invalid Content-MD5 %q", v)
+	}
+	return hex.EncodeToString(raw), nil
+}
 
 // NewS3ToEngine creates a new adapter
 func NewS3ToEngine(e engine.Engine, db *sql.DB, logger *zap.Logger) *S3ToEngine {
@@ -212,17 +239,32 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		zap.String("version_id", reqVersionID))
 
 	if reqVersionID != "" && a.db != nil {
-		var isDeleteMarker bool
+		var isDeleteMarker, isLatest bool
 		var vETag, vContentType string
 		var vSize int64
 		var vCreatedAt time.Time
 		err := a.db.QueryRowContext(r.Context(), `
-			SELECT is_delete_marker, etag, content_type, size_bytes, created_at
+			SELECT is_delete_marker, is_latest, etag, content_type, size_bytes, created_at
 			FROM object_versions
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND version_id = $4`,
-			t.ID, bucket, artifact, reqVersionID).Scan(&isDeleteMarker, &vETag, &vContentType, &vSize, &vCreatedAt)
+			t.ID, bucket, artifact, reqVersionID).Scan(&isDeleteMarker, &isLatest, &vETag, &vContentType, &vSize, &vCreatedAt)
 		if err != nil {
 			WriteS3Error(w, ErrNoSuchVersion, r.URL.Path, generateRequestID())
+			return
+		}
+		if !isDeleteMarker && !isLatest && !a.versionBytesIntact(r.Context(), t.ID, bucket, artifact, reqVersionID) {
+			// R2-03: versions are metadata-only — every PUT overwrites the
+			// one blob at this key — so the bytes of a non-current version
+			// no longer exist. Answering 200 with the CURRENT object's bytes
+			// under the requested version id (the previous behaviour) made
+			// restore tools restore the wrong data. Fail loudly until
+			// WP-R2-1 keeps one blob per version. The one non-current
+			// version whose bytes ARE intact — the newest live version
+			// behind a delete marker (nothing has overwritten it) — is
+			// still served, so an accidental delete stays recoverable.
+			w.Header().Set("x-amz-version-id", reqVersionID)
+			WriteS3ErrorWithContext(w, ErrNotImplemented, r.URL.Path, generateRequestID(),
+				WithSuggestion("Only the current version of an object can be retrieved on this service; non-current versions are listed but their data is not retained."))
 			return
 		}
 		if isDeleteMarker {
@@ -468,8 +510,11 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 
 		// Use backend-native range GET when available (avoids downloading the
 		// full object and discarding prefix bytes — 10-50× faster for large files).
+		// Encrypted objects are sliced from the decrypted bytes.Reader below:
+		// the backend-native range reads the stored CIPHERTEXT (R2-02 — a
+		// ranged download of an SSE object returned ciphertext).
 		rangeReader := io.Reader(dataReader)
-		if ce, ok := a.engine.(*engine.CoreEngine); ok {
+		if ce, ok := a.engine.(*engine.CoreEngine); ok && cachedEncAlgo == "" {
 			if rr, rangeErr := ce.GetRange(r.Context(), container, artifact, rng.start, rng.length); rangeErr == nil {
 				defer func() { _ = rr.Close() }()
 				rangeReader = rr
@@ -551,6 +596,29 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	})
 }
 
+// versionBytesIntact reports whether a non-current version's bytes are still
+// the ones on the backend: true only when the current version is a delete
+// marker and the requested version is the newest non-marker version (no PUT
+// has overwritten the blob since). Everything else has been overwritten.
+func (a *S3ToEngine) versionBytesIntact(ctx context.Context, tenantID, bucket, key, versionID string) bool {
+	var latestIsMarker bool
+	if err := a.db.QueryRowContext(ctx, `
+		SELECT is_delete_marker FROM object_versions
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND is_latest = TRUE`,
+		tenantID, bucket, key).Scan(&latestIsMarker); err != nil || !latestIsMarker {
+		return false
+	}
+	var newestLive string
+	if err := a.db.QueryRowContext(ctx, `
+		SELECT version_id FROM object_versions
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND is_delete_marker = FALSE
+		ORDER BY created_at DESC LIMIT 1`,
+		tenantID, bucket, key).Scan(&newestLive); err != nil {
+		return false
+	}
+	return newestLive == versionID
+}
+
 // detectContentType determines MIME type from extension
 func (a *S3ToEngine) detectContentType(artifact string) string {
 	dotIdx := strings.LastIndex(artifact, ".")
@@ -607,7 +675,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	// x-amz-decoded-content-length carries the real size when the body
 	// uses aws-chunked encoding (r.ContentLength is the encoded size).
 	size := r.ContentLength
-	if decoded := r.Header.Get("x-amz-decoded-content-length"); decoded != "" {
+	if decoded := r.Header.Get("x-amz-decoded-content-length"); decoded != "" && isAWSChunked(r) {
 		if n, err := strconv.ParseInt(decoded, 10, 64); err == nil {
 			size = n
 		}
@@ -617,23 +685,43 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	}
 
 	if a.db != nil {
+		// The lock lives in object_locks, not on the head row: a retained
+		// key whose head row is gone (delete marker, crash between deletes)
+		// must still refuse the overwrite — the write below replaces the
+		// backend bytes in place (R2-01).
+		if lockErr := checkObjectLock(r.Context(), a.db, t.ID, bucket, artifact, isObjectLockBypass(r)); lockErr != nil {
+			WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
+				WithSuggestion("Object is protected by Object Lock."))
+			return
+		}
 		var existingETag string
 		existsErr := a.db.QueryRowContext(r.Context(), `
 			SELECT etag FROM object_head_cache
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
 			t.ID, bucket, artifact).Scan(&existingETag)
-		if existsErr == nil {
-			if lockErr := checkObjectLock(r.Context(), a.db, t.ID, bucket, artifact, isObjectLockBypass(r)); lockErr != nil {
-				WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
-					WithSuggestion("Object is protected by Object Lock."))
-				return
-			}
-			if r.Header.Get("If-Match") != "" && checkIfMatch(r, existingETag) {
-				w.WriteHeader(http.StatusPreconditionFailed)
-				return
-			}
+		if existsErr == nil && r.Header.Get("If-Match") != "" && checkIfMatch(r, existingETag) {
+			w.WriteHeader(http.StatusPreconditionFailed)
+			return
 		}
 	}
+
+	// Everything that can reject the request for a client-side reason is
+	// checked BEFORE a body byte is read: the backend write replaces the
+	// previous object's bytes in place, so a rejection after it corrupts the
+	// customer's existing object (R2-05: a PUT with too many x-amz-meta-*
+	// headers answered 400 and left the new bytes under the old head row).
+	userMeta := extractS3Metadata(r)
+	if err := validateMetadata(userMeta); err != nil {
+		WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(), WithSuggestion(err.Error()))
+		return
+	}
+	metaJSON, _ := json.Marshal(userMeta)
+	wantMD5, md5Err := parseContentMD5(r)
+	if md5Err != nil {
+		WriteS3Error(w, ErrInvalidDigest, r.URL.Path, generateRequestID())
+		return
+	}
+	sizeDeclared := putSizeDeclared(r)
 
 	chunked := isAWSChunked(r)
 	a.logger.Debug("PUT with tenant isolation",
@@ -728,8 +816,12 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 			WriteS3Error(w, bodyReadErrorCode(readErr), r.URL.Path, generateRequestID())
 			return
 		}
-		if chunked && int64(len(plaintext)) != metadataSize {
+		if sizeDeclared && int64(len(plaintext)) != metadataSize {
 			WriteS3Error(w, ErrIncompleteBody, r.URL.Path, generateRequestID())
+			return
+		}
+		if wantMD5 != "" && fmt.Sprintf("%x", hasher.Sum(nil)) != wantMD5 {
+			WriteS3Error(w, ErrBadDigest, r.URL.Path, generateRequestID())
 			return
 		}
 
@@ -765,8 +857,12 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 				WriteS3Error(w, bodyReadErrorCode(readErr), r.URL.Path, generateRequestID())
 				return
 			}
-			if chunked && int64(len(plaintext)) != metadataSize {
+			if sizeDeclared && int64(len(plaintext)) != metadataSize {
 				WriteS3Error(w, ErrIncompleteBody, r.URL.Path, generateRequestID())
+				return
+			}
+			if wantMD5 != "" && fmt.Sprintf("%x", hasher.Sum(nil)) != wantMD5 {
+				WriteS3Error(w, ErrBadDigest, r.URL.Path, generateRequestID())
 				return
 			}
 
@@ -819,7 +915,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 			// WP-C: no uuid.Parse gate — tenant IDs are strings ("tenant-<hex>"
 			// from registration). The old gate silently skipped chunking for
 			// every real tenant.
-			chunkErr := a.handleChunkedPut(r, w, t, t.ID, bucket, artifact, metadataSize, hashingBody, hasher)
+			chunkErr := a.handleChunkedPut(r, w, t, t.ID, bucket, artifact, metadataSize, hashingBody, hasher, wantMD5)
 			if chunkErr == nil {
 				return
 			}
@@ -830,6 +926,8 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 			switch {
 			case errors.Is(chunkErr, errDecodedLengthMismatch):
 				WriteS3Error(w, ErrIncompleteBody, r.URL.Path, generateRequestID())
+			case errors.Is(chunkErr, errBadDigest):
+				WriteS3Error(w, ErrBadDigest, r.URL.Path, generateRequestID())
 			case errors.Is(chunkErr, engine.ErrAllBackendsUnavailable):
 				WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
 			default:
@@ -889,13 +987,18 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		return
 	}
 
-	// aws-chunked declares its decoded size in a header the client controls:
-	// reject when the measured decoded bytes disagree, otherwise the stored
-	// object and its billing record would carry a client-invented size.
-	// (Plain Content-Length bodies are length-enforced by the HTTP server.)
-	if chunked && bodyCounter.n != metadataSize {
-		a.logger.Warn("aws-chunked decoded length mismatch",
+	// The stored size is the MEASURED size. The declared size comes from
+	// headers the client controls (x-amz-decoded-content-length was honoured
+	// on plain bodies too, R2-06) and a driver may commit a body that ended
+	// early; either way the head row and the bill must never describe bytes
+	// that were not received. A body with no declared size at all records
+	// what arrived.
+	if !sizeDeclared {
+		metadataSize = bodyCounter.n
+	} else if bodyCounter.n != metadataSize {
+		a.logger.Warn("PUT body length mismatch",
 			zap.String("tenant_id", t.ID),
+			zap.Bool("aws_chunked", chunked),
 			zap.Int64("declared", metadataSize),
 			zap.Int64("measured", bodyCounter.n))
 		WriteS3Error(w, ErrIncompleteBody, r.URL.Path, generateRequestID())
@@ -903,6 +1006,10 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	}
 
 	etag := fmt.Sprintf("%x", hasher.Sum(nil))
+	if wantMD5 != "" && etag != wantMD5 {
+		WriteS3Error(w, ErrBadDigest, r.URL.Path, generateRequestID())
+		return
+	}
 	a.putLogicalBytes = metadataSize
 
 	contentType := r.Header.Get("Content-Type")
@@ -914,13 +1021,6 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	contentEncoding := requestContentEncoding(r)
 	contentLanguage := requestContentLanguage(r)
 	echoHdrs := requestEchoHeaders(r)
-
-	userMeta := extractS3Metadata(r)
-	if err := validateMetadata(userMeta); err != nil {
-		WriteS3Error(w, ErrInvalidRequest, r.URL.Path, generateRequestID())
-		return
-	}
-	metaJSON, _ := json.Marshal(userMeta)
 
 	if a.db != nil {
 		// atomicHeadUpsert locks the previous row and returns its size in
@@ -1049,6 +1149,7 @@ func (a *S3ToEngine) handleChunkedPut(
 	metadataSize int64,
 	hashingBody io.Reader,
 	hasher hash.Hash,
+	wantMD5 string,
 ) error {
 	ctx := r.Context()
 
@@ -1202,7 +1303,7 @@ func (a *S3ToEngine) handleChunkedPut(
 	// Reject declared-vs-measured mismatch before installing the manifest:
 	// stored chunks without refs are swept by dedup GC, but a manifest with
 	// a client-invented logical size would poison billing permanently.
-	if isAWSChunked(r) && measuredSize != metadataSize {
+	if putSizeDeclared(r) && measuredSize != metadataSize {
 		return fmt.Errorf("declared %d, measured %d: %w",
 			metadataSize, measuredSize, errDecodedLengthMismatch)
 	}
@@ -1217,12 +1318,16 @@ func (a *S3ToEngine) handleChunkedPut(
 	}
 
 	etag := fmt.Sprintf("%x", hasher.Sum(nil))
+	if wantMD5 != "" && etag != wantMD5 {
+		// Before the manifest install: the stored chunks are ref-released by
+		// the deferred compensator and swept by GC.
+		return fmt.Errorf("content-md5 %s, computed %s: %w", wantMD5, etag, errBadDigest)
+	}
 	contentDisposition := sanitizeContentDisposition(r.Header.Get("Content-Disposition"))
 	contentEncoding := requestContentEncoding(r)
 	contentLanguage := requestContentLanguage(r)
 	echoHdrs := requestEchoHeaders(r)
-	userMeta := extractS3Metadata(r)
-	_ = validateMetadata(userMeta)
+	userMeta := extractS3Metadata(r) // validated by HandlePut before the body was read
 	metaJSON, _ := json.Marshal(userMeta)
 
 	chunkEncAlgo := ""
@@ -1780,6 +1885,17 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 	reqVersionID := r.URL.Query().Get("versionId")
 	vStatus := getBucketVersioningStatus(r.Context(), a.db, t.ID, bucket)
 
+	// Object Lock is checked before EVERY delete flavour. AWS lets a delete
+	// marker land on a retained key because every version keeps its bytes;
+	// our versions are metadata-only (one blob per key, WP-R2-1), so a
+	// marker here unbilled and hid the retained object and the next PUT
+	// overwrote it (R2-01). Refusing the marker is the documented deviation.
+	if lockErr := checkObjectLock(r.Context(), a.db, t.ID, bucket, object, isObjectLockBypass(r)); lockErr != nil {
+		WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
+			WithSuggestion("Object is protected by Object Lock."))
+		return
+	}
+
 	if a.db != nil && (vStatus == "Enabled" || vStatus == "Suspended") && reqVersionID != "" {
 		result, err := a.db.ExecContext(r.Context(), `
 			DELETE FROM object_versions
@@ -1860,12 +1976,6 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 		return
 	}
 
-	if lockErr := checkObjectLock(r.Context(), a.db, t.ID, bucket, object, isObjectLockBypass(r)); lockErr != nil {
-		WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
-			WithSuggestion("Object is protected by Object Lock."))
-		return
-	}
-
 	// Chunked objects: decrement chunk ref counts via GCI instead of
 	// deleting from the backend. Actual chunk data stays until GC (Phase 8.7).
 	// backend_name is the routing truth (the same column GET hints from):
@@ -1932,6 +2042,14 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 			a.releaseQuotaForDelete(r, t.ID, deletedSize)
 		} else if delErr != sql.ErrNoRows {
 			a.logger.Error("head cache delete failed", zap.Error(delErr))
+		}
+		// The retention (expired, governance-bypassed, or none) goes with the
+		// object: the PUT-side lock check no longer needs a head row, so a
+		// stale lock row would refuse the next upload to this key.
+		if _, lockDelErr := a.db.ExecContext(r.Context(), `
+			DELETE FROM object_locks WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+			t.ID, bucket, object); lockDelErr != nil {
+			a.logger.Error("object lock row delete failed", zap.Error(lockDelErr))
 		}
 	}
 
@@ -2021,18 +2139,47 @@ func publicBucketStorageClass(ctx context.Context, db *sql.DB, eng engine.Engine
 // Hot tiers (standard/performance both map to STANDARD) do not override the
 // public role; cold/resilient tiers keep their placement promise even on a
 // public bucket.
+//
+// The header is client input (R2-07). Only the classes we sell are honoured
+// from it — STANDARD, GLACIER, DEEP_ARCHIVE (case-insensitive like AWS);
+// internal names (PUBLIC → r2, RESILIENT → lyve), legacy AWS classes that
+// would map onto hub disk (REDUCED_REDUNDANCY → local) and anything unknown
+// fall back to the bucket's own resolution. A cold/resilient bucket tier is
+// a placement promise: a header can make an archive object colder
+// (DEEP_ARCHIVE) but never hotter, and a resilient bucket never moves.
 func resolvePutStorageClass(ctx context.Context, db *sql.DB, eng engine.Engine, tenantID, bucket, header string) string {
-	if header != "" {
-		return header
-	}
+	requested := clientStorageClass(header)
 	class := bucketTierStorageClass(ctx, db, tenantID, bucket)
 	if class != "" && class != "STANDARD" {
+		if class == "GLACIER" && requested == "DEEP_ARCHIVE" {
+			return requested
+		}
 		return class
 	}
 	if pub := publicBucketStorageClass(ctx, db, eng, tenantID, bucket); pub != "" {
+		if requested == "GLACIER" || requested == "DEEP_ARCHIVE" {
+			return requested
+		}
 		return pub
 	}
+	if requested != "" {
+		return requested
+	}
 	return class
+}
+
+// clientStorageClass maps an x-amz-storage-class request header onto the
+// classes a client may choose; everything else is "" (no preference).
+func clientStorageClass(header string) string {
+	switch strings.ToUpper(strings.TrimSpace(header)) {
+	case "STANDARD":
+		return "STANDARD"
+	case "GLACIER":
+		return "GLACIER"
+	case "DEEP_ARCHIVE":
+		return "DEEP_ARCHIVE"
+	}
+	return ""
 }
 
 // storageClassDisablesChunking reports classes whose objects must be stored

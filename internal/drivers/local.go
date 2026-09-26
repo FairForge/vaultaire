@@ -66,10 +66,9 @@ func (d *LocalDriver) Name() string {
 
 // Get retrieves an artifact from a container
 func (d *LocalDriver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
-	fullPath := filepath.Join(d.basePath, container, artifact)
-	cleanPath := filepath.Clean(fullPath)
-	if !strings.HasPrefix(cleanPath, filepath.Clean(d.basePath)) {
-		return nil, fmt.Errorf("path traversal detected: %s", artifact)
+	fullPath, err := d.resolvePath(container, artifact)
+	if err != nil {
+		return nil, err
 	}
 
 	d.logger.Debug("LocalDriver.Get",
@@ -94,10 +93,8 @@ func (d *LocalDriver) Put(ctx context.Context, container, artifact string, data 
 		opt(&options)
 	}
 
-	fullPath := filepath.Join(d.basePath, container, artifact)
-	cleanPath := filepath.Clean(fullPath)
-	if !strings.HasPrefix(cleanPath, filepath.Clean(d.basePath)) {
-		return fmt.Errorf("path traversal detected: %s", artifact)
+	if _, err := d.resolvePath(container, artifact); err != nil {
+		return err
 	}
 
 	return d.AtomicWrite(ctx, container, artifact, data)
@@ -105,8 +102,29 @@ func (d *LocalDriver) Put(ctx context.Context, container, artifact string, data 
 
 // Delete removes an artifact from a container
 func (d *LocalDriver) Delete(ctx context.Context, container, artifact string) error {
-	fullPath := filepath.Join(d.basePath, container, artifact)
+	fullPath, err := d.resolvePath(container, artifact)
+	if err != nil {
+		return err
+	}
 	return os.Remove(fullPath)
+}
+
+// resolvePath maps a container/artifact pair onto the filesystem and refuses
+// anything that resolves outside the driver's base directory (R2-04). S3 keys
+// are arbitrary strings, so ".." segments reach the driver verbatim; the
+// former HasPrefix check also accepted a sibling directory whose name merely
+// starts with the base name (/data vs /data-other). The escape is reported as
+// the engine's NotFoundError: the key cannot exist, and a client-level miss
+// must never charge a circuit breaker.
+func (d *LocalDriver) resolvePath(container, artifact string) (string, error) {
+	base := filepath.Clean(d.basePath)
+	full := filepath.Join(base, container, artifact)
+	rel, err := filepath.Rel(base, full)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("local: %s/%s escapes the data directory: %w",
+			container, artifact, engine.ErrNotFound(container, artifact))
+	}
+	return full, nil
 }
 
 // List lists artifacts in a container

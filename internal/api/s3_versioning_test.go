@@ -283,11 +283,38 @@ func TestVersioning_GetSpecificVersion(t *testing.T) {
 	w1 := f.putObject(t, key, "first version")
 	vid1 := w1.Header().Get("x-amz-version-id")
 
-	_ = f.putObject(t, key, "second version")
+	w2 := f.putObject(t, key, "second version")
+	vid2 := w2.Header().Get("x-amz-version-id")
 
-	// GET with first versionId should return first content's metadata
+	// The current version is served with its id.
+	w := f.getObjectVersion(t, key, vid2)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, vid2, w.Header().Get("x-amz-version-id"))
+	assert.Equal(t, "second version", w.Body.String())
+
+	// R2-03: versions are metadata-only (the backend holds one blob per key),
+	// so a non-current version must fail loudly rather than answer 200 with
+	// the current object's bytes under the old version id.
+	w = f.getObjectVersion(t, key, vid1)
+	assert.Equal(t, http.StatusNotImplemented, w.Code)
+	assert.NotContains(t, w.Body.String(), "second version")
+}
+
+// The newest live version behind a delete marker still has its bytes on the
+// backend (nothing overwrote them), so it stays retrievable — the undelete
+// path for an accidental `aws s3 rm`.
+func TestVersioning_GetNewestLiveVersionBehindMarker(t *testing.T) {
+	f := setupVersioningFixture(t)
+	f.setVersioning(t, "Enabled")
+
+	key := "undelete.txt"
+	w1 := f.putObject(t, key, "keep this")
+	vid1 := w1.Header().Get("x-amz-version-id")
+	require.Equal(t, http.StatusNoContent, f.deleteObject(t, key).Code)
+
 	w := f.getObjectVersion(t, key, vid1)
 	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "keep this", w.Body.String())
 	assert.Equal(t, vid1, w.Header().Get("x-amz-version-id"))
 }
 
