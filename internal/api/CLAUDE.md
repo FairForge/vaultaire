@@ -427,7 +427,11 @@ BOOLEAN (migration 042).
   filtered to letters/digits/space/_'- (16 chars) and only ever set via textContent. "Save image"
   rebuilds the room as a standalone SVG, rasterises it and letters the sign/tags/caption on canvas.
   Sprites are 3D pixel cuboids from the scratch generator (fireplace + mascot have two animated
-  frames). If prices change, update `PRICE` + the tray labels in the builder script AND the pricing
+  frames). Night: both rooms follow light/dark mode (window sky/moon/stars, `.night-dim` layer,
+  `url(#nightdim)` filter on unlit pieces, `.glow` pools on `.piece.light` lamps/fireplace); the CSS
+  is written once with a `/*NIGHT*/` marker that the page generator expands into the system-dark
+  and `data-theme="dark"` selector forms, and "Save image" copies the live computed colours.
+  If prices change, update `PRICE` + the tray labels in the builder script AND the pricing
   section. The page script has NO template literals (html/template parses `<script>`).
 - **site_shell.go** — shared favicon + `<style>` + pixel-mark brand bar for the /docs/* and
   /changelog shells, so the sub-pages match the landing page (system fonts, no embeds), plus the
