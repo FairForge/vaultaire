@@ -10,7 +10,7 @@
 |------|----------|
 | `internal/` packages | **72** total, **23** linked into `cmd/vaultaire`, **49** never linked |
 | `internal/` source LOC (non-test / test) | 131,819 / 103,392 |
-| `deadcode ./cmd/vaultaire` | **924** unreachable functions across the 23 linked packages (plan said 928; 4 fewer after #469-#472) |
+| `deadcode ./cmd/vaultaire` | **924** unreachable functions across the 23 linked packages (plan said 928 — the four PRs between the survey and this run did not touch `internal/`, so the delta is tool-version noise, not code) |
 | 100%-dead files inside linked packages | **96** files, 18,524 LOC (every `func` in the file unreachable) |
 | `cmd/*` directories | 23; only `cmd/vaultaire` is product, 22 are benches/probes/tools (table below) |
 | Untracked root artifacts | ~35 build outputs, all gitignored, none tracked (verified with `git ls-files`) |
@@ -34,8 +34,8 @@ were also grepped in `Makefile`, `.github/`, `scripts/`, `tools/`, `deploy/` —
 
 | ID | Sev | file:line | What | Why it matters | Proposed fix |
 |----|-----|-----------|------|----------------|--------------|
-| R0-01 | P3 | `docs/CODE_REVIEW_PLAN.md:45`, `internal/engine/engine.go:34,93-98,193,452,494,591,612,710` | Plan says "every function in `internal/cache` unreachable". False: `engine.go` constructs and calls `cache.TieredCache` (`Get/Set/Delete/HealthCheck/GetMetrics`). 16 of 17 cache files are dead; `tiered_cache.go` (76 LOC, a mutex-guarded `map[string][]byte`, no size bound) is live and is the engine's read cache. | Later sessions would skip a live, unbounded in-memory cache believing it deleted. R6 must review it (no eviction, no cap — `Config.MemorySize`/`SSDSize`/`SSDPath` are ignored at `tiered_cache.go:11-30`). | Corrected in the plan tracker by this session. R6: review or remove the engine cache (see WP-R0-3). |
-| R0-02 | P2 | `internal/api/quota_management.go:132,145-151` | `handleDeleteQuota`/`handleUpdateQuota` read `mux.Vars(r)["tenant_id"]` (gorilla/mux) but the server is chi; `mux.Vars` on a chi request is always empty. Unreachable today only because `setupQuotaManagementRoutes` (145-151) is an empty function with the routes commented out. | If anyone uncomments those routes, DELETE `/api/v1/admin/quotas/{tenant_id}` calls `DeleteQuota(ctx, "")`. This file is also the **only** reason `github.com/gorilla/mux` is in `go.mod`. | R10: either port to `chi.URLParam` and register under the admin group, or delete the 4 handlers + `quota_management_test.go`; then `go mod tidy` drops gorilla/mux. Not fixed here (behavioural decision). |
+| R0-01 | P3 | `docs/CODE_REVIEW_PLAN.md:45`, `internal/engine/engine.go:34,93-98,193,452,494,591,612,710`, `cmd/vaultaire/main.go:131-136` | Plan says "every function in `internal/cache` unreachable". False by linkage: `engine.go` constructs and calls `cache.TieredCache` (`Get/Set/Delete/HealthCheck/GetMetrics`), so 16 of 17 cache files were dead but `tiered_cache.go` is linked. **Correction (post-merge review):** it is linked but **switched off** — `main.go` passes `EnableCaching: false` since #337 (WP-2) because the map never evicts; `Config.MemorySize`/`SSDSize`/`SSDPath` are ignored at `tiered_cache.go:11-30`. | Later sessions would either skip it as deleted or review it as a live hot path; it is neither. | R6 decides: bounded LRU (bytes-capped, per-object cap) or delete the code path (WP-R0-3). |
+| R0-02 | P2 | `internal/api/quota_management.go:132,145-151` | `handleDeleteQuota` reads `mux.Vars(r)["tenant_id"]` (gorilla/mux) but the server is chi; `mux.Vars` on a chi request is always empty. (`handleUpdateQuota` at :86-93 splits `r.URL.Path` itself and is not affected — corrected post-merge.) Unreachable today only because `setupQuotaManagementRoutes` (145-151) is an empty function with the routes commented out. | If anyone uncomments those routes, DELETE `/api/v1/admin/quotas/{tenant_id}` calls `DeleteQuota(ctx, "")`. This file is also the **only** reason `github.com/gorilla/mux` is in `go.mod`. | R10: either port to `chi.URLParam` and register under the admin group, or delete the 4 handlers + `quota_management_test.go`; then `go mod tidy` drops gorilla/mux. Not fixed here (behavioural decision). |
 | R0-03 | P3 | `docs/IMPLEMENTATION_PLAN.md:1134`, `internal/crypto/postquantum.go`, `internal/crypto/sse_s3.go:7` | Plan 5.14.4 lists `postquantum.go` as the SSE-S3 implementation file. SSE-S3 uses Go stdlib `crypto/mlkem`; `postquantum.go` (cloudflare/circl) is 13/13 dead. `crypto/CLAUDE.md:12,35` also describes it as "pipeline encryption" — that pipeline (`crypto/pipeline.go`) is 10/10 dead too. | `github.com/cloudflare/circl` is kept alive only by dead code; two ML-KEM implementations in one package invites the wrong one being used. | Decision D-3 below (recommend delete postquantum.go + pipeline.go, drop circl, fix plan line 1134 and crypto/CLAUDE.md). |
 | R0-04 | P3 | `docs/IMPLEMENTATION_PLAN.md:955`, `internal/api/metrics.go`, `internal/api/prom_metrics.go` | Plan 5.12.10 (SHIPPED) names `api/metrics.go` as a deliverable file. The shipped Prometheus registry is `prom_metrics.go`; `metrics.go` is a 6/6-dead legacy stub kept alive only by `metrics_test.go`. | Two `Metrics` registries in one package; R1 would read the wrong file. | Decision D-4 (recommend delete metrics.go + metrics_test.go; fix plan line 955). |
 | R0-05 | P3 | `docs/IMPLEMENTATION_PLAN.md:720,1204`, `internal/api/middleware.go`, `internal/api/server.go` | Plan 5.11.1 and 5.14.11 (both COMPLETE) name `api/middleware.go` as the file. `X-Vaultaire-Version` and the security headers are set in `server.go`; `middleware.go` (`RateLimitMiddleware`, `ExtractTenant`) is 2/2 dead. `RateLimiter` itself is live (`server.go:212` CDN limiter). | Same as R0-04. | Decision D-5 (recommend delete middleware.go + middleware_test.go; fix plan lines 720/1204). |
@@ -121,7 +121,7 @@ tests of live code that borrowed a helper from a dead file were edited (listed i
 | crypto | `backend_integration.go`, `pipeline.go`, `tls.go` (kept: `postquantum.go`, class B) | 1,018 |
 | dashboard/handlers | `activity.go`, `upload.go` (kept: `dashboard.go`, `files.go`, `help.go` — see decisions D-8) | 125 |
 | database | `history.go` | 58 |
-| drivers | `bandwidth_quota.go`, `chunked_transfer.go`, `circuit_breaker.go`, `compression.go`, `conflict.go`, `driver.go`, `egress_predictor.go`, `fallback.go`, `health.go`, `parallel.go`, `parallel_chunks.go`, `parallel_stream.go`, `queue.go`, `reader_pool.go`, `regional_failover.go`, `resumable.go`, `retry.go`, `s3_auth.go`, `s3_iam.go`, `smart_cache.go`, `throttle.go`, `webhook.go` (kept: `geyser_admin.go` tooling, `cost_advisor.go`/`wasm.go` class B) | 2,822 |
+| drivers | `bandwidth_quota.go`, `chunked_transfer.go`, `circuit_breaker.go`, `compression.go`, `conflict.go`, `driver.go`, `egress_predictor.go`, `fallback.go`, `health.go`, `parallel.go`, `parallel_chunks.go`, `parallel_stream.go`, `queue.go`, `reader_pool.go`, `regional_failover.go`, `resumable.go`, `retry.go`, `s3_auth.go`, `s3_iam.go`, `smart_cache.go`, `throttle.go`, `webhook.go` (kept: `geyser_admin.go` tooling, `cost_advisor.go`/`wasm.go` class B) | 2,767 |
 | engine | `context.go`, `migration_progress.go`, `migrator.go`, `monitor.go`, `performance_monitor.go` (kept: `analytics.go`, `capacity.go`, `replicator.go`, `sla.go`, `disaster_recovery.go`, `load_balancer.go` — class B) | 430 |
 | tenant | `store.go` (in-memory `Store`; product uses PostgreSQL) | 60 |
 | usage | `auto_upgrade.go`, `billing_integration.go`, `cost_tracker.go`, `grace_period.go`, `overage.go`, `quotas.go`, `reporting.go`, `templates.go`, `tracker.go` (kept: `free_tier.go`, `quota_manager.go`, live) | 1,832 |
@@ -221,7 +221,7 @@ Verified by `go mod tidy` on this branch after the class A/C/D deletions (`go.mo
 | `internal/` packages | 72 | 32 (31 + new `testutil`) | −41 |
 | `internal/` non-test LOC | 131,819 | 81,962 | **−49,857** |
 | `internal/` test LOC | 103,392 | 69,747 | **−33,645** |
-| Files | — | 341 deleted, 4 added, 13 modified, 2 renamed | |
+| Files | — | 341 deleted (104 class-A non-test + 74 class-C non-test + 3 class-D non-test + 160 test files), 4 added, 13 modified, 2 renamed. The PR title's "62 dead files" undercounted: 74 class-C files were removed | |
 | `go.mod` direct requires | 33 | 32 | −2 dropped, +1 promoted from indirect |
 
 Product (non-test) code edits beyond file deletion — all removals of dead members that referenced
@@ -245,7 +245,40 @@ Test edits (tests of live code that borrowed from deleted files):
   `testutil` / local config.
 
 Verification: `go build ./... && go vet ./...` clean (including `tests/` and all `cmd/*`),
-`gofmt -l` clean, `golangci-lint run ./...` clean, `go test -short ./...` — see PR body.
+`gofmt -l` clean, `golangci-lint run ./...` clean, `go test -short ./...` 37 ok. Local aws-cli
+end-to-end drive (mb / put 6 B, 1 MiB, 12 MiB multipart / head / copy / range GET / delete / rb),
+dashboard login + 7 pages, public pages — all pass; prod deploy of #473 healthy (4/4 backends).
+
+## Post-merge review (2026-09-26, same day) — corrections and additional findings
+
+An adversarial re-read of #473 compared per-function test coverage on the base commit against
+`main` for the 1,006 functions that survived, re-vetted with build tags, and grepped comments,
+scripts and migrations (not just Go imports and the plan) for the deleted paths. Corrections
+to the text above are marked inline; the new findings follow. Fixed in the follow-up PR:
+test-database isolation (R0-13) and these docs. Everything else is routed to its session.
+
+| ID | Sev | file:line | What | Why it matters | Proposed fix |
+|----|-----|-----------|------|----------------|--------------|
+| R0-13 | **P1 (dev hygiene)** | `internal/usage/manager_test.go:25-36`, `internal/api/usage_test.go:25-26`, `internal/api/quota_management_test.go:133-134`; `internal/usage/quota_manager.go:19-40` (`InitializeSchema`) | Three tests `DROP TABLE` the quota tables on whatever database they connect to and rebuild them from the Go DDL in `InitializeSchema`, which has drifted from the migrations (no `spending_cap_cents`, no `ON DELETE CASCADE`). Before this follow-up the default target was the **shared dev DB**: it had lost `spending_cap_cents` (read by `billing/metered.go:247`), all 10 cascade FKs and 13 tables; only 2 of 39 tenants still had quota rows. Pre-commit runs these tests on every commit. In CI the same drops race other packages against one migrated DB. | Every review session's local test run re-corrupts the DB the `verify` skill and E2E checks use; R9/R10 would review quota/billing against a wrong schema. | **Fixed here:** `internal/testutil` (and the two hardcoded helpers `auth/helpers_test.go`, `auth/backfill_test.go`, plus `database/postgres_test.go`) default to `vaultaire_test`; `DATABASE_URL` still wins (CI unchanged); `make test-db` creates/migrates it; dev DB repaired by re-running the idempotent migrations (rows untouched). **Root cause → R9 (WP-R0-7):** one schema owner — delete `InitializeSchema` DDL, make the three tests use the migrated schema and per-tenant cleanup instead of `DROP TABLE`. |
+| R0-14 | P2 | `internal/usage/quota_manager.go:120` (`ReleaseQuota`) | Its only real-database test lived in the deleted `usage/auto_upgrade_test.go`; the api tests stub it (`quota_test.go:31`). Coverage 75% → **0%**. It runs on every delete/overwrite and its negative-delta "adds unconditionally" contract is relied on by `api/quota_accounting.go:58`. | Billing-relevant code path with no test. Behaviour unchanged. | R10 (WP-R0-8): DB-backed test on the migrated schema — decrement, floor at 0, negative delta adds, unknown tenant no-op. |
+| R0-15 | P3 | `cmd/vaultaire/main.go:135` | Comment says re-enable caching "when `internal/cache/lru.go` is wired with a size bound" — R0 deleted `lru.go`. That file also capped item *count* (not bytes) and `io.ReadAll`'d every object, so it was never the fix. | Dangling pointer that steers R6 at the wrong design. | R6 with WP-R0-3: replace with the requirement (bytes-capped, evicting, per-object cap). |
+| R0-16 | P3 | `internal/dashboard/handlers/admin_costs.go:29`, `internal/drivers/lyve_README.md:221` | Cost map says "see note in `internal/usage/cost_tracker.go`" — deleted. The note explained costing Lyve at $7.99/TB despite the promo and cited a `lyve_README.md` "post-promo rate" section that does not exist. The README bullet still claims cost tracking bills Lyve at $0 and that `admin_costs.go` omits it — both stale. Promo term: README says 1-year; owner note 2026-07-30 says ~mid-2028 — **[YOU] confirm**. | Two live docs point at nothing / contradict the code. | R7 (WP-R0-10): inline the reasoning in `admin_costs.go`, fix the README bullet, cite "Contract terms" section. |
+| R0-17 | P3 | `internal/database/migrations/056_runtime_tables_and_deletion.sql:12-20` | Header says the DDL is "kept in exact sync — change there, change here" with `usage/{auto_upgrade,grace_period,reporting,billing_integration}.go`, `auth/activity.go`, `audit/compression.go` — all deleted. ~11 tables (`grace_periods`, `upgrade_triggers`, `usage_reports`, `billing_policies`, `user_activities`, `audit_logs_archive`, …) now have no reader or writer. | Same dual-ownership defect as R0-13; the migration comment is the only remaining "source". | R9 (WP-R0-7): migration set is the sole owner; decide whether orphan tables get a drop migration. |
+| R0-18 | P3 | `internal/crypto/gci_test.go:17-24` | `getTestDB` hardcodes `postgres://postgres:postgres@localhost:5432/vaultaire_test` (not `DATABASE_URL`) and `DELETE`s every row of the three GCI tables. In CI that URL cannot connect, so **the GCI tests have never run in CI** (silent skip). Deliberately *not* redirected here: pointing it at `DATABASE_URL` would start wiping GCI tables in the shared CI DB in parallel with `api/dedup_gc_coherence_test.go`. | Dedup index has no CI coverage; a naive fix creates a flake. | R8/R15 (WP-R0-11): per-test scoped rows or a dedicated CI database for destructive suites. |
+| R0-19 | P3 | `internal/auth/db_test_fix.go:1-2` (`//go:build integration`), `scripts/verify_{full_system,implementation,steps}.sh`, `.github/workflows/security.yml:41` | Pre-existing: `go vet -tags integration ./...` fails (a second `setupTestDB` behind the build tag — it clashed with `db_test.go` before R0, with `helpers_test.go` now); the three `scripts/verify_*.sh` check for ~25 files R0 deleted and nothing invokes them; gosec still `-exclude-dir=internal/testing` (gone); `GOOS=windows` build fails in `drivers/local.go:363` (also pre-existing). | Noise that R15 will otherwise rediscover. | R15 (WP-R0-11): delete the scripts + tagged duplicate, drop the gosec exclude. |
+
+Process gaps in the R0 session itself, for R15's methodology notes: tests were run once at the
+end, not after each package removal; the 100%-dead-file scan counted only `func` declarations,
+so files holding only types/consts were never examined; the reference sweep covered the plan
+and Go imports but not comments, scripts or migrations (how R0-15/16/17 slipped through).
+
+### Follow-up PR (test-database isolation)
+
+- `internal/testutil`: `DATABASE_URL` → `TEST_DB_*` → default **`vaultaire_test`**; URL parser unit-tested.
+- `auth/helpers_test.go`, `auth/backfill_test.go`, `database/postgres_test.go`, `usage/manager_test.go`: use it; fail with "run `make test-db`" when unreachable.
+- `Makefile`: `test-db` target (create + migrate, mirrors CI's setup step, idempotent). `CLAUDE.md` documents it.
+- Verified: `go test -short ./...` with `DATABASE_URL` unset leaves the dev DB byte-for-byte unchanged (table/row counts identical before and after) and hits `vaultaire_test`; with `DATABASE_URL` set (CI path) the DB-backed packages pass.
+- Dev DB repaired by re-running all 61 migrations with `ON_ERROR_STOP` (the deploy procedure): `spending_cap_cents` restored, 10 cascade FKs restored, 13 dropped tables recreated, tenant/user/quota rows unchanged (39/19/2). The 37 missing quota rows are not recoverable this way.
 
 ## Invariants confirmed
 
@@ -253,9 +286,9 @@ Verification: `go build ./... && go vet ./...` clean (including `tests/` and all
   `bench-results/*.md` and `tests/benchmarks/baseline_results.txt`, both intentional.
 - `internal/docs` (parent, OpenAPI + served pages) is live; only the nine `docs/*` subpackages
   were scaffolding. `/docs` routes are unaffected.
-- `internal/cache.TieredCache` is live and is the engine's read cache (R0-01). Nothing else in
-  `internal/cache` was referenced by `tiered_cache.go`, so removing the other 16 files does not
-  change engine behaviour (`go build`, `go vet`, `go test -short ./internal/engine/...` pass).
+- `internal/cache.TieredCache` is linked from the engine but disabled in production (`EnableCaching:
+  false` in `main.go` since #337). Nothing else in `internal/cache` was referenced by
+  `tiered_cache.go`, so removing the other 16 files does not change engine behaviour.
 - `RateLimiter` (`api/ratelimit.go`) is live via `server.go:212`; only the `RateLimitMiddleware`
   wrapper was dead.
 - Azure SDK, restic/chunker, x/time, x/oauth2, prometheus, goldmark, klauspost/compress,
@@ -310,6 +343,11 @@ go run golang.org/x/tools/cmd/deadcode@latest ./cmd/vaultaire
 | WP-R0-4 | Prune partially-dead live files (table above), starting with `crypto/encryption.go` and `database/postgres.go` | per session | S each | R5/R8/R9/R10 |
 | WP-R0-5 | `make clean` + `make deadcode` targets | `Makefile` | XS | R15 |
 | WP-R0-6 | Per-directory CLAUDE.md sweep for files deleted here (engine, drivers, crypto, handlers done in this PR; verify api/database/auth) | `internal/*/CLAUDE.md` | XS | — |
+| WP-R0-7 | **Single schema owner**: delete `QuotaManager.InitializeSchema` DDL; the three quota tests use the migrated schema with per-tenant cleanup, no `DROP TABLE`; fix migration 056 header; decide fate of orphan tables (R0-13, R0-17) | `internal/usage/quota_manager.go`, `usage/manager_test.go`, `api/{usage,quota_management}_test.go`, `migrations/056` | S–M | R9 |
+| WP-R0-8 | `ReleaseQuota` DB-backed test (R0-14) | `internal/usage/quota_manager_test.go` (new) | XS | R10, after WP-R0-7 |
+| WP-R0-9 | Fix `main.go:135` caching comment as part of the cache decision (R0-15) | `cmd/vaultaire/main.go`, `internal/cache/tiered_cache.go` | XS | R6 (with WP-R0-3) |
+| WP-R0-10 | Lyve cost reasoning inline + README bullet + promo end date from [YOU] (R0-16) | `dashboard/handlers/admin_costs.go`, `drivers/lyve_README.md` | XS | R7 |
+| WP-R0-11 | Repo hygiene: delete `scripts/verify_*.sh` + `auth/db_test_fix.go`, drop gosec `internal/testing` exclude, GCI tests in CI without shared-DB wipes (R0-18, R0-19) | `scripts/`, `.github/workflows/security.yml`, `internal/crypto/gci_test.go` | S | R15 (R8 for gci) |
 
 Proposed `Makefile` target (WP-R0-5, not applied by R0):
 ```make

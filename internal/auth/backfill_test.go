@@ -3,25 +3,22 @@ package auth
 import (
 	"context"
 	"database/sql"
-	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	"github.com/FairForge/vaultaire/internal/testutil"
+
 	_ "github.com/lib/pq"
 )
 
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		dsn = "postgres://viera@localhost:5432/vaultaire?sslmode=disable"
-	}
-	db, err := sql.Open("postgres", dsn)
+	db, err := sql.Open("postgres", testutil.DSN())
 	require.NoError(t, err)
-	require.NoError(t, db.Ping())
+	require.NoError(t, db.Ping(), "test database unreachable — create it with `make test-db`")
 	return db
 }
 
