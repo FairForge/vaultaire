@@ -67,3 +67,14 @@ func TestDocsPage_HeadReturnsNoBody(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Result().StatusCode)
 	assert.Empty(t, w.Body.String())
 }
+
+// The FAQ pricing table is GitHub-style markdown; without the table extension
+// goldmark printed it as a paragraph of raw pipes on the live page.
+func TestDocsFAQ_RendersPricingTable(t *testing.T) {
+	w := docsGet(t, "faq")
+	require.Equal(t, http.StatusOK, w.Result().StatusCode)
+	body := w.Body.String()
+	assert.Contains(t, body, "<table>")
+	assert.Contains(t, body, "<th>Tier</th>")
+	assert.NotContains(t, body, "| Tier | Price |", "raw markdown table must not leak through")
+}

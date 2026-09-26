@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/yuin/goldmark"
 	"go.uber.org/zap"
 )
 
@@ -50,7 +49,7 @@ func renderChangelog(logger *zap.Logger) []byte {
 	changelogOnce.Do(func() {
 		var buf bytes.Buffer
 		buf.WriteString(changelogShellPre)
-		if err := goldmark.Convert(changelogMD, &buf); err != nil {
+		if err := siteMarkdown.Convert(changelogMD, &buf); err != nil {
 			logger.Error("render changelog markdown", zap.Error(err))
 			buf.Reset()
 			buf.WriteString(changelogShellPre)
