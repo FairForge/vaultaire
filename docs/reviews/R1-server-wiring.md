@@ -248,3 +248,14 @@ the three flusher `ctx.Done` branches (R1-06); `LoginRateLimiter.Cleanup` (R1-14
    covered. 7. Flags — covered (DB-backed part skipped locally, R1-13). 8. Prometheus — collectors
    covered; no test that every series a rule file references exists (cheap to add: parse
    `deploy/monitoring/*.yml`). 9. Rate limiters — unit-covered; no proxy-behaviour test before this PR.
+
+## Post-merge review (2026-09-26, same day) — correction to the R1-01 fix
+
+| ID | Sev | file:line | What | Why it matters | Proposed fix |
+|---|---|---|---|---|---|
+| R1-20 | **P0** | `internal/clientip/clientip.go:82` (as merged in #475) | `trustedPeer` read `r.Header.Get("X-Forwarded-For")` and took the last comma-separated entry. HAProxy `option forwardfor` does **not** merge into an existing header: it adds a *new* `X-Forwarded-For` occurrence at the end of the header list (HAProxy 2.8 manual, `option forwardfor`: "this header is always appended at the end of the existing header list, the server must be configured to always use the last occurrence of this header only"; prod is 2.8.16 with plain `option forwardfor`, no `if-none`). Go's `Header.Get` returns the **first** occurrence — i.e. whatever the client sent. Proof: a request with two XFF lines (`9.9.9.9` client, `198.51.100.4` HAProxy) made `FromRequest` return `9.9.9.9`. | The R1-01 bypass (API-key IP allowlist, login/reset/abuse limiters, access log) was still open for any client that sends its own `X-Forwarded-For` header line. The #475 tests only exercised a single comma-joined value. | **Fixed:** `Header.Values` → last occurrence → last entry; `CF-Connecting-IP` honoured only when it occurs exactly once (two occurrences = ambiguous → peer). Tests: `TestFromRequest_ClientSuppliedForwardedForLineIsIgnored`, `TestFromRequest_AmbiguousCloudflareHeaderFallsBackToPeer`. |
+
+Also noted (no change): the Security workflow is red on `main` for the same pre-existing gosec
+findings in `cmd/backend-matrix` and `cmd/geyser-*` probe tools (G703/G124/G117) — R15 / WP-R0-11.
+WP-R1-1 for [YOU] stands; the HAProxy `del-header CF-Connecting-IP unless { src -f cloudflare.lst }`
+line is now the belt to this brace.
