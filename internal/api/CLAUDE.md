@@ -403,6 +403,17 @@ BOOLEAN (migration 042).
   query) is delegated to `handleS3Request` untouched — `isS3RootRequest` is the
   discriminator. Registered as exact `Get("/")`/`Head("/")` before the `/*` catch-all.
   No storage backend — served from the embedded binary.
+- **Visual style (2026-09-26, SELFBOX-inspired pixel look):** light-grey canvas, charcoal app
+  bar, square white cards, bold-then-light headlines, yellow/red/green pixel tags, swipe-bar
+  links. Still ONE self-contained file: Montserrat (variable) + Silkscreen are base64 `@font-face`
+  (Silkscreen skips `&`, which it draws like `$`), and all pixel art is an inline `<svg>` of
+  `<symbol id="s-*">` sprites at the top of `<body>` (mascot, mascot-wave, plant, lamp, floorlamp,
+  dresser, shelf, box, heart, logo, mark) referenced via `<use>`. Sprites are generated from ASCII
+  grids (one `<path>` per colour); size a sprite with `class="px" style="--w:W;--h:H"` and `--u`
+  (px per pixel). Base64 font blobs can in theory contain a `TestLanding_NoDeadProduct` banned
+  substring — re-run that test after swapping fonts. Both stored.ge and stored.cloud serve this page.
+- **site_shell.go** — shared favicon + `<style>` + pixel-mark brand bar for the /docs/* and
+  /changelog shells, so the sub-pages match the landing page (system fonts, no embeds).
 - **`waitlist.go`** — `POST /api/waitlist` (public, no auth) captures a pre-launch email
   into `waitlist_signups` (migration 044, `ON CONFLICT (email) DO NOTHING`). Validates via
   `mail.ParseAddress`, lowercases, per-IP sliding-window rate limit (`waitlistLimiter`,
