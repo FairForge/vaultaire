@@ -1,6 +1,9 @@
 package auth
 
 import (
+	"time"
+
+	"github.com/pquerna/otp/totp"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -24,14 +27,24 @@ func TestMFA_ValidateCode(t *testing.T) {
 	t.Run("validates correct code", func(t *testing.T) {
 		mfa := NewMFAService("stored.ge")
 
-		// Use a known secret for testing
-		secret := "JBSWY3DPEHPK3PXP"
-
-		// For testing, we accept a specific code
-		code := "123456"
+		secret, _, err := mfa.GenerateSecret("user@stored.ge")
+		require.NoError(t, err)
+		code, err := totp.GenerateCode(secret, time.Now())
+		require.NoError(t, err)
 
 		valid := mfa.ValidateCode(secret, code)
 		assert.True(t, valid)
+	})
+
+	t.Run("no hard-coded test backdoor (R5-15)", func(t *testing.T) {
+		mfa := NewMFAService("stored.ge")
+		// The former "test secret" + "123456" pair must behave like any other
+		// secret/code pair: only a real TOTP for the current step validates.
+		secret := "JBSWY3DPEHPK3PXP"
+		assert.Equal(t, totp.Validate("123456", secret), mfa.ValidateCode(secret, "123456"))
+		real, err := totp.GenerateCode(secret, time.Now())
+		require.NoError(t, err)
+		assert.True(t, mfa.ValidateCode(secret, real))
 	})
 
 	t.Run("rejects incorrect code", func(t *testing.T) {

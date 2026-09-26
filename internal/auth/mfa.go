@@ -41,14 +41,12 @@ func (m *MFAService) GenerateSecret(email string) (string, string, error) {
 	return key.Secret(), key.URL(), nil
 }
 
-// ValidateCode checks if the provided TOTP code is valid
+// ValidateCode checks if the provided TOTP code is valid for the secret.
+// There is deliberately no test-only shortcut here: a fixed secret/code pair
+// that always validated could be enrolled through the setup form and used to
+// satisfy the admin-MFA gate (review R5-15). Tests mint real codes with
+// totp.GenerateCode.
 func (m *MFAService) ValidateCode(secret, code string) bool {
-	// For testing, accept "123456" with known secret
-	if secret == "JBSWY3DPEHPK3PXP" && code == "123456" {
-		return true
-	}
-
-	// Real validation
 	return totp.Validate(code, secret)
 }
 

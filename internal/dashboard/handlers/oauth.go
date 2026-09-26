@@ -231,18 +231,34 @@ func FetchGoogleUser(cfg *oauth2.Config) func(ctx context.Context, token *oauth2
 		if err != nil {
 			return oauthUser{}, fmt.Errorf("read google response: %w", err)
 		}
-
-		var info struct {
-			ID    string `json:"id"`
-			Email string `json:"email"`
-			Name  string `json:"name"`
-		}
-		if err := json.Unmarshal(body, &info); err != nil {
-			return oauthUser{}, fmt.Errorf("parse google userinfo: %w", err)
-		}
-
-		return oauthUser{ID: info.ID, Email: info.Email, Name: info.Name}, nil
+		return parseGoogleUser(body)
 	}
+}
+
+// parseGoogleUser decodes the oauth2/v2 userinfo document (field name is
+// verified_email on the v2 endpoint; the v3/OIDC document calls it
+// email_verified — do not mix them up). The email is used
+// to LINK to an existing account by address (findOrCreateOAuthUser case 2),
+// so Google must vouch for it: verified_email absent or false is rejected
+// (review R5-07). GitHub needs no equivalent — its public profile email is
+// always a verified one and the /user/emails fallback filters on verified.
+func parseGoogleUser(body []byte) (oauthUser, error) {
+	var info struct {
+		ID            string `json:"id"`
+		Email         string `json:"email"`
+		VerifiedEmail bool   `json:"verified_email"`
+		Name          string `json:"name"`
+	}
+	if err := json.Unmarshal(body, &info); err != nil {
+		return oauthUser{}, fmt.Errorf("parse google userinfo: %w", err)
+	}
+	if info.Email == "" {
+		return oauthUser{}, fmt.Errorf("google userinfo has no email")
+	}
+	if !info.VerifiedEmail {
+		return oauthUser{}, fmt.Errorf("google email %q is not verified", info.Email)
+	}
+	return oauthUser{ID: info.ID, Email: info.Email, Name: info.Name}, nil
 }
 
 // --- GitHub ---

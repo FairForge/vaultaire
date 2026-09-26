@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -23,6 +24,22 @@ const (
 // rate limit (3 requests per hour).
 var ErrResetRateLimited = errors.New("password reset rate limit exceeded")
 
+// ErrNoVerifySecret is returned when a token would be minted or verified with
+// an empty HMAC key (VERIFY_SECRET and JWT_SECRET both unset). Tokens signed
+// with an empty key are forgeable by anyone who knows a user ID, so both
+// directions fail closed (R5-17).
+var ErrNoVerifySecret = errors.New("auth: no verify secret configured")
+
+// passwordFingerprint binds a reset token to the password it is allowed to
+// replace: the first 16 hex chars of SHA-256(current password hash). A
+// completed reset — or any other password change — changes the hash, so
+// every token issued before it stops verifying. That is what makes the
+// token single-use without any server-side state (R5-03).
+func passwordFingerprint(passwordHash string) string {
+	sum := sha256.Sum256([]byte(passwordHash))
+	return hex.EncodeToString(sum[:8])
+}
+
 // RequestPasswordReset generates an HMAC-signed password reset token for the
 // user with the given email. Returns ErrResetRateLimited if the email has
 // already requested 3 resets within the past hour.
@@ -38,6 +55,10 @@ var ErrResetRateLimited = errors.New("password reset rate limit exceeded")
 func (a *AuthService) RequestPasswordReset(ctx context.Context, email string) (string, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 
+	if len(a.verifySecret) == 0 {
+		return "", ErrNoVerifySecret
+	}
+
 	user, err := a.GetUserByEmail(ctx, email)
 	if err != nil {
 		return "", fmt.Errorf("user not found")
@@ -49,19 +70,13 @@ func (a *AuthService) RequestPasswordReset(ctx context.Context, email string) (s
 	}
 
 	expiry := time.Now().Add(resetTokenExpiry).Unix()
-	payload := fmt.Sprintf("reset|%s|%d", user.ID, expiry)
+	payload := fmt.Sprintf("reset|%s|%d|%s", user.ID, expiry, passwordFingerprint(user.PasswordHash))
 
 	mac := hmac.New(sha256.New, a.verifySecret)
 	mac.Write([]byte(payload))
 	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 
-	token := base64.RawURLEncoding.EncodeToString([]byte(payload + "|" + sig))
-
-	a.resetMu.Lock()
-	a.resetTokens[token] = user.ID
-	a.resetMu.Unlock()
-
-	return token, nil
+	return base64.RawURLEncoding.EncodeToString([]byte(payload + "|" + sig)), nil
 }
 
 // CompletePasswordReset validates a reset token and updates the user's
@@ -72,7 +87,7 @@ func (a *AuthService) CompletePasswordReset(ctx context.Context, token, newPassw
 		return "", fmt.Errorf("password must be at least 8 characters")
 	}
 
-	userID, err := a.validateResetToken(token)
+	userID, fingerprint, err := a.validateResetToken(token)
 	if err != nil {
 		return "", err
 	}
@@ -80,6 +95,11 @@ func (a *AuthService) CompletePasswordReset(ctx context.Context, token, newPassw
 	user, exists := a.userIndex[userID]
 	if !exists {
 		return "", fmt.Errorf("user not found")
+	}
+	// The token is bound to the password it was issued against. A used
+	// token, or one issued before a password change, no longer matches.
+	if !hmac.Equal([]byte(fingerprint), []byte(passwordFingerprint(user.PasswordHash))) {
+		return "", fmt.Errorf("reset token already used or superseded")
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
@@ -98,48 +118,46 @@ func (a *AuthService) CompletePasswordReset(ctx context.Context, token, newPassw
 		}
 	}
 
-	// Single-use token: clear from in-memory map.
-	a.resetMu.Lock()
-	delete(a.resetTokens, token)
-	a.resetMu.Unlock()
-
 	return userID, nil
 }
 
-// validateResetToken decodes a reset token, verifies its HMAC signature
-// and expiry, and returns the userID it references.
-func (a *AuthService) validateResetToken(token string) (string, error) {
+// validateResetToken decodes a reset token, verifies its HMAC signature and
+// expiry, and returns the userID and password fingerprint it carries.
+// Token format: base64url("reset|userID|expiry|fingerprint|signature").
+func (a *AuthService) validateResetToken(token string) (userID, fingerprint string, err error) {
+	if len(a.verifySecret) == 0 {
+		return "", "", ErrNoVerifySecret
+	}
 	decoded, err := base64.RawURLEncoding.DecodeString(token)
 	if err != nil {
-		return "", fmt.Errorf("invalid reset token")
+		return "", "", fmt.Errorf("invalid reset token")
 	}
 
-	parts := strings.SplitN(string(decoded), "|", 4)
-	if len(parts) != 4 || parts[0] != "reset" {
-		return "", fmt.Errorf("invalid reset token")
+	parts := strings.SplitN(string(decoded), "|", 5)
+	if len(parts) != 5 || parts[0] != "reset" {
+		return "", "", fmt.Errorf("invalid reset token")
 	}
 
-	userID := parts[1]
-	payload := parts[0] + "|" + parts[1] + "|" + parts[2]
-	sig := parts[3]
+	payload := strings.Join(parts[:4], "|")
+	sig := parts[4]
 
 	mac := hmac.New(sha256.New, a.verifySecret)
 	mac.Write([]byte(payload))
 	expectedSig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 
 	if !hmac.Equal([]byte(sig), []byte(expectedSig)) {
-		return "", fmt.Errorf("invalid reset token")
+		return "", "", fmt.Errorf("invalid reset token")
 	}
 
 	var expiry int64
 	if _, err := fmt.Sscanf(parts[2], "%d", &expiry); err != nil {
-		return "", fmt.Errorf("invalid reset token")
+		return "", "", fmt.Errorf("invalid reset token")
 	}
 	if time.Now().Unix() > expiry {
-		return "", fmt.Errorf("reset token expired")
+		return "", "", fmt.Errorf("reset token expired")
 	}
 
-	return userID, nil
+	return parts[1], parts[3], nil
 }
 
 // allowResetRequest checks the per-email rate limit and records the

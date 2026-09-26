@@ -67,7 +67,6 @@ type AuthService struct {
 	mfaMu          sync.RWMutex
 	verifySecret   []byte            // HMAC key for email verification tokens
 	verifyTokens   map[string]string // token -> userID (in-memory lookup)
-	resetTokens    map[string]string // password-reset token -> userID
 	resetRates     map[string][]time.Time
 	resetMu        sync.Mutex
 	auditLogger    *AuditLogger
@@ -114,7 +113,6 @@ func NewAuthService(db Database, sqlDB *sql.DB) *AuthService {
 		preferences:    make(map[string]*UserPreferences),
 		mfaSettings:    make(map[string]*MFASettings),
 		verifyTokens:   make(map[string]string),
-		resetTokens:    make(map[string]string),
 		resetRates:     make(map[string][]time.Time),
 		auditLogger:    nil,
 		signupsEnabled: true, // default: signups allowed (prod sets SIGNUPS_ENABLED=false to close)
@@ -232,7 +230,7 @@ func (a *AuthService) LoadFromDB(ctx context.Context) error {
 		       COALESCE(permissions, '["*"]'::jsonb),
 		       COALESCE(bucket_scope, '{}'),
 		       COALESCE(ip_allowlist, '{}'),
-		       expires_at, last_used, created_at
+		       expires_at, last_used, created_at, revoked_at
 		FROM api_keys
 	`)
 	if err != nil {
@@ -248,15 +246,20 @@ func (a *AuthService) LoadFromDB(ctx context.Context) error {
 			ipAllowlist pq.StringArray
 			expiresAt   sql.NullTime
 			lastUsed    sql.NullTime
+			revokedAt   sql.NullTime
 		)
 		if err := akRows.Scan(&k.ID, &k.UserID, &k.Name, &k.Key, &k.Hash,
 			&k.Secret, &permJSON, &bucketScope, &ipAllowlist,
-			&expiresAt, &lastUsed, &k.CreatedAt); err != nil {
+			&expiresAt, &lastUsed, &k.CreatedAt, &revokedAt); err != nil {
 			return fmt.Errorf("scan api key: %w", err)
 		}
 
+		// Corrupt permissions fail closed (no permissions), never open (R5-14).
 		if err := json.Unmarshal(permJSON, &k.Permissions); err != nil {
-			k.Permissions = []string{"*"}
+			k.Permissions = nil
+		}
+		if revokedAt.Valid {
+			k.RevokedAt = &revokedAt.Time
 		}
 		k.BucketScope = []string(bucketScope)
 		k.IPAllowlist = []string(ipAllowlist)
