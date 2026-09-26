@@ -173,10 +173,11 @@ func main() {
 
 	// Create engine with or without DB
 	eng := engine.NewEngine(db, logger, &engine.Config{
-		// Caching stays OFF until a bounded LRU replaces TieredCache — its
-		// memory map never evicts, so even per-object-capped entries
-		// accumulate without bound across distinct keys (WP-2 / CR-2).
-		// Re-enable when internal/cache/lru.go is wired with a size bound.
+		// Caching is OFF: cache.TieredCache is an unbounded map whose Config
+		// is ignored (WP-2 / CR-2, R0-01). R6 decided the code path should
+		// be deleted rather than fixed (docs/reviews/R6-engine.md, WP-R6-6);
+		// any future read cache must be bytes-capped, evicting, per-object
+		// capped and filled outside the request goroutine.
 		EnableCaching:  false,
 		EnableML:       db != nil, // Only enable ML if we have DB
 		DefaultBackend: "local",

@@ -1868,11 +1868,16 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 
 	// Chunked objects: decrement chunk ref counts via GCI instead of
 	// deleting from the backend. Actual chunk data stays until GC (Phase 8.7).
+	// backend_name is the routing truth (the same column GET hints from):
+	// without the hint, a DELETE after a restart went to the primary alone,
+	// was answered "not found", and the bytes stayed on the real backend
+	// forever while the head row — and the customer's bill — went away (R6-05).
 	var isChunked bool
+	var recordedBackend string
 	if a.db != nil {
 		_ = a.db.QueryRowContext(r.Context(),
-			`SELECT is_chunked FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-			t.ID, bucket, object).Scan(&isChunked)
+			`SELECT is_chunked, COALESCE(backend_name, '') FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+			t.ID, bucket, object).Scan(&isChunked, &recordedBackend)
 	}
 
 	if isChunked && a.gci != nil {
@@ -1886,7 +1891,20 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 			return
 		}
 	} else {
+		if recordedBackend != "" {
+			if ce, ok := a.engine.(*engine.CoreEngine); ok {
+				ce.HintBackend(container, object, recordedBackend)
+			}
+		}
 		if err := a.engine.Delete(r.Context(), container, object); err != nil {
+			if errors.Is(err, engine.ErrAllBackendsUnavailable) {
+				// The backend that holds the bytes is unreachable: the
+				// client retries; the head row must NOT be removed (a
+				// "miss" verdict from a fallback is not a verdict, R6-02).
+				w.Header().Set("Retry-After", "30")
+				WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
+				return
+			}
 			if !isObjectMissingErr(err) {
 				a.logger.Error("delete failed",
 					zap.String("container", container),

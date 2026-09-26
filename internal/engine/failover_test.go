@@ -407,7 +407,11 @@ func TestIsBackendFailure_ClassifiesErrors(t *testing.T) {
 		PermissionError{TenantID: "t", Action: "write"},
 		fmt.Errorf("remove /data/c/k: no such file or directory"),
 		fmt.Errorf("operation error S3: GetObject, NoSuchKey: key does not exist"),
-		fmt.Errorf("api error NotFound: ... https response error status code: 404"),
+		// aws-sdk-go-v2 formats the status as "StatusCode: 404" (the lowercase
+		// "status code:" was v1). Real, typed SDK chains are covered by
+		// failover_sdk_errors_test.go; this is the stringified fallback.
+		fmt.Errorf("https response error StatusCode: 404, RequestID: X, api error NotFound: Not Found"),
+		&NotFoundError{Container: "c", Artifact: "a"},
 		fmt.Errorf("all backends failed: %w", NotFoundError{Container: "c", Artifact: "a"}),
 	}
 	for _, err := range benign {
