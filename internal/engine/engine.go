@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -224,16 +226,6 @@ func (e *CoreEngine) Get(ctx context.Context, container, artifact string) (io.Re
 		}
 	}
 
-	// Log what intelligence would have recommended (informational only).
-	if e.intelligence != nil {
-		if rec := e.intelligence.GetRecommendation(tenantID, container, artifact); rec != nil {
-			e.logger.Debug("intelligence recommendation (not used for routing)",
-				zap.String("actual_backend", preferredBackend),
-				zap.String("recommended", rec.PreferredBackend),
-				zap.String("reason", rec.Reason))
-		}
-	}
-
 	// Build candidate list: preferred backend first, then primary, then others.
 	candidates := e.buildCandidateList(preferredBackend)
 
@@ -340,20 +332,22 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 	// double-counted every PUT and re-counted each deduplicated chunk store.
 
 	// Resolve storage class from options to determine target backend.
+	//
+	// Placement is decided by the API layer (resolvePutStorageClass) and this
+	// class → backend map, nothing else. The access tracker used to be
+	// consulted here when no class was set and its answer APPLIED: with
+	// `temperature` never written it named "lyve" for every previously-seen
+	// object, so the second to fifth PUT of any key in an `auto` bucket left
+	// the primary for the resilient tier's backend (R6-03; the 2026-07-31 fix
+	// had only closed the "local" branch). The engine must never re-derive
+	// placement.
 	options := ApplyPutOptions(opts...)
 	targetBackend, _ := ResolveStorageClass(options.StorageClass, e.primary, e.drivers)
 
-	// Intelligence recommendations override if no explicit storage class was set.
-	if options.StorageClass == "" && e.intelligence != nil {
-		if rec := e.intelligence.GetRecommendation(tenantID, container, artifact); rec != nil {
-			if rec.PreferredBackend != "" {
-				targetBackend = e.applyBackendRecommendation(targetBackend, rec.PreferredBackend)
-			}
-		}
-	}
-
-	// Build candidate list: target first, then primary, then other DURABLE
-	// backends — local is excluded unless targeted or primary (WP-F).
+	// Build candidate list: target first, then primary, then the
+	// general-purpose durable backends — target-only backends (local, r2,
+	// geyser, permafrost, idrive-<region>) are excluded unless targeted or
+	// primary (WP-F, R6-04).
 	candidates := e.buildWriteCandidateList(targetBackend)
 
 	// Failover body safety: retries share ONE reader, so an attempt that
@@ -430,7 +424,9 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 				zap.String("target_backend", targetBackend),
 				zap.Strings("candidates", candidates),
 				zap.Error(err))
-			err = fmt.Errorf("%w: %w", ErrAllBackendsUnavailable, err)
+			if !errors.Is(err, ErrAllBackendsUnavailable) {
+				err = fmt.Errorf("%w: %w", ErrAllBackendsUnavailable, err)
+			}
 		}
 		return "", fmt.Errorf("put %s/%s: %w", container, artifact, err)
 	}
@@ -459,7 +455,18 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 	return usedBackend, nil
 }
 
-// Delete removes an artifact from all backends
+// Delete removes an artifact from the backend that holds it, falling back to
+// the primary. It stops at the first backend that reports success (or a miss
+// — the API layer treats a miss as an idempotent delete), so a second copy on
+// another backend is NOT removed here; that is WP-R6-1.
+//
+// The backend is resolved like Get does: hint / in-memory map first, then the
+// durable object_locations row. Resolving from the in-memory map alone meant
+// that after every restart a DELETE of an object stored off-primary went to
+// the primary, was answered "not found", and the head row was removed while
+// the bytes stayed on the real backend forever (R6-05). Callers that know the
+// head-cache backend_name must still HintBackend first — that column is the
+// routing truth and object_locations can lag it.
 func (e *CoreEngine) Delete(ctx context.Context, container, artifact string) error {
 	start := time.Now()
 	tenantID := common.GetTenantID(ctx)
@@ -467,7 +474,13 @@ func (e *CoreEngine) Delete(ctx context.Context, container, artifact string) err
 	key := objectKey(container, artifact)
 	targetBackend := e.primary
 	if stored, ok := e.objectBackends.Load(key); ok {
-		targetBackend = stored.(string)
+		if name, ok := stored.(string); ok && name != "" {
+			targetBackend = name
+		}
+	} else if e.locations != nil {
+		if name, err := e.locations.LookupBackend(ctx, tenantID, container, artifact); err == nil && name != "" {
+			targetBackend = name
+		}
 	}
 
 	candidates := []string{targetBackend}
@@ -735,50 +748,45 @@ func (e *CoreEngine) buildCandidateList(preferred string) []string {
 	return candidates
 }
 
-// nonDurableBackends are backends whose writes do not survive loss of the hub
-// machine. WP-F (1.14): they may receive writes only when explicitly targeted
-// (REDUCED_REDUNDANCY) or configured as the primary (STORAGE_MODE=local) —
-// never as a silent failover destination for customer data.
-var nonDurableBackends = map[string]bool{"local": true}
-
-// applyBackendRecommendation accepts an intelligence-recommended backend only
-// when it is registered AND a safe write target, otherwise it keeps the
-// already-resolved target.
+// targetOnlyBackends receive a write only when they are the resolved target
+// of the storage class (or the configured primary) — never as a silent
+// failover destination for someone else's object:
 //
-// The access tracker names "local" for almost anything it has seen before —
-// its "hot data" branch and its catch-all default both do — so applying
-// recommendations verbatim silently relocated any previously-accessed object
-// onto the hub's single unreplicated disk on its next write. That is exactly
-// what nonDurableBackends/WP-F keeps off the failover path, for exactly the
-// same reasons: it lies about durability, fills the single box, and bills the
-// wrong tier. A non-durable recommendation is honoured only where that
-// backend is already the configured primary (STORAGE_MODE=local).
-func (e *CoreEngine) applyBackendRecommendation(current, recommended string) string {
-	if _, exists := e.drivers[recommended]; !exists {
-		e.logger.Warn("intelligence recommended non-existent backend, keeping target",
-			zap.String("recommended", recommended),
-			zap.String("target", current),
-			zap.String("primary", e.primary))
-		return current
-	}
-	if nonDurableBackends[recommended] && recommended != e.primary {
-		e.logger.Debug("ignoring non-durable backend recommendation",
-			zap.String("recommended", recommended),
-			zap.String("target", current))
-		return current
-	}
-	return recommended
+//   - local: the hub's disk does not survive loss of the machine (WP-F, 1.14).
+//   - r2: the PUBLIC store / CDN origin; a private object must not land there.
+//   - geyser: tape — evicted after the staging window, then 403 on GET; a
+//     STANDARD customer never asked for a restore workflow.
+//   - permafrost: the OneDrive fleet, an async second-copy role at ~10 MB/s.
+//   - idrive-<region>: region-pinned buckets; writing a US object to an EU
+//     endpoint (or the reverse) is a data-residency breach.
+//
+// Failover for a general-purpose write is therefore between the target, the
+// primary and the remaining general-purpose durable backends (idrive, lyve,
+// s3, quotaless). (R6-04)
+var targetOnlyBackends = map[string]bool{
+	"local":      true,
+	"r2":         true,
+	"geyser":     true,
+	"permafrost": true,
+	"onedrive":   true, // the fleet driver's name in cmd/dedup-migrate
+}
+
+// writeOnlyWhenTargeted reports whether name may receive a write only as the
+// explicit target or the configured primary.
+func writeOnlyWhenTargeted(name string) bool {
+	return targetOnlyBackends[name] || strings.HasPrefix(name, "idrive-")
 }
 
 // buildWriteCandidateList is buildCandidateList restricted to backends that
-// are safe write targets. A failing durable backend must surface as a 5xx to
-// the client, not as a silent write to the hub's local disk (which lies about
-// durability, fills the single box, and bills the wrong tier).
+// are safe write targets for THIS object. A failing durable backend must
+// surface as a 5xx to the client, not as a silent write to the hub's local
+// disk, to the public store, to tape or to the wrong jurisdiction (which lies
+// about durability or placement, and bills the wrong tier).
 func (e *CoreEngine) buildWriteCandidateList(target string) []string {
 	all := e.buildCandidateList(target)
 	writable := make([]string, 0, len(all))
 	for _, name := range all {
-		if nonDurableBackends[name] && name != target && name != e.primary {
+		if writeOnlyWhenTargeted(name) && name != target && name != e.primary {
 			continue
 		}
 		writable = append(writable, name)
