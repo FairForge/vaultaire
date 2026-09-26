@@ -8,10 +8,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/FairForge/vaultaire/internal/testutil"
 
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/FairForge/vaultaire/internal/flags"
@@ -48,10 +49,7 @@ func flagsSessionCtx(req *http.Request, role string) *http.Request {
 
 func openHandlersFlagsDB(t *testing.T) (*sql.DB, string) {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set — skipping integration test")
-	}
+	dsn := testutil.DSN() // R9: vaultaire_test by default; DATABASE_URL still wins
 	db, err := sql.Open("postgres", dsn)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })

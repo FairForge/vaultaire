@@ -383,19 +383,19 @@ func (s *Server) handleMgmtListObjects(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case prefix != "" && startingAfter != "":
 		dbRows, dbErr2 = s.db.QueryContext(r.Context(),
-			`SELECT object_key, size, etag, content_type, last_modified FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key LIKE $3 AND object_key > $4 ORDER BY object_key LIMIT $5`,
+			`SELECT object_key, size_bytes, etag, content_type, updated_at FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key LIKE $3 AND object_key > $4 ORDER BY object_key LIMIT $5`,
 			tenantID, bucket, prefix+"%", startingAfter, lim)
 	case prefix != "":
 		dbRows, dbErr2 = s.db.QueryContext(r.Context(),
-			`SELECT object_key, size, etag, content_type, last_modified FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key LIKE $3 ORDER BY object_key LIMIT $4`,
+			`SELECT object_key, size_bytes, etag, content_type, updated_at FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key LIKE $3 ORDER BY object_key LIMIT $4`,
 			tenantID, bucket, prefix+"%", lim)
 	case startingAfter != "":
 		dbRows, dbErr2 = s.db.QueryContext(r.Context(),
-			`SELECT object_key, size, etag, content_type, last_modified FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key > $3 ORDER BY object_key LIMIT $4`,
+			`SELECT object_key, size_bytes, etag, content_type, updated_at FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key > $3 ORDER BY object_key LIMIT $4`,
 			tenantID, bucket, startingAfter, lim)
 	default:
 		dbRows, dbErr2 = s.db.QueryContext(r.Context(),
-			`SELECT object_key, size, etag, content_type, last_modified FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 ORDER BY object_key LIMIT $3`,
+			`SELECT object_key, size_bytes, etag, content_type, updated_at FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 ORDER BY object_key LIMIT $3`,
 			tenantID, bucket, lim)
 	}
 	err := dbErr2
@@ -480,8 +480,13 @@ func (s *Server) handleMgmtCreateKey(w http.ResponseWriter, r *http.Request) {
 	tenantIDForLimit, _ := r.Context().Value(tenantIDKey).(string)
 	if s.db != nil && tenantIDForLimit != "" {
 		var keyCount int
-		_ = s.db.QueryRowContext(r.Context(),
-			"SELECT COUNT(*) FROM api_keys WHERE tenant_id = $1", tenantIDForLimit).Scan(&keyCount)
+		// api_keys has no tenant_id (R5-16 / WP-R9-6); resolve the tenant the
+		// same way the S3 auth path does — users.email = tenants.email.
+		_ = s.db.QueryRowContext(r.Context(), `
+			SELECT COUNT(*) FROM api_keys ak
+			JOIN users u ON u.id = ak.user_id
+			JOIN tenants t ON t.email = u.email
+			WHERE t.id = $1 AND ak.revoked_at IS NULL`, tenantIDForLimit).Scan(&keyCount)
 		if keyCount >= maxKeysPerTenant {
 			writeManagementError(w, ErrTypeConflict, "key_limit_exceeded",
 				fmt.Sprintf("maximum %d API keys per account", maxKeysPerTenant), "")

@@ -10,9 +10,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"testing"
 	"time"
+
+	"github.com/FairForge/vaultaire/internal/testutil"
 
 	"github.com/FairForge/vaultaire/internal/config"
 	"github.com/FairForge/vaultaire/internal/engine"
@@ -22,10 +23,7 @@ import (
 )
 
 func TestShutdown_FlushesBufferedTrackers(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set; skipping DB-backed shutdown flush test")
-	}
+	dsn := testutil.DSN() // R9: vaultaire_test by default; DATABASE_URL still wins
 	db, err := sql.Open("postgres", dsn)
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()

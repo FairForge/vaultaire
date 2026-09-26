@@ -7,8 +7,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
+
+	"github.com/FairForge/vaultaire/internal/testutil"
 
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/stretchr/testify/assert"
@@ -70,10 +71,7 @@ func TestWriteS3ErrorWithContext_WithSuggestion(t *testing.T) {
 
 func errorsTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		dsn = "postgres://viera@localhost:5432/vaultaire?sslmode=disable"
-	}
+	dsn := testutil.DSN() // R9: never the shared dev DB (R0-13)
 	db, err := sql.Open("postgres", dsn)
 	require.NoError(t, err)
 	require.NoError(t, db.Ping())

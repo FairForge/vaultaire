@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
@@ -487,11 +486,6 @@ func TestCDN_LastModifiedHeader(t *testing.T) {
 // --- HeadObject tests ---
 
 func TestHeadObject_LastModifiedFromCache(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
-
 	f := setupAdapterFixture(t)
 
 	_, err := f.db.Exec(`

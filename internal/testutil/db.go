@@ -52,7 +52,14 @@ func DSN() string {
 	if raw := os.Getenv("DATABASE_URL"); raw != "" {
 		return raw
 	}
-	cfg := DBConfig()
+	return DSNFor(DBConfig())
+}
+
+// DSNFor renders a key=value lib/pq DSN for cfg. Tests that need a sibling
+// database on the same server (the fresh-migration tests) take DBConfig(),
+// swap Database and render it here, so the result is valid whether the
+// session was configured by DATABASE_URL or by the TEST_DB_* defaults.
+func DSNFor(cfg database.Config) string {
 	if cfg.Password != "" {
 		return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
 			cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.Database, cfg.SSLMode)

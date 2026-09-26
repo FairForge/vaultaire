@@ -8,18 +8,19 @@
 -- migration set own every runtime table, and fixes the FK behaviors that made
 -- GDPR ExecuteDeletion trip foreign keys.
 --
--- DDL sources (kept in exact sync — change there, change here):
---   tenant_quotas / quota_usage_events  internal/usage/quota_manager.go
---   upgrade_triggers / _suggestions     internal/usage/auto_upgrade.go
---   grace_periods                       internal/usage/grace_period.go
---   usage_reports / snapshots / sched   internal/usage/reporting.go
---   billing_policies / credits / invoices  internal/usage/billing_integration.go
---     (billing_charges deliberately NOT here — migration 019 already owns it)
---   user_activities                     internal/auth/activity.go
---   artifacts                           internal/database/postgres.go
---   audit_logs_archive                  internal/audit/compression.go
+-- Ownership (Review R9, WP-R0-7): THE MIGRATION SET IS THE SOLE SCHEMA OWNER.
+-- The Go files that once carried parallel DDL for these tables
+-- (usage/{quota_manager,auto_upgrade,grace_period,reporting,billing_integration}.go,
+-- auth/activity.go, audit/compression.go) were deleted by R0/R9; nothing in
+-- the binary or the tests creates or drops these tables any more. Change the
+-- schema here (with a new numbered migration), never in Go.
 --
--- Deviations from the Go DDL, on purpose:
+-- Of the 14 tables below only tenant_quotas and quota_usage_events have a
+-- reader or writer today; the rest are candidates for a DROP migration
+-- (decision D-12, docs/reviews/R9-database.md).
+--   (billing_charges deliberately NOT here — migration 019 already owns it)
+
+-- Deviations from the (deleted) Go DDL, on purpose:
 --   * tenant_quotas gains spending_cap_cents (migration 043 adds it to
 --     existing DBs, but 043 is skipped on a fresh DB where the table doesn't
 --     exist yet — so it must be baked in here).

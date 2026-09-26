@@ -28,9 +28,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
+
+	"github.com/FairForge/vaultaire/internal/testutil"
 
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/google/uuid"
@@ -242,10 +243,7 @@ func TestChunkedPut_AbortedInstallReleasesRefs(t *testing.T) {
 // (notably its tenant-scoped encrypted chunks) drop to zero and are marked so
 // the GC sweep reclaims them.
 func TestExecuteDeletion_DecrementsGCIRefs(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set — skipping integration test")
-	}
+	dsn := testutil.DSN() // R9: vaultaire_test by default; DATABASE_URL still wins
 	db, err := sql.Open("postgres", dsn)
 	require.NoError(t, err)
 	// t.Cleanup (not defer) so the connection outlives the row-cleanup

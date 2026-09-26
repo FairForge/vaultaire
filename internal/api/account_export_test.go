@@ -56,9 +56,9 @@ func TestCreateExport_CollectsUserData(t *testing.T) {
 			AddRow("my-bucket", "private", time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC), []byte("{}")))
 
 	// Objects.
-	mock.ExpectQuery(`SELECT bucket, object_key, size, content_type, last_modified FROM object_head_cache`).
+	mock.ExpectQuery(`SELECT bucket, object_key, size_bytes, content_type, updated_at FROM object_head_cache`).
 		WithArgs("tenant-1").
-		WillReturnRows(sqlmock.NewRows([]string{"bucket", "object_key", "size", "content_type", "last_modified"}).
+		WillReturnRows(sqlmock.NewRows([]string{"bucket", "object_key", "size_bytes", "content_type", "updated_at"}).
 			AddRow("my-bucket", "file.txt", 42, "text/plain", time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)))
 
 	// API keys.
@@ -68,9 +68,9 @@ func TestCreateExport_CollectsUserData(t *testing.T) {
 			AddRow("key-1", "main-key", []byte(`["*"]`), time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)))
 
 	// Bandwidth.
-	mock.ExpectQuery(`SELECT date, ingress_bytes, egress_bytes, requests FROM bandwidth_usage_daily`).
+	mock.ExpectQuery(`SELECT date, ingress_bytes, egress_bytes, requests_count FROM bandwidth_usage_daily`).
 		WithArgs("tenant-1").
-		WillReturnRows(sqlmock.NewRows([]string{"date", "ingress_bytes", "egress_bytes", "requests"}))
+		WillReturnRows(sqlmock.NewRows([]string{"date", "ingress_bytes", "egress_bytes", "requests_count"}))
 
 	// Events.
 	mock.ExpectQuery(`SELECT id, type, data, created_at FROM events`).

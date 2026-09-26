@@ -87,7 +87,7 @@ func queryRecentUsers(ctx context.Context, db *sql.DB, logger *zap.Logger) []rec
 	rows, err := db.QueryContext(ctx, `
 		SELECT u.email, COALESCE(u.company, ''), COALESCE(t.plan, 'free'), u.created_at
 		FROM users u
-		LEFT JOIN tenants t ON t.id = u.tenant_id
+		LEFT JOIN tenants t ON t.email = u.email
 		ORDER BY u.created_at DESC
 		LIMIT 10
 	`)
