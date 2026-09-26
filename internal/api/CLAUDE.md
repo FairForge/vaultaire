@@ -412,27 +412,30 @@ BOOLEAN (migration 042).
   grids (one `<path>` per colour); size a sprite with `class="px" style="--w:W;--h:H"` and `--u`
   (px per pixel). Base64 font blobs can in theory contain a `TestLanding_NoDeadProduct` banned
   substring — re-run that test after swapping fonts. Both stored.ge and stored.cloud serve this page.
-- **Room builder (#build, section 02) + pick-up-able pieces:** every `.piece` (`<g>` + transparent
+- **House builder (#build, section 02) + pick-up-able pieces:** every `.piece` (`<g>` + transparent
   `.hit` rect + `<use>`) inside an `svg[data-play]` (hero room, final CTA) can be dragged, snapped to the
-  pixel grid. In the builder (`#room`, viewBox 128x72, floor line y=64) furniture IS storage at the
-  published annual prices: Standard = storage box 1 TB / dresser 5 TB / bookcase 10 TB ($4.49/TB),
-  Vault = lockbox 1 TB / safe 10 TB ($2/TB), fireplace = always-hot add-on, 1 TB of Standard ($3/TB,
-  capped at the room's Standard TB); everything else is free decor. Storage pieces carry colour-coded
-  TB tags in a top `#room-tags` layer; the tray groups pieces by tier with a plain-words blurb; a
-  three-step strip, a TB-to-photos line (~4 MB a photo), a remove button on the selected piece with
-  undo, and a receipt that lists which pieces make each line. Wall/fit "vibes" are site-wide CSS vars
-  (`--wall-a/-b/-deep`, `--fit`). State persists in localStorage `sg-room` and travels in
-  `#room=v1.<wall>.<fit>.<name>.<k-x-y_…>` links; `decode` whitelists piece keys (`shelf` aliases to
-  `safe` for first-version links), clamps coords, caps 30 pieces / one mascot, and the name is
-  filtered to letters/digits/space/_'- (16 chars) and only ever set via textContent. "Save image"
-  rebuilds the room as a standalone SVG, rasterises it and letters the sign/tags/caption on canvas.
-  Sprites are 3D pixel cuboids from the scratch generator (fireplace + mascot have two animated
-  frames). Night: both rooms follow light/dark mode (window sky/moon/stars, `.night-dim` layer,
-  `url(#nightdim)` filter on unlit pieces, `.glow` pools on `.piece.light` lamps/fireplace); the CSS
-  is written once with a `/*NIGHT*/` marker that the page generator expands into the system-dark
-  and `data-theme="dark"` selector forms, and "Save image" copies the live computed colours.
-  If prices change, update `PRICE` + the tray labels in the builder script AND the pricing
-  section. The page script has NO template literals (html/template parses `<script>`).
+  pixel grid. The builder (`#room`, viewBox 128x115) is a house cutaway and THE FLOOR IS THE TIER:
+  downstairs = Standard $4.49/TB (floor line y=103), attic = Vault $2/TB (attic floor y=54). Storage
+  pieces (storage box 1 TB, dresser 5 TB, bookcase 10 TB) always stand on a floor (`settle`), their
+  floor is judged by their vertical middle (`zoneOf`, so a half-dragged piece already reads as moving),
+  and the price follows the floor; decor (plant, lamp, picture, coffee, mat, rug, mascot) is free and
+  may float. Colour-coded TB tags (yellow downstairs, grey attic) live in a top `#room-tags` layer and
+  recolour mid-drag; a floating toolbar on the selected piece offers "to attic"/"bring down" (storage
+  only, also Enter / ArrowUp / ArrowDown) and remove (with undo); the receipt has a line per floor
+  listing the pieces on it; a TB-to-photos line (~4 MB a photo). Wall/fit "vibes" are site-wide CSS
+  vars (`--wall-a/-b/-deep`, `--fit`). State persists in localStorage `sg-room` and travels in
+  `#room=v2.<wall>.<fit>.<name>.<k-x-y_…>` links (y in house coordinates; the floor is implied);
+  `decode` also accepts `v1` single-room links (pieces land downstairs, the old safe/lockbox/shelf
+  go to the attic, fireplace becomes a lamp), whitelists piece keys, clamps coords, caps 30 pieces /
+  one mascot, and the name is filtered to letters/digits/space/_'- (16 chars) and only ever set via
+  textContent. "Save image" rebuilds the house as a standalone SVG with its live (day or night)
+  colours, rasterises it and letters the sign, floor labels, TB tags and caption on canvas. Night:
+  both rooms follow light/dark mode (window sky/moon/stars, `.night-dim` layer, `url(#nightdim)`
+  filter on unlit pieces, `.glow` pools on `.piece.light` lamps); the CSS is written once with a
+  `/*NIGHT*/` marker that the page generator expands into the system-dark and `data-theme="dark"`
+  selector forms. Sprites are 3D pixel cuboids from the scratch generator. If prices change, update
+  `PRICE` + the floor labels in the builder markup/script, the tray labels, AND the pricing section.
+  The page script has NO template literals (html/template parses `<script>`).
 - **site_shell.go** — shared favicon + `<style>` + pixel-mark brand bar for the /docs/* and
   /changelog shells, so the sub-pages match the landing page (system fonts, no embeds), plus the
   light/dark toggle and `siteMarkdown` (goldmark + table extension: the FAQ price table rendered as
