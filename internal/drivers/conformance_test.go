@@ -9,6 +9,4 @@ var (
 	_ engine.Driver = (*LyveDriver)(nil)
 	_ engine.Driver = (*QuotalessDriver)(nil)
 	_ engine.Driver = (*GeyserDriver)(nil)
-	_ engine.Driver = (*ThrottledDriver)(nil)
-	_ engine.Driver = (*CompressionDriver)(nil)
 )

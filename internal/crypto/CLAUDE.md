@@ -7,13 +7,11 @@ Encryption, key management, and post-quantum cryptography for Vaultaire.
 - **ssec.go** — SSE-C (customer-provided keys): stateless AES-256-GCM encrypt/decrypt with customer's 32-byte key. S3 header parsing (algorithm, key, MD5 validation). No DB, no key storage
 - **sse_s3.go** — SSE-S3 service: ML-KEM-768 key encapsulation + AES-256-GCM data encryption. Per-tenant keypairs in DB, per-object DEKs via KEM encapsulation
 - **chunk_encryption.go** — `ChunkEncryptionService`: per-chunk convergent encryption (AES-256-GCM with HKDF-derived deterministic nonce). Same tenant + same content → same ciphertext (dedup-safe). Ciphertext format: `[nonce 12B][GCM ciphertext+tag]` (28B overhead)
-- **encryption.go** — Core Encryptor interface: AES-256-GCM, ChaCha20-Poly1305, Noop implementations. Chunk-level encrypt/decrypt for pipeline
+- **encryption.go** — `Encryptor` interface: AES-256-GCM, ChaCha20-Poly1305, Noop. Only `NewChunkEncryptionService` reaches it from the product; the rest is unreachable (Review R0 → R8)
 - **keymanager.go** — Multi-tenant HKDF key derivation with version tracking and TTL cache
-- **postquantum.go** — ML-KEM-768 via cloudflare/circl (pipeline encryption). SSE-S3 uses Go stdlib crypto/mlkem instead
+- **postquantum.go** — ML-KEM-768 via cloudflare/circl. **Unreachable from the product** (its only consumer, `pipeline.go`, was removed in Review R0); SSE-S3 uses Go stdlib `crypto/mlkem`. Deletion pending decision D-3 in `docs/reviews/R0-dead-code.md`
 - **compression.go** — LZ4/Zstd/Snappy compression with auto-detection
 - **chunker.go** — Content-defined chunking (FastCDC)
-- **pipeline.go** — Full encrypt+compress+chunk pipeline
-- **tls.go** — TLS configuration helpers
 - **gci.go** — Global content index for deduplication
 - **config.go** — Crypto configuration types
 
@@ -31,9 +29,9 @@ Encryption, key management, and post-quantum cryptography for Vaultaire.
 
 **Activation**: set `ENCRYPTION_MASTER_KEY` env var (64 hex chars). When absent, SSE-S3 is disabled gracefully. Per-bucket via `sse_enabled` column, per-request via `x-amz-server-side-encryption: AES256` header.
 
-**Two ML-KEM implementations** coexist:
-- `postquantum.go` — cloudflare/circl (pipeline encryption, existing)
-- `sse_s3.go` — Go stdlib crypto/mlkem (SSE-S3, new)
+**Two ML-KEM implementations** still exist in the package, but only one is live:
+- `sse_s3.go` — Go stdlib `crypto/mlkem` (SSE-S3, the product path)
+- `postquantum.go` — cloudflare/circl, dead since the pipeline was removed (R0, decision D-3)
 
 ## Chunking + Dedup Architecture (Phase 8.3-8.5)
 

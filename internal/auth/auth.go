@@ -53,26 +53,25 @@ type JWTClaims struct {
 // fast O(1) lookups during request handling. sqlDB is used to persist
 // new registrations so they survive process restarts.
 type AuthService struct {
-	db              Database
-	sqlDB           *sql.DB // for persistent writes; nil in test mode
-	jwtSecret       []byte
-	users           map[string]*User          // email -> user
-	tenants         map[string]*Tenant        // tenantID -> tenant
-	apiKeys         map[string]*APIKey        // key -> apikey
-	userIndex       map[string]*User          // userID -> user
-	keyIndex        map[string]*Tenant        // accessKey -> tenant (for S3 auth)
-	profiles        map[string]*ProfileUpdate // user profiles
-	preferences     map[string]*UserPreferences
-	mfaSettings     map[string]*MFASettings // userID -> MFA config
-	mfaMu           sync.RWMutex
-	verifySecret    []byte            // HMAC key for email verification tokens
-	verifyTokens    map[string]string // token -> userID (in-memory lookup)
-	resetTokens     map[string]string // password-reset token -> userID
-	resetRates      map[string][]time.Time
-	resetMu         sync.Mutex
-	activityTracker *ActivityTracker
-	auditLogger     *AuditLogger
-	signupsEnabled  bool // when false, all account creation is rejected
+	db             Database
+	sqlDB          *sql.DB // for persistent writes; nil in test mode
+	jwtSecret      []byte
+	users          map[string]*User          // email -> user
+	tenants        map[string]*Tenant        // tenantID -> tenant
+	apiKeys        map[string]*APIKey        // key -> apikey
+	userIndex      map[string]*User          // userID -> user
+	keyIndex       map[string]*Tenant        // accessKey -> tenant (for S3 auth)
+	profiles       map[string]*ProfileUpdate // user profiles
+	preferences    map[string]*UserPreferences
+	mfaSettings    map[string]*MFASettings // userID -> MFA config
+	mfaMu          sync.RWMutex
+	verifySecret   []byte            // HMAC key for email verification tokens
+	verifyTokens   map[string]string // token -> userID (in-memory lookup)
+	resetTokens    map[string]string // password-reset token -> userID
+	resetRates     map[string][]time.Time
+	resetMu        sync.Mutex
+	auditLogger    *AuditLogger
+	signupsEnabled bool // when false, all account creation is rejected
 	// signupsEnabledFn, when set, overrides signupsEnabled — 1.13 wires the
 	// feature-flag service here so the `signups` flag (env default + DB
 	// override) decides, flippable at runtime with no deploy.
@@ -103,23 +102,22 @@ func generateRandomSecret() []byte {
 // sqlDB may be nil (e.g. in tests); persistence is skipped when it is.
 func NewAuthService(db Database, sqlDB *sql.DB) *AuthService {
 	return &AuthService{
-		db:              db,
-		sqlDB:           sqlDB,
-		jwtSecret:       generateRandomSecret(),
-		users:           make(map[string]*User),
-		tenants:         make(map[string]*Tenant),
-		apiKeys:         make(map[string]*APIKey),
-		userIndex:       make(map[string]*User),
-		keyIndex:        make(map[string]*Tenant),
-		profiles:        make(map[string]*ProfileUpdate),
-		preferences:     make(map[string]*UserPreferences),
-		mfaSettings:     make(map[string]*MFASettings),
-		verifyTokens:    make(map[string]string),
-		resetTokens:     make(map[string]string),
-		resetRates:      make(map[string][]time.Time),
-		activityTracker: nil,
-		auditLogger:     nil,
-		signupsEnabled:  true, // default: signups allowed (prod sets SIGNUPS_ENABLED=false to close)
+		db:             db,
+		sqlDB:          sqlDB,
+		jwtSecret:      generateRandomSecret(),
+		users:          make(map[string]*User),
+		tenants:        make(map[string]*Tenant),
+		apiKeys:        make(map[string]*APIKey),
+		userIndex:      make(map[string]*User),
+		keyIndex:       make(map[string]*Tenant),
+		profiles:       make(map[string]*ProfileUpdate),
+		preferences:    make(map[string]*UserPreferences),
+		mfaSettings:    make(map[string]*MFASettings),
+		verifyTokens:   make(map[string]string),
+		resetTokens:    make(map[string]string),
+		resetRates:     make(map[string][]time.Time),
+		auditLogger:    nil,
+		signupsEnabled: true, // default: signups allowed (prod sets SIGNUPS_ENABLED=false to close)
 	}
 }
 
@@ -639,20 +637,4 @@ func GenerateID() string {
 	bytes := make([]byte, 8)
 	_, _ = rand.Read(bytes)
 	return hex.EncodeToString(bytes)
-}
-
-// TrackActivity tracks user activity
-func (a *AuthService) TrackActivity(userID, action, resource, ip, userAgent string) {
-	if a.activityTracker != nil {
-		event := &ActivityEvent{
-			UserID:    userID,
-			Action:    action,
-			Resource:  resource,
-			IP:        ip,
-			UserAgent: userAgent,
-		}
-		go func() {
-			_ = a.activityTracker.Track(context.Background(), event)
-		}()
-	}
 }

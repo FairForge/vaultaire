@@ -16,7 +16,7 @@ type Driver interface {
 }
 ```
 
-`driver.go` re-exports `engine.Driver` as a local type alias and defines `PutOption` functional options (`WithContentType`, `WithUserMetadata`).
+All drivers implement `engine.Driver` directly (the old `driver.go` alias + `PutOption` shim was removed in Review R0; put options are `engine.WithContentType` etc.).
 
 ## Driver Implementations
 
@@ -59,42 +59,18 @@ Helpers: `IsValidRegion(region)`, `IsEURegion(region)` (true for `eu-*`), `Regio
 
 | File | Type | Purpose |
 |------|------|---------|
-| `health.go` | `HealthChecker` | Registers named health checks, runs them concurrently with timeout, returns `HealthReport` (healthy/degraded/unhealthy) |
-| `circuit_breaker.go` | `CircuitBreaker` | Closed/Open/HalfOpen states; configurable failure/success thresholds and reset timeout |
-| `retry.go` | `RetryPolicy`, `RetryableDriver` | Exponential backoff with jitter; wraps any `Driver` with automatic retries |
-| `fallback.go` | `FallbackDriver` | Wraps primary + secondary `Driver`; tries primary first, falls back on failure |
-| `regional_failover.go` | `RegionalFailover` | Automatic failover between two `RegionDriver` instances with health monitoring |
-| `throttle.go` | `ThrottledDriver` | Wraps any `Driver` with `rate.Limiter`-based bandwidth throttling |
-| `parallel.go` | `ParallelDriver` | Worker-pool concurrency for bulk `Put`/`Get` operations |
-| `queue.go` | `RequestQueue` | Bounded work queue with worker pool; `ErrQueueFull` / `ErrQueueClosed` |
 
 ### Bandwidth & Cost
 
 | File | Type | Purpose |
 |------|------|---------|
 | `egress_tracker.go` | `EgressTracker` | Per-tenant byte + cost tracking; default rate $0.009/GB (iDrive E2) |
-| `egress_predictor.go` | `EgressPredictor` | Daily/monthly usage prediction with quota alerts (Info/Warning/Critical) |
-| `bandwidth_quota.go` | `BandwidthQuota` | Monthly egress quotas per tenant with automatic reset |
 | `cost_advisor.go` | `CostAdvisor` | Analyzes file access patterns; recommends compression, dedup, tier migration |
 
 ### Caching & Streaming
 
 | File | Type | Purpose |
 |------|------|---------|
-| `smart_cache.go` | `SmartCache` | LRU cache with tenant isolation; tracks hits/misses/evictions |
-| `compression.go` | `CompressionDriver` | Wraps any `Driver`; gzip-compresses on Put, decompresses on Get |
-| `reader_pool.go` | `ReaderPool` | `sync.Pool`-based reader reuse |
-| `parallel_stream.go` | `StreamManager` | Manages concurrent download streams |
-| `parallel_chunks.go` | `ChunkReader` | Parallel chunk reading for large objects |
-| `chunked_transfer.go` | `ChunkedTransfer` | Chunked upload/download management |
-| `resumable.go` | `ResumableUpload` | Upload checkpoint + resume via temp file metadata |
-
-### S3 Protocol
-
-| File | Type | Purpose |
-|------|------|---------|
-| `s3_auth.go` | `S3Signer` | AWS Signature V4 implementation for raw HTTP signing |
-| `s3_iam.go` | `PolicyEvaluator`, `IAMPolicy`, `STSToken` | IAM policy parsing and action/resource evaluation |
 
 ### Local Driver Extras
 
@@ -110,9 +86,7 @@ Helpers: `IsValidRegion(region)`, `IsEURegion(region)` (true for `eu-*`), `Regio
 | File | Type | Purpose |
 |------|------|---------|
 | `capabilities.go` | `CapabilityChecker` | Interface for drivers to declare capabilities (streaming, range read, multipart, versioning, encryption, replication, watch, atomic) |
-| `conflict.go` | `ConflictDetector`, `ConflictResolver` | Version-based conflict detection for concurrent writes |
 | `wasm.go` | `WASMPlugin` | WASM plugin execution via wazero (future compute-at-edge) |
-| `webhook.go` | `WebhookDispatcher` | Dispatches `WatchEvent`s to registered webhook URLs |
 
 ### Geyser Admin
 
@@ -124,7 +98,7 @@ Helpers: `IsValidRegion(region)`, `IsEURegion(region)` (true for `eu-*`), `Regio
 
 | File | Purpose |
 |------|---------|
-| `test_helpers.go` | `mustClose`, `mustCopy`, `mustWrite` convenience functions for tests |
+| `helpers_test.go` | `mustClose`, `mustCopy`, `mustWrite` convenience functions for tests |
 | `conformance_test.go` | Cross-driver conformance test suite |
 
 ## Existing READMEs
