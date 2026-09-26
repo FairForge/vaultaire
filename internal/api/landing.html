@@ -12,6 +12,7 @@
 <meta name="theme-color" content="#383838" media="(prefers-color-scheme: light)">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%22-4 -4 22 22%22 shape-rendering=%22crispEdges%22%3E%3Crect x=%22-4%22 y=%22-4%22 width=%2222%22 height=%2222%22 fill=%22%23333%22/%3E%3Cpath fill=%22%23fff%22 d=%22M0 0h14v1h-14zM0 1h1v1h-1zM13 1h1v1h-1zM0 2h1v1h-1zM13 2h1v1h-1zM0 3h1v1h-1zM13 3h1v1h-1zM0 4h1v1h-1zM13 4h1v1h-1zM0 5h1v1h-1zM13 5h1v1h-1zM13 6h1v1h-1zM13 7h1v1h-1zM13 8h1v1h-1zM0 9h4v1h-4zM13 9h1v1h-1zM0 10h1v1h-1zM13 10h1v1h-1zM0 11h4v1h-4zM13 11h1v1h-1zM3 12h1v1h-1zM13 12h1v1h-1zM0 13h4v1h-4zM5 13h9v1h-9z%22/%3E%3C/svg%3E">
 
+<script>try{var t=localStorage.getItem("sg-theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}</script>
 <style>
     /* Montserrat (variable 300–800) + Silkscreen 400/700, both OFL, latin
        subset, embedded so the page stays one self-contained file with zero
@@ -77,8 +78,10 @@
         --receipt: #fffaf0;
         color-scheme: light dark;
     }
+    /* dark tokens: from the system setting unless the visitor picked light,
+       or from an explicit dark pick (html[data-theme], set by the top-bar toggle) */
     @media (prefers-color-scheme: dark) {
-        :root {
+        :root:not([data-theme="light"]) {
             --bg: #1a1a1a;
             --card: #242424;
             --panel: #2f2f2f;
@@ -96,6 +99,25 @@
             --code-bg: #111111;
         }
     }
+    :root[data-theme="dark"] {
+        --bg: #1a1a1a;
+        --card: #242424;
+        --panel: #2f2f2f;
+        --panel-hover: #3a3a3a;
+        --ink: #f3f3f3;
+        --body: #cfcfcf;
+        --dim: #a0a0a0;
+        --line: #363636;
+        --bar: #101010;
+        --btn: #f3f3f3;
+        --btn-ink: #1a1a1a;
+        --hl: rgba(255, 212, 0, 0.12);
+        --green-ink: #4fd86c;
+        --c-tape: #7a9cc2;
+        --code-bg: #111111;
+        color-scheme: dark;
+    }
+    :root[data-theme="light"] { color-scheme: light; }
 
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
@@ -256,6 +278,22 @@
         font-weight: 800;
         line-height: 1;
     }
+    .theme-toggle {
+        display: inline-grid;
+        place-items: center;
+        width: 30px;
+        height: 30px;
+        padding: 0;
+        border: 0;
+        background: transparent;
+        color: rgba(255, 255, 255, 0.85);
+        cursor: pointer;
+    }
+    .theme-toggle:hover { color: var(--yellow); }
+    .theme-toggle svg { width: 18px; height: 18px; shape-rendering: crispEdges; }
+    .theme-toggle .i-sun { display: none; }
+    html.is-dark .theme-toggle .i-sun { display: block; }
+    html.is-dark .theme-toggle .i-moon { display: none; }
     @media (max-width: 760px) {
         .hide-sm { display: none; }
         .topnav { gap: 14px; }
@@ -891,6 +929,7 @@
                 <li class="hide-sm"><a href="/docs">Docs</a></li>
                 <li class="hide-sm"><a href="/changelog">Changelog</a></li>
                 <li class="hide-sm"><a href="/status">Status</a></li>
+                <li><button class="theme-toggle" type="button" aria-label="Switch to dark mode"><svg class="i-moon" viewBox="0 0 8 8" aria-hidden="true"><path fill="currentColor" d="M3 0h3v1h-3zM1 1h3v1h-3zM1 2h2v1h-2zM0 3h2v1h-2zM0 4h2v1h-2zM1 5h2v1h-2zM1 6h3v1h-3zM3 7h3v1h-3z"/></svg><svg class="i-sun" viewBox="0 0 9 9" aria-hidden="true"><path fill="currentColor" d="M4 0h1v1h-1zM1 1h1v1h-1zM7 1h1v1h-1zM3 2h3v1h-3zM2 3h5v1h-5zM0 4h1v1h-1zM2 4h5v1h-5zM8 4h1v1h-1zM2 5h5v1h-5zM3 6h3v1h-3zM1 7h1v1h-1zM7 7h1v1h-1zM4 8h1v1h-1z"/></svg></button></li>
                 <li><a class="help" href="/docs/faq" aria-label="Frequently asked questions" title="FAQ">?</a></li>
                 <li><a href="/login">Sign in</a></li>
                 {{if .SignupsOpen}}
@@ -2298,6 +2337,36 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
         if (fromLink) {
             setTimeout(function () { document.getElementById('build').scrollIntoView({ block: 'start' }); }, 50);
         }
+    })();
+
+    // ---- light/dark toggle: follows the system until the visitor picks one;
+    // the pick is shared with /docs and /changelog via localStorage sg-theme.
+    (function () {
+        var root = document.documentElement, mq = window.matchMedia('(prefers-color-scheme: dark)');
+        function dark() {
+            var t = root.getAttribute('data-theme');
+            return t ? t === 'dark' : mq.matches;
+        }
+        function sync() {
+            var d = dark();
+            root.classList.toggle('is-dark', d);
+            document.querySelectorAll('.theme-toggle').forEach(function (b) {
+                b.setAttribute('aria-label', d ? 'Switch to light mode' : 'Switch to dark mode');
+            });
+            document.querySelectorAll('meta[name="theme-color"]').forEach(function (m) {
+                m.setAttribute('content', d ? '#101010' : '#383838');
+            });
+        }
+        document.querySelectorAll('.theme-toggle').forEach(function (b) {
+            b.addEventListener('click', function () {
+                var next = dark() ? 'light' : 'dark';
+                root.setAttribute('data-theme', next);
+                try { window.localStorage.setItem('sg-theme', next); } catch (e) { /* private mode */ }
+                sync();
+            });
+        });
+        if (mq.addEventListener) mq.addEventListener('change', sync);
+        sync();
     })();
 </script>
 

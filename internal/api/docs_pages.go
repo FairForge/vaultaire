@@ -37,7 +37,7 @@ const docsShellPre = `<!DOCTYPE html>
 <title>__TITLE__ — stored.ge</title>
 ` + siteShellStyle + `</head>
 <body>
-<header class="top"><div class="top-in">` + siteShellBrand + `<a class="crumb" href="/docs">Docs</a></div></header>
+<header class="top"><div class="top-in">` + siteShellBrand + `<a class="crumb" href="/docs">Docs</a>` + siteShellToggle + `</div></header>
 <main>
 `
 

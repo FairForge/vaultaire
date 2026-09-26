@@ -8,24 +8,32 @@ package api
 // system sans and stay a few KB.
 
 // siteShellStyle is the favicon link + <style> block (light + dark via
-// prefers-color-scheme); the favicon is the landing page's pixel box mark.
-const siteShellStyle = `<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%22-4 -4 22 22%22 shape-rendering=%22crispEdges%22%3E%3Crect x=%22-4%22 y=%22-4%22 width=%2222%22 height=%2222%22 fill=%22%23333%22/%3E%3Cpath fill=%22%23fff%22 d=%22M0 0h14v1h-14zM0 1h1v1h-1zM13 1h1v1h-1zM0 2h1v1h-1zM13 2h1v1h-1zM0 3h1v1h-1zM13 3h1v1h-1zM0 4h1v1h-1zM13 4h1v1h-1zM0 5h1v1h-1zM13 5h1v1h-1zM13 6h1v1h-1zM13 7h1v1h-1zM13 8h1v1h-1zM0 9h4v1h-4zM13 9h1v1h-1zM0 10h1v1h-1zM13 10h1v1h-1zM0 11h4v1h-4zM13 11h1v1h-1zM3 12h1v1h-1zM13 12h1v1h-1zM0 13h4v1h-4zM5 13h9v1h-9z%22/%3E%3C/svg%3E">
+// prefers-color-scheme, overridable by the saved sg-theme pick); the favicon is
+// the landing page's pixel box mark.
+const siteShellStyle = `<script>try{var t=localStorage.getItem("sg-theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}</script>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%22-4 -4 22 22%22 shape-rendering=%22crispEdges%22%3E%3Crect x=%22-4%22 y=%22-4%22 width=%2222%22 height=%2222%22 fill=%22%23333%22/%3E%3Cpath fill=%22%23fff%22 d=%22M0 0h14v1h-14zM0 1h1v1h-1zM13 1h1v1h-1zM0 2h1v1h-1zM13 2h1v1h-1zM0 3h1v1h-1zM13 3h1v1h-1zM0 4h1v1h-1zM13 4h1v1h-1zM0 5h1v1h-1zM13 5h1v1h-1zM13 6h1v1h-1zM13 7h1v1h-1zM13 8h1v1h-1zM0 9h4v1h-4zM13 9h1v1h-1zM0 10h1v1h-1zM13 10h1v1h-1zM0 11h4v1h-4zM13 11h1v1h-1zM3 12h1v1h-1zM13 12h1v1h-1zM0 13h4v1h-4zM5 13h9v1h-9z%22/%3E%3C/svg%3E">
 <style>
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 :root {
-  --bg: #f2f2f2; --card: #ffffff; --panel: #e8e8e8; --ink: #2b2b2b; --body: #4d4d4d;
-  --dim: #737373; --line: #dedede; --bar: #383838; --yellow: #ffd400; --hl: #fff4bf;
+  --bg: #f4f1ec; --card: #ffffff; --panel: #ebe6de; --ink: #2b2b2b; --body: #4d4d4d;
+  --dim: #737373; --line: #e3ddd3; --bar: #383838; --yellow: #ffd400; --hl: #fff4bf;
   --code-bg: #262626; --code-ink: #e6e6e6;
   --sans: 'Montserrat', 'Avenir Next', 'Segoe UI', system-ui, -apple-system, sans-serif;
   --mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
   color-scheme: light dark;
 }
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #1a1a1a; --card: #242424; --panel: #2f2f2f; --ink: #f3f3f3; --body: #cfcfcf;
     --dim: #a0a0a0; --line: #363636; --bar: #101010; --hl: rgba(255, 212, 0, 0.12); --code-bg: #111111;
   }
 }
+:root[data-theme="dark"] {
+  --bg: #1a1a1a; --card: #242424; --panel: #2f2f2f; --ink: #f3f3f3; --body: #cfcfcf;
+  --dim: #a0a0a0; --line: #363636; --bar: #101010; --hl: rgba(255, 212, 0, 0.12); --code-bg: #111111;
+  color-scheme: dark;
+}
+:root[data-theme="light"] { color-scheme: light; }
 body { font-family: var(--sans); background: var(--bg); color: var(--body); line-height: 1.65; -webkit-font-smoothing: antialiased; }
 .top { position: sticky; top: 0; z-index: 10; background: var(--bar); }
 .top-in { max-width: 860px; margin: 0 auto; padding: 0 20px; height: 56px; display: flex; align-items: center; gap: 18px; }
@@ -33,6 +41,12 @@ body { font-family: var(--sans); background: var(--bg); color: var(--body); line
 .brand svg { width: 28px; height: 28px; shape-rendering: crispEdges; flex: none; }
 .crumb { color: rgba(255, 255, 255, 0.78); text-decoration: none; font-size: 14px; font-weight: 600; }
 .crumb:hover { color: #fff; }
+.theme-toggle { margin-left: auto; display: inline-grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 0; background: transparent; color: rgba(255, 255, 255, 0.85); cursor: pointer; }
+.theme-toggle:hover { color: var(--yellow); }
+.theme-toggle svg { width: 18px; height: 18px; shape-rendering: crispEdges; }
+.theme-toggle .i-sun { display: none; }
+html.is-dark .theme-toggle .i-sun { display: block; }
+html.is-dark .theme-toggle .i-moon { display: none; }
 .crumb::before { content: "/"; margin-right: 12px; color: rgba(255, 255, 255, 0.35); }
 main { max-width: 860px; margin: 32px auto 64px; padding: 40px 44px 48px; background: var(--card); }
 @media (max-width: 900px) { main { margin: 0 0 40px; padding: 28px 16px 36px; } }
@@ -67,3 +81,19 @@ const siteShellBrand = `<a class="brand" href="/" aria-label="stored.ge home">` 
 	`<svg viewBox="0 0 14 14" aria-hidden="true" focusable="false"><path fill="currentColor" d="` +
 	`M0 0h14v1h-14zM0 1h1v5h-1zM13 1h1v13h-1zM0 9h4v1h-4zM0 10h1v1h-1zM0 11h4v1h-4zM3 12h1v1h-1zM0 13h4v1h-4zM5 13h8v1h-8z` +
 	`"/></svg><span>stored.ge</span></a>`
+
+// siteShellToggle is the bar's light/dark switch plus its script; the pick is
+// shared with the landing page through localStorage "sg-theme".
+const siteShellToggle = `<button class="theme-toggle" type="button" aria-label="Switch to dark mode">` +
+	`<svg class="i-moon" viewBox="0 0 8 8" aria-hidden="true"><path fill="currentColor" d="` +
+	`M3 0h3v1h-3zM1 1h3v1h-3zM1 2h2v1h-2zM0 3h2v1h-2zM0 4h2v1h-2zM1 5h2v1h-2zM1 6h3v1h-3zM3 7h3v1h-3z"/></svg>` +
+	`<svg class="i-sun" viewBox="0 0 9 9" aria-hidden="true"><path fill="currentColor" d="` +
+	`M4 0h1v1h-1zM1 1h1v1h-1zM7 1h1v1h-1zM3 2h3v1h-3zM2 3h5v1h-5zM0 4h1v1h-1zM2 4h5v1h-5zM8 4h1v1h-1z` +
+	`M2 5h5v1h-5zM3 6h3v1h-3zM1 7h1v1h-1zM7 7h1v1h-1zM4 8h1v1h-1z"/></svg></button>` +
+	`<script>(function(){var r=document.documentElement,q=window.matchMedia("(prefers-color-scheme: dark)"),` +
+	`b=document.currentScript.previousElementSibling;` +
+	`function d(){var t=r.getAttribute("data-theme");return t?t==="dark":q.matches}` +
+	`function s(){var k=d();r.classList.toggle("is-dark",k);b.setAttribute("aria-label",k?"Switch to light mode":"Switch to dark mode")}` +
+	`b.addEventListener("click",function(){var n=d()?"light":"dark";r.setAttribute("data-theme",n);` +
+	`try{localStorage.setItem("sg-theme",n)}catch(e){}s()});` +
+	`if(q.addEventListener)q.addEventListener("change",s);s()})();</script>`
