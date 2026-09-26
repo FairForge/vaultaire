@@ -621,3 +621,22 @@ func TestCDN_TenantScopedBackend_ServesPublicObject(t *testing.T) {
 		"tenant-scoped backend must receive the tenant via context")
 	assert.Equal(t, string(content), w.Body.String())
 }
+
+// R2-08c / R6-25: an unreachable backend is not a missing object. The CDN
+// must answer 503 + Retry-After (clients retry) instead of 404 (clients
+// treat it as deleted).
+func TestCDN_BackendUnavailable_Returns503(t *testing.T) {
+	f := setupCDNFixture(t)
+	f.server.engine.AddDriver("down", &downDriver{name: "down"})
+	_, err := f.db.Exec(`
+		INSERT INTO object_head_cache (tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name)
+		VALUES ($1, $2, 'unreachable.bin', 5, 'e1', 'text/plain', 'down')`, f.tenantID, f.bucket)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("GET", "/cdn/"+f.slug+"/"+f.bucket+"/unreachable.bin", nil)
+	w := httptest.NewRecorder()
+	f.router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.NotEmpty(t, w.Header().Get("Retry-After"))
+}
