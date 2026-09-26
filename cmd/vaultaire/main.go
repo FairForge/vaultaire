@@ -4,7 +4,9 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -18,6 +20,48 @@ import (
 	"github.com/FairForge/vaultaire/internal/usage"
 	"go.uber.org/zap"
 )
+
+// shutdownTimeout bounds the whole stop sequence: HTTP drain (in-flight
+// uploads/downloads), the trackers' synchronous flush, then the engine.
+// systemd's TimeoutStopSec must stay above this.
+const shutdownTimeout = 30 * time.Second
+
+// shutdowner is the slice of *api.Server and *engine.CoreEngine that the
+// stop sequence needs; interfaces so the order is unit-testable.
+type shutdowner interface {
+	Shutdown(ctx context.Context) error
+}
+
+// gracefulShutdown stops the process in the only order that works: the HTTP
+// server first — its Shutdown waits for in-flight requests and then flushes
+// the buffered bandwidth/CDN/access-log trackers, both of which need the
+// database — and the engine second, because engine.Shutdown closes the
+// *sql.DB that both of them share (review R1-03: the previous order closed
+// the pool under draining requests and the flush).
+func gracefulShutdown(ctx context.Context, logger *zap.Logger, srv, eng shutdowner) {
+	if err := srv.Shutdown(ctx); err != nil {
+		logger.Warn("http server drain incomplete", zap.Error(err))
+	}
+	if err := eng.Shutdown(ctx); err != nil {
+		logger.Warn("engine shutdown error", zap.Error(err))
+	}
+}
+
+// serveUntilShutdown runs the blocking serve function and tells the two ways
+// it can return apart. http.Server.ListenAndServe returns ErrServerClosed
+// the instant Shutdown closes the listener — BEFORE in-flight requests have
+// drained and before Shutdown itself returns — so that value means "the stop
+// sequence has started", not "failed": wait for it to finish (review R1-02:
+// treating it as fatal exited with status 1 mid-drain on every deploy). Any
+// other error is a real failure and is returned as-is.
+func serveUntilShutdown(serve func() error, shutdownDone <-chan struct{}) error {
+	err := serve()
+	if errors.Is(err, http.ErrServerClosed) {
+		<-shutdownDone
+		return nil
+	}
+	return err
+}
 
 type nilQuotaManager struct{}
 
@@ -337,19 +381,21 @@ func main() {
 		server = api.NewServer(cfg, logger, eng, &nilQuotaManager{}, nil)
 	}
 
-	// Graceful shutdown
+	// Graceful shutdown: SIGTERM/SIGINT → drain HTTP + flush trackers →
+	// engine (closes the DB). main waits on shutdownDone so the process
+	// exits only after the sequence completes, and exits 0.
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-		<-sigChan
+		sig := <-sigChan
 
-		logger.Info("shutting down...")
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		logger.Info("shutting down...", zap.String("signal", sig.String()))
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
 
-		_ = eng.Shutdown(ctx)
-		_ = server.Shutdown(ctx)
-		os.Exit(0)
+		gracefulShutdown(ctx, logger, server, eng)
 	}()
 
 	// Start server
@@ -367,7 +413,8 @@ func main() {
 	fmt.Printf("╚══════════════════════════════════════╝\n")
 	fmt.Printf("\n")
 
-	if err := server.Start(); err != nil {
+	if err := serveUntilShutdown(server.Start, shutdownDone); err != nil {
 		logger.Fatal("server failed", zap.Error(err))
 	}
+	logger.Info("shutdown complete")
 }
