@@ -20,6 +20,9 @@ func setupTestDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatalf("Cannot open test database: %v", err)
 	}
+	if err := db.Ping(); err != nil {
+		t.Fatalf("test database unreachable (%v) — create it with `make test-db`", err)
+	}
 
 	// Clean slate - add billing tables
 	_, _ = db.Exec("DROP TABLE IF EXISTS invoices")

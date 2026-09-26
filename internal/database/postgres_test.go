@@ -3,7 +3,9 @@ package database
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -94,8 +96,26 @@ func TestPostgres_ArtifactOperations(t *testing.T) {
 }
 
 // testConfig mirrors testutil.DBConfig; duplicated here because testutil imports
-// this package and an in-package _test.go cannot import it back.
+// this package and an in-package _test.go cannot import it back. Resolution:
+// DATABASE_URL (CI) > TEST_DB_* > localhost/viera/vaultaire_test.
 func testConfig() Config {
+	if raw := os.Getenv("DATABASE_URL"); raw != "" {
+		if u, err := url.Parse(raw); err == nil && u.Path != "" {
+			port := 5432
+			if p := u.Port(); p != "" {
+				port, _ = strconv.Atoi(p)
+			}
+			cfg := Config{Host: u.Hostname(), Port: port, Database: u.Path[1:], SSLMode: u.Query().Get("sslmode")}
+			if u.User != nil {
+				cfg.User = u.User.Username()
+				cfg.Password, _ = u.User.Password()
+			}
+			if cfg.SSLMode == "" {
+				cfg.SSLMode = "disable"
+			}
+			return cfg
+		}
+	}
 	env := func(key, def string) string {
 		if v := os.Getenv(key); v != "" {
 			return v
@@ -105,7 +125,7 @@ func testConfig() Config {
 	return Config{
 		Host:     env("TEST_DB_HOST", "localhost"),
 		Port:     5432,
-		Database: env("TEST_DB_NAME", "vaultaire"),
+		Database: env("TEST_DB_NAME", "vaultaire_test"),
 		User:     env("TEST_DB_USER", "viera"),
 		Password: env("TEST_DB_PASSWORD", ""),
 		SSLMode:  "disable",

@@ -38,7 +38,19 @@ test-pkg:
 test-clean:
 	go clean -testcache
 
-.PHONY: test test-unit test-integration test-load test-all test-coverage test-bench test-pkg test-clean
+# Create + migrate the local test database (default target of every DB-backed
+# test when DATABASE_URL is unset — see internal/testutil). Idempotent; mirrors
+# the CI "Set up database" step. Never points at the shared dev DB `vaultaire`.
+TEST_DB ?= vaultaire_test
+test-db:
+	psql -X -q -h localhost -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$(TEST_DB)'" | grep -q 1 || \
+		psql -X -q -h localhost -d postgres -c "CREATE DATABASE $(TEST_DB)"
+	@for f in internal/database/migrations/*.sql; do \
+		psql -X -q -v ON_ERROR_STOP=1 -h localhost -d $(TEST_DB) -f "$$f" > /dev/null || exit 1; \
+	done
+	@echo "$(TEST_DB): migrations applied"
+
+.PHONY: test test-unit test-integration test-load test-all test-coverage test-bench test-pkg test-clean test-db
 
 # Code formatting
 fmt:

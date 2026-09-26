@@ -4,16 +4,21 @@ import (
 	"database/sql"
 	"testing"
 
+	"github.com/FairForge/vaultaire/internal/testutil"
 	_ "github.com/lib/pq"
 )
 
-// setupTestDB opens the local dev PostgreSQL and clears the @stored.ge test
-// fixtures. Tests that call it skip when the server is unreachable.
+// setupTestDB opens the test database (testutil.DSN: DATABASE_URL, else
+// TEST_DB_*, else local vaultaire_test — never the shared dev DB) and clears
+// the @stored.ge fixtures this package's tests create.
 func setupTestDB(t *testing.T) *sql.DB {
-	connStr := "user=viera dbname=vaultaire sslmode=disable"
-	db, err := sql.Open("postgres", connStr)
+	t.Helper()
+	db, err := sql.Open("postgres", testutil.DSN())
 	if err != nil {
 		t.Fatal(err)
+	}
+	if err := db.Ping(); err != nil {
+		t.Fatalf("test database unreachable (%v) — create it with `make test-db`", err)
 	}
 
 	// Clean up test data in dependency order:

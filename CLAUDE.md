@@ -37,6 +37,12 @@ make test-coverage        # Generate coverage.out and coverage.html
 # Run a single test
 go test ./internal/auth/... -run TestCreateUserWithTenant -v
 
+# DB-backed tests: create/migrate the local test database first (idempotent).
+# Tests default to `vaultaire_test` (internal/testutil); DATABASE_URL overrides
+# (CI sets it). Never point tests at the shared dev DB `vaultaire` — several
+# tests DROP and recreate tables.
+make test-db
+
 # Run a specific package
 go test -v -race ./internal/api/...
 
