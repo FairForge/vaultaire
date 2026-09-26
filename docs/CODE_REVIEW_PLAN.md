@@ -14,7 +14,7 @@ Update this table at the end of every session.
 | # | Section | Depends on | Status | Findings file | PRs |
 |---|---------|-----------|--------|---------------|-----|
 | R0 | Dead code & scaffolding triage | — | **done 2026-09-26** — 41 pkgs + 77 files deleted (−83.5k LOC); post-merge review added R0-13..19 + test-DB isolation; 6 pkgs + 15 files await decisions D-1..D-10 | [R0-dead-code.md](reviews/R0-dead-code.md) | #473, #474 |
-| R1 | Entry point, server wiring, config, shutdown | R0 | not started | | |
+| R1 | Entry point, server wiring, config, shutdown | R0 | **done 2026-09-26** — 19 findings (1 P0 client-IP trust, 2 P1 shutdown order/exit race — all three fixed; 5 P2, 11 P3 incl. a `.gitignore` rule hiding `cmd/vaultaire/*_test.go`, fixed → 11 WPs); nine areas answered with evidence; ops items for [YOU] in WP-R1-1 | [R1-server-wiring.md](reviews/R1-server-wiring.md) | (pending) |
 | R2 | S3 object data path (GET/PUT/HEAD/DELETE, chunked) | R0 | not started | | |
 | R3 | S3 multipart, copy, batch, reaper | R2 | not started | | |
 | R4 | S3 bucket-level features | R2 | not started | | |
