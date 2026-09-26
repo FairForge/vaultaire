@@ -1,6 +1,6 @@
 # R6 Engine core — 2026-09-26
 
-**Repo state reviewed:** `main` @ `fd1e8b8` (#477). Branch: `review/R6-engine`.
+**Repo state reviewed:** `main` @ `fd1e8b8` (#477). Branch: `review/R6-engine`. **PR:** #478.
 **Depends on:** R0 (`load_balancer.go` kept only for `internal/ha`; `monitor.go`, `migrator.go`,
 `migration_progress.go`, `performance_monitor.go`, `context.go` already deleted — they are not
 reviewed here), R1 (engine `HealthCheck` and `StartTiering` have no callers; caching is switched OFF
