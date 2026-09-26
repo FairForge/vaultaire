@@ -403,6 +403,29 @@ BOOLEAN (migration 042).
   query) is delegated to `handleS3Request` untouched — `isS3RootRequest` is the
   discriminator. Registered as exact `Get("/")`/`Head("/")` before the `/*` catch-all.
   No storage backend — served from the embedded binary.
+- **Visual style (2026-09-26, SELFBOX-inspired pixel look):** light-grey canvas, charcoal app
+  bar, square white cards, bold-then-light headlines, yellow/red/green pixel tags, swipe-bar
+  links. Still ONE self-contained file: Montserrat (variable) + Silkscreen are base64 `@font-face`
+  (Silkscreen skips `&`, which it draws like `$`), and all pixel art is an inline `<svg>` of
+  `<symbol id="s-*">` sprites at the top of `<body>` (mascot, mascot-wave, plant, lamp, floorlamp,
+  dresser, shelf, box, heart, logo, mark) referenced via `<use>`. Sprites are generated from ASCII
+  grids (one `<path>` per colour); size a sprite with `class="px" style="--w:W;--h:H"` and `--u`
+  (px per pixel). Base64 font blobs can in theory contain a `TestLanding_NoDeadProduct` banned
+  substring — re-run that test after swapping fonts. Both stored.ge and stored.cloud serve this page.
+- **Room builder (#build, section 02) + pick-up-able pieces:** every `.piece` (`<g>` + transparent
+  `.hit` rect + `<use>`) inside an `svg[data-play]` (hero room, final CTA) can be dragged, snapped to the
+  pixel grid. The builder (`#room`, viewBox 128x72, floor line y=64) maps pieces to REAL quota at the
+  landing's published prices (box 1 TB Standard, dresser 5 TB Standard, tape shelf 10 TB Vault, lamp
+  1 TB pin-hot capped at Standard TB; everything else is free decor) and prices it on a café-receipt
+  card. Wall/fit "vibes" are site-wide CSS vars (`--wall-a/-b/-deep`, `--fit`: mascot hoodie, band,
+  scenes). State persists in localStorage `sg-room` and travels in `#room=v1.<wall>.<fit>.<name>.<k-x-y_…>`
+  links; `decode` whitelists piece keys/vibes, clamps coords, caps 30 pieces / one mascot, and the name
+  is filtered to letters/digits/space/_'- (16 chars) and only ever set via textContent. "Save image"
+  rebuilds the room as a standalone SVG → canvas → PNG. If prices change, update the `PRICE`/tray
+  labels in the builder script AND the pricing section. The page script has NO template literals
+  (html/template parses `<script>`).
+- **site_shell.go** — shared favicon + `<style>` + pixel-mark brand bar for the /docs/* and
+  /changelog shells, so the sub-pages match the landing page (system fonts, no embeds).
 - **`waitlist.go`** — `POST /api/waitlist` (public, no auth) captures a pre-launch email
   into `waitlist_signups` (migration 044, `ON CONFLICT (email) DO NOTHING`). Validates via
   `mail.ParseAddress`, lowercases, per-IP sliding-window rate limit (`waitlistLimiter`,
