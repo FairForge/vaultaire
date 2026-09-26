@@ -1,6 +1,6 @@
 # R1 Entry point, server wiring, config, shutdown — 2026-09-26
 
-**Repo state reviewed:** `main` @ `9c3330f` (#474). Branch: `review/R1-server-wiring`.
+**Repo state reviewed:** `main` @ `9c3330f` (#474). Branch: `review/R1-server-wiring` → PR #475.
 **Depends on:** [R0-dead-code.md](R0-dead-code.md) — handoff row confirmed below; D-4/D-5 stubs
 (`api/metrics.go`, `api/middleware.go`) ignored as instructed, the live code is `prom_metrics.go`
 and the middlewares in `server.go`.
