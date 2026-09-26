@@ -42,14 +42,14 @@
     }
 
     :root {
-        --bg: #f2f2f2;
+        --bg: #f4f1ec;
         --card: #ffffff;
-        --panel: #e8e8e8;
-        --panel-hover: #dcdcdc;
+        --panel: #ebe6de;
+        --panel-hover: #dfd8cd;
         --ink: #2b2b2b;
         --body: #4d4d4d;
         --dim: #737373;
-        --line: #dedede;
+        --line: #e3ddd3;
         --bar: #383838;
         --btn: #333333;
         --btn-ink: #ffffff;
@@ -69,6 +69,12 @@
         --sans: 'Montserrat', 'Avenir Next', 'Segoe UI', system-ui, -apple-system, sans-serif;
         --pix: 'Silkscreen', ui-monospace, 'SF Mono', Menlo, monospace;
         --mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+        /* vibe: wall + outfit colours, rewritten live by the room builder */
+        --wall-a: #0a3a63;
+        --wall-b: #125594;
+        --wall-deep: #0b2f52;
+        --fit: #1c3445;
+        --receipt: #fffaf0;
         color-scheme: light dark;
     }
     @media (prefers-color-scheme: dark) {
@@ -313,8 +319,9 @@
         overflow: hidden;
         padding: 40px 22px 0;
         background:
-            radial-gradient(ellipse 34% 40% at 7% 82%, rgba(125, 214, 255, 0.55), transparent 70%),
-            linear-gradient(180deg, #0a3a63 0%, #0f4c81 58%, #125594 100%);
+            radial-gradient(ellipse 34% 40% at 7% 82%, rgba(255, 236, 170, 0.5), transparent 70%),
+            linear-gradient(180deg, var(--wall-a) 0%, var(--wall-b) 100%);
+        transition: background 0.4s ease;
         box-shadow: 0 22px 40px -22px rgba(0, 0, 0, 0.5);
     }
     .room::before {
@@ -332,7 +339,7 @@
         border: 7px solid #6e4127;
         box-shadow: inset 0 0 0 2px #a8683b, 0 14px 24px rgba(0, 0, 0, 0.4);
     }
-    .scene { display: block; width: calc(100% + 44px); height: auto; margin: 16px -22px 0; }
+    .scene { display: block; width: calc(100% + 44px); height: auto; margin: 16px -22px 0; color: var(--fit); touch-action: pan-y; }
 
     .term { background: #1e1e1e; color: #e6e6e6; overflow: hidden; }
     .term-bar { display: flex; align-items: center; gap: 6px; padding: 8px 12px; background: #383838; }
@@ -383,6 +390,7 @@
     }
     .kicker b { background: var(--btn); color: var(--btn-ink); padding: 4px 7px; font-weight: 700; }
     .section-head h2 { font-size: clamp(1.9rem, 3.8vw, 2.7rem); margin-bottom: 12px; }
+    .section-head h2 em { display: block; font-style: normal; font-weight: 300; }
     .section-head .lede { font-size: 1.1rem; font-weight: 300; }
 
     /* ---- 01 tiers: the "which size?" picker ---------------------------- */
@@ -395,10 +403,9 @@
         display: flex;
         align-items: flex-end;
         justify-content: center;
-        height: 156px;
+        height: 172px;
         padding-bottom: 16px;
         background: var(--panel);
-        overflow: hidden;
     }
     .tier-art .px { --u: 3px; position: relative; }
     .tier.pop .tier-art::before {
@@ -625,7 +632,7 @@
     .answer h3 { font-size: 1.15rem; margin-bottom: 8px; }
     .answer p { font-size: 0.95rem; }
     .support { display: flex; align-items: flex-end; gap: 18px; max-width: 580px; margin-top: 28px; }
-    .support .px { --u: 3px; }
+    .support .px { --u: 3px; color: var(--fit); }
     .support-bubble { position: relative; flex: 1; padding: 16px 18px; background: var(--card); font-size: 0.93rem; }
     .support-bubble::before {
         content: "";
@@ -641,7 +648,7 @@
     /* ---- final CTA ----------------------------------------------------- */
     .final { padding: 88px 0 96px; text-align: center; background: var(--card); }
     .final-art { display: flex; justify-content: center; margin-bottom: 30px; }
-    .final-art svg { display: block; width: min(300px, 80%); height: auto; }
+    .final-art svg { display: block; width: min(300px, 80%); height: auto; color: var(--fit); }
     .final h2 { font-size: clamp(2rem, 4.4vw, 3rem); margin-bottom: 10px; }
     .final p { margin-bottom: 26px; font-size: 1.1rem; font-weight: 300; }
     .final .waitlist-form { margin: 0 auto; justify-content: center; }
@@ -680,10 +687,197 @@
         }
     }
     @keyframes rise { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: none; } }
+    /* ---- pick-up-able pieces: die-cut sticker outline + lift ---------- */
+    .sticker {
+        filter: drop-shadow(2px 0 0 #fff) drop-shadow(-2px 0 0 #fff) drop-shadow(0 2px 0 #fff) drop-shadow(0 -2px 0 #fff) drop-shadow(0 6px 8px rgba(0, 0, 0, 0.16));
+    }
+    .grab-piece {
+        position: relative;
+        display: inline-flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+        padding: 0;
+        border: 0;
+        background: none;
+        color: inherit;
+        cursor: grab;
+        transition: transform 0.18s cubic-bezier(0.3, 1.6, 0.5, 1);
+    }
+    .grab-piece:hover { transform: translateY(-6px) rotate(-2deg); }
+    .grab-piece:active { transform: translateY(-2px) scale(0.94); }
+    .grab-piece .grab-hint {
+        position: absolute;
+        top: -26px;
+        left: 50%;
+        translate: -50% 0;
+        padding: 4px 6px;
+        background: var(--btn);
+        color: var(--btn-ink);
+        font-family: var(--pix);
+        font-size: 10px;
+        line-height: 1;
+        text-transform: uppercase;
+        white-space: nowrap;
+        opacity: 0;
+        transition: opacity 0.15s ease;
+        pointer-events: none;
+    }
+    .grab-piece:hover .grab-hint, .grab-piece:focus-visible .grab-hint { opacity: 1; }
+    .piece { cursor: grab; outline: none; }
+    .piece .hit { fill: transparent; }
+    .piece.lift { cursor: grabbing; scale: 1.08; rotate: -3deg; filter: drop-shadow(0 3px 0 rgba(0, 0, 0, 0.28)); }
+    .piece { transform-box: fill-box; transform-origin: 50% 100%; transition: scale 0.15s ease, rotate 0.15s ease; }
+    .piece:focus-visible .hit { stroke: var(--yellow); stroke-width: 1; stroke-dasharray: 2 1; }
+    .piece.pop { animation: pop 0.35s cubic-bezier(0.3, 1.8, 0.5, 1); }
+    @keyframes pop { from { scale: 0.4; } to { scale: 1; } }
+    .room-hint {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        margin-top: 12px;
+        font-family: var(--pix);
+        font-size: 11px;
+        text-transform: uppercase;
+        color: var(--dim);
+    }
+    .room-hint a { color: var(--ink); }
+
+    /* ---- sticker band: the TikTok-caption ticker ---------------------- */
+    .band { overflow: hidden; background: var(--yellow); color: #1a1a1a; border-block: 2px solid #1a1a1a; margin-bottom: 56px; }
+    .band-track { display: flex; width: max-content; }
+    .band-row { display: flex; align-items: center; gap: 22px; padding: 12px 11px; font-family: var(--pix); font-size: 14px; text-transform: uppercase; white-space: nowrap; }
+    .band-row .px { --u: 2px; color: var(--fit); }
+    @media (prefers-reduced-motion: no-preference) { .band-track { animation: band 38s linear infinite; } .band:hover .band-track { animation-play-state: paused; } }
+    @keyframes band { to { transform: translateX(-50%); } }
+
+    /* ---- 02 the room builder ------------------------------------------ */
+    .builder { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 20px; align-items: start; }
+    @media (min-width: 961px) { .b-stage { position: sticky; top: 78px; } }
+    @media (max-width: 960px) { .builder { grid-template-columns: 1fr; } }
+    .b-room { position: relative; overflow: hidden; background: var(--card); box-shadow: 0 22px 40px -24px rgba(0, 0, 0, 0.45); }
+    .b-room svg.room-svg { display: block; width: 100%; height: auto; color: var(--fit); touch-action: none; user-select: none; -webkit-user-select: none; }
+    .b-room.drop-ok { outline: 3px dashed var(--yellow); outline-offset: -3px; }
+    .b-room .wall { fill: url(#wallgrad); }
+    .float-note {
+        position: absolute;
+        translate: -50% 0;
+        padding: 3px 6px;
+        background: #1a1a1a;
+        color: #fff;
+        font-family: var(--pix);
+        font-size: 11px;
+        white-space: nowrap;
+        pointer-events: none;
+        animation: floatup 1.1s ease-out forwards;
+    }
+    @keyframes floatup { from { opacity: 0; transform: translateY(6px); } 15% { opacity: 1; } to { opacity: 0; transform: translateY(-34px); } }
+    .b-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 14px 22px; margin-top: 14px; }
+    .swatches { display: flex; align-items: center; gap: 6px; }
+    .swatches > span { margin-right: 4px; font-family: var(--pix); font-size: 11px; text-transform: uppercase; color: var(--dim); }
+    .swatch { width: 26px; height: 26px; border: 2px solid var(--card); outline: 2px solid transparent; background: var(--sw); cursor: pointer; padding: 0; }
+    .swatch:hover { outline-color: var(--line); }
+    .swatch[aria-pressed="true"] { outline-color: var(--ink); }
+    .b-reset { margin-left: auto; padding: 6px 9px; border: 0; background: var(--panel); color: var(--ink); font-family: var(--pix); font-size: 10px; text-transform: uppercase; cursor: pointer; }
+    .b-reset:hover { background: var(--panel-hover); }
+
+    .tray-title { margin: 0 0 8px; font-family: var(--pix); font-size: 11px; text-transform: uppercase; color: var(--dim); }
+    .tray { display: grid; grid-template-columns: repeat(auto-fill, minmax(98px, 1fr)); gap: 8px; margin-bottom: 18px; }
+    .piece-card {
+        position: relative;
+        display: grid;
+        grid-template-rows: 54px auto auto auto;
+        justify-items: center;
+        align-items: end;
+        gap: 2px;
+        padding: 10px 6px 9px;
+        border: 2px solid transparent;
+        background: var(--card);
+        color: var(--ink);
+        font-family: var(--sans);
+        text-align: center;
+        cursor: grab;
+        touch-action: pan-y;
+        transition: border-color 0.15s ease, transform 0.18s cubic-bezier(0.3, 1.6, 0.5, 1);
+    }
+    .piece-card:hover { border-color: var(--ink); transform: translateY(-3px); }
+    .piece-card:active { transform: scale(0.96); }
+    .piece-card .px { --u: 2px; align-self: end; color: var(--fit); transition: transform 0.18s cubic-bezier(0.3, 1.6, 0.5, 1); }
+    .piece-card:hover .px { transform: translateY(-4px) rotate(-4deg); }
+    .piece-card[data-add="rug"] .px { color: var(--wall-deep); }
+    .pc-name { margin-top: 8px; font-size: 0.86rem; font-weight: 700; line-height: 1.2; }
+    .pc-what { font-size: 0.74rem; color: var(--dim); line-height: 1.3; }
+    .pc-price { margin-top: 4px; padding: 3px 5px; background: var(--yellow); color: #1a1a1a; font-family: var(--pix); font-size: 10px; line-height: 1; }
+    .pc-price.free { background: var(--green); color: #0b2a12; }
+    .piece-card[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }
+    .drag-ghost { position: fixed; z-index: 200; pointer-events: none; translate: -50% -85%; rotate: -4deg; }
+    .drag-ghost .px { --u: 4px; }
+
+    /* the order: a café receipt with a torn edge */
+    .receipt {
+        position: relative;
+        margin-top: 4px;
+        padding: 22px 20px 20px;
+        background: var(--receipt);
+        color: #2b2b2b;
+        font-family: var(--mono);
+        font-size: 13px;
+        box-shadow: 0 16px 30px -22px rgba(0, 0, 0, 0.5);
+        --tear: radial-gradient(circle at 6px 0, transparent 5px, var(--receipt) 5.5px);
+    }
+    .receipt::before, .receipt::after { content: ""; position: absolute; left: 0; right: 0; height: 8px; background: var(--tear); background-size: 12px 8px; }
+    .receipt::before { top: -7px; }
+    .receipt::after { bottom: -7px; rotate: 180deg; }
+    .r-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+    .r-head .px { --u: 3px; }
+    .r-head label { display: block; font-family: var(--pix); font-size: 10px; text-transform: uppercase; color: #6b6b6b; }
+    .r-head input {
+        width: 100%;
+        border: 0;
+        border-bottom: 2px dashed #b9b2a6;
+        background: transparent;
+        color: #2b2b2b;
+        font: 700 18px var(--sans);
+        padding: 2px 0 4px;
+        border-radius: 0;
+    }
+    .r-head input:focus { outline: none; border-bottom-color: #2b2b2b; }
+    .r-lines { list-style: none; margin: 12px 0; padding: 10px 0; border-block: 2px dashed #d4ccbf; }
+    .r-lines li { display: flex; align-items: baseline; gap: 6px; padding: 3px 0; }
+    .r-lines li .dots { flex: 1; border-bottom: 2px dotted #cfc7b9; translate: 0 -4px; }
+    .r-lines li.muted { color: #8a8378; }
+    .r-total { display: flex; justify-content: space-between; align-items: baseline; font-family: var(--sans); font-weight: 800; font-size: 1.6rem; letter-spacing: -0.02em; }
+    .r-total small { font-family: var(--pix); font-weight: 400; font-size: 10px; letter-spacing: 0; text-transform: uppercase; color: #6b6b6b; }
+    .r-fine { margin-top: 4px; font-size: 11.5px; line-height: 1.5; color: #6b6b6b; }
+    .r-save { margin-top: 8px; padding: 8px 10px; background: #fff0a8; font-size: 12px; font-weight: 700; }
+    .r-save:empty { display: none; }
+    .r-warn { margin-top: 8px; font-size: 12px; color: #b3261e; }
+    .r-warn:empty { display: none; }
+    .r-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+    .r-actions .btn { flex: 1 1 auto; }
+    .receipt .btn-primary { background: #2b2b2b; color: #fff; border-color: #2b2b2b; }
+    .receipt .btn-ghost { color: #2b2b2b; border-color: #2b2b2b; }
+    .receipt .btn-ghost:hover { background: #2b2b2b; color: #fff; }
+    .toast {
+        position: fixed;
+        left: 50%;
+        bottom: 24px;
+        z-index: 300;
+        translate: -50% 0;
+        padding: 10px 14px;
+        background: #1a1a1a;
+        color: #fff;
+        font-family: var(--pix);
+        font-size: 12px;
+        text-transform: uppercase;
+        box-shadow: 4px 4px 0 var(--yellow);
+        animation: floatup 2.4s ease-out forwards;
+    }
+    .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 </style>
 </head>
 <body>
-<svg class="sprite-defs" width="0" height="0" aria-hidden="true" focusable="false"><defs><symbol id="s-mascot" viewBox="0 0 16 26"><path fill="#000000" fill-opacity="0.14" d="M1 25h13v1h-13z"/><path fill="#262626" d="M4 5h2v1h-2zM9 5h2v1h-2zM4 6h2v1h-2zM9 6h2v1h-2zM2 24h4v1h-4zM8 24h4v1h-4z"/><path fill="#ffffff" d="M6 14h2v1h-2zM6 15h2v1h-2z"/><path fill="#f6cba4" d="M4 3h7v1h-7zM3 4h9v1h-9zM2 5h2v1h-2zM6 5h3v1h-3zM11 5h1v1h-1zM2 6h2v1h-2zM6 6h3v1h-3zM11 6h1v1h-1zM2 7h10v1h-10zM2 8h4v1h-4zM10 8h2v1h-2zM3 9h8v1h-8zM1 18h1v1h-1zM12 18h1v1h-1z"/><path fill="#6b3f1f" d="M3 0h8v1h-8zM2 1h10v1h-10zM2 2h11v1h-11zM2 3h2v1h-2zM11 3h2v1h-2zM2 4h1v1h-1zM12 4h1v1h-1z"/><path fill="#c85a54" d="M6 8h4v1h-4z"/><path fill="#d9a33a" d="M3 19h8v1h-8zM3 20h8v1h-8zM3 21h3v1h-3zM8 21h3v1h-3zM3 22h3v1h-3zM8 22h3v1h-3zM3 23h3v1h-3zM8 23h3v1h-3z"/><path fill="#b3832a" d="M6 21h1v1h-1zM11 21h1v1h-1zM6 22h1v1h-1zM11 22h1v1h-1zM6 23h1v1h-1zM11 23h1v1h-1z"/><path fill="#e0a77c" d="M12 5h1v1h-1zM12 6h1v1h-1zM12 7h1v1h-1zM12 8h1v1h-1zM11 9h1v1h-1zM5 10h4v1h-4zM1 19h1v1h-1zM12 19h1v1h-1z"/><path fill="#1c3445" d="M3 11h8v1h-8zM2 12h10v1h-10zM1 13h5v1h-5zM8 13h5v1h-5zM1 14h4v1h-4zM9 14h4v1h-4zM1 15h4v1h-4zM9 15h4v1h-4zM1 16h5v1h-5zM8 16h5v1h-5zM1 17h12v1h-12zM2 18h10v1h-10z"/><path fill="#2f5c86" d="M6 13h2v1h-2zM5 14h1v1h-1zM8 14h1v1h-1zM5 15h1v1h-1zM8 15h1v1h-1zM6 16h2v1h-2z"/></symbol><symbol id="s-mascot-wave" viewBox="0 0 16 26"><path fill="#000000" fill-opacity="0.14" d="M1 25h13v1h-13z"/><path fill="#262626" d="M4 5h2v1h-2zM9 5h2v1h-2zM4 6h2v1h-2zM9 6h2v1h-2zM2 24h4v1h-4zM8 24h4v1h-4z"/><path fill="#ffffff" d="M6 14h2v1h-2zM6 15h2v1h-2z"/><path fill="#f6cba4" d="M4 3h7v1h-7zM3 4h9v1h-9zM2 5h2v1h-2zM6 5h3v1h-3zM11 5h1v1h-1zM14 5h2v1h-2zM2 6h2v1h-2zM6 6h3v1h-3zM11 6h1v1h-1zM14 6h2v1h-2zM2 7h10v1h-10zM2 8h4v1h-4zM10 8h2v1h-2zM3 9h8v1h-8zM1 18h1v1h-1z"/><path fill="#6b3f1f" d="M3 0h8v1h-8zM2 1h10v1h-10zM2 2h11v1h-11zM2 3h2v1h-2zM11 3h2v1h-2zM2 4h1v1h-1zM12 4h1v1h-1z"/><path fill="#c85a54" d="M6 8h4v1h-4z"/><path fill="#d9a33a" d="M3 19h8v1h-8zM3 20h8v1h-8zM3 21h3v1h-3zM8 21h3v1h-3zM3 22h3v1h-3zM8 22h3v1h-3zM3 23h3v1h-3zM8 23h3v1h-3z"/><path fill="#b3832a" d="M6 21h1v1h-1zM11 21h1v1h-1zM6 22h1v1h-1zM11 22h1v1h-1zM6 23h1v1h-1zM11 23h1v1h-1z"/><path fill="#e0a77c" d="M12 5h1v1h-1zM12 6h1v1h-1zM12 7h1v1h-1zM12 8h1v1h-1zM11 9h1v1h-1zM5 10h4v1h-4zM1 19h1v1h-1z"/><path fill="#1c3445" d="M14 7h2v1h-2zM14 8h2v1h-2zM13 9h2v1h-2zM13 10h2v1h-2zM3 11h8v1h-8zM12 11h2v1h-2zM2 12h12v1h-12zM1 13h5v1h-5zM8 13h5v1h-5zM1 14h4v1h-4zM9 14h4v1h-4zM1 15h4v1h-4zM9 15h4v1h-4zM1 16h5v1h-5zM8 16h5v1h-5zM1 17h12v1h-12zM2 18h11v1h-11z"/><path fill="#2f5c86" d="M6 13h2v1h-2zM5 14h1v1h-1zM8 14h1v1h-1zM5 15h1v1h-1zM8 15h1v1h-1zM6 16h2v1h-2z"/></symbol><symbol id="s-plant" viewBox="0 0 12 18"><path fill="#000000" fill-opacity="0.14" d="M1 17h10v1h-10z"/><path fill="#9ccc4a" d="M6 0h1v1h-1zM5 1h2v1h-2zM5 2h3v1h-3zM5 3h3v1h-3zM5 4h2v1h-2zM5 5h1v1h-1z"/><path fill="#43ad4b" d="M5 0h1v1h-1zM4 1h1v1h-1zM7 1h1v1h-1zM4 2h1v1h-1zM8 2h1v1h-1zM3 3h2v1h-2zM8 3h1v1h-1zM3 4h2v1h-2zM7 4h2v1h-2zM2 5h3v1h-3zM6 5h4v1h-4zM3 6h6v1h-6zM5 7h2v1h-2z"/><path fill="#1f7a45" d="M3 2h1v1h-1zM2 3h1v1h-1zM9 3h1v1h-1zM1 4h2v1h-2zM9 4h2v1h-2zM1 5h1v1h-1zM10 5h1v1h-1zM2 6h1v1h-1zM9 6h1v1h-1zM3 7h2v1h-2zM7 7h2v1h-2zM5 8h2v1h-2zM5 9h2v1h-2z"/><path fill="#b9e4f7" d="M9 10h1v1h-1zM9 11h1v1h-1zM9 12h1v1h-1zM9 13h1v1h-1zM9 14h1v1h-1zM9 15h1v1h-1zM8 16h2v1h-2z"/><path fill="#7fcdf0" d="M3 10h6v1h-6zM3 11h6v1h-6zM3 12h6v1h-6zM3 13h6v1h-6zM3 14h6v1h-6zM3 15h6v1h-6zM4 16h4v1h-4z"/><path fill="#4aa8dc" d="M2 10h1v1h-1zM2 11h1v1h-1zM2 12h1v1h-1zM2 13h1v1h-1zM2 14h1v1h-1zM2 15h1v1h-1zM2 16h2v1h-2z"/></symbol><symbol id="s-lamp" viewBox="0 0 10 13"><path fill="#b9e4f7" d="M2 11h6v1h-6zM1 12h8v1h-8z"/><path fill="#f7d774" d="M2 0h6v1h-6zM1 1h7v1h-7zM1 2h7v1h-7zM1 3h7v1h-7zM1 4h7v1h-7zM1 5h7v1h-7z"/><path fill="#dfb24a" d="M8 1h1v1h-1zM8 2h1v1h-1zM8 3h1v1h-1zM8 4h1v1h-1zM8 5h1v1h-1zM2 6h6v1h-6z"/><path fill="#5bc0eb" d="M4 7h2v1h-2zM4 8h2v1h-2zM4 9h2v1h-2zM4 10h2v1h-2z"/></symbol><symbol id="s-heart" viewBox="0 0 9 8"><path fill="#ff3b6b" d="M1 0h2v1h-2zM6 0h2v1h-2zM0 1h4v1h-4zM5 1h4v1h-4zM0 2h9v1h-9zM0 3h8v1h-8zM1 4h6v1h-6zM2 5h4v1h-4zM3 6h2v1h-2z"/><path fill="#c9244f" d="M8 3h1v1h-1zM7 4h1v1h-1zM6 5h1v1h-1zM5 6h1v1h-1zM4 7h1v1h-1z"/></symbol><symbol id="s-floorlamp" viewBox="0 0 10 44"><path fill="#000000" fill-opacity="0.14" d="M0 43h10v1h-10z"/><path fill="#f7d774" d="M2 0h6v1h-6zM1 1h7v1h-7zM1 2h7v1h-7zM1 3h7v1h-7zM1 4h7v1h-7zM1 5h7v1h-7zM1 6h7v1h-7z"/><path fill="#dfb24a" d="M8 1h1v1h-1zM8 2h1v1h-1zM8 3h1v1h-1zM8 4h1v1h-1zM8 5h1v1h-1zM8 6h1v1h-1zM1 7h8v1h-8z"/><path fill="#9e9e9e" d="M4 8h1v1h-1zM4 9h1v1h-1zM4 10h1v1h-1zM4 11h1v1h-1zM4 12h1v1h-1zM4 13h1v1h-1zM4 14h1v1h-1zM4 15h1v1h-1zM4 16h1v1h-1zM4 17h1v1h-1zM4 18h1v1h-1zM4 19h1v1h-1zM4 20h1v1h-1zM4 21h1v1h-1zM4 22h1v1h-1zM4 23h1v1h-1zM4 24h1v1h-1zM4 25h1v1h-1zM4 26h1v1h-1zM4 27h1v1h-1zM4 28h1v1h-1zM4 29h1v1h-1zM4 30h1v1h-1zM4 31h1v1h-1zM4 32h1v1h-1zM4 33h1v1h-1zM4 34h1v1h-1zM4 35h1v1h-1zM4 36h1v1h-1zM4 37h1v1h-1zM4 38h1v1h-1zM4 39h1v1h-1zM4 40h1v1h-1z"/><path fill="#4a4a4a" d="M5 8h1v1h-1zM5 9h1v1h-1zM5 10h1v1h-1zM5 11h1v1h-1zM5 12h1v1h-1zM5 13h1v1h-1zM5 14h1v1h-1zM5 15h1v1h-1zM5 16h1v1h-1zM5 17h1v1h-1zM5 18h1v1h-1zM5 19h1v1h-1zM5 20h1v1h-1zM5 21h1v1h-1zM5 22h1v1h-1zM5 23h1v1h-1zM5 24h1v1h-1zM5 25h1v1h-1zM5 26h1v1h-1zM5 27h1v1h-1zM5 28h1v1h-1zM5 29h1v1h-1zM5 30h1v1h-1zM5 31h1v1h-1zM5 32h1v1h-1zM5 33h1v1h-1zM5 34h1v1h-1zM5 35h1v1h-1zM5 36h1v1h-1zM5 37h1v1h-1zM5 38h1v1h-1zM5 39h1v1h-1zM5 40h1v1h-1zM2 41h6v1h-6zM2 42h6v1h-6z"/></symbol><symbol id="s-dresser" viewBox="0 0 32 20"><path fill="#000000" fill-opacity="0.14" d="M0 19h32v1h-32z"/><path fill="#6e4127" d="M21 2h1v1h-1zM30 2h1v1h-1zM21 3h1v1h-1zM30 3h1v1h-1zM21 4h1v1h-1zM30 4h1v1h-1zM21 5h1v1h-1zM30 5h1v1h-1zM21 6h1v1h-1zM30 6h1v1h-1zM21 7h1v1h-1zM30 7h1v1h-1zM21 8h1v1h-1zM30 8h1v1h-1zM21 9h1v1h-1zM30 9h1v1h-1zM21 10h1v1h-1zM30 10h1v1h-1zM21 11h1v1h-1zM30 11h1v1h-1zM21 12h1v1h-1zM30 12h1v1h-1zM21 13h1v1h-1zM30 13h1v1h-1zM21 14h1v1h-1zM30 14h1v1h-1zM21 15h1v1h-1zM30 15h1v1h-1zM21 16h1v1h-1zM30 16h1v1h-1zM21 17h1v1h-1zM30 17h1v1h-1zM2 18h3v1h-3zM14 18h3v1h-3zM27 18h3v1h-3z"/><path fill="#a8683b" d="M0 1h32v1h-32zM22 2h8v1h-8zM22 3h1v1h-1zM22 4h1v1h-1zM22 5h1v1h-1zM25 5h3v1h-3zM22 6h1v1h-1zM25 6h3v1h-3zM22 7h1v1h-1zM25 7h3v1h-3zM22 8h1v1h-1zM25 8h3v1h-3zM6 9h2v1h-2zM16 9h2v1h-2zM22 9h1v1h-1zM25 9h3v1h-3zM6 10h2v1h-2zM16 10h2v1h-2zM22 10h1v1h-1zM25 10h3v1h-3zM22 11h1v1h-1zM25 11h3v1h-3zM22 12h1v1h-1zM25 12h3v1h-3zM22 13h1v1h-1zM25 13h3v1h-3zM22 14h1v1h-1zM25 14h3v1h-3zM22 15h1v1h-1zM22 16h1v1h-1zM22 17h8v1h-8z"/><path fill="#d59352" d="M0 0h32v1h-32zM23 3h7v1h-7zM23 4h7v1h-7zM23 5h2v1h-2zM28 5h2v1h-2zM23 6h2v1h-2zM28 6h2v1h-2zM23 7h2v1h-2zM28 7h2v1h-2zM23 8h2v1h-2zM28 8h2v1h-2zM23 9h2v1h-2zM28 9h2v1h-2zM23 10h2v1h-2zM28 10h2v1h-2zM23 11h2v1h-2zM28 11h2v1h-2zM23 12h2v1h-2zM28 12h2v1h-2zM23 13h2v1h-2zM28 13h2v1h-2zM23 14h2v1h-2zM28 14h2v1h-2zM23 15h7v1h-7zM23 16h7v1h-7z"/><path fill="#f2cf7c" d="M2 3h9v1h-9zM12 3h9v1h-9zM2 4h4v1h-4zM8 4h3v1h-3zM12 4h4v1h-4zM18 4h3v1h-3zM2 5h4v1h-4zM8 5h3v1h-3zM12 5h4v1h-4zM18 5h3v1h-3zM2 6h9v1h-9zM12 6h9v1h-9zM2 8h9v1h-9zM12 8h9v1h-9zM2 9h4v1h-4zM8 9h3v1h-3zM12 9h4v1h-4zM18 9h3v1h-3zM2 10h4v1h-4zM8 10h3v1h-3zM12 10h4v1h-4zM18 10h3v1h-3zM2 11h9v1h-9zM12 11h9v1h-9zM2 13h9v1h-9zM12 13h9v1h-9zM2 14h4v1h-4zM8 14h3v1h-3zM12 14h4v1h-4zM18 14h3v1h-3zM2 15h4v1h-4zM8 15h3v1h-3zM12 15h4v1h-4zM18 15h3v1h-3zM2 16h9v1h-9zM12 16h9v1h-9z"/><path fill="#e2b45b" d="M1 2h20v1h-20zM1 3h1v1h-1zM11 3h1v1h-1zM1 4h1v1h-1zM11 4h1v1h-1zM1 5h1v1h-1zM11 5h1v1h-1zM1 6h1v1h-1zM11 6h1v1h-1zM1 7h20v1h-20zM1 8h1v1h-1zM11 8h1v1h-1zM1 9h1v1h-1zM11 9h1v1h-1zM1 10h1v1h-1zM11 10h1v1h-1zM1 11h1v1h-1zM11 11h1v1h-1zM1 12h20v1h-20zM1 13h1v1h-1zM11 13h1v1h-1zM1 14h1v1h-1zM11 14h1v1h-1zM1 15h1v1h-1zM11 15h1v1h-1zM1 16h1v1h-1zM11 16h1v1h-1zM1 17h20v1h-20z"/><path fill="#dfb24a" d="M6 4h2v1h-2zM16 4h2v1h-2zM6 5h2v1h-2zM16 5h2v1h-2zM6 14h2v1h-2zM16 14h2v1h-2zM6 15h2v1h-2zM16 15h2v1h-2z"/></symbol><symbol id="s-shelf" viewBox="0 0 20 40"><path fill="#000000" fill-opacity="0.14" d="M0 39h20v1h-20z"/><path fill="#4a2c1a" d="M6 2h2v1h-2zM12 2h2v1h-2zM6 8h2v1h-2zM12 8h2v1h-2zM12 9h2v1h-2zM12 10h2v1h-2zM12 11h2v1h-2zM12 12h2v1h-2zM2 14h2v1h-2zM6 14h2v1h-2zM12 14h2v1h-2zM2 15h2v1h-2zM2 16h2v1h-2zM2 17h2v1h-2zM2 18h2v1h-2zM6 20h2v1h-2zM12 20h4v1h-4zM14 21h2v1h-2zM14 22h2v1h-2zM14 23h2v1h-2zM14 24h2v1h-2z"/><path fill="#6e4127" d="M0 2h2v1h-2zM18 2h2v1h-2zM0 3h2v1h-2zM18 3h2v1h-2zM0 4h2v1h-2zM18 4h2v1h-2zM0 5h2v1h-2zM18 5h2v1h-2zM0 6h2v1h-2zM18 6h2v1h-2zM0 7h2v1h-2zM18 7h2v1h-2zM0 8h2v1h-2zM18 8h2v1h-2zM0 9h2v1h-2zM18 9h2v1h-2zM0 10h2v1h-2zM18 10h2v1h-2zM0 11h2v1h-2zM18 11h2v1h-2zM0 12h2v1h-2zM18 12h2v1h-2zM0 13h2v1h-2zM18 13h2v1h-2zM0 14h2v1h-2zM18 14h2v1h-2zM0 15h2v1h-2zM18 15h2v1h-2zM0 16h2v1h-2zM18 16h2v1h-2zM0 17h2v1h-2zM18 17h2v1h-2zM0 18h2v1h-2zM18 18h2v1h-2zM0 19h2v1h-2zM18 19h2v1h-2zM0 20h2v1h-2zM18 20h2v1h-2zM0 21h2v1h-2zM18 21h2v1h-2zM0 22h2v1h-2zM18 22h2v1h-2zM0 23h2v1h-2zM18 23h2v1h-2zM0 24h2v1h-2zM18 24h2v1h-2zM0 25h2v1h-2zM18 25h2v1h-2zM0 26h2v1h-2zM9 26h2v1h-2zM18 26h2v1h-2zM0 27h2v1h-2zM9 27h2v1h-2zM18 27h2v1h-2zM0 28h2v1h-2zM9 28h2v1h-2zM18 28h2v1h-2zM0 29h2v1h-2zM9 29h2v1h-2zM18 29h2v1h-2zM0 30h2v1h-2zM9 30h2v1h-2zM18 30h2v1h-2zM0 31h2v1h-2zM9 31h2v1h-2zM18 31h2v1h-2zM0 32h2v1h-2zM9 32h2v1h-2zM18 32h2v1h-2zM0 33h2v1h-2zM9 33h2v1h-2zM18 33h2v1h-2zM0 34h2v1h-2zM9 34h2v1h-2zM18 34h2v1h-2zM0 35h2v1h-2zM9 35h2v1h-2zM18 35h2v1h-2zM0 36h2v1h-2zM9 36h2v1h-2zM18 36h2v1h-2zM0 37h20v1h-20zM1 38h2v1h-2zM17 38h2v1h-2z"/><path fill="#a8683b" d="M0 0h20v1h-20zM0 1h20v1h-20zM2 7h16v1h-16zM2 13h16v1h-16zM2 19h16v1h-16zM2 25h16v1h-16zM2 26h7v1h-7zM11 26h7v1h-7zM2 27h1v1h-1zM8 27h1v1h-1zM11 27h1v1h-1zM17 27h1v1h-1zM2 28h1v1h-1zM8 28h1v1h-1zM11 28h1v1h-1zM17 28h1v1h-1zM2 29h1v1h-1zM8 29h1v1h-1zM11 29h1v1h-1zM17 29h1v1h-1zM2 30h1v1h-1zM8 30h1v1h-1zM11 30h1v1h-1zM17 30h1v1h-1zM2 31h1v1h-1zM8 31h1v1h-1zM11 31h1v1h-1zM17 31h1v1h-1zM2 32h1v1h-1zM8 32h1v1h-1zM11 32h1v1h-1zM17 32h1v1h-1zM2 33h1v1h-1zM8 33h1v1h-1zM11 33h1v1h-1zM17 33h1v1h-1zM2 34h1v1h-1zM8 34h1v1h-1zM11 34h1v1h-1zM17 34h1v1h-1zM2 35h1v1h-1zM8 35h1v1h-1zM11 35h1v1h-1zM17 35h1v1h-1zM2 36h7v1h-7zM11 36h7v1h-7z"/><path fill="#d59352" d="M3 27h5v1h-5zM12 27h5v1h-5zM3 28h5v1h-5zM12 28h5v1h-5zM3 29h5v1h-5zM12 29h5v1h-5zM3 30h4v1h-4zM13 30h4v1h-4zM3 31h4v1h-4zM13 31h4v1h-4zM3 32h5v1h-5zM12 32h5v1h-5zM3 33h5v1h-5zM12 33h5v1h-5zM3 34h5v1h-5zM12 34h5v1h-5zM3 35h5v1h-5zM12 35h5v1h-5z"/><path fill="#b9e4f7" d="M14 2h2v1h-2zM15 3h1v1h-1zM14 4h2v1h-2zM14 5h2v1h-2zM14 6h2v1h-2zM10 14h2v1h-2zM11 15h1v1h-1zM10 16h2v1h-2zM10 17h2v1h-2zM10 18h2v1h-2z"/><path fill="#7fcdf0" d="M8 20h2v1h-2zM9 21h1v1h-1zM8 22h2v1h-2zM8 23h2v1h-2zM8 24h2v1h-2z"/><path fill="#e8412c" d="M2 2h2v1h-2zM3 3h1v1h-1zM2 4h2v1h-2zM2 5h2v1h-2zM2 6h2v1h-2zM4 8h2v1h-2zM14 8h2v1h-2zM5 9h1v1h-1zM15 9h1v1h-1zM4 10h2v1h-2zM14 10h2v1h-2zM4 11h2v1h-2zM14 11h2v1h-2zM4 12h2v1h-2zM14 12h2v1h-2zM16 14h2v1h-2zM17 15h1v1h-1zM16 16h2v1h-2zM16 17h2v1h-2zM16 18h2v1h-2zM10 20h2v1h-2zM11 21h1v1h-1zM10 22h2v1h-2zM10 23h2v1h-2zM10 24h2v1h-2z"/><path fill="#ffd400" d="M4 2h2v1h-2zM16 2h2v1h-2zM5 3h1v1h-1zM17 3h1v1h-1zM4 4h2v1h-2zM16 4h2v1h-2zM4 5h2v1h-2zM16 5h2v1h-2zM4 6h2v1h-2zM16 6h2v1h-2zM16 8h2v1h-2zM17 9h1v1h-1zM16 10h2v1h-2zM16 11h2v1h-2zM16 12h2v1h-2zM12 15h2v1h-2zM13 16h1v1h-1zM12 17h2v1h-2zM12 18h2v1h-2zM12 21h2v1h-2zM13 22h1v1h-1zM12 23h2v1h-2zM12 24h2v1h-2z"/><path fill="#27c24c" d="M6 3h2v1h-2zM7 4h1v1h-1zM6 5h2v1h-2zM6 6h2v1h-2zM6 9h2v1h-2zM7 10h1v1h-1zM6 11h2v1h-2zM6 12h2v1h-2zM2 20h2v1h-2zM3 21h1v1h-1zM2 22h2v1h-2zM2 23h2v1h-2zM2 24h2v1h-2z"/><path fill="#3b82f6" d="M8 2h2v1h-2zM9 3h1v1h-1zM8 4h2v1h-2zM8 5h2v1h-2zM8 6h2v1h-2zM2 8h2v1h-2zM3 9h1v1h-1zM2 10h2v1h-2zM2 11h2v1h-2zM2 12h2v1h-2zM4 14h2v1h-2zM14 14h2v1h-2zM5 15h1v1h-1zM15 15h1v1h-1zM4 16h2v1h-2zM14 16h2v1h-2zM4 17h2v1h-2zM14 17h2v1h-2zM4 18h2v1h-2zM14 18h2v1h-2zM16 20h2v1h-2zM17 21h1v1h-1zM16 22h2v1h-2zM16 23h2v1h-2zM16 24h2v1h-2z"/><path fill="#8e5bd6" d="M10 2h2v1h-2zM11 3h1v1h-1zM10 4h2v1h-2zM10 5h2v1h-2zM10 6h2v1h-2zM8 8h2v1h-2zM9 9h1v1h-1zM8 10h2v1h-2zM8 11h2v1h-2zM8 12h2v1h-2zM6 15h2v1h-2zM7 16h1v1h-1zM6 17h2v1h-2zM6 18h2v1h-2zM4 20h2v1h-2zM5 21h1v1h-1zM4 22h2v1h-2zM4 23h2v1h-2zM4 24h2v1h-2z"/><path fill="#ff8a3d" d="M12 3h2v1h-2zM13 4h1v1h-1zM12 5h2v1h-2zM12 6h2v1h-2zM10 8h2v1h-2zM11 9h1v1h-1zM10 10h2v1h-2zM10 11h2v1h-2zM10 12h2v1h-2zM8 14h2v1h-2zM9 15h1v1h-1zM8 16h2v1h-2zM8 17h2v1h-2zM8 18h2v1h-2zM6 21h2v1h-2zM7 22h1v1h-1zM6 23h2v1h-2zM6 24h2v1h-2z"/><path fill="#ffffff" d="M2 3h1v1h-1zM4 3h1v1h-1zM8 3h1v1h-1zM10 3h1v1h-1zM14 3h1v1h-1zM16 3h1v1h-1zM6 4h1v1h-1zM12 4h1v1h-1zM2 9h1v1h-1zM4 9h1v1h-1zM8 9h1v1h-1zM10 9h1v1h-1zM14 9h1v1h-1zM16 9h1v1h-1zM6 10h1v1h-1zM4 15h1v1h-1zM8 15h1v1h-1zM10 15h1v1h-1zM14 15h1v1h-1zM16 15h1v1h-1zM6 16h1v1h-1zM12 16h1v1h-1zM2 21h1v1h-1zM4 21h1v1h-1zM8 21h1v1h-1zM10 21h1v1h-1zM16 21h1v1h-1zM6 22h1v1h-1zM12 22h1v1h-1z"/><path fill="#4a4a4a" d="M7 30h1v1h-1zM12 30h1v1h-1zM7 31h1v1h-1zM12 31h1v1h-1z"/></symbol><symbol id="s-box" viewBox="0 0 16 13"><path fill="#000000" fill-opacity="0.14" d="M0 12h16v1h-16z"/><path fill="#e7bc86" d="M0 0h6v1h-6zM8 0h5v1h-5zM0 1h6v1h-6zM8 1h5v1h-5z"/><path fill="#cf9356" d="M13 0h3v1h-3zM13 1h3v1h-3zM0 3h6v1h-6zM8 3h5v1h-5zM0 4h6v1h-6zM8 4h5v1h-5zM0 5h13v1h-13zM0 6h13v1h-13zM0 7h2v1h-2zM6 7h7v1h-7zM0 8h13v1h-13zM0 9h2v1h-2zM8 9h5v1h-5zM0 10h13v1h-13zM0 11h13v1h-13z"/><path fill="#a9713f" d="M0 2h6v1h-6zM8 2h8v1h-8zM13 3h3v1h-3zM13 4h3v1h-3zM13 5h3v1h-3zM13 6h3v1h-3zM2 7h4v1h-4zM13 7h3v1h-3zM13 8h3v1h-3zM2 9h6v1h-6zM13 9h3v1h-3zM13 10h3v1h-3zM13 11h3v1h-3z"/><path fill="#f3e6c4" d="M6 0h2v1h-2zM6 1h2v1h-2zM6 2h2v1h-2zM6 3h2v1h-2zM6 4h2v1h-2z"/></symbol><symbol id="s-logo" viewBox="0 0 34 30"><path fill="currentColor" d="M0 0h34v1h-34zM0 1h1v1h-1zM33 1h1v1h-1zM0 2h1v1h-1zM33 2h1v1h-1zM0 3h1v1h-1zM33 3h1v1h-1zM0 4h1v1h-1zM33 4h1v1h-1zM0 5h1v1h-1zM33 5h1v1h-1zM0 6h1v1h-1zM33 6h1v1h-1zM0 7h1v1h-1zM33 7h1v1h-1zM0 8h1v1h-1zM33 8h1v1h-1zM0 9h1v1h-1zM33 9h1v1h-1zM0 10h1v1h-1zM33 10h1v1h-1zM0 11h1v1h-1zM33 11h1v1h-1zM0 12h1v1h-1zM33 12h1v1h-1zM0 13h1v1h-1zM33 13h1v1h-1zM33 14h1v1h-1zM33 15h1v1h-1zM33 16h1v1h-1zM33 17h1v1h-1zM0 18h4v1h-4zM5 18h4v1h-4zM10 18h4v1h-4zM15 18h4v1h-4zM20 18h4v1h-4zM25 18h3v1h-3zM33 18h1v1h-1zM0 19h1v1h-1zM6 19h2v1h-2zM10 19h1v1h-1zM13 19h1v1h-1zM15 19h1v1h-1zM18 19h1v1h-1zM20 19h1v1h-1zM25 19h1v1h-1zM28 19h1v1h-1zM33 19h1v1h-1zM0 20h4v1h-4zM6 20h2v1h-2zM10 20h1v1h-1zM13 20h1v1h-1zM15 20h4v1h-4zM20 20h3v1h-3zM25 20h1v1h-1zM28 20h1v1h-1zM33 20h1v1h-1zM3 21h1v1h-1zM6 21h2v1h-2zM10 21h1v1h-1zM13 21h1v1h-1zM15 21h1v1h-1zM17 21h1v1h-1zM20 21h1v1h-1zM25 21h1v1h-1zM28 21h1v1h-1zM33 21h1v1h-1zM0 22h4v1h-4zM6 22h2v1h-2zM10 22h4v1h-4zM15 22h1v1h-1zM18 22h1v1h-1zM20 22h4v1h-4zM25 22h3v1h-3zM33 22h1v1h-1zM33 23h1v1h-1zM33 24h1v1h-1zM6 25h4v1h-4zM11 25h4v1h-4zM33 25h1v1h-1zM6 26h1v1h-1zM11 26h1v1h-1zM33 26h1v1h-1zM6 27h1v1h-1zM8 27h2v1h-2zM11 27h3v1h-3zM33 27h1v1h-1zM6 28h1v1h-1zM9 28h1v1h-1zM11 28h1v1h-1zM33 28h1v1h-1zM0 29h3v1h-3zM4 29h1v1h-1zM6 29h4v1h-4zM11 29h4v1h-4zM17 29h17v1h-17z"/></symbol><symbol id="s-mark" viewBox="0 0 14 14"><path fill="currentColor" d="M0 0h14v1h-14zM0 1h1v1h-1zM13 1h1v1h-1zM0 2h1v1h-1zM13 2h1v1h-1zM0 3h1v1h-1zM13 3h1v1h-1zM0 4h1v1h-1zM13 4h1v1h-1zM0 5h1v1h-1zM13 5h1v1h-1zM13 6h1v1h-1zM13 7h1v1h-1zM13 8h1v1h-1zM0 9h4v1h-4zM13 9h1v1h-1zM0 10h1v1h-1zM13 10h1v1h-1zM0 11h4v1h-4zM13 11h1v1h-1zM3 12h1v1h-1zM13 12h1v1h-1zM0 13h4v1h-4zM5 13h9v1h-9z"/></symbol></defs></svg>
+<svg class="sprite-defs" width="0" height="0" aria-hidden="true" focusable="false"><defs><symbol id="s-mascot" viewBox="0 0 16 26"><path fill="#000000" fill-opacity="0.14" d="M1 25h13v1h-13z"/><path fill="currentColor" d="M3 11h8v1h-8zM2 12h10v1h-10zM1 13h5v1h-5zM8 13h5v1h-5zM1 14h4v1h-4zM9 14h4v1h-4zM1 15h4v1h-4zM9 15h4v1h-4zM1 16h5v1h-5zM8 16h5v1h-5zM1 17h12v1h-12zM2 18h10v1h-10z"/><path fill="#262626" d="M4 5h2v1h-2zM9 5h2v1h-2zM4 6h2v1h-2zM9 6h2v1h-2zM2 24h4v1h-4zM8 24h4v1h-4z"/><path fill="#ffffff" d="M6 14h2v1h-2zM6 15h2v1h-2z"/><path fill="#f6cba4" d="M4 3h7v1h-7zM3 4h9v1h-9zM2 5h2v1h-2zM6 5h3v1h-3zM11 5h1v1h-1zM2 6h2v1h-2zM6 6h3v1h-3zM11 6h1v1h-1zM2 7h10v1h-10zM2 8h4v1h-4zM10 8h2v1h-2zM3 9h8v1h-8zM1 18h1v1h-1zM12 18h1v1h-1z"/><path fill="#6b3f1f" d="M3 0h8v1h-8zM2 1h10v1h-10zM2 2h11v1h-11zM2 3h2v1h-2zM11 3h2v1h-2zM2 4h1v1h-1zM12 4h1v1h-1z"/><path fill="#ffffff" fill-opacity="0.32" d="M6 13h2v1h-2zM5 14h1v1h-1zM8 14h1v1h-1zM5 15h1v1h-1zM8 15h1v1h-1zM6 16h2v1h-2z"/><path fill="#c85a54" d="M6 8h4v1h-4z"/><path fill="#d9a33a" d="M3 19h8v1h-8zM3 20h8v1h-8zM3 21h3v1h-3zM8 21h3v1h-3zM3 22h3v1h-3zM8 22h3v1h-3zM3 23h3v1h-3zM8 23h3v1h-3z"/><path fill="#b3832a" d="M6 21h1v1h-1zM11 21h1v1h-1zM6 22h1v1h-1zM11 22h1v1h-1zM6 23h1v1h-1zM11 23h1v1h-1z"/><path fill="#e0a77c" d="M12 5h1v1h-1zM12 6h1v1h-1zM12 7h1v1h-1zM12 8h1v1h-1zM11 9h1v1h-1zM5 10h4v1h-4zM1 19h1v1h-1zM12 19h1v1h-1z"/></symbol><symbol id="s-mascot-wave" viewBox="0 0 16 26"><path fill="#000000" fill-opacity="0.14" d="M1 25h13v1h-13z"/><path fill="currentColor" d="M14 7h2v1h-2zM14 8h2v1h-2zM13 9h2v1h-2zM13 10h2v1h-2zM3 11h8v1h-8zM12 11h2v1h-2zM2 12h12v1h-12zM1 13h5v1h-5zM8 13h5v1h-5zM1 14h4v1h-4zM9 14h4v1h-4zM1 15h4v1h-4zM9 15h4v1h-4zM1 16h5v1h-5zM8 16h5v1h-5zM1 17h12v1h-12zM2 18h11v1h-11z"/><path fill="#262626" d="M4 5h2v1h-2zM9 5h2v1h-2zM4 6h2v1h-2zM9 6h2v1h-2zM2 24h4v1h-4zM8 24h4v1h-4z"/><path fill="#ffffff" d="M6 14h2v1h-2zM6 15h2v1h-2z"/><path fill="#f6cba4" d="M4 3h7v1h-7zM3 4h9v1h-9zM2 5h2v1h-2zM6 5h3v1h-3zM11 5h1v1h-1zM14 5h2v1h-2zM2 6h2v1h-2zM6 6h3v1h-3zM11 6h1v1h-1zM14 6h2v1h-2zM2 7h10v1h-10zM2 8h4v1h-4zM10 8h2v1h-2zM3 9h8v1h-8zM1 18h1v1h-1z"/><path fill="#6b3f1f" d="M3 0h8v1h-8zM2 1h10v1h-10zM2 2h11v1h-11zM2 3h2v1h-2zM11 3h2v1h-2zM2 4h1v1h-1zM12 4h1v1h-1z"/><path fill="#ffffff" fill-opacity="0.32" d="M6 13h2v1h-2zM5 14h1v1h-1zM8 14h1v1h-1zM5 15h1v1h-1zM8 15h1v1h-1zM6 16h2v1h-2z"/><path fill="#c85a54" d="M6 8h4v1h-4z"/><path fill="#d9a33a" d="M3 19h8v1h-8zM3 20h8v1h-8zM3 21h3v1h-3zM8 21h3v1h-3zM3 22h3v1h-3zM8 22h3v1h-3zM3 23h3v1h-3zM8 23h3v1h-3z"/><path fill="#b3832a" d="M6 21h1v1h-1zM11 21h1v1h-1zM6 22h1v1h-1zM11 22h1v1h-1zM6 23h1v1h-1zM11 23h1v1h-1z"/><path fill="#e0a77c" d="M12 5h1v1h-1zM12 6h1v1h-1zM12 7h1v1h-1zM12 8h1v1h-1zM11 9h1v1h-1zM5 10h4v1h-4zM1 19h1v1h-1z"/></symbol><symbol id="s-plant" viewBox="0 0 12 18"><path fill="#000000" fill-opacity="0.14" d="M1 17h10v1h-10z"/><path fill="#9ccc4a" d="M6 0h1v1h-1zM5 1h2v1h-2zM5 2h3v1h-3zM5 3h3v1h-3zM5 4h2v1h-2zM5 5h1v1h-1z"/><path fill="#43ad4b" d="M5 0h1v1h-1zM4 1h1v1h-1zM7 1h1v1h-1zM4 2h1v1h-1zM8 2h1v1h-1zM3 3h2v1h-2zM8 3h1v1h-1zM3 4h2v1h-2zM7 4h2v1h-2zM2 5h3v1h-3zM6 5h4v1h-4zM3 6h6v1h-6zM5 7h2v1h-2z"/><path fill="#1f7a45" d="M3 2h1v1h-1zM2 3h1v1h-1zM9 3h1v1h-1zM1 4h2v1h-2zM9 4h2v1h-2zM1 5h1v1h-1zM10 5h1v1h-1zM2 6h1v1h-1zM9 6h1v1h-1zM3 7h2v1h-2zM7 7h2v1h-2zM5 8h2v1h-2zM5 9h2v1h-2z"/><path fill="#b9e4f7" d="M9 10h1v1h-1zM9 11h1v1h-1zM9 12h1v1h-1zM9 13h1v1h-1zM9 14h1v1h-1zM9 15h1v1h-1zM8 16h2v1h-2z"/><path fill="#7fcdf0" d="M3 10h6v1h-6zM3 11h6v1h-6zM3 12h6v1h-6zM3 13h6v1h-6zM3 14h6v1h-6zM3 15h6v1h-6zM4 16h4v1h-4z"/><path fill="#4aa8dc" d="M2 10h1v1h-1zM2 11h1v1h-1zM2 12h1v1h-1zM2 13h1v1h-1zM2 14h1v1h-1zM2 15h1v1h-1zM2 16h2v1h-2z"/></symbol><symbol id="s-lamp" viewBox="0 0 10 13"><path fill="#b9e4f7" d="M2 11h6v1h-6zM1 12h8v1h-8z"/><path fill="#f7d774" d="M2 0h6v1h-6zM1 1h7v1h-7zM1 2h7v1h-7zM1 3h7v1h-7zM1 4h7v1h-7zM1 5h7v1h-7z"/><path fill="#dfb24a" d="M8 1h1v1h-1zM8 2h1v1h-1zM8 3h1v1h-1zM8 4h1v1h-1zM8 5h1v1h-1zM2 6h6v1h-6z"/><path fill="#5bc0eb" d="M4 7h2v1h-2zM4 8h2v1h-2zM4 9h2v1h-2zM4 10h2v1h-2z"/></symbol><symbol id="s-heart" viewBox="0 0 9 8"><path fill="#ff3b6b" d="M1 0h2v1h-2zM6 0h2v1h-2zM0 1h4v1h-4zM5 1h4v1h-4zM0 2h9v1h-9zM0 3h8v1h-8zM1 4h6v1h-6zM2 5h4v1h-4zM3 6h2v1h-2z"/><path fill="#c9244f" d="M8 3h1v1h-1zM7 4h1v1h-1zM6 5h1v1h-1zM5 6h1v1h-1zM4 7h1v1h-1z"/></symbol><symbol id="s-cup" viewBox="0 0 8 12"><path fill="#000000" fill-opacity="0.14" d="M1 11h6v1h-6z"/><path fill="#cf9356" d="M1 6h5v1h-5zM1 7h2v1h-2zM4 7h2v1h-2zM1 8h5v1h-5z"/><path fill="#a9713f" d="M6 6h1v1h-1zM6 7h1v1h-1zM6 8h1v1h-1z"/><path fill="#f3e6c4" d="M3 7h1v1h-1z"/><path fill="#ffffff" d="M1 4h5v1h-5zM1 5h5v1h-5zM2 9h3v1h-3zM2 10h3v1h-3z"/><path fill="#9e9e9e" d="M3 0h1v1h-1zM5 0h1v1h-1zM2 1h1v1h-1zM4 1h1v1h-1zM6 4h1v1h-1zM6 5h1v1h-1zM5 9h1v1h-1zM5 10h1v1h-1z"/><path fill="#4a4a4a" d="M2 2h4v1h-4zM0 3h8v1h-8z"/></symbol><symbol id="s-mat" viewBox="0 0 6 16"><path fill="#000000" fill-opacity="0.14" d="M0 15h6v1h-6z"/><path fill="currentColor" d="M1 0h4v1h-4zM0 1h1v1h-1zM3 1h3v1h-3zM0 2h1v1h-1zM2 2h1v1h-1zM4 2h2v1h-2zM0 3h2v1h-2zM4 3h1v1h-1zM0 4h5v1h-5zM0 5h5v1h-5zM0 6h1v1h-1zM2 6h3v1h-3zM0 7h5v1h-5zM0 8h5v1h-5zM0 9h5v1h-5zM0 10h1v1h-1zM2 10h3v1h-3zM0 11h5v1h-5zM0 12h5v1h-5zM0 13h5v1h-5zM1 14h4v1h-4z"/><path fill="#000000" fill-opacity="0.2" d="M5 3h1v1h-1zM5 4h1v1h-1zM5 5h1v1h-1zM5 6h1v1h-1zM5 7h1v1h-1zM5 8h1v1h-1zM5 9h1v1h-1zM5 10h1v1h-1zM5 11h1v1h-1zM5 12h1v1h-1zM5 13h1v1h-1z"/><path fill="#ffffff" fill-opacity="0.32" d="M1 1h2v1h-2zM1 2h1v1h-1zM3 2h1v1h-1zM2 3h2v1h-2zM1 6h1v1h-1zM1 10h1v1h-1z"/></symbol><symbol id="s-rug" viewBox="0 0 32 5"><path fill="currentColor" d="M3 0h26v1h-26zM1 1h30v1h-30zM1 2h3v1h-3zM5 2h2v1h-2zM8 2h2v1h-2zM11 2h2v1h-2zM14 2h2v1h-2zM17 2h2v1h-2zM20 2h2v1h-2zM23 2h2v1h-2zM26 2h5v1h-5zM1 3h30v1h-30zM3 4h26v1h-26z"/><path fill="#ffffff" fill-opacity="0.32" d="M0 2h1v1h-1zM4 2h1v1h-1zM7 2h1v1h-1zM10 2h1v1h-1zM13 2h1v1h-1zM16 2h1v1h-1zM19 2h1v1h-1zM22 2h1v1h-1zM25 2h1v1h-1zM31 2h1v1h-1z"/></symbol><symbol id="s-floorlamp" viewBox="0 0 10 44"><path fill="#000000" fill-opacity="0.14" d="M0 43h10v1h-10z"/><path fill="#f7d774" d="M2 0h6v1h-6zM1 1h7v1h-7zM1 2h7v1h-7zM1 3h7v1h-7zM1 4h7v1h-7zM1 5h7v1h-7zM1 6h7v1h-7z"/><path fill="#dfb24a" d="M8 1h1v1h-1zM8 2h1v1h-1zM8 3h1v1h-1zM8 4h1v1h-1zM8 5h1v1h-1zM8 6h1v1h-1zM1 7h8v1h-8z"/><path fill="#9e9e9e" d="M4 8h1v1h-1zM4 9h1v1h-1zM4 10h1v1h-1zM4 11h1v1h-1zM4 12h1v1h-1zM4 13h1v1h-1zM4 14h1v1h-1zM4 15h1v1h-1zM4 16h1v1h-1zM4 17h1v1h-1zM4 18h1v1h-1zM4 19h1v1h-1zM4 20h1v1h-1zM4 21h1v1h-1zM4 22h1v1h-1zM4 23h1v1h-1zM4 24h1v1h-1zM4 25h1v1h-1zM4 26h1v1h-1zM4 27h1v1h-1zM4 28h1v1h-1zM4 29h1v1h-1zM4 30h1v1h-1zM4 31h1v1h-1zM4 32h1v1h-1zM4 33h1v1h-1zM4 34h1v1h-1zM4 35h1v1h-1zM4 36h1v1h-1zM4 37h1v1h-1zM4 38h1v1h-1zM4 39h1v1h-1zM4 40h1v1h-1z"/><path fill="#4a4a4a" d="M5 8h1v1h-1zM5 9h1v1h-1zM5 10h1v1h-1zM5 11h1v1h-1zM5 12h1v1h-1zM5 13h1v1h-1zM5 14h1v1h-1zM5 15h1v1h-1zM5 16h1v1h-1zM5 17h1v1h-1zM5 18h1v1h-1zM5 19h1v1h-1zM5 20h1v1h-1zM5 21h1v1h-1zM5 22h1v1h-1zM5 23h1v1h-1zM5 24h1v1h-1zM5 25h1v1h-1zM5 26h1v1h-1zM5 27h1v1h-1zM5 28h1v1h-1zM5 29h1v1h-1zM5 30h1v1h-1zM5 31h1v1h-1zM5 32h1v1h-1zM5 33h1v1h-1zM5 34h1v1h-1zM5 35h1v1h-1zM5 36h1v1h-1zM5 37h1v1h-1zM5 38h1v1h-1zM5 39h1v1h-1zM5 40h1v1h-1zM2 41h6v1h-6zM2 42h6v1h-6z"/></symbol><symbol id="s-dresser" viewBox="0 0 32 20"><path fill="#000000" fill-opacity="0.14" d="M0 19h32v1h-32z"/><path fill="#6e4127" d="M21 2h1v1h-1zM30 2h1v1h-1zM21 3h1v1h-1zM30 3h1v1h-1zM21 4h1v1h-1zM30 4h1v1h-1zM21 5h1v1h-1zM30 5h1v1h-1zM21 6h1v1h-1zM30 6h1v1h-1zM21 7h1v1h-1zM30 7h1v1h-1zM21 8h1v1h-1zM30 8h1v1h-1zM21 9h1v1h-1zM30 9h1v1h-1zM21 10h1v1h-1zM30 10h1v1h-1zM21 11h1v1h-1zM30 11h1v1h-1zM21 12h1v1h-1zM30 12h1v1h-1zM21 13h1v1h-1zM30 13h1v1h-1zM21 14h1v1h-1zM30 14h1v1h-1zM21 15h1v1h-1zM30 15h1v1h-1zM21 16h1v1h-1zM30 16h1v1h-1zM21 17h1v1h-1zM30 17h1v1h-1zM2 18h3v1h-3zM14 18h3v1h-3zM27 18h3v1h-3z"/><path fill="#a8683b" d="M0 1h32v1h-32zM22 2h8v1h-8zM22 3h1v1h-1zM22 4h1v1h-1zM22 5h1v1h-1zM25 5h3v1h-3zM22 6h1v1h-1zM25 6h3v1h-3zM22 7h1v1h-1zM25 7h3v1h-3zM22 8h1v1h-1zM25 8h3v1h-3zM6 9h2v1h-2zM16 9h2v1h-2zM22 9h1v1h-1zM25 9h3v1h-3zM6 10h2v1h-2zM16 10h2v1h-2zM22 10h1v1h-1zM25 10h3v1h-3zM22 11h1v1h-1zM25 11h3v1h-3zM22 12h1v1h-1zM25 12h3v1h-3zM22 13h1v1h-1zM25 13h3v1h-3zM22 14h1v1h-1zM25 14h3v1h-3zM22 15h1v1h-1zM22 16h1v1h-1zM22 17h8v1h-8z"/><path fill="#d59352" d="M0 0h32v1h-32zM23 3h7v1h-7zM23 4h7v1h-7zM23 5h2v1h-2zM28 5h2v1h-2zM23 6h2v1h-2zM28 6h2v1h-2zM23 7h2v1h-2zM28 7h2v1h-2zM23 8h2v1h-2zM28 8h2v1h-2zM23 9h2v1h-2zM28 9h2v1h-2zM23 10h2v1h-2zM28 10h2v1h-2zM23 11h2v1h-2zM28 11h2v1h-2zM23 12h2v1h-2zM28 12h2v1h-2zM23 13h2v1h-2zM28 13h2v1h-2zM23 14h2v1h-2zM28 14h2v1h-2zM23 15h7v1h-7zM23 16h7v1h-7z"/><path fill="#f2cf7c" d="M2 3h9v1h-9zM12 3h9v1h-9zM2 4h4v1h-4zM8 4h3v1h-3zM12 4h4v1h-4zM18 4h3v1h-3zM2 5h4v1h-4zM8 5h3v1h-3zM12 5h4v1h-4zM18 5h3v1h-3zM2 6h9v1h-9zM12 6h9v1h-9zM2 8h9v1h-9zM12 8h9v1h-9zM2 9h4v1h-4zM8 9h3v1h-3zM12 9h4v1h-4zM18 9h3v1h-3zM2 10h4v1h-4zM8 10h3v1h-3zM12 10h4v1h-4zM18 10h3v1h-3zM2 11h9v1h-9zM12 11h9v1h-9zM2 13h9v1h-9zM12 13h9v1h-9zM2 14h4v1h-4zM8 14h3v1h-3zM12 14h4v1h-4zM18 14h3v1h-3zM2 15h4v1h-4zM8 15h3v1h-3zM12 15h4v1h-4zM18 15h3v1h-3zM2 16h9v1h-9zM12 16h9v1h-9z"/><path fill="#e2b45b" d="M1 2h20v1h-20zM1 3h1v1h-1zM11 3h1v1h-1zM1 4h1v1h-1zM11 4h1v1h-1zM1 5h1v1h-1zM11 5h1v1h-1zM1 6h1v1h-1zM11 6h1v1h-1zM1 7h20v1h-20zM1 8h1v1h-1zM11 8h1v1h-1zM1 9h1v1h-1zM11 9h1v1h-1zM1 10h1v1h-1zM11 10h1v1h-1zM1 11h1v1h-1zM11 11h1v1h-1zM1 12h20v1h-20zM1 13h1v1h-1zM11 13h1v1h-1zM1 14h1v1h-1zM11 14h1v1h-1zM1 15h1v1h-1zM11 15h1v1h-1zM1 16h1v1h-1zM11 16h1v1h-1zM1 17h20v1h-20z"/><path fill="#dfb24a" d="M6 4h2v1h-2zM16 4h2v1h-2zM6 5h2v1h-2zM16 5h2v1h-2zM6 14h2v1h-2zM16 14h2v1h-2zM6 15h2v1h-2zM16 15h2v1h-2z"/></symbol><symbol id="s-shelf" viewBox="0 0 20 40"><path fill="#000000" fill-opacity="0.14" d="M0 39h20v1h-20z"/><path fill="#4a2c1a" d="M6 2h2v1h-2zM12 2h2v1h-2zM6 8h2v1h-2zM12 8h2v1h-2zM12 9h2v1h-2zM12 10h2v1h-2zM12 11h2v1h-2zM12 12h2v1h-2zM2 14h2v1h-2zM6 14h2v1h-2zM12 14h2v1h-2zM2 15h2v1h-2zM2 16h2v1h-2zM2 17h2v1h-2zM2 18h2v1h-2zM6 20h2v1h-2zM12 20h4v1h-4zM14 21h2v1h-2zM14 22h2v1h-2zM14 23h2v1h-2zM14 24h2v1h-2z"/><path fill="#6e4127" d="M0 2h2v1h-2zM18 2h2v1h-2zM0 3h2v1h-2zM18 3h2v1h-2zM0 4h2v1h-2zM18 4h2v1h-2zM0 5h2v1h-2zM18 5h2v1h-2zM0 6h2v1h-2zM18 6h2v1h-2zM0 7h2v1h-2zM18 7h2v1h-2zM0 8h2v1h-2zM18 8h2v1h-2zM0 9h2v1h-2zM18 9h2v1h-2zM0 10h2v1h-2zM18 10h2v1h-2zM0 11h2v1h-2zM18 11h2v1h-2zM0 12h2v1h-2zM18 12h2v1h-2zM0 13h2v1h-2zM18 13h2v1h-2zM0 14h2v1h-2zM18 14h2v1h-2zM0 15h2v1h-2zM18 15h2v1h-2zM0 16h2v1h-2zM18 16h2v1h-2zM0 17h2v1h-2zM18 17h2v1h-2zM0 18h2v1h-2zM18 18h2v1h-2zM0 19h2v1h-2zM18 19h2v1h-2zM0 20h2v1h-2zM18 20h2v1h-2zM0 21h2v1h-2zM18 21h2v1h-2zM0 22h2v1h-2zM18 22h2v1h-2zM0 23h2v1h-2zM18 23h2v1h-2zM0 24h2v1h-2zM18 24h2v1h-2zM0 25h2v1h-2zM18 25h2v1h-2zM0 26h2v1h-2zM9 26h2v1h-2zM18 26h2v1h-2zM0 27h2v1h-2zM9 27h2v1h-2zM18 27h2v1h-2zM0 28h2v1h-2zM9 28h2v1h-2zM18 28h2v1h-2zM0 29h2v1h-2zM9 29h2v1h-2zM18 29h2v1h-2zM0 30h2v1h-2zM9 30h2v1h-2zM18 30h2v1h-2zM0 31h2v1h-2zM9 31h2v1h-2zM18 31h2v1h-2zM0 32h2v1h-2zM9 32h2v1h-2zM18 32h2v1h-2zM0 33h2v1h-2zM9 33h2v1h-2zM18 33h2v1h-2zM0 34h2v1h-2zM9 34h2v1h-2zM18 34h2v1h-2zM0 35h2v1h-2zM9 35h2v1h-2zM18 35h2v1h-2zM0 36h2v1h-2zM9 36h2v1h-2zM18 36h2v1h-2zM0 37h20v1h-20zM1 38h2v1h-2zM17 38h2v1h-2z"/><path fill="#a8683b" d="M0 0h20v1h-20zM0 1h20v1h-20zM2 7h16v1h-16zM2 13h16v1h-16zM2 19h16v1h-16zM2 25h16v1h-16zM2 26h7v1h-7zM11 26h7v1h-7zM2 27h1v1h-1zM8 27h1v1h-1zM11 27h1v1h-1zM17 27h1v1h-1zM2 28h1v1h-1zM8 28h1v1h-1zM11 28h1v1h-1zM17 28h1v1h-1zM2 29h1v1h-1zM8 29h1v1h-1zM11 29h1v1h-1zM17 29h1v1h-1zM2 30h1v1h-1zM8 30h1v1h-1zM11 30h1v1h-1zM17 30h1v1h-1zM2 31h1v1h-1zM8 31h1v1h-1zM11 31h1v1h-1zM17 31h1v1h-1zM2 32h1v1h-1zM8 32h1v1h-1zM11 32h1v1h-1zM17 32h1v1h-1zM2 33h1v1h-1zM8 33h1v1h-1zM11 33h1v1h-1zM17 33h1v1h-1zM2 34h1v1h-1zM8 34h1v1h-1zM11 34h1v1h-1zM17 34h1v1h-1zM2 35h1v1h-1zM8 35h1v1h-1zM11 35h1v1h-1zM17 35h1v1h-1zM2 36h7v1h-7zM11 36h7v1h-7z"/><path fill="#d59352" d="M3 27h5v1h-5zM12 27h5v1h-5zM3 28h5v1h-5zM12 28h5v1h-5zM3 29h5v1h-5zM12 29h5v1h-5zM3 30h4v1h-4zM13 30h4v1h-4zM3 31h4v1h-4zM13 31h4v1h-4zM3 32h5v1h-5zM12 32h5v1h-5zM3 33h5v1h-5zM12 33h5v1h-5zM3 34h5v1h-5zM12 34h5v1h-5zM3 35h5v1h-5zM12 35h5v1h-5z"/><path fill="#b9e4f7" d="M14 2h2v1h-2zM15 3h1v1h-1zM14 4h2v1h-2zM14 5h2v1h-2zM14 6h2v1h-2zM10 14h2v1h-2zM11 15h1v1h-1zM10 16h2v1h-2zM10 17h2v1h-2zM10 18h2v1h-2z"/><path fill="#7fcdf0" d="M8 20h2v1h-2zM9 21h1v1h-1zM8 22h2v1h-2zM8 23h2v1h-2zM8 24h2v1h-2z"/><path fill="#e8412c" d="M2 2h2v1h-2zM3 3h1v1h-1zM2 4h2v1h-2zM2 5h2v1h-2zM2 6h2v1h-2zM4 8h2v1h-2zM14 8h2v1h-2zM5 9h1v1h-1zM15 9h1v1h-1zM4 10h2v1h-2zM14 10h2v1h-2zM4 11h2v1h-2zM14 11h2v1h-2zM4 12h2v1h-2zM14 12h2v1h-2zM16 14h2v1h-2zM17 15h1v1h-1zM16 16h2v1h-2zM16 17h2v1h-2zM16 18h2v1h-2zM10 20h2v1h-2zM11 21h1v1h-1zM10 22h2v1h-2zM10 23h2v1h-2zM10 24h2v1h-2z"/><path fill="#ffd400" d="M4 2h2v1h-2zM16 2h2v1h-2zM5 3h1v1h-1zM17 3h1v1h-1zM4 4h2v1h-2zM16 4h2v1h-2zM4 5h2v1h-2zM16 5h2v1h-2zM4 6h2v1h-2zM16 6h2v1h-2zM16 8h2v1h-2zM17 9h1v1h-1zM16 10h2v1h-2zM16 11h2v1h-2zM16 12h2v1h-2zM12 15h2v1h-2zM13 16h1v1h-1zM12 17h2v1h-2zM12 18h2v1h-2zM12 21h2v1h-2zM13 22h1v1h-1zM12 23h2v1h-2zM12 24h2v1h-2z"/><path fill="#27c24c" d="M6 3h2v1h-2zM7 4h1v1h-1zM6 5h2v1h-2zM6 6h2v1h-2zM6 9h2v1h-2zM7 10h1v1h-1zM6 11h2v1h-2zM6 12h2v1h-2zM2 20h2v1h-2zM3 21h1v1h-1zM2 22h2v1h-2zM2 23h2v1h-2zM2 24h2v1h-2z"/><path fill="#3b82f6" d="M8 2h2v1h-2zM9 3h1v1h-1zM8 4h2v1h-2zM8 5h2v1h-2zM8 6h2v1h-2zM2 8h2v1h-2zM3 9h1v1h-1zM2 10h2v1h-2zM2 11h2v1h-2zM2 12h2v1h-2zM4 14h2v1h-2zM14 14h2v1h-2zM5 15h1v1h-1zM15 15h1v1h-1zM4 16h2v1h-2zM14 16h2v1h-2zM4 17h2v1h-2zM14 17h2v1h-2zM4 18h2v1h-2zM14 18h2v1h-2zM16 20h2v1h-2zM17 21h1v1h-1zM16 22h2v1h-2zM16 23h2v1h-2zM16 24h2v1h-2z"/><path fill="#8e5bd6" d="M10 2h2v1h-2zM11 3h1v1h-1zM10 4h2v1h-2zM10 5h2v1h-2zM10 6h2v1h-2zM8 8h2v1h-2zM9 9h1v1h-1zM8 10h2v1h-2zM8 11h2v1h-2zM8 12h2v1h-2zM6 15h2v1h-2zM7 16h1v1h-1zM6 17h2v1h-2zM6 18h2v1h-2zM4 20h2v1h-2zM5 21h1v1h-1zM4 22h2v1h-2zM4 23h2v1h-2zM4 24h2v1h-2z"/><path fill="#ff8a3d" d="M12 3h2v1h-2zM13 4h1v1h-1zM12 5h2v1h-2zM12 6h2v1h-2zM10 8h2v1h-2zM11 9h1v1h-1zM10 10h2v1h-2zM10 11h2v1h-2zM10 12h2v1h-2zM8 14h2v1h-2zM9 15h1v1h-1zM8 16h2v1h-2zM8 17h2v1h-2zM8 18h2v1h-2zM6 21h2v1h-2zM7 22h1v1h-1zM6 23h2v1h-2zM6 24h2v1h-2z"/><path fill="#ffffff" d="M2 3h1v1h-1zM4 3h1v1h-1zM8 3h1v1h-1zM10 3h1v1h-1zM14 3h1v1h-1zM16 3h1v1h-1zM6 4h1v1h-1zM12 4h1v1h-1zM2 9h1v1h-1zM4 9h1v1h-1zM8 9h1v1h-1zM10 9h1v1h-1zM14 9h1v1h-1zM16 9h1v1h-1zM6 10h1v1h-1zM4 15h1v1h-1zM8 15h1v1h-1zM10 15h1v1h-1zM14 15h1v1h-1zM16 15h1v1h-1zM6 16h1v1h-1zM12 16h1v1h-1zM2 21h1v1h-1zM4 21h1v1h-1zM8 21h1v1h-1zM10 21h1v1h-1zM16 21h1v1h-1zM6 22h1v1h-1zM12 22h1v1h-1z"/><path fill="#4a4a4a" d="M7 30h1v1h-1zM12 30h1v1h-1zM7 31h1v1h-1zM12 31h1v1h-1z"/></symbol><symbol id="s-box" viewBox="0 0 16 13"><path fill="#000000" fill-opacity="0.14" d="M0 12h16v1h-16z"/><path fill="#e7bc86" d="M0 0h6v1h-6zM8 0h5v1h-5zM0 1h6v1h-6zM8 1h5v1h-5z"/><path fill="#cf9356" d="M13 0h3v1h-3zM13 1h3v1h-3zM0 3h6v1h-6zM8 3h5v1h-5zM0 4h6v1h-6zM8 4h5v1h-5zM0 5h13v1h-13zM0 6h13v1h-13zM0 7h2v1h-2zM6 7h7v1h-7zM0 8h13v1h-13zM0 9h2v1h-2zM8 9h5v1h-5zM0 10h13v1h-13zM0 11h13v1h-13z"/><path fill="#a9713f" d="M0 2h6v1h-6zM8 2h8v1h-8zM13 3h3v1h-3zM13 4h3v1h-3zM13 5h3v1h-3zM13 6h3v1h-3zM2 7h4v1h-4zM13 7h3v1h-3zM13 8h3v1h-3zM2 9h6v1h-6zM13 9h3v1h-3zM13 10h3v1h-3zM13 11h3v1h-3z"/><path fill="#f3e6c4" d="M6 0h2v1h-2zM6 1h2v1h-2zM6 2h2v1h-2zM6 3h2v1h-2zM6 4h2v1h-2z"/></symbol><symbol id="s-logo" viewBox="0 0 34 30"><path fill="currentColor" d="M0 0h34v1h-34zM0 1h1v1h-1zM33 1h1v1h-1zM0 2h1v1h-1zM33 2h1v1h-1zM0 3h1v1h-1zM33 3h1v1h-1zM0 4h1v1h-1zM33 4h1v1h-1zM0 5h1v1h-1zM33 5h1v1h-1zM0 6h1v1h-1zM33 6h1v1h-1zM0 7h1v1h-1zM33 7h1v1h-1zM0 8h1v1h-1zM33 8h1v1h-1zM0 9h1v1h-1zM33 9h1v1h-1zM0 10h1v1h-1zM33 10h1v1h-1zM0 11h1v1h-1zM33 11h1v1h-1zM0 12h1v1h-1zM33 12h1v1h-1zM0 13h1v1h-1zM33 13h1v1h-1zM33 14h1v1h-1zM33 15h1v1h-1zM33 16h1v1h-1zM33 17h1v1h-1zM0 18h4v1h-4zM5 18h4v1h-4zM10 18h4v1h-4zM15 18h4v1h-4zM20 18h4v1h-4zM25 18h3v1h-3zM33 18h1v1h-1zM0 19h1v1h-1zM6 19h2v1h-2zM10 19h1v1h-1zM13 19h1v1h-1zM15 19h1v1h-1zM18 19h1v1h-1zM20 19h1v1h-1zM25 19h1v1h-1zM28 19h1v1h-1zM33 19h1v1h-1zM0 20h4v1h-4zM6 20h2v1h-2zM10 20h1v1h-1zM13 20h1v1h-1zM15 20h4v1h-4zM20 20h3v1h-3zM25 20h1v1h-1zM28 20h1v1h-1zM33 20h1v1h-1zM3 21h1v1h-1zM6 21h2v1h-2zM10 21h1v1h-1zM13 21h1v1h-1zM15 21h1v1h-1zM17 21h1v1h-1zM20 21h1v1h-1zM25 21h1v1h-1zM28 21h1v1h-1zM33 21h1v1h-1zM0 22h4v1h-4zM6 22h2v1h-2zM10 22h4v1h-4zM15 22h1v1h-1zM18 22h1v1h-1zM20 22h4v1h-4zM25 22h3v1h-3zM33 22h1v1h-1zM33 23h1v1h-1zM33 24h1v1h-1zM6 25h4v1h-4zM11 25h4v1h-4zM33 25h1v1h-1zM6 26h1v1h-1zM11 26h1v1h-1zM33 26h1v1h-1zM6 27h1v1h-1zM8 27h2v1h-2zM11 27h3v1h-3zM33 27h1v1h-1zM6 28h1v1h-1zM9 28h1v1h-1zM11 28h1v1h-1zM33 28h1v1h-1zM0 29h3v1h-3zM4 29h1v1h-1zM6 29h4v1h-4zM11 29h4v1h-4zM17 29h17v1h-17z"/></symbol><symbol id="s-mark" viewBox="0 0 14 14"><path fill="currentColor" d="M0 0h14v1h-14zM0 1h1v1h-1zM13 1h1v1h-1zM0 2h1v1h-1zM13 2h1v1h-1zM0 3h1v1h-1zM13 3h1v1h-1zM0 4h1v1h-1zM13 4h1v1h-1zM0 5h1v1h-1zM13 5h1v1h-1zM13 6h1v1h-1zM13 7h1v1h-1zM13 8h1v1h-1zM0 9h4v1h-4zM13 9h1v1h-1zM0 10h1v1h-1zM13 10h1v1h-1zM0 11h4v1h-4zM13 11h1v1h-1zM3 12h1v1h-1zM13 12h1v1h-1zM0 13h4v1h-4zM5 13h9v1h-9z"/></symbol></defs></svg>
 
 <a class="skip" href="#main">Skip to content</a>
 
@@ -692,6 +886,7 @@
         <a class="logo" href="/" aria-label="stored.ge home"><svg class="px" style="--w:14;--h:14" viewBox="0 0 14 14" aria-hidden="true" focusable="false"><use href="#s-mark"/></svg><span>stored<b>.ge</b></span></a>
         <nav aria-label="Main">
             <ul class="topnav">
+                <li class="hide-sm"><a href="#build">Build yours</a></li>
                 <li class="hide-sm"><a href="#pricing">Pricing</a></li>
                 <li class="hide-sm"><a href="/docs">Docs</a></li>
                 <li class="hide-sm"><a href="/changelog">Changelog</a></li>
@@ -738,6 +933,7 @@
             </div>
             <p class="trust-line">open-source engine &middot; measured benchmarks &middot; founder-direct support</p>
         </div>
+        <div class="room-col">
         <div class="room">
         <div class="term" aria-label="Terminal session showing an rclone upload to stored.ge">
             <div class="term-bar">
@@ -753,10 +949,14 @@ Elapsed time:      3m29.5s</span>
 2026-07-23 09:15:51 family-photos</span>
 <span class="p">$</span> <span class="blink">█</span></pre>
         </div>
-        <svg class="scene" viewBox="0 0 160 54" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><rect x="0" y="38" width="160" height="3" fill="#ece6db"/><rect x="0" y="41" width="160" height="13" fill="#b9793f"/><path fill="#a0662f" d="M0 44h160v1h-160zM0 47h160v1h-160zM0 50h160v1h-160zM22 41h1v3h-1zM61 41h1v3h-1zM104 41h1v3h-1zM143 41h1v3h-1zM8 45h1v2h-1zM47 45h1v2h-1zM90 45h1v2h-1zM126 45h1v2h-1zM30 48h1v2h-1zM72 48h1v2h-1zM115 48h1v2h-1zM151 48h1v2h-1zM14 51h1v3h-1zM55 51h1v3h-1zM98 51h1v3h-1zM137 51h1v3h-1z"/><use href="#s-floorlamp" x="6" y="4" width="10" height="44"/><use href="#s-shelf" x="20" y="8" width="20" height="40"/><use href="#s-dresser" x="46" y="28" width="32" height="20"/><use href="#s-lamp" x="49" y="15" width="10" height="13"/><use href="#s-box" x="61" y="16" width="16" height="13"/><use class="wave-a" href="#s-mascot" x="88" y="22" width="16" height="26"/><use class="wave-b" href="#s-mascot-wave" x="88" y="22" width="16" height="26"/><use href="#s-plant" x="110" y="30" width="12" height="18"/><use href="#s-box" x="130" y="35" width="16" height="13"/><use href="#s-box" x="132" y="23" width="16" height="13"/></svg>
+        <svg class="scene" data-play viewBox="0 0 160 54" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><rect x="0" y="38" width="160" height="3" fill="#ece6db"/><rect x="0" y="41" width="160" height="13" fill="#b9793f"/><path fill="#a0662f" d="M0 44h160v1h-160zM0 47h160v1h-160zM0 50h160v1h-160zM22 41h1v3h-1zM61 41h1v3h-1zM104 41h1v3h-1zM143 41h1v3h-1zM8 45h1v2h-1zM47 45h1v2h-1zM90 45h1v2h-1zM126 45h1v2h-1zM30 48h1v2h-1zM72 48h1v2h-1zM115 48h1v2h-1zM151 48h1v2h-1zM14 51h1v3h-1zM55 51h1v3h-1zM98 51h1v3h-1zM137 51h1v3h-1z"/><g class="piece" transform="translate(6 4)"><rect class="hit" width="10" height="44"/><use href="#s-floorlamp" width="10" height="44"/></g><g class="piece" transform="translate(20 8)"><rect class="hit" width="20" height="40"/><use href="#s-shelf" width="20" height="40"/></g><g class="piece" transform="translate(46 28)"><rect class="hit" width="32" height="20"/><use href="#s-dresser" width="32" height="20"/></g><g class="piece" transform="translate(49 15)"><rect class="hit" width="10" height="13"/><use href="#s-lamp" width="10" height="13"/></g><g class="piece" transform="translate(61 16)"><rect class="hit" width="16" height="13"/><use href="#s-box" width="16" height="13"/></g><g class="piece" transform="translate(88 22)"><rect class="hit" width="16" height="26"/><use class="wave-a" href="#s-mascot" width="16" height="26"/><use class="wave-b" href="#s-mascot-wave" width="16" height="26"/></g><g class="piece" transform="translate(110 30)"><rect class="hit" width="12" height="18"/><use href="#s-plant" width="12" height="18"/></g><g class="piece" transform="translate(130 35)"><rect class="hit" width="16" height="13"/><use href="#s-box" width="16" height="13"/></g><g class="piece" transform="translate(132 23)"><rect class="hit" width="16" height="13"/><use href="#s-box" width="16" height="13"/></g></svg>
+        </div>
+        <p class="room-hint"><span>psst: the furniture moves</span><a href="#build">build your own ▸</a></p>
         </div>
     </div>
 </section>
+
+<div class="band" aria-hidden="true"><div class="band-track"><div class="band-row"><svg class="px" style="--w:16;--h:13;--u:2px" viewBox="0 0 16 13" aria-hidden="true" focusable="false"><use href="#s-box"/></svg><span>no meters</span><svg class="px" style="--w:9;--h:8;--u:2px" viewBox="0 0 9 8" aria-hidden="true" focusable="false"><use href="#s-heart"/></svg><span>no API fees</span><svg class="px" style="--w:8;--h:12;--u:2px" viewBox="0 0 8 12" aria-hidden="true" focusable="false"><use href="#s-cup"/></svg><span>5× cheaper than AWS S3</span><svg class="px" style="--w:12;--h:18;--u:2px" viewBox="0 0 12 18" aria-hidden="true" focusable="false"><use href="#s-plant"/></svg><span>tape archive at $2/TB</span><svg class="px" style="--w:10;--h:13;--u:2px" viewBox="0 0 10 13" aria-hidden="true" focusable="false"><use href="#s-lamp"/></svg><span>open-source engine</span><svg class="px" style="--w:6;--h:16;--u:2px" viewBox="0 0 6 16" aria-hidden="true" focusable="false"><use href="#s-mat"/></svg><span>your storage, but cozy</span><svg class="px" style="--w:9;--h:8;--u:2px" viewBox="0 0 9 8" aria-hidden="true" focusable="false"><use href="#s-heart"/></svg><span>founder-direct support</span></div><div class="band-row"><svg class="px" style="--w:16;--h:13;--u:2px" viewBox="0 0 16 13" aria-hidden="true" focusable="false"><use href="#s-box"/></svg><span>no meters</span><svg class="px" style="--w:9;--h:8;--u:2px" viewBox="0 0 9 8" aria-hidden="true" focusable="false"><use href="#s-heart"/></svg><span>no API fees</span><svg class="px" style="--w:8;--h:12;--u:2px" viewBox="0 0 8 12" aria-hidden="true" focusable="false"><use href="#s-cup"/></svg><span>5× cheaper than AWS S3</span><svg class="px" style="--w:12;--h:18;--u:2px" viewBox="0 0 12 18" aria-hidden="true" focusable="false"><use href="#s-plant"/></svg><span>tape archive at $2/TB</span><svg class="px" style="--w:10;--h:13;--u:2px" viewBox="0 0 10 13" aria-hidden="true" focusable="false"><use href="#s-lamp"/></svg><span>open-source engine</span><svg class="px" style="--w:6;--h:16;--u:2px" viewBox="0 0 6 16" aria-hidden="true" focusable="false"><use href="#s-mat"/></svg><span>your storage, but cozy</span><svg class="px" style="--w:9;--h:8;--u:2px" viewBox="0 0 9 8" aria-hidden="true" focusable="false"><use href="#s-heart"/></svg><span>founder-direct support</span></div></div></div>
 
 <aside class="facts" aria-label="Measured benchmarks">
     <p class="facts-kicker">Measured, not projected — numbers from the production stack</p>
@@ -789,7 +989,7 @@ Elapsed time:      3m29.5s</span>
         </div>
         <div class="tiers">
             <div class="tier">
-                <div class="tier-art"><svg class="px" style="--w:10;--h:13" viewBox="0 0 10 13" aria-hidden="true" focusable="false"><use href="#s-lamp"/></svg></div>
+                <div class="tier-art"><button class="grab-piece" type="button" data-add="lamp" aria-label="Add a lamp (1 TB pinned hot) to your room"><span class="grab-hint">+ add to room</span><svg class="px sticker" style="--w:10;--h:13" viewBox="0 0 10 13" aria-hidden="true" focusable="false"><use href="#s-lamp"/></svg></button></div>
                 <div class="tier-name"><h3>Performance</h3><span class="tier-tag tag-red">After launch</span></div>
                 <div class="tier-body">
                     <p>Always hot. ~24 ms reads, data never ages to a slower tier, egress served direct. <strong>Launches after October 31</strong> — not for sale on day one; until then, the pin-hot add-on on Standard keeps chosen data permanently hot.</p>
@@ -798,7 +998,7 @@ Elapsed time:      3m29.5s</span>
                 <div class="tier-price">$6.99<small>/TB/mo &middot; coming later</small></div>
             </div>
             <div class="tier pop">
-                <div class="tier-art"><svg class="px" style="--w:32;--h:20" viewBox="0 0 32 20" aria-hidden="true" focusable="false"><use href="#s-dresser"/></svg></div>
+                <div class="tier-art"><button class="grab-piece" type="button" data-add="dresser" aria-label="Add a dresser (5 TB Standard) to your room"><span class="grab-hint">+ add to room</span><svg class="px sticker" style="--w:32;--h:20" viewBox="0 0 32 20" aria-hidden="true" focusable="false"><use href="#s-dresser"/></svg></button></div>
                 <div class="tier-name"><h3>Standard</h3><span class="tier-tag">MOST POPULAR</span></div>
                 <div class="tier-body">
                     <p>Smart storage that optimizes itself. About 15% of your quota stays on hot storage; data idle for 14+ days moves to tape and comes back hot within minutes when you read it — you store, we optimize. Pin-hot add-on ($3/TB/mo) for bytes that must never demote.</p>
@@ -807,7 +1007,7 @@ Elapsed time:      3m29.5s</span>
                 <div class="tier-price">$4.49<small>/TB/mo annual &middot; $4.99 monthly</small></div>
             </div>
             <div class="tier">
-                <div class="tier-art"><svg class="px" style="--w:20;--h:40" viewBox="0 0 20 40" aria-hidden="true" focusable="false"><use href="#s-shelf"/></svg></div>
+                <div class="tier-art"><button class="grab-piece" type="button" data-add="shelf" aria-label="Add a tape shelf (10 TB Vault) to your room"><span class="grab-hint">+ add to room</span><svg class="px sticker" style="--w:20;--h:40" viewBox="0 0 20 40" aria-hidden="true" focusable="false"><use href="#s-shelf"/></svg></button></div>
                 <div class="tier-name"><h3>Vault</h3><span class="tier-tag tag-green">Lowest $/TB</span></div>
                 <div class="tier-body">
                     <p>Tape-backed archive, any size. Glacier economics with restores that start in minutes — and Vault bills on its own, so if you ever need to cut costs, the archive keeps running.</p>
@@ -820,10 +1020,53 @@ Elapsed time:      3m29.5s</span>
     </div>
 </section>
 
+<section class="build" id="build">
+    <div class="container">
+        <div class="section-head">
+            <p class="kicker"><b>02</b>Build yours</p>
+            <h2>Pick it up. Put it down. <em>That's your storage.</em></h2>
+            <p class="lede">Every piece is real quota at real prices. Drag pieces into the room (or tap to add), pick your vibe, name it, then share it.</p>
+        </div>
+        <div class="builder">
+            <div class="b-stage">
+                <div class="b-room">
+                    <svg class="room-svg" id="room" viewBox="0 0 128 72" shape-rendering="crispEdges" role="group" aria-label="Your room. Focus a piece and use arrow keys to move it; Delete removes it.">
+                        <defs><linearGradient id="wallgrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" style="stop-color:var(--wall-a)"/><stop offset="1" style="stop-color:var(--wall-b)"/></linearGradient></defs>
+                        <g id="room-bg" aria-hidden="true"><rect fill="url(#wallgrad)" width="128" height="50"/><rect x="83" y="8" width="32" height="26" fill="#fdfaf3"/><rect x="85" y="10" width="28" height="22" fill="#bfe3f5"/><path fill="#ffffff" d="M89 14h8v2h-8zM91 13h4v1h-4zM101 22h9v2h-9zM103 21h4v1h-4z"/><rect x="98" y="10" width="2" height="22" fill="#fdfaf3"/><rect x="85" y="20" width="28" height="2" fill="#fdfaf3"/><rect x="82" y="34" width="34" height="2" fill="#e6dccb"/><rect x="8" y="8" width="52" height="11" fill="#6e4127"/><rect x="9" y="9" width="50" height="9" fill="#a8683b"/><rect x="14" y="4" width="1" height="4" fill="#6e4127"/><rect x="53" y="4" width="1" height="4" fill="#6e4127"/><text id="room-sign" x="34" y="15.6" text-anchor="middle" font-family="Silkscreen, monospace" font-size="5" fill="#fdf3dc">my vault</text><rect y="50" width="128" height="2" fill="#efe8dc"/><rect y="52" width="128" height="20" fill="#c98a52"/><path fill="#b27540" d="M0 56h128v1h-128zM0 61h128v1h-128zM0 66h128v1h-128zM18 52h1v4h-1zM57 52h1v4h-1zM99 52h1v4h-1zM36 57h1v4h-1zM80 57h1v4h-1zM118 57h1v4h-1zM9 62h1v4h-1zM49 62h1v4h-1zM92 62h1v4h-1zM27 67h1v5h-1zM70 67h1v5h-1zM110 67h1v5h-1z"/></g>
+                        <g id="room-items"></g>
+                    </svg>
+                </div>
+                <div class="b-tools">
+                    <div class="swatches" role="group" aria-label="Wall colour"><span>wall</span><button class="swatch" type="button" data-wall="midnight" style="--sw:#125594" aria-label="wall: midnight" aria-pressed="false"></button><button class="swatch" type="button" data-wall="matcha" style="--sw:#b8cfb0" aria-label="wall: matcha" aria-pressed="false"></button><button class="swatch" type="button" data-wall="oat" style="--sw:#eee3d0" aria-label="wall: oat" aria-pressed="false"></button><button class="swatch" type="button" data-wall="blush" style="--sw:#f6cfd0" aria-label="wall: blush" aria-pressed="false"></button><button class="swatch" type="button" data-wall="butter" style="--sw:#f8e9b3" aria-label="wall: butter" aria-pressed="false"></button><button class="swatch" type="button" data-wall="lilac" style="--sw:#d7cdf1" aria-label="wall: lilac" aria-pressed="false"></button></div>
+                    <div class="swatches" role="group" aria-label="Outfit colour"><span>fit</span><button class="swatch" type="button" data-fit="midnight" style="--sw:#1c3445" aria-label="fit: midnight" aria-pressed="false"></button><button class="swatch" type="button" data-fit="matcha" style="--sw:#5f7f5a" aria-label="fit: matcha" aria-pressed="false"></button><button class="swatch" type="button" data-fit="oat" style="--sw:#b59f7c" aria-label="fit: oat" aria-pressed="false"></button><button class="swatch" type="button" data-fit="blush" style="--sw:#d9828f" aria-label="fit: blush" aria-pressed="false"></button><button class="swatch" type="button" data-fit="lilac" style="--sw:#8f7cc8" aria-label="fit: lilac" aria-pressed="false"></button><button class="swatch" type="button" data-fit="noir" style="--sw:#2b2b2b" aria-label="fit: noir" aria-pressed="false"></button></div>
+                    <button class="b-reset" type="button" id="b-reset">reset room</button>
+                </div>
+            </div>
+            <div class="b-side">
+                <p class="tray-title">storage</p><div class="tray" role="group" aria-label="storage pieces"><button class="piece-card" type="button" data-add="box" aria-label="Add moving box: 1 TB Standard, $4.49/mo"><svg class="px sticker" style="--w:16;--h:13" viewBox="0 0 16 13" aria-hidden="true" focusable="false"><use href="#s-box"/></svg><span class="pc-name">Moving box</span><span class="pc-what">1 TB Standard</span><span class="pc-price">$4.49/mo</span></button><button class="piece-card" type="button" data-add="dresser" aria-label="Add dresser: 5 TB Standard, $22.45/mo"><svg class="px sticker" style="--w:32;--h:20" viewBox="0 0 32 20" aria-hidden="true" focusable="false"><use href="#s-dresser"/></svg><span class="pc-name">Dresser</span><span class="pc-what">5 TB Standard</span><span class="pc-price">$22.45/mo</span></button><button class="piece-card" type="button" data-add="shelf" aria-label="Add tape shelf: 10 TB Vault, $20.00/mo"><svg class="px sticker" style="--w:20;--h:40" viewBox="0 0 20 40" aria-hidden="true" focusable="false"><use href="#s-shelf"/></svg><span class="pc-name">Tape shelf</span><span class="pc-what">10 TB Vault</span><span class="pc-price">$20.00/mo</span></button><button class="piece-card" type="button" data-add="lamp" aria-label="Add lamp: pins 1 TB hot, $3.00/mo"><svg class="px sticker" style="--w:10;--h:13" viewBox="0 0 10 13" aria-hidden="true" focusable="false"><use href="#s-lamp"/></svg><span class="pc-name">Lamp</span><span class="pc-what">pins 1 TB hot</span><span class="pc-price">$3.00/mo</span></button></div><p class="tray-title">decor · free</p><div class="tray" role="group" aria-label="decor · free pieces"><button class="piece-card" type="button" data-add="plant" aria-label="Add plant: good vibes, free"><svg class="px sticker" style="--w:12;--h:18" viewBox="0 0 12 18" aria-hidden="true" focusable="false"><use href="#s-plant"/></svg><span class="pc-name">Plant</span><span class="pc-what">good vibes</span><span class="pc-price free">free</span></button><button class="piece-card" type="button" data-add="cup" aria-label="Add coffee: fuel, free"><svg class="px sticker" style="--w:8;--h:12" viewBox="0 0 8 12" aria-hidden="true" focusable="false"><use href="#s-cup"/></svg><span class="pc-name">Coffee</span><span class="pc-what">fuel</span><span class="pc-price free">free</span></button><button class="piece-card" type="button" data-add="mat" aria-label="Add yoga mat: matches your fit, free"><svg class="px sticker" style="--w:6;--h:16" viewBox="0 0 6 16" aria-hidden="true" focusable="false"><use href="#s-mat"/></svg><span class="pc-name">Yoga mat</span><span class="pc-what">matches your fit</span><span class="pc-price free">free</span></button><button class="piece-card" type="button" data-add="rug" aria-label="Add rug: matches your wall, free"><svg class="px sticker" style="--w:32;--h:5" viewBox="0 0 32 5" aria-hidden="true" focusable="false"><use href="#s-rug"/></svg><span class="pc-name">Rug</span><span class="pc-what">matches your wall</span><span class="pc-price free">free</span></button><button class="piece-card" type="button" data-add="heart" aria-label="Add heart: for the wall, free"><svg class="px sticker" style="--w:9;--h:8" viewBox="0 0 9 8" aria-hidden="true" focusable="false"><use href="#s-heart"/></svg><span class="pc-name">Heart</span><span class="pc-what">for the wall</span><span class="pc-price free">free</span></button><button class="piece-card" type="button" data-add="mascot" aria-label="Add you: one of you, free"><svg class="px sticker" style="--w:16;--h:26" viewBox="0 0 16 26" aria-hidden="true" focusable="false"><use href="#s-mascot-wave"/></svg><span class="pc-name">You</span><span class="pc-what">one of you</span><span class="pc-price free">free</span></button></div>
+                <div class="receipt" id="receipt" data-open="{{if .SignupsOpen}}1{{else}}0{{end}}">
+                    <div class="r-head"><svg class="px" style="--w:8;--h:12;--u:3px" viewBox="0 0 8 12" aria-hidden="true" focusable="false"><use href="#s-cup"/></svg><div style="flex:1"><label for="vault-name">name on the cup</label><input id="vault-name" type="text" maxlength="16" autocomplete="off" spellcheck="false" placeholder="your name"></div></div>
+                    <ul class="r-lines" id="r-lines"><li><span>Standard</span><span>6 TB</span><span class="dots"></span><span>$26.94</span></li><li><span>Pin-hot</span><span>1 TB</span><span class="dots"></span><span>$3.00</span></li><li class="muted"><span>decor</span><span>4 pcs</span><span class="dots"></span><span>free</span></li></ul>
+                    <div class="r-total"><small>total / mo, billed yearly</small><span id="r-total">$29.94</span></div>
+                    <p class="r-fine">Annual rates: Standard $4.49/TB, Vault $2/TB, pin-hot $3/TB. Monthly plans: Standard $4.99/TB, Vault $2.55/TB. No meters, no API fees.</p>
+                    <p class="r-save" id="r-save">the same 6 TB of Standard on AWS S3: $138.00/mo</p>
+                    <p class="r-warn" id="r-warn"></p>
+                    <div class="r-actions">
+                        {{if .SignupsOpen}}<a class="btn btn-primary" href="/register">Start free</a>{{else}}<a class="btn btn-primary" href="#waitlist">Join waitlist</a>{{end}}
+                        <button class="btn btn-ghost" type="button" id="b-share">Share room</button>
+                        <button class="btn btn-ghost" type="button" id="b-save">Save image</button>
+                    </div>
+                </div>
+                <p class="sr-only" aria-live="polite" id="b-live"></p>
+            </div>
+        </div>
+    </div>
+</section>
+
 <section>
     <div class="container">
         <div class="section-head">
-            <p class="kicker"><b>02</b>How it works</p>
+            <p class="kicker"><b>03</b>How it works</p>
             <h2>Watch a workload age.</h2>
             <p class="lede">Drag the timeline. The ring is where your bytes live; the number in the middle is what you pay. Only one of them moves.</p>
         </div>
@@ -915,7 +1158,7 @@ Elapsed time:      3m29.5s</span>
 <section>
     <div class="container">
         <div class="section-head">
-            <p class="kicker"><b>03</b>Use cases</p>
+            <p class="kicker"><b>04</b>Use cases</p>
             <h2>What are you building on it?</h2>
             <p class="lede">Pick your workload — each one is a paste-ready start, not a brochure.</p>
         </div>
@@ -1052,7 +1295,7 @@ SELECT count(*) FROM 's3://lake/events/2026/*.parquet';</pre>
 <section>
     <div class="container">
         <div class="section-head">
-            <p class="kicker"><b>04</b>Attach anything</p>
+            <p class="kicker"><b>05</b>Attach anything</p>
             <h2>If it speaks S3, it plugs in.</h2>
             <p class="lede">Tools, SDKs, and platform features all hit the same endpoint with the same keys — mix them freely on the same bucket. Click around.</p>
         </div>
@@ -1218,7 +1461,7 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
 <section id="pricing">
     <div class="container">
         <div class="section-head">
-            <p class="kicker"><b>05</b>Pricing</p>
+            <p class="kicker"><b>06</b>Pricing</p>
             <h2>Pay per TB. That's the whole model.</h2>
             <p class="lede">You buy a quota in whole TB at a flat per-TB rate and resize it whenever you like (prorated). The bill never moves on its own: no meters, no overage, no API fees, no request classes, no retrieval surcharges — and every limit is printed on this page, not in a PDF.</p>
         </div>
@@ -1315,7 +1558,7 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
 <section>
     <div class="container">
         <div class="section-head">
-            <p class="kicker"><b>06</b>Straight answers</p>
+            <p class="kicker"><b>07</b>Straight answers</p>
             <h2>The parts most storage pages won't tell you.</h2>
             <p class="lede">More in the <a href="/docs/faq">full FAQ</a>.</p>
         </div>
@@ -1349,7 +1592,7 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
 
 <section class="final">
     <div class="container">
-        <div class="final-art"><svg viewBox="0 0 66 34" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><use href="#s-dresser" x="0" y="14" width="32" height="20"/><use href="#s-lamp" x="4" y="1" width="10" height="13"/><use href="#s-box" x="14" y="2" width="16" height="13"/><use class="wave-a" href="#s-mascot" x="38" y="8" width="16" height="26"/><use class="wave-b" href="#s-mascot-wave" x="38" y="8" width="16" height="26"/><use href="#s-heart" x="56" y="4" width="9" height="8"/></svg></div>
+        <div class="final-art"><svg data-play viewBox="0 0 66 34" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><g class="piece" transform="translate(0 14)"><rect class="hit" width="32" height="20"/><use href="#s-dresser" width="32" height="20"/></g><g class="piece" transform="translate(4 1)"><rect class="hit" width="10" height="13"/><use href="#s-lamp" width="10" height="13"/></g><g class="piece" transform="translate(14 2)"><rect class="hit" width="16" height="13"/><use href="#s-box" width="16" height="13"/></g><g class="piece" transform="translate(38 8)"><rect class="hit" width="16" height="26"/><use class="wave-a" href="#s-mascot" width="16" height="26"/><use class="wave-b" href="#s-mascot-wave" width="16" height="26"/></g><g class="piece" transform="translate(56 4)"><rect class="hit" width="9" height="8"/><use href="#s-heart" width="9" height="8"/></g></svg></div>
         {{if .SignupsOpen}}
         <h2>Try it in the next five minutes.</h2>
         <p>5 GB free, no credit card. Keys on signup, rclone config ready to paste.</p>
@@ -1554,6 +1797,507 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
         }
         slider.addEventListener('input', render);
         render();
+    })();
+    // ---- 02: build-your-vault. Every piece is real quota at real prices;
+    // the room, vibe and name persist on this device and travel in #room= links.
+    (function () {
+        var NS = 'http://www.w3.org/2000/svg';
+        var PRICE = { std: 4.49, vault: 2.00, pin: 3.00, aws: 23.00 };
+        var P = {
+            box:     { w: 16, h: 13, name: 'Moving box', what: '1 TB Standard', std: 1 },
+            dresser: { w: 32, h: 20, name: 'Dresser', what: '5 TB Standard', std: 5 },
+            shelf:   { w: 20, h: 40, name: 'Tape shelf', what: '10 TB Vault', vault: 10 },
+            lamp:    { w: 10, h: 13, name: 'Lamp', what: '1 TB pinned hot', pin: 1 },
+            plant:   { w: 12, h: 18, name: 'Plant', what: 'decor, free' },
+            cup:     { w: 8,  h: 12, name: 'Coffee', what: 'decor, free' },
+            mat:     { w: 6,  h: 16, name: 'Yoga mat', what: 'decor, free' },
+            rug:     { w: 32, h: 5,  name: 'Rug', what: 'decor, free', flat: true, deep: true },
+            heart:   { w: 9,  h: 8,  name: 'Heart', what: 'decor, free', wall: true },
+            mascot:  { w: 16, h: 26, name: 'You', what: 'that is you', max: 1 }
+        };
+        var WALLS = {
+            midnight: ['#0a3a63', '#125594', '#0b2f52'],
+            matcha:   ['#9fbc98', '#b8cfb0', '#6f8f6a'],
+            oat:      ['#e2d3ba', '#eee3d0', '#c4a983'],
+            blush:    ['#eeb6bb', '#f6cfd0', '#d98c98'],
+            butter:   ['#f1d98a', '#f8e9b3', '#d4ae46'],
+            lilac:    ['#c2b3e6', '#d7cdf1', '#9d8ccf']
+        };
+        var FITS = { midnight: '#1c3445', matcha: '#5f7f5a', oat: '#b59f7c', blush: '#d9828f', lilac: '#8f7cc8', noir: '#2b2b2b' };
+        var W = 128, H = 72, FLOOR = 64, MAX = 30;
+        var STARTER = [['rug', 30, 59], ['dresser', 34, 44], ['lamp', 37, 31], ['cup', 58, 33], ['box', 8, 51], ['plant', 72, 46], ['mascot', 88, 38]];
+
+        var store = {
+            get: function (k) { try { return window.localStorage.getItem(k); } catch (e) { return null; } },
+            set: function (k, v) { try { window.localStorage.setItem(k, v); } catch (e) { /* private mode: fine */ } }
+        };
+        function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+        function money(n) { return '$' + n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+        function cleanName(s) { return String(s || '').replace(/[^\p{L}\p{N} _\u0027-]/gu, '').slice(0, 16); }
+        function mkItem(k, x, y) {
+            var p = P[k];
+            return { k: k, x: clamp(Math.round(x), 0, W - p.w), y: clamp(Math.round(y), 0, H - p.h) };
+        }
+        function starter() { return STARTER.map(function (s) { return mkItem(s[0], s[1], s[2]); }); }
+
+        var state = { wall: 'midnight', fit: 'midnight', name: '', items: starter() };
+
+        // ---- vibe: wall + fit colours are site-wide CSS variables
+        function applyVibe() {
+            var w = WALLS[state.wall], r = document.documentElement.style;
+            r.setProperty('--wall-a', w[0]);
+            r.setProperty('--wall-b', w[1]);
+            r.setProperty('--wall-deep', w[2]);
+            r.setProperty('--fit', FITS[state.fit]);
+            document.querySelectorAll('[data-wall]').forEach(function (b) {
+                b.setAttribute('aria-pressed', b.getAttribute('data-wall') === state.wall ? 'true' : 'false');
+            });
+            document.querySelectorAll('[data-fit]').forEach(function (b) {
+                b.setAttribute('aria-pressed', b.getAttribute('data-fit') === state.fit ? 'true' : 'false');
+            });
+        }
+
+        // ---- share format: v1.<wall>.<fit>.<name>.<k-x-y_k-x-y...>
+        function encode() {
+            return 'v1.' + state.wall + '.' + state.fit + '.' + encodeURIComponent(state.name) + '.' +
+                state.items.map(function (i) { return i.k + '-' + i.x + '-' + i.y; }).join('_');
+        }
+        function decode(str) {
+            var parts = String(str || '').split('.');
+            if (parts.length !== 5 || parts[0] !== 'v1' || !WALLS[parts[1]] || !FITS[parts[2]]) return null;
+            var name = '';
+            try { name = cleanName(decodeURIComponent(parts[3])); } catch (e) { name = ''; }
+            var items = [], you = 0;
+            parts[4].split('_').forEach(function (t) {
+                var m = /^([a-z]+)-(\d{1,3})-(\d{1,3})$/.exec(t);
+                if (!m || !Object.prototype.hasOwnProperty.call(P, m[1]) || items.length >= MAX) return;
+                if (m[1] === 'mascot' && you++) return;
+                items.push(mkItem(m[1], Number(m[2]), Number(m[3])));
+            });
+            return { wall: parts[1], fit: parts[2], name: name, items: items };
+        }
+        function save() { store.set('sg-room', encode()); }
+
+        var fromLink = false;
+        (function load() {
+            var h = window.location.hash, got = null;
+            if (h.indexOf('#room=') === 0) { got = decode(h.slice(6)); fromLink = !!got; }
+            if (!got) got = decode(store.get('sg-room'));
+            if (got) state = got;
+        })();
+        applyVibe();
+
+        // ---- SVG helpers
+        function el(tag, attrs) {
+            var n = document.createElementNS(NS, tag);
+            for (var a in attrs) { if (Object.prototype.hasOwnProperty.call(attrs, a)) n.setAttribute(a, attrs[a]); }
+            return n;
+        }
+        function svgPoint(svg, cx, cy) {
+            var pt = svg.createSVGPoint();
+            pt.x = cx; pt.y = cy;
+            return pt.matrixTransform(svg.getScreenCTM().inverse());
+        }
+
+        // Drag any .piece around its SVG, snapped to the pixel grid. opts.outside
+        // reports a drop beyond the SVG's box (the builder treats that as remove).
+        function makeDraggable(svg, g, pos, w, h, vb, opts) {
+            opts = opts || {};
+            g.addEventListener('pointerdown', function (e) {
+                if (e.button > 0) return;
+                e.preventDefault();
+                var start = svgPoint(svg, e.clientX, e.clientY), ox = pos.x, oy = pos.y, moved = false, out = false;
+                try { g.setPointerCapture(e.pointerId); } catch (err) { /* older engines */ }
+                g.classList.add('lift');
+                g.parentNode.appendChild(g);
+                if (g.focus) { try { g.focus({ preventScroll: true }); } catch (err) { /* no focus on svg */ } }
+                function mv(ev) {
+                    var p = svgPoint(svg, ev.clientX, ev.clientY);
+                    var nx = Math.round(ox + p.x - start.x), ny = Math.round(oy + p.y - start.y);
+                    if (nx !== ox || ny !== oy) moved = true;
+                    var r = svg.getBoundingClientRect();
+                    out = !!opts.outside && (ev.clientX < r.left - 8 || ev.clientX > r.right + 8 || ev.clientY < r.top - 8 || ev.clientY > r.bottom + 8);
+                    pos.x = out ? nx : clamp(nx, 0, vb[0] - w);
+                    pos.y = out ? ny : clamp(ny, 0, vb[1] - h);
+                    g.setAttribute('transform', 'translate(' + pos.x + ' ' + pos.y + ')');
+                    g.style.opacity = out ? '0.35' : '';
+                }
+                function up() {
+                    g.removeEventListener('pointermove', mv);
+                    g.classList.remove('lift');
+                    g.style.opacity = '';
+                    if (out) { opts.outside(); return; }
+                    pos.x = clamp(pos.x, 0, vb[0] - w);
+                    pos.y = clamp(pos.y, 0, vb[1] - h);
+                    g.setAttribute('transform', 'translate(' + pos.x + ' ' + pos.y + ')');
+                    if (moved && navigator.vibrate) { try { navigator.vibrate(6); } catch (err) { /* ignore */ } }
+                    if (opts.end) opts.end(moved);
+                }
+                g.addEventListener('pointermove', mv);
+                g.addEventListener('pointerup', up, { once: true });
+                g.addEventListener('pointercancel', up, { once: true });
+            });
+        }
+
+        // decorative scenes (hero room, final CTA): pick things up, put them down
+        document.querySelectorAll('svg[data-play]').forEach(function (svg) {
+            var vb = svg.getAttribute('viewBox').split(' ').map(Number).slice(2);
+            svg.querySelectorAll('.piece').forEach(function (g) {
+                var m = /translate\((-?\d+) (-?\d+)\)/.exec(g.getAttribute('transform') || '');
+                var hit = g.querySelector('.hit');
+                if (!m || !hit) return;
+                var pos = { x: Number(m[1]), y: Number(m[2]) };
+                makeDraggable(svg, g, pos, Number(hit.getAttribute('width')), Number(hit.getAttribute('height')), vb);
+            });
+        });
+
+        var room = document.getElementById('room');
+        if (!room) return;
+        var itemsLayer = document.getElementById('room-items');
+        var roomBox = document.querySelector('.b-room');
+        var sign = document.getElementById('room-sign');
+        var live = document.getElementById('b-live');
+        var nameInput = document.getElementById('vault-name');
+        var receipt = document.getElementById('receipt');
+
+        function announce(msg) { if (live) live.textContent = msg; }
+        function floatNote(text, x, y) {
+            if (!roomBox) return;
+            var r = room.getBoundingClientRect(), b = roomBox.getBoundingClientRect();
+            var n = document.createElement('span');
+            n.className = 'float-note';
+            n.textContent = text;
+            n.style.left = (r.left - b.left + (x / W) * r.width) + 'px';
+            n.style.top = (r.top - b.top + (y / H) * r.height) + 'px';
+            roomBox.appendChild(n);
+            setTimeout(function () { n.remove(); }, 1200);
+        }
+        function toast(msg) {
+            var t = document.createElement('div');
+            t.className = 'toast';
+            t.setAttribute('role', 'status');
+            t.textContent = msg;
+            document.body.appendChild(t);
+            setTimeout(function () { t.remove(); }, 2500);
+        }
+        function gain(p) {
+            if (p.std) return '+' + p.std + ' TB';
+            if (p.vault) return '+' + p.vault + ' TB vault';
+            if (p.pin) return '+1 TB hot';
+            return 'free';
+        }
+
+        function signText() { return state.name ? state.name.toLowerCase() + '’s vault' : 'my vault'; }
+        function renderSign() {
+            if (!sign) return;
+            sign.textContent = signText();
+            if (signText().length > 12) {
+                sign.setAttribute('textLength', '48');
+                sign.setAttribute('lengthAdjust', 'spacingAndGlyphs');
+            } else {
+                sign.removeAttribute('textLength');
+                sign.removeAttribute('lengthAdjust');
+            }
+        }
+
+        function order() {
+            return state.items.slice().sort(function (a, b) {
+                var fa = P[a.k].flat ? 0 : 1, fb = P[b.k].flat ? 0 : 1;
+                return fa - fb || (a.y + P[a.k].h) - (b.y + P[b.k].h);
+            });
+        }
+        function pieceNode(item) {
+            var p = P[item.k];
+            var g = el('g', {
+                'class': 'piece', transform: 'translate(' + item.x + ' ' + item.y + ')',
+                tabindex: '0', role: 'button',
+                'aria-label': p.name + ', ' + p.what + '. Drag to move, or use arrow keys; Delete removes it.'
+            });
+            if (p.deep) g.style.color = 'var(--wall-deep)';
+            g.appendChild(el('rect', { 'class': 'hit', width: p.w, height: p.h }));
+            if (item.k === 'mascot') {
+                g.appendChild(el('use', { href: '#s-mascot', width: p.w, height: p.h, 'class': 'wave-a' }));
+                g.appendChild(el('use', { href: '#s-mascot-wave', width: p.w, height: p.h, 'class': 'wave-b' }));
+            } else {
+                g.appendChild(el('use', { href: '#s-' + item.k, width: p.w, height: p.h }));
+            }
+            makeDraggable(room, g, item, p.w, p.h, [W, H], {
+                outside: function () { removeItem(item); },
+                end: function (moved) { if (moved) { render(item); save(); } }
+            });
+            g.addEventListener('keydown', function (e) {
+                var step = e.shiftKey ? 4 : 1, dx = 0, dy = 0;
+                if (e.key === 'ArrowLeft') dx = -step;
+                else if (e.key === 'ArrowRight') dx = step;
+                else if (e.key === 'ArrowUp') dy = -step;
+                else if (e.key === 'ArrowDown') dy = step;
+                else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); removeItem(item, true); return; }
+                else return;
+                e.preventDefault();
+                item.x = clamp(item.x + dx, 0, W - p.w);
+                item.y = clamp(item.y + dy, 0, H - p.h);
+                g.setAttribute('transform', 'translate(' + item.x + ' ' + item.y + ')');
+                save();
+            });
+            g._item = item;
+            return g;
+        }
+        function render(focusItem, popItem) {
+            while (itemsLayer.firstChild) itemsLayer.removeChild(itemsLayer.firstChild);
+            order().forEach(function (item) {
+                var g = pieceNode(item);
+                itemsLayer.appendChild(g);
+                if (item === popItem) g.classList.add('pop');
+                if (item === focusItem) { try { g.focus({ preventScroll: true }); } catch (e) { /* ignore */ } }
+            });
+            updateTray();
+            updateReceipt();
+        }
+
+        function freeX(p) {
+            for (var x = 4; x <= W - p.w - 2; x += 2) {
+                var clash = state.items.some(function (i) {
+                    var q = P[i.k];
+                    if (q.flat || q.wall || i.y + q.h < FLOOR - 1) return false;
+                    return x < i.x + q.w && x + p.w > i.x;
+                });
+                if (!clash) return x;
+            }
+            return 4 + Math.floor(Math.random() * (W - p.w - 8));
+        }
+        function canAdd(k) {
+            if (state.items.length >= MAX) return false;
+            if (P[k].max && state.items.filter(function (i) { return i.k === k; }).length >= P[k].max) return false;
+            return true;
+        }
+        function addItem(k, x, y) {
+            var p = P[k];
+            if (!p) return;
+            if (!canAdd(k)) { toast(state.items.length >= MAX ? 'room is full: drag something out' : 'there is only one you'); return; }
+            if (x === undefined) {
+                x = freeX(p);
+                y = p.flat ? FLOOR - 5 : (p.wall ? 22 : FLOOR - p.h);
+            }
+            var item = mkItem(k, x, y);
+            state.items.push(item);
+            render(null, item);
+            floatNote(gain(p), item.x + p.w / 2, item.y);
+            announce('Added ' + p.name + ': ' + p.what + '. Total ' + money(totals().total) + ' a month.');
+            if (navigator.vibrate) { try { navigator.vibrate(8); } catch (e) { /* ignore */ } }
+            save();
+        }
+        function removeItem(item, viaKeyboard) {
+            var i = state.items.indexOf(item);
+            if (i < 0) return;
+            state.items.splice(i, 1);
+            var p = P[item.k];
+            render();
+            floatNote(p.std || p.vault || p.pin ? '−' + gain(p).slice(1) : 'bye', item.x + p.w / 2, clamp(item.y, 4, H - 8));
+            announce('Removed ' + p.name + '. Total ' + money(totals().total) + ' a month.');
+            if (viaKeyboard) {
+                var next = itemsLayer.querySelector('.piece');
+                if (next) next.focus(); else document.querySelector('.piece-card').focus();
+            }
+            save();
+        }
+
+        function totals() {
+            var t = { std: 0, vault: 0, pin: 0, decor: 0 };
+            state.items.forEach(function (i) {
+                var p = P[i.k];
+                t.std += p.std || 0; t.vault += p.vault || 0; t.pin += p.pin || 0;
+                if (!p.std && !p.vault && !p.pin) t.decor++;
+            });
+            t.pinUsed = Math.min(t.pin, t.std);
+            t.total = t.std * PRICE.std + t.vault * PRICE.vault + t.pinUsed * PRICE.pin;
+            return t;
+        }
+        function line(list, label, qty, amt, muted) {
+            var li = document.createElement('li');
+            if (muted) li.className = 'muted';
+            var a = document.createElement('span'); a.textContent = label;
+            var q = document.createElement('span'); q.textContent = qty;
+            var d = document.createElement('span'); d.className = 'dots';
+            var v = document.createElement('span'); v.textContent = amt;
+            li.appendChild(a); li.appendChild(q); li.appendChild(d); li.appendChild(v);
+            list.appendChild(li);
+        }
+        function updateReceipt() {
+            var t = totals(), list = document.getElementById('r-lines');
+            while (list.firstChild) list.removeChild(list.firstChild);
+            if (t.std) line(list, 'Standard', t.std + ' TB', money(t.std * PRICE.std));
+            if (t.vault) line(list, 'Vault', t.vault + ' TB', money(t.vault * PRICE.vault));
+            if (t.pin) line(list, 'Pin-hot', t.pinUsed + ' TB', money(t.pinUsed * PRICE.pin));
+            if (t.decor) line(list, 'decor', t.decor + (t.decor === 1 ? ' pc' : ' pcs'), 'free', true);
+            if (!state.items.length) line(list, 'nothing yet', '', receipt.getAttribute('data-open') === '1' ? '5 GB free' : 'drag something in', true);
+            document.getElementById('r-total').textContent = money(t.total);
+            document.getElementById('r-save').textContent = t.std
+                ? 'the same ' + t.std + ' TB of Standard on AWS S3: ' + money(t.std * PRICE.aws) + '/mo'
+                : '';
+            document.getElementById('r-warn').textContent = t.pin > t.std
+                ? 'Lamps pin Standard TB hot. Add a box or dresser to light ' + (t.pin - t.std === 1 ? 'it' : 'them') + '.'
+                : '';
+        }
+        function updateTray() {
+            document.querySelectorAll('.piece-card').forEach(function (c) {
+                c.setAttribute('aria-disabled', canAdd(c.getAttribute('data-add')) ? 'false' : 'true');
+            });
+        }
+
+        // ---- tray: tap/click adds, mouse can drag straight into the room
+        var suppressClick = false;
+        document.querySelectorAll('.piece-card').forEach(function (card) {
+            var k = card.getAttribute('data-add');
+            card.addEventListener('click', function () {
+                if (suppressClick) { suppressClick = false; return; }
+                addItem(k);
+            });
+            card.addEventListener('pointerdown', function (e) {
+                if (e.pointerType === 'touch' || e.button > 0 || !canAdd(k)) return;
+                var sx = e.clientX, sy = e.clientY, ghost = null;
+                function inside(ev) {
+                    var r = room.getBoundingClientRect();
+                    return ev.clientX >= r.left && ev.clientX <= r.right && ev.clientY >= r.top && ev.clientY <= r.bottom;
+                }
+                function mv(ev) {
+                    if (!ghost && Math.abs(ev.clientX - sx) + Math.abs(ev.clientY - sy) > 6) {
+                        ghost = document.createElement('div');
+                        ghost.className = 'drag-ghost sticker';
+                        ghost.appendChild(card.querySelector('svg').cloneNode(true));
+                        document.body.appendChild(ghost);
+                    }
+                    if (ghost) {
+                        ghost.style.left = ev.clientX + 'px';
+                        ghost.style.top = ev.clientY + 'px';
+                        roomBox.classList.toggle('drop-ok', inside(ev));
+                    }
+                }
+                function up(ev) {
+                    window.removeEventListener('pointermove', mv);
+                    roomBox.classList.remove('drop-ok');
+                    if (!ghost) return;
+                    ghost.remove();
+                    suppressClick = true;
+                    setTimeout(function () { suppressClick = false; }, 0);
+                    if (inside(ev)) {
+                        var pt = svgPoint(room, ev.clientX, ev.clientY);
+                        addItem(k, pt.x - P[k].w / 2, pt.y - P[k].h * 0.85);
+                    }
+                }
+                window.addEventListener('pointermove', mv);
+                window.addEventListener('pointerup', up, { once: true });
+            });
+        });
+
+        // tier cards: the sprite is a sticker you can drop into your room
+        document.querySelectorAll('.grab-piece[data-add]').forEach(function (b) {
+            b.addEventListener('click', function () {
+                var k = b.getAttribute('data-add');
+                document.getElementById('build').scrollIntoView({ behavior: 'smooth', block: 'start' });
+                setTimeout(function () { addItem(k); }, 550);
+            });
+        });
+
+        document.querySelectorAll('[data-wall]').forEach(function (b) {
+            b.addEventListener('click', function () { state.wall = b.getAttribute('data-wall'); applyVibe(); save(); });
+        });
+        document.querySelectorAll('[data-fit]').forEach(function (b) {
+            b.addEventListener('click', function () { state.fit = b.getAttribute('data-fit'); applyVibe(); save(); });
+        });
+        document.getElementById('b-reset').addEventListener('click', function () {
+            state.items = starter();
+            render();
+            announce('Room reset.');
+            save();
+        });
+        nameInput.value = state.name;
+        nameInput.addEventListener('input', function () {
+            var c = cleanName(nameInput.value);
+            if (c !== nameInput.value) nameInput.value = c;
+            state.name = c;
+            renderSign();
+            save();
+        });
+
+        function shareURL() { return window.location.origin + window.location.pathname + '#room=' + encode(); }
+        document.getElementById('b-share').addEventListener('click', function () {
+            var url = shareURL();
+            if (navigator.share) {
+                navigator.share({ title: signText() + ' on stored.ge', url: url }).catch(function () { /* dismissed */ });
+                return;
+            }
+            if (navigator.clipboard) {
+                navigator.clipboard.writeText(url).then(function () { toast('link copied. go post it'); }, function () { toast('copy failed'); });
+            }
+        });
+
+        // ---- save as image: rebuild the room as a standalone SVG, rasterise it,
+        // then letter the sign + caption with the page's own (already loaded) fonts.
+        function bgMarkup(wa, wb) {
+            return '<defs><linearGradient id="wg" x1="0" y1="0" x2="0" y2="1">' +
+                '<stop offset="0" style="stop-color:' + wa + '"/><stop offset="1" style="stop-color:' + wb + '"/></linearGradient></defs>' +
+                document.getElementById('room-bg').innerHTML.replace('url(#wallgrad)', 'url(#wg)');
+        }
+        document.getElementById('b-save').addEventListener('click', function () {
+            var cs = getComputedStyle(document.documentElement);
+            var wa = cs.getPropertyValue('--wall-a').trim(), wb = cs.getPropertyValue('--wall-b').trim();
+            var deep = cs.getPropertyValue('--wall-deep').trim(), fit = cs.getPropertyValue('--fit').trim();
+            var need = { 'mascot-wave': 1 }, body = '';
+            order().forEach(function (i) {
+                var p = P[i.k], sym = i.k === 'mascot' ? 'mascot-wave' : i.k;
+                need[sym] = 1;
+                body += '<g transform="translate(' + i.x + ' ' + i.y + ')" color="' + (p.deep ? deep : fit) + '">' +
+                    '<use href="#s-' + sym + '" width="' + p.w + '" height="' + p.h + '"/></g>';
+            });
+            var defs = '';
+            Object.keys(need).forEach(function (id) { defs += document.getElementById('s-' + id).outerHTML; });
+            var svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 72" width="1024" height="576" shape-rendering="crispEdges">' +
+                '<defs>' + defs + '</defs>' + bgMarkup(wa, wb).replace(/<text[\s\S]*?<\/text>/, '') + body + '</svg>';
+            var img = new Image();
+            img.onload = function () {
+                var c = document.createElement('canvas');
+                c.width = 1024; c.height = 700;
+                var x = c.getContext('2d');
+                x.fillStyle = '#fffaf0';
+                x.fillRect(0, 0, 1024, 700);
+                x.imageSmoothingEnabled = false;
+                x.drawImage(img, 0, 0, 1024, 576);
+                x.fillStyle = '#fdf3dc';
+                x.textAlign = 'center';
+                x.font = '40px Silkscreen';
+                x.fillText(signText(), 34 * 8, 15.6 * 8, 48 * 8);
+                var t = totals(), tb = t.std + t.vault;
+                x.textAlign = 'left';
+                x.fillStyle = '#2b2b2b';
+                x.font = '800 38px Montserrat';
+                x.fillText(signText(), 36, 636);
+                x.font = '20px Silkscreen';
+                x.fillStyle = '#6b6b6b';
+                x.fillText(tb + ' TB · ' + money(t.total) + '/mo · built on stored.ge', 36, 672);
+                x.textAlign = 'right';
+                x.fillStyle = '#2b2b2b';
+                x.font = '800 30px Montserrat';
+                x.fillText('STORED.GE', 988, 652);
+                c.toBlob(function (blob) {
+                    if (!blob) { toast('could not save image'); return; }
+                    var a = document.createElement('a');
+                    a.href = URL.createObjectURL(blob);
+                    a.download = 'my-stored-vault.png';
+                    document.body.appendChild(a);
+                    a.click();
+                    setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+                    toast('saved. go post it');
+                });
+            };
+            img.onerror = function () { toast('could not save image'); };
+            img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+        });
+
+        renderSign();
+        render();
+        if (fromLink) {
+            setTimeout(function () { document.getElementById('build').scrollIntoView({ block: 'start' }); }, 50);
+        }
     })();
 </script>
 
