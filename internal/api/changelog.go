@@ -34,7 +34,7 @@ const changelogShellPre = `<!DOCTYPE html>
 <title>Changelog — stored.ge</title>
 ` + siteShellStyle + `</head>
 <body>
-<header class="top"><div class="top-in">` + siteShellBrand + `<a class="crumb" href="/changelog">Changelog</a></div></header>
+<header class="top"><div class="top-in">` + siteShellBrand + `<a class="crumb" href="/changelog">Changelog</a>` + siteShellToggle + `</div></header>
 <main>
 `
 
