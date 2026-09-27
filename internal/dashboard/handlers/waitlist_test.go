@@ -36,7 +36,7 @@ func TestHandleAdminWaitlist_ListsSignups(t *testing.T) {
 
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM waitlist_signups`).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(2))
-	mock.ExpectQuery(`SELECT email, source, created_at FROM waitlist_signups`).
+	mock.ExpectQuery(`SELECT email, source, created_at, plan_std_tb, plan_vault_tb FROM waitlist_signups`).
 		WillReturnRows(sqlmock.NewRows([]string{"email", "source", "created_at", "plan_std_tb", "plan_vault_tb"}).
 			AddRow("a@example.com", "landing", time.Now(), 6, 1).
 			AddRow("b@example.com", "landing", time.Now(), 0, 0))
@@ -60,7 +60,7 @@ func TestHandleAdminWaitlistExport_CSV(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
-	mock.ExpectQuery(`SELECT email, source, created_at FROM waitlist_signups`).
+	mock.ExpectQuery(`SELECT email, source, created_at, plan_std_tb, plan_vault_tb FROM waitlist_signups`).
 		WillReturnRows(sqlmock.NewRows([]string{"email", "source", "created_at", "plan_std_tb", "plan_vault_tb"}).
 			AddRow("a@example.com", "landing", time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC), 6, 1))
 
