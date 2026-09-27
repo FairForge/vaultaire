@@ -82,6 +82,22 @@ func TestBuildBackendProbes_PermafrostUsesDriverProbe(t *testing.T) {
 	}
 }
 
+func TestBuildBackendProbes_LocalIsProbedWheneverRegistered(t *testing.T) {
+	// `local` is always registered and needs no credentials; without a probe
+	// state the admin backends page showed it as "unhealthy" forever.
+	eng := &fakeDriverChecker{drivers: map[string]error{"local": nil}}
+	got := buildBackendProbes(envOf(nil), eng)
+
+	c := findCheck(t, got, "local")
+	require.NotNil(t, c.probe)
+	require.NoError(t, c.probe(context.Background()))
+	assert.Equal(t, []string{"local"}, eng.calls, "the driver's own HealthCheck (a stat of DATA_PATH)")
+
+	for _, c := range buildBackendProbes(envOf(nil), &fakeDriverChecker{}) {
+		assert.NotEqual(t, "local", c.name, "not registered → not probed")
+	}
+}
+
 func TestBuildBackendProbes_LyveWithoutProbeKeyUsesSignedHeadBucket(t *testing.T) {
 	// R7-02: once LYVE_* is a scoped service user, RSCustomerDetails (root
 	// only) would fail — so with no dedicated probe key the probe is the

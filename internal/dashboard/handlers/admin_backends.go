@@ -28,9 +28,14 @@ type BackendState struct {
 
 // BackendInfo is the per-backend view model for the template.
 type BackendInfo struct {
-	Name         string
-	IsPrimary    bool
-	IsBackup     bool
+	Name      string
+	IsPrimary bool
+	IsBackup  bool
+	// Probed is true when a health probe has reported on this backend. A
+	// registered driver with no probe state is NOT unhealthy — it is
+	// unobserved; the template used to render the zero Healthy as "unhealthy"
+	// (the eight never-probed idrive-<region> rows, and local).
+	Probed       bool
 	Healthy      bool
 	Score        float64
 	LatencyMs    int64
@@ -83,6 +88,7 @@ func HandleAdminBackends(tmpl *template.Template, eng *engine.CoreEngine, hc Hea
 				bi.CircuitState = "unknown"
 			}
 			if st, ok := states[name]; ok {
+				bi.Probed = true
 				bi.Healthy = st.Healthy
 				bi.Score = st.Score
 				bi.LatencyMs = st.Latency.Milliseconds()
