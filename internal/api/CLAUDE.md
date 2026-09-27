@@ -434,7 +434,14 @@ BOOLEAN (migration 042).
   both rooms follow light/dark mode (window sky/moon/stars, `.night-dim` layer, `url(#nightdim)`
   filter on unlit pieces, `.glow` pools on `.piece.light` lamps); the CSS is written once with a
   `/*NIGHT*/` marker that the page generator expands into the system-dark and `data-theme="dark"`
-  selector forms. Sprites are 3D pixel cuboids from the scratch generator. If prices change, update
+  selector forms. **Why strip** (top of the section, replaces the text steps): tap what you'd hate
+  to lose (photos / videos / projects / everything -> box / dresser / box / bookcase), it packs into a
+  labelled piece, and "Put it downstairs" / "Send to the attic" moves the packed pieces into the
+  house. Labels ride on items as `l` (p/v/w/e), in tags ("PHOTOS 1 TB"), receipt sub-lines ("1 storage
+  box of photos"), share links (`k-x-y-l`) and the exported image; auto-placement (`freeX`) spaces
+  pieces by the wider of piece and tag so labels never overlap. The piece toolbar also has "open":
+  downstairs answers instantly, the attic in minutes (the tier promise, shown not told).
+  Sprites are 3D pixel cuboids from the scratch generator. If prices change, update
   `PRICE` + the floor labels in the builder markup/script, the tray labels, AND the pricing section.
   The page script has NO template literals (html/template parses `<script>`).
 - **site_shell.go** — shared favicon + `<style>` + pixel-mark brand bar for the /docs/* and
