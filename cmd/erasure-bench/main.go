@@ -26,7 +26,8 @@
 // (GEYSER_* + GEYSER_BUCKET or GEYSER_LA_BUCKET), onedrive/permafrost
 // (TENANT_N_*), idrive (IDRIVE_*), wasabi (WASABI_* + WASABI_BUCKET), r2
 // (R2_ACCOUNT_ID + R2_ACCESS_KEY/R2_SECRET_KEY + R2_BENCH_BUCKET, never the
-// public bucket), pixeldrain (PIXELDRAIN_API_KEY, REST adapter in
+// public bucket), b2 (B2_ACCESS_KEY/B2_SECRET_KEY/B2_ENDPOINT/B2_REGION +
+// B2_BENCH_BUCKET, application key not master), pixeldrain (PIXELDRAIN_API_KEY, REST adapter in
 // pixeldrain.go), local.
 // Usage on SLC:
 //
@@ -488,7 +489,7 @@ func readFirstK(ctx context.Context, enc reedsolomon.Encoder, bes map[string]eng
 	fetchWall := time.Since(t0)
 	cancel()
 	if got < k {
-		fmt.Printf("READ first-k  FAILED: only %d/%d shards (%s)\n", got, k, trunc(lastErr, 80))
+		fmt.Printf("READ first-k  FAILED: only %d/%d shards (%s)\n", got, k, trunc(lastErr, 400))
 		return
 	}
 	dec, ok := reconstruct(enc, have, k, shardLen, size, want)
@@ -539,7 +540,7 @@ func readDegraded(ctx context.Context, enc reedsolomon.Encoder, bes map[string]e
 	fetchWall := time.Since(t0)
 	cancel()
 	if got < k {
-		fmt.Printf("READ lose:%-8s FAILED: only %d/%d shards (%s)\n", lost, got, k, trunc(lastErr, 80))
+		fmt.Printf("READ lose:%-8s FAILED: only %d/%d shards (%s)\n", lost, got, k, trunc(lastErr, 400))
 		return
 	}
 	dec, ok := reconstruct(enc, have, k, shardLen, size, want)
@@ -628,6 +629,20 @@ func buildBackends(logger *zap.Logger) map[string]engine.Driver {
 	}
 	if ak := os.Getenv("PIXELDRAIN_API_KEY"); ak != "" {
 		add("pixeldrain", newPixeldrainLeg(ak), nil)
+	}
+	if ak := os.Getenv("B2_ACCESS_KEY"); ak != "" {
+		// Backblaze B2 (S3-compatible, account-homed region e.g. us-east-005).
+		// Needs an application key, never the master key (B2 rejects it on S3).
+		bucket := os.Getenv("B2_BENCH_BUCKET")
+		if bucket == "" {
+			bucket = "vt-ecbench-b2"
+		}
+		d, err := drivers.NewS3Driver(os.Getenv("B2_ENDPOINT"), ak, os.Getenv("B2_SECRET_KEY"), os.Getenv("B2_REGION"), logger)
+		if err == nil {
+			add("b2", s3Fixed{d, bucket, "b2"}, nil)
+		} else {
+			add("b2", nil, err)
+		}
 	}
 	if ak := os.Getenv("WASABI_ACCESS_KEY"); ak != "" {
 		d, err := drivers.NewS3Driver(os.Getenv("WASABI_ENDPOINT"), ak, os.Getenv("WASABI_SECRET_KEY"), os.Getenv("WASABI_REGION"), logger)
