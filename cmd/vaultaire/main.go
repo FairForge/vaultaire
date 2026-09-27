@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"syscall"
 	"time"
 
@@ -286,19 +287,17 @@ func main() {
 		}
 	}
 
-	// 6. Add iDrive if credentials available — register one driver per region
+	// 6. Add iDrive if credentials available — the primary plus one driver per
+	// region that has its own key pair (WP-R7-1).
 	if accessKey := os.Getenv("IDRIVE_ACCESS_KEY"); accessKey != "" {
 		secretKey := os.Getenv("IDRIVE_SECRET_KEY")
+		defaultRegion := drivers.IDriveDefaultRegion(os.Getenv)
 		defaultEndpoint := os.Getenv("IDRIVE_ENDPOINT")
 		if defaultEndpoint == "" {
-			defaultEndpoint = "https://e2-us-west-1.idrive.com"
-		}
-		defaultRegion := os.Getenv("IDRIVE_REGION")
-		if defaultRegion == "" {
-			defaultRegion = "us-west-1"
+			defaultEndpoint = drivers.IDriveRegionEndpoint(os.Getenv, defaultRegion)
 		}
 
-		// Register default driver (backward compat alias).
+		// The primary serves the default region.
 		idriveDriver, err := drivers.NewIDriveDriver(accessKey, secretKey, defaultEndpoint, defaultRegion, logger)
 		if err != nil {
 			logger.Warn("failed to add iDrive driver", zap.Error(err))
@@ -307,23 +306,52 @@ func main() {
 			logger.Info("iDrive driver added", zap.String("endpoint", defaultEndpoint), zap.String("region", defaultRegion))
 		}
 
-		// Register per-region drivers for bucket-level region routing. The
-		// reseller account mints one key pair per region, so each region
-		// takes IDRIVE_<REGION>_ACCESS_KEY/_SECRET_KEY (+ optional _ENDPOINT)
-		// when set and falls back to the primary pair otherwise.
+		// Per-region drivers for bucket-level data residency. The reseller
+		// account mints one key pair per region and the primary pair answers
+		// 403 everywhere else (Review R7-01), so a region is registered ONLY
+		// with IDRIVE_<REGION>_ACCESS_KEY/_SECRET_KEY set; its fixed bucket is
+		// created on first boot if absent. Regions without a pair are refused
+		// at CreateBucket rather than silently stored on the primary.
+		regions := make([]string, 0, len(drivers.IDriveRegions))
 		for region := range drivers.IDriveRegions {
-			driverName := "idrive-" + region
+			regions = append(regions, region)
+		}
+		sort.Strings(regions)
+		var registered []string
+		for _, region := range regions {
+			if region == defaultRegion {
+				continue
+			}
 			regionAK, regionSK := drivers.IDriveRegionCredentials(os.Getenv, region)
+			if regionAK == "" {
+				logger.Info("iDrive region not enabled (no dedicated key pair)",
+					zap.String("region", region),
+					zap.String("env", drivers.IDriveRegionEnvKey(region, "ACCESS_KEY")))
+				continue
+			}
 			endpoint := drivers.IDriveRegionEndpoint(os.Getenv, region)
 			drv, drvErr := drivers.NewIDriveDriver(regionAK, regionSK, endpoint, region, logger)
 			if drvErr != nil {
-				logger.Warn("failed to add region iDrive driver",
+				logger.Error("failed to add region iDrive driver",
 					zap.String("region", region), zap.Error(drvErr))
 				continue
 			}
-			eng.AddDriver(driverName, drv)
+			ectx, ecancel := context.WithTimeout(context.Background(), 20*time.Second)
+			if created, eerr := drv.EnsureBucket(ectx); eerr != nil {
+				logger.Error("iDrive region bucket not verified — region registered, probe will alert",
+					zap.String("region", region), zap.Error(eerr))
+			} else if created {
+				logger.Info("iDrive region bucket provisioned", zap.String("region", region))
+			}
+			ecancel()
+			eng.AddDriver("idrive-"+region, drv)
+			registered = append(registered, region)
 		}
-		logger.Info("iDrive per-region drivers registered", zap.Int("regions", len(drivers.IDriveRegions)))
+		drivers.SetAvailableIDriveRegions(defaultRegion, registered)
+		logger.Info("iDrive regions enabled",
+			zap.String("default", defaultRegion),
+			zap.Strings("regions", registered),
+			zap.Int("available_in_account", len(drivers.IDriveRegions)))
 	}
 
 	// 6b. Cloudflare R2 — PUBLIC BUCKETS / CDN ORIGIN ONLY, never a tier

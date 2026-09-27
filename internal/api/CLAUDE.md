@@ -287,15 +287,15 @@ Server-side encryption with customer-provided 256-bit AES keys. Stateless — ke
 
 ## Per-Bucket Region Selection (Phase 5.14.7)
 
-Each bucket has a `region` column (default `us-west-1`). Region is immutable after creation.
+Each bucket has a `region` column (default = the primary's region, `drivers.IDriveDefaultRegion` = `IDRIVE_REGION` else `us-central-1`; migration 066 relabelled the pre-WP-R7-1 `us-west-1` rows, a region id the account never had). Region is immutable after creation.
 
-**CreateBucket** reads region from (in priority order): `X-Stored-Region` header, `x-amz-bucket-region` header, `<CreateBucketConfiguration><LocationConstraint>` XML body, or defaults to `us-west-1`. Validated against `drivers.IsValidRegion()`. Invalid region returns `InvalidLocationConstraint` (400). Response includes `x-amz-bucket-region` header.
+**CreateBucket** reads region from (in priority order): `X-Stored-Region` header, `x-amz-bucket-region` header, `<CreateBucketConfiguration><LocationConstraint>` XML body, or the default region. Validated against `drivers.IsValidRegion()` (the 13 account regions) **and** `drivers.IDriveRegionAvailable()` (a driver is registered for it on this deployment, or it is the default) — an unknown or not-enabled region returns `InvalidLocationConstraint` (400) rather than a bucket whose objects would silently land on the primary (Review R7-01). Response includes `x-amz-bucket-region` header.
 
 **GetBucketLocation** (`GET /{bucket}?location`): returns `<LocationConstraint>region</LocationConstraint>` XML + `x-amz-bucket-region` header.
 
 **HeadBucket** (`HEAD /{bucket}`): returns 200 + `x-amz-bucket-region` header.
 
-**PUT routing** (s3_engine_adapter.go): `bucketRegionDriver()` looks up bucket region from DB. If non-default and an `idrive-{region}` driver exists, PUT goes directly to that driver, bypassing the engine's normal routing. Backend name stored as `idrive-{region}` in `object_head_cache`.
+**PUT routing** (s3_engine_adapter.go): `bucketRegionDriver()` looks up bucket region from DB. If non-default and an `idrive-{region}` driver exists, PUT goes directly to that driver, bypassing the engine's normal routing. Backend name stored as `idrive-{region}` in `object_head_cache`. If the bucket is pinned to a non-default region and **no** driver is registered for it (`errRegionDriverUnavailable`), the PUT is refused with 503 + `Retry-After` — never written to the primary under a residency label (WP-R7-1). Region drivers exist only for regions with their own `IDRIVE_<REGION>_*` key pair (`cmd/vaultaire/main.go`), which also provisions the region's bucket at boot and registers the region as available for CreateBucket.
 
 **GET routing**: `HintBackend()` seeds the engine's `objectBackends` map from `cachedBackendName` so GET routes directly to the correct region driver without a failed failover attempt.
 
