@@ -57,7 +57,7 @@ func NewIDriveDriver(accessKey, secretKey, endpoint, region string, logger *zap.
 		return nil, fmt.Errorf("idrive: credentials required")
 	}
 	if region == "" {
-		region = "us-west-1" // Default region
+		region = IDriveFallbackRegion
 	}
 
 	cfg, err := config.LoadDefaultConfig(context.Background(),
@@ -387,6 +387,31 @@ func (d *IDriveDriver) HealthCheck(ctx context.Context) error {
 	return nil
 }
 
+// Region returns the region this driver signs for.
+func (d *IDriveDriver) Region() string { return d.region }
+
+// EnsureBucket makes sure the driver's fixed bucket exists in its region,
+// creating it when HeadBucket says it is absent (WP-R7-1: the reseller
+// account has no `vaultaire` bucket outside the primary region, so an
+// idrive-<region> driver registered with its own key pair provisions its
+// bucket at boot). Any other HeadBucket error — 403 for a wrong key, a
+// transport failure — is returned unchanged so the caller can log it; the
+// probe reports it thereafter. Returns whether the bucket was created.
+func (d *IDriveDriver) EnsureBucket(ctx context.Context) (created bool, err error) {
+	_, err = d.client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(d.bucket)})
+	if err == nil {
+		return false, nil
+	}
+	if !s3IsNotFound(err) {
+		return false, fmt.Errorf("idrive head bucket %s in %s: %w", d.bucket, d.region, err)
+	}
+	if _, err := d.client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(d.bucket)}); err != nil {
+		return false, fmt.Errorf("idrive create bucket %s in %s: %w", d.bucket, d.region, err)
+	}
+	d.logger.Info("iDrive region bucket created", zap.String("bucket", d.bucket), zap.String("region", d.region))
+	return true, nil
+}
+
 func (d *IDriveDriver) ValidateAuth(ctx context.Context) error {
 	// Try to list buckets - this requires valid authentication
 	_, err := d.client.ListBuckets(ctx, &s3.ListBucketsInput{})
@@ -405,12 +430,12 @@ func LoadIDriveConfig() (accessKey, secretKey, endpoint, region string) {
 	endpoint = os.Getenv("IDRIVE_ENDPOINT")
 	region = os.Getenv("IDRIVE_REGION")
 
-	// Defaults
-	if endpoint == "" {
-		endpoint = "https://e2-us-west-1.idrive.com"
-	}
+	// Defaults: the primary's region and its real regional endpoint.
 	if region == "" {
-		region = "us-west-1"
+		region = IDriveFallbackRegion
+	}
+	if endpoint == "" {
+		endpoint = IDriveRegionEndpoint(os.Getenv, region)
 	}
 
 	return

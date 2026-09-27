@@ -23,7 +23,9 @@
         </div>
 
         <div style="margin:0.75rem 0">
-            {{if .Healthy}}
+            {{if not .Probed}}
+                <span class="badge" title="No health probe reports on this backend yet">not probed</span>
+            {{else if .Healthy}}
                 <span class="badge badge-success">healthy</span>
             {{else}}
                 <span class="badge badge-danger">unhealthy</span>

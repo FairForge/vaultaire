@@ -15,11 +15,13 @@ import (
 	"hash"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/crypto"
+	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/flags"
 	"github.com/FairForge/vaultaire/internal/tenant"
@@ -956,7 +958,16 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	// Region-aware routing: if the bucket has a non-default region and
 	// a region-specific driver is registered, route directly to it.
 	var backendName string
-	regionDriver := bucketRegionDriver(r.Context(), a.db, a.engine, t.ID, bucket)
+	regionDriver, regionErr := bucketRegionDriver(r.Context(), a.db, a.engine, t.ID, bucket)
+	if regionErr != nil {
+		// Never fall through to the primary: the bucket promised a region.
+		a.logger.Error("region-pinned bucket has no driver — PUT refused",
+			zap.String("bucket", bucket), zap.Error(regionErr))
+		w.Header().Set("Retry-After", "300")
+		WriteS3ErrorWithContext(w, ErrServiceUnavailable, r.URL.Path, generateRequestID(),
+			WithSuggestion("This bucket's region is not enabled on this deployment."))
+		return
+	}
 	if regionDriver != "" {
 		if ce, ok := a.engine.(*engine.CoreEngine); ok {
 			if drv, exists := ce.GetDriver(regionDriver); exists {
@@ -2072,29 +2083,35 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 	})
 }
 
-// bucketRegionDriver returns the engine driver name for a bucket's region.
-// Returns "" if the bucket uses the default region or if no region-specific
-// driver is registered (non-iDrive backends).
-func bucketRegionDriver(ctx context.Context, db *sql.DB, eng engine.Engine, tenantID, bucket string) string {
+// errRegionDriverUnavailable: the bucket is pinned to a region this process
+// has no driver for (the region's key pair is not configured, or the driver
+// failed at boot). Writing to the primary instead would break the residency
+// promise silently, so the PUT is refused (503 + Retry-After).
+var errRegionDriverUnavailable = errors.New("region backend unavailable")
+
+// bucketRegionDriver returns the engine driver name for a bucket's region:
+// "" when the bucket is in the default region (served by the primary through
+// the engine) or when the bucket row cannot be read; the `idrive-<region>`
+// name when that driver is registered; errRegionDriverUnavailable when the
+// bucket names a non-default region with no registered driver (WP-R7-1).
+func bucketRegionDriver(ctx context.Context, db *sql.DB, eng engine.Engine, tenantID, bucket string) (string, error) {
 	if db == nil {
-		return ""
+		return "", nil
 	}
 	var region string
 	err := db.QueryRowContext(ctx,
 		"SELECT region FROM buckets WHERE tenant_id = $1 AND name = $2",
 		tenantID, bucket).Scan(&region)
-	if err != nil || region == "" || region == "us-west-1" {
-		return ""
+	if err != nil || region == "" || region == drivers.IDriveDefaultRegion(os.Getenv) {
+		return "", nil
 	}
 	driverName := "idrive-" + region
-	ce, ok := eng.(*engine.CoreEngine)
-	if !ok {
-		return ""
+	if ce, ok := eng.(*engine.CoreEngine); ok {
+		if _, exists := ce.GetDriver(driverName); exists {
+			return driverName, nil
+		}
 	}
-	if _, exists := ce.GetDriver(driverName); exists {
-		return driverName
-	}
-	return ""
+	return "", fmt.Errorf("%w: bucket %s is pinned to %s and no %s driver is registered", errRegionDriverUnavailable, bucket, region, driverName)
 }
 
 var tierPreferenceToStorageClass = map[string]string{

@@ -89,13 +89,18 @@ func buildBackendProbes(getenv func(string) string, eng driverChecker) []backend
 		}
 	}
 
+	// envKey "" = probe whenever the driver is registered. `local` is always
+	// registered (hub disk); its HealthCheck is a stat of DATA_PATH, which is
+	// what catches an unmounted or vanished data directory — and without a
+	// probe state the admin backends page rendered it as "unhealthy" forever.
 	for _, d := range []struct{ name, envKey string }{
+		{"local", ""},
 		{"idrive", "IDRIVE_ACCESS_KEY"},
 		{"geyser", "GEYSER_ACCESS_KEY"},
 		{"r2", "R2_ACCESS_KEY"},
 		{"permafrost", "TENANT_1_ID"},
 	} {
-		if getenv(d.envKey) == "" || !registered[d.name] {
+		if (d.envKey != "" && getenv(d.envKey) == "") || !registered[d.name] {
 			continue
 		}
 		checks = append(checks, backendCheck{name: d.name, probe: driverProbe(d.name)})
