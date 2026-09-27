@@ -30,9 +30,16 @@ func NewS3Driver(endpoint, accessKey, secretKey, region string, logger *zap.Logg
 	// Create custom credentials provider
 	creds := credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")
 
+	// Sign with the caller's region: Backblaze B2 (us-east-005 etc.) rejects
+	// requests whose SigV4 scope names a different region, and R2 wants "auto".
+	// Empty keeps the historical us-east-1 default.
+	signingRegion := region
+	if signingRegion == "" {
+		signingRegion = "us-east-1"
+	}
 	cfg, err := config.LoadDefaultConfig(context.TODO(),
 		config.WithCredentialsProvider(creds),
-		config.WithRegion("us-east-1"),
+		config.WithRegion(signingRegion),
 		config.WithHTTPClient(TunedHTTPClient()),
 	)
 	if err != nil {
