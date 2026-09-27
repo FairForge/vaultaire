@@ -289,7 +289,7 @@ Server-side encryption with customer-provided 256-bit AES keys. Stateless — ke
 
 ## Per-Bucket Region Selection (Phase 5.14.7)
 
-Each bucket has a `region` column (default = the primary's region, `drivers.IDriveDefaultRegion` = `IDRIVE_REGION` else `us-central-1`; migration 066 relabelled the pre-WP-R7-1 `us-west-1` rows, a region id the account never had). Region is immutable after creation.
+Each bucket has a `region` column (default = the primary's region, `drivers.IDriveDefaultRegion` = `IDRIVE_REGION` else `us-central-1`; migration 067 relabelled the pre-WP-R7-1 `us-west-1` rows, a region id the account never had). Region is immutable after creation.
 
 **CreateBucket** reads region from (in priority order): `X-Stored-Region` header, `x-amz-bucket-region` header, `<CreateBucketConfiguration><LocationConstraint>` XML body, or the default region. Validated against `drivers.IsValidRegion()` (the 13 account regions) **and** `drivers.IDriveRegionAvailable()` (a driver is registered for it on this deployment, or it is the default) — an unknown or not-enabled region returns `InvalidLocationConstraint` (400) rather than a bucket whose objects would silently land on the primary (Review R7-01). Response includes `x-amz-bucket-region` header.
 
