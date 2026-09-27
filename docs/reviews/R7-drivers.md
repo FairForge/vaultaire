@@ -1,6 +1,6 @@
 # R7 Storage drivers — 2026-09-27
 
-**Repo state reviewed:** `main` @ `53dbfdb` (#495). Branch: `review/R7-drivers`. **PR:** see Status tracker.
+**Repo state reviewed:** `main` @ `53dbfdb` (#495). Branch: `review/R7-drivers`. **PR:** #496.
 **Depends on:** R6 (contract table in `docs/reviews/R6-engine.md` § *Driver contract as the engine
 assumes it*; R6-01/02/04/06 fixed there), R0 (drivers files deleted; `geyser_admin.go` kept for the
 `cmd/geyser-*` probes), R1 (R1-12 probes; HAProxy `timeout server 50000`), R2 (R2-04 `resolvePath`,
