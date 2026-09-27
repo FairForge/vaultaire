@@ -2,7 +2,12 @@
 {{define "content"}}
 <div class="dashboard-header">
     <h1>Waitlist Signups</h1>
-    <a href="/admin/waitlist/export" class="btn btn-sm">Download CSV</a>
+    <div class="dashboard-actions" style="margin-top:0">
+        <a href="/admin/waitlist/export" class="btn btn-sm">Download CSV</a>
+        <a href="/admin/waitlist/export?filter=house&amp;fields=email" class="btn btn-sm btn-primary">Launch list: built a house (emails)</a>
+        <a href="/admin/waitlist/export?filter=downstairs" class="btn btn-sm">Downstairs CSV</a>
+        <a href="/admin/waitlist/export?filter=attic" class="btn btn-sm">Attic CSV</a>
+    </div>
 </div>
 
 <div class="card-grid">
