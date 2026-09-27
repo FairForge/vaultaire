@@ -522,7 +522,7 @@
     @media (max-width: 760px) { .stage-list { grid-template-columns: 1fr; } }
     .stage { position: relative; padding: 20px; background: var(--card); border-top: 6px solid var(--panel); opacity: 0.6; transition: opacity 0.2s ease, border-color 0.2s ease; }
     .stage.active { opacity: 1; border-top-color: var(--yellow); }
-    .stage .when { margin-bottom: 8px; font-family: var(--pix); font-size: 11px; text-transform: uppercase; color: var(--dim); }
+    .stage .when { margin-bottom: 8px; font-family: var(--pix); font-size: 11px; text-transform: uppercase; color: var(--body); }
     .stage h3 { font-size: 1.1rem; margin-bottom: 6px; padding-right: 52px; }
     .stage p { font-size: 0.92rem; }
     .stage-art { position: absolute; top: 18px; right: 18px; }
@@ -634,7 +634,7 @@
     .packs td { padding: 12px 10px; border-top: 1px solid var(--line); font-size: 0.93rem; vertical-align: top; }
     .packs td:first-child { font-weight: 700; color: var(--ink); white-space: nowrap; }
     .packs td:nth-child(2) { font-weight: 800; color: var(--ink); white-space: nowrap; }
-    .packs td:nth-child(3) { color: var(--dim); }
+    .packs td:nth-child(3) { color: var(--body); }
     .packs .best td { background: var(--hl); }
     .packs .best td:first-child { box-shadow: inset 6px 0 0 var(--yellow); }
     @media (max-width: 600px) {
@@ -648,7 +648,7 @@
     .compare table { width: 100%; min-width: 720px; border-collapse: collapse; font-size: 0.88rem; }
     .compare th, .compare td { padding: 12px 14px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
     .compare th { font-family: var(--pix); font-weight: 400; font-size: 11px; text-transform: uppercase; color: var(--dim); }
-    .compare td:first-child { font-weight: 700; color: var(--ink); }
+    .compare tbody th { font-family: var(--sans); font-size: inherit; font-weight: 700; text-transform: none; color: var(--ink); }
     .compare th.us, .compare td.us { background: var(--hl); color: var(--ink); font-weight: 700; }
     .compare .fine { padding: 0 14px; }
 
@@ -685,7 +685,7 @@
     .footer-grid { display: grid; grid-template-columns: 1.5fr 1fr 1fr 1fr; gap: 32px; }
     @media (max-width: 760px) { .footer-grid { grid-template-columns: 1fr 1fr; } .footer-brand { grid-column: 1 / -1; } }
     .footer-brand p { max-width: 26em; margin-top: 18px; font-size: 0.9rem; }
-    footer h4 { margin-bottom: 14px; font-family: var(--pix); font-size: 11px; font-weight: 400; letter-spacing: 0.05em; text-transform: uppercase; color: #fff; }
+    footer h3 { margin-bottom: 14px; font-family: var(--pix); font-size: 11px; font-weight: 400; letter-spacing: 0.05em; text-transform: uppercase; color: #fff; }
     .footer-links { list-style: none; display: flex; flex-direction: column; gap: 8px; }
     .footer-links a { color: rgba(255, 255, 255, 0.72); text-decoration: none; font-size: 0.9rem; }
     .footer-links a:hover { color: #fff; }
