@@ -4,7 +4,7 @@ Web dashboard for stored.ge customers and admins. Uses htmx + Go templates, embe
 
 ## Architecture
 
-- **embed.go** — `//go:embed` bundles `templates/` and `static/` into the binary
+- **embed.go** — `//go:embed` bundles `templates/` and `static/` into the binary; its `init` hashes the static tree into `handlers.AssetVersion`, and every layout references assets through `{{asset "/static/…"}}` (`handlers/assets.go`) so the URL changes with the file — Cloudflare caches `/static/` at the edge for 4 h, and without the version a deploy pairs new HTML with the old stylesheet (happened with #507). Parse layouts with `template.New("").Funcs(handlers.TemplateFuncs())`; `assets_test.go` fails on a bare `/static/` reference in a layout
 - **router.go** — `RegisterRoutes(r, deps)` mounts all dashboard routes on the chi router. Must be called BEFORE the S3 catch-all in `server.go`.
 - **auth/** — session management (PostgreSQL-backed `DBStore` or in-memory `MemoryStore`)
 - **handlers/** — HTTP handlers (`overview.go` renders dashboard with real data from DB, `errors.go` = branded 404)

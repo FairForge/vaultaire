@@ -22,7 +22,7 @@ import (
 
 func overviewTemplate(t *testing.T) *template.Template {
 	t.Helper()
-	base := template.Must(template.ParseFS(os.DirFS("../templates"), "layouts/base.html"))
+	base := template.Must(template.New("").Funcs(TemplateFuncs()).ParseFS(os.DirFS("../templates"), "layouts/base.html"))
 	tmpl := template.Must(base.Clone())
 	template.Must(tmpl.ParseFS(os.DirFS("../templates"), "customer/dashboard.html", "generated/house.html"))
 	return tmpl
