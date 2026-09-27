@@ -28,6 +28,7 @@
 </div>
 
 {{if .Upgraded}}<div class="alert alert-success">Plan upgraded successfully.</div>{{end}}
+{{if .HouseIntent}}<div class="alert alert-info"><strong>Your house from the site:</strong> {{.HouseIntent.StdTB}} TB downstairs (Standard) and {{.HouseIntent.VaultTB}} TB in the attic (Vault) &middot; <strong>{{.HouseIntent.Monthly}}/mo</strong> billed yearly. Whole-TB checkout is on its way; until then pick a plan below or <a href="mailto:support@stored.ge">ask us</a> and we will set it up by hand.{{if .HouseIntent.RoomURL}} <a href="{{.HouseIntent.RoomURL}}">Reopen your house</a>.{{end}}</div>{{end}}
 
 <div class="egress-callout">Egress: $0.00 — always free</div>
 

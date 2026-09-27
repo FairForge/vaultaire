@@ -2,6 +2,13 @@
     {{if not .SignupsOpen}}
     // Waitlist forms post to the existing /api/waitlist endpoint, then swap to
     // an inline confirmation. Both hero and footer forms share this handler.
+    // the house the visitor built (if the builder is on the page) rides along
+    function withHouse(payload) {
+        if (typeof window.sgHouse !== 'function') return payload;
+        var h = window.sgHouse();
+        if (h.std || h.vault) { payload.std_tb = h.std; payload.vault_tb = h.vault; payload.room = h.room; }
+        return payload;
+    }
     document.querySelectorAll('[data-waitlist]').forEach(function (form) {
         form.addEventListener('submit', async function (event) {
             event.preventDefault();
@@ -10,7 +17,7 @@
                 await fetch('/api/waitlist', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ email: email })
+                    body: JSON.stringify(withHouse({ email: email }))
                 });
             } catch (e) { /* endpoint degrades to 200; confirmation is best-effort */ }
             form.innerHTML = '<span class="waitlist-ok">You\'re on the list — see you October 31.</span>';

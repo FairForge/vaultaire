@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"github.com/FairForge/vaultaire/internal/api/landing"
 	"html/template"
 	"net/http"
 
@@ -27,6 +28,7 @@ func HandleBilling(tmpl *template.Template, stripe *billing.StripeService, db *s
 		ctx := r.Context()
 
 		populateBillingPlan(ctx, db, data, sd.TenantID)
+		populateHouseIntent(ctx, db, data, sd.TenantID)
 		populateAccruedCharges(ctx, db, data, sd.TenantID)
 		populateBillingPlans(stripe, data)
 		populateValueStack(ctx, db, data, sd.TenantID)
@@ -158,6 +160,28 @@ func populateBillingPlan(ctx context.Context, db *sql.DB, data map[string]any, t
 	default:
 		data["StatusClass"] = "default"
 		data["StatusLabel"] = "Free"
+	}
+}
+
+// populateHouseIntent surfaces the house the customer built on the landing
+// page (stored at signup) as the proposed plan, until they hold a subscription.
+func populateHouseIntent(ctx context.Context, db *sql.DB, data map[string]any, tenantID string) {
+	if db == nil {
+		return
+	}
+	if has, _ := data["HasSubscription"].(bool); has {
+		return
+	}
+	var std, vault int
+	var room string
+	if err := db.QueryRowContext(ctx,
+		`SELECT intent_std_tb, intent_vault_tb, intent_room FROM tenants WHERE id = $1`, tenantID).
+		Scan(&std, &vault, &room); err != nil {
+		return
+	}
+	h := landing.HouseIntent{StdTB: std, VaultTB: vault, Room: room}
+	if !h.Empty() {
+		data["HouseIntent"] = h
 	}
 }
 

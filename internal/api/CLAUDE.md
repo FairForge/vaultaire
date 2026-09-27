@@ -464,10 +464,15 @@ BOOLEAN (migration 042).
   /changelog shells, so the sub-pages match the landing page (system fonts, no embeds), plus the
   light/dark toggle and `siteMarkdown` (goldmark + table extension: the FAQ price table rendered as
   raw pipes before).
+- **`landing/prices.go`** — `landing.Get()` = the embedded prices.json for the Go side; `landing.HouseIntent`
+  (+ `ParseHouseIntent`: clamps TB to 0..300, drops rooms that are not share links) = what a visitor
+  built in the house, carried onto `waitlist_signups.plan_std_tb/plan_vault_tb/room` and
+  `tenants.intent_*` (migration 065). A hint for onboarding/demand reporting; nothing is billed from it.
 - **`waitlist.go`** — `POST /api/waitlist` (public, no auth) captures a pre-launch email
   into `waitlist_signups` (migration 044, `ON CONFLICT (email) DO NOTHING`). Validates via
   `mail.ParseAddress`, lowercases, per-IP sliding-window rate limit (`waitlistLimiter`,
-  10/hour). Accepts form-encoded or JSON. Nil-DB degrades to 200 (dev). The landing form's
+  10/hour). Accepts form-encoded or JSON, plus the optional house intent (`std_tb`, `vault_tb`, `room`;
+  a re-signup with a house replaces the stored one). Nil-DB degrades to 200 (dev). The landing form's
   `handleWaitlist` JS POSTs here then shows the success modal.
 
 ## Tenant Context

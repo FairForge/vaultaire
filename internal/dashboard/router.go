@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/api/landing"
 	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/billing"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
@@ -368,6 +369,12 @@ func renderAuthPage(base *template.Template, page string, deps Deps) http.Handle
 			"HasGoogle": deps.Google != nil,
 			"HasGithub": deps.GitHub != nil,
 		}
+		// The house built on the landing page arrives in the query string
+		// (its receipt links here); show it and carry it through the form.
+		q := r.URL.Query()
+		if h := landing.ParseHouseIntent(q.Get("std_tb"), q.Get("vault_tb"), q.Get("room")); !h.Empty() {
+			data["Intent"] = h
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := tmpl.ExecuteTemplate(w, "base", data); err != nil {
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
@@ -492,18 +499,23 @@ func handleRegister(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 		email := r.FormValue("email")
 		password := r.FormValue("password")
 		company := r.FormValue("company")
+		intent := landing.ParseHouseIntent(r.FormValue("std_tb"), r.FormValue("vault_tb"), r.FormValue("room"))
 
 		renderErr := func(msg string) {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusBadRequest)
-			_ = errTmpl.ExecuteTemplate(w, "base", map[string]any{
+			data := map[string]any{
 				"Error":     msg,
 				"Email":     email,
 				"Company":   company,
 				"Page":      "register",
 				"HasGoogle": deps.Google != nil,
 				"HasGithub": deps.GitHub != nil,
-			})
+			}
+			if !intent.Empty() {
+				data["Intent"] = intent
+			}
+			_ = errTmpl.ExecuteTemplate(w, "base", data)
 		}
 
 		if len(password) < 8 {
@@ -523,6 +535,16 @@ func handleRegister(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 				renderErr("Registration failed. Please try again.")
 			}
 			return
+		}
+
+		// Remember the house on the tenant: the billing page proposes it as
+		// the plan. A hint only (nothing is billed from it); failure is logged.
+		if !intent.Empty() && deps.DB != nil {
+			if _, ierr := deps.DB.ExecContext(r.Context(),
+				`UPDATE tenants SET intent_std_tb = $1, intent_vault_tb = $2, intent_room = $3 WHERE id = $4`,
+				intent.StdTB, intent.VaultTB, intent.Room, user.TenantID); ierr != nil {
+				deps.Logger.Error("store house intent on tenant", zap.String("tenant", user.TenantID), zap.Error(ierr))
+			}
 		}
 
 		// Create Stripe customer for billing (non-blocking).
@@ -821,6 +843,7 @@ func pageContent(page string) string {
 			`<div class="auth-page"><div class="auth-card">` +
 			`<div class="auth-brand">stored.ge</div>` +
 			`<h1>Create Account</h1>` +
+			`{{if .Intent}}<div class="alert alert-info house-intent"><strong>Your house:</strong> {{.Intent.StdTB}} TB downstairs, {{.Intent.VaultTB}} TB in the attic &middot; <strong>{{.Intent.Monthly}}/mo</strong> billed yearly. It will be waiting on your billing page.</div>{{end}}` +
 			`{{if .Error}}<div class="alert alert-error">{{.Error}}</div>{{end}}` +
 			`{{if or .HasGoogle .HasGithub}}` +
 			`<div class="oauth-buttons">` +
@@ -830,6 +853,7 @@ func pageContent(page string) string {
 			`<div class="auth-divider"><span>or</span></div>` +
 			`{{end}}` +
 			`<form method="POST" action="/register">` +
+			`{{if .Intent}}<input type="hidden" name="std_tb" value="{{.Intent.StdTB}}"><input type="hidden" name="vault_tb" value="{{.Intent.VaultTB}}"><input type="hidden" name="room" value="{{.Intent.Room}}">{{end}}` +
 			`<div class="form-group"><label>Email</label><input type="email" name="email" value="{{.Email}}" required></div>` +
 			`<div class="form-group"><label>Password</label><input type="password" name="password" required minlength="8"></div>` +
 			`<div class="form-group"><label>Company</label><input type="text" name="company" value="{{.Company}}"></div>` +

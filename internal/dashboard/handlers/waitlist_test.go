@@ -37,9 +37,9 @@ func TestHandleAdminWaitlist_ListsSignups(t *testing.T) {
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM waitlist_signups`).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(2))
 	mock.ExpectQuery(`SELECT email, source, created_at FROM waitlist_signups`).
-		WillReturnRows(sqlmock.NewRows([]string{"email", "source", "created_at"}).
-			AddRow("a@example.com", "landing", time.Now()).
-			AddRow("b@example.com", "landing", time.Now()))
+		WillReturnRows(sqlmock.NewRows([]string{"email", "source", "created_at", "plan_std_tb", "plan_vault_tb"}).
+			AddRow("a@example.com", "landing", time.Now(), 6, 1).
+			AddRow("b@example.com", "landing", time.Now(), 0, 0))
 
 	h := HandleAdminWaitlist(testWaitlistTemplate(t), db, zap.NewNop())
 	req := httptest.NewRequest("GET", "/admin/waitlist", nil).WithContext(adminCtx(t))
@@ -51,6 +51,7 @@ func TestHandleAdminWaitlist_ListsSignups(t *testing.T) {
 	assert.Contains(t, body, `class="count">2`)
 	assert.Contains(t, body, "a@example.com")
 	assert.Contains(t, body, "b@example.com")
+	assert.Contains(t, body, "1 built a house: 6 TB downstairs, 1 TB in the attic")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -60,8 +61,8 @@ func TestHandleAdminWaitlistExport_CSV(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	mock.ExpectQuery(`SELECT email, source, created_at FROM waitlist_signups`).
-		WillReturnRows(sqlmock.NewRows([]string{"email", "source", "created_at"}).
-			AddRow("a@example.com", "landing", time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)))
+		WillReturnRows(sqlmock.NewRows([]string{"email", "source", "created_at", "plan_std_tb", "plan_vault_tb"}).
+			AddRow("a@example.com", "landing", time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC), 6, 1))
 
 	h := HandleAdminWaitlistExport(db, zap.NewNop())
 	req := httptest.NewRequest("GET", "/admin/waitlist/export", nil).WithContext(adminCtx(t))

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"github.com/FairForge/vaultaire/internal/api/landing"
 	"net/http"
 	"net/mail"
 	"strings"
@@ -20,12 +21,20 @@ var waitlistRL = newWaitlistLimiter(10, time.Hour)
 // Public and unauthenticated. Accepts form-encoded (email=...) or JSON ({"email"}).
 func (s *Server) handleWaitlistSignup(w http.ResponseWriter, r *http.Request) {
 	email := strings.TrimSpace(r.FormValue("email"))
+	// The house the visitor built on the landing page, if any (TB per floor
+	// + the share-link room): stored beside the email so launch-day demand
+	// is known per tier. Optional; junk is clamped/dropped, never rejected.
+	intent := landing.ParseHouseIntent(r.FormValue("std_tb"), r.FormValue("vault_tb"), r.FormValue("room"))
 	if email == "" {
 		var body struct {
-			Email string `json:"email"`
+			Email   string          `json:"email"`
+			StdTB   json.RawMessage `json:"std_tb"`
+			VaultTB json.RawMessage `json:"vault_tb"`
+			Room    string          `json:"room"`
 		}
 		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body) == nil {
 			email = strings.TrimSpace(body.Email)
+			intent = landing.ParseHouseIntent(rawNumber(body.StdTB), rawNumber(body.VaultTB), body.Room)
 		}
 	}
 
@@ -49,19 +58,29 @@ func (s *Server) handleWaitlistSignup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ON CONFLICT DO NOTHING: re-signing up with the same email is a no-op success.
+	// Re-signing up with the same email is a no-op success, except that a
+	// newly built house replaces the old one (the latest plan is the truth).
 	if _, err := s.db.ExecContext(r.Context(), `
-		INSERT INTO waitlist_signups (email, source, ip_address, user_agent)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (email) DO NOTHING`,
-		email, "landing", ip, r.UserAgent()); err != nil {
+		INSERT INTO waitlist_signups (email, source, ip_address, user_agent, plan_std_tb, plan_vault_tb, room)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (email) DO UPDATE
+		   SET plan_std_tb = EXCLUDED.plan_std_tb, plan_vault_tb = EXCLUDED.plan_vault_tb, room = EXCLUDED.room
+		 WHERE EXCLUDED.plan_std_tb + EXCLUDED.plan_vault_tb > 0`,
+		email, "landing", ip, r.UserAgent(), intent.StdTB, intent.VaultTB, intent.Room); err != nil {
 		s.logger.Error("waitlist insert", zap.String("email", email), zap.Error(err))
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save"})
 		return
 	}
 
-	s.logger.Info("waitlist signup", zap.String("email", email))
+	s.logger.Info("waitlist signup", zap.String("email", email),
+		zap.Int("std_tb", intent.StdTB), zap.Int("vault_tb", intent.VaultTB))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// rawNumber renders a JSON number or string field as the text ParseHouseIntent
+// reads ("6", "6.0", "\"6\"" all become 6; anything else becomes empty).
+func rawNumber(raw json.RawMessage) string {
+	return strings.Trim(strings.TrimSpace(string(raw)), `"`)
 }
 
 // waitlistLimiter is a small per-IP sliding-window rate limiter.

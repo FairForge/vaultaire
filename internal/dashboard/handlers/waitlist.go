@@ -6,6 +6,7 @@ import (
 	"encoding/csv"
 	"html/template"
 	"net/http"
+	"strconv"
 	"time"
 
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
@@ -17,6 +18,8 @@ type waitlistRow struct {
 	Email      string
 	Source     string
 	CreatedFmt string
+	StdTB      int // the house built on the landing page: TB downstairs (Standard)
+	VaultTB    int // ...and in the attic (Vault); both 0 when no house was built
 }
 
 // HandleAdminWaitlist renders the admin waitlist page: total count + recent signups.
@@ -37,6 +40,16 @@ func HandleAdminWaitlist(tmpl *template.Template, db *sql.DB, logger *zap.Logger
 			rows, count := queryWaitlist(r.Context(), db, logger)
 			data["Signups"] = rows
 			data["SignupCount"] = count
+			// launch-day demand per floor, from the houses people built
+			var std, vault, houses int
+			for _, r := range rows {
+				std += r.StdTB
+				vault += r.VaultTB
+				if r.StdTB+r.VaultTB > 0 {
+					houses++
+				}
+			}
+			data["TotalStdTB"], data["TotalVaultTB"], data["Houses"] = std, vault, houses
 		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -61,13 +74,13 @@ func HandleAdminWaitlistExport(db *sql.DB, logger *zap.Logger) http.HandlerFunc 
 
 		cw := csv.NewWriter(w)
 		defer cw.Flush()
-		_ = cw.Write([]string{"email", "source", "created_at"})
+		_ = cw.Write([]string{"email", "source", "created_at", "downstairs_tb", "attic_tb"})
 
 		if db == nil {
 			return
 		}
 		rows, err := db.QueryContext(r.Context(),
-			`SELECT email, source, created_at FROM waitlist_signups ORDER BY created_at DESC`)
+			`SELECT email, source, created_at, plan_std_tb, plan_vault_tb FROM waitlist_signups ORDER BY created_at DESC`)
 		if err != nil {
 			logger.Error("waitlist export query", zap.Error(err))
 			return
@@ -76,12 +89,13 @@ func HandleAdminWaitlistExport(db *sql.DB, logger *zap.Logger) http.HandlerFunc 
 
 		for rows.Next() {
 			var email, source string
+			var stdTB, vaultTB int
 			var created time.Time
-			if err := rows.Scan(&email, &source, &created); err != nil {
+			if err := rows.Scan(&email, &source, &created, &stdTB, &vaultTB); err != nil {
 				logger.Error("waitlist export scan", zap.Error(err))
 				continue
 			}
-			_ = cw.Write([]string{email, source, created.UTC().Format(time.RFC3339)})
+			_ = cw.Write([]string{email, source, created.UTC().Format(time.RFC3339), strconv.Itoa(stdTB), strconv.Itoa(vaultTB)})
 		}
 	}
 }
@@ -93,7 +107,7 @@ func queryWaitlist(ctx context.Context, db *sql.DB, logger *zap.Logger) ([]waitl
 	}
 
 	rows, err := db.QueryContext(ctx,
-		`SELECT email, source, created_at FROM waitlist_signups ORDER BY created_at DESC LIMIT 1000`)
+		`SELECT email, source, created_at, plan_std_tb, plan_vault_tb FROM waitlist_signups ORDER BY created_at DESC LIMIT 1000`)
 	if err != nil {
 		logger.Error("waitlist list query", zap.Error(err))
 		return nil, count
@@ -103,8 +117,9 @@ func queryWaitlist(ctx context.Context, db *sql.DB, logger *zap.Logger) ([]waitl
 	var out []waitlistRow
 	for rows.Next() {
 		var email, source string
+		var stdTB, vaultTB int
 		var created time.Time
-		if err := rows.Scan(&email, &source, &created); err != nil {
+		if err := rows.Scan(&email, &source, &created, &stdTB, &vaultTB); err != nil {
 			logger.Error("waitlist list scan", zap.Error(err))
 			continue
 		}
@@ -112,6 +127,8 @@ func queryWaitlist(ctx context.Context, db *sql.DB, logger *zap.Logger) ([]waitl
 			Email:      email,
 			Source:     source,
 			CreatedFmt: created.Format("Jan 2, 2006 15:04 MST"),
+			StdTB:      stdTB,
+			VaultTB:    vaultTB,
 		})
 	}
 	return out, count

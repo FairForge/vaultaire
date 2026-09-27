@@ -9,6 +9,7 @@
     <div class="card">
         <div class="card-title">Total Signups</div>
         <div class="card-value">{{.SignupCount}}</div>
+        {{if .Houses}}<div class="card-detail">{{.Houses}} built a house: {{.TotalStdTB}} TB downstairs, {{.TotalVaultTB}} TB in the attic</div>{{end}}
     </div>
 </div>
 
@@ -21,6 +22,8 @@
                     <th>Email</th>
                     <th>Source</th>
                     <th>Signed Up</th>
+                    <th>Downstairs TB</th>
+                    <th>Attic TB</th>
                 </tr>
             </thead>
             <tbody>
@@ -29,6 +32,8 @@
                     <td>{{.Email}}</td>
                     <td>{{.Source}}</td>
                     <td>{{.CreatedFmt}}</td>
+                    <td>{{if .StdTB}}{{.StdTB}}{{else}}&middot;{{end}}</td>
+                    <td>{{if .VaultTB}}{{.VaultTB}}{{else}}&middot;{{end}}</td>
                 </tr>
                 {{end}}
             </tbody>
