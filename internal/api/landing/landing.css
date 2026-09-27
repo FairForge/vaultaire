@@ -970,7 +970,8 @@
     /* ---- night: both rooms follow light/dark mode. Lines marked NIGHT are
        expanded by the page generator into the system-dark and toggle-dark forms. */
     .night-dim { opacity: 0; transition: opacity 0.4s ease; }
-    .glow { opacity: 0; transition: opacity 0.4s ease; pointer-events: none; }
+    .glow { opacity: 0; transition: opacity 0.4s ease; pointer-events: none; mix-blend-mode: screen; }
+    .light-pool { pointer-events: none; }
     .win-night { opacity: 0; transition: opacity 0.4s ease; }
     .win-sky, .win-cloud, .win-frame { transition: fill 0.4s ease, opacity 0.4s ease; }
     /*NIGHT*/ .night-dim { opacity: 0.5; }
@@ -980,7 +981,7 @@
     /*NIGHT*/ .win-sky { fill: #1b2553; }
     /*NIGHT*/ .win-frame { fill: #8d897f; }
     /*NIGHT*/ .room-svg .piece:not(.light), .scene .piece:not(.light) { filter: url(#nightdim); }
-    /*NIGHT*/ .room { background: radial-gradient(ellipse 30% 42% at 6% 84%, rgba(255, 214, 140, 0.5), transparent 70%), linear-gradient(rgba(6, 10, 36, 0.5), rgba(6, 10, 36, 0.5)), linear-gradient(180deg, var(--wall-a) 0%, var(--wall-b) 100%); }
+    /*NIGHT*/ .room { background: radial-gradient(ellipse 70% 75% at 10% 82%, rgba(255, 196, 110, 0.42), transparent 72%), radial-gradient(ellipse 45% 40% at 42% 70%, rgba(255, 190, 100, 0.25), transparent 70%), linear-gradient(rgba(6, 10, 36, 0.5), rgba(6, 10, 36, 0.5)), linear-gradient(180deg, var(--wall-a) 0%, var(--wall-b) 100%); }
     /*NIGHT*/ .room::before { filter: brightness(0.55); }
     /*NIGHT*/ .zone-floor { fill: #e8dcc8; }
     .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }

@@ -39,7 +39,7 @@
             lilac:    ['#c2b3e6', '#d7cdf1', '#9d8ccf']
         };
         var FITS = { midnight: '#1c3445', matcha: '#5f7f5a', oat: '#b59f7c', blush: '#d9828f', lilac: '#8f7cc8', noir: '#2b2b2b' };
-        var STARTER = [['dresser', 36, 80], ['lamp', 39, 70], ['box', 17, 88], ['plant', 74, 80], ['mascot', 94, 77], ['box', 30, 39]];
+        var STARTER = [['dresser', 36, 80], ['lamp', 56, 70], ['box', 17, 88], ['plant', 74, 80], ['mascot', 94, 77], ['box', 30, 39]];
 
         var store = {
             get: function (k) { try { return window.localStorage.getItem(k); } catch (e) { return null; } },
@@ -199,6 +199,7 @@
         if (!room) return;
         var itemsLayer = document.getElementById('room-items');
         var tagsLayer = document.getElementById('room-tags');
+        var lightLayer = document.getElementById('room-light');
         var roomBox = document.querySelector('.b-room');
         var sign = document.getElementById('room-sign');
         var live = document.getElementById('b-live');
@@ -329,6 +330,15 @@
                 g.appendChild(el('use', { href: '#s-' + k, width: p.w, height: p.h }));
             }
         }
+        // a lamp's light at night: a wide ambient pool that fills the room plus a
+        // bright core around the shade; both sit on the light layer above the furniture
+        function lightPool(p) {
+            var g = el('g', { 'class': 'light-pool', 'aria-hidden': 'true' });
+            g.appendChild(el('ellipse', { 'class': 'glow', cx: p.glow[0], cy: p.glow[1] + 10, rx: p.glow[2] * 6, ry: p.glow[3] * 4.6, fill: 'url(#lampfill)' }));
+            g.appendChild(el('ellipse', { 'class': 'glow', cx: p.glow[0], cy: p.glow[1] + 5, rx: p.glow[2] * 3.6, ry: p.glow[3] * 3.1, fill: 'url(#lampambient)' }));
+            g.appendChild(el('ellipse', { 'class': 'glow', cx: p.glow[0], cy: p.glow[1], rx: p.glow[2], ry: p.glow[3], fill: 'url(#lampglow)' }));
+            return g;
+        }
         function tagNode(item) {
             var p = P[item.k], t = tagText(item), tw = t.length * 3 + 3;
             var tg = el('g', { 'class': 'tb-tag', 'aria-hidden': 'true' });
@@ -352,11 +362,12 @@
             title.textContent = label;
             g.appendChild(title);
             if (p.deep) g.style.color = 'var(--wall-deep)';
-            if (p.glow) g.appendChild(el('ellipse', { 'class': 'glow', cx: p.glow[0], cy: p.glow[1], rx: p.glow[2], ry: p.glow[3], fill: 'url(#lampglow)' }));
+            if (p.glow) g._light = lightPool(p);
             g.appendChild(el('rect', { 'class': 'hit', width: p.w, height: p.h }));
             uses(g, item.k, p);
             if (p.tb) g._tag = tagNode(item);
             function follow() {
+                if (g._light) g._light.setAttribute('transform', 'translate(' + item.x + ' ' + item.y + ')');
                 if (!g._tag) return;
                 g._tag.setAttribute('transform', 'translate(' + (item.x + g._tag._dx) + ' ' + (item.y - 6) + ')');
                 g._tag._rect.setAttribute('fill', ZONE[zoneOf(item)].tag);
@@ -409,9 +420,11 @@
             tools.hidden = true;
             while (itemsLayer.firstChild) itemsLayer.removeChild(itemsLayer.firstChild);
             while (tagsLayer.firstChild) tagsLayer.removeChild(tagsLayer.firstChild);
+            while (lightLayer.firstChild) lightLayer.removeChild(lightLayer.firstChild);
             order().forEach(function (item) {
                 var g = pieceNode(item);
                 itemsLayer.appendChild(g);
+                if (g._light) lightLayer.appendChild(g._light);
                 if (g._tag) tagsLayer.appendChild(g._tag);
                 if (item === popItem) g.classList.add('pop');
                 if (item === focusItem) { try { g.focus({ preventScroll: true }); } catch (e) { /* ignore */ } }
@@ -671,16 +684,22 @@
             var wa = cs.getPropertyValue('--wall-a').trim(), wb = cs.getPropertyValue('--wall-b').trim();
             var deep = cs.getPropertyValue('--wall-deep').trim(), fit = cs.getPropertyValue('--fit').trim();
             var night = document.documentElement.classList.contains('is-dark');
-            var need = {}, body = '', ordered = order();
+            var need = {}, body = '', lights = '', ordered = order();
             ordered.forEach(function (i) {
                 var p = P[i.k], sym = p.alt || i.k;
                 need[sym] = 1;
                 body += '<g transform="translate(' + i.x + ' ' + i.y + ')" color="' + (p.deep ? deep : fit) + '"' +
                     (night && !p.glow ? ' filter="url(#nightdim)"' : '') + '>' +
-                    (night && p.glow ? '<ellipse cx="' + p.glow[0] + '" cy="' + p.glow[1] + '" rx="' + p.glow[2] + '" ry="' + p.glow[3] + '" fill="url(#lampglow)"/>' : '') +
                     '<use href="#s-' + sym + '" width="' + p.w + '" height="' + p.h + '"/></g>';
+                if (night && p.glow) {
+                    lights += '<g transform="translate(' + i.x + ' ' + i.y + ')" style="mix-blend-mode:screen">' +
+                        '<ellipse cx="' + p.glow[0] + '" cy="' + (p.glow[1] + 10) + '" rx="' + (p.glow[2] * 6) + '" ry="' + (p.glow[3] * 4.6) + '" fill="url(#lampfill)"/>' +
+                        '<ellipse cx="' + p.glow[0] + '" cy="' + (p.glow[1] + 5) + '" rx="' + (p.glow[2] * 3.6) + '" ry="' + (p.glow[3] * 3.1) + '" fill="url(#lampambient)"/>' +
+                        '<ellipse cx="' + p.glow[0] + '" cy="' + p.glow[1] + '" rx="' + p.glow[2] + '" ry="' + p.glow[3] + '" fill="url(#lampglow)"/></g>';
+                }
             });
-            var defs = night ? document.getElementById('lampglow').outerHTML + document.getElementById('nightdim').outerHTML : '';
+            body += lights;
+            var defs = night ? document.getElementById('lampglow').outerHTML + document.getElementById('lampambient').outerHTML + document.getElementById('lampfill').outerHTML + document.getElementById('nightdim').outerHTML : '';
             Object.keys(need).forEach(function (id) { defs += document.getElementById('s-' + id).outerHTML; });
             var S = 8, CW = W * S, CH = H * S, BAND = 124;
             var svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + W + ' ' + H + '" width="' + CW + '" height="' + CH + '" shape-rendering="crispEdges">' +
