@@ -183,16 +183,78 @@
             });
         }
 
-        // decorative scenes (hero room, final CTA): pick things up, put them down
+        // ---- lighting: is it night, where are the lights, how does a piece cast a shadow
+        var darkMQ = window.matchMedia('(prefers-color-scheme: dark)');
+        function isNight() {
+            var t = document.documentElement.getAttribute('data-theme');
+            return t ? t === 'dark' : darkMQ.matches;
+        }
+        // a cast shadow under a piece: soft and centred by default, stretched away
+        // from the strongest nearby light (a lamp at night, the window by day)
+        function shadowShape(cx, bottom, w, lights, night) {
+            var best = 0, dir = 0;
+            lights.forEach(function (L) {
+                var dx = cx - L.x, d = Math.abs(dx);
+                if (d >= L.reach) return;
+                var s = (1 - d / L.reach) * L.weight;
+                if (s > best) { best = s; dir = dx >= 0 ? 1 : -1; }
+            });
+            return {
+                cx: cx + dir * best * w * 0.45, cy: bottom - 0.6,
+                rx: w * 0.55 + best * w * 0.7, ry: 2.2 + best * 0.8,
+                o: Math.min((night ? 0.34 : 0.2) + best * 0.18, 0.55)
+            };
+        }
+        function setShadow(node, s) {
+            node.setAttribute('cx', s.cx); node.setAttribute('cy', s.cy);
+            node.setAttribute('rx', s.rx); node.setAttribute('ry', s.ry);
+            node.setAttribute('fill-opacity', s.o);
+        }
+        function shadowNode() { return el('ellipse', { 'class': 'shadow', fill: '#000', filter: 'url(#soft)' }); }
+        // how lit a point is by the lamps (0..1), from the ambient pool geometry
+        function lampLevel(px, py, lamps) {
+            var lvl = 0;
+            lamps.forEach(function (L) {
+                var dx = (px - L.x) / L.rx, dy = (py - L.y) / L.ry;
+                lvl = Math.max(lvl, 1 - Math.sqrt(dx * dx + dy * dy));
+            });
+            return lvl;
+        }
+        function tintFor(lvl) { return lvl > 0.45 ? 'url(#nightwarm)' : lvl > 0.12 ? 'url(#nightmid)' : 'url(#nightdim)'; }
+
+        // decorative scenes (hero room, final CTA): pick things up, put them down;
+        // pieces cast shadows and take the lamp light like the builder's do
         document.querySelectorAll('svg[data-play]').forEach(function (svg) {
-            var vb = svg.getAttribute('viewBox').split(' ').map(Number).slice(2);
+            var vb = svg.getAttribute('viewBox').split(' ').map(Number).slice(2), entries = [];
+            var shadows = el('g', { 'class': 'scene-shadows', 'aria-hidden': 'true' });
+            var first = svg.querySelector('.piece');
+            if (first) first.parentNode.insertBefore(shadows, first);
+            function relightScene() {
+                var night = isNight(), lamps = [], lights = [];
+                entries.forEach(function (e) {
+                    if (!e.core) return;
+                    lamps.push({ x: e.pos.x + e.core.cx, y: e.pos.y + e.core.cy + 5, rx: e.core.rx * 3.6, ry: e.core.ry * 3.1 });
+                    lights.push({ x: e.pos.x + e.core.cx, reach: e.core.rx * 4, weight: 1 });
+                });
+                if (!night) lights = [{ x: -40, reach: vb[0] + 80, weight: 0.35 }]; // daylight from the left
+                entries.forEach(function (e) {
+                    setShadow(e.shadow, shadowShape(e.pos.x + e.w / 2, e.pos.y + e.h, e.w, lights, night));
+                    if (!e.core) e.g.style.setProperty('--nf', tintFor(night ? lampLevel(e.pos.x + e.w / 2, e.pos.y + e.h / 2, lamps) : 0));
+                });
+            }
             svg.querySelectorAll('.piece').forEach(function (g) {
                 var m = /translate\((-?\d+) (-?\d+)\)/.exec(g.getAttribute('transform') || '');
                 var hit = g.querySelector('.hit');
                 if (!m || !hit) return;
-                var pos = { x: Number(m[1]), y: Number(m[2]) };
-                makeDraggable(svg, g, pos, Number(hit.getAttribute('width')), Number(hit.getAttribute('height')), vb);
+                var pos = { x: Number(m[1]), y: Number(m[2]) }, w = Number(hit.getAttribute('width')), h = Number(hit.getAttribute('height'));
+                var glows = g.querySelectorAll('ellipse.glow'), c = glows.length ? glows[glows.length - 1] : null;
+                var e = { g: g, pos: pos, w: w, h: h, shadow: shadowNode(), core: c ? { cx: +c.getAttribute('cx'), cy: +c.getAttribute('cy'), rx: +c.getAttribute('rx'), ry: +c.getAttribute('ry') } : null };
+                entries.push(e);
+                shadows.appendChild(e.shadow);
+                makeDraggable(svg, g, pos, w, h, vb, { follow: relightScene, end: relightScene });
             });
+            document.addEventListener('sg-theme', relightScene);
+            relightScene();
         });
 
         var room = document.getElementById('room');
@@ -200,6 +262,7 @@
         var itemsLayer = document.getElementById('room-items');
         var tagsLayer = document.getElementById('room-tags');
         var lightLayer = document.getElementById('room-light');
+        var shadowLayer = document.getElementById('room-shadows');
         var roomBox = document.querySelector('.b-room');
         var sign = document.getElementById('room-sign');
         var live = document.getElementById('b-live');
@@ -363,11 +426,13 @@
             g.appendChild(title);
             if (p.deep) g.style.color = 'var(--wall-deep)';
             if (p.glow) g._light = lightPool(p);
+            if (!p.flat && !p.wall) g._shadow = shadowNode();
             g.appendChild(el('rect', { 'class': 'hit', width: p.w, height: p.h }));
             uses(g, item.k, p);
             if (p.tb) g._tag = tagNode(item);
             function follow() {
                 if (g._light) g._light.setAttribute('transform', 'translate(' + item.x + ' ' + item.y + ')');
+                relight();
                 if (!g._tag) return;
                 g._tag.setAttribute('transform', 'translate(' + (item.x + g._tag._dx) + ' ' + (item.y - 6) + ')');
                 g._tag._rect.setAttribute('fill', ZONE[zoneOf(item)].tag);
@@ -421,18 +486,54 @@
             while (itemsLayer.firstChild) itemsLayer.removeChild(itemsLayer.firstChild);
             while (tagsLayer.firstChild) tagsLayer.removeChild(tagsLayer.firstChild);
             while (lightLayer.firstChild) lightLayer.removeChild(lightLayer.firstChild);
+            while (shadowLayer.firstChild) shadowLayer.removeChild(shadowLayer.firstChild);
             order().forEach(function (item) {
                 var g = pieceNode(item);
                 itemsLayer.appendChild(g);
+                if (g._shadow) shadowLayer.appendChild(g._shadow);
                 if (g._light) lightLayer.appendChild(g._light);
                 if (g._tag) tagsLayer.appendChild(g._tag);
                 if (item === popItem) g.classList.add('pop');
                 if (item === focusItem) { try { g.focus({ preventScroll: true }); } catch (e) { /* ignore */ } }
             });
             if (emptyText) emptyText.setAttribute('display', state.items.length ? 'none' : 'inline');
+            relight();
             updateTray();
             updateReceipt();
         }
+
+        // the lights on a floor: lamps at night, the window by day (walls block the other floor)
+        var WINDOW_X = { ground: 99, attic: 104 };
+        function lampsOn(zone) {
+            var lamps = [];
+            state.items.forEach(function (o) {
+                var q = P[o.k];
+                if (!q.glow || zoneOf(o) !== zone) return;
+                lamps.push({ x: o.x + q.glow[0], y: o.y + q.glow[1] + 5, rx: q.glow[2] * 3.6, ry: q.glow[3] * 3.1, reach: q.glow[2] * 4 });
+            });
+            return lamps;
+        }
+        function lightsFor(zone, night, lamps) {
+            if (night) return lamps.map(function (L) { return { x: L.x, reach: L.reach, weight: 1 }; });
+            return [{ x: WINDOW_X[zone], reach: 80, weight: 0.5 }];
+        }
+        function pieceLight(item, night, lamps) {
+            var p = P[item.k];
+            return night && !p.glow ? lampLevel(item.x + p.w / 2, item.y + p.h / 2, lamps) : 0;
+        }
+        // shadows stretch away from the light and pieces near a lamp take a warm tint
+        function relight() {
+            var night = isNight(), cache = {};
+            itemsLayer.querySelectorAll('.piece').forEach(function (g) {
+                var it = g._item;
+                if (!it) return;
+                var p = P[it.k], zone = zoneOf(it);
+                if (!cache[zone]) { var lamps = lampsOn(zone); cache[zone] = { lamps: lamps, lights: lightsFor(zone, night, lamps) }; }
+                if (g._shadow) setShadow(g._shadow, shadowShape(it.x + p.w / 2, it.y + p.h, p.w, cache[zone].lights, night));
+                if (!p.glow) g.style.setProperty('--nf', tintFor(pieceLight(it, night, cache[zone].lamps)));
+            });
+        }
+        document.addEventListener('sg-theme', relight);
 
         // a free x on the given floor, clear of the ladder and other floor pieces;
         // a storage piece claims the wider of itself and its tag so labels never overlap
@@ -671,7 +772,7 @@
             for (var i = 0; i < from.length; i++) {
                 if (from[i].tagName.toLowerCase() === 'text') continue;
                 var cs = getComputedStyle(from[i]), f = from[i].getAttribute('fill');
-                if (f) to[i].setAttribute('fill', f.indexOf('url(') === 0 ? 'url(#wg)' : cs.fill);
+                if (f) to[i].setAttribute('fill', f === 'url(#wallgrad)' ? 'url(#wg)' : (f.indexOf('url(') === 0 ? f : cs.fill));
                 to[i].setAttribute('opacity', cs.opacity);
                 to[i].removeAttribute('class');
             }
@@ -684,12 +785,17 @@
             var wa = cs.getPropertyValue('--wall-a').trim(), wb = cs.getPropertyValue('--wall-b').trim();
             var deep = cs.getPropertyValue('--wall-deep').trim(), fit = cs.getPropertyValue('--fit').trim();
             var night = document.documentElement.classList.contains('is-dark');
-            var need = {}, body = '', lights = '', ordered = order();
+            var need = {}, body = '', lights = '', shadows = '', ordered = order(), lampCache = {};
             ordered.forEach(function (i) {
-                var p = P[i.k], sym = p.alt || i.k;
+                var p = P[i.k], sym = p.alt || i.k, zone = zoneOf(i);
+                if (!lampCache[zone]) { var lm = lampsOn(zone); lampCache[zone] = { lamps: lm, lights: lightsFor(zone, night, lm) }; }
+                if (!p.flat && !p.wall) {
+                    var sh = shadowShape(i.x + p.w / 2, i.y + p.h, p.w, lampCache[zone].lights, night);
+                    shadows += '<ellipse cx="' + sh.cx + '" cy="' + sh.cy + '" rx="' + sh.rx + '" ry="' + sh.ry + '" fill="#000" fill-opacity="' + sh.o + '" filter="url(#soft)"/>';
+                }
                 need[sym] = 1;
                 body += '<g transform="translate(' + i.x + ' ' + i.y + ')" color="' + (p.deep ? deep : fit) + '"' +
-                    (night && !p.glow ? ' filter="url(#nightdim)"' : '') + '>' +
+                    (night && !p.glow ? ' filter="' + tintFor(pieceLight(i, night, lampCache[zone].lamps)) + '"' : '') + '>' +
                     '<use href="#s-' + sym + '" width="' + p.w + '" height="' + p.h + '"/></g>';
                 if (night && p.glow) {
                     lights += '<g transform="translate(' + i.x + ' ' + i.y + ')" style="mix-blend-mode:screen">' +
@@ -698,8 +804,11 @@
                         '<ellipse cx="' + p.glow[0] + '" cy="' + p.glow[1] + '" rx="' + p.glow[2] + '" ry="' + p.glow[3] + '" fill="url(#lampglow)"/></g>';
                 }
             });
-            body += lights;
-            var defs = night ? document.getElementById('lampglow').outerHTML + document.getElementById('lampambient').outerHTML + document.getElementById('lampfill').outerHTML + document.getElementById('nightdim').outerHTML : '';
+            body = shadows + body + lights;
+            var defs = '';
+            ['soft', 'vig'].concat(night ? ['lampglow', 'lampambient', 'lampfill', 'nightdim', 'nightmid', 'nightwarm'] : []).forEach(function (id) {
+                defs += document.getElementById(id).outerHTML;
+            });
             Object.keys(need).forEach(function (id) { defs += document.getElementById('s-' + id).outerHTML; });
             var S = 8, CW = W * S, CH = H * S, BAND = 124;
             var svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + W + ' ' + H + '" width="' + CW + '" height="' + CH + '" shape-rendering="crispEdges">' +
@@ -853,6 +962,7 @@
             document.querySelectorAll('meta[name="theme-color"]').forEach(function (m) {
                 m.setAttribute('content', d ? '#101010' : '#383838');
             });
+            document.dispatchEvent(new Event('sg-theme'));
         }
         document.querySelectorAll('.theme-toggle').forEach(function (b) {
             b.addEventListener('click', function () {

@@ -980,7 +980,16 @@
     /*NIGHT*/ .win-cloud { opacity: 0; }
     /*NIGHT*/ .win-sky { fill: #1b2553; }
     /*NIGHT*/ .win-frame { fill: #8d897f; }
-    /*NIGHT*/ .room-svg .piece:not(.light), .scene .piece:not(.light) { filter: url(#nightdim); }
+    /*NIGHT*/ .room-svg .piece:not(.light), .scene .piece:not(.light) { filter: var(--nf, url(#nightdim)); }
+    .shadow { pointer-events: none; }
+    .day-light { transition: opacity 0.4s ease; }
+    .moon-light, .vignette { opacity: 0; transition: opacity 0.4s ease; pointer-events: none; }
+    /*NIGHT*/ .day-light { opacity: 0; }
+    /*NIGHT*/ .moon-light { opacity: 1; }
+    /*NIGHT*/ .vignette { opacity: 1; }
+    /*NIGHT*/ .room { box-shadow: inset 0 0 90px rgba(0, 0, 0, 0.5), 0 22px 40px -22px rgba(0, 0, 0, 0.5); }
+    @media (prefers-reduced-motion: no-preference) { .light-pool { animation: breathe 3.8s ease-in-out infinite; } }
+    @keyframes breathe { 50% { opacity: 0.86; } }
     /*NIGHT*/ .room { background: radial-gradient(ellipse 70% 75% at 10% 82%, rgba(255, 196, 110, 0.42), transparent 72%), radial-gradient(ellipse 45% 40% at 42% 70%, rgba(255, 190, 100, 0.25), transparent 70%), linear-gradient(rgba(6, 10, 36, 0.5), rgba(6, 10, 36, 0.5)), linear-gradient(180deg, var(--wall-a) 0%, var(--wall-b) 100%); }
     /*NIGHT*/ .room::before { filter: brightness(0.55); }
     /*NIGHT*/ .zone-floor { fill: #e8dcc8; }

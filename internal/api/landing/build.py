@@ -109,6 +109,17 @@ NIGHT_DEFS = (
     # the room fill: very wide and faint, so the whole floor the lamp is on feels warm
     '<radialGradient id="lampfill"><stop offset="0" stop-color="#ffc98a" stop-opacity="0.22"/>'
     '<stop offset="1" stop-color="#ffb060" stop-opacity="0"/></radialGradient>'
+    # cast shadows (blurred ellipses) and the night vignette
+    '<filter id="soft" x="-60%" y="-300%" width="220%" height="700%"><feGaussianBlur stdDeviation="1.3"/></filter>'
+    '<radialGradient id="vig" cx="0.5" cy="0.45" r="0.72"><stop offset="0.5" stop-color="#000" stop-opacity="0"/>'
+    '<stop offset="1" stop-color="#000" stop-opacity="0.5"/></radialGradient>'
+    # night tints by distance from a lamp: near = warm, mid = half, far = the cool dim
+    '<filter id="nightwarm" color-interpolation-filters="sRGB"><feComponentTransfer>'
+    '<feFuncR type="linear" slope="0.98"/><feFuncG type="linear" slope="0.84"/><feFuncB type="linear" slope="0.62"/>'
+    '</feComponentTransfer></filter>'
+    '<filter id="nightmid" color-interpolation-filters="sRGB"><feComponentTransfer>'
+    '<feFuncR type="linear" slope="0.74"/><feFuncG type="linear" slope="0.68"/><feFuncB type="linear" slope="0.64"/>'
+    '</feComponentTransfer></filter>'
     '<filter id="nightdim" color-interpolation-filters="sRGB"><feComponentTransfer>'
     '<feFuncR type="linear" slope="0.5"/><feFuncG type="linear" slope="0.52"/><feFuncB type="linear" slope="0.66"/>'
     '</feComponentTransfer></filter>'
