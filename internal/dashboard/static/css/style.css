@@ -572,3 +572,7 @@ th {
 .alert-warning { background: #fffbeb; color: #92400e; border: 1px solid #fde68a; }
 .alert-info { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
 @media (max-width: 480px) { .house-floors { grid-template-columns: 1fr; } .stepper input[type="number"] { width: 4.5rem; } }
+
+/* Floors (Phase 2): the bucket list says where a bucket lives. */
+.badge-downstairs { background: #ffd400; color: #2b2b2b; }
+.badge-attic { background: #b9c7d2; color: #2b2b2b; }

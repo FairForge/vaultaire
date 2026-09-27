@@ -10,8 +10,14 @@ import (
 	"time"
 
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
+	"github.com/FairForge/vaultaire/internal/flags"
+	"github.com/FairForge/vaultaire/internal/usage"
 	"go.uber.org/zap"
 )
+
+// FlagHouseOverview draws the house on the overview (dashboard plan Phase
+// 2). Registered in api/server.go with default off; per tenant, then global.
+const FlagHouseOverview = "house_overview"
 
 // BackendLocation maps a storage backend to its physical location.
 type BackendLocation struct {
@@ -40,8 +46,9 @@ type ActivityRow struct {
 }
 
 // HandleOverview returns an http.HandlerFunc that renders the dashboard
-// overview page with real data from PostgreSQL.
-func HandleOverview(tmpl *template.Template, db *sql.DB, logger *zap.Logger, storageMode string) http.HandlerFunc {
+// overview page with real data from PostgreSQL. fl may be nil (the house
+// stays off).
+func HandleOverview(tmpl *template.Template, db *sql.DB, logger *zap.Logger, storageMode string, fl *flags.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
 		if sd == nil {
@@ -68,6 +75,7 @@ func HandleOverview(tmpl *template.Template, db *sql.DB, logger *zap.Logger, sto
 			populateEmailVerified(ctx, db, sd.UserID, data)
 			populateOnboarding(ctx, db, sd.TenantID, r, data)
 			populateCarbonBadge(ctx, db, sd.TenantID, data)
+			populateHouseOverview(ctx, db, fl, sd.TenantID, data)
 		} else {
 			setDefaults(data)
 		}
@@ -133,6 +141,96 @@ func populateStorageUsage(ctx context.Context, db *sql.DB, tenantID string, data
 	data["StorageBarClass"] = barClass
 	data["Tier"] = tier
 	data["ShowUpgradeCTA"] = tier == "free" && pct >= 80
+}
+
+// populateHouseOverview builds the house (flag house_overview) and the
+// egress bar. Floors come from tenant_floor_quotas when the tenant bought a
+// house; otherwise the single total quota is the downstairs and there is no
+// attic. Egress is an allowance, never a bill: free to 0.5× the downstairs
+// quota plus 1× the attic quota per month (what the site says), or the
+// tenant's bandwidth limit when an admin set one.
+func populateHouseOverview(ctx context.Context, db *sql.DB, fl *flags.Service, tenantID string, data map[string]any) {
+	var used, limit int64
+	var bwLimit sql.NullInt64
+	if err := db.QueryRowContext(ctx,
+		`SELECT storage_used_bytes, storage_limit_bytes, bandwidth_limit_bytes FROM tenant_quotas WHERE tenant_id = $1`,
+		tenantID).Scan(&used, &limit, &bwLimit); err != nil {
+		return
+	}
+	std := FloorState{Floor: usage.FloorStandard, LimitBytes: limit, UsedBytes: used}
+	vault := FloorState{Floor: usage.FloorVault}
+	floors, err := usage.NewQuotaManager(db).GetFloors(ctx, tenantID)
+	if err == nil && len(floors) > 0 {
+		std, vault = FloorState{Floor: usage.FloorStandard}, FloorState{Floor: usage.FloorVault}
+		for _, f := range floors {
+			switch f.Floor {
+			case usage.FloorStandard:
+				std.LimitBytes, std.UsedBytes = f.LimitBytes, f.UsedBytes
+			case usage.FloorVault:
+				vault.LimitBytes, vault.UsedBytes = f.LimitBytes, f.UsedBytes
+			}
+		}
+	}
+	hasHouse := len(floors) > 0
+
+	// egress allowance
+	allowance := limit / 2
+	if hasHouse {
+		allowance = std.LimitBytes/2 + vault.LimitBytes
+	}
+	if bwLimit.Valid && bwLimit.Int64 > 0 {
+		allowance = bwLimit.Int64
+	}
+	var egress int64
+	_ = db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(egress_bytes), 0) FROM bandwidth_usage_daily
+		 WHERE tenant_id = $1 AND date >= date_trunc('month', CURRENT_DATE)`, tenantID).Scan(&egress)
+	data["EgressAllowanceFmt"] = formatBytes(allowance)
+	pct := 0
+	if allowance > 0 {
+		pct = int(math.Min(100, math.Round(float64(egress)*100/float64(allowance))))
+	}
+	data["EgressPct"] = pct
+	data["EgressBarClass"] = ""
+	if pct >= 90 {
+		data["EgressBarClass"] = "danger"
+	} else if pct >= 75 {
+		data["EgressBarClass"] = "warning"
+	}
+
+	if fl == nil || !fl.Enabled(FlagHouseOverview, tenantID) {
+		return
+	}
+
+	// bucket bytes per floor, for the pieces' names and links
+	rows, err := db.QueryContext(ctx,
+		`SELECT bucket, floor, COALESCE(SUM(size_bytes), 0) FROM object_head_cache
+		 WHERE tenant_id = $1 GROUP BY bucket, floor`, tenantID)
+	if err == nil {
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var b, floor string
+			var n int64
+			if rows.Scan(&b, &floor, &n) != nil {
+				continue
+			}
+			if floor == usage.FloorVault && hasHouse {
+				vault.Buckets = append(vault.Buckets, BucketBytes{Name: b, Bytes: n})
+			} else {
+				std.Buckets = append(std.Buckets, BucketBytes{Name: b, Bytes: n})
+			}
+		}
+	}
+	if !hasHouse {
+		// A legacy tenant's attic bytes still count on the single quota.
+		vault = FloorState{Floor: usage.FloorVault}
+	}
+	var room string
+	_ = db.QueryRowContext(ctx, `SELECT intent_room FROM tenants WHERE id = $1`, tenantID).Scan(&room)
+
+	scene := BuildHouseScene(std, vault, room)
+	data["HouseScene"] = scene
+	data["HouseOn"] = true
 }
 
 func populateBandwidth(ctx context.Context, db *sql.DB, tenantID string, data map[string]any) {

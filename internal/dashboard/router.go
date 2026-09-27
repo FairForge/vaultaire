@@ -146,8 +146,9 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		overviewTmpl := template.Must(baseTmpl.Clone())
 		template.Must(overviewTmpl.ParseFS(Templates,
 			"templates/customer/dashboard.html",
+			"templates/generated/house.html", // the house: sprites, room, CSS (make landing)
 		))
-		dr.Get("/", handlers.HandleOverview(overviewTmpl, deps.DB, deps.Logger, deps.StorageMode))
+		dr.Get("/", handlers.HandleOverview(overviewTmpl, deps.DB, deps.Logger, deps.StorageMode, deps.Flags))
 
 		// Bucket browser.
 		bucketsTmpl := template.Must(baseTmpl.Clone())

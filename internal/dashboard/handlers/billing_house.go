@@ -66,8 +66,10 @@ type HouseView struct {
 }
 
 // populateHouse fills data["House"]. With the flag off the section is
-// disabled and the page falls back to the legacy plan grid.
-func populateHouse(ctx context.Context, db *sql.DB, svc HouseBilling, fl *flags.Service, data map[string]any, tenantID string) {
+// disabled and the page falls back to the legacy plan grid. add is the
+// overview's "add a box" nudge: "downstairs" or "attic" pre-increments that
+// floor's stepper by one.
+func populateHouse(ctx context.Context, db *sql.DB, svc HouseBilling, fl *flags.Service, data map[string]any, tenantID, add string) {
 	v := HouseView{Period: string(billing.PeriodAnnual), Prices: landing.Get()}
 	data["House"] = v
 	if fl == nil || !fl.Enabled(FlagQuotaCheckout, tenantID) || db == nil {
@@ -100,6 +102,12 @@ func populateHouse(ctx context.Context, db *sql.DB, svc HouseBilling, fl *flags.
 		if v.Std == 0 && v.Vault == 0 {
 			v.Std = 1 // the site's first box
 		}
+	}
+	switch add {
+	case "downstairs":
+		v.Std++
+	case "attic":
+		v.Vault++
 	}
 	v.Quote = billing.QuoteHouse(v.Std, v.Vault, v.PinHot, billing.Period(v.Period))
 	data["House"] = v

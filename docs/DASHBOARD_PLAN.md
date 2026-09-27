@@ -1,6 +1,6 @@
 # Dashboard plan: the house comes inside
 
-*Drafted 2026-09-27 from the landing-page work (PRs #479–#493). Status: Phase 0 shipped (#498), Phase 1 shipped behind `quota_checkout` (this PR). Owner: Isaac. Estimates are working days for one person and assume the landing sources/generator pattern.*
+*Drafted 2026-09-27 from the landing-page work (PRs #479–#493). Status: Phase 0 shipped (#498), Phase 1 shipped behind `quota_checkout` (#504), Phase 2 shipped behind `house_overview` (this PR). Owner: Isaac. Estimates are working days for one person and assume the landing sources/generator pattern.*
 
 ## Why
 
@@ -50,7 +50,9 @@ The site sells whole TB; billing must too. *Shipped: migration 066 (`tenant_floo
 - **Kill-switch:** feature flag `quota_checkout` (default off) so the code ships dark and is turned on for launch.
 - Out of scope here: Performance tier (parked), founders slots (manual until demand is real).
 
-### Phase 2: the house inside (3 days) — *overview and buckets*
+### Phase 2: the house inside (3 days) — *overview and buckets* — **shipped dark**
+
+*Shipped: `build.py` now also writes `internal/dashboard/templates/generated/house.html` (sprites, night defs, room background, house CSS — same sources hash, guarded by `TestHouseTemplate_GeneratedFromLandingSources`); `handlers/house_scene.go` ports the builder's layout and light rules to Go (pieces from the quota per floor, greedy 10/5/1 with a three-bookcase fallback for big floors, fill by used bytes as a clip, titles and links from the buckets in each piece, vibe and sign from the saved room, day/night shadows and lamp tints); overview cards say fullness per floor with "add a box" links; egress is a bar against the site's allowance (0.5× downstairs + 1× attic, or an admin limit); the dashboard layout reads the shared `sg-theme` so night follows the site's toggle; bucket list/settings/objects speak floors. Not done: a headless-Chrome harness for the house (the Go render tests cover the SVG); the dashboard's own dark palette is Phase 3.*
 
 - **Overview = your house.** The same SVG house as the site, rendered from live data: pieces sized by the quota bought per floor, fill level by bytes used, labels from bucket names. Click a piece → its bucket. Night mode follows the theme toggle. Static SVG + a little JS, reusing the sprite defs from `landing/` (the generator gains a `dashboard` target that emits the sprite block for the dashboard templates).
 - **Buckets speak floors.** Tier preference shown as "downstairs / attic / auto"; the attic badge says "minutes to open"; archive objects show restore state in floor language.
