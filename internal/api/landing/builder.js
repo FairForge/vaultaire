@@ -656,6 +656,11 @@
             document.getElementById('r-warn').textContent = (t.ground && !t.attic)
                 ? 'Tip: anything you rarely open can go up to the attic for $__PRICE_VAULT__/TB.'
                 : '';
+            // the receipt IS the plan: the register button carries the house along
+            var cta = receipt.querySelector('.r-actions a.btn-primary');
+            if (cta && (cta.getAttribute('href') || '').indexOf('/register') === 0) {
+                cta.setAttribute('href', '/register?std_tb=' + t.ground + '&vault_tb=' + t.attic + '&room=' + encodeURIComponent(encode()));
+            }
             var tb = t.ground + t.attic, meter = document.getElementById('b-meter');
             if (meter) {
                 while (meter.firstChild) meter.removeChild(meter.firstChild);
@@ -937,6 +942,12 @@
             up.addEventListener('click', function () { moveIn('attic'); });
             draw();
         })();
+
+        // for the waitlist forms: what the visitor built, to store beside the email
+        window.sgHouse = function () {
+            var t = totals();
+            return { std: t.ground, vault: t.attic, room: encode() };
+        };
 
         renderSign();
         render();

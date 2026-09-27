@@ -103,6 +103,8 @@ function run() {
         ok(hh.querySelectorAll('#room-items .piece').length === 4, 'v2 link: junk piece and second mascot dropped', hh.querySelectorAll('#room-items .piece').length);
         ok(hh.getElementById('room-sign').textContent === 'zoëb’s place', 'v2 link: name filtered', hh.getElementById('room-sign').textContent);
         ok(hh.querySelector('a[href="/register"]') !== null, 'open variant links /register');
+        ok(hh.querySelector('.r-actions a[href^="/register?std_tb=2&vault_tb=5&room=v2."]') !== null, 'receipt button carries the house into /register', (hh.querySelector('.r-actions a.btn-primary') || {}).getAttribute && hh.querySelector('.r-actions a.btn-primary').getAttribute('href'));
+        var hs = hh.defaultView.sgHouse(); ok(hs.std === 2 && hs.vault === 5 && /^v2\./.test(hs.room), 'sgHouse reports TB per floor for the waitlist', JSON.stringify(hs));
 
         // ---- export renders a PNG of the right size
         var got = null; w.HTMLAnchorElement.prototype.click = function () { got = this.download; };

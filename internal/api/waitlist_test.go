@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -27,7 +28,7 @@ func TestWaitlist_ValidEmail_Inserts(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	mock.ExpectExec(`INSERT INTO waitlist_signups`).
-		WithArgs("alice@example.com", "landing", sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WithArgs("alice@example.com", "landing", sqlmock.AnyArg(), sqlmock.AnyArg(), 0, 0, "").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
 	s := &Server{db: db, logger: zap.NewNop()}
@@ -54,7 +55,7 @@ func TestWaitlist_Duplicate_IsOK(t *testing.T) {
 
 	// ON CONFLICT DO NOTHING → 0 rows affected, but still a success for the visitor.
 	mock.ExpectExec(`INSERT INTO waitlist_signups`).
-		WithArgs("dup@example.com", "landing", sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WithArgs("dup@example.com", "landing", sqlmock.AnyArg(), sqlmock.AnyArg(), 0, 0, "").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	s := &Server{db: db, logger: zap.NewNop()}
@@ -80,7 +81,7 @@ func TestWaitlist_NormalizesEmailCase(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	mock.ExpectExec(`INSERT INTO waitlist_signups`).
-		WithArgs("mixed@example.com", "landing", sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WithArgs("mixed@example.com", "landing", sqlmock.AnyArg(), sqlmock.AnyArg(), 0, 0, "").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
 	s := &Server{db: db, logger: zap.NewNop()}
@@ -106,4 +107,37 @@ func TestWaitlistLimiter(t *testing.T) {
 
 	// After the window passes, the first IP is allowed again.
 	assert.True(t, l.allow("1.1.1.1", now+3601))
+}
+
+// The landing page's house rides along with the email: TB per floor and the
+// share-link room, as form fields or JSON. Junk is clamped, never rejected.
+func TestWaitlist_CarriesHouseIntent(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	mock.ExpectExec(`INSERT INTO waitlist_signups`).
+		WithArgs("house@example.com", "landing", sqlmock.AnyArg(), sqlmock.AnyArg(), 6, 1, "v2.oat.noir..box-17-88").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO waitlist_signups`).
+		WithArgs("json@example.com", "landing", sqlmock.AnyArg(), sqlmock.AnyArg(), 300, 0, "").
+		WillReturnResult(sqlmock.NewResult(2, 1))
+
+	s := &Server{db: db, logger: zap.NewNop()}
+
+	form := url.Values{"email": {"house@example.com"}, "std_tb": {"6"}, "vault_tb": {"1"}, "room": {"v2.oat.noir..box-17-88"}}
+	req := httptest.NewRequest(http.MethodPost, "/api/waitlist", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Forwarded-For", "203.0.113.50")
+	w := httptest.NewRecorder()
+	s.handleWaitlistSignup(w, req)
+	require.Equal(t, http.StatusOK, w.Result().StatusCode)
+
+	body := `{"email":"json@example.com","std_tb":99999,"vault_tb":"nope","room":"<script>"}`
+	req = httptest.NewRequest(http.MethodPost, "/api/waitlist", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Forwarded-For", "203.0.113.51")
+	w = httptest.NewRecorder()
+	s.handleWaitlistSignup(w, req)
+	require.Equal(t, http.StatusOK, w.Result().StatusCode)
+	require.NoError(t, mock.ExpectationsWereMet())
 }
