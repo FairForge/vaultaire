@@ -78,7 +78,7 @@ The `engine.Driver` interface (in `internal/engine/interface.go`) is the sacred 
 
 Registration persists to **four tables in order**: `users` -> `tenants` -> `api_keys` -> `tenant_quotas`. Missing any causes failures. S3 auth queries `tenants` first (primary key, full access), then falls back to `api_keys` for scoped VLT_ keys (`revoked_at IS NULL` — revocation/rotation/expiry are persisted there, 064), then `sts_tokens` for ASIA-prefixed temporary credentials.
 
-Other critical tables (66 migrations through `066_floor_quotas.sql`):
+Other critical tables (67 migrations through `067_bucket_region_default.sql`):
 - `object_head_cache` — HEAD/GET metadata cache (~1ms), content-type, ETag, metadata JSONB
 - `buckets` — bucket registry with visibility, CORS, cache TTL, metadata JSONB, slug
 - `multipart_uploads`, `multipart_parts` — in-progress multipart state

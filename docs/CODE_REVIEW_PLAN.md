@@ -782,6 +782,12 @@ Read docs/reviews/R5-*.md first.
    Cloudflare — is CF-Connecting-IP trusted only when the peer is Cloudflare/HAProxy?),
    and the memory growth of the limiter map.
 8. Audit trail: which of these actions write an audit row, and which should but do not.
+   FACT (prod, 2026-09-27): `audit_logs` has ZERO rows in 30 days while primary swaps,
+   flag flips, key revocations and password resets happened — wire every admin/key/
+   account mutation to it (pre-launch checklist item 1).
+9. Credential-attack signal: SignatureDoesNotMatch / InvalidAccessKeyId / unknown VLT_
+   key are log lines only (`api/s3.go:278`). Add a per-access-key counter
+   (`vaultaire_auth_failures_total{reason}`) and an alert rule (checklist item 3).
 
 Tests: go test -race ./internal/api/ -run 'Mgmt|Management|UserAPI|Webhook|Event|STS|
 Admin|Compliance|Idempot|RateLimit'. Add negative auth tests for every route you find
@@ -826,6 +832,12 @@ and internal/dashboard/handlers/CLAUDE.md, and docs/reviews/R5-*.md.
 6. Public forms: /register, /login, /forgot-password, /reset-password, /abuse,
    /api/waitlist — rate limits, enumeration, the signups flag, honeypot/captcha
    presence, and abuse-form input size limits.
+   FACTS (prod, 2026-09-27): both rows in `abuse_reports` are crypto spam from
+   throwaway addresses (the form has no rate limit or verification — checklist item 9);
+   `user_activities` has ZERO rows in 30 days, so dashboard login success/failure per
+   user+IP and MFA outcome are not recorded anywhere (checklist item 2); every
+   `waitlist_signups.source` is `landing` — capture referrer/UTM so sign-ups can be
+   attributed (checklist item 7).
 7. Legal pages: templates exist for aup, baa, cookies, data-act, dpa, gdpr, privacy,
    terms — check the effective dates and that pricing/plan text matches the QUOTA-SOLD
    decision and the Oct 31 launch copy (memory: launch copy has stale competitor and
@@ -885,6 +897,12 @@ continue vs abort), metrics emitted, and shutdown behaviour. Then:
 9. Deploy interaction: .github/workflows/deploy.yml swaps binaries with a health check;
    what does an in-flight demotion or GC do when SIGTERM arrives — is the ledger left
    consistent?
+10. Two jobs that do not exist yet and should before launch (checklist items 4 and 5):
+   a synthetic customer check (scripted PUT/GET/DELETE through the public S3 endpoint
+   every few minutes with its own metric + alert — the letshow demo PUT failed every
+   minute for 26 days, 28 Aug → 22 Sep 2026, and nothing paged) and a retention job
+   for `s3_access_log`, `events`, `quota_usage_events` (WP-R9-2) plus
+   `waitlist_signups.ip_address/user_agent`.
 
 Tests: go test -race ./internal/api/ -run 'Demot|Promot|GC|Inventory|Reaper|Alert|
 Probe|Cert|Flag'. Write a table of untested job transitions.
@@ -986,6 +1004,39 @@ Part B — synthesis
 10. Update the Status tracker in docs/CODE_REVIEW_PLAN.md to complete, and write a
     memory-style handoff paragraph at the top of SYNTHESIS.md for the next session.
 ```
+
+---
+
+## Pre-launch observability & security checklist (added 2026-09-27)
+
+From the read-only prod sweep on 2026-09-27 (waitlist, users, sessions, S3 access log, app
+auth failures, SSH/UFW/fail2ban, alert state — evidence in the R7 session transcript and
+`docs/reviews/R7-drivers.md`). Verdict that day: 39 organic waitlist sign-ups, no breach
+indicators, one historical silent outage (letshow PUTs 5xx every minute 28 Aug → 22 Sep, dead
+iDrive account, no alert existed yet). Everything below is a gap, not an incident. Owner
+**[YOU]** = box/config work; **RNN** = the review session that carries it.
+
+| # | Item | Why | Owner | Status |
+|---|------|-----|-------|--------|
+| 1 | **Admin audit trail** — every admin/key/account mutation (primary swap, flag flip, key create/revoke, password reset, MFA change, tier change) writes `audit_logs`; admin page to read it | `audit_logs` had 0 rows in 30 days while all of those happened; first thing an incident review needs | R11 (item 8) | open |
+| 2 | **Login events** — dashboard login success/failure per user + IP + MFA outcome into `user_activities` (or a `login_attempts` table); lockout/alert on N failures | `user_activities` had 0 rows in 30 days; an account takeover is invisible | R12 (item 6) | open |
+| 3 | **Credential-attack metrics** — `vaultaire_auth_failures_total{reason}` for SignatureDoesNotMatch / InvalidAccessKeyId / unknown VLT_ key, per access key; alert on a burst | today log lines only (92k unauthenticated scanner hits in 14 d were fine; a stuffing attempt against a real key would look the same) | R11 (item 9) | open |
+| 4 | **Synthetic customer check** — scripted PUT/GET/DELETE through the public S3 endpoint every few minutes, own metric + alert | the letshow demo failed for 26 days with nothing paging; probes check backends, not the customer path | R13 (item 10) | open |
+| 5 | **Retention** — `s3_access_log`, `events`, `quota_usage_events` (WP-R9-2) and `waitlist_signups.ip_address/user_agent`; document periods in the privacy policy | unbounded PII tables; GDPR asks | R13 (item 10) + R14 (policy text) | open |
+| 6 | **Off-box backups and logs** — encrypted off-box DB dump (WP-R9-7), journald retention raised and shipped off-box | a breach or disk loss takes the evidence and the backups with it | [YOU] (WP-R9-7) | open |
+| 7 | **Sign-up attribution** — referrer + UTM on `/api/waitlist` and `/register` (`source` is always `landing`) | 1–2 sign-ups/day and no idea which LET/Reddit post produces them | R12 (item 6) | open |
+| 8 | **Lock down `/metrics`, `/health/backends`, `/health?details`** at HAProxy (WP-R1-1, R1-04) | public backend topology + process telemetry | [YOU] (WP-R1-1) | open |
+| 9 | **Abuse-report form** — rate limit + email verification or captcha, size limits | both existing rows are crypto spam from throwaway addresses | R12 (item 6) | open |
+| 10 | **Install the current alert rules on SLC** (`deploy/monitoring/vaultaire-backends.yml`: permafrost + local probes, R7-19) | rules on the box predate #496/#503 | [YOU] | open |
+| 11 | **iDrive per-region key pairs into prod `.env`** for the regions to sell (`deploy/scripts/idrive-region-env.sh`), then restart | WP-R7-1 code is live; without pairs only the default region exists | [YOU] + Isaac (which regions) | open |
+| 12 | **Lyve data plane off the ROOT key** (scoped `vaultaire-prod` user; keep `LYVE_PROBE_*` = root or drop it), TFA on root | R7-02 | [YOU] | open |
+| 13 | **SSH housekeeping** — something at the home IP logs in hourly (Sep 14: every hour at :58); confirm it is a known job. Password auth is already off, fail2ban active | hygiene; 20k failed-password attempts/14 d are noise against a closed door | [YOU] | open |
+
+Migration numbering note: `066_floor_quotas.sql` (#504) and the region-default migration
+(#502) collided on 066 the same day; the latter is `067_bucket_region_default.sql` now. The
+runner is a sorted `psql` loop with no tracking table, so the rename is safe. Next free
+number: **068** — check `ls internal/database/migrations | tail -1` on a fresh `main` before
+naming a migration.
 
 ---
 
