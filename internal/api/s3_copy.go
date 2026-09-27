@@ -13,7 +13,9 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/crypto"
+	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/tenant"
+	"github.com/FairForge/vaultaire/internal/usage"
 	"go.uber.org/zap"
 )
 
@@ -149,11 +151,16 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 	// is settled against the actual streamed byte count after the write, and
 	// an overwritten destination's bytes (captured atomically by the upsert)
 	// are released.
+	// The destination's class decides both where the copy lands and which
+	// floor it is billed on (header, then the destination bucket's tier).
+	destClass := resolvePutStorageClass(r.Context(), s.db, s.engine, t.ID, destBucket,
+		r.Header.Get("x-amz-storage-class"))
+	floor := usage.FloorOf(destClass)
 	quotaOn := s.quotaManager != nil
 	var reservedBytes int64
 	if quotaOn {
 		if srcSize > 0 {
-			ok, qErr := s.quotaManager.CheckAndReserve(r.Context(), t.ID, srcSize)
+			ok, qErr := reserveQuota(r.Context(), s.quotaManager, t.ID, floor, srcSize)
 			if qErr != nil {
 				s.logger.Error("copy: quota check failed",
 					zap.Error(qErr), zap.String("tenant_id", t.ID))
@@ -185,11 +192,15 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 	hasher := md5.New() // #nosec G401 — S3 spec requires MD5 for ETags
 	tee := io.TeeReader(counter, hasher)
 
-	backendName, err := s.engine.Put(r.Context(), destContainer, destKey, tee)
+	var putOpts []engine.PutOption
+	if destClass != "" {
+		putOpts = append(putOpts, engine.WithStorageClass(destClass))
+	}
+	backendName, err := s.engine.Put(r.Context(), destContainer, destKey, tee, putOpts...)
 	if err != nil {
 		if quotaOn {
 			ctx, cancel := quotaCtx(r)
-			s.releaseQuota(ctx, t.ID, reservedBytes)
+			s.releaseQuota(ctx, t.ID, floor, reservedBytes)
 			cancel()
 		}
 		s.logger.Error("copy: dest put failed",
@@ -204,7 +215,7 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 	now := time.Now().UTC()
 
 	// Update object_head_cache for the copied object.
-	var displacedSize int64
+	var displaced displacedRow
 	if s.db != nil {
 		// Look up source content-type (for COPY directive). Size is now
 		// authoritative from counter.n — no fallback path needed.
@@ -219,26 +230,27 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 
 		// atomicHeadUpsert captures the overwritten row's size (WP-1).
 		var dbErr error
-		displacedSize, dbErr = atomicHeadUpsertReleasing(r.Context(), s.db, manifestReleaser(s.gci), t.ID, destBucket, destKey, func(tx *sql.Tx) error {
+		displaced, dbErr = atomicHeadUpsertReleasing(r.Context(), s.db, manifestReleaser(s.gci), t.ID, destBucket, destKey, func(tx *sql.Tx) error {
 			// is_chunked=FALSE explicitly: overwriting a chunked destination
 			// must flip the flag (and the releaser above frees its manifest),
 			// or GET keeps reading the stale manifest.
 			_, execErr := tx.ExecContext(r.Context(), `
 				INSERT INTO object_head_cache
-					(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, is_chunked, updated_at)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, $8)
+					(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, floor, is_chunked, updated_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $9, FALSE, $8)
 				ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
 					size_bytes   = EXCLUDED.size_bytes,
 					etag         = EXCLUDED.etag,
 					content_type = EXCLUDED.content_type,
 					backend_name = EXCLUDED.backend_name,
+					floor        = EXCLUDED.floor,
 					is_chunked   = FALSE,
 					updated_at   = EXCLUDED.updated_at
-			`, t.ID, destBucket, destKey, counter.n, etag, contentType, backendName, now)
+			`, t.ID, destBucket, destKey, counter.n, etag, contentType, backendName, now, floor)
 			return execErr
 		})
 		if dbErr != nil {
-			displacedSize = 0
+			displaced = displacedRow{}
 			s.logger.Error("copy: failed to cache object metadata",
 				zap.Error(dbErr),
 				zap.String("tenant_id", t.ID),
@@ -249,7 +261,7 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 
 	if quotaOn {
 		ctx, cancel := quotaCtx(r)
-		s.settlePutQuota(ctx, t.ID, reservedBytes, counter.n, displacedSize)
+		s.settlePutQuota(ctx, t.ID, floor, reservedBytes, counter.n, displaced)
 		cancel()
 	}
 
@@ -343,10 +355,12 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 
 	// Reserve the destination's logical bytes (copy bypasses the PUT
 	// handler's reservation — WP-1 contract).
+	// Chunk blobs always live on the engine's primary backend, so a chunked
+	// copy is billed downstairs whatever the destination bucket's tier.
 	quotaOn := s.quotaManager != nil
 	var reservedBytes int64
 	if quotaOn && srcSize > 0 {
-		ok, qErr := s.quotaManager.CheckAndReserve(r.Context(), t.ID, srcSize)
+		ok, qErr := reserveQuota(r.Context(), s.quotaManager, t.ID, usage.FloorStandard, srcSize)
 		if qErr != nil {
 			s.logger.Error("chunked copy: quota check failed",
 				zap.Error(qErr), zap.String("tenant_id", t.ID))
@@ -363,7 +377,7 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 	releaseReservation := func() {
 		if quotaOn && reservedBytes > 0 {
 			ctx, cancel := quotaCtx(r)
-			s.releaseQuota(ctx, t.ID, reservedBytes)
+			s.releaseQuota(ctx, t.ID, usage.FloorStandard, reservedBytes)
 			cancel()
 		}
 	}
@@ -451,8 +465,8 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 		}
 		_, execErr := tx.ExecContext(r.Context(), `
 			INSERT INTO object_head_cache
-				(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, is_chunked, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, '', $7, $8, $9, TRUE, NOW())
+				(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, floor, is_chunked, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, '', $7, $8, $9, 'standard', TRUE, NOW())
 			ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
 				size_bytes            = EXCLUDED.size_bytes,
 				etag                  = EXCLUDED.etag,
@@ -461,6 +475,7 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 				metadata              = EXCLUDED.metadata,
 				encryption_algorithm  = EXCLUDED.encryption_algorithm,
 				content_disposition   = EXCLUDED.content_disposition,
+				floor                 = EXCLUDED.floor,
 				is_chunked            = EXCLUDED.is_chunked,
 				updated_at            = NOW()
 		`, t.ID, destBucket, destKey, srcMeta.LogicalSize, srcETag, contentType,
@@ -487,7 +502,7 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 
 	if quotaOn {
 		ctx, cancel := quotaCtx(r)
-		s.settlePutQuota(ctx, t.ID, reservedBytes, srcMeta.LogicalSize, displaced)
+		s.settlePutQuota(ctx, t.ID, usage.FloorStandard, reservedBytes, srcMeta.LogicalSize, displaced)
 		cancel()
 	}
 

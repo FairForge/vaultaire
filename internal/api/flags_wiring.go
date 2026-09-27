@@ -3,6 +3,8 @@ package api
 import (
 	"os"
 	"strconv"
+
+	"github.com/FairForge/vaultaire/internal/dashboard/handlers"
 )
 
 // Day-one feature flags (1.13 live-iteration kit). Adding a flag is a key
@@ -25,6 +27,13 @@ const (
 	// ships flag-dark and is enabled tenant-by-tenant first. Checked per
 	// tenant inside SmartDemotionRunner.RunOnce.
 	flagSmartDemotion = "smart_demotion"
+
+	// flagQuotaCheckout opens the whole-TB house checkout on the billing
+	// page (dashboard plan Phase 1; Tier 2 in the runbook). Default OFF:
+	// ships dark, opened per tenant from /admin/flags, then globally for
+	// launch. The Stripe webhook is NOT gated — a bought house is always
+	// applied. Checked in dashboard/handlers (billing_house.go).
+	flagQuotaCheckout = handlers.FlagQuotaCheckout
 )
 
 // signupsDefaultFromEnv is the `signups` flag's in-code default: the

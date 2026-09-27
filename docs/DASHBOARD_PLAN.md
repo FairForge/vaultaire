@@ -1,6 +1,6 @@
 # Dashboard plan: the house comes inside
 
-*Drafted 2026-09-27 from the landing-page work (PRs #479–#493). Status: proposal, not started. Owner: Isaac. Estimates are working days for one person and assume the landing sources/generator pattern.*
+*Drafted 2026-09-27 from the landing-page work (PRs #479–#493). Status: Phase 0 shipped (#498), Phase 1 shipped behind `quota_checkout` (this PR). Owner: Isaac. Estimates are working days for one person and assume the landing sources/generator pattern.*
 
 ## Why
 
@@ -36,11 +36,11 @@ The plan below makes the dashboard the second half of the same product, in this 
 - Registration page shows "Your house: 6 TB downstairs, 1 TB attic · $28.94/mo" and carries it through. **Done.**
 - Billing page shows the house as the proposed plan with a link back to the room, until a subscription exists. **Done.**
 - Admin waitlist page shows TB per floor and a total, so launch-day demand is visible per tier. **Done.**
-- Onboarding checklist gains a first step: "Your plan is waiting on Billing" when an intent exists and no subscription.
+- Onboarding checklist gains a first step: "Your plan is waiting on Billing" when an intent exists and no subscription. **Done (Phase 1 PR).**
 
-### Phase 1: quota checkout (4 days) — *the money model*
+### Phase 1: quota checkout (4 days) — *the money model* — **shipped dark**
 
-The site sells whole TB; billing must too.
+The site sells whole TB; billing must too. *Shipped: migration 066 (`tenant_floor_quotas`, `object_head_cache.floor`, `tenants.house_period`, `tenant_quotas.pin_hot_bytes`), per-floor PUT/copy/multipart/delete accounting, `billing/house.go` (prices verified against `prices.json`, quantity checkout, prorated resize, webhook → quotas), the billing page's steppers + receipt, the `quota_checkout` flag. Not in this PR: the Stripe prices themselves (created by hand — recipe in `internal/billing/CLAUDE.md`), the six env vars on prod, flipping the flag. Existing tenants need no mapping: nobody holds a Stripe subscription in prod, and tenants without floor rows keep the single total quota.*
 
 - **Stripe products:** one recurring price per floor and period: Standard annual, Standard monthly, Vault annual, Vault monthly, each with `quantity` = TB. Plus pin-hot annual/monthly as an add-on line. Price ids come from env as today, amounts are asserted against `prices.json` at boot (a mismatch logs loudly and disables checkout rather than charging the wrong number).
 - **One subscription, several items:** a house with both floors is one Stripe subscription with two items (Standard × 6, Vault × 1). Resizing = updating quantities with proration. Downgrading a floor to 0 removes the item; data is never touched by billing.
@@ -82,8 +82,8 @@ The site sells whole TB; billing must too.
 - **Two-floor quotas change PUT enforcement.** The single-quota invariant (`storage_used_bytes == SUM(object_head_cache.size_bytes)`) becomes per floor; the reconcile job and the account-deletion path must follow. This is the riskiest change and gets its own PR with the reconcile run on prod after deploy.
 - **Existing tenants** (bench accounts, the durability demo, the admin) need a mapping from `tenants.plan` strings to floor quotas; a one-off migration with a dry-run report first.
 - **Stripe tax and currency** are unchanged (USD, no tax) unless Isaac decides otherwise before launch.
-- **Decision needed:** does a Vault-only house (attic, no downstairs) count as a customer on day one? The site allows it; billing must, or the site must not.
-- **Decision needed:** monthly plans from the dashboard at launch, or annual only with monthly later? The site quotes both.
+- **Decided 2026-09-27: yes.** A Vault-only house (attic, no downstairs) is sold; checkout accepts Standard = 0 with Vault ≥ 1 (one subscription item).
+- **Decided 2026-09-27: both.** Annual and monthly ship from the dashboard at launch (six Stripe prices). The period is fixed for the life of a subscription; switching is a support request.
 
 ## Sequence and size
 

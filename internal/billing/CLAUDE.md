@@ -32,8 +32,8 @@ Stripe billing integration for stored.ge subscriptions, payments, and invoices.
 | `checkout.session.completed` | Activate subscription, save to DB |
 | `invoice.payment_succeeded` | Mark subscription active |
 | `invoice.payment_failed` | Mark subscription past_due |
-| `customer.subscription.updated` | Sync status and plan |
-| `customer.subscription.deleted` | Downgrade to starter, clear subscription |
+| `customer.subscription.created` / `.updated` | Sync status and plan; house subscriptions → floor quotas (`applyHouse`) |
+| `customer.subscription.deleted` | Downgrade to starter, clear subscription (and the house's floor quotas); ignored for a stale subscription id |
 
 ## Environment Variables (wired in server.go)
 
@@ -46,6 +46,48 @@ Stripe billing integration for stored.ge subscriptions, payments, and invoices.
 - Checkout + billing portal: wired in dashboard billing handler
 - Registration → auto-creates Stripe customer (server.go:511-514)
 - Stripe event idempotency via `stripe_events` table (migration 019)
+
+## Whole-TB House Checkout (dashboard plan Phase 1, `house.go`)
+
+The site sells storage as a house (downstairs = Standard, attic = Vault, whole
+TB per floor, pin-hot add-on on Standard). Billing sells exactly that: **one
+Stripe subscription per tenant, one item per line, `quantity` = TB.**
+
+- **Prices** live only in `internal/api/landing/prices.json`. Six Stripe price
+  ids come from env (`STRIPE_PRICE_{STANDARD,VAULT,PINHOT}_{ANNUAL,MONTHLY}`);
+  `ConfigureHouse` + `StartHouseVerification` fetch each one and assert amount /
+  USD / interval against the file (retry every 5 min until it passes, then
+  hourly). `HouseCheckoutReady()` is false until then and the page says so.
+- **Stripe setup (test and live, by hand in the dashboard):**
+  Standard annual = yearly, per unit, **$53.88** (4.49 × 12); Standard monthly =
+  monthly, per unit, **$4.99**; Vault annual = yearly, per unit, **$24.00**;
+  Vault monthly = monthly, **volume tiers**: 1 unit → flat **$4.99** (unit $0),
+  2+ units → **$2.55**/unit (this is the "$4.99 monthly minimum" the site
+  prints); Pin-hot annual = yearly, per unit, **$36.00**; Pin-hot monthly =
+  monthly, per unit, **$3.00**. Coupons: `AllowPromotionCodes` is on (LET code).
+- `QuoteHouse(std, vault, pin, period)` is the receipt (per-line cents, the
+  Vault monthly minimum for 1 TB, ×12 when annual); `ValidateHouseOrder` = the
+  product rules (≥1 floor, ≤300 TB/floor, pin-hot ≤ downstairs, known period).
+  **Attic-only houses are sold** and **both periods ship** (decisions 2026-09-27).
+- `CreateHouseCheckout` → hosted Checkout (subscription mode, metadata
+  `house=1`, `tenant_id`, `ClientReferenceID`); `UpdateHouseSubscription` resizes
+  in place with `create_prorations` (quantity changes; a line at 0 is deleted;
+  the **period is fixed** for the life of a subscription — switching = support).
+  `HouseFromSubscription` maps items back to an order (false for legacy packs).
+- **Webhook → quotas:** `SetHouseQuotas(usage.QuotaManager)` wires `applyHouse`,
+  called from `checkout.session.completed` (fetches the subscription — the
+  session carries no items) and `customer.subscription.{created,updated}`:
+  active/trialing/past_due → `SetHouse` (floor rows, total = sum, tier
+  standard|vault, `tenants.plan='house'`, `house_period`); canceled/unpaid/
+  incomplete_expired and `customer.subscription.deleted` → `ClearHouse` (free
+  tier limits, **used bytes untouched** — billing never deletes). Clearing is
+  honoured only for the tenant's current `stripe_subscription_id`, so a stale
+  subscription's events cannot take a paid house away. Idempotent; replays
+  are no-ops (`stripe_events` dedup on top).
+- **Never metered:** `ReportDaily` and the dashboard's accrued estimate skip any
+  tenant with floor rows (quota-sold), even when `tier='standard'`.
+- Tests: `house_test.go` — quote maths vs the price file, verification
+  mismatches, checkout/update params, and DB-backed webhook → floor quotas.
 
 ## Metered Usage Reporting (Phase 2.7)
 

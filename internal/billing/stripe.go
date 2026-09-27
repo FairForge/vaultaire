@@ -38,6 +38,11 @@ type StripeService struct {
 	db     *sql.DB
 	logger *zap.Logger
 	plans  map[string]Plan
+
+	// house is the whole-TB checkout state (house.go); subFetcher is the
+	// subscription source, replaced in tests.
+	house      houseState
+	subFetcher subscriptionFetcher
 }
 
 // NewStripeService initializes the Stripe SDK and returns a new service.

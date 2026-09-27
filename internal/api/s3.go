@@ -18,6 +18,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/events"
 	"github.com/FairForge/vaultaire/internal/tenant"
+	"github.com/FairForge/vaultaire/internal/usage"
 	"go.uber.org/zap"
 )
 
@@ -755,6 +756,13 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3
 	// release on failure, release the overwritten object's size on overwrite
 	// (the overwritten size is captured atomically by the head-cache upsert).
 	quotaOn := s.quotaManager != nil && req.TenantID != ""
+	// The floor is decided by the storage class the write resolves to
+	// (header, then bucket tier, then public-bucket placement); resolve it
+	// once here, reserve on it, and hand it to the adapter so placement and
+	// billing can never disagree.
+	storageClass := resolvePutStorageClass(r.Context(), s.db, s.engine, req.TenantID, req.Bucket,
+		r.Header.Get("x-amz-storage-class"))
+	floor := usage.FloorOf(storageClass)
 	var reserved int64
 	{
 		size := r.ContentLength
@@ -774,7 +782,7 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3
 			return
 		}
 		if quotaOn && size > 0 {
-			ok, err := s.quotaManager.CheckAndReserve(r.Context(), req.TenantID, size)
+			ok, err := reserveQuota(r.Context(), s.quotaManager, req.TenantID, floor, size)
 			if err != nil {
 				// Fail closed: an unmetered write would corrupt billing.
 				s.logger.Error("quota check failed",
@@ -796,6 +804,7 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3
 	adapter.chunkEncSvc = s.chunkEncSvc
 	adapter.gci = s.gci
 	adapter.flags = s.flags
+	adapter.storageClass, adapter.storageClassResolved = storageClass, true
 	if s.chunkPutConcurrency > 0 {
 		adapter.chunkStoreConcurrency = s.chunkPutConcurrency
 	}
@@ -816,9 +825,9 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3
 	ctx, cancel := quotaCtx(r)
 	defer cancel()
 	if rec.statusCode >= 200 && rec.statusCode < 300 {
-		s.settlePutQuota(ctx, req.TenantID, reserved, adapter.putLogicalBytes, adapter.displacedBytes)
+		s.settlePutQuota(ctx, req.TenantID, floor, reserved, adapter.putLogicalBytes, adapter.displaced)
 	} else {
-		s.releaseQuota(ctx, req.TenantID, reserved)
+		s.releaseQuota(ctx, req.TenantID, floor, reserved)
 	}
 }
 

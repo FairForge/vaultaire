@@ -147,7 +147,8 @@ func (r *MeteredReporter) ReportDaily(ctx context.Context, date time.Time) error
 		SELECT tq.tenant_id, tq.storage_used_bytes, COALESCE(t.stripe_customer_id, '')
 		FROM tenant_quotas tq
 		JOIN tenants t ON t.id = tq.tenant_id
-		WHERE tq.tier IN ('standard', 'performance')`)
+		WHERE tq.tier IN ('standard', 'performance')
+		  AND NOT EXISTS (SELECT 1 FROM tenant_floor_quotas f WHERE f.tenant_id = tq.tenant_id)`)
 	if err != nil {
 		return fmt.Errorf("query metered tenants: %w", err)
 	}

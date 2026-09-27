@@ -11,7 +11,7 @@ Web dashboard for stored.ge customers and admins. Uses htmx + Go templates, embe
 - **templates/layouts/** — shared HTML layouts (`base.html`, `admin.html`)
 - **templates/customer/** — customer page templates (`dashboard.html` = overview)
 - **static/css/** — `style.css`
-- **static/js/** — `htmx.min.js` (v2.0.4, vendored), `dashboard.js` (shared tab switching + copy-to-clipboard)
+- **static/js/** — `htmx.min.js` (v2.0.4, vendored), `dashboard.js` (shared tab switching + copy-to-clipboard), `house.js` (billing steppers + live receipt; prices arrive as data attributes from prices.json)
 - **middleware/** — 6 middleware files:
   - `csrf.go` — double-submit cookie CSRF on all POST forms
   - `flash.go` — cookie-based flash messages ("Settings saved", "Key revoked", etc.)
@@ -85,7 +85,8 @@ Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`,
 | `/reset-password` | GET | none | New-password form (token in query string) |
 | `/reset-password` | POST | none | Validate token + new password, update DB, invalidate ALL sessions for user, redirect to /login with flash |
 | `/dashboard/billing` | GET | session | Billing: plan, upgrade, value stack, cost comparison |
-| `/dashboard/billing/upgrade` | POST | session | Redirect to Stripe Checkout for chosen plan |
+| `/dashboard/billing/upgrade` | POST | session | Redirect to Stripe Checkout for chosen legacy pack plan (return URLs are absolute via `Deps.BaseURL`) |
+| `/dashboard/billing/house` | POST | session | Whole-TB house checkout (Phase 1), behind the `quota_checkout` flag (per tenant → global; 404 when off). Form `std`, `vault`, `pin_hot` (TB) + `period` (`annual`\|`monthly`); validated by `billing.ValidateHouseOrder`. New house → Stripe Checkout with quantity items; existing house → `UpdateHouseSubscription` (prorated; period fixed; a floor cannot shrink below its used bytes) and the floor quotas are applied at once from the returned subscription via `Deps.Quotas`. Errors come back as flash messages. Handler: `handlers/billing_house.go`; page section: `templates/customer/billing.html` `house-checkout` + `static/js/house.js` (steppers, live receipt, no inline handlers — CSP) |
 | `/dashboard/billing/portal` | POST | session | Redirect to Stripe Billing Portal |
 | `/dashboard/compliance` | GET | session | Compliance dashboard: per-bucket security posture, score |
 | `/dashboard/compliance/export` | GET | session | Download compliance report as JSON |

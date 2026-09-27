@@ -27,9 +27,9 @@ func TestOnboardingStatus_NewUser(t *testing.T) {
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM webhook_endpoints`).
 		WithArgs("tenant-1").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectQuery(`SELECT access_key FROM tenants`).
+	mock.ExpectQuery(`SELECT access_key, intent_std_tb, intent_vault_tb, subscription_status FROM tenants`).
 		WithArgs("tenant-1").
-		WillReturnRows(sqlmock.NewRows([]string{"access_key"}).AddRow("AKTEST123"))
+		WillReturnRows(sqlmock.NewRows([]string{"access_key", "intent_std_tb", "intent_vault_tb", "subscription_status"}).AddRow("AKTEST123", 0, 0, "none"))
 
 	req := httptest.NewRequest("GET", "/dashboard/", nil)
 	data := map[string]any{}
@@ -59,9 +59,9 @@ func TestOnboardingStatus_WithBucket(t *testing.T) {
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM webhook_endpoints`).
 		WithArgs("tenant-1").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectQuery(`SELECT access_key FROM tenants`).
+	mock.ExpectQuery(`SELECT access_key, intent_std_tb, intent_vault_tb, subscription_status FROM tenants`).
 		WithArgs("tenant-1").
-		WillReturnRows(sqlmock.NewRows([]string{"access_key"}).AddRow("AKTEST123"))
+		WillReturnRows(sqlmock.NewRows([]string{"access_key", "intent_std_tb", "intent_vault_tb", "subscription_status"}).AddRow("AKTEST123", 0, 0, "none"))
 
 	req := httptest.NewRequest("GET", "/dashboard/", nil)
 	data := map[string]any{}
@@ -89,9 +89,9 @@ func TestOnboardingStatus_AllComplete(t *testing.T) {
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM webhook_endpoints`).
 		WithArgs("tenant-1").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	mock.ExpectQuery(`SELECT access_key FROM tenants`).
+	mock.ExpectQuery(`SELECT access_key, intent_std_tb, intent_vault_tb, subscription_status FROM tenants`).
 		WithArgs("tenant-1").
-		WillReturnRows(sqlmock.NewRows([]string{"access_key"}).AddRow("AKTEST123"))
+		WillReturnRows(sqlmock.NewRows([]string{"access_key", "intent_std_tb", "intent_vault_tb", "subscription_status"}).AddRow("AKTEST123", 0, 0, "none"))
 
 	req := httptest.NewRequest("GET", "/dashboard/", nil)
 	data := map[string]any{}

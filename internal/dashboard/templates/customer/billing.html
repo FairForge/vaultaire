@@ -12,6 +12,7 @@
 .comparison-subtitle { margin-top: 0.5rem; font-size: 0.85rem; color: var(--text-muted, #64748b); }
 .comparison-footnote { margin-top: 0.5rem; font-size: 0.75rem; color: var(--text-muted, #94a3b8); }
 </style>
+{{if .House.Enabled}}<script src="/static/js/house.js" defer></script>{{end}}
 {{end}}
 {{define "content"}}
 <div class="page-header">
@@ -27,15 +28,16 @@
     {{end}}
 </div>
 
-{{if .Upgraded}}<div class="alert alert-success">Plan upgraded successfully.</div>{{end}}
-{{if .HouseIntent}}<div class="alert alert-info"><strong>Your house from the site:</strong> {{.HouseIntent.StdTB}} TB downstairs (Standard) and {{.HouseIntent.VaultTB}} TB in the attic (Vault) &middot; <strong>{{.HouseIntent.Monthly}}/mo</strong> billed yearly. Whole-TB checkout is on its way; until then pick a plan below or <a href="mailto:support@stored.ge">ask us</a> and we will set it up by hand.{{if .HouseIntent.RoomURL}} <a href="{{.HouseIntent.RoomURL}}">Reopen your house</a>.{{end}}</div>{{end}}
+{{if .Upgraded}}<div class="alert alert-success">{{if .House.Enabled}}Your house is paid for. The floors open as soon as Stripe confirms, usually within a minute.{{else}}Plan upgraded successfully.{{end}}</div>{{end}}
+{{if .Resized}}<div class="alert alert-success">Your house was resized. The difference is prorated on your next invoice.</div>{{end}}
+{{if and .HouseIntent (not .House.Enabled)}}<div class="alert alert-info"><strong>Your house from the site:</strong> {{.HouseIntent.StdTB}} TB downstairs (Standard) and {{.HouseIntent.VaultTB}} TB in the attic (Vault) &middot; <strong>{{.HouseIntent.Monthly}}/mo</strong> billed yearly. Whole-TB checkout is on its way; until then pick a plan below or <a href="mailto:support@stored.ge">ask us</a> and we will set it up by hand.{{if .HouseIntent.RoomURL}} <a href="{{.HouseIntent.RoomURL}}">Reopen your house</a>.{{end}}</div>{{end}}
 
 <div class="egress-callout">Egress: $0.00 — always free</div>
 
 <div class="card-grid">
     <div class="card">
         <div class="card-title">Current Plan</div>
-        <div class="card-value card-value-plan">{{.Plan}}</div>
+        {{if .House.HasHouse}}<div class="card-value">{{if .House.Std}}{{.House.Std}} TB downstairs{{end}}{{if and .House.Std .House.Vault}} · {{end}}{{if .House.Vault}}{{.House.Vault}} TB attic{{end}}</div>{{else}}<div class="card-value card-value-plan">{{.Plan}}</div>{{end}}
         <div class="card-detail">
             <span class="badge badge-{{.StatusClass}}">{{.StatusLabel}}</span>
         </div>
@@ -55,7 +57,9 @@
     {{end}}
 </div>
 
-{{if not .HasSubscription}}
+{{if .House.Enabled}}
+{{template "house-checkout" .}}
+{{else if not .HasSubscription}}
 <div class="card">
     <div class="card-title">Upgrade Your Plan</div>
     {{if .AvailablePlans}}
@@ -130,5 +134,89 @@
 <div class="dashboard-actions">
     <a href="/dashboard/" class="btn">Back to Dashboard</a>
     <a href="/dashboard/usage" class="btn">View Usage</a>
+</div>
+{{end}}
+
+{{define "house-checkout"}}
+{{$h := .House}}
+<div class="card house-card" id="house">
+    <div class="card-title">{{if $h.HasHouse}}Your house{{else}}Build your house{{end}}</div>
+    <p class="text-muted house-lede">Downstairs opens instantly. The attic is back in minutes. Whole TB at a flat rate, resize whenever you like, and billing never deletes a thing.</p>
+    {{if not $h.Ready}}<div class="alert alert-warning" role="status">Whole-TB checkout isn't open yet. You can still build your house below; to order today, <a href="mailto:support@stored.ge">email support@stored.ge</a> and we will set it up by hand.</div>{{end}}
+    <form method="POST" action="/dashboard/billing/house" class="house-form" id="house-form"
+          data-std-annual="{{printf "%.2f" $h.Prices.Standard.Annual}}" data-std-monthly="{{printf "%.2f" $h.Prices.Standard.Monthly}}"
+          data-vault-annual="{{printf "%.2f" $h.Prices.Vault.Annual}}" data-vault-monthly="{{printf "%.2f" $h.Prices.Vault.Monthly}}"
+          data-vault-monthly-min="{{printf "%.2f" $h.Prices.Vault.MonthlyMinimum}}" data-pin-hot="{{printf "%.2f" $h.Prices.PinHot}}">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+
+        <div class="house-floors">
+            <fieldset class="house-floor">
+                <legend>Downstairs <span class="house-tag">Standard</span></legend>
+                <div class="stepper">
+                    <button type="button" class="step" data-for="house-std" data-step="-1" aria-label="One box less downstairs">&minus;</button>
+                    <label class="sr-only" for="house-std">TB downstairs</label>
+                    <input type="number" id="house-std" name="std" inputmode="numeric" min="{{$h.MinStd}}" max="300" step="1" value="{{$h.Std}}" aria-describedby="house-std-help">
+                    <span class="unit" aria-hidden="true">TB</span>
+                    <button type="button" class="step" data-for="house-std" data-step="1" aria-label="One more box downstairs">+</button>
+                </div>
+                <p id="house-std-help" class="house-help">${{printf "%.2f" $h.Prices.Standard.Annual}}/TB a month billed yearly, ${{printf "%.2f" $h.Prices.Standard.Monthly}} monthly. Opens instantly.{{if $h.HasHouse}} Holding {{$h.UsedStdFmt}}.{{end}}</p>
+            </fieldset>
+
+            <fieldset class="house-floor house-floor-attic">
+                <legend>Attic <span class="house-tag house-tag-attic">Vault</span></legend>
+                <div class="stepper">
+                    <button type="button" class="step" data-for="house-vault" data-step="-1" aria-label="One box less in the attic">&minus;</button>
+                    <label class="sr-only" for="house-vault">TB in the attic</label>
+                    <input type="number" id="house-vault" name="vault" inputmode="numeric" min="{{$h.MinVault}}" max="300" step="1" value="{{$h.Vault}}" aria-describedby="house-vault-help">
+                    <span class="unit" aria-hidden="true">TB</span>
+                    <button type="button" class="step" data-for="house-vault" data-step="1" aria-label="One more box in the attic">+</button>
+                </div>
+                <p id="house-vault-help" class="house-help">${{printf "%.2f" $h.Prices.Vault.Annual}}/TB a month billed yearly, ${{printf "%.2f" $h.Prices.Vault.Monthly}} monthly (${{printf "%.2f" $h.Prices.Vault.MonthlyMinimum}} monthly minimum). Back in minutes when you open it.{{if $h.HasHouse}} Holding {{$h.UsedVaultFmt}}.{{end}}</p>
+            </fieldset>
+
+            <fieldset class="house-floor house-floor-pin">
+                <legend>Pin hot <span class="house-tag">add-on</span></legend>
+                <div class="stepper">
+                    <button type="button" class="step" data-for="house-pin" data-step="-1" aria-label="One TB less pinned hot">&minus;</button>
+                    <label class="sr-only" for="house-pin">TB pinned hot</label>
+                    <input type="number" id="house-pin" name="pin_hot" inputmode="numeric" min="0" max="300" step="1" value="{{$h.PinHot}}" aria-describedby="house-pin-help">
+                    <span class="unit" aria-hidden="true">TB</span>
+                    <button type="button" class="step" data-for="house-pin" data-step="1" aria-label="One TB more pinned hot">+</button>
+                </div>
+                <p id="house-pin-help" class="house-help">${{printf "%.2f" $h.Prices.PinHot}}/TB a month. Downstairs TB that must never move to tape; at most the downstairs size.</p>
+            </fieldset>
+        </div>
+
+        <fieldset class="house-period">
+            <legend>Billing</legend>
+            {{if $h.HasHouse}}
+            <input type="hidden" name="period" value="{{$h.Period}}">
+            <p class="house-help">Billed {{if eq $h.Period "monthly"}}monthly{{else}}yearly{{end}} for the life of this subscription. To switch, <a href="mailto:support@stored.ge">email support@stored.ge</a>.</p>
+            {{else}}
+            <div class="house-period-options">
+                <label class="house-radio"><input type="radio" name="period" value="annual" {{if ne $h.Period "monthly"}}checked{{end}}> Yearly <span class="house-help">the site's prices, paid once a year</span></label>
+                <label class="house-radio"><input type="radio" name="period" value="monthly" {{if eq $h.Period "monthly"}}checked{{end}}> Monthly <span class="house-help">a little more per TB, cancel any month</span></label>
+            </div>
+            {{end}}
+        </fieldset>
+
+        <div class="house-receipt" aria-live="polite" id="house-receipt">
+            <table class="house-lines" id="house-lines">
+                <caption class="sr-only">Your house, priced</caption>
+                <thead><tr><th scope="col">Line</th><th scope="col">Size</th><th scope="col">Per month</th></tr></thead>
+                <tbody>
+                {{range $h.Quote.Lines}}<tr><th scope="row">{{.Label}}</th><td>{{.TB}} TB</td><td>{{.Money}}</td></tr>{{end}}
+                </tbody>
+            </table>
+            <p class="house-total"><strong id="house-monthly">{{$h.Quote.Monthly}}</strong>/mo
+                <span id="house-charge-wrap"{{if eq $h.Period "monthly"}} hidden{{end}}>&middot; billed yearly, <span id="house-charge">{{$h.Quote.Charge}}</span>/yr</span></p>
+            <p class="house-help">Prices from the same sheet as the site. Egress is never billed. Resizing is prorated. Coupons go on the next page.</p>
+        </div>
+
+        <div class="house-actions">
+            <button type="submit" class="btn btn-primary" {{if not $h.Ready}}disabled aria-disabled="true"{{end}}>{{if $h.HasHouse}}Update my house &#9656;{{else}}Checkout &#9656;{{end}}</button>
+            {{if $h.RoomURL}}<a class="btn" href="{{$h.RoomURL}}">Reopen it on the site</a>{{end}}
+        </div>
+    </form>
 </div>
 {{end}}

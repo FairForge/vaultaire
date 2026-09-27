@@ -171,6 +171,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	s.flags.Register(flagSignups, signupsDefaultFromEnv())
 	s.flags.Register(flagChunking, true)
 	s.flags.Register(flagSmartDemotion, false)
+	s.flags.Register(flagQuotaCheckout, false)
 	if err := s.flags.Refresh(context.Background()); err != nil {
 		logger.Warn("initial feature flag refresh failed — serving in-code defaults until the background refresh succeeds",
 			zap.Error(err))
@@ -368,6 +369,18 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		// Register plans. Price IDs come from environment (set in Stripe Dashboard).
 		// If not set, plans won't appear on the billing page but nothing breaks.
 		registerStripePlans(s.stripe)
+
+		// Whole-TB house checkout (dashboard plan Phase 1): six price ids
+		// from env, verified against prices.json in Start (checkout stays
+		// closed until they match). The webhook applies floor quotas.
+		if ids := billing.HousePriceIDsFromEnv(os.Getenv); ids.Complete() {
+			s.stripe.ConfigureHouse(ids, nil)
+		} else {
+			logger.Info("house checkout dormant (STRIPE_PRICE_{STANDARD,VAULT,PINHOT}_{ANNUAL,MONTHLY} not all set)")
+		}
+		if hq, ok := s.quotaManager.(billing.HouseQuotas); ok {
+			s.webhookHandler.SetHouseQuotas(hq)
+		}
 
 		logger.Info("stripe billing service initialized")
 
@@ -703,6 +716,7 @@ func (s *Server) setupRoutes() {
 		Engine:        s.engine,
 		HealthChecker: &healthCheckerAdapter{s.healthChecker},
 		Flags:         s.flags,
+		Quotas:        houseQuotas(s.quotaManager),
 	})
 
 	s.logger.Info("Registering management API routes")
@@ -868,6 +882,15 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		zap.String("email", req.Email),
 		zap.String("user_id", user.ID),
 		zap.String("tenant_id", tenant.ID))
+}
+
+// houseQuotas returns the quota manager as the dashboard's house-quota
+// writer, or a nil interface when it cannot (nil manager, no database).
+func houseQuotas(qm QuotaManager) billing.HouseQuotas {
+	if hq, ok := qm.(billing.HouseQuotas); ok {
+		return hq
+	}
+	return nil
 }
 
 // registerStripePlans loads plan definitions from environment variables.
@@ -1190,6 +1213,12 @@ func (s *Server) Start() error {
 	// Report metered usage to Stripe daily + check spending caps hourly.
 	if s.meteredReporter != nil {
 		s.meteredReporter.StartMeteredReporting(ctx)
+	}
+
+	// Verify the house prices against prices.json (retrying until they
+	// match; re-checked hourly). Only when every price id is configured.
+	if s.stripe != nil && s.stripe.HousePriceIDs().Complete() {
+		s.stripe.StartHouseVerification(ctx)
 	}
 
 	// Check bandwidth thresholds hourly + seed default alerts for new tenants.

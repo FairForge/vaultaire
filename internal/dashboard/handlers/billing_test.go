@@ -37,7 +37,7 @@ func testBillingTemplate(t *testing.T) *template.Template {
 
 func TestHandleBilling_NoDB(t *testing.T) {
 	tmpl := testBillingTemplate(t)
-	handler := HandleBilling(tmpl, nil, nil, zap.NewNop())
+	handler := HandleBilling(tmpl, nil, nil, nil, zap.NewNop())
 
 	req := httptest.NewRequest("GET", "/dashboard/billing", nil)
 	req = req.WithContext(usageSessionCtx(t))
@@ -53,7 +53,7 @@ func TestHandleBilling_NoDB(t *testing.T) {
 
 func TestHandleBilling_NoSession(t *testing.T) {
 	tmpl := testBillingTemplate(t)
-	handler := HandleBilling(tmpl, nil, nil, zap.NewNop())
+	handler := HandleBilling(tmpl, nil, nil, nil, zap.NewNop())
 
 	req := httptest.NewRequest("GET", "/dashboard/billing", nil)
 	w := httptest.NewRecorder()
@@ -65,7 +65,7 @@ func TestHandleBilling_NoSession(t *testing.T) {
 
 func TestHandleBilling_UpgradedParam(t *testing.T) {
 	tmpl := testBillingTemplate(t)
-	handler := HandleBilling(tmpl, nil, nil, zap.NewNop())
+	handler := HandleBilling(tmpl, nil, nil, nil, zap.NewNop())
 
 	req := httptest.NewRequest("GET", "/dashboard/billing?upgraded=1", nil)
 	req = req.WithContext(usageSessionCtx(t))
@@ -78,7 +78,7 @@ func TestHandleBilling_UpgradedParam(t *testing.T) {
 }
 
 func TestHandleUpgrade_NoStripe(t *testing.T) {
-	handler := HandleUpgrade(nil, nil, zap.NewNop())
+	handler := HandleUpgrade(nil, nil, "https://stored.ge", zap.NewNop())
 
 	req := httptest.NewRequest("POST", "/dashboard/billing/upgrade", nil)
 	req = req.WithContext(usageSessionCtx(t))
