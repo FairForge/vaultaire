@@ -1,6 +1,6 @@
 # Dashboard plan: the house comes inside
 
-*Drafted 2026-09-27 from the landing-page work (PRs #479–#493). Status: Phase 0 shipped (#498), Phase 1 shipped behind `quota_checkout` (#504), Phase 2 shipped behind `house_overview` (#505), Phase 3 shipped (this PR). Owner: Isaac. Estimates are working days for one person and assume the landing sources/generator pattern.*
+*Drafted 2026-09-27 from the landing-page work (PRs #479–#493). Status: Phase 0 shipped (#498), Phase 1 shipped behind `quota_checkout` (#504), Phase 2 shipped behind `house_overview` (#505), Phase 3 shipped (#507), Phase 4 shipped (this PR). All four phases are in; the flags `quota_checkout` and `house_overview` are still off. Owner: Isaac. Estimates are working days for one person and assume the landing sources/generator pattern.*
 
 ## Why
 
@@ -67,7 +67,9 @@ The site sells whole TB; billing must too. *Shipped: migration 066 (`tenant_floo
 - Keep every existing page working: this is a stylesheet and layout swap, not a rewrite. Templates that inline their own colours (billing, analytics charts) move to tokens.
 - Accessibility pass to 100 on the four main pages (overview, buckets, billing, settings) with the same Lighthouse routine used on the site.
 
-### Phase 4: admin follow-through (1 day)
+### Phase 4: admin follow-through (1 day) — **shipped**
+
+*Shipped: waitlist export takes `?filter=house|downstairs|attic` and `?fields=email` (the launch email list is one button on the page); revenue counts every live house per line — downstairs, attic, pin-hot — priced with `billing.QuoteHouse` at the tenant's period (the legacy `house` plan row is skipped so nothing is counted twice); the tenants list shows the house ("6 TB downstairs · 1 TB attic") instead of the plan string; the flags page orders the launch levers first, tags each flag with its runbook risk tier and says what it does. Admin pages were retokened in Phase 3.*
 
 - Waitlist: export CSV with the per-floor columns; a "launch email" list filtered by intent.
 - Revenue: MRR by floor from Stripe items; tenants list shows the house summary.

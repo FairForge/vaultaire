@@ -3,6 +3,7 @@ package handlers
 import (
 	"html/template"
 	"net/http"
+	"sort"
 	"strconv"
 
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
@@ -17,6 +18,62 @@ import (
 // service's write-through Set/Unset, so a toggle is live on the next
 // request — no deploy, no restart.
 
+// flagInfo is what the flags page says about each registered flag: the
+// runbook's risk tier (1.13) and what flipping it does. Tier 1 = a feature
+// that ships dark and is opened per tenant, then globally; Tier 2 =
+// billing, auth or the data path — never flipped at chat speed, always
+// after a low-traffic window and a plan to flip back.
+type flagInfo struct {
+	Tier  int
+	About string
+}
+
+var flagInfos = map[string]flagInfo{
+	"signups":        {1, "Public account creation (web form, /auth/register, OAuth signup). Off = existing users keep signing in, nobody new gets in."},
+	"quota_checkout": {2, "Whole-TB house checkout on the billing page (Phase 1). Needs the six STRIPE_PRICE_* env vars verified at boot; the webhook applies bought houses whether or not this is on."},
+	"house_overview": {1, "Draws the customer's house on the dashboard overview (Phase 2) in place of the storage gauge."},
+	"chunking":       {2, "Content-defined chunking + dedup on the PUT path. Off = plain whole-object PUTs; reads keep working either way."},
+	"smart_demotion": {2, "The Smart-tier demotion job: idle downstairs objects move to tape behind the scenes and come back hot on read."},
+}
+
+// flagOrder puts the launch levers first.
+var flagOrder = []string{"signups", "quota_checkout", "house_overview", "chunking", "smart_demotion"}
+
+// FlagView is a resolved flag plus what the page says about it.
+type FlagView struct {
+	flags.Flag
+	Tier  int
+	About string
+}
+
+// flagViews orders the resolved flags (launch levers first, then the rest
+// alphabetically) and attaches their descriptions.
+func flagViews(resolved []flags.Flag) []FlagView {
+	rank := map[string]int{}
+	for i, k := range flagOrder {
+		rank[k] = i
+	}
+	out := make([]FlagView, 0, len(resolved))
+	for _, f := range resolved {
+		info := flagInfos[f.Key]
+		out = append(out, FlagView{Flag: f, Tier: info.Tier, About: info.About})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		ri, iok := rank[out[i].Key]
+		rj, jok := rank[out[j].Key]
+		switch {
+		case iok && jok:
+			return ri < rj
+		case iok:
+			return true
+		case jok:
+			return false
+		}
+		return out[i].Key < out[j].Key
+	})
+	return out
+}
+
 // HandleAdminFlags renders the flags dashboard page.
 func HandleAdminFlags(tmpl *template.Template, svc *flags.Service, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -28,7 +85,7 @@ func HandleAdminFlags(tmpl *template.Template, svc *flags.Service, logger *zap.L
 
 		data := sessionData(sd, "admin-flags")
 		withCSRF(r.Context(), data)
-		data["Flags"] = svc.Resolved()
+		data["Flags"] = flagViews(svc.Resolved())
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := tmpl.ExecuteTemplate(w, "admin", data); err != nil {

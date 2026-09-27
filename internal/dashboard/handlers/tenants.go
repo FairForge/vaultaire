@@ -7,10 +7,12 @@ import (
 	"html/template"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
+	"github.com/FairForge/vaultaire/internal/usage"
 	"go.uber.org/zap"
 )
 
@@ -34,6 +36,19 @@ type tenantRow struct {
 	StorageLimitFmt string
 	UsagePercent    int
 	UsageBarClass   string
+	House           string // "6 TB downstairs · 1 TB attic" for house tenants (Phase 4)
+}
+
+// houseSummary is the tenant's house in the site's words, "" without one.
+func houseSummary(stdBytes, vaultBytes int64) string {
+	var parts []string
+	if stdBytes > 0 {
+		parts = append(parts, fmt.Sprintf("%d TB downstairs", stdBytes/usage.TB))
+	}
+	if vaultBytes > 0 {
+		parts = append(parts, fmt.Sprintf("%d TB attic", vaultBytes/usage.TB))
+	}
+	return strings.Join(parts, " · ")
 }
 
 // HandleTenantList renders the admin tenant list page.
@@ -66,7 +81,9 @@ func queryTenantList(ctx context.Context, db *sql.DB, search string, logger *zap
 	rows, err := db.QueryContext(ctx, `
 		SELECT t.id, t.name, t.email, COALESCE(t.plan, 'starter'),
 		       t.subscription_status, t.suspended_at,
-		       COALESCE(q.storage_used_bytes, 0), COALESCE(q.storage_limit_bytes, 1099511627776)
+		       COALESCE(q.storage_used_bytes, 0), COALESCE(q.storage_limit_bytes, 1099511627776),
+		       COALESCE((SELECT storage_limit_bytes FROM tenant_floor_quotas WHERE tenant_id = t.id AND floor = 'standard'), 0),
+		       COALESCE((SELECT storage_limit_bytes FROM tenant_floor_quotas WHERE tenant_id = t.id AND floor = 'vault'), 0)
 		FROM tenants t
 		LEFT JOIN tenant_quotas q ON q.tenant_id = t.id
 		WHERE ($1 = '' OR t.name ILIKE '%' || $1 || '%' OR t.email ILIKE '%' || $1 || '%')
@@ -84,11 +101,12 @@ func queryTenantList(ctx context.Context, db *sql.DB, search string, logger *zap
 		var tr tenantRow
 		var subStatus string
 		var suspendedAt sql.NullTime
-		var usedBytes, limitBytes int64
+		var usedBytes, limitBytes, stdBytes, vaultBytes int64
 		if err := rows.Scan(&tr.ID, &tr.Name, &tr.Email, &tr.Plan,
-			&subStatus, &suspendedAt, &usedBytes, &limitBytes); err != nil {
+			&subStatus, &suspendedAt, &usedBytes, &limitBytes, &stdBytes, &vaultBytes); err != nil {
 			continue
 		}
+		tr.House = houseSummary(stdBytes, vaultBytes)
 		tr.StorageUsedFmt = formatBytes(usedBytes)
 		tr.StorageLimitFmt = formatBytes(limitBytes)
 		if limitBytes > 0 {

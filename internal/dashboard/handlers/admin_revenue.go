@@ -11,6 +11,7 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/billing"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
+	"github.com/FairForge/vaultaire/internal/usage"
 	"go.uber.org/zap"
 )
 
@@ -103,7 +104,8 @@ func HandleAdminRevenue(tmpl *template.Template, db *sql.DB, logger *zap.Logger)
 func populateRevenue(ctx context.Context, db *sql.DB, data map[string]any, logger *zap.Logger) {
 	fixedCents := queryFixedMRR(ctx, db, logger)
 	meteredCents := queryMeteredMRR(ctx, db, logger)
-	totalMRR := fixedCents + meteredCents
+	houseCents, houseLines := queryHouseMRR(ctx, db, logger)
+	totalMRR := fixedCents + meteredCents + houseCents
 
 	data["MRRFmt"] = formatCents(totalMRR)
 
@@ -130,7 +132,7 @@ func populateRevenue(ctx context.Context, db *sql.DB, data map[string]any, logge
 		data["ChurnRateFmt"] = fmt.Sprintf("%.1f%%", rate)
 	}
 
-	data["ByTier"] = queryRevenueByTier(ctx, db, logger)
+	data["ByTier"] = append(queryRevenueByTier(ctx, db, logger), houseLines...)
 	data["TopCustomers"] = queryTopCustomers(ctx, db, logger)
 
 	bars := queryMRRTrend(ctx, db, logger)
@@ -164,6 +166,86 @@ func queryFixedMRR(ctx context.Context, db *sql.DB, logger *zap.Logger) int64 {
 		total += planMonthlyCents(plan)
 	}
 	return total
+}
+
+// queryHouseMRR prices every live house (dashboard plan Phase 4): the floor
+// quotas and pin-hot are the Stripe items' quantities, so the per-line MRR is
+// billing.QuoteHouse at the tenant's period — the same sheet the customer
+// saw. Returns the total and one revenue line per floor/add-on.
+func queryHouseMRR(ctx context.Context, db *sql.DB, logger *zap.Logger) (int64, []tierRevenue) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT t.id, t.house_period, f.floor, f.storage_limit_bytes, COALESCE(q.pin_hot_bytes, 0)
+		FROM tenants t
+		JOIN tenant_floor_quotas f ON f.tenant_id = t.id
+		LEFT JOIN tenant_quotas q ON q.tenant_id = t.id
+		WHERE t.plan = 'house' AND t.subscription_status IN ('active', 'past_due', 'trialing')
+		ORDER BY t.id`)
+	if err != nil {
+		logger.Debug("revenue: house mrr", zap.Error(err))
+		return 0, nil
+	}
+	defer func() { _ = rows.Close() }()
+
+	type house struct {
+		std, vault, pin int
+		period          billing.Period
+	}
+	houses := map[string]*house{}
+	var order []string
+	for rows.Next() {
+		var id, period, floor string
+		var limit, pin int64
+		if err := rows.Scan(&id, &period, &floor, &limit, &pin); err != nil {
+			continue
+		}
+		h, ok := houses[id]
+		if !ok {
+			h = &house{period: billing.Period(period), pin: int(pin / usage.TB)}
+			if h.period != billing.PeriodMonthly {
+				h.period = billing.PeriodAnnual
+			}
+			houses[id] = h
+			order = append(order, id)
+		}
+		switch floor {
+		case usage.FloorStandard:
+			h.std = int(limit / usage.TB)
+		case usage.FloorVault:
+			h.vault = int(limit / usage.TB)
+		}
+	}
+
+	var total, stdCents, vaultCents, pinCents int64
+	var stdN, vaultN, pinN int
+	for _, id := range order {
+		h := houses[id]
+		q := billing.QuoteHouse(h.std, h.vault, h.pin, h.period)
+		total += q.MonthlyCents
+		for _, l := range q.Lines {
+			switch l.Label {
+			case "Downstairs":
+				stdCents += l.Cents
+				stdN++
+			case "Attic":
+				vaultCents += l.Cents
+				vaultN++
+			case "Pin-hot":
+				pinCents += l.Cents
+				pinN++
+			}
+		}
+	}
+	var lines []tierRevenue
+	if stdN > 0 {
+		lines = append(lines, tierRevenue{Tier: "downstairs (Standard)", Count: stdN, MRRCents: stdCents, MRRFmt: formatCents(stdCents)})
+	}
+	if vaultN > 0 {
+		lines = append(lines, tierRevenue{Tier: "attic (Vault)", Count: vaultN, MRRCents: vaultCents, MRRFmt: formatCents(vaultCents)})
+	}
+	if pinN > 0 {
+		lines = append(lines, tierRevenue{Tier: "pin-hot", Count: pinN, MRRCents: pinCents, MRRFmt: formatCents(pinCents)})
+	}
+	return total, lines
 }
 
 func queryMeteredMRR(ctx context.Context, db *sql.DB, logger *zap.Logger) int64 {
@@ -223,6 +305,9 @@ func queryRevenueByTier(ctx context.Context, db *sql.DB, logger *zap.Logger) []t
 		var count int
 		if err := fixedRows.Scan(&plan, &count); err != nil {
 			continue
+		}
+		if plan == "house" {
+			continue // priced per floor by queryHouseMRR
 		}
 		cents := planMonthlyCents(plan) * int64(count)
 		if plan == "" {
