@@ -1022,3 +1022,48 @@ Bench gotchas:
   **east-homed** — do not reuse it for west benches.
 - Set `AWS_DEFAULT_REGION` when using aws-cli on SLC or every op burns ~2 s
   on IMDS probes.
+
+## Re-check + bench, 2026-09-27 (root key from SLC; bench bucket `vt-lyvebench-20260927` deleted after)
+
+**Account state (RSGetUserInfo / RSCustomerDetails / IAM):** customer `v01`, 12 buckets,
+2,023 objects, 32.6 GB used. The 09-20 hygiene list HAS been executed since (mass DeleteBytes on
+2026-09-23 across all seven regions): 110 → 12 buckets, the four policy-less `stored-*` keys are
+gone, and a scoped IAM user `vaultaire-prod` (policy `vaultaire-prod-stored-buckets`, created
+2026-09-23) now exists for prod. Left over: `servertest` (admin, no policy, created 2025-08-22,
+never used) and `vaultaire-bench-2026` / `stored-us-east-1` with 1000+ objects each. Root user
+still has TFA off and `PwdMustChange: true`. Regions available: us-west-1, us-central-2,
+us-east-1, eu-west-1, eu-central-1, ap-southeast-1, ap-northeast-1 (no ca-central-1 / us-east-2).
+
+**Pricing (lyve.seagate.com, 2026-09-27):** Standard "from $7.99/TB-mo", Infrequent Access "from
+$4.99/TB-mo" with a **180-day minimum retention**; both "no retrieval, egress, or API fees". The
+$6.37 in older notes is not the public list price — confirm with the owner whether it is our
+post-promo rate. `RSListBillingData` returns bytes only (no prices), so promo status is still
+invoice-only.
+
+**Latency from SLC (TCP connect / signed ListBuckets TTFB):** us-west-1 24 / 138 ms,
+us-central-2 29 / 167, us-east-1 60 / 224, eu-west-1 120 / 500, eu-central-1 138 / 554,
+ap-southeast-1 107 / 1341, ap-northeast-1 105 / 1085. Presigned small-object GET TTFB in
+us-west-1: 114–116 ms (100 KB and 1 MiB).
+
+**Throughput, us-west-1, paired 1 GiB (aws-cli multipart):** PUT **460 / 454 MB/s**, GET
+**228 / 223 MB/s**; single-stream presigned GET 140 MB/s; 8 × 128 MiB parallel ranges 208 MB/s
+(the GET ceiling from SLC is ~210–230 MB/s however it is parallelised; PUT is 2× that).
+
+**STANDARD_IA:** `put-object --storage-class STANDARD_IA` accepted, HEAD reports `STANDARD_IA`.
+No IA usage on the account (RSListBillingData STANDARD_IA = 0).
+
+**CopyObject checksum bug — still present, but the Go driver is NOT affected.** aws-cli 2.35.21
+`s3 cp` of a server-side-copied object aborts with "Expected checksum … did not match calculated
+checksum" (a 32-byte value, so SHA-256-sized). The production `LyveDriver` (aws-sdk-go-v2, no
+`ChecksumMode` on GetObject) read the copy fine: 64 MiB, md5 identical to the source. Only
+clients that send `x-amz-checksum-mode: ENABLED` (aws-cli, boto3 defaults) trip it, and they talk
+to stored.ge, not to Lyve. Note the copy's ETag collapses to a plain MD5 while the multipart
+source keeps its `-N` ETag.
+
+**Worker over a Lyve presigned URL (throwaway Worker, deleted):** cache HIT from a real client
+146 ms / 216 ms total for 100 KB / 1 MiB (direct Lyve 409 / 531 ms); from SLC 1 GiB single
+stream 59 MB/s, 8-way 284 MB/s (the best of the three origins tried this week), Range → 206.
+Lyve has no egress fee, so Worker-served Lyve bytes are $0 at both ends.
+
+**Lifecycle expiration still unverified:** `lyve-lifecycle-canary-20260927` (us-west-1, 1-day
+expire-all, object planted 05:14 UTC 09-27) — check on/after 2026-09-29, then delete the bucket.
