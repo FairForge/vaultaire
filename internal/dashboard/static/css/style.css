@@ -326,7 +326,12 @@ tbody th { font-family: var(--sans); font-weight: 700; font-size: inherit; text-
 .admin-body { background: var(--bg); }
 .admin-layout { display: flex; min-height: 100vh; }
 .admin-sidebar { width: 220px; background: var(--bar); color: #fff; display: flex; flex-direction: column; flex-shrink: 0; }
-.sidebar-brand { padding: 1rem; border-bottom: 1px solid rgba(255, 255, 255, 0.14); }
+.sidebar-brand { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; padding: 0.75rem 1rem; border-bottom: 1px solid rgba(255, 255, 255, 0.14); }
+.sidebar-tools { display: flex; align-items: center; gap: 0.5rem; }
+.menu-toggle { display: none; align-items: center; gap: 6px; padding: 7px 10px; border: 2px solid rgba(255, 255, 255, 0.82); background: transparent; color: #fff; font: 600 13px/1 var(--sans); cursor: pointer; }
+.menu-toggle::after { content: ""; border-top: 6px solid currentColor; border-left: 4px solid transparent; border-right: 4px solid transparent; }
+.menu-toggle[aria-expanded="true"]::after { rotate: 180deg; }
+.menu-toggle:hover { background: rgba(255, 255, 255, 0.1); }
 .sidebar-brand a { color: #fff; text-decoration: none; font-weight: 800; text-transform: uppercase; letter-spacing: 0.02em; font-size: 14px; }
 .sidebar-brand a:hover { background: transparent; color: var(--yellow); }
 .sidebar-nav { flex: 1; padding: 0.5rem 0; }
@@ -466,8 +471,20 @@ tbody th { font-family: var(--sans); font-weight: 700; font-size: inherit; text-
 /* Responsive */
 @media (max-width: 768px) {
     .admin-layout { flex-direction: column; }
-    .admin-sidebar { width: 100%; }
-    .sidebar-nav { display: flex; flex-wrap: wrap; }
+    /* The sidebar becomes a sticky bar: brand, theme, Menu. Closed, the nav
+       shows only the current page (a "you are here" strip); open, every
+       link in two columns plus the footer links. Without JS (no html.js)
+       the list simply wraps as before. */
+    .admin-sidebar { width: 100%; position: sticky; top: 0; z-index: 40; }
+    .menu-toggle { display: inline-flex; }
+    .sidebar-nav { display: flex; flex-wrap: wrap; padding: 0.25rem 0; }
+    .sidebar-nav .sidebar-link { padding: 0.5rem 1rem; }
+    html.js .admin-sidebar:not(.open) .sidebar-nav .sidebar-link:not(.sidebar-link--active) { display: none; }
+    html.js .admin-sidebar:not(.open) .sidebar-footer { display: none; }
+    html.js .admin-sidebar:not(.open) .sidebar-link--active { background: transparent; color: var(--yellow); font-family: var(--pix); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+    html.js .admin-sidebar:not(.open) .sidebar-link--active::before { content: "you are here: "; color: rgba(255, 255, 255, 0.6); }
+    html.js .admin-sidebar.open .sidebar-nav { display: grid; grid-template-columns: 1fr 1fr; padding: 0.5rem 0; border-bottom: 1px solid rgba(255, 255, 255, 0.14); }
+    html.js .admin-sidebar.open .sidebar-footer { display: flex; flex-direction: row; flex-wrap: wrap; }
     .card-grid { grid-template-columns: 1fr; }
     .navbar { flex-wrap: wrap; gap: 0.5rem; padding: 0.75rem 16px; }
     .nav-links { flex-wrap: wrap; gap: 12px; }
