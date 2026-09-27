@@ -60,27 +60,48 @@ func HandleAdminWaitlist(tmpl *template.Template, db *sql.DB, logger *zap.Logger
 	}
 }
 
-// HandleAdminWaitlistExport streams all signups as a CSV download.
+// waitlistFilters are the launch-list cuts of the waitlist (dashboard plan
+// Phase 4): everyone, everyone who built a house, and per floor.
+var waitlistFilters = map[string]string{"": "all", "house": "houses", "downstairs": "downstairs", "attic": "attic"}
+
+// HandleAdminWaitlistExport streams signups as a CSV download.
+//
+//	?filter=house|downstairs|attic  only signups whose house has that floor
+//	?fields=email                   one column, ready to paste into a mailer
 func HandleAdminWaitlistExport(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if dashauth.GetSession(r.Context()) == nil {
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
+		filter := r.URL.Query().Get("filter")
+		label, ok := waitlistFilters[filter]
+		if !ok {
+			http.Error(w, "unknown filter", http.StatusBadRequest)
+			return
+		}
+		emailOnly := r.URL.Query().Get("fields") == "email"
 
 		w.Header().Set("Content-Type", "text/csv")
 		w.Header().Set("Content-Disposition",
-			`attachment; filename="waitlist-`+time.Now().Format("2006-01-02")+`.csv"`)
+			`attachment; filename="waitlist-`+label+`-`+time.Now().Format("2006-01-02")+`.csv"`)
 
 		cw := csv.NewWriter(w)
 		defer cw.Flush()
-		_ = cw.Write([]string{"email", "source", "created_at", "downstairs_tb", "attic_tb"})
+		if emailOnly {
+			_ = cw.Write([]string{"email"})
+		} else {
+			_ = cw.Write([]string{"email", "source", "created_at", "downstairs_tb", "attic_tb"})
+		}
 
 		if db == nil {
 			return
 		}
 		rows, err := db.QueryContext(r.Context(),
-			`SELECT email, source, created_at, plan_std_tb, plan_vault_tb FROM waitlist_signups ORDER BY created_at DESC`)
+			`SELECT email, source, created_at, plan_std_tb, plan_vault_tb FROM waitlist_signups
+			 WHERE ($1 = '' OR ($1 = 'house' AND plan_std_tb + plan_vault_tb > 0)
+			        OR ($1 = 'downstairs' AND plan_std_tb > 0) OR ($1 = 'attic' AND plan_vault_tb > 0))
+			 ORDER BY created_at DESC`, filter)
 		if err != nil {
 			logger.Error("waitlist export query", zap.Error(err))
 			return
@@ -93,6 +114,10 @@ func HandleAdminWaitlistExport(db *sql.DB, logger *zap.Logger) http.HandlerFunc 
 			var created time.Time
 			if err := rows.Scan(&email, &source, &created, &stdTB, &vaultTB); err != nil {
 				logger.Error("waitlist export scan", zap.Error(err))
+				continue
+			}
+			if emailOnly {
+				_ = cw.Write([]string{email})
 				continue
 			}
 			_ = cw.Write([]string{email, source, created.UTC().Format(time.RFC3339), strconv.Itoa(stdTB), strconv.Itoa(vaultTB)})

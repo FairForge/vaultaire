@@ -238,8 +238,7 @@ func TestFloorAccounting_ReconcileRepairsFloors(t *testing.T) {
 	_, err := f.db.Exec(`UPDATE tenant_floor_quotas SET storage_used_bytes = 12345 WHERE tenant_id = $1`, f.tenantID)
 	require.NoError(t, err)
 
-	_, err = f.qm.ReconcileStorageUsage(context.Background())
-	require.NoError(t, err)
+	require.NoError(t, f.qm.ReconcileTenantStorageUsage(context.Background(), f.tenantID))
 	std, vault := f.floors(t)
 	assert.Equal(t, int64(1<<20), std)
 	assert.Equal(t, int64(2<<20), vault)

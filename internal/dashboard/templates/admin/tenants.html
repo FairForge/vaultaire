@@ -27,7 +27,7 @@
                 <tr>
                     <td><a href="/admin/tenants/{{.ID}}">{{.Name}}</a></td>
                     <td>{{.Email}}</td>
-                    <td><span class="badge">{{.Plan}}</span></td>
+                    <td>{{if .House}}<span class="badge badge-downstairs">house</span> {{.House}}{{else}}<span class="badge badge-default">{{.Plan}}</span>{{end}}</td>
                     <td>
                         <div>{{.StorageUsedFmt}} / {{.StorageLimitFmt}}</div>
                         <div class="usage-bar" style="width:80px">

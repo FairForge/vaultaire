@@ -54,3 +54,15 @@ document.addEventListener('click', function(e) {
     if (q.addEventListener) q.addEventListener('change', sync);
     sync();
 })();
+
+// Admin bar on small screens: the Menu button opens and closes the nav.
+document.addEventListener('click', function (e) {
+    var b = e.target.closest('.menu-toggle');
+    if (!b) return;
+    var bar = b.closest('.admin-sidebar');
+    var open = !bar.classList.contains('open');
+    bar.classList.toggle('open', open);
+    b.setAttribute('aria-expanded', open ? 'true' : 'false');
+    b.setAttribute('aria-label', open ? 'Close the admin menu' : 'Open the admin menu');
+    b.textContent = open ? 'Close' : 'Menu';
+});
