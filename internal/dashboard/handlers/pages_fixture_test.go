@@ -28,7 +28,7 @@ func TestPages_WriteScreenshotFixtures(t *testing.T) {
 	id := houseTenant(t, db, 0, 0)
 
 	page := func(name string) *template.Template {
-		base := template.Must(template.ParseFS(os.DirFS("../templates"), "layouts/base.html"))
+		base := template.Must(template.New("").Funcs(TemplateFuncs()).ParseFS(os.DirFS("../templates"), "layouts/base.html"))
 		tmpl := template.Must(base.Clone())
 		template.Must(tmpl.ParseFS(os.DirFS("../templates"), "customer/"+name))
 		return tmpl

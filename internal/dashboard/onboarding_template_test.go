@@ -16,7 +16,7 @@ import (
 // per B2) — snippets carry the YOUR_SECRET_KEY placeholder.
 func renderOverview(t *testing.T, data map[string]any) string {
 	t.Helper()
-	tmpl := template.Must(template.ParseFS(Templates,
+	tmpl := template.Must(template.New("").Funcs(handlers.TemplateFuncs()).ParseFS(Templates,
 		"templates/layouts/base.html",
 		"templates/customer/dashboard.html",
 		"templates/generated/house.html",
