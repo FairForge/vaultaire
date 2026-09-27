@@ -105,8 +105,37 @@ func r7IDrive(t *testing.T) (*IDriveDriver, string, string) {
 		region = strings.TrimSuffix(strings.TrimPrefix(host, "s3."), ".idrivee2.com")
 	}
 	require.NotEmpty(t, region, "cannot derive region from endpoint host %q", host)
+	// R7_SCRATCH_BUCKET=1: no `vaultaire` bucket exists outside the primary
+	// region, so create a throwaway bucket in this region for the object-level
+	// checks and delete it (and everything under it) when the test ends.
+	if os.Getenv("R7_SCRATCH_BUCKET") == "1" {
+		t.Setenv("IDRIVE_BUCKET", "review-r7-"+r7Rand())
+	}
 	d, err := NewIDriveDriver(ak, sk, ep, region, zap.NewNop())
 	require.NoError(t, err)
+	if os.Getenv("R7_SCRATCH_BUCKET") == "1" {
+		ctx, cancel := r7Ctx(t)
+		defer cancel()
+		_, err := d.client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(d.bucket)})
+		require.NoError(t, err, "create scratch bucket %s", d.bucket)
+		t.Logf("scratch bucket %s created in %s", d.bucket, region)
+		t.Cleanup(func() {
+			cctx, ccancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer ccancel()
+			p := s3.NewListObjectsV2Paginator(d.client, &s3.ListObjectsV2Input{Bucket: aws.String(d.bucket)})
+			for p.HasMorePages() {
+				page, err := p.NextPage(cctx)
+				if err != nil {
+					break
+				}
+				for _, o := range page.Contents {
+					_, _ = d.client.DeleteObject(cctx, &s3.DeleteObjectInput{Bucket: aws.String(d.bucket), Key: o.Key})
+				}
+			}
+			_, err := d.client.DeleteBucket(cctx, &s3.DeleteBucketInput{Bucket: aws.String(d.bucket)})
+			t.Logf("scratch bucket %s deleted: %s", d.bucket, r7Shape(err))
+		})
+	}
 	return d, ep, region
 }
 
