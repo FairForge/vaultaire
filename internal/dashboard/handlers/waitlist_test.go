@@ -16,7 +16,7 @@ import (
 func testWaitlistTemplate(t *testing.T) *template.Template {
 	t.Helper()
 	return template.Must(template.New("admin").Parse(
-		`{{define "admin"}}<span class="count">{{.SignupCount}}</span>` +
+		`{{define "admin"}}<span class="count">{{.SignupCount}}</span>{{if .Houses}}<span class="houses">{{.Houses}} built a house: {{.TotalStdTB}} TB downstairs, {{.TotalVaultTB}} TB in the attic</span>{{end}}` +
 			`{{range .Signups}}<span class="row">{{.Email}}</span>{{end}}{{end}}`))
 }
 
