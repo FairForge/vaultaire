@@ -134,6 +134,33 @@ func (m *QuotaManager) ReconcileStorageUsage(ctx context.Context) (int64, error)
 	return res.RowsAffected()
 }
 
+// ReconcileTenantStorageUsage is ReconcileStorageUsage for ONE tenant.
+// Tests use this one: the global reconcile rewrites every tenant's ledger,
+// and with `go test ./...` running packages in parallel against one
+// database it erased other packages' in-flight reservations (a PUT reserves
+// before its head row exists), which showed up as a CI-only flake.
+func (m *QuotaManager) ReconcileTenantStorageUsage(ctx context.Context, tenantID string) error {
+	if _, err := m.db.ExecContext(ctx, `
+		UPDATE tenant_quotas tq
+		SET storage_used_bytes = COALESCE(
+			(SELECT SUM(o.size_bytes) FROM object_head_cache o
+			 WHERE o.tenant_id = tq.tenant_id), 0),
+		    updated_at = NOW()
+		WHERE tq.tenant_id = $1`, tenantID); err != nil {
+		return fmt.Errorf("reconciling storage usage for tenant %s: %w", tenantID, err)
+	}
+	if _, err := m.db.ExecContext(ctx, `
+		UPDATE tenant_floor_quotas f
+		SET storage_used_bytes = COALESCE(
+			(SELECT SUM(o.size_bytes) FROM object_head_cache o
+			 WHERE o.tenant_id = f.tenant_id AND o.floor = f.floor), 0),
+		    updated_at = NOW()
+		WHERE f.tenant_id = $1`, tenantID); err != nil {
+		return fmt.Errorf("reconciling floor usage for tenant %s: %w", tenantID, err)
+	}
+	return nil
+}
+
 func (m *QuotaManager) GetUsage(ctx context.Context, tenantID string) (used, limit int64, err error) {
 	err = m.db.QueryRowContext(ctx,
 		`SELECT storage_used_bytes, storage_limit_bytes

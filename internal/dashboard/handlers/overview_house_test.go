@@ -55,8 +55,7 @@ func TestOverview_HouseRendersFromLiveData(t *testing.T) {
 		require.NoError(t, err)
 	}
 	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM object_head_cache WHERE tenant_id = $1`, id) })
-	_, err = qm.ReconcileStorageUsage(context.Background())
-	require.NoError(t, err)
+	require.NoError(t, qm.ReconcileTenantStorageUsage(context.Background(), id))
 
 	h := HandleOverview(overviewTemplate(t), db, zap.NewNop(), "local", houseOverviewFlags(true))
 	req := injectSessionWithTenant(httptest.NewRequest("GET", "/dashboard/", nil), id)
@@ -137,8 +136,7 @@ func TestOverview_WriteScreenshotFixtures(t *testing.T) {
 		require.NoError(t, err)
 	}
 	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM object_head_cache WHERE tenant_id = $1`, id) })
-	_, err = qm.ReconcileStorageUsage(context.Background())
-	require.NoError(t, err)
+	require.NoError(t, qm.ReconcileTenantStorageUsage(context.Background(), id))
 
 	h := HandleOverview(overviewTemplate(t), db, zap.NewNop(), "local", houseOverviewFlags(true))
 	req := injectSessionWithTenant(httptest.NewRequest("GET", "/dashboard/", nil), id)
