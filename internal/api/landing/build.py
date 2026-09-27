@@ -223,6 +223,52 @@ def sources_hash():
     return h.hexdigest()
 
 
+def og_page():
+    """A standalone 1200x630 page for the social preview (make og renders it)."""
+    b = read('builder.html')
+    a = b.index('<svg class="room-svg"'); z = b.index('</svg>', a) + 6
+    room = prices(b[a:z].replace(' id="room"', ''))  # price tokens inside the floor labels
+    pieces = ''
+    for k, x, y, tag in (('dresser', 36, 80, '5 TB'), ('box', 17, 88, '1 TB'), ('lamp', 39, 70, ''), ('plant', 74, 80, ''),
+                         ('mascot-wave', 94, 77, ''), ('box', 30, 39, 'PHOTOS 1 TB'), ('dresser', 66, 31, 'VIDEOS 5 TB')):
+        w, h = sprites.SPRITES[k].w, sprites.SPRITES[k].h
+        pieces += f'<g transform="translate({x} {y})"><use href="#s-{k}" width="{w}" height="{h}"/></g>'
+        if tag:
+            tw = len(tag) * 3 + 3
+            tx = x + round(w / 2 - tw / 2)
+            fill = '#b9c7d2' if y < 54 else '#ffd400'
+            pieces += (f'<g transform="translate({tx} {y - 6})"><rect width="{tw}" height="5" fill="{fill}"/>'
+                       f'<text x="{tw / 2}" y="4" text-anchor="middle" font-family="Silkscreen, monospace" font-size="4" fill="#1a1a1a">{tag}</text></g>')
+    room = room.replace('<g id="room-items"></g>', f'<g color="#1c3445">{pieces}</g>')
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><title>og</title>
+<style>
+{css()}
+html, body {{ margin: 0; width: 1200px; height: 630px; overflow: hidden; background: #f4f1ec; }}
+.og {{ display: grid; grid-template-columns: 560px 1fr; gap: 40px; width: 1200px; height: 630px; padding: 36px 48px; box-sizing: border-box; align-items: center; }}
+.og .room-svg {{ width: 560px; height: auto; display: block; color: #1c3445; box-shadow: 0 22px 40px -24px rgba(0,0,0,.45); }}
+.og h1 {{ font: 800 44px/1.1 'Montserrat', sans-serif; letter-spacing: -0.02em; color: #2b2b2b; margin: 0 0 18px; }}
+.og h1 em {{ display: block; font-style: normal; font-weight: 300; }}
+.og .line {{ font: 400 18px 'Silkscreen', monospace; text-transform: uppercase; color: #4d4d4d; margin: 10px 0; }}
+.og .tags {{ display: flex; flex-wrap: wrap; gap: 8px; margin-top: 22px; }}
+.og .tag {{ font-size: 13px; padding: 7px 9px; }}
+.og .brand {{ display: flex; align-items: center; gap: 12px; margin-bottom: 26px; font: 800 22px 'Montserrat', sans-serif; text-transform: uppercase; color: #2b2b2b; }}
+.og .brand .px {{ --u: 2.5px; color: #2b2b2b; }}
+</style></head>
+<body style="--wall-a:#0a3a63;--wall-b:#125594;--wall-deep:#0b2f52;--fit:#1c3445">
+{sprite_defs()}
+<div class="og">
+  {room}
+  <div>
+    <div class="brand">{spr('mark', 14, 14)}<span>stored.ge</span></div>
+    <h1>Your photos, your projects, your backups. <em>Put away, not thrown away.</em></h1>
+    <p class="line">downstairs ${PRICE_TOKENS['__PRICE_STD__']}/TB &middot; attic ${PRICE_TOKENS['__PRICE_VAULT__']}/TB</p>
+    <div class="tags"><span class="tag">no meters</span><span class="tag">no API fees</span><span class="tag tag-green">S3 compatible</span><span class="tag">open-source engine</span></div>
+  </div>
+</div>
+</body></html>"""
+
+
 def main():
     page = read('landing.src.html')
     page = sub(page, '__CSS__', css())
@@ -240,4 +286,10 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    if len(sys.argv) > 2 and sys.argv[1] == 'og':
+        os.makedirs(sys.argv[2], exist_ok=True)
+        with open(os.path.join(sys.argv[2], 'og.html'), 'w', encoding='utf-8') as f:
+            f.write(og_page())
+        print('wrote', os.path.join(sys.argv[2], 'og.html'))
+    else:
+        main()

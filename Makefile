@@ -69,6 +69,18 @@ lint:
 landing:
 	python3 internal/api/landing/build.py
 
+# Drive the house builder in headless Chrome (internal/api/landing/browser).
+landing-browser:
+	bash internal/api/landing/browser/run.sh
+
+# Re-render the social preview (internal/api/og.png) from the landing sources.
+# Needs Chrome; override with CHROME=/path/to/chrome.
+CHROME ?= $(shell command -v google-chrome || command -v chromium || echo "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+og:
+	python3 internal/api/landing/build.py og /tmp/vaultaire-og
+	"$(CHROME)" --headless=new --disable-gpu --hide-scrollbars --no-sandbox --blink-settings=preferredColorScheme=1 --window-size=1200,630 --force-device-scale-factor=1 --virtual-time-budget=4000 --screenshot=internal/api/og.png file:///tmp/vaultaire-og/og.html >/dev/null 2>&1
+	@ls -la internal/api/og.png
+
 build:
 	go build -o bin/vaultaire ./cmd/vaultaire
 
