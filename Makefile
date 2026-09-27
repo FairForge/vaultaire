@@ -64,6 +64,11 @@ lint:
 .PHONY: fmt lint
 
 # Build the binary
+# Regenerate internal/api/landing.html from its sources (internal/api/landing/).
+# landing_build_test.go fails when the sources and the generated file drift.
+landing:
+	python3 internal/api/landing/build.py
+
 build:
 	go build -o bin/vaultaire ./cmd/vaultaire
 
