@@ -102,6 +102,13 @@ def spr(name, w, h, u=None, cls='px'):
 NIGHT_DEFS = (
     '<radialGradient id="lampglow"><stop offset="0" stop-color="#ffe7a3" stop-opacity="0.8"/>'
     '<stop offset="0.45" stop-color="#ffc861" stop-opacity="0.3"/><stop offset="1" stop-color="#ffc861" stop-opacity="0"/></radialGradient>'
+    # the ambient pool: wide, soft, warm; drawn with screen blending so it lights furniture
+    '<radialGradient id="lampambient"><stop offset="0" stop-color="#ffd9a0" stop-opacity="0.7"/>'
+    '<stop offset="0.35" stop-color="#ffc072" stop-opacity="0.4"/><stop offset="0.7" stop-color="#ffa64a" stop-opacity="0.14"/>'
+    '<stop offset="1" stop-color="#ff9e3d" stop-opacity="0"/></radialGradient>'
+    # the room fill: very wide and faint, so the whole floor the lamp is on feels warm
+    '<radialGradient id="lampfill"><stop offset="0" stop-color="#ffc98a" stop-opacity="0.22"/>'
+    '<stop offset="1" stop-color="#ffb060" stop-opacity="0"/></radialGradient>'
     '<filter id="nightdim" color-interpolation-filters="sRGB"><feComponentTransfer>'
     '<feFuncR type="linear" slope="0.5"/><feFuncG type="linear" slope="0.52"/><feFuncB type="linear" slope="0.66"/>'
     '</feComponentTransfer></filter>'
