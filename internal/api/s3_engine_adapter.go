@@ -23,6 +23,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/flags"
 	"github.com/FairForge/vaultaire/internal/tenant"
+	"github.com/FairForge/vaultaire/internal/usage"
 	"go.uber.org/zap"
 )
 
@@ -77,7 +78,13 @@ type S3ToEngine struct {
 	// the PUT created the key).
 	quota           QuotaManager
 	putLogicalBytes int64
-	displacedBytes  int64
+	displaced       displacedRow
+
+	// storageClass, when storageClassResolved, is the class the Server
+	// layer already resolved (and reserved quota on) for this PUT; HandlePut
+	// uses it instead of resolving again so billing and placement agree.
+	storageClass         string
+	storageClassResolved bool
 }
 
 // errDecodedLengthMismatch signals an aws-chunked body whose decoded byte
@@ -786,8 +793,11 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	// backend) when no cold/resilient tier or explicit header says otherwise;
 	// PUBLIC objects stay whole too, so the CDN path can address them as one
 	// R2 key.
-	resolvedStorageClass := resolvePutStorageClass(r.Context(), a.db, a.engine, t.ID, bucket,
-		r.Header.Get("x-amz-storage-class"))
+	resolvedStorageClass := a.storageClass
+	if !a.storageClassResolved {
+		resolvedStorageClass = resolvePutStorageClass(r.Context(), a.db, a.engine, t.ID, bucket,
+			r.Header.Get("x-amz-storage-class"))
+	}
 	chunkingDisabledByTier := storageClassDisablesChunking(resolvedStorageClass)
 	willChunkEncrypt := a.gci != nil && a.chunkEncSvc != nil &&
 		metadataSize > chunkThreshold && !chunkingDisabledByVersioning && !chunkingDisabledByTier
@@ -1029,8 +1039,8 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		displaced, dbErr := atomicHeadUpsertReleasing(r.Context(), a.db, manifestReleaser(a.gci), t.ID, bucket, artifact, func(tx *sql.Tx) error {
 			_, execErr := tx.ExecContext(r.Context(), `
 				INSERT INTO object_head_cache
-					(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, content_encoding, content_language, cache_control, http_expires, website_redirect_location, is_chunked, updated_at)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, FALSE, NOW())
+					(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, content_encoding, content_language, cache_control, http_expires, website_redirect_location, floor, is_chunked, updated_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, FALSE, NOW())
 				ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
 					size_bytes            = EXCLUDED.size_bytes,
 					etag                  = EXCLUDED.etag,
@@ -1044,18 +1054,19 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 					cache_control         = EXCLUDED.cache_control,
 					http_expires          = EXCLUDED.http_expires,
 					website_redirect_location = EXCLUDED.website_redirect_location,
+					floor                 = EXCLUDED.floor,
 					is_chunked            = EXCLUDED.is_chunked,
 					updated_at            = NOW()
-			`, t.ID, bucket, artifact, metadataSize, etag, contentType, backendName, metaJSON, encryptionAlgorithm, contentDisposition, contentEncoding, contentLanguage, echoHdrs.CacheControl, echoHdrs.Expires, echoHdrs.WebsiteRedirect)
+			`, t.ID, bucket, artifact, metadataSize, etag, contentType, backendName, metaJSON, encryptionAlgorithm, contentDisposition, contentEncoding, contentLanguage, echoHdrs.CacheControl, echoHdrs.Expires, echoHdrs.WebsiteRedirect, usage.FloorOf(resolvedStorageClass))
 			return execErr
 		})
-		a.displacedBytes = displaced
+		a.displaced = displaced
 		if dbErr != nil {
 			// HEAD serves exclusively from object_head_cache — returning 200
 			// without the row means every subsequent HEAD/GET 404s and the
 			// bytes are never billed. The blob is already durable, so the
 			// client's retry is safe and idempotent (upsert). Fail loudly.
-			a.displacedBytes = 0
+			a.displaced = displacedRow{}
 			a.putLogicalBytes = 0
 			a.logger.Error("failed to cache object metadata — failing PUT",
 				zap.Error(dbErr),
@@ -1361,8 +1372,8 @@ func (a *S3ToEngine) handleChunkedPut(
 		}
 		_, execErr := tx.ExecContext(ctx, `
 			INSERT INTO object_head_cache
-				(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, content_encoding, content_language, cache_control, http_expires, website_redirect_location, is_chunked, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, TRUE, NOW())
+				(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, content_encoding, content_language, cache_control, http_expires, website_redirect_location, floor, is_chunked, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'standard', TRUE, NOW())
 			ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
 				size_bytes            = EXCLUDED.size_bytes,
 				etag                  = EXCLUDED.etag,
@@ -1376,19 +1387,20 @@ func (a *S3ToEngine) handleChunkedPut(
 				cache_control         = EXCLUDED.cache_control,
 				http_expires          = EXCLUDED.http_expires,
 				website_redirect_location = EXCLUDED.website_redirect_location,
+				floor                 = EXCLUDED.floor,
 				is_chunked            = EXCLUDED.is_chunked,
 				updated_at            = NOW()
 		`, t.ID, bucket, artifact, measuredSize, etag, contentType, backendName, metaJSON, chunkEncAlgo, contentDisposition, contentEncoding, contentLanguage, echoHdrs.CacheControl, echoHdrs.Expires, echoHdrs.WebsiteRedirect)
 		return execErr
 	})
-	a.displacedBytes = displaced
+	a.displaced = displaced
 	if dbErr != nil {
 		// Manifest swap and head upsert rolled back together: the previous
 		// version is fully intact (old manifest, old head row) and the retry
 		// re-runs the whole swap. This request's ref increments are released
 		// by the deferred compensator (F10); chunk blobs whose refs drop to
 		// zero are reclaimed by dedup GC.
-		a.displacedBytes = 0
+		a.displaced = displacedRow{}
 		a.putLogicalBytes = 0
 		return fmt.Errorf("install chunked object %s/%s: %w", bucket, artifact, dbErr)
 	}
@@ -1954,14 +1966,14 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 		// The head-cache row is the billing record (WP-1): DELETE...RETURNING
 		// captures the removed size atomically, so a concurrent writer or
 		// deleter can never cause the same bytes to be released twice.
-		var markedSize int64
+		var marked displacedRow
 		delErr := a.db.QueryRowContext(r.Context(), `
 			DELETE FROM object_head_cache
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
-			RETURNING size_bytes`,
-			t.ID, bucket, object).Scan(&markedSize)
+			RETURNING size_bytes, floor`,
+			t.ID, bucket, object).Scan(&marked.Size, &marked.Floor)
 		if delErr == nil {
-			a.releaseQuotaForDelete(r, t.ID, markedSize)
+			a.releaseQuotaForDelete(r, t.ID, marked)
 		} else if delErr != sql.ErrNoRows {
 			a.logger.Error("delete-marker head cache delete failed", zap.Error(delErr))
 		}
@@ -2032,14 +2044,14 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 	if a.db != nil {
 		// DELETE...RETURNING releases exactly the bytes this request removed
 		// (the row is the billing record — WP-1). Logical size for chunked.
-		var deletedSize int64
+		var deleted displacedRow
 		delErr := a.db.QueryRowContext(r.Context(), `
 			DELETE FROM object_head_cache
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
-			RETURNING size_bytes
-		`, t.ID, bucket, object).Scan(&deletedSize)
+			RETURNING size_bytes, floor
+		`, t.ID, bucket, object).Scan(&deleted.Size, &deleted.Floor)
 		if delErr == nil {
-			a.releaseQuotaForDelete(r, t.ID, deletedSize)
+			a.releaseQuotaForDelete(r, t.ID, deleted)
 		} else if delErr != sql.ErrNoRows {
 			a.logger.Error("head cache delete failed", zap.Error(delErr))
 		}

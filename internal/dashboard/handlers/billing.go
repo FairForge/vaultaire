@@ -4,18 +4,22 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"github.com/FairForge/vaultaire/internal/api/landing"
 	"html/template"
 	"net/http"
+	"strings"
 
+	"github.com/FairForge/vaultaire/internal/api/landing"
 	"github.com/FairForge/vaultaire/internal/billing"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
+	"github.com/FairForge/vaultaire/internal/flags"
 	"go.uber.org/zap"
 )
 
 // HandleBilling renders the billing page with plan, subscription status,
-// invoice history, value stack, and cost comparison.
-func HandleBilling(tmpl *template.Template, stripe *billing.StripeService, db *sql.DB, logger *zap.Logger) http.HandlerFunc {
+// invoice history, value stack, and cost comparison — and, behind the
+// quota_checkout flag, the whole-TB house checkout. svc may be a nil
+// interface (billing not configured); fl may be nil (no flags = off).
+func HandleBilling(tmpl *template.Template, svc BillingService, db *sql.DB, fl *flags.Service, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
 		if sd == nil {
@@ -25,17 +29,26 @@ func HandleBilling(tmpl *template.Template, stripe *billing.StripeService, db *s
 
 		data := sessionData(sd, "billing")
 		withCSRF(r.Context(), data)
+		withFlash(r.Context(), data)
 		ctx := r.Context()
 
 		populateBillingPlan(ctx, db, data, sd.TenantID)
 		populateHouseIntent(ctx, db, data, sd.TenantID)
 		populateAccruedCharges(ctx, db, data, sd.TenantID)
-		populateBillingPlans(stripe, data)
+		populateBillingPlans(svc, data)
 		populateValueStack(ctx, db, data, sd.TenantID)
 		populateCostComparison(ctx, db, data, sd.TenantID)
+		var houseSvc HouseBilling
+		if svc != nil {
+			houseSvc = svc
+		}
+		populateHouse(ctx, db, houseSvc, fl, data, sd.TenantID)
 
 		if r.URL.Query().Get("upgraded") == "1" {
 			data["Upgraded"] = true
+		}
+		if r.URL.Query().Get("resized") == "1" {
+			data["Resized"] = true
 		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -46,8 +59,10 @@ func HandleBilling(tmpl *template.Template, stripe *billing.StripeService, db *s
 	}
 }
 
-// HandleUpgrade redirects to a Stripe Checkout session for the chosen plan.
-func HandleUpgrade(stripe *billing.StripeService, db *sql.DB, logger *zap.Logger) http.HandlerFunc {
+// HandleUpgrade redirects to a Stripe Checkout session for the chosen
+// (legacy pack) plan. baseURL makes the return URLs absolute — Stripe
+// rejects relative ones.
+func HandleUpgrade(stripe *billing.StripeService, db *sql.DB, baseURL string, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
 		if sd == nil {
@@ -73,10 +88,11 @@ func HandleUpgrade(stripe *billing.StripeService, db *sql.DB, logger *zap.Logger
 			return
 		}
 
+		base := strings.TrimRight(baseURL, "/")
 		checkoutURL, err := stripe.CreateCheckoutSession(
 			customerID, planID,
-			"/dashboard/billing?upgraded=1",
-			"/dashboard/billing",
+			base+"/dashboard/billing?upgraded=1",
+			base+"/dashboard/billing",
 		)
 		if err != nil {
 			logger.Error("create checkout session", zap.Error(err))
@@ -197,13 +213,16 @@ func populateAccruedCharges(ctx context.Context, db *sql.DB, data map[string]any
 
 	var tier string
 	var storageBytes int64
+	var hasHouse bool
 	if err := db.QueryRowContext(ctx,
-		`SELECT tier, storage_used_bytes FROM tenant_quotas WHERE tenant_id = $1`, tenantID).
-		Scan(&tier, &storageBytes); err != nil {
+		`SELECT tier, storage_used_bytes,
+		        EXISTS (SELECT 1 FROM tenant_floor_quotas f WHERE f.tenant_id = tenant_quotas.tenant_id)
+		   FROM tenant_quotas WHERE tenant_id = $1`, tenantID).
+		Scan(&tier, &storageBytes, &hasHouse); err != nil {
 		return
 	}
-	if tier != "standard" && tier != "performance" {
-		return // not a metered tier — fixed-price subscription
+	if hasHouse || (tier != "standard" && tier != "performance") {
+		return // quota-sold house or fixed-price pack — never metered
 	}
 
 	var egressBytes int64
@@ -218,12 +237,12 @@ func populateAccruedCharges(ctx context.Context, db *sql.DB, data map[string]any
 	data["AccruedCharges"] = fmt.Sprintf("$%.2f", float64(cents)/100)
 }
 
-func populateBillingPlans(stripe *billing.StripeService, data map[string]any) {
-	if stripe == nil {
+func populateBillingPlans(svc BillingService, data map[string]any) {
+	if svc == nil {
 		data["AvailablePlans"] = nil
 		return
 	}
-	data["AvailablePlans"] = stripe.Plans()
+	data["AvailablePlans"] = svc.Plans()
 }
 
 func populateValueStack(ctx context.Context, db *sql.DB, data map[string]any, tenantID string) {

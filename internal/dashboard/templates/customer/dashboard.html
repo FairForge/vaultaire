@@ -108,6 +108,12 @@
                 hx-swap="outerHTML">Dismiss</button>
     </div>
     <ul class="onboarding-checklist">
+        {{if .Onboarding.PlanWaiting}}
+        <li>
+            <span class="check-pending">&#9675;</span>
+            <a href="/dashboard/billing">Your plan is waiting on Billing</a> <span class="text-muted">({{.Onboarding.PlanSummary}})</span>
+        </li>
+        {{end}}
         <li>
             {{if .Onboarding.HasBucket}}<span class="check-done">&#10003;</span>{{else}}<span class="check-pending">&#9675;</span>{{end}}
             <a href="/dashboard/buckets">Create your first bucket</a>

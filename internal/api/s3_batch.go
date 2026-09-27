@@ -168,15 +168,15 @@ func (s *Server) handleDeleteObjects(w http.ResponseWriter, r *http.Request, req
 		// Success (or idempotent miss) — remove the billing record and
 		// release exactly the bytes it held (atomic via RETURNING, WP-1).
 		if s.db != nil {
-			var deletedSize int64
+			var deleted displacedRow
 			cacheErr := s.db.QueryRowContext(r.Context(), `
 				DELETE FROM object_head_cache
 				WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
-				RETURNING size_bytes
-			`, t.ID, bucket, key).Scan(&deletedSize)
-			if cacheErr == nil && deletedSize > 0 {
+				RETURNING size_bytes, floor
+			`, t.ID, bucket, key).Scan(&deleted.Size, &deleted.Floor)
+			if cacheErr == nil && deleted.Size > 0 {
 				ctx, cancel := quotaCtx(r)
-				s.releaseQuota(ctx, t.ID, deletedSize)
+				s.releaseQuota(ctx, t.ID, deleted.Floor, deleted.Size)
 				cancel()
 			} else if cacheErr != nil && cacheErr != sql.ErrNoRows {
 				s.logger.Error("batch delete: head cache delete failed",

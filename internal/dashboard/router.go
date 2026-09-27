@@ -42,6 +42,7 @@ type Deps struct {
 	Engine        *engine.CoreEngine     // Nil-safe; used by admin backends page.
 	HealthChecker handlers.HealthChecker // Nil-safe; backend health state provider.
 	Flags         *flags.Service         // Nil-safe; admin feature-flags page (1.13).
+	Quotas        billing.HouseQuotas    // Nil-safe; applies a resized house's floor quotas at once (Phase 1).
 }
 
 // RegisterRoutes mounts the dashboard, auth, admin, and static-asset
@@ -231,8 +232,15 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		template.Must(billingTmpl.ParseFS(Templates,
 			"templates/customer/billing.html",
 		))
-		dr.Get("/billing", handlers.HandleBilling(billingTmpl, deps.Stripe, deps.DB, deps.Logger))
-		dr.Post("/billing/upgrade", handlers.HandleUpgrade(deps.Stripe, deps.DB, deps.Logger))
+		// A nil *StripeService must stay a nil interface (the handlers
+		// nil-check it), so convert only when configured.
+		var billingSvc handlers.BillingService
+		if deps.Stripe != nil {
+			billingSvc = deps.Stripe
+		}
+		dr.Get("/billing", handlers.HandleBilling(billingTmpl, billingSvc, deps.DB, deps.Flags, deps.Logger))
+		dr.Post("/billing/upgrade", handlers.HandleUpgrade(deps.Stripe, deps.DB, deps.BaseURL, deps.Logger))
+		dr.Post("/billing/house", handlers.HandleHouseCheckout(billingSvc, deps.DB, deps.Quotas, deps.Flags, deps.BaseURL, deps.Logger))
 		dr.Post("/billing/portal", handlers.HandleManageBilling(deps.Stripe, deps.Logger))
 
 		// Compliance dashboard.

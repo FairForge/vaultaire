@@ -18,6 +18,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/tenant"
+	"github.com/FairForge/vaultaire/internal/usage"
 
 	"go.uber.org/zap"
 )
@@ -427,10 +428,16 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 	// assembled size here before streaming to the backend. If the object
 	// overwrites an existing key, the overwritten bytes are captured
 	// atomically by the head-cache upsert and released after success.
+	// Multipart bypasses the tier-aware plain-PUT path, so resolve the
+	// bucket's tier here too — without this, aws-cli's default multipart
+	// uploads would ignore tier placement (a resilient-tier bucket would
+	// silently store on the primary backend). The floor follows the class.
+	tierClass := resolvePutStorageClass(r.Context(), s.db, s.engine, t.ID, bucket, "")
+	floor := usage.FloorOf(tierClass)
 	quotaOn := s.quotaManager != nil
 	var reservedBytes int64
 	if quotaOn {
-		ok, qErr := s.quotaManager.CheckAndReserve(r.Context(), t.ID, totalSize)
+		ok, qErr := reserveQuota(r.Context(), s.quotaManager, t.ID, floor, totalSize)
 		if qErr != nil {
 			s.logger.Error("multipart complete: quota check failed",
 				zap.Error(qErr), zap.String("tenant_id", t.ID))
@@ -474,12 +481,9 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 		}
 	}()
 
-	// Upload assembled stream to backend. Multipart bypasses the tier-aware
-	// plain-PUT path, so resolve the bucket's tier here too — without this,
-	// aws-cli's default multipart uploads would ignore tier placement (a
-	// resilient-tier bucket would silently store on the primary backend).
+	// Upload assembled stream to the backend the resolved class picks.
 	completeOpts := []engine.PutOption{engine.WithContentLength(totalSize)}
-	if tierClass := resolvePutStorageClass(r.Context(), s.db, s.engine, t.ID, bucket, ""); tierClass != "" {
+	if tierClass != "" {
 		completeOpts = append(completeOpts, engine.WithStorageClass(tierClass))
 	}
 	go func() {
@@ -491,7 +495,7 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 	if uploadErr := <-errCh; uploadErr != nil {
 		if quotaOn {
 			ctx, cancel := quotaCtx(r)
-			s.releaseQuota(ctx, t.ID, reservedBytes)
+			s.releaseQuota(ctx, t.ID, floor, reservedBytes)
 			cancel()
 		}
 		s.logger.Error("multipart backend storage failed",
@@ -504,7 +508,7 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 
 	// Mark completed and update head cache
 	etagValue := strings.Trim(finalETag, "\"")
-	var displacedSize int64
+	var displaced displacedRow
 	if s.db != nil {
 		_, _ = s.db.ExecContext(r.Context(), `
 			UPDATE multipart_uploads SET status = 'completed' WHERE upload_id = $1
@@ -517,24 +521,25 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 		// atomicHeadUpsert captures the overwritten row's size in the same
 		// transaction (WP-1) — released below only if the upsert succeeded.
 		var dbErr error
-		displacedSize, dbErr = atomicHeadUpsertReleasing(r.Context(), s.db, manifestReleaser(s.gci), t.ID, bucket, object, func(tx *sql.Tx) error {
+		displaced, dbErr = atomicHeadUpsertReleasing(r.Context(), s.db, manifestReleaser(s.gci), t.ID, bucket, object, func(tx *sql.Tx) error {
 			// is_chunked=FALSE explicitly: a multipart object overwriting a
 			// chunked one must flip the flag (releaser frees the manifest).
 			_, execErr := tx.ExecContext(r.Context(), `
 				INSERT INTO object_head_cache
-					(tenant_id, bucket, object_key, size_bytes, etag, content_type, is_chunked, updated_at)
-				VALUES ($1, $2, $3, $4, $5, $6, FALSE, NOW())
+					(tenant_id, bucket, object_key, size_bytes, etag, content_type, floor, is_chunked, updated_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, NOW())
 				ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
 					size_bytes   = EXCLUDED.size_bytes,
 					etag         = EXCLUDED.etag,
 					content_type = EXCLUDED.content_type,
+					floor        = EXCLUDED.floor,
 					is_chunked   = FALSE,
 					updated_at   = NOW()
-			`, t.ID, bucket, object, totalSize, etagValue, contentType)
+			`, t.ID, bucket, object, totalSize, etagValue, contentType, floor)
 			return execErr
 		})
 		if dbErr != nil {
-			displacedSize = 0
+			displaced = displacedRow{}
 			s.logger.Error("failed to update head cache after multipart complete", zap.Error(dbErr))
 		}
 	} else {
@@ -545,9 +550,9 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 		memUploadsMu.Unlock()
 	}
 
-	if quotaOn && displacedSize > 0 {
+	if quotaOn && displaced.Size > 0 {
 		ctx, cancel := quotaCtx(r)
-		s.releaseQuota(ctx, t.ID, displacedSize)
+		s.releaseQuota(ctx, t.ID, displaced.Floor, displaced.Size)
 		cancel()
 	}
 

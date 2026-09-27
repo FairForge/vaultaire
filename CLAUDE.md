@@ -78,7 +78,7 @@ The `engine.Driver` interface (in `internal/engine/interface.go`) is the sacred 
 
 Registration persists to **four tables in order**: `users` -> `tenants` -> `api_keys` -> `tenant_quotas`. Missing any causes failures. S3 auth queries `tenants` first (primary key, full access), then falls back to `api_keys` for scoped VLT_ keys (`revoked_at IS NULL` — revocation/rotation/expiry are persisted there, 064), then `sts_tokens` for ASIA-prefixed temporary credentials.
 
-Other critical tables (64 migrations through `064_api_keys_revoked_at.sql`):
+Other critical tables (66 migrations through `066_floor_quotas.sql`):
 - `object_head_cache` — HEAD/GET metadata cache (~1ms), content-type, ETag, metadata JSONB
 - `buckets` — bucket registry with visibility, CORS, cache TTL, metadata JSONB, slug
 - `multipart_uploads`, `multipart_parts` — in-progress multipart state
@@ -91,6 +91,7 @@ Other critical tables (64 migrations through `064_api_keys_revoked_at.sql`):
 - `oauth_accounts` — OAuth provider links (Google, GitHub)
 - `smart_demotions` — Smart-tier demotion ledger (5.15.8): one row per hot→cold move, hot copy reclaimed after a grace period under an etag guard; read-time promotion state (063)
 - `feature_flags` — runtime flags (1.13): global kill-switches + per-tenant overrides, `'*'` = global row; served via `internal/flags` (~15s cache, admin API + dashboard `/admin/flags`)
+- `tenant_floor_quotas` — whole-TB quota per floor (066, dashboard plan Phase 1): one row per (tenant, `standard`|`vault`) for tenants who bought a house; PUT is enforced per floor AND on the `tenant_quotas` total (= sum of floors); `object_head_cache.floor` records where each object is billed (GLACIER/DEEP_ARCHIVE = vault). Tenants without rows keep the single total quota. Written by the Stripe webhook (`billing.WebhookHandler.applyHouse`) and `usage.QuotaManager.SetHouse/ClearHouse`
 
 Migrations are in `internal/database/migrations/`.
 
@@ -157,7 +158,8 @@ GitHub Actions Deploy (`.github/workflows/deploy.yml`):
 | `QUOTALESS_ACCESS_KEY`, `QUOTALESS_SECRET_KEY`, `QUOTALESS_ENDPOINT` | — | Quotaless storage |
 | `STRIPE_SECRET_KEY` | — | Stripe API key (sk_test_... or sk_live_...) |
 | `STRIPE_WEBHOOK_SECRET` | — | Stripe webhook endpoint secret (whsec_...) |
-| `STRIPE_PRICE_VAULT3`, `STRIPE_PRICE_VAULT9`, etc. | — | Stripe Price IDs for each plan |
+| `STRIPE_PRICE_VAULT3`, `STRIPE_PRICE_VAULT9`, etc. | — | Stripe Price IDs for each legacy pack plan |
+| `STRIPE_PRICE_STANDARD_ANNUAL`, `STRIPE_PRICE_STANDARD_MONTHLY`, `STRIPE_PRICE_VAULT_ANNUAL`, `STRIPE_PRICE_VAULT_MONTHLY`, `STRIPE_PRICE_PINHOT_ANNUAL`, `STRIPE_PRICE_PINHOT_MONTHLY` | — | Whole-TB house checkout (dashboard plan Phase 1): one recurring price per line × period, quantity = TB. All six must be set; at boot (and hourly) each is fetched and asserted against `internal/api/landing/prices.json` (amount, USD, interval; Vault monthly = volume tiers with the $4.99 minimum) — a mismatch logs an error and keeps checkout closed. Recipe in `internal/billing/CLAUDE.md`. The page itself is gated by the `quota_checkout` flag (default off) |
 | `STRIPE_METER_STORAGE`, `STRIPE_METER_EGRESS` | — | Stripe Billing Meter event-names for metered tiers (both required to enable metered reporting) |
 | `GOOGLE_CLIENT_ID` | — | Google OAuth client ID |
 | `GOOGLE_CLIENT_SECRET` | — | Google OAuth client secret |

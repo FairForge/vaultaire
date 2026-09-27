@@ -122,6 +122,15 @@ func (m *QuotaManager) ReconcileStorageUsage(ctx context.Context) (int64, error)
 	if err != nil {
 		return 0, fmt.Errorf("reconciling storage usage: %w", err)
 	}
+	// The floor ledgers (066) follow the same source of truth, per floor.
+	if _, err := m.db.ExecContext(ctx, `
+		UPDATE tenant_floor_quotas f
+		SET storage_used_bytes = COALESCE(
+			(SELECT SUM(o.size_bytes) FROM object_head_cache o
+			 WHERE o.tenant_id = f.tenant_id AND o.floor = f.floor), 0),
+		    updated_at = NOW()`); err != nil {
+		return 0, fmt.Errorf("reconciling floor usage: %w", err)
+	}
 	return res.RowsAffected()
 }
 
@@ -260,5 +269,3 @@ func (m *QuotaManager) GetUsageHistory(ctx context.Context, tenantID string, day
 
 	return history, nil
 }
-
-// GetTier returns the current tier for a tenant
