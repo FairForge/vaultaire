@@ -29,6 +29,24 @@ type BucketRow struct {
 	LastModified    time.Time
 	SizeFmt         string
 	LastModifiedFmt string
+
+	// The floor the bucket lives on, in the site's words (Phase 2):
+	// tier_preference archive = "attic"; standard/performance/resilient =
+	// "downstairs"; auto = "downstairs" too (auto resolves to the primary,
+	// a header can still put single objects in the attic).
+	TierPreference string
+	FloorWord      string // downstairs | attic
+	FloorClass     string // badge class
+	AtticBytes     int64  // bytes of this bucket recorded in the attic
+	AtticFmt       string
+}
+
+// floorWords maps a bucket tier preference onto the floor a customer reads.
+func floorWords(tierPreference string) (word, class string) {
+	if tierPreference == "archive" {
+		return "attic", "badge-attic"
+	}
+	return "downstairs", "badge-downstairs"
 }
 
 // ObjectRow is a single object for the bucket browser template.
@@ -301,14 +319,17 @@ func listBuckets(ctx context.Context, db *sql.DB, tenantID string) []BucketRow {
 	rows, err := db.QueryContext(ctx,
 		`SELECT b.name,
 		        b.visibility,
+		        b.tier_preference,
 		        COALESCE(o.object_count, 0),
 		        COALESCE(o.total_size, 0),
+		        COALESCE(o.attic_size, 0),
 		        COALESCE(o.last_modified, b.created_at)
 		 FROM buckets b
 		 LEFT JOIN (
 		     SELECT bucket,
 		            COUNT(*) AS object_count,
 		            SUM(size_bytes) AS total_size,
+		            SUM(size_bytes) FILTER (WHERE floor = 'vault') AS attic_size,
 		            MAX(updated_at) AS last_modified
 		     FROM object_head_cache
 		     WHERE tenant_id = $1
@@ -325,11 +346,13 @@ func listBuckets(ctx context.Context, db *sql.DB, tenantID string) []BucketRow {
 	for rows.Next() {
 		var b BucketRow
 		var lastMod time.Time
-		if err := rows.Scan(&b.Name, &b.Visibility, &b.ObjectCount, &b.TotalSize, &lastMod); err != nil {
+		if err := rows.Scan(&b.Name, &b.Visibility, &b.TierPreference, &b.ObjectCount, &b.TotalSize, &b.AtticBytes, &lastMod); err != nil {
 			continue
 		}
 		b.LastModified = lastMod
 		b.SizeFmt = formatBytes(b.TotalSize)
+		b.AtticFmt = formatBytes(b.AtticBytes)
+		b.FloorWord, b.FloorClass = floorWords(b.TierPreference)
 		b.LastModifiedFmt = relativeTime(lastMod)
 		buckets = append(buckets, b)
 	}

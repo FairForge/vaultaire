@@ -102,4 +102,4 @@ Lighthouse 100 on every public page: every control has a name that contains its 
 3. `make landing-browser` (33 headless-Chrome checks) and `go test ./internal/api/...`; screenshot at 1280 light/dark and 390 wide before opening a PR.
 4. `make og` if the house scene or prices changed.
 5. PRs auto-merge on green; the main ruleset needs an up-to-date branch and resolved review threads (CodeQL comments count). Deploys restart the server; in-memory user cache refreshes then.
-6. For the dashboard: port the tokens in §2–§4 into `layouts/base.html`, serve the two fonts from the binary, reuse the sprite defs via a generator target, and follow `docs/DASHBOARD_PLAN.md`.
+6. For the dashboard: port the tokens in §2–§4 into `layouts/base.html`, serve the two fonts from the binary, reuse the sprite defs via the generator's dashboard output (`make landing` also writes `internal/dashboard/templates/generated/house.html`; the house's own CSS lives in `landing/house.css`), and follow `docs/DASHBOARD_PLAN.md`.

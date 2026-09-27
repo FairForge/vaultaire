@@ -19,6 +19,7 @@ func renderOverview(t *testing.T, data map[string]any) string {
 	tmpl := template.Must(template.ParseFS(Templates,
 		"templates/layouts/base.html",
 		"templates/customer/dashboard.html",
+		"templates/generated/house.html",
 	))
 	var sb strings.Builder
 	require.NoError(t, tmpl.ExecuteTemplate(&sb, "base", data))
