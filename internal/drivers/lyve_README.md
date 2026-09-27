@@ -1049,9 +1049,6 @@ us-west-1: 114–116 ms (100 KB and 1 MiB).
 **228 / 223 MB/s**; single-stream presigned GET 140 MB/s; 8 × 128 MiB parallel ranges 208 MB/s
 (the GET ceiling from SLC is ~210–230 MB/s however it is parallelised; PUT is 2× that).
 
-**STANDARD_IA:** `put-object --storage-class STANDARD_IA` accepted, HEAD reports `STANDARD_IA`.
-No IA usage on the account (RSListBillingData STANDARD_IA = 0).
-
 **CopyObject checksum bug — still present, but the Go driver is NOT affected.** aws-cli 2.35.21
 `s3 cp` of a server-side-copied object aborts with "Expected checksum … did not match calculated
 checksum" (a 32-byte value, so SHA-256-sized). The production `LyveDriver` (aws-sdk-go-v2, no
@@ -1068,14 +1065,14 @@ Lyve has no egress fee, so Worker-served Lyve bytes are $0 at both ends.
 **Lifecycle expiration still unverified:** `lyve-lifecycle-canary-20260927` (us-west-1, 1-day
 expire-all, object planted 05:14 UTC 09-27) — check on/after 2026-09-29, then delete the bucket.
 
-### STANDARD_IA is fully read/write (verified 2026-09-27, us-west-1)
+### Infrequent Access — verified, then retired (2026-09-27)
 
-Single PUT and multipart PUT with `--storage-class STANDARD_IA`, HEAD (`StorageClass:
-STANDARD_IA`), full GET, Range GET (206, class echoed), ListObjectsV2 class, anonymous presigned
-GET (TTFB 95 ms), CopyObject IA→STANDARD (HEAD then reports no class = STANDARD, AWS-style),
-in-place CopyObject to change class, a `Transitions: 30d → STANDARD_IA` lifecycle rule, and
-DeleteObject before 180 days (accepted; the minimum-retention charge, if any, is invoice-only).
-Paired 256 MiB throughput, two rounds: STANDARD PUT 153–167 / GET 56–170 MB/s, STANDARD_IA PUT
-154–167 / GET 84–126 MB/s, single-stream presigned 159–211 MB/s for both — **IA is not slower
-than STANDARD**; the spread is Lyve's run-to-run variance. Only unmeasured: whether a lifecycle
-transition actually fires after 30 days.
+The full IA surface works (single and multipart PUT, HEAD, GET, Range, list, anonymous presigned
+GET, CopyObject in both directions, transition rules, early delete) and paired 256 MiB runs put IA
+in the same throughput band as STANDARD. **Decision (Isaac, 2026-09-27): not used, anywhere.**
+The class is unmapped in the engine (clients sending `STANDARD_IA` land on the primary as
+STANDARD), the account holds no IA objects or transition rules, and the three terms the 07-29
+note asked for are now known: 180-day minimum retention, no retrieval fee, and **early deletes are
+billed as `GhostSpace` = bytes × remaining days** in `RSListBillingData` (the 769 MiB of tests
+deleted today show as 145,332,633,600 byte-days, about two cents). Do not reopen unless the quota
+model changes.
