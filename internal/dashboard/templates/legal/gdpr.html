@@ -87,7 +87,7 @@
     <p>For HIPAA-covered entities, our <a href="/legal/baa">Business Associate Agreement</a> provides additional breach notification commitments.</p>
 
     <h2 id="data-residency">Data Residency</h2>
-    <p>stored.ge currently offers storage in the following regions through our infrastructure partner iDrive e2:</p>
+    <p>Default storage is in the United States (Dallas, Texas: region <code>us-central-1</code>) through our infrastructure partner iDrive e2. Additional regions are enabled per deployment and offered in the bucket-creation region picker; regions that are not enabled cannot be selected. The regions our partner operates are:</p>
     <table class="table">
         <thead>
             <tr>
@@ -96,33 +96,22 @@
             </tr>
         </thead>
         <tbody>
-            <tr>
-                <td>us-west-1</td>
-                <td>United States (West)</td>
-            </tr>
-            <tr>
-                <td>us-east-1</td>
-                <td>United States (East)</td>
-            </tr>
-            <tr>
-                <td>eu-west-1</td>
-                <td>Ireland</td>
-            </tr>
-            <tr>
-                <td>eu-central-2</td>
-                <td>Frankfurt, Germany</td>
-            </tr>
-            <tr>
-                <td>eu-west-2</td>
-                <td>London, United Kingdom</td>
-            </tr>
-            <tr>
-                <td>eu-south-1</td>
-                <td>Paris, France</td>
-            </tr>
+            <tr><td>us-central-1</td><td>Dallas, United States (default)</td></tr>
+            <tr><td>us-west-2</td><td>Los Angeles, United States</td></tr>
+            <tr><td>us-west-4</td><td>Oregon, United States</td></tr>
+            <tr><td>us-southwest-1</td><td>Phoenix, United States</td></tr>
+            <tr><td>us-southeast-1</td><td>Miami, United States</td></tr>
+            <tr><td>us-midwest-1</td><td>Chicago, United States</td></tr>
+            <tr><td>us-east-1</td><td>Virginia, United States</td></tr>
+            <tr><td>eu-west-1</td><td>Ireland</td></tr>
+            <tr><td>eu-west-3</td><td>London, United Kingdom</td></tr>
+            <tr><td>eu-west-4</td><td>Paris, France</td></tr>
+            <tr><td>eu-central-1</td><td>Frankfurt, Germany</td></tr>
+            <tr><td>eu-south-1</td><td>Milan, Italy</td></tr>
+            <tr><td>ap-northeast-1</td><td>Tokyo, Japan</td></tr>
         </tbody>
     </table>
-    <p>Per-bucket region selection is planned to allow EU-only storage for organizations that require data to remain within the European Economic Area. International data transfers are governed by Standard Contractual Clauses as described in our <a href="/legal/dpa">DPA</a>.</p>
+    <p>A bucket's region is fixed at creation and its objects are stored only in that region: EU regions keep data within the European Union and United Kingdom as labelled above. International data transfers are governed by Standard Contractual Clauses as described in our <a href="/legal/dpa">DPA</a>.</p>
 
     <h2 id="sub-processors">Sub-processors</h2>
     <p>stored.ge engages the following sub-processors in delivering the service:</p>

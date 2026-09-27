@@ -11,6 +11,7 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/testutil"
 
+	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/FairForge/vaultaire/internal/usage"
 	"github.com/stretchr/testify/assert"
@@ -327,7 +328,7 @@ func TestCreateBucket_DefaultRegion(t *testing.T) {
 	var region string
 	err = db.QueryRow(`SELECT region FROM buckets WHERE tenant_id = 'test-s3-r2' AND name = 'default-region-bucket'`).Scan(&region)
 	require.NoError(t, err)
-	assert.Equal(t, "us-west-1", region)
+	assert.Equal(t, drivers.IDriveDefaultRegion(os.Getenv), region, "default = the primary's region (WP-R7-1), not a label the account lacks")
 }
 
 func TestCreateBucket_XMLLocationConstraint(t *testing.T) {
@@ -345,7 +346,7 @@ func TestCreateBucket_XMLLocationConstraint(t *testing.T) {
 	s := s3ServerWithDB(t, db)
 	defer func() { _ = os.RemoveAll("/tmp/vaultaire/test-s3-r3") }()
 
-	body := `<CreateBucketConfiguration><LocationConstraint>eu-central-2</LocationConstraint></CreateBucketConfiguration>`
+	body := `<CreateBucketConfiguration><LocationConstraint>eu-central-1</LocationConstraint></CreateBucketConfiguration>`
 	req := httptest.NewRequest("PUT", "/xml-region-bucket", strings.NewReader(body))
 	req.Header.Set("Content-Length", "100")
 	req = withTenantCtx(req, "test-s3-r3")
@@ -358,7 +359,7 @@ func TestCreateBucket_XMLLocationConstraint(t *testing.T) {
 	var region string
 	err = db.QueryRow(`SELECT region FROM buckets WHERE tenant_id = 'test-s3-r3' AND name = 'xml-region-bucket'`).Scan(&region)
 	require.NoError(t, err)
-	assert.Equal(t, "eu-central-2", region)
+	assert.Equal(t, "eu-central-1", region)
 }
 
 func TestGetBucketLocation(t *testing.T) {

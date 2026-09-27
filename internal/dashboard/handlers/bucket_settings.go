@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
@@ -41,7 +42,7 @@ func HandleBucketSettings(tmpl *template.Template, db *sql.DB, logger *zap.Logge
 		corsOrigins := "*"
 		cacheMaxAge := 3600
 		slug := ""
-		region := "us-west-1"
+		region := drivers.IDriveDefaultRegion(os.Getenv)
 		tierPref := "auto"
 		var dataResidency sql.NullString
 

@@ -434,22 +434,27 @@ func bootstrap(logger *zap.Logger) (*sql.DB, *engine.CoreEngine) {
 
 	if accessKey := os.Getenv("IDRIVE_ACCESS_KEY"); accessKey != "" {
 		secretKey := os.Getenv("IDRIVE_SECRET_KEY")
+		defaultRegion := drivers.IDriveDefaultRegion(os.Getenv)
 		defaultEndpoint := os.Getenv("IDRIVE_ENDPOINT")
 		if defaultEndpoint == "" {
-			defaultEndpoint = "https://e2-us-west-1.idrive.com"
-		}
-		defaultRegion := os.Getenv("IDRIVE_REGION")
-		if defaultRegion == "" {
-			defaultRegion = "us-west-1"
+			defaultEndpoint = drivers.IDriveRegionEndpoint(os.Getenv, defaultRegion)
 		}
 		if d, dErr := drivers.NewIDriveDriver(accessKey, secretKey, defaultEndpoint, defaultRegion, logger); dErr == nil {
 			eng.AddDriver("idrive", d)
 			logger.Info("iDrive driver added")
 		}
-		for region, endpoint := range drivers.IDriveRegions {
-			driverName := "idrive-" + region
-			if d, dErr := drivers.NewIDriveDriver(accessKey, secretKey, endpoint, region, logger); dErr == nil {
-				eng.AddDriver(driverName, d)
+		// Same rule as cmd/vaultaire (WP-R7-1): a region driver only with its
+		// own key pair — the primary pair is refused (403) in other regions.
+		for region := range drivers.IDriveRegions {
+			if region == defaultRegion {
+				continue
+			}
+			ak, sk := drivers.IDriveRegionCredentials(os.Getenv, region)
+			if ak == "" {
+				continue
+			}
+			if d, dErr := drivers.NewIDriveDriver(ak, sk, drivers.IDriveRegionEndpoint(os.Getenv, region), region, logger); dErr == nil {
+				eng.AddDriver("idrive-"+region, d)
 			}
 		}
 	}

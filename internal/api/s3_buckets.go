@@ -186,10 +186,19 @@ func (s *Server) CreateBucket(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if region == "" {
-		region = "us-west-1"
+		region = drivers.IDriveDefaultRegion(os.Getenv)
 	}
 	if !drivers.IsValidRegion(region) {
 		WriteS3Error(w, ErrInvalidLocationConstraint, r.URL.Path, generateRequestID())
+		return
+	}
+	// A region the account has but this deployment has no driver for must be
+	// refused: accepting the bucket would silently store its objects on the
+	// primary — a data-residency breach with a truthful-looking label
+	// (Review R7-01 / WP-R7-1).
+	if !drivers.IDriveRegionAvailable(region) {
+		WriteS3ErrorWithContext(w, ErrInvalidLocationConstraint, r.URL.Path, generateRequestID(),
+			WithSuggestion(fmt.Sprintf("Region %s is not enabled on this deployment.", region)))
 		return
 	}
 
@@ -253,7 +262,7 @@ func (s *Server) handleGetBucketLocation(w http.ResponseWriter, r *http.Request,
 			return
 		}
 	} else {
-		region = "us-west-1"
+		region = drivers.IDriveDefaultRegion(os.Getenv)
 	}
 
 	resp := LocationConstraintResponse{Location: region}
