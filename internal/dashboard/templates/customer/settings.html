@@ -13,12 +13,12 @@
     <form method="POST" action="/dashboard/settings/profile">
         <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
         <div class="form-group">
-            <label>Email</label>
-            <input type="email" value="{{.ProfileEmail}}" disabled>
+            <label for="f-email">Email</label>
+            <input id="f-email" type="email" value="{{.ProfileEmail}}" disabled>
         </div>
         <div class="form-group">
-            <label>Company</label>
-            <input type="text" name="company" value="{{.ProfileCompany}}" placeholder="Your company name">
+            <label for="f-company">Company</label>
+            <input id="f-company" type="text" name="company" value="{{.ProfileCompany}}" placeholder="Your company name">
         </div>
         {{if .MemberSince}}
         <p class="text-muted" style="margin-bottom: 1rem;">Member since {{.MemberSince}}</p>
@@ -34,16 +34,16 @@
     <form method="POST" action="/dashboard/settings/password">
         <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
         <div class="form-group">
-            <label>Current Password</label>
-            <input type="password" name="current_password" required>
+            <label for="f-current_password">Current Password</label>
+            <input id="f-current_password" type="password" name="current_password" required>
         </div>
         <div class="form-group">
-            <label>New Password</label>
-            <input type="password" name="new_password" required minlength="8">
+            <label for="f-new_password">New Password</label>
+            <input id="f-new_password" type="password" name="new_password" required minlength="8">
         </div>
         <div class="form-group">
-            <label>Confirm New Password</label>
-            <input type="password" name="confirm_password" required minlength="8">
+            <label for="f-confirm_password">Confirm New Password</label>
+            <input id="f-confirm_password" type="password" name="confirm_password" required minlength="8">
         </div>
         <button type="submit" class="btn btn-primary">Change Password</button>
     </form>
@@ -117,8 +117,8 @@
     <form method="POST" action="/dashboard/settings/mfa/disable">
         <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
         <div class="form-group">
-            <label>Enter your password to disable 2FA</label>
-            <input type="password" name="password" required>
+            <label for="f-password">Enter your password to disable 2FA</label>
+            <input id="f-password" type="password" name="password" required>
         </div>
         <button type="submit" class="btn btn-danger">Disable 2FA</button>
     </form>
@@ -137,8 +137,8 @@
     </form>
 </div>
 
-<div class="card" style="border: 1px solid var(--danger, #dc3545);">
-    <div class="card-title" style="color: var(--danger, #dc3545);">Delete Account</div>
+<div class="card" style="border: 1px solid var(--danger);">
+    <div class="card-title" style="color: var(--danger);">Delete Account</div>
     {{if .DeletionScheduled}}
     <div class="alert alert-error" style="margin-bottom: 1rem;">
         Your account is scheduled for deletion on <strong>{{.DeletionDate}}</strong>. All data will be permanently removed after this date.
@@ -152,12 +152,12 @@
     <form method="POST" action="/dashboard/settings/delete-account">
         <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
         <div class="form-group">
-            <label>Confirm your password</label>
-            <input type="password" name="password" required>
+            <label for="f-delete-password">Confirm your password</label>
+            <input id="f-delete-password" type="password" name="password" required>
         </div>
         <div class="form-group">
-            <label>Reason for leaving (optional)</label>
-            <textarea name="reason" rows="2" placeholder="Help us improve..."></textarea>
+            <label for="f-reason">Reason for leaving (optional)</label>
+            <textarea id="f-reason" name="reason" rows="2" placeholder="Help us improve..."></textarea>
         </div>
         <button type="submit" class="btn btn-danger" onclick="return confirm('Are you sure? Your account will be scheduled for deletion in 30 days.');">Delete Account</button>
     </form>

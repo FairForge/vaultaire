@@ -109,25 +109,25 @@
     {{if .HasChartData}}
     <div style="margin-top:1rem">
         <div class="card-detail" style="margin-bottom:0.5rem">30-Day Bandwidth</div>
-        <svg viewBox="0 0 620 240" style="width:100%;max-width:620px;background:#f8f9fa;border-radius:4px">
-            <text x="2" y="12" font-size="10" fill="#666">{{.ChartMaxLabel}}</text>
+        <svg viewBox="0 0 620 240" style="width:100%;max-width:620px;background:var(--panel);border-radius:4px">
+            <text x="2" y="12" font-size="10" fill="var(--dim)">{{.ChartMaxLabel}}</text>
             <g transform="translate(10,20)">
                 {{range .ChartBars}}
-                <rect x="{{.X}}" y="{{.InY}}" width="{{.W}}" height="{{.InH}}" fill="#3b82f6" rx="1"/>
-                <rect x="{{.X}}" y="{{.EgY}}" width="{{.W}}" height="{{.EgH}}" fill="#10b981" rx="1"/>
+                <rect x="{{.X}}" y="{{.InY}}" width="{{.W}}" height="{{.InH}}" fill="var(--btn)" rx="1"/>
+                <rect x="{{.X}}" y="{{.EgY}}" width="{{.W}}" height="{{.EgH}}" fill="var(--ok-ink)" rx="1"/>
                 {{if .ShowLabel}}
-                <text x="{{.X}}" y="215" font-size="9" fill="#999">{{.Label}}</text>
+                <text x="{{.X}}" y="215" font-size="9" fill="var(--dim)">{{.Label}}</text>
                 {{end}}
                 {{end}}
             </g>
         </svg>
-        <div style="margin-top:0.5rem;font-size:0.8rem;color:#666">
-            <span style="color:#3b82f6">&#9632;</span> Ingress
-            <span style="color:#10b981;margin-left:1rem">&#9632;</span> Egress
+        <div style="margin-top:0.5rem;font-size:0.8rem;color:var(--dim)">
+            <span style="color:var(--btn)">&#9632;</span> Ingress
+            <span style="color:var(--ok-ink);margin-left:1rem">&#9632;</span> Egress
         </div>
     </div>
     {{else}}
-    <div class="card-detail" style="margin-top:1rem;color:#999">No bandwidth data yet.</div>
+    <div class="card-detail" style="margin-top:1rem;color:var(--dim)">No bandwidth data yet.</div>
     {{end}}
 
     <div id="bandwidth-feedback"></div>

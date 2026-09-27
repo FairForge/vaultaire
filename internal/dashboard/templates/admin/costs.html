@@ -21,7 +21,7 @@
     </div>
     <div class="card">
         <div class="card-title">Negative-Margin Tenants</div>
-        <div class="card-value"{{if gt .NegativeMarginCount 0}} style="color:#ef4444"{{end}}>{{.NegativeMarginCount}}</div>
+        <div class="card-value"{{if gt .NegativeMarginCount 0}} style="color:var(--danger-ink)"{{end}}>{{.NegativeMarginCount}}</div>
     </div>
 </div>
 
@@ -138,7 +138,7 @@
                     <td style="text-align:right">{{.RevenueFmt}}</td>
                     <td style="text-align:right">{{.CostFmt}}</td>
                     <td style="text-align:right">{{.EgressCostFmt}}</td>
-                    <td style="text-align:right{{if .IsNegative}};color:#ef4444;font-weight:600{{end}}">{{.MarginFmt}}</td>
+                    <td style="text-align:right{{if .IsNegative}};color:var(--danger-ink);font-weight:600{{end}}">{{.MarginFmt}}</td>
                 </tr>
                 {{end}}
             </tbody>

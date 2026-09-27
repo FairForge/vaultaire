@@ -30,7 +30,7 @@ Light is the default; dark follows the system or the toggle (`data-theme` on `<h
 | `--panel` / `--panel-hover` | `#ebe6de` / `#dfd8cd` | `#2f2f2f` / `#3a3a3a` | trays, chips, sliders |
 | `--ink` | `#2b2b2b` | `#f3f3f3` | headings, strong |
 | `--body` | `#4d4d4d` | `#cfcfcf` | text |
-| `--dim` | `#737373` | `#a0a0a0` | captions (min 4.5:1 on its background) |
+| `--dim` | `#737373` (`#666666` on the dashboard, whose captions sit on `--bg`) | `#a0a0a0` | captions (min 4.5:1 on its background) |
 | `--line` | `#e3ddd3` | `#363636` | hairlines |
 | `--bar` | `#383838` | `#101010` | top bar, footer |
 | `--btn` / `--btn-ink` | `#333333` / `#ffffff` | `#f3f3f3` / `#1a1a1a` | primary buttons |
