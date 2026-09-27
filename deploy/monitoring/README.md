@@ -99,10 +99,21 @@ never-incremented stub before), so `VaultaireHighErrorRate` can now fire.
 
 ### Env knobs for the Lyve probe
 
-`LYVE_PROBE_ACCESS_KEY` / `LYVE_PROBE_SECRET_KEY` (root key; falls back to
-`LYVE_ACCESS_KEY`/`LYVE_SECRET_KEY`, which IS root until the Lyve hygiene
-pass moves prod to a service user) and `LYVE_PROBE_CUSTOMER` (default `v01`).
-Without a secret the Lyve probe degrades to the old TCP dial.
+`LYVE_PROBE_ACCESS_KEY` / `LYVE_PROBE_SECRET_KEY` (the account ROOT key — the
+console action is root-only) and `LYVE_PROBE_CUSTOMER` (default `v01`). There
+is deliberately **no fallback** to `LYVE_ACCESS_KEY`/`LYVE_SECRET_KEY`
+(Review R7-19): the data-plane pair is meant to be the scoped `vaultaire-prod`
+IAM user, which the console refuses, so a fallback would turn that key
+rotation into a false alert. Without the probe pair the Lyve probe is the
+driver's signed `HeadBucket` on `stored-<LYVE_REGION>`; only when no Lyve
+driver is registered does it degrade to the old TCP dial.
+
+Also probed since R7: every `idrive-<region>` driver that has its own
+`IDRIVE_<REGION>_ACCESS_KEY`/`_SECRET_KEY` pair (signed HeadBucket, starts
+staggered across one 30 s interval — regions running on the primary pair are
+a known 403 and are skipped), and `permafrost` (authenticated Graph call on
+one rotating fleet account; `PermafrostProbeFailing` is a 15-minute warning,
+and `BackendProbeFailing` excludes it).
 
 ## Known limits
 

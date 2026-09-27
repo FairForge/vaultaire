@@ -115,26 +115,32 @@ func (d *S3CompatDriver) Delete(ctx context.Context, container, artifact string)
 	return nil
 }
 
-// List lists artifacts in a container
+// List returns the artifact names under container that start with prefix,
+// relative to the container, across every page (Review R7-06: this used to
+// strip len(prefix) bytes off the key — the artifact prefix, not the
+// `<root>/<container>/` key prefix — and read one page).
 func (d *S3CompatDriver) List(ctx context.Context, container, prefix string) ([]string, error) {
-	s3Prefix := d.buildKey(container, "") + "/"
-
-	result, err := d.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket: aws.String(d.bucket),
-		Prefix: aws.String(s3Prefix),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("list objects with s3Prefix %s: %w", prefix, err)
-	}
+	keyPrefix := d.buildKey(container, "") + "/"
 
 	var artifacts []string
-	s3PrefixLen := len(prefix)
-
-	for _, obj := range result.Contents {
-		if obj.Key != nil && len(*obj.Key) > s3PrefixLen {
-			// Remove the prefix to get just the artifact name
-			artifactPath := (*obj.Key)[s3PrefixLen:]
-			artifacts = append(artifacts, artifactPath)
+	paginator := s3ListPaginator(d.client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(d.bucket),
+		Prefix: aws.String(keyPrefix + prefix),
+	})
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list objects %s%s: %w", keyPrefix, prefix, err)
+		}
+		for _, obj := range page.Contents {
+			key := aws.ToString(obj.Key)
+			// A sibling container sharing the prefix (c1 vs c1-other) cannot
+			// match keyPrefix because of the trailing slash; the container's
+			// own directory marker (key == keyPrefix) yields an empty name.
+			if !strings.HasPrefix(key, keyPrefix) || len(key) == len(keyPrefix) {
+				continue
+			}
+			artifacts = append(artifacts, key[len(keyPrefix):])
 		}
 	}
 
@@ -150,7 +156,7 @@ func (d *S3CompatDriver) Exists(ctx context.Context, container, artifact string)
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		if strings.Contains(err.Error(), "NotFound") || strings.Contains(err.Error(), "404") {
+		if s3IsNotFound(err) {
 			return false, nil
 		}
 		return false, fmt.Errorf("exists %s: %w", key, err)

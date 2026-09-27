@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 
@@ -117,14 +116,18 @@ func (d *S3Driver) List(ctx context.Context, container, prefix string) ([]string
 		input.Prefix = aws.String(prefix)
 	}
 
-	result, err := d.client.ListObjectsV2(ctx, input)
-	if err != nil {
-		return nil, fmt.Errorf("list objects in %s: %w", container, err)
-	}
-
+	// Every page (Review R7-06): a single ListObjectsV2 call silently
+	// truncated listings at 1,000 keys.
 	var keys []string
-	for _, obj := range result.Contents {
-		keys = append(keys, *obj.Key)
+	paginator := s3ListPaginator(d.client, input)
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list objects in %s: %w", container, err)
+		}
+		for _, obj := range page.Contents {
+			keys = append(keys, aws.ToString(obj.Key))
+		}
 	}
 	return keys, nil
 }
@@ -136,7 +139,7 @@ func (d *S3Driver) Exists(ctx context.Context, container, artifact string) (bool
 		Key:    aws.String(artifact),
 	})
 	if err != nil {
-		if strings.Contains(err.Error(), "NotFound") || strings.Contains(err.Error(), "404") {
+		if s3IsNotFound(err) {
 			return false, nil
 		}
 		return false, fmt.Errorf("exists %s/%s: %w", container, artifact, err)

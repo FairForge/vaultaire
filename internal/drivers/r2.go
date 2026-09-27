@@ -214,7 +214,7 @@ func (d *R2Driver) List(ctx context.Context, container, prefix string) ([]string
 	basePrefix := d.buildKey(tenantID, container, "")
 
 	var artifacts []string
-	paginator := s3.NewListObjectsV2Paginator(d.client, &s3.ListObjectsV2Input{
+	paginator := s3ListPaginator(d.client, &s3.ListObjectsV2Input{
 		Bucket: aws.String(d.bucket),
 		Prefix: aws.String(fullPrefix),
 	})
@@ -237,7 +237,7 @@ func (d *R2Driver) Exists(ctx context.Context, container, artifact string) (bool
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		if strings.Contains(err.Error(), "NotFound") || strings.Contains(err.Error(), "404") {
+		if s3IsNotFound(err) {
 			return false, nil
 		}
 		return false, fmt.Errorf("r2 exists %s: %w", key, err)

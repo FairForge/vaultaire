@@ -188,7 +188,11 @@ func NewOneDriveFleetDriver(logger *zap.Logger) (*OneDriveDriver, error) {
 	return d, nil
 }
 
-func (d *OneDriveDriver) Name() string { return "onedrive" }
+// Name is the registration key main.go uses ("permafrost"). The engine records
+// the registration key as an object's backend_name, so the two must never
+// drift: the driver was once registered as "onedrive" and 2,613 prod head rows
+// still carry that name with no driver to answer it (Review R7-10).
+func (d *OneDriveDriver) Name() string { return "permafrost" }
 
 func (d *OneDriveDriver) TenantCount() int { return len(d.tenants) }
 

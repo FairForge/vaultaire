@@ -14,7 +14,7 @@ groups:
       # Primary/durable backends: a failing signed probe for 5 minutes means
       # PUTs are 503ing (fail-loudly) or reads are failing. Page.
       - alert: BackendProbeFailing
-        expr: vaultaire_backend_health{backend!="lyve"} == 0
+        expr: vaultaire_backend_health{backend!~"lyve|permafrost"} == 0
         for: 5m
         labels:
           severity: critical
@@ -32,6 +32,18 @@ groups:
         annotations:
           summary: "Lyve console probe failing"
           description: "RSCustomerDetails (root key) has failed for 15+ minutes — beyond the known 403 propagation windows. Check the Lyve console / key status."
+
+      # Permafrost (OneDrive fleet) is an internal parity leg, not
+      # customer-facing, and its probe covers one rotating fleet account per
+      # tick (Review R7-18/19) — a warning, not a page.
+      - alert: PermafrostProbeFailing
+        expr: vaultaire_backend_health{backend="permafrost"} == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Permafrost (OneDrive fleet) probe failing"
+          description: "The authenticated Graph probe has failed for 15+ minutes (expired client secret? tenant throttled?). Check `curl -s localhost:8000/health/backends` for last_error and the Azure app registrations' secret expiries."
 
       # Durable writes are being rejected. One in 10 minutes is worth a
       # heads-up (letshow writes every minute, so a real outage produces

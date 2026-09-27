@@ -153,7 +153,7 @@ GitHub Actions Deploy (`.github/workflows/deploy.yml`):
 | `STORAGE_MODE` | auto-detect | Force specific backend |
 | `S3_ACCESS_KEY`, `S3_SECRET_KEY` | — | AWS S3 credentials |
 | `LYVE_ACCESS_KEY`, `LYVE_SECRET_KEY`, `LYVE_REGION` | region: us-west-1 | Seagate Lyve Cloud 2 — buckets are homed per region; see `internal/drivers/lyve_README.md` |
-| `LYVE_PROBE_ACCESS_KEY`, `LYVE_PROBE_SECRET_KEY`, `LYVE_PROBE_CUSTOMER` | falls back to `LYVE_*`; customer `v01` | Root key for the authenticated Lyve health probe (console `RSCustomerDetails` is root-only); see `deploy/monitoring/README.md` |
+| `LYVE_PROBE_ACCESS_KEY`, `LYVE_PROBE_SECRET_KEY`, `LYVE_PROBE_CUSTOMER` | unset → the probe is the driver's signed HeadBucket; customer `v01` | Root key for the console `RSCustomerDetails` probe (root-only). It never falls back to `LYVE_*` (R7-19): the data-plane key should be the scoped `vaultaire-prod` user, which the console refuses; see `deploy/monitoring/README.md` |
 | `QUOTALESS_ACCESS_KEY`, `QUOTALESS_SECRET_KEY`, `QUOTALESS_ENDPOINT` | — | Quotaless storage |
 | `STRIPE_SECRET_KEY` | — | Stripe API key (sk_test_... or sk_live_...) |
 | `STRIPE_WEBHOOK_SECRET` | — | Stripe webhook endpoint secret (whsec_...) |

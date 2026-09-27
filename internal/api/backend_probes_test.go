@@ -99,13 +99,18 @@ func TestBuildBackendProbes_SkipsDriverThatFailedToRegister(t *testing.T) {
 	}
 }
 
-func TestBuildBackendProbes_LyveConsoleProbeWhenSecretPresent(t *testing.T) {
-	env := map[string]string{"LYVE_ACCESS_KEY": "STX1ROOT", "LYVE_SECRET_KEY": "s", "LYVE_REGION": "us-east-1"}
+func TestBuildBackendProbes_LyveConsoleProbeWhenProbeKeyPresent(t *testing.T) {
+	// The console action is root-only, so it runs only on the dedicated
+	// LYVE_PROBE_* pair (R7-02/R7-19) — never on the data-plane key.
+	env := map[string]string{
+		"LYVE_ACCESS_KEY": "STX1SERVICE", "LYVE_SECRET_KEY": "s", "LYVE_REGION": "us-east-1",
+		"LYVE_PROBE_ACCESS_KEY": "STX1ROOT", "LYVE_PROBE_SECRET_KEY": "root-secret",
+	}
 
-	got := buildBackendProbes(envOf(env), &fakeDriverChecker{})
+	got := buildBackendProbes(envOf(env), &fakeDriverChecker{drivers: map[string]error{"lyve": nil}})
 	c := findCheck(t, got, "lyve")
 
-	require.NotNil(t, c.probe, "with a secret the Lyve probe is the console action")
+	require.NotNil(t, c.probe, "with a probe key the Lyve probe is the console action")
 	assert.Equal(t, "s3.us-east-1.global.lyve.seagate.com:443", c.address, "TCP address kept for diagnostics")
 	assert.Equal(t, lyveConsoleProbeInterval, c.interval, "console probe is paced slower than the S3 HEADs")
 }
@@ -139,8 +144,8 @@ func TestLyveProbeCredentials_DedicatedProbeKeyWins(t *testing.T) {
 	delete(env, "LYVE_PROBE_SECRET_KEY")
 	delete(env, "LYVE_PROBE_CUSTOMER")
 	ak, sk, customer = lyveProbeCredentials(envOf(env))
-	assert.Equal(t, "STX1SERVICE", ak, "falls back to the data-plane key (today that IS root)")
-	assert.Equal(t, "service-secret", sk)
+	assert.Empty(t, ak, "no fallback to the data-plane key: RSCustomerDetails is root-only and LYVE_* becomes a scoped user (R7-02)")
+	assert.Empty(t, sk)
 	assert.Equal(t, "v01", customer, "customer id defaults to ours")
 }
 

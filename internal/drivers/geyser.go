@@ -314,19 +314,22 @@ func (d *GeyserDriver) List(ctx context.Context, container string, prefix string
 	tenantID := d.getTenantID(ctx)
 	fullPrefix := d.buildKey(tenantID, container, prefix)
 
-	resp, err := d.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+	// Every page (Review R7-06): a single ListObjectsV2 call truncated the
+	// listing at 1,000 keys.
+	var artifacts []string
+	basePrefix := d.buildKey(tenantID, container, "")
+	paginator := s3ListPaginator(d.client, &s3.ListObjectsV2Input{
 		Bucket: aws.String(d.bucket),
 		Prefix: aws.String(fullPrefix),
 	})
-	if err != nil {
-		return nil, fmt.Errorf("geyser list: %w", err)
-	}
-
-	var artifacts []string
-	basePrefix := d.buildKey(tenantID, container, "")
-	for _, obj := range resp.Contents {
-		name := strings.TrimPrefix(*obj.Key, basePrefix)
-		artifacts = append(artifacts, name)
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("geyser list %s: %w", fullPrefix, err)
+		}
+		for _, obj := range page.Contents {
+			artifacts = append(artifacts, strings.TrimPrefix(aws.ToString(obj.Key), basePrefix))
+		}
 	}
 	return artifacts, nil
 }
@@ -340,7 +343,7 @@ func (d *GeyserDriver) Exists(ctx context.Context, container, artifact string) (
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		if strings.Contains(err.Error(), "NotFound") || strings.Contains(err.Error(), "404") {
+		if s3IsNotFound(err) {
 			return false, nil
 		}
 		return false, fmt.Errorf("geyser exists %s: %w", key, err)

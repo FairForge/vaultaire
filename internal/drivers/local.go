@@ -127,21 +127,37 @@ func (d *LocalDriver) resolvePath(container, artifact string) (string, error) {
 	return full, nil
 }
 
-// List lists artifacts in a container
+// List returns the artifact names under container that start with prefix,
+// slash-separated and relative to the container, walking the whole container
+// (used only on the no-DB listing fallback). A missing container — or one
+// that resolves outside the data directory — is an empty listing, not an
+// error. In-flight AtomicWrite temp files (`.tmp-*`) and legacy `.meta`
+// sidecars are not objects (Review R7-06).
 func (d *LocalDriver) List(ctx context.Context, container, prefix string) ([]string, error) {
-	containerPath := filepath.Join(d.basePath, container)
-	var artifacts []string
+	containerPath, err := d.resolvePath(container, "")
+	if err != nil {
+		return []string{}, nil
+	}
+	artifacts := []string{}
 
-	err := filepath.Walk(containerPath, func(path string, info os.FileInfo, err error) error {
+	err = filepath.Walk(containerPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
 		}
-		if !info.IsDir() {
-			if rel, err := filepath.Rel(containerPath, path); err == nil {
-				if !strings.HasSuffix(rel, ".meta") {
-					artifacts = append(artifacts, rel)
-				}
-			}
+		if info.IsDir() {
+			return nil
+		}
+		base := info.Name()
+		if isAtomicWriteTemp(base) || strings.HasSuffix(base, ".meta") {
+			return nil
+		}
+		rel, err := filepath.Rel(containerPath, path)
+		if err != nil {
+			return nil
+		}
+		name := filepath.ToSlash(rel)
+		if strings.HasPrefix(name, prefix) {
+			artifacts = append(artifacts, name)
 		}
 		return nil
 	})
@@ -685,6 +701,23 @@ func (d *LocalDriver) HasDirectoryChanged(ctx context.Context, container, dir st
 	return modTime.After(since), nil
 }
 
+// isAtomicWriteTemp reports whether a file name is one of AtomicWrite's
+// in-flight temp files: os.CreateTemp(dir, ".tmp-*") appends a random decimal
+// number, so the suffix is all digits. A customer key such as ".tmp-notes"
+// is a legitimate object and must stay visible in listings.
+func isAtomicWriteTemp(name string) bool {
+	rest, ok := strings.CutPrefix(name, ".tmp-")
+	if !ok || rest == "" {
+		return false
+	}
+	for _, c := range rest {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // AtomicWrite performs an atomic write operation using temp file + rename
 func (d *LocalDriver) AtomicWrite(ctx context.Context, container, artifact string, data io.Reader) error {
 	containerPath := filepath.Join(d.basePath, container)
@@ -1009,10 +1042,15 @@ func (d *LocalDriver) CompleteMultipartUpload(ctx context.Context, upload *Multi
 	return nil
 }
 
-// Exists checks if an artifact exists
+// Exists checks if an artifact exists. A key that resolves outside the data
+// directory cannot exist: (false, nil), and nothing outside is stat'ed
+// (Review R7-20).
 func (d *LocalDriver) Exists(ctx context.Context, container, artifact string) (bool, error) {
-	fullPath := filepath.Join(d.basePath, container, artifact)
-	_, err := os.Stat(fullPath)
+	fullPath, err := d.resolvePath(container, artifact)
+	if err != nil {
+		return false, nil
+	}
+	_, err = os.Stat(fullPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
