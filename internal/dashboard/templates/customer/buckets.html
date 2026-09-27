@@ -22,18 +22,10 @@
             <div class="form-group form-group-inline">
                 <label>Region</label>
                 <select name="region">
-                    <optgroup label="United States">
-                        <option value="us-west-1" selected>US West (San Jose)</option>
-                        <option value="us-west-2">US West (Dallas)</option>
-                        <option value="us-central-1">US Central (Chicago)</option>
-                        <option value="us-east-1">US East (Virginia)</option>
-                    </optgroup>
-                    <optgroup label="European Union">
-                        <option value="eu-west-1">EU West (Ireland)</option>
-                        <option value="eu-central-2">EU Central (Frankfurt)</option>
-                        <option value="eu-west-2">EU West (London)</option>
-                        <option value="eu-south-1">EU South (Milan)</option>
-                    </optgroup>
+                    {{range .RegionGroups}}<optgroup label="{{.Label}}">
+                        {{range .Regions}}<option value="{{.ID}}"{{if eq .ID $.DefaultRegion}} selected{{end}}{{if not .Available}} disabled{{end}}>{{.Name}}{{if not .Available}} (not enabled){{end}}</option>
+                        {{end}}</optgroup>
+                    {{end}}
                 </select>
             </div>
             <button type="submit" class="btn btn-primary">Create</button>

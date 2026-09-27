@@ -521,7 +521,7 @@ func TestHandleCreateBucket_DerivesResidency(t *testing.T) {
 	assert.Equal(t, "eu", residency)
 
 	// US region → 'us' residency
-	form = url.Values{"name": {"res-us-bucket"}, "region": {"us-west-1"}}
+	form = url.Values{"name": {"res-us-bucket"}, "region": {"us-central-1"}}
 	req = injectSessionWithTenant(httptest.NewRequest("POST", "/dashboard/buckets",
 		strings.NewReader(form.Encode())), "test-dash-dr2")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")

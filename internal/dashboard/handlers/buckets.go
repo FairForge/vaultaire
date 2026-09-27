@@ -68,6 +68,7 @@ func HandleBuckets(tmpl *template.Template, db *sql.DB, dataPath string, logger 
 
 		data := sessionData(sd, "buckets")
 		withCSRF(r.Context(), data)
+		withRegionPicker(data)
 
 		if db != nil {
 			buckets := listBuckets(r.Context(), db, sd.TenantID)
@@ -132,13 +133,20 @@ func HandleCreateBucket(tmpl *template.Template, db *sql.DB, dataPath string, lo
 			}
 		}
 
-		// Validate region selection.
+		// Validate region selection. Only regions with a registered driver on
+		// this deployment are offered/accepted (WP-R7-1): a bucket in any other
+		// region would silently store on the primary.
 		region := strings.TrimSpace(r.FormValue("region"))
 		if region == "" {
-			region = "us-west-1"
+			region = drivers.IDriveDefaultRegion(os.Getenv)
 		}
 		if !drivers.IsValidRegion(region) {
 			data["CreateError"] = "Invalid region."
+			renderBucketList(w, tmpl, db, sd, data, logger)
+			return
+		}
+		if !drivers.IDriveRegionAvailable(region) {
+			data["CreateError"] = "Region " + drivers.RegionDisplayName(region) + " is not enabled on this deployment."
 			renderBucketList(w, tmpl, db, sd, data, logger)
 			return
 		}
@@ -243,7 +251,37 @@ func HandleBucketObjects(tmpl *template.Template, db *sql.DB, logger *zap.Logger
 	}
 }
 
+// regionPickerOption is one row of the bucket-creation region picker.
+type regionPickerOption struct {
+	ID, Name  string
+	Available bool // a driver is registered for it on this deployment
+}
+
+// regionPickerGroup is one residency group of the picker.
+type regionPickerGroup struct {
+	Label   string
+	Regions []regionPickerOption
+}
+
+// withRegionPicker adds the region picker data: every account region grouped
+// by residency, flagged with whether this deployment can store there, and the
+// default (primary) region. The template used to hard-code eight regions,
+// three of which never existed (Review R7-01).
+func withRegionPicker(data map[string]any) {
+	var groups []regionPickerGroup
+	for _, g := range drivers.IDriveRegionGroups() {
+		pg := regionPickerGroup{Label: g.Label}
+		for _, r := range g.Regions {
+			pg.Regions = append(pg.Regions, regionPickerOption{ID: r.ID, Name: r.Name, Available: drivers.IDriveRegionAvailable(r.ID)})
+		}
+		groups = append(groups, pg)
+	}
+	data["RegionGroups"] = groups
+	data["DefaultRegion"] = drivers.IDriveDefaultRegion(os.Getenv)
+}
+
 func renderBucketList(w http.ResponseWriter, tmpl *template.Template, db *sql.DB, sd *dashauth.SessionData, data map[string]any, logger *zap.Logger) {
+	withRegionPicker(data)
 	if db != nil {
 		buckets := listBuckets(context.Background(), db, sd.TenantID)
 		data["Buckets"] = buckets

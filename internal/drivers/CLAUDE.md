@@ -36,9 +36,9 @@ All drivers implement `engine.Driver` directly (the old `driver.go` alias + `Put
 
 ### iDrive Region Registry (Phase 5.14.7)
 
-`idrive_regions.go` — static map of iDrive e2 region identifiers to S3-compatible endpoints. Used by `cmd/vaultaire/main.go` to register one `IDriveDriver` per region (`idrive-{region}`), enabling per-bucket data residency.
+`idrive_regions.go` — the 13 regions the reseller account actually has (`s3.<region>.idrivee2.com`; rebuilt in WP-R7-1 — the old table named eight AWS-style ids on `e2-<region>.idrive.com`, three of which never existed). `cmd/vaultaire/main.go` registers one `IDriveDriver` per region (`idrive-{region}`) **only when that region's own key pair is set** (`IDriveRegionCredentials` has no fallback — the primary pair answers 403 elsewhere), calls `EnsureBucket` so the region's fixed bucket exists, and records the enabled set with `SetAvailableIDriveRegions`. The primary serves `IDriveDefaultRegion` (`IDRIVE_REGION`, else `us-central-1`).
 
-Helpers: `IsValidRegion(region)`, `IsEURegion(region)` (true for `eu-*`), `RegionDisplayName(region)`. Called from S3 API (`CreateBucket` validation), dashboard (`HandleCreateBucket`, `HandleBucketSettings`), and engine adapter (`bucketRegionDriver` routing).
+Helpers: `IsValidRegion`, `IsEURegion` (`eu-*`), `RegionDisplayName`, `IDriveRegionGroups` (US / EU / Asia Pacific for pickers), `IDriveRegionAvailable` (enforced once main.go has called `SetAvailableIDriveRegions`; unset = every table region, for tests/dev). Called from S3 API (`CreateBucket` validation, `bucketRegionDriver` routing), dashboard (`HandleBuckets` picker, `HandleCreateBucket`, `HandleBucketSettings`).
 
 ### Not wired in main.go (scaffolds / future)
 
