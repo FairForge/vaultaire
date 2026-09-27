@@ -44,8 +44,10 @@ func TestNewOneDriveFleetDriver_IncompleteTenant(t *testing.T) {
 }
 
 func TestOneDriveDriver_Name(t *testing.T) {
+	// Must equal the registration key in cmd/vaultaire/main.go: the engine
+	// stores that key as backend_name, and a drift orphans routing rows (R7-10).
 	d := &OneDriveDriver{}
-	assert.Equal(t, "onedrive", d.Name())
+	assert.Equal(t, "permafrost", d.Name())
 }
 
 func TestOneDriveDriver_TenantCount(t *testing.T) {

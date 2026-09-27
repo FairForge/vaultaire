@@ -476,6 +476,9 @@ type backendCheck struct {
 	// interval overrides defaultProbeInterval; timeout overrides defaultProbeTimeout.
 	interval time.Duration
 	timeout  time.Duration
+	// initialDelay staggers the first probe (region drivers, R7-19) so a
+	// dozen signed HeadBuckets do not all fire in the same second at boot.
+	initialDelay time.Duration
 }
 
 // endpointToAddress parses an endpoint URL and returns host:port.
@@ -565,6 +568,13 @@ func configuredBackends(getenv func(string) string) []backendCheck {
 // cancelled. The first probe runs immediately so /health is accurate from
 // the first request.
 func (s *Server) runBackendHealthLoop(ctx context.Context, b backendCheck) {
+	if b.initialDelay > 0 {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(b.initialDelay):
+		}
+	}
 	s.probeBackendOnce(ctx, b)
 
 	interval := b.interval

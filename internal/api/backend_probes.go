@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"net"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/drivers"
@@ -66,32 +68,62 @@ func buildBackendProbes(getenv func(string) string, eng driverChecker) []backend
 		}
 	}
 
+	driverProbe := func(name string) func(ctx context.Context) error {
+		return func(ctx context.Context) error { return eng.CheckDriver(ctx, name) }
+	}
+
 	for i := range checks {
 		if checks[i].name != "lyve" {
 			continue
 		}
-		ak, sk, customer := lyveProbeCredentials(getenv)
-		if ak == "" || sk == "" {
-			continue // cannot sign → keep the TCP dial
+		// Console action (root-only) on the dedicated probe pair; otherwise the
+		// driver's signed HeadBucket, which a scoped service user can do
+		// (R7-02/R7-19). The TCP dial remains only when neither exists.
+		if ak, sk, customer := lyveProbeCredentials(getenv); ak != "" && sk != "" {
+			client := drivers.NewLyveConsoleClient(ak, sk)
+			checks[i].probe = func(ctx context.Context) error { return client.CustomerDetails(ctx, customer) }
+			checks[i].interval = lyveConsoleProbeInterval
+			checks[i].timeout = lyveConsoleProbeTimeout
+		} else if registered["lyve"] {
+			checks[i].probe = driverProbe("lyve")
 		}
-		client := drivers.NewLyveConsoleClient(ak, sk)
-		checks[i].probe = func(ctx context.Context) error { return client.CustomerDetails(ctx, customer) }
-		checks[i].interval = lyveConsoleProbeInterval
-		checks[i].timeout = lyveConsoleProbeTimeout
 	}
 
 	for _, d := range []struct{ name, envKey string }{
 		{"idrive", "IDRIVE_ACCESS_KEY"},
 		{"geyser", "GEYSER_ACCESS_KEY"},
 		{"r2", "R2_ACCESS_KEY"},
+		{"permafrost", "TENANT_1_ID"},
 	} {
 		if getenv(d.envKey) == "" || !registered[d.name] {
 			continue
 		}
-		name := d.name
+		checks = append(checks, backendCheck{name: d.name, probe: driverProbe(d.name)})
+	}
+
+	// Region-pinned iDrive drivers (R1-12 / WP-R1-6): probed only when the
+	// region has its own key pair — the reseller account mints one per
+	// region, and a region left on the primary pair is a known 403 (R7-01)
+	// that would page forever. Starts are staggered across one interval so
+	// twelve HeadBuckets do not fire in the same second.
+	var regions []string
+	for name := range registered {
+		if !strings.HasPrefix(name, "idrive-") {
+			continue
+		}
+		region := strings.TrimPrefix(name, "idrive-")
+		ak := getenv(drivers.IDriveRegionEnvKey(region, "ACCESS_KEY"))
+		sk := getenv(drivers.IDriveRegionEnvKey(region, "SECRET_KEY"))
+		if ak != "" && sk != "" {
+			regions = append(regions, name)
+		}
+	}
+	sort.Strings(regions)
+	for i, name := range regions {
 		checks = append(checks, backendCheck{
-			name:  name,
-			probe: func(ctx context.Context) error { return eng.CheckDriver(ctx, name) },
+			name:         name,
+			probe:        driverProbe(name),
+			initialDelay: defaultProbeInterval * time.Duration(i+1) / time.Duration(len(regions)+1),
 		})
 	}
 
@@ -99,15 +131,16 @@ func buildBackendProbes(getenv func(string) string, eng driverChecker) []backend
 }
 
 // lyveProbeCredentials returns the key pair + customer id for the console
-// probe. RSCustomerDetails is ROOT-only, so once prod's data-plane LYVE_* key
-// becomes a scoped service user the root key lives in LYVE_PROBE_*; until
-// then the data-plane key (which is root today) is used.
+// probe. RSCustomerDetails is ROOT-only, so it runs on LYVE_PROBE_* alone:
+// the data-plane LYVE_* pair is (or is about to be) a scoped service user
+// that the console refuses, and using it here would turn the key rotation
+// into a false alert. With no probe pair the Lyve probe is the driver's
+// signed HeadBucket (see buildBackendProbes).
 func lyveProbeCredentials(getenv func(string) string) (accessKey, secretKey, customer string) {
 	accessKey = getenv("LYVE_PROBE_ACCESS_KEY")
 	secretKey = getenv("LYVE_PROBE_SECRET_KEY")
 	if accessKey == "" || secretKey == "" {
-		accessKey = getenv("LYVE_ACCESS_KEY")
-		secretKey = getenv("LYVE_SECRET_KEY")
+		accessKey, secretKey = "", ""
 	}
 	customer = getenv("LYVE_PROBE_CUSTOMER")
 	if customer == "" {

@@ -208,7 +208,7 @@ func (d *LyveDriver) List(ctx context.Context, container string, prefix string) 
 	// Use the tenantID we actually used, not d.tenantID
 	tenantPrefix := fmt.Sprintf("t-%s/%s/", tenantID, container)
 	var keys []string
-	paginator := s3.NewListObjectsV2Paginator(d.client, &s3.ListObjectsV2Input{
+	paginator := s3ListPaginator(d.client, &s3.ListObjectsV2Input{
 		Bucket: aws.String(bucket),
 		Prefix: aws.String(keyPrefix),
 	})
@@ -238,7 +238,7 @@ func (d *LyveDriver) Exists(ctx context.Context, container, artifact string) (bo
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		if strings.Contains(err.Error(), "NotFound") || strings.Contains(err.Error(), "404") {
+		if s3IsNotFound(err) {
 			return false, nil
 		}
 		return false, fmt.Errorf("lyve exists: %w", err)
@@ -255,5 +255,8 @@ func (d *LyveDriver) HealthCheck(ctx context.Context) error {
 	_, err := d.client.HeadBucket(ctx, &s3.HeadBucketInput{
 		Bucket: aws.String(bucket),
 	})
-	return err
+	if err != nil {
+		return fmt.Errorf("lyve health check (%s): %w", bucket, err)
+	}
+	return nil
 }
