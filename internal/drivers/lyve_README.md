@@ -1067,3 +1067,15 @@ Lyve has no egress fee, so Worker-served Lyve bytes are $0 at both ends.
 
 **Lifecycle expiration still unverified:** `lyve-lifecycle-canary-20260927` (us-west-1, 1-day
 expire-all, object planted 05:14 UTC 09-27) — check on/after 2026-09-29, then delete the bucket.
+
+### STANDARD_IA is fully read/write (verified 2026-09-27, us-west-1)
+
+Single PUT and multipart PUT with `--storage-class STANDARD_IA`, HEAD (`StorageClass:
+STANDARD_IA`), full GET, Range GET (206, class echoed), ListObjectsV2 class, anonymous presigned
+GET (TTFB 95 ms), CopyObject IA→STANDARD (HEAD then reports no class = STANDARD, AWS-style),
+in-place CopyObject to change class, a `Transitions: 30d → STANDARD_IA` lifecycle rule, and
+DeleteObject before 180 days (accepted; the minimum-retention charge, if any, is invoice-only).
+Paired 256 MiB throughput, two rounds: STANDARD PUT 153–167 / GET 56–170 MB/s, STANDARD_IA PUT
+154–167 / GET 84–126 MB/s, single-stream presigned 159–211 MB/s for both — **IA is not slower
+than STANDARD**; the spread is Lyve's run-to-run variance. Only unmeasured: whether a lifecycle
+transition actually fires after 30 days.
