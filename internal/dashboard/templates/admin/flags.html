@@ -13,6 +13,10 @@
         on other nodes within ~15s). Resolution: tenant override → global state →
         in-code default. Clearing a row reverts to the next level up.
     </div>
+    <div class="card-detail" style="margin-top:0.5rem">
+        <span class="badge">Tier 1</span> ships dark, opened per tenant first, then globally.
+        <span class="badge badge-warning" style="margin-left:0.5rem">Tier 2</span> billing, auth or the data path: never at chat speed, low-traffic window, a plan to flip back.
+    </div>
 </div>
 
 {{if not .Flags}}
@@ -28,8 +32,10 @@
         {{.Key}}
         {{if .Enabled}}<span class="badge badge-success">enabled</span>
         {{else}}<span class="badge badge-danger">disabled</span>{{end}}
+        {{if eq .Tier 2}}<span class="badge badge-warning">Tier 2</span>{{else if eq .Tier 1}}<span class="badge">Tier 1</span>{{end}}
         {{if not .Registered}}<span class="badge badge-warning">unregistered (leftover DB row)</span>{{end}}
     </div>
+    {{if .About}}<p class="text-muted" style="font-size:0.9rem;margin:0.25rem 0 0.5rem">{{.About}}</p>{{end}}
 
     <div class="card-detail" style="margin:0.5rem 0">
         Default: <strong>{{if .Default}}on{{else}}off{{end}}</strong>
@@ -77,8 +83,8 @@
 
     <form method="POST" action="/admin/flags/{{.Key}}/set" style="display:flex;gap:0.5rem;align-items:center;margin:0.5rem 0 0">
         <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
-        <input type="text" name="tenant_id" placeholder="tenant-…" required style="max-width:280px">
-        <select name="enabled">
+        <input type="text" name="tenant_id" placeholder="tenant-…" aria-label="Tenant id for the override" required style="max-width:280px">
+        <select name="enabled" aria-label="Override state">
             <option value="true">on</option>
             <option value="false">off</option>
         </select>

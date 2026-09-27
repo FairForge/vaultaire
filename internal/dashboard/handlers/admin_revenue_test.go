@@ -48,6 +48,10 @@ func TestRevenue_MRRFromFixedPlans(t *testing.T) {
 	mock.ExpectQuery(`SELECT tq.tier, tq.storage_used_bytes`).
 		WillReturnRows(sqlmock.NewRows([]string{"tier", "storage_used_bytes", "egress"}))
 
+	// House MRR (Phase 4): none.
+	mock.ExpectQuery(`SELECT t.id, t.house_period, f.floor`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "house_period", "floor", "storage_limit_bytes", "pin_hot_bytes"}))
+
 	// Active subs count.
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM tenants WHERE subscription_status = 'active'`).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(2))
@@ -107,6 +111,10 @@ func TestRevenue_MRRIncludesMetered(t *testing.T) {
 	mock.ExpectQuery(`SELECT tq.tier, tq.storage_used_bytes`).
 		WillReturnRows(sqlmock.NewRows([]string{"tier", "storage_used_bytes", "egress"}).
 			AddRow("standard", twoTB, int64(0)))
+
+	// House MRR (Phase 4): none.
+	mock.ExpectQuery(`SELECT t.id, t.house_period, f.floor`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "house_period", "floor", "storage_limit_bytes", "pin_hot_bytes"}))
 
 	// Active subs.
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM tenants WHERE subscription_status = 'active'`).

@@ -99,8 +99,8 @@ Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`,
 | `/admin/tenants/{id}/bandwidth-limit` | POST | session + admin | Update tenant bandwidth limit |
 | `/admin/tenants/{id}/reset-mfa` | POST | session + admin | Reset user's 2FA |
 | `/admin/waitlist` | GET | session + admin | Pre-launch waitlist signups (count + list) |
-| `/admin/waitlist/export` | GET | session + admin | Download all waitlist signups as CSV |
-| `/admin/revenue` | GET | session + admin | Revenue dashboard: MRR, tier breakdown, churn, top customers |
+| `/admin/waitlist/export` | GET | session + admin | Download waitlist signups as CSV; `?filter=house\|downstairs\|attic` cuts by the house built on the site, `?fields=email` gives the one-column launch list (Phase 4) |
+| `/admin/revenue` | GET | session + admin | Revenue dashboard: MRR (legacy packs + metered + houses per floor via `queryHouseMRR`/`billing.QuoteHouse`), tier breakdown, churn, top customers |
 | `/admin/costs` | GET | session + admin | Cost dashboard: backend spend, per-tenant margin, negative-margin alerts |
 | `/admin/dedup` | GET | session + admin | GCI dedup dashboard: global ratio, savings, per-tenant breakdown |
 | `/admin/support` | GET | session + admin | Customer support search (email, tenant ID, access key, Stripe ID) |
@@ -115,7 +115,7 @@ Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`,
 | `/admin/abuse` | GET | session + admin | Abuse queue with status filter tabs |
 | `/admin/abuse/{id}` | GET | session + admin | Abuse report detail with action buttons |
 | `/admin/abuse/{id}/action` | POST | session + admin | Change abuse report status (reviewing/actioned/dismissed) |
-| `/admin/flags` | GET | session + admin | Feature flags: defaults, global state, per-tenant overrides (1.13) |
+| `/admin/flags` | GET | session + admin | Feature flags: defaults, global state, per-tenant overrides (1.13); launch levers first, each with its runbook risk tier and a one-line description (`flagInfos` in admin_flags.go — add an entry when you register a flag) |
 | `/admin/flags/{key}/set` | POST | session + admin | Set global row or tenant override (form: enabled, tenant_id?) |
 | `/admin/flags/{key}/clear` | POST | session + admin | Remove a row → revert to global/default |
 | `/admin/*` | GET | session + admin role | Admin panel |
