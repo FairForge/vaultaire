@@ -1,0 +1,72 @@
+<section class="build" id="build">
+    <div class="container">
+        <div class="section-head">
+            <p class="kicker"><b>02</b>Build yours</p>
+            <h2>Pick it up. Put it away. <em>That's your storage.</em></h2>
+            <p class="lede">Your photos, your projects, your backups: things you want to keep, not carry around. Downstairs is in reach at $__PRICE_STD__/TB, the attic is stored away at $__PRICE_VAULT__/TB, and the receipt is your plan.</p>
+        </div>
+        <div class="why" id="why">
+            <div class="why-panel">
+                <p class="why-n"><b>1</b>Your stuff lives on things that die.</p>
+                <div class="why-art">__PHONE____LAPTOP__</div>
+                <p class="why-p">Phones fill up and laptops fail. Tap what you'd hate to lose.</p>
+                <div class="chips" role="group" aria-label="What to pack">
+                    <button class="chip" type="button" data-pack="p" aria-pressed="false">photos<small>1 TB</small></button>
+                    <button class="chip" type="button" data-pack="v" aria-pressed="false">videos<small>5 TB</small></button>
+                    <button class="chip" type="button" data-pack="w" aria-pressed="false">projects<small>1 TB</small></button>
+                    <button class="chip" type="button" data-pack="e" aria-pressed="false">everything<small>10 TB</small></button>
+                </div>
+            </div>
+            <div class="why-panel">
+                <p class="why-n"><b>2</b>Pack it into a box.</p>
+                <div class="why-art packed" id="packed"><span class="packed-empty">nothing packed yet</span></div>
+                <p class="why-p" id="packed-line">Each box is real space at a flat price. Bigger holds more.</p>
+            </div>
+            <div class="why-panel">
+                <p class="why-n"><b>3</b>Put it away. Get it back any time.</p>
+                <div class="why-art">__MASCOT____BOX__</div>
+                <p class="why-p">Downstairs when you use it. Attic when you don't. Bring it back down whenever you like; nothing is deleted.</p>
+                <div class="why-actions"><button class="btn btn-primary" type="button" id="pack-down" disabled>Put it downstairs</button><button class="btn btn-ghost" type="button" id="pack-up" disabled>Send to the attic</button></div>
+                <p class="why-fine">Fill a box from your laptop, a backup app, or the dashboard.</p>
+            </div>
+        </div>
+        <div class="builder">
+            <div class="b-stage">
+                <div class="b-room">
+                    <svg class="room-svg" id="room" viewBox="0 0 128 115" shape-rendering="crispEdges" role="group" aria-label="Your house: attic on top, downstairs below. Focus a piece and use arrow keys to move it; Delete removes it.">
+                        <defs><linearGradient id="wallgrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" style="stop-color:var(--wall-a)"/><stop offset="1" style="stop-color:var(--wall-b)"/></linearGradient></defs>
+                        <g id="room-bg" aria-hidden="true"><rect fill="url(#wallgrad)" width="128" height="103"/><rect y="10" width="128" height="44" fill="#3b2a1a" fill-opacity="0.38"/><rect width="128" height="10" fill="#4a3226"/><path fill="#5c4030" d="M0 4h128v1h-128z"/><rect x="0" y="54" width="3" height="3" fill="#a8683b"/><rect x="15" y="54" width="113" height="3" fill="#a8683b"/><rect x="15" y="56" width="113" height="1" fill="#6e4127"/><rect x="0" y="56" width="3" height="1" fill="#6e4127"/><rect x="5" y="57" width="2" height="46" fill="#a8683b"/><rect x="11" y="57" width="2" height="46" fill="#a8683b"/><path fill="#d59352" d="M5 61h8v1h-8zM5 66h8v1h-8zM5 71h8v1h-8zM5 76h8v1h-8zM5 81h8v1h-8zM5 86h8v1h-8zM5 91h8v1h-8zM5 96h8v1h-8zM5 101h8v1h-8z"/><rect x="20" y="60" width="42" height="11" fill="#6e4127"/><rect x="21" y="61" width="40" height="9" fill="#a8683b"/><text id="room-sign" x="41" y="67.6" text-anchor="middle" font-family="Silkscreen, monospace" font-size="5" fill="#fdf3dc">my place</text><rect y="103" width="128" height="2" fill="#efe8dc"/><rect y="105" width="128" height="10" fill="#c98a52"/><path fill="#b27540" d="M0 108h128v1h-128zM0 112h128v1h-128zM18 105h1v3h-1zM57 105h1v3h-1zM99 105h1v3h-1zM36 109h1v3h-1zM80 109h1v3h-1zM118 109h1v3h-1zM9 113h1v2h-1zM49 113h1v2h-1zM92 113h1v2h-1z"/><rect class="night-dim" width="128" height="115" fill="#070b24"/><circle class="win-frame" cx="104" cy="32" r="10" fill="#fdfaf3"/><circle class="win-sky" cx="104" cy="32" r="8" fill="#bfe3f5"/><path class="win-cloud" fill="#ffffff" d="M99 30h6v2h-6zM101 29h3v1h-3z"/><g class="win-night"><path fill="#fdf1c0" d="M105 27h3v1h-3zM104 28h2v1h-2zM104 29h2v1h-2zM104 30h2v1h-2zM105 31h3v1h-3z"/><path fill="#ffffff" d="M99 34h1v1h-1zM108 36h1v1h-1zM100 27h1v1h-1z"/></g><rect class="win-frame" x="83" y="66" width="32" height="26" fill="#fdfaf3"/><rect class="win-sky" x="85" y="68" width="28" height="22" fill="#bfe3f5"/><path class="win-cloud" fill="#ffffff" d="M89 72h8v2h-8zM91 71h4v1h-4zM101 80h9v2h-9zM103 79h4v1h-4z"/><g class="win-night"><path fill="#fdf1c0" d="M105 70h3v1h-3zM104 71h2v1h-2zM104 72h2v1h-2zM104 73h2v1h-2zM105 74h3v1h-3z"/><path fill="#ffffff" d="M88 70h1v1h-1zM93 74h1v1h-1zM87 83h1v1h-1zM95 86h1v1h-1zM109 82h1v1h-1zM103 87h1v1h-1zM111 76h1v1h-1zM91 88h1v1h-1z"/></g><rect class="win-frame" x="98" y="68" width="2" height="22" fill="#fdfaf3"/><rect class="win-frame" x="85" y="78" width="28" height="2" fill="#fdfaf3"/><rect class="win-frame" x="82" y="92" width="34" height="2" fill="#e6dccb"/><g class="zone-labels"><text class="zone-text" x="124" y="7.4" text-anchor="end" font-family="Silkscreen, monospace" font-size="4" fill="#e8dcc8">ATTIC  $__PRICE_VAULT__/TB</text><text class="zone-text zone-floor" x="124" y="112.6" text-anchor="end" font-family="Silkscreen, monospace" font-size="4" fill="#5a3418">DOWNSTAIRS  $__PRICE_STD__/TB</text></g></g>
+                        <g id="room-items"></g>
+                        <g id="room-tags"></g>
+                        <text id="room-empty" x="64" y="86" text-anchor="middle" font-family="Silkscreen, monospace" font-size="4" fill="#fdf3dc" display="none">tap or drag pieces in here</text>
+                    </svg>
+                    <div class="b-piece-tools" id="b-piece-tools" hidden><button type="button" id="b-open">open</button><button type="button" id="b-move">to attic</button><button type="button" id="b-remove">remove</button></div>
+                </div>
+                <p class="b-meter" id="b-meter"><b>7 TB</b> in your house, about 1.8 million photos<small>at roughly 4 MB a photo</small></p>
+                <div class="b-tools">
+                    <div class="swatches" role="group" aria-label="Wall colour"><span>wall</span>__WALLS__</div>
+                    <div class="swatches" role="group" aria-label="Outfit colour"><span>fit</span>__FITS__</div>
+                    <button class="b-reset" type="button" id="b-reset">reset house</button>
+                </div>
+            </div>
+            <div class="b-side">
+                __TRAY__
+                <div class="receipt" id="receipt" data-open="{{if .SignupsOpen}}1{{else}}0{{end}}">
+                    <div class="r-head">__CUP__<div style="flex:1"><label for="vault-name">name on the cup</label><input id="vault-name" type="text" maxlength="16" autocomplete="off" spellcheck="false" placeholder="your name"></div></div>
+                    <ul class="r-lines" id="r-lines"><li><span>Downstairs</span><span>6 TB</span><span class="dots"></span><span>$26.94</span></li><li class="sub">1 dresser, 1 storage box</li><li><span>Attic</span><span>1 TB</span><span class="dots"></span><span>$2.00</span></li><li class="sub">1 storage box · saves $2.49/mo vs downstairs</li><li class="muted"><span>decor</span><span>3 pcs</span><span class="dots"></span><span>free</span></li></ul>
+                    <div class="r-total"><small>total / mo, billed yearly</small><span id="r-total">$28.94</span></div>
+                    <p class="r-fine">Annual rates: downstairs is Standard at $__PRICE_STD__/TB, the attic is Vault at $__PRICE_VAULT__/TB. Monthly plans: $__PRICE_STD_MONTHLY__ and $__PRICE_VAULT_MONTHLY__. No meters, no API fees.</p>
+                    <p class="r-save" id="r-save">the same 7 TB on AWS S3: $161.00/mo</p>
+                    <p class="r-warn" id="r-warn"></p>
+                    <div class="r-actions">
+                        {{if .SignupsOpen}}<a class="btn btn-primary" href="/register">Start free</a>{{else}}<a class="btn btn-primary" href="#waitlist">Join waitlist</a>{{end}}
+                        <button class="btn btn-ghost" type="button" id="b-share">Share house</button>
+                        <button class="btn btn-ghost" type="button" id="b-save">Save image</button>
+                    </div>
+                </div>
+                <p class="sr-only" aria-live="polite" id="b-live"></p>
+            </div>
+        </div>
+    </div>
+</section>
+

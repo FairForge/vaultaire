@@ -1,0 +1,770 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>stored.ge — S3-compatible storage that optimizes itself. $__PRICE_STD__/TB, tape archive $__PRICE_VAULT__/TB</title>
+<meta name="description" content="S3-compatible object storage with automatic tiering across hot storage and tape. $__PRICE_STD__/TB, tape-backed archive at $__PRICE_VAULT__/TB. Flat per-TB quota, no API fees, no retrieval fees.">
+<meta property="og:title" content="stored.ge — S3-compatible storage that optimizes itself">
+<meta property="og:description" content="One endpoint. Your data auto-tiers across hot storage and tape — $__PRICE_STD__/TB, archive at $__PRICE_VAULT__/TB. Flat quota, no API fees.">
+<meta property="og:url" content="https://stored.ge">
+<meta property="og:image" content="https://stored.ge/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://stored.ge/og.png">
+<meta name="theme-color" content="#101010" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#383838" media="(prefers-color-scheme: light)">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%22-4 -4 22 22%22 shape-rendering=%22crispEdges%22%3E%3Crect x=%22-4%22 y=%22-4%22 width=%2222%22 height=%2222%22 fill=%22%23333%22/%3E%3Cpath fill=%22%23fff%22 d=%22M0 0h14v1h-14zM0 1h1v1h-1zM13 1h1v1h-1zM0 2h1v1h-1zM13 2h1v1h-1zM0 3h1v1h-1zM13 3h1v1h-1zM0 4h1v1h-1zM13 4h1v1h-1zM0 5h1v1h-1zM13 5h1v1h-1zM13 6h1v1h-1zM13 7h1v1h-1zM13 8h1v1h-1zM0 9h4v1h-4zM13 9h1v1h-1zM0 10h1v1h-1zM13 10h1v1h-1zM0 11h4v1h-4zM13 11h1v1h-1zM3 12h1v1h-1zM13 12h1v1h-1zM0 13h4v1h-4zM5 13h9v1h-9z%22/%3E%3C/svg%3E">
+
+<script>try{var t=localStorage.getItem("sg-theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}</script>
+<style>
+__CSS__
+</style>
+</head>
+<body>
+__SPRITES__
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+    <div class="topbar-inner">
+        <a class="logo" href="/" aria-label="stored.ge home"><svg class="px" style="--w:14;--h:14" viewBox="0 0 14 14" aria-hidden="true" focusable="false"><use href="#s-mark"/></svg><span>stored<b>.ge</b></span></a>
+        <nav aria-label="Main">
+            <ul class="topnav">
+                <li class="hide-sm"><a href="#build">Build yours</a></li>
+                <li class="hide-sm"><a href="#pricing">Pricing</a></li>
+                <li class="hide-sm"><a href="/docs">Docs</a></li>
+                <li class="hide-sm"><a href="/changelog">Changelog</a></li>
+                <li class="hide-sm"><a href="/status">Status</a></li>
+                <li><button class="theme-toggle" type="button" aria-label="Switch to dark mode"><svg class="i-moon" viewBox="0 0 8 8" aria-hidden="true"><path fill="currentColor" d="M3 0h3v1h-3zM1 1h3v1h-3zM1 2h2v1h-2zM0 3h2v1h-2zM0 4h2v1h-2zM1 5h2v1h-2zM1 6h3v1h-3zM3 7h3v1h-3z"/></svg><svg class="i-sun" viewBox="0 0 9 9" aria-hidden="true"><path fill="currentColor" d="M4 0h1v1h-1zM1 1h1v1h-1zM7 1h1v1h-1zM3 2h3v1h-3zM2 3h5v1h-5zM0 4h1v1h-1zM2 4h5v1h-5zM8 4h1v1h-1zM2 5h5v1h-5zM3 6h3v1h-3zM1 7h1v1h-1zM7 7h1v1h-1zM4 8h1v1h-1z"/></svg></button></li>
+                <li><a class="help" href="/docs/faq" aria-label="? frequently asked questions" title="FAQ">?</a></li>
+                <li><a href="/login">Sign in</a></li>
+                {{if .SignupsOpen}}
+                <li><a class="btn btn-primary" href="/register">Start free</a></li>
+                {{else}}
+                <li><a class="btn btn-primary" href="#waitlist">Join waitlist</a></li>
+                {{end}}
+            </ul>
+        </nav>
+    </div>
+</header>
+
+<main id="main">
+
+<section class="hero" id="waitlist">
+    <div class="container hero-grid">
+        <div>
+            {{if .SignupsOpen}}
+            <p class="hero-flag"><span class="dot"></span>Live — 5 GB free, no credit card</p>
+            {{else}}
+            <p class="hero-flag">Launching <strong>October 31, 2026</strong></p>
+            {{end}}
+            <h1>S3-compatible storage that <em>optimizes itself.</em></h1>
+            <p class="sub">
+                One endpoint. Your data automatically tiers across hot storage and tape —
+                <strong>$__PRICE_STD__/TB</strong>, tape archive at <strong>$__PRICE_VAULT__/TB</strong>.
+                You buy a quota in whole TB at a flat rate — no meters, no API fees, no retrieval fees.
+            </p>
+            <div class="hero-cta">
+                {{if .SignupsOpen}}
+                <a class="btn btn-primary" href="/register">Start free — 5 GB, no card</a>
+                <a class="arrow-link" href="#pricing">see pricing</a>
+                {{else}}
+                <form class="waitlist-form" data-waitlist>
+                    <input type="email" name="email" placeholder="you@example.com" required aria-label="Email address">
+                    <button type="submit" class="btn btn-primary">Join waitlist</button>
+                </form>
+                <a class="arrow-link" href="#pricing">see launch pricing</a>
+                {{end}}
+            </div>
+            <p class="trust-line">open-source engine &middot; measured benchmarks &middot; founder-direct support</p>
+        </div>
+        <div class="room-col">
+        <div class="room">
+        <div class="term" aria-label="Terminal session showing an rclone upload to stored.ge">
+            <div class="term-bar">
+                <span class="term-dot"></span><span class="term-dot"></span><span class="term-dot"></span>
+                <span class="term-title">~ — zsh</span>
+            </div>
+            <pre><span class="p">$</span> rclone copy ~/backups stored:archive -P
+<span class="out">Transferred:   63.921 GiB / 63.921 GiB, 100%, 312.4 MiB/s
+Elapsed time:      3m29.5s</span>
+<span class="p">$</span> aws s3 ls --endpoint-url https://stored.ge
+<span class="out">2026-06-30 03:00:12 postgres-wal
+2026-07-12 21:44:08 archive
+2026-07-23 09:15:51 family-photos</span>
+<span class="p">$</span> <span class="blink">█</span></pre>
+        </div>
+        <svg class="scene" data-play viewBox="0 0 160 54" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><rect x="0" y="38" width="160" height="3" fill="#ece6db"/><rect x="0" y="41" width="160" height="13" fill="#b9793f"/><path fill="#a0662f" d="M0 44h160v1h-160zM0 47h160v1h-160zM0 50h160v1h-160zM22 41h1v3h-1zM61 41h1v3h-1zM104 41h1v3h-1zM143 41h1v3h-1zM8 45h1v2h-1zM47 45h1v2h-1zM90 45h1v2h-1zM126 45h1v2h-1zM30 48h1v2h-1zM72 48h1v2h-1zM115 48h1v2h-1zM151 48h1v2h-1zM14 51h1v3h-1zM55 51h1v3h-1zM98 51h1v3h-1zM137 51h1v3h-1z"/><rect class="night-dim" y="38" width="160" height="16" fill="#070b24"/><g class="piece light" transform="translate(4 4)"><ellipse class="glow" cx="5" cy="4" rx="22" ry="16" fill="url(#lampglow)"/><rect class="hit" width="10" height="44"/><use href="#s-floorlamp" width="10" height="44"/></g><g class="piece" transform="translate(15 4)"><rect class="hit" width="31" height="44"/><use href="#s-bookcase" width="31" height="44"/></g><g class="piece" transform="translate(50 25)"><rect class="hit" width="31" height="23"/><use href="#s-dresser" width="31" height="23"/></g><g class="piece light" transform="translate(53 15)"><ellipse class="glow" cx="5" cy="3" rx="18" ry="13" fill="url(#lampglow)"/><rect class="hit" width="10" height="13"/><use href="#s-lamp" width="10" height="13"/></g><g class="piece" transform="translate(66 13)"><rect class="hit" width="17" height="15"/><use href="#s-box" width="17" height="15"/></g><g class="piece" transform="translate(86 22)"><rect class="hit" width="16" height="26"/><use class="wave-a" href="#s-mascot" width="16" height="26"/><use class="wave-b" href="#s-mascot-wave" width="16" height="26"/></g><g class="piece" transform="translate(105 25)"><rect class="hit" width="14" height="23"/><use href="#s-plant" width="14" height="23"/></g><g class="piece" transform="translate(122 33)"><rect class="hit" width="17" height="15"/><use href="#s-box" width="17" height="15"/></g><g class="piece" transform="translate(124 18)"><rect class="hit" width="17" height="15"/><use href="#s-box" width="17" height="15"/></g></svg>
+        </div>
+        <p class="room-hint"><span>psst: the furniture moves</span><a href="#build">build your house ▸</a></p>
+        </div>
+    </div>
+</section>
+
+<div class="band" aria-hidden="true"><div class="band-track"><div class="band-row"><svg class="px" style="--w:17;--h:15;--u:2px" viewBox="0 0 17 15" aria-hidden="true" focusable="false"><use href="#s-box"/></svg><span>no meters</span><svg class="px" style="--w:9;--h:8;--u:2px" viewBox="0 0 9 8" aria-hidden="true" focusable="false"><use href="#s-heart"/></svg><span>no API fees</span><svg class="px" style="--w:8;--h:12;--u:2px" viewBox="0 0 8 12" aria-hidden="true" focusable="false"><use href="#s-cup"/></svg><span>__PRICE_AWS_MULT__× cheaper than AWS S3</span><svg class="px" style="--w:31;--h:23;--u:2px" viewBox="0 0 31 23" aria-hidden="true" focusable="false"><use href="#s-dresser"/></svg><span>attic archive at $__PRICE_VAULT__/TB</span><svg class="px" style="--w:10;--h:13;--u:2px" viewBox="0 0 10 13" aria-hidden="true" focusable="false"><use href="#s-lamp"/></svg><span>open-source engine</span><svg class="px" style="--w:6;--h:16;--u:2px" viewBox="0 0 6 16" aria-hidden="true" focusable="false"><use href="#s-mat"/></svg><span>your storage, but cozy</span><svg class="px" style="--w:9;--h:8;--u:2px" viewBox="0 0 9 8" aria-hidden="true" focusable="false"><use href="#s-heart"/></svg><span>founder-direct support</span></div><div class="band-row"><svg class="px" style="--w:17;--h:15;--u:2px" viewBox="0 0 17 15" aria-hidden="true" focusable="false"><use href="#s-box"/></svg><span>no meters</span><svg class="px" style="--w:9;--h:8;--u:2px" viewBox="0 0 9 8" aria-hidden="true" focusable="false"><use href="#s-heart"/></svg><span>no API fees</span><svg class="px" style="--w:8;--h:12;--u:2px" viewBox="0 0 8 12" aria-hidden="true" focusable="false"><use href="#s-cup"/></svg><span>__PRICE_AWS_MULT__× cheaper than AWS S3</span><svg class="px" style="--w:31;--h:23;--u:2px" viewBox="0 0 31 23" aria-hidden="true" focusable="false"><use href="#s-dresser"/></svg><span>attic archive at $__PRICE_VAULT__/TB</span><svg class="px" style="--w:10;--h:13;--u:2px" viewBox="0 0 10 13" aria-hidden="true" focusable="false"><use href="#s-lamp"/></svg><span>open-source engine</span><svg class="px" style="--w:6;--h:16;--u:2px" viewBox="0 0 6 16" aria-hidden="true" focusable="false"><use href="#s-mat"/></svg><span>your storage, but cozy</span><svg class="px" style="--w:9;--h:8;--u:2px" viewBox="0 0 9 8" aria-hidden="true" focusable="false"><use href="#s-heart"/></svg><span>founder-direct support</span></div></div></div>
+
+<aside class="facts" aria-label="Measured benchmarks">
+    <p class="facts-kicker">Measured, not projected — numbers from the production stack</p>
+    <div class="container facts-row">
+        <div class="fact">
+            <div class="n">22/22</div>
+            <p class="l">S3 compatibility tests passing — verified with aws-cli, boto3, rclone, restic, and JuiceFS</p>
+        </div>
+        <div class="fact">
+            <div class="n">320 MB/s</div>
+            <p class="l">sustained multipart upload, measured from a datacenter host</p>
+        </div>
+        <div class="fact">
+            <div class="n">&lt;1 ms</div>
+            <p class="l">metadata reads — HEAD served from a PostgreSQL cache, never a backend round-trip</p>
+        </div>
+        <div class="fact">
+            <div class="n">0 bytes</div>
+            <p class="l">buffered in memory — everything streams, so a 500 GB PUT uses the same RAM as a 5 MB one</p>
+        </div>
+    </div>
+</aside>
+
+<section>
+    <div class="container">
+        <div class="section-head">
+            <p class="kicker"><b>01</b>Tiers</p>
+            <h2>Three tiers, one API.</h2>
+            <p class="lede">Start where your workload lives — move buckets between tiers whenever you like.</p>
+        </div>
+        <div class="tiers">
+            <div class="tier">
+                <div class="tier-art"><button class="grab-piece" type="button" data-add="lamp" aria-label="add to house: a lamp"><span class="grab-hint">add to house</span><svg class="px sticker" style="--w:10;--h:13" viewBox="0 0 10 13" aria-hidden="true" focusable="false"><use href="#s-lamp"/></svg></button></div>
+                <div class="tier-name"><h3>Performance</h3><span class="tier-tag tag-red">After launch</span></div>
+                <div class="tier-body">
+                    <p>Always hot. ~24 ms reads, data never ages to a slower tier, egress served direct. <strong>Launches after October 31</strong> — not for sale on day one; until then, the pin-hot add-on on Standard keeps chosen data permanently hot.</p>
+                    <p class="tier-for"><b>for</b> latency-sensitive apps &middot; media &amp; API assets &middot; fast-restore backups &middot; B2 migrations</p>
+                </div>
+                <div class="tier-price">$__PRICE_PERF__<small>/TB/mo &middot; coming later</small></div>
+            </div>
+            <div class="tier pop">
+                <div class="tier-art"><button class="grab-piece" type="button" data-add="dresser" aria-label="add downstairs: a dresser, 5 TB"><span class="grab-hint">add downstairs</span><svg class="px sticker" style="--w:31;--h:23" viewBox="0 0 31 23" aria-hidden="true" focusable="false"><use href="#s-dresser"/></svg></button></div>
+                <div class="tier-name"><h3>Standard</h3><span class="tier-tag">MOST POPULAR</span></div>
+                <div class="tier-body">
+                    <p>Smart storage that optimizes itself. About 15% of your quota stays on hot storage; data idle for 14+ days moves to tape and comes back hot within minutes when you read it — you store, we optimize. Pin-hot add-on ($__PRICE_PIN_HOT__/TB/mo) for bytes that must never demote.</p>
+                    <p class="tier-for"><b>for</b> general S3 storage &middot; SaaS backends &middot; backup targets &middot; data lakes</p>
+                </div>
+                <div class="tier-price">$__PRICE_STD__<small>/TB/mo annual &middot; $__PRICE_STD_MONTHLY__ monthly</small></div>
+            </div>
+            <div class="tier">
+                <div class="tier-art"><button class="grab-piece" type="button" data-add="bookcase" data-zone="attic" aria-label="add to attic: a bookcase, 10 TB"><span class="grab-hint">add to attic</span><svg class="px sticker" style="--w:31;--h:44" viewBox="0 0 31 44" aria-hidden="true" focusable="false"><use href="#s-bookcase"/></svg></button></div>
+                <div class="tier-name"><h3>Vault</h3><span class="tier-tag tag-green">Lowest $/TB</span></div>
+                <div class="tier-body">
+                    <p>Tape-backed archive, any size. Glacier economics with restores that start in minutes — and Vault bills on its own, so if you ever need to cut costs, the archive keeps running.</p>
+                    <p class="tier-for"><b>for</b> 3-2-1 backups &middot; compliance &amp; WORM &middot; homelab archives &middot; datahoarders</p>
+                </div>
+                <div class="tier-price">$__PRICE_VAULT__<small>/TB/mo annual &middot; $__PRICE_VAULT_MONTHLY__ monthly</small></div>
+            </div>
+        </div>
+        <p class="tiers-note">Not sure? Start on Standard — it self-optimizes, and you can move any bucket up or down later.</p>
+    </div>
+</section>
+
+__BUILDER__
+
+<section>
+    <div class="container">
+        <div class="section-head">
+            <p class="kicker"><b>03</b>How it works</p>
+            <h2>Watch a workload age.</h2>
+            <p class="lede">Drag the timeline. The ring is where your bytes live; the number in the middle is what you pay. Only one of them moves.</p>
+        </div>
+        <div class="panel-dark">
+            <div class="donut-wrap">
+                <div class="donut">
+                    <svg viewBox="0 0 200 200" aria-hidden="true">
+                        <g class="ring">
+                            <circle class="track" cx="100" cy="100" r="78" stroke-width="20"></circle>
+                            <circle id="seg-hot"  cx="100" cy="100" r="78" transform="rotate(-90 100 100)"
+                                    style="stroke-dasharray:281.25 490.09;stroke-dashoffset:0"></circle>
+                            <circle id="seg-warm" cx="100" cy="100" r="78" transform="rotate(-90 100 100)"
+                                    style="stroke-dasharray:183.23 490.09;stroke-dashoffset:-284.25"></circle>
+                            <circle id="seg-tape" cx="100" cy="100" r="78" transform="rotate(-90 100 100)"
+                                    style="stroke-dasharray:16.60 490.09;stroke-dashoffset:-470.48"></circle>
+                        </g>
+                    </svg>
+                    <div class="donut-center">
+                        <span class="big">$__PRICE_STD__</span>
+                        <span class="small">/TB/mo — fixed</span>
+                    </div>
+                </div>
+                <div class="scrub">
+                    <label for="age-slider">days since upload <output id="age-out">30</output></label>
+                    <input type="range" id="age-slider" min="0" max="120" step="1" value="30">
+                    <div class="scrub-presets" role="group" aria-label="Timeline presets">
+                        <button type="button" data-day="0">day 0</button>
+                        <button type="button" data-day="14">day 14</button>
+                        <button type="button" data-day="30">day 30</button>
+                        <button type="button" data-day="60">day 60</button>
+                        <button type="button" data-day="90">day 90</button>
+                        <button type="button" data-day="120">day 120</button>
+                    </div>
+                </div>
+            </div>
+            <div class="legend" aria-live="polite">
+                <div class="leg">
+                    <div class="leg-row">
+                        <span class="leg-dot" style="background:var(--c-hot)"></span>
+                        <span class="leg-name">Hot <small>— performance S3, sub-30 ms</small></span>
+                        <span class="leg-val" id="val-hot">14.5 TB</span>
+                    </div>
+                    <div class="leg-bar"><i id="bar-hot" style="width:58%;background:var(--c-hot)"></i></div>
+                </div>
+                <div class="leg">
+                    <div class="leg-row">
+                        <span class="leg-dot" style="background:var(--c-warm)"></span>
+                        <span class="leg-name">Restored <small>— read from tape, hot again for 7 days</small></span>
+                        <span class="leg-val" id="val-warm">9.5 TB</span>
+                    </div>
+                    <div class="leg-bar"><i id="bar-warm" style="width:38%;background:var(--c-warm)"></i></div>
+                </div>
+                <div class="leg">
+                    <div class="leg-row">
+                        <span class="leg-dot" style="background:var(--c-tape)"></span>
+                        <span class="leg-name">Archive <small>— tape libraries</small></span>
+                        <span class="leg-val" id="val-tape">1.0 TB</span>
+                    </div>
+                    <div class="leg-bar"><i id="bar-tape" style="width:4%;background:var(--c-tape)"></i></div>
+                </div>
+                <p class="note">Any object is readable at any time — the engine serves from the fastest copy.
+                Your bill never mentions tiers: <strong>one price, our problem.</strong></p>
+            </div>
+        </div>
+        <div class="stage-list">
+            <div class="stage active" id="stage-0">
+                <div class="stage-art"><svg class="px" style="--w:10;--h:13" viewBox="0 0 10 13" aria-hidden="true" focusable="false"><use href="#s-lamp"/></svg></div>
+                <p class="when">DAY 0–14 · HOT</p>
+                <h3>Everything fast</h3>
+                <p>New writes land on performance S3 infrastructure. Sub-30 ms reads, full-speed multipart uploads.</p>
+            </div>
+            <div class="stage" id="stage-1">
+                <div class="stage-art"><svg class="px" style="--w:17;--h:15" viewBox="0 0 17 15" aria-hidden="true" focusable="false"><use href="#s-box"/></svg></div>
+                <p class="when">DAY 14+ · TAPE</p>
+                <h3>Idle data moves to tape</h3>
+                <p>Objects untouched for 14 days migrate to tape libraries automatically. Still listed, still yours — a read brings them back hot within minutes.</p>
+            </div>
+            <div class="stage" id="stage-2">
+                <div class="stage-art"><svg class="px" style="--w:14;--h:23" viewBox="0 0 14 23" aria-hidden="true" focusable="false"><use href="#s-plant"/></svg></div>
+                <p class="when">DAY 60+ · SETTLED</p>
+                <h3>~15% hot, the rest on tape</h3>
+                <p>The working set stays on hot storage (about 15% of your quota); everything else sits on tape at archive economics. Your price never moved.</p>
+            </div>
+        </div>
+        <p class="panel-caption">Illustrative 25 TB quota with a typical access pattern. You never configure lifecycle policies unless you want to.</p>
+    </div>
+</section>
+
+<section>
+    <div class="container">
+        <div class="section-head">
+            <p class="kicker"><b>04</b>Use cases</p>
+            <h2>What are you building on it?</h2>
+            <p class="lede">Pick your workload — each one is a paste-ready start, not a brochure.</p>
+        </div>
+        <div class="uc-tabs" role="tablist" aria-label="Use cases">
+            <button class="uc-tab active" data-uc="backup" role="tab" aria-selected="true">Backups</button>
+            <button class="uc-tab" data-uc="app" role="tab" aria-selected="false">App storage</button>
+            <button class="uc-tab" data-uc="media" role="tab" aria-selected="false">Media &amp; delivery</button>
+            <button class="uc-tab" data-uc="worm" role="tab" aria-selected="false">Archive &amp; compliance</button>
+            <button class="uc-tab" data-uc="lake" role="tab" aria-selected="false">Data lakes</button>
+        </div>
+
+        <div class="uc-panel active" data-panel="backup">
+            <div>
+                <h3>3-2-1 backups that actually finish</h3>
+                <p class="uc-desc">Point restic, rclone, or any S3-speaking backup tool at a bucket. Encrypted client-side if you want, versioned server-side if you ask.</p>
+                <ul>
+                    <li>No minimum storage duration — rotate nightlies without penalty fees</li>
+                    <li>Bucket versioning + Object Lock stop ransomware from rewriting history</li>
+                    <li>Add a Vault pack as the off-site deep copy — it bills separately, so it survives budget cuts</li>
+                </ul>
+                <p class="uc-rec">recommended tier<b>Standard</b></p>
+            </div>
+            <div class="snippet">
+                <div class="snippet-head"><span>restic — nightly backup</span><button class="copy-btn" data-copy="uc-backup-snip">copy</button></div>
+                <pre id="uc-backup-snip">export AWS_ACCESS_KEY_ID=YOUR_KEY
+export AWS_SECRET_ACCESS_KEY=YOUR_SECRET
+
+restic -r s3:https://stored.ge/backups init
+restic -r s3:https://stored.ge/backups backup /home /etc
+
+# verify what you'd restore
+restic -r s3:https://stored.ge/backups snapshots</pre>
+            </div>
+        </div>
+
+        <div class="uc-panel" data-panel="app">
+            <div>
+                <h3>The storage layer behind your app</h3>
+                <p class="uc-desc">Use any AWS SDK with one changed line — the endpoint. Scoped keys and temporary STS credentials keep your blast radius small.</p>
+                <ul>
+                    <li>Per-key permissions and bucket scoping — the upload service can't read billing exports</li>
+                    <li>Presigned URLs let browsers upload/download directly, no proxy bandwidth</li>
+                    <li>Webhooks fire on <code>object.created</code> — trigger thumbnails, virus scans, pipelines</li>
+                </ul>
+                <p class="uc-rec">recommended tier<b>Standard</b></p>
+            </div>
+            <div class="snippet">
+                <div class="snippet-head"><span>python — boto3</span><button class="copy-btn" data-copy="uc-app-snip">copy</button></div>
+                <pre id="uc-app-snip">import boto3
+
+s3 = boto3.client(
+    "s3",
+    endpoint_url="https://stored.ge",
+    aws_access_key_id="YOUR_KEY",
+    aws_secret_access_key="YOUR_SECRET",
+)
+
+s3.upload_file("avatar.png", "user-uploads", "u/42/avatar.png")
+url = s3.generate_presigned_url(
+    "get_object",
+    Params={"Bucket": "user-uploads", "Key": "u/42/avatar.png"},
+    ExpiresIn=3600,
+)</pre>
+            </div>
+        </div>
+
+        <div class="uc-panel" data-panel="media">
+            <div>
+                <h3>Serve files to the whole internet</h3>
+                <p class="uc-desc">Make a bucket public-read and its objects are directly fetchable — with content-type, range requests, and inline/attachment handling done right.</p>
+                <ul>
+                    <li>Range requests + presigned URLs for video seeking and paid downloads</li>
+                    <li>Per-bucket bandwidth budgets so a viral file can't torch your bill</li>
+                    <li>Performance tier keeps every read hot — media never ages to a slower backend</li>
+                </ul>
+                <p class="uc-rec">recommended tier<b>Performance</b></p>
+            </div>
+            <div class="snippet">
+                <div class="snippet-head"><span>aws-cli — public assets</span><button class="copy-btn" data-copy="uc-media-snip">copy</button></div>
+                <pre id="uc-media-snip">aws s3 cp ./dist s3://site-assets/ --recursive \
+  --endpoint-url https://stored.ge
+
+# time-limited download link for a paid file
+aws s3 presign s3://downloads/album.zip \
+  --endpoint-url https://stored.ge --expires-in 86400</pre>
+            </div>
+        </div>
+
+        <div class="uc-panel" data-panel="worm">
+            <div>
+                <h3>Write once, prove it forever</h3>
+                <p class="uc-desc">Object Lock retention and legal holds at the S3 API level — plus MFA Delete on top for the buckets that really matter.</p>
+                <ul>
+                    <li>WORM retention: nobody — including you — deletes inside the window</li>
+                    <li>Tape-backed Vault packs put an air-gap-grade copy behind the same API</li>
+                    <li>Versioning keeps every revision; delete markers instead of destruction</li>
+                </ul>
+                <p class="uc-rec">recommended tier<b>Vault</b></p>
+            </div>
+            <div class="snippet">
+                <div class="snippet-head"><span>aws-cli — object lock</span><button class="copy-btn" data-copy="uc-worm-snip">copy</button></div>
+                <pre id="uc-worm-snip">aws s3api put-object-retention \
+  --bucket audit-logs --key 2026/07/ledger.csv \
+  --retention Mode=COMPLIANCE,RetainUntilDate=2027-07-25T00:00:00Z \
+  --endpoint-url https://stored.ge</pre>
+            </div>
+        </div>
+
+        <div class="uc-panel" data-panel="lake">
+            <div>
+                <h3>A data lake without the AWS bill</h3>
+                <p class="uc-desc">Multipart uploads stream at full speed, and there are no per-request fees — so millions of small objects don't become a line item.</p>
+                <ul>
+                    <li>$0 API fees: LIST-heavy query engines (DuckDB, Spark, Athena-style) run free</li>
+                    <li>JuiceFS mounts a bucket as a POSIX filesystem for tools that want files</li>
+                    <li>Cold partitions age to cheaper tiers automatically — no lifecycle YAML</li>
+                </ul>
+                <p class="uc-rec">recommended tier<b>Standard</b></p>
+            </div>
+            <div class="snippet">
+                <div class="snippet-head"><span>duckdb — query in place</span><button class="copy-btn" data-copy="uc-lake-snip">copy</button></div>
+                <pre id="uc-lake-snip">-- duckdb
+INSTALL httpfs; LOAD httpfs;
+SET s3_endpoint='stored.ge';
+SET s3_access_key_id='YOUR_KEY';
+SET s3_secret_access_key='YOUR_SECRET';
+
+SELECT count(*) FROM 's3://lake/events/2026/*.parquet';</pre>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section>
+    <div class="container">
+        <div class="section-head">
+            <p class="kicker"><b>05</b>Attach anything</p>
+            <h2>If it speaks S3, it plugs in.</h2>
+            <p class="lede">Tools, SDKs, and platform features all hit the same endpoint with the same keys — mix them freely on the same bucket. Click around.</p>
+        </div>
+
+        <div class="res-grid" role="group" aria-label="Attachable tools and features">
+            <button class="res-chip active" data-res="rclone"><span class="circle c-cream">rc</span>rclone</button>
+            <button class="res-chip" data-res="restic"><span class="circle c-cream">rs</span>restic</button>
+            <button class="res-chip" data-res="awscli"><span class="circle c-cream">aws</span>aws-cli</button>
+            <button class="res-chip" data-res="cyberduck"><span class="circle c-gold">gui</span>Cyberduck</button>
+            <button class="res-chip" data-res="juicefs"><span class="circle c-gold">fs</span>JuiceFS</button>
+            <button class="res-chip" data-res="sdk"><span class="circle c-gold">{ }</span>SDKs</button>
+            <button class="res-chip" data-res="presign"><span class="circle c-terra">url</span>Presigned</button>
+            <button class="res-chip" data-res="keys"><span class="circle c-terra">key</span>Keys &amp; STS</button>
+            <button class="res-chip" data-res="hooks"><span class="circle c-terra">hook</span>Webhooks</button>
+            <button class="res-chip" data-res="public"><span class="circle c-gray">www</span>Public buckets</button>
+            <button class="res-chip" data-res="lock"><span class="circle c-gray">worm</span>Object Lock</button>
+        </div>
+
+        <div class="res-detail">
+            <div class="res-card active" data-card="rclone">
+                <h3>rclone<small>sync · mount · migrate</small></h3>
+                <p>The Swiss-army knife: sync directories, mount buckets as drives, and migrate straight off B2/S3/Drive into stored.ge with one command. Full walkthrough in the <a href="/docs/rclone">rclone guide</a>.</p>
+                <div class="snippet">
+                    <div class="snippet-head"><span>shell</span><button class="copy-btn" data-copy="res-rclone-snip">copy</button></div>
+                    <pre id="res-rclone-snip">rclone config create stored s3 provider=Other \
+  access_key_id=YOUR_KEY secret_access_key=YOUR_SECRET \
+  endpoint=https://stored.ge region=us-east-1
+
+rclone sync ~/photos stored:photos -P      # keep in sync
+rclone mount stored:photos ~/mnt/photos    # use as a drive
+rclone sync b2:old-bucket stored:photos    # leave your old provider</pre>
+                </div>
+            </div>
+            <div class="res-card" data-card="restic">
+                <h3>restic<small>encrypted backups</small></h3>
+                <p>Client-side encrypted, deduplicated, incremental backups. Your keys never leave your machine — we store ciphertext and can't read a byte of it.</p>
+                <div class="snippet">
+                    <div class="snippet-head"><span>shell</span><button class="copy-btn" data-copy="res-restic-snip">copy</button></div>
+                    <pre id="res-restic-snip">restic -r s3:https://stored.ge/backups init
+restic -r s3:https://stored.ge/backups backup /srv/data
+restic -r s3:https://stored.ge/backups forget --keep-daily 7 --keep-weekly 8 --prune</pre>
+                </div>
+            </div>
+            <div class="res-card" data-card="awscli">
+                <h3>aws-cli<small>scriptable everything</small></h3>
+                <p>Every S3 operation we support, from cron jobs and CI pipelines. Multipart, versioning, tagging, lock — it's all the same flags you already know, plus <code>--endpoint-url</code>.</p>
+                <div class="snippet">
+                    <div class="snippet-head"><span>shell</span><button class="copy-btn" data-copy="res-awscli-snip">copy</button></div>
+                    <pre id="res-awscli-snip">alias s3ge='aws --endpoint-url https://stored.ge'
+
+s3ge s3 mb s3://ci-artifacts
+s3ge s3 cp build.tar.gz s3://ci-artifacts/v1.4.2/
+s3ge s3api list-object-versions --bucket ci-artifacts --prefix v1.4.2/</pre>
+                </div>
+            </div>
+            <div class="res-card" data-card="cyberduck">
+                <h3>Cyberduck &amp; friends<small>point-and-click</small></h3>
+                <p>Any S3-capable GUI works: Cyberduck, Mountain Duck, S3 Browser, Transmit. Add a connection with server <code>stored.ge</code>, port 443, and your keys — then drag and drop. Handy for the team members who are never going to open a terminal.</p>
+                <div class="snippet">
+                    <div class="snippet-head"><span>cyberduck — connection settings</span><button class="copy-btn" data-copy="res-duck-snip">copy</button></div>
+                    <pre id="res-duck-snip">Protocol:   Amazon S3
+Server:     stored.ge
+Port:       443
+Access Key: YOUR_KEY
+Secret Key: YOUR_SECRET</pre>
+                </div>
+            </div>
+            <div class="res-card" data-card="juicefs">
+                <h3>JuiceFS<small>POSIX filesystem</small></h3>
+                <p>Mount a bucket as a real filesystem — rename, append, chmod — for tools that insist on files. We're in its compatibility matrix; the facts strip above wasn't decorative.</p>
+                <div class="snippet">
+                    <div class="snippet-head"><span>shell</span><button class="copy-btn" data-copy="res-juicefs-snip">copy</button></div>
+                    <pre id="res-juicefs-snip">juicefs format --storage s3 \
+  --bucket https://stored.ge/myfs \
+  --access-key YOUR_KEY --secret-key YOUR_SECRET \
+  redis://localhost/1 myfs
+
+juicefs mount redis://localhost/1 ~/jfs</pre>
+                </div>
+            </div>
+            <div class="res-card" data-card="sdk">
+                <h3>Every AWS SDK<small>one changed line</small></h3>
+                <p>boto3, aws-sdk-js, aws-sdk-go, Rust, PHP — set the endpoint and everything else is stock. No vendor SDK to install, no lock-in to us either.</p>
+                <div class="snippet">
+                    <div class="snippet-head"><span>node — @aws-sdk/client-s3</span><button class="copy-btn" data-copy="res-sdk-snip">copy</button></div>
+                    <pre id="res-sdk-snip">import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+
+const s3 = new S3Client({
+  endpoint: "https://stored.ge",
+  region: "us-east-1",
+  credentials: { accessKeyId: KEY, secretAccessKey: SECRET },
+});
+
+await s3.send(new PutObjectCommand({
+  Bucket: "user-uploads", Key: "report.pdf", Body: buf,
+}));</pre>
+                </div>
+            </div>
+            <div class="res-card" data-card="presign">
+                <h3>Presigned URLs<small>direct browser traffic</small></h3>
+                <p>Hand a browser a time-limited URL and it uploads or downloads straight to storage — your server never proxies the bytes. Generate them with any SDK, the CLI, or the dashboard API.</p>
+                <div class="snippet">
+                    <div class="snippet-head"><span>shell</span><button class="copy-btn" data-copy="res-presign-snip">copy</button></div>
+                    <pre id="res-presign-snip"># 24h download link
+aws s3 presign s3://downloads/build.zip \
+  --endpoint-url https://stored.ge --expires-in 86400</pre>
+                </div>
+            </div>
+            <div class="res-card" data-card="keys">
+                <h3>Scoped keys &amp; STS<small>least privilege</small></h3>
+                <p>Mint API keys locked to specific buckets and permissions, with optional IP allowlists and expiry. Need something shorter-lived? STS issues temporary credentials that can only narrow — never escalate — the parent key's scope.</p>
+                <div class="snippet">
+                    <div class="snippet-head"><span>shell — temporary credentials</span><button class="copy-btn" data-copy="res-keys-snip">copy</button></div>
+                    <pre id="res-keys-snip">curl -X POST https://stored.ge/api/v1/sts/token \
+  -H "Authorization: Bearer $JWT" \
+  -d '{"duration_seconds": 3600,
+       "buckets": ["user-uploads"],
+       "permissions": ["read", "write"]}'</pre>
+                </div>
+            </div>
+            <div class="res-card" data-card="hooks">
+                <h3>Webhooks &amp; events<small>react to storage</small></h3>
+                <p>Subscribe an HTTPS endpoint to <code>object.created</code>, <code>object.deleted</code>, bucket and key events. Deliveries are HMAC-signed and logged with response codes, so you can actually debug them.</p>
+                <div class="snippet">
+                    <div class="snippet-head"><span>shell</span><button class="copy-btn" data-copy="res-hooks-snip">copy</button></div>
+                    <pre id="res-hooks-snip">curl -X POST https://stored.ge/api/v1/webhooks \
+  -H "Authorization: Bearer $JWT" \
+  -d '{"url": "https://api.example.com/on-upload",
+       "events": ["object.created"]}'</pre>
+                </div>
+            </div>
+            <div class="res-card" data-card="public">
+                <h3>Public buckets<small>serve the internet</small></h3>
+                <p>Flip a bucket to public-read and objects are fetchable at a plain URL — correct content types, range requests for video seeking, and per-bucket bandwidth budgets so surprise traffic can't run up a surprise bill.</p>
+                <div class="snippet">
+                    <div class="snippet-head"><span>what a visitor fetches</span><button class="copy-btn" data-copy="res-public-snip">copy</button></div>
+                    <pre id="res-public-snip">https://stored.ge/site-assets/logo.svg
+https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
+                </div>
+            </div>
+            <div class="res-card" data-card="lock">
+                <h3>Object Lock / WORM<small>immutability</small></h3>
+                <p>Retention windows and legal holds enforced at the API — compliance mode means nobody, including the account owner, deletes early. Add MFA Delete for a second factor on the destructive paths.</p>
+                <div class="snippet">
+                    <div class="snippet-head"><span>shell</span><button class="copy-btn" data-copy="res-lock-snip">copy</button></div>
+                    <pre id="res-lock-snip">aws s3api put-object-legal-hold \
+  --bucket evidence --key case-1138/disk.img \
+  --legal-hold Status=ON \
+  --endpoint-url https://stored.ge</pre>
+                </div>
+            </div>
+        </div>
+
+        <p class="res-legend">
+            <span class="k-cream">command-line tools</span>
+            <span class="k-gold">apps &amp; code</span>
+            <span class="k-terra">platform features</span>
+            <span class="k-gray">publishing &amp; compliance</span>
+        </p>
+    </div>
+</section>
+
+<section id="pricing">
+    <div class="container">
+        <div class="section-head">
+            <p class="kicker"><b>06</b>Pricing</p>
+            <h2>Pay per TB. That's the whole model.</h2>
+            <p class="lede">You buy a quota in whole TB at a flat per-TB rate and resize it whenever you like (prorated). The bill never moves on its own: no meters, no overage, no API fees, no request classes, no retrieval surcharges — and every limit is printed on this page, not in a PDF.</p>
+        </div>
+
+        <div class="calc">
+            <label for="calc-tb">how much quota do you need? <output id="calc-out">20 TB</output></label>
+            <input type="range" id="calc-tb" min="1" max="100" step="1" value="20">
+            <div class="calc-rows">
+                <div class="calc-row us"><span class="who">stored.ge Standard (annual)</span><span class="amt" id="calc-us">__PRICE_STD_20TB__/mo</span></div>
+                <div class="calc-row"><span class="who">Backblaze B2</span><span class="amt" id="calc-b2">__PRICE_B2_20TB__/mo</span></div>
+                <div class="calc-row"><span class="who">AWS S3</span><span class="amt" id="calc-aws">__PRICE_AWS_20TB__/mo</span></div>
+            </div>
+            <p class="calc-note" id="calc-note">That's <strong>__PRICE_AWS_SAVED_20TB__/yr</strong> kept out of AWS's pocket.</p>
+        </div>
+
+        <div class="plans">
+            <div class="plan">
+                <p class="plan-kicker">Vault</p>
+                <div class="price">$__PRICE_VAULT__<small>/TB/mo</small></div>
+                <p class="alt-price">annual &middot; $__PRICE_VAULT_MONTHLY__ monthly &middot; any size</p>
+                <ul>
+                    <li>Tape-backed archive</li>
+                    <li>Restores start in minutes</li>
+                    <li>1× free restore allowance every month</li>
+                    <li>Billed separately — survives downgrades</li>
+                </ul>
+                <div class="plan-cta"><a class="btn btn-ghost" href="#packs">Vault details</a></div>
+            </div>
+            <div class="plan pop">
+                <p class="plan-kicker">Standard — most popular</p>
+                <div class="price">$__PRICE_STD__<small>/TB/mo</small></div>
+                <p class="alt-price">annual &middot; $__PRICE_STD_MONTHLY__ monthly &middot; any whole-TB quota</p>
+                <ul>
+                    <li>Automatic tiering built in (~15% hot, rest on tape)</li>
+                    <li>Egress free to 0.__PRICE_AWS_MULT__× your quota/mo, then throttled — never billed</li>
+                    <li>Hard quota, resize any time — no overage, no meters</li>
+                    <li>__PRICE_AWS_MULT__× cheaper than AWS S3</li>
+                </ul>
+                {{if .SignupsOpen}}
+                <div class="plan-cta"><a class="btn btn-primary" href="/register">Start free</a></div>
+                {{else}}
+                <div class="plan-cta"><a class="btn btn-primary" href="#waitlist">Join waitlist</a></div>
+                {{end}}
+            </div>
+            <div class="plan">
+                <p class="plan-kicker">Performance — coming after launch</p>
+                <div class="price">$__PRICE_PERF__<small>/TB/mo</small></div>
+                <p class="alt-price">pure hot storage &middot; not for sale on launch day</p>
+                <ul>
+                    <li>~24 ms reads, always</li>
+                    <li>Data never ages out</li>
+                    <li>Egress free to 1× your quota/mo</li>
+                    <li>Until then: pin-hot add-on on Standard, $__PRICE_PIN_HOT__/TB/mo</li>
+                </ul>
+                <div class="plan-cta"><span class="btn btn-ghost" aria-disabled="true">Launches after Oct 31</span></div>
+            </div>
+        </div>
+
+        <div class="packs" id="packs">
+            <p class="packs-title">Vault — tape-backed archive, any size</p>
+            <table>
+                <tr><td>Monthly</td><td>$__PRICE_VAULT_MONTHLY__/TB/mo</td><td>$__PRICE_VAULT_MIN__ monthly minimum</td></tr>
+                <tr class="best"><td>Annual, prepaid</td><td>$__PRICE_VAULT_2DP__/TB/mo</td><td>any size — 5 TB is $__PRICE_VAULT_5TB__/mo, billed yearly</td></tr>
+                <tr><td>Founders slots</td><td>$__PRICE_FOUNDERS__/TB/mo</td><td>first 100 TB &middot; annual only &middot; 3–10 TB per account &middot; lifetime rate</td></tr>
+            </table>
+            <p class="fine">Pick a quota in TB, change it whenever. The honest fine print: one durable tape copy (we're the offsite leg of <em>your</em> 3-2-1) &middot; 30-day minimum per object &middot; restore up to 1× your quota free every month — a free monthly restore drill — beyond that, restores are queued, never billed &middot; restored copies stay hot 7 days. Never: retrieval fees or egress fees. Founders slots are numbered and hard-capped — when they're gone, they're gone.</p>
+        </div>
+
+        <p class="includes">
+            Every tier includes: real S3 API (multipart, versioning, Object Lock/WORM, presigned URLs) &middot;
+            $0 API fees &middot; no retrieval fees &middot; encryption at rest &middot; scoped API keys &amp; STS
+        </p>
+
+        <div class="compare">
+            <table>
+                <thead>
+                    <tr><th></th><th class="us">stored.ge</th><th>Backblaze B2</th><th>Wasabi</th><th>Cloudflare R2</th><th>AWS S3</th></tr>
+                </thead>
+                <tbody>
+                    <tr><th scope="row">$/TB/mo</th><td class="us">$__PRICE_STD__</td><td>$__PRICE_B2__</td><td>$__PRICE_WASABI__</td><td>$__PRICE_R2__</td><td>$__PRICE_AWS__</td></tr>
+                    <tr><th scope="row">API/request fees</th><td class="us">$0</td><td>Class B/C fees</td><td>$0</td><td>ops-based</td><td>per-request</td></tr>
+                    <tr><th scope="row">Egress</th><td class="us">0.__PRICE_AWS_MULT__× quota free/mo, then throttled — never billed</td><td>3× free, then $0.01/GB</td><td>"Free" (fair-use policy)</td><td>Free</td><td>$0.09/GB</td></tr>
+                    <tr><th scope="row">Billing</th><td class="us">Flat quota, no meters</td><td>Metered</td><td>Metered (90-day min)</td><td>Metered</td><td>Metered</td></tr>
+                    <tr><th scope="row">Min storage duration</th><td class="us">None (Vault: 30 days)</td><td>None</td><td>90 days</td><td>None</td><td>None</td></tr>
+                    <tr><th scope="row">Archive tier</th><td class="us">$__PRICE_VAULT__/TB (tape)</td><td>—</td><td>—</td><td>—</td><td>Glacier (retrieval fees)</td></tr>
+                    <tr><th scope="row">Auto-tiering</th><td class="us">Built in</td><td>No</td><td>No</td><td>No</td><td>Manual lifecycle</td></tr>
+                </tbody>
+            </table>
+            <p class="fine">Competitor pricing as published August 2026 — Backblaze and Wasabi both raised prices earlier this year. Wasabi's free egress is subject to their fair-use ratio policy.</p>
+        </div>
+    </div>
+</section>
+
+<section>
+    <div class="container">
+        <div class="section-head">
+            <p class="kicker"><b>07</b>Straight answers</p>
+            <h2>The parts most storage pages won't tell you.</h2>
+            <p class="lede">More in the <a href="/docs/faq">full FAQ</a>.</p>
+        </div>
+        <div class="answers">
+            <div class="answer">
+                <h3>Is there an SLA?</h3>
+                <p>Not a contractual one yet — we won't sell one we can't back. The target is 99.5%+, the <a href="/status">status page</a> is real, and incident reports are written by a human. SLA credits ship with the second site.</p>
+            </div>
+            <div class="answer">
+                <h3>Where does my data actually live?</h3>
+                <p>On established storage providers — enterprise S3 infrastructure for hot data, professional tape libraries for archive. The control plane runs on our own hardware with tested daily off-site backups; your data doesn't depend on that one box.</p>
+            </div>
+            <div class="answer">
+                <h3>How fast are cold reads?</h3>
+                <p>Data that's aged to tape spools to cache on first read — seconds to a couple of minutes to first byte, longer for multi-TB restores. Hot data is &lt;50 ms. Need everything hot forever? That's the Performance tier.</p>
+            </div>
+            <div class="answer">
+                <h3>What if you disappear?</h3>
+                <p>It's standard S3 — <code>rclone sync</code> your data out any time, free, no proprietary format. Documented wind-down commitment: minimum 60 days notice and free unlimited egress. The <a href="https://github.com/FairForge/vaultaire">engine is open source</a>, so the software outlives us too.</p>
+            </div>
+        </div>
+        <div class="support">
+            <svg class="px" style="--w:16;--h:26" viewBox="0 0 16 26" aria-hidden="true" focusable="false"><use href="#s-mascot"/></svg>
+            <div class="support-bubble">
+                <p class="support-hi">Hi! Stuck on something?</p>
+                <p>Support is founder-direct and replies target &lt;4h: <a href="mailto:support@stored.ge">support@stored.ge</a></p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="final">
+    <div class="container">
+        <div class="final-art"><svg data-play viewBox="0 0 70 40" aria-hidden="true" focusable="false" shape-rendering="crispEdges"><g class="piece" transform="translate(0 17)"><rect class="hit" width="31" height="23"/><use href="#s-dresser" width="31" height="23"/></g><g class="piece light" transform="translate(4 7)"><ellipse class="glow" cx="5" cy="3" rx="18" ry="13" fill="url(#lampglow)"/><rect class="hit" width="10" height="13"/><use href="#s-lamp" width="10" height="13"/></g><g class="piece" transform="translate(14 5)"><rect class="hit" width="17" height="15"/><use href="#s-box" width="17" height="15"/></g><g class="piece" transform="translate(40 14)"><rect class="hit" width="16" height="26"/><use class="wave-a" href="#s-mascot" width="16" height="26"/><use class="wave-b" href="#s-mascot-wave" width="16" height="26"/></g><g class="piece" transform="translate(59 6)"><rect class="hit" width="9" height="8"/><use href="#s-heart" width="9" height="8"/></g></svg></div>
+        {{if .SignupsOpen}}
+        <h2>Try it in the next five minutes.</h2>
+        <p>5 GB free, no credit card. Keys on signup, rclone config ready to paste.</p>
+        <a class="btn btn-primary" href="/register">Start free</a>
+        {{else}}
+        <h2>Launching October 31, 2026.</h2>
+        <p>Join the waitlist and we'll email you once — on launch day, with a founding-member code.</p>
+        <form class="waitlist-form" data-waitlist>
+            <input type="email" name="email" placeholder="you@example.com" required aria-label="Email address">
+            <button type="submit" class="btn btn-primary">Join waitlist</button>
+        </form>
+        {{end}}
+    </div>
+</section>
+
+</main>
+
+<footer>
+    <div class="container">
+        <div class="footer-grid">
+            <div class="footer-brand">
+                <a class="logo" href="/" aria-label="stored.ge home"><svg class="px" style="--w:34;--h:30" viewBox="0 0 34 30" aria-hidden="true" focusable="false"><use href="#s-logo"/></svg></a>
+                <p>S3-compatible storage orchestration across hot storage and tape. Built in the open by FairForge.</p>
+            </div>
+            <div>
+                <h3>Product</h3>
+                <ul class="footer-links">
+                    <li><a href="#pricing">Pricing</a></li>
+                    <li><a href="/docs">Docs</a></li>
+                    <li><a href="/changelog">Changelog</a></li>
+                    <li><a href="/status">Status</a></li>
+                    <li><a href="https://github.com/FairForge/vaultaire">GitHub</a></li>
+                </ul>
+            </div>
+            <div>
+                <h3>Legal</h3>
+                <ul class="footer-links">
+                    <li><a href="/legal/terms">Terms of Service</a></li>
+                    <li><a href="/legal/privacy">Privacy Policy</a></li>
+                    <li><a href="/legal/aup">Acceptable Use</a></li>
+                    <li><a href="/legal/cookies">Cookie Policy</a></li>
+                    <li><a href="/legal/dpa">DPA</a></li>
+                    <li><a href="/legal/gdpr">GDPR</a></li>
+                    <li><a href="/legal/baa">BAA</a></li>
+                    <li><a href="/legal/data-act">EU Data Act</a></li>
+                </ul>
+            </div>
+            <div>
+                <h3>Support</h3>
+                <ul class="footer-links">
+                    <li><a href="mailto:support@stored.ge">support@stored.ge</a></li>
+                    <li><a href="/abuse">Report abuse</a></li>
+                    <li><a href="/login">Sign in</a></li>
+                </ul>
+            </div>
+        </div>
+        <div class="footer-bottom">
+            <span>© 2026 FairForge LLC. All rights reserved.</span>
+            <span>founder-direct support — replies target &lt;4h</span>
+        </div>
+    </div>
+</footer>
+
+<script>
+__SCRIPT__
+</script>
+
+</body>
+</html>

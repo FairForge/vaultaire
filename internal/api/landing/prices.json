@@ -1,0 +1,15 @@
+{
+  "_comment": "Every stored.ge price the landing page shows. Edit here, then `make landing`. USD per TB per month unless noted.",
+  "standard": { "annual": 4.49, "monthly": 4.99 },
+  "vault": { "annual": 2.00, "monthly": 2.55, "monthly_minimum": 4.99 },
+  "pin_hot": 3.00,
+  "performance": 6.99,
+  "founders": 1.00,
+  "competitors": {
+    "_asof": "August 2026",
+    "aws_s3": 23.00,
+    "backblaze_b2": 6.95,
+    "wasabi": 7.99,
+    "cloudflare_r2": 15.00
+  }
+}

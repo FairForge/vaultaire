@@ -720,6 +720,10 @@ func (s *Server) setupRoutes() {
 	s.router.Get("/", s.handleRoot)
 	s.router.Head("/", s.handleRoot)
 
+	// Social preview image for the landing page (og_image.go), embedded.
+	s.router.Get("/og.png", s.handleOGImage)
+	s.router.Head("/og.png", s.handleOGImage)
+
 	// Public customer-facing changelog (1.13): rendered once at boot from
 	// the embedded changelog.md. Registered before the catch-all so the
 	// path never reaches the S3 handler.
