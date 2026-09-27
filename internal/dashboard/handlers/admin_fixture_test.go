@@ -30,7 +30,7 @@ func TestAdmin_WriteScreenshotFixtures(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	page := func(name string) *template.Template {
-		return template.Must(template.ParseFS(os.DirFS("../templates"), "layouts/admin.html", "admin/"+name))
+		return template.Must(template.New("").Funcs(TemplateFuncs()).ParseFS(os.DirFS("../templates"), "layouts/admin.html", "admin/"+name))
 	}
 	write := func(name string, w *httptest.ResponseRecorder) {
 		require.Equal(t, 200, w.Code, name)
