@@ -12,7 +12,7 @@
 .comparison-subtitle { margin-top: 0.5rem; font-size: 0.85rem; color: var(--text-muted); }
 .comparison-footnote { margin-top: 0.5rem; font-size: 0.75rem; color: var(--text-muted); }
 </style>
-{{if .House.Enabled}}<script src="/static/js/house.js" defer></script>{{end}}
+{{if .House.Enabled}}<script src="{{asset "/static/js/house.js"}}" defer></script>{{end}}
 {{end}}
 {{define "content"}}
 <div class="page-header">

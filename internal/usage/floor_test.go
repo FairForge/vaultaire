@@ -232,8 +232,7 @@ func TestReconcileStorageUsage_PerFloor(t *testing.T) {
 	_, err := db.Exec(`UPDATE tenant_floor_quotas SET storage_used_bytes = 999 WHERE tenant_id = $1`, tenantID)
 	require.NoError(t, err)
 
-	_, err = m.ReconcileStorageUsage(ctx)
-	require.NoError(t, err)
+	require.NoError(t, m.ReconcileTenantStorageUsage(ctx, tenantID))
 
 	floors, err := m.GetFloors(ctx, tenantID)
 	require.NoError(t, err)

@@ -54,7 +54,7 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 	r.Handle("/static/*", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
 
 	// Parse shared layout templates.
-	baseTmpl := template.Must(template.ParseFS(Templates,
+	baseTmpl := template.Must(template.New("").Funcs(handlers.TemplateFuncs()).ParseFS(Templates,
 		"templates/layouts/base.html",
 	))
 
@@ -254,67 +254,67 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 	})
 
 	// --- Admin (session + admin role required) ---
-	adminTmpl := template.Must(template.ParseFS(Templates,
+	adminTmpl := template.Must(template.New("").Funcs(handlers.TemplateFuncs()).ParseFS(Templates,
 		"templates/layouts/admin.html",
 		"templates/admin/dashboard.html",
 	))
-	tenantListTmpl := template.Must(template.ParseFS(Templates,
+	tenantListTmpl := template.Must(template.New("").Funcs(handlers.TemplateFuncs()).ParseFS(Templates,
 		"templates/layouts/admin.html",
 		"templates/admin/tenants.html",
 	))
-	tenantDetailTmpl := template.Must(template.ParseFS(Templates,
+	tenantDetailTmpl := template.Must(template.New("").Funcs(handlers.TemplateFuncs()).ParseFS(Templates,
 		"templates/layouts/admin.html",
 		"templates/admin/tenant_detail.html",
 	))
-	systemTmpl := template.Must(template.ParseFS(Templates,
+	systemTmpl := template.Must(template.New("").Funcs(handlers.TemplateFuncs()).ParseFS(Templates,
 		"templates/layouts/admin.html",
 		"templates/admin/system.html",
 	))
-	backendsTmpl := template.Must(template.ParseFS(Templates,
+	backendsTmpl := template.Must(template.New("").Funcs(handlers.TemplateFuncs()).ParseFS(Templates,
 		"templates/layouts/admin.html",
 		"templates/admin/backends.html",
 	))
-	waitlistTmpl := template.Must(template.ParseFS(Templates,
+	waitlistTmpl := template.Must(template.New("").Funcs(handlers.TemplateFuncs()).ParseFS(Templates,
 		"templates/layouts/admin.html",
 		"templates/admin/waitlist.html",
 	))
-	auditTmpl := template.Must(template.ParseFS(Templates,
+	auditTmpl := template.Must(template.New("").Funcs(handlers.TemplateFuncs()).ParseFS(Templates,
 		"templates/layouts/admin.html",
 		"templates/admin/audit.html",
 	))
-	revenueTmpl := template.Must(template.ParseFS(Templates,
+	revenueTmpl := template.Must(template.New("").Funcs(handlers.TemplateFuncs()).ParseFS(Templates,
 		"templates/layouts/admin.html",
 		"templates/admin/revenue.html",
 	))
-	costsTmpl := template.Must(template.ParseFS(Templates,
+	costsTmpl := template.Must(template.New("").Funcs(handlers.TemplateFuncs()).ParseFS(Templates,
 		"templates/layouts/admin.html",
 		"templates/admin/costs.html",
 	))
-	dedupTmpl := template.Must(template.ParseFS(Templates,
+	dedupTmpl := template.Must(template.New("").Funcs(handlers.TemplateFuncs()).ParseFS(Templates,
 		"templates/layouts/admin.html",
 		"templates/admin/dedup.html",
 	))
-	supportTmpl := template.Must(template.ParseFS(Templates,
+	supportTmpl := template.Must(template.New("").Funcs(handlers.TemplateFuncs()).ParseFS(Templates,
 		"templates/layouts/admin.html",
 		"templates/admin/support.html",
 	))
-	customerDetailTmpl := template.Must(template.ParseFS(Templates,
+	customerDetailTmpl := template.Must(template.New("").Funcs(handlers.TemplateFuncs()).ParseFS(Templates,
 		"templates/layouts/admin.html",
 		"templates/admin/support_detail.html",
 	))
-	notificationsTmpl := template.Must(template.ParseFS(Templates,
+	notificationsTmpl := template.Must(template.New("").Funcs(handlers.TemplateFuncs()).ParseFS(Templates,
 		"templates/layouts/admin.html",
 		"templates/admin/notifications.html",
 	))
-	adminAbuseTmpl := template.Must(template.ParseFS(Templates,
+	adminAbuseTmpl := template.Must(template.New("").Funcs(handlers.TemplateFuncs()).ParseFS(Templates,
 		"templates/layouts/admin.html",
 		"templates/admin/abuse.html",
 	))
-	abuseDetailTmpl := template.Must(template.ParseFS(Templates,
+	abuseDetailTmpl := template.Must(template.New("").Funcs(handlers.TemplateFuncs()).ParseFS(Templates,
 		"templates/layouts/admin.html",
 		"templates/admin/abuse_detail.html",
 	))
-	flagsTmpl := template.Must(template.ParseFS(Templates,
+	flagsTmpl := template.Must(template.New("").Funcs(handlers.TemplateFuncs()).ParseFS(Templates,
 		"templates/layouts/admin.html",
 		"templates/admin/flags.html",
 	))
