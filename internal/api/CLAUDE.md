@@ -446,7 +446,7 @@ BOOLEAN (migration 042).
   Sprites are 3D pixel cuboids from the scratch generator. If prices change, update
   `PRICE` + the floor labels in the builder markup/script, the tray labels, AND the pricing section.
   The page script has NO template literals (html/template parses `<script>`).
-- **`landing/` (sources) + `make landing`** — landing.html is GENERATED. Sources: `landing.src.html`
+- **`landing/` (sources) + `make landing`** — landing.html is GENERATED (and so is `internal/dashboard/templates/generated/house.html`, the dashboard's house: `house.css` + the sprite/room subset, same stamp, see internal/dashboard/CLAUDE.md; `landing.SourcesHash` in `landing/hash.go` is the shared guard). Sources: `landing.src.html`
   (markup with `__CSS__`/`__SPRITES__`/`__BUILDER__`/`__SCRIPT__` and `__PRICE_*__` tokens),
   `landing.css` (fonts as `__MONT__`/`__SILK4__`/`__SILK7__`, `/*NIGHT*/` lines expanded into both
   dark selector forms), `sprites.py` (pixel art -> `<symbol>`s), `builder.html` (house builder; tray /

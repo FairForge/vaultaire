@@ -42,7 +42,7 @@ func HandleBilling(tmpl *template.Template, svc BillingService, db *sql.DB, fl *
 		if svc != nil {
 			houseSvc = svc
 		}
-		populateHouse(ctx, db, houseSvc, fl, data, sd.TenantID)
+		populateHouse(ctx, db, houseSvc, fl, data, sd.TenantID, r.URL.Query().Get("add"))
 
 		if r.URL.Query().Get("upgraded") == "1" {
 			data["Upgraded"] = true

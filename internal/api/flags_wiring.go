@@ -34,6 +34,11 @@ const (
 	// launch. The Stripe webhook is NOT gated — a bought house is always
 	// applied. Checked in dashboard/handlers (billing_house.go).
 	flagQuotaCheckout = handlers.FlagQuotaCheckout
+
+	// flagHouseOverview draws the customer's house (pieces per floor from
+	// the quota, fill from usage) on the dashboard overview in place of the
+	// storage gauge (dashboard plan Phase 2). Default OFF, per tenant first.
+	flagHouseOverview = handlers.FlagHouseOverview
 )
 
 // signupsDefaultFromEnv is the `signups` flag's in-code default: the

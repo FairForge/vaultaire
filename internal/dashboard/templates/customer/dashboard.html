@@ -90,7 +90,11 @@
     color: var(--text-muted, #64748b);
 }
 .btn-dismiss:hover { background: var(--code-bg, #f8fafc); }
+.house-card .card-title { margin-bottom: 0.75rem; }
+.house-fullness { margin-top: 0.75rem; font-weight: 600; }
+.house-fullness a { font-weight: 400; margin-left: 0.5rem; white-space: nowrap; }
 </style>
+{{if .HouseScene}}{{template "house-css" .}}{{end}}
 {{end}}
 {{define "content"}}
 <div class="dashboard-header">
@@ -211,7 +215,41 @@ curl -X PUT https://stored.ge/my-first-bucket/hello.txt \
 </div>
 {{end}}
 
+{{if .HouseScene}}{{$h := .HouseScene}}
+{{template "house-sprites" .}}
+<div class="card house-card">
+    <div class="card-title">Your house</div>
+    <div class="house-room wall-{{$h.Wall}} fit-{{$h.Fit}}">
+        <svg class="house-svg" viewBox="0 0 128 115" role="img" aria-label="{{$h.AriaLabel}} Each piece links to the bucket that fills it.">
+            {{template "house-room" $h}}
+            <g class="hs-shadows" aria-hidden="true">{{range $h.Pieces}}<ellipse class="shadow sh-day" cx="{{.ShadowDay.CX}}" cy="{{.ShadowDay.CY}}" rx="{{.ShadowDay.RX}}" ry="{{.ShadowDay.RY}}" fill="#000" fill-opacity="{{.ShadowDay.O}}" filter="url(#soft)"/><ellipse class="shadow sh-night" cx="{{.ShadowNight.CX}}" cy="{{.ShadowNight.CY}}" rx="{{.ShadowNight.RX}}" ry="{{.ShadowNight.RY}}" fill="#000" fill-opacity="{{.ShadowNight.O}}" filter="url(#soft)"/>{{end}}</g>
+            <g class="hs-items">{{range $h.Pieces}}{{if .Decor}}<g class="hs-piece {{.Night}}{{if .LightPool}} light{{end}}" transform="translate({{.X}} {{.Y}})" aria-hidden="true"><use href="#s-{{.Symbol}}" width="{{.W}}" height="{{.H}}"{{if .WaveSymbol}} class="wave-a"{{end}}/>{{if .WaveSymbol}}<use href="#s-{{.WaveSymbol}}" width="{{.W}}" height="{{.H}}" class="wave-b"/>{{end}}</g>{{else}}<a href="{{.Href}}" class="hs-piece {{.Night}}" transform="translate({{.X}} {{.Y}})" aria-label="{{.Title}}"><title>{{.Title}}</title><rect class="hit" x="-1" y="-1" width="{{.HitW}}" height="{{.HitH}}"/><clipPath id="{{.ClipID}}"><rect x="0" y="{{.FillY}}" width="{{.W}}" height="{{.FillH}}"/></clipPath><use href="#s-{{.Symbol}}" width="{{.W}}" height="{{.H}}" class="hs-empty"/>{{if not .Empty}}<use href="#s-{{.Symbol}}" width="{{.W}}" height="{{.H}}" clip-path="url(#{{.ClipID}})"/>{{end}}</a>{{end}}{{end}}</g>
+            <g class="hs-light" aria-hidden="true">{{range $h.Pieces}}{{if .LightPool}}<g class="light-pool">{{range .Pools}}<ellipse class="glow" cx="{{.CX}}" cy="{{.CY}}" rx="{{.RX}}" ry="{{.RY}}" fill="{{.Fill}}"/>{{end}}</g>{{end}}{{end}}</g>
+            <g class="hs-tags" aria-hidden="true">{{range $h.Pieces}}{{if not .Decor}}<g class="tb-tag" transform="translate({{.TagX}} {{.TagY}})"><rect width="{{.TagW}}" height="5" fill="{{.TagFill}}"/><text x="{{.TagMidX}}" y="4" text-anchor="middle" font-family="Silkscreen, monospace" font-size="4" fill="#1a1a1a">{{.Tag}}</text></g>{{end}}{{end}}</g>
+            <g class="zone-labels" aria-hidden="true"><text x="124" y="7.4" text-anchor="end" font-family="Silkscreen, monospace" font-size="4" fill="#e8dcc8">ATTIC  {{if $h.Vault.Bought}}{{$h.Vault.UsedFmt}} / {{$h.Vault.LimitFmt}}{{else}}NONE YET{{end}}</text><text class="zone-floor" x="124" y="112.6" text-anchor="end" font-family="Silkscreen, monospace" font-size="4" fill="#5a3418">DOWNSTAIRS  {{if $h.Std.Bought}}{{$h.Std.UsedFmt}} / {{$h.Std.LimitFmt}}{{else}}NONE YET{{end}}</text></g>
+        </svg>
+    </div>
+    <p class="house-fullness">{{$h.Std.Label}} &middot; {{$h.Vault.Label}}.
+        <a href="/dashboard/billing?add=downstairs">Add a box downstairs &#9656;</a>
+        <a href="/dashboard/billing?add=attic">Add one to the attic &#9656;</a></p>
+    <p class="house-help">Downstairs opens instantly; the attic is back in minutes. Click a piece to open its bucket. Night follows your theme.</p>
+</div>
+{{end}}
 <div class="card-grid">
+    {{if .HouseScene}}
+    <div class="card">
+        <div class="card-title">Downstairs</div>
+        <div class="card-value">{{.HouseScene.Std.UsedFmt}}</div>
+        {{if .HouseScene.Std.Bought}}<div class="usage-bar"><div class="usage-bar-fill{{if ge .HouseScene.Std.Pct 90}} danger{{else if ge .HouseScene.Std.Pct 75}} warning{{end}}" style="width: {{.HouseScene.Std.Pct}}%"></div></div>{{end}}
+        <div class="card-detail">{{.HouseScene.Std.Label}}</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Attic</div>
+        <div class="card-value">{{.HouseScene.Vault.UsedFmt}}</div>
+        {{if .HouseScene.Vault.Bought}}<div class="usage-bar"><div class="usage-bar-fill{{if ge .HouseScene.Vault.Pct 90}} danger{{else if ge .HouseScene.Vault.Pct 75}} warning{{end}}" style="width: {{.HouseScene.Vault.Pct}}%"></div></div>{{end}}
+        <div class="card-detail">{{.HouseScene.Vault.Label}}</div>
+    </div>
+    {{else}}
     <div class="card">
         <div class="card-title">Storage Used</div>
         <div class="card-value">{{.StorageUsedFmt}}</div>
@@ -220,10 +258,13 @@ curl -X PUT https://stored.ge/my-first-bucket/hello.txt \
         </div>
         <div class="card-detail">{{.StoragePercent}}% of {{.StorageLimitFmt}}</div>
     </div>
+    {{end}}
     <div class="card">
-        <div class="card-title">Bandwidth This Month</div>
-        <div class="card-value">{{.BandwidthTotalFmt}}</div>
-        <div class="card-detail">{{.IngressFmt}} in / {{.EgressFmt}} out</div>
+        <div class="card-title">{{if .HouseScene}}Egress This Month{{else}}Bandwidth This Month{{end}}</div>
+        <div class="card-value">{{if .HouseScene}}{{.EgressFmt}}{{else}}{{.BandwidthTotalFmt}}{{end}}</div>
+        {{if .EgressAllowanceFmt}}<div class="usage-bar"><div class="usage-bar-fill {{.EgressBarClass}}" style="width: {{.EgressPct}}%"></div></div>
+        <div class="card-detail">{{.EgressPct}}% of {{.EgressAllowanceFmt}} free this month, then slower &middot; never billed</div>
+        {{else}}<div class="card-detail">{{.IngressFmt}} in / {{.EgressFmt}} out</div>{{end}}
     </div>
     <div class="card">
         <div class="card-title">Buckets</div>

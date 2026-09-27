@@ -1,0 +1,49 @@
+<style>
+    /* The house on the dashboard (docs/DASHBOARD_PLAN.md Phase 2). Emitted by
+       build.py into internal/dashboard/templates/generated/house.html as the
+       "house-css" template; NIGHT lines are expanded the same way as landing.css.
+       The wall/fit classes are generated from builder.js's WALLS/FITS tables. */
+    .sprite-defs { position: absolute; width: 0; height: 0; overflow: hidden; }
+    .house-room { position: relative; overflow: hidden; background: #ffffff; box-shadow: 0 22px 40px -24px rgba(0, 0, 0, 0.45); --wall-a: #0a3a63; --wall-b: #125594; --wall-deep: #0b2f52; --fit: #1c3445; }
+__VIBES__
+    .house-svg { display: block; width: 100%; height: auto; color: var(--fit); shape-rendering: crispEdges; }
+    .house-svg .hit { fill: transparent; }
+    .house-svg a.hs-piece { outline: none; cursor: pointer; }
+    .house-svg a.hs-piece:hover .hit, .house-svg a.hs-piece:focus-visible .hit { stroke: #ffd400; stroke-width: 1; stroke-dasharray: 2 1; }
+    .house-svg .hs-empty { opacity: 0.3; }
+    .house-svg .tb-tag, .house-svg .zone-labels { pointer-events: none; }
+    .wave-b { opacity: 0; }
+    @media (prefers-reduced-motion: no-preference) {
+        .wave-a { animation: wave-a 4.5s infinite; }
+        .wave-b { animation: wave-b 4.5s infinite; }
+        .light-pool { animation: breathe 3.8s ease-in-out infinite; }
+    }
+    @keyframes wave-a { 0%, 9.9% { opacity: 1; } 10%, 19.9% { opacity: 0; } 20%, 29.9% { opacity: 1; } 30%, 39.9% { opacity: 0; } 40%, 100% { opacity: 1; } }
+    @keyframes wave-b { 0%, 9.9% { opacity: 0; } 10%, 19.9% { opacity: 1; } 20%, 29.9% { opacity: 0; } 30%, 39.9% { opacity: 1; } 40%, 100% { opacity: 0; } }
+    @keyframes breathe { 50% { opacity: 0.86; } }
+    /* night follows the shared theme (data-theme on <html>, else the system) */
+    .night-dim { opacity: 0; transition: opacity 0.4s ease; }
+    .glow { opacity: 0; transition: opacity 0.4s ease; pointer-events: none; mix-blend-mode: screen; }
+    .light-pool { pointer-events: none; }
+    .win-night { opacity: 0; transition: opacity 0.4s ease; }
+    .win-sky, .win-cloud, .win-frame { transition: fill 0.4s ease, opacity 0.4s ease; }
+    .shadow { pointer-events: none; }
+    .sh-night { opacity: 0; }
+    .day-light { transition: opacity 0.4s ease; }
+    .moon-light, .vignette { opacity: 0; transition: opacity 0.4s ease; pointer-events: none; }
+    /*NIGHT*/ .night-dim { opacity: 0.5; }
+    /*NIGHT*/ .glow { opacity: 1; }
+    /*NIGHT*/ .win-night { opacity: 1; }
+    /*NIGHT*/ .win-cloud { opacity: 0; }
+    /*NIGHT*/ .win-sky { fill: #1b2553; }
+    /*NIGHT*/ .win-frame { fill: #8d897f; }
+    /*NIGHT*/ .house-svg .hs-piece.nf-warm { filter: url(#nightwarm); }
+    /*NIGHT*/ .house-svg .hs-piece.nf-mid { filter: url(#nightmid); }
+    /*NIGHT*/ .house-svg .hs-piece.nf-dim { filter: url(#nightdim); }
+    /*NIGHT*/ .day-light { opacity: 0; }
+    /*NIGHT*/ .moon-light { opacity: 1; }
+    /*NIGHT*/ .vignette { opacity: 1; }
+    /*NIGHT*/ .sh-day { opacity: 0; }
+    /*NIGHT*/ .sh-night { opacity: 1; }
+    /*NIGHT*/ .zone-floor { fill: #e8dcc8; }
+</style>
