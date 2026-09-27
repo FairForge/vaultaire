@@ -444,6 +444,22 @@ BOOLEAN (migration 042).
   Sprites are 3D pixel cuboids from the scratch generator. If prices change, update
   `PRICE` + the floor labels in the builder markup/script, the tray labels, AND the pricing section.
   The page script has NO template literals (html/template parses `<script>`).
+- **`landing/` (sources) + `make landing`** — landing.html is GENERATED. Sources: `landing.src.html`
+  (markup with `__CSS__`/`__SPRITES__`/`__BUILDER__`/`__SCRIPT__` and `__PRICE_*__` tokens),
+  `landing.css` (fonts as `__MONT__`/`__SILK4__`/`__SILK7__`, `/*NIGHT*/` lines expanded into both
+  dark selector forms), `sprites.py` (pixel art -> `<symbol>`s), `builder.html` (house builder; tray /
+  swatches generated), `page.js` + `builder.js` (no template literals: html/template parses the
+  script), `prices.json` (EVERY stored.ge price the page shows: tier rates, add-on, founders,
+  competitors, derived 20 TB figures — edit here, rebuild), `fonts/`. `build.py` stamps a sha256 of the
+  sources into the output's first comment and `landing_build_test.go` recomputes it, so a hand edit to
+  landing.html or a stale rebuild fails CI. Never edit landing.html directly.
+- **`landing/browser/`** — headless-Chrome checks of the house builder (`harness.html`, 31 PASS/FAIL
+  lines: floors, tags, toolbar, undo, keyboard, why strip, labels, links v1/v2, export). `run.sh`
+  renders both template variants via `TestLanding_WriteVariants` (env `LANDING_OUT`) then drives
+  Chrome; `make landing-browser` locally, the `landing-browser` CI job on every PR.
+- **og_image.go / og.png** — `/og.png` social preview (1200x630, embedded, 1 day cache) that the
+  landing's og:image / twitter:image meta point at. Re-render with `make og` (build.py `og` mode
+  writes a standalone page, Chrome screenshots it) whenever the house scene or prices change.
 - **site_shell.go** — shared favicon + `<style>` + pixel-mark brand bar for the /docs/* and
   /changelog shells, so the sub-pages match the landing page (system fonts, no embeds), plus the
   light/dark toggle and `siteMarkdown` (goldmark + table extension: the FAQ price table rendered as

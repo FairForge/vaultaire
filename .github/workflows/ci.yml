@@ -85,3 +85,21 @@ jobs:
           DATABASE_URL: postgres://viera@localhost:5432/vaultaire?sslmode=disable
           JWT_SECRET: ci-test-secret-not-for-production
           PORT: "8000"
+
+  # The landing page's house builder, driven in headless Chrome
+  # (internal/api/landing/browser/harness.html). Needs no database.
+  landing-browser:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.25"
+          cache: true
+      - name: Browser checks
+        run: bash internal/api/landing/browser/run.sh
+        env:
+          CHROME: google-chrome

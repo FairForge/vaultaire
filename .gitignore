@@ -142,3 +142,6 @@ cmd/pipeline-bench/
 pipeline-bench
 /dedup-migrate
 /dedup-migrate-linux
+
+# python bytecode from the landing page generator
+__pycache__/
