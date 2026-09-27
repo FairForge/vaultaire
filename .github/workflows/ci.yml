@@ -90,6 +90,8 @@ jobs:
   # (internal/api/landing/browser/harness.html). Needs no database.
   landing-browser:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7
       - name: Set up Go
