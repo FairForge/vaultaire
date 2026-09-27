@@ -37,7 +37,7 @@ function run() {
         var P = w.__LANDING_PRICES__ || { ground: 4.49, attic: 2.0 };
         ok(pieces() === 6, 'starter has 6 pieces', pieces());
         ok(total() === money(6 * P.ground + 1 * P.attic), 'starter total', total());
-        ok(/Downstairs 6 TB/.test(lines()) && /Attic 1 TB/.test(lines()), 'receipt has a line per floor', lines());
+        ok(/Downstairs\s*6 TB/.test(lines()) && /Attic\s*1 TB\b/.test(lines()), 'receipt has a line per floor', lines());
 
         // ---- add from the tray, drag it up, price follows the floor
         d.querySelector('.piece-card[data-add="bookcase"]').click();
@@ -50,7 +50,7 @@ function run() {
         pe('pointerup', cx, cy - 40 * u, bc);
         ok(midTag === 'rgb(185, 199, 210)', 'tag turns grey mid-drag', midTag);
         ok(total() === money(6 * P.ground + 11 * P.attic), 'bookcase priced as attic after drag', total());
-        ok(/Attic 11 TB/.test(lines()) && /saves/.test(lines()), 'attic line shows saving', lines());
+        ok(/Attic\s*11 TB/.test(lines()) && /saves/.test(lines()), 'attic line shows saving', lines());
 
         // ---- toolbar: move / open / remove + undo
         var dr = d.querySelector('#room-items .piece[aria-label^="Dresser"]'); dr.dispatchEvent(new w.FocusEvent('focus'));
@@ -98,7 +98,7 @@ function run() {
         // ---- old (v1) links map onto the house; v2 links with junk are cleaned
         var e = document.getElementById('g').contentDocument;
         ok(e.querySelectorAll('#room-items .piece').length === 5, 'v1 link: 5 pieces', e.querySelectorAll('#room-items .piece').length);
-        ok(/Attic 11 TB/.test(e.getElementById('r-lines').textContent.replace(/\s+/g, ' ')), 'v1 link: archive pieces went to the attic');
+        ok(/Attic\s*11 TB/.test(e.getElementById('r-lines').textContent.replace(/\s+/g, ' ')), 'v1 link: archive pieces went to the attic');
         var hh = document.getElementById('h').contentDocument;
         ok(hh.querySelectorAll('#room-items .piece').length === 4, 'v2 link: junk piece and second mascot dropped', hh.querySelectorAll('#room-items .piece').length);
         ok(hh.getElementById('room-sign').textContent === 'zoëb’s place', 'v2 link: name filtered', hh.getElementById('room-sign').textContent);
