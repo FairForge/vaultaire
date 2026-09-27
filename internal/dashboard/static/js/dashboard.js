@@ -27,3 +27,30 @@ document.addEventListener('click', function(e) {
         });
     }
 });
+
+// Light/dark: the pick is shared with the site through localStorage "sg-theme"
+// (the layouts set data-theme before first paint); the toggle button flips it.
+(function () {
+    var r = document.documentElement, q = window.matchMedia('(prefers-color-scheme: dark)');
+    function dark() { var t = r.getAttribute('data-theme'); return t ? t === 'dark' : q.matches; }
+    function sync() {
+        var k = dark();
+        r.classList.toggle('is-dark', k);
+        document.querySelectorAll('.theme-toggle').forEach(function (b) {
+            b.setAttribute('aria-label', k ? 'Switch to light mode' : 'Switch to dark mode');
+        });
+        var m = document.querySelector('meta[name="theme-color"]');
+        if (m) m.content = k ? '#101010' : '#383838';
+    }
+    document.addEventListener('click', function (e) {
+        var b = e.target.closest('.theme-toggle');
+        if (!b) return;
+        var n = dark() ? 'light' : 'dark';
+        r.setAttribute('data-theme', n);
+        try { localStorage.setItem('sg-theme', n); } catch (err) {}
+        sync();
+        document.dispatchEvent(new CustomEvent('sg-theme'));
+    });
+    if (q.addEventListener) q.addEventListener('change', sync);
+    sync();
+})();

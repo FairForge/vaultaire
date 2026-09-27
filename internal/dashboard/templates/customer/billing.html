@@ -3,14 +3,14 @@
 <style>
 .comparison-table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
 .comparison-table th,
-.comparison-table td { padding: 0.6rem 0.75rem; text-align: right; border-bottom: 1px solid var(--border, #e2e8f0); }
+.comparison-table td { padding: 0.6rem 0.75rem; text-align: right; border-bottom: 1px solid var(--border); }
 .comparison-table th:first-child,
 .comparison-table td:first-child { text-align: left; }
-.comparison-table th { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted, #64748b); font-weight: 600; }
-.comparison-highlight td { background: var(--highlight-bg, #f0fdf4); font-weight: 600; }
-.savings-callout { margin-top: 1rem; padding: 0.75rem 1rem; background: var(--highlight-bg, #f0fdf4); border-radius: 0.375rem; font-weight: 600; font-size: 1.1rem; color: var(--success, #16a34a); }
-.comparison-subtitle { margin-top: 0.5rem; font-size: 0.85rem; color: var(--text-muted, #64748b); }
-.comparison-footnote { margin-top: 0.5rem; font-size: 0.75rem; color: var(--text-muted, #94a3b8); }
+.comparison-table th { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); font-weight: 600; }
+.comparison-highlight td { background: var(--highlight-bg); font-weight: 600; }
+.savings-callout { margin-top: 1rem; padding: 0.75rem 1rem; background: var(--highlight-bg); border-radius: 0.375rem; font-weight: 600; font-size: 1.1rem; color: var(--success); }
+.comparison-subtitle { margin-top: 0.5rem; font-size: 0.85rem; color: var(--text-muted); }
+.comparison-footnote { margin-top: 0.5rem; font-size: 0.75rem; color: var(--text-muted); }
 </style>
 {{if .House.Enabled}}<script src="/static/js/house.js" defer></script>{{end}}
 {{end}}
@@ -214,7 +214,7 @@
         </div>
 
         <div class="house-actions">
-            <button type="submit" class="btn btn-primary" {{if not $h.Ready}}disabled aria-disabled="true"{{end}}>{{if $h.HasHouse}}Update my house &#9656;{{else}}Checkout &#9656;{{end}}</button>
+            <button type="submit" class="btn btn-primary" {{if not $h.Ready}}disabled aria-disabled="true"{{end}}>{{if $h.HasHouse}}Update my house{{else}}Checkout{{end}}</button>
             {{if $h.RoomURL}}<a class="btn" href="{{$h.RoomURL}}">Reopen it on the site</a>{{end}}
         </div>
     </form>

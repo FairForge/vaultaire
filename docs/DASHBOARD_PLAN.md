@@ -1,6 +1,6 @@
 # Dashboard plan: the house comes inside
 
-*Drafted 2026-09-27 from the landing-page work (PRs #479–#493). Status: Phase 0 shipped (#498), Phase 1 shipped behind `quota_checkout` (#504), Phase 2 shipped behind `house_overview` (this PR). Owner: Isaac. Estimates are working days for one person and assume the landing sources/generator pattern.*
+*Drafted 2026-09-27 from the landing-page work (PRs #479–#493). Status: Phase 0 shipped (#498), Phase 1 shipped behind `quota_checkout` (#504), Phase 2 shipped behind `house_overview` (#505), Phase 3 shipped (this PR). Owner: Isaac. Estimates are working days for one person and assume the landing sources/generator pattern.*
 
 ## Why
 
@@ -59,7 +59,9 @@ The site sells whole TB; billing must too. *Shipped: migration 066 (`tenant_floo
 - **Fullness, not meters.** Storage used is "4.2 of 6 TB downstairs, 0.9 of 1 TB attic"; the upgrade nudge is "add a box" that opens the billing steppers with +1.
 - **Egress** stays as it is today (allowance as fraction of quota, throttled, never billed) but is shown as a simple bar.
 
-### Phase 3: the look (2 days)
+### Phase 3: the look (2 days) — **shipped**
+
+*Shipped: `static/css/style.css` rewritten on the site's tokens (oat/charcoal palette, Montserrat + Silkscreen served from `static/fonts/`, square cards with a 2 px border, charcoal primary buttons with the ▸, ghost buttons, Silkscreen tags/table headers/captions, underline inputs, yellow focus ring, alerts with a 6 px left bar, dark tokens under both selectors); the layouts carry the pixel mark, favicon, theme-color and the shared `sg-theme` toggle (dashboard.js), the admin sidebar uses the bar colour with a yellow active link; template inline colours moved to tokens (`--dim`, `--line`, `--panel`, `--ok-ink`, `--danger-ink`, …). Lighthouse accessibility 100 on overview, buckets, billing and settings (settings inputs got explicit labels). One deviation from the guide: `--dim` is #666 on the dashboard, not #737373, because captions here sit on the oat page background and 4.5:1 needs it.*
 
 - Port the site's design tokens (oat/charcoal palette, Montserrat + Silkscreen served from the binary, square cards, yellow/grey/orange tags, dark mode with the shared `sg-theme` toggle) into `layouts/base.html` and `layouts/admin.html`.
 - Keep every existing page working: this is a stylesheet and layout swap, not a rewrite. Templates that inline their own colours (billing, analytics charts) move to tokens.

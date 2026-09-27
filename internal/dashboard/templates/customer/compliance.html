@@ -27,7 +27,7 @@
 <div class="stats-grid stats-grid-3">
     <div class="stat-card">
         <div class="stat-label">Compliance Score</div>
-        <div class="stat-value" style="color:{{if ge .ComplianceScore 80}}var(--success){{else if ge .ComplianceScore 50}}var(--warning, #e6a817){{else}}var(--danger){{end}}">{{.ComplianceScore}}%</div>
+        <div class="stat-value" style="color:{{if ge .ComplianceScore 80}}var(--success){{else if ge .ComplianceScore 50}}var(--warning){{else}}var(--danger){{end}}">{{.ComplianceScore}}%</div>
         <div class="stat-sub">{{if ge .ComplianceScore 80}}Good standing{{else if ge .ComplianceScore 50}}Needs attention{{else}}Action required{{end}}</div>
     </div>
     <div class="stat-card">

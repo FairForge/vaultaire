@@ -117,15 +117,15 @@
     <div class="card-title">Internal Notes</div>
     {{if .Notes}}
     {{range .Notes}}
-    <div style="border-bottom:1px solid #1e293b;padding:0.75rem 0">
+    <div style="border-bottom:1px solid var(--line);padding:0.75rem 0">
         <div style="font-size:0.9rem">{{.Note}}</div>
-        <div style="font-size:0.8rem;color:#94a3b8;margin-top:0.25rem">{{.AdminEmail}} &mdash; {{.RelTime}}</div>
+        <div style="font-size:0.8rem;color:var(--dim);margin-top:0.25rem">{{.AdminEmail}} &mdash; {{.RelTime}}</div>
     </div>
     {{end}}
     {{end}}
     <form action="/admin/support/{{.TenantID}}/notes" method="POST" style="margin-top:1rem">
         <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-        <textarea name="note" rows="3" maxlength="2000" placeholder="Add a note..." style="width:100%;padding:0.5rem;border:1px solid #334155;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:0.9rem;resize:vertical;box-sizing:border-box"></textarea>
+        <textarea name="note" rows="3" maxlength="2000" placeholder="Add a note..." style="width:100%;padding:0.5rem;border:1px solid var(--line);border-radius:6px;background:var(--code-block-bg);color:var(--line);font-size:0.9rem;resize:vertical;box-sizing:border-box"></textarea>
         <button type="submit" class="btn btn-sm btn-primary" style="margin-top:0.5rem">Add Note</button>
     </form>
 </div>
