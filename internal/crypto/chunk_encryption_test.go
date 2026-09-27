@@ -1,12 +1,16 @@
 package crypto
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/hkdf"
 )
 
 func newTestChunkEncryptionService(t *testing.T) *ChunkEncryptionService {
@@ -140,4 +144,73 @@ func TestChunkEncryption_DecryptWithoutHash(t *testing.T) {
 	decrypted, err := svc.DecryptChunkData(tenantID, plaintextHash, ciphertext, "")
 	require.NoError(t, err)
 	assert.Equal(t, plaintext, decrypted)
+}
+
+// TestChunkEncryption_NonceBoundToSealedBytes — R8-01. The convergent key is
+// fixed by (tenant, plaintextHash), but the bytes actually sealed are the
+// chunk AFTER the compression decision (raw or zstd, by the request's
+// Content-Type and the zstd version). Two different messages under one key
+// must never share a nonce (cipher.AEAD.Seal: "unique for all time, for a
+// given key"; NIST SP 800-38D §8), so the nonce has to be derived from what
+// is sealed, not from the plaintext identity.
+func TestChunkEncryption_NonceBoundToSealedBytes(t *testing.T) {
+	svc := newTestChunkEncryptionService(t)
+	tenantID := "tenant-r8-nonce"
+	chunk := []byte("the chunk, whose hash is the dedup identity")
+	sum := sha256.Sum256(chunk)
+	plaintextHash := hex.EncodeToString(sum[:])
+
+	raw := chunk
+	compressed := []byte("zstd(chunk) — a different message under the same convergent key")
+
+	ctRaw, hRaw, err := svc.EncryptChunkData(tenantID, plaintextHash, raw)
+	require.NoError(t, err)
+	ctZ, hZ, err := svc.EncryptChunkData(tenantID, plaintextHash, compressed)
+	require.NoError(t, err)
+
+	assert.NotEqual(t, ctRaw[:12], ctZ[:12],
+		"different sealed bytes under one convergent key must get different nonces")
+
+	// Both still decrypt (the nonce travels with the blob).
+	gotRaw, err := svc.DecryptChunkData(tenantID, plaintextHash, ctRaw, hRaw)
+	require.NoError(t, err)
+	assert.Equal(t, raw, gotRaw)
+	gotZ, err := svc.DecryptChunkData(tenantID, plaintextHash, ctZ, hZ)
+	require.NoError(t, err)
+	assert.Equal(t, compressed, gotZ)
+
+	// Convergence is preserved: the same sealed bytes give the same blob.
+	ctRaw2, hRaw2, err := svc.EncryptChunkData(tenantID, plaintextHash, raw)
+	require.NoError(t, err)
+	assert.Equal(t, ctRaw, ctRaw2)
+	assert.Equal(t, hRaw, hRaw2)
+}
+
+// TestChunkEncryption_LegacyV1BlobDecrypts — blobs sealed before R8-01 carry
+// their (plaintext-hash-derived) nonce as the 12-byte prefix; decryption
+// reads the nonce from the blob, so no stored chunk needs re-encrypting.
+func TestChunkEncryption_LegacyV1BlobDecrypts(t *testing.T) {
+	svc := newTestChunkEncryptionService(t)
+	tenantID := "tenant-r8-legacy"
+	plaintext := []byte("a chunk stored under the v1 nonce derivation")
+	sum := sha256.Sum256(plaintext)
+	plaintextHash := hex.EncodeToString(sum[:])
+
+	key, err := svc.deriveConvergentKey(tenantID, plaintextHash)
+	require.NoError(t, err)
+	block, err := aes.NewCipher(key)
+	require.NoError(t, err)
+	gcm, err := cipher.NewGCM(block)
+	require.NoError(t, err)
+
+	// The pre-R8 derivation: HKDF(convergentKey, salt = plaintextHash, info v1).
+	nonce := make([]byte, gcm.NonceSize())
+	_, err = io.ReadFull(hkdf.New(sha256.New, key, []byte(plaintextHash), []byte("vaultaire-chunk-nonce-v1")), nonce)
+	require.NoError(t, err)
+	legacy := append(append([]byte{}, nonce...), gcm.Seal(nil, nonce, plaintext, nil)...)
+	legacySum := sha256.Sum256(legacy)
+
+	got, err := svc.DecryptChunkData(tenantID, plaintextHash, legacy, hex.EncodeToString(legacySum[:]))
+	require.NoError(t, err)
+	assert.Equal(t, plaintext, got)
 }

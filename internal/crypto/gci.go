@@ -354,7 +354,23 @@ func (g *GlobalContentIndex) InsertChunkTx(ctx context.Context, tx *sql.Tx, entr
 // Runs as a direct UPDATE rather than the increment_chunk_ref() SQL function
 // because the function returns VOID, which hides the rows-affected count.
 func (g *GlobalContentIndex) IncrementRef(ctx context.Context, scope, plaintextHash string) (int64, error) {
-	res, err := g.db.ExecContext(ctx, `
+	return g.incrementRef(ctx, g.db, scope, plaintextHash)
+}
+
+// IncrementRefTx is IncrementRef inside a caller-owned transaction — used by
+// the chunked PUT path when it finds, under the advisory lock, that a
+// concurrent first-store already committed the row (R8-02). The caller
+// commits; the cache entry is invalidated either way.
+func (g *GlobalContentIndex) IncrementRefTx(ctx context.Context, tx *sql.Tx, scope, plaintextHash string) (int64, error) {
+	return g.incrementRef(ctx, tx, scope, plaintextHash)
+}
+
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
+}
+
+func (g *GlobalContentIndex) incrementRef(ctx context.Context, ex execer, scope, plaintextHash string) (int64, error) {
+	res, err := ex.ExecContext(ctx, `
 		UPDATE global_content_index
 		SET ref_count = ref_count + 1,
 		    last_accessed_at = NOW(),

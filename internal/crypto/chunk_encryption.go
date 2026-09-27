@@ -24,9 +24,16 @@ func NewChunkEncryptionService(km *KeyManager) *ChunkEncryptionService {
 }
 
 // EncryptChunkData derives a convergent key from the tenant key + plaintext hash,
-// then encrypts with AES-256-GCM using a deterministic nonce (HKDF-derived).
-// Returns ciphertext (nonce prepended) and the ciphertext hash (SHA-256 of the
-// encrypted blob, for integrity verification on read).
+// then encrypts with AES-256-GCM using a deterministic nonce (HKDF-derived
+// from the key and the bytes being sealed). Returns ciphertext (nonce
+// prepended) and the ciphertext hash (SHA-256 of the encrypted blob, for
+// integrity verification on read).
+//
+// plaintextHash is the chunk's dedup identity (SHA-256 of the chunk BEFORE
+// compression); data is what is actually sealed — the raw chunk or its zstd
+// output, decided per request by Content-Type. The key is fixed by the
+// identity, so it is the nonce that must separate the two possible messages
+// (R8-01).
 //
 // Ciphertext format: [nonce (12B)][GCM ciphertext + tag (len(data)+16)]
 // Overhead: 28 bytes per chunk.
@@ -46,7 +53,7 @@ func (s *ChunkEncryptionService) EncryptChunkData(tenantID string, plaintextHash
 		return nil, "", fmt.Errorf("create GCM: %w", err)
 	}
 
-	nonce, err := s.deriveNonce(convergentKey, plaintextHash, gcm.NonceSize())
+	nonce, err := s.deriveNonce(convergentKey, data, gcm.NonceSize())
 	if err != nil {
 		return nil, "", fmt.Errorf("derive nonce: %w", err)
 	}
@@ -118,13 +125,28 @@ func (s *ChunkEncryptionService) deriveConvergentKey(tenantID string, plaintextH
 	return DeriveConvergentKey(tenantKey, hashBytes), nil
 }
 
-// deriveNonce produces a deterministic nonce from the convergent key and
-// plaintext hash using HKDF. This is safe because the (key, nonce) pair
-// is unique per distinct plaintext — reusing a nonce with a DIFFERENT
-// plaintext under the same key is impossible by construction (convergent
-// encryption guarantees same key ↔ same plaintext).
-func (s *ChunkEncryptionService) deriveNonce(convergentKey []byte, plaintextHash string, nonceSize int) ([]byte, error) {
-	hkdfReader := hkdf.New(sha256.New, convergentKey, []byte(plaintextHash), []byte("vaultaire-chunk-nonce-v1"))
+// deriveNonce produces a deterministic nonce from the convergent key and the
+// SHA-256 of the bytes that are about to be sealed.
+//
+// The convergent key is a function of (tenant, plaintext hash) only, while the
+// sealed message may be the raw chunk or its compressed form — the compression
+// decision depends on the request's Content-Type, on whether zstd shrank the
+// chunk, and on the zstd version, none of which are part of the key. Deriving
+// the nonce from the plaintext hash therefore reused one (key, nonce) pair for
+// two distinct messages whenever two stores of the same chunk made different
+// compression decisions (concurrent first-stores with different Content-Types,
+// a re-store after GC, a zstd upgrade). GCM forfeits both confidentiality and
+// authenticity on nonce reuse (NIST SP 800-38D §8; cipher.AEAD.Seal requires
+// the nonce to be "unique for all time, for a given key"). Salting the HKDF
+// with the hash of the sealed bytes makes the nonce a function of the message:
+// identical messages still converge to identical blobs (dedup unaffected),
+// distinct messages under one key get distinct nonces.
+//
+// Decryption reads the nonce from the blob prefix, so blobs sealed under the
+// previous derivation (salt = plaintext hash) keep decrypting unchanged.
+func (s *ChunkEncryptionService) deriveNonce(convergentKey []byte, sealed []byte, nonceSize int) ([]byte, error) {
+	salt := sha256.Sum256(sealed)
+	hkdfReader := hkdf.New(sha256.New, convergentKey, salt[:], []byte("vaultaire-chunk-nonce-v2"))
 	nonce := make([]byte, nonceSize)
 	if _, err := io.ReadFull(hkdfReader, nonce); err != nil {
 		return nil, fmt.Errorf("HKDF nonce derivation: %w", err)

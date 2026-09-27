@@ -133,18 +133,22 @@ func (s *Server) handleDeleteObjects(w http.ResponseWriter, r *http.Request, req
 		// so dedup GC can reclaim the physical chunks.
 		var isChunked bool
 		if s.db != nil {
-			_ = s.db.QueryRowContext(r.Context(),
+			if rowErr := s.db.QueryRowContext(r.Context(),
 				`SELECT is_chunked FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-				t.ID, bucket, key).Scan(&isChunked)
+				t.ID, bucket, key).Scan(&isChunked); rowErr != nil && !errors.Is(rowErr, sql.ErrNoRows) {
+				// Never guess "whole" for a possibly chunked object (R8-07).
+				s.logger.Error("batch delete: head cache read failed", zap.Error(rowErr), zap.String("key", key))
+				result.Errors = append(result.Errors, DeleteError{
+					Key: key, Code: ErrInternalError, Message: "Internal error while deleting",
+				})
+				continue
+			}
 		}
 
 		var delErr error
-		chunkedHandled := false
-		if isChunked && s.gci != nil {
-			delErr = s.gci.DeleteObjectChunks(r.Context(), t.ID, bucket, key)
-			chunkedHandled = true
-		}
-		if !chunkedHandled {
+		// A chunked object's manifest is released together with its head row
+		// below, in one transaction (R8-08); there is no backend delete.
+		if !isChunked || s.gci == nil {
 			delErr = s.engine.Delete(r.Context(), container, key)
 			if delErr != nil && (strings.Contains(delErr.Error(), "no such file or directory") ||
 				strings.Contains(delErr.Error(), "not found")) {
@@ -168,19 +172,24 @@ func (s *Server) handleDeleteObjects(w http.ResponseWriter, r *http.Request, req
 		// Success (or idempotent miss) — remove the billing record and
 		// release exactly the bytes it held (atomic via RETURNING, WP-1).
 		if s.db != nil {
-			var deleted displacedRow
-			cacheErr := s.db.QueryRowContext(r.Context(), `
-				DELETE FROM object_head_cache
-				WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
-				RETURNING size_bytes, floor
-			`, t.ID, bucket, key).Scan(&deleted.Size, &deleted.Floor)
-			if cacheErr == nil && deleted.Size > 0 {
+			deleted, found, cacheErr := deleteHeadRowReleasing(r.Context(), s.db, manifestReleaser(s.gci), t.ID, bucket, key)
+			switch {
+			case cacheErr != nil && isChunked:
+				// Row and manifest rolled back together: the object is intact
+				// and the client retries this key.
+				s.logger.Error("batch delete: chunked delete failed",
+					zap.Error(cacheErr), zap.String("key", key))
+				result.Errors = append(result.Errors, DeleteError{
+					Key: key, Code: ErrInternalError, Message: "Internal error while deleting",
+				})
+				continue
+			case cacheErr != nil:
+				s.logger.Error("batch delete: head cache delete failed",
+					zap.Error(cacheErr), zap.String("key", key))
+			case found && deleted.Size > 0:
 				ctx, cancel := quotaCtx(r)
 				s.releaseQuota(ctx, t.ID, deleted.Floor, deleted.Size)
 				cancel()
-			} else if cacheErr != nil && cacheErr != sql.ErrNoRows {
-				s.logger.Error("batch delete: head cache delete failed",
-					zap.Error(cacheErr), zap.String("key", key))
 			}
 		}
 
