@@ -461,7 +461,7 @@ func bootstrap(logger *zap.Logger) (*sql.DB, *engine.CoreEngine) {
 
 	if os.Getenv("TENANT_1_ID") != "" {
 		if d, dErr := drivers.NewOneDriveFleetDriver(logger); dErr == nil {
-			eng.AddDriver("onedrive", d)
+			eng.AddDriver("permafrost", d) // registration key = main.go's = d.Name(); "onedrive" wrote 2,613 orphan head rows (R7-10)
 			logger.Info("OneDrive fleet driver added")
 		}
 	}

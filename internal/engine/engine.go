@@ -768,7 +768,7 @@ var targetOnlyBackends = map[string]bool{
 	"r2":         true,
 	"geyser":     true,
 	"permafrost": true,
-	"onedrive":   true, // the fleet driver's name in cmd/dedup-migrate
+	"onedrive":   true, // legacy registration key (tools now use "permafrost", R7-10); keep for old head rows
 }
 
 // writeOnlyWhenTargeted reports whether name may receive a write only as the

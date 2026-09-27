@@ -77,7 +77,7 @@ func main() {
 	}
 	if os.Getenv("TENANT_1_ID") != "" {
 		d, err := drivers.NewOneDriveFleetDriver(logger)
-		add("onedrive", d, err)
+		add("permafrost", d, err) // same registration key as main.go (R7-10)
 	} else {
 		fmt.Println("skip onedrive  no TENANT_1_ID")
 	}
