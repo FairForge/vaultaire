@@ -473,7 +473,17 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		}
 		dataReader = bytes.NewReader(plaintext)
 		w.Header().Set("x-amz-server-side-encryption-customer-algorithm", "AES256")
-	} else if cachedEncAlgo != "" && a.sseService != nil {
+	} else if cachedEncAlgo != "" {
+		if a.sseService == nil {
+			// The row says the blob is SSE-S3 ciphertext and this process has
+			// no master key (unset, mistyped, rotated on one node). Serving
+			// the raw blob as a 200 hands the client garbage cut to the
+			// plaintext Content-Length (R8-04) — fail closed instead.
+			a.logger.Error("encrypted object read with no SSE service: ENCRYPTION_MASTER_KEY is not configured on this process",
+				zap.String("bucket", bucket), zap.String("object", artifact), zap.String("algorithm", cachedEncAlgo))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
 		encBytes, readErr := io.ReadAll(reader)
 		if readErr != nil {
 			a.logger.Error("failed to read encrypted object", zap.Error(readErr))
@@ -801,8 +811,16 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 			r.Header.Get("x-amz-storage-class"))
 	}
 	chunkingDisabledByTier := storageClassDisablesChunking(resolvedStorageClass)
+	// Mirrors the chunked-path gate below exactly — including the `chunking`
+	// kill-switch. When this said "the chunk path will encrypt it" but the
+	// flag then kept the object out of the chunk path, an SSE bucket's large
+	// object was stored as plaintext (R8-03).
+	// The flag is read ONCE per request: a refresh between two reads could
+	// skip SSE here and then keep the object out of the chunk path below.
+	chunkingOn := a.chunkingEnabled(t.ID)
 	willChunkEncrypt := a.gci != nil && a.chunkEncSvc != nil &&
-		metadataSize > chunkThreshold && !chunkingDisabledByVersioning && !chunkingDisabledByTier
+		metadataSize > chunkThreshold && !chunkingDisabledByVersioning && !chunkingDisabledByTier &&
+		chunkingOn
 
 	if crypto.HasSSECHeaders(r) {
 		if r.Header.Get("x-amz-server-side-encryption") != "" {
@@ -898,9 +916,11 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	// (encryptionAlgorithm == ""). Silently storing such an object as plaintext
 	// would violate the bucket's encryption guarantee, so reject it instead.
 	// (SSE-C already rejects oversize objects in its own branch above.)
-	// When chunkEncSvc is set, per-chunk convergent encryption handles oversize
-	// objects via the chunked path — no 256 MiB limit applies.
-	if a.sseService != nil && a.chunkEncSvc == nil && encryptionAlgorithm == "" && metadataSize > crypto.MaxEncryptableSize &&
+	// When the object WILL take the chunked path with per-chunk convergent
+	// encryption, no 256 MiB limit applies; any other reason it is not going
+	// to be encrypted (no chunk service, chunking flag off, versioned bucket,
+	// whole-object tier) means it must be refused here (R8-03).
+	if a.sseService != nil && !willChunkEncrypt && encryptionAlgorithm == "" && metadataSize > crypto.MaxEncryptableSize &&
 		(r.Header.Get("x-amz-server-side-encryption") == "AES256" ||
 			isBucketSSEEnabled(r.Context(), a.db, t.ID, bucket)) {
 		WriteS3ErrorWithContext(w, ErrEntityTooLarge, r.URL.Path, generateRequestID(),
@@ -922,7 +942,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	// happens INSIDE handleChunkedPut on plaintext; whole-object SSE-S3 was
 	// deliberately skipped above (willChunkEncrypt) for bodies heading here.
 	if a.gci != nil && metadataSize > chunkThreshold && !chunkingDisabledByVersioning &&
-		!chunkingDisabledByTier && encryptionAlgorithm == "" && a.chunkingEnabled(t.ID) {
+		!chunkingDisabledByTier && encryptionAlgorithm == "" && chunkingOn {
 		{
 			// WP-C: no uuid.Parse gate — tenant IDs are strings ("tenant-<hex>"
 			// from registration). The old gate silently skipped chunking for
@@ -1423,6 +1443,13 @@ func (a *S3ToEngine) handleChunkedPut(
 	// now stale — remove it so nothing can ever serve those bytes. Best-effort:
 	// the chunked GET path no longer falls through to the plain path, so a
 	// failed delete costs orphaned disk, not wrong data.
+	// The displaced row's backend_name is where that blob lives (R8-20): hint
+	// it, or a blob that landed off-primary is looked for in the wrong place.
+	if displaced.Backend != "" {
+		if ce, ok := a.engine.(*engine.CoreEngine); ok {
+			ce.HintBackend(t.NamespaceContainer(bucket), artifact, displaced.Backend)
+		}
+	}
 	if blobErr := a.engine.Delete(ctx, t.NamespaceContainer(bucket), artifact); blobErr != nil &&
 		!isObjectMissingErr(blobErr) {
 		a.logger.Warn("stale whole-object blob delete failed after chunked PUT",
@@ -1487,34 +1514,79 @@ func (a *S3ToEngine) handleChunkedPut(
 // re-stores blob + row, sweep then deletes the blob out from under the live
 // row. The lock serializes the two so the sweep either finishes first (this
 // path stores fresh) or sees the re-inserted row's ref_count and skips.
-// Returns the backend that stored the blob.
-func (a *S3ToEngine) storeChunkLocked(ctx context.Context, scope, storageKey string, storeData []byte, entry *crypto.GCIEntry) (string, error) {
+//
+// The row is re-checked UNDER the lock (R8-02): two requests that both missed
+// the lookup for a new chunk both encode it — possibly differently, since the
+// compression decision follows each request's Content-Type — and serialize
+// here. Without the re-check the loser overwrote the winner's blob while its
+// INSERT ... ON CONFLICT merely bumped the count, leaving the row's
+// compression flag and ciphertext hash describing bytes that were no longer
+// there: every object sharing the chunk then failed its integrity check on
+// every GET. The loser now takes a reference on the winner's row and reports
+// the winner's backend and ciphertext hash; its own encoding is discarded.
+type chunkStoreResult struct {
+	backend        string  // backend holding the blob (the row's when reused)
+	ciphertextHash *string // SHA-256 of the blob that is actually stored, nil if unencrypted
+	reused         bool    // an existing row was found under the lock; nothing was written
+}
+
+func (a *S3ToEngine) storeChunkLocked(ctx context.Context, scope, storageKey string, storeData []byte, entry *crypto.GCIEntry) (chunkStoreResult, error) {
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
-		return "", fmt.Errorf("begin chunk store tx: %w", err)
+		return chunkStoreResult{}, fmt.Errorf("begin chunk store tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
 	if _, err := tx.ExecContext(ctx,
 		`SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))`, scope, entry.PlaintextHash); err != nil {
-		return "", fmt.Errorf("advisory lock: %w", err)
+		return chunkStoreResult{}, fmt.Errorf("advisory lock: %w", err)
+	}
+
+	var rowBackend string
+	var rowCiphertextHash sql.NullString
+	err = tx.QueryRowContext(ctx, `
+		SELECT backend_id, ciphertext_hash FROM global_content_index
+		WHERE dedup_scope = $1 AND plaintext_hash = $2
+		FOR UPDATE`, scope, entry.PlaintextHash).Scan(&rowBackend, &rowCiphertextHash)
+	switch {
+	case err == nil:
+		rows, incErr := a.gci.IncrementRefTx(ctx, tx, scope, entry.PlaintextHash)
+		if incErr != nil {
+			return chunkStoreResult{}, fmt.Errorf("reference existing chunk: %w", incErr)
+		}
+		if rows != 1 {
+			return chunkStoreResult{}, fmt.Errorf("reference existing chunk: %d rows updated under lock", rows)
+		}
+		if err := tx.Commit(); err != nil {
+			return chunkStoreResult{}, fmt.Errorf("commit chunk reference: %w", err)
+		}
+		res := chunkStoreResult{backend: rowBackend, reused: true}
+		if rowCiphertextHash.Valid {
+			h := rowCiphertextHash.String
+			res.ciphertextHash = &h
+		}
+		return res, nil
+	case errors.Is(err, sql.ErrNoRows):
+		// New chunk: store it below.
+	default:
+		return chunkStoreResult{}, fmt.Errorf("check chunk index under lock: %w", err)
 	}
 
 	storedBytes := int64(len(storeData))
 	chunkOpts := []engine.PutOption{engine.WithContentLength(storedBytes)}
 	bn, putErr := a.engine.Put(ctx, chunkContainer, storageKey, bytes.NewReader(storeData), chunkOpts...)
 	if putErr != nil {
-		return "", putErr
+		return chunkStoreResult{}, putErr
 	}
 	entry.BackendID = bn
 
 	if insertErr := a.gci.InsertChunkTx(ctx, tx, entry); insertErr != nil {
-		return "", fmt.Errorf("insert chunk index: %w", insertErr)
+		return chunkStoreResult{}, fmt.Errorf("insert chunk index: %w", insertErr)
 	}
 	if err := tx.Commit(); err != nil {
-		return "", fmt.Errorf("commit chunk store: %w", err)
+		return chunkStoreResult{}, fmt.Errorf("commit chunk store: %w", err)
 	}
-	return bn, nil
+	return chunkStoreResult{backend: bn, ciphertextHash: entry.CiphertextHash}, nil
 }
 
 // errChunkIntegrity signals that a fetched chunk's bytes did not hash to its
@@ -1976,17 +2048,19 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 
 		// The head-cache row is the billing record (WP-1): DELETE...RETURNING
 		// captures the removed size atomically, so a concurrent writer or
-		// deleter can never cause the same bytes to be released twice.
-		var marked displacedRow
-		delErr := a.db.QueryRowContext(r.Context(), `
-			DELETE FROM object_head_cache
-			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
-			RETURNING size_bytes, floor`,
-			t.ID, bucket, object).Scan(&marked.Size, &marked.Floor)
-		if delErr == nil {
+		// deleter can never cause the same bytes to be released twice. An
+		// object chunked before versioning was enabled releases its manifest
+		// in the same transaction (R8-07) — the marker branch used to drop the
+		// head row and leak the manifest and its GCI references forever.
+		marked, found, delErr := deleteHeadRowReleasing(r.Context(), a.db, manifestReleaser(a.gci), t.ID, bucket, object)
+		if delErr != nil {
+			a.logger.Error("delete-marker head cache delete failed", zap.Error(delErr),
+				zap.String("bucket", bucket), zap.String("object", object))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+		if found {
 			a.releaseQuotaForDelete(r, t.ID, marked)
-		} else if delErr != sql.ErrNoRows {
-			a.logger.Error("delete-marker head cache delete failed", zap.Error(delErr))
 		}
 
 		w.Header().Set("x-amz-version-id", markerID)
@@ -2008,21 +2082,24 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 	var isChunked bool
 	var recordedBackend string
 	if a.db != nil {
-		_ = a.db.QueryRowContext(r.Context(),
+		// A failed read here must not be guessed away: treating a chunked
+		// object as whole sends it to the backend delete, which "succeeds" as
+		// an idempotent miss, and the head row goes while the manifest and
+		// its GCI references leak forever (R8-07).
+		if rowErr := a.db.QueryRowContext(r.Context(),
 			`SELECT is_chunked, COALESCE(backend_name, '') FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-			t.ID, bucket, object).Scan(&isChunked, &recordedBackend)
-	}
-
-	if isChunked && a.gci != nil {
-		if delErr := a.gci.DeleteObjectChunks(r.Context(), t.ID, bucket, object); delErr != nil {
-			a.logger.Error("chunked delete failed",
-				zap.Error(delErr),
-				zap.String("tenant_id", t.ID),
-				zap.String("bucket", bucket),
-				zap.String("object", object))
+			t.ID, bucket, object).Scan(&isChunked, &recordedBackend); rowErr != nil && !errors.Is(rowErr, sql.ErrNoRows) {
+			a.logger.Error("head cache read before delete failed", zap.Error(rowErr),
+				zap.String("bucket", bucket), zap.String("object", object))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 			return
 		}
+	}
+
+	if isChunked && a.gci != nil {
+		// Nothing to delete on the backend: the chunks stay until dedup GC.
+		// The manifest is released together with the head row below, in one
+		// transaction (R8-08).
 	} else {
 		if recordedBackend != "" {
 			if ce, ok := a.engine.(*engine.CoreEngine); ok {
@@ -2054,17 +2131,25 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 
 	if a.db != nil {
 		// DELETE...RETURNING releases exactly the bytes this request removed
-		// (the row is the billing record — WP-1). Logical size for chunked.
-		var deleted displacedRow
-		delErr := a.db.QueryRowContext(r.Context(), `
-			DELETE FROM object_head_cache
-			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
-			RETURNING size_bytes, floor
-		`, t.ID, bucket, object).Scan(&deleted.Size, &deleted.Floor)
-		if delErr == nil {
-			a.releaseQuotaForDelete(r, t.ID, deleted)
-		} else if delErr != sql.ErrNoRows {
+		// (the row is the billing record — WP-1). Logical size for chunked;
+		// a chunked object's manifest goes in the same transaction (R8-08).
+		deleted, found, delErr := deleteHeadRowReleasing(r.Context(), a.db, manifestReleaser(a.gci), t.ID, bucket, object)
+		switch {
+		case delErr != nil && isChunked:
+			// The manifest is still intact (rolled back with the row): the
+			// client retries. Answering 204 here would leave a live object.
+			a.logger.Error("chunked delete failed",
+				zap.Error(delErr),
+				zap.String("tenant_id", t.ID),
+				zap.String("bucket", bucket),
+				zap.String("object", object))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		case delErr != nil:
+			// The blob is already gone; the drifted row is the only loss.
 			a.logger.Error("head cache delete failed", zap.Error(delErr))
+		case found:
+			a.releaseQuotaForDelete(r, t.ID, deleted)
 		}
 		// The retention (expired, governance-bypassed, or none) goes with the
 		// object: the PUT-side lock check no longer needs a head row, so a

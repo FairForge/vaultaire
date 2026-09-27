@@ -4,165 +4,58 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/testutil"
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
+	"github.com/stretchr/testify/require"
 )
 
-// getTestDB returns a database connection for testing
-// Uses TEST_DATABASE_URL env var or skips if not available
+// getTestDB connects to the test database the rest of the suite uses
+// (internal/testutil: vaultaire_test by default, DATABASE_URL wins — CI sets
+// it). The schema comes from the real migrations (`make test-db`), never from
+// a simplified copy: this file used to carry its own pre-054 schema and a
+// fallback DSN with a role that existed nowhere, so its ten tests had never
+// run (R8-13 / R0-18).
 func getTestDB(t *testing.T) *sql.DB {
-	dbURL := os.Getenv("TEST_DATABASE_URL")
-	if dbURL == "" {
-		// Try default local postgres
-		dbURL = "postgres://postgres:postgres@localhost:5432/vaultaire_test?sslmode=disable"
-	}
+	t.Helper()
+	db, err := sql.Open("postgres", testutil.DSN())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
 
-	db, err := sql.Open("postgres", dbURL)
-	if err != nil {
-		t.Skipf("Skipping GCI tests: cannot connect to database: %v", err)
-	}
-
-	// Test connection
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-
-	if err := db.PingContext(ctx); err != nil {
-		t.Skipf("Skipping GCI tests: database not available: %v", err)
-	}
-
+	require.NoError(t, db.PingContext(ctx), "GCI tests need the test database (make test-db)")
 	return db
 }
 
-// setupTestTables creates test tables (run migration)
-func setupTestTables(t *testing.T, db *sql.DB) {
-	// Read and execute migration
-	migration := `
-	-- Simplified test schema
-	CREATE TABLE IF NOT EXISTS global_content_index (
-		plaintext_hash VARCHAR(64) PRIMARY KEY,
-		backend_id VARCHAR(255) NOT NULL,
-		storage_key VARCHAR(512) NOT NULL,
-		size_bytes BIGINT NOT NULL,
-		compressed_size BIGINT,
-		compression_algo VARCHAR(32),
-		ref_count INTEGER NOT NULL DEFAULT 1,
-		first_seen_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-		last_accessed_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-		marked_for_deletion BOOLEAN NOT NULL DEFAULT FALSE,
-		marked_at TIMESTAMP WITH TIME ZONE
-	);
-
-	CREATE TABLE IF NOT EXISTS tenant_chunk_refs (
-		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-		tenant_id TEXT NOT NULL,
-		bucket_name VARCHAR(255) NOT NULL,
-		object_key VARCHAR(1024) NOT NULL,
-		chunk_index INTEGER NOT NULL,
-		chunk_offset BIGINT NOT NULL,
-		plaintext_hash VARCHAR(64) NOT NULL,
-		encryption_key_version INTEGER NOT NULL DEFAULT 1,
-		ciphertext_hash VARCHAR(64),
-		created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-		UNIQUE(tenant_id, bucket_name, object_key, chunk_index)
-	);
-
-	CREATE TABLE IF NOT EXISTS object_metadata (
-		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-		tenant_id TEXT NOT NULL,
-		bucket_name VARCHAR(255) NOT NULL,
-		object_key VARCHAR(1024) NOT NULL,
-		total_size BIGINT NOT NULL,
-		chunk_count INTEGER NOT NULL,
-		content_hash VARCHAR(64),
-		content_type VARCHAR(255),
-		logical_size BIGINT NOT NULL,
-		physical_size BIGINT,
-		dedup_ratio REAL,
-		pipeline_config JSONB,
-		created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-		updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-		UNIQUE(tenant_id, bucket_name, object_key)
-	);
-
-	-- Helper functions
-	CREATE OR REPLACE FUNCTION increment_chunk_ref(p_hash VARCHAR(64))
-	RETURNS VOID AS $$
-	BEGIN
-		UPDATE global_content_index
-		SET ref_count = ref_count + 1,
-			last_accessed_at = NOW(),
-			marked_for_deletion = FALSE,
-			marked_at = NULL
-		WHERE plaintext_hash = p_hash;
-	END;
-	$$ LANGUAGE plpgsql;
-
-	CREATE OR REPLACE FUNCTION decrement_chunk_ref(p_hash VARCHAR(64))
-	RETURNS INTEGER AS $$
-	DECLARE
-		new_count INTEGER;
-	BEGIN
-		UPDATE global_content_index
-		SET ref_count = ref_count - 1
-		WHERE plaintext_hash = p_hash
-		RETURNING ref_count INTO new_count;
-
-		IF new_count = 0 THEN
-			UPDATE global_content_index
-			SET marked_for_deletion = TRUE,
-				marked_at = NOW()
-			WHERE plaintext_hash = p_hash;
-		END IF;
-
-		RETURN new_count;
-	END;
-	$$ LANGUAGE plpgsql;
-
-	CREATE OR REPLACE FUNCTION get_tenant_dedup_ratio(p_tenant_id TEXT)
-	RETURNS TABLE(logical_bytes BIGINT, physical_bytes BIGINT, ratio REAL) AS $$
-	BEGIN
-		RETURN QUERY
-		SELECT
-			COALESCE(SUM(om.logical_size), 0)::BIGINT as logical_bytes,
-			COALESCE(SUM(om.physical_size), 0)::BIGINT as physical_bytes,
-			CASE
-				WHEN COALESCE(SUM(om.physical_size), 0) > 0
-				THEN (SUM(om.logical_size)::REAL / SUM(om.physical_size)::REAL)
-				ELSE 1.0
-			END as ratio
-		FROM object_metadata om
-		WHERE om.tenant_id = p_tenant_id;
-	END;
-	$$ LANGUAGE plpgsql;
-	`
-
-	_, err := db.Exec(migration)
-	if err != nil {
-		t.Fatalf("Failed to setup test tables: %v", err)
+// testScope gives each test its own dedup_scope (and tenant) so the suite can
+// run in parallel with the internal/api dedup tests against the same
+// database. Cleanup is scoped to exactly those keys — no table-wide DELETEs.
+func testScope(t *testing.T, db *sql.DB) (scope, tenantID string) {
+	t.Helper()
+	scope = "gci-test-" + t.Name()
+	tenantID = uuid.New().String()
+	clean := func() {
+		_, _ = db.Exec("DELETE FROM tenant_chunk_refs WHERE tenant_id = $1", tenantID)
+		_, _ = db.Exec("DELETE FROM object_metadata WHERE tenant_id = $1", tenantID)
+		_, _ = db.Exec("DELETE FROM global_content_index WHERE dedup_scope = $1", scope)
 	}
-}
-
-// cleanupTestData removes test data
-func cleanupTestData(t *testing.T, db *sql.DB) {
-	_, _ = db.Exec("DELETE FROM tenant_chunk_refs")
-	_, _ = db.Exec("DELETE FROM object_metadata")
-	_, _ = db.Exec("DELETE FROM global_content_index")
+	clean()
+	t.Cleanup(clean)
+	return scope, tenantID
 }
 
 func TestGCI_LookupChunk_NotFound(t *testing.T) {
 	db := getTestDB(t)
-	defer func() { _ = db.Close() }()
-	setupTestTables(t, db)
-	cleanupTestData(t, db)
+	scope, _ := testScope(t, db)
 
 	gci := NewGlobalContentIndex(db)
 	ctx := context.Background()
 
-	result, err := gci.LookupChunk(ctx, GlobalDedupScope, "nonexistent_hash_abc123")
+	result, err := gci.LookupChunk(ctx, scope, "nonexistent_hash_abc123")
 	if err != nil {
 		t.Fatalf("LookupChunk failed: %v", err)
 	}
@@ -180,15 +73,14 @@ func TestGCI_LookupChunk_NotFound(t *testing.T) {
 
 func TestGCI_InsertAndLookup(t *testing.T) {
 	db := getTestDB(t)
-	defer func() { _ = db.Close() }()
-	setupTestTables(t, db)
-	cleanupTestData(t, db)
+	scope, _ := testScope(t, db)
 
 	gci := NewGlobalContentIndex(db)
 	ctx := context.Background()
 
 	// Insert a chunk
 	entry := &GCIEntry{
+		DedupScope:    scope,
 		PlaintextHash: "abc123def456abc123def456abc123def456abc123def456abc123def456abcd",
 		BackendID:     "lyve-us-east",
 		StorageKey:    "chunks/ab/cd/abc123def456",
@@ -202,7 +94,7 @@ func TestGCI_InsertAndLookup(t *testing.T) {
 	}
 
 	// Lookup the chunk
-	result, err := gci.LookupChunk(ctx, GlobalDedupScope, entry.PlaintextHash)
+	result, err := gci.LookupChunk(ctx, scope, entry.PlaintextHash)
 	if err != nil {
 		t.Fatalf("LookupChunk failed: %v", err)
 	}
@@ -227,15 +119,14 @@ func TestGCI_InsertAndLookup(t *testing.T) {
 
 func TestGCI_InsertDuplicate_IncrementsRefCount(t *testing.T) {
 	db := getTestDB(t)
-	defer func() { _ = db.Close() }()
-	setupTestTables(t, db)
-	cleanupTestData(t, db)
+	scope, _ := testScope(t, db)
 
 	gci := NewGlobalContentIndex(db)
 	ctx := context.Background()
 
 	hash := "duplicate_test_hash_123456789012345678901234567890123456789012"
 	entry := &GCIEntry{
+		DedupScope:    scope,
 		PlaintextHash: hash,
 		BackendID:     "lyve-us-east",
 		StorageKey:    "chunks/du/pl/duplicate",
@@ -259,7 +150,7 @@ func TestGCI_InsertDuplicate_IncrementsRefCount(t *testing.T) {
 	gci.cache.clear()
 
 	// Check ref count
-	result, err := gci.LookupChunk(ctx, GlobalDedupScope, hash)
+	result, err := gci.LookupChunk(ctx, scope, hash)
 	if err != nil {
 		t.Fatalf("LookupChunk failed: %v", err)
 	}
@@ -271,9 +162,7 @@ func TestGCI_InsertDuplicate_IncrementsRefCount(t *testing.T) {
 
 func TestGCI_BatchLookup(t *testing.T) {
 	db := getTestDB(t)
-	defer func() { _ = db.Close() }()
-	setupTestTables(t, db)
-	cleanupTestData(t, db)
+	scope, _ := testScope(t, db)
 
 	gci := NewGlobalContentIndex(db)
 	ctx := context.Background()
@@ -287,6 +176,7 @@ func TestGCI_BatchLookup(t *testing.T) {
 
 	for i, hash := range hashes[:2] { // Only insert first 2
 		entry := &GCIEntry{
+			DedupScope:    scope,
 			PlaintextHash: hash,
 			BackendID:     "lyve-us-east",
 			StorageKey:    fmt.Sprintf("chunks/batch/%d", i),
@@ -302,7 +192,7 @@ func TestGCI_BatchLookup(t *testing.T) {
 	gci.cache.clear()
 
 	// Batch lookup all 3 (2 exist, 1 doesn't)
-	results, err := gci.LookupChunks(ctx, GlobalDedupScope, hashes)
+	results, err := gci.LookupChunks(ctx, scope, hashes)
 	if err != nil {
 		t.Fatalf("LookupChunks failed: %v", err)
 	}
@@ -329,15 +219,14 @@ func TestGCI_BatchLookup(t *testing.T) {
 
 func TestGCI_RefCounting(t *testing.T) {
 	db := getTestDB(t)
-	defer func() { _ = db.Close() }()
-	setupTestTables(t, db)
-	cleanupTestData(t, db)
+	scope, _ := testScope(t, db)
 
 	gci := NewGlobalContentIndex(db)
 	ctx := context.Background()
 
 	hash := "refcount_test_hash_12345678901234567890123456789012345678901234"
 	entry := &GCIEntry{
+		DedupScope:    scope,
 		PlaintextHash: hash,
 		BackendID:     "lyve-us-east",
 		StorageKey:    "chunks/ref/test",
@@ -351,7 +240,7 @@ func TestGCI_RefCounting(t *testing.T) {
 	}
 
 	// Increment ref
-	rows, err := gci.IncrementRef(ctx, GlobalDedupScope, hash)
+	rows, err := gci.IncrementRef(ctx, scope, hash)
 	if err != nil {
 		t.Fatalf("IncrementRef failed: %v", err)
 	}
@@ -361,13 +250,13 @@ func TestGCI_RefCounting(t *testing.T) {
 
 	// Check ref count is 2
 	gci.cache.clear()
-	result, _ := gci.LookupChunk(ctx, GlobalDedupScope, hash)
+	result, _ := gci.LookupChunk(ctx, scope, hash)
 	if result.Entry.RefCount != 2 {
 		t.Errorf("RefCount after increment = %d, want 2", result.Entry.RefCount)
 	}
 
 	// Decrement ref
-	newCount, err := gci.DecrementRef(ctx, GlobalDedupScope, hash)
+	newCount, err := gci.DecrementRef(ctx, scope, hash)
 	if err != nil {
 		t.Fatalf("DecrementRef failed: %v", err)
 	}
@@ -376,7 +265,7 @@ func TestGCI_RefCounting(t *testing.T) {
 	}
 
 	// Decrement again - should hit 0 and mark for deletion
-	newCount, err = gci.DecrementRef(ctx, GlobalDedupScope, hash)
+	newCount, err = gci.DecrementRef(ctx, scope, hash)
 	if err != nil {
 		t.Fatalf("Second DecrementRef failed: %v", err)
 	}
@@ -386,7 +275,7 @@ func TestGCI_RefCounting(t *testing.T) {
 
 	// Check marked for deletion
 	var markedForDeletion bool
-	err = db.QueryRow("SELECT marked_for_deletion FROM global_content_index WHERE plaintext_hash = $1", hash).Scan(&markedForDeletion)
+	err = db.QueryRow("SELECT marked_for_deletion FROM global_content_index WHERE dedup_scope = $1 AND plaintext_hash = $2", scope, hash).Scan(&markedForDeletion)
 	if err != nil {
 		t.Fatalf("Failed to check marked_for_deletion: %v", err)
 	}
@@ -397,14 +286,11 @@ func TestGCI_RefCounting(t *testing.T) {
 
 func TestGCI_TenantChunkRefs(t *testing.T) {
 	db := getTestDB(t)
-	defer func() { _ = db.Close() }()
-	setupTestTables(t, db)
-	cleanupTestData(t, db)
+	scope, tenantID := testScope(t, db)
 
 	gci := NewGlobalContentIndex(db)
 	ctx := context.Background()
 
-	tenantID := uuid.New().String()
 	bucket := "test-bucket"
 	objectKey := "path/to/file.txt"
 
@@ -414,6 +300,7 @@ func TestGCI_TenantChunkRefs(t *testing.T) {
 
 	for _, hash := range []string{hash1, hash2} {
 		entry := &GCIEntry{
+			DedupScope:    scope,
 			PlaintextHash: hash,
 			BackendID:     "lyve-us-east",
 			StorageKey:    "chunks/" + hash[:8],
@@ -434,6 +321,7 @@ func TestGCI_TenantChunkRefs(t *testing.T) {
 			ChunkIndex:           0,
 			ChunkOffset:          0,
 			PlaintextHash:        hash1,
+			DedupScope:           scope,
 			EncryptionKeyVersion: 1,
 		},
 		{
@@ -443,6 +331,7 @@ func TestGCI_TenantChunkRefs(t *testing.T) {
 			ChunkIndex:           1,
 			ChunkOffset:          1024,
 			PlaintextHash:        hash2,
+			DedupScope:           scope,
 			EncryptionKeyVersion: 1,
 		},
 	}
@@ -477,14 +366,11 @@ func TestGCI_TenantChunkRefs(t *testing.T) {
 
 func TestGCI_ObjectMetadata(t *testing.T) {
 	db := getTestDB(t)
-	defer func() { _ = db.Close() }()
-	setupTestTables(t, db)
-	cleanupTestData(t, db)
+	_, tenantID := testScope(t, db)
 
 	gci := NewGlobalContentIndex(db)
 	ctx := context.Background()
 
-	tenantID := uuid.New().String()
 	bucket := "test-bucket"
 	objectKey := "path/to/document.pdf"
 
@@ -536,20 +422,18 @@ func TestGCI_ObjectMetadata(t *testing.T) {
 
 func TestGCI_DeleteObjectChunks(t *testing.T) {
 	db := getTestDB(t)
-	defer func() { _ = db.Close() }()
-	setupTestTables(t, db)
-	cleanupTestData(t, db)
+	scope, tenantID := testScope(t, db)
 
 	gci := NewGlobalContentIndex(db)
 	ctx := context.Background()
 
-	tenantID := uuid.New().String()
 	bucket := "delete-test-bucket"
 	objectKey := "to-be-deleted.txt"
 
 	// Insert chunk
 	hash := "delete_test_hash_123456789012345678901234567890123456789012345"
 	entry := &GCIEntry{
+		DedupScope:    scope,
 		PlaintextHash: hash,
 		BackendID:     "lyve-us-east",
 		StorageKey:    "chunks/delete/test",
@@ -568,6 +452,7 @@ func TestGCI_DeleteObjectChunks(t *testing.T) {
 		ChunkIndex:           0,
 		ChunkOffset:          0,
 		PlaintextHash:        hash,
+		DedupScope:           scope,
 		EncryptionKeyVersion: 1,
 	}
 	if err := gci.AddTenantChunkRef(ctx, ref); err != nil {
@@ -612,7 +497,7 @@ func TestGCI_DeleteObjectChunks(t *testing.T) {
 
 	// Verify chunk ref count decremented and marked for deletion
 	gci.cache.clear()
-	result, _ := gci.LookupChunk(ctx, GlobalDedupScope, hash)
+	result, _ := gci.LookupChunk(ctx, scope, hash)
 	if result.Entry.RefCount != 0 {
 		t.Errorf("RefCount = %d, want 0", result.Entry.RefCount)
 	}
@@ -620,15 +505,14 @@ func TestGCI_DeleteObjectChunks(t *testing.T) {
 
 func TestGCI_Cache(t *testing.T) {
 	db := getTestDB(t)
-	defer func() { _ = db.Close() }()
-	setupTestTables(t, db)
-	cleanupTestData(t, db)
+	scope, _ := testScope(t, db)
 
 	gci := NewGlobalContentIndex(db)
 	ctx := context.Background()
 
 	hash := "cache_test_hash_1234567890123456789012345678901234567890123456"
 	entry := &GCIEntry{
+		DedupScope:    scope,
 		PlaintextHash: hash,
 		BackendID:     "lyve-us-east",
 		StorageKey:    "chunks/cache/test",
@@ -642,7 +526,7 @@ func TestGCI_Cache(t *testing.T) {
 	}
 
 	// Verify in cache
-	cached := gci.cache.get(hash)
+	cached := gci.cache.get(cacheKey(scope, hash))
 	if cached == nil {
 		t.Fatal("Expected chunk to be cached")
 		return
@@ -652,7 +536,7 @@ func TestGCI_Cache(t *testing.T) {
 	}
 
 	// Lookup should use cache (won't hit DB)
-	result, err := gci.LookupChunk(ctx, GlobalDedupScope, hash)
+	result, err := gci.LookupChunk(ctx, scope, hash)
 	if err != nil {
 		t.Fatalf("LookupChunk failed: %v", err)
 	}
@@ -662,7 +546,7 @@ func TestGCI_Cache(t *testing.T) {
 
 	// Clear cache and lookup again (will hit DB)
 	gci.cache.clear()
-	result, err = gci.LookupChunk(ctx, GlobalDedupScope, hash)
+	result, err = gci.LookupChunk(ctx, scope, hash)
 	if err != nil {
 		t.Fatalf("LookupChunk after cache clear failed: %v", err)
 	}
@@ -671,7 +555,7 @@ func TestGCI_Cache(t *testing.T) {
 	}
 
 	// Should be cached again
-	cached = gci.cache.get(hash)
+	cached = gci.cache.get(cacheKey(scope, hash))
 	if cached == nil {
 		t.Error("Expected chunk to be re-cached after DB lookup")
 	}

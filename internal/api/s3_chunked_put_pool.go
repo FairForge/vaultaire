@@ -223,7 +223,7 @@ func (p *chunkStorePool) storeOne(job chunkStoreJob) chunkStoreOutcome {
 		entryCiphertextHash = &ciphertextHash
 	}
 
-	bn, storeErr := p.a.storeChunkLocked(p.ctx, p.scope, storageKey, storeData, &crypto.GCIEntry{
+	res, storeErr := p.a.storeChunkLocked(p.ctx, p.scope, storageKey, storeData, &crypto.GCIEntry{
 		DedupScope:      p.scope,
 		PlaintextHash:   chunk.Hash,
 		StorageKey:      storageKey,
@@ -239,10 +239,22 @@ func (p *chunkStorePool) storeOne(job chunkStoreJob) chunkStoreOutcome {
 		return chunkStoreOutcome{chunk: job.chunk,
 			err: fmt.Errorf("store chunk %s: %w", chunk.Hash[:16], storeErr)}
 	}
+	// A concurrent first-store won the lock: the blob on disk is THEIRS, so
+	// the manifest carries the row's ciphertext hash (not the one computed
+	// here for bytes that were never stored) and no physical bytes are
+	// attributed to this upload (R8-02).
+	storedBytes := int64(len(storeData))
+	if res.reused {
+		storedBytes = 0
+		ciphertextHash = ""
+		if res.ciphertextHash != nil {
+			ciphertextHash = *res.ciphertextHash
+		}
+	}
 	return chunkStoreOutcome{
 		chunk:          job.chunk,
-		backend:        bn,
-		storedBytes:    int64(len(storeData)),
+		backend:        res.backend,
+		storedBytes:    storedBytes,
 		ciphertextHash: ciphertextHash,
 	}
 }

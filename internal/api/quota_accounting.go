@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -65,8 +66,9 @@ func quotaCtx(r *http.Request) (context.Context, context.CancelFunc) {
 // displacedRow is what a head-cache upsert found under the key it replaced:
 // the billing record's size and floor (zero/"" when the key was new).
 type displacedRow struct {
-	Size  int64
-	Floor string
+	Size    int64
+	Floor   string
+	Backend string // backend_name of the displaced row ("" when new/unknown) — the hint for its stale blob (R8-20)
 }
 
 // settlePutQuota reconciles a successful write's up-front reservation
@@ -186,10 +188,10 @@ func atomicHeadUpsertReleasing(ctx context.Context, db *sql.DB, gci chunkManifes
 	var displaced displacedRow
 	var displacedChunked bool
 	err = tx.QueryRowContext(ctx, `
-		SELECT size_bytes, floor, is_chunked FROM object_head_cache
+		SELECT size_bytes, floor, COALESCE(backend_name, ''), is_chunked FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
 		FOR UPDATE`,
-		tenantID, bucket, key).Scan(&displaced.Size, &displaced.Floor, &displacedChunked)
+		tenantID, bucket, key).Scan(&displaced.Size, &displaced.Floor, &displaced.Backend, &displacedChunked)
 	if err != nil && err != sql.ErrNoRows {
 		return displacedRow{}, fmt.Errorf("lock head-cache row: %w", err)
 	}
@@ -207,6 +209,49 @@ func atomicHeadUpsertReleasing(ctx context.Context, db *sql.DB, gci chunkManifes
 		return displacedRow{}, fmt.Errorf("commit head-cache upsert: %w", err)
 	}
 	return displaced, nil
+}
+
+// deleteHeadRowReleasing removes an object's head-cache row (the billing
+// record, DELETE ... RETURNING so the bytes are released exactly once) and,
+// when the row was a chunked object, releases its manifest — tenant_chunk_refs,
+// GCI ref counts, object_metadata — in the SAME transaction. Split across two
+// (manifest first, head row second) a crash between them left a head row that
+// said is_chunked with no manifest behind it: HEAD 200, GET 500, still billed
+// (R8-08); the delete-marker branch never released the manifest at all
+// (R8-07/R2-16). Lock order matches atomicHeadUpsertReleasing: head row, then
+// manifest rows.
+//
+// Returns found=false (no error) when there was no row: S3 DELETE is
+// idempotent and there is nothing to release.
+func deleteHeadRowReleasing(ctx context.Context, db *sql.DB, gci chunkManifestReleaser,
+	tenantID, bucket, key string) (row displacedRow, found bool, err error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return displacedRow{}, false, fmt.Errorf("begin head-cache delete: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var chunked bool
+	err = tx.QueryRowContext(ctx, `
+		DELETE FROM object_head_cache
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
+		RETURNING size_bytes, floor, COALESCE(backend_name, ''), is_chunked`,
+		tenantID, bucket, key).Scan(&row.Size, &row.Floor, &row.Backend, &chunked)
+	if errors.Is(err, sql.ErrNoRows) {
+		return displacedRow{}, false, nil
+	}
+	if err != nil {
+		return displacedRow{}, false, fmt.Errorf("delete head-cache row: %w", err)
+	}
+	if chunked && gci != nil {
+		if relErr := gci.DeleteObjectChunksTx(ctx, tx, tenantID, bucket, key); relErr != nil {
+			return displacedRow{}, false, fmt.Errorf("release chunk manifest: %w", relErr)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return displacedRow{}, false, fmt.Errorf("commit head-cache delete: %w", err)
+	}
+	return row, true, nil
 }
 
 // storageReconciler is implemented by usage.QuotaManager; the nil quota
