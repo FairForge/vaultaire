@@ -65,6 +65,10 @@ func (s *Server) handleInitiateMultipartUpload(w http.ResponseWriter, r *http.Re
 		WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
 		return
 	}
+	if s.freeTierBucketCapBlocksWrite(r.Context(), t.ID, bucket) {
+		writeFreeTierBucketCap(w, r)
+		return
+	}
 
 	if crypto.HasSSECHeaders(r) {
 		WriteS3ErrorWithContext(w, ErrNotImplemented, r.URL.Path, generateRequestID(),

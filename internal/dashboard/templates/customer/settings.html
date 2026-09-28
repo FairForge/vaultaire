@@ -141,14 +141,14 @@
     <div class="card-title" style="color: var(--danger);">Delete Account</div>
     {{if .DeletionScheduled}}
     <div class="alert alert-error" style="margin-bottom: 1rem;">
-        Your account is scheduled for deletion on <strong>{{.DeletionDate}}</strong>. All data will be permanently removed after this date.
+        Your account is scheduled for deletion on <strong>{{.DeletionDate}}</strong>. After that date support erases your objects, keys and account records (email support@stored.ge to bring it forward). If you have a subscription, cancel it on the billing page so it does not renew.
     </div>
     <form method="POST" action="/dashboard/settings/cancel-deletion">
         <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
         <button type="submit" class="btn btn-primary">Cancel Deletion</button>
     </form>
     {{else}}
-    <p class="text-muted" style="margin-bottom: 1rem;">Permanently delete your account and all associated data. You will have a 30-day grace period to change your mind.</p>
+    <p class="text-muted" style="margin-bottom: 1rem;">Schedule your account and all associated data for deletion. You have a 30-day grace period to change your mind; after it, support carries out the erasure. Cancel any subscription on the billing page first so it does not renew.</p>
     <form method="POST" action="/dashboard/settings/delete-account">
         <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
         <div class="form-group">

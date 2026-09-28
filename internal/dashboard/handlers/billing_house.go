@@ -33,6 +33,7 @@ type HouseBilling interface {
 	GetCustomerID(ctx context.Context, tenantID string) (string, error)
 	CreateCustomer(ctx context.Context, email, tenantID string) (string, error)
 	CreateHouseCheckout(ctx context.Context, customerID, tenantID string, o billing.HouseOrder, successURL, cancelURL string) (string, error)
+	HasLiveSubscription(ctx context.Context, customerID string) (bool, error)
 	UpdateHouseSubscription(ctx context.Context, subID string, o billing.HouseOrder) (*stripe.Subscription, error)
 	HouseFromSubscription(sub *stripe.Subscription) (billing.HouseOrder, bool)
 }
@@ -119,6 +120,7 @@ type tenantHouse struct {
 	plan, status       string
 	subID, period      string
 	active             bool
+	liveOther          bool // a non-house subscription Stripe is still billing
 	house              usage.House
 	usedStd, usedVault int64
 }
@@ -139,6 +141,10 @@ func loadHouse(ctx context.Context, db *sql.DB, tenantID string) (tenantHouse, e
 	h.subID = sub.String
 	h.active = h.plan == "house" && h.subID != "" &&
 		(h.status == "active" || h.status == "past_due" || h.status == "trialing")
+	// Anything else with a subscription id that Stripe is still billing
+	// (a legacy pack, an incomplete 3-D Secure checkout, a past-due pack)
+	// must not be joined by a second subscription (Review R10-05).
+	h.liveOther = !h.active && h.subID != "" && !terminalSubscriptionStatus(h.status)
 
 	qm := usage.NewQuotaManager(db)
 	house, ok, err := qm.GetHouse(ctx, tenantID)
@@ -161,6 +167,16 @@ func loadHouse(ctx context.Context, db *sql.DB, tenantID string) (tenantHouse, e
 		}
 	}
 	return h, nil
+}
+
+// terminalSubscriptionStatus is a Stripe subscription status that no
+// longer bills: a new subscription may be opened next to it.
+func terminalSubscriptionStatus(status string) bool {
+	switch status {
+	case "", "canceled", "incomplete_expired":
+		return true
+	}
+	return false
 }
 
 // wholeTBUp is the smallest whole-TB quota that still holds n bytes.
@@ -263,6 +279,11 @@ func HandleHouseCheckout(svc HouseBilling, db *sql.DB, quotas billing.HouseQuota
 			return
 		}
 
+		if h.liveOther {
+			back(w, r, "error", fmt.Sprintf("This account already has a subscription (%s). Email support@stored.ge and we will move it to a house — a second checkout would bill you twice.", h.status))
+			return
+		}
+
 		customerID, err := svc.GetCustomerID(r.Context(), sd.TenantID)
 		if err != nil {
 			// Registered while Stripe was down: create the customer now.
@@ -272,6 +293,19 @@ func HandleHouseCheckout(svc HouseBilling, db *sql.DB, quotas billing.HouseQuota
 				back(w, r, "error", "We couldn't open a billing account for you. Email support@stored.ge and we will sort it out.")
 				return
 			}
+		}
+		// Stripe is the source of truth for "already paying": a Checkout
+		// completed seconds ago (webhook not yet landed) or a pack bought
+		// out of band must not get a second subscription (Review R10-05).
+		live, err := svc.HasLiveSubscription(r.Context(), customerID)
+		if err != nil {
+			logger.Error("check live subscriptions before checkout", zap.Error(err), zap.String("tenant", sd.TenantID))
+			back(w, r, "error", "We couldn't confirm your billing state with Stripe. Please try again in a minute.")
+			return
+		}
+		if live {
+			back(w, r, "error", "You already have a subscription on this account — give the page a minute to catch up, then resize your house below. If it does not appear, email support@stored.ge.")
+			return
 		}
 		base := strings.TrimRight(baseURL, "/")
 		checkoutURL, err := svc.CreateHouseCheckout(r.Context(), customerID, sd.TenantID, order,

@@ -104,16 +104,31 @@ func (m *QuotaManager) ReleaseQuota(ctx context.Context, tenantID string, bytes 
 	return nil
 }
 
-// ReconcileStorageUsage rewrites every tenant's storage_used_bytes to the
-// sum of logical object sizes in object_head_cache — the billing source of
-// truth. Returns the number of tenant rows updated. Run once before enabling
-// metered billing (Gate C), and any time drift is suspected.
+// ReconcileStorageUsage rewrites every tenant's storage_used_bytes — and
+// every floor ledger (066) — to the sum of logical object sizes in
+// object_head_cache, the billing source of truth, in ONE transaction that
+// first locks every tenant row in order. Returns the number of tenant rows
+// updated. Run once before enabling metered billing (Gate C), and any time
+// drift is suspected.
 //
 // Run only while writes are quiesced: an in-flight PUT's reservation is not
 // yet reflected in object_head_cache, so reconciling during live traffic
-// erases that reservation and under-counts until the next reconcile.
+// erases that reservation and under-counts until the next reconcile. The
+// row locks mean a reservation is wholly before or wholly after the rewrite
+// (the two ledgers can no longer disagree with each other — Review R10-18),
+// but they cannot see a reservation whose head row is still in flight.
 func (m *QuotaManager) ReconcileStorageUsage(ctx context.Context) (int64, error) {
-	res, err := m.db.ExecContext(ctx, `
+	tx, err := m.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("reconciling storage usage: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx,
+		`SELECT tenant_id FROM tenant_quotas ORDER BY tenant_id FOR UPDATE`); err != nil {
+		return 0, fmt.Errorf("reconciling storage usage: lock tenants: %w", err)
+	}
+	res, err := tx.ExecContext(ctx, `
 		UPDATE tenant_quotas tq
 		SET storage_used_bytes = COALESCE(
 			(SELECT SUM(o.size_bytes) FROM object_head_cache o
@@ -123,7 +138,7 @@ func (m *QuotaManager) ReconcileStorageUsage(ctx context.Context) (int64, error)
 		return 0, fmt.Errorf("reconciling storage usage: %w", err)
 	}
 	// The floor ledgers (066) follow the same source of truth, per floor.
-	if _, err := m.db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE tenant_floor_quotas f
 		SET storage_used_bytes = COALESCE(
 			(SELECT SUM(o.size_bytes) FROM object_head_cache o
@@ -131,7 +146,14 @@ func (m *QuotaManager) ReconcileStorageUsage(ctx context.Context) (int64, error)
 		    updated_at = NOW()`); err != nil {
 		return 0, fmt.Errorf("reconciling floor usage: %w", err)
 	}
-	return res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("reconciling storage usage: rows: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("reconciling storage usage: commit: %w", err)
+	}
+	return n, nil
 }
 
 // ReconcileTenantStorageUsage is ReconcileStorageUsage for ONE tenant.
@@ -140,7 +162,12 @@ func (m *QuotaManager) ReconcileStorageUsage(ctx context.Context) (int64, error)
 // database it erased other packages' in-flight reservations (a PUT reserves
 // before its head row exists), which showed up as a CI-only flake.
 func (m *QuotaManager) ReconcileTenantStorageUsage(ctx context.Context, tenantID string) error {
-	if _, err := m.db.ExecContext(ctx, `
+	tx, err := m.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("reconciling storage usage for tenant %s: begin: %w", tenantID, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE tenant_quotas tq
 		SET storage_used_bytes = COALESCE(
 			(SELECT SUM(o.size_bytes) FROM object_head_cache o
@@ -149,7 +176,7 @@ func (m *QuotaManager) ReconcileTenantStorageUsage(ctx context.Context, tenantID
 		WHERE tq.tenant_id = $1`, tenantID); err != nil {
 		return fmt.Errorf("reconciling storage usage for tenant %s: %w", tenantID, err)
 	}
-	if _, err := m.db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE tenant_floor_quotas f
 		SET storage_used_bytes = COALESCE(
 			(SELECT SUM(o.size_bytes) FROM object_head_cache o
@@ -157,6 +184,9 @@ func (m *QuotaManager) ReconcileTenantStorageUsage(ctx context.Context, tenantID
 		    updated_at = NOW()
 		WHERE f.tenant_id = $1`, tenantID); err != nil {
 		return fmt.Errorf("reconciling floor usage for tenant %s: %w", tenantID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("reconciling storage usage for tenant %s: commit: %w", tenantID, err)
 	}
 	return nil
 }
@@ -234,30 +264,6 @@ func (m *QuotaManager) GetTier(ctx context.Context, tenantID string) (string, er
 	err := m.db.QueryRowContext(ctx,
 		"SELECT tier FROM tenant_quotas WHERE tenant_id = $1", tenantID).Scan(&tier)
 	return tier, err
-}
-
-// UpdateTier updates the tier and associated limits
-func (m *QuotaManager) UpdateTier(ctx context.Context, tenantID, newTier string) error {
-	limits := map[string]int64{
-		"free":         5368709120,      // 5GB
-		"starter":      1099511627776,   // 1TB
-		"vault18":      19791209299968,  // 18TB (pack size)
-		"professional": 10995116277760,  // 10TB
-		"enterprise":   109951162777600, // 100TB
-	}
-
-	limit, ok := limits[newTier]
-	if !ok {
-		return fmt.Errorf("invalid tier: %s", newTier)
-	}
-
-	_, err := m.db.ExecContext(ctx,
-		`UPDATE tenant_quotas
-		 SET tier = $1, storage_limit_bytes = $2, updated_at = CURRENT_TIMESTAMP
-		 WHERE tenant_id = $3`,
-		newTier, limit, tenantID)
-
-	return err
 }
 
 // GetUsageHistory returns historical usage data

@@ -242,7 +242,7 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		dr.Get("/billing", handlers.HandleBilling(billingTmpl, billingSvc, deps.DB, deps.Flags, deps.Logger))
 		dr.Post("/billing/upgrade", handlers.HandleUpgrade(deps.Stripe, deps.DB, deps.BaseURL, deps.Logger))
 		dr.Post("/billing/house", handlers.HandleHouseCheckout(billingSvc, deps.DB, deps.Quotas, deps.Flags, deps.BaseURL, deps.Logger))
-		dr.Post("/billing/portal", handlers.HandleManageBilling(deps.Stripe, deps.Logger))
+		dr.Post("/billing/portal", handlers.HandleManageBilling(deps.Stripe, deps.BaseURL, deps.Logger))
 
 		// Compliance dashboard.
 		complianceTmpl := template.Must(baseTmpl.Clone())

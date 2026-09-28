@@ -89,6 +89,10 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 	}
 
 	destBucket := req.Bucket
+	if s.freeTierBucketCapBlocksWrite(r.Context(), t.ID, destBucket) {
+		writeFreeTierBucketCap(w, r)
+		return
+	}
 	destKey := req.Object
 
 	srcContainer := t.NamespaceContainer(srcBucket)

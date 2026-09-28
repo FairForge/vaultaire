@@ -695,7 +695,7 @@ func (s *Server) handleMgmtDeleteAccount(w http.ResponseWriter, r *http.Request)
 	resp := map[string]interface{}{
 		"object":       "account_deletion",
 		"scheduled_at": scheduledAt,
-		"message":      "Account scheduled for deletion. You have 30 days to cancel.",
+		"message":      "Account scheduled for deletion. You have 30 days to cancel; after that date the erasure is carried out by support (email support@stored.ge to bring it forward). Cancel your Stripe subscription from the billing page so it does not renew.",
 		"request_id":   getRequestID(w),
 	}
 	writeJSON(w, http.StatusOK, resp)

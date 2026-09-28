@@ -48,6 +48,9 @@ func houseTenant(t *testing.T, db *sql.DB, intentStd, intentVault int) string {
 type fakeHouseBilling struct {
 	ready      bool
 	why        string
+	live       bool  // HasLiveSubscription answer
+	liveErr    error // ...or its error
+	liveAsked  int
 	checkout   string
 	gotOrder   billing.HouseOrder
 	gotSuccess string
@@ -74,6 +77,10 @@ func (f *fakeHouseBilling) CreateCustomer(_ context.Context, _, tenantID string)
 func (f *fakeHouseBilling) CreateHouseCheckout(_ context.Context, _, _ string, o billing.HouseOrder, successURL, cancelURL string) (string, error) {
 	f.gotOrder, f.gotSuccess, f.gotCancel = o, successURL, cancelURL
 	return f.checkout, nil
+}
+func (f *fakeHouseBilling) HasLiveSubscription(_ context.Context, _ string) (bool, error) {
+	f.liveAsked++
+	return f.live, f.liveErr
 }
 func (f *fakeHouseBilling) UpdateHouseSubscription(_ context.Context, _ string, o billing.HouseOrder) (*stripe.Subscription, error) {
 	f.gotOrder = o
@@ -230,6 +237,58 @@ func TestHandleHouseCheckout_StartsCheckoutWithAbsoluteURLs(t *testing.T) {
 	h = HandleHouseCheckout(fb, db, nil, houseFlags(false), "https://stored.ge", zap.NewNop())
 	w = postHouse(t, h, id, url.Values{"std": {"1"}, "period": {"annual"}})
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+// A second Checkout while Stripe still bills a subscription would open a
+// second subscription (R10-05): refused from the local row when it says so,
+// and from Stripe when the webhook has not landed yet.
+func TestHandleHouseCheckout_RefusesASecondSubscription(t *testing.T) {
+	db := testDashDB(t)
+	t.Cleanup(func() { _ = db.Close() }) // registered first = runs last, after the tenant cleanup
+	id := houseTenant(t, db, 0, 0)
+	fb := newFakeHouseBilling()
+	h := HandleHouseCheckout(fb, db, nil, houseFlags(true), "https://stored.ge", zap.NewNop())
+	order := url.Values{"std": {"2"}, "period": {"annual"}}
+
+	// 1. The webhook has not landed (no local subscription yet) but Stripe
+	//    already has one: refused, nothing created.
+	fb.live = true
+	w := postHouse(t, h, id, order)
+	require.Equal(t, http.StatusSeeOther, w.Code)
+	assert.Equal(t, "/dashboard/billing", w.Header().Get("Location"))
+	cat, msg := flashOf(t, w)
+	assert.Equal(t, "error", cat)
+	assert.Contains(t, msg, "already have a subscription")
+	assert.Equal(t, 1, fb.liveAsked)
+	assert.Equal(t, billing.HouseOrder{}, fb.gotOrder, "no checkout started")
+
+	// 2. Stripe cannot be asked: refused too (never guess on a money path).
+	fb.live, fb.liveErr = false, fmt.Errorf("stripe: 503")
+	w = postHouse(t, h, id, order)
+	cat, _ = flashOf(t, w)
+	assert.Equal(t, "error", cat)
+	assert.Equal(t, billing.HouseOrder{}, fb.gotOrder)
+
+	// 3. A legacy pack the local row knows about, still billing: refused
+	//    before Stripe is even asked.
+	fb.liveErr = nil
+	asked := fb.liveAsked
+	_, err := db.Exec(`UPDATE tenants SET plan = 'vault18', subscription_status = 'active', stripe_subscription_id = 'sub_pack' WHERE id = $1`, id)
+	require.NoError(t, err)
+	w = postHouse(t, h, id, order)
+	cat, msg = flashOf(t, w)
+	assert.Equal(t, "error", cat)
+	assert.Contains(t, msg, "bill you twice")
+	assert.Equal(t, asked, fb.liveAsked, "refused from the local row")
+	assert.Equal(t, billing.HouseOrder{}, fb.gotOrder)
+
+	// 4. That old subscription is over (canceled): a new house may be bought.
+	_, err = db.Exec(`UPDATE tenants SET subscription_status = 'canceled' WHERE id = $1`, id)
+	require.NoError(t, err)
+	w = postHouse(t, h, id, order)
+	require.Equal(t, http.StatusSeeOther, w.Code)
+	assert.Equal(t, "https://checkout.stripe.test/cs_1", w.Header().Get("Location"))
+	assert.Equal(t, billing.HouseOrder{Std: 2, Period: billing.PeriodAnnual}, fb.gotOrder)
 }
 
 func TestHandleHouseCheckout_ResizeAppliesQuotasImmediately(t *testing.T) {

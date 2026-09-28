@@ -90,7 +90,7 @@ func TestHandleUpgrade_NoStripe(t *testing.T) {
 }
 
 func TestHandleManageBilling_NoStripe(t *testing.T) {
-	handler := HandleManageBilling(nil, zap.NewNop())
+	handler := HandleManageBilling(nil, "https://stored.ge", zap.NewNop())
 
 	req := httptest.NewRequest("POST", "/dashboard/billing/portal", nil)
 	req = req.WithContext(usageSessionCtx(t))

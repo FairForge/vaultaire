@@ -122,7 +122,6 @@ type QuotaManager interface {
 	ListQuotas(ctx context.Context) ([]map[string]interface{}, error)
 	DeleteQuota(ctx context.Context, tenantID string) error
 	GetTier(ctx context.Context, tenantID string) (string, error)
-	UpdateTier(ctx context.Context, tenantID, newTier string) error
 	GetUsageHistory(ctx context.Context, tenantID string, days int) ([]map[string]interface{}, error)
 }
 
@@ -364,8 +363,15 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// Stripe billing service. Only active when STRIPE_SECRET_KEY is set.
 	if stripeKey := os.Getenv("STRIPE_SECRET_KEY"); stripeKey != "" {
 		s.stripe = billing.NewStripeService(stripeKey, s.db, logger)
-		whSecret := os.Getenv("STRIPE_WEBHOOK_SECRET")
-		s.webhookHandler = billing.NewWebhookHandler(whSecret, s.stripe, logger)
+		// The webhook route is mounted only with its signing secret: an
+		// unsigned webhook would be an open door to subscription state
+		// (Review R10-01). The endpoint in the Stripe dashboard must be
+		// pinned to API version 2023-08-16 (stripe-go v75), see billing/CLAUDE.md.
+		if whSecret := os.Getenv("STRIPE_WEBHOOK_SECRET"); whSecret != "" {
+			s.webhookHandler = billing.NewWebhookHandler(whSecret, s.stripe, logger)
+		} else {
+			logger.Error("STRIPE_SECRET_KEY is set but STRIPE_WEBHOOK_SECRET is not — /webhook/stripe is NOT mounted; paid houses cannot be applied until both are set")
+		}
 
 		// Register plans. Price IDs come from environment (set in Stripe Dashboard).
 		// If not set, plans won't appear on the billing page but nothing breaks.
@@ -379,7 +385,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		} else {
 			logger.Info("house checkout dormant (STRIPE_PRICE_{STANDARD,VAULT,PINHOT}_{ANNUAL,MONTHLY} not all set)")
 		}
-		if hq, ok := s.quotaManager.(billing.HouseQuotas); ok {
+		if hq, ok := s.quotaManager.(billing.HouseQuotas); ok && s.webhookHandler != nil {
 			s.webhookHandler.SetHouseQuotas(hq)
 		}
 
@@ -1119,7 +1125,7 @@ func (s *Server) versionMiddleware(next http.Handler) http.Handler {
 
 // requestLimitsMiddleware caps request body sizes to prevent resource
 // exhaustion. S3 PUT/POST uploads are exempt (bounded by engine + quota).
-// Management API mutations get 10 MB. Everything else gets 64 KB.
+// Management API mutations and /webhook/ get 10 MB. Everything else gets 64 KB.
 func (s *Server) requestLimitsMiddleware(next http.Handler) http.Handler {
 	const (
 		defaultLimit    int64 = 64 << 10 // 64 KB
@@ -1149,6 +1155,11 @@ func (s *Server) requestLimitsMiddleware(next http.Handler) http.Handler {
 
 		limit := defaultLimit
 		if strings.HasPrefix(path, "/api/") && (method == "PUT" || method == "POST" || method == "PATCH") {
+			limit = managementLimit
+		}
+		// Stripe events carry every invoice line and previous_attributes;
+		// 64 KB is a size cliff Stripe would retry for days (R1-15/R10-04).
+		if strings.HasPrefix(path, "/webhook/") {
 			limit = managementLimit
 		}
 

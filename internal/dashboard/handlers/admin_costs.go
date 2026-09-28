@@ -24,9 +24,14 @@ const (
 // backendCostPerTBCents maps backend names to their per-TB storage cost in cents.
 // Zero means free (contributed, local, or fixed-only).
 var backendCostPerTBCents = map[string]int64{
-	"geyser":     155, // $1.55/TB
-	"idrive":     413, // $4.125/TB annual-plan Y2+ rate, rounded up from 412.5
-	"lyve":       799, // $7.99/TB — see note in internal/usage/cost_tracker.go
+	"geyser": 155, // $1.55/TB
+	"idrive": 413, // $4.125/TB annual-plan Y2+ rate, rounded up from 412.5
+	// Lyve is costed at its CURRENT list price ($7.99/TB standard, 2026-09-27;
+	// $4.99 IA) even though the account is at $0 under a SaaS promo the owner
+	// puts at ~mid-2028 (2026-07-30 note; the README's older $6.37 was the
+	// pre-2026 list). The modelled view is "what this traffic costs once the
+	// promo ends"; ?costs=invoiced zeroes it (subsidizedBackends). R0-16/R10-30.
+	"lyve":       799,
 	"hetzner":    381, // ~€3.81/TB
 	"permafrost": 0,
 	"gorilla":    0,
@@ -55,10 +60,11 @@ var egressCostPerTBCents = map[string]int64{
 }
 
 // subsidizedBackends are backends that carry a modelled rate above but bill us
-// nothing today, so the two cost views diverge. Lyve is $0 under a 1-year SaaS
-// promo whose end date we do not yet have in writing; when it ends, the
-// modelled figure is what we start paying. The gap between the two views is
-// the subsidy we are currently living on.
+// nothing today, so the two cost views diverge. Lyve is $0 under a SaaS promo
+// (owner: runs to ~mid-2028; the contract text in drivers/lyve_README.md
+// "Contract terms" has no end date in writing); when it ends, the modelled
+// figure is what we start paying. The gap between the two views is the
+// subsidy we are currently living on.
 var subsidizedBackends = map[string]bool{
 	"lyve": true,
 }

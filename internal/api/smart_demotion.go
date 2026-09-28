@@ -92,6 +92,7 @@ type SmartDemotionResult struct {
 type TenantDemotionStats struct {
 	TenantID       string `json:"tenant_id"`
 	QuotaBytes     int64  `json:"quota_bytes"`
+	PinHotBytes    int64  `json:"pin_hot_bytes"` // the paid pin-hot add-on, added to the budget
 	HotBudgetBytes int64  `json:"hot_budget_bytes"`
 	HotBytesBefore int64  `json:"hot_bytes_before"`
 	HotBytesAfter  int64  `json:"hot_bytes_after"`
@@ -182,20 +183,29 @@ func (r *SmartDemotionRunner) RunOnce(ctx context.Context, dryRun bool) (SmartDe
 		res.Errors = append(res.Errors, errs...)
 	}
 
+	// The hot budget is a share of the DOWNSTAIRS quota (the attic is tape by
+	// definition) plus whatever the tenant pays to pin hot (Review R10-07):
+	// a house tenant's downstairs is its `standard` floor row; a tenant
+	// without floor rows keeps the single total.
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT tenant_id, storage_limit_bytes FROM tenant_quotas WHERE tier = ANY($1) ORDER BY tenant_id`,
+		`SELECT tq.tenant_id,
+		        COALESCE((SELECT f.storage_limit_bytes FROM tenant_floor_quotas f
+		                   WHERE f.tenant_id = tq.tenant_id AND f.floor = 'standard'), tq.storage_limit_bytes),
+		        tq.pin_hot_bytes
+		   FROM tenant_quotas tq WHERE tq.tier = ANY($1) ORDER BY tq.tenant_id`,
 		pq.Array(r.Tiers))
 	if err != nil {
 		return res, fmt.Errorf("smart demotion: list tenants: %w", err)
 	}
 	type tenantRow struct {
-		id    string
-		quota int64
+		id     string
+		quota  int64
+		pinHot int64
 	}
 	var tenants []tenantRow
 	for rows.Next() {
 		var t tenantRow
-		if err := rows.Scan(&t.id, &t.quota); err != nil {
+		if err := rows.Scan(&t.id, &t.quota, &t.pinHot); err != nil {
 			_ = rows.Close()
 			return res, fmt.Errorf("smart demotion: scan tenant: %w", err)
 		}
@@ -214,7 +224,7 @@ func (r *SmartDemotionRunner) RunOnce(ctx context.Context, dryRun bool) (SmartDe
 			continue
 		}
 		res.TenantsScanned++
-		stats, cands, err := r.planTenant(ctx, t.id, t.quota)
+		stats, cands, err := r.planTenant(ctx, t.id, t.quota, t.pinHot)
 		if err != nil {
 			res.Errors = append(res.Errors, fmt.Sprintf("%s: plan: %v", t.id, err))
 			continue
@@ -247,8 +257,9 @@ func (r *SmartDemotionRunner) RunOnce(ctx context.Context, dryRun bool) (SmartDe
 
 // planTenant computes the budget and selects candidates: idle objects first
 // (oldest access first), then LRU extras only while still over budget.
-func (r *SmartDemotionRunner) planTenant(ctx context.Context, tenantID string, quota int64) (TenantDemotionStats, []demotionCandidate, error) {
-	stats := TenantDemotionStats{TenantID: tenantID, QuotaBytes: quota, HotBudgetBytes: int64(float64(quota) * r.HotFraction)}
+func (r *SmartDemotionRunner) planTenant(ctx context.Context, tenantID string, quota, pinHot int64) (TenantDemotionStats, []demotionCandidate, error) {
+	stats := TenantDemotionStats{TenantID: tenantID, QuotaBytes: quota, PinHotBytes: pinHot,
+		HotBudgetBytes: int64(float64(quota)*r.HotFraction) + pinHot}
 	if err := r.db.QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(size_bytes),0) FROM object_head_cache WHERE tenant_id=$1 AND backend_name=$2`,
 		tenantID, r.HotBackend).Scan(&stats.HotBytesBefore); err != nil {

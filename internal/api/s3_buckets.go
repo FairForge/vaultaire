@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -104,6 +105,41 @@ func (s *Server) ListBuckets(w http.ResponseWriter, r *http.Request) {
 	if err := xml.NewEncoder(w).Encode(response); err != nil {
 		s.logger.Error("Failed to encode response", zap.Error(err))
 	}
+}
+
+// freeTierBucketCapBlocksWrite reports whether an object write into bucket
+// must be refused because the tenant is on the free tier, already holds its
+// FreeTierLimits.MaxBuckets bucket rows, and bucket is not one of them.
+// CreateBucket enforces the cap, but PUT / CopyObject / multipart auto-create
+// the container and never looked (R2-19 = R5-27, Review R10-12). Paid tenants
+// and tenants under the cap are untouched; existing phantom containers keep
+// working (the wider "PUT needs a bucket row" rule is R4's, WP-R5-13).
+func (s *Server) freeTierBucketCapBlocksWrite(ctx context.Context, tenantID, bucket string) bool {
+	if s.db == nil || s.quotaManager == nil || tenantID == "" || bucket == "" {
+		return false
+	}
+	tier, err := s.quotaManager.GetTier(ctx, tenantID)
+	if err != nil || !usage.IsFreeTier(tier) {
+		return false
+	}
+	var owned bool
+	if err := s.db.QueryRowContext(ctx,
+		"SELECT EXISTS(SELECT 1 FROM buckets WHERE tenant_id = $1 AND name = $2)",
+		tenantID, bucket).Scan(&owned); err != nil || owned {
+		return false
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM buckets WHERE tenant_id = $1", tenantID).Scan(&count); err != nil {
+		return false
+	}
+	return count >= usage.FreeTierLimits.MaxBuckets
+}
+
+// writeFreeTierBucketCap answers the refusal the way CreateBucket does.
+func writeFreeTierBucketCap(w http.ResponseWriter, r *http.Request) {
+	WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
+		WithSuggestion(fmt.Sprintf("Free tier allows %d bucket. Upgrade at https://stored.ge/dashboard/billing", usage.FreeTierLimits.MaxBuckets)))
 }
 
 // CreateBucket handles S3 CreateBucket operation

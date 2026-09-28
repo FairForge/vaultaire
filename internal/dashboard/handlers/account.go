@@ -89,7 +89,7 @@ func HandleRequestDeletion(db *sql.DB, sessions dashauth.SessionStore, logger *z
 		}
 
 		middleware.SetFlash(w, "success",
-			fmt.Sprintf("Account scheduled for deletion on %s. You can cancel anytime before then.", scheduledAt.Format("January 2, 2006")))
+			fmt.Sprintf("Account scheduled for deletion on %s. You can cancel anytime before then; after that date support carries out the erasure (email support@stored.ge to bring it forward). Cancel your subscription on the billing page so it does not renew.", scheduledAt.Format("January 2, 2006")))
 		http.Redirect(w, r, "/dashboard/settings", http.StatusSeeOther)
 	}
 }
