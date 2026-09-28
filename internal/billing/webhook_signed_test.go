@@ -177,14 +177,16 @@ func TestWebhook_HandlerFailureIsLeftForStripeToRetry(t *testing.T) {
 		return n == 1
 	}
 
-	// 1. A checkout for a customer we do not know: the tenant lookup fails.
+	// 1. A checkout for a customer nobody owns, with no reference to a tenant
+	// in the payload: not ours — acknowledged and recorded, nothing granted
+	// (post-merge R10-45; a 500 here would be retried for three days).
 	evID := "evt_" + tenantID + "_unknown"
 	body := eventBody(t, evID, "checkout.session.completed", stripe.CheckoutSession{
 		ID: "cs_u", Customer: &stripe.Customer{ID: "cus_nobody"}, Subscription: &stripe.Subscription{ID: "sub_u"}})
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, signedRequest(t, testWebhookSecret, time.Now(), body))
-	assert.Equal(t, http.StatusInternalServerError, w.Code)
-	assert.False(t, recorded(evID), "a failed event is not recorded, so the retry is handled")
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.True(t, recorded(evID), "a foreign customer's event is recorded so Stripe stops")
 
 	// 2. The subscription cannot be fetched (Stripe blip): same.
 	evID = "evt_" + tenantID + "_nosub"

@@ -181,6 +181,65 @@ func (h *WebhookHandler) unmarshal(event stripe.Event, what string, v any) bool 
 	return true
 }
 
+// resolveTenant maps a verified event to a tenant. The customer id is the
+// normal key; when `tenants` does not know it, the payload's own hints —
+// Checkout's client_reference_id and the metadata.tenant_id this service
+// stamps on every session and subscription — name the tenant, and the
+// customer id is healed onto the row so later events resolve directly (the
+// persist in CreateCustomer is logged-and-continued, so a checkout can
+// complete under a customer id the row never received). A customer that
+// resolves nowhere is not ours (another product on the Stripe account, a
+// customer made in the dashboard, a tenant already erased): the event is
+// acknowledged and recorded rather than answered 500 for three days of
+// retries (post-merge review R10-45). Only a real lookup failure is an
+// error, which ServeHTTP turns into a retry.
+func (h *WebhookHandler) resolveTenant(ctx context.Context, event stripe.Event, customerID string, hints ...string) (string, bool, error) {
+	tenantID, err := h.stripe.LookupTenantByCustomer(ctx, customerID)
+	if err == nil {
+		return tenantID, true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", false, err
+	}
+	for _, hint := range hints {
+		if hint == "" {
+			continue
+		}
+		var exists bool
+		if err := h.stripe.db.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM tenants WHERE id = $1)`, hint).Scan(&exists); err != nil {
+			return "", false, fmt.Errorf("resolve tenant hint %q: %w", hint, err)
+		}
+		if !exists {
+			continue
+		}
+		res, err := h.stripe.db.ExecContext(ctx,
+			`UPDATE tenants SET stripe_customer_id = $1
+			  WHERE id = $2 AND (stripe_customer_id IS NULL OR stripe_customer_id = '')`,
+			customerID, hint)
+		if err != nil {
+			return "", false, fmt.Errorf("heal stripe_customer_id for tenant %s: %w", hint, err)
+		}
+		healed, _ := res.RowsAffected()
+		h.logger.Warn("stripe webhook: customer unknown, tenant resolved from the event's own reference",
+			zap.String("id", event.ID), zap.String("customer", customerID), zap.String("tenant", hint),
+			zap.Bool("customer_id_healed", healed == 1))
+		return hint, true, nil
+	}
+	h.logger.Warn("stripe webhook: customer belongs to no tenant — acknowledged, not applied",
+		zap.String("id", event.ID), zap.String("type", string(event.Type)), zap.String("customer", customerID))
+	return "", false, nil
+}
+
+// invoiceTenantHint is the subscription metadata Stripe copies onto every
+// invoice (subscription_details.metadata, invoices since 2023-06-29).
+func invoiceTenantHint(inv *stripe.Invoice) string {
+	if inv.SubscriptionDetails == nil {
+		return ""
+	}
+	return inv.SubscriptionDetails.Metadata["tenant_id"]
+}
+
 func (h *WebhookHandler) handleCheckoutCompleted(ctx context.Context, event stripe.Event) error {
 	var session stripe.CheckoutSession
 	if !h.unmarshal(event, "checkout session", &session) {
@@ -202,9 +261,13 @@ func (h *WebhookHandler) handleCheckoutCompleted(ctx context.Context, event stri
 		return nil
 	}
 
-	tenantID, err := h.stripe.LookupTenantByCustomer(ctx, customerID)
+	tenantID, ours, err := h.resolveTenant(ctx, event, customerID,
+		session.ClientReferenceID, session.Metadata["tenant_id"])
 	if err != nil {
 		return fmt.Errorf("lookup tenant for checkout customer %s: %w", customerID, err)
+	}
+	if !ours {
+		return nil
 	}
 
 	// A house checkout: the subscription's items are the floor quotas. The
@@ -251,9 +314,12 @@ func (h *WebhookHandler) handlePaymentSucceeded(ctx context.Context, event strip
 		return nil
 	}
 
-	tenantID, err := h.stripe.LookupTenantByCustomer(ctx, customerID)
+	tenantID, ours, err := h.resolveTenant(ctx, event, customerID, invoiceTenantHint(&inv))
 	if err != nil {
 		return fmt.Errorf("lookup tenant for payment: %w", err)
+	}
+	if !ours {
+		return nil
 	}
 
 	// Ensure subscription status is active after successful payment.
@@ -284,9 +350,12 @@ func (h *WebhookHandler) handlePaymentFailed(ctx context.Context, event stripe.E
 		return nil
 	}
 
-	tenantID, err := h.stripe.LookupTenantByCustomer(ctx, customerID)
+	tenantID, ours, err := h.resolveTenant(ctx, event, customerID, invoiceTenantHint(&inv))
 	if err != nil {
 		return fmt.Errorf("lookup tenant for failed payment: %w", err)
+	}
+	if !ours {
+		return nil
 	}
 
 	// past_due is the grace period: the house is kept (applyHouse grants
@@ -319,9 +388,12 @@ func (h *WebhookHandler) handleSubscriptionUpdated(ctx context.Context, event st
 		return nil
 	}
 
-	tenantID, err := h.stripe.LookupTenantByCustomer(ctx, customerID)
+	tenantID, ours, err := h.resolveTenant(ctx, event, customerID, sub.Metadata["tenant_id"])
 	if err != nil {
 		return fmt.Errorf("lookup tenant for subscription update: %w", err)
+	}
+	if !ours {
+		return nil
 	}
 
 	status := string(sub.Status)
@@ -438,9 +510,12 @@ func (h *WebhookHandler) handleSubscriptionDeleted(ctx context.Context, event st
 		return nil
 	}
 
-	tenantID, err := h.stripe.LookupTenantByCustomer(ctx, customerID)
+	tenantID, ours, err := h.resolveTenant(ctx, event, customerID, sub.Metadata["tenant_id"])
 	if err != nil {
 		return fmt.Errorf("lookup tenant for subscription delete: %w", err)
+	}
+	if !ours {
+		return nil
 	}
 
 	// A deleted subscription that is not the tenant's current one (an old
