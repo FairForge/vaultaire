@@ -81,6 +81,16 @@ func HandleUpgrade(stripe *billing.StripeService, db *sql.DB, baseURL string, lo
 			return
 		}
 
+		// A tenant with a house (or any subscription Stripe still bills)
+		// must not open a second subscription through the legacy page
+		// (Review R10-05).
+		if db != nil {
+			if h, err := loadHouse(r.Context(), db, sd.TenantID); err == nil && (h.active || h.liveOther) {
+				http.Error(w, "This account already has a subscription. Resize your house on the billing page or email support@stored.ge.", http.StatusConflict)
+				return
+			}
+		}
+
 		customerID, err := stripe.GetCustomerID(r.Context(), sd.TenantID)
 		if err != nil {
 			logger.Error("get customer id for upgrade", zap.Error(err))
@@ -104,8 +114,9 @@ func HandleUpgrade(stripe *billing.StripeService, db *sql.DB, baseURL string, lo
 	}
 }
 
-// HandleManageBilling redirects to the Stripe Billing Portal.
-func HandleManageBilling(stripe *billing.StripeService, logger *zap.Logger) http.HandlerFunc {
+// HandleManageBilling redirects to the Stripe Billing Portal. baseURL makes
+// the return URL absolute — Stripe rejects a relative one (Review R10-06).
+func HandleManageBilling(stripe *billing.StripeService, baseURL string, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
 		if sd == nil {
@@ -119,7 +130,7 @@ func HandleManageBilling(stripe *billing.StripeService, logger *zap.Logger) http
 		}
 
 		portalURL, err := stripe.CreateBillingPortalSession(
-			r.Context(), sd.TenantID, "/dashboard/billing",
+			r.Context(), sd.TenantID, strings.TrimRight(baseURL, "/")+"/dashboard/billing",
 		)
 		if err != nil {
 			logger.Error("create billing portal session", zap.Error(err))

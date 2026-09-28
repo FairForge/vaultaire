@@ -218,9 +218,12 @@ durable/failover-eligible. The gaps are in the surfaces around it:
   customer can select it. Note this directly contradicts
   `docs/IMPLEMENTATION_PLAN.md:871` ("Don't route customer `STANDARD_IA` to
   Lyve"); **the code and the plan disagree today** and one of them must change.
-- **Cost tracking would bill Lyve at $0** — `internal/usage/cost_tracker.go`
-  has no `lyve` key, and `admin_costs.go` omits it from the cost/egress/order
-  maps.
+- **Cost tracking:** `internal/dashboard/handlers/admin_costs.go` costs Lyve
+  at the current list price ($7.99/TB standard as of 2026-09-27) in the
+  default "modelled" view and at $0 in `?costs=invoiced` (the promo, see
+  *Contract terms* §4 — end date still not in writing; owner says ~mid-2028).
+  The `$6.37/TB` quoted elsewhere in this file is the pre-2026 list price.
+  (`internal/usage/cost_tracker.go` no longer exists — R0-16/R10-30.)
 - **Health check is commented out** (`internal/api/server.go`) and points at a
   stale `lyvecloud.seagate.com` host.
 - **`bucketRegionDriver` hardcodes `"idrive-" + region`**, and `IsValidRegion`

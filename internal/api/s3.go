@@ -756,6 +756,12 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3
 	// release on failure, release the overwritten object's size on overwrite
 	// (the overwritten size is captured atomically by the head-cache upsert).
 	quotaOn := s.quotaManager != nil && req.TenantID != ""
+	// A free-tier tenant at the bucket cap cannot grow a new bucket by
+	// writing into it (R10-12).
+	if s.freeTierBucketCapBlocksWrite(r.Context(), req.TenantID, req.Bucket) {
+		writeFreeTierBucketCap(w, r)
+		return
+	}
 	// The floor is decided by the storage class the write resolves to
 	// (header, then bucket tier, then public-bucket placement); resolve it
 	// once here, reserve on it, and hand it to the adapter so placement and

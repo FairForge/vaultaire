@@ -18,7 +18,7 @@ Stripe billing integration for stored.ge subscriptions, payments, and invoices.
 | `GetCustomerID(ctx, tenantID)` | Look up Stripe customer ID from DB |
 | `CreateCheckoutSession(customerID, planID, successURL, cancelURL)` | Create checkout for a registered plan |
 | `GetSubscription(ctx, tenantID)` | Fetch subscription from Stripe |
-| `CancelSubscription(ctx, tenantID)` | Cancel at period end, update DB status |
+| `CancelSubscription(ctx, tenantID)` | Cancels **immediately** (`subscription.Cancel`; no route calls it — WP-R10-4 deletes it) |
 | `GetInvoices(ctx, tenantID, limit)` | List recent invoices from Stripe |
 | `CreateBillingPortalSession(ctx, tenantID, returnURL)` | Self-service billing portal |
 | `SaveSubscription(ctx, tenantID, subID, status, plan)` | Persist subscription state (called by webhook) |
@@ -37,8 +37,42 @@ Stripe billing integration for stored.ge subscriptions, payments, and invoices.
 
 ## Environment Variables (wired in server.go)
 
-- `STRIPE_SECRET_KEY` — Stripe API key (server.go:169)
-- `STRIPE_WEBHOOK_SECRET` — webhook endpoint secret (server.go:171)
+- `STRIPE_SECRET_KEY` — Stripe API key
+- `STRIPE_WEBHOOK_SECRET` — webhook endpoint secret. **Required for the route
+  to exist**: `server.go` mounts `/webhook/stripe` only when both are set, and
+  `NewWebhookHandler("")` answers 503 to everything (Review R10-01 — an empty
+  secret used to mean "skip verification").
+
+## Webhook delivery contract (Review R10)
+
+- **Signature**: `webhook.ConstructEvent` — scheme v1 (HMAC-SHA256 over
+  `<t>.<body>`), 300 s tolerance, **and the event's `api_version` must equal
+  `stripe.APIVersion` = `2023-08-16`** (stripe-go v75.11.0 refuses any other).
+  The endpoint in the Stripe dashboard must therefore be created **pinned to
+  2023-08-16**; left on the account default every delivery is a 400, Stripe
+  retries for three days and then disables the endpoint. Upgrading the SDK
+  moves the pin (WP-R10-6).
+- **Body cap**: 10 MB (`http.MaxBytesReader`, 413 past it; the general
+  request-limits middleware gives `/webhook/` the same 10 MB). Never a
+  truncating `LimitReader`.
+- **Acknowledgement**: 200 only after the handler succeeded and the event id
+  was written to `stripe_events`. A tenant lookup miss, a Stripe fetch error or
+  a DB error answers **500 and records nothing**, so Stripe retries (up to
+  three days) and the retry is handled as a fresh event. Handlers are
+  idempotent; a duplicate of a recorded event is a no-op 200. A payload the SDK
+  cannot deserialise is logged and dropped (200) — retrying it would only get
+  the endpoint disabled.
+- **Ordering**: Stripe does not guarantee event order. `checkout.session.
+  completed` fetches the subscription; `customer.subscription.updated` still
+  trusts the payload (WP-R10-2).
+- **Dunning**: `invoice.payment_failed` → `past_due`, house **kept** (grace =
+  Stripe Smart Retries); the dashboard's "after retries" setting delivers
+  `canceled`/`unpaid`, which clears the house. Set it to **cancel**.
+- **Customer Portal** (dashboard config): keep quantity updates **off** — the
+  dashboard's resize path refuses a floor below its usage, the portal would not.
+- **Tests**: every webhook test signs its fixture with
+  `webhook.ComputeSignature` (`webhook_signed_test.go`); unsigned, wrong-secret,
+  stale, foreign-API-version, oversize and handler-failure cases are covered.
 
 ## Wiring
 
@@ -70,7 +104,12 @@ Stripe subscription per tenant, one item per line, `quantity` = TB.**
   product rules (≥1 floor, ≤300 TB/floor, pin-hot ≤ downstairs, known period).
   **Attic-only houses are sold** and **both periods ship** (decisions 2026-09-27).
 - `CreateHouseCheckout` → hosted Checkout (subscription mode, metadata
-  `house=1`, `tenant_id`, `ClientReferenceID`); `UpdateHouseSubscription` resizes
+  `house=1`, `tenant_id`, `ClientReferenceID`, Stripe idempotency key over
+  (tenant, order, 5-min window) so a double submit is one session);
+  `HasLiveSubscription` lists the customer's subscriptions and the dashboard
+  refuses a new checkout while any is active/trialing/past_due/incomplete/
+  unpaid (R10-05 — a second Checkout is a second subscription);
+  `UpdateHouseSubscription` resizes
   in place with `create_prorations` (quantity changes; a line at 0 is deleted;
   the **period is fixed** for the life of a subscription — switching = support).
   `HouseFromSubscription` maps items back to an order (false for legacy packs).
@@ -108,6 +147,9 @@ the free tier are never metered.
 - `AccruedCents(tier, storageBytes, egressBytes)` / `MeteredRatePerTB(tier)` —
   exported pricing helpers (Standard $3.99/TB, Performance $6.00/TB; egress $0).
   Used by the dashboard billing handler for the "≈ $X.XX this month" estimate.
+  **Stale vs prices.json (4.99/4.49, 6.99) and dormant at launch** — the
+  2026-09-21 decision sells quota, not meters; no launch tenant is metered
+  (house tenants have floor rows and are excluded). Deletion = WP-R10-4.
 
 **Idempotency / no double-billing**: `metered_usage_reports` has
 `UNIQUE(tenant_id, meter, period_date)`. `reportMeter` skips the Stripe call if a

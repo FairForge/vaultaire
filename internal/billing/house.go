@@ -2,6 +2,8 @@ package billing
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -436,6 +438,38 @@ func (s *StripeService) houseCheckoutParams(customerID, tenantID string, o House
 	return params
 }
 
+// houseCheckoutIdempotencyKey keys a Checkout creation on (tenant, order,
+// 5-minute window): Stripe returns the SAME session for a repeated request
+// with the same key (Idempotent requests: keys are kept 24 h), so a double
+// submit of the form cannot open two sessions (Review R10-05).
+func houseCheckoutIdempotencyKey(tenantID string, o HouseOrder, now time.Time) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("house-checkout|%s|%d|%d|%d|%s|%d",
+		tenantID, o.Std, o.Vault, o.PinHot, o.Period, now.Unix()/300)))
+	return "house-" + hex.EncodeToString(sum[:16])
+}
+
+// HasLiveSubscription reports whether the customer already holds a
+// subscription Stripe would keep billing (active, trialing, past_due,
+// incomplete, unpaid). A second Checkout for such a customer would open a
+// second subscription while the first keeps invoicing (Review R10-05).
+func (s *StripeService) HasLiveSubscription(ctx context.Context, customerID string) (bool, error) {
+	params := &stripe.SubscriptionListParams{Customer: stripe.String(customerID), Status: stripe.String("all")}
+	params.Context = ctx
+	params.Limit = stripe.Int64(50)
+	it := subscription.List(params)
+	for it.Next() {
+		switch it.Subscription().Status {
+		case stripe.SubscriptionStatusActive, stripe.SubscriptionStatusTrialing, stripe.SubscriptionStatusPastDue,
+			stripe.SubscriptionStatusIncomplete, stripe.SubscriptionStatusUnpaid:
+			return true, nil
+		}
+	}
+	if err := it.Err(); err != nil {
+		return false, fmt.Errorf("list subscriptions for %s: %w", customerID, err)
+	}
+	return false, nil
+}
+
 // CreateHouseCheckout starts a Stripe Checkout for a house and returns the
 // hosted page URL. URLs must be absolute (Stripe rejects relative ones).
 func (s *StripeService) CreateHouseCheckout(ctx context.Context, customerID, tenantID string, o HouseOrder, successURL, cancelURL string) (string, error) {
@@ -447,6 +481,7 @@ func (s *StripeService) CreateHouseCheckout(ctx context.Context, customerID, ten
 	}
 	params := s.houseCheckoutParams(customerID, tenantID, o, successURL, cancelURL)
 	params.Context = ctx
+	params.SetIdempotencyKey(houseCheckoutIdempotencyKey(tenantID, o, time.Now()))
 	sess, err := checkoutsession.New(params)
 	if err != nil {
 		return "", fmt.Errorf("create house checkout session: %w", err)

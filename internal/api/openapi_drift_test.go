@@ -224,7 +224,6 @@ var knownUndocumented = map[string]bool{
 	"POST /api/v1/manage/account/export":                     true,
 	"POST /api/v1/manage/buckets":                            true,
 	"POST /api/v1/manage/keys":                               true,
-	"POST /api/v1/quota/upgrade":                             true,
 	"POST /api/v1/sts/token":                                 true,
 	"POST /api/v1/user/apikeys":                              true,
 	"POST /api/v1/user/apikeys/{keyId}/expire":               true,

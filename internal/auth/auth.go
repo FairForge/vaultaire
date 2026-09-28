@@ -159,9 +159,10 @@ func (a *AuthService) LoadFromDB(ctx context.Context) error {
 		return nil
 	}
 
-	// Load users
+	// Load users. company is nullable (R10-44): a single NULL row used to
+	// abort the whole load — and with it every login after a restart.
 	rows, err := a.sqlDB.QueryContext(ctx, `
-		SELECT id, email, password_hash, company, created_at, updated_at,
+		SELECT id, email, password_hash, COALESCE(company, ''), created_at, updated_at,
 		       COALESCE(email_verified, FALSE)
 		FROM users
 	`)
@@ -300,14 +301,11 @@ func (a *AuthService) CreateUser(ctx context.Context, email, password string) (*
 
 // CreateUserWithTenant creates both user and their storage tenant.
 //
-// Credentials are written to the in-memory maps first (so the caller
-// gets them back immediately), then persisted to PostgreSQL via three
-// sequential INSERTs: users → tenants → api_keys. Each INSERT is
-// wrapped with ON CONFLICT DO NOTHING for idempotency. If a DB write
-// fails, the error is returned — the in-memory maps are already
-// populated so the current process can serve the new tenant, but the
-// caller should surface the error so the operator knows persistence
-// failed.
+// The four rows — users → tenants → api_keys → tenant_quotas, in that order
+// — are written in ONE transaction; the in-memory maps are populated only
+// after it commits (Review R10-10 / R5-18). A failed INSERT therefore leaves
+// neither a partial account in the database nor a phantom account in this
+// process. The primary API key is the tenant's own S3 key pair.
 func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password, company string) (*User, *Tenant, *APIKey, error) {
 	// Single chokepoint: when signups are disabled, reject before any work so
 	// the web form, /auth/register API, and OAuth signup are all blocked here.
@@ -359,79 +357,94 @@ func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password,
 	// Link tenant to user
 	user.TenantID = tenant.ID
 
-	// Create primary API key
-	apiKey, err := a.GenerateAPIKey(ctx, user.ID, "primary", nil)
-	if err != nil {
-		apiKey = &APIKey{
-			ID:        uuid.New().String(),
-			UserID:    user.ID,
-			TenantID:  tenant.ID,
-			Name:      "primary",
-			Key:       tenant.AccessKey,
-			Secret:    tenant.SecretKey,
-			CreatedAt: time.Now(),
+	// The primary API key is the tenant's own S3 key pair.
+	apiKey := &APIKey{
+		ID:        uuid.New().String(),
+		UserID:    user.ID,
+		TenantID:  tenant.ID,
+		Name:      "primary",
+		Key:       tenant.AccessKey,
+		Secret:    tenant.SecretKey,
+		CreatedAt: time.Now(),
+	}
+
+	// Persist to PostgreSQL so credentials survive restarts — all four rows
+	// or none.
+	if a.sqlDB != nil {
+		if err := a.persistNewAccount(ctx, user, tenant, apiKey, company); err != nil {
+			return nil, nil, nil, err
 		}
 	}
 
-	// Write to in-memory maps for current-process lookups.
+	// Write to in-memory maps for current-process lookups — after the
+	// commit, so a failed persist never leaves an account that authenticates
+	// until the next restart.
 	a.users[email] = user
 	a.userIndex[user.ID] = user
 	a.tenants[tenant.ID] = tenant
 	a.apiKeys[apiKey.Key] = apiKey
 	a.keyIndex[tenant.AccessKey] = tenant
 
-	// Persist to PostgreSQL so credentials survive restarts.
-	if a.sqlDB != nil {
-		_, err = a.sqlDB.ExecContext(ctx, `
-			INSERT INTO users (id, email, password_hash, company, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6)
-			ON CONFLICT (email) DO NOTHING
-		`, user.ID, user.Email, user.PasswordHash, user.Company,
-			user.CreatedAt, user.UpdatedAt)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("persist user: %w", err)
-		}
+	return user, tenant, apiKey, nil
+}
 
-		// tenants.name = company name; tenants.email = owner email.
-		// Both are NOT NULL in the schema so must always be provided.
-		_, err = a.sqlDB.ExecContext(ctx, `
-			INSERT INTO tenants (id, name, email, access_key, secret_key, created_at)
-			VALUES ($1, $2, $3, $4, $5, $6)
-			ON CONFLICT (id) DO NOTHING
-		`, tenant.ID, company, email, tenant.AccessKey, tenant.SecretKey, tenant.CreatedAt)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("persist tenant: %w", err)
-		}
+// persistNewAccount writes users → tenants → api_keys → tenant_quotas in one
+// transaction. Each INSERT is ON CONFLICT DO NOTHING for idempotency.
+func (a *AuthService) persistNewAccount(ctx context.Context, user *User, tenant *Tenant, apiKey *APIKey, company string) error {
+	tx, err := a.sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin registration: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
 
-		// secret_key must be stored (not just the bcrypt secret_hash) — SigV4
-		// verification recomputes the request signature from the raw secret,
-		// so a hash-only row can never authenticate and must be regenerated.
-		secretHash, err := bcrypt.GenerateFromPassword([]byte(apiKey.Secret), bcrypt.DefaultCost)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("hash api key secret: %w", err)
-		}
-		_, err = a.sqlDB.ExecContext(ctx, `
-			INSERT INTO api_keys (id, user_id, name, key_id, secret_hash, secret_key, created_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
-			ON CONFLICT (key_id) DO NOTHING
-		`, apiKey.ID, user.ID, apiKey.Name, apiKey.Key, string(secretHash), apiKey.Secret, apiKey.CreatedAt)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("persist api key: %w", err)
-		}
-
-		// Provision a default quota row so HandlePut never sees
-		// "no rows in result set" on the tenant_quotas SELECT.
-		_, err = a.sqlDB.ExecContext(ctx, `
-			INSERT INTO tenant_quotas (tenant_id)
-			VALUES ($1)
-			ON CONFLICT (tenant_id) DO NOTHING
-		`, tenant.ID)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("provision tenant quota: %w", err)
-		}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO users (id, email, password_hash, company, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (email) DO NOTHING
+	`, user.ID, user.Email, user.PasswordHash, user.Company,
+		user.CreatedAt, user.UpdatedAt); err != nil {
+		return fmt.Errorf("persist user: %w", err)
 	}
 
-	return user, tenant, apiKey, nil
+	// tenants.name = company name; tenants.email = owner email.
+	// Both are NOT NULL in the schema so must always be provided.
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO tenants (id, name, email, access_key, secret_key, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (id) DO NOTHING
+	`, tenant.ID, company, user.Email, tenant.AccessKey, tenant.SecretKey, tenant.CreatedAt); err != nil {
+		return fmt.Errorf("persist tenant: %w", err)
+	}
+
+	// secret_key must be stored (not just the bcrypt secret_hash) — SigV4
+	// verification recomputes the request signature from the raw secret,
+	// so a hash-only row can never authenticate and must be regenerated.
+	secretHash, err := bcrypt.GenerateFromPassword([]byte(apiKey.Secret), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hash api key secret: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO api_keys (id, user_id, name, key_id, secret_hash, secret_key, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (key_id) DO NOTHING
+	`, apiKey.ID, user.ID, apiKey.Name, apiKey.Key, string(secretHash), apiKey.Secret, apiKey.CreatedAt); err != nil {
+		return fmt.Errorf("persist api key: %w", err)
+	}
+
+	// Provision a default quota row so HandlePut never sees
+	// "no rows in result set" on the tenant_quotas SELECT.
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO tenant_quotas (tenant_id)
+		VALUES ($1)
+		ON CONFLICT (tenant_id) DO NOTHING
+	`, tenant.ID); err != nil {
+		return fmt.Errorf("provision tenant quota: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit registration: %w", err)
+	}
+	return nil
 }
 
 // ValidatePassword checks if password is correct

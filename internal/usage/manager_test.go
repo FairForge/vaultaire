@@ -85,24 +85,6 @@ func TestQuotaManager_CheckAndUpdateQuota(t *testing.T) {
 	})
 }
 
-func TestUpdateTier_Free(t *testing.T) {
-	db := setupTestDB(t)
-	m := NewQuotaManager(db)
-	tenantID := newTestTenant(t, db, m, "tenant-free", "starter", 1099511627776)
-
-	err := m.UpdateTier(context.Background(), tenantID, "free")
-	require.NoError(t, err)
-
-	tier, err := m.GetTier(context.Background(), tenantID)
-	require.NoError(t, err)
-	assert.Equal(t, "free", tier)
-
-	used, limit, err := m.GetUsage(context.Background(), tenantID)
-	require.NoError(t, err)
-	assert.Equal(t, int64(0), used)
-	assert.Equal(t, int64(5368709120), limit) // 5 GB
-}
-
 // R9-03: GetUsageHistory embedded a literal `INTERVAL '%d days'` (never
 // formatted) so GET /api/v1/quota/history always failed.
 func TestQuotaManager_GetUsageHistory(t *testing.T) {

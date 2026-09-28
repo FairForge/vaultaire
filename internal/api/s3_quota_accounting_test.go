@@ -635,9 +635,12 @@ func TestQuotaAccounting_ReconcileRepairsdrift(t *testing.T) {
 		f.tenantID)
 	require.NoError(t, err)
 
-	n, err := f.qm.ReconcileStorageUsage(context.Background())
-	require.NoError(t, err)
-	assert.GreaterOrEqual(t, n, int64(1))
+	// Per tenant: the global reconcile rewrites EVERY tenant in the shared
+	// test database — with `go test ./...` running packages in parallel it
+	// zeroed other packages' seeded ledgers and erased in-flight reservations
+	// (Review R10-11, proven with an audit trigger). The global variant is
+	// exercised by the admin endpoint against a quiesced production DB.
+	require.NoError(t, f.qm.ReconcileTenantStorageUsage(context.Background(), f.tenantID))
 
 	assert.Equal(t, int64(8<<10), f.used(t),
 		"reconciliation must restore usage to the object_head_cache sum")

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/testutil"
+	"github.com/FairForge/vaultaire/internal/usage"
 
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
@@ -84,7 +85,12 @@ func setupDemotionFixture(t *testing.T, quotaBytes int64, tier string) *demotion
 	})
 
 	now := time.Now()
-	r := NewSmartDemotionRunner(db, eng, stubFlags{on: map[string]bool{flagSmartDemotion: true}}, logger)
+	// The flag is enabled for THIS tenant only: the test database is shared
+	// with every other package (and with local live cycles), so a global
+	// flag would make the runner scan every `standard` tenant it finds
+	// there and the per-tenant assertions below would count strangers
+	// (Review R10 — the R9-05 shared-DB class).
+	r := NewSmartDemotionRunner(db, eng, stubFlags{on: map[string]bool{flagSmartDemotion + "/" + tenantID: true}}, logger)
 	require.NotNil(t, r)
 	r.now = func() time.Time { return now }
 	return &demotionFixture{t: t, db: db, eng: eng, hotDir: hotDir, coldDir: coldDir, tenantID: tenantID, runner: r, now: now}
@@ -177,6 +183,41 @@ func TestSmartDemotion_OverBudgetDemotesLRUUntilUnderBudget(t *testing.T) {
 	assert.Equal(t, int64(1536*gb), res.Tenants[0].HotBytesAfter)
 }
 
+// The pin-hot add-on the customer pays for ($3/TB/mo) raises the hot budget
+// by exactly what was bought, and the budget is a share of the DOWNSTAIRS
+// quota only — attic TB are tape by definition (Review R10-07).
+func TestSmartDemotion_PinHotRaisesTheBudgetAndTheAtticDoesNot(t *testing.T) {
+	// Arrange: a house of 10 TB downstairs + 20 TB attic + 1 TB pinned hot.
+	// Budget = 15% × 10 TB + 1 TB = 2.5 TB (not 15% × 30 TB = 4.5 TB, not 1.5 TB).
+	f := setupDemotionFixture(t, 1, "standard")
+	require.NoError(t, usage.NewQuotaManager(f.db).SetHouse(context.Background(), f.tenantID,
+		usage.House{StdBytes: 10 * tb, VaultBytes: 20 * tb, PinHotBytes: 1 * tb}))
+	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM tenant_floor_quotas WHERE tenant_id = $1`, f.tenantID) })
+	f.object("b", "a", 1*tb, 10, 1) // 2.4 TB hot, nothing idle
+	f.object("b", "lru", 1*tb, 10, 9)
+	f.object("b", "c", 400*gb, 10, 2)
+
+	// Act
+	res, err := f.runner.RunOnce(context.Background(), false)
+
+	// Assert: under the 2.5 TB budget → nothing demoted.
+	require.NoError(t, err)
+	require.Len(t, res.Tenants, 1)
+	assert.Equal(t, int64(2560*gb), res.Tenants[0].HotBudgetBytes, "15%% of downstairs + pin-hot")
+	assert.Equal(t, int64(1*tb), res.Tenants[0].PinHotBytes)
+	assert.Equal(t, 0, res.Demoted, "%+v", res)
+	assert.Equal(t, "idrive", f.backendOf("b", "lru"))
+
+	// Without the add-on the same house is over budget (1.5 TB) and the LRU object goes.
+	_, err = f.db.Exec(`UPDATE tenant_quotas SET pin_hot_bytes = 0 WHERE tenant_id = $1`, f.tenantID)
+	require.NoError(t, err)
+	res, err = f.runner.RunOnce(context.Background(), false)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1536*gb), res.Tenants[0].HotBudgetBytes)
+	assert.Equal(t, 1, res.Demoted, "%+v", res)
+	assert.Equal(t, "geyser", f.backendOf("b", "lru"))
+}
+
 func TestSmartDemotion_IdleObjectDemotedEvenUnderBudget(t *testing.T) {
 	f := setupDemotionFixture(t, 10*tb, "standard")
 	f.object("b", "cold-idle", 100, 30, 20) // idle 20d ≥ 14d
@@ -235,8 +276,8 @@ func TestSmartDemotion_FlagOffIsNoop_TierFilter(t *testing.T) {
 	assert.Equal(t, 0, res.Demoted)
 	assert.Equal(t, "idrive", f.backendOf("b", "idle"))
 
-	// flag on but tenant is on a tier the job does not manage
-	f.runner.flags = stubFlags{on: map[string]bool{flagSmartDemotion: true}}
+	// flag on (for this tenant) but the tenant is on a tier the job does not manage
+	f.runner.flags = stubFlags{on: map[string]bool{flagSmartDemotion + "/" + f.tenantID: true}}
 	_, err = f.db.Exec(`UPDATE tenant_quotas SET tier='vault' WHERE tenant_id=$1`, f.tenantID)
 	require.NoError(t, err)
 	res, err = f.runner.RunOnce(context.Background(), false)

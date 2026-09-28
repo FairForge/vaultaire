@@ -46,34 +46,6 @@ func (s *Server) handleGetQuota(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(quota)
 }
 
-// handleUpgradeQuota upgrades a user's quota tier
-func (s *Server) handleUpgradeQuota(w http.ResponseWriter, r *http.Request) {
-	tenantID, ok := r.Context().Value(common.TenantIDKey).(string)
-	if !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	var req struct {
-		NewTier string `json:"new_tier"`
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
-		return
-	}
-
-	// Update the tier
-	err := s.quotaManager.UpdateTier(r.Context(), tenantID, req.NewTier)
-	if err != nil {
-		http.Error(w, "failed to upgrade", http.StatusInternalServerError)
-		return
-	}
-
-	// Return updated quota
-	s.handleGetQuota(w, r)
-}
-
 // handleGetQuotaHistory returns usage history
 func (s *Server) handleGetQuotaHistory(w http.ResponseWriter, r *http.Request) {
 	tenantID, ok := r.Context().Value(common.TenantIDKey).(string)

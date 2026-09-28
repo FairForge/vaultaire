@@ -1,10 +1,8 @@
 package billing
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -199,6 +197,20 @@ func item(itemID, priceID string, qty int64) *stripe.SubscriptionItem {
 	return &stripe.SubscriptionItem{ID: itemID, Price: &stripe.Price{ID: priceID}, Quantity: qty}
 }
 
+// A double submit of the checkout form within the window carries the same
+// Stripe idempotency key (one session); a different order or a later window
+// is a new request (R10-05).
+func TestHouseCheckoutIdempotencyKey(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	o := HouseOrder{Std: 6, Vault: 1, Period: PeriodAnnual}
+	k1 := houseCheckoutIdempotencyKey("tenant-1", o, now)
+	assert.Equal(t, k1, houseCheckoutIdempotencyKey("tenant-1", o, now.Add(90*time.Second)), "same window")
+	assert.NotEqual(t, k1, houseCheckoutIdempotencyKey("tenant-1", o, now.Add(6*time.Minute)), "next window")
+	assert.NotEqual(t, k1, houseCheckoutIdempotencyKey("tenant-1", HouseOrder{Std: 7, Vault: 1, Period: PeriodAnnual}, now))
+	assert.NotEqual(t, k1, houseCheckoutIdempotencyKey("tenant-2", o, now))
+	assert.LessOrEqual(t, len(k1), 255, "Stripe caps idempotency keys at 255 chars")
+}
+
 func TestHouseFromSubscription(t *testing.T) {
 	svc := NewStripeService("sk_test_fake", nil, zap.NewNop())
 	svc.ConfigureHouse(testIDs, goodPrices())
@@ -280,7 +292,7 @@ func setupHouseFixture(t *testing.T) *houseFixture {
 	svc := NewStripeService("sk_test_fake", db, zap.NewNop())
 	svc.ConfigureHouse(testIDs, goodPrices())
 	subs := fakeSubs{}
-	h := NewWebhookHandler("", svc, zap.NewNop())
+	h := NewWebhookHandler(testWebhookSecret, svc, zap.NewNop())
 	h.SetHouseQuotas(qm)
 	h.subs = subs
 	return &houseFixture{db: db, qm: qm, handler: h, subs: subs, tenantID: tenantID}
@@ -288,13 +300,8 @@ func setupHouseFixture(t *testing.T) *houseFixture {
 
 func (f *houseFixture) post(t *testing.T, suffix, typ string, obj any) {
 	t.Helper()
-	raw, err := json.Marshal(obj)
-	require.NoError(t, err)
-	ev := stripe.Event{ID: "evt_" + f.tenantID + "_" + suffix, Type: stripe.EventType(typ),
-		Data: &stripe.EventData{Raw: raw}}
-	body, err := json.Marshal(ev)
-	require.NoError(t, err)
-	req := httptest.NewRequest("POST", "/webhook/stripe", bytes.NewReader(body))
+	body := eventBody(t, "evt_"+f.tenantID+"_"+suffix, typ, obj)
+	req := signedRequest(t, testWebhookSecret, time.Now(), body)
 	w := httptest.NewRecorder()
 	f.handler.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code)
