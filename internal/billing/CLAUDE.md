@@ -56,12 +56,20 @@ Stripe billing integration for stored.ge subscriptions, payments, and invoices.
   request-limits middleware gives `/webhook/` the same 10 MB). Never a
   truncating `LimitReader`.
 - **Acknowledgement**: 200 only after the handler succeeded and the event id
-  was written to `stripe_events`. A tenant lookup miss, a Stripe fetch error or
-  a DB error answers **500 and records nothing**, so Stripe retries (up to
-  three days) and the retry is handled as a fresh event. Handlers are
-  idempotent; a duplicate of a recorded event is a no-op 200. A payload the SDK
-  cannot deserialise is logged and dropped (200) — retrying it would only get
-  the endpoint disabled.
+  was written to `stripe_events`. A Stripe fetch error or a DB error answers
+  **500 and records nothing**, so Stripe retries (up to three days) and the
+  retry is handled as a fresh event. Handlers are idempotent; a duplicate of a
+  recorded event is a no-op 200. A payload the SDK cannot deserialise is logged
+  and dropped (200) — retrying it would only get the endpoint disabled.
+- **Tenant resolution** (`resolveTenant`, post-merge R10-45): the customer id
+  first; when `tenants` does not know it, the event's own `client_reference_id`
+  / `metadata.tenant_id` (stamped on every session and subscription we create;
+  invoices carry it as `subscription_details.metadata`) names the tenant and
+  the customer id is healed onto the row — `CreateCustomer` logs-and-continues
+  when its persist fails, so a checkout can complete under a customer id the
+  row never received. A customer that resolves nowhere is **not ours** (another
+  product on the account, a dashboard-made customer, an erased tenant): 200 +
+  recorded, never a three-day 500 retry storm.
 - **Ordering**: Stripe does not guarantee event order. `checkout.session.
   completed` fetches the subscription; `customer.subscription.updated` still
   trusts the payload (WP-R10-2).
