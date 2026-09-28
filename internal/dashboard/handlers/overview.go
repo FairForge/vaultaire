@@ -321,12 +321,13 @@ func populateActivity(ctx context.Context, db *sql.DB, tenantID string, data map
 
 // backendEnergyKWhPerTBMonth maps backends to energy consumption in kWh/TB/month.
 var backendEnergyKWhPerTBMonth = map[string]float64{
-	"geyser":   0.1, // tape, powered off
-	"idrive":   1.0, // spinning disk
-	"s3":       1.0,
-	"lyve":     1.0,
-	"onedrive": 0.5, // SSD
-	"local":    1.0,
+	"geyser":     0.1, // tape, powered off
+	"idrive":     1.0, // spinning disk
+	"s3":         1.0,
+	"lyve":       1.0,
+	"permafrost": 0.5, // SSD (OneDrive fleet; registration key, R7-10)
+	"onedrive":   0.5, // legacy bench rows written under the old key
+	"local":      1.0,
 }
 
 const (

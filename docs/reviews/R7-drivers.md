@@ -307,3 +307,9 @@ pre-R2-04 traversal pattern.
 | WP-R7-7 | **Lyve lock guard** (R7-16): `GetObjectLockConfiguration` at boot; lock enabled → Error + target-only; driver-declared `TargetOnly()` capability replacing the engine's name list. | `drivers/lyve.go`, `engine/engine.go` | S | R6 (`targetOnlyBackends`) |
 | WP-R6-3 (values) | Per-operation deadlines and `ResponseHeaderTimeout` per the table above; SDK `RetryMaxAttempts` 2 on request paths; transport buffer sizing review. | `drivers/transport.go`, each constructor, `engine/failover.go` | S–M | — |
 | handed on | R7-02 → [YOU] (Lyve scoped user + TFA); alert rule install → ops; `docs/DRIVERS.md`/`ARCHITECTURE.md` rewrite from the conformance tables → R14 (WP-R6-9); `idrive_integration.md` deletion → R14; clean-EOF short body → WP-R2-1; `"default"` tenant fallback → WP-R6-1 | | | |
+
+## Post-merge review (2026-09-27) — R7-10 follow-through
+
+| ID | Sev | file:line | What | Why it matters | Proposed fix |
+|---|---|---|---|---|---|
+| R7-27 | P3 | `cmd/dedup-migrate/main.go:459`, `cmd/backend-matrix/main.go:80`, `cmd/erasure-bench/main.go:616`, `dashboard/handlers/overview.go:230` | #496 set `OneDriveDriver.Name()` to `"permafrost"` so "the two names cannot drift again" — but the engine records the **registration key**, and the three tools still registered the driver as `"onedrive"`. Another dedup-migrate run against prod would have written more orphan `onedrive` head rows. The energy map keyed only the old name. | The R7-10 fix did not close the drift it described. | **Fixed here (#post)**: the three tools register `"permafrost"`; the energy map carries both keys until WP-R7-5 reconciles the 2,613 rows; `targetOnlyBackends` keeps `"onedrive"` for the same reason. |

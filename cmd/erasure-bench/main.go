@@ -613,7 +613,7 @@ func buildBackends(logger *zap.Logger) map[string]engine.Driver {
 	}
 	if os.Getenv("TENANT_1_ID") != "" {
 		d, err := drivers.NewOneDriveFleetDriver(logger)
-		add("onedrive", d, err)
+		add("permafrost", d, err) // same registration key as main.go (R7-10)
 	}
 	if acct := os.Getenv("R2_ACCOUNT_ID"); acct != "" && os.Getenv("R2_ACCESS_KEY") != "" {
 		bucket := os.Getenv("R2_BENCH_BUCKET")
