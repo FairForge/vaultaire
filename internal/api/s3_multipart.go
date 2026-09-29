@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,6 +56,20 @@ type memUpload struct {
 type memPart struct {
 	ETag string
 	Size int64
+}
+
+// uploadIDPattern is the only shape an upload id can have: the current
+// `upload-<32 hex>` (newUploadID) and the pre-R3 `upload-<unix>-<nanos>` still
+// possible on rows that were in flight across the upgrade. The id names the
+// staging directory under multipartTempBase, so a request-supplied id is
+// checked against this BEFORE the tenant-scoped row lookup and before any
+// path is built from it — the row lookup is the authority, this is the
+// belt (CodeQL go/path-injection on the staging paths).
+var uploadIDPattern = regexp.MustCompile(`^upload-(?:[0-9a-f]{32}|[0-9]{1,12}-[0-9]{1,12})$`)
+
+// validUploadID reports whether id can name a staging directory.
+func validUploadID(id string) bool {
+	return uploadIDPattern.MatchString(id)
 }
 
 // multipartDir returns the temp directory for a specific upload's parts.
@@ -162,6 +177,9 @@ func (s *Server) handleInitiateMultipartUpload(w http.ResponseWriter, r *http.Re
 // also names the staging directory, so an id that is not this tenant's must
 // never reach the filesystem.
 func (s *Server) multipartUploadActive(r *http.Request, tenantID, uploadID string) (bool, error) {
+	if !validUploadID(uploadID) {
+		return false, nil
+	}
 	if s.db != nil {
 		var status string
 		err := s.db.QueryRowContext(r.Context(), `
@@ -773,6 +791,10 @@ func (s *Server) handleAbortMultipartUpload(w http.ResponseWriter, r *http.Reque
 	}
 
 	uploadID := r.URL.Query().Get("uploadId")
+	if !validUploadID(uploadID) {
+		WriteS3Error(w, ErrNoSuchUpload, r.URL.Path, generateRequestID())
+		return
+	}
 
 	if s.db != nil {
 		result, err := s.db.ExecContext(r.Context(), `

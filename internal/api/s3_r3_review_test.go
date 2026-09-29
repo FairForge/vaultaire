@@ -631,3 +631,28 @@ func TestMultipartComplete_HeadRowFailureIsNot200(t *testing.T) {
 	require.NoError(t, f.db.QueryRow(`SELECT status FROM multipart_uploads WHERE upload_id = $1`, id).Scan(&status))
 	assert.Equal(t, "active", status, "the upload stays completable so the retry is not NoSuchUpload")
 }
+
+// ---- upload ids are validated syntactically before any path is built --------
+
+func TestMultipart_MalformedUploadIDNeverTouchesTheFilesystem(t *testing.T) {
+	srv, tnt, _ := newTestMultipartServer(t)
+	for _, id := range []string{"", "..", "../../etc", "upload-../x", "upload-zz", "upload-" + strings.Repeat("a", 33), "upload-1-2-3"} {
+		q := "?uploadId=" + id
+		for _, c := range []struct{ method, path string }{
+			{"PUT", "/test-bucket/f.bin" + q + "&partNumber=1"},
+			{"POST", "/test-bucket/f.bin" + q},
+			{"DELETE", "/test-bucket/f.bin" + q},
+			{"GET", "/test-bucket/f.bin" + q},
+		} {
+			w := doS3Request(srv, tnt, c.method, c.path, bytes.NewReader([]byte("x")))
+			assert.Equal(t, http.StatusNotFound, w.Code, "%s %s", c.method, c.path)
+			assert.Contains(t, w.Body.String(), ErrNoSuchUpload, "%s %s", c.method, c.path)
+		}
+	}
+	for _, id := range []string{"upload-zz", "upload-1-2-3", "x"} {
+		_, err := os.Stat(filepath.Join(multipartTempBase, id))
+		assert.True(t, os.IsNotExist(err), "no directory for %q", id)
+	}
+	assert.True(t, validUploadID("upload-"+strings.Repeat("0", 32)))
+	assert.True(t, validUploadID("upload-1790649661-802876000"), "pre-R3 ids still resolve")
+}
