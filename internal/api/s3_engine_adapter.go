@@ -975,42 +975,20 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		putOpts = append(putOpts, engine.WithStorageClass(storageClass))
 	}
 
-	// Region-aware routing: if the bucket has a non-default region and
-	// a region-specific driver is registered, route directly to it.
+	// Placement (region driver for a pinned bucket, else the engine) is the
+	// shared helper so multipart complete and CopyObject cannot drift from
+	// it again (R3-08).
 	var backendName string
-	regionDriver, regionErr := bucketRegionDriver(r.Context(), a.db, a.engine, t.ID, bucket)
-	if regionErr != nil {
-		// Never fall through to the primary: the bucket promised a region.
-		a.logger.Error("region-pinned bucket has no driver — PUT refused",
-			zap.String("bucket", bucket), zap.Error(regionErr))
-		w.Header().Set("Retry-After", "300")
-		WriteS3ErrorWithContext(w, ErrServiceUnavailable, r.URL.Path, generateRequestID(),
-			WithSuggestion("This bucket's region is not enabled on this deployment."))
-		return
-	}
-	if regionDriver != "" {
-		if ce, ok := a.engine.(*engine.CoreEngine); ok {
-			if drv, exists := ce.GetDriver(regionDriver); exists {
-				putErr := drv.Put(r.Context(), container, artifact, hashingBody, putOpts...)
-				if putErr != nil {
-					a.logger.Error("region driver put failed",
-						zap.Error(putErr),
-						zap.String("driver", regionDriver))
-					WriteS3Error(w, bodyReadErrorCode(putErr), r.URL.Path, generateRequestID())
-					return
-				}
-				backendName = regionDriver
-				ce.HintBackend(container, artifact, regionDriver)
-			}
-		}
-	}
-	if backendName == "" {
-		var putErr error
-		backendName, putErr = a.engine.Put(r.Context(), container, artifact, hashingBody, putOpts...)
-		err = putErr
-	}
+	backendName, err = placeObject(r.Context(), a.db, a.engine, t.ID, bucket, container, artifact, hashingBody, putOpts...)
 	if err != nil {
 		switch {
+		case errors.Is(err, errRegionDriverUnavailable):
+			// Never fall through to the primary: the bucket promised a region.
+			a.logger.Error("region-pinned bucket has no driver — PUT refused",
+				zap.String("bucket", bucket), zap.Error(err))
+			w.Header().Set("Retry-After", "300")
+			WriteS3ErrorWithContext(w, ErrServiceUnavailable, r.URL.Path, generateRequestID(),
+				WithSuggestion("This bucket's region is not enabled on this deployment."))
 		case errors.Is(err, engine.ErrAllBackendsUnavailable):
 			w.Header().Set("Retry-After", "30")
 			WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
@@ -1109,30 +1087,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		}
 	}
 
-	versionID := ""
-	vStatus := getBucketVersioningStatus(r.Context(), a.db, t.ID, bucket)
-	if a.db != nil && (vStatus == "Enabled" || vStatus == "Suspended") {
-		if vStatus == "Enabled" {
-			versionID = generateVersionID()
-		} else {
-			versionID = "null"
-		}
-
-		_, _ = a.db.ExecContext(r.Context(), `
-			UPDATE object_versions SET is_latest = FALSE
-			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND is_latest = TRUE`,
-			t.ID, bucket, artifact)
-
-		_, _ = a.db.ExecContext(r.Context(), `
-			INSERT INTO object_versions
-				(tenant_id, bucket, object_key, version_id, size_bytes, etag, content_type, is_latest, is_delete_marker, backend_name)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, FALSE, $8)
-			ON CONFLICT (tenant_id, bucket, object_key, version_id) DO UPDATE SET
-				size_bytes = EXCLUDED.size_bytes, etag = EXCLUDED.etag,
-				content_type = EXCLUDED.content_type, is_latest = TRUE,
-				is_delete_marker = FALSE, backend_name = EXCLUDED.backend_name`,
-			t.ID, bucket, artifact, versionID, metadataSize, etag, contentType, backendName)
-	}
+	versionID := recordObjectVersion(r.Context(), a.db, t.ID, bucket, artifact, metadataSize, etag, contentType, backendName)
 
 	applyObjectLockOnPut(r.Context(), a.db, t.ID, bucket, artifact, r)
 
@@ -1456,28 +1411,7 @@ func (a *S3ToEngine) handleChunkedPut(
 			zap.Error(blobErr), zap.String("bucket", bucket), zap.String("object", artifact))
 	}
 
-	versionID := ""
-	vStatus := getBucketVersioningStatus(ctx, a.db, t.ID, bucket)
-	if a.db != nil && (vStatus == "Enabled" || vStatus == "Suspended") {
-		if vStatus == "Enabled" {
-			versionID = generateVersionID()
-		} else {
-			versionID = "null"
-		}
-		_, _ = a.db.ExecContext(ctx, `
-			UPDATE object_versions SET is_latest = FALSE
-			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND is_latest = TRUE`,
-			t.ID, bucket, artifact)
-		_, _ = a.db.ExecContext(ctx, `
-			INSERT INTO object_versions
-				(tenant_id, bucket, object_key, version_id, size_bytes, etag, content_type, is_latest, is_delete_marker, backend_name)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, FALSE, $8)
-			ON CONFLICT (tenant_id, bucket, object_key, version_id) DO UPDATE SET
-				size_bytes = EXCLUDED.size_bytes, etag = EXCLUDED.etag,
-				content_type = EXCLUDED.content_type, is_latest = TRUE,
-				is_delete_marker = FALSE, backend_name = EXCLUDED.backend_name`,
-			t.ID, bucket, artifact, versionID, measuredSize, etag, contentType, backendName)
-	}
+	versionID := recordObjectVersion(ctx, a.db, t.ID, bucket, artifact, measuredSize, etag, contentType, backendName)
 
 	applyObjectLockOnPut(ctx, a.db, t.ID, bucket, artifact, r)
 

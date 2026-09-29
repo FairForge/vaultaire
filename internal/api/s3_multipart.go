@@ -4,7 +4,9 @@ import (
 	"crypto/md5" // #nosec G501 — S3 spec requires MD5 for ETags
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,6 +28,10 @@ import (
 const (
 	multipartTempBase = "/tmp/vaultaire-multipart"
 	maxPartNumber     = 10000
+	// maxCompleteMultipartBodyBytes bounds the CompleteMultipartUpload XML
+	// body: 10,000 parts × ~150 bytes is ~1.5 MiB; S3 POST bodies are
+	// otherwise unlimited (R2's requestLimitsMiddleware note).
+	maxCompleteMultipartBodyBytes = 8 * 1024 * 1024
 )
 
 // In-memory fallback for when DB is not available (test mode).
@@ -42,6 +48,8 @@ type memUpload struct {
 	Status   string // "active", "completed", "aborted"
 	Parts    map[int]memPart
 	Created  time.Time
+	Attrs    objectAttrs
+	Class    string
 }
 
 type memPart struct {
@@ -76,14 +84,36 @@ func (s *Server) handleInitiateMultipartUpload(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	uploadID := fmt.Sprintf("upload-%d-%d", time.Now().Unix(), time.Now().Nanosecond())
+	// The object's attributes travel on THIS request (Content-Type,
+	// x-amz-meta-*, Cache-Control, ..., x-amz-storage-class); Complete only
+	// carries the part list. They are persisted on the upload row and written
+	// to the head row at complete (R3-04). Invalid metadata is refused before
+	// any state exists.
+	attrs, err := objectAttrsFromRequest(r)
+	if err != nil {
+		WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(), WithSuggestion(err.Error()))
+		return
+	}
+	storageClass := clientStorageClass(r.Header.Get("x-amz-storage-class"))
+
+	uploadID, err := newUploadID()
+	if err != nil {
+		s.logger.Error("failed to generate upload id", zap.Error(err))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return
+	}
 
 	// Persist upload record
 	if s.db != nil {
 		_, err := s.db.ExecContext(r.Context(), `
-			INSERT INTO multipart_uploads (upload_id, tenant_id, bucket, object_key, status)
-			VALUES ($1, $2, $3, $4, 'active')
-		`, uploadID, t.ID, bucket, object)
+			INSERT INTO multipart_uploads
+				(upload_id, tenant_id, bucket, object_key, status, content_type, metadata, storage_class,
+				 content_disposition, content_encoding, content_language, cache_control, http_expires,
+				 website_redirect_location)
+			VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		`, uploadID, t.ID, bucket, object, attrs.ContentType, attrs.metadataJSON(), storageClass,
+			attrs.ContentDisposition, attrs.ContentEncoding, attrs.ContentLanguage,
+			attrs.CacheControl, attrs.Expires, attrs.WebsiteRedirect)
 		if err != nil {
 			s.logger.Error("failed to create multipart upload record", zap.Error(err))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
@@ -98,6 +128,8 @@ func (s *Server) handleInitiateMultipartUpload(w http.ResponseWriter, r *http.Re
 			Status:   "active",
 			Parts:    make(map[int]memPart),
 			Created:  time.Now(),
+			Attrs:    attrs,
+			Class:    storageClass,
 		}
 		memUploadsMu.Unlock()
 	}
@@ -125,10 +157,46 @@ func (s *Server) handleInitiateMultipartUpload(w http.ResponseWriter, r *http.Re
 	}
 }
 
+// multipartUploadActive reports whether uploadID is an active upload owned by
+// tenantID. Every multipart query is keyed by upload_id AND tenant_id: the id
+// also names the staging directory, so an id that is not this tenant's must
+// never reach the filesystem.
+func (s *Server) multipartUploadActive(r *http.Request, tenantID, uploadID string) (bool, error) {
+	if s.db != nil {
+		var status string
+		err := s.db.QueryRowContext(r.Context(), `
+			SELECT status FROM multipart_uploads
+			WHERE upload_id = $1 AND tenant_id = $2
+		`, uploadID, tenantID).Scan(&status)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return status == "active", nil
+	}
+	memUploadsMu.RLock()
+	mu, ok := memUploads[uploadID]
+	memUploadsMu.RUnlock()
+	return ok && mu.TenantID == tenantID && mu.Status == "active", nil
+}
+
 func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket, object string) {
 	t, err := tenant.FromContext(r.Context())
 	if err != nil || t == nil {
 		WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
+		return
+	}
+
+	// UploadPartCopy (x-amz-copy-source on an UploadPart) is not implemented.
+	// It used to fall through here, read the EMPTY request body as the part
+	// and answer 200 with the empty-string ETag — a server-side copy of a
+	// large object through aws-cli / rclone completed as a 0-byte object
+	// (R3-02). Fail loudly until WP-R3-2 implements it.
+	if r.Header.Get("x-amz-copy-source") != "" {
+		WriteS3ErrorWithContext(w, ErrNotImplemented, r.URL.Path, generateRequestID(),
+			WithSuggestion("UploadPartCopy is not supported yet. Copy the object with CopyObject, or download and re-upload it."))
 		return
 	}
 
@@ -142,29 +210,15 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 	}
 
 	// Verify upload exists, is active, and belongs to this tenant
-	if s.db != nil {
-		var status string
-		err := s.db.QueryRowContext(r.Context(), `
-			SELECT status FROM multipart_uploads
-			WHERE upload_id = $1 AND tenant_id = $2
-		`, uploadID, t.ID).Scan(&status)
-		if err == sql.ErrNoRows || (err == nil && status != "active") {
-			WriteS3Error(w, ErrNoSuchUpload, r.URL.Path, generateRequestID())
-			return
-		}
-		if err != nil {
-			s.logger.Error("failed to query multipart upload", zap.Error(err))
-			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-			return
-		}
-	} else {
-		memUploadsMu.RLock()
-		mu, ok := memUploads[uploadID]
-		memUploadsMu.RUnlock()
-		if !ok || mu.TenantID != t.ID || mu.Status != "active" {
-			WriteS3Error(w, ErrNoSuchUpload, r.URL.Path, generateRequestID())
-			return
-		}
+	active, err := s.multipartUploadActive(r, t.ID, uploadID)
+	if err != nil {
+		s.logger.Error("failed to query multipart upload", zap.Error(err))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return
+	}
+	if !active {
+		WriteS3Error(w, ErrNoSuchUpload, r.URL.Path, generateRequestID())
+		return
 	}
 
 	// Per-upload in-flight byte cap (WP-10-minimal, H-1): part data sits
@@ -209,13 +263,26 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 		body = newAWSChunkedReader(r.Body)
 	}
 
-	pp := partFilePath(uploadID, partNumber)
-	f, err := os.Create(pp) // #nosec G304 — path derived from validated uploadID + partNumber
+	// The part is written to a private temp file and renamed over the part
+	// path only once it is complete (R3-11). Writing the part path directly
+	// (os.Create truncates) meant a client retry of the same part number —
+	// aws-cli retries a timed-out part while the first attempt may still be
+	// streaming — interleaved two bodies in one file, and the failing attempt
+	// then REMOVED the file the retry had just written. A failed attempt now
+	// leaves the previous part exactly as it was.
+	dir := multipartDir(uploadID)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		s.logger.Error("failed to create part temp dir", zap.Error(err))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return
+	}
+	f, err := os.CreateTemp(dir, fmt.Sprintf(".part-%05d-*", partNumber))
 	if err != nil {
 		s.logger.Error("failed to create part temp file", zap.Error(err))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return
 	}
+	tmp := f.Name()
 
 	hasher := md5.New() // #nosec G401 — S3 spec requires MD5 for ETags
 	size, err := io.Copy(f, io.TeeReader(body, hasher))
@@ -223,7 +290,7 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 		err = closeErr
 	}
 	if err != nil {
-		_ = os.Remove(pp)
+		_ = os.Remove(tmp)
 		s.logger.Error("failed to write part data", zap.Error(err))
 		WriteS3Error(w, bodyReadErrorCode(err), r.URL.Path, generateRequestID())
 		return
@@ -233,11 +300,19 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 	// by lying (or absent) length headers; what actually landed on disk is
 	// authoritative. Remove the file so the rejected bytes don't leak.
 	if s.db != nil && s.multipartMaxUploadBytes > 0 && existingBytes+size > s.multipartMaxUploadBytes {
-		_ = os.Remove(pp)
+		_ = os.Remove(tmp)
 		WriteS3ErrorWithContext(w, ErrEntityTooLarge, r.URL.Path, generateRequestID(),
 			WithSuggestion(fmt.Sprintf(
 				"This part pushed the upload past the %d-byte in-flight limit. Complete or abort the upload, or use fewer/smaller parts.",
 				s.multipartMaxUploadBytes)))
+		return
+	}
+
+	pp := partFilePath(uploadID, partNumber)
+	if err := os.Rename(tmp, pp); err != nil {
+		_ = os.Remove(tmp)
+		s.logger.Error("failed to install part file", zap.Error(err))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return
 	}
 
@@ -285,6 +360,66 @@ type partRecord struct {
 	Size       int64
 }
 
+// parseCompleteMultipartBody reads the CompleteMultipartUpload XML. Read to
+// EOF before decoding: a streaming xml.Decoder stops at the closing element
+// and never drains the body, which would silently skip the signed
+// x-amz-content-sha256 verification — a truncated-but-well-formed part list
+// would commit a shorter object undetected. The body is bounded (R3-12) and
+// a non-empty body that is not the expected XML is the client's error, not
+// a licence to assemble every uploaded part.
+func parseCompleteMultipartBody(r *http.Request) (CompleteMultipartUploadRequest, string, error) {
+	var req CompleteMultipartUploadRequest
+	if r.Body == nil {
+		return req, "", nil
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxCompleteMultipartBodyBytes+1))
+	if err != nil {
+		return req, bodyReadErrorCode(err), err
+	}
+	if len(body) > maxCompleteMultipartBodyBytes {
+		return req, ErrEntityTooLarge, fmt.Errorf("complete body exceeds %d bytes", maxCompleteMultipartBodyBytes)
+	}
+	if len(strings.TrimSpace(string(body))) == 0 {
+		return req, "", nil
+	}
+	if err := xml.Unmarshal(body, &req); err != nil {
+		return req, ErrMalformedXML, fmt.Errorf("parse complete body: %w", err)
+	}
+	return req, "", nil
+}
+
+// multipartUploadAttrs loads the attributes and storage class recorded on
+// the upload row at CreateMultipartUpload.
+func (s *Server) multipartUploadAttrs(r *http.Request, uploadID string) (objectAttrs, string, error) {
+	if s.db == nil {
+		memUploadsMu.RLock()
+		defer memUploadsMu.RUnlock()
+		if mu, ok := memUploads[uploadID]; ok {
+			return mu.Attrs, mu.Class, nil
+		}
+		return objectAttrs{ContentType: "application/octet-stream"}, "", nil
+	}
+	var a objectAttrs
+	var metaJSON []byte
+	var class string
+	err := s.db.QueryRowContext(r.Context(), `
+		SELECT content_type, metadata, storage_class, content_disposition, content_encoding,
+		       content_language, cache_control, http_expires, website_redirect_location
+		FROM multipart_uploads WHERE upload_id = $1`, uploadID).Scan(
+		&a.ContentType, &metaJSON, &class, &a.ContentDisposition, &a.ContentEncoding,
+		&a.ContentLanguage, &a.CacheControl, &a.Expires, &a.WebsiteRedirect)
+	if err != nil {
+		return objectAttrs{}, "", fmt.Errorf("load upload attributes: %w", err)
+	}
+	if len(metaJSON) > 0 {
+		_ = json.Unmarshal(metaJSON, &a.Metadata)
+	}
+	if a.ContentType == "" {
+		a.ContentType = "application/octet-stream"
+	}
+	return a, class, nil
+}
+
 func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Request, bucket, object string) {
 	t, err := tenant.FromContext(r.Context())
 	if err != nil || t == nil {
@@ -295,49 +430,32 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 	uploadID := r.URL.Query().Get("uploadId")
 
 	// Verify upload is active and belongs to this tenant
-	if s.db != nil {
-		var status string
-		err := s.db.QueryRowContext(r.Context(), `
-			SELECT status FROM multipart_uploads
-			WHERE upload_id = $1 AND tenant_id = $2
-		`, uploadID, t.ID).Scan(&status)
-		if err == sql.ErrNoRows || (err == nil && status != "active") {
-			WriteS3Error(w, ErrNoSuchUpload, r.URL.Path, generateRequestID())
-			return
-		}
-		if err != nil {
-			s.logger.Error("failed to query multipart upload", zap.Error(err))
-			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-			return
-		}
-	} else {
-		memUploadsMu.RLock()
-		mu, ok := memUploads[uploadID]
-		memUploadsMu.RUnlock()
-		if !ok || mu.TenantID != t.ID || mu.Status != "active" {
-			WriteS3Error(w, ErrNoSuchUpload, r.URL.Path, generateRequestID())
-			return
-		}
+	active, err := s.multipartUploadActive(r, t.ID, uploadID)
+	if err != nil {
+		s.logger.Error("failed to query multipart upload", zap.Error(err))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return
+	}
+	if !active {
+		WriteS3Error(w, ErrNoSuchUpload, r.URL.Path, generateRequestID())
+		return
 	}
 
-	// Parse the CompleteMultipartUpload XML body (AWS clients send this).
-	// Read to EOF before decoding: a streaming xml.Decoder stops at the
-	// closing element and never drains the body, which would silently skip
-	// the signed x-amz-content-sha256 verification — a truncated-but-well-
-	// formed part list would commit a shorter object undetected.
-	var completeReq CompleteMultipartUploadRequest
-	if r.Body != nil {
-		body, readErr := io.ReadAll(r.Body)
-		if readErr != nil {
-			s.logger.Warn("complete multipart: body read failed", zap.Error(readErr))
-			WriteS3Error(w, bodyReadErrorCode(readErr), r.URL.Path, generateRequestID())
-			return
-		}
-		if len(body) > 0 {
-			if decErr := xml.Unmarshal(body, &completeReq); decErr != nil {
-				s.logger.Debug("no parseable complete request body, using all uploaded parts", zap.Error(decErr))
-			}
-		}
+	// Object Lock is checked before anything is written, like plain PUT: the
+	// assembled object replaces the key's bytes IN PLACE on the backend, so a
+	// multipart complete over a COMPLIANCE-retained key destroyed it (R3-01,
+	// live-proven). Refused with the same 403 as PUT.
+	if lockErr := checkObjectLock(r.Context(), s.db, t.ID, bucket, object, isObjectLockBypass(r)); lockErr != nil {
+		WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
+			WithSuggestion("Object is protected by Object Lock."))
+		return
+	}
+
+	completeReq, errCode, err := parseCompleteMultipartBody(r)
+	if err != nil {
+		s.logger.Warn("complete multipart: bad request body", zap.Error(err))
+		WriteS3Error(w, errCode, r.URL.Path, generateRequestID())
+		return
 	}
 
 	// Load all uploaded parts, ordered by part number
@@ -415,6 +533,23 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 		parts = selected
 	}
 
+	// Every selected part's bytes must be on disk with the recorded size
+	// before anything is reserved or written: the staging directory lives
+	// under /tmp (wiped at boot by systemd-tmpfiles on the prod box, R3-13),
+	// and the assembly pipe would otherwise deliver a clean, SHORT stream
+	// that a length-lax backend commits under the declared size (R7-12).
+	for _, p := range parts {
+		st, statErr := os.Stat(partFilePath(uploadID, p.PartNumber))
+		if statErr != nil || st.Size() != p.Size {
+			s.logger.Warn("complete multipart: part data missing or short on disk",
+				zap.String("uploadID", uploadID), zap.Int("partNumber", p.PartNumber),
+				zap.Int64("recorded", p.Size), zap.Error(statErr))
+			WriteS3ErrorWithContext(w, ErrInvalidPart, r.URL.Path, generateRequestID(),
+				WithSuggestion(fmt.Sprintf("The data for part %d is no longer available on the server. Upload the part again.", p.PartNumber)))
+			return
+		}
+	}
+
 	// Compute total size and S3-compatible multipart ETag:
 	// ETag = MD5(concat(MD5_part1 + MD5_part2 + ...))-N
 	var totalSize int64
@@ -427,6 +562,14 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 		}
 	}
 	finalETag := fmt.Sprintf("\"%x-%d\"", etagHasher.Sum(nil), len(parts))
+	etagValue := strings.Trim(finalETag, "\"")
+
+	attrs, requestedClass, err := s.multipartUploadAttrs(r, uploadID)
+	if err != nil {
+		s.logger.Error("complete multipart: upload attributes unavailable", zap.Error(err))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return
+	}
 
 	// WP-1: multipart bypasses the PUT handler's reservation, so reserve the
 	// assembled size here before streaming to the backend. If the object
@@ -435,8 +578,11 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 	// Multipart bypasses the tier-aware plain-PUT path, so resolve the
 	// bucket's tier here too — without this, aws-cli's default multipart
 	// uploads would ignore tier placement (a resilient-tier bucket would
-	// silently store on the primary backend). The floor follows the class.
-	tierClass := resolvePutStorageClass(r.Context(), s.db, s.engine, t.ID, bucket, "")
+	// silently store on the primary backend). The class header sent on
+	// CreateMultipartUpload is honoured exactly like PUT's (R10-24: it used
+	// to be dropped, so a GLACIER multipart landed downstairs). The floor
+	// follows the class.
+	tierClass := resolvePutStorageClass(r.Context(), s.db, s.engine, t.ID, bucket, requestedClass)
 	floor := usage.FloorOf(tierClass)
 	quotaOn := s.quotaManager != nil
 	var reservedBytes int64
@@ -455,6 +601,13 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 		}
 		reservedBytes = totalSize
 	}
+	releaseReservation := func() {
+		if quotaOn {
+			ctx, cancel := quotaCtx(r)
+			s.releaseQuota(ctx, t.ID, floor, reservedBytes)
+			cancel()
+		}
+	}
 
 	// Stream assembled parts to backend via pipe
 	pr, pw := io.Pipe()
@@ -462,7 +615,9 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 
 	errCh := make(chan error, 1)
 
-	// Writer goroutine: read temp files in order, write into pipe
+	// Writer goroutine: read temp files in order, write into pipe. Bounded by
+	// the reader: once the backend write returns, pr is closed and every
+	// further pw.Write fails with ErrClosedPipe, so the goroutine exits.
 	go func() {
 		defer func() {
 			if err := pw.Close(); err != nil {
@@ -485,66 +640,80 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 		}
 	}()
 
-	// Upload assembled stream to the backend the resolved class picks.
+	// Upload the assembled stream where the bucket's placement says: the
+	// region driver for a region-pinned bucket (R3-08: complete used to go
+	// straight to the engine, i.e. the primary, under a residency label), else
+	// the backend the resolved class picks.
 	completeOpts := []engine.PutOption{engine.WithContentLength(totalSize)}
 	if tierClass != "" {
 		completeOpts = append(completeOpts, engine.WithStorageClass(tierClass))
 	}
+	if attrs.ContentType != "" {
+		completeOpts = append(completeOpts, engine.WithContentType(attrs.ContentType))
+	}
+	var backendName string
 	go func() {
-		_, putErr := s.engine.Put(r.Context(), containerName, object, pr, completeOpts...)
+		var putErr error
+		backendName, putErr = placeObject(r.Context(), s.db, s.engine, t.ID, bucket, containerName, object, pr, completeOpts...)
 		_ = pr.Close()
 		errCh <- putErr
 	}()
 
 	if uploadErr := <-errCh; uploadErr != nil {
-		if quotaOn {
-			ctx, cancel := quotaCtx(r)
-			s.releaseQuota(ctx, t.ID, floor, reservedBytes)
-			cancel()
+		releaseReservation()
+		if errors.Is(uploadErr, errRegionDriverUnavailable) {
+			s.logger.Error("multipart complete: region-pinned bucket has no driver — refused",
+				zap.String("bucket", bucket), zap.Error(uploadErr))
+			w.Header().Set("Retry-After", "300")
+			WriteS3ErrorWithContext(w, ErrServiceUnavailable, r.URL.Path, generateRequestID(),
+				WithSuggestion("This bucket's region is not enabled on this deployment."))
+			return
 		}
 		s.logger.Error("multipart backend storage failed",
 			zap.Error(uploadErr),
 			zap.String("bucket", bucket),
 			zap.String("key", object))
+		if errors.Is(uploadErr, engine.ErrAllBackendsUnavailable) {
+			w.Header().Set("Retry-After", "30")
+			WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
+			return
+		}
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return
 	}
 
-	// Mark completed and update head cache
-	etagValue := strings.Trim(finalETag, "\"")
+	// Head row + upload status in ONE transaction. The head row is the only
+	// thing HEAD/GET/DELETE and the bill read: answering 200 without it means
+	// the object is invisible and unbilled forever (R3-10 — it used to log
+	// and return 200). The status flips in the same transaction so a failed
+	// complete stays 'active' and the client's retry is not NoSuchUpload.
 	var displaced displacedRow
 	if s.db != nil {
-		_, _ = s.db.ExecContext(r.Context(), `
-			UPDATE multipart_uploads SET status = 'completed' WHERE upload_id = $1
-		`, uploadID)
-
-		contentType := r.Header.Get("Content-Type")
-		if contentType == "" {
-			contentType = "application/octet-stream"
-		}
-		// atomicHeadUpsert captures the overwritten row's size in the same
-		// transaction (WP-1) — released below only if the upsert succeeded.
 		var dbErr error
 		displaced, dbErr = atomicHeadUpsertReleasing(r.Context(), s.db, manifestReleaser(s.gci), t.ID, bucket, object, func(tx *sql.Tx) error {
-			// is_chunked=FALSE explicitly: a multipart object overwriting a
-			// chunked one must flip the flag (releaser frees the manifest).
-			_, execErr := tx.ExecContext(r.Context(), `
-				INSERT INTO object_head_cache
-					(tenant_id, bucket, object_key, size_bytes, etag, content_type, floor, is_chunked, updated_at)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, NOW())
-				ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
-					size_bytes   = EXCLUDED.size_bytes,
-					etag         = EXCLUDED.etag,
-					content_type = EXCLUDED.content_type,
-					floor        = EXCLUDED.floor,
-					is_chunked   = FALSE,
-					updated_at   = NOW()
-			`, t.ID, bucket, object, totalSize, etagValue, contentType, floor)
-			return execErr
+			if err := upsertWholeObjectHeadRow(r.Context(), tx, t.ID, bucket, object, totalSize, etagValue, backendName, floor, attrs); err != nil {
+				return err
+			}
+			// Unconditional on purpose: the upload was active when this
+			// request started and every part was read in full, so a reaper
+			// abort that raced the assembly must not turn a fully written
+			// object into "new bytes under the old head row"; a concurrent
+			// complete of the same upload writes identical bytes and an
+			// identical row (the displaced size it releases is the size the
+			// other request reserved, so the bill stays exact).
+			if _, err := tx.ExecContext(r.Context(), `
+				UPDATE multipart_uploads SET status = 'completed'
+				WHERE upload_id = $1 AND tenant_id = $2`, uploadID, t.ID); err != nil {
+				return fmt.Errorf("mark upload completed: %w", err)
+			}
+			return nil
 		})
 		if dbErr != nil {
-			displaced = displacedRow{}
-			s.logger.Error("failed to update head cache after multipart complete", zap.Error(dbErr))
+			releaseReservation()
+			s.logger.Error("multipart complete: head row write failed — failing the request",
+				zap.Error(dbErr), zap.String("bucket", bucket), zap.String("key", object))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
 		}
 	} else {
 		memUploadsMu.Lock()
@@ -560,6 +729,11 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 		cancel()
 	}
 
+	// Versioning ledger row + bucket default retention, exactly as plain PUT
+	// (R3-09: multipart objects never appeared in object_versions).
+	versionID := recordObjectVersion(r.Context(), s.db, t.ID, bucket, object, totalSize, etagValue, attrs.ContentType, backendName)
+	applyObjectLockOnPut(r.Context(), s.db, t.ID, bucket, object, r)
+
 	// Clean up temp files
 	_ = os.RemoveAll(multipartDir(uploadID))
 
@@ -567,12 +741,17 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 		zap.String("bucket", bucket),
 		zap.String("key", object),
 		zap.String("uploadID", uploadID),
+		zap.String("backend", backendName),
 		zap.Int64("totalSize", totalSize),
 		zap.Int("parts", len(parts)),
 		zap.String("etag", finalETag))
 
 	location := fmt.Sprintf("http://%s/%s/%s", r.Host, bucket, object)
 	w.Header().Set("Content-Type", "application/xml")
+	w.Header().Set("ETag", finalETag)
+	if versionID != "" {
+		w.Header().Set("x-amz-version-id", versionID)
+	}
 	if err := xml.NewEncoder(w).Encode(CompleteMultipartUploadResult{
 		Location: location,
 		Bucket:   bucket,
@@ -641,29 +820,15 @@ func (s *Server) handleListParts(w http.ResponseWriter, r *http.Request, bucket,
 	uploadID := r.URL.Query().Get("uploadId")
 
 	// Verify upload exists and is active
-	if s.db != nil {
-		var status string
-		err := s.db.QueryRowContext(r.Context(), `
-			SELECT status FROM multipart_uploads
-			WHERE upload_id = $1 AND tenant_id = $2
-		`, uploadID, t.ID).Scan(&status)
-		if err == sql.ErrNoRows || (err == nil && status != "active") {
-			WriteS3Error(w, ErrNoSuchUpload, r.URL.Path, generateRequestID())
-			return
-		}
-		if err != nil {
-			s.logger.Error("failed to query multipart upload for list parts", zap.Error(err))
-			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-			return
-		}
-	} else {
-		memUploadsMu.RLock()
-		mu, ok := memUploads[uploadID]
-		memUploadsMu.RUnlock()
-		if !ok || mu.TenantID != t.ID || mu.Status != "active" {
-			WriteS3Error(w, ErrNoSuchUpload, r.URL.Path, generateRequestID())
-			return
-		}
+	active, err := s.multipartUploadActive(r, t.ID, uploadID)
+	if err != nil {
+		s.logger.Error("failed to query multipart upload for list parts", zap.Error(err))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return
+	}
+	if !active {
+		WriteS3Error(w, ErrNoSuchUpload, r.URL.Path, generateRequestID())
+		return
 	}
 
 	// Fetch parts
