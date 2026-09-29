@@ -4,7 +4,7 @@ PostgreSQL connection management and migrations for Vaultaire.
 
 ## Migrations
 
-All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, guarded `DO $$` blocks). 66 files numbered `003`–`068` (`001`, `002`, `037`, `039`, `050` and `053` are absent from the set or renumbered; two `004_*` files — lexical order is the run order).
+All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, guarded `DO $$` blocks). 66 files numbered `003`–`068` (`001`, `002` and `053` never existed; two `004_*` files — lexical order is the run order).
 
 **Runner (there is no Go runner and no `schema_migrations` table):** every deploy (`.github/workflows/deploy.yml`), CI (`ci.yml`) and `make test-db` run `for f in migrations/*.sql; do psql -v ON_ERROR_STOP=1 -f "$f"; done` — the **whole set, every time, before the binary swap**. "Already applied" is decided purely by idempotency, so every statement must be re-runnable (`TestMigrations_Reapply` double-applies the set). Rules for a new migration (Review R9):
 
