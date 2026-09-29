@@ -4,7 +4,7 @@ PostgreSQL connection management and migrations for Vaultaire.
 
 ## Migrations
 
-All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, guarded `DO $$` blocks). 62 files numbered `003`–`064` (`001`, `002` and `053` never existed; two `004_*` files — lexical order is the run order).
+All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, guarded `DO $$` blocks). 66 files numbered `003`–`068` (`001`, `002` and `053` never existed; two `004_*` files — lexical order is the run order).
 
 **Runner (there is no Go runner and no `schema_migrations` table):** every deploy (`.github/workflows/deploy.yml`), CI (`ci.yml`) and `make test-db` run `for f in migrations/*.sql; do psql -v ON_ERROR_STOP=1 -f "$f"; done` — the **whole set, every time, before the binary swap**. "Already applied" is decided purely by idempotency, so every statement must be re-runnable (`TestMigrations_Reapply` double-applies the set). Rules for a new migration (Review R9):
 
@@ -61,6 +61,10 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 | 062 | Smart-tier demotions (5.15.8): `smart_demotions` ledger (`(tenant_id, bucket, object_key)` PK, etag, size_bytes, hot/cold backend, reason, demoted_at, hot_deleted_at, hot_outcome) + partial index on pending reclaims |
 | 063 | Read-time promotion: `promote_requested_at`, `restore_requested_at` on `smart_demotions` + partial index on pending promotions |
 | 064 | API key revocation persisted (R5-01): `revoked_at TIMESTAMPTZ` on `api_keys` + partial index `idx_api_keys_active (key_id) WHERE revoked_at IS NULL` — the index both credential lookups use (R9 EXPLAIN) |
+| 065 | House intent (#498): what a visitor built in the landing page's house (TB downstairs/attic, share-link room) carried onto `waitlist_signups` pre-launch and onto the tenant at signup |
+| 066 | Floor quotas (#504, dashboard plan Phase 1): `tenant_floor_quotas` (one row per tenant × `standard`/`vault` floor), `object_head_cache.floor`, `tenants.house_period`, `tenant_quotas.pin_hot_bytes`; backfill of archive-bucket / GLACIER objects |
+| 067 | Bucket region default (#502, WP-R7-1): `buckets.region` default becomes the primary's real region (`us-central-1`); rows carrying the old `us-west-1` placeholder are rewritten |
+| 068 | Multipart upload attributes (Review R3, #514): `content_type`, `metadata JSONB`, `storage_class`, `content_disposition`, `content_encoding`, `content_language`, `cache_control`, `http_expires`, `website_redirect_location` on `multipart_uploads` — CreateMultipartUpload is where clients send them, Complete carries only the part list; written to the head row at complete |
 
 ## Key Tables
 

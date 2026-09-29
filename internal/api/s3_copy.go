@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -60,6 +61,17 @@ func resolveCopyContentType(directive, requestCT, sourceCT string) string {
 	return "application/octet-stream"
 }
 
+// resolveCopyAttrs applies x-amz-metadata-directive to the whole attribute
+// set, not just Content-Type (R3-06: COPY used to drop the source's
+// metadata, disposition and cache headers; REPLACE ignored the request's
+// x-amz-meta-*). request is already validated by objectAttrsFromRequest.
+func resolveCopyAttrs(directive string, request, source objectAttrs) objectAttrs {
+	if strings.EqualFold(directive, "REPLACE") {
+		return request
+	}
+	return source
+}
+
 // handleCopyObject handles S3 CopyObject requests.
 //
 // S3 spec: PUT /dest-bucket/dest-key with x-amz-copy-source header. The source
@@ -95,10 +107,26 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 	}
 	destKey := req.Object
 
+	// Object Lock on the DESTINATION, before anything is read or written: the
+	// copy replaces the key's bytes in place, so a copy over a
+	// COMPLIANCE-retained key destroyed it (R3-01, live-proven).
+	if lockErr := checkObjectLock(r.Context(), s.db, t.ID, destBucket, destKey, isObjectLockBypass(r)); lockErr != nil {
+		WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
+			WithSuggestion("Object is protected by Object Lock."))
+		return
+	}
+
+	// Everything the request itself can be refused for is checked before the
+	// source is opened or the destination touched (R2-05).
+	directive := r.Header.Get("x-amz-metadata-directive")
+	requestAttrs, err := objectAttrsFromRequest(r)
+	if err != nil {
+		WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(), WithSuggestion(err.Error()))
+		return
+	}
+
 	srcContainer := t.NamespaceContainer(srcBucket)
 	destContainer := t.NamespaceContainer(destBucket)
-
-	directive := r.Header.Get("x-amz-metadata-directive")
 
 	s.logger.Debug("CopyObject",
 		zap.String("tenant_id", t.ID),
@@ -117,15 +145,16 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 	var srcSize int64
 	var srcEnc string
 	var srcChunked bool
+	var srcBackend string
 	if s.db != nil {
 		_ = s.db.QueryRowContext(r.Context(), `
-			SELECT size_bytes, COALESCE(encryption_algorithm, ''), is_chunked
+			SELECT size_bytes, COALESCE(encryption_algorithm, ''), is_chunked, COALESCE(backend_name, '')
 			FROM object_head_cache
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-			t.ID, srcBucket, srcKey).Scan(&srcSize, &srcEnc, &srcChunked)
+			t.ID, srcBucket, srcKey).Scan(&srcSize, &srcEnc, &srcChunked, &srcBackend)
 	}
 	if srcChunked && s.gci != nil {
-		s.handleChunkedCopy(w, r, t, srcBucket, srcKey, destBucket, destKey, srcSize, directive)
+		s.handleChunkedCopy(w, r, t, srcBucket, srcKey, destBucket, destKey, srcSize, directive, requestAttrs)
 		return
 	}
 	if srcEnc != "" || srcChunked {
@@ -134,12 +163,29 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 		return
 	}
 
+	// The source's recorded attributes (COPY directive) — read before the
+	// stream so a self-copy with REPLACE sees the pre-write row.
+	sourceAttrs := objectAttrs{ContentType: "application/octet-stream"}
+	if s.db != nil {
+		if a, aErr := loadHeadAttrs(r.Context(), s.db, t.ID, srcBucket, srcKey); aErr == nil {
+			sourceAttrs = a
+		}
+	}
+	attrs := resolveCopyAttrs(directive, requestAttrs, sourceAttrs)
+
+	// Route the read to the backend that holds the source (routing truth).
+	if srcBackend != "" && s.engine != nil {
+		s.engine.HintBackend(srcContainer, srcKey, srcBackend)
+	}
 	reader, err := s.engine.Get(r.Context(), srcContainer, srcKey)
 	if err != nil {
-		if strings.Contains(err.Error(), "no such file or directory") ||
-			strings.Contains(err.Error(), "not found") {
+		switch {
+		case errors.Is(err, engine.ErrAllBackendsUnavailable):
+			w.Header().Set("Retry-After", "30")
+			WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
+		case isObjectMissingErr(err):
 			WriteS3Error(w, ErrNoSuchKey, r.URL.Path, generateRequestID())
-		} else {
+		default:
 			s.logger.Error("copy: source get failed",
 				zap.Error(err),
 				zap.String("container", srcContainer),
@@ -189,6 +235,13 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 			}
 		}
 	}
+	releaseReservation := func() {
+		if quotaOn && reservedBytes > 0 {
+			ctx, cancel := quotaCtx(r)
+			s.releaseQuota(ctx, t.ID, floor, reservedBytes)
+			cancel()
+		}
+	}
 
 	// Stream source → MD5 hasher → destination, tallying bytes as we go so
 	// the persisted size never depends on the source cache row being present.
@@ -196,70 +249,60 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 	hasher := md5.New() // #nosec G401 — S3 spec requires MD5 for ETags
 	tee := io.TeeReader(counter, hasher)
 
-	var putOpts []engine.PutOption
+	putOpts := []engine.PutOption{engine.WithContentType(attrs.ContentType)}
 	if destClass != "" {
 		putOpts = append(putOpts, engine.WithStorageClass(destClass))
 	}
-	backendName, err := s.engine.Put(r.Context(), destContainer, destKey, tee, putOpts...)
+	// Placement is the shared helper: a region-pinned destination bucket
+	// goes to its region driver or is refused (R3-08 — copy used to write
+	// the primary under a residency label).
+	backendName, err := placeObject(r.Context(), s.db, s.engine, t.ID, destBucket, destContainer, destKey, tee, putOpts...)
 	if err != nil {
-		if quotaOn {
-			ctx, cancel := quotaCtx(r)
-			s.releaseQuota(ctx, t.ID, floor, reservedBytes)
-			cancel()
+		releaseReservation()
+		switch {
+		case errors.Is(err, errRegionDriverUnavailable):
+			s.logger.Error("copy: region-pinned bucket has no driver — refused",
+				zap.String("bucket", destBucket), zap.Error(err))
+			w.Header().Set("Retry-After", "300")
+			WriteS3ErrorWithContext(w, ErrServiceUnavailable, r.URL.Path, generateRequestID(),
+				WithSuggestion("This bucket's region is not enabled on this deployment."))
+		case errors.Is(err, engine.ErrAllBackendsUnavailable):
+			w.Header().Set("Retry-After", "30")
+			WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
+		default:
+			s.logger.Error("copy: dest put failed",
+				zap.Error(err),
+				zap.String("container", destContainer),
+				zap.String("key", destKey))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		}
-		s.logger.Error("copy: dest put failed",
-			zap.Error(err),
-			zap.String("container", destContainer),
-			zap.String("key", destKey))
-		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return
 	}
 
 	etag := fmt.Sprintf("%x", hasher.Sum(nil))
 	now := time.Now().UTC()
 
-	// Update object_head_cache for the copied object.
+	// Update object_head_cache for the copied object. Every attribute column
+	// is written (R3-05: the old upsert left the displaced object's
+	// encryption_algorithm on the row, so a plain copy over an SSE key was
+	// served through the decryptor — live GET 500). A failed head write is a
+	// 500, never a 200 with no row (R10 ledger row / R3-10): the blob is
+	// durable and the client's retry is idempotent.
 	var displaced displacedRow
 	if s.db != nil {
-		// Look up source content-type (for COPY directive). Size is now
-		// authoritative from counter.n — no fallback path needed.
-		var sourceCT string
-		_ = s.db.QueryRowContext(r.Context(), `
-			SELECT content_type
-			FROM object_head_cache
-			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
-		`, t.ID, srcBucket, srcKey).Scan(&sourceCT)
-
-		contentType := resolveCopyContentType(directive, r.Header.Get("Content-Type"), sourceCT)
-
-		// atomicHeadUpsert captures the overwritten row's size (WP-1).
 		var dbErr error
 		displaced, dbErr = atomicHeadUpsertReleasing(r.Context(), s.db, manifestReleaser(s.gci), t.ID, destBucket, destKey, func(tx *sql.Tx) error {
-			// is_chunked=FALSE explicitly: overwriting a chunked destination
-			// must flip the flag (and the releaser above frees its manifest),
-			// or GET keeps reading the stale manifest.
-			_, execErr := tx.ExecContext(r.Context(), `
-				INSERT INTO object_head_cache
-					(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, floor, is_chunked, updated_at)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $9, FALSE, $8)
-				ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
-					size_bytes   = EXCLUDED.size_bytes,
-					etag         = EXCLUDED.etag,
-					content_type = EXCLUDED.content_type,
-					backend_name = EXCLUDED.backend_name,
-					floor        = EXCLUDED.floor,
-					is_chunked   = FALSE,
-					updated_at   = EXCLUDED.updated_at
-			`, t.ID, destBucket, destKey, counter.n, etag, contentType, backendName, now, floor)
-			return execErr
+			return upsertWholeObjectHeadRow(r.Context(), tx, t.ID, destBucket, destKey, counter.n, etag, backendName, floor, attrs)
 		})
 		if dbErr != nil {
-			displaced = displacedRow{}
-			s.logger.Error("copy: failed to cache object metadata",
+			releaseReservation()
+			s.logger.Error("copy: head row write failed — failing the request",
 				zap.Error(dbErr),
 				zap.String("tenant_id", t.ID),
 				zap.String("bucket", destBucket),
 				zap.String("key", destKey))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
 		}
 	}
 
@@ -268,6 +311,9 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 		s.settlePutQuota(ctx, t.ID, floor, reservedBytes, counter.n, displaced)
 		cancel()
 	}
+
+	versionID := recordObjectVersion(r.Context(), s.db, t.ID, destBucket, destKey, counter.n, etag, attrs.ContentType, backendName)
+	applyObjectLockOnPut(r.Context(), s.db, t.ID, destBucket, destKey, r)
 
 	result := CopyObjectResult{
 		ETag:         fmt.Sprintf(`"%s"`, etag),
@@ -283,6 +329,9 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 
 	w.Header().Set("Content-Type", "application/xml")
 	w.Header().Set("x-amz-request-id", generateRequestID())
+	if versionID != "" {
+		w.Header().Set("x-amz-version-id", versionID)
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(xml.Header))
 	_, _ = w.Write(xmlData)
@@ -336,10 +385,11 @@ func parseCopySource(source string) (bucket, key string, err error) {
 // tenant, same convergent keys. Everything commits in ONE transaction via
 // atomicHeadUpsert + ReplaceObjectManifestTx, so an overwritten chunked
 // destination releases its old manifest atomically (same contract as
-// handleChunkedPut after review-A).
+// handleChunkedPut after review-A). The destination's Object Lock was checked
+// by the caller before the source was looked at.
 func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 	t *tenant.Tenant, srcBucket, srcKey, destBucket, destKey string,
-	srcSize int64, directive string) {
+	srcSize int64, directive string, requestAttrs objectAttrs) {
 
 	if srcBucket == destBucket && srcKey == destKey {
 		// AWS requires changed metadata/storage-class for a self-copy; we
@@ -417,18 +467,12 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	contentType := resolveCopyContentType(directive, r.Header.Get("Content-Type"), srcCT)
+	contentType := resolveCopyContentType(directive, requestAttrs.ContentType, srcCT)
 	destUserMeta := srcUserMeta
 	destDisposition := srcDisposition
 	if strings.EqualFold(directive, "REPLACE") {
-		userMeta := extractS3Metadata(r)
-		if vErr := validateMetadata(userMeta); vErr != nil {
-			releaseReservation()
-			WriteS3Error(w, ErrInvalidRequest, r.URL.Path, generateRequestID())
-			return
-		}
-		destUserMeta, _ = json.Marshal(userMeta)
-		destDisposition = sanitizeContentDisposition(r.Header.Get("Content-Disposition"))
+		destUserMeta, _ = json.Marshal(requestAttrs.Metadata)
+		destDisposition = requestAttrs.ContentDisposition
 	}
 
 	// Build the destination manifest: same chunks, new object identity.
@@ -497,9 +541,13 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 
 	// A stale whole-object blob at the destination key (previously a plain
 	// object) must not survive the overwrite — same invariant as chunked PUT.
+	// The displaced row's backend is the hint (R2-20 / WP-R6-1); a miss in
+	// any driver's shape is fine (R6-25).
+	if displaced.Backend != "" && s.engine != nil {
+		s.engine.HintBackend(t.NamespaceContainer(destBucket), destKey, displaced.Backend)
+	}
 	if blobErr := s.engine.Delete(r.Context(), t.NamespaceContainer(destBucket), destKey); blobErr != nil &&
-		!strings.Contains(blobErr.Error(), "no such file or directory") &&
-		!strings.Contains(blobErr.Error(), "not found") {
+		!isObjectMissingErr(blobErr) {
 		s.logger.Warn("chunked copy: stale destination blob delete failed",
 			zap.Error(blobErr), zap.String("bucket", destBucket), zap.String("key", destKey))
 	}

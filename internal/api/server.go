@@ -350,11 +350,15 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		if v := os.Getenv("MULTIPART_ABANDON_HOURS"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				s.multipartReaper.AbandonAge = time.Duration(n) * time.Hour
+			} else {
+				logger.Warn("invalid MULTIPART_ABANDON_HOURS (need an integer > 0), keeping default", zap.String("value", v))
 			}
 		}
 		if v := os.Getenv("MULTIPART_TERMINAL_RETENTION_DAYS"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				s.multipartReaper.TerminalRetention = time.Duration(n) * 24 * time.Hour
+			} else {
+				logger.Warn("invalid MULTIPART_TERMINAL_RETENTION_DAYS (need an integer > 0), keeping default", zap.String("value", v))
 			}
 		}
 		s.multipartReaper.Start(context.Background())

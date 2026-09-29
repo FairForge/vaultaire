@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"strings"
 
 	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/tenant"
@@ -130,12 +129,16 @@ func (s *Server) handleDeleteObjects(w http.ResponseWriter, r *http.Request, req
 
 		// Chunked objects live under _chunks/, not container/key: their
 		// delete decrements GCI ref counts (mirrors single-key HandleDelete)
-		// so dedup GC can reclaim the physical chunks.
+		// so dedup GC can reclaim the physical chunks. backend_name is the
+		// routing truth: without the hint a DELETE after a restart went to
+		// the primary alone, was answered "not found", and the bytes stayed
+		// on the real backend while the head row went (R6-05, WP-R6-1).
 		var isChunked bool
+		var recordedBackend string
 		if s.db != nil {
 			if rowErr := s.db.QueryRowContext(r.Context(),
-				`SELECT is_chunked FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-				t.ID, bucket, key).Scan(&isChunked); rowErr != nil && !errors.Is(rowErr, sql.ErrNoRows) {
+				`SELECT is_chunked, COALESCE(backend_name, '') FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+				t.ID, bucket, key).Scan(&isChunked, &recordedBackend); rowErr != nil && !errors.Is(rowErr, sql.ErrNoRows) {
 				// Never guess "whole" for a possibly chunked object (R8-07).
 				s.logger.Error("batch delete: head cache read failed", zap.Error(rowErr), zap.String("key", key))
 				result.Errors = append(result.Errors, DeleteError{
@@ -149,10 +152,15 @@ func (s *Server) handleDeleteObjects(w http.ResponseWriter, r *http.Request, req
 		// A chunked object's manifest is released together with its head row
 		// below, in one transaction (R8-08); there is no backend delete.
 		if !isChunked || s.gci == nil {
+			if recordedBackend != "" && s.engine != nil {
+				s.engine.HintBackend(container, key, recordedBackend)
+			}
 			delErr = s.engine.Delete(r.Context(), container, key)
-			if delErr != nil && (strings.Contains(delErr.Error(), "no such file or directory") ||
-				strings.Contains(delErr.Error(), "not found")) {
-				delErr = nil // idempotent miss, matches AWS behavior
+			// A miss is idempotent (AWS behaviour) in every shape a driver
+			// produces it — the SDK's NoSuchKey/NotFound included (R6-25);
+			// an unreachable backend is NOT a miss (R6-02).
+			if delErr != nil && isObjectMissingErr(delErr) {
+				delErr = nil
 			}
 		}
 
