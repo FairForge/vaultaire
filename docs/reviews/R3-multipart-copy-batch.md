@@ -1,7 +1,7 @@
 # R3 S3 multipart, CopyObject, batch delete, multipart reaper — 2026-09-28
 
 **Repo state reviewed:** `main` @ `c20ff53` (#513). **Reviewer:** Claude (session R3 of `docs/CODE_REVIEW_PLAN.md`). **Depends on:** R2 (read in full), hand-offs from R0, R5, R6, R7, R8, R9, R10 (each answered below).
-**Method:** every file below read end to end; every behavioural claim run against a local build (`STORAGE_MODE=local`, DB `vaultaire_test`, never the dev DB, never prod) with aws-cli 2.28.19, before the fixes and again after them; prod inspected read-only over SSH (systemd unit, `/tmp`, the two multipart tables, head rows). Fixes are in the PR on the tracker row; everything else is a work package.
+**Method:** every file below read end to end; every behavioural claim run against a local build (`STORAGE_MODE=local`, DB `vaultaire_test`, never the dev DB, never prod) with aws-cli 2.28.19, before the fixes and again after them; prod inspected read-only over SSH (systemd unit, `/tmp`, the two multipart tables, head rows). Fixes are in PR #514; everything else is a work package.
 
 ## Scope reviewed
 
