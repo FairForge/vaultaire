@@ -1,0 +1,59 @@
+# Customer-path canary + retention job — install to /etc/prometheus/rules/ (see README).
+#
+# Series come from the app's /metrics:
+#   vaultaire_synthetic_check_success                        1/0, last PUT→HEAD→GET→DELETE→GET(404) cycle
+#   vaultaire_synthetic_check_latency_seconds{op}            last request latency per op
+#   vaultaire_synthetic_check_failures_total{op}             cycles that failed, by the op that failed
+#   vaultaire_synthetic_check_last_success_timestamp_seconds unix time of the last good cycle (0 = never)
+#   vaultaire_retention_last_run_timestamp_seconds           unix time of the last successful nightly prune
+#   vaultaire_retention_runs_total{outcome}                  ok / error
+#
+# The synthetic check (internal/api/synthetic_check.go, Review R13-13) signs
+# real S3 requests with its own key pair through SYNTHETIC_CHECK_URL — the
+# PUBLIC address — every SYNTHETIC_CHECK_INTERVAL (2 m). The backend probes
+# (vaultaire-backends.yml) never saw the letshow outage: 26 days of failing
+# customer PUTs with every backend probe green. This rule set does.
+#
+# Manual triage when SyntheticCheckFailing fires:
+#   journalctl -u vaultaire | grep "synthetic customer check FAILED"   (names the op + status)
+#   curl -s localhost:8000/metrics | grep vaultaire_synthetic
+groups:
+  - name: vaultaire-synthetic
+    rules:
+      - alert: SyntheticCheckFailing
+        expr: vaultaire_synthetic_check_success == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Customer S3 path is failing (synthetic check)"
+          description: "The signed PUT/HEAD/GET/DELETE canary through the public endpoint has failed for 5 minutes. Backends may be green — this is the path customers take. journalctl -u vaultaire | grep 'synthetic customer check FAILED'."
+
+      - alert: SyntheticCheckStale
+        expr: (time() - vaultaire_synthetic_check_last_success_timestamp_seconds) > 15 * 60
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No successful synthetic cycle in 15 minutes"
+          description: "Either the canary is failing every cycle or the job itself is not running (SYNTHETIC_CHECK_URL unset after a config change? process wedged?). Value = {{ $value | humanizeDuration }} since the last success."
+
+      - alert: SyntheticCheckSlow
+        expr: vaultaire_synthetic_check_latency_seconds{op="put"} > 5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Synthetic PUT slower than 5 s for 15 minutes"
+          description: "A 4 KiB PUT through the public endpoint takes {{ $value }}s. Check the primary backend probe latency and HAProxy."
+
+  - name: vaultaire-retention
+    rules:
+      - alert: RetentionJobStale
+        expr: (time() - vaultaire_retention_last_run_timestamp_seconds) > 48 * 3600
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Retention job has not succeeded in 48 hours"
+          description: "The nightly log-table prune (internal/api/retention.go) last succeeded {{ $value | humanizeDuration }} ago. journalctl -u vaultaire | grep retention; POST /api/v1/admin/retention to run it by hand."

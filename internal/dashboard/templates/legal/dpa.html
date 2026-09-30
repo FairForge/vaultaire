@@ -55,7 +55,7 @@
         <li><strong>Encryption at rest</strong> — available under Controller-supplied keys (SSE-C) or client-side encryption; server-managed encryption at rest (SSE-S3) is implemented but not yet enabled in production. Objects held by storage sub-processors are subject to those providers' own at-rest encryption.</li>
         <li><strong>Access controls</strong> — production access is limited to authorized personnel via SSH key authentication. Customer data access requires S3 credentials (access key + secret key) or authenticated dashboard session.</li>
         <li><strong>Authentication</strong> — passwords hashed with bcrypt (cost 10), TOTP two-factor authentication available, session tokens are cryptographically random, dashboard accounts lock for 15 minutes after 10 failed sign-ins.</li>
-        <li><strong>Monitoring</strong> — S3 access logs retained N days (placeholder until the purge job ships); every sign-in outcome, credential change and administrative action is written to an audit log; authentication-failure bursts page the operator.</li>
+        <li><strong>Monitoring</strong> — S3 access logs retained 30 days, event and usage records 90 days, public-link access logs 2 days after aggregation, webhook delivery records 30 days (all purged automatically by a nightly job); every sign-in outcome, credential change and administrative action is written to an audit log; authentication-failure bursts page the operator.</li>
         <li><strong>Backups</strong> — daily PostgreSQL backups with 7-day retention, currently held on the production host (off-host copies are planned before launch); object data itself lives with the storage sub-processors, not on that host.</li>
     </ul>
 

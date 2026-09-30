@@ -108,6 +108,25 @@ func (ct *CDNAnalyticsTracker) Flush() {
 	}
 }
 
+// cdnRollupSQL aggregates cdn_access_log into cdn_stats_daily for today AND
+// yesterday. Review R13-03 (R10-39 / R14-07): with `>= CURRENT_DATE` the
+// rows between the last rollup of a day and midnight were never rolled up —
+// every day's tail was missing from the budget and the raw log could never
+// be pruned. Yesterday is re-rolled on every run of the following day
+// (idempotent upsert), so the retention job may drop raw rows older than
+// two days.
+const cdnRollupSQL = `
+		INSERT INTO cdn_stats_daily (tenant_id, bucket, date, requests, bytes_sent, unique_objects)
+		SELECT tenant_id, bucket, DATE(accessed_at), COUNT(*), SUM(bytes_sent), COUNT(DISTINCT object_key)
+		FROM cdn_access_log
+		WHERE accessed_at >= CURRENT_DATE - 1
+		GROUP BY tenant_id, bucket, DATE(accessed_at)
+		ON CONFLICT (tenant_id, bucket, date)
+		DO UPDATE SET requests = EXCLUDED.requests,
+		             bytes_sent = EXCLUDED.bytes_sent,
+		             unique_objects = EXCLUDED.unique_objects
+	`
+
 // StartRollup runs a background goroutine that aggregates cdn_access_log into
 // cdn_stats_daily once per hour.
 func (ct *CDNAnalyticsTracker) StartRollup(ctx context.Context) {
@@ -133,17 +152,7 @@ func (ct *CDNAnalyticsTracker) runRollup() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	_, err := ct.db.ExecContext(ctx, `
-		INSERT INTO cdn_stats_daily (tenant_id, bucket, date, requests, bytes_sent, unique_objects)
-		SELECT tenant_id, bucket, DATE(accessed_at), COUNT(*), SUM(bytes_sent), COUNT(DISTINCT object_key)
-		FROM cdn_access_log
-		WHERE accessed_at >= CURRENT_DATE
-		GROUP BY tenant_id, bucket, DATE(accessed_at)
-		ON CONFLICT (tenant_id, bucket, date)
-		DO UPDATE SET requests = EXCLUDED.requests,
-		             bytes_sent = EXCLUDED.bytes_sent,
-		             unique_objects = EXCLUDED.unique_objects
-	`)
+	_, err := ct.db.ExecContext(ctx, cdnRollupSQL)
 	if err != nil && ct.logger != nil {
 		ct.logger.Error("cdn stats rollup", zap.Error(err))
 	}

@@ -274,7 +274,15 @@ func (s *Server) handleQuotaReconcile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "quota reconciliation not available", http.StatusServiceUnavailable)
 		return
 	}
-	n, err := rec.ReconcileStorageUsage(r.Context())
+	// Single-flight (Review R13-05): two reconciles ran two global rewrites.
+	if !s.quotaReconcileGate.tryAcquire() {
+		writeJobAlreadyRunning(w, "quota_reconcile")
+		return
+	}
+	defer s.quotaReconcileGate.release()
+	ctx, cancel := adminTriggerContext(r)
+	defer cancel()
+	n, err := rec.ReconcileStorageUsage(ctx)
 	actor, _ := r.Context().Value(userIDKey).(string)
 	audit.Record(r.Context(), s.db, audit.Entry{UserID: actor, EventType: "admin", Action: "admin.quota_reconcile", Error: err,
 		Metadata: map[string]any{"tenants_updated": n}})

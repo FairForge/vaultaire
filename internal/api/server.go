@@ -93,6 +93,9 @@ type Server struct {
 	smartDemotion      *SmartDemotionRunner
 	smartPromoter      *SmartPromoter
 	multipartReaper    *MultipartReaper
+	quotaReconcileGate jobGate           // single-flight for POST /admin/quota-reconcile (Review R13-05)
+	retention          *RetentionJob     // nightly log-table pruner (Review R13-14, checklist item 5)
+	synthetic          *syntheticChecker // customer-path canary (Review R13-13, checklist item 4)
 	// multipartMaxUploadBytes caps a single multipart upload's accumulated
 	// in-flight part bytes (0 = unlimited). Part data lives unbilled on local
 	// disk until complete — without a cap one upload can fill the disk.
@@ -264,13 +267,18 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	s.cdnAnalytics.StartRollup(context.Background())
 
 	// S3 access log tracker — buffers access events, delivers log objects to target buckets.
+	// Both deliver through the customer write path (Review R13-02 / R6-21):
+	// "<tenant>_<bucket>" namespace, tenant in ctx, quota, head row.
+	reportWriter := newGeneratedObjectWriter(s.db, s.engine, s.quotaManager, s.gci, logger)
 	s.accessLogTracker = NewS3AccessLogTracker(s.db)
 	s.accessLogTracker.SetLogger(logger)
+	s.accessLogTracker.SetWriter(reportWriter)
 	s.accessLogTracker.StartFlusher(context.Background(), 5*time.Second)
 	s.accessLogTracker.StartLogDelivery(context.Background(), s.engine)
 
 	// Inventory report runner — generates CSV inventory reports on schedule.
 	s.inventoryRunner = NewInventoryRunner(s.db, s.engine, logger)
+	s.inventoryRunner.SetWriter(reportWriter)
 	s.inventoryRunner.StartInventoryJob(context.Background())
 
 	// Dedup GC runner — reconciles ref counts and reclaims orphaned chunks.
@@ -288,28 +296,48 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	s.smartPromoter = NewSmartPromoter(s.db, s.engine, logger)
 	if s.smartDemotion != nil {
 		s.smartDemotion.Promoter = s.smartPromoter
+		// A rejected knob value is logged, never silently ignored (Review
+		// R13-19; the multipart knobs already did this, R3-20).
 		if v := os.Getenv("SMART_DEMOTION_HOT_FRACTION"); v != "" {
 			if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 && f <= 1 {
 				s.smartDemotion.HotFraction = f
+			} else {
+				logger.Warn("invalid SMART_DEMOTION_HOT_FRACTION (need 0 < f <= 1), keeping default", zap.String("value", v))
 			}
 		}
 		if v := os.Getenv("SMART_DEMOTION_IDLE_DAYS"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				s.smartDemotion.IdleAfter = time.Duration(n) * 24 * time.Hour
+			} else {
+				logger.Warn("invalid SMART_DEMOTION_IDLE_DAYS (need an integer > 0), keeping default", zap.String("value", v))
 			}
 		}
 		if v := os.Getenv("SMART_DEMOTION_MIN_AGE_DAYS"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 				s.smartDemotion.MinAge = time.Duration(n) * 24 * time.Hour
+			} else {
+				logger.Warn("invalid SMART_DEMOTION_MIN_AGE_DAYS (need an integer >= 0), keeping default", zap.String("value", v))
 			}
 		}
 		if v := os.Getenv("SMART_DEMOTION_MAX_GB_PER_RUN"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				s.smartDemotion.MaxBytesPerRun = int64(n) << 30
+			} else {
+				logger.Warn("invalid SMART_DEMOTION_MAX_GB_PER_RUN (need an integer > 0), keeping default", zap.String("value", v))
 			}
 		}
 		if v := os.Getenv("SMART_DEMOTION_TIERS"); v != "" {
-			s.smartDemotion.Tiers = strings.Split(v, ",")
+			var tiers []string
+			for _, tier := range strings.Split(v, ",") {
+				if tier = strings.TrimSpace(tier); tier != "" {
+					tiers = append(tiers, tier)
+				}
+			}
+			if len(tiers) > 0 {
+				s.smartDemotion.Tiers = tiers
+			} else {
+				logger.Warn("invalid SMART_DEMOTION_TIERS (empty), keeping default", zap.String("value", v))
+			}
 		}
 		s.smartDemotion.Start(context.Background())
 	}
@@ -345,6 +373,12 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 			logger.Warn("invalid CHUNK_GET_PREFETCH, keeping default", zap.String("value", v))
 		}
 	}
+
+	// Retention (Review R13-14): nightly prune of the log tables; started in
+	// Start() on the shutdown-cancelled context. Synthetic customer check
+	// (Review R13-13): off unless SYNTHETIC_CHECK_URL is set.
+	s.retention = NewRetentionJob(s.db, logger)
+	s.synthetic = newSyntheticCheckerFromEnv(os.Getenv, logger)
 
 	s.multipartReaper = NewMultipartReaper(s.db, logger)
 	if s.multipartReaper != nil {
@@ -826,6 +860,7 @@ func (s *Server) registerComplianceRoutes() {
 		r.Post("/dedup-gc", s.requireAdmin(s.handleDedupGCTrigger))
 		r.Post("/smart-demotion", s.requireAdmin(s.handleSmartDemotionTrigger))
 		r.Post("/quota-reconcile", s.requireAdmin(s.handleQuotaReconcile))
+		r.Post("/retention", s.requireAdmin(s.handleRetentionTrigger))
 
 		// Feature flags (1.13): flip kill-switches / per-tenant enablement
 		// at runtime. updated_by comes from the JWT.
@@ -1223,6 +1258,10 @@ func (s *Server) Start() error {
 
 	// Check bandwidth thresholds hourly + seed default alerts for new tenants.
 	s.bandwidthAlerter.StartBandwidthAlerts(ctx)
+
+	// Nightly retention (catch-up at boot) and the synthetic customer check.
+	s.retention.Start(ctx)
+	s.synthetic.Start(ctx)
 
 	s.logger.Info("Starting server with RBAC and API Key Management",
 		zap.Int("port", s.config.Server.Port))

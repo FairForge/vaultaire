@@ -212,12 +212,14 @@ func TestInventoryCSV_Format(t *testing.T) {
 	logger := zap.NewNop()
 	runner := NewInventoryRunner(f.db, f.eng, logger)
 	require.NotNil(t, runner)
+	runner.SetWriter(newGeneratedObjectWriter(f.db, f.eng, nil, nil, logger))
 
 	runner.GenerateReportNow(context.Background(), f.tenantID, f.bucket, f.invBucket, "inv/", "csv")
 
-	// Read the generated inventory object from the local filesystem
-	container := fmt.Sprintf("tenant/%s/%s", f.tenantID, f.invBucket)
-	containerPath := filepath.Join(f.tempDir, container)
+	// Read the generated inventory object from the local filesystem — under
+	// the S3 container namespace "<tenant>_<bucket>" (Review R13-02: this
+	// test used to assert the unaddressable "tenant/<id>/<bucket>" path).
+	containerPath := filepath.Join(f.tempDir, f.tenant.NamespaceContainer(f.invBucket))
 
 	// Find the CSV file under inv/
 	var csvPath string

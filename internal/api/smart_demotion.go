@@ -71,8 +71,10 @@ type SmartDemotionRunner struct {
 	// PR B) at the start of every run.
 	Promoter *SmartPromoter
 
-	now        func() time.Time
-	beforeFlip func(bucket, key string) // test hook: runs after the cold copy, before the routing flip
+	gate            jobGate // one run at a time per process (Review R13-05)
+	now             func() time.Time
+	beforeFlip      func(bucket, key string) // test hook: runs after the cold copy, before the routing flip
+	beforeHotDelete func(bucket, key string) // test hook: runs inside the reclaim tx, after the row lock, before the hot delete
 }
 
 // SmartDemotionResult is one run's outcome.
@@ -142,7 +144,11 @@ func (r *SmartDemotionRunner) Start(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				res, err := r.RunOnce(ctx, false)
+				res, err := r.RunOnceGuarded(ctx, false)
+				if errors.Is(err, errJobAlreadyRunning) {
+					r.logger.Warn("smart demotion: tick skipped, a run is already in progress")
+					continue
+				}
 				if err != nil {
 					r.logger.Error("smart demotion run failed", zap.Error(err))
 					continue
@@ -155,6 +161,21 @@ func (r *SmartDemotionRunner) Start(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// RunOnceGuarded is RunOnce under the single-flight gate: a second caller
+// (ticker vs admin trigger, or two admins) gets errJobAlreadyRunning instead
+// of a concurrent run. A dry run shares the gate — it reads the same tables
+// and its report would describe a moving target.
+func (r *SmartDemotionRunner) RunOnceGuarded(ctx context.Context, dryRun bool) (SmartDemotionResult, error) {
+	if r == nil {
+		return SmartDemotionResult{DryRun: dryRun}, errors.New("smart demotion: runner not configured")
+	}
+	if !r.gate.tryAcquire() {
+		return SmartDemotionResult{DryRun: dryRun}, errJobAlreadyRunning
+	}
+	defer r.gate.release()
+	return r.RunOnce(ctx, dryRun)
 }
 
 // RunOnce performs one cycle: reclaim hot copies past grace, then demote.
@@ -414,34 +435,51 @@ func (r *SmartDemotionRunner) demote(ctx context.Context, hot, cold engine.Drive
 func (r *SmartDemotionRunner) reclaimHotCopies(ctx context.Context, hot engine.Driver) (int, []string) {
 	var errs []string
 	cutoff := r.now().Add(-r.HotGrace)
-	rows, err := r.db.QueryContext(ctx,
-		`SELECT tenant_id, bucket, object_key, etag, cold_backend FROM smart_demotions
-		 WHERE hot_deleted_at IS NULL AND demoted_at < $1 ORDER BY demoted_at ASC LIMIT $2`,
-		cutoff, r.MaxObjectsPerTenant)
-	if err != nil {
-		return 0, []string{fmt.Sprintf("reclaim: list: %v", err)}
-	}
 	type pending struct{ tenant, bucket, key, etag, cold string }
-	var todo []pending
-	for rows.Next() {
-		var p pending
-		if err := rows.Scan(&p.tenant, &p.bucket, &p.key, &p.etag, &p.cold); err != nil {
-			_ = rows.Close()
-			return 0, []string{fmt.Sprintf("reclaim: scan: %v", err)}
-		}
-		todo = append(todo, p)
-	}
-	_ = rows.Close()
-
 	reclaimed := 0
-	for _, p := range todo {
-		outcome, err := r.reclaimOne(ctx, hot, p.tenant, p.bucket, p.key, p.etag, p.cold)
+	// Batches until one comes back short (Review R13-20): a single LIMIT
+	// capped reclaims at 1000 per run for ALL tenants while demotion moves
+	// 1000 per tenant, so hot copies (paid storage) piled up past the grace.
+	// A row whose reclaim failed keeps hot_deleted_at NULL and would be
+	// re-selected forever within one run; the seen set breaks that.
+	seen := map[string]bool{}
+	for ctx.Err() == nil {
+		rows, err := r.db.QueryContext(ctx,
+			`SELECT tenant_id, bucket, object_key, etag, cold_backend FROM smart_demotions
+			 WHERE hot_deleted_at IS NULL AND demoted_at < $1 ORDER BY demoted_at ASC LIMIT $2`,
+			cutoff, r.MaxObjectsPerTenant)
 		if err != nil {
-			errs = append(errs, fmt.Sprintf("reclaim %s %s/%s: %v", p.tenant, p.bucket, p.key, err))
-			continue
+			return reclaimed, append(errs, fmt.Sprintf("reclaim: list: %v", err))
 		}
-		if outcome == "deleted" || outcome == "object_gone" {
-			reclaimed++
+		var todo []pending
+		for rows.Next() {
+			var p pending
+			if err := rows.Scan(&p.tenant, &p.bucket, &p.key, &p.etag, &p.cold); err != nil {
+				_ = rows.Close()
+				return reclaimed, append(errs, fmt.Sprintf("reclaim: scan: %v", err))
+			}
+			if id := p.tenant + "/" + p.bucket + "/" + p.key; !seen[id] {
+				seen[id] = true
+				todo = append(todo, p)
+			}
+		}
+		_ = rows.Close()
+		if len(todo) == 0 {
+			break
+		}
+		fetched := len(todo)
+		for _, p := range todo {
+			outcome, err := r.reclaimOne(ctx, hot, p.tenant, p.bucket, p.key, p.etag, p.cold)
+			if err != nil {
+				errs = append(errs, fmt.Sprintf("reclaim %s %s/%s: %v", p.tenant, p.bucket, p.key, err))
+				continue
+			}
+			if outcome == "deleted" || outcome == "object_gone" {
+				reclaimed++
+			}
+		}
+		if fetched < r.MaxObjectsPerTenant {
+			break
 		}
 	}
 	return reclaimed, errs
@@ -476,6 +514,9 @@ func (r *SmartDemotionRunner) reclaimOne(ctx context.Context, hot engine.Driver,
 	}
 
 	if outcome == "deleted" || outcome == "object_gone" {
+		if r.beforeHotDelete != nil {
+			r.beforeHotDelete(bucket, key)
+		}
 		if delErr := hot.Delete(tctx, container, key); delErr != nil {
 			// Leave the ledger open; retry next run. An orphan on the hot
 			// backend costs money, never data.
@@ -504,7 +545,13 @@ func (s *Server) handleSmartDemotionTrigger(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	dryRun, _ := strconv.ParseBool(r.URL.Query().Get("dry_run"))
-	res, err := s.smartDemotion.RunOnce(r.Context(), dryRun)
+	ctx, cancel := adminTriggerContext(r)
+	defer cancel()
+	res, err := s.smartDemotion.RunOnceGuarded(ctx, dryRun)
+	if errors.Is(err, errJobAlreadyRunning) {
+		writeJobAlreadyRunning(w, "smart_demotion")
+		return
+	}
 	actor, _ := r.Context().Value(userIDKey).(string)
 	audit.Record(r.Context(), s.db, audit.Entry{UserID: actor, EventType: "admin", Action: "admin.smart_demotion", Error: err,
 		Metadata: map[string]any{"dry_run": dryRun}})

@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/csv"
@@ -254,6 +253,9 @@ type InventoryRunner struct {
 	db     *sql.DB
 	eng    *engine.CoreEngine
 	logger *zap.Logger
+	// writer delivers the report through the customer write path (Review
+	// R13-02); nil = reports are not delivered.
+	writer *generatedObjectWriter
 }
 
 func NewInventoryRunner(db *sql.DB, eng *engine.CoreEngine, logger *zap.Logger) *InventoryRunner {
@@ -261,6 +263,13 @@ func NewInventoryRunner(db *sql.DB, eng *engine.CoreEngine, logger *zap.Logger) 
 		return nil
 	}
 	return &InventoryRunner{db: db, eng: eng, logger: logger}
+}
+
+// SetWriter wires the delivery writer.
+func (ir *InventoryRunner) SetWriter(w *generatedObjectWriter) {
+	if ir != nil {
+		ir.writer = w
+	}
 }
 
 // StartInventoryJob runs a background goroutine that generates inventory reports.
@@ -333,61 +342,71 @@ func (ir *InventoryRunner) runInventory(ctx context.Context) {
 	}
 }
 
+// generateReport streams the bucket's head rows as CSV into
+// {prefix}{bucket}/{date}T00-00Z/manifest.csv of the target bucket through
+// the customer write path (Review R13-02). An empty bucket writes nothing.
 func (ir *InventoryRunner) generateReport(ctx context.Context, tenantID, bucket, targetBucket, prefix, format string) {
-	rows, err := ir.db.QueryContext(ctx, `
-		SELECT object_key, size_bytes, etag, content_type, updated_at,
-			COALESCE(encryption_algorithm, ''), COALESCE(backend_name, '')
-		FROM object_head_cache
-		WHERE tenant_id = $1 AND bucket = $2
-		ORDER BY object_key ASC
-	`, tenantID, bucket)
-	if err != nil {
-		ir.logger.Error("query objects for inventory",
-			zap.String("bucket", bucket), zap.Error(err))
+	_ = format // ORC/Parquet are accepted at config time and written as CSV (R4-18)
+	if ir.writer == nil {
+		ir.logger.Warn("inventory report skipped: no delivery writer", zap.String("tenant_id", tenantID), zap.String("bucket", bucket))
 		return
 	}
-	defer func() { _ = rows.Close() }()
-
-	var buf bytes.Buffer
-	w := csv.NewWriter(&buf)
-
-	_ = w.Write([]string{"Key", "SizeBytes", "ETag", "ContentType", "LastModified", "EncryptionAlgorithm", "BackendName"})
-
-	var count int
-	for rows.Next() {
-		var key, etag, contentType, encAlgo, backendName string
-		var sizeBytes int64
-		var updatedAt time.Time
-		if err := rows.Scan(&key, &sizeBytes, &etag, &contentType, &updatedAt, &encAlgo, &backendName); err != nil {
-			ir.logger.Error("scan inventory row", zap.Error(err))
-			continue
-		}
-		_ = w.Write([]string{
-			key,
-			fmt.Sprintf("%d", sizeBytes),
-			etag,
-			contentType,
-			updatedAt.UTC().Format(time.RFC3339),
-			encAlgo,
-			backendName,
-		})
-		count++
+	var count int64
+	if err := ir.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2`, tenantID, bucket).Scan(&count); err != nil {
+		ir.logger.Error("count objects for inventory", zap.String("bucket", bucket), zap.Error(err))
+		return
 	}
-	w.Flush()
-
 	if count == 0 {
 		return
 	}
 
 	now := time.Now().UTC()
-	objectKey := fmt.Sprintf("%s%s/%sT00-00Z/manifest.csv",
-		prefix, bucket, now.Format("2006-01-02"))
+	objectKey := fmt.Sprintf("%s%s/%sT00-00Z/manifest.csv", prefix, bucket, now.Format("2006-01-02"))
 
-	container := fmt.Sprintf("tenant/%s/%s", tenantID, targetBucket)
+	var written int
+	_, err := ir.writer.write(ctx, tenantID, targetBucket, objectKey, "text/csv", func(out io.Writer) error {
+		rows, err := ir.db.QueryContext(ctx, `
+			SELECT object_key, size_bytes, etag, content_type, updated_at,
+				COALESCE(encryption_algorithm, ''), COALESCE(backend_name, '')
+			FROM object_head_cache
+			WHERE tenant_id = $1 AND bucket = $2
+			ORDER BY object_key ASC
+		`, tenantID, bucket)
+		if err != nil {
+			return fmt.Errorf("query objects for inventory: %w", err)
+		}
+		defer func() { _ = rows.Close() }()
 
-	if _, err := ir.eng.Put(ctx, container, objectKey, strings.NewReader(buf.String())); err != nil {
-		ir.logger.Error("write inventory report",
+		w := csv.NewWriter(out)
+		if err := w.Write([]string{"Key", "SizeBytes", "ETag", "ContentType", "LastModified", "EncryptionAlgorithm", "BackendName"}); err != nil {
+			return err
+		}
+		for rows.Next() {
+			var key, etag, contentType, encAlgo, backendName string
+			var sizeBytes int64
+			var updatedAt time.Time
+			if err := rows.Scan(&key, &sizeBytes, &etag, &contentType, &updatedAt, &encAlgo, &backendName); err != nil {
+				return fmt.Errorf("scan inventory row: %w", err)
+			}
+			if err := w.Write([]string{
+				key, fmt.Sprintf("%d", sizeBytes), etag, contentType,
+				updatedAt.UTC().Format(time.RFC3339), encAlgo, backendName,
+			}); err != nil {
+				return err
+			}
+			written++
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("iterate inventory rows: %w", err)
+		}
+		w.Flush()
+		return w.Error()
+	})
+	if err != nil {
+		ir.logger.Warn("inventory report not delivered",
 			zap.String("tenant_id", tenantID),
+			zap.String("bucket", bucket),
 			zap.String("target", targetBucket+"/"+objectKey),
 			zap.Error(err))
 		return
@@ -397,7 +416,7 @@ func (ir *InventoryRunner) generateReport(ctx context.Context, tenantID, bucket,
 		zap.String("tenant_id", tenantID),
 		zap.String("bucket", bucket),
 		zap.String("target", targetBucket+"/"+objectKey),
-		zap.Int("objects", count))
+		zap.Int("objects", written))
 }
 
 // GenerateReportNow is exposed for testing — generates a report immediately.

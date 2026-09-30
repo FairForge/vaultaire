@@ -585,14 +585,15 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		WriteS3Error(cw, ErrNotImplemented, r.URL.Path, generateRequestID())
 	}
 
-	// Record S3 access log for authenticated requests.
-	if tenantID != "" && tenantID != "default" && s.accessLogTracker != nil {
+	// Record S3 access log for authenticated requests (the resolved tenant:
+	// identical to tenantID in production, the context tenant in test mode).
+	if t.ID != "" && t.ID != "default" && s.accessLogTracker != nil {
 		statusCode := cw.statusCode
 		if statusCode == 0 {
 			statusCode = http.StatusOK
 		}
 		s.accessLogTracker.Record(r.Context(), s3AccessEvent{
-			tenantID:      tenantID,
+			tenantID:      t.ID,
 			bucket:        s3Req.Bucket,
 			objectKey:     s3Req.Object,
 			operation:     s3Req.Operation,

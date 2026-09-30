@@ -75,7 +75,12 @@ read-but-undocumented (marked with their source file).
 | `CHUNK_GET_PREFETCH` | 4 | Chunks fetched ahead of the write cursor per chunked GET (1 = sequential) |
 | `MULTIPART_ABANDON_HOURS` | 48 | Reaper aborts active multipart uploads idle longer than this |
 | `MULTIPART_TERMINAL_RETENTION_DAYS` | 7 | Reaper purges completed/aborted multipart rows older than this |
-| `SMART_DEMOTION_HOT_FRACTION`, `SMART_DEMOTION_IDLE_DAYS`, `SMART_DEMOTION_MIN_AGE_DAYS`, `SMART_DEMOTION_MAX_GB_PER_RUN`, `SMART_DEMOTION_TIERS` | 0.15, 14, 3, 500, standard | Smart-tier demotion job (5.15.8) knobs; the job itself is gated by the `smart_demotion` feature flag (default OFF) |
+| `SMART_DEMOTION_HOT_FRACTION`, `SMART_DEMOTION_IDLE_DAYS`, `SMART_DEMOTION_MIN_AGE_DAYS`, `SMART_DEMOTION_MAX_GB_PER_RUN`, `SMART_DEMOTION_TIERS` | 0.15, 14, 3, 500, standard | Smart-tier demotion job (5.15.8) knobs; the job itself is gated by the `smart_demotion` feature flag (default OFF). Invalid values are logged and ignored. Do not enable the flag before WP-R13-1 (Review R13-04) |
+| `SYNTHETIC_CHECK_URL` | — (off) | Public S3 endpoint the in-process customer-path canary signs real requests against (prod: `https://stored.ge`). Off when unset (Review R13-13, checklist item 4) |
+| `SYNTHETIC_CHECK_ACCESS_KEY`, `SYNTHETIC_CHECK_SECRET_KEY` | — | Key pair of a dedicated synthetic tenant. Both required with the URL, or the check stays off (logged at Error) |
+| `SYNTHETIC_CHECK_BUCKET` | `synthetic-check` | Bucket the cycle writes into — create it for the synthetic tenant first; the check never creates it |
+| `SYNTHETIC_CHECK_INTERVAL` | `2m` | Cycle period (Go duration, minimum `30s`): PUT → HEAD → GET (bytes compared) → DELETE → GET (404), 20 s per request |
+| `SYNTHETIC_CHECK_REGION` | `us-east-1` | SigV4 credential-scope region (the verifier accepts any region string) |
 
 ### Storage backends
 

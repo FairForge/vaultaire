@@ -129,9 +129,16 @@ func (a *BandwidthAlerter) checkBandwidthAlerts(ctx context.Context) {
 	}
 
 	for _, tl := range tenants {
-		a.checkTenantAlerts(cctx, tl.tenantID, tl.limitBytes)
+		// Per-tenant budget (Review R13-09): one stalled e-mail provider used
+		// to eat the whole pass's 30 s and silently skip every later tenant.
+		tctx, tcancel := context.WithTimeout(ctx, bandwidthAlertTenantTimeout)
+		a.checkTenantAlerts(tctx, tl.tenantID, tl.limitBytes)
+		tcancel()
 	}
 }
+
+// bandwidthAlertTenantTimeout bounds one tenant's check + e-mail.
+const bandwidthAlertTenantTimeout = 10 * time.Second
 
 func (a *BandwidthAlerter) checkTenantAlerts(ctx context.Context, tenantID string, limitBytes int64) {
 	var usedBytes int64
@@ -211,8 +218,13 @@ func (a *BandwidthAlerter) fireAlert(ctx context.Context, tenantID, alertID stri
 				"Your stored.ge bandwidth usage has reached %s of your %s monthly limit (%d%%).",
 				formatBandwidthBytes(usedBytes), formatBandwidthBytes(limitBytes), pctUsed)
 			if err := a.emailer.Send(ctx, to, subject, body, body); err != nil {
-				a.logger.Warn("send bandwidth alert email",
+				// Not marked fired: the next hourly pass retries (Review
+				// R13-09 — a failed send used to stamp last_fired_at and the
+				// alert was lost for the rest of the month). The event row
+				// above already carries it to the dashboard feed.
+				a.logger.Warn("send bandwidth alert email — will retry next pass",
 					zap.String("tenant", tenantID), zap.Error(err))
+				return
 			}
 		}
 	}

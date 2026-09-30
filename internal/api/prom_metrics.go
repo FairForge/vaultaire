@@ -40,6 +40,10 @@ func (s *Server) initMetrics() {
 
 		reg.MustRegister(authFailures, authFailuresByKey)
 		reg.MustRegister(dashboard.Collectors()...)
+		reg.MustRegister(retentionDeletedRows, retentionLastRun, retentionRuns)
+		if s.synthetic != nil {
+			reg.MustRegister(newSyntheticCollector(s.synthetic))
+		}
 
 		var src engineMetricsSource
 		if s.engine != nil {

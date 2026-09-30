@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/FairForge/vaultaire/internal/audit"
 	"net/http"
@@ -23,6 +24,7 @@ type DedupGCRunner struct {
 	gci         *crypto.GlobalContentIndex
 	logger      *zap.Logger
 	GracePeriod time.Duration
+	gate        jobGate // one run at a time per process (Review R13-05)
 }
 
 // DedupGCResult holds the outcome of a single GC run.
@@ -62,7 +64,11 @@ func (g *DedupGCRunner) StartDedupGC(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				result, err := g.RunOnce(ctx)
+				result, err := g.RunOnceGuarded(ctx)
+				if errors.Is(err, errJobAlreadyRunning) {
+					g.logger.Warn("dedup gc: tick skipped, a run is already in progress")
+					continue
+				}
 				if err != nil {
 					g.logger.Error("dedup gc failed", zap.Error(err))
 					continue
@@ -74,6 +80,19 @@ func (g *DedupGCRunner) StartDedupGC(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// RunOnceGuarded is RunOnce under the single-flight gate (ticker vs admin
+// trigger): a concurrent caller gets errJobAlreadyRunning.
+func (g *DedupGCRunner) RunOnceGuarded(ctx context.Context) (DedupGCResult, error) {
+	if g == nil {
+		return DedupGCResult{}, errors.New("dedup gc: runner not configured")
+	}
+	if !g.gate.tryAcquire() {
+		return DedupGCResult{}, errJobAlreadyRunning
+	}
+	defer g.gate.release()
+	return g.RunOnce(ctx)
 }
 
 // RunOnce performs a single GC cycle: reconcile then sweep.
@@ -261,7 +280,13 @@ func (s *Server) handleDedupGCTrigger(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "dedup gc not available", http.StatusServiceUnavailable)
 		return
 	}
-	result, err := s.dedupGCRunner.RunOnce(r.Context())
+	ctx, cancel := adminTriggerContext(r)
+	defer cancel()
+	result, err := s.dedupGCRunner.RunOnceGuarded(ctx)
+	if errors.Is(err, errJobAlreadyRunning) {
+		writeJobAlreadyRunning(w, "dedup_gc")
+		return
+	}
 	actor, _ := r.Context().Value(userIDKey).(string)
 	audit.Record(r.Context(), s.db, audit.Entry{UserID: actor, EventType: "admin", Action: "admin.dedup_gc", Error: err})
 	if err != nil {
