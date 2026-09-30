@@ -101,8 +101,6 @@ func TestS3Operations(t *testing.T) {
 
 	// Create engine with nil db for testing
 	eng := engine.NewEngine(nil, logger, &engine.Config{
-		EnableCaching:  false,
-		EnableML:       false,
 		DefaultBackend: "local",
 	})
 

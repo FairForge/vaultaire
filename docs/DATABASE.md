@@ -136,7 +136,7 @@ Legend: **W** written by, **R** read by (packages), **Ret** retention/cleanup,
 | webhook_endpoints / webhook_deliveries | 033 (+056) | api/webhooks | api/webhooks, events | cascade endpoint→deliveries, event→deliveries; deletion | yes |
 | s3_access_log | 040 | api/access_log (every S3 request) | delivery (logging-enabled buckets), dashboard/admin_support | delivered rows deleted; others never (WP-R9-2) | yes |
 | cdn_access_log / cdn_stats_daily | 035 | api/cdn_analytics | dashboard | rollup; not in deletion | yes |
-| access_patterns | 055 | intelligence (engine LogAccess) | intelligence | none; not in deletion (WP-R6-5) | yes |
+| access_patterns | 055 | — (writer `internal/intelligence` deleted in R15, WP-R6-5) | — | orphan → D-12 drop list | yes |
 | **Admin / support / public** | | | | | |
 | admin_notes, admin_notifications, abuse_reports | 045/046/047 | dashboard/admin, api | dashboard/admin | — | notes/abuse yes |
 | waitlist_signups | 044 (+065/070) | api/waitlist | dashboard/admin (CSV export) | — | no |
@@ -192,7 +192,7 @@ success rows are only recorded for `logging_enabled` buckets — error rows for
 every bucket, the admin support page reads them), `events` 90 d,
 `quota_usage_events` 90 d, `stripe_events` 90 d, `cdn_access_log` 2 d (the
 hourly rollup re-rolls yesterday, R13-03), `webhook_deliveries` 30 d,
-`access_patterns` 90 d (`last_seen`), `waitlist_signups.ip_address/user_agent`
+`waitlist_signups.ip_address/user_agent`
 blanked after 90 d (row kept). `audit_logs` is never pruned. The privacy
 policy and the DPA state the same numbers.
 

@@ -100,7 +100,7 @@ Your 10 TB downstairs (Standard) on stored.ge — prices.json, 2026-09-30:
 
 ### Webhook Notifications to Customers — SHIPPED (basic)
 **What:** Customer-configured webhooks (`/api/v1/webhooks`) fired from the event log (`/api/v1/events`: object.*, bucket.*, key.*, sts.token_created), HMAC-signed. One delivery attempt, no retry yet (WP-R11-3); email-on-event and size/bulk filters are not built.
-**Where:** `internal/api/events.go`, `internal/api/webhooks_routes.go` (`internal/webhooks/delivery.go` was proposed and does not exist)
+**Where:** `internal/api/events.go`, `internal/api/webhooks_routes.go` (the never-linked `internal/webhooks` package was deleted in Review R15)
 **Phase:** 5.11.6 shipped
 
 ### Onboarding Flow

@@ -348,10 +348,6 @@ Routes mount in router.go only when `deps.Flags != nil`. Template: `templates/ad
 
 `HandleOAuthLogin(cfg, logger)` — redirects to the provider consent screen with a state cookie (10-min TTL). `HandleOAuthCallback(cfg, provider, fetchUser, authSvc, sessions, db, mfa, logger, renderCreds)` — validates state, exchanges the code, resolves the user via `findOrCreateOAuthUser` (existing OAuth link → existing email match+link → create new account); an EXISTING account with TOTP enabled goes through `BeginMFAChallenge` (mfa = the pending store; nil skips) instead of getting a session (R5-06 / WP-R5-2, R12); otherwise creates a session. Success/challenge write `auth.login_succeeded` with `via=oauth:<provider>`. **B2:** `findOrCreateOAuthUser` returns the minted `*auth.APIKey` ONLY for a brand-new account; the callback then calls `renderCreds(w, key, secret)` (wired in router.go to the shared `signupCredsRenderer` reveal-once credentials page) instead of redirecting — existing users still redirect to `/dashboard`. `FetchGoogleUser` / `FetchGithubUser` normalize provider user info (GitHub falls back to `/user/emails` for private emails). Tests: `oauth_test.go` (fake token endpoint via httptest, no real provider).
 
-## Legacy Handlers
-
-Files like `dashboard.go` etc. are stubs from before Phase 0 with inline terminal-style templates. They are NOT wired into the router. Remaining phases will rewrite them.
-
 ## Pattern
 
 ```go

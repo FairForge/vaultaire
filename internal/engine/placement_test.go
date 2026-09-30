@@ -95,49 +95,31 @@ func (d *memDriver) has(c, a string) bool {
 	return ok
 }
 
-// R6-03: an `auto` bucket PUT carries no storage class. The engine used to ask
-// the access tracker for a recommendation and APPLY it; with `temperature`
-// never written (always 'cold') and access_count < 5, the tracker names
-// "lyve" for every object that already has an access_patterns row — i.e. the
-// second to fifth PUT of any key in a default bucket landed on the resilient
-// tier's backend instead of the primary. Placement is the API layer's decision
-// (resolvePutStorageClass); the engine must not re-derive it.
+// R6-03: an `auto` bucket PUT carries no storage class. The engine used to
+// ask an access tracker for a recommendation and APPLY it, relocating the
+// second to fifth PUT of any key in a default bucket to the resilient tier's
+// backend. The tracker was deleted in R15 (WP-R6-5); this pins the rule that
+// placement is the API layer's decision and an overwrite stays on the primary.
 func TestEnginePut_AutoBucketOverwriteStaysOnPrimary(t *testing.T) {
-	db := openTestDB(t)
-	const tenantID, container, key = "r6-placement-tenant", "r6-placement-tenant_bucket", "overwrite.bin"
-	t.Cleanup(func() {
-		_, _ = db.Exec(`DELETE FROM access_patterns WHERE tenant_id = $1`, tenantID)
-		_, _ = db.Exec(`DELETE FROM object_locations WHERE tenant_id = $1`, tenantID)
-	})
-	// What the tracker leaves behind after the first PUT was flushed.
-	_, err := db.Exec(`
-		INSERT INTO access_patterns (tenant_id, container, artifact_key, operation, access_count, temperature)
-		VALUES ($1, $2, $3, 'PUT', 1, 'cold')
-		ON CONFLICT (tenant_id, container, artifact_key) DO UPDATE SET access_count = 1, temperature = 'cold'`,
-		tenantID, container, key)
-	require.NoError(t, err)
+	const container, key = "r6-placement-tenant_bucket", "overwrite.bin"
 
-	eng := NewEngine(db, nopLogger(), &Config{DefaultBackend: "idrive", EnableML: true})
+	eng := NewEngine(nil, nopLogger(), &Config{DefaultBackend: "idrive"})
 	idrive := newMemDriver("idrive")
 	lyve := newMemDriver("lyve")
 	eng.AddDriver("idrive", idrive)
 	eng.AddDriver("lyve", lyve)
 	eng.SetPrimary("idrive")
-	require.NotNil(t, eng.intelligence, "fixture must exercise the tracker path")
 
-	ctx := common.WithTenantID(context.Background(), tenantID)
-	backend, err := eng.Put(ctx, container, key, strings.NewReader("v2"))
-	require.NoError(t, err)
-
-	assert.Equal(t, "idrive", backend, "an auto-bucket overwrite must stay on the primary")
+	ctx := common.WithTenantID(context.Background(), "r6-placement-tenant")
+	for _, body := range []string{"v1", "v2", "v3", "v4", "v5"} {
+		backend, err := eng.Put(ctx, container, key, strings.NewReader(body))
+		require.NoError(t, err)
+		assert.Equal(t, "idrive", backend, "an auto-bucket overwrite must stay on the primary")
+	}
 	assert.True(t, idrive.has(container, key))
-	assert.False(t, lyve.has(container, key), "the access tracker must never place customer data")
+	assert.False(t, lyve.has(container, key), "nothing but the resolved class may place customer data")
 }
 
-// R6-04: r2 (public store), geyser (tape), permafrost (async second copy) and
-// region-pinned idrive-<region> drivers are TARGET-ONLY: they receive a write
-// when they are the resolved target or the configured primary, never as a
-// silent failover destination for a STANDARD object.
 func TestBuildWriteCandidateList_TargetOnlyBackends(t *testing.T) {
 	eng := NewEngine(nil, nopLogger(), &Config{DefaultBackend: "idrive"})
 	for _, n := range []string{"idrive", "lyve", "s3", "r2", "geyser", "permafrost", "idrive-eu-west-1", "local"} {

@@ -69,25 +69,4 @@ func TestMFA_BackupCodes(t *testing.T) {
 			assert.Len(t, code, 8)
 		}
 	})
-
-	t.Run("validates backup code once", func(t *testing.T) {
-		mfa := NewMFAService("stored.ge")
-
-		codes, err := mfa.GenerateBackupCodes()
-		require.NoError(t, err)
-
-		// Store codes for user first
-		mfa.backupCodes["user-001"] = make(map[string]bool)
-		for _, code := range codes {
-			mfa.backupCodes["user-001"][code] = false
-		}
-
-		// First use should succeed
-		valid := mfa.ValidateBackupCode("user-001", codes[0])
-		assert.True(t, valid)
-
-		// Second use should fail
-		valid = mfa.ValidateBackupCode("user-001", codes[0])
-		assert.False(t, valid)
-	})
 }

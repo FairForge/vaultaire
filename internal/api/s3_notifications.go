@@ -490,11 +490,3 @@ func (d *NotificationDispatcher) FireSync(tenantID, bucket, eventName, objectKey
 	}
 	d.dispatch(tenantID, bucket, eventName, objectKey, size, etag)
 }
-
-// SetHTTPClient replaces the HTTP client (for testing).
-func (d *NotificationDispatcher) SetHTTPClient(c *http.Client) {
-	if d == nil {
-		return
-	}
-	d.client = c
-}

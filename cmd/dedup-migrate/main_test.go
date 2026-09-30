@@ -52,8 +52,6 @@ func setupFixture(t *testing.T) *testFixture {
 	t.Cleanup(func() { _ = os.RemoveAll(tempDir) })
 
 	eng := engine.NewEngine(nil, logger, &engine.Config{
-		EnableCaching:  false,
-		EnableML:       false,
 		DefaultBackend: "local",
 	})
 	driver := drivers.NewLocalDriver(tempDir, logger)

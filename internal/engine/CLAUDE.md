@@ -4,35 +4,28 @@ Core orchestration layer — connects the API layer to storage drivers. This is 
 
 ## Key Types
 
-- **`CoreEngine`** (`engine.go`) — the main orchestrator. Holds `map[string]Driver` (named drivers), primary/backup selection, access tracking, a tiered cache (constructed with `EnableCaching: false` in prod — `main.go`; WP-R6-6 deletes it) and a cost optimizer (fed by `SetCostConfiguration`, never consulted — inert). Implements the `Engine` interface.
+- **`CoreEngine`** (`engine.go`) — the main orchestrator. Holds `map[string]Driver` (named drivers), the configured primary, the per-backend circuit breakers (`FailoverManager`) and the object→backend routing cache. Implements the `Engine` interface. The read cache, access tracker, cost optimizer, health-score selector, backup replication and tiering engine were inert in production and were deleted in Review R15 (WP-R6-4/5/6); `Config` is now just `DefaultBackend`.
 - **`Engine`** interface (`interface.go:9`) — top-level contract: `Get`, `Put`, `Delete`, `List`, `HealthCheck`, `GetMetrics`, plus future stubs (`Execute`, `Query`, `Train`, `Predict`) and `GetContainerMetadata` / `GetArtifactMetadata` (`interface.go:30-32`), which nothing outside the package calls.
 - **`Driver`** interface (`interface.go:38`) — the sacred backend contract: `Name`, `Get`, `Put`, `Delete`, `List`, `Exists`, `HealthCheck`. All storage drivers implement this.
 
 ## Request Flow
 
-- **Put**: resolve storage class (the API layer's `resolvePutStorageClass` + `storageClassToBackend` are the ONLY placement inputs — the engine never re-derives placement; the access-tracker "recommendation" override was removed in R6, it had been relocating `auto`-bucket overwrites to Lyve, R6-03) → build WRITE candidate list (`buildWriteCandidateList`: target, primary, then the general-purpose durable backends; **target-only backends** `local`, `r2`, `geyser`, `permafrost` and every `idrive-<region>` receive a write only as the explicit target or the configured primary — WP-F + R6-04) → failover.Execute tries in order → record mapping in `objectBackends` sync.Map → invalidate cache → optionally replicate to backup async (dormant: nothing calls `SetBackup`). If every eligible backend fails with a genuine backend failure (`isBackendFailure`), Put returns `ErrAllBackendsUnavailable` (API layer → 503 + Retry-After), logs at Error level, and bumps the `write_failures` counter (exposed in GetMetrics) — customer data is never silently stranded on the hub's local disk. Client-level outcomes (quota, invalid input) keep their error identity (403/400, not 503).
-- **Get**: check `objectBackends` map (seeded by the API layer's `HintBackend` from `object_head_cache.backend_name` — the routing truth) → `object_locations` on a miss → tiered cache (L1, off in prod) → failover.Execute with candidate list → cache result
-- **Delete**: resolve the backend like Get (hint / map → `object_locations` → primary; R6-05 — the API layer hints from the head row first) → failover.Execute against `[recorded, primary]`, stopping at the first success → remove from `objectBackends` + `object_locations` → invalidate cache
+- **Put**: resolve storage class (the API layer's `resolvePutStorageClass` + `storageClassToBackend` are the ONLY placement inputs — the engine never re-derives placement; the access-tracker "recommendation" override was removed in R6, it had been relocating `auto`-bucket overwrites to Lyve, R6-03) → build WRITE candidate list (`buildWriteCandidateList`: target, primary, then the general-purpose durable backends; **target-only backends** `local`, `r2`, `geyser`, `permafrost` and every `idrive-<region>` receive a write only as the explicit target or the configured primary — WP-F + R6-04) → failover.Execute tries in order → record mapping in `objectBackends` sync.Map + async `object_locations` row. If every eligible backend fails with a genuine backend failure (`isBackendFailure`), Put returns `ErrAllBackendsUnavailable` (API layer → 503 + Retry-After), logs at Error level, and bumps the `write_failures` counter (exposed in GetMetrics) — customer data is never silently stranded on the hub's local disk. Client-level outcomes (quota, invalid input) keep their error identity (403/400, not 503).
+- **Get**: check `objectBackends` map (seeded by the API layer's `HintBackend` from `object_head_cache.backend_name` — the routing truth) → `object_locations` on a miss → failover.Execute with candidate list
+- **Delete**: resolve the backend like Get (hint / map → `object_locations` → primary; R6-05 — the API layer hints from the head row first) → failover.Execute against `[recorded, primary]`, stopping at the first success → remove from `objectBackends` + `object_locations`
 - **List**: delegates to primary driver only (no pagination; the API uses it only as the no-DB fallback)
 
 ## Object Location Routing (Phase 7.1-7.2)
 
 Two-tier backend lookup: `objectBackends sync.Map` (L1, in-memory hot cache) → `LocationStore` / `object_locations` table (L2, PostgreSQL durable). On sync.Map miss, the engine queries `object_locations` and seeds the sync.Map so subsequent GETs are fast. Put records to both layers. Delete removes from both.
 
-`LocationStore` (`routing.go`) wraps `*sql.DB` for object location CRUD. All methods are nil-DB safe (degrade to no-op). `last_accessed` is updated on every LookupBackend call (fire-and-forget goroutine) for tiering age tracking.
+`LocationStore` (`routing.go`) wraps `*sql.DB` for object location CRUD. All methods are nil-DB safe (degrade to no-op). `last_accessed` is updated on every LookupBackend call (fire-and-forget goroutine); nothing reads it any more (WP-R6-1 drops the touch).
 
-Tables created in migration 048: `object_locations` (routing source of truth), `tiering_policies` (Phase 7.3), `tenant_cost_daily` (Phase 7.4). Also adds `last_accessed` column to `object_head_cache`.
+Tables created in migration 048: `object_locations` (routing cache), `tiering_policies` and `tenant_cost_daily` (both orphans since the tiering engine was deleted — D-12). Also adds `last_accessed` column to `object_head_cache`.
 
-## Tiering Engine (Phase 7.3)
+## Tiering
 
-`TieringEngine` (`tiering.go`) runs a background goroutine that periodically scans `object_locations` for objects eligible for tier migration based on `tiering_policies`. Ticker + stop chan + ctx.Done select loop.
-
-- `Start(ctx)` — background loop, default 1-hour interval. No-op if DB is nil.
-- `Stop()` — close(stop)
-- `runScan(ctx)` — loads policies from `tiering_policies`, falls back to hardcoded default (90-day→geyser/GLACIER) if no policies exist. Finds candidates via `object_locations` WHERE `last_accessed < NOW() - min_age_days`. Excludes objects in buckets with a non-auto `tier_preference` (`AND NOT EXISTS (SELECT 1 FROM buckets WHERE ... tier_preference != 'auto')`) so pinned buckets are never age-migrated. Processes up to 100 per policy per tick.
-- `migrateObject(...)` — crash-safe sequence: Get→Put→UpdateDB→UpdateSyncMap→Delete. Never deletes source until routing update succeeds. If put fails, source is untouched (safe).
-
-Integrated into CoreEngine: `tiering` field, created in `NewEngine()`, started via `StartTiering(ctx)` — **which nothing calls** (R1). Do not start it: `migrateObject` never updates `object_head_cache.backend_name` (the routing truth) and `object_locations` also holds dedup-chunk rows, so the default policy would move `_global` chunks to tape (R6-10). Smart demotion (5.15.8, `api/smart_demotion.go`) is the correct successor; WP-R6-4 deletes this.
+There is no age-based tiering engine (deleted in Review R15, WP-R6-4: it never ran, never updated the routing truth and would have moved `_global` chunk rows to tape — R6-10). The only mover of customer data between backends is the Smart-tier demotion job (`api/smart_demotion.go`, 5.15.8).
 
 ## Supporting Files
 
@@ -40,8 +33,6 @@ Integrated into CoreEngine: `tiering` field, created in `NewEngine()`, started v
 |------|------|---------|
 | `types.go` | `Container`, `Artifact` | Domain types (internal names for bucket/object) |
 | `errors.go` | `NotFoundError`, `PermissionError` | Error types + sentinels (`ErrQuotaExceeded`, `ErrInvalidInput`, `ErrAllBackendsUnavailable`) |
-| `selector.go` | `BackendSelector` | Health-score selector — constructed, **never consulted** (R6-17; WP-R6-4 deletes) |
-| `cost_optimizer.go` | `CostOptimizer` | Cost-based selector — fed by `SetCostConfiguration`, **never consulted** (R6-17) |
 | `health.go` | `HealthScorer` | Weighted score — scored only by `api/health_handlers.go` for the `/health` / `/status` display (R6-17); **not a routing input**. The only live routing signal is the circuit breaker |
 | `load_balancer.go` | `LoadBalancer` | 4 strategies: RoundRobin, LeastConn, WeightedRandom, Adaptive — **unreachable** from the product (no constructor caller; WP-R6-4) |
 | `replicator.go` | `Replicator` | Cross-backend replication: Sync, Async (5 workers), Quorum — **unreachable** (WP-R6-4) |
@@ -53,7 +44,6 @@ Integrated into CoreEngine: `tiering` field, created in `NewEngine()`, started v
 | `storage_class.go` | `ResolveStorageClass`, `BackendToStorageClass` | S3 storage class ↔ backend name mapping (STANDARD→idrive, GLACIER→geyser, etc.) |
 | `interface.go` | `Restorer`, `RestoreStatus` | Optional driver interface for archive backends (V18.2): `RestoreObject(days)` + `RestoreStatus` (raw x-amz-restore passthrough). Geyser implements it. `ErrArchived`/`ErrRestoreAlreadyInProgress` sentinels in errors.go; `ErrArchived` is client-level for the breaker AND stops failover iteration (other backends would mask the archived state as 404) |
 | `routing.go` | `LocationStore` | PostgreSQL-backed object location CRUD (RecordLocation, LookupBackend, RemoveLocation, CountByBackend, TouchLastAccessed) — nil-DB safe |
-| `tiering.go` | `TieringEngine` | Background age-based object migration between backends (1h interval, crash-safe Get→Put→UpdateDB→Delete) |
 
 ## Bucket Tier Preference (Phase 7.5)
 

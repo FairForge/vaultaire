@@ -385,28 +385,6 @@ func ClearSessionCookie(w http.ResponseWriter) {
 	})
 }
 
-// --- BasicAuth (kept for admin API endpoints) ---
-
-// BasicAuth validates HTTP Basic Authentication credentials.
-type BasicAuth struct {
-	username string
-	password string
-}
-
-// NewBasicAuth creates a BasicAuth validator.
-func NewBasicAuth(username, password string) *BasicAuth {
-	return &BasicAuth{username: username, password: password}
-}
-
-// Validate checks the request's basic auth credentials.
-func (ba *BasicAuth) Validate(r *http.Request) bool {
-	user, pass, ok := r.BasicAuth()
-	if !ok {
-		return false
-	}
-	return user == ba.username && pass == ba.password
-}
-
 // --- helpers ---
 
 // MaxUserAgentLen bounds the User-Agent string stored per session to the

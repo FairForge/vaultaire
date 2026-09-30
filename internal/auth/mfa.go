@@ -5,23 +5,20 @@ import (
 	"encoding/base32"
 	"fmt"
 	"strings"
-	"sync"
 
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
 )
 
+// MFAService mints TOTP secrets and backup codes. Backup-code consumption is
+// persisted by AuthService.ValidateBackupCode (user_mfa); the in-memory
+// variant that used to live here was never called by the product (R5).
 type MFAService struct {
-	issuer      string
-	backupCodes map[string]map[string]bool // userID -> codes -> used
-	mu          sync.RWMutex
+	issuer string
 }
 
 func NewMFAService(issuer string) *MFAService {
-	return &MFAService{
-		issuer:      issuer,
-		backupCodes: make(map[string]map[string]bool),
-	}
+	return &MFAService{issuer: issuer}
 }
 
 // GenerateSecret creates a new TOTP secret for a user
@@ -66,23 +63,4 @@ func (m *MFAService) GenerateBackupCodes() ([]string, error) {
 	}
 
 	return codes, nil
-}
-
-// ValidateBackupCode checks and consumes a backup code
-func (m *MFAService) ValidateBackupCode(userID, code string) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	userCodes, exists := m.backupCodes[userID]
-	if !exists {
-		return false
-	}
-
-	// Check if code exists and hasn't been used
-	if used, exists := userCodes[code]; exists && !used {
-		userCodes[code] = true
-		return true
-	}
-
-	return false
 }

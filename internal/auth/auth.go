@@ -71,7 +71,6 @@ type AuthService struct {
 	verifyTokens   map[string]string // token -> userID (in-memory lookup)
 	resetRates     map[string][]time.Time
 	resetMu        sync.Mutex
-	auditLogger    *AuditLogger
 	signupsEnabled bool // when false, all account creation is rejected
 	// signupsEnabledFn, when set, overrides signupsEnabled — 1.13 wires the
 	// feature-flag service here so the `signups` flag (env default + DB
@@ -124,7 +123,6 @@ func NewAuthService(db Database, sqlDB *sql.DB) *AuthService {
 		mfaSettings:    make(map[string]*MFASettings),
 		verifyTokens:   make(map[string]string),
 		resetRates:     make(map[string][]time.Time),
-		auditLogger:    nil,
 		signupsEnabled: true, // default: signups allowed (prod sets SIGNUPS_ENABLED=false to close)
 	}
 }
@@ -308,11 +306,6 @@ func (a *AuthService) record(ctx context.Context, e audit.Entry) {
 		}
 	}
 	audit.Record(ctx, a.sqlDB, e)
-}
-
-// SetAuditLogger sets the audit logger for the auth service
-func (a *AuthService) SetAuditLogger(logger *AuditLogger) {
-	a.auditLogger = logger
 }
 
 // CreateUser creates a new user account WITH tenant
@@ -628,16 +621,6 @@ func (a *AuthService) ValidateS3Request(ctx context.Context, accessKey string) (
 		now := time.Now()
 		apiKey.LastUsed = &now
 		apiKey.UsageCount++
-
-		if a.auditLogger != nil {
-			event := APIKeyAuditEvent{
-				UserID:  tenant.UserID,
-				KeyID:   apiKey.ID,
-				Action:  AuditKeyUsed,
-				Success: true,
-			}
-			_ = a.auditLogger.LogKeyEvent(ctx, event)
-		}
 	}
 
 	return tenant, nil

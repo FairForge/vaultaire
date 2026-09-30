@@ -179,30 +179,6 @@ func TestIDriveDriver_StreamingUpload(t *testing.T) {
 	})
 }
 
-func TestIDriveDriver_MultipartUpload(t *testing.T) {
-	t.Run("uses multipart for files over 5MB", func(t *testing.T) {
-		driver, _ := NewIDriveDriver(
-			"test-key",
-			"test-secret",
-			"https://e2.idrive.com",
-			"us-west-1",
-			zap.NewNop(),
-		)
-
-		// Set multipart threshold
-		driver.multipartThreshold = 5 * 1024 * 1024 // 5MB
-
-		// Create 6MB reader
-		size := int64(6 * 1024 * 1024)
-		reader := io.LimitReader(rand.Reader, size)
-
-		err := driver.PutWithSize(context.Background(), "bucket", "large.bin", reader, size)
-
-		// Should attempt multipart (will fail without creds)
-		assert.Error(t, err)
-	})
-}
-
 func TestIDriveDriver_EgressTracking(t *testing.T) {
 	t.Run("tracks download bandwidth", func(t *testing.T) {
 		driver, _ := NewIDriveDriver(
@@ -354,7 +330,7 @@ func TestIDriveIntegration(t *testing.T) {
 
 		// Create fully configured driver
 		logger := zap.NewNop()
-		driver, err := NewIDriveDriverFromConfig(logger)
+		driver, err := NewIDriveDriver(os.Getenv("IDRIVE_ACCESS_KEY"), os.Getenv("IDRIVE_SECRET_KEY"), os.Getenv("IDRIVE_ENDPOINT"), os.Getenv("IDRIVE_REGION"), logger)
 		require.NoError(t, err)
 
 		// Add all features

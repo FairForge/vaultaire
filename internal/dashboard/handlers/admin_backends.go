@@ -33,7 +33,6 @@ type BackendState struct {
 type BackendInfo struct {
 	Name      string
 	IsPrimary bool
-	IsBackup  bool
 	// Probed is true when a health probe has reported on this backend. A
 	// registered driver with no probe state is NOT unhealthy — it is
 	// unobserved; the template used to render the zero Healthy as "unhealthy"
@@ -61,7 +60,6 @@ func HandleAdminBackends(tmpl *template.Template, eng *engine.CoreEngine, hc Hea
 		withCSRF(r.Context(), data)
 
 		primary := eng.GetPrimary()
-		backup := eng.GetBackup()
 		circuitStates := eng.GetFailoverStatus()
 
 		states := make(map[string]*BackendState)
@@ -83,7 +81,6 @@ func HandleAdminBackends(tmpl *template.Template, eng *engine.CoreEngine, hc Hea
 			bi := BackendInfo{
 				Name:         name,
 				IsPrimary:    name == primary,
-				IsBackup:     name == backup,
 				CircuitState: circuitStates[name],
 				StorageClass: engine.BackendToStorageClass(name),
 			}
