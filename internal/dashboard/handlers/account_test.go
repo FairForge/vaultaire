@@ -106,7 +106,7 @@ func TestHandleExportData_ReturnsJSON(t *testing.T) {
 }
 
 func TestHandleRequestDeletion_NoSession(t *testing.T) {
-	handler := HandleRequestDeletion(nil, nil, zap.NewNop())
+	handler := HandleRequestDeletion(nil, nil, nil, nil, zap.NewNop())
 
 	req := httptest.NewRequest("POST", "/dashboard/settings/delete-account", nil)
 	w := httptest.NewRecorder()
@@ -122,11 +122,11 @@ func TestHandleRequestDeletion_WrongPassword(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	hash, _ := bcrypt.GenerateFromPassword([]byte("correct-password"), bcrypt.MinCost)
-	mock.ExpectQuery(`SELECT password_hash FROM users`).
+	mock.ExpectQuery(`SELECT password_hash, email FROM users`).
 		WithArgs("user-123").
-		WillReturnRows(sqlmock.NewRows([]string{"password_hash"}).AddRow(string(hash)))
+		WillReturnRows(sqlmock.NewRows([]string{"password_hash", "email"}).AddRow(string(hash), "test@stored.ge"))
 
-	handler := HandleRequestDeletion(db, nil, zap.NewNop())
+	handler := HandleRequestDeletion(db, nil, nil, nil, zap.NewNop())
 
 	form := url.Values{"password": {"wrong-password"}}
 	req := injectAccountSession(httptest.NewRequest("POST", "/dashboard/settings/delete-account", strings.NewReader(form.Encode())))
@@ -150,7 +150,7 @@ func TestHandleRequestDeletion_WrongPassword(t *testing.T) {
 }
 
 func TestHandleCancelDeletion_NoSession(t *testing.T) {
-	handler := HandleCancelDeletion(nil, zap.NewNop())
+	handler := HandleCancelDeletion(nil, nil, zap.NewNop())
 
 	req := httptest.NewRequest("POST", "/dashboard/settings/cancel-deletion", nil)
 	w := httptest.NewRecorder()
@@ -169,7 +169,7 @@ func TestHandleCancelDeletion_Success(t *testing.T) {
 		WithArgs("user-123").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
-	handler := HandleCancelDeletion(db, zap.NewNop())
+	handler := HandleCancelDeletion(db, nil, zap.NewNop())
 
 	req := injectAccountSession(httptest.NewRequest("POST", "/dashboard/settings/cancel-deletion", nil))
 	w := httptest.NewRecorder()
@@ -188,4 +188,89 @@ func TestHandleCancelDeletion_Success(t *testing.T) {
 		}
 	}
 	assert.True(t, hasFlash, "should set flash cookie on cancel success")
+}
+
+// WP-R10-3 / R12-22: an OAuth-only account (empty password hash) used to be
+// refused with "Incorrect password." forever — bcrypt against "" never
+// matches. Without 2FA it confirms by re-typing the account e-mail.
+func TestHandleRequestDeletion_OAuthOnlyConfirmsWithEmail(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	flashOf := func(w *httptest.ResponseRecorder) url.Values {
+		for _, c := range w.Result().Cookies() {
+			if c.Name == "flash" {
+				v, _ := url.ParseQuery(c.Value)
+				return v
+			}
+		}
+		return url.Values{}
+	}
+	post := func(form url.Values) *httptest.ResponseRecorder {
+		req := injectAccountSession(httptest.NewRequest("POST", "/dashboard/settings/delete-account", strings.NewReader(form.Encode())))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		w := httptest.NewRecorder()
+		HandleRequestDeletion(db, nil, nil, nil, zap.NewNop()).ServeHTTP(w, req)
+		return w
+	}
+
+	// Wrong e-mail: refused, nothing scheduled.
+	mock.ExpectQuery(`SELECT password_hash, email FROM users`).WithArgs("user-123").
+		WillReturnRows(sqlmock.NewRows([]string{"password_hash", "email"}).AddRow("", "Test@stored.ge"))
+	w := post(url.Values{"confirm_email": {"someone-else@stored.ge"}})
+	assert.Equal(t, http.StatusSeeOther, w.Code)
+	assert.Contains(t, flashOf(w).Get("error"), "does not match")
+
+	// Right e-mail (case-insensitive): scheduled through the service.
+	scheduled := time.Now().Add(30 * 24 * time.Hour)
+	mock.ExpectQuery(`SELECT password_hash, email FROM users`).WithArgs("user-123").
+		WillReturnRows(sqlmock.NewRows([]string{"password_hash", "email"}).AddRow("", "Test@stored.ge"))
+	mock.ExpectQuery(`UPDATE users`).
+		WithArgs(sqlmock.AnyArg(), "User requested deletion", "pending_deletion", "user-123").
+		WillReturnRows(sqlmock.NewRows([]string{"deletion_scheduled_at"}).AddRow(scheduled))
+	mock.ExpectExec(`INSERT INTO audit_logs`).WillReturnResult(sqlmock.NewResult(0, 1))
+	w = post(url.Values{"confirm_email": {" test@STORED.ge "}})
+	assert.Equal(t, http.StatusSeeOther, w.Code)
+	assert.Equal(t, "/dashboard/settings", w.Header().Get("Location"))
+	assert.Contains(t, flashOf(w).Get("success"), "subscription is cancelled and your objects, keys and account records are erased")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestHandleRequestDeletion_ReasonIsCapped(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	hash, _ := bcrypt.GenerateFromPassword([]byte("pw-123456"), bcrypt.MinCost)
+	mock.ExpectQuery(`SELECT password_hash, email FROM users`).WithArgs("user-123").
+		WillReturnRows(sqlmock.NewRows([]string{"password_hash", "email"}).AddRow(string(hash), "test@stored.ge"))
+	mock.ExpectQuery(`UPDATE users`).
+		WithArgs(sqlmock.AnyArg(), strings.Repeat("r", 500), "pending_deletion", "user-123").
+		WillReturnRows(sqlmock.NewRows([]string{"deletion_scheduled_at"}).AddRow(time.Now()))
+	mock.ExpectExec(`INSERT INTO audit_logs`).WillReturnResult(sqlmock.NewResult(0, 1))
+
+	form := url.Values{"password": {"pw-123456"}, "reason": {strings.Repeat("r", 700)}}
+	req := injectAccountSession(httptest.NewRequest("POST", "/dashboard/settings/delete-account", strings.NewReader(form.Encode())))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	HandleRequestDeletion(db, nil, nil, nil, zap.NewNop()).ServeHTTP(w, req)
+	assert.Equal(t, http.StatusSeeOther, w.Code)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestHandleCancelDeletion_NothingScheduled(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	mock.ExpectExec(`UPDATE users SET deletion_scheduled_at = NULL`).WithArgs("user-123").WillReturnResult(sqlmock.NewResult(0, 0))
+	req := injectAccountSession(httptest.NewRequest("POST", "/dashboard/settings/cancel-deletion", nil))
+	w := httptest.NewRecorder()
+	HandleCancelDeletion(db, nil, zap.NewNop()).ServeHTTP(w, req)
+	assert.Equal(t, http.StatusSeeOther, w.Code)
+	for _, c := range w.Result().Cookies() {
+		if c.Name == "flash" {
+			v, _ := url.ParseQuery(c.Value)
+			assert.Contains(t, v.Get("error"), "No account deletion is scheduled")
+		}
+	}
 }

@@ -179,7 +179,13 @@ func (s *StripeService) GetSubscription(ctx context.Context, tenantID string) (*
 	return sub, nil
 }
 
-// CancelSubscription cancels a tenant's subscription at period end.
+// CancelSubscription cancels a tenant's subscription immediately
+// (`subscription.Cancel` — the DELETE, not cancel_at_period_end). Idempotent
+// for the account-deletion runner (WP-R10-3): the subscription is fetched
+// first and one that is already `canceled` is reported as success, so a run
+// that crashed between Stripe's answer and its own stamp does not defer the
+// tenant forever on the repeat (Stripe refuses to cancel a cancelled
+// subscription).
 func (s *StripeService) CancelSubscription(ctx context.Context, tenantID string) error {
 	if s.db == nil {
 		return fmt.Errorf("no database")
@@ -195,9 +201,16 @@ func (s *StripeService) CancelSubscription(ctx context.Context, tenantID string)
 		return fmt.Errorf("no subscription for tenant %s", tenantID)
 	}
 
-	_, err = subscription.Cancel(subID.String, nil)
+	current, err := s.subs().Get(ctx, subID.String)
 	if err != nil {
-		return fmt.Errorf("cancel stripe subscription: %w", err)
+		return fmt.Errorf("get stripe subscription %s before cancel: %w", subID.String, err)
+	}
+	if current != nil && current.Status == stripe.SubscriptionStatusCanceled {
+		s.logger.Info("subscription already cancelled at Stripe", zap.String("tenant", tenantID), zap.String("subscription", subID.String))
+	} else {
+		if _, err := subscription.Cancel(subID.String, &stripe.SubscriptionCancelParams{Params: stripe.Params{Context: ctx}}); err != nil {
+			return fmt.Errorf("cancel stripe subscription: %w", err)
+		}
 	}
 
 	_, err = s.db.ExecContext(ctx,

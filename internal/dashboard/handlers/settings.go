@@ -251,14 +251,23 @@ func populateProfile(authSvc *auth.AuthService, db *sql.DB, r *http.Request, sd 
 	}
 }
 
+// populateDeletionStatus fills the settings page's deletion card: the
+// scheduled date, and which confirmation the delete form asks for
+// (password; a TOTP code for an OAuth-only account with 2FA; else the
+// e-mail re-typed — WP-R10-3 / R12-22).
 func populateDeletionStatus(ctx context.Context, db *sql.DB, userID string, data map[string]any) {
 	if db == nil {
 		return
 	}
 	var scheduledAt sql.NullTime
+	var hasPassword bool
 	err := db.QueryRowContext(ctx,
-		`SELECT deletion_scheduled_at FROM users WHERE id = $1`, userID).Scan(&scheduledAt)
-	if err == nil && scheduledAt.Valid {
+		`SELECT deletion_scheduled_at, password_hash <> '' FROM users WHERE id = $1`, userID).Scan(&scheduledAt, &hasPassword)
+	if err != nil {
+		return
+	}
+	data["HasPassword"] = hasPassword
+	if scheduledAt.Valid {
 		data["DeletionScheduled"] = true
 		data["DeletionDate"] = scheduledAt.Time.Format("January 2, 2006")
 	}

@@ -111,12 +111,12 @@ Analytics link only appears in `bucket_objects.html` for public-read buckets (ga
 
 ## Account / GDPR (`account.go`)
 
-Three handlers for GDPR compliance (Phase 5.14.1):
+Three handlers for GDPR compliance (Phase 5.14.1; deletion through `internal/account` since WP-R10-3):
 - `HandleExportData(db, logger)` — POST `/dashboard/settings/export`. Collects user profile, tenant, quota, buckets, objects, API keys, bandwidth (90d) into JSON. Returns as `Content-Disposition: attachment` download. Writes an `account.exported` audit row (bytes, `via=dashboard`).
-- `HandleRequestDeletion(db, sessions, logger)` — POST `/dashboard/settings/delete-account`. Requires password confirmation via bcrypt. Sets `deletion_scheduled_at` 30 days out and `status = 'pending_deletion'`. Flash message with scheduled date. Writes `account.deletion_scheduled` (severity warning, scheduled_at + reason).
-- `HandleCancelDeletion(db, logger)` — POST `/dashboard/settings/cancel-deletion`. Nulls `deletion_scheduled_at`/`deletion_reason`, sets `status = 'active'`. Writes `account.deletion_cancelled`.
+- `HandleRequestDeletion(db, authSvc, accounts, mfa, logger)` — POST `/dashboard/settings/delete-account`. Confirms identity by the strongest factor the account has (`confirmDeletionIdentity`): the password (bcrypt) when there is one; a TOTP code (`totp_code`, single-use via `ConsumeTOTPCode`) for an OAuth-only account with 2FA; otherwise the account e-mail re-typed (`confirm_email`, case-insensitive) — bcrypt against the empty hash meant OAuth-only users could never delete (R12-22). Then `account.Service.Schedule` (30 d, reason capped at 500 runes, idempotent). Flash = `DeletionScheduledMessage` (what the runner does on the date). Writes `account.deletion_scheduled` (severity warning, scheduled_at + reason).
+- `HandleCancelDeletion(db, accounts, logger)` — POST `/dashboard/settings/cancel-deletion`. `account.Service.Cancel`; "No account deletion is scheduled." on `ErrNoPendingDeletion`. Writes `account.deletion_cancelled`.
 
-`populateDeletionStatus(ctx, db, userID, data)` in `settings.go` queries `deletion_scheduled_at` from users and populates `DeletionScheduled` + `DeletionDate` template data.
+`populateDeletionStatus(ctx, db, userID, data)` in `settings.go` reads `deletion_scheduled_at` and `password_hash <> ''` and populates `DeletionScheduled` + `DeletionDate` + `HasPassword`; the template picks the confirmation field from `HasPassword` / `MFAEnabled`. The runner that erases on the date is `internal/api/deletion_runner.go`.
 
 ## Compliance Dashboard (`compliance.go`)
 

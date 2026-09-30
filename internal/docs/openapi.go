@@ -1015,7 +1015,7 @@ func generateManagementPaths() map[string]*PathItem {
 		"/api/v1/manage/account": {
 			Delete: mut(withBody(jsonOp("Management", "Schedule account deletion (GDPR)", "ManageDeleteAccount",
 				"Marks the user `pending_deletion` with `deletion_scheduled_at` = now + 30 days. Login keeps working during the grace period; "+
-					"a second call returns the existing date. Reverse it with POST /account/cancel-deletion. The erasure itself is carried out by support after the date.",
+					"a second call returns the existing date. Reverse it with POST /account/cancel-deletion. On that date the deletion job cancels the Stripe subscription and erases every object (on its recorded backend), key, session and account record; backups age out within 7 days. Nothing changes during the grace period — export and cancellation keep working. `reason` is capped at 500 characters.",
 				map[string]Response{
 					"200": jsonResp("Deletion scheduled", ref("AccountDeletionScheduled")),
 					"400": errResp("`invalid_json`, or `missing_parameter` when `reason` is empty"),
@@ -1258,6 +1258,29 @@ func generateAdminPaths() map[string]*PathItem {
 					}, "error", "job")),
 					"500": textResp("`retention failed: ...`"),
 					"503": textResp("`retention not available` (no database)"),
+				})),
+		},
+		"/api/v1/admin/account-deletion": {
+			Post: admin(jsonOp("Admin", "Run the account-deletion job once", "AdminAccountDeletion",
+				"Erases every account whose 30-day grace period has ended (WP-R10-3): per tenant, cancel the Stripe subscription, delete every object on its recorded backend "+
+					"(chunked manifests released, multipart uploads aborted), then remove every tenant/user row in one transaction, revoke sessions and write an `account.erased` audit row. "+
+					"A tenant that Stripe or a backend refuses is deferred to the next run (500 with the per-tenant detail); a cancel that lands mid-walk stops that tenant. "+
+					"One advisory lock — the daily 04:30 UTC run and this trigger cannot overlap (409 `already_running`). Writes an `admin.account_deletion` audit row. No request body.",
+				map[string]Response{
+					"200": jsonResp("Every due tenant handled", objectPtr("", map[string]*Schema{
+						"tenants":   arrayOf(freeObject("Per-tenant outcome: tenant_id, user_id, outcome (erased|deferred|cancelled), stripe_cancelled, objects_deleted, chunked_released, locked_erased, object_failures, multipart_aborted, rows, error")),
+						"erased":    integer("Tenants fully erased this run"),
+						"deferred":  integer("Tenants left for the next run"),
+						"cancelled": integer("Tenants whose deletion was cancelled while the run looked at them"),
+						"duration":  str("Run duration (Go duration string)"),
+						"errors":    arrayOf(str("Per-tenant deferral reasons")),
+					}, "tenants", "erased", "deferred", "cancelled", "duration")),
+					"409": jsonResp("A run is already in progress", objectPtr("", map[string]*Schema{
+						"error": strEnum("", "already_running"),
+						"job":   strEnum("", "account_deletion"),
+					}, "error", "job")),
+					"500": jsonResp("At least one tenant was deferred; the body is the same result object", freeObject("")),
+					"503": textResp("`account deletion runner not available` (no database or engine)"),
 				})),
 		},
 		"/api/v1/admin/flags": {

@@ -54,17 +54,23 @@ type JWTClaims struct {
 // fast O(1) lookups during request handling. sqlDB is used to persist
 // new registrations so they survive process restarts.
 type AuthService struct {
-	db             Database
-	sqlDB          *sql.DB // for persistent writes; nil in test mode
-	jwtSecret      []byte
-	users          map[string]*User          // email -> user
-	tenants        map[string]*Tenant        // tenantID -> tenant
-	apiKeys        map[string]*APIKey        // key -> apikey
-	userIndex      map[string]*User          // userID -> user
-	keyIndex       map[string]*Tenant        // accessKey -> tenant (for S3 auth)
-	profiles       map[string]*ProfileUpdate // user profiles
-	preferences    map[string]*UserPreferences
-	mfaSettings    map[string]*MFASettings         // userID -> MFA config
+	db          Database
+	sqlDB       *sql.DB // for persistent writes; nil in test mode
+	jwtSecret   []byte
+	users       map[string]*User          // email -> user
+	tenants     map[string]*Tenant        // tenantID -> tenant
+	apiKeys     map[string]*APIKey        // key -> apikey
+	userIndex   map[string]*User          // userID -> user
+	keyIndex    map[string]*Tenant        // accessKey -> tenant (for S3 auth)
+	profiles    map[string]*ProfileUpdate // user profiles
+	preferences map[string]*UserPreferences
+	mfaSettings map[string]*MFASettings // userID -> MFA config
+	// cacheMu guards the credential maps above against Evict (WP-R10-3):
+	// the account-deletion runner removes an erased account from the
+	// in-process cache while requests read it. Only the writers and the
+	// login / S3 / API-key readers take it today; the remaining readers
+	// predate it (WP-R5-14).
+	cacheMu        sync.RWMutex
 	totpUsed       map[string]map[string]time.Time // userID -> accepted TOTP codes inside the replay window (R5-15c, R12-38)
 	mfaMu          sync.RWMutex
 	verifySecret   []byte            // HMAC key for email verification tokens
@@ -185,8 +191,10 @@ func (a *AuthService) LoadFromDB(ctx context.Context) error {
 			&u.CreatedAt, &u.UpdatedAt, &u.EmailVerified); err != nil {
 			return fmt.Errorf("scan user: %w", err)
 		}
+		a.cacheMu.Lock()
 		a.users[u.Email] = u
 		a.userIndex[u.ID] = u
+		a.cacheMu.Unlock()
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate users: %w", err)
@@ -222,10 +230,12 @@ func (a *AuthService) LoadFromDB(ctx context.Context) error {
 			u.TenantID = t.ID
 		}
 
+		a.cacheMu.Lock()
 		a.tenants[t.ID] = &t
 		if t.AccessKey != "" {
 			a.keyIndex[t.AccessKey] = &t
 		}
+		a.cacheMu.Unlock()
 	}
 	if err := trows.Err(); err != nil {
 		return fmt.Errorf("iterate tenants: %w", err)
@@ -280,14 +290,15 @@ func (a *AuthService) LoadFromDB(ctx context.Context) error {
 		}
 		k.Metadata = make(map[string]string)
 
+		a.cacheMu.Lock()
 		if u, ok := a.userIndex[k.UserID]; ok {
 			k.TenantID = u.TenantID
 			if tenant, ok := a.tenants[u.TenantID]; ok {
 				a.keyIndex[k.Key] = tenant
 			}
 		}
-
 		a.apiKeys[k.Key] = &k
+		a.cacheMu.Unlock()
 	}
 	if err := akRows.Err(); err != nil {
 		return fmt.Errorf("iterate api keys: %w", err)
@@ -401,11 +412,13 @@ func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password,
 	// Write to in-memory maps for current-process lookups — after the
 	// commit, so a failed persist never leaves an account that authenticates
 	// until the next restart.
+	a.cacheMu.Lock()
 	a.users[email] = user
 	a.userIndex[user.ID] = user
 	a.tenants[tenant.ID] = tenant
 	a.apiKeys[apiKey.Key] = apiKey
 	a.keyIndex[tenant.AccessKey] = tenant
+	a.cacheMu.Unlock()
 
 	a.record(ctx, audit.Entry{UserID: user.ID, TenantID: tenant.ID, Action: "account.created",
 		Resource: "user:" + user.ID, Metadata: map[string]any{"email": email}})
@@ -476,7 +489,9 @@ func (a *AuthService) persistNewAccount(ctx context.Context, user *User, tenant 
 func (a *AuthService) ValidatePassword(ctx context.Context, email, password string) (bool, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 
+	a.cacheMu.RLock()
 	user, exists := a.users[email]
+	a.cacheMu.RUnlock()
 	if !exists {
 		return false, nil
 	}
@@ -532,7 +547,9 @@ func (a *AuthService) ChangePassword(ctx context.Context, userID, currentPasswor
 // GetUserByEmail retrieves a user by email
 func (a *AuthService) GetUserByEmail(ctx context.Context, email string) (*User, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
+	a.cacheMu.RLock()
 	user, exists := a.users[email]
+	a.cacheMu.RUnlock()
 	if !exists {
 		return nil, fmt.Errorf("user not found")
 	}
@@ -541,7 +558,9 @@ func (a *AuthService) GetUserByEmail(ctx context.Context, email string) (*User, 
 
 // GetUserByID retrieves a user by ID
 func (a *AuthService) GetUserByID(ctx context.Context, userID string) (*User, error) {
+	a.cacheMu.RLock()
 	user, exists := a.userIndex[userID]
+	a.cacheMu.RUnlock()
 	if !exists {
 		return nil, fmt.Errorf("user not found")
 	}
@@ -612,18 +631,57 @@ func (a *AuthService) CreateUserFromOAuth(ctx context.Context, email, company, p
 
 // ValidateS3Request validates S3 API requests and returns tenant
 func (a *AuthService) ValidateS3Request(ctx context.Context, accessKey string) (*Tenant, error) {
+	a.cacheMu.RLock()
 	tenant, exists := a.keyIndex[accessKey]
+	apiKey, hasKey := a.apiKeys[accessKey]
+	a.cacheMu.RUnlock()
 	if !exists {
 		return nil, fmt.Errorf("invalid access key")
 	}
 
-	if apiKey, ok := a.apiKeys[accessKey]; ok {
+	if hasKey {
 		now := time.Now()
 		apiKey.LastUsed = &now
 		apiKey.UsageCount++
 	}
 
 	return tenant, nil
+}
+
+// Evict removes an erased account from the in-process credential cache
+// (WP-R10-3). S3 auth reads the database, but the dashboard login,
+// password checks and API-key validation read these maps, which are loaded
+// once at boot: without this an erased user could still sign in until the
+// next restart. The tenant is removed with every access key that pointed
+// at it and every API key that belonged to the user.
+func (a *AuthService) Evict(userID, tenantID string) {
+	a.cacheMu.Lock()
+	defer a.cacheMu.Unlock()
+	if u, ok := a.userIndex[userID]; ok {
+		delete(a.users, u.Email)
+		delete(a.userIndex, userID)
+	}
+	if t, ok := a.tenants[tenantID]; ok {
+		delete(a.keyIndex, t.AccessKey)
+		delete(a.tenants, tenantID)
+	}
+	for key, k := range a.apiKeys {
+		if k.UserID == userID || (tenantID != "" && k.TenantID == tenantID) {
+			delete(a.apiKeys, key)
+			delete(a.keyIndex, key)
+		}
+	}
+	for key, t := range a.keyIndex {
+		if tenantID != "" && t.ID == tenantID {
+			delete(a.keyIndex, key)
+		}
+	}
+	a.mfaMu.Lock()
+	delete(a.mfaSettings, userID)
+	delete(a.totpUsed, userID)
+	a.mfaMu.Unlock()
+	delete(a.profiles, userID)
+	delete(a.preferences, userID)
 }
 
 // GenerateJWT creates a JWT token for web access

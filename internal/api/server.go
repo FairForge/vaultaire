@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/account"
 	"github.com/FairForge/vaultaire/internal/audit"
 	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/billing"
@@ -93,9 +94,11 @@ type Server struct {
 	smartDemotion      *SmartDemotionRunner
 	smartPromoter      *SmartPromoter
 	multipartReaper    *MultipartReaper
-	quotaReconcileGate jobGate           // single-flight for POST /admin/quota-reconcile (Review R13-05)
-	retention          *RetentionJob     // nightly log-table pruner (Review R13-14, checklist item 5)
-	synthetic          *syntheticChecker // customer-path canary (Review R13-13, checklist item 4)
+	quotaReconcileGate jobGate                // single-flight for POST /admin/quota-reconcile (Review R13-05)
+	retention          *RetentionJob          // nightly log-table pruner (Review R13-14, checklist item 5)
+	accountSvc         *account.Service       // the one deletion state machine (WP-R10-3)
+	accountDeletion    *AccountDeletionRunner // daily erasure of accounts past their grace period (WP-R10-3)
+	synthetic          *syntheticChecker      // customer-path canary (Review R13-13, checklist item 4)
 	// multipartMaxUploadBytes caps a single multipart upload's accumulated
 	// in-flight part bytes (0 = unlimited). Part data lives unbilled on local
 	// disk until complete — without a cap one upload can fill the disk.
@@ -379,6 +382,10 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// (Review R13-13): off unless SYNTHETIC_CHECK_URL is set.
 	s.retention = NewRetentionJob(s.db, logger)
 	s.synthetic = newSyntheticCheckerFromEnv(os.Getenv, logger)
+	// The one account-deletion state machine (WP-R10-3): the management
+	// API, the user API and the dashboard schedule/cancel through it; the
+	// runner (built in Start, once Stripe/auth/sessions exist) erases.
+	s.accountSvc = account.NewService(s.db, logger)
 
 	s.multipartReaper = NewMultipartReaper(s.db, logger)
 	if s.multipartReaper != nil {
@@ -744,6 +751,7 @@ func (s *Server) setupRoutes() {
 		HealthChecker: &healthCheckerAdapter{s.healthChecker},
 		Flags:         s.flags,
 		Quotas:        houseQuotas(s.quotaManager),
+		Account:       s.accountSvc,
 	})
 
 	s.logger.Info("Registering management API routes")
@@ -862,6 +870,7 @@ func (s *Server) registerComplianceRoutes() {
 		r.Post("/smart-demotion", s.requireAdmin(s.handleSmartDemotionTrigger))
 		r.Post("/quota-reconcile", s.requireAdmin(s.handleQuotaReconcile))
 		r.Post("/retention", s.requireAdmin(s.handleRetentionTrigger))
+		r.Post("/account-deletion", s.requireAdmin(s.handleAccountDeletionTrigger))
 
 		// Feature flags (1.13): flip kill-switches / per-tenant enablement
 		// at runtime. updated_by comes from the JWT.
@@ -1262,6 +1271,22 @@ func (s *Server) Start() error {
 
 	// Nightly retention (catch-up at boot) and the synthetic customer check.
 	s.retention.Start(ctx)
+
+	// Account-deletion runner (WP-R10-3): daily 04:30 UTC with a catch-up at
+	// boot. Needs the engine (object walk) and the DB; Stripe when set.
+	if s.engine != nil {
+		s.accountDeletion = NewAccountDeletionRunner(s.db, s.logger, s.engine, s.gci, s.quotaManager, s.accountSvc)
+	}
+	if s.accountDeletion != nil {
+		if s.stripe != nil {
+			s.accountDeletion.Stripe = s.stripe
+		}
+		if s.auth != nil {
+			s.accountDeletion.Auth = s.auth
+		}
+		s.accountDeletion.Sessions = s.sessionStore
+		s.accountDeletion.Start(ctx)
+	}
 	s.synthetic.Start(ctx)
 
 	s.logger.Info("Starting server with RBAC and API Key Management",
