@@ -40,8 +40,10 @@ go test ./internal/auth/... -run TestCreateUserWithTenant -v
 
 # DB-backed tests: create/migrate the local test database first (idempotent).
 # Tests default to `vaultaire_test` (internal/testutil); DATABASE_URL overrides
-# (CI sets it). Never point tests at the shared dev DB `vaultaire` — several
-# tests DROP and recreate tables.
+# (CI sets it). Never point tests at the shared dev DB `vaultaire`. Packages run
+# in parallel on ONE database: a test may only touch its own tenant's rows —
+# no global reconcile, no table-wide DELETE/UPDATE, GCI cleanups bounded to the
+# hashes the fixture wrote (`cleanupTenantChunkRows`, Review R15).
 make test-db
 
 # Run a specific package
