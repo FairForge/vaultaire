@@ -473,17 +473,7 @@ func setupChunkingFixture(t *testing.T) *adapterTestFixture {
 	f.adapter.chunkingThreshold = 1024
 
 	t.Cleanup(func() {
-		_, _ = f.db.Exec("DELETE FROM tenant_chunk_refs WHERE tenant_id = $1", tenantUUID)
-		// Reclaim GCI rows this fixture created: its tenant-scoped (encrypted)
-		// rows, plus any now-orphaned rows (global chunks whose only refs were
-		// just deleted). Keeps table-wide GC assertions from seeing leaked rows.
-		_, _ = f.db.Exec(`DELETE FROM global_content_index g
-			WHERE g.dedup_scope = $1
-			   OR NOT EXISTS (
-				SELECT 1 FROM tenant_chunk_refs r
-				WHERE r.dedup_scope = g.dedup_scope AND r.plaintext_hash = g.plaintext_hash)`,
-			tenantUUID)
-		_, _ = f.db.Exec("DELETE FROM object_metadata WHERE tenant_id = $1", tenantUUID)
+		cleanupTenantChunkRows(f.db, tenantUUID.String(), tenantUUID.String())
 		_, _ = f.db.Exec("DELETE FROM object_head_cache WHERE tenant_id = $1", f.tenantID)
 		_, _ = f.db.Exec("DELETE FROM tenants WHERE id = $1", f.tenantID)
 	})

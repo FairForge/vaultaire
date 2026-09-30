@@ -377,6 +377,11 @@ func TestPresignedURL_Integration(t *testing.T) {
 	mock.ExpectQuery(`SELECT versioning_status FROM buckets`).
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectBegin()
+	// R15-17: writers of one key serialise on a per-key advisory lock BEFORE
+	// the probe (a missing row cannot be FOR UPDATE-locked).
+	mock.ExpectExec(`SELECT pg_advisory_xact_lock`).
+		WithArgs(testPresignTenantID, sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(`SELECT size_bytes, floor, COALESCE\(backend_name, ''\), is_chunked FROM object_head_cache`).
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectExec(`INSERT INTO object_head_cache`).

@@ -186,6 +186,21 @@ func atomicHeadUpsertReleasing(ctx context.Context, db *sql.DB, gci chunkManifes
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// Serialise writers of the same key BEFORE the probe. A row that does not
+	// exist yet cannot be locked by FOR UPDATE, so two concurrent first
+	// writers of a new key both saw "no previous row", both reported
+	// displaced = 0, and the loser's reserved bytes were never released — the
+	// tenant's ledger over-counted by one object until an admin reconcile
+	// (Review R15-17, TestAtomicHeadUpsert_ConcurrentFirstWritersAccountOnce).
+	// A transaction-scoped advisory lock on the key closes the gap for every
+	// writer (plain/chunked PUT, copy, multipart complete, background reports)
+	// since they all come through here; it is released at commit/rollback.
+	if _, err := tx.ExecContext(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext($1 || '/' || $2 || '/' || $3)::bigint)`,
+		tenantID, bucket, key); err != nil {
+		return displacedRow{}, fmt.Errorf("lock head-cache key: %w", err)
+	}
+
 	var displaced displacedRow
 	var displacedChunked bool
 	err = tx.QueryRowContext(ctx, `
