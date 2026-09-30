@@ -265,6 +265,15 @@ func (s *Server) CreateBucket(w http.ResponseWriter, r *http.Request) {
 		auth.EnsureTenantSlug(ctx, s.db, tenantID, s.logger)
 	}
 
+	// Re-creating an owned bucket is a no-op (ON CONFLICT DO NOTHING): the
+	// header describes the region the bucket HAS, not the one requested.
+	if s.db != nil {
+		var stored string
+		if err := s.db.QueryRowContext(ctx, `SELECT region FROM buckets WHERE tenant_id = $1 AND name = $2`,
+			tenantID, bucket).Scan(&stored); err == nil && stored != "" {
+			region = stored
+		}
+	}
 	w.Header().Set("x-amz-bucket-region", region)
 	w.Header().Set("Location", "/"+bucket)
 	emitEvent(ctx, s.db, s.logger, "bucket.created", tenantID, map[string]interface{}{
@@ -361,7 +370,59 @@ func (s *Server) DeleteBucket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if bucket exists
+	// With a database the registry decides (R4-04): the marker directory
+	// CreateBucket leaves under /tmp said nothing about the bucket's objects
+	// (a non-empty bucket was deleted; a bucket whose marker was wiped at
+	// boot could not be). Objects, versions/delete markers and in-progress
+	// multipart uploads all keep the bucket (AWS 409 BucketNotEmpty).
+	if s.db != nil && tenantID != "default" {
+		var exists bool
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM buckets WHERE tenant_id = $1 AND name = $2)`,
+			tenantID, bucket).Scan(&exists); err != nil {
+			s.logger.Error("delete bucket: registry lookup failed", zap.Error(err))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+		if !exists {
+			reqID := generateRequestID()
+			if suggestion := bucketSuggestion(ctx, s.db, tenantID, bucket); suggestion != "" {
+				WriteS3ErrorWithContext(w, ErrNoSuchBucket, r.URL.Path, reqID, WithSuggestion(suggestion))
+			} else {
+				WriteS3Error(w, ErrNoSuchBucket, r.URL.Path, reqID)
+			}
+			return
+		}
+		var objects, versions, uploads int
+		if err := s.db.QueryRowContext(ctx, `
+			SELECT
+				(SELECT COUNT(*) FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2),
+				(SELECT COUNT(*) FROM object_versions WHERE tenant_id = $1 AND bucket = $2),
+				(SELECT COUNT(*) FROM multipart_uploads WHERE tenant_id = $1 AND bucket = $2 AND status = 'active')`,
+			tenantID, bucket).Scan(&objects, &versions, &uploads); err != nil {
+			s.logger.Error("delete bucket: contents lookup failed", zap.Error(err))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+		if objects > 0 || versions > 0 || uploads > 0 {
+			WriteS3ErrorWithContext(w, ErrBucketNotEmpty, r.URL.Path, generateRequestID(),
+				WithSuggestion(fmt.Sprintf("The bucket still holds %d object(s), %d version(s) and %d in-progress multipart upload(s).", objects, versions, uploads)))
+			return
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM buckets WHERE tenant_id = $1 AND name = $2`, tenantID, bucket); err != nil {
+			s.logger.Error("delete bucket: registry delete failed", zap.Error(err))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+		_ = os.RemoveAll(dirPath) // the marker directory, if any
+		emitEvent(ctx, s.db, s.logger, "bucket.deleted", tenantID, map[string]interface{}{
+			"bucket": bucket,
+		})
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// No database (dev): the marker directory is all there is.
 	if _, err := os.Stat(dirPath); os.IsNotExist(err) {
 		reqID := generateRequestID()
 		if suggestion := bucketSuggestion(ctx, s.db, tenantID, bucket); suggestion != "" {

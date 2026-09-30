@@ -75,6 +75,7 @@ const (
 	ErrQuotaExceeded                     = "QuotaExceeded"
 	ErrServiceUnavailable                = "ServiceUnavailable"
 	ErrInvalidBucketState                = "InvalidBucketState"
+	ErrPreconditionFailed                = "PreconditionFailed"
 	ErrInvalidLocationConstraint         = "InvalidLocationConstraint"
 	ErrInvalidTag                        = "InvalidTag"
 	ErrInvalidObjectState                = "InvalidObjectState"
@@ -121,6 +122,7 @@ var errorMessages = map[string]string{
 	ErrQuotaExceeded:                     "Storage quota exceeded. Upgrade your plan for more storage.",
 	ErrServiceUnavailable:                "All storage backends are temporarily unavailable. Please retry.",
 	ErrInvalidBucketState:                "The request is not valid for the current state of the bucket.",
+	ErrPreconditionFailed:                "At least one of the pre-conditions you specified did not hold.",
 	ErrInvalidLocationConstraint:         "The specified location constraint is not valid.",
 	ErrInvalidTag:                        "The tag provided was not valid.",
 	ErrInvalidObjectState:                "The operation is not valid for the object's storage class",
@@ -167,6 +169,7 @@ var errorStatusCodes = map[string]int{
 	ErrQuotaExceeded:                     http.StatusForbidden,
 	ErrServiceUnavailable:                http.StatusServiceUnavailable,
 	ErrInvalidBucketState:                http.StatusConflict,
+	ErrPreconditionFailed:                http.StatusPreconditionFailed,
 	ErrInvalidLocationConstraint:         http.StatusBadRequest,
 	ErrInvalidTag:                        http.StatusBadRequest,
 	ErrInvalidObjectState:                http.StatusForbidden,

@@ -26,6 +26,8 @@ const (
 	presignAWS4Request   = "aws4_request"
 	presignMaxExpires    = 604800
 	presignDefaultRegion = "us-east-1"
+	// presignMaxClockSkew bounds how far in the future X-Amz-Date may lie.
+	presignMaxClockSkew = 15 * time.Minute
 )
 
 func isPresignedRequest(r *http.Request) bool {
@@ -65,8 +67,18 @@ func (s *Server) verifyPresignedURL(r *http.Request) (string, *auth.KeyScope, er
 		return "", nil, fmt.Errorf("%s", ErrAuthorizationQueryParametersError)
 	}
 
-	if time.Now().UTC().After(reqTime.Add(time.Duration(expires) * time.Second)) {
+	now := time.Now().UTC()
+	if now.After(reqTime.Add(time.Duration(expires) * time.Second)) {
 		return "", nil, fmt.Errorf("%s", ErrExpiredPresignedRequest)
+	}
+	// The 7-day cap is only a cap if the signing date is honest: a signer
+	// could otherwise mint a URL valid for years by dating it in the future
+	// (R5-12 / R4-08). AWS's clock-skew allowance applies.
+	if reqTime.After(now.Add(presignMaxClockSkew)) {
+		return "", nil, fmt.Errorf("%s", ErrRequestTimeTooSkewed)
+	}
+	if credDate != reqTime.Format(presignDateFormat) {
+		return "", nil, fmt.Errorf("%s", ErrAuthorizationQueryParametersError)
 	}
 
 	if s.db == nil {
@@ -208,7 +220,25 @@ func buildPresignCanonicalQuery(values url.Values) string {
 		copy(vs, values[k])
 		sort.Strings(vs)
 		for _, v := range vs {
-			pairs = append(pairs, url.QueryEscape(k)+"="+url.QueryEscape(v))
+			pairs = append(pairs, uriEncodeSegment(k)+"="+uriEncodeSegment(v))
+		}
+	}
+	return strings.Join(pairs, "&")
+}
+
+// presignQueryString renders values the way the canonical query is signed
+// (RFC 3986: unreserved characters bare, everything else %XX — a space is
+// %20, never '+'), so the URL we hand out verifies byte for byte.
+func presignQueryString(values url.Values) string {
+	var keys []string
+	for k := range values {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var pairs []string
+	for _, k := range keys {
+		for _, v := range values[k] {
+			pairs = append(pairs, uriEncodeSegment(k)+"="+uriEncodeSegment(v))
 		}
 	}
 	return strings.Join(pairs, "&")
@@ -301,6 +331,6 @@ func generatePresignedS3URL(baseURL, accessKey, secretKey, bucket, key, method s
 
 	q.Set("X-Amz-Signature", signature)
 
-	fullURL := baseURL + path + "?" + q.Encode()
+	fullURL := baseURL + canonicalURI + "?" + presignQueryString(q)
 	return fullURL, expiresAt
 }

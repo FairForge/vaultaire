@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,15 +15,32 @@ type httpRange struct {
 	length int64
 }
 
+// errMultiRange marks a syntactically valid multi-range request. We serve
+// single ranges only; a caller that sees it ignores the header and answers
+// 200 with the whole body, which RFC 9110 §14.2 permits (AWS does the same).
+var errMultiRange = errors.New("multi-range request")
+
+// rangeParseErr is parseRangeHeader's error alone, for callers that only
+// need to classify the header.
+func rangeParseErr(header string, totalSize int64) error {
+	_, err := parseRangeHeader(header, totalSize)
+	return err
+}
+
 func parseRangeHeader(header string, totalSize int64) (*httpRange, error) {
-	if header == "" || !strings.HasPrefix(header, "bytes=") {
+	// The range unit is case-insensitive (RFC 9110 §14.1).
+	if header == "" || len(header) < 6 || !strings.EqualFold(header[:6], "bytes=") {
 		return nil, fmt.Errorf("invalid range header")
 	}
 
-	spec := strings.TrimPrefix(header, "bytes=")
+	spec := strings.TrimSpace(header[6:])
 
 	if strings.Contains(spec, ",") {
-		return nil, fmt.Errorf("multi-range not supported")
+		return nil, errMultiRange
+	}
+	if totalSize <= 0 {
+		// Nothing satisfies a range on an empty object (AWS: 416).
+		return nil, fmt.Errorf("unsatisfiable range on a %d-byte object", totalSize)
 	}
 
 	parts := strings.SplitN(spec, "-", 2)

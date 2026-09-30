@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/tenant"
@@ -20,7 +21,13 @@ import (
 
 const defaultMaxKeys = 1000
 
-// ListObjectsV2Params holds parsed S3 ListObjectsV2 query parameters.
+// listPageSize bounds one database round trip while walking a listing; the
+// walk keeps fetching until max-keys results are in hand or the bucket is
+// exhausted, so a common prefix wider than one page cannot end the listing
+// early (Review R4-05).
+const listPageSize = 1000
+
+// ListObjectsV2Params holds parsed S3 ListObjects / ListObjectsV2 query parameters.
 type ListObjectsV2Params struct {
 	Bucket            string
 	Prefix            string
@@ -29,9 +36,13 @@ type ListObjectsV2Params struct {
 	ContinuationToken string
 	StartAfter        string
 	EncodingType      string
+	// V1 is a ListObjects (not list-type=2) request: paged with marker /
+	// NextMarker instead of continuation tokens.
+	V1     bool
+	Marker string
 }
 
-// ListBucketV2Result is the XML response for ListObjectsV2.
+// ListBucketV2Result is the XML response for ListObjects (v1) and ListObjectsV2.
 type ListBucketV2Result struct {
 	XMLName               xml.Name            `xml:"ListBucketResult"`
 	Xmlns                 string              `xml:"xmlns,attr"`
@@ -47,6 +58,8 @@ type ListBucketV2Result struct {
 	NextContinuationToken string              `xml:"NextContinuationToken,omitempty"`
 	StartAfter            string              `xml:"StartAfter,omitempty"`
 	EncodingType          string              `xml:"EncodingType,omitempty"`
+	Marker                string              `xml:"Marker,omitempty"`
+	NextMarker            string              `xml:"NextMarker,omitempty"`
 }
 
 // ListV2Entry represents a single object in the list response.
@@ -96,12 +109,8 @@ func parseListV2Params(r *http.Request, bucket string) ListObjectsV2Params {
 		ContinuationToken: q.Get("continuation-token"),
 		StartAfter:        q.Get("start-after"),
 		EncodingType:      q.Get("encoding-type"),
-	}
-
-	if params.ContinuationToken == "" && params.StartAfter == "" {
-		if marker := q.Get("marker"); marker != "" {
-			params.StartAfter = marker
-		}
+		V1:                q.Get("list-type") != "2",
+		Marker:            q.Get("marker"),
 	}
 
 	if mk := q.Get("max-keys"); mk != "" {
@@ -116,8 +125,122 @@ func parseListV2Params(r *http.Request, bucket string) ListObjectsV2Params {
 	return params
 }
 
-// HandleListV2 processes S3 ListObjectsV2 requests with pagination,
-// prefix, delimiter, continuation-token, and start-after support.
+// prefixSuccessor returns the smallest string greater (in byte order) than
+// every string that starts with p: the last rune advanced by one, carrying
+// past U+10FFFF and skipping the surrogate gap so the result stays valid
+// UTF-8 (PostgreSQL text rejects invalid UTF-8). "" has no successor.
+// Used to skip a whole common prefix with one bound, and as the upper bound
+// of a prefix range so the listing never needs LIKE (R9-19).
+func prefixSuccessor(p string) string {
+	for p != "" {
+		r, size := utf8.DecodeLastRuneInString(p)
+		head := p[:len(p)-size]
+		if r == utf8.RuneError && size <= 1 {
+			// Not valid UTF-8: advance the last byte.
+			b := p[len(p)-1]
+			if b < 0xff {
+				return head + string([]byte{b + 1})
+			}
+			p = head
+			continue
+		}
+		next := r + 1
+		if next >= 0xD800 && next <= 0xDFFF {
+			next = 0xE000
+		}
+		if next > utf8.MaxRune {
+			// Carry into the previous rune.
+			p = head
+			continue
+		}
+		return head + string(next)
+	}
+	return ""
+}
+
+// listSource yields the keys of one bucket (already restricted to the prefix)
+// in UTF-8 byte order, starting at lower (inclusive or exclusive) and below
+// upper ("" = unbounded), at most limit of them.
+type listSource interface {
+	fetch(ctx context.Context, lower string, inclusive bool, upper string, limit int) ([]ListV2Entry, error)
+}
+
+// walkList is the listing algorithm shared by the database and driver
+// sources. It keeps fetching pages until maxKeys results (keys + common
+// prefixes) are in hand or the source is exhausted; a common prefix is left
+// behind with its successor as the next lower bound, so a prefix holding a
+// million keys costs one row. Returns the results, whether more exist, and
+// the last emitted key or prefix (the continuation token / NextMarker).
+func walkList(ctx context.Context, src listSource, prefix, delimiter, lower string, inclusive bool, maxKeys int) ([]ListV2Entry, []CommonPrefixEntry, bool, string, error) {
+	upper := prefixSuccessor(prefix)
+	if lower < prefix {
+		lower, inclusive = prefix, true
+	}
+	var contents []ListV2Entry
+	var prefixes []CommonPrefixEntry
+	count := 0
+	last := ""
+	for {
+		need := maxKeys - count + 1 // one extra row tells us whether more exist
+		if need > listPageSize {
+			need = listPageSize
+		}
+		batch, err := src.fetch(ctx, lower, inclusive, upper, need)
+		if err != nil {
+			return nil, nil, false, "", err
+		}
+		if len(batch) == 0 {
+			return contents, prefixes, false, last, nil
+		}
+		skipped := false
+		for _, e := range batch {
+			if !strings.HasPrefix(e.Key, prefix) {
+				// Defensive: the sources filter by prefix; never stall on a
+				// stray row — move past it.
+				lower, inclusive = e.Key, false
+				continue
+			}
+			rest := e.Key[len(prefix):]
+			if delimiter != "" {
+				if idx := strings.Index(rest, delimiter); idx >= 0 {
+					cp := prefix + rest[:idx+len(delimiter)]
+					if count >= maxKeys {
+						return contents, prefixes, true, last, nil
+					}
+					prefixes = append(prefixes, CommonPrefixEntry{Prefix: cp})
+					count++
+					last = cp
+					lower, inclusive = prefixSuccessor(cp), true
+					skipped = true
+					break
+				}
+			}
+			if count >= maxKeys {
+				return contents, prefixes, true, last, nil
+			}
+			contents = append(contents, e)
+			count++
+			last = e.Key
+			lower, inclusive = e.Key, false
+		}
+		if !skipped && len(batch) < need {
+			return contents, prefixes, false, last, nil
+		}
+	}
+}
+
+// resumeAfter turns a continuation token / marker (the last emitted key or
+// common prefix) into the next lower bound: a common prefix is skipped whole
+// via its successor, a key is exclusive.
+func resumeAfter(token, delimiter string) (lower string, inclusive bool) {
+	if delimiter != "" && strings.HasSuffix(token, delimiter) {
+		return prefixSuccessor(token), true
+	}
+	return token, false
+}
+
+// HandleListV2 processes S3 ListObjects (v1) and ListObjectsV2 requests with
+// pagination, prefix, delimiter, continuation-token / marker and start-after.
 func (a *S3ToEngine) HandleListV2(w http.ResponseWriter, r *http.Request, bucket string) {
 	t, err := tenant.FromContext(r.Context())
 	if err != nil {
@@ -134,32 +257,57 @@ func (a *S3ToEngine) HandleListV2(w http.ResponseWriter, r *http.Request, bucket
 		return
 	}
 
-	cursor := ""
-	if params.ContinuationToken != "" {
-		cursor, err = decodeContinuationToken(params.ContinuationToken)
-		if err != nil {
+	// Cursor precedence: continuation-token, start-after, marker. A v1
+	// request (no list-type=2) pages on marker/NextMarker, but every response
+	// also carries the v2 fields — clients have always paged on them here.
+	lower, inclusive := "", true
+	switch {
+	case params.ContinuationToken != "":
+		token, decErr := decodeContinuationToken(params.ContinuationToken)
+		if decErr != nil {
 			WriteS3Error(w, ErrInvalidRequest, r.URL.Path, generateRequestID())
 			return
 		}
-	} else if params.StartAfter != "" {
-		cursor = params.StartAfter
+		lower, inclusive = resumeAfter(token, params.Delimiter)
+	case params.StartAfter != "":
+		lower, inclusive = params.StartAfter, false
+	case params.Marker != "":
+		lower, inclusive = resumeAfter(params.Marker, params.Delimiter)
 	}
 
-	var rawEntries []ListV2Entry
+	var src listSource
 	if a.db != nil {
-		rawEntries, err = a.fetchListBatch(r.Context(), t.ID, bucket, params.Prefix, cursor, params.MaxKeys, params.Delimiter)
+		// A bucket with no registry row and no objects does not exist (AWS
+		// 404); a phantom container that holds objects still lists (WP-R4-5).
+		var exists bool
+		if qErr := a.db.QueryRowContext(r.Context(), `
+			SELECT EXISTS(SELECT 1 FROM buckets WHERE tenant_id = $1 AND name = $2)
+			    OR EXISTS(SELECT 1 FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2)`,
+			t.ID, bucket).Scan(&exists); qErr != nil {
+			a.logger.Error("list objects: bucket lookup failed", zap.Error(qErr))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+		if !exists {
+			reqID := generateRequestID()
+			if suggestion := bucketSuggestion(r.Context(), a.db, t.ID, bucket); suggestion != "" {
+				WriteS3ErrorWithContext(w, ErrNoSuchBucket, r.URL.Path, reqID, WithSuggestion(suggestion))
+			} else {
+				WriteS3Error(w, ErrNoSuchBucket, r.URL.Path, reqID)
+			}
+			return
+		}
+		src = &dbListSource{db: a.db, tenantID: t.ID, bucket: bucket}
 	} else {
-		rawEntries, err = a.listFromDriver(r.Context(), t, bucket, params.Prefix, cursor)
+		src = &driverListSource{eng: a.engine, tenant: t, bucket: bucket, prefix: params.Prefix}
 	}
+
+	contents, commonPrefixes, isTruncated, last, err := walkList(r.Context(), src, params.Prefix, params.Delimiter, lower, inclusive, params.MaxKeys)
 	if err != nil {
 		a.logger.Error("list objects failed", zap.String("bucket", bucket), zap.Error(err))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return
 	}
-
-	contents, commonPrefixes, isTruncated, lastKey := processListEntries(
-		rawEntries, params.Prefix, params.Delimiter, params.MaxKeys,
-	)
 
 	result := ListBucketV2Result{
 		Xmlns:          "http://s3.amazonaws.com/doc/2006-03-01/",
@@ -181,8 +329,14 @@ func (a *S3ToEngine) HandleListV2(w http.ResponseWriter, r *http.Request, bucket
 	if params.StartAfter != "" {
 		result.StartAfter = params.StartAfter
 	}
-	if isTruncated && lastKey != "" {
-		result.NextContinuationToken = encodeContinuationToken(lastKey)
+	if isTruncated && last != "" {
+		result.NextContinuationToken = encodeContinuationToken(last)
+	}
+	if params.V1 {
+		result.Marker = params.Marker
+		if isTruncated && last != "" {
+			result.NextMarker = last
+		}
 	}
 
 	// encoding-type=url: percent-encode every field that carries a key or
@@ -192,6 +346,8 @@ func (a *S3ToEngine) HandleListV2(w http.ResponseWriter, r *http.Request, bucket
 		result.Prefix = s3URLEncode(result.Prefix)
 		result.Delimiter = s3URLEncode(result.Delimiter)
 		result.StartAfter = s3URLEncode(result.StartAfter)
+		result.Marker = s3URLEncode(result.Marker)
+		result.NextMarker = s3URLEncode(result.NextMarker)
 		for i := range result.Contents {
 			result.Contents[i].Key = s3URLEncode(result.Contents[i].Key)
 		}
@@ -210,60 +366,30 @@ func (a *S3ToEngine) HandleListV2(w http.ResponseWriter, r *http.Request, bucket
 	}
 }
 
-// fetchListBatch queries object_head_cache for a page of objects.
-func (a *S3ToEngine) fetchListBatch(ctx context.Context, tenantID, bucket, prefix, cursor string, maxKeys int, delimiter string) ([]ListV2Entry, error) {
-	fetchLimit := maxKeys + 1
-	if delimiter != "" {
-		fetchLimit = maxKeys * 10
-		if fetchLimit < 1000 {
-			fetchLimit = 1000
-		}
-		if fetchLimit > 10000 {
-			fetchLimit = 10000
-		}
+// dbListSource pages object_head_cache in UTF-8 byte order. The explicit
+// COLLATE "C" is what S3 clients rely on (prod's database collation is
+// en_US.UTF-8, which sorts `a-b` before `B` and `_x` after `ab` — R4-05);
+// migration 069's index carries the same collation so the range and the
+// order both use it.
+type dbListSource struct {
+	db       *sql.DB
+	tenantID string
+	bucket   string
+}
+
+func (s *dbListSource) fetch(ctx context.Context, lower string, inclusive bool, upper string, limit int) ([]ListV2Entry, error) {
+	cmp := ">"
+	if inclusive {
+		cmp = ">="
 	}
-
-	escapedPrefix := strings.ReplaceAll(prefix, `\`, `\\`)
-	escapedPrefix = strings.ReplaceAll(escapedPrefix, `%`, `\%`)
-	escapedPrefix = strings.ReplaceAll(escapedPrefix, `_`, `\_`)
-	likePattern := escapedPrefix + "%"
-
-	var rows *sql.Rows
-	var err error
-
-	switch {
-	case prefix == "" && cursor == "":
-		rows, err = a.db.QueryContext(ctx,
-			`SELECT object_key, size_bytes, etag, content_type, updated_at, COALESCE(backend_name, '')
-			 FROM object_head_cache
-			 WHERE tenant_id = $1 AND bucket = $2
-			 ORDER BY object_key ASC
-			 LIMIT $3`, tenantID, bucket, fetchLimit)
-	case prefix == "":
-		rows, err = a.db.QueryContext(ctx,
-			`SELECT object_key, size_bytes, etag, content_type, updated_at, COALESCE(backend_name, '')
-			 FROM object_head_cache
-			 WHERE tenant_id = $1 AND bucket = $2 AND object_key > $3
-			 ORDER BY object_key ASC
-			 LIMIT $4`, tenantID, bucket, cursor, fetchLimit)
-	case cursor == "":
-		rows, err = a.db.QueryContext(ctx,
-			`SELECT object_key, size_bytes, etag, content_type, updated_at, COALESCE(backend_name, '')
-			 FROM object_head_cache
-			 WHERE tenant_id = $1 AND bucket = $2
-			   AND object_key LIKE $3 ESCAPE '\'
-			 ORDER BY object_key ASC
-			 LIMIT $4`, tenantID, bucket, likePattern, fetchLimit)
-	default:
-		rows, err = a.db.QueryContext(ctx,
-			`SELECT object_key, size_bytes, etag, content_type, updated_at, COALESCE(backend_name, '')
-			 FROM object_head_cache
-			 WHERE tenant_id = $1 AND bucket = $2
-			   AND object_key LIKE $3 ESCAPE '\'
-			   AND object_key > $4
-			 ORDER BY object_key ASC
-			 LIMIT $5`, tenantID, bucket, likePattern, cursor, fetchLimit)
-	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT object_key, size_bytes, etag, content_type, updated_at, COALESCE(backend_name, '')
+		FROM object_head_cache
+		WHERE tenant_id = $1 AND bucket = $2
+		  AND object_key COLLATE "C" `+cmp+` $3::text
+		  AND ($4::text = '' OR object_key COLLATE "C" < $4::text)
+		ORDER BY object_key COLLATE "C" ASC
+		LIMIT $5`, s.tenantID, s.bucket, lower, upper, limit)
 	if err != nil {
 		return nil, fmt.Errorf("query object_head_cache: %w", err)
 	}
@@ -295,29 +421,33 @@ func (a *S3ToEngine) fetchListBatch(ctx context.Context, tenantID, bucket, prefi
 	if rowErr := rows.Err(); rowErr != nil {
 		return nil, fmt.Errorf("iterate object_head_cache: %w", rowErr)
 	}
-
 	return entries, nil
 }
 
-// listFromDriver falls back to the engine driver when DB is unavailable.
-func (a *S3ToEngine) listFromDriver(ctx context.Context, t *tenant.Tenant, bucket, prefix, cursor string) ([]ListV2Entry, error) {
-	container := t.NamespaceContainer(bucket)
-	artifacts, err := a.engine.List(ctx, container, prefix)
-	if err != nil {
-		return nil, fmt.Errorf("engine list: %w", err)
+// driverListSource is the no-database fallback: one engine List, sorted in
+// byte order and sliced per fetch.
+type driverListSource struct {
+	eng    engine.Engine
+	tenant *tenant.Tenant
+	bucket string
+	prefix string
+	loaded bool
+	all    []ListV2Entry
+}
+
+func (s *driverListSource) load(ctx context.Context) error {
+	if s.loaded {
+		return nil
 	}
-
-	sort.Slice(artifacts, func(i, j int) bool {
-		return artifacts[i].Key < artifacts[j].Key
-	})
-
+	container := s.tenant.NamespaceContainer(s.bucket)
+	artifacts, err := s.eng.List(ctx, container, s.prefix)
+	if err != nil {
+		return fmt.Errorf("engine list: %w", err)
+	}
+	sort.Slice(artifacts, func(i, j int) bool { return artifacts[i].Key < artifacts[j].Key })
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
-	var entries []ListV2Entry
 	for _, art := range artifacts {
-		if prefix != "" && !strings.HasPrefix(art.Key, prefix) {
-			continue
-		}
-		if cursor != "" && art.Key <= cursor {
+		if s.prefix != "" && !strings.HasPrefix(art.Key, s.prefix) {
 			continue
 		}
 		modified := now
@@ -328,7 +458,7 @@ func (a *S3ToEngine) listFromDriver(ctx context.Context, t *tenant.Tenant, bucke
 		if etag != "" && !strings.HasPrefix(etag, `"`) {
 			etag = `"` + etag + `"`
 		}
-		entries = append(entries, ListV2Entry{
+		s.all = append(s.all, ListV2Entry{
 			Key:          art.Key,
 			Size:         art.Size,
 			ETag:         etag,
@@ -336,58 +466,49 @@ func (a *S3ToEngine) listFromDriver(ctx context.Context, t *tenant.Tenant, bucke
 			StorageClass: "STANDARD",
 		})
 	}
-
-	return entries, nil
+	s.loaded = true
+	return nil
 }
 
-// processListEntries applies delimiter grouping and max-keys truncation.
-// Returns contents, commonPrefixes, isTruncated, and the last key examined.
+func (s *driverListSource) fetch(ctx context.Context, lower string, inclusive bool, upper string, limit int) ([]ListV2Entry, error) {
+	if err := s.load(ctx); err != nil {
+		return nil, err
+	}
+	return sliceListEntries(s.all, lower, inclusive, upper, limit), nil
+}
+
+// sliceListEntries applies a fetch window to an in-memory, byte-ordered list.
+func sliceListEntries(all []ListV2Entry, lower string, inclusive bool, upper string, limit int) []ListV2Entry {
+	var out []ListV2Entry
+	for _, e := range all {
+		if e.Key < lower || (!inclusive && e.Key == lower) {
+			continue
+		}
+		if upper != "" && e.Key >= upper {
+			break
+		}
+		out = append(out, e)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+// memListSource wraps a byte-ordered slice as a listSource.
+type memListSource []ListV2Entry
+
+func (m memListSource) fetch(_ context.Context, lower string, inclusive bool, upper string, limit int) ([]ListV2Entry, error) {
+	return sliceListEntries(m, lower, inclusive, upper, limit), nil
+}
+
+// processListEntries applies delimiter grouping and max-keys truncation to an
+// already-sorted slice (kept for the in-memory callers and their tests).
+// Returns contents, commonPrefixes, isTruncated, and the last emitted key or
+// prefix — the continuation token.
 func processListEntries(entries []ListV2Entry, prefix, delimiter string, maxKeys int) ([]ListV2Entry, []CommonPrefixEntry, bool, string) {
-	if delimiter == "" {
-		if len(entries) > maxKeys {
-			lastKey := ""
-			if maxKeys > 0 {
-				lastKey = entries[maxKeys-1].Key
-			}
-			return entries[:maxKeys], nil, true, lastKey
-		}
-		lastKey := ""
-		if len(entries) > 0 {
-			lastKey = entries[len(entries)-1].Key
-		}
-		return entries, nil, false, lastKey
-	}
-
-	var contents []ListV2Entry
-	var commonPrefixes []CommonPrefixEntry
-	seen := make(map[string]bool)
-	count := 0
-	var lastKey string
-
-	for _, entry := range entries {
-		lastKey = entry.Key
-
-		keyAfterPrefix := entry.Key[len(prefix):]
-		idx := strings.Index(keyAfterPrefix, delimiter)
-
-		if idx >= 0 {
-			cp := prefix + keyAfterPrefix[:idx+len(delimiter)]
-			if !seen[cp] {
-				if count >= maxKeys {
-					return contents, commonPrefixes, true, lastKey
-				}
-				seen[cp] = true
-				commonPrefixes = append(commonPrefixes, CommonPrefixEntry{Prefix: cp})
-				count++
-			}
-		} else {
-			if count >= maxKeys {
-				return contents, commonPrefixes, true, lastKey
-			}
-			contents = append(contents, entry)
-			count++
-		}
-	}
-
-	return contents, commonPrefixes, false, lastKey
+	sorted := append([]ListV2Entry(nil), entries...)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Key < sorted[j].Key })
+	contents, prefixes, truncated, last, _ := walkList(context.Background(), memListSource(sorted), prefix, delimiter, prefix, true, maxKeys)
+	return contents, prefixes, truncated, last
 }

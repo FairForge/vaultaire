@@ -151,7 +151,10 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 	defer func() { _ = reader.Close() }()
 
 	rangeHeader := r.Header.Get("Range")
-	if rangeHeader != "" && sizeBytes > 0 {
+	if rangeHeader != "" && errors.Is(rangeParseErr(rangeHeader, sizeBytes), errMultiRange) {
+		rangeHeader = "" // served whole (RFC 9110 §14.2)
+	}
+	if rangeHeader != "" {
 		rng, parseErr := parseRangeHeader(rangeHeader, sizeBytes)
 		if parseErr != nil {
 			writeRangeNotSatisfiable(w, sizeBytes)

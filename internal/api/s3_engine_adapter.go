@@ -520,7 +520,10 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	setEchoHeaders(w.Header(), cachedEcho.CacheControl, cachedEcho.Expires, cachedEcho.WebsiteRedirect)
 
 	rangeHeader := r.Header.Get("Range")
-	if rangeHeader != "" && cacheHit && cachedSize > 0 {
+	if rangeHeader != "" && cacheHit && errors.Is(rangeParseErr(rangeHeader, cachedSize), errMultiRange) {
+		rangeHeader = "" // RFC 9110 §14.2: a multi-range request may be served whole
+	}
+	if rangeHeader != "" && cacheHit {
 		rng, parseErr := parseRangeHeader(rangeHeader, cachedSize)
 		if parseErr != nil {
 			writeRangeNotSatisfiable(w, cachedSize)
@@ -735,6 +738,13 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		return
 	}
 	metaJSON, _ := json.Marshal(userMeta)
+	// PutObject replaces the tag set: the x-amz-tagging header, or none.
+	putTags, tagErr := parseTaggingHeader(r.Header.Get("x-amz-tagging"))
+	if tagErr != nil {
+		WriteS3ErrorWithContext(w, ErrInvalidTag, r.URL.Path, generateRequestID(), WithSuggestion(tagErr.Error()))
+		return
+	}
+	tagsJSON, _ := json.Marshal(putTags)
 	wantMD5, md5Err := parseContentMD5(r)
 	if md5Err != nil {
 		WriteS3Error(w, ErrInvalidDigest, r.URL.Path, generateRequestID())
@@ -1048,8 +1058,8 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		displaced, dbErr := atomicHeadUpsertReleasing(r.Context(), a.db, manifestReleaser(a.gci), t.ID, bucket, artifact, func(tx *sql.Tx) error {
 			_, execErr := tx.ExecContext(r.Context(), `
 				INSERT INTO object_head_cache
-					(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, content_encoding, content_language, cache_control, http_expires, website_redirect_location, floor, is_chunked, updated_at)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, FALSE, NOW())
+					(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, content_encoding, content_language, cache_control, http_expires, website_redirect_location, floor, is_chunked, tags, updated_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, FALSE, $17, NOW())
 				ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
 					size_bytes            = EXCLUDED.size_bytes,
 					etag                  = EXCLUDED.etag,
@@ -1065,8 +1075,9 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 					website_redirect_location = EXCLUDED.website_redirect_location,
 					floor                 = EXCLUDED.floor,
 					is_chunked            = EXCLUDED.is_chunked,
+					tags                  = EXCLUDED.tags,
 					updated_at            = NOW()
-			`, t.ID, bucket, artifact, metadataSize, etag, contentType, backendName, metaJSON, encryptionAlgorithm, contentDisposition, contentEncoding, contentLanguage, echoHdrs.CacheControl, echoHdrs.Expires, echoHdrs.WebsiteRedirect, usage.FloorOf(resolvedStorageClass))
+			`, t.ID, bucket, artifact, metadataSize, etag, contentType, backendName, metaJSON, encryptionAlgorithm, contentDisposition, contentEncoding, contentLanguage, echoHdrs.CacheControl, echoHdrs.Expires, echoHdrs.WebsiteRedirect, usage.FloorOf(resolvedStorageClass), tagsJSON)
 			return execErr
 		})
 		a.displaced = displaced
@@ -1148,6 +1159,10 @@ func (a *S3ToEngine) handleChunkedPut(
 	hasher hash.Hash,
 	wantMD5 string,
 ) error {
+	// Tag set for the head row (validated in HandlePut before the body was
+	// read; re-parsed here because the chunked path builds its own row).
+	chunkTags, _ := parseTaggingHeader(r.Header.Get("x-amz-tagging"))
+	tagsJSON, _ := json.Marshal(chunkTags)
 	ctx := r.Context()
 
 	// pctx cancels the chunker, the store workers, and their DB work as one
@@ -1358,8 +1373,8 @@ func (a *S3ToEngine) handleChunkedPut(
 		}
 		_, execErr := tx.ExecContext(ctx, `
 			INSERT INTO object_head_cache
-				(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, content_encoding, content_language, cache_control, http_expires, website_redirect_location, floor, is_chunked, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'standard', TRUE, NOW())
+				(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, content_encoding, content_language, cache_control, http_expires, website_redirect_location, floor, is_chunked, tags, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'standard', TRUE, $16, NOW())
 			ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
 				size_bytes            = EXCLUDED.size_bytes,
 				etag                  = EXCLUDED.etag,
@@ -1375,8 +1390,9 @@ func (a *S3ToEngine) handleChunkedPut(
 				website_redirect_location = EXCLUDED.website_redirect_location,
 				floor                 = EXCLUDED.floor,
 				is_chunked            = EXCLUDED.is_chunked,
+				tags                  = EXCLUDED.tags,
 				updated_at            = NOW()
-		`, t.ID, bucket, artifact, measuredSize, etag, contentType, backendName, metaJSON, chunkEncAlgo, contentDisposition, contentEncoding, contentLanguage, echoHdrs.CacheControl, echoHdrs.Expires, echoHdrs.WebsiteRedirect)
+		`, t.ID, bucket, artifact, measuredSize, etag, contentType, backendName, metaJSON, chunkEncAlgo, contentDisposition, contentEncoding, contentLanguage, echoHdrs.CacheControl, echoHdrs.Expires, echoHdrs.WebsiteRedirect, tagsJSON)
 		return execErr
 	})
 	a.displaced = displaced
@@ -1710,7 +1726,7 @@ func (a *S3ToEngine) handleChunkedGet(
 		rng     *httpRange
 		isRange bool
 	)
-	if rh := r.Header.Get("Range"); rh != "" && cachedSize > 0 {
+	if rh := r.Header.Get("Range"); rh != "" && !errors.Is(rangeParseErr(rh, cachedSize), errMultiRange) {
 		parsed, parseErr := parseRangeHeader(rh, cachedSize)
 		if parseErr != nil {
 			writeRangeNotSatisfiable(w, cachedSize)

@@ -34,6 +34,10 @@ type objectAttrs struct {
 	Expires            string
 	WebsiteRedirect    string
 	Metadata           map[string]string
+	// Tags is the object's tag set (x-amz-tagging on PUT / CopyObject
+	// REPLACE, the source's under COPY, empty otherwise). Written on every
+	// whole-object upsert: a tag set used to survive an overwrite (R4-06).
+	Tags map[string]string
 }
 
 // objectAttrsFromRequest reads the attributes a PUT-shaped request carries.
@@ -42,6 +46,10 @@ type objectAttrs struct {
 func objectAttrsFromRequest(r *http.Request) (objectAttrs, error) {
 	meta := extractS3Metadata(r)
 	if err := validateMetadata(meta); err != nil {
+		return objectAttrs{}, err
+	}
+	tags, err := parseTaggingHeader(r.Header.Get("x-amz-tagging"))
+	if err != nil {
 		return objectAttrs{}, err
 	}
 	echo := requestEchoHeaders(r)
@@ -58,7 +66,17 @@ func objectAttrsFromRequest(r *http.Request) (objectAttrs, error) {
 		Expires:            echo.Expires,
 		WebsiteRedirect:    echo.WebsiteRedirect,
 		Metadata:           meta,
+		Tags:               tags,
 	}, nil
+}
+
+func (o objectAttrs) tagsJSON() []byte {
+	m := o.Tags
+	if m == nil {
+		m = map[string]string{}
+	}
+	b, _ := json.Marshal(m)
+	return b
 }
 
 func (o objectAttrs) metadataJSON() []byte {
@@ -75,19 +93,22 @@ func (o objectAttrs) metadataJSON() []byte {
 // no row.
 func loadHeadAttrs(ctx context.Context, db *sql.DB, tenantID, bucket, key string) (objectAttrs, error) {
 	var a objectAttrs
-	var metaJSON []byte
+	var metaJSON, tagsJSON []byte
 	err := db.QueryRowContext(ctx, `
 		SELECT content_type, metadata, content_disposition, content_encoding, content_language,
-		       cache_control, http_expires, website_redirect_location
+		       cache_control, http_expires, website_redirect_location, COALESCE(tags, '{}')
 		FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
 		tenantID, bucket, key).Scan(&a.ContentType, &metaJSON, &a.ContentDisposition, &a.ContentEncoding,
-		&a.ContentLanguage, &a.CacheControl, &a.Expires, &a.WebsiteRedirect)
+		&a.ContentLanguage, &a.CacheControl, &a.Expires, &a.WebsiteRedirect, &tagsJSON)
 	if err != nil {
 		return objectAttrs{}, err
 	}
 	if len(metaJSON) > 0 {
 		_ = json.Unmarshal(metaJSON, &a.Metadata)
+	}
+	if len(tagsJSON) > 0 {
+		_ = json.Unmarshal(tagsJSON, &a.Tags)
 	}
 	if a.ContentType == "" {
 		a.ContentType = "application/octet-stream"
@@ -109,8 +130,8 @@ func upsertWholeObjectHeadRow(ctx context.Context, tx *sql.Tx, tenantID, bucket,
 		INSERT INTO object_head_cache
 			(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata,
 			 encryption_algorithm, content_disposition, content_encoding, content_language,
-			 cache_control, http_expires, website_redirect_location, floor, is_chunked, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '', $9, $10, $11, $12, $13, $14, $15, FALSE, NOW())
+			 cache_control, http_expires, website_redirect_location, floor, is_chunked, tags, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '', $9, $10, $11, $12, $13, $14, $15, FALSE, $16, NOW())
 		ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
 			size_bytes                = EXCLUDED.size_bytes,
 			etag                      = EXCLUDED.etag,
@@ -126,10 +147,11 @@ func upsertWholeObjectHeadRow(ctx context.Context, tx *sql.Tx, tenantID, bucket,
 			website_redirect_location = EXCLUDED.website_redirect_location,
 			floor                     = EXCLUDED.floor,
 			is_chunked                = FALSE,
+			tags                      = EXCLUDED.tags,
 			updated_at                = NOW()`,
 		tenantID, bucket, key, size, etag, attrs.ContentType, backendName, attrs.metadataJSON(),
 		attrs.ContentDisposition, attrs.ContentEncoding, attrs.ContentLanguage,
-		attrs.CacheControl, attrs.Expires, attrs.WebsiteRedirect, floor)
+		attrs.CacheControl, attrs.Expires, attrs.WebsiteRedirect, floor, attrs.tagsJSON())
 	if err != nil {
 		return fmt.Errorf("upsert head row %s/%s: %w", bucket, key, err)
 	}

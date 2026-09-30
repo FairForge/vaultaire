@@ -38,7 +38,12 @@ func isInlineRenderable(contentType string) bool {
 	// X-Content-Type-Options: nosniff does not help — these are correctly
 	// typed, not sniffed.
 	switch ct {
-	case "text/html", "application/xhtml+xml", "image/svg+xml":
+	case "text/html", "application/xhtml+xml", "image/svg+xml", "text/xml", "application/xml":
+		return false
+	}
+	// XML documents can carry an xml-stylesheet XSLT that runs script
+	// (R2-14 / R4-03); every +xml subtype is treated as XML.
+	if strings.HasSuffix(ct, "+xml") {
 		return false
 	}
 	return strings.HasPrefix(ct, "image/") ||
@@ -69,14 +74,22 @@ func attachmentDisposition(key string) string {
 //  2. a stored Content-Disposition on the object → use it
 //  3. a browser-renderable content type → inline
 //  4. otherwise → attachment (safe default)
+//
+// A stored disposition never overrides the renderable check: an object
+// uploaded with `Content-Disposition: inline` and a scriptable type used to
+// be served inline on the shared CDN origin (R4-03, live-proven stored XSS).
 func cdnContentDisposition(forceDownload bool, stored, contentType, key string) string {
 	if forceDownload {
 		return attachmentDisposition(key)
 	}
+	renderable := isInlineRenderable(contentType)
 	if s := sanitizeContentDisposition(stored); s != "" {
-		return s
+		if renderable || strings.HasPrefix(strings.ToLower(strings.TrimSpace(s)), "attachment") {
+			return s
+		}
+		return attachmentDisposition(key)
 	}
-	if isInlineRenderable(contentType) {
+	if renderable {
 		return "inline"
 	}
 	return attachmentDisposition(key)

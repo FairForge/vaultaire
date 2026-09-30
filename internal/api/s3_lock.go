@@ -133,6 +133,19 @@ func (s *Server) handlePutObjectLockConfiguration(w http.ResponseWriter, r *http
 	mode := ""
 	days := 0
 
+	// Object Lock cannot be turned off once enabled (AWS): a configuration
+	// without ObjectLockEnabled used to disable it and clear the defaults.
+	if !enabled {
+		var current bool
+		if err := s.db.QueryRowContext(r.Context(),
+			`SELECT object_lock_enabled FROM buckets WHERE tenant_id = $1 AND name = $2`,
+			t.ID, req.Bucket).Scan(&current); err == nil && current {
+			WriteS3ErrorWithContext(w, ErrInvalidBucketState, r.URL.Path, generateRequestID(),
+				WithSuggestion("Object Lock cannot be disabled once it is enabled on a bucket."))
+			return
+		}
+	}
+
 	if config.Rule != nil && config.Rule.DefaultRetention != nil {
 		dr := config.Rule.DefaultRetention
 		if dr.Mode != "GOVERNANCE" && dr.Mode != "COMPLIANCE" {
@@ -258,17 +271,59 @@ func (s *Server) handlePutObjectRetention(w http.ResponseWriter, r *http.Request
 		WriteS3Error(w, ErrInvalidRetentionPeriod, r.URL.Path, generateRequestID())
 		return
 	}
+	// AWS: the retain-until date must be in the future.
+	if !retainUntil.After(time.Now()) {
+		WriteS3ErrorWithContext(w, ErrInvalidArgument, r.URL.Path, generateRequestID(),
+			WithSuggestion("The retain until date must be in the future."))
+		return
+	}
 
-	if config.Mode == "COMPLIANCE" {
-		var existingMode string
-		var existingUntil sql.NullTime
-		err := s.db.QueryRowContext(r.Context(),
-			`SELECT retention_mode, retain_until_date FROM object_locks
-			 WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-			t.ID, req.Bucket, req.Object).Scan(&existingMode, &existingUntil)
-		if err == nil && existingMode == "COMPLIANCE" && existingUntil.Valid {
-			if retainUntil.Before(existingUntil.Time) {
-				WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
+	// Retention applies to an object that exists (a lock row for a key with
+	// no head row used to be created — R4-01).
+	var exists bool
+	if err := s.db.QueryRowContext(r.Context(),
+		`SELECT EXISTS(SELECT 1 FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3)`,
+		t.ID, req.Bucket, req.Object).Scan(&exists); err != nil {
+		s.logger.Error("retention: head-cache lookup failed", zap.Error(err))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return
+	}
+	if !exists {
+		WriteS3Error(w, ErrNoSuchKey, r.URL.Path, generateRequestID())
+		return
+	}
+
+	// The Object Lock model (R4-01, live-proven bypass before this):
+	//   COMPLIANCE — the mode can never change and the period can only be
+	//                extended, by anyone including the root key;
+	//   GOVERNANCE — shortening or removing the period needs the bypass
+	//                header (WP-R4-1 ties it to a permission); extending
+	//                and upgrading to COMPLIANCE never do.
+	// An expired retention is inert and may be replaced freely.
+	var existingMode string
+	var existingUntil sql.NullTime
+	err = s.db.QueryRowContext(r.Context(),
+		`SELECT retention_mode, retain_until_date FROM object_locks
+		 WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+		t.ID, req.Bucket, req.Object).Scan(&existingMode, &existingUntil)
+	if err != nil && err != sql.ErrNoRows {
+		s.logger.Error("retention: lock lookup failed", zap.Error(err))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return
+	}
+	if err == nil && existingUntil.Valid && existingUntil.Time.After(time.Now()) {
+		shortens := retainUntil.Before(existingUntil.Time)
+		switch existingMode {
+		case "COMPLIANCE":
+			if config.Mode != "COMPLIANCE" || shortens {
+				WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
+					WithSuggestion("COMPLIANCE retention can only be extended; its mode cannot be changed."))
+				return
+			}
+		case "GOVERNANCE":
+			if shortens && !isObjectLockBypass(r) {
+				WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
+					WithSuggestion("Shortening GOVERNANCE retention requires x-amz-bypass-governance-retention."))
 				return
 			}
 		}
