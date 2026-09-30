@@ -2,7 +2,6 @@
 package drivers
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -13,7 +12,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"go.uber.org/zap"
 
 	"github.com/FairForge/vaultaire/internal/common"
@@ -30,16 +28,14 @@ const (
 // IDriveDriver implements Driver interface for iDrive E2 storage.
 // Uses a fixed bucket with tenant-prefixed keys (like GeyserDriver).
 type IDriveDriver struct {
-	accessKey          string
-	secretKey          string
-	endpoint           string
-	region             string
-	bucket             string
-	client             *s3.Client
-	logger             *zap.Logger
-	multipartThreshold int64          // Size threshold for multipart uploads
-	partSize           int64          // Size of each part in multipart upload
-	egressTracker      *EgressTracker // Track bandwidth usage
+	accessKey     string
+	secretKey     string
+	endpoint      string
+	region        string
+	bucket        string
+	client        *s3.Client
+	logger        *zap.Logger
+	egressTracker *EgressTracker // Track bandwidth usage
 }
 
 // NewIDriveDriver creates a new iDrive E2 storage driver.
@@ -86,15 +82,13 @@ func NewIDriveDriver(accessKey, secretKey, endpoint, region string, logger *zap.
 	)
 
 	return &IDriveDriver{
-		accessKey:          accessKey,
-		secretKey:          secretKey,
-		endpoint:           endpoint,
-		region:             region,
-		bucket:             bucket,
-		client:             client,
-		logger:             logger,
-		multipartThreshold: 5 * 1024 * 1024,
-		partSize:           5 * 1024 * 1024,
+		accessKey: accessKey,
+		secretKey: secretKey,
+		endpoint:  endpoint,
+		region:    region,
+		bucket:    bucket,
+		client:    client,
+		logger:    logger,
 	}, nil
 }
 
@@ -182,109 +176,6 @@ func (d *IDriveDriver) Put(ctx context.Context, container, artifact string, data
 		return err
 	}
 	return nil
-}
-
-// PutWithSize handles uploads with known size, using multipart for large files
-func (d *IDriveDriver) PutWithSize(ctx context.Context, container, artifact string, reader io.Reader, size int64) error {
-	if size > d.multipartThreshold {
-		return d.putMultipart(ctx, container, artifact, reader, size)
-	}
-	return d.Put(ctx, container, artifact, reader)
-}
-
-// putMultipart handles multipart uploads for large files
-func (d *IDriveDriver) putMultipart(ctx context.Context, container, artifact string, reader io.Reader, size int64) error {
-	tenantID := d.getTenantID(ctx)
-	key := d.buildKey(tenantID, container, artifact)
-
-	createResp, err := d.client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
-		Bucket: aws.String(d.bucket),
-		Key:    aws.String(key),
-	})
-	if err != nil {
-		return fmt.Errorf("idrive create multipart %s/%s: %w", container, artifact, err)
-	}
-
-	uploadID := *createResp.UploadId
-	var parts []types.CompletedPart
-	partNumber := int32(1)
-
-	// Upload parts
-	for {
-		// Read part data
-		partData := make([]byte, d.partSize)
-		n, err := io.ReadFull(reader, partData)
-		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-			// Abort on error
-			d.abortMultipartUpload(ctx, container, artifact, uploadID)
-			return fmt.Errorf("idrive read part %d: %w", partNumber, err)
-		}
-
-		if n == 0 {
-			break
-		}
-
-		uploadResp, err := d.client.UploadPart(ctx, &s3.UploadPartInput{
-			Bucket:     aws.String(d.bucket),
-			Key:        aws.String(key),
-			PartNumber: aws.Int32(partNumber),
-			UploadId:   aws.String(uploadID),
-			Body:       bytes.NewReader(partData[:n]),
-		})
-		if err != nil {
-			d.abortMultipartUpload(ctx, d.bucket, key, uploadID)
-			return fmt.Errorf("idrive upload part %d: %w", partNumber, err)
-		}
-
-		parts = append(parts, types.CompletedPart{
-			ETag:       uploadResp.ETag,
-			PartNumber: aws.Int32(partNumber),
-		})
-
-		partNumber++
-
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			break
-		}
-	}
-
-	_, err = d.client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
-		Bucket:   aws.String(d.bucket),
-		Key:      aws.String(key),
-		UploadId: aws.String(uploadID),
-		MultipartUpload: &types.CompletedMultipartUpload{
-			Parts: parts,
-		},
-	})
-	if err != nil {
-		d.abortMultipartUpload(ctx, d.bucket, key, uploadID)
-		return fmt.Errorf("idrive complete multipart %s: %w", key, err)
-	}
-
-	d.logger.Info("multipart upload completed",
-		zap.String("bucket", d.bucket),
-		zap.String("key", key),
-		zap.Int("parts", len(parts)),
-	)
-
-	return nil
-}
-
-// abortMultipartUpload cancels a multipart upload
-func (d *IDriveDriver) abortMultipartUpload(ctx context.Context, container, artifact, uploadID string) {
-	_, err := d.client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
-		Bucket:   aws.String(container),
-		Key:      aws.String(artifact),
-		UploadId: aws.String(uploadID),
-	})
-	if err != nil {
-		d.logger.Error("failed to abort multipart upload",
-			zap.String("container", container),
-			zap.String("artifact", artifact),
-			zap.String("uploadID", uploadID),
-			zap.Error(err),
-		)
-	}
 }
 
 // GetRange reads a byte range directly from iDrive without downloading the
@@ -421,33 +312,4 @@ func (d *IDriveDriver) ValidateAuth(ctx context.Context) error {
 
 	d.logger.Info("iDrive authentication validated")
 	return nil
-}
-
-// LoadIDriveConfig loads iDrive configuration from environment
-func LoadIDriveConfig() (accessKey, secretKey, endpoint, region string) {
-	accessKey = os.Getenv("IDRIVE_ACCESS_KEY")
-	secretKey = os.Getenv("IDRIVE_SECRET_KEY")
-	endpoint = os.Getenv("IDRIVE_ENDPOINT")
-	region = os.Getenv("IDRIVE_REGION")
-
-	// Defaults: the primary's region and its real regional endpoint.
-	if region == "" {
-		region = IDriveFallbackRegion
-	}
-	if endpoint == "" {
-		endpoint = IDriveRegionEndpoint(os.Getenv, region)
-	}
-
-	return
-}
-
-// NewIDriveDriverFromConfig creates an iDrive driver from environment config
-func NewIDriveDriverFromConfig(logger *zap.Logger) (*IDriveDriver, error) {
-	accessKey, secretKey, endpoint, region := LoadIDriveConfig()
-
-	if accessKey == "" || secretKey == "" {
-		return nil, fmt.Errorf("idrive: IDRIVE_ACCESS_KEY and IDRIVE_SECRET_KEY required")
-	}
-
-	return NewIDriveDriver(accessKey, secretKey, endpoint, region, logger)
 }

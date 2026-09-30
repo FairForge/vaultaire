@@ -1,10 +1,5 @@
-// Package api contains the S3-compatible API implementation.
-// NOTE: The following auth functions and constants are preserved for future S3 signature verification.
-// They implement the AWS Signature Version 4 signing process.
-// NOTE: Auth functions are preserved for future S3 signature verification implementation.
-//
-//nolint:unused // Will be used in future implementations
-//nolint:unused,deadcode // These will be used when full S3 auth is implemented
+// Package auth holds the S3 SigV4 verifier, the account/key/session
+// services and the STS minting logic.
 package auth
 
 import (
@@ -15,7 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -262,22 +256,6 @@ func (a *Auth) lookupCredential(accessKey string) (*credential, error) {
 	return nil, ErrUnknownAccessKey
 }
 
-// validateTimestamp checks if the request timestamp is within acceptable range
-func (a *Auth) validateTimestamp(amzDate string) error {
-	t, err := time.Parse(timeFormat, amzDate)
-	if err != nil {
-		return fmt.Errorf("invalid date format: %w", err)
-	}
-
-	now := time.Now().UTC()
-	diff := now.Sub(t)
-	if diff < -maxTimeSkew || diff > maxTimeSkew {
-		return fmt.Errorf("request timestamp too old or too far in future")
-	}
-
-	return nil
-}
-
 func (a *Auth) createStringToSign(amzDate, scope, canonicalRequest string) string {
 	hash := sha256.Sum256([]byte(canonicalRequest))
 	return strings.Join([]string{
@@ -299,136 +277,4 @@ func hmacSHA256(key, data []byte) []byte {
 	h := hmac.New(sha256.New, key)
 	h.Write(data)
 	return h.Sum(nil)
-}
-
-// AuthHandler handles authentication endpoints
-type AuthHandler struct {
-	db          *sql.DB
-	logger      *zap.Logger
-	authService *AuthService
-}
-
-// NewAuthHandler creates a new auth handler.
-// db is passed through to AuthService so that Register persists
-// users, tenants, and quota rows to PostgreSQL.
-func NewAuthHandler(db *sql.DB, logger *zap.Logger) *AuthHandler {
-	return &AuthHandler{
-		db:          db,
-		logger:      logger,
-		authService: NewAuthService(nil, db), // db was previously nil — registrations never persisted
-	}
-}
-
-// Register creates a new tenant account
-func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
-		Company  string `json:"company"`
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	_, tenant, _, err := h.authService.CreateUserWithTenant(
-		r.Context(), req.Email, req.Password, req.Company)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	// Return credentials. Endpoint is read from VAULTAIRE_ENDPOINT so
-	// it works correctly in production without a code change.
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"accessKeyId":     tenant.AccessKey,
-		"secretAccessKey": tenant.SecretKey,
-		"endpoint":        getEndpointURL(),
-	})
-}
-
-// getEndpointURL returns the public S3 endpoint.
-// Set VAULTAIRE_ENDPOINT in the systemd service file for production.
-// Falls back to localhost for local development.
-func getEndpointURL() string {
-	if ep := os.Getenv("VAULTAIRE_ENDPOINT"); ep != "" {
-		return ep
-	}
-	return "http://localhost:8000"
-}
-
-// Login authenticates a user and returns JWT
-func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	valid, err := h.authService.ValidatePassword(r.Context(), req.Email, req.Password)
-	if err != nil || !valid {
-		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
-		return
-	}
-
-	user, _ := h.authService.GetUserByEmail(r.Context(), req.Email)
-	token, _ := h.authService.GenerateJWT(user)
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"token":     token,
-		"tenant_id": user.TenantID,
-	})
-}
-
-// RequestPasswordReset initiates password reset flow
-func (h *AuthHandler) RequestPasswordReset(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Email string `json:"email"`
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	token, err := h.authService.RequestPasswordReset(r.Context(), req.Email)
-	if err != nil {
-		http.Error(w, "Email not found", http.StatusNotFound)
-		return
-	}
-
-	// In production, email the token. For now, return it.
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"message": "Reset token generated",
-		"token":   token, // TODO: email this instead of returning it
-	})
-}
-
-// CompletePasswordReset completes the reset with new password
-func (h *AuthHandler) CompletePasswordReset(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Token       string `json:"token"`
-		NewPassword string `json:"new_password"`
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	if _, err := h.authService.CompletePasswordReset(r.Context(), req.Token, req.NewPassword); err != nil {
-		http.Error(w, "Invalid or expired token", http.StatusBadRequest)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"message": "Password reset successful"})
 }

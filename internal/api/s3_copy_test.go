@@ -26,8 +26,6 @@ func setupCopyTestServer(t *testing.T) (*Server, *tenant.Tenant, string, func())
 
 	logger, _ := zap.NewDevelopment()
 	eng := engine.NewEngine(nil, logger, &engine.Config{
-		EnableCaching:  false,
-		EnableML:       false,
 		DefaultBackend: "local",
 	})
 

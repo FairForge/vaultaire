@@ -64,14 +64,13 @@ type retentionPolicy struct {
 // deliberately absent: the security record is kept for the life of the
 // service; an account deletion removes the subject's rows (WP-R10-3).
 const (
-	retentionAccessLog     = 30 * 24 * time.Hour
-	retentionEvents        = 90 * 24 * time.Hour
-	retentionQuotaEvents   = 90 * 24 * time.Hour
-	retentionStripeEvents  = 90 * 24 * time.Hour
-	retentionCDNAccessLog  = 2 * 24 * time.Hour // rolled into cdn_stats_daily; yesterday is re-rolled every hour (R13-03)
-	retentionWebhookDeliv  = 30 * 24 * time.Hour
-	retentionAccessPattern = 90 * 24 * time.Hour
-	retentionWaitlistPII   = 90 * 24 * time.Hour
+	retentionAccessLog    = 30 * 24 * time.Hour
+	retentionEvents       = 90 * 24 * time.Hour
+	retentionQuotaEvents  = 90 * 24 * time.Hour
+	retentionStripeEvents = 90 * 24 * time.Hour
+	retentionCDNAccessLog = 2 * 24 * time.Hour // rolled into cdn_stats_daily; yesterday is re-rolled every hour (R13-03)
+	retentionWebhookDeliv = 30 * 24 * time.Hour
+	retentionWaitlistPII  = 90 * 24 * time.Hour
 )
 
 // defaultRetentionPolicies is the shipped policy set.
@@ -83,7 +82,6 @@ func defaultRetentionPolicies() []retentionPolicy {
 		{Table: "stripe_events", Column: "processed_at", MaxAge: retentionStripeEvents},
 		{Table: "cdn_access_log", Column: "accessed_at", MaxAge: retentionCDNAccessLog},
 		{Table: "webhook_deliveries", Column: "created_at", MaxAge: retentionWebhookDeliv},
-		{Table: "access_patterns", Column: "last_seen", MaxAge: retentionAccessPattern},
 		{Table: "waitlist_signups", Column: "created_at", MaxAge: retentionWaitlistPII,
 			Action: retentionScrubColumns, ScrubColumns: []string{"ip_address", "user_agent"},
 			Extra: "(ip_address <> '' OR user_agent <> '')"},

@@ -16,7 +16,6 @@ import (
 	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/engine"
-	"github.com/FairForge/vaultaire/internal/events"
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/FairForge/vaultaire/internal/usage"
 	"go.uber.org/zap"
@@ -443,23 +442,6 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		ctx = context.WithValue(ctx, common.TenantIDKey, existingTenantID)
 	}
 	r = r.WithContext(ctx)
-
-	eventLogger := events.NewEventLogger(s.logger)
-	eventLogger.Log(events.Event{
-		Type:      "s3_request",
-		Container: s3Req.Bucket,
-		Artifact:  s3Req.Object,
-		Operation: s3Req.Operation,
-		TenantID:  tenantID,
-		Data: map[string]interface{}{
-			"method":    r.Method,
-			"path":      r.URL.Path,
-			"size":      r.ContentLength,
-			"query":     len(s3Req.Query),
-			"headers":   len(s3Req.Headers),
-			"tenant_id": tenantID,
-		},
-	})
 
 	// Phase 4.2: check bandwidth limit before data-transfer operations.
 	if tenantID != "" && tenantID != "default" && s.bandwidthTracker != nil {

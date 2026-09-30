@@ -78,11 +78,6 @@ func IsReservedSlug(slug string) bool {
 	return reservedSlugs[slug]
 }
 
-// ValidateSlug returns true if slug matches the required pattern.
-func ValidateSlug(slug string) bool {
-	return slugRe.MatchString(slug)
-}
-
 // EnsureSlugUnique checks the tenants table and appends -N suffix
 // if the base slug is taken or reserved. Returns the unique slug.
 func EnsureSlugUnique(ctx context.Context, db *sql.DB, baseSlug string) (string, error) {

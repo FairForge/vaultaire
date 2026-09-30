@@ -190,14 +190,14 @@ Two models, deliberately separate:
 - **The circuit breaker**, fed by live request outcomes, is the **only** signal
   that alters routing.
 
-`HealthScorer`, `BackendSelector` and `CostOptimizer` (`internal/engine/health.go`,
-`selector.go`, `cost_optimizer.go`) are constructed and never consulted; the
-per-backend price table `main.go` feeds them influences nothing (R6-17,
-WP-R6-4). `TieringEngine.StartTiering` must never be called: it would move
-`_global` chunk rows to tape and never updates the routing truth (R6-10). The
-only mover of customer data between backends is the Smart-tier demotion job
-(`internal/api/smart_demotion.go`), gated by the `smart_demotion` feature flag
-(default off). There is no 7/30/90-day age-tiering policy in effect.
+`HealthScorer` (`internal/engine/health.go`) is scored only for the `/health`
+and `/status` display; it is not a routing input. The cost optimizer, the
+health-score selector, the age-based tiering engine, the engine read cache and
+the access-pattern tracker were inert and were deleted in Review R15 (WP-R6-4,
+WP-R6-5, WP-R6-6). The only mover of customer data between backends is the
+Smart-tier demotion job (`internal/api/smart_demotion.go`), gated by the
+`smart_demotion` feature flag (default off). There is no 7/30/90-day
+age-tiering policy in effect.
 
 ## Chunking, dedup, encryption
 

@@ -368,8 +368,6 @@ func bootstrap(logger *zap.Logger) (*sql.DB, *engine.CoreEngine) {
 	db := dbConn.DB()
 
 	eng := engine.NewEngine(db, logger, &engine.Config{
-		EnableCaching:  false,
-		EnableML:       false,
 		DefaultBackend: "local",
 	})
 

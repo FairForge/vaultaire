@@ -703,10 +703,10 @@ Consequence for cost modelling: **egress stays at $0 in the cost maps, because
 that is the truth.** Pricing it would model the wrong failure mode — budgeting
 dollars against a risk that actually manifests as slow transfers. The metric
 to watch is the **egress:stored ratio and observed throughput**, not a dollar
-figure. Two supporting facts: `CostOptimizer.egress` is currently written by
-`SetEgressCosts` but never read, so a non-zero value would change no routing
-today; and `egressCostPerTBCents` feeds the admin *actual-spend* table, where
-a fictional cost would make real margin reporting wrong.
+figure. Two supporting facts: the engine has no cost-based routing at all (the
+inert `CostOptimizer` was deleted in Review R15), so no egress figure could
+change placement; and `egressCostPerTBCents` feeds the admin *actual-spend*
+table, where a fictional cost would make real margin reporting wrong.
 
 The one place a non-zero egress number belongs is **replacement planning** —
 if Lyve is swapped for a vendor that does meter egress, model that in the tier

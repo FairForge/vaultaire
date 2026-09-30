@@ -57,7 +57,6 @@ func setupRetentionFixture(t *testing.T) *retentionFixture {
 			`DELETE FROM s3_access_log WHERE tenant_id = $1`,
 			`DELETE FROM stripe_events WHERE tenant_id = $1`,
 			`DELETE FROM cdn_access_log WHERE tenant_id = $1`,
-			`DELETE FROM access_patterns WHERE tenant_id = $1`,
 			`DELETE FROM audit_logs WHERE tenant_id = $1`,
 			`DELETE FROM tenant_quotas WHERE tenant_id = $1`,
 			`DELETE FROM tenants WHERE id = $1`,
@@ -92,9 +91,6 @@ func setupRetentionFixture(t *testing.T) *retentionFixture {
 	// cdn_access_log (2 d)
 	mustExec(`INSERT INTO cdn_access_log (tenant_id, bucket, object_key, bytes_sent, country, referer, accessed_at) VALUES ($1,'pub','k',1,'US','',$2)`, f.tenantID, time.Now().Add(-3*24*time.Hour))
 	mustExec(`INSERT INTO cdn_access_log (tenant_id, bucket, object_key, bytes_sent, country, referer, accessed_at) VALUES ($1,'pub','k',1,'US','',$2)`, f.tenantID, fresh)
-	// access_patterns (90 d on last_seen)
-	mustExec(`INSERT INTO access_patterns (tenant_id, container, artifact_key, operation, access_time, first_seen, last_seen) VALUES ($1,'c','old','GET',$2,$2,$2)`, f.tenantID, old)
-	mustExec(`INSERT INTO access_patterns (tenant_id, container, artifact_key, operation, access_time, first_seen, last_seen) VALUES ($1,'c','new','GET',$2,$2,$2)`, f.tenantID, fresh)
 	// waitlist_signups (PII nulled after 90 d, row kept)
 	mustExec(`INSERT INTO waitlist_signups (email, source, ip_address, user_agent, created_at) VALUES ($1,'landing','10.0.0.9','ua-old',$2)`, "ret-"+id+"-old@test.local", old)
 	mustExec(`INSERT INTO waitlist_signups (email, source, ip_address, user_agent, created_at) VALUES ($1,'landing','10.0.0.9','ua-new',$2)`, "ret-"+id+"-new@test.local", fresh)
@@ -127,7 +123,6 @@ func TestRetention_PrunesOnlyRowsPastTheirPeriod(t *testing.T) {
 	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM quota_usage_events WHERE tenant_id = $1`, f.tenantID))
 	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM stripe_events WHERE tenant_id = $1`, f.tenantID))
 	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM cdn_access_log WHERE tenant_id = $1`, f.tenantID))
-	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM access_patterns WHERE tenant_id = $1`, f.tenantID))
 	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM audit_logs WHERE tenant_id = $1`, f.tenantID), "audit_logs are never pruned")
 
 	// Waitlist: both rows kept; only the old one lost its IP + user agent.
@@ -140,7 +135,7 @@ func TestRetention_PrunesOnlyRowsPastTheirPeriod(t *testing.T) {
 	assert.Equal(t, "ua-new", newUA)
 
 	// Per-table counts are reported (at least our rows; the shared DB may hold more).
-	for _, tbl := range []string{"s3_access_log", "events", "quota_usage_events", "stripe_events", "cdn_access_log", "webhook_deliveries", "access_patterns", "waitlist_signups"} {
+	for _, tbl := range []string{"s3_access_log", "events", "quota_usage_events", "stripe_events", "cdn_access_log", "webhook_deliveries", "waitlist_signups"} {
 		assert.GreaterOrEqual(t, res.Tables[tbl], int64(1), tbl)
 	}
 	assert.Empty(t, res.Errors)
@@ -220,7 +215,7 @@ func TestRetention_PoliciesMatchThePolicyPage(t *testing.T) {
 	want := map[string]time.Duration{
 		"s3_access_log": 30 * 24 * time.Hour, "events": 90 * 24 * time.Hour, "quota_usage_events": 90 * 24 * time.Hour,
 		"stripe_events": 90 * 24 * time.Hour, "cdn_access_log": 2 * 24 * time.Hour, "webhook_deliveries": 30 * 24 * time.Hour,
-		"access_patterns": 90 * 24 * time.Hour, "waitlist_signups": 90 * 24 * time.Hour,
+		"waitlist_signups": 90 * 24 * time.Hour,
 	}
 	got := map[string]time.Duration{}
 	for _, p := range defaultRetentionPolicies() {

@@ -9,28 +9,6 @@ import (
 	"time"
 )
 
-func TestBasicAuth(t *testing.T) {
-	t.Run("validates correct credentials", func(t *testing.T) {
-		auth := NewBasicAuth("admin", "password123")
-		req := httptest.NewRequest("GET", "/", nil)
-		req.SetBasicAuth("admin", "password123")
-
-		if !auth.Validate(req) {
-			t.Error("expected valid credentials to pass")
-		}
-	})
-
-	t.Run("rejects incorrect credentials", func(t *testing.T) {
-		auth := NewBasicAuth("admin", "password123")
-		req := httptest.NewRequest("GET", "/", nil)
-		req.SetBasicAuth("admin", "wrongpass")
-
-		if auth.Validate(req) {
-			t.Error("expected invalid credentials to fail")
-		}
-	})
-}
-
 func TestMemoryStore(t *testing.T) {
 	t.Run("creates and retrieves session", func(t *testing.T) {
 		store := NewMemoryStore()

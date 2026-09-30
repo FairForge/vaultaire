@@ -173,41 +173,7 @@ func main() {
 	}
 
 	// Create engine with or without DB
-	eng := engine.NewEngine(db, logger, &engine.Config{
-		// Caching is OFF: cache.TieredCache is an unbounded map whose Config
-		// is ignored (WP-2 / CR-2, R0-01). R6 decided the code path should
-		// be deleted rather than fixed (docs/reviews/R6-engine.md, WP-R6-6);
-		// any future read cache must be bytes-capped, evicting, per-object
-		// capped and filled outside the request goroutine.
-		EnableCaching:  false,
-		EnableML:       db != nil, // Only enable ML if we have DB
-		DefaultBackend: "local",
-	})
-
-	// Configure backend costs
-	eng.SetCostConfiguration(map[string]float64{
-		"idrive": 0.0033, // $3.30/TB
-		// $7.99/TB. Lyve invoices us $0 under a 1-year SaaS promo; we track a
-		// conservative rate so the promo cannot mask the post-promo liability.
-		"lyve":       0.00799,
-		"quotaless":  0.001,
-		"s3":         0.023,
-		"permafrost": 0.0,
-		"local":      0.0,
-		"geyser":     0.00155, // $1.55/TB
-		"r2":         0.01536, // $15.36/TB — public buckets only, paid for by $0 egress
-	})
-
-	eng.SetEgressCosts(map[string]float64{
-		"idrive":     0.0,
-		"lyve":       0.0,
-		"s3":         0.09,
-		"quotaless":  0.01,
-		"permafrost": 0.0,
-		"local":      0.0,
-		"geyser":     0.0,
-		"r2":         0.0,
-	})
+	eng := engine.NewEngine(db, logger, &engine.Config{DefaultBackend: "local"})
 
 	// Initialize storage drivers
 	// 1. Always add local driver

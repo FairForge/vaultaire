@@ -13,7 +13,7 @@ Authentication service for Vaultaire. Handles user registration, login, JWT toke
 
 ## Audit trail (Review R11-09)
 
-`GenerateAPIKey`, `RotateAPIKey`, `RevokeAPIKey`, `SetAPIKeyExpiration`, `ChangePassword`, `CompletePasswordReset`, `EnableMFA`, `DisableMFA` and `CreateUserWithTenant` each write one `audit_logs` row through `AuthService.record` → `internal/audit` (`key.created`, `key.rotated`, `key.revoked`, `key.expiry_set`, `auth.password_changed`, `auth.password_reset`, `mfa.enabled`, `mfa.disabled`, `account.created`). Writing here — not in the handlers — is what makes the dashboard, `/api/v1/user` and `/api/v1/manage` agree (the R4-22 lesson). The actor and client IP come from the request context (`audit.WithActor` / `audit.WithRequest`, set by `requireJWT`, the dashboard session middleware and `requestIDMiddleware`); an admin resetting another user's MFA is recorded as `performed_by = admin`, `user_id = subject`. Nil `sqlDB` = no row. The old in-memory `AuditLogger` (`apikey.go:471`) still exists but has no product caller (`NewAuditLogger` is never called outside tests) — WP-R5-4 deletes it.
+`GenerateAPIKey`, `RotateAPIKey`, `RevokeAPIKey`, `SetAPIKeyExpiration`, `ChangePassword`, `CompletePasswordReset`, `EnableMFA`, `DisableMFA` and `CreateUserWithTenant` each write one `audit_logs` row through `AuthService.record` → `internal/audit` (`key.created`, `key.rotated`, `key.revoked`, `key.expiry_set`, `auth.password_changed`, `auth.password_reset`, `mfa.enabled`, `mfa.disabled`, `account.created`). Writing here — not in the handlers — is what makes the dashboard, `/api/v1/user` and `/api/v1/manage` agree (the R4-22 lesson). The actor and client IP come from the request context (`audit.WithActor` / `audit.WithRequest`, set by `requireJWT`, the dashboard session middleware and `requestIDMiddleware`); an admin resetting another user's MFA is recorded as `performed_by = admin`, `user_id = subject`. Nil `sqlDB` = no row. The old in-memory `AuditLogger` and `GenerateAPIKeyWithAudit` were deleted in Review R15.
 
 `ErrUnknownAccessKey` (`sigv4.go`) is what `lookupCredential` returns for an id that exists nowhere; the S3 auth-failure metric keys `key_known` off it. `AccessKeyFromRequest` extracts the presented id for the bounded `key_hash` label only.
 
@@ -116,7 +116,6 @@ it is non-nil only when a new account was actually created.
 
 - `GenerateSlug(company)` — URL-safe slug from company name (deterministic, no DB)
 - `IsReservedSlug(slug)` — checks against reserved route paths (admin, cdn, api, etc.)
-- `ValidateSlug(slug)` — validates against `^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$`
 - `EnsureSlugUnique(ctx, db, slug)` — appends `-N` suffix if slug taken in `tenants` table
 - `EnsureTenantSlug(ctx, db, tenantID, logger)` — lazy slug generation on first bucket create
 - `CanEnablePublicRead(tier)` — archive-tier gate for public-read bucket visibility

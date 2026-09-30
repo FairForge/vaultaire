@@ -57,17 +57,6 @@ func TestGenerateSlug_NumericOnly(t *testing.T) {
 	assert.Equal(t, "12345", GenerateSlug("12345"))
 }
 
-func TestValidateSlug(t *testing.T) {
-	assert.True(t, ValidateSlug("acme-corp"))
-	assert.True(t, ValidateSlug("ab"))
-	assert.True(t, ValidateSlug("12345"))
-	assert.False(t, ValidateSlug("a"))
-	assert.False(t, ValidateSlug("-bad"))
-	assert.False(t, ValidateSlug("bad-"))
-	assert.False(t, ValidateSlug(""))
-	assert.False(t, ValidateSlug("UPPER"))
-}
-
 func TestCanEnablePublicRead_StarterTier(t *testing.T) {
 	allowed, reason := CanEnablePublicRead("starter")
 	assert.True(t, allowed)
