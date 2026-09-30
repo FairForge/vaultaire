@@ -121,7 +121,7 @@ against one `key_hash`), `AuthFailuresKnownKeysElevated` (warning) and
 `AuthFailuresUnknownKeyStorm` (warning, scanner noise far above the
 background). Keys off `vaultaire_auth_failures_total{reason,key_known}` and
 `vaultaire_auth_failures_by_key_total{key_hash}` (`internal/api/auth_metrics.go`):
-`key_known="true"` means the access key id EXISTS — a stuffing run against a
+`key_known="true"` means the access key id EXISTS (settled by a lookup even on the presign path, whose verifier answers Expired/TooSkewed before it looks the id up — #519) — a stuffing run against a
 real customer key moves that series, scanners stay on `"false"`; `key_hash` is
 sha256(id)[:8], emitted for known keys only, so cardinality is bounded by the
 number of real keys and the id never appears in a label. To map a hash back:
