@@ -139,7 +139,7 @@ func TestObjectLockConfig_CannotBeDisabledOnceEnabled(t *testing.T) {
 
 func TestNotificationTarget_RefusesPrivateLoopbackAndNonHTTP(t *testing.T) {
 	f := setupNotificationFixture(t)
-	webhookAllowPrivateTargets = false // the production policy
+	webhookAllowPrivateTargets.Store(false) // the production policy
 	put := func(topic string) *httptest.ResponseRecorder {
 		body := fmt.Sprintf(`<NotificationConfiguration><TopicConfiguration><Topic>%s</Topic><Event>s3:ObjectCreated:*</Event></TopicConfiguration></NotificationConfiguration>`, topic)
 		req := httptest.NewRequest("PUT", "/"+f.bucket+"?notification", strings.NewReader(body))
@@ -180,8 +180,8 @@ func TestWebhookClient_RefusesResolvedPrivateAddressAndRedirects(t *testing.T) {
 	require.Error(t, err, "loopback address refused at dial time")
 	assert.Equal(t, 0, hits)
 
-	webhookAllowPrivateTargets = true
-	t.Cleanup(func() { webhookAllowPrivateTargets = false })
+	webhookAllowPrivateTargets.Store(true)
+	t.Cleanup(func() { webhookAllowPrivateTargets.Store(false) })
 	c = webhookClient(5 * time.Second)
 	req, _ = http.NewRequestWithContext(context.Background(), "POST", srv.URL+"/hook", strings.NewReader("{}"))
 	resp, err := c.Do(req)
