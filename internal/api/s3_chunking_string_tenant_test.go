@@ -32,14 +32,7 @@ func setupStringTenantChunkingFixture(t *testing.T) *adapterTestFixture {
 
 	tid := f.tenantID
 	t.Cleanup(func() {
-		_, _ = f.db.Exec("DELETE FROM tenant_chunk_refs WHERE tenant_id::text = $1", tid)
-		_, _ = f.db.Exec(`DELETE FROM global_content_index g
-			WHERE g.dedup_scope = $1
-			   OR NOT EXISTS (
-				SELECT 1 FROM tenant_chunk_refs r
-				WHERE r.dedup_scope = g.dedup_scope AND r.plaintext_hash = g.plaintext_hash)`,
-			tid)
-		_, _ = f.db.Exec("DELETE FROM object_metadata WHERE tenant_id::text = $1", tid)
+		cleanupTenantChunkRows(f.db, tid, tid)
 	})
 	return f
 }

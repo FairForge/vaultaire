@@ -270,3 +270,32 @@ func TestS3Upload_ShortBodyIsAnError(t *testing.T) {
 type errReader struct{ err error }
 
 func (e errReader) Read([]byte) (int, error) { return 0, e.err }
+
+// R7-12 (Review R15): on the multipart path the SDK reads until io.EOF and
+// commits whatever arrived. A body that ends CLEANLY short of the declared
+// length must not be reported as a success — the object would be stored
+// truncated under the declared size and the MD5 of the partial stream.
+func TestS3Upload_CleanEOFShortBodyIsAnError(t *testing.T) {
+	declared := int64(40 << 20) // 3 parts
+	body := bytes.Repeat([]byte("z"), 20<<20)
+	m := newMockUploadClient()
+
+	in := &s3.PutObjectInput{
+		Bucket:        aws.String("b"),
+		Key:           aws.String("k"),
+		Body:          nonSeekableReader{bytes.NewReader(body)}, // io.EOF after 20 MiB, no error
+		ContentLength: aws.Int64(declared),
+	}
+	err := s3ParallelUploadInput(context.Background(), m, in)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, io.ErrUnexpectedEOF), "short body must surface as ErrUnexpectedEOF: %v", err)
+	assert.Contains(t, err.Error(), "20971520 of 41943040")
+
+	// The exact-length case is unaffected.
+	m2 := newMockUploadClient()
+	full := bytes.Repeat([]byte("y"), int(declared))
+	in2 := &s3.PutObjectInput{Bucket: aws.String("b"), Key: aws.String("k"),
+		Body: nonSeekableReader{bytes.NewReader(full)}, ContentLength: aws.Int64(declared)}
+	require.NoError(t, s3ParallelUploadInput(context.Background(), m2, in2))
+	assert.Equal(t, full, m2.reassemble())
+}

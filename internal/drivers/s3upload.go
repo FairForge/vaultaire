@@ -65,11 +65,42 @@ func s3ParallelUploadInput(ctx context.Context, client manager.UploadAPIClient, 
 		return err
 	}
 
+	// The manager ignores ContentLength on a non-seekable body: it reads parts
+	// until io.EOF and commits whatever arrived. A body that ends CLEANLY
+	// short of the declared size (a proxy that strips the length, a future
+	// wrapper) would therefore be stored truncated under the declared size
+	// (R7-12; the ≤ 16 MiB path is guarded by putSinglePartIfSmall). Count
+	// the bytes and refuse to report success for a short upload. The blob
+	// is already on the backend at that point — the caller writes no head
+	// row and releases the reservation, the client's retry overwrites it
+	// (WP-R2-1 makes the truncated blob a fresh key that can be deleted).
+	declared := aws.ToInt64(in.ContentLength)
+	var counted *countingReader
+	if declared > 0 {
+		counted = &countingReader{Reader: in.Body}
+		in.Body = counted
+	}
 	uploader := uploaderFor(client)
 	if _, err := uploader.Upload(ctx, in); err != nil { //nolint:staticcheck // manager.Uploader is deprecated in favor of transfermanager; migration is a post-launch WP
 		return fmt.Errorf("s3 parallel upload %s/%s: %w", aws.ToString(in.Bucket), aws.ToString(in.Key), err)
 	}
+	if counted != nil && counted.n != declared {
+		return fmt.Errorf("s3 upload %s/%s: body ended after %d of %d declared bytes: %w",
+			aws.ToString(in.Bucket), aws.ToString(in.Key), counted.n, declared, io.ErrUnexpectedEOF)
+	}
 	return nil
+}
+
+// countingReader counts the bytes the uploader consumed.
+type countingReader struct {
+	io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.Reader.Read(p)
+	c.n += int64(n)
+	return n, err
 }
 
 // uploaderCache holds one manager.Uploader per client. The uploader owns a

@@ -26,7 +26,10 @@ func setupGCFixture(t *testing.T) (*DedupGCRunner, *adapterTestFixture) {
 
 	runner := NewDedupGCRunner(f.db, f.eng, f.adapter.gci, zap.NewNop())
 	require.NotNil(t, runner)
-	runner.GracePeriod = 0
+	// A real grace period: with 0 the reconcile and the sweep touched every
+	// package's fresh rows on the shared test database (R15-03). Tests that
+	// want their rows collectable backdate exactly their own (backdateGCIRows).
+	runner.GracePeriod = time.Hour
 
 	return runner, f
 }
@@ -36,6 +39,8 @@ func TestDedupGC_DeletesMarkedPastGrace(t *testing.T) {
 
 	content := generateTestData(8 * 1024)
 	putChunkedObject(t, f, "gc-delete.bin", content, "application/octet-stream")
+	pairs := tenantChunkPairs(t, f.db, f.tenant.ID)
+	require.NotEmpty(t, pairs)
 
 	// Delete the object — decrements ref counts, marks chunks for deletion.
 	delReq := httptest.NewRequest("DELETE", "/test-bucket/gc-delete.bin", nil)
@@ -44,29 +49,21 @@ func TestDedupGC_DeletesMarkedPastGrace(t *testing.T) {
 	f.adapter.HandleDelete(dw, delReq, "test-bucket", "gc-delete.bin")
 	require.Equal(t, http.StatusNoContent, dw.Code)
 
-	// Backdate marked_at and last_accessed_at so they're past grace.
-	_, err := f.db.Exec(`
-		UPDATE global_content_index
-		SET marked_at = NOW() - INTERVAL '1 day',
-		    last_accessed_at = NOW() - INTERVAL '1 day'
-		WHERE marked_for_deletion = TRUE AND ref_count = 0`)
-	require.NoError(t, err)
+	// Backdate marked_at and last_accessed_at so they're past grace — only
+	// the rows this fixture wrote (R15: the table-wide UPDATE touched other
+	// packages' rows on the shared test database).
+	backdateGCIRows(t, f.db, pairs)
 
-	// Collect the storage keys before GC.
-	rows, err := f.db.Query(`
-		SELECT storage_key FROM global_content_index
-		WHERE marked_for_deletion = TRUE AND ref_count = 0`)
-	require.NoError(t, err)
+	// Collect the storage keys of this fixture's marked rows before GC.
 	var keys []string
-	for rows.Next() {
+	for _, p := range pairs {
 		var k string
-		require.NoError(t, rows.Scan(&k))
-		keys = append(keys, k)
+		if qErr := f.db.QueryRow(`SELECT storage_key FROM global_content_index
+			WHERE dedup_scope = $1 AND plaintext_hash = $2 AND marked_for_deletion = TRUE AND ref_count = 0`,
+			p.scope, p.hash).Scan(&k); qErr == nil {
+			keys = append(keys, k)
+		}
 	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate rows: %v", err)
-	}
-	_ = rows.Close()
 	require.NotEmpty(t, keys, "should have marked chunks")
 
 	// Run GC.
@@ -75,10 +72,8 @@ func TestDedupGC_DeletesMarkedPastGrace(t *testing.T) {
 	assert.Greater(t, result.Deleted, 0)
 	assert.Greater(t, result.BytesReclaimed, int64(0))
 
-	// GCI rows should be gone.
-	var count int
-	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM global_content_index WHERE marked_for_deletion = TRUE`).Scan(&count))
-	assert.Equal(t, 0, count, "all marked GCI rows should be deleted")
+	// This fixture's GCI rows should be gone.
+	assert.Equal(t, 0, gciRowsFor(t, f.db, pairs), "all of this fixture's marked GCI rows should be deleted")
 
 	// Backend data should be gone.
 	for _, key := range keys {
@@ -130,13 +125,19 @@ func TestDedupGC_ReconcilesOrphan(t *testing.T) {
 
 	content := generateTestData(8 * 1024)
 	putChunkedObject(t, f, "gc-reconcile.bin", content, "application/octet-stream")
+	pairs := tenantChunkPairs(t, f.db, f.tenant.ID)
+	require.NotEmpty(t, pairs)
 
-	// Artificially inflate ref_count to simulate drift.
-	_, err := f.db.Exec(`
-		UPDATE global_content_index
-		SET ref_count = ref_count + 5,
-		    last_accessed_at = NOW() - INTERVAL '1 day'`)
-	require.NoError(t, err)
+	// Artificially inflate ref_count on THIS fixture's rows to simulate drift
+	// (the table-wide UPDATE used to inflate — and then assert on — other
+	// packages' rows, R15-03).
+	for _, p := range pairs {
+		_, err := f.db.Exec(`
+			UPDATE global_content_index
+			SET ref_count = ref_count + 5, last_accessed_at = NOW() - INTERVAL '1 day'
+			WHERE dedup_scope = $1 AND plaintext_hash = $2`, p.scope, p.hash)
+		require.NoError(t, err)
+	}
 
 	result, gcErr := runner.RunOnce(context.Background())
 	require.NoError(t, gcErr)
@@ -144,21 +145,15 @@ func TestDedupGC_ReconcilesOrphan(t *testing.T) {
 
 	// Verify ref counts now match actual refs, counted within each dedup scope
 	// (ref counting is per (dedup_scope, plaintext_hash) since WP-7).
-	rows, err := f.db.Query(`
-		SELECT g.plaintext_hash, g.ref_count,
-		       (SELECT COUNT(*) FROM tenant_chunk_refs r
-		        WHERE r.dedup_scope = g.dedup_scope AND r.plaintext_hash = g.plaintext_hash)
-		FROM global_content_index g`)
-	require.NoError(t, err)
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var hash string
+	for _, p := range pairs {
 		var gcRefCount, actualCount int
-		require.NoError(t, rows.Scan(&hash, &gcRefCount, &actualCount))
-		assert.Equal(t, actualCount, gcRefCount, "ref_count should match actual refs for %s", hash)
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate rows: %v", err)
+		require.NoError(t, f.db.QueryRow(`
+			SELECT g.ref_count,
+			       (SELECT COUNT(*) FROM tenant_chunk_refs r
+			        WHERE r.dedup_scope = g.dedup_scope AND r.plaintext_hash = g.plaintext_hash)
+			FROM global_content_index g WHERE g.dedup_scope = $1 AND g.plaintext_hash = $2`,
+			p.scope, p.hash).Scan(&gcRefCount, &actualCount))
+		assert.Equal(t, actualCount, gcRefCount, "ref_count should match actual refs for %s", p.hash)
 	}
 }
 
@@ -204,11 +199,9 @@ func TestDedupGC_EndToEnd(t *testing.T) {
 	putChunkedObject(t, f, "gc-e2e-a.bin", content, "application/octet-stream")
 	putChunkedObject(t, f, "gc-e2e-b.bin", content, "application/octet-stream")
 
-	// Count shared chunks.
-	var chunkCount int
-	require.NoError(t, f.db.QueryRow(`
-		SELECT COUNT(*) FROM global_content_index`).Scan(&chunkCount))
-	require.Greater(t, chunkCount, 0)
+	// Count shared chunks (this fixture's, not the whole table — R15).
+	pairs := tenantChunkPairs(t, f.db, f.tenant.ID)
+	require.Greater(t, gciRowsFor(t, f.db, pairs), 0)
 
 	// Delete object A — ref counts decrement but chunks survive (still used by B).
 	delReq := httptest.NewRequest("DELETE", "/test-bucket/gc-e2e-a.bin", nil)
@@ -241,13 +234,8 @@ func TestDedupGC_EndToEnd(t *testing.T) {
 	f.adapter.HandleDelete(dw2, delReq2, "test-bucket", "gc-e2e-b.bin")
 	require.Equal(t, http.StatusNoContent, dw2.Code)
 
-	// Backdate again.
-	_, err = f.db.Exec(`
-		UPDATE global_content_index
-		SET marked_at = NOW() - INTERVAL '1 day',
-		    last_accessed_at = NOW() - INTERVAL '1 day'
-		WHERE marked_for_deletion = TRUE`)
-	require.NoError(t, err)
+	// Backdate again (only this fixture's rows).
+	backdateGCIRows(t, f.db, pairs)
 
 	// Run GC again — now all chunks should be collected.
 	result2, gcErr2 := runner.RunOnce(context.Background())
@@ -255,10 +243,8 @@ func TestDedupGC_EndToEnd(t *testing.T) {
 	assert.Greater(t, result2.Deleted, 0, "orphaned chunks should be deleted")
 	assert.Greater(t, result2.BytesReclaimed, int64(0))
 
-	// GCI should be empty.
-	var remaining int
-	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM global_content_index`).Scan(&remaining))
-	assert.Equal(t, 0, remaining, "GCI should have no rows after full GC")
+	// Every row this fixture wrote is gone (other packages' rows are not ours to count).
+	assert.Equal(t, 0, gciRowsFor(t, f.db, pairs), "GCI should have no rows for this fixture after full GC")
 }
 
 func TestNewDedupGCRunner_NilGuards(t *testing.T) {
@@ -276,6 +262,8 @@ func TestDedupGC_GlobalContainerCleanup(t *testing.T) {
 
 	content := generateTestData(8 * 1024)
 	putChunkedObject(t, f, "gc-global.bin", content, "application/octet-stream")
+	pairs := tenantChunkPairs(t, f.db, f.tenant.ID)
+	require.NotEmpty(t, pairs)
 
 	// Verify chunks exist in the _global container on disk.
 	globalDir := filepath.Join(f.tempDir, chunkContainer)
@@ -291,11 +279,7 @@ func TestDedupGC_GlobalContainerCleanup(t *testing.T) {
 	f.adapter.HandleDelete(dw, delReq, "test-bucket", "gc-global.bin")
 	require.Equal(t, http.StatusNoContent, dw.Code)
 
-	_, _ = f.db.Exec(`
-		UPDATE global_content_index
-		SET marked_at = NOW() - INTERVAL '1 day',
-		    last_accessed_at = NOW() - INTERVAL '1 day'
-		WHERE marked_for_deletion = TRUE`)
+	backdateGCIRows(t, f.db, pairs)
 
 	result, gcErr := runner.RunOnce(context.Background())
 	require.NoError(t, gcErr)
@@ -307,9 +291,7 @@ func TestDedupGC_GlobalContainerCleanup(t *testing.T) {
 	// matching deleted hashes. We verified per-key deletion in other tests,
 	// so just check the GCI is clean.
 	_ = entries2
-	var count int
-	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM global_content_index`).Scan(&count))
-	assert.Equal(t, 0, count)
+	assert.Equal(t, 0, gciRowsFor(t, f.db, pairs))
 }
 
 func TestDedupGC_ManualTrigger(t *testing.T) {
