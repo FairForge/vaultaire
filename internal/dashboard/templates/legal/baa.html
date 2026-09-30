@@ -1,7 +1,7 @@
 {{define "title"}}Business Associate Agreement — stored.ge{{end}}
 {{define "content"}}
 <div class="card">
-    <p class="text-muted">Last updated: June 1, 2026</p>
+    <p class="text-muted">Last updated: September 30, 2026</p>
     <h1>Business Associate Agreement</h1>
     <p>This Business Associate Agreement ("BAA") is entered into between you, the Covered Entity or Business Associate ("Covered Entity"), and FairForge LLC, operating as stored.ge ("Business Associate"), and supplements the <a href="/legal/terms">Terms of Service</a> and <a href="/legal/dpa">Data Processing Agreement</a>.</p>
     <p>This BAA is required under the Health Insurance Portability and Accountability Act of 1996 ("HIPAA"), the Health Information Technology for Economic and Clinical Health Act ("HITECH"), and their implementing regulations at 45 CFR Parts 160 and 164 (collectively, "HIPAA Rules").</p>
@@ -43,16 +43,16 @@
     <p>Business Associate shall implement administrative, physical, and technical safeguards that reasonably and appropriately protect the confidentiality, integrity, and availability of ePHI, as required by 45 CFR §164.306 and §164.312. stored.ge provides the following safeguards:</p>
 
     <h3>3.1 Encryption at Rest</h3>
-    <p>All stored objects are encrypted at rest using server-side encryption (SSE-S3) with AES-256-GCM. Key encapsulation uses ML-KEM-768, a post-quantum key encapsulation mechanism. Per-tenant encryption keys are derived and managed automatically.</p>
+    <p>Encryption at rest is available under keys the Covered Entity supplies with each request (SSE-C — never stored by us) or applied client-side before upload. Server-managed encryption at rest (SSE-S3, AES-256-GCM with ML-KEM-768 key encapsulation and per-tenant keys) is implemented and tested but <strong>not yet enabled in production</strong>; Covered Entities storing ePHI should use SSE-C or client-side encryption until it is. Objects held by our storage subcontractors are additionally subject to those providers' own at-rest encryption.</p>
 
     <h3>3.2 Encryption in Transit</h3>
-    <p>All data in transit is encrypted via TLS 1.2 or higher. HSTS headers are enforced on all connections. API endpoints are accessible only over HTTPS.</p>
+    <p>All data in transit is encrypted via TLS 1.2 or higher. HSTS is enforced at our edge (one-year max-age, preload) and plain HTTP is redirected to HTTPS. API endpoints are accessible only over HTTPS.</p>
 
     <h3>3.3 Access Controls</h3>
     <ul>
         <li><strong>Unique user identification:</strong> Each tenant receives unique access credentials. Scoped API keys provide granular, per-bucket, per-operation access control.</li>
         <li><strong>Two-factor authentication:</strong> TOTP-based two-factor authentication is available for all accounts and enforced for administrative access.</li>
-        <li><strong>Automatic logoff:</strong> Dashboard sessions expire after 24 hours of inactivity, with hourly session cleanup.</li>
+        <li><strong>Automatic logoff:</strong> Dashboard sessions expire 24 hours after sign-in regardless of activity, with hourly session cleanup; accounts lock for 15 minutes after 10 failed sign-ins.</li>
         <li><strong>Emergency access:</strong> Administrators can reset two-factor authentication and manage account status for emergency access procedures.</li>
     </ul>
 
@@ -91,7 +91,7 @@
     <ul>
         <li>Return or destroy all PHI received from Covered Entity, or created or received by Business Associate on behalf of Covered Entity, if feasible.</li>
         <li>If return or destruction is not feasible, extend the protections of this BAA to the PHI retained and limit further uses and disclosures to those purposes that make return or destruction infeasible.</li>
-        <li>Account deletion follows the process described in our <a href="/legal/terms">Terms of Service</a>: a 30-day grace period followed by permanent data destruction.</li>
+        <li>Account deletion follows the process described in our <a href="/legal/terms">Terms of Service</a>: a 30-day grace period, after which the account is closed and our operators erase your objects, keys and account records.</li>
     </ul>
 
     <h2 id="term-termination">8. Term and Termination</h2>

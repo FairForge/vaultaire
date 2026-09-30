@@ -1,7 +1,7 @@
 {{define "title"}}EU Data Act Compliance — stored.ge{{end}}
 {{define "content"}}
 <div class="card">
-    <p class="text-muted">Last updated: June 1, 2026</p>
+    <p class="text-muted">Last updated: September 30, 2026</p>
     <h1>EU Data Act Compliance</h1>
     <p>The EU Data Act (Regulation 2023/2854) establishes new rules for cloud service providers regarding data portability, switching, and interoperability. stored.ge is fully compliant with the Data Act's requirements for cloud services, which apply from September 12, 2025.</p>
 
@@ -36,9 +36,9 @@
     <h2 id="interoperability">Article 25 — Interoperability</h2>
     <p>The Data Act requires cloud services to ensure interoperability with other services using open interfaces and standards. stored.ge is built on open standards:</p>
     <ul>
-        <li><strong>Full S3 API compatibility:</strong> GET, PUT, DELETE, LIST, HEAD, multipart upload, object versioning, pre-signed URLs, and more.</li>
+        <li><strong>Full S3 API compatibility:</strong> GET, PUT, DELETE, LIST, HEAD, multipart upload, Object Lock, version history, pre-signed URLs, and more.</li>
         <li><strong>Standard authentication:</strong> AWS Signature Version 4 (SigV4), the industry-standard authentication mechanism for S3-compatible services.</li>
-        <li><strong>Standard data formats:</strong> Objects are stored and returned as-is. No proprietary encoding, wrapping, or transformation.</li>
+        <li><strong>Standard data formats:</strong> Objects are returned exactly as uploaded. Any chunking or compression our engine applies at rest is transparent and undone on every read; no proprietary encoding is ever exposed.</li>
         <li><strong>Standard metadata:</strong> Object metadata uses standard HTTP headers and user-defined <code>x-amz-meta-*</code> headers, fully portable across providers.</li>
     </ul>
 
@@ -56,7 +56,7 @@
     <ul>
         <li><strong>Open protocol:</strong> The S3 API is an open, widely-implemented protocol supported by hundreds of tools and libraries.</li>
         <li><strong>No proprietary SDKs:</strong> Any S3-compatible SDK or CLI works with stored.ge. We do not develop or require proprietary client software.</li>
-        <li><strong>No proprietary data formats:</strong> Objects are stored byte-for-byte as uploaded. No proprietary headers, checksums, or container formats are added.</li>
+        <li><strong>No proprietary data formats:</strong> Objects come back byte-for-byte as uploaded, with standard S3 headers and ETags. No proprietary headers, checksums, or container formats are exposed.</li>
         <li><strong>No proprietary features:</strong> All stored.ge features use standard S3 operations. Your workflows are portable to any S3-compatible provider.</li>
     </ul>
 

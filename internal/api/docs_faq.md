@@ -35,16 +35,17 @@ bill never moves on its own: no meters, no overage charges.
 
 No API/request fees, ever. No retrieval fees. No minimum storage duration on
 Standard; Vault has a 30-day per-object minimum (a third of Wasabi's 90). Egress
-is free up to 0.5× your quota each month; beyond that throughput is throttled
-rather than billed — no surprise egress bills. Vault restores are free up to 1×
-your quota each month — test your restores monthly at no cost — and restores
-beyond that are queued, never billed.
+is free up to 0.5× your quota each month; beyond that throughput may be throttled,
+never billed — no surprise egress bills. Vault restores are free up to 1× your quota
+each month — test your restores monthly at no cost — and restores beyond that are
+queued, never billed.
 
 **What stays hot on Standard?**
-About 15% of your quota lives on hot storage. Data idle for 14+ days moves to tape
-automatically; reading it brings it back hot within minutes (and it stays hot for
-7 days). Need specific data to never demote? The **pin-hot add-on** is $3/TB/mo for
-the pinned amount.
+The Smart schedule: about 15% of your quota lives on hot storage; data idle for 14+
+days moves to tape and reading it brings it back hot within minutes (it then stays hot
+for 7 days). The schedule is switched on per account by us — until it is on for yours,
+everything you store on Standard simply stays hot. Need specific data to never demote?
+The **pin-hot add-on** is $3/TB/mo for the pinned amount.
 
 **How is $4.49/TB sustainable? Is this VC-subsidized?**
 No. The tiering math alone is a real margin: at full fill, ~15% on hot storage and
@@ -67,10 +68,11 @@ Contractual SLA credits ship when the second site comes online.
 
 **Isn't a single server a single point of failure?**
 For the *control plane*, yes — the API runs on one dedicated box (HA-proxied,
-monitored, daily off-site DB backups, tested restores). Your **data** is not on that
-box — it lives on enterprise S3 and tape providers. If the server dies, your data is
-intact and the control plane restores from backup (target: under an hour). A hot
-standby in a second city is the first thing new revenue buys.
+monitored, daily DB backups; off-host backup copies and a rehearsed restore are on
+the pre-launch list). Your **data** is not on that box — it lives on enterprise S3 and
+tape providers. If the server dies, your data is intact and the control plane restores
+from backup (target: under an hour). A hot standby in a second city is the first thing
+new revenue buys.
 
 **What if you disappear? / bus factor of one?**
 Three answers: (1) It's standard S3 — `rclone sync` your data out anytime, egress
@@ -87,20 +89,25 @@ true of any provider, including the big ones. 30-day full refund, no questions.
 ## Technical
 
 **How fast is it?**
-~320 MB/s sustained multipart upload from a datacenter host; from home you'll
-saturate your uplink first. Sub-1ms HEAD/metadata (served from cache). Range-GET
+~320 MB/s sustained multipart upload from a datacenter host (measured 2026-07);
+from home you'll saturate your uplink first. Sub-1ms HEAD/metadata (served from cache). Range-GET
 passthrough for video seeking and partial restores.
 
 **How does encryption work?**
-Encrypted at rest by default (SSE-S3). Want to hold your own keys? Use SSE-C, or
-client-side encryption (rclone crypt works great). Client-side encryption disables
-dedup on that data — everything else still works.
+Everything is encrypted in transit (TLS 1.2+, HSTS). At rest you have two options
+today: SSE-C (you send the key with each request; we encrypt with it and keep
+nothing) or client-side encryption (rclone crypt, restic — we store ciphertext and
+can't read a byte). Server-managed encryption at rest (SSE-S3, AES-256-GCM) is built
+and tested but **not yet enabled in production**; when it is, it will be on by default
+for every bucket and this answer will say so. Client-side encryption disables dedup on
+that data — everything else still works.
 
 **A privacy note on deduplication:**
-Dedup runs over encrypted chunks via convergent encryption (key derived from content
-hash). Known limitation: someone who already possesses an exact file could confirm it
-exists in the store. If that's in your threat model, use SSE-C or client-side
-encryption and you keep dedup on everything else.
+Dedup is content-addressed: identical chunks are stored once, per account for
+encrypted data and shared across accounts for plain data. Known limitation: someone
+who already possesses an exact file could confirm it exists in the store. If that's in
+your threat model, use SSE-C or client-side encryption and you keep dedup on everything
+else.
 
 **Cold data retrieval — is it instant?**
 Hot data is <50ms. Data aged to tape spools to cache on first read — seconds to a
@@ -109,9 +116,12 @@ hot forever? The pin-hot add-on ($3/TB/mo) keeps it from ever demoting; a full
 always-hot Performance tier launches after October 31.
 
 **Which S3 features are supported?**
-Multipart, versioning, Object Lock (governance + compliance/WORM), presigned URLs,
+Multipart, Object Lock (governance + compliance/WORM, legal hold), presigned URLs,
 CORS, range + conditional requests, tagging, batch delete, ListObjectsV2, scoped API
-keys (per-bucket, IP allowlist, expiry), and STS temporary credentials.
+keys (per-bucket, IP allowlist, expiry), STS temporary credentials, and versioning in
+the sense of version history + delete markers (retrieving a *previous* version's bytes
+is not yet available — `GET ?versionId=<old>` answers 501 rather than the wrong bytes).
+The full list is the [OpenAPI spec](/openapi.json).
 
 ## Support
 

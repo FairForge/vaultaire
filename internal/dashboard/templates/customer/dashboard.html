@@ -200,10 +200,13 @@ await client.send(new PutObjectCommand({
   Body: "Hello!",
 }));</pre>
             <button type="button" class="btn-copy" data-copy-target="snippet-js">Copy</button></div>
-        <div class="tab-panel panel-curl"><pre id="snippet-curl">curl -X PUT https://stored.ge/my-first-bucket \
+        <div class="tab-panel panel-curl"><pre id="snippet-curl"># curl 7.75+ signs S3 requests itself (SigV4)
+curl -X PUT https://stored.ge/my-first-bucket \
+  --aws-sigv4 "aws:amz:us-east-1:s3" \
   --user "{{.Onboarding.AccessKey}}:YOUR_SECRET_KEY"
 
 curl -X PUT https://stored.ge/my-first-bucket/hello.txt \
+  --aws-sigv4 "aws:amz:us-east-1:s3" \
   --user "{{.Onboarding.AccessKey}}:YOUR_SECRET_KEY" \
   -d "Hello!"</pre>
             <button type="button" class="btn-copy" data-copy-target="snippet-curl">Copy</button></div>
