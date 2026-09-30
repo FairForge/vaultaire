@@ -81,6 +81,9 @@ func (s *Server) ListBuckets(w http.ResponseWriter, r *http.Request) {
 				}
 				response.Buckets.Bucket = append(response.Buckets.Bucket, bi)
 			}
+			if err := rows.Err(); err != nil {
+				s.logger.Warn("iterate rows", zap.Error(err))
+			}
 		}
 	} else {
 		basePath := filepath.Join("/tmp/vaultaire", tenantID)

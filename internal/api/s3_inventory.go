@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/csv"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -65,7 +66,7 @@ func (s *Server) handleGetBucketInventory(w http.ResponseWriter, r *http.Request
 		`SELECT inventory_enabled, inventory_schedule, inventory_target_bucket, inventory_prefix, inventory_format
 		 FROM buckets WHERE tenant_id = $1 AND name = $2`,
 		t.ID, req.Bucket).Scan(&enabled, &schedule, &targetBucket, &prefix, &format)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		reqID := generateRequestID()
 		if suggestion := bucketSuggestion(r.Context(), s.db, t.ID, req.Bucket); suggestion != "" {
 			WriteS3ErrorWithContext(w, ErrNoSuchBucket, r.URL.Path, reqID, WithSuggestion(suggestion))
@@ -331,6 +332,9 @@ func (ir *InventoryRunner) runInventory(ctx context.Context) {
 			continue
 		}
 		configs = append(configs, c)
+	}
+	if err := rows.Err(); err != nil {
+		ir.logger.Warn("iterate rows", zap.Error(err))
 	}
 
 	for _, c := range configs {

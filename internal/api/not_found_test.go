@@ -62,7 +62,7 @@ func TestIsObjectMissingErr(t *testing.T) {
 		},
 		{
 			"aws-sdk GetObject miss (iDrive/Lyve/S3 drivers)",
-			errors.New("get t1_b/k: idrive get t1/b/k: operation error S3: GetObject, https response error StatusCode: 404, RequestID: X, HostID: Y, api error NoSuchKey: The specified key does not exist."),
+			errors.New("get t1_b/k: idrive get t1/b/k: operation error S3: GetObject, https response error StatusCode: 404, RequestID: X, HostID: Y, api error NoSuchKey: The specified key does not exist"),
 			true,
 		},
 		{

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -36,7 +37,7 @@ func (s *Server) handleGetBucketVersioning(w http.ResponseWriter, r *http.Reques
 		err := s.db.QueryRowContext(r.Context(),
 			`SELECT versioning_status, mfa_delete_enabled FROM buckets WHERE tenant_id = $1 AND name = $2`,
 			t.ID, req.Bucket).Scan(&dbStatus, &mfaDeleteEnabled)
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			reqID := generateRequestID()
 			if suggestion := bucketSuggestion(r.Context(), s.db, t.ID, req.Bucket); suggestion != "" {
 				WriteS3ErrorWithContext(w, ErrNoSuchBucket, r.URL.Path, reqID, WithSuggestion(suggestion))
@@ -108,7 +109,7 @@ func (s *Server) handlePutBucketVersioning(w http.ResponseWriter, r *http.Reques
 		err := s.db.QueryRowContext(r.Context(),
 			`SELECT object_lock_enabled FROM buckets WHERE tenant_id = $1 AND name = $2`,
 			t.ID, req.Bucket).Scan(&objectLockEnabled)
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			WriteS3Error(w, ErrNoSuchBucket, r.URL.Path, generateRequestID())
 			return
 		}

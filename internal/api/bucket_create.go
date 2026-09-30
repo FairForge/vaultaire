@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/FairForge/vaultaire/internal/auth"
+	"github.com/FairForge/vaultaire/internal/dashboard/handlers"
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/usage"
 	"go.uber.org/zap"
@@ -112,11 +113,18 @@ func (s *Server) createBucketRegistry(ctx context.Context, tenantID, bucket, reg
 	}
 
 	sseDefault := s.sseService != nil
+	// data_residency is the coarse label the dashboard settings page shows
+	// (050); the dashboard used to derive it and the S3/management paths left
+	// it NULL — one rule now (Review R15, WP-R12-10).
+	residency := "us"
+	if drivers.IsEURegion(region) {
+		residency = "eu"
+	}
 	if _, err := s.db.ExecContext(ctx, `
-		INSERT INTO buckets (tenant_id, name, visibility, sse_enabled, region)
-		VALUES ($1, $2, 'private', $3, $4)
+		INSERT INTO buckets (tenant_id, name, visibility, sse_enabled, region, data_residency)
+		VALUES ($1, $2, 'private', $3, $4, $5)
 		ON CONFLICT (tenant_id, name) DO NOTHING
-	`, tenantID, bucket, sseDefault, region); err != nil {
+	`, tenantID, bucket, sseDefault, region, residency); err != nil {
 		return out, fmt.Errorf("persist bucket %s: %w", bucket, err)
 	}
 	auth.EnsureTenantSlug(ctx, s.db, tenantID, s.logger)
@@ -136,4 +144,30 @@ func (s *Server) createBucketRegistry(ctx context.Context, tenantID, bucket, reg
 	s.logger.Info("bucket created",
 		zap.String("bucket", bucket), zap.String("tenant", tenantID), zap.String("region", out.region))
 	return out, nil
+}
+
+// dashboardBucketCreator adapts createBucketRegistry to the dashboard's
+// BucketCreator so all three entry points (S3 CreateBucket, the management
+// API and the dashboard form) share one rule (WP-R12-10).
+func (s *Server) dashboardBucketCreator() handlers.BucketCreator {
+	return func(ctx context.Context, tenantID, name, region string) (handlers.BucketCreateResult, error) {
+		out, err := s.createBucketRegistry(ctx, tenantID, name, region)
+		if err != nil {
+			return handlers.BucketCreateResult{}, err
+		}
+		res := handlers.BucketCreateResult{Region: out.region}
+		switch out.state {
+		case bucketCreateCapMax:
+			res.State = handlers.BucketCreateCapMax
+		case bucketCreateCapFree:
+			res.State = handlers.BucketCreateCapFree
+		case bucketCreateInvalidRegion:
+			res.State = handlers.BucketCreateInvalidRegion
+		case bucketCreateRegionUnavailable:
+			res.State = handlers.BucketCreateRegionUnavailable
+		default:
+			res.State = handlers.BucketCreateOK
+		}
+		return res, nil
+	}
 }

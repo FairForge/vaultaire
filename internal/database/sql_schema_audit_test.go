@@ -73,9 +73,8 @@ func TestSQLLiteralsMatchSchema(t *testing.T) {
 
 	var failures []string
 	for _, s := range sites {
-		stmt, err := db.Prepare(s.sql)
+		err := prepareAndClose(db, s.sql)
 		if err == nil {
-			_ = stmt.Close()
 			continue
 		}
 		msg := err.Error()
@@ -180,4 +179,15 @@ func constString(e ast.Expr) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// prepareAndClose prepares one statement and releases it immediately (the
+// audit only wants the parse/validation outcome).
+func prepareAndClose(db *sql.DB, query string) error {
+	stmt, err := db.Prepare(query)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = stmt.Close() }()
+	return nil
 }

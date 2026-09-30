@@ -102,12 +102,16 @@ make build          # Build binary
 make test-db        # Create + migrate the local vaultaire_test database (before any DB-backed test)
 make test           # Quick tests with race detector
 make test-unit      # Unit tests only
-make lint           # golangci-lint
+make test-integration # what CI runs: every package with -race against the migrated test DB
+make lint           # golangci-lint (.golangci.yml)
+make gosec          # the Security workflow's gosec command
+make deadcode       # unreachable functions in the product binary
 make fmt            # Format code
+make clean          # remove every build output, including tool binaries in the repo root
 make landing        # Regenerate the landing page from internal/api/landing/ (never hand-edit landing.html)
 make dash-shots     # Screenshot every dashboard page (light/dark/phone)
 make dash-lighthouse # Lighthouse accessibility score per dashboard page
-pre-commit install  # go fmt + short tests + lint before each commit
+pre-commit install && pre-commit install --hook-type pre-push  # fmt + lint on commit, short tests on push
 ```
 
 TDD is the standard workflow. Tests use [testify](https://github.com/stretchr/testify) with Arrange/Act/Assert.

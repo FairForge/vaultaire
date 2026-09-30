@@ -660,7 +660,7 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
 	`, t.ID, req.Bucket, req.Object).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &metadataJSON, &backendName, &encAlgo, &tagsJSON, &contentDisposition, &contentEncoding, &contentLanguage, &echo.CacheControl, &echo.Expires, &echo.WebsiteRedirect)
 
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		s.logger.Warn("HEAD: object not in metadata cache",
 			zap.String("tenant_id", t.ID),
 			zap.String("bucket", req.Bucket),

@@ -378,6 +378,9 @@ func queryTenantCostData(ctx context.Context, db *sql.DB, logger *zap.Logger) []
 		}
 		result = append(result, td)
 	}
+	if err := rows.Err(); err != nil {
+		return nil
+	}
 	return result
 }
 
@@ -439,6 +442,9 @@ func populateActualBackends(ctx context.Context, db *sql.DB, data map[string]any
 
 		actual = append(actual, r)
 	}
+	if err := rows.Err(); err != nil {
+		logger.Warn("iterate rows", zap.Error(err))
+	}
 
 	data["ModelledSpendFmt"] = formatCents(modelledTotal)
 	data["InvoicedSpendFmt"] = formatCents(invoicedTotal)
@@ -472,6 +478,9 @@ func queryBackendEgress(ctx context.Context, db *sql.DB, logger *zap.Logger) map
 			continue
 		}
 		out[name] = bytes
+	}
+	if err := rows.Err(); err != nil {
+		return nil
 	}
 	return out
 }

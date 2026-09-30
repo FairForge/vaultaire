@@ -86,10 +86,11 @@ Every push and PR: PostgreSQL 15 service container, all migrations applied
 with `ON_ERROR_STOP`, `go build ./...`, `go test -race ./...` (with
 `DATABASE_URL` and `JWT_SECRET`), golangci-lint v2.4.0, then a smoke boot that
 must answer `/health/live` and `/status`. A second job drives the landing
-page's house builder in headless Chrome. Nightly (`nightly.yml`): Go
-benchmarks, the k6 script `tests/k6/s3_basic_load.js` and the chaos tests,
-all `continue-on-error` — informational, not gates (the gates are
-`tests/load/`, see `docs/SCALE_TESTING.md`).
+page's house builder in headless Chrome. The Security workflow (`security.yml`)
+runs gosec (green since Review R15; `make gosec` is the same command), Trivy
+and govulncheck. There is no nightly workflow any more (its unauthenticated
+benchmarks measured nothing — `docs/SCALE_TESTING.md`); the load gate is
+`tests/load/`.
 
 ## Backups
 

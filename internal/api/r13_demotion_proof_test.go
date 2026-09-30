@@ -47,6 +47,9 @@ func TestR13_DemotionLedgerProof(t *testing.T) {
 			fmt.Printf("smart_demotions:   reason=%s %s→%s demoted_at=%s hot_deleted=%v outcome=%q\n", reason, hot, cold, at.Format(time.RFC3339), deleted, outcome)
 			n++
 		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("iterate rows: %v", err)
+		}
 		_ = rows.Close()
 		if n == 0 {
 			fmt.Println("smart_demotions:   (no row)")
@@ -58,6 +61,9 @@ func TestR13_DemotionLedgerProof(t *testing.T) {
 			var lim, used int64
 			require.NoError(t, frows.Scan(&fl, &lim, &used))
 			fmt.Printf("tenant_floor_quotas: floor=%s limit=%d used=%d\n", fl, lim, used)
+		}
+		if err := frows.Err(); err != nil {
+			t.Fatalf("iterate rows: %v", err)
 		}
 		_ = frows.Close()
 		var used int64

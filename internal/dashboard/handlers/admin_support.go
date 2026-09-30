@@ -105,6 +105,9 @@ func searchCustomers(ctx context.Context, db *sql.DB, q string, logger *zap.Logg
 			Status: status, StatusClass: statusClass,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil
+	}
 	return results
 }
 
@@ -186,6 +189,9 @@ func queryTimeline(ctx context.Context, db *sql.DB, tenantID string, logger *zap
 			RelTime: relativeTime(createdAt),
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil
+	}
 	return events
 }
 
@@ -216,6 +222,9 @@ func queryS3Errors(ctx context.Context, db *sql.DB, tenantID string, logger *zap
 			RelTime: relativeTime(loggedAt),
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil
+	}
 	return entries
 }
 
@@ -243,6 +252,9 @@ func queryNotes(ctx context.Context, db *sql.DB, tenantID string, logger *zap.Lo
 		notes = append(notes, adminNote{
 			Note: note, AdminEmail: adminEmail, RelTime: relativeTime(createdAt),
 		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil
 	}
 	return notes
 }

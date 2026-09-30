@@ -1212,7 +1212,7 @@ func (a *S3ToEngine) handleChunkedPut(
 	// capped engine-path uploads at chunk_size ÷ round-trip (~19 MB/s to
 	// iDrive). This dispatcher loop stays sequential for every dedup
 	// decision; only compress → encrypt → storeChunkLocked runs on workers.
-	pool := newChunkStorePool(a, pctx, cancelStores,
+	pool := newChunkStorePool(pctx, a, cancelStores,
 		tenantID, t.ID, bucket, artifact, dedupScope, contentType, encrypting)
 
 	// Every chunk processed takes one GCI reference (fresh insert at

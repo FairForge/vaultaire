@@ -3,6 +3,7 @@ package api
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -185,6 +186,12 @@ func (s *Server) handleListWebhooks(w http.ResponseWriter, r *http.Request) {
 			"updated_at": updatedAt.Format(time.RFC3339),
 		})
 	}
+	if err := rows.Err(); err != nil {
+		s.logger.Warn("iterate rows", zap.Error(err))
+	}
+	if err := rows.Err(); err != nil {
+		s.logger.Warn("iterate rows", zap.Error(err))
+	}
 
 	hasMore := len(items) > limit
 	nextCursor := ""
@@ -251,7 +258,7 @@ func (s *Server) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 		FROM webhook_endpoints
 		WHERE id = $1 AND tenant_id = $2`,
 		webhookID, tenantID).Scan(&currentURL, pq.Array(&currentFilter), &currentEnabled, &createdAt)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		writeManagementError(w, ErrTypeNotFound, "webhook_not_found", "webhook not found", "")
 		return
 	}
@@ -408,6 +415,12 @@ func (s *Server) handleListDeliveries(w http.ResponseWriter, r *http.Request) {
 			"retry_count":   retryCount,
 			"created_at":    createdAt.Format(time.RFC3339),
 		})
+	}
+	if err := rows.Err(); err != nil {
+		s.logger.Warn("iterate rows", zap.Error(err))
+	}
+	if err := rows.Err(); err != nil {
+		s.logger.Warn("iterate rows", zap.Error(err))
 	}
 
 	hasMore := len(items) > limit

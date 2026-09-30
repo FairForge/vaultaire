@@ -63,6 +63,9 @@ func TestCDNRollup_IncludesYesterday(t *testing.T) {
 		assert.Equal(t, int64(1), req)
 		assert.Equal(t, int64(100), bytes)
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate rows: %v", err)
+	}
 	today := time.Now().UTC()
 	// The DB's CURRENT_DATE is its session timezone's date; the test DB is
 	// local. Compare against the DB's own idea of today/yesterday.

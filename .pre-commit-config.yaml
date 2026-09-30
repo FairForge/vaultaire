@@ -16,12 +16,16 @@ repos:
         types: [go]
         pass_filenames: false
 
+      # The short suite takes several minutes with the DB-backed packages, so
+      # it runs on push, not on every commit (Review R15). Install both hooks:
+      #   pre-commit install && pre-commit install --hook-type pre-push
       - id: go-test
-        name: go test
+        name: go test (pre-push)
         entry: go test ./... -short
         language: system
         types: [go]
         pass_filenames: false
+        stages: [pre-push]
 
       - id: golangci-lint
         name: golangci-lint

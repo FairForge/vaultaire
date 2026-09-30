@@ -185,4 +185,4 @@ Pixeldrain from SLC: 581 MB/s concurrent upload, ~1700ms p50 per-request.
 
 Pixeldrain's value is **global CDN distribution** (6 PoPs), not raw speed.
 
-See `cmd/pixeldrain-bench/` and `bench-results/*-pixeldrain-*.json`.
+See `cmd/tools/pixeldrain-bench/` and `bench-results/*-pixeldrain-*.json`.

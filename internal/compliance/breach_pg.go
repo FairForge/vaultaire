@@ -184,6 +184,9 @@ func (s *BreachPgStore) ListBreaches(ctx context.Context, filters map[string]int
 		}
 		breaches = append(breaches, &b)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
+	}
 
 	return breaches, nil
 }
@@ -219,6 +222,9 @@ func (s *BreachPgStore) GetAffectedUsers(ctx context.Context, breachID uuid.UUID
 			return nil, fmt.Errorf("scan breach_affected_users: %w", err)
 		}
 		users = append(users, &u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
 	}
 
 	return users, nil
@@ -287,6 +293,9 @@ func (s *BreachPgStore) GetNotifications(ctx context.Context, breachID uuid.UUID
 		}
 		notifications = append(notifications, &n)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
+	}
 
 	return notifications, nil
 }
@@ -314,6 +323,9 @@ func (s *BreachPgStore) GetBreachStats(ctx context.Context) (*BreachStats, error
 			stats.BreachesByType[t] = c
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
+	}
 	_ = rows.Close()
 
 	rows, err = s.db.QueryContext(ctx, `SELECT severity, COUNT(*) FROM breach_records GROUP BY severity`)
@@ -327,6 +339,9 @@ func (s *BreachPgStore) GetBreachStats(ctx context.Context) (*BreachStats, error
 			stats.BreachesBySeverity[t] = c
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
+	}
 	_ = rows.Close()
 
 	rows, err = s.db.QueryContext(ctx, `SELECT status, COUNT(*) FROM breach_records GROUP BY status`)
@@ -339,6 +354,9 @@ func (s *BreachPgStore) GetBreachStats(ctx context.Context) (*BreachStats, error
 		if err := rows.Scan(&t, &c); err == nil {
 			stats.BreachesByStatus[t] = c
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
 	}
 	_ = rows.Close()
 

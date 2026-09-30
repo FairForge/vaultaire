@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 
@@ -127,7 +128,7 @@ func (c *FastCDCChunker) ChunkContext(ctx context.Context, r io.Reader) (<-chan 
 
 		for {
 			chunk, err := chunker.Next(buf)
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				break
 			}
 			if err != nil {
@@ -187,7 +188,7 @@ func (c *FastCDCChunker) ChunkBytes(data []byte) ([]Chunk, error) {
 
 	for {
 		chunk, err := chunker.Next(buf)
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
@@ -267,7 +268,7 @@ func (c *FixedChunker) Chunk(r io.Reader) (<-chan ChunkResult, error) {
 
 		for {
 			n, err := io.ReadFull(r, buf)
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				break
 			}
 			if err == io.ErrUnexpectedEOF {

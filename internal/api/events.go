@@ -119,6 +119,9 @@ func dispatchWebhooks(db *sql.DB, logger *zap.Logger, eventID, eventType, tenant
 		}
 		endpoints = append(endpoints, ep)
 	}
+	if err := rows.Err(); err != nil {
+		logger.Warn("iterate rows", zap.Error(err))
+	}
 
 	eventPayload := map[string]interface{}{
 		"id":         eventID,
@@ -313,6 +316,18 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 			"data":       json.RawMessage(data),
 			"created_at": createdAt.Format(time.RFC3339),
 		})
+	}
+	if err := rows.Err(); err != nil {
+		s.logger.Warn("iterate rows", zap.Error(err))
+	}
+	if err := rows.Err(); err != nil {
+		s.logger.Warn("iterate rows", zap.Error(err))
+	}
+	if err := rows.Err(); err != nil {
+		s.logger.Warn("iterate rows", zap.Error(err))
+	}
+	if err := rows.Err(); err != nil {
+		s.logger.Warn("iterate rows", zap.Error(err))
 	}
 
 	hasMore := len(items) > limit

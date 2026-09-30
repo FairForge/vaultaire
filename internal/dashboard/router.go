@@ -33,7 +33,8 @@ type Deps struct {
 	MFAPending    *MFAPendingStore // Short-lived store for 2FA login challenges.
 	Sessions      dashauth.SessionStore
 	Logger        *zap.Logger
-	DataPath      string                 // Local storage root for bucket creation.
+	DataPath      string                 // Local storage root (bucket list sizes in dev).
+	CreateBucket  handlers.BucketCreator // The API layer's bucket registry (nil = creation refused).
 	Stripe        *billing.StripeService // Nil when STRIPE_SECRET_KEY is not set.
 	Google        *oauth2.Config         // Nil when GOOGLE_CLIENT_ID is not set.
 	GitHub        *oauth2.Config         // Nil when GITHUB_CLIENT_ID is not set.
@@ -184,7 +185,7 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 			"templates/customer/bucket_settings.html",
 		))
 		dr.Get("/buckets", handlers.HandleBuckets(bucketsTmpl, deps.DB, deps.DataPath, deps.Logger))
-		dr.Post("/buckets", handlers.HandleCreateBucket(bucketsTmpl, deps.DB, deps.DataPath, deps.Logger))
+		dr.Post("/buckets", handlers.HandleCreateBucket(bucketsTmpl, deps.DB, deps.CreateBucket, deps.Logger))
 		dr.Get("/buckets/{name}", handlers.HandleBucketObjects(bucketObjsTmpl, deps.DB, deps.Logger))
 		dr.Post("/buckets/{name}/restore", handlers.HandleRestoreObject(deps.Engine, deps.DB, deps.Logger))
 		dr.Get("/buckets/{name}/restore-status", handlers.HandleObjectRestoreStatus(deps.Engine, deps.DB, deps.Logger))

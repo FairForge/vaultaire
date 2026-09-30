@@ -148,6 +148,9 @@ func queryComplianceData(r *http.Request, db *sql.DB, tenantID string) ([]Bucket
 
 		buckets = append(buckets, b)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, 0
+	}
 
 	compliant := 0
 	for _, b := range buckets {

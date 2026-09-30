@@ -56,7 +56,7 @@ func GenerateSTSToken(ctx context.Context, db *sql.DB, tenantID, parentKeyID str
 	}
 
 	if err := ValidatePermissions(perms); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrSTSScope, err)
+		return nil, fmt.Errorf("%w: %w", ErrSTSScope, err)
 	}
 
 	buckets := intersectBucketScope(parentScope.BucketScope, req.BucketScope)

@@ -253,7 +253,7 @@ func (f *FailoverManager) Execute(ctx context.Context, backends []string, fn fun
 		// remaining backend (R6-06). Their breakers are not charged either.
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			if lastErr != nil {
-				return "", fmt.Errorf("%w (last backend error: %v)", ctxErr, lastErr)
+				return "", fmt.Errorf("%w (last backend error: %w)", ctxErr, lastErr)
 			}
 			return "", fmt.Errorf("request abandoned before %s: %w", backend, ctxErr)
 		}

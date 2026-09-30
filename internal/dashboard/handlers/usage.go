@@ -157,6 +157,9 @@ func populateUsageHistory(ctx context.Context, db *sql.DB, tenantID string, data
 			Requests:   reqs,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		data["RowsError"] = err.Error()
+	}
 	data["UsageHistory"] = history
 }
 

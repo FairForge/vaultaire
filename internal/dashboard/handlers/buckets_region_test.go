@@ -49,21 +49,12 @@ func TestHandleBuckets_RegionPickerFromTable(t *testing.T) {
 	assert.Contains(t, body, `<optgroup label="European Union">`)
 }
 
+// The region gate itself lives in the API layer's registry
+// (createBucketRegistry — TestManagementCreateBucket_UnavailableRegion); the
+// dashboard only renders the verdict, naming the region the customer picked.
 func TestHandleCreateBucket_RegionNotEnabledIsRefused(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires database")
-	}
-	db := testDashDB(t)
-	defer func() { _ = db.Close() }()
-	cleanupDashBucketData(t, db)
-	defer cleanupDashBucketData(t, db)
-	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key) VALUES ('test-dash-r7', 'Region Co', 'r7@test.com', 'VK-dr7', 'SK-dr7') ON CONFLICT DO NOTHING`)
-	require.NoError(t, err)
-
-	drivers.SetAvailableIDriveRegions(drivers.IDriveDefaultRegion(os.Getenv), []string{"eu-west-1"})
-	t.Cleanup(drivers.ResetAvailableIDriveRegions)
-
-	handler := HandleCreateBucket(testBucketsTemplate(t), db, t.TempDir(), zap.NewNop())
+	fc := &fakeCreator{result: BucketCreateResult{State: BucketCreateRegionUnavailable}}
+	handler := HandleCreateBucket(testBucketsTemplate(t), nil, fc.fn(), zap.NewNop())
 
 	form := url.Values{"name": {"tokyo-bucket"}, "region": {"ap-northeast-1"}}
 	req := injectSessionWithTenant(httptest.NewRequest("POST", "/dashboard/buckets",
@@ -73,20 +64,7 @@ func TestHandleCreateBucket_RegionNotEnabledIsRefused(t *testing.T) {
 	handler.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code, "re-rendered form")
+	assert.Contains(t, w.Body.String(), "Tokyo")
 	assert.Contains(t, w.Body.String(), "not enabled on this deployment")
-	var n int
-	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM buckets WHERE tenant_id = 'test-dash-r7'`).Scan(&n))
-	assert.Equal(t, 0, n)
-
-	// Default region (no selection) still works and is stored as the primary's region.
-	form = url.Values{"name": {"home-bucket"}}
-	req = injectSessionWithTenant(httptest.NewRequest("POST", "/dashboard/buckets",
-		strings.NewReader(form.Encode())), "test-dash-r7")
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	w = httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusOK, w.Code)
-	var region string
-	require.NoError(t, db.QueryRow(`SELECT region FROM buckets WHERE tenant_id = 'test-dash-r7' AND name = 'home-bucket'`).Scan(&region))
-	assert.Equal(t, drivers.IDriveDefaultRegion(os.Getenv), region)
+	assert.Equal(t, []string{"test-dash-r7/tokyo-bucket/ap-northeast-1"}, fc.calls)
 }

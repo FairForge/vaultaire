@@ -320,6 +320,9 @@ func (at *S3AccessLogTracker) deliverLogs(ctx context.Context) {
 		}
 		configs = append(configs, c)
 	}
+	if err := rows.Err(); err != nil {
+		at.logger.Warn("iterate rows", zap.Error(err))
+	}
 
 	for _, c := range configs {
 		// A bucket busier than 1000 requests per pass used to fall behind
@@ -370,6 +373,9 @@ func (at *S3AccessLogTracker) deliverBucketLogs(ctx context.Context, tenantID, b
 		}
 		ids = append(ids, id)
 		records = append(records, e)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate rows: %w", err)
 	}
 
 	_ = rows.Close()

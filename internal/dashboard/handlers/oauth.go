@@ -248,7 +248,11 @@ func findOrCreateOAuthUser(ctx context.Context, authSvc *auth.AuthService, db *s
 func FetchGoogleUser(cfg *oauth2.Config) func(ctx context.Context, token *oauth2.Token) (oauthUser, error) {
 	return func(ctx context.Context, token *oauth2.Token) (oauthUser, error) {
 		client := cfg.Client(ctx, token)
-		resp, err := client.Get("https://www.googleapis.com/oauth2/v2/userinfo")
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://www.googleapis.com/oauth2/v2/userinfo", nil)
+		if err != nil {
+			return oauthUser{}, fmt.Errorf("google userinfo request: %w", err)
+		}
+		resp, err := client.Do(req)
 		if err != nil {
 			return oauthUser{}, fmt.Errorf("google userinfo request: %w", err)
 		}
@@ -296,7 +300,11 @@ func FetchGithubUser(cfg *oauth2.Config) func(ctx context.Context, token *oauth2
 		client := cfg.Client(ctx, token)
 
 		// Get user profile.
-		resp, err := client.Get("https://api.github.com/user")
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/user", nil)
+		if err != nil {
+			return oauthUser{}, fmt.Errorf("github user request: %w", err)
+		}
+		resp, err := client.Do(req)
 		if err != nil {
 			return oauthUser{}, fmt.Errorf("github user request: %w", err)
 		}
@@ -341,7 +349,11 @@ func FetchGithubUser(cfg *oauth2.Config) func(ctx context.Context, token *oauth2
 }
 
 func fetchGithubPrimaryEmail(ctx context.Context, client *http.Client) (string, error) {
-	resp, err := client.Get("https://api.github.com/user/emails")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/user/emails", nil)
+	if err != nil {
+		return "", fmt.Errorf("github emails request: %w", err)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("github emails request: %w", err)
 	}

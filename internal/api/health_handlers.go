@@ -156,7 +156,8 @@ func (s *Server) handleHealthEnhanced(w http.ResponseWriter, r *http.Request) {
 
 	resp := map[string]interface{}{
 		"status":           status,
-		"version":          "0.1.0",
+		"version":          BuildSHA,
+		"build":            BuildDate,
 		"uptime":           time.Since(s.startTime).Seconds(),
 		"backends_healthy": healthy,
 		"backends_total":   total,

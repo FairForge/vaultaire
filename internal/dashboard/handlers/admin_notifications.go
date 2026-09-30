@@ -91,6 +91,9 @@ func queryAdminNotifications(ctx context.Context, db *sql.DB, logger *zap.Logger
 			RelTime:    relativeTime(createdAt),
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, 0
+	}
 	return notifs, unread
 }
 

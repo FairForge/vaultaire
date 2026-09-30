@@ -8,9 +8,11 @@ test:
 test-unit:
 	go test -short -race -cover ./internal/...
 
-# Integration tests (requires services)
-test-integration:
-	go test -short ./tests/integration
+# DB-backed suites against the migrated local test database (what CI runs):
+# every package, race detector, no -short. Needs `make test-db` first.
+TEST_DSN ?= postgres://$(USER)@localhost:5432/$(TEST_DB)?sslmode=disable
+test-integration: test-db
+	DATABASE_URL="$(TEST_DSN)" JWT_SECRET=local-test-secret go test -race ./...
 
 # Load/performance tests (slow)
 test-load:
@@ -57,11 +59,21 @@ fmt:
 	go fmt ./...
 	gofmt -s -w .
 
-# Linting
+# Linting — configuration in .golangci.yml (Review R15); CI runs the same.
 lint:
 	golangci-lint run ./...
 
-.PHONY: fmt lint
+# The Security workflow's gosec command, verbatim (see security.yml for the
+# exclusion rationale). Needs: go install github.com/securego/gosec/v2/cmd/gosec@latest
+gosec:
+	gosec -severity medium -exclude-dir=tests -exclude-dir=cmd/tools -exclude=G101,G115,G301,G304 ./...
+
+# Unreachable functions in the product binary (R0's tool of record).
+# x/tools v0.50 needs the Go 1.26 toolchain; GOTOOLCHAIN=auto downloads it.
+deadcode:
+	go run golang.org/x/tools/cmd/deadcode@v0.50.0 ./cmd/vaultaire
+
+.PHONY: fmt lint gosec deadcode
 
 # Build the binary
 # Regenerate internal/api/landing.html from its sources (internal/api/landing/).
@@ -91,12 +103,36 @@ og:
 	"$(CHROME)" --headless=new --disable-gpu --hide-scrollbars --no-sandbox --blink-settings=preferredColorScheme=1 --window-size=1200,630 --force-device-scale-factor=1 --virtual-time-budget=4000 --screenshot=internal/api/og.png file:///tmp/vaultaire-og/og.html >/dev/null 2>&1
 	@ls -la internal/api/og.png
 
-build:
-	go build -o bin/vaultaire ./cmd/vaultaire
+# Build identity stamped into /version, /health and /status (WP-R14-4).
+# deploy.yml stamps the same two variables from GITHUB_SHA.
+BUILD_SHA  ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo dev)
+BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS    := -X github.com/FairForge/vaultaire/internal/api.BuildSHA=$(BUILD_SHA) \
+              -X github.com/FairForge/vaultaire/internal/api.BuildDate=$(BUILD_DATE)
 
-# Clean build artifacts
+build:
+	go build -ldflags "$(LDFLAGS)" -o bin/vaultaire ./cmd/vaultaire
+
+version:
+	@echo "$(BUILD_SHA) $(BUILD_DATE)"
+
+# Remove every build output, including the tool binaries that used to pile up
+# in the repo root (WP-R0-5: ~35 gitignored files). Keeps bench-results/*.md.
 clean:
-	rm -rf bin/
+	rm -rf bin/ dist/ coverage.out coverage.html cov.out
+	rm -f vaultaire vaultaire-bin vaultaire-linux vaultaire-darwin vaultaire-windows.exe
+	rm -f backend-matrix backend-matrix-linux bench bench-linux bench-compare bench-compare-linux
+	rm -f dedup-migrate dedup-migrate-linux erasure-bench erasure-bench-linux
+	rm -f geyser-admin-test geyser-cloudsync-probe geyser-console-probe geyser-smoke geyser-smoke-bin geyser-test
+	rm -f lighthouse-bench loadtest loadtest-linux onedrive-bench onedrive-bench-linux
+	rm -f permafrost-benchmark permafrost-benchmark-linux permafrost-fleet permafrost-fleet-linux
+	rm -f permafrost-parallel permafrost-parallel-linux permafrost-stress permafrost-stress-linux
+	rm -f permafrost-v2 permafrost-v2-linux permafrost-v3 permafrost-v3-linux
+	rm -f pixeldrain-bench pixeldrain-bench-linux pipeline-bench quotaless-bench-v2 quotaless-bench-v2-linux
+	rm -f uloz-bench uloz-bench-linux validate validate-linux
+	rm -f *.bin *.test test*.txt test_output.log downloaded.txt cache_benchmark_results.txt compress.txt
+	rm -rf bench-results/quotaless-*/
+	find . -name __pycache__ -type d -prune -exec rm -rf {} +
 	go clean
 
-.PHONY: build clean landing landing-browser og dash-shots dash-lighthouse
+.PHONY: build version clean landing landing-browser og dash-shots dash-lighthouse

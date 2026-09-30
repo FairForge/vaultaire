@@ -48,7 +48,7 @@ func TestHandleAdminAudit_ReadsAuditLogs(t *testing.T) {
 	rows := sqlmock.NewRows(auditLogCols).
 		AddRow(auditRow("a1", "key.revoked", "admin-1", "t-1", "203.0.113.7", "success")...).
 		AddRow(auditRow("a2", "auth.login_failed", "", "", "198.51.100.9", "success")...)
-	mock.ExpectQuery(`FROM audit_logs WHERE TRUE ORDER BY timestamp DESC`).WithArgs(51).WillReturnRows(rows)
+	mock.ExpectQuery(`FROM audit_logs`).WithArgs("", "", "", "", "", "", false, sqlmock.AnyArg(), "", 51).WillReturnRows(rows)
 
 	handler := HandleAdminAudit(testAdminAuditTemplate(t), db, zap.NewNop())
 	req := httptest.NewRequest("GET", "/admin/audit", nil).WithContext(adminCtx(t))
@@ -68,8 +68,8 @@ func TestHandleAdminAudit_FiltersByActorTenantIPTypeAction(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
-	mock.ExpectQuery(`FROM audit_logs WHERE TRUE AND tenant_id = \$1 AND performed_by::text = \$2 AND host\(ip\) = \$3 AND action = \$4 AND event_type = \$5`).
-		WithArgs("t-1", "admin-1", "203.0.113.7", "key.revoked", "key", 51).
+	mock.ExpectQuery(`FROM audit_logs`).
+		WithArgs("t-1", "", "admin-1", "203.0.113.7", "key.revoked", "key", false, sqlmock.AnyArg(), "", 51).
 		WillReturnRows(sqlmock.NewRows(auditLogCols).AddRow(auditRow("a1", "key.revoked", "admin-1", "t-1", "203.0.113.7", "success")...))
 
 	handler := HandleAdminAudit(testAdminAuditTemplate(t), db, zap.NewNop())
@@ -91,7 +91,7 @@ func TestHandleAdminAudit_PaginationKeepsFilters(t *testing.T) {
 	for i := 0; i < auditPageSize+1; i++ {
 		rows.AddRow(auditRow("id", "flag.set", "admin-1", "", "", "success")...)
 	}
-	mock.ExpectQuery(`FROM audit_logs WHERE TRUE AND event_type = \$1`).WithArgs("flag", 51).WillReturnRows(rows)
+	mock.ExpectQuery(`FROM audit_logs`).WithArgs("", "", "", "", "", "flag", false, sqlmock.AnyArg(), "", 51).WillReturnRows(rows)
 
 	handler := HandleAdminAudit(testAdminAuditTemplate(t), db, zap.NewNop())
 	req := httptest.NewRequest("GET", "/admin/audit?type=flag", nil).WithContext(adminCtx(t))
@@ -136,7 +136,7 @@ func TestHandleAdminAuditExport_CSVIsAuditedAndEscaped(t *testing.T) {
 	rows := sqlmock.NewRows(auditLogCols).
 		AddRow("a1", time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC), "u-1", "admin-1", "t-1", "auth", "auth.login_failed",
 			"", "success", "warning", "203.0.113.7", "curl/8", "", []byte(`{"email":"=HYPERLINK(\"x\")@evil.test"}`))
-	mock.ExpectQuery(`FROM audit_logs WHERE TRUE AND event_type = \$1`).WithArgs("auth", 101).WillReturnRows(rows)
+	mock.ExpectQuery(`FROM audit_logs`).WithArgs("", "", "", "", "", "auth", false, sqlmock.AnyArg(), "", 101).WillReturnRows(rows)
 
 	handler := HandleAdminAuditExport(db, zap.NewNop())
 	req := httptest.NewRequest("GET", "/admin/audit/export?type=auth", nil).WithContext(adminCtx(t))

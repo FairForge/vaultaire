@@ -91,10 +91,6 @@ func TestPostgres_TenantOperations(t *testing.T) {
 	}
 }
 
-func TestPostgres_ArtifactOperations(t *testing.T) {
-	t.Skip("Artifact operations not yet implemented")
-}
-
 // testConfig mirrors testutil.DBConfig; duplicated here because testutil imports
 // this package and an in-package _test.go cannot import it back. Resolution:
 // DATABASE_URL (CI) > TEST_DB_* > localhost/viera/vaultaire_test.

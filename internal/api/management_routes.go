@@ -118,6 +118,12 @@ func (s *Server) handleMgmtListBuckets(w http.ResponseWriter, r *http.Request) {
 		b.Object = "bucket"
 		buckets = append(buckets, b)
 	}
+	if err := rows.Err(); err != nil {
+		s.logger.Warn("iterate rows", zap.Error(err))
+	}
+	if err := rows.Err(); err != nil {
+		s.logger.Warn("iterate rows", zap.Error(err))
+	}
 
 	hasMore := len(buckets) > limit
 	if hasMore {
@@ -457,6 +463,18 @@ func (s *Server) handleMgmtListObjects(w http.ResponseWriter, r *http.Request) {
 		}
 		o.Object = "object"
 		objects = append(objects, o)
+	}
+	if err := dbRows.Err(); err != nil {
+		s.logger.Warn("iterate rows", zap.Error(err))
+	}
+	if err := dbRows.Err(); err != nil {
+		s.logger.Warn("iterate rows", zap.Error(err))
+	}
+	if err := dbRows.Err(); err != nil {
+		s.logger.Warn("iterate rows", zap.Error(err))
+	}
+	if err := dbRows.Err(); err != nil {
+		s.logger.Warn("iterate rows", zap.Error(err))
 	}
 
 	hasMore := len(objects) > limit

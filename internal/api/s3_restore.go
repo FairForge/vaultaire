@@ -58,7 +58,7 @@ func (s *Server) handleRestoreObject(w http.ResponseWriter, r *http.Request, req
 	}
 
 	restorer, backendName, lookupErr := objectRestorer(s.engine, s.db, r, t.ID, req.Bucket, req.Object)
-	if lookupErr == sql.ErrNoRows {
+	if errors.Is(lookupErr, sql.ErrNoRows) {
 		reqID := generateRequestID()
 		if suggestion := keySuggestion(r.Context(), s.db, t.ID, req.Bucket, req.Object); suggestion != "" {
 			WriteS3ErrorWithContext(w, ErrNoSuchKey, r.URL.Path, reqID, WithSuggestion(suggestion))

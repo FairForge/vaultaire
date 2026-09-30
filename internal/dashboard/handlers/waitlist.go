@@ -130,6 +130,9 @@ func HandleAdminWaitlistExport(db *sql.DB, logger *zap.Logger) http.HandlerFunc 
 			}
 			_ = cw.Write(csvSafeRow(email, source, created.UTC().Format(time.RFC3339), strconv.Itoa(stdTB), strconv.Itoa(vaultTB)))
 		}
+		if err := rows.Err(); err != nil {
+			logger.Warn("iterate rows", zap.Error(err))
+		}
 	}
 }
 
@@ -163,6 +166,9 @@ func queryWaitlist(ctx context.Context, db *sql.DB, logger *zap.Logger) ([]waitl
 			StdTB:      stdTB,
 			VaultTB:    vaultTB,
 		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0
 	}
 	return out, count
 }

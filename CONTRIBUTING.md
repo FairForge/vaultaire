@@ -43,7 +43,7 @@ go mod download
 make test-db        # creates + migrates the local vaultaire_test database (needed before any DB-backed test)
 make test
 make build
-pre-commit install  # runs go fmt, go test ./... -short and golangci-lint before every commit
+pre-commit install && pre-commit install --hook-type pre-push  # fmt + lint on commit, go test ./... -short on push
 ```
 
 ## Style Guidelines

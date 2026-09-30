@@ -185,6 +185,9 @@ func (s *GDPRService) GetDataInventory(ctx context.Context, userID uuid.UUID) ([
 			}
 			items = append(items, item)
 		}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("iterate rows: %w", err)
+		}
 	}
 
 	return items, nil
@@ -220,6 +223,9 @@ func (s *GDPRService) ListProcessingActivities(ctx context.Context) ([]*Processi
 			continue
 		}
 		activities = append(activities, &activity)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
 	}
 
 	return activities, nil

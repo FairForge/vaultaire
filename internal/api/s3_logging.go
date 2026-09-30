@@ -3,6 +3,7 @@ package api
 import (
 	"database/sql"
 	"encoding/xml"
+	"errors"
 	"io"
 	"net/http"
 
@@ -45,7 +46,7 @@ func (s *Server) handleGetBucketLogging(w http.ResponseWriter, r *http.Request, 
 		`SELECT logging_enabled, logging_target_bucket, logging_prefix
 		 FROM buckets WHERE tenant_id = $1 AND name = $2`,
 		t.ID, req.Bucket).Scan(&enabled, &targetBucket, &prefix)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		reqID := generateRequestID()
 		if suggestion := bucketSuggestion(r.Context(), s.db, t.ID, req.Bucket); suggestion != "" {
 			WriteS3ErrorWithContext(w, ErrNoSuchBucket, r.URL.Path, reqID, WithSuggestion(suggestion))

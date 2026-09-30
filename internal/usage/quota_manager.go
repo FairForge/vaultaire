@@ -248,6 +248,9 @@ func (qm *QuotaManager) ListQuotas(ctx context.Context) ([]map[string]interface{
 
 		quotas = append(quotas, q)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
+	}
 
 	return quotas, nil
 }
@@ -298,6 +301,9 @@ func (m *QuotaManager) GetUsageHistory(ctx context.Context, tenantID string, day
 			"uploaded":   uploaded,
 			"deleted":    deleted,
 		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
 	}
 
 	return history, nil

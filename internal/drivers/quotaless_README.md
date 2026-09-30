@@ -310,7 +310,7 @@ ON VERY COLD (no access 365 days):
 |------|---------|----------|
 | Raw HTTP bench | Production-path testing | `cmd/quotaless-bench-v2/main.go` |
 | rclone bench | Compatibility testing | `cmd/quotaless-full-bench/bench.sh` |
-| bench-compare | Cross-provider comparison | `cmd/bench-compare/main.go` |
+| bench-compare | Cross-provider comparison | `cmd/tools/bench-compare/main.go` |
 | Quotaless driver bench | Legacy (uses broken S3Driver) | `cmd/quotaless-bench/main.go` |
 
 ### Bench results

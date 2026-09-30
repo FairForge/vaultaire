@@ -25,8 +25,9 @@ Vaultaire is a universal storage orchestration engine providing a unified S3-com
 ## Build, Test, and Lint Commands
 
 ```bash
-# Build
+# Build (stamps git sha + build time into /version, /health, /status via -ldflags)
 make build                # -> bin/vaultaire
+make version              # print the sha/date the next build would carry
 
 # Test
 make test                 # Quick: -short -race -cover ./...
@@ -46,8 +47,15 @@ make test-db
 # Run a specific package
 go test -v -race ./internal/api/...
 
-# Lint
-make lint                 # golangci-lint run ./...
+# What CI runs: every package, -race, against the migrated vaultaire_test
+make test-integration     # = make test-db + DATABASE_URL=… go test -race ./...
+make test-load            # tests/load (env-gated SigV4 load gate, needs VAULTAIRE_LOAD_*)
+
+# Lint + security (configs: .golangci.yml, .github/workflows/security.yml)
+make lint                 # golangci-lint run ./...  (errcheck, rowserrcheck, noctx, errorlint, revive ctx-first, …)
+make gosec                # the Security workflow's gosec command, verbatim (must stay at 0 issues)
+make deadcode             # unreachable functions in cmd/vaultaire (x/tools deadcode; downloads the 1.26 toolchain)
+make clean                # bin/, coverage files and every tool binary that used to pile up in the repo root
 
 # Format
 make fmt                  # go fmt + gofmt -s -w
@@ -64,6 +72,8 @@ Driver Layer (internal/drivers) Storage provider implementations (local, s3, lyv
 ```
 
 ### Entry Point
+
+`cmd/vaultaire` is the only product binary; everything under `cmd/tools/` is an operator probe or benchmark (table in `cmd/tools/README.md`), never linked into the product (`go list -deps ./cmd/vaultaire`) and excluded from the Security workflow's gosec run.
 
 `cmd/vaultaire/main.go` — initializes drivers from environment variables, opens PostgreSQL (optional — the DB handle is opened lazily and never pinged at boot (R9-06 / WP-R9-4): a dead Postgres still logs "connected" and every DB call then fails), starts the HTTP server. Storage mode auto-detected: iDrive > Quotaless > S3 > Geyser > local (Lyve, R2 and permafrost are registered when their env vars are set but never auto-selected as primary).
 
@@ -112,7 +122,7 @@ Migrations are in `internal/database/migrations/`.
 
 - **TDD is mandatory**: Red -> Green -> Refactor. Write failing test first.
 - Tests follow Arrange/Act/Assert pattern with testify (`require` for fatal, `assert` for non-fatal).
-- Pre-commit hooks run: `go fmt`, `go test ./... -short`, `golangci-lint run`.
+- Pre-commit hooks run `go fmt` and `golangci-lint run` on commit; `go test ./... -short` runs on **push** (`pre-commit install && pre-commit install --hook-type pre-push`).
 
 ## Git Workflow
 

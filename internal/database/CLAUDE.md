@@ -116,7 +116,7 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 
 Pool settings: `MaxOpenConns=50`, `MaxIdleConns=25`, `ConnMaxLifetime=5m`, `ConnMaxIdleTime=1m`. Sized for 100+ concurrent S3 requests (each runs 5-6 DB queries through the auth + head-cache path).
 
-Prod is PostgreSQL **16.13** (`max_connections = 200`, no pgbouncer, `statement_timeout`/`lock_timeout` = 0); local dev is 15.13. `NewPostgres` does **not** dial (`sql.Open` is lazy): a down Postgres is only noticed on the first query (R9-06 / WP-R9-4). The `Postgres` wrapper's CRUD methods (`CreateTables`, `CreateTenant`, `*Artifact*`, `Exec`/`Query*`) are dead code (R0-12) — only `NewPostgres`, `Close`, `DB` are used (`Ping` exists but has no caller, which is why a dead Postgres is not noticed at boot).
+Prod is PostgreSQL **16.13** (`max_connections = 200`, no pgbouncer, `statement_timeout`/`lock_timeout` = 0); local dev is 15.13. `NewPostgres` does **not** dial (`sql.Open` is lazy): a down Postgres is only noticed on the first query (R9-06 / WP-R9-4). The `Postgres` wrapper is `NewPostgres`, `Close`, `Ping`, `DB` and the two tenant helpers its own test uses (`CreateTenant`, `GetTenant`); the dead `CreateTables`/`*Artifact*`/`Exec`/`Query*` methods were deleted in Review R15 (R9-21). `Ping` has no caller, which is why a dead Postgres is not noticed at boot (WP-R9-4).
 
 ## Test databases
 

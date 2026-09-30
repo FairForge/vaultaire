@@ -20,7 +20,7 @@ type SMTPSender struct {
 	rl       *rateLimiter
 }
 
-func (s *SMTPSender) Send(_ context.Context, to, subject, htmlBody, textBody string) error {
+func (s *SMTPSender) Send(ctx context.Context, to, subject, htmlBody, textBody string) error {
 	if err := s.rl.check(to); err != nil {
 		return err
 	}
@@ -29,7 +29,7 @@ func (s *SMTPSender) Send(_ context.Context, to, subject, htmlBody, textBody str
 	addr := net.JoinHostPort(s.host, s.port)
 
 	if s.port == "465" {
-		return s.sendImplicitTLS(addr, to, msg)
+		return s.sendImplicitTLS(ctx, addr, to, msg)
 	}
 	return s.sendSTARTTLS(addr, to, msg)
 }
@@ -42,8 +42,9 @@ func (s *SMTPSender) sendSTARTTLS(addr, to string, msg []byte) error {
 	return smtp.SendMail(addr, a, s.from, []string{to}, msg)
 }
 
-func (s *SMTPSender) sendImplicitTLS(addr, to string, msg []byte) error {
-	conn, err := tls.Dial("tcp", addr, &tls.Config{ServerName: s.host})
+func (s *SMTPSender) sendImplicitTLS(ctx context.Context, addr, to string, msg []byte) error {
+	dialer := &tls.Dialer{Config: &tls.Config{ServerName: s.host, MinVersion: tls.VersionTLS12}}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("tls dial %s: %w", addr, err)
 	}

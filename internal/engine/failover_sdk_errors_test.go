@@ -33,10 +33,10 @@ func s3ErrorFrom(t *testing.T, op string, status int, body string) error {
 		_, _ = w.Write([]byte(body))
 	}))
 	t.Cleanup(srv.Close)
-	return s3CallAgainst(t, srv.URL, op, context.Background())
+	return s3CallAgainst(context.Background(), t, srv.URL, op)
 }
 
-func s3CallAgainst(t *testing.T, endpoint, op string, ctx context.Context) error {
+func s3CallAgainst(ctx context.Context, t *testing.T, endpoint, op string) error {
 	t.Helper()
 	client := s3.New(s3.Options{
 		BaseEndpoint: aws.String(endpoint),
@@ -108,7 +108,7 @@ func TestIsBackendFailure_ConnectionRefusedIsFailure(t *testing.T) {
 	addr := l.Addr().String()
 	require.NoError(t, l.Close())
 
-	err = s3CallAgainst(t, "http://"+addr, "GET", context.Background())
+	err = s3CallAgainst(context.Background(), t, "http://"+addr, "GET")
 	assert.True(t, isBackendFailure(err), "connection refused must count: %v", err)
 }
 
@@ -123,7 +123,7 @@ func TestIsBackendFailure_ClientCancellationIsNotFailure(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := s3CallAgainst(t, srv.URL, "GET", ctx)
+	err := s3CallAgainst(ctx, t, srv.URL, "GET")
 	require.True(t, errors.Is(err, context.Canceled), "fixture must produce a wrapped context.Canceled: %v", err)
 
 	assert.False(t, isBackendFailure(err), "client cancellation must not trip the breaker: %v", err)

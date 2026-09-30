@@ -876,6 +876,9 @@ func (s *Server) handleListParts(w http.ResponseWriter, r *http.Request, bucket,
 			item.LastModified = createdAt.UTC().Format(time.RFC3339)
 			items = append(items, item)
 		}
+		if err := rows.Err(); err != nil {
+			s.logger.Warn("iterate rows", zap.Error(err))
+		}
 	} else {
 		memUploadsMu.RLock()
 		mu := memUploads[uploadID]
@@ -930,6 +933,9 @@ func (s *Server) handleListMultipartUploads(w http.ResponseWriter, r *http.Reque
 			}
 			item.Initiated = createdAt.UTC().Format(time.RFC3339)
 			uploads = append(uploads, item)
+		}
+		if err := rows.Err(); err != nil {
+			s.logger.Warn("iterate rows", zap.Error(err))
 		}
 	} else {
 		memUploadsMu.RLock()

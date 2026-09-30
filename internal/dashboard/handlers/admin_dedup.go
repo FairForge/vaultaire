@@ -122,6 +122,9 @@ func populateTenantDedup(ctx context.Context, db *sql.DB, gci *crypto.GlobalCont
 			DedupRatio:  fmt.Sprintf("%.1fx", ts.DedupRatio),
 		})
 	}
+	if err := rows.Err(); err != nil {
+		logger.Warn("iterate rows", zap.Error(err))
+	}
 
 	if len(table) > 0 {
 		data["TenantTable"] = table

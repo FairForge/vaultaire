@@ -146,7 +146,7 @@ func TestManagementCreateBucket(t *testing.T) {
 		WithArgs("test-tenant").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectExec(`INSERT INTO buckets`).
-		WithArgs("test-tenant", "new-bucket", false, sqlmock.AnyArg()).
+		WithArgs("test-tenant", "new-bucket", false, sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectQuery(`SELECT slug, name FROM tenants WHERE id`).
 		WithArgs("test-tenant").
