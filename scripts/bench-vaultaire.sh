@@ -63,7 +63,7 @@ build_binaries() {
     if command -v go &>/dev/null; then
         echo "Building binaries..."
         go build -o bin/vaultaire ./cmd/vaultaire/
-        go build -o bin/bench-compare ./cmd/bench-compare/
+        go build -o bin/bench-compare ./cmd/tools/bench-compare/
         VAULTAIRE_BIN="./bin/vaultaire"
         BENCH_BIN="./bin/bench-compare"
     else

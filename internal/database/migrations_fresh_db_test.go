@@ -161,8 +161,8 @@ func TestMigrations_FreshDatabaseBootstrap(t *testing.T) {
 		FROM tenant_quotas
 		WHERE tier IN ('standard', 'performance') AND spending_cap_cents > 0`)
 	require.NoError(t, err, "metered-billing SELECT must succeed on a fresh migrations-only database")
+	defer func() { _ = rows.Close() }()
 	require.NoError(t, rows.Err())
-	_ = rows.Close()
 }
 
 // applyAllMigrations runs every migration file in sorted order. Each file is

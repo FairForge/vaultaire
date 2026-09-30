@@ -467,6 +467,9 @@ func TestR11_KeyLifecycle_WritesAuditRows(t *testing.T) {
 			assert.Equal(t, user.ID, by)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate rows: %v", err)
+	}
 	assert.Equal(t, []string{"account.created", "key.created", "key.revoked", "auth.password_changed"}, actions)
 }
 

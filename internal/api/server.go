@@ -733,6 +733,7 @@ func (s *Server) setupRoutes() {
 		Sessions:      s.sessionStore,
 		Logger:        s.logger,
 		DataPath:      dataPath,
+		CreateBucket:  s.dashboardBucketCreator(),
 		Stripe:        s.stripe,
 		Google:        s.googleOAuth,
 		GitHub:        s.githubOAuth,
@@ -1074,8 +1075,8 @@ func (s *Server) SetAuthService(authService *auth.AuthService) {
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{
-		"version": "0.1.0",
-		"build":   "2025-08-12",
+		"version": BuildSHA,
+		"build":   BuildDate,
 		"go":      runtime.Version(),
 	})
 }
@@ -1098,7 +1099,7 @@ func (s *Server) handleStatusPage(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	_, _ = fmt.Fprintf(w, statusPageHTML, statusClass, statusLabel, "0.1.0", uptime, healthy, total)
+	_, _ = fmt.Fprintf(w, statusPageHTML, statusClass, statusLabel, BuildSHA, uptime, healthy, total)
 }
 
 const statusPageHTML = `<!DOCTYPE html>

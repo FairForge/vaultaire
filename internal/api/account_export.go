@@ -194,6 +194,9 @@ func (e *AccountExporter) collectBuckets(ctx context.Context, tenantID string) [
 		}
 		buckets = append(buckets, b)
 	}
+	if err := rows.Err(); err != nil {
+		return nil
+	}
 	if buckets == nil {
 		return []map[string]interface{}{}
 	}
@@ -224,6 +227,9 @@ func (e *AccountExporter) collectObjects(ctx context.Context, tenantID string) [
 			"content_type":  contentType,
 			"last_modified": lastModified,
 		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil
 	}
 	if objects == nil {
 		return []map[string]interface{}{}
@@ -259,6 +265,9 @@ func (e *AccountExporter) collectAPIKeys(ctx context.Context, userID string) []m
 		}
 		keys = append(keys, k)
 	}
+	if err := rows.Err(); err != nil {
+		return nil
+	}
 	if keys == nil {
 		return []map[string]interface{}{}
 	}
@@ -287,6 +296,9 @@ func (e *AccountExporter) collectBandwidth(ctx context.Context, tenantID string)
 			"egress_bytes":  egress,
 			"requests":      requests,
 		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil
 	}
 	if usage == nil {
 		return []map[string]interface{}{}
@@ -321,6 +333,9 @@ func (e *AccountExporter) collectEvents(ctx context.Context, tenantID string) []
 			ev["data"] = evData
 		}
 		events = append(events, ev)
+	}
+	if err := rows.Err(); err != nil {
+		return nil
 	}
 	if events == nil {
 		return []map[string]interface{}{}

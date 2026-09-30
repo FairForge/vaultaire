@@ -34,11 +34,14 @@ jobs:
         #   G115: safe bounded integer conversions
         #   G301: MkdirAll 0755 is correct for storage directories
         #   G304: file path handling is core to a storage system
-
+        # cmd/tools holds operator-run probes and benches whose "tainted"
+        # inputs are the operator's own flags and env (Review R15); the
+        # product binary is cmd/vaultaire only (`go list -deps` proves it).
+        # `make gosec` runs the identical command locally.
         run: >-
           gosec -severity medium
           -exclude-dir=tests
-          -exclude-dir=internal/testing
+          -exclude-dir=cmd/tools
           -exclude=G101,G115,G301,G304
           ./...
 
@@ -66,7 +69,12 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: '1.25'
-      - name: Check for vulnerable dependencies
+      # govulncheck reports only vulnerabilities whose functions the binary
+      # actually reaches (Review R15: the two x/crypto CVEs Trivy flags are
+      # in packages this code does not call). Advisory until the toolchain
+      # moves to Go 1.26, which the fixed x/ modules require (D-24).
+      - name: Check for reachable vulnerabilities (govulncheck)
         run: |
-          go list -json -m all | nancy sleuth
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
         continue-on-error: true

@@ -208,6 +208,9 @@ func collectExportData(r *http.Request, db *sql.DB, userID, tenantID string, log
 				})
 			}
 		}
+		if rerr := bucketRows.Err(); rerr != nil {
+			logger.Warn("export buckets", zap.Error(rerr))
+		}
 		data["buckets"] = buckets
 	}
 
@@ -227,6 +230,9 @@ func collectExportData(r *http.Request, db *sql.DB, userID, tenantID string, log
 				})
 			}
 		}
+		if rerr := objRows.Err(); rerr != nil {
+			logger.Warn("export objects", zap.Error(rerr))
+		}
 		data["objects"] = objects
 	}
 
@@ -243,6 +249,9 @@ func collectExportData(r *http.Request, db *sql.DB, userID, tenantID string, log
 					"id": kID, "name": kName, "created_at": kCreated,
 				})
 			}
+		}
+		if err := keyRows.Err(); err != nil {
+			return nil
 		}
 		data["api_keys"] = keys
 	}
@@ -261,6 +270,9 @@ func collectExportData(r *http.Request, db *sql.DB, userID, tenantID string, log
 					"egress_bytes": egress, "requests": reqs,
 				})
 			}
+		}
+		if err := bwRows.Err(); err != nil {
+			return nil
 		}
 		data["bandwidth_usage"] = bw
 	}

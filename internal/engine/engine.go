@@ -288,7 +288,7 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 				return fmt.Errorf("%w: non-rewindable body", ErrNoFailover)
 			}
 			if _, serr := seeker.Seek(bodyStart, io.SeekStart); serr != nil {
-				return fmt.Errorf("%w: rewind failed: %v", ErrNoFailover, serr)
+				return fmt.Errorf("%w: rewind failed: %w", ErrNoFailover, serr)
 			}
 			sizeReader.bytesRead = 0
 		}

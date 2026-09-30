@@ -86,10 +86,6 @@ docs/archive/
 docs/BUSINESS.md
 test/archive/
 
-# K6 test results
-tests/k6/*.json
-tests/k6/results/
-
 # Load test results
 tests/load/results/
 
@@ -98,10 +94,22 @@ cache_benchmark_results.txt
 compress.txt
 
 # Local-only internal tools (untracked source)
-cmd/geyser-admin-test/
-cmd/geyser-smoke/
+cmd/tools/geyser-admin-test/
+cmd/tools/geyser-smoke/
 
-# Compiled benchmark binaries (from cmd/*)
+# Compiled tool binaries (from cmd/tools/*); `make clean` removes them all
+/backend-matrix
+/backend-matrix-linux
+/bench
+/erasure-bench
+/erasure-bench-linux
+/geyser-cloudsync-probe
+/geyser-console-probe
+/geyser-admin-test
+/uloz-bench
+/uloz-bench-linux
+/validate
+/validate-linux
 /bench-compare
 /bench-compare-linux
 /lighthouse-bench

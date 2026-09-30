@@ -220,6 +220,9 @@ func populateHouseOverview(ctx context.Context, db *sql.DB, fl *flags.Service, t
 				std.Buckets = append(std.Buckets, BucketBytes{Name: b, Bytes: n})
 			}
 		}
+		if err := rows.Err(); err != nil {
+			data["RowsError"] = err.Error()
+		}
 	}
 	if !hasHouse {
 		// A legacy tenant's attic bytes still count on the single quota.
@@ -316,6 +319,9 @@ func populateActivity(ctx context.Context, db *sql.DB, tenantID string, data map
 			BadgeClass: badge,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		data["RowsError"] = err.Error()
+	}
 	data["Activity"] = activity
 }
 
@@ -360,6 +366,9 @@ func populateCarbonBadge(ctx context.Context, db *sql.DB, tenantID string, data 
 		}
 		tb := float64(sizeBytes) / (1024 * 1024 * 1024 * 1024)
 		actualKWh += tb * energy
+	}
+	if err := rows.Err(); err != nil {
+		data["RowsError"] = err.Error()
 	}
 
 	if totalBytes == 0 {

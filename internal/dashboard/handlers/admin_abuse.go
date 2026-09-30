@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"database/sql"
+	"errors"
 	"html/template"
 	"net/http"
 	"strconv"
@@ -121,6 +122,12 @@ func HandleAdminAbuse(tmpl *template.Template, db *sql.DB, logger *zap.Logger) h
 						RelTime:       relativeTime(createdAt),
 					})
 				}
+				if err := rows.Err(); err != nil {
+					logger.Warn("iterate rows", zap.Error(err))
+				}
+				if err := rows.Err(); err != nil {
+					logger.Warn("iterate rows", zap.Error(err))
+				}
 				data["Reports"] = reports
 			}
 		}
@@ -172,7 +179,7 @@ func HandleAdminAbuseDetail(tmpl *template.Template, db *sql.DB, logger *zap.Log
 				&report.Status, &tenantID, &bucket, &objectKey,
 				&resolvedBy, &resolvedAt, &createdAt)
 		if err != nil {
-			if err == sql.ErrNoRows {
+			if errors.Is(err, sql.ErrNoRows) {
 				http.Error(w, "Not Found", http.StatusNotFound)
 			} else {
 				logger.Error("query abuse report detail", zap.Error(err))

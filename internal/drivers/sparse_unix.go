@@ -49,7 +49,7 @@ func (d *LocalDriver) GetHoles(ctx context.Context, container, artifact string) 
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close() //nolint:errcheck // read-only fd, Close error is not actionable
+	defer func() { _ = file.Close() }() // read-only fd, Close error is not actionable
 
 	var holes []HoleInfo
 	var offset int64 = 0

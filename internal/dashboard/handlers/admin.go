@@ -109,5 +109,8 @@ func queryRecentUsers(ctx context.Context, db *sql.DB, logger *zap.Logger) []rec
 		}
 		users = append(users, u)
 	}
+	if err := rows.Err(); err != nil {
+		return nil
+	}
 	return users
 }

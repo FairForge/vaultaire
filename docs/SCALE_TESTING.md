@@ -35,19 +35,15 @@ Run it before a release that touches the write path, the quota path, the
 breaker or the DB pool. Numbers on a laptop are local-disk bound; the gates
 validate correctness and concurrency behaviour, not production throughput.
 
-## Nightly (`.github/workflows/nightly.yml`)
+## Nightly workflow — removed (Review R15)
 
-07:00 UTC daily (and `workflow_dispatch`): PostgreSQL 15 service, migrations,
-`go build`, server started with `JWT_SECRET` and `DATABASE_URL`, then
-
-1. `go test -bench=. -benchtime=10s ./tests/benchmarks/`
-2. `k6 run --quiet tests/k6/s3_basic_load.js` (other scripts in `tests/k6/`:
-   `s3_realistic_load.js`, `tenant_isolation_load.js`, `resource_monitor.js`)
-3. `./tests/chaos/basic_chaos_test.sh` and `go test ./tests/chaos/`
-
-Every step is `continue-on-error`; results are uploaded as
-`nightly-results-<run>` (`tests/benchmarks/baseline_results.txt`,
-`tests/k6/*.json`). Nothing fails the workflow — read the artifact.
+`nightly.yml` and the `tests/{benchmarks,k6,chaos}` suites it ran were deleted:
+every one of them hit the server **unauthenticated** (403 on every PUT — the
+benchmark step had been failing on `upload failed: 403` and the k6 error
+threshold tripping on every run), and every step was `continue-on-error`, so
+the workflow reported green for months while measuring nothing. The gates are
+`tests/load/` (SigV4, env-gated) and the in-process synthetic customer check
+(`SYNTHETIC_CHECK_*`, R13).
 
 ## Running a server for a manual test
 

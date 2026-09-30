@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"math"
 	"time"
 )
@@ -94,6 +95,9 @@ func QueryBandwidthDays(ctx context.Context, db *sql.DB, tenantID string) ([]Ban
 			continue
 		}
 		days = append(days, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
 	}
 	return days, nil
 }

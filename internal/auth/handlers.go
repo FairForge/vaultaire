@@ -3,6 +3,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"database/sql"
@@ -58,7 +59,7 @@ func (a *Auth) ValidateRequest(r *http.Request) (string, *KeyScope, error) {
 			if enforce && a.db != nil {
 				return "", nil, fmt.Errorf("%w: unsigned AWSAccessKeyId query authentication is not supported", ErrSignatureMismatch)
 			}
-			return a.validateAccessKey(accessKey)
+			return a.validateAccessKey(r.Context(), accessKey)
 		}
 		// For testing without auth, allow but use test-tenant
 		if a.db == nil {
@@ -78,7 +79,7 @@ func (a *Auth) ValidateRequest(r *http.Request) (string, *KeyScope, error) {
 			a.logger.Warn("no database connection, using test-tenant")
 			return "test-tenant", fullAccess, nil
 		}
-		cred, err := a.lookupCredential(params.AccessKey)
+		cred, err := a.lookupCredential(r.Context(), params.AccessKey)
 		if err != nil {
 			return "", nil, err
 		}
@@ -115,7 +116,7 @@ func (a *Auth) ValidateRequest(r *http.Request) (string, *KeyScope, error) {
 		}
 		parts := strings.SplitN(strings.TrimPrefix(authHeader, "AWS "), ":", 2)
 		if len(parts) == 2 {
-			return a.validateAccessKey(parts[0])
+			return a.validateAccessKey(r.Context(), parts[0])
 		}
 	}
 
@@ -132,12 +133,12 @@ type credential struct {
 
 // validateAccessKey looks up the tenant ID and key scope by access key,
 // without signature verification (legacy paths and SIGV4_ENFORCE=false).
-func (a *Auth) validateAccessKey(accessKey string) (string, *KeyScope, error) {
+func (a *Auth) validateAccessKey(ctx context.Context, accessKey string) (string, *KeyScope, error) {
 	if a.db == nil {
 		a.logger.Warn("no database connection, using test-tenant")
 		return "test-tenant", &KeyScope{Permissions: []string{"*"}}, nil
 	}
-	cred, err := a.lookupCredential(accessKey)
+	cred, err := a.lookupCredential(ctx, accessKey)
 	if err != nil {
 		return "", nil, err
 	}
@@ -147,7 +148,7 @@ func (a *Auth) validateAccessKey(accessKey string) (string, *KeyScope, error) {
 // lookupCredential resolves an access key to its secret, tenant and scope.
 // Checks the tenants table first (primary keys, full access), then falls
 // back to api_keys for scoped VLT_ keys, then sts_tokens for ASIA keys.
-func (a *Auth) lookupCredential(accessKey string) (*credential, error) {
+func (a *Auth) lookupCredential(ctx context.Context, accessKey string) (*credential, error) {
 	if a.db == nil {
 		return nil, fmt.Errorf("database not initialized")
 	}
@@ -157,7 +158,7 @@ func (a *Auth) lookupCredential(accessKey string) (*credential, error) {
 	// COALESCE: a NULL secret_key must resolve to the empty-secret fail-closed
 	// path ("regenerate this API key"), not a scan error that hard-locks the
 	// tenant out even under SIGV4_ENFORCE=false.
-	err := a.db.QueryRow(`SELECT id, COALESCE(secret_key, '') FROM tenants WHERE access_key = $1`, accessKey).
+	err := a.db.QueryRowContext(ctx, `SELECT id, COALESCE(secret_key, '') FROM tenants WHERE access_key = $1`, accessKey).
 		Scan(&tenantID, &secretKey)
 	if err == nil {
 		a.logger.Debug("authenticated tenant (primary key)",
@@ -174,7 +175,7 @@ func (a *Auth) lookupCredential(accessKey string) (*credential, error) {
 	var permJSON []byte
 	var bucketScope, ipAllowlist pq.StringArray
 	var expiresAt sql.NullTime
-	err = a.db.QueryRow(`
+	err = a.db.QueryRowContext(ctx, `
 		SELECT t.id, COALESCE(ak.secret_key, ''),
 		       COALESCE(ak.permissions, '["*"]'::jsonb),
 		       COALESCE(ak.bucket_scope, '{}'),
@@ -219,7 +220,7 @@ func (a *Auth) lookupCredential(accessKey string) (*credential, error) {
 		var stsPermJSON []byte
 		var stsBucketScope, stsIPRestrict pq.StringArray
 		var stsExpiresAt time.Time
-		err = a.db.QueryRow(`
+		err = a.db.QueryRowContext(ctx, `
 			SELECT tenant_id, COALESCE(secret_key, ''), permissions, bucket_scope, ip_restrict, expires_at
 			FROM sts_tokens WHERE access_key = $1
 		`, accessKey).Scan(&tenantID, &secretKey, &stsPermJSON, &stsBucketScope, &stsIPRestrict, &stsExpiresAt)

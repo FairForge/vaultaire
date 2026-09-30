@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -89,15 +90,15 @@ func (s *Server) verifyPresignedURL(r *http.Request) (string, *auth.KeyScope, er
 	var secretKey, tenantID string
 	var scope *auth.KeyScope
 
-	err = s.db.QueryRow(
+	err = s.db.QueryRowContext(r.Context(),
 		`SELECT secret_key, id FROM tenants WHERE access_key = $1`, accessKey,
 	).Scan(&secretKey, &tenantID)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		// Try scoped API key — requires secret_key stored for signature verification.
 		var permJSON []byte
 		var bucketScope, ipAllowlist pq.StringArray
 		var expiresAtDB sql.NullTime
-		err = s.db.QueryRow(`
+		err = s.db.QueryRowContext(r.Context(), `
 			SELECT ak.secret_key, t.id,
 			       COALESCE(ak.permissions, '["*"]'::jsonb),
 			       COALESCE(ak.bucket_scope, '{}'),
@@ -122,12 +123,12 @@ func (s *Server) verifyPresignedURL(r *http.Request) (string, *auth.KeyScope, er
 			if expiresAtDB.Valid {
 				scope.ExpiresAt = &expiresAtDB.Time
 			}
-		} else if err == sql.ErrNoRows && len(accessKey) >= 4 && accessKey[:4] == "ASIA" {
+		} else if errors.Is(err, sql.ErrNoRows) && len(accessKey) >= 4 && accessKey[:4] == "ASIA" {
 			// Try STS temporary credential.
 			var stsPermJSON []byte
 			var stsBucketScope, stsIPRestrict pq.StringArray
 			var stsExpiresAt time.Time
-			err = s.db.QueryRow(`
+			err = s.db.QueryRowContext(r.Context(), `
 				SELECT secret_key, tenant_id, permissions, bucket_scope, ip_restrict, expires_at
 				FROM sts_tokens WHERE access_key = $1
 			`, accessKey).Scan(&secretKey, &tenantID, &stsPermJSON, &stsBucketScope, &stsIPRestrict, &stsExpiresAt)

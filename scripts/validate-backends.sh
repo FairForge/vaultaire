@@ -141,7 +141,7 @@ echo ""
 
 # Build validate binary
 echo "Building validation binary..."
-go build -o bin/validate ./cmd/validate/
+go build -o bin/validate ./cmd/tools/validate/
 echo ""
 
 if [[ -n "$LIVE" ]]; then

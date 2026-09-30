@@ -513,16 +513,21 @@ func (g *GlobalContentIndex) DeleteObjectChunksTx(ctx context.Context, tx *sql.T
 	}
 
 	type scopedHash struct{ scope, hash string }
-	var chunks []scopedHash
-	for rows.Next() {
-		var c scopedHash
-		if err := rows.Scan(&c.scope, &c.hash); err != nil {
-			_ = rows.Close()
-			return fmt.Errorf("failed to scan hash: %w", err)
+	chunks, err := func() ([]scopedHash, error) {
+		defer func() { _ = rows.Close() }()
+		var out []scopedHash
+		for rows.Next() {
+			var c scopedHash
+			if err := rows.Scan(&c.scope, &c.hash); err != nil {
+				return nil, fmt.Errorf("failed to scan hash: %w", err)
+			}
+			out = append(out, c)
 		}
-		chunks = append(chunks, c)
+		return out, rows.Err()
+	}()
+	if err != nil {
+		return err
 	}
-	_ = rows.Close()
 
 	// Delete chunk references
 	_, err = tx.ExecContext(ctx, `

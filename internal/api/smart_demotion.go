@@ -463,6 +463,9 @@ func (r *SmartDemotionRunner) reclaimHotCopies(ctx context.Context, hot engine.D
 				todo = append(todo, p)
 			}
 		}
+		if err := rows.Err(); err != nil {
+			return 0, nil
+		}
 		_ = rows.Close()
 		if len(todo) == 0 {
 			break

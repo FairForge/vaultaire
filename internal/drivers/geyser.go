@@ -257,7 +257,7 @@ func (d *GeyserDriver) Put(ctx context.Context, container, artifact string, data
 func materialize(data io.Reader) (body io.ReadSeeker, size int64, cleanup func(), err error) {
 	buf := &bytes.Buffer{}
 	n, err := io.CopyN(buf, data, spillThreshold+1)
-	if err != nil && err != io.EOF {
+	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, 0, func() {}, fmt.Errorf("reading body: %w", err)
 	}
 

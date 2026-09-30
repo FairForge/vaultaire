@@ -1,0 +1,77 @@
+# golangci-lint v2 configuration (Review R15, item 4). `make lint` and the CI
+# Lint step both read this file; pre-commit runs the same command.
+#
+# Linters chosen for the invariants CLAUDE.md calls non-negotiable:
+#   errcheck / rowserrcheck — every DB/IO error handled (sqlclosecheck is
+#   deliberately OFF: the job runners and multi-query handlers close rows
+#   explicitly before the next statement so a pooled connection is not held
+#   for the whole function; the linter only accepts `defer`)
+#   noctx / contextcheck / revive:context-as-argument — ctx first and propagated
+#   bodyclose — HTTP bodies closed (drivers, probes, webhooks)
+#   errorlint — %w wrapping so the typed backend/miss classifiers keep working
+#   gosec (the same exclusions as .github/workflows/security.yml) — advisory
+#   copies of the checks the Security workflow enforces
+#   staticcheck / govet / unused / ineffassign / misspell — the defaults
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+issues:
+  # Show everything: the defaults hide repeats after three per linter.
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - bodyclose
+    - errorlint
+    - noctx
+    - rowserrcheck
+    - revive
+    - misspell
+    - nolintlint
+  settings:
+    errcheck:
+      exclude-functions:
+        - (io.Closer).Close
+        - (*database/sql.Rows).Close
+        - (*database/sql.Tx).Rollback
+        - (*os.File).Close
+        - (net/http.ResponseWriter).Write
+    revive:
+      rules:
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+        - name: unreachable-code
+    nolintlint:
+      require-explanation: false
+      require-specific: true
+    staticcheck:
+      checks: ["all", "-ST1000", "-ST1003", "-ST1005", "-ST1016", "-ST1020", "-ST1021", "-ST1022", "-QF1001", "-QF1003", "-QF1008"]
+  exclusions:
+    generated: lax
+    rules:
+      # Class-B scaffolding awaiting decisions D-1/D-2/D-3 (R0): keep it
+      # building, do not spend lint budget on it.
+      - path: internal/(k8s|container|global|ha|slo|integrations|loadtest)/
+        linters: [errorlint, noctx, revive, bodyclose]
+      # Probe/bench tools take operator flags; ctx-less HTTP is fine there.
+      - path: cmd/tools/
+        linters: [noctx, bodyclose, errorlint, revive]
+      - path: _test\.go
+        linters: [noctx, bodyclose, errorlint]
+
+formatters:
+  enable:
+    - gofmt

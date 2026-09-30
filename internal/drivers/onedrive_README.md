@@ -313,7 +313,7 @@ go.mod). The pre-fleet `permafrost-benchmark` + `permafrost-parallel`
 
 ```bash
 # Build for SLC
-GOOS=linux GOARCH=amd64 go build -o permafrost-v3-linux ./cmd/permafrost-v3/
+GOOS=linux GOARCH=amd64 go build -o permafrost-v3-linux ./cmd/tools/permafrost-v3/
 scp permafrost-v3-linux vaultaire-slc:/tmp/
 
 # Run on SLC (source env vars first)
@@ -321,7 +321,7 @@ ssh vaultaire-slc 'cd /tmp && source .env.bench && ./permafrost-v3-linux'
 
 # Quick local test (all tenants)
 source .env.bench
-go run ./cmd/permafrost-v3/
+go run ./cmd/tools/permafrost-v3/
 
 # Build+run any tool (substitute tool name)
 GOOS=linux GOARCH=amd64 go build -o <tool>-linux ./cmd/<tool>/

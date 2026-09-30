@@ -22,9 +22,9 @@ jobs:
 
       - name: Build binaries
         run: |
-          GOOS=linux GOARCH=amd64 go build -o vaultaire-linux-amd64 cmd/vaultaire/main.go
-          GOOS=darwin GOARCH=amd64 go build -o vaultaire-darwin-amd64 cmd/vaultaire/main.go
-          GOOS=windows GOARCH=amd64 go build -o vaultaire-windows-amd64.exe cmd/vaultaire/main.go
+          GOOS=linux GOARCH=amd64 go build -ldflags "-X github.com/FairForge/vaultaire/internal/api.BuildSHA=${GITHUB_SHA::12} -X github.com/FairForge/vaultaire/internal/api.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o vaultaire-linux-amd64 ./cmd/vaultaire
+          GOOS=darwin GOARCH=amd64 go build -ldflags "-X github.com/FairForge/vaultaire/internal/api.BuildSHA=${GITHUB_SHA::12} -X github.com/FairForge/vaultaire/internal/api.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o vaultaire-darwin-amd64 ./cmd/vaultaire
+          GOOS=windows GOARCH=amd64 go build -ldflags "-X github.com/FairForge/vaultaire/internal/api.BuildSHA=${GITHUB_SHA::12} -X github.com/FairForge/vaultaire/internal/api.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o vaultaire-windows-amd64.exe ./cmd/vaultaire
 
       - name: Create Release
         uses: softprops/action-gh-release@v3

@@ -5,6 +5,7 @@ package drivers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -32,7 +33,7 @@ func (d *LocalDriver) LockFile(ctx context.Context, container, artifact string, 
 	err = syscall.Flock(int(file.Fd()), lockFlag|syscall.LOCK_NB)
 	if err != nil {
 		_ = file.Close()
-		if err == syscall.EWOULDBLOCK {
+		if errors.Is(err, syscall.EWOULDBLOCK) {
 			return nil, fmt.Errorf("lock would block")
 		}
 		return nil, fmt.Errorf("flock failed: %w", err)

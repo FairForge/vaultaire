@@ -7,7 +7,6 @@ import (
 	"html/template"
 	"net/http"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -105,8 +104,38 @@ func HandleBuckets(tmpl *template.Template, db *sql.DB, dataPath string, logger 
 	}
 }
 
+// BucketCreateState is the outcome the shared bucket registry reports
+// (mirrors internal/api's createBucketRegistry, which the dashboard cannot
+// import — internal/api mounts the dashboard).
+type BucketCreateState int
+
+const (
+	BucketCreateOK                BucketCreateState = iota // row inserted (or already owned)
+	BucketCreateCapMax                                     // 1000-bucket hard cap
+	BucketCreateCapFree                                    // free-tier bucket cap
+	BucketCreateInvalidRegion                              // unknown region id
+	BucketCreateRegionUnavailable                          // region known, no driver on this deployment
+)
+
+// BucketCreateResult is what a BucketCreator decided; Region is the stored region.
+type BucketCreateResult struct {
+	State  BucketCreateState
+	Region string
+}
+
+// BucketCreator is the one bucket-creation rule, implemented by the API layer
+// (`createBucketRegistry`: caps, region validation, sse default, registry row,
+// slug, `bucket.created` event). The dashboard used to run its own copy that
+// made a directory under DATA_PATH and skipped every rule the S3 and
+// management entry points enforce (Review R12-25 / WP-R12-10, the R4-22
+// class). region == "" means the deployment default.
+type BucketCreator func(ctx context.Context, tenantID, name, region string) (BucketCreateResult, error)
+
 // HandleCreateBucket handles POST /dashboard/buckets to create a new bucket.
-func HandleCreateBucket(tmpl *template.Template, db *sql.DB, dataPath string, logger *zap.Logger) http.HandlerFunc {
+// Name validation stays here (the form's error copy); everything else is the
+// creator's decision. A nil creator means bucket creation is not wired
+// (tests, dev without the API) and every attempt is refused.
+func HandleCreateBucket(tmpl *template.Template, db *sql.DB, create BucketCreator, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
 		if sd == nil {
@@ -134,72 +163,33 @@ func HandleCreateBucket(tmpl *template.Template, db *sql.DB, dataPath string, lo
 			return
 		}
 
-		// Free tier: enforce bucket limit.
-		if db != nil {
-			var tier string
-			_ = db.QueryRowContext(r.Context(),
-				"SELECT tier FROM tenant_quotas WHERE tenant_id = $1", sd.TenantID).Scan(&tier)
-			if usage.IsFreeTier(tier) {
-				var count int
-				_ = db.QueryRowContext(r.Context(),
-					"SELECT COUNT(*) FROM buckets WHERE tenant_id = $1", sd.TenantID).Scan(&count)
-				if count >= usage.FreeTierLimits.MaxBuckets {
-					data["CreateError"] = fmt.Sprintf("Free tier allows %d bucket. Upgrade your plan for more.", usage.FreeTierLimits.MaxBuckets)
-					renderBucketList(w, r, tmpl, db, sd, data, logger)
-					return
-				}
-			}
+		if create == nil {
+			data["CreateError"] = "Bucket creation is not available."
+			renderBucketList(w, r, tmpl, db, sd, data, logger)
+			return
 		}
 
-		// Validate region selection. Only regions with a registered driver on
-		// this deployment are offered/accepted (WP-R7-1): a bucket in any other
-		// region would silently store on the primary.
 		region := strings.TrimSpace(r.FormValue("region"))
-		if region == "" {
-			region = drivers.IDriveDefaultRegion(os.Getenv)
+		res, err := create(r.Context(), sd.TenantID, name, region)
+		if err != nil {
+			logger.Error("create bucket", zap.String("bucket", name), zap.Error(err))
+			data["CreateError"] = "Failed to create bucket."
+			renderBucketList(w, r, tmpl, db, sd, data, logger)
+			return
 		}
-		if !drivers.IsValidRegion(region) {
+		switch res.State {
+		case BucketCreateCapMax:
+			data["CreateError"] = "Bucket limit reached."
+		case BucketCreateCapFree:
+			data["CreateError"] = fmt.Sprintf("Free tier allows %d bucket. Upgrade your plan for more.", usage.FreeTierLimits.MaxBuckets)
+		case BucketCreateInvalidRegion:
 			data["CreateError"] = "Invalid region."
-			renderBucketList(w, r, tmpl, db, sd, data, logger)
-			return
-		}
-		if !drivers.IDriveRegionAvailable(region) {
+		case BucketCreateRegionUnavailable:
 			data["CreateError"] = "Region " + drivers.RegionDisplayName(region) + " is not enabled on this deployment."
+		}
+		if _, refused := data["CreateError"]; refused {
 			renderBucketList(w, r, tmpl, db, sd, data, logger)
 			return
-		}
-
-		// Create the directory under the data path.
-		if dataPath != "" {
-			dirPath := filepath.Join(dataPath, name)
-			cleanPath := filepath.Clean(dirPath)
-			if !strings.HasPrefix(cleanPath, filepath.Clean(dataPath)) {
-				data["CreateError"] = "Invalid bucket name."
-				renderBucketList(w, r, tmpl, db, sd, data, logger)
-				return
-			}
-			if err := os.MkdirAll(cleanPath, 0750); err != nil {
-				logger.Error("create bucket directory", zap.Error(err))
-				data["CreateError"] = "Failed to create bucket."
-				renderBucketList(w, r, tmpl, db, sd, data, logger)
-				return
-			}
-		}
-
-		residency := "us"
-		if drivers.IsEURegion(region) {
-			residency = "eu"
-		}
-
-		if db != nil {
-			_, dbErr := db.ExecContext(r.Context(), `
-				INSERT INTO buckets (tenant_id, name, visibility, region, data_residency)
-				VALUES ($1, $2, 'private', $3, $4)
-				ON CONFLICT (tenant_id, name) DO NOTHING
-			`, sd.TenantID, name, region, residency)
-			if dbErr != nil {
-				logger.Error("persist bucket to DB", zap.Error(dbErr))
-			}
 		}
 
 		data["CreateSuccess"] = name
@@ -356,6 +346,9 @@ func listBuckets(ctx context.Context, db *sql.DB, tenantID string) []BucketRow {
 		b.LastModifiedFmt = relativeTime(lastMod)
 		buckets = append(buckets, b)
 	}
+	if err := rows.Err(); err != nil {
+		return nil
+	}
 	return buckets
 }
 
@@ -443,6 +436,9 @@ func populateBucketObjects(ctx context.Context, db *sql.DB, tenantID, bucket, pr
 			obj.CDNURL = cdnBase + "/" + key
 		}
 		objects = append(objects, obj)
+	}
+	if err := rows.Err(); err != nil {
+		data["RowsError"] = err.Error()
 	}
 
 	// Build sorted prefix list.

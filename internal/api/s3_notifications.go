@@ -404,6 +404,9 @@ func (d *NotificationDispatcher) dispatch(tenantID, bucket, eventName, objectKey
 		}
 		targets = append(targets, t)
 	}
+	if err := rows.Err(); err != nil {
+		d.logger.Warn("iterate rows", zap.Error(err))
+	}
 
 	payload := S3Event{
 		Records: []S3EventRecord{{

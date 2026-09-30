@@ -3,12 +3,12 @@ package handlers
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"html/template"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -101,29 +101,80 @@ func TestHandleBuckets_NoSession(t *testing.T) {
 	assert.Equal(t, "/login", w.Header().Get("Location"))
 }
 
-func TestHandleCreateBucket_NoDB(t *testing.T) {
-	tmpDir := t.TempDir()
-	tmpl := testBucketsTemplate(t)
-	handler := HandleCreateBucket(tmpl, nil, tmpDir, zap.NewNop())
+// fakeCreator records the call and answers with a fixed result.
+type fakeCreator struct {
+	calls  []string
+	result BucketCreateResult
+	err    error
+}
 
-	form := url.Values{"name": {"my-test-bucket"}}
-	req := injectSession(httptest.NewRequest("POST", "/dashboard/buckets",
-		strings.NewReader(form.Encode())))
+func (f *fakeCreator) fn() BucketCreator {
+	return func(_ context.Context, tenantID, name, region string) (BucketCreateResult, error) {
+		f.calls = append(f.calls, tenantID+"/"+name+"/"+region)
+		return f.result, f.err
+	}
+}
+
+func postCreateBucket(t *testing.T, handler http.HandlerFunc, form url.Values) *httptest.ResponseRecorder {
+	t.Helper()
+	req := injectSession(httptest.NewRequest("POST", "/dashboard/buckets", strings.NewReader(form.Encode())))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
+	return w
+}
 
+// The dashboard delegates to the API layer's registry (WP-R12-10): the
+// handler validates the name, hands tenant/name/region to the creator and
+// renders the creator's verdict. It no longer touches the filesystem.
+func TestHandleCreateBucket_DelegatesToTheRegistry(t *testing.T) {
+	tmpl := testBucketsTemplate(t)
+	fc := &fakeCreator{result: BucketCreateResult{State: BucketCreateOK, Region: "us-central-1"}}
+	handler := HandleCreateBucket(tmpl, nil, fc.fn(), zap.NewNop())
+
+	w := postCreateBucket(t, handler, url.Values{"name": {"My-Test-Bucket"}, "region": {"us-central-1"}})
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), "my-test-bucket")
+	assert.Equal(t, []string{"tenant-456/my-test-bucket/us-central-1"}, fc.calls, "lower-cased name and the chosen region reach the registry")
+}
 
-	// Directory should have been created.
-	_, err := os.Stat(filepath.Join(tmpDir, "my-test-bucket"))
-	require.NoError(t, err)
+func TestHandleCreateBucket_RendersTheRegistryVerdict(t *testing.T) {
+	tmpl := testBucketsTemplate(t)
+	cases := []struct {
+		name   string
+		result BucketCreateResult
+		err    error
+		want   string
+	}{
+		{"free cap", BucketCreateResult{State: BucketCreateCapFree}, nil, "Free tier allows 1 bucket"},
+		{"hard cap", BucketCreateResult{State: BucketCreateCapMax}, nil, "Bucket limit reached"},
+		{"invalid region", BucketCreateResult{State: BucketCreateInvalidRegion}, nil, "Invalid region"},
+		{"region unavailable", BucketCreateResult{State: BucketCreateRegionUnavailable}, nil, "not enabled on this deployment"},
+		{"registry error", BucketCreateResult{}, errors.New("db down"), "Failed to create bucket"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fc := &fakeCreator{result: tc.result, err: tc.err}
+			w := postCreateBucket(t, HandleCreateBucket(tmpl, nil, fc.fn(), zap.NewNop()),
+				url.Values{"name": {"some-bucket"}, "region": {"eu-west-1"}})
+			assert.Equal(t, http.StatusOK, w.Code)
+			assert.Contains(t, w.Body.String(), tc.want)
+			assert.NotContains(t, w.Body.String(), `CreateSuccess`)
+		})
+	}
+}
+
+func TestHandleCreateBucket_NoCreatorIsRefused(t *testing.T) {
+	tmpl := testBucketsTemplate(t)
+	w := postCreateBucket(t, HandleCreateBucket(tmpl, nil, nil, zap.NewNop()), url.Values{"name": {"my-test-bucket"}})
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "Bucket creation is not available")
 }
 
 func TestHandleCreateBucket_InvalidName(t *testing.T) {
 	tmpl := testBucketsTemplate(t)
-	handler := HandleCreateBucket(tmpl, nil, t.TempDir(), zap.NewNop())
+	fc := &fakeCreator{result: BucketCreateResult{State: BucketCreateOK}}
+	handler := HandleCreateBucket(tmpl, nil, fc.fn(), zap.NewNop())
 
 	tests := []struct {
 		name string
@@ -146,6 +197,7 @@ func TestHandleCreateBucket_InvalidName(t *testing.T) {
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Contains(t, w.Body.String(), "Invalid bucket name", "name=%q", tt.name)
 	}
+	assert.Empty(t, fc.calls, "an invalid name never reaches the registry")
 }
 
 func TestHandleBucketObjects_NoDB(t *testing.T) {
@@ -238,41 +290,9 @@ func injectSessionWithTenant(req *http.Request, tenantID string) *http.Request {
 	return req.WithContext(ctx)
 }
 
-func TestHandleCreateBucket_PersistsToDB(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires database")
-	}
-	db := testDashDB(t)
-	defer func() { _ = db.Close() }()
-	cleanupDashBucketData(t, db)
-	defer cleanupDashBucketData(t, db)
-
-	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key) VALUES ('test-dash-1', 'Test Co', 'testdash1@test.com', 'VK-d1', 'SK-d1') ON CONFLICT DO NOTHING`)
-	require.NoError(t, err)
-
-	tmpDir := t.TempDir()
-	tmpl := testBucketsTemplate(t)
-	handler := HandleCreateBucket(tmpl, db, tmpDir, zap.NewNop())
-
-	form := url.Values{"name": {"my-dash-bucket"}}
-	req := injectSessionWithTenant(httptest.NewRequest("POST", "/dashboard/buckets",
-		strings.NewReader(form.Encode())), "test-dash-1")
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Body.String(), "my-dash-bucket")
-
-	var vis string
-	err = db.QueryRow(`SELECT visibility FROM buckets WHERE tenant_id = 'test-dash-1' AND name = 'my-dash-bucket'`).Scan(&vis)
-	require.NoError(t, err)
-	assert.Equal(t, "private", vis)
-}
-
 func TestHandleCreateBucket_InvalidName_NoDB(t *testing.T) {
 	tmpl := testBucketsTemplate(t)
-	handler := HandleCreateBucket(tmpl, nil, t.TempDir(), zap.NewNop())
+	handler := HandleCreateBucket(tmpl, nil, nil, zap.NewNop())
 
 	form := url.Values{"name": {"-bad"}}
 	req := injectSession(httptest.NewRequest("POST", "/dashboard/buckets",
@@ -414,53 +434,6 @@ func TestDashboardJS_Exists(t *testing.T) {
 	assert.Contains(t, string(data), "btn-copy")
 }
 
-func TestHandleCreateBucket_WithRegion(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires database")
-	}
-	db := testDashDB(t)
-	defer func() { _ = db.Close() }()
-	cleanupDashBucketData(t, db)
-	defer cleanupDashBucketData(t, db)
-
-	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key) VALUES ('test-dash-r1', 'Region Co', 'r1@test.com', 'VK-dr1', 'SK-dr1') ON CONFLICT DO NOTHING`)
-	require.NoError(t, err)
-
-	tmpDir := t.TempDir()
-	tmpl := testBucketsTemplate(t)
-	handler := HandleCreateBucket(tmpl, db, tmpDir, zap.NewNop())
-
-	form := url.Values{"name": {"eu-dash-bucket"}, "region": {"eu-west-1"}}
-	req := injectSessionWithTenant(httptest.NewRequest("POST", "/dashboard/buckets",
-		strings.NewReader(form.Encode())), "test-dash-r1")
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Body.String(), "eu-dash-bucket")
-
-	var region string
-	err = db.QueryRow(`SELECT region FROM buckets WHERE tenant_id = 'test-dash-r1' AND name = 'eu-dash-bucket'`).Scan(&region)
-	require.NoError(t, err)
-	assert.Equal(t, "eu-west-1", region)
-}
-
-func TestHandleCreateBucket_InvalidRegion(t *testing.T) {
-	tmpl := testBucketsTemplate(t)
-	handler := HandleCreateBucket(tmpl, nil, t.TempDir(), zap.NewNop())
-
-	form := url.Values{"name": {"bad-region-bucket"}, "region": {"ap-southeast-1"}}
-	req := injectSession(httptest.NewRequest("POST", "/dashboard/buckets",
-		strings.NewReader(form.Encode())))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Body.String(), "Invalid region")
-}
-
 func TestListBuckets_Dashboard_IncludesEmptyBuckets(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires database")
@@ -486,50 +459,4 @@ func TestListBuckets_Dashboard_IncludesEmptyBuckets(t *testing.T) {
 	body := w.Body.String()
 	assert.Contains(t, body, "empty-bucket")
 	assert.Contains(t, body, `<span class="count">1</span>`)
-}
-
-func TestHandleCreateBucket_DerivesResidency(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires database")
-	}
-	db := testDashDB(t)
-	defer func() { _ = db.Close() }()
-	cleanupDashBucketData(t, db)
-	defer cleanupDashBucketData(t, db)
-
-	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key)
-		VALUES ('test-dash-dr2', 'Residency Co', 'dr2@test.com', 'VK-dr2', 'SK-dr2')
-		ON CONFLICT DO NOTHING`)
-	require.NoError(t, err)
-
-	tmpDir := t.TempDir()
-	tmpl := testBucketsTemplate(t)
-	handler := HandleCreateBucket(tmpl, db, tmpDir, zap.NewNop())
-
-	// EU region → 'eu' residency
-	form := url.Values{"name": {"res-eu-bucket"}, "region": {"eu-west-1"}}
-	req := injectSessionWithTenant(httptest.NewRequest("POST", "/dashboard/buckets",
-		strings.NewReader(form.Encode())), "test-dash-dr2")
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusOK, w.Code)
-
-	var residency string
-	err = db.QueryRow(`SELECT data_residency FROM buckets WHERE tenant_id = 'test-dash-dr2' AND name = 'res-eu-bucket'`).Scan(&residency)
-	require.NoError(t, err)
-	assert.Equal(t, "eu", residency)
-
-	// US region → 'us' residency
-	form = url.Values{"name": {"res-us-bucket"}, "region": {"us-central-1"}}
-	req = injectSessionWithTenant(httptest.NewRequest("POST", "/dashboard/buckets",
-		strings.NewReader(form.Encode())), "test-dash-dr2")
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	w = httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusOK, w.Code)
-
-	err = db.QueryRow(`SELECT data_residency FROM buckets WHERE tenant_id = 'test-dash-dr2' AND name = 'res-us-bucket'`).Scan(&residency)
-	require.NoError(t, err)
-	assert.Equal(t, "us", residency)
 }

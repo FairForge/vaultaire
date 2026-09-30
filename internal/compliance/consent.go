@@ -2,6 +2,7 @@ package compliance
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -217,7 +218,7 @@ func (s *ConsentService) CheckConsent(ctx context.Context, userID uuid.UUID, pur
 
 	consent, err := s.db.GetConsent(ctx, userID, purpose)
 	if err != nil {
-		if err == ErrNotFound {
+		if errors.Is(err, ErrNotFound) {
 			return false, nil
 		}
 		return false, err

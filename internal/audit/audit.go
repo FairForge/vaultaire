@@ -209,45 +209,35 @@ func List(ctx context.Context, db *sql.DB, f Filter) (*Page, error) {
 	if limit > 100 {
 		limit = 100
 	}
-	where := []string{"TRUE"}
-	args := []any{}
-	add := func(cond string, v any) {
-		args = append(args, v)
-		where = append(where, fmt.Sprintf(cond, len(args)))
-	}
-	if f.TenantID != "" {
-		add("tenant_id = $%d", f.TenantID)
-	}
-	if f.UserID != "" {
-		add("user_id::text = $%d", f.UserID)
-	}
-	if f.Actor != "" {
-		add("performed_by::text = $%d", f.Actor)
-	}
-	if f.IP != "" {
-		add("host(ip) = $%d", f.IP)
-	}
-	if f.Action != "" {
-		add("action = $%d", f.Action)
-	}
-	if f.EventType != "" {
-		add("event_type = $%d", f.EventType)
-	}
-	if f.Cursor != "" {
+	// One static statement (no string assembly — gosec G202, and
+	// TestSQLLiteralsMatchSchema prepares it against the migrated schema):
+	// every filter is "empty means unfiltered" in SQL. audit_logs is
+	// admin-read and bounded by retention, so the generic plan is fine.
+	var cursorTS time.Time
+	var cursorID string
+	useCursor := f.Cursor != ""
+	if useCursor {
 		ts, id, err := decodeCursor(f.Cursor)
 		if err != nil {
 			return nil, err
 		}
-		args = append(args, ts, id)
-		where = append(where, fmt.Sprintf("(timestamp, id::text) < ($%d, $%d)", len(args)-1, len(args)))
+		cursorTS, cursorID = ts, id
 	}
-	args = append(args, limit+1)
-	q := `SELECT id::text, timestamp, COALESCE(user_id::text,''), COALESCE(performed_by::text,''), COALESCE(tenant_id,''),
+	const q = `SELECT id::text, timestamp, COALESCE(user_id::text,''), COALESCE(performed_by::text,''), COALESCE(tenant_id,''),
 	             event_type, action, COALESCE(resource,''), result, COALESCE(severity,''), COALESCE(host(ip),''),
 	             COALESCE(user_agent,''), COALESCE(error_msg,''), COALESCE(metadata, '{}'::jsonb)
-	      FROM audit_logs WHERE ` + strings.Join(where, " AND ") +
-		fmt.Sprintf(" ORDER BY timestamp DESC, id::text DESC LIMIT $%d", len(args))
-	rows, err := db.QueryContext(ctx, q, args...) // #nosec G202 -- conditions are fixed literals with $N placeholders
+	      FROM audit_logs
+	      WHERE ($1 = '' OR tenant_id = $1)
+	        AND ($2 = '' OR user_id::text = $2)
+	        AND ($3 = '' OR performed_by::text = $3)
+	        AND ($4 = '' OR host(ip) = $4)
+	        AND ($5 = '' OR action = $5)
+	        AND ($6 = '' OR event_type = $6)
+	        AND (NOT $7::boolean OR (timestamp, id::text) < ($8::timestamptz, $9::text))
+	      ORDER BY timestamp DESC, id::text DESC
+	      LIMIT $10`
+	rows, err := db.QueryContext(ctx, q, f.TenantID, f.UserID, f.Actor, f.IP, f.Action, f.EventType,
+		useCursor, cursorTS, cursorID, limit+1)
 	if err != nil {
 		return nil, fmt.Errorf("list audit rows: %w", err)
 	}

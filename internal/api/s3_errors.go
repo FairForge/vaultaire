@@ -333,6 +333,9 @@ func bucketSuggestion(ctx context.Context, db *sql.DB, tenantID, bucket string) 
 			bestName = name
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return ""
+	}
 
 	if bestName != "" && bestDist <= maxSuggestionDistance {
 		return fmt.Sprintf("Did you mean '%s'?", bestName)
@@ -385,6 +388,12 @@ func keySuggestion(ctx context.Context, db *sql.DB, tenantID, bucket, key string
 			bestDist = d
 			bestKey = k
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return ""
+	}
+	if err := rows.Err(); err != nil {
+		return ""
 	}
 
 	if bestKey != "" && bestDist <= maxSuggestionDistance {

@@ -79,7 +79,7 @@ type chunkStorePool struct {
 }
 
 func newChunkStorePool(
-	a *S3ToEngine, ctx context.Context, cancel context.CancelFunc,
+	ctx context.Context, a *S3ToEngine, cancel context.CancelFunc,
 	refTenantID, encTenantID, bucket, artifact, scope, contentType string,
 	encrypting bool,
 ) *chunkStorePool {

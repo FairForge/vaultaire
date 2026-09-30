@@ -3,6 +3,7 @@ package api
 import (
 	"database/sql"
 	"encoding/xml"
+	"errors"
 	"net/http"
 	"sort"
 	"strconv"
@@ -86,7 +87,7 @@ func (s *Server) handleListObjectVersions(w http.ResponseWriter, r *http.Request
 	err = s.db.QueryRowContext(r.Context(),
 		`SELECT TRUE FROM buckets WHERE tenant_id = $1 AND name = $2`,
 		t.ID, req.Bucket).Scan(&bucketExists)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		reqID := generateRequestID()
 		if suggestion := bucketSuggestion(r.Context(), s.db, t.ID, req.Bucket); suggestion != "" {
 			WriteS3ErrorWithContext(w, ErrNoSuchBucket, r.URL.Path, reqID, WithSuggestion(suggestion))
@@ -119,7 +120,7 @@ func (s *Server) handleListObjectVersions(w http.ResponseWriter, r *http.Request
 			SELECT created_at FROM object_versions
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND version_id = $4`,
 			t.ID, req.Bucket, keyMarker, versionIDMarker).Scan(&markerCreatedAt)
-		if err != nil && err != sql.ErrNoRows {
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			s.logger.Error("list versions: marker lookup failed", zap.Error(err))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 			return

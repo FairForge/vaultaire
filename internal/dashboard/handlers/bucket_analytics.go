@@ -119,6 +119,9 @@ func populateTopObjects(ctx context.Context, db *sql.DB, tenantID, bucket string
 		o.Bandwidth = formatBytes(bw)
 		objects = append(objects, o)
 	}
+	if err := rows.Err(); err != nil {
+		data["RowsError"] = err.Error()
+	}
 	data["TopObjects"] = objects
 }
 
@@ -183,6 +186,9 @@ func populateCountries(ctx context.Context, db *sql.DB, tenantID, bucket string,
 		}
 		c.Bandwidth = formatBytes(bw)
 		countries = append(countries, c)
+	}
+	if err := rows.Err(); err != nil {
+		data["RowsError"] = err.Error()
 	}
 	data["Countries"] = countries
 }

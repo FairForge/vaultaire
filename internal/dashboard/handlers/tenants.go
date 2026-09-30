@@ -117,6 +117,9 @@ func queryTenantList(ctx context.Context, db *sql.DB, search string, logger *zap
 		tr.Status, tr.StatusClass = tenantStatus(subStatus, suspendedAt.Valid)
 		tenants = append(tenants, tr)
 	}
+	if err := rows.Err(); err != nil {
+		return nil
+	}
 	return tenants
 }
 

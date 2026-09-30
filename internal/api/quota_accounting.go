@@ -193,7 +193,7 @@ func atomicHeadUpsertReleasing(ctx context.Context, db *sql.DB, gci chunkManifes
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
 		FOR UPDATE`,
 		tenantID, bucket, key).Scan(&displaced.Size, &displaced.Floor, &displaced.Backend, &displacedChunked)
-	if err != nil && err != sql.ErrNoRows {
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return displacedRow{}, fmt.Errorf("lock head-cache row: %w", err)
 	}
 

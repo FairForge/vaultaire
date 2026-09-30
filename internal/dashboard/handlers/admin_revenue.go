@@ -165,6 +165,9 @@ func queryFixedMRR(ctx context.Context, db *sql.DB, logger *zap.Logger) int64 {
 		}
 		total += planMonthlyCents(plan)
 	}
+	if err := rows.Err(); err != nil {
+		return 0
+	}
 	return total
 }
 
@@ -213,6 +216,9 @@ func queryHouseMRR(ctx context.Context, db *sql.DB, logger *zap.Logger) (int64, 
 		case usage.FloorVault:
 			h.vault = int(limit / usage.TB)
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, nil
 	}
 
 	var total, stdCents, vaultCents, pinCents int64
@@ -274,6 +280,9 @@ func queryMeteredMRR(ctx context.Context, db *sql.DB, logger *zap.Logger) int64 
 		}
 		total += billing.AccruedCents(tier, storageBytes, egressBytes)
 	}
+	if err := rows.Err(); err != nil {
+		return 0
+	}
 	return total
 }
 
@@ -320,6 +329,9 @@ func queryRevenueByTier(ctx context.Context, db *sql.DB, logger *zap.Logger) []t
 			MRRFmt:   formatCents(cents),
 		})
 	}
+	if err := fixedRows.Err(); err != nil {
+		return nil
+	}
 
 	// Metered tiers from tenant_quotas.
 	meteredRows, err := db.QueryContext(ctx, `
@@ -348,6 +360,9 @@ func queryRevenueByTier(ctx context.Context, db *sql.DB, logger *zap.Logger) []t
 			MRRCents: cents,
 			MRRFmt:   formatCents(cents),
 		})
+	}
+	if err := meteredRows.Err(); err != nil {
+		return nil
 	}
 	return tiers
 }
@@ -392,6 +407,9 @@ func queryTopCustomers(ctx context.Context, db *sql.DB, logger *zap.Logger) []cu
 			StorageFmt: formatBytes(storageBytes),
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil
+	}
 	return customers
 }
 
@@ -428,6 +446,9 @@ func queryMRRTrend(ctx context.Context, db *sql.DB, logger *zap.Logger) []trendB
 			orderedKeys = append(orderedKeys, key)
 		}
 		monthMap[key].cents += planMonthlyCents(plan) * int64(count)
+	}
+	if err := rows.Err(); err != nil {
+		return nil
 	}
 
 	if len(orderedKeys) == 0 {

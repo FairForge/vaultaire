@@ -63,6 +63,9 @@ func TestDedupGC_DeletesMarkedPastGrace(t *testing.T) {
 		require.NoError(t, rows.Scan(&k))
 		keys = append(keys, k)
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate rows: %v", err)
+	}
 	_ = rows.Close()
 	require.NotEmpty(t, keys, "should have marked chunks")
 
@@ -153,6 +156,9 @@ func TestDedupGC_ReconcilesOrphan(t *testing.T) {
 		var gcRefCount, actualCount int
 		require.NoError(t, rows.Scan(&hash, &gcRefCount, &actualCount))
 		assert.Equal(t, actualCount, gcRefCount, "ref_count should match actual refs for %s", hash)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate rows: %v", err)
 	}
 }
 
@@ -331,6 +337,9 @@ func TestDedupGC_ChunksInGlobalContainer(t *testing.T) {
 		var key string
 		require.NoError(t, rows.Scan(&key))
 		assert.Contains(t, key, "_chunks/", "chunks should be stored with _chunks/ prefix")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate rows: %v", err)
 	}
 	_ = runner // use runner to confirm it builds
 }

@@ -70,7 +70,7 @@ jobs:
 
       - name: Smoke test
         run: |
-          go build -o vaultaire cmd/vaultaire/main.go
+          go build -ldflags "-X github.com/FairForge/vaultaire/internal/api.BuildSHA=${GITHUB_SHA::12} -X github.com/FairForge/vaultaire/internal/api.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o vaultaire ./cmd/vaultaire
           ./vaultaire &
           sleep 5
           # Liveness smoke: assert the server booted and serves HTTP — NOT that

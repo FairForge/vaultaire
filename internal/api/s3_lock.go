@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/xml"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -306,7 +307,7 @@ func (s *Server) handlePutObjectRetention(w http.ResponseWriter, r *http.Request
 		`SELECT retention_mode, retain_until_date FROM object_locks
 		 WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
 		t.ID, req.Bucket, req.Object).Scan(&existingMode, &existingUntil)
-	if err != nil && err != sql.ErrNoRows {
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		s.logger.Error("retention: lock lookup failed", zap.Error(err))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return

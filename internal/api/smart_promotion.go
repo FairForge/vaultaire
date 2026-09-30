@@ -366,6 +366,9 @@ func (p *SmartPromoter) PromotePending(ctx context.Context) (int, []string) {
 		}
 		items = append(items, it)
 	}
+	if err := rows.Err(); err != nil {
+		return 0, nil
+	}
 	_ = rows.Close()
 
 	promoted := 0

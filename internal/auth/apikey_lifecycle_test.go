@@ -29,13 +29,13 @@ func TestRevokeAPIKey_PersistsAndBlocksS3Auth(t *testing.T) {
 	require.NoError(t, err)
 
 	a := NewAuth(db, zap.NewNop())
-	cred, err := a.lookupCredential(key.Key)
+	cred, err := a.lookupCredential(context.Background(), key.Key)
 	require.NoError(t, err)
 	require.Equal(t, user.TenantID, cred.tenantID)
 
 	require.NoError(t, svc.RevokeAPIKey(context.Background(), user.ID, key.ID))
 
-	_, err = a.lookupCredential(key.Key)
+	_, err = a.lookupCredential(context.Background(), key.Key)
 	assert.Error(t, err, "a revoked key must not authenticate on the S3 path")
 
 	// Survives a restart: a fresh service loading from the DB sees the revocation.
@@ -67,7 +67,7 @@ func TestRevokeAPIKey_OtherUsersKeyIsNotFound(t *testing.T) {
 	assert.Error(t, svc.RevokeAPIKey(context.Background(), other.ID, key.ID))
 
 	a := NewAuth(db, zap.NewNop())
-	_, err = a.lookupCredential(key.Key)
+	_, err = a.lookupCredential(context.Background(), key.Key)
 	assert.NoError(t, err, "another user's revoke attempt must not touch the key")
 }
 
@@ -83,10 +83,10 @@ func TestRotateAPIKey_PersistsNewKeyAndRevokesOld(t *testing.T) {
 	require.NotEqual(t, old.Key, rotated.Key)
 
 	a := NewAuth(db, zap.NewNop())
-	_, err = a.lookupCredential(old.Key)
+	_, err = a.lookupCredential(context.Background(), old.Key)
 	assert.Error(t, err, "the rotated-away key must stop authenticating")
 
-	cred, err := a.lookupCredential(rotated.Key)
+	cred, err := a.lookupCredential(context.Background(), rotated.Key)
 	require.NoError(t, err, "the new key must be persisted so the S3 path sees it")
 	assert.Equal(t, user.TenantID, cred.tenantID)
 	assert.Equal(t, rotated.Secret, cred.secretKey)
@@ -105,7 +105,7 @@ func TestSetAPIKeyExpiration_PersistsAndAppliesToS3Auth(t *testing.T) {
 	require.NoError(t, svc.SetAPIKeyExpiration(context.Background(), user.ID, key.ID, past))
 
 	a := NewAuth(db, zap.NewNop())
-	cred, err := a.lookupCredential(key.Key)
+	cred, err := a.lookupCredential(context.Background(), key.Key)
 	require.NoError(t, err)
 	require.NotNil(t, cred.scope.ExpiresAt, "expires_at must be persisted")
 	assert.True(t, IsKeyExpired(cred.scope.ExpiresAt))
@@ -122,7 +122,7 @@ func TestGenerateAPIKey_PermissionsOnlyPersists(t *testing.T) {
 	require.NoError(t, err)
 
 	a := NewAuth(db, zap.NewNop())
-	cred, err := a.lookupCredential(key.Key)
+	cred, err := a.lookupCredential(context.Background(), key.Key)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"GetObject"}, cred.scope.Permissions)
 	assert.Empty(t, cred.scope.BucketScope)
@@ -141,7 +141,7 @@ func TestLookupCredential_CorruptPermissionsFailClosed(t *testing.T) {
 	require.NoError(t, err)
 
 	a := NewAuth(db, zap.NewNop())
-	cred, err := a.lookupCredential(key.Key)
+	cred, err := a.lookupCredential(context.Background(), key.Key)
 	require.NoError(t, err)
 	assert.Empty(t, cred.scope.Permissions)
 	assert.False(t, CheckPermission(cred.scope.Permissions, "GetObject"))
