@@ -118,33 +118,43 @@ func (a *AuthService) GetMFASecret(_ context.Context, userID string) (string, er
 const totpReplayWindow = 90 * time.Second
 
 // ConsumeTOTPCode records that code was accepted for userID and reports
-// whether it was fresh. A second call with the same code inside
-// totpReplayWindow returns false; the caller treats that as a failed factor.
+// whether it was fresh. Every code accepted inside totpReplayWindow is
+// remembered — not just the last one: totp.Validate allows the adjacent 30 s
+// steps (skew 1), so two or three codes are valid at any moment and a guard
+// that kept only the latest let an earlier code be replayed once another had
+// been used (post-merge R12-38). A repeat returns false; the caller treats
+// that as a failed factor.
 func (a *AuthService) ConsumeTOTPCode(userID, code string) bool {
 	a.mfaMu.Lock()
 	defer a.mfaMu.Unlock()
 	if a.totpUsed == nil {
-		a.totpUsed = make(map[string]totpUse)
+		a.totpUsed = make(map[string]map[string]time.Time)
 	}
 	now := time.Now()
-	if u, ok := a.totpUsed[userID]; ok && u.code == code && now.Sub(u.at) < totpReplayWindow {
+	used := a.totpUsed[userID]
+	if at, ok := used[code]; ok && now.Sub(at) < totpReplayWindow {
 		return false
 	}
-	// Bound the map: entries older than the window are dead.
-	if len(a.totpUsed) > 4096 {
-		for k, u := range a.totpUsed {
-			if now.Sub(u.at) >= totpReplayWindow {
-				delete(a.totpUsed, k)
+	// Bound the maps: entries older than the window are dead.
+	if len(a.totpUsed) > 4096 || len(used) > 8 {
+		for uid, codes := range a.totpUsed {
+			for c, at := range codes {
+				if now.Sub(at) >= totpReplayWindow {
+					delete(codes, c)
+				}
+			}
+			if len(codes) == 0 {
+				delete(a.totpUsed, uid)
 			}
 		}
+		used = a.totpUsed[userID]
 	}
-	a.totpUsed[userID] = totpUse{code: code, at: now}
+	if used == nil {
+		used = make(map[string]time.Time)
+		a.totpUsed[userID] = used
+	}
+	used[code] = now
 	return true
-}
-
-type totpUse struct {
-	code string
-	at   time.Time
 }
 
 // ValidateBackupCode checks and consumes a single-use backup code.
