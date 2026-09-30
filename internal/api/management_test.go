@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
@@ -246,21 +245,30 @@ func TestManagementDeleteBucket(t *testing.T) {
 	s, mock, cleanup := newMgmtTestServer(t)
 	defer cleanup()
 
-	// Create a temp bucket dir so the handler can read it
-	dir := t.TempDir()
-	t.Setenv("DATA_PATH", dir)
-	bucketPath := dir + "/test-tenant/del-bucket"
-	require.NoError(t, mkdirAll(bucketPath))
+	// The registry decides (post-merge R4-22): no data directory exists and
+	// none is needed.
+	t.Setenv("DATA_PATH", t.TempDir())
 
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM buckets`).
+		WithArgs("test-tenant", "del-bucket").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM object_head_cache`).
+		WithArgs("test-tenant", "del-bucket").
+		WillReturnRows(sqlmock.NewRows([]string{"objects", "versions", "uploads"}).AddRow(0, 0, 0))
+	mock.ExpectBegin()
+	mock.ExpectExec(`DELETE FROM bucket_notifications`).
+		WithArgs("test-tenant", "del-bucket").
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(`DELETE FROM buckets`).
 		WithArgs("test-tenant", "del-bucket").
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
 
 	req := httptest.NewRequest("DELETE", "/api/v1/manage/buckets/del-bucket", nil)
 	w := httptest.NewRecorder()
 	s.router.ServeHTTP(w, req)
 
-	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
 
 	var resp map[string]interface{}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
@@ -665,8 +673,4 @@ func TestMgmtSetBucketResidency_Null(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "bucket", resp["object"])
 	assert.Nil(t, resp["data_residency"])
-}
-
-func mkdirAll(path string) error {
-	return os.MkdirAll(path, 0750)
 }

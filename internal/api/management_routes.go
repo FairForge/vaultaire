@@ -303,35 +303,54 @@ func (s *Server) handleMgmtDeleteBucket(w http.ResponseWriter, r *http.Request) 
 	}
 	dirPath := filepath.Clean(filepath.Join(dataPath, tenantID, name)) // #nosec G703 — name from URL param, tenant from JWT
 
-	entries, err := os.ReadDir(dirPath)
-	if err != nil {
-		if os.IsNotExist(err) {
+	if s.db != nil {
+		// The registry decides (post-merge R4-22): this handler used to
+		// read the DATA_PATH directory — which object writes never touch —
+		// and deleted the row of a non-empty bucket. Same rule as S3
+		// DeleteBucket now.
+		outcome, err := s.deleteBucketRegistry(r.Context(), tenantID, name)
+		if err != nil {
+			s.logger.Error("delete bucket", zap.Error(err))
+			writeManagementError(w, ErrTypeAPI, "internal_error", "failed to delete bucket", "")
+			return
+		}
+		switch outcome.state {
+		case bucketDeleteMissing:
 			writeManagementError(w, ErrTypeNotFound, "bucket_not_found", "bucket not found", "name")
 			return
-		}
-		s.logger.Error("read bucket dir", zap.Error(err))
-		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to read bucket", "")
-		return
-	}
-
-	for _, entry := range entries {
-		n := entry.Name()
-		if !entry.IsDir() && n != "" && n[0] != '.' {
-			writeManagementError(w, ErrTypeConflict, "bucket_not_empty",
-				"bucket is not empty", "name")
+		case bucketDeleteNotEmpty:
+			writeManagementError(w, ErrTypeConflict, "bucket_not_empty", outcome.contents(), "name")
 			return
 		}
-	}
-
-	if err := os.RemoveAll(dirPath); err != nil {
-		s.logger.Error("delete bucket dir", zap.Error(err))
-		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to delete bucket", "")
-		return
-	}
-
-	if s.db != nil {
-		_, _ = s.db.ExecContext(r.Context(),
-			`DELETE FROM buckets WHERE tenant_id = $1 AND name = $2`, tenantID, name)
+		_ = os.RemoveAll(dirPath) // the marker directory, if any
+		emitEvent(r.Context(), s.db, s.logger, "bucket.deleted", tenantID, map[string]interface{}{
+			"bucket": name,
+		})
+	} else {
+		// No database (dev): the marker directory is all there is.
+		entries, err := os.ReadDir(dirPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				writeManagementError(w, ErrTypeNotFound, "bucket_not_found", "bucket not found", "name")
+				return
+			}
+			s.logger.Error("read bucket dir", zap.Error(err))
+			writeManagementError(w, ErrTypeAPI, "internal_error", "failed to read bucket", "")
+			return
+		}
+		for _, entry := range entries {
+			n := entry.Name()
+			if !entry.IsDir() && n != "" && n[0] != '.' {
+				writeManagementError(w, ErrTypeConflict, "bucket_not_empty",
+					"bucket is not empty", "name")
+				return
+			}
+		}
+		if err := os.RemoveAll(dirPath); err != nil {
+			s.logger.Error("delete bucket dir", zap.Error(err))
+			writeManagementError(w, ErrTypeAPI, "internal_error", "failed to delete bucket", "")
+			return
+		}
 	}
 
 	resp := map[string]interface{}{
