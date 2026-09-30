@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/FairForge/vaultaire/internal/audit"
 	"strings"
 	"time"
 
@@ -118,6 +119,7 @@ func (a *AuthService) CompletePasswordReset(ctx context.Context, token, newPassw
 		}
 	}
 
+	a.record(ctx, audit.Entry{UserID: userID, Action: "auth.password_reset", Resource: "user:" + userID})
 	return userID, nil
 }
 

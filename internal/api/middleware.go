@@ -1,83 +1,39 @@
 package api
 
 import (
-	"context"
-	"database/sql"
-	"fmt"
 	"net/http"
-	"strings"
-	"time"
-
-	"github.com/FairForge/vaultaire/internal/common"
-	"go.uber.org/zap"
 )
 
-// Middleware is a function that wraps an HTTP handler
-type Middleware func(http.Handler) http.Handler
-
-// RateLimitMiddleware creates middleware that enforces rate limits
-func RateLimitMiddleware(limiter *RateLimiter) Middleware {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Extract tenant ID from header
-			tenantID := r.Header.Get("X-Tenant-ID")
-			if tenantID == "" {
-				tenantID = "default" // Default tenant for requests without ID
-			}
-
-			// Set rate limit headers (always set, even on success)
-			w.Header().Set("X-RateLimit-Limit", "100")
-			w.Header().Set("X-RateLimit-Remaining", "99") // Simplified for now
-			w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", time.Now().Add(time.Second).Unix()))
-
-			// Check rate limit
-			if !limiter.Allow(tenantID) {
-				// Rate limit exceeded
-				w.WriteHeader(http.StatusTooManyRequests)
-				// Handle error to satisfy gosec
-				_, _ = w.Write([]byte("Rate limit exceeded"))
-				return
-			}
-
-			// Continue to next handler
-			next.ServeHTTP(w, r)
-		})
+// requireAdmin gates a handler on users.role = 'admin', looked up per
+// request for the JWT user (requireJWT must run first). Moved here from the
+// deleted quota_management.go (Review R11 / WP-R10-7); the string-keyed
+// "is_admin" context short-circuit that nothing set is gone.
+func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.isAdminRequest(r) {
+			http.Error(w, "admin access required", http.StatusForbidden)
+			return
+		}
+		next(w, r)
 	}
 }
 
-// ExtractTenant extracts tenant from AWS signature
-func ExtractTenant(db *sql.DB, logger *zap.Logger) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			auth := r.Header.Get("Authorization")
-			var tenantID string
+// requireAdminMiddleware is requireAdmin in chi's middleware shape, for
+// r.Use on a whole route group.
+func (s *Server) requireAdminMiddleware(next http.Handler) http.Handler {
+	return s.requireAdmin(next.ServeHTTP)
+}
 
-			if strings.Contains(auth, "AWS4-HMAC-SHA256") {
-				// Extract access key from signature
-				parts := strings.Split(auth, "Credential=")
-				if len(parts) > 1 {
-					credParts := strings.Split(parts[1], "/")
-					if len(credParts) > 0 {
-						accessKey := credParts[0]
-						logger.Debug("Extracting tenant", zap.String("access_key", accessKey))
-						// Look up tenant
-						err := db.QueryRow("SELECT id FROM tenants WHERE access_key = $1",
-							accessKey).Scan(&tenantID)
-						if err != nil {
-							logger.Debug("tenant lookup failed",
-								zap.String("access_key", accessKey))
-							tenantID = "test-tenant"
-						}
-					}
-				}
-			}
-
-			if tenantID == "" {
-				tenantID = "test-tenant"
-			}
-
-			ctx := context.WithValue(r.Context(), common.TenantIDKey, tenantID)
-			next.ServeHTTP(w, r.WithContext(ctx))
-		})
+func (s *Server) isAdminRequest(r *http.Request) bool {
+	userID, _ := r.Context().Value(userIDKey).(string)
+	if userID == "" || s.db == nil {
+		return false
 	}
+	var role string
+	if err := s.db.QueryRowContext(r.Context(),
+		"SELECT COALESCE(role, '') FROM users WHERE id = $1", userID,
+	).Scan(&role); err != nil {
+		return false
+	}
+	return role == "admin"
 }

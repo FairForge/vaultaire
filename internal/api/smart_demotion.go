@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/FairForge/vaultaire/internal/audit"
 	"net/http"
 	"strconv"
 	"time"
@@ -504,6 +505,9 @@ func (s *Server) handleSmartDemotionTrigger(w http.ResponseWriter, r *http.Reque
 	}
 	dryRun, _ := strconv.ParseBool(r.URL.Query().Get("dry_run"))
 	res, err := s.smartDemotion.RunOnce(r.Context(), dryRun)
+	actor, _ := r.Context().Value(userIDKey).(string)
+	audit.Record(r.Context(), s.db, audit.Entry{UserID: actor, EventType: "admin", Action: "admin.smart_demotion", Error: err,
+		Metadata: map[string]any{"dry_run": dryRun}})
 	if err != nil {
 		s.logger.Error("manual smart demotion failed", zap.Error(err))
 		http.Error(w, "smart demotion failed: "+err.Error(), http.StatusInternalServerError)

@@ -6,18 +6,29 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/audit"
 	"github.com/FairForge/vaultaire/internal/auth"
+	"github.com/FairForge/vaultaire/internal/usage"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 )
 
+// jsonAPIMiddleware returns the one rate limiter and one idempotency
+// middleware shared by every JSON API group (built lazily; tests that mount
+// routes by hand call it too).
+func (s *Server) jsonAPIMiddleware() (*ManagementRateLimiter, *idempotencyMiddleware) {
+	s.jsonAPIOnce.Do(func() {
+		s.jsonAPILimiter = NewManagementRateLimiter()
+		s.jsonAPIIdempotency = newIdempotencyMiddleware(s.db, s.logger)
+	})
+	return s.jsonAPILimiter, s.jsonAPIIdempotency
+}
+
 func (s *Server) registerManagementRoutes() {
-	rl := NewManagementRateLimiter()
-	im := newIdempotencyMiddleware(s.db, s.logger)
+	rl, im := s.jsonAPIMiddleware()
 
 	s.router.Route("/api/v1/manage", func(r chi.Router) {
 		r.Use(s.requireJWT)
@@ -52,6 +63,7 @@ func (s *Server) registerManagementRoutes() {
 type mgmtBucket struct {
 	Object    string            `json:"object"`
 	Name      string            `json:"name"`
+	Region    string            `json:"region,omitempty"`
 	Metadata  map[string]string `json:"metadata"`
 	CreatedAt time.Time         `json:"created_at"`
 	RequestID string            `json:"request_id,omitempty"`
@@ -136,7 +148,8 @@ func (s *Server) handleMgmtCreateBucket(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var req struct {
-		Name string `json:"name"`
+		Name   string `json:"name"`
+		Region string `json:"region"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeManagementError(w, ErrTypeInvalidRequest, "invalid_json", "request body must be valid JSON", "")
@@ -154,40 +167,39 @@ func (s *Server) handleMgmtCreateBucket(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	dataPath := os.Getenv("DATA_PATH")
-	if dataPath == "" {
-		dataPath = "/tmp/vaultaire"
-	}
-	dirPath := filepath.Clean(filepath.Join(dataPath, tenantID, req.Name)) // #nosec G703 — name validated by validateBucketName (a-z0-9.-)
-	if err := os.MkdirAll(dirPath, 0750); err != nil {
-		s.logger.Error("create bucket dir", zap.Error(err))
+	outcome, err := s.createBucketRegistry(r.Context(), tenantID, req.Name, req.Region)
+	if err != nil {
+		s.logger.Error("management create bucket", zap.Error(err))
 		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to create bucket", "")
 		return
 	}
-
-	if s.db != nil {
-		result, dbErr := s.db.ExecContext(r.Context(), `
-			INSERT INTO buckets (tenant_id, name, visibility)
-			VALUES ($1, $2, 'private')
-			ON CONFLICT (tenant_id, name) DO NOTHING
-		`, tenantID, req.Name)
-		if dbErr != nil {
-			s.logger.Error("persist bucket", zap.Error(dbErr))
-			writeManagementError(w, ErrTypeAPI, "db_error", "failed to persist bucket", "")
-			return
-		}
-		if rows, _ := result.RowsAffected(); rows == 0 {
-			writeManagementError(w, ErrTypeConflict, "bucket_exists",
-				"a bucket with this name already exists", "name")
-			return
-		}
-
-		auth.EnsureTenantSlug(r.Context(), s.db, tenantID, s.logger)
+	switch outcome.state {
+	case bucketCreateCapMax:
+		writeManagementError(w, ErrTypeConflict, "bucket_limit_exceeded",
+			fmt.Sprintf("maximum %d buckets per account", maxBucketsPerTenant), "")
+		return
+	case bucketCreateCapFree:
+		writeManagementError(w, ErrTypePermission, "free_tier_bucket_limit",
+			fmt.Sprintf("Free tier allows %d bucket. Upgrade at https://stored.ge/dashboard/billing", usage.FreeTierLimits.MaxBuckets), "")
+		return
+	case bucketCreateInvalidRegion:
+		writeManagementError(w, ErrTypeInvalidRequest, "invalid_region", "region is not a known region id", "region")
+		return
+	case bucketCreateRegionUnavailable:
+		writeManagementError(w, ErrTypeInvalidRequest, "region_unavailable",
+			fmt.Sprintf("Region %s is not enabled on this deployment.", req.Region), "region")
+		return
+	}
+	if outcome.alreadyOwned {
+		writeManagementError(w, ErrTypeConflict, "bucket_exists",
+			"a bucket with this name already exists", "name")
+		return
 	}
 
 	bucket := mgmtBucket{
 		Object:    "bucket",
 		Name:      req.Name,
+		Region:    outcome.region,
 		CreatedAt: time.Now().UTC(),
 		RequestID: getRequestID(w),
 	}
@@ -657,6 +669,9 @@ func (s *Server) handleMgmtExportData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	audit.Record(r.Context(), s.db, audit.Entry{UserID: userID, TenantID: tenantID, Action: "account.exported",
+		Resource: "export:" + result.ID, Metadata: map[string]any{"bytes": result.SizeBytes, "via": "management_api"}})
+
 	resp := map[string]interface{}{
 		"object":     "data_export",
 		"id":         result.ID,
@@ -721,6 +736,9 @@ func (s *Server) handleMgmtDeleteAccount(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	audit.Record(r.Context(), s.db, audit.Entry{UserID: userID, TenantID: tenantID, Action: "account.deletion_scheduled",
+		Resource: "user:" + userID, Severity: "warning", Metadata: map[string]any{"scheduled_at": scheduledAt, "reason": req.Reason, "via": "management_api"}})
+
 	resp := map[string]interface{}{
 		"object":       "account_deletion",
 		"scheduled_at": scheduledAt,
@@ -743,6 +761,10 @@ func (s *Server) handleMgmtCancelDeletion(w http.ResponseWriter, r *http.Request
 		writeManagementError(w, ErrTypeAPI, "cancel_failed", "failed to cancel account deletion", "")
 		return
 	}
+
+	tenantID, _ := r.Context().Value(tenantIDKey).(string)
+	audit.Record(r.Context(), s.db, audit.Entry{UserID: userID, TenantID: tenantID, Action: "account.deletion_cancelled",
+		Resource: "user:" + userID, Metadata: map[string]any{"via": "management_api"}})
 
 	resp := map[string]interface{}{
 		"object":     "account_deletion",

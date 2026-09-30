@@ -11,6 +11,12 @@ Authentication service for Vaultaire. Handles user registration, login, JWT toke
 - **KeyScope** — `{Permissions, BucketScope, IPAllowlist, ExpiresAt}` — returned from auth lookups for scope enforcement
 - **KeyCreateOptions** — optional scope params for `GenerateAPIKey`
 
+## Audit trail (Review R11-09)
+
+`GenerateAPIKey`, `RotateAPIKey`, `RevokeAPIKey`, `SetAPIKeyExpiration`, `ChangePassword`, `CompletePasswordReset`, `EnableMFA`, `DisableMFA` and `CreateUserWithTenant` each write one `audit_logs` row through `AuthService.record` → `internal/audit` (`key.created`, `key.rotated`, `key.revoked`, `key.expiry_set`, `auth.password_changed`, `auth.password_reset`, `mfa.enabled`, `mfa.disabled`, `account.created`). Writing here — not in the handlers — is what makes the dashboard, `/api/v1/user` and `/api/v1/manage` agree (the R4-22 lesson). The actor and client IP come from the request context (`audit.WithActor` / `audit.WithRequest`, set by `requireJWT`, the dashboard session middleware and `requestIDMiddleware`); an admin resetting another user's MFA is recorded as `performed_by = admin`, `user_id = subject`. Nil `sqlDB` = no row. The old in-memory `AuditLogger` (`apikey.go`) is no longer wired from the API — R0/WP-R5-4 removes it.
+
+`ErrUnknownAccessKey` (`sigv4.go`) is what `lookupCredential` returns for an id that exists nowhere; the S3 auth-failure metric keys `key_known` off it. `AccessKeyFromRequest` extracts the presented id for the bounded `key_hash` label only.
+
 ## Critical Methods
 
 - `LoadFromDB(ctx)` — populates in-memory maps from PostgreSQL on startup. Without this, login/S3 auth fails after restart.
@@ -122,7 +128,7 @@ Both backfill functions run on every startup (called from `server.go`), are idem
 `sts.go` — AWS STS-compatible short-lived S3 credentials with scope intersection:
 - `STSToken` — access key (ASIA prefix), secret, tenant, parent key ID, scoped permissions/buckets/IPs, expiry
 - `STSRequest` — requested permissions, bucket scope, IP restrictions, TTL (1–43200s, default 3600)
-- `GenerateSTSToken(ctx, db, tenantID, parentKeyID, parentScope, req)` — mints token with scope intersection (permissions = intersection with parent, buckets = intersection, IP = narrowed). Persists to `sts_tokens` table. Secret stored in plaintext (required for SigV4 verification).
+- `GenerateSTSToken(ctx, db, tenantID, parentKeyID, parentScope, req)` — mints token with scope intersection (permissions = intersection with parent, buckets = intersection, IP = narrowed). Persists to `sts_tokens` table. Secret stored in plaintext (required for SigV4 verification). **Review R11-03:** empty bucket/IP scopes are persisted as `{}` — nil slices became NULL and every unscoped mint failed the NOT NULL constraint; caller-fixable failures (no overlap, unknown permission) wrap `ErrSTSScope`, everything else is internal. `STSRequest.ParentKeyID` names one of the caller's own live keys as the parent (`AuthService.GetOwnedAPIKey`, typed `ErrKeyNotFound` / `ErrKeyRevoked`); the API's default parent is the account's full authority.
 - `StartSTSCleanup(ctx, db, logger)` — hourly goroutine deletes expired tokens
 
 S3 auth integration: `validateAccessKey` (handlers.go) falls back to `sts_tokens` table for ASIA-prefixed keys after checking `tenants` and `api_keys`. `verifyPresignedURL` (s3_presign.go) does the same for pre-signed URL verification. Expired tokens are rejected at auth time.

@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/audit"
 	"go.uber.org/zap"
 )
 
@@ -195,6 +196,8 @@ func (s *Service) Set(ctx context.Context, key, tenantID string, enabled bool, u
 		zap.String("tenant", tenantID),
 		zap.Bool("enabled", enabled),
 		zap.String("updated_by", updatedBy))
+	audit.Record(ctx, s.db, audit.Entry{TenantID: auditTenant(tenantID), Action: "flag.set", Resource: "flag:" + key,
+		Metadata: map[string]any{"enabled": enabled, "tenant": tenantID, "updated_by": updatedBy}})
 	return s.Refresh(ctx)
 }
 
@@ -215,7 +218,17 @@ func (s *Service) Unset(ctx context.Context, key, tenantID string) error {
 	s.logger.Info("feature flag unset",
 		zap.String("flag", key),
 		zap.String("tenant", tenantID))
+	audit.Record(ctx, s.db, audit.Entry{TenantID: auditTenant(tenantID), Action: "flag.unset", Resource: "flag:" + key,
+		Metadata: map[string]any{"tenant": tenantID}})
 	return s.Refresh(ctx)
+}
+
+// auditTenant maps the global row marker to "no tenant" for the audit row.
+func auditTenant(tenantID string) string {
+	if tenantID == GlobalTenant {
+		return ""
+	}
+	return tenantID
 }
 
 // Registered reports whether the key was declared in code.

@@ -1,51 +1,48 @@
 package api
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/audit"
 	"github.com/FairForge/vaultaire/internal/auth"
-	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 )
 
-// UserInfo combines all user-related data
+// UserInfo is GET /api/v1/user: the account as stored, not a mock
+// (Review R11-02 — profile, preferences, activity and the MFA endpoints
+// were hard-coded fixtures that answered 200 without touching anything).
 type UserInfo struct {
-	ID          string                 `json:"id"`
-	Email       string                 `json:"email"`
-	TenantID    string                 `json:"tenant_id"`
-	Company     string                 `json:"company,omitempty"`
-	Profile     map[string]interface{} `json:"profile"`
-	Preferences map[string]interface{} `json:"preferences"`
-	Quota       QuotaInfo              `json:"quota"`
-	MFAEnabled  bool                   `json:"mfa_enabled"`
-	CreatedAt   time.Time              `json:"created_at"`
+	ID                  string     `json:"id"`
+	Email               string     `json:"email"`
+	TenantID            string     `json:"tenant_id"`
+	Company             string     `json:"company,omitempty"`
+	Role                string     `json:"role,omitempty"`
+	Status              string     `json:"status,omitempty"`
+	DeletionScheduledAt *time.Time `json:"deletion_scheduled_at,omitempty"`
+	Quota               QuotaInfo  `json:"quota"`
+	MFAEnabled          bool       `json:"mfa_enabled"`
+	CreatedAt           time.Time  `json:"created_at"`
 }
 
-// registerUserAPIRoutes sets up all user management endpoints
+// registerUserAPIRoutes sets up the JWT-authenticated account endpoints.
+// Quota, usage and presign moved here from their dead-by-auth mounts
+// (Review R11-07 / WP-R10-7): the old chains never set the tenant the
+// handlers read, so every customer got 401.
 func (s *Server) registerUserAPIRoutes() {
 	s.router.Route("/api/v1/user", func(r chi.Router) {
-		r.Use(s.requireJWT) // Use JWT middleware for API routes
+		r.Use(s.requireJWT)
 
-		// User info
 		r.Get("/", s.handleGetUserInfo)
-		r.Put("/", s.handleUpdateUserInfo)
-		r.Delete("/", s.handleDeleteUser)
+		// Same contract and handler as DELETE /api/v1/manage/account: one
+		// account-deletion flow (30-day grace, cancel via either API).
+		r.Delete("/", s.handleMgmtDeleteAccount)
 
-		// Profile
-		r.Get("/profile", s.handleGetProfile)
-		r.Put("/profile", s.handleUpdateProfile)
-
-		// Preferences
-		r.Get("/preferences", s.handleGetPreferences)
-		r.Put("/preferences", s.handleUpdatePreferences)
-
-		// Activity
-		r.Get("/activity", s.handleGetActivity)
-
-		// Enhanced API Keys endpoints
 		r.Get("/apikeys", s.handleListUserAPIKeys)
 		r.Post("/apikeys", s.handleCreateUserAPIKey)
 		r.Post("/apikeys/{keyId}/rotate", s.handleRotateUserAPIKey)
@@ -53,64 +50,80 @@ func (s *Server) registerUserAPIRoutes() {
 		r.Post("/apikeys/{keyId}/expire", s.handleSetUserAPIKeyExpiration)
 		r.Get("/apikeys/audit", s.handleGetUserAPIKeyAuditLogs)
 
-		// MFA
-		r.Post("/mfa/enable", s.handleEnableMFA)
-		r.Post("/mfa/disable", s.handleDisableMFA)
-		r.Get("/mfa/backup-codes", s.handleGetBackupCodes)
-
-		// Quota (alias to quota endpoints)
 		r.Get("/quota", s.handleGetQuota)
+		r.Get("/quota/history", s.handleGetQuotaHistory)
 		r.Get("/usage", s.handleGetUsageStats)
+		r.Get("/usage/alerts", s.handleGetUsageAlerts)
+		r.Get("/presigned", s.handleGetPresignedURL)
 	})
 }
 
-// handleGetUserInfo returns comprehensive user information
+// handleGetUserInfo returns the account as persisted.
 func (s *Server) handleGetUserInfo(w http.ResponseWriter, r *http.Request) {
-	userID, ok := r.Context().Value(common.UserIDKey).(string)
-	if !ok {
-		userID = r.Context().Value(userIDKey).(string)
+	userID, _ := r.Context().Value(userIDKey).(string)
+	tenantID, _ := r.Context().Value(tenantIDKey).(string)
+	if userID == "" || tenantID == "" {
+		writeManagementError(w, ErrTypeAuthentication, "missing_credentials", "user or tenant not found in token", "")
+		return
+	}
+	email, _ := r.Context().Value(emailKey).(string)
+
+	info := UserInfo{ID: userID, Email: email, TenantID: tenantID}
+
+	if s.db != nil {
+		var (
+			company, role, status sql.NullString
+			createdAt             sql.NullTime
+			deletionAt            sql.NullTime
+		)
+		err := s.db.QueryRowContext(r.Context(),
+			`SELECT email, company, role, status, created_at, deletion_scheduled_at FROM users WHERE id = $1`, userID).
+			Scan(&info.Email, &company, &role, &status, &createdAt, &deletionAt)
+		if errors.Is(err, sql.ErrNoRows) {
+			writeManagementError(w, ErrTypeNotFound, "user_not_found", "user not found", "")
+			return
+		}
+		if err != nil {
+			s.logger.Error("user info lookup", zap.Error(err))
+			writeManagementError(w, ErrTypeAPI, "db_error", "failed to load user", "")
+			return
+		}
+		info.Company = company.String
+		info.Role = role.String
+		info.Status = status.String
+		if createdAt.Valid {
+			info.CreatedAt = createdAt.Time
+		}
+		if deletionAt.Valid {
+			t := deletionAt.Time
+			info.DeletionScheduledAt = &t
+		}
 	}
 
-	tenantID, _ := r.Context().Value(common.TenantIDKey).(string)
-	if tenantID == "" {
-		tenantID = r.Context().Value(tenantIDKey).(string)
+	if s.auth != nil {
+		info.MFAEnabled, _ = s.auth.IsMFAEnabled(r.Context(), userID)
 	}
-
-	emailStr := ""
-	if email, ok := r.Context().Value(emailKey).(string); ok {
-		emailStr = email
-	}
-
-	// Get quota info
-	used, limit, _ := s.quotaManager.GetUsage(r.Context(), tenantID)
-	tier, _ := s.quotaManager.GetTier(r.Context(), tenantID)
-
-	userInfo := UserInfo{
-		ID:       userID,
-		Email:    emailStr,
-		TenantID: tenantID,
-		Profile: map[string]interface{}{
-			"displayName": "User Name",
-			"avatar":      "",
-		},
-		Preferences: map[string]interface{}{
-			"theme":         "light",
-			"notifications": true,
-		},
-		Quota: QuotaInfo{
+	if s.quotaManager != nil {
+		used, limit, _ := s.quotaManager.GetUsage(r.Context(), tenantID)
+		tier, _ := s.quotaManager.GetTier(r.Context(), tenantID)
+		info.Quota = QuotaInfo{
 			TenantID:     tenantID,
 			StorageUsed:  used,
 			StorageLimit: limit,
-			Percentage:   float64(used) / float64(limit) * 100,
+			Percentage:   usagePercent(used, limit),
 			Tier:         tier,
 			CanUpgrade:   tier != "enterprise",
-		},
-		MFAEnabled: false,
-		CreatedAt:  time.Now().Add(-30 * 24 * time.Hour), // Mock data
+		}
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(userInfo)
+	writeJSON(w, http.StatusOK, info)
+}
+
+func usagePercent(used, limit int64) float64 {
+	if limit <= 0 {
+		return 0
+	}
+	return float64(used) / float64(limit) * 100
 }
 
 // handleListUserAPIKeys lists all API keys for a user
@@ -124,7 +137,7 @@ func (s *Server) handleListUserAPIKeys(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(keys); err != nil { // #nosec G117 — secret intentionally returned once at creation
+	if err := json.NewEncoder(w).Encode(keys); err != nil { // #nosec G117 — ListAPIKeys blanks the secret; it is returned once at creation
 		s.logger.Error("failed to encode API keys list", zap.Error(err))
 	}
 }
@@ -210,30 +223,16 @@ func (s *Server) handleRotateUserAPIKey(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
-// handleDeleteUserAPIKey deletes an API key
+// handleDeleteUserAPIKey revokes an API key. The audit row is written by
+// the auth service (one site for the dashboard, this API and the
+// management API — Review R11-09).
 func (s *Server) handleDeleteUserAPIKey(w http.ResponseWriter, r *http.Request) {
 	userID := r.Context().Value(userIDKey).(string)
 	keyID := chi.URLParam(r, "keyId")
 
-	err := s.auth.RevokeAPIKey(r.Context(), userID, keyID)
-	if err != nil {
+	if err := s.auth.RevokeAPIKey(r.Context(), userID, keyID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
-	}
-
-	// Log revocation if audit logger available
-	if s.auditLogger != nil {
-		event := auth.APIKeyAuditEvent{
-			UserID:    userID,
-			KeyID:     keyID,
-			Action:    auth.AuditKeyRevoked,
-			IP:        r.RemoteAddr,
-			UserAgent: r.UserAgent(),
-			Success:   true,
-		}
-		if err := s.auditLogger.LogKeyEvent(r.Context(), event); err != nil {
-			s.logger.Error("failed to log audit event", zap.Error(err))
-		}
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -256,28 +255,9 @@ func (s *Server) handleSetUserAPIKeyExpiration(w http.ResponseWriter, r *http.Re
 	}
 
 	expiresAt := time.Now().AddDate(0, 0, req.Days)
-	err := s.auth.SetAPIKeyExpiration(r.Context(), userID, keyID, expiresAt)
-	if err != nil {
+	if err := s.auth.SetAPIKeyExpiration(r.Context(), userID, keyID, expiresAt); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
-	}
-
-	// Log expiration setting if audit logger available
-	if s.auditLogger != nil {
-		event := auth.APIKeyAuditEvent{
-			UserID:    userID,
-			KeyID:     keyID,
-			Action:    auth.AuditKeyExpireSet,
-			IP:        r.RemoteAddr,
-			UserAgent: r.UserAgent(),
-			Success:   true,
-			Metadata: map[string]interface{}{
-				"expires_at": expiresAt,
-			},
-		}
-		if err := s.auditLogger.LogKeyEvent(r.Context(), event); err != nil {
-			s.logger.Error("failed to log audit event", zap.Error(err))
-		}
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -289,170 +269,33 @@ func (s *Server) handleSetUserAPIKeyExpiration(w http.ResponseWriter, r *http.Re
 	}
 }
 
-// handleGetUserAPIKeyAuditLogs retrieves audit logs for API keys
+// handleGetUserAPIKeyAuditLogs lists the caller's own key events from the
+// persisted audit trail (it used to read a per-process in-memory list).
 func (s *Server) handleGetUserAPIKeyAuditLogs(w http.ResponseWriter, r *http.Request) {
 	userID := r.Context().Value(userIDKey).(string)
 
-	if s.auditLogger != nil {
-		filters := auth.AuditFilters{
-			UserID: userID,
-			Limit:  100,
+	f := audit.Filter{UserID: userID, EventType: "key", Cursor: r.URL.Query().Get("cursor"), Limit: 100}
+	if a := r.URL.Query().Get("action"); a != "" {
+		f.Action = a
+	}
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil {
+			f.Limit = n
 		}
-
-		if keyID := r.URL.Query().Get("key_id"); keyID != "" {
-			filters.KeyID = keyID
-		}
-		if action := r.URL.Query().Get("action"); action != "" {
-			filters.Action = action
-		}
-
-		logs, err := s.auditLogger.GetAuditLogs(r.Context(), filters)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+	page, err := audit.List(r.Context(), s.db, f)
+	if err != nil {
+		if errors.Is(err, audit.ErrBadCursor) {
+			writeManagementError(w, ErrTypeInvalidRequest, "invalid_cursor", "cursor is not one this endpoint issued", "cursor")
 			return
 		}
-
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(logs); err != nil {
-			s.logger.Error("failed to encode audit logs", zap.Error(err))
-		}
+		s.logger.Error("user key audit list", zap.Error(err))
+		writeManagementError(w, ErrTypeAPI, "db_error", "failed to list audit rows", "")
 		return
 	}
-
-	// Return empty logs if no audit logger
-	logs := []map[string]interface{}{}
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(logs); err != nil {
-		s.logger.Error("failed to encode empty audit logs", zap.Error(err))
+	items := make([]interface{}, len(page.Rows))
+	for i, row := range page.Rows {
+		items[i] = row
 	}
-}
-
-// handleUpdateUserInfo updates user information
-func (s *Server) handleUpdateUserInfo(w http.ResponseWriter, r *http.Request) {
-	var update struct {
-		Email   string `json:"email,omitempty"`
-		Company string `json:"company,omitempty"`
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
-		return
-	}
-
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"message": "user updated successfully",
-	})
-}
-
-// handleDeleteUser deletes a user account
-func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusNotImplemented)
-}
-
-// handleGetProfile returns user profile
-func (s *Server) handleGetProfile(w http.ResponseWriter, r *http.Request) {
-	profile := map[string]interface{}{
-		"displayName": "John Doe",
-		"avatar":      "",
-		"bio":         "Storage enthusiast",
-		"location":    "El Paso, TX",
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(profile)
-}
-
-// handleUpdateProfile updates user profile
-func (s *Server) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
-	var profile map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&profile); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
-		return
-	}
-
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(profile)
-}
-
-// handleGetPreferences returns user preferences
-func (s *Server) handleGetPreferences(w http.ResponseWriter, r *http.Request) {
-	prefs := map[string]interface{}{
-		"theme":         "light",
-		"notifications": true,
-		"email_digest":  "weekly",
-		"language":      "en",
-		"timezone":      "America/Chicago",
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(prefs)
-}
-
-// handleUpdatePreferences updates user preferences
-func (s *Server) handleUpdatePreferences(w http.ResponseWriter, r *http.Request) {
-	var prefs map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&prefs); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
-		return
-	}
-
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(prefs)
-}
-
-// handleGetActivity returns user activity history
-func (s *Server) handleGetActivity(w http.ResponseWriter, r *http.Request) {
-	activities := []map[string]interface{}{
-		{
-			"action":    "login",
-			"timestamp": time.Now().Add(-1 * time.Hour),
-			"ip":        "192.168.1.1",
-		},
-		{
-			"action":    "upload",
-			"resource":  "file.txt",
-			"timestamp": time.Now().Add(-2 * time.Hour),
-		},
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(activities)
-}
-
-// handleEnableMFA enables MFA for user
-func (s *Server) handleEnableMFA(w http.ResponseWriter, r *http.Request) {
-	response := map[string]interface{}{
-		"secret":  "JBSWY3DPEHPK3PXP",
-		"qr_code": "data:image/png;base64,...",
-		"backup_codes": []string{
-			"ABC-123-456",
-			"DEF-789-012",
-		},
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(response)
-}
-
-// handleDisableMFA disables MFA for user
-func (s *Server) handleDisableMFA(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"message": "MFA disabled successfully",
-	})
-}
-
-// handleGetBackupCodes returns MFA backup codes
-func (s *Server) handleGetBackupCodes(w http.ResponseWriter, r *http.Request) {
-	codes := []string{
-		"ABC-123-456",
-		"DEF-789-012",
-		"GHI-345-678",
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"backup_codes": codes,
-	})
+	writeListResponse(w, items, page.HasMore, page.NextCursor, len(items))
 }

@@ -115,6 +115,19 @@ a known 403 and are skipped), and `permafrost` (authenticated Graph call on
 one rotating fleet account; `PermafrostProbeFailing` is a 15-minute warning,
 and `BackendProbeFailing` excludes it).
 
+`vaultaire-auth.yml` — credential-attack signal (Review R11-10, pre-launch
+checklist item 3): `AuthFailuresAgainstRealKey` (critical, >1/s for 5 min
+against one `key_hash`), `AuthFailuresKnownKeysElevated` (warning) and
+`AuthFailuresUnknownKeyStorm` (warning, scanner noise far above the
+background). Keys off `vaultaire_auth_failures_total{reason,key_known}` and
+`vaultaire_auth_failures_by_key_total{key_hash}` (`internal/api/auth_metrics.go`):
+`key_known="true"` means the access key id EXISTS — a stuffing run against a
+real customer key moves that series, scanners stay on `"false"`; `key_hash` is
+sha256(id)[:8], emitted for known keys only, so cardinality is bounded by the
+number of real keys and the id never appears in a label. To map a hash back:
+`SELECT access_key FROM tenants` / `key_id FROM api_keys`, hash each. Install
+like the other rule files (not yet on SLC — checklist item 10).
+
 ## Known limits
 
 - **Push only.** ntfy.sh rejects anonymous email publishing, and the box has

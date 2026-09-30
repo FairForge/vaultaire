@@ -7,7 +7,9 @@ import (
 	"encoding/base32"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/FairForge/vaultaire/internal/audit"
 	"strings"
 	"time"
 
@@ -17,6 +19,12 @@ import (
 )
 
 // APIKey represents an API key for S3 access
+// ErrKeyNotFound / ErrKeyRevoked are the typed key-lifecycle errors.
+var (
+	ErrKeyNotFound = errors.New("API key not found")
+	ErrKeyRevoked  = errors.New("API key already revoked")
+)
+
 type APIKey struct {
 	ID          string            `json:"id" db:"id"`
 	UserID      string            `json:"user_id" db:"user_id"`
@@ -85,6 +93,9 @@ func (a *AuthService) GenerateAPIKey(ctx context.Context, userID, name string, o
 	}
 	a.indexAPIKey(apiKey)
 
+	a.record(ctx, audit.Entry{UserID: userID, TenantID: apiKey.TenantID, Action: "key.created", Resource: "key:" + apiKey.ID,
+		Metadata: map[string]any{"name": apiKey.Name, "permissions": apiKey.Permissions, "bucket_scope": apiKey.BucketScope,
+			"ip_allowlist": apiKey.IPAllowlist, "expires_at": apiKey.ExpiresAt}})
 	return apiKey, nil
 }
 
@@ -141,6 +152,21 @@ func (a *AuthService) findOwnedKey(userID, keyID string) *APIKey {
 	return nil
 }
 
+// GetOwnedAPIKey returns the caller's key with this id, or ErrKeyNotFound /
+// ErrKeyRevoked. Used by STS to bound a token to a named parent key.
+func (a *AuthService) GetOwnedAPIKey(_ context.Context, userID, keyID string) (*APIKey, error) {
+	key := a.findOwnedKey(userID, keyID)
+	if key == nil {
+		return nil, ErrKeyNotFound
+	}
+	if key.RevokedAt != nil {
+		return nil, ErrKeyRevoked
+	}
+	cp := *key
+	cp.Secret = ""
+	return &cp, nil
+}
+
 // persistRevocation stamps revoked_at on the row. The S3 auth path reads
 // api_keys per request and filters on revoked_at IS NULL, so this — not the
 // in-memory field — is what actually stops a key (R5-01).
@@ -195,10 +221,10 @@ func (a *AuthService) ValidateAPIKey(ctx context.Context, key, secret string) (*
 func (a *AuthService) RotateAPIKey(ctx context.Context, userID, keyID string) (*APIKey, error) {
 	oldKey := a.findOwnedKey(userID, keyID)
 	if oldKey == nil {
-		return nil, fmt.Errorf("API key not found")
+		return nil, ErrKeyNotFound
 	}
 	if oldKey.RevokedAt != nil {
-		return nil, fmt.Errorf("API key already revoked")
+		return nil, ErrKeyRevoked
 	}
 
 	accessKey, err := generateAccessKey()
@@ -237,6 +263,8 @@ func (a *AuthService) RotateAPIKey(ctx context.Context, userID, keyID string) (*
 	oldKey.RevokedAt = &now
 	a.indexAPIKey(newKey)
 
+	a.record(ctx, audit.Entry{UserID: userID, TenantID: newKey.TenantID, Action: "key.rotated", Resource: "key:" + oldKey.ID,
+		Metadata: map[string]any{"new_key_id": newKey.ID, "name": oldKey.Name}})
 	return newKey, nil
 }
 
@@ -245,16 +273,18 @@ func (a *AuthService) RotateAPIKey(ctx context.Context, userID, keyID string) (*
 func (a *AuthService) RevokeAPIKey(ctx context.Context, userID, keyID string) error {
 	key := a.findOwnedKey(userID, keyID)
 	if key == nil {
-		return fmt.Errorf("API key not found")
+		return ErrKeyNotFound
 	}
 	if key.RevokedAt != nil {
-		return fmt.Errorf("API key already revoked")
+		return ErrKeyRevoked
 	}
 	if err := a.persistRevocation(ctx, userID, keyID); err != nil {
 		return err
 	}
 	now := time.Now()
 	key.RevokedAt = &now
+	a.record(ctx, audit.Entry{UserID: userID, TenantID: key.TenantID, Action: "key.revoked", Resource: "key:" + keyID,
+		Metadata: map[string]any{"name": key.Name}})
 	return nil
 }
 
@@ -263,7 +293,7 @@ func (a *AuthService) RevokeAPIKey(ctx context.Context, userID, keyID string) er
 func (a *AuthService) SetAPIKeyExpiration(ctx context.Context, userID, keyID string, expiresAt time.Time) error {
 	key := a.findOwnedKey(userID, keyID)
 	if key == nil {
-		return fmt.Errorf("API key not found")
+		return ErrKeyNotFound
 	}
 	if a.sqlDB != nil {
 		if _, err := a.sqlDB.ExecContext(ctx,
@@ -273,6 +303,8 @@ func (a *AuthService) SetAPIKeyExpiration(ctx context.Context, userID, keyID str
 		}
 	}
 	key.ExpiresAt = &expiresAt
+	a.record(ctx, audit.Entry{UserID: userID, TenantID: key.TenantID, Action: "key.expiry_set", Resource: "key:" + keyID,
+		Metadata: map[string]any{"expires_at": expiresAt}})
 	return nil
 }
 

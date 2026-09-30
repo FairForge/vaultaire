@@ -255,8 +255,8 @@ func (a *Auth) lookupCredential(accessKey string) (*credential, error) {
 		}
 	}
 
-	a.logger.Debug("invalid access key", zap.String("access_key", accessKey))
-	return nil, fmt.Errorf("invalid access key")
+	a.logger.Debug("invalid access key", zap.String("access_key", accessKey[:min(6, len(accessKey))]+"..."))
+	return nil, ErrUnknownAccessKey
 }
 
 // validateTimestamp checks if the request timestamp is within acceptable range

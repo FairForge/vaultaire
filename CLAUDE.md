@@ -91,6 +91,7 @@ Other critical tables (69 migrations through `069_head_cache_byte_order_index.sq
 - `oauth_accounts` — OAuth provider links (Google, GitHub)
 - `smart_demotions` — Smart-tier demotion ledger (5.15.8): one row per hot→cold move, hot copy reclaimed after a grace period under an etag guard; read-time promotion state (063)
 - `feature_flags` — runtime flags (1.13): global kill-switches + per-tenant overrides, `'*'` = global row; served via `internal/flags` (~15s cache, admin API + dashboard `/admin/flags`)
+- `audit_logs` — the operator audit trail (008), written by `internal/audit` since Review R11 (it had no writer at all before — 0 rows in 30 days of prod): every key create/rotate/revoke/expiry, password change/reset, MFA enable/disable, registration, flag set/unset, account deletion schedule/cancel, data export, admin tenant suspend/enable/quota/tier/bandwidth, primary swap, waitlist export, admin triggers, STS mint and webhook CRUD, with actor (`performed_by`), subject, client IP (from `internal/clientip`) and user agent. Read with `GET /api/v1/admin/audit` (admin JWT); the dashboard page still reads `events` (WP-R11-10)
 - `tenant_floor_quotas` — whole-TB quota per floor (066, dashboard plan Phase 1): one row per (tenant, `standard`|`vault`) for tenants who bought a house; PUT is enforced per floor AND on the `tenant_quotas` total (= sum of floors); `object_head_cache.floor` records where each object is billed (GLACIER/DEEP_ARCHIVE = vault). Tenants without rows keep the single total quota. Written by the Stripe webhook (`billing.WebhookHandler.applyHouse`) and `usage.QuotaManager.SetHouse/ClearHouse`
 
 Migrations are in `internal/database/migrations/`.
@@ -196,4 +197,5 @@ GitHub Actions Deploy (`.github/workflows/deploy.yml`):
 - Daily PostgreSQL backups at 3am UTC (7-day retention) in `/opt/vaultaire/backups/`
 - Deploy: push to `main` triggers `.github/workflows/deploy.yml` (build → migrate → swap → health check)
 - Health: `curl https://stored.ge/health`
+- Auth-failure signal: `/metrics` exports `vaultaire_auth_failures_total{reason,key_known}` and `vaultaire_auth_failures_by_key_total{key_hash}` (Review R11-10); rules in `deploy/monitoring/vaultaire-auth.yml` page on a burst against a real key
 - Cross-compile: `GOOS=linux GOARCH=amd64 go build -o vaultaire-bin ./cmd/vaultaire`

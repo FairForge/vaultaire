@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -30,6 +31,12 @@ type STSRequest struct {
 	BucketScope []string `json:"bucket_scope"`
 	IPRestrict  []string `json:"ip_restrict"`
 	TTL         int      `json:"ttl"`
+	// ParentKeyID optionally names one of the caller's own API keys whose
+	// scope bounds the token. Empty = the account's own (full) authority.
+	// Review R11-03: the parent used to be a random key of the user, and a
+	// fresh account's primary key has no permission list, so STS never
+	// minted for it.
+	ParentKeyID string `json:"parent_key_id,omitempty"`
 }
 
 const (
@@ -38,19 +45,32 @@ const (
 	stsMinTTL     = 1
 )
 
+// ErrSTSScope marks a request the caller can fix (scope does not overlap,
+// unknown permission); anything else from GenerateSTSToken is internal.
+var ErrSTSScope = errors.New("sts scope error")
+
 func GenerateSTSToken(ctx context.Context, db *sql.DB, tenantID, parentKeyID string, parentScope *KeyScope, req STSRequest) (*STSToken, error) {
 	perms := intersectPermissions(parentScope.Permissions, req.Permissions)
 	if len(perms) == 0 {
-		return nil, fmt.Errorf("no permissions overlap between parent key and request")
+		return nil, fmt.Errorf("%w: no permissions overlap between parent key and request", ErrSTSScope)
 	}
 
 	if err := ValidatePermissions(perms); err != nil {
-		return nil, fmt.Errorf("validate permissions: %w", err)
+		return nil, fmt.Errorf("%w: %v", ErrSTSScope, err)
 	}
 
 	buckets := intersectBucketScope(parentScope.BucketScope, req.BucketScope)
+	if buckets == nil {
+		// sts_tokens.bucket_scope / ip_restrict are NOT NULL: a nil slice
+		// became NULL and the INSERT failed for every unscoped request
+		// (Review R11-03, the R5-05 nil-array class on another entry point).
+		buckets = []string{}
+	}
 
 	ipRestrict := narrowIPRestrict(parentScope.IPAllowlist, req.IPRestrict)
+	if ipRestrict == nil {
+		ipRestrict = []string{}
+	}
 
 	ttl := req.TTL
 	if ttl <= 0 {

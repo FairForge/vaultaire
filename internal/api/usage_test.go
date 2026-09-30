@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/usage"
 	_ "github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
@@ -60,7 +59,7 @@ func TestUsageAPI_GetUsageStats(t *testing.T) {
 
 	// Get usage stats - Add tenantID to context
 	req := httptest.NewRequest("GET", "/api/v1/usage/stats?tenant_id="+tenantID, nil)
-	ctx := context.WithValue(req.Context(), common.TenantIDKey, tenantID)
+	ctx := context.WithValue(req.Context(), tenantIDKey, tenantID)
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 
@@ -90,7 +89,7 @@ func TestUsageAPI_GetUsageAlerts(t *testing.T) {
 
 	// Get usage alerts - Add tenantID to context
 	req := httptest.NewRequest("GET", "/api/v1/usage/alerts?tenant_id="+tenantID, nil)
-	ctx := context.WithValue(req.Context(), common.TenantIDKey, tenantID)
+	ctx := context.WithValue(req.Context(), tenantIDKey, tenantID)
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 

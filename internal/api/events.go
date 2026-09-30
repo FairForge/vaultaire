@@ -133,7 +133,11 @@ func dispatchWebhooks(db *sql.DB, logger *zap.Logger, eventID, eventType, tenant
 		return
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	// The guarded client from s3_notifications.go: no redirects, no proxy,
+	// resolved addresses re-checked against the private ranges at dial
+	// time (Review R11-04 — the default client followed redirects and
+	// dialled anything the stored URL named).
+	client := webhookClient(5 * time.Second)
 	for _, ep := range endpoints {
 		if !matchesWebhookFilter(ep.filter, eventType) {
 			continue

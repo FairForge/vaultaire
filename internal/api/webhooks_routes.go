@@ -4,10 +4,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
-	"net/url"
 	"strconv"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/audit"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
@@ -15,8 +15,7 @@ import (
 )
 
 func (s *Server) registerWebhookRoutes() {
-	rl := NewManagementRateLimiter()
-	im := newIdempotencyMiddleware(s.db, s.logger)
+	rl, im := s.jsonAPIMiddleware()
 
 	s.router.Route("/api/v1/webhooks", func(r chi.Router) {
 		r.Use(s.requireJWT)
@@ -62,8 +61,12 @@ func (s *Server) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 		writeManagementError(w, ErrTypeInvalidRequest, "missing_url", "url is required", "url")
 		return
 	}
-	if _, err := url.ParseRequestURI(req.URL); err != nil {
-		writeManagementError(w, ErrTypeInvalidRequest, "invalid_url", "url must be a valid URL", "url")
+	// Same target policy as S3 bucket notifications (R4-02 / Review R11-04):
+	// the server POSTs to this URL, so loopback, private and link-local
+	// targets, non-http schemes and credentials are refused here and the
+	// resolved address is re-checked at dial time.
+	if err := validateWebhookTarget(req.URL); err != nil {
+		writeManagementError(w, ErrTypeInvalidRequest, "invalid_url", "url is not an acceptable webhook target: "+err.Error(), "url")
 		return
 	}
 	if len(req.Events) == 0 {
@@ -98,6 +101,11 @@ func (s *Server) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to create webhook", "")
 		return
 	}
+
+	audit.Record(r.Context(), s.db, audit.Entry{
+		TenantID: tenantID, Action: "webhook.created", Resource: "webhook:" + id,
+		Metadata: map[string]any{"url": req.URL, "events": req.Events},
+	})
 
 	resp := map[string]interface{}{
 		"object":     "webhook",
@@ -220,8 +228,8 @@ func (s *Server) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.URL != nil {
-		if _, err := url.ParseRequestURI(*req.URL); err != nil {
-			writeManagementError(w, ErrTypeInvalidRequest, "invalid_url", "url must be a valid URL", "url")
+		if err := validateWebhookTarget(*req.URL); err != nil {
+			writeManagementError(w, ErrTypeInvalidRequest, "invalid_url", "url is not an acceptable webhook target: "+err.Error(), "url")
 			return
 		}
 	}
@@ -275,6 +283,11 @@ func (s *Server) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	audit.Record(r.Context(), s.db, audit.Entry{
+		TenantID: tenantID, Action: "webhook.updated", Resource: "webhook:" + webhookID,
+		Metadata: map[string]any{"url": currentURL, "events": currentFilter, "enabled": currentEnabled},
+	})
+
 	resp := map[string]interface{}{
 		"object":     "webhook",
 		"id":         webhookID,
@@ -312,6 +325,10 @@ func (s *Server) handleDeleteWebhook(w http.ResponseWriter, r *http.Request) {
 		writeManagementError(w, ErrTypeNotFound, "webhook_not_found", "webhook not found", "")
 		return
 	}
+
+	audit.Record(r.Context(), s.db, audit.Entry{
+		TenantID: tenantID, Action: "webhook.deleted", Resource: "webhook:" + webhookID,
+	})
 
 	resp := map[string]interface{}{
 		"object":     "webhook",

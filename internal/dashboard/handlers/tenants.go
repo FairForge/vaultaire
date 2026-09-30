@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"github.com/FairForge/vaultaire/internal/audit"
 	"html/template"
 	"net/http"
 	"strconv"
@@ -336,6 +337,7 @@ func HandleSuspendTenant(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 			return
 		}
 
+		audit.Record(r.Context(), db, audit.Entry{UserID: sd.UserID, TenantID: tenantID, EventType: "admin", Action: "admin.tenant_suspended", Resource: "tenant:" + tenantID, Severity: "warning"})
 		logger.Info("tenant suspended", zap.String("tenant_id", tenantID), zap.String("by", sd.Email))
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -376,6 +378,7 @@ func HandleEnableTenant(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 			return
 		}
 
+		audit.Record(r.Context(), db, audit.Entry{UserID: sd.UserID, TenantID: tenantID, EventType: "admin", Action: "admin.tenant_enabled", Resource: "tenant:" + tenantID})
 		logger.Info("tenant enabled", zap.String("tenant_id", tenantID), zap.String("by", sd.Email))
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -425,6 +428,8 @@ func HandleUpdateQuota(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 			return
 		}
 
+		audit.Record(r.Context(), db, audit.Entry{UserID: sd.UserID, TenantID: tenantID, EventType: "admin", Action: "admin.tenant_quota_set", Resource: "tenant:" + tenantID,
+			Metadata: map[string]any{"storage_limit_bytes": limitBytes}})
 		logger.Info("quota updated",
 			zap.String("tenant_id", tenantID),
 			zap.Int64("limit_gb", limitGB),
@@ -478,6 +483,8 @@ func HandleUpdateBandwidthLimit(db *sql.DB, logger *zap.Logger) http.HandlerFunc
 			return
 		}
 
+		audit.Record(r.Context(), db, audit.Entry{UserID: sd.UserID, TenantID: tenantID, EventType: "admin", Action: "admin.tenant_bandwidth_set", Resource: "tenant:" + tenantID,
+			Metadata: map[string]any{"bandwidth_limit_bytes": limitBytes}})
 		logger.Info("bandwidth limit updated",
 			zap.String("tenant_id", tenantID),
 			zap.Int64("limit_gb", limitGB),
@@ -550,6 +557,8 @@ func HandleChangeTier(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 			return
 		}
 
+		audit.Record(r.Context(), db, audit.Entry{UserID: sd.UserID, TenantID: tenantID, EventType: "admin", Action: "admin.tenant_tier_set", Resource: "tenant:" + tenantID,
+			Metadata: map[string]any{"tier": newTier, "storage_limit_bytes": limitBytes}})
 		logger.Info("tier changed",
 			zap.String("tenant_id", tenantID),
 			zap.String("tier", newTier),

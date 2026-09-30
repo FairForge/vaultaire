@@ -37,6 +37,8 @@ func (s *Server) initMetrics() {
 			Help: "HTTP responses with a 5xx status.",
 		}, func() float64 { return float64(atomic.LoadInt64(&s.errorCount)) }))
 
+		reg.MustRegister(authFailures, authFailuresByKey)
+
 		var src engineMetricsSource
 		if s.engine != nil {
 			src = s.engine

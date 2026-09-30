@@ -3,8 +3,6 @@ package api
 import (
 	"encoding/json"
 	"net/http"
-
-	"github.com/FairForge/vaultaire/internal/common"
 )
 
 // QuotaInfo represents user quota information
@@ -19,7 +17,7 @@ type QuotaInfo struct {
 
 // handleGetQuota returns the current quota for a user
 func (s *Server) handleGetQuota(w http.ResponseWriter, r *http.Request) {
-	tenantID, ok := r.Context().Value(common.TenantIDKey).(string)
+	tenantID, ok := r.Context().Value(tenantIDKey).(string)
 	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -48,7 +46,7 @@ func (s *Server) handleGetQuota(w http.ResponseWriter, r *http.Request) {
 
 // handleGetQuotaHistory returns usage history
 func (s *Server) handleGetQuotaHistory(w http.ResponseWriter, r *http.Request) {
-	tenantID, ok := r.Context().Value(common.TenantIDKey).(string)
+	tenantID, ok := r.Context().Value(tenantIDKey).(string)
 	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return

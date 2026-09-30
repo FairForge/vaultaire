@@ -23,6 +23,26 @@ var ErrSignatureMismatch = errors.New("request signature does not match")
 // clock skew. Maps to the S3 error code RequestTimeTooSkewed (403).
 var ErrRequestTimeSkewed = errors.New("request time too skewed")
 
+// ErrUnknownAccessKey is returned when no tenant, API key or STS token has
+// the presented access key id. Typed so the auth-failure metric can tell a
+// scanner (unknown key) from an attack on a real one (Review R11-10).
+var ErrUnknownAccessKey = errors.New("invalid access key")
+
+// AccessKeyFromRequest returns the access key id a request presents (SigV4
+// header Credential or the presigned X-Amz-Credential), or "". Used only to
+// bucket auth-failure metrics; never logged in clear.
+func AccessKeyFromRequest(r *http.Request) string {
+	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, algorithm) {
+		if p, err := parseSigV4AuthHeader(h); err == nil {
+			return p.AccessKey
+		}
+	}
+	if c := r.URL.Query().Get("X-Amz-Credential"); c != "" {
+		return strings.SplitN(c, "/", 2)[0]
+	}
+	return ""
+}
+
 const unsignedPayload = "UNSIGNED-PAYLOAD"
 
 // sigV4Enforced reports whether full signature verification is required.
