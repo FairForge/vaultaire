@@ -223,7 +223,7 @@ func TestOpenAPISpec_JSONAPICoverage(t *testing.T) {
 		public := map[string]bool{
 			"POST /auth/register": true, "POST /auth/login": true,
 			"POST /auth/password-reset": true, "POST /auth/password-reset/complete": true,
-			"POST /api/waitlist": true,
+			"POST /api/waitlist": true, "POST /api/ping": true,
 		}
 		for _, o := range ops {
 			key := o.Method + " " + o.Path

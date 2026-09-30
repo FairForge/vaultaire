@@ -59,6 +59,24 @@ func TestAdmin_WriteScreenshotFixtures(t *testing.T) {
 	HandleAdminWaitlist(page("waitlist.html"), db, zap.NewNop()).ServeHTTP(w, httptest.NewRequest("GET", "/admin/waitlist", nil).WithContext(adminCtx(t)))
 	write("waitlist", w)
 
+	// traffic: a few days of cookieless aggregates, keyed by a fixture referrer
+	ref := "fixture-" + stamp + ".example"
+	for _, r := range []struct {
+		ago            int
+		kind, name, cc string
+		n              int
+	}{{0, "view", "/", "DE", 41}, {0, "view", "/docs/rclone", "US", 9}, {0, "event", "builder.edit", "DE", 12}, {1, "view", "/", "GB", 33}, {2, "view", "/", "FR", 27}} {
+		_, err := db.Exec(`INSERT INTO site_stats_daily (day, kind, name, referrer, utm_source, utm_medium, utm_campaign, country, device, n)
+			VALUES (CURRENT_DATE - $1::int, $2, $3, $4, 'let', '', 'launch', $5, 'desktop', $6)
+			ON CONFLICT (day, kind, name, referrer, utm_source, utm_medium, utm_campaign, country, device) DO UPDATE SET n = EXCLUDED.n`,
+			r.ago, r.kind, r.name, ref, r.cc, r.n)
+		require.NoError(t, err)
+	}
+	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM site_stats_daily WHERE referrer = $1`, ref) })
+	w = httptest.NewRecorder()
+	HandleAdminStats(page("stats.html"), db, zap.NewNop()).ServeHTTP(w, httptest.NewRequest("GET", "/admin/stats", nil).WithContext(adminCtx(t)))
+	write("stats", w)
+
 	id := houseTenant(t, db, 0, 0)
 	require.NoError(t, usage.NewQuotaManager(db).SetHouse(context.Background(), id, usage.HouseFromTB(6, 1, 0)))
 	_, err := db.Exec(`UPDATE tenants SET plan = 'house', subscription_status = 'active', house_period = 'annual', name = 'Casa' WHERE id = $1`, id)

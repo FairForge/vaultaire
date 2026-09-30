@@ -320,8 +320,9 @@ def og_page():
     a = b.index('<svg class="room-svg"'); z = b.index('</svg>', a) + 6
     room = prices(b[a:z].replace(' id="room"', ''))  # price tokens inside the floor labels
     pieces = ''
-    for k, x, y, tag in (('dresser', 36, 80, '5 TB'), ('box', 17, 88, '1 TB'), ('lamp', 39, 70, ''), ('plant', 74, 80, ''),
-                         ('mascot-wave', 94, 77, ''), ('box', 30, 39, 'PHOTOS 1 TB'), ('dresser', 66, 31, 'VIDEOS 5 TB')):
+    # the same example house as the builder's starter (builder.js STARTER)
+    for k, x, y, tag in (('box', 16, 88, 'PHOTOS 1 TB'), ('lamp', 40, 90, ''), ('box', 58, 88, 'PROJECTS 1 TB'),
+                         ('mascot-wave', 96, 77, ''), ('plant', 113, 80, ''), ('dresser', 30, 31, 'BACKUPS 5 TB')):
         w, h = sprites.SPRITES[k].w, sprites.SPRITES[k].h
         pieces += f'<g transform="translate({x} {y})"><use href="#s-{k}" width="{w}" height="{h}"/></g>'
         if tag:

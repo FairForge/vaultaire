@@ -32,6 +32,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/email"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/flags"
+	"github.com/FairForge/vaultaire/internal/sitestats"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -66,6 +67,7 @@ type Server struct {
 	webhookHandler     *billing.WebhookHandler
 	meteredReporter    *billing.MeteredReporter
 	requestCount       int64
+	siteStats          *sitestats.Collector // cookieless public-site counts (site_stats.go)
 	testMode           bool
 	errorCount         int64
 	metricsOnce        sync.Once
@@ -268,6 +270,10 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	s.cdnAnalytics.SetLogger(logger)
 	s.cdnAnalytics.StartFlusher(context.Background(), 5*time.Second)
 	s.cdnAnalytics.StartRollup(context.Background())
+
+	// Public-site statistics — cookieless daily aggregates (site_stats.go).
+	s.siteStats = sitestats.New(logger)
+	go s.siteStats.Run(context.Background(), s.db, 30*time.Second)
 
 	// S3 access log tracker — buffers access events, delivers log objects to target buckets.
 	// Both deliver through the customer write path (Review R13-02 / R6-21):
@@ -490,6 +496,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	s.router.Use(s.requestLimitsMiddleware)
 	s.router.Use(s.versionMiddleware)
 	s.router.Use(s.loggingMiddleware)
+	s.router.Use(s.siteStatsMiddleware)
 
 	s.setupRoutes()
 
@@ -773,6 +780,8 @@ func (s *Server) setupRoutes() {
 
 	// Public pre-launch waitlist signup from the landing page (no auth).
 	s.router.Post("/api/waitlist", s.handleWaitlistSignup)
+	// Public cookieless statistics beacon from the landing page (no auth).
+	s.router.Post("/api/ping", s.handlePing)
 
 	// Public marketing landing page at "/" for browsers. Authenticated S3
 	// ListBuckets (GET / with SigV4 auth) is delegated to the catch-all inside
@@ -1312,6 +1321,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	if s.accessLogTracker != nil {
 		s.accessLogTracker.Flush()
+	}
+	if s.siteStats != nil {
+		if ferr := s.siteStats.Flush(ctx, s.db); ferr != nil {
+			s.logger.Warn("site stats flush on shutdown", zap.Error(ferr))
+		}
 	}
 
 	return err
