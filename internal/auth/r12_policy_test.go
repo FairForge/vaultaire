@@ -31,7 +31,22 @@ func TestConsumeTOTPCode_RejectsReplay(t *testing.T) {
 
 	// After the window the digits may legitimately recur.
 	svc.mfaMu.Lock()
-	svc.totpUsed["u1"] = totpUse{code: "654321", at: time.Now().Add(-totpReplayWindow - time.Second)}
+	svc.totpUsed["u1"] = map[string]time.Time{"654321": time.Now().Add(-totpReplayWindow - time.Second)}
 	svc.mfaMu.Unlock()
 	assert.True(t, svc.ConsumeTOTPCode("u1", "654321"))
+}
+
+// Post-merge review of R12 (R12-38): totp.Validate accepts the previous and
+// next 30 s step too (skew 1), so two or three codes are valid at any moment.
+// A guard that remembers only the LAST accepted code let an earlier one be
+// replayed as soon as another code had been used — RFC 6238 §5.2 says a code
+// is accepted once, full stop. Every accepted code is now remembered for the
+// window.
+func TestConsumeTOTPCode_RejectsReplayOfAnyCodeInsideTheWindow(t *testing.T) {
+	svc := NewAuthService(nil, nil)
+	require.True(t, svc.ConsumeTOTPCode("u1", "111111"), "code A fresh")
+	require.True(t, svc.ConsumeTOTPCode("u1", "222222"), "code B (adjacent step) fresh")
+	assert.False(t, svc.ConsumeTOTPCode("u1", "111111"), "A again is a replay even though B was accepted after it")
+	assert.False(t, svc.ConsumeTOTPCode("u1", "222222"), "B again is a replay")
+	assert.True(t, svc.ConsumeTOTPCode("u1", "333333"), "a third code is fresh")
 }

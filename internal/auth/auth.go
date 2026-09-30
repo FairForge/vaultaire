@@ -64,8 +64,8 @@ type AuthService struct {
 	keyIndex       map[string]*Tenant        // accessKey -> tenant (for S3 auth)
 	profiles       map[string]*ProfileUpdate // user profiles
 	preferences    map[string]*UserPreferences
-	mfaSettings    map[string]*MFASettings // userID -> MFA config
-	totpUsed       map[string]totpUse      // userID -> last accepted TOTP code (replay guard, R5-15c)
+	mfaSettings    map[string]*MFASettings         // userID -> MFA config
+	totpUsed       map[string]map[string]time.Time // userID -> accepted TOTP codes inside the replay window (R5-15c, R12-38)
 	mfaMu          sync.RWMutex
 	verifySecret   []byte            // HMAC key for email verification tokens
 	verifyTokens   map[string]string // token -> userID (in-memory lookup)
