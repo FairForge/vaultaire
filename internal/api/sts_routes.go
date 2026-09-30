@@ -2,9 +2,12 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/audit"
 	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
@@ -17,6 +20,12 @@ func (s *Server) registerSTSRoutes() {
 	})
 }
 
+// handleSTSCreateToken mints a temporary credential bounded by the caller's
+// authority. The JWT holder owns the tenant, so the default parent scope is
+// the account's own full access; `parent_key_id` bounds the token to one of
+// the caller's own live keys instead. (Review R11-03: the parent used to be
+// `ListAPIKeys()[0]` — a random map entry, and a fresh account's primary key
+// carries no permission list, so no token could ever be minted for it.)
 func (s *Server) handleSTSCreateToken(w http.ResponseWriter, r *http.Request) {
 	userID, _ := r.Context().Value(userIDKey).(string)
 	tenantID, _ := r.Context().Value(tenantIDKey).(string)
@@ -40,27 +49,54 @@ func (s *Server) handleSTSCreateToken(w http.ResponseWriter, r *http.Request) {
 
 	parentKeyID := "tenant:" + tenantID
 	parentScope := &auth.KeyScope{Permissions: []string{"*"}}
-
-	keys, err := s.auth.ListAPIKeys(r.Context(), userID)
-	if err == nil && len(keys) > 0 {
-		parentKeyID = keys[0].Key
+	if req.ParentKeyID != "" {
+		parent, err := s.auth.GetOwnedAPIKey(r.Context(), userID, req.ParentKeyID)
+		switch {
+		case errors.Is(err, auth.ErrKeyNotFound):
+			writeManagementError(w, ErrTypeNotFound, "parent_key_not_found", "parent_key_id is not one of your API keys", "parent_key_id")
+			return
+		case errors.Is(err, auth.ErrKeyRevoked):
+			writeManagementError(w, ErrTypeInvalidRequest, "parent_key_revoked", "parent_key_id names a revoked key", "parent_key_id")
+			return
+		case err != nil:
+			s.logger.Error("sts parent key lookup", zap.Error(err))
+			writeManagementError(w, ErrTypeAPI, "internal_error", "failed to resolve parent key", "")
+			return
+		}
+		parentKeyID = parent.Key
+		perms := parent.Permissions
+		if len(perms) == 0 {
+			// A key row without a permission list is a full-access key
+			// (the S3 auth path reads COALESCE(permissions, '["*"]')).
+			perms = []string{"*"}
+		}
 		parentScope = &auth.KeyScope{
-			Permissions: keys[0].Permissions,
-			BucketScope: keys[0].BucketScope,
-			IPAllowlist: keys[0].IPAllowlist,
-			ExpiresAt:   keys[0].ExpiresAt,
+			Permissions: perms,
+			BucketScope: parent.BucketScope,
+			IPAllowlist: parent.IPAllowlist,
+			ExpiresAt:   parent.ExpiresAt,
 		}
 	}
 
 	token, err := auth.GenerateSTSToken(r.Context(), s.db, tenantID, parentKeyID, parentScope, req)
 	if err != nil {
+		if errors.Is(err, auth.ErrSTSScope) {
+			writeManagementError(w, ErrTypeInvalidRequest, "scope_error",
+				strings.TrimPrefix(err.Error(), auth.ErrSTSScope.Error()+": "), "")
+			return
+		}
+		// Persist failures used to be echoed as a 400 with the SQL text in it.
 		s.logger.Error("sts create token", zap.Error(err))
-		writeManagementError(w, ErrTypeInvalidRequest, "scope_error", err.Error(), "")
+		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to create STS token", "")
 		return
 	}
 
 	emitEvent(r.Context(), s.db, s.logger, "sts.token_created", tenantID, map[string]interface{}{
 		"access_key": token.AccessKey,
+	})
+	audit.Record(r.Context(), s.db, audit.Entry{
+		UserID: userID, TenantID: tenantID, Action: "sts.token_created", Resource: "sts:" + token.AccessKey,
+		Metadata: map[string]any{"parent_key": parentKeyID, "expires_at": token.ExpiresAt, "permissions": token.Permissions},
 	})
 
 	resp := map[string]interface{}{

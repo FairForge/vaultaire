@@ -1,0 +1,52 @@
+# Credential-attack signal — install to /etc/prometheus/rules/ (see README).
+#
+# Series come from the app's /metrics (internal/api/auth_metrics.go,
+# Review R11-10 / pre-launch checklist item 3):
+#   vaultaire_auth_failures_total{reason,key_known}   every rejected S3 auth
+#       reason: signature_mismatch | unknown_access_key | time_skewed |
+#               invalid_content_sha256 | missing_authorization | malformed |
+#               lookup_error | expired | ip_denied | presign_*
+#       key_known: "true" when the access key id exists (a tenant key, a
+#       VLT_ key or an STS token) — i.e. someone is guessing the SECRET of a
+#       real key — "false" for scanners hitting made-up ids.
+#   vaultaire_auth_failures_by_key_total{key_hash}    only for known keys;
+#       key_hash = first 8 hex of sha256(access key id), so the cardinality
+#       is bounded by the number of real keys and the id is never exposed.
+#
+# Before this, a stuffing run against a real key was a log line
+# ("authentication failed") indistinguishable from the ~92k/14d scanner hits.
+groups:
+  - name: vaultaire-auth
+    rules:
+      # One real key being hammered: >1 failure/s sustained for 5 minutes.
+      # Page — it is either a leaked key id under attack or a customer's
+      # broken integration (both need a human).
+      - alert: AuthFailuresAgainstRealKey
+        expr: sum by (key_hash) (rate(vaultaire_auth_failures_by_key_total[5m])) > 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Signature failures against a real access key ({{ $labels.key_hash }})"
+          description: "{{ $value | printf \"%.1f\" }} failed authentications/s for 5+ minutes against a key that exists. Find it with `SELECT access_key FROM tenants` / `key_id FROM api_keys` hashed (sha256, first 8 hex) = {{ $labels.key_hash }}; check the audit trail and consider revoking."
+
+      # Any failure against known keys at a low sustained rate: warning.
+      - alert: AuthFailuresKnownKeysElevated
+        expr: sum(rate(vaultaire_auth_failures_total{key_known="true"}[15m])) > 0.2
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated auth failures against real keys"
+          description: "More than 0.2/s of SigV4 failures for 15+ minutes across keys that exist. Break down by reason and key_hash on /metrics."
+
+      # Scanner storm against unknown ids: informational, only when it is
+      # far above the usual background (~0.1/s in Sep 2026).
+      - alert: AuthFailuresUnknownKeyStorm
+        expr: sum(rate(vaultaire_auth_failures_total{key_known="false"}[10m])) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Unknown-access-key storm"
+          description: "{{ $value | printf \"%.1f\" }} rejected requests/s with access keys that do not exist. Usually a scanner; check HAProxy/fail2ban if it persists."

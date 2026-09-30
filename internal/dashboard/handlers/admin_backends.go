@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"database/sql"
+	"github.com/FairForge/vaultaire/internal/audit"
 	"html/template"
 	"net/http"
 	"sort"
@@ -117,7 +119,7 @@ func HandleAdminBackends(tmpl *template.Template, eng *engine.CoreEngine, hc Hea
 }
 
 // HandleSetPrimary handles POST /admin/backends/{name}/primary.
-func HandleSetPrimary(eng *engine.CoreEngine, logger *zap.Logger) http.HandlerFunc {
+func HandleSetPrimary(eng *engine.CoreEngine, db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
 		if sd == nil {
@@ -130,6 +132,8 @@ func HandleSetPrimary(eng *engine.CoreEngine, logger *zap.Logger) http.HandlerFu
 		logger.Info("primary backend changed via admin dashboard",
 			zap.String("backend", name),
 			zap.String("admin", sd.Email))
+		audit.Record(r.Context(), db, audit.Entry{UserID: sd.UserID, EventType: "admin", Action: "admin.primary_swapped",
+			Resource: "backend:" + name, Severity: "warning", Metadata: map[string]any{"backend": name, "admin": sd.Email}})
 
 		http.Redirect(w, r, "/admin/backends", http.StatusSeeOther)
 	}

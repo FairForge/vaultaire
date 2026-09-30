@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"github.com/FairForge/vaultaire/internal/audit"
 	"net/http"
 	"sort"
 	"sync"
@@ -340,6 +341,7 @@ func RequireSession(store SessionStore) func(http.Handler) http.Handler {
 				return
 			}
 			ctx := context.WithValue(r.Context(), SessionKey, sd)
+			ctx = audit.WithActor(ctx, sd.UserID)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"github.com/FairForge/vaultaire/internal/audit"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -61,6 +62,8 @@ func (a *AuthService) EnableMFA(ctx context.Context, userID, secret string, back
 		}
 	}
 
+	a.record(ctx, audit.Entry{UserID: userID, Action: "mfa.enabled", Resource: "user:" + userID,
+		Metadata: map[string]any{"backup_codes": len(backupCodes)}})
 	return nil
 }
 
@@ -79,6 +82,7 @@ func (a *AuthService) DisableMFA(ctx context.Context, userID string) error {
 		}
 	}
 
+	a.record(ctx, audit.Entry{UserID: userID, Action: "mfa.disabled", Resource: "user:" + userID})
 	return nil
 }
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/FairForge/vaultaire/internal/audit"
 	"net/http"
 	"time"
 
@@ -274,6 +275,9 @@ func (s *Server) handleQuotaReconcile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n, err := rec.ReconcileStorageUsage(r.Context())
+	actor, _ := r.Context().Value(userIDKey).(string)
+	audit.Record(r.Context(), s.db, audit.Entry{UserID: actor, EventType: "admin", Action: "admin.quota_reconcile", Error: err,
+		Metadata: map[string]any{"tenants_updated": n}})
 	if err != nil {
 		s.logger.Error("quota reconciliation failed", zap.Error(err))
 		http.Error(w, "reconcile failed: "+err.Error(), http.StatusInternalServerError)

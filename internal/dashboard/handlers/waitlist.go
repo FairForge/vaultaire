@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/csv"
+	"github.com/FairForge/vaultaire/internal/audit"
 	"html/template"
 	"net/http"
 	"strconv"
@@ -70,7 +71,8 @@ var waitlistFilters = map[string]string{"": "all", "house": "houses", "downstair
 //	?fields=email                   one column, ready to paste into a mailer
 func HandleAdminWaitlistExport(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if dashauth.GetSession(r.Context()) == nil {
+		sd := dashauth.GetSession(r.Context())
+		if sd == nil {
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
@@ -81,6 +83,10 @@ func HandleAdminWaitlistExport(db *sql.DB, logger *zap.Logger) http.HandlerFunc 
 			return
 		}
 		emailOnly := r.URL.Query().Get("fields") == "email"
+
+		// Bulk PII export by an admin — audited (R10-28 / Review R11-26).
+		audit.Record(r.Context(), db, audit.Entry{UserID: sd.UserID, EventType: "admin", Action: "admin.waitlist_exported",
+			Metadata: map[string]any{"filter": filter, "email_only": emailOnly}})
 
 		w.Header().Set("Content-Type", "text/csv")
 		w.Header().Set("Content-Disposition",

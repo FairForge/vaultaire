@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"time"
-
-	"github.com/FairForge/vaultaire/internal/common"
 )
 
 // Define context key locally for api package
@@ -28,7 +26,7 @@ type UsageAlert struct {
 }
 
 func (s *Server) handleGetUsageStats(w http.ResponseWriter, r *http.Request) {
-	tenantID, ok := r.Context().Value(common.TenantIDKey).(string)
+	tenantID, ok := r.Context().Value(tenantIDKey).(string)
 	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -57,7 +55,7 @@ func (s *Server) handleGetUsageStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetUsageAlerts(w http.ResponseWriter, r *http.Request) {
-	tenantID, ok := r.Context().Value(common.TenantIDKey).(string)
+	tenantID, ok := r.Context().Value(tenantIDKey).(string)
 	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return

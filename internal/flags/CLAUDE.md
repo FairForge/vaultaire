@@ -28,6 +28,10 @@ restart. Backed by the `feature_flags` table (migration 059).
   upsert/delete + immediate cache reload. `updatedBy` should be the admin's
   email (from JWT or dashboard session).
 - `Registered(key)` — used by the admin API to reject typo'd keys loudly.
+- Every `Set`/`Unset` writes an `audit_logs` row (`flag.set` / `flag.unset`,
+  resource `flag:<key>`, metadata tenant/enabled/updated_by) via
+  `internal/audit` — Review R11-09; the actor is the JWT / session user from
+  the context. Nil DB = no row.
 - `Resolved() []Flag` — admin view: default, global row, effective state,
   per-tenant overrides (sorted). Includes unregistered leftover DB keys.
 

@@ -166,40 +166,6 @@ func (s *Server) CreateBucket(w http.ResponseWriter, r *http.Request) {
 		zap.String("bucket", bucket),
 		zap.String("tenant", tenantID))
 
-	if s.db != nil && tenantID != "default" {
-		// Idempotent re-creation: if the tenant already owns this bucket, skip
-		// the quota gate entirely. CreateBucket on a bucket you own is a no-op
-		// (BucketAlreadyOwnedByYou) in S3 — it must not 403 just because you're
-		// at the bucket limit, or `aws s3 mb`/terraform/rclone ensure-bucket
-		// calls break once a free-tier tenant has their one bucket.
-		var alreadyOwned bool
-		_ = s.db.QueryRowContext(ctx,
-			"SELECT EXISTS(SELECT 1 FROM buckets WHERE tenant_id = $1 AND name = $2)",
-			tenantID, bucket).Scan(&alreadyOwned)
-
-		if !alreadyOwned {
-			var count int
-			_ = s.db.QueryRowContext(ctx,
-				"SELECT COUNT(*) FROM buckets WHERE tenant_id = $1", tenantID).Scan(&count)
-
-			const maxBucketsPerTenant = 1000
-			if count >= maxBucketsPerTenant {
-				WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
-					WithSuggestion(fmt.Sprintf("Maximum %d buckets per account", maxBucketsPerTenant)))
-				return
-			}
-
-			if s.quotaManager != nil {
-				tier, _ := s.quotaManager.GetTier(ctx, tenantID)
-				if usage.IsFreeTier(tier) && count >= usage.FreeTierLimits.MaxBuckets {
-					WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
-						WithSuggestion(fmt.Sprintf("Free tier allows %d bucket. Upgrade at https://stored.ge/dashboard/billing", usage.FreeTierLimits.MaxBuckets)))
-					return
-				}
-			}
-		}
-	}
-
 	// Parse region: header takes precedence, then XML body, then default.
 	region := r.Header.Get("X-Stored-Region")
 	if region == "" {
@@ -221,65 +187,33 @@ func (s *Server) CreateBucket(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if region == "" {
-		region = drivers.IDriveDefaultRegion(os.Getenv)
-	}
-	if !drivers.IsValidRegion(region) {
-		WriteS3Error(w, ErrInvalidLocationConstraint, r.URL.Path, generateRequestID())
+
+	outcome, err := s.createBucketRegistry(ctx, tenantID, bucket, region)
+	if err != nil {
+		s.logger.Error("create bucket", zap.Error(err), zap.String("bucket", bucket))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return
 	}
-	// A region the account has but this deployment has no driver for must be
-	// refused: accepting the bucket would silently store its objects on the
-	// primary — a data-residency breach with a truthful-looking label
-	// (Review R7-01 / WP-R7-1).
-	if !drivers.IDriveRegionAvailable(region) {
+	switch outcome.state {
+	case bucketCreateCapMax:
+		WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
+			WithSuggestion(fmt.Sprintf("Maximum %d buckets per account", maxBucketsPerTenant)))
+		return
+	case bucketCreateCapFree:
+		writeFreeTierBucketCap(w, r)
+		return
+	case bucketCreateInvalidRegion:
+		WriteS3Error(w, ErrInvalidLocationConstraint, r.URL.Path, generateRequestID())
+		return
+	case bucketCreateRegionUnavailable:
 		WriteS3ErrorWithContext(w, ErrInvalidLocationConstraint, r.URL.Path, generateRequestID(),
 			WithSuggestion(fmt.Sprintf("Region %s is not enabled on this deployment.", region)))
 		return
 	}
+	region = outcome.region
 
-	// Create container directory
-	dirPath, safe := safeBucketPath("/tmp/vaultaire", tenantID, bucket)
-	if !safe {
-		WriteS3Error(w, ErrInvalidBucketName, r.URL.Path, generateRequestID())
-		return
-	}
-	if err := os.MkdirAll(dirPath, 0755); err != nil { // #nosec G301 -- bucket dirs need read access
-		s.logger.Error("Failed to create container", zap.Error(err))
-		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-		return
-	}
-
-	if s.db != nil {
-		sseDefault := s.sseService != nil
-		_, dbErr := s.db.ExecContext(ctx, `
-			INSERT INTO buckets (tenant_id, name, visibility, sse_enabled, region)
-			VALUES ($1, $2, 'private', $3, $4)
-			ON CONFLICT (tenant_id, name) DO NOTHING
-		`, tenantID, bucket, sseDefault, region)
-		if dbErr != nil {
-			s.logger.Error("failed to persist bucket",
-				zap.Error(dbErr), zap.String("bucket", bucket))
-		}
-
-		auth.EnsureTenantSlug(ctx, s.db, tenantID, s.logger)
-	}
-
-	// Re-creating an owned bucket is a no-op (ON CONFLICT DO NOTHING): the
-	// header describes the region the bucket HAS, not the one requested.
-	if s.db != nil {
-		var stored string
-		if err := s.db.QueryRowContext(ctx, `SELECT region FROM buckets WHERE tenant_id = $1 AND name = $2`,
-			tenantID, bucket).Scan(&stored); err == nil && stored != "" {
-			region = stored
-		}
-	}
 	w.Header().Set("x-amz-bucket-region", region)
 	w.Header().Set("Location", "/"+bucket)
-	emitEvent(ctx, s.db, s.logger, "bucket.created", tenantID, map[string]interface{}{
-		"bucket": bucket,
-		"region": region,
-	})
 	w.WriteHeader(http.StatusOK)
 }
 

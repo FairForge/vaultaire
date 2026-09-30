@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/FairForge/vaultaire/internal/audit"
 	"strings"
 	"sync"
 	"time"
@@ -288,6 +289,18 @@ func (a *AuthService) LoadFromDB(ctx context.Context) error {
 	return nil
 }
 
+// record writes an operator audit row (internal/audit) for a mutation on
+// this service. One site covers the dashboard, the user API and the
+// management API (Review R11-09). tenantID may be empty.
+func (a *AuthService) record(ctx context.Context, e audit.Entry) {
+	if e.TenantID == "" && e.UserID != "" {
+		if u, ok := a.userIndex[e.UserID]; ok {
+			e.TenantID = u.TenantID
+		}
+	}
+	audit.Record(ctx, a.sqlDB, e)
+}
+
 // SetAuditLogger sets the audit logger for the auth service
 func (a *AuthService) SetAuditLogger(logger *AuditLogger) {
 	a.auditLogger = logger
@@ -384,6 +397,9 @@ func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password,
 	a.tenants[tenant.ID] = tenant
 	a.apiKeys[apiKey.Key] = apiKey
 	a.keyIndex[tenant.AccessKey] = tenant
+
+	a.record(ctx, audit.Entry{UserID: user.ID, TenantID: tenant.ID, Action: "account.created",
+		Resource: "user:" + user.ID, Metadata: map[string]any{"email": email}})
 
 	return user, tenant, apiKey, nil
 }
@@ -500,6 +516,7 @@ func (a *AuthService) ChangePassword(ctx context.Context, userID, currentPasswor
 		}
 	}
 
+	a.record(ctx, audit.Entry{UserID: userID, Action: "auth.password_changed", Resource: "user:" + userID})
 	return nil
 }
 

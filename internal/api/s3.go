@@ -280,6 +280,8 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 				default:
 					WriteS3Error(w, ErrAccessDenied, r.URL.Path, reqID)
 				}
+				reason, known := presignFailureReason(errCode)
+				recordAuthFailure(r, reason, known)
 				return
 			}
 		} else {
@@ -308,6 +310,8 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 				} else {
 					WriteS3Error(w, errCode, r.URL.Path, reqID)
 				}
+				reason, known := authFailureReason(err)
+				recordAuthFailure(r, reason, known)
 				return
 			}
 		}
@@ -327,11 +331,13 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 	if scope != nil {
 		if auth.IsKeyExpired(scope.ExpiresAt) {
 			WriteS3Error(w, ErrExpiredPresignedRequest, r.URL.Path, generateRequestID())
+			recordAuthFailure(r, "expired", true)
 			return
 		}
 		if !auth.CheckIPAllowlist(scope.IPAllowlist, extractClientIP(r)) {
 			WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
 				WithSuggestion("This key is restricted by IP address."))
+			recordAuthFailure(r, "ip_denied", true)
 			return
 		}
 	}

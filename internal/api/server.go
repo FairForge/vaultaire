@@ -17,8 +17,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/audit"
 	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/billing"
+	"github.com/FairForge/vaultaire/internal/clientip"
 	"github.com/FairForge/vaultaire/internal/compliance"
 	"github.com/FairForge/vaultaire/internal/config"
 	"github.com/FairForge/vaultaire/internal/crypto"
@@ -28,7 +30,6 @@ import (
 	"github.com/FairForge/vaultaire/internal/email"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/flags"
-	"github.com/FairForge/vaultaire/internal/rbac"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -50,46 +51,47 @@ var (
 )
 
 type Server struct {
-	config           *config.Config
-	logger           *zap.Logger
-	router           chi.Router
-	httpServer       *http.Server
-	db               *sql.DB
-	events           chan Event
-	engine           *engine.CoreEngine
-	quotaManager     QuotaManager
-	rbacService      *RBACService
-	auth             *auth.AuthService
-	auditLogger      *auth.AuditLogger
-	stripe           *billing.StripeService
-	webhookHandler   *billing.WebhookHandler
-	meteredReporter  *billing.MeteredReporter
-	requestCount     int64
-	testMode         bool
-	errorCount       int64
-	metricsOnce      sync.Once
-	promHandler      http.Handler
-	healthChecker    *BackendHealthChecker
-	certMonitor      *certExpiryMonitor // TLS_CERT_PROBE_TARGETS; nil = off
-	securityTxt      string             // rendered once at boot (security_txt.go)
-	sessionStore     dashauth.SessionStore
-	bandwidthTracker *BandwidthTracker
-	bandwidthAlerter *BandwidthAlerter
-	googleOAuth      *oauth2.Config
-	githubOAuth      *oauth2.Config
-	mfaService       *auth.MFAService
-	mfaPendingStore  *dashboard.MFAPendingStore
-	sseService       *crypto.SSEService
-	chunkEncSvc      *crypto.ChunkEncryptionService
-	gci              *crypto.GlobalContentIndex
-	cdnRateLimiter   *RateLimiter
-	cdnAnalytics     *CDNAnalyticsTracker
-	accessLogTracker *S3AccessLogTracker
-	inventoryRunner  *InventoryRunner
-	dedupGCRunner    *DedupGCRunner
-	smartDemotion    *SmartDemotionRunner
-	smartPromoter    *SmartPromoter
-	multipartReaper  *MultipartReaper
+	config             *config.Config
+	logger             *zap.Logger
+	router             chi.Router
+	httpServer         *http.Server
+	db                 *sql.DB
+	events             chan Event
+	engine             *engine.CoreEngine
+	quotaManager       QuotaManager
+	auth               *auth.AuthService
+	stripe             *billing.StripeService
+	webhookHandler     *billing.WebhookHandler
+	meteredReporter    *billing.MeteredReporter
+	requestCount       int64
+	testMode           bool
+	errorCount         int64
+	metricsOnce        sync.Once
+	jsonAPIOnce        sync.Once
+	jsonAPILimiter     *ManagementRateLimiter
+	jsonAPIIdempotency *idempotencyMiddleware
+	promHandler        http.Handler
+	healthChecker      *BackendHealthChecker
+	certMonitor        *certExpiryMonitor // TLS_CERT_PROBE_TARGETS; nil = off
+	securityTxt        string             // rendered once at boot (security_txt.go)
+	sessionStore       dashauth.SessionStore
+	bandwidthTracker   *BandwidthTracker
+	bandwidthAlerter   *BandwidthAlerter
+	googleOAuth        *oauth2.Config
+	githubOAuth        *oauth2.Config
+	mfaService         *auth.MFAService
+	mfaPendingStore    *dashboard.MFAPendingStore
+	sseService         *crypto.SSEService
+	chunkEncSvc        *crypto.ChunkEncryptionService
+	gci                *crypto.GlobalContentIndex
+	cdnRateLimiter     *RateLimiter
+	cdnAnalytics       *CDNAnalyticsTracker
+	accessLogTracker   *S3AccessLogTracker
+	inventoryRunner    *InventoryRunner
+	dedupGCRunner      *DedupGCRunner
+	smartDemotion      *SmartDemotionRunner
+	smartPromoter      *SmartPromoter
+	multipartReaper    *MultipartReaper
 	// multipartMaxUploadBytes caps a single multipart upload's accumulated
 	// in-flight part bytes (0 = unlimited). Part data lives unbilled on local
 	// disk until complete — without a cap one upload can fill the disk.
@@ -167,6 +169,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	//   chunking — default on; global kill-switch + per-tenant override for
 	//              the chunked/dedup PUT path (reads unaffected).
 	s.flags = flags.New(s.db, logger)
+	audit.SetLogger(logger)
 	s.flags.Register(flagSignups, signupsDefaultFromEnv())
 	s.flags.Register(flagChunking, true)
 	s.flags.Register(flagSmartDemotion, false)
@@ -239,9 +242,6 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		s.gci = crypto.NewGlobalContentIndex(s.db)
 		logger.Info("global content index initialized (chunking + dedup)")
 	}
-
-	s.auditLogger = auth.NewAuditLogger()
-	s.auth.SetAuditLogger(s.auditLogger)
 
 	// Session store for the dashboard web UI.
 	// Uses PostgreSQL when available, in-memory otherwise.
@@ -444,12 +444,9 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		logger.Info("github oauth initialized")
 	}
 
-	s.rbacService = NewRBACService(logger)
-
 	s.router.Use(s.requestIDMiddleware)
 	s.router.Use(s.requestLimitsMiddleware)
 	s.router.Use(s.versionMiddleware)
-	s.router.Use(s.rbacService.InjectUserContext)
 	s.router.Use(s.loggingMiddleware)
 
 	s.setupRoutes()
@@ -648,33 +645,8 @@ func (s *Server) setupRoutes() {
 	s.logger.Info("Registering user API routes")
 	s.registerUserAPIRoutes()
 
-	s.logger.Info("Registering quota routes")
-	s.registerQuotaRoutes()
-
 	s.logger.Info("Registering compliance routes")
 	s.registerComplianceRoutes()
-
-	s.router.With(s.rbacService.RequirePermission("quota.read")).
-		Get("/api/v1/usage/stats", s.handleGetUsageStats)
-	s.router.With(s.rbacService.RequirePermission("quota.read")).
-		Get("/api/v1/usage/alerts", s.handleGetUsageAlerts)
-	s.router.With(s.rbacService.RequirePermission("storage.read")).
-		Get("/api/v1/presigned", s.handleGetPresignedURL)
-
-	s.setupQuotaManagementRoutes()
-	s.setupPatternRoutes()
-
-	handlers := rbac.NewRBACHandlers(s.rbacService.manager, s.rbacService.auditor)
-	s.router.Route("/api/rbac", func(r chi.Router) {
-		r.Get("/roles", handlers.HandleGetRoles)
-		r.Get("/users/{userID}/roles", handlers.HandleGetUserRoles)
-		r.With(s.rbacService.RequireRole(rbac.RoleAdmin)).
-			Post("/users/{userID}/roles", handlers.HandleAssignRole)
-		r.With(s.rbacService.RequireRole(rbac.RoleAdmin)).
-			Delete("/users/{userID}/roles", handlers.HandleRevokeRole)
-		r.Get("/permissions", handlers.HandleGetPermissions)
-		r.Get("/audit", handlers.HandleGetAuditLogs)
-	})
 
 	// Stripe webhook endpoint. No auth middleware — Stripe verifies via signature.
 	if s.webhookHandler != nil {
@@ -786,8 +758,13 @@ func (s *Server) registerComplianceRoutes() {
 		s.logger,
 	)
 
+	// Review R11-01: the breach and ROPA handlers take no subject and act on
+	// operator-global tables (the same handlers are admin-only under
+	// /api/v1/admin); the user-scoped ones read a context key requireJWT
+	// never sets. Admin-only until D-12 drops the scaffolding (WP-R11-5).
 	s.router.Route("/api/compliance", func(r chi.Router) {
 		r.Use(s.requireJWT)
+		r.Use(s.requireAdminMiddleware)
 
 		r.Post("/sar", complianceHandler.HandleCreateSAR)
 		r.Get("/sar/{id}", complianceHandler.HandleGetSARStatus)
@@ -845,6 +822,9 @@ func (s *Server) registerComplianceRoutes() {
 		r.Get("/flags", s.requireAdmin(s.handleAdminFlagsList))
 		r.Put("/flags/{key}", s.requireAdmin(s.handleAdminFlagSet))
 		r.Delete("/flags/{key}", s.requireAdmin(s.handleAdminFlagUnset))
+
+		// Operator audit trail (Review R11-09, pre-launch checklist item 1).
+		r.Get("/audit", s.requireAdmin(s.handleAdminAuditList))
 	})
 }
 
@@ -1037,30 +1017,6 @@ func (s *Server) SetAuthService(authService *auth.AuthService) {
 	s.auth = authService
 }
 
-func (s *Server) SetAuditLogger(logger *auth.AuditLogger) {
-	s.auditLogger = logger
-}
-
-func (s *Server) WrapWithRBACPermission(permission string, handler http.HandlerFunc) http.HandlerFunc {
-	if s.rbacService == nil {
-		return handler
-	}
-	return func(w http.ResponseWriter, r *http.Request) {
-		userID := rbac.GetUserID(r.Context())
-		if userID.String() == "00000000-0000-0000-0000-000000000000" {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-		if !s.rbacService.manager.UserHasPermission(userID, permission) {
-			http.Error(w, "Forbidden - insufficient permissions", http.StatusForbidden)
-			s.rbacService.auditor.LogPermissionCheck(userID, permission, false)
-			return
-		}
-		s.rbacService.auditor.LogPermissionCheck(userID, permission, true)
-		handler(w, r)
-	}
-}
-
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{
@@ -1176,7 +1132,10 @@ func (s *Server) requestIDMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Request-Id", uuid.New().String())
 		w.Header().Set("Server", "stored.ge")
-		next.ServeHTTP(w, r)
+		// Client IP for the audit trail comes from internal/clientip only
+		// (R1-01); stashed once here so service-layer audit writes see it.
+		ctx := audit.WithRequest(r.Context(), clientip.FromRequest(r), r.UserAgent())
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -1217,7 +1176,7 @@ func (s *Server) Start() error {
 
 	// Clean up expired idempotency cache entries hourly.
 	if s.db != nil {
-		im := newIdempotencyMiddleware(s.db, s.logger)
+		_, im := s.jsonAPIMiddleware()
 		im.StartCleanup(ctx)
 	}
 
@@ -1291,6 +1250,7 @@ func (s *Server) requireJWT(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), userIDKey, claims.UserID)
 		ctx = context.WithValue(ctx, emailKey, claims.Email)
 		ctx = context.WithValue(ctx, tenantIDKey, claims.TenantID)
+		ctx = audit.WithActor(ctx, claims.UserID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

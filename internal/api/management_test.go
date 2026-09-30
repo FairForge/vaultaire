@@ -136,13 +136,26 @@ func TestManagementCreateBucket(t *testing.T) {
 	s, mock, cleanup := newMgmtTestServer(t)
 	defer cleanup()
 
-	mock.ExpectExec(`INSERT INTO buckets`).
+	// createBucketRegistry (Review R11-05): ownership → cap count → row →
+	// slug → stored-region read-back → event (the same sequence S3
+	// CreateBucket runs).
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM buckets`).
 		WithArgs("test-tenant", "new-bucket").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM buckets WHERE tenant_id`).
+		WithArgs("test-tenant").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectExec(`INSERT INTO buckets`).
+		WithArgs("test-tenant", "new-bucket", false, sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(1, 1))
-
 	mock.ExpectQuery(`SELECT slug, name FROM tenants WHERE id`).
 		WithArgs("test-tenant").
 		WillReturnRows(sqlmock.NewRows([]string{"slug", "name"}).AddRow("test-slug", "TestCo"))
+	mock.ExpectQuery(`SELECT region FROM buckets WHERE tenant_id`).
+		WithArgs("test-tenant", "new-bucket").
+		WillReturnRows(sqlmock.NewRows([]string{"region"}).AddRow("us-central-1"))
+	mock.ExpectExec(`INSERT INTO events`).
+		WillReturnResult(sqlmock.NewResult(1, 1))
 
 	body := bytes.NewBufferString(`{"name":"new-bucket"}`)
 	req := httptest.NewRequest("POST", "/api/v1/manage/buckets", body)
@@ -156,6 +169,7 @@ func TestManagementCreateBucket(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "bucket", resp["object"])
 	assert.Equal(t, "new-bucket", resp["name"])
+	assert.Equal(t, "us-central-1", resp["region"], "the management response reports the STORED region like S3 CreateBucket")
 }
 
 func TestManagementCreateBucket_Invalid(t *testing.T) {
@@ -200,9 +214,9 @@ func TestManagementCreateBucket_Duplicate(t *testing.T) {
 	s, mock, cleanup := newMgmtTestServer(t)
 	defer cleanup()
 
-	mock.ExpectExec(`INSERT INTO buckets`).
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM buckets`).
 		WithArgs("test-tenant", "dup-bucket").
-		WillReturnResult(sqlmock.NewResult(0, 0))
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 
 	body := bytes.NewBufferString(`{"name":"dup-bucket"}`)
 	req := httptest.NewRequest("POST", "/api/v1/manage/buckets", body)

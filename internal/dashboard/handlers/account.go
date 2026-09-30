@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"github.com/FairForge/vaultaire/internal/audit"
 	"net/http"
 	"time"
 
@@ -27,6 +28,8 @@ func HandleExportData(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 		}
 
 		data := collectExportData(r, db, sd.UserID, sd.TenantID, logger)
+		audit.Record(r.Context(), db, audit.Entry{UserID: sd.UserID, TenantID: sd.TenantID, Action: "account.exported",
+			Metadata: map[string]any{"bytes": len(data), "via": "dashboard"}})
 
 		filename := fmt.Sprintf("stored-ge-export-%s.json", time.Now().Format("2006-01-02"))
 		w.Header().Set("Content-Type", "application/json")
@@ -88,6 +91,8 @@ func HandleRequestDeletion(db *sql.DB, sessions dashauth.SessionStore, logger *z
 			return
 		}
 
+		audit.Record(r.Context(), db, audit.Entry{UserID: sd.UserID, TenantID: sd.TenantID, Action: "account.deletion_scheduled",
+			Resource: "user:" + sd.UserID, Severity: "warning", Metadata: map[string]any{"scheduled_at": scheduledAt, "reason": reason, "via": "dashboard"}})
 		middleware.SetFlash(w, "success",
 			fmt.Sprintf("Account scheduled for deletion on %s. You can cancel anytime before then; after that date support carries out the erasure (email support@stored.ge to bring it forward). Cancel your subscription on the billing page so it does not renew.", scheduledAt.Format("January 2, 2006")))
 		http.Redirect(w, r, "/dashboard/settings", http.StatusSeeOther)
@@ -118,6 +123,8 @@ func HandleCancelDeletion(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 			return
 		}
 
+		audit.Record(r.Context(), db, audit.Entry{UserID: sd.UserID, TenantID: sd.TenantID, Action: "account.deletion_cancelled",
+			Resource: "user:" + sd.UserID, Metadata: map[string]any{"via": "dashboard"}})
 		middleware.SetFlash(w, "success", "Account deletion has been cancelled.")
 		http.Redirect(w, r, "/dashboard/settings", http.StatusSeeOther)
 	}

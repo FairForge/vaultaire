@@ -130,7 +130,7 @@ func TestHandleAdminBackends_ShowsCircuitState(t *testing.T) {
 
 func TestHandleSetPrimary(t *testing.T) {
 	eng := testEngine(t, "local", "s3")
-	handler := HandleSetPrimary(eng, zap.NewNop())
+	handler := HandleSetPrimary(eng, nil, zap.NewNop())
 
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("name", "s3")

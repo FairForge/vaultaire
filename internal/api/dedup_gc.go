@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"github.com/FairForge/vaultaire/internal/audit"
 	"net/http"
 	"time"
 
@@ -261,6 +262,8 @@ func (s *Server) handleDedupGCTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := s.dedupGCRunner.RunOnce(r.Context())
+	actor, _ := r.Context().Value(userIDKey).(string)
+	audit.Record(r.Context(), s.db, audit.Entry{UserID: actor, EventType: "admin", Action: "admin.dedup_gc", Error: err})
 	if err != nil {
 		s.logger.Error("manual dedup gc failed", zap.Error(err))
 		http.Error(w, "gc failed: "+err.Error(), http.StatusInternalServerError)

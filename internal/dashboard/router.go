@@ -356,7 +356,7 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		ar.Post("/support/{id}/notes", handlers.HandleAddNote(deps.DB, deps.Logger))
 		if deps.Engine != nil {
 			ar.Get("/backends", handlers.HandleAdminBackends(backendsTmpl, deps.Engine, deps.HealthChecker, deps.Logger))
-			ar.Post("/backends/{name}/primary", handlers.HandleSetPrimary(deps.Engine, deps.Logger))
+			ar.Post("/backends/{name}/primary", handlers.HandleSetPrimary(deps.Engine, deps.DB, deps.Logger))
 			ar.Post("/backends/{name}/check", handlers.HandleForceHealthCheck(deps.Engine, deps.Logger))
 		}
 		if deps.Flags != nil {
