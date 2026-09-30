@@ -57,12 +57,14 @@ func TestShutdown_FlushesBufferedTrackers(t *testing.T) {
 	// auto-flush threshold, and Shutdown runs long before the 5s ticker.
 	s.bandwidthTracker.Record(ctx, tenantID, 1024, 2048)
 	s.cdnAnalytics.Record(ctx, tenantID, "flush-bucket", "obj.bin", 512, "US", "")
+	// An error row: since Review R13-14 success rows are recorded only for
+	// buckets with logging enabled (this one has none); error rows always.
 	s.accessLogTracker.Record(ctx, s3AccessEvent{
 		tenantID:   tenantID,
 		bucket:     "flush-bucket",
 		objectKey:  "obj.bin",
 		operation:  "GetObject",
-		statusCode: 200,
+		statusCode: 503,
 		bytesSent:  512,
 	})
 

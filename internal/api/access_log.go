@@ -1,17 +1,19 @@
 package api
 
 import (
-	"bytes"
+	"bufio"
 	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
-	"strings"
+	"io"
 	"sync"
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/engine"
+	"github.com/lib/pq"
 	"go.uber.org/zap"
 )
 
@@ -38,12 +40,28 @@ type S3AccessLogTracker struct {
 	mu     sync.Mutex
 	buffer []s3AccessEvent
 	logger *zap.Logger
+
+	// writer delivers log objects through the customer write path (Review
+	// R13-02). nil = delivery disabled (no DB / no engine).
+	writer *generatedObjectWriter
+
+	// enabled is the set of "<tenant>/<bucket>" with logging_enabled, loaded
+	// when delivery starts and refreshed every pass; PutBucketLogging writes
+	// through (SetLoggingEnabled). Success rows are recorded only for these
+	// buckets (Review R13-14 / R9-04: every request from every tenant used to
+	// insert a row that only logging-enabled buckets ever consumed). Error
+	// rows (status >= 400) are recorded for every bucket — the admin support
+	// page reads them — and the retention job bounds both at 30 days.
+	enabledMu     sync.RWMutex
+	enabled       map[string]bool
+	enabledLoaded bool
 }
 
 func NewS3AccessLogTracker(db *sql.DB) *S3AccessLogTracker {
 	return &S3AccessLogTracker{
-		db:     db,
-		buffer: make([]s3AccessEvent, 0, 128),
+		db:      db,
+		buffer:  make([]s3AccessEvent, 0, 128),
+		enabled: map[string]bool{},
 	}
 }
 
@@ -51,9 +69,70 @@ func (at *S3AccessLogTracker) SetLogger(logger *zap.Logger) {
 	at.logger = logger
 }
 
+// SetWriter wires the delivery writer (nil disables delivery).
+func (at *S3AccessLogTracker) SetWriter(w *generatedObjectWriter) { at.writer = w }
+
+// SetLoggingEnabled is the write-through from PutBucketLogging so a newly
+// enabled bucket's requests are recorded before the next refresh.
+func (at *S3AccessLogTracker) SetLoggingEnabled(tenantID, bucket string, on bool) {
+	at.enabledMu.Lock()
+	defer at.enabledMu.Unlock()
+	if on {
+		at.enabled[tenantID+"/"+bucket] = true
+	} else {
+		delete(at.enabled, tenantID+"/"+bucket)
+	}
+}
+
+// refreshLoggingEnabled reloads the enabled set from the buckets table.
+func (at *S3AccessLogTracker) refreshLoggingEnabled(ctx context.Context) {
+	if at.db == nil {
+		return
+	}
+	rows, err := at.db.QueryContext(ctx,
+		`SELECT tenant_id, name FROM buckets WHERE logging_enabled = TRUE AND logging_target_bucket IS NOT NULL`)
+	if err != nil {
+		if at.logger != nil {
+			at.logger.Warn("refresh logging-enabled buckets", zap.Error(err))
+		}
+		return
+	}
+	defer func() { _ = rows.Close() }()
+	next := map[string]bool{}
+	for rows.Next() {
+		var tenantID, bucket string
+		if err := rows.Scan(&tenantID, &bucket); err == nil {
+			next[tenantID+"/"+bucket] = true
+		}
+	}
+	if rows.Err() != nil {
+		return
+	}
+	at.enabledMu.Lock()
+	at.enabled, at.enabledLoaded = next, true
+	at.enabledMu.Unlock()
+}
+
+// shouldRecord applies the logging_enabled gate. Until the set has been
+// loaded (boot, or no DB) every event is recorded, as before.
+func (at *S3AccessLogTracker) shouldRecord(event s3AccessEvent) bool {
+	if event.statusCode >= 400 {
+		return true
+	}
+	at.enabledMu.RLock()
+	defer at.enabledMu.RUnlock()
+	if !at.enabledLoaded {
+		return true
+	}
+	return at.enabled[event.tenantID+"/"+event.bucket]
+}
+
 // Record appends an S3 access event to the buffer. Auto-flushes at 100 events.
 func (at *S3AccessLogTracker) Record(_ context.Context, event s3AccessEvent) {
 	if event.tenantID == "" || event.bucket == "" {
+		return
+	}
+	if !at.shouldRecord(event) {
 		return
 	}
 	if event.loggedAt.IsZero() {
@@ -145,34 +224,49 @@ func randomHex6() string {
 	return hex.EncodeToString(b)
 }
 
-// writeAccessLogObject formats records as S3 access log lines and writes them
-// as an object to the target bucket via engine.Put.
-func (at *S3AccessLogTracker) writeAccessLogObject(ctx context.Context, eng *engine.CoreEngine, tenantID, targetBucket, prefix string, records []s3AccessEvent) error {
-	if eng == nil || len(records) == 0 {
-		return nil
+// writeAccessLogObject formats records as S3 access log lines and delivers
+// them as ONE object into the tenant's target bucket through the customer
+// write path (namespace, tenant ctx, quota, head row — Review R13-02).
+// Returns the key written.
+func (at *S3AccessLogTracker) writeAccessLogObject(ctx context.Context, tenantID, targetBucket, prefix string, records []s3AccessEvent) (string, error) {
+	if len(records) == 0 {
+		return "", nil
 	}
-
-	var buf bytes.Buffer
-	for _, r := range records {
-		buf.WriteString(formatAccessLogLine(r))
-		buf.WriteByte('\n')
+	if at.writer == nil {
+		return "", errors.New("access log delivery: no writer configured")
 	}
-
 	now := time.Now().UTC()
 	objectKey := fmt.Sprintf("%s%s-%s", prefix, now.Format("2006-01-02-15-04-05"), randomHex6())
-
-	container := fmt.Sprintf("tenant/%s/%s", tenantID, targetBucket)
-	_, err := eng.Put(ctx, container, objectKey, strings.NewReader(buf.String()))
-	return err
+	_, err := at.writer.write(ctx, tenantID, targetBucket, objectKey, "text/plain", func(w io.Writer) error {
+		bw := bufio.NewWriter(w)
+		for _, r := range records {
+			if _, err := bw.WriteString(formatAccessLogLine(r)); err != nil {
+				return err
+			}
+			if err := bw.WriteByte('\n'); err != nil {
+				return err
+			}
+		}
+		return bw.Flush()
+	})
+	if err != nil {
+		return "", err
+	}
+	return objectKey, nil
 }
 
 // StartLogDelivery runs a background goroutine that delivers accumulated access
 // log records from the s3_access_log table to the configured target buckets as
 // log objects every 5 minutes.
 func (at *S3AccessLogTracker) StartLogDelivery(ctx context.Context, eng *engine.CoreEngine) {
-	if at.db == nil || eng == nil {
+	if at.db == nil || eng == nil || at.writer == nil {
 		return
 	}
+	// Load the logging_enabled gate before the first request can be
+	// recorded against it; the pass refreshes it every 5 minutes.
+	loadCtx, cancelLoad := context.WithTimeout(ctx, 10*time.Second)
+	at.refreshLoggingEnabled(loadCtx)
+	cancelLoad()
 	go func() {
 		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
@@ -181,15 +275,18 @@ func (at *S3AccessLogTracker) StartLogDelivery(ctx context.Context, eng *engine.
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				at.deliverLogs(ctx, eng)
+				at.deliverLogs(ctx)
 			}
 		}
 	}()
 }
 
-func (at *S3AccessLogTracker) deliverLogs(ctx context.Context, eng *engine.CoreEngine) {
+// deliverLogs is one delivery pass over every logging-enabled bucket that
+// has undelivered rows.
+func (at *S3AccessLogTracker) deliverLogs(ctx context.Context) {
 	deliverCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
+	at.refreshLoggingEnabled(deliverCtx)
 
 	// Find all buckets with logging enabled.
 	rows, err := at.db.QueryContext(deliverCtx, `
@@ -225,24 +322,37 @@ func (at *S3AccessLogTracker) deliverLogs(ctx context.Context, eng *engine.CoreE
 	}
 
 	for _, c := range configs {
-		at.deliverBucketLogs(deliverCtx, eng, c.tenantID, c.bucket, c.targetBucket, c.prefix)
+		// A bucket busier than 1000 requests per pass used to fall behind
+		// forever (Review R13-24): keep delivering until a batch comes back
+		// short or the pass deadline is spent.
+		for ctx.Err() == nil {
+			n, err := at.deliverBucketLogs(deliverCtx, c.tenantID, c.bucket, c.targetBucket, c.prefix)
+			if err != nil || n < accessLogDeliveryBatch {
+				break
+			}
+		}
 	}
 }
 
-func (at *S3AccessLogTracker) deliverBucketLogs(ctx context.Context, eng *engine.CoreEngine, tenantID, bucket, targetBucket, prefix string) {
+// accessLogDeliveryBatch is the number of rows one delivered object carries.
+const accessLogDeliveryBatch = 1000
+
+// deliverBucketLogs delivers up to one batch for a bucket and returns how
+// many rows it delivered.
+func (at *S3AccessLogTracker) deliverBucketLogs(ctx context.Context, tenantID, bucket, targetBucket, prefix string) (int, error) {
 	rows, err := at.db.QueryContext(ctx, `
 		SELECT id, tenant_id, bucket, object_key, operation, status_code,
 			bytes_sent, bytes_received, source_ip, user_agent, request_id, error_code, logged_at
 		FROM s3_access_log
 		WHERE tenant_id = $1 AND bucket = $2
 		ORDER BY logged_at ASC
-		LIMIT 1000
-	`, tenantID, bucket)
+		LIMIT $3
+	`, tenantID, bucket, accessLogDeliveryBatch)
 	if err != nil {
 		if at.logger != nil {
 			at.logger.Error("query access log records", zap.Error(err))
 		}
-		return
+		return 0, err
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -262,30 +372,37 @@ func (at *S3AccessLogTracker) deliverBucketLogs(ctx context.Context, eng *engine
 		records = append(records, e)
 	}
 
+	_ = rows.Close()
 	if len(records) == 0 {
-		return
+		return 0, nil
 	}
 
-	if err := at.writeAccessLogObject(ctx, eng, tenantID, targetBucket, prefix, records); err != nil {
+	key, err := at.writeAccessLogObject(ctx, tenantID, targetBucket, prefix, records)
+	if err != nil {
 		if at.logger != nil {
-			at.logger.Error("write access log object",
+			at.logger.Warn("access log delivery skipped — rows kept for the next pass",
 				zap.String("tenant_id", tenantID),
+				zap.String("bucket", bucket),
 				zap.String("target_bucket", targetBucket),
 				zap.Error(err))
 		}
-		return
+		return 0, err
 	}
 
-	// Delete delivered records.
-	for _, id := range ids {
-		_, _ = at.db.ExecContext(ctx, `DELETE FROM s3_access_log WHERE id = $1`, id)
+	// Delivered rows go in one statement (R4-18: one DELETE per row).
+	if _, err := at.db.ExecContext(ctx, `DELETE FROM s3_access_log WHERE id = ANY($1)`, pq.Array(ids)); err != nil {
+		if at.logger != nil {
+			at.logger.Error("delete delivered access log rows (will be re-delivered)", zap.Error(err))
+		}
+		return len(records), err
 	}
 
 	if at.logger != nil {
 		at.logger.Info("delivered access log records",
 			zap.String("tenant_id", tenantID),
 			zap.String("bucket", bucket),
-			zap.String("target_bucket", targetBucket),
+			zap.String("target", targetBucket+"/"+key),
 			zap.Int("records", len(records)))
 	}
+	return len(records), nil
 }

@@ -194,7 +194,22 @@ func (p *SmartPromoter) flipBack(ctx context.Context, tenantID, bucket, key, eta
 	if n, _ := res.RowsAffected(); n == 0 {
 		return false
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM smart_demotions WHERE tenant_id=$1 AND bucket=$2 AND object_key=$3`, tenantID, bucket, key); err != nil {
+	// The ledger row is dropped ONLY while the hot copy is still on record
+	// as present. The head-row UPDATE above may have waited on the reclaim
+	// job's row lock (Review R13-01): the reclaim deletes the hot blob and
+	// stamps hot_deleted_at without touching backend_name or etag, so the
+	// UPDATE alone re-evaluates to 1 row after it commits. Without this
+	// guard the flip routed to a backend that no longer had the bytes and
+	// then deleted the cold copy — the object was gone from both. 0 rows
+	// here = the reclaim won: roll the flip back and serve from cold.
+	del, err := tx.ExecContext(ctx, `DELETE FROM smart_demotions
+		WHERE tenant_id=$1 AND bucket=$2 AND object_key=$3 AND hot_deleted_at IS NULL`, tenantID, bucket, key)
+	if err != nil {
+		return false
+	}
+	if n, _ := del.RowsAffected(); n == 0 {
+		p.logger.Info("smart promotion: hot copy reclaimed during flip-back — serving cold",
+			zap.String("tenant", tenantID), zap.String("bucket", bucket), zap.String("key", key))
 		return false
 	}
 	if err := tx.Commit(); err != nil {
@@ -288,8 +303,17 @@ func (p *SmartPromoter) promote(ctx context.Context, tenantID, bucket, key, etag
 		return "", fmt.Errorf("flip routing: %w", err)
 	}
 	n, _ := res.RowsAffected()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM smart_demotions WHERE tenant_id=$1 AND bucket=$2 AND object_key=$3`, tenantID, bucket, key); err != nil {
+	// A copy-back only runs for rows whose hot copy was already reclaimed
+	// (OnRead schedules on hotDeleted; PromotePending selects on it), so no
+	// reclaim can be deleting the blob we just wrote. The conditional delete
+	// keeps that true under any future caller (Review R13-01).
+	del, err := tx.ExecContext(ctx, `DELETE FROM smart_demotions
+		WHERE tenant_id=$1 AND bucket=$2 AND object_key=$3 AND (hot_deleted_at IS NOT NULL OR $4)`, tenantID, bucket, key, n == 0)
+	if err != nil {
 		return "", fmt.Errorf("drop ledger: %w", err)
+	}
+	if d, _ := del.RowsAffected(); n == 1 && d == 0 {
+		return "", fmt.Errorf("ledger row for %s/%s has an unreclaimed hot copy — copy-back refused", bucket, key)
 	}
 	if err := tx.Commit(); err != nil {
 		return "", fmt.Errorf("commit: %w", err)
@@ -324,7 +348,8 @@ func (p *SmartPromoter) PromotePending(ctx context.Context) (int, []string) {
 	}
 	rows, err := p.db.QueryContext(ctx,
 		`SELECT tenant_id, bucket, object_key, etag, size_bytes FROM smart_demotions
-		 WHERE promote_requested_at IS NOT NULL ORDER BY promote_requested_at ASC LIMIT 1000`)
+		 WHERE promote_requested_at IS NOT NULL AND hot_deleted_at IS NOT NULL
+		 ORDER BY promote_requested_at ASC LIMIT 1000`)
 	if err != nil {
 		return 0, []string{fmt.Sprintf("promote pending: list: %v", err)}
 	}

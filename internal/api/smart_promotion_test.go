@@ -201,3 +201,44 @@ func TestSmartPromotion_HandleGetEvictedAnswers503NotForbidden(t *testing.T) {
 	assert.GreaterOrEqual(t, stub.restoreCalls, 1, "restore submitted on the reader's behalf")
 	_ = time.Second
 }
+
+// Review R13-01: the hot-copy reclaim and a read-time flip-back of the same
+// object at the moment the grace expires. The reclaim locks the head row and
+// deletes the hot blob; the GET read the ledger before that commit (hot copy
+// "still present") and its flip-back UPDATE waits on the row lock. When the
+// reclaim commits, the UPDATE re-evaluates against a row whose backend and
+// etag are unchanged — 1 row — and the flip-back then deletes the cold copy:
+// routing points at a backend with no bytes and the other copy is gone.
+// Whatever the interleaving, the backend the row routes to must hold the bytes.
+func TestSmartPromotion_FlipBackLosesToConcurrentReclaim(t *testing.T) {
+	f := setupDemotionFixture(t, 10*tb, "standard")
+	p := newPromoter(f)
+	h := f.object("b", "k", 100, 30, 20, onBackend("geyser"))
+	require.NoError(t, os.MkdirAll(filepath.Join(f.hotDir, f.tenantID+"_b"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(f.hotDir, f.tenantID+"_b", "k"), []byte("hot"), 0o600))
+	_, err := f.db.Exec(`INSERT INTO smart_demotions (tenant_id,bucket,object_key,etag,size_bytes,hot_backend,cold_backend,reason,demoted_at)
+		VALUES ($1,'b','k',$2,100,'idrive','geyser','idle',$3)`, f.tenantID, h.etag, f.now.Add(-48*time.Hour))
+	require.NoError(t, err)
+
+	flipped := make(chan string, 1)
+	f.runner.beforeHotDelete = func(bucket, key string) {
+		// The customer GET arrives while the reclaim holds the row lock.
+		go func() { flipped <- p.OnRead(context.Background(), f.tenantID, bucket, key, h.etag) }()
+		time.Sleep(300 * time.Millisecond) // long enough for the flip-back to block on the lock
+	}
+
+	res, err := f.runner.RunOnce(context.Background(), false)
+	require.NoError(t, err)
+	served := <-flipped
+
+	cur := f.backendOf("b", "k")
+	switch cur {
+	case "idrive":
+		assert.True(t, f.hotExists("b", "k"), "routes hot but the hot copy is gone (res=%+v served=%s)", res, served)
+	case "geyser":
+		assert.True(t, f.coldExists("b", "k"), "routes cold but the cold copy is gone (res=%+v served=%s)", res, served)
+	default:
+		t.Fatalf("unexpected backend %q", cur)
+	}
+	assert.True(t, f.hotExists("b", "k") || f.coldExists("b", "k"), "at least one copy must survive")
+}

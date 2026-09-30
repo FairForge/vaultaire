@@ -42,9 +42,11 @@ queued, never billed.
 
 **What stays hot on Standard?**
 The Smart schedule: about 15% of your quota lives on hot storage; data idle for 14+
-days moves to tape and reading it brings it back hot within minutes (it then stays hot
-for 7 days). The schedule is switched on per account by us — until it is on for yours,
-everything you store on Standard simply stays hot. Need specific data to never demote?
+days moves to tape. Reading it brings it back hot — within minutes while the archive
+still holds it on its staging disk (roughly two weeks), a few hours once it has been
+written to tape — and it then stays hot until it goes idle again (14 days), or sooner
+if your hot allowance is full. The schedule is switched on per account by us — until it
+is on for yours, everything you store on Standard simply stays hot. Need specific data to never demote?
 The **pin-hot add-on** is $3/TB/mo for the pinned amount.
 
 **How is $4.49/TB sustainable? Is this VC-subsidized?**

@@ -1240,6 +1240,26 @@ func generateAdminPaths() map[string]*PathItem {
 					"503": textResp("`quota reconciliation not available`"),
 				})),
 		},
+		"/api/v1/admin/retention": {
+			Post: admin(jsonOp("Admin", "Run the retention job once", "AdminRetention",
+				"Prunes the log tables past their retention periods (s3_access_log 30 d, events / quota_usage_events / stripe_events / access_patterns 90 d, "+
+					"webhook_deliveries 30 d, cdn_access_log 2 d after rollup, waitlist sign-up IP/user agent cleared after 90 d; audit_logs never) in batches under "+
+					"one advisory lock — the nightly run and this trigger cannot overlap (409 `already_running`). Writes an `admin.retention` audit row. No request body.",
+				map[string]Response{
+					"200": jsonResp("Rows pruned per table", objectPtr("", map[string]*Schema{
+						"tables":   freeObject("Table name → rows deleted (or PII-cleared) this run"),
+						"total":    integer("Rows affected across every table"),
+						"duration": str("Run duration (Go duration string)"),
+						"errors":   arrayOf(str("Per-table error text")),
+					}, "tables", "total", "duration")),
+					"409": jsonResp("A run is already in progress", objectPtr("", map[string]*Schema{
+						"error": strEnum("", "already_running"),
+						"job":   strEnum("", "retention"),
+					}, "error", "job")),
+					"500": textResp("`retention failed: ...`"),
+					"503": textResp("`retention not available` (no database)"),
+				})),
+		},
 		"/api/v1/admin/flags": {
 			Get: admin(jsonOp("Admin", "List feature flags", "AdminListFlags",
 				"Every flag registered in code with its default, the global row (if any), the effective global state and every per-tenant override.",

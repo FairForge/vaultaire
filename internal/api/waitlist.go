@@ -1,6 +1,8 @@
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"github.com/FairForge/vaultaire/internal/api/landing"
 	"net/http"
@@ -69,7 +71,7 @@ func (s *Server) handleWaitlistSignup(w http.ResponseWriter, r *http.Request) {
 
 	// Degrade gracefully without a DB (dev/local): don't fail the visitor's submit.
 	if s.db == nil {
-		s.logger.Warn("waitlist signup with no database", zap.String("email", email))
+		s.logger.Warn("waitlist signup with no database", zap.String("email_hash", emailHash(email)))
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
 	}
@@ -85,12 +87,12 @@ func (s *Server) handleWaitlistSignup(w http.ResponseWriter, r *http.Request) {
 		 WHERE EXCLUDED.plan_std_tb + EXCLUDED.plan_vault_tb > 0`,
 		email, attr.Source("landing"), ip, r.UserAgent(), intent.StdTB, intent.VaultTB, intent.Room,
 		attr.Referrer, attr.UTMSource, attr.UTMMedium, attr.UTMCampaign); err != nil {
-		s.logger.Error("waitlist insert", zap.String("email", email), zap.Error(err))
+		s.logger.Error("waitlist insert", zap.String("email_hash", emailHash(email)), zap.Error(err))
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save"})
 		return
 	}
 
-	s.logger.Info("waitlist signup", zap.String("email", email), zap.String("source", attr.Source("landing")),
+	s.logger.Info("waitlist signup", zap.String("email_hash", emailHash(email)), zap.String("source", attr.Source("landing")),
 		zap.Int("std_tb", intent.StdTB), zap.Int("vault_tb", intent.VaultTB))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -142,4 +144,12 @@ func (l *waitlistLimiter) allow(ip string, now int64) bool {
 	}
 	l.hits[ip] = append(kept, now)
 	return true
+}
+
+// emailHash is what the log carries instead of the address (Review R13-22 /
+// R14-16): sha256 truncated to 8 hex — enough to correlate one visitor's
+// lines, not enough to be a second copy of the PII the retention job expires.
+func emailHash(email string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(email))))
+	return hex.EncodeToString(sum[:4])
 }

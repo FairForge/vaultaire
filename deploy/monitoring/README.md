@@ -25,6 +25,7 @@ it is **not** committed. It lives in `/etc/default/ntfy-bridge` on the server
 | `alertmanager.yml` | `/etc/prometheus/alertmanager.yml` | route → ntfy webhook receiver, send_resolved, critical-inhibits-warning |
 | `ntfy-bridge.py` | `/opt/vaultaire/monitoring/ntfy-bridge.py` | Alertmanager webhook → readable ntfy push (UTF-8-safe JSON publish) |
 | `ntfy-bridge.service` | `/etc/systemd/system/ntfy-bridge.service` | sandboxed systemd unit (DynamicUser) |
+| `vaultaire-backends.yml`, `vaultaire-auth.yml`, `vaultaire-tls.yml`, `vaultaire-synthetic.yml` | `/etc/prometheus/rules/` | alert rules: backend probes / auth failures / origin cert / customer-path canary + retention job (Review R13 — install all four, checklist item 10) |
 
 ## Install (already done on slc-vaultaire-01, 2026-08-03)
 
@@ -89,7 +90,7 @@ never-incremented stub before), so `VaultaireHighErrorRate` can now fire.
 1. Edit the YAML here, merge (rules are not deployed automatically).
 2. On the box:
    ```bash
-   sudo cp deploy/monitoring/vaultaire-backends.yml /etc/prometheus/rules/
+   sudo cp deploy/monitoring/vaultaire-*.yml /etc/prometheus/rules/
    sudo promtool check rules /etc/prometheus/rules/*.yml
    sudo systemctl reload prometheus      # SIGHUP re-reads rule_files
    curl -s localhost:9090/api/v1/rules | jq '.data.groups[].name'

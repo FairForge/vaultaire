@@ -126,6 +126,9 @@ func (s *Server) handlePutBucketLogging(w http.ResponseWriter, r *http.Request, 
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 			return
 		}
+		if s.accessLogTracker != nil {
+			s.accessLogTracker.SetLoggingEnabled(t.ID, req.Bucket, false)
+		}
 		s.logger.Info("bucket logging disabled",
 			zap.String("tenant_id", t.ID),
 			zap.String("bucket", req.Bucket))
@@ -161,6 +164,9 @@ func (s *Server) handlePutBucketLogging(w http.ResponseWriter, r *http.Request, 
 		s.logger.Error("enable bucket logging", zap.Error(err))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return
+	}
+	if s.accessLogTracker != nil {
+		s.accessLogTracker.SetLoggingEnabled(t.ID, req.Bucket, true)
 	}
 
 	s.logger.Info("bucket logging enabled",
