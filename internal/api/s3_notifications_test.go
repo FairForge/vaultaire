@@ -44,8 +44,8 @@ func setupNotificationFixture(t *testing.T) *notificationFixture {
 	// These tests deliver to httptest servers on loopback, which the target
 	// policy refuses in production (R4-02); the policy's own tests set this
 	// back to false explicitly.
-	webhookAllowPrivateTargets = true
-	t.Cleanup(func() { webhookAllowPrivateTargets = false })
+	webhookAllowPrivateTargets.Store(true)
+	t.Cleanup(func() { webhookAllowPrivateTargets.Store(false) })
 
 	dsn := testutil.DSN() // R9: vaultaire_test by default; DATABASE_URL still wins
 	db, err := sql.Open("postgres", dsn)

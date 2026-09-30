@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/tenant"
@@ -203,10 +204,11 @@ func isValidS3EventFilter(event string) bool {
 	return false
 }
 
-// webhookAllowPrivateTargets is a test-only escape: notification targets on
+// webhookAllowPrivateTargets is a test-only escape (atomic: the dispatcher's
+// delivery goroutines outlive the test that flips it — post-merge R4-24): notification targets on
 // loopback / private ranges are refused (R4-02) except when a test points the
 // dispatcher at an httptest server.
-var webhookAllowPrivateTargets = false
+var webhookAllowPrivateTargets atomic.Bool
 
 // isPrivateOrSpecialIP reports whether ip is loopback, private, link-local,
 // CGNAT, multicast, unspecified or broadcast — never a legitimate webhook.
@@ -258,7 +260,7 @@ func validateWebhookTarget(raw string) error {
 	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") {
 		return fmt.Errorf("localhost is not a valid target")
 	}
-	if ip := net.ParseIP(host); ip != nil && !webhookAllowPrivateTargets && isPrivateOrSpecialIP(ip) {
+	if ip := net.ParseIP(host); ip != nil && !webhookAllowPrivateTargets.Load() && isPrivateOrSpecialIP(ip) {
 		return fmt.Errorf("private, loopback and link-local addresses are not valid targets")
 	}
 	return nil
@@ -282,7 +284,7 @@ func webhookClient(timeout time.Duration) *http.Client {
 			}
 			var lastErr error
 			for _, a := range addrs {
-				if !webhookAllowPrivateTargets && isPrivateOrSpecialIP(a.IP) {
+				if !webhookAllowPrivateTargets.Load() && isPrivateOrSpecialIP(a.IP) {
 					lastErr = fmt.Errorf("webhook target %q resolves to a private address", host)
 					continue
 				}

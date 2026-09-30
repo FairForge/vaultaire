@@ -340,6 +340,76 @@ func (s *Server) handleHeadBucket(w http.ResponseWriter, r *http.Request, req *S
 	w.WriteHeader(http.StatusOK)
 }
 
+// bucketDeleteState is the outcome of deleteBucketRegistry.
+type bucketDeleteState int
+
+const (
+	bucketDeleteDone bucketDeleteState = iota
+	bucketDeleteMissing
+	bucketDeleteNotEmpty
+)
+
+type bucketDeleteOutcome struct {
+	state                      bucketDeleteState
+	objects, versions, uploads int
+}
+
+func (o bucketDeleteOutcome) contents() string {
+	return fmt.Sprintf("The bucket still holds %d object(s), %d version(s) and %d in-progress multipart upload(s).",
+		o.objects, o.versions, o.uploads)
+}
+
+// deleteBucketRegistry is the one bucket-delete decision for every entry
+// point (S3 DeleteBucket, the management API): the registry row must exist;
+// objects, versions/delete markers and in-progress multipart uploads keep
+// the bucket (AWS 409 BucketNotEmpty); otherwise the row goes together with
+// the bucket's own configuration rows (notification targets — a re-created
+// bucket must not inherit the previous one's webhooks). No filesystem is
+// consulted: the /tmp or DATA_PATH marker directory said nothing about the
+// bucket's objects (R4-04 on the S3 path, post-merge R4-22 on the
+// management API).
+func (s *Server) deleteBucketRegistry(ctx context.Context, tenantID, bucket string) (bucketDeleteOutcome, error) {
+	var out bucketDeleteOutcome
+	var exists bool
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM buckets WHERE tenant_id = $1 AND name = $2)`,
+		tenantID, bucket).Scan(&exists); err != nil {
+		return out, fmt.Errorf("delete bucket %s: registry lookup: %w", bucket, err)
+	}
+	if !exists {
+		out.state = bucketDeleteMissing
+		return out, nil
+	}
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT
+			(SELECT COUNT(*) FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2),
+			(SELECT COUNT(*) FROM object_versions WHERE tenant_id = $1 AND bucket = $2),
+			(SELECT COUNT(*) FROM multipart_uploads WHERE tenant_id = $1 AND bucket = $2 AND status = 'active')`,
+		tenantID, bucket).Scan(&out.objects, &out.versions, &out.uploads); err != nil {
+		return out, fmt.Errorf("delete bucket %s: contents lookup: %w", bucket, err)
+	}
+	if out.objects > 0 || out.versions > 0 || out.uploads > 0 {
+		out.state = bucketDeleteNotEmpty
+		return out, nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return out, fmt.Errorf("delete bucket %s: begin: %w", bucket, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM bucket_notifications WHERE tenant_id = $1 AND bucket = $2`, tenantID, bucket); err != nil {
+		return out, fmt.Errorf("delete bucket %s: notification targets: %w", bucket, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM buckets WHERE tenant_id = $1 AND name = $2`, tenantID, bucket); err != nil {
+		return out, fmt.Errorf("delete bucket %s: registry row: %w", bucket, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return out, fmt.Errorf("delete bucket %s: commit: %w", bucket, err)
+	}
+	out.state = bucketDeleteDone
+	return out, nil
+}
+
 // DeleteBucket handles S3 DeleteBucket operation
 func (s *Server) DeleteBucket(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -376,15 +446,14 @@ func (s *Server) DeleteBucket(w http.ResponseWriter, r *http.Request) {
 	// boot could not be). Objects, versions/delete markers and in-progress
 	// multipart uploads all keep the bucket (AWS 409 BucketNotEmpty).
 	if s.db != nil && tenantID != "default" {
-		var exists bool
-		if err := s.db.QueryRowContext(ctx,
-			`SELECT EXISTS(SELECT 1 FROM buckets WHERE tenant_id = $1 AND name = $2)`,
-			tenantID, bucket).Scan(&exists); err != nil {
-			s.logger.Error("delete bucket: registry lookup failed", zap.Error(err))
+		outcome, err := s.deleteBucketRegistry(ctx, tenantID, bucket)
+		if err != nil {
+			s.logger.Error("delete bucket: registry delete failed", zap.Error(err))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 			return
 		}
-		if !exists {
+		switch outcome.state {
+		case bucketDeleteMissing:
 			reqID := generateRequestID()
 			if suggestion := bucketSuggestion(ctx, s.db, tenantID, bucket); suggestion != "" {
 				WriteS3ErrorWithContext(w, ErrNoSuchBucket, r.URL.Path, reqID, WithSuggestion(suggestion))
@@ -392,26 +461,9 @@ func (s *Server) DeleteBucket(w http.ResponseWriter, r *http.Request) {
 				WriteS3Error(w, ErrNoSuchBucket, r.URL.Path, reqID)
 			}
 			return
-		}
-		var objects, versions, uploads int
-		if err := s.db.QueryRowContext(ctx, `
-			SELECT
-				(SELECT COUNT(*) FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2),
-				(SELECT COUNT(*) FROM object_versions WHERE tenant_id = $1 AND bucket = $2),
-				(SELECT COUNT(*) FROM multipart_uploads WHERE tenant_id = $1 AND bucket = $2 AND status = 'active')`,
-			tenantID, bucket).Scan(&objects, &versions, &uploads); err != nil {
-			s.logger.Error("delete bucket: contents lookup failed", zap.Error(err))
-			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-			return
-		}
-		if objects > 0 || versions > 0 || uploads > 0 {
+		case bucketDeleteNotEmpty:
 			WriteS3ErrorWithContext(w, ErrBucketNotEmpty, r.URL.Path, generateRequestID(),
-				WithSuggestion(fmt.Sprintf("The bucket still holds %d object(s), %d version(s) and %d in-progress multipart upload(s).", objects, versions, uploads)))
-			return
-		}
-		if _, err := s.db.ExecContext(ctx, `DELETE FROM buckets WHERE tenant_id = $1 AND name = $2`, tenantID, bucket); err != nil {
-			s.logger.Error("delete bucket: registry delete failed", zap.Error(err))
-			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+				WithSuggestion(outcome.contents()))
 			return
 		}
 		_ = os.RemoveAll(dirPath) // the marker directory, if any
