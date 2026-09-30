@@ -10,7 +10,7 @@ Status (2026-07-29): **cleared for launch-tier use; one commercial unknown.**
 - **Performance:** benchmarked on **both** the direct and engine paths.
 - **The open question:** the account is at $0 under a **1-year SaaS promo whose
   end date and renewal rate we do not have in writing**. That date is when
-  Lyve COGS goes from $0 to an unknown number, and our modelled $6.37/TB is
+  Lyve COGS goes from $0 to an unknown number, and our modelled $7.99/TB is
   above every tier's selling price. Get it in writing before committing large
   volumes of customer data (§4).
 - **Design around:** no durability warranty at all, and no multi-region
@@ -124,8 +124,9 @@ Two caveats survive, and they are the ones to plan around:
   **30 days** of discovery; SLA procedures must be exhausted first.
 - **No fee-change clause** was found in either document — pricing lives in the
   Order, which we do not have a copy of. So the post-interim rate is
-  genuinely unknown; the `$6.37/TB` in `cmd/vaultaire/main.go:144` is our own
-  modelling constant, never a quoted or invoiced price.
+  genuinely unknown; the `$7.99/TB` in `cmd/vaultaire/main.go`'s price table
+  (the 2026-09-27 list price; the older `$6.37` was the pre-2026 list) is our
+  own modelling constant, never a quoted or invoiced price.
 - **Infrequent Access supplement** (we are not adopting IA — recorded for
   completeness): 180-day minimum retention, **128 KB** minimum object size,
   monthly retrievals capped at average objects stored, US-Central and APAC
@@ -142,7 +143,7 @@ What remains is **one commercial unknown and two facts to design around**:
 1. **The promo end date and renewal rate are not written down** (§4). This is
    the only real blocker left, and it is a question, not a risk we can engineer
    away. Everything on Lyve has $0 COGS until that date and an unknown COGS
-   after it. The `$6.37/TB` we model is *above every tier's selling price*
+   after it. The `$7.99/TB` we model is *above every tier's selling price*
    ($4.49 Standard annual, $5.99 Performance), so if the renewal lands near
    that number, any tier backed solely by Lyve is negative-margin the day the
    promo ends. **Get the date and the rate before sizing how much customer data
@@ -213,19 +214,19 @@ contract plus `RangeGetter` and parallel multipart, is registered in
 `cmd/vaultaire/main.go` on `LYVE_ACCESS_KEY`, and is already treated as
 durable/failover-eligible. The gaps are in the surfaces around it:
 
-- **`STANDARD_IA → lyve` routing is already live** (`internal/engine/storage_class.go`),
-  but **unreachable** — no `tier_preference` value maps to `STANDARD_IA`, so no
-  customer can select it. Note this directly contradicts
-  `docs/IMPLEMENTATION_PLAN.md:871` ("Don't route customer `STANDARD_IA` to
-  Lyve"); **the code and the plan disagree today** and one of them must change.
+- **Lyve is reached only through the internal `RESILIENT` class**
+  (`internal/engine/storage_class.go`), which the `resilient` bucket
+  `tier_preference` resolves to. The old `STANDARD_IA → lyve` mapping was
+  removed, so a customer `x-amz-storage-class: STANDARD_IA` never routes to
+  Lyve and objects land at Lyve's default class, never its IA service tier —
+  the code and `docs/IMPLEMENTATION_PLAN.md` ("Don't route customer
+  `STANDARD_IA` to Lyve") now agree.
 - **Cost tracking:** `internal/dashboard/handlers/admin_costs.go` costs Lyve
   at the current list price ($7.99/TB standard as of 2026-09-27) in the
   default "modelled" view and at $0 in `?costs=invoiced` (the promo, see
   *Contract terms* §4 — end date still not in writing; owner says ~mid-2028).
   The `$6.37/TB` quoted elsewhere in this file is the pre-2026 list price.
   (`internal/usage/cost_tracker.go` no longer exists — R0-16/R10-30.)
-- **Health check is commented out** (`internal/api/server.go`) and points at a
-  stale `lyvecloud.seagate.com` host.
 - **`bucketRegionDriver` hardcodes `"idrive-" + region`**, and `IsValidRegion`
   is an iDrive-only registry — Lyve's region names differ, so bucket-region
   routing cannot currently express a Lyve tier.
@@ -814,8 +815,9 @@ in (due Jul 31); until then use our own reaper.
   only. Verify our contract's egress/API pricing first — Lyve markets no
   egress fees, which would make presigned offload free bandwidth.
 - **Not** a primary hot tier (iDrive is cheaper with faster single-stream
-  GET) and **not** archive (Geyser is ~4× cheaper per TB). Lyve ≈
-  $6.37/TB (cost map in `cmd/vaultaire/main.go`).
+  GET) and **not** archive (Geyser is ~5× cheaper per TB). Lyve ≈
+  $7.99/TB list (cost map in `cmd/vaultaire/main.go`; invoiced at $0 under the
+  promo).
 
 ## Prior art & where the old tooling lives
 

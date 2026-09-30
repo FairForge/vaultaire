@@ -4,9 +4,9 @@ HTTP handlers for the stored.ge customer dashboard. Each handler receives a pre-
 
 ## Overview Handler (`overview.go`)
 
-`HandleOverview(tmpl, db, logger, storageMode)` renders the main dashboard page:
+`HandleOverview(tmpl, db, logger, storageMode, fl *flags.Service)` renders the main dashboard page (`fl` gates the house via `house_overview`):
 - Reads session from context via `dashauth.GetSession(r.Context())`
-- Queries 4 tables: `tenant_quotas`, `bandwidth_usage_daily`, `object_head_cache`, `api_keys`, `quota_usage_events`
+- Queries five tables: `tenant_quotas`, `bandwidth_usage_daily`, `object_head_cache`, `api_keys`, `quota_usage_events` (plus `tenant_floor_quotas` for the house)
 - Fails gracefully to zeros when DB is nil or tables are empty
 - `populateLocality(storageMode, data)` maps the active backend to a physical location (city, country, SVG coordinates) for the Data Locality card. Falls back to "local" (Salt Lake City) for unknown backends. Pre-computes SVG dot coordinates (LocalityDotX/Y) for a 200x100 world map.
 - Template: `templates/customer/dashboard.html`
@@ -17,7 +17,7 @@ Helper functions are in `context.go`: `formatBytes` (human-readable sizes), `rel
 
 Three handlers:
 - `HandleBuckets(tmpl, db, dataPath, logger)` — lists buckets from `buckets` table LEFT JOIN `object_head_cache` (includes empty buckets with count=0)
-- `HandleCreateBucket(tmpl, db, dataPath, logger)` — validates S3-compatible name and region (via `drivers.IsValidRegion`, default `us-west-1`), creates directory at `{dataPath}/{name}`, persists to `buckets` table with region
+- `HandleCreateBucket(tmpl, db, dataPath, logger)` — validates S3-compatible name and region (`drivers.IsValidRegion`; default `drivers.IDriveDefaultRegion` = `IDRIVE_REGION`, else `us-central-1`; a region whose key pair is not configured is refused by `IDriveRegionAvailable` — WP-R7-1), creates directory at `{dataPath}/{name}`, persists to `buckets` table with region
 - `HandleBucketObjects(tmpl, db, logger)` — lists objects in a bucket with prefix-based "folder" navigation (uses chi URL param `{name}`). Queries bucket visibility and tenant slug; for public-read buckets with a slug, sets `CDNBaseURL` and populates `ObjectRow.CDNURL` and `ObjectRow.PreviewType` fields for inline media previews and CDN copy buttons.
 
 `previewTypeFromContentType(ct)` maps content types to preview categories: `image/*` → "image", `video/*` → "video", `audio/*` → "audio", `text/*`/json/xml/js → "text", everything else → "".
@@ -40,7 +40,7 @@ Template: `templates/customer/bucket_settings.html` — includes a "Storage Tier
 
 Three handlers:
 - `HandleAPIKeys(tmpl, authSvc, logger)` — lists all keys for current user via `auth.ListAPIKeys()`
-- `HandleGenerateKey(tmpl, authSvc, logger)` — creates key via `auth.GenerateAPIKey()`, shows secret once
+- `HandleGenerateKey(tmpl, authSvc, db, logger)` — creates key via `auth.GenerateAPIKey()`, shows secret once
 - `HandleRevokeKey(authSvc, logger)` — revokes key via `auth.RevokeAPIKey()`, redirects back
 
 Uses `auth.AuthService` directly (not DB queries) since keys are in-memory + DB-backed. The free-tier key cap is enforced by `auth.GenerateAPIKey` (`ErrKeyLimitReached` → the friendly message) for every entry point — the handler's own count included the primary pair minted at signup, so a fresh free account could never generate a key (Review R12, P1).
@@ -69,9 +69,9 @@ Queries: `tenant_quotas`, `bandwidth_usage_daily` (30 days). Chart bars are `Cha
 ## Settings Page (`settings.go`)
 
 Four handlers:
-- `HandleSettings(tmpl, authSvc, db, logger)` — GET renders profile, password, and notification forms
+- `HandleSettings(tmpl, authSvc, db, sessions, logger)` — GET renders profile, password, notification forms and the active-sessions list
 - `HandleUpdateProfile(tmpl, authSvc, db, logger)` — POST updates company in DB + in-memory
-- `HandleChangePassword(tmpl, authSvc, db, logger)` — POST validates current password via `authSvc.ChangePassword()`, enforces min length + match + different-from-current
+- `HandleChangePassword(tmpl, authSvc, db, sessions, logger)` — POST validates current password via `authSvc.ChangePassword()`, enforces min length + match + different-from-current, then revokes every other session
 - `HandleUpdateNotifications(tmpl, authSvc, db, logger)` — POST saves email notification preference via `authSvc.SetUserPreferences()`
 
 Uses both `*auth.AuthService` (password change, preferences) and `*sql.DB` (company column, member-since date).
@@ -112,9 +112,9 @@ Analytics link only appears in `bucket_objects.html` for public-read buckets (ga
 ## Account / GDPR (`account.go`)
 
 Three handlers for GDPR compliance (Phase 5.14.1):
-- `HandleExportData(db, logger)` — POST `/dashboard/settings/export`. Collects user profile, tenant, quota, buckets, objects, API keys, bandwidth (90d) into JSON. Returns as `Content-Disposition: attachment` download.
-- `HandleRequestDeletion(db, sessions, logger)` — POST `/dashboard/settings/delete-account`. Requires password confirmation via bcrypt. Sets `deletion_scheduled_at` 30 days out and `status = 'pending_deletion'`. Flash message with scheduled date.
-- `HandleCancelDeletion(db, logger)` — POST `/dashboard/settings/cancel-deletion`. Nulls `deletion_scheduled_at`/`deletion_reason`, sets `status = 'active'`.
+- `HandleExportData(db, logger)` — POST `/dashboard/settings/export`. Collects user profile, tenant, quota, buckets, objects, API keys, bandwidth (90d) into JSON. Returns as `Content-Disposition: attachment` download. Writes an `account.exported` audit row (bytes, `via=dashboard`).
+- `HandleRequestDeletion(db, sessions, logger)` — POST `/dashboard/settings/delete-account`. Requires password confirmation via bcrypt. Sets `deletion_scheduled_at` 30 days out and `status = 'pending_deletion'`. Flash message with scheduled date. Writes `account.deletion_scheduled` (severity warning, scheduled_at + reason).
+- `HandleCancelDeletion(db, logger)` — POST `/dashboard/settings/cancel-deletion`. Nulls `deletion_scheduled_at`/`deletion_reason`, sets `status = 'active'`. Writes `account.deletion_cancelled`.
 
 `populateDeletionStatus(ctx, db, userID, data)` in `settings.go` queries `deletion_scheduled_at` from users and populates `DeletionScheduled` + `DeletionDate` template data.
 
@@ -147,16 +147,19 @@ in the api package → `waitlist_signups`, migration 044).
 - `HandleAdminWaitlist(tmpl, db, logger)` — GET `/admin/waitlist`: total count + the
   1000 most recent signups (email, source, date). Renders the `admin` layout.
 - `HandleAdminWaitlistExport(db, logger)` — GET `/admin/waitlist/export`: streams **all**
-  signups as a CSV download (`encoding/csv`, `Content-Disposition: attachment`).
+  signups as a CSV download (`encoding/csv`, `Content-Disposition: attachment`);
+  `?filter=house|downstairs|attic` keeps only signups whose built house has that floor
+  (unknown filter → 400), `?fields=email` emits the one-column mailer list. Cells are
+  formula-escaped (`csvSafe`) and the export writes an `admin.waitlist_exported` audit row.
 Both redirect to `/login` without a session; nil-DB degrades to empty/zero. Linked
 from the admin sidebar nav. Template: `templates/admin/waitlist.html`.
 
 ## Admin Revenue Dashboard (`admin_revenue.go`)
 
-`HandleAdminRevenue(tmpl, db, logger)` — GET `/admin/revenue`: real MRR from two
-sources: fixed-price Vault plans (`planMonthlyCents` lookup, prices from
-VAULT_SERIES_ECONOMICS.md) + metered tiers (standard/performance via
-`billing.AccruedCents`). Cards: MRR, Active Subs, New This Month, Churn
+`HandleAdminRevenue(tmpl, db, logger)` — GET `/admin/revenue`: real MRR from three
+sources (`populateRevenue`): fixed-price Vault plans (`queryFixedMRR` → `planMonthlyCents`,
+prices from VAULT_SERIES_ECONOMICS.md) + metered tiers (`queryMeteredMRR`, standard/performance
+via `billing.AccruedCents`) + houses per floor (`queryHouseMRR` → `billing.QuoteHouse`). Cards: MRR, Active Subs, New This Month, Churn
 (count + rate from `subscriptions` table). Revenue-by-tier table groups fixed plans
 and metered tiers separately. Top 10 customers by storage, ordered DESC. Optional
 SVG bar chart of new MRR added per month (last 12 months, derived from
@@ -176,8 +179,8 @@ with "$0.00 MRR" zero-state.
 `HandleAdminCosts(tmpl, db, logger)` — GET `/admin/costs`: estimated backend spend,
 per-tenant margin (revenue minus cost), and negative-margin alerts.
 
-Cost model: `backendCostPerTBCents` map (geyser=155, idrive=330, lyve=799,
-hetzner=381, onedrive/gorilla/local/edge=0) + fixed costs (Geyser $155/mo floor,
+Cost model: `backendCostPerTBCents` map (geyser=155, idrive=413 — the annual-plan
+Y2+ rate, lyve=799 — current list, hetzner=381, permafrost/gorilla/local/edge=0) + fixed costs (Geyser $155/mo floor,
 Gorilla configurable). `tierBackend(plan, tier)` maps vault*→geyser,
 standard/performance→idrive, free→local. `egressCostPerTBCents` carries MODELLED
 market rates (lyve=1000 = $10/TB); `subsidizedBackends` (lyve) marks backends

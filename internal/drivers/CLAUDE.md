@@ -1,6 +1,6 @@
 # internal/drivers
 
-Storage backend implementations for the Vaultaire engine. Every driver implements `engine.Driver` (defined in `internal/engine/interface.go`).
+Storage backend implementations for the Vaultaire engine. Every registered driver implements `engine.Driver` (defined in `internal/engine/interface.go`); `S3Driver` (`s3.go`) is the one exception — an embedded base type whose `Put` takes no options, so it is not an `engine.Driver` itself.
 
 ## Driver Interface Contract
 
@@ -16,7 +16,7 @@ type Driver interface {
 }
 ```
 
-All drivers implement `engine.Driver` directly (the old `driver.go` alias + `PutOption` shim was removed in Review R0; put options are `engine.WithContentType` etc.).
+All registered drivers implement `engine.Driver` directly (the old `driver.go` alias + `PutOption` shim was removed in Review R0; put options are `engine.WithContentType` etc.). `S3Driver` is only ever embedded (`QuotalessDriver`), never registered.
 
 ## Driver Implementations
 
@@ -40,11 +40,11 @@ All drivers implement `engine.Driver` directly (the old `driver.go` alias + `Put
 
 Helpers: `IsValidRegion`, `IsEURegion` (`eu-*`), `RegionDisplayName`, `IDriveRegionGroups` (US / EU / Asia Pacific for pickers), `IDriveRegionAvailable` (enforced once main.go has called `SetAvailableIDriveRegions`; unset = every table region, for tests/dev). Called from S3 API (`CreateBucket` validation, `bucketRegionDriver` routing), dashboard (`HandleBuckets` picker, `HandleCreateBucket`, `HandleBucketSettings`).
 
-### Not wired in main.go (scaffolds / future)
+### Not wired in main.go (base types)
 
-| Driver | File | Constructor | Backend | Status |
+| Type | File | Constructor | Backend | Status |
 |--------|------|-------------|---------|--------|
-| `S3Driver` | `s3.go` | `NewS3Driver(endpoint, accessKey, secretKey, region, logger)` | Generic AWS S3 | Used as base for `QuotalessDriver` (embedded); not directly wired |
+| `S3Driver` | `s3.go` | `NewS3Driver(endpoint, accessKey, secretKey, region, logger)` | Generic AWS S3 | Embedded base type for `QuotalessDriver`; **not an `engine.Driver`** (`Put(ctx, container, artifact, data)` has no options parameter) and never registered on its own |
 
 ## Shared Utilities
 
@@ -55,12 +55,7 @@ Helpers: `IsValidRegion`, `IsEURegion` (`eu-*`), `RegionDisplayName`, `IDriveReg
 | `transport.go` | `TunedHTTPClient` | Shared HTTP client factory with connection pooling (200 conns), 4MB I/O buffers, DNS caching, TLS session resumption. Used by all S3-compatible drivers (Lyve, Geyser, iDrive, S3, S3compat). Options: `WithInsecureTLS()`, `WithResponseHeaderTimeout()`, `WithHTTP1Only()`. Disable via `VAULTAIRE_TUNED_TRANSPORT=false`. OneDrive has its own transports (odGraphTransport, odCDNTransport). |
 | `s3errors.go` | `s3IsNotFound` | Typed miss classification for every S3-class `Exists` (Review R7-05): `smithy.APIError` `NoSuchKey`/`NotFound` or an HTTP 404 `ResponseError`; `NoSuchBucket` is a backend error, never a miss. Replaced `strings.Contains(err.Error(), "404")`. Mirror of `engine.isSDKNotFound` / `api.isObjectMissingErr` — keep the three in sync. Note: HEAD responses carry no body, so on `Exists` a missing bucket is indistinguishable from a missing key; `HealthCheck`'s HeadBucket is the bucket check |
 | `s3list.go` | `s3ListPaginator` | The one way drivers walk `ListObjectsV2` pages (R7-06): `StopOnDuplicateToken` so a gateway that repeats a continuation token cannot spin the caller. Used by idrive, lyve, r2, geyser, s3, s3compat |
-| `s3upload.go` | `s3ParallelUpload` | Shared parallel multipart upload via the AWS SDK `manager.Uploader` (16 MiB parts, 8 concurrent). Takes the known body `size` (<=0 = unknown): objects that fit in one part are sent as a **single PutObject**, because with a non-seekable body an exactly-part-size object otherwise costs 3 round trips (Create+UploadPart+Complete). One `manager.Uploader` is cached per client so the SDK's part-buffer pool is reused across calls. Large files upload as concurrent parts instead of one PutObject stream; small files still go as a single PutObject; no full-object buffering. **R2-06:** a body that ends before its declared size (client gone mid-upload) is an error, never committed as a shorter object. Used by `s3compat.go` + `idrive.go` `Put`. Uses stable `feature/s3/manager` (v1) — not the pre-1.0 `transfermanager`. (OneDrive uploads are non-S3; parallel upload there is deferred to the EC layer.) |
-
-### Resilience & Orchestration
-
-| File | Type | Purpose |
-|------|------|---------|
+| `s3upload.go` | `s3ParallelUpload` | Shared parallel multipart upload via the AWS SDK `manager.Uploader` (16 MiB parts, 8 concurrent). Takes the known body `size` (<=0 = unknown): objects that fit in one part are sent as a **single PutObject**, because with a non-seekable body an exactly-part-size object otherwise costs 3 round trips (Create+UploadPart+Complete). One `manager.Uploader` is cached per client so the SDK's part-buffer pool is reused across calls. Large files upload as concurrent parts instead of one PutObject stream; small files still go as a single PutObject; no full-object buffering. **R2-06:** a body that ends before its declared size (client gone mid-upload) is an error, never committed as a shorter object. Used by the `Put` of `s3compat.go`, `idrive.go` and `r2.go`; `lyve.go` goes through the `s3ParallelUploadInput` variant (caller-built `PutObjectInput`, same uploader). Uses stable `feature/s3/manager` (v1) — not the pre-1.0 `transfermanager`. (OneDrive uploads are non-S3; parallel upload there is deferred to the EC layer.) |
 
 ### Bandwidth & Cost
 
@@ -68,11 +63,6 @@ Helpers: `IsValidRegion`, `IsEURegion` (`eu-*`), `RegionDisplayName`, `IDriveReg
 |------|------|---------|
 | `egress_tracker.go` | `EgressTracker` | Per-tenant byte + cost tracking; default rate $0.009/GB (iDrive E2) |
 | `cost_advisor.go` | `CostAdvisor` | Analyzes file access patterns; recommends compression, dedup, tier migration |
-
-### Caching & Streaming
-
-| File | Type | Purpose |
-|------|------|---------|
 
 ### Local Driver Extras
 
@@ -90,10 +80,11 @@ Helpers: `IsValidRegion`, `IsEURegion` (`eu-*`), `RegionDisplayName`, `IDriveReg
 | `capabilities.go` | `CapabilityChecker` | Interface for drivers to declare capabilities (streaming, range read, multipart, versioning, encryption, replication, watch, atomic) |
 | `wasm.go` | `WASMPlugin` | WASM plugin execution via wazero (future compute-at-edge) |
 
-### Geyser Admin
+### Console clients (Geyser, Lyve)
 
 | File | Type | Purpose |
 |------|------|---------|
+| `lyve_console.go` | `LyveConsoleClient` | Lyve Cloud account-management ("RS*") actions: form-encoded `Action=RS…` POSTs to the IAM host, signed with plain SigV4 as service `iam`. `CustomerDetails` (`RSCustomerDetails`) is the authenticated Lyve health probe in `api/backend_probes.go` — it answers only for the account ROOT key (`LYVE_PROBE_*`), a scoped IAM user gets "Action not supported". One 403 retry (`WithLyveConsoleRetryDelay`); see `.private/lyve-console-rs-actions.md` |
 | `geyser_admin.go` | `GeyserAdminClient` | Console API client: programmatic login (`Login` → `VerifyMFA`, cookie jar for httpOnly session cookies), bucket provisioning (terminal status is `CREATED` on the live wire), airgap, restore (`RestoreToCache` to staging, `RestoreToCloud` to a cloud integration), cloud-integration CRUD, `cloudSync` server-side ingest, billing, tape/site/event info, keepalive. Spec-synced 2026-09-19 to the console's own OpenAPI (`/api/v3/api-docs`, saved at `.private/geyser-console-openapi.json`): adds `GetBucketAccess`, `BrowseBucket` (per-object `location` — CACHE vs tape), `PresignUpload`/`PresignDownload` (no-S3-creds data path), `GetBucketSizeHistory`, `GetDatacenters`, `GetDatacenterPricing` (list vs reseller wholesale), `Estimate` (quote engine), `CreateTapeCollection`/`UpdateTapeCollection` (resize works both directions = billing lever). Responses are triple-framed (envelope, bare JSON, or Spring `{content,page}` pagination) — `geyserBody` + `doList` handle all three. |
 
 ### Test Helpers
@@ -105,7 +96,8 @@ Helpers: `IsValidRegion`, `IsEURegion` (`eu-*`), `RegionDisplayName`, `IDriveReg
 
 ## Existing READMEs
 
-- `idrive_README.md` -- iDrive E2 integration + reseller API reference
+- `idrive_README.md` -- iDrive E2 driver notes (endpoints come from the `IDriveRegions` table; reseller API reference is `.private/IDRIVE_RESELLER_API.md`)
+- `geyser_README.md` -- Geyser (Spectra Logic Vail tape) ops manual: endpoints, restore/recall, console tooling
 - `lyve_README.md` -- Lyve Cloud 2 ops manual: bucket homing/replication-policy trap, probe recipes, benchmarks
 - `onedrive_README.md` -- OneDrive integration + dual-transport pattern (HTTP/2 for API, HTTP/1.1 for CDN)
 - `quotaless_README.md` -- Quotaless backend ops manual

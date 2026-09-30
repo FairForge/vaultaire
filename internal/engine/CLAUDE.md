@@ -4,8 +4,8 @@ Core orchestration layer — connects the API layer to storage drivers. This is 
 
 ## Key Types
 
-- **`CoreEngine`** (`engine.go`) — the main orchestrator. Holds `map[string]Driver` (named drivers), primary/backup selection, access tracking, tiered cache, cost optimizer. Implements the `Engine` interface.
-- **`Engine`** interface (`interface.go:9`) — top-level contract: `Get`, `Put`, `Delete`, `List`, `HealthCheck`, `GetMetrics`, plus future stubs (`Execute`, `Query`, `Train`, `Predict`).
+- **`CoreEngine`** (`engine.go`) — the main orchestrator. Holds `map[string]Driver` (named drivers), primary/backup selection, access tracking, a tiered cache (constructed with `EnableCaching: false` in prod — `main.go`; WP-R6-6 deletes it) and a cost optimizer (fed by `SetCostConfiguration`, never consulted — inert). Implements the `Engine` interface.
+- **`Engine`** interface (`interface.go:9`) — top-level contract: `Get`, `Put`, `Delete`, `List`, `HealthCheck`, `GetMetrics`, plus future stubs (`Execute`, `Query`, `Train`, `Predict`) and `GetContainerMetadata` / `GetArtifactMetadata` (`interface.go:30-32`), which nothing outside the package calls.
 - **`Driver`** interface (`interface.go:38`) — the sacred backend contract: `Name`, `Get`, `Put`, `Delete`, `List`, `Exists`, `HealthCheck`. All storage drivers implement this.
 
 ## Request Flow
@@ -25,7 +25,7 @@ Tables created in migration 048: `object_locations` (routing source of truth), `
 
 ## Tiering Engine (Phase 7.3)
 
-`TieringEngine` (`tiering.go`) runs a background goroutine that periodically scans `object_locations` for objects eligible for tier migration based on `tiering_policies`. Follows the BackendMonitor Start/Stop pattern (ticker + stop chan + ctx.Done select loop).
+`TieringEngine` (`tiering.go`) runs a background goroutine that periodically scans `object_locations` for objects eligible for tier migration based on `tiering_policies`. Ticker + stop chan + ctx.Done select loop.
 
 - `Start(ctx)` — background loop, default 1-hour interval. No-op if DB is nil.
 - `Stop()` — close(stop)
@@ -42,12 +42,13 @@ Integrated into CoreEngine: `tiering` field, created in `NewEngine()`, started v
 | `errors.go` | `NotFoundError`, `PermissionError` | Error types + sentinels (`ErrQuotaExceeded`, `ErrInvalidInput`, `ErrAllBackendsUnavailable`) |
 | `selector.go` | `BackendSelector` | Health-score selector — constructed, **never consulted** (R6-17; WP-R6-4 deletes) |
 | `cost_optimizer.go` | `CostOptimizer` | Cost-based selector — fed by `SetCostConfiguration`, **never consulted** (R6-17) |
-| `health.go` | `HealthScorer` | Weighted score — **never scored** (R6-17). The only live routing signal is the circuit breaker |
-| `load_balancer.go` | `LoadBalancer` | 4 strategies: RoundRobin, LeastConn, WeightedRandom, Adaptive |
-| `replicator.go` | `Replicator` | Cross-backend replication: Sync, Async (5 workers), Quorum |
-| `capacity.go` | `CapacityPlanner` | Linear regression to predict when backends fill |
-| `disaster_recovery.go` | `DisasterRecovery` | Failover configs, recovery plans (RTO/RPO) |
-| `sla.go` | `SLAMonitor` | SLA compliance tracking, violation detection |
+| `health.go` | `HealthScorer` | Weighted score — scored only by `api/health_handlers.go` for the `/health` / `/status` display (R6-17); **not a routing input**. The only live routing signal is the circuit breaker |
+| `load_balancer.go` | `LoadBalancer` | 4 strategies: RoundRobin, LeastConn, WeightedRandom, Adaptive — **unreachable** from the product (no constructor caller; WP-R6-4) |
+| `replicator.go` | `Replicator` | Cross-backend replication: Sync, Async (5 workers), Quorum — **unreachable** (WP-R6-4) |
+| `capacity.go` | `CapacityPlanner` | Linear regression to predict when backends fill — **unreachable** (WP-R6-4) |
+| `disaster_recovery.go` | `DisasterRecovery` | Failover configs, recovery plans (RTO/RPO) — **unreachable** (WP-R6-4) |
+| `sla.go` | `SLAMonitor` | SLA compliance tracking, violation detection — **unreachable** (WP-R6-4) |
+| `analytics.go` | `Analytics`, `BackendMetrics`, `BackendStats` | Per-backend request/latency stats — **unreachable** (WP-R6-4) |
 | `failover.go` | `FailoverManager`, `BackendCircuitBreaker` | Per-backend circuit breaker (5 failures/60s → open, 30s → half-open → probe) + ordered failover execution |
 | `storage_class.go` | `ResolveStorageClass`, `BackendToStorageClass` | S3 storage class ↔ backend name mapping (STANDARD→idrive, GLACIER→geyser, etc.) |
 | `interface.go` | `Restorer`, `RestoreStatus` | Optional driver interface for archive backends (V18.2): `RestoreObject(days)` + `RestoreStatus` (raw x-amz-restore passthrough). Geyser implements it. `ErrArchived`/`ErrRestoreAlreadyInProgress` sentinels in errors.go; `ErrArchived` is client-level for the breaker AND stops failover iteration (other backends would mask the archived state as 404) |
@@ -81,7 +82,8 @@ Each registered backend gets an independent `BackendCircuitBreaker`:
 
 `x-amz-storage-class` header on PUT maps to a target backend:
 - STANDARD → idrive, GLACIER/DEEP_ARCHIVE → geyser, REDUCED_REDUNDANCY → local
-- RESILIENT → lyve (internal class — what the `resilient` bucket tier resolves to; NOT the removed STANDARD_IA mapping: objects land on Lyve at its default class, never Lyve's IA service tier)
+- RESILIENT → lyve (internal class — what the `resilient` bucket `tier_preference` resolves to via `tierPreferenceToStorageClass` in `api/s3_engine_adapter.go`; NOT the removed STANDARD_IA mapping: objects land on Lyve at its default class, never Lyve's IA service tier)
+- PUBLIC → r2 (internal class, never sent by clients — set by `api.resolvePutStorageClass` for public-read buckets when an `r2` driver is registered; R2 is the public-bucket / CDN origin only, not a tier)
 
 If the target backend isn't registered, falls back to primary silently. Storage class is a hint, never an error.
 

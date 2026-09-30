@@ -30,7 +30,7 @@ If you haven't already, create a bucket using the AWS CLI:
 
 ```bash
 aws s3 mb s3://my-jfs-data \
-  --endpoint-url https://s3.stored.ge \
+  --endpoint-url https://stored.ge \
   --region us-east-1
 ```
 
@@ -45,14 +45,14 @@ sudo mkdir -p /var/jfs
 
 juicefs format \
   --storage s3 \
-  --bucket https://s3.stored.ge/my-jfs-data \
-  --access-key VK_YOUR_ACCESS_KEY \
-  --secret-key SK_YOUR_SECRET_KEY \
+  --bucket https://stored.ge/my-jfs-data \
+  --access-key VKxxxxxxxxxxxxxxxx \
+  --secret-key SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
   sqlite3:///var/jfs/meta.db \
   myjfs
 ```
 
-Replace `VK_YOUR_ACCESS_KEY` and `SK_YOUR_SECRET_KEY` with your actual stored.ge credentials. The last argument (`myjfs`) is your filesystem name.
+Replace `VKxxxxxxxxxxxxxxxx` and `SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` with your actual stored.ge credentials — the primary pair shown once at sign-up, or a scoped `VLT_…` key from Dashboard → API Keys limited to this bucket. The last argument (`myjfs`) is your filesystem name.
 
 ## Step 4: Mount the Filesystem
 
@@ -140,9 +140,9 @@ juicefs mount -d \
 ```bash
 juicefs format \
   --storage s3 \
-  --bucket https://s3.stored.ge/my-jfs-data \
-  --access-key VK_YOUR_ACCESS_KEY \
-  --secret-key SK_YOUR_SECRET_KEY \
+  --bucket https://stored.ge/my-jfs-data \
+  --access-key VKxxxxxxxxxxxxxxxx \
+  --secret-key SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
   redis://localhost:6379/0 \
   myjfs
 ```

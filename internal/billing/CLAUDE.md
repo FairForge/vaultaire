@@ -42,6 +42,14 @@ Stripe billing integration for stored.ge subscriptions, payments, and invoices.
   to exist**: `server.go` mounts `/webhook/stripe` only when both are set, and
   `NewWebhookHandler("")` answers 503 to everything (Review R10-01 — an empty
   secret used to mean "skip verification").
+- `STRIPE_PRICE_VAULT3`, `STRIPE_PRICE_VAULT9`, `STRIPE_PRICE_VAULT18`,
+  `STRIPE_PRICE_VAULT36`, `STRIPE_PRICE_STANDARD` — the five legacy pack
+  plans (`registerStripePlans` → `RegisterPlan`).
+- `STRIPE_PRICE_{STANDARD,VAULT,PINHOT}_{ANNUAL,MONTHLY}` — the six house
+  prices, read by `HousePriceIDsFromEnv` (`house.go`); all six or the house
+  checkout stays closed.
+- `STRIPE_METER_STORAGE`, `STRIPE_METER_EGRESS` — Billing Meter event names;
+  both or the metered reporter stays dormant.
 
 ## Webhook delivery contract (Review R10)
 
@@ -84,9 +92,9 @@ Stripe billing integration for stored.ge subscriptions, payments, and invoices.
 
 ## Wiring
 
-- Webhook route: `POST /webhook/stripe` registered in server.go:394
+- Webhook route: `POST /webhook/stripe` registered in `server.go` (only when both Stripe envs are set)
 - Checkout + billing portal: wired in dashboard billing handler
-- Registration → auto-creates Stripe customer (server.go:511-514)
+- Stripe customers are created from three places: `/auth/register` (`server.go`), the dashboard register form (`dashboard/router.go`), and lazily at house checkout when the tenant has none yet (`dashboard/handlers/billing_house.go`) — each logs-and-continues on failure, which is why the webhook heals the customer id onto the row
 - Stripe event idempotency via `stripe_events` table (migration 019)
 
 ## Whole-TB House Checkout (dashboard plan Phase 1, `house.go`)

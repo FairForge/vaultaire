@@ -4,7 +4,7 @@ PostgreSQL connection management and migrations for Vaultaire.
 
 ## Migrations
 
-All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, guarded `DO $$` blocks). 67 files numbered `003`–`069` (`001`, `002` and `053` never existed; two `004_*` files — lexical order is the run order).
+All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, guarded `DO $$` blocks). 68 files numbered `003`–`070` (`001`, `002` and `053` never existed; two `004_*` files — lexical order is the run order).
 
 **Runner (there is no Go runner and no `schema_migrations` table):** every deploy (`.github/workflows/deploy.yml`), CI (`ci.yml`) and `make test-db` run `for f in migrations/*.sql; do psql -v ON_ERROR_STOP=1 -f "$f"; done` — the **whole set, every time, before the binary swap**. "Already applied" is decided purely by idempotency, so every statement must be re-runnable (`TestMigrations_Reapply` double-applies the set). Rules for a new migration (Review R9):
 
@@ -37,7 +37,9 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 | 034 | Free tier defaults: `tenant_quotas` column defaults changed to tier='free', storage_limit_bytes=5368709120 (5 GB). Existing rows unchanged. WP-8: wrapped in a `to_regclass` guard — no-op on a fresh DB where `tenant_quotas` doesn't exist until 056 (which bakes these defaults in). |
 | 035 | CDN analytics: `cdn_access_log` (per-request log), `cdn_stats_daily` (tenant+bucket+date rollup) |
 | 036 | MFA Delete: `mfa_delete_enabled` BOOLEAN on `buckets` (default FALSE) |
+| 037 | SSE-S3: `tenant_encryption_keys` table (tenant_id PK, algorithm `ML-KEM-768+AES-256-GCM`, sealed seed, public_key, key_version, rotated_at); `sse_enabled` BOOLEAN on `buckets` |
 | 038 | Account deletion: `deletion_scheduled_at` + `deletion_reason` on users, `account_exports` table |
+| 039 | Bucket region: `region TEXT NOT NULL DEFAULT 'us-west-1'` on `buckets` (the default is rewritten to the primary's real region by 067) |
 | 040 | S3 access logging + inventory: `logging_enabled`, `logging_target_bucket`, `logging_prefix`, `inventory_enabled`, `inventory_schedule`, `inventory_target_bucket`, `inventory_prefix`, `inventory_format` on `buckets`; `s3_access_log` table |
 | 041 | Object tagging: `tags JSONB` (default `{}`) on `object_head_cache` — per-object S3 `?tagging` sub-resource (flat key/value map) |
 | 042 | Content-Disposition: `content_disposition TEXT` (default `''`) on `object_head_cache` — stored response header; `cdn_force_download BOOLEAN` (default FALSE) on `buckets` — CDN force-attachment toggle |
@@ -48,6 +50,7 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 | 047 | Abuse reports: `abuse_reports` table (reporter, tenant, bucket, key, type, description, status) — public abuse reporting + admin moderation queue |
 | 048 | Object location tracking: `object_locations` (durable backend routing), `tiering_policies` (age-based tiering config), `tenant_cost_daily` (per-tenant cost rollup); `last_accessed` column on `object_head_cache` |
 | 049 | Bucket tier preference: `tier_preference TEXT NOT NULL DEFAULT 'auto'` on `buckets` — pins a bucket to a specific storage tier (auto/performance/standard/archive) |
+| 050 | Data residency (Phase 7.6): `data_residency TEXT` (nullable) on `buckets` — per-bucket residency constraint |
 | 051 | Chunking + dedup: `global_content_index` (dedup hash→backend), `tenant_chunk_refs` (per-tenant chunk manifest), `object_metadata` (pipeline metadata); PL/pgSQL functions `increment_chunk_ref`, `decrement_chunk_ref`, `get_tenant_dedup_ratio`; `is_chunked BOOLEAN` on `object_head_cache` |
 | 052 | Chunk encryption: `encrypted BOOLEAN` (default FALSE) + `encryption_algo VARCHAR(32)` on `global_content_index` — tracks per-chunk convergent encryption state for the GET path |
 | 054 | Tenant-scoped dedup (WP-7): `dedup_scope VARCHAR(64)` (default `'_global'`) on `global_content_index` + `tenant_chunk_refs`; GCI primary key promoted to `(dedup_scope, plaintext_hash)` and the `tenant_chunk_refs` FK re-pointed at the composite key; `increment_chunk_ref`/`decrement_chunk_ref` take `(scope, hash)`. Encrypted chunks scope to the tenant UUID; unencrypted chunks stay `'_global'` (cross-tenant dedup preserved). The PK/FK swap is guarded on the PK still being single-column, so re-apply is a no-op |
@@ -66,22 +69,23 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 | 067 | Bucket region default (#502, WP-R7-1): `buckets.region` default becomes the primary's real region (`us-central-1`); rows carrying the old `us-west-1` placeholder are rewritten |
 | 068 | Multipart upload attributes (Review R3, #514): `content_type`, `metadata JSONB`, `storage_class`, `content_disposition`, `content_encoding`, `content_language`, `cache_control`, `http_expires`, `website_redirect_location` on `multipart_uploads` — CreateMultipartUpload is where clients send them, Complete carries only the part list; written to the head row at complete |
 | 069 | Byte-order listing index (Review R4-05 / WP-R9-9, #515): `CREATE INDEX CONCURRENTLY … ON object_head_cache (tenant_id, bucket, object_key COLLATE "C")` — S3 listings are UTF-8 byte order and the prod database collation is `en_US.UTF-8`; the listing queries now order and range on `object_key COLLATE "C"` (no more `LIKE prefix%`) and this index serves both. Idempotent (`IF NOT EXISTS`), runs outside a transaction like every file |
+| 070 | Sign-up attribution (Review R12, checklist item 7): `referrer`, `utm_source`, `utm_medium`, `utm_campaign` on `waitlist_signups` and `signup_referrer`, `signup_utm_source`, `signup_utm_medium`, `signup_utm_campaign` on `users` (TEXT NOT NULL DEFAULT ''; referrer = host only, utm values capped at 100 chars) |
 
 ## Key Tables
 
-- **users** — `id (UUID)`, `email`, `password_hash`, `company`, `status`, `role`, `stripe_customer_id`, `deletion_scheduled_at`, `deletion_reason`
+- **users** — `id (UUID)`, `email`, `password_hash`, `company`, `status`, `role`, `stripe_customer_id`, `deletion_scheduled_at`, `deletion_reason`, `signup_referrer`, `signup_utm_source`, `signup_utm_medium`, `signup_utm_campaign` (070)
 - **tenants** — `id`, `name`, `email`, `access_key`, `secret_key`, `slug`, `slug_locked`, `stripe_customer_id`, `stripe_subscription_id`, `subscription_status`, `plan`, `suspended_at`
-- **api_keys** — `id (UUID)`, `user_id → users`, `name`, `key_id`, `secret_hash`, `secret_key`, `permissions` (JSONB, default `["*"]`), `bucket_scope` (TEXT[]), `ip_allowlist` (TEXT[]), `expires_at`
-- **tenant_quotas** — `tenant_id (PK)`, `storage_limit_bytes`, `storage_used_bytes`, `tier`
+- **api_keys** — `id (UUID)`, `user_id → users`, `name`, `key_id`, `secret_hash`, `secret_key`, `permissions` (JSONB, default `["*"]`), `bucket_scope` (TEXT[]), `ip_allowlist` (TEXT[]), `expires_at`, `revoked_at` (064 — the credential lookups filter `revoked_at IS NULL`)
+- **tenant_quotas** — `tenant_id (PK)`, `storage_limit_bytes`, `storage_used_bytes`, `tier`, `spending_cap_cents` (043), `pin_hot_bytes` (066 — bytes that must never demote)
 - **dashboard_sessions** — `id (VARCHAR 64)`, `user_id → users`, `tenant_id → tenants`, `email`, `role`, `ip_address`, `user_agent`, `created_at`, `last_active_at`, `expires_at`
 - **subscriptions** — Stripe subscription state tracking
 - **bandwidth_usage_daily** — per-tenant daily ingress/egress/requests (unique on tenant_id + date)
 - **backend_bandwidth_daily** — per-backend daily ingress/egress/requests (PK backend_name + date); only requests that touched a backend produce rows
 - **buckets** — `(tenant_id, name) PK`, `visibility` (private/public-read), `cors_origins`, `cache_max_age_secs`, `bandwidth_budget_bytes`, `versioning_status`, `object_lock_enabled`, `default_retention_mode`, `default_retention_days`, `mfa_delete_enabled`, `logging_enabled`, `logging_target_bucket`, `logging_prefix`, `inventory_enabled`, `inventory_schedule`, `inventory_target_bucket`, `inventory_prefix`, `inventory_format`, `cdn_force_download`, `tier_preference` (auto/performance/standard/archive, default auto)
 - **object_head_cache** — HEAD request cache (size, ETag, content-type, backend_name stored on PUT); `tags` JSONB holds per-object S3 tags (separate from `metadata`); `content_disposition` TEXT holds the stored Content-Disposition response header; `is_chunked` BOOLEAN (default FALSE) flags objects stored via content-defined chunking
-- **global_content_index** — `plaintext_hash (VARCHAR(64) PK)`, `backend_id`, `storage_key`, `size_bytes`, `compressed_size`, `compression_algo`, `encrypted` (BOOLEAN, default FALSE), `encryption_algo` (VARCHAR(32)), `ref_count` (default 1), `first_seen_at`, `last_accessed_at`, `marked_for_deletion` (default FALSE), `marked_at` — global dedup hash-to-backend mapping; partial index on `marked_for_deletion` for GC
-- **tenant_chunk_refs** — `id (UUID PK)`, `tenant_id (UUID)`, `bucket_name`, `object_key`, `chunk_index`, `chunk_offset`, `plaintext_hash` → `global_content_index`, `encryption_key_version`, `ciphertext_hash`, `created_at`; UNIQUE(tenant_id, bucket_name, object_key, chunk_index) — per-tenant chunk manifest
-- **object_metadata** — `id (UUID PK)`, `tenant_id (UUID)`, `bucket_name`, `object_key`, `total_size`, `chunk_count`, `content_hash`, `content_type`, `logical_size`, `physical_size`, `dedup_ratio`, `pipeline_config (JSONB)`, `created_at`, `updated_at`; UNIQUE(tenant_id, bucket_name, object_key) — pipeline metadata per chunked object
+- **global_content_index** — `(dedup_scope, plaintext_hash) PK` (054 — `dedup_scope VARCHAR(64)` default `'_global'`, tenant UUID for encrypted chunks), `backend_id`, `storage_key`, `size_bytes`, `compressed_size`, `compression_algo`, `encrypted` (BOOLEAN, default FALSE), `encryption_algo` (VARCHAR(32)), `ciphertext_hash` (054), `ref_count` (default 1), `first_seen_at`, `last_accessed_at`, `marked_for_deletion` (default FALSE), `marked_at` — scoped dedup hash-to-backend mapping; partial index on `marked_for_deletion` for GC
+- **tenant_chunk_refs** — `id (UUID PK)`, `tenant_id (TEXT since 058)`, `bucket_name`, `object_key`, `chunk_index`, `chunk_offset`, `dedup_scope` + `plaintext_hash` → `global_content_index` (composite FK, 054), `encryption_key_version`, `ciphertext_hash`, `created_at`; UNIQUE(tenant_id, bucket_name, object_key, chunk_index) — per-tenant chunk manifest
+- **object_metadata** — `id (UUID PK)`, `tenant_id (TEXT since 058)`, `bucket_name`, `object_key`, `total_size`, `chunk_count`, `content_hash`, `content_type`, `logical_size`, `physical_size`, `dedup_ratio`, `pipeline_config (JSONB)`, `created_at`, `updated_at`; UNIQUE(tenant_id, bucket_name, object_key) — pipeline metadata per chunked object
 - **user_mfa** — `user_id (PK)`, `secret`, `enabled`, `backup_codes` (JSON), `created_at`, `updated_at` — TOTP 2FA settings
 - **mfa_audit_log** — `id (SERIAL)`, `user_id`, `action`, `success`, `ip_address`, `user_agent`, `created_at`
 - **object_versions** — `(tenant_id, bucket, object_key, version_id) PK`, `size_bytes`, `etag`, `content_type`, `is_latest`, `is_delete_marker`, `backend_name`, `created_at`
@@ -111,10 +115,10 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 
 Pool settings: `MaxOpenConns=50`, `MaxIdleConns=25`, `ConnMaxLifetime=5m`, `ConnMaxIdleTime=1m`. Sized for 100+ concurrent S3 requests (each runs 5-6 DB queries through the auth + head-cache path).
 
-Prod is PostgreSQL **16.13** (`max_connections = 200`, no pgbouncer, `statement_timeout`/`lock_timeout` = 0); local dev is 15.13. `NewPostgres` does **not** dial (`sql.Open` is lazy): a down Postgres is only noticed on the first query (R9-06 / WP-R9-4). The `Postgres` wrapper's CRUD methods (`CreateTables`, `CreateTenant`, `*Artifact*`, `Exec`/`Query*`) are dead code (R0-12) — only `NewPostgres`, `Close`, `Ping`, `DB` are used.
+Prod is PostgreSQL **16.13** (`max_connections = 200`, no pgbouncer, `statement_timeout`/`lock_timeout` = 0); local dev is 15.13. `NewPostgres` does **not** dial (`sql.Open` is lazy): a down Postgres is only noticed on the first query (R9-06 / WP-R9-4). The `Postgres` wrapper's CRUD methods (`CreateTables`, `CreateTenant`, `*Artifact*`, `Exec`/`Query*`) are dead code (R0-12) — only `NewPostgres`, `Close`, `DB` are used (`Ping` exists but has no caller, which is why a dead Postgres is not noticed at boot).
 
 ## Test databases
 
-`internal/testutil.DSN()` resolves `DATABASE_URL` > `TEST_DB_*` > `vaultaire_test`; every DB-backed test goes through it (R9 removed the last direct `os.Getenv("DATABASE_URL")` guards and the three helpers that fell back to the shared dev DB). `make test-db` creates/migrates `vaultaire_test`. Tests must not `DROP TABLE` or `DELETE` without a tenant/key predicate — CI runs packages in parallel against ONE database. Known exception still open: `crypto/gci_test.go` (never runs; R0-18 / WP-R0-11).
+`internal/testutil.DSN()` resolves `DATABASE_URL` > `TEST_DB_*` > `vaultaire_test`; every DB-backed test goes through it (R9 removed the last direct `os.Getenv("DATABASE_URL")` guards and the three helpers that fell back to the shared dev DB). `make test-db` creates/migrates `vaultaire_test`. Tests must not `DROP TABLE` or `DELETE` without a tenant/key predicate — CI runs packages in parallel against ONE database. (`crypto/gci_test.go` runs against the migrated test DB since R8-13, with a per-test `dedup_scope` and scoped cleanup.)
 
-Review R9 findings, schema-by-domain table, hot-query EXPLAIN verdicts and follow-up WPs: `docs/reviews/R9-database.md`.
+The schema-by-domain table is `docs/DATABASE.md`. Review R9 findings, hot-query EXPLAIN verdicts and follow-up WPs: `docs/reviews/R9-database.md`.

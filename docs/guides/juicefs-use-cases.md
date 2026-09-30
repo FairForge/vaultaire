@@ -4,7 +4,7 @@ Real setups you can run today on a $3/year VPS backed by stored.ge storage. Ever
 
 ## Plex / Jellyfin Media Server
 
-Stream your media library from stored.ge without filling up your VPS disk. A $3/year NAT VPS + a Vault1 plan ($4.99/month for 1TB) gives you a full media server for under $65/year.
+Stream your media library from stored.ge without filling up your VPS disk. A $3/year NAT VPS + 1 TB in the attic (Vault: $4.99/mo minimum paid monthly, $2/TB paid annually) gives you a full media server for under $65/year — under $30/year on the annual rate.
 
 ```bash
 # Point Jellyfin at the mount
@@ -32,7 +32,7 @@ juicefs mount -d \
   sqlite3:///var/jfs/meta.db /mnt/storedge
 ```
 
-**Cost math**: 500GB of media on Vault1 ($4.99/mo) + BuyVM $3.50/yr VPS = ~$63/year total. Comparable Plex cloud setups on Google Drive or Dropbox run $100+/year and can revoke API access at any time.
+**Cost math**: 500GB of media fits the 1 TB Vault minimum ($4.99/mo monthly, or $24/year annual) + BuyVM $3.50/yr VPS = ~$63/year total, ~$28/year on the annual rate. Comparable Plex cloud setups on Google Drive or Dropbox run $100+/year and can revoke API access at any time.
 
 ## Nextcloud External Storage
 
@@ -47,9 +47,9 @@ Add to your Nextcloud `config.php`:
     'class' => '\\OC\\Files\\ObjectStore\\S3',
     'arguments' => [
         'bucket' => 'nextcloud-data',
-        'key'    => 'VK_YOUR_ACCESS_KEY',
-        'secret' => 'SK_YOUR_SECRET_KEY',
-        'hostname' => 's3.stored.ge',
+        'key'    => 'VKxxxxxxxxxxxxxxxx',   // or a scoped VLT_ key
+        'secret' => 'SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+        'hostname' => 'stored.ge',
         'port'   => 443,
         'use_ssl' => true,
         'use_path_style' => true,
@@ -83,15 +83,15 @@ UPLOAD_LOCATION=/mnt/storedge/immich-uploads
 # Or use S3 directly:
 # IMMICH_S3_ENABLED=true
 # IMMICH_S3_BUCKET=immich-photos
-# IMMICH_S3_ENDPOINT=https://s3.stored.ge
-# IMMICH_S3_ACCESS_KEY=VK_YOUR_ACCESS_KEY
-# IMMICH_S3_SECRET_KEY=SK_YOUR_SECRET_KEY
+# IMMICH_S3_ENDPOINT=https://stored.ge
+# IMMICH_S3_ACCESS_KEY=VKxxxxxxxxxxxxxxxx
+# IMMICH_S3_SECRET_KEY=SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 # IMMICH_S3_REGION=us-east-1
 ```
 
 The JuiceFS mount path (`UPLOAD_LOCATION`) is simpler to set up and doesn't require Immich's S3 support. Both approaches work — choose S3 direct if you want Immich to handle uploads natively, or JuiceFS if you want filesystem-level access to the photos.
 
-**Cost math**: 200GB of photos on Vault1 ($4.99/mo) is $60/year. Google One 200GB is $30/year but locks you into their ecosystem. Immich + stored.ge gives you full ownership.
+**Cost math**: 200GB of photos fits the 1 TB Vault minimum: $4.99/mo ($60/year) monthly, or $24/year annual. Google One 200GB is $30/year but locks you into their ecosystem. Immich + stored.ge gives you full ownership.
 
 ## Git LFS / CI Artifacts
 
@@ -101,13 +101,13 @@ Configure your `.lfsconfig`:
 
 ```ini
 [lfs]
-  url = "https://s3.stored.ge"
+  url = "https://stored.ge"
 
 [lfs "storage"]
   s3.bucket = git-lfs-artifacts
-  s3.endpoint = https://s3.stored.ge
-  s3.access_key_id = VK_YOUR_ACCESS_KEY
-  s3.secret_access_key = SK_YOUR_SECRET_KEY
+  s3.endpoint = https://stored.ge
+  s3.access_key_id = VKxxxxxxxxxxxxxxxx
+  s3.secret_access_key = SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
 Or use the JuiceFS mount for CI artifact caching:
@@ -183,4 +183,4 @@ Sonarr/Radarr → Settings → Media Management:
 - **Use Hardlinks instead of Copy**: No
 - **Import using Script**: No
 
-This gives you the speed of local downloads with the storage capacity of stored.ge. A 4TB Vault3 plan ($9.99/mo) holds a serious media library at a fraction of what a large VPS disk costs.
+This gives you the speed of local downloads with the storage capacity of stored.ge. 4 TB of Vault ($8/mo annual or $10.20 monthly) holds a serious media library at a fraction of what a large VPS disk costs.

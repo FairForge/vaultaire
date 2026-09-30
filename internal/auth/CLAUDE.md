@@ -5,22 +5,22 @@ Authentication service for Vaultaire. Handles user registration, login, JWT toke
 ## Key Types
 
 - **AuthService** — stateful service with in-memory maps for O(1) lookups. Backed by PostgreSQL for persistence.
-- **User** — `{ID, Email, PasswordHash, Company, TenantID}`
-- **Tenant** — `{ID, UserID, AccessKey, SecretKey}` — S3 auth queries `keyIndex[accessKey]`
-- **APIKey** — `{ID, UserID, TenantID, Key, Secret, Hash, Permissions, BucketScope, IPAllowlist, ExpiresAt}`
+- **User** — `{ID, Email, PasswordHash, Company, TenantID, EmailVerified, CreatedAt, UpdatedAt}`
+- **Tenant** — `{ID, UserID, AccessKey, SecretKey, CreatedAt}` — S3 auth queries `keyIndex[accessKey]`
+- **APIKey** — `{ID, UserID, TenantID, Name, Key, Secret, Hash, Permissions, BucketScope, IPAllowlist, ExpiresAt, LastUsed, CreatedAt, RevokedAt, Metadata, UsageCount, LastIP}`
 - **KeyScope** — `{Permissions, BucketScope, IPAllowlist, ExpiresAt}` — returned from auth lookups for scope enforcement
 - **KeyCreateOptions** — optional scope params for `GenerateAPIKey`
 
 ## Audit trail (Review R11-09)
 
-`GenerateAPIKey`, `RotateAPIKey`, `RevokeAPIKey`, `SetAPIKeyExpiration`, `ChangePassword`, `CompletePasswordReset`, `EnableMFA`, `DisableMFA` and `CreateUserWithTenant` each write one `audit_logs` row through `AuthService.record` → `internal/audit` (`key.created`, `key.rotated`, `key.revoked`, `key.expiry_set`, `auth.password_changed`, `auth.password_reset`, `mfa.enabled`, `mfa.disabled`, `account.created`). Writing here — not in the handlers — is what makes the dashboard, `/api/v1/user` and `/api/v1/manage` agree (the R4-22 lesson). The actor and client IP come from the request context (`audit.WithActor` / `audit.WithRequest`, set by `requireJWT`, the dashboard session middleware and `requestIDMiddleware`); an admin resetting another user's MFA is recorded as `performed_by = admin`, `user_id = subject`. Nil `sqlDB` = no row. The old in-memory `AuditLogger` (`apikey.go`) is no longer wired from the API — R0/WP-R5-4 removes it.
+`GenerateAPIKey`, `RotateAPIKey`, `RevokeAPIKey`, `SetAPIKeyExpiration`, `ChangePassword`, `CompletePasswordReset`, `EnableMFA`, `DisableMFA` and `CreateUserWithTenant` each write one `audit_logs` row through `AuthService.record` → `internal/audit` (`key.created`, `key.rotated`, `key.revoked`, `key.expiry_set`, `auth.password_changed`, `auth.password_reset`, `mfa.enabled`, `mfa.disabled`, `account.created`). Writing here — not in the handlers — is what makes the dashboard, `/api/v1/user` and `/api/v1/manage` agree (the R4-22 lesson). The actor and client IP come from the request context (`audit.WithActor` / `audit.WithRequest`, set by `requireJWT`, the dashboard session middleware and `requestIDMiddleware`); an admin resetting another user's MFA is recorded as `performed_by = admin`, `user_id = subject`. Nil `sqlDB` = no row. The old in-memory `AuditLogger` (`apikey.go:471`) still exists but has no product caller (`NewAuditLogger` is never called outside tests) — WP-R5-4 deletes it.
 
 `ErrUnknownAccessKey` (`sigv4.go`) is what `lookupCredential` returns for an id that exists nowhere; the S3 auth-failure metric keys `key_known` off it. `AccessKeyFromRequest` extracts the presented id for the bounded `key_hash` label only.
 
 ## Critical Methods
 
 - `LoadFromDB(ctx)` — populates in-memory maps from PostgreSQL on startup. Without this, login/S3 auth fails after restart.
-- `CreateUserWithTenant(ctx, email, password, company)` — creates user + tenant + API key + quota row. Persists to 4 tables in order: `users → tenants → api_keys → tenant_quotas`. Enforces `MinPasswordLength` (8, `ErrPasswordTooShort`) for every signup entry point — the web form checked it, `/auth/register` did not (Review R12); OAuth passes "" and gets no hash.
+- `CreateUserWithTenant(ctx, email, password, company)` — creates user + tenant + API key + quota row. Persists to 4 tables in order: `users → tenants → api_keys → tenant_quotas`, in ONE transaction (`persistNewAccount`, R10 — a partial registration can no longer exist). Enforces `MinPasswordLength` (8, `ErrPasswordTooShort`) for every signup entry point — the web form checked it, `/auth/register` did not (Review R12); OAuth passes "" and gets no hash.
 - `GenerateAPIKey` — enforces the free-tier key cap (`ErrKeyLimitReached`): `usage.FreeTierLimits.MaxAPIKeys` ACTIVE keys beyond the tenant's primary pair (the row registration writes); paid tiers are not capped here. One chokepoint for the dashboard, the management API and the user API (R11-16 / WP-R11-6; the dashboard's own count included the primary and refused every free account — R12 P1).
 - `ConsumeTOTPCode(userID, code)` — TOTP replay guard (RFC 6238 §5.2, R5-15c): the same code is accepted once per 90 s window; the dashboard's `/login/verify-2fa` treats a repeat as a failed factor.
 - `ValidateS3Request(ctx, accessKey)` — returns tenant from `keyIndex` map. Hot path for every S3 request.
@@ -133,7 +133,7 @@ Both backfill functions run on every startup (called from `server.go`), are idem
 - `GenerateSTSToken(ctx, db, tenantID, parentKeyID, parentScope, req)` — mints token with scope intersection (permissions = intersection with parent, buckets = intersection, IP = narrowed). Persists to `sts_tokens` table. Secret stored in plaintext (required for SigV4 verification). **Review R11-03:** empty bucket/IP scopes are persisted as `{}` — nil slices became NULL and every unscoped mint failed the NOT NULL constraint; caller-fixable failures (no overlap, unknown permission) wrap `ErrSTSScope`, everything else is internal. `STSRequest.ParentKeyID` names one of the caller's own live keys as the parent (`AuthService.GetOwnedAPIKey`, typed `ErrKeyNotFound` / `ErrKeyRevoked`); the API's default parent is the account's full authority.
 - `StartSTSCleanup(ctx, db, logger)` — hourly goroutine deletes expired tokens
 
-S3 auth integration: `validateAccessKey` (handlers.go) falls back to `sts_tokens` table for ASIA-prefixed keys after checking `tenants` and `api_keys`. `verifyPresignedURL` (s3_presign.go) does the same for pre-signed URL verification. Expired tokens are rejected at auth time.
+S3 auth integration: `validateAccessKey` → `lookupCredential` (handlers.go) falls back to the `sts_tokens` table for ASIA-prefixed keys after checking `tenants` and `api_keys`. `verifyPresignedURL` (s3_presign.go) does the same for pre-signed URL verification. Expired tokens are rejected at auth time.
 
 ## Testing
 
