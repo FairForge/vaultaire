@@ -255,7 +255,10 @@ func (a *Auth) lookupCredential(accessKey string) (*credential, error) {
 		}
 	}
 
-	a.logger.Debug("invalid access key", zap.String("access_key", accessKey[:min(6, len(accessKey))]+"..."))
+	// Never log the request-derived key, even truncated (CodeQL
+	// go/clear-text-logging on the Authorization header); the metric
+	// carries the signal (vaultaire_auth_failures_total{reason="unknown_access_key"}).
+	a.logger.Debug("invalid access key")
 	return nil, ErrUnknownAccessKey
 }
 
