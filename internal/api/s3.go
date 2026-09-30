@@ -281,6 +281,10 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 					WriteS3Error(w, ErrAccessDenied, r.URL.Path, reqID)
 				}
 				reason, known := presignFailureReason(errCode)
+				if known {
+					// The verifier may have failed before looking the id up.
+					known = s.accessKeyExists(r.Context(), auth.AccessKeyFromRequest(r))
+				}
 				recordAuthFailure(r, reason, known)
 				return
 			}

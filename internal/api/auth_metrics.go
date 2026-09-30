@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -61,7 +62,12 @@ func authFailureReason(err error) (reason string, keyKnown bool) {
 }
 
 // presignFailureReason classifies a presigned-URL failure by its S3 code.
-func presignFailureReason(code string) (reason string, keyKnown bool) {
+// mayBeKnown says the failure is one a real key can produce; whether the id
+// actually exists is decided by accessKeyExists — verifyPresignedURL
+// answers Expired / TooSkewed BEFORE its credential lookup, so the code
+// alone cannot vouch for the key (post-merge R11-28: it used to, and every
+// random X-Amz-Credential with a stale date minted a new key_hash series).
+func presignFailureReason(code string) (reason string, mayBeKnown bool) {
 	switch code {
 	case ErrExpiredPresignedRequest:
 		return "presign_expired", true
@@ -74,6 +80,24 @@ func presignFailureReason(code string) (reason string, keyKnown bool) {
 	default:
 		return "presign_unknown_key", false
 	}
+}
+
+// accessKeyExists reports whether some credential of ours has this access
+// key id (tenant primary key, live VLT_ key or STS token). It is the gate
+// before a per-key metric series: only ids that exist may be hashed into
+// one, or the label set is attacker-controlled.
+func (s *Server) accessKeyExists(ctx context.Context, accessKey string) bool {
+	if s.db == nil || accessKey == "" {
+		return false
+	}
+	var exists bool
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT EXISTS(SELECT 1 FROM tenants WHERE access_key = $1)
+		    OR EXISTS(SELECT 1 FROM api_keys WHERE key_id = $1 AND revoked_at IS NULL)
+		    OR EXISTS(SELECT 1 FROM sts_tokens WHERE access_key = $1)`, accessKey).Scan(&exists); err != nil {
+		return false
+	}
+	return exists
 }
 
 // recordAuthFailure increments the counters for one rejected request.
