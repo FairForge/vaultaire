@@ -1352,8 +1352,7 @@ Sixteen review sessions (2026-09-25 → 09-30, `docs/CODE_REVIEW_PLAN.md`, findi
 all but eight P1s in PRs #473–#528. What remains is listed here by work-package id with
 its launch-gating flag; sizes, files and dependencies are in SYNTHESIS.md.
 
-**LAUNCH-GATING (before 2026-10-31):** WP-R10-3 account-deletion runner + async export
-(D-15, D-16; = WP-R9-10/WP-R11-9/WP-R12-7) · WP-R10-9 egress allowance enforcement
+**LAUNCH-GATING (before 2026-10-31):** WP-R10-9 egress allowance enforcement
 (throttle, egress-only counter) · WP-R8-1 stored-random tenant keys + real key versioning
 (gating for the *copy* — every rotation/shredding claim is already removed) · WP-R3-3
 SSE-S3 for multipart (gating the day `ENCRYPTION_MASTER_KEY` ships; needs WP-R8-5) ·
@@ -1367,7 +1366,8 @@ routing-truth backfill (prod's 62 NULL / 447 local / 2,613 onedrive head rows) �
 WP-R9-7 backups off-box [YOU] · WP-R1-1 HAProxy `/metrics` deny + CF header strip [YOU]
 · checklist rows 4/10/11/12/13 + Stripe + master-key decision [YOU].
 
-**PRE-LAUNCH NICE:** WP-R2-2 CDN through the adapter · WP-R14-1/2 CDN limiter + request
+**PRE-LAUNCH NICE:** WP-R10-3b async GDPR export (the export half of WP-R10-3; design in
+`docs/reviews/WP-R10-3-deletion-runner.md`) · WP-R2-2 CDN through the adapter · WP-R14-1/2 CDN limiter + request
 cost · WP-R2-3 client-body errors ≠ backend failures · WP-R6-3 per-op driver deadlines ·
 WP-R6-1 location-authoritative reads/deletes · WP-R6-2 engine concurrency · WP-R10-2
 webhook ordering · WP-R10-4 one product (delete legacy packs + meters; = WP-R14-5) ·
@@ -1381,6 +1381,10 @@ WP-R15-1 chunk-signature verification · WP-R15-2/3/4/5.
 
 **POST-LAUNCH:** WP-R9-8 type normalisation · D-12 orphan-table drop (WP-R11-5) ·
 D-24 Go 1.26 (WP-R15-3).
+
+**DONE in the build phase:** WP-R10-3 account-deletion runner (D-15/D-16; = WP-R9-10/WP-R11-9/
+WP-R12-7) → #529, 2026-09-30 — `internal/account` state machine, daily runner, migration 072,
+legal copy; note `docs/reviews/WP-R10-3-deletion-runner.md`.
 
 **DONE by the review:** WP-R0-2/3/5/6/7/8/9/10/11, WP-R1-3/6/7/9/11, WP-R2-5, WP-R5-1/2/3/
 7/8(part)/11/13(=R4-5 open), WP-R6-4/5/6/7/8/9, WP-R7-1, WP-R9-1/2/9, WP-R10-1/7,
