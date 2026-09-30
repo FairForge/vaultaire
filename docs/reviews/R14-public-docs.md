@@ -180,7 +180,7 @@ UPDATE tenants SET suspended_at=NULL   → CDN GET 200
 
 Hostnames outside CLAUDE.md remain in ops files by design: `deploy.yml`, `deploy/monitoring/*`, `deploy/scripts/idrive-region-env.sh`, `scripts/push-to-slc.sh`, the driver READMEs' ssh recipes, `bench-results/*`, and one Go comment (`server.go:923`). D-20 decides whether a public repo should carry them at all.
 
-## Fixes made in this session (PR below)
+## Fixes made in this session (PR #522)
 
 Code (TDD, negative tests first): R14-01 `LogSender` redaction (`email.go`, `email_test.go` asserts no token substring in any field); R14-02 CDN `suspended_at` gate (`cdn.go`, `TestCDN_SuspendedTenant_Returns404`: serve → suspend → 404 GET+HEAD → re-enable → 200); R14-10/11 `/status` HEAD + `no-store` + link, `/llms.txt` rendered from `prices.json` with HEAD/`Content-Length`/cache, HEAD on `/docs/api` + `/openapi.json` (`status_test.go`, `llms_txt_test.go`); R14-08 OpenAPI: 59 operations, Bearer scheme, PATCH, components, `TestOpenAPISpec_JSONAPICoverage`, allowlist → 32 compliance routes, `TestOpenAPIRouteInventory` (prints the diff); R14-09 `prices.json.egress` + `__EGRESS_STD__`/`__EGRESS_VAULT__`/`__PRICES_ASOF__` placeholders, `prices.go` mirror; R14-12 `RenderWelcome` + template + test deleted.
 
