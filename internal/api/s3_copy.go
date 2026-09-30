@@ -72,6 +72,16 @@ func resolveCopyAttrs(directive string, request, source objectAttrs) objectAttrs
 	return source
 }
 
+// resolveCopyTags applies x-amz-tagging-directive (independent of the
+// metadata directive, as on AWS): COPY (default) carries the source's tags,
+// REPLACE takes the request's x-amz-tagging (R4-06).
+func resolveCopyTags(taggingDirective string, request, source objectAttrs) map[string]string {
+	if strings.EqualFold(taggingDirective, "REPLACE") {
+		return request.Tags
+	}
+	return source.Tags
+}
+
 // handleCopyObject handles S3 CopyObject requests.
 //
 // S3 spec: PUT /dest-bucket/dest-key with x-amz-copy-source header. The source
@@ -172,6 +182,7 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 		}
 	}
 	attrs := resolveCopyAttrs(directive, requestAttrs, sourceAttrs)
+	attrs.Tags = resolveCopyTags(r.Header.Get("x-amz-tagging-directive"), requestAttrs, sourceAttrs)
 
 	// Route the read to the backend that holds the source (routing truth).
 	if srcBackend != "" && s.engine != nil {

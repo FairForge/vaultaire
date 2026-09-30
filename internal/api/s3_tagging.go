@@ -4,8 +4,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"encoding/xml"
+	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"go.uber.org/zap"
@@ -47,6 +50,50 @@ func tagCount(tagsJSON []byte) int {
 		return 0
 	}
 	return len(tagMap)
+}
+
+// validateTagMap applies the S3 tag-set limits shared by PutObjectTagging,
+// the x-amz-tagging header on PutObject and CopyObject (R4-06).
+func validateTagMap(tags map[string]string) error {
+	if len(tags) > maxObjectTags {
+		return fmt.Errorf("an object cannot have more than %d tags", maxObjectTags)
+	}
+	for k, v := range tags {
+		if k == "" {
+			return fmt.Errorf("tag keys must not be empty")
+		}
+		if len(k) > maxTagKeyLen {
+			return fmt.Errorf("tag keys may be at most %d characters", maxTagKeyLen)
+		}
+		if len(v) > maxTagValueLen {
+			return fmt.Errorf("tag values may be at most %d characters", maxTagValueLen)
+		}
+	}
+	return nil
+}
+
+// parseTaggingHeader parses an x-amz-tagging header (URL query encoding,
+// e.g. `env=prod&team=core%20infra`) into a validated tag map. An absent
+// header is an empty tag set — PutObject always replaces the tags.
+func parseTaggingHeader(v string) (map[string]string, error) {
+	tags := map[string]string{}
+	if strings.TrimSpace(v) == "" {
+		return tags, nil
+	}
+	values, err := url.ParseQuery(v)
+	if err != nil {
+		return nil, fmt.Errorf("malformed x-amz-tagging: %w", err)
+	}
+	for k, vs := range values {
+		if len(vs) != 1 {
+			return nil, fmt.Errorf("duplicate tag key %q", k)
+		}
+		tags[k] = vs[0]
+	}
+	if err := validateTagMap(tags); err != nil {
+		return nil, err
+	}
+	return tags, nil
 }
 
 // handleGetObjectTagging returns the tag set for an object as XML.

@@ -4,7 +4,7 @@ PostgreSQL connection management and migrations for Vaultaire.
 
 ## Migrations
 
-All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, guarded `DO $$` blocks). 66 files numbered `003`–`068` (`001`, `002` and `053` never existed; two `004_*` files — lexical order is the run order).
+All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, guarded `DO $$` blocks). 67 files numbered `003`–`069` (`001`, `002` and `053` never existed; two `004_*` files — lexical order is the run order).
 
 **Runner (there is no Go runner and no `schema_migrations` table):** every deploy (`.github/workflows/deploy.yml`), CI (`ci.yml`) and `make test-db` run `for f in migrations/*.sql; do psql -v ON_ERROR_STOP=1 -f "$f"; done` — the **whole set, every time, before the binary swap**. "Already applied" is decided purely by idempotency, so every statement must be re-runnable (`TestMigrations_Reapply` double-applies the set). Rules for a new migration (Review R9):
 
@@ -65,6 +65,7 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 | 066 | Floor quotas (#504, dashboard plan Phase 1): `tenant_floor_quotas` (one row per tenant × `standard`/`vault` floor), `object_head_cache.floor`, `tenants.house_period`, `tenant_quotas.pin_hot_bytes`; backfill of archive-bucket / GLACIER objects |
 | 067 | Bucket region default (#502, WP-R7-1): `buckets.region` default becomes the primary's real region (`us-central-1`); rows carrying the old `us-west-1` placeholder are rewritten |
 | 068 | Multipart upload attributes (Review R3, #514): `content_type`, `metadata JSONB`, `storage_class`, `content_disposition`, `content_encoding`, `content_language`, `cache_control`, `http_expires`, `website_redirect_location` on `multipart_uploads` — CreateMultipartUpload is where clients send them, Complete carries only the part list; written to the head row at complete |
+| 069 | Byte-order listing index (Review R4-05 / WP-R9-9, #515): `CREATE INDEX CONCURRENTLY … ON object_head_cache (tenant_id, bucket, object_key COLLATE "C")` — S3 listings are UTF-8 byte order and the prod database collation is `en_US.UTF-8`; the listing queries now order and range on `object_key COLLATE "C"` (no more `LIKE prefix%`) and this index serves both. Idempotent (`IF NOT EXISTS`), runs outside a transaction like every file |
 
 ## Key Tables
 

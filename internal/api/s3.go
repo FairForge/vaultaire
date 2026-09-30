@@ -275,7 +275,7 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 				switch errCode {
 				case ErrExpiredPresignedRequest, ErrSignatureDoesNotMatch,
 					ErrAccessDenied, ErrAuthorizationQueryParametersError,
-					ErrInvalidPresignExpires:
+					ErrInvalidPresignExpires, ErrRequestTimeTooSkewed:
 					WriteS3Error(w, errCode, r.URL.Path, reqID)
 				default:
 					WriteS3Error(w, ErrAccessDenied, r.URL.Path, reqID)
@@ -683,6 +683,16 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	if err != nil {
 		s.logger.Error("HEAD: metadata query failed", zap.Error(err))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return
+	}
+
+	// Conditionals apply to HEAD exactly as to GET (RFC 9110 §13; AWS
+	// answers 304 / 412 on HeadObject) — R2-11 / R4-07.
+	if code := evaluateConditionalGET(r, etag, updatedAt); code == http.StatusNotModified {
+		writeNotModified(w, etag, updatedAt, "")
+		return
+	} else if code == http.StatusPreconditionFailed {
+		WriteS3Error(w, ErrPreconditionFailed, r.URL.Path, generateRequestID())
 		return
 	}
 

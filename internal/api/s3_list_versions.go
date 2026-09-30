@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"go.uber.org/zap"
 )
@@ -62,6 +63,7 @@ type versionRow struct {
 	isLatest       bool
 	isDeleteMarker bool
 	createdAt      time.Time
+	backend        string
 }
 
 // handleListObjectVersions serves GET /{bucket}?versions. Rows come from two
@@ -125,18 +127,21 @@ func (s *Server) handleListObjectVersions(w http.ResponseWriter, r *http.Request
 	}
 
 	fetch := maxKeys + 1
+	// Prefix as a byte-order range (never LIKE: `_`/`%` were wildcards,
+	// R9-18) and byte-order paging, matching ListObjects (R4-05).
+	prefixEnd := prefixSuccessor(prefix)
 
 	// Source 1: real version rows.
 	rows, err := s.db.QueryContext(r.Context(), `
-		SELECT object_key, version_id, size_bytes, etag, is_latest, is_delete_marker, created_at
+		SELECT object_key, version_id, size_bytes, etag, is_latest, is_delete_marker, created_at, COALESCE(backend_name, '')
 		FROM object_versions
 		WHERE tenant_id = $1 AND bucket = $2
-		  AND ($3 = '' OR object_key LIKE $3 || '%')
-		  AND ($4 = '' OR object_key > $4
-		       OR (object_key = $4 AND $5::timestamptz IS NOT NULL AND created_at < $5))
-		ORDER BY object_key ASC, created_at DESC
+		  AND ($3::text = '' OR (object_key COLLATE "C" >= $3::text AND object_key COLLATE "C" < $7::text))
+		  AND ($4::text = '' OR object_key COLLATE "C" > $4::text
+		       OR (object_key = $4::text AND $5::timestamptz IS NOT NULL AND created_at < $5))
+		ORDER BY object_key COLLATE "C" ASC, created_at DESC
 		LIMIT $6`,
-		t.ID, req.Bucket, prefix, keyMarker, nullableTime(markerCreatedAt), fetch)
+		t.ID, req.Bucket, prefix, keyMarker, nullableTime(markerCreatedAt), fetch, prefixEnd)
 	if err != nil {
 		s.logger.Error("list versions: version query failed", zap.Error(err))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
@@ -146,7 +151,7 @@ func (s *Server) handleListObjectVersions(w http.ResponseWriter, r *http.Request
 	for rows.Next() {
 		var vr versionRow
 		if scanErr := rows.Scan(&vr.key, &vr.versionID, &vr.size, &vr.etag,
-			&vr.isLatest, &vr.isDeleteMarker, &vr.createdAt); scanErr != nil {
+			&vr.isLatest, &vr.isDeleteMarker, &vr.createdAt, &vr.backend); scanErr != nil {
 			_ = rows.Close()
 			s.logger.Error("list versions: scan failed", zap.Error(scanErr))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
@@ -163,18 +168,18 @@ func (s *Server) handleListObjectVersions(w http.ResponseWriter, r *http.Request
 
 	// Source 2: head-cache objects with no version rows = S3 "null" versions.
 	rows, err = s.db.QueryContext(r.Context(), `
-		SELECT h.object_key, h.size_bytes, h.etag, h.updated_at
+		SELECT h.object_key, h.size_bytes, h.etag, h.updated_at, COALESCE(h.backend_name, '')
 		FROM object_head_cache h
 		WHERE h.tenant_id = $1 AND h.bucket = $2
-		  AND ($3 = '' OR h.object_key LIKE $3 || '%')
-		  AND ($4 = '' OR h.object_key > $4)
+		  AND ($3::text = '' OR (h.object_key COLLATE "C" >= $3::text AND h.object_key COLLATE "C" < $6::text))
+		  AND ($4::text = '' OR h.object_key COLLATE "C" > $4::text)
 		  AND NOT EXISTS (
 			SELECT 1 FROM object_versions v
 			WHERE v.tenant_id = h.tenant_id AND v.bucket = h.bucket
 			  AND v.object_key = h.object_key)
-		ORDER BY h.object_key ASC
+		ORDER BY h.object_key COLLATE "C" ASC
 		LIMIT $5`,
-		t.ID, req.Bucket, prefix, keyMarker, fetch)
+		t.ID, req.Bucket, prefix, keyMarker, fetch, prefixEnd)
 	if err != nil {
 		s.logger.Error("list versions: null-version query failed", zap.Error(err))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
@@ -182,7 +187,7 @@ func (s *Server) handleListObjectVersions(w http.ResponseWriter, r *http.Request
 	}
 	for rows.Next() {
 		vr := versionRow{versionID: "null", isLatest: true}
-		if scanErr := rows.Scan(&vr.key, &vr.size, &vr.etag, &vr.createdAt); scanErr != nil {
+		if scanErr := rows.Scan(&vr.key, &vr.size, &vr.etag, &vr.createdAt, &vr.backend); scanErr != nil {
 			_ = rows.Close()
 			s.logger.Error("list versions: null-version scan failed", zap.Error(scanErr))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
@@ -240,7 +245,7 @@ func (s *Server) handleListObjectVersions(w http.ResponseWriter, r *http.Request
 				LastModified: vr.createdAt.UTC().Format("2006-01-02T15:04:05.000Z"),
 				ETag:         etag,
 				Size:         vr.size,
-				StorageClass: "STANDARD",
+				StorageClass: engine.BackendToStorageClass(vr.backend),
 				Owner:        owner,
 			})
 		}

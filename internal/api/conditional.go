@@ -77,6 +77,11 @@ func checkIfMatch(r *http.Request, currentETag string) bool {
 // evaluateConditionalGET checks conditional headers per RFC 9110 §13.2.2.
 // Returns 304, 412, or 0 (proceed normally).
 func evaluateConditionalGET(r *http.Request, etag string, lastModified time.Time) int {
+	// If-Match is evaluated before everything else (RFC 9110 §13.2.2) —
+	// it was never evaluated on GET/HEAD at all (R2-11 / R4-07).
+	if checkIfMatch(r, etag) {
+		return http.StatusPreconditionFailed
+	}
 	if checkIfUnmodifiedSince(r, lastModified) {
 		return http.StatusPreconditionFailed
 	}

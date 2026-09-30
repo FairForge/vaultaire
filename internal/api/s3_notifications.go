@@ -6,8 +6,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"encoding/xml"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -144,6 +147,11 @@ func (s *Server) handlePutBucketNotification(w http.ResponseWriter, r *http.Requ
 		if tc.Topic == "" || len(tc.Events) == 0 {
 			continue
 		}
+		if vErr := validateWebhookTarget(tc.Topic); vErr != nil {
+			WriteS3ErrorWithContext(w, ErrInvalidArgument, r.URL.Path, generateRequestID(),
+				WithSuggestion("Notification target "+tc.Topic+" is not allowed: "+vErr.Error()))
+			return
+		}
 		for _, event := range tc.Events {
 			if !isValidS3EventFilter(event) {
 				WriteS3Error(w, ErrInvalidRequest, r.URL.Path, generateRequestID())
@@ -195,6 +203,114 @@ func isValidS3EventFilter(event string) bool {
 	return false
 }
 
+// webhookAllowPrivateTargets is a test-only escape: notification targets on
+// loopback / private ranges are refused (R4-02) except when a test points the
+// dispatcher at an httptest server.
+var webhookAllowPrivateTargets = false
+
+// isPrivateOrSpecialIP reports whether ip is loopback, private, link-local,
+// CGNAT, multicast, unspecified or broadcast — never a legitimate webhook.
+func isPrivateOrSpecialIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() || ip.IsUnspecified() || ip.IsInterfaceLocalMulticast() {
+		return true
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		switch {
+		case ip4[0] == 100 && ip4[1]&0xc0 == 64: // 100.64.0.0/10 CGNAT
+			return true
+		case ip4[0] == 0: // 0.0.0.0/8 "this network"
+			return true
+		case ip4[0] >= 240: // 240.0.0.0/4 reserved + broadcast
+			return true
+		case ip4[0] == 192 && ip4[1] == 0 && ip4[2] == 0: // 192.0.0.0/24 IETF protocol assignments
+			return true
+		}
+	}
+	return false
+}
+
+// validateWebhookTarget applies the policy for a tenant-supplied URL the
+// server will call (R4-02): http/https only, no credentials, a host that is
+// neither localhost nor a literal address in a private or special range.
+// Hostnames are re-checked against their resolved addresses at dial time
+// (webhookClient), so a name that later resolves into the private network
+// is refused there.
+func validateWebhookTarget(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("scheme must be http or https")
+	}
+	if u.User != nil {
+		return fmt.Errorf("credentials in the URL are not allowed")
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("missing host")
+	}
+	lower := strings.ToLower(strings.TrimSuffix(host, "."))
+	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") {
+		return fmt.Errorf("localhost is not a valid target")
+	}
+	if ip := net.ParseIP(host); ip != nil && !webhookAllowPrivateTargets && isPrivateOrSpecialIP(ip) {
+		return fmt.Errorf("private, loopback and link-local addresses are not valid targets")
+	}
+	return nil
+}
+
+// webhookClient is the HTTP client every tenant-configured webhook goes
+// through: bounded timeout, no redirects, and a dialer that refuses private
+// addresses at connect time (after DNS, so rebinding cannot reach them).
+func webhookClient(timeout time.Duration) *http.Client {
+	dialer := &net.Dialer{Timeout: timeout}
+	transport := &http.Transport{
+		Proxy: nil, // never through an environment proxy
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, fmt.Errorf("webhook dial %q: %w", addr, err)
+			}
+			addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+			if err != nil {
+				return nil, fmt.Errorf("webhook resolve %q: %w", host, err)
+			}
+			var lastErr error
+			for _, a := range addrs {
+				if !webhookAllowPrivateTargets && isPrivateOrSpecialIP(a.IP) {
+					lastErr = fmt.Errorf("webhook target %q resolves to a private address", host)
+					continue
+				}
+				conn, dErr := dialer.DialContext(ctx, network, net.JoinHostPort(a.IP.String(), port))
+				if dErr == nil {
+					return conn, nil
+				}
+				lastErr = dErr
+			}
+			if lastErr == nil {
+				lastErr = fmt.Errorf("webhook target %q has no address", host)
+			}
+			return nil, lastErr
+		},
+		MaxIdleConns:          8,
+		IdleConnTimeout:       30 * time.Second,
+		TLSHandshakeTimeout:   timeout,
+		ResponseHeaderTimeout: timeout,
+	}
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
 // NotificationDispatcher fires S3 event notifications asynchronously.
 type NotificationDispatcher struct {
 	db     *sql.DB
@@ -209,7 +325,7 @@ func NewNotificationDispatcher(db *sql.DB, logger *zap.Logger) *NotificationDisp
 	return &NotificationDispatcher{
 		db:     db,
 		logger: logger,
-		client: &http.Client{Timeout: 5 * time.Second},
+		client: webhookClient(5 * time.Second),
 	}
 }
 
