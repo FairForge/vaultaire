@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -69,23 +70,10 @@ func HandleGenerateKey(tmpl *template.Template, authSvc *auth.AuthService, db *s
 		data := sessionData(sd, "apikeys")
 		withCSRF(r.Context(), data)
 
-		if db != nil {
-			var tier string
-			_ = db.QueryRowContext(r.Context(),
-				"SELECT tier FROM tenant_quotas WHERE tenant_id = $1", sd.TenantID).Scan(&tier)
-			if usage.IsFreeTier(tier) {
-				var count int
-				_ = db.QueryRowContext(r.Context(),
-					"SELECT COUNT(*) FROM api_keys WHERE user_id = $1", sd.UserID).Scan(&count)
-				if count >= usage.FreeTierLimits.MaxAPIKeys {
-					data["GenerateError"] = fmt.Sprintf("Free tier allows %d API key. Upgrade your plan for more.", usage.FreeTierLimits.MaxAPIKeys)
-					data["Keys"] = listKeys(r, authSvc, sd.UserID)
-					w.Header().Set("Content-Type", "text/html; charset=utf-8")
-					_ = tmpl.ExecuteTemplate(w, "base", data)
-					return
-				}
-			}
-		}
+		// The free-tier key cap is enforced by auth.GenerateAPIKey for every
+		// entry point (ErrKeyLimitReached). The count this handler used to do
+		// itself included the primary key pair minted at signup, so a fresh
+		// free account could never generate a key at all (Review R12).
 
 		name := strings.TrimSpace(r.FormValue("name"))
 		if name == "" {
@@ -124,6 +112,13 @@ func HandleGenerateKey(tmpl *template.Template, authSvc *auth.AuthService, db *s
 
 		key, err := authSvc.GenerateAPIKey(r.Context(), sd.UserID, name, opts)
 		if err != nil {
+			if errors.Is(err, auth.ErrKeyLimitReached) {
+				data["GenerateError"] = fmt.Sprintf("Free tier allows %d extra API key besides the one you got at signup. Revoke one first, or upgrade your plan for more.", usage.FreeTierLimits.MaxAPIKeys)
+				data["Keys"] = listKeys(r, authSvc, sd.UserID)
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				_ = tmpl.ExecuteTemplate(w, "base", data)
+				return
+			}
 			logger.Error("generate API key", zap.Error(err))
 			data["GenerateError"] = "Failed to generate key. Please try again."
 			data["Keys"] = listKeys(r, authSvc, sd.UserID)

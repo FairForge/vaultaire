@@ -112,8 +112,10 @@ func HandleMFAEnable(settingsTmpl *template.Template, authSvc *auth.AuthService,
 }
 
 // HandleMFADisable handles POST /dashboard/settings/mfa/disable.
-// Requires the user's current password for confirmation.
-func HandleMFADisable(settingsTmpl *template.Template, authSvc *auth.AuthService, logger *zap.Logger) http.HandlerFunc {
+// Requires the user's current password for confirmation. Every OTHER session
+// is revoked (R5-22 / WP-R5-8): a device that got in while the second factor
+// was on must not outlive the decision to drop it; the issuing device stays.
+func HandleMFADisable(settingsTmpl *template.Template, authSvc *auth.AuthService, sessions dashauth.SessionStore, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
 		if sd == nil {
@@ -164,13 +166,28 @@ func HandleMFADisable(settingsTmpl *template.Template, authSvc *auth.AuthService
 			return
 		}
 
-		middleware.SetFlash(w, "success", "Two-factor authentication disabled.")
+		if sessions != nil {
+			current := ""
+			if c, cErr := r.Cookie(dashauth.SessionCookieName); cErr == nil {
+				current = c.Value
+			}
+			if err := sessions.DeleteByUserIDExcept(r.Context(), sd.UserID, current); err != nil {
+				logger.Error("revoke other sessions on mfa disable", zap.String("user", sd.UserID), zap.Error(err))
+			}
+		}
+
+		middleware.SetFlash(w, "success", "Two-factor authentication disabled. Other devices were signed out.")
 		http.Redirect(w, r, "/dashboard/settings", http.StatusSeeOther)
 	}
 }
 
-// HandleAdminResetMFA handles POST /admin/tenants/{id}/reset-mfa.
-func HandleAdminResetMFA(authSvc *auth.AuthService, logger *zap.Logger) http.HandlerFunc {
+// HandleAdminResetMFA handles POST /admin/tenants/{id}/reset-mfa (an htmx
+// form: the response is the fragment for #mfa-feedback, not a redirect — a
+// 303 made htmx swap the whole tenant page into the card). Resetting the
+// second factor signs the user out everywhere (R5-22): whoever holds a
+// session got it under the old factor. The audit row is written by
+// auth.DisableMFA.
+func HandleAdminResetMFA(authSvc *auth.AuthService, sessions dashauth.SessionStore, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tenantID := chi.URLParam(r, "id")
 		if tenantID == "" {
@@ -186,11 +203,19 @@ func HandleAdminResetMFA(authSvc *auth.AuthService, logger *zap.Logger) http.Han
 
 		if err := authSvc.DisableMFA(r.Context(), userID); err != nil {
 			logger.Error("admin reset mfa", zap.String("tenant", tenantID), zap.Error(err))
-			http.Error(w, "Failed to reset 2FA", http.StatusInternalServerError)
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`<div class="alert alert-error">Failed to reset 2FA.</div>`))
 			return
 		}
+		if sessions != nil {
+			if err := sessions.DeleteByUserID(r.Context(), userID); err != nil {
+				logger.Error("revoke sessions on admin mfa reset", zap.String("user", userID), zap.Error(err))
+			}
+		}
 
-		http.Redirect(w, r, "/admin/tenants/"+tenantID, http.StatusSeeOther) // #nosec G710 -- hardcoded path prefix
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<div class="alert alert-success">Two-factor authentication reset. The user was signed out of every device and can enrol again from Settings.</div>`))
 	}
 }
 

@@ -56,6 +56,11 @@ func HandleOAuthLogin(cfg *oauth2.Config, logger *zap.Logger) http.HandlerFunc {
 // renderCreds (if non-nil) is invoked with the minted S3 access key and
 // secret to show them once (B2) — existing users are redirected to
 // /dashboard as before.
+//
+// An EXISTING account with TOTP enabled is not signed in here: the callback
+// starts the same pending challenge as the password form and redirects to
+// /login/verify-2fa (Review R5-06 — OAuth used to skip the second factor).
+// mfa may be nil when the deployment has no pending store.
 func HandleOAuthCallback(
 	cfg *oauth2.Config,
 	provider string,
@@ -63,6 +68,7 @@ func HandleOAuthCallback(
 	authSvc *auth.AuthService,
 	sessions dashauth.SessionStore,
 	db *sql.DB,
+	mfa MFAChallenger,
 	logger *zap.Logger,
 	renderCreds func(w http.ResponseWriter, accessKey, secret string),
 ) http.HandlerFunc {
@@ -141,11 +147,30 @@ func HandleOAuthCallback(
 			return
 		}
 
-		// Determine role.
-		role := "user"
-		if db != nil {
-			_ = db.QueryRowContext(r.Context(),
-				`SELECT role FROM users WHERE id = $1`, user.ID).Scan(&role)
+		role := ResolveRole(r.Context(), db, user.ID)
+		via := "oauth:" + provider
+
+		// Second factor (R5-06): an existing account that enabled TOTP stops
+		// here, exactly like the password form. A brand-new OAuth signup
+		// (apiKey != nil) cannot have MFA yet.
+		if apiKey == nil {
+			var status MFAStatus
+			if authSvc != nil {
+				status = authSvc
+			}
+			handled, mErr := BeginMFAChallenge(w, r, status, mfa, MFAChallenge{
+				UserID: user.ID, TenantID: user.TenantID, Email: user.Email, Role: role,
+			})
+			if mErr != nil {
+				logger.Error("oauth: begin mfa challenge", zap.Error(mErr))
+				http.Redirect(w, r, "/login", http.StatusSeeOther)
+				return
+			}
+			if handled {
+				RecordLoginEvent(r.Context(), db, LoginEvent{Action: "auth.login_succeeded", UserID: user.ID,
+					TenantID: user.TenantID, Email: user.Email, Via: via, MFA: "pending"})
+				return
+			}
 		}
 
 		// Create session.
@@ -164,6 +189,8 @@ func HandleOAuthCallback(
 		}
 
 		dashauth.SetSessionCookie(w, sessionToken, sessionTTL)
+		RecordLoginEvent(r.Context(), db, LoginEvent{Action: "auth.login_succeeded", UserID: user.ID,
+			TenantID: user.TenantID, Email: user.Email, Via: via, MFA: "none"})
 
 		// B2: a fresh signup sees its S3 credentials exactly once. The
 		// secret exists only in this response — it is never persisted or

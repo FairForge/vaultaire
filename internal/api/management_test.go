@@ -471,7 +471,7 @@ func TestManagementKeys(t *testing.T) {
 	authSvc := auth.NewAuthService(nil, nil)
 	authSvc.SetJWTSecret("test-secret")
 
-	user, _, _, err := authSvc.CreateUserWithTenant(context.Background(), "keys@test.com", "pass123", "TestCo")
+	user, _, _, err := authSvc.CreateUserWithTenant(context.Background(), "keys@test.com", "pass12345", "TestCo")
 	require.NoError(t, err)
 	userID := user.ID
 

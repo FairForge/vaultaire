@@ -6,6 +6,7 @@ import (
 	"html/template"
 	"io/fs"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/api/landing"
@@ -49,89 +50,108 @@ type Deps struct {
 // routes on the given router. It MUST be called before the S3 catch-all
 // in server.go so that these paths are matched first.
 func RegisterRoutes(r chi.Router, deps Deps) {
-	// Serve embedded static assets (CSS, JS).
+	// Serve embedded static assets (CSS, JS, fonts).
 	staticFS, _ := fs.Sub(Static, "static")
-	r.Handle("/static/*", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
+	r.Handle("/static/*", http.StripPrefix("/static/", staticHandler(http.FS(staticFS))))
 
 	// Parse shared layout templates.
 	baseTmpl := template.Must(template.New("").Funcs(handlers.TemplateFuncs()).ParseFS(Templates,
 		"templates/layouts/base.html",
 	))
 
-	// Rate limiter: 5 attempts/min per IP for login and 2FA.
+	// Rate limiter: 5 attempts/min per IP for login and 2FA. The account
+	// lockout is the per-ACCOUNT complement (10 failures in 15 min → locked
+	// 15 min), so a distributed guess against one mailbox is stopped too.
 	loginRL := middleware.NewLoginRateLimiter(5, 5)
+	lockout := middleware.NewAccountLockout(10, 15*time.Minute, 15*time.Minute)
+	// Registration: 10/min per IP (it used to be unlimited — mass account
+	// creation minted a key pair and four DB rows per request).
+	registerRL := middleware.NewLoginRateLimiter(10, 10)
+	// The pending-2FA store behind the interface both login entry points use.
+	var mfaGate handlers.MFAChallenger
+	if deps.MFAPending != nil {
+		mfaGate = mfaChallenger{deps.MFAPending}
+	}
 
-	// --- Public auth routes ---
-	r.Get("/login", renderAuthPage(baseTmpl, "login", deps))
-	r.Post("/login", loginRL.Limit(handleLogin(baseTmpl, deps)).ServeHTTP)
-	// When signups are closed, the register page redirects to the homepage
-	// (waitlist). The POST is still gated server-side at CreateUserWithTenant.
-	r.Get("/register", func(w http.ResponseWriter, r *http.Request) {
-		if deps.Auth != nil && !deps.Auth.SignupsEnabled() {
-			http.Redirect(w, r, "/", http.StatusSeeOther)
-			return
+	// Public pages get the same browser security headers as the dashboard
+	// (the login, register, reset and abuse forms used to ship without a CSP).
+	r.Group(func(pub chi.Router) {
+		pub.Use(middleware.SecurityHeaders)
+
+		// --- Public auth routes ---
+		pub.Get("/login", renderAuthPage(baseTmpl, "login", deps))
+		pub.Post("/login", loginRL.Limit(handleLogin(baseTmpl, deps, lockout, mfaGate)).ServeHTTP)
+		// When signups are closed, the register page redirects to the homepage
+		// (waitlist). The POST is still gated server-side at CreateUserWithTenant.
+		pub.Get("/register", func(w http.ResponseWriter, r *http.Request) {
+			if deps.Auth != nil && !deps.Auth.SignupsEnabled() {
+				http.Redirect(w, r, "/", http.StatusSeeOther)
+				return
+			}
+			renderAuthPage(baseTmpl, "register", deps)(w, r)
+		})
+		pub.Post("/register", registerRL.Limit(handleRegister(baseTmpl, deps)).ServeHTTP)
+		pub.Get("/logout", handleLogout(deps.Sessions))
+
+		// --- Email verification (public) ---
+		pub.Get("/verify", handleVerifyEmail(baseTmpl, deps))
+
+		// --- Password reset (public) ---
+		resetRL := middleware.NewLoginRateLimiter(5, 5)
+		pub.Get("/forgot-password", renderAuthPage(baseTmpl, "forgot-password", deps))
+		pub.Post("/forgot-password", resetRL.Limit(handleForgotPassword(baseTmpl, deps)).ServeHTTP)
+		pub.Get("/reset-password", handleResetPasswordForm(baseTmpl, deps))
+		pub.Post("/reset-password", resetRL.Limit(handleResetPassword(baseTmpl, deps)).ServeHTTP)
+
+		// --- 2FA verification (public, used during login) ---
+		pub.Get("/login/verify-2fa", renderAuthPage(baseTmpl, "verify-2fa", deps))
+		pub.Post("/login/verify-2fa", loginRL.Limit(handleVerify2FA(baseTmpl, deps, lockout)).ServeHTTP)
+
+		// --- OAuth login ---
+		// New OAuth signups get the same reveal-once credentials page as the
+		// web register form (B2) — without it the minted secret was discarded.
+		// Existing accounts with TOTP go through the same second factor as the
+		// password form (R5-06) via mfaGate.
+		oauthCreds := signupCredsRenderer(baseTmpl, deps)
+		if deps.Google != nil {
+			pub.Get("/auth/google", handlers.HandleOAuthLogin(deps.Google, deps.Logger))
+			pub.Get("/auth/google/callback", handlers.HandleOAuthCallback(
+				deps.Google, "google", handlers.FetchGoogleUser(deps.Google),
+				deps.Auth, deps.Sessions, deps.DB, mfaGate, deps.Logger, oauthCreds))
 		}
-		renderAuthPage(baseTmpl, "register", deps)(w, r)
+		if deps.GitHub != nil {
+			pub.Get("/auth/github", handlers.HandleOAuthLogin(deps.GitHub, deps.Logger))
+			pub.Get("/auth/github/callback", handlers.HandleOAuthCallback(
+				deps.GitHub, "github", handlers.FetchGithubUser(deps.GitHub),
+				deps.Auth, deps.Sessions, deps.DB, mfaGate, deps.Logger, oauthCreds))
+		}
+
+		// --- Legal pages (public) ---
+		legalPages := map[string]string{
+			"privacy":  "templates/legal/privacy.html",
+			"terms":    "templates/legal/terms.html",
+			"dpa":      "templates/legal/dpa.html",
+			"cookies":  "templates/legal/cookies.html",
+			"aup":      "templates/legal/aup.html",
+			"baa":      "templates/legal/baa.html",
+			"gdpr":     "templates/legal/gdpr.html",
+			"data-act": "templates/legal/data-act.html",
+		}
+		for slug, tmplPath := range legalPages {
+			pageTmpl := template.Must(baseTmpl.Clone())
+			template.Must(pageTmpl.ParseFS(Templates, tmplPath))
+			pub.Get("/legal/"+slug, handlers.HandleLegalPage(pageTmpl))
+		}
+		pub.Get("/compliance/gdpr", http.RedirectHandler("/legal/gdpr", http.StatusMovedPermanently).ServeHTTP)
+		pub.Get("/compliance/data-act", http.RedirectHandler("/legal/data-act", http.StatusMovedPermanently).ServeHTTP)
+
+		// --- Public abuse report form ---
+		abusePubTmpl := template.Must(baseTmpl.Clone())
+		template.Must(abusePubTmpl.ParseFS(Templates, "templates/public/abuse.html"))
+		pub.Get("/abuse", handlers.HandleAbuseForm(abusePubTmpl, deps.Logger))
+		abuseRL := middleware.NewLoginRateLimiter(5, 5)
+		pub.Post("/abuse", abuseRL.Limit(handlers.HandleAbuseSubmit(abusePubTmpl, deps.DB, deps.Logger)).ServeHTTP)
 	})
-	r.Post("/register", handleRegister(baseTmpl, deps))
-	r.Get("/logout", handleLogout(deps.Sessions))
-
-	// --- Email verification (public) ---
-	r.Get("/verify", handleVerifyEmail(baseTmpl, deps))
-
-	// --- Password reset (public) ---
-	resetRL := middleware.NewLoginRateLimiter(5, 5)
-	r.Get("/forgot-password", renderAuthPage(baseTmpl, "forgot-password", deps))
-	r.Post("/forgot-password", resetRL.Limit(handleForgotPassword(baseTmpl, deps)).ServeHTTP)
-	r.Get("/reset-password", handleResetPasswordForm(baseTmpl, deps))
-	r.Post("/reset-password", resetRL.Limit(handleResetPassword(baseTmpl, deps)).ServeHTTP)
-
-	// --- 2FA verification (public, used during login) ---
-	r.Get("/login/verify-2fa", renderAuthPage(baseTmpl, "verify-2fa", deps))
-	r.Post("/login/verify-2fa", loginRL.Limit(handleVerify2FA(baseTmpl, deps)).ServeHTTP)
-
-	// --- OAuth login ---
-	// New OAuth signups get the same reveal-once credentials page as the
-	// web register form (B2) — without it the minted secret was discarded.
-	oauthCreds := signupCredsRenderer(baseTmpl, deps)
-	if deps.Google != nil {
-		r.Get("/auth/google", handlers.HandleOAuthLogin(deps.Google, deps.Logger))
-		r.Get("/auth/google/callback", handlers.HandleOAuthCallback(
-			deps.Google, "google", handlers.FetchGoogleUser(deps.Google),
-			deps.Auth, deps.Sessions, deps.DB, deps.Logger, oauthCreds))
-	}
-	if deps.GitHub != nil {
-		r.Get("/auth/github", handlers.HandleOAuthLogin(deps.GitHub, deps.Logger))
-		r.Get("/auth/github/callback", handlers.HandleOAuthCallback(
-			deps.GitHub, "github", handlers.FetchGithubUser(deps.GitHub),
-			deps.Auth, deps.Sessions, deps.DB, deps.Logger, oauthCreds))
-	}
-
-	// --- Legal pages (public) ---
-	legalPages := map[string]string{
-		"privacy":  "templates/legal/privacy.html",
-		"terms":    "templates/legal/terms.html",
-		"dpa":      "templates/legal/dpa.html",
-		"cookies":  "templates/legal/cookies.html",
-		"aup":      "templates/legal/aup.html",
-		"baa":      "templates/legal/baa.html",
-		"gdpr":     "templates/legal/gdpr.html",
-		"data-act": "templates/legal/data-act.html",
-	}
-	for slug, tmplPath := range legalPages {
-		pageTmpl := template.Must(baseTmpl.Clone())
-		template.Must(pageTmpl.ParseFS(Templates, tmplPath))
-		r.Get("/legal/"+slug, handlers.HandleLegalPage(pageTmpl))
-	}
-	r.Get("/compliance/gdpr", http.RedirectHandler("/legal/gdpr", http.StatusMovedPermanently).ServeHTTP)
-	r.Get("/compliance/data-act", http.RedirectHandler("/legal/data-act", http.StatusMovedPermanently).ServeHTTP)
-
-	// --- Public abuse report form ---
-	abusePubTmpl := template.Must(baseTmpl.Clone())
-	template.Must(abusePubTmpl.ParseFS(Templates, "templates/public/abuse.html"))
-	r.Get("/abuse", handlers.HandleAbuseForm(abusePubTmpl, deps.Logger))
-	abuseRL := middleware.NewLoginRateLimiter(5, 5)
-	r.Post("/abuse", abuseRL.Limit(handlers.HandleAbuseSubmit(abusePubTmpl, deps.DB, deps.Logger)).ServeHTTP)
 
 	// --- Customer dashboard (session required) ---
 	r.Route("/dashboard", func(dr chi.Router) {
@@ -215,7 +235,7 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		))
 		dr.Get("/settings/mfa", handlers.HandleMFASetup(mfaSetupTmpl, deps.Auth, deps.MFA, deps.Logger))
 		dr.Post("/settings/mfa/enable", handlers.HandleMFAEnable(settingsTmpl, deps.Auth, deps.MFA, deps.Logger))
-		dr.Post("/settings/mfa/disable", handlers.HandleMFADisable(settingsTmpl, deps.Auth, deps.Logger))
+		dr.Post("/settings/mfa/disable", handlers.HandleMFADisable(settingsTmpl, deps.Auth, deps.Sessions, deps.Logger))
 
 		// GDPR: data export + account deletion.
 		dr.Post("/settings/export", handlers.HandleExportData(deps.DB, deps.Logger))
@@ -335,7 +355,7 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		ar.Post("/tenants/{id}/quota", handlers.HandleUpdateQuota(deps.DB, deps.Logger))
 		ar.Post("/tenants/{id}/tier", handlers.HandleChangeTier(deps.DB, deps.Logger))
 		ar.Post("/tenants/{id}/bandwidth-limit", handlers.HandleUpdateBandwidthLimit(deps.DB, deps.Logger))
-		ar.Post("/tenants/{id}/reset-mfa", handlers.HandleAdminResetMFA(deps.Auth, deps.Logger))
+		ar.Post("/tenants/{id}/reset-mfa", handlers.HandleAdminResetMFA(deps.Auth, deps.Sessions, deps.Logger))
 		ar.Get("/system", handlers.HandleAdminSystem(systemTmpl, deps.DB, deps.Logger))
 		ar.Get("/audit", handlers.HandleAdminAudit(auditTmpl, deps.DB, deps.Logger))
 		ar.Get("/audit/export", handlers.HandleAdminAuditExport(deps.DB, deps.Logger))
@@ -384,6 +404,18 @@ func renderAuthPage(base *template.Template, page string, deps Deps) http.Handle
 		if h := landing.ParseHouseIntent(q.Get("std_tb"), q.Get("vault_tb"), q.Get("room")); !h.Empty() {
 			data["Intent"] = h
 		}
+		// Where the visitor came from (checklist item 7): page.js appends the
+		// landing URL's utm_* and the referring host (`ref`) to /register
+		// links; the Referer header is the fallback. Carried as hidden fields.
+		if page == "register" {
+			ref := q.Get("ref")
+			if ref == "" {
+				ref = r.Referer()
+			}
+			if a := landing.ParseAttribution(ref, q.Get("utm_source"), q.Get("utm_medium"), q.Get("utm_campaign")); !a.Empty() {
+				data["Attribution"] = a
+			}
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := tmpl.ExecuteTemplate(w, "base", data); err != nil {
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
@@ -391,7 +423,34 @@ func renderAuthPage(base *template.Template, page string, deps Deps) http.Handle
 	}
 }
 
-func handleLogin(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
+// mfaChallenger adapts MFAPendingStore to handlers.MFAChallenger.
+type mfaChallenger struct{ store *MFAPendingStore }
+
+func (m mfaChallenger) Begin(c handlers.MFAChallenge) (string, error) {
+	return m.store.Create(MFAPending{UserID: c.UserID, TenantID: c.TenantID, Email: c.Email, Role: c.Role})
+}
+
+// staticHandler serves the embedded static tree without directory listings
+// (http.FileServer indexed /static/, /static/js/ … — Review R12) and with a
+// long immutable cache for versioned URLs: every template references assets
+// through {{asset}} (?v=<hash of the tree>), so a changed file is a new URL.
+func staticHandler(fsys http.FileSystem) http.Handler {
+	files := http.FileServer(fsys)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "" || strings.HasSuffix(r.URL.Path, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Query().Get("v") != "" {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			w.Header().Set("Cache-Control", "public, max-age=300")
+		}
+		files.ServeHTTP(w, r)
+	})
+}
+
+func handleLogin(baseTmpl *template.Template, deps Deps, lockout *middleware.AccountLockout, mfaGate handlers.MFAChallenger) http.HandlerFunc {
 	errTmpl := template.Must(baseTmpl.Clone())
 	template.Must(errTmpl.Parse(pageContent("login")))
 
@@ -410,52 +469,65 @@ func handleLogin(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 				"HasGithub": deps.GitHub != nil,
 			})
 		}
-
-		valid, err := deps.Auth.ValidatePassword(r.Context(), email, password)
-		if err != nil || !valid {
+		// Every outcome is one audit_logs row (checklist item 2); the message
+		// to the browser stays the same for every failure (no enumeration).
+		fail := func(reason string, user *auth.User) {
+			LoginFailures.WithLabelValues(reason).Inc()
+			ev := handlers.LoginEvent{Action: "auth.login_failed", Email: email, Via: "password", Reason: reason}
+			if user != nil {
+				ev.UserID, ev.TenantID = user.ID, user.TenantID
+			}
+			handlers.RecordLoginEvent(r.Context(), deps.DB, ev)
+			if reason != "locked" && lockout != nil && lockout.Fail(email) {
+				LoginLockouts.Inc()
+				ev.Action, ev.Reason = "auth.login_locked", ""
+				handlers.RecordLoginEvent(r.Context(), deps.DB, ev)
+				deps.Logger.Warn("dashboard account locked after repeated failures", zap.String("email", email))
+			}
 			renderErr("Invalid email or password.")
-			return
 		}
 
-		user, err := deps.Auth.GetUserByEmail(r.Context(), email)
-		if err != nil {
-			renderErr("Invalid email or password.")
-			return
+		// The user is looked up first so failures can be attributed; the
+		// answer to the browser does not depend on whether it exists.
+		user, uErr := deps.Auth.GetUserByEmail(r.Context(), email)
+		if uErr != nil {
+			user = nil
 		}
-
-		// Determine role — default to "user" if the DB column isn't loaded yet.
-		role := "user"
-		if deps.DB != nil {
-			_ = deps.DB.QueryRowContext(r.Context(),
-				`SELECT role FROM users WHERE id = $1`, user.ID).Scan(&role)
-		}
-
-		// If MFA is enabled, redirect to the 2FA verification page.
-		if mfaEnabled, _ := deps.Auth.IsMFAEnabled(r.Context(), user.ID); mfaEnabled {
-			if deps.MFAPending != nil {
-				pendingToken, pErr := deps.MFAPending.Create(MFAPending{
-					UserID:   user.ID,
-					TenantID: user.TenantID,
-					Email:    user.Email,
-					Role:     role,
-				})
-				if pErr != nil {
-					deps.Logger.Error("create mfa pending", zap.Error(pErr))
-					renderErr("Something went wrong. Please try again.")
-					return
-				}
-				http.SetCookie(w, &http.Cookie{
-					Name:     "mfa_pending",
-					Value:    pendingToken,
-					Path:     "/",
-					HttpOnly: true,
-					SameSite: http.SameSiteLaxMode,
-					Secure:   true,
-					MaxAge:   300, // 5 minutes
-				})
-				http.Redirect(w, r, "/login/verify-2fa", http.StatusSeeOther)
+		if lockout != nil {
+			if locked, _ := lockout.Locked(email); locked {
+				fail("locked", user)
 				return
 			}
+		}
+		valid, err := deps.Auth.ValidatePassword(r.Context(), email, password)
+		if err != nil || !valid || user == nil {
+			if user == nil {
+				fail("unknown_user", nil)
+			} else {
+				fail("bad_password", user)
+			}
+			return
+		}
+		if lockout != nil {
+			lockout.Reset(email)
+		}
+
+		role := handlers.ResolveRole(r.Context(), deps.DB, user.ID)
+
+		// If MFA is enabled, redirect to the 2FA verification page (the same
+		// challenge the OAuth callbacks start — R5-06).
+		handled, mErr := handlers.BeginMFAChallenge(w, r, deps.Auth, mfaGate, handlers.MFAChallenge{
+			UserID: user.ID, TenantID: user.TenantID, Email: user.Email, Role: role,
+		})
+		if mErr != nil {
+			deps.Logger.Error("create mfa pending", zap.Error(mErr))
+			renderErr("Something went wrong. Please try again.")
+			return
+		}
+		if handled {
+			handlers.RecordLoginEvent(r.Context(), deps.DB, handlers.LoginEvent{Action: "auth.login_succeeded",
+				UserID: user.ID, TenantID: user.TenantID, Email: user.Email, Via: "password", MFA: "pending"})
+			return
 		}
 
 		token, err := deps.Sessions.Create(r.Context(), dashauth.SessionData{
@@ -473,6 +545,8 @@ func handleLogin(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 		}
 
 		dashauth.SetSessionCookie(w, token, sessionTTL)
+		handlers.RecordLoginEvent(r.Context(), deps.DB, handlers.LoginEvent{Action: "auth.login_succeeded",
+			UserID: user.ID, TenantID: user.TenantID, Email: user.Email, Via: "password", MFA: "none"})
 		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 	}
 }
@@ -509,6 +583,7 @@ func handleRegister(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 		password := r.FormValue("password")
 		company := r.FormValue("company")
 		intent := landing.ParseHouseIntent(r.FormValue("std_tb"), r.FormValue("vault_tb"), r.FormValue("room"))
+		attr := landing.ParseAttribution(r.FormValue("referrer"), r.FormValue("utm_source"), r.FormValue("utm_medium"), r.FormValue("utm_campaign"))
 
 		renderErr := func(msg string) {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -523,6 +598,9 @@ func handleRegister(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 			}
 			if !intent.Empty() {
 				data["Intent"] = intent
+			}
+			if !attr.Empty() {
+				data["Attribution"] = attr
 			}
 			_ = errTmpl.ExecuteTemplate(w, "base", data)
 		}
@@ -553,6 +631,16 @@ func handleRegister(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 				`UPDATE tenants SET intent_std_tb = $1, intent_vault_tb = $2, intent_room = $3 WHERE id = $4`,
 				intent.StdTB, intent.VaultTB, intent.Room, user.TenantID); ierr != nil {
 				deps.Logger.Error("store house intent on tenant", zap.String("tenant", user.TenantID), zap.Error(ierr))
+			}
+		}
+
+		// Sign-up attribution on the user row (checklist item 7). A hint for
+		// marketing; failure is logged, never shown.
+		if !attr.Empty() && deps.DB != nil {
+			if _, aerr := deps.DB.ExecContext(r.Context(),
+				`UPDATE users SET signup_referrer = $1, signup_utm_source = $2, signup_utm_medium = $3, signup_utm_campaign = $4 WHERE id = $5`,
+				attr.Referrer, attr.UTMSource, attr.UTMMedium, attr.UTMCampaign, user.ID); aerr != nil {
+				deps.Logger.Error("store signup attribution", zap.String("user", user.ID), zap.Error(aerr))
 			}
 		}
 
@@ -609,7 +697,7 @@ func handleVerifyEmail(baseTmpl *template.Template, deps Deps) http.HandlerFunc 
 	}
 }
 
-func handleVerify2FA(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
+func handleVerify2FA(baseTmpl *template.Template, deps Deps, lockout *middleware.AccountLockout) http.HandlerFunc {
 	errTmpl := template.Must(baseTmpl.Clone())
 	template.Must(errTmpl.Parse(pageContent("verify-2fa")))
 
@@ -624,7 +712,7 @@ func handleVerify2FA(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 		}
 
 		// Read the pending token from the cookie.
-		cookie, err := r.Cookie("mfa_pending")
+		cookie, err := r.Cookie(handlers.MFAPendingCookie)
 		if err != nil || deps.MFAPending == nil {
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
@@ -636,11 +724,39 @@ func handleVerify2FA(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
+		// An account locked meanwhile (by password guesses on the other
+		// path) does not get to finish a challenge that predates the lock.
+		if lockout != nil {
+			if locked, _ := lockout.Locked(pending.Email); locked {
+				deps.MFAPending.Get(cookie.Value)
+				handlers.ClearMFAPendingCookie(w)
+				http.Redirect(w, r, "/login", http.StatusSeeOther)
+				return
+			}
+		}
 
 		code := r.FormValue("totp_code")
 		if code == "" {
 			renderErr("Please enter your authentication code.")
 			return
+		}
+
+		fail := func(reason string) {
+			LoginFailures.WithLabelValues(reason).Inc()
+			handlers.RecordLoginEvent(r.Context(), deps.DB, handlers.LoginEvent{Action: "auth.mfa_failed",
+				UserID: pending.UserID, TenantID: pending.TenantID, Email: pending.Email, Reason: reason})
+			if lockout != nil && lockout.Fail(pending.Email) {
+				// Guessing the second factor counts like guessing the first:
+				// the challenge is consumed and the account is locked.
+				LoginLockouts.Inc()
+				handlers.RecordLoginEvent(r.Context(), deps.DB, handlers.LoginEvent{Action: "auth.login_locked",
+					UserID: pending.UserID, TenantID: pending.TenantID, Email: pending.Email})
+				deps.MFAPending.Get(cookie.Value)
+				handlers.ClearMFAPendingCookie(w)
+				http.Redirect(w, r, "/login", http.StatusSeeOther)
+				return
+			}
+			renderErr("Invalid code. Please try again.")
 		}
 
 		// Try TOTP code first.
@@ -650,33 +766,33 @@ func handleVerify2FA(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 			return
 		}
 
+		via := "totp"
 		valid := deps.MFA.ValidateCode(secret, code)
+		if valid && !deps.Auth.ConsumeTOTPCode(pending.UserID, code) {
+			// RFC 6238 §5.2: a code is accepted once (R5-15c, proven live).
+			fail("replayed_code")
+			return
+		}
 
 		// If TOTP fails, try as backup code.
 		if !valid {
 			if ok, _ := deps.Auth.ValidateBackupCode(r.Context(), pending.UserID, code); ok {
 				valid = true
+				via = "backup_code"
 			}
 		}
 
 		if !valid {
-			renderErr("Invalid code. Please try again.")
+			fail("bad_code")
 			return
 		}
 
-		// Consume the pending token.
+		// Consume the pending token and clear the cookie.
 		deps.MFAPending.Get(cookie.Value)
-
-		// Clear the pending cookie.
-		http.SetCookie(w, &http.Cookie{
-			Name:     "mfa_pending",
-			Value:    "",
-			Path:     "/",
-			HttpOnly: true,
-			Secure:   true,
-			SameSite: http.SameSiteLaxMode,
-			MaxAge:   -1,
-		})
+		handlers.ClearMFAPendingCookie(w)
+		if lockout != nil {
+			lockout.Reset(pending.Email)
+		}
 
 		// Create the real session. The MFA pending token is single-use
 		// (consumed above) so this is the first real session for this
@@ -696,6 +812,8 @@ func handleVerify2FA(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 		}
 
 		dashauth.SetSessionCookie(w, token, sessionTTL)
+		handlers.RecordLoginEvent(r.Context(), deps.DB, handlers.LoginEvent{Action: "auth.mfa_succeeded",
+			UserID: pending.UserID, TenantID: pending.TenantID, Email: pending.Email, Via: via})
 		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 	}
 }
@@ -863,6 +981,7 @@ func pageContent(page string) string {
 			`{{end}}` +
 			`<form method="POST" action="/register">` +
 			`{{if .Intent}}<input type="hidden" name="std_tb" value="{{.Intent.StdTB}}"><input type="hidden" name="vault_tb" value="{{.Intent.VaultTB}}"><input type="hidden" name="room" value="{{.Intent.Room}}">{{end}}` +
+			`{{if .Attribution}}<input type="hidden" name="referrer" value="{{.Attribution.Referrer}}"><input type="hidden" name="utm_source" value="{{.Attribution.UTMSource}}"><input type="hidden" name="utm_medium" value="{{.Attribution.UTMMedium}}"><input type="hidden" name="utm_campaign" value="{{.Attribution.UTMCampaign}}">{{end}}` +
 			`<div class="form-group"><label>Email</label><input type="email" name="email" value="{{.Email}}" required></div>` +
 			`<div class="form-group"><label>Password</label><input type="password" name="password" required minlength="8"></div>` +
 			`<div class="form-group"><label>Company</label><input type="text" name="company" value="{{.Company}}"></div>` +

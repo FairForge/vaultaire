@@ -15,7 +15,18 @@ type LoginRateLimiter struct {
 	limiters map[string]*visitorLimiter
 	rps      rate.Limit // tokens per second
 	burst    int
+	inserts  int // new-IP inserts since the last sweep (see getLimiter)
 }
+
+// Bound the per-IP map without a goroutine: every rateLimitSweepEvery new
+// IPs (or when it grows past rateLimitMaxEntries) the idle entries are
+// swept inline. Cleanup used to exist but nothing ever called it, so the
+// three limiter instances grew one entry per IP forever (Review R1-14).
+const (
+	rateLimitSweepEvery = 512
+	rateLimitMaxEntries = 20000
+	rateLimitIdle       = 5 * time.Minute
+)
 
 type visitorLimiter struct {
 	limiter  *rate.Limiter
@@ -54,6 +65,10 @@ func (rl *LoginRateLimiter) getLimiter(ip string) *rate.Limiter {
 
 	v, exists := rl.limiters[ip]
 	if !exists {
+		rl.inserts++
+		if rl.inserts%rateLimitSweepEvery == 0 || len(rl.limiters) > rateLimitMaxEntries {
+			rl.cleanupLocked(time.Now())
+		}
 		v = &visitorLimiter{
 			limiter:  rate.NewLimiter(rl.rps, rl.burst),
 			lastSeen: time.Now(),
@@ -64,18 +79,34 @@ func (rl *LoginRateLimiter) getLimiter(ip string) *rate.Limiter {
 	return v.limiter
 }
 
-// Cleanup removes entries not seen in the last 5 minutes.
-// Call periodically from a goroutine.
+// Cleanup removes entries not seen in the last 5 minutes. getLimiter calls
+// it inline; it stays exported for tests and operators' tooling.
 func (rl *LoginRateLimiter) Cleanup() {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
+	rl.cleanupLocked(time.Now())
+}
 
-	cutoff := time.Now().Add(-5 * time.Minute)
+// cleanupLocked drops idle entries; a runaway map is reset outright. Caller
+// holds mu.
+func (rl *LoginRateLimiter) cleanupLocked(now time.Time) {
+	if len(rl.limiters) > rateLimitMaxEntries {
+		rl.limiters = make(map[string]*visitorLimiter)
+		return
+	}
+	cutoff := now.Add(-rateLimitIdle)
 	for ip, v := range rl.limiters {
 		if v.lastSeen.Before(cutoff) {
 			delete(rl.limiters, ip)
 		}
 	}
+}
+
+// Len is the number of tracked IPs (tests).
+func (rl *LoginRateLimiter) Len() int {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	return len(rl.limiters)
 }
 
 // ClientIP returns the client IP used to key the login/reset/abuse limiters

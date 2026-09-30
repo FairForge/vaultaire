@@ -4,8 +4,10 @@ import (
 	"database/sql"
 	"html/template"
 	"net/http"
+	"net/mail"
 	"strings"
 
+	"github.com/FairForge/vaultaire/internal/dashboard/middleware"
 	"go.uber.org/zap"
 )
 
@@ -29,6 +31,22 @@ func HandleAbuseForm(tmpl *template.Template, logger *zap.Logger) http.HandlerFu
 	}
 }
 
+// Abuse-form limits (pre-launch checklist item 9: both prod rows were crypto
+// spam from throwaway addresses). The form is public and unauthenticated, so
+// the defences are cheap and silent: a honeypot field bots fill in, bounds on
+// every field, a URL that must be http(s), and a per-reporter daily cap on
+// top of the 5/min per-IP limiter in router.go.
+const (
+	abuseMaxEmail       = 320
+	abuseMaxName        = 200
+	abuseMaxURL         = 2048
+	abuseMaxDescription = 5000
+	abusePerReporterDay = 3
+	// abuseHoneypotField is a hidden input humans never see (CSS-hidden,
+	// autocomplete off). Anything in it means a bot filled every field.
+	abuseHoneypotField = "website"
+)
+
 // HandleAbuseSubmit processes a public abuse report submission.
 func HandleAbuseSubmit(tmpl *template.Template, db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -38,9 +56,9 @@ func HandleAbuseSubmit(tmpl *template.Template, db *sql.DB, logger *zap.Logger) 
 		description := strings.TrimSpace(r.FormValue("description"))
 		url := strings.TrimSpace(r.FormValue("url"))
 
-		renderErr := func(msg string) {
+		renderErr := func(status int, msg string) {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(http.StatusBadRequest)
+			w.WriteHeader(status)
 			_ = tmpl.ExecuteTemplate(w, "base", map[string]any{
 				"Page":          "abuse",
 				"Error":         msg,
@@ -51,26 +69,60 @@ func HandleAbuseSubmit(tmpl *template.Template, db *sql.DB, logger *zap.Logger) 
 				"URL":           url,
 			})
 		}
+		thanks := func() {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_ = tmpl.ExecuteTemplate(w, "base", map[string]any{"Page": "abuse", "Submitted": true})
+		}
 
-		if email == "" || !strings.Contains(email, "@") {
-			renderErr("A valid email address is required.")
+		// Honeypot: pretend success, store nothing, leave a log line.
+		if strings.TrimSpace(r.FormValue(abuseHoneypotField)) != "" {
+			logger.Info("abuse report dropped: honeypot filled", zap.String("ip", middleware.ClientIP(r)))
+			thanks()
+			return
+		}
+
+		addr, aErr := mail.ParseAddress(email)
+		if aErr != nil || len(email) > abuseMaxEmail || addr.Address != email {
+			renderErr(http.StatusBadRequest, "A valid email address is required.")
+			return
+		}
+		email = strings.ToLower(email)
+		if len(name) > abuseMaxName {
+			renderErr(http.StatusBadRequest, "Name is too long.")
 			return
 		}
 		if !validReportTypes[reportType] {
-			renderErr("Please select a report type.")
+			renderErr(http.StatusBadRequest, "Please select a report type.")
 			return
 		}
 		if description == "" {
-			renderErr("A description of the abuse is required.")
+			renderErr(http.StatusBadRequest, "A description of the abuse is required.")
 			return
 		}
-		if len(description) > 5000 {
-			renderErr("Description is too long (max 5000 characters).")
+		if len(description) > abuseMaxDescription {
+			renderErr(http.StatusBadRequest, "Description is too long (max 5000 characters).")
 			return
+		}
+		if url != "" {
+			isHTTP := strings.HasPrefix(url, "https://") || strings.HasPrefix(url, "http://")
+			if len(url) > abuseMaxURL || !isHTTP {
+				renderErr(http.StatusBadRequest, "The content URL must start with http:// or https://.")
+				return
+			}
 		}
 
 		if db == nil {
-			renderErr("Service temporarily unavailable.")
+			renderErr(http.StatusServiceUnavailable, "Service temporarily unavailable.")
+			return
+		}
+
+		// Per-reporter daily cap: one address cannot flood the queue even
+		// from many IPs.
+		var today int
+		if err := db.QueryRowContext(r.Context(),
+			`SELECT COUNT(*) FROM abuse_reports WHERE reporter_email = $1 AND created_at > NOW() - INTERVAL '24 hours'`,
+			email).Scan(&today); err == nil && today >= abusePerReporterDay {
+			renderErr(http.StatusTooManyRequests, "You have reached today's limit of reports from this address. Email abuse@stored.ge if this is urgent.")
 			return
 		}
 
@@ -80,7 +132,7 @@ func HandleAbuseSubmit(tmpl *template.Template, db *sql.DB, logger *zap.Logger) 
 			email, name, reportType, description, url)
 		if err != nil {
 			logger.Error("insert abuse report", zap.Error(err))
-			renderErr("Failed to submit report. Please try again.")
+			renderErr(http.StatusInternalServerError, "Failed to submit report. Please try again.")
 			return
 		}
 
@@ -88,10 +140,6 @@ func HandleAbuseSubmit(tmpl *template.Template, db *sql.DB, logger *zap.Logger) 
 			logger.Error("create abuse notification", zap.Error(notifErr))
 		}
 
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_ = tmpl.ExecuteTemplate(w, "base", map[string]any{
-			"Page":      "abuse",
-			"Submitted": true,
-		})
+		thanks()
 	}
 }

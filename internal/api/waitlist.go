@@ -25,16 +25,32 @@ func (s *Server) handleWaitlistSignup(w http.ResponseWriter, r *http.Request) {
 	// + the share-link room): stored beside the email so launch-day demand
 	// is known per tier. Optional; junk is clamped/dropped, never rejected.
 	intent := landing.ParseHouseIntent(r.FormValue("std_tb"), r.FormValue("vault_tb"), r.FormValue("room"))
+	// Where the visitor came from (checklist item 7): page.js sends the
+	// document.referrer host and the utm_* labels of the landing URL; the
+	// Referer header is the fallback for a form posted without JS.
+	referrer := r.FormValue("referrer")
+	if referrer == "" {
+		referrer = r.Referer()
+	}
+	attr := landing.ParseAttribution(referrer, r.FormValue("utm_source"), r.FormValue("utm_medium"), r.FormValue("utm_campaign"))
 	if email == "" {
 		var body struct {
-			Email   string          `json:"email"`
-			StdTB   json.RawMessage `json:"std_tb"`
-			VaultTB json.RawMessage `json:"vault_tb"`
-			Room    string          `json:"room"`
+			Email       string          `json:"email"`
+			StdTB       json.RawMessage `json:"std_tb"`
+			VaultTB     json.RawMessage `json:"vault_tb"`
+			Room        string          `json:"room"`
+			Referrer    string          `json:"referrer"`
+			UTMSource   string          `json:"utm_source"`
+			UTMMedium   string          `json:"utm_medium"`
+			UTMCampaign string          `json:"utm_campaign"`
 		}
 		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body) == nil {
 			email = strings.TrimSpace(body.Email)
 			intent = landing.ParseHouseIntent(rawNumber(body.StdTB), rawNumber(body.VaultTB), body.Room)
+			if body.Referrer == "" {
+				body.Referrer = r.Referer()
+			}
+			attr = landing.ParseAttribution(body.Referrer, body.UTMSource, body.UTMMedium, body.UTMCampaign)
 		}
 	}
 
@@ -61,18 +77,20 @@ func (s *Server) handleWaitlistSignup(w http.ResponseWriter, r *http.Request) {
 	// Re-signing up with the same email is a no-op success, except that a
 	// newly built house replaces the old one (the latest plan is the truth).
 	if _, err := s.db.ExecContext(r.Context(), `
-		INSERT INTO waitlist_signups (email, source, ip_address, user_agent, plan_std_tb, plan_vault_tb, room)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO waitlist_signups (email, source, ip_address, user_agent, plan_std_tb, plan_vault_tb, room,
+		                              referrer, utm_source, utm_medium, utm_campaign)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		ON CONFLICT (email) DO UPDATE
 		   SET plan_std_tb = EXCLUDED.plan_std_tb, plan_vault_tb = EXCLUDED.plan_vault_tb, room = EXCLUDED.room
 		 WHERE EXCLUDED.plan_std_tb + EXCLUDED.plan_vault_tb > 0`,
-		email, "landing", ip, r.UserAgent(), intent.StdTB, intent.VaultTB, intent.Room); err != nil {
+		email, attr.Source("landing"), ip, r.UserAgent(), intent.StdTB, intent.VaultTB, intent.Room,
+		attr.Referrer, attr.UTMSource, attr.UTMMedium, attr.UTMCampaign); err != nil {
 		s.logger.Error("waitlist insert", zap.String("email", email), zap.Error(err))
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save"})
 		return
 	}
 
-	s.logger.Info("waitlist signup", zap.String("email", email),
+	s.logger.Info("waitlist signup", zap.String("email", email), zap.String("source", attr.Source("landing")),
 		zap.Int("std_tb", intent.StdTB), zap.Int("vault_tb", intent.VaultTB))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

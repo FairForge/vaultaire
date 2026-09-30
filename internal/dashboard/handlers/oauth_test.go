@@ -62,7 +62,7 @@ func TestHandleOAuthCallback_MissingStateCookie(t *testing.T) {
 		func(ctx context.Context, token *oauth2.Token) (oauthUser, error) {
 			return oauthUser{}, nil
 		},
-		nil, nil, nil, zap.NewNop(), nil)
+		nil, nil, nil, nil, zap.NewNop(), nil)
 
 	req := httptest.NewRequest("GET", "/auth/test/callback?state=abc&code=xyz", nil)
 	w := httptest.NewRecorder()
@@ -78,7 +78,7 @@ func TestHandleOAuthCallback_StateMismatch(t *testing.T) {
 		func(ctx context.Context, token *oauth2.Token) (oauthUser, error) {
 			return oauthUser{}, nil
 		},
-		nil, nil, nil, zap.NewNop(), nil)
+		nil, nil, nil, nil, zap.NewNop(), nil)
 
 	req := httptest.NewRequest("GET", "/auth/test/callback?state=wrong&code=xyz", nil)
 	req.AddCookie(&http.Cookie{Name: "oauth_state", Value: "correct"})
@@ -95,7 +95,7 @@ func TestHandleOAuthCallback_ProviderError(t *testing.T) {
 		func(ctx context.Context, token *oauth2.Token) (oauthUser, error) {
 			return oauthUser{}, nil
 		},
-		nil, nil, nil, zap.NewNop(), nil)
+		nil, nil, nil, nil, zap.NewNop(), nil)
 
 	req := httptest.NewRequest("GET", "/auth/test/callback?state=abc&error=access_denied", nil)
 	req.AddCookie(&http.Cookie{Name: "oauth_state", Value: "abc"})
@@ -112,7 +112,7 @@ func TestHandleOAuthCallback_MissingCode(t *testing.T) {
 		func(ctx context.Context, token *oauth2.Token) (oauthUser, error) {
 			return oauthUser{}, nil
 		},
-		nil, nil, nil, zap.NewNop(), nil)
+		nil, nil, nil, nil, zap.NewNop(), nil)
 
 	req := httptest.NewRequest("GET", "/auth/test/callback?state=abc", nil)
 	req.AddCookie(&http.Cookie{Name: "oauth_state", Value: "abc"})
@@ -194,7 +194,7 @@ func oauthCallbackFixture(t *testing.T, authSvc *auth.AuthService, email string,
 		func(ctx context.Context, token *oauth2.Token) (oauthUser, error) {
 			return oauthUser{ID: "prov-1", Email: email, Name: "Cb User"}, nil
 		},
-		authSvc, dashauth.NewMemoryStore(), nil, zap.NewNop(), renderCreds)
+		authSvc, dashauth.NewMemoryStore(), nil, nil, zap.NewNop(), renderCreds)
 }
 
 func TestHandleOAuthCallback_NewUserShowsCredentialsOnce(t *testing.T) {
@@ -282,4 +282,88 @@ func TestParseGoogleUser_RequiresVerifiedEmail(t *testing.T) {
 			}
 		})
 	}
+}
+
+// R5-06 / WP-R5-2: an OAuth sign-in for an account that has TOTP enabled must
+// stop at the second factor exactly like the password form does — a pending
+// challenge and a redirect to /login/verify-2fa, never a session.
+type fakeChallenger struct{ began []MFAChallenge }
+
+func (f *fakeChallenger) Begin(c MFAChallenge) (string, error) {
+	f.began = append(f.began, c)
+	return "pending-token-1", nil
+}
+
+func TestHandleOAuthCallback_ExistingUserWithMFAIsChallengedNotLoggedIn(t *testing.T) {
+	authSvc := createTestAuthSvc(t)
+	user, _, _, err := authSvc.CreateUserWithTenant(context.Background(), "mfa-oauth@example.com", "Str0ngPassw0rd!", "x")
+	require.NoError(t, err)
+	require.NoError(t, authSvc.EnableMFA(context.Background(), user.ID, "JBSWY3DPEHPK3PXP", []string{"AAAAAAAA"}))
+
+	ch := &fakeChallenger{}
+	sessions := dashauth.NewMemoryStore()
+	handler := oauthCallbackFixtureWith(t, authSvc, sessions, ch, "mfa-oauth@example.com", nil)
+
+	req := httptest.NewRequest("GET", "/auth/test/callback?state=abc&code=xyz", nil)
+	req.AddCookie(&http.Cookie{Name: "oauth_state", Value: "abc"})
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusSeeOther, w.Code)
+	assert.Equal(t, "/login/verify-2fa", w.Header().Get("Location"), "must go to the second factor")
+	require.Len(t, ch.began, 1, "a pending challenge must be stored")
+	assert.Equal(t, user.ID, ch.began[0].UserID)
+
+	var pending, session bool
+	for _, c := range w.Result().Cookies() {
+		switch c.Name {
+		case MFAPendingCookie:
+			pending = c.Value == "pending-token-1"
+		case dashauth.SessionCookieName:
+			session = c.Value != ""
+		}
+	}
+	assert.True(t, pending, "mfa_pending cookie must carry the challenge token")
+	assert.False(t, session, "NO session before the second factor")
+	list, _ := sessions.ListByUserID(context.Background(), user.ID)
+	assert.Empty(t, list, "no session row may exist before the code is verified")
+}
+
+func TestHandleOAuthCallback_ExistingUserWithoutMFAGetsSession(t *testing.T) {
+	authSvc := createTestAuthSvc(t)
+	user, _, _, err := authSvc.CreateUserWithTenant(context.Background(), "plain-oauth@example.com", "Str0ngPassw0rd!", "x")
+	require.NoError(t, err)
+
+	ch := &fakeChallenger{}
+	sessions := dashauth.NewMemoryStore()
+	handler := oauthCallbackFixtureWith(t, authSvc, sessions, ch, "plain-oauth@example.com", nil)
+
+	req := httptest.NewRequest("GET", "/auth/test/callback?state=abc&code=xyz", nil)
+	req.AddCookie(&http.Cookie{Name: "oauth_state", Value: "abc"})
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusSeeOther, w.Code)
+	assert.Equal(t, "/dashboard", w.Header().Get("Location"))
+	assert.Empty(t, ch.began, "no challenge for an account without MFA")
+	list, _ := sessions.ListByUserID(context.Background(), user.ID)
+	assert.Len(t, list, 1, "a session is created")
+}
+
+// oauthCallbackFixtureWith is oauthCallbackFixture with an explicit session
+// store and MFA challenger.
+func oauthCallbackFixtureWith(t *testing.T, authSvc *auth.AuthService, sessions dashauth.SessionStore, mfa MFAChallenger, email string, renderCreds func(w http.ResponseWriter, accessKey, secret string)) http.HandlerFunc {
+	t.Helper()
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"test-token","token_type":"bearer"}`))
+	}))
+	t.Cleanup(tokenSrv.Close)
+	cfg := testOAuthConfig()
+	cfg.Endpoint.TokenURL = tokenSrv.URL
+	return HandleOAuthCallback(cfg, "test",
+		func(ctx context.Context, token *oauth2.Token) (oauthUser, error) {
+			return oauthUser{ID: "prov-mfa", Email: email, Name: "Cb User"}, nil
+		},
+		authSvc, sessions, nil, mfa, zap.NewNop(), renderCreds)
 }

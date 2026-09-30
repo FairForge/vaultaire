@@ -122,11 +122,13 @@ func HandleAdminWaitlistExport(db *sql.DB, logger *zap.Logger) http.HandlerFunc 
 				logger.Error("waitlist export scan", zap.Error(err))
 				continue
 			}
+			// Cells are formula-escaped: every email here came from the public
+			// form (R10-28 / R11-26).
 			if emailOnly {
-				_ = cw.Write([]string{email})
+				_ = cw.Write(csvSafeRow(email))
 				continue
 			}
-			_ = cw.Write([]string{email, source, created.UTC().Format(time.RFC3339), strconv.Itoa(stdTB), strconv.Itoa(vaultTB)})
+			_ = cw.Write(csvSafeRow(email, source, created.UTC().Format(time.RFC3339), strconv.Itoa(stdTB), strconv.Itoa(vaultTB)))
 		}
 	}
 }

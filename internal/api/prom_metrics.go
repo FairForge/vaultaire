@@ -1,6 +1,7 @@
 package api
 
 import (
+	"github.com/FairForge/vaultaire/internal/dashboard"
 	"net/http"
 	"sort"
 	"sync/atomic"
@@ -38,6 +39,7 @@ func (s *Server) initMetrics() {
 		}, func() float64 { return float64(atomic.LoadInt64(&s.errorCount)) }))
 
 		reg.MustRegister(authFailures, authFailuresByKey)
+		reg.MustRegister(dashboard.Collectors()...)
 
 		var src engineMetricsSource
 		if s.engine != nil {

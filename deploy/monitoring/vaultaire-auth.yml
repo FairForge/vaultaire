@@ -50,3 +50,29 @@ groups:
         annotations:
           summary: "Unknown-access-key storm"
           description: "{{ $value | printf \"%.1f\" }} rejected requests/s with access keys that do not exist. Usually a scanner; check HAProxy/fail2ban if it persists."
+
+      # Dashboard sign-in (Review R12, checklist item 2). Series from
+      # internal/dashboard/metrics.go:
+      #   vaultaire_dashboard_login_failures_total{reason}  bad_password |
+      #       unknown_user | locked | bad_code | replayed_code
+      #   vaultaire_dashboard_login_lockouts_total          accounts locked
+      #       after 10 failures in 15 minutes
+      # Every outcome is also an audit_logs row (event_type=auth) with the
+      # client IP, so the who/where is one query away.
+      - alert: DashboardLoginFailuresElevated
+        expr: sum(rate(vaultaire_dashboard_login_failures_total[10m])) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated dashboard sign-in failures"
+          description: "More than 0.5 failed dashboard sign-ins per second for 10+ minutes. Break down by reason on /metrics; SELECT metadata->>'email', host(ip), count(*) FROM audit_logs WHERE action='auth.login_failed' AND timestamp > now()-interval '15 min' GROUP BY 1,2 ORDER BY 3 DESC."
+
+      - alert: DashboardAccountLockouts
+        expr: increase(vaultaire_dashboard_login_lockouts_total[15m]) >= 3
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Dashboard accounts are being locked out"
+          description: "{{ $value | printf \"%.0f\" }} accounts locked in 15 minutes — a credential-stuffing run against known e-mails or a customer's broken automation. The locked addresses are the auth.login_locked rows in audit_logs."

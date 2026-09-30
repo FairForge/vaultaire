@@ -177,6 +177,10 @@ func (s *Server) handleCreateUserAPIKey(w http.ResponseWriter, r *http.Request) 
 
 	key, err := s.auth.GenerateAPIKey(r.Context(), userID, req.Name, opts)
 	if err != nil {
+		if errors.Is(err, auth.ErrKeyLimitReached) {
+			http.Error(w, "API key limit reached for this plan; revoke a key or upgrade", http.StatusConflict)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

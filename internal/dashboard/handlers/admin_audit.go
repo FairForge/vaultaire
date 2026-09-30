@@ -3,49 +3,137 @@ package handlers
 import (
 	"database/sql"
 	"encoding/csv"
-	"fmt"
 	"html/template"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/audit"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"go.uber.org/zap"
 )
 
-var auditEventTypes = []string{
-	"bandwidth.alert",
-	"bucket.created",
-	"bucket.deleted",
-	"key.created",
-	"key.revoked",
-	"object.created",
-	"object.deleted",
-	"object.downloaded",
-	"sts.token_created",
-	"webhook.test",
-}
+// The admin audit page reads the operator audit trail — `audit_logs`, written
+// by internal/audit since Review R11 (keys, passwords, MFA, registration,
+// flags, admin tenant/backend actions, exports, and since R12 every dashboard
+// sign-in outcome). Until R12 this page read the `events` table (object.created
+// & co.), so an operator looking for "who revoked that key" saw uploads
+// (WP-R11-10). Filters: tenant, actor (performed_by), subject user, client IP,
+// event type, action; keyset cursor from audit.List.
 
-type auditEventRow struct {
-	ID          string
-	Type        string
+// auditEventTypes are the event_type values audit.Record produces (the part
+// of the action before the dot).
+var auditEventTypes = []string{"account", "admin", "auth", "flag", "key", "mfa", "sts", "webhook"}
+
+type auditRowView struct {
+	Time        string
+	EventType   string
+	Action      string
+	Actor       string
+	Subject     string
 	TenantID    string
-	DataJSON    string
-	DataSummary string
-	CreatedFmt  string
-	createdRaw  string
+	Resource    string
+	Result      string
+	ResultClass string
+	Severity    string
+	IP          string
+	UserAgent   string
+	Error       string
+	MetaJSON    string
+	MetaSummary string
 }
 
 type auditFilters struct {
 	Tenant string
+	Actor  string
+	User   string
+	IP     string
 	Type   string
-	From   string
-	To     string
+	Action string
 	Cursor string
 }
 
 const auditPageSize = 50
 
+func parseAuditFilters(r *http.Request) auditFilters {
+	q := r.URL.Query()
+	return auditFilters{
+		Tenant: strings.TrimSpace(q.Get("tenant")),
+		Actor:  strings.TrimSpace(q.Get("actor")),
+		User:   strings.TrimSpace(q.Get("user")),
+		IP:     strings.TrimSpace(q.Get("ip")),
+		Type:   strings.TrimSpace(q.Get("type")),
+		Action: strings.TrimSpace(q.Get("action")),
+		Cursor: q.Get("cursor"),
+	}
+}
+
+func (f auditFilters) toAudit(limit int) audit.Filter {
+	return audit.Filter{TenantID: f.Tenant, Actor: f.Actor, UserID: f.User, IP: f.IP,
+		EventType: f.Type, Action: f.Action, Cursor: f.Cursor, Limit: limit}
+}
+
+// queryString renders the filters (without the cursor unless given) for links.
+func (f auditFilters) queryString(cursor string) string {
+	params := url.Values{}
+	set := func(k, v string) {
+		if v != "" {
+			params.Set(k, v)
+		}
+	}
+	set("tenant", f.Tenant)
+	set("actor", f.Actor)
+	set("user", f.User)
+	set("ip", f.IP)
+	set("type", f.Type)
+	set("action", f.Action)
+	set("cursor", cursor)
+	if qs := params.Encode(); qs != "" {
+		return "?" + qs
+	}
+	return ""
+}
+
+func auditView(row audit.Row) auditRowView {
+	v := auditRowView{
+		Time:      row.Timestamp.UTC().Format("Jan 2, 2006 15:04:05 UTC"),
+		EventType: row.EventType,
+		Action:    row.Action,
+		Actor:     row.PerformedBy,
+		Subject:   row.UserID,
+		TenantID:  row.TenantID,
+		Resource:  row.Resource,
+		Result:    row.Result,
+		Severity:  row.Severity,
+		IP:        row.IP,
+		UserAgent: row.UserAgent,
+		Error:     row.Error,
+		MetaJSON:  string(row.Metadata),
+	}
+	switch {
+	case row.Result == "failure", row.Severity == "error":
+		v.ResultClass = "danger"
+	case row.Severity == "warning":
+		v.ResultClass = "warning"
+	default:
+		v.ResultClass = "success"
+	}
+	v.MetaSummary = auditSummarize(v.MetaJSON)
+	return v
+}
+
+func auditSummarize(s string) string {
+	if s == "{}" {
+		return ""
+	}
+	if len(s) <= 80 {
+		return s
+	}
+	return s[:80] + "…"
+}
+
+// HandleAdminAudit renders GET /admin/audit.
 func HandleAdminAudit(tmpl *template.Template, db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
@@ -57,19 +145,28 @@ func HandleAdminAudit(tmpl *template.Template, db *sql.DB, logger *zap.Logger) h
 		data := sessionData(sd, "admin-audit")
 		withCSRF(r.Context(), data)
 		data["EventTypes"] = auditEventTypes
-		data["Events"] = []auditEventRow{}
+		data["Events"] = []auditRowView{}
 		data["HasMore"] = false
 
 		f := parseAuditFilters(r)
 		data["Filters"] = f
-		data["ExportURL"] = "/admin/audit/export" + auditFilterQS(f)
+		data["ExportURL"] = "/admin/audit/export" + f.queryString("")
 
 		if db != nil {
-			events, hasMore, nextCursor := queryAuditEvents(r, db, f, logger)
-			data["Events"] = events
-			data["HasMore"] = hasMore
-			if hasMore {
-				data["NextURL"] = "/admin/audit" + auditNextPageQS(f, nextCursor)
+			page, err := audit.List(r.Context(), db, f.toAudit(auditPageSize))
+			if err != nil {
+				logger.Error("audit page query", zap.Error(err))
+				data["QueryError"] = "Could not read the audit trail."
+			} else {
+				rows := make([]auditRowView, 0, len(page.Rows))
+				for _, row := range page.Rows {
+					rows = append(rows, auditView(row))
+				}
+				data["Events"] = rows
+				data["HasMore"] = page.HasMore
+				if page.HasMore {
+					data["NextURL"] = "/admin/audit" + f.queryString(page.NextCursor)
+				}
 			}
 		}
 
@@ -81,12 +178,23 @@ func HandleAdminAudit(tmpl *template.Template, db *sql.DB, logger *zap.Logger) h
 	}
 }
 
+// auditExportMaxPages bounds one CSV download (pages × 100 rows).
+const auditExportMaxPages = 200
+
+// HandleAdminAuditExport streams GET /admin/audit/export as CSV with the same
+// filters. Cells are formula-escaped (the metadata carries user-supplied
+// e-mails and key names); the export itself is audited — it is a bulk read
+// of client IPs and account identifiers.
 func HandleAdminAuditExport(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if dashauth.GetSession(r.Context()) == nil {
+		sd := dashauth.GetSession(r.Context())
+		if sd == nil {
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
+		f := parseAuditFilters(r)
+		audit.Record(r.Context(), db, audit.Entry{UserID: sd.UserID, EventType: "admin", Action: "admin.audit_exported",
+			Metadata: map[string]any{"tenant": f.Tenant, "actor": f.Actor, "user": f.User, "ip": f.IP, "type": f.Type, "action": f.Action}})
 
 		w.Header().Set("Content-Type", "text/csv")
 		w.Header().Set("Content-Disposition",
@@ -94,160 +202,29 @@ func HandleAdminAuditExport(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 
 		cw := csv.NewWriter(w)
 		defer cw.Flush()
-		_ = cw.Write([]string{"id", "type", "tenant_id", "data", "created_at"})
+		_ = cw.Write([]string{"timestamp", "event_type", "action", "result", "severity", "performed_by", "user_id",
+			"tenant_id", "resource", "ip", "user_agent", "error", "metadata"})
 
 		if db == nil {
 			return
 		}
-
-		f := parseAuditFilters(r)
-		where, args := auditWhere(f, false)
-		q := "SELECT id, type, tenant_id, data, created_at FROM events" + where + " ORDER BY created_at DESC" // #nosec G202 -- parameterized $N placeholders only
-
-		rows, err := db.QueryContext(r.Context(), q, args...)
-		if err != nil {
-			logger.Error("audit export query", zap.Error(err))
-			return
-		}
-		defer func() { _ = rows.Close() }()
-
-		for rows.Next() {
-			var id, typ, tenantID string
-			var data []byte
-			var created time.Time
-			if err := rows.Scan(&id, &typ, &tenantID, &data, &created); err != nil {
-				logger.Error("audit export scan", zap.Error(err))
-				continue
+		af := f.toAudit(100)
+		af.Cursor = ""
+		for i := 0; i < auditExportMaxPages; i++ {
+			page, err := audit.List(r.Context(), db, af)
+			if err != nil {
+				logger.Error("audit export query", zap.Error(err))
+				return
 			}
-			_ = cw.Write([]string{id, typ, tenantID, string(data), created.UTC().Format(time.RFC3339)})
+			for _, row := range page.Rows {
+				_ = cw.Write(csvSafeRow(row.Timestamp.UTC().Format(time.RFC3339), row.EventType, row.Action, row.Result,
+					row.Severity, row.PerformedBy, row.UserID, row.TenantID, row.Resource, row.IP, row.UserAgent,
+					row.Error, string(row.Metadata)))
+			}
+			if !page.HasMore {
+				return
+			}
+			af.Cursor = page.NextCursor
 		}
 	}
-}
-
-func parseAuditFilters(r *http.Request) auditFilters {
-	return auditFilters{
-		Tenant: r.URL.Query().Get("tenant"),
-		Type:   r.URL.Query().Get("type"),
-		From:   r.URL.Query().Get("from"),
-		To:     r.URL.Query().Get("to"),
-		Cursor: r.URL.Query().Get("cursor"),
-	}
-}
-
-func auditWhere(f auditFilters, withCursor bool) (string, []interface{}) {
-	where := " WHERE 1=1"
-	var args []interface{}
-	idx := 1
-	if f.Tenant != "" {
-		where += fmt.Sprintf(" AND tenant_id = $%d", idx)
-		args = append(args, f.Tenant)
-		idx++
-	}
-	if f.Type != "" {
-		where += fmt.Sprintf(" AND type = $%d", idx)
-		args = append(args, f.Type)
-		idx++
-	}
-	if f.From != "" {
-		where += fmt.Sprintf(" AND created_at >= $%d::date", idx)
-		args = append(args, f.From)
-		idx++
-	}
-	if f.To != "" {
-		where += fmt.Sprintf(" AND created_at < ($%d::date + INTERVAL '1 day')", idx)
-		args = append(args, f.To)
-		idx++
-	}
-	if withCursor && f.Cursor != "" {
-		where += fmt.Sprintf(" AND created_at < $%d", idx)
-		args = append(args, f.Cursor)
-	}
-	return where, args
-}
-
-func queryAuditEvents(r *http.Request, db *sql.DB, f auditFilters, logger *zap.Logger) ([]auditEventRow, bool, string) {
-	where, args := auditWhere(f, true)
-	q := "SELECT id, type, tenant_id, data, created_at FROM events" + where + // #nosec G202 -- parameterized $N placeholders only
-		fmt.Sprintf(" ORDER BY created_at DESC LIMIT %d", auditPageSize+1)
-
-	rows, err := db.QueryContext(r.Context(), q, args...)
-	if err != nil {
-		logger.Error("audit events query", zap.Error(err))
-		return nil, false, ""
-	}
-	defer func() { _ = rows.Close() }()
-
-	var events []auditEventRow
-	for rows.Next() {
-		var id, typ, tenantID string
-		var data []byte
-		var created time.Time
-		if err := rows.Scan(&id, &typ, &tenantID, &data, &created); err != nil {
-			logger.Error("audit events scan", zap.Error(err))
-			continue
-		}
-		dataStr := string(data)
-		events = append(events, auditEventRow{
-			ID:          id,
-			Type:        typ,
-			TenantID:    tenantID,
-			DataJSON:    dataStr,
-			DataSummary: auditSummarize(dataStr),
-			CreatedFmt:  created.Format("Jan 2, 2006 15:04 MST"),
-			createdRaw:  created.Format(time.RFC3339Nano),
-		})
-	}
-
-	hasMore := len(events) > auditPageSize
-	var nextCursor string
-	if hasMore {
-		events = events[:auditPageSize]
-		nextCursor = events[auditPageSize-1].createdRaw
-	}
-	return events, hasMore, nextCursor
-}
-
-func auditSummarize(s string) string {
-	if len(s) <= 80 {
-		return s
-	}
-	return s[:80] + "…"
-}
-
-func auditFilterQS(f auditFilters) string {
-	params := url.Values{}
-	if f.Tenant != "" {
-		params.Set("tenant", f.Tenant)
-	}
-	if f.Type != "" {
-		params.Set("type", f.Type)
-	}
-	if f.From != "" {
-		params.Set("from", f.From)
-	}
-	if f.To != "" {
-		params.Set("to", f.To)
-	}
-	if qs := params.Encode(); qs != "" {
-		return "?" + qs
-	}
-	return ""
-}
-
-func auditNextPageQS(f auditFilters, cursor string) string {
-	params := url.Values{}
-	if f.Tenant != "" {
-		params.Set("tenant", f.Tenant)
-	}
-	if f.Type != "" {
-		params.Set("type", f.Type)
-	}
-	if f.From != "" {
-		params.Set("from", f.From)
-	}
-	if f.To != "" {
-		params.Set("to", f.To)
-	}
-	params.Set("cursor", cursor)
-	return "?" + params.Encode()
 }

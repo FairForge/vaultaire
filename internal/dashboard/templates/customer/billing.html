@@ -30,6 +30,7 @@
 
 {{if .Upgraded}}<div class="alert alert-success">{{if .House.Enabled}}Your house is paid for. The floors open as soon as Stripe confirms, usually within a minute.{{else}}Plan upgraded successfully.{{end}}</div>{{end}}
 {{if .Resized}}<div class="alert alert-success">Your house was resized. The difference is prorated on your next invoice.</div>{{end}}
+{{if eq .SubscriptionStatus "past_due"}}<div class="alert alert-error"><strong>Your last payment did not go through.</strong> Stripe will retry the card over the next days; your storage stays exactly as it is meanwhile. Update the card under <em>Manage Payment</em> to keep the house when the retries end.</div>{{end}}
 {{if and .HouseIntent (not .House.Enabled)}}<div class="alert alert-info"><strong>Your house from the site:</strong> {{.HouseIntent.StdTB}} TB downstairs (Standard) and {{.HouseIntent.VaultTB}} TB in the attic (Vault) &middot; <strong>{{.HouseIntent.Monthly}}/mo</strong> billed yearly. Whole-TB checkout is on its way; until then pick a plan below or <a href="mailto:support@stored.ge">ask us</a> and we will set it up by hand.{{if .HouseIntent.RoomURL}} <a href="{{.HouseIntent.RoomURL}}">Reopen your house</a>.{{end}}</div>{{end}}
 
 <div class="egress-callout">Egress: $0.00 — always free</div>

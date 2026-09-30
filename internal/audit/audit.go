@@ -178,7 +178,9 @@ type Row struct {
 // Filter narrows List. Limit is clamped to 1..100 (default 50).
 type Filter struct {
 	TenantID  string
-	UserID    string
+	UserID    string // the subject (user_id)
+	Actor     string // who acted (performed_by)
+	IP        string // client address, exact match
 	Action    string
 	EventType string
 	Cursor    string
@@ -218,6 +220,12 @@ func List(ctx context.Context, db *sql.DB, f Filter) (*Page, error) {
 	}
 	if f.UserID != "" {
 		add("user_id::text = $%d", f.UserID)
+	}
+	if f.Actor != "" {
+		add("performed_by::text = $%d", f.Actor)
+	}
+	if f.IP != "" {
+		add("host(ip) = $%d", f.IP)
 	}
 	if f.Action != "" {
 		add("action = $%d", f.Action)

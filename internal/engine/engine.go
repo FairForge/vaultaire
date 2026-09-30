@@ -794,6 +794,30 @@ func (e *CoreEngine) buildWriteCandidateList(target string) []string {
 	return writable
 }
 
+// ErrNotPrimaryEligible is returned by CheckPrimaryEligible.
+var ErrNotPrimaryEligible = errors.New("backend cannot be the primary")
+
+// CheckPrimaryEligible reports whether name may become the write primary:
+// it must be a registered driver and not a target-only backend. r2 is the
+// PUBLIC store, geyser is tape, permafrost is the async second-copy fleet and
+// idrive-<region> pins residency — none of them may receive every private
+// object. local is allowed (it is the dev/hub primary). The admin dashboard
+// used to hand SetPrimary any string, including drivers that do not exist
+// (Review R12 — proven live: primary set to "r2" on a box without an r2
+// driver, after which every write would have failed).
+func (e *CoreEngine) CheckPrimaryEligible(name string) error {
+	e.mu.RLock()
+	_, registered := e.drivers[name]
+	e.mu.RUnlock()
+	if !registered {
+		return fmt.Errorf("%w: %q is not a registered backend", ErrNotPrimaryEligible, name)
+	}
+	if name != "local" && writeOnlyWhenTargeted(name) {
+		return fmt.Errorf("%w: %q is a target-only backend (public store, tape, second copy or region pin)", ErrNotPrimaryEligible, name)
+	}
+	return nil
+}
+
 // GetDriver returns a named driver if it is registered.
 func (e *CoreEngine) GetDriver(name string) (Driver, bool) {
 	e.mu.RLock()

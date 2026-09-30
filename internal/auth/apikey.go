@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/FairForge/vaultaire/internal/audit"
+	"github.com/FairForge/vaultaire/internal/usage"
 	"strings"
 	"time"
 
@@ -23,6 +24,10 @@ import (
 var (
 	ErrKeyNotFound = errors.New("API key not found")
 	ErrKeyRevoked  = errors.New("API key already revoked")
+	// ErrKeyLimitReached: the free tier allows usage.FreeTierLimits.MaxAPIKeys
+	// active keys BEYOND the primary pair minted at signup. Enforced in
+	// GenerateAPIKey so every entry point agrees (Review R12 / R11-16).
+	ErrKeyLimitReached = errors.New("API key limit reached for this plan")
 )
 
 type APIKey struct {
@@ -51,6 +56,9 @@ func (a *AuthService) GenerateAPIKey(ctx context.Context, userID, name string, o
 	user, exists := a.userIndex[userID]
 	if !exists {
 		return nil, fmt.Errorf("user not found")
+	}
+	if err := a.checkKeyCap(ctx, user); err != nil {
+		return nil, err
 	}
 
 	accessKey, err := generateAccessKey()
@@ -501,4 +509,32 @@ type AuditFilters struct {
 	StartTime time.Time
 	EndTime   time.Time
 	Limit     int
+}
+
+// checkKeyCap enforces the free-tier key cap: active (non-revoked) keys
+// other than the tenant's primary pair must stay below
+// usage.FreeTierLimits.MaxAPIKeys. Paid tiers are not capped here. Without
+// a database (tests, dev) there is no tier and no cap.
+func (a *AuthService) checkKeyCap(ctx context.Context, user *User) error {
+	if a.sqlDB == nil {
+		return nil
+	}
+	var tier string
+	err := a.sqlDB.QueryRowContext(ctx,
+		`SELECT COALESCE(tier, '') FROM tenant_quotas WHERE tenant_id = $1`, user.TenantID).Scan(&tier)
+	if err != nil || !usage.IsFreeTier(tier) {
+		return nil // no quota row → not free-tier capped; a DB error must not block key creation
+	}
+	var active int
+	if err := a.sqlDB.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM api_keys ak
+		WHERE ak.user_id = $1 AND ak.revoked_at IS NULL
+		  AND ak.key_id <> (SELECT access_key FROM tenants WHERE id = $2)`,
+		user.ID, user.TenantID).Scan(&active); err != nil {
+		return fmt.Errorf("count api keys: %w", err)
+	}
+	if active >= usage.FreeTierLimits.MaxAPIKeys {
+		return ErrKeyLimitReached
+	}
+	return nil
 }

@@ -1,9 +1,38 @@
 
+    // Where this visit came from: the landing URL's utm_* labels and the
+    // referring site (host only). Sent with the waitlist e-mail and appended
+    // to /register links so a sign-up can be attributed to the post that
+    // produced it. No cookie, no storage — the values live on this page only.
+    function attribution() {
+        var out = {};
+        try {
+            var q = new URLSearchParams(window.location.search);
+            ['utm_source', 'utm_medium', 'utm_campaign'].forEach(function (k) { var v = q.get(k); if (v) out[k] = v.slice(0, 100); });
+            if (document.referrer) { var u = new URL(document.referrer); if (u.hostname && u.hostname !== window.location.hostname) out.referrer = u.hostname; }
+        } catch (e) { /* attribution is a hint */ }
+        return out;
+    }
+    (function () {
+        var a = attribution();
+        if (!a.utm_source && !a.utm_medium && !a.utm_campaign && !a.referrer) return;
+        document.querySelectorAll('a.btn').forEach(function (link) {
+            if (link.getAttribute('href') !== '/register') return;
+            var p = new URLSearchParams();
+            if (a.utm_source) p.set('utm_source', a.utm_source);
+            if (a.utm_medium) p.set('utm_medium', a.utm_medium);
+            if (a.utm_campaign) p.set('utm_campaign', a.utm_campaign);
+            if (a.referrer) p.set('ref', a.referrer);
+            link.setAttribute('href', '/register?' + p.toString());
+        });
+    })();
+
     {{if not .SignupsOpen}}
     // Waitlist forms post to the existing /api/waitlist endpoint, then swap to
     // an inline confirmation. Both hero and footer forms share this handler.
     // the house the visitor built (if the builder is on the page) rides along
     function withHouse(payload) {
+        var a = attribution();
+        Object.keys(a).forEach(function (k) { payload[k] = a[k]; });
         if (typeof window.sgHouse !== 'function') return payload;
         var h = window.sgHouse();
         if (h.std || h.vault) { payload.std_tb = h.std; payload.vault_tb = h.vault; payload.room = h.room; }
