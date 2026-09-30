@@ -22,7 +22,7 @@ type Sender interface {
 
 // NewSender returns a Sender based on environment configuration.
 // EMAIL_PROVIDER selects the backend: "resend", "smtp", or anything else
-// falls back to LogSender (logs the full email, zero config).
+// falls back to LogSender (logs recipient + subject only, zero config).
 func NewSender(logger *zap.Logger) Sender {
 	from := os.Getenv("EMAIL_FROM")
 	if from == "" {
@@ -63,8 +63,13 @@ func NewSender(logger *zap.Logger) Sender {
 	}
 }
 
-// LogSender logs emails at Info level instead of sending them.
-// Used in development and as the zero-config fallback.
+// LogSender logs that an email would have been sent instead of sending it.
+// Used in development and as the zero-config fallback — which is what prod
+// runs until EMAIL_PROVIDER is set. It logs the recipient, the subject and
+// the body sizes only: a password-reset or verification body carries a
+// bearer token, and journald is not a place for those (Review R14-01 /
+// R1-08). Developers who need the link render it from the token in the
+// database or run with EMAIL_PROVIDER=smtp against a local MailHog.
 type LogSender struct {
 	logger *zap.Logger
 	rl     *rateLimiter
@@ -77,8 +82,8 @@ func (s *LogSender) Send(_ context.Context, to, subject, htmlBody, textBody stri
 	s.logger.Info("email (dev mode — not sent)",
 		zap.String("to", to),
 		zap.String("subject", subject),
-		zap.String("html", htmlBody),
-		zap.String("text", textBody))
+		zap.Int("html_bytes", len(htmlBody)),
+		zap.Int("text_bytes", len(textBody)))
 	return nil
 }
 

@@ -1,7 +1,7 @@
 {{define "title"}}Terms of Service — stored.ge{{end}}
 {{define "content"}}
 <div class="card">
-    <p class="text-muted">Last updated: June 1, 2026</p>
+    <p class="text-muted">Last updated: September 30, 2026</p>
     <h1>Terms of Service</h1>
     <p>These Terms of Service ("Terms") govern your use of the stored.ge object storage service operated by FairForge LLC ("we", "us", "stored.ge"). By creating an account or using our service, you agree to these Terms.</p>
 
@@ -42,21 +42,16 @@
     <p>Your use of stored.ge is subject to our <a href="/legal/aup">Acceptable Use Policy</a>, which prohibits storing illegal content, distributing malware, and other abusive activities. Violations may result in immediate suspension or termination.</p>
 
     <h2 id="usage-limits">Usage Limits</h2>
-    <p>Your storage, bandwidth, and API usage are subject to the limits of your subscription plan. Current plan limits are displayed on your dashboard. If you exceed your plan limits:</p>
+    <p>Storage is sold as a quota in whole terabytes at a flat per-terabyte rate (the free tier is 5 GB). Your quota and egress allowance are displayed on your dashboard. There are no overage charges:</p>
     <ul>
-        <li>Additional storage usage may be billed at the overage rate specified in your plan.</li>
-        <li>We may throttle API requests that exceed rate limits.</li>
+        <li>A write that would exceed your quota is refused with a quota error until you resize the quota (up or down, prorated) or delete data. Existing data stays readable.</li>
+        <li>Egress is never billed. Past the monthly allowance keyed to your quota, download throughput may be throttled; archive restores beyond their allowance are queued.</li>
+        <li>We may rate-limit management API requests (100 per minute per account).</li>
         <li>We will notify you before taking any action that affects your ability to access stored data.</li>
     </ul>
 
     <h2 id="service-level">Service Level Agreement</h2>
-    <p>We target <strong>99.9% monthly uptime</strong> for the stored.ge API, measured as the percentage of successful requests (non-5xx responses) relative to total requests in a calendar month. This excludes:</p>
-    <ul>
-        <li>Scheduled maintenance windows (announced at least 48 hours in advance).</li>
-        <li>Force majeure events.</li>
-        <li>Issues caused by client-side misconfiguration or abuse.</li>
-    </ul>
-    <p>If we fail to meet the 99.9% target in a given month, affected paid customers may request a service credit by contacting support within 30 days. Credits are applied as a percentage of that month's charges proportional to the downtime experienced.</p>
+    <p>We target <strong>99.5% monthly availability</strong> for the stored.ge API, measured as the percentage of successful requests (non-5xx responses) relative to total requests in a calendar month, excluding scheduled maintenance (announced at least 48 hours in advance), force majeure and client-side misconfiguration or abuse. We publish a <a href="/status">status page</a> and write incident reports. We do not yet offer a contractual service-level agreement or service credits; we will introduce them once the service runs from a second site, and will say so here and in the changelog.</p>
 
     <h2 id="data-ownership">Data Ownership</h2>
     <p><strong>You own your data.</strong> We claim no ownership rights over any content you upload to stored.ge. You retain all rights, title, and interest in your objects and metadata. We will not access, use, or disclose the content of your stored objects except:</p>
@@ -67,17 +62,17 @@
 
     <h2 id="billing">Billing and Payment</h2>
     <ul>
-        <li>Paid plans are billed monthly in advance via Stripe.</li>
-        <li>You may upgrade or downgrade your plan at any time through the billing page.</li>
-        <li>Refunds are handled on a case-by-case basis; contact support within 14 days of a charge.</li>
-        <li>If payment fails, we will attempt to collect for up to 14 days before suspending your account. Your data is preserved during suspension.</li>
+        <li>Paid quotas are billed in advance via Stripe, monthly or annually as you choose at checkout.</li>
+        <li>You may resize your quota up or down at any time through the billing page; changes are prorated.</li>
+        <li>A full refund is available within 30 days of your first purchase, no questions asked; later refunds are handled case by case — contact support.</li>
+        <li>If a payment fails, Stripe retries it on its schedule and e-mails you. If the subscription is cancelled for non-payment, your quota returns to the free tier: stored data is preserved and stays readable, and writes above the free quota are refused until you subscribe again.</li>
     </ul>
 
     <h2 id="termination">Termination</h2>
     <ul>
-        <li><strong>By you:</strong> You may delete your account at any time through your account settings. Account deletion enters a 30-day grace period during which you can cancel the deletion and recover your data. After the grace period, all data is permanently deleted.</li>
+        <li><strong>By you:</strong> You may delete your account at any time through your account settings. Account deletion enters a 30-day grace period during which you can cancel the deletion and recover your data. After the grace period the account is closed and our operators erase your objects, keys and account records.</li>
         <li><strong>By us (AUP violation):</strong> We may suspend or terminate your account immediately for Acceptable Use Policy violations. For severe violations (malware, CSAM, phishing), data may be deleted immediately without a grace period.</li>
-        <li><strong>By us (non-payment):</strong> Accounts suspended for non-payment are retained for 30 days. If payment is not resolved, the account enters the standard deletion process.</li>
+        <li><strong>By us (non-payment):</strong> A subscription cancelled for non-payment returns the account to the free tier; data is preserved and remains readable. We will contact you before taking any further action on the account.</li>
     </ul>
 
     <h2 id="liability">Limitation of Liability</h2>

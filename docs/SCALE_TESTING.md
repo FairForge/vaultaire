@@ -1,313 +1,163 @@
-# Scale Testing Guide
+# Scale Testing
 
-This document describes the scale testing infrastructure for Vaultaire and best practices for performance validation.
+> **The launch gate is `tests/load/README.md`.** Five authenticated scenarios
+> with pass/fail thresholds, run by hand against a live instance (CI skips
+> them). Everything else on this page — the nightly k6 job and the
+> `internal/loadtest` library — is informational.
 
-## Overview
+## The gates (`tests/load/`)
 
-Vaultaire includes a comprehensive load testing package (`internal/loadtest`) that supports multiple testing strategies:
+`go test ./tests/load/ -v -timeout 10m` against a running server. Env:
+`VAULTAIRE_LOAD_ENDPOINT` (default `http://localhost:8000`),
+`VAULTAIRE_LOAD_ACCESS_KEY` / `_SECRET_KEY` (fall back to
+`VAULTAIRE_BENCH_*`), `VAULTAIRE_LOAD_BUCKET` (default `load-test`), and
+`VAULTAIRE_LOAD_EMAIL` / `_PASSWORD` for the management burst. The load
+tenant needs a `tenant_quotas` row with headroom (the multipart scenario alone
+writes 5 GB; the free tier is 5 GB).
 
-| Test Type | Purpose                 | Duration   | When to Use                     |
-| --------- | ----------------------- | ---------- | ------------------------------- |
-| Load      | Baseline performance    | 5-30 min   | Before releases, after changes  |
-| Stress    | Find breaking points    | 10-60 min  | Capacity planning, new features |
-| Spike     | Traffic burst handling  | 5-15 min   | Event preparation, resilience   |
-| Soak      | Resource leak detection | 4-24 hours | Before major releases           |
-| Chaos     | Failure resilience      | 10-30 min  | Resilience validation           |
+| Test | Gate |
+|------|------|
+| `TestLoad_ConcurrentPut` (100 × 1 MB) | 0 5xx, p99 < 2 s |
+| `TestLoad_ConcurrentGet` (100 readers) | 0 5xx, p99 < 500 ms |
+| `TestLoad_Multipart` (50 × 100 MB) | 0 5xx |
+| `TestLoad_MixedReadWrite` (100 workers, 70/30) | 0 5xx, p99 < 2 s |
+| `TestLoad_ManagementBurst` (50 rapid) | 429s appear, 0 5xx |
+| all | goroutine growth < 50 |
 
-## Running Tests
+`TestLoad_Uploader_PartSize` checks the multipart uploader's part sizing.
+Last production run: 2026-08-03 on the production host, all gates pass; the
+table, the 6.2 GB RSS transient during 50 concurrent multipart completes and
+the rerun recipe are in `bench-results/LOADTEST-2026-08-03.md`. The three
+production bugs the first run found (breaker tripped by 404s, idempotent
+re-create 403, quota-exceeded 500) are recorded in the README.
 
-### Prerequisites
+Run it before a release that touches the write path, the quota path, the
+breaker or the DB pool. Numbers on a laptop are local-disk bound; the gates
+validate correctness and concurrency behaviour, not production throughput.
+
+## Nightly (`.github/workflows/nightly.yml`)
+
+07:00 UTC daily (and `workflow_dispatch`): PostgreSQL 15 service, migrations,
+`go build`, server started with `JWT_SECRET` and `DATABASE_URL`, then
+
+1. `go test -bench=. -benchtime=10s ./tests/benchmarks/`
+2. `k6 run --quiet tests/k6/s3_basic_load.js` (other scripts in `tests/k6/`:
+   `s3_realistic_load.js`, `tenant_isolation_load.js`, `resource_monitor.js`)
+3. `./tests/chaos/basic_chaos_test.sh` and `go test ./tests/chaos/`
+
+Every step is `continue-on-error`; results are uploaded as
+`nightly-results-<run>` (`tests/benchmarks/baseline_results.txt`,
+`tests/k6/*.json`). Nothing fails the workflow — read the artifact.
+
+## Running a server for a manual test
 
 ```bash
-# Ensure test environment is isolated
-export VAULTAIRE_ENV=test
-
-# Start the service under test
-go run ./cmd/server
+make build && JWT_SECRET=dev PORT=8000 ./bin/vaultaire      # or: go run ./cmd/vaultaire
 ```
 
-### Basic Load Test
+No `VAULTAIRE_ENV`, no config file: everything is env vars (`docs/CONFIG.md`).
+With no backend credentials the primary is the `local` driver under
+`DATA_PATH` (default `/tmp/vaultaire-data`). With a database, register a
+tenant (`POST /auth/register`) and use the returned key pair; without one the
+server serves S3 on the no-DB fallback path and HEAD answers 503.
+
+## The `internal/loadtest` library
+
+A Go package for writing your own load, stress, spike, soak and chaos runs
+against any worker function. Signatures as of `internal/loadtest/framework.go`:
+
+```go
+type TestType string            // TestTypeLoad, TestTypeStress, TestTypeSpike, TestTypeSoak
+type WorkerFunc func(ctx context.Context, workerID int) Result
+
+func DefaultConfig(name string, testType TestType) *Config   // Duration, RampUp/RampDown, TargetRPS, MaxConcurrency, Timeout
+func New(config *Config, workerFunc WorkerFunc) *Framework
+func (f *Framework) Run(ctx context.Context) (*Summary, error)
+```
 
 ```go
 package main
 
 import (
     "context"
+    "fmt"
     "time"
 
     "github.com/FairForge/vaultaire/internal/loadtest"
 )
 
 func main() {
-    config := loadtest.DefaultConfig("s3-api-test")
-    config.Duration = 10 * time.Minute
-    config.TargetRPS = 100
-    config.MaxConcurrency = 50
+    cfg := loadtest.DefaultConfig("s3-put", loadtest.TestTypeLoad)
+    cfg.Duration = 10 * time.Minute
+    cfg.TargetRPS = 100
+    cfg.MaxConcurrency = 50
 
     worker := func(ctx context.Context, id int) loadtest.Result {
         start := time.Now()
-        // Perform S3 operation
-        err := performS3Put(ctx)
-        return loadtest.Result{
-            StartTime: start,
-            Duration:  time.Since(start),
-            Error:     err,
-        }
+        err := performS3Put(ctx) // your SigV4 client
+        return loadtest.Result{StartTime: start, Duration: time.Since(start), Error: err}
     }
 
-    framework := loadtest.NewFramework(config, worker)
-    summary, err := framework.Run(context.Background())
-
-    // Analyze results
-    analyzer := loadtest.NewBottleneckAnalyzer(nil)
-    analysis := analyzer.AnalyzeLoadTest(summary)
-
+    summary, err := loadtest.New(cfg, worker).Run(context.Background())
+    if err != nil {
+        panic(err)
+    }
+    analysis := loadtest.NewBottleneckAnalyzer(nil).AnalyzeLoadTest(summary)
     fmt.Println(analysis.GenerateReport())
 }
 ```
 
-## Test Strategies
+The other testers follow the same shape — `DefaultStressConfig(name)` /
+`NewStressTester(cfg, worker)` (ramps `StartRPS`→`MaxRPS`, stops at
+`FailureThreshold` or `LatencyThreshold`), `DefaultSpikeConfig` /
+`NewSpikeTester` (`BaselineRPS`, `SpikeRPS`, recovery time), `DefaultSoakConfig`
+/ `NewSoakTester` (memory / goroutine / GC sampling with thresholds),
+`DefaultChaosConfig` / `NewChaosTester` (latency, error, timeout and partition
+injection with a resilience score). Each `Run` returns its own result type
+that `BottleneckAnalyzer` (`AnalyzeStressTest`, `AnalyzeSoakTest`) and the
+report generators accept.
 
-### 1. Load Testing
-
-**Purpose**: Establish baseline performance metrics
-
-**Configuration**:
-
-- `TargetRPS`: Expected production traffic
-- `Duration`: 10+ minutes for stable metrics
-- `MaxConcurrency`: Match production connection limits
-
-**Key Metrics**:
-
-- Requests per second achieved
-- P95 and P99 latency
-- Error rate
-
-### 2. Stress Testing
-
-**Purpose**: Find system breaking points
-
-**Configuration**:
-
-- `StartRPS`: 10% of expected load
-- `MaxRPS`: 5-10x expected load
-- `RampUpRate`: Gradual increase (10-20 RPS per interval)
-- `FailureThreshold`: Acceptable error rate (typically 5%)
-- `LatencyThreshold`: Maximum acceptable P99 latency
-
-**Key Metrics**:
-
-- Breaking point RPS
-- Latency at breaking point
-- Error types at failure
-
-### 3. Spike Testing
-
-**Purpose**: Validate handling of sudden traffic bursts
-
-**Configuration**:
-
-- `BaselineRPS`: Normal traffic level
-- `SpikeRPS`: 5-10x baseline
-- `SpikeDuration`: 1-5 minutes
-- `RecoveryPeriod`: Time to monitor after spike
-
-**Key Metrics**:
-
-- Recovery time
-- Error rate during spike
-- Post-spike stability
-
-### 4. Soak Testing
-
-**Purpose**: Detect memory leaks and resource exhaustion
-
-**Configuration**:
-
-- `Duration`: 4-24 hours
-- `TargetRPS`: Sustainable load (50-70% of breaking point)
-- `MemoryThreshold`: Alert threshold (e.g., 2GB)
-- `GoroutineThreshold`: Maximum goroutine count
-
-**Key Metrics**:
-
-- Memory growth percentage
-- Goroutine growth
-- GC frequency
-- Long-term error rate stability
-
-### 5. Chaos Testing
-
-**Purpose**: Validate system resilience to failures
-
-**Chaos Types**:
-
-- `ChaosLatency`: Add artificial delays
-- `ChaosError`: Inject random errors
-- `ChaosTimeout`: Simulate timeouts
-- `ChaosPartition`: Simulate network partitions
-
-**Key Metrics**:
-
-- Resilience score (0-100)
-- Recovery time
-- Error handling effectiveness
-
-## Performance Baselines
-
-### Creating Baselines
+Baselines and capacity models are library calls too, not a CLI:
 
 ```go
-manager := loadtest.NewBaselineManager("./baselines")
+bm := loadtest.NewBaselineManager("./baselines")
+bm.CreateBaseline("v1.2.0", "Release 1.2.0", "production", "1.2.0", summary)
+_ = bm.SaveToFile("v1.2.0")
+cmp, _ := bm.Compare("v1.2.0", newSummary)     // cmp.OverallStatus, cmp.Regressions, cmp.Differences
+fmt.Println(cmp.GenerateReport())
 
-// After a load test
-baseline := manager.CreateBaseline(
-    "v1.2.0",           // Name
-    "Release 1.2.0",    // Description
-    "production",       // Environment
-    "1.2.0",           // Version
-    summary,           // Test summary
-)
-
-manager.SaveToFile("v1.2.0")
+model := loadtest.BuildModelFromStress("api", stressResult)   // or BuildModelFromSoak(name, soakResult, targetRPS)
+p := loadtest.NewCapacityPlanner(model)
+_ = p.EstimateCapacity(500)          // RequiredInstances, EstimatedLatency, Confidence
+_ = p.CalculateHeadroom(currentRPS)  // Utilization, RiskLevel
+_ = p.PlanForGrowth(100, 20, 12)     // 20 %/month for 12 months
 ```
 
-### Comparing Against Baselines
+Default baseline thresholds: RPS −10 %, avg latency +15 %, p95 +20 %, p99
++25 %, error rate +50 % relative (`BaselineManager.SetThreshold` to change).
 
-```go
-// After new test
-comparison, err := manager.Compare("v1.2.0", newSummary)
+There is no `cmd/loadtest`, no `compare` sub-command and no pre-merge load
+workflow; a "load-test on every PR" job would need a running server and is
+not what CI does.
 
-if comparison.OverallStatus == loadtest.StatusRegression {
-    fmt.Println("REGRESSION DETECTED")
-    for _, metric := range comparison.Regressions {
-        diff := comparison.Differences[metric]
-        fmt.Printf("  %s: %.2f%% change\n", metric, diff.DeltaPct)
-    }
-}
-```
+## SLA targets
 
-### Threshold Configuration
+`loadtest.DefaultStorageSLA()` (`internal/loadtest/sla.go`) encodes the targets
+the launch copy promises nothing beyond ("no contractual SLA, target 99.5 %"
+in the FAQ):
 
-Default thresholds (can be customized):
+| Objective | Target | Priority |
+|-----------|--------|----------|
+| Availability (30 d) | ≥ 99.9 % | critical |
+| p50 latency | ≤ 50 ms | medium |
+| p95 latency | ≤ 200 ms | high |
+| p99 latency | ≤ 500 ms | critical |
+| Error rate | ≤ 0.1 % | critical |
+| Throughput | ≥ 100 RPS per instance | high |
 
-| Metric             | Threshold | Meaning                           |
-| ------------------ | --------- | --------------------------------- |
-| `requests_per_sec` | 10%       | Allow 10% RPS decrease            |
-| `avg_latency_ms`   | 15%       | Allow 15% latency increase        |
-| `p95_latency_ms`   | 20%       | Allow 20% P95 increase            |
-| `p99_latency_ms`   | 25%       | Allow 25% P99 increase            |
-| `error_rate`       | 50%       | Allow 50% relative error increase |
-
-## Capacity Planning
-
-### Building Capacity Models
-
-```go
-// From stress test results
-model := loadtest.BuildModelFromStress("api-service", stressResult)
-
-// Or from soak test results
-model := loadtest.BuildModelFromSoak("api-service", soakResult, 100)
-```
-
-### Estimating Capacity
-
-```go
-planner := loadtest.NewCapacityPlanner(model)
-
-// Estimate for specific RPS
-estimate := planner.EstimateCapacity(500)
-fmt.Printf("Need %d instances for 500 RPS\n", estimate.RequiredInstances)
-fmt.Printf("Estimated latency: %v\n", estimate.EstimatedLatency)
-fmt.Printf("Confidence: %.0f%%\n", estimate.Confidence * 100)
-
-// Check current headroom
-headroom := planner.CalculateHeadroom(currentRPS)
-fmt.Printf("Utilization: %.0f%%\n", headroom.Utilization)
-fmt.Printf("Risk level: %s\n", headroom.RiskLevel)
-```
-
-### Growth Planning
-
-```go
-// Plan for 20% monthly growth over 12 months
-plans := planner.PlanForGrowth(100, 20, 12)
-
-for i, plan := range plans {
-    fmt.Printf("Month %d: %.0f RPS, %d instances\n",
-        i+1, plan.TargetRPS, plan.RequiredInstances)
-}
-```
-
-## Bottleneck Analysis
-
-### Automatic Detection
-
-```go
-analyzer := loadtest.NewBottleneckAnalyzer(nil)
-
-// Analyze different test types
-analysis := analyzer.AnalyzeLoadTest(loadSummary)
-analysis := analyzer.AnalyzeSoakTest(soakResult)
-analysis := analyzer.AnalyzeStressTest(stressResult)
-
-fmt.Printf("Health Score: %.0f/100\n", analysis.HealthScore)
-fmt.Println(analysis.GenerateReport())
-```
-
-### Bottleneck Types
-
-| Type       | Indicators        | Common Causes                           |
-| ---------- | ----------------- | --------------------------------------- |
-| Latency    | High P95/P99      | Database queries, lock contention       |
-| Throughput | Low RPS           | CPU bottleneck, single-threaded code    |
-| Memory     | High growth       | Leaks, large allocations                |
-| Goroutine  | High count/growth | Leaked goroutines, missing cancellation |
-| GC         | Frequent pauses   | Excessive allocations                   |
-
-## CI/CD Integration
-
-### Pre-merge Testing
-
-```yaml
-# .github/workflows/load-test.yml
-load-test:
-  runs-on: ubuntu-latest
-  steps:
-    - name: Run Load Test
-      run: go test -v ./tests/load/... -tags=loadtest
-
-    - name: Compare Baseline
-      run: go run ./cmd/loadtest compare --baseline=main
-```
-
-### Release Testing
-
-Run full test suite before releases:
-
-1. Load test (30 min)
-2. Stress test (find breaking point)
-3. Soak test (4 hours minimum)
-4. Compare against previous release baseline
-
-## Performance SLAs
-
-Recommended SLA targets for stored.ge:
-
-| Metric       | Target             | Critical          |
-| ------------ | ------------------ | ----------------- |
-| Availability | 99.9%              | 99.5%             |
-| P50 Latency  | < 50ms             | < 100ms           |
-| P99 Latency  | < 500ms            | < 1s              |
-| Error Rate   | < 0.1%             | < 1%              |
-| Throughput   | > 100 RPS/instance | > 50 RPS/instance |
-
-Configure tests to fail when SLAs are breached:
-
-```go
-config := loadtest.DefaultAnalysisConfig()
-config.P99LatencyThreshold = 500 * time.Millisecond
-config.ErrorRateThreshold = 0.001  // 0.1%
-```
+`loadtest.NewSLAValidator(sla).Validate(summary)` returns per-objective
+results with `GenerateReport()` and `GetFailedCritical()`; custom SLAs are
+built with `CreateCustomSLA` and the `NewLatencySLO` / `NewErrorRateSLO` /
+`NewThroughputSLO` constructors. `DefaultAnalysisConfig()` holds the
+bottleneck thresholds (`AvgLatencyThreshold`, `ErrorRateThreshold`,
+`MemoryGrowthThreshold`, `GoroutineThreshold`, `GCPauseThreshold`).

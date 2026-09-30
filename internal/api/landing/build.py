@@ -84,6 +84,10 @@ PRICE_TOKENS = {
     '__PRICE_AWS_20TB__': money(20 * P['competitors']['aws_s3']),
     '__PRICE_AWS_SAVED_20TB__': f"${round((P['competitors']['aws_s3'] - P['standard']['annual']) * 20 * 12):,}",
     '__PRICE_AWS_MULT__': f"{P['competitors']['aws_s3'] / P['standard']['annual']:.0f}",
+    # Egress allowances are data, not a digit borrowed from the AWS multiple (R14-09).
+    '__EGRESS_STD__': f"{P['egress']['standard_free_ratio']:g}",
+    '__EGRESS_VAULT__': f"{P['egress']['vault_restore_free_ratio']:g}",
+    '__PRICES_ASOF__': P['competitors']['_asof'],
 }
 
 

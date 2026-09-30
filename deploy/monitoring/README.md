@@ -125,7 +125,14 @@ background). Keys off `vaultaire_auth_failures_total{reason,key_known}` and
 real customer key moves that series, scanners stay on `"false"`; `key_hash` is
 sha256(id)[:8], emitted for known keys only, so cardinality is bounded by the
 number of real keys and the id never appears in a label. To map a hash back:
-`SELECT access_key FROM tenants` / `key_id FROM api_keys`, hash each. Install
+`SELECT access_key FROM tenants` / `key_id FROM api_keys`, hash each. The same
+file carries the dashboard sign-in rules (Review R12):
+`DashboardLoginFailuresElevated` (warning, >0.5/s over 10 min) off
+`vaultaire_dashboard_login_failures_total{reason}` (reason = bad_password |
+unknown_user | locked | bad_code | replayed_code) and
+`DashboardAccountLockouts` (warning, ≥3 lockouts in 15 min) off
+`vaultaire_dashboard_login_lockouts_total` — both from
+`internal/dashboard/metrics.go`, registered on the server's registry. Install
 like the other rule files (not yet on SLC — checklist item 10).
 
 ## Known limits

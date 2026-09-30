@@ -37,11 +37,20 @@ restart. Backed by the `feature_flags` table (migration 059).
 
 ## Registered flags
 
-Declared in `internal/api/flags_wiring.go` (key constants + defaults +
-gate sites). Day one: `signups` (default = `SIGNUPS_ENABLED` env; gated at
-`auth.CreateUserWithTenant` via `SetSignupsEnabledFunc`) and `chunking`
-(default true; gated at the chunked-PUT entry check in `s3_engine_adapter.go`).
-Adding a flag = key constant + `Register` call + call site. No schema change.
+Key constants live in `internal/api/flags_wiring.go` (the two dashboard ones
+are re-exported from `dashboard/handlers`); the `Register` calls are in
+`api.NewServer`. Five flags today:
+
+| Flag | Default | Gate site |
+|------|---------|-----------|
+| `signups` | `SIGNUPS_ENABLED` env (unset = on) | `auth.CreateUserWithTenant` via `SetSignupsEnabledFunc` (global-only; also the landing form in `api/landing.go`) |
+| `chunking` | true | the chunked-PUT entry check in `api/s3_engine_adapter.go` (`chunkingEnabled(tenantID)`) |
+| `smart_demotion` | false | per tenant inside `SmartDemotionRunner.RunOnce` (`api/smart_demotion.go`) |
+| `quota_checkout` | false | the dashboard billing page's house checkout (`dashboard/handlers/billing_house.go`) |
+| `house_overview` | false | the house on the dashboard overview (`dashboard/handlers/overview.go`) |
+
+Adding a flag = key constant + `Register` call + call site (+ a `flagInfos`
+entry in `dashboard/handlers/admin_flags.go`). No schema change.
 
 ## Testing
 

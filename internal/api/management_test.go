@@ -460,8 +460,8 @@ func TestLlmsTxt(t *testing.T) {
 
 	body := w.Body.String()
 	assert.Contains(t, body, "stored.ge")
-	assert.Contains(t, body, "S3-Compatible Endpoints")
-	assert.Contains(t, body, "Management API")
+	assert.Contains(t, body, "S3-compatible endpoints")
+	assert.Contains(t, body, "JSON API")
 	assert.Contains(t, body, "Bearer JWT")
 	assert.Contains(t, body, "/api/v1/manage")
 }

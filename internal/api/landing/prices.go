@@ -31,6 +31,13 @@ type Prices struct {
 	PinHot      float64 `json:"pin_hot"`
 	Performance float64 `json:"performance"`
 	Founders    float64 `json:"founders"`
+	// Egress allowances are keyed to the quota (per month) — see
+	// prices.json. They used to be typed into the landing copy as
+	// "0." + the AWS price multiple (Review R14-09); now they are data.
+	Egress struct {
+		StandardFreeRatio     float64 `json:"standard_free_ratio"`
+		VaultRestoreFreeRatio float64 `json:"vault_restore_free_ratio"`
+	} `json:"egress"`
 	Competitors struct {
 		AWSS3        float64 `json:"aws_s3"`
 		BackblazeB2  float64 `json:"backblaze_b2"`

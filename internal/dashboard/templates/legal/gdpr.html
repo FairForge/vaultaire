@@ -1,7 +1,7 @@
 {{define "title"}}GDPR Compliance — stored.ge{{end}}
 {{define "content"}}
 <div class="card">
-    <p class="text-muted">Last updated: June 1, 2026</p>
+    <p class="text-muted">Last updated: September 30, 2026</p>
     <h1>GDPR Compliance</h1>
     <p>stored.ge is committed to compliance with the General Data Protection Regulation (EU) 2016/679 ("GDPR"). This page describes how our service maps to GDPR requirements. For the full legal framework, see our <a href="/legal/privacy">Privacy Policy</a> and <a href="/legal/dpa">Data Processing Agreement</a>.</p>
 
@@ -24,13 +24,13 @@
     <ul>
         <li><strong>Data minimization:</strong> We store only the objects you upload and the minimal account metadata required to operate the service (email, hashed password, billing information). We do not collect analytics, behavioral data, or advertising profiles.</li>
         <li><strong>Purpose limitation:</strong> Your data is processed solely for the purpose of providing object storage and delivery. We do not access, analyze, or profile the content of stored objects.</li>
-        <li><strong>Storage limitation:</strong> Account data is retained only for the duration of your account. Upon account deletion, a 30-day grace period allows data recovery, after which all data is permanently destroyed.</li>
+        <li><strong>Storage limitation:</strong> Account data is retained only for the duration of your account. Upon account deletion, a 30-day grace period allows data recovery, after which the account is closed and our operators erase your objects, keys and account records.</li>
     </ul>
 
     <h2 id="erasure">Article 17 — Right to Erasure</h2>
     <p>Data subjects have the right to request deletion of their personal data. stored.ge supports this through:</p>
     <ul>
-        <li><strong>Account deletion:</strong> Available via the dashboard settings page or the management API (<code>DELETE /account</code>). Initiates a 30-day grace period, after which all account data, stored objects, and metadata are permanently deleted.</li>
+        <li><strong>Account deletion:</strong> Available via the dashboard settings page or the management API (<code>DELETE /account</code>). Initiates a 30-day grace period, after which the account is closed and our operators erase your objects, keys and account records.</li>
         <li><strong>Object deletion:</strong> Individual objects can be deleted at any time via the S3-compatible API (<code>DELETE</code> operation) or dashboard.</li>
         <li><strong>Cancellation:</strong> Account deletion can be cancelled during the 30-day grace period via the dashboard settings page.</li>
     </ul>
@@ -41,14 +41,13 @@
     <ul>
         <li><strong>S3-compatible API:</strong> All stored objects are accessible via the standard S3 protocol. You can export your entire data set using any S3-compatible tool — <code>aws-cli</code>, <code>boto3</code>, <code>rclone</code>, <code>s3cmd</code>, Cyberduck, and others — with zero modification.</li>
         <li><strong>GDPR data export:</strong> The dashboard settings page includes a one-click data export that downloads a JSON file containing all account data: profile, tenant information, quotas, buckets, objects, API keys, and 90 days of bandwidth history.</li>
-        <li><strong>No proprietary formats:</strong> Objects are stored as-is. We do not wrap, transform, or encode your data in any proprietary format.</li>
+        <li><strong>No proprietary formats:</strong> Objects are returned byte-for-byte through the S3 API. At rest, large objects may be split into chunks and compressed by our engine (which is open source); no proprietary client or format is ever needed to read your data back.</li>
     </ul>
 
     <h2 id="by-design">Article 25 — Data Protection by Design</h2>
     <p>Privacy and security are built into stored.ge from the ground up:</p>
     <ul>
-        <li><strong>Encryption at rest:</strong> All stored objects are encrypted using server-side encryption (SSE-S3) with AES-256-GCM. Key encapsulation uses ML-KEM-768, a post-quantum key encapsulation mechanism standardized by NIST.</li>
-        <li><strong>Encryption in transit:</strong> All connections are encrypted via TLS 1.2 or higher. HSTS headers are enforced on all responses.</li>
+                <li><strong>Encryption:</strong> all connections are encrypted in transit (TLS 1.2 or higher; HSTS is enforced at our edge). At rest you can encrypt with your own keys (SSE-C — the key travels with each request and is never stored) or client-side; server-managed encryption at rest (SSE-S3, AES-256-GCM with ML-KEM-768 key encapsulation) is implemented and tested but <strong>not yet enabled in production</strong>. Objects held by our storage sub-processors are additionally subject to those providers' own at-rest encryption.</li>
         <li><strong>Scoped API keys:</strong> API keys can be scoped to specific buckets and operations, following the principle of least privilege.</li>
         <li><strong>Two-factor authentication:</strong> TOTP-based 2FA is available for all accounts and enforced for administrative access.</li>
         <li><strong>No tracking:</strong> stored.ge does not use analytics cookies, advertising trackers, or third-party behavioral tracking scripts.</li>
@@ -68,12 +67,12 @@
     <h2 id="security">Article 32 — Security of Processing</h2>
     <p>stored.ge implements appropriate technical and organizational measures to ensure a level of security appropriate to the risk:</p>
     <ul>
-        <li><strong>Encryption:</strong> AES-256-GCM at rest with ML-KEM-768 key encapsulation; TLS 1.2+ in transit.</li>
+        <li><strong>Encryption:</strong> TLS 1.2+ in transit (HSTS at the edge); SSE-C or client-side encryption at rest on request — server-managed SSE-S3 (AES-256-GCM, ML-KEM-768) is implemented but not yet enabled in production.</li>
         <li><strong>Access controls:</strong> Per-tenant credentials, scoped API keys, role-based dashboard access.</li>
         <li><strong>Integrity:</strong> ETag (MD5) verification on every upload, Object Lock (WORM) for immutable retention, MFA Delete for versioned objects.</li>
         <li><strong>Audit logging:</strong> API operations, account access, and administrative actions are logged.</li>
         <li><strong>Breach notification:</strong> Automated breach tracking with 72-hour notification deadline, severity assessment, and affected user notification (see below).</li>
-        <li><strong>Backups:</strong> Daily PostgreSQL backups with 7-day retention in a separate location.</li>
+        <li><strong>Backups:</strong> Daily PostgreSQL backups with 7-day retention, currently on the production host (off-host copies planned before launch).</li>
     </ul>
 
     <h2 id="breach-notification">Articles 33/34 — Breach Notification</h2>
@@ -111,7 +110,7 @@
             <tr><td>ap-northeast-1</td><td>Tokyo, Japan</td></tr>
         </tbody>
     </table>
-    <p>A bucket's region is fixed at creation and its objects are stored only in that region: EU regions keep data within the European Union and United Kingdom as labelled above. International data transfers are governed by Standard Contractual Clauses as described in our <a href="/legal/dpa">DPA</a>.</p>
+    <p>A bucket's region is fixed at creation and its <strong>Standard-tier</strong> objects are stored only in that region: EU regions keep data within the European Union and United Kingdom as labelled above. Two exceptions apply whatever the bucket's region: objects stored in the <strong>Vault tier</strong> (storage class <code>GLACIER</code> / <code>DEEP_ARCHIVE</code>, or a Vault bucket) are written to our tape partner in Los Angeles, United States; and the objects of <strong>public-read buckets</strong> are served from Cloudflare R2. International data transfers are governed by Standard Contractual Clauses as described in our <a href="/legal/dpa">DPA</a>.</p>
 
     <h2 id="sub-processors">Sub-processors</h2>
     <p>stored.ge engages the following sub-processors in delivering the service:</p>
@@ -124,21 +123,14 @@
             </tr>
         </thead>
         <tbody>
-            <tr>
-                <td>iDrive Inc.</td>
-                <td>Object storage infrastructure</td>
-                <td>United States / EU</td>
-            </tr>
-            <tr>
-                <td>Stripe Inc.</td>
-                <td>Payment processing and billing</td>
-                <td>United States</td>
-            </tr>
-            <tr>
-                <td>Resend Inc.</td>
-                <td>Transactional email delivery</td>
-                <td>United States</td>
-            </tr>
+            <tr><td>iDrive Inc.</td><td>Object storage — Standard tier, per-bucket region</td><td>United States / EU</td></tr>
+            <tr><td>Seagate Technology (Lyve Cloud)</td><td>Object storage — resilient tier, failover</td><td>United States</td></tr>
+            <tr><td>Geyser Data Inc.</td><td>Tape archive — Vault tier (all regions)</td><td>United States (Los Angeles)</td></tr>
+            <tr><td>Cloudflare Inc.</td><td>CDN, DDoS protection, TLS; R2 storage for public-read buckets</td><td>Global (edge network) / United States</td></tr>
+            <tr><td>Microsoft Corporation (OneDrive)</td><td>Internal parity copies, when enabled</td><td>United States</td></tr>
+            <tr><td>Stripe Inc.</td><td>Payment processing</td><td>United States</td></tr>
+            <tr><td>Resend Inc.</td><td>Transactional e-mail, when enabled</td><td>United States</td></tr>
+            <tr><td>Google LLC / GitHub Inc.</td><td>OAuth sign-in (only if used)</td><td>United States</td></tr>
         </tbody>
     </table>
     <p>Changes to sub-processors are communicated with at least 30 days' notice. The full sub-processor list and notification process are documented in our <a href="/legal/dpa">DPA</a>.</p>

@@ -1,19 +1,20 @@
 # Product Features Roadmap
 
+> Roadmap/feature notes — not customer-facing; prices live in `internal/api/landing/prices.json`. Written for the pack era; statuses and paths were corrected 2026-09-30 (Review R14). "Proposed" marks a file or directory that does not exist.
+
 Comprehensive list of customer-facing features, organized by when they can be built.
 Each feature references its implementation phase in the master plan.
 
-## Phase 2: Billing Foundation (NOW)
+## Phase 2: Billing Foundation (historical — the house is quota-sold, see the status notes)
 
 ### Multi-Item Subscriptions (Add-ons)
 **What:** Customers can add/remove individual services (object lock, priority egress, extra storage blocks) without canceling their base plan. Uses Stripe Subscription Items — each add-on is a separate line item on one subscription.
 **Where:** `internal/billing/stripe.go` — add `AddSubscriptionItem()`, `RemoveSubscriptionItem()`
 **Phase:** 2.1-2.6
 
-### Metered (Usage-Based) Billing
-**What:** Charge per GB actually stored, reported to Stripe via usage records. Hybrid model: base plan + metered overage. The r/datahoarder crowd hates paying for unused capacity.
-**Where:** `internal/billing/metered.go` — Stripe usage record reporting, background job
-**Phase:** 2.2-2.6
+### Metered (Usage-Based) Billing — NOT PURSUED
+**Decision (2026-09-21, R10):** stored.ge is quota-sold — whole TB, flat rate, no overage, egress never billed. `internal/billing/metered.go` and `STRIPE_METER_*` exist but stay unset; there is no usage-based line on any invoice.
+**Phase:** dropped
 
 ### Pause/Resume Subscription
 **What:** Customer pauses billing — data stays, no charges. Stripe supports this natively. Huge for seasonal users; nobody in cheap storage offers this.
@@ -22,12 +23,13 @@ Each feature references its implementation phase in the master plan.
 
 ### Prepaid Credits
 **What:** Buy $50 credit, draw down against usage. Great for burst backups. Uses Stripe customer credit balance.
-**Where:** `internal/billing/credits.go` — `AddCredit()`, `GetBalance()`, Stripe customer balance API
+**Where:** `internal/billing/credits.go` (proposed — does not exist) — `AddCredit()`, `GetBalance()`, Stripe customer balance API
 **Phase:** 2.5
 
 ### Grace Period on Failed Payments
 **What:** 3/7/14 day email warnings before any access restriction. Never delete data on payment failure. Builds trust.
-**Where:** `internal/billing/webhook.go` (already started with `OverageService`), email notifications
+**Status:** dunning is delegated to Stripe; the app has no suspension-on-non-payment code (R10-35). `OverageService` is gone with the overage model.
+**Where:** `internal/billing/webhook.go`, email notifications
 **Phase:** 2.2 (webhook), 4.1 (enforcement)
 
 ### Instant Plan Switching
@@ -40,8 +42,8 @@ Each feature references its implementation phase in the master plan.
 **Where:** Stripe Dashboard (Price configuration) + `internal/billing/stripe.go` plan registration
 **Phase:** 2.1 (architecture), 2.5 (dashboard display)
 
-### Free Tier (5GB, No Credit Card)
-**What:** Biggest signup accelerator. 5GB storage, 1GB bandwidth/month, 1 bucket, 1 API key. Soft limit at 80%, block at 100% with upgrade prompt.
+### Free Tier (5GB, No Credit Card) — SHIPPED
+**What:** 5 GB storage, 1 bucket, 1 scoped API key (`internal/usage/free_tier.go`), enforced on every object write and on bucket/key creation. The 80 % soft-limit prompt is dashboard copy.
 **Where:** `internal/usage/quota_manager.go` — default tier = `free`, `internal/dashboard/` — upgrade CTA
 **Phase:** 5.6.8
 
@@ -65,13 +67,13 @@ Each feature references its implementation phase in the master plan.
 ### Transparent Invoice Breakdown
 **What:** Line-item invoices showing: storage × rate, egress (free included), add-ons. Frame as value, not cost.
 ```
-Your 10TB on stored.ge:
-  Storage:     10 TB × $3.99        $39.90
-  Egress:      50 GB free included     $0
-  Object Lock: enabled               $1.99
-  ─────────────────────────────────────
-  Total:                             $41.89
+Your 10 TB downstairs (Standard) on stored.ge — prices.json, 2026-09-30:
+  Storage:  10 TB × $4.49 (annual)          $44.90/mo   (× $4.99 = $49.90 if paid monthly)
+  Egress:   5 TB/mo included (0.5× quota)   $0          never billed; may be throttled past it
+  ─────────────────────────────────────────────────────
+  Total:                                    $44.90/mo
 ```
+(Object Lock is included; there is no add-on price for it. The pin-hot add-on is $3/TB/mo.)
 **Where:** `internal/dashboard/templates/customer/billing.html`
 **Phase:** 2.5
 
@@ -79,36 +81,36 @@ Your 10TB on stored.ge:
 
 ### Bandwidth Banking
 **What:** Unused free egress rolls over month-to-month. "You have 180GB egress banked from 3 quiet months." Nobody else offers this.
-**Where:** `internal/usage/bandwidth_banking.go` — track rollover in `tenant_quotas` or new table, display in dashboard
+**Where:** `internal/usage/bandwidth_banking.go` (proposed — does not exist). Egress is never billed today, so "banking" would apply to the throttle allowance only
 **Phase:** 4.1-4.3
 
 ### Mid-Cycle Usage Alerts
-**What:** Email at 50%/75%/90% of storage quota. 3-day warning before overage charges. Data loss anxiety is the #1 fear.
-**Where:** `internal/billing/alerts.go` — background job checks thresholds, sends via email service
+**What:** Email at 50%/75%/90% of storage quota. (No overage charges exist; the warning is about hitting the quota.) Data loss anxiety is the #1 fear.
+**Where:** `internal/billing/alerts.go` (proposed — does not exist); the shipped piece is `internal/api/bandwidth_alerts.go` (hourly bandwidth threshold check via `email.Sender`). Prod sends no mail until `EMAIL_PROVIDER` is set
 **Phase:** 4.2 (enforcement) + 5.6.6 (event system)
 
 ## Phase 5.5: S3 Compatibility Features
 
-### Ransomware Recovery / Object Lock
-**What:** Object lock with compliance mode + immutable snapshots. "Even if your keys are compromised, locked objects can't be deleted." Sells to IT admins and compliance teams.
-**Where:** `internal/api/s3_lock.go`, migration `025_object_lock.sql`
+### Ransomware Recovery / Object Lock — SHIPPED
+**What:** Object Lock (GOVERNANCE + COMPLIANCE retention, legal hold, MFA Delete) enforced on every delete, overwrite, multipart complete and copy (R2/R3/R4). "Even if your keys are compromised, locked objects can't be deleted." Sells to IT admins and compliance teams.
+**Where:** `internal/api/s3_lock.go`, migration `028_object_lock.sql`
 **Phase:** 5.5.9
 
 ## Phase 5.6: Developer Experience
 
-### Webhook Notifications to Customers
-**What:** "Email me when any upload > 1GB completes" or "Alert on bulk deletion." Peace of mind. Customer-configured webhooks delivered via event system.
-**Where:** `internal/api/events.go` (foundation), `internal/webhooks/delivery.go` (Phase 12.3 for full webhook delivery)
-**Phase:** 5.6.6 (event log), 12.3 (webhook delivery)
+### Webhook Notifications to Customers — SHIPPED (basic)
+**What:** Customer-configured webhooks (`/api/v1/webhooks`) fired from the event log (`/api/v1/events`: object.*, bucket.*, key.*, sts.token_created), HMAC-signed. One delivery attempt, no retry yet (WP-R11-3); email-on-event and size/bulk filters are not built.
+**Where:** `internal/api/events.go`, `internal/api/webhooks_routes.go` (`internal/webhooks/delivery.go` was proposed and does not exist)
+**Phase:** 5.11.6 shipped
 
 ### Onboarding Flow
 **What:** Post-registration "Get Started" checklist with pre-filled curl examples using the user's ACTUAL API keys. Target: first API call in <5 minutes.
-**Where:** `internal/dashboard/templates/customer/onboarding.html`
-**Phase:** 5.6.7
+**Where:** shipped as the onboarding block in `internal/dashboard/templates/customer/dashboard.html` (cURL snippet with the real key, `--aws-sigv4` since R14-03); `onboarding.html` does not exist
+**Phase:** 5.6.7 shipped
 
 ### Team Billing
 **What:** One payment method, multiple users/API keys under one tenant. Already have user/tenant separation — just need multi-user invite flow.
-**Where:** `internal/dashboard/handlers/team.go`, `internal/auth/invites.go`
+**Where:** `internal/dashboard/handlers/team.go`, `internal/auth/invites.go` (both proposed — do not exist)
 **Phase:** 5.6 (foundation), 18 (full multi-tenant)
 
 ## HIGH PRIORITY: CLI/TUI (Pull forward from Phase 26)
@@ -117,7 +119,7 @@ The target market (r/datahoarder, r/cloudstorage, self-hosters, devs) strongly p
 
 ### `stored` CLI
 **What:** Single binary CLI for all stored.ge operations. Pipe-friendly, scriptable, no browser needed.
-**Where:** `cmd/stored/` — Go binary, uses stored.ge API
+**Where:** `cmd/stored/` (proposed — does not exist) — Go binary, uses stored.ge API
 **Stack:** cobra (CLI framework) + lipgloss (styled output)
 ```
 stored signup                            # register from terminal
@@ -137,7 +139,7 @@ stored mount <bucket> <mountpoint>       # wrapper for s3fs/JuiceFS
 
 ### `stored` TUI (Interactive Mode)
 **What:** Full-screen terminal UI built with Bubble Tea. Browse buckets/objects with arrow keys, live usage bars, key management. `stored tui` or just `stored` with no args.
-**Where:** `cmd/stored/tui/` — uses bubbletea + bubbles + lipgloss
+**Where:** `cmd/stored/tui/` (proposed — does not exist) — uses bubbletea + bubbles + lipgloss
 **Phase:** Same as CLI, or as a follow-up.
 
 ### rclone One-Liner Setup
@@ -159,7 +161,7 @@ stored mount <bucket> <mountpoint>       # wrapper for s3fs/JuiceFS
 
 ### Phase 1: rclone-Powered Mount (Ship with CLI, ~Phase 5.7)
 **What:** `stored mount ~/StoredDrive` wraps rclone under the hood. One command → mounted drive. Also `stored sync ~/folder` for two-way Dropbox-style sync via `rclone bisync`. Branded one-click installer that configures rclone automatically.
-**Where:** `cmd/stored/mount.go` — wraps rclone, auto-downloads if not present
+**Where:** `cmd/stored/mount.go` (proposed — does not exist) — wraps rclone, auto-downloads if not present
 **Why rclone:** Already supports S3, handles caching, retries, bandwidth limits, and has 50+ backend support. Free, battle-tested, open source. Covers 90% of desktop sync use cases with zero custom sync engine development.
 **Phase:** ~5.7 (ships with CLI)
 
@@ -175,7 +177,7 @@ stored mount <bucket> <mountpoint>       # wrapper for s3fs/JuiceFS
 - Pause/resume sync
 - Multi-account support
 **NOT Electron** (too heavy), **NOT WASM** (wrong tool), **NOT Flutter** (different language).
-**Where:** `cmd/stored-desktop/` — Wails app
+**Where:** `cmd/stored-desktop/` (proposed — does not exist) — Wails app
 **Phase:** Post-launch (Tier 3-4), only if customer demand warrants it
 
 ## Mobile App
@@ -196,7 +198,7 @@ stored mount <bucket> <mountpoint>       # wrapper for s3fs/JuiceFS
 - QR code setup — scan from dashboard, auto-configures the app
 - Widget showing storage usage on home screen
 - Shortcut/Siri integration: "Hey Siri, back up my photos to stored"
-**Where:** `mobile/ios/`, `mobile/android/` (or `mobile/` for cross-platform)
+**Where:** `mobile/ios/`, `mobile/android/` (or `mobile/` for cross-platform) — proposed, nothing exists
 **Phase:** Tier 3-4. Consider after desktop client proves demand. Camera backup alone could be an MVP — it's the #1 reason normal people use cloud storage.
 
 ### Mobile-First Alternative: Progressive Web App (PWA)
@@ -210,19 +212,19 @@ These are features users take for granted. Missing any one creates friction:
 
 | Feature | Status | Phase |
 |---------|--------|-------|
-| Web dashboard | Done (Phase 1) | 1.x |
-| S3 API compatibility | Working | 5.5 (hardening) |
-| File sharing (presigned URLs) | Partial | 5.6.5 (STS) |
-| Search / find files | Not started | 5.6.3 (metadata) |
-| Trash / undelete | Not started | 5.5.6 (versioning) |
+| Web dashboard | Shipped (house checkout + overview behind flags) | 1.x, dashboard plan Phases 0-4 |
+| S3 API compatibility | Shipped; conformance fixes A1, reviews R2-R4 | 5.5 |
+| File sharing (presigned URLs) | Shipped: presigned GET/PUT (SigV4 query auth, `GET /api/v1/user/presigned`) + STS temporary credentials (`POST /api/v1/sts/token`) | 5.10.16, 5.11.5 |
+| Search / find files | Not started (prefix listing only) | 5.6.3 (metadata) |
+| Trash / undelete | Partial: versioning is metadata-only, a previous version's bytes cannot be retrieved (WP-R2-1) | 5.5.6 |
 | File preview (images, PDF) | Not started | Tier 3 |
-| Activity log | Not started | 5.6.6 (events) |
-| 2FA / MFA | Stubbed | 5.1 (security) |
-| Email notifications | Not started | 4.3 (alerts) |
-| API documentation | Stubbed | 5.6.7 (onboarding) |
-| Status page | Not started | Post-launch |
+| Activity log | Shipped: `GET /api/v1/events` (customer events) + `audit_logs` via `internal/audit` (operator trail, dashboard audit page) | 5.11.6, R11/R12 |
+| 2FA / MFA | Shipped: TOTP (#196), honoured by OAuth and MFA Delete | 5.1 |
+| Email notifications | Code shipped (bandwidth alerts, password reset, verification); prod sends nothing until `EMAIL_PROVIDER` is set | 4.3 |
+| API documentation | Shipped: `/docs`, `/docs/api` (Swagger UI), `/openapi.json` (drift-guarded), `/llms.txt`, `docs/API.md` | 5.6.7, R14 |
+| Status page | Shipped: `/status` (HTML), `/health*` | launch |
 | CLI tool | Not started | ~5.7 |
-| Desktop sync | Not started | ~5.7 (rclone) |
+| Desktop sync | Not started (rclone guide is the answer today) | ~5.7 |
 | Mobile app | Not started | Tier 3-4 |
 
 ## Wow Factor Summary
@@ -230,8 +232,8 @@ These are features users take for granted. Missing any one creates friction:
 Things that make people switch or tell their friends:
 
 1. **"Just storage" positioning** — anti-bloat, resonates with technical crowd
-2. **$3.99/TB** — 5-10x cheaper than AWS/Azure/GCP
-3. **Free egress** — nobody else at this price point
+2. **Whole-TB flat pricing** (see `prices.json`: Standard $4.49/TB annual) — ~5× cheaper than AWS S3
+3. **Egress never billed** — 0.5× quota/month free on Standard, then throttled at most; no per-request fees
 4. **Pipe-friendly CLI** — `cat file | stored put bucket/key`
 5. **rclone one-liner** — `stored rclone-config >> ~/.config/rclone/rclone.conf`
 6. **Pause subscription** — data stays, billing stops
@@ -240,16 +242,16 @@ Things that make people switch or tell their friends:
 9. **Object lock** — ransomware-proof backups
 10. **Transparent value display** — show durability/encryption/redundancy, not costs
 11. **S3 cost comparison** — "This costs $230/mo on AWS" on dashboard
-12. **EU data residency** — GDPR toggle per bucket
+12. **EU data residency** — per-bucket region at creation (shipped; five EU regions)
 13. **Terminal-first** — everything works without a browser
 14. **Open source core** — trust through transparency
 
 ## Phase 7: Storage Intelligence Features
 
-### Data Residency Picker
-**What:** "Keep my data in EU only" / "US only" toggle per bucket. Huge for GDPR. Geyser London enables EU. Lyve has AP regions.
-**Where:** `internal/engine/routing.go` — region-aware routing, `internal/dashboard/` — region selector on bucket creation
-**Phase:** 7.6
+### Data Residency Picker — SHIPPED (per-bucket region)
+**What:** A bucket's region is chosen at creation (`LocationConstraint` / dashboard selector) from the 13 iDrive regions the deployment has key pairs for (`us-*`, `eu-west-1/3/4`, `eu-central-1`, `eu-south-1`, `ap-northeast-1`) and is immutable. Exceptions stated in the GDPR page: Vault objects go to the tape backend (Los Angeles) and public-read objects to the CDN origin.
+**Where:** `internal/api/s3_buckets.go`, `bucketRegionDriver` in `s3_engine_adapter.go`, `internal/drivers/idrive_regions.go` (`internal/engine/routing.go` is not the region path)
+**Phase:** 5.14.7 + WP-R7-1 shipped
 
 ### Carbon Footprint Badge
 **What:** Tape is ~90% less energy than spinning disk. "Your data produces X% less CO2 than traditional cloud." Show per-tenant stats based on which backends their data lives on.
@@ -261,19 +263,12 @@ Things that make people switch or tell their friends:
 ### Charge for Logical Bytes (Not Physical)
 Every provider charges for logical bytes stored. Show the VALUE stack (durability, encryption, redundancy, erasure coding) — not the cost stack (dedup ratio, compression savings, backend cost).
 
-### Price Tiers (from docs/BUSINESS.md)
-| Product | Price | Backend |
-|---------|-------|---------|
-| Free | $0 (5GB) | Quotaless |
-| Vault3 | $2.99/mo (3TB) | Geyser direct |
-| Vault9 | $9/mo (9TB) | Geyser direct |
-| Vault18 | $18/mo (18TB) | Geyser direct |
-| Vault36 | $36/mo (36TB) | Geyser direct |
-| Standard | $3.99/TB/mo | Lyve → Quotaless → Geyser |
-| Performance | $6.99/TB/mo | Lyve direct |
-| Annual | 20% off | Same backends |
+### Price Tiers
+See `internal/api/landing/prices.json` — the one price file (landing page, dashboard, legal pages and `llms.txt` render from it). As of 2026-09-30: Standard $4.49/TB/mo annual, $4.99 monthly; Vault $2.00 annual, $2.55 monthly with a $4.99 monthly minimum; pin-hot $3/TB/mo; Performance $6.99 parked until after launch; 5 GB free. Quota-sold, no overage, egress never billed. Backends per tier: Standard → iDrive (hot), Vault → Geyser tape, public buckets → R2 (`docs/ARCHITECTURE.md`).
 
-### Add-on Pricing (TBD — set in Stripe Dashboard)
+The pack-era table (`Vault3/9/18/36`, `$3.99/TB`) is gone from every product surface; the only leftover is `registerStripePlans` in `internal/api/server.go`, which still registers `STRIPE_PRICE_VAULT3…` plans with the retired labels when those env vars are set (they are not). Removing it is a work package.
+
+### Add-on Pricing (not on the price list — none of these is sold today)
 | Add-on | Price | Phase |
 |--------|-------|-------|
 | Object Lock / WORM | ~$1.99/mo | 5.5.9 |

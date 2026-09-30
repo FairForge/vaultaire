@@ -2,8 +2,10 @@
 
 Single source of truth for "what is the client's IP" — the only place allowed to
 read `X-Forwarded-For` / `CF-Connecting-IP`. Feeds the API-key IP allowlist
-(`api/s3.go`), the S3 access log, the waitlist limiter and the dashboard
-login/reset/abuse limiters (`dashboard/middleware.ClientIP`).
+(`api/s3.go`), the S3 access log, the waitlist limiter, the dashboard
+login/reset/abuse limiters (`dashboard/middleware.ClientIP`) and the audit
+trail's client address (`audit.WithRequest` in `api/server.go`'s
+`requestIDMiddleware`, so every `audit_logs` row records the same IP).
 
 **Trust model** (from the SLC `haproxy.cfg`, `option forwardfor` = append):
 peer = **last** entry of the **last** `X-Forwarded-For` header occurrence (HAProxy adds a new

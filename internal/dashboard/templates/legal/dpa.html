@@ -1,7 +1,7 @@
 {{define "title"}}Data Processing Agreement — stored.ge{{end}}
 {{define "content"}}
 <div class="card">
-    <p class="text-muted">Last updated: June 1, 2026</p>
+    <p class="text-muted">Last updated: September 30, 2026</p>
     <h1>Data Processing Agreement</h1>
     <p>This Data Processing Agreement ("DPA") supplements the <a href="/legal/terms">Terms of Service</a> and is entered into between the customer identified below ("Controller") and FairForge LLC ("Processor", "stored.ge") pursuant to Article 28 of the General Data Protection Regulation (EU) 2016/679 ("GDPR").</p>
 
@@ -52,11 +52,11 @@
     <p>The Processor implements the following technical and organizational measures:</p>
     <ul>
         <li><strong>Encryption in transit</strong> — all API and dashboard traffic is encrypted via TLS 1.2 or higher.</li>
-        <li><strong>Encryption at rest</strong> — objects are stored on encrypted storage volumes.</li>
+        <li><strong>Encryption at rest</strong> — available under Controller-supplied keys (SSE-C) or client-side encryption; server-managed encryption at rest (SSE-S3) is implemented but not yet enabled in production. Objects held by storage sub-processors are subject to those providers' own at-rest encryption.</li>
         <li><strong>Access controls</strong> — production access is limited to authorized personnel via SSH key authentication. Customer data access requires S3 credentials (access key + secret key) or authenticated dashboard session.</li>
-        <li><strong>Authentication</strong> — passwords hashed with bcrypt (cost 12), TOTP two-factor authentication available, session tokens are cryptographically random.</li>
-        <li><strong>Monitoring</strong> — access logs retained for 90 days, anomaly detection on API usage patterns.</li>
-        <li><strong>Backups</strong> — daily PostgreSQL backups with 7-day retention, stored in a separate location from production data.</li>
+        <li><strong>Authentication</strong> — passwords hashed with bcrypt (cost 10), TOTP two-factor authentication available, session tokens are cryptographically random, dashboard accounts lock for 15 minutes after 10 failed sign-ins.</li>
+        <li><strong>Monitoring</strong> — S3 access logs retained N days (placeholder until the purge job ships); every sign-in outcome, credential change and administrative action is written to an audit log; authentication-failure bursts page the operator.</li>
+        <li><strong>Backups</strong> — daily PostgreSQL backups with 7-day retention, currently held on the production host (off-host copies are planned before launch); object data itself lives with the storage sub-processors, not on that host.</li>
     </ul>
 
     <h2 id="sub-processors">Sub-processors</h2>
@@ -70,21 +70,14 @@
             </tr>
         </thead>
         <tbody>
-            <tr>
-                <td>iDrive Inc.</td>
-                <td>Object storage infrastructure</td>
-                <td>United States</td>
-            </tr>
-            <tr>
-                <td>Stripe Inc.</td>
-                <td>Payment processing</td>
-                <td>United States</td>
-            </tr>
-            <tr>
-                <td>Cloudflare Inc.</td>
-                <td>CDN and DDoS protection</td>
-                <td>Global (edge network)</td>
-            </tr>
+            <tr><td>iDrive Inc.</td><td>Object storage — Standard tier, per-bucket region</td><td>United States / EU</td></tr>
+            <tr><td>Seagate Technology (Lyve Cloud)</td><td>Object storage — resilient tier, failover</td><td>United States</td></tr>
+            <tr><td>Geyser Data Inc.</td><td>Tape archive — Vault tier (all regions)</td><td>United States (Los Angeles)</td></tr>
+            <tr><td>Cloudflare Inc.</td><td>CDN, DDoS protection, TLS; R2 storage for public-read buckets</td><td>Global (edge network) / United States</td></tr>
+            <tr><td>Microsoft Corporation (OneDrive)</td><td>Internal parity copies, when enabled</td><td>United States</td></tr>
+            <tr><td>Stripe Inc.</td><td>Payment processing</td><td>United States</td></tr>
+            <tr><td>Resend Inc.</td><td>Transactional e-mail, when enabled</td><td>United States</td></tr>
+            <tr><td>Google LLC / GitHub Inc.</td><td>OAuth sign-in (only if used)</td><td>United States</td></tr>
         </tbody>
     </table>
     <p>The Processor will notify the Controller at least 30 days before adding or replacing a sub-processor, giving the Controller the opportunity to object.</p>
@@ -110,7 +103,7 @@
     <p>Upon termination of the service agreement:</p>
     <ul>
         <li>The Controller may export all stored data via the S3-compatible API or the data export feature in account settings.</li>
-        <li>After a 30-day grace period following account deletion, the Processor will permanently delete all Controller data from production and backup systems within 90 days.</li>
+        <li>After the 30-day grace period following an account deletion request, the account is closed and the Processor's operators erase the Controller's objects, metadata and account records from production; database backups age out within 7 days of the erasure.</li>
         <li>The Processor will provide written confirmation of deletion upon request.</li>
     </ul>
 

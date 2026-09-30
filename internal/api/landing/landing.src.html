@@ -279,11 +279,11 @@ __BUILDER__
         <div class="uc-panel active" data-panel="backup">
             <div>
                 <h3>3-2-1 backups that actually finish</h3>
-                <p class="uc-desc">Point restic, rclone, or any S3-speaking backup tool at a bucket. Encrypted client-side if you want, versioned server-side if you ask.</p>
+                <p class="uc-desc">Point restic, rclone, or any S3-speaking backup tool at a bucket. Encrypted client-side if you want, Object Lock on the server if you ask.</p>
                 <ul>
                     <li>No minimum storage duration — rotate nightlies without penalty fees</li>
-                    <li>Bucket versioning + Object Lock stop ransomware from rewriting history</li>
-                    <li>Add a Vault pack as the off-site deep copy — it bills separately, so it survives budget cuts</li>
+                    <li>Object Lock (WORM) stops ransomware from rewriting history</li>
+                    <li>Add Vault TB as the off-site deep copy — it bills separately, so it survives budget cuts</li>
                 </ul>
                 <p class="uc-rec">recommended tier<b>Standard</b></p>
             </div>
@@ -359,7 +359,7 @@ aws s3 presign s3://downloads/album.zip \
                 <p class="uc-desc">Object Lock retention and legal holds at the S3 API level — plus MFA Delete on top for the buckets that really matter.</p>
                 <ul>
                     <li>WORM retention: nobody — including you — deletes inside the window</li>
-                    <li>Tape-backed Vault packs put an air-gap-grade copy behind the same API</li>
+                    <li>Tape-backed Vault storage puts an air-gap-grade copy behind the same API</li>
                     <li>Versioning keeps every revision; delete markers instead of destruction</li>
                 </ul>
                 <p class="uc-rec">recommended tier<b>Vault</b></p>
@@ -602,7 +602,7 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
                 <p class="alt-price">annual &middot; $__PRICE_STD_MONTHLY__ monthly &middot; any whole-TB quota</p>
                 <ul>
                     <li>Automatic tiering built in (~15% hot, rest on tape)</li>
-                    <li>Egress free to 0.__PRICE_AWS_MULT__× your quota/mo, then throttled — never billed</li>
+                    <li>Egress free to __EGRESS_STD__× your quota/mo, then may be throttled — never billed</li>
                     <li>Hard quota, resize any time — no overage, no meters</li>
                     <li>__PRICE_AWS_MULT__× cheaper than AWS S3</li>
                 </ul>
@@ -633,12 +633,12 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
                 <tr class="best"><td>Annual, prepaid</td><td>$__PRICE_VAULT_2DP__/TB/mo</td><td>any size — 5 TB is $__PRICE_VAULT_5TB__/mo, billed yearly</td></tr>
                 <tr><td>Founders slots</td><td>$__PRICE_FOUNDERS__/TB/mo</td><td>first 100 TB &middot; annual only &middot; 3–10 TB per account &middot; lifetime rate</td></tr>
             </table>
-            <p class="fine">Pick a quota in TB, change it whenever. The honest fine print: one durable tape copy (we're the offsite leg of <em>your</em> 3-2-1) &middot; 30-day minimum per object &middot; restore up to 1× your quota free every month — a free monthly restore drill — beyond that, restores are queued, never billed &middot; restored copies stay hot 7 days. Never: retrieval fees or egress fees. Founders slots are numbered and hard-capped — when they're gone, they're gone.</p>
+            <p class="fine">Pick a quota in TB, change it whenever. The honest fine print: one durable tape copy (we're the offsite leg of <em>your</em> 3-2-1) &middot; 30-day minimum per object &middot; restore up to __EGRESS_VAULT__× your quota free every month — a free monthly restore drill — beyond that, restores are queued, never billed &middot; restored copies stay hot 7 days. Never: retrieval fees or egress fees. Founders slots are numbered and hard-capped — when they're gone, they're gone.</p>
         </div>
 
         <p class="includes">
-            Every tier includes: real S3 API (multipart, versioning, Object Lock/WORM, presigned URLs) &middot;
-            $0 API fees &middot; no retrieval fees &middot; encryption at rest &middot; scoped API keys &amp; STS
+            Every tier includes: real S3 API (multipart, Object Lock/WORM, presigned URLs, version history) &middot;
+            $0 API fees &middot; no retrieval fees &middot; TLS everywhere, SSE-C and client-side encryption &middot; scoped API keys &amp; STS
         </p>
 
         <div class="compare">
@@ -649,14 +649,14 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
                 <tbody>
                     <tr><th scope="row">$/TB/mo</th><td class="us">$__PRICE_STD__</td><td>$__PRICE_B2__</td><td>$__PRICE_WASABI__</td><td>$__PRICE_R2__</td><td>$__PRICE_AWS__</td></tr>
                     <tr><th scope="row">API/request fees</th><td class="us">$0</td><td>Class B/C fees</td><td>$0</td><td>ops-based</td><td>per-request</td></tr>
-                    <tr><th scope="row">Egress</th><td class="us">0.__PRICE_AWS_MULT__× quota free/mo, then throttled — never billed</td><td>3× free, then $0.01/GB</td><td>"Free" (fair-use policy)</td><td>Free</td><td>$0.09/GB</td></tr>
+                    <tr><th scope="row">Egress</th><td class="us">__EGRESS_STD__× quota free/mo, then may be throttled — never billed</td><td>3× free, then $0.01/GB</td><td>"Free" (fair-use policy)</td><td>Free</td><td>$0.09/GB</td></tr>
                     <tr><th scope="row">Billing</th><td class="us">Flat quota, no meters</td><td>Metered</td><td>Metered (90-day min)</td><td>Metered</td><td>Metered</td></tr>
                     <tr><th scope="row">Min storage duration</th><td class="us">None (Vault: 30 days)</td><td>None</td><td>90 days</td><td>None</td><td>None</td></tr>
                     <tr><th scope="row">Archive tier</th><td class="us">$__PRICE_VAULT__/TB (tape)</td><td>—</td><td>—</td><td>—</td><td>Glacier (retrieval fees)</td></tr>
                     <tr><th scope="row">Auto-tiering</th><td class="us">Built in</td><td>No</td><td>No</td><td>No</td><td>Manual lifecycle</td></tr>
                 </tbody>
             </table>
-            <p class="fine">Competitor pricing as published August 2026 — Backblaze and Wasabi both raised prices earlier this year. Wasabi's free egress is subject to their fair-use ratio policy.</p>
+            <p class="fine">Competitor pricing as published on their pricing pages, __PRICES_ASOF__ — Backblaze and Wasabi both raised prices earlier this year. Wasabi's free egress is subject to their fair-use ratio policy.</p>
         </div>
     </div>
 </section>
@@ -675,7 +675,7 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
             </div>
             <div class="answer">
                 <h3>Where does my data actually live?</h3>
-                <p>On established storage providers — enterprise S3 infrastructure for hot data, professional tape libraries for archive. The control plane runs on our own hardware with tested daily off-site backups; your data doesn't depend on that one box.</p>
+                <p>On established storage providers — enterprise S3 infrastructure for hot data, professional tape libraries for archive. The control plane runs on our own hardware with daily database backups; your data doesn't depend on that one box.</p>
             </div>
             <div class="answer">
                 <h3>How fast are cold reads?</h3>

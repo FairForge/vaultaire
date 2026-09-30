@@ -37,38 +37,48 @@ Before creating bug reports, please check existing issues as you might find that
 ## Development Setup
 
 ```bash
-git clone https://github.com/fairforge/vaultaire
+git clone https://github.com/FairForge/vaultaire
 cd vaultaire
-make deps
+go mod download
+make test-db        # creates + migrates the local vaultaire_test database (needed before any DB-backed test)
 make test
 make build
-Style Guidelines
-Go Style
+pre-commit install  # runs go fmt, go test ./... -short and golangci-lint before every commit
+```
 
-Run gofmt before committing
-Follow Effective Go
-Write clear comments explaining WHY, not WHAT
+## Style Guidelines
 
-Commit Messages
+### Go Style
 
-Use present tense ("Add feature" not "Added feature")
-Use imperative mood ("Move cursor to..." not "Moves cursor to...")
-Limit first line to 72 characters
-Reference issues and pull requests after the first line
+* Run `gofmt` before committing (`make fmt`)
+* Follow [Effective Go](https://go.dev/doc/effective_go)
+* Write clear comments explaining WHY, not WHAT
+
+### Commit Messages
+
+* Format: `type(scope): description [Phase NNN]` or `[Review RNN]` — type is one of feat/fix/refactor/test/docs
+* Use present tense ("Add feature" not "Added feature")
+* Use imperative mood ("Move cursor to..." not "Moves cursor to...")
+* Limit first line to 72 characters
+* Reference issues and pull requests after the first line
 
 Example:
-feat: add S3 multipart upload support
+
+```
+feat(api): add S3 multipart upload support [Phase 5.10]
 
 - Implements resumable uploads for files >100MB
 - Adds retry logic for failed parts
 - Updates documentation
 
 Fixes #123
-Community
+```
 
-Discord: Join our server (coming soon)
-Twitter: @storedge
-Blog: blog.stored.ge
+## Community
 
-Recognition
+* Questions and support: support@stored.ge
+* Bugs and feature requests: [GitHub issues](https://github.com/FairForge/vaultaire/issues)
+
+## Recognition
+
 Contributors will be recognized in our README.md and release notes. We value every contribution, no matter how small!

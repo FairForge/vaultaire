@@ -61,10 +61,17 @@ Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`,
 | `/legal/dpa` | GET | none | Data Processing Agreement (Article 28) |
 | `/legal/cookies` | GET | none | Cookie Policy |
 | `/legal/aup` | GET | none | Acceptable Use Policy |
+| `/legal/baa` | GET | none | Business Associate Agreement |
+| `/legal/gdpr` | GET | none | GDPR page (`/compliance/gdpr` 301s here) |
+| `/legal/data-act` | GET | none | EU Data Act page (`/compliance/data-act` 301s here) |
+| `/auth/{google,github}` | GET | none | OAuth consent redirect (mounted only when that provider's client id/secret are set) |
+| `/auth/{google,github}/callback` | GET | none | OAuth callback: link/create the account, MFA challenge for TOTP users, reveal-once credentials for a brand-new account (see Auth Flow 2a) |
 | `/dashboard/` | GET | session | Overview: the house (flag `house_overview`) or the storage gauge, fullness per floor, egress bar, stats, activity |
 | `/dashboard/buckets` | GET | session | Bucket list with counts + sizes + the floor (downstairs/attic from `tier_preference`, plus attic bytes put away by header) |
 | `/dashboard/buckets` | POST | session | Create new bucket (validates name, creates directory) |
 | `/dashboard/buckets/{name}` | GET | session | Object browser with prefix navigation |
+| `/dashboard/buckets/{name}/restore` | POST | session | Recall a GLACIER-backed object from tape (V18.2, `handlers/bucket_restore.go`; form key + optional prefix) |
+| `/dashboard/buckets/{name}/restore-status` | GET | session | htmx status span for a recall (`?key=`): on tape / restoring / restored |
 | `/dashboard/buckets/{name}/settings` | GET | session | Bucket settings: visibility, CDN URL, cache, CORS |
 | `/dashboard/buckets/{name}/settings` | POST | session | Update bucket visibility, cache TTL, CORS origins |
 | `/dashboard/buckets/{name}/analytics` | GET | session | CDN analytics: downloads, bandwidth, top objects, geo |
@@ -99,8 +106,16 @@ Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`,
 | `/dashboard/settings/export` | POST | session | Download all user data as JSON (GDPR Article 20) |
 | `/dashboard/settings/delete-account` | POST | session | Schedule account deletion with 30-day grace (GDPR Article 17) |
 | `/dashboard/settings/cancel-deletion` | POST | session | Cancel pending account deletion |
+| `/admin/tenants` | GET | session + admin | Tenant list |
+| `/admin/tenants/{id}` | GET | session + admin | Tenant detail (info card, bandwidth chart, quick actions) |
+| `/admin/tenants/{id}/suspend`, `/enable` | POST | session + admin | Suspend / re-enable a tenant (audited) |
+| `/admin/tenants/{id}/quota`, `/tier` | POST | session + admin | Edit quota / change legacy tier — 409 for a house tenant (floor rows are Stripe-owned, R10-21) |
 | `/admin/tenants/{id}/bandwidth-limit` | POST | session + admin | Update tenant bandwidth limit |
 | `/admin/tenants/{id}/reset-mfa` | POST | session + admin | Reset user's 2FA: answers the htmx form with a fragment (a 303 swapped the whole page into the card) and signs the user out of every device (R12) |
+| `/admin/system` | GET | session + admin | System page: process stats (goroutines, memory, GC, uptime, Go version) + DB pool stats (`handlers/admin_system.go`) |
+| `/admin/backends` | GET | session + admin | Backend health + primary (mounted only when `deps.Engine != nil`) |
+| `/admin/backends/{name}/primary` | POST | session + admin | Swap the engine primary — refused for anything `engine.CheckPrimaryEligible` rejects (audited, R12) |
+| `/admin/backends/{name}/check` | POST | session + admin | Force a health check of one backend |
 | `/admin/waitlist` | GET | session + admin | Pre-launch waitlist signups (count + list) |
 | `/admin/waitlist/export` | GET | session + admin | Download waitlist signups as CSV; `?filter=house\|downstairs\|attic` cuts by the house built on the site, `?fields=email` gives the one-column launch list (Phase 4). Cells are formula-escaped (`csvSafe`: a leading `=`, `+`, `-`, `@`, tab gets a `'` — R10-28 / R11-26) |
 | `/admin/revenue` | GET | session + admin | Revenue dashboard: MRR (legacy packs + metered + houses per floor via `queryHouseMRR`/`billing.QuoteHouse`), tier breakdown, churn, top customers |
@@ -145,7 +160,7 @@ Public flow at `/forgot-password` → email link → `/reset-password?token=...`
 - Auth service additionally rate-limits at 3/hour per email
 - On successful reset, calls `Sessions.DeleteByUserID(userID)` to log the user out of every device, then sets a flash message and redirects to `/login`
 
-The reset email is currently logged (not sent) — wire to a real email provider when one is configured.
+The reset email IS sent: router.go renders `email.RenderPasswordReset` and calls `deps.Email.Send` (`internal/email`). Which sender that is depends on `EMAIL_PROVIDER` — unconfigured (prod today) it is `LogSender`, which logs recipient/subject only and delivers nothing (R14-01).
 
 ## MFA Pending Store
 

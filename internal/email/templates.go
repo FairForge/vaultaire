@@ -66,16 +66,3 @@ func RenderPasswordReset(baseURL, token, email string) (string, string, error) {
 		Email:   email,
 	})
 }
-
-type welcomeData struct {
-	Email     string
-	AccessKey string
-}
-
-// RenderWelcome renders the welcome email template.
-func RenderWelcome(email, accessKey string) (string, string, error) {
-	return render("welcome.html", welcomeData{
-		Email:     email,
-		AccessKey: accessKey,
-	})
-}

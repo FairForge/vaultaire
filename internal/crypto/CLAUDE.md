@@ -1,6 +1,6 @@
 # internal/crypto
 
-Encryption, key management, and post-quantum cryptography for Vaultaire.
+Encryption, key management, and chunking/dedup primitives for Vaultaire. The "post-quantum" part is ML-KEM-768 inside SSE-S3 only (key rotation and crypto-shredding are no-ops end to end — WP-R8-1; SSE-S3 is not enabled in prod: no `ENCRYPTION_MASTER_KEY`).
 
 ## Key Files
 
@@ -8,10 +8,10 @@ Encryption, key management, and post-quantum cryptography for Vaultaire.
 - **sse_s3.go** — SSE-S3 service: ML-KEM-768 key encapsulation + AES-256-GCM data encryption. Per-tenant keypairs in DB, per-object DEKs via KEM encapsulation
 - **chunk_encryption.go** — `ChunkEncryptionService`: per-chunk convergent encryption (AES-256-GCM with HKDF-derived deterministic nonce). Same tenant + same content → same ciphertext (dedup-safe). Ciphertext format: `[nonce 12B][GCM ciphertext+tag]` (28B overhead). **R8-01 (2026-09-27):** the key is fixed by `(tenant, plaintextHash)` but the sealed bytes are the chunk AFTER the compression decision (raw or zstd, per request Content-Type), so the nonce is `HKDF(convergentKey, salt = SHA-256(sealed bytes), info "vaultaire-chunk-nonce-v2")` — a function of the message, never of the plaintext identity alone (the v1 derivation reused one (key, nonce) for two different messages when two stores compressed differently — NIST SP 800-38D §8). Decrypt reads the nonce from the blob prefix, so v1 blobs still decrypt (`TestChunkEncryption_LegacyV1BlobDecrypts`). Key version is hard-coded 1 end to end — rotation and crypto-shredding do not exist yet (WP-R8-1, `docs/reviews/R8-crypto-dedup.md`)
 - **encryption.go** — `Encryptor` interface: AES-256-GCM, ChaCha20-Poly1305, Noop. Only `NewChunkEncryptionService` reaches it from the product; the rest is unreachable (Review R0 → R8)
-- **keymanager.go** — Multi-tenant HKDF key derivation with version tracking and TTL cache
+- **keymanager.go** — Multi-tenant HKDF key derivation with version tracking and TTL cache. Version tracking is in-memory only and `RotateKey` has no product caller (rotation/shredding are no-ops, WP-R8-1)
 - **postquantum.go** — ML-KEM-768 via cloudflare/circl. **Unreachable from the product** (its only consumer, `pipeline.go`, was removed in Review R0); SSE-S3 uses Go stdlib `crypto/mlkem`. Deletion pending decision D-3 in `docs/reviews/R0-dead-code.md`
 - **compression.go** — LZ4/Zstd/Snappy compression with auto-detection
-- **chunker.go** — Content-defined chunking (FastCDC)
+- **chunker.go** — Content-defined chunking via `restic/chunker` (Rabin fingerprinting), ~2 MiB real average; the Go type is still named `FastCDCChunker` and the 4 MiB argument is accepted but not passed (R8-11/R8-18, WP-R8-4)
 - **gci.go** — Global content index for deduplication
 - **config.go** — Crypto configuration types
 

@@ -56,7 +56,7 @@ on either end. From a home connection you'll saturate your uplink first.
 
 ## Client-side encryption (optional)
 
-Want zero-knowledge encryption on top of ours? Wrap the remote with `rclone crypt`:
+Want encryption we can never undo? Wrap the remote with `rclone crypt` — only you hold the key:
 
 ```
 rclone config create secret crypt remote=stored:backups \
@@ -70,6 +70,8 @@ can't read) — everything else works normally.
 ## Notes
 
 - Use **path-style** addressing (rclone's S3 `Other` provider does this by default).
-- No egress fees up to 3× your stored volume per month, so `rclone sync`-ing
-  your data back out — or leaving entirely — is free. No lock-in by design.
+- Egress is never billed: Standard includes free egress up to 0.5× your quota per
+  month (Vault restores up to 1×), beyond that throughput may be throttled — so
+  `rclone sync`-ing your data back out, or leaving entirely, costs nothing. No lock-in
+  by design.
 - Questions? [FAQ](/docs/faq) · [support@stored.ge](mailto:support@stored.ge)

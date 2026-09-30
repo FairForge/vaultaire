@@ -2,6 +2,8 @@
 
 Connect rclone to stored.ge for file syncing, mounting, and serving — works on Linux, macOS, and Windows.
 
+> The customer copy of this guide is the served page at https://stored.ge/docs/rclone (`internal/api/docs_rclone.md`); keep the two in step.
+
 ## What is rclone
 
 rclone is a command-line tool for managing files on cloud storage. It supports over 70 backends, including any S3-compatible service. Think of it as rsync for the cloud — you get `copy`, `sync`, `mount`, and even `serve` (WebDAV, SFTP, FTP) against your stored.ge buckets.
@@ -40,10 +42,10 @@ name> storedge
 Storage> s3
 provider> Other
 env_auth> false
-access_key_id> VK_YOUR_ACCESS_KEY
-secret_access_key> SK_YOUR_SECRET_KEY
+access_key_id> VKxxxxxxxxxxxxxxxx
+secret_access_key> SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 region> us-east-1
-endpoint> https://s3.stored.ge
+endpoint> https://stored.ge
 location_constraint> (leave blank, press Enter)
 acl> private
 Edit advanced config?> n
@@ -55,14 +57,16 @@ This creates the following entry in `~/.config/rclone/rclone.conf`:
 [storedge]
 type = s3
 provider = Other
-access_key_id = VK_YOUR_ACCESS_KEY
-secret_access_key = SK_YOUR_SECRET_KEY
+access_key_id = VKxxxxxxxxxxxxxxxx
+secret_access_key = SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 region = us-east-1
-endpoint = https://s3.stored.ge
+endpoint = https://stored.ge
 acl = private
 ```
 
 You can also create this file directly instead of using the interactive setup.
+
+The `VK…`/`SK…` pair is the primary key shown once at sign-up. A scoped `VLT_…` key from Dashboard → API Keys (per bucket, per operation, optional IP allowlist and expiry) works in exactly the same place and is the better choice for a machine that only needs one bucket.
 
 ## Step 3: Basic Operations
 

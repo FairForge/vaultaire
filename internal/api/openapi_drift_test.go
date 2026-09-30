@@ -57,8 +57,8 @@ func TestOpenAPIDriftGuard(t *testing.T) {
 	specOps := map[string]bool{} // "METHOD /path"
 	for path, item := range spec.Paths {
 		for method, op := range map[string]any{
-			"GET": item.Get, "PUT": item.Put, "POST": item.Post,
-			"DELETE": item.Delete, "HEAD": item.Head,
+			"GET": item.Get, "PUT": item.Put, "POST": item.Post, "PATCH": item.Patch,
+			"DELETE": item.Delete, "HEAD": item.Head, "OPTIONS": item.Options,
 		} {
 			if op != nil && !isNilPtr(op) {
 				specOps[method+" "+path] = true
@@ -135,23 +135,19 @@ func isNilPtr(v any) bool {
 	return fmt.Sprintf("%v", v) == "<nil>"
 }
 
-// knownUndocumented is the recorded, reviewed backlog of API routes that
-// predate the drift guard and are not yet in the OpenAPI spec (B3 —
-// OpenAPI rebrand + expand — burns this down; note the spec's PathItem has
-// no Patch field yet, so PATCH routes cannot be documented until it grows
-// one). Do not add to it casually: new endpoints should ship documented.
-// 100 routes as of 2026-07-20 — the "7 of ~40 ops documented" audit
-// finding, now enumerated and guarded.
+// knownUndocumented is the reviewed backlog of API routes that exist in
+// code but are deliberately absent from the OpenAPI spec. Since Review R14
+// (B3, OpenAPI expand) every JSON route under /api/v1, /auth and
+// /api/waitlist is documented in internal/docs/openapi.go; what remains is
+// exactly the /api/compliance/* group — admin-only GDPR scaffolding
+// (SAR, consent, ROPA, breach, privacy controls) whose user-scoped
+// handlers are dead-by-auth and whose breach/ROPA handlers duplicate the
+// documented /api/v1/admin/breach* routes. It is slated for deletion under
+// decision D-12 / WP-R11-5 and is not published until then. Do not add to
+// this list casually: new endpoints ship documented.
 var knownUndocumented = map[string]bool{
 	"DELETE /api/compliance/consent/{purpose}":               true,
 	"DELETE /api/compliance/ropa/activities/{id}":            true,
-	"DELETE /api/v1/admin/flags/{key}":                       true,
-	"DELETE /api/v1/manage/account":                          true,
-	"DELETE /api/v1/manage/buckets/{name}":                   true,
-	"DELETE /api/v1/manage/keys/{id}":                        true,
-	"DELETE /api/v1/user":                                    true,
-	"DELETE /api/v1/user/apikeys/{keyId}":                    true,
-	"DELETE /api/v1/webhooks/{id}":                           true,
 	"GET /api/compliance/activities":                         true,
 	"GET /api/compliance/breach":                             true,
 	"GET /api/compliance/breach/stats":                       true,
@@ -169,65 +165,17 @@ var knownUndocumented = map[string]bool{
 	"GET /api/compliance/ropa/report":                        true,
 	"GET /api/compliance/ropa/stats":                         true,
 	"GET /api/compliance/sar/{id}":                           true,
-	"GET /api/v1/admin/breaches":                             true,
-	"GET /api/v1/admin/flags":                                true,
-	"GET /api/v1/events":                                     true,
-	"GET /api/v1/manage/account/export/{id}":                 true,
-	"GET /api/v1/manage/buckets":                             true,
-	"GET /api/v1/manage/buckets/{name}":                      true,
-	"GET /api/v1/manage/buckets/{name}/objects":              true,
-	"GET /api/v1/manage/keys":                                true,
-	"GET /api/v1/manage/usage":                               true,
-	"GET /api/v1/user":                                       true,
-	// Review R11 (WP-R10-7): quota/usage/presign moved under /api/v1/user
-	// from their dead-by-auth mounts; the admin audit trail is new (R11-09).
-	// Documenting them in openapi.go is R14's (B3).
-	"GET /api/v1/user/quota/history":                   true,
-	"GET /api/v1/user/usage/alerts":                    true,
-	"GET /api/v1/user/presigned":                       true,
-	"GET /api/v1/admin/audit":                          true,
-	"GET /api/v1/user/apikeys":                         true,
-	"GET /api/v1/user/apikeys/audit":                   true,
-	"GET /api/v1/user/quota":                           true,
-	"GET /api/v1/user/usage":                           true,
-	"GET /api/v1/webhooks":                             true,
-	"GET /api/v1/webhooks/{id}/deliveries":             true,
-	"PATCH /api/compliance/breach/{id}":                true,
-	"PATCH /api/compliance/ropa/activities/{id}":       true,
-	"PATCH /api/v1/admin/breach/{id}":                  true,
-	"PATCH /api/v1/manage/buckets/{name}":              true,
-	"PATCH /api/v1/webhooks/{id}":                      true,
-	"POST /api/compliance/breach":                      true,
-	"POST /api/compliance/breach/{id}/notify":          true,
-	"POST /api/compliance/consent":                     true,
-	"POST /api/compliance/deletion":                    true,
-	"POST /api/compliance/export":                      true,
-	"POST /api/compliance/privacy/controls":            true,
-	"POST /api/compliance/privacy/minimize":            true,
-	"POST /api/compliance/privacy/pseudonymize":        true,
-	"POST /api/compliance/ropa/activities":             true,
-	"POST /api/compliance/ropa/activities/{id}/review": true,
-	"POST /api/compliance/sar":                         true,
-	"POST /api/v1/admin/breach":                        true,
-	"POST /api/v1/admin/dedup-gc":                      true,
-	"POST /api/v1/admin/smart-demotion":                true,
-	"POST /api/v1/admin/quota-reconcile":               true,
-	"POST /api/v1/manage/account/cancel-deletion":      true,
-	"POST /api/v1/manage/account/export":               true,
-	"POST /api/v1/manage/buckets":                      true,
-	"POST /api/v1/manage/keys":                         true,
-	"POST /api/v1/sts/token":                           true,
-	"POST /api/v1/user/apikeys":                        true,
-	"POST /api/v1/user/apikeys/{keyId}/expire":         true,
-	"POST /api/v1/user/apikeys/{keyId}/rotate":         true,
-	"POST /api/v1/webhooks":                            true,
-	"POST /api/v1/webhooks/{id}/test":                  true,
-	"POST /api/waitlist":                               true,
-	"POST /auth/login":                                 true,
-	"POST /auth/password-reset":                        true,
-	"POST /auth/password-reset/complete":               true,
-	"POST /auth/register":                              true,
-	"PUT /api/v1/admin/flags/{key}":                    true,
-	"PUT /api/v1/manage/buckets/{name}/residency":      true,
-	"PUT /api/v1/manage/buckets/{name}/tier":           true,
+	"PATCH /api/compliance/breach/{id}":                      true,
+	"PATCH /api/compliance/ropa/activities/{id}":             true,
+	"POST /api/compliance/breach":                            true,
+	"POST /api/compliance/breach/{id}/notify":                true,
+	"POST /api/compliance/consent":                           true,
+	"POST /api/compliance/deletion":                          true,
+	"POST /api/compliance/export":                            true,
+	"POST /api/compliance/privacy/controls":                  true,
+	"POST /api/compliance/privacy/minimize":                  true,
+	"POST /api/compliance/privacy/pseudonymize":              true,
+	"POST /api/compliance/ropa/activities":                   true,
+	"POST /api/compliance/ropa/activities/{id}/review":       true,
+	"POST /api/compliance/sar":                               true,
 }

@@ -646,7 +646,9 @@ func (s *Server) setupRoutes() {
 		s.router.Head(path, s.handleDocsPage(slug))
 	}
 	s.router.Get("/docs/api", docs.SwaggerUIHandler())
+	s.router.Head("/docs/api", docs.SwaggerUIHandler())
 	s.router.Get("/openapi.json", docs.OpenAPIJSONHandler())
+	s.router.Head("/openapi.json", docs.OpenAPIJSONHandler())
 
 	s.logger.Info("Registering user API routes")
 	s.registerUserAPIRoutes()
@@ -662,6 +664,7 @@ func (s *Server) setupRoutes() {
 
 	// Public status page — no auth, renders HTML.
 	s.router.Get("/status", s.handleStatusPage)
+	s.router.Head("/status", s.handleStatusPage)
 
 	// CDN path-based routes — before dashboard and S3 catch-all.
 	s.logger.Info("Registering CDN routes")
@@ -718,6 +721,7 @@ func (s *Server) setupRoutes() {
 	s.registerWebhookRoutes()
 
 	s.router.Get("/llms.txt", s.handleLlmsTxt)
+	s.router.Head("/llms.txt", s.handleLlmsTxt)
 
 	// RFC 9116 disclosure contact (5.5.6). Before the S3 catch-all — it used
 	// to fall through and answer 403 AccessDenied.
@@ -1053,6 +1057,12 @@ func (s *Server) handleStatusPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// Live state: never cache (Review R14-10); uptime monitors HEAD first.
+	w.Header().Set("Cache-Control", "no-store")
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	_, _ = fmt.Fprintf(w, statusPageHTML, statusClass, statusLabel, "0.1.0", uptime, healthy, total)
 }
 
@@ -1083,7 +1093,7 @@ a:hover{text-decoration:underline}
 <p class="detail">Version: %s</p>
 <p class="detail">Uptime: %s</p>
 <p class="detail">Backends: %d / %d healthy</p>
-<p class="detail" style="margin-top:1.5rem"><a href="/health?details=true">JSON health endpoint</a></p>
+<p class="detail" style="margin-top:1.5rem"><a href="/health">JSON health endpoint</a></p>
 </div>
 </body>
 </html>`

@@ -44,7 +44,7 @@ aws --endpoint-url https://stored.ge s3 cp hello.txt s3://my-first-bucket/
 aws --endpoint-url https://stored.ge s3 ls s3://my-first-bucket/
 ```
 
-That's it — your file is stored, encrypted at rest, and tiered automatically.
+That's it — your file is stored, and the engine places it for you.
 
 ## 4. Use it from your language of choice
 
@@ -67,10 +67,17 @@ out of the box: `restic -r s3:https://stored.ge/my-bucket init`.
 
 ## 5. What happens to your data
 
-- **Encrypted at rest** by default (SSE-S3). Want to hold your own keys? Use SSE-C.
-- **Auto-tiered**: hot for the first ~30 days on fast enterprise S3, then migrated
-  toward tape-backed archive. You don't configure lifecycle rules unless you want to.
-- **Deduplicated and compressed** transparently — your quota counts logical bytes (what you see); the savings are ours.
+- **Encrypted in transit** (TLS 1.2+). Want encryption at rest under your own keys?
+  Use SSE-C (`--sse-c AES256 --sse-c-key …`) or client-side encryption (restic,
+  `rclone crypt`). Server-managed encryption at rest (SSE-S3) is built and will be
+  switched on for every bucket once it is enabled in production — it is not on today.
+- **Placed for you**: Standard objects land on fast enterprise S3; `GLACIER` /
+  `DEEP_ARCHIVE` (or a Vault bucket) go to tape. The Smart schedule — about 15 % of
+  your quota hot, data idle for 14+ days moved to tape and brought back within minutes
+  on read — is enabled per account; you never write lifecycle rules.
+- **Deduplicated and compressed** transparently (objects over 64 MiB are chunked and
+  zstd-compressed at rest, returned byte-for-byte) — your quota counts logical bytes
+  (what you see); the savings are ours.
 
 ## Next steps
 

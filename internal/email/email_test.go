@@ -22,8 +22,14 @@ func TestLogSender_Send(t *testing.T) {
 	core, logs := observer.New(zap.InfoLevel)
 	logger := zap.New(core)
 
+	// Review R14-01 (R1-08): prod runs LogSender, so the log line must never
+	// carry the body — a password-reset body contains the reset token.
+	const token = "tok-SECRET-9f8e7d6c"
+	html := `<a href="https://stored.ge/reset-password?token=` + token + `">Reset</a>`
+	text := "https://stored.ge/reset-password?token=" + token
+
 	sender := &LogSender{logger: logger, rl: newTestRateLimiter()}
-	err := sender.Send(context.Background(), "user@example.com", "Test Subject", "<h1>Hi</h1>", "Hi")
+	err := sender.Send(context.Background(), "user@example.com", "Test Subject", html, text)
 
 	require.NoError(t, err)
 	require.Equal(t, 1, logs.Len())
@@ -34,11 +40,14 @@ func TestLogSender_Send(t *testing.T) {
 	fields := make(map[string]string)
 	for _, f := range entry.Context {
 		fields[f.Key] = f.String
+		assert.NotContains(t, f.String, token, "field %q leaked the body", f.Key)
 	}
 	assert.Equal(t, "user@example.com", fields["to"])
 	assert.Equal(t, "Test Subject", fields["subject"])
-	assert.Equal(t, "<h1>Hi</h1>", fields["html"])
-	assert.Equal(t, "Hi", fields["text"])
+	_, hasHTML := fields["html"]
+	_, hasText := fields["text"]
+	assert.False(t, hasHTML, "html body must not be logged")
+	assert.False(t, hasText, "text body must not be logged")
 }
 
 func TestLogSender_RateLimit(t *testing.T) {
@@ -152,18 +161,6 @@ func TestRenderPasswordReset(t *testing.T) {
 	assert.Contains(t, html, "Reset")
 
 	assert.Contains(t, text, "https://stored.ge/reset-password?token=reset-tok")
-	assert.NotContains(t, text, "<")
-}
-
-func TestRenderWelcome(t *testing.T) {
-	html, text, err := RenderWelcome("user@example.com", "AKID12345")
-	require.NoError(t, err)
-
-	assert.Contains(t, html, "AKID12345")
-	assert.Contains(t, html, "Welcome")
-	assert.Contains(t, html, "stored.ge")
-
-	assert.Contains(t, text, "AKID12345")
 	assert.NotContains(t, text, "<")
 }
 
