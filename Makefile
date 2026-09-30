@@ -73,6 +73,16 @@ landing:
 landing-browser:
 	bash internal/api/landing/browser/run.sh
 
+# Photograph the dashboard (internal/dashboard/browser/shots.sh): every fixture
+# page at 1280 px light/dark and 390 px, into /tmp/vaultaire-dash/shots.
+# Needs Chrome and the local test database. dash-lighthouse also scores
+# accessibility per page with Lighthouse (needs npx) and fails below 100.
+dash-shots:
+	bash internal/dashboard/browser/shots.sh
+
+dash-lighthouse:
+	bash internal/dashboard/browser/shots.sh lighthouse
+
 # Re-render the social preview (internal/api/og.png) from the landing sources.
 # Needs Chrome; override with CHROME=/path/to/chrome.
 CHROME ?= $(shell command -v google-chrome || command -v chromium || echo "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
@@ -89,4 +99,4 @@ clean:
 	rm -rf bin/
 	go clean
 
-.PHONY: build clean
+.PHONY: build clean landing landing-browser og dash-shots dash-lighthouse
