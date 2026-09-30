@@ -41,6 +41,7 @@ func (s *Server) initMetrics() {
 		reg.MustRegister(authFailures, authFailuresByKey)
 		reg.MustRegister(dashboard.Collectors()...)
 		reg.MustRegister(retentionDeletedRows, retentionLastRun, retentionRuns)
+		reg.MustRegister(accountDeletionTenants, accountDeletionObjects, accountDeletionLastRun, accountDeletionRuns)
 		if s.synthetic != nil {
 			reg.MustRegister(newSyntheticCollector(s.synthetic))
 		}

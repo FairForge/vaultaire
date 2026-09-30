@@ -3,6 +3,7 @@ package dashboard
 import (
 	"database/sql"
 	"errors"
+	"github.com/FairForge/vaultaire/internal/account"
 	"html/template"
 	"io/fs"
 	"net/http"
@@ -45,6 +46,7 @@ type Deps struct {
 	HealthChecker handlers.HealthChecker // Nil-safe; backend health state provider.
 	Flags         *flags.Service         // Nil-safe; admin feature-flags page (1.13).
 	Quotas        billing.HouseQuotas    // Nil-safe; applies a resized house's floor quotas at once (Phase 1).
+	Account       *account.Service       // The one account-deletion state machine (WP-R10-3); nil = built per request from DB.
 }
 
 // RegisterRoutes mounts the dashboard, auth, admin, and static-asset
@@ -240,8 +242,8 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 
 		// GDPR: data export + account deletion.
 		dr.Post("/settings/export", handlers.HandleExportData(deps.DB, deps.Logger))
-		dr.Post("/settings/delete-account", handlers.HandleRequestDeletion(deps.DB, deps.Sessions, deps.Logger))
-		dr.Post("/settings/cancel-deletion", handlers.HandleCancelDeletion(deps.DB, deps.Logger))
+		dr.Post("/settings/delete-account", handlers.HandleRequestDeletion(deps.DB, deps.Auth, deps.Account, deps.MFA, deps.Logger))
+		dr.Post("/settings/cancel-deletion", handlers.HandleCancelDeletion(deps.DB, deps.Account, deps.Logger))
 
 		// Email verification resend.
 		dr.Post("/settings/resend-verify", handlers.HandleResendVerification(deps.Auth, deps.Logger, deps.Email, deps.BaseURL))

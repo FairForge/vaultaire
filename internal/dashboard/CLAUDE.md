@@ -104,8 +104,8 @@ Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`,
 | `/dashboard/compliance` | GET | session | Compliance dashboard: per-bucket security posture, score |
 | `/dashboard/compliance/export` | GET | session | Download compliance report as JSON |
 | `/dashboard/settings/export` | POST | session | Download all user data as JSON (GDPR Article 20) |
-| `/dashboard/settings/delete-account` | POST | session | Schedule account deletion with 30-day grace (GDPR Article 17) |
-| `/dashboard/settings/cancel-deletion` | POST | session | Cancel pending account deletion |
+| `/dashboard/settings/delete-account` | POST | session | Schedule account deletion with 30-day grace (GDPR Article 17) through `internal/account` (WP-R10-3); confirmed by password, or TOTP / re-typed e-mail for OAuth-only accounts (R12-22). The runner erases on the date; nothing is blocked before it (D-16) |
+| `/dashboard/settings/cancel-deletion` | POST | session | Cancel pending account deletion (`account.Service.Cancel`) |
 | `/admin/tenants` | GET | session + admin | Tenant list |
 | `/admin/tenants/{id}` | GET | session + admin | Tenant detail (info card, bandwidth chart, quick actions) |
 | `/admin/tenants/{id}/suspend`, `/enable` | POST | session + admin | Suspend / re-enable a tenant (audited) |

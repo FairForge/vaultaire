@@ -18,7 +18,7 @@ Stripe billing integration for stored.ge subscriptions, payments, and invoices.
 | `GetCustomerID(ctx, tenantID)` | Look up Stripe customer ID from DB |
 | `CreateCheckoutSession(customerID, planID, successURL, cancelURL)` | Create checkout for a registered plan |
 | `GetSubscription(ctx, tenantID)` | Fetch subscription from Stripe |
-| `CancelSubscription(ctx, tenantID)` | Cancels **immediately** (`subscription.Cancel`; no route calls it — WP-R10-4 deletes it) |
+| `CancelSubscription(ctx, tenantID)` | Cancels **immediately** (`subscription.Cancel`). Called by the account-deletion runner (WP-R10-3, stage a); idempotent — the subscription is fetched first and an already-`canceled` one is success, so a crash between Stripe's answer and the runner's stamp cannot defer the tenant forever (`TestCancelSubscription_AlreadyCancelledIsSuccess`) |
 | `GetInvoices(ctx, tenantID, limit)` | List recent invoices from Stripe |
 | `CreateBillingPortalSession(ctx, tenantID, returnURL)` | Self-service billing portal |
 | `SaveSubscription(ctx, tenantID, subID, status, plan)` | Persist subscription state (called by webhook) |

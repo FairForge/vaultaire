@@ -30,7 +30,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/FairForge/vaultaire/internal/account"
 	"github.com/FairForge/vaultaire/internal/testutil"
 
 	"github.com/FairForge/vaultaire/internal/tenant"
@@ -323,8 +325,12 @@ func TestExecuteDeletion_DecrementsGCIRefs(t *testing.T) {
 	          (tenant_id, bucket_name, object_key, chunk_index, chunk_offset, plaintext_hash, dedup_scope)
 	          VALUES ($1, 'wp6-bucket', 'secret.bin', 0, 0, $2, $3)`, doomedTenant, scopedHash, doomedTenant)
 
-	svc := NewAccountDeletionService(db, zap.NewNop())
-	require.NoError(t, svc.ExecuteDeletion(ctx, userID, doomedTenant))
+	// WP-R10-3: the row erase lives in internal/account and refuses an
+	// account that is not past its date.
+	_, err = db.ExecContext(ctx, `UPDATE users SET status = 'pending_deletion', deletion_scheduled_at = NOW() - INTERVAL '1 hour' WHERE id::text = $1`, userID)
+	require.NoError(t, err)
+	_, err = account.NewService(db, zap.NewNop()).EraseRows(ctx, userID, doomedTenant, "", time.Now())
+	require.NoError(t, err)
 
 	// Shared chunk: one reference released, still alive for the other tenant.
 	var sharedCount int

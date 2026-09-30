@@ -141,23 +141,35 @@
     <div class="card-title" style="color: var(--danger);">Delete Account</div>
     {{if .DeletionScheduled}}
     <div class="alert alert-error" style="margin-bottom: 1rem;">
-        Your account is scheduled for deletion on <strong>{{.DeletionDate}}</strong>. After that date support erases your objects, keys and account records (email support@stored.ge to bring it forward). If you have a subscription, cancel it on the billing page so it does not renew.
+        Your account is scheduled for deletion on <strong>{{.DeletionDate}}</strong>. On that date your subscription is cancelled and your objects, keys and account records are erased; backups age out within 7 days. Until then everything keeps working, so export your data first if you need it.
     </div>
     <form method="POST" action="/dashboard/settings/cancel-deletion">
         <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
         <button type="submit" class="btn btn-primary">Cancel Deletion</button>
     </form>
     {{else}}
-    <p class="text-muted" style="margin-bottom: 1rem;">Schedule your account and all associated data for deletion. You have a 30-day grace period to change your mind; after it, support carries out the erasure. Cancel any subscription on the billing page first so it does not renew.</p>
+    <p class="text-muted" style="margin-bottom: 1rem;">Schedule your account and all associated data for deletion. You have a 30-day grace period to change your mind; on the date, your subscription is cancelled and your objects, keys and account records are erased by our deletion job. Backups age out within 7 days.</p>
     <form method="POST" action="/dashboard/settings/delete-account">
         <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        {{if .HasPassword}}
         <div class="form-group">
             <label for="f-delete-password">Confirm your password</label>
-            <input id="f-delete-password" type="password" name="password" required>
+            <input id="f-delete-password" type="password" name="password" required autocomplete="current-password">
         </div>
+        {{else if .MFAEnabled}}
+        <div class="form-group">
+            <label for="f-delete-totp">Confirm with your authenticator code</label>
+            <input id="f-delete-totp" type="text" name="totp_code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required autocomplete="one-time-code">
+        </div>
+        {{else}}
+        <div class="form-group">
+            <label for="f-delete-email">Type your account e-mail to confirm</label>
+            <input id="f-delete-email" type="email" name="confirm_email" required autocomplete="off">
+        </div>
+        {{end}}
         <div class="form-group">
             <label for="f-reason">Reason for leaving (optional)</label>
-            <textarea id="f-reason" name="reason" rows="2" placeholder="Help us improve..."></textarea>
+            <textarea id="f-reason" name="reason" rows="2" maxlength="500" placeholder="Help us improve..."></textarea>
         </div>
         <button type="submit" class="btn btn-danger" onclick="return confirm('Are you sure? Your account will be scheduled for deletion in 30 days.');">Delete Account</button>
     </form>

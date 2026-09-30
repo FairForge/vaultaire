@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/account"
 	"github.com/FairForge/vaultaire/internal/audit"
 	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/usage"
@@ -677,6 +678,22 @@ func (s *Server) handleMgmtGetUsage(w http.ResponseWriter, r *http.Request) {
 
 // --- Account (GDPR) ---
 
+// accounts returns the deletion state machine (a per-call instance when the
+// server was built without NewServer, as tests do).
+func (s *Server) accounts() *account.Service {
+	if s.accountSvc != nil {
+		return s.accountSvc
+	}
+	return account.NewService(s.db, s.logger)
+}
+
+// mgmtDeletionMessage is the contract text of DELETE /api/v1/manage/account
+// and DELETE /api/v1/user (WP-R10-3): what the runner does on the date.
+func mgmtDeletionMessage(at time.Time) string {
+	return fmt.Sprintf("Account scheduled for deletion on %s. You can cancel any time before then (POST /api/v1/manage/account/cancel-deletion); on that date your subscription is cancelled and your objects, keys and account records are erased by the deletion job. Backups age out within 7 days.",
+		at.UTC().Format("2006-01-02"))
+}
+
 func (s *Server) handleMgmtExportData(w http.ResponseWriter, r *http.Request) {
 	userID, _ := r.Context().Value(userIDKey).(string)
 	tenantID, _ := r.Context().Value(tenantIDKey).(string)
@@ -752,8 +769,7 @@ func (s *Server) handleMgmtDeleteAccount(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	svc := NewAccountDeletionService(s.db, s.logger)
-	scheduledAt, err := svc.ScheduleDeletion(r.Context(), userID, tenantID, req.Reason)
+	scheduledAt, err := s.accounts().Schedule(r.Context(), userID, tenantID, req.Reason)
 	if err != nil {
 		s.logger.Error("management delete account", zap.Error(err))
 		writeManagementError(w, ErrTypeAPI, "deletion_failed", "failed to schedule account deletion", "")
@@ -766,7 +782,7 @@ func (s *Server) handleMgmtDeleteAccount(w http.ResponseWriter, r *http.Request)
 	resp := map[string]interface{}{
 		"object":       "account_deletion",
 		"scheduled_at": scheduledAt,
-		"message":      "Account scheduled for deletion. You have 30 days to cancel; after that date the erasure is carried out by support (email support@stored.ge to bring it forward). Cancel your Stripe subscription from the billing page so it does not renew.",
+		"message":      mgmtDeletionMessage(scheduledAt),
 		"request_id":   getRequestID(w),
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -779,8 +795,11 @@ func (s *Server) handleMgmtCancelDeletion(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	svc := NewAccountDeletionService(s.db, s.logger)
-	if err := svc.CancelDeletion(r.Context(), userID); err != nil {
+	if err := s.accounts().Cancel(r.Context(), userID); err != nil {
+		if errors.Is(err, account.ErrNoPendingDeletion) {
+			writeManagementError(w, ErrTypeInvalidRequest, "no_pending_deletion", "no account deletion is scheduled", "")
+			return
+		}
 		s.logger.Error("management cancel deletion", zap.Error(err))
 		writeManagementError(w, ErrTypeAPI, "cancel_failed", "failed to cancel account deletion", "")
 		return

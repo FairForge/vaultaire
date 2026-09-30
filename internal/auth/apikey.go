@@ -212,7 +212,9 @@ func (a *AuthService) ValidateAPIKey(ctx context.Context, key, secret string) (*
 		return nil, fmt.Errorf("invalid API secret")
 	}
 
+	a.cacheMu.RLock()
 	user, exists := a.userIndex[apiKey.UserID]
+	a.cacheMu.RUnlock()
 	if !exists {
 		return nil, fmt.Errorf("user not found")
 	}
