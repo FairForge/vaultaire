@@ -5,8 +5,14 @@
   "pin_hot": 3.00,
   "performance": 6.99,
   "founders": 1.00,
+  "egress": {
+    "_comment": "Allowances keyed to the quota, per month. Never billed; past the allowance throughput may be throttled (Standard) or restores queue (Vault).",
+    "standard_free_ratio": 0.5,
+    "vault_restore_free_ratio": 1.0
+  },
   "competitors": {
-    "_asof": "August 2026",
+    "_asof": "September 2026",
+    "_sources": "wasabi.com/pricing and backblaze.com/cloud-storage/pricing read 2026-09-30; AWS S3 Standard and Cloudflare R2 are list prices",
     "aws_s3": 23.00,
     "backblaze_b2": 6.95,
     "wasabi": 7.99,

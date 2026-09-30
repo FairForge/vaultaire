@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestStatusPage_Healthy(t *testing.T) {
@@ -68,4 +69,24 @@ func TestRequestIDMiddleware_SetsHeaders(t *testing.T) {
 	// Verify the request ID looks like a UUID (36 chars with dashes).
 	rid := rec.Header().Get("X-Request-Id")
 	assert.Len(t, rid, 36)
+}
+
+// Review R14-10: /status is live state — HEAD works, nothing caches it, and
+// the page no longer links the backend-listing ?details=true form.
+func TestStatusPage_HeadAndNoStore(t *testing.T) {
+	s := newTestServerWithHealthChecker(t)
+
+	req := httptest.NewRequest(http.MethodHead, "/status", nil)
+	rec := httptest.NewRecorder()
+	s.handleStatusPage(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Empty(t, rec.Body.String())
+	assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
+
+	req = httptest.NewRequest(http.MethodGet, "/status", nil)
+	rec = httptest.NewRecorder()
+	s.handleStatusPage(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "details=true")
+	assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
 }

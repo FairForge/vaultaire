@@ -640,3 +640,33 @@ func TestCDN_BackendUnavailable_Returns503(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
 	assert.NotEmpty(t, w.Header().Get("Retry-After"))
 }
+
+// TestCDN_SuspendedTenant_Returns404 — Review R14-02 (R4-19): the S3 path
+// refuses every request from a suspended tenant (s3.go isTenantSuspended);
+// the CDN path is the unauthenticated read path an abuse suspension exists
+// for, and it never looked. A suspended tenant's public bucket must answer
+// exactly like an unknown slug (no oracle), and serve again once re-enabled.
+func TestCDN_SuspendedTenant_Returns404(t *testing.T) {
+	f := setupCDNFixture(t)
+
+	get := func() int {
+		req := httptest.NewRequest("GET", "/cdn/"+f.slug+"/"+f.bucket+"/"+f.key, nil)
+		rec := httptest.NewRecorder()
+		f.router.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	require.Equal(t, http.StatusOK, get(), "sanity: serves before suspension")
+
+	_, err := f.db.Exec(`UPDATE tenants SET suspended_at = NOW() WHERE id = $1`, f.tenantID)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusNotFound, get(), "suspended tenant must not serve on the CDN")
+
+	req := httptest.NewRequest("HEAD", "/cdn/"+f.slug+"/"+f.bucket+"/"+f.key, nil)
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "HEAD too")
+
+	_, err = f.db.Exec(`UPDATE tenants SET suspended_at = NULL WHERE id = $1`, f.tenantID)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, get(), "serves again once re-enabled")
+}

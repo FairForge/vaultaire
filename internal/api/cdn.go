@@ -31,9 +31,13 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
+	// A suspended tenant serves nothing on the CDN either (Review R14-02,
+	// R4-19): the S3 path already refuses it (isTenantSuspended), and the
+	// unauthenticated public path is the one an abuse suspension exists for.
+	// Same 404 as an unknown slug, so suspension is not an oracle.
 	var tenantID string
 	err := s.db.QueryRowContext(ctx,
-		"SELECT id FROM tenants WHERE slug = $1", slug).Scan(&tenantID)
+		"SELECT id FROM tenants WHERE slug = $1 AND suspended_at IS NULL", slug).Scan(&tenantID)
 	if err != nil {
 		http.NotFound(w, r)
 		return
