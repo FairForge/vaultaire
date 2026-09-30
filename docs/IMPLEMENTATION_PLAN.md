@@ -1345,6 +1345,52 @@ bandwidth from us — wrap cloudSync instead of proxying bytes.*
 
 ---
 
+## Review 2026-09 (R0–R15) — work packages by id (added 2026-09-30)
+
+Sixteen review sessions (2026-09-25 → 09-30, `docs/CODE_REVIEW_PLAN.md`, findings in
+`docs/reviews/`, the launch document in `docs/reviews/SYNTHESIS.md`) fixed every P0 and
+all but eight P1s in PRs #473–#528. What remains is listed here by work-package id with
+its launch-gating flag; sizes, files and dependencies are in SYNTHESIS.md.
+
+**LAUNCH-GATING (before 2026-10-31):** WP-R10-3 account-deletion runner + async export
+(D-15, D-16; = WP-R9-10/WP-R11-9/WP-R12-7) · WP-R10-9 egress allowance enforcement
+(throttle, egress-only counter) · WP-R8-1 stored-random tenant keys + real key versioning
+(gating for the *copy* — every rotation/shredding claim is already removed) · WP-R3-3
+SSE-S3 for multipart (gating the day `ENCRYPTION_MASTER_KEY` ships; needs WP-R8-5) ·
+WP-R2-1 write-new-key-then-swap (gating only if versioning is sold as byte retention) ·
+WP-R13-1 demoted objects must not present as GLACIER + WP-R13-3 job scheduling/catch-up
+(**both before the `smart_demotion` flag flips for any tenant**) · WP-R11-3 webhook
+delivery with retries (gating only if webhooks are marketed) · WP-R14-6 re-open the
+encryption copy when the key ships · WP-R4-1 GOVERNANCE bypass as a permission ·
+WP-R12-5 session-bound CSRF · WP-R12-8 server-side pending TOTP secret · WP-R7-5
+routing-truth backfill (prod's 62 NULL / 447 local / 2,613 onedrive head rows) ·
+WP-R9-7 backups off-box [YOU] · WP-R1-1 HAProxy `/metrics` deny + CF header strip [YOU]
+· checklist rows 4/10/11/12/13 + Stripe + master-key decision [YOU].
+
+**PRE-LAUNCH NICE:** WP-R2-2 CDN through the adapter · WP-R14-1/2 CDN limiter + request
+cost · WP-R2-3 client-body errors ≠ backend failures · WP-R6-3 per-op driver deadlines ·
+WP-R6-1 location-authoritative reads/deletes · WP-R6-2 engine concurrency · WP-R10-2
+webhook ordering · WP-R10-4 one product (delete legacy packs + meters; = WP-R14-5) ·
+WP-R10-5 admin pages on the house model · WP-R10-8 ledger tightening · WP-R3-5 staging
+dir · WP-R3-2 UploadPartCopy · WP-R3-4 batch-delete parity · WP-R4-2/3/4/5/6 bucket
+state machine, CORS preflight, notification filters, buckets-row rule, hygiene · WP-R5-9
+`api_keys.tenant_id` (= WP-R9-6) · WP-R5-4/5/6/10/12 auth hygiene · WP-R11-2/4/5/6/11 ·
+WP-R12-1/2/3/4/9/11/12 · WP-R13-2 · WP-R14-3 · WP-R8-2/3/4/5/6 · WP-R2-4/6/7 · WP-R3-1/6
+· WP-R1-2/4/5/8/10 · WP-R9-3/5 · WP-R7-2/3/4/6/7 · WP-R0-1 (D-1..D-9) · WP-R0-4 ·
+WP-R15-1 chunk-signature verification · WP-R15-2/3/4/5.
+
+**POST-LAUNCH:** WP-R9-8 type normalisation · D-12 orphan-table drop (WP-R11-5) ·
+D-24 Go 1.26 (WP-R15-3).
+
+**DONE by the review:** WP-R0-2/3/5/6/7/8/9/10/11, WP-R1-3/6/7/9/11, WP-R2-5, WP-R5-1/2/3/
+7/8(part)/11/13(=R4-5 open), WP-R6-4/5/6/7/8/9, WP-R7-1, WP-R9-1/2/9, WP-R10-1/7,
+WP-R11-1/8/10, WP-R12-6/10, WP-R13 built items, WP-R14-4/7/8, WP-R15-4.
+
+Decisions waiting on Isaac: D-1..D-4, D-7, D-9, D-12..D-24 (table in SYNTHESIS.md;
+D-19 was *applied* and needs confirmation).
+
+---
+
 # POST-LAUNCH 90-DAY PRIORITY STACK (added 2026-07-07)
 <!-- reconstructed: new section — Tier 2 shipped ahead of schedule (Phases 7-10.3 done), so the original "build after first customers" order no longer applies. Ranked by revenue impact × retention × effort, targeting what LET/Reddit users and the first 50 customers will actually hit. -->
 

@@ -1,0 +1,356 @@
+# Vaultaire code review 2026-09 — synthesis (R0–R15)
+
+**Written 2026-09-30 by session R15**, the last of the sixteen in `docs/CODE_REVIEW_PLAN.md`. Launch is **2026-10-31**. This is the one document to read before deciding what ships.
+
+## Handoff (memory-style)
+
+Between 2026-09-25 and 2026-09-30 sixteen review sessions (R0 dead code → R15 tests/CI/synthesis) read every package the product binary links, reproduced every P0/P1 live on a local build (aws-cli, curl, psql) before fixing it, and inspected prod read-only. Findings: **8 P0** (client-IP trust, three Object-Lock bypasses on the delete/multipart/copy/retention paths, key revocation never persisted, a convergent-encryption nonce reuse, an unsigned Stripe webhook, a reclaim race that deleted both copies of an object) — **all fixed**; **~70 P1** (two more found by R15 itself: a per-request goroutine leak and a quota over-count when two writers create the same key at once — both fixed), all fixed except the eight structural ones below; ~130 P2 and ~150 P3 recorded. PRs **#473–#528** (R0 #473/#474, R1 #475/#476, R5 #477, R6 #478, R9 #481, R2 #484, R7 #496/#497/#501/#502, R8 #511, R10 #512/#513, R3 #514, R4 #515/#517, R11 #518/#519, R12 #520/#521, R14 #522, R13 #523, R15 #524 deletions / #525 CI+lint+gosec+tooling / #526 deps / #527 tests+flakes / #528 this synthesis) — R0 alone removed 83.5k lines of scaffolding and R15 another ~9.7k; every P0/P1 fix landed with a red-first test. `main` is at `#528`; every review branch is merged.
+
+**Still open and launch-relevant (table A below):** the account-deletion runner (WP-R10-3, D-15/D-16 — GDPR + billing), egress enforcement (WP-R10-9 — the allowance is copy), the encryption story (WP-R8-1 rotation/shredding are no-ops; WP-R3-3 multipart is plaintext on SSE buckets; WP-R14-6 re-open the copy when the key ships), write-new-key-then-swap (WP-R2-1 — versions are metadata-only, the last in-place-overwrite corruption class), two items that must land **before the `smart_demotion` flag flips** (WP-R13-1 demoted objects present as GLACIER; WP-R13-3 the daily tickers never fire on a daily-redeployed box), webhook delivery (WP-R11-3), the GOVERNANCE bypass as a permission (WP-R4-1), session-bound CSRF (WP-R12-5), the pending TOTP secret (WP-R12-8), routing-truth backfill of prod's 62 NULL / 447 `local` / 2,613 `onedrive` head rows (WP-R7-5), backups off-box (WP-R9-7), and the **[YOU]** box/config rows (Stripe endpoint + secrets + prices, synthetic tenant + env, alert rules on SLC, iDrive regional pairs, Lyve scoped user + TFA, HAProxy `/metrics` deny + CF header strip, off-box backups, SSH housekeeping).
+
+**Where to start next:** (1) do the [YOU] rows in the checklist — nothing sells without Stripe and nothing pages without the rules; (2) decide D-15/D-16/D-19/D-24 (table below) — the runner, the terms, the toolchain; (3) build WP-R10-3, then WP-R10-9, then WP-R13-1 + WP-R13-3 before enabling demotion for any tenant; (4) run `make test-db && make test-integration` and `make gosec` before every PR — both are what CI runs. Test-DB rules: own tenant rows, never a global reconcile or a table-wide DELETE/UPDATE in a test, GCI cleanups bounded to hashes the fixture wrote (`cleanupTenantChunkRows`). Never `--admin`; no `Co-Authored-By` trailers. The methodology notes at the end say what found the bugs.
+
+## Every P0 and P1 finding, deduplicated
+
+**Gating** = must be closed (or its copy made honest) before customers pay on 2026-10-31. "fixed #N" = merged. Post-merge meta-review findings are marked *(meta)*.
+
+| ID(s) | Sev | One line | Status | Owner | Gating? |
+|-------|-----|----------|--------|-------|---------|
+| R1-01 + R1-20 *(meta)* | P0 | Client IP trusted from `CF-Connecting-IP` / first `X-Forwarded-For` (then: first header *occurrence*) — API-key IP allowlist and login limiters spoofable | fixed #475, #476 (`internal/clientip`, last occurrence, CF header only from a Cloudflare peer) | WP-R1-1 belt at HAProxy | no (code closed); [YOU] HAProxy `del-header` is belt-and-braces |
+| R2-01 | P0 | COMPLIANCE-locked bytes destroyed on a versioned bucket via delete marker + re-PUT | fixed #484 (lock checked first on every delete/put branch) | — | no |
+| R3-01 | P0 | CompleteMultipartUpload and CopyObject never checked Object Lock — every aws-cli upload > 8 MiB overwrote retained bytes | fixed #514 | — | no |
+| R4-01 | P0 | PutObjectRetention converted COMPLIANCE→GOVERNANCE, shortened GOVERNANCE without bypass, locked ghost keys, accepted past dates; bucket lock could be disabled | fixed #515 | WP-R4-1 (bypass as a permission) | no |
+| R5-01 | P0 | Revoking/rotating/expiring an API key never persisted — revoked keys authenticated forever | fixed #477 (migration 064, `revoked_at IS NULL` on both lookups) | — | no |
+| R8-01 | P0 | Convergent chunk nonce derived from the plaintext hash while the sealed bytes depend on the compression decision → (key, nonce) reuse | fixed #511 (nonce bound to the sealed bytes, v1 blobs decrypt) | WP-R8-1 for versioning | no |
+| R10-01 | P0 | `/webhook/stripe` processed unsigned events when `STRIPE_WEBHOOK_SECRET` was empty | fixed #512 (route mounts only with both secrets; empty secret → 503) | [YOU] set both | no (config item is gating: nothing sells without it) |
+| R13-01 | P0 | Hot-copy reclaim racing a read-time flip-back deleted both copies (test-reproduced) | fixed #523 | — | no |
+| R1-02, R1-03 | P1 | Every `systemctl stop` exited 1 before draining; engine closed the DB before the HTTP drain | fixed #475 | — | no |
+| R2-02 | P1 | Range GET on an SSE object served ciphertext (every ranged download once a master key exists) | fixed #484 | — | no |
+| R2-03 | P1 | `GET ?versionId=<old>` served the current bytes under the old id | stop-gap #484 (501 for non-current versions) | **WP-R2-1** | no — copy says "version history and delete markers" (R14); yes if byte retention is marketed |
+| R2-04 | P1 | Local driver `Delete` had no base-directory guard (arbitrary file deletion where local is primary) | fixed #484 (`resolvePath` on Get/Put/Delete; List/Exists in #496) | — | no |
+| R2-05 | P1 | Late PUT validation destroyed the overwritten object (in-place write, then 400) | fixed #484 (validate before reading the body); residue = post-write DB failure | WP-R2-1 | no |
+| R2-06 | P1 | Short/spoofed bodies committed under the declared size (`x-amz-decoded-content-length` trusted; `ErrUnexpectedEOF` stored) | fixed #484; the > 16 MiB clean-EOF residue (R7-12) is guarded by a transport property | WP-R2-1 | no |
+| R2-07 | P1 | `x-amz-storage-class` header placed private objects on r2 / hub disk and Vault objects hot | fixed #484 (allow-list; header never makes a cold bucket hotter) | D-13 | no |
+| R2-08 | P1 | CDN 404s chunked objects, serves SSE ciphertext, maps outages to 404 | (c) fixed #484 (503); (a)/(b) open | **WP-R2-2** | no unless public buckets > 64 MiB are marketed |
+| R2-09 | P1 | Client aborts charged the primary's breaker (five aborted uploads/minute = 30 s outage) | open | **WP-R2-3** | no (pre-launch nice) |
+| R3-02 | P1 | UploadPartCopy stored the empty body → 0-byte objects | stop-gap #514 (501) | WP-R3-2 | no |
+| R3-03 (+ R3-28 correction) | P1 | Multipart head rows never wrote `backend_name` (prod's 62 NULL rows are exactly these; R2's and R7-11's statements were wrong) | fixed #514; prod backfill open | **WP-R7-5** | no (bench data today) |
+| R3-04 | P1 | Multipart dropped Content-Type / `x-amz-meta-*` / storage class from CreateMultipartUpload | fixed #514 (migration 068) | — | no |
+| R3-05 | P1 | Multipart/copy overwrite kept the displaced row's `encryption_algorithm` → GET 500 | fixed #514 | — | no |
+| R3-06 | P1 | `x-amz-metadata-directive` half-implemented | fixed #514 | — | no |
+| R3-07 | P1 | Multipart objects stored plaintext on `sse_enabled` buckets | open | **WP-R3-3** (needs WP-R8-5) | **yes the day `ENCRYPTION_MASTER_KEY` ships**; prod has none and no copy claims encryption at rest |
+| R3-08 | P1 | Region pinning ignored by complete and copy | fixed #514 (`placeObject`) | — | no |
+| R3-09 | P1 | Versioned buckets got no ledger row / version id from multipart & copy; batch delete hard-deletes without a marker | multipart/copy fixed #514; batch open | WP-R3-4 | no |
+| R3-10 | P1 | Failed head-row write after the backend write answered 200 | fixed #514 | — | no |
+| R4-02 (+ R11-04 same class) | P1 | Notification targets / customer webhooks were arbitrary URLs POSTed from the prod box (live SSRF to loopback) | fixed #515, #518 (`validateWebhookTarget` + dial-time re-check on both entry points) | — | no |
+| R4-03 | P1 | CDN rendered `text/html` inline via a stored `Content-Disposition` (stored XSS on the shared origin) | fixed #515 | — | no |
+| R4-04 + R4-22 *(meta)* | P1 | DeleteBucket decided emptiness from a `/tmp` marker dir (non-empty buckets deleted; 404 after reboot) — then the same defect on the management API | fixed #515, #517 (one `deleteBucketRegistry`) | — | no |
+| R4-05 | P1 | Listings lost a key at every delimiter page boundary, ended early on a wide prefix, sorted in the locale's order on prod | fixed #515 (byte-order walker, migration 069) | — | no |
+| R4-06 | P1 | Tags survived overwrites; `x-amz-tagging` ignored | fixed #515 | — | no |
+| R5-02 | P1 | Copy source never checked against the key's bucket scope | fixed #477 | — | no |
+| R5-03 | P1 | Reset tokens replayable | fixed #477 | — | no |
+| R5-04 | P1 | MFA disable without the password | fixed #477 | — | no |
+| R5-05 | P1 | Scoped-key creation failed unless every scope field was supplied; phantom in-memory key | fixed #477 | — | no |
+| R5-06 → R12-01 | P1 | OAuth login skipped the second factor | fixed #520 | — | no |
+| R5-07 | P1 | Google identity linked without `verified_email` | fixed #477 | — | no |
+| R6-01, R6-06 | P1 | SDK-v2 404 casing and client cancels charged the breakers | fixed #478 | — | no |
+| R6-02 | P1 | An outage of the holding backend answered 404 (fallback miss taken as verdict) | fixed #478 | — | no |
+| R6-03 | P1 | Access tracker relocated `auto`-bucket overwrites to Lyve | fixed #478; tracker deleted #524 | — | no |
+| R6-04 | P1 | Write failover onto r2/geyser/permafrost/EU regions | fixed #478 (target-only backends) | — | no |
+| R6-05 | P1 | Delete ignored the recorded location after a restart (off-primary bytes orphaned) | fixed #478 (+ #514 for batch/copy) | — | no |
+| R6-21 → R13-02 | P1 | Access-log/inventory delivery wrote under the wrong container with no tenant, head row or quota — no customer ever saw a report | fixed #523 (live-proven with aws-cli) | — | no |
+| R7-01 | P1 | iDrive region table named regions the account does not have; every regional driver signed with the primary pair (live 403) | fixed #502 (13 real regions, key-gated drivers) | [YOU] per-region pairs (checklist 11) | no for code; **yes** if EU residency is sold before the pairs are in `.env` |
+| R7-02 | P1 | Lyve data plane on the account ROOT key, TFA off | open | [YOU] (checklist 12) | **yes** (credential hygiene on the only general failover leg) |
+| R8-02 | P1 | Concurrent first-store overwrote the winner's blob under the winner's metadata → permanent 500 | fixed #511 | — | no |
+| R8-03 | P1 | `chunking` flag off + SSE bucket → > 64 MiB stored plaintext | fixed #511 | — | no |
+| R8-04 | P1 | GET of an SSE-S3 object with no master key served ciphertext as 200 | fixed #511 | — | no |
+| R8-05 | P1 | Key rotation and crypto-shredding are no-ops end to end | open | **WP-R8-1** | no (all rotation/shredding copy removed in R14); **yes** before any such claim returns |
+| R9-01, R9-02, R9-03 | P1 | Phantom columns: management object list 500'd, GDPR export silently emptied, quota history 500'd since May | fixed #481 (+ `TestSQLLiteralsMatchSchema`) | — | no |
+| R9-04 → R13-14 | P1 | Three unbounded PII log tables, no retention | fixed #523 (retention job, policy numbers in the DPA) | — | no |
+| R9-05 / R0-13 | P1 (dev) | Tests `DROP TABLE`d quota tables on whatever DB they hit | fixed #474, #481 | — | no |
+| R10-02 | P1 | Webhook handler failures answered 200 and were recorded → Stripe never retried a lost house | fixed #512 | — | no |
+| R10-03 | P1 | stripe-go v75 rejects any endpoint API version but 2023-08-16 | documented #512 | [YOU] pin the endpoint | **yes** (config) |
+| R10-04 | P1 | 64 KB truncating webhook body cap | fixed #512 | — | no |
+| R10-05 | P1 | A second checkout opened a second Stripe subscription | fixed #512 | — | no |
+| R10-06 | P1 | Relative portal return URL (Stripe rejects) | fixed #512 | — | no |
+| R10-07 | P1 | Pin-hot sold but never enforced; hot budget counted the attic | fixed #512 | — | no |
+| R10-08 | P1 | Account deletion never executes; nothing cancels the subscription | copy made honest #512; runner open | **WP-R10-3 / D-15 / D-16** | **yes** (GDPR obligation + money) |
+| R10-09 | P1 | `POST /api/v1/quota/upgrade` set any tier with no payment (dead-by-auth) | deleted #512 | — | no |
+| R10-10 (= R5-18, R9-13) | P1 | Registration not transactional | fixed #512 | — | no |
+| R10-11 | P1 (CI) | Global reconcile rewrote every tenant on the shared DB (the floor-test flake) | fixed #512 | — | no |
+| R10-12 (= R2-19, R5-27) | P1 | Free-tier bucket cap bypassed by PUT/copy/multipart | narrow fix #512; the "row required" rule open | WP-R4-5 | no |
+| R10-45 *(meta)* | P2 (money) | Unknown-customer events 500'd for three days; a checkout whose customer-id persist failed could never be applied | fixed #513 | — | no |
+| R11-01 | P1 | Any customer JWT could read/write the operator breach register | fixed #518 (admin-only) | WP-R11-5 | no |
+| R11-02 | P1 | Ten `/api/v1/user` routes were mocks answering 200 (MFA "enabled" with a fixed secret, fabricated login trail) | fixed #518 | — | no |
+| R11-03 | P1 | STS never minted (random parent, NULL scope insert) | fixed #518 | WP-R5-5 for IP intersection | no |
+| R11-05 | P1 | Management `POST /buckets` bypassed the free-tier cap and ignored `region` | fixed #518 (`createBucketRegistry`); dashboard on it #525 | — | no |
+| R11-06 (= R5-08, R2-13) | P1 | RBAC authority from `Authorization` substrings; `/api/patterns` unauthenticated with SQL in the 500 | deleted #518 | — | no |
+| R11-28 *(meta)* | P2 | Presign failures hashed unauthenticated ids into a per-key metric (unbounded cardinality, forgeable alert) | fixed #519 | — | no |
+| R12-02 | P1 | A fresh free-tier account could never generate an API key | fixed #520 | — | no |
+| R12-03 | P1 | Admin "Set as Primary" accepted any name (r2, tape, unregistered) | fixed #520 | — | no |
+| R12-04 | P1 | API-driven password reset left dashboard sessions alive | fixed #520 | — | no |
+| R12-05 + R12-38 *(meta)* | P1 / P3 | TOTP codes replayed within the step; then the guard remembered only one code | fixed #520, #521 | — | no |
+| R12-06 | P1 | No sign-in outcome recorded anywhere; no lockout | fixed #520 | [YOU] install `vaultaire-auth.yml` | no |
+| R12-07 (= R11-19) | P1 | `/auth/login` unthrottled; 1-char passwords accepted by API | fixed #520 | — | no |
+| R13-03 | P1 | CDN rollup dropped every day's tail | fixed #523 | — | no |
+| R13-04 | P1 (flag-dark) | Demoted Standard objects list/HEAD as GLACIER → `aws s3 sync` skips them | open | **WP-R13-1** | **yes before `smart_demotion` flips**; flag is off |
+| R13-13, R13-14 | P1 (checklist 4, 5) | No synthetic customer check; no retention job | built #523 | [YOU] env + rules (checklist 4/10) | **yes** (config) |
+| R14-01 (= R1-08) | P1 | `LogSender` logged the full reset e-mail (token in journald) | fixed #522 | — | no |
+| R14-02 | P1 | CDN served suspended tenants' public buckets | fixed #522 | — | no |
+| R14-03 (= R12-30) | P1 | Onboarding cURL used HTTP Basic against SigV4 | fixed #522 | — | no |
+| R14-04 | P1 | Served docs quoted retired prices/rules/paths | fixed #522 | — | no |
+| R14-05 (= R12-20) | P1 | 38 legal/marketing claims the code cannot keep | 31 rewritten #522; 7 blocked | WP-R8-1, WP-R10-3, WP-R2-1, WP-R9-7, R13; D-19, D-21 | **yes for the 7** — each is one request away from being tested |
+| R15-01 (this session) | P1 | `handleS3Request` leaked one goroutine + a 1000-slot channel per authenticated request (`events.NewEventLogger` per request) | fixed #524 (test red on main: 400 requests → +400 goroutines) | — | no |
+| R15-17 (this session) | **P1** (money) | Two concurrent first writers of one new key both captured "no previous row" (a missing row cannot be `FOR UPDATE`-locked) → the loser's reserved bytes were never released; the tenant over-counted until an admin reconcile | fixed #527 (per-key transaction advisory lock before the probe; deterministic red-first test) | — | no |
+| R15-02 (this session) | P1 (ops) | `nightly.yml` reported green for months while every benchmark/k6/chaos step failed unauthenticated behind `continue-on-error` | deleted #525 | — | no |
+
+## Tenant-isolation invariants (R5's ten), re-verified on `main` @ `afb5b63` on 2026-09-30
+
+Each row is a query site read this session (file:line at `afb5b63`), not a re-statement.
+
+| # | Invariant | Spot-check | Held? |
+|---|-----------|------------|-------|
+| 1 | Tenant identity comes only from a credential | `auth/handlers.go:160` (`tenants WHERE access_key`), `:183-186` (`api_keys … JOIN users u … JOIN tenants t ON t.email = u.email WHERE ak.key_id = $1 AND ak.revoked_at IS NULL`), `:224` (`sts_tokens WHERE access_key`) — the order tenants → api_keys → sts_tokens; `s3_presign.go:108-109,132` the same predicates on the presigned path | **yes** |
+| 2 | Tenant carried in context, not re-derived | `s3.go` sets `tenant.WithTenant` + `common.TenantIDKey` after auth; every adapter call reads `tenant.FromContext` (e.g. `s3_batch.go:61,99`) | **yes** |
+| 3 | Every tenant-owned row is read/written with a tenant predicate or after an ownership check | management routes: 15 `r.Context().Value(tenantIDKey)` reads; dashboard handlers: 66 `sd.TenantID` uses; batch delete `s3_batch.go:121,141,183,199` all `t.ID`-keyed; webhooks/events keyed by the JWT tenant (R11 invariant 2) | **yes** |
+| 4 | Scoped keys and STS tokens only narrow | `auth/sts.go:53-70` (`intersectPermissions`, `intersectBucketScope`, `narrowIPRestrict`), `api/sts_routes.go:31` (tenant from JWT), `:52-56` (`parent_key_id` must be the caller's own, unrevoked); copy source: `s3_copy_scope.go:21-33` requires `GetObject` + source bucket in scope | **yes** (IP narrowing can still widen — WP-R5-5, P2) |
+| 5 | Dashboard sessions bind user + tenant at login | `dashboard/router.go:520,529,535` (password + MFA-pending + OAuth all carry `TenantID: user.TenantID`) | **yes** |
+| 6 | Management APIs take identity from JWT claims only | `server.go:1308-1317` (`requireJWT`: `ValidateJWT` → `userIDKey`, `emailKey`, `tenantIDKey`, `audit.WithActor`) | **yes** |
+| 7 | RBAC is not an authority | package deleted in #518; grep for `X-Tenant-ID`/`X-User-ID`/`X-API-Key` readers in `internal/` (non-test): none (the one hit is the class-B `internal/integrations` client, D-1) | **yes** |
+| 8 | `api_keys` → tenant by `users.email = tenants.email` | still the join (rows 1–2); `tenants.email` UNIQUE (005); no code path edits `users.email` | **holds, by construction only** — WP-R5-9 still open |
+| 9 | Dedup: `_global` for plaintext, per-tenant scope when encrypted | `s3_chunked_put_pool.go` / `s3_engine_adapter.go` `dedupScope = t.ID` when encrypting (R8 invariant 1, unchanged) | **yes** |
+| 10 | Suspended tenants blocked per request | S3: `s3.go:355-361` (`isTenantSuspended`); CDN: `cdn.go:40` `… AND suspended_at IS NULL` (R14-02) | **yes** (S3 still fails open on a DB error — R5-22, P3) |
+| + | Audit actor is the context actor, IP from `clientip` | `audit/audit.go:75-80` (`WithRequest`/`WithActor`), `:148` (`performed_by`) | yes |
+| + | Background writers carry the tenant and the S3 namespace | `background_put.go:125-151` (`NamespaceContainer`, `common.WithTenantID`, `reserveQuota`, `placeObject`) | yes (R13-02 fix holds) |
+| − | Residual hazard | `common/context.go:19-24` `GetTenantID` still returns `"default"` for a missing tenant (R6-22) — WP-R6-1 refuses/warns | open, P2 |
+
+## Work packages — every WP-* from R0–R14, merged, ordered
+
+Status: **done** = shipped in the PR named; **open**; **[YOU]** = box/config work; **D-n** = waits on a decision. Size XS/S/M/L. "Merged with" lists the ids that describe the same work; every id appears once.
+
+### A. Launch-gating (before 2026-10-31)
+
+| WP | What | Files | Size | Depends on | Status |
+|----|------|-------|------|------------|--------|
+| **WP-R10-3** (= WP-R9-10, WP-R11-9, WP-R12-7 half) | **Account-deletion runner, for real**: daily runner (WP-R13-3 shape) reading `deletion_scheduled_at < NOW()` → Stripe `subscription.Cancel` → engine walk of every bucket/version/multipart on the recorded backend → `ExecuteDeletion` + the 18 survivor tables (R9 area 5, list in R13); async export to a private bucket + presigned 7-day link (R10-27); `pending_deletion` does **not** block auth (D-16); dashboard schedules through the service (`internal/account`, WP-R12-7). Design written in R13. | `api/account_deletion.go`, new `api/deletion_runner.go`, `api/account_export.go`, `dashboard/handlers/account.go`, `auth`, templates | M | D-15, D-16, WP-R13-3 | **open** — GDPR Art. 17 is promised on the settings page ("erased by hand … within the grace period" since #512) and in the DPA; the subscription-cancel half is money |
+| **WP-R10-9** (= R10-22, R13-16, WP-R1-9 done) | **Egress allowance enforcement**: allowance seeded from the house (0.5× downstairs + 1× attic) in `SetHouse`/`ClearHouse`; one cached per-tenant month counter (fed by the 5 s flusher, not a SUM per request); egress-only accounting (the alerter and the throttle agree); a rate cap on GET + `/cdn`, never a 503; the 80/95 % alerts become the warning ladder; Cloudflare edge bytes later | `api/{bandwidth,s3,cdn,bandwidth_alerts}.go`, `usage/floor.go` | M | Isaac: throttle shape (rate cap recommended) | **open** — SMART_TIER_DESIGN calls it launch-gating; today the allowance is copy (FAQ says "may be throttled", which is true only because nothing bills) |
+| **WP-R8-1** | **Real key versioning + stored-random tenant keys**: random per-tenant chunk key wrapped by the master key in `tenant_encryption_keys`, `key_version` on the GCI row, encrypt with current / decrypt with recorded, rotation = new version + background re-encrypt, shredding = delete the wrapped keys, runbook | `crypto/{keymanager,chunk_encryption,sse_s3,gci}.go`, migration 072+, `api/s3_chunked_put_pool.go` | M | R8-01 fix (done #511) | **open** — gating only for the *copy*: every "rotation/shredding" claim was removed in R14 and SSE-S3 is "implemented, not yet enabled"; ship the master key without this and rotation stays a no-op (accepted if the copy stays honest — WP-R14-6) |
+| **WP-R3-3** (= R3-07; needs WP-R8-5) | **SSE-S3 for multipart objects**: streaming framed AEAD over the assembled pipe (1 MiB GCM segments, blob version `0x02`); today every aws-cli upload > 8 MiB on an `sse_enabled` bucket is stored plaintext | `api/s3_multipart.go`, `crypto/sse_s3.go` | M | WP-R8-5 | **open** — gating the day `ENCRYPTION_MASTER_KEY` is deployed (prod has none); until then "encrypted bucket" is not claimed anywhere |
+| **WP-R2-1** (= R2-03/05/15, R3-15, R13-06, WP-R3-4 driver, R7-12) | **Write-new-key-then-swap**: PUT/copy/multipart write to `<key>@<versionid>`, the head-row tx flips the pointer, the old blob is deleted after commit → real version retention (a non-current `?versionId` answers **501** today), removes the post-write corruption class on all three writers, lets the delete marker keep AWS semantics on locked keys, closes the reclaim-vs-re-PUT window (R13-06) and the clean-EOF short-body residue (R7-12) | `api/s3_engine_adapter.go`, `s3_copy.go`, `s3_multipart.go`, `smart_*`, driver key mapping | L | nothing (R3 centralised the upsert helpers) | **open** — the largest correctness item on the object path; gating only if "versioning" is marketed as byte retention (R14 rewrote the copy to "version history and delete markers") |
+| **WP-R13-1** | **Demoted Standard objects must not present as GLACIER**: class from `floor` (`standard` → STANDARD whatever backend), HEAD skips the restore round trip, listing/versions/HEAD queries carry `floor`; `aws s3 sync` skips GLACIER objects today | `api/s3_list.go`, `s3_list_versions.go`, `s3.go`, `s3_engine_adapter.go`, `engine/storage_class.go` | S | — | **open — must land before `smart_demotion` is enabled for any tenant** (flag is OFF; not gating while it stays off) |
+| **WP-R13-3** (= R13-07/11/23, WP-R11-8 half done) | **Job scheduling + observability**: `job_runs` (071) for every daily runner — catch-up at boot + hourly when the last success is > 24 h old (the 24 h tickers have never fired on the daily-redeployed box), admin triggers async (202 + id, 409 while running — done for the gate), `vaultaire_job_last_success_timestamp_seconds{job}` / `_runs_total{job,outcome}` + a `JobStale` rule; inventory per-report deadline | `api/retention.go` (the pattern), `smart_demotion.go`, `dedup_gc.go`, `s3_inventory.go`, `deploy/monitoring/` | S | — | **open — before the flag flips**; dedup GC has never run unattended on prod either (127 chunk rows, nothing to sweep yet) |
+| **WP-R11-3** (= R11-11, R13-15) | **Webhook delivery, for real**: `webhook_outbox` + worker (`FOR UPDATE SKIP LOCKED`, backoff 1/5/25/125/625 s, 5 attempts), per-endpoint 10 s deadline, `t=<unix>,v1=<hmac(t.body)>` signature, `POST /{id}/rotate-secret`, 30-day retention (retention job already prunes `webhook_deliveries`) | `api/events.go`, `api/webhooks_routes.go`, migration, worker | M | WP-R13-3 | **open** — customer-visible: one attempt, `retry_count` always 0; gating only if webhooks are marketed (they are documented in the OpenAPI spec) |
+| **WP-R14-6** | **Re-open the encryption copy when the master key ships**: claims-table rows 1/26/27, `billing.html:96`, landing line — flip "not yet enabled in production" the day `ENCRYPTION_MASTER_KEY` is set and R8's rotation no-op is closed | legal pages, guides, landing source | XS | WP-R8-1, [YOU] key deploy | **open** — a decision, then copy |
+| **WP-R4-1** (= R4-09, R11-21, R12 "not done") | **GOVERNANCE bypass as a permission**: key scope in the request context (`contextWithScope` in `handleS3Request`), `x-amz-bypass-governance-retention` honoured only for `*` / `BypassGovernanceRetention` keys, permission in the three key forms | `api/s3.go`, `s3_lock.go`, `auth/scoped_keys.go`, key forms | S | — | **open** — GOVERNANCE is "protected against most users" only once the bypass is a privilege; COMPLIANCE is fully enforced |
+| **WP-R12-5** | **Session-bound CSRF token** (HMAC over the session id) + `Sec-Fetch-Site`/`Origin` check on POST; today the protection is `SameSite=Lax` plus "the CDN never renders scripts" | `dashboard/middleware/csrf.go`, layouts | S | — | **open** — defence in depth one property deep |
+| **WP-R12-8** (= WP-R5-8 remainder, R12-23) | **MFA enrolment**: server-side pending secret (10-min TTL), vendored QR script, CSP without `cdn.jsdelivr.net` | `dashboard/handlers/mfa.go`, `mfa_setup.html`, `static/js`, `security_headers.go` | S | — | **open** — the enrolment page loads a CDN script without SRI on the page that shows the secret |
+| **WP-R7-5** (= R7-10/11, R3-03 backfill, R7-27) | **Routing-truth reconciliation**: boot check that every distinct `object_head_cache.backend_name` has a registered driver; sampled head-row ↔ driver `Exists` job + `vaultaire_routing_truth_mismatches_total`; one-off backfill of prod's **62 NULL** (multipart, R3-03), **447 `local`** (bench, bytes gone) and **2,613 `onedrive`** (bench, registration key renamed) rows; decide `local`'s durable role and `DATA_PATH` backup | `api/` new job, `cmd/vaultaire/main.go`, one-off script | S–M | WP-R13-3 shape, WP-R9-7 | **open** — the 62 rows are customer-shaped (multipart) even though today's are bench data; WP-R6-1 would make the 2,613 unreadable |
+| **WP-R9-7** | **Backups off-box**: `umask 077` + `chmod 600`, `pg_dump -Fc`, encrypted off-box copy (R2/Lyve), restore runbook + quarterly drill; `psql ≥ 16.10` on the restore host (`\restrict` header); journald shipped off-box (checklist 6) | prod `pg-backup.sh`, `deploy/` docs | S | — | **[YOU] open** — a disk loss takes DB and backups together; dumps hold every tenant's plaintext S3 secrets world-readable on the box |
+| **WP-R1-1** | **Ops hardening on SLC**: HAProxy `http-request deny if { path_beg /metrics }` (+ `/health/backends`), `del-header CF-Connecting-IP unless { src -f cloudflare.lst }`, `TimeoutStopSec=45`, drop the Redis `Wants/After`, fix `IMPLEMENTATION_PLAN.md:1229-1232` (checklist 8) | box config | XS | — | **[YOU] open** — `/metrics` is public through Cloudflare today |
+| **WP-R7-1 rest** (checklist 11) | iDrive per-region key pairs into prod `.env` (`deploy/scripts/idrive-region-env.sh`), restart → each boot creates that region's bucket; Isaac: which regions to sell | prod `.env` | XS | Isaac | **[YOU] open** — without pairs only `us-central-1` exists; the dashboard picker greys the rest |
+| R7-02 (checklist 12) | Lyve data plane off the ROOT key: `LYVE_ACCESS_KEY/SECRET` → the scoped `vaultaire-prod` user; keep `LYVE_PROBE_*` = root or drop it (the probe falls back to the driver's signed HeadBucket since #496); TFA on root | prod `.env`, Lyve console | XS | — | **[YOU] open** — the broadest credential in the fleet sits in the hottest path |
+| checklist 4 + 10 | Synthetic tenant + bucket on prod, `SYNTHETIC_CHECK_URL=https://s3.stored.ge` (the unproxied origin — through Cloudflare the HEAD→GET SigV4 flake would page), `_ACCESS_KEY/_SECRET_KEY/_BUCKET`, restart; install `deploy/monitoring/vaultaire-{backends,tls,auth,synthetic}.yml` on SLC (rules on the box predate #496) | prod `.env`, `/etc/prometheus/rules/` | XS | — | **[YOU] open** — the letshow outage ran 26 days with nothing paging |
+| R10 [YOU] | Stripe: endpoint pinned to API version **2023-08-16** with the five event types, `STRIPE_SECRET_KEY` **and** `STRIPE_WEBHOOK_SECRET` set together (the route refuses to mount otherwise), the six `STRIPE_PRICE_*` ids, portal quantity updates **off**, dunning → cancel after retries | Stripe dashboard, prod `.env` | XS | — | **[YOU] open** — nothing can be sold until this is done; prod has no Stripe env at all |
+
+### B. Pre-launch nice-to-have (ship if the runway allows; none blocks 2026-10-31)
+
+| WP | What | Files | Size | Depends on | Status |
+|----|------|-------|------|------------|--------|
+| WP-R2-2 (= R2-08 a/b, R2-10 done, R2-14 done, R2-27, R4-19, R14-21) | CDN through the adapter: chunked (≥ 64 MiB) and SSE objects on `/cdn` (404 / ciphertext today), 429 on rate limit, `NamespaceContainer`; or refuse chunking/SSE on public-read buckets at PUT | `api/cdn.go`, `s3_engine_adapter.go` | S–M | — | open — public large objects are the CDN's reason to exist |
+| WP-R14-1 (+ R14-17) | CDN limiter per client (`clientip`) + 429 + `Retry-After` + `no-store`; default `Content-Type` when the row's is empty | `api/cdn.go`, `ratelimit.go` | XS | — | open — one scraper 404s a bucket for everyone |
+| WP-R14-2 (= R14-07; retention half done R13) | CDN request cost: cache tenant/bucket/budget per (slug,bucket), batch the `cdn_access_log` flush, count per (tenant,bucket,day) in memory | `api/cdn.go`, `cdn_analytics.go` | S | — | open |
+| WP-R2-3 (= R2-09, WP-R6-3 body half) | Client-body errors are not backend failures: `ErrClientBody` sentinel, `isBackendFailure` false, `bodyReadErrorCode` → 400 `IncompleteBody`; five aborted uploads in a minute open the primary's breaker today | `engine/engine.go`, `failover.go`, `api/s3_errors.go`, driver `%w` sweep | S | — | open |
+| WP-R6-3 (values in R7) | Per-operation driver deadlines (`ResponseHeaderTimeout` 20/60/20 s, Get first byte 25 s, Put 60 s + 1 s/MiB, SDK `RetryMaxAttempts` 2) so a stalled backend trips its breaker instead of surfacing as HAProxy's 50 s cut | `drivers/transport.go`, each constructor | S–M | — | open — an outage is invisible to routing today |
+| WP-R6-1 (= R6-07/09/14/15/22/24, R8-19, WP-R9-5 half) | Location-authoritative reads/deletes: candidates = recorded backend (+ primary for legacy), no 18-way fan-out on a miss, `Delete` attempts every candidate, drop `object_locations` from the read path + its touch goroutine, bound `objectBackends`, refuse/warn on a missing tenant ctx | `engine/engine.go`, `routing.go` | M | WP-R7-5 first (the `onedrive` rows) | open |
+| WP-R6-2 | Engine concurrency: snapshot `primary`/`drivers` under `RLock`; `AddDriver` after start = error; race test with a runtime `SetPrimary` | `engine/engine.go` | S | — | open |
+| WP-R10-2 (+ R10-15/16/38 done half) | Webhook ordering + atomic dedup: fetch the subscription in `handleSubscriptionUpdated`, claim the event id with `INSERT … ON CONFLICT DO NOTHING RETURNING`, cover *paused* in `HasLiveSubscription` | `billing/webhook.go` | S | — | open |
+| WP-R10-4 (= R10-13/34/37/42, WP-R14-5) | One product: delete the legacy pack path and the metered reporter (`registerStripePlans`, `HandleUpgrade`, `CancelSubscription`, `MeteredReporter`, `STRIPE_METER_*`, `spending_cap_cents`, three price ladders, `$3.99` literals) → `prices.json` is the one source | `billing/*`, `server.go`, dashboard handlers, migration | S | Isaac confirms no pack sales; D-12 | open |
+| WP-R10-5 (= R10-14/21, R12-33) | Admin revenue/costs/tenant pages on the house model: MRR from Stripe or a webhook-maintained `subscriptions` row, exclude `plan='house'` from metered queries, `stripe_events.tenant_id`, floors editable via `SetHouse` | `dashboard/handlers/{admin_revenue,admin_costs,admin_support,tenants}.go` | S | WP-R10-4 | open — admin pages double-count houses today |
+| WP-R10-8 (= R10-17/19/20/24/25/43, R3-14) | Ledger tightening: displaced/delete releases inside the head-row tx, net reservation on overwrite (a full floor refuses a *smaller* overwrite today), multipart part reservations (a free tenant can pin 50 GiB × N of hub disk for 48 h), drop the per-reservation `quota_usage_events` row | `api/quota_accounting.go`, `s3*.go`, `usage/*` | S | — | open |
+| WP-R3-5 (= R3-13, R13-18) | Staging directory: `MULTIPART_STAGING_DIR` under `DATA_PATH` (parts live under `/tmp`, wiped at boot by systemd-tmpfiles), orphan-dir sweep, free-space guard | `api/s3_multipart.go`, `multipart_reaper.go` | S | — | open |
+| WP-R3-2 | UploadPartCopy (501 today; aws-cli/rclone server-side copies of large objects use it) with `copySourceScopeDenied` | `api/s3.go`, `s3_multipart.go`, `s3_copy_scope.go` | S | — | open |
+| WP-R3-4 (+ R4-17 batch MFA) | Batch delete parity with `HandleDelete` on versioned buckets (marker, `VersionId`/`DeleteMarker` in the response; after `aws s3 rm --recursive` the ledger stays `is_latest` and DeleteBucket answers 409 with no batch way out) | `api/s3_engine_adapter.go`, `s3_batch.go` | S–M | — | open |
+| WP-R4-2 (+ R4-10/17) | Lock/versioning/MFA bucket state machine: suspend refused on lock buckets, lock enable turns versioning on, MFA-Delete gated on versioning, TOTP replay cache | `api/s3_versioning.go`, `s3_lock.go`, `s3_mfa_delete.go` | S | — | open |
+| WP-R4-3 | CORS preflight on the S3 host (browser uploads to presigned PUT URLs fail at preflight) | `server.go`, `s3.go`, `cors.go` | S | — | open |
+| WP-R4-4 (+ R4-13) | Notification prefix/suffix filters persisted and evaluated | `api/s3_notifications.go`, migration | S | — | open |
+| WP-R4-5 (= WP-R5-13, R2-19, R5-27, R4-12; R10-12 narrow fix done) | Object writes require a `buckets` row (404 `NoSuchBucket` on PUT/copy/initiate) + fixture sweep; no prod backfill (0 phantoms) | `api/s3.go`, `s3_copy.go`, `s3_multipart.go`, fixtures | S–M | — | open — a free tenant with zero `buckets` rows still grows phantom containers |
+| WP-R5-9 (= WP-R9-6, R5-16, R9-08, R11-16 half) | `api_keys.tenant_id` column (backfill from the `users.email = tenants.email` join, NOT NULL after), both credential lookups join on it, key limit on it; test that changing `users.email` cannot break a scoped key | migration, `auth/handlers.go`, `api/s3_presign.go`, `auth/auth.go` | S | E2E pass with aws-cli | open — invariant 8 holds only while no code path edits `users.email` |
+| WP-R5-4 (= R5-09/19/20/24, R9-20; ctx half done R15) | Remove `SIGV4_ENFORCE` + `validateAccessKey` fallbacks (one env typo = key-existence auth), `verifyTokens`/profile/preference maps (WP-R12-11) | `auth/sigv4.go`, `auth/handlers.go`, `auth/CLAUDE.md`, `CLAUDE.md` | S | — | open (the dead `AuthHandler` and `QueryRow` sites went in R15) |
+| WP-R5-5 (= WP-R11-7, R5-10 b/c) | STS IP intersection (a token can drop the parent's IP restriction) + parent-revoke cascade | `auth/sts.go`, `api/sts_routes.go`, migration | S | — | open |
+| WP-R5-6 | `AuthService` map synchronisation (registration/key writes race logins — Go aborts the process on a detected concurrent map write) or read from the DB | `auth/*.go` | S | — | open — a launch-day signup burst is the trigger |
+| WP-R5-10 | JWT revocation on password change (`iat` vs `users.updated_at`) + `iss` check | `auth/auth.go`, `api/server.go` | XS | — | open |
+| WP-R5-12 (+ R5-21/23, R12-32) | `ValidPermissions` generated from the parser (18 operations cannot be granted today), expired-key error code, canonical IP-allowlist compare + validation on create, `expires_at` in the past refused | `auth/scoped_keys.go`, `api/s3.go`, `dashboard/handlers/apikeys.go` | XS | — | open |
+| WP-R11-2 (= R11-08, R10-23) | Idempotency claim-first + body hash (same key + different body replays today; cached bodies hold key secrets 24 h) | `api/idempotency.go`, migration | S | — | open |
+| WP-R11-4 (+ R11-12) | Keyset `(created_at, id)` cursors for events/deliveries (second-precision cursors skip rows) | `api/events.go`, `webhooks_routes.go` | S | — | open |
+| WP-R11-5 (D-12) | Compliance scaffolding drop: unmount `/api/compliance`, delete gdpr/consent/ropa/privacy/portability (soc2 went in R15), keep `breach*` under `/api/v1/admin`, migration `DROP TABLE IF EXISTS` for the orphan tables | `api/server.go`, `internal/compliance/*`, migration | S | D-12 | open |
+| WP-R11-6 (+ R11-17/22; R11-16 done R12) | Key API hygiene: typed `ErrKeyNotFound`/`ErrKeyRevoked` → 404/409, management envelope on the user-API key routes, `revoked_at` in the management list, `days ≥ 1` | `api/management_routes.go`, `user_api.go`, `auth/apikey.go` | S | WP-R5-9 | open |
+| WP-R11-10 → done #520 (R12-15) | Admin audit page reads `audit_logs` | — | — | — | **done** |
+| WP-R11-11 (= R2-28, R11-18) | PATCH metadata normalisation (lower-case, name check, `x-amz-meta-` strip) | `api/metadata.go`, `management_routes.go` | XS | — | open |
+| WP-R12-1 (+ R12-17, R10-27 half) | Stream the GDPR export; page the object query | `dashboard/handlers/account.go`, `api/account_export.go` | S | WP-R10-3 | open |
+| WP-R12-2 (+ R12-18) | Object browser on R4's `walkList` (`max-keys`, continuation, `COLLATE "C"`, escaped prefix) — a million-key bucket is a million-row page today | `dashboard/handlers/buckets.go`, `api/s3_list.go` | S | — | open |
+| WP-R12-3 (D-18) | Plan gate for `tier_preference` (`archive`/`performance`/`resilient`) on the dashboard AND management API | `dashboard/handlers/bucket_settings.go`, `api/management_routes.go` | S | Isaac | open |
+| WP-R12-4 | Audit rows for the remaining dashboard mutations (bucket create/settings incl. visibility→public, profile, session revoke, abuse action, support note, restore) + `/auth/login` JWT mint | handlers, `api/server.go` | XS | — | open |
+| WP-R12-9 | OAuth PKCE + consent step when linking an OAuth identity to a password account | `dashboard/handlers/oauth.go` | XS | — | open |
+| WP-R12-10 → **done R15** (#525) | Dashboard bucket create through `createBucketRegistry` | — | — | — | **done** — one rule on all three entry points; the DATA_PATH directory sink (gosec G703) is gone |
+| WP-R12-11 (+ R12-26/29, R5-24) | Settings hygiene: company cap/clear, persist or drop the in-memory profile/preference maps, resend-verify limiter, POST logout | `dashboard/handlers/settings.go`, `router.go`, `auth/*` | XS | — | open |
+| WP-R12-12 (+ R12-31/34/35) | Admin hygiene: tier-2 flag confirm, unregistered keys refused in `flags.Set`, abuse state machine + audit, persist the primary swap | `dashboard/handlers/{admin_flags,admin_abuse,admin_backends}.go`, `flags/service.go` | XS | — | open |
+| WP-R12-13 | Persist the primary swap (process memory only today) | `engine`, `admin_backends.go` | XS | — | open (folded into WP-R12-12) |
+| WP-R13-2 (+ R13-06 detect, R13-10) | Demotion ledger hygiene: `kept_changed` deletes the cold copy when the row moved off cold (tape bytes leak per overwritten demoted object), `object_gone` re-checks after the hot delete, plain-PUT displaced-blob delete | `api/smart_demotion.go`, `s3_engine_adapter.go` | XS | WP-R2-1 for the structural close | open — before the flag flips |
+| WP-R14-3 (+ R14-13/14/15) | Email hygiene: RFC 2047 subjects, quoted-printable, `Date`/`Message-ID`, CRLF guard, 15 s Resend timeout, text alternative unescape, resend-verification surfaces send errors | `internal/email/*`, `dashboard/handlers/email_verify.go` | XS | — | open — matters the day `EMAIL_PROVIDER` is set (prod runs `LogSender`) |
+| WP-R14-4 → **done R15** (#525) | Real version on `/version`, `/health`, `/status` via `-ldflags` (git sha + build time) in `make build`, `deploy.yml`, `ci.yml`, `release.yml` | — | — | — | **done** — `"0.1.0"/"2025-08-12"` since August 2025 |
+| WP-R14-8 → done #523 (R13-22) | Waitlist e-mail hashed in logs | — | — | — | **done** |
+| WP-R8-2 (= R8-09; DELETE half done #511) | Chunk lifecycle: orphan-blob sweep (`_global/_chunks` listing vs GCI), shrink `storeChunkLocked`'s lock/connection scope (an advisory lock + pooled connection held across a 16 MiB backend PUT) | `api/s3_engine_adapter.go`, `dedup_gc.go`, `gci.go` | S–M | — | open |
+| WP-R8-3 (= WP-4, R8-10) | Body integrity on the non-chunked path: MD5 tee on plain GET vs the head ETag, abort + metric on mismatch; AAD `tenant‖bucket‖key` on new SSE writes | `api/s3_engine_adapter.go`, `crypto/{sse_s3,ssec,chunk_encryption}.go` | S–M | — | open — a corrupted whole object is served 200 today |
+| WP-R8-4 (+ R8-11/18, R10-32) | Chunker identity: decide the average (**2 MiB real** vs the documented 4 MiB — `SetAverageBits` later is a dedup reset), record chunker+library in `pipeline_config`, pin `restic/chunker`, one floor helper | `crypto/chunker.go`, `api/s3_engine_adapter.go`, `go.mod` | S | Isaac (average) | open — decide before customer data accumulates |
+| WP-R8-5 (+ R8-12; unlocks WP-R3-3) | Streaming SSE-S3 (1 MiB GCM frames, blob `0x02`) — removes the ≤ 512 MiB per-request peak and the 256 MiB cap | `crypto/sse_s3.go`, `api/s3_engine_adapter.go` | M | WP-R2-6 | open |
+| WP-R8-6 (+ R8-14/15) | SSE header parity: `x-amz-server-side-encryption` on chunk-encrypted PUT/GET; SSE-C missing key → 400 | `api/s3_engine_adapter.go`, `s3.go` | XS | — | open |
+| WP-R2-4 (+ R2-21/22/23, R8-14; conditional half done #515) | Header parity HEAD/200/206 (one writer), HEAD `?versionId` + Range, 0-byte SSE-C PUT | `api/s3.go`, `s3_engine_adapter.go` | M | — | open |
+| WP-R2-5 → done #511 (R8-07) | Delete-marker path releases chunked manifests | — | — | — | **done** |
+| WP-R2-6 (+ R8-12) | Server-wide bound on SSE and chunked in-flight memory (semaphores sized from `GOMEMLIMIT`); peak today = 512 MiB × concurrent SSE requests | `server.go`, `s3_engine_adapter.go` | S | — | open |
+| WP-R2-7 (+ R2-25, R3-27) | Key length ≤ 1024 bytes + bucket-name validation on object ops (a 1,100-byte key → 500 ×3 retries) | `api/s3.go` | XS | — | open |
+| WP-R3-1 | Multipart through the chunk pipeline (dedup, compression, per-chunk encryption, chunked GET) keeping the `-N` ETag; the natural home for part reservations | `api/s3_multipart.go`, `s3_engine_adapter.go` | M | WP-R8-4, WP-R10-8 | open |
+| WP-R3-6 (+ R3-19/23/24/25, R4 multipart tagging) | Conformance: ListParts/ListMultipartUploads pagination, `EntityTooSmall`, `Location` scheme, `WithContentLength` on copy, multipart `x-amz-tagging` | `api/s3_multipart.go`, `s3_copy.go` | S | — | open |
+| WP-R4-6 (+ R4-15/16/18/20) | Bucket hygiene: shared name validator (IP form, `xn--`, `-s3alias`), reject both auth mechanisms, `host` in `SignedHeaders`, refuse ORC/Parquet, ctx on presign lookups (done R15), drop the nil-DB `/tmp` walks | `api/s3_buckets.go`, `s3_presign.go`, `s3_inventory.go` | S | — | open |
+| WP-R1-2 (+ R1-05/06, R13-17, R3-21) | Server-lifetime context for the 11 `Background` goroutines + recover middleware on the S3/API chain (a handler panic is invisible to metrics today) + HEAD nil guard (done #484) | `server.go`, new `recover.go`, trackers | S | — | open |
+| WP-R1-4 (+ R1-09/17) | Config surface: delete `configs/`, prune `config.Config` to `Server.Port`, unify `DATA_PATH`/`QUOTALESS_ENDPOINT` defaults, pass `storageMode`/`dataPath` from `main`, rewrite `.env.example` | `config/`, `configs/`, `.env.example`, `server.go`, `main.go` | S | — | open (the CLAUDE.md env table was rewritten in R14) |
+| WP-R1-5 (+ R1-11) | CDN host router through the middleware chain (request id, limits, logging, 5xx counting) | `server.go` | XS | — | open |
+| WP-R1-8 (+ R1-14/18, R2-26; reset header done #518, limiter sweep done #520) | One request id through ctx (S3 error `RequestId` ≠ `X-Request-Id` today) | `server.go`, `s3_errors.go` | XS | — | open |
+| WP-R1-10 (= WP-R9-4 half, R1-16, R9-06) | Boot DB contract: `PingContext` 10 s in `NewPostgres`, fail-fast decision, `bootCtx` deadline for the `NewServer` prologue (a hung Postgres blocks boot and the deploy gate rolls back a good binary) | `database/postgres.go`, `main.go`, `server.go` | S | — | open |
+| WP-R9-2 → done #523 (R13-14) | Log-table retention | — | — | — | **done** |
+| WP-R9-3 (+ R9-11/17, R10-40) | Migration runner hardening: `PGOPTIONS='-c lock_timeout=5s -c statement_timeout=600s'` on deploy/CI/Makefile, drop four duplicate indexes, CONCURRENTLY rule for big tables | `deploy.yml`, `ci.yml`, `Makefile`, migration 072 | S | — | open |
+| WP-R9-5 (+ R2-17, R6-15, R9-10) | Coalesce the per-GET `last_accessed` touch (one write + goroutine per cache-hit GET today) | `api/s3_engine_adapter.go`, `bandwidth.go` | XS | — | open |
+| WP-R9-8 | Type normalisation (`timestamptz` on 29 live columns, `tenant_id` TEXT everywhere) | migrations | M | D-12 | post-launch |
+| WP-R9-9 → done #515 (R4-05) | Prefix listing as a range scan + `COLLATE "C"` index | — | — | — | **done** |
+| WP-R7-2 | Geyser streams known lengths (`materialize` copies every Vault PUT ≤ 64 MiB into RAM and larger ones to a temp file) | `drivers/geyser.go` | S | Geyser creds for a live check | open |
+| WP-R7-3 (+ R7-04/21) | Delete `quotaless.go` + `S3Driver` (dead account, `io.ReadAll` bodies, in-request sleeps) | `drivers/*`, `main.go` | S | Quotaless exit (M12) | open |
+| WP-R7-4 (+ R7-06/07/08/09/18) | Permafrost conformance: typed Graph error, ctx-aware bounded retries, streamed range downloads, recursive `List`, fleet fingerprint, all-tenant probe | `drivers/onedrive.go` | M | — | open — permafrost is targeted by nothing today |
+| WP-R7-6 (+ R7-15/18/20/24/26; PutWithSize etc. done R15) | Driver hygiene: `R2Endpoint` rejects `us`, explicit checksum mode per driver, `fsync` parent dir + prune empty dirs (local), wrap lyve `HealthCheck` error, DNS cache TTL, every driver honours `ContentType`, `Name()` = registration key | `drivers/*` | S | — | open |
+| WP-R7-7 (+ R7-16) | Lyve lock guard: `GetObjectLockConfiguration` at boot; lock enabled → Error + target-only (a default retention on `stored-*` would make every failover write undeletable) | `drivers/lyve.go`, `engine` | S | — | open; [YOU] never enable a default retention on `stored-*` |
+| WP-R6-4 → **done R15** (#524) | Delete the inert engine (tiering, selector, cost optimizer, backup replication, interface stubs) | — | — | — | **done** except the class-B files (D-1/D-2/D-9) and the `Execute/Query/Train/Predict` interface stubs (XS, with D-9) |
+| WP-R6-5 → **done R15** (#524) | Access-tracking decision = remove (`internal/intelligence`, the retention policy; `access_patterns` → D-12) | — | — | — | **done** |
+| WP-R6-6 → **done R15** (#524) | Read cache = delete (`internal/cache`, `cachingReader`) | — | — | — | **done** |
+| WP-R6-7 → done #523 (R13-02) | Background writers through the S3 write path | — | — | — | **done** |
+| WP-R6-8 → done #496 (R7) | Driver contract conformance table | — | — | — | **done** (residue in WP-R7-4/6) |
+| WP-R6-9 → done #522 (R14) | ARCHITECTURE.md / DRIVERS.md rewritten | — | — | — | **done** |
+| WP-R0-1 (D-1..D-8) | Execute the class-B deletions (`k8s`, `container`, `global`, `ha`, `slo`, `integrations`, `postquantum.go`, `wasm.go`, `api/metrics.go`; `go mod tidy` drops `yaml.v3`, `wazero`, `circl`) + plan line fixes | packages, `go.mod`, `IMPLEMENTATION_PLAN.md` | M | Isaac | open — D-6/D-8 executed in R15 |
+| WP-R0-2 → done #518 (D-10/D-11) | Quota admin routes + gorilla/mux gone | — | — | — | **done** |
+| WP-R0-3 → done R15 (= WP-R6-6) | Read cache decision executed | — | — | — | **done** |
+| WP-R0-4 (+ R0-12, R8-22, R9-21 done R15) | Prune the partially-dead live files (`crypto/encryption.go` 26/27, `keymanager.go` 14/16, `compression.go` 16/31, `chunker.go` 10/14, `config.go` presets) | `internal/crypto/*` | S | D-2/D-3 | open (the `database/postgres.go` wrapper went in R15) |
+| WP-R0-5 → **done R15** | `make clean` + `make deadcode` | — | — | — | **done** |
+| WP-R0-6 → done (R14 sweep) | Per-directory CLAUDE.md sweep | — | — | — | **done** |
+| WP-R0-7 → done #481 (R9-05) | Single schema owner | — | — | — | **done** |
+| WP-R0-8 → done #512 (R10) | `ReleaseQuota` DB test | — | — | — | **done** |
+| WP-R0-9 → done #478 (R6-13) | `main.go` caching comment | — | — | — | **done** (the whole block went in R15) |
+| WP-R0-10 → done #512 (R10-30) | Lyve cost reasoning inline | — | — | — | **done** |
+| WP-R0-11 → **done R15** (+ R8-13 #511) | Repo hygiene: `scripts/verify_*.sh`, `auth/db_test_fix.go`, gosec `internal/testing` exclude, GCI tests scoped | — | — | — | **done** |
+| WP-R1-3 → **done R15** (= WP-R14-4) | Build identity | — | — | — | **done** |
+| WP-R1-6 → done #496 (R7-19) | Probe every `idrive-<region>` + permafrost | — | — | — | **done** |
+| WP-R1-7 → done #481 + R15 | `DATABASE_URL` skips → `testutil.DSN()` (the compat suite was the last one) | — | — | — | **done** |
+| WP-R1-9 → done #512 (R10-04) | `/webhook/` body cap 10 MB | — | — | — | **done** |
+| WP-R1-11 → done #522 (R14-01) | `LogSender` redaction | — | — | — | **done** |
+| WP-R5-1, WP-R5-2 (→ #520), WP-R5-3 (→ #518), WP-R5-7 (→ #515), WP-R5-8 (partly #520/#521; rest = WP-R12-8), WP-R5-11 (→ #512), WP-R5-13 (= WP-R4-5) | — | — | — | — | **done** except as noted |
+| WP-R7-1 → done #502 | iDrive regions rebuilt (prod pairs = [YOU], above) | — | — | — | **done** (code) |
+| WP-R9-1 → done #481; WP-R9-4 (= WP-R1-10 + R9-20 ctx sites, mostly done R15); WP-R9-6 (= WP-R5-9); WP-R9-10 (= WP-R10-3) | — | — | — | — | see the merged rows |
+| WP-R10-1 → done #512; WP-R10-6 (stripe-go upgrade — moves the 2023-08-16 pin; **do not bump** until the endpoint is re-pinned; needs Go 1.26 per D-24); WP-R10-7 → done #518 | — | — | — | — | as noted |
+| WP-R11-1 → done #518; WP-R11-8 → done #523 (409 gate; async trigger = WP-R13-3); WP-R11-9 (= WP-R10-3 / WP-R12-7) | — | — | — | — | as noted |
+| WP-R12-6 → done #522 (R14 claims table); WP-R14-5 (= WP-R10-4); WP-R14-7 → done #523 | — | — | — | — | as noted |
+| WP-R13-1/2/3 | above (A) | | | | |
+| WP-R15-1 | **Chunk-signature verification for `STREAMING-AWS4-HMAC-SHA256-PAYLOAD`** (see the accepted deviation in this document): per-chunk `HMAC(signingKey, "AWS4-HMAC-SHA256-PAYLOAD\n"+date+"\n"+scope+"\n"+prevSig+"\n"+sha256("")+"\n"+sha256(chunk))` checked in `awsChunkedReader`, seed = the header signature; fixture = a raw aws-cli capture against a known test secret | `internal/auth/sigv4*.go`, `api/s3_engine_adapter.go`, `s3_multipart.go` | S | — | open — P2, not gating (TLS + HAProxy redirect; the seed signature binds `x-amz-decoded-content-length`) |
+| WP-R15-2 | **`rows.Err` in the void dashboard helpers**: `populate*` now records the iteration error under `data["RowsError"]`; render it (or return it) instead of a silently short page | `dashboard/handlers/{overview,usage,buckets,bucket_analytics}.go`, templates | XS | — | open |
+| WP-R15-3 | **Go 1.26 toolchain** (D-24): bump `go.mod`, `setup-go` in the four workflows, then merge the four `golang.org/x/*` dependabot PRs (x/crypto 0.57 closes GO-2026-6354/6355; unreachable from our code per govulncheck) and WP-R10-6 | `go.mod`, `.github/workflows/*.yml` | XS | Isaac | open |
+| WP-R15-4 | **Scoped GCI test fixtures**: the api fixtures' `NOT EXISTS (tenant_chunk_refs)` cleanup deletes every GCI row with no reference table-wide — including `internal/crypto`'s rows mid-test (the last shared-DB flake); scope it to hashes the fixture wrote, and scope `TestDedupGC_*`'s table-wide counts | `internal/api/s3_quota_accounting_test.go:108`, `s3_chunked_copy_test.go`, `s3_chunking_string_tenant_test.go`, `s3_chunking_test.go`, `dedup_gc_test.go` | XS | — | **done R15** (#527) |
+
+## Decisions for Isaac (D-1 … D-24)
+
+| D | What | Raised by | Session's recommendation | Blocks |
+|---|------|-----------|--------------------------|--------|
+| D-1 | Delete class-B packages `k8s`, `container`, `global`, `ha`, `slo`, `integrations` (21.7k src LOC, never linked) | R0 | **Delete**, rely on git; `go mod tidy` drops `gopkg.in/yaml.v3` | WP-R0-1; lint budget; every CI run compiles them |
+| D-2 | Delete `engine/{sla,disaster_recovery}.go`, `drivers/wasm.go` | R0 | **Delete**; drops `tetratelabs/wazero` | WP-R0-1 |
+| D-3 | Delete `crypto/postquantum.go` (SSE-S3 uses stdlib `crypto/mlkem`) | R0 | **Delete**; drops `cloudflare/circl`; fix plan line 1134 | WP-R0-1 |
+| D-4 | Delete `api/metrics.go` (legacy registry; live one is `prom_metrics.go`) | R0 | **Delete**; fix plan line 955 | WP-R0-1 |
+| D-5 | Delete `api/middleware.go` stubs | R0 | **Executed** in R11 (#518): the dead functions went; the file now hosts `requireAdmin` | — |
+| D-6 | Delete `internal/webhooks` | R0 | **Executed** in R15 (#524) | — |
+| D-7 | Delete `cmd/loadtest` + `internal/loadtest` (`tests/load` is the harness of record) | R0 | **Delete** (moved to `cmd/tools/loadtest` meanwhile) | WP-R0-1 |
+| D-8 | Delete the three dashboard stubs | R0, R12-27 | **Executed** in R15 (#524) | — |
+| D-9 | Keep `analytics.go`, `cost_advisor.go`, `capacity.go`, `replicator.go`, `soc2.go` (plan names them) | R0 | R6 and R15 disagree with "keep": `soc2.go` was deleted in R15 (813 unreachable lines, WP-R11-5 drops the compliance scaffolding); recommend **deleting** `replicator.go` (R6: a 5-goroutine `[]byte` queue is not the P3 replication design) and the other three with D-1 | WP-R0-1, WP-R0-4 |
+| D-10 | Quota admin handlers + gorilla/mux | R0 | **Executed** in R11 (#518) | — |
+| D-11 | RBAC stub | R5 | **Executed** in R11 (#518): deleted | — |
+| D-12 | Drop the 39 orphan tables (056 runtime set, 27 compliance/RBAC tables, `dedup_statistics`, `tenant_cost_daily`, `tiering_policies`, now `access_patterns`) via one `DROP TABLE IF EXISTS` migration | R9, R11 | **Drop** (R11's verdict; the compliance module is scaffolding — keep `breach_*`, `audit_logs`) | WP-R11-5, WP-R10-4, WP-R9-8 |
+| D-13 | May an `x-amz-storage-class` header make an `auto`-bucket object *colder* (GLACIER)? | R2 | Kept allowed (a public bucket + GLACIER lands the object on tape by the customer's own choice); confirm | docs |
+| D-14 | `cmd/dedup-migrate`: delete or build-tag + fix R8-06 | R8 | **Delete** (new objects chunk at PUT; prod's 5,224 whole objects are bench data) | nothing; the tool must not be run as is |
+| D-15 | Is "erased by hand within the grace period" acceptable copy until WP-R10-3, or must the runner ship before launch? | R10 | **Runner before launch** (GDPR obligation; the subscription-cancel half is money) | WP-R10-3 |
+| D-16 | Does `pending_deletion` block login / S3 during the grace period? | R11 | **No** — cancel and export need the session; deletion runs on the date (the AWS shape) | WP-R10-3 |
+| D-17 | Suspended tenants may sign in to the dashboard? | R12 | **Keep** (they need billing/export); add a banner + read-only except billing | WP-R12-12 |
+| D-18 | Which plans may pick the `archive` / `performance` / `resilient` floors from the settings form and the management API? | R12 | Gate `resilient` and `performance` to paid; `archive` needs an attic (house) — confirm | WP-R12-3 |
+| D-19 | Terms: 99.9 % SLA + credits vs FAQ "no contractual SLA, target 99.5 %"; refunds 14-day case-by-case vs "30-day full refund" | R14 | **Applied**: terms now say 99.5 % target, no credits until a second site, 30-day full refund on a first purchase — **this needs your confirmation, not just a yes**; revert = fix the FAQ too | legal copy |
+| D-20 | Root `CLAUDE.md` in a PUBLIC repo names the prod host, SSH alias, paths and the sudo-password Keychain hint | R14 | Move the *Production* section to `.private/` (a `README`-style pointer stays) | repo hygiene |
+| D-21 | Drop the "30-day minimum per object" Vault claim (nothing enforces or bills it) | R14 | **Drop** (customer-unfavourable claim with no code) | landing/FAQ |
+| D-22 | `s3.stored.ge` resolves straight to the origin (unproxied); intended? | R14 | **Keep and document** — it is what the synthetic check must use (the Cloudflare HEAD→GET SigV4 flake would page otherwise) | checklist 4 |
+| D-23 | Region-pinned Standard buckets are outside the Smart hot budget | R13 | **(a)** document as "always hot, not Smart" until a same-region cold backend exists | WP-R13-1 docs, FAQ |
+| D-24 (new) | Move the toolchain to **Go 1.26**: the four open `golang.org/x/*` dependabot PRs (incl. x/crypto 0.57 for GO-2026-6354/6355) require `go 1.26` in their own go.mod; govulncheck shows the vulnerable functions are unreachable from this code, so it is not urgent — but every future x/ bump will need it, and stripe-go's next major (WP-R10-6) will too | R15 | **Yes, right after launch** (or now if a quiet week exists): bump `go.mod` + the four workflows' `setup-go`, re-run the full suite; one-line change, one prod deploy | WP-R15-3, WP-R10-6 |
+
+## Pre-launch checklist (13 rows) — status 2026-09-30, [YOU] rows as click paths
+
+| # | Item | Status | Click path for [YOU] |
+|---|------|--------|----------------------|
+| 1 | Admin audit trail | **done** #518 (writes), #520 (dashboard page) | — |
+| 2 | Login events + lockout | **done** #520 | install `vaultaire-auth.yml` (row 10) |
+| 3 | Credential-attack metrics | **done** #518, #519 | install `vaultaire-auth.yml` (row 10) |
+| 4 | Synthetic customer check | **code done** #523 | 1. `POST /auth/register` a dedicated tenant (`synthetic@stored.ge`), note the key pair; 2. `aws s3 mb s3://synthetic-check --endpoint-url https://s3.stored.ge` with it; 3. add to `/opt/vaultaire/configs/.env`: `SYNTHETIC_CHECK_URL=https://s3.stored.ge` (the unproxied origin — D-22; through Cloudflare the HEAD→GET SigV4 flake would page), `SYNTHETIC_CHECK_ACCESS_KEY=…`, `SYNTHETIC_CHECK_SECRET_KEY=…`, `SYNTHETIC_CHECK_BUCKET=synthetic-check`, optional `SYNTHETIC_CHECK_INTERVAL=2m`; 4. `sudo systemctl restart vaultaire`; 5. `curl -s localhost:8000/metrics \| grep synthetic` → `vaultaire_synthetic_check_success 1` |
+| 5 | Retention + policy text | **done** #523 (job, numbers in privacy/DPA) | — |
+| 6 | Off-box backups and logs | **open** [YOU] (WP-R9-7) | on SLC: `chmod 700 /opt/vaultaire/backups; chmod 600 /opt/vaultaire/backups/*`; edit `/opt/vaultaire/bin/pg-backup.sh`: `umask 077`, `pg_dump -Fc`, then `aws s3 cp` (or `rclone`) the dump to a private R2/Lyve bucket with a key that can only write; raise `journald` `SystemMaxUse`; document `pg_restore -d vaultaire <file>` in `docs/RUNBOOK.md`; run one restore into a scratch DB |
+| 7 | Sign-up attribution | **done** #520 (migration 070) | — |
+| 8 | Lock down `/metrics`, `/health/backends`, `/health?details` | **open** [YOU] (WP-R1-1) | in `/etc/haproxy/haproxy.cfg` on each frontend: `http-request deny if { path_beg /metrics } \|\| { path_beg /health/backends }`; `http-request del-header CF-Connecting-IP unless { src -f /etc/haproxy/cloudflare.lst }` (the list = the ranges `deploy/ufw-cloudflare-lockdown.sh` fetches); `sudo haproxy -c -f …` then `sudo systemctl reload haproxy`; verify `curl -sI https://stored.ge/metrics` → 403 and `curl -s localhost:8000/metrics` still 200 (Prometheus scrapes localhost) |
+| 9 | Abuse-report form | **done** #520 | — |
+| 10 | Install the alert rules on SLC | **open** [YOU] | `scp deploy/monitoring/vaultaire-{backends,tls,auth,synthetic}.yml vaultaire-slc:/tmp/`; on the box `sudo mv /tmp/vaultaire-*.yml /etc/prometheus/rules/ && sudo promtool check rules /etc/prometheus/rules/*.yml && sudo systemctl reload prometheus`; confirm on `:9090/rules` that `BackendProbeFailing`, `SyntheticCheckFailing`, `AuthFailureBurst`, `DashboardLoginLockouts`, `RetentionJobStale` are loaded; fire a test alert (`amtool alert add test`) and see the ntfy push |
+| 11 | iDrive per-region key pairs into prod `.env` | **open** [YOU] + Isaac (which regions) | `bash deploy/scripts/idrive-region-env.sh .private/idrive-keys-2026-09-20.env` → paste the `IDRIVE_<REGION>_ACCESS_KEY/SECRET_KEY` lines for the regions to sell into `/opt/vaultaire/configs/.env`; restart; check the boot log for `idrive-<region> bucket ensured` and `/health/backends` for each region; the dashboard picker greys the rest |
+| 12 | Lyve data plane off the ROOT key | **open** [YOU] (R7-02) | Lyve console → IAM → user `vaultaire-prod` (exists since 2026-09-23) → generate keys; set `LYVE_ACCESS_KEY/SECRET` to them in `.env`; keep `LYVE_PROBE_*` = the root pair **or** delete both `LYVE_PROBE_*` lines (the probe then uses the driver's signed HeadBucket, #496); restart; `/health/backends` shows `lyve` healthy; then Lyve console → root account → enable TFA; never enable a default retention on `stored-*` (R7-16) |
+| 13 | SSH housekeeping | **open** [YOU] | `journalctl -u ssh --since -7d \| grep Accepted` on the box; confirm the hourly :58 login is the known job; if not, `sudo lastlog` + revoke the key in `~/.ssh/authorized_keys` |
+| + | Stripe (from R10) | **open** [YOU] | Stripe dashboard → Developers → Webhooks → add endpoint `https://stored.ge/webhook/stripe`, **API version 2023-08-16** (the version picker on the endpoint), events `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.payment_succeeded`, `invoice.payment_failed` → copy `whsec_…` → `STRIPE_WEBHOOK_SECRET` **and** `STRIPE_SECRET_KEY` together in `.env`; Products → create the six recurring prices per `internal/billing/CLAUDE.md` → `STRIPE_PRICE_{STANDARD,VAULT,PINHOT}_{ANNUAL,MONTHLY}`; Settings → Customer portal → quantity updates **off**, cancellation allowed; Settings → Billing → Manage failed payments → after retries **cancel** the subscription; restart; boot log `house prices verified`; flip `quota_checkout` + `house_overview` when ready |
+| + | `ENCRYPTION_MASTER_KEY` deploy decision (WP-R14-6) | **open** Isaac | `openssl rand -hex 32` → `.env`; every *new* bucket then defaults `sse_enabled`; multipart objects stay plaintext until WP-R3-3; rotation is a no-op until WP-R8-1 — decide "ship the key + keep the copy honest" or "wait for WP-R8-1" |
+
+## Prod facts collected read-only across sessions (state as of the session named)
+
+| Fact | Session |
+|------|---------|
+| PostgreSQL **16.13** (`max_connections` 200, no pgbouncer, `statement_timeout`/`lock_timeout` 0); local dev 15.13; CI 15 | R9 |
+| Prod schema == migrations (`pg_dump -s` diff = one column position) | R9 |
+| 26 buckets (3 versioning-enabled, 0 lock-enabled, 1 public, 0 logging, 0 inventory); **0 phantom containers**; `datcollate=en_US.UTF-8`; migration 069's `COLLATE "C"` index valid and ready | R4 |
+| **205,604 `object_versions` rows** describing bytes that no longer exist (3 versioned bench buckets, metadata-only versioning) | R4 |
+| `object_head_cache` routing rows: `onedrive` 2,613 / 880 MB (bench, registration key renamed), `idrive` 2,038 / 2.0 GB, `local` 452 / 567 MB vs a `DATA_PATH` of 10 files, **NULL 62 / 12 GB** (= every multipart upload before #514), `r2` 26, `permafrost` 25, `lyve` 7 / 576 MB, `geyser` 2 / 48 MB | R7, R3 |
+| `global_content_index` 127 rows, all `_global` scope, **plaintext**, ref 1, on `idrive`; 1 chunked object; drift 0; `tenant_encryption_keys` 0 | R8 |
+| `.env` names: `DATA_PATH DB_* ENV GEYSER_* IDRIVE_{ACCESS_KEY,ENDPOINT,REGION,SECRET_KEY} JWT_SECRET LYVE_{ACCESS_KEY,SECRET_KEY,REGION} LYVE_PROBE_* PORT R2_* SIGNUPS_ENABLED STORAGE_MODE TENANT_{1,2,3}_* TLS_CERT_PROBE_TARGETS VAULTAIRE_BASE_URL VAULTAIRE_ENDPOINT` — **no `ENCRYPTION_MASTER_KEY`, no `EMAIL_PROVIDER` (LogSender), no `STRIPE_*`, no `IDRIVE_<REGION>_*`, no `SYNTHETIC_CHECK_*`**; `ENV` is set and read by nothing | R1, R14 |
+| Lyve data plane on the account **ROOT key**, TFA off; scoped user `vaultaire-prod` unused; `stored-us-east-1`/`stored-us-west-1` have no Object Lock, versioning off; prod region `us-east-1` | R7 |
+| HAProxy 2.8.16: `option forwardfor` (appends a new XFF header), HSTS `max-age=31536000; includeSubDomains; preload` at the edge, https redirect; `/metrics`, `/health/backends`, `/health?details` public; `s3.stored.ge` grey-clouded (origin direct) | R1, R14 |
+| systemd: `TimeoutStopSec` = 90 s default, `Wants=redis-server` (no Redis), `PrivateTmp=no`; `/tmp` is the root ext4 (3.4 TB free) with `D /tmp 1777 root root 30d` (boot wipe) | R1, R3 |
+| Backups: cron 03:00 UTC, plain `pg_dump \| gzip`, `0664` in a `0755` dir, 7 days, nothing leaves the box; dumps hold every tenant's plaintext S3 secrets | R9 |
+| Alert rules on the box predate #496; Prometheus binds `127.0.0.1:9090`; Alertmanager → ntfy-bridge live | R7, ops memory |
+| Log tables on 2026-09-26: `s3_access_log` 442,807 rows, `events` 436,237, `quota_usage_events` 354,863 (now bounded by the retention job) | R9 |
+| `audit_logs` 0 rows in 30 days before #518; `user_activities` 0 | R11, R12 |
+| `bucket_notifications` 0 rows; multipart tables 0 rows; `/tmp/vaultaire-multipart` empty; 21 `/tmp/vaultaire` marker dirs for 26 buckets (no longer consulted) | R3, R4 |
+| Waitlist: 39 organic sign-ups by 2026-09-27; two abuse-report rows (crypto spam); 92k unauthenticated scanner hits / 14 d; one silent 26-day outage (letshow, dead iDrive account) | R7 checklist sweep |
+| `/metrics` on 2026-09-30 (anonymous, 94 min after a deploy): `go_goroutines 46`, `vaultaire_requests_total 4070`, RSS 122 MB | R15 |
+| Repo is **PUBLIC**; root `CLAUDE.md` names the prod host, SSH alias, paths, Keychain hint (D-20) | R14 |
+
+## Docs and plan updates made by R15
+
+- `docs/CODE_REVIEW_PLAN.md`: R15 tracker row → done; "How to run a session" now says the review is complete and points here.
+- `docs/IMPLEMENTATION_PLAN.md`: new section "Review 2026-09 (R0–R15)" listing the work packages by id with the launch-gating flag (mirrors table A/B above).
+- `docs/SCALE_TESTING.md`, `docs/DEPLOY.md`, `README.md`, `CONTRIBUTING.md`, root `CLAUDE.md` (build/test/lint block, `cmd/tools`, hook stages), per-directory CLAUDE.md files touched by the deletions (engine, auth, database, handlers, api, drivers/lyve_README), `docs/ARCHITECTURE.md`, `docs/DATABASE.md`, `docs/PRODUCT_FEATURES.md`.
+
+## Methodology notes for the next review
+
+**What found the most**
+1. **Live reproduction before reading further** — aws-cli/curl/psql against a local build (R2, R3, R4, R11, R12, R13, R14): every P0 was proven with a request, and several "obvious from the code" claims turned out wrong under the tool (R4-21, R3-28). Budget half the session for it.
+2. **"Same bug on the other entry point"** — one grep after every fix: R4-04 → R4-22 (management bucket delete), R4-02 → R11-04 (customer webhooks), R5-03 → R12-04 (API reset vs web reset), R10-12 → R11-05 (bucket cap on the management API), R11-16 → R12-02 (key cap counted the primary). The meta-reviewer's four gaps were all this shape; R15 found R15-02 (nightly) and the dashboard bucket create (WP-R12-10) the same way.
+3. **"Claimed invariant vs the check that runs before it"** — R11-28 (presign metrics before the credential existed), R12-38 (one remembered TOTP code vs a two-step window), R2-01 (delete-marker branch before the lock check), R6-02 (fallback miss taken as verdict). When a sentence says "always/never", find the path that returns first.
+4. **Audit triggers on shared tables while the whole suite runs** (R10-11) — the only way the cross-package writers were caught; R15 used the same idea in reverse (run 3× and read the failing statement).
+5. **Reading the tool's own log, not its badge** — the nightly workflow (R15-02), gosec's `#nosec` on the wrong line (R15-04), dependabot's "blocked" (R15-05): each needed one `gh run view --log` / `gh pr diff`.
+6. **deadcode + `go list -deps` before deleting anything, then build/vet with every tag set and `GOOS=linux`** — R0 was caught by an external test package; R15 was caught by a linux-only file.
+
+**What cost the most**
+1. **Tracker-row conflicts on every PR** (`docs/CODE_REVIEW_PLAN.md`): every session rebased and re-applied its one row. Next time: one tracker file per session, or the row lands in a separate docs-only PR at the end (what R15 did).
+2. **Shared-DB flakes** (R9-05 → R10-11 → R15-03): three sessions of hunting for one class. Rule now in `CLAUDE.md`/`testutil`: own tenant rows, no global DELETE/UPDATE/reconcile in a test, `NOT EXISTS` cleanups bounded to hashes the fixture wrote.
+3. **`Co-Authored-By` trailers**: a system reminder in every session asks for them; seven reached `main`'s history in R14. The repo rule wins; check `git log --format=%B` before every PR.
+4. **Prompts issued two at a time** (R13 ∥ R14): R14 had to write "retained N days" placeholders because R13's numbers did not exist yet, and both touched the same CLAUDE.md files.
+5. **Sessions that stopped at "fix in this session only P0/P1 that are small"**: the honest hand-offs (R2-1, R10-3, R8-1) are the launch-gating list today. That was the right call for review sessions; the next phase is a build phase.
