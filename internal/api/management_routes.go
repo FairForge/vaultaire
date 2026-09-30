@@ -296,12 +296,22 @@ func (s *Server) handleMgmtDeleteBucket(w http.ResponseWriter, r *http.Request) 
 	}
 
 	name := chi.URLParam(r, "name")
+	// A name that cannot be a bucket cannot be one of ours; it also keeps
+	// the marker path below inside DATA_PATH/<tenant>/ (no "." / "..").
+	if !validateBucketName(name) {
+		writeManagementError(w, ErrTypeNotFound, "bucket_not_found", "bucket not found", "name")
+		return
+	}
 
 	dataPath := os.Getenv("DATA_PATH")
 	if dataPath == "" {
 		dataPath = "/tmp/vaultaire"
 	}
-	dirPath := filepath.Clean(filepath.Join(dataPath, tenantID, name)) // #nosec G703 — name from URL param, tenant from JWT
+	dirPath, safe := safeBucketPath(dataPath, tenantID, name)
+	if !safe {
+		writeManagementError(w, ErrTypeNotFound, "bucket_not_found", "bucket not found", "name")
+		return
+	}
 
 	if s.db != nil {
 		// The registry decides (post-merge R4-22): this handler used to
