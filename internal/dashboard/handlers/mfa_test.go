@@ -11,6 +11,7 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/auth"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
+	"github.com/go-chi/chi/v5"
 	"github.com/pquerna/otp/totp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -170,7 +171,7 @@ func TestHandleMFADisable_ValidPassword(t *testing.T) {
 	user, _ := authSvc.GetUserByEmail(context.Background(), "mfa@stored.ge")
 	require.NoError(t, authSvc.EnableMFA(context.Background(), user.ID, "SECRET", nil))
 
-	handler := HandleMFADisable(tmpl, authSvc, zap.NewNop())
+	handler := HandleMFADisable(tmpl, authSvc, nil, zap.NewNop())
 
 	form := strings.NewReader("password=password123")
 	req := httptest.NewRequest("POST", "/dashboard/settings/mfa/disable", form)
@@ -193,7 +194,7 @@ func TestHandleMFADisable_WrongPassword(t *testing.T) {
 	user, _ := authSvc.GetUserByEmail(context.Background(), "mfa@stored.ge")
 	require.NoError(t, authSvc.EnableMFA(context.Background(), user.ID, "SECRET", nil))
 
-	handler := HandleMFADisable(tmpl, authSvc, zap.NewNop())
+	handler := HandleMFADisable(tmpl, authSvc, nil, zap.NewNop())
 
 	form := strings.NewReader("password=wrongpassword")
 	req := httptest.NewRequest("POST", "/dashboard/settings/mfa/disable", form)
@@ -219,7 +220,7 @@ func TestHandleMFADisable_MissingPasswordIsRejected(t *testing.T) {
 	user, _ := authSvc.GetUserByEmail(context.Background(), "mfa@stored.ge")
 	require.NoError(t, authSvc.EnableMFA(context.Background(), user.ID, "SECRET", nil))
 
-	handler := HandleMFADisable(tmpl, authSvc, zap.NewNop())
+	handler := HandleMFADisable(tmpl, authSvc, nil, zap.NewNop())
 
 	for _, body := range []string{"", "password="} {
 		req := httptest.NewRequest("POST", "/dashboard/settings/mfa/disable", strings.NewReader(body))
@@ -246,7 +247,7 @@ func TestHandleMFADisable_PasswordlessOAuthUserCannotBypass(t *testing.T) {
 	token, _ := store.Create(context.Background(), dashauth.SessionData{UserID: oauthUser.ID, TenantID: oauthUser.TenantID, Email: oauthUser.Email, Role: "user"}, time.Hour)
 	sd, _ := store.Get(context.Background(), token)
 
-	handler := HandleMFADisable(tmpl, authSvc, zap.NewNop())
+	handler := HandleMFADisable(tmpl, authSvc, nil, zap.NewNop())
 	for _, body := range []string{"", "password=", "password=anything"} {
 		req := httptest.NewRequest("POST", "/dashboard/settings/mfa/disable", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -258,4 +259,58 @@ func TestHandleMFADisable_PasswordlessOAuthUserCannotBypass(t *testing.T) {
 		enabled, _ := authSvc.IsMFAEnabled(context.Background(), oauthUser.ID)
 		assert.True(t, enabled, "a passwordless account cannot disable MFA from the form (body %q)", body)
 	}
+}
+
+// R5-22 / WP-R5-8: dropping the second factor signs out every OTHER device;
+// the device that made the change keeps its session.
+func TestHandleMFADisable_RevokesOtherSessions(t *testing.T) {
+	tmpl := testSettingsTmpl(t)
+	authSvc := newAuthWithMFAUser(t)
+	user, _ := authSvc.GetUserByEmail(context.Background(), "mfa@stored.ge")
+	require.NoError(t, authSvc.EnableMFA(context.Background(), user.ID, "JBSWY3DPEHPK3PXP", nil))
+
+	store := dashauth.NewMemoryStore()
+	sd := dashauth.SessionData{UserID: user.ID, TenantID: user.TenantID, Email: user.Email, Role: "user"}
+	current, _ := store.Create(context.Background(), sd, time.Hour)
+	other, _ := store.Create(context.Background(), sd, time.Hour)
+
+	handler := HandleMFADisable(tmpl, authSvc, store, zap.NewNop())
+	req := httptest.NewRequest("POST", "/dashboard/settings/mfa/disable", strings.NewReader("password=password123"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: dashauth.SessionCookieName, Value: current})
+	cur, _ := store.Get(context.Background(), current)
+	req = req.WithContext(context.WithValue(req.Context(), dashauth.SessionKey, cur))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusSeeOther, w.Code)
+	kept, _ := store.Get(context.Background(), current)
+	assert.NotNil(t, kept, "the issuing device stays signed in")
+	gone, _ := store.Get(context.Background(), other)
+	assert.Nil(t, gone, "every other device is signed out")
+}
+
+// The admin reset answers the htmx form with a fragment and signs the user
+// out everywhere.
+func TestHandleAdminResetMFA_FragmentAndRevokesAllSessions(t *testing.T) {
+	authSvc := newAuthWithMFAUser(t)
+	user, _ := authSvc.GetUserByEmail(context.Background(), "mfa@stored.ge")
+	require.NoError(t, authSvc.EnableMFA(context.Background(), user.ID, "JBSWY3DPEHPK3PXP", nil))
+	store := dashauth.NewMemoryStore()
+	tok, _ := store.Create(context.Background(), dashauth.SessionData{UserID: user.ID, Email: user.Email}, time.Hour)
+
+	handler := HandleAdminResetMFA(authSvc, store, zap.NewNop())
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", user.TenantID)
+	req := httptest.NewRequest("POST", "/admin/tenants/"+user.TenantID+"/reset-mfa", nil)
+	req = req.WithContext(context.WithValue(adminCtx(t), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code, "a fragment, not a redirect")
+	assert.Contains(t, w.Body.String(), "reset")
+	enabled, _ := authSvc.IsMFAEnabled(context.Background(), user.ID)
+	assert.False(t, enabled)
+	s, _ := store.Get(context.Background(), tok)
+	assert.Nil(t, s, "all sessions revoked")
 }

@@ -26,6 +26,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/dashboard"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
+	dashmw "github.com/FairForge/vaultaire/internal/dashboard/middleware"
 	"github.com/FairForge/vaultaire/internal/docs"
 	"github.com/FairForge/vaultaire/internal/email"
 	"github.com/FairForge/vaultaire/internal/engine"
@@ -625,10 +626,15 @@ func (s *Server) setupRoutes() {
 	s.router.Get("/version", s.handleVersion)
 
 	s.logger.Info("Registering auth routes")
-	s.router.Post("/auth/register", s.handleRegister)
-	s.router.Post("/auth/login", s.handleLogin)
-	s.router.Post("/auth/password-reset", s.handlePasswordReset)
-	s.router.Post("/auth/password-reset/complete", s.handlePasswordResetComplete)
+	// The JSON auth routes share the dashboard's per-IP limiter shape
+	// (R11-19: /auth/login had none — a stuffing run against the API was
+	// unthrottled while the web form allowed 5/min). Register is 10/min.
+	authLoginRL := dashmw.NewLoginRateLimiter(5, 5)
+	authRegisterRL := dashmw.NewLoginRateLimiter(10, 10)
+	s.router.Post("/auth/register", authRegisterRL.Limit(http.HandlerFunc(s.handleRegister)).ServeHTTP)
+	s.router.Post("/auth/login", authLoginRL.Limit(http.HandlerFunc(s.handleLogin)).ServeHTTP)
+	s.router.Post("/auth/password-reset", authLoginRL.Limit(http.HandlerFunc(s.handlePasswordReset)).ServeHTTP)
+	s.router.Post("/auth/password-reset/complete", authLoginRL.Limit(http.HandlerFunc(s.handlePasswordResetComplete)).ServeHTTP)
 
 	// Customer docs (1B.3): hub + goldmark-rendered guides; the Swagger API
 	// reference moved from /docs to /docs/api.
@@ -1000,9 +1006,18 @@ func (s *Server) handlePasswordResetComplete(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if _, err := s.auth.CompletePasswordReset(r.Context(), req.Token, req.NewPassword); err != nil {
+	userID, err := s.auth.CompletePasswordReset(r.Context(), req.Token, req.NewPassword)
+	if err != nil {
 		http.Error(w, "Invalid or expired token", http.StatusBadRequest)
 		return
+	}
+	// Same as the dashboard's /reset-password: a reset signs the user out of
+	// every dashboard device (the R5-03 fix was only on the web form — a
+	// stolen session survived an API-driven reset, proven live in R12).
+	if s.sessionStore != nil {
+		if dErr := s.sessionStore.DeleteByUserID(r.Context(), userID); dErr != nil {
+			s.logger.Error("invalidate sessions on api password reset", zap.String("user", userID), zap.Error(dErr))
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"database/sql"
 	"html/template"
 	"net/http"
 	"net/http/httptest"
@@ -168,6 +169,8 @@ func TestHandleAbuseSubmit_Valid(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM abuse_reports WHERE reporter_email`).
+		WithArgs("reporter@test.com").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectExec(`INSERT INTO abuse_reports`).
 		WithArgs("reporter@test.com", "Jane", "malware", "Found malware in bucket", "https://example.com").
 		WillReturnResult(sqlmock.NewResult(1, 1))
@@ -218,4 +221,59 @@ func TestHandleAbuseForm_Renders(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), "<form>")
+}
+
+// Checklist item 9 (R12): the public form drops honeypot submissions
+// silently, bounds every field, and caps reports per address per day.
+func TestHandleAbuseSubmit_HoneypotIsDroppedSilently(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	// No query and no insert may happen.
+	handler := HandleAbuseSubmit(testAbusePublicTemplate(t), db, zap.NewNop())
+	form := url.Values{"reporter_email": {"bot@spam.test"}, "report_type": {"spam"},
+		"description": {"buy crypto"}, "website": {"http://spam.test"}}
+	req := httptest.NewRequest("POST", "/abuse", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code, "the bot sees success")
+	assert.Contains(t, w.Body.String(), "Thank you")
+	require.NoError(t, mock.ExpectationsWereMet(), "nothing was stored")
+}
+
+func TestHandleAbuseSubmit_BoundsAndDailyCap(t *testing.T) {
+	post := func(db *sql.DB, form url.Values) *httptest.ResponseRecorder {
+		handler := HandleAbuseSubmit(testAbusePublicTemplate(t), db, zap.NewNop())
+		req := httptest.NewRequest("POST", "/abuse", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		return w
+	}
+	base := func() url.Values {
+		return url.Values{"reporter_email": {"r@test.com"}, "report_type": {"spam"}, "description": {"x"}}
+	}
+
+	f := base()
+	f.Set("reporter_email", "not an address")
+	assert.Equal(t, http.StatusBadRequest, post(nil, f).Code, "email must parse")
+
+	f = base()
+	f.Set("url", "javascript:alert(1)")
+	assert.Equal(t, http.StatusBadRequest, post(nil, f).Code, "URL must be http(s)")
+
+	f = base()
+	f.Set("reporter_name", strings.Repeat("n", 201))
+	assert.Equal(t, http.StatusBadRequest, post(nil, f).Code, "name bounded")
+
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM abuse_reports WHERE reporter_email`).
+		WithArgs("r@test.com").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(3))
+	w := post(db, base())
+	assert.Equal(t, http.StatusTooManyRequests, w.Code, "fourth report from one address in a day is refused")
+	assert.Contains(t, w.Body.String(), "limit")
+	require.NoError(t, mock.ExpectationsWereMet())
 }

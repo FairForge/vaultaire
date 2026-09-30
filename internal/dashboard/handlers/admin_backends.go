@@ -9,6 +9,7 @@ import (
 	"time"
 
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
+	"github.com/FairForge/vaultaire/internal/dashboard/middleware"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
@@ -128,6 +129,17 @@ func HandleSetPrimary(eng *engine.CoreEngine, db *sql.DB, logger *zap.Logger) ht
 		}
 
 		name := chi.URLParam(r, "name")
+		// Only a registered, general-purpose backend may take every write
+		// (Review R12: this used to accept any string — "r2" on a box with
+		// no r2 driver, tape, the public store).
+		if err := eng.CheckPrimaryEligible(name); err != nil {
+			logger.Warn("primary swap refused", zap.String("backend", name), zap.String("admin", sd.Email), zap.Error(err))
+			audit.Record(r.Context(), db, audit.Entry{UserID: sd.UserID, EventType: "admin", Action: "admin.primary_swap_refused",
+				Resource: "backend:" + name, Error: err, Metadata: map[string]any{"backend": name, "admin": sd.Email}})
+			middleware.SetFlash(w, "error", "Cannot make "+name+" the primary: "+err.Error()+".")
+			http.Redirect(w, r, "/admin/backends", http.StatusSeeOther)
+			return
+		}
 		eng.SetPrimary(name)
 		logger.Info("primary backend changed via admin dashboard",
 			zap.String("backend", name),

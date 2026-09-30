@@ -603,3 +603,40 @@ func TestHandleBucketSettings_DataResidency(t *testing.T) {
 	body := w.Body.String()
 	assert.Contains(t, body, `<span class="residency">eu</span>`)
 }
+
+// Review R12 (mass assignment): the form offers auto/performance/standard/
+// archive; "resilient" (the Lyve tier) reached the row from a crafted POST on
+// a free tenant. It now falls back to auto like any other unknown value.
+func TestHandleUpdateBucketSettings_ResilientNotOfferedByTheForm(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires database")
+	}
+	db := testDashDB(t)
+	defer func() { _ = db.Close() }()
+	cleanupDashBucketData(t, db)
+	defer cleanupDashBucketData(t, db)
+
+	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key, slug)
+		VALUES ('test-dash-tp4', 'Res Co', 'res@test.com', 'VK-tp4', 'SK-tp4', 'res-co') ON CONFLICT DO NOTHING`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO tenant_quotas (tenant_id, storage_limit_bytes, storage_used_bytes, tier)
+		VALUES ('test-dash-tp4', 5368709120, 0, 'free') ON CONFLICT DO NOTHING`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO buckets (tenant_id, name, visibility, tier_preference)
+		VALUES ('test-dash-tp4', 'res-bucket', 'private', 'standard') ON CONFLICT DO NOTHING`)
+	require.NoError(t, err)
+
+	handler := HandleUpdateBucketSettings(testBucketSettingsTemplate(t), db, zap.NewNop())
+	form := url.Values{"visibility": {"private"}, "tier_preference": {"resilient"}}
+	req := injectSessionWithTenant(httptest.NewRequest("POST", "/dashboard/buckets/res-bucket/settings",
+		strings.NewReader(form.Encode())), "test-dash-tp4")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req = injectBucketRoute(req, "res-bucket")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusSeeOther, w.Code)
+
+	var pref string
+	require.NoError(t, db.QueryRow(`SELECT tier_preference FROM buckets WHERE tenant_id = 'test-dash-tp4' AND name = 'res-bucket'`).Scan(&pref))
+	assert.Equal(t, "auto", pref, "a value the form does not offer is not stored")
+}

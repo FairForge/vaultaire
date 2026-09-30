@@ -52,7 +52,7 @@ func TestVerifyEmail_ExpiredToken(t *testing.T) {
 	// Token with wrong secret won't verify.
 	svc2 := NewAuthService(nil, nil)
 	svc2.SetVerifySecret("different-secret")
-	user, _, _, _ := svc2.CreateUserWithTenant(context.Background(), "other@stored.ge", "pass", "X")
+	user, _, _, _ := svc2.CreateUserWithTenant(context.Background(), "other@stored.ge", "password123", "X")
 	token, _ := svc2.GenerateEmailVerifyToken(context.Background(), user.ID)
 
 	err := svc.VerifyEmail(context.Background(), token)
@@ -63,7 +63,7 @@ func TestIsEmailVerified(t *testing.T) {
 	svc := NewAuthService(nil, nil)
 	svc.SetVerifySecret("test-secret-key")
 
-	user, _, _, _ := svc.CreateUserWithTenant(context.Background(), "check@stored.ge", "pass", "X")
+	user, _, _, _ := svc.CreateUserWithTenant(context.Background(), "check@stored.ge", "password123", "X")
 
 	assert.False(t, svc.IsEmailVerified(context.Background(), user.ID))
 

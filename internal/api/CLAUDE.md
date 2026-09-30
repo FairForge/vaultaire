@@ -481,8 +481,17 @@ BOOLEAN (migration 042).
   into `waitlist_signups` (migration 044, `ON CONFLICT (email) DO NOTHING`). Validates via
   `mail.ParseAddress`, lowercases, per-IP sliding-window rate limit (`waitlistLimiter`,
   10/hour). Accepts form-encoded or JSON, plus the optional house intent (`std_tb`, `vault_tb`, `room`;
-  a re-signup with a house replaces the stored one). Nil-DB degrades to 200 (dev). The landing form's
-  `handleWaitlist` JS POSTs here then shows the success modal.
+  a re-signup with a house replaces the stored one) and the attribution (`referrer` — page.js sends
+  `document.referrer`, the `Referer` header is the fallback — `utm_source`, `utm_medium`,
+  `utm_campaign`; `landing.ParseAttribution` keeps the referrer's host only). `source` = utm_source,
+  else the referring host, else `landing` (it was always `landing` — checklist item 7, migration 070).
+  Nil-DB degrades to 200 (dev). The landing form's JS POSTs here then shows the success modal.
+- **`/auth/*` JSON routes** (`server.go`) — `/auth/login`, `/auth/password-reset*` sit behind a 5/min per-IP
+  `dashboard/middleware.LoginRateLimiter`, `/auth/register` behind 10/min (R11-19: the API had no limiter
+  while the web form had one). `/auth/password-reset/complete` revokes every dashboard session of the user
+  like the web form does (R12 — a stolen session survived an API-driven reset). The password floor
+  (`auth.MinPasswordLength`, 8) is enforced in `CreateUserWithTenant`, so the API can no longer accept a
+  one-character password the form refused.
 
 ## Tenant Context
 
@@ -492,7 +501,7 @@ Most handlers use `tenant.FromContext(r.Context())` to get the authenticated ten
 
 - `backend_probes.go` — `buildBackendProbes(getenv, engine)` decides what gets probed: `configuredBackends` still yields the env-driven TCP entries (quotaless, lyve), then entries are upgraded to **authenticated** probes: `local` (always registered; its HealthCheck stats `DATA_PATH`), `idrive`/`geyser`/`r2`/`permafrost` → `engine.CheckDriver` (the driver's signed HeadBucket / authenticated Graph call), `lyve` → `drivers.LyveConsoleClient.CustomerDetails` on the dedicated root pair `LYVE_PROBE_*` (one 403 retry; paced at 60s) — **no fallback to `LYVE_*`** (R7-19: the data-plane key is meant to be a scoped IAM user the console refuses); without the probe pair Lyve gets the driver's signed HeadBucket, and only without a driver the TCP dial. Every registered `idrive-<region>` driver whose region has its own `IDRIVE_<REGION>_*` pair gets a signed HeadBucket with a staggered first run (`backendCheck.initialDelay`, spread over one interval); regions on the primary pair are a known 403 (R7-01) and are skipped. A driver that failed to register at boot is skipped. `probeBackendOnce` bounds every probe with a timeout (15s; 45s for the Lyve console) and records the result in `BackendHealthChecker` (`Failures` is monotonic). Rules: `BackendProbeFailing` excludes `lyve` and `permafrost`, which have their own 15-minute warning rules.
 - **Why**: a TCP dial cannot see a revoked key. Prod's iDrive key was dead for two weeks in Sep 2026 while `/health` said healthy and only Lyve was ever probed.
-- `prom_metrics.go` — `/metrics` is a real Prometheus registry (`initMetrics`, once). Keeps the legacy unlabeled `vaultaire_requests_total` / `vaultaire_errors_total` (the live prod rules reference them; `errorCount` now increments on 5xx in `loggingMiddleware`, it was a never-incremented stub), plus `backendCollector`: `vaultaire_backend_health{backend}`, `_probe_failures_total`, `_probe_latency_seconds`, `_circuit_open{backend}` (engine breaker not closed), `vaultaire_backend_write_failures_total` (engine fail-loudly counter). Go + process collectors included (RSS is `process_resident_memory_bytes`). Rules: `deploy/monitoring/vaultaire-backends.yml`.
+- `prom_metrics.go` — `/metrics` is a real Prometheus registry (`initMetrics`, once); it also registers `dashboard.Collectors()` (dashboard sign-in failures/lockouts, R12). Keeps the legacy unlabeled `vaultaire_requests_total` / `vaultaire_errors_total` (the live prod rules reference them; `errorCount` now increments on 5xx in `loggingMiddleware`, it was a never-incremented stub), plus `backendCollector`: `vaultaire_backend_health{backend}`, `_probe_failures_total`, `_probe_latency_seconds`, `_circuit_open{backend}` (engine breaker not closed), `vaultaire_backend_write_failures_total` (engine fail-loudly counter). Go + process collectors included (RSS is `process_resident_memory_bytes`). Rules: `deploy/monitoring/vaultaire-backends.yml`.
 - `/health` still always returns 200 (HAProxy) — alerting is Prometheus's job, not the health endpoint's.
 - Tests: `backend_probes_test.go`, `prom_metrics_test.go`, `internal/drivers/lyve_console_test.go`.
 

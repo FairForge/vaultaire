@@ -193,3 +193,39 @@ func TestHandleAdminBackends_NilHealthChecker(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), "local")
 }
+
+// Review R12: "Set as Primary" must refuse the public store, tape, the
+// second-copy fleet, region pins and names that are not registered at all
+// (proven live: the primary was set to "r2" on a deployment without r2).
+func TestHandleSetPrimary_RefusesTargetOnlyAndUnknownBackends(t *testing.T) {
+	eng := testEngine(t, "local", "idrive", "r2", "geyser", "idrive-eu-west-1")
+	handler := HandleSetPrimary(eng, nil, zap.NewNop())
+
+	for _, name := range []string{"r2", "geyser", "idrive-eu-west-1", "does-not-exist"} {
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("name", name)
+		req := httptest.NewRequest("POST", "/admin/backends/"+name+"/primary", nil)
+		req = req.WithContext(context.WithValue(adminCtx(t), chi.RouteCtxKey, rctx))
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusSeeOther, w.Code, name)
+		assert.Equal(t, "local", eng.GetPrimary(), "primary must not change for %s", name)
+		var flashed bool
+		for _, c := range w.Result().Cookies() {
+			if c.Name == "flash" {
+				flashed = true
+			}
+		}
+		assert.True(t, flashed, "the admin is told why (%s)", name)
+	}
+
+	// A general-purpose durable backend is still accepted.
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("name", "idrive")
+	req := httptest.NewRequest("POST", "/admin/backends/idrive/primary", nil)
+	req = req.WithContext(context.WithValue(adminCtx(t), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, "idrive", eng.GetPrimary())
+}

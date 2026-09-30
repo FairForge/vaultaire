@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"github.com/DATA-DOG/go-sqlmock"
 	"html/template"
 	"net/http"
 	"net/http/httptest"
@@ -344,4 +345,43 @@ func TestHandleChangeTier_NoDB(t *testing.T) {
 	handler.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+// R10-21 / WP-R10-5: a house tenant's total is the sum of its floors and is
+// written by Stripe; an admin edit of the total or the legacy tier is refused.
+func TestHandleUpdateQuota_RefusedForHouseTenant(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM tenant_floor_quotas`).WithArgs("t-house").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(2))
+
+	handler := HandleUpdateQuota(db, zap.NewNop())
+	req := httptest.NewRequest("POST", "/admin/tenants/t-house/quota", strings.NewReader("storage_limit=100"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req = req.WithContext(withChiParam(adminCtx(t), "id", "t-house"))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusConflict, w.Code)
+	assert.Contains(t, w.Body.String(), "bought a house")
+	require.NoError(t, mock.ExpectationsWereMet(), "no UPDATE was issued")
+}
+
+func TestHandleChangeTier_RefusedForHouseTenant(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM tenant_floor_quotas`).WithArgs("t-house").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+
+	handler := HandleChangeTier(db, zap.NewNop())
+	req := httptest.NewRequest("POST", "/admin/tenants/t-house/tier", strings.NewReader("tier=vault3"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req = req.WithContext(withChiParam(adminCtx(t), "id", "t-house"))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusConflict, w.Code)
+	require.NoError(t, mock.ExpectationsWereMet())
 }

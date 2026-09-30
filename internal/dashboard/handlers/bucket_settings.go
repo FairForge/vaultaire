@@ -19,6 +19,11 @@ import (
 
 const cdnBaseHost = "https://cdn.stored.ge/"
 
+// dashboardTierPreferences are the tier_preference values the bucket settings
+// form offers (templates/customer/bucket_settings.html). The management API
+// additionally accepts "resilient".
+var dashboardTierPreferences = map[string]bool{"auto": true, "performance": true, "standard": true, "archive": true}
+
 func HandleBucketSettings(tmpl *template.Template, db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
@@ -120,11 +125,15 @@ func HandleUpdateBucketSettings(tmpl *template.Template, db *sql.DB, logger *zap
 			return
 		}
 
+		// Only the floors the settings page offers. "resilient" (the Lyve
+		// tier) is not sold from this form; a crafted POST used to set it on
+		// a free tenant (Review R12 mass-assignment check). Unknown values fall
+		// back to auto rather than failing the whole form.
 		tierPref := r.FormValue("tier_preference")
 		if tierPref == "" {
 			tierPref = "auto"
 		}
-		if tierPref != "auto" && tierPref != "performance" && tierPref != "standard" && tierPref != "archive" && tierPref != "resilient" {
+		if !dashboardTierPreferences[tierPref] {
 			tierPref = "auto"
 		}
 

@@ -530,3 +530,6 @@ tbody th { font-family: var(--sans); font-weight: 700; font-size: inherit; text-
 .house-card .card-title { margin-bottom: 0.75rem; }
 .house-fullness { margin-top: 0.75rem; font-weight: 700; color: var(--ink); }
 .house-fullness a { font-weight: 600; margin-left: 0.5rem; white-space: nowrap; }
+
+/* Honeypot (public abuse form): off-screen for people, present for bots. */
+.hp-field{position:absolute;left:-10000px;top:auto;width:1px;height:1px;overflow:hidden}

@@ -3,6 +3,7 @@ package api
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -566,6 +567,11 @@ func (s *Server) handleMgmtCreateKey(w http.ResponseWriter, r *http.Request) {
 
 	key, err := s.auth.GenerateAPIKey(r.Context(), userID, req.Name, opts)
 	if err != nil {
+		if errors.Is(err, auth.ErrKeyLimitReached) {
+			writeManagementError(w, ErrTypeConflict, "key_limit_exceeded",
+				"this plan's API key limit is reached; revoke a key or upgrade", "")
+			return
+		}
 		s.logger.Error("management create key", zap.Error(err))
 		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to create API key", "")
 		return

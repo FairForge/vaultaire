@@ -73,3 +73,21 @@ func TestMFAPendingStore_Peek(t *testing.T) {
 	p = store.Get(token)
 	require.NotNil(t, p)
 }
+
+// R5-15d: expired challenges used to stay in memory until their own token
+// was presented again — an attacker who could pass the first factor grew the
+// store by one entry per attempt forever. Create now sweeps inline.
+func TestMFAPendingStore_SweepsExpiredOnCreate(t *testing.T) {
+	store := NewMFAPendingStore()
+	for i := 0; i < mfaPendingSweepAt; i++ {
+		tok, err := store.Create(MFAPending{UserID: "u"})
+		require.NoError(t, err)
+		store.mu.Lock()
+		store.entries[tok].Expires = time.Now().Add(-time.Second)
+		store.mu.Unlock()
+	}
+	require.Equal(t, mfaPendingSweepAt, store.Len())
+	_, err := store.Create(MFAPending{UserID: "fresh"})
+	require.NoError(t, err)
+	assert.Equal(t, 1, store.Len(), "only the fresh challenge survives the sweep")
+}

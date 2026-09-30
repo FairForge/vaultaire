@@ -85,3 +85,28 @@ func TestHandleAdminWaitlistExport_NoSession(t *testing.T) {
 	h.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusSeeOther, w.Code)
 }
+
+// R10-28 / R11-26: the export is opened in a spreadsheet; a public-form
+// email that starts with = must not become a formula.
+func TestHandleAdminWaitlistExport_FormulaCellsAreEscaped(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectExec(`INSERT INTO audit_logs`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectQuery(`SELECT email, source, created_at, plan_std_tb, plan_vault_tb FROM waitlist_signups`).
+		WillReturnRows(sqlmock.NewRows([]string{"email", "source", "created_at", "plan_std_tb", "plan_vault_tb"}).
+			AddRow(`=HYPERLINK("http://evil.test","click")@r12.test`, "landing", time.Now(), 0, 0).
+			AddRow("ok@example.com", "+not-a-source", time.Now(), 1, 0))
+
+	h := HandleAdminWaitlistExport(db, zap.NewNop())
+	req := httptest.NewRequest("GET", "/admin/waitlist/export", nil).WithContext(adminCtx(t))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.Contains(t, body, `"'=HYPERLINK(""http://evil.test"",""click"")@r12.test"`, "formula cell is prefixed and quoted")
+	assert.Contains(t, body, `'+not-a-source`)
+	assert.NotContains(t, body, "\n=HYPERLINK")
+}

@@ -14,13 +14,14 @@
         <p class="auth-subtitle">If you believe content hosted on stored.ge violates our Acceptable Use Policy, please let us know.</p>
         {{if .Error}}<div class="alert alert-error">{{.Error}}</div>{{end}}
         <form method="POST" action="/abuse">
+            <div class="hp-field" aria-hidden="true"><label for="abuse-website">Website</label><input id="abuse-website" type="text" name="website" tabindex="-1" autocomplete="off"></div>
             <div class="form-group">
                 <label>Your email <span style="color:var(--danger)">*</span></label>
                 <input type="email" name="reporter_email" value="{{.ReporterEmail}}" required>
             </div>
             <div class="form-group">
                 <label>Your name</label>
-                <input type="text" name="reporter_name" value="{{.ReporterName}}">
+                <input type="text" name="reporter_name" value="{{.ReporterName}}" maxlength="200">
             </div>
             <div class="form-group">
                 <label>Report type <span style="color:var(--danger)">*</span></label>
@@ -36,7 +37,7 @@
             </div>
             <div class="form-group">
                 <label>URL of content</label>
-                <input type="url" name="url" value="{{.URL}}" placeholder="https://...">
+                <input type="url" name="url" value="{{.URL}}" placeholder="https://..." maxlength="2048">
             </div>
             <div class="form-group">
                 <label>Description <span style="color:var(--danger)">*</span></label>

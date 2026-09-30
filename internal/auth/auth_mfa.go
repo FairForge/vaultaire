@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"time"
+
 	"github.com/FairForge/vaultaire/internal/audit"
 
 	"golang.org/x/crypto/bcrypt"
@@ -106,6 +108,43 @@ func (a *AuthService) GetMFASecret(_ context.Context, userID string) (string, er
 		return settings.Secret, nil
 	}
 	return "", fmt.Errorf("MFA not enabled for user")
+}
+
+// totpReplayWindow: a TOTP code is accepted once. RFC 6238 §5.2 — "the
+// verifier MUST NOT accept the second attempt of the OTP after the
+// successful validation has been issued for the first OTP". The dashboard
+// used to accept the same six digits again for the rest of the 30 s step
+// (R5-15c, proven live): a shoulder-surfed or intercepted code was reusable.
+const totpReplayWindow = 90 * time.Second
+
+// ConsumeTOTPCode records that code was accepted for userID and reports
+// whether it was fresh. A second call with the same code inside
+// totpReplayWindow returns false; the caller treats that as a failed factor.
+func (a *AuthService) ConsumeTOTPCode(userID, code string) bool {
+	a.mfaMu.Lock()
+	defer a.mfaMu.Unlock()
+	if a.totpUsed == nil {
+		a.totpUsed = make(map[string]totpUse)
+	}
+	now := time.Now()
+	if u, ok := a.totpUsed[userID]; ok && u.code == code && now.Sub(u.at) < totpReplayWindow {
+		return false
+	}
+	// Bound the map: entries older than the window are dead.
+	if len(a.totpUsed) > 4096 {
+		for k, u := range a.totpUsed {
+			if now.Sub(u.at) >= totpReplayWindow {
+				delete(a.totpUsed, k)
+			}
+		}
+	}
+	a.totpUsed[userID] = totpUse{code: code, at: now}
+	return true
+}
+
+type totpUse struct {
+	code string
+	at   time.Time
 }
 
 // ValidateBackupCode checks and consumes a single-use backup code.

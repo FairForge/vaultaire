@@ -32,7 +32,7 @@ Shared helpers in `context.go`: `sessionData(sd, page)` builds the base template
 
 Two handlers:
 - `HandleBucketSettings(tmpl, db, logger)` — GET renders bucket settings page: visibility toggle (private/public-read), CDN URL card with tabbed code examples, cache TTL, CORS origins, **region** (read-only card showing region + display name + EU badge), **storage tier** preference (auto/performance/standard/archive radio buttons). Checks `CanEnablePublicRead(tier)` for archive-tier restriction. Region data: `Region`, `RegionDisplay`, `IsEURegion`. Reads `tier_preference` from `buckets` and passes `TierPreference` to template.
-- `HandleUpdateBucketSettings(tmpl, db, logger)` — POST updates visibility, CORS origins, cache_max_age_secs, and `tier_preference` in `buckets` table. Validates visibility enum, clamps cache to 0–86400, enforces archive-tier restriction via `auth.CanEnablePublicRead()`. Validates `tier_preference` is one of auto/performance/standard/archive (invalid values fall back to auto). Uses flash messages for feedback. Region is NOT updatable.
+- `HandleUpdateBucketSettings(tmpl, db, logger)` — POST updates visibility, CORS origins, cache_max_age_secs, and `tier_preference` in `buckets` table. Validates visibility enum, clamps cache to 0–86400, enforces archive-tier restriction via `auth.CanEnablePublicRead()`. `tier_preference` must be one the form offers — auto/performance/standard/archive (`dashboardTierPreferences`; `resilient` reached the row from a crafted POST on a free tenant, R12) — invalid values fall back to auto. Uses flash messages for feedback. Region is NOT updatable.
 
 Template: `templates/customer/bucket_settings.html` — includes a "Storage Tier" card with 4 radio buttons (Auto, Performance, Standard, Archive) between Region and Visibility cards. Routes: `GET/POST /dashboard/buckets/{name}/settings`.
 
@@ -43,7 +43,7 @@ Three handlers:
 - `HandleGenerateKey(tmpl, authSvc, logger)` — creates key via `auth.GenerateAPIKey()`, shows secret once
 - `HandleRevokeKey(authSvc, logger)` — revokes key via `auth.RevokeAPIKey()`, redirects back
 
-Uses `auth.AuthService` directly (not DB queries) since keys are in-memory + DB-backed.
+Uses `auth.AuthService` directly (not DB queries) since keys are in-memory + DB-backed. The free-tier key cap is enforced by `auth.GenerateAPIKey` (`ErrKeyLimitReached` → the friendly message) for every entry point — the handler's own count included the primary pair minted at signup, so a fresh free account could never generate a key (Review R12, P1).
 
 ## Bandwidth Chart (`bandwidth_chart.go`)
 
@@ -81,8 +81,9 @@ Uses both `*auth.AuthService` (password change, preferences) and `*sql.DB` (comp
 Three customer handlers + one admin handler:
 - `HandleMFASetup(tmpl, authSvc, mfaSvc, logger)` — GET renders QR code, secret, and backup codes. Redirects if already enabled.
 - `HandleMFAEnable(settingsTmpl, authSvc, mfaSvc, logger)` — POST validates TOTP code against pending secret, enables MFA via `authSvc.EnableMFA()`.
-- `HandleMFADisable(settingsTmpl, authSvc, logger)` — POST requires password confirmation, disables MFA via `authSvc.DisableMFA()`.
-- `HandleAdminResetMFA(authSvc, logger)` — POST admin endpoint to reset a user's 2FA.
+- `HandleMFADisable(settingsTmpl, authSvc, sessions, logger)` — POST requires password confirmation, disables MFA via `authSvc.DisableMFA()`, and revokes every OTHER session (R5-22).
+- `HandleAdminResetMFA(authSvc, sessions, logger)` — POST admin endpoint (htmx): resets a user's 2FA, revokes ALL their sessions, answers with a fragment.
+- `mfa_flow.go` — the second factor as ONE flow for both first-factor entry points: `MFAChallenge`/`MFAChallenger` (router.go adapts `dashboard.MFAPendingStore`), `BeginMFAChallenge` (checks `IsMFAEnabled`, stores the challenge, sets the `mfa_pending` cookie, redirects), `Set/ClearMFAPendingCookie`, `LoginEvent`/`RecordLoginEvent` (the `auth.*` audit rows), `ResolveRole`. R5-06: OAuth created the session directly and skipped TOTP.
 
 QR code rendered client-side via `qrcode-generator` CDN library. Backup codes passed as comma-separated hidden field during enable confirmation.
 
@@ -98,7 +99,7 @@ The onboarding card in `dashboard.html` shows a 3-item checklist (bucket, object
 
 **Bucket creation** (`HandleCreateBucket` in `buckets.go`): queries `tenant_quotas` for tier. Free tier tenants with `>= FreeTierLimits.MaxBuckets` existing buckets get a `CreateError` message.
 
-**API key generation** (`HandleGenerateKey` in `apikeys.go`): same pattern — queries tier and key count. Free tier tenants at the limit see `GenerateError`. Signature changed to accept `*sql.DB` as third parameter.
+**API key generation** (`HandleGenerateKey` in `apikeys.go`): the cap lives in `auth.GenerateAPIKey` — free tier = `MaxAPIKeys` ACTIVE keys beyond the primary pair; revoking frees the slot; the dashboard, management API (409 `key_limit_exceeded`) and user API (409) all map `auth.ErrKeyLimitReached` (R12 / WP-R11-6).
 
 **Dashboard upgrade CTA** (`populateStorageUsage` in `overview.go`): sets `ShowUpgradeCTA = true` when tier is "free" and storage usage is >= 80%. The CTA card in `dashboard.html` links to `/dashboard/billing`.
 
@@ -275,11 +276,13 @@ Template: `templates/admin/notifications.html`. Migration: `046_admin_notificati
 Two handlers for the public abuse reporting form (Phase 3.11):
 - `HandleAbuseForm(tmpl, logger)` — GET `/abuse`: renders the public report form using the
   "base" layout (no session required, same pattern as legal pages).
-- `HandleAbuseSubmit(tmpl, db, logger)` — POST `/abuse`: validates reporter email, report type
-  (one of 6 enum values), and description (non-empty, max 5000 chars). Inserts into
-  `abuse_reports` table and calls `CreateNotification` to alert admins. Rate-limited at 5/min
-  per IP via a dedicated `LoginRateLimiter` instance. Re-renders form with `.Error` on
-  validation failure; renders `.Submitted=true` confirmation on success.
+- `HandleAbuseSubmit(tmpl, db, logger)` — POST `/abuse`: honeypot (`website` field, CSS-hidden;
+  filled → confirmation page, nothing stored, one log line), `mail.ParseAddress` e-mail (≤ 320),
+  name ≤ 200, report type (one of 6 enum values), description (non-empty, ≤ 5000), URL ≤ 2048 and
+  http(s) only, then 3 reports per reporter address per 24 h (429). Inserts into `abuse_reports`
+  and calls `CreateNotification` to alert admins. Rate-limited at 5/min per IP via a dedicated
+  `LoginRateLimiter` instance in router.go. Re-renders the form with `.Error` on validation
+  failure; renders `.Submitted=true` on success (checklist item 9, R12).
 
 Helper: `validReportTypes` map for enum validation.
 
@@ -303,6 +306,32 @@ badge-warning/info/success/default.
 
 Templates: `templates/admin/abuse.html` (list), `templates/admin/abuse_detail.html` (detail).
 
+## Admin Audit Trail (`admin_audit.go`)
+
+`HandleAdminAudit` (GET `/admin/audit`) and `HandleAdminAuditExport` (GET `/admin/audit/export`)
+read `audit_logs` through `audit.List` (WP-R11-10, R12 — the page read the `events` table before,
+so "who revoked that key" showed uploads). Filters: `tenant`, `actor` (performed_by), `user`
+(subject), `ip` (client address, exact), `type` (event_type), `action`, keyset `cursor`; 50 rows a
+page. The CSV export walks pages (≤ 200 × 100 rows), formula-escapes every cell (`csv.go`) and
+writes `admin.audit_exported`. Template: `templates/admin/audit.html`. Tests use sqlmock against
+`FROM audit_logs`.
+
+`csv.go` — `csvSafe`/`csvSafeRow`: a cell starting with `=`, `+`, `-`, `@`, tab or CR is prefixed
+with `'` (OWASP CSV injection); used by the waitlist and audit exports.
+
+## Admin Backends (`admin_backends.go`)
+
+`HandleSetPrimary` refuses anything `engine.CheckPrimaryEligible` rejects — an unregistered name,
+r2 (public store), geyser (tape), permafrost/onedrive (second copy), `idrive-<region>` (residency
+pin) — with a flash and an `admin.primary_swap_refused` audit row (Review R12, proven live: the
+primary was set to "r2" on a box without an r2 driver). `local` stays allowed (dev/hub primary).
+
+## Admin Tenants (`tenants.go`)
+
+`HandleUpdateQuota` and `HandleChangeTier` answer 409 for a tenant with `tenant_floor_quotas`
+rows (a house): the total is the sum of the floors and is written by Stripe, so editing it here
+desyncs the ledgers (R10-21 / WP-R10-5). The tier list (`tierLimits`) is the legacy pack ladder.
+
 ## Admin Feature Flags (`admin_flags.go`)
 
 Three handlers for the 1.13 feature-flags page:
@@ -314,7 +343,7 @@ Routes mount in router.go only when `deps.Flags != nil`. Template: `templates/ad
 
 ## OAuth (`oauth.go`)
 
-`HandleOAuthLogin(cfg, logger)` — redirects to the provider consent screen with a state cookie (10-min TTL). `HandleOAuthCallback(cfg, provider, fetchUser, authSvc, sessions, db, logger, renderCreds)` — validates state, exchanges the code, resolves the user via `findOrCreateOAuthUser` (existing OAuth link → existing email match+link → create new account), creates a session. **B2:** `findOrCreateOAuthUser` returns the minted `*auth.APIKey` ONLY for a brand-new account; the callback then calls `renderCreds(w, key, secret)` (wired in router.go to the shared `signupCredsRenderer` reveal-once credentials page) instead of redirecting — existing users still redirect to `/dashboard`. `FetchGoogleUser` / `FetchGithubUser` normalize provider user info (GitHub falls back to `/user/emails` for private emails). Tests: `oauth_test.go` (fake token endpoint via httptest, no real provider).
+`HandleOAuthLogin(cfg, logger)` — redirects to the provider consent screen with a state cookie (10-min TTL). `HandleOAuthCallback(cfg, provider, fetchUser, authSvc, sessions, db, mfa, logger, renderCreds)` — validates state, exchanges the code, resolves the user via `findOrCreateOAuthUser` (existing OAuth link → existing email match+link → create new account); an EXISTING account with TOTP enabled goes through `BeginMFAChallenge` (mfa = the pending store; nil skips) instead of getting a session (R5-06 / WP-R5-2, R12); otherwise creates a session. Success/challenge write `auth.login_succeeded` with `via=oauth:<provider>`. **B2:** `findOrCreateOAuthUser` returns the minted `*auth.APIKey` ONLY for a brand-new account; the callback then calls `renderCreds(w, key, secret)` (wired in router.go to the shared `signupCredsRenderer` reveal-once credentials page) instead of redirecting — existing users still redirect to `/dashboard`. `FetchGoogleUser` / `FetchGithubUser` normalize provider user info (GitHub falls back to `/user/emails` for private emails). Tests: `oauth_test.go` (fake token endpoint via httptest, no real provider).
 
 ## Legacy Handlers
 

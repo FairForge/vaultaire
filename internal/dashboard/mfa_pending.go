@@ -31,6 +31,12 @@ func NewMFAPendingStore() *MFAPendingStore {
 	return &MFAPendingStore{entries: make(map[string]*MFAPending)}
 }
 
+// mfaPendingSweepAt: Create sweeps expired entries whenever the store holds
+// this many, so an attacker replaying the first factor (or a wave of users
+// who never finish the second step) cannot grow it without bound (R5-15d —
+// entries used to be evicted only when their own token was presented).
+const mfaPendingSweepAt = 256
+
 // Create stores a pending MFA challenge and returns a random token.
 func (s *MFAPendingStore) Create(p MFAPending) (string, error) {
 	b := make([]byte, 32)
@@ -43,8 +49,33 @@ func (s *MFAPendingStore) Create(p MFAPending) (string, error) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(s.entries) >= mfaPendingSweepAt {
+		s.sweepLocked(time.Now())
+	}
 	s.entries[token] = &p
 	return token, nil
+}
+
+// Sweep drops expired challenges. Create calls it inline; exported for tests.
+func (s *MFAPendingStore) Sweep() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sweepLocked(time.Now())
+}
+
+func (s *MFAPendingStore) sweepLocked(now time.Time) {
+	for k, p := range s.entries {
+		if now.After(p.Expires) {
+			delete(s.entries, k)
+		}
+	}
+}
+
+// Len is the number of live entries (tests).
+func (s *MFAPendingStore) Len() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.entries)
 }
 
 // Get retrieves and deletes a pending MFA challenge (single use).

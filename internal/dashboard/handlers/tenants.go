@@ -391,6 +391,19 @@ func HandleEnableTenant(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 	}
 }
 
+// hasHouse reports whether the tenant bought a house: its quota lives in
+// tenant_floor_quotas (per floor) and the total is their sum. An admin edit
+// of the total or the legacy tier would desync the two ledgers and be
+// overwritten by the next Stripe event (R10-21 / WP-R10-5), so those edits
+// are refused for house tenants until the page edits floors.
+func hasHouse(ctx context.Context, db *sql.DB, tenantID string) bool {
+	var n int
+	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tenant_floor_quotas WHERE tenant_id = $1`, tenantID).Scan(&n)
+	return n > 0
+}
+
+const houseEditRefused = `<div class="alert alert-error">This tenant bought a house: its quota is the sum of the floors in tenant_floor_quotas and is set by Stripe. Resize the house from the customer's billing page (or SetHouse) — editing the total here would desync the floors.</div>`
+
 // HandleUpdateQuota updates a tenant's storage limit and returns an htmx fragment.
 func HandleUpdateQuota(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -416,6 +429,13 @@ func HandleUpdateQuota(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 
 		if db == nil {
 			http.Error(w, "Database not available", http.StatusInternalServerError)
+			return
+		}
+
+		if hasHouse(r.Context(), db, tenantID) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusConflict)
+			_, _ = fmt.Fprint(w, houseEditRefused)
 			return
 		}
 
@@ -525,6 +545,13 @@ func HandleChangeTier(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 
 		if db == nil {
 			http.Error(w, "Database not available", http.StatusInternalServerError)
+			return
+		}
+
+		if hasHouse(r.Context(), db, tenantID) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusConflict)
+			_, _ = fmt.Fprint(w, houseEditRefused)
 			return
 		}
 

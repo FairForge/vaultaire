@@ -20,7 +20,9 @@ Authentication service for Vaultaire. Handles user registration, login, JWT toke
 ## Critical Methods
 
 - `LoadFromDB(ctx)` — populates in-memory maps from PostgreSQL on startup. Without this, login/S3 auth fails after restart.
-- `CreateUserWithTenant(ctx, email, password, company)` — creates user + tenant + API key + quota row. Persists to 4 tables in order: `users → tenants → api_keys → tenant_quotas`.
+- `CreateUserWithTenant(ctx, email, password, company)` — creates user + tenant + API key + quota row. Persists to 4 tables in order: `users → tenants → api_keys → tenant_quotas`. Enforces `MinPasswordLength` (8, `ErrPasswordTooShort`) for every signup entry point — the web form checked it, `/auth/register` did not (Review R12); OAuth passes "" and gets no hash.
+- `GenerateAPIKey` — enforces the free-tier key cap (`ErrKeyLimitReached`): `usage.FreeTierLimits.MaxAPIKeys` ACTIVE keys beyond the tenant's primary pair (the row registration writes); paid tiers are not capped here. One chokepoint for the dashboard, the management API and the user API (R11-16 / WP-R11-6; the dashboard's own count included the primary and refused every free account — R12 P1).
+- `ConsumeTOTPCode(userID, code)` — TOTP replay guard (RFC 6238 §5.2, R5-15c): the same code is accepted once per 90 s window; the dashboard's `/login/verify-2fa` treats a repeat as a failed factor.
 - `ValidateS3Request(ctx, accessKey)` — returns tenant from `keyIndex` map. Hot path for every S3 request.
 - `SetJWTSecret(secret)` — override default JWT key from `JWT_SECRET` env var.
 - `EnableMFA(ctx, userID, secret, backupCodes)` — enables TOTP 2FA, hashes backup codes, persists to `user_mfa` table.

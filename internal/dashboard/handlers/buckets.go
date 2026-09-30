@@ -123,14 +123,14 @@ func HandleCreateBucket(tmpl *template.Template, db *sql.DB, dataPath string, lo
 		// Validate bucket name (S3-compatible rules).
 		if !bucketNameRe.MatchString(name) {
 			data["CreateError"] = "Invalid bucket name. Use 3-63 lowercase letters, numbers, hyphens, or dots."
-			renderBucketList(w, tmpl, db, sd, data, logger)
+			renderBucketList(w, r, tmpl, db, sd, data, logger)
 			return
 		}
 
 		// Prevent path traversal.
 		if strings.Contains(name, "..") {
 			data["CreateError"] = "Invalid bucket name."
-			renderBucketList(w, tmpl, db, sd, data, logger)
+			renderBucketList(w, r, tmpl, db, sd, data, logger)
 			return
 		}
 
@@ -145,7 +145,7 @@ func HandleCreateBucket(tmpl *template.Template, db *sql.DB, dataPath string, lo
 					"SELECT COUNT(*) FROM buckets WHERE tenant_id = $1", sd.TenantID).Scan(&count)
 				if count >= usage.FreeTierLimits.MaxBuckets {
 					data["CreateError"] = fmt.Sprintf("Free tier allows %d bucket. Upgrade your plan for more.", usage.FreeTierLimits.MaxBuckets)
-					renderBucketList(w, tmpl, db, sd, data, logger)
+					renderBucketList(w, r, tmpl, db, sd, data, logger)
 					return
 				}
 			}
@@ -160,12 +160,12 @@ func HandleCreateBucket(tmpl *template.Template, db *sql.DB, dataPath string, lo
 		}
 		if !drivers.IsValidRegion(region) {
 			data["CreateError"] = "Invalid region."
-			renderBucketList(w, tmpl, db, sd, data, logger)
+			renderBucketList(w, r, tmpl, db, sd, data, logger)
 			return
 		}
 		if !drivers.IDriveRegionAvailable(region) {
 			data["CreateError"] = "Region " + drivers.RegionDisplayName(region) + " is not enabled on this deployment."
-			renderBucketList(w, tmpl, db, sd, data, logger)
+			renderBucketList(w, r, tmpl, db, sd, data, logger)
 			return
 		}
 
@@ -175,13 +175,13 @@ func HandleCreateBucket(tmpl *template.Template, db *sql.DB, dataPath string, lo
 			cleanPath := filepath.Clean(dirPath)
 			if !strings.HasPrefix(cleanPath, filepath.Clean(dataPath)) {
 				data["CreateError"] = "Invalid bucket name."
-				renderBucketList(w, tmpl, db, sd, data, logger)
+				renderBucketList(w, r, tmpl, db, sd, data, logger)
 				return
 			}
 			if err := os.MkdirAll(cleanPath, 0750); err != nil {
 				logger.Error("create bucket directory", zap.Error(err))
 				data["CreateError"] = "Failed to create bucket."
-				renderBucketList(w, tmpl, db, sd, data, logger)
+				renderBucketList(w, r, tmpl, db, sd, data, logger)
 				return
 			}
 		}
@@ -203,7 +203,7 @@ func HandleCreateBucket(tmpl *template.Template, db *sql.DB, dataPath string, lo
 		}
 
 		data["CreateSuccess"] = name
-		renderBucketList(w, tmpl, db, sd, data, logger)
+		renderBucketList(w, r, tmpl, db, sd, data, logger)
 	}
 }
 
@@ -298,10 +298,10 @@ func withRegionPicker(data map[string]any) {
 	data["DefaultRegion"] = drivers.IDriveDefaultRegion(os.Getenv)
 }
 
-func renderBucketList(w http.ResponseWriter, tmpl *template.Template, db *sql.DB, sd *dashauth.SessionData, data map[string]any, logger *zap.Logger) {
+func renderBucketList(w http.ResponseWriter, r *http.Request, tmpl *template.Template, db *sql.DB, sd *dashauth.SessionData, data map[string]any, logger *zap.Logger) {
 	withRegionPicker(data)
 	if db != nil {
-		buckets := listBuckets(context.Background(), db, sd.TenantID)
+		buckets := listBuckets(r.Context(), db, sd.TenantID)
 		data["Buckets"] = buckets
 		data["BucketCount"] = len(buckets)
 	} else {

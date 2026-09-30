@@ -28,7 +28,7 @@ func TestWaitlist_ValidEmail_Inserts(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	mock.ExpectExec(`INSERT INTO waitlist_signups`).
-		WithArgs("alice@example.com", "landing", sqlmock.AnyArg(), sqlmock.AnyArg(), 0, 0, "").
+		WithArgs("alice@example.com", "landing", sqlmock.AnyArg(), sqlmock.AnyArg(), 0, 0, "", "", "", "", "").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
 	s := &Server{db: db, logger: zap.NewNop()}
@@ -55,7 +55,7 @@ func TestWaitlist_Duplicate_IsOK(t *testing.T) {
 
 	// ON CONFLICT DO NOTHING → 0 rows affected, but still a success for the visitor.
 	mock.ExpectExec(`INSERT INTO waitlist_signups`).
-		WithArgs("dup@example.com", "landing", sqlmock.AnyArg(), sqlmock.AnyArg(), 0, 0, "").
+		WithArgs("dup@example.com", "landing", sqlmock.AnyArg(), sqlmock.AnyArg(), 0, 0, "", "", "", "", "").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	s := &Server{db: db, logger: zap.NewNop()}
@@ -81,7 +81,7 @@ func TestWaitlist_NormalizesEmailCase(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	mock.ExpectExec(`INSERT INTO waitlist_signups`).
-		WithArgs("mixed@example.com", "landing", sqlmock.AnyArg(), sqlmock.AnyArg(), 0, 0, "").
+		WithArgs("mixed@example.com", "landing", sqlmock.AnyArg(), sqlmock.AnyArg(), 0, 0, "", "", "", "", "").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
 	s := &Server{db: db, logger: zap.NewNop()}
@@ -116,10 +116,10 @@ func TestWaitlist_CarriesHouseIntent(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 	mock.ExpectExec(`INSERT INTO waitlist_signups`).
-		WithArgs("house@example.com", "landing", sqlmock.AnyArg(), sqlmock.AnyArg(), 6, 1, "v2.oat.noir..box-17-88").
+		WithArgs("house@example.com", "landing", sqlmock.AnyArg(), sqlmock.AnyArg(), 6, 1, "v2.oat.noir..box-17-88", "", "", "", "").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(`INSERT INTO waitlist_signups`).
-		WithArgs("json@example.com", "landing", sqlmock.AnyArg(), sqlmock.AnyArg(), 300, 0, "").
+		WithArgs("json@example.com", "landing", sqlmock.AnyArg(), sqlmock.AnyArg(), 300, 0, "", "", "", "", "").
 		WillReturnResult(sqlmock.NewResult(2, 1))
 
 	s := &Server{db: db, logger: zap.NewNop()}
@@ -139,5 +139,44 @@ func TestWaitlist_CarriesHouseIntent(t *testing.T) {
 	w = httptest.NewRecorder()
 	s.handleWaitlistSignup(w, req)
 	require.Equal(t, http.StatusOK, w.Result().StatusCode)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// Checklist item 7 (R12): `source` used to be the literal "landing" for every
+// row. The campaign label, or else the referring host, is stored instead,
+// with the raw attribution beside it.
+func TestWaitlist_StoresAttribution(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectExec(`INSERT INTO waitlist_signups`).
+		WithArgs("let@example.com", "let", sqlmock.AnyArg(), sqlmock.AnyArg(), 0, 0, "",
+			"lowendtalk.com", "let", "forum", "launch").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	s := &Server{db: db, logger: zap.NewNop()}
+	req := httptest.NewRequest(http.MethodPost, "/api/waitlist",
+		strings.NewReader(url.Values{"email": {"let@example.com"}, "utm_source": {"let"}, "utm_medium": {"forum"},
+			"utm_campaign": {"launch"}, "referrer": {"https://lowendtalk.com/discussion/1"}}.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Forwarded-For", "203.0.113.50")
+	w := httptest.NewRecorder()
+	s.handleWaitlistSignup(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	require.NoError(t, mock.ExpectationsWereMet())
+
+	// JSON body + Referer header fallback: the host becomes the source.
+	mock.ExpectExec(`INSERT INTO waitlist_signups`).
+		WithArgs("reddit@example.com", "www.reddit.com", sqlmock.AnyArg(), sqlmock.AnyArg(), 6, 1, "",
+			"www.reddit.com", "", "", "").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	req = httptest.NewRequest(http.MethodPost, "/api/waitlist",
+		strings.NewReader(`{"email":"reddit@example.com","std_tb":6,"vault_tb":1}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Referer", "https://www.reddit.com/r/DataHoarder/comments/x")
+	req.Header.Set("X-Forwarded-For", "203.0.113.51")
+	w = httptest.NewRecorder()
+	s.handleWaitlistSignup(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
 	require.NoError(t, mock.ExpectationsWereMet())
 }

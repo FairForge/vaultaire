@@ -65,6 +65,7 @@ type AuthService struct {
 	profiles       map[string]*ProfileUpdate // user profiles
 	preferences    map[string]*UserPreferences
 	mfaSettings    map[string]*MFASettings // userID -> MFA config
+	totpUsed       map[string]totpUse      // userID -> last accepted TOTP code (replay guard, R5-15c)
 	mfaMu          sync.RWMutex
 	verifySecret   []byte            // HMAC key for email verification tokens
 	verifyTokens   map[string]string // token -> userID (in-memory lookup)
@@ -84,6 +85,14 @@ type AuthService struct {
 // turned off via SetSignupsEnabled(false). Gating this one function blocks every
 // account-creation path at the source.
 var ErrSignupsDisabled = errors.New("signups are currently disabled")
+
+// MinPasswordLength is the shortest password CreateUserWithTenant accepts.
+const MinPasswordLength = 8
+
+// ErrPasswordTooShort is returned by CreateUserWithTenant for a password
+// shorter than MinPasswordLength (every signup entry point: web form,
+// /auth/register API; OAuth passes no password).
+var ErrPasswordTooShort = errors.New("password must be at least 8 characters")
 
 // Database interface for auth operations
 type Database interface {
@@ -335,6 +344,13 @@ func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password,
 	// Check if user exists
 	if _, exists := a.users[email]; exists {
 		return nil, nil, nil, fmt.Errorf("user already exists")
+	}
+
+	// Password policy lives here, not in the forms: the web form enforced
+	// eight characters while /auth/register accepted one (Review R12). OAuth
+	// accounts pass "" and get no password hash at all.
+	if password != "" && len(password) < MinPasswordLength {
+		return nil, nil, nil, ErrPasswordTooShort
 	}
 
 	// Hash password (empty for OAuth-only users).

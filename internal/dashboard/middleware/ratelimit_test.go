@@ -112,3 +112,24 @@ func TestLoginRateLimit_CleanupRemovesStaleEntries(t *testing.T) {
 	// Cleanup should not panic.
 	rl.Cleanup()
 }
+
+// R1-14: Cleanup had no caller, so every limiter grew one entry per IP for
+// the life of the process. Idle entries are now swept inline as new IPs
+// arrive; the map cannot grow without bound.
+func TestLoginRateLimit_MapIsSweptInline(t *testing.T) {
+	rl := NewLoginRateLimiter(5, 5)
+	for i := 0; i < rateLimitSweepEvery-1; i++ {
+		rl.getLimiter("10.1." + string(rune('0'+i%10)) + "." + string(rune('0'+(i/10)%10)) + string(rune('0'+(i/100)%10)))
+	}
+	// Age every entry past the idle window.
+	rl.mu.Lock()
+	for _, v := range rl.limiters {
+		v.lastSeen = v.lastSeen.Add(-2 * rateLimitIdle)
+	}
+	rl.mu.Unlock()
+	before := rl.Len()
+	rl.getLimiter("203.0.113.9") // the Nth new IP triggers the sweep
+	if rl.Len() >= before {
+		t.Fatalf("expected idle entries to be swept: before=%d after=%d", before, rl.Len())
+	}
+}
