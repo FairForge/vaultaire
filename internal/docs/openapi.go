@@ -224,6 +224,7 @@ func GenerateOpenAPISpec() *OpenAPISpec {
 			{Name: "Objects", Description: "S3 object operations (SigV4)"},
 			{Name: "Auth", Description: "Registration, login and password reset. Public; per-IP rate limited (login and reset 5/min, register 10/min)"},
 			{Name: "Waitlist", Description: "Pre-launch waitlist signup from the landing page. Public; 10 signups per IP per hour"},
+			{Name: "Site", Description: "Cookieless statistics beacon for the public site: named clicks, counted as daily totals with no identifier. Public; 240 pings per IP per hour"},
 			{Name: "User", Description: "The caller's own account: profile, API keys, quota, usage, presigned URLs. Bearer JWT; no rate limiter on this group"},
 			{Name: "Management", Description: "Buckets, keys, usage and GDPR account operations under /api/v1/manage. Bearer JWT, rate limited per tenant, Idempotency-Key honoured on mutations"},
 			{Name: "Webhooks", Description: "Tenant webhook endpoints and their deliveries. Bearer JWT, rate limited per tenant, Idempotency-Key honoured on mutations"},
@@ -685,6 +686,20 @@ func generateAuthPaths() map[string]*PathItem {
 						"application/x-www-form-urlencoded": {Schema: ref("WaitlistSignup")},
 					},
 				}),
+		},
+		"/api/ping": {
+			Post: withBody(publicOp("Site", "Count one named click on the public site", "SitePing",
+				"The landing page's `navigator.sendBeacon` target. Counts the event into the day's cookieless site "+
+					"statistics (page, referring host, campaign labels, country from Cloudflare, device class — totals only, no identifier). "+
+					"Event names come from a closed list (`builder.edit`, `builder.attic`, `builder.share`, `builder.save`, `builder.pack`, "+
+					"`build.view`, `pricing.view`, `calc.move`, `age.scrub`, `copy`, `waitlist.submit`, `cta.register`, `uc.*`, `res.*`); "+
+					"anything else, and any non-browser user agent, is ignored with the same 204 so the page never sees an error.",
+				map[string]Response{
+					"204": {Description: "Counted, or ignored"},
+					"400": jsonResp("`invalid body` (not JSON, or over 2 KB)", ref("SimpleError")),
+					"429": jsonResp("`too many requests`", ref("SimpleError")),
+				}),
+				jsonBody("One event", ref("SitePing"))),
 		},
 	}
 }
@@ -1548,6 +1563,14 @@ func generateJSONSchemas() map[string]Schema {
 			"utm_medium":   str(""),
 			"utm_campaign": str(""),
 		}, "email"),
+
+		"SitePing": object("", map[string]*Schema{
+			"event":        str("Event name from the closed list (required)"),
+			"referrer":     str("document.referrer host, if any"),
+			"utm_source":   str(""),
+			"utm_medium":   str(""),
+			"utm_campaign": str(""),
+		}, "event"),
 
 		// User
 		"UserInfo": object("The account as persisted (GET /api/v1/user)", map[string]*Schema{

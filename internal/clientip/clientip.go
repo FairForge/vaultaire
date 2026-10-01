@@ -113,3 +113,28 @@ func trustedPeer(r *http.Request) string {
 	}
 	return host
 }
+
+// Country returns the ISO 3166-1 alpha-2 code Cloudflare attaches to proxied
+// requests as CF-IPCountry ("XX" unknown, "T1" Tor), upper-cased, or "" when
+// the request did not arrive through Cloudflare's edge or the header is
+// missing, doubled or malformed. Like CF-Connecting-IP it is trusted only
+// behind a Cloudflare peer: anyone can send the header to the origin.
+func Country(r *http.Request) string {
+	if !IsCloudflare(net.ParseIP(trustedPeer(r))) {
+		return ""
+	}
+	vals := r.Header.Values("CF-IPCountry")
+	if len(vals) != 1 {
+		return ""
+	}
+	c := strings.ToUpper(strings.TrimSpace(vals[0]))
+	if len(c) != 2 {
+		return ""
+	}
+	for _, ch := range c {
+		if !(ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9') {
+			return ""
+		}
+	}
+	return c
+}

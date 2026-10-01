@@ -17,6 +17,8 @@ Vocabulary, everywhere a customer reads:
 | opens instantly / back in minutes | latency, staging | hot read / restore |
 | your house, your place | account, tenant | tenant |
 
+The example house tells one story everywhere it appears: **PHOTOS 1 TB** and **PROJECTS 1 TB** downstairs (opened often), **BACKUPS 5 TB** in the attic (kept, rarely opened). The hero terminal lists the same three names as buckets, the hero scene tags two of them, the builder starts with them (`builder.js` `STARTER`) and the social preview draws them (`build.py` `og_page`). The starter is an example, not a plan: only a house the visitor changed, or opened from a link, is reported to the waitlist and to `/register`. Keep the story when adding pieces.
+
 Honesty rules: prices are printed where the thing is; the attic always says "back in minutes"; nothing is deleted by billing; no phone app exists yet, so say "from your laptop, a backup app, or the dashboard".
 
 ## 2. Colour

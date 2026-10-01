@@ -154,6 +154,18 @@ in the api package → `waitlist_signups`, migration 044).
 Both redirect to `/login` without a session; nil-DB degrades to empty/zero. Linked
 from the admin sidebar nav. Template: `templates/admin/waitlist.html`.
 
+## Admin Traffic (`admin_stats.go`)
+
+`HandleAdminStats(tmpl, db, logger)` — GET `/admin/stats` ("Traffic" in the sidebar): the
+cookieless public-site statistics (`internal/sitestats` → `site_stats_daily`, migration 073)
+read back as a 30-day table (views, landing views, distinct visitors, beacon events, waitlist
+signups and tenants created per day), top-N tables (pages, referrers, countries, devices,
+utm_source, utm_campaign, events, waitlist by country) and the all-time funnel waitlist →
+accounts → with a bucket → with an object → paying (`subscription_status = 'active'`).
+Every literal is static so the R9 schema audit prepares it. Nil DB renders the empty page;
+no session redirects to `/login`. Photographed by `TestAdmin_WriteScreenshotFixtures`
+(`make dash-shots`). Template: `templates/admin/stats.html`.
+
 ## Admin Revenue Dashboard (`admin_revenue.go`)
 
 `HandleAdminRevenue(tmpl, db, logger)` — GET `/admin/revenue`: real MRR from three

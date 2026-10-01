@@ -1,0 +1,55 @@
+{{define "title"}}Traffic — stored.ge admin{{end}}
+{{define "content"}}
+<div class="dashboard-header">
+    <h1>Traffic</h1>
+</div>
+<p class="text-muted" style="margin:0 0 1.25rem">Cookieless, last {{.WindowDays}} days. Rendered public pages from browsers (bots excluded), the landing page's beacon events, and what they led to. Daily totals only: no cookie, no identifier, no third party. Visitors are counted from a daily-salted hash that is deleted after two days.</p>
+
+<div class="card-grid">
+    <div class="card"><div class="card-title">Page views</div><div class="card-value">{{.Views}}</div><div class="card-detail">{{.Landing}} on the landing page</div></div>
+    <div class="card"><div class="card-title">Visitor-days</div><div class="card-value">{{.Uniques}}</div><div class="card-detail">distinct visitors, summed per day</div></div>
+    <div class="card"><div class="card-title">Beacon events</div><div class="card-value">{{.Events}}</div><div class="card-detail">builder, pricing, tabs, copies</div></div>
+    <div class="card"><div class="card-title">Waitlist signups</div><div class="card-value">{{.Signups}}</div><div class="card-detail">{{.Accounts}} accounts created</div></div>
+</div>
+
+<div class="card" style="margin-bottom:1.5rem">
+    <div class="card-title" style="margin-bottom:0.75rem">Funnel (all time)</div>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th scope="col">Waitlist</th><th scope="col">Accounts</th><th scope="col">With a bucket</th><th scope="col">With an object</th><th scope="col">Paying</th></tr></thead>
+            <tbody><tr><td>{{.Funnel.Waitlist}}</td><td>{{.Funnel.Accounts}}</td><td>{{.Funnel.WithBucket}}</td><td>{{.Funnel.WithObject}}</td><td>{{.Funnel.Paying}}</td></tr></tbody>
+        </table>
+    </div>
+</div>
+
+<div class="card" style="margin-bottom:1.5rem">
+    <div class="card-title" style="margin-bottom:0.75rem">By day</div>
+    {{if .Days}}
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th scope="col">Day</th><th scope="col">Views</th><th scope="col">Landing</th><th scope="col">Visitors</th><th scope="col">Events</th><th scope="col">Waitlist</th><th scope="col">Accounts</th></tr></thead>
+            <tbody>
+            {{range .Days}}<tr><td>{{.Day}}</td><td>{{.Views}}</td><td>{{.Landing}}</td><td>{{.Uniques}}</td><td>{{.Events}}</td><td>{{.Signups}}</td><td>{{.Accounts}}</td></tr>
+            {{end}}
+            </tbody>
+        </table>
+    </div>
+    {{else}}<p class="text-muted">No traffic recorded yet.</p>{{end}}
+</div>
+
+<div class="card-grid">
+    {{range .Tops}}
+    <div class="card">
+        <div class="card-title" style="margin-bottom:0.5rem">{{.Title}}</div>
+        {{if .Rows}}
+        <div class="table-wrap">
+            <table>
+                <thead><tr><th scope="col">Name</th><th scope="col">Count</th></tr></thead>
+                <tbody>{{range .Rows}}<tr><td>{{.Name}}</td><td>{{.N}}</td></tr>{{end}}</tbody>
+            </table>
+        </div>
+        {{else}}<p class="text-muted">—</p>{{end}}
+    </div>
+    {{end}}
+</div>
+{{end}}

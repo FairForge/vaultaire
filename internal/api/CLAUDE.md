@@ -497,6 +497,18 @@ BOOLEAN (migration 042).
   (+ `ParseHouseIntent`: clamps TB to 0..300, drops rooms that are not share links) = what a visitor
   built in the house, carried onto `waitlist_signups.plan_std_tb/plan_vault_tb/room` and
   `tenants.intent_*` (migration 065). A hint for onboarding/demand reporting; nothing is billed from it.
+  The page only reports a house the visitor changed or opened from a link (`builder.js` `built()`):
+  the starter is an example (photos + projects downstairs, backups in the attic — the story the hero
+  terminal, hero tags and og.png tell too), and until 2026-09-30 every signup carried it as intent.
+  `waitlist_signups.country` (073) keeps the CF-IPCountry code beside the address.
+- **`site_stats.go`** — cookieless statistics for the public site (`internal/sitestats`, migration 073):
+  `siteStatsMiddleware` counts every rendered public page (GET, 200, text/html, `sitestats.PagePath`
+  allowlist, non-bot UA, S3 ListBuckets on `/` excluded) with referring host, utm_*, `clientip.Country`
+  (CF-IPCountry, trusted only behind Cloudflare) and device class, plus a daily-salted visitor hash;
+  `POST /api/ping` (public, 240/IP/h, `pingRL`) is the page's `sendBeacon` target for names from the
+  closed event list (unknown names and bots answer the same 204). One collector, flushed every 30 s and
+  on `Shutdown` after the HTTP drain. Read on `/admin/stats` ("Traffic"). The privacy policy's
+  "Site statistics" bullet and the cookie policy's no-tracking paragraph describe exactly this.
 - **`waitlist.go`** — `POST /api/waitlist` (public, no auth) captures a pre-launch email
   into `waitlist_signups` (migration 044, `ON CONFLICT (email) DO NOTHING`). Validates via
   `mail.ParseAddress`, lowercases, per-IP sliding-window rate limit (`waitlistLimiter`,

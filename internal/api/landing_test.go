@@ -125,3 +125,22 @@ func TestIsS3RootRequest(t *testing.T) {
 		})
 	}
 }
+
+// The page tells one example story everywhere it shows storage: photos and
+// projects downstairs, backups in the attic — the hero terminal's buckets, the
+// hero scene's tags, the builder's starter and its receipt all agree. The
+// beacon for the cookieless site statistics is wired in too.
+func TestLanding_ExampleStory(t *testing.T) {
+	for _, page := range []string{string(landingClosed), string(landingOpen)} {
+		for _, want := range []string{
+			"rclone copy ~/backups stored:backups", "03:00:12 backups", "21:44:08 projects", "09:15:51 photos",
+			"PHOTOS 1 TB", "PROJECTS 1 TB", `data-pack="b"`, "1 dresser of backups", "1 storage box of photos", "$18.98",
+			"navigator.sendBeacon('/api/ping'", "b: 'backups'",
+		} {
+			assert.Contains(t, page, want)
+		}
+		for _, gone := range []string{"stored:archive", "postgres-wal", "$28.94", "1 dresser, 1 storage box"} {
+			assert.NotContains(t, page, gone)
+		}
+	}
+}

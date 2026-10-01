@@ -33,15 +33,21 @@ function run() {
         function tags() { return Array.from(d.querySelectorAll('#room-tags text')).map(function (t) { return t.textContent; }); }
         function pe(t, x, y, el) { el.dispatchEvent(new w.PointerEvent(t, { bubbles: true, clientX: x, clientY: y, pointerId: 1, button: 0, pointerType: 'mouse' })); }
 
-        // ---- starter house: 6 TB downstairs + 1 TB attic at the published rates
+        // ---- starter house: photos + projects (2 TB) downstairs, backups (5 TB) in the attic
         var P = w.__LANDING_PRICES__ || { ground: 4.49, attic: 2.0 };
         ok(pieces() === 6, 'starter has 6 pieces', pieces());
-        ok(total() === money(6 * P.ground + 1 * P.attic), 'starter total', total());
-        ok(/Downstairs\s*6 TB/.test(lines()) && /Attic\s*1 TB\b/.test(lines()), 'receipt has a line per floor', lines());
+        ok(total() === money(2 * P.ground + 5 * P.attic), 'starter total', total());
+        ok(/Downstairs\s*2 TB/.test(lines()) && /Attic\s*5 TB\b/.test(lines()), 'receipt has a line per floor', lines());
+        ok(/box of photos/.test(lines()) && /box of projects/.test(lines()) && /dresser of backups/.test(lines()), 'starter tells the example story', lines());
+        ok(tags().indexOf('BACKUPS 5 TB') >= 0 && tags().indexOf('PHOTOS 1 TB') >= 0, 'starter pieces are labelled', tags().join(','));
+        var h0 = w.sgHouse();
+        ok(h0.std === 0 && h0.vault === 0 && h0.room === '', 'an untouched starter is not reported as a house', JSON.stringify(h0));
 
         // ---- add from the tray, drag it up, price follows the floor
         d.querySelector('.piece-card[data-add="bookcase"]').click();
-        ok(total() === money(16 * P.ground + 1 * P.attic), 'bookcase lands downstairs', total());
+        ok(total() === money(12 * P.ground + 5 * P.attic), 'bookcase lands downstairs', total());
+        var h1 = w.sgHouse();
+        ok(h1.std === 12 && h1.vault === 5 && /^v2\./.test(h1.room), 'sgHouse reports the house once it is edited', JSON.stringify(h1));
         var room = d.getElementById('room'), r = room.getBoundingClientRect(), u = r.height / 115;
         var bc = d.querySelector('#room-items .piece[aria-label^="Bookcase"]'), b = bc.getBoundingClientRect();
         var cx = b.left + b.width / 2, cy = b.top + b.height / 2;
@@ -49,15 +55,15 @@ function run() {
         var midTag = w.getComputedStyle(d.querySelector('#room-tags .tb-tag:last-child rect')).fill;
         pe('pointerup', cx, cy - 40 * u, bc);
         ok(midTag === 'rgb(185, 199, 210)', 'tag turns grey mid-drag', midTag);
-        ok(total() === money(6 * P.ground + 11 * P.attic), 'bookcase priced as attic after drag', total());
-        ok(/Attic\s*11 TB/.test(lines()) && /saves/.test(lines()), 'attic line shows saving', lines());
+        ok(total() === money(2 * P.ground + 15 * P.attic), 'bookcase priced as attic after drag', total());
+        ok(/Attic\s*15 TB/.test(lines()) && /saves/.test(lines()), 'attic line shows saving', lines());
 
         // ---- toolbar: move / open / remove + undo
-        var dr = d.querySelector('#room-items .piece[aria-label^="Dresser"]'); dr.dispatchEvent(new w.FocusEvent('focus'));
+        var dr = d.querySelector('#room-items .piece[aria-label^="Storage box: photos"]'); dr.dispatchEvent(new w.FocusEvent('focus'));
         var mv = d.getElementById('b-move');
         ok(!d.getElementById('b-piece-tools').hidden && mv.textContent === 'to attic', 'toolbar shows "to attic" for a downstairs piece', mv.textContent);
         mv.click();
-        ok(total() === money(1 * P.ground + 16 * P.attic), 'move button re-prices the dresser', total());
+        ok(total() === money(1 * P.ground + 16 * P.attic), 'move button re-prices the box', total());
         ok(d.getElementById('b-move').textContent === 'bring down', 'move button flips to "bring down"');
         d.getElementById('b-open').click();
         ok(/back in minutes/.test(Array.from(d.querySelectorAll('.float-note')).map(function (n) { return n.textContent; }).join(' ')), 'open note for an attic piece');
@@ -71,7 +77,7 @@ function run() {
         ok(pieces() === before, 'undo restores the piece', pieces());
 
         // ---- keyboard: ArrowUp hops a storage piece to the attic, Delete removes
-        var bx = d.querySelector('#room-items .piece[aria-label^="Storage box: 1 TB, downstairs"]');
+        var bx = d.querySelector('#room-items .piece[aria-label^="Storage box: projects"]');
         bx.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
         ok(!/Downstairs/.test(lines()), 'ArrowUp moves the last downstairs box to the attic', lines());
 
@@ -85,7 +91,7 @@ function run() {
         var n0 = pieces();
         d.getElementById('pack-up').click();
         ok(pieces() === n0 + 2 && d.querySelectorAll('#packed .packed-item').length === 0, 'send to attic adds the packed pieces');
-        ok(/1 dresser of videos/.test(lines()) && /storage box of photos/.test(lines()), 'receipt names the labelled pieces', lines());
+        ok(/1 dresser of videos/.test(lines()) && /storage boxes of photos/.test(lines()), 'receipt names the labelled pieces', lines());
         ok(tags().indexOf('PHOTOS 1 TB') >= 0 && tags().indexOf('VIDEOS 5 TB') >= 0, 'tags carry labels', tags().join(','));
         ok(/-p(_|$)/.test(w.localStorage.getItem('sg-room')) && /-v(_|$)/.test(w.localStorage.getItem('sg-room')), 'labels persist in saved state');
 

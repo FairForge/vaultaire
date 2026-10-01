@@ -25,8 +25,8 @@
             mascot:   { w: 16, h: 26, name: 'You', max: 1, alt: 'mascot-wave', anim: 'wave' }
         };
         // what you pack: label key -> [piece, label]; labels ride on pieces, links and the image
-        var LABEL = { p: 'photos', v: 'videos', w: 'projects', e: 'everything' };
-        var PACK = { p: 'box', v: 'dresser', w: 'box', e: 'bookcase' };
+        var LABEL = { p: 'photos', v: 'videos', w: 'projects', e: 'everything', b: 'backups' };
+        var PACK = { p: 'box', v: 'dresser', w: 'box', e: 'bookcase', b: 'dresser' };
         // earlier share links: the pieces they used, and the floor they land on
         Object.keys(P).forEach(function (k) { P[k].k = k; });
         var ALIAS = { shelf: ['bookcase', 'attic'], safe: ['bookcase', 'attic'], lockbox: ['box', 'attic'], fireplace: ['lamp'] };
@@ -39,7 +39,10 @@
             lilac:    ['#c2b3e6', '#d7cdf1', '#9d8ccf']
         };
         var FITS = { midnight: '#1c3445', matcha: '#5f7f5a', oat: '#b59f7c', blush: '#d9828f', lilac: '#8f7cc8', noir: '#2b2b2b' };
-        var STARTER = [['dresser', 36, 80], ['lamp', 56, 70], ['box', 17, 88], ['plant', 74, 80], ['mascot', 94, 77], ['box', 30, 39]];
+        // the example house: the one story the whole page tells. Photos and
+        // projects downstairs (opened often), backups in the attic (kept, rarely
+        // opened); the hero terminal lists the same three names as buckets.
+        var STARTER = [['box', 16, 88, 'p'], ['lamp', 40, 90], ['box', 58, 88, 'w'], ['mascot', 96, 77], ['plant', 113, 80], ['dresser', 30, 31, 'b']];
 
         var store = {
             get: function (k) { try { return window.localStorage.getItem(k); } catch (e) { return null; } },
@@ -67,7 +70,7 @@
             var p = P[k], y = p.flat ? ZONE[zone].floor - 5 : (p.wall ? (zone === 'attic' ? 20 : 74) : ZONE[zone].floor - p.h);
             return settle(mkItem(k, freeX(p, zone, null, l), y, l));
         }
-        function starter() { return STARTER.map(function (s) { return settle(mkItem(s[0], s[1], s[2])); }); }
+        function starter() { return STARTER.map(function (s) { return settle(mkItem(s[0], s[1], s[2], s[3])); }); }
         function rateOf(item) { return PRICE[zoneOf(item)]; }
         function costOf(item) { return P[item.k].tb ? P[item.k].tb * rateOf(item) : 0; }
         function what(item) {
@@ -107,7 +110,7 @@
             try { name = cleanName(decodeURIComponent(parts[3])); } catch (e) { name = ''; }
             var items = [], you = 0;
             parts[4].split('_').forEach(function (t) {
-                var m = /^([a-z]+)-(\d{1,3})-(\d{1,3})(?:-([pvwe]))?$/.exec(t);
+                var m = /^([a-z]+)-(\d{1,3})-(\d{1,3})(?:-([pvweb]))?$/.exec(t);
                 if (!m) return;
                 var k = m[1], zone = null;
                 if (Object.prototype.hasOwnProperty.call(ALIAS, k)) { zone = ALIAS[k][1] || null; k = ALIAS[k][0]; }
@@ -129,6 +132,12 @@
             if (got) state = got;
         })();
         applyVibe();
+        // the starter is an example, not a plan: only a house the visitor changed
+        // (or opened from a link) is reported to the waitlist and to /register
+        function itemsKey(items) { return items.map(function (i) { return i.k + '-' + i.x + '-' + i.y + (i.l ? '-' + i.l : ''); }).join('_'); }
+        var STARTER_KEY = itemsKey(starter());
+        var STARTER_ATTIC = (function () { var n = 0; starter().forEach(function (i) { if (P[i.k].tb && zoneOf(i) === 'attic') n += P[i.k].tb; }); return n; })();
+        function built() { return fromLink || itemsKey(state.items) !== STARTER_KEY; }
 
         // ---- SVG helpers
         function el(tag, attrs) {
@@ -657,9 +666,19 @@
                 ? 'Tip: anything you rarely open can go up to the attic for $__PRICE_VAULT__/TB.'
                 : '';
             // the receipt IS the plan: the register button carries the house along
-            var cta = receipt.querySelector('.r-actions a.btn-primary');
-            if (cta && (cta.getAttribute('href') || '').indexOf('/register') === 0) {
-                cta.setAttribute('href', '/register?std_tb=' + t.ground + '&vault_tb=' + t.attic + '&room=' + encodeURIComponent(encode()));
+            // (once it is the visitor's own; the attribution params already on the
+            // link are kept)
+            var cta = receipt.querySelector('.r-actions a.btn-primary'), href = cta ? (cta.getAttribute('href') || '') : '';
+            if (cta && href.indexOf('/register') === 0) {
+                var qs = new URLSearchParams(href.indexOf('?') >= 0 ? href.slice(href.indexOf('?') + 1) : '');
+                qs.delete('std_tb'); qs.delete('vault_tb'); qs.delete('room');
+                if (built()) { qs.set('std_tb', String(t.ground)); qs.set('vault_tb', String(t.attic)); qs.set('room', encode()); }
+                var q = qs.toString();
+                cta.setAttribute('href', '/register' + (q ? '?' + q : ''));
+            }
+            if (window.sgPing) {
+                if (built()) window.sgPing('builder.edit');
+                if (t.attic !== STARTER_ATTIC) window.sgPing('builder.attic');
             }
             var tb = t.ground + t.attic, meter = document.getElementById('b-meter');
             if (meter) {
@@ -758,6 +777,7 @@
 
         function shareURL() { return window.location.origin + window.location.pathname + '#room=' + encode(); }
         document.getElementById('b-share').addEventListener('click', function () {
+            if (window.sgPing) window.sgPing('builder.share');
             var url = shareURL();
             if (navigator.share) {
                 navigator.share({ title: signText() + ' on stored.ge', url: url }).catch(function () { /* dismissed */ });
@@ -786,6 +806,7 @@
                 copy.innerHTML.replace(/<text[\s\S]*?<\/text>/g, '');
         }
         document.getElementById('b-save').addEventListener('click', function () {
+            if (window.sgPing) window.sgPing('builder.save');
             var cs = getComputedStyle(document.documentElement);
             var wa = cs.getPropertyValue('--wall-a').trim(), wb = cs.getPropertyValue('--wall-b').trim();
             var deep = cs.getPropertyValue('--wall-deep').trim(), fit = cs.getPropertyValue('--fit').trim();
@@ -929,6 +950,7 @@
                     if (addItem(PACK[l], undefined, undefined, zone, l, true)) { n++; last = state.items[state.items.length - 1]; }
                 });
                 if (!n) return;
+                if (window.sgPing) window.sgPing('builder.pack');
                 packed = [];
                 draw();
                 render(null, last);
@@ -945,6 +967,7 @@
 
         // for the waitlist forms: what the visitor built, to store beside the email
         window.sgHouse = function () {
+            if (!built()) return { std: 0, vault: 0, room: '' };
             var t = totals();
             return { std: t.ground, vault: t.attic, room: encode() };
         };

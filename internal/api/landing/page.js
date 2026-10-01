@@ -12,6 +12,36 @@
         } catch (e) { /* attribution is a hint */ }
         return out;
     }
+    // ---- cookieless site statistics (POST /api/ping): one named event, no
+    // identifier, no storage. Nothing is sent when the page is not served over
+    // http(s) (the browser harness runs it from a file).
+    var pinged = {};
+    function ping(name, once) {
+        if (once && pinged[name]) return;
+        pinged[name] = true;
+        try {
+            if (window.location.protocol !== 'http:' && window.location.protocol !== 'https:') return;
+            var a = attribution();
+            var body = JSON.stringify({ event: name, referrer: a.referrer || '', utm_source: a.utm_source || '', utm_medium: a.utm_medium || '', utm_campaign: a.utm_campaign || '' });
+            if (navigator.sendBeacon) { navigator.sendBeacon('/api/ping', new Blob([body], { type: 'application/json' })); return; }
+            fetch('/api/ping', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body, keepalive: true }).catch(function () { /* best-effort */ });
+        } catch (e) { /* statistics never break the page */ }
+    }
+    window.sgPing = function (name) { ping(name, true); };
+    (function () {
+        if (!('IntersectionObserver' in window)) return;
+        var reached = { build: 'build.view', pricing: 'pricing.view' };
+        var io = new IntersectionObserver(function (entries) {
+            entries.forEach(function (en) {
+                if (en.isIntersecting && reached[en.target.id]) { ping(reached[en.target.id], true); io.unobserve(en.target); }
+            });
+        }, { threshold: 0.25 });
+        Object.keys(reached).forEach(function (id) { var el = document.getElementById(id); if (el) io.observe(el); });
+    })();
+    document.querySelectorAll('a[href^="/register"]').forEach(function (a) {
+        a.addEventListener('click', function () { ping('cta.register'); });
+    });
+
     (function () {
         var a = attribution();
         if (!a.utm_source && !a.utm_medium && !a.utm_campaign && !a.referrer) return;
@@ -41,6 +71,7 @@
     document.querySelectorAll('[data-waitlist]').forEach(function (form) {
         form.addEventListener('submit', async function (event) {
             event.preventDefault();
+            ping('waitlist.submit', true);
             var email = form.querySelector('input[name=email]').value;
             try {
                 await fetch('/api/waitlist', {
@@ -57,6 +88,7 @@
     document.querySelectorAll('[data-copy]').forEach(function (btn) {
         btn.addEventListener('click', function () {
             var target = document.getElementById(btn.getAttribute('data-copy'));
+            ping('copy');
             navigator.clipboard.writeText(target.innerText).then(function () {
                 btn.textContent = 'copied';
                 setTimeout(function () { btn.textContent = 'copy'; }, 1500);
@@ -114,9 +146,10 @@
                 document.getElementById('stage-' + i).classList.toggle('active', i === idx);
             });
         }
-        slider.addEventListener('input', function () { render(Number(slider.value)); });
+        slider.addEventListener('input', function () { ping('age.scrub', true); render(Number(slider.value)); });
         document.querySelectorAll('.scrub-presets button').forEach(function (btn) {
             btn.addEventListener('click', function () {
+                ping('age.scrub', true);
                 slider.value = btn.getAttribute('data-day');
                 render(Number(slider.value));
             });
@@ -132,6 +165,7 @@
                 t.setAttribute('aria-selected', t === tab ? 'true' : 'false');
             });
             var key = tab.getAttribute('data-uc');
+            ping('uc.' + key);
             document.querySelectorAll('.uc-panel').forEach(function (p) {
                 p.classList.toggle('active', p.getAttribute('data-panel') === key);
             });
@@ -145,6 +179,7 @@
                 c.classList.toggle('active', c === chip);
             });
             var key = chip.getAttribute('data-res');
+            ping('res.' + key);
             document.querySelectorAll('.res-card').forEach(function (card) {
                 card.classList.toggle('active', card.getAttribute('data-card') === key);
             });
@@ -173,6 +208,6 @@
                 ' TB on tape for <strong>' + money(tb * __PRICE_VAULT_2DP__) + '/mo</strong> billed yearly.';
             document.getElementById('calc-note').innerHTML = note;
         }
-        slider.addEventListener('input', render);
+        slider.addEventListener('input', function () { ping('calc.move', true); render(); });
         render();
     })();

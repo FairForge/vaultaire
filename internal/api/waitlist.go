@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"github.com/FairForge/vaultaire/internal/api/landing"
+	"github.com/FairForge/vaultaire/internal/clientip"
 	"net/http"
 	"net/mail"
 	"strings"
@@ -80,13 +81,13 @@ func (s *Server) handleWaitlistSignup(w http.ResponseWriter, r *http.Request) {
 	// newly built house replaces the old one (the latest plan is the truth).
 	if _, err := s.db.ExecContext(r.Context(), `
 		INSERT INTO waitlist_signups (email, source, ip_address, user_agent, plan_std_tb, plan_vault_tb, room,
-		                              referrer, utm_source, utm_medium, utm_campaign)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		                              referrer, utm_source, utm_medium, utm_campaign, country)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		ON CONFLICT (email) DO UPDATE
 		   SET plan_std_tb = EXCLUDED.plan_std_tb, plan_vault_tb = EXCLUDED.plan_vault_tb, room = EXCLUDED.room
 		 WHERE EXCLUDED.plan_std_tb + EXCLUDED.plan_vault_tb > 0`,
 		email, attr.Source("landing"), ip, r.UserAgent(), intent.StdTB, intent.VaultTB, intent.Room,
-		attr.Referrer, attr.UTMSource, attr.UTMMedium, attr.UTMCampaign); err != nil {
+		attr.Referrer, attr.UTMSource, attr.UTMMedium, attr.UTMCampaign, clientip.Country(r)); err != nil {
 		s.logger.Error("waitlist insert", zap.String("email_hash", emailHash(email)), zap.Error(err))
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save"})
 		return

@@ -850,7 +850,7 @@
     #b-remove { box-shadow: 3px 3px 0 var(--red); }
     #b-remove::after { content: " \00d7"; }
     #b-remove:hover { background: var(--red); }
-    .tb-tag { pointer-events: none; }
+    .tb-tag, .hero-tag { pointer-events: none; }
     .b-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 14px 22px; margin-top: 14px; }
     .swatches { display: flex; align-items: center; gap: 6px; }
     .swatches > span { margin-right: 4px; font-family: var(--pix); font-size: 11px; text-transform: uppercase; color: var(--dim); }

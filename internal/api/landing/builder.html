@@ -14,6 +14,7 @@
                     <button class="chip" type="button" data-pack="p" aria-pressed="false">photos<small>1 TB</small></button>
                     <button class="chip" type="button" data-pack="v" aria-pressed="false">videos<small>5 TB</small></button>
                     <button class="chip" type="button" data-pack="w" aria-pressed="false">projects<small>1 TB</small></button>
+                    <button class="chip" type="button" data-pack="b" aria-pressed="false">backups<small>5 TB</small></button>
                     <button class="chip" type="button" data-pack="e" aria-pressed="false">everything<small>10 TB</small></button>
                 </div>
             </div>
@@ -55,8 +56,8 @@
                 __TRAY__
                 <div class="receipt" id="receipt" data-open="{{if .SignupsOpen}}1{{else}}0{{end}}">
                     <div class="r-head">__CUP__<div style="flex:1"><label for="vault-name">name on the cup</label><input id="vault-name" type="text" maxlength="16" autocomplete="off" spellcheck="false" placeholder="your name"></div></div>
-                    <ul class="r-lines" id="r-lines"><li><span>Downstairs</span><span>6 TB</span><span class="dots"></span><span>$26.94</span></li><li class="sub">1 dresser, 1 storage box</li><li><span>Attic</span><span>1 TB</span><span class="dots"></span><span>$2.00</span></li><li class="sub">1 storage box · saves $2.49/mo vs downstairs</li><li class="muted"><span>decor</span><span>3 pcs</span><span class="dots"></span><span>free</span></li></ul>
-                    <div class="r-total"><small>total / mo, billed yearly</small><span id="r-total">$28.94</span></div>
+                    <ul class="r-lines" id="r-lines"><li><span>Downstairs</span><span>2 TB</span><span class="dots"></span><span>$8.98</span></li><li class="sub">1 storage box of photos, 1 storage box of projects</li><li><span>Attic</span><span>5 TB</span><span class="dots"></span><span>$10.00</span></li><li class="sub">1 dresser of backups · saves $12.45/mo vs downstairs</li><li class="muted"><span>decor</span><span>3 pcs</span><span class="dots"></span><span>free</span></li></ul>
+                    <div class="r-total"><small>total / mo, billed yearly</small><span id="r-total">$18.98</span></div>
                     <p class="r-fine">Annual rates: downstairs is Standard at $__PRICE_STD__/TB, the attic is Vault at $__PRICE_VAULT__/TB. Monthly plans: $__PRICE_STD_MONTHLY__ and $__PRICE_VAULT_MONTHLY__. No meters, no API fees.</p>
                     <p class="r-save" id="r-save">the same 7 TB on AWS S3: $161.00/mo</p>
                     <p class="r-warn" id="r-warn"></p>
@@ -71,4 +72,3 @@
         </div>
     </div>
 </section>
-
