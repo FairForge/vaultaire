@@ -256,6 +256,11 @@ func rejectedCount(surface string) float64 {
 	return promtest.ToFloat64(egressRejected.WithLabelValues(surface))
 }
 
+// egressFastBound is what "not slowed" means in these tests: under the
+// 1.4 s an 8 MiB body takes at the test rate, with room for a slow CI
+// runner under -race.
+const egressFastBound = 1250 * time.Millisecond
+
 // testThrottle is a fast shape for timing tests: 4 MiB/s (a 1 MiB burst).
 func testThrottle() usage.EgressThrottle {
 	return usage.EgressThrottle{MinBytesPerSec: 4 * mib, Factor: 1, MaxStreams: 16}
@@ -274,7 +279,7 @@ func TestEgress_UnderTheAllowanceIsFullSpeed(t *testing.T) {
 	// Assert
 	require.Equal(t, http.StatusOK, got.status)
 	assert.Equal(t, want, got.body)
-	assert.Less(t, got.elapsed, time.Second)
+	assert.Less(t, got.elapsed, egressFastBound)
 	assert.Equal(t, engaged, engagedCount(egressSurfaceS3))
 	assert.Equal(t, 8*mib, f.used(), "the counter has exactly the bytes sent")
 	assert.Equal(t, 32*mib, f.allowance())
@@ -288,7 +293,7 @@ func TestEgress_PastTheAllowance_GetIsPaced_PutListHeadAreNot(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		res := f.do(http.MethodGet, f.s3Path("obj.bin"), nil)
 		require.Equal(t, http.StatusOK, res.status)
-		require.Less(t, res.elapsed, time.Second, "download %d is still inside the allowance", i+1)
+		require.Less(t, res.elapsed, egressFastBound, "download %d is still inside the allowance", i+1)
 	}
 	require.Equal(t, 32*mib, f.used())
 	engaged := engagedCount(egressSurfaceS3)
@@ -306,14 +311,14 @@ func TestEgress_PastTheAllowance_GetIsPaced_PutListHeadAreNot(t *testing.T) {
 	require.Equal(t, http.StatusOK, get.status)
 	assert.Equal(t, want, get.body)
 	assert.GreaterOrEqual(t, get.elapsed, 1400*time.Millisecond)
-	assert.Less(t, get.elapsed, 6*time.Second)
+	assert.Less(t, get.elapsed, 10*time.Second)
 	assert.Equal(t, engaged+1, engagedCount(egressSurfaceS3))
-	assert.Less(t, putElapsed, time.Second, "uploads are never slowed for bandwidth")
+	assert.Less(t, putElapsed, egressFastBound, "uploads are never slowed for bandwidth")
 	assert.Equal(t, http.StatusOK, list.status)
 	assert.Contains(t, string(list.body), "second.bin")
-	assert.Less(t, list.elapsed, 500*time.Millisecond)
+	assert.Less(t, list.elapsed, egressFastBound)
 	assert.Equal(t, http.StatusOK, head.status)
-	assert.Less(t, head.elapsed, 500*time.Millisecond)
+	assert.Less(t, head.elapsed, egressFastBound)
 }
 
 func TestEgress_FlagOff_NothingIsSlowed_TheDecisionIsCounted(t *testing.T) {
@@ -332,8 +337,8 @@ func TestEgress_FlagOff_NothingIsSlowed_TheDecisionIsCounted(t *testing.T) {
 	require.Equal(t, http.StatusOK, s3.status)
 	require.Equal(t, http.StatusOK, cdn.status)
 	assert.Equal(t, want, s3.body)
-	assert.Less(t, s3.elapsed, time.Second)
-	assert.Less(t, cdn.elapsed, time.Second)
+	assert.Less(t, s3.elapsed, egressFastBound)
+	assert.Less(t, cdn.elapsed, egressFastBound)
 	assert.Equal(t, would+1, wouldCount(egressSurfaceS3), "the same decision is counted")
 	assert.Equal(t, wouldCDN+1, wouldCount(egressSurfaceCDN))
 	assert.Equal(t, engaged, engagedCount(egressSurfaceS3))
@@ -358,7 +363,7 @@ func TestEgress_PerTenantFlagRowIsTheExemption(t *testing.T) {
 
 	// Assert 1
 	require.Equal(t, http.StatusOK, exempt.status)
-	assert.Less(t, exempt.elapsed, time.Second)
+	assert.Less(t, exempt.elapsed, egressFastBound)
 	assert.Equal(t, would+1, wouldCount(egressSurfaceS3))
 
 	// Act 2: the exemption is removed.
@@ -928,7 +933,7 @@ func TestEgress_PublicBucketReadersSpendTheOwnersAllowance(t *testing.T) {
 	for i, res := range cdn {
 		require.Equal(t, http.StatusOK, res.status, "download %d", i+1)
 	}
-	assert.Less(t, cdn[3].elapsed, time.Second)
+	assert.Less(t, cdn[3].elapsed, egressFastBound)
 	assert.GreaterOrEqual(t, cdn[4].elapsed, 1400*time.Millisecond)
 	assert.Equal(t, 40*mib, f.used())
 

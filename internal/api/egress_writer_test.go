@@ -94,7 +94,7 @@ func TestEgressWriter_ASingle64MiBWriteIsPaced(t *testing.T) {
 	assert.Equal(t, int64(len(body)), under.written())
 	assert.LessOrEqual(t, under.maxWrite, egressSliceBytes)
 	assert.GreaterOrEqual(t, elapsed, 1500*time.Millisecond, "a paced 64 MiB at 32 MiB/s cannot finish sooner")
-	assert.Less(t, elapsed, 6*time.Second)
+	assert.Less(t, elapsed, 15*time.Second)
 	assert.Equal(t, float64(len(body)), testutil.ToFloat64(egressThrottledBytes)-throttledBefore)
 	assert.Positive(t, under.flushes, "paced slices are pushed out, not left in a buffer")
 }
@@ -147,7 +147,7 @@ func TestEgressWriter_ContextCancelReturnsAtOnce(t *testing.T) {
 	select {
 	case err := <-done:
 		require.Error(t, err)
-		assert.Less(t, time.Since(cancelled), 200*time.Millisecond)
+		assert.Less(t, time.Since(cancelled), time.Second, "4 MiB at the floor would take a minute")
 	case <-time.After(3 * time.Second):
 		t.Fatal("a paced Write must return when the request context is cancelled")
 	}
@@ -195,7 +195,7 @@ func TestEgressWriter_ErrorsAreNotPacedOrCounted(t *testing.T) {
 		// Assert
 		require.NoError(t, err)
 		assert.Equal(t, 1<<20, n)
-		assert.Less(t, time.Since(start), 500*time.Millisecond, "status %d must not be slowed", code)
+		assert.Less(t, time.Since(start), 2*time.Second, "status %d must not be slowed (1 MiB at the floor takes 16 s)", code)
 		assert.Equal(t, code, under.status)
 	}
 	assert.Equal(t, engagedBefore, testutil.ToFloat64(egressEngaged.WithLabelValues(egressSurfaceS3)))

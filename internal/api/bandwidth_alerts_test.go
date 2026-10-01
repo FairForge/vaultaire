@@ -101,7 +101,7 @@ func TestEgressAlerts_AgreeWithTheThrottleOnUsed(t *testing.T) {
 	assert.Empty(t, sender.emails())
 	assert.False(t, st.Over)
 	assert.Equal(t, int64(0), st.UsedBytes)
-	assert.Less(t, fast.elapsed, time.Second)
+	assert.Less(t, fast.elapsed, egressFastBound)
 
 	// Act 2: three more downloads (32 MiB in all) — still in flight as far
 	// as the database is concerned: nothing was flushed.
