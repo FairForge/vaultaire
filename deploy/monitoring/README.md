@@ -25,7 +25,7 @@ it is **not** committed. It lives in `/etc/default/ntfy-bridge` on the server
 | `alertmanager.yml` | `/etc/prometheus/alertmanager.yml` | route → ntfy webhook receiver, send_resolved, critical-inhibits-warning |
 | `ntfy-bridge.py` | `/opt/vaultaire/monitoring/ntfy-bridge.py` | Alertmanager webhook → readable ntfy push (UTF-8-safe JSON publish) |
 | `ntfy-bridge.service` | `/etc/systemd/system/ntfy-bridge.service` | sandboxed systemd unit (DynamicUser) |
-| `vaultaire-backends.yml`, `vaultaire-auth.yml`, `vaultaire-tls.yml`, `vaultaire-synthetic.yml` | `/etc/prometheus/rules/` | alert rules: backend probes / auth failures / origin cert / customer-path canary + retention job (Review R13 — install all four, checklist item 10) |
+| `vaultaire-backends.yml`, `vaultaire-auth.yml`, `vaultaire-tls.yml`, `vaultaire-synthetic.yml`, `vaultaire-egress.yml` | `/etc/prometheus/rules/` | alert rules: backend probes / auth failures / origin cert / customer-path canary + retention job / egress throttle (Review R13 + WP-R10-9 — install all five, checklist item 10) |
 
 ## Install (already done on slc-vaultaire-01, 2026-08-03)
 
@@ -115,6 +115,17 @@ staggered across one 30 s interval — regions running on the primary pair are
 a known 403 and are skipped), and `permafrost` (authenticated Graph call on
 one rotating fleet account; `PermafrostProbeFailing` is a 15-minute warning,
 and `BackendProbeFailing` excludes it).
+
+`vaultaire-egress.yml` — the egress allowance throttle (WP-R10-9): one
+info-level rule, `EgressThrottleActive` (`vaultaire_egress_throttled_tenants > 0`
+for 10 min) — information, not an outage: that many tenants are past their
+monthly allowance and downloading at their capped rate until the 1st (UTC).
+The series (`vaultaire_egress_{throttled_tenants,throttle_engaged_total{surface},would_throttle_total{surface},throttle_rejected_total{surface},throttled_bytes_total}`,
+`internal/api/egress_writer.go`) carry no tenant label; the tenant is in the
+`egress allowance spent` log line and on `/admin/tenants/{id}`. While the
+`egress_throttle` flag is off, `would_throttle_total` is the dry run: it
+counts the responses that would have been paced. Exempt a tenant (the
+synthetic-check tenant, demos) with a per-tenant flag row, flag off.
 
 `vaultaire-auth.yml` — credential-attack signal (Review R11-10, pre-launch
 checklist item 3): `AuthFailuresAgainstRealKey` (critical, >1/s for 5 min

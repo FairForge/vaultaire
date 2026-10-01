@@ -34,11 +34,17 @@ hard cap — a write past it returns a clear quota error until you resize — so
 bill never moves on its own: no meters, no overage charges.
 
 No API/request fees, ever. No retrieval fees. No minimum storage duration on
-Standard; Vault has a 30-day per-object minimum (a third of Wasabi's 90). Egress
-is free up to 0.5× your quota each month; beyond that throughput may be throttled,
-never billed — no surprise egress bills. Vault restores are free up to 1× your quota
-each month — test your restores monthly at no cost — and restores beyond that are
-queued, never billed.
+Standard; Vault has a 30-day per-object minimum (a third of Wasabi's 90).
+
+**What about egress?**
+Egress is never billed — no surprise egress bills. Each month you can download
+__EGRESS_STD__× your Standard quota plus __EGRESS_VAULT__× your Vault quota for free — enough to
+test your restores monthly at no cost. __EGRESS_PAST_LONG__
+__EGRESS_ONE__ Uploads, listings and deletes are never slowed. While you
+are rate-limited, keep to 16 parallel downloads or fewer: more than that are answered
+`503 SlowDown` and your client retries them. Your dashboard shows the allowance, what
+you have used of it, and — if you pass it — the rate and the reset date; adding
+quota raises the allowance within a minute.
 
 **What stays hot on Standard?**
 The Smart schedule: about 15% of your quota lives on hot storage; data idle for 14+
@@ -78,7 +84,7 @@ new revenue buys.
 
 **What if you disappear? / bus factor of one?**
 Three answers: (1) It's standard S3 — `rclone sync` your data out anytime, egress
-is never billed (a full exit past your monthly allowance is throttled, not charged),
+is never billed (a full exit past your monthly allowance is rate-limited, not charged),
 there's no proprietary format and no lock-in. (2) Your data lives on
 established providers that don't depend on us. (3) The core engine is
 [open source](https://github.com/FairForge/vaultaire). Documented wind-down

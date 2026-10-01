@@ -358,7 +358,7 @@ func queryTenantCostData(ctx context.Context, db *sql.DB, logger *zap.Logger) []
 		LEFT JOIN (
 			SELECT tenant_id, SUM(egress_bytes) AS egress
 			FROM bandwidth_usage_daily
-			WHERE date >= date_trunc('month', CURRENT_DATE)
+			WHERE date >= date_trunc('month', NOW() AT TIME ZONE 'UTC')::date
 			GROUP BY tenant_id
 		) bw ON bw.tenant_id = t.id
 		WHERE t.subscription_status = 'active'
@@ -463,7 +463,7 @@ func queryBackendEgress(ctx context.Context, db *sql.DB, logger *zap.Logger) map
 	rows, err := db.QueryContext(ctx, `
 		SELECT backend_name, COALESCE(SUM(egress_bytes), 0)
 		FROM backend_bandwidth_daily
-		WHERE date >= date_trunc('month', CURRENT_DATE)
+		WHERE date >= date_trunc('month', NOW() AT TIME ZONE 'UTC')::date
 		GROUP BY backend_name`)
 	if err != nil {
 		logger.Debug("costs: query backend egress", zap.Error(err))

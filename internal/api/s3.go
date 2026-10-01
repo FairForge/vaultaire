@@ -492,21 +492,14 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 	}
 	r = r.WithContext(ctx)
 
-	// Phase 4.2: check bandwidth limit before data-transfer operations.
-	if tenantID != "" && tenantID != "default" && s.bandwidthTracker != nil {
-		if s3Req.Operation == "GetObject" || s3Req.Operation == "PutObject" || s3Req.Operation == "UploadPart" {
-			if s.bandwidthTracker.IsOverLimit(r.Context(), tenantID) {
-				s.logger.Warn("bandwidth limit exceeded",
-					zap.String("tenant_id", tenantID),
-					zap.String("operation", s3Req.Operation))
-				WriteS3Error(w, ErrSlowDown, r.URL.Path, generateRequestID())
-				return
-			}
-		}
-	}
-
 	// Wrap response writer to count egress bytes for bandwidth tracking.
-	cw := &countingResponseWriter{ResponseWriter: w}
+	// Every byte also lands on the tenant's month counter as it is written
+	// (WP-R10-9), so a response still in flight counts toward the allowance.
+	cw := &countingResponseWriter{ResponseWriter: w, head: r.Method == http.MethodHead}
+	metered := tenantID != "" && tenantID != "default" && s.egress != nil
+	if metered {
+		cw.span = s.egress.span(r.Context(), tenantID)
+	}
 
 	// Install a backend-attribution slot: the engine records which storage
 	// backend actually served this request, and bandwidth tracking below
@@ -525,7 +518,7 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 
 	switch s3Req.Operation {
 	case "GetObject":
-		s.handleGetObject(cw, r, s3Req)
+		s.serveGetObject(cw, r, s3Req, tenantID, metered)
 	case "HeadObject":
 		s.handleHeadObject(cw, r, s3Req)
 	case "PutObject":
@@ -641,9 +634,29 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 	// Record bandwidth for authenticated requests, attributed to the backend
 	// the engine reports having served the bytes ("" if none was touched).
 	if tenantID != "" && tenantID != "default" && s.bandwidthTracker != nil {
-		s.bandwidthTracker.RecordWithBackend(r.Context(), tenantID,
-			common.BackendUsed(r.Context()), ingressBytes, cw.bytesWritten)
+		s.bandwidthTracker.recordResponse(tenantID, common.BackendUsed(r.Context()), ingressBytes, cw)
 	}
+}
+
+// serveGetObject is the one place an object body leaves on the S3 surface
+// (header-signed and presigned alike): past the egress allowance the body is
+// paced through the tenant's token bucket (WP-R10-9). The wrapper goes on
+// here, before the handler, so no path inside it can send around it.
+func (s *Server) serveGetObject(cw *countingResponseWriter, r *http.Request, req *S3Request, tenantID string, metered bool) {
+	if !metered {
+		s.handleGetObject(cw, r, req)
+		return
+	}
+	gw, admitted := s.egress.admit(cw, r, tenantID, egressSurfaceS3)
+	if !admitted {
+		// The one refusal: the tenant is being paced and already has
+		// EGRESS_THROTTLE_MAX_STREAMS paced downloads open.
+		cw.Header().Set("Retry-After", egressRetryAfter)
+		WriteS3Error(cw, ErrSlowDown, r.URL.Path, generateRequestID())
+		return
+	}
+	defer gw.close() // also on a panic: a leaked slot would shrink the guard for good
+	s.handleGetObject(gw, r, req)
 }
 
 // handleGetObject handles S3 GET requests

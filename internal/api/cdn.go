@@ -100,6 +100,33 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A GET sends the object: count its bytes on the tenant's month counter
+	// as they are written and, past the egress allowance, pace them through
+	// the SAME token bucket the tenant's S3 downloads use (WP-R10-9). The
+	// public bucket's readers spend the owner's allowance.
+	if r.Method == http.MethodGet && s.egress != nil {
+		cw := &countingResponseWriter{ResponseWriter: w, span: s.egress.span(ctx, tenantID)}
+		gw, admitted := s.egress.admit(cw, r, tenantID, egressSurfaceCDN)
+		if !admitted {
+			// The stream guard: the tenant is being paced and already has
+			// EGRESS_THROTTLE_MAX_STREAMS paced CDN responses open.
+			w.Header().Set("Retry-After", egressRetryAfter)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":"this account has used its monthly egress allowance and too many rate-limited downloads are in progress; retry shortly"}`))
+			return
+		}
+		// Recorded when the handler returns, however it returns: a reader
+		// that hangs up mid-body used to cost the tenant nothing.
+		defer func() {
+			gw.close()
+			if s.bandwidthTracker != nil {
+				s.bandwidthTracker.recordResponse(tenantID, common.BackendUsed(ctx), 0, cw)
+			}
+		}()
+		w = gw
+	}
+
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Disposition", cdnContentDisposition(forceDownload, contentDisposition, contentType, key))
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", sizeBytes))
@@ -170,7 +197,7 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 				zap.Error(err))
 			return
 		}
-		if s.bandwidthTracker != nil {
+		if s.bandwidthTracker != nil && s.egress == nil {
 			s.bandwidthTracker.RecordWithBackend(ctx, tenantID, common.BackendUsed(ctx), 0, rng.length)
 		}
 		if s.cdnAnalytics != nil {
@@ -188,7 +215,7 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.bandwidthTracker != nil {
+	if s.bandwidthTracker != nil && s.egress == nil {
 		s.bandwidthTracker.RecordWithBackend(ctx, tenantID, common.BackendUsed(ctx), 0, written)
 	}
 	if s.cdnAnalytics != nil {

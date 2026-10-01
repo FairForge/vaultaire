@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/FairForge/vaultaire/internal/common"
@@ -74,19 +75,17 @@ func TestBandwidthTracker_AggregatesByTenantAndDate(t *testing.T) {
 	assert.Equal(t, int64(600), totalEgress)
 }
 
-func TestCheckBandwidthLimit_NilDB(t *testing.T) {
-	// Nil DB should always allow (fail open).
-	bt := NewBandwidthTracker(nil)
-	assert.False(t, bt.IsOverLimit(context.Background(), "tenant-1"))
-}
-
-func TestWriteS3Error_BandwidthExceeded(t *testing.T) {
+// The stream guard's answer (WP-R10-9): AWS's wire shape for SlowDown is a
+// 503 that SDKs retry with backoff. It was a 429 "Monthly bandwidth limit
+// exceeded" refusal of every GET and PUT.
+func TestWriteS3Error_SlowDownIs503(t *testing.T) {
 	w := httptest.NewRecorder()
 	WriteS3Error(w, ErrSlowDown, "/test", "req-1")
 
-	assert.Equal(t, http.StatusTooManyRequests, w.Code)
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
 	assert.Contains(t, w.Body.String(), "<Code>SlowDown</Code>")
-	assert.Contains(t, w.Body.String(), "bandwidth")
+	assert.Contains(t, w.Body.String(), "egress allowance")
+	assert.NotContains(t, w.Body.String(), "bandwidth limit")
 }
 
 // --- Per-backend egress attribution ---
@@ -136,11 +135,11 @@ func TestBandwidthTracker_FlushWritesBackendRows(t *testing.T) {
 
 	// Per-tenant upsert (existing behaviour, all 3 events aggregated).
 	mock.ExpectExec(`INSERT INTO bandwidth_usage_daily`).
-		WithArgs("tenant-1", int64(0), int64(1750), 3).
+		WithArgs("tenant-1", bandwidthDay(time.Now()), int64(0), int64(1750), 3).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	// Per-backend upsert: only the attributed 1500 bytes, single lyve row.
 	mock.ExpectExec(`INSERT INTO backend_bandwidth_daily`).
-		WithArgs("lyve", int64(0), int64(1500), 2).
+		WithArgs("lyve", bandwidthDay(time.Now()), int64(0), int64(1500), 2).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	bt.Flush()

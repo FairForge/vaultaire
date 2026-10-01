@@ -145,10 +145,14 @@ func mockTenantDetailQueries(mock sqlmock.Sqlmock, tenantID string) {
 		WillReturnRows(sqlmock.NewRows([]string{"ingress", "egress", "requests"}).
 			AddRow(int64(0), int64(0), int64(0)))
 
-	mock.ExpectQuery(`SELECT bandwidth_limit_bytes`).
+	// The egress allowance and the month's egress (usage.EgressStatusFromDB).
+	mock.ExpectQuery(`SELECT q.storage_limit_bytes`).
 		WithArgs(tenantID).
-		WillReturnRows(sqlmock.NewRows([]string{"bandwidth_limit_bytes"}).
-			AddRow(nil))
+		WillReturnRows(sqlmock.NewRows([]string{"limit", "override", "std", "vault", "floors"}).
+			AddRow(int64(5368709120), int64(0), int64(0), int64(0), 0))
+	mock.ExpectQuery(`SELECT COALESCE\(SUM\(egress_bytes\), 0\) FROM bandwidth_usage_daily`).
+		WithArgs(tenantID, sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{"sum"}).AddRow(int64(0)))
 
 	mock.ExpectQuery(`SELECT date, COALESCE\(ingress_bytes`).
 		WithArgs(tenantID).
@@ -164,7 +168,7 @@ func TestHandleCustomerDetail_NotFound(t *testing.T) {
 		WithArgs("t-bad").
 		WillReturnRows(sqlmock.NewRows([]string{"name", "email", "plan", "subscription_status", "stripe_customer_id", "stripe_subscription_id", "suspended_at", "created_at"}))
 
-	h := HandleCustomerDetail(testCustomerDetailTemplate(t), db, zap.NewNop())
+	h := HandleCustomerDetail(testCustomerDetailTemplate(t), db, zap.NewNop(), nil)
 	ctx := withChiParam(adminCtx(t), "id", "t-bad")
 	req := httptest.NewRequest("GET", "/admin/support/t-bad", nil).WithContext(ctx)
 	w := httptest.NewRecorder()
@@ -202,7 +206,7 @@ func TestHandleCustomerDetail_LoadsTimeline(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"note", "email", "created_at"}).
 			AddRow("Customer contacted about billing", "admin@stored.ge", time.Now()))
 
-	h := HandleCustomerDetail(testCustomerDetailTemplate(t), db, zap.NewNop())
+	h := HandleCustomerDetail(testCustomerDetailTemplate(t), db, zap.NewNop(), nil)
 	ctx := withChiParam(adminCtx(t), "id", "t-1")
 	req := httptest.NewRequest("GET", "/admin/support/t-1", nil).WithContext(ctx)
 	w := httptest.NewRecorder()

@@ -6,9 +6,12 @@
   "performance": 6.99,
   "founders": 1.00,
   "egress": {
-    "_comment": "Allowances keyed to the quota, per month. Never billed; past the allowance throughput may be throttled (Standard) or restores queue (Vault).",
+    "_comment": "ONE allowance per account per UTC month: standard_free_ratio x the downstairs (Standard) quota + vault_restore_free_ratio x the attic (Vault) quota (internal/usage/egress.go). Never billed. The three sentences below are the ONE wording every page uses for what happens past it (landing, FAQ, rclone guide, terms, llms.txt): downloads are rate-limited by internal/api/egress_meter.go; there is no separate Vault restore queue. Keep them free of quotes, ampersands and angle brackets (they are pasted into HTML and Markdown), and never write that downloads are never refused: the stream guard refuses.",
     "standard_free_ratio": 0.5,
-    "vault_restore_free_ratio": 1.0
+    "vault_restore_free_ratio": 1.0,
+    "past_allowance_short": "then rate-limited — never billed",
+    "past_allowance": "Past the allowance, downloads are rate-limited to about the pace of one more allowance per month until it resets on the 1st (UTC); they are never billed.",
+    "one_allowance": "It is one allowance for the whole account: Standard downloads and Vault restores draw on the same number and the same rate limit, and there is no separate restore queue."
   },
   "competitors": {
     "_asof": "September 2026",

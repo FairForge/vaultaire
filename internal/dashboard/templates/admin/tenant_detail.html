@@ -64,6 +64,7 @@
             <input type="number" name="storage_limit" value="{{.StorageLimitGB}}" min="1" class="form-input-sm">
             <button type="submit" class="btn btn-sm btn-primary">Update</button>
         </div>
+        <div class="card-detail">To exempt a tenant from the throttle, add an <code>egress_throttle</code> row for it on <a href="/admin/flags">Flags</a> (enabled = off).</div>
     </form>
 </div>
 
@@ -104,7 +105,8 @@
             <div class="card-value" style="font-size:1rem">{{.RequestsCount}}</div>
         </div>
     </div>
-    <div class="card-detail">Limit: {{.BandwidthLimitFmt}}</div>
+    <div class="card-detail"><strong>Egress allowance</strong> (this UTC month): {{.EgressFmt}} of {{.EgressAllowanceFmt}} ({{.EgressPct}}%) &middot; {{.EgressState}}{{if .EgressThrottled}} at {{.EgressRateFmt}} until {{.EgressResetFmt}}{{end}}</div>
+    <div class="card-detail">Plan: {{.EgressPlanFmt}} &middot; {{if .EgressOverrideFmt}}Override: {{.EgressOverrideFmt}}{{else}}no override{{end}} &middot; rate past the allowance: {{.EgressRateFmt}}</div>
 
     {{if .HasChartData}}
     <div style="margin-top:1rem">
@@ -136,11 +138,12 @@
         hx-target="#bandwidth-feedback"
         hx-swap="innerHTML">
         <div class="form-row">
-            <label>Bandwidth Limit (GB, 0 = unlimited)</label>
-            <input type="number" name="bandwidth_limit" value="{{.BandwidthLimitGB}}" min="0" class="form-input-sm">
+            <label>Egress allowance override (GB per month, 0 = the plan's allowance)</label>
+            <input type="number" name="bandwidth_limit" value="{{.EgressOverrideGB}}" min="0" class="form-input-sm">
             <button type="submit" class="btn btn-sm btn-primary">Update</button>
         </div>
     </form>
+    <div class="card-detail" style="margin-top:0.5rem">To exempt a tenant from the throttle, add an <code>egress_throttle</code> row for it on <a href="/admin/flags">Flags</a> with the flag off.</div>
 </div>
 
 <div class="card" id="mfa-section">

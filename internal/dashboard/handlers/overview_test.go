@@ -40,7 +40,7 @@ func testOverviewTemplate(t *testing.T) *template.Template {
 
 func TestHandleOverview_NoDB(t *testing.T) {
 	tmpl := testOverviewTemplate(t)
-	handler := HandleOverview(tmpl, nil, zap.NewNop(), "local", nil)
+	handler := HandleOverview(tmpl, nil, zap.NewNop(), "local", nil, nil)
 
 	// Create a session and inject it into the request context.
 	store := dashauth.NewMemoryStore()
@@ -74,7 +74,7 @@ func TestHandleOverview_NoDB(t *testing.T) {
 
 func TestHandleOverview_NoSession(t *testing.T) {
 	tmpl := testOverviewTemplate(t)
-	handler := HandleOverview(tmpl, nil, zap.NewNop(), "local", nil)
+	handler := HandleOverview(tmpl, nil, zap.NewNop(), "local", nil, nil)
 
 	req := httptest.NewRequest("GET", "/dashboard/", nil)
 	w := httptest.NewRecorder()
@@ -187,7 +187,7 @@ func TestUpgradeCTA_StarterTier(t *testing.T) {
 
 func TestCarbonBadge_NoData(t *testing.T) {
 	tmpl := testOverviewTemplate(t)
-	handler := HandleOverview(tmpl, nil, zap.NewNop(), "local", nil)
+	handler := HandleOverview(tmpl, nil, zap.NewNop(), "local", nil, nil)
 
 	req := httptest.NewRequest("GET", "/dashboard/", nil)
 	ctx := context.WithValue(req.Context(), dashauth.SessionKey, &dashauth.SessionData{

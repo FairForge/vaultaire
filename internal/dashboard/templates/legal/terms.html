@@ -45,7 +45,7 @@
     <p>Storage is sold as a quota in whole terabytes at a flat per-terabyte rate (the free tier is 5 GB). Your quota and egress allowance are displayed on your dashboard. There are no overage charges:</p>
     <ul>
         <li>A write that would exceed your quota is refused with a quota error until you resize the quota (up or down, prorated) or delete data. Existing data stays readable.</li>
-        <li>Egress is never billed. Past the monthly allowance keyed to your quota, download throughput may be throttled; archive restores beyond their allowance are queued.</li>
+        <li>Egress is never billed. Your monthly egress allowance is keyed to your quota ({{egress "std"}}× the Standard quota plus {{egress "vault"}}× the Vault quota) and is shown on your dashboard. {{egress "past"}} {{egress "one"}} While an account is rate-limited it may hold a limited number of concurrent downloads; requests beyond that are answered with a retryable error. Uploads, listings and deletions are not rate-limited for bandwidth.</li>
         <li>We may rate-limit management API requests (100 per minute per account).</li>
         <li>We will notify you before taking any action that affects your ability to access stored data.</li>
     </ul>

@@ -115,7 +115,7 @@ func TestHandleTenantList_WithSearch(t *testing.T) {
 // --- Tenant detail tests ---
 
 func TestHandleTenantDetail_NoSession(t *testing.T) {
-	handler := HandleTenantDetail(testAdminTenantDetailTemplate(t), nil, zap.NewNop())
+	handler := HandleTenantDetail(testAdminTenantDetailTemplate(t), nil, zap.NewNop(), nil)
 
 	req := httptest.NewRequest("GET", "/admin/tenants/t-1", nil)
 	w := httptest.NewRecorder()
@@ -126,7 +126,7 @@ func TestHandleTenantDetail_NoSession(t *testing.T) {
 }
 
 func TestHandleTenantDetail_EmptyID(t *testing.T) {
-	handler := HandleTenantDetail(testAdminTenantDetailTemplate(t), nil, zap.NewNop())
+	handler := HandleTenantDetail(testAdminTenantDetailTemplate(t), nil, zap.NewNop(), nil)
 
 	ctx := withChiParam(adminCtx(t), "id", "")
 	req := httptest.NewRequest("GET", "/admin/tenants/", nil)
@@ -138,7 +138,7 @@ func TestHandleTenantDetail_EmptyID(t *testing.T) {
 }
 
 func TestHandleTenantDetail_NoDB(t *testing.T) {
-	handler := HandleTenantDetail(testAdminTenantDetailTemplate(t), nil, zap.NewNop())
+	handler := HandleTenantDetail(testAdminTenantDetailTemplate(t), nil, zap.NewNop(), nil)
 
 	ctx := withChiParam(adminCtx(t), "id", "nonexistent")
 	req := httptest.NewRequest("GET", "/admin/tenants/nonexistent", nil)
@@ -260,7 +260,8 @@ func TestHandleUpdateBandwidthLimit_InvalidInput(t *testing.T) {
 	handler.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "Invalid bandwidth limit")
+	assert.Contains(t, w.Body.String(), "Invalid egress allowance")
+	assert.Contains(t, w.Body.String(), "0 = the plan's allowance")
 }
 
 func TestHandleUpdateBandwidthLimit_NegativeInput(t *testing.T) {
@@ -291,7 +292,7 @@ func TestHandleUpdateBandwidthLimit_NoDB(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 }
 
-func TestHandleUpdateBandwidthLimit_ZeroMeansUnlimited(t *testing.T) {
+func TestHandleUpdateBandwidthLimit_ZeroIsAccepted(t *testing.T) {
 	handler := HandleUpdateBandwidthLimit(nil, zap.NewNop())
 
 	ctx := withChiParam(adminCtx(t), "id", "t-1")
@@ -302,7 +303,7 @@ func TestHandleUpdateBandwidthLimit_ZeroMeansUnlimited(t *testing.T) {
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
-	// NoDB so it'll be 500, but the handler accepts 0 as valid (unlimited).
+	// NoDB so it'll be 500, but the handler accepts 0 as valid (0 = the plan's allowance).
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 }
 

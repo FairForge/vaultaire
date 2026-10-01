@@ -42,6 +42,17 @@ func (s *Server) initMetrics() {
 		reg.MustRegister(dashboard.Collectors()...)
 		reg.MustRegister(retentionDeletedRows, retentionLastRun, retentionRuns)
 		reg.MustRegister(accountDeletionTenants, accountDeletionObjects, accountDeletionLastRun, accountDeletionRuns)
+		// Egress throttle (WP-R10-9). No tenant label on any of them.
+		reg.MustRegister(egressEngaged, egressWouldThrottle, egressRejected, egressThrottledBytes)
+		reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "vaultaire_egress_throttled_tenants",
+			Help: "Tenants past their monthly egress allowance with the egress_throttle flag on (their downloads are paced).",
+		}, func() float64 {
+			if s.egress == nil {
+				return 0
+			}
+			return float64(s.egress.throttledTenants())
+		}))
 		if s.synthetic != nil {
 			reg.MustRegister(newSyntheticCollector(s.synthetic))
 		}

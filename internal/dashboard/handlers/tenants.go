@@ -151,7 +151,7 @@ func usageBarClass(pct int) string {
 }
 
 // HandleTenantDetail renders the admin tenant detail page.
-func HandleTenantDetail(tmpl *template.Template, db *sql.DB, logger *zap.Logger) http.HandlerFunc {
+func HandleTenantDetail(tmpl *template.Template, db *sql.DB, logger *zap.Logger, eg usage.EgressStatusReader) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
 		if sd == nil {
@@ -172,7 +172,7 @@ func HandleTenantDetail(tmpl *template.Template, db *sql.DB, logger *zap.Logger)
 
 		data := sessionData(sd, "admin-tenants")
 		withCSRF(r.Context(), data)
-		if !loadTenantDetail(r.Context(), db, tenantID, data, logger) {
+		if !loadTenantDetail(r.Context(), db, eg, tenantID, data, logger) {
 			http.NotFound(w, r)
 			return
 		}
@@ -198,7 +198,7 @@ var availableTiers = []tierOption{
 	{"vault36", "Vault36 (36 TB)"},
 }
 
-func loadTenantDetail(ctx context.Context, db *sql.DB, tenantID string, data map[string]any, logger *zap.Logger) bool {
+func loadTenantDetail(ctx context.Context, db *sql.DB, eg usage.EgressStatusReader, tenantID string, data map[string]any, logger *zap.Logger) bool {
 	var name, email, plan, subStatus string
 	var stripeCustomerID, stripeSubID sql.NullString
 	var suspendedAt sql.NullTime
@@ -266,17 +266,9 @@ func loadTenantDetail(ctx context.Context, db *sql.DB, tenantID string, data map
 	data["BandwidthTotalFmt"] = formatBytes(ingress + egress)
 	data["RequestsCount"] = requests
 
-	// Bandwidth limit.
-	var bwLimitBytes sql.NullInt64
-	_ = db.QueryRowContext(ctx,
-		`SELECT bandwidth_limit_bytes FROM tenant_quotas WHERE tenant_id = $1`, tenantID).Scan(&bwLimitBytes)
-	if bwLimitBytes.Valid && bwLimitBytes.Int64 > 0 {
-		data["BandwidthLimitFmt"] = formatBytes(bwLimitBytes.Int64)
-		data["BandwidthLimitGB"] = bwLimitBytes.Int64 / (1024 * 1024 * 1024)
-	} else {
-		data["BandwidthLimitFmt"] = "Unlimited"
-		data["BandwidthLimitGB"] = int64(0)
-	}
+	// Egress allowance: used / allowance / override / state, from the same
+	// definition and counter the throttle uses (WP-R10-9).
+	populateEgress(ctx, db, eg, tenantID, data)
 
 	days, _ := QueryBandwidthDays(ctx, db, tenantID)
 	if len(days) > 0 {
@@ -463,8 +455,11 @@ func HandleUpdateQuota(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 	}
 }
 
-// HandleUpdateBandwidthLimit sets or clears a tenant's bandwidth limit.
-// A value of 0 means unlimited.
+// HandleUpdateBandwidthLimit sets or clears a tenant's egress-allowance
+// override (tenant_quotas.bandwidth_limit_bytes). 0 clears it: the tenant is
+// back on the plan's allowance (the house, or half the single quota). It is
+// not "unlimited" — exempting a tenant from the throttle is a per-tenant
+// egress_throttle flag row (/admin/flags).
 func HandleUpdateBandwidthLimit(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
@@ -483,7 +478,7 @@ func HandleUpdateBandwidthLimit(db *sql.DB, logger *zap.Logger) http.HandlerFunc
 		if err != nil || limitGB < 0 {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusBadRequest)
-			_, _ = fmt.Fprint(w, `<div class="alert alert-error">Invalid bandwidth limit. Enter a non-negative number in GB (0 = unlimited).</div>`)
+			_, _ = fmt.Fprint(w, `<div class="alert alert-error">Invalid egress allowance. Enter a non-negative number in GB (0 = the plan's allowance).</div>`)
 			return
 		}
 
@@ -501,23 +496,23 @@ func HandleUpdateBandwidthLimit(db *sql.DB, logger *zap.Logger) http.HandlerFunc
 		if _, err := db.ExecContext(r.Context(),
 			`UPDATE tenant_quotas SET bandwidth_limit_bytes = $1, updated_at = NOW() WHERE tenant_id = $2`,
 			limitBytes, tenantID); err != nil {
-			logger.Error("update bandwidth limit", zap.String("tenant_id", tenantID), zap.Error(err))
-			http.Error(w, "Failed to update bandwidth limit", http.StatusInternalServerError)
+			logger.Error("update egress allowance override", zap.String("tenant_id", tenantID), zap.Error(err))
+			http.Error(w, "Failed to update egress allowance", http.StatusInternalServerError)
 			return
 		}
 
 		audit.Record(r.Context(), db, audit.Entry{UserID: sd.UserID, TenantID: tenantID, EventType: "admin", Action: "admin.tenant_bandwidth_set", Resource: "tenant:" + tenantID,
 			Metadata: map[string]any{"bandwidth_limit_bytes": limitBytes}})
-		logger.Info("bandwidth limit updated",
+		logger.Info("egress allowance override updated",
 			zap.String("tenant_id", tenantID),
 			zap.Int64("limit_gb", limitGB),
 			zap.String("by", sd.Email))
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if limitGB == 0 {
-			_, _ = fmt.Fprint(w, `<div class="alert alert-success">Bandwidth limit removed (unlimited).</div>`)
+			_, _ = fmt.Fprint(w, `<div class="alert alert-success">Override removed: this tenant is on its plan's egress allowance. The throttle picks it up within a minute.</div>`)
 		} else {
-			_, _ = fmt.Fprintf(w, `<div class="alert alert-success">Bandwidth limit updated to %s/month.</div>`, formatBytes(*limitBytes))
+			_, _ = fmt.Fprintf(w, `<div class="alert alert-success">Egress allowance override set to %s/month. The throttle picks it up within a minute.</div>`, formatBytes(*limitBytes))
 		}
 	}
 }

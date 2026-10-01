@@ -81,6 +81,7 @@ type Server struct {
 	sessionStore       dashauth.SessionStore
 	bandwidthTracker   *BandwidthTracker
 	bandwidthAlerter   *BandwidthAlerter
+	egress             *egressMeter // per-tenant month egress counter + throttle (WP-R10-9)
 	googleOAuth        *oauth2.Config
 	githubOAuth        *oauth2.Config
 	mfaService         *auth.MFAService
@@ -184,6 +185,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	s.flags.Register(flagSmartDemotion, false)
 	s.flags.Register(flagQuotaCheckout, false)
 	s.flags.Register(flagHouseOverview, false)
+	s.flags.Register(flagEgressThrottle, false)
 	if err := s.flags.Refresh(context.Background()); err != nil {
 		logger.Warn("initial feature flag refresh failed — serving in-code defaults until the background refresh succeeds",
 			zap.Error(err))
@@ -264,6 +266,12 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	s.bandwidthTracker = NewBandwidthTracker(s.db)
 	s.bandwidthTracker.SetLogger(logger)
 	s.bandwidthTracker.StartFlusher(context.Background(), 5*time.Second)
+
+	// Egress allowance enforcement (WP-R10-9): one live month counter per
+	// tenant and the throttle past the allowance. The egress_throttle flag
+	// (default OFF) decides whether a tenant past it is paced or only counted.
+	s.egress = newEgressMeter(s.db, egressThrottleFromEnv(os.Getenv, logger),
+		func(tenantID string) bool { return s.flags.Enabled(flagEgressThrottle, tenantID) }, logger)
 
 	// CDN analytics tracker — buffers CDN access events and flushes to DB.
 	s.cdnAnalytics = NewCDNAnalyticsTracker(s.db)
@@ -459,6 +467,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// Bandwidth threshold alerter (Phase 4.3). Active whenever a DB is present;
 	// the alerter skips tenants with no bandwidth_limit_bytes.
 	s.bandwidthAlerter = NewBandwidthAlerter(s.db, logger)
+	s.bandwidthAlerter.SetEgressReader(s.egress)
 
 	// Base URL for OAuth callbacks and email links.
 	baseURL := os.Getenv("VAULTAIRE_BASE_URL")
@@ -759,6 +768,7 @@ func (s *Server) setupRoutes() {
 		Flags:         s.flags,
 		Quotas:        houseQuotas(s.quotaManager),
 		Account:       s.accountSvc,
+		Egress:        s.egress,
 	})
 
 	s.logger.Info("Registering management API routes")
@@ -1312,8 +1322,20 @@ func (s *Server) Start() error {
 // matters: drain first so in-flight requests can't record behind the flush.
 func (s *Server) Shutdown(ctx context.Context) error {
 	err := s.httpServer.Shutdown(ctx)
+	s.flushTrackers(ctx)
+	return err
+}
 
+// flushTrackers writes out everything the buffered trackers hold. Egress
+// first: a response still open when the drain ended has not recorded its
+// bytes yet, so the live counter's unrecorded bytes are handed to the
+// bandwidth tracker before it flushes — otherwise the restarted process
+// would reload a month counter short by every download in flight (WP-R10-9).
+func (s *Server) flushTrackers(ctx context.Context) {
 	if s.bandwidthTracker != nil {
+		if s.egress != nil {
+			s.egress.drainUnrecorded(s.bandwidthTracker)
+		}
 		s.bandwidthTracker.Flush()
 	}
 	if s.cdnAnalytics != nil {
@@ -1327,8 +1349,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 			s.logger.Warn("site stats flush on shutdown", zap.Error(ferr))
 		}
 	}
-
-	return err
 }
 
 func (s *Server) GetRouter() chi.Router {

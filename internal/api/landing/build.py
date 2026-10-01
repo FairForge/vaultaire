@@ -87,6 +87,8 @@ PRICE_TOKENS = {
     # Egress allowances are data, not a digit borrowed from the AWS multiple (R14-09).
     '__EGRESS_STD__': f"{P['egress']['standard_free_ratio']:g}",
     '__EGRESS_VAULT__': f"{P['egress']['vault_restore_free_ratio']:g}",
+    # What happens past the allowance: one wording for every page (WP-R10-9).
+    '__EGRESS_PAST__': P['egress']['past_allowance_short'],
     '__PRICES_ASOF__': P['competitors']['_asof'],
 }
 

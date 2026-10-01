@@ -266,7 +266,8 @@ curl -X PUT https://stored.ge/my-first-bucket/hello.txt \
         <div class="card-title">{{if .HouseScene}}Egress This Month{{else}}Bandwidth This Month{{end}}</div>
         <div class="card-value">{{if .HouseScene}}{{.EgressFmt}}{{else}}{{.BandwidthTotalFmt}}{{end}}</div>
         {{if .EgressAllowanceFmt}}<div class="usage-bar"><div class="usage-bar-fill {{.EgressBarClass}}" style="width: {{.EgressPct}}%"></div></div>
-        <div class="card-detail">{{.EgressPct}}% of {{.EgressAllowanceFmt}} free this month, then slower &middot; never billed</div>
+        {{if .EgressThrottled}}<div class="card-detail">All {{.EgressAllowanceFmt}} of this month's egress allowance is used: downloads are rate-limited to {{.EgressRateFmt}} until {{.EgressResetFmt}} (UTC) &middot; never billed &middot; <a href="/dashboard/billing">add quota</a> to raise it</div>
+        {{else}}<div class="card-detail">{{.EgressPct}}% of {{.EgressAllowanceFmt}} free this month, then rate-limited to {{.EgressRateFmt}} &middot; never billed</div>{{end}}
         {{else}}<div class="card-detail">{{.IngressFmt}} in / {{.EgressFmt}} out</div>{{end}}
     </div>
     <div class="card">

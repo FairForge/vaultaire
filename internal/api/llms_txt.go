@@ -18,8 +18,14 @@ const llmsTxtTemplate = `# stored.ge API Reference
 > S3-compatible object storage, sold as a whole-TB quota at a flat rate:
 > Standard $%s/TB/mo annual ($%s monthly), Vault archive $%s/TB/mo annual
 > ($%s monthly, $%s monthly minimum), pin-hot add-on $%s/TB/mo. 5 GB free,
-> no card. No API, request or retrieval fees; egress is never billed
-> (Standard: free up to %s× your quota per month, then may be throttled).
+> no card. No API, request or retrieval fees; egress is never billed.
+> Free egress per month: %s× the Standard quota + %s× the Vault quota.
+> %s
+> %s
+> While rate-limited, more than 16 parallel downloads are answered 503
+> SlowDown (retryable). GET /api/v1/user/usage reports egress_allowance,
+> egress_used, egress_throttled, egress_rate_limit_bytes_per_sec and
+> egress_resets_at.
 
 ## Authentication
 
@@ -96,11 +102,14 @@ GET /llms.txt        this file
 func llmsTxtBody() string {
 	p := landing.Get()
 	money := func(v float64) string { return strings.TrimSuffix(fmt.Sprintf("%.2f", v), ".00") }
-	ratio := strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.2f", p.Egress.StandardFreeRatio), "0"), ".")
+	ratio := func(v float64) string {
+		return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.2f", v), "0"), ".")
+	}
 	return fmt.Sprintf(llmsTxtTemplate,
 		money(p.Standard.Annual), money(p.Standard.Monthly),
 		money(p.Vault.Annual), money(p.Vault.Monthly), money(p.Vault.MonthlyMinimum),
-		money(p.PinHot), ratio)
+		money(p.PinHot), ratio(p.Egress.StandardFreeRatio), ratio(p.Egress.VaultRestoreFreeRatio),
+		p.Egress.PastAllowance, p.Egress.OneAllowance)
 }
 
 func (s *Server) handleLlmsTxt(w http.ResponseWriter, r *http.Request) {
