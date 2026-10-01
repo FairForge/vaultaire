@@ -3,14 +3,12 @@ package api
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/FairForge/vaultaire/internal/testutil"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -77,37 +75,9 @@ func TestCDNRollup_IncludesYesterday(t *testing.T) {
 
 // Review R13-09: a failed alert e-mail is retried on the next pass instead
 // of being stamped as fired for the month.
-type failingBandwidthEmailSender struct{ calls int }
-
-func (f *failingBandwidthEmailSender) Send(_ context.Context, _, _, _, _ string) error {
-	f.calls++
-	return errors.New("provider down")
-}
-
-func TestBandwidthAlert_EmailFailureRetriesNextHour(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	require.NoError(t, err)
-	defer func() { _ = db.Close() }()
-
-	mock.ExpectQuery(`SELECT tenant_id, bandwidth_limit_bytes FROM tenant_quotas`).
-		WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "bandwidth_limit_bytes"}).AddRow("tenant-1", int64(1000)))
-	mock.ExpectQuery(`SELECT COALESCE\(SUM\(egress_bytes\), 0\)`).WithArgs("tenant-1").
-		WillReturnRows(sqlmock.NewRows([]string{"sum"}).AddRow(int64(900)))
-	mock.ExpectQuery(`SELECT id, threshold_pct, alert_type, last_fired_at FROM bandwidth_alerts`).WithArgs("tenant-1").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "threshold_pct", "alert_type", "last_fired_at"}).AddRow("alert-1", 80, "email", nil))
-	mock.ExpectExec(`INSERT INTO events`).WillReturnResult(sqlmock.NewResult(0, 1)) // emitEvent
-	mock.ExpectQuery(`SELECT email FROM tenants`).WithArgs("tenant-1").
-		WillReturnRows(sqlmock.NewRows([]string{"email"}).AddRow("owner@example.com"))
-	// NO `UPDATE bandwidth_alerts SET last_fired_at` expectation: the send failed.
-
-	sender := &failingBandwidthEmailSender{}
-	alerter := NewBandwidthAlerter(db, zap.NewNop())
-	alerter.SetEmailSender(sender)
-	alerter.checkBandwidthAlerts(context.Background())
-
-	assert.Equal(t, 1, sender.calls)
-	require.NoError(t, mock.ExpectationsWereMet(), "last_fired_at must not be written after a failed send")
-}
+// Review R13-09 (a failed send must not stamp last_fired_at) is pinned by
+// TestEgressAlerts_FailedSendIsRetriedNextPass in bandwidth_alerts_test.go
+// since WP-R10-9 moved the alerter onto the shared egress allowance.
 
 // Review R13-20: reclaim drains the backlog in batches instead of stopping
 // at one LIMIT per run.

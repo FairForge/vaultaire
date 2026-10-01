@@ -70,8 +70,10 @@ can't read) — everything else works normally.
 ## Notes
 
 - Use **path-style** addressing (rclone's S3 `Other` provider does this by default).
-- Egress is never billed: Standard includes free egress up to 0.5× your quota per
-  month (Vault restores up to 1×), beyond that throughput may be throttled — so
-  `rclone sync`-ing your data back out, or leaving entirely, costs nothing. No lock-in
-  by design.
+- Egress is never billed. Each month you can download __EGRESS_STD__× your Standard quota plus
+  __EGRESS_VAULT__× your Vault quota for free. __EGRESS_PAST_LONG__
+  So `rclone sync`-ing your data back out, or leaving entirely, costs nothing — past
+  the allowance it only takes longer. No lock-in by design.
+- While you are rate-limited, keep `--transfers` (times `--multi-thread-streams`) at 16
+  or fewer: parallel downloads beyond that are answered `503 SlowDown` and retried.
 - Questions? [FAQ](/docs/faq) · [support@stored.ge](mailto:support@stored.ge)

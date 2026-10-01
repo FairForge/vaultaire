@@ -261,7 +261,7 @@ func queryMeteredMRR(ctx context.Context, db *sql.DB, logger *zap.Logger) int64 
 		LEFT JOIN (
 			SELECT tenant_id, SUM(egress_bytes) AS egress
 			FROM bandwidth_usage_daily
-			WHERE date >= date_trunc('month', CURRENT_DATE)
+			WHERE date >= date_trunc('month', NOW() AT TIME ZONE 'UTC')::date
 			GROUP BY tenant_id
 		) bw ON bw.tenant_id = tq.tenant_id
 		WHERE tq.tier IN ('standard', 'performance')`)

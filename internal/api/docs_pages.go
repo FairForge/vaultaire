@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/FairForge/vaultaire/internal/api/landing"
 	"go.uber.org/zap"
 )
 
@@ -75,6 +76,11 @@ func renderDocsPages(logger *zap.Logger) map[string][]byte {
 			return strings.ReplaceAll(docsShellPre, "__TITLE__", title)
 		}
 		render := func(title string, md []byte) []byte {
+			// The egress rule is written once, in prices.json; the guides
+			// carry placeholders (WP-R10-9).
+			for token, value := range landing.EgressTokens() {
+				md = bytes.ReplaceAll(md, []byte(token), []byte(value))
+			}
 			var buf bytes.Buffer
 			buf.WriteString(shell(title))
 			if err := siteMarkdown.Convert(md, &buf); err != nil {

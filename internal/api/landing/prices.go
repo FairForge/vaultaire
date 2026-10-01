@@ -34,9 +34,17 @@ type Prices struct {
 	// Egress allowances are keyed to the quota (per month) — see
 	// prices.json. They used to be typed into the landing copy as
 	// "0." + the AWS price multiple (Review R14-09); now they are data.
+	//
+	// The allowance is ONE number per account per UTC month — the Standard
+	// ratio × the downstairs quota + the Vault ratio × the attic quota
+	// (internal/usage/egress.go) — and the three sentences are the one
+	// wording every page uses for what happens past it (WP-R10-9).
 	Egress struct {
 		StandardFreeRatio     float64 `json:"standard_free_ratio"`
 		VaultRestoreFreeRatio float64 `json:"vault_restore_free_ratio"`
+		PastAllowanceShort    string  `json:"past_allowance_short"`
+		PastAllowance         string  `json:"past_allowance"`
+		OneAllowance          string  `json:"one_allowance"`
 	} `json:"egress"`
 	Competitors struct {
 		AWSS3        float64 `json:"aws_s3"`
@@ -146,4 +154,19 @@ func (h HouseIntent) RoomURL() string {
 		return ""
 	}
 	return "/#room=" + h.Room
+}
+
+// EgressTokens are the placeholders the embedded Markdown guides carry for
+// the egress rule, with their values from prices.json. build.py substitutes
+// the same names into the landing page.
+func EgressTokens() map[string]string {
+	e := Get().Egress
+	ratio := func(v float64) string { return strconv.FormatFloat(v, 'g', -1, 64) }
+	return map[string]string{
+		"__EGRESS_STD__":       ratio(e.StandardFreeRatio),
+		"__EGRESS_VAULT__":     ratio(e.VaultRestoreFreeRatio),
+		"__EGRESS_PAST__":      e.PastAllowanceShort,
+		"__EGRESS_PAST_LONG__": e.PastAllowance,
+		"__EGRESS_ONE__":       e.OneAllowance,
+	}
 }

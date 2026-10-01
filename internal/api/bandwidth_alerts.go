@@ -7,31 +7,47 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/email"
+	"github.com/FairForge/vaultaire/internal/usage"
 	"go.uber.org/zap"
 )
 
-// BandwidthAlerter checks tenant egress against configured thresholds and fires
-// alerts (event + email) when a threshold is crossed, once per calendar month.
+// BandwidthAlerter is the warning ladder of the egress allowance (WP-R10-9):
+// every hour it reads each active tenant's position from the SAME allowance
+// (internal/usage) and the SAME month counter (egressMeter) the throttle
+// uses, and sends one notice per threshold per UTC month — 80 % and 95 % for
+// every tenant with an allowance, and at 100 % the notice that states the
+// rate and the reset date. Before WP-R10-9 it covered only tenants with an
+// admin-set limit and the enforcement counted ingress too (Review R13-16).
 type BandwidthAlerter struct {
 	db      *sql.DB
 	emailer email.Sender
 	logger  *zap.Logger
+	egress  usage.EgressStatusReader // the live counter; nil = the recorded month
+	now     func() time.Time
 }
 
 func NewBandwidthAlerter(db *sql.DB, logger *zap.Logger) *BandwidthAlerter {
-	return &BandwidthAlerter{db: db, logger: logger}
+	return &BandwidthAlerter{db: db, logger: logger, now: time.Now}
 }
 
 func (a *BandwidthAlerter) SetEmailSender(s email.Sender) { a.emailer = s }
 
-// StartBandwidthAlerts launches a goroutine that seeds default alert rows and
-// checks bandwidth thresholds every hour. Nil-safe on receiver and db.
+// SetEgressReader gives the alerter the server's live month counter, so its
+// "used" is the throttle's "used".
+func (a *BandwidthAlerter) SetEgressReader(r usage.EgressStatusReader) { a.egress = r }
+
+// egressAlertLadder is the default ladder. A tenant's row for a step is
+// created the first time the step is crossed (nothing is seeded per tenant
+// per hour); a row with enabled = false silences that step.
+var egressAlertLadder = []int{80, 95, 100}
+
+// StartBandwidthAlerts launches a goroutine that checks the ladder every
+// hour. Nil-safe on receiver and db.
 func (a *BandwidthAlerter) StartBandwidthAlerts(ctx context.Context) {
 	if a == nil || a.db == nil {
 		return
 	}
 	go func() {
-		a.seedDefaultAlerts(ctx)
 		a.checkBandwidthAlerts(ctx)
 
 		ticker := time.NewTicker(1 * time.Hour)
@@ -41,200 +57,232 @@ func (a *BandwidthAlerter) StartBandwidthAlerts(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				a.seedDefaultAlerts(ctx)
 				a.checkBandwidthAlerts(ctx)
 			}
 		}
 	}()
 }
 
-// seedDefaultAlerts ensures every tenant with a bandwidth limit has 80% and 95%
-// email alert rows. Idempotent via ON CONFLICT DO NOTHING.
-func (a *BandwidthAlerter) seedDefaultAlerts(ctx context.Context) {
-	if a.db == nil {
-		return
-	}
-	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	rows, err := a.db.QueryContext(cctx,
-		`SELECT tenant_id FROM tenant_quotas WHERE bandwidth_limit_bytes > 0`)
-	if err != nil {
-		a.logger.Error("query tenants for bandwidth alert seeding", zap.Error(err))
-		return
-	}
-	defer func() { _ = rows.Close() }()
-
-	var tenantIDs []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			a.logger.Error("scan tenant for bandwidth alert seeding", zap.Error(err))
-			continue
-		}
-		tenantIDs = append(tenantIDs, id)
-	}
-	if err := rows.Err(); err != nil {
-		a.logger.Error("iterate tenants for bandwidth alert seeding", zap.Error(err))
-		return
-	}
-
-	for _, id := range tenantIDs {
-		for _, pct := range []int{80, 95} {
-			if _, err := a.db.ExecContext(cctx,
-				`INSERT INTO bandwidth_alerts (tenant_id, threshold_pct, alert_type)
-				 VALUES ($1, $2, 'email')
-				 ON CONFLICT (tenant_id, threshold_pct, alert_type) DO NOTHING`,
-				id, pct); err != nil {
-				a.logger.Error("seed bandwidth alert",
-					zap.String("tenant", id), zap.Int("pct", pct), zap.Error(err))
-			}
-		}
-	}
-}
-
-// checkBandwidthAlerts iterates tenants with a bandwidth limit and fires alerts
-// for any threshold crossed this calendar month that hasn't already been alerted.
+// checkBandwidthAlerts walks the tenants with egress recorded this UTC month
+// and fires any step crossed and not yet sent.
 func (a *BandwidthAlerter) checkBandwidthAlerts(ctx context.Context) {
 	if a.db == nil {
 		return
 	}
 	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	rows, err := a.db.QueryContext(cctx,
-		`SELECT tenant_id, bandwidth_limit_bytes FROM tenant_quotas WHERE bandwidth_limit_bytes > 0`)
+	tenants, err := a.alertCandidates(cctx)
+	cancel()
 	if err != nil {
-		a.logger.Error("query tenants for bandwidth alerts", zap.Error(err))
+		a.logger.Error("query tenants for egress alerts", zap.Error(err))
 		return
 	}
-	defer func() { _ = rows.Close() }()
-
-	type tenantLimit struct {
-		tenantID   string
-		limitBytes int64
-	}
-	var tenants []tenantLimit
-	for rows.Next() {
-		var tl tenantLimit
-		if err := rows.Scan(&tl.tenantID, &tl.limitBytes); err != nil {
-			a.logger.Error("scan tenant bandwidth limit", zap.Error(err))
-			continue
-		}
-		tenants = append(tenants, tl)
-	}
-	if err := rows.Err(); err != nil {
-		a.logger.Error("iterate tenants for bandwidth alerts", zap.Error(err))
-		return
-	}
-
-	for _, tl := range tenants {
+	for _, id := range tenants {
 		// Per-tenant budget (Review R13-09): one stalled e-mail provider used
 		// to eat the whole pass's 30 s and silently skip every later tenant.
 		tctx, tcancel := context.WithTimeout(ctx, bandwidthAlertTenantTimeout)
-		a.checkTenantAlerts(tctx, tl.tenantID, tl.limitBytes)
+		a.checkTenantAlerts(tctx, id)
 		tcancel()
 	}
+}
+
+// alertCandidates lists, with one set-based query, the tenants that have
+// egress recorded this UTC month. A tenant with none cannot have crossed a
+// step.
+func (a *BandwidthAlerter) alertCandidates(ctx context.Context) ([]string, error) {
+	rows, err := a.db.QueryContext(ctx,
+		`SELECT tenant_id FROM bandwidth_usage_daily
+		  WHERE date >= $1::date
+		  GROUP BY tenant_id HAVING SUM(egress_bytes) > 0`,
+		usage.EgressMonthStart(a.now()).Format("2006-01-02"))
+	if err != nil {
+		return nil, fmt.Errorf("list tenants with egress this month: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var tenants []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan tenant with egress this month: %w", err)
+		}
+		tenants = append(tenants, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate tenants with egress this month: %w", err)
+	}
+	return tenants, nil
 }
 
 // bandwidthAlertTenantTimeout bounds one tenant's check + e-mail.
 const bandwidthAlertTenantTimeout = 10 * time.Second
 
-func (a *BandwidthAlerter) checkTenantAlerts(ctx context.Context, tenantID string, limitBytes int64) {
-	var usedBytes int64
-	if err := a.db.QueryRowContext(ctx,
-		`SELECT COALESCE(SUM(egress_bytes), 0)
-		 FROM bandwidth_usage_daily
-		 WHERE tenant_id = $1 AND date >= date_trunc('month', CURRENT_DATE)`,
-		tenantID).Scan(&usedBytes); err != nil {
-		a.logger.Error("query month egress for bandwidth alert",
+// status reads the tenant's position: the server's counter when wired, the
+// database otherwise.
+func (a *BandwidthAlerter) status(ctx context.Context, tenantID string) (usage.EgressStatus, error) {
+	if a.egress != nil {
+		return a.egress.EgressStatus(ctx, tenantID)
+	}
+	return usage.EgressStatusFromDB(ctx, a.db, tenantID, a.now())
+}
+
+type egressAlertRow struct {
+	id           string
+	thresholdPct int
+	alertType    string
+	enabled      bool
+	lastFiredAt  sql.NullTime
+}
+
+func (a *BandwidthAlerter) checkTenantAlerts(ctx context.Context, tenantID string) {
+	st, err := a.status(ctx, tenantID)
+	if err != nil {
+		a.logger.Error("read egress status for alert",
 			zap.String("tenant", tenantID), zap.Error(err))
+		return
+	}
+	allowance, used := st.Allowance.Bytes, st.UsedBytes
+	// Below the first step there is nothing to read: the ladder is the only
+	// writer of alert rows, so no row can sit under it.
+	if allowance <= 0 || !egressCrossed(used, allowance, egressAlertLadder[0]) {
 		return
 	}
 
 	rows, err := a.db.QueryContext(ctx,
-		`SELECT id, threshold_pct, alert_type, last_fired_at
-		 FROM bandwidth_alerts
-		 WHERE tenant_id = $1 AND enabled = true`,
-		tenantID)
+		`SELECT id, threshold_pct, alert_type, enabled, last_fired_at
+		   FROM bandwidth_alerts WHERE tenant_id = $1`, tenantID)
 	if err != nil {
-		a.logger.Error("query bandwidth alerts for tenant",
+		a.logger.Error("query egress alerts for tenant",
 			zap.String("tenant", tenantID), zap.Error(err))
 		return
 	}
-	defer func() { _ = rows.Close() }()
-
-	type alertRow struct {
-		id           string
-		thresholdPct int
-		alertType    string
-		lastFiredAt  sql.NullTime
-	}
-	var alerts []alertRow
+	var alerts []egressAlertRow
+	have := map[int]bool{}
 	for rows.Next() {
-		var ar alertRow
-		if err := rows.Scan(&ar.id, &ar.thresholdPct, &ar.alertType, &ar.lastFiredAt); err != nil {
-			a.logger.Error("scan bandwidth alert", zap.Error(err))
+		var ar egressAlertRow
+		if err := rows.Scan(&ar.id, &ar.thresholdPct, &ar.alertType, &ar.enabled, &ar.lastFiredAt); err != nil {
+			a.logger.Error("scan egress alert", zap.Error(err))
 			continue
 		}
 		alerts = append(alerts, ar)
+		if ar.alertType == "email" {
+			have[ar.thresholdPct] = true
+		}
 	}
 	if err := rows.Err(); err != nil {
-		a.logger.Error("iterate bandwidth alerts", zap.Error(err))
+		_ = rows.Close()
+		a.logger.Error("iterate egress alerts", zap.Error(err))
 		return
 	}
+	_ = rows.Close()
 
-	monthStart := bandwidthAlertMonthStart()
+	// A ladder step crossed for the first time gets its row now.
+	for _, pct := range egressAlertLadder {
+		if have[pct] || !egressCrossed(used, allowance, pct) {
+			continue
+		}
+		var id string
+		err := a.db.QueryRowContext(ctx,
+			`INSERT INTO bandwidth_alerts (tenant_id, threshold_pct, alert_type)
+			 VALUES ($1, $2, 'email')
+			 ON CONFLICT (tenant_id, threshold_pct, alert_type) DO UPDATE SET threshold_pct = EXCLUDED.threshold_pct
+			 RETURNING id`, tenantID, pct).Scan(&id)
+		if err != nil {
+			a.logger.Error("create egress alert row",
+				zap.String("tenant", tenantID), zap.Int("pct", pct), zap.Error(err))
+			continue
+		}
+		alerts = append(alerts, egressAlertRow{id: id, thresholdPct: pct, alertType: "email", enabled: true})
+	}
 
+	monthStart := usage.EgressMonthStart(a.now())
 	for _, ar := range alerts {
-		if usedBytes*100 < limitBytes*int64(ar.thresholdPct) {
+		if !ar.enabled || !egressCrossed(used, allowance, ar.thresholdPct) {
 			continue
 		}
 		if ar.lastFiredAt.Valid && !ar.lastFiredAt.Time.Before(monthStart) {
 			continue
 		}
-		a.fireAlert(ctx, tenantID, ar.id, ar.thresholdPct, ar.alertType, usedBytes, limitBytes)
+		// The 100 % notice says downloads are being paced. Where they are
+		// not (the egress_throttle flag is off, or this tenant is exempt) it
+		// would be false, so it waits — unfired — for the flag.
+		if ar.thresholdPct >= 100 && !st.Throttled {
+			continue
+		}
+		a.fireAlert(ctx, tenantID, ar, st)
 	}
 }
 
-func (a *BandwidthAlerter) fireAlert(ctx context.Context, tenantID, alertID string, thresholdPct int, alertType string, usedBytes, limitBytes int64) {
+// egressCrossed reports whether used has reached pct % of the allowance.
+func egressCrossed(used, allowance int64, pct int) bool {
+	return float64(used)*100 >= float64(allowance)*float64(pct)
+}
+
+func (a *BandwidthAlerter) fireAlert(ctx context.Context, tenantID string, ar egressAlertRow, st usage.EgressStatus) {
+	used, allowance := st.UsedBytes, st.Allowance.Bytes
 	pctUsed := int64(0)
-	if limitBytes > 0 {
-		pctUsed = usedBytes * 100 / limitBytes
+	if allowance > 0 {
+		pctUsed = used * 100 / allowance
 	}
 
 	emitEvent(ctx, a.db, a.logger, "bandwidth.alert", tenantID, map[string]interface{}{
-		"threshold_pct": thresholdPct,
-		"used_bytes":    usedBytes,
-		"limit_bytes":   limitBytes,
-		"pct_used":      pctUsed,
+		"threshold_pct":      ar.thresholdPct,
+		"used_bytes":         used,
+		"limit_bytes":        allowance,
+		"pct_used":           pctUsed,
+		"throttled":          st.Throttled,
+		"rate_bytes_per_sec": st.RateBytesPerSec,
+		"resets_at":          st.ResetAt.Format(time.RFC3339),
 	})
 
-	if alertType == "email" && a.emailer != nil {
+	if ar.alertType == "email" && a.emailer != nil {
 		to := a.bandwidthTenantEmail(ctx, tenantID)
 		if to != "" {
-			subject := fmt.Sprintf("You've used %d%% of your stored.ge bandwidth limit", pctUsed)
-			body := fmt.Sprintf(
-				"Your stored.ge bandwidth usage has reached %s of your %s monthly limit (%d%%).",
-				formatBandwidthBytes(usedBytes), formatBandwidthBytes(limitBytes), pctUsed)
+			subject, body := egressAlertMessage(ar.thresholdPct, st)
 			if err := a.emailer.Send(ctx, to, subject, body, body); err != nil {
 				// Not marked fired: the next hourly pass retries (Review
 				// R13-09 — a failed send used to stamp last_fired_at and the
 				// alert was lost for the rest of the month). The event row
 				// above already carries it to the dashboard feed.
-				a.logger.Warn("send bandwidth alert email — will retry next pass",
+				a.logger.Warn("send egress alert email — will retry next pass",
 					zap.String("tenant", tenantID), zap.Error(err))
 				return
 			}
 		}
 	}
 
+	// last_fired_at is a TIMESTAMP without zone: store the UTC wall clock so
+	// the comparison with the UTC month start holds in any session time zone.
 	if _, err := a.db.ExecContext(ctx,
-		`UPDATE bandwidth_alerts SET last_fired_at = NOW() WHERE id = $1`,
-		alertID); err != nil {
-		a.logger.Error("update bandwidth alert last_fired_at",
-			zap.String("alert", alertID), zap.Error(err))
+		`UPDATE bandwidth_alerts SET last_fired_at = (NOW() AT TIME ZONE 'UTC') WHERE id = $1`,
+		ar.id); err != nil {
+		a.logger.Error("update egress alert last_fired_at",
+			zap.String("alert", ar.id), zap.Error(err))
 	}
+}
+
+// egressAlertMessage words one step of the ladder.
+func egressAlertMessage(thresholdPct int, st usage.EgressStatus) (subject, body string) {
+	used, allowance := st.UsedBytes, st.Allowance.Bytes
+	reset := st.ResetAt.UTC().Format("January 2, 2006")
+	rate := formatBandwidthBytes(st.RateBytesPerSec) + "/s"
+	if thresholdPct >= 100 {
+		subject = "Your stored.ge egress allowance for this month is used up"
+		body = fmt.Sprintf(
+			"You have downloaded %s this month, which is all of your %s egress allowance. "+
+				"Until the allowance resets on %s (UTC), downloads from your account are rate-limited to %s in total. "+
+				"Nothing is billed and nothing is deleted; uploads, listings and deletes are not affected. "+
+				"The allowance follows your quota: adding storage at https://stored.ge/dashboard/billing raises it within a minute.",
+			formatBandwidthBytes(used), formatBandwidthBytes(allowance), reset, rate)
+		return subject, body
+	}
+	pctUsed := used * 100 / allowance
+	subject = fmt.Sprintf("You've used %d%% of your stored.ge egress allowance", pctUsed)
+	body = fmt.Sprintf(
+		"Your stored.ge downloads this month have reached %s of your %s egress allowance (%d%%). "+
+			"Past the allowance, downloads are rate-limited to %s in total until it resets on %s (UTC) — never billed. "+
+			"Uploads are not affected.",
+		formatBandwidthBytes(used), formatBandwidthBytes(allowance), pctUsed, rate, reset)
+	return subject, body
 }
 
 func (a *BandwidthAlerter) bandwidthTenantEmail(ctx context.Context, tenantID string) string {
@@ -247,11 +295,6 @@ func (a *BandwidthAlerter) bandwidthTenantEmail(ctx context.Context, tenantID st
 		return e.String
 	}
 	return ""
-}
-
-func bandwidthAlertMonthStart() time.Time {
-	now := time.Now().UTC()
-	return time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 }
 
 func formatBandwidthBytes(b int64) string {

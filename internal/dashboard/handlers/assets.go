@@ -2,7 +2,10 @@ package handlers
 
 import (
 	"html/template"
+	"strconv"
 	"strings"
+
+	"github.com/FairForge/vaultaire/internal/api/landing"
 )
 
 // Static assets are served from the binary under /static/ and cached at
@@ -26,5 +29,24 @@ func AssetURL(path string) string {
 
 // TemplateFuncs is the FuncMap every layout is parsed with.
 func TemplateFuncs() template.FuncMap {
-	return template.FuncMap{"asset": AssetURL}
+	return template.FuncMap{"asset": AssetURL, "egress": egressCopy}
+}
+
+// egressCopy gives a template the egress rule as the price file words it
+// (prices.json `egress`; WP-R10-9): "std" and "vault" are the allowance
+// ratios, "past" what happens past the allowance, "one" that the allowance
+// is one number per account.
+func egressCopy(what string) string {
+	e := landing.Get().Egress
+	switch what {
+	case "std":
+		return strconv.FormatFloat(e.StandardFreeRatio, 'g', -1, 64)
+	case "vault":
+		return strconv.FormatFloat(e.VaultRestoreFreeRatio, 'g', -1, 64)
+	case "past":
+		return e.PastAllowance
+	case "one":
+		return e.OneAllowance
+	}
+	return ""
 }

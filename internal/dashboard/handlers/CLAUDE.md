@@ -341,6 +341,21 @@ r2 (public store), geyser (tape), permafrost/onedrive (second copy), `idrive-<re
 pin) — with a flash and an `admin.primary_swap_refused` audit row (Review R12, proven live: the
 primary was set to "r2" on a box without an r2 driver). `local` stays allowed (dev/hub primary).
 
+## Egress allowance (`egress.go`, WP-R10-9)
+
+`egressStatus(ctx, db, eg, tenantID)` reads a tenant's egress position from the API server's live
+month counter (`eg`, a `usage.EgressStatusReader` handed in through `Deps.Egress`) or, when nil, from
+the database (`usage.EgressStatusFromDB`); `populateEgress` turns it into the template keys the
+overview and the admin tenant page share (`EgressFmt`, `EgressAllowanceFmt`, `EgressPct`,
+`EgressThrottled`, `EgressRateFmt`, `EgressResetFmt`, `EgressPlanFmt`, `EgressOverrideFmt`,
+`EgressState`). Nothing here computes an allowance: `internal/usage` is the one definition.
+`HandleOverview`, `HandleTenantDetail` and `HandleCustomerDetail` take the reader as their last
+argument. `HandleUpdateBandwidthLimit` writes the override (`tenant_quotas.bandwidth_limit_bytes`):
+0 clears it — the tenant is back on its plan's allowance, not "unlimited". The `egress` template
+function (`assets.go`) gives the legal pages the egress sentences from `prices.json`. Every
+`bandwidth_usage_daily` month reader in this package uses the UTC month
+(`date_trunc('month', NOW() AT TIME ZONE 'UTC')::date`). Tests: `egress_test.go` (real templates).
+
 ## Admin Tenants (`tenants.go`)
 
 `HandleUpdateQuota` and `HandleChangeTier` answer 409 for a tenant with `tenant_floor_quotas`

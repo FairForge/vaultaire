@@ -57,7 +57,7 @@ func TestOverview_HouseRendersFromLiveData(t *testing.T) {
 	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM object_head_cache WHERE tenant_id = $1`, id) })
 	require.NoError(t, qm.ReconcileTenantStorageUsage(context.Background(), id))
 
-	h := HandleOverview(overviewTemplate(t), db, zap.NewNop(), "local", houseOverviewFlags(true))
+	h := HandleOverview(overviewTemplate(t), db, zap.NewNop(), "local", houseOverviewFlags(true), nil)
 	req := injectSessionWithTenant(httptest.NewRequest("GET", "/dashboard/", nil), id)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -77,26 +77,26 @@ func TestOverview_HouseRendersFromLiveData(t *testing.T) {
 	assert.Contains(t, body, `url(#lampfill)`, "the lamp's night pools")
 	assert.Contains(t, body, `id="nightdim"`)
 	assert.Contains(t, body, `/dashboard/billing?add=downstairs`)
-	assert.Contains(t, body, `free this month, then slower`, "egress bar")
+	assert.Contains(t, body, `free this month, then rate-limited to`, "egress bar")
 	assert.Contains(t, body, `of 4 TB free this month`, "egress allowance = 0.5×6 TB + 1 TB")
 	assert.NotContains(t, body, `ZgotmplZ`, "no html/template escaping accidents")
 	assert.NotContains(t, body, `Storage Used`, "fullness cards replace the gauge")
 
 	// Flag off: the classic page, no house.
-	h = HandleOverview(overviewTemplate(t), db, zap.NewNop(), "local", houseOverviewFlags(false))
+	h = HandleOverview(overviewTemplate(t), db, zap.NewNop(), "local", houseOverviewFlags(false), nil)
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	require.Equal(t, 200, w.Code)
 	assert.NotContains(t, w.Body.String(), `house-svg`)
 	assert.Contains(t, w.Body.String(), `Storage Used`)
-	assert.Contains(t, w.Body.String(), `free this month, then slower`, "the egress bar is not gated")
+	assert.Contains(t, w.Body.String(), `free this month, then rate-limited to`, "the egress bar is not gated")
 }
 
 func TestOverview_LegacyTenantHouse(t *testing.T) {
 	db := testDashDB(t)
 	t.Cleanup(func() { _ = db.Close() })
 	id := houseTenant(t, db, 0, 0) // free tier: 5 GB, no floor rows
-	h := HandleOverview(overviewTemplate(t), db, zap.NewNop(), "local", houseOverviewFlags(true))
+	h := HandleOverview(overviewTemplate(t), db, zap.NewNop(), "local", houseOverviewFlags(true), nil)
 	req := injectSessionWithTenant(httptest.NewRequest("GET", "/dashboard/", nil), id)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -138,7 +138,7 @@ func TestOverview_WriteScreenshotFixtures(t *testing.T) {
 	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM object_head_cache WHERE tenant_id = $1`, id) })
 	require.NoError(t, qm.ReconcileTenantStorageUsage(context.Background(), id))
 
-	h := HandleOverview(overviewTemplate(t), db, zap.NewNop(), "local", houseOverviewFlags(true))
+	h := HandleOverview(overviewTemplate(t), db, zap.NewNop(), "local", houseOverviewFlags(true), nil)
 	req := injectSessionWithTenant(httptest.NewRequest("GET", "/dashboard/", nil), id)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)

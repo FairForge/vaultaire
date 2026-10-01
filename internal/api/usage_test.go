@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -106,4 +107,40 @@ func uniqueQuotaTenant(t *testing.T, db *sql.DB, prefix string) string {
 	id := fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
 	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM tenant_quotas WHERE tenant_id = $1`, id) })
 	return id
+}
+
+// WP-R10-9: /api/v1/user/usage carries the egress allowance, what is used of
+// it and whether downloads are being paced — the same numbers the overview
+// and the throttle read.
+func TestUsageAPI_CarriesEgressAllowanceUsedAndThrottled(t *testing.T) {
+	// Arrange: 64 MiB of quota → a 32 MiB allowance, 40 MiB downloaded.
+	f := setupEgressFixture(t, 64*mib, testThrottle(), nil)
+	f.setUsed(40 * mib)
+	get := func() map[string]any {
+		req := httptest.NewRequest("GET", "/api/v1/user/usage", nil)
+		req = req.WithContext(context.WithValue(req.Context(), tenantIDKey, f.tenantID))
+		w := httptest.NewRecorder()
+		f.srv.handleGetUsageStats(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+		var out map[string]any
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
+		return out
+	}
+
+	// Act 1: the flag is off for the tenant.
+	off := get()
+
+	// Assert 1: over, but nothing is slowed.
+	assert.Equal(t, float64(32*mib), off["egress_allowance"])
+	assert.Equal(t, float64(40*mib), off["egress_used"])
+	assert.Equal(t, false, off["egress_throttled"])
+	assert.Equal(t, float64(4*mib), off["egress_rate_limit_bytes_per_sec"])
+	assert.Equal(t, usage.EgressResetAt(time.Now()).Format(time.RFC3339), off["egress_resets_at"])
+
+	// Act 2: the flag is on.
+	f.enforced.Store(true)
+	on := get()
+
+	// Assert 2
+	assert.Equal(t, true, on["egress_throttled"])
 }

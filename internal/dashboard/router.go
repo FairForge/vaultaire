@@ -19,6 +19,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/email"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/flags"
+	"github.com/FairForge/vaultaire/internal/usage"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 	"golang.org/x/oauth2"
@@ -34,19 +35,20 @@ type Deps struct {
 	MFAPending    *MFAPendingStore // Short-lived store for 2FA login challenges.
 	Sessions      dashauth.SessionStore
 	Logger        *zap.Logger
-	DataPath      string                 // Local storage root (bucket list sizes in dev).
-	CreateBucket  handlers.BucketCreator // The API layer's bucket registry (nil = creation refused).
-	Stripe        *billing.StripeService // Nil when STRIPE_SECRET_KEY is not set.
-	Google        *oauth2.Config         // Nil when GOOGLE_CLIENT_ID is not set.
-	GitHub        *oauth2.Config         // Nil when GITHUB_CLIENT_ID is not set.
-	StorageMode   string                 // e.g. "local", "s3", "quotaless", "geyser", "idrive"
-	Email         email.Sender           // Email sender (LogSender if unconfigured).
-	BaseURL       string                 // Base URL for email links (e.g. "https://stored.ge").
-	Engine        *engine.CoreEngine     // Nil-safe; used by admin backends page.
-	HealthChecker handlers.HealthChecker // Nil-safe; backend health state provider.
-	Flags         *flags.Service         // Nil-safe; admin feature-flags page (1.13).
-	Quotas        billing.HouseQuotas    // Nil-safe; applies a resized house's floor quotas at once (Phase 1).
-	Account       *account.Service       // The one account-deletion state machine (WP-R10-3); nil = built per request from DB.
+	DataPath      string                   // Local storage root (bucket list sizes in dev).
+	CreateBucket  handlers.BucketCreator   // The API layer's bucket registry (nil = creation refused).
+	Stripe        *billing.StripeService   // Nil when STRIPE_SECRET_KEY is not set.
+	Google        *oauth2.Config           // Nil when GOOGLE_CLIENT_ID is not set.
+	GitHub        *oauth2.Config           // Nil when GITHUB_CLIENT_ID is not set.
+	StorageMode   string                   // e.g. "local", "s3", "quotaless", "geyser", "idrive"
+	Email         email.Sender             // Email sender (LogSender if unconfigured).
+	BaseURL       string                   // Base URL for email links (e.g. "https://stored.ge").
+	Engine        *engine.CoreEngine       // Nil-safe; used by admin backends page.
+	HealthChecker handlers.HealthChecker   // Nil-safe; backend health state provider.
+	Flags         *flags.Service           // Nil-safe; admin feature-flags page (1.13).
+	Quotas        billing.HouseQuotas      // Nil-safe; applies a resized house's floor quotas at once (Phase 1).
+	Account       *account.Service         // The one account-deletion state machine (WP-R10-3); nil = built per request from DB.
+	Egress        usage.EgressStatusReader // The API server's live egress counter (WP-R10-9); nil = the recorded month.
 }
 
 // RegisterRoutes mounts the dashboard, auth, admin, and static-asset
@@ -171,7 +173,7 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 			"templates/customer/dashboard.html",
 			"templates/generated/house.html", // the house: sprites, room, CSS (make landing)
 		))
-		dr.Get("/", handlers.HandleOverview(overviewTmpl, deps.DB, deps.Logger, deps.StorageMode, deps.Flags))
+		dr.Get("/", handlers.HandleOverview(overviewTmpl, deps.DB, deps.Logger, deps.StorageMode, deps.Flags, deps.Egress))
 
 		// Bucket browser.
 		bucketsTmpl := template.Must(baseTmpl.Clone())
@@ -356,7 +358,7 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		ar.NotFound(handlers.HandleNotFound(deps.Logger))
 		ar.Get("/", handlers.HandleAdminOverview(adminTmpl, deps.DB, deps.Logger))
 		ar.Get("/tenants", handlers.HandleTenantList(tenantListTmpl, deps.DB, deps.Logger))
-		ar.Get("/tenants/{id}", handlers.HandleTenantDetail(tenantDetailTmpl, deps.DB, deps.Logger))
+		ar.Get("/tenants/{id}", handlers.HandleTenantDetail(tenantDetailTmpl, deps.DB, deps.Logger, deps.Egress))
 		ar.Post("/tenants/{id}/suspend", handlers.HandleSuspendTenant(deps.DB, deps.Logger))
 		ar.Post("/tenants/{id}/enable", handlers.HandleEnableTenant(deps.DB, deps.Logger))
 		ar.Post("/tenants/{id}/quota", handlers.HandleUpdateQuota(deps.DB, deps.Logger))
@@ -380,7 +382,7 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		ar.Get("/abuse/{id}", handlers.HandleAdminAbuseDetail(abuseDetailTmpl, deps.DB, deps.Logger))
 		ar.Post("/abuse/{id}/action", handlers.HandleAbuseAction(deps.DB, deps.Logger))
 		ar.Get("/support", handlers.HandleAdminSupport(supportTmpl, deps.DB, deps.Logger))
-		ar.Get("/support/{id}", handlers.HandleCustomerDetail(customerDetailTmpl, deps.DB, deps.Logger))
+		ar.Get("/support/{id}", handlers.HandleCustomerDetail(customerDetailTmpl, deps.DB, deps.Logger, deps.Egress))
 		ar.Post("/support/{id}/notes", handlers.HandleAddNote(deps.DB, deps.Logger))
 		if deps.Engine != nil {
 			ar.Get("/backends", handlers.HandleAdminBackends(backendsTmpl, deps.Engine, deps.HealthChecker, deps.Logger))

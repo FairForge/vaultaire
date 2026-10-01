@@ -22,7 +22,7 @@ func TestLlmsTxt_PricesFromPriceFileAndHEAD(t *testing.T) {
 
 	assert.Contains(t, body, "$4.49/TB/mo annual ($4.99 monthly)")
 	assert.Contains(t, body, "$2/TB/mo annual\n> ($2.55 monthly, $4.99 monthly minimum)")
-	assert.Contains(t, body, "free up to 0.5× your quota")
+	assert.Contains(t, body, "Free egress per month: 0.5× the Standard quota + 1× the Vault quota.")
 	assert.NotContains(t, body, "3.99")
 	assert.NotContains(t, body, "GET /docs — interactive Swagger UI")
 	assert.Contains(t, body, "GET /docs/api")

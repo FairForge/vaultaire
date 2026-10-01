@@ -602,7 +602,7 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
                 <p class="alt-price">annual &middot; $__PRICE_STD_MONTHLY__ monthly &middot; any whole-TB quota</p>
                 <ul>
                     <li>Automatic tiering built in (~15% hot, rest on tape)</li>
-                    <li>Egress free to __EGRESS_STD__× your quota/mo, then may be throttled — never billed</li>
+                    <li>Egress free to __EGRESS_STD__× your quota/mo, __EGRESS_PAST__</li>
                     <li>Hard quota, resize any time — no overage, no meters</li>
                     <li>__PRICE_AWS_MULT__× cheaper than AWS S3</li>
                 </ul>
@@ -633,7 +633,7 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
                 <tr class="best"><td>Annual, prepaid</td><td>$__PRICE_VAULT_2DP__/TB/mo</td><td>any size — 5 TB is $__PRICE_VAULT_5TB__/mo, billed yearly</td></tr>
                 <tr><td>Founders slots</td><td>$__PRICE_FOUNDERS__/TB/mo</td><td>first 100 TB &middot; annual only &middot; 3–10 TB per account &middot; lifetime rate</td></tr>
             </table>
-            <p class="fine">Pick a quota in TB, change it whenever. The honest fine print: one durable tape copy (we're the offsite leg of <em>your</em> 3-2-1) &middot; 30-day minimum per object &middot; restore up to __EGRESS_VAULT__× your quota free every month — a free monthly restore drill — beyond that, restores are queued, never billed &middot; restored copies stay hot 7 days. Never: retrieval fees or egress fees. Founders slots are numbered and hard-capped — when they're gone, they're gone.</p>
+            <p class="fine">Pick a quota in TB, change it whenever. The honest fine print: one durable tape copy (we're the offsite leg of <em>your</em> 3-2-1) &middot; 30-day minimum per object &middot; restore up to __EGRESS_VAULT__× your quota free every month — a free monthly restore drill — __EGRESS_PAST__ (one allowance and one rate limit for the whole account, no restore queue) &middot; restored copies stay hot 7 days. Never: retrieval fees or egress fees. Founders slots are numbered and hard-capped — when they're gone, they're gone.</p>
         </div>
 
         <p class="includes">
@@ -649,7 +649,7 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
                 <tbody>
                     <tr><th scope="row">$/TB/mo</th><td class="us">$__PRICE_STD__</td><td>$__PRICE_B2__</td><td>$__PRICE_WASABI__</td><td>$__PRICE_R2__</td><td>$__PRICE_AWS__</td></tr>
                     <tr><th scope="row">API/request fees</th><td class="us">$0</td><td>Class B/C fees</td><td>$0</td><td>ops-based</td><td>per-request</td></tr>
-                    <tr><th scope="row">Egress</th><td class="us">__EGRESS_STD__× quota free/mo, then may be throttled — never billed</td><td>3× free, then $0.01/GB</td><td>"Free" (fair-use policy)</td><td>Free</td><td>$0.09/GB</td></tr>
+                    <tr><th scope="row">Egress</th><td class="us">__EGRESS_STD__× quota free/mo, __EGRESS_PAST__</td><td>3× free, then $0.01/GB</td><td>"Free" (fair-use policy)</td><td>Free</td><td>$0.09/GB</td></tr>
                     <tr><th scope="row">Billing</th><td class="us">Flat quota, no meters</td><td>Metered</td><td>Metered (90-day min)</td><td>Metered</td><td>Metered</td></tr>
                     <tr><th scope="row">Min storage duration</th><td class="us">None (Vault: 30 days)</td><td>None</td><td>90 days</td><td>None</td><td>None</td></tr>
                     <tr><th scope="row">Archive tier</th><td class="us">$__PRICE_VAULT__/TB (tape)</td><td>—</td><td>—</td><td>—</td><td>Glacier (retrieval fees)</td></tr>

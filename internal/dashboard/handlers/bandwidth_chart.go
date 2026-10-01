@@ -109,7 +109,7 @@ func QueryMonthBandwidth(ctx context.Context, db *sql.DB, tenantID string) (ingr
 		        COALESCE(SUM(egress_bytes), 0),
 		        COALESCE(SUM(requests_count), 0)
 		 FROM bandwidth_usage_daily
-		 WHERE tenant_id = $1 AND date >= date_trunc('month', CURRENT_DATE)`,
+		 WHERE tenant_id = $1 AND date >= date_trunc('month', NOW() AT TIME ZONE 'UTC')::date`,
 		tenantID).Scan(&ingress, &egress, &requests)
 	return
 }

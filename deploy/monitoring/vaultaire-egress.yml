@@ -1,0 +1,37 @@
+# Egress allowance throttle — install to /etc/prometheus/rules/ (see README).
+#
+# Series come from the app's /metrics (WP-R10-9, internal/api/egress_meter.go;
+# none carries a tenant label):
+#   vaultaire_egress_throttled_tenants                 tenants past their monthly allowance with the egress_throttle flag on
+#   vaultaire_egress_throttle_engaged_total{surface}   object responses paced (surface = s3 | cdn)
+#   vaultaire_egress_would_throttle_total{surface}     responses that would have been paced — the flag is off for the tenant
+#   vaultaire_egress_throttle_rejected_total{surface}  requests refused by the stream guard (503 SlowDown on S3, 429 on /cdn)
+#   vaultaire_egress_throttled_bytes_total             object bytes sent at the paced rate
+#
+# The allowance is 0.5 x the downstairs quota + 1 x the attic quota per UTC
+# month (prices.json `egress`), or the override on /admin/tenants/{id}. Past
+# it a tenant's GetObject and /cdn bodies share one token bucket:
+# max(EGRESS_THROTTLE_MIN_BYTES_PER_SEC, EGRESS_THROTTLE_FACTOR x allowance / 30 d).
+# Nothing is billed and nothing but the stream guard is refused.
+#
+# Before flipping `egress_throttle` globally, watch the dry run:
+#   curl -s localhost:8000/metrics | grep vaultaire_egress_would_throttle_total
+#   journalctl -u vaultaire | grep "egress allowance spent"      (names the tenant, used, allowance, rate)
+# and exempt the tenants that must never be slowed (the synthetic-check
+# tenant, demos) with a per-tenant row, flag off, on /admin/flags.
+#
+# Triage when EgressThrottleActive fires: it is information, not an outage —
+# the named number of tenants are downloading at their capped rate until the
+# 1st (UTC). /admin/tenants/{id} shows used / allowance / override / state;
+# raise the override or add the exemption row if a tenant should not be capped.
+groups:
+  - name: vaultaire-egress
+    rules:
+      - alert: EgressThrottleActive
+        expr: vaultaire_egress_throttled_tenants > 0
+        for: 10m
+        labels:
+          severity: info
+        annotations:
+          summary: "{{ $value }} tenant(s) past their egress allowance are being rate-limited"
+          description: "Downloads of these tenants are paced until the allowance resets on the 1st (UTC); nothing is billed. journalctl -u vaultaire | grep 'egress allowance spent' names them; /admin/tenants/{id} shows used / allowance / override. Refusals by the stream guard: vaultaire_egress_throttle_rejected_total."

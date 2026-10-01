@@ -47,8 +47,9 @@ type ActivityRow struct {
 
 // HandleOverview returns an http.HandlerFunc that renders the dashboard
 // overview page with real data from PostgreSQL. fl may be nil (the house
-// stays off).
-func HandleOverview(tmpl *template.Template, db *sql.DB, logger *zap.Logger, storageMode string, fl *flags.Service) http.HandlerFunc {
+// stays off); eg may be nil (the egress bar reads the recorded month instead
+// of the server's live counter).
+func HandleOverview(tmpl *template.Template, db *sql.DB, logger *zap.Logger, storageMode string, fl *flags.Service, eg usage.EgressStatusReader) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
 		if sd == nil {
@@ -75,7 +76,7 @@ func HandleOverview(tmpl *template.Template, db *sql.DB, logger *zap.Logger, sto
 			populateEmailVerified(ctx, db, sd.UserID, data)
 			populateOnboarding(ctx, db, sd.TenantID, r, data)
 			populateCarbonBadge(ctx, db, sd.TenantID, data)
-			populateHouseOverview(ctx, db, fl, sd.TenantID, data)
+			populateHouseOverview(ctx, db, fl, eg, sd.TenantID, data)
 		} else {
 			setDefaults(data)
 		}
@@ -146,15 +147,15 @@ func populateStorageUsage(ctx context.Context, db *sql.DB, tenantID string, data
 // populateHouseOverview builds the house (flag house_overview) and the
 // egress bar. Floors come from tenant_floor_quotas when the tenant bought a
 // house; otherwise the single total quota is the downstairs and there is no
-// attic. Egress is an allowance, never a bill: free to 0.5× the downstairs
-// quota plus 1× the attic quota per month (what the site says), or the
-// tenant's bandwidth limit when an admin set one.
-func populateHouseOverview(ctx context.Context, db *sql.DB, fl *flags.Service, tenantID string, data map[string]any) {
+// attic. The egress bar reads the one allowance (internal/usage) and the one
+// month counter the throttle uses (WP-R10-9); past the allowance it says
+// what is true of this tenant — the rate and the reset date when downloads
+// are being paced.
+func populateHouseOverview(ctx context.Context, db *sql.DB, fl *flags.Service, eg usage.EgressStatusReader, tenantID string, data map[string]any) {
 	var used, limit int64
-	var bwLimit sql.NullInt64
 	if err := db.QueryRowContext(ctx,
-		`SELECT storage_used_bytes, storage_limit_bytes, bandwidth_limit_bytes FROM tenant_quotas WHERE tenant_id = $1`,
-		tenantID).Scan(&used, &limit, &bwLimit); err != nil {
+		`SELECT storage_used_bytes, storage_limit_bytes FROM tenant_quotas WHERE tenant_id = $1`,
+		tenantID).Scan(&used, &limit); err != nil {
 		return
 	}
 	std := FloorState{Floor: usage.FloorStandard, LimitBytes: limit, UsedBytes: used}
@@ -173,30 +174,7 @@ func populateHouseOverview(ctx context.Context, db *sql.DB, fl *flags.Service, t
 	}
 	hasHouse := len(floors) > 0
 
-	// egress allowance
-	allowance := limit / 2
-	if hasHouse {
-		allowance = std.LimitBytes/2 + vault.LimitBytes
-	}
-	if bwLimit.Valid && bwLimit.Int64 > 0 {
-		allowance = bwLimit.Int64
-	}
-	var egress int64
-	_ = db.QueryRowContext(ctx,
-		`SELECT COALESCE(SUM(egress_bytes), 0) FROM bandwidth_usage_daily
-		 WHERE tenant_id = $1 AND date >= date_trunc('month', CURRENT_DATE)`, tenantID).Scan(&egress)
-	data["EgressAllowanceFmt"] = formatBytes(allowance)
-	pct := 0
-	if allowance > 0 {
-		pct = int(math.Min(100, math.Round(float64(egress)*100/float64(allowance))))
-	}
-	data["EgressPct"] = pct
-	data["EgressBarClass"] = ""
-	if pct >= 90 {
-		data["EgressBarClass"] = "danger"
-	} else if pct >= 75 {
-		data["EgressBarClass"] = "warning"
-	}
+	populateEgress(ctx, db, eg, tenantID, data)
 
 	if fl == nil || !fl.Enabled(FlagHouseOverview, tenantID) {
 		return
@@ -241,7 +219,7 @@ func populateBandwidth(ctx context.Context, db *sql.DB, tenantID string, data ma
 	err := db.QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(ingress_bytes), 0), COALESCE(SUM(egress_bytes), 0)
 		 FROM bandwidth_usage_daily
-		 WHERE tenant_id = $1 AND date >= date_trunc('month', CURRENT_DATE)`,
+		 WHERE tenant_id = $1 AND date >= date_trunc('month', NOW() AT TIME ZONE 'UTC')::date`,
 		tenantID).Scan(&ingress, &egress)
 	if err != nil {
 		ingress, egress = 0, 0

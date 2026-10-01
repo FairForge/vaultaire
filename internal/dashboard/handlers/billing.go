@@ -239,7 +239,7 @@ func populateAccruedCharges(ctx context.Context, db *sql.DB, data map[string]any
 	var egressBytes int64
 	_ = db.QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(egress_bytes), 0) FROM bandwidth_usage_daily
-		 WHERE tenant_id = $1 AND date >= date_trunc('month', CURRENT_DATE)`,
+		 WHERE tenant_id = $1 AND date >= date_trunc('month', NOW() AT TIME ZONE 'UTC')::date`,
 		tenantID).Scan(&egressBytes)
 
 	cents := billing.AccruedCents(tier, storageBytes, egressBytes)
@@ -276,7 +276,8 @@ func populateValueStack(ctx context.Context, db *sql.DB, data map[string]any, te
 // Pricing — stored.ge Standard quota rate (annual, 2026-09-21 quota-sold
 // decision) vs competitor list prices as published August 2026 (Wasabi raised
 // to $7.99 Jul 1, B2 to $6.95 May 1). Egress on stored.ge is allowance-based
-// (throttled past 0.5× quota/mo), never billed.
+// (rate-limited past the allowance — internal/usage/egress.go, WP-R10-9),
+// never billed.
 const (
 	storedStoragePerTB = 4.49
 	storedEgressPerTB  = 0.0
@@ -337,7 +338,7 @@ func populateCostComparison(ctx context.Context, db *sql.DB, data map[string]any
 	var egressBytes int64
 	err = db.QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(egress_bytes), 0) FROM bandwidth_usage_daily
-		 WHERE tenant_id = $1 AND date >= date_trunc('month', CURRENT_DATE)`,
+		 WHERE tenant_id = $1 AND date >= date_trunc('month', NOW() AT TIME ZONE 'UTC')::date`,
 		tenantID).Scan(&egressBytes)
 	if err != nil {
 		zero()

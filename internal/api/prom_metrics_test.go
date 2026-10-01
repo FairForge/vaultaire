@@ -1,13 +1,16 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/usage"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/stretchr/testify/assert"
@@ -129,4 +132,46 @@ func TestLoggingMiddleware_ImplicitOKIsNotAnError(t *testing.T) {
 	}))
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/x", nil))
 	assert.Equal(t, int64(0), atomic.LoadInt64(&s.errorCount))
+}
+
+// WP-R10-9: the throttle's series are on the SERVER registry (the default
+// registry is not exported) and carry no tenant label.
+func TestMetricsEndpoint_ExportsEgressThrottleSeries(t *testing.T) {
+	// Arrange: one tenant past its allowance with enforcement on, one under.
+	stub := newMeterStub(usage.DefaultEgressThrottle())
+	stub.allowance.Store(1000)
+	stub.enforced.Store(true)
+	stub.m.span(context.Background(), "tenant-over").count(5000)
+	stub.m.span(context.Background(), "tenant-under").count(10)
+	s := &Server{startTime: time.Now(), healthChecker: NewBackendHealthChecker(), logger: zap.NewNop(), egress: stub.m}
+	s.initMetrics()
+
+	// Act
+	rr := httptest.NewRecorder()
+	s.handleMetrics(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+
+	// Assert
+	require.Equal(t, http.StatusOK, rr.Code)
+	body := rr.Body.String()
+	assert.Contains(t, body, "\nvaultaire_egress_throttled_tenants 1\n")
+	for _, series := range []string{
+		`vaultaire_egress_throttle_engaged_total{surface="s3"}`,
+		`vaultaire_egress_throttle_engaged_total{surface="cdn"}`,
+		`vaultaire_egress_would_throttle_total{surface="s3"}`,
+		`vaultaire_egress_would_throttle_total{surface="cdn"}`,
+		`vaultaire_egress_throttle_rejected_total{surface="s3"}`,
+		`vaultaire_egress_throttle_rejected_total{surface="cdn"}`,
+		"\nvaultaire_egress_throttled_bytes_total ",
+	} {
+		assert.Contains(t, body, series)
+	}
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "vaultaire_egress_") {
+			labels := ""
+			if i := strings.IndexByte(line, '{'); i >= 0 {
+				labels = line[i:]
+			}
+			assert.NotContains(t, labels, "tenant", "no tenant label on the egress series")
+		}
+	}
 }

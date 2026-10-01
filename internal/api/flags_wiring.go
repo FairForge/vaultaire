@@ -39,6 +39,13 @@ const (
 	// the quota, fill from usage) on the dashboard overview in place of the
 	// storage gauge (dashboard plan Phase 2). Default OFF, per tenant first.
 	flagHouseOverview = handlers.FlagHouseOverview
+
+	// flagEgressThrottle turns the egress allowance into a rate cap
+	// (WP-R10-9, decision D-25): a tenant past its monthly allowance has its
+	// GetObject and /cdn bodies paced. Default OFF: the same decision is only
+	// counted (vaultaire_egress_would_throttle_total). On globally, a tenant
+	// row with enabled=false is the exemption (synthetic check, demos).
+	flagEgressThrottle = "egress_throttle"
 )
 
 // signupsDefaultFromEnv is the `signups` flag's in-code default: the

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/usage"
 	"github.com/go-chi/chi/v5"
 
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
@@ -112,7 +113,7 @@ func searchCustomers(ctx context.Context, db *sql.DB, q string, logger *zap.Logg
 }
 
 // HandleCustomerDetail renders the customer detail support page.
-func HandleCustomerDetail(tmpl *template.Template, db *sql.DB, logger *zap.Logger) http.HandlerFunc {
+func HandleCustomerDetail(tmpl *template.Template, db *sql.DB, logger *zap.Logger, eg usage.EgressStatusReader) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
 		if sd == nil {
@@ -135,7 +136,7 @@ func HandleCustomerDetail(tmpl *template.Template, db *sql.DB, logger *zap.Logge
 		withCSRF(r.Context(), data)
 		withFlash(r.Context(), data)
 
-		if !loadTenantDetail(r.Context(), db, tenantID, data, logger) {
+		if !loadTenantDetail(r.Context(), db, eg, tenantID, data, logger) {
 			http.NotFound(w, r)
 			return
 		}
