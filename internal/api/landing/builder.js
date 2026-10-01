@@ -158,13 +158,18 @@
             g.addEventListener('pointerdown', function (e) {
                 if (e.button > 0) return;
                 e.preventDefault();
-                var start = svgPoint(svg, e.clientX, e.clientY), ox = pos.x, oy = pos.y, moved = false, out = false;
-                try { g.setPointerCapture(e.pointerId); } catch (err) { /* older engines */ }
+                var id = e.pointerId, start = svgPoint(svg, e.clientX, e.clientY), ox = pos.x, oy = pos.y, moved = false, out = false, done = false;
                 g.classList.add('lift');
                 if (opts.start) opts.start();
+                // Raise the piece BEFORE taking the pointer: moving a node in the
+                // DOM releases any capture it holds, which left pieces stuck "in
+                // hand" after a click. The move and the drop are read on the window,
+                // so a drop is never missed even where capture is not granted.
                 g.parentNode.appendChild(g);
+                try { g.setPointerCapture(id); } catch (err) { /* older engines */ }
                 if (g.focus) { try { g.focus({ preventScroll: true }); } catch (err) { /* no focus on svg */ } }
                 function mv(ev) {
+                    if (ev.pointerId !== id) return;
                     var p = svgPoint(svg, ev.clientX, ev.clientY);
                     var nx = Math.round(ox + p.x - start.x), ny = Math.round(oy + p.y - start.y);
                     if (nx !== ox || ny !== oy) { moved = true; if (opts.moving) opts.moving(); }
@@ -176,8 +181,14 @@
                     g.style.opacity = out ? '0.35' : '';
                     if (opts.follow) opts.follow();
                 }
-                function up() {
-                    g.removeEventListener('pointermove', mv);
+                function up(ev) {
+                    if (done || (ev && ev.pointerId !== undefined && ev.pointerId !== id)) return;
+                    done = true;
+                    window.removeEventListener('pointermove', mv);
+                    window.removeEventListener('pointerup', up);
+                    window.removeEventListener('pointercancel', up);
+                    g.removeEventListener('lostpointercapture', up);
+                    try { g.releasePointerCapture(id); } catch (err) { /* not captured */ }
                     g.classList.remove('lift');
                     g.style.opacity = '';
                     if (out) { opts.outside(); return; }
@@ -187,9 +198,10 @@
                     if (moved && navigator.vibrate) { try { navigator.vibrate(6); } catch (err) { /* ignore */ } }
                     if (opts.end) opts.end(moved);
                 }
-                g.addEventListener('pointermove', mv);
-                g.addEventListener('pointerup', up, { once: true });
-                g.addEventListener('pointercancel', up, { once: true });
+                window.addEventListener('pointermove', mv);
+                window.addEventListener('pointerup', up);
+                window.addEventListener('pointercancel', up);
+                g.addEventListener('lostpointercapture', up);
             });
         }
 

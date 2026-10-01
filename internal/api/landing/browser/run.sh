@@ -28,3 +28,14 @@ cat "$OUT/result.txt"
 grep -q '^DONE$' "$OUT/result.txt" || { echo "harness did not finish"; exit 1; }
 if grep -q '^FAIL' "$OUT/result.txt"; then echo "browser checks FAILED"; exit 1; fi
 echo "browser checks passed ($(grep -c '^PASS' "$OUT/result.txt") checks)"
+
+# Real mouse input through the DevTools protocol (pointer.mjs): the one thing
+# synthetic events cannot see is a lost pointer capture. Needs Node 22+ (global
+# WebSocket); CI installs it, locally it is skipped with a note when missing.
+if command -v node >/dev/null 2>&1 && node -e 'process.exit(typeof WebSocket === "function" ? 0 : 1)' 2>/dev/null; then
+  node internal/api/landing/browser/pointer.mjs "$OUT/closed.html" "$CHROME" | tee "$OUT/pointer.txt"
+  if grep -q '^FAIL' "$OUT/pointer.txt"; then echo "pointer checks FAILED"; exit 1; fi
+  echo "pointer checks passed ($(grep -c '^PASS' "$OUT/pointer.txt") checks)"
+else
+  echo "pointer checks skipped: node 22+ not found"
+fi
