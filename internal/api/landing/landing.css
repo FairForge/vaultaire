@@ -755,6 +755,9 @@
     .piece .hit { fill: transparent; }
     .piece.lift { cursor: grabbing; scale: 1.08; rotate: -3deg; filter: drop-shadow(0 3px 0 rgba(0, 0, 0, 0.28)); }
     .piece { transform-box: fill-box; transform-origin: 50% 100%; transition: scale 0.15s ease, rotate 0.15s ease; }
+    .piece.settle { transition: transform 0.22s cubic-bezier(0.3, 1.4, 0.5, 1), scale 0.15s ease, rotate 0.15s ease; }
+    /* a finger on a piece drags it; a finger on the room still scrolls the page */
+    .scene .piece, .final-art .piece { touch-action: none; }
     .piece:focus-visible .hit { stroke: var(--yellow); stroke-width: 1; stroke-dasharray: 2 1; }
     .piece.pop { animation: pop 0.35s cubic-bezier(0.3, 1.8, 0.5, 1); }
     @keyframes pop { from { scale: 0.4; } to { scale: 1; } }

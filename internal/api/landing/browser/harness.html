@@ -112,6 +112,28 @@ function run() {
         ok(hh.querySelector('.r-actions a[href^="/register?std_tb=2&vault_tb=5&room=v2."]') !== null, 'receipt button carries the house into /register', (hh.querySelector('.r-actions a.btn-primary') || {}).getAttribute && hh.querySelector('.r-actions a.btn-primary').getAttribute('href'));
         var hs = hh.defaultView.sgHouse(); ok(hs.std === 2 && hs.vault === 5 && /^v2\./.test(hs.room), 'sgHouse reports TB per floor for the waitlist', JSON.stringify(hs));
 
+        // ---- hero scene: pieces drag on touch, fall to the floor or onto what is under them
+        var hero = d.querySelector('svg.scene[data-play]'), hr = hero.getBoundingClientRect(), hu = hr.width / 160;
+        function at(g) { var b = g.getBoundingClientRect(); return [b.left + b.width / 2, b.top + b.height / 2]; }
+        function drag(g, dx, dy, type) {
+            var c = at(g);
+            g.dispatchEvent(new w.PointerEvent('pointerdown', { bubbles: true, clientX: c[0], clientY: c[1], pointerId: 2, button: 0, pointerType: type || 'mouse' }));
+            g.dispatchEvent(new w.PointerEvent('pointermove', { bubbles: true, clientX: c[0] + dx * hu, clientY: c[1] + dy * hu, pointerId: 2, button: 0, pointerType: type || 'mouse' }));
+            g.dispatchEvent(new w.PointerEvent('pointerup', { bubbles: true, clientX: c[0] + dx * hu, clientY: c[1] + dy * hu, pointerId: 2, button: 0, pointerType: type || 'mouse' }));
+        }
+        function posOf(g) { var m = /translate\((-?\d+) (-?\d+)\)/.exec(g.getAttribute('transform')); return [Number(m[1]), Number(m[2])]; }
+        var hbox = hero.querySelector('.piece[transform="translate(66 13)"]'), hdr = hero.querySelector('.piece[transform="translate(50 25)"]'), hlamp = hero.querySelector('.piece[transform="translate(53 15)"]');
+        ok(w.getComputedStyle(hbox).touchAction === 'none', 'hero pieces take the touch', w.getComputedStyle(hbox).touchAction);
+        drag(hbox, -36, -8, 'touch');
+        ok(posOf(hbox)[1] === 33, 'a box dropped in mid-air falls to the floor', posOf(hbox).join(','));
+        drag(hbox, 34, -28);
+        ok(posOf(hbox)[1] === 12 && posOf(hbox)[0] === 64, 'a box dropped over the dresser rests on it', posOf(hbox).join(','));
+        drag(hdr, -50, 0);
+        ok(posOf(hbox)[1] === 33 && posOf(hlamp)[1] === 35, 'what stood on the dresser falls when it leaves', posOf(hbox).join(',') + ' ' + posOf(hlamp).join(','));
+        hbox.dispatchEvent(new w.PointerEvent('pointerdown', { bubbles: true, clientX: at(hbox)[0], clientY: at(hbox)[1], pointerId: 3, button: 0, pointerType: 'mouse' }));
+        hbox.dispatchEvent(new w.PointerEvent('pointerup', { bubbles: true, clientX: at(hbox)[0], clientY: at(hbox)[1], pointerId: 3, button: 0, pointerType: 'mouse' }));
+        ok(hbox.classList.contains('pop') && posOf(hbox)[1] === 33, 'a tap bounces the piece where it is');
+
         // ---- export renders a PNG of the right size
         var got = null; w.HTMLAnchorElement.prototype.click = function () { got = this.download; };
         var dims = null, ob = w.HTMLCanvasElement.prototype.toBlob;
