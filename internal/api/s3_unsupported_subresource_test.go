@@ -41,13 +41,21 @@ func TestDetermineOperation_UnsupportedSubresource(t *testing.T) {
 		}
 	}
 
-	objectLevel := []struct{ method, path string }{
+	otherCases := []struct{ method, path string }{
 		{"GET", "/bkt/obj?attributes"},
 		{"GET", "/bkt/obj?torrent"},
 		{"POST", "/bkt/obj?select&select-type=2"},
 		{"PUT", "/bkt/obj?renameObject"},
+		// not S3 operations, but each used to run the destructive plain one
+		{"DELETE", "/bkt/obj?retention"},
+		{"DELETE", "/bkt/obj?legal-hold"},
+		{"DELETE", "/bkt/obj?acl"},
+		{"PUT", "/bkt/obj?uploadId=upload-0123"},
+		{"PUT", "/bkt?location"},
+		{"DELETE", "/bkt?versioning"},
+		{"DELETE", "/bkt?notification"},
 	}
-	for _, tc := range objectLevel {
+	for _, tc := range otherCases {
 		r := httptest.NewRequest(tc.method, tc.path, nil)
 		req, err := p.ParseRequest(r)
 		require.NoError(t, err, "%s %s", tc.method, tc.path)
