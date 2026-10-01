@@ -161,6 +161,7 @@
                 var start = svgPoint(svg, e.clientX, e.clientY), ox = pos.x, oy = pos.y, moved = false, out = false;
                 try { g.setPointerCapture(e.pointerId); } catch (err) { /* older engines */ }
                 g.classList.add('lift');
+                if (opts.start) opts.start();
                 g.parentNode.appendChild(g);
                 if (g.focus) { try { g.focus({ preventScroll: true }); } catch (err) { /* no focus on svg */ } }
                 function mv(ev) {
@@ -251,6 +252,52 @@
                     if (!e.core) e.g.style.setProperty('--nf', tintFor(night ? lampLevel(e.pos.x + e.w / 2, e.pos.y + e.h / 2, lamps) : 0));
                 });
             }
+            // The scene has a floor and things stand on things: a piece dropped
+            // in mid-air falls to the floor or onto whatever is under it (a box
+            // on the dresser, the lamp on the box); drag the dresser away and what
+            // stood on it falls too. A tap just bounces the piece.
+            var floor = 0, REST = 2; // pieces sit 2 px into their support, like the art
+            function overlapX(a, b) { return Math.min(a.pos.x + a.w, b.pos.x + b.w) - Math.max(a.pos.x, b.pos.x); }
+            function restY(e) {
+                var y = floor - e.h;
+                entries.forEach(function (o) {
+                    // only something at least as wide can hold a piece (a box on
+                    // the dresser, not a dresser on a lamp), and it must fit above it
+                    if (o === e || o.lifted || o.w < e.w || overlapX(e, o) < e.w * 0.5) return;
+                    var top = o.pos.y - e.h + REST;
+                    if (top < 0 || top < e.pos.y - 8) return; // the support is above the piece, not under it
+                    if (top < y) y = top;
+                });
+                return y;
+            }
+            function settle(e) {
+                var y = restY(e);
+                if (Math.abs(y - e.pos.y) <= 3) return false;
+                e.pos.y = y;
+                e.g.classList.add('settle');
+                setTimeout(function () { e.g.classList.remove('settle'); }, 260);
+                e.g.setAttribute('transform', 'translate(' + e.pos.x + ' ' + e.pos.y + ')');
+                return true;
+            }
+            function bounce(e) {
+                e.g.classList.remove('pop');
+                void e.g.getBoundingClientRect();
+                e.g.classList.add('pop');
+            }
+            function land(e, moved) {
+                e.lifted = false;
+                if (moved) {
+                    settle(e);
+                    e.grounded = true;
+                    for (var pass = 0; pass < 6; pass++) {
+                        var fell = false;
+                        entries.forEach(function (o) { if (o !== e && o.grounded && settle(o)) fell = true; });
+                        if (!fell) break;
+                    }
+                }
+                bounce(e);
+                relightScene();
+            }
             svg.querySelectorAll('.piece').forEach(function (g) {
                 var m = /translate\((-?\d+) (-?\d+)\)/.exec(g.getAttribute('transform') || '');
                 var hit = g.querySelector('.hit');
@@ -260,8 +307,12 @@
                 var e = { g: g, pos: pos, w: w, h: h, shadow: shadowNode(), core: c ? { cx: +c.getAttribute('cx'), cy: +c.getAttribute('cy'), rx: +c.getAttribute('rx'), ry: +c.getAttribute('ry') } : null };
                 entries.push(e);
                 shadows.appendChild(e.shadow);
-                makeDraggable(svg, g, pos, w, h, vb, { follow: relightScene, end: relightScene });
+                makeDraggable(svg, g, pos, w, h, vb, { start: function () { e.lifted = true; }, follow: relightScene, end: function (moved) { land(e, moved); } });
             });
+            // the floor is where the lowest piece stands; a piece that already
+            // rests on it (or on another piece) takes part in the falling
+            entries.forEach(function (e) { floor = Math.max(floor, e.pos.y + e.h); });
+            entries.forEach(function (e) { e.grounded = Math.abs(restY(e) - e.pos.y) <= 3; });
             document.addEventListener('sg-theme', relightScene);
             relightScene();
         });

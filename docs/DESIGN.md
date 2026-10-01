@@ -73,6 +73,7 @@ Rules: one accent (yellow) does the pointing; red only for remove/danger; never 
 - 3D pieces use `cuboid()` (front face + top + side at 3 px depth); every standing piece ends in a 1 px `o` shadow row. Palette letters live at the top of `sprites.py`; `#` = `currentColor` for the tintable hoodie.
 - Size means capacity: box 17×15 (1 TB), dresser 31×23 (5 TB), bookcase 31×44 (10 TB); the mascot is 26 tall, so a dresser is chest-high and a bookcase taller than a person. Keep that ordering if you add a piece.
 - "Stickers" (`.sticker`) get a 2 px white die-cut via four drop-shadows plus a soft drop; used in trays, tier cards, drag ghosts.
+- The decorative scenes (`svg[data-play]`: hero and final) are toys with a floor: a dropped piece falls to the floor or onto something at least as wide as itself (a box on the dresser, the lamp on the box), what stood on a piece falls when it is dragged away, and a tap bounces it. Pieces take the touch (`touch-action: none`) while the room around them still scrolls.
 - Two-frame animations (mascot wave, flame flicker) are two `<use>`s toggled by CSS opacity keyframes, never JS timers.
 - Add a sprite: draw it in `sprites.py`, add to `SPRITES`, `make landing`, look at `sprites-preview` before using it.
 
