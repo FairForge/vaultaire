@@ -95,6 +95,43 @@ func (p *S3Parser) parsePath(req *S3Request) {
 	}
 }
 
+// opUnsupportedSubresource is the operation of a request that names an S3
+// sub-resource this server has no handler for (for that method). It has no
+// case in handleS3Request, so it is answered 501 NotImplemented.
+const opUnsupportedSubresource = "UnsupportedSubresource"
+
+// The S3 sub-resource names, implemented or not. A request that names one
+// and matched no handler must not fall through to the method's plain
+// operation: before WP-R4-7 `DELETE /{bucket}?lifecycle` was DeleteBucket (an
+// empty bucket was deleted), `PUT /{bucket}?policy` was CreateBucket (200 —
+// the client believed a policy applied) and `GET /{bucket}?lifecycle` was a
+// listing. A1 closed this for ?acl only. partNumber is deliberately absent
+// from the object list: it is a parameter of plain GetObject/HeadObject.
+var (
+	bucketSubresources = []string{
+		"accelerate", "acl", "analytics", "cors", "delete", "encryption",
+		"intelligent-tiering", "inventory", "lifecycle", "location", "logging",
+		"metadataConfiguration", "metadataTable", "metrics", "notification",
+		"object-lock", "ownershipControls", "policy", "policyStatus",
+		"publicAccessBlock", "replication", "requestPayment", "session",
+		"tagging", "uploads", "versioning", "versions", "website",
+	}
+	objectSubresources = []string{
+		"acl", "attributes", "legal-hold", "renameObject", "restore",
+		"retention", "select", "tagging", "torrent", "uploadId", "uploads",
+	}
+)
+
+// namesSubresource reports whether the query carries one of the names.
+func namesSubresource(query map[string]string, names []string) bool {
+	for _, n := range names {
+		if _, ok := query[n]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // determineOperation determines the S3 operation from method and path
 func (p *S3Parser) determineOperation(req *S3Request, method string) {
 	if req.Bucket == "" {
@@ -164,6 +201,12 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 		default:
 			req.Operation = "Unknown"
 		}
+		switch req.Operation {
+		case "ListObjects", "CreateBucket", "DeleteBucket":
+			if namesSubresource(req.Query, bucketSubresources) {
+				req.Operation = opUnsupportedSubresource
+			}
+		}
 		return
 	}
 
@@ -220,6 +263,12 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 		}
 	default:
 		req.Operation = "Unknown"
+	}
+	switch req.Operation {
+	case "GetObject", "PutObject", "DeleteObject", "PostObject":
+		if namesSubresource(req.Query, objectSubresources) {
+			req.Operation = opUnsupportedSubresource
+		}
 	}
 }
 

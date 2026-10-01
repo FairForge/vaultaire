@@ -25,11 +25,15 @@ func TestHandleAdminStats_RendersAggregates(t *testing.T) {
 	db := testDashDB(t)
 	t.Cleanup(func() { _ = db.Close() })
 	ref := fmt.Sprintf("stats-test-%d.example", time.Now().UnixNano())
+	// The collector and the page both count UTC days. CURRENT_DATE is the
+	// session's local date, so seeding with it failed every evening west of
+	// Greenwich (and never in CI, which runs in UTC).
+	today := time.Now().UTC().Format("2006-01-02")
 	_, err := db.Exec(`INSERT INTO site_stats_daily (day, kind, name, referrer, utm_source, utm_medium, utm_campaign, country, device, n)
-		VALUES (CURRENT_DATE, 'view', '/', $1, 'lowendtalk', '', '', 'DE', 'phone', 7)`, ref)
+		VALUES ($2::date, 'view', '/', $1, 'lowendtalk', '', '', 'DE', 'phone', 7)`, ref, today)
 	require.NoError(t, err)
 	_, err = db.Exec(`INSERT INTO site_stats_daily (day, kind, name, referrer, utm_source, utm_medium, utm_campaign, country, device, n)
-		VALUES (CURRENT_DATE, 'event', 'builder.attic', $1, '', '', '', 'DE', 'phone', 3)`, ref)
+		VALUES ($2::date, 'event', 'builder.attic', $1, '', '', '', 'DE', 'phone', 3)`, ref, today)
 	require.NoError(t, err)
 	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM site_stats_daily WHERE referrer = $1`, ref) })
 
@@ -41,7 +45,7 @@ func TestHandleAdminStats_RendersAggregates(t *testing.T) {
 	assert.Contains(t, body, "<h1>Traffic</h1>")
 	assert.Contains(t, body, ref, "the referrer appears in the top table")
 	assert.Contains(t, body, "builder.attic")
-	assert.Contains(t, body, time.Now().UTC().Format("2006-01-02"), "today's row is listed")
+	assert.Contains(t, body, today, "today's row is listed")
 	assert.Contains(t, body, "Funnel (all time)")
 	assert.Contains(t, body, `href="/admin/stats" class="sidebar-link sidebar-link--active"`)
 }
