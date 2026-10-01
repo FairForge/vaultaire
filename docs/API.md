@@ -206,10 +206,9 @@ refused a delete). The full code list from `internal/api/s3_errors.go`:
 | 411 | `MissingContentLength` |
 | 412 | `PreconditionFailed` |
 | 413 | `EntityTooLarge` |
-| 429 | `SlowDown` |
 | 500 | `InternalError` |
 | 501 | `NotImplemented` |
-| 503 | `ServiceUnavailable` (every backend unreachable; carries `Retry-After`) |
+| 503 | `ServiceUnavailable` (every backend unreachable; carries `Retry-After`), `SlowDown` (+ `Retry-After`: the egress stream guard, see Rate limits) |
 
 An object miss on any backend is 404 `NoSuchKey`; an unreachable backend is
 never reported as a miss — it is 503, so sync clients do not treat the object
@@ -220,8 +219,8 @@ invented code.
 
 | Surface | Limit |
 |---------|-------|
-| S3 API | none today. `SlowDown` exists in the code for a monthly bandwidth cap that is not enforced; the egress throttle past the free allowance (0.5× quota/month on Standard) is WP-R10-9 |
-| CDN | 100 requests/s, burst 200, **per bucket** (keyed `cdn:<slug>:<bucket>`, not per client); the refusal is currently a 404 — WP-R14-1 moves it to per-IP + 429 |
+| S3 API | no request-rate limit. **Egress allowance** (WP-R10-9): each UTC month an account may download 0.5 × its Standard quota + 1 × its Vault quota (`GET /api/v1/user/usage` → `egress_allowance`, `egress_used`, `egress_throttled`, `egress_rate_limit_bytes_per_sec`, `egress_resets_at`). Past it, GetObject bodies (header-signed and presigned) are rate-limited — one token bucket per account, shared with `/cdn` — and never billed; uploads, listings, HEAD and errors are not slowed. While rate-limited, more than 16 concurrent downloads are answered 503 `SlowDown` + `Retry-After: 60`. Enforcement is the `egress_throttle` flag (off until launch) |
+| CDN | Egress counts on the bucket owner's allowance and shares its rate limit; while the owner is rate-limited, more than 16 concurrent `/cdn` downloads answer 429 + `Retry-After: 60`. Request rate: 100 requests/s, burst 200, **per bucket** (keyed `cdn:<slug>:<bucket>`, not per client); the refusal is currently a 404 — WP-R14-1 moves it to per-IP + 429 |
 | JSON API (`/api/v1/*`) | 100 requests/min per tenant, burst 10, `X-RateLimit-*` + `Retry-After` |
 | `/auth/login`, password reset | 5/min per IP; `/auth/register` 10/min per IP; `/api/waitlist` 10/hour per IP |
 | Email | 10 messages/min per recipient |
