@@ -108,6 +108,8 @@ func setupDeletionFixture(t *testing.T) *deletionFixture {
 	f.runner.Auth = f.auth
 	f.runner.Sessions = f.sessions
 	f.runner.BatchSize = 2
+	// The shared test database holds other packages' past-due accounts.
+	f.runner.onlyDue = func(d account.Due) bool { return d.UserID == f.userID }
 
 	t.Cleanup(func() {
 		ctx := context.Background()
@@ -264,6 +266,37 @@ func TestAccountDeletionRunner_ErasesEverythingOnce(t *testing.T) {
 	assert.Equal(t, int32(1), f.stripe.calls.Load())
 }
 
+// Packages run in parallel on one test database, and internal/billing and
+// internal/account seed their own past-due accounts to call EraseRows on.
+// RunOnce walks every due account, so this fixture's runs erased theirs
+// mid-test ("account is not pending deletion") and counted them in its own
+// result — main went red twice in the day after #529. The fixture's runner
+// sees its own account only.
+func TestAccountDeletionRunner_FixtureLeavesOtherPackagesDueAccountsAlone(t *testing.T) {
+	f := setupDeletionFixture(t)
+	f.seed(time.Now().Add(-time.Hour))
+	otherUser := uuid.New().String()
+	otherTenant := "other-pkg-" + otherUser[:8]
+	otherEmail := otherTenant + "@test.local"
+	f.exec(`INSERT INTO users (id, email, password_hash, company, status, deletion_scheduled_at, created_at, updated_at)
+	        VALUES ($1, $2, 'x', 'Other Pkg', 'pending_deletion', NOW() - INTERVAL '2 hours', NOW(), NOW())`, otherUser, otherEmail)
+	f.exec(`INSERT INTO tenants (id, name, email, access_key, secret_key) VALUES ($1, 'Other Pkg', $2, $3, $4)`,
+		otherTenant, otherEmail, "VKOP"+otherUser[:8], "SKOP"+otherUser[:8])
+	t.Cleanup(func() {
+		_, _ = f.db.Exec(`DELETE FROM audit_logs WHERE tenant_id = $1`, otherTenant)
+		_, _ = f.db.Exec(`DELETE FROM tenants WHERE id = $1`, otherTenant)
+		_, _ = f.db.Exec(`DELETE FROM users WHERE id::text = $1`, otherUser)
+	})
+
+	res, err := f.runner.RunOnce(context.Background())
+	require.NoError(t, err, "run: %+v", res)
+	require.Len(t, res.Tenants, 1, "only the fixture's own account")
+	assert.Equal(t, f.tenantID, res.Tenants[0].TenantID)
+	assert.Equal(t, outcomeErased, res.Tenants[0].Outcome)
+	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM users WHERE id::text = $1 AND status = 'pending_deletion'`, otherUser), "another package's due account is still there")
+	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM tenants WHERE id = $1`, otherTenant))
+}
+
 func TestAccountDeletionRunner_StripeFailureDefersTheTenantAndTouchesNoObject(t *testing.T) {
 	f := setupDeletionFixture(t)
 	f.seed(time.Now().Add(-time.Hour))
@@ -323,16 +356,55 @@ func TestAccountDeletionRunner_BackendFailureLeavesTheRowAndResumesNextRun(t *te
 	assert.Equal(t, int32(1), f.stripe.calls.Load())
 	var cancelled sql.NullTime
 	require.NoError(t, f.db.QueryRow(`SELECT deletion_stripe_cancelled_at FROM tenants WHERE id = $1`, f.tenantID).Scan(&cancelled))
-	assert.True(t, cancelled.Valid, "the Stripe stamp survives so tomorrow does not cancel twice")
+	assert.True(t, cancelled.Valid, "the Stripe stamp records the cancel")
 
+	// Stripe's customer.subscription.deleted delivery clears the id, so
+	// tomorrow's run has nothing left to cancel.
+	f.exec(`UPDATE tenants SET stripe_subscription_id = NULL, subscription_status = 'canceled' WHERE id = $1`, f.tenantID)
 	f.second.fail.Store(false)
 	res, err = f.runner.RunOnce(ctx)
 	require.NoError(t, err)
 	require.Len(t, res.Tenants, 1)
 	assert.Equal(t, outcomeErased, res.Tenants[0].Outcome)
+	assert.True(t, res.Tenants[0].StripeCancelled, "the stamp still says the runner cancelled it")
 	assert.Equal(t, int32(1), f.stripe.calls.Load(), "Stripe not called again")
 	assert.False(t, fileExists(filepath.Join(f.secDir, f.container(), "b/three.txt")))
 	assert.Zero(t, f.count(`SELECT COUNT(*) FROM users WHERE id::text = $1`, f.userID))
+}
+
+// The stamp says an earlier run cancelled a subscription — not that the one
+// on the row today is cancelled. A run that stamps and is then deferred
+// leaves the account alive (D-16); the customer may cancel the deletion, buy
+// again, and schedule a second deletion months later. That run must cancel
+// the new subscription before it erases, or Stripe bills an account that no
+// longer exists.
+func TestAccountDeletionRunner_StaleStripeStampDoesNotSkipANewSubscription(t *testing.T) {
+	f := setupDeletionFixture(t)
+	f.seed(time.Now().Add(-time.Hour))
+	ctx := context.Background()
+
+	// Run 1: Stripe cancelled and stamped, then a backend refuses → deferred.
+	f.second.fail.Store(true)
+	res, err := f.runner.RunOnce(ctx)
+	require.Error(t, err)
+	require.Len(t, res.Tenants, 1)
+	require.Equal(t, outcomeDeferred, res.Tenants[0].Outcome)
+	require.Equal(t, int32(1), f.stripe.calls.Load())
+	require.Equal(t, 1, f.count(`SELECT COUNT(*) FROM tenants WHERE id = $1 AND deletion_stripe_cancelled_at IS NOT NULL`, f.tenantID), "fixture: the stamp is set")
+
+	// The customer changes their mind, the webhook clears the cancelled
+	// subscription, they check out again, and later schedule a new deletion.
+	require.NoError(t, account.NewService(f.db, zap.NewNop()).Cancel(ctx, f.userID))
+	f.exec(`UPDATE tenants SET stripe_subscription_id = $2, subscription_status = 'active' WHERE id = $1`, f.tenantID, "sub_again_"+f.suffix)
+	f.exec(`UPDATE users SET status = 'pending_deletion', deletion_scheduled_at = NOW() - INTERVAL '1 hour' WHERE id::text = $1`, f.userID)
+
+	f.second.fail.Store(false)
+	res, err = f.runner.RunOnce(ctx)
+	require.NoError(t, err, "run: %+v", res)
+	require.Len(t, res.Tenants, 1)
+	assert.Equal(t, outcomeErased, res.Tenants[0].Outcome)
+	assert.True(t, res.Tenants[0].StripeCancelled)
+	assert.Equal(t, int32(2), f.stripe.calls.Load(), "the subscription bought after the first cancel is cancelled before the erase")
 }
 
 func TestAccountDeletionRunner_CancelDuringTheWalkStopsIt(t *testing.T) {
