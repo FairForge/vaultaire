@@ -99,6 +99,10 @@ jobs:
         with:
           go-version: "1.25"
           cache: true
+      - name: Set up Node (pointer.mjs drives Chrome over the DevTools protocol)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - name: Browser checks
         run: bash internal/api/landing/browser/run.sh
         env:
