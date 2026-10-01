@@ -35,7 +35,9 @@ import (
 // Per due tenant, in this order, every step idempotent and resumable:
 //
 //	a. Stripe — cancel the subscription immediately and stamp
-//	   tenants.deletion_stripe_cancelled_at. A Stripe error (or no Stripe
+//	   tenants.deletion_stripe_cancelled_at. A subscription id on the row is
+//	   cancelled on every run, stamped or not (the call is idempotent; a
+//	   stale stamp must never let an erase skip it). A Stripe error (or no Stripe
 //	   client while a subscription id is set) defers THIS tenant to the next
 //	   run; nothing of theirs is touched before billing is settled.
 //	b. Objects — every object_head_cache row is deleted on its RECORDED
@@ -126,6 +128,10 @@ type AccountDeletionRunner struct {
 
 	now         func() time.Time
 	beforeBatch func() // test hook: runs before each object batch
+	// onlyDue is a test hook: when set, RunOnce skips every due account it
+	// rejects. Packages share one test database and seed their own past-due
+	// accounts; a fixture's run must not erase them. Never set in production.
+	onlyDue func(account.Due) bool
 }
 
 // TenantErasure is one tenant's outcome in a run.
@@ -276,6 +282,9 @@ func (r *AccountDeletionRunner) RunOnce(ctx context.Context) (AccountDeletionRes
 		return res, fmt.Errorf("account deletion: %w", err)
 	}
 	for _, d := range dues {
+		if r.onlyDue != nil && !r.onlyDue(d) {
+			continue
+		}
 		if ctx.Err() != nil {
 			res.Errors = append(res.Errors, "run deadline reached before tenant "+d.TenantID)
 			break
@@ -429,9 +438,10 @@ func (r *AccountDeletionRunner) defer_(te TenantErasure, log *zap.Logger, stage 
 	return te
 }
 
-// cancelSubscription is stage a. Idempotent through the stamp: a run that
-// crashed after Stripe answered but before the stamp repeats the cancel,
-// which Stripe answers with the already-cancelled subscription.
+// cancelSubscription is stage a. Idempotent through CancelSubscription: a
+// run that repeats it (a crash before the stamp, a deferred tenant whose
+// webhook has not cleared the id yet) finds the subscription already
+// cancelled at Stripe. The stamp records that this runner cancelled it.
 func (r *AccountDeletionRunner) cancelSubscription(ctx context.Context, tenantID string, te *TenantErasure) error {
 	var subID sql.NullString
 	var stamped sql.NullTime
@@ -443,13 +453,17 @@ func (r *AccountDeletionRunner) cancelSubscription(ctx context.Context, tenantID
 	if err != nil {
 		return fmt.Errorf("read subscription: %w", err)
 	}
-	if stamped.Valid {
-		te.StripeCancelled = true
+	if !subID.Valid || subID.String == "" {
+		// Nothing to bill: never subscribed, or the webhook cleared the id
+		// after an earlier run's cancel (the stamp says which).
+		te.StripeCancelled = stamped.Valid
 		return nil
 	}
-	if !subID.Valid || subID.String == "" {
-		return nil // nothing to bill; the webhook may already have downgraded
-	}
+	// A subscription id is on the row. The stamp is not proof that THIS one
+	// is cancelled: a run that stamped and was then deferred or cancelled
+	// leaves the stamp behind while the account lives on (D-16), and the
+	// customer may have bought again since. CancelSubscription answers an
+	// already-cancelled subscription with success, so ask every time.
 	if r.Stripe == nil {
 		return fmt.Errorf("subscription %s is set but STRIPE_SECRET_KEY is not configured — the account is not erased until billing can be cancelled", subID.String)
 	}

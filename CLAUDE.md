@@ -43,7 +43,9 @@ go test ./internal/auth/... -run TestCreateUserWithTenant -v
 # (CI sets it). Never point tests at the shared dev DB `vaultaire`. Packages run
 # in parallel on ONE database: a test may only touch its own tenant's rows —
 # no global reconcile, no table-wide DELETE/UPDATE, GCI cleanups bounded to the
-# hashes the fixture wrote (`cleanupTenantChunkRows`, Review R15).
+# hashes the fixture wrote (`cleanupTenantChunkRows`, Review R15). A job that
+# walks every tenant (the deletion runner) runs scoped in its tests (`onlyDue`):
+# other packages seed their own past-due accounts on the same database.
 make test-db
 
 # Run a specific package
