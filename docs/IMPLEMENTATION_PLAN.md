@@ -12,6 +12,7 @@
 7. **WP-R2-1** write-new-key-then-swap (L) — recommended post-launch unless versioning is sold as byte retention.
 8. **WP-R10-3b** async GDPR export (S), then SYNTHESIS table B by size.
 Code freeze = Stage 6 (week of Oct 19): after it the driver switches to owner-checklist mode. **Owner critical path ([YOU], click paths in the SYNTHESIS "Pre-launch checklist"):** Stripe (endpoint pinned to API 2023-08-16, both secrets, six house prices, then flip `quota_checkout` + `house_overview`), synthetic tenant + `SYNTHETIC_CHECK_*`, install the four `deploy/monitoring/vaultaire-{backends,tls,auth,synthetic}.yml` rule files on SLC, backups off-box (WP-R9-7), HAProxy `/metrics` deny + CF header strip (WP-R1-1), iDrive regional pairs, Lyve scoped key + root TFA, the `ENCRYPTION_MASTER_KEY` decision, CSAM/DMCA, email provider, Cloudflare items, status page, standby VPS, and decisions D-1..D-4, D-7, D-9, D-12..D-24 (D-19 was applied and needs confirmation). The stage list under the 09-22 line below is still the owner sequence.
+**Operating mode (2026-10-01, owner decision): BUILD THE FULL PLAN — Isaac is customer zero.** The whole plan is worked through with or without outside customers. After the pre-launch queue above, the order of record is the **FULL-PLAN TRACK** section (before Tier 2): ten stages in dependency order, gated by prerequisites and by use on tenant zero instead of customer counts; Phases 31–39 (smart programmable buckets and what the original master plan had that this plan did not) are at the end of the file. The public-launch gates (signups, Stripe, CSAM/DMCA, alerting) are unchanged.
 **Status (2026-09-22, superseded by the 2026-09-30 line above — kept as history)**: **Launch = October 31, 2026 (T-39). ALL launch-blocking CODE is shipped** — Stages 0, 1, 1B and 3 done; backend-outage alerting live (5.12.10, #457); quota-sold pricing copy (#458). Prod = iDrive primary (NEW reseller acct d15e6040, Dallas key swapped in 2026-09-22) + Geyser archive + Lyve `resilient`/fallback leg; **no `ENCRYPTION_MASTER_KEY` in prod yet**. Pricing is QUOTA-SOLD on every tier (section below): Vault Flex $2.55/$2.00 per TB, Standard $4.49/$4.99, Performance PARKED, no Stripe Billing Meters at launch.
 **Remaining critical path = OWNER items, in stage order per `.private/LAUNCH_EXECUTION_SEQUENCE.md`:**
 - **Stage 2** — confirm iDrive payment on the new acct; generate + escrow `ENCRYPTION_MASTER_KEY` → prod (runbook `.private/STAGE2_RUNBOOK.md`).
@@ -1430,7 +1431,7 @@ D-19 was *applied* and needs confirmation).
 | 12 | **iDrive reseller R1-R3** | R1-R6 | Per-tenant sub-accounts matter at ~50+ customers (isolation, white-label, cost attribution). Not before. | L |
 | 13 | ~~**Per-region iDrive key support**~~ ✅ DONE pre-launch — #460, then rebuilt in #502 (WP-R7-1) | 5.14.7 follow-up | Shipped differently from this row's sketch: a region driver is registered **only** with its own `IDRIVE_<REGION>_*` pair and there is **no** fallback to the primary pair (it 403s elsewhere). Remaining = [YOU] put the regional pairs into prod `.env` (SYNTHESIS checklist row 11). | done |
 
-**Re-rank 2026-09-30 (plan driver; supersedes the row order above where they differ; re-rank monthly against customer signal).** Start the week after launch:
+**Re-rank 2026-09-30 (plan driver; supersedes the row order above where they differ).** *Since 2026-10-01 the order of record is the FULL-PLAN TRACK section below: A lands in its Stage 2, B in Stage 3, C in Stage 4, D is its rule 3, E is in Stage 1; the monthly re-rank is against what tenant zero's use turns up as well as any customer signal.* Start the week after launch:
 - **A — small, independent, each a LET post:** 12.1 lifecycle XML (expiration + abort-MPU first; transitions map to the smart floors), 26.4 `stored` CLI + `stored rclone-config` (spec `docs/PRODUCT_FEATURES.md`), 14.4 backup verification reports, 15.1 Docker image + compose, V18.2 full restore orchestration (rehydration worker, bulk thaw, completion webhooks; WP-VG3 folds in), WP-VG2 streaming-signature + checksum sweep.
 - **B — Phase 11 erasure coding, from ~day 45**, split 11.1+11.7 → 11.2 (= P3) → 11.3 behind a flag → 11.6 → 11.8; P2/P4/P5/P6 fold in; 6.6 only when the R130 is bought. The bench findings under Phase 11 are binding.
 - **C — Phase 10 remainder** (10.5 on top of WP-R8-1, 10.6, 10.7) before dedup + encryption carries real volume; 10.0 client E2EE SDK after that, per `.private/PRIVACY_NORTH_STAR.md`.
@@ -1463,7 +1464,75 @@ Add to the Garage/SeaweedFS/Ceph/MinIO candidate set: (a) vaultaire-over-versity
 
 ---
 
-# TIER 2: COST OPTIMIZATION (Build after first customers)
+# FULL-PLAN TRACK (added 2026-10-01 — owner decision: build the whole plan)
+
+**Operating mode.** Isaac is customer zero: stored.ge is in use by its owner, so the plan is worked through to the end **with or without outside customers**. The tier headings below ("after first customers", "once you have product-market fit", "when you're a real business") and the words "demand-gated" describe the order things were once expected in; they are no longer start conditions. What gates a phase now is listed here. The **public** launch (2026-10-31: signups, Stripe, CSAM/DMCA, alerting) keeps its own gates — Stage 0 — because those protect strangers' data and money, not ours.
+
+This section is the order of record for everything after the pre-launch queue. It supersedes the ordering (not the content) of the Post-Launch 90-Day Priority Stack and its 2026-09-30 re-rank.
+
+## The five rules
+
+1. **Dependency order, not customer count.** A phase starts when the phases it stands on are done. Nothing waits for "N customers" or "someone asks".
+2. **Linked, flagged, used.** Every phase ships linked into the product binary (or as its own shipped binary), behind a feature flag where it changes behaviour, with tests — and is switched on for **tenant zero** (Isaac's own tenant, real data, on prod) before the next stage starts. That use is the acceptance gate that customer signal used to be. The review deleted about 93k lines that were written ahead of need and met none of the three: never linked, never flagged, never used.
+3. **Re-scope before prompting.** Phases 22–39 and every "reconstructed" section are scoping text, not specifications. Each gets a docs PR that checks it against the code as it then stands before its first worker prompt.
+4. **Real-world prerequisites stay gates.** Hardware (R130 / own fleet, CORVAULT, RDMA, GPU, a second site), money (SOC 2 auditor, ASN + IP space, Stripe Connect platform review), law (the review that master-plan step 1010 requires before tokens, a storage market or a DAO; the RaptorQ licence check), and third parties (Geyser object-lock buckets, a second Geyser copy). A worker session cannot close these; the stage table names them.
+5. **One loop.** One worker prompt per turn; done means merged, deployed, verified, plan line flipped, Status date bumped. The plan driver reviews every PR before the next prompt.
+
+## The order
+
+| Stage | Stands on | What (plan sections) | Outside prerequisite |
+|---|---|---|---|
+| **0. Public-launch safety** | — | The pre-launch queue in the Status line; the [YOU] rows of SYNTHESIS; launch stages 2–6 | Stripe, CSAM/DMCA, e-mail provider, standby |
+| **1. Foundations** — the write path, the engine and the one-way doors, before real data accumulates | 0 | **One-way doors first:** WP-R8-4 chunker identity (the average is 2 MiB, documented as 4; changing it later resets dedup), WP-R8-1 key versioning before the master key carries data. **Write path:** WP-R2-1 write-new-key-then-swap, WP-R3-1 multipart through the chunk pipeline, WP-R3-2 UploadPartCopy, WP-R8-5 streaming SSE → WP-R3-3 SSE multipart, WP-R3-4 batch-delete parity, WP-R2-4/6/7. **Engine:** WP-R6-1 location-authoritative reads, WP-R6-2 concurrency, WP-R6-3 per-operation deadlines, WP-R2-3 client-body errors, WP-R7-2/4/6/7 drivers. **Integrity:** WP-R8-2 orphan sweep, WP-R8-3 body integrity, WP-VG2 + WP-R15-1 streaming signatures and checksums. **The rest of SYNTHESIS table B** by size. **Hygiene:** D-1/D-2/D-9 deletions, D-12 table drop, D-24 Go 1.26 | The owner's answers to D-1..D-24 |
+| **2. Product surface on the existing engine** | 1 | Vault: V18.2 full restore, V18.8, V18.1 ingest buffer, V18.4 Glacier migration, V18.5 retention templates + certificates, V18.6 calculator, V18.9 backup-tool-aware routing. **Phase 12 lifecycle and Phase 31.1–31.5 smart buckets (one rule engine — see Phase 31).** 26.4 CLI, 14.4 verification reports, no-surprises billing, privacy quick wins, 15.1–15.4 Docker / ARM / Helm / docs, 26.1–26.3 and 26.5–26.8 developer experience, 5.12.9 capacity planning | V18.3 second tape copy and V18.5 lock-enabled bucket are Geyser provisioning |
+| **3. Durability core** | 1 | Phase 11: 11.1 + 11.7 → 11.2 (= P3) → 11.3 behind a flag → 11.6 repair → 11.8; P2, P4, P5, P6; 11.5 LRC; 11.4 RaptorQ; 6.6 own-fleet driver; Phase 38 audit jobs | 6.6 needs the box; 11.4 needs the licence check |
+| **4. Privacy and keys** | 1 | 10.5 key UI and rotation, 10.6 proof-of-ownership, 10.7 isolation audit, 10.0.1–10.0.4 client E2EE SDK, Phase 32.6 split keys, Phase 38 write-avoidance (needs 10.6 and the SDK). 10.8 blind dedup keeps its **measurement** trigger (F-3) | An external audit before the words "zero-knowledge" |
+| **5. Protocols and data intelligence** | 1 | Phase 13 WebDAV / SFTP / FUSE; Phase 14.1–14.3; Phase 23 (with 23.0 and 23.5–23.9); Phase 24 (with 24.4–24.9) | — |
+| **6. Identity and the multi-tenant platform** | 1 | Phase 19 IAM and bucket policies (F-2), Phase 32 enterprise identity, Phase 18 reseller platform (with 18.7–18.9), R1–R6 iDrive reseller, Phase 28 enterprise operations, Phase 33 operations platform | Stripe Connect review, SOC 2 auditor, a second site |
+| **7. Edge, federation, network** | 3, 6 | 16.5 cache agent → Phase 20 hub–spoke → 16.1–16.4 NAS agent → Phase 21 cooperative / BYOS / credits (with 21.7) → Phase 22 WASM and edge compute (with 22.5–22.9) → Phase 31.6 bucket functions → Phase 34 networking → Phase 36 hub-to-hub federation | Spoke hardware; ASN + IP space for 34.8; GPU / Pi hardware |
+| **8. Proofs, web3, markets** | 4, 7 | 6.5 Filecoin, Phase 25, Phase 35, Phase 17 data marketplace | **Legal review first** for 35.3–35.5 and 17.2 |
+| **9. Packaging** | all | Phase 29 integrations, Phase 37 more backends + orchestration, Phase 30 stored.cloud and platform licensing, Phase 39 business operations (owner track, runs from Stage 0) | CORVAULT / RDMA hardware for 37.2–37.3 |
+
+Phase 27 (go-to-market) runs alongside from Stage 0 and is the owner's. Stages 2–5 do not depend on each other and may interleave; inside a stage the order is the one written.
+
+**Size, so the track is read honestly:** roughly 250–300 worker sessions — about 8 in Stage 0, 55 in Stage 1 (table B is most of it), 30 in Stage 2, 15 in Stage 3, 12 in Stage 4, 25 in Stage 5, 35 in Stage 6, 60 in Stage 7, 25 in Stage 8, 15 in Stage 9. These are estimates from the section counts, not commitments.
+
+## Open decisions for the full track (F-1 … F-6)
+
+| F | What | Recommendation |
+|---|------|----------------|
+| F-1 | Smart buckets: declarative rules only, or rules plus customer-supplied WASM functions (Phase 31.6) | Rules first (Stage 2); functions with Phase 22 (Stage 7) |
+| F-2 | Phase 19: bucket policies only, or a full IAM evaluator | Bucket policies + cross-tenant grants first; the evaluator when Phase 18 hierarchies exist |
+| F-3 | 10.8 blind dedup was decided "do not build" on 2026-08-02 on **security** grounds (a server-held OPRF secret is weaker than per-tenant client keys), not for lack of customers | Keep the measurement trigger; evaluate it on tenant zero's data |
+| F-4 | Phase 35.3–35.5 (token, storage market, DAO) and 17.2 (data monetisation) need a legal review before code | Book the review when Stage 7 starts; build 35.1, 35.2, 35.6–35.9 meanwhile |
+| F-5 | Which hardware, and when: R130 (6.6), a second site (28.3), spoke boxes (20), Pi / GPU (22.6, 22.7), CORVAULT / RDMA (37.2, 37.3) | R130 during Stage 2 so Stage 3 has an own-fleet leg; the rest when their stage starts |
+| F-6 | Tenant zero: which tenant on prod is Isaac's own, and does real data go on it before Stage 1's one-way doors (WP-R8-4, WP-R8-1) and the off-box backups (WP-R9-7) are closed | Name the tenant now; keep irreplaceable data elsewhere until those three are done |
+
+## What the original master plan had that this plan did not — where each went
+
+Checked 2026-10-01 against `.private/VAULTAIRE_MASTER_PLAN.md` (steps 1–1320).
+
+| Master-plan steps | Was it carried? | Now |
+|---|---|---|
+| "Smart Bucket Architecture" (per-bucket pipeline config, algorithm registries); 5.10 prep "notifications = foundation for smart buckets" | No — lost in the 2026-07-07 truncation ("smart buckets" survives only in the reconstruction comment) | **Phase 31** |
+| 305 SSO, 331–340 split keys (Shamir), 371–374 LDAP / AD / SAML | Scaffolding existed, unreachable, deleted in R0 (#473) | **Phase 32** |
+| 361–400 HA, tracing/APM, SLO, on-call, blue-green/canary, IaC; 401–450 containers, Kubernetes, global distribution, scale testing | Partly: 15, 28; the `k8s` / `ha` / `slo` / `global` packages are unlinked scaffolding (D-1) | **Phase 33** |
+| 811–910 P2P, content routing, mesh, bandwidth optimisation, BGP anycast, CDN layer, network ML, QUIC, IPv6, network security | Only 21.4 (DHT) | **Phase 34** |
+| 911–1000 blockchain, storage proofs, token, market, DAO, ZK, homomorphic encryption, DID, Web3 | Only as the four-line Phase 25 | **Phase 35** |
+| 1061–1100 hub-to-hub federation | No (Phase 20 is hub–spoke, a different thing) | **Phase 36** |
+| 1101–1140 CORVAULT, SeaweedFS, 3FS backends; backend orchestration layer | No; the selector / cost optimiser / health scorer were inert and deleted (#524) | **Phase 37** |
+| 1205 write-avoidance, 1207–1208 Redis + bloom lookups, 1214–1219 savings metrics, chunk verification, consistency audit, analytics API, attack prevention | Partly (8, 10.6, 10.7) | **Phase 38** |
+| 1001–1060 legal, product management, support, billing operations, developer ecosystem | Partly (5.14.2, 27, 26.5, 26.6) | **Phase 39** |
+| 741–810 function marketplace, Pi nodes, GPU, edge analytics, edge security | No | **22.5–22.9** |
+| 201–230 memory / SSD cache; 611–710 ClickHouse pipeline, RL cache, predictive maintenance, intelligent routing, optimisation advisors | Cache shipped then deleted as unbounded (#524); the rest only as Phase 23's four lines | **23.0, 23.5–23.9** |
+| 1222–1239 Arrow Flight, Delta-style log, statistics / zone maps, partition pruning, aggregate pushdown, natural-language queries, query builder, cross-container joins | Only as Phase 24's three lines | **24.4–24.9** |
+| 1310–1315 family accounts, organisation members, department usage, chargeback, custom-domain SSL | No | **18.7–18.9** |
+| 565–568 compute contribution, credit transfer, credit marketplace | No | **21.7** |
+| 511–520 file-level dedup; 521–530 simple replication engine; 128 / 263–264 delta encoding for versions; 121–125 per-operation rate limits | Superseded: chunk dedup (8) replaces file dedup; 11.2 / P3 and V18.3 replace the replication engine; delta encoding is listed under Phase 38; per-operation limits stay a Deferred Decision | — |
+
+---
+
+# TIER 2: COST OPTIMIZATION (Build after first customers — since 2026-10-01 ordered by the FULL-PLAN TRACK, not by customer count)
 
 > **Plan text is not code — audit of Tiers 2–4 against `main` @ #531 (2026-09-30).** Read this before treating any section below as shipped.
 > - **SHIPPED:** 6.1–6.4 backends, 7.5/7.6 bucket tier + residency columns, 8 chunking + GCI dedup + GC, 9 zstd, 10.1–10.3 convergent chunk encryption (inert in prod: no master key), P1 permafrost driver, 5.15.8 smart demotion (flag OFF).
@@ -1935,14 +2004,14 @@ Add to the Garage/SeaweedFS/Ceph/MinIO candidate set: (a) vaultaire-over-versity
 
 ---
 
-# TIER 3: SCALE & FEATURES (Build once you have product-market fit)
+# TIER 3: SCALE & FEATURES (Build once you have product-market fit — since 2026-10-01 ordered by the FULL-PLAN TRACK)
 
 ---
 
 ## Phase 12: S3 Lifecycle Rules
 *Depends on: Phase 7 (tiering engine for tier transitions)*
 
-> **NOT STARTED — no package (audit 2026-09-30).** No `?lifecycle` sub-resource is routed (`S3Parser.determineOperation` knows versioning, location, notification, object-lock, logging, inventory, uploads, versions and acl at bucket level — nothing else), there is no `internal/engine/lifecycle.go` and no lifecycle table. The only lifecycle-like behaviour in the product is the abandoned-multipart reaper (#346, server-wide, not configurable per bucket). The tiering engine this phase "depends on" was deleted (#524); Transition rules will map onto the floors (`standard` / `vault`) and smart demotion. Post-launch queue A, first item: Expiration + AbortIncompleteMultipartUpload first.
+> **NOT STARTED — no package (audit 2026-09-30).** No `?lifecycle` sub-resource is routed (`S3Parser.determineOperation` knows versioning, location, notification, object-lock, logging, inventory, uploads, versions and acl at bucket level — nothing else), there is no `internal/engine/lifecycle.go` and no lifecycle table. The only lifecycle-like behaviour in the product is the abandoned-multipart reaper (#346, server-wide, not configurable per bucket). The tiering engine this phase "depends on" was deleted (#524); Transition rules will map onto the floors (`standard` / `vault`) and smart demotion. Post-launch queue A, first item: Expiration + AbortIncompleteMultipartUpload first. **2026-10-01: build it as the first front-end of Phase 31.2's bucket-rule engine (lifecycle XML in, rules stored) — one rule table, not a separate lifecycle engine.**
 
 ### 12.1: Lifecycle Rule Engine
 **Files**: `internal/engine/lifecycle.go` (new)
@@ -2245,7 +2314,7 @@ Add to the Garage/SeaweedFS/Ceph/MinIO candidate set: (a) vaultaire-over-versity
 
 ---
 
-# TIER 4: PLATFORM SCALE (Build when you're a real business)
+# TIER 4: PLATFORM SCALE (Build when you're a real business — since 2026-10-01 ordered by the FULL-PLAN TRACK)
 
 ---
 
@@ -2409,7 +2478,7 @@ Anyone runs a Vaultaire spoke node on their VPS → joins the stored.ge network:
 - Cryptographic storage proofs (Merkle challenges — shares machinery with 10.6)
 - Filecoin anchoring via Lighthouse/Filebase for compliance certificates (Phase 6.5.x plan: `logical-hugging-muffin.md`)
 - IPFS gateway for public buckets
-- **Do not build speculatively** — every sub-item here needs a paying customer asking first
+- **Do not build speculatively** — every sub-item here needs a paying customer asking first. *(2026-10-01, owner decision: scheduled in Stage 8 of the FULL-PLAN TRACK and expanded as Phase 35; the gate is now the legal review for the token / market / governance parts, not customer demand.)*
 
 ---
 
@@ -2483,6 +2552,184 @@ Anyone runs a Vaultaire spoke node on their VPS → joins the stored.ge network:
 
 ---
 
+# ADDITIONS 2026-10-01 — Phases 31–39 and the sub-steps the consolidated plan never carried
+
+*Added by owner decision (see FULL-PLAN TRACK). Sources: `.private/VAULTAIRE_MASTER_PLAN.md` step numbers given per phase, and for Phase 31 the owner's request of 2026-10-01. Everything here is **scoping text**: each phase gets a re-scope docs PR against the code before its first worker prompt (rule 3 of the track). "Today" lines say what exists in the code on 2026-10-01.*
+
+---
+
+## Phase 31: Smart Programmable Buckets
+*Requested by the owner 2026-10-01. Sources: master plan "Smart Bucket Architecture" (per-bucket pipeline config, passthrough mode, algorithm registries); `.private/PHASE_5_10_PREP.md` ("bucket notifications — foundation for smart buckets"); the "Stripe for Storage, programmable buckets" goal. Stands on: Stage 1 (WP-R8-4, WP-R3-1), WP-R13-3 job scheduling, WP-R11-3 webhook outbox; 31.6 on Phase 22.1.*
+
+**The idea in one line:** a bucket carries a *program* — a **profile** that says how its bytes are processed and placed, and **rules** that say what happens to its objects and when — set from the dashboard, the management API, the CLI, or plain S3 calls.
+
+**Today:** the profile exists as scattered switches — `buckets.tier_preference`, `sse_enabled`, `region`, `visibility` → R2, `storageClassDisablesChunking`, the `chunking` flag, the 64 MiB chunking threshold — resolved in several places (`resolvePutStorageClass`, `willChunkEncrypt`, `bucketRegionDriver`). The rules exist as three unrelated features: bucket notifications (5.10.12; prefix/suffix filters are not persisted — WP-R4-4), per-bucket inventory and access logging (5.14.9), and the server-wide multipart reaper. There is no lifecycle (Phase 12) and no way to say "do X to objects matching Y".
+
+### 31.1: Bucket pipeline profile ("smart")
+- One versioned JSON document per bucket (`buckets.pipeline_profile`): chunking (on/off, minimum object size), dedup scope (off / tenant / global), compression (off / zstd level), encryption (none / SSE-S3 / convergent / client E2EE marker), placement (floor, backend, region, and the erasure scheme once Phase 11 exists), passthrough (no processing at all).
+- Presets a customer picks instead of writing JSON: `standard` (today's behaviour), `backup` (dedup + zstd, restic/borg-aware routing from V18.9), `archive` (whole objects to tape), `media` (no compression, large chunks), `passthrough` (the master plan's "HPC" bucket), `public` (R2).
+- One resolver, `resolveBucketPipeline`, replaces the scattered checks; the existing columns become views of the profile. A profile change affects **new writes only** — manifests are self-describing, so old objects keep reading.
+- Algorithm registries (chunker / compressor / encryptor interfaces) are built only when a second implementation exists; one implementation behind a registry is the scaffolding the review deleted.
+
+### 31.2: Bucket rules ("programmable", declarative)
+- A rule = **trigger + filter + action**, stored per bucket, tenant-scoped.
+- Triggers: object created / deleted / restored / read (the 5.11.6 event types), a schedule (daily), a threshold (bucket bytes, object age, egress).
+- Filters: prefix, suffix, tags, size range, content type, age, storage floor.
+- Actions: expire, abort incomplete uploads, move to a floor (downstairs ↔ attic), tag, copy to another bucket of the same tenant, apply retention / legal hold, request a restore, send a webhook (through the WP-R11-3 outbox), refuse the write (per-prefix size or type limits).
+- **Phase 12 is this engine's first front-end:** S3 lifecycle XML (`PUT ?lifecycle`) is parsed into rules (Expiration, AbortIncompleteMultipartUpload, Transition → floor moves) and read back from them. `PUT ?notification` becomes the second front-end. One rule table, no parallel lifecycle engine.
+
+### 31.3: Rule runtime
+- Event-triggered rules run from the event stream; scheduled ones from a daily runner in the `job_runs` shape (catch-up at boot, one advisory lock, admin trigger, metrics).
+- Every rule has a **dry run**: "would affect N objects, X TB" (Phase 12.2's preview) before it is enabled, per-run caps, idempotent actions, an audit row per action batch.
+- Object Lock always wins; a rule can never touch another tenant's objects; deletes go through the same path as S3 DELETE (quota release, version ledger, chunk refs).
+
+### 31.4: Dashboard — the bucket's program page
+- Profile picker (presets with what each costs and does), rule builder without XML, dry-run result, run history, in the house language (downstairs / attic).
+
+### 31.5: Recipes
+- One-click bundles of profile + rules: "backup bucket" (backup profile, weekly verification report 14.4, keep 30 daily / 12 monthly), "media library", "log bucket" (expire after 30 days), "camera roll", "static site". Each recipe is a document a customer can read, export and edit.
+
+### 31.6: Functions (stands on Phase 22.1)
+- A rule action may be a WASM function: transform on upload (thumbnail, transcode probe, metadata extraction, virus scan), validate (reject on schema), or a customer-supplied module. Sandboxed, CPU/memory/time limits, per-invocation metering, results to object metadata or a sibling key. This is where Phases 22.2 and 22.3 land; decision F-1.
+
+### 31.7: Bucket as code
+- `GET|PUT /api/v1/manage/buckets/{name}/program` (profile + rules as one JSON document, in the OpenAPI spec), `stored bucket program get|apply` in the CLI (26.4), YAML export/import so a bucket's behaviour can live in a repository.
+
+**Test**: create a bucket from the `backup` recipe → upload → the profile's dedup and compression show in the bucket's stats → add a rule "expire `tmp/` after 7 days", dry-run names the right objects, the daily run deletes them and releases quota → the same rule set via `aws s3api put-bucket-lifecycle-configuration` reads back identically in the dashboard → a locked object is skipped and reported → change the profile and confirm old objects still read.
+
+---
+
+## Phase 32: Enterprise Identity and Split Keys
+*Master plan steps 305, 331–340 (split key management), 371–374. Stands on: Phase 18.1 (organisations), Phase 19.*
+
+**Today:** dashboard login is password + TOTP, or Google / GitHub OAuth. The SAML, LDAP, Active Directory and service-account files were unreachable scaffolding and were deleted in R0 (#473).
+
+- **32.1** Generic OIDC single sign-on for an organisation (issuer, client, domain claim), with the R12 rules kept: MFA honoured, sessions revoked on reset.
+- **32.2** SAML 2.0 service provider.
+- **32.3** LDAP / Active Directory bind and group sync.
+- **32.4** SCIM provisioning and organisation member management.
+- **32.5** Service accounts (non-human principals with scoped keys and their own audit actor).
+- **32.6** Split keys: split API keys (two holders must combine), and Shamir-shared encryption keys with a per-bucket policy, reconstructed on read. Stands on WP-R8-1.
+
+**Test**: an organisation signs in through OIDC and SAML test providers → a deprovisioned SCIM user loses sessions and keys → a split-key bucket cannot be read with one share.
+
+---
+
+## Phase 33: Operations Platform
+*Master plan steps 361–400 and 401–450. Stands on: Phase 15, Phase 28.3.*
+
+**Today:** one box, systemd, HAProxy, Prometheus + Alertmanager + ntfy, auto-rollback deploys. `internal/{k8s,ha,slo,container,global}` are unlinked scaffolding (D-1: delete, then build what is needed linked).
+
+- **33.1** Distributed tracing (OpenTelemetry) through API → engine → driver; one request id end to end (WP-R1-8).
+- **33.2** SLO / SLI tracking with burn-rate alerts, feeding the published SLA (28.2).
+- **33.3** Blue-green and canary deploys across the hub and its standby; a deploy never drops an in-flight upload.
+- **33.4** Infrastructure as code for the box, HAProxy, Prometheus rules and DNS.
+- **33.5** A nightly suite that really runs: chaos (backend down, DB down, disk full), soak, spike — the one R15 deleted reported green while every step failed.
+- **33.6** Kubernetes operator and autoscaling beyond the 15.3 Helm chart — only once there is more than one hub node.
+- **33.7** Escalation policy and on-call runbooks.
+
+---
+
+## Phase 34: Advanced Networking
+*Master plan steps 811–910. Stands on: Phase 20 for the peer-to-peer items.*
+
+**Today:** HTTP/1.1 and HTTP/2 through Cloudflare and HAProxy; IPv4; no peer-to-peer code or dependency.
+
+- **34.1** HTTP/3 (QUIC) at the edge first, in the hub and spoke agents later.
+- **34.2** IPv6 dual stack (listener, allowlists, `clientip`, rate limiters).
+- **34.3** CDN integration layer: cache purge on overwrite/delete, origin configuration, adapters beyond Cloudflare, per-CDN cost and analytics.
+- **34.4** Peer-to-peer foundation: libp2p, Kademlia DHT, NAT traversal, gossip (shared with 21.4).
+- **34.5** Content routing: content addressing, provider announcements, multi-path.
+- **34.6** Mesh topology management and healing.
+- **34.7** Bandwidth optimisation: traffic shaping, multi-path aggregation, adaptive streaming.
+- **34.8** BGP anycast — needs an ASN, IP space and at least two points of presence.
+- **34.9** Network telemetry and learned path selection.
+- **34.10** Network security: DDoS posture, geo-blocking, intrusion detection, automated blocking.
+
+---
+
+## Phase 35: Blockchain, Proofs and Advanced Cryptography
+*Master plan steps 911–1000; extends Phase 25. Stands on: 10.6 (Merkle challenge machinery), Phase 21 (credits) for the economic parts. **35.3–35.5 need the legal review of master-plan step 1010 before any code** (decision F-4).*
+
+**Today:** nothing; Phase 25 is four lines.
+
+- **35.1** Publicly verifiable storage proofs (challenge generation, proof verification, monitoring).
+- **35.2** On-chain anchoring of proofs and immutability certificates (pairs with V18.5).
+- **35.3** Token model, staking, reward distribution.
+- **35.4** Storage market: bid/ask, price discovery, escrow, dispute resolution, reputation.
+- **35.5** Decentralised governance: proposals, voting, timelock, multi-sig treasury.
+- **35.6** Zero-knowledge proofs of possession.
+- **35.7** Homomorphic encryption for encrypted search and analytics — a research spike with a written verdict first.
+- **35.8** Decentralised identity: DIDs, verifiable credentials, wallet login.
+- **35.9** Web3 gateway: IPFS pinning and gateway for public buckets, ENS, cross-chain storage API.
+
+---
+
+## Phase 36: Hub-to-Hub Federation
+*Master plan steps 1061–1100. Not Phase 20: that is one hub with spokes; this is independent Vaultaire hubs sharing data. Stands on: Phase 15 (a second hub must be installable), Phase 19 (permissions for foreign users), Phase 20.*
+
+- **36.1** Server-to-server protocol: versioned API, `/version`, OpenAPI specification, a multi-hub test environment.
+- **36.2** Hub identity and trust: key exchange, DNS TXT verification, signed requests, key rotation, trust and block lists, a shared blocklist protocol, S2S rate limits.
+- **36.3** Federated user identity (`@user:hub-domain`).
+- **36.4** Federated sharing: share request, accept / reject, permissions on local resources, updates, revocation, remote shares in the dashboard.
+- **36.5** Inter-hub data transfer (direct, or brokered peer-to-peer through 34.4).
+- **36.6** Discovery: a central directory first, peer-to-peer later; caching of remote metadata; eventual consistency of shared state.
+- **36.7** Abuse and spam handling across the federation; diagnostics for S2S traffic.
+
+---
+
+## Phase 37: More Backends and Backend Orchestration
+*Master plan steps 1101–1140, 181–190. Stands on: WP-R6-1, WP-R6-3, Phase 6.6.*
+
+**Today:** eight drivers behind `engine.Driver`; placement is by bucket tier and header; the circuit breaker is the only routing signal. The selector, cost optimiser and health scorer were constructed and never consulted, and were deleted in #524.
+
+- **37.1** SeaweedFS backend (the own-fleet candidate beside MinIO; decides 6.6's software).
+- **37.2** CORVAULT backend (Redfish API) — needs the hardware.
+- **37.3** DeepSeek 3FS backend (FUSE, RDMA-aware) — needs the hardware.
+- **37.4** Orchestration, rebuilt wired: workload detection (small files, large files, streaming), a per-backend cost engine, policy routing rules per tenant and per bucket (the profile of 31.1 is where a customer states them), health score as a routing input. Each rule lands with a test proving it changes a routing decision.
+- **37.5** Backend migration tooling: move a tenant or bucket between backends under the etag guard smart demotion uses.
+
+---
+
+## Phase 38: Dedup Write-Avoidance and Audit
+*Master plan steps 1205, 1207–1208, 1214–1219, 128. Stands on: 10.6 (mandatory for 38.1), the client SDK (10.0) or CLI (26.4), WP-R8-2, WP-R8-3.*
+
+**Today:** server-side chunking, GCI, GC with reconcile, the admin dedup page, per-chunk SHA-256 on read. A client always uploads every byte.
+
+- **38.1** Client-side dedup check (`POST /v1/dedup/check`: the client chunks, sends hashes, uploads only new chunks) — only with proof-of-ownership, never across tenants for encrypted data.
+- **38.2** Bandwidth-savings accounting and a per-tenant dedup analytics API.
+- **38.3** Scheduled chunk verification: sample, re-hash, repair from another copy (shares machinery with P5 and 14.4).
+- **38.4** Monthly consistency audit: every GCI row has a blob, every manifest ref has a row, ref counts match, no orphan blobs (extends WP-R8-2).
+- **38.5** Bloom filter / external cache for negative lookups — only if measured lookup latency asks for it (the Phase 8 note).
+- **38.6** Delta encoding between versions of an object — after WP-R2-1 makes versions real bytes.
+
+---
+
+## Phase 39: Business Operations (owner track)
+*Master plan steps 1001–1060. Runs alongside from Stage 0; mostly not code.*
+
+**Done:** terms, privacy, AUP, DPA, BAA, GDPR pages (5.14.2); FAQ; launch posts; the in-app support view and abuse queue.
+
+- **39.1** Legal: counsel review of the published documents; NDA, contractor and enterprise agreement templates; the F-4 review.
+- **39.2** Product: customer interviews, personas, public feature voting, a public roadmap.
+- **39.3** Support: helpdesk, canned responses, runbooks, hosted status page (5.14.12), community forum or Discord with moderation rules.
+- **39.4** Billing operations: refunds and disputes in the admin dashboard, dunning, revenue analytics, Stripe Tax, bookkeeping.
+- **39.5** Developer ecosystem: docs portal (26.5), SDKs (26.6), tutorials, a showcase page.
+- **39.6** stored.cloud sales motion: CRM, deck, security questionnaire pack (with Phase 30).
+
+---
+
+## Sub-steps added to existing phases (2026-10-01)
+
+- **18.7** Family accounts and organisation member management. **18.8** Department-level usage and a chargeback reporting API. **18.9** Custom-domain SSL provisioning for white-label domains. *(master 1310–1315)*
+- **21.7** Compute contribution (GPU hours), credit transfer between users, a credit marketplace. *(master 565–568)*
+- **22.5** Function marketplace: packaging, discovery, ratings, billing. **22.6** Raspberry Pi edge nodes (Pi-optimised agent, thermal and SD-card care). **22.7** GPU acceleration for transcode and inference — needs the hardware. **22.8** Edge analytics. **22.9** Edge security: node certificates, edge-to-edge encryption, audit. *(master 741–810)*
+- **23.0** A bounded read cache, wired and measured — prerequisite for 23.2; the earlier cache was unbounded and was deleted in #524. **23.5** Access-log analytics pipeline. **23.6** Predictive maintenance from SMART data — needs own fleet (6.6). **23.7** Latency-aware routing. **23.8** Learned cache policy, A/B against LRU. **23.9** Performance and cost optimisation advisors. *(master 201–230, 611–710)*
+- **24.4** Arrow Flight streaming results. **24.5** Delta-style transaction log with time travel. **24.6** File statistics, zone maps, partition pruning, aggregate pushdown. **24.7** Natural-language queries, with the generated SQL shown. **24.8** Query builder UI and cross-bucket joins. **24.9** Per-GB-scanned metering and query quotas. *(master 1222–1239)*
+
+
+---
+
 # SESSION HANDOFF (end of plan)
 <!-- reconstructed 2026-07-07: the original closing handoff section was lost in the truncation; rewritten to match current state and the /next + /next-step skills -->
 
@@ -2496,7 +2743,7 @@ Anyone runs a Vaultaire spoke node on their VPS → joins the stored.ge network:
 
 ## How to resume (for /next and /next-step)
 1. Read the **Status** line at the top of this file — it names the last completed phase, the launch blockers, and the next code phase.
-2. Pre-launch (until 2026-10-31): two tracks. **Code** — take the first unfinished item of the pre-launch queue in the Status line (2026-09-30: WP-R10-9 → WP-R13-1 + WP-R13-3 → WP-R4-1 / WP-R12-5 / WP-R12-8 → WP-R11-3 → WP-R7-5 → encryption track → WP-R2-1 → WP-R10-3b); each row's files, size and dependencies are in `docs/reviews/SYNTHESIS.md` table A, the shape of a finished one is `docs/reviews/WP-R10-3-deletion-runner.md`, and the "Review 2026-09" section above lists every WP id. A WP ends with its note in `docs/reviews/WP-<id>.md`, its plan line moved to DONE, the Status line date bumped and the SYNTHESIS status cell flipped. **Owner** — the [YOU] rows of the SYNTHESIS pre-launch checklist and the launch stages (Stage 2 → 3 → 4 Stripe house prices → 5 status page, email → 5.5 CSAM/DMCA → 6 smoke + signups) per `.private/LAUNCH_EXECUTION_SEQUENCE.md`. After the Stage 6 code freeze (week of Oct 19) only owner items remain. Post-launch: the 2026-09-30 re-rank (A–E) under the **Post-Launch 90-Day Priority Stack**; Phases 22–30 are reconstructed text and are re-scoped in a docs PR before any prompt.
+2. Pre-launch (until 2026-10-31): two tracks. **Code** — take the first unfinished item of the pre-launch queue in the Status line (2026-09-30: WP-R10-9 → WP-R13-1 + WP-R13-3 → WP-R4-1 / WP-R12-5 / WP-R12-8 → WP-R11-3 → WP-R7-5 → encryption track → WP-R2-1 → WP-R10-3b); each row's files, size and dependencies are in `docs/reviews/SYNTHESIS.md` table A, the shape of a finished one is `docs/reviews/WP-R10-3-deletion-runner.md`, and the "Review 2026-09" section above lists every WP id. A WP ends with its note in `docs/reviews/WP-<id>.md`, its plan line moved to DONE, the Status line date bumped and the SYNTHESIS status cell flipped. **Owner** — the [YOU] rows of the SYNTHESIS pre-launch checklist and the launch stages (Stage 2 → 3 → 4 Stripe house prices → 5 status page, email → 5.5 CSAM/DMCA → 6 smoke + signups) per `.private/LAUNCH_EXECUTION_SEQUENCE.md`. After the Stage 6 code freeze (week of Oct 19) only owner items remain. After the queue: the **FULL-PLAN TRACK** section — take the first unfinished item of the lowest unfinished stage; a stage is finished when its items are merged, deployed and in use on tenant zero. Phases 22–39 are scoping text and are re-scoped in a docs PR before any prompt.
 3. Read `.private/CLAUDE.md` (infra/creds), the per-directory `CLAUDE.md` files for packages you'll touch, and check `git log --oneline -5` + `git status`.
 4. Migration numbers: `ls internal/database/migrations/ | tail -1` on a fresh `main` and take the next sequential (`073_site_stats.sql` is the latest as of 2026-09-30, so the next is `074`); then `make test-db` so the local `vaultaire_test` database carries it (never point tests at the dev DB `vaultaire`).
 5. Branch per phase: `phase-X.Y-feature-name`, commit format `type(scope): description [Phase X.Y]`, squash-merge after CI.
