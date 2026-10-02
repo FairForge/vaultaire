@@ -99,6 +99,23 @@ var accountDeletionSwept = prometheus.NewCounterVec(prometheus.CounterOpts{
 // tenant `a` + bucket `b_c`), and "" collapses every prefix.
 var sweepTenantIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*$`)
 
+// sweepFallbackTenantID is the id every driver and common.GetTenantID fall
+// back to when a context carries no tenant. On a fixed-bucket backend
+// `t-default/` holds whatever any tenant's context-less path wrote, and is
+// where dedup GC addresses chunk blobs: it is nobody's prefix to sweep.
+const sweepFallbackTenantID = "default"
+
+// sweepableTenantID refuses an id nothing may be listed under.
+func sweepableTenantID(tenantID string) error {
+	if !sweepTenantIDPattern.MatchString(tenantID) {
+		return fmt.Errorf("tenant id %q is not sweepable (only letters, digits and '-'): nothing is listed under it", tenantID)
+	}
+	if tenantID == sweepFallbackTenantID {
+		return fmt.Errorf("tenant id %q is the fallback of requests that carry no tenant — its prefix is shared: nothing is listed under it", tenantID)
+	}
+	return nil
+}
+
 // errSweepCancelled is returned through a walk when the user cancelled.
 var errSweepCancelled = errors.New("deletion cancelled during the sweep")
 
@@ -150,8 +167,8 @@ type sweepPlan struct {
 // whose id is the start of ANOTHER tenant's id followed by a separator — the
 // prefix of the first would then be a prefix of the second's containers.
 func (r *AccountDeletionRunner) checkSweepTenant(ctx context.Context, tenantID string) error {
-	if !sweepTenantIDPattern.MatchString(tenantID) {
-		return fmt.Errorf("tenant id %q is not sweepable (only letters, digits and '-'): nothing is listed under it", tenantID)
+	if err := sweepableTenantID(tenantID); err != nil {
+		return err
 	}
 	var collides int
 	err := r.db.QueryRowContext(ctx, `
@@ -251,8 +268,8 @@ func (r *AccountDeletionRunner) sweepTenant(ctx context.Context, d account.Due, 
 	}
 	// Checked again here: this function is what lists and deletes, whoever
 	// built the plan.
-	if !sweepTenantIDPattern.MatchString(d.TenantID) {
-		return false, fmt.Errorf("tenant id %q is not sweepable", d.TenantID)
+	if err := sweepableTenantID(d.TenantID); err != nil {
+		return false, err
 	}
 	if te.Swept == nil {
 		te.Swept = map[string]int{}

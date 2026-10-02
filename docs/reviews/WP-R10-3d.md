@@ -153,3 +153,13 @@ gone, the tenant-keyed operator row kept and scrubbed) is unchanged and green.
 ## [YOU]
 
 Nothing.
+
+## Post-merge review (plan driver, 2026-10-02)
+
+Read: `operatorTrailScrub` and its place in `Deleted` (before the `DELETE` it protects rows
+from). **No finding.** The classification by the shape of the row rather than by `users.role`
+at erase time is the right call: a demoted admin leaves the same trail.
+
+Noted: the scrub runs inside the erase transaction, so a statement error there rolls the erase
+back and the tenant is deferred — visible (`AccountDeletionDeferred`), not silent. The
+`jsonb_typeof` guard covers the one input that could raise.
