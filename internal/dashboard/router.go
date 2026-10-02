@@ -49,7 +49,16 @@ type Deps struct {
 	Quotas        billing.HouseQuotas      // Nil-safe; applies a resized house's floor quotas at once (Phase 1).
 	Account       *account.Service         // The one account-deletion state machine (WP-R10-3); nil = built per request from DB.
 	Egress        usage.EgressStatusReader // The API server's live egress counter (WP-R10-9); nil = the recorded month.
+	// CSRFKey keys the session-bound CSRF token (WP-R12-5): CSRFKeyFromSecret
+	// of a secret that survives restarts (prod: JWT_SECRET). Nil = a random
+	// key for this process — forms opened before a restart then fail once.
+	CSRFKey []byte
 }
+
+// CSRFKeyFromSecret derives the CSRF key from a persistent server secret
+// with its own label (middleware.DeriveCSRFKey): the secret itself is never
+// the key.
+func CSRFKeyFromSecret(secret string) []byte { return middleware.DeriveCSRFKey(secret) }
 
 // RegisterRoutes mounts the dashboard, auth, admin, and static-asset
 // routes on the given router. It MUST be called before the S3 catch-all
@@ -63,6 +72,18 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 	baseTmpl := template.Must(template.New("").Funcs(handlers.TemplateFuncs()).ParseFS(Templates,
 		"templates/layouts/base.html",
 	))
+
+	// One CSRF middleware for both session chains (/dashboard and /admin):
+	// the token is an HMAC over the session id, checked together with
+	// Sec-Fetch-Site and Origin against the dashboard's own origins.
+	csrfKeyBytes := deps.CSRFKey
+	if len(csrfKeyBytes) == 0 {
+		csrfKeyBytes = middleware.DeriveCSRFKey("")
+		if deps.Logger != nil {
+			deps.Logger.Warn("dashboard: no CSRF key configured (JWT_SECRET unset?) — using a random key; forms opened before a restart will be refused once")
+		}
+	}
+	csrf := middleware.NewCSRF(csrfKeyBytes, deps.BaseURL)
 
 	// Rate limiter: 5 attempts/min per IP for login and 2FA. The account
 	// lockout is the per-ACCOUNT complement (10 failures in 15 min → locked
@@ -163,7 +184,7 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		dr.Use(middleware.Recovery(deps.Logger))
 		dr.Use(middleware.SecurityHeaders)
 		dr.Use(dashauth.RequireSession(deps.Sessions))
-		dr.Use(middleware.CSRF)
+		dr.Use(csrf)
 		dr.Use(middleware.Flash)
 		dr.NotFound(handlers.HandleNotFound(deps.Logger))
 
@@ -352,7 +373,7 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		ar.Use(middleware.Recovery(deps.Logger))
 		ar.Use(middleware.SecurityHeaders)
 		ar.Use(dashauth.RequireAdmin(deps.Sessions))
-		ar.Use(middleware.CSRF)
+		ar.Use(csrf)
 		ar.Use(middleware.RequireAdminMFA(deps.Auth))
 		ar.Use(middleware.Flash)
 		ar.NotFound(handlers.HandleNotFound(deps.Logger))

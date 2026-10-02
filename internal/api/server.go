@@ -769,6 +769,10 @@ func (s *Server) setupRoutes() {
 		Quotas:        houseQuotas(s.quotaManager),
 		Account:       s.accountSvc,
 		Egress:        s.egress,
+		// JWT_SECRET is the one secret every deployment must set and it
+		// survives restarts: the CSRF key is derived from it under its own
+		// label, never the secret itself (WP-R12-5).
+		CSRFKey: dashboard.CSRFKeyFromSecret(os.Getenv("JWT_SECRET")),
 	})
 
 	s.logger.Info("Registering management API routes")
