@@ -68,6 +68,11 @@ func TestJobRuleFile_MatchesTheRegisteredJobsAndTheExportedSeries(t *testing.T) 
 	assert.Contains(t, rules["JobStale"].expr, "vaultaire_job_last_success_timestamp_seconds")
 	assert.Contains(t, rules["JobFailing"].expr, `vaultaire_job_runs_total{outcome="error"}`)
 	assert.Contains(t, rules["AccountDeletionDeferred"].expr, `vaultaire_account_deletion_tenants_total{result="deferred"}`)
+	// A write destroyed by a stale-copy delete (WP-R13-2) is a customer's
+	// object: it pages.
+	require.Contains(t, rules, "StaleCopyLostWrite")
+	assert.Equal(t, "critical", rules["StaleCopyLostWrite"].severity)
+	assert.Contains(t, rules["StaleCopyLostWrite"].expr, "increase(vaultaire_stale_copy_lost_writes_total[")
 	// A job that has never succeeded reads 0: the staleness rules must give
 	// the boot catch-up time to run before they fire.
 	assert.Equal(t, "30m", rules["JobStale"].forDur)
@@ -111,10 +116,13 @@ func TestJobRuleFile_MatchesTheRegisteredJobsAndTheExportedSeries(t *testing.T) 
 		`vaultaire_job_runs_total{job_name="dedup_gc",outcome="error"}`,
 		`vaultaire_job_runs_total{job_name="account_deletion",outcome="ok"}`,
 		`vaultaire_account_deletion_tenants_total{result="deferred"}`,
+		`vaultaire_stale_copy_lost_writes_total{source="reclaim"}`,
+		`vaultaire_stale_copy_lost_writes_total{source="delete"}`,
+		`vaultaire_stale_copy_lost_writes_total{source="overwrite"}`,
 	} {
 		assert.True(t, strings.Contains(body, "\n"+series+" "), "exported before any run: %s", series)
 	}
-	for _, series := range []string{"vaultaire_job_last_success_timestamp_seconds", "vaultaire_job_runs_total", "vaultaire_account_deletion_tenants_total"} {
+	for _, series := range []string{"vaultaire_job_last_success_timestamp_seconds", "vaultaire_job_runs_total", "vaultaire_account_deletion_tenants_total", "vaultaire_stale_copy_lost_writes_total"} {
 		assert.True(t, strings.Contains(raw, series), "the rule file documents %s", series)
 	}
 	assert.False(t, strings.Contains(body, `tenant_id="`), "no tenant label on any series")

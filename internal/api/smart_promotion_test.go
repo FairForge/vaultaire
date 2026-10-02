@@ -26,6 +26,7 @@ func newPromoter(f *demotionFixture) *SmartPromoter {
 	p := NewSmartPromoter(f.db, f.eng, zap.NewNop())
 	p.sync = true
 	p.now = f.runner.now
+	p.scopeTenant = f.tenantID
 	f.runner.Promoter = p
 	return p
 }

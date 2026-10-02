@@ -57,6 +57,9 @@ func (s *Server) initMetrics() {
 		// Reads that waited on an automatic restore (WP-R13-1): their 503 is
 		// kept out of vaultaire_errors_total, this is where it shows.
 		reg.MustRegister(smartRestoreWaits)
+		// Writes destroyed by the delete of a stale copy (R13-06: detected,
+		// not preventable before WP-R2-1). Every source is there at 0.
+		reg.MustRegister(staleCopyLostWrites)
 		reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 			Name: "vaultaire_egress_throttled_tenants",
 			Help: "Tenants past their monthly egress allowance with the egress_throttle flag on (their downloads are paced).",

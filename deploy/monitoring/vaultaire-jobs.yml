@@ -5,6 +5,8 @@
 #                                                        READ FROM job_runs (0 = never succeeded)
 #   vaultaire_job_runs_total{job_name,outcome}          runs in this process: ok / error / interrupted
 #   vaultaire_account_deletion_tenants_total{result}    erased / deferred / cancelled
+#   vaultaire_stale_copy_lost_writes_total{source}      objects whose bytes the delete of a stale copy removed while a
+#                                                        write of the same key was in flight (reclaim / delete / overwrite)
 #
 # The last-success series is read from the database, not kept in memory: a
 # process that has just started reports the success of the process before it.
@@ -68,3 +70,20 @@ groups:
         annotations:
           summary: "An account erasure is being deferred"
           description: "The account-deletion runner could not finish a tenant whose grace period ended (Stripe refused the cancel, a backend refused a delete, or STRIPE_SECRET_KEY is unset with a subscription on the row). It retries every hour; the erasure is owed on its date. GET /api/v1/admin/jobs → account_deletion.last_error names the tenant and the reason."
+
+      # WP-R13-2 (Review R13-06). A stale copy of an object — the hot copy of a
+      # demoted object, the blob an overwrite left on another backend — is
+      # deleted at a key a customer may be writing at that moment; a PUT's
+      # bytes land before its head-row transaction, so no lock orders the two
+      # (WP-R2-1 closes it). When it happens the object has a head row and no
+      # bytes: every GET fails until it is uploaded again. The Error log line
+      # "stale copy: the delete of a stale copy removed a write" names the
+      # tenant, bucket and key — tell the customer.
+      - alert: StaleCopyLostWrite
+        expr: increase(vaultaire_stale_copy_lost_writes_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A customer object lost its bytes to a stale-copy delete ({{ $labels.source }})"
+          description: "The delete of a stale copy removed bytes a write of the same key had just stored: the object lists and HEADs but cannot be read. journalctl -u vaultaire | grep 'stale copy: the delete of a stale copy' gives tenant, bucket and key; the customer must upload the object again. Source {{ $labels.source }}: reclaim = the smart_demotion job, delete = DeleteObject on a demoted key, overwrite = a write that replaced an object on another backend."

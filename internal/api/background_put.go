@@ -170,6 +170,9 @@ func (g *generatedObjectWriter) write(ctx context.Context, tenantID, bucket, key
 			g.logger.Error("generated object: release overwritten object failed", zap.Error(err), zap.String("tenant_id", tenantID))
 		}
 	}
+	// A report that replaces one stored on another backend (the target
+	// bucket changed tier or visibility between two runs): as plain PUT.
+	dropDisplacedBlob(tctx, g.db, g.eng, g.logger, lostWriteOverwrite, tenantID, bucket, container, key, displaced, backendName)
 	recordObjectVersion(tctx, g.db, tenantID, bucket, key, size, etag, contentType, backendName)
 
 	return deliveredObject{Size: size, ETag: etag, Backend: backendName}, nil

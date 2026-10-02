@@ -747,6 +747,11 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 		cancel()
 	}
 
+	// The key's previous blob on another backend (a demoted object replaced
+	// by a multipart upload, R13-10) — exactly as plain PUT.
+	dropDisplacedBlob(r.Context(), s.db, s.engine, s.logger, lostWriteOverwrite,
+		t.ID, bucket, t.NamespaceContainer(bucket), object, displaced, backendName)
+
 	// Versioning ledger row + bucket default retention, exactly as plain PUT
 	// (R3-09: multipart objects never appeared in object_versions).
 	versionID := recordObjectVersion(r.Context(), s.db, t.ID, bucket, object, totalSize, etagValue, attrs.ContentType, backendName)

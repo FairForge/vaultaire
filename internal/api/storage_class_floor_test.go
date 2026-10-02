@@ -215,6 +215,15 @@ func TestDemotedStandardObject_GetServedFromColdSaysStandard(t *testing.T) {
 	f := setupClassFixture(t)
 	f.demoted("b", "old.jpg", true)
 	f.p.sync = false // the copy-back must not flip routing before the response is written
+	// It runs on its own goroutine and writes into the fixture's hot dir:
+	// the test ends only when it has (TempDir's cleanup raced it — 1 run in 40).
+	t.Cleanup(func() {
+		assert.Eventually(t, func() bool {
+			busy := false
+			f.p.inflight.Range(func(_, _ any) bool { busy = true; return false })
+			return !busy
+		}, 10*time.Second, 5*time.Millisecond, "the async copy-back never finished")
+	})
 
 	// Act
 	w := httptest.NewRecorder()
