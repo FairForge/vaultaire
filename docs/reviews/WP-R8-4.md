@@ -108,3 +108,13 @@ documents keep the words they were written with.
   change is `ChunkerAverageBits = 22` + regenerating the golden boundaries + a new identity on new
   objects; old objects keep reading (their chunks and manifests do not depend on the average).
 - Nothing to install, no env, no migration.
+
+## Post-merge review (plan driver, 2026-10-02)
+
+Read against the note: `crypto/chunker.go`, `config.go` (`Value`/`Scan`, `RecordedPipeline`),
+`gci.go` (the upsert already wrote `pipeline_config`; it was nil everywhere), `api/chunked_object.go`,
+the two write sites. A nil `*PipelineConfig` reaches `database/sql` as NULL (value-receiver `Valuer`
+on a nil pointer is the documented exception). No finding. One note: `NewChunkerFromConfig` builds
+the chunker from `min`/`max` and the constant `ChunkerAverageBits`, not from the recorded
+`Chunker.AverageBits` — fine while there is one identity; the day the average changes, a config-built
+chunker must take its bits from the record.
