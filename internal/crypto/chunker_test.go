@@ -9,20 +9,20 @@ import (
 	"testing"
 )
 
-func TestFastCDCChunker_Basic(t *testing.T) {
-	chunker, err := DefaultFastCDCChunker()
+func TestRabinChunker_Basic(t *testing.T) {
+	chunker, err := DefaultChunker()
 	if err != nil {
 		t.Fatalf("Failed to create chunker: %v", err)
 	}
 
-	if chunker.Algorithm() != ChunkingFastCDC {
-		t.Errorf("Algorithm() = %v, want %v", chunker.Algorithm(), ChunkingFastCDC)
+	if chunker.Algorithm() != ChunkingRabin {
+		t.Errorf("Algorithm() = %v, want %v", chunker.Algorithm(), ChunkingRabin)
 	}
 }
 
-func TestFastCDCChunker_SmallData(t *testing.T) {
+func TestRabinChunker_SmallData(t *testing.T) {
 	// Use smaller chunk sizes for testing
-	chunker, err := NewFastCDCChunker(512, 1024, 2048)
+	chunker, err := NewRabinChunker(512, 2048)
 	if err != nil {
 		t.Fatalf("Failed to create chunker: %v", err)
 	}
@@ -49,9 +49,9 @@ func TestFastCDCChunker_SmallData(t *testing.T) {
 	}
 }
 
-func TestFastCDCChunker_LargeData(t *testing.T) {
+func TestRabinChunker_LargeData(t *testing.T) {
 	// Use smaller chunk sizes for faster testing
-	chunker, err := NewFastCDCChunker(1024, 4096, 8192)
+	chunker, err := NewRabinChunker(1024, 8192)
 	if err != nil {
 		t.Fatalf("Failed to create chunker: %v", err)
 	}
@@ -111,13 +111,13 @@ func TestFastCDCChunker_LargeData(t *testing.T) {
 	}
 }
 
-func TestFastCDCChunker_Deterministic(t *testing.T) {
+func TestRabinChunker_Deterministic(t *testing.T) {
 	// Same data should produce same chunks with same polynomial
-	chunker1, err := NewFastCDCChunkerWithPol(1024, 4096, 8192, 0x3DA3358B4DC173)
+	chunker1, err := NewRabinChunkerWithPol(1024, 8192, 0x3DA3358B4DC173)
 	if err != nil {
 		t.Fatalf("Failed to create chunker1: %v", err)
 	}
-	chunker2, err := NewFastCDCChunkerWithPol(1024, 4096, 8192, 0x3DA3358B4DC173)
+	chunker2, err := NewRabinChunkerWithPol(1024, 8192, 0x3DA3358B4DC173)
 	if err != nil {
 		t.Fatalf("Failed to create chunker2: %v", err)
 	}
@@ -150,8 +150,8 @@ func TestFastCDCChunker_Deterministic(t *testing.T) {
 	}
 }
 
-func TestFastCDCChunker_Streaming(t *testing.T) {
-	chunker, err := NewFastCDCChunker(1024, 4096, 8192)
+func TestRabinChunker_Streaming(t *testing.T) {
+	chunker, err := NewRabinChunker(1024, 8192)
 	if err != nil {
 		t.Fatalf("Failed to create chunker: %v", err)
 	}
@@ -188,8 +188,8 @@ func TestFastCDCChunker_Streaming(t *testing.T) {
 	}
 }
 
-func TestFastCDCChunker_EmptyData(t *testing.T) {
-	chunker, err := DefaultFastCDCChunker()
+func TestRabinChunker_EmptyData(t *testing.T) {
+	chunker, err := DefaultChunker()
 	if err != nil {
 		t.Fatalf("Failed to create chunker: %v", err)
 	}
@@ -211,20 +211,15 @@ func TestFastCDCChunker_EmptyData(t *testing.T) {
 	}
 }
 
-func TestFastCDCChunker_InvalidParams(t *testing.T) {
-	_, err := NewFastCDCChunker(0, 1024, 2048)
+func TestRabinChunker_InvalidParams(t *testing.T) {
+	_, err := NewRabinChunker(0, 2048)
 	if err == nil {
 		t.Error("Expected error for zero min size")
 	}
 
-	_, err = NewFastCDCChunker(4096, 1024, 2048)
+	_, err = NewRabinChunker(4096, 2048)
 	if err == nil {
-		t.Error("Expected error for min > avg")
-	}
-
-	_, err = NewFastCDCChunker(1024, 4096, 2048)
-	if err == nil {
-		t.Error("Expected error for avg > max")
+		t.Error("Expected error for min > max")
 	}
 }
 
@@ -309,14 +304,14 @@ func TestFixedChunker_Streaming(t *testing.T) {
 }
 
 func TestNewChunkerFromConfig(t *testing.T) {
-	// Test FastCDC from config
+	// Test the Rabin chunker from config
 	config := ConfigSmartStorage
 	chunker, err := NewChunkerFromConfig(config)
 	if err != nil {
 		t.Fatalf("Failed to create chunker from config: %v", err)
 	}
-	if chunker.Algorithm() != ChunkingFastCDC {
-		t.Errorf("Expected FastCDC, got %v", chunker.Algorithm())
+	if chunker.Algorithm() != ChunkingRabin {
+		t.Errorf("Expected rabin, got %v", chunker.Algorithm())
 	}
 
 	// Test Fixed from config
@@ -339,7 +334,7 @@ func TestNewChunkerFromConfig(t *testing.T) {
 
 // TestChunkDeduplication verifies that identical content produces identical chunks
 func TestChunkDeduplication(t *testing.T) {
-	chunker, err := NewFastCDCChunkerWithPol(1024, 4096, 8192, 0x3DA3358B4DC173)
+	chunker, err := NewRabinChunkerWithPol(1024, 8192, 0x3DA3358B4DC173)
 	if err != nil {
 		t.Fatalf("Failed to create chunker: %v", err)
 	}
@@ -377,7 +372,7 @@ func TestChunkDeduplication(t *testing.T) {
 
 // TestChunkAppendScenario tests appending data to a file (common backup scenario)
 func TestChunkAppendScenario(t *testing.T) {
-	chunker, err := NewFastCDCChunkerWithPol(512, 2048, 4096, 0x3DA3358B4DC173)
+	chunker, err := NewRabinChunkerWithPol(512, 4096, 0x3DA3358B4DC173)
 	if err != nil {
 		t.Fatalf("Failed to create chunker: %v", err)
 	}
@@ -428,8 +423,8 @@ func TestChunkAppendScenario(t *testing.T) {
 	}
 }
 
-func BenchmarkFastCDCChunker_1MB(b *testing.B) {
-	chunker, _ := NewFastCDCChunker(256*1024, 1024*1024, 4*1024*1024)
+func BenchmarkRabinChunker_1MB(b *testing.B) {
+	chunker, _ := NewRabinChunker(256*1024, 4*1024*1024)
 	data := make([]byte, 1024*1024)
 	if _, err := rand.Read(data); err != nil {
 		b.Fatalf("Failed to generate random data: %v", err)
@@ -443,8 +438,8 @@ func BenchmarkFastCDCChunker_1MB(b *testing.B) {
 	}
 }
 
-func BenchmarkFastCDCChunker_10MB(b *testing.B) {
-	chunker, _ := NewFastCDCChunker(1024*1024, 4*1024*1024, 16*1024*1024)
+func BenchmarkRabinChunker_10MB(b *testing.B) {
+	chunker, _ := NewRabinChunker(1024*1024, 16*1024*1024)
 	data := make([]byte, 10*1024*1024)
 	if _, err := rand.Read(data); err != nil {
 		b.Fatalf("Failed to generate random data: %v", err)
@@ -458,8 +453,8 @@ func BenchmarkFastCDCChunker_10MB(b *testing.B) {
 	}
 }
 
-func BenchmarkFastCDCChunker_100MB(b *testing.B) {
-	chunker, _ := NewFastCDCChunker(1024*1024, 4*1024*1024, 16*1024*1024)
+func BenchmarkRabinChunker_100MB(b *testing.B) {
+	chunker, _ := NewRabinChunker(1024*1024, 16*1024*1024)
 	data := make([]byte, 100*1024*1024)
 	if _, err := rand.Read(data); err != nil {
 		b.Fatalf("Failed to generate random data: %v", err)
@@ -489,7 +484,7 @@ func BenchmarkFixedChunker_10MB(b *testing.B) {
 }
 
 func TestChunker_ChunkContext_Cancellation(t *testing.T) {
-	chunker, err := NewFastCDCChunker(512, 1024, 2048)
+	chunker, err := NewRabinChunker(512, 2048)
 	if err != nil {
 		t.Fatalf("Failed to create chunker: %v", err)
 	}
@@ -529,8 +524,8 @@ func TestChunker_ChunkContext_Cancellation(t *testing.T) {
 	t.Logf("drained %d buffered results after cancel", drained)
 }
 
-func BenchmarkFastCDCChunker_Streaming_100MB(b *testing.B) {
-	chunker, _ := NewFastCDCChunker(1024*1024, 4*1024*1024, 16*1024*1024)
+func BenchmarkRabinChunker_Streaming_100MB(b *testing.B) {
+	chunker, _ := NewRabinChunker(1024*1024, 16*1024*1024)
 	data := make([]byte, 100*1024*1024)
 	if _, err := rand.Read(data); err != nil {
 		b.Fatalf("Failed to generate random data: %v", err)

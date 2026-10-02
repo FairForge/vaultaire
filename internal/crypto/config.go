@@ -4,6 +4,8 @@
 package crypto
 
 import (
+	"database/sql/driver"
+	"encoding/json"
 	"fmt"
 )
 
@@ -11,9 +13,12 @@ import (
 type ChunkingAlgorithm string
 
 const (
-	ChunkingNone    ChunkingAlgorithm = "none"
-	ChunkingFixed   ChunkingAlgorithm = "fixed"
-	ChunkingFastCDC ChunkingAlgorithm = "fastcdc"
+	ChunkingNone  ChunkingAlgorithm = "none"
+	ChunkingFixed ChunkingAlgorithm = "fixed"
+	// ChunkingRabin is restic's Rabin fingerprint chunker (RabinChunker). It
+	// was named "fastcdc" until WP-R8-4; no pipeline_config row was ever
+	// written with the old name (the column was NULL everywhere).
+	ChunkingRabin ChunkingAlgorithm = "rabin"
 )
 
 // CompressionAlgorithm represents supported compression algorithms
@@ -51,8 +56,11 @@ type PipelineConfig struct {
 	ChunkingEnabled bool              `json:"chunking_enabled"`
 	ChunkingAlgo    ChunkingAlgorithm `json:"chunking_algo,omitempty"`
 	ChunkMinSize    int               `json:"chunk_min_size,omitempty"` // bytes
-	ChunkAvgSize    int               `json:"chunk_avg_size,omitempty"` // bytes
+	ChunkAvgSize    int               `json:"chunk_avg_size,omitempty"` // bytes — the EXPECTED average (ChunkExpectedAverage); the chunker takes min, max and Chunker.AverageBits
 	ChunkMaxSize    int               `json:"chunk_max_size,omitempty"` // bytes
+	// Chunker is what cut the chunks: library, version, polynomial, sizes
+	// (WP-R8-4). Nil on configs that never chunked.
+	Chunker *ChunkerIdentity `json:"chunker,omitempty"`
 
 	// Deduplication settings
 	DedupEnabled     bool `json:"dedup_enabled"`
@@ -72,6 +80,56 @@ type PipelineConfig struct {
 	PostQuantumReady bool `json:"post_quantum_ready,omitempty"`
 }
 
+// Value stores the config as JSON (object_metadata.pipeline_config is JSONB);
+// a nil *PipelineConfig stores NULL.
+func (c PipelineConfig) Value() (driver.Value, error) {
+	b, err := json.Marshal(c)
+	if err != nil {
+		return nil, fmt.Errorf("pipeline config: %w", err)
+	}
+	return string(b), nil
+}
+
+// Scan reads the JSONB column back.
+func (c *PipelineConfig) Scan(src any) error {
+	switch v := src.(type) {
+	case nil:
+		*c = PipelineConfig{}
+		return nil
+	case []byte:
+		return json.Unmarshal(v, c)
+	case string:
+		return json.Unmarshal([]byte(v), c)
+	}
+	return fmt.Errorf("pipeline config: cannot scan %T", src)
+}
+
+// RecordedPipeline is what a chunked object's pipeline_config records (WP-R8-4):
+// what the pipeline DID to this object — not a preset. The chunker identity is
+// the part that matters: it is what a later change to the chunker is told
+// apart by. Compression is decided per chunk (ShouldCompress) and encryption
+// per deployment (the master key); both are also on every index row.
+func RecordedPipeline(chunker ChunkerIdentity, encrypted bool) *PipelineConfig {
+	cfg := &PipelineConfig{
+		ChunkingEnabled:    true,
+		ChunkingAlgo:       ChunkingRabin,
+		ChunkMinSize:       chunker.MinSize,
+		ChunkAvgSize:       chunker.MinSize + 1<<chunker.AverageBits,
+		ChunkMaxSize:       chunker.MaxSize,
+		Chunker:            &chunker,
+		DedupEnabled:       true,
+		DedupCrossTenant:   !encrypted,
+		CompressionEnabled: true,
+		CompressionAlgo:    CompressionZstd,
+	}
+	if encrypted {
+		cfg.EncryptionEnabled = true
+		cfg.EncryptionAlgo = EncryptionAESGCM
+		cfg.EncryptionMode = EncryptionModeConvergent
+	}
+	return cfg
+}
+
 // Validate checks if the pipeline config is valid
 func (c PipelineConfig) Validate() error {
 	// Validate chunking
@@ -79,7 +137,7 @@ func (c PipelineConfig) Validate() error {
 		if c.ChunkingAlgo == "" || c.ChunkingAlgo == ChunkingNone {
 			return fmt.Errorf("chunking enabled but no algorithm specified")
 		}
-		if c.ChunkingAlgo == ChunkingFastCDC || c.ChunkingAlgo == ChunkingFixed {
+		if c.ChunkingAlgo == ChunkingRabin || c.ChunkingAlgo == ChunkingFixed {
 			if c.ChunkMinSize <= 0 || c.ChunkAvgSize <= 0 || c.ChunkMaxSize <= 0 {
 				return fmt.Errorf("chunk sizes must be positive")
 			}
@@ -139,9 +197,9 @@ var ConfigPassthrough = PipelineConfig{
 // ConfigSmartStorage is the default "smart" pipeline for general storage
 var ConfigSmartStorage = PipelineConfig{
 	ChunkingEnabled:    true,
-	ChunkingAlgo:       ChunkingFastCDC,
-	ChunkMinSize:       1 * 1024 * 1024,  // 1MB
-	ChunkAvgSize:       4 * 1024 * 1024,  // 4MB
+	ChunkingAlgo:       ChunkingRabin,
+	ChunkMinSize:       1 * 1024 * 1024, // 1MB
+	ChunkAvgSize:       ChunkExpectedAverage,
 	ChunkMaxSize:       16 * 1024 * 1024, // 16MB
 	DedupEnabled:       true,
 	DedupCrossTenant:   true,
@@ -156,7 +214,7 @@ var ConfigSmartStorage = PipelineConfig{
 // ConfigArchive is optimized for cold storage (max compression)
 var ConfigArchive = PipelineConfig{
 	ChunkingEnabled:    true,
-	ChunkingAlgo:       ChunkingFastCDC,
+	ChunkingAlgo:       ChunkingRabin,
 	ChunkMinSize:       1 * 1024 * 1024,  // 1MB
 	ChunkAvgSize:       8 * 1024 * 1024,  // 8MB (larger for archive)
 	ChunkMaxSize:       32 * 1024 * 1024, // 32MB
@@ -187,7 +245,7 @@ var ConfigHPC = PipelineConfig{
 // ConfigEnterprise is for compliance-focused deployments
 var ConfigEnterprise = PipelineConfig{
 	ChunkingEnabled:    true,
-	ChunkingAlgo:       ChunkingFastCDC,
+	ChunkingAlgo:       ChunkingRabin,
 	ChunkMinSize:       1 * 1024 * 1024,
 	ChunkAvgSize:       4 * 1024 * 1024,
 	ChunkMaxSize:       16 * 1024 * 1024,

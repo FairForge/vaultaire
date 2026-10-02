@@ -1181,7 +1181,7 @@ func (a *S3ToEngine) handleChunkedPut(
 	pctx, cancelStores := context.WithCancel(ctx)
 	defer cancelStores()
 
-	chunker, err := crypto.DefaultFastCDCChunker()
+	chunker, err := crypto.DefaultChunker()
 	if err != nil {
 		return fmt.Errorf("create chunker: %w", err)
 	}
@@ -1370,22 +1370,23 @@ func (a *S3ToEngine) handleChunkedPut(
 	// manifest (consistent lock order: head row → manifest tables).
 	displaced, dbErr := atomicHeadUpsert(ctx, a.db, t.ID, bucket, artifact, func(tx *sql.Tx) error {
 		if metaErr := a.gci.ReplaceObjectManifestTx(ctx, tx, tenantID, bucket, artifact, newRefs, &crypto.ObjectMeta{
-			TenantID:     tenantID,
-			BucketName:   bucket,
-			ObjectKey:    artifact,
-			TotalSize:    measuredSize,
-			ChunkCount:   chunkCount,
-			ContentType:  &contentType,
-			LogicalSize:  measuredSize,
-			PhysicalSize: &physicalSize,
-			DedupRatio:   &dedupRatio,
+			TenantID:       tenantID,
+			BucketName:     bucket,
+			ObjectKey:      artifact,
+			TotalSize:      measuredSize,
+			ChunkCount:     chunkCount,
+			ContentType:    &contentType,
+			LogicalSize:    measuredSize,
+			PhysicalSize:   &physicalSize,
+			DedupRatio:     &dedupRatio,
+			PipelineConfig: chunkedPipeline(chunker, encrypting),
 		}); metaErr != nil {
 			return fmt.Errorf("replace object manifest: %w", metaErr)
 		}
 		_, execErr := tx.ExecContext(ctx, `
 			INSERT INTO object_head_cache
 				(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, content_encoding, content_language, cache_control, http_expires, website_redirect_location, floor, is_chunked, tags, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'standard', TRUE, $16, NOW())
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $17, TRUE, $16, NOW())
 			ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
 				size_bytes            = EXCLUDED.size_bytes,
 				etag                  = EXCLUDED.etag,
@@ -1403,7 +1404,7 @@ func (a *S3ToEngine) handleChunkedPut(
 				is_chunked            = EXCLUDED.is_chunked,
 				tags                  = EXCLUDED.tags,
 				updated_at            = NOW()
-		`, t.ID, bucket, artifact, measuredSize, etag, contentType, backendName, metaJSON, chunkEncAlgo, contentDisposition, contentEncoding, contentLanguage, echoHdrs.CacheControl, echoHdrs.Expires, echoHdrs.WebsiteRedirect, tagsJSON)
+		`, t.ID, bucket, artifact, measuredSize, etag, contentType, backendName, metaJSON, chunkEncAlgo, contentDisposition, contentEncoding, contentLanguage, echoHdrs.CacheControl, echoHdrs.Expires, echoHdrs.WebsiteRedirect, tagsJSON, chunkedObjectFloor)
 		return execErr
 	})
 	a.displaced = displaced

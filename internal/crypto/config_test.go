@@ -50,7 +50,7 @@ func TestPipelineConfigValidate(t *testing.T) {
 			name: "invalid chunk sizes",
 			config: PipelineConfig{
 				ChunkingEnabled: true,
-				ChunkingAlgo:    ChunkingFastCDC,
+				ChunkingAlgo:    ChunkingRabin,
 				ChunkMinSize:    8192, // min > avg
 				ChunkAvgSize:    4096,
 				ChunkMaxSize:    16384,
@@ -155,9 +155,11 @@ func TestGetPreset(t *testing.T) {
 
 func TestConfigPresetValues(t *testing.T) {
 	// Verify smart preset has expected values
-	if ConfigSmartStorage.ChunkAvgSize != 4*1024*1024 {
+	// The expected average is what the chunker really cuts (≈2 MiB, WP-R8-4),
+	// not the 4 MiB the presets used to claim.
+	if ConfigSmartStorage.ChunkAvgSize != ChunkExpectedAverage {
 		t.Errorf("ConfigSmartStorage.ChunkAvgSize = %d, want %d",
-			ConfigSmartStorage.ChunkAvgSize, 4*1024*1024)
+			ConfigSmartStorage.ChunkAvgSize, ChunkExpectedAverage)
 	}
 
 	// Verify archive has cross-tenant dedup

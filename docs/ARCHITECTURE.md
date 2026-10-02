@@ -203,9 +203,12 @@ age-tiering policy in effect.
 
 For Standard-floor objects the API layer splits the body with restic's
 **Rabin** fingerprint chunker (`internal/crypto/chunker.go`,
-`github.com/restic/chunker`) — not FastCDC, despite type names. The library's
-split mask is fixed, so the real average chunk is about **2 MiB** (R8-11;
-WP-R8-4 decides whether to change it before launch — a change resets dedup).
+`github.com/restic/chunker` v0.4.0, `RabinChunker`) — not FastCDC. Its identity
+(library + version, polynomial `0x2ADD89E3B790BB`, 1 MiB min, 20 average bits,
+16 MiB max) is one constant set, recorded on every chunked object's
+`pipeline_config` and pinned by a golden-boundary test; the real average chunk
+is about **2 MiB** (WP-R8-4 kept it — a change resets dedup for everything
+stored).
 Each chunk is content-hashed, optionally zstd-compressed (level 3, skipped for
 incompressible content types or when it does not shrink), and stored once in
 `_global`; `global_content_index` holds one row per distinct chunk with a

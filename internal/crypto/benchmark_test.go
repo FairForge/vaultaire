@@ -65,7 +65,7 @@ func BenchmarkDecryption_AES256GCM(b *testing.B) {
 	}
 }
 
-func BenchmarkChunking_FastCDC(b *testing.B) {
+func BenchmarkChunking_Rabin(b *testing.B) {
 	config, _ := GetPreset("smart")
 	chunker, _ := NewChunkerFromConfig(config)
 
