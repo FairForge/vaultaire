@@ -1,12 +1,12 @@
-# How to Use stored.ge with rclone
+# How to Use Stored with rclone
 
-Connect rclone to stored.ge for file syncing, mounting, and serving — works on Linux, macOS, and Windows.
+Connect rclone to Stored for file syncing, mounting, and serving — works on Linux, macOS, and Windows.
 
 > The customer copy of this guide is the served page at https://stored.ge/docs/rclone (`internal/api/docs_rclone.md`); keep the two in step.
 
 ## What is rclone
 
-rclone is a command-line tool for managing files on cloud storage. It supports over 70 backends, including any S3-compatible service. Think of it as rsync for the cloud — you get `copy`, `sync`, `mount`, and even `serve` (WebDAV, SFTP, FTP) against your stored.ge buckets.
+rclone is a command-line tool for managing files on cloud storage. It supports over 70 backends, including any S3-compatible service. Think of it as rsync for the cloud — you get `copy`, `sync`, `mount`, and even `serve` (WebDAV, SFTP, FTP) against your Stored buckets.
 
 ## Step 1: Install rclone
 
@@ -26,7 +26,7 @@ Verify:
 rclone version
 ```
 
-## Step 2: Configure stored.ge Remote
+## Step 2: Configure Stored Remote
 
 Run the interactive config:
 
@@ -82,7 +82,7 @@ rclone lsd storedge:
 rclone ls storedge:my-bucket
 ```
 
-**Copy files to stored.ge:**
+**Copy files to Stored:**
 
 ```bash
 # Single file
@@ -112,7 +112,7 @@ rclone delete storedge:my-bucket/old-file.txt
 
 ## Step 4: Mount as a Filesystem
 
-Mount your stored.ge bucket as a local directory:
+Mount your Stored bucket as a local directory:
 
 ```bash
 mkdir -p /mnt/storedge
@@ -139,7 +139,7 @@ fusermount -u /mnt/storedge
 
 ## Step 5: Serve via WebDAV, SFTP, or FTP
 
-Turn your stored.ge bucket into a WebDAV server accessible from any file manager:
+Turn your Stored bucket into a WebDAV server accessible from any file manager:
 
 ```bash
 rclone serve webdav storedge:my-bucket --addr :8080
@@ -168,7 +168,7 @@ Create a systemd unit:
 ```bash
 sudo tee /etc/systemd/system/rclone-storedge.service << 'EOF'
 [Unit]
-Description=rclone mount for stored.ge
+Description=rclone mount for Stored
 After=network-online.target
 Wants=network-online.target
 

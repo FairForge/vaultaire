@@ -30,7 +30,7 @@ const changelogShellPre = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Changelog — stored.ge</title>
+<title>Changelog — Stored</title>
 ` + siteShellStyle + `</head>
 <body>
 <header class="top"><div class="top-in">` + siteShellBrand + `<a class="crumb" href="/changelog">Changelog</a>` + siteShellToggle + `</div></header>

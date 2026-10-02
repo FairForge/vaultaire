@@ -186,7 +186,7 @@ func GenerateOpenAPISpec() *OpenAPISpec {
 	return &OpenAPISpec{
 		OpenAPI: "3.0.3",
 		Info: Info{
-			Title: "stored.ge Storage API",
+			Title: "Stored Storage API",
 			Description: "Two APIs on one host.\n\n" +
 				"**S3 API** — the root paths (`/`, `/{bucket}`, `/{bucket}/{key}`) speak the S3 wire protocol: " +
 				"AWS Signature Version 4, region `us-east-1`, path-style addressing, XML bodies. Use them with any S3 client " +
@@ -201,7 +201,7 @@ func GenerateOpenAPISpec() *OpenAPISpec {
 				"and honour an `Idempotency-Key` header on mutations (the first response is replayed for 24 h).",
 			Version: "1.1.0",
 			Contact: Contact{
-				Name:  "stored.ge Support",
+				Name:  "Stored Support",
 				Email: "support@stored.ge",
 			},
 			License: License{
@@ -2060,7 +2060,7 @@ const swaggerUIHTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>API Reference — stored.ge</title>
+    <title>API Reference — Stored</title>
     <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.10.3/swagger-ui.css">
     <style>
         html { box-sizing: border-box; overflow: -moz-scrollbars-vertical; overflow-y: scroll; }

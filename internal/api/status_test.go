@@ -27,7 +27,7 @@ func TestStatusPage_Healthy(t *testing.T) {
 	assert.Contains(t, rec.Header().Get("Content-Type"), "text/html")
 	body := rec.Body.String()
 	assert.Contains(t, body, "All Systems Operational")
-	assert.Contains(t, body, "stored.ge")
+	assert.Contains(t, body, "Stored")
 	assert.Contains(t, body, BuildSHA)
 	assert.Contains(t, body, "1 / 1 healthy")
 }

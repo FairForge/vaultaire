@@ -1,9 +1,9 @@
-{{define "title"}}Business Associate Agreement — stored.ge{{end}}
+{{define "title"}}Business Associate Agreement — Stored{{end}}
 {{define "content"}}
 <div class="card">
     <p class="text-muted">Last updated: September 30, 2026</p>
     <h1>Business Associate Agreement</h1>
-    <p>This Business Associate Agreement ("BAA") is entered into between you, the Covered Entity or Business Associate ("Covered Entity"), and FairForge LLC, operating as stored.ge ("Business Associate"), and supplements the <a href="/legal/terms">Terms of Service</a> and <a href="/legal/dpa">Data Processing Agreement</a>.</p>
+    <p>This Business Associate Agreement ("BAA") is entered into between you, the Covered Entity or Business Associate ("Covered Entity"), and FairForge LLC, operating as Stored ("Business Associate"), and supplements the <a href="/legal/terms">Terms of Service</a> and <a href="/legal/dpa">Data Processing Agreement</a>.</p>
     <p>This BAA is required under the Health Insurance Portability and Accountability Act of 1996 ("HIPAA"), the Health Information Technology for Economic and Clinical Health Act ("HITECH"), and their implementing regulations at 45 CFR Parts 160 and 164 (collectively, "HIPAA Rules").</p>
 
     <h2 id="contents">Contents</h2>
@@ -22,8 +22,8 @@
     <h2 id="definitions">1. Definitions</h2>
     <p>Capitalized terms used but not defined in this BAA have the meanings assigned to them in the HIPAA Rules. For purposes of this BAA:</p>
     <ul>
-        <li><strong>Covered Entity</strong> means the customer who is subject to HIPAA and enters into this BAA in connection with the use of stored.ge services.</li>
-        <li><strong>Business Associate</strong> means FairForge LLC, operating as stored.ge, which creates, receives, maintains, or transmits Protected Health Information on behalf of the Covered Entity.</li>
+        <li><strong>Covered Entity</strong> means the customer who is subject to HIPAA and enters into this BAA in connection with the use of Stored services.</li>
+        <li><strong>Business Associate</strong> means FairForge LLC, operating as Stored, which creates, receives, maintains, or transmits Protected Health Information on behalf of the Covered Entity.</li>
         <li><strong>Protected Health Information (PHI)</strong> means individually identifiable health information as defined in 45 CFR §160.103, including electronic PHI (ePHI).</li>
         <li><strong>Electronic Protected Health Information (ePHI)</strong> means PHI that is transmitted by or maintained in electronic media, as defined in 45 CFR §160.103.</li>
         <li><strong>Breach</strong> means the acquisition, access, use, or disclosure of PHI in a manner not permitted under the HIPAA Privacy Rule which compromises the security or privacy of the PHI, as defined in 45 CFR §164.402.</li>
@@ -40,7 +40,7 @@
     <p>Business Associate shall not use or disclose PHI in any manner that would violate the HIPAA Rules if done by Covered Entity, except as permitted above.</p>
 
     <h2 id="safeguards">3. Safeguards</h2>
-    <p>Business Associate shall implement administrative, physical, and technical safeguards that reasonably and appropriately protect the confidentiality, integrity, and availability of ePHI, as required by 45 CFR §164.306 and §164.312. stored.ge provides the following safeguards:</p>
+    <p>Business Associate shall implement administrative, physical, and technical safeguards that reasonably and appropriately protect the confidentiality, integrity, and availability of ePHI, as required by 45 CFR §164.306 and §164.312. Stored provides the following safeguards:</p>
 
     <h3>3.1 Encryption at Rest</h3>
     <p>Encryption at rest is available under keys the Covered Entity supplies with each request (SSE-C — never stored by us) or applied client-side before upload. Server-managed encryption at rest (SSE-S3, AES-256-GCM with ML-KEM-768 key encapsulation and per-tenant keys) is implemented and tested but <strong>not yet enabled in production</strong>; Covered Entities storing ePHI should use SSE-C or client-side encryption until it is. Objects held by our storage subcontractors are additionally subject to those providers' own at-rest encryption.</p>
@@ -64,7 +64,7 @@
     </ul>
 
     <h3>3.5 Audit Controls</h3>
-    <p>stored.ge maintains audit logs for account access, API operations, and administrative actions. Event logging and webhook notifications are available for real-time monitoring of object operations.</p>
+    <p>Stored maintains audit logs for account access, API operations, and administrative actions. Event logging and webhook notifications are available for real-time monitoring of object operations.</p>
 
     <h2 id="breach-notification">4. Breach Notification</h2>
     <p>Business Associate shall comply with the breach notification requirements of 45 CFR §§164.400–414:</p>
@@ -80,7 +80,7 @@
 
     <h2 id="access-records">6. Access to Records</h2>
     <ul>
-        <li><strong>Individual access:</strong> Business Associate shall make PHI maintained in Designated Record Sets available to Covered Entity as necessary to satisfy Covered Entity's obligations under 45 CFR §164.524. stored.ge's S3-compatible API provides direct access to all stored objects.</li>
+        <li><strong>Individual access:</strong> Business Associate shall make PHI maintained in Designated Record Sets available to Covered Entity as necessary to satisfy Covered Entity's obligations under 45 CFR §164.524. Stored's S3-compatible API provides direct access to all stored objects.</li>
         <li><strong>Amendment:</strong> Business Associate shall make PHI available for amendment and incorporate any amendments to PHI as directed by Covered Entity, pursuant to 45 CFR §164.526.</li>
         <li><strong>Accounting of disclosures:</strong> Business Associate shall make information available to Covered Entity as required to provide an accounting of disclosures under 45 CFR §164.528.</li>
         <li><strong>HHS access:</strong> Business Associate shall make its internal practices, books, and records relating to the use and disclosure of PHI available to the Secretary of HHS for purposes of determining Covered Entity's compliance with the HIPAA Rules.</li>

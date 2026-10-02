@@ -1,6 +1,6 @@
 # Changelog
 
-What's new on stored.ge. Ship requests and bug reports are credited — tell us
+What's new on Stored. Ship requests and bug reports are credited — tell us
 what you need and it shows up here.
 
 ---
@@ -49,7 +49,7 @@ what you need and it shows up here.
 
 ## 2026-07-20 — New homepage
 
-- **The real stored.ge front page is live.** Tier ladder (Vault archive →
+- **The real Stored front page is live.** Tier ladder (Vault archive →
   Standard → Performance), honest measured numbers, full pricing with the
   Vault packs, and a straight-answers section covering the questions most
   storage providers dodge. The old pre-launch placeholder page is gone.

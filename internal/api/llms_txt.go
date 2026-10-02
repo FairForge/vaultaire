@@ -9,12 +9,12 @@ import (
 )
 
 // /llms.txt — the plain-text summary an AI assistant reads before it writes
-// code against stored.ge. Prices come from the one price file
+// code against Stored. Prices come from the one price file
 // (internal/api/landing/prices.json) so this never quotes a retired number
 // again (Review R14-04: it said "$3.99/TB" for four months). The route list
 // is the one TestOpenAPIRouteInventory prints; /openapi.json is the
 // authoritative machine-readable version.
-const llmsTxtTemplate = `# stored.ge API Reference
+const llmsTxtTemplate = `# Stored API Reference
 > S3-compatible object storage, sold as a whole-TB quota at a flat rate:
 > Standard $%s/TB/mo annual ($%s monthly), Vault archive $%s/TB/mo annual
 > ($%s monthly, $%s monthly minimum), pin-hot add-on $%s/TB/mo. 5 GB free,

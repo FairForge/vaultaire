@@ -230,7 +230,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	s.cdnRateLimiter = NewRateLimiter()
 
 	// MFA service for TOTP generation and validation.
-	s.mfaService = auth.NewMFAService("stored.ge")
+	s.mfaService = auth.NewMFAService("Stored")
 	s.mfaPendingStore = dashboard.NewMFAPendingStore()
 
 	if masterKey := os.Getenv("ENCRYPTION_MASTER_KEY"); masterKey != "" && s.db != nil {
@@ -1065,7 +1065,7 @@ func (s *Server) handlePasswordReset(w http.ResponseWriter, r *http.Request) {
 		htmlBody, textBody, renderErr := email.RenderPasswordReset(s.baseURL, token, req.Email)
 		if renderErr != nil {
 			s.logger.Error("render password reset email", zap.Error(renderErr))
-		} else if sendErr := s.emailSender.Send(r.Context(), req.Email, "Reset your password — stored.ge", htmlBody, textBody); sendErr != nil {
+		} else if sendErr := s.emailSender.Send(r.Context(), req.Email, "Reset your password — Stored", htmlBody, textBody); sendErr != nil {
 			s.logger.Error("send password reset email", zap.String("to", req.Email), zap.Error(sendErr))
 		}
 	}
@@ -1150,7 +1150,7 @@ const statusPageHTML = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Status — stored.ge</title>
+<title>Status — Stored</title>
 <style>
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0f172a;color:#e2e8f0;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
 .card{background:#1e293b;border-radius:12px;padding:2.5rem;max-width:480px;width:100%%;text-align:center}
@@ -1166,7 +1166,7 @@ a:hover{text-decoration:underline}
 </head>
 <body>
 <div class="card">
-<div class="brand">stored.ge</div>
+<div class="brand">Stored</div>
 <h1>System Status</h1>
 <div class="status %s">%s</div>
 <p class="detail">Version: %s</p>

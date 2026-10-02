@@ -14,7 +14,7 @@ Inputs (all in this directory):
                      generated here from PIECES and prices.json)
   page.js            the page's own interactions (waitlist, tabs, sliders)
   builder.js         the house builder, why strip and light/dark toggle
-  prices.json        every stored.ge price the page shows, in one place
+  prices.json        every Stored price the page shows, in one place
   fonts/*.woff2      Montserrat (variable) + Silkscreen 400/700, OFL, latin subset
 
 The output carries a sha256 of these sources in its first comment;
@@ -354,7 +354,7 @@ html, body {{ margin: 0; width: 1200px; height: 630px; overflow: hidden; backgro
 <div class="og">
   {room}
   <div>
-    <div class="brand">{spr('mark', 14, 14)}<span>stored.ge</span></div>
+    <div class="brand">{spr('mark', 14, 14)}<span>Stored</span></div>
     <h1>Your photos, your projects, your backups. <em>Put away, not thrown away.</em></h1>
     <p class="line">downstairs ${PRICE_TOKENS['__PRICE_STD__']}/TB &middot; attic ${PRICE_TOKENS['__PRICE_VAULT__']}/TB</p>
     <div class="tags"><span class="tag">no meters</span><span class="tag">no API fees</span><span class="tag tag-green">S3 compatible</span><span class="tag">open-source engine</span></div>

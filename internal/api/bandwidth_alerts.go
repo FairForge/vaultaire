@@ -262,7 +262,7 @@ func egressAlertMessage(thresholdPct int, st usage.EgressStatus) (subject, body 
 	reset := st.ResetAt.UTC().Format("January 2, 2006")
 	rate := formatBandwidthBytes(st.RateBytesPerSec) + "/s"
 	if thresholdPct >= 100 {
-		subject = "Your stored.ge egress allowance for this month is used up"
+		subject = "Your Stored egress allowance for this month is used up"
 		body = fmt.Sprintf(
 			"You have downloaded %s this month, which is all of your %s egress allowance. "+
 				"Until the allowance resets on %s (UTC), downloads from your account are rate-limited to %s in total. "+
@@ -272,9 +272,9 @@ func egressAlertMessage(thresholdPct int, st usage.EgressStatus) (subject, body 
 		return subject, body
 	}
 	pctUsed := used * 100 / allowance
-	subject = fmt.Sprintf("You've used %d%% of your stored.ge egress allowance", pctUsed)
+	subject = fmt.Sprintf("You've used %d%% of your Stored egress allowance", pctUsed)
 	body = fmt.Sprintf(
-		"Your stored.ge downloads this month have reached %s of your %s egress allowance (%d%%). "+
+		"Your Stored downloads this month have reached %s of your %s egress allowance (%d%%). "+
 			"Past the allowance, downloads are rate-limited to %s in total until it resets on %s (UTC) — never billed. "+
 			"Uploads are not affected.",
 		formatBandwidthBytes(used), formatBandwidthBytes(allowance), pctUsed, rate, reset)

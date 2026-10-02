@@ -1,6 +1,6 @@
-# Mount stored.ge as a POSIX Filesystem with JuiceFS
+# Mount Stored as a POSIX Filesystem with JuiceFS
 
-Turn your stored.ge S3 bucket into a full POSIX filesystem you can `cd`, `ls`, and `cat` — on any Linux VPS with 512MB of RAM.
+Turn your Stored S3 bucket into a full POSIX filesystem you can `cd`, `ls`, and `cat` — on any Linux VPS with 512MB of RAM.
 
 ## What is JuiceFS
 
@@ -9,8 +9,8 @@ JuiceFS is an open-source, high-performance POSIX filesystem that splits storage
 ## Prerequisites
 
 - Any Linux VPS (Ubuntu 20.04+, Debian 11+, or similar) with at least 512MB RAM
-- A stored.ge account with your access key and secret key (find them in your dashboard at stored.ge)
-- A bucket created on stored.ge (you'll do this below if you haven't already)
+- A Stored account with your access key and secret key (find them in your dashboard at stored.ge)
+- A bucket created on Stored (you'll do this below if you haven't already)
 
 ## Step 1: Install JuiceFS
 
@@ -24,7 +24,7 @@ Verify the install:
 juicefs version
 ```
 
-## Step 2: Create a Bucket on stored.ge
+## Step 2: Create a Bucket on Stored
 
 If you haven't already, create a bucket using the AWS CLI:
 
@@ -34,7 +34,7 @@ aws s3 mb s3://my-jfs-data \
   --region us-east-1
 ```
 
-Or create one from your stored.ge dashboard.
+Or create one from your Stored dashboard.
 
 ## Step 3: Format the Filesystem
 
@@ -52,7 +52,7 @@ juicefs format \
   myjfs
 ```
 
-Replace `VKxxxxxxxxxxxxxxxx` and `SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` with your actual stored.ge credentials — the primary pair shown once at sign-up, or a scoped `VLT_…` key from Dashboard → API Keys limited to this bucket. The last argument (`myjfs`) is your filesystem name.
+Replace `VKxxxxxxxxxxxxxxxx` and `SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` with your actual Stored credentials — the primary pair shown once at sign-up, or a scoped `VLT_…` key from Dashboard → API Keys limited to this bucket. The last argument (`myjfs`) is your filesystem name.
 
 ## Step 4: Mount the Filesystem
 
@@ -71,12 +71,12 @@ juicefs mount -d sqlite3:///var/jfs/meta.db /mnt/storedge
 ## Step 5: Verify
 
 ```bash
-echo "hello stored.ge" > /mnt/storedge/test.txt
+echo "hello Stored" > /mnt/storedge/test.txt
 cat /mnt/storedge/test.txt
 ls -la /mnt/storedge/
 ```
 
-You should see your file. It's stored on stored.ge but behaves exactly like a local file.
+You should see your file. It lives on Stored but behaves exactly like a local file.
 
 ## Automounting on Boot
 
@@ -85,7 +85,7 @@ Create a systemd unit so your filesystem mounts automatically:
 ```bash
 sudo tee /etc/systemd/system/juicefs-storedge.service << 'EOF'
 [Unit]
-Description=JuiceFS mount for stored.ge
+Description=JuiceFS mount for Stored
 After=network-online.target
 Wants=network-online.target
 

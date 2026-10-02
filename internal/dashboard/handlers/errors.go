@@ -23,7 +23,7 @@ const errorPage404HTML = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>404 — stored.ge</title>
+<title>404 — Stored</title>
 <style>
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0f172a;color:#e2e8f0;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
 .card{background:#1e293b;border-radius:12px;padding:2.5rem;max-width:420px;text-align:center}

@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>stored.ge — S3-compatible storage that optimizes itself. $__PRICE_STD__/TB, tape archive $__PRICE_VAULT__/TB</title>
+<title>Stored — S3-compatible storage that optimizes itself. $__PRICE_STD__/TB, tape archive $__PRICE_VAULT__/TB</title>
 <meta name="description" content="S3-compatible object storage with automatic tiering across hot storage and tape. $__PRICE_STD__/TB, tape-backed archive at $__PRICE_VAULT__/TB. Flat per-TB quota, no API fees, no retrieval fees.">
-<meta property="og:title" content="stored.ge — S3-compatible storage that optimizes itself">
+<meta property="og:title" content="Stored — S3-compatible storage that optimizes itself">
 <meta property="og:description" content="One endpoint. Your data auto-tiers across hot storage and tape — $__PRICE_STD__/TB, archive at $__PRICE_VAULT__/TB. Flat quota, no API fees.">
 <meta property="og:url" content="https://stored.ge">
 <meta property="og:image" content="https://stored.ge/og.png">
@@ -29,7 +29,7 @@ __SPRITES__
 
 <header class="topbar">
     <div class="topbar-inner">
-        <a class="logo" href="/" aria-label="stored.ge home"><svg class="px" style="--w:14;--h:14" viewBox="0 0 14 14" aria-hidden="true" focusable="false"><use href="#s-mark"/></svg><span>stored<b>.ge</b></span></a>
+        <a class="logo" href="/" aria-label="Stored home"><svg class="px" style="--w:14;--h:14" viewBox="0 0 14 14" aria-hidden="true" focusable="false"><use href="#s-mark"/></svg><span>Stored</span></a>
         <nav aria-label="Main">
             <ul class="topnav">
                 <li class="hide-sm"><a href="#build">Build yours</a></li>
@@ -82,7 +82,7 @@ __SPRITES__
         </div>
         <div class="room-col">
         <div class="room">
-        <div class="term" aria-label="Terminal session showing an rclone upload to stored.ge">
+        <div class="term" aria-label="Terminal session showing an rclone upload to Stored">
             <div class="term-bar">
                 <span class="term-dot"></span><span class="term-dot"></span><span class="term-dot"></span>
                 <span class="term-title">~ — zsh</span>
@@ -423,7 +423,7 @@ SELECT count(*) FROM 's3://lake/events/2026/*.parquet';</pre>
         <div class="res-detail">
             <div class="res-card active" data-card="rclone">
                 <h3>rclone<small>sync · mount · migrate</small></h3>
-                <p>The Swiss-army knife: sync directories, mount buckets as drives, and migrate straight off B2/S3/Drive into stored.ge with one command. Full walkthrough in the <a href="/docs/rclone">rclone guide</a>.</p>
+                <p>The Swiss-army knife: sync directories, mount buckets as drives, and migrate straight off B2/S3/Drive into Stored with one command. Full walkthrough in the <a href="/docs/rclone">rclone guide</a>.</p>
                 <div class="snippet">
                     <div class="snippet-head"><span>shell</span><button class="copy-btn" data-copy="res-rclone-snip">copy</button></div>
                     <pre id="res-rclone-snip">rclone config create stored s3 provider=Other \
@@ -576,7 +576,7 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
             <label for="calc-tb">how much quota do you need? <output id="calc-out">20 TB</output></label>
             <input type="range" id="calc-tb" min="1" max="100" step="1" value="20">
             <div class="calc-rows">
-                <div class="calc-row us"><span class="who">stored.ge Standard (annual)</span><span class="amt" id="calc-us">__PRICE_STD_20TB__/mo</span></div>
+                <div class="calc-row us"><span class="who">Stored Standard (annual)</span><span class="amt" id="calc-us">__PRICE_STD_20TB__/mo</span></div>
                 <div class="calc-row"><span class="who">Backblaze B2</span><span class="amt" id="calc-b2">__PRICE_B2_20TB__/mo</span></div>
                 <div class="calc-row"><span class="who">AWS S3</span><span class="amt" id="calc-aws">__PRICE_AWS_20TB__/mo</span></div>
             </div>
@@ -644,7 +644,7 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
         <div class="compare">
             <table>
                 <thead>
-                    <tr><th></th><th class="us">stored.ge</th><th>Backblaze B2</th><th>Wasabi</th><th>Cloudflare R2</th><th>AWS S3</th></tr>
+                    <tr><th></th><th class="us">Stored</th><th>Backblaze B2</th><th>Wasabi</th><th>Cloudflare R2</th><th>AWS S3</th></tr>
                 </thead>
                 <tbody>
                     <tr><th scope="row">$/TB/mo</th><td class="us">$__PRICE_STD__</td><td>$__PRICE_B2__</td><td>$__PRICE_WASABI__</td><td>$__PRICE_R2__</td><td>$__PRICE_AWS__</td></tr>
@@ -720,7 +720,7 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
     <div class="container">
         <div class="footer-grid">
             <div class="footer-brand">
-                <a class="logo" href="/" aria-label="stored.ge home"><svg class="px" style="--w:34;--h:30" viewBox="0 0 34 30" aria-hidden="true" focusable="false"><use href="#s-logo"/></svg></a>
+                <a class="logo" href="/" aria-label="Stored home"><svg class="px" style="--w:34;--h:30" viewBox="0 0 34 30" aria-hidden="true" focusable="false"><use href="#s-logo"/></svg></a>
                 <p>S3-compatible storage orchestration across hot storage and tape. Built in the open by FairForge.</p>
             </div>
             <div>

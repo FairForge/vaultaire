@@ -86,10 +86,10 @@ main hr { border: none; border-top: 1px solid var(--line); margin: 1.5rem 0; }
 
 // siteShellBrand is the bar's home link: the 14×14 pixel box mark (same
 // geometry as the landing page's #s-mark sprite) plus the wordmark.
-const siteShellBrand = `<a class="brand" href="/" aria-label="stored.ge home">` +
+const siteShellBrand = `<a class="brand" href="/" aria-label="Stored home">` +
 	`<svg viewBox="0 0 14 14" aria-hidden="true" focusable="false"><path fill="currentColor" d="` +
 	`M0 0h14v1h-14zM0 1h1v5h-1zM13 1h1v13h-1zM0 9h4v1h-4zM0 10h1v1h-1zM0 11h4v1h-4zM3 12h1v1h-1zM0 13h4v1h-4zM5 13h8v1h-8z` +
-	`"/></svg><span>stored.ge</span></a>`
+	`"/></svg><span>Stored</span></a>`
 
 // siteShellToggle is the bar's light/dark switch plus its script; the pick is
 // shared with the landing page through localStorage "sg-theme".

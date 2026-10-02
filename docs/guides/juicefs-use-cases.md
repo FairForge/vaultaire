@@ -1,10 +1,10 @@
-# Use Cases for JuiceFS + stored.ge on Cheap VPS
+# Use Cases for JuiceFS + Stored on Cheap VPS
 
-Real setups you can run today on a $3/year VPS backed by stored.ge storage. Every example assumes you've already mounted stored.ge at `/mnt/storedge` following the [JuiceFS setup guide](juicefs-setup.md).
+Real setups you can run today on a $3/year VPS backed by Stored storage. Every example assumes you've already mounted Stored at `/mnt/storedge` following the [JuiceFS setup guide](juicefs-setup.md).
 
 ## Plex / Jellyfin Media Server
 
-Stream your media library from stored.ge without filling up your VPS disk. A $3/year NAT VPS + 1 TB in the attic (Vault: $4.99/mo minimum paid monthly, $2/TB paid annually) gives you a full media server for under $65/year — under $30/year on the annual rate.
+Stream your media library from Stored without filling up your VPS disk. A $3/year NAT VPS + 1 TB in the attic (Vault: $4.99/mo minimum paid monthly, $2/TB paid annually) gives you a full media server for under $65/year — under $30/year on the annual rate.
 
 ```bash
 # Point Jellyfin at the mount
@@ -91,11 +91,11 @@ UPLOAD_LOCATION=/mnt/storedge/immich-uploads
 
 The JuiceFS mount path (`UPLOAD_LOCATION`) is simpler to set up and doesn't require Immich's S3 support. Both approaches work — choose S3 direct if you want Immich to handle uploads natively, or JuiceFS if you want filesystem-level access to the photos.
 
-**Cost math**: 200GB of photos fits the 1 TB Vault minimum: $4.99/mo ($60/year) monthly, or $24/year annual. Google One 200GB is $30/year but locks you into their ecosystem. Immich + stored.ge gives you full ownership.
+**Cost math**: 200GB of photos fits the 1 TB Vault minimum: $4.99/mo ($60/year) monthly, or $24/year annual. Google One 200GB is $30/year but locks you into their ecosystem. Immich + Stored gives you full ownership.
 
 ## Git LFS / CI Artifacts
 
-Store large binary assets (models, datasets, build artifacts) on stored.ge via Git LFS.
+Store large binary assets (models, datasets, build artifacts) on Stored via Git LFS.
 
 Configure your `.lfsconfig`:
 
@@ -127,7 +127,7 @@ Artifacts persist across CI runs without eating VPS disk space.
 
 ## Database Backups
 
-Dump your PostgreSQL (or MySQL) database straight to stored.ge on a schedule:
+Dump your PostgreSQL (or MySQL) database straight to Stored on a schedule:
 
 ```bash
 #!/bin/bash
@@ -154,11 +154,11 @@ Add a cron job:
 echo "0 3 * * * /usr/local/bin/backup-db.sh >> /var/log/db-backup.log 2>&1" | crontab -
 ```
 
-Your backups are stored off-server on stored.ge automatically. No rsync, no separate S3 upload step — `pg_dump` writes directly to the mount.
+Your backups are stored off-server on Stored automatically. No rsync, no separate S3 upload step — `pg_dump` writes directly to the mount.
 
 ## *arr Stack (Sonarr / Radarr / Lidarr)
 
-The *arr apps download media locally and then you move finished files to stored.ge for long-term storage. Don't point the download client directly at JuiceFS — downloading to a remote mount is slow.
+The *arr apps download media locally and then you move finished files to Stored for long-term storage. Don't point the download client directly at JuiceFS — downloading to a remote mount is slow.
 
 **Setup:**
 
@@ -166,7 +166,7 @@ The *arr apps download media locally and then you move finished files to stored.
 # Download to local SSD (fast)
 # /downloads is on the VPS local disk
 
-# Final media storage on stored.ge
+# Final media storage on Stored
 mkdir -p /mnt/storedge/media/movies
 mkdir -p /mnt/storedge/media/tv
 mkdir -p /mnt/storedge/media/music
@@ -183,4 +183,4 @@ Sonarr/Radarr → Settings → Media Management:
 - **Use Hardlinks instead of Copy**: No
 - **Import using Script**: No
 
-This gives you the speed of local downloads with the storage capacity of stored.ge. 4 TB of Vault ($8/mo annual or $10.20 monthly) holds a serious media library at a fraction of what a large VPS disk costs.
+This gives you the speed of local downloads with the storage capacity of Stored. 4 TB of Vault ($8/mo annual or $10.20 monthly) holds a serious media library at a fraction of what a large VPS disk costs.

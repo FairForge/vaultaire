@@ -42,7 +42,7 @@ func HandleResendVerification(authSvc *auth.AuthService, logger *zap.Logger, sen
 			return
 		}
 
-		if err := sender.Send(r.Context(), sd.Email, "Verify your email — stored.ge", htmlBody, textBody); err != nil {
+		if err := sender.Send(r.Context(), sd.Email, "Verify your email — Stored", htmlBody, textBody); err != nil {
 			logger.Error("send verification email", zap.String("to", sd.Email), zap.Error(err))
 		}
 

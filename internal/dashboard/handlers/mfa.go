@@ -157,7 +157,7 @@ func HandleMFAEnable(tmpl *template.Template, authSvc *auth.AuthService, mfaSvc 
 		})
 		switch res {
 		case MFAEnrolNone:
-			middleware.SetFlash(w, "error", "That setup session has expired — it lasts 10 minutes, and a service restart ends it. Scan the new QR code below, and remove the earlier stored.ge entry from your authenticator.")
+			middleware.SetFlash(w, "error", "That setup session has expired — it lasts 10 minutes, and a service restart ends it. Scan the new QR code below, and remove the earlier Stored entry from your authenticator.")
 			http.Redirect(w, r, setupPath, http.StatusSeeOther)
 			return
 		case MFAEnrolMismatch:

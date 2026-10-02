@@ -2,7 +2,7 @@
 
 ## The basics
 
-**What is stored.ge?**
+**What is Stored?**
 S3-compatible object storage. One endpoint, one API, and an engine that routes your
 data across enterprise S3 (hot) and tape libraries (cold) based on access patterns.
 Anything that speaks S3 works: aws-cli, rclone, restic, boto3, JuiceFS, Cyberduck.

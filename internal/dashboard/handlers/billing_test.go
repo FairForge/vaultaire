@@ -122,8 +122,8 @@ func TestCostComparison_WithUsage(t *testing.T) {
 	providers := data["Providers"].([]ProviderCost)
 	require.Len(t, providers, 4)
 
-	// stored.ge: 1 TB * $4.49 = $4.49, egress = $0.00
-	assert.Equal(t, "stored.ge", providers[0].Name)
+	// Stored: 1 TB * $4.49 = $4.49, egress = $0.00
+	assert.Equal(t, "Stored", providers[0].Name)
 	assert.Equal(t, "$4.49", providers[0].StorageCost)
 	assert.Equal(t, "$0.00", providers[0].EgressCost)
 	assert.Equal(t, "$4.49", providers[0].TotalCost)

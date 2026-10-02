@@ -1,6 +1,6 @@
-# rclone + stored.ge
+# rclone + Stored
 
-rclone is the fastest way to sync, mount, or migrate data to stored.ge.
+rclone is the fastest way to sync, mount, or migrate data to Stored.
 
 ## Quick config (one command)
 
@@ -51,7 +51,7 @@ rclone copy ~/data stored:data -P \
   --s3-upload-concurrency 8
 ```
 
-stored.ge streams uploads chunk-by-chunk, so large objects don't buffer in memory
+Stored streams uploads chunk-by-chunk, so large objects don't buffer in memory
 on either end. From a home connection you'll saturate your uplink first.
 
 ## Client-side encryption (optional)
