@@ -398,3 +398,51 @@ on the box.
    a few days, then flip `egress_throttle` globally **before signups open**.
 5. E-mail is `LogSender` on prod: the 80 / 95 / 100 % notices are logged, not delivered, until
    `EMAIL_PROVIDER` is set.
+
+## Post-merge review (plan driver, 2026-10-01)
+
+Read against `main` @ #539: `egress_meter.go`, `egress_writer.go`, `usage/egress.go` in full; the
+diffs of `bandwidth.go`, `s3.go`, `cdn.go`, `server.go`, `s3_errors.go`; the rewritten alerter;
+the dashboard helper and the admin override form; the copy source in `prices.json`. Checked
+against the code, not the note: every sender of object bytes (`engine.Get` / `GetRange` callers:
+the adapter, `/cdn` on both routers, server-side copy), the writer interfaces a handler could use
+to step around the wrapper (none: no `ReaderFrom`, no `ResponseController`, no `ServeContent`),
+the server and driver timeouts a paced response could hit (`WriteTimeout` unset, no client
+`Timeout` on the tuned transport). The egress, alerter and dashboard tests ran four times under
+`-race` on a separate database: green each time.
+
+| ID | Sev | Where | What | Status |
+|----|-----|-------|------|--------|
+| PM-1 | P2 (forgeable page) | `server.go` `loggingMiddleware` vs `s3.go` `serveGetObject` | The stream guard answers **503** `SlowDown`, and the logging middleware counted every 5xx into `vaultaire_errors_total` — the series `VaultaireServerErrorRatio` pages on (> 5 % and ≥ 10 in 10 minutes). With the flag on, any tenant past its allowance (a free account after 2.5 GiB) could page the operator by running more than 16 downloads at once — `rclone --transfers 32` does it without malice. The R11-28 class: an alert a client can fire. `/cdn` was not affected (its refusal is 429). | **fixed here**: a handler marks the response as a refusal of one client (`markClientRefusal`, a `requestOutcome` the middleware puts in the request context) and the middleware leaves it out of the 5xx count; the request is still counted and logged with its status. Red-first: `TestEgress_StreamGuardRefusalIsNotAServerError` (on `main`: ten refusals, ten "server errors"); a real 503 through the same middleware still counts. |
+
+Read and left as they are (each is small, or is the stated design):
+
+- A response that crosses the allowance **mid-stream** joins the paced set without passing the
+  stream guard (it cannot be refused once it is sending), so the "no paced stream is silent for
+  more than 20 s" sizing holds for 2 × `MaxStreams` streams, not for a client that opened
+  hundreds just under the line. The cost falls on that client: its streams outlast the proxies'
+  silence timeouts and the retries meet the guard.
+- An entry whose first load failed (database down) counts live bytes that the later successful
+  load overwrites: an undercount, in the customer's favour, for the responses open at that moment.
+- The 80 % and 95 % notices say "past the allowance, downloads are rate-limited to R" while the
+  flag is off. True the day the flag is on; the 100 % notice is already held back for that reason.
+- A failed e-mail send re-emits the `bandwidth.alert` event on every hourly pass until the send
+  succeeds (the R13-09 shape, unchanged).
+- The FAQ, the rclone guide and `llms.txt` say "16 parallel downloads": changing
+  `EGRESS_THROTTLE_MAX_STREAMS` means changing that copy.
+- **Same class, next WP:** the auto-restore answer for a demoted, evicted object
+  (`s3_engine_adapter.go`, 503 + `Retry-After: 120`) is also a per-object condition counted as a
+  server error. `smart_demotion` is off; it goes into the WP-R13-1 prompt.
+
+**Before the flag flips globally** (adds to the [YOU] list above): turn `egress_throttle` on for
+tenant zero alone and run one large download past the allowance through the real path
+(Cloudflare → HAProxy → iDrive). The two things the build could not prove — what the proxies do
+with a paced response and what a backend does with a reader this slow over hours — are answered
+by that one run, not by another test.
+
+**D-25, the driver's recommendation on the floor:** set `EGRESS_THROTTLE_MIN_BYTES_PER_SEC=16384`
+on prod. At the default 64 KiB/s a free account can pull about 158 GiB a month past a 2.5 GiB
+allowance — 31 times what it can store, against an iDrive free-egress pool of 3 times stored.
+At 16 KiB/s the ceiling is about 40 GiB, the paced slice shrinks with it (the code already does
+this), and no paid plan changes: the pace rule (one more allowance a month) is above 16 KiB/s
+from about 80 GiB of quota upward.

@@ -946,3 +946,49 @@ func TestEgress_PublicBucketReadersSpendTheOwnersAllowance(t *testing.T) {
 	assert.GreaterOrEqual(t, own.elapsed, 1400*time.Millisecond)
 	f.requireRecordedEqualsLive()
 }
+
+// Post-merge review: the stream guard's 503 SlowDown is a refusal of one
+// client that is past its allowance, not a server failure. The logging
+// middleware counted every 5xx into vaultaire_errors_total, which the
+// VaultaireServerErrorRatio rule pages on — so any tenant past its allowance
+// could page the operator by opening more than MaxStreams downloads. A real
+// 5xx still counts.
+func TestEgress_StreamGuardRefusalIsNotAServerError(t *testing.T) {
+	// Arrange: one paced stream allowed; the tenant is over; the fixture's
+	// S3 surface behind the server's logging middleware.
+	cfg := usage.EgressThrottle{MinBytesPerSec: 65536, Factor: 1, MaxStreams: 1}
+	f := setupEgressFixture(t, 64*mib, cfg, nil)
+	f.enforced.Store(true)
+	f.put("obj.bin", 8*mib)
+	f.setUsed(96 * mib)
+	logged := httptest.NewServer(f.srv.loggingMiddleware(f.handler()))
+	defer logged.Close()
+	get := func() int {
+		resp, err := logged.Client().Get(logged.URL + f.s3Path("obj.bin"))
+		require.NoError(t, err)
+		defer func() { _ = resp.Body.Close() }()
+		return resp.StatusCode
+	}
+	_, _, release := f.hold(f.s3Path("obj.bin"))
+	defer release()
+	errsBefore, reqsBefore := atomic.LoadInt64(&f.srv.errorCount), atomic.LoadInt64(&f.srv.requestCount)
+
+	// Act: ten more downloads are refused by the guard.
+	for i := 0; i < 10; i++ {
+		require.Equal(t, http.StatusServiceUnavailable, get())
+	}
+
+	// Assert: ten requests, no server error.
+	assert.Equal(t, reqsBefore+10, atomic.LoadInt64(&f.srv.requestCount))
+	assert.Equal(t, errsBefore, atomic.LoadInt64(&f.srv.errorCount), "a throttle refusal must not feed the 5xx alert")
+
+	// A real server failure on the same path still counts.
+	failing := httptest.NewServer(f.srv.loggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})))
+	defer failing.Close()
+	resp, err := failing.Client().Get(failing.URL)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.Equal(t, errsBefore+1, atomic.LoadInt64(&f.srv.errorCount))
+}
