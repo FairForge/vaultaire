@@ -158,7 +158,8 @@ Account     /api/v1/user
 Webhooks    GET/POST /api/v1/webhooks · PATCH/DELETE /webhooks/{id} · GET /webhooks/{id}/deliveries · POST /webhooks/{id}/test
 Events      GET /api/v1/events   (object.created/deleted/downloaded, bucket.*, key.*, sts.token_created, webhook.test)
 STS         POST /api/v1/sts/token {"duration_seconds","permissions","bucket_scope","parent_key_id"}
-Admin       /api/v1/admin/*  (admin role: audit, flags, dedup-gc, smart-demotion, quota-reconcile)
+Admin       /api/v1/admin/*  (admin role: audit, flags, quota-reconcile; jobs = the background jobs' state,
+            POST jobs/{job}/run or dedup-gc | smart-demotion | retention | account-deletion → 202, the run continues)
 ```
 
 Conventions (Stripe-style):

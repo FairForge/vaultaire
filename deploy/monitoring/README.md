@@ -25,7 +25,7 @@ it is **not** committed. It lives in `/etc/default/ntfy-bridge` on the server
 | `alertmanager.yml` | `/etc/prometheus/alertmanager.yml` | route → ntfy webhook receiver, send_resolved, critical-inhibits-warning |
 | `ntfy-bridge.py` | `/opt/vaultaire/monitoring/ntfy-bridge.py` | Alertmanager webhook → readable ntfy push (UTF-8-safe JSON publish) |
 | `ntfy-bridge.service` | `/etc/systemd/system/ntfy-bridge.service` | sandboxed systemd unit (DynamicUser) |
-| `vaultaire-backends.yml`, `vaultaire-auth.yml`, `vaultaire-tls.yml`, `vaultaire-synthetic.yml`, `vaultaire-egress.yml` | `/etc/prometheus/rules/` | alert rules: backend probes / auth failures / origin cert / customer-path canary + retention job / egress throttle (Review R13 + WP-R10-9 — install all five, checklist item 10) |
+| `vaultaire-backends.yml`, `vaultaire-auth.yml`, `vaultaire-tls.yml`, `vaultaire-synthetic.yml`, `vaultaire-egress.yml`, `vaultaire-jobs.yml` | `/etc/prometheus/rules/` | alert rules: backend probes / auth failures / origin cert / customer-path canary / egress throttle / background jobs (Review R13 + WP-R10-9 + WP-R13-3 — install all six, checklist item 10; on 2026-10-02 only `backends` and `tls` were installed on SLC, next to the older `vaultaire-alerts.yml`) |
 
 ## Install (already done on slc-vaultaire-01, 2026-08-03)
 
@@ -115,6 +115,33 @@ staggered across one 30 s interval — regions running on the primary pair are
 a known 403 and are skipped), and `permafrost` (authenticated Graph call on
 one rotating fleet account; `PermafrostProbeFailing` is a 15-minute warning,
 and `BackendProbeFailing` excludes it).
+
+`vaultaire-jobs.yml` — the background jobs (WP-R13-3). Four rules:
+`JobStale` (a daily job — `inventory`, `dedup_gc`, `retention`,
+`account_deletion`, `smart_demotion` — with no success in 36 h, `for: 30m`),
+`PeriodicJobStale` (an hourly job, or the 5-minute access-log delivery, with
+none in 3 h), `JobFailing` (three failed runs of one job in 6 h) and
+`AccountDeletionDeferred` (the erasure runner could not finish a tenant whose
+grace period ended). The staleness rules read
+`vaultaire_job_last_success_timestamp_seconds{job_name}`, which the app reads from
+the `job_runs` table on every scrape (15 s cache) — so it is right the moment
+a new process starts. It replaces `vaultaire_retention_last_run_timestamp_seconds`
+and `vaultaire_account_deletion_last_run_timestamp_seconds`, which were set
+only after a run in the same process and read 0 after every deploy:
+`RetentionJobStale` (`(time() - gauge) > 48h`, `for: 0m`, formerly in
+`vaultaire-synthetic.yml`) was true after every deploy until 03:30 UTC. A job
+that has never succeeded reads 0 and goes stale after the rule's `for`; a job
+this process does not run (smart demotion without both backends) exports no
+series. `vaultaire_job_runs_total{job_name,outcome}` starts at 0 for every outcome
+at boot, so the first failure after a restart counts. Triage:
+`GET /api/v1/admin/jobs` (admin JWT) is `job_runs` as JSON — last outcome,
+error text or note, rows, next run; `POST /api/v1/admin/jobs/<job>/run`
+starts one run (202, 409 while one is running). The label is `job_name`, not
+`job`: Prometheus sets `job` on every scraped series (the scrape job,
+`vaultaire` here) and stores a scraped `job` label as `exported_job`, so a
+rule on `{job="retention"}` would never match. `internal/api/job_rules_test.go`
+checks that every job the server registers is named in exactly one staleness
+rule and that every series the file reads is exported.
 
 `vaultaire-egress.yml` — the egress allowance throttle (WP-R10-9): one
 info-level rule, `EgressThrottleActive` (`vaultaire_egress_throttled_tenants > 0`

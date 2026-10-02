@@ -257,13 +257,34 @@ type InventoryRunner struct {
 	// writer delivers the report through the customer write path (Review
 	// R13-02); nil = reports are not delivered.
 	writer *generatedObjectWriter
+	// ReportDeadline bounds ONE report (Review R13-23: every tenant's
+	// reports used to share one 5-minute budget, so a large bucket early in
+	// the list starved the rest).
+	ReportDeadline time.Duration
+	// JobName is the job_runs name (tests use their own: the table is shared).
+	JobName string
+	// onlyTenant is a test hook: when set, a run skips every other tenant's
+	// configurations. Packages share one test database. Never set in
+	// production.
+	onlyTenant string
+}
+
+// inventoryJobName is the job's name in job_runs and on the metrics.
+const inventoryJobName = "inventory"
+
+// InventoryResult is one run's outcome.
+type InventoryResult struct {
+	// Reports written, reports that could not be written, configurations
+	// not due today (weekly, and it is not Sunday).
+	Written, Failed, Skipped int
+	Errors                   []string
 }
 
 func NewInventoryRunner(db *sql.DB, eng *engine.CoreEngine, logger *zap.Logger) *InventoryRunner {
 	if db == nil || eng == nil {
 		return nil
 	}
-	return &InventoryRunner{db: db, eng: eng, logger: logger}
+	return &InventoryRunner{db: db, eng: eng, logger: logger, ReportDeadline: 30 * time.Minute, JobName: inventoryJobName}
 }
 
 // SetWriter wires the delivery writer.
@@ -273,48 +294,53 @@ func (ir *InventoryRunner) SetWriter(w *generatedObjectWriter) {
 	}
 }
 
-// StartInventoryJob runs a background goroutine that generates inventory reports.
-// Checks once per hour whether any inventory reports are due.
-func (ir *InventoryRunner) StartInventoryJob(ctx context.Context) {
-	if ir == nil {
-		return
-	}
-	go func() {
-		ticker := time.NewTicker(1 * time.Hour)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				ir.runInventory(ctx)
-			}
+// spec is the job's schedule: daily at 00:30 UTC, catch-up four minutes after
+// boot. It used to be an hourly tick that acted only when the wall clock's
+// hour was 0 (Review R13-07/R13-23): a restart during hour 0 skipped the
+// day's reports, or wrote them twice. The day is now decided by job_runs.
+//
+// What makes a run fail: the list of inventory configurations could not be
+// read — retried at the next hourly check. A report that could not be
+// written (target bucket gone, over quota, its deadline) does NOT: it is
+// counted in the note and the other buckets' reports are written; the next
+// day's run writes that bucket's next report.
+func (ir *InventoryRunner) spec(sched *jobScheduler) jobSpec {
+	sp := jobSpec{Name: ir.JobName, Hour: 0, Minute: 30,
+		BootDelay: 4 * time.Minute, MaxRunTime: 6 * time.Hour}
+	sp.Run = func(ctx context.Context) (jobReport, error) {
+		// The report is dated on the day it was owed: a catch-up after a
+		// restart writes the report of the scheduled day, and "weekly" means
+		// the run scheduled on a Sunday.
+		day := (&scheduledJob{spec: sp}).lastScheduled(sched.now())
+		res, err := ir.RunOnce(ctx, day)
+		rep := jobReport{Rows: int64(res.Written)}
+		if res.Failed > 0 {
+			rep.Note = fmt.Sprintf("%d report(s) not written, first: %s", res.Failed, res.Errors[0])
 		}
-	}()
+		return rep, err
+	}
+	return sp
 }
 
-func (ir *InventoryRunner) runInventory(ctx context.Context) {
-	now := time.Now().UTC()
-
-	// Only run at midnight UTC (hour 0).
-	if now.Hour() != 0 {
-		return
+// RunOnce writes the reports owed for day (UTC): every daily configuration,
+// and the weekly ones when day is a Sunday.
+func (ir *InventoryRunner) RunOnce(ctx context.Context, day time.Time) (InventoryResult, error) {
+	var res InventoryResult
+	if ir == nil {
+		return res, errors.New("inventory: runner not configured")
 	}
+	day = day.UTC()
 
-	runCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	defer cancel()
-
-	rows, err := ir.db.QueryContext(runCtx, `
+	rows, err := ir.db.QueryContext(ctx, `
 		SELECT tenant_id, name, inventory_schedule, inventory_target_bucket,
 			inventory_prefix, inventory_format
 		FROM buckets
 		WHERE inventory_enabled = TRUE AND inventory_target_bucket IS NOT NULL
+		ORDER BY tenant_id, name
 	`)
 	if err != nil {
-		ir.logger.Error("query inventory-enabled buckets", zap.Error(err))
-		return
+		return res, fmt.Errorf("inventory: list configurations: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
 
 	type invConfig struct {
 		tenantID     string
@@ -328,45 +354,66 @@ func (ir *InventoryRunner) runInventory(ctx context.Context) {
 	for rows.Next() {
 		var c invConfig
 		if err := rows.Scan(&c.tenantID, &c.bucket, &c.schedule, &c.targetBucket, &c.prefix, &c.format); err != nil {
-			ir.logger.Error("scan inventory config", zap.Error(err))
-			continue
+			_ = rows.Close()
+			return res, fmt.Errorf("inventory: scan configuration: %w", err)
 		}
 		configs = append(configs, c)
 	}
+	_ = rows.Close()
 	if err := rows.Err(); err != nil {
-		ir.logger.Warn("iterate rows", zap.Error(err))
+		return res, fmt.Errorf("inventory: iterate configurations: %w", err)
 	}
 
 	for _, c := range configs {
-		// Weekly runs only on Sunday.
-		if c.schedule == "weekly" && now.Weekday() != time.Sunday {
+		if ir.onlyTenant != "" && c.tenantID != ir.onlyTenant {
 			continue
 		}
-		ir.generateReport(runCtx, c.tenantID, c.bucket, c.targetBucket, c.prefix, c.format)
+		if ctx.Err() != nil {
+			return res, ctx.Err()
+		}
+		// Weekly reports belong to the run scheduled on a Sunday.
+		if c.schedule == "weekly" && day.Weekday() != time.Sunday {
+			res.Skipped++
+			continue
+		}
+		rctx, cancel := ctx, context.CancelFunc(func() {})
+		if ir.ReportDeadline > 0 {
+			rctx, cancel = context.WithTimeout(ctx, ir.ReportDeadline)
+		}
+		err := ir.generateReport(rctx, c.tenantID, c.bucket, c.targetBucket, c.prefix, c.format, day)
+		cancel()
+		if err != nil {
+			res.Failed++
+			res.Errors = append(res.Errors, fmt.Sprintf("%s/%s: %v", c.tenantID, c.bucket, err))
+			ir.logger.Warn("inventory report not delivered",
+				zap.String("tenant_id", c.tenantID), zap.String("bucket", c.bucket),
+				zap.String("target", c.targetBucket), zap.Error(err))
+			continue
+		}
+		res.Written++
 	}
+	return res, nil
 }
 
 // generateReport streams the bucket's head rows as CSV into
 // {prefix}{bucket}/{date}T00-00Z/manifest.csv of the target bucket through
-// the customer write path (Review R13-02). An empty bucket writes nothing.
-func (ir *InventoryRunner) generateReport(ctx context.Context, tenantID, bucket, targetBucket, prefix, format string) {
+// the customer write path (Review R13-02). date is the day the report is
+// for. An empty bucket writes nothing (and is not an error).
+func (ir *InventoryRunner) generateReport(ctx context.Context, tenantID, bucket, targetBucket, prefix, format string, date time.Time) error {
 	_ = format // ORC/Parquet are accepted at config time and written as CSV (R4-18)
 	if ir.writer == nil {
-		ir.logger.Warn("inventory report skipped: no delivery writer", zap.String("tenant_id", tenantID), zap.String("bucket", bucket))
-		return
+		return errors.New("no delivery writer")
 	}
 	var count int64
 	if err := ir.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2`, tenantID, bucket).Scan(&count); err != nil {
-		ir.logger.Error("count objects for inventory", zap.String("bucket", bucket), zap.Error(err))
-		return
+		return fmt.Errorf("count objects: %w", err)
 	}
 	if count == 0 {
-		return
+		return nil
 	}
 
-	now := time.Now().UTC()
-	objectKey := fmt.Sprintf("%s%s/%sT00-00Z/manifest.csv", prefix, bucket, now.Format("2006-01-02"))
+	objectKey := fmt.Sprintf("%s%s/%sT00-00Z/manifest.csv", prefix, bucket, date.UTC().Format("2006-01-02"))
 
 	var written int
 	_, err := ir.writer.write(ctx, tenantID, targetBucket, objectKey, "text/csv", func(out io.Writer) error {
@@ -411,12 +458,7 @@ func (ir *InventoryRunner) generateReport(ctx context.Context, tenantID, bucket,
 		return w.Error()
 	})
 	if err != nil {
-		ir.logger.Warn("inventory report not delivered",
-			zap.String("tenant_id", tenantID),
-			zap.String("bucket", bucket),
-			zap.String("target", targetBucket+"/"+objectKey),
-			zap.Error(err))
-		return
+		return fmt.Errorf("deliver %s/%s: %w", targetBucket, objectKey, err)
 	}
 
 	ir.logger.Info("inventory report generated",
@@ -424,12 +466,17 @@ func (ir *InventoryRunner) generateReport(ctx context.Context, tenantID, bucket,
 		zap.String("bucket", bucket),
 		zap.String("target", targetBucket+"/"+objectKey),
 		zap.Int("objects", written))
+	return nil
 }
 
-// GenerateReportNow is exposed for testing — generates a report immediately.
+// GenerateReportNow is exposed for testing — generates today's report
+// immediately.
 func (ir *InventoryRunner) GenerateReportNow(ctx context.Context, tenantID, bucket, targetBucket, prefix, format string) {
 	if ir == nil {
 		return
 	}
-	ir.generateReport(ctx, tenantID, bucket, targetBucket, prefix, format)
+	if err := ir.generateReport(ctx, tenantID, bucket, targetBucket, prefix, format, time.Now()); err != nil {
+		ir.logger.Warn("inventory report not delivered",
+			zap.String("tenant_id", tenantID), zap.String("bucket", bucket), zap.Error(err))
+	}
 }

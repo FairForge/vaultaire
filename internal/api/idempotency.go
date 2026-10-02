@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -135,20 +136,16 @@ func (im *idempotencyMiddleware) cacheResponse(_ context.Context, tenantID, key,
 	}
 }
 
-// StartCleanup launches a goroutine that deletes expired idempotency cache entries hourly.
-func (im *idempotencyMiddleware) StartCleanup(ctx context.Context) {
-	go func() {
-		ticker := time.NewTicker(1 * time.Hour)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				_, _ = im.db.ExecContext(ctx, `DELETE FROM idempotency_cache WHERE created_at < NOW() - INTERVAL '24 hours'`)
-			}
-		}
-	}()
+// cleanupExpired deletes idempotency cache entries past their 24 h life. It
+// is the `idempotency_cleanup` job (hourly, jobs.go); the error used to be
+// dropped.
+func (im *idempotencyMiddleware) cleanupExpired(ctx context.Context) (int64, error) {
+	res, err := im.db.ExecContext(ctx, `DELETE FROM idempotency_cache WHERE created_at < NOW() - INTERVAL '24 hours'`)
+	if err != nil {
+		return 0, fmt.Errorf("delete expired idempotency keys: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 // capturingResponseWriter wraps http.ResponseWriter to capture the response for caching.

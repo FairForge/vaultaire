@@ -1,12 +1,10 @@
-# Customer-path canary + retention job — install to /etc/prometheus/rules/ (see README).
+# Customer-path canary — install to /etc/prometheus/rules/ (see README).
 #
 # Series come from the app's /metrics:
 #   vaultaire_synthetic_check_success                        1/0, last PUT→HEAD→GET→DELETE→GET(404) cycle
 #   vaultaire_synthetic_check_latency_seconds{op}            last request latency per op
 #   vaultaire_synthetic_check_failures_total{op}             cycles that failed, by the op that failed
 #   vaultaire_synthetic_check_last_success_timestamp_seconds unix time of the last good cycle (0 = never)
-#   vaultaire_retention_last_run_timestamp_seconds           unix time of the last successful nightly prune
-#   vaultaire_retention_runs_total{outcome}                  ok / error
 #
 # The synthetic check (internal/api/synthetic_check.go, Review R13-13) signs
 # real S3 requests with its own key pair through SYNTHETIC_CHECK_URL — the
@@ -17,6 +15,9 @@
 # Manual triage when SyntheticCheckFailing fires:
 #   journalctl -u vaultaire | grep "synthetic customer check FAILED"   (names the op + status)
 #   curl -s localhost:8000/metrics | grep vaultaire_synthetic
+#
+# RetentionJobStale lived here until WP-R13-3: it is JobStale{job_name="retention"}
+# in vaultaire-jobs.yml now, on a series that survives a restart.
 groups:
   - name: vaultaire-synthetic
     rules:
@@ -46,14 +47,3 @@ groups:
         annotations:
           summary: "Synthetic PUT slower than 5 s for 15 minutes"
           description: "A 4 KiB PUT through the public endpoint takes {{ $value }}s. Check the primary backend probe latency and HAProxy."
-
-  - name: vaultaire-retention
-    rules:
-      - alert: RetentionJobStale
-        expr: (time() - vaultaire_retention_last_run_timestamp_seconds) > 48 * 3600
-        for: 0m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Retention job has not succeeded in 48 hours"
-          description: "The nightly log-table prune (internal/api/retention.go) last succeeded {{ $value | humanizeDuration }} ago. journalctl -u vaultaire | grep retention; POST /api/v1/admin/retention to run it by hand."

@@ -53,37 +53,20 @@ func NewMultipartReaper(db *sql.DB, logger *zap.Logger) *MultipartReaper {
 	}
 }
 
-// Start runs one immediate reap (a restart after downtime should clean up
-// right away, not an hour later) and then reaps hourly until ctx is done.
-func (m *MultipartReaper) Start(ctx context.Context) {
-	if m == nil {
-		return
-	}
-	go func() {
-		m.runAndLog(ctx)
-		ticker := time.NewTicker(1 * time.Hour)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				m.runAndLog(ctx)
-			}
-		}
-	}()
-}
+// multipartReaperJobName is the job's name in job_runs and on the metrics.
+const multipartReaperJobName = "multipart_reaper"
 
-func (m *MultipartReaper) runAndLog(ctx context.Context) {
-	result, err := m.RunOnce(ctx)
-	if err != nil {
-		m.logger.Error("multipart reaper failed", zap.Error(err))
-		return
-	}
-	if result.Aborted > 0 || result.Purged > 0 {
-		m.logger.Info("multipart reaper completed",
-			zap.Int("aborted", result.Aborted),
-			zap.Int("purged", result.Purged))
+// spec is the job's schedule: a reap shortly after boot (a restart after
+// downtime should clean up right away, not an hour later), then hourly. A
+// run fails when a pass could not list its rows; a single upload that could
+// not be aborted or purged is logged and the pass continues.
+func (m *MultipartReaper) spec() jobSpec {
+	return jobSpec{
+		Name: multipartReaperJobName, Every: time.Hour, BootDelay: 10 * time.Second, MaxRunTime: 30 * time.Minute,
+		Run: func(ctx context.Context) (jobReport, error) {
+			result, err := m.RunOnce(ctx)
+			return jobReport{Rows: int64(result.Aborted + result.Purged)}, err
+		},
 	}
 }
 

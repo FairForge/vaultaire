@@ -8,13 +8,12 @@ import (
 	"time"
 )
 
-// Single-flight for the background jobs that also have an admin trigger
-// (Review R13-05 / WP-R11-8). The deploy is stop→swap→start on one box, so
-// two binaries never overlap; inside one process the ticker and
-// POST /api/v1/admin/{dedup-gc,smart-demotion,quota-reconcile} could, and
-// an admin double-click ran two global jobs at once. A run that finds the
-// gate held is refused, never queued: the ticker logs and waits for its
-// next tick, the trigger answers 409 already_running.
+// Single-flight for the admin-triggerable work (Review R13-05 / WP-R11-8). A
+// run that finds another one in progress is refused, never queued: the
+// trigger answers 409 already_running. The background jobs take ONE pg
+// advisory lock per job in the scheduler (jobs.go, WP-R13-3), which also
+// covers a second process; jobGate is the in-process form, still used by
+// POST /api/v1/admin/quota-reconcile (not a scheduled job).
 
 // errJobAlreadyRunning is returned by a guarded run when another run of the
 // same job holds the gate.

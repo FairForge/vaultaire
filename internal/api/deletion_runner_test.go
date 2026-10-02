@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -68,6 +67,8 @@ type deletionFixture struct {
 	auth     *auth.AuthService
 	sessions dashauth.SessionStore
 	runner   *AccountDeletionRunner
+	sched    *jobScheduler
+	sj       *scheduledJob // the runner as the scheduler runs it: lock + job_runs
 
 	userID, tenantID, email, bucket, suffix, uploadID, hash string
 }
@@ -110,6 +111,12 @@ func setupDeletionFixture(t *testing.T) *deletionFixture {
 	f.runner.BatchSize = 2
 	// The shared test database holds other packages' past-due accounts.
 	f.runner.onlyDue = func(d account.Due) bool { return d.UserID == f.userID }
+	// job_runs rows are global: the fixture's job has its own name (and so
+	// its own advisory lock).
+	f.runner.JobName = "test_account_deletion_" + f.suffix
+	f.sched = newJobScheduler(db, logger)
+	f.sj = f.sched.Register(f.runner.spec())
+	require.NotNil(t, f.sj)
 
 	t.Cleanup(func() {
 		ctx := context.Background()
@@ -123,7 +130,8 @@ func setupDeletionFixture(t *testing.T) *deletionFixture {
 		_, _ = db.ExecContext(ctx, `DELETE FROM audit_logs WHERE tenant_id = $1`, f.tenantID)
 		_, _ = db.ExecContext(ctx, `DELETE FROM stripe_events WHERE event_id = $1`, "evt_runner_"+f.suffix)
 		_, _ = db.ExecContext(ctx, `DELETE FROM global_content_index WHERE plaintext_hash = $1`, f.hash)
-		_, _ = db.ExecContext(ctx, `DELETE FROM job_runs WHERE job = $1`, accountDeletionJob)
+		_, _ = db.ExecContext(ctx, `DELETE FROM job_runs WHERE job = $1`, f.runner.JobName)
+		_, _ = db.ExecContext(ctx, `DELETE FROM audit_logs WHERE action = $1`, "admin."+f.runner.JobName)
 		_ = os.RemoveAll(multipartDir(f.uploadID))
 	})
 	return f
@@ -209,7 +217,13 @@ func TestAccountDeletionRunner_ErasesEverythingOnce(t *testing.T) {
 	tok, err := f.sessions.Create(ctx, dashauth.SessionData{UserID: f.userID, TenantID: f.tenantID, Email: f.email}, time.Hour)
 	require.NoError(t, err)
 
-	res, err := f.runner.RunOnce(ctx)
+	// As the scheduler runs it: under the job's lock, recorded in job_runs.
+	var res AccountDeletionResult
+	_, err = f.sj.runWith(ctx, func(ctx context.Context) (jobReport, error) {
+		r, runErr := f.runner.RunOnce(ctx)
+		res = r
+		return jobReport{Rows: int64(r.Erased)}, runErr
+	})
 	require.NoError(t, err, "run: %+v", res)
 	require.Len(t, res.Tenants, 1, "one due tenant")
 	te := res.Tenants[0]
@@ -256,8 +270,10 @@ func TestAccountDeletionRunner_ErasesEverythingOnce(t *testing.T) {
 	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM audit_logs WHERE tenant_id = $1 AND action = 'admin.tenant_suspended' AND ip IS NULL AND user_agent IS NULL`, f.tenantID), "operator row kept, scrubbed")
 	assert.Zero(t, f.count(`SELECT COUNT(*) FROM audit_logs WHERE user_id::text = $1`, f.userID), "the user's own rows are gone (privacy policy)")
 	var outcome string
-	require.NoError(t, f.db.QueryRow(`SELECT last_outcome FROM job_runs WHERE job = $1`, accountDeletionJob).Scan(&outcome))
+	var erased int64
+	require.NoError(t, f.db.QueryRow(`SELECT last_outcome, rows_affected FROM job_runs WHERE job = $1`, f.runner.JobName).Scan(&outcome, &erased))
 	assert.Equal(t, "ok", outcome)
+	assert.Equal(t, int64(1), erased)
 
 	// A second run finds nothing and calls nobody.
 	res, err = f.runner.RunOnce(ctx)
@@ -436,6 +452,7 @@ func TestAccountDeletionRunner_CancelDuringTheWalkStopsIt(t *testing.T) {
 }
 
 func TestAccountDeletionRunner_ConcurrentRunIsRefused(t *testing.T) {
+	// Arrange: another session holds the job's advisory lock.
 	f := setupDeletionFixture(t)
 	f.seed(time.Now().Add(-time.Hour))
 	ctx := context.Background()
@@ -443,24 +460,35 @@ func TestAccountDeletionRunner_ConcurrentRunIsRefused(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = conn.Close() }()
 	var got bool
-	require.NoError(t, conn.QueryRowContext(ctx, `SELECT pg_try_advisory_lock($1)`, accountDeletionLockKey).Scan(&got))
+	key := jobLockKey(f.runner.JobName)
+	require.NoError(t, conn.QueryRowContext(ctx, `SELECT pg_try_advisory_lock($1)`, key).Scan(&got))
 	require.True(t, got)
 
-	_, err = f.runner.RunOnce(ctx)
+	// Act + Assert: refused, nothing touched.
+	_, err = f.sj.RunNow(ctx)
 	assert.ErrorIs(t, err, errJobAlreadyRunning)
 	assert.Equal(t, int32(0), f.stripe.calls.Load())
 	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM users WHERE id::text = $1`, f.userID))
 
-	s := &Server{logger: zap.NewNop(), db: f.db, accountDeletion: f.runner}
-	rr := doJSON(t, s.handleAccountDeletionTrigger, "POST", "/api/v1/admin/account-deletion")
+	s := &Server{logger: zap.NewNop(), db: f.db, accountDeletion: f.runner, jobs: f.sched}
+	rr := doJSON(t, s.adminJobTrigger(f.runner.JobName), "POST", "/api/v1/admin/account-deletion")
 	assert.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
 	assert.Contains(t, rr.Body.String(), "already_running")
 
-	_, _ = conn.ExecContext(ctx, `SELECT pg_advisory_unlock($1)`, accountDeletionLockKey)
-	rr = doJSON(t, s.handleAccountDeletionTrigger, "POST", "/api/v1/admin/account-deletion")
-	assert.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	assert.Contains(t, rr.Body.String(), `"erased":1`)
-	assert.GreaterOrEqual(t, f.count(`SELECT COUNT(*) FROM audit_logs WHERE action = 'admin.account_deletion' AND metadata->>'erased' = '1' AND timestamp > NOW() - INTERVAL '1 minute'`), 1, "the trigger writes an audit row")
+	// Released: 202 at once, the run is detached; job_runs has the result.
+	_, _ = conn.ExecContext(ctx, `SELECT pg_advisory_unlock($1)`, key)
+	rr = doJSON(t, s.adminJobTrigger(f.runner.JobName), "POST", "/api/v1/admin/account-deletion")
+	require.Equal(t, http.StatusAccepted, rr.Code, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), `"status":"started"`)
+	require.Eventually(t, func() bool {
+		rows, err := jobRunRows(ctx, f.db)
+		return err == nil && rows[f.runner.JobName].Outcome == jobOutcomeOK
+	}, 15*time.Second, 20*time.Millisecond)
+	rows, err := jobRunRows(ctx, f.db)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), rows[f.runner.JobName].Rows, "one account erased")
+	assert.Zero(t, f.count(`SELECT COUNT(*) FROM users WHERE id::text = $1`, f.userID))
+	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM audit_logs WHERE action = $1 AND metadata->>'started' = 'true'`, "admin."+f.runner.JobName), "the trigger writes an audit row")
 }
 
 func TestAccountDeletionRunner_NotDueIsNotTouched(t *testing.T) {
@@ -473,25 +501,15 @@ func TestAccountDeletionRunner_NotDueIsNotTouched(t *testing.T) {
 	assert.Equal(t, 5, f.count(`SELECT COUNT(*) FROM object_head_cache WHERE tenant_id = $1`, f.tenantID))
 }
 
-func TestAccountDeletionRunner_DueFollowsTheDailySchedule(t *testing.T) {
+func TestAccountDeletionRunner_KeepsItsScheduleOnTheSharedRunner(t *testing.T) {
+	// "No behaviour change": daily 04:30 UTC, catch-up two minutes after
+	// boot, a 6-hour ceiling, the name job_runs already holds on prod; a
+	// deferred tenant still makes the run an error (retried hourly).
 	f := setupDeletionFixture(t)
-	fixed := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
-	f.runner.now = func() time.Time { return fixed }
-	due, err := f.runner.due(context.Background())
-	require.NoError(t, err)
-	assert.True(t, due, "never ran: due")
-	for _, c := range []struct {
-		last time.Time
-		want bool
-	}{
-		{time.Date(2026, 10, 2, 4, 45, 0, 0, time.UTC), false},
-		{time.Date(2026, 10, 2, 2, 0, 0, 0, time.UTC), true},
-		{time.Date(2026, 9, 28, 5, 0, 0, 0, time.UTC), true},
-	} {
-		f.exec(`INSERT INTO job_runs (job, last_success_at, last_outcome) VALUES ($1, $2, 'ok')
-			ON CONFLICT (job) DO UPDATE SET last_success_at = EXCLUDED.last_success_at`, accountDeletionJob, c.last)
-		due, err := f.runner.due(context.Background())
-		require.NoError(t, err)
-		assert.Equal(t, c.want, due, fmt.Sprintf("last success %s", c.last))
-	}
+	f.runner.JobName = accountDeletionJob
+	sp := f.runner.spec()
+	assert.Equal(t, "account_deletion", sp.Name)
+	assert.Equal(t, "daily 04:30 UTC", sp.schedule())
+	assert.Equal(t, 2*time.Minute, sp.BootDelay)
+	assert.Equal(t, 6*time.Hour, sp.MaxRunTime)
 }

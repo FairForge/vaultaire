@@ -62,6 +62,39 @@
 </div>
 {{end}}
 
+{{if .Jobs}}
+<div class="card">
+    <div class="card-title">Background Jobs</div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Job</th>
+                    <th>Last outcome</th>
+                    <th>Last started</th>
+                    <th>Last success</th>
+                    <th>Rows</th>
+                    <th>Error / note</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .Jobs}}
+                <tr>
+                    <td><code>{{.Job}}</code></td>
+                    <td><span class="badge badge-{{if eq .Outcome "ok"}}success{{else if eq .Outcome "running"}}warning{{else}}danger{{end}}">{{.Outcome}}</span></td>
+                    <td>{{.LastStarted}}</td>
+                    <td>{{.LastSuccess}}</td>
+                    <td>{{.Rows}}</td>
+                    <td class="text-muted">{{.Detail}}</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+    <div class="card-detail">Daily (UTC): inventory 00:30, dedup_gc 02:30, retention 03:30, account_deletion 04:30, smart_demotion 06:30 — each catches up a few minutes after a restart. The others run hourly (access_log_delivery every 5 minutes). Schedule and next run: <code>GET /api/v1/admin/jobs</code>.</div>
+</div>
+{{end}}
+
 <div class="dashboard-actions">
     <a href="/admin" class="btn">Admin Overview</a>
     <a href="/admin/tenants" class="btn">Tenants</a>

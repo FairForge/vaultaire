@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -29,6 +28,8 @@ type retentionFixture struct {
 	oldEvent string
 	newEvent string
 	job      *RetentionJob
+	sched    *jobScheduler
+	sj       *scheduledJob // the job as the scheduler runs it: lock + job_runs
 }
 
 func setupRetentionFixture(t *testing.T) *retentionFixture {
@@ -64,7 +65,6 @@ func setupRetentionFixture(t *testing.T) *retentionFixture {
 			_, _ = db.Exec(q, f.tenantID)
 		}
 		_, _ = db.Exec(`DELETE FROM waitlist_signups WHERE email LIKE $1`, "ret-"+id+"%")
-		_, _ = db.Exec(`DELETE FROM job_runs WHERE job = 'retention'`)
 	})
 
 	old := time.Now().Add(-100 * 24 * time.Hour)
@@ -100,6 +100,28 @@ func setupRetentionFixture(t *testing.T) *retentionFixture {
 	f.job = NewRetentionJob(db, zap.NewNop())
 	require.NotNil(t, f.job)
 	f.job.BatchSize = 1 // exercise the batch loop
+	// The test database is shared by every package and job_runs rows are
+	// global: the fixture's job has its own name (and so its own advisory
+	// lock) and prunes only the fixture's rows — a job that walks every row
+	// runs scoped in its tests.
+	f.job.JobName = "test_retention_" + id
+	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM job_runs WHERE job = $1`, f.job.JobName) })
+	for i, p := range f.job.Policies {
+		scope := "tenant_id = '" + f.tenantID + "'"
+		switch p.Table {
+		case "webhook_deliveries":
+			scope = "webhook_id = '" + f.webhook + "'"
+		case "waitlist_signups":
+			scope = "email LIKE 'ret-" + id + "-%'"
+		}
+		if p.Extra != "" {
+			scope += " AND " + p.Extra
+		}
+		f.job.Policies[i].Extra = scope
+	}
+	f.sched = newJobScheduler(db, zap.NewNop())
+	f.sj = f.sched.Register(f.job.spec())
+	require.NotNil(t, f.sj)
 	return f
 }
 
@@ -134,79 +156,73 @@ func TestRetention_PrunesOnlyRowsPastTheirPeriod(t *testing.T) {
 	assert.Equal(t, "10.0.0.9", newIP)
 	assert.Equal(t, "ua-new", newUA)
 
-	// Per-table counts are reported (at least our rows; the shared DB may hold more).
+	// Per-table counts are reported: exactly the fixture's one old row each.
 	for _, tbl := range []string{"s3_access_log", "events", "quota_usage_events", "stripe_events", "cdn_access_log", "webhook_deliveries", "waitlist_signups"} {
-		assert.GreaterOrEqual(t, res.Tables[tbl], int64(1), tbl)
+		assert.Equal(t, int64(1), res.Tables[tbl], tbl)
 	}
 	assert.Empty(t, res.Errors)
 
-	// job_runs recorded the success and the job is no longer due.
-	last, err := lastJobSuccess(context.Background(), f.db, "retention")
+	// A second run — this time as the scheduler runs it — is a no-op, and
+	// job_runs records the success: the job is no longer due.
+	rep, err := f.sj.RunNow(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), rep.Rows)
+	last, err := lastJobSuccess(context.Background(), f.db, f.job.JobName)
 	require.NoError(t, err)
 	assert.WithinDuration(t, time.Now(), last, time.Minute)
-	due, err := f.job.due(context.Background())
+	due, err := f.sj.due(context.Background())
 	require.NoError(t, err)
 	assert.False(t, due)
-
-	// A second run is a no-op.
-	res, err = f.job.RunOnce(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, int64(0), res.Total)
 }
 
 func TestRetention_SecondConcurrentRunIsRefused(t *testing.T) {
+	// Arrange: another session (a second process, or a run in progress)
+	// holds the job's advisory lock.
 	f := setupRetentionFixture(t)
 	conn, err := f.db.Conn(context.Background())
 	require.NoError(t, err)
 	defer func() { _ = conn.Close() }()
 	var got bool
-	require.NoError(t, conn.QueryRowContext(context.Background(), `SELECT pg_try_advisory_lock($1)`, retentionLockKey).Scan(&got))
+	key := jobLockKey(f.job.JobName)
+	require.NoError(t, conn.QueryRowContext(context.Background(), `SELECT pg_try_advisory_lock($1)`, key).Scan(&got))
 	require.True(t, got)
 
-	_, err = f.job.RunOnce(context.Background())
+	// Act + Assert: the scheduler's run and the admin trigger are refused.
+	_, err = f.sj.RunNow(context.Background())
 	assert.ErrorIs(t, err, errJobAlreadyRunning)
 	assert.Equal(t, 2, f.count(`SELECT COUNT(*) FROM s3_access_log WHERE tenant_id = $1`, f.tenantID), "nothing pruned while the lock is held")
 
-	s := &Server{logger: zap.NewNop(), db: f.db, retention: f.job}
-	rr := doJSON(t, s.handleRetentionTrigger, "POST", "/api/v1/admin/retention")
+	s := &Server{logger: zap.NewNop(), db: f.db, retention: f.job, jobs: f.sched}
+	rr := doJSON(t, s.adminJobTrigger(f.job.JobName), "POST", "/api/v1/admin/retention")
 	assert.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), `"already_running"`)
 
-	_, _ = conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock($1)`, retentionLockKey)
-	rr = doJSON(t, s.handleRetentionTrigger, "POST", "/api/v1/admin/retention")
-	assert.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	assert.Contains(t, rr.Body.String(), `"s3_access_log":`)
+	// Released: the trigger starts the run and answers 202 at once; the
+	// result is in job_runs.
+	_, _ = conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock($1)`, key)
+	rr = doJSON(t, s.adminJobTrigger(f.job.JobName), "POST", "/api/v1/admin/retention")
+	require.Equal(t, http.StatusAccepted, rr.Code, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), `"status":"started"`)
+	assert.Contains(t, rr.Body.String(), `"job":"`+f.job.JobName+`"`)
+	require.Eventually(t, func() bool {
+		rows, err := jobRunRows(context.Background(), f.db)
+		return err == nil && rows[f.job.JobName].Outcome == jobOutcomeOK
+	}, 10*time.Second, 20*time.Millisecond)
+	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM s3_access_log WHERE tenant_id = $1`, f.tenantID), "the detached run pruned")
+	rows, err := jobRunRows(context.Background(), f.db)
+	require.NoError(t, err)
+	assert.Equal(t, int64(7), rows[f.job.JobName].Rows, "one old row in each of the seven tables")
 }
 
-func TestRetention_DueFollowsTheDailyScheduleAndCatchesUp(t *testing.T) {
-	f := setupRetentionFixture(t)
-	fixed := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
-	f.job.now = func() time.Time { return fixed }
-
-	// Never ran: due.
-	due, err := f.job.due(context.Background())
-	require.NoError(t, err)
-	assert.True(t, due)
-
-	assert.Equal(t, time.Date(2026, 9, 30, 3, 30, 0, 0, time.UTC), f.job.lastScheduled(fixed))
-	assert.Equal(t, time.Date(2026, 9, 29, 3, 30, 0, 0, time.UTC), f.job.lastScheduled(time.Date(2026, 9, 30, 1, 0, 0, 0, time.UTC)))
-
-	// Succeeded after today's 03:30: not due. Succeeded before it: due
-	// (this is the catch-up after a restart that ate the tick, R13-07).
-	for _, c := range []struct {
-		last time.Time
-		want bool
-	}{
-		{time.Date(2026, 9, 30, 3, 45, 0, 0, time.UTC), false},
-		{time.Date(2026, 9, 30, 2, 0, 0, 0, time.UTC), true},
-		{time.Date(2026, 9, 27, 3, 45, 0, 0, time.UTC), true},
-	} {
-		_, err := f.db.Exec(`INSERT INTO job_runs (job, last_success_at, last_outcome) VALUES ('retention', $1, 'ok')
-			ON CONFLICT (job) DO UPDATE SET last_success_at = EXCLUDED.last_success_at`, c.last)
-		require.NoError(t, err)
-		due, err := f.job.due(context.Background())
-		require.NoError(t, err)
-		assert.Equal(t, c.want, due, fmt.Sprintf("last success %s", c.last))
-	}
+func TestRetention_KeepsItsScheduleOnTheSharedRunner(t *testing.T) {
+	// "No behaviour change": nightly 03:30 UTC, catch-up a minute after
+	// boot, a 10-minute ceiling, the name job_runs already holds on prod.
+	sp := NewRetentionJob(setupRetentionFixture(t).db, zap.NewNop()).spec()
+	assert.Equal(t, "retention", sp.Name)
+	assert.True(t, sp.daily())
+	assert.Equal(t, "daily 03:30 UTC", sp.schedule())
+	assert.Equal(t, time.Minute, sp.BootDelay)
+	assert.Equal(t, 10*time.Minute, sp.MaxRunTime)
 }
 
 func TestRetention_PoliciesMatchThePolicyPage(t *testing.T) {

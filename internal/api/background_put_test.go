@@ -66,7 +66,8 @@ func TestAccessLogDelivery_ReportReadableThroughS3(t *testing.T) {
 	require.Equal(t, 10, pending, "ten rows wait for delivery")
 
 	// Deliver.
-	f.server.accessLogTracker.deliverLogs(context.Background())
+	_, dErr := f.server.accessLogTracker.deliverLogs(context.Background())
+	require.NoError(t, dErr)
 
 	// The rows are gone and exactly one log object exists in the target
 	// bucket, addressed like any customer object.
@@ -112,7 +113,8 @@ func TestAccessLogDelivery_TargetBucketGoneKeepsRows(t *testing.T) {
 	_, err = f.db.Exec(`DELETE FROM buckets WHERE tenant_id = $1 AND name = $2`, f.tenantID, f.logBucket)
 	require.NoError(t, err)
 
-	f.server.accessLogTracker.deliverLogs(context.Background())
+	_, dErr := f.server.accessLogTracker.deliverLogs(context.Background())
+	require.NoError(t, dErr)
 
 	var pending int
 	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM s3_access_log WHERE tenant_id=$1`, f.tenantID).Scan(&pending))
@@ -136,7 +138,8 @@ func TestAccessLogDelivery_QuotaExceededKeepsRows(t *testing.T) {
 		VALUES ($1,$2,'k','GetObject',200,1,0,'127.0.0.1','ua','rid','',NOW())`, f.tenantID, f.bucket)
 	require.NoError(t, err)
 
-	f.server.accessLogTracker.deliverLogs(context.Background())
+	_, dErr := f.server.accessLogTracker.deliverLogs(context.Background())
+	require.NoError(t, dErr)
 
 	var pending, heads int
 	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM s3_access_log WHERE tenant_id=$1`, f.tenantID).Scan(&pending))

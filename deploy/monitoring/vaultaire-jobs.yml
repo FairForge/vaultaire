@@ -1,0 +1,70 @@
+# Background jobs — install to /etc/prometheus/rules/ (see README).
+#
+# Series come from the app's /metrics (internal/api/jobs.go, WP-R13-3):
+#   vaultaire_job_last_success_timestamp_seconds{job_name}   unix time of the job's last successful run,
+#                                                        READ FROM job_runs (0 = never succeeded)
+#   vaultaire_job_runs_total{job_name,outcome}          runs in this process: ok / error / interrupted
+#   vaultaire_account_deletion_tenants_total{result}    erased / deferred / cancelled
+#
+# The last-success series is read from the database, not kept in memory: a
+# process that has just started reports the success of the process before it.
+# The gauges it replaces (vaultaire_retention_last_run_timestamp_seconds,
+# vaultaire_account_deletion_last_run_timestamp_seconds) were set only after a
+# run in the same process and read 0 after every deploy — RetentionJobStale,
+# written on one of them with `for: 0m`, was true after every deploy until the
+# next 03:30 UTC. Both gauges are gone; RetentionJobStale is JobStale{job_name="retention"}.
+#
+# The label is job_name, not job: Prometheus puts its own `job` (the scrape
+# job, "vaultaire") on every series and stores a scraped `job` label as
+# `exported_job` — a rule on {job="retention"} would never match.
+#
+# Daily jobs (UTC): inventory 00:30, dedup_gc 02:30, retention 03:30,
+# account_deletion 04:30, smart_demotion 06:30. Each catches up a few minutes
+# after a start when job_runs has no success since its last scheduled time,
+# and re-checks every hour. A run is "error" (and retried at the next hourly
+# check) only when the run itself failed; one object, chunk, report or tenant
+# that failed is a note on an "ok" run — except account_deletion, where a
+# deferred tenant is the failure on purpose (AccountDeletionDeferred).
+#
+# Triage:
+#   curl -s -H "Authorization: Bearer <admin JWT>" https://stored.ge/api/v1/admin/jobs | jq .
+#   journalctl -u vaultaire | grep -E '"job run (failed|interrupted|completed)"'
+#   POST /api/v1/admin/jobs/<job>/run     start one run now (202; 409 while one is running)
+groups:
+  - name: vaultaire-jobs
+    rules:
+      - alert: JobStale
+        expr: (time() - vaultaire_job_last_success_timestamp_seconds{job_name=~"inventory|dedup_gc|retention|account_deletion|smart_demotion"}) > 36 * 3600
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Daily job {{ $labels.job_name }} has not succeeded in 36 hours"
+          description: "{{ $labels.job_name }} last succeeded {{ $value | humanizeDuration }} ago (a value near the age of the epoch means it has never succeeded). It is due once a day and retried hourly while it fails. GET /api/v1/admin/jobs shows the last outcome and error; journalctl -u vaultaire | grep 'job run'."
+
+      - alert: PeriodicJobStale
+        expr: (time() - vaultaire_job_last_success_timestamp_seconds{job_name=~"multipart_reaper|cdn_rollup|idempotency_cleanup|sts_cleanup|session_cleanup|bandwidth_alerts|access_log_delivery"}) > 3 * 3600
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Periodic job {{ $labels.job_name }} has not succeeded in 3 hours"
+          description: "{{ $labels.job_name }} runs every hour (access_log_delivery every 5 minutes) and last succeeded {{ $value | humanizeDuration }} ago. GET /api/v1/admin/jobs; journalctl -u vaultaire | grep 'job run failed'."
+
+      - alert: JobFailing
+        expr: increase(vaultaire_job_runs_total{outcome="error"}[6h]) >= 3
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Job {{ $labels.job_name }} failed {{ $value | humanize }} times in 6 hours"
+          description: "The run itself is failing (not single items — those are notes on an ok run). The error text is in GET /api/v1/admin/jobs (last_error) and in the 'job run failed' log line."
+
+      - alert: AccountDeletionDeferred
+        expr: increase(vaultaire_account_deletion_tenants_total{result="deferred"}[2h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "An account erasure is being deferred"
+          description: "The account-deletion runner could not finish a tenant whose grace period ended (Stripe refused the cancel, a backend refused a delete, or STRIPE_SECRET_KEY is unset with a subscription on the row). It retries every hour; the erasure is owed on its date. GET /api/v1/admin/jobs → account_deletion.last_error names the tenant and the reason."

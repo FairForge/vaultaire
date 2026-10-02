@@ -6,11 +6,12 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
-	"github.com/FairForge/vaultaire/internal/audit"
 	"net/http"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/FairForge/vaultaire/internal/audit"
 )
 
 // contextKey is an unexported type for context keys in this package.
@@ -296,21 +297,16 @@ func (d *DBStore) ListByUserID(ctx context.Context, userID string) ([]SessionInf
 	return out, nil
 }
 
-// StartCleanup launches a goroutine that deletes expired sessions every hour.
-// It stops when ctx is cancelled.
-func (d *DBStore) StartCleanup(ctx context.Context) {
-	go func() {
-		ticker := time.NewTicker(1 * time.Hour)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				_, _ = d.db.ExecContext(ctx, `DELETE FROM dashboard_sessions WHERE expires_at < NOW()`)
-			}
-		}
-	}()
+// CleanupExpired deletes expired sessions and returns how many. The API
+// server runs it hourly as the `session_cleanup` job; the error used to be
+// dropped.
+func (d *DBStore) CleanupExpired(ctx context.Context) (int64, error) {
+	res, err := d.db.ExecContext(ctx, `DELETE FROM dashboard_sessions WHERE expires_at < NOW()`)
+	if err != nil {
+		return 0, fmt.Errorf("delete expired sessions: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 // --- Middleware ---

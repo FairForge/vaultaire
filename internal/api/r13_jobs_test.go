@@ -47,7 +47,8 @@ func TestCDNRollup_IncludesYesterday(t *testing.T) {
 
 	ct := NewCDNAnalyticsTracker(db)
 	ct.SetLogger(zap.NewNop())
-	ct.runRollup()
+	_, err = ct.rollup(context.Background())
+	require.NoError(t, err)
 
 	rows, err := db.Query(`SELECT date, requests, bytes_sent FROM cdn_stats_daily WHERE tenant_id = $1 ORDER BY date`, tenantID)
 	require.NoError(t, err)

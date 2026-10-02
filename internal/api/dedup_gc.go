@@ -3,11 +3,7 @@ package api
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"github.com/FairForge/vaultaire/internal/audit"
-	"net/http"
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/crypto"
@@ -24,14 +20,22 @@ type DedupGCRunner struct {
 	gci         *crypto.GlobalContentIndex
 	logger      *zap.Logger
 	GracePeriod time.Duration
-	gate        jobGate // one run at a time per process (Review R13-05)
+	// JobName is the job_runs name (tests use their own: the table is shared).
+	JobName string
 }
+
+// dedupGCJobName is the job's name in job_runs and on the metrics.
+const dedupGCJobName = "dedup_gc"
 
 // DedupGCResult holds the outcome of a single GC run.
 type DedupGCResult struct {
 	Reconciled     int   `json:"reconciled"`
 	Deleted        int   `json:"deleted"`
 	BytesReclaimed int64 `json:"bytes_reclaimed"`
+	// Failed counts sweep candidates that could not be swept (lock or row
+	// delete error, or a blob the backend would not delete — leaked, never
+	// corrupt). They stay candidates and the next run takes them.
+	Failed int `json:"failed,omitempty"`
 }
 
 // NewDedupGCRunner builds the GC runner. gci must be the SAME instance the PUT
@@ -48,51 +52,36 @@ func NewDedupGCRunner(db *sql.DB, eng *engine.CoreEngine, gci *crypto.GlobalCont
 		gci:         gci,
 		logger:      logger,
 		GracePeriod: 7 * 24 * time.Hour,
+		JobName:     dedupGCJobName,
 	}
 }
 
-// StartDedupGC runs a background goroutine that triggers RunOnce daily.
-func (g *DedupGCRunner) StartDedupGC(ctx context.Context) {
-	if g == nil {
-		return
-	}
-	go func() {
-		ticker := time.NewTicker(24 * time.Hour)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				result, err := g.RunOnceGuarded(ctx)
-				if errors.Is(err, errJobAlreadyRunning) {
-					g.logger.Warn("dedup gc: tick skipped, a run is already in progress")
-					continue
-				}
-				if err != nil {
-					g.logger.Error("dedup gc failed", zap.Error(err))
-					continue
-				}
-				g.logger.Info("dedup gc completed",
-					zap.Int("reconciled", result.Reconciled),
-					zap.Int("deleted", result.Deleted),
-					zap.Int64("bytes_reclaimed", result.BytesReclaimed))
+// spec is the job's schedule: daily at 02:30 UTC, catch-up three minutes
+// after boot. It used to be a 24 h ticker with no run at boot (Review
+// R13-07): on a box redeployed several times a day the tick never came and
+// the GC ran only when an admin posted the trigger.
+//
+// What makes a run fail: the reconcile statement or the candidate scan
+// failed — nothing was swept; it is retried at the next hourly check (both
+// are single statements). A chunk that could not be swept does NOT fail the
+// run: it is counted (`failed`), written to job_runs as a note, and stays a
+// candidate for tomorrow's run — one stuck blob must not make the GC repeat
+// every hour.
+func (g *DedupGCRunner) spec() jobSpec {
+	return jobSpec{
+		Name: g.JobName, Hour: 2, Minute: 30,
+		BootDelay: 3 * time.Minute, MaxRunTime: 2 * time.Hour,
+		Run: func(ctx context.Context) (jobReport, error) {
+			res, err := g.RunOnce(ctx)
+			g.logger.Info("dedup gc run", zap.Int("reconciled", res.Reconciled), zap.Int("deleted", res.Deleted),
+				zap.Int64("bytes_reclaimed", res.BytesReclaimed), zap.Int("failed", res.Failed), zap.Error(err))
+			rep := jobReport{Rows: int64(res.Deleted)}
+			if res.Failed > 0 {
+				rep.Note = fmt.Sprintf("%d chunk(s) not swept (see the log); they stay candidates", res.Failed)
 			}
-		}
-	}()
-}
-
-// RunOnceGuarded is RunOnce under the single-flight gate (ticker vs admin
-// trigger): a concurrent caller gets errJobAlreadyRunning.
-func (g *DedupGCRunner) RunOnceGuarded(ctx context.Context) (DedupGCResult, error) {
-	if g == nil {
-		return DedupGCResult{}, errors.New("dedup gc: runner not configured")
+			return rep, err
+		},
 	}
-	if !g.gate.tryAcquire() {
-		return DedupGCResult{}, errJobAlreadyRunning
-	}
-	defer g.gate.release()
-	return g.RunOnce(ctx)
 }
 
 // RunOnce performs a single GC cycle: reconcile then sweep.
@@ -105,12 +94,13 @@ func (g *DedupGCRunner) RunOnce(ctx context.Context) (DedupGCResult, error) {
 	}
 	result.Reconciled = reconciled
 
-	deleted, reclaimed, err := g.sweep(ctx)
+	deleted, failed, reclaimed, err := g.sweep(ctx)
+	result.Deleted = deleted
+	result.Failed = failed
+	result.BytesReclaimed = reclaimed
 	if err != nil {
 		return result, fmt.Errorf("sweep: %w", err)
 	}
-	result.Deleted = deleted
-	result.BytesReclaimed = reclaimed
 
 	return result, nil
 }
@@ -150,7 +140,7 @@ func (g *DedupGCRunner) reconcile(ctx context.Context) (int, error) {
 
 // sweep deletes chunks that have been ref_count=0 and marked_for_deletion past
 // the grace period. Uses conditional DELETE to avoid racing with concurrent re-refs.
-func (g *DedupGCRunner) sweep(ctx context.Context) (int, int64, error) {
+func (g *DedupGCRunner) sweep(ctx context.Context) (int, int, int64, error) {
 	graceSecs := int(g.GracePeriod.Seconds())
 	rows, err := g.db.QueryContext(ctx, `
 		SELECT dedup_scope, plaintext_hash, backend_id, storage_key, size_bytes
@@ -160,7 +150,7 @@ func (g *DedupGCRunner) sweep(ctx context.Context) (int, int64, error) {
 		  AND marked_at < NOW() - make_interval(secs => $1)
 	`, graceSecs)
 	if err != nil {
-		return 0, 0, fmt.Errorf("sweep query: %w", err)
+		return 0, 0, 0, fmt.Errorf("sweep query: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -175,31 +165,52 @@ func (g *DedupGCRunner) sweep(ctx context.Context) (int, int64, error) {
 	for rows.Next() {
 		var c candidate
 		if err := rows.Scan(&c.scope, &c.hash, &c.backendID, &c.key, &c.size); err != nil {
-			return 0, 0, fmt.Errorf("scan candidate: %w", err)
+			return 0, 0, 0, fmt.Errorf("scan candidate: %w", err)
 		}
 		candidates = append(candidates, c)
 	}
 	if err := rows.Err(); err != nil {
-		return 0, 0, fmt.Errorf("iterate candidates: %w", err)
+		return 0, 0, 0, fmt.Errorf("iterate candidates: %w", err)
 	}
 
-	var deleted int
+	var deleted, failed int
 	var reclaimed int64
 	for _, c := range candidates {
-		ok, err := g.sweepOne(ctx, c.scope, c.hash, c.backendID, c.key)
+		if ctx.Err() != nil {
+			// Run deadline or shutdown: what is left stays a candidate.
+			return deleted, failed, reclaimed, ctx.Err()
+		}
+		outcome, err := g.sweepOne(ctx, c.scope, c.hash, c.backendID, c.key)
 		if err != nil {
 			g.logger.Error("sweep chunk",
 				zap.String("hash", c.hash), zap.Error(err))
+			failed++
 			continue
 		}
-		if ok {
+		switch outcome {
+		case sweepDeleted:
 			deleted++
 			reclaimed += c.size
+		case sweepBlobLeaked:
+			failed++
 		}
 	}
 
-	return deleted, reclaimed, nil
+	return deleted, failed, reclaimed, nil
 }
+
+// sweepOutcome is what happened to one sweep candidate.
+type sweepOutcome int
+
+const (
+	// sweepKept: re-referenced since the scan — nothing to do.
+	sweepKept sweepOutcome = iota
+	// sweepDeleted: row and blob are gone.
+	sweepDeleted
+	// sweepBlobLeaked: the row is gone and the backend refused the blob
+	// delete — a leaked blob, never a corrupt object.
+	sweepBlobLeaked
+)
 
 // sweepOne deletes a single candidate's GCI row and its backing blob while
 // holding an advisory lock keyed on (scope, hash) — the same lock the chunked
@@ -219,19 +230,19 @@ func (g *DedupGCRunner) sweep(ctx context.Context) (int, int64, error) {
 // later PUT dedup-hit a chunk that no longer exists) and again after the blob
 // delete (a concurrent LookupChunk may re-cache the row in the window before
 // the delete commits).
-func (g *DedupGCRunner) sweepOne(ctx context.Context, scope, hash, backendID, key string) (bool, error) {
+func (g *DedupGCRunner) sweepOne(ctx context.Context, scope, hash, backendID, key string) (sweepOutcome, error) {
 	conn, err := g.db.Conn(ctx)
 	if err != nil {
-		return false, fmt.Errorf("acquire sweep conn: %w", err)
+		return sweepKept, fmt.Errorf("acquire sweep conn: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
 
 	if _, err := conn.ExecContext(ctx,
 		`SELECT pg_advisory_lock(hashtext($1), hashtext($2))`, scope, hash); err != nil {
-		return false, fmt.Errorf("advisory lock: %w", err)
+		return sweepKept, fmt.Errorf("advisory lock: %w", err)
 	}
 	defer func() {
-		_, _ = conn.ExecContext(ctx,
+		_, _ = conn.ExecContext(context.WithoutCancel(ctx),
 			`SELECT pg_advisory_unlock(hashtext($1), hashtext($2))`, scope, hash)
 	}()
 
@@ -247,12 +258,12 @@ func (g *DedupGCRunner) sweepOne(ctx context.Context, scope, hash, backendID, ke
 		  AND marked_for_deletion = TRUE
 	`, scope, hash)
 	if err != nil {
-		return false, fmt.Errorf("delete gci row: %w", err)
+		return sweepKept, fmt.Errorf("delete gci row: %w", err)
 	}
 	affected, _ := res.RowsAffected()
 	if affected == 0 {
 		// Re-referenced since the candidate scan — nothing to do.
-		return false, nil
+		return sweepKept, nil
 	}
 
 	if g.gci != nil {
@@ -269,31 +280,8 @@ func (g *DedupGCRunner) sweepOne(ctx context.Context, scope, hash, backendID, ke
 			zap.String("hash", hash),
 			zap.String("key", key),
 			zap.Error(err))
-		return false, nil
+		return sweepBlobLeaked, nil
 	}
 
-	return true, nil
-}
-
-func (s *Server) handleDedupGCTrigger(w http.ResponseWriter, r *http.Request) {
-	if s.dedupGCRunner == nil {
-		http.Error(w, "dedup gc not available", http.StatusServiceUnavailable)
-		return
-	}
-	ctx, cancel := adminTriggerContext(r)
-	defer cancel()
-	result, err := s.dedupGCRunner.RunOnceGuarded(ctx)
-	if errors.Is(err, errJobAlreadyRunning) {
-		writeJobAlreadyRunning(w, "dedup_gc")
-		return
-	}
-	actor, _ := r.Context().Value(userIDKey).(string)
-	audit.Record(r.Context(), s.db, audit.Entry{UserID: actor, EventType: "admin", Action: "admin.dedup_gc", Error: err})
-	if err != nil {
-		s.logger.Error("manual dedup gc failed", zap.Error(err))
-		http.Error(w, "gc failed: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(result)
+	return sweepDeleted, nil
 }

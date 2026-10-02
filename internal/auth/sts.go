@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/lib/pq"
-	"go.uber.org/zap"
 )
 
 type STSToken struct {
@@ -120,24 +119,15 @@ func GenerateSTSToken(ctx context.Context, db *sql.DB, tenantID, parentKeyID str
 	return token, nil
 }
 
-func StartSTSCleanup(ctx context.Context, db *sql.DB, logger *zap.Logger) {
-	go func() {
-		ticker := time.NewTicker(1 * time.Hour)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				result, err := db.ExecContext(ctx, `DELETE FROM sts_tokens WHERE expires_at < NOW()`)
-				if err != nil {
-					logger.Error("sts token cleanup", zap.Error(err))
-				} else if n, _ := result.RowsAffected(); n > 0 {
-					logger.Info("cleaned expired STS tokens", zap.Int64("count", n))
-				}
-			}
-		}
-	}()
+// CleanupExpiredSTSTokens deletes expired temporary credentials and returns
+// how many. The API server runs it hourly as the `sts_cleanup` job.
+func CleanupExpiredSTSTokens(ctx context.Context, db *sql.DB) (int64, error) {
+	result, err := db.ExecContext(ctx, `DELETE FROM sts_tokens WHERE expires_at < NOW()`)
+	if err != nil {
+		return 0, fmt.Errorf("delete expired STS tokens: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	return n, nil
 }
 
 func generateSTSAccessKey() (string, error) {

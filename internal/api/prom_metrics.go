@@ -40,8 +40,18 @@ func (s *Server) initMetrics() {
 
 		reg.MustRegister(authFailures, authFailuresByKey)
 		reg.MustRegister(dashboard.Collectors()...)
-		reg.MustRegister(retentionDeletedRows, retentionLastRun, retentionRuns)
-		reg.MustRegister(accountDeletionTenants, accountDeletionObjects, accountDeletionLastRun, accountDeletionRuns)
+		reg.MustRegister(retentionDeletedRows)
+		reg.MustRegister(accountDeletionTenants, accountDeletionObjects)
+		// Background jobs (WP-R13-3): runs by outcome, and the last success of
+		// every registered job READ FROM job_runs — a process that has just
+		// started reports the success of the process before it. The per-job
+		// "last run" gauges this replaces were Set only after a run in this
+		// process: they read 0 after every deploy and a staleness rule on them
+		// was true until the next nightly run.
+		reg.MustRegister(jobRuns)
+		if s.jobs != nil {
+			reg.MustRegister(newJobsCollector(s.jobs))
+		}
 		// Egress throttle (WP-R10-9). No tenant label on any of them.
 		reg.MustRegister(egressEngaged, egressWouldThrottle, egressRejected, egressThrottledBytes)
 		// Reads that waited on an automatic restore (WP-R13-1): their 503 is

@@ -286,9 +286,13 @@ func TestEgressAlerts_PassFindsTenantsWithEgressThisMonth(t *testing.T) {
 	assert.Empty(t, quiet.alertRows())
 }
 
-func TestStartBandwidthAlerts_NilSafe(t *testing.T) {
+func TestBandwidthAlerts_NilSafe(t *testing.T) {
 	var a *BandwidthAlerter
-	a.StartBandwidthAlerts(context.Background())
+	n, err := a.checkBandwidthAlerts(context.Background())
+	require.NoError(t, err)
+	assert.Zero(t, n)
 
-	NewBandwidthAlerter((*sql.DB)(nil), zap.NewNop()).StartBandwidthAlerts(context.Background())
+	n, err = NewBandwidthAlerter((*sql.DB)(nil), zap.NewNop()).checkBandwidthAlerts(context.Background())
+	require.NoError(t, err)
+	assert.Zero(t, n)
 }
