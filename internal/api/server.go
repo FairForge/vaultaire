@@ -1228,13 +1228,30 @@ func (s *Server) requestIDMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// requestOutcome lets a handler tell the logging middleware that the 5xx it
+// answered is a deliberate refusal of one client, not a server failure.
+// vaultaire_errors_total feeds the VaultaireServerErrorRatio page; without
+// this a tenant past its egress allowance could fire it by opening more
+// downloads than the stream guard admits (503 SlowDown, WP-R10-9).
+type requestOutcome struct{ clientRefusal atomic.Bool }
+
+type requestOutcomeKey struct{}
+
+// markClientRefusal keeps the response of this request out of the 5xx count.
+func markClientRefusal(ctx context.Context) {
+	if oc, ok := ctx.Value(requestOutcomeKey{}).(*requestOutcome); ok {
+		oc.clientRefusal.Store(true)
+	}
+}
+
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&s.requestCount, 1)
 		start := time.Now()
 		cw := &countingResponseWriter{ResponseWriter: w}
-		next.ServeHTTP(cw, r)
-		if cw.statusCode >= http.StatusInternalServerError {
+		oc := &requestOutcome{}
+		next.ServeHTTP(cw, r.WithContext(context.WithValue(r.Context(), requestOutcomeKey{}, oc)))
+		if cw.statusCode >= http.StatusInternalServerError && !oc.clientRefusal.Load() {
 			atomic.AddInt64(&s.errorCount, 1)
 		}
 		s.logger.Info("request",

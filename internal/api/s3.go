@@ -650,7 +650,9 @@ func (s *Server) serveGetObject(cw *countingResponseWriter, r *http.Request, req
 	gw, admitted := s.egress.admit(cw, r, tenantID, egressSurfaceS3)
 	if !admitted {
 		// The one refusal: the tenant is being paced and already has
-		// EGRESS_THROTTLE_MAX_STREAMS paced downloads open.
+		// EGRESS_THROTTLE_MAX_STREAMS paced downloads open. It is the
+		// client's doing, so it stays out of the 5xx count the pager reads.
+		markClientRefusal(r.Context())
 		cw.Header().Set("Retry-After", egressRetryAfter)
 		WriteS3Error(cw, ErrSlowDown, r.URL.Path, generateRequestID())
 		return
