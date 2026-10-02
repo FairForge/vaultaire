@@ -72,9 +72,17 @@ type SmartDemotionRunner struct {
 	// PR B) at the start of every run.
 	Promoter *SmartPromoter
 
-	now             func() time.Time
-	beforeFlip      func(bucket, key string) // test hook: runs after the cold copy, before the routing flip
-	beforeHotDelete func(bucket, key string) // test hook: runs inside the reclaim tx, after the row lock, before the hot delete
+	now        func() time.Time
+	beforeFlip func(bucket, key string) // test hook: runs after the cold copy, before the routing flip
+	// scopeTenant, when set, confines the ledger passes (reclaim, drift, the
+	// day's byte budget) to one tenant. Tests only: the ledger is one table
+	// shared with every other test on the database, and a run that settles
+	// another fixture's rows with THIS fixture's drivers closes rows it knows
+	// nothing about.
+	scopeTenant string
+
+	beforeHotDelete  func(bucket, key string) // test hook: runs inside the reclaim tx, after the row locks, before the first stale copy is deleted
+	afterStaleDelete func(bucket, key string) // test hook: runs after the reclaim committed, before its check for a write the deletes destroyed
 }
 
 // SmartDemotionResult is one run's outcome.
@@ -199,17 +207,24 @@ func (r *SmartDemotionRunner) RunOnce(ctx context.Context, dryRun bool) (SmartDe
 			res.Promoted = n
 			res.Errors = append(res.Errors, errs...)
 		}
-		n, errs := r.reclaimHotCopies(ctx, hot)
+		n, errs := r.reclaimHotCopies(ctx)
 		res.HotReclaimed = n
 		res.Errors = append(res.Errors, errs...)
+		if ctx.Err() != nil {
+			// Stopping (a deploy) or at the ceiling: what the two passes
+			// above did not reach is the next run's work, and the run's
+			// result is the context's error — not "the day's bytes could
+			// not be read", which is what the next query would report.
+			return res, ctx.Err()
+		}
 	}
 
 	// The byte budget is per 24 hours, whatever number of runs it takes: the
 	// ledger says what the last day's runs already moved (a row whose object
 	// was promoted since is gone from it — an undercount, never an overcount).
 	if err := r.db.QueryRowContext(ctx,
-		`SELECT COALESCE(SUM(size_bytes), 0) FROM smart_demotions WHERE demoted_at > $1`,
-		r.now().Add(-24*time.Hour)).Scan(&res.BytesDemotedBefore); err != nil {
+		`SELECT COALESCE(SUM(size_bytes), 0) FROM smart_demotions WHERE demoted_at > $1 AND ($2 = '' OR tenant_id = $2)`,
+		r.now().Add(-24*time.Hour), r.scopeTenant).Scan(&res.BytesDemotedBefore); err != nil {
 		return res, fmt.Errorf("smart demotion: read the day's demoted bytes: %w", err)
 	}
 
@@ -255,6 +270,9 @@ func (r *SmartDemotionRunner) RunOnce(ctx context.Context, dryRun bool) (SmartDe
 		}
 		res.TenantsScanned++
 		stats, cands, err := r.planTenant(ctx, t.id, t.quota, t.pinHot)
+		if err != nil && ctx.Err() != nil {
+			return res, ctx.Err()
+		}
 		if err != nil {
 			res.Errors = append(res.Errors, fmt.Sprintf("%s: plan: %v", t.id, err))
 			continue
@@ -274,6 +292,9 @@ func (r *SmartDemotionRunner) RunOnce(ctx context.Context, dryRun bool) (SmartDe
 			}
 			moved, err := r.demote(ctx, hot, cold, t.id, c)
 			switch {
+			case err != nil && ctx.Err() != nil:
+				// The move was cut by the stop, it did not fail.
+				return res, ctx.Err()
 			case err != nil:
 				res.Errors = append(res.Errors, fmt.Sprintf("%s %s/%s: %v", t.id, c.bucket, c.key, err))
 			case !moved:
@@ -307,11 +328,15 @@ func (r *SmartDemotionRunner) planTenant(ctx context.Context, tenantID string, q
 	ageCutoff := now.Add(-r.MinAge)
 
 	// Eligible = whole objects on the hot backend, old enough, in buckets
-	// that are neither versioned nor pinned hot.
+	// that are neither versioned nor pinned hot. "Old enough" counts from the
+	// last WRITE (updated_at is set by the write upserts only): an overwrite
+	// keeps the row's created_at and last_accessed, so a key rewritten today
+	// used to look a month old and idle and its fresh bytes went to tape the
+	// next morning — the churn MinAge exists to prevent (WP-R13-2).
 	const eligible = `
 		FROM object_head_cache o
 		WHERE o.tenant_id = $1 AND o.backend_name = $2 AND NOT o.is_chunked AND o.size_bytes > 0
-		  AND o.created_at < $3
+		  AND o.created_at < $3 AND o.updated_at < $3
 		  AND NOT EXISTS (SELECT 1 FROM buckets b WHERE b.tenant_id = o.tenant_id AND b.name = o.bucket
 		                    AND (COALESCE(b.versioning_status,'') IN ('Enabled','Suspended')
 		                         OR COALESCE(b.tier_preference,'') = 'performance'))`
@@ -406,11 +431,13 @@ func (r *SmartDemotionRunner) demote(ctx context.Context, hot, cold engine.Drive
 	if n == 0 {
 		// Changed under us. Our cold copy is stale garbage UNLESS the new
 		// version itself landed on the cold backend at this key (a PUT with
-		// an archive storage class) — then the blob there is theirs.
+		// an archive storage class) — then the blob there is theirs. An
+		// object DELETED during the copy has no row at all: the copy is
+		// garbage too (it used to stay on tape, WP-R13-2).
 		var cur string
 		qerr := r.db.QueryRowContext(ctx, `SELECT COALESCE(backend_name,'') FROM object_head_cache WHERE tenant_id=$1 AND bucket=$2 AND object_key=$3`, tenantID, c.bucket, c.key).Scan(&cur)
-		if qerr == nil && cur != r.ColdBackend {
-			if delErr := cold.Delete(tctx, container, c.key); delErr != nil {
+		if errors.Is(qerr, sql.ErrNoRows) || (qerr == nil && cur != r.ColdBackend) {
+			if delErr := cold.Delete(tctx, container, c.key); delErr != nil && !isObjectMissingErr(delErr) {
 				r.logger.Warn("smart demotion: stale cold copy not removed",
 					zap.String("tenant", tenantID), zap.String("bucket", c.bucket), zap.String("key", c.key), zap.Error(delErr))
 			}
@@ -423,7 +450,7 @@ func (r *SmartDemotionRunner) demote(ctx context.Context, hot, cold engine.Drive
 		 ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
 		   etag = EXCLUDED.etag, size_bytes = EXCLUDED.size_bytes, hot_backend = EXCLUDED.hot_backend,
 		   cold_backend = EXCLUDED.cold_backend, reason = EXCLUDED.reason, demoted_at = EXCLUDED.demoted_at,
-		   hot_deleted_at = NULL, hot_outcome = ''`,
+		   hot_deleted_at = NULL, hot_outcome = '', promote_requested_at = NULL, restore_requested_at = NULL`,
 		tenantID, c.bucket, c.key, c.etag, c.size, r.HotBackend, r.ColdBackend, c.reason, r.now()); err != nil {
 		return false, fmt.Errorf("ledger: %w", err)
 	}
@@ -440,57 +467,101 @@ func (r *SmartDemotionRunner) demote(ctx context.Context, hot, cold engine.Drive
 	return true, nil
 }
 
-// reclaimHotCopies deletes hot copies of objects demoted longer than HotGrace
-// ago, under the head-cache row lock and only while the row still routes to
-// the cold backend with the demoted etag. An object rewritten or moved since
-// keeps its hot bytes (they are live data); an object deleted since has an
-// orphaned hot copy that is removed.
-func (r *SmartDemotionRunner) reclaimHotCopies(ctx context.Context, hot engine.Driver) (int, []string) {
-	var errs []string
+// reclaimHotCopies settles the ledger rows that owe a delete
+// (ledgerSettler.settle with the grace elapsed), in two passes:
+//
+//   - open rows demoted longer than HotGrace ago: the hot copy of an object
+//     that is still as the demotion left it is deleted; for an object
+//     rewritten, moved or deleted since, the copies the key no longer routes
+//     to are deleted — the cold copy an overwrite left on tape (R13-10) as
+//     well as an orphaned hot one — and the copy it does route to is never
+//     touched;
+//   - reclaimed rows whose object is no longer the demoted one (no head row,
+//     another backend, another etag, chunked): the write or delete that
+//     changed it removes the cold copy itself, at once; this pass is what
+//     retries the ones that failed or that a restart cut short.
+//
+// A cancelled run stops between two rows: the rows it did not reach are the
+// next run's work, never a list of failures.
+func (r *SmartDemotionRunner) reclaimHotCopies(ctx context.Context) (int, []string) {
 	cutoff := r.now().Add(-r.HotGrace)
-	type pending struct{ tenant, bucket, key, etag, cold string }
+	reclaimed, errs := r.settlePass(ctx, "reclaim",
+		`SELECT tenant_id, bucket, object_key FROM smart_demotions
+		 WHERE hot_deleted_at IS NULL AND demoted_at < $1 AND ($2 = '' OR tenant_id = $2)
+		 ORDER BY demoted_at ASC LIMIT $3`, cutoff)
+	if ctx.Err() != nil {
+		return reclaimed, errs
+	}
+	_, driftErrs := r.settlePass(ctx, "reclaim (changed since)",
+		`SELECT d.tenant_id, d.bucket, d.object_key FROM smart_demotions d
+		 LEFT JOIN object_head_cache o
+		   ON o.tenant_id = d.tenant_id AND o.bucket = d.bucket AND o.object_key = d.object_key
+		 WHERE d.hot_deleted_at IS NOT NULL AND d.hot_outcome = 'deleted' AND d.demoted_at < $1
+		   AND ($2 = '' OR d.tenant_id = $2)
+		   AND (o.object_key IS NULL OR o.is_chunked
+		        OR COALESCE(o.backend_name,'') <> d.cold_backend OR COALESCE(o.etag,'') <> d.etag)
+		 ORDER BY d.tenant_id, d.bucket, d.object_key LIMIT $3`, cutoff)
+	return reclaimed, append(errs, driftErrs...)
+}
+
+// settlePass settles every row a listing returns, in batches until one comes
+// back short (Review R13-20: a single LIMIT capped reclaims at 1000 per run
+// for ALL tenants while demotion moves 1000 per tenant, so hot copies — paid
+// storage — piled up past the grace). A row whose settle failed is selected
+// again by the next batch; the seen set stops that within one run.
+func (r *SmartDemotionRunner) settlePass(ctx context.Context, what, listing string, cutoff time.Time) (int, []string) {
+	var errs []string
+	type pending struct{ tenant, bucket, key string }
 	reclaimed := 0
-	// Batches until one comes back short (Review R13-20): a single LIMIT
-	// capped reclaims at 1000 per run for ALL tenants while demotion moves
-	// 1000 per tenant, so hot copies (paid storage) piled up past the grace.
-	// A row whose reclaim failed keeps hot_deleted_at NULL and would be
-	// re-selected forever within one run; the seen set breaks that.
+	settler := r.settler()
 	seen := map[string]bool{}
 	for ctx.Err() == nil {
-		rows, err := r.db.QueryContext(ctx,
-			`SELECT tenant_id, bucket, object_key, etag, cold_backend FROM smart_demotions
-			 WHERE hot_deleted_at IS NULL AND demoted_at < $1 ORDER BY demoted_at ASC LIMIT $2`,
-			cutoff, r.MaxObjectsPerTenant)
+		rows, err := r.db.QueryContext(ctx, listing, cutoff, r.scopeTenant, r.MaxObjectsPerTenant)
 		if err != nil {
-			return reclaimed, append(errs, fmt.Sprintf("reclaim: list: %v", err))
+			if ctx.Err() != nil {
+				break
+			}
+			return reclaimed, append(errs, fmt.Sprintf("%s: list: %v", what, err))
 		}
 		var todo []pending
 		for rows.Next() {
 			var p pending
-			if err := rows.Scan(&p.tenant, &p.bucket, &p.key, &p.etag, &p.cold); err != nil {
+			if err := rows.Scan(&p.tenant, &p.bucket, &p.key); err != nil {
 				_ = rows.Close()
-				return reclaimed, append(errs, fmt.Sprintf("reclaim: scan: %v", err))
+				return reclaimed, append(errs, fmt.Sprintf("%s: scan: %v", what, err))
 			}
 			if id := p.tenant + "/" + p.bucket + "/" + p.key; !seen[id] {
 				seen[id] = true
 				todo = append(todo, p)
 			}
 		}
-		if err := rows.Err(); err != nil {
-			return 0, nil
-		}
+		iterErr := rows.Err()
 		_ = rows.Close()
+		if iterErr != nil {
+			if ctx.Err() != nil {
+				break
+			}
+			return reclaimed, append(errs, fmt.Sprintf("%s: iterate: %v", what, iterErr))
+		}
 		if len(todo) == 0 {
 			break
 		}
 		fetched := len(todo)
 		for _, p := range todo {
-			outcome, err := r.reclaimOne(ctx, hot, p.tenant, p.bucket, p.key, p.etag, p.cold)
+			if ctx.Err() != nil {
+				return reclaimed, errs
+			}
+			outcome, err := settler.settle(ctx, lostWriteReclaim, p.tenant, p.bucket, p.key, true)
 			if err != nil {
-				errs = append(errs, fmt.Sprintf("reclaim %s %s/%s: %v", p.tenant, p.bucket, p.key, err))
+				if ctx.Err() != nil {
+					// Cut short by the stop itself: the row is untouched or
+					// rolled back, and still owed for the next run.
+					return reclaimed, errs
+				}
+				errs = append(errs, fmt.Sprintf("%s %s %s/%s: %v", what, p.tenant, p.bucket, p.key, err))
 				continue
 			}
-			if outcome == "deleted" || outcome == "object_gone" {
+			if outcome == ledgerDeleted || outcome == ledgerObjectGone {
 				reclaimed++
 			}
 		}
@@ -501,53 +572,8 @@ func (r *SmartDemotionRunner) reclaimHotCopies(ctx context.Context, hot engine.D
 	return reclaimed, errs
 }
 
-func (r *SmartDemotionRunner) reclaimOne(ctx context.Context, hot engine.Driver, tenantID, bucket, key, etag, coldBackend string) (string, error) {
-	tctx := common.WithTenantID(ctx, tenantID)
-	container := tenantID + "_" + bucket
-
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return "", fmt.Errorf("begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	var curBackend, curEtag string
-	err = tx.QueryRowContext(ctx,
-		`SELECT COALESCE(backend_name,''), COALESCE(etag,'') FROM object_head_cache
-		 WHERE tenant_id=$1 AND bucket=$2 AND object_key=$3 FOR UPDATE`,
-		tenantID, bucket, key).Scan(&curBackend, &curEtag)
-	outcome := ""
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		// Object deleted since demotion: the hot copy is an orphan.
-		outcome = "object_gone"
-	case err != nil:
-		return "", fmt.Errorf("lock row: %w", err)
-	case curBackend == coldBackend && curEtag == etag:
-		outcome = "deleted"
-	default:
-		outcome = "kept_changed"
-	}
-
-	if outcome == "deleted" || outcome == "object_gone" {
-		if r.beforeHotDelete != nil {
-			r.beforeHotDelete(bucket, key)
-		}
-		if delErr := hot.Delete(tctx, container, key); delErr != nil {
-			// Leave the ledger open; retry next run. An orphan on the hot
-			// backend costs money, never data.
-			_, _ = tx.ExecContext(ctx, `UPDATE smart_demotions SET hot_outcome='delete_failed' WHERE tenant_id=$1 AND bucket=$2 AND object_key=$3`, tenantID, bucket, key)
-			_ = tx.Commit()
-			return "", fmt.Errorf("delete hot: %w", delErr)
-		}
-	}
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE smart_demotions SET hot_deleted_at=$4, hot_outcome=$5 WHERE tenant_id=$1 AND bucket=$2 AND object_key=$3`,
-		tenantID, bucket, key, r.now(), outcome); err != nil {
-		return "", fmt.Errorf("close ledger: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return "", fmt.Errorf("commit: %w", err)
-	}
-	return outcome, nil
+// settler is the ledger settler with this runner's clock and test hooks.
+func (r *SmartDemotionRunner) settler() *ledgerSettler {
+	return &ledgerSettler{db: r.db, eng: r.eng, logger: r.logger, now: r.now,
+		beforeDelete: r.beforeHotDelete, afterDelete: r.afterStaleDelete}
 }

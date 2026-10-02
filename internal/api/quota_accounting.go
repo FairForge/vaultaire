@@ -70,6 +70,7 @@ type displacedRow struct {
 	Size    int64
 	Floor   string
 	Backend string // backend_name of the displaced row ("" when new/unknown) — the hint for its stale blob (R8-20)
+	Chunked bool   // the displaced row was a chunked object: no whole blob lives at its key
 }
 
 // settlePutQuota reconciles a successful write's up-front reservation
@@ -212,6 +213,7 @@ func atomicHeadUpsertReleasing(ctx context.Context, db *sql.DB, gci chunkManifes
 		return displacedRow{}, fmt.Errorf("lock head-cache row: %w", err)
 	}
 
+	displaced.Chunked = displacedChunked
 	if displacedChunked && gci != nil {
 		if relErr := gci.DeleteObjectChunksTx(ctx, tx, tenantID, bucket, key); relErr != nil {
 			return displacedRow{}, fmt.Errorf("release displaced chunk manifest: %w", relErr)

@@ -199,6 +199,9 @@ func (s *Server) handleDeleteObjects(w http.ResponseWriter, r *http.Request, req
 				s.releaseQuota(ctx, t.ID, deleted.Floor, deleted.Size)
 				cancel()
 			}
+			// The second copy of a Smart-demoted object and its ledger row,
+			// exactly as single DELETE (WP-R13-2).
+			s.smartPromoter.OnDelete(r.Context(), t.ID, bucket, key)
 		}
 
 		if !delReq.Quiet {

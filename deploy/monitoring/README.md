@@ -116,7 +116,11 @@ a known 403 and are skipped), and `permafrost` (authenticated Graph call on
 one rotating fleet account; `PermafrostProbeFailing` is a 15-minute warning,
 and `BackendProbeFailing` excludes it).
 
-`vaultaire-jobs.yml` — the background jobs (WP-R13-3). Four rules:
+`vaultaire-jobs.yml` — the background jobs (WP-R13-3). Five rules — the fifth,
+`StaleCopyLostWrite` (critical, WP-R13-2), fires when the delete of a stale
+copy of an object removed bytes a write of the same key had just stored (the
+log line names tenant, bucket and key; the customer must upload again). The
+other four:
 `JobStale` (a daily job — `inventory`, `dedup_gc`, `retention`,
 `account_deletion`, `smart_demotion` — with no success in 36 h, `for: 30m`),
 `PeriodicJobStale` (an hourly job, or the 5-minute access-log delivery, with

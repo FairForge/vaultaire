@@ -331,6 +331,11 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 		cancel()
 	}
 
+	// The destination's previous blob on another backend (a demoted object
+	// copied over, R13-10) — exactly as plain PUT.
+	dropDisplacedBlob(r.Context(), s.db, s.engine, s.logger, lostWriteOverwrite,
+		t.ID, destBucket, t.NamespaceContainer(destBucket), destKey, displaced, backendName)
+
 	versionID := recordObjectVersion(r.Context(), s.db, t.ID, destBucket, destKey, counter.n, etag, attrs.ContentType, backendName)
 	applyObjectLockOnPut(r.Context(), s.db, t.ID, destBucket, destKey, r)
 

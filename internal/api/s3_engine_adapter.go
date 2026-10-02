@@ -1093,6 +1093,14 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		}
 	}
 
+	// The row this PUT replaced may have routed to ANOTHER backend — a
+	// Smart-demoted object rewritten hot, a class or visibility change, a
+	// failover. Its blob there has nothing pointing at it any more: remove
+	// it (R13-10 — it stayed on tape forever; the chunked path already did
+	// this). Same backend = overwritten in place, nothing to do.
+	dropDisplacedBlob(r.Context(), a.db, a.engine, a.logger, lostWriteOverwrite,
+		t.ID, bucket, container, artifact, a.displaced, backendName)
+
 	versionID := recordObjectVersion(r.Context(), a.db, t.ID, bucket, artifact, metadataSize, etag, contentType, backendName)
 
 	applyObjectLockOnPut(r.Context(), a.db, t.ID, bucket, artifact, r)
@@ -2104,6 +2112,10 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 			t.ID, bucket, object); lockDelErr != nil {
 			a.logger.Error("object lock row delete failed", zap.Error(lockDelErr))
 		}
+		// A Smart-demoted object has a second copy (the hot one, until it is
+		// reclaimed) that the delete above did not reach: remove it now and
+		// settle the ledger, so no later job owes this key a delete (WP-R13-2).
+		a.smartPromoter.OnDelete(r.Context(), t.ID, bucket, object)
 	}
 
 	w.WriteHeader(http.StatusNoContent)

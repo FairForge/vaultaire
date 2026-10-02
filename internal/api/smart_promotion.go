@@ -59,6 +59,9 @@ type SmartPromoter struct {
 	inflight sync.Map // "tenant/bucket/key" → struct{}
 	sync     bool     // tests: run copy-backs inline
 	now      func() time.Time
+	// scopeTenant confines PromotePending to one tenant (tests: the ledger
+	// is shared with every other test on the database).
+	scopeTenant string
 
 	beforeFlip func(bucket, key string) // test hook: after the hot copy, before the routing flip
 }
@@ -89,12 +92,18 @@ type ledgerRow struct {
 	restoreAt        time.Time // when the last restore was submitted (zero when never)
 }
 
+// lookup reads the ledger row that describes the object as it is demoted
+// NOW. A row settled as kept_changed / object_gone is history (the object
+// was replaced or deleted since): it is no row to the read path, whatever
+// its etag — a later object with the same content must not be "promoted" on
+// the strength of it.
 func (p *SmartPromoter) lookup(ctx context.Context, tenantID, bucket, key string) (ledgerRow, bool, error) {
 	var row ledgerRow
 	var hotDeleted, promoteReq, restoreReq sql.NullTime
 	err := p.db.QueryRowContext(ctx,
 		`SELECT etag, size_bytes, hot_deleted_at, promote_requested_at, restore_requested_at
-		 FROM smart_demotions WHERE tenant_id=$1 AND bucket=$2 AND object_key=$3`,
+		 FROM smart_demotions WHERE tenant_id=$1 AND bucket=$2 AND object_key=$3
+		   AND hot_outcome NOT IN ('kept_changed', 'object_gone')`,
 		tenantID, bucket, key).Scan(&row.etag, &row.size, &hotDeleted, &promoteReq, &restoreReq)
 	if errors.Is(err, sql.ErrNoRows) {
 		return row, false, nil
@@ -387,6 +396,25 @@ func (p *SmartPromoter) promote(ctx context.Context, tenantID, bucket, key, etag
 	tctx := common.WithTenantID(ctx, tenantID)
 	container := tenantID + "_" + bucket
 
+	// The ledger row is a claim about the past; the head row is the object.
+	// A copy-back may only start for an object that is still the demoted one
+	// (routes cold, same etag). Without this check a pending promotion of an
+	// object that had since been OVERWRITTEN copied the old cold bytes onto
+	// the hot backend at the key — over the customer's new object — and the
+	// guarded flip below then reported "changed" and left them there
+	// (WP-R13-2: the row said the new etag, the blob held the old bytes).
+	// A stale row is settled instead: its cold copy goes, nothing is written.
+	rt, err := routeOf(ctx, p.db, tenantID, bucket, key, false)
+	if err != nil {
+		return "", err
+	}
+	if !rt.headRow || rt.backend != p.ColdBackend || rt.etag != etag {
+		if _, err := p.settler().settle(ctx, lostWriteReclaim, tenantID, bucket, key, false); err != nil {
+			return "", fmt.Errorf("settle stale ledger row: %w", err)
+		}
+		return "changed", nil
+	}
+
 	rc, err := cold.Get(tctx, container, key)
 	if err != nil {
 		if errors.Is(err, engine.ErrArchived) {
@@ -468,8 +496,9 @@ func (p *SmartPromoter) PromotePending(ctx context.Context) (int, []string) {
 	}
 	rows, err := p.db.QueryContext(ctx,
 		`SELECT tenant_id, bucket, object_key, etag, size_bytes FROM smart_demotions
-		 WHERE promote_requested_at IS NOT NULL AND hot_deleted_at IS NOT NULL
-		 ORDER BY promote_requested_at ASC LIMIT 1000`)
+		 WHERE promote_requested_at IS NOT NULL AND hot_deleted_at IS NOT NULL AND hot_outcome = 'deleted'
+		   AND ($1 = '' OR tenant_id = $1)
+		 ORDER BY promote_requested_at ASC LIMIT 1000`, p.scopeTenant)
 	if err != nil {
 		return 0, []string{fmt.Sprintf("promote pending: list: %v", err)}
 	}
@@ -498,6 +527,9 @@ func (p *SmartPromoter) PromotePending(ctx context.Context) (int, []string) {
 			break
 		}
 		outcome, err := p.promote(ctx, it.tenant, it.bucket, it.key, it.etag, it.size)
+		if err != nil && ctx.Err() != nil {
+			break // cut by the stop: the row is still pending for the next run
+		}
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("promote %s %s/%s: %v", it.tenant, it.bucket, it.key, err))
 			continue

@@ -93,6 +93,8 @@ func setupDemotionFixture(t *testing.T, quotaBytes int64, tier string) *demotion
 	r := NewSmartDemotionRunner(db, eng, stubFlags{on: map[string]bool{flagSmartDemotion + "/" + tenantID: true}}, logger)
 	require.NotNil(t, r)
 	r.now = func() time.Time { return now }
+	// The ledger passes too: other fixtures' rows are not this run's to settle.
+	r.scopeTenant = tenantID
 	return &demotionFixture{t: t, db: db, eng: eng, hotDir: hotDir, coldDir: coldDir, tenantID: tenantID, runner: r, now: now}
 }
 
