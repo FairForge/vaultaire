@@ -17,7 +17,7 @@ import (
 func deleteObjects(t *testing.T, server *Server, tnt *tenant.Tenant, bucket string, body string) (int, string) {
 	t.Helper()
 	req := httptest.NewRequest("POST", "/"+bucket+"?delete", strings.NewReader(body))
-	ctx := tenant.WithTenant(req.Context(), tnt)
+	ctx := s3Ctx(req.Context(), tnt)
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 	server.handleS3Request(w, req)

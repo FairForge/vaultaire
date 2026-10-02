@@ -24,13 +24,13 @@
     <ul>
         <li><strong>Data minimization:</strong> We store only the objects you upload and the minimal account metadata required to operate the service (email, hashed password, billing information). We do not collect analytics, behavioral data, or advertising profiles.</li>
         <li><strong>Purpose limitation:</strong> Your data is processed solely for the purpose of providing object storage and delivery. We do not access, analyze, or profile the content of stored objects.</li>
-        <li><strong>Storage limitation:</strong> Account data is retained only for the duration of your account. Upon account deletion, a 30-day grace period allows data recovery, after which the account is closed and our deletion job erases your objects, keys and account records on the scheduled date; backups age out within 7 days.</li>
+        <li><strong>Storage limitation:</strong> Account data is retained only for the duration of your account. Upon account deletion, a 30-day grace period allows data recovery, after which the account is closed and our deletion job erases your objects, keys and account records on the scheduled date; backups age out within 7 days. Large objects are stored in deduplicated blocks: the blocks of your objects are released on that date and deleted by the storage collector once its seven-day safety period has passed, except a block that is byte-for-byte identical to one another customer stores, which remains as that customer's data.</li>
     </ul>
 
     <h2 id="erasure">Article 17 — Right to Erasure</h2>
     <p>Data subjects have the right to request deletion of their personal data. stored.ge supports this through:</p>
     <ul>
-        <li><strong>Account deletion:</strong> Available via the dashboard settings page or the management API (<code>DELETE /account</code>). Initiates a 30-day grace period, after which the account is closed, the subscription is cancelled and our deletion job erases your objects, keys and account records on the scheduled date.</li>
+        <li><strong>Account deletion:</strong> Available via the dashboard settings page or the management API (<code>DELETE /account</code>). Initiates a 30-day grace period, after which the account is closed, the subscription is cancelled and our deletion job erases your objects, keys and account records on the scheduled date. Large objects are stored in deduplicated blocks: the blocks of your objects are released on that date and deleted by the storage collector once its seven-day safety period has passed, except a block that is byte-for-byte identical to one another customer stores, which remains as that customer's data.</li>
         <li><strong>Object deletion:</strong> Individual objects can be deleted at any time via the S3-compatible API (<code>DELETE</code> operation) or dashboard.</li>
         <li><strong>Cancellation:</strong> Account deletion can be cancelled during the 30-day grace period via the dashboard settings page.</li>
     </ul>

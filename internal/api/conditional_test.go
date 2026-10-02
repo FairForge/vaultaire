@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -271,7 +270,7 @@ func TestHandleGet_IfNoneMatch_304(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/test-bucket/cond.txt", nil)
 	req.Header.Set("If-None-Match", `"cond999"`)
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -303,7 +302,7 @@ func TestHandleGet_IfNoneMatch_NoMatch_Returns200(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/test-bucket/fresh.txt", nil)
 	req.Header.Set("If-None-Match", `"old-etag"`)
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -331,7 +330,7 @@ func TestHandleGet_ETagAndLastModifiedOnResponse(t *testing.T) {
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("GET", "/test-bucket/headers.txt", nil)
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -363,7 +362,7 @@ func TestHandlePut_IfMatch_412(t *testing.T) {
 	req := httptest.NewRequest("PUT", "/test-bucket/locked.txt", bytes.NewReader(newContent))
 	req.Header.Set("If-Match", `"wrong-etag"`)
 	req.Header.Set("Content-Type", "text/plain")
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -392,7 +391,7 @@ func TestHandlePut_IfMatch_MatchingETag_Succeeds(t *testing.T) {
 	req := httptest.NewRequest("PUT", "/test-bucket/update.txt", bytes.NewReader(newContent))
 	req.Header.Set("If-Match", `"match111"`)
 	req.Header.Set("Content-Type", "text/plain")
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -498,7 +497,7 @@ func TestHeadObject_LastModifiedFromCache(t *testing.T) {
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("HEAD", "/test-bucket/dated.txt", nil)
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	s := &Server{
@@ -538,7 +537,7 @@ func TestHandleGet_S3CacheControlHeader(t *testing.T) {
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("GET", "/test-bucket/cc.txt", nil)
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()

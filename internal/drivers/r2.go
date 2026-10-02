@@ -13,7 +13,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"go.uber.org/zap"
 
-	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/engine"
 )
 
@@ -129,21 +128,25 @@ func NewR2Driver(accountID, accessKey, secretKey, jurisdiction, bucket string, l
 	}, nil
 }
 
-func (d *R2Driver) getTenantID(ctx context.Context) string {
-	if tid := common.GetTenantID(ctx); tid != "" {
-		return tid
-	}
-	return "default"
-}
-
 func (d *R2Driver) buildKey(tenantID, container, artifact string) string {
 	return fmt.Sprintf("t-%s/%s/%s", tenantID, container, artifact)
 }
 
+// key is the R2 key of a call; a context that names no tenant is refused
+// (tenant_ctx.go) — it used to resolve to "default".
+func (d *R2Driver) key(ctx context.Context, op, container, artifact string) (string, error) {
+	tenantID, err := requireTenant(ctx, d.Name(), op, "", d.logger)
+	if err != nil {
+		return "", err
+	}
+	return d.buildKey(tenantID, container, artifact), nil
+}
+
 // ObjectKey is the R2 key an artifact is stored under — what a presigned /
-// custom-domain serve path needs to address the object directly.
+// custom-domain serve path needs to address the object directly, and what
+// engine.KeyAddresser reports.
 func (d *R2Driver) ObjectKey(ctx context.Context, container, artifact string) string {
-	return d.buildKey(d.getTenantID(ctx), container, artifact)
+	return d.buildKey(contextTenant(ctx), container, artifact)
 }
 
 // Bucket returns the R2 bucket public objects live in.
@@ -155,7 +158,10 @@ func (d *R2Driver) Name() string { return "r2" }
 // passes ContentLength) go straight through; larger bodies use the shared
 // parallel multipart uploader (16 MiB parts).
 func (d *R2Driver) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...engine.PutOption) error {
-	key := d.ObjectKey(ctx, container, artifact)
+	key, kErr := d.key(ctx, "Put", container, artifact)
+	if kErr != nil {
+		return kErr
+	}
 	options := engine.ApplyPutOptions(opts...)
 	if err := s3ParallelUpload(ctx, d.client, d.bucket, key, options.ContentType, data, options.ContentLength); err != nil {
 		return fmt.Errorf("r2 put %s: %w", key, err)
@@ -164,7 +170,10 @@ func (d *R2Driver) Put(ctx context.Context, container, artifact string, data io.
 }
 
 func (d *R2Driver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
-	key := d.ObjectKey(ctx, container, artifact)
+	key, kErr := d.key(ctx, "Get", container, artifact)
+	if kErr != nil {
+		return nil, kErr
+	}
 	out, err := d.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(d.bucket),
 		Key:    aws.String(key),
@@ -178,7 +187,10 @@ func (d *R2Driver) Get(ctx context.Context, container, artifact string) (io.Read
 // GetRange implements engine.RangeGetter (CDN range requests pass straight
 // through instead of downloading + discarding).
 func (d *R2Driver) GetRange(ctx context.Context, container, artifact string, offset, length int64) (io.ReadCloser, error) {
-	key := d.ObjectKey(ctx, container, artifact)
+	key, kErr := d.key(ctx, "GetRange", container, artifact)
+	if kErr != nil {
+		return nil, kErr
+	}
 	in := &s3.GetObjectInput{
 		Bucket: aws.String(d.bucket),
 		Key:    aws.String(key),
@@ -198,7 +210,10 @@ func (d *R2Driver) GetRange(ctx context.Context, container, artifact string, off
 }
 
 func (d *R2Driver) Delete(ctx context.Context, container, artifact string) error {
-	key := d.ObjectKey(ctx, container, artifact)
+	key, kErr := d.key(ctx, "Delete", container, artifact)
+	if kErr != nil {
+		return kErr
+	}
 	if _, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(d.bucket),
 		Key:    aws.String(key),
@@ -209,7 +224,10 @@ func (d *R2Driver) Delete(ctx context.Context, container, artifact string) error
 }
 
 func (d *R2Driver) List(ctx context.Context, container, prefix string) ([]string, error) {
-	tenantID := d.getTenantID(ctx)
+	tenantID, tErr := requireTenant(ctx, d.Name(), "List", "", d.logger)
+	if tErr != nil {
+		return nil, tErr
+	}
 	fullPrefix := d.buildKey(tenantID, container, prefix)
 	basePrefix := d.buildKey(tenantID, container, "")
 
@@ -231,7 +249,10 @@ func (d *R2Driver) List(ctx context.Context, container, prefix string) ([]string
 }
 
 func (d *R2Driver) Exists(ctx context.Context, container, artifact string) (bool, error) {
-	key := d.ObjectKey(ctx, container, artifact)
+	key, kErr := d.key(ctx, "Exists", container, artifact)
+	if kErr != nil {
+		return false, kErr
+	}
 	_, err := d.client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(d.bucket),
 		Key:    aws.String(key),

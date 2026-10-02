@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/FairForge/vaultaire/internal/crypto"
-	"github.com/FairForge/vaultaire/internal/tenant"
 )
 
 // R2-02: a Range GET on an encrypted object must slice the PLAINTEXT. The
@@ -35,7 +34,7 @@ func rangeGet(t *testing.T, f *adapterTestFixture, key, rng string, hdr func(*ht
 	if hdr != nil {
 		hdr(req)
 	}
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandleGet(w, req, "test-bucket", key)
 	return w
@@ -51,7 +50,7 @@ func TestHandleGet_Range_SSES3_ServesPlaintextSlice(t *testing.T) {
 	body := ssePlaintext()
 	req := httptest.NewRequest("PUT", "/test-bucket/enc.bin", bytes.NewReader(body))
 	req.Header.Set("x-amz-server-side-encryption", "AES256")
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, "test-bucket", "enc.bin")
 	require.Equal(t, http.StatusOK, w.Code)
@@ -82,7 +81,7 @@ func TestHandleGet_Range_SSEC_ServesPlaintextSlice(t *testing.T) {
 	body := ssePlaintext()
 	req := httptest.NewRequest("PUT", "/test-bucket/ssec.bin", bytes.NewReader(body))
 	ssec(req)
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, "test-bucket", "ssec.bin")
 	require.Equal(t, http.StatusOK, w.Code)

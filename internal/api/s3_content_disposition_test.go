@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -25,13 +24,13 @@ func TestPutGet_ContentDisposition(t *testing.T) {
 	putReq.ContentLength = int64(len(content))
 	putReq.Header.Set("Content-Type", "application/octet-stream")
 	putReq.Header.Set("Content-Disposition", disposition)
-	putReq = putReq.WithContext(tenant.WithTenant(putReq.Context(), f.tenant))
+	putReq = putReq.WithContext(s3Ctx(putReq.Context(), f.tenant))
 	pw := httptest.NewRecorder()
 	f.adapter.HandlePut(pw, putReq, "test-bucket", "report.bin")
 	require.Equal(t, http.StatusOK, pw.Code)
 
 	getReq := httptest.NewRequest("GET", "/test-bucket/report.bin", nil)
-	getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+	getReq = getReq.WithContext(s3Ctx(getReq.Context(), f.tenant))
 	gw := httptest.NewRecorder()
 	f.adapter.HandleGet(gw, getReq, "test-bucket", "report.bin")
 
@@ -54,7 +53,7 @@ func TestHeadObject_ContentDisposition(t *testing.T) {
 
 	srv := &Server{db: f.db, logger: zap.NewNop()}
 	req := httptest.NewRequest("HEAD", "/test-bucket/head.txt", nil)
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	srv.handleHeadObject(w, req, &S3Request{Bucket: "test-bucket", Object: "head.txt"})
 
@@ -83,7 +82,7 @@ func TestGet_ResponseContentDispositionOverride(t *testing.T) {
 	override := `attachment; filename="override.bin"`
 	getReq := httptest.NewRequest("GET", "/test-bucket/ovr.bin", nil)
 	getReq.URL.RawQuery = "response-content-disposition=" + url.QueryEscape(override)
-	getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+	getReq = getReq.WithContext(s3Ctx(getReq.Context(), f.tenant))
 	gw := httptest.NewRecorder()
 	f.adapter.HandleGet(gw, getReq, "test-bucket", "ovr.bin")
 
@@ -111,7 +110,7 @@ func TestGet_ContentDispositionHeaderInjectionStripped(t *testing.T) {
 	// Build the request manually so the raw CRLF survives into the query value.
 	getReq := httptest.NewRequest("GET", "/test-bucket/inj.bin", nil)
 	getReq.URL.RawQuery = "response-content-disposition=attachment\r\nX-Injected: evil"
-	getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+	getReq = getReq.WithContext(s3Ctx(getReq.Context(), f.tenant))
 	gw := httptest.NewRecorder()
 	f.adapter.HandleGet(gw, getReq, "test-bucket", "inj.bin")
 

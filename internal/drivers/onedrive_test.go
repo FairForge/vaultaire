@@ -70,14 +70,17 @@ func TestOneDriveDriver_PickTenant_SkipsThrottled(t *testing.T) {
 
 func TestOneDriveDriver_BuildPath(t *testing.T) {
 	d := &OneDriveDriver{}
-	path := d.buildPath(testCtxWithTenant("tenant-abc"), "my-bucket", "path/to/obj.bin")
+	path, err := d.buildPath(testCtxWithTenant("tenant-abc"), "Get", "my-bucket", "path/to/obj.bin")
+	require.NoError(t, err)
 	assert.Equal(t, "t-tenant-abc/my-bucket/path/to/obj.bin", path)
 }
 
-func TestOneDriveDriver_BuildPath_DefaultTenant(t *testing.T) {
+// A context that names no tenant used to resolve to "t-default/…"; it is
+// refused (WP-R8-7, tenant_ctx.go).
+func TestOneDriveDriver_BuildPath_NoTenantIsRefused(t *testing.T) {
 	d := &OneDriveDriver{}
-	path := d.buildPath(testCtxNoTenant(), "bucket", "key")
-	assert.Equal(t, "t-default/bucket/key", path)
+	_, err := d.buildPath(testCtxNoTenant(), "Get", "bucket", "key")
+	require.ErrorIs(t, err, ErrNoTenant)
 }
 
 func TestOdDecorrelatedJitter(t *testing.T) {

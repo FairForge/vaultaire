@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/FairForge/vaultaire/internal/drivers"
-	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -65,7 +64,7 @@ func TestHandlePut_ArchiveTierSkipsChunking(t *testing.T) {
 	content := generateTestData(8 * 1024) // above the 1 KB fixture chunk threshold
 	req := httptest.NewRequest("PUT", "/test-bucket/master.mov", bytes.NewReader(content))
 	req.ContentLength = int64(len(content))
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, "test-bucket", "master.mov")
 	require.Equal(t, http.StatusOK, w.Code)
@@ -78,7 +77,7 @@ func TestHandlePut_ArchiveTierSkipsChunking(t *testing.T) {
 
 	// And the object must round-trip.
 	getReq := httptest.NewRequest("GET", "/test-bucket/master.mov", nil)
-	getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+	getReq = getReq.WithContext(s3Ctx(getReq.Context(), f.tenant))
 	gw := httptest.NewRecorder()
 	f.adapter.HandleGet(gw, getReq, "test-bucket", "master.mov")
 	require.Equal(t, http.StatusOK, gw.Code)
@@ -104,7 +103,7 @@ func TestHandlePut_GlacierHeaderSkipsChunking(t *testing.T) {
 			req := httptest.NewRequest("PUT", "/test-bucket/archive.bin", bytes.NewReader(content))
 			req.ContentLength = int64(len(content))
 			req.Header.Set("x-amz-storage-class", class)
-			req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+			req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 			w := httptest.NewRecorder()
 			f.adapter.HandlePut(w, req, "test-bucket", "archive.bin")
 			require.Equal(t, http.StatusOK, w.Code)

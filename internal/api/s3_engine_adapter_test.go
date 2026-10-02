@@ -34,6 +34,9 @@ type adapterTestFixture struct {
 	tenantID string
 	tenant   *tenant.Tenant
 	tempDir  string
+	// fixed is the fixed-bucket primary of the chunk fixture
+	// (setupChunkingFixture); nil in the plain adapter fixture.
+	fixed *fixedBucketDriver
 }
 
 func setupAdapterFixture(t *testing.T) *adapterTestFixture {
@@ -104,7 +107,7 @@ func TestHandleGet_ContentTypeFromCache(t *testing.T) {
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("GET", "/test-bucket/video.mp4", nil)
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -126,7 +129,7 @@ func TestHandleGet_ContentTypeFallsBackToExtension(t *testing.T) {
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("GET", "/test-bucket/data.json", nil)
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -154,7 +157,7 @@ func TestHandleGet_RangeRequest(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/test-bucket/alphabet.txt", nil)
 	req.Header.Set("Range", "bytes=0-4")
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -186,7 +189,7 @@ func TestHandleGet_RangeRequest_Unsatisfiable(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/test-bucket/small.txt", nil)
 	req.Header.Set("Range", "bytes=100-200")
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -205,7 +208,7 @@ func TestHandleGet_RangeIgnoredWithoutCache(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/test-bucket/nocache.txt", nil)
 	req.Header.Set("Range", "bytes=0-4")
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -234,7 +237,7 @@ func TestHandleGet_ContentLengthSetFromCache(t *testing.T) {
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("GET", "/test-bucket/sized.txt", nil)
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -269,7 +272,7 @@ func TestPutObject_SSEC_Encrypts(t *testing.T) {
 	req.ContentLength = int64(len(content))
 	req.Header.Set("Content-Type", "text/plain")
 	setSSECHeaders(t, req, key)
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -305,14 +308,14 @@ func TestGetObject_SSEC_RequiresKey(t *testing.T) {
 	putReq := httptest.NewRequest("PUT", "/test-bucket/ssec-need-key.txt", bytes.NewReader(content))
 	putReq.ContentLength = int64(len(content))
 	setSSECHeaders(t, putReq, key)
-	ctx := tenant.WithTenant(putReq.Context(), f.tenant)
+	ctx := s3Ctx(putReq.Context(), f.tenant)
 	putReq = putReq.WithContext(ctx)
 	pw := httptest.NewRecorder()
 	f.adapter.HandlePut(pw, putReq, "test-bucket", "ssec-need-key.txt")
 	require.Equal(t, http.StatusOK, pw.Code)
 
 	getReq := httptest.NewRequest("GET", "/test-bucket/ssec-need-key.txt", nil)
-	ctx = tenant.WithTenant(getReq.Context(), f.tenant)
+	ctx = s3Ctx(getReq.Context(), f.tenant)
 	getReq = getReq.WithContext(ctx)
 	gw := httptest.NewRecorder()
 	f.adapter.HandleGet(gw, getReq, "test-bucket", "ssec-need-key.txt")
@@ -330,7 +333,7 @@ func TestGetObject_SSEC_WrongKey(t *testing.T) {
 	putReq := httptest.NewRequest("PUT", "/test-bucket/ssec-wrong.txt", bytes.NewReader(content))
 	putReq.ContentLength = int64(len(content))
 	setSSECHeaders(t, putReq, key)
-	ctx := tenant.WithTenant(putReq.Context(), f.tenant)
+	ctx := s3Ctx(putReq.Context(), f.tenant)
 	putReq = putReq.WithContext(ctx)
 	pw := httptest.NewRecorder()
 	f.adapter.HandlePut(pw, putReq, "test-bucket", "ssec-wrong.txt")
@@ -338,7 +341,7 @@ func TestGetObject_SSEC_WrongKey(t *testing.T) {
 
 	getReq := httptest.NewRequest("GET", "/test-bucket/ssec-wrong.txt", nil)
 	setSSECHeaders(t, getReq, wrongKey)
-	ctx = tenant.WithTenant(getReq.Context(), f.tenant)
+	ctx = s3Ctx(getReq.Context(), f.tenant)
 	getReq = getReq.WithContext(ctx)
 	gw := httptest.NewRecorder()
 	f.adapter.HandleGet(gw, getReq, "test-bucket", "ssec-wrong.txt")
@@ -356,7 +359,7 @@ func TestGetObject_SSEC_CorrectKey(t *testing.T) {
 	putReq.ContentLength = int64(len(content))
 	putReq.Header.Set("Content-Type", "text/plain")
 	setSSECHeaders(t, putReq, key)
-	ctx := tenant.WithTenant(putReq.Context(), f.tenant)
+	ctx := s3Ctx(putReq.Context(), f.tenant)
 	putReq = putReq.WithContext(ctx)
 	pw := httptest.NewRecorder()
 	f.adapter.HandlePut(pw, putReq, "test-bucket", "ssec-roundtrip.txt")
@@ -364,7 +367,7 @@ func TestGetObject_SSEC_CorrectKey(t *testing.T) {
 
 	getReq := httptest.NewRequest("GET", "/test-bucket/ssec-roundtrip.txt", nil)
 	setSSECHeaders(t, getReq, key)
-	ctx = tenant.WithTenant(getReq.Context(), f.tenant)
+	ctx = s3Ctx(getReq.Context(), f.tenant)
 	getReq = getReq.WithContext(ctx)
 	gw := httptest.NewRecorder()
 	f.adapter.HandleGet(gw, getReq, "test-bucket", "ssec-roundtrip.txt")
@@ -389,7 +392,7 @@ func TestHeadObject_SSEC_RequiresKey(t *testing.T) {
 
 	srv := &Server{db: f.db, logger: zap.NewNop()}
 	req := httptest.NewRequest("HEAD", "/test-bucket/ssec-head.txt", nil)
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	s3Req := &S3Request{Bucket: "test-bucket", Object: "ssec-head.txt"}
 
@@ -415,7 +418,7 @@ func TestHeadObject_SSEC_WithKey(t *testing.T) {
 	srv := &Server{db: f.db, logger: zap.NewNop()}
 	req := httptest.NewRequest("HEAD", "/test-bucket/ssec-head-ok.txt", nil)
 	setSSECHeaders(t, req, key)
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	s3Req := &S3Request{Bucket: "test-bucket", Object: "ssec-head-ok.txt"}
 
@@ -436,7 +439,7 @@ func TestPutObject_SSEC_And_SSES3_MutuallyExclusive(t *testing.T) {
 	req.ContentLength = int64(len(content))
 	setSSECHeaders(t, req, key)
 	req.Header.Set("x-amz-server-side-encryption", "AES256")
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()

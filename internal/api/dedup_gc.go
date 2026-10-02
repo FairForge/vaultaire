@@ -33,9 +33,14 @@ type DedupGCResult struct {
 	Deleted        int   `json:"deleted"`
 	BytesReclaimed int64 `json:"bytes_reclaimed"`
 	// Failed counts sweep candidates that could not be swept (lock or row
-	// delete error, or a blob the backend would not delete — leaked, never
-	// corrupt). They stay candidates and the next run takes them.
+	// delete error, a backend that could not be asked, or a blob the backend
+	// would not delete — leaked, never corrupt). They stay candidates and
+	// the next run takes them.
 	Failed int `json:"failed,omitempty"`
+	// LegacyPending counts candidates whose blob is not at the one address
+	// but still at a legacy one (written before WP-R8-7): their rows are
+	// kept — the chunk move works from them — and they stay candidates.
+	LegacyPending int `json:"legacy_pending,omitempty"`
 }
 
 // NewDedupGCRunner builds the GC runner. gci must be the SAME instance the PUT
@@ -79,6 +84,12 @@ func (g *DedupGCRunner) spec() jobSpec {
 			if res.Failed > 0 {
 				rep.Note = fmt.Sprintf("%d chunk(s) not swept (see the log); they stay candidates", res.Failed)
 			}
+			if res.LegacyPending > 0 {
+				if rep.Note != "" {
+					rep.Note += "; "
+				}
+				rep.Note += fmt.Sprintf("%d chunk(s) are still at a legacy address: run the chunk move (POST /api/v1/admin/chunk-move), they stay candidates", res.LegacyPending)
+			}
 			return rep, err
 		},
 	}
@@ -94,9 +105,10 @@ func (g *DedupGCRunner) RunOnce(ctx context.Context) (DedupGCResult, error) {
 	}
 	result.Reconciled = reconciled
 
-	deleted, failed, reclaimed, err := g.sweep(ctx)
+	deleted, failed, pending, reclaimed, err := g.sweep(ctx)
 	result.Deleted = deleted
 	result.Failed = failed
+	result.LegacyPending = pending
 	result.BytesReclaimed = reclaimed
 	if err != nil {
 		return result, fmt.Errorf("sweep: %w", err)
@@ -140,7 +152,7 @@ func (g *DedupGCRunner) reconcile(ctx context.Context) (int, error) {
 
 // sweep deletes chunks that have been ref_count=0 and marked_for_deletion past
 // the grace period. Uses conditional DELETE to avoid racing with concurrent re-refs.
-func (g *DedupGCRunner) sweep(ctx context.Context) (int, int, int64, error) {
+func (g *DedupGCRunner) sweep(ctx context.Context) (deleted, failed, pending int, reclaimed int64, err error) {
 	graceSecs := int(g.GracePeriod.Seconds())
 	rows, err := g.db.QueryContext(ctx, `
 		SELECT dedup_scope, plaintext_hash, backend_id, storage_key, size_bytes
@@ -150,7 +162,7 @@ func (g *DedupGCRunner) sweep(ctx context.Context) (int, int, int64, error) {
 		  AND marked_at < NOW() - make_interval(secs => $1)
 	`, graceSecs)
 	if err != nil {
-		return 0, 0, 0, fmt.Errorf("sweep query: %w", err)
+		return 0, 0, 0, 0, fmt.Errorf("sweep query: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -165,20 +177,18 @@ func (g *DedupGCRunner) sweep(ctx context.Context) (int, int, int64, error) {
 	for rows.Next() {
 		var c candidate
 		if err := rows.Scan(&c.scope, &c.hash, &c.backendID, &c.key, &c.size); err != nil {
-			return 0, 0, 0, fmt.Errorf("scan candidate: %w", err)
+			return 0, 0, 0, 0, fmt.Errorf("scan candidate: %w", err)
 		}
 		candidates = append(candidates, c)
 	}
 	if err := rows.Err(); err != nil {
-		return 0, 0, 0, fmt.Errorf("iterate candidates: %w", err)
+		return 0, 0, 0, 0, fmt.Errorf("iterate candidates: %w", err)
 	}
 
-	var deleted, failed int
-	var reclaimed int64
 	for _, c := range candidates {
 		if ctx.Err() != nil {
 			// Run deadline or shutdown: what is left stays a candidate.
-			return deleted, failed, reclaimed, ctx.Err()
+			return deleted, failed, pending, reclaimed, ctx.Err()
 		}
 		outcome, err := g.sweepOne(ctx, c.scope, c.hash, c.backendID, c.key)
 		if err != nil {
@@ -193,10 +203,12 @@ func (g *DedupGCRunner) sweep(ctx context.Context) (int, int, int64, error) {
 			reclaimed += c.size
 		case sweepBlobLeaked:
 			failed++
+		case sweepLegacyPending:
+			pending++
 		}
 	}
 
-	return deleted, failed, reclaimed, nil
+	return deleted, failed, pending, reclaimed, nil
 }
 
 // sweepOutcome is what happened to one sweep candidate.
@@ -210,6 +222,9 @@ const (
 	// sweepBlobLeaked: the row is gone and the backend refused the blob
 	// delete — a leaked blob, never a corrupt object.
 	sweepBlobLeaked
+	// sweepLegacyPending: the blob is not at the one address but a copy is
+	// still at a legacy one — row kept for the chunk move.
+	sweepLegacyPending
 )
 
 // sweepOne deletes a single candidate's GCI row and its backing blob while
@@ -246,6 +261,34 @@ func (g *DedupGCRunner) sweepOne(ctx context.Context, scope, hash, backendID, ke
 			`SELECT pg_advisory_unlock(hashtext($1), hashtext($2))`, scope, hash)
 	}()
 
+	// Where the blob is, asked BEFORE the row goes (WP-R8-7): the row is the
+	// only record of the blob's backend and key.
+	//   - the backend cannot be asked (not registered, breaker open, an
+	//     error): nothing is deleted, the candidate stays for the next run —
+	//     deleting the row first would leave a blob nothing knows about;
+	//   - the blob is not at the one address but a copy written before
+	//     WP-R8-7 is still under a tenant's prefix: the row is kept, because
+	//     the chunk move works from it and a delete here never touches a
+	//     legacy address;
+	//   - it is nowhere: the row goes, there is nothing to delete.
+	addr := chunkAddr{scope: scope, hash: hash, backend: backendID, key: key}
+	store := g.chunks()
+	atAddress, err := store.exists(ctx, addr)
+	if err != nil {
+		return sweepKept, fmt.Errorf("ask the backend for the blob: %w", err)
+	}
+	if !atAddress {
+		legacy, err := store.legacyCopyExists(ctx, addr)
+		if err != nil {
+			return sweepKept, fmt.Errorf("look for a legacy copy: %w", err)
+		}
+		if legacy {
+			g.logger.Warn("dedup gc: chunk is still at a legacy address — row kept, run the chunk move",
+				zap.String("hash", hash), zap.String("backend", backendID))
+			return sweepLegacyPending, nil
+		}
+	}
+
 	if g.gci != nil {
 		g.gci.InvalidateCache(scope, hash)
 	}
@@ -272,16 +315,23 @@ func (g *DedupGCRunner) sweepOne(ctx context.Context, scope, hash, backendID, ke
 
 	// Blob delete happens under the same lock, after the row delete committed:
 	// a concurrent PUT re-storing this chunk blocks on the lock, then finds no
-	// row and stores fresh data. A failed blob delete leaks the blob (same as
-	// before WP-6), never corrupts a live object.
-	g.eng.HintBackend(chunkContainer, key, backendID)
-	if err := g.eng.Delete(ctx, chunkContainer, key); err != nil {
+	// row and stores fresh data AT THE SAME ADDRESS this delete names — which
+	// is what makes the lock mean something (before WP-R8-7 the two addressed
+	// different keys on a fixed-bucket backend). A failed blob delete leaks
+	// the blob (same as before WP-6), never corrupts a live object.
+	if err := store.delete(ctx, addr); err != nil {
 		g.logger.Error("delete chunk data (leaked, not corrupt)",
 			zap.String("hash", hash),
 			zap.String("key", key),
+			zap.String("backend", backendID),
 			zap.Error(err))
 		return sweepBlobLeaked, nil
 	}
 
 	return sweepDeleted, nil
+}
+
+// chunks is the runner's chunk store: the one way a chunk blob is addressed.
+func (g *DedupGCRunner) chunks() *chunkStore {
+	return newChunkStore(g.eng, g.db, g.logger)
 }

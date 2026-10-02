@@ -128,7 +128,7 @@ func (f *compatFixture) put(t *testing.T, key, contentType string, body []byte) 
 	req := httptest.NewRequest("PUT", "/"+f.bucket+"/"+key, bytes.NewReader(body))
 	req.Header.Set("Content-Type", contentType)
 	req.ContentLength = int64(len(body))
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, f.bucket, key)
@@ -141,7 +141,7 @@ func (f *compatFixture) get(t *testing.T, key string, headers map[string]string)
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 	f.adapter.HandleGet(w, req, f.bucket, key)
@@ -151,7 +151,7 @@ func (f *compatFixture) get(t *testing.T, key string, headers map[string]string)
 func (f *compatFixture) head(t *testing.T, key string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest("HEAD", "/"+f.bucket+"/"+key, nil)
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 	f.server.handleHeadObject(w, req, &S3Request{Bucket: f.bucket, Object: key})
@@ -161,7 +161,7 @@ func (f *compatFixture) head(t *testing.T, key string) *httptest.ResponseRecorde
 func (f *compatFixture) del(t *testing.T, key string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest("DELETE", "/"+f.bucket+"/"+key, nil)
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 	f.adapter.HandleDelete(w, req, f.bucket, key)
@@ -175,7 +175,7 @@ func (f *compatFixture) listV2(t *testing.T, params map[string]string) *httptest
 		url += "&" + k + "=" + v
 	}
 	req := httptest.NewRequest("GET", url, nil)
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 	f.adapter.HandleListV2(w, req, f.bucket)
@@ -262,7 +262,7 @@ func TestCompat_MultipartUpload(t *testing.T) {
 
 	// Initiate
 	initReq := httptest.NewRequest("POST", "/"+f.bucket+"/"+key+"?uploads", nil)
-	ctx := tenant.WithTenant(initReq.Context(), f.tenant)
+	ctx := s3Ctx(initReq.Context(), f.tenant)
 	initReq = initReq.WithContext(ctx)
 	initW := httptest.NewRecorder()
 	f.server.handleInitiateMultipartUpload(initW, initReq, f.bucket, key)
@@ -282,7 +282,7 @@ func TestCompat_MultipartUpload(t *testing.T) {
 	part1Req := httptest.NewRequest("PUT",
 		"/"+f.bucket+"/"+key+"?partNumber=1&uploadId="+uploadID,
 		bytes.NewReader(part1Data))
-	ctx = tenant.WithTenant(part1Req.Context(), f.tenant)
+	ctx = s3Ctx(part1Req.Context(), f.tenant)
 	part1Req = part1Req.WithContext(ctx)
 	part1W := httptest.NewRecorder()
 	f.server.handleUploadPart(part1W, part1Req, f.bucket, key)
@@ -294,7 +294,7 @@ func TestCompat_MultipartUpload(t *testing.T) {
 	part2Req := httptest.NewRequest("PUT",
 		"/"+f.bucket+"/"+key+"?partNumber=2&uploadId="+uploadID,
 		bytes.NewReader(part2Data))
-	ctx = tenant.WithTenant(part2Req.Context(), f.tenant)
+	ctx = s3Ctx(part2Req.Context(), f.tenant)
 	part2Req = part2Req.WithContext(ctx)
 	part2W := httptest.NewRecorder()
 	f.server.handleUploadPart(part2W, part2Req, f.bucket, key)
@@ -311,7 +311,7 @@ func TestCompat_MultipartUpload(t *testing.T) {
 	completeReq := httptest.NewRequest("POST",
 		"/"+f.bucket+"/"+key+"?uploadId="+uploadID,
 		strings.NewReader(completeBody))
-	ctx = tenant.WithTenant(completeReq.Context(), f.tenant)
+	ctx = s3Ctx(completeReq.Context(), f.tenant)
 	completeReq = completeReq.WithContext(ctx)
 	completeW := httptest.NewRecorder()
 	f.server.handleCompleteMultipartUpload(completeW, completeReq, f.bucket, key)
@@ -422,7 +422,7 @@ func TestCompat_CopyObject(t *testing.T) {
 	// CopyObject: PUT dest with x-amz-copy-source
 	copyReq := httptest.NewRequest("PUT", "/"+f.bucket+"/"+dstKey, nil)
 	copyReq.Header.Set("x-amz-copy-source", "/"+f.bucket+"/"+srcKey)
-	ctx := tenant.WithTenant(copyReq.Context(), f.tenant)
+	ctx := s3Ctx(copyReq.Context(), f.tenant)
 	copyReq = copyReq.WithContext(ctx)
 	copyW := httptest.NewRecorder()
 	f.server.handleCopyObject(copyW, copyReq, &S3Request{Bucket: f.bucket, Object: dstKey})
@@ -454,7 +454,7 @@ func TestCompat_BucketOperations(t *testing.T) {
 
 	// CreateBucket
 	createReq := httptest.NewRequest("PUT", "/"+newBucket, nil)
-	ctx := tenant.WithTenant(createReq.Context(), f.tenant)
+	ctx := s3Ctx(createReq.Context(), f.tenant)
 	createReq = createReq.WithContext(ctx)
 	createW := httptest.NewRecorder()
 	f.server.CreateBucket(createW, createReq)
@@ -462,7 +462,7 @@ func TestCompat_BucketOperations(t *testing.T) {
 
 	// ListBuckets — verify it appears
 	listReq := httptest.NewRequest("GET", "/", nil)
-	ctx = tenant.WithTenant(listReq.Context(), f.tenant)
+	ctx = s3Ctx(listReq.Context(), f.tenant)
 	listReq = listReq.WithContext(ctx)
 	listW := httptest.NewRecorder()
 	f.server.ListBuckets(listW, listReq)
@@ -481,7 +481,7 @@ func TestCompat_BucketOperations(t *testing.T) {
 
 	// DeleteBucket
 	delReq := httptest.NewRequest("DELETE", "/"+newBucket, nil)
-	ctx = tenant.WithTenant(delReq.Context(), f.tenant)
+	ctx = s3Ctx(delReq.Context(), f.tenant)
 	delReq = delReq.WithContext(ctx)
 	delW := httptest.NewRecorder()
 	f.server.DeleteBucket(delW, delReq)

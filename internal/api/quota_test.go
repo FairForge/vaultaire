@@ -75,7 +75,7 @@ func TestHandlePutObject_QuotaExceeded(t *testing.T) {
 	putReq := httptest.NewRequest("PUT", "/test-bucket/test-object.txt",
 		bytes.NewReader(body))
 	putReq.ContentLength = int64(len(body))
-	ctx := tenant.WithTenant(putReq.Context(), testTenant)
+	ctx := s3Ctx(putReq.Context(), testTenant)
 	putReq = putReq.WithContext(ctx)
 
 	s3Req := &S3Request{
@@ -127,7 +127,7 @@ func TestHandlePutObject_QuotaAllowed(t *testing.T) {
 	putReq := httptest.NewRequest("PUT", "/test-bucket/test-object.txt",
 		bytes.NewReader(body))
 	putReq.ContentLength = int64(len(body))
-	ctx := tenant.WithTenant(putReq.Context(), testTenant)
+	ctx := s3Ctx(putReq.Context(), testTenant)
 	putReq = putReq.WithContext(ctx)
 
 	s3Req := &S3Request{

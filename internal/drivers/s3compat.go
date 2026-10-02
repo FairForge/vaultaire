@@ -67,6 +67,12 @@ func (d *S3CompatDriver) buildKey(container, artifact string) string {
 	return path.Join(d.prefix, container, artifact)
 }
 
+// ObjectKey is the key a call would address (engine.KeyAddresser). It does
+// not depend on the tenant in the context: the container carries it.
+func (d *S3CompatDriver) ObjectKey(_ context.Context, container, artifact string) string {
+	return d.buildKey(container, artifact)
+}
+
 // Get retrieves an artifact
 func (d *S3CompatDriver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
 	key := d.buildKey(container, artifact)

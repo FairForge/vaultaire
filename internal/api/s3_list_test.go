@@ -74,14 +74,14 @@ func setupListTestServer(t *testing.T) (*Server, *tenant.Tenant, func()) {
 func putListTestObject(server *Server, t *tenant.Tenant, bucket, key, content string) {
 	req := httptest.NewRequest("PUT", "/"+bucket+"/"+key,
 		bytes.NewReader([]byte(content)))
-	ctx := tenant.WithTenant(req.Context(), t)
+	ctx := s3Ctx(req.Context(), t)
 	req = req.WithContext(ctx)
 	server.handleS3Request(httptest.NewRecorder(), req)
 }
 
 func listObjects(server *Server, t *tenant.Tenant, path string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest("GET", path, nil)
-	ctx := tenant.WithTenant(req.Context(), t)
+	ctx := s3Ctx(req.Context(), t)
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 	server.handleS3Request(w, req)
@@ -389,7 +389,7 @@ func TestContinuationToken_RoundTrip(t *testing.T) {
 func putEscapedListObject(server *Server, t *tenant.Tenant, bucket, key string) {
 	req := httptest.NewRequest("PUT", "/"+bucket+"/"+url.PathEscape(key),
 		bytes.NewReader([]byte("x")))
-	req = req.WithContext(tenant.WithTenant(req.Context(), t))
+	req = req.WithContext(s3Ctx(req.Context(), t))
 	server.handleS3Request(httptest.NewRecorder(), req)
 }
 

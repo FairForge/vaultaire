@@ -70,7 +70,7 @@
 
     <h2 id="termination">Termination</h2>
     <ul>
-        <li><strong>By you:</strong> You may delete your account at any time through your account settings. Account deletion enters a 30-day grace period during which you can cancel the deletion and recover your data. On the date the grace period ends, the account is closed, any subscription is cancelled and our deletion job erases your objects, keys and account records; backups age out within 7 days.</li>
+        <li><strong>By you:</strong> You may delete your account at any time through your account settings. Account deletion enters a 30-day grace period during which you can cancel the deletion and recover your data. On the date the grace period ends, the account is closed, any subscription is cancelled and our deletion job erases your objects, keys and account records; backups age out within 7 days. Large objects are stored in deduplicated blocks: the blocks of your objects are released on that date and deleted by the storage collector once its seven-day safety period has passed, except a block that is byte-for-byte identical to one another customer stores, which remains as that customer's data.</li>
         <li><strong>By us (AUP violation):</strong> We may suspend or terminate your account immediately for Acceptable Use Policy violations. For severe violations (malware, CSAM, phishing), data may be deleted immediately without a grace period.</li>
         <li><strong>By us (non-payment):</strong> A subscription cancelled for non-payment returns the account to the free tier; data is preserved and remains readable. We will contact you before taking any further action on the account.</li>
     </ul>

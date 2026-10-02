@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -35,7 +34,7 @@ func (f *loggingFixture) s3(t *testing.T, method, target string, body []byte) *h
 	if body != nil {
 		req.ContentLength = int64(len(body))
 	}
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	rr := httptest.NewRecorder()
 	f.server.handleS3Request(rr, req)
 	return rr
@@ -50,7 +49,7 @@ func TestAccessLogDelivery_ReportReadableThroughS3(t *testing.T) {
 <BucketLoggingStatus xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><LoggingEnabled><TargetBucket>%s</TargetBucket><TargetPrefix>logs/</TargetPrefix></LoggingEnabled></BucketLoggingStatus>`, f.logBucket)
 	s3Req := &S3Request{Bucket: f.bucket, TenantID: f.tenantID}
 	r := httptest.NewRequest("PUT", "/"+f.bucket+"?logging", strings.NewReader(configXML)).
-		WithContext(tenant.WithTenant(context.Background(), f.tenant))
+		WithContext(s3Ctx(context.Background(), f.tenant))
 	w := httptest.NewRecorder()
 	f.server.handlePutBucketLogging(w, r, s3Req)
 	require.Equal(t, 200, w.Code, w.Body.String())
@@ -174,7 +173,7 @@ func TestInventoryDelivery_ReportReadableThroughS3(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		req := httptest.NewRequest("PUT", fmt.Sprintf("/%s/file-%d.txt", f.bucket, i), strings.NewReader("hello"))
 		req.ContentLength = 5
-		req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+		req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 		rr := httptest.NewRecorder()
 		f.server.handleS3Request(rr, req)
 		require.Equal(t, 200, rr.Code, rr.Body.String())
@@ -191,7 +190,7 @@ func TestInventoryDelivery_ReportReadableThroughS3(t *testing.T) {
 	assert.Equal(t, "text/csv", contentType)
 
 	req := httptest.NewRequest("GET", "/"+f.invBucket+"/"+key, nil).
-		WithContext(tenant.WithTenant(context.Background(), f.tenant))
+		WithContext(s3Ctx(context.Background(), f.tenant))
 	rr := httptest.NewRecorder()
 	f.server.handleS3Request(rr, req)
 	require.Equal(t, 200, rr.Code, rr.Body.String())

@@ -18,8 +18,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/FairForge/vaultaire/internal/tenant"
 )
 
 // Review R4 (docs/reviews/R4-bucket-features.md): bucket-level features must
@@ -114,7 +112,7 @@ func TestObjectLockConfig_CannotBeDisabledOnceEnabled(t *testing.T) {
 	f := setupLockFixture(t)
 	put := func(body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest("PUT", "/"+f.bucket+"?object-lock", strings.NewReader(body))
-		req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+		req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 		w := httptest.NewRecorder()
 		f.server.handlePutObjectLockConfiguration(w, req, &S3Request{Bucket: f.bucket, TenantID: f.tenantID})
 		return w
@@ -143,7 +141,7 @@ func TestNotificationTarget_RefusesPrivateLoopbackAndNonHTTP(t *testing.T) {
 	put := func(topic string) *httptest.ResponseRecorder {
 		body := fmt.Sprintf(`<NotificationConfiguration><TopicConfiguration><Topic>%s</Topic><Event>s3:ObjectCreated:*</Event></TopicConfiguration></NotificationConfiguration>`, topic)
 		req := httptest.NewRequest("PUT", "/"+f.bucket+"?notification", strings.NewReader(body))
-		req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+		req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 		w := httptest.NewRecorder()
 		f.server.handlePutBucketNotification(w, req, &S3Request{Bucket: f.bucket, TenantID: f.tenantID})
 		return w
@@ -233,7 +231,7 @@ func TestCDN_InlineDispositionNeverRendersScriptableTypes(t *testing.T) {
 func (f *versioningFixture) deleteBucket(t *testing.T, bucket string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest("DELETE", "/"+bucket, nil)
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.server.DeleteBucket(w, req)
 	return w
@@ -282,7 +280,7 @@ func TestCreateBucket_ReCreateReportsStoredRegion(t *testing.T) {
 	f := setupVersioningFixture(t)
 	req := httptest.NewRequest("PUT", "/"+f.bucket, strings.NewReader(`<CreateBucketConfiguration><LocationConstraint>eu-west-1</LocationConstraint></CreateBucketConfiguration>`))
 	req.ContentLength = int64(len(`<CreateBucketConfiguration><LocationConstraint>eu-west-1</LocationConstraint></CreateBucketConfiguration>`))
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.server.CreateBucket(w, req)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
@@ -306,7 +304,7 @@ func (f *versioningFixture) seedKeys(t *testing.T, keys ...string) {
 func (f *versioningFixture) list(t *testing.T, query string) ListBucketV2Result {
 	t.Helper()
 	req := httptest.NewRequest("GET", "/"+f.bucket+"?"+query, nil)
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.server.handleS3Request(w, req)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
@@ -388,7 +386,7 @@ func TestListObjects_V1MarkerAndMissingBucket(t *testing.T) {
 	assert.Equal(t, "k2", res.Marker)
 
 	req := httptest.NewRequest("GET", "/no-such-bucket-"+f.tenantID+"?list-type=2", nil)
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.server.handleS3Request(w, req)
 	assert.Equal(t, http.StatusNotFound, w.Code)
@@ -399,7 +397,7 @@ func TestListObjectVersions_PrefixIsLiteralAndClassFromBackend(t *testing.T) {
 	f := setupVersioningFixture(t)
 	f.seedKeys(t, "a_b", "axb")
 	req := httptest.NewRequest("GET", "/"+f.bucket+"?versions&prefix=a_", nil)
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.server.handleS3Request(w, req)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
@@ -434,7 +432,7 @@ func TestObjectTags_HeaderOnPutAndResetOnOverwrite(t *testing.T) {
 	key := "tagged.bin"
 	req := httptest.NewRequest("PUT", "/"+f.bucket+"/"+key, bytes.NewReader([]byte("v1")))
 	req.Header.Set("x-amz-tagging", "env=prod&team=core%20infra")
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, f.bucket, key)
 	require.Equal(t, http.StatusOK, w.Code)
@@ -445,7 +443,7 @@ func TestObjectTags_HeaderOnPutAndResetOnOverwrite(t *testing.T) {
 
 	req = httptest.NewRequest("PUT", "/"+f.bucket+"/"+key, bytes.NewReader([]byte("v3")))
 	req.Header.Set("x-amz-tagging", strings.Repeat("k=v&", 11)+"z=1")
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w = httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, f.bucket, key)
 	assert.Equal(t, http.StatusBadRequest, w.Code, "more than 10 tags is InvalidTag, refused before the body is read")
@@ -457,7 +455,7 @@ func TestObjectTags_CopyDirectiveAndMultipartReset(t *testing.T) {
 	f := setupVersioningFixture(t)
 	req := httptest.NewRequest("PUT", "/"+f.bucket+"/src", bytes.NewReader([]byte("SRC")))
 	req.Header.Set("x-amz-tagging", "a=b")
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, f.bucket, "src")
 	require.Equal(t, http.StatusOK, w.Code)
@@ -482,7 +480,7 @@ func (f *versioningFixture) head(t *testing.T, key string, hdr map[string]string
 	for k, v := range hdr {
 		req.Header.Set(k, v)
 	}
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.server.handleS3Request(w, req)
 	return w
@@ -494,7 +492,7 @@ func (f *versioningFixture) get(t *testing.T, key string, hdr map[string]string)
 	for k, v := range hdr {
 		req.Header.Set(k, v)
 	}
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandleGet(w, req, f.bucket, key)
 	return w

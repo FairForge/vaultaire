@@ -120,7 +120,7 @@ func (f *versioningFixture) putObject(t *testing.T, key, content string) *httpte
 	t.Helper()
 	req := httptest.NewRequest("PUT", "/"+f.bucket+"/"+key, bytes.NewReader([]byte(content)))
 	req.Header.Set("Content-Type", "text/plain")
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -132,7 +132,7 @@ func (f *versioningFixture) putObject(t *testing.T, key, content string) *httpte
 func (f *versioningFixture) getObject(t *testing.T, key string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest("GET", "/"+f.bucket+"/"+key, nil)
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -143,7 +143,7 @@ func (f *versioningFixture) getObject(t *testing.T, key string) *httptest.Respon
 func (f *versioningFixture) getObjectVersion(t *testing.T, key, versionID string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest("GET", "/"+f.bucket+"/"+key+"?versionId="+versionID, nil)
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -154,7 +154,7 @@ func (f *versioningFixture) getObjectVersion(t *testing.T, key, versionID string
 func (f *versioningFixture) deleteObject(t *testing.T, key string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest("DELETE", "/"+f.bucket+"/"+key, nil)
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -165,7 +165,7 @@ func (f *versioningFixture) deleteObject(t *testing.T, key string) *httptest.Res
 func (f *versioningFixture) deleteObjectVersion(t *testing.T, key, versionID string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest("DELETE", "/"+f.bucket+"/"+key+"?versionId="+versionID, nil)
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -191,7 +191,7 @@ func TestVersioning_EnableSuspend(t *testing.T) {
 
 	// Initially disabled — GET should return empty Status
 	req := httptest.NewRequest("GET", "/"+f.bucket+"?versioning", nil)
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 	f.server.handleGetBucketVersioning(w, req, s3Req)
@@ -204,7 +204,7 @@ func TestVersioning_EnableSuspend(t *testing.T) {
 	// Enable versioning
 	body := `<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status></VersioningConfiguration>`
 	req = httptest.NewRequest("PUT", "/"+f.bucket+"?versioning", bytes.NewReader([]byte(body)))
-	ctx = tenant.WithTenant(req.Context(), f.tenant)
+	ctx = s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w = httptest.NewRecorder()
 	f.server.handlePutBucketVersioning(w, req, s3Req)
@@ -212,7 +212,7 @@ func TestVersioning_EnableSuspend(t *testing.T) {
 
 	// Verify enabled
 	req = httptest.NewRequest("GET", "/"+f.bucket+"?versioning", nil)
-	ctx = tenant.WithTenant(req.Context(), f.tenant)
+	ctx = s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w = httptest.NewRecorder()
 	f.server.handleGetBucketVersioning(w, req, s3Req)
@@ -222,7 +222,7 @@ func TestVersioning_EnableSuspend(t *testing.T) {
 	// Suspend versioning
 	body = `<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Suspended</Status></VersioningConfiguration>`
 	req = httptest.NewRequest("PUT", "/"+f.bucket+"?versioning", bytes.NewReader([]byte(body)))
-	ctx = tenant.WithTenant(req.Context(), f.tenant)
+	ctx = s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w = httptest.NewRecorder()
 	f.server.handlePutBucketVersioning(w, req, s3Req)
@@ -230,7 +230,7 @@ func TestVersioning_EnableSuspend(t *testing.T) {
 
 	// Verify suspended
 	req = httptest.NewRequest("GET", "/"+f.bucket+"?versioning", nil)
-	ctx = tenant.WithTenant(req.Context(), f.tenant)
+	ctx = s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w = httptest.NewRecorder()
 	f.server.handleGetBucketVersioning(w, req, s3Req)

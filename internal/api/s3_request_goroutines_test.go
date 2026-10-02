@@ -36,7 +36,7 @@ func TestHandleS3Request_DoesNotLeakGoroutinesPerRequest(t *testing.T) {
 	tn := &tenant.Tenant{ID: "leak-tenant", Namespace: "tenant/leak-tenant/"}
 	do := func(method, path string, body []byte) int {
 		req := httptest.NewRequest(method, path, bytes.NewReader(body))
-		req = req.WithContext(tenant.WithTenant(req.Context(), tn))
+		req = req.WithContext(s3Ctx(req.Context(), tn))
 		w := httptest.NewRecorder()
 		server.handleS3Request(w, req)
 		return w.Code

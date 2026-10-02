@@ -12,7 +12,6 @@ import (
 	"testing"
 
 	"github.com/FairForge/vaultaire/internal/crypto"
-	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -46,7 +45,7 @@ func (f *chunkedCopyFixture) seedChunked(t *testing.T, key string, content []byt
 	t.Helper()
 	req := httptest.NewRequest("PUT", "/test-bucket/"+key, bytes.NewReader(content))
 	req.ContentLength = int64(len(content))
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, "test-bucket", key)
 	require.Equal(t, http.StatusOK, w.Code, "chunked seed PUT must succeed")
@@ -101,7 +100,7 @@ func TestChunkedCopy_ManifestCopyRoundtrip(t *testing.T) {
 
 	// Destination GET is byte-identical.
 	getReq := httptest.NewRequest("GET", "/dest-bucket/copy.bin", nil)
-	getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+	getReq = getReq.WithContext(s3Ctx(getReq.Context(), f.tenant))
 	gw := httptest.NewRecorder()
 	f.adapter.HandleGet(gw, getReq, "dest-bucket", "copy.bin")
 	require.Equal(t, http.StatusOK, gw.Code)
@@ -113,14 +112,14 @@ func TestChunkedCopy_ManifestCopyRoundtrip(t *testing.T) {
 
 	// Deleting the source must not orphan the copy.
 	delReq := httptest.NewRequest("DELETE", "/test-bucket/src.bin", nil)
-	delReq = delReq.WithContext(tenant.WithTenant(delReq.Context(), f.tenant))
+	delReq = delReq.WithContext(s3Ctx(delReq.Context(), f.tenant))
 	dw := httptest.NewRecorder()
 	f.adapter.HandleDelete(dw, delReq, "test-bucket", "src.bin")
 	require.Equal(t, http.StatusNoContent, dw.Code)
 
 	gw2 := httptest.NewRecorder()
 	getReq2 := httptest.NewRequest("GET", "/dest-bucket/copy.bin", nil)
-	getReq2 = getReq2.WithContext(tenant.WithTenant(getReq2.Context(), f.tenant))
+	getReq2 = getReq2.WithContext(s3Ctx(getReq2.Context(), f.tenant))
 	f.adapter.HandleGet(gw2, getReq2, "dest-bucket", "copy.bin")
 	require.Equal(t, http.StatusOK, gw2.Code)
 	assert.Equal(t, content, gw2.Body.Bytes(),

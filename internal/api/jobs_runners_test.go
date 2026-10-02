@@ -15,7 +15,6 @@ import (
 	"github.com/FairForge/vaultaire/internal/config"
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
-	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -126,14 +125,12 @@ func TestDedupGCJob_AChunkTheBackendWillNotDeleteIsANoteNotAFailedRun(t *testing
 	pairs := tenantChunkPairs(t, f.db, f.tenant.ID)
 	require.NotEmpty(t, pairs)
 	delReq := httptest.NewRequest("DELETE", "/test-bucket/gc-flaky.bin", nil)
-	delReq = delReq.WithContext(tenant.WithTenant(delReq.Context(), f.tenant))
+	delReq = delReq.WithContext(s3Ctx(delReq.Context(), f.tenant))
 	dw := httptest.NewRecorder()
 	f.adapter.HandleDelete(dw, delReq, "test-bucket", "gc-flaky.bin")
 	require.Equal(t, http.StatusNoContent, dw.Code)
 	backdateGCIRows(t, f.db, pairs)
-	flaky := &flakyDriver{LocalDriver: drivers.NewLocalDriver(f.tempDir, zap.NewNop())}
-	flaky.fail.Store(true)
-	f.eng.AddDriver("local", flaky)
+	f.fixed.failDelete.Store(true)
 	jf := setupJobsFixture(t)
 	runner.JobName = testJobName("gc")
 	j := asJob(t, jf, runner.spec())
@@ -165,7 +162,7 @@ func setupInventoryJobFixture(t *testing.T) *inventoryJobFixture {
 	for i := 0; i < 2; i++ {
 		req := httptest.NewRequest("PUT", fmt.Sprintf("/%s/file-%d.txt", f.bucket, i), strings.NewReader("hello"))
 		req.ContentLength = 5
-		req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+		req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 		rr := httptest.NewRecorder()
 		f.server.handleS3Request(rr, req)
 		require.Equal(t, 200, rr.Code, rr.Body.String())

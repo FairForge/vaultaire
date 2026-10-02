@@ -103,7 +103,7 @@
     <p>Upon termination of the service agreement:</p>
     <ul>
         <li>The Controller may export all stored data via the S3-compatible API or the data export feature in account settings.</li>
-        <li>After the 30-day grace period following an account deletion request, the account is closed, the subscription is cancelled and the Processor's automated deletion job erases the Controller's objects, metadata and account records from production on that date; database backups age out within 7 days of the erasure.</li>
+        <li>After the 30-day grace period following an account deletion request, the account is closed, the subscription is cancelled and the Processor's automated deletion job erases the Controller's objects, metadata and account records from production on that date; database backups age out within 7 days of the erasure. Large objects are stored in deduplicated blocks: the blocks of the Controller's objects are released on that date and deleted by the storage collector once its seven-day safety period has passed, except a block that is byte-for-byte identical to one another Controller stores, which remains as that Controller's data.</li>
         <li>The Processor will provide written confirmation of deletion upon request.</li>
     </ul>
 

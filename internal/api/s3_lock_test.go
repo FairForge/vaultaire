@@ -116,7 +116,7 @@ func (f *lockFixture) putObject(t *testing.T, key, content string) *httptest.Res
 	t.Helper()
 	req := httptest.NewRequest("PUT", "/"+f.bucket+"/"+key, bytes.NewReader([]byte(content)))
 	req.Header.Set("Content-Type", "text/plain")
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -143,7 +143,7 @@ func (f *lockFixture) deleteObject(t *testing.T, key string, headers map[string]
 // tests call the handlers directly; since WP-R4-1 the bypass header counts
 // only for a key that may bypass, and no scope in the context is no bypass.
 func (f *lockFixture) asPrimaryKey(ctx context.Context) context.Context {
-	return auth.WithKeyScope(tenant.WithTenant(ctx, f.tenant), &auth.KeyScope{Permissions: []string{"*"}})
+	return auth.WithKeyScope(s3Ctx(ctx, f.tenant), &auth.KeyScope{Permissions: []string{"*"}})
 }
 
 // --- Test: bucket-level object lock configuration ---
@@ -155,7 +155,7 @@ func TestObjectLock_PutGetBucketConfig(t *testing.T) {
 
 	// GET before enabling — should return empty config
 	req := httptest.NewRequest("GET", "/"+f.bucket+"?object-lock", nil)
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 	f.server.handleGetObjectLockConfiguration(w, req, s3Req)
@@ -172,7 +172,7 @@ func TestObjectLock_PutGetBucketConfig(t *testing.T) {
 		<Rule><DefaultRetention><Mode>GOVERNANCE</Mode><Days>30</Days></DefaultRetention></Rule>
 	</ObjectLockConfiguration>`
 	req = httptest.NewRequest("PUT", "/"+f.bucket+"?object-lock", bytes.NewReader([]byte(body)))
-	ctx = tenant.WithTenant(req.Context(), f.tenant)
+	ctx = s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w = httptest.NewRecorder()
 	f.server.handlePutObjectLockConfiguration(w, req, s3Req)
@@ -180,7 +180,7 @@ func TestObjectLock_PutGetBucketConfig(t *testing.T) {
 
 	// GET again — should return enabled config
 	req = httptest.NewRequest("GET", "/"+f.bucket+"?object-lock", nil)
-	ctx = tenant.WithTenant(req.Context(), f.tenant)
+	ctx = s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w = httptest.NewRecorder()
 	f.server.handleGetObjectLockConfiguration(w, req, s3Req)
@@ -211,7 +211,7 @@ func TestObjectLock_PutGetRetention(t *testing.T) {
 	</Retention>`, retainUntil)
 
 	req := httptest.NewRequest("PUT", "/"+f.bucket+"/"+key+"?retention", bytes.NewReader([]byte(body)))
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 	f.server.handlePutObjectRetention(w, req, s3Req)
@@ -219,7 +219,7 @@ func TestObjectLock_PutGetRetention(t *testing.T) {
 
 	// GET retention
 	req = httptest.NewRequest("GET", "/"+f.bucket+"/"+key+"?retention", nil)
-	ctx = tenant.WithTenant(req.Context(), f.tenant)
+	ctx = s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w = httptest.NewRecorder()
 	f.server.handleGetObjectRetention(w, req, s3Req)
@@ -243,7 +243,7 @@ func TestObjectLock_PutGetLegalHold(t *testing.T) {
 
 	body := `<LegalHold xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>ON</Status></LegalHold>`
 	req := httptest.NewRequest("PUT", "/"+f.bucket+"/"+key+"?legal-hold", bytes.NewReader([]byte(body)))
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 	f.server.handlePutObjectLegalHold(w, req, s3Req)
@@ -251,7 +251,7 @@ func TestObjectLock_PutGetLegalHold(t *testing.T) {
 
 	// GET legal hold
 	req = httptest.NewRequest("GET", "/"+f.bucket+"/"+key+"?legal-hold", nil)
-	ctx = tenant.WithTenant(req.Context(), f.tenant)
+	ctx = s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w = httptest.NewRecorder()
 	f.server.handleGetObjectLegalHold(w, req, s3Req)

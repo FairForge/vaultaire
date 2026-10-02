@@ -132,7 +132,7 @@ func TestPutBucketInventory_Enable(t *testing.T) {
 </InventoryConfiguration>`, f.invBucket)
 
 	s3Req := &S3Request{Bucket: f.bucket, TenantID: f.tenantID}
-	ctx := tenant.WithTenant(context.Background(), f.tenant)
+	ctx := s3Ctx(context.Background(), f.tenant)
 	r := httptest.NewRequest("PUT", "/"+f.bucket+"?inventory", bytes.NewReader([]byte(configXML))).WithContext(ctx)
 	w := httptest.NewRecorder()
 
@@ -172,7 +172,7 @@ func TestDeleteBucketInventory(t *testing.T) {
 </InventoryConfiguration>`, f.invBucket)
 
 	s3Req := &S3Request{Bucket: f.bucket, TenantID: f.tenantID}
-	ctx := tenant.WithTenant(context.Background(), f.tenant)
+	ctx := s3Ctx(context.Background(), f.tenant)
 	r := httptest.NewRequest("PUT", "/"+f.bucket+"?inventory", bytes.NewReader([]byte(configXML))).WithContext(ctx)
 	w := httptest.NewRecorder()
 	f.server.handlePutBucketInventory(w, r, s3Req)
@@ -318,7 +318,7 @@ func TestGetBucketInventory_Disabled(t *testing.T) {
 	f := setupInventoryFixture(t)
 
 	s3Req := &S3Request{Bucket: f.bucket, TenantID: f.tenantID}
-	ctx := tenant.WithTenant(context.Background(), f.tenant)
+	ctx := s3Ctx(context.Background(), f.tenant)
 	r := httptest.NewRequest("GET", "/"+f.bucket+"?inventory", nil).WithContext(ctx)
 	w := httptest.NewRecorder()
 

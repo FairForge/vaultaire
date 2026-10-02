@@ -64,6 +64,13 @@ func (d *LocalDriver) Name() string {
 	return "local"
 }
 
+// ObjectKey is the path a call would address, relative to the base directory
+// (engine.KeyAddresser). It does not depend on the tenant in the context: the
+// container carries it.
+func (d *LocalDriver) ObjectKey(_ context.Context, container, artifact string) string {
+	return container + "/" + artifact
+}
+
 // Get retrieves an artifact from a container
 func (d *LocalDriver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
 	fullPath, err := d.resolvePath(container, artifact)

@@ -17,7 +17,7 @@ import (
 func TestHeadObject_NilDB_NoPanic(t *testing.T) {
 	s := &Server{logger: zap.NewNop()}
 	req := httptest.NewRequest("HEAD", "/b/k", nil)
-	req = req.WithContext(tenant.WithTenant(req.Context(), &tenant.Tenant{ID: "t"}))
+	req = req.WithContext(s3Ctx(req.Context(), &tenant.Tenant{ID: "t"}))
 	w := httptest.NewRecorder()
 
 	require.NotPanics(t, func() { s.handleHeadObject(w, req, &S3Request{Bucket: "b", Object: "k"}) })

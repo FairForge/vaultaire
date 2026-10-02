@@ -181,7 +181,7 @@ func TestSmartPromotion_HandleGetServesAndFlips(t *testing.T) {
 	tn := &tenant.Tenant{ID: f.tenantID, Namespace: "tenant/" + f.tenantID + "/"}
 
 	req := httptest.NewRequest(http.MethodGet, "/b/doc", nil)
-	req = req.WithContext(tenant.WithTenant(req.Context(), tn))
+	req = req.WithContext(s3Ctx(req.Context(), tn))
 	w := httptest.NewRecorder()
 	adapter.HandleGet(w, req, "b", "doc")
 
@@ -207,7 +207,7 @@ func TestSmartPromotion_HandleGetEvictedAnswers503NotForbidden(t *testing.T) {
 	tn := &tenant.Tenant{ID: f.tenantID, Namespace: "tenant/" + f.tenantID + "/"}
 
 	req := httptest.NewRequest(http.MethodGet, "/b/doc", nil)
-	req = req.WithContext(tenant.WithTenant(req.Context(), tn))
+	req = req.WithContext(s3Ctx(req.Context(), tn))
 	w := httptest.NewRecorder()
 	adapter.HandleGet(w, req, "b", "doc")
 

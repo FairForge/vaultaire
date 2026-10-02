@@ -50,7 +50,7 @@ func TestS3_DeleteObject(t *testing.T) {
 	// First PUT an object
 	putReq := httptest.NewRequest("PUT", "/test-bucket/test-key.txt",
 		bytes.NewReader([]byte("test content")))
-	ctx := tenant.WithTenant(putReq.Context(), testTenant)
+	ctx := s3Ctx(putReq.Context(), testTenant)
 	putReq = putReq.WithContext(ctx)
 	putW := httptest.NewRecorder()
 	server.handleS3Request(putW, putReq)
@@ -58,7 +58,7 @@ func TestS3_DeleteObject(t *testing.T) {
 
 	// Then DELETE it
 	deleteReq := httptest.NewRequest("DELETE", "/test-bucket/test-key.txt", nil)
-	ctx = tenant.WithTenant(deleteReq.Context(), testTenant)
+	ctx = s3Ctx(deleteReq.Context(), testTenant)
 	deleteReq = deleteReq.WithContext(ctx)
 	deleteW := httptest.NewRecorder()
 
@@ -67,7 +67,7 @@ func TestS3_DeleteObject(t *testing.T) {
 
 	// Verify it's gone with GET
 	getReq := httptest.NewRequest("GET", "/test-bucket/test-key.txt", nil)
-	ctx = tenant.WithTenant(getReq.Context(), testTenant)
+	ctx = s3Ctx(getReq.Context(), testTenant)
 	getReq = getReq.WithContext(ctx)
 	getW := httptest.NewRecorder()
 

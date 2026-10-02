@@ -12,7 +12,6 @@ import (
 	"testing"
 
 	"github.com/FairForge/vaultaire/internal/engine"
-	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -143,7 +142,7 @@ func putArchiveObject(t *testing.T, f *adapterTestFixture, key string, content [
 	t.Helper()
 	req := httptest.NewRequest("PUT", "/test-bucket/"+key, bytes.NewReader(content))
 	req.ContentLength = int64(len(content))
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, "test-bucket", key)
 	require.Equal(t, http.StatusOK, w.Code)
@@ -160,7 +159,7 @@ func TestGetArchivedObject_403InvalidObjectState(t *testing.T) {
 	stub.archived = true
 
 	req := httptest.NewRequest("GET", "/test-bucket/cold.bin", nil)
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandleGet(w, req, "test-bucket", "cold.bin")
 
@@ -179,7 +178,7 @@ func TestRestoreObject_Passthrough(t *testing.T) {
 
 	body := strings.NewReader(`<RestoreRequest><Days>3</Days></RestoreRequest>`)
 	req := httptest.NewRequest("POST", "/test-bucket/cold.bin?restore", body)
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	s.handleRestoreObject(w, req, &S3Request{Bucket: "test-bucket", Object: "cold.bin", TenantID: f.tenantID})
 
@@ -195,7 +194,7 @@ func TestRestoreObject_AlreadyInProgress409(t *testing.T) {
 	stub.inProgress = true
 
 	req := httptest.NewRequest("POST", "/test-bucket/cold.bin?restore", nil)
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	s.handleRestoreObject(w, req, &S3Request{Bucket: "test-bucket", Object: "cold.bin", TenantID: f.tenantID})
 
@@ -213,7 +212,7 @@ func TestRestoreObject_StagedObject403(t *testing.T) {
 	stub.staged = true
 
 	req := httptest.NewRequest("POST", "/test-bucket/fresh.bin?restore", nil)
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	s.handleRestoreObject(w, req, &S3Request{Bucket: "test-bucket", Object: "fresh.bin", TenantID: f.tenantID})
 
@@ -235,7 +234,7 @@ func TestRestoreObject_HotBackend403(t *testing.T) {
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("POST", "/test-bucket/hot.bin?restore", nil)
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	s.handleRestoreObject(w, req, &S3Request{Bucket: "test-bucket", Object: "hot.bin", TenantID: f.tenantID})
 
@@ -248,7 +247,7 @@ func TestRestoreObject_MissingKey404(t *testing.T) {
 	f, _, s := restoreFixture(t)
 
 	req := httptest.NewRequest("POST", "/test-bucket/nope.bin?restore", nil)
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	s.handleRestoreObject(w, req, &S3Request{Bucket: "test-bucket", Object: "nope.bin", TenantID: f.tenantID})
 
@@ -264,7 +263,7 @@ func TestHeadArchivedObject_XAmzRestore(t *testing.T) {
 	stub.restoreState = `ongoing-request="true"`
 
 	req := httptest.NewRequest("HEAD", "/test-bucket/cold.bin", nil)
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	s.handleHeadObject(w, req, &S3Request{Bucket: "test-bucket", Object: "cold.bin", TenantID: f.tenantID})
 

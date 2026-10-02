@@ -18,7 +18,6 @@ import (
 	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
-	"github.com/FairForge/vaultaire/internal/tenant"
 )
 
 // R6-05: a DELETE must reach the backend recorded in object_head_cache even
@@ -63,7 +62,7 @@ func TestHandleDelete_RoutesToRecordedBackendAfterRestart(t *testing.T) {
 	adapter := NewS3ToEngine(fresh, f.db, zap.NewNop())
 
 	req := httptest.NewRequest("DELETE", "/test-bucket/on-lyve.bin", nil)
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	adapter.HandleDelete(w, req, "test-bucket", "on-lyve.bin")
 
@@ -95,7 +94,7 @@ func TestHandleDelete_RecordedBackendUnavailableIs503(t *testing.T) {
 	f.eng.AddDriver("idrive", &downDriver{name: "idrive"})
 
 	req := httptest.NewRequest("DELETE", "/test-bucket/unreachable.bin", nil)
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandleDelete(w, req, "test-bucket", "unreachable.bin")
 

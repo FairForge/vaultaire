@@ -29,18 +29,21 @@ import (
 	"go.uber.org/zap"
 )
 
-// chunkContainer is the shared, tenant-independent container that stores
-// deduplicated content-defined chunks. Dedup is global — identical content is
-// stored once across all tenants — so chunks must live outside any tenant's
-// namespace, otherwise an object that dedups against a chunk first written by a
-// different tenant or bucket would have no reachable copy.
+// chunkContainer is the container that stores deduplicated content-defined
+// chunks. Dedup is global — identical unencrypted content is stored once
+// across all tenants — so a chunk must have ONE address, outside every
+// tenant's namespace: container `_global` AND the tenant
+// engine.ChunkAddressTenant in the driver context (a fixed-bucket backend keys
+// `t-<tenant in the context>/<container>/…`; with the uploader's tenant there
+// a chunk was reachable by its uploader only — WP-R8-7). Every chunk blob
+// call goes through chunkStore (chunk_store.go), which builds that context.
 //
 // Isolation is preserved at the manifest layer: a tenant can only reach a chunk
 // through its own tenant_chunk_refs rows (queried by tenant_id in
-// GetObjectChunks). The container itself is not addressable via the S3 API,
-// since every S3 request is routed through the tenant namespace
-// ("tenant/{id}/{bucket}"), never the bare "_global" prefix.
-const chunkContainer = "_global"
+// GetObjectChunks). The container itself is not addressable via the S3 API:
+// a tenant's objects live in containers named `<tenant>_<bucket>`, under its
+// own tenant id, never `_global` under the reserved one.
+const chunkContainer = engine.ChunkContainer
 
 // S3ToEngine adapts S3 requests to engine operations.
 type S3ToEngine struct {
@@ -132,6 +135,11 @@ func NewS3ToEngine(e engine.Engine, db *sql.DB, logger *zap.Logger) *S3ToEngine 
 		chunkStoreConcurrency: defaultChunkStoreConcurrency,
 		chunkGetPrefetch:      defaultChunkGetPrefetch,
 	}
+}
+
+// chunks is the adapter's chunk store: the one way a chunk blob is addressed.
+func (a *S3ToEngine) chunks() *chunkStore {
+	return newChunkStore(a.engine, a.db, a.logger)
 }
 
 // TranslateRequest converts S3 terminology to engine terminology
@@ -1200,12 +1208,12 @@ func (a *S3ToEngine) handleChunkedPut(
 	encrypting := a.chunkEncSvc != nil
 	dedupScope := crypto.GlobalDedupScope
 	if encrypting {
-		// The tenant ID becomes the dedup-scope partition. Nothing else
-		// validates that a tenant ID can't equal the "_global" sentinel
-		// (registration never mints one, but the property is load-bearing
-		// enough to enforce here rather than assume).
-		if t.ID == crypto.GlobalDedupScope {
-			return fmt.Errorf("tenant ID collides with the global dedup scope sentinel")
+		// The tenant ID becomes the dedup-scope partition, so it must not
+		// be the shared scope's name. The S3 front door refuses reserved
+		// ids (handleS3Request); this is the same rule where it is
+		// load-bearing.
+		if engine.IsReservedTenantID(t.ID) {
+			return fmt.Errorf("tenant ID is reserved: it collides with the shared dedup scope")
 		}
 		dedupScope = t.ID
 	}
@@ -1525,9 +1533,7 @@ func (a *S3ToEngine) storeChunkLocked(ctx context.Context, scope, storageKey str
 		return chunkStoreResult{}, fmt.Errorf("check chunk index under lock: %w", err)
 	}
 
-	storedBytes := int64(len(storeData))
-	chunkOpts := []engine.PutOption{engine.WithContentLength(storedBytes)}
-	bn, putErr := a.engine.Put(ctx, chunkContainer, storageKey, bytes.NewReader(storeData), chunkOpts...)
+	bn, putErr := a.chunks().put(ctx, storageKey, storeData)
 	if putErr != nil {
 		return chunkStoreResult{}, putErr
 	}
@@ -1549,6 +1555,7 @@ var errChunkIntegrity = errors.New("chunk integrity verification failed")
 
 // chunkDesc is a resolved chunk location + its byte position within the object.
 type chunkDesc struct {
+	scope          string // dedup scope of the index row
 	storageKey     string
 	backendID      string
 	plaintextHash  string
@@ -1567,15 +1574,10 @@ type chunkDesc struct {
 //
 // Pipeline order: fetch → decrypt → decompress → verify.
 func (a *S3ToEngine) fetchAndVerifyChunk(ctx context.Context, d chunkDesc, tenantID string) ([]byte, error) {
-	// Hint the backend that holds this chunk so retrieval is deterministic after
-	// a restart (when the engine's in-memory routing map is cold).
-	if d.backendID != "" {
-		if ce, ok := a.engine.(*engine.CoreEngine); ok {
-			ce.HintBackend(chunkContainer, d.storageKey, d.backendID)
-		}
-	}
-
-	rdr, err := a.engine.Get(ctx, chunkContainer, d.storageKey)
+	// The one address of the chunk on the backend its index row names
+	// (chunk_store.go); blobs written before WP-R8-7 are found at their old
+	// address until the chunk move has run.
+	rdr, err := a.chunks().get(ctx, chunkAddr{scope: d.scope, hash: d.plaintextHash, backend: d.backendID, key: d.storageKey})
 	if err != nil {
 		return nil, fmt.Errorf("fetch chunk %s: %w", d.plaintextHash[:16], err)
 	}
@@ -1682,6 +1684,7 @@ func (a *S3ToEngine) handleChunkedGet(
 			ctHash = *ref.CiphertextHash
 		}
 		descs[i] = chunkDesc{
+			scope:          scope,
 			storageKey:     storageKey,
 			backendID:      lookup.Entry.BackendID,
 			plaintextHash:  ref.PlaintextHash,
