@@ -83,7 +83,7 @@ func (f *classFixture) vaultObject(bucket, key string) {
 
 func (f *classFixture) req(method, target string) *http.Request {
 	r := httptest.NewRequest(method, target, nil)
-	return r.WithContext(tenant.WithTenant(r.Context(), f.tn))
+	return r.WithContext(s3Ctx(r.Context(), f.tn))
 }
 
 func (f *classFixture) floorOf(bucket, key string) string {
@@ -335,7 +335,7 @@ func TestRestoreObject_DemotedStandardObjectAnswersLikeAStandardObject(t *testin
 	// Act
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/b/old.jpg?restore", strings.NewReader(`<RestoreRequest><Days>2</Days></RestoreRequest>`))
-	r = r.WithContext(tenant.WithTenant(r.Context(), f.tn))
+	r = r.WithContext(s3Ctx(r.Context(), f.tn))
 	f.server.handleRestoreObject(w, r, &S3Request{Bucket: "b", Object: "old.jpg", TenantID: f.tenantID})
 
 	// Assert: AWS's answer for RestoreObject on a STANDARD object, and no

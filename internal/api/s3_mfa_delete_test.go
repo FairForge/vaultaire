@@ -135,7 +135,7 @@ func (f *mfaDeleteFixture) putObject(t *testing.T, key, content string) {
 	t.Helper()
 	req := httptest.NewRequest("PUT", "/"+f.bucket+"/"+key, bytes.NewReader([]byte(content)))
 	req.Header.Set("Content-Type", "text/plain")
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, f.bucket, key)
@@ -163,7 +163,7 @@ func TestMFADelete_NotEnabled_AllowsDelete(t *testing.T) {
 	f.putObject(t, key, "data to delete")
 
 	req := httptest.NewRequest("DELETE", "/"+f.bucket+"/"+key, nil)
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	s3Req := &S3Request{Bucket: f.bucket, Object: key, TenantID: f.tenantID}
@@ -182,7 +182,7 @@ func TestMFADelete_Enabled_MissingHeader_Denied(t *testing.T) {
 	f.putObject(t, key, "protected data")
 
 	req := httptest.NewRequest("DELETE", "/"+f.bucket+"/"+key, nil)
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	s3Req := &S3Request{Bucket: f.bucket, Object: key, TenantID: f.tenantID}
@@ -206,7 +206,7 @@ func TestMFADelete_Enabled_ValidCode_Succeeds(t *testing.T) {
 
 	req := httptest.NewRequest("DELETE", "/"+f.bucket+"/"+key, nil)
 	req.Header.Set("x-amz-mfa", "arn:aws:iam::serial "+testMFACode(t))
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	s3Req := &S3Request{Bucket: f.bucket, Object: key, TenantID: f.tenantID}
@@ -226,7 +226,7 @@ func TestMFADelete_Enabled_InvalidCode_Denied(t *testing.T) {
 
 	req := httptest.NewRequest("DELETE", "/"+f.bucket+"/"+key, nil)
 	req.Header.Set("x-amz-mfa", "arn:aws:iam::serial 999999")
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	s3Req := &S3Request{Bucket: f.bucket, Object: key, TenantID: f.tenantID}
@@ -248,7 +248,7 @@ func TestMFADelete_EnableRequiresMFA(t *testing.T) {
 	</VersioningConfiguration>`
 
 	req := httptest.NewRequest("PUT", "/"+f.bucket+"?versioning", bytes.NewReader([]byte(body)))
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -258,7 +258,7 @@ func TestMFADelete_EnableRequiresMFA(t *testing.T) {
 	// With valid MFA header — should succeed
 	req = httptest.NewRequest("PUT", "/"+f.bucket+"?versioning", bytes.NewReader([]byte(body)))
 	req.Header.Set("x-amz-mfa", "arn:aws:iam::serial "+testMFACode(t))
-	ctx = tenant.WithTenant(req.Context(), f.tenant)
+	ctx = s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	w = httptest.NewRecorder()
@@ -297,7 +297,7 @@ func TestMFADelete_EnableRequiresObjectLock(t *testing.T) {
 
 	req := httptest.NewRequest("PUT", "/"+noLockBucket+"?versioning", bytes.NewReader([]byte(body)))
 	req.Header.Set("x-amz-mfa", "arn:aws:iam::serial "+testMFACode(t))
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	s3Req := &S3Request{Bucket: noLockBucket, TenantID: f.tenantID}
@@ -326,7 +326,7 @@ func TestMFADelete_PutVersioning_SuspendRequiresMFA(t *testing.T) {
 	</VersioningConfiguration>`
 
 	req := httptest.NewRequest("PUT", "/"+f.bucket+"?versioning", bytes.NewReader([]byte(body)))
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	s3Req := &S3Request{Bucket: f.bucket, TenantID: f.tenantID}
@@ -337,7 +337,7 @@ func TestMFADelete_PutVersioning_SuspendRequiresMFA(t *testing.T) {
 
 	req = httptest.NewRequest("PUT", "/"+f.bucket+"?versioning", bytes.NewReader([]byte(body)))
 	req.Header.Set("x-amz-mfa", "arn:aws:iam::serial "+testMFACode(t))
-	ctx = tenant.WithTenant(req.Context(), f.tenant)
+	ctx = s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	w = httptest.NewRecorder()
@@ -352,7 +352,7 @@ func TestMFADelete_GetVersioning_ReturnsMfaDeleteStatus(t *testing.T) {
 
 	// Before enabling — MfaDelete should be absent
 	req := httptest.NewRequest("GET", "/"+f.bucket+"?versioning", nil)
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 	f.server.handleGetBucketVersioning(w, req, s3Req)
@@ -366,7 +366,7 @@ func TestMFADelete_GetVersioning_ReturnsMfaDeleteStatus(t *testing.T) {
 	f.enableMFADelete(t)
 
 	req = httptest.NewRequest("GET", "/"+f.bucket+"?versioning", nil)
-	ctx = tenant.WithTenant(req.Context(), f.tenant)
+	ctx = s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w = httptest.NewRecorder()
 	f.server.handleGetBucketVersioning(w, req, s3Req)

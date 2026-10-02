@@ -230,6 +230,12 @@ func (e *CoreEngine) GetRange(ctx context.Context, container, artifact string, o
 // lifetime without a DB round-trip.
 func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...PutOption) (string, error) {
 	tenantID := common.GetTenantID(ctx)
+	// A chunk blob has one address (WP-R8-7): a write into the chunk
+	// container under any other tenant's context would store it where no
+	// other reader, and no collector, will ever look.
+	if container == ChunkContainer && tenantID != ChunkAddressTenant {
+		return "", fmt.Errorf("put %s/%s: %w", container, artifact, ErrChunkAddress)
+	}
 	sizeReader := &sizeTrackingReader{Reader: data}
 
 	// Quota accounting deliberately does NOT happen here (WP-1): the API

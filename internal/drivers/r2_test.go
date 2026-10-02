@@ -95,8 +95,12 @@ func TestR2Driver_BuildKey(t *testing.T) {
 		d.buildKey("tenant-1", "tenant-1_photos", "2026/a.jpg"))
 
 	ctx := common.WithTenantID(context.Background(), "tenant-9")
-	assert.Equal(t, "tenant-9", d.getTenantID(ctx))
-	assert.Equal(t, "default", d.getTenantID(context.Background()))
+	key, err := d.key(ctx, "Get", "tenant-9_photos", "a.jpg")
+	require.NoError(t, err)
+	assert.Equal(t, "t-tenant-9/tenant-9_photos/a.jpg", key)
+	// No tenant in the context: refused, not filed under "default" (WP-R8-7).
+	_, err = d.key(context.Background(), "Get", "tenant-9_photos", "a.jpg")
+	require.ErrorIs(t, err, ErrNoTenant)
 }
 
 func TestR2Driver_ImplementsEngineInterfaces(t *testing.T) {

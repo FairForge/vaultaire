@@ -56,7 +56,7 @@ func TestS3_PutAndGet_WithTenant(t *testing.T) {
 	testContent := "test content for step 56"
 	putReq := httptest.NewRequest("PUT", "/test-bucket/test-key.txt",
 		bytes.NewReader([]byte(testContent)))
-	ctx := tenant.WithTenant(putReq.Context(), testTenant)
+	ctx := s3Ctx(putReq.Context(), testTenant)
 	putReq = putReq.WithContext(ctx)
 
 	putW := httptest.NewRecorder()
@@ -65,7 +65,7 @@ func TestS3_PutAndGet_WithTenant(t *testing.T) {
 
 	// Test GET
 	getReq := httptest.NewRequest("GET", "/test-bucket/test-key.txt", nil)
-	ctx = tenant.WithTenant(getReq.Context(), testTenant)
+	ctx = s3Ctx(getReq.Context(), testTenant)
 	getReq = getReq.WithContext(ctx)
 
 	getW := httptest.NewRecorder()

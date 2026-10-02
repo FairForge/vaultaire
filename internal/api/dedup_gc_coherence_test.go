@@ -35,7 +35,6 @@ import (
 	"github.com/FairForge/vaultaire/internal/account"
 	"github.com/FairForge/vaultaire/internal/testutil"
 
-	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -71,7 +70,7 @@ func tenantChunks(t *testing.T, db *sql.DB, tenantID, key string) []scopedChunk 
 func deleteChunkedObject(t *testing.T, f *adapterTestFixture, key string) {
 	t.Helper()
 	req := httptest.NewRequest("DELETE", "/test-bucket/"+key, nil)
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandleDelete(w, req, "test-bucket", key)
 	require.Equal(t, http.StatusNoContent, w.Code)
@@ -80,7 +79,7 @@ func deleteChunkedObject(t *testing.T, f *adapterTestFixture, key string) {
 func getChunkedObject(t *testing.T, f *adapterTestFixture, key string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest("GET", "/test-bucket/"+key, nil)
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandleGet(w, req, "test-bucket", key)
 	return w
@@ -222,7 +221,7 @@ func TestChunkedPut_AbortedInstallReleasesRefs(t *testing.T) {
 
 	req := httptest.NewRequest("PUT", "/test-bucket/abort-doomed.bin", bytes.NewReader(content))
 	req.ContentLength = int64(len(content))
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, "test-bucket", "abort-doomed.bin")
 	require.GreaterOrEqual(t, w.Code, 500, "install failure must abort the chunked PUT")

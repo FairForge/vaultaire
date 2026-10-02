@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"syscall"
 
+	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/database"
 	"github.com/FairForge/vaultaire/internal/drivers"
@@ -180,7 +181,9 @@ func migrateObject(ctx context.Context, d *deps, c candidate, dryRun, keepOrigin
 	t := &tenant.Tenant{ID: c.tenantID}
 	container := t.NamespaceContainer(c.bucket)
 
-	reader, err := d.eng.Get(ctx, container, c.key)
+	// The object is read where its tenant's requests wrote it: drivers key by
+	// the tenant in the context and refuse a call that names none.
+	reader, err := d.eng.Get(common.WithTenantID(ctx, c.tenantID), container, c.key)
 	if err != nil {
 		return nil, fmt.Errorf("get object %s/%s: %w", c.bucket, c.key, err)
 	}
@@ -223,8 +226,9 @@ func migrateObject(ctx context.Context, d *deps, c candidate, dryRun, keepOrigin
 		if !dryRun {
 			if lookup.IsNewChunk {
 				opts := []engine.PutOption{engine.WithContentLength(int64(chunk.Size))}
-				// "_global" — shared chunk container (see internal/api/s3_engine_adapter.go:39)
-				bn, putErr := d.eng.Put(ctx, "_global", storageKey, bytes.NewReader(chunk.Data), opts...)
+				// The one address of a chunk blob (WP-R8-7): container and
+				// context both come from the engine's helper.
+				bn, putErr := d.eng.Put(engine.ChunkContext(ctx), engine.ChunkContainer, storageKey, bytes.NewReader(chunk.Data), opts...)
 				if putErr != nil {
 					return nil, fmt.Errorf("store chunk %s: %w", chunk.Hash[:16], putErr)
 				}
@@ -316,7 +320,7 @@ func migrateObject(ctx context.Context, d *deps, c candidate, dryRun, keepOrigin
 
 	// Step 3: delete the monolithic copy (only after flag flip)
 	if !keepOriginal {
-		if err := d.eng.Delete(ctx, container, c.key); err != nil {
+		if err := d.eng.Delete(common.WithTenantID(ctx, c.tenantID), container, c.key); err != nil {
 			d.log.Warn("delete original failed (object is migrated, original leaked)",
 				zap.String("key", c.key), zap.Error(err))
 		}
@@ -424,7 +428,7 @@ func bootstrap(logger *zap.Logger) (*sql.DB, *engine.CoreEngine) {
 		if ep := os.Getenv("GEYSER_ENDPOINT"); ep != "" {
 			geyserOpts = append(geyserOpts, drivers.WithGeyserEndpoint(ep))
 		}
-		if d, dErr := drivers.NewGeyserDriver(accessKey, secretKey, bucket, "vaultaire", logger, geyserOpts...); dErr == nil {
+		if d, dErr := drivers.NewGeyserDriver(accessKey, secretKey, bucket, "", logger, geyserOpts...); dErr == nil {
 			eng.AddDriver("geyser", d)
 			logger.Info("geyser driver added")
 		}

@@ -124,7 +124,7 @@ func TestGetBucketLogging_Disabled(t *testing.T) {
 	f := setupLoggingFixture(t)
 
 	s3Req := &S3Request{Bucket: f.bucket, TenantID: f.tenantID}
-	ctx := tenant.WithTenant(context.Background(), f.tenant)
+	ctx := s3Ctx(context.Background(), f.tenant)
 	r := httptest.NewRequest("GET", "/"+f.bucket+"?logging", nil).WithContext(ctx)
 	w := httptest.NewRecorder()
 
@@ -152,7 +152,7 @@ func TestPutBucketLogging_Enable(t *testing.T) {
 </BucketLoggingStatus>`, f.logBucket)
 
 	s3Req := &S3Request{Bucket: f.bucket, TenantID: f.tenantID}
-	ctx := tenant.WithTenant(context.Background(), f.tenant)
+	ctx := s3Ctx(context.Background(), f.tenant)
 	r := httptest.NewRequest("PUT", "/"+f.bucket+"?logging", bytes.NewReader([]byte(configXML))).WithContext(ctx)
 	w := httptest.NewRecorder()
 
@@ -184,7 +184,7 @@ func TestPutBucketLogging_SameBucket(t *testing.T) {
 </BucketLoggingStatus>`, f.bucket) // self-referential
 
 	s3Req := &S3Request{Bucket: f.bucket, TenantID: f.tenantID}
-	ctx := tenant.WithTenant(context.Background(), f.tenant)
+	ctx := s3Ctx(context.Background(), f.tenant)
 	r := httptest.NewRequest("PUT", "/"+f.bucket+"?logging", bytes.NewReader([]byte(configXML))).WithContext(ctx)
 	w := httptest.NewRecorder()
 

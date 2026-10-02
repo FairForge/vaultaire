@@ -88,3 +88,34 @@ groups:
         annotations:
           summary: "5xx ratio above 5%"
           description: "{{ $value | humanizePercentage }} of requests returned 5xx over the last 10 minutes (≥10 errors)."
+
+      # WP-R8-7. A fixed-bucket driver (idrive, lyve, geyser, r2, permafrost)
+      # keys every object by the tenant in the context of the call. A call
+      # that names no tenant used to be filed under t-default/ — a miss for an
+      # object that exists, a write nothing finds, a delete that "succeeds" on
+      # nothing (how dedup GC leaked every chunk blob). Such a call is refused
+      # now; any increase is a bug in a caller. The series starts at 0 for
+      # every registered backend. The "driver call refused" Error line names
+      # the backend and the operation.
+      - alert: DriverCallWithoutTenant
+        expr: increase(vaultaire_driver_calls_without_tenant_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A driver call on {{ $labels.backend }} carried no tenant and was refused"
+          description: "{{ $value | printf \"%.0f\" }} call(s) in the last hour on {{ $labels.backend }} named no tenant in their context (they would have addressed t-default/). journalctl -u vaultaire | grep 'driver call refused' names the operation; the caller needs common.WithTenantID or engine.ChunkContext."
+
+      # WP-R8-7. Chunk blobs written before the one address existed are read
+      # from the uploading tenant's prefix until the chunk move has run
+      # (POST /api/v1/admin/chunk-move?backend=idrive&dry_run=false). Reads
+      # from a legacy address after the move mean a blob the move did not
+      # reach: run the dry run again and read its errors.
+      - alert: ChunkLegacyAddressReads
+        expr: increase(vaultaire_chunk_legacy_address_reads_total[24h]) > 0
+        for: 0m
+        labels:
+          severity: info
+        annotations:
+          summary: "Chunk reads served from a legacy address"
+          description: "{{ $value | printf \"%.0f\" }} chunk read(s) in the last 24 hours missed at the one address and were served from under a tenant's prefix. Before the chunk move this is expected; after it, POST /api/v1/admin/chunk-move?backend=<b> (a dry run) shows what is left. When the series stays at 0 the read fallback can be removed (docs/reviews/WP-R8-7.md)."

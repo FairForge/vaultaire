@@ -23,7 +23,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/FairForge/vaultaire/internal/drivers"
-	"github.com/FairForge/vaultaire/internal/tenant"
 )
 
 // Review R3 (docs/reviews/R3-multipart-copy-batch.md): multipart complete,
@@ -41,7 +40,7 @@ func (f *versioningFixture) s3(t *testing.T, method, path string, body io.Reader
 	for k, v := range hdr {
 		req.Header.Set(k, v)
 	}
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.server.handleS3Request(w, req)
 	return w
@@ -267,7 +266,7 @@ func TestCopyObject_MetadataDirectiveCopyAndReplace(t *testing.T) {
 	req.Header.Set("X-Amz-Meta-Foo", "bar")
 	req.Header.Set("Content-Disposition", `attachment; filename="s.txt"`)
 	req.Header.Set("Cache-Control", "max-age=60")
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, f.bucket, "src.txt")
 	require.Equal(t, http.StatusOK, w.Code)
@@ -422,7 +421,7 @@ func TestUploadPart_AwsChunkedFramingIsStripped(t *testing.T) {
 	req.Header.Set("Content-Encoding", "aws-chunked")
 	req.Header.Set("x-amz-decoded-content-length", fmt.Sprint(len(payload)))
 	req.ContentLength = int64(len(framed))
-	req = req.WithContext(tenant.WithTenant(req.Context(), tnt))
+	req = req.WithContext(s3Ctx(req.Context(), tnt))
 	rec := httptest.NewRecorder()
 	srv.handleS3Request(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())

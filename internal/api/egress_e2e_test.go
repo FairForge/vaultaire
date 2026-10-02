@@ -155,7 +155,7 @@ func (f *egressFixture) handler() http.Handler {
 			f.srv.router.ServeHTTP(w, r)
 			return
 		}
-		f.srv.handleS3Request(w, r.WithContext(tenant.WithTenant(r.Context(), f.tn)))
+		f.srv.handleS3Request(w, r.WithContext(s3Ctx(r.Context(), f.tn)))
 	})
 }
 
@@ -826,7 +826,7 @@ func TestEgress_EveryObjectBodyPathGoesThroughTheThrottle(t *testing.T) {
 			req.Header.Set("x-amz-server-side-encryption", "AES256")
 		}
 		rec := httptest.NewRecorder()
-		a.HandlePut(rec, req.WithContext(tenant.WithTenant(req.Context(), f.tn)), egressTestBucket, key)
+		a.HandlePut(rec, req.WithContext(s3Ctx(req.Context(), f.tn)), egressTestBucket, key)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	}
 	plain := make([]byte, 3*mib)
@@ -862,7 +862,7 @@ func TestEgress_EveryObjectBodyPathGoesThroughTheThrottle(t *testing.T) {
 			if tc.rng != "" {
 				req.Header.Set("Range", tc.rng)
 			}
-			req = req.WithContext(tenant.WithTenant(req.Context(), f.tn))
+			req = req.WithContext(s3Ctx(req.Context(), f.tn))
 			under := &sliceRecorder{}
 			var body bytes.Buffer
 			tee := &teeWriter{sliceRecorder: under, buf: &body}

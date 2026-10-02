@@ -46,13 +46,20 @@ import (
 //     the driver (deleteCopyOn — never engine.Delete, which falls back to the
 //     primary).
 //
-// What it never touches: the shared chunk container. On a fixed-bucket
-// backend the chunk blobs written during a tenant's requests sit under that
-// tenant's prefix (`t-<tenant>/_global/…`); they are the content index's,
-// released by the manifest path and dedup GC's to collect. The walk reports
-// them, the sweep counts them (ChunkBlobsLeft) and leaves them. (That GC
-// does not find them under a tenant's prefix is WP-R8-7, not the sweep's to
-// paper over: another tenant's manifest may name the same chunk.)
+// What it never touches: the chunk container. A chunk blob is the content
+// index's — another tenant's manifest may name the same chunk — released by
+// the manifest path and collected by dedup GC at its one address
+// (`t-_global/_global/…`, chunk_store.go), which no tenant walk can list: the
+// sweep refuses every id that does not start with a letter or a digit.
+//
+// What a walk can still find under a tenant's prefix is a chunk blob written
+// BEFORE WP-R8-7 (`t-<tenant>/_global/…`), which the chunk move has not yet
+// brought to the one address. The sweep still does not delete it (the skip is
+// what protects a chunk another tenant shares), counts it (ChunkBlobsLeft) —
+// and DEFERS the tenant: once the tenant's rows are gone nothing would name
+// that prefix again, and dedup GC deletes at the one address only, so the
+// blob would stay for ever. The chunk move (POST /api/v1/admin/chunk-move)
+// empties the prefix; the next run of the erasure then finds 0 and finishes.
 //
 // What it cannot reach: a backend with no registered driver. Rows that name
 // one are listed in the erasure record (UnsweptBackends) and the log.
@@ -390,16 +397,18 @@ func (s *tenantSweep) remove(ctx context.Context, backend, container, artifact s
 // walk sweeps a backend that can list the tenant: everything under the
 // tenant's prefix except the shared chunk container.
 func (s *tenantSweep) walk(ctx context.Context, backend string, walker engine.TenantWalker) error {
-	failures := 0
+	failures, chunkBlobs := 0, 0
 	err := walker.WalkTenant(ctx, s.d.TenantID, func(o engine.TenantObject) error {
 		if err := s.tick(ctx); err != nil {
 			return err
 		}
 		if o.Container == chunkContainer {
 			// Not the tenant's container: the content index owns these blobs
-			// (another manifest may reference the same chunk); collecting
-			// them is dedup GC's job.
+			// (another manifest may reference the same chunk). A blob HERE
+			// was written before chunks had one address (WP-R8-7) and the
+			// chunk move has not reached it yet.
 			if !s.final { // the pass after the erase sees the same blobs again
+				chunkBlobs++
 				s.te.ChunkBlobsLeft++
 				accountDeletionSwept.WithLabelValues(backend, "shared_left").Inc()
 			}
@@ -412,6 +421,13 @@ func (s *tenantSweep) walk(ctx context.Context, backend string, walker engine.Te
 	}
 	if failures > 0 {
 		return fmt.Errorf("%d deletes failed", failures)
+	}
+	if chunkBlobs > 0 {
+		// Not erased yet: nothing collects a chunk blob under a tenant's
+		// prefix, and after the row erase nothing would name the prefix.
+		return fmt.Errorf("%d chunk blob(s) written before WP-R8-7 are still under the tenant's prefix: "+
+			"run the chunk move (POST /api/v1/admin/chunk-move?backend=%s&dry_run=false), the erasure finishes on its next run",
+			chunkBlobs, backend)
 	}
 	return nil
 }

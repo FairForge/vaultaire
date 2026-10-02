@@ -156,7 +156,7 @@ func TestExists_MissVsErrorOnEveryS3Driver(t *testing.T) {
 		for _, tc := range s3ShapeCases {
 			t.Run(drv.name+"/"+tc.name, func(t *testing.T) {
 				exists := drv.mk(newShapeClient(t, tc.shape))
-				ok, err := exists(context.Background())
+				ok, err := exists(tenantCtx())
 				assert.False(t, ok)
 				if tc.headNotFound {
 					assert.NoError(t, err, "a miss is (false, nil)")
@@ -167,7 +167,7 @@ func TestExists_MissVsErrorOnEveryS3Driver(t *testing.T) {
 		}
 		t.Run(drv.name+"/200 present", func(t *testing.T) {
 			exists := drv.mk(newShapeClient(t, s3Shape{status: 200}))
-			ok, err := exists(context.Background())
+			ok, err := exists(tenantCtx())
 			require.NoError(t, err)
 			assert.True(t, ok)
 		})

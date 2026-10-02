@@ -126,7 +126,7 @@ func setupA1Fixture(t *testing.T) *a1Fixture {
 }
 
 func (f *a1Fixture) ctx() context.Context {
-	return tenant.WithTenant(context.Background(), f.tenant)
+	return s3Ctx(context.Background(), f.tenant)
 }
 
 // --- CreateBucket Location header ----------------------------------------

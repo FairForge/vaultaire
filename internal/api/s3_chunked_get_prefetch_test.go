@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/engine"
-	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -92,7 +91,7 @@ func TestChunkedGet_PrefetchRangeRequest(t *testing.T) {
 	start, end := int64(512*1024), int64(8<<20)
 	req := httptest.NewRequest("GET", "/test-bucket/prefetch-range.bin", nil)
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandleGet(w, req, "test-bucket", "prefetch-range.bin")
 

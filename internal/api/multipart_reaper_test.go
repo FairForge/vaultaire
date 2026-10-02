@@ -26,7 +26,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -146,7 +145,7 @@ func TestMultipartReaper_NilGuards(t *testing.T) {
 func capFixtureInitiate(t *testing.T, f *quotaAccountingFixture, key string) string {
 	t.Helper()
 	req := httptest.NewRequest("POST", "/test-bucket/"+key+"?uploads", nil)
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.server.handleInitiateMultipartUpload(w, req, "test-bucket", key)
 	require.Equal(t, 200, w.Code)
@@ -164,7 +163,7 @@ func capFixtureUploadPart(t *testing.T, f *quotaAccountingFixture, key, uploadID
 	url := fmt.Sprintf("/test-bucket/%s?uploadId=%s&partNumber=%d", key, uploadID, partNumber)
 	req := httptest.NewRequest("PUT", url, bytes.NewReader(data))
 	req.ContentLength = int64(len(data))
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.server.handleUploadPart(w, req, "test-bucket", key)
 	return w

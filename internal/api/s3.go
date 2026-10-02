@@ -379,6 +379,17 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 			zap.String("path", r.URL.Path))
 	}
 
+	// An id starting with '_' is the system's (engine.ChunkAddressTenant is
+	// where every chunk blob lives, WP-R8-7): no credential may resolve to
+	// one. Registration mints `tenant-<hex>`; this is the check that nobody
+	// made such a row by hand.
+	if tenantID != "" && engine.IsReservedTenantID(tenantID) {
+		s.logger.Error("request refused: the credential resolves to a reserved tenant id",
+			zap.String("tenant_id", tenantID), zap.String("path", r.URL.Path))
+		WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
+		return
+	}
+
 	// The key's scope travels with the request: Object Lock reads it to
 	// decide whether x-amz-bypass-governance-retention is this key's to send
 	// (WP-R4-1 — it used to be a local of this function, and the header

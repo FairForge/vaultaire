@@ -244,7 +244,10 @@ func main() {
 		if ep := os.Getenv("GEYSER_ENDPOINT"); ep != "" {
 			geyserOpts = append(geyserOpts, drivers.WithGeyserEndpoint(ep))
 		}
-		geyserDriver, err := drivers.NewGeyserDriver(accessKey, secretKey, bucket, "vaultaire", logger, geyserOpts...)
+		// No driver-level default tenant (it was "vaultaire"): a call whose
+		// context names no tenant is refused, not filed under a made-up one
+		// (WP-R8-7, internal/drivers/tenant_ctx.go).
+		geyserDriver, err := drivers.NewGeyserDriver(accessKey, secretKey, bucket, "", logger, geyserOpts...)
 		if err != nil {
 			logger.Warn("failed to create Geyser driver", zap.Error(err))
 		} else {

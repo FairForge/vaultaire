@@ -9,13 +9,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/account"
-	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/testutil"
@@ -30,130 +28,6 @@ import (
 // PM-3 of #529).
 
 // --- test backends -------------------------------------------------------------
-
-// fixedBucketDriver keys the way iDrive, Lyve, Geyser and R2 do: one store,
-// every key `t-<tenant>/<container>/<artifact>`, the tenant taken from the
-// context ("default" when it carries none). It implements engine.TenantWalker
-// and can be told to fail the way a backend does.
-type fixedBucketDriver struct {
-	dir string
-
-	failGet       atomic.Bool  // reads fail (what opens the engine's breaker)
-	failWalkAfter atomic.Int32 // > 0: the listing fails after handing out this many objects
-	failRemove    atomic.Bool  // every delete is refused
-	hangRemove    atomic.Bool  // every delete waits for its context to give up
-	walks         atomic.Int32 // WalkTenant calls
-	removes       atomic.Int32 // deletes attempted
-	onObject      func(n int)  // called before object n of a walk is handed out
-}
-
-func (d *fixedBucketDriver) tenant(ctx context.Context) string {
-	if t, ok := ctx.Value(common.TenantIDKey).(string); ok && t != "" {
-		return t
-	}
-	return "default"
-}
-
-func (d *fixedBucketDriver) path(tenant, container, artifact string) string {
-	return filepath.Join(d.dir, "t-"+tenant, container, filepath.FromSlash(artifact))
-}
-
-func (d *fixedBucketDriver) Name() string { return "fixed" }
-
-func (d *fixedBucketDriver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
-	if d.failGet.Load() {
-		return nil, errors.New("fixed: connection refused")
-	}
-	f, err := os.Open(d.path(d.tenant(ctx), container, artifact))
-	if err != nil {
-		return nil, engine.ErrNotFound(container, artifact)
-	}
-	return f, nil
-}
-
-func (d *fixedBucketDriver) Put(ctx context.Context, container, artifact string, data io.Reader, _ ...engine.PutOption) error {
-	p := d.path(d.tenant(ctx), container, artifact)
-	if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
-		return err
-	}
-	b, err := io.ReadAll(data)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(p, b, 0o600)
-}
-
-func (d *fixedBucketDriver) Delete(ctx context.Context, container, artifact string) error {
-	return os.Remove(d.path(d.tenant(ctx), container, artifact))
-}
-
-func (d *fixedBucketDriver) List(ctx context.Context, container, prefix string) ([]string, error) {
-	var out []string
-	root := filepath.Join(d.dir, "t-"+d.tenant(ctx), container)
-	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return nil
-		}
-		rel, _ := filepath.Rel(root, p)
-		if name := filepath.ToSlash(rel); strings.HasPrefix(name, prefix) {
-			out = append(out, name)
-		}
-		return nil
-	})
-	return out, err
-}
-
-func (d *fixedBucketDriver) Exists(ctx context.Context, container, artifact string) (bool, error) {
-	return fileExists(d.path(d.tenant(ctx), container, artifact)), nil
-}
-
-func (d *fixedBucketDriver) HealthCheck(context.Context) error { return nil }
-
-func (d *fixedBucketDriver) WalkTenant(ctx context.Context, tenantID string, fn func(engine.TenantObject) error) error {
-	d.walks.Add(1)
-	if tenantID == "" || strings.Contains(tenantID, "/") {
-		return drivers.ErrWalkTenantID
-	}
-	root := filepath.Join(d.dir, "t-"+tenantID)
-	var files []string
-	_ = filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() {
-			files = append(files, p)
-		}
-		return nil
-	})
-	for n, p := range files {
-		if err := ctx.Err(); err != nil {
-			return fmt.Errorf("fixed: walk: %w", err)
-		}
-		if limit := int(d.failWalkAfter.Load()); limit > 0 && n >= limit {
-			return errors.New("fixed: walk: 500 InternalError on the next page")
-		}
-		if d.onObject != nil {
-			d.onObject(n)
-		}
-		rel, _ := filepath.Rel(root, p)
-		container, artifact, _ := strings.Cut(filepath.ToSlash(rel), "/")
-		err := fn(engine.TenantObject{Container: container, Artifact: artifact, Remove: func(rctx context.Context) error {
-			d.removes.Add(1)
-			if d.hangRemove.Load() {
-				<-rctx.Done()
-				return rctx.Err()
-			}
-			if d.failRemove.Load() {
-				return errors.New("fixed: 503 SlowDown")
-			}
-			if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-				return err
-			}
-			return nil
-		}})
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
 
 // listOnlyDriver is a backend that cannot list a tenant (the plain `s3`
 // driver, permafrost): the engine.Driver methods of a local driver and no
@@ -349,25 +223,44 @@ func TestErasureSweep_NeighboursAndTheChunkContainerSurvive(t *testing.T) {
 	for _, n := range []string{longer, shorter} {
 		theirs = append(theirs, f.onFixed(n, n+"_"+b, "theirs"), f.onFixed(n, n+"_"+bc, "theirs"))
 	}
-	// On a fixed-bucket store the chunks a tenant's requests wrote are under
-	// THAT tenant's prefix — inside the walk's reach.
-	chunks = append(chunks, f.onFixed(T, chunkContainer, "_chunks/h2"), f.onFixed("default", chunkContainer, "_chunks/h3"), f.onFixed(longer, chunkContainer, "_chunks/h4"))
+	// On a fixed-bucket store a chunk blob written BEFORE WP-R8-7 is under
+	// the prefix of the tenant whose request wrote it — inside the walk's
+	// reach. Since then a chunk has one address, under the reserved tenant
+	// id, which no walk can list.
+	legacyChunk := f.onFixed(T, chunkContainer, "_chunks/h2")
+	chunks = append(chunks, f.onFixed(engine.ChunkAddressTenant, chunkContainer, "_chunks/h3"), f.onFixed(longer, chunkContainer, "_chunks/h4"))
 	// The backend that cannot list a tenant: the buckets the tables remember
 	// are swept, a bucket no table remembers is out of its reach.
 	mine = append(mine, f.onLocal(f.plainDir, T, b, "orphan/a"), f.onLocal(f.plainDir, T, bc, "orphan/b"))
 	forgottenOnPlain := f.onLocal(f.plainDir, T, "forgotten", "orphan/c")
 	theirs = append(theirs, f.onLocal(f.plainDir, longer, b, "theirs"), f.onLocal(f.plainDir, shorter, bc, "theirs"))
 
-	// Act
+	// Act 1: the chunk move has not run yet.
 	te := f.run()
 
-	// Assert
-	require.Equal(t, outcomeErased, te.Outcome, "%+v", te)
+	// Assert: everything of the tenant's own is gone, the chunk blob is seen,
+	// counted and LEFT (another tenant's manifest may name it) — and the
+	// account is not reported erased: after the row erase nothing would name
+	// this prefix again, and no collector deletes under it.
+	require.Equal(t, outcomeDeferred, te.Outcome, "%+v", te)
+	assert.Contains(t, te.Error, "chunk move")
+	assert.Equal(t, 1, te.ChunkBlobsLeft, "the chunk blob under the tenant's own prefix is seen, counted and left")
+	assert.True(t, f.userExists(), "not erased while a chunk blob is still under the tenant's prefix")
 	assertGone(t, "the erased tenant's bytes", mine...)
 	assertKept(t, "a neighbour's bytes", theirs...)
-	assertKept(t, "the shared chunk container", chunks...)
+	assertKept(t, "the chunk container, at the one address and under a neighbour", chunks...)
+	assertKept(t, "the chunk blob under the tenant's prefix", legacyChunk)
 	assert.Equal(t, map[string]int{"local": 3, "second": 3, "fixed": 3, "plain": 2}, te.Swept)
-	assert.Equal(t, 1, te.ChunkBlobsLeft, "the chunk blob under the tenant's own prefix is seen, counted and left")
+
+	// Act 2: the chunk move emptied the prefix (here: by hand).
+	require.NoError(t, os.Remove(legacyChunk))
+	te = f.run()
+
+	// Assert: erased, nothing left behind, the chunk container untouched.
+	require.Equal(t, outcomeErased, te.Outcome, "%+v", te)
+	assert.Zero(t, te.ChunkBlobsLeft)
+	assertKept(t, "a neighbour's bytes", theirs...)
+	assertKept(t, "the chunk container", chunks...)
 	assertKept(t, "a bucket no table remembers, on a backend that cannot list a tenant (documented limit)", forgottenOnPlain)
 	assert.Equal(t, []string{"fixed", "local", "plain", "second"}, te.SweptBackends)
 }

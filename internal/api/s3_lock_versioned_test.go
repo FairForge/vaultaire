@@ -11,8 +11,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/FairForge/vaultaire/internal/tenant"
 )
 
 // R2-01: Object Lock must hold on versioning-enabled buckets — the only
@@ -37,7 +35,7 @@ func (f *versioningFixture) putObjectRaw(t *testing.T, key, content string) *htt
 	t.Helper()
 	req := httptest.NewRequest("PUT", "/"+f.bucket+"/"+key, bytes.NewReader([]byte(content)))
 	req.Header.Set("Content-Type", "text/plain")
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, f.bucket, key)
 	return w

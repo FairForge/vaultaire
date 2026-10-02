@@ -14,8 +14,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/FairForge/vaultaire/internal/tenant"
 )
 
 // R2-05 / R2-06 / R2-12: everything that can reject a PUT for a client-side
@@ -29,7 +27,7 @@ func adapterPut(t *testing.T, f *adapterTestFixture, key string, body []byte, hd
 	if hdr != nil {
 		hdr(req)
 	}
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, "test-bucket", key)
 	return w
@@ -82,7 +80,7 @@ func TestHandlePut_DeclaredLengthMismatch_Rejected(t *testing.T) {
 	// declared size.
 	req := httptest.NewRequest("PUT", "/test-bucket/short.bin", bytes.NewReader(body[:10]))
 	req.ContentLength = 5000
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w = httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, "test-bucket", "short.bin")
 	assert.Equal(t, http.StatusBadRequest, w.Code)

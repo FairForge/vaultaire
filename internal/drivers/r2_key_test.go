@@ -50,15 +50,15 @@ func TestR2Driver_KeyDotSegmentsAreSentLiterally(t *testing.T) {
 	_, err = d.Get(ctxA, "c", "/leading/slash")
 	require.Error(t, err)
 
-	// No tenant in ctx → the shared "default" prefix (R6-22), still inside t-*.
+	// No tenant in ctx → refused before any request (WP-R8-7); it used to
+	// be sent under the shared "default" prefix (R6-22).
 	_, err = d.Get(context.Background(), "c", "k")
-	require.Error(t, err)
+	require.ErrorIs(t, err, ErrNoTenant)
 
 	mu.Lock()
 	defer mu.Unlock()
-	require.Len(t, paths, 3)
+	require.Len(t, paths, 2)
 	assert.Equal(t, "/"+R2DefaultBucket+"/t-tenantA/c/x/../../t-tenantB/c/secret", paths[0],
 		"dot segments travel literally — nothing normalises the key toward another tenant's prefix")
 	assert.Equal(t, "/"+R2DefaultBucket+"/t-tenantA/c//leading/slash", paths[1])
-	assert.Equal(t, "/"+R2DefaultBucket+"/t-default/c/k", paths[2])
 }

@@ -132,7 +132,7 @@ func TestNotification_PutGetConfig(t *testing.T) {
 </NotificationConfiguration>`
 
 	req := httptest.NewRequest("PUT", "/"+f.bucket+"?notification", bytes.NewReader([]byte(configXML)))
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -141,7 +141,7 @@ func TestNotification_PutGetConfig(t *testing.T) {
 
 	// GET notification config
 	req = httptest.NewRequest("GET", "/"+f.bucket+"?notification", nil)
-	ctx = tenant.WithTenant(req.Context(), f.tenant)
+	ctx = s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	w = httptest.NewRecorder()
@@ -171,7 +171,7 @@ func TestNotification_ClearConfig(t *testing.T) {
 </NotificationConfiguration>`
 
 	req := httptest.NewRequest("PUT", "/"+f.bucket+"?notification", bytes.NewReader([]byte(configXML)))
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 	f.server.handlePutBucketNotification(w, req, &S3Request{Bucket: f.bucket, TenantID: f.tenantID})
@@ -180,7 +180,7 @@ func TestNotification_ClearConfig(t *testing.T) {
 	// Now clear it with empty config
 	emptyXML := `<NotificationConfiguration/>`
 	req = httptest.NewRequest("PUT", "/"+f.bucket+"?notification", bytes.NewReader([]byte(emptyXML)))
-	ctx = tenant.WithTenant(req.Context(), f.tenant)
+	ctx = s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w = httptest.NewRecorder()
 	f.server.handlePutBucketNotification(w, req, &S3Request{Bucket: f.bucket, TenantID: f.tenantID})
@@ -188,7 +188,7 @@ func TestNotification_ClearConfig(t *testing.T) {
 
 	// GET should return empty config
 	req = httptest.NewRequest("GET", "/"+f.bucket+"?notification", nil)
-	ctx = tenant.WithTenant(req.Context(), f.tenant)
+	ctx = s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w = httptest.NewRecorder()
 	f.server.handleGetBucketNotification(w, req, &S3Request{Bucket: f.bucket, TenantID: f.tenantID})
@@ -229,7 +229,7 @@ func TestNotification_EventFired(t *testing.T) {
 </NotificationConfiguration>`, webhookSrv.URL)
 
 	req := httptest.NewRequest("PUT", "/"+f.bucket+"?notification", bytes.NewReader([]byte(configXML)))
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 	f.server.handlePutBucketNotification(w, req, &S3Request{Bucket: f.bucket, TenantID: f.tenantID})
@@ -238,7 +238,7 @@ func TestNotification_EventFired(t *testing.T) {
 	// PUT an object — should trigger notification
 	req = httptest.NewRequest("PUT", "/"+f.bucket+"/test-file.txt", bytes.NewReader([]byte("hello world")))
 	req.Header.Set("Content-Type", "text/plain")
-	ctx = tenant.WithTenant(req.Context(), f.tenant)
+	ctx = s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w = httptest.NewRecorder()
 
@@ -291,7 +291,7 @@ func TestNotification_WildcardMatch(t *testing.T) {
 </NotificationConfiguration>`, webhookSrv.URL)
 
 	req := httptest.NewRequest("PUT", "/"+f.bucket+"?notification", bytes.NewReader([]byte(configXML)))
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 	f.server.handlePutBucketNotification(w, req, &S3Request{Bucket: f.bucket, TenantID: f.tenantID})
@@ -343,7 +343,7 @@ func TestNotification_DeleteEventFired(t *testing.T) {
 </NotificationConfiguration>`, webhookSrv.URL)
 
 	req := httptest.NewRequest("PUT", "/"+f.bucket+"?notification", bytes.NewReader([]byte(configXML)))
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 	f.server.handlePutBucketNotification(w, req, &S3Request{Bucket: f.bucket, TenantID: f.tenantID})
@@ -352,7 +352,7 @@ func TestNotification_DeleteEventFired(t *testing.T) {
 	// PUT an object first
 	req = httptest.NewRequest("PUT", "/"+f.bucket+"/delete-me.txt", bytes.NewReader([]byte("data")))
 	req.Header.Set("Content-Type", "text/plain")
-	ctx = tenant.WithTenant(req.Context(), f.tenant)
+	ctx = s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w = httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, f.bucket, "delete-me.txt")
@@ -363,7 +363,7 @@ func TestNotification_DeleteEventFired(t *testing.T) {
 	f.adapter.notifySvc = dispatcher
 
 	req = httptest.NewRequest("DELETE", "/"+f.bucket+"/delete-me.txt", nil)
-	ctx = tenant.WithTenant(req.Context(), f.tenant)
+	ctx = s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w = httptest.NewRecorder()
 	f.adapter.HandleDelete(w, req, f.bucket, "delete-me.txt")
@@ -410,7 +410,7 @@ func TestNotification_DisabledNotDelivered(t *testing.T) {
 </NotificationConfiguration>`, webhookSrv.URL)
 
 	req := httptest.NewRequest("PUT", "/"+f.bucket+"?notification", bytes.NewReader([]byte(configXML)))
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 	f.server.handlePutBucketNotification(w, req, &S3Request{Bucket: f.bucket, TenantID: f.tenantID})
@@ -470,7 +470,7 @@ func TestNotification_InvalidEventFilter(t *testing.T) {
 </NotificationConfiguration>`
 
 	req := httptest.NewRequest("PUT", "/"+f.bucket+"?notification", bytes.NewReader([]byte(configXML)))
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 	f.server.handlePutBucketNotification(w, req, &S3Request{Bucket: f.bucket, TenantID: f.tenantID})

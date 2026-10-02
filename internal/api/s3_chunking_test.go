@@ -35,7 +35,7 @@ func putChunkedObject(t *testing.T, f *adapterTestFixture, key string, content [
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, "test-bucket", key)
 	require.Equal(t, http.StatusOK, w.Code, "chunked PUT should succeed")
@@ -57,7 +57,7 @@ func TestHandleGet_ChunkedObject(t *testing.T) {
 	require.True(t, isChunked, "object should be chunked for this test to be meaningful")
 
 	getReq := httptest.NewRequest("GET", "/test-bucket/chunked-get.bin", nil)
-	getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+	getReq = getReq.WithContext(s3Ctx(getReq.Context(), f.tenant))
 	gw := httptest.NewRecorder()
 	f.adapter.HandleGet(gw, getReq, "test-bucket", "chunked-get.bin")
 
@@ -77,7 +77,7 @@ func TestHandleGet_ChunkedObject_RangeRequest(t *testing.T) {
 
 	getReq := httptest.NewRequest("GET", "/test-bucket/range.bin", nil)
 	getReq.Header.Set("Range", "bytes=0-99")
-	getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+	getReq = getReq.WithContext(s3Ctx(getReq.Context(), f.tenant))
 	gw := httptest.NewRecorder()
 	f.adapter.HandleGet(gw, getReq, "test-bucket", "range.bin")
 
@@ -100,7 +100,7 @@ func TestHandleGet_ChunkedDedup_SharedContent(t *testing.T) {
 	bodies := make([][]byte, 0, len(keys))
 	for _, key := range keys {
 		getReq := httptest.NewRequest("GET", "/test-bucket/"+key, nil)
-		getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+		getReq = getReq.WithContext(s3Ctx(getReq.Context(), f.tenant))
 		gw := httptest.NewRecorder()
 		f.adapter.HandleGet(gw, getReq, "test-bucket", key)
 		require.Equal(t, http.StatusOK, gw.Code)
@@ -120,7 +120,7 @@ func TestHandleGet_SmallObject_NotChunked(t *testing.T) {
 	putReq := httptest.NewRequest("PUT", "/test-bucket/small-get.txt", bytes.NewReader(content))
 	putReq.ContentLength = int64(len(content))
 	putReq.Header.Set("Content-Type", "text/plain")
-	putReq = putReq.WithContext(tenant.WithTenant(putReq.Context(), f.tenant))
+	putReq = putReq.WithContext(s3Ctx(putReq.Context(), f.tenant))
 	pw := httptest.NewRecorder()
 	f.adapter.HandlePut(pw, putReq, "test-bucket", "small-get.txt")
 	require.Equal(t, http.StatusOK, pw.Code)
@@ -133,7 +133,7 @@ func TestHandleGet_SmallObject_NotChunked(t *testing.T) {
 	require.False(t, isChunked, "small object should use the normal path")
 
 	getReq := httptest.NewRequest("GET", "/test-bucket/small-get.txt", nil)
-	getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+	getReq = getReq.WithContext(s3Ctx(getReq.Context(), f.tenant))
 	gw := httptest.NewRecorder()
 	f.adapter.HandleGet(gw, getReq, "test-bucket", "small-get.txt")
 
@@ -151,7 +151,7 @@ func TestHandleHead_ChunkedObject(t *testing.T) {
 
 	srv := &Server{db: f.db, logger: zap.NewNop()}
 	headReq := httptest.NewRequest("HEAD", "/test-bucket/head-chunked.bin", nil)
-	headReq = headReq.WithContext(tenant.WithTenant(headReq.Context(), f.tenant))
+	headReq = headReq.WithContext(s3Ctx(headReq.Context(), f.tenant))
 	hw := httptest.NewRecorder()
 	srv.handleHeadObject(hw, headReq, &S3Request{Bucket: "test-bucket", Object: "head-chunked.bin"})
 
@@ -173,7 +173,7 @@ func TestChunkedRoundTrip_PutDeletePut(t *testing.T) {
 
 	// DELETE the chunked object (decrements chunk refs; data stays until GC).
 	delReq := httptest.NewRequest("DELETE", "/test-bucket/"+key, nil)
-	delReq = delReq.WithContext(tenant.WithTenant(delReq.Context(), f.tenant))
+	delReq = delReq.WithContext(s3Ctx(delReq.Context(), f.tenant))
 	dw := httptest.NewRecorder()
 	f.adapter.HandleDelete(dw, delReq, "test-bucket", key)
 	require.Equal(t, http.StatusNoContent, dw.Code)
@@ -184,7 +184,7 @@ func TestChunkedRoundTrip_PutDeletePut(t *testing.T) {
 
 	// GET and verify the data round-trips intact.
 	getReq := httptest.NewRequest("GET", "/test-bucket/"+key, nil)
-	getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+	getReq = getReq.WithContext(s3Ctx(getReq.Context(), f.tenant))
 	gw := httptest.NewRecorder()
 	f.adapter.HandleGet(gw, getReq, "test-bucket", key)
 	require.Equal(t, http.StatusOK, gw.Code)
@@ -198,7 +198,7 @@ func putChunkedAs(t *testing.T, f *adapterTestFixture, tn *tenant.Tenant, bucket
 	t.Helper()
 	req := httptest.NewRequest("PUT", "/"+bucket+"/"+key, bytes.NewReader(content))
 	req.ContentLength = int64(len(content))
-	req = req.WithContext(tenant.WithTenant(req.Context(), tn))
+	req = req.WithContext(s3Ctx(req.Context(), tn))
 	w := httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, bucket, key)
 	require.Equal(t, http.StatusOK, w.Code)
@@ -207,7 +207,7 @@ func putChunkedAs(t *testing.T, f *adapterTestFixture, tn *tenant.Tenant, bucket
 func getChunkedAs(t *testing.T, f *adapterTestFixture, tn *tenant.Tenant, bucket, key string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest("GET", "/"+bucket+"/"+key, nil)
-	req = req.WithContext(tenant.WithTenant(req.Context(), tn))
+	req = req.WithContext(s3Ctx(req.Context(), tn))
 	w := httptest.NewRecorder()
 	f.adapter.HandleGet(w, req, bucket, key)
 	return w
@@ -240,7 +240,7 @@ func TestHandleGet_ChunkedObject_MultiChunk(t *testing.T) {
 	// Range straddling a chunk boundary (~1 MB).
 	rangeReq := httptest.NewRequest("GET", "/test-bucket/multi.bin", nil)
 	rangeReq.Header.Set("Range", "bytes=1048570-1048580")
-	rangeReq = rangeReq.WithContext(tenant.WithTenant(rangeReq.Context(), f.tenant))
+	rangeReq = rangeReq.WithContext(s3Ctx(rangeReq.Context(), f.tenant))
 	rw := httptest.NewRecorder()
 	f.adapter.HandleGet(rw, rangeReq, "test-bucket", "multi.bin")
 	require.Equal(t, http.StatusPartialContent, rw.Code)
@@ -338,7 +338,7 @@ func TestHandleGet_ChunkedObject_MultiChunkRanges(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			req := httptest.NewRequest("GET", "/test-bucket/ranges.bin", nil)
 			req.Header.Set("Range", tc.hdr)
-			req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+			req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 			w := httptest.NewRecorder()
 			f.adapter.HandleGet(w, req, "test-bucket", "ranges.bin")
 
@@ -368,8 +368,8 @@ func TestHandleGet_ChunkedObject_CorruptChunk(t *testing.T) {
 		ORDER BY chunk_index LIMIT 1`,
 		tenantUUID, "test-bucket", "corrupt.bin").Scan(&hashHex))
 
-	// Overwrite the chunk's bytes in the shared global container on disk.
-	chunkPath := filepath.Join(f.tempDir, "_global", "_chunks", hashHex)
+	// Overwrite the chunk's bytes at its one address on the backend.
+	chunkPath := f.fixed.path(engine.ChunkAddressTenant, chunkContainer, "_chunks/"+hashHex)
 	require.NoError(t, os.WriteFile(chunkPath, []byte("corrupted chunk payload — wrong bytes"), 0600))
 
 	gw := getChunkedAs(t, f, f.tenant, "test-bucket", "corrupt.bin")
@@ -468,6 +468,14 @@ func setupChunkingFixture(t *testing.T) *adapterTestFixture {
 	container := f.tenant.NamespaceContainer("test-bucket")
 	require.NoError(t, os.MkdirAll(filepath.Join(f.tempDir, container), 0755))
 
+	// The primary is shaped like prod's (WP-R8-7): a fixed bucket keyed
+	// `t-<tenant in the context>/<container>/<artifact>`. On the local driver
+	// — keyed by container only — a chunk had one address by accident, and
+	// no chunk test could see that in prod it had one per uploader.
+	f.fixed = &fixedBucketDriver{dir: t.TempDir()}
+	f.eng.AddDriver("fixed", f.fixed)
+	f.eng.SetPrimary("fixed")
+
 	f.adapter = NewS3ToEngine(f.eng, f.db, zap.NewNop())
 	f.adapter.gci = crypto.NewGlobalContentIndex(f.db)
 	f.adapter.chunkingThreshold = 1024
@@ -495,7 +503,7 @@ func TestHandlePut_ChunkedUpload(t *testing.T) {
 	req := httptest.NewRequest("PUT", "/test-bucket/large-object.bin", bytes.NewReader(content))
 	req.ContentLength = int64(len(content))
 	req.Header.Set("Content-Type", "application/octet-stream")
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -545,7 +553,7 @@ func TestHandlePut_ChunkedDedup(t *testing.T) {
 	// First upload
 	req1 := httptest.NewRequest("PUT", "/test-bucket/dedup-obj-1.bin", bytes.NewReader(content))
 	req1.ContentLength = int64(len(content))
-	ctx1 := tenant.WithTenant(req1.Context(), f.tenant)
+	ctx1 := s3Ctx(req1.Context(), f.tenant)
 	req1 = req1.WithContext(ctx1)
 	w1 := httptest.NewRecorder()
 	f.adapter.HandlePut(w1, req1, "test-bucket", "dedup-obj-1.bin")
@@ -563,7 +571,7 @@ func TestHandlePut_ChunkedDedup(t *testing.T) {
 	// Second upload with same content under a different key
 	req2 := httptest.NewRequest("PUT", "/test-bucket/dedup-obj-2.bin", bytes.NewReader(content))
 	req2.ContentLength = int64(len(content))
-	ctx2 := tenant.WithTenant(req2.Context(), f.tenant)
+	ctx2 := s3Ctx(req2.Context(), f.tenant)
 	req2 = req2.WithContext(ctx2)
 	w2 := httptest.NewRecorder()
 	f.adapter.HandlePut(w2, req2, "test-bucket", "dedup-obj-2.bin")
@@ -596,7 +604,7 @@ func TestHandlePut_SmallObjectSkipsChunking(t *testing.T) {
 	req := httptest.NewRequest("PUT", "/test-bucket/small.txt", bytes.NewReader(content))
 	req.ContentLength = int64(len(content))
 	req.Header.Set("Content-Type", "text/plain")
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -624,7 +632,7 @@ func TestHandlePut_EncryptedSkipsChunking(t *testing.T) {
 	key := generateSSECKey(t)
 	setSSECHeaders(t, req, key)
 
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -647,7 +655,7 @@ func TestHandleDelete_ChunkedObject(t *testing.T) {
 	content := generateTestData(8 * 1024)
 	putReq := httptest.NewRequest("PUT", "/test-bucket/to-delete.bin", bytes.NewReader(content))
 	putReq.ContentLength = int64(len(content))
-	ctx := tenant.WithTenant(putReq.Context(), f.tenant)
+	ctx := s3Ctx(putReq.Context(), f.tenant)
 	putReq = putReq.WithContext(ctx)
 	pw := httptest.NewRecorder()
 	f.adapter.HandlePut(pw, putReq, "test-bucket", "to-delete.bin")
@@ -663,7 +671,7 @@ func TestHandleDelete_ChunkedObject(t *testing.T) {
 
 	// Delete the chunked object
 	delReq := httptest.NewRequest("DELETE", "/test-bucket/to-delete.bin", nil)
-	ctx = tenant.WithTenant(delReq.Context(), f.tenant)
+	ctx = s3Ctx(delReq.Context(), f.tenant)
 	delReq = delReq.WithContext(ctx)
 	dw := httptest.NewRecorder()
 	f.adapter.HandleDelete(dw, delReq, "test-bucket", "to-delete.bin")
@@ -713,7 +721,7 @@ func TestHandleDelete_ChunkedDedup_PartialRefCount(t *testing.T) {
 	for _, key := range []string{"shared-1.bin", "shared-2.bin"} {
 		req := httptest.NewRequest("PUT", "/test-bucket/"+key, bytes.NewReader(content))
 		req.ContentLength = int64(len(content))
-		ctx := tenant.WithTenant(req.Context(), f.tenant)
+		ctx := s3Ctx(req.Context(), f.tenant)
 		req = req.WithContext(ctx)
 		w := httptest.NewRecorder()
 		f.adapter.HandlePut(w, req, "test-bucket", key)
@@ -722,7 +730,7 @@ func TestHandleDelete_ChunkedDedup_PartialRefCount(t *testing.T) {
 
 	// Delete only the first key
 	delReq := httptest.NewRequest("DELETE", "/test-bucket/shared-1.bin", nil)
-	ctx := tenant.WithTenant(delReq.Context(), f.tenant)
+	ctx := s3Ctx(delReq.Context(), f.tenant)
 	delReq = delReq.WithContext(ctx)
 	dw := httptest.NewRecorder()
 	f.adapter.HandleDelete(dw, delReq, "test-bucket", "shared-1.bin")
@@ -765,7 +773,7 @@ func TestHandlePut_ChunkedUpload_NoGCI(t *testing.T) {
 
 	req := httptest.NewRequest("PUT", "/test-bucket/no-gci-large.bin", bytes.NewReader(content))
 	req.ContentLength = int64(len(content))
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
+	ctx := s3Ctx(req.Context(), f.tenant)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -887,7 +895,7 @@ func TestHandlePut_ChunkedUpload_LazyReader(t *testing.T) {
 	req := httptest.NewRequest("PUT", "/test-bucket/lazy.bin", body)
 	req.ContentLength = objSize
 	req.Header.Set("Content-Type", "application/octet-stream")
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, "test-bucket", "lazy.bin")
 
@@ -939,13 +947,12 @@ func TestHandlePut_ChunkedUpload_BackendFailureReturns5xx(t *testing.T) {
 	f := setupChunkingFixture(t)
 
 	// Replace the primary driver with one that always fails on Put.
-	f.eng.AddDriver("local", &failingPutDriver{})
-	f.eng.SetPrimary("local")
+	f.eng.AddDriver("fixed", &failingPutDriver{})
 
 	content := generateTestData(8 * 1024)
 	req := httptest.NewRequest("PUT", "/test-bucket/fail.bin", bytes.NewReader(content))
 	req.ContentLength = int64(len(content))
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, "test-bucket", "fail.bin")
 
@@ -1053,7 +1060,7 @@ func TestHandleGet_DecompressesCompressedChunks(t *testing.T) {
 	putChunkedObject(t, f, "compressed-get.txt", content, "text/plain")
 
 	getReq := httptest.NewRequest("GET", "/test-bucket/compressed-get.txt", nil)
-	getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+	getReq = getReq.WithContext(s3Ctx(getReq.Context(), f.tenant))
 	gw := httptest.NewRecorder()
 	f.adapter.HandleGet(gw, getReq, "test-bucket", "compressed-get.txt")
 
@@ -1070,7 +1077,7 @@ func TestHandleGet_RangeOnCompressedChunks(t *testing.T) {
 
 	getReq := httptest.NewRequest("GET", "/test-bucket/compressed-range.txt", nil)
 	getReq.Header.Set("Range", "bytes=50-149")
-	getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+	getReq = getReq.WithContext(s3Ctx(getReq.Context(), f.tenant))
 	gw := httptest.NewRecorder()
 	f.adapter.HandleGet(gw, getReq, "test-bucket", "compressed-range.txt")
 
@@ -1156,7 +1163,7 @@ func TestChunkedEncryption_SkipsWholeObjectSSE(t *testing.T) {
 	req.ContentLength = int64(len(content))
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("x-amz-server-side-encryption", "AES256")
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, "test-bucket", "sse-and-chunk.bin")
 	require.Equal(t, http.StatusOK, w.Code)
@@ -1176,7 +1183,7 @@ func TestChunkedEncryption_SkipsWholeObjectSSE(t *testing.T) {
 
 	// The decisive check: GET must return the original plaintext, not ciphertext.
 	getReq := httptest.NewRequest("GET", "/test-bucket/sse-and-chunk.bin", nil)
-	getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+	getReq = getReq.WithContext(s3Ctx(getReq.Context(), f.tenant))
 	gw := httptest.NewRecorder()
 	f.adapter.HandleGet(gw, getReq, "test-bucket", "sse-and-chunk.bin")
 	require.Equal(t, http.StatusOK, gw.Code)
@@ -1191,7 +1198,7 @@ func TestHandlePut_ChunkedWithEncryption(t *testing.T) {
 	req := httptest.NewRequest("PUT", "/test-bucket/encrypted-chunked.bin", bytes.NewReader(content))
 	req.ContentLength = int64(len(content))
 	req.Header.Set("Content-Type", "application/octet-stream")
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 
 	w := httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, "test-bucket", "encrypted-chunked.bin")
@@ -1249,7 +1256,7 @@ func TestHandlePut_ChunkedWithEncryption(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, lookup.Entry)
 
-	raw, err := f.eng.Get(context.Background(), "_global", lookup.Entry.StorageKey)
+	raw, err := f.eng.Get(engine.ChunkContext(context.Background()), chunkContainer, lookup.Entry.StorageKey)
 	require.NoError(t, err)
 	rawBytes, _ := io.ReadAll(raw)
 	_ = raw.Close()
@@ -1263,7 +1270,7 @@ func TestHandleGet_ChunkedEncryptedRoundTrip(t *testing.T) {
 	putETag := putChunkedObject(t, f, "enc-roundtrip.bin", content, "application/octet-stream")
 
 	getReq := httptest.NewRequest("GET", "/test-bucket/enc-roundtrip.bin", nil)
-	getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+	getReq = getReq.WithContext(s3Ctx(getReq.Context(), f.tenant))
 	gw := httptest.NewRecorder()
 	f.adapter.HandleGet(gw, getReq, "test-bucket", "enc-roundtrip.bin")
 
@@ -1281,7 +1288,7 @@ func TestHandleGet_EncryptedCompressedRoundTrip(t *testing.T) {
 	putETag := putChunkedObject(t, f, "comp-enc.bin", content, "text/plain")
 
 	getReq := httptest.NewRequest("GET", "/test-bucket/comp-enc.bin", nil)
-	getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+	getReq = getReq.WithContext(s3Ctx(getReq.Context(), f.tenant))
 	gw := httptest.NewRecorder()
 	f.adapter.HandleGet(gw, getReq, "test-bucket", "comp-enc.bin")
 
@@ -1334,7 +1341,7 @@ func TestHandlePut_ChunkedEncryptedDedup(t *testing.T) {
 	// Both objects must be retrievable
 	for _, key := range []string{"enc-dedup-1.bin", "enc-dedup-2.bin"} {
 		getReq := httptest.NewRequest("GET", "/test-bucket/"+key, nil)
-		getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+		getReq = getReq.WithContext(s3Ctx(getReq.Context(), f.tenant))
 		gw := httptest.NewRecorder()
 		f.adapter.HandleGet(gw, getReq, "test-bucket", key)
 		require.Equal(t, http.StatusOK, gw.Code)
@@ -1359,7 +1366,7 @@ func TestHandleGet_EncryptedDedup_DifferentContentType(t *testing.T) {
 
 	for _, key := range []string{"ct-first.txt", "ct-second.pdf"} {
 		getReq := httptest.NewRequest("GET", "/test-bucket/"+key, nil)
-		getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+		getReq = getReq.WithContext(s3Ctx(getReq.Context(), f.tenant))
 		gw := httptest.NewRecorder()
 		f.adapter.HandleGet(gw, getReq, "test-bucket", key)
 		require.Equal(t, http.StatusOK, gw.Code,

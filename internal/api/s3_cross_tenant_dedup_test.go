@@ -46,7 +46,7 @@ func putAs(t *testing.T, f *adapterTestFixture, tn *tenant.Tenant, key string, c
 	req := httptest.NewRequest("PUT", "/test-bucket/"+key, bytes.NewReader(content))
 	req.ContentLength = int64(len(content))
 	req.Header.Set("Content-Type", "application/octet-stream")
-	req = req.WithContext(tenant.WithTenant(req.Context(), tn))
+	req = req.WithContext(s3Ctx(req.Context(), tn))
 	w := httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, "test-bucket", key)
 	require.Equal(t, http.StatusOK, w.Code, "PUT should succeed for tenant %s", tn.ID)
@@ -56,7 +56,7 @@ func putAs(t *testing.T, f *adapterTestFixture, tn *tenant.Tenant, key string, c
 func getAs(t *testing.T, f *adapterTestFixture, tn *tenant.Tenant, key string) (int, []byte) {
 	t.Helper()
 	req := httptest.NewRequest("GET", "/test-bucket/"+key, nil)
-	req = req.WithContext(tenant.WithTenant(req.Context(), tn))
+	req = req.WithContext(s3Ctx(req.Context(), tn))
 	w := httptest.NewRecorder()
 	f.adapter.HandleGet(w, req, "test-bucket", key)
 	body, _ := io.ReadAll(w.Body)

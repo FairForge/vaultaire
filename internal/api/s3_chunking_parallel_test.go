@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/engine"
-	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -69,7 +68,7 @@ func (e *instrumentedEngine) Put(ctx context.Context, container, artifact string
 func getChunked(t *testing.T, f *adapterTestFixture, key string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest("GET", "/test-bucket/"+key, nil)
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandleGet(w, req, "test-bucket", key)
 	return w
@@ -141,7 +140,7 @@ func TestChunkedPut_WorkerFailureReleasesRefs(t *testing.T) {
 	content := generateTestData(48 << 20)
 	req := httptest.NewRequest("PUT", "/test-bucket/fail.bin", bytes.NewReader(content))
 	req.ContentLength = int64(len(content))
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, "test-bucket", "fail.bin")
 	require.GreaterOrEqual(t, w.Code, 500, "failed chunk store must fail the PUT")

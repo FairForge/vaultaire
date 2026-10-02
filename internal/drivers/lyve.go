@@ -7,7 +7,6 @@ import (
 	"io"
 	"strings"
 
-	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -66,21 +65,23 @@ func NewLyveDriver(accessKey, secretKey, tenantID, region string, logger *zap.Lo
 	}, nil
 }
 
-// getTenantID extracts tenant from context or uses default
-func (d *LyveDriver) getTenantID(ctx context.Context) string {
-	if tid := ctx.Value(common.TenantIDKey); tid != nil {
-		if t, ok := tid.(string); ok {
-			return t
-		}
-	}
-	// If no tenant in context and no default, this is an error condition
-	if d.tenantID == "" {
-		// Log warning or panic - requests MUST have tenant context
-		d.logger.Warn("no tenant ID in context or driver")
-		return "default" // Fallback, but this shouldn't happen
-	}
-	return d.tenantID
+// getTenantID is the tenant the call is made for: the context's, else the
+// driver's own default (tools pass one; the server passes none). With
+// neither the call is refused (tenant_ctx.go) — it used to resolve to
+// "default".
+func (d *LyveDriver) getTenantID(ctx context.Context, op string) (string, error) {
+	return requireTenant(ctx, d.Name(), op, d.tenantID, d.logger)
 }
+
+// ObjectKey is the key a call would address (engine.KeyAddresser).
+func (d *LyveDriver) ObjectKey(ctx context.Context, container, artifact string) string {
+	tid := contextTenant(ctx)
+	if tid == "" {
+		tid = d.tenantID
+	}
+	return d.buildTenantKey(tid, container, artifact)
+}
+
 func (d *LyveDriver) buildTenantKey(tenantID, container, artifact string) string {
 	return fmt.Sprintf("t-%s/%s/%s", tenantID, container, artifact)
 }
@@ -90,7 +91,10 @@ func (d *LyveDriver) getBucket() string {
 }
 
 func (d *LyveDriver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
-	tenantID := d.getTenantID(ctx)
+	tenantID, tErr := d.getTenantID(ctx, "Get")
+	if tErr != nil {
+		return nil, tErr
+	}
 	key := d.buildTenantKey(tenantID, container, artifact)
 	bucket := d.getBucket()
 
@@ -107,7 +111,10 @@ func (d *LyveDriver) Get(ctx context.Context, container, artifact string) (io.Re
 
 // GetRange reads a byte range directly from Lyve. Implements engine.RangeGetter.
 func (d *LyveDriver) GetRange(ctx context.Context, container, artifact string, offset, length int64) (io.ReadCloser, error) {
-	tenantID := d.getTenantID(ctx)
+	tenantID, tErr := d.getTenantID(ctx, "GetRange")
+	if tErr != nil {
+		return nil, tErr
+	}
 	key := d.buildTenantKey(tenantID, container, artifact)
 	bucket := d.getBucket()
 
@@ -131,7 +138,10 @@ func (d *LyveDriver) GetRange(ctx context.Context, container, artifact string, o
 }
 
 func (d *LyveDriver) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...engine.PutOption) error {
-	tenantID := d.getTenantID(ctx)
+	tenantID, tErr := d.getTenantID(ctx, "Put")
+	if tErr != nil {
+		return tErr
+	}
 	key := d.buildTenantKey(tenantID, container, artifact)
 	bucket := d.getBucket()
 
@@ -181,7 +191,10 @@ func (d *LyveDriver) Put(ctx context.Context, container, artifact string, data i
 }
 
 func (d *LyveDriver) Delete(ctx context.Context, container, artifact string) error {
-	tenantID := d.getTenantID(ctx)
+	tenantID, tErr := d.getTenantID(ctx, "Delete")
+	if tErr != nil {
+		return tErr
+	}
 	key := d.buildTenantKey(tenantID, container, artifact)
 	bucket := d.getBucket()
 
@@ -197,7 +210,10 @@ func (d *LyveDriver) Delete(ctx context.Context, container, artifact string) err
 }
 
 func (d *LyveDriver) List(ctx context.Context, container string, prefix string) ([]string, error) {
-	tenantID := d.getTenantID(ctx)
+	tenantID, tErr := d.getTenantID(ctx, "List")
+	if tErr != nil {
+		return nil, tErr
+	}
 	keyPrefix := fmt.Sprintf("t-%s/%s/", tenantID, container)
 	if prefix != "" {
 		keyPrefix = fmt.Sprintf("t-%s/%s/%s", tenantID, container, prefix)
@@ -229,7 +245,10 @@ func (d *LyveDriver) List(ctx context.Context, container string, prefix string) 
 }
 
 func (d *LyveDriver) Exists(ctx context.Context, container, artifact string) (bool, error) {
-	tenantID := d.getTenantID(ctx)
+	tenantID, tErr := d.getTenantID(ctx, "Exists")
+	if tErr != nil {
+		return false, tErr
+	}
 	key := d.buildTenantKey(tenantID, container, artifact)
 	bucket := d.getBucket()
 

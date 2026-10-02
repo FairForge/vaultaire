@@ -36,7 +36,6 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
-	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
@@ -261,18 +260,28 @@ func (d *OneDriveDriver) logFallbackHit(op, path string, t *odTenant) {
 	)
 }
 
-func (d *OneDriveDriver) buildPath(ctx context.Context, container, artifact string) string {
-	tenantID := "default"
-	if tid, ok := ctx.Value(common.TenantIDKey).(string); ok && tid != "" {
-		tenantID = tid
+// buildPath is the fleet path of a call. A context that names no tenant is
+// refused (tenant_ctx.go) — it used to resolve to "default".
+func (d *OneDriveDriver) buildPath(ctx context.Context, op, container, artifact string) (string, error) {
+	tenantID, err := requireTenant(ctx, d.Name(), op, "", d.logger)
+	if err != nil {
+		return "", err
 	}
-	return fmt.Sprintf("t-%s/%s/%s", tenantID, container, artifact)
+	return tenantKey(tenantID, container, artifact), nil
+}
+
+// ObjectKey is the path a call would address (engine.KeyAddresser).
+func (d *OneDriveDriver) ObjectKey(ctx context.Context, container, artifact string) string {
+	return tenantKey(contextTenant(ctx), container, artifact)
 }
 
 // Put stores an artifact via OneDrive Graph API.
 // Files <4MB use simple PUT; larger files use chunked upload sessions.
 func (d *OneDriveDriver) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...engine.PutOption) error {
-	path := d.buildPath(ctx, container, artifact)
+	path, pErr := d.buildPath(ctx, "Put", container, artifact)
+	if pErr != nil {
+		return pErr
+	}
 	// Deterministic placement: the path's home tenant, always — never the
 	// rotation. A throttled home tenant still receives the write (graphDo
 	// retries with backoff); writing elsewhere would strand the object where
@@ -339,7 +348,10 @@ func (d *OneDriveDriver) Put(ctx context.Context, container, artifact string, da
 // Fetches the pre-authenticated CDN URL from item metadata, then downloads
 // via HTTP/1.1 (bypassing Go's HTTP/2 flow-control bugs).
 func (d *OneDriveDriver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
-	path := d.buildPath(ctx, container, artifact)
+	path, pErr := d.buildPath(ctx, "Get", container, artifact)
+	if pErr != nil {
+		return nil, pErr
+	}
 
 	// Home tenant first, then probe the fleet: pre-placement data may live
 	// on any account (the old round-robin Put).
@@ -473,7 +485,10 @@ func (t *odTenant) downloadRanges(ctx context.Context, dlURL string, fileSize in
 // rotation pointed), and deleting only one of them leaves a stale duplicate
 // that the next Get's fleet probe resurrects.
 func (d *OneDriveDriver) Delete(ctx context.Context, container, artifact string) error {
-	path := d.buildPath(ctx, container, artifact)
+	path, pErr := d.buildPath(ctx, "Delete", container, artifact)
+	if pErr != nil {
+		return pErr
+	}
 
 	deleted := false
 	var hardErr error  // an account we could not fully check — a copy may survive there
@@ -524,9 +539,9 @@ func (d *OneDriveDriver) Delete(ctx context.Context, container, artifact string)
 // object hashes to its own home tenant), so a listing must union every
 // account — the old single-tenant listing showed a third of the namespace.
 func (d *OneDriveDriver) List(ctx context.Context, container string, prefix string) ([]string, error) {
-	tenantID := "default"
-	if tid, ok := ctx.Value(common.TenantIDKey).(string); ok && tid != "" {
-		tenantID = tid
+	tenantID, tErr := requireTenant(ctx, d.Name(), "List", "", d.logger)
+	if tErr != nil {
+		return nil, tErr
 	}
 	folderPath := fmt.Sprintf("%s/t-%s/%s", odRootFolder, tenantID, container)
 
@@ -578,7 +593,10 @@ func (d *OneDriveDriver) List(ctx context.Context, container string, prefix stri
 // Exists checks if an artifact exists in OneDrive (home tenant first, then
 // the fleet — pre-placement data may live on any account).
 func (d *OneDriveDriver) Exists(ctx context.Context, container, artifact string) (bool, error) {
-	path := d.buildPath(ctx, container, artifact)
+	path, pErr := d.buildPath(ctx, "Exists", container, artifact)
+	if pErr != nil {
+		return false, pErr
+	}
 	var downErr error // an account we could not check — absence is not provable past it
 	for i, t := range d.tenantsFor(path) {
 		driveID, err := t.getDriveID(ctx)

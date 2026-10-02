@@ -64,7 +64,7 @@ func TestIDriveDriver_Operations(t *testing.T) {
 		)
 
 		// Test that Put accepts options (even if not used yet)
-		err := driver.Put(context.Background(),
+		err := driver.Put(tenantCtx(),
 			"test-bucket",
 			"test-key",
 			strings.NewReader("test data"))
@@ -83,7 +83,7 @@ func TestIDriveDriver_Operations(t *testing.T) {
 		)
 
 		// Should accept empty prefix
-		_, err := driver.List(context.Background(), "bucket", "")
+		_, err := driver.List(tenantCtx(), "bucket", "")
 		assert.Error(t, err) // Expected without real S3
 	})
 }
@@ -99,7 +99,7 @@ func TestIDriveDriver_ErrorHandling(t *testing.T) {
 		)
 
 		// Without real credentials, Exists should fail to connect
-		exists, err := driver.Exists(context.Background(), "bucket", "missing")
+		exists, err := driver.Exists(tenantCtx(), "bucket", "missing")
 
 		// Either an error (can't connect) OR false (if it somehow connects)
 		// Since we're using fake credentials, we expect an error
@@ -123,7 +123,7 @@ func TestIDriveDriver_ValidateAuth(t *testing.T) {
 			zap.NewNop(),
 		)
 
-		ctx := context.Background()
+		ctx := tenantCtx()
 		err := driver.ValidateAuth(ctx)
 
 		// Should fail with fake credentials
@@ -151,7 +151,7 @@ func TestIDriveDriver_ValidateAuth_Integration(t *testing.T) {
 		)
 		require.NoError(t, err)
 
-		ctx := context.Background()
+		ctx := tenantCtx()
 		err = driver.ValidateAuth(ctx)
 		assert.NoError(t, err)
 	})
@@ -172,7 +172,7 @@ func TestIDriveDriver_StreamingUpload(t *testing.T) {
 		reader := io.LimitReader(rand.Reader, size)
 
 		// This should stream, not load in memory
-		err := driver.Put(context.Background(), "bucket", "large.bin", reader)
+		err := driver.Put(tenantCtx(), "bucket", "large.bin", reader)
 
 		// Will fail without real creds, but should handle streaming
 		assert.Error(t, err)

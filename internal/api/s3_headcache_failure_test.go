@@ -18,7 +18,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -95,7 +94,7 @@ func TestChunkedPut_HeadCacheWriteFailure_Returns5xx(t *testing.T) {
 	content := testBytes(64 << 10) // well above the fixture's 1 KiB threshold
 	req := httptest.NewRequest("PUT", "/test-bucket/doomed-chunked.bin", bytes.NewReader(content))
 	req.ContentLength = int64(len(content))
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, "test-bucket", "doomed-chunked.bin")
 

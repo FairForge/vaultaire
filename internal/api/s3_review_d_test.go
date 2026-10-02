@@ -15,7 +15,6 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -29,7 +28,7 @@ func TestSSEC_AboveChunkThreshold_NotChunked(t *testing.T) {
 	req := httptest.NewRequest("PUT", "/test-bucket/ssec-big.bin", bytes.NewReader(content))
 	req.ContentLength = int64(len(content))
 	setSSECHeaders(t, req, key)
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, "test-bucket", "ssec-big.bin")
 	require.Equal(t, http.StatusOK, w.Code)
@@ -48,7 +47,7 @@ func TestSSEC_AboveChunkThreshold_NotChunked(t *testing.T) {
 	// GET with the key returns the plaintext.
 	getReq := httptest.NewRequest("GET", "/test-bucket/ssec-big.bin", nil)
 	setSSECHeaders(t, getReq, key)
-	getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+	getReq = getReq.WithContext(s3Ctx(getReq.Context(), f.tenant))
 	gw := httptest.NewRecorder()
 	f.adapter.HandleGet(gw, getReq, "test-bucket", "ssec-big.bin")
 	require.Equal(t, http.StatusOK, gw.Code)
@@ -56,7 +55,7 @@ func TestSSEC_AboveChunkThreshold_NotChunked(t *testing.T) {
 
 	// GET without the key must be refused — never raw ciphertext with a 200.
 	noKeyReq := httptest.NewRequest("GET", "/test-bucket/ssec-big.bin", nil)
-	noKeyReq = noKeyReq.WithContext(tenant.WithTenant(noKeyReq.Context(), f.tenant))
+	noKeyReq = noKeyReq.WithContext(s3Ctx(noKeyReq.Context(), f.tenant))
 	nw := httptest.NewRecorder()
 	f.adapter.HandleGet(nw, noKeyReq, "test-bucket", "ssec-big.bin")
 	assert.Equal(t, http.StatusForbidden, nw.Code,
@@ -141,7 +140,7 @@ func TestPlainCopyOverChunkedDest_ReleasesManifest(t *testing.T) {
 
 	// GET returns the copied plain bytes — not stale chunked data.
 	getReq := httptest.NewRequest("GET", "/test-bucket/dest-key.bin", nil)
-	getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+	getReq = getReq.WithContext(s3Ctx(getReq.Context(), f.tenant))
 	gw := httptest.NewRecorder()
 	f.adapter.HandleGet(gw, getReq, "test-bucket", "dest-key.bin")
 	require.Equal(t, http.StatusOK, gw.Code)

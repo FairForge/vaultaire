@@ -137,7 +137,7 @@ func (f *quotaAccountingFixture) s3Req(bucket, object string) *S3Request {
 
 // ctx attaches both tenant context keys the real request path sets.
 func (f *quotaAccountingFixture) ctx(ctx context.Context) context.Context {
-	return common.WithTenantID(tenant.WithTenant(ctx, f.tenant), f.tenantID)
+	return common.WithTenantID(s3Ctx(ctx, f.tenant), f.tenantID)
 }
 
 // put uploads body to test-bucket/key through the full server PUT path and

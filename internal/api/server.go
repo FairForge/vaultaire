@@ -98,6 +98,8 @@ type Server struct {
 	smartPromoter      *SmartPromoter
 	multipartReaper    *MultipartReaper
 	quotaReconcileGate jobGate                // single-flight for POST /admin/quota-reconcile (Review R13-05)
+	chunkMover         *ChunkMover            // chunk blobs written before WP-R8-7 → the one address (POST /admin/chunk-move)
+	chunkMoveGate      jobGate                // one chunk move at a time
 	jobs               *jobScheduler          // the one background-job scheduler (WP-R13-3, jobs.go)
 	retention          *RetentionJob          // nightly log-table pruner (Review R13-14, checklist item 5)
 	accountSvc         *account.Service       // the one deletion state machine (WP-R10-3)
@@ -298,6 +300,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 
 	// Dedup GC runner — reconciles ref counts and reclaims orphaned chunks.
 	s.dedupGCRunner = NewDedupGCRunner(s.db, s.engine, s.gci, logger)
+	s.chunkMover = NewChunkMover(s.db, s.engine, logger)
 
 	// Smart-tier demotion job (5.15.8): keeps ≤15% of a Standard tenant's
 	// quota on the hot backend, flag-gated per tenant (smart_demotion,
@@ -899,6 +902,9 @@ func (s *Server) registerComplianceRoutes() {
 		r.Post("/retention", s.requireAdmin(s.adminJobTrigger(retentionJobName)))
 		r.Post("/account-deletion", s.requireAdmin(s.adminJobTrigger(accountDeletionJob)))
 		r.Post("/quota-reconcile", s.requireAdmin(s.handleQuotaReconcile))
+		// Chunk blobs written before WP-R8-7 → the one address. Dry run by
+		// default; ?backend= is required.
+		r.Post("/chunk-move", s.requireAdmin(s.handleChunkMove))
 
 		// Feature flags (1.13): flip kill-switches / per-tenant enablement
 		// at runtime. updated_by comes from the JWT.

@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/FairForge/vaultaire/internal/crypto"
-	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -25,7 +24,7 @@ func oversizePut(t *testing.T, f *adapterTestFixture, key string, mutate func(*h
 	if mutate != nil {
 		mutate(req)
 	}
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, "test-bucket", key)
 	return w

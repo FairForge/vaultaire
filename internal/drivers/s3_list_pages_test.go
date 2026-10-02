@@ -209,7 +209,7 @@ func TestS3List_TerminatesOnRepeatedContinuationToken(t *testing.T) {
 	assert.Equal(t, []string{"only", "only"}, got, "two pages were read (the second repeats), then the walk stops")
 
 	id := &IDriveDriver{client: client, bucket: "vaultaire", logger: zap.NewNop()}
-	_, err = id.List(ctx, "c", "")
+	_, err = id.List(common.WithTenantID(ctx, "tn"), "c", "")
 	require.NoError(t, err)
 
 	l.mu.Lock()

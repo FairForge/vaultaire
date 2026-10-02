@@ -1298,6 +1298,26 @@ func generateAdminPaths() map[string]*PathItem {
 					"503": textResp("`quota reconciliation not available`"),
 				})),
 		},
+		"/api/v1/admin/chunk-move": {
+			Post: admin(withParams(jsonOp("Admin", "Move chunk blobs written before WP-R8-7 to their one address", "AdminChunkMove",
+				"A chunk blob has one address: its index row's backend, the `_global` container and the reserved tenant `_global` in the driver context "+
+					"(`t-_global/_global/<storage_key>` on a fixed-bucket backend). Blobs written before WP-R8-7 are under the uploading tenant's prefix "+
+					"(`t-<tenant>/_global/…`). This call works on ONE backend: for every index row there it copies a verified old copy to the one address, "+
+					"reads it back, verifies size and hash, and only then deletes the old copies; blobs under a tenant's chunk container with no index row "+
+					"(orphans) are deleted. Dry run by default: only `dry_run=false` changes anything. Idempotent and resumable — a run stopped anywhere is "+
+					"finished by the next one. Synchronous, on a context detached from the request (a proxy timeout does not stop it; the result is also in "+
+					"the `chunk move` log line). Done when `at_address == rows` and `orphans == 0`. Writes an `admin.chunk_move` audit row. No request body.",
+				map[string]Response{
+					"200": jsonResp("What the run did (or, for a dry run, would do)", ref("ChunkMoveResult")),
+					"400": textResp("`backend is required`, `dry_run must be true or false`, an unregistered backend or a `tenant` that is not a tenant id"),
+					"409": jsonResp("A chunk move is already running", ref("JobAlreadyRunning")),
+					"500": textResp("`chunk move failed (see the log)` — what was done is kept"),
+					"503": textResp("`chunk move not available` (no database or engine)"),
+				}),
+				queryParam("backend", "Required. A registered backend name (e.g. `idrive`)", &Schema{Type: "string"}),
+				queryParam("dry_run", "Report only (the default). `false` moves and deletes", &Schema{Type: "boolean", Default: true}),
+				queryParam("tenant", "Repeatable. An extra tenant id to look under — an erased tenant whose `account.erased` row shows `chunk_blobs_left` > 0", &Schema{Type: "string"}))),
+		},
 		"/api/v1/admin/retention": {
 			Post: admin(jsonOp("Admin", "Start one retention run", "AdminRetention",
 				"The same call as `POST /api/v1/admin/jobs/retention/run`: prunes the log tables past their retention periods (s3_access_log 30 d, events / quota_usage_events / stripe_events 90 d, "+
@@ -1895,6 +1915,24 @@ func generateJSONSchemas() map[string]Schema {
 			"error": strEnum("", "already_running"),
 			"job":   str("Job name"),
 		}, "error", "job"),
+		"ChunkMoveResult": object("", map[string]*Schema{
+			"object":          strEnum("", "chunk_move"),
+			"backend":         str("The backend the run worked on"),
+			"dry_run":         boolean("True: nothing was changed; moved, bytes_moved, legacy_deleted and orphans_deleted are what a run would do"),
+			"rows":            integer("Index rows on the backend that were examined"),
+			"at_address":      integer("Chunks whose blob is at the one address, verified, with no old copy left"),
+			"moved":           integer("Chunks copied to the one address and verified"),
+			"bytes_moved":     integer("Stored bytes copied"),
+			"legacy_deleted":  integer("Old copies deleted"),
+			"missing":         integer("Chunks with no copy that verifies anywhere — the objects that reference them cannot be read"),
+			"failed":          integer("Chunks (or listings) that could not be decided or done; the next run retries"),
+			"orphans":         integer("Blobs under a tenant's chunk container with no index row"),
+			"orphans_deleted": integer("Orphans deleted"),
+			"unrecognized":    integer("Names under a tenant's chunk container that are not a chunk key, or belong to a row on another backend; left alone"),
+			"tenants_listed":  integer("Tenant prefixes listed"),
+			"note":            str("Why nothing was done (a backend whose keys do not depend on the tenant)"),
+			"errors":          arrayOf(str("One failure, at most 20")),
+		}, "object", "backend", "dry_run", "rows", "at_address", "moved", "bytes_moved", "legacy_deleted", "missing", "failed", "orphans", "orphans_deleted", "unrecognized", "tenants_listed"),
 		"SmartDemotionResult": object("", map[string]*Schema{
 			"dry_run":              boolean(""),
 			"tenants_scanned":      {Type: "integer"},

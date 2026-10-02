@@ -103,7 +103,7 @@ func setupTaggingFixture(t *testing.T) *taggingFixture {
 func (f *taggingFixture) get(t *testing.T) *httptest.ResponseRecorder {
 	t.Helper()
 	s3Req := &S3Request{Bucket: f.bucket, Object: f.object, TenantID: f.tenantID}
-	ctx := tenant.WithTenant(context.Background(), f.tenant)
+	ctx := s3Ctx(context.Background(), f.tenant)
 	r := httptest.NewRequest("GET", "/"+f.bucket+"/"+f.object+"?tagging", nil).WithContext(ctx)
 	w := httptest.NewRecorder()
 	f.server.handleGetObjectTagging(w, r, s3Req)
@@ -113,7 +113,7 @@ func (f *taggingFixture) get(t *testing.T) *httptest.ResponseRecorder {
 func (f *taggingFixture) put(t *testing.T, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	s3Req := &S3Request{Bucket: f.bucket, Object: f.object, TenantID: f.tenantID}
-	ctx := tenant.WithTenant(context.Background(), f.tenant)
+	ctx := s3Ctx(context.Background(), f.tenant)
 	r := httptest.NewRequest("PUT", "/"+f.bucket+"/"+f.object+"?tagging", bytes.NewReader([]byte(body))).WithContext(ctx)
 	w := httptest.NewRecorder()
 	f.server.handlePutObjectTagging(w, r, s3Req)
@@ -206,7 +206,7 @@ func TestDeleteObjectTagging(t *testing.T) {
 	require.Equal(t, http.StatusOK, wp.Code)
 
 	s3Req := &S3Request{Bucket: f.bucket, Object: f.object, TenantID: f.tenantID}
-	ctx := tenant.WithTenant(context.Background(), f.tenant)
+	ctx := s3Ctx(context.Background(), f.tenant)
 	r := httptest.NewRequest("DELETE", "/"+f.bucket+"/"+f.object+"?tagging", nil).WithContext(ctx)
 	w := httptest.NewRecorder()
 	f.server.handleDeleteObjectTagging(w, r, s3Req)
@@ -223,7 +223,7 @@ func TestPutObjectTagging_ObjectNotFound(t *testing.T) {
 	f := setupTaggingFixture(t)
 
 	s3Req := &S3Request{Bucket: f.bucket, Object: "does-not-exist.txt", TenantID: f.tenantID}
-	ctx := tenant.WithTenant(context.Background(), f.tenant)
+	ctx := s3Ctx(context.Background(), f.tenant)
 	r := httptest.NewRequest("PUT", "/"+f.bucket+"/does-not-exist.txt?tagging",
 		bytes.NewReader([]byte(taggingXML([2]string{"env", "prod"})))).WithContext(ctx)
 	w := httptest.NewRecorder()

@@ -104,7 +104,7 @@ func TestBucketCountLimit(t *testing.T) {
 
 	req := httptest.NewRequest("PUT", "/bucket-1001", nil)
 	tn := &tenant.Tenant{ID: tenantID}
-	req = req.WithContext(tenant.WithTenant(req.Context(), tn))
+	req = req.WithContext(s3Ctx(req.Context(), tn))
 	w := httptest.NewRecorder()
 
 	s.CreateBucket(w, req)

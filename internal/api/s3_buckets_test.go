@@ -84,7 +84,7 @@ func s3ServerWithDB(t *testing.T, db *sql.DB) *Server {
 
 func withTenantCtx(r *http.Request, tenantID string) *http.Request {
 	t := &tenant.Tenant{ID: tenantID}
-	ctx := tenant.WithTenant(r.Context(), t)
+	ctx := s3Ctx(r.Context(), t)
 	return r.WithContext(ctx)
 }
 

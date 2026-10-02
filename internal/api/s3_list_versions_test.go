@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -22,7 +21,7 @@ func (f *versioningFixture) listVersions(t *testing.T, rawQuery string) (*httpte
 		target += "&" + rawQuery
 	}
 	req := httptest.NewRequest("GET", target, nil)
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 
 	q := map[string]string{}
 	parsed, err := url.ParseQuery(req.URL.RawQuery)
@@ -155,7 +154,7 @@ func TestListObjectVersions_MissingBucket(t *testing.T) {
 	f := setupVersioningFixture(t)
 
 	req := httptest.NewRequest("GET", "/nope-no-bucket?versions", nil)
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.server.handleListObjectVersions(w, req, &S3Request{
 		Bucket:   "nope-no-bucket",

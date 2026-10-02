@@ -15,7 +15,6 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/flags"
-	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -111,7 +110,7 @@ func TestHandlePut_ChunkingFlagOff_SSEBucketStillEncrypts(t *testing.T) {
 	content := generateTestData(8 * 1024)
 	req := httptest.NewRequest("PUT", "/test-bucket/flag-off.bin", bytes.NewReader(content))
 	req.ContentLength = int64(len(content))
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, "test-bucket", "flag-off.bin")
 	require.Equal(t, http.StatusOK, w.Code)
@@ -165,7 +164,7 @@ func TestHandleGet_SSEObjectWithoutService_Fails(t *testing.T) {
 	req := httptest.NewRequest("PUT", "/test-bucket/sse.bin", bytes.NewReader(plaintext))
 	req.ContentLength = int64(len(plaintext))
 	req.Header.Set("x-amz-server-side-encryption", "AES256")
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, "test-bucket", "sse.bin")
 	require.Equal(t, http.StatusOK, w.Code)
@@ -207,7 +206,7 @@ func TestHandleDelete_DeleteMarkerReleasesChunkedManifest(t *testing.T) {
 	})
 
 	req := httptest.NewRequest("DELETE", "/test-bucket/versioned-later.bin", nil)
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandleDelete(w, req, "test-bucket", "versioned-later.bin")
 	require.Equal(t, http.StatusNoContent, w.Code)

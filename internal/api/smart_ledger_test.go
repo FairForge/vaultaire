@@ -96,7 +96,7 @@ func (f *ledgerFixture) read(path string) string {
 
 func (f *ledgerFixture) req(method, target string, body []byte) *http.Request {
 	r := httptest.NewRequest(method, target, bytes.NewReader(body))
-	return r.WithContext(tenant.WithTenant(r.Context(), f.tn))
+	return r.WithContext(s3Ctx(r.Context(), f.tn))
 }
 
 func (f *ledgerFixture) put(bucket, key, body string, hdr ...string) {

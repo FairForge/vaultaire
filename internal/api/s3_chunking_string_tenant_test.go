@@ -15,7 +15,6 @@ import (
 	"testing"
 
 	"github.com/FairForge/vaultaire/internal/crypto"
-	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -41,7 +40,7 @@ func stringTenantPut(t *testing.T, f *adapterTestFixture, key string, content []
 	t.Helper()
 	req := httptest.NewRequest("PUT", "/test-bucket/"+key, bytes.NewReader(content))
 	req.ContentLength = int64(len(content))
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, "test-bucket", key)
 	return w
@@ -50,7 +49,7 @@ func stringTenantPut(t *testing.T, f *adapterTestFixture, key string, content []
 func stringTenantGet(t *testing.T, f *adapterTestFixture, key string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest("GET", "/test-bucket/"+key, nil)
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandleGet(w, req, "test-bucket", key)
 	return w
@@ -105,7 +104,7 @@ func TestChunking_StringTenantID_DedupAndDelete(t *testing.T) {
 
 	// DELETE must take the chunked path (decrement refs), not the plain path.
 	req := httptest.NewRequest("DELETE", "/test-bucket/dedup-a.bin", nil)
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.adapter.HandleDelete(w, req, "test-bucket", "dedup-a.bin")
 	require.Equal(t, http.StatusNoContent, w.Code)

@@ -52,10 +52,15 @@ func TestLyveDriver_TenantFromContext(t *testing.T) {
 
 	// Context tenant overrides the driver default.
 	ctx := context.WithValue(context.Background(), common.TenantIDKey, "ctx-tenant")
-	assert.Equal(t, "ctx-tenant", d.getTenantID(ctx))
+	got, err := d.getTenantID(ctx, "Get")
+	require.NoError(t, err)
+	assert.Equal(t, "ctx-tenant", got)
 
-	// No context tenant falls back to the driver default.
-	assert.Equal(t, "default-tenant", d.getTenantID(context.Background()))
+	// No context tenant falls back to the driver's own default (tools build
+	// the driver with one; the server passes none — tenant_ctx_test.go).
+	got, err = d.getTenantID(context.Background(), "Get")
+	require.NoError(t, err)
+	assert.Equal(t, "default-tenant", got)
 }
 
 // TestLyveDriver_Integration exercises the full CRUD surface against a real

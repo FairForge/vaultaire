@@ -61,7 +61,7 @@ func putObject(t *testing.T, server *Server, tnt *tenant.Tenant, tempDir, bucket
 	require.NoError(t, os.MkdirAll(bucketPath, 0755))
 
 	req := httptest.NewRequest("PUT", "/"+bucket+"/"+key, bytes.NewReader([]byte(content)))
-	ctx := tenant.WithTenant(req.Context(), tnt)
+	ctx := s3Ctx(req.Context(), tnt)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -74,7 +74,7 @@ func getObject(t *testing.T, server *Server, tnt *tenant.Tenant, bucket, key str
 	t.Helper()
 
 	req := httptest.NewRequest("GET", "/"+bucket+"/"+key, nil)
-	ctx := tenant.WithTenant(req.Context(), tnt)
+	ctx := s3Ctx(req.Context(), tnt)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -95,7 +95,7 @@ func TestCopyObject_SameBucket(t *testing.T) {
 	// Act: copy src.txt → dest.txt within same bucket.
 	req := httptest.NewRequest("PUT", "/bucket1/dest.txt", nil)
 	req.Header.Set("x-amz-copy-source", "/bucket1/src.txt")
-	ctx := tenant.WithTenant(req.Context(), tnt)
+	ctx := s3Ctx(req.Context(), tnt)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -131,7 +131,7 @@ func TestCopyObject_CrossBucket(t *testing.T) {
 	// Act: copy bucket-a/file.bin → bucket-b/file.bin.
 	req := httptest.NewRequest("PUT", "/bucket-b/file.bin", nil)
 	req.Header.Set("x-amz-copy-source", "/bucket-a/file.bin")
-	ctx := tenant.WithTenant(req.Context(), tnt)
+	ctx := s3Ctx(req.Context(), tnt)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -156,7 +156,7 @@ func TestCopyObject_NonexistentSource(t *testing.T) {
 	// Act: copy from a key that doesn't exist.
 	req := httptest.NewRequest("PUT", "/bucket1/dest.txt", nil)
 	req.Header.Set("x-amz-copy-source", "/bucket1/ghost.txt")
-	ctx := tenant.WithTenant(req.Context(), tnt)
+	ctx := s3Ctx(req.Context(), tnt)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -177,7 +177,7 @@ func TestCopyObject_SelfOverwrite(t *testing.T) {
 	// Act: copy to itself (same bucket, same key).
 	req := httptest.NewRequest("PUT", "/bucket1/same.txt", nil)
 	req.Header.Set("x-amz-copy-source", "/bucket1/same.txt")
-	ctx := tenant.WithTenant(req.Context(), tnt)
+	ctx := s3Ctx(req.Context(), tnt)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -201,7 +201,7 @@ func TestCopyObject_ETagMatches(t *testing.T) {
 	// Act.
 	req := httptest.NewRequest("PUT", "/bucket1/copy.txt", nil)
 	req.Header.Set("x-amz-copy-source", "/bucket1/src.txt")
-	ctx := tenant.WithTenant(req.Context(), tnt)
+	ctx := s3Ctx(req.Context(), tnt)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -241,7 +241,7 @@ func TestCopyObject_InvalidCopySource(t *testing.T) {
 			if tc.copySource != "" {
 				req.Header.Set("x-amz-copy-source", tc.copySource)
 			}
-			ctx := tenant.WithTenant(req.Context(), tnt)
+			ctx := s3Ctx(req.Context(), tnt)
 			req = req.WithContext(ctx)
 
 			w := httptest.NewRecorder()
@@ -269,7 +269,7 @@ func TestCopyObject_CopySourceWithQueryString(t *testing.T) {
 	// Act: copy source with ?versionId= (should be stripped).
 	req := httptest.NewRequest("PUT", "/bucket1/dest.txt", nil)
 	req.Header.Set("x-amz-copy-source", "/bucket1/src.txt?versionId=null")
-	ctx := tenant.WithTenant(req.Context(), tnt)
+	ctx := s3Ctx(req.Context(), tnt)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -395,7 +395,7 @@ func TestCopyObject_SelfCopy_LargeFile(t *testing.T) {
 
 	req := httptest.NewRequest("PUT", "/bucket1/self.bin", nil)
 	req.Header.Set("x-amz-copy-source", "/bucket1/self.bin")
-	ctx := tenant.WithTenant(req.Context(), tnt)
+	ctx := s3Ctx(req.Context(), tnt)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -423,7 +423,7 @@ func TestCopyObject_URLEncodedSourceKey(t *testing.T) {
 
 	req := httptest.NewRequest("PUT", "/bucket1/dest.txt", nil)
 	req.Header.Set("x-amz-copy-source", "/bucket1/my%20file.txt")
-	ctx := tenant.WithTenant(req.Context(), tnt)
+	ctx := s3Ctx(req.Context(), tnt)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()

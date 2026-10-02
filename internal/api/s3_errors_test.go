@@ -377,5 +377,5 @@ func TestNoSuchBucketSuggestion_EndToEnd(t *testing.T) {
 	assert.Contains(t, errResp.Message, "Did you mean")
 
 	// Verify the tenant.FromContext pattern works
-	_ = tenant.WithTenant(ctx, &tenant.Tenant{ID: tenantID})
+	_ = s3Ctx(ctx, &tenant.Tenant{ID: tenantID})
 }

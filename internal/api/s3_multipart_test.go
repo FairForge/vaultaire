@@ -63,7 +63,7 @@ func newTestMultipartServer(t *testing.T) (*Server, *tenant.Tenant, string) {
 // doS3Request executes an S3 request against the test server with tenant context.
 func doS3Request(srv *Server, t *tenant.Tenant, method, path string, body io.Reader) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, body)
-	ctx := tenant.WithTenant(req.Context(), t)
+	ctx := s3Ctx(req.Context(), t)
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 	srv.handleS3Request(w, req)

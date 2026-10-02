@@ -95,7 +95,7 @@ func itemURL(tenant *odTenant, path string) string {
 func TestOneDriveDelete_SweepsAllFleetCopies(t *testing.T) {
 	ctx := common.WithTenantID(context.Background(), "x")
 	d, stubs := stubFleet(3, zap.NewNop())
-	path := d.buildPath(ctx, "bkt", "obj")
+	path := d.ObjectKey(ctx, "bkt", "obj")
 	home := d.homeTenantIndex(path)
 	dup := (home + 1) % 3
 
@@ -125,7 +125,7 @@ func TestOneDriveDelete_MissingEverywhereErrors(t *testing.T) {
 func TestOneDriveExists_SurvivesDownAccount(t *testing.T) {
 	ctx := common.WithTenantID(context.Background(), "x")
 	d, stubs := stubFleet(2, zap.NewNop())
-	path := d.buildPath(ctx, "bkt", "obj")
+	path := d.ObjectKey(ctx, "bkt", "obj")
 	home := d.homeTenantIndex(path)
 	other := (home + 1) % 2
 
@@ -146,7 +146,7 @@ func TestOneDriveExists_SurvivesDownAccount(t *testing.T) {
 func TestOneDriveExists_DownAccountNotFoundIsError(t *testing.T) {
 	ctx := common.WithTenantID(context.Background(), "x")
 	d, _ := stubFleet(2, zap.NewNop())
-	home := d.homeTenantIndex(d.buildPath(ctx, "bkt", "obj"))
+	home := d.homeTenantIndex(d.ObjectKey(ctx, "bkt", "obj"))
 	d.tenants[home].driveID = ""
 	d.tenants[home].userUPN = "brokenupn"
 
@@ -161,7 +161,7 @@ func TestOneDriveGet_LogsFallbackHit(t *testing.T) {
 	core, logs := observer.New(zap.InfoLevel)
 	ctx := common.WithTenantID(context.Background(), "x")
 	d, stubs := stubFleet(2, zap.New(core))
-	path := d.buildPath(ctx, "bkt", "obj")
+	path := d.ObjectKey(ctx, "bkt", "obj")
 	other := (d.homeTenantIndex(path) + 1) % 2
 
 	dlURL := "https://cdn.example.test/obj"

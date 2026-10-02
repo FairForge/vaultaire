@@ -20,7 +20,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -97,13 +96,20 @@ func NewGeyserDriver(accessKey, secretKey, bucket, tenantID string, logger *zap.
 	}, nil
 }
 
-func (d *GeyserDriver) getTenantID(ctx context.Context) string {
-	if tid := ctx.Value(common.TenantIDKey); tid != nil {
-		if s, ok := tid.(string); ok && s != "" {
-			return s
-		}
+// getTenantID is the tenant the call is made for: the context's, else the
+// driver's own default (tools pass one; the server passes none). With
+// neither the call is refused (tenant_ctx.go).
+func (d *GeyserDriver) getTenantID(ctx context.Context, op string) (string, error) {
+	return requireTenant(ctx, d.Name(), op, d.tenantID, d.logger)
+}
+
+// ObjectKey is the key a call would address (engine.KeyAddresser).
+func (d *GeyserDriver) ObjectKey(ctx context.Context, container, artifact string) string {
+	tid := contextTenant(ctx)
+	if tid == "" {
+		tid = d.tenantID
 	}
-	return d.tenantID
+	return d.buildKey(tid, container, artifact)
 }
 
 func (d *GeyserDriver) buildKey(tenantID, container, artifact string) string {
@@ -128,7 +134,10 @@ func geyserWireErr(err error) error {
 }
 
 func (d *GeyserDriver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
-	tenantID := d.getTenantID(ctx)
+	tenantID, tErr := d.getTenantID(ctx, "Get")
+	if tErr != nil {
+		return nil, tErr
+	}
 	key := d.buildKey(tenantID, container, artifact)
 
 	resp, err := d.client.GetObject(ctx, &s3.GetObjectInput{
@@ -143,7 +152,10 @@ func (d *GeyserDriver) Get(ctx context.Context, container, artifact string) (io.
 
 // GetRange reads a byte range from Geyser tape. Implements engine.RangeGetter.
 func (d *GeyserDriver) GetRange(ctx context.Context, container, artifact string, offset, length int64) (io.ReadCloser, error) {
-	tenantID := d.getTenantID(ctx)
+	tenantID, tErr := d.getTenantID(ctx, "GetRange")
+	if tErr != nil {
+		return nil, tErr
+	}
 	key := d.buildKey(tenantID, container, artifact)
 
 	input := &s3.GetObjectInput{
@@ -169,7 +181,10 @@ func (d *GeyserDriver) GetRange(ctx context.Context, container, artifact string,
 // engine.Restorer. Measured on the live library: recall <3 min idle,
 // bulk-friendly; re-restoring extends the staging expiry.
 func (d *GeyserDriver) RestoreObject(ctx context.Context, container, artifact string, days int32) error {
-	tenantID := d.getTenantID(ctx)
+	tenantID, tErr := d.getTenantID(ctx, "RestoreObject")
+	if tErr != nil {
+		return tErr
+	}
 	key := d.buildKey(tenantID, container, artifact)
 	if days < 1 {
 		days = 1
@@ -199,7 +214,10 @@ func (d *GeyserDriver) RestoreObject(ctx context.Context, container, artifact st
 // engine.Restorer. The raw x-amz-restore value is passed through so our own
 // HEAD responses are wire-identical to AWS Glacier.
 func (d *GeyserDriver) RestoreStatus(ctx context.Context, container, artifact string) (*engine.RestoreStatus, error) {
-	tenantID := d.getTenantID(ctx)
+	tenantID, tErr := d.getTenantID(ctx, "RestoreStatus")
+	if tErr != nil {
+		return nil, tErr
+	}
 	key := d.buildKey(tenantID, container, artifact)
 
 	resp, err := d.client.HeadObject(ctx, &s3.HeadObjectInput{
@@ -221,7 +239,10 @@ func (d *GeyserDriver) RestoreStatus(ctx context.Context, container, artifact st
 var _ engine.Restorer = (*GeyserDriver)(nil)
 
 func (d *GeyserDriver) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...engine.PutOption) error {
-	tenantID := d.getTenantID(ctx)
+	tenantID, tErr := d.getTenantID(ctx, "Put")
+	if tErr != nil {
+		return tErr
+	}
 	key := d.buildKey(tenantID, container, artifact)
 
 	// Geyser's Spectra Vail gateway requires Content-Length on every PUT
@@ -297,7 +318,10 @@ func materialize(data io.Reader) (body io.ReadSeeker, size int64, cleanup func()
 }
 
 func (d *GeyserDriver) Delete(ctx context.Context, container, artifact string) error {
-	tenantID := d.getTenantID(ctx)
+	tenantID, tErr := d.getTenantID(ctx, "Delete")
+	if tErr != nil {
+		return tErr
+	}
 	key := d.buildKey(tenantID, container, artifact)
 
 	_, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
@@ -311,7 +335,10 @@ func (d *GeyserDriver) Delete(ctx context.Context, container, artifact string) e
 }
 
 func (d *GeyserDriver) List(ctx context.Context, container string, prefix string) ([]string, error) {
-	tenantID := d.getTenantID(ctx)
+	tenantID, tErr := d.getTenantID(ctx, "List")
+	if tErr != nil {
+		return nil, tErr
+	}
 	fullPrefix := d.buildKey(tenantID, container, prefix)
 
 	// Every page (Review R7-06): a single ListObjectsV2 call truncated the
@@ -335,7 +362,10 @@ func (d *GeyserDriver) List(ctx context.Context, container string, prefix string
 }
 
 func (d *GeyserDriver) Exists(ctx context.Context, container, artifact string) (bool, error) {
-	tenantID := d.getTenantID(ctx)
+	tenantID, tErr := d.getTenantID(ctx, "Exists")
+	if tErr != nil {
+		return false, tErr
+	}
 	key := d.buildKey(tenantID, container, artifact)
 
 	_, err := d.client.HeadObject(ctx, &s3.HeadObjectInput{

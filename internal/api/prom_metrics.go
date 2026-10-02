@@ -2,6 +2,7 @@ package api
 
 import (
 	"github.com/FairForge/vaultaire/internal/dashboard"
+	"github.com/FairForge/vaultaire/internal/drivers"
 	"net/http"
 	"sort"
 	"sync/atomic"
@@ -60,6 +61,17 @@ func (s *Server) initMetrics() {
 		// Writes destroyed by the delete of a stale copy (R13-06: detected,
 		// not preventable before WP-R2-1). Every source is there at 0.
 		reg.MustRegister(staleCopyLostWrites)
+		// Chunk blobs (WP-R8-7): reads served from a legacy address (0 after
+		// the chunk move — then the fallback can go), and driver calls
+		// refused because their context named no tenant (they used to land
+		// under t-default/). The second starts at 0 for every backend.
+		reg.MustRegister(chunkLegacyReads)
+		reg.MustRegister(drivers.Collectors()...)
+		if s.engine != nil {
+			for _, name := range s.engine.GetDriverNames() {
+				drivers.InitTenantlessSeries(name)
+			}
+		}
 		reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 			Name: "vaultaire_egress_throttled_tenants",
 			Help: "Tenants past their monthly egress allowance with the egress_throttle flag on (their downloads are paced).",

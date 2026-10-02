@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/engine"
-	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -44,7 +43,7 @@ func TestDedupGC_DeletesMarkedPastGrace(t *testing.T) {
 
 	// Delete the object — decrements ref counts, marks chunks for deletion.
 	delReq := httptest.NewRequest("DELETE", "/test-bucket/gc-delete.bin", nil)
-	delReq = delReq.WithContext(tenant.WithTenant(delReq.Context(), f.tenant))
+	delReq = delReq.WithContext(s3Ctx(delReq.Context(), f.tenant))
 	dw := httptest.NewRecorder()
 	f.adapter.HandleDelete(dw, delReq, "test-bucket", "gc-delete.bin")
 	require.Equal(t, http.StatusNoContent, dw.Code)
@@ -93,7 +92,7 @@ func TestDedupGC_RespectsGrace(t *testing.T) {
 	putChunkedObject(t, f, "gc-grace.bin", content, "application/octet-stream")
 
 	delReq := httptest.NewRequest("DELETE", "/test-bucket/gc-grace.bin", nil)
-	delReq = delReq.WithContext(tenant.WithTenant(delReq.Context(), f.tenant))
+	delReq = delReq.WithContext(s3Ctx(delReq.Context(), f.tenant))
 	dw := httptest.NewRecorder()
 	f.adapter.HandleDelete(dw, delReq, "test-bucket", "gc-grace.bin")
 	require.Equal(t, http.StatusNoContent, dw.Code)
@@ -205,7 +204,7 @@ func TestDedupGC_EndToEnd(t *testing.T) {
 
 	// Delete object A — ref counts decrement but chunks survive (still used by B).
 	delReq := httptest.NewRequest("DELETE", "/test-bucket/gc-e2e-a.bin", nil)
-	delReq = delReq.WithContext(tenant.WithTenant(delReq.Context(), f.tenant))
+	delReq = delReq.WithContext(s3Ctx(delReq.Context(), f.tenant))
 	dw := httptest.NewRecorder()
 	f.adapter.HandleDelete(dw, delReq, "test-bucket", "gc-e2e-a.bin")
 	require.Equal(t, http.StatusNoContent, dw.Code)
@@ -221,7 +220,7 @@ func TestDedupGC_EndToEnd(t *testing.T) {
 
 	// Object B should still be readable.
 	getReq := httptest.NewRequest("GET", "/test-bucket/gc-e2e-b.bin", nil)
-	getReq = getReq.WithContext(tenant.WithTenant(getReq.Context(), f.tenant))
+	getReq = getReq.WithContext(s3Ctx(getReq.Context(), f.tenant))
 	gw := httptest.NewRecorder()
 	f.adapter.HandleGet(gw, getReq, "test-bucket", "gc-e2e-b.bin")
 	require.Equal(t, http.StatusOK, gw.Code)
@@ -229,7 +228,7 @@ func TestDedupGC_EndToEnd(t *testing.T) {
 
 	// Now delete object B too.
 	delReq2 := httptest.NewRequest("DELETE", "/test-bucket/gc-e2e-b.bin", nil)
-	delReq2 = delReq2.WithContext(tenant.WithTenant(delReq2.Context(), f.tenant))
+	delReq2 = delReq2.WithContext(s3Ctx(delReq2.Context(), f.tenant))
 	dw2 := httptest.NewRecorder()
 	f.adapter.HandleDelete(dw2, delReq2, "test-bucket", "gc-e2e-b.bin")
 	require.Equal(t, http.StatusNoContent, dw2.Code)
@@ -274,7 +273,7 @@ func TestDedupGC_GlobalContainerCleanup(t *testing.T) {
 
 	// Delete, backdate, GC.
 	delReq := httptest.NewRequest("DELETE", "/test-bucket/gc-global.bin", nil)
-	delReq = delReq.WithContext(tenant.WithTenant(delReq.Context(), f.tenant))
+	delReq = delReq.WithContext(s3Ctx(delReq.Context(), f.tenant))
 	dw := httptest.NewRecorder()
 	f.adapter.HandleDelete(dw, delReq, "test-bucket", "gc-global.bin")
 	require.Equal(t, http.StatusNoContent, dw.Code)
