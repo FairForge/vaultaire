@@ -420,11 +420,19 @@ func (j *scheduledJob) execute(ctx context.Context, release func(), run func(con
 
 	outcome, text := jobOutcomeOK, rep.Note
 	switch {
-	case err == nil:
 	case errors.Is(ctx.Err(), context.Canceled):
 		// The scheduler's own context ended: the process is stopping. Not
-		// a failure of the job; the next boot's catch-up runs it again.
-		outcome, text = jobOutcomeInterrupted, "the process stopped during this run: "+err.Error()
+		// a failure of the job, and never the day's success either, whatever
+		// the run returned — a job that treats its items' failures as notes
+		// reports a pass the shutdown cut short as done. The next boot's
+		// catch-up runs it again.
+		outcome, text = jobOutcomeInterrupted, "the process stopped during this run"
+		if err != nil {
+			text += ": " + err.Error()
+		} else if rep.Note != "" {
+			text += ": " + rep.Note
+		}
+	case err == nil:
 	default:
 		outcome, text = jobOutcomeError, err.Error()
 	}

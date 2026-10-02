@@ -477,3 +477,38 @@ func TestAdminTriggerContext_SurvivesRequestCancel(t *testing.T) {
 	require.True(t, ok)
 	assert.WithinDuration(t, time.Now().Add(adminTriggerTimeout), dl, time.Minute)
 }
+
+// Post-merge review: a deploy cancels the scheduler's context in the middle
+// of a demotion run. With one flagged tenant (the canary: tenant zero) the
+// cancelled copies were appended as per-object failures, the loop ended on
+// its last tenant and RunOnce returned nil — the scheduler recorded the cut
+// run as the day's success and the next boot's catch-up did not run it again.
+func TestSmartDemotionJob_ARunCutByAShutdownIsNotTheDaysSuccess(t *testing.T) {
+	// Arrange: three idle objects of one tenant; the process starts stopping
+	// while the first is being moved.
+	// A tier of its own, so this tenant is the only — and therefore the
+	// last — one the run lists, as the one managed tenant is on prod.
+	tier := "cut-" + uuid.New().String()[:8]
+	f := setupDemotionFixture(t, 1*tb, tier)
+	f.runner.Tiers = []string{tier}
+	f.object("b", "one", 100, 30, 22)
+	f.object("b", "two", 100, 30, 21)
+	f.object("b", "three", 100, 30, 20)
+	jf := setupJobsFixture(t)
+	f.runner.JobName = testJobName("demotion-cut")
+	j := asJob(t, jf, f.runner.spec())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.runner.beforeFlip = func(string, string) { cancel() }
+
+	// Act
+	j.tick(ctx)
+
+	// Assert: interrupted, no success recorded — the next boot runs it again.
+	row := jf.row(f.runner.JobName)
+	assert.Equal(t, jobOutcomeInterrupted, row.Outcome, row.Error)
+	assert.False(t, row.LastSuccess.Valid, "a run the shutdown cut short must not count as today's run")
+	due, err := j.due(context.Background())
+	require.NoError(t, err)
+	assert.True(t, due)
+}

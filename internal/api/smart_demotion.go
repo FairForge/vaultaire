@@ -261,6 +261,11 @@ func (r *SmartDemotionRunner) RunOnce(ctx context.Context, dryRun bool) (SmartDe
 		}
 		res.Candidates += len(cands)
 		for _, c := range cands {
+			if ctx.Err() != nil {
+				// Stopping (a deploy) or at the ceiling: the rest is not a
+				// list of failed objects, it is the next run's work.
+				return res, ctx.Err()
+			}
 			if res.BytesDemotedBefore+res.BytesDemoted >= r.MaxBytesPerRun {
 				break
 			}

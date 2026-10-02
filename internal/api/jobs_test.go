@@ -584,3 +584,29 @@ func TestJobScheduler_ANameIsRegisteredOnce(t *testing.T) {
 	}
 	assert.Equal(t, 1, n)
 }
+
+// Post-merge review: a job whose items' failures are notes returns nil for a
+// pass the shutdown cut short. Whatever a run returns, one that ends while
+// the process is stopping is "interrupted" and never the day's success.
+func TestJob_ARunThatEndsWhileTheProcessStopsIsNotASuccess(t *testing.T) {
+	// Arrange: a daily job whose run reports success after the shutdown began.
+	jf := setupJobsFixture(t)
+	name := testJobName("stopping")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	j := asJob(t, jf, jobSpec{Name: name, Run: func(context.Context) (jobReport, error) {
+		cancel()
+		return jobReport{Rows: 3, Note: "2 item(s) failed, first: context canceled"}, nil
+	}})
+
+	// Act
+	j.tick(ctx)
+
+	// Assert
+	row := jf.row(name)
+	assert.Equal(t, jobOutcomeInterrupted, row.Outcome)
+	assert.Contains(t, row.Error, "2 item(s) failed")
+	assert.False(t, row.LastSuccess.Valid, "the next boot must run it again")
+	assert.Equal(t, float64(0), counterValue(name, jobOutcomeOK))
+	assert.Equal(t, float64(1), counterValue(name, jobOutcomeInterrupted))
+}
