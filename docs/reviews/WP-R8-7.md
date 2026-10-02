@@ -1,6 +1,6 @@
 # WP-R8-7 — one address for chunk blobs
 
-**Worker session, 2026-10-02. PR #PRNUM, branch `wp/R8-7-chunk-address`, from `main` @ #555.** Closes
+**Worker session, 2026-10-02. PR #556, branch `wp/R8-7-chunk-address`, from `main` @ #555.** Closes
 WP-R10-3c F-1 (P1; P0 the day two customers upload the same large file) and SYNTHESIS table A row
 WP-R8-7. No migration.
 
