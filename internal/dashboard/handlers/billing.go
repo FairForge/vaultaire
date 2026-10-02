@@ -273,9 +273,9 @@ func populateValueStack(ctx context.Context, db *sql.DB, data map[string]any, te
 	data["StorageUsedFmt"] = formatBytes(used)
 }
 
-// Pricing — stored.ge Standard quota rate (annual, 2026-09-21 quota-sold
+// Pricing — Stored Standard quota rate (annual, 2026-09-21 quota-sold
 // decision) vs competitor list prices as published August 2026 (Wasabi raised
-// to $7.99 Jul 1, B2 to $6.95 May 1). Egress on stored.ge is allowance-based
+// to $7.99 Jul 1, B2 to $6.95 May 1). Egress on Stored is allowance-based
 // (rate-limited past the allowance — internal/usage/egress.go, WP-R10-9),
 // never billed.
 const (
@@ -312,7 +312,7 @@ func providerCost(name string, storageTB, egressTB, storageRate, egressRate floa
 func populateCostComparison(ctx context.Context, db *sql.DB, data map[string]any, tenantID string) {
 	zero := func() {
 		data["Providers"] = []ProviderCost{
-			{Name: "stored.ge", StorageCost: "$0.00", EgressCost: "$0.00", TotalCost: "$0.00", Highlight: true},
+			{Name: "Stored", StorageCost: "$0.00", EgressCost: "$0.00", TotalCost: "$0.00", Highlight: true},
 			{Name: "AWS S3", StorageCost: "$0.00", EgressCost: "$0.00", TotalCost: "$0.00"},
 			{Name: "Backblaze B2", StorageCost: "$0.00", EgressCost: "$0.00", TotalCost: "$0.00"},
 			{Name: "Wasabi", StorageCost: "$0.00", EgressCost: "$0.00", TotalCost: "$0.00"},
@@ -353,7 +353,7 @@ func populateCostComparison(ctx context.Context, db *sql.DB, data map[string]any
 	tbStored := float64(usedBytes) / (1024 * 1024 * 1024 * 1024)
 	tbEgress := float64(egressBytes) / (1024 * 1024 * 1024 * 1024)
 
-	stored := providerCost("stored.ge", tbStored, tbEgress, storedStoragePerTB, storedEgressPerTB, true)
+	stored := providerCost("Stored", tbStored, tbEgress, storedStoragePerTB, storedEgressPerTB, true)
 	aws := providerCost("AWS S3", tbStored, tbEgress, awsStoragePerTB, awsEgressPerTB, false)
 	b2 := providerCost("Backblaze B2", tbStored, tbEgress, b2StoragePerTB, b2EgressPerTB, false)
 	wasabi := providerCost("Wasabi", tbStored, tbEgress, wasabiStoragePerTB, wasabiEgressPerTB, false)

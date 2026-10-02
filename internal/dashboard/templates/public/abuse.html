@@ -1,9 +1,9 @@
-{{define "title"}}Report Abuse — stored.ge{{end}}
+{{define "title"}}Report Abuse — Stored{{end}}
 {{define "nav"}}{{end}}
 {{define "content"}}
 <div class="auth-page">
     <div class="auth-card" style="max-width:540px">
-        <div class="auth-brand">stored.ge</div>
+        <div class="auth-brand">Stored</div>
         <h1>Report Abuse</h1>
         {{if .Submitted}}
         <div class="alert alert-success">
@@ -11,7 +11,7 @@
         </div>
         <div class="auth-footer"><a href="/">Back to homepage</a></div>
         {{else}}
-        <p class="auth-subtitle">If you believe content hosted on stored.ge violates our Acceptable Use Policy, please let us know.</p>
+        <p class="auth-subtitle">If you believe content hosted on Stored violates our Acceptable Use Policy, please let us know.</p>
         {{if .Error}}<div class="alert alert-error">{{.Error}}</div>{{end}}
         <form method="POST" action="/abuse">
             <div class="hp-field" aria-hidden="true"><label for="abuse-website">Website</label><input id="abuse-website" type="text" name="website" tabindex="-1" autocomplete="off"></div>

@@ -152,7 +152,7 @@ func TestEgressAlerts_Ladder(t *testing.T) {
 	// Assert 2
 	emails := sender.emails()
 	require.Len(t, emails, 1)
-	assert.Equal(t, "You've used 85% of your stored.ge egress allowance", emails[0].subject)
+	assert.Equal(t, "You've used 85% of your Stored egress allowance", emails[0].subject)
 	assert.Contains(t, emails[0].text, "27.2 MB of your 32.0 MB egress allowance")
 	assert.Contains(t, emails[0].text, "4.0 MB/s")
 	assert.Contains(t, emails[0].text, reset)
@@ -176,7 +176,7 @@ func TestEgressAlerts_Ladder(t *testing.T) {
 	// Assert 4: the notice states the rate and the reset date.
 	emails = sender.emails()
 	require.Len(t, emails, 3)
-	assert.Equal(t, "Your stored.ge egress allowance for this month is used up", emails[2].subject)
+	assert.Equal(t, "Your Stored egress allowance for this month is used up", emails[2].subject)
 	assert.Contains(t, emails[2].text, "rate-limited to 4.0 MB/s in total")
 	assert.Contains(t, emails[2].text, "resets on "+reset+" (UTC)")
 	assert.Contains(t, emails[2].text, "Nothing is billed")

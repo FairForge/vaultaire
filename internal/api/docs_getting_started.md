@@ -1,6 +1,6 @@
-# Getting Started with stored.ge
+# Getting Started with Stored
 
-stored.ge is S3-compatible object storage. If a tool speaks S3 — aws-cli, rclone,
+Stored is S3-compatible object storage. If a tool speaks S3 — aws-cli, rclone,
 restic, boto3, JuiceFS, Cyberduck — it works here. This guide gets you from signup
 to your first upload in about two minutes.
 
@@ -39,7 +39,7 @@ Then create a bucket and upload a file:
 
 ```
 aws --endpoint-url https://stored.ge s3 mb s3://my-first-bucket
-echo "hello stored.ge" > hello.txt
+echo "hello Stored" > hello.txt
 aws --endpoint-url https://stored.ge s3 cp hello.txt s3://my-first-bucket/
 aws --endpoint-url https://stored.ge s3 ls s3://my-first-bucket/
 ```

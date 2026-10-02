@@ -843,7 +843,7 @@
             if (window.sgPing) window.sgPing('builder.share');
             var url = shareURL();
             if (navigator.share) {
-                navigator.share({ title: signText() + ' on stored.ge', url: url }).catch(function () { /* dismissed */ });
+                navigator.share({ title: signText() + ' on Stored', url: url }).catch(function () { /* dismissed */ });
                 return;
             }
             if (navigator.clipboard) {
@@ -939,7 +939,7 @@
                 x.fillText(signText(), 36, CH + 60);
                 x.font = '20px Silkscreen';
                 x.fillStyle = '#6b6b6b';
-                x.fillText(tb + ' TB · ' + money(t.total) + '/mo · built on stored.ge', 36, CH + 96);
+                x.fillText(tb + ' TB · ' + money(t.total) + '/mo · built on Stored · stored.ge', 36, CH + 96);
                 x.textAlign = 'right';
                 x.fillStyle = '#2b2b2b';
                 x.font = '800 30px Montserrat';

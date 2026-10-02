@@ -886,7 +886,7 @@ func handleForgotPassword(baseTmpl *template.Template, deps Deps) http.HandlerFu
 			htmlBody, textBody, renderErr := email.RenderPasswordReset(deps.BaseURL, token, addr)
 			if renderErr != nil {
 				deps.Logger.Error("render password reset email", zap.Error(renderErr))
-			} else if sendErr := deps.Email.Send(r.Context(), addr, "Reset your password — stored.ge", htmlBody, textBody); sendErr != nil {
+			} else if sendErr := deps.Email.Send(r.Context(), addr, "Reset your password — Stored", htmlBody, textBody); sendErr != nil {
 				deps.Logger.Error("send password reset email", zap.String("to", addr), zap.Error(sendErr))
 			}
 		} else if !errors.Is(err, auth.ErrResetRateLimited) {
@@ -983,11 +983,11 @@ func handleResetPassword(baseTmpl *template.Template, deps Deps) http.HandlerFun
 func pageContent(page string) string {
 	switch page {
 	case "login":
-		return `{{define "title"}}Sign In — stored.ge{{end}}` +
+		return `{{define "title"}}Sign In — Stored{{end}}` +
 			`{{define "nav"}}{{end}}` +
 			`{{define "content"}}` +
 			`<div class="auth-page"><div class="auth-card">` +
-			`<div class="auth-brand">stored.ge</div>` +
+			`<div class="auth-brand">Stored</div>` +
 			`<h1>Sign In</h1>` +
 			`{{if .Error}}<div class="alert alert-error">{{.Error}}</div>{{end}}` +
 			`{{if or .HasGoogle .HasGithub}}` +
@@ -1005,11 +1005,11 @@ func pageContent(page string) string {
 			`<div class="auth-footer">No account? <a href="/register">Create one</a></div>` +
 			`</div></div>{{end}}`
 	case "register":
-		return `{{define "title"}}Register — stored.ge{{end}}` +
+		return `{{define "title"}}Register — Stored{{end}}` +
 			`{{define "nav"}}{{end}}` +
 			`{{define "content"}}` +
 			`<div class="auth-page"><div class="auth-card">` +
-			`<div class="auth-brand">stored.ge</div>` +
+			`<div class="auth-brand">Stored</div>` +
 			`<h1>Create Account</h1>` +
 			`{{if .Intent}}<div class="alert alert-info house-intent"><strong>Your house:</strong> {{.Intent.StdTB}} TB downstairs, {{.Intent.VaultTB}} TB in the attic &middot; <strong>{{.Intent.Monthly}}/mo</strong> billed yearly. It will be waiting on your billing page.</div>{{end}}` +
 			`{{if .Error}}<div class="alert alert-error">{{.Error}}</div>{{end}}` +
@@ -1034,11 +1034,11 @@ func pageContent(page string) string {
 		// B2: post-signup reveal-once S3 credentials. The secret exists only
 		// in this response — refreshing or navigating away loses it for good
 		// (a replacement key can be minted at /dashboard/apikeys).
-		return `{{define "title"}}Your S3 Credentials — stored.ge{{end}}` +
+		return `{{define "title"}}Your S3 Credentials — Stored{{end}}` +
 			`{{define "nav"}}{{end}}` +
 			`{{define "content"}}` +
 			`<div class="auth-page"><div class="auth-card">` +
-			`<div class="auth-brand">stored.ge</div>` +
+			`<div class="auth-brand">Stored</div>` +
 			`<h1>Your S3 Credentials</h1>` +
 			`<div class="alert alert-error"><strong>Save these now.</strong> ` +
 			`Your secret key is shown only once — it cannot be recovered. ` +
@@ -1054,11 +1054,11 @@ func pageContent(page string) string {
 			`<a href="/dashboard" class="btn btn-primary btn-block">I saved my keys — go to dashboard</a>` +
 			`</div></div>{{end}}`
 	case "verify-2fa":
-		return `{{define "title"}}Verify 2FA — stored.ge{{end}}` +
+		return `{{define "title"}}Verify 2FA — Stored{{end}}` +
 			`{{define "nav"}}{{end}}` +
 			`{{define "content"}}` +
 			`<div class="auth-page"><div class="auth-card">` +
-			`<div class="auth-brand">stored.ge</div>` +
+			`<div class="auth-brand">Stored</div>` +
 			`<h1>Two-Factor Authentication</h1>` +
 			`<p class="auth-subtitle">Enter the 6-digit code from your authenticator app, or a backup code.</p>` +
 			`{{if .Error}}<div class="alert alert-error">{{.Error}}</div>{{end}}` +
@@ -1070,11 +1070,11 @@ func pageContent(page string) string {
 			`<div class="auth-footer"><a href="/login">Back to sign in</a></div>` +
 			`</div></div>{{end}}`
 	case "verify-result":
-		return `{{define "title"}}Email Verification — stored.ge{{end}}` +
+		return `{{define "title"}}Email Verification — Stored{{end}}` +
 			`{{define "nav"}}{{end}}` +
 			`{{define "content"}}` +
 			`<div class="auth-page"><div class="auth-card">` +
-			`<div class="auth-brand">stored.ge</div>` +
+			`<div class="auth-brand">Stored</div>` +
 			`<h1>Email Verification</h1>` +
 			`{{if .Success}}<div class="alert alert-success">{{.Success}}</div>` +
 			`<div class="auth-footer"><a href="/login">Sign in</a></div>` +
@@ -1083,11 +1083,11 @@ func pageContent(page string) string {
 			`{{end}}` +
 			`</div></div>{{end}}`
 	case "forgot-password":
-		return `{{define "title"}}Forgot Password — stored.ge{{end}}` +
+		return `{{define "title"}}Forgot Password — Stored{{end}}` +
 			`{{define "nav"}}{{end}}` +
 			`{{define "content"}}` +
 			`<div class="auth-page"><div class="auth-card">` +
-			`<div class="auth-brand">stored.ge</div>` +
+			`<div class="auth-brand">Stored</div>` +
 			`<h1>Reset Password</h1>` +
 			`<p class="auth-subtitle">Enter your email and we'll send you a link to reset your password.</p>` +
 			`{{if .Error}}<div class="alert alert-error">{{.Error}}</div>{{end}}` +
@@ -1099,11 +1099,11 @@ func pageContent(page string) string {
 			`<div class="auth-footer"><a href="/login">Back to sign in</a></div>` +
 			`</div></div>{{end}}`
 	case "reset-password":
-		return `{{define "title"}}Reset Password — stored.ge{{end}}` +
+		return `{{define "title"}}Reset Password — Stored{{end}}` +
 			`{{define "nav"}}{{end}}` +
 			`{{define "content"}}` +
 			`<div class="auth-page"><div class="auth-card">` +
-			`<div class="auth-brand">stored.ge</div>` +
+			`<div class="auth-brand">Stored</div>` +
 			`<h1>Choose a New Password</h1>` +
 			`{{if .Error}}<div class="alert alert-error">{{.Error}}</div>{{end}}` +
 			`<form method="POST" action="/reset-password">` +

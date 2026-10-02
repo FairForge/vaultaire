@@ -1,4 +1,4 @@
-{{define "title"}}Dashboard — stored.ge{{end}}
+{{define "title"}}Dashboard — Stored{{end}}
 {{define "head"}}
 <style>
 .onboarding-card {
@@ -105,7 +105,7 @@
 {{if and .Onboarding (not .Onboarding.AllDone) (not .OnboardingDismissed)}}
 <div class="onboarding-card">
     <div class="onboarding-header">
-        <h2>Get Started with stored.ge</h2>
+        <h2>Get Started with Stored</h2>
         <button class="btn-dismiss"
                 hx-post="/dashboard/onboarding/dismiss"
                 hx-target="closest .onboarding-card"

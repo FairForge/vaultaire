@@ -1,6 +1,6 @@
 # API
 
-The customer-facing surface of stored.ge as served today. The maintained
+The customer-facing surface of Stored as served today. The maintained
 short form is `GET https://stored.ge/llms.txt` (`internal/api/llms_txt.go`);
 the machine-readable route list is `GET https://stored.ge/openapi.json`
 (`internal/docs/openapi.go`, guarded by `openapi_drift_test.go` so a route

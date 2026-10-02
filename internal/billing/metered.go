@@ -342,9 +342,9 @@ func (r *MeteredReporter) fireCapAlert(ctx context.Context, tenantID, label stri
 	if to == "" {
 		return
 	}
-	subject := fmt.Sprintf("You've used %d%% of your stored.ge spending cap", pct)
+	subject := fmt.Sprintf("You've used %d%% of your Stored spending cap", pct)
 	body := fmt.Sprintf(
-		"Your stored.ge usage has reached $%.2f of your $%.2f monthly spending cap (%d%%).",
+		"Your Stored usage has reached $%.2f of your $%.2f monthly spending cap (%d%%).",
 		float64(accrued)/100, float64(capCents)/100, pct)
 	if err := r.emailer.Send(ctx, to, subject, body, body); err != nil {
 		r.logger.Warn("send cap alert email", zap.String("tenant", tenantID), zap.Error(err))
