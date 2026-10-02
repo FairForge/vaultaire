@@ -172,7 +172,7 @@ R0 handoff row for R12 **confirmed**: `middleware/flash.go` `GetFlash` (0 caller
 | WP-R12-10 | Dashboard bucket create through `createBucketRegistry` (R12-25) | `handlers/buckets.go`, `api/bucket_create.go` (interface) | XS | — |
 | WP-R12-11 | Settings hygiene: company cap/clear, persist preferences or drop the maps, resend-verify limiter, POST logout (R12-26, R12-29, WP-R5-4) | `handlers/settings.go`, `email_verify.go`, `router.go`, `auth/{profile,preferences,email_verify}.go` | XS | — |
 | WP-R12-12 | Admin hygiene: tier-2 flag confirm + unregistered key rejection, abuse state machine + audit, persist primary swap (R12-31/34/35) | `handlers/admin_flags.go`, `admin_abuse.go`, `admin_backends.go`, `flags/service.go` | XS | — |
-| WP-R4-1 | *(stands)* `BypassGovernanceRetention` as a permission — NOT done here: adding the map entry without the S3 lock check would be a permission that does nothing (R11-21); needs `contextWithScope` in `handleS3Request` + `s3_lock.go` first, then the key form | `auth/scoped_keys.go`, `api/s3.go`, `api/s3_lock.go`, `apikeys.html` | S | R4/R11 |
+| WP-R4-1 — **done 2026-10-02, #548** | *(stands)* `BypassGovernanceRetention` as a permission — NOT done here: adding the map entry without the S3 lock check would be a permission that does nothing (R11-21); needs `contextWithScope` in `handleS3Request` + `s3_lock.go` first, then the key form | `auth/scoped_keys.go`, `api/s3.go`, `api/s3_lock.go`, `apikeys.html` | S | R4/R11 |
 
 **Decisions for Isaac:** **D-17** suspended tenants may sign in (keep; add banner + read-only) — R12-28; **D-18** which plans may choose the attic/performance/resilient floors from the settings form — R12-11; **D-8** delete the three stubs — R12-27.
 

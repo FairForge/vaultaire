@@ -122,7 +122,7 @@ func (s *Server) handleDeleteObjects(w http.ResponseWriter, r *http.Request, req
 			result.Errors = append(result.Errors, DeleteError{
 				Key:     key,
 				Code:    ErrAccessDenied,
-				Message: errorMessages[ErrAccessDenied] + " Object is protected by Object Lock.",
+				Message: errorMessages[ErrAccessDenied] + " " + lockDeniedHint(r),
 			})
 			continue
 		}

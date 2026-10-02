@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/xml"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/testutil"
 
+	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/tenant"
@@ -129,12 +131,19 @@ func (f *lockFixture) deleteObject(t *testing.T, key string, headers map[string]
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	ctx := tenant.WithTenant(req.Context(), f.tenant)
-	req = req.WithContext(ctx)
+	req = req.WithContext(f.asPrimaryKey(req.Context()))
 
 	w := httptest.NewRecorder()
 	f.adapter.HandleDelete(w, req, f.bucket, key)
 	return w
+}
+
+// asPrimaryKey is the context handleS3Request builds for a request signed
+// with the tenant's primary key: the tenant and a full-access scope. These
+// tests call the handlers directly; since WP-R4-1 the bypass header counts
+// only for a key that may bypass, and no scope in the context is no bypass.
+func (f *lockFixture) asPrimaryKey(ctx context.Context) context.Context {
+	return auth.WithKeyScope(tenant.WithTenant(ctx, f.tenant), &auth.KeyScope{Permissions: []string{"*"}})
 }
 
 // --- Test: bucket-level object lock configuration ---

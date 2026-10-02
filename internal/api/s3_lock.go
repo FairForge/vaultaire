@@ -8,8 +8,10 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"go.uber.org/zap"
 )
@@ -298,8 +300,8 @@ func (s *Server) handlePutObjectRetention(w http.ResponseWriter, r *http.Request
 	//   COMPLIANCE — the mode can never change and the period can only be
 	//                extended, by anyone including the root key;
 	//   GOVERNANCE — shortening or removing the period needs the bypass
-	//                header (WP-R4-1 ties it to a permission); extending
-	//                and upgrading to COMPLIANCE never do.
+	//                header from a key that may bypass (isObjectLockBypass,
+	//                WP-R4-1); extending and upgrading to COMPLIANCE never do.
 	// An expired retention is inert and may be replaced freely.
 	var existingMode string
 	var existingUntil sql.NullTime
@@ -323,8 +325,11 @@ func (s *Server) handlePutObjectRetention(w http.ResponseWriter, r *http.Request
 			}
 		case "GOVERNANCE":
 			if shortens && !isObjectLockBypass(r) {
-				WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
-					WithSuggestion("Shortening GOVERNANCE retention requires x-amz-bypass-governance-retention."))
+				hint := "Shortening GOVERNANCE retention requires x-amz-bypass-governance-retention from a key with the " + auth.PermBypassGovernanceRetention + " permission."
+				if bypassRequested(r) {
+					hint = "Shortening GOVERNANCE retention: this key does not have the " + auth.PermBypassGovernanceRetention + " permission."
+				}
+				WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(), WithSuggestion(hint))
 				return
 			}
 		}
@@ -543,9 +548,77 @@ func applyObjectLockOnPut(ctx context.Context, db *sql.DB, tenantID, bucket, key
 	`, tenantID, bucket, key, defaultMode, retainUntil)
 }
 
-// isObjectLockBypass returns true if the bypass-governance-retention header is set.
+const bypassGovernanceHeader = "x-amz-bypass-governance-retention"
+
+// isObjectLockBypass reports whether this request may bypass GOVERNANCE
+// retention (WP-R4-1, Review R4-09). Three things must hold:
+//
+//  1. the request asks: `x-amz-bypass-governance-retention: true`;
+//  2. the ask is authenticated — the signature covers it (see
+//     bypassRequested): a header added after signing, or by whoever holds a
+//     presigned URL, is not the key holder's ask;
+//  3. the key may: the scope handleS3Request put in the context is a
+//     full-access key or carries BypassGovernanceRetention
+//     (auth.KeyScope.CanBypassGovernanceRetention). No scope in the context
+//     is no bypass — a handler reached some other way fails closed.
+//
+// It used to be (1) alone: any key that could delete could bypass.
+// COMPLIANCE retention and legal holds never consult this (checkObjectLock).
 func isObjectLockBypass(r *http.Request) bool {
-	v := r.Header.Get("x-amz-bypass-governance-retention")
-	b, _ := strconv.ParseBool(v)
-	return b
+	return bypassRequested(r) && auth.KeyScopeFromContext(r.Context()).CanBypassGovernanceRetention()
 }
+
+// bypassRequested: the request carries the bypass flag where its signature
+// covers it.
+//
+//   - Presigned URL: every query parameter is in the canonical query, so the
+//     flag hoisted into the query (what the AWS SDKs do when they presign) is
+//     the signer's; as a header it counts only when X-Amz-SignedHeaders lists
+//     it — the holder of a URL signed for `host` alone can send any header.
+//   - Authorization header: SignedHeaders must list it (AWS refuses a request
+//     with an unsigned x-amz-* header; the SDKs sign them all).
+//   - No SigV4 material at all (test mode, a database-less server): the
+//     header as sent.
+func bypassRequested(r *http.Request) bool {
+	header := isTrue(r.Header.Get(bypassGovernanceHeader))
+	if isPresignedRequest(r) {
+		for k, vs := range r.URL.Query() {
+			if strings.EqualFold(k, bypassGovernanceHeader) && len(vs) > 0 && isTrue(vs[0]) {
+				return true
+			}
+		}
+		return header && signedHeaderListed(r.URL.Query().Get("X-Amz-SignedHeaders"))
+	}
+	if authz := r.Header.Get("Authorization"); strings.HasPrefix(authz, "AWS4-HMAC-SHA256") {
+		_, list, _ := strings.Cut(authz, "SignedHeaders=")
+		list, _, _ = strings.Cut(list, ",")
+		return header && signedHeaderListed(list)
+	}
+	return header
+}
+
+func signedHeaderListed(signedHeaders string) bool {
+	for _, h := range strings.Split(signedHeaders, ";") {
+		if strings.EqualFold(strings.TrimSpace(h), bypassGovernanceHeader) {
+			return true
+		}
+	}
+	return false
+}
+
+// lockDeniedHint is the sentence appended to the AccessDenied of a
+// lock-protected delete or overwrite. When the request asked for the bypass
+// and did not get it, it says why — the caller otherwise sees a refusal that
+// looks the same as before the header was sent.
+func lockDeniedHint(r *http.Request) string {
+	const base = "Object is protected by Object Lock."
+	switch {
+	case bypassRequested(r) && !auth.KeyScopeFromContext(r.Context()).CanBypassGovernanceRetention():
+		return base + " This key does not have the " + auth.PermBypassGovernanceRetention + " permission."
+	case isTrue(r.Header.Get(bypassGovernanceHeader)) && !bypassRequested(r):
+		return base + " The " + bypassGovernanceHeader + " header was not covered by the request signature and was ignored."
+	}
+	return base // no bypass asked for, or COMPLIANCE retention / a legal hold: nothing bypasses those
+}
+
+func isTrue(v string) bool { b, _ := strconv.ParseBool(v); return b }

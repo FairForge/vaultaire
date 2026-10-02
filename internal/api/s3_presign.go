@@ -142,6 +142,7 @@ func (s *Server) verifyPresignedURL(r *http.Request) (string, *auth.KeyScope, er
 				BucketScope: []string(stsBucketScope),
 				IPAllowlist: []string(stsIPRestrict),
 				ExpiresAt:   &stsExpiresAt,
+				Temporary:   true,
 			}
 			if jsonErr := json.Unmarshal(stsPermJSON, &scope.Permissions); jsonErr != nil {
 				scope.Permissions = nil // fail closed (R5-14)

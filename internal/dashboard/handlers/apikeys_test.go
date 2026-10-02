@@ -184,3 +184,33 @@ func TestHandleAPIKeys_NoSession(t *testing.T) {
 	assert.Equal(t, http.StatusSeeOther, w.Code)
 	assert.Equal(t, "/login", w.Header().Get("Location"))
 }
+
+// WP-R4-1: the key form is one of the three places a key is created; a key
+// made there with the GOVERNANCE bypass must carry it.
+func TestHandleGenerateKey_WithTheGovernanceBypassPermission(t *testing.T) {
+	// Arrange
+	tmpl := testAPIKeysTemplate(t)
+	authSvc, sd := setupAuthWithUser(t)
+	handler := HandleGenerateKey(tmpl, authSvc, nil, zap.NewNop())
+	form := url.Values{"name": {"retention-admin"}, "permissions": {"DeleteObject", auth.PermBypassGovernanceRetention}}
+	req := httptest.NewRequest("POST", "/dashboard/apikeys", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req = req.WithContext(context.WithValue(req.Context(), dashauth.SessionKey, sd))
+	w := httptest.NewRecorder()
+
+	// Act
+	handler.ServeHTTP(w, req)
+
+	// Assert
+	require.Equal(t, http.StatusOK, w.Code)
+	require.NotContains(t, w.Body.String(), `class="error"`, w.Body.String())
+	keys, err := authSvc.ListAPIKeys(context.Background(), sd.UserID)
+	require.NoError(t, err)
+	for _, k := range keys {
+		if k.Name == "retention-admin" {
+			assert.Equal(t, []string{"DeleteObject", auth.PermBypassGovernanceRetention}, k.Permissions)
+			return
+		}
+	}
+	t.Fatal("key not created")
+}

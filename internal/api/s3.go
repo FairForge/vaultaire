@@ -379,6 +379,12 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 			zap.String("path", r.URL.Path))
 	}
 
+	// The key's scope travels with the request: Object Lock reads it to
+	// decide whether x-amz-bypass-governance-retention is this key's to send
+	// (WP-R4-1 — it used to be a local of this function, and the header
+	// alone was the bypass).
+	r = r.WithContext(auth.WithKeyScope(r.Context(), scope))
+
 	// Enforce key expiration and IP allowlist before any further processing.
 	if scope != nil {
 		if auth.IsKeyExpired(scope.ExpiresAt) {

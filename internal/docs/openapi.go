@@ -741,6 +741,7 @@ func generateUserPaths() map[string]*PathItem {
 				}),
 			Post: withBody(jsonOp("User", "Create an API key", "CreateUserAPIKey",
 				"Creates a scoped key. `permissions` restricts the key to the named S3 operations (validated); `expiry_days` sets `expires_at`. "+
+					"`BypassGovernanceRetention` is a privilege, not an operation: it lets the key have `x-amz-bypass-governance-retention` honoured. "+
 					"The secret is returned once. Subject to the plan's key cap (409).",
 				map[string]Response{
 					"201": jsonResp("Key created; `secret` is shown only here", ref("UserAPIKeyCreated")),
@@ -978,6 +979,7 @@ func generateManagementPaths() map[string]*PathItem {
 				})),
 			Post: mut(withBody(jsonOp("Management", "Create an API key", "ManageCreateKey",
 				"Creates a scoped key: `permissions` (S3 operation names, validated), `bucket_scope`, `ip_allowlist` (CIDRs) and `expires_at`. "+
+					"`BypassGovernanceRetention` is a privilege, not an operation: it lets the key have `x-amz-bypass-governance-retention` honoured. "+
 					"The secret is returned once. Caps: 50 live keys per account, and the plan's own limit (both 409). Emits `key.created`.",
 				map[string]Response{
 					"201": jsonResp("Key created; `secret` is shown only here", ref("APIKeyCreated")),
@@ -1162,6 +1164,7 @@ func generateSTSPaths() map[string]*PathItem {
 				"Issues an `ASIA`-prefixed access key / secret pair usable with SigV4 on the S3 API until `expiration`. "+
 					"The token's scope is the intersection of the requested scope with a parent scope: by default the account's own full access; "+
 					"with `parent_key_id` (Review R11-03) the named key's permissions, bucket scope, IP allowlist and expiry bound it instead. "+
+					"A token never inherits the GOVERNANCE bypass: it carries `BypassGovernanceRetention` only when the request names it and the parent may bypass (`*` on a token does not include it). "+
 					"`ttl` defaults to 3600 s and is clamped to 43200 s. Emits `sts.token_created` and writes an audit row.",
 				map[string]Response{
 					"201": jsonResp("Credentials; `secret_key` is shown only here", ref("STSToken")),
@@ -1516,7 +1519,7 @@ func generateS3Schemas() map[string]Schema {
 func generateJSONSchemas() map[string]Schema {
 	permissions := &Schema{
 		Type:        "array",
-		Description: "S3 operation names the key may perform (`GetObject`, `PutObject`, `ListBuckets`, ...) or `*` for all; empty = full access",
+		Description: "S3 operation names the key may perform (`GetObject`, `PutObject`, `ListBuckets`, ...) or `*` for all; empty = full access. `BypassGovernanceRetention` adds the privilege to bypass GOVERNANCE Object Lock retention with `x-amz-bypass-governance-retention` (full-access keys have it)",
 		Items:       &Schema{Type: "string"},
 	}
 	apiKeyProps := func(withSecret, withRequestID bool) map[string]*Schema {

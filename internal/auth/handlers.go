@@ -233,6 +233,7 @@ func (a *Auth) lookupCredential(ctx context.Context, accessKey string) (*credent
 				BucketScope: []string(stsBucketScope),
 				IPAllowlist: []string(stsIPRestrict),
 				ExpiresAt:   &stsExpiresAt,
+				Temporary:   true,
 			}
 			if jsonErr := json.Unmarshal(stsPermJSON, &scope.Permissions); jsonErr != nil {
 				a.logger.Warn("sts token has unparsable permissions — treating as no permissions",
