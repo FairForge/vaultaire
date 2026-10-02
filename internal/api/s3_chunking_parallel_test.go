@@ -100,7 +100,7 @@ func TestChunkedPut_ParallelChunkStores(t *testing.T) {
 }
 
 // TestChunkedPut_DuplicateChunksSingleStore uploads content whose chunks are
-// all identical (constant bytes never trigger a FastCDC boundary, so the
+// all identical (constant bytes never trigger a Rabin boundary, so the
 // chunker emits max-size chunks with one shared hash). Concurrent workers
 // must not race duplicate hashes into double stores: the first occurrence
 // stores, later occurrences wait and take dedup references.

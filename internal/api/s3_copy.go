@@ -438,7 +438,7 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 	quotaOn := s.quotaManager != nil
 	var reservedBytes int64
 	if quotaOn && srcSize > 0 {
-		ok, qErr := reserveQuota(r.Context(), s.quotaManager, t.ID, usage.FloorStandard, srcSize)
+		ok, qErr := reserveQuota(r.Context(), s.quotaManager, t.ID, chunkedObjectFloor, srcSize)
 		if qErr != nil {
 			s.logger.Error("chunked copy: quota check failed",
 				zap.Error(qErr), zap.String("tenant_id", t.ID))
@@ -455,7 +455,7 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 	releaseReservation := func() {
 		if quotaOn && reservedBytes > 0 {
 			ctx, cancel := quotaCtx(r)
-			s.releaseQuota(ctx, t.ID, usage.FloorStandard, reservedBytes)
+			s.releaseQuota(ctx, t.ID, chunkedObjectFloor, reservedBytes)
 			cancel()
 		}
 	}
@@ -532,13 +532,17 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 			LogicalSize:  srcMeta.LogicalSize,
 			PhysicalSize: &physicalSize,
 			DedupRatio:   &dedupRatio,
+			// The copy's chunks are the source's: cut by the chunker the
+			// source records (the product has only ever cut with the
+			// default one, so a source without a record gets that).
+			PipelineConfig: copiedPipeline(srcMeta),
 		}); repErr != nil {
 			return fmt.Errorf("install destination manifest: %w", repErr)
 		}
 		_, execErr := tx.ExecContext(r.Context(), `
 			INSERT INTO object_head_cache
 				(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, floor, is_chunked, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, '', $7, $8, $9, 'standard', TRUE, NOW())
+			VALUES ($1, $2, $3, $4, $5, $6, '', $7, $8, $9, $10, TRUE, NOW())
 			ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
 				size_bytes            = EXCLUDED.size_bytes,
 				etag                  = EXCLUDED.etag,
@@ -551,7 +555,7 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 				is_chunked            = EXCLUDED.is_chunked,
 				updated_at            = NOW()
 		`, t.ID, destBucket, destKey, srcMeta.LogicalSize, srcETag, contentType,
-			destUserMeta, srcEncAlgo, destDisposition)
+			destUserMeta, srcEncAlgo, destDisposition, chunkedObjectFloor)
 		return execErr
 	})
 	if dbErr != nil {
@@ -578,7 +582,7 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 
 	if quotaOn {
 		ctx, cancel := quotaCtx(r)
-		s.settlePutQuota(ctx, t.ID, usage.FloorStandard, reservedBytes, srcMeta.LogicalSize, displaced)
+		s.settlePutQuota(ctx, t.ID, chunkedObjectFloor, reservedBytes, srcMeta.LogicalSize, displaced)
 		cancel()
 	}
 

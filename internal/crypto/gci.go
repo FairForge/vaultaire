@@ -724,17 +724,18 @@ func (g *GlobalContentIndex) GetObjectMetadata(ctx context.Context, tenantID str
 	var physicalSize sql.NullInt64
 	var dedupRatio sql.NullFloat64
 
+	var pipeline []byte
 	err := g.db.QueryRowContext(ctx, `
 		SELECT id, tenant_id, bucket_name, object_key, total_size, chunk_count,
 		       content_hash, content_type, logical_size, physical_size, dedup_ratio,
-		       created_at, updated_at
+		       pipeline_config, created_at, updated_at
 		FROM object_metadata
 		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = $3
 	`, tenantID, bucket, key).Scan(
 		&meta.ID, &meta.TenantID, &meta.BucketName, &meta.ObjectKey,
 		&meta.TotalSize, &meta.ChunkCount, &contentHash, &contentType,
 		&meta.LogicalSize, &physicalSize, &dedupRatio,
-		&meta.CreatedAt, &meta.UpdatedAt,
+		&pipeline, &meta.CreatedAt, &meta.UpdatedAt,
 	)
 
 	if err == sql.ErrNoRows {
@@ -756,6 +757,13 @@ func (g *GlobalContentIndex) GetObjectMetadata(ctx context.Context, tenantID str
 	if dedupRatio.Valid {
 		ratio := float32(dedupRatio.Float64)
 		meta.DedupRatio = &ratio
+	}
+	if len(pipeline) > 0 {
+		var cfg PipelineConfig
+		if err := cfg.Scan(pipeline); err != nil {
+			return nil, fmt.Errorf("object metadata pipeline_config: %w", err)
+		}
+		meta.PipelineConfig = &cfg
 	}
 
 	return &meta, nil

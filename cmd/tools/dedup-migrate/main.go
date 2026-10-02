@@ -192,7 +192,7 @@ func migrateObject(ctx context.Context, d *deps, c candidate, dryRun, keepOrigin
 	hasher := md5.New() // #nosec G401
 	hashingReader := io.TeeReader(reader, hasher)
 
-	chunker, err := crypto.DefaultFastCDCChunker()
+	chunker, err := crypto.DefaultChunker()
 	if err != nil {
 		return nil, fmt.Errorf("create chunker: %w", err)
 	}
@@ -296,15 +296,17 @@ func migrateObject(ctx context.Context, d *deps, c candidate, dryRun, keepOrigin
 		dedupRatio = float32(measuredSize) / float32(physicalNew)
 	}
 	if err := d.gci.ReplaceObjectManifest(ctx, c.tenantID, c.bucket, c.key, newRefs, &crypto.ObjectMeta{
-		TenantID:     c.tenantID,
-		BucketName:   c.bucket,
-		ObjectKey:    c.key,
-		TotalSize:    measuredSize,
-		ChunkCount:   chunkCount,
-		ContentType:  &contentType,
-		LogicalSize:  measuredSize,
-		PhysicalSize: &physicalNew,
-		DedupRatio:   &dedupRatio,
+		TenantID:    c.tenantID,
+		BucketName:  c.bucket,
+		ObjectKey:   c.key,
+		TotalSize:   measuredSize,
+		ChunkCount:  chunkCount,
+		ContentType: &contentType,
+		// What cut the chunks (WP-R8-4).
+		PipelineConfig: crypto.RecordedPipeline(chunker.Identity(), false),
+		LogicalSize:    measuredSize,
+		PhysicalSize:   &physicalNew,
+		DedupRatio:     &dedupRatio,
 	}); err != nil {
 		return nil, fmt.Errorf("replace manifest: %w", err)
 	}
