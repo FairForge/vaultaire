@@ -1,6 +1,6 @@
 # WP-R10-3c — an account erasure reaches every byte
 
-**Worker session, 2026-10-02. Branch `wp/R10-3c-erasure-sweep`, from `main` @ #553.** Closes
+**Worker session, 2026-10-02. PR #554, branch `wp/R10-3c-erasure-sweep`, from `main` @ #553.** Closes
 WP-R10-3 post-merge finding PM-3 (P1, erasure claim) and the erasure half of R13-10. No
 migration. **Opens WP-R8-7** (below) — found on the way, proven, not built here.
 
