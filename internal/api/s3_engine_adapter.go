@@ -708,7 +708,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		// backend bytes in place (R2-01).
 		if lockErr := checkObjectLock(r.Context(), a.db, t.ID, bucket, artifact, isObjectLockBypass(r)); lockErr != nil {
 			WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
-				WithSuggestion("Object is protected by Object Lock."))
+				WithSuggestion(lockDeniedHint(r)))
 			return
 		}
 		var existingETag string
@@ -1940,7 +1940,7 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 	// overwrote it (R2-01). Refusing the marker is the documented deviation.
 	if lockErr := checkObjectLock(r.Context(), a.db, t.ID, bucket, object, isObjectLockBypass(r)); lockErr != nil {
 		WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
-			WithSuggestion("Object is protected by Object Lock."))
+			WithSuggestion(lockDeniedHint(r)))
 		return
 	}
 

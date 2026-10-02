@@ -53,6 +53,11 @@
                     <label class="checkbox-label"><input type="checkbox" name="permissions" value="ListMultipartUploads"> ListUploads</label>
                     <label class="checkbox-label"><input type="checkbox" name="permissions" value="ListParts"> ListParts</label>
                 </div>
+                <div>
+                    <strong class="text-muted">Object Lock</strong>
+                    <label class="checkbox-label"><input type="checkbox" name="permissions" value="BypassGovernanceRetention" aria-describedby="bypass-help"> BypassGovernanceRetention</label>
+                    <p id="bypass-help" class="text-muted">Lets this key delete, overwrite or shorten the retention of an object under GOVERNANCE retention by sending <code>x-amz-bypass-governance-retention: true</code> (it still needs DeleteObject or PutObject for the operation itself); a Full Access key already can, and no key bypasses COMPLIANCE retention or a legal hold.</p>
+                </div>
             </div>
         </div>
 

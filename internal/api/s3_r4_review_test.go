@@ -40,7 +40,7 @@ func (f *lockFixture) putRetention(t *testing.T, key, mode string, until time.Ti
 	for k, v := range hdr {
 		req.Header.Set(k, v)
 	}
-	req = req.WithContext(tenant.WithTenant(req.Context(), f.tenant))
+	req = req.WithContext(f.asPrimaryKey(req.Context()))
 	w := httptest.NewRecorder()
 	f.server.handlePutObjectRetention(w, req, &S3Request{Bucket: f.bucket, Object: key, TenantID: f.tenantID})
 	return w

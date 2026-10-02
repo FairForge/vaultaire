@@ -43,6 +43,8 @@ Three handlers:
 - `HandleGenerateKey(tmpl, authSvc, db, logger)` — creates key via `auth.GenerateAPIKey()`, shows secret once
 - `HandleRevokeKey(authSvc, logger)` — revokes key via `auth.RevokeAPIKey()`, redirects back
 
+The form's permission checkboxes post names from `auth.ValidPermissions` (`TestAPIKeysPage_OffersTheGovernanceBypassPermission` fails on a checkbox the validator refuses). Since WP-R4-1 it offers `BypassGovernanceRetention` under "Object Lock" with one sentence saying what it does: the key may bypass GOVERNANCE retention with `x-amz-bypass-governance-retention`; a Full Access key already can; nothing bypasses COMPLIANCE or a legal hold.
+
 Uses `auth.AuthService` directly (not DB queries) since keys are in-memory + DB-backed. The free-tier key cap is enforced by `auth.GenerateAPIKey` (`ErrKeyLimitReached` → the friendly message) for every entry point — the handler's own count included the primary pair minted at signup, so a fresh free account could never generate a key (Review R12, P1).
 
 ## Bandwidth Chart (`bandwidth_chart.go`)

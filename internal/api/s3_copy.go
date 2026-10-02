@@ -122,7 +122,7 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 	// COMPLIANCE-retained key destroyed it (R3-01, live-proven).
 	if lockErr := checkObjectLock(r.Context(), s.db, t.ID, destBucket, destKey, isObjectLockBypass(r)); lockErr != nil {
 		WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
-			WithSuggestion("Object is protected by Object Lock."))
+			WithSuggestion(lockDeniedHint(r)))
 		return
 	}
 

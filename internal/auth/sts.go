@@ -50,6 +50,14 @@ var ErrSTSScope = errors.New("sts scope error")
 
 func GenerateSTSToken(ctx context.Context, db *sql.DB, tenantID, parentKeyID string, parentScope *KeyScope, req STSRequest) (*STSToken, error) {
 	perms := intersectPermissions(parentScope.Permissions, req.Permissions)
+	// The GOVERNANCE bypass is never inherited: a token carries it only when
+	// the request names it AND the parent may bypass (WP-R4-1). An unscoped
+	// request copies the parent's list, and a parent of `*` hands the
+	// requested list through — both would otherwise pass the privilege on
+	// without anyone having asked for it.
+	if !contains(req.Permissions, PermBypassGovernanceRetention) || !parentScope.CanBypassGovernanceRetention() {
+		perms = without(perms, PermBypassGovernanceRetention)
+	}
 	if len(perms) == 0 {
 		return nil, fmt.Errorf("%w: no permissions overlap between parent key and request", ErrSTSScope)
 	}
@@ -208,4 +216,24 @@ func narrowIPRestrict(parentAllowlist, requested []string) []string {
 		return parentAllowlist
 	}
 	return requested
+}
+
+func contains(list []string, v string) bool {
+	for _, x := range list {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
+// without returns list minus v, never aliasing the caller's slice.
+func without(list []string, v string) []string {
+	out := make([]string, 0, len(list))
+	for _, x := range list {
+		if x != v {
+			out = append(out, x)
+		}
+	}
+	return out
 }

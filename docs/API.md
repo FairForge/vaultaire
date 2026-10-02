@@ -120,8 +120,15 @@ Behaviour worth knowing before writing code against it:
 - **Object Lock** (`GOVERNANCE`, `COMPLIANCE`, legal hold) is enforced on
   every delete flavour, on overwrite, on multipart complete and on copy;
   refusals are 403 `AccessDenied` with "Object is protected by Object Lock."
-  appended. `COMPLIANCE` retention can only be extended. MFA Delete is
-  available on lock-enabled buckets (`x-amz-mfa` TOTP).
+  appended. `COMPLIANCE` retention can only be extended, and nothing bypasses
+  it or a legal hold. `GOVERNANCE` retention is bypassed (delete, overwrite,
+  shorten) only by a request that sends a **signed**
+  `x-amz-bypass-governance-retention: true` with a key that may: a full-access
+  key (`*`, e.g. the account's primary key) or a scoped key that lists the
+  `BypassGovernanceRetention` permission. An STS token bypasses only when its
+  request named that permission and its parent could; a presigned URL carries
+  its signer's scope, and the flag counts only where the signature covers it.
+  MFA Delete is available on lock-enabled buckets (`x-amz-mfa` TOTP).
 - **Versioning is metadata-only today**: version history and delete markers
   work; `GET ?versionId=<non-current>` answers 501 (WP-R2-1).
 - **Regions**: a bucket's region is fixed at creation and must be one the

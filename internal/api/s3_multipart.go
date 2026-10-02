@@ -465,7 +465,7 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 	// live-proven). Refused with the same 403 as PUT.
 	if lockErr := checkObjectLock(r.Context(), s.db, t.ID, bucket, object, isObjectLockBypass(r)); lockErr != nil {
 		WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
-			WithSuggestion("Object is protected by Object Lock."))
+			WithSuggestion(lockDeniedHint(r)))
 		return
 	}
 

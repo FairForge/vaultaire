@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"strings"
@@ -15,6 +16,37 @@ type KeyScope struct {
 	BucketScope []string
 	IPAllowlist []string
 	ExpiresAt   *time.Time
+	// Temporary marks an STS token. A token never holds a privilege by
+	// wildcard: `*` on a token is "every operation", not "every privilege"
+	// (see CanBypassGovernanceRetention).
+	Temporary bool
+}
+
+// PermBypassGovernanceRetention is the one entry of ValidPermissions that is
+// not an S3 operation: it is the privilege to have
+// `x-amz-bypass-governance-retention: true` honoured — to delete, overwrite
+// or shorten the retention of an object under GOVERNANCE retention before
+// its date (AWS: s3:BypassGovernanceRetention). It grants no operation by
+// itself: a key still needs DeleteObject to delete.
+const PermBypassGovernanceRetention = "BypassGovernanceRetention"
+
+// CanBypassGovernanceRetention reports whether the key may bypass GOVERNANCE
+// retention (WP-R4-1). A full-access key (`*` — the tenant's primary key, a
+// key created without a permission list) may; a scoped key only when it
+// lists the permission; an STS token only when it lists it explicitly — a
+// token minted without asking for the bypass does not get it through `*`.
+// A nil scope (no authenticated key) may not. COMPLIANCE retention and legal
+// holds are not affected by any of this: nothing bypasses them.
+func (s *KeyScope) CanBypassGovernanceRetention() bool {
+	if s == nil {
+		return false
+	}
+	for _, p := range s.Permissions {
+		if p == PermBypassGovernanceRetention || (p == "*" && !s.Temporary) {
+			return true
+		}
+	}
+	return false
 }
 
 // KeyCreateOptions specifies optional scope constraints when creating
@@ -26,39 +58,41 @@ type KeyCreateOptions struct {
 	ExpiresAt   *time.Time
 }
 
-// ValidPermissions is the set of operation names that may appear in
-// an API key's permissions list. These match the operation strings
-// produced by determineOperation in s3.go.
+// ValidPermissions is the set of names that may appear in an API key's
+// permissions list. They match the operation strings produced by
+// determineOperation in s3.go, plus one privilege that is not an operation
+// (PermBypassGovernanceRetention).
 var ValidPermissions = map[string]bool{
-	"*":                          true,
-	"GetObject":                  true,
-	"PutObject":                  true,
-	"DeleteObject":               true,
-	"HeadObject":                 true,
-	"ListObjects":                true,
-	"ListBuckets":                true,
-	"CreateBucket":               true,
-	"DeleteBucket":               true,
-	"HeadBucket":                 true,
-	"DeleteObjects":              true,
-	"InitiateMultipartUpload":    true,
-	"UploadPart":                 true,
-	"CompleteMultipartUpload":    true,
-	"AbortMultipartUpload":       true,
-	"ListMultipartUploads":       true,
-	"ListParts":                  true,
-	"GetBucketVersioning":        true,
-	"PutBucketVersioning":        true,
-	"GetBucketNotification":      true,
-	"PutBucketNotification":      true,
-	"GetObjectLockConfiguration": true,
-	"PutObjectLockConfiguration": true,
-	"PutObjectRetention":         true,
-	"GetObjectRetention":         true,
-	"PutObjectLegalHold":         true,
-	"GetObjectLegalHold":         true,
-	"PostObject":                 true,
-	"RestoreObject":              true,
+	"*":                           true,
+	PermBypassGovernanceRetention: true,
+	"GetObject":                   true,
+	"PutObject":                   true,
+	"DeleteObject":                true,
+	"HeadObject":                  true,
+	"ListObjects":                 true,
+	"ListBuckets":                 true,
+	"CreateBucket":                true,
+	"DeleteBucket":                true,
+	"HeadBucket":                  true,
+	"DeleteObjects":               true,
+	"InitiateMultipartUpload":     true,
+	"UploadPart":                  true,
+	"CompleteMultipartUpload":     true,
+	"AbortMultipartUpload":        true,
+	"ListMultipartUploads":        true,
+	"ListParts":                   true,
+	"GetBucketVersioning":         true,
+	"PutBucketVersioning":         true,
+	"GetBucketNotification":       true,
+	"PutBucketNotification":       true,
+	"GetObjectLockConfiguration":  true,
+	"PutObjectLockConfiguration":  true,
+	"PutObjectRetention":          true,
+	"GetObjectRetention":          true,
+	"PutObjectLegalHold":          true,
+	"GetObjectLegalHold":          true,
+	"PostObject":                  true,
+	"RestoreObject":               true,
 }
 
 // CheckPermission returns true if keyPerms authorizes the given operation.
@@ -127,4 +161,18 @@ func ValidatePermissions(perms []string) error {
 		}
 	}
 	return nil
+}
+
+type keyScopeCtxKey struct{}
+
+// WithKeyScope returns ctx carrying the scope of the key that authenticated
+// the request.
+func WithKeyScope(ctx context.Context, scope *KeyScope) context.Context {
+	return context.WithValue(ctx, keyScopeCtxKey{}, scope)
+}
+
+// KeyScopeFromContext returns the scope put there by WithKeyScope, or nil.
+func KeyScopeFromContext(ctx context.Context) *KeyScope {
+	s, _ := ctx.Value(keyScopeCtxKey{}).(*KeyScope)
+	return s
 }
