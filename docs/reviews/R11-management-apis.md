@@ -196,7 +196,7 @@ X-RateLimit-Reset                                          -> now+3 s after 5 re
 | WP-R11-9 | **Dashboard account deletion through the service** (R11-13): `HandleRequestDeletion`/`HandleCancelDeletion` call `AccountDeletionService`; settings banner for `pending_deletion` | `dashboard/handlers/account.go`, templates | XS | R12, D-16 |
 | WP-R11-10 | **Admin audit page reads `audit_logs`** (R11-09 read side): `/admin/audit` switches from `events` to `audit_logs` with actor/IP filters + CSV (escaped) | `dashboard/handlers/admin_audit.go`, template | S | R12 |
 | WP-R11-11 | **PATCH metadata normalisation** (R11-18 / R2-28) | `api/metadata.go`, `management_routes.go` | XS | — |
-| WP-R4-1 | *(stands)* GOVERNANCE bypass as a permission (R11-21) | `s3.go`, `s3_lock.go`, `auth/scoped_keys.go`, key forms | S | R12 |
+| WP-R4-1 — **done 2026-10-02, #548** | *(stands)* GOVERNANCE bypass as a permission (R11-21) | `s3.go`, `s3_lock.go`, `auth/scoped_keys.go`, key forms | S | R12 |
 
 **Decisions for Isaac:** D-11 RBAC stub = **deleted here** (recommendation executed as instructed). D-12 compliance scaffolding = **drop** (WP-R11-5; breach log stays admin-only). **D-16** (new): `pending_deletion` does **not** block login or S3 during the grace period (see R11-13).
 

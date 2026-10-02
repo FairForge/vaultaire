@@ -99,7 +99,7 @@ COMPLIANCE vs GOVERNANCE and legal hold are enforced on PUT overwrite, single DE
 
 | WP | Title | Files | Size | Depends on |
 |---|---|---|---|---|
-| WP-R4-1 | **Bypass is a permission** (R4-09): key scope in the request context; `x-amz-bypass-governance-retention` honoured only for `*` / `BypassGovernanceRetention` keys; scoped-key UI | `s3.go`, `s3_lock.go`, `auth`, dashboard keys page | S | R11 |
+| WP-R4-1 — **done 2026-10-02, #548** ([WP-R4-1.md](WP-R4-1.md)) | **Bypass is a permission** (R4-09): key scope in the request context; `x-amz-bypass-governance-retention` honoured only for `*` / `BypassGovernanceRetention` keys; scoped-key UI | `s3.go`, `s3_lock.go`, `auth`, dashboard keys page | S | R11 |
 | WP-R4-2 | **Lock/versioning/MFA bucket state machine** (R4-10, R4-17): suspend refused on lock buckets, lock enable turns versioning on, MFA-Delete gated on versioning, TOTP replay cache | `s3_versioning.go`, `s3_lock.go`, `s3_mfa_delete.go` | S | — |
 | WP-R4-3 | **CORS preflight on the S3 host** (R4-11): unauthenticated OPTIONS answered from the bucket's `cors_origins` | `server.go`, `s3.go`, `cors.go` | S | — |
 | WP-R4-4 | **Notification filters + one guarded webhook client** (R4-13, R4-02 for R11's webhooks): persist prefix/suffix filters, evaluate in `dispatch`; `webhooks_routes.go` uses `webhookClient()` | `s3_notifications.go`, `webhooks_routes.go`, migration | S | R11 |
