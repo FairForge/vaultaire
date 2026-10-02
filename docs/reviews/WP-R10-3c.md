@@ -354,3 +354,31 @@ whole-object PUTs; reads of existing chunked objects keep working. [YOU].
    code since #529)? Recommended: the code — say in the paragraph that a lock protects against
    deleting an object, not against closing the account.
 3. Nothing to install. `deploy/monitoring` is unchanged.
+
+## Post-merge review (plan driver, 2026-10-02)
+
+Read against `main` @ #554: `erasure_sweep.go` and `drivers/tenant_walk.go` in full, every
+driver's `getTenantID` fallback, and the uses of the id `"default"` across `internal/`. Not
+re-read: the runner's wiring of the two passes, the tests beyond the two refused-id ones, the
+permafrost fallback against Graph (nobody can run that here).
+
+**WP-R8-7 is real.** The skipped test was run with the `Skip` removed: tenant B's GET of a
+deduplicated upload answers 500. `IDriveDriver.getTenantID` / `buildKey` (`t-<tenant>/…`, tenant
+from the context, `"default"` when there is none) are what the test's double imitates. It is
+the next prompt, ahead of the queue.
+
+| ID | Sev | Where | What | Status |
+|----|-----|-------|------|--------|
+| PM-1 | P3 (hardening; the blast radius is other tenants' bytes) | `erasure_sweep.go` `checkSweepTenant`, `sweepTenant` | `"default"` passed the id pattern. It is the id every driver and `common.GetTenantID` fall back to when a context carries no tenant, so on a fixed-bucket backend `t-default/` holds whatever any tenant's context-less path wrote — and is where dedup GC addresses chunk blobs. Registration never mints that id; a `tenants` row with it (a dev database, a hand-made row) would have been swept like any other. | **fixed here**: `sweepableTenantID` refuses the fallback id in the plan and in the function that lists. Red-first: `TestErasureSweep_RefusesTheFallbackTenantID` (on `main`: one walk, one list). |
+
+Clean on this read: the walk's own page loop (a token that does not advance is an error, not
+the end); `Remove` bound to the listed key; the prefix boundaries (`t-<T>/`, `<T>_`); the
+collision query; the chunk-container skip; an open breaker defers; the sweep keeps no cursor.
+
+Noted, not changed:
+- The legal sentence is still not true for one case, and the note says so honestly: the blocks
+  of a chunked object (over 64 MB) stay under the erased tenant's prefix until WP-R8-7.
+- The write-during-erasure residual is narrower, not closed.
+- A decision the worker surfaced and that is not yet in the decisions table: `gdpr.html:37`
+  says Object Lock defers an erasure; the runner erases locked objects with their owner's
+  account. Recorded as **D-26** below in SYNTHESIS.

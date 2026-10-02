@@ -807,3 +807,28 @@ func TestErasureSweep_MetricsExistAtZeroForEveryRegisteredBackend(t *testing.T) 
 		}
 	}
 }
+
+// Post-merge review: "default" is the tenant id every driver and
+// common.GetTenantID fall back to when a context carries no tenant. On a
+// fixed-bucket backend `t-default/` therefore holds whatever ANY tenant's
+// context-less path wrote (and is where dedup GC addresses chunk blobs). No
+// registration mints that id, but a tenants row with it — a dev database, a
+// hand-made row — would have been swept like any other: every backend's
+// shared fallback prefix, deleted.
+func TestErasureSweep_RefusesTheFallbackTenantID(t *testing.T) {
+	// Arrange
+	f := setupSweepFixture(t)
+	ctx := context.Background()
+
+	// Act
+	_, planErr := f.runner.planSweep(ctx, "default")
+	te := TenantErasure{}
+	_, sweepErr := f.runner.sweepTenant(ctx, account.Due{TenantID: "default", UserID: f.userID},
+		sweepPlan{backends: []string{"fixed", "local", "plain"}, buckets: []string{"b"}}, &te, zap.NewNop(), true)
+
+	// Assert
+	assert.Error(t, planErr)
+	assert.Error(t, sweepErr)
+	assert.Zero(t, f.fixed.walks.Load(), "nothing may be listed under the shared fallback prefix")
+	assert.Zero(t, f.plain.lists.Load())
+}
