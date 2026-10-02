@@ -357,3 +357,32 @@ deploy on is, and a legacy block under a tenant's prefix defers the erasure unti
    rows are WP-R7-5's.
 5. Install `deploy/monitoring/vaultaire-backends.yml` again (two new rules: `DriverCallWithoutTenant`,
    `ChunkLegacyAddressReads`).
+
+## Post-merge review (plan driver, 2026-10-02)
+
+Read in full against the note: `engine/chunk_address.go`, `api/chunk_store.go`, `api/dedup_gc.go`,
+`api/chunk_move.go`, `drivers/tenant_ctx.go` + the five drivers, the sweep's deferral, the front-door
+guard. Checked and held: a miss at the one address never charges the breaker (`isBackendFailure`
+excludes `NotFoundError` and the SDK 404s — every legacy read starts with one); `object_locations`
+has no constraint on `tenant_id`, so the `_global` writer row is fine; the move's listing pass skips
+reserved ids, so `t-_global/_global/` is never listed and an in-flight first store (blob put before
+the row insert, under the xact lock) is never an "orphan"; `HealthCheck` and `EnsureBucket` carry no
+key, so the refusal cannot mark a backend down; the access-log and inventory writers carry a tenant.
+
+**PM-1 (P1, fixed #558): region pinning did not reach the chunked path.** WP-R7-1 enforces a
+bucket's region on the plain PUT, multipart complete and CopyObject (R3-08) — "never fall through to
+the primary: the bucket promised a region" — but the chunked-path gate checked threshold, versioning,
+tier, encryption and the flag only. An object above the threshold in an `eu-west-1` bucket had its
+chunks at the one address on the primary in Dallas; with no driver for the region the plain path
+refused the PUT while the chunked path accepted it (the red run put the chunk at
+`t-_global/_global/…` on the primary from the pinned bucket). Fix: `chunkingDisabledByRegion` joins
+the gate and `willChunkEncrypt` (whole objects through `placeObject`, or the 503); a chunked source
+copied INTO a pinned bucket is 503 without the region driver and 501 with it (a manifest copy would
+leave the chunks on the primary). `TestHandlePut_RegionPinnedBucketIsNeverChunked`,
+`TestChunkedCopy_RegionPinnedDestination`. Prod impact today: none (one `eu-west-1` bucket, 0
+objects, no regional keys). Same shape as R4-22 / R7-27: a rule enforced on one entry point and not
+the other.
+
+Noted, not changed: `bytes_reclaimed` counts a candidate whose blob was "nowhere" (the 127 dead rows
+will report 256 MB reclaimed when GC drops them); `NewChunkerFromConfig` ignores a recorded
+`Chunker.AverageBits` (WP-R8-4; only matters the day the average changes).

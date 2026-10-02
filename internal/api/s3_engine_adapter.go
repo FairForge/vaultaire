@@ -824,6 +824,20 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 			r.Header.Get("x-amz-storage-class"))
 	}
 	chunkingDisabledByTier := storageClassDisablesChunking(resolvedStorageClass)
+	// A bucket pinned to a region promises where its bytes live (WP-R7-1):
+	// the plain path places through the region's driver or refuses the
+	// write, never the primary. A chunk blob has one address on the engine's
+	// primary (WP-R8-7) and a dedup hit may reference a chunk any tenant
+	// uploaded anywhere, so a chunked object cannot keep that promise — and
+	// with no driver for the region the plain path refused the PUT while the
+	// chunked path accepted it. A pinned bucket stores whole objects. Asked
+	// only where it can matter (one bucket read per large PUT).
+	chunkingDisabledByRegion := false
+	if a.gci != nil && a.db != nil && metadataSize > chunkThreshold {
+		if name, rErr := bucketRegionDriver(r.Context(), a.db, a.engine, t.ID, bucket); name != "" || rErr != nil {
+			chunkingDisabledByRegion = true
+		}
+	}
 	// Mirrors the chunked-path gate below exactly — including the `chunking`
 	// kill-switch. When this said "the chunk path will encrypt it" but the
 	// flag then kept the object out of the chunk path, an SSE bucket's large
@@ -833,7 +847,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	chunkingOn := a.chunkingEnabled(t.ID)
 	willChunkEncrypt := a.gci != nil && a.chunkEncSvc != nil &&
 		metadataSize > chunkThreshold && !chunkingDisabledByVersioning && !chunkingDisabledByTier &&
-		chunkingOn
+		!chunkingDisabledByRegion && chunkingOn
 
 	if crypto.HasSSECHeaders(r) {
 		if r.Header.Get("x-amz-server-side-encryption") != "" {
@@ -955,7 +969,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	// happens INSIDE handleChunkedPut on plaintext; whole-object SSE-S3 was
 	// deliberately skipped above (willChunkEncrypt) for bodies heading here.
 	if a.gci != nil && metadataSize > chunkThreshold && !chunkingDisabledByVersioning &&
-		!chunkingDisabledByTier && encryptionAlgorithm == "" && chunkingOn {
+		!chunkingDisabledByTier && !chunkingDisabledByRegion && encryptionAlgorithm == "" && chunkingOn {
 		{
 			// WP-C: no uuid.Parse gate — tenant IDs are strings ("tenant-<hex>"
 			// from registration). The old gate silently skipped chunking for
