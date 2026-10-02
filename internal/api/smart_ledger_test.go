@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -632,4 +634,52 @@ func scrapeMetrics(t *testing.T, s *Server) string {
 	s.handleMetrics(w, httptest.NewRequest("GET", "/metrics", nil))
 	require.Equal(t, http.StatusOK, w.Code)
 	return strings.TrimSpace(w.Body.String())
+}
+
+// hungDriver is a backend in an outage: reads fail, and a delete waits on
+// the dead endpoint until its context gives up.
+type hungDriver struct {
+	*drivers.LocalDriver
+	deletes atomic.Int32
+}
+
+func (d *hungDriver) Get(context.Context, string, string) (io.ReadCloser, error) {
+	return nil, errors.New("dial tcp: i/o timeout")
+}
+
+func (d *hungDriver) Delete(ctx context.Context, _, _ string) error {
+	d.deletes.Add(1)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// Post-merge review: the displaced-blob delete runs inside the overwrite
+// request, straight on the old backend's driver. When that backend is the
+// one in an outage — the primary is down, writes fail over, and every
+// overwrite displaces a row that routed to the primary — each PUT waited for
+// the dead backend (up to staleCopyTimeout, 30 s) before it answered. The
+// engine already knows: the backend's circuit breaker is open. The blob is
+// then left (an orphan costs money; the wait cost the customer's write path
+// during the outage the failover exists for).
+func TestDisplacedBlob_NotAttemptedWhileTheOldBackendsBreakerIsOpen(t *testing.T) {
+	// Arrange: the old backend is down and its breaker has opened.
+	f := setupLedgerFixture(t)
+	down := &hungDriver{LocalDriver: drivers.NewLocalDriver(t.TempDir(), zap.NewNop())}
+	f.eng.AddDriver("lyve", down)
+	f.object("b", "k", 100, 30, 1) // the row as the overwrite left it: routes to idrive
+	container := f.tenantID + "_b"
+	for i := 0; i < 10 && f.eng.GetFailoverStatus()["lyve"] == "closed"; i++ {
+		f.eng.HintBackend(container, "probe", "lyve")
+		_, _ = f.eng.Get(context.Background(), container, "probe")
+	}
+	require.NotEqual(t, "closed", f.eng.GetFailoverStatus()["lyve"], "fixture: the breaker must be open")
+
+	// Act
+	start := time.Now()
+	dropDisplacedBlob(context.Background(), f.db, f.eng, zap.NewNop(), lostWriteOverwrite,
+		f.tenantID, "b", container, "k", displacedRow{Size: 100, Backend: "lyve"}, "idrive")
+
+	// Assert: no call to the dead backend, no wait.
+	assert.Equal(t, int32(0), down.deletes.Load(), "a delete was sent to a backend whose breaker is open")
+	assert.Less(t, time.Since(start), 5*time.Second)
 }
