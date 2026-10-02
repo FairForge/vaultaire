@@ -131,7 +131,7 @@ Both backfill functions run on every startup (called from `server.go`), are idem
 - `STSToken` — access key (ASIA prefix), secret, tenant, parent key ID, scoped permissions/buckets/IPs, expiry
 - `STSRequest` — requested permissions, bucket scope, IP restrictions, TTL (1–43200s, default 3600)
 - `GenerateSTSToken(ctx, db, tenantID, parentKeyID, parentScope, req)` — mints token with scope intersection (permissions = intersection with parent, buckets = intersection, IP = narrowed). Persists to `sts_tokens` table. Secret stored in plaintext (required for SigV4 verification). **Review R11-03:** empty bucket/IP scopes are persisted as `{}` — nil slices became NULL and every unscoped mint failed the NOT NULL constraint; caller-fixable failures (no overlap, unknown permission) wrap `ErrSTSScope`, everything else is internal. `STSRequest.ParentKeyID` names one of the caller's own live keys as the parent (`AuthService.GetOwnedAPIKey`, typed `ErrKeyNotFound` / `ErrKeyRevoked`); the API's default parent is the account's full authority.
-- `StartSTSCleanup(ctx, db, logger)` — hourly goroutine deletes expired tokens
+- `CleanupExpiredSTSTokens(ctx, db)` — deletes expired tokens and returns how many; the API server runs it hourly as the `sts_cleanup` job of its scheduler (`internal/api/jobs.go`, WP-R13-3 — it was a goroutine here that waited an hour after every start and reported nothing)
 
 S3 auth integration: `validateAccessKey` → `lookupCredential` (handlers.go) falls back to the `sts_tokens` table for ASIA-prefixed keys after checking `tenants` and `api_keys`. `verifyPresignedURL` (s3_presign.go) does the same for pre-signed URL verification. Expired tokens are rejected at auth time.
 

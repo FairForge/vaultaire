@@ -3,12 +3,9 @@ package api
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/FairForge/vaultaire/internal/audit"
-	"net/http"
-	"strconv"
+	"strings"
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/common"
@@ -62,16 +59,19 @@ type SmartDemotionRunner struct {
 	MinAge      time.Duration
 	HotGrace    time.Duration
 	// MaxObjectsPerTenant bounds one tenant's candidates per run; MaxBytesPerRun
-	// bounds the whole run (SLC transit: every demoted byte crosses the box).
+	// bounds the bytes demoted per 24 hours (SLC transit: every demoted byte
+	// crosses the box). It is a DAILY budget, not a per-run one: a run that
+	// a deploy interrupts is run again by the next boot's catch-up, and the
+	// second run only gets what the first left of the budget.
 	MaxObjectsPerTenant int
 	MaxBytesPerRun      int64
-	Interval            time.Duration
+	// JobName is the job_runs name (tests use their own: the table is shared).
+	JobName string
 
 	// Promoter, when set, runs pending copy-backs (read-time promotion,
 	// PR B) at the start of every run.
 	Promoter *SmartPromoter
 
-	gate            jobGate // one run at a time per process (Review R13-05)
 	now             func() time.Time
 	beforeFlip      func(bucket, key string) // test hook: runs after the cold copy, before the routing flip
 	beforeHotDelete func(bucket, key string) // test hook: runs inside the reclaim tx, after the row lock, before the hot delete
@@ -79,16 +79,19 @@ type SmartDemotionRunner struct {
 
 // SmartDemotionResult is one run's outcome.
 type SmartDemotionResult struct {
-	DryRun         bool                  `json:"dry_run"`
-	TenantsScanned int                   `json:"tenants_scanned"`
-	Candidates     int                   `json:"candidates"`
-	Demoted        int                   `json:"demoted"`
-	Skipped        int                   `json:"skipped"`
-	BytesDemoted   int64                 `json:"bytes_demoted"`
-	HotReclaimed   int                   `json:"hot_reclaimed"`
-	Promoted       int                   `json:"promoted"`
-	Errors         []string              `json:"errors,omitempty"`
-	Tenants        []TenantDemotionStats `json:"tenants,omitempty"`
+	DryRun bool `json:"dry_run"`
+	// BytesDemotedBefore is what the ledger shows as demoted in the 24 h
+	// before this run started: it counts against MaxBytesPerRun.
+	BytesDemotedBefore int64                 `json:"bytes_demoted_before,omitempty"`
+	TenantsScanned     int                   `json:"tenants_scanned"`
+	Candidates         int                   `json:"candidates"`
+	Demoted            int                   `json:"demoted"`
+	Skipped            int                   `json:"skipped"`
+	BytesDemoted       int64                 `json:"bytes_demoted"`
+	HotReclaimed       int                   `json:"hot_reclaimed"`
+	Promoted           int                   `json:"promoted"`
+	Errors             []string              `json:"errors,omitempty"`
+	Tenants            []TenantDemotionStats `json:"tenants,omitempty"`
 }
 
 // TenantDemotionStats is the per-tenant breakdown.
@@ -126,56 +129,52 @@ func NewSmartDemotionRunner(db *sql.DB, eng *engine.CoreEngine, fl flagChecker, 
 		HotGrace:            24 * time.Hour,
 		MaxObjectsPerTenant: 1000,
 		MaxBytesPerRun:      500 << 30, // 500 GiB
-		Interval:            24 * time.Hour,
+		JobName:             smartDemotionJobName,
 		now:                 time.Now,
 	}
 }
 
-// Start runs RunOnce on the interval until ctx is cancelled.
-func (r *SmartDemotionRunner) Start(ctx context.Context) {
-	if r == nil {
-		return
-	}
-	go func() {
-		ticker := time.NewTicker(r.Interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				res, err := r.RunOnceGuarded(ctx, false)
-				if errors.Is(err, errJobAlreadyRunning) {
-					r.logger.Warn("smart demotion: tick skipped, a run is already in progress")
-					continue
-				}
-				if err != nil {
-					r.logger.Error("smart demotion run failed", zap.Error(err))
-					continue
-				}
-				r.logger.Info("smart demotion run completed",
-					zap.Int("tenants", res.TenantsScanned), zap.Int("candidates", res.Candidates),
-					zap.Int("demoted", res.Demoted), zap.Int("skipped", res.Skipped),
-					zap.Int64("bytes_demoted", res.BytesDemoted), zap.Int("hot_reclaimed", res.HotReclaimed),
-					zap.Strings("errors", res.Errors))
-			}
-		}
-	}()
-}
+// smartDemotionJobName is the job's name in job_runs and on the metrics.
+const smartDemotionJobName = "smart_demotion"
 
-// RunOnceGuarded is RunOnce under the single-flight gate: a second caller
-// (ticker vs admin trigger, or two admins) gets errJobAlreadyRunning instead
-// of a concurrent run. A dry run shares the gate — it reads the same tables
-// and its report would describe a moving target.
-func (r *SmartDemotionRunner) RunOnceGuarded(ctx context.Context, dryRun bool) (SmartDemotionResult, error) {
-	if r == nil {
-		return SmartDemotionResult{DryRun: dryRun}, errors.New("smart demotion: runner not configured")
+// spec is the job's schedule: daily at 06:30 UTC (night in the Americas — the
+// job moves bytes across the box), catch-up five minutes after boot. It used
+// to be a 24 h ticker with no run at boot (Review R13-07): it never fired on
+// a box that is redeployed several times a day.
+//
+// What makes a run fail: the tenant list could not be read, or a backend is
+// no longer registered — nothing was moved; it is retried at the next hourly
+// check. What does NOT: an object that could not be moved, reclaimed or
+// promoted, or a tenant whose plan failed — those are counted in the note
+// and are tomorrow's candidates again; the run ceiling (the rest is
+// tomorrow's). A run that fails for one object must not repeat every hour:
+// every repeat re-reads every tenant and, with MaxBytesPerRun, would turn a
+// daily budget into an hourly one (the budget is also enforced over 24 h).
+func (r *SmartDemotionRunner) spec() jobSpec {
+	return jobSpec{
+		Name: r.JobName, Hour: 6, Minute: 30,
+		BootDelay: 5 * time.Minute, MaxRunTime: 6 * time.Hour,
+		Run: func(ctx context.Context) (jobReport, error) {
+			res, err := r.RunOnce(ctx, false)
+			r.logger.Info("smart demotion run",
+				zap.Int("tenants", res.TenantsScanned), zap.Int("candidates", res.Candidates),
+				zap.Int("demoted", res.Demoted), zap.Int("skipped", res.Skipped),
+				zap.Int64("bytes_demoted", res.BytesDemoted), zap.Int("hot_reclaimed", res.HotReclaimed),
+				zap.Int("promoted", res.Promoted), zap.Strings("errors", res.Errors), zap.Error(err))
+			rep := jobReport{Rows: int64(res.Demoted + res.HotReclaimed + res.Promoted)}
+			var notes []string
+			if errors.Is(err, context.DeadlineExceeded) {
+				// The ceiling, not a failure: what is left is tomorrow's.
+				notes = append(notes, "stopped at the run ceiling")
+				err = nil
+			}
+			if n := len(res.Errors); n > 0 {
+				notes = append(notes, fmt.Sprintf("%d item(s) failed, first: %s", n, res.Errors[0]))
+			}
+			rep.Note = strings.Join(notes, "; ")
+			return rep, err
+		},
 	}
-	if !r.gate.tryAcquire() {
-		return SmartDemotionResult{DryRun: dryRun}, errJobAlreadyRunning
-	}
-	defer r.gate.release()
-	return r.RunOnce(ctx, dryRun)
 }
 
 // RunOnce performs one cycle: reclaim hot copies past grace, then demote.
@@ -203,6 +202,15 @@ func (r *SmartDemotionRunner) RunOnce(ctx context.Context, dryRun bool) (SmartDe
 		n, errs := r.reclaimHotCopies(ctx, hot)
 		res.HotReclaimed = n
 		res.Errors = append(res.Errors, errs...)
+	}
+
+	// The byte budget is per 24 hours, whatever number of runs it takes: the
+	// ledger says what the last day's runs already moved (a row whose object
+	// was promoted since is gone from it — an undercount, never an overcount).
+	if err := r.db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(size_bytes), 0) FROM smart_demotions WHERE demoted_at > $1`,
+		r.now().Add(-24*time.Hour)).Scan(&res.BytesDemotedBefore); err != nil {
+		return res, fmt.Errorf("smart demotion: read the day's demoted bytes: %w", err)
 	}
 
 	// The hot budget is a share of the DOWNSTAIRS quota (the attic is tape by
@@ -253,7 +261,7 @@ func (r *SmartDemotionRunner) RunOnce(ctx context.Context, dryRun bool) (SmartDe
 		}
 		res.Candidates += len(cands)
 		for _, c := range cands {
-			if res.BytesDemoted >= r.MaxBytesPerRun {
+			if res.BytesDemotedBefore+res.BytesDemoted >= r.MaxBytesPerRun {
 				break
 			}
 			if dryRun {
@@ -537,32 +545,4 @@ func (r *SmartDemotionRunner) reclaimOne(ctx context.Context, hot engine.Driver,
 		return "", fmt.Errorf("commit: %w", err)
 	}
 	return outcome, nil
-}
-
-// handleSmartDemotionTrigger runs one cycle on demand (admin). ?dry_run=true
-// reports what would move without moving it — the flag-dark verification
-// path before enabling the flag for a tenant.
-func (s *Server) handleSmartDemotionTrigger(w http.ResponseWriter, r *http.Request) {
-	if s.smartDemotion == nil {
-		http.Error(w, "smart demotion not available", http.StatusServiceUnavailable)
-		return
-	}
-	dryRun, _ := strconv.ParseBool(r.URL.Query().Get("dry_run"))
-	ctx, cancel := adminTriggerContext(r)
-	defer cancel()
-	res, err := s.smartDemotion.RunOnceGuarded(ctx, dryRun)
-	if errors.Is(err, errJobAlreadyRunning) {
-		writeJobAlreadyRunning(w, "smart_demotion")
-		return
-	}
-	actor, _ := r.Context().Value(userIDKey).(string)
-	audit.Record(r.Context(), s.db, audit.Entry{UserID: actor, EventType: "admin", Action: "admin.smart_demotion", Error: err,
-		Metadata: map[string]any{"dry_run": dryRun}})
-	if err != nil {
-		s.logger.Error("manual smart demotion failed", zap.Error(err))
-		http.Error(w, "smart demotion failed: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(res)
 }

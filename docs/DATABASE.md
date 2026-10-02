@@ -57,7 +57,7 @@ Rules for a new migration:
 | `067_bucket_region_default.sql` | `buckets.region` default becomes the primary's real region `us-central-1`; rows carrying the old `us-west-1` placeholder (a region the account never had) are relabelled — they were always stored by the primary |
 | `068_multipart_upload_attrs.sql` | `multipart_uploads` gains `content_type`, `metadata JSONB`, `storage_class`, `content_disposition`, `content_encoding`, `content_language`, `cache_control`, `http_expires`, `website_redirect_location` — CreateMultipartUpload is where clients send them; Complete carries only the part list and now copies them to the head row |
 | `069_head_cache_byte_order_index.sql` | `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_object_head_cache_key_c ON object_head_cache (tenant_id, bucket, object_key COLLATE "C")` — S3 listings are UTF-8 byte order, prod's collation is `en_US.UTF-8`; listing queries now order and range on `object_key COLLATE "C"` and this index serves both |
-| `071_retention_job.sql` | `job_runs` (`job` PK, `last_started_at`, `last_finished_at`, `last_success_at`, `last_outcome`, `last_error`, `rows_affected`) — the persisted schedule of the nightly retention job (Review R13-14; WP-R13-3 moves the other daily runners onto it) — and the time indexes the job's range deletes need: `s3_access_log (logged_at)`, `stripe_events (processed_at)`, `webhook_deliveries (created_at)`, `access_patterns (last_seen)`, `quota_usage_events ("timestamp")` |
+| `071_retention_job.sql` | `job_runs` (`job` PK, `last_started_at`, `last_finished_at`, `last_success_at`, `last_outcome`, `last_error`, `rows_affected`) — the persisted state of every background job (Review R13-14 created it for the retention job; since WP-R13-3 the one scheduler in `internal/api/jobs.go` writes a row per job — five daily ones, seven interval ones — and reads `last_success_at` to decide whether a daily run is owed and to export `vaultaire_job_last_success_timestamp_seconds{job_name}`; `GET /api/v1/admin/jobs` is the table as JSON) — and the time indexes the job's range deletes need: `s3_access_log (logged_at)`, `stripe_events (processed_at)`, `webhook_deliveries (created_at)`, `access_patterns (last_seen)`, `quota_usage_events ("timestamp")` |
 | `070_signup_attribution.sql` | `waitlist_signups.referrer` (host only), `utm_source`, `utm_medium`, `utm_campaign`; `users.signup_referrer`, `signup_utm_source`, `signup_utm_medium`, `signup_utm_campaign` — so LET/Reddit sign-ups can be told apart |
 
 The per-file purpose table for 003–069 is in `internal/database/CLAUDE.md`.
@@ -186,8 +186,8 @@ index-served.
 | object_locations lookup (`engine/routing.go`) | pkey |
 
 The log tables are bounded by the nightly retention job since Review R13
-(`internal/api/retention.go`, 03:30 UTC with a catch-up at boot, one
-`pg_try_advisory_lock`, batched `ctid` deletes): `s3_access_log` 30 d (and
+(`internal/api/retention.go`, a daily job of the shared scheduler: 03:30 UTC with a catch-up at boot, one
+`pg_try_advisory_lock` per job, batched `ctid` deletes): `s3_access_log` 30 d (and
 success rows are only recorded for `logging_enabled` buckets — error rows for
 every bucket, the admin support page reads them), `events` 90 d,
 `quota_usage_events` 90 d, `stripe_events` 90 d, `cdn_access_log` 2 d (the

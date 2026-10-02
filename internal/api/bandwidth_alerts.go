@@ -41,40 +41,35 @@ func (a *BandwidthAlerter) SetEgressReader(r usage.EgressStatusReader) { a.egres
 // per hour); a row with enabled = false silences that step.
 var egressAlertLadder = []int{80, 95, 100}
 
-// StartBandwidthAlerts launches a goroutine that checks the ladder every
-// hour. Nil-safe on receiver and db.
-func (a *BandwidthAlerter) StartBandwidthAlerts(ctx context.Context) {
-	if a == nil || a.db == nil {
-		return
-	}
-	go func() {
-		a.checkBandwidthAlerts(ctx)
+// bandwidthAlertsJobName is the job's name in job_runs and on the metrics.
+const bandwidthAlertsJobName = "bandwidth_alerts"
 
-		ticker := time.NewTicker(1 * time.Hour)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				a.checkBandwidthAlerts(ctx)
-			}
-		}
-	}()
+// spec is the alerter's schedule: one pass shortly after boot, then hourly
+// (jobs.go). A pass fails when the candidate list could not be read; a
+// tenant whose check or e-mail failed is logged and retried next pass
+// (Review R13-09).
+func (a *BandwidthAlerter) spec() jobSpec {
+	return jobSpec{
+		Name: bandwidthAlertsJobName, Every: time.Hour, BootDelay: 40 * time.Second, MaxRunTime: 30 * time.Minute,
+		Run: func(ctx context.Context) (jobReport, error) {
+			n, err := a.checkBandwidthAlerts(ctx)
+			return jobReport{Rows: int64(n)}, err
+		},
+	}
 }
 
 // checkBandwidthAlerts walks the tenants with egress recorded this UTC month
-// and fires any step crossed and not yet sent.
-func (a *BandwidthAlerter) checkBandwidthAlerts(ctx context.Context) {
-	if a.db == nil {
-		return
+// and fires any step crossed and not yet sent. It returns how many tenants
+// it checked.
+func (a *BandwidthAlerter) checkBandwidthAlerts(ctx context.Context) (int, error) {
+	if a == nil || a.db == nil {
+		return 0, nil
 	}
 	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	tenants, err := a.alertCandidates(cctx)
 	cancel()
 	if err != nil {
-		a.logger.Error("query tenants for egress alerts", zap.Error(err))
-		return
+		return 0, fmt.Errorf("query tenants for egress alerts: %w", err)
 	}
 	for _, id := range tenants {
 		// Per-tenant budget (Review R13-09): one stalled e-mail provider used
@@ -83,6 +78,7 @@ func (a *BandwidthAlerter) checkBandwidthAlerts(ctx context.Context) {
 		a.checkTenantAlerts(tctx, id)
 		tcancel()
 	}
+	return len(tenants), nil
 }
 
 // alertCandidates lists, with one set-based query, the tenants that have

@@ -399,27 +399,6 @@ func TestSmartDemotion_RateLimitPerRun(t *testing.T) {
 	assert.Equal(t, 3, res.Demoted, "stops once the per-run byte budget is exceeded")
 }
 
-func TestSmartDemotion_AdminTriggerEndpoint(t *testing.T) {
-	f := setupDemotionFixture(t, 1*tb, "standard")
-	f.object("b", "idle", 100, 30, 20)
-	s := &Server{logger: zap.NewNop(), smartDemotion: f.runner}
-
-	rr := doJSON(t, s.handleSmartDemotionTrigger, "POST", "/api/v1/admin/smart-demotion?dry_run=true")
-	require.Equal(t, 200, rr.Code, rr.Body.String())
-	assert.Contains(t, rr.Body.String(), `"dry_run":true`)
-	assert.Contains(t, rr.Body.String(), `"candidates":1`)
-	assert.Equal(t, "idrive", f.backendOf("b", "idle"))
-
-	rr = doJSON(t, s.handleSmartDemotionTrigger, "POST", "/api/v1/admin/smart-demotion")
-	require.Equal(t, 200, rr.Code, rr.Body.String())
-	assert.Contains(t, rr.Body.String(), `"demoted":1`)
-	assert.Equal(t, "geyser", f.backendOf("b", "idle"))
-
-	s.smartDemotion = nil
-	rr = doJSON(t, s.handleSmartDemotionTrigger, "POST", "/api/v1/admin/smart-demotion")
-	assert.Equal(t, 503, rr.Code)
-}
-
 func doJSON(t *testing.T, h http.HandlerFunc, method, target string) *httptest.ResponseRecorder {
 	t.Helper()
 	rr := httptest.NewRecorder()

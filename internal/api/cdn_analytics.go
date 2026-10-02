@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"sync"
 	"time"
 
@@ -127,35 +128,15 @@ const cdnRollupSQL = `
 		             unique_objects = EXCLUDED.unique_objects
 	`
 
-// StartRollup runs a background goroutine that aggregates cdn_access_log into
-// cdn_stats_daily once per hour.
-func (ct *CDNAnalyticsTracker) StartRollup(ctx context.Context) {
-	if ct.db == nil {
-		return
+// rollup aggregates cdn_access_log into cdn_stats_daily. It is the
+// `cdn_rollup` job (shortly after boot, then hourly — jobs.go).
+func (ct *CDNAnalyticsTracker) rollup(ctx context.Context) (int64, error) {
+	res, err := ct.db.ExecContext(ctx, cdnRollupSQL)
+	if err != nil {
+		return 0, fmt.Errorf("cdn stats rollup: %w", err)
 	}
-	go func() {
-		ct.runRollup()
-		ticker := time.NewTicker(1 * time.Hour)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				ct.runRollup()
-			}
-		}
-	}()
-}
-
-func (ct *CDNAnalyticsTracker) runRollup() {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	_, err := ct.db.ExecContext(ctx, cdnRollupSQL)
-	if err != nil && ct.logger != nil {
-		ct.logger.Error("cdn stats rollup", zap.Error(err))
-	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 // CheckBudget returns the bandwidth used this month, the budget limit, and

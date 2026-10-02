@@ -3,10 +3,8 @@ package api
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -64,12 +62,11 @@ import (
 // one's mind, the walk is not.
 
 const (
-	accountDeletionJob            = "account_deletion"
-	accountDeletionLockKey  int64 = 0x6163636f // "acco"
-	outcomeErased                 = "erased"
-	outcomeDeferred               = "deferred"
-	outcomeCancelled              = "cancelled"
-	accountDeletionDueLimit       = 200
+	accountDeletionJob      = "account_deletion"
+	outcomeErased           = "erased"
+	outcomeDeferred         = "deferred"
+	outcomeCancelled        = "cancelled"
+	accountDeletionDueLimit = 200
 )
 
 var (
@@ -81,14 +78,6 @@ var (
 		Name: "vaultaire_account_deletion_objects_total",
 		Help: "Objects handled by the account-deletion runner, by result (deleted, chunked_released, failed).",
 	}, []string{"result"})
-	accountDeletionLastRun = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "vaultaire_account_deletion_last_run_timestamp_seconds",
-		Help: "Unix time of the last account-deletion run that deferred no tenant.",
-	})
-	accountDeletionRuns = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "vaultaire_account_deletion_runs_total",
-		Help: "Account-deletion runs by outcome.",
-	}, []string{"outcome"})
 )
 
 // subscriptionCanceller is the slice of billing.StripeService the runner
@@ -120,11 +109,11 @@ type AccountDeletionRunner struct {
 	// store's rows are deleted by EraseRows anyway).
 	Sessions dashauth.SessionStore
 
-	BatchSize              int
-	RunAtHour, RunAtMinute int
-	MaxRunTime             time.Duration
-	TenantDeadline         time.Duration
-	BootDelay              time.Duration
+	BatchSize      int
+	MaxRunTime     time.Duration
+	TenantDeadline time.Duration
+	// JobName is the job_runs name (tests use their own: the table is shared).
+	JobName string
 
 	now         func() time.Time
 	beforeBatch func() // test hook: runs before each object batch
@@ -168,117 +157,57 @@ func NewAccountDeletionRunner(db *sql.DB, logger *zap.Logger, eng engine.Engine,
 	if logger == nil {
 		logger = zap.NewNop()
 	}
+	// Start every result at 0: AccountDeletionDeferred reads an increase, and
+	// a series that first appears at 1 after a restart is not one.
+	for _, r := range []string{outcomeErased, outcomeDeferred, outcomeCancelled} {
+		accountDeletionTenants.WithLabelValues(r)
+	}
 	return &AccountDeletionRunner{
 		db: db, logger: logger, eng: eng, gci: gci, quota: quota, account: acct,
 		BatchSize:      1000,
-		RunAtHour:      4,
-		RunAtMinute:    30,
 		MaxRunTime:     6 * time.Hour,
 		TenantDeadline: 2 * time.Hour,
-		BootDelay:      2 * time.Minute,
+		JobName:        accountDeletionJob,
 		now:            time.Now,
 	}
 }
 
-// Start runs the scheduler until ctx is done (retention.go's shape).
-func (r *AccountDeletionRunner) Start(ctx context.Context) {
-	if r == nil {
-		return
-	}
-	go func() {
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(r.BootDelay):
-		}
-		r.runIfDue(ctx)
-		ticker := time.NewTicker(time.Hour)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				r.runIfDue(ctx)
+// spec is the job's schedule: daily at 04:30 UTC (an hour after retention),
+// catch-up two minutes after boot.
+//
+// What makes a run fail: a tenant that was deferred (Stripe refused the
+// cancel, a backend refused a delete, the per-tenant deadline) or the due
+// list could not be read. last_success_at then stays put and every hourly
+// check retries — that retry is the point: the erasure is owed on its date,
+// and each stage is idempotent. A cancelled tenant does not fail the run.
+func (r *AccountDeletionRunner) spec() jobSpec {
+	return jobSpec{
+		Name: r.JobName, Hour: 4, Minute: 30,
+		BootDelay: 2 * time.Minute, MaxRunTime: r.MaxRunTime,
+		Run: func(ctx context.Context) (jobReport, error) {
+			res, err := r.RunOnce(ctx)
+			if len(res.Tenants) > 0 || err != nil {
+				r.logger.Info("account deletion run", zap.Int("erased", res.Erased), zap.Int("deferred", res.Deferred),
+					zap.Int("cancelled", res.Cancelled), zap.String("duration", res.Duration), zap.Strings("errors", res.Errors))
 			}
-		}
-	}()
-}
-
-func (r *AccountDeletionRunner) lastScheduled(now time.Time) time.Time {
-	now = now.UTC()
-	at := time.Date(now.Year(), now.Month(), now.Day(), r.RunAtHour, r.RunAtMinute, 0, 0, time.UTC)
-	if at.After(now) {
-		at = at.Add(-24 * time.Hour)
-	}
-	return at
-}
-
-func (r *AccountDeletionRunner) due(ctx context.Context) (bool, error) {
-	last, err := lastJobSuccess(ctx, r.db, accountDeletionJob)
-	if err != nil {
-		return false, err
-	}
-	return last.IsZero() || last.Before(r.lastScheduled(r.now())), nil
-}
-
-func (r *AccountDeletionRunner) runIfDue(ctx context.Context) {
-	due, err := r.due(ctx)
-	if err != nil {
-		r.logger.Warn("account deletion: could not read job_runs", zap.Error(err))
-		return
-	}
-	if !due {
-		return
-	}
-	res, err := r.RunOnce(ctx)
-	switch {
-	case errors.Is(err, errJobAlreadyRunning):
-		r.logger.Warn("account deletion: run skipped, another instance holds the lock")
-	case err != nil:
-		r.logger.Error("account deletion run finished with deferred tenants", zap.Error(err),
-			zap.Int("erased", res.Erased), zap.Int("deferred", res.Deferred), zap.Int("cancelled", res.Cancelled))
-	default:
-		r.logger.Info("account deletion run completed", zap.Int("erased", res.Erased),
-			zap.Int("cancelled", res.Cancelled), zap.String("duration", res.Duration))
+			return jobReport{Rows: int64(res.Erased)}, err
+		},
 	}
 }
 
-// RunOnce erases every due account under the advisory lock. A deferred
-// tenant (Stripe or a backend refused) makes the run's outcome "error" so
-// job_runs.last_success_at stays put and the hourly check retries; a
-// cancelled tenant does not.
+// RunOnce erases every due account. A deferred tenant (Stripe or a backend
+// refused) makes the run an error, so job_runs.last_success_at stays put
+// and the hourly check retries; a cancelled tenant does not. Locking and
+// job_runs are the scheduler's (run it through the registered job).
 func (r *AccountDeletionRunner) RunOnce(ctx context.Context) (AccountDeletionResult, error) {
 	res := AccountDeletionResult{}
 	if r == nil {
 		return res, errors.New("account deletion: runner not configured")
 	}
-	ctx, cancel := context.WithTimeout(ctx, r.MaxRunTime)
-	defer cancel()
-
-	conn, err := r.db.Conn(ctx)
-	if err != nil {
-		return res, fmt.Errorf("account deletion: acquire conn: %w", err)
-	}
-	defer func() { _ = conn.Close() }()
-	var locked bool
-	if err := conn.QueryRowContext(ctx, `SELECT pg_try_advisory_lock($1)`, accountDeletionLockKey).Scan(&locked); err != nil {
-		return res, fmt.Errorf("account deletion: advisory lock: %w", err)
-	}
-	if !locked {
-		return res, errJobAlreadyRunning
-	}
-	defer func() {
-		_, _ = conn.ExecContext(context.WithoutCancel(ctx), `SELECT pg_advisory_unlock($1)`, accountDeletionLockKey)
-	}()
-
 	start := r.now()
-	recordJobStart(ctx, r.db, accountDeletionJob, start)
 
 	dues, err := r.account.ListDue(ctx, start, accountDeletionDueLimit)
 	if err != nil {
-		accountDeletionRuns.WithLabelValues("error").Inc()
-		recordJobFinish(context.WithoutCancel(ctx), r.db, accountDeletionJob, r.now(), "error", err, 0)
 		return res, fmt.Errorf("account deletion: %w", err)
 	}
 	for _, d := range dues {
@@ -304,17 +233,10 @@ func (r *AccountDeletionRunner) RunOnce(ctx context.Context) (AccountDeletionRes
 	}
 	res.Duration = r.now().Sub(start).String()
 
-	outcome := "ok"
-	var runErr error
 	if len(res.Errors) > 0 {
-		outcome = "error"
-		runErr = errors.New(strings.Join(res.Errors, "; "))
-	} else {
-		accountDeletionLastRun.Set(float64(r.now().Unix()))
+		return res, errors.New(strings.Join(res.Errors, "; "))
 	}
-	accountDeletionRuns.WithLabelValues(outcome).Inc()
-	recordJobFinish(context.WithoutCancel(ctx), r.db, accountDeletionJob, r.now(), outcome, runErr, int64(res.Erased))
-	return res, runErr
+	return res, nil
 }
 
 // eraseTenant runs stages a–e for one account. It never returns an error:
@@ -652,30 +574,4 @@ func (r *AccountDeletionRunner) abortMultipart(ctx context.Context, tenantID str
 		}
 	}
 	return nil
-}
-
-// handleAccountDeletionTrigger runs the job once on demand (admin). A run
-// already holding the lock answers 409 already_running.
-func (s *Server) handleAccountDeletionTrigger(w http.ResponseWriter, r *http.Request) {
-	if s.accountDeletion == nil {
-		http.Error(w, "account deletion runner not available", http.StatusServiceUnavailable)
-		return
-	}
-	ctx, cancel := adminTriggerContext(r)
-	defer cancel()
-	res, err := s.accountDeletion.RunOnce(ctx)
-	if errors.Is(err, errJobAlreadyRunning) {
-		writeJobAlreadyRunning(w, accountDeletionJob)
-		return
-	}
-	actor, _ := r.Context().Value(userIDKey).(string)
-	audit.Record(r.Context(), s.db, audit.Entry{UserID: actor, EventType: "admin", Action: "admin.account_deletion", Error: err,
-		Metadata: map[string]any{"erased": res.Erased, "deferred": res.Deferred, "cancelled": res.Cancelled}})
-	w.Header().Set("Content-Type", "application/json")
-	if err != nil {
-		// Deferred tenants are reported, not hidden: the body carries them.
-		s.logger.Error("manual account deletion run deferred tenants", zap.Error(err))
-		w.WriteHeader(http.StatusInternalServerError)
-	}
-	_ = json.NewEncoder(w).Encode(res)
 }

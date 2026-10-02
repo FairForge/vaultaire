@@ -1222,23 +1222,63 @@ func generateAdminPaths() map[string]*PathItem {
 				}),
 				jsonBody("Fields to update", freeObject("Field name → new value")))),
 		},
-		"/api/v1/admin/dedup-gc": {
-			Post: admin(jsonOp("Admin", "Run one dedup GC cycle", "AdminDedupGC",
-				"Reconciles chunk reference counts and sweeps unreferenced chunks once, synchronously. Writes an `admin.dedup_gc` audit row. No request body.",
+		"/api/v1/admin/jobs": {
+			Get: admin(jsonOp("Admin", "List the background jobs", "AdminListJobs",
+				"Every background job this server runs, joined with its `job_runs` row: the schedule, whether a run is in progress, the last start, finish and success, "+
+					"the last outcome (`ok`, `error`, `interrupted` — the process stopped during the run — or `running`), the rows it affected and when it is next expected. "+
+					"Daily jobs: `inventory` 00:30 UTC, `dedup_gc` 02:30, `retention` 03:30, `account_deletion` 04:30, `smart_demotion` 06:30 (a catch-up check a few minutes after every start, "+
+					"then one per hour; a run happens when `job_runs` has no success since the last scheduled time). Interval jobs: `multipart_reaper`, `cdn_rollup`, `idempotency_cleanup`, "+
+					"`sts_cleanup`, `session_cleanup`, `bandwidth_alerts` (hourly) and `access_log_delivery` (every 5 minutes). On `ok`, `last_error` is the run's note: items that failed "+
+					"without failing the run. A `job_runs` row no job of this process claims is listed with `registered: false`.",
 				map[string]Response{
-					"200": jsonResp("What the cycle did", ref("DedupGCResult")),
-					"500": textResp("`gc failed: ...`"),
-					"503": textResp("`dedup gc not available` (no database or engine)"),
+					"200": jsonResp("The jobs", objectPtr("", map[string]*Schema{
+						"object": strEnum("", "list"),
+						"jobs":   arrayOf(ref("JobRun")),
+					}, "object", "jobs")),
+					"500": textResp("`could not read job_runs`"),
+					"503": textResp("`jobs not available` (no database)"),
+				})),
+		},
+		"/api/v1/admin/jobs/{job}/run": {
+			Parameters: []Parameter{pathParam("job", "Job name, as listed by `GET /api/v1/admin/jobs`")},
+			Post: admin(withParams(jsonOp("Admin", "Start one run of a background job", "AdminRunJob",
+				"Starts one run now and answers **202** as soon as the run holds the job's advisory lock; the run continues on the server after the response "+
+					"(a closed connection does not cancel it, a shutdown does). The result is in `GET /api/v1/admin/jobs` (`last_outcome`, `rows_affected`, `last_error`) and in the log. "+
+					"**409** `already_running` while another run of the job — the scheduler's, another trigger's, or another process's — holds the lock. "+
+					"`dry_run=true` is supported by `smart_demotion` only: it is synchronous, answers 200 with the report, moves nothing and is not recorded as a run. "+
+					"Writes an `admin.<job>` audit row. No request body.",
+				map[string]Response{
+					"200": jsonResp("`dry_run=true` on `smart_demotion`: what the run would do", ref("SmartDemotionResult")),
+					"202": jsonResp("The run was started", ref("JobStarted")),
+					"400": textResp("`dry_run is only supported by smart_demotion`"),
+					"404": textResp("No such job on this server"),
+					"409": jsonResp("A run is already in progress", ref("JobAlreadyRunning")),
+					"500": textResp("`could not start <job>: ...` (the lock could not be taken)"),
+				}),
+				queryParam("dry_run", "`smart_demotion` only: report, move nothing", &Schema{Type: "boolean", Default: false}))),
+		},
+		"/api/v1/admin/dedup-gc": {
+			Post: admin(jsonOp("Admin", "Start one dedup GC run", "AdminDedupGC",
+				"The same call as `POST /api/v1/admin/jobs/dedup_gc/run`: reconciles chunk reference counts and sweeps unreferenced chunks past their 7-day grace. "+
+					"Answers 202 once the run has started; it also runs on its own every day at 02:30 UTC. Writes an `admin.dedup_gc` audit row. No request body.",
+				map[string]Response{
+					"202": jsonResp("The run was started", ref("JobStarted")),
+					"409": jsonResp("A run is already in progress", ref("JobAlreadyRunning")),
+					"500": textResp("`could not start dedup_gc: ...`"),
+					"503": textResp("The job is not available on this server (no database or engine)"),
 				})),
 		},
 		"/api/v1/admin/smart-demotion": {
-			Post: admin(withParams(jsonOp("Admin", "Run one Smart-tier demotion cycle", "AdminSmartDemotion",
-				"Runs the hot→cold demotion job once, synchronously. `dry_run=true` reports what would move without moving it — the flag-dark verification path "+
+			Post: admin(withParams(jsonOp("Admin", "Start one Smart-tier demotion run", "AdminSmartDemotion",
+				"The same call as `POST /api/v1/admin/jobs/smart_demotion/run`: the hot→cold demotion job (it also runs on its own every day at 06:30 UTC). "+
+					"Answers 202 once the run has started. `dry_run=true` is synchronous and reports what would move without moving it — the flag-dark verification path "+
 					"before enabling `smart_demotion` for a tenant. Writes an `admin.smart_demotion` audit row. No request body.",
 				map[string]Response{
-					"200": jsonResp("What the cycle did (or would do)", ref("SmartDemotionResult")),
-					"500": textResp("`smart demotion failed: ...`"),
-					"503": textResp("`smart demotion not available`"),
+					"200": jsonResp("`dry_run=true`: what the run would do", ref("SmartDemotionResult")),
+					"202": jsonResp("The run was started", ref("JobStarted")),
+					"409": jsonResp("A run (or a dry run) is already in progress", ref("JobAlreadyRunning")),
+					"500": textResp("`smart demotion failed: ...` (dry run) or `could not start smart_demotion: ...`"),
+					"503": textResp("The job is not available on this server (the hot or the cold backend is not registered)"),
 				}),
 				queryParam("dry_run", "Report only; move nothing", &Schema{Type: "boolean", Default: false}))),
 		},
@@ -1256,46 +1296,29 @@ func generateAdminPaths() map[string]*PathItem {
 				})),
 		},
 		"/api/v1/admin/retention": {
-			Post: admin(jsonOp("Admin", "Run the retention job once", "AdminRetention",
-				"Prunes the log tables past their retention periods (s3_access_log 30 d, events / quota_usage_events / stripe_events / access_patterns 90 d, "+
+			Post: admin(jsonOp("Admin", "Start one retention run", "AdminRetention",
+				"The same call as `POST /api/v1/admin/jobs/retention/run`: prunes the log tables past their retention periods (s3_access_log 30 d, events / quota_usage_events / stripe_events 90 d, "+
 					"webhook_deliveries 30 d, cdn_access_log 2 d after rollup, waitlist sign-up IP/user agent cleared after 90 d; audit_logs never) in batches under "+
-					"one advisory lock — the nightly run and this trigger cannot overlap (409 `already_running`). Writes an `admin.retention` audit row. No request body.",
+					"the job's advisory lock — the nightly 03:30 UTC run and this trigger cannot overlap. Answers 202 once the run has started. Writes an `admin.retention` audit row. No request body.",
 				map[string]Response{
-					"200": jsonResp("Rows pruned per table", objectPtr("", map[string]*Schema{
-						"tables":   freeObject("Table name → rows deleted (or PII-cleared) this run"),
-						"total":    integer("Rows affected across every table"),
-						"duration": str("Run duration (Go duration string)"),
-						"errors":   arrayOf(str("Per-table error text")),
-					}, "tables", "total", "duration")),
-					"409": jsonResp("A run is already in progress", objectPtr("", map[string]*Schema{
-						"error": strEnum("", "already_running"),
-						"job":   strEnum("", "retention"),
-					}, "error", "job")),
-					"500": textResp("`retention failed: ...`"),
-					"503": textResp("`retention not available` (no database)"),
+					"202": jsonResp("The run was started", ref("JobStarted")),
+					"409": jsonResp("A run is already in progress", ref("JobAlreadyRunning")),
+					"500": textResp("`could not start retention: ...`"),
+					"503": textResp("The job is not available on this server (no database)"),
 				})),
 		},
 		"/api/v1/admin/account-deletion": {
-			Post: admin(jsonOp("Admin", "Run the account-deletion job once", "AdminAccountDeletion",
-				"Erases every account whose 30-day grace period has ended (WP-R10-3): per tenant, cancel the Stripe subscription, delete every object on its recorded backend "+
-					"(chunked manifests released, multipart uploads aborted), then remove every tenant/user row in one transaction, revoke sessions and write an `account.erased` audit row. "+
-					"A tenant that Stripe or a backend refuses is deferred to the next run (500 with the per-tenant detail); a cancel that lands mid-walk stops that tenant. "+
-					"One advisory lock — the daily 04:30 UTC run and this trigger cannot overlap (409 `already_running`). Writes an `admin.account_deletion` audit row. No request body.",
+			Post: admin(jsonOp("Admin", "Start one account-deletion run", "AdminAccountDeletion",
+				"The same call as `POST /api/v1/admin/jobs/account_deletion/run`: erases every account whose 30-day grace period has ended (WP-R10-3) — per tenant, cancel the Stripe subscription, "+
+					"delete every object on its recorded backend (chunked manifests released, multipart uploads aborted), then remove every tenant/user row in one transaction, revoke sessions and "+
+					"write an `account.erased` audit row. A tenant that Stripe or a backend refuses is deferred: the run's outcome is `error` with the per-tenant reasons in `last_error`, "+
+					"and the hourly check retries it. One advisory lock — the daily 04:30 UTC run and this trigger cannot overlap. Answers 202 once the run has started. "+
+					"Writes an `admin.account_deletion` audit row. No request body.",
 				map[string]Response{
-					"200": jsonResp("Every due tenant handled", objectPtr("", map[string]*Schema{
-						"tenants":   arrayOf(freeObject("Per-tenant outcome: tenant_id, user_id, outcome (erased|deferred|cancelled), stripe_cancelled, objects_deleted, chunked_released, locked_erased, object_failures, multipart_aborted, rows, error")),
-						"erased":    integer("Tenants fully erased this run"),
-						"deferred":  integer("Tenants left for the next run"),
-						"cancelled": integer("Tenants whose deletion was cancelled while the run looked at them"),
-						"duration":  str("Run duration (Go duration string)"),
-						"errors":    arrayOf(str("Per-tenant deferral reasons")),
-					}, "tenants", "erased", "deferred", "cancelled", "duration")),
-					"409": jsonResp("A run is already in progress", objectPtr("", map[string]*Schema{
-						"error": strEnum("", "already_running"),
-						"job":   strEnum("", "account_deletion"),
-					}, "error", "job")),
-					"500": jsonResp("At least one tenant was deferred; the body is the same result object", freeObject("")),
-					"503": textResp("`account deletion runner not available` (no database or engine)"),
+					"202": jsonResp("The run was started", ref("JobStarted")),
+					"409": jsonResp("A run is already in progress", ref("JobAlreadyRunning")),
+					"500": textResp("`could not start account_deletion: ...`"),
+					"503": textResp("The job is not available on this server (no database or engine)"),
 				})),
 		},
 		"/api/v1/admin/flags": {
@@ -1847,22 +1870,40 @@ func generateJSONSchemas() map[string]Schema {
 			"CreatedAt":           dateTime(""),
 			"UpdatedAt":           dateTime(""),
 		}, "ID", "BreachType", "Severity", "Status", "DetectedAt", "DeadlineAt", "CreatedAt", "UpdatedAt"),
-		"DedupGCResult": object("", map[string]*Schema{
-			"reconciled":      {Type: "integer", Description: "Reference counts corrected"},
-			"deleted":         {Type: "integer", Description: "Chunks swept"},
-			"bytes_reclaimed": integer(""),
-		}, "reconciled", "deleted", "bytes_reclaimed"),
+		"JobRun": object("One background job and its `job_runs` row", map[string]*Schema{
+			"job":              str("Job name"),
+			"schedule":         str("`daily HH:MM UTC` or `every <interval>`; empty for an unregistered row"),
+			"registered":       boolean("False for a `job_runs` row that no job of this server claims"),
+			"running":          boolean("A run is recorded as in progress"),
+			"last_started_at":  nullable(dateTime("")),
+			"last_finished_at": nullable(dateTime("")),
+			"last_success_at":  nullable(dateTime("The last run whose outcome was `ok`; what `vaultaire_job_last_success_timestamp_seconds{job_name}` exports")),
+			"last_outcome":     strEnum("Empty when the job has never run", "", "ok", "error", "interrupted", "running"),
+			"last_error":       str("The failure text of an `error` run; on `ok`, the run's note (items that failed without failing the run)"),
+			"rows_affected":    integer("The job's own unit: rows pruned, objects moved, chunks swept, reports written, accounts erased"),
+			"next_run_at":      dateTime("When the job is next expected to run; omitted when unknown"),
+		}, "job", "schedule", "registered", "running", "last_started_at", "last_finished_at", "last_success_at", "last_outcome", "last_error", "rows_affected"),
+		"JobStarted": object("A job run was started and continues on the server", map[string]*Schema{
+			"job":        str("Job name"),
+			"status":     strEnum("", "started"),
+			"status_url": str("Where the result will be: `/api/v1/admin/jobs`"),
+		}, "job", "status", "status_url"),
+		"JobAlreadyRunning": object("Another run of the job holds its lock", map[string]*Schema{
+			"error": strEnum("", "already_running"),
+			"job":   str("Job name"),
+		}, "error", "job"),
 		"SmartDemotionResult": object("", map[string]*Schema{
-			"dry_run":         boolean(""),
-			"tenants_scanned": {Type: "integer"},
-			"candidates":      {Type: "integer"},
-			"demoted":         {Type: "integer"},
-			"skipped":         {Type: "integer"},
-			"bytes_demoted":   integer(""),
-			"hot_reclaimed":   {Type: "integer", Description: "Hot copies reclaimed after their grace period"},
-			"promoted":        {Type: "integer", Description: "Objects promoted back on read"},
-			"errors":          strArray("Per-object errors; omitted when none"),
-			"tenants":         arrayOf(ref("TenantDemotionStats")),
+			"dry_run":              boolean(""),
+			"tenants_scanned":      {Type: "integer"},
+			"candidates":           {Type: "integer"},
+			"demoted":              {Type: "integer"},
+			"skipped":              {Type: "integer"},
+			"bytes_demoted":        integer(""),
+			"bytes_demoted_before": integer("Bytes the ledger shows as demoted in the 24 hours before this run; they count against the daily byte budget. Omitted when zero"),
+			"hot_reclaimed":        {Type: "integer", Description: "Hot copies reclaimed after their grace period"},
+			"promoted":             {Type: "integer", Description: "Objects promoted back on read"},
+			"errors":               strArray("Per-object errors; omitted when none"),
+			"tenants":              arrayOf(ref("TenantDemotionStats")),
 		}, "dry_run", "tenants_scanned", "candidates", "demoted", "skipped", "bytes_demoted", "hot_reclaimed", "promoted"),
 		"TenantDemotionStats": object("Per-tenant breakdown of a demotion run", map[string]*Schema{
 			"tenant_id":        str(""),

@@ -285,7 +285,8 @@ Runner log lines (zap, pruned):
   deferred daily with an Error log line, never claimed erased. Operator action: register
   the driver, or hand-clean the rows once the bytes are confirmed gone. No alert rule yet
   (a `vaultaire_account_deletion_tenants_total{result="deferred"}` rule belongs with the
-  WP-R13-3 job rules).
+  WP-R13-3 job rules). **Done in WP-R13-3 (#543): `AccountDeletionDeferred` in
+  `deploy/monitoring/vaultaire-jobs.yml`.**
 - **The auth cache's other ~25 map readers** are still unlocked (pre-existing; `cacheMu`
   covers `Evict`, the three writers and the five login/API-key readers) — WP-R5-14.
 - **A JWT issued before the erasure** still passes `requireJWT` for up to 24 h; every

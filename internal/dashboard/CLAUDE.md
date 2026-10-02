@@ -37,7 +37,7 @@ Web dashboard for stored.ge customers and admins. Uses htmx + Go templates, embe
 ## Session Auth
 
 Sessions use the `dashboard_sessions` PostgreSQL table. The `SessionStore` interface has two implementations:
-- `DBStore` — production, PostgreSQL-backed, hourly cleanup goroutine
+- `DBStore` — production, PostgreSQL-backed; `CleanupExpired` deletes expired sessions and is run hourly by the API server as the `session_cleanup` job (`internal/api/jobs.go`)
 - `MemoryStore` — tests and local dev without DB
 
 Session data is injected into request context via `RequireSession` middleware. Handlers call `dashauth.GetSession(r.Context())` to get `{UserID, TenantID, Email, Role, IPAddress, UserAgent}`.
@@ -112,7 +112,7 @@ Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`,
 | `/admin/tenants/{id}/quota`, `/tier` | POST | session + admin | Edit quota / change legacy tier — 409 for a house tenant (floor rows are Stripe-owned, R10-21) |
 | `/admin/tenants/{id}/bandwidth-limit` | POST | session + admin | Set the tenant's egress-allowance override (GB per month; **0 = the plan's allowance**, not "unlimited" — the exemption is a per-tenant `egress_throttle` flag row). The tenant page shows used / allowance / plan / override / state (WP-R10-9) |
 | `/admin/tenants/{id}/reset-mfa` | POST | session + admin | Reset user's 2FA: answers the htmx form with a fragment (a 303 swapped the whole page into the card) and signs the user out of every device (R12) |
-| `/admin/system` | GET | session + admin | System page: process stats (goroutines, memory, GC, uptime, Go version) + DB pool stats (`handlers/admin_system.go`) |
+| `/admin/system` | GET | session + admin | System page: process stats (goroutines, memory, GC, uptime, Go version) + DB pool stats + **Background jobs** — the `job_runs` table (last outcome, last start, last success, rows, error or note; WP-R13-3; the same data with the schedule is `GET /api/v1/admin/jobs`) (`handlers/admin_system.go`) |
 | `/admin/backends` | GET | session + admin | Backend health + primary (mounted only when `deps.Engine != nil`) |
 | `/admin/backends/{name}/primary` | POST | session + admin | Swap the engine primary — refused for anything `engine.CheckPrimaryEligible` rejects (audited, R12) |
 | `/admin/backends/{name}/check` | POST | session + admin | Force a health check of one backend |

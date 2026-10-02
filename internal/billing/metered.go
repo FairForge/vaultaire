@@ -94,8 +94,12 @@ func NewMeteredReporter(stripeSvc *StripeService, db *sql.DB, logger *zap.Logger
 func (r *MeteredReporter) SetEmailSender(s email.Sender) { r.emailer = s }
 
 // StartMeteredReporting launches a goroutine that reports the previous day's usage
-// once per UTC day (at hour 0) and checks spending caps hourly. It mirrors
-// CDNAnalyticsTracker.StartRollup / auth.StartSTSCleanup. Nil-safe.
+// once per UTC day (at hour 0) and checks spending caps hourly. Nil-safe.
+//
+// It is the one loop left with an hour-0 gate: a restart during hour 0 skips
+// or repeats the day's report. Dormant on prod (both STRIPE_METER_* unset);
+// it must move onto the API server's job scheduler (internal/api/jobs.go,
+// job_runs decides the day) before the meters are switched on — WP-R10-4.
 func (r *MeteredReporter) StartMeteredReporting(ctx context.Context) {
 	if r == nil || r.db == nil || r.stripe == nil {
 		return

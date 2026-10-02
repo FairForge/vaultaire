@@ -98,6 +98,7 @@ type Server struct {
 	smartPromoter      *SmartPromoter
 	multipartReaper    *MultipartReaper
 	quotaReconcileGate jobGate                // single-flight for POST /admin/quota-reconcile (Review R13-05)
+	jobs               *jobScheduler          // the one background-job scheduler (WP-R13-3, jobs.go)
 	retention          *RetentionJob          // nightly log-table pruner (Review R13-14, checklist item 5)
 	accountSvc         *account.Service       // the one deletion state machine (WP-R10-3)
 	accountDeletion    *AccountDeletionRunner // daily erasure of accounts past their grace period (WP-R10-3)
@@ -277,7 +278,6 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	s.cdnAnalytics = NewCDNAnalyticsTracker(s.db)
 	s.cdnAnalytics.SetLogger(logger)
 	s.cdnAnalytics.StartFlusher(context.Background(), 5*time.Second)
-	s.cdnAnalytics.StartRollup(context.Background())
 
 	// Public-site statistics — cookieless daily aggregates (site_stats.go).
 	s.siteStats = sitestats.New(logger)
@@ -291,16 +291,13 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	s.accessLogTracker.SetLogger(logger)
 	s.accessLogTracker.SetWriter(reportWriter)
 	s.accessLogTracker.StartFlusher(context.Background(), 5*time.Second)
-	s.accessLogTracker.StartLogDelivery(context.Background(), s.engine)
 
-	// Inventory report runner — generates CSV inventory reports on schedule.
+	// Inventory report runner — CSV inventory reports, daily (jobs below).
 	s.inventoryRunner = NewInventoryRunner(s.db, s.engine, logger)
 	s.inventoryRunner.SetWriter(reportWriter)
-	s.inventoryRunner.StartInventoryJob(context.Background())
 
 	// Dedup GC runner — reconciles ref counts and reclaims orphaned chunks.
 	s.dedupGCRunner = NewDedupGCRunner(s.db, s.engine, s.gci, logger)
-	s.dedupGCRunner.StartDedupGC(context.Background())
 
 	// Smart-tier demotion job (5.15.8): keeps ≤15% of a Standard tenant's
 	// quota on the hot backend, flag-gated per tenant (smart_demotion,
@@ -356,7 +353,6 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 				logger.Warn("invalid SMART_DEMOTION_TIERS (empty), keeping default", zap.String("value", v))
 			}
 		}
-		s.smartDemotion.Start(context.Background())
 	}
 
 	// Multipart reaper + per-upload byte cap (WP-10-minimal): part data sits
@@ -417,7 +413,6 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 				logger.Warn("invalid MULTIPART_TERMINAL_RETENTION_DAYS (need an integer > 0), keeping default", zap.String("value", v))
 			}
 		}
-		s.multipartReaper.Start(context.Background())
 	}
 
 	// Stripe billing service. Only active when STRIPE_SECRET_KEY is set.
@@ -506,6 +501,11 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	s.router.Use(s.versionMiddleware)
 	s.router.Use(s.loggingMiddleware)
 	s.router.Use(s.siteStatsMiddleware)
+
+	// Every background job is registered with the one scheduler (WP-R13-3);
+	// the loops start in Start(), on the context Shutdown cancels.
+	s.jobs = newJobScheduler(s.db, logger)
+	s.registerJobs()
 
 	s.setupRoutes()
 
@@ -885,11 +885,16 @@ func (s *Server) registerComplianceRoutes() {
 		r.Get("/breaches", s.requireAdmin(complianceHandler.HandleListBreaches))
 		r.Patch("/breach/{id}", s.requireAdmin(complianceHandler.HandleUpdateBreach))
 
-		r.Post("/dedup-gc", s.requireAdmin(s.handleDedupGCTrigger))
-		r.Post("/smart-demotion", s.requireAdmin(s.handleSmartDemotionTrigger))
+		// Background jobs (WP-R13-3): the state of every job, and one run
+		// now. The four named triggers are the same call as /jobs/{job}/run
+		// — 202 once the run holds the job's lock, 409 while another does.
+		r.Get("/jobs", s.requireAdmin(s.handleAdminJobsList))
+		r.Post("/jobs/{job}/run", s.requireAdmin(s.handleAdminJobRun))
+		r.Post("/dedup-gc", s.requireAdmin(s.adminJobTrigger(dedupGCJobName)))
+		r.Post("/smart-demotion", s.requireAdmin(s.adminJobTrigger(smartDemotionJobName)))
+		r.Post("/retention", s.requireAdmin(s.adminJobTrigger(retentionJobName)))
+		r.Post("/account-deletion", s.requireAdmin(s.adminJobTrigger(accountDeletionJob)))
 		r.Post("/quota-reconcile", s.requireAdmin(s.handleQuotaReconcile))
-		r.Post("/retention", s.requireAdmin(s.handleRetentionTrigger))
-		r.Post("/account-deletion", s.requireAdmin(s.handleAccountDeletionTrigger))
 
 		// Feature flags (1.13): flip kill-switches / per-tenant enablement
 		// at runtime. updated_by comes from the JWT.
@@ -1275,22 +1280,6 @@ func (s *Server) Start() error {
 
 	go s.startHealthChecks(ctx)
 
-	// Clean up expired dashboard sessions hourly.
-	if ds, ok := s.sessionStore.(*dashauth.DBStore); ok {
-		ds.StartCleanup(ctx)
-	}
-
-	// Clean up expired idempotency cache entries hourly.
-	if s.db != nil {
-		_, im := s.jsonAPIMiddleware()
-		im.StartCleanup(ctx)
-	}
-
-	// Clean up expired STS tokens hourly.
-	if s.db != nil {
-		auth.StartSTSCleanup(ctx, s.db, s.logger)
-	}
-
 	// Report metered usage to Stripe daily + check spending caps hourly.
 	if s.meteredReporter != nil {
 		s.meteredReporter.StartMeteredReporting(ctx)
@@ -1301,12 +1290,6 @@ func (s *Server) Start() error {
 	if s.stripe != nil && s.stripe.HousePriceIDs().Complete() {
 		s.stripe.StartHouseVerification(ctx)
 	}
-
-	// Check bandwidth thresholds hourly + seed default alerts for new tenants.
-	s.bandwidthAlerter.StartBandwidthAlerts(ctx)
-
-	// Nightly retention (catch-up at boot) and the synthetic customer check.
-	s.retention.Start(ctx)
 
 	// Account-deletion runner (WP-R10-3): daily 04:30 UTC with a catch-up at
 	// boot. Needs the engine (object walk) and the DB; Stripe when set.
@@ -1321,8 +1304,11 @@ func (s *Server) Start() error {
 			s.accountDeletion.Auth = s.auth
 		}
 		s.accountDeletion.Sessions = s.sessionStore
-		s.accountDeletion.Start(ctx)
+		s.jobs.Register(s.accountDeletion.spec())
 	}
+	// Every background job (jobs_wiring.go has the table): daily jobs catch
+	// up a few minutes after boot, the hourly ones run once and then tick.
+	s.jobs.Start(ctx)
 	s.synthetic.Start(ctx)
 
 	s.logger.Info("Starting server with RBAC and API Key Management",

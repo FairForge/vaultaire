@@ -255,35 +255,28 @@ func (at *S3AccessLogTracker) writeAccessLogObject(ctx context.Context, tenantID
 	return objectKey, nil
 }
 
-// StartLogDelivery runs a background goroutine that delivers accumulated access
-// log records from the s3_access_log table to the configured target buckets as
-// log objects every 5 minutes.
-func (at *S3AccessLogTracker) StartLogDelivery(ctx context.Context, eng *engine.CoreEngine) {
+// PrepareLogDelivery loads the logging_enabled gate and reports whether log
+// delivery can run on this process (database, engine and delivery writer
+// present). The delivery itself — accumulated s3_access_log rows written to
+// the configured target buckets as log objects every 5 minutes — is the
+// `access_log_delivery` job of the scheduler (jobs.go).
+func (at *S3AccessLogTracker) PrepareLogDelivery(ctx context.Context, eng *engine.CoreEngine) bool {
 	if at.db == nil || eng == nil || at.writer == nil {
-		return
+		return false
 	}
 	// Load the logging_enabled gate before the first request can be
-	// recorded against it; the pass refreshes it every 5 minutes.
+	// recorded against it; every delivery pass refreshes it.
 	loadCtx, cancelLoad := context.WithTimeout(ctx, 10*time.Second)
 	at.refreshLoggingEnabled(loadCtx)
 	cancelLoad()
-	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				at.deliverLogs(ctx)
-			}
-		}
-	}()
+	return true
 }
 
 // deliverLogs is one delivery pass over every logging-enabled bucket that
-// has undelivered rows.
-func (at *S3AccessLogTracker) deliverLogs(ctx context.Context) {
+// has undelivered rows: the `access_log_delivery` job (every 5 minutes,
+// jobs.go). It fails when the list of buckets could not be read; a bucket
+// whose rows could not be delivered keeps them for the next pass.
+func (at *S3AccessLogTracker) deliverLogs(ctx context.Context) (int, error) {
 	deliverCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	at.refreshLoggingEnabled(deliverCtx)
@@ -296,10 +289,7 @@ func (at *S3AccessLogTracker) deliverLogs(ctx context.Context) {
 		WHERE b.logging_enabled = TRUE AND b.logging_target_bucket IS NOT NULL
 	`)
 	if err != nil {
-		if at.logger != nil {
-			at.logger.Error("query logging-enabled buckets", zap.Error(err))
-		}
-		return
+		return 0, fmt.Errorf("query logging-enabled buckets: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -324,17 +314,20 @@ func (at *S3AccessLogTracker) deliverLogs(ctx context.Context) {
 		at.logger.Warn("iterate rows", zap.Error(err))
 	}
 
+	delivered := 0
 	for _, c := range configs {
 		// A bucket busier than 1000 requests per pass used to fall behind
 		// forever (Review R13-24): keep delivering until a batch comes back
 		// short or the pass deadline is spent.
-		for ctx.Err() == nil {
+		for deliverCtx.Err() == nil {
 			n, err := at.deliverBucketLogs(deliverCtx, c.tenantID, c.bucket, c.targetBucket, c.prefix)
+			delivered += n
 			if err != nil || n < accessLogDeliveryBatch {
 				break
 			}
 		}
 	}
+	return delivered, nil
 }
 
 // accessLogDeliveryBatch is the number of rows one delivered object carries.
