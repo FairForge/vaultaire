@@ -194,8 +194,11 @@ func TestMFAEnrolment_BackupCodesAreShownOnceAfterTheCodeVerified(t *testing.T) 
 	f.enbl = HandleMFAEnable(tmpl, f.auth, f.mfa, f.store, zap.NewNop())
 	secret := f.open(mfaTestSession)
 
-	// Act
-	w := f.enable(mfaTestSession, "totp_code="+f.code(secret))
+	// Act. ONE code, computed once: the assertion below is about this very
+	// code, and a second totp.GenerateCode after a slow enable (ten bcrypt
+	// hashes — 15 s under -race on CI) can fall in the next 30-second step.
+	code := f.code(secret)
+	w := f.enable(mfaTestSession, "totp_code="+code)
 
 	// Assert: ten codes, in the response to the verified code, never cached.
 	require.Equal(t, http.StatusOK, w.Code)
@@ -210,7 +213,7 @@ func TestMFAEnrolment_BackupCodesAreShownOnceAfterTheCodeVerified(t *testing.T) 
 	assert.Equal(t, 0, f.store.Len(), "the pending secret is single use")
 	// The code that enrolled cannot be replayed as the second factor of a
 	// sign-in: the login flow's single-use guard has it on record.
-	assert.False(t, f.auth.ConsumeTOTPCode(f.userID(), f.code(secret)))
+	assert.False(t, f.auth.ConsumeTOTPCode(f.userID(), code))
 }
 
 func TestMFAEnrolment_AReplayedPostChangesNothingAndShowsNoCodes(t *testing.T) {
