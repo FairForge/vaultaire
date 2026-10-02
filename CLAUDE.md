@@ -193,7 +193,7 @@ GitHub Actions Deploy (`.github/workflows/deploy.yml`):
 | `GITHUB_CLIENT_ID` | — | GitHub OAuth App client ID |
 | `GITHUB_CLIENT_SECRET` | — | GitHub OAuth App client secret |
 | `VAULTAIRE_BASE_URL` | http://localhost:8000 | Base URL for OAuth callbacks |
-| `JWT_SECRET` | — | **Required** — JWT signing key for API auth |
+| `JWT_SECRET` | — | **Required** — JWT signing key for API auth. The dashboard's CSRF key is derived from it under its own label (`middleware.DeriveCSRFKey`, WP-R12-5): rotating it invalidates the token of every open dashboard page (one reload) |
 | `SIGNUPS_ENABLED` | true | Default for the `signups` feature flag (1.13): `false` closes public signups (web form, `/auth/register` API, OAuth signup — all gated at `auth.CreateUserWithTenant`); a `feature_flags` DB row overrides this env in either direction at runtime. Existing-user login always works |
 | `VERIFY_SECRET` | — | HMAC secret for email verification tokens |
 | `GEYSER_ACCESS_KEY`, `GEYSER_SECRET_KEY` | — | Geyser tape S3 credentials |

@@ -56,7 +56,7 @@ read-but-undocumented (marked with their source file).
 | `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` | localhost, 5432, vaultaire, (the code default is the maintainer's OS user — set it), "" | PostgreSQL connection. The DB is optional: without one the process degrades to a no-DB fallback (HEAD answers 503, no auth/billing/dashboard) |
 | `DATA_PATH` | /tmp/vaultaire-data | Local storage directory for the always-registered `local` driver. `internal/api/management_routes.go` still defaults to `/tmp/vaultaire` — one of the two mismatches WP-R1-4 unifies |
 | `STORAGE_MODE` | auto-detect | Force the primary backend (`idrive`, `quotaless`, `s3`, `geyser`, `local`) |
-| `JWT_SECRET` | — | **Required** — JWT signing key for the JSON API and dashboard |
+| `JWT_SECRET` | — | **Required** — JWT signing key for the JSON API and dashboard. The dashboard's CSRF key is derived from it (its own label, never the secret itself); rotating it makes every open dashboard page reload once |
 | `VAULTAIRE_ENDPOINT` | http://localhost:8000 | The public S3 endpoint echoed to customers (registration response, dashboard, credential download). Prod sets `https://stored.ge`. Read in `internal/auth/handlers.go` and `internal/api/server.go` (R1-09) |
 | `VAULTAIRE_BASE_URL` | http://localhost:8000 | Base URL for OAuth callbacks |
 | `VERIFY_SECRET` | — | HMAC secret for email verification tokens |
