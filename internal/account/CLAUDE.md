@@ -49,6 +49,20 @@ nulled first, NO ACTION FK —, `breach_affected_users`, `deletion_requests`,
 the privacy policy says "your own entries are removed with your account"),
 `waitlist_signups` by e-mail, then `users`, `tenants`.
 
+**An operator's erasure keeps the operator trail (WP-R10-3d).** Before that
+`DELETE`, `operatorTrailScrub` de-identifies the rows that name the user but are
+not their own entry: a row about **another tenant** (the admin dashboard writes
+the admin as `user_id` AND `performed_by` with the subject tenant in `tenant_id`),
+an `event_type = 'admin'` row (primary swap, job triggers, exports), or a row
+with no tenant whose subject is not the user (a global flag flip). Those stay with
+`user_id` / `performed_by` nulled where they were the user, `ip` / `user_agent`
+nulled when the user made the request, every top-level metadata value equal to
+their id or e-mail dropped, and `"actor_erased": true` added (a NULL actor alone
+reads as "the system"). The order is the rule: scrub first, then the `DELETE`
+no longer matches. The classification is by row shape, never by `users.role`.
+Rules bind through `ruleArgs`: `ByUser`, `ByTenant`, `ByEmail`, or `ByAccount`
+(`$1` user, `$2` tenant — `''` when there is none —, `$3` e-mail).
+
 `Kept`: `stripe_events` (ledger; `tenant_id` nulled), `audit_logs` /
 `audit_logs_archive` rows keyed by the tenant only (operator actions; `ip` and
 `user_agent` nulled), `billing_charges`, `metered_usage_reports`,
@@ -61,7 +75,8 @@ fails when one is in neither list, and prepares every statement against the
 migrated schema — a new tenant-scoped table cannot leak past an erasure unnoticed.
 The DB-backed `erase_db_test.go` seeds a row in each table the prompt named and
 asserts the deleted/kept/scrubbed split; `TestEraseRows_RefusesWhenCancelWon`
-pins the guard.
+pins the guard; `TestEraseRows_OperatorErasureKeepsTheOperatorTrail` pins the
+operator half (five kept shapes, three own entries gone, a neighbour untouched).
 
 ## What is deliberately not here
 
