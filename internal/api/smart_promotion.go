@@ -5,11 +5,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/http"
 	"sync"
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/engine"
+	"github.com/FairForge/vaultaire/internal/usage"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
 
@@ -43,6 +46,12 @@ type SmartPromoter struct {
 	ColdBackend string
 	// RestoreDays is the recall window requested from the cold backend.
 	RestoreDays int32
+	// RestoreRetry is how old a recorded restore request may be before a
+	// read that still finds the object on tape submits another one. A
+	// restore that landed and expired again before the copy-back ran (the
+	// daily job was down, the window passed) would otherwise never be
+	// re-requested: every read would answer "being brought back" for good.
+	RestoreRetry time.Duration
 	// Concurrency bounds simultaneous async copy-backs.
 	Concurrency int
 
@@ -61,12 +70,13 @@ func NewSmartPromoter(db *sql.DB, eng *engine.CoreEngine, logger *zap.Logger) *S
 	}
 	return &SmartPromoter{
 		db: db, eng: eng, logger: logger,
-		HotBackend:  "idrive",
-		ColdBackend: "geyser",
-		RestoreDays: 7,
-		Concurrency: 4,
-		sem:         make(chan struct{}, 4),
-		now:         time.Now,
+		HotBackend:   "idrive",
+		ColdBackend:  "geyser",
+		RestoreDays:  7,
+		RestoreRetry: 6 * time.Hour,
+		Concurrency:  4,
+		sem:          make(chan struct{}, 4),
+		now:          time.Now,
 	}
 }
 
@@ -76,6 +86,7 @@ type ledgerRow struct {
 	hotDeleted       bool
 	promoteRequested bool
 	restoreRequested bool
+	restoreAt        time.Time // when the last restore was submitted (zero when never)
 }
 
 func (p *SmartPromoter) lookup(ctx context.Context, tenantID, bucket, key string) (ledgerRow, bool, error) {
@@ -92,6 +103,7 @@ func (p *SmartPromoter) lookup(ctx context.Context, tenantID, bucket, key string
 		return row, false, err
 	}
 	row.hotDeleted, row.promoteRequested, row.restoreRequested = hotDeleted.Valid, promoteReq.Valid, restoreReq.Valid
+	row.restoreAt = restoreReq.Time
 	return row, true, nil
 }
 
@@ -128,49 +140,157 @@ func (p *SmartPromoter) OnRead(ctx context.Context, tenantID, bucket, key, etag 
 	return p.ColdBackend
 }
 
-// OnArchived is called when a GET on a cold-routed object failed with
-// ErrArchived. For a Smart-demoted object it submits the restore on the
-// reader's behalf and returns true (the caller answers 503 + Retry-After).
-func (p *SmartPromoter) OnArchived(ctx context.Context, tenantID, bucket, key string) bool {
+// archivedRead is what the read path does with an object whose cold backend
+// answered ErrArchived (the bytes are on tape).
+type archivedRead int
+
+const (
+	// archivedNotSmart: an attic object — the customer chose the archive
+	// class and owns the restore. The caller answers Glacier's 403.
+	archivedNotSmart archivedRead = iota
+	// archivedRestoring: a downstairs object; the restore is submitted (or
+	// already running) on the reader's behalf. The caller answers a
+	// retryable 503 that is NOT a server error (one object's state).
+	archivedRestoring
+	// archivedRestoreFailed: a downstairs object whose restore could not be
+	// submitted. Still a retryable 503, and a server error.
+	archivedRestoreFailed
+)
+
+// smartRestoreWaits counts reads answered 503 because the object's bytes
+// were on tape. The "restoring" answers are kept out of vaultaire_errors_total
+// (markClientRefusal), so this is the series that shows them.
+var smartRestoreWaits = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "vaultaire_smart_restore_waits_total",
+	Help: "Reads of a Standard object whose bytes were on tape, answered 503 + Retry-After while the automatic restore runs (result: restoring = restore submitted or in progress, failed = the restore request failed).",
+}, []string{"result"})
+
+// OnArchivedRead is called when a read (S3 GET, copy source, CDN) of an
+// object failed with ErrArchived. floor is the head row's floor.
+//
+// The rule (WP-R13-1): a downstairs object is STANDARD to the customer, who
+// can therefore never be asked for a restore — RestoreObject refuses a
+// STANDARD object — so the read submits it. That holds with or without a
+// ledger row: a standard-floor object on the cold backend with no
+// smart_demotions row (a lost row, a deployment whose primary is the
+// archive) is restored too, it just has nothing to copy it back hot.
+// An attic object keeps Glacier semantics unless it carries a ledger row
+// (an attic write that fell back to the hot backend and was demoted later).
+func (p *SmartPromoter) OnArchivedRead(ctx context.Context, tenantID, bucket, key, floor string) archivedRead {
 	if p == nil {
-		return false
+		return archivedNotSmart
 	}
+	downstairs := floor != usage.FloorVault
 	row, ok, err := p.lookup(ctx, tenantID, bucket, key)
-	if err != nil || !ok {
-		return false
+	if err != nil {
+		p.logger.Warn("smart promotion: ledger lookup failed on an archived read", zap.Error(err))
+		if downstairs {
+			return p.countWait(archivedRestoreFailed)
+		}
+		return archivedNotSmart
 	}
-	p.requestRestore(ctx, tenantID, bucket, key, row)
-	return true
+	switch {
+	case ok:
+		if p.requestRestore(ctx, tenantID, bucket, key, row) {
+			return p.countWait(archivedRestoring)
+		}
+		return p.countWait(archivedRestoreFailed)
+	case downstairs:
+		p.logger.Warn("smart promotion: standard-floor object is on tape with no demotion ledger row — restoring on read",
+			zap.String("tenant", tenantID), zap.String("bucket", bucket), zap.String("key", key))
+		if p.submitRestore(ctx, tenantID, bucket, key) {
+			return p.countWait(archivedRestoring)
+		}
+		return p.countWait(archivedRestoreFailed)
+	}
+	return archivedNotSmart
 }
 
-func (p *SmartPromoter) requestRestore(ctx context.Context, tenantID, bucket, key string, row ledgerRow) {
+func (p *SmartPromoter) countWait(a archivedRead) archivedRead {
+	if a == archivedRestoring {
+		smartRestoreWaits.WithLabelValues("restoring").Inc()
+	} else {
+		smartRestoreWaits.WithLabelValues("failed").Inc()
+	}
+	return a
+}
+
+// submitRestore asks the cold backend to recall one object. True when the
+// recall was accepted or is already running.
+func (p *SmartPromoter) submitRestore(ctx context.Context, tenantID, bucket, key string) bool {
 	cold, ok := p.eng.GetDriver(p.ColdBackend)
 	if !ok {
-		return
+		return false
 	}
 	restorer, ok := cold.(engine.Restorer)
 	if !ok {
 		p.logger.Warn("smart promotion: cold backend cannot restore", zap.String("backend", p.ColdBackend))
-		return
+		return false
 	}
-	tctx := common.WithTenantID(ctx, tenantID)
-	container := tenantID + "_" + bucket
-	if !row.restoreRequested {
-		err := restorer.RestoreObject(tctx, container, key, p.RestoreDays)
-		if err != nil && !errors.Is(err, engine.ErrRestoreAlreadyInProgress) {
-			p.logger.Warn("smart promotion: auto-restore request failed",
-				zap.String("tenant", tenantID), zap.String("bucket", bucket), zap.String("key", key), zap.Error(err))
-			return
+	err := restorer.RestoreObject(common.WithTenantID(ctx, tenantID), tenantID+"_"+bucket, key, p.RestoreDays)
+	if err != nil && !errors.Is(err, engine.ErrRestoreAlreadyInProgress) {
+		p.logger.Warn("smart promotion: auto-restore request failed",
+			zap.String("tenant", tenantID), zap.String("bucket", bucket), zap.String("key", key), zap.Error(err))
+		return false
+	}
+	p.logger.Info("smart promotion: auto-restore requested",
+		zap.String("tenant", tenantID), zap.String("bucket", bucket), zap.String("key", key))
+	return true
+}
+
+// requestRestore submits the recall for a ledger row unless one was
+// submitted within RestoreRetry, and stamps the row. True when a recall is
+// on its way (just submitted, already running, or recently requested).
+func (p *SmartPromoter) requestRestore(ctx context.Context, tenantID, bucket, key string, row ledgerRow) bool {
+	now := p.now()
+	stale := row.restoreRequested && p.RestoreRetry > 0 && now.Sub(row.restoreAt) > p.RestoreRetry
+	if !row.restoreRequested || stale {
+		if !p.submitRestore(ctx, tenantID, bucket, key) {
+			return false
 		}
-		p.logger.Info("smart promotion: auto-restore requested",
-			zap.String("tenant", tenantID), zap.String("bucket", bucket), zap.String("key", key))
 	}
 	_, _ = p.db.ExecContext(ctx,
 		`UPDATE smart_demotions
-		 SET restore_requested_at = COALESCE(restore_requested_at, $4),
+		 SET restore_requested_at = CASE WHEN $5 THEN $4 ELSE COALESCE(restore_requested_at, $4) END,
 		     promote_requested_at = COALESCE(promote_requested_at, $4)
 		 WHERE tenant_id=$1 AND bucket=$2 AND object_key=$3`,
-		tenantID, bucket, key, p.now())
+		tenantID, bucket, key, now, stale)
+	return true
+}
+
+// autoRestoreRetryAfter is the Retry-After of a read that waits on a recall.
+const autoRestoreRetryAfter = "120"
+
+const (
+	autoRestoreMessage       = "This object has not been read for a while and is being brought back from cold storage. No action is needed: retry the request. It is usually readable again within a few hours."
+	autoRestoreFailedMessage = "This object is in cold storage and bringing it back could not be started. Retry shortly."
+)
+
+// writeArchivedRead answers an S3 read (GetObject, the source of a
+// CopyObject) whose backend said the bytes are on tape. notSmartHint is the
+// sentence appended to Glacier's InvalidObjectState for an attic object.
+//
+// The "being brought back" 503 is the state of ONE object, not a failure of
+// the service: it is marked as a client refusal so it stays out of
+// vaultaire_errors_total (the 5xx page) — a customer syncing a bucket of
+// evicted objects must not page the operator. A restore that could not be
+// submitted is ours and counts.
+func writeArchivedRead(w http.ResponseWriter, r *http.Request, p *SmartPromoter, tenantID, bucket, key, floor, notSmartHint string) {
+	switch p.OnArchivedRead(r.Context(), tenantID, bucket, key, floor) {
+	case archivedRestoring:
+		markClientRefusal(r.Context())
+		w.Header().Set("Retry-After", autoRestoreRetryAfter)
+		WriteS3ErrorWithContext(w, ErrServiceUnavailable, r.URL.Path, generateRequestID(), WithMessage(autoRestoreMessage))
+	case archivedRestoreFailed:
+		w.Header().Set("Retry-After", autoRestoreRetryAfter)
+		WriteS3ErrorWithContext(w, ErrServiceUnavailable, r.URL.Path, generateRequestID(), WithMessage(autoRestoreFailedMessage))
+	default:
+		// Archive-tier object past the staging window (V18.2): Glacier wire
+		// semantics — 403 InvalidObjectState, never a raw 500. rclone and
+		// aws-cli recognize this and drive their restore flows.
+		w.Header().Set("x-amz-storage-class", "GLACIER")
+		WriteS3ErrorWithContext(w, ErrInvalidObjectState, r.URL.Path, generateRequestID(), WithSuggestion(notSmartHint))
+	}
 }
 
 // flipBack re-routes a demoted object to the hot backend while its hot copy
@@ -272,7 +392,7 @@ func (p *SmartPromoter) promote(ctx context.Context, tenantID, bucket, key, etag
 		if errors.Is(err, engine.ErrArchived) {
 			row, found, lerr := p.lookup(ctx, tenantID, bucket, key)
 			if lerr == nil && found {
-				p.requestRestore(ctx, tenantID, bucket, key, row)
+				_ = p.requestRestore(ctx, tenantID, bucket, key, row)
 			}
 			return "restore_requested", nil
 		}

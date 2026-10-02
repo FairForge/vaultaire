@@ -246,7 +246,7 @@ func TestInventoryCSV_Format(t *testing.T) {
 	require.Len(t, records, 4)
 
 	// Verify header
-	assert.Equal(t, []string{"Key", "SizeBytes", "ETag", "ContentType", "LastModified", "EncryptionAlgorithm", "BackendName"}, records[0])
+	assert.Equal(t, []string{"Key", "SizeBytes", "ETag", "ContentType", "LastModified", "EncryptionAlgorithm", "StorageClass"}, records[0])
 
 	// Verify data rows are sorted by key
 	assert.Equal(t, "file-a.txt", records[1][0])

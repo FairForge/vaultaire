@@ -74,7 +74,9 @@ out of the box: `restic -r s3:https://stored.ge/my-bucket init`.
 - **Placed for you**: Standard objects land on fast enterprise S3; `GLACIER` /
   `DEEP_ARCHIVE` (or a Vault bucket) go to tape. The Smart schedule — about 15 % of
   your quota hot, data idle for 14+ days moved to tape and brought back within minutes
-  on read — is enabled per account; you never write lifecycle rules.
+  on read — is enabled per account; you never write lifecycle rules, and a Standard
+  object stays `STANDARD` in listings wherever it is kept (no restore step). Buckets
+  created in a non-default region are always hot.
 - **Deduplicated and compressed** transparently (objects over 64 MiB are chunked and
   zstd-compressed at rest, returned byte-for-byte) — your quota counts logical bytes
   (what you see); the savings are ours.

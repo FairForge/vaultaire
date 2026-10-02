@@ -70,7 +70,7 @@ Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`,
 | `/dashboard/buckets` | GET | session | Bucket list with counts + sizes + the floor (downstairs/attic from `tier_preference`, plus attic bytes put away by header) |
 | `/dashboard/buckets` | POST | session | Create new bucket (validates name, creates directory) |
 | `/dashboard/buckets/{name}` | GET | session | Object browser with prefix navigation |
-| `/dashboard/buckets/{name}/restore` | POST | session | Recall a GLACIER-backed object from tape (V18.2, `handlers/bucket_restore.go`; form key + optional prefix) |
+| `/dashboard/buckets/{name}/restore` | POST | session | Recall an attic (vault-floor, GLACIER-class) object from tape (V18.2, `handlers/bucket_restore.go`; form key + optional prefix; a Smart-demoted downstairs object is refused — it is STANDARD, WP-R13-1) |
 | `/dashboard/buckets/{name}/restore-status` | GET | session | htmx status span for a recall (`?key=`): on tape / restoring / restored |
 | `/dashboard/buckets/{name}/settings` | GET | session | Bucket settings: visibility, CDN URL, cache, CORS |
 | `/dashboard/buckets/{name}/settings` | POST | session | Update bucket visibility, cache TTL, CORS origins |

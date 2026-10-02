@@ -21,25 +21,29 @@ type restoreRequestXML struct {
 }
 
 // objectRestorer resolves the Restorer driver holding an object, or nil when
-// the object's backend doesn't support restore (not archive-class).
+// the object has no restore concept for the customer: it is on a backend
+// without one, or it is a downstairs (standard-floor) object — STANDARD to
+// the customer wherever the Smart tier parked its bytes (WP-R13-1). The
+// second return is the class the customer sees.
 func objectRestorer(ce *engine.CoreEngine, db *sql.DB, r *http.Request, tenantID, bucket, object string) (engine.Restorer, string, error) {
-	var backendName string
+	var backendName, floor string
 	err := db.QueryRowContext(r.Context(), `
-		SELECT COALESCE(backend_name, '') FROM object_head_cache
+		SELECT COALESCE(backend_name, ''), floor FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-		tenantID, bucket, object).Scan(&backendName)
+		tenantID, bucket, object).Scan(&backendName, &floor)
 	if err != nil {
 		return nil, "", err
 	}
-	if ce == nil {
-		return nil, backendName, nil
+	class := engine.CustomerStorageClass(floor, backendName)
+	if ce == nil || !engine.IsArchiveClass(class) {
+		return nil, class, nil
 	}
 	drv, ok := ce.GetDriver(backendName)
 	if !ok {
-		return nil, backendName, nil
+		return nil, class, nil
 	}
 	restorer, _ := drv.(engine.Restorer)
-	return restorer, backendName, nil
+	return restorer, class, nil
 }
 
 // handleRestoreObject implements POST /{bucket}/{key}?restore (V18.2 minimum
@@ -57,7 +61,7 @@ func (s *Server) handleRestoreObject(w http.ResponseWriter, r *http.Request, req
 		return
 	}
 
-	restorer, backendName, lookupErr := objectRestorer(s.engine, s.db, r, t.ID, req.Bucket, req.Object)
+	restorer, class, lookupErr := objectRestorer(s.engine, s.db, r, t.ID, req.Bucket, req.Object)
 	if errors.Is(lookupErr, sql.ErrNoRows) {
 		reqID := generateRequestID()
 		if suggestion := keySuggestion(r.Context(), s.db, t.ID, req.Bucket, req.Object); suggestion != "" {
@@ -73,10 +77,14 @@ func (s *Server) handleRestoreObject(w http.ResponseWriter, r *http.Request, req
 		return
 	}
 	if restorer == nil {
-		// The object lives on a hot backend — restore is meaningless there.
-		// AWS answers the same way for a RestoreObject on a STANDARD object.
+		// Not an archive-class object: restore is meaningless. AWS answers
+		// the same way for a RestoreObject on a STANDARD object. This is
+		// also the answer for a Smart-demoted downstairs object, with no
+		// backend call: it is STANDARD to the customer, and reading it is
+		// what brings it back (smart_promotion.go) — a GET either serves it
+		// or submits the recall itself and answers 503 + Retry-After.
 		WriteS3ErrorWithContext(w, ErrInvalidObjectState, r.URL.Path, generateRequestID(),
-			WithSuggestion("Only archive-tier (GLACIER) objects support restore. This object is on hot storage ("+engine.BackendToStorageClass(backendName)+") and is directly readable."))
+			WithSuggestion("Only archive-tier (GLACIER) objects support restore. This object's storage class is "+class+": read it with a plain GET."))
 		return
 	}
 

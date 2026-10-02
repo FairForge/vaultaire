@@ -711,6 +711,7 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	var updatedAt time.Time
 	var metadataJSON []byte
 	var backendName string
+	var floor string
 	var encAlgo string
 	var tagsJSON []byte
 	var contentDisposition string
@@ -719,10 +720,10 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	var echo putEchoHeaders
 
 	err = s.db.QueryRowContext(r.Context(), `
-		SELECT size_bytes, etag, content_type, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(tags, '{}'), COALESCE(content_disposition, ''), COALESCE(content_encoding, ''), COALESCE(content_language, ''), COALESCE(cache_control, ''), COALESCE(http_expires, ''), COALESCE(website_redirect_location, '')
+		SELECT size_bytes, etag, content_type, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(tags, '{}'), COALESCE(content_disposition, ''), COALESCE(content_encoding, ''), COALESCE(content_language, ''), COALESCE(cache_control, ''), COALESCE(http_expires, ''), COALESCE(website_redirect_location, ''), floor
 		FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
-	`, t.ID, req.Bucket, req.Object).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &metadataJSON, &backendName, &encAlgo, &tagsJSON, &contentDisposition, &contentEncoding, &contentLanguage, &echo.CacheControl, &echo.Expires, &echo.WebsiteRedirect)
+	`, t.ID, req.Bucket, req.Object).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &metadataJSON, &backendName, &encAlgo, &tagsJSON, &contentDisposition, &contentEncoding, &contentLanguage, &echo.CacheControl, &echo.Expires, &echo.WebsiteRedirect, &floor)
 
 	if errors.Is(err, sql.ErrNoRows) {
 		s.logger.Warn("HEAD: object not in metadata cache",
@@ -767,15 +768,20 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	} else {
 		w.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
 	}
-	w.Header().Set("x-amz-storage-class", engine.BackendToStorageClass(backendName))
+	// The class follows the floor, not the backend (WP-R13-1): a Smart-demoted
+	// downstairs object is STANDARD while its bytes sit on the cold backend.
+	storageClass := engine.CustomerStorageClass(floor, backendName)
+	w.Header().Set("x-amz-storage-class", storageClass)
 	w.Header().Set("x-amz-request-id", generateRequestID())
 	// V18.2: archive-class objects carry live restore state so Glacier restore
 	// pollers (rclone, aws-cli s3api head-object) work unmodified. This is the
 	// one deliberate exception to "HEAD never touches the backend" — the
-	// x-amz-restore value only exists on the backend, and only GLACIER-class
-	// objects pay the round trip. Failure just omits the header (HEAD itself
-	// must stay reliable).
-	if engine.BackendToStorageClass(backendName) == "GLACIER" && s.engine != nil {
+	// x-amz-restore value only exists on the backend, and only objects that
+	// REPORT an archive class (attic objects) pay the round trip. A demoted
+	// downstairs object reports STANDARD, has no restore state to show and
+	// makes no backend call. Failure just omits the header (HEAD itself must
+	// stay reliable).
+	if engine.IsArchiveClass(storageClass) && s.engine != nil {
 		if drv, exists := s.engine.GetDriver(backendName); exists {
 			if restorer, isRestorer := drv.(engine.Restorer); isRestorer {
 				if st, stErr := restorer.RestoreStatus(r.Context(), t.NamespaceContainer(req.Bucket), req.Object); stErr == nil {

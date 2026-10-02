@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,10 @@ import (
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 )
+
+// cdnAccessTouchEvery bounds the access-time writes of the CDN path: a
+// public object's last_accessed is refreshed when it is older than this.
+const cdnAccessTouchEvery = 24 * time.Hour
 
 func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
@@ -80,11 +85,13 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 	var updatedAt time.Time
 	var contentDisposition string
 	var backendName string
+	var floor string
+	var lastAccessed time.Time
 	err = s.db.QueryRowContext(ctx, `
-		SELECT size_bytes, etag, content_type, updated_at, COALESCE(content_disposition, ''), COALESCE(backend_name, '')
+		SELECT size_bytes, etag, content_type, updated_at, COALESCE(content_disposition, ''), COALESCE(backend_name, ''), floor, last_accessed
 		FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-		tenantID, bucket, key).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &contentDisposition, &backendName)
+		tenantID, bucket, key).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &contentDisposition, &backendName, &floor, &lastAccessed)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -151,6 +158,22 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 	// every driver look under tenant "default" — public objects on those
 	// backends 404'd even though the bytes existed (2026-07-31).
 	ctx = common.WithTenantID(ctx, tenantID)
+	// A public read is a read (WP-R13-1): a Smart-demoted object comes back
+	// hot exactly as on an S3 GET, and the access time is recorded so the
+	// demotion job does not move an object the public is reading. The S3
+	// path touches the row on every GET; here it is at most once a day per
+	// object — the CDN is the high-volume path and the job counts in days.
+	if s.smartPromoter != nil && backendName == s.smartPromoter.ColdBackend {
+		backendName = s.smartPromoter.OnRead(ctx, tenantID, bucket, key, etag)
+	}
+	if time.Since(lastAccessed) > cdnAccessTouchEvery {
+		go func() { // #nosec G118 -- fire-and-forget access-time touch; must outlive the request, request ctx would cancel it
+			_, _ = s.db.ExecContext(context.Background(), `
+				UPDATE object_head_cache SET last_accessed = NOW()
+				WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+				tenantID, bucket, key)
+		}()
+	}
 	// Seed the engine's routing map like the S3 GET path does, so the fetch
 	// goes straight to the backend that holds the object instead of walking
 	// the failover chain after a restart.
@@ -166,12 +189,36 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 			zap.String("container", container),
 			zap.String("key", key),
 			zap.Error(err))
+		// The object's own headers were set above for the 200: they must
+		// not frame or cache an error body (Content-Length made net/http
+		// cut the error text short).
+		for _, h := range []string{"Content-Length", "ETag", "Content-Disposition", "Accept-Ranges", "Last-Modified"} {
+			w.Header().Del(h)
+		}
+		w.Header().Set("Cache-Control", "no-store")
 		switch {
 		case errors.Is(err, engine.ErrAllBackendsUnavailable):
 			// The backend holding the bytes is unreachable: clients retry a
 			// 503, they treat a 404 as a deletion (R6-25).
 			w.Header().Set("Retry-After", "30")
 			http.Error(w, "storage backend temporarily unavailable", http.StatusServiceUnavailable)
+		case errors.Is(err, engine.ErrArchived):
+			// The bytes are on tape (this was a 500). Same rule as the S3
+			// GET: a downstairs object is recalled on the reader's behalf —
+			// a retryable 503 that is one object's state, not a server
+			// failure; an attic object is not readable until its owner
+			// restores it.
+			switch s.smartPromoter.OnArchivedRead(ctx, tenantID, bucket, key, floor) {
+			case archivedRestoring:
+				markClientRefusal(ctx)
+				w.Header().Set("Retry-After", autoRestoreRetryAfter)
+				http.Error(w, "this object is being brought back from cold storage; retry shortly", http.StatusServiceUnavailable)
+			case archivedRestoreFailed:
+				w.Header().Set("Retry-After", autoRestoreRetryAfter)
+				http.Error(w, "this object is in cold storage and could not be brought back yet; retry shortly", http.StatusServiceUnavailable)
+			default:
+				http.Error(w, "this object is archived and must be restored by its owner before it can be read", http.StatusForbidden)
+			}
 		case isObjectMissingErr(err):
 			http.NotFound(w, r)
 		default:

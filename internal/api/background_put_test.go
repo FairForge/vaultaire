@@ -194,7 +194,7 @@ func TestInventoryDelivery_ReportReadableThroughS3(t *testing.T) {
 	require.Equal(t, 200, rr.Code, rr.Body.String())
 	lines := strings.Split(strings.TrimRight(rr.Body.String(), "\n"), "\n")
 	require.Len(t, lines, 4, rr.Body.String())
-	assert.Equal(t, "Key,SizeBytes,ETag,ContentType,LastModified,EncryptionAlgorithm,BackendName", lines[0])
+	assert.Equal(t, "Key,SizeBytes,ETag,ContentType,LastModified,EncryptionAlgorithm,StorageClass", lines[0])
 	assert.True(t, strings.HasPrefix(lines[1], "file-0.txt,5,"), lines[1])
 
 	// Re-running the same day overwrites the same key (one manifest per day).

@@ -73,6 +73,39 @@ func BackendToStorageClass(backendName string) string {
 	return "STANDARD"
 }
 
+// archiveFloor is the object_head_cache.floor id of the attic
+// (usage.FloorVault — the engine cannot import internal/usage; the api
+// package's TestCustomerStorageClass_AgreesWithTheFloorIDs pins the two).
+const archiveFloor = "vault"
+
+// IsArchiveClass reports whether a storage class needs a restore before the
+// object can be read (what `aws s3 sync` / `cp` skip without
+// --force-glacier-transfer).
+func IsArchiveClass(class string) bool {
+	return class == "GLACIER" || class == "DEEP_ARCHIVE"
+}
+
+// CustomerStorageClass is the storage class a customer sees for an object:
+// the ONE place listings, HEAD, GET, inventory reports and the dashboard
+// derive it (WP-R13-1, Review R13-04).
+//
+// The class follows the floor the object is billed on (object_head_cache.floor),
+// not the backend that holds its bytes today. A downstairs object
+// (floor = standard) is never reported in an archive class: where the Smart
+// tier parks it is ours, the customer bought STANDARD and reads it with a
+// plain GET (the read-time promotion brings it back). It used to list as
+// GLACIER once demoted to tape, and `aws s3 sync` skipped it. An attic
+// object (floor = vault) reports the class of the backend it is on, as
+// before. Any floor value that is not the attic is treated as downstairs
+// (the column is NOT NULL DEFAULT 'standard' since migration 066).
+func CustomerStorageClass(floor, backendName string) string {
+	class := BackendToStorageClass(backendName)
+	if floor != archiveFloor && IsArchiveClass(class) {
+		return "STANDARD"
+	}
+	return class
+}
+
 // BackendRegion returns "eu" or "us" for a given backend name.
 // iDrive backends registered as "idrive-eu-*" are EU; everything else is US.
 func BackendRegion(name string) string {

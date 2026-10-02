@@ -59,9 +59,12 @@ type ObjectRow struct {
 	LastModifiedFmt string
 	PreviewType     string
 	CDNURL          string
-	// IsArchived: the object lives on an archive-class backend (Geyser tape)
-	// and may need a restore before it is readable (V18.2). Drives the
-	// Restore button + live status fragment in the object browser.
+	// IsArchived: an ATTIC object on an archive-class backend (Geyser tape),
+	// which may need a restore before it is readable (V18.2). Derived from
+	// the class the customer sees (engine.CustomerStorageClass): a
+	// downstairs object the Smart tier parked on that backend is not "in
+	// the attic". Drives the Restore button + live status fragment in the
+	// object browser.
 	IsArchived bool
 }
 
@@ -370,7 +373,7 @@ func previewTypeFromContentType(ct string) string {
 
 func populateBucketObjects(ctx context.Context, db *sql.DB, tenantID, bucket, prefix, cdnBase string, data map[string]any) {
 	// Query all objects matching the prefix.
-	query := `SELECT object_key, size_bytes, content_type, updated_at, COALESCE(backend_name, '')
+	query := `SELECT object_key, size_bytes, content_type, updated_at, COALESCE(backend_name, ''), floor
 		 FROM object_head_cache
 		 WHERE tenant_id = $1 AND bucket = $2`
 	args := []any{tenantID, bucket}
@@ -399,10 +402,10 @@ func populateBucketObjects(ctx context.Context, db *sql.DB, tenantID, bucket, pr
 
 	hasArchived := false
 	for rows.Next() {
-		var key, contentType, backendName string
+		var key, contentType, backendName, floor string
 		var size int64
 		var lastMod time.Time
-		if err := rows.Scan(&key, &size, &contentType, &lastMod, &backendName); err != nil {
+		if err := rows.Scan(&key, &size, &contentType, &lastMod, &backendName, &floor); err != nil {
 			continue
 		}
 		totalCount++
@@ -427,7 +430,7 @@ func populateBucketObjects(ctx context.Context, db *sql.DB, tenantID, bucket, pr
 			SizeFmt:         formatBytes(size),
 			LastModifiedFmt: relativeTime(lastMod),
 			PreviewType:     previewTypeFromContentType(contentType),
-			IsArchived:      engine.BackendToStorageClass(backendName) == "GLACIER",
+			IsArchived:      engine.IsArchiveClass(engine.CustomerStorageClass(floor, backendName)),
 		}
 		if obj.IsArchived {
 			hasArchived = true

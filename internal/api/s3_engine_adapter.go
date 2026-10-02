@@ -326,13 +326,14 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	var cachedContentLanguage string
 	var cachedEcho putEchoHeaders
 	var cachedIsChunked bool
+	var cachedFloor string
 	var cacheHit bool
 	if a.db != nil {
 		err := a.db.QueryRowContext(r.Context(), `
-			SELECT content_type, size_bytes, etag, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(tags, '{}'), COALESCE(content_disposition, ''), COALESCE(content_encoding, ''), COALESCE(content_language, ''), COALESCE(cache_control, ''), COALESCE(http_expires, ''), COALESCE(website_redirect_location, ''), is_chunked
+			SELECT content_type, size_bytes, etag, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(tags, '{}'), COALESCE(content_disposition, ''), COALESCE(content_encoding, ''), COALESCE(content_language, ''), COALESCE(cache_control, ''), COALESCE(http_expires, ''), COALESCE(website_redirect_location, ''), is_chunked, floor
 			FROM object_head_cache
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-			t.ID, bucket, artifact).Scan(&cachedContentType, &cachedSize, &cachedETag, &cachedUpdatedAt, &cachedMetadata, &cachedBackendName, &cachedEncAlgo, &cachedTags, &cachedContentDisposition, &cachedContentEncoding, &cachedContentLanguage, &cachedEcho.CacheControl, &cachedEcho.Expires, &cachedEcho.WebsiteRedirect, &cachedIsChunked)
+			t.ID, bucket, artifact).Scan(&cachedContentType, &cachedSize, &cachedETag, &cachedUpdatedAt, &cachedMetadata, &cachedBackendName, &cachedEncAlgo, &cachedTags, &cachedContentDisposition, &cachedContentEncoding, &cachedContentLanguage, &cachedEcho.CacheControl, &cachedEcho.Expires, &cachedEcho.WebsiteRedirect, &cachedIsChunked, &cachedFloor)
 		if err == nil {
 			cacheHit = true
 		}
@@ -351,6 +352,10 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 			ce.HintBackend(container, artifact, cachedBackendName)
 		}
 	}
+	// The class this response reports: the floor decides, not the backend
+	// the bytes are read from (WP-R13-1) — the same value HEAD and the
+	// listings give.
+	storageClass := engine.CustomerStorageClass(cachedFloor, cachedBackendName)
 
 	if cacheHit && a.db != nil {
 		go func() { // #nosec G118 -- fire-and-forget access-time touch; must outlive the request, request ctx would cancel it
@@ -386,7 +391,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	if cacheHit && cachedIsChunked && a.gci != nil {
 		chunkErr := a.handleChunkedGet(w, r, t, bucket, artifact,
 			cachedSize, cachedETag, cachedContentType, cachedUpdatedAt,
-			cachedMetadata, cachedTags, cachedContentDisposition, cachedContentEncoding, cachedContentLanguage, cachedEcho, cachedBackendName)
+			cachedMetadata, cachedTags, cachedContentDisposition, cachedContentEncoding, cachedContentLanguage, cachedEcho, storageClass)
 		if chunkErr != nil {
 			a.logger.Error("chunked get failed",
 				zap.Error(chunkErr),
@@ -403,22 +408,12 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 			w.Header().Set("Retry-After", "30")
 			WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
 		} else if errors.Is(err, engine.ErrArchived) {
-			// Smart-demoted object evicted to tape: the restore is submitted
-			// on the reader's behalf and the answer is a retryable 503, not
-			// Glacier's 403 — Smart customers never issue restores themselves.
-			if a.smartPromoter != nil && a.smartPromoter.OnArchived(r.Context(), t.ID, bucket, artifact) {
-				w.Header().Set("Retry-After", "120")
-				w.Header().Set("x-amz-storage-class", "GLACIER")
-				WriteS3ErrorWithContext(w, ErrServiceUnavailable, r.URL.Path, generateRequestID(),
-					WithSuggestion("This object is being brought back from the archive tier automatically — retry in a few minutes."))
-				return
-			}
-			// Archive-tier object past the staging window (V18.2): Glacier
-			// wire semantics — 403 InvalidObjectState, never a raw 500.
-			// rclone/aws-cli recognize this and drive their restore flows.
-			w.Header().Set("x-amz-storage-class", "GLACIER")
-			WriteS3ErrorWithContext(w, ErrInvalidObjectState, r.URL.Path, generateRequestID(),
-				WithSuggestion("This object is archived on tape. Request a restore (POST ?restore or the dashboard Restore button), then retry — restores typically begin within minutes."))
+			// The bytes are on tape. A downstairs object is restored on the
+			// reader's behalf and the answer is a retryable 503 (Smart
+			// customers never issue restores themselves); an attic object
+			// answers Glacier's 403 InvalidObjectState.
+			writeArchivedRead(w, r, a.smartPromoter, t.ID, bucket, artifact, cachedFloor,
+				"This object is archived on tape. Request a restore (POST ?restore or the dashboard Restore button), then retry — restores typically begin within minutes.")
 		} else if isObjectMissingErr(err) {
 			reqID := generateRequestID()
 			if suggestion := keySuggestion(r.Context(), a.db, t.ID, bucket, artifact); suggestion != "" {
@@ -580,7 +575,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	if w.Header().Get("Cache-Control") == "" {
 		w.Header().Set("Cache-Control", "private, no-cache")
 	}
-	w.Header().Set("x-amz-storage-class", engine.BackendToStorageClass(cachedBackendName))
+	w.Header().Set("x-amz-storage-class", storageClass)
 	if cacheHit {
 		if cachedSize > 0 {
 			w.Header().Set("Content-Length", strconv.FormatInt(cachedSize, 10))
@@ -1635,7 +1630,7 @@ func (a *S3ToEngine) handleChunkedGet(
 	cachedContentEncoding string,
 	cachedContentLanguage string,
 	cachedEcho putEchoHeaders,
-	cachedBackendName string,
+	storageClass string,
 ) error {
 	ctx := r.Context()
 
@@ -1771,7 +1766,7 @@ func (a *S3ToEngine) handleChunkedGet(
 		if w.Header().Get("Cache-Control") == "" {
 			w.Header().Set("Cache-Control", "private, no-cache")
 		}
-		w.Header().Set("x-amz-storage-class", engine.BackendToStorageClass(cachedBackendName))
+		w.Header().Set("x-amz-storage-class", storageClass)
 		if cachedSize > 0 {
 			w.Header().Set("Content-Length", strconv.FormatInt(cachedSize, 10))
 		}
