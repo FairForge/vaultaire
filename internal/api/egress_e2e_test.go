@@ -55,7 +55,14 @@ type egressFixture struct {
 	slug     string
 	tempDir  string
 	enforced atomic.Bool
+	// finished holds the ids of requests whose server handler has returned
+	// (see settle).
+	finished sync.Map
 }
+
+// egressTestRequestID marks a fixture request so the test can wait for its
+// server handler to return.
+const egressTestRequestID = "X-Egress-Test-Request"
 
 // setupEgressFixture builds a tenant with quotaBytes of storage (so an
 // allowance of half that) behind a throttle of the given shape. wrap, when
@@ -141,6 +148,9 @@ func setupEgressFixture(t *testing.T, quotaBytes int64, cfg usage.EgressThrottle
 // everything else as an authenticated S3 request of the fixture's tenant.
 func (f *egressFixture) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if id := r.Header.Get(egressTestRequestID); id != "" {
+			defer f.finished.Store(id, struct{}{})
+		}
 		if strings.HasPrefix(r.URL.Path, "/cdn/") {
 			f.srv.router.ServeHTTP(w, r)
 			return
@@ -153,6 +163,26 @@ func (f *egressFixture) allowance() int64 {
 	a, err := usage.NewQuotaManager(f.db).EgressAllowance(context.Background(), f.tenantID)
 	require.NoError(f.t, err)
 	return a.Bytes
+}
+
+// mark tags a request so settle can wait for it.
+func (f *egressFixture) mark(req *http.Request) string {
+	id := uuid.New().String()
+	req.Header.Set(egressTestRequestID, id)
+	return id
+}
+
+// settle returns once the server handler of a marked request has returned.
+// A client has the last byte of a response before the server has counted and
+// recorded it (the count follows the write), so an assertion on the counter
+// straight after a download raced the handler: main went red once on a
+// counter exactly one 16 KiB paced slice short (CI run 36953508850).
+func (f *egressFixture) settle(id string) {
+	f.t.Helper()
+	require.Eventually(f.t, func() bool {
+		_, done := f.finished.LoadAndDelete(id)
+		return done
+	}, 10*time.Second, time.Millisecond, "the server handler did not return")
 }
 
 // used is the live counter.
@@ -194,11 +224,13 @@ func (f *egressFixture) put(key string, size int64) []byte {
 	req, err := http.NewRequest(http.MethodPut, f.ts.URL+"/"+egressTestBucket+"/"+key, bytes.NewReader(body))
 	require.NoError(f.t, err)
 	req.ContentLength = size
+	id := f.mark(req)
 	resp, err := f.ts.Client().Do(req)
 	require.NoError(f.t, err)
 	defer func() { _ = resp.Body.Close() }()
 	msg, _ := io.ReadAll(resp.Body)
 	require.Equal(f.t, http.StatusOK, resp.StatusCode, string(msg))
+	f.settle(id)
 	return body
 }
 
@@ -217,13 +249,16 @@ func (f *egressFixture) do(method, path string, headers map[string]string) egres
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
+	id := f.mark(req)
 	start := time.Now()
 	resp, err := f.ts.Client().Do(req)
 	require.NoError(f.t, err)
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(f.t, err)
-	return egressResult{status: resp.StatusCode, header: resp.Header, body: body, elapsed: time.Since(start)}
+	elapsed := time.Since(start)
+	f.settle(id)
+	return egressResult{status: resp.StatusCode, header: resp.Header, body: body, elapsed: elapsed}
 }
 
 func (f *egressFixture) s3Path(key string) string { return "/" + egressTestBucket + "/" + key }
@@ -990,5 +1025,7 @@ func TestEgress_StreamGuardRefusalIsNotAServerError(t *testing.T) {
 	resp, err := failing.Client().Get(failing.URL)
 	require.NoError(t, err)
 	_ = resp.Body.Close()
-	assert.Equal(t, errsBefore+1, atomic.LoadInt64(&f.srv.errorCount))
+	// The middleware counts after the handler returns; the client is ahead.
+	require.Eventually(t, func() bool { return atomic.LoadInt64(&f.srv.errorCount) == errsBefore+1 },
+		5*time.Second, time.Millisecond)
 }
