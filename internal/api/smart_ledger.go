@@ -239,6 +239,19 @@ func dropDisplacedBlob(ctx context.Context, db *sql.DB, eng engine.Engine, logge
 	if _, registered := ce.GetDriver(displaced.Backend); !registered {
 		return
 	}
+	// This runs inside the write's request, straight on the old backend's
+	// driver. When that backend is the one in an outage — the primary is down
+	// and writes fail over — every overwrite displaces a row that routed to
+	// it, and each PUT would wait for the dead backend (up to
+	// staleCopyTimeout) before answering. The engine's breaker already knows:
+	// leave the blob (an orphan costs money) and keep the write path fast
+	// during the outage the failover exists for.
+	if st := ce.GetFailoverStatus()[displaced.Backend]; st != "" && st != "closed" {
+		logger.Warn("displaced blob left in place: its backend is unavailable (circuit breaker not closed) — orphan on the backend the object left",
+			zap.String("tenant", tenantID), zap.String("bucket", bucket), zap.String("key", key),
+			zap.String("backend", displaced.Backend), zap.String("breaker", st))
+		return
+	}
 	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), staleCopyTimeout)
 	defer cancel()
 

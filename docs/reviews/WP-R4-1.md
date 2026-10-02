@@ -227,3 +227,15 @@ changes behaviour on deploy. Nothing was changed on the box.
 
 Nothing to set. If a customer's backup key should be able to prune GOVERNANCE-retained
 objects, it needs a new key with the permission (or the primary key).
+
+## Post-merge review (plan driver, 2026-10-02)
+
+Read: `isObjectLockBypass`, `bypassRequested`, `KeyScope.CanBypassGovernanceRetention`, and
+that the presigned test (`isPresignedRequest`) is the same function the authenticator
+dispatches on — a request cannot be authenticated one way and judged the other. **No finding.**
+The signed-header rule is the part the brief did not ask for and the part that mattered: before
+it, the holder of any presigned DELETE URL of a full-access key could add the header.
+
+Noted: the `SignedHeaders=` list is cut out of the `Authorization` header by its first
+occurrence. Whoever writes that header also computes the signature, so they could sign the
+header honestly; there is no second party to fool on this path.
