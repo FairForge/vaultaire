@@ -129,12 +129,18 @@ func (s *Server) adminJobTrigger(job string) http.HandlerFunc {
 
 // triggerJob starts one run of a job. missing is the status for a job this
 // process does not run (404 on the generic route, 503 on a named one).
-func (s *Server) triggerJob(w http.ResponseWriter, r *http.Request, name string, missing int) {
-	j := s.jobs.job(name)
+//
+// requested may come from the URL. It is only a lookup key: nothing below
+// writes it back — the name in every answer, audit row and log line is the
+// registered job's own (the unknown-job answer used to quote the path
+// parameter; CodeQL go/reflected-xss).
+func (s *Server) triggerJob(w http.ResponseWriter, r *http.Request, requested string, missing int) {
+	j := s.jobs.job(requested)
 	if j == nil {
-		http.Error(w, "job "+strconv.Quote(name)+" is not available on this server", missing)
+		http.Error(w, "no such job on this server (GET /api/v1/admin/jobs lists them)", missing)
 		return
 	}
+	name := j.spec.Name
 	actor, _ := r.Context().Value(userIDKey).(string)
 
 	// The dry run: synchronous, under the job's lock, never recorded as a run.

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"sync"
@@ -43,8 +44,10 @@ func adminTriggerContext(r *http.Request) (context.Context, context.CancelFunc) 
 }
 
 // writeJobAlreadyRunning answers the admin trigger when the gate is held.
+// The body is encoded, never concatenated: job is a server-side name today,
+// and must stay harmless if a caller ever passes anything else.
 func writeJobAlreadyRunning(w http.ResponseWriter, job string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusConflict)
-	_, _ = w.Write([]byte(`{"error":"already_running","job":"` + job + `"}`))
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": "already_running", "job": job})
 }

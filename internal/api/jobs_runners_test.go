@@ -16,6 +16,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/tenant"
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -426,6 +427,17 @@ func TestAdminTriggers_202Then409WhileRunning_DryRunStaysSynchronous(t *testing.
 	// The generic route is the same call; an unknown job is 404 there and
 	// 503 on a named route; dry_run on any other job is refused.
 	assert.Equal(t, http.StatusNotFound, doJSON(t, s.handleAdminJobRun, "POST", "/api/v1/admin/jobs/nope/run").Code)
+	// The requested name is a lookup key only: an unknown one is never
+	// written back (it used to be quoted into the answer).
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("job", `<script>alert(1)</script>`)
+	xr := httptest.NewRequest("POST", "/api/v1/admin/jobs/x/run", nil)
+	xr = xr.WithContext(context.WithValue(xr.Context(), chi.RouteCtxKey, rctx))
+	xw := httptest.NewRecorder()
+	s.handleAdminJobRun(xw, xr)
+	assert.Equal(t, http.StatusNotFound, xw.Code)
+	assert.NotContains(t, xw.Body.String(), "script")
+	assert.Contains(t, xw.Header().Get("Content-Type"), "text/plain")
 	assert.Equal(t, http.StatusServiceUnavailable, doJSON(t, s.adminJobTrigger("nope"), "POST", "/api/v1/admin/dedup-gc").Code)
 	other := jf.name("other")
 	jf.sched.Register(jobSpec{Name: other, Every: time.Hour, Run: func(context.Context) (jobReport, error) { return jobReport{}, nil }})
