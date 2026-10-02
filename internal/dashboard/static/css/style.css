@@ -533,3 +533,15 @@ tbody th { font-family: var(--sans); font-weight: 700; font-size: inherit; text-
 
 /* Honeypot (public abuse form): off-screen for people, present for bots. */
 .hp-field{position:absolute;left:-10000px;top:auto;width:1px;height:1px;overflow:hidden}
+
+/* Two-factor enrolment (mfa_setup.html). The QR code is a black-on-white PNG
+   the server renders: it keeps a white plate in dark mode too, or a phone
+   camera cannot read it. */
+.mfa-center { text-align: center; }
+.mfa-qr { text-align: center; margin: 1.5rem 0; }
+.mfa-qr img { background: #fff; padding: 12px; border-radius: 8px; max-width: 100%; height: auto; }
+.mfa-key { margin: 0.5rem 0 1.5rem; }
+.mfa-key code { font-size: 1.1rem; letter-spacing: 2px; padding: 0.5rem 1rem; border: 2px solid var(--border); border-radius: 4px; word-break: break-all; display: inline-block; }
+.mfa-codes { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; max-width: 320px; margin: 1rem auto 1.5rem; }
+.mfa-codes code { padding: 0.4rem; text-align: center; border: 2px solid var(--border); border-radius: 4px; font-size: 0.95rem; }
+.mfa-code-input { max-width: 200px; font-size: 1.2rem; letter-spacing: 4px; text-align: center; }

@@ -22,7 +22,7 @@ Web dashboard for stored.ge customers and admins. Uses htmx + Go templates, embe
   - `ratelimit.go` — per-IP login rate limiting (5 attempts/min, covers 2FA; separate instances for reset, abuse, and since R12 register at 10/min). The map is bounded: idle entries are swept inline every 512 new IPs (`Cleanup` had no caller before R12 — R1-14)
   - `lockout.go` — `AccountLockout` (Review R12, checklist item 2): per-ACCOUNT failure counter, 10 failures in 15 min → locked 15 min; a locked account gets the same "Invalid email or password." (no enumeration); second-factor failures count too. The per-IP limiter cannot see a distributed guess against one mailbox
   - `recovery.go` — panic recovery, renders self-contained 500 HTML (no template dependency)
-  - `security_headers.go` — CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy on the dashboard, admin AND (since R12) every public page the router serves (login, register, reset, verify, legal, abuse) — never on S3 responses
+  - `security_headers.go` — CSP (`ContentSecurityPolicy`: no external host in any directive since WP-R12-8 — `cdn.jsdelivr.net` left `script-src`; `TestNoServedTemplateOrCSPNamesAnExternalScriptHost` fails on a template that loads a script or stylesheet from another host and on a CSP source that is not a keyword or `data:`), X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy on the dashboard, admin AND (since R12) every public page the router serves (login, register, reset, verify, legal, abuse) — never on S3 responses
   - `admin_mfa.go` — RequireAdminMFA redirects admins without TOTP to MFA setup (SOC 2 CC6.1)
 - **metrics.go** — `vaultaire_dashboard_login_failures_total{reason}` (bad_password | unknown_user | locked | bad_code | replayed_code) and `vaultaire_dashboard_login_lockouts_total`, registered on the server's registry by `api.initMetrics` (`dashboard.Collectors()`); rules in `deploy/monitoring/vaultaire-auth.yml`
 
@@ -83,8 +83,9 @@ Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`,
 | `/dashboard/settings/profile` | POST | session | Update company name |
 | `/dashboard/settings/password` | POST | session | Change password (validates current) |
 | `/dashboard/settings/notifications` | POST | session | Update notification preferences |
-| `/dashboard/settings/mfa` | GET | session | 2FA setup page (QR code, backup codes) |
-| `/dashboard/settings/mfa/enable` | POST | session | Confirm TOTP code to enable 2FA |
+| `/dashboard/settings/mfa` | GET | session | 2FA setup page: QR code + manual key of a secret the server keeps pending for the session (10 min) |
+| `/dashboard/settings/mfa/qr.png` | GET | session | The pending secret's QR code, rendered by the server (PNG, `no-store`) |
+| `/dashboard/settings/mfa/enable` | POST | session | The 6-digit code only; on success the response shows the backup codes once |
 | `/dashboard/settings/mfa/disable` | POST | session | Disable 2FA — the password is required and verified server-side (an empty field used to skip the check, R5-04); OAuth-only accounts (no password) are told to use the admin reset. Every OTHER session is revoked (R5-22 / R12) |
 | `/dashboard/settings/sessions/revoke-all` | POST | session | Sign out of all OTHER devices (keeps current session) |
 | `/dashboard/settings/sessions/{id}/revoke` | POST | session | Revoke a specific session owned by the current user |

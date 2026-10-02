@@ -80,14 +80,16 @@ Uses both `*auth.AuthService` (password change, preferences) and `*sql.DB` (comp
 
 ## MFA Handlers (`mfa.go`)
 
-Three customer handlers + one admin handler:
-- `HandleMFASetup(tmpl, authSvc, mfaSvc, logger)` — GET renders QR code, secret, and backup codes. Redirects if already enabled.
-- `HandleMFAEnable(settingsTmpl, authSvc, mfaSvc, logger)` — POST validates TOTP code against pending secret, enables MFA via `authSvc.EnableMFA()`.
+Four customer handlers + one admin handler. **Enrolment keeps the pending secret server-side (WP-R12-8, `docs/reviews/WP-R12-8.md`):**
+- `mfa_enrol.go` — `MFAEnrolmentStore`: the generated TOTP secret waiting for its first valid code, in this process's memory, keyed by the session id (the session cookie's value) and bound to the user id. One entry per session (`Begin` returns the same secret to a reload or a second tab), 10-minute TTL from the first open, expired entries swept at 256, hard cap 5000 (`ErrMFAEnrolmentBusy`, never grown). `Confirm(session, user, verify)` checks a code under the lock and takes the entry on success (single use; two tabs cannot both enrol); a wrong code keeps it; `Restore` puts it back when enabling failed afterwards. A restart empties the store: an enrolment open across a deploy answers "scan the new QR code" — the same trade the 2FA login challenge makes.
+- `HandleMFASetup(tmpl, authSvc, mfaSvc, store, logger)` — GET: `store.Begin`, renders the manual key and `<img src="/dashboard/settings/mfa/qr.png">`. No backup codes, no secret-bearing form field, `Cache-Control: no-store`. Redirects if already enabled.
+- `HandleMFAQR(store, logger)` — GET `/dashboard/settings/mfa/qr.png`: the QR code of the session's pending secret, a PNG rendered by the server (`otp.NewKeyFromURL(...).Image` — boombuler/barcode, already in the binary through pquerna/otp); `no-store`, `Cross-Origin-Resource-Policy: same-origin`; 404 without a pending enrolment. No script touches the secret and the page works without JavaScript.
+- `HandleMFAEnable(setupTmpl, authSvc, mfaSvc, store, logger)` — POST carries the 6-digit code ONLY (a `secret` / `backup_codes` field is ignored): already enabled → redirect to settings (a replay, a reload, a second tab — nothing replaced, no codes); `store.Confirm` → none = flash "expired… scan the new QR code", mismatch = flash "did not match" (same QR stays valid); OK → backup codes generated HERE, `authSvc.EnableMFA`, the code is spent (`ConsumeTOTPCode`), and the response (200, `no-store`, the setup template's `.Enrolled` branch) shows the ten codes — the only time they are ever shown.
 - `HandleMFADisable(settingsTmpl, authSvc, sessions, logger)` — POST requires password confirmation, disables MFA via `authSvc.DisableMFA()`, and revokes every OTHER session (R5-22).
 - `HandleAdminResetMFA(authSvc, sessions, logger)` — POST admin endpoint (htmx): resets a user's 2FA, revokes ALL their sessions, answers with a fragment.
 - `mfa_flow.go` — the second factor as ONE flow for both first-factor entry points: `MFAChallenge`/`MFAChallenger` (router.go adapts `dashboard.MFAPendingStore`), `BeginMFAChallenge` (checks `IsMFAEnabled`, stores the challenge, sets the `mfa_pending` cookie, redirects), `Set/ClearMFAPendingCookie`, `LoginEvent`/`RecordLoginEvent` (the `auth.*` audit rows), `ResolveRole`. R5-06: OAuth created the session directly and skipped TOTP.
 
-QR code rendered client-side via `qrcode-generator` CDN library. Backup codes passed as comma-separated hidden field during enable confirmation.
+Before WP-R12-8 the secret and the ten backup codes came back from the browser in hidden fields (a user could enrol a secret of their choosing — R12-23) and the QR code was drawn by `qrcode-generator` loaded from cdn.jsdelivr.net without SRI on the page that shows the secret. The fixture pages `mfa-setup` and `mfa-enrolled` are in `make dash-shots` / `dash-lighthouse`.
 
 ## Onboarding (`onboarding.go`)
 

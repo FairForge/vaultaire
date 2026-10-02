@@ -1,5 +1,25 @@
 {{define "title"}}Enable 2FA — stored.ge{{end}}
 {{define "content"}}
+{{if .Enrolled}}
+<div class="page-header">
+    <div>
+        <h1>Two-Factor Authentication Is On</h1>
+        <p class="text-muted">From now on, signing in asks for a code from your authenticator app.</p>
+    </div>
+</div>
+
+<div class="card card-highlight">
+    <div class="card-title">Save Your Backup Codes Now</div>
+    <div class="alert alert-success">These ten codes are shown this once. Each one signs you in a single time if you lose your authenticator.</div>
+    <div class="mfa-codes">
+        {{range .BackupCodes}}
+        <code>{{.}}</code>
+        {{end}}
+    </div>
+    <p class="text-muted">Store them somewhere safe — a password manager, or on paper. We keep only a hash of each and cannot show them again; if you lose both the codes and your authenticator, contact support.</p>
+    <a href="/dashboard/settings" class="btn btn-primary">I have saved them</a>
+</div>
+{{else}}
 <div class="page-header">
     <div>
         <h1>Enable Two-Factor Authentication</h1>
@@ -14,59 +34,29 @@
 {{if .Secret}}
 <div class="card">
     <div class="card-title">Step 1: Scan QR Code</div>
-    <div style="text-align: center; margin: 1.5rem 0;">
-        <div id="qrcode" style="display: inline-block; padding: 1rem; background: var(--card); border-radius: 8px;"></div>
+    <div class="mfa-qr">
+        <img src="{{.QRPath}}" width="240" height="240" alt="QR code for your authenticator app. If it does not load, enter the key below by hand.">
     </div>
-    <p class="text-muted" style="text-align: center;">Can't scan? Enter this key manually:</p>
-    <div style="text-align: center; margin: 0.5rem 0 1.5rem;">
-        <code style="font-size: 1.1rem; letter-spacing: 2px; padding: 0.5rem 1rem; background: var(--bg-secondary); border-radius: 4px;">{{.Secret}}</code>
+    <p class="text-muted mfa-center">Can't scan? Enter this key manually:</p>
+    <div class="mfa-center mfa-key">
+        <code>{{.Secret}}</code>
     </div>
+    <p class="text-muted mfa-center">This code is valid for 10 minutes. Reloading the page shows the same one.</p>
 </div>
 
 <div class="card">
-    <div class="card-title">Step 2: Save Backup Codes</div>
-    <p class="text-muted" style="margin-bottom: 1rem;">Store these codes somewhere safe. Each code can only be used once if you lose access to your authenticator.</p>
-    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; max-width: 300px; margin: 0 auto 1.5rem;">
-        {{range .BackupCodes}}
-        <code style="padding: 0.4rem; text-align: center; background: var(--bg-secondary); border-radius: 4px; font-size: 0.9rem;">{{.}}</code>
-        {{end}}
-    </div>
-</div>
-
-<div class="card">
-    <div class="card-title">Step 3: Verify Code</div>
-    <p class="text-muted" style="margin-bottom: 1rem;">Enter a code from your authenticator app to confirm setup.</p>
+    <div class="card-title">Step 2: Verify Code</div>
+    <p class="text-muted">Enter a code from your authenticator app to confirm setup. Your backup codes are shown right after.</p>
     <form method="POST" action="/dashboard/settings/mfa/enable">
         <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-        <input type="hidden" name="secret" value="{{.Secret}}">
-        <input type="hidden" name="backup_codes" value="{{range $i, $c := .BackupCodes}}{{if $i}},{{end}}{{$c}}{{end}}">
         <div class="form-group">
-            <label>6-Digit Code</label>
-            <input type="text" name="totp_code" placeholder="000000" maxlength="6" inputmode="numeric" autocomplete="one-time-code" autofocus required style="max-width: 200px; font-size: 1.2rem; letter-spacing: 4px; text-align: center;">
+            <label for="totp_code">6-Digit Code</label>
+            <input type="text" id="totp_code" name="totp_code" class="mfa-code-input" placeholder="000000" maxlength="6" inputmode="numeric" autocomplete="one-time-code" autofocus required>
         </div>
         <button type="submit" class="btn btn-primary">Enable 2FA</button>
-        <a href="/dashboard/settings" class="btn" style="margin-left: 0.5rem;">Cancel</a>
+        <a href="/dashboard/settings" class="btn">Cancel</a>
     </form>
 </div>
-
-<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
-<script>
-(function() {
-    var el = document.getElementById('qrcode');
-    if (!el) return;
-    var dataURL = "{{.QRDataURL}}";
-    // Decode base64 data URI to get the otpauth URL.
-    var b64 = dataURL.replace('data:text/plain;base64,', '');
-    var otpauth = atob(b64);
-    try {
-        var qr = qrcode(0, 'M');
-        qr.addData(otpauth);
-        qr.make();
-        el.innerHTML = qr.createSvgTag(5, 0);
-    } catch(e) {
-        el.innerHTML = '<p style="color: var(--text-muted);">QR code generation failed. Use the manual key above.</p>';
-    }
-})();
-</script>
+{{end}}
 {{end}}
 {{end}}
