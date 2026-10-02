@@ -165,6 +165,26 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 			t.ID, srcBucket, srcKey).Scan(&srcSize, &srcEnc, &srcChunked, &srcBackend, &srcFloor)
 	}
 	if srcChunked && s.gci != nil {
+		// A manifest copy moves no data: the chunks stay at their one
+		// address on the primary (WP-R8-7). A destination bucket pinned to
+		// a region promised where its bytes live (WP-R7-1), so it gets what
+		// every other write into it gets: a refusal when the region has no
+		// driver, and — until a chunked source can be re-stored whole in the
+		// region — 501 rather than a copy whose bytes are elsewhere.
+		regionDriver, rErr := bucketRegionDriver(r.Context(), s.db, s.engine, t.ID, destBucket)
+		if rErr != nil {
+			s.logger.Error("copy: region-pinned bucket has no driver — refused",
+				zap.String("bucket", destBucket), zap.Error(rErr))
+			w.Header().Set("Retry-After", "300")
+			WriteS3ErrorWithContext(w, ErrServiceUnavailable, r.URL.Path, generateRequestID(),
+				WithSuggestion("This bucket's region is not enabled on this deployment."))
+			return
+		}
+		if regionDriver != "" {
+			WriteS3ErrorWithContext(w, ErrNotImplemented, r.URL.Path, generateRequestID(),
+				WithSuggestion("Copying a large (chunked) object into a bucket pinned to a region is not supported yet. Download it and upload it into that bucket."))
+			return
+		}
 		s.handleChunkedCopy(w, r, t, srcBucket, srcKey, destBucket, destKey, srcSize, directive, requestAttrs)
 		return
 	}
