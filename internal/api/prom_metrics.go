@@ -41,7 +41,7 @@ func (s *Server) initMetrics() {
 		reg.MustRegister(authFailures, authFailuresByKey)
 		reg.MustRegister(dashboard.Collectors()...)
 		reg.MustRegister(retentionDeletedRows)
-		reg.MustRegister(accountDeletionTenants, accountDeletionObjects)
+		reg.MustRegister(accountDeletionTenants, accountDeletionObjects, accountDeletionSwept)
 		// Background jobs (WP-R13-3): runs by outcome, and the last success of
 		// every registered job READ FROM job_runs — a process that has just
 		// started reports the success of the process before it. The per-job

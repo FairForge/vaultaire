@@ -180,3 +180,46 @@ func TestOneDriveGet_LogsFallbackHit(t *testing.T) {
 	require.Equal(t, 1, hits.Len(), "a non-home read must log a fallback hit")
 	assert.Equal(t, d.tenants[other].name, hits.All()[0].ContextMap()["tenant"])
 }
+
+// WP-R10-3c: permafrost cannot walk a tenant (a folder tree on every fleet
+// account), so the account-erasure sweep uses List + Delete per bucket on it.
+// List returns the container's DIRECT children on every account — a key with
+// a '/' shows up as its first folder — and Delete of that name removes the
+// folder item on each account that has it (Graph deletes a folder with its
+// subtree). Every request stays under `t-<tenant>/<container>`.
+func TestOneDriveSweepShape_ListsDirectChildrenAndDeletesEachItemOnEveryAccount(t *testing.T) {
+	// Arrange
+	ctx := common.WithTenantID(context.Background(), "x")
+	d, stubs := stubFleet(3, zap.NewNop())
+	childrenURL := func(tn *odTenant, container string) string {
+		return graphBase + "/drives/" + tn.driveID + "/items/root:/" + odEscapePath(odRootFolder+"/t-x/"+container) + ":/children?$top=999"
+	}
+	a, b := d.tenants[0], d.tenants[1]
+	stubs[0].routes["GET "+childrenURL(a, "c")] = odRoute{200, `{"value":[{"name":"photos"},{"name":"k.txt"}]}`}
+	stubs[1].routes["GET "+childrenURL(b, "c")] = odRoute{200, `{"value":[{"name":"photos"}]}`}
+	for i, tn := range []*odTenant{a, b} {
+		id := "FOLDER-" + tn.name
+		stubs[i].routes["GET "+itemURL(tn, "t-x/c/photos")] = odRoute{200, `{"id":"` + id + `"}`}
+		stubs[i].routes["DELETE "+graphBase+"/drives/"+tn.driveID+"/items/"+id] = odRoute{204, ""}
+	}
+
+	// Act
+	names, err := d.List(ctx, "c", "")
+	require.NoError(t, err)
+	delErr := d.Delete(ctx, "c", "photos")
+
+	// Assert
+	assert.ElementsMatch(t, []string{"photos", "k.txt"}, names, "direct children of the container, the union of the fleet")
+	require.NoError(t, delErr)
+	for i, tn := range []*odTenant{a, b} {
+		assert.Contains(t, stubs[i].calls, "DELETE "+graphBase+"/drives/"+tn.driveID+"/items/FOLDER-"+tn.name,
+			"the folder item is deleted on account %s", tn.name)
+	}
+	for i := range stubs {
+		for _, call := range stubs[i].calls {
+			inContainer := strings.Contains(call, "/t-x/c:/children") || strings.Contains(call, "/t-x/c/photos")
+			assert.True(t, inContainer || strings.Contains(call, "/items/FOLDER-"),
+				"request outside the tenant's container: %s", call)
+		}
+	}
+}

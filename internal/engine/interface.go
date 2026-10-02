@@ -45,6 +45,44 @@ type Driver interface {
 	HealthCheck(ctx context.Context) error
 }
 
+// TenantObject is one object a TenantWalker found.
+type TenantObject struct {
+	// Container and Artifact are the pair Get/Delete address the object by
+	// under the walked tenant. Container is "" when the stored key has no
+	// container segment at all (nothing this code writes).
+	Container string
+	Artifact  string
+	// Remove deletes exactly this object — the key the listing returned, not
+	// one rebuilt from the pair. A miss is not an error.
+	Remove func(ctx context.Context) error
+}
+
+// TenantWalker is an optional interface for drivers that can enumerate
+// everything ONE tenant holds on the backend, in whatever container it is —
+// including containers no table remembers (WP-R10-3c, the account-erasure
+// sweep). Drivers that key every object under the tenant implement it: the
+// fixed-bucket ones (`t-<tenant>/<container>/<artifact>`) and the
+// container-only ones (`<tenant>_<bucket>/…`).
+//
+// The contract, because a walk that lists the wrong prefix hands the caller
+// another customer's data to delete:
+//   - an empty tenant id, or one containing '/', is refused (never the
+//     "default" fallback Get/Put/Delete use);
+//   - the listing is bounded by a separator after the tenant id, so tenant
+//     `ab` never matches tenant `abc`;
+//   - every page is read; a listing that cannot be completed is an error,
+//     never a short success;
+//   - a key the backend returns from outside the tenant's prefix aborts the
+//     walk with an error and is not handed to fn;
+//   - an error from fn stops the walk and is returned.
+//
+// The shared chunk container is NOT filtered here: on a fixed-bucket backend
+// chunk blobs written during a tenant's request sit under that tenant's
+// prefix. The caller decides what it may touch.
+type TenantWalker interface {
+	WalkTenant(ctx context.Context, tenantID string, fn func(TenantObject) error) error
+}
+
 // RangeGetter is an optional interface for drivers that support byte-range
 // reads directly (avoiding full-object download + discard). Drivers that
 // implement this will be used for range GETs, dramatically improving download
