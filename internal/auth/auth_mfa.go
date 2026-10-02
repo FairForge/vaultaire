@@ -36,15 +36,10 @@ func (a *AuthService) EnableMFA(ctx context.Context, userID, secret string, back
 		hashedCodes[i] = string(hashed)
 	}
 
-	a.mfaMu.Lock()
-	a.mfaSettings[userID] = &MFASettings{
-		UserID:      userID,
-		Secret:      secret,
-		Enabled:     true,
-		BackupCodes: hashedCodes,
-	}
-	a.mfaMu.Unlock()
-
+	// The database first, then this process's copy: a write the database
+	// refused must not leave the account "enabled" in memory only — the
+	// sign-in flow would ask for a code until the next restart, and then
+	// stop (LoadMFAFromDB finds no row). WP-R12-8.
 	if a.sqlDB != nil {
 		codesJSON, err := json.Marshal(hashedCodes)
 		if err != nil {
@@ -63,6 +58,15 @@ func (a *AuthService) EnableMFA(ctx context.Context, userID, secret string, back
 			return fmt.Errorf("persist mfa settings: %w", err)
 		}
 	}
+
+	a.mfaMu.Lock()
+	a.mfaSettings[userID] = &MFASettings{
+		UserID:      userID,
+		Secret:      secret,
+		Enabled:     true,
+		BackupCodes: hashedCodes,
+	}
+	a.mfaMu.Unlock()
 
 	a.record(ctx, audit.Entry{UserID: userID, Action: "mfa.enabled", Resource: "user:" + userID,
 		Metadata: map[string]any{"backup_codes": len(backupCodes)}})

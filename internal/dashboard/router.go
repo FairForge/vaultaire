@@ -31,8 +31,9 @@ const sessionTTL = 24 * time.Hour
 type Deps struct {
 	DB            *sql.DB
 	Auth          *auth.AuthService
-	MFA           *auth.MFAService // TOTP secret generation / validation.
-	MFAPending    *MFAPendingStore // Short-lived store for 2FA login challenges.
+	MFA           *auth.MFAService            // TOTP secret generation / validation.
+	MFAPending    *MFAPendingStore            // Short-lived store for 2FA login challenges.
+	MFAEnrol      *handlers.MFAEnrolmentStore // Pending TOTP enrolments (WP-R12-8); nil = one is created here.
 	Sessions      dashauth.SessionStore
 	Logger        *zap.Logger
 	DataPath      string                   // Local storage root (bucket list sizes in dev).
@@ -259,8 +260,17 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		template.Must(mfaSetupTmpl.ParseFS(Templates,
 			"templates/customer/mfa_setup.html",
 		))
-		dr.Get("/settings/mfa", handlers.HandleMFASetup(mfaSetupTmpl, deps.Auth, deps.MFA, deps.Logger))
-		dr.Post("/settings/mfa/enable", handlers.HandleMFAEnable(settingsTmpl, deps.Auth, deps.MFA, deps.Logger))
+		// Enrolment (WP-R12-8): the pending TOTP secret stays in this
+		// process, keyed by the session; the QR code is a PNG the server
+		// renders; the enable POST carries the 6-digit code only and answers
+		// with the backup codes, once, on the setup template.
+		mfaEnrol := deps.MFAEnrol
+		if mfaEnrol == nil {
+			mfaEnrol = handlers.NewMFAEnrolmentStore()
+		}
+		dr.Get("/settings/mfa", handlers.HandleMFASetup(mfaSetupTmpl, deps.Auth, deps.MFA, mfaEnrol, deps.Logger))
+		dr.Get("/settings/mfa/qr.png", handlers.HandleMFAQR(mfaEnrol, deps.Logger))
+		dr.Post("/settings/mfa/enable", handlers.HandleMFAEnable(mfaSetupTmpl, deps.Auth, deps.MFA, mfaEnrol, deps.Logger))
 		dr.Post("/settings/mfa/disable", handlers.HandleMFADisable(settingsTmpl, deps.Auth, deps.Sessions, deps.Logger))
 
 		// GDPR: data export + account deletion.

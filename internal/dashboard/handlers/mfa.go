@@ -1,20 +1,40 @@
 package handlers
 
 import (
-	"encoding/base64"
+	"bytes"
+	"errors"
 	"html/template"
+	"image/png"
 	"net/http"
+	"strings"
 
 	"github.com/FairForge/vaultaire/internal/auth"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/FairForge/vaultaire/internal/dashboard/middleware"
 	"github.com/go-chi/chi/v5"
+	"github.com/pquerna/otp"
 	"go.uber.org/zap"
 )
 
-// HandleMFASetup renders the 2FA setup page with a QR code and backup codes.
-// The user must confirm with a TOTP code before MFA is actually enabled.
-func HandleMFASetup(tmpl *template.Template, authSvc *auth.AuthService, mfaSvc *auth.MFAService, logger *zap.Logger) http.HandlerFunc {
+// mfaQRPath is where the setup page's <img> finds the QR code of the
+// session's pending secret (HandleMFAQR).
+const mfaQRPath = "/dashboard/settings/mfa/qr.png"
+
+// sessionID is the dashboard session id of the request (the session cookie's
+// value) — the key the pending enrolment is stored under.
+func sessionID(r *http.Request) string {
+	if c, err := r.Cookie(dashauth.SessionCookieName); err == nil {
+		return c.Value
+	}
+	return ""
+}
+
+// HandleMFASetup renders the 2FA setup page: the QR code and the manual key
+// of a TOTP secret that is generated and KEPT by the server (MFAEnrolmentStore,
+// keyed by the session) until HandleMFAEnable sees a valid code for it. The
+// page carries no backup codes and no secret-bearing form field (WP-R12-8).
+// A reload or a second tab shows the same secret for ten minutes.
+func HandleMFASetup(tmpl *template.Template, authSvc *auth.AuthService, mfaSvc *auth.MFAService, store *MFAEnrolmentStore, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
 		if sd == nil {
@@ -32,82 +52,146 @@ func HandleMFASetup(tmpl *template.Template, authSvc *auth.AuthService, mfaSvc *
 
 		data := sessionData(sd, "settings")
 		withCSRF(r.Context(), data)
+		withFlash(r.Context(), data)
+		// The page shows a secret: no cache may keep it.
+		w.Header().Set("Cache-Control", "no-store")
 
-		if mfaSvc == nil {
+		sid := sessionID(r)
+		if mfaSvc == nil || store == nil || sid == "" {
 			data["Error"] = "2FA is not available."
 			renderMFATemplate(w, tmpl, data, logger)
 			return
 		}
 
-		// Generate a new TOTP secret.
-		secret, otpauthURL, err := mfaSvc.GenerateSecret(sd.Email)
-		if err != nil {
+		e, err := store.Begin(sid, sd.UserID, func() (string, string, error) { return mfaSvc.GenerateSecret(sd.Email) })
+		switch {
+		case errors.Is(err, ErrMFAEnrolmentBusy):
+			logger.Warn("mfa enrolment store is full")
+			data["Error"] = "Too many two-factor setups are in progress right now. Try again in a few minutes."
+		case err != nil:
 			logger.Error("generate totp secret", zap.Error(err))
 			data["Error"] = "Could not generate 2FA secret."
-			renderMFATemplate(w, tmpl, data, logger)
-			return
+		default:
+			data["Secret"] = e.Secret
+			data["QRPath"] = mfaQRPath
 		}
-
-		// Generate backup codes.
-		backupCodes, err := mfaSvc.GenerateBackupCodes()
-		if err != nil {
-			logger.Error("generate backup codes", zap.Error(err))
-			data["Error"] = "Could not generate backup codes."
-			renderMFATemplate(w, tmpl, data, logger)
-			return
-		}
-
-		data["Secret"] = secret
-		data["OTPAuthURL"] = otpauthURL
-		data["QRDataURL"] = qrDataURL(otpauthURL)
-		data["BackupCodes"] = backupCodes
-
 		renderMFATemplate(w, tmpl, data, logger)
 	}
 }
 
-// HandleMFAEnable handles POST /dashboard/settings/mfa/enable.
-// Validates the TOTP code the user entered to confirm setup.
-func HandleMFAEnable(settingsTmpl *template.Template, authSvc *auth.AuthService, mfaSvc *auth.MFAService, logger *zap.Logger) http.HandlerFunc {
+// HandleMFAQR serves the QR code of the session's pending enrolment as a PNG
+// rendered by the server (WP-R12-8). The page used to load a QR library from
+// cdn.jsdelivr.net, without SRI, and hand it the secret; no script touches
+// the secret now and the page needs none to work.
+func HandleMFAQR(store *MFAEnrolmentStore, logger *zap.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sd := dashauth.GetSession(r.Context())
+		if sd == nil || store == nil {
+			http.NotFound(w, r)
+			return
+		}
+		e, ok := store.Peek(sessionID(r), sd.UserID)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		key, err := otp.NewKeyFromURL(e.OTPAuthURL)
+		if err != nil {
+			logger.Error("mfa qr: parse otpauth url", zap.Error(err))
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+		img, err := key.Image(240, 240)
+		if err != nil {
+			logger.Error("mfa qr: render", zap.Error(err))
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+		var buf bytes.Buffer
+		if err := png.Encode(&buf, img); err != nil {
+			logger.Error("mfa qr: encode", zap.Error(err))
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "no-store")
+		// Only the dashboard's own pages may embed it: a page on a sibling
+		// subdomain (same-site, so the session cookie rides along) gets no
+		// pixels at all.
+		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+		_, _ = w.Write(buf.Bytes())
+	}
+}
+
+// HandleMFAEnable handles POST /dashboard/settings/mfa/enable. The request
+// carries the 6-digit code and nothing else that matters: the secret it is
+// checked against is the server's pending one, and the backup codes are
+// generated here, after the code verified, stored hashed, and shown ONCE in
+// this response. Nothing secret is accepted from the client — a `secret` or
+// `backup_codes` field in the form is ignored.
+func HandleMFAEnable(tmpl *template.Template, authSvc *auth.AuthService, mfaSvc *auth.MFAService, store *MFAEnrolmentStore, logger *zap.Logger) http.HandlerFunc {
+	const setupPath = "/dashboard/settings/mfa"
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
 		if sd == nil {
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
-
-		secret := r.FormValue("secret")
-		code := r.FormValue("totp_code")
-		backupCodesRaw := r.FormValue("backup_codes")
-
-		if secret == "" || code == "" {
-			http.Redirect(w, r, "/dashboard/settings/mfa", http.StatusSeeOther)
+		if authSvc == nil || mfaSvc == nil || store == nil {
+			http.Redirect(w, r, setupPath, http.StatusSeeOther)
 			return
 		}
 
-		// Validate the TOTP code against the secret.
-		if mfaSvc == nil || !mfaSvc.ValidateCode(secret, code) {
-			http.Redirect(w, r, "/dashboard/settings/mfa", http.StatusSeeOther)
+		// Already enrolled: a replay of the enable POST, a reload of the
+		// result page, a second tab. Nothing is replaced and no codes are
+		// shown again.
+		if enabled, _ := authSvc.IsMFAEnabled(r.Context(), sd.UserID); enabled {
+			http.Redirect(w, r, "/dashboard/settings", http.StatusSeeOther)
 			return
 		}
 
-		// Parse backup codes.
-		var backupCodes []string
-		for _, c := range splitCodes(backupCodesRaw) {
-			if c != "" {
-				backupCodes = append(backupCodes, c)
-			}
+		code := strings.TrimSpace(r.FormValue("totp_code"))
+		sid := sessionID(r)
+		e, res := store.Confirm(sid, sd.UserID, func(secret string) bool {
+			return code != "" && mfaSvc.ValidateCode(secret, code)
+		})
+		switch res {
+		case MFAEnrolNone:
+			middleware.SetFlash(w, "error", "That setup session has expired — it lasts 10 minutes, and a service restart ends it. Scan the new QR code below, and remove the earlier stored.ge entry from your authenticator.")
+			http.Redirect(w, r, setupPath, http.StatusSeeOther)
+			return
+		case MFAEnrolMismatch:
+			middleware.SetFlash(w, "error", "That code did not match. Check that your phone's clock is right and enter the current code.")
+			http.Redirect(w, r, setupPath, http.StatusSeeOther)
+			return
 		}
 
-		// Enable MFA.
-		if err := authSvc.EnableMFA(r.Context(), sd.UserID, secret, backupCodes); err != nil {
+		backupCodes, err := mfaSvc.GenerateBackupCodes()
+		if err == nil {
+			err = authSvc.EnableMFA(r.Context(), sd.UserID, e.Secret, backupCodes)
+		}
+		if err != nil {
+			// The code was right and the QR code is still good: put the
+			// pending secret back so the next attempt can succeed.
+			store.Restore(sid, e)
 			logger.Error("enable mfa", zap.Error(err))
-			http.Redirect(w, r, "/dashboard/settings/mfa", http.StatusSeeOther)
+			middleware.SetFlash(w, "error", "Two-factor authentication could not be enabled. Try the current code again.")
+			http.Redirect(w, r, setupPath, http.StatusSeeOther)
 			return
 		}
 
-		middleware.SetFlash(w, "success", "Two-factor authentication enabled.")
-		http.Redirect(w, r, "/dashboard/settings", http.StatusSeeOther)
+		// The code that enrolled is spent: it must not also be the second
+		// factor of a sign-in in the same 30 seconds (RFC 6238 §5.2 — the
+		// single-use guard of the login flow now knows about it).
+		authSvc.ConsumeTOTPCode(sd.UserID, code)
+
+		data := sessionData(sd, "settings")
+		withCSRF(r.Context(), data)
+		data["Enrolled"] = true
+		data["BackupCodes"] = backupCodes
+		// Shown once: this response is the only place the codes ever appear.
+		w.Header().Set("Cache-Control", "no-store")
+		renderMFATemplate(w, tmpl, data, logger)
 	}
 }
 
@@ -238,26 +322,4 @@ func populateProfileForMFA(authSvc *auth.AuthService, r *http.Request, sd *dasha
 			data["EmailNotifications"] = prefs.EmailNotifications
 		}
 	}
-}
-
-func splitCodes(s string) []string {
-	var codes []string
-	current := ""
-	for _, c := range s {
-		if c == ',' {
-			codes = append(codes, current)
-			current = ""
-		} else {
-			current += string(c)
-		}
-	}
-	if current != "" {
-		codes = append(codes, current)
-	}
-	return codes
-}
-
-// qrDataURL encodes the otpauth URL as a base64 data URI for QR rendering.
-func qrDataURL(otpauthURL string) string {
-	return "data:text/plain;base64," + base64.StdEncoding.EncodeToString([]byte(otpauthURL))
 }

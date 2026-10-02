@@ -26,7 +26,7 @@ Authentication service for Vaultaire. Handles user registration, login, JWT toke
 - `ValidateS3Request(ctx, accessKey)` — returns tenant from `keyIndex` map. (The S3 request path itself verifies against the database — `Auth.ValidateRequest`; this is the cache lookup.)
 - `Evict(userID, tenantID)` — WP-R10-3: removes an erased account from every map (user by e-mail/id, tenant, its access key, the user's/tenant's API keys, MFA, profile, preferences). The runner calls it after `account.EraseRows` so an erased user cannot sign in from the boot-time cache until the next restart. `cacheMu` (RWMutex) guards the credential maps for `Evict`, the writers (`LoadFromDB`, `CreateUserWithTenant`, `indexAPIKey`) and the login/API-key readers (`ValidatePassword`, `GetUserByEmail`, `GetUserByID`, `ValidateS3Request`, `ValidateAPIKey`); the other ~25 readers predate it (WP-R5-14).
 - `SetJWTSecret(secret)` — override default JWT key from `JWT_SECRET` env var.
-- `EnableMFA(ctx, userID, secret, backupCodes)` — enables TOTP 2FA, hashes backup codes, persists to `user_mfa` table.
+- `EnableMFA(ctx, userID, secret, backupCodes)` — enables TOTP 2FA, hashes backup codes, persists to `user_mfa` table. The database row is written FIRST, the in-memory copy after it (WP-R12-8: a refused write used to leave the account "enabled" in memory until the next restart). Callers pass a secret the SERVER generated and kept (the dashboard's `MFAEnrolmentStore`) — never one from a request.
 - `DisableMFA(ctx, userID)` — disables 2FA, deletes from `user_mfa` table.
 - `IsMFAEnabled(ctx, userID)` — checks in-memory MFA state (O(1)).
 - `GetMFASecret(ctx, userID)` — returns TOTP secret for enabled users.
