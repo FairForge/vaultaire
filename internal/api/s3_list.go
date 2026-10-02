@@ -383,7 +383,7 @@ func (s *dbListSource) fetch(ctx context.Context, lower string, inclusive bool, 
 		cmp = ">="
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT object_key, size_bytes, etag, content_type, updated_at, COALESCE(backend_name, '')
+		SELECT object_key, size_bytes, etag, content_type, updated_at, COALESCE(backend_name, ''), floor
 		FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2
 		  AND object_key COLLATE "C" `+cmp+` $3::text
@@ -397,10 +397,10 @@ func (s *dbListSource) fetch(ctx context.Context, lower string, inclusive bool, 
 
 	var entries []ListV2Entry
 	for rows.Next() {
-		var key, etag, contentType, backendName string
+		var key, etag, contentType, backendName, floor string
 		var size int64
 		var updatedAt time.Time
-		if scanErr := rows.Scan(&key, &size, &etag, &contentType, &updatedAt, &backendName); scanErr != nil {
+		if scanErr := rows.Scan(&key, &size, &etag, &contentType, &updatedAt, &backendName, &floor); scanErr != nil {
 			return nil, fmt.Errorf("scan object_head_cache: %w", scanErr)
 		}
 		if etag != "" && !strings.HasPrefix(etag, `"`) {
@@ -411,11 +411,13 @@ func (s *dbListSource) fetch(ctx context.Context, lower string, inclusive bool, 
 			Size:         size,
 			ETag:         etag,
 			LastModified: updatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
-			// Same backend→class mapping HEAD uses — the versitygw sweep
-			// caught listings saying STANDARD while HEAD said GLACIER/RR for
-			// the same object. Backup tools plan restores off the listed
-			// class, so the two must agree.
-			StorageClass: engine.BackendToStorageClass(backendName),
+			// The same class HEAD and GET report (engine.CustomerStorageClass)
+			// — the versitygw sweep caught listings saying STANDARD while
+			// HEAD said GLACIER/RR for the same object. Backup tools plan
+			// restores off the listed class: a Smart-demoted downstairs
+			// object must list as STANDARD or `aws s3 sync` skips it
+			// (WP-R13-1).
+			StorageClass: engine.CustomerStorageClass(floor, backendName),
 		})
 	}
 	if rowErr := rows.Err(); rowErr != nil {

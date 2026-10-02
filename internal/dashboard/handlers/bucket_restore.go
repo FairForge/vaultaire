@@ -22,18 +22,21 @@ import (
 // download, short enough that staging doesn't fill with thawed data.
 const dashboardRestoreDays = 2
 
-// objectRestorerFor resolves the archive backend holding an object, or nil
-// when the object is on hot storage (mirrors api.objectRestorer).
+// objectRestorerFor resolves the archive backend holding an ATTIC object, or
+// nil when the object has nothing for its owner to restore: it is on hot
+// storage, or it is a downstairs object the Smart tier parked on the cold
+// backend — STANDARD to the customer, brought back by reading it (mirrors
+// api.objectRestorer, WP-R13-1).
 func objectRestorerFor(ctx context.Context, eng *engine.CoreEngine, db *sql.DB, tenantID, bucket, key string) (engine.Restorer, error) {
-	var backendName string
+	var backendName, floor string
 	err := db.QueryRowContext(ctx, `
-		SELECT COALESCE(backend_name, '') FROM object_head_cache
+		SELECT COALESCE(backend_name, ''), floor FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-		tenantID, bucket, key).Scan(&backendName)
+		tenantID, bucket, key).Scan(&backendName, &floor)
 	if err != nil {
 		return nil, err
 	}
-	if eng == nil {
+	if eng == nil || !engine.IsArchiveClass(engine.CustomerStorageClass(floor, backendName)) {
 		return nil, nil
 	}
 	drv, ok := eng.GetDriver(backendName)

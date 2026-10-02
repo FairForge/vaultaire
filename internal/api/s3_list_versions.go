@@ -65,6 +65,10 @@ type versionRow struct {
 	isDeleteMarker bool
 	createdAt      time.Time
 	backend        string
+	// class is the storage class a customer sees for this version
+	// (engine.CustomerStorageClass): the current version reports what HEAD
+	// reports for the key.
+	class string
 }
 
 // handleListObjectVersions serves GET /{bucket}?versions. Rows come from two
@@ -132,15 +136,23 @@ func (s *Server) handleListObjectVersions(w http.ResponseWriter, r *http.Request
 	// R9-18) and byte-order paging, matching ListObjects (R4-05).
 	prefixEnd := prefixSuccessor(prefix)
 
-	// Source 1: real version rows.
+	// Source 1: real version rows. The head row is joined for the class of
+	// the CURRENT version (WP-R13-1): it must be what HEAD and ListObjects
+	// say for the key — the floor decides, not the backend. Older versions
+	// have no floor on record and keep the class of the backend they were
+	// written to (a version row on the cold backend was written with an
+	// archive class: demotion never touches a versioned bucket).
 	rows, err := s.db.QueryContext(r.Context(), `
-		SELECT object_key, version_id, size_bytes, etag, is_latest, is_delete_marker, created_at, COALESCE(backend_name, '')
-		FROM object_versions
-		WHERE tenant_id = $1 AND bucket = $2
-		  AND ($3::text = '' OR (object_key COLLATE "C" >= $3::text AND object_key COLLATE "C" < $7::text))
-		  AND ($4::text = '' OR object_key COLLATE "C" > $4::text
-		       OR (object_key = $4::text AND $5::timestamptz IS NOT NULL AND created_at < $5))
-		ORDER BY object_key COLLATE "C" ASC, created_at DESC
+		SELECT v.object_key, v.version_id, v.size_bytes, v.etag, v.is_latest, v.is_delete_marker, v.created_at, COALESCE(v.backend_name, ''),
+		       h.object_key IS NOT NULL, COALESCE(h.floor, ''), COALESCE(h.backend_name, '')
+		FROM object_versions v
+		LEFT JOIN object_head_cache h
+		       ON h.tenant_id = v.tenant_id AND h.bucket = v.bucket AND h.object_key = v.object_key
+		WHERE v.tenant_id = $1 AND v.bucket = $2
+		  AND ($3::text = '' OR (v.object_key COLLATE "C" >= $3::text AND v.object_key COLLATE "C" < $7::text))
+		  AND ($4::text = '' OR v.object_key COLLATE "C" > $4::text
+		       OR (v.object_key = $4::text AND $5::timestamptz IS NOT NULL AND v.created_at < $5))
+		ORDER BY v.object_key COLLATE "C" ASC, v.created_at DESC
 		LIMIT $6`,
 		t.ID, req.Bucket, prefix, keyMarker, nullableTime(markerCreatedAt), fetch, prefixEnd)
 	if err != nil {
@@ -151,12 +163,19 @@ func (s *Server) handleListObjectVersions(w http.ResponseWriter, r *http.Request
 	var merged []versionRow
 	for rows.Next() {
 		var vr versionRow
+		var hasHead bool
+		var headFloor, headBackend string
 		if scanErr := rows.Scan(&vr.key, &vr.versionID, &vr.size, &vr.etag,
-			&vr.isLatest, &vr.isDeleteMarker, &vr.createdAt, &vr.backend); scanErr != nil {
+			&vr.isLatest, &vr.isDeleteMarker, &vr.createdAt, &vr.backend,
+			&hasHead, &headFloor, &headBackend); scanErr != nil {
 			_ = rows.Close()
 			s.logger.Error("list versions: scan failed", zap.Error(scanErr))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 			return
+		}
+		vr.class = engine.BackendToStorageClass(vr.backend)
+		if vr.isLatest && hasHead {
+			vr.class = engine.CustomerStorageClass(headFloor, headBackend)
 		}
 		merged = append(merged, vr)
 	}
@@ -169,7 +188,7 @@ func (s *Server) handleListObjectVersions(w http.ResponseWriter, r *http.Request
 
 	// Source 2: head-cache objects with no version rows = S3 "null" versions.
 	rows, err = s.db.QueryContext(r.Context(), `
-		SELECT h.object_key, h.size_bytes, h.etag, h.updated_at, COALESCE(h.backend_name, '')
+		SELECT h.object_key, h.size_bytes, h.etag, h.updated_at, COALESCE(h.backend_name, ''), h.floor
 		FROM object_head_cache h
 		WHERE h.tenant_id = $1 AND h.bucket = $2
 		  AND ($3::text = '' OR (h.object_key COLLATE "C" >= $3::text AND h.object_key COLLATE "C" < $6::text))
@@ -188,12 +207,14 @@ func (s *Server) handleListObjectVersions(w http.ResponseWriter, r *http.Request
 	}
 	for rows.Next() {
 		vr := versionRow{versionID: "null", isLatest: true}
-		if scanErr := rows.Scan(&vr.key, &vr.size, &vr.etag, &vr.createdAt, &vr.backend); scanErr != nil {
+		var floor string
+		if scanErr := rows.Scan(&vr.key, &vr.size, &vr.etag, &vr.createdAt, &vr.backend, &floor); scanErr != nil {
 			_ = rows.Close()
 			s.logger.Error("list versions: null-version scan failed", zap.Error(scanErr))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 			return
 		}
+		vr.class = engine.CustomerStorageClass(floor, vr.backend)
 		merged = append(merged, vr)
 	}
 	_ = rows.Close()
@@ -246,7 +267,7 @@ func (s *Server) handleListObjectVersions(w http.ResponseWriter, r *http.Request
 				LastModified: vr.createdAt.UTC().Format("2006-01-02T15:04:05.000Z"),
 				ETag:         etag,
 				Size:         vr.size,
-				StorageClass: engine.BackendToStorageClass(vr.backend),
+				StorageClass: vr.class,
 				Owner:        owner,
 			})
 		}

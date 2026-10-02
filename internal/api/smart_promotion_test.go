@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/tenant"
+	"github.com/FairForge/vaultaire/internal/usage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -114,7 +115,9 @@ func TestSmartPromotion_NotDemotedObjectsUntouched(t *testing.T) {
 	f.object("vault", "archive.bin", 100, 30, 20, onBackend("geyser")) // a Vault object, never demoted by us
 
 	assert.Equal(t, "geyser", p.OnRead(context.Background(), f.tenantID, "vault", "archive.bin", "etag-vault-archive.bin"))
-	assert.False(t, p.OnArchived(context.Background(), f.tenantID, "vault", "archive.bin"), "Vault keeps Glacier semantics")
+	_, err := f.db.Exec(`UPDATE object_head_cache SET floor = 'vault' WHERE tenant_id = $1 AND object_key = 'archive.bin'`, f.tenantID)
+	require.NoError(t, err)
+	assert.Equal(t, archivedNotSmart, p.OnArchivedRead(context.Background(), f.tenantID, "vault", "archive.bin", usage.FloorVault), "Vault keeps Glacier semantics")
 	assert.Equal(t, "geyser", f.backendOf("vault", "archive.bin"))
 }
 
@@ -140,10 +143,21 @@ func TestSmartPromotion_EvictedObjectAutoRestoresThenCopiesBack(t *testing.T) {
 	assert.True(t, restoreReq)
 	assert.True(t, promoteReq)
 
-	// The GET path's ErrArchived branch consults OnArchived: ours → true,
-	// and a second call must not re-submit the restore.
-	assert.True(t, p.OnArchived(context.Background(), f.tenantID, "b", "doc"))
+	// The GET path's ErrArchived branch consults OnArchivedRead: ours →
+	// restoring, and a second call must not re-submit the restore.
+	assert.Equal(t, archivedRestoring, p.OnArchivedRead(context.Background(), f.tenantID, "b", "doc", usage.FloorStandard))
 	assert.Equal(t, 1, stub.restoreCalls, "restore submitted once")
+
+	// A request older than RestoreRetry with the object STILL on tape is
+	// submitted again: a restore that landed and expired before the
+	// copy-back ran must not leave the object waiting for good.
+	f.now = f.now.Add(p.RestoreRetry + time.Minute)
+	later := f.now
+	p.now = func() time.Time { return later }
+	assert.Equal(t, archivedRestoring, p.OnArchivedRead(context.Background(), f.tenantID, "b", "doc", usage.FloorStandard))
+	assert.Equal(t, 2, stub.restoreCalls, "stale request re-submitted")
+	assert.Equal(t, archivedRestoring, p.OnArchivedRead(context.Background(), f.tenantID, "b", "doc", usage.FloorStandard))
+	assert.Equal(t, 2, stub.restoreCalls, "and stamped, so not on every read")
 
 	// Restore lands; the daily job's PromotePending copies it back.
 	stub.archived = false

@@ -211,6 +211,7 @@ func WriteS3Error(w http.ResponseWriter, code string, resource string, requestID
 // ErrorContext carries optional context for enriched error messages.
 type ErrorContext struct {
 	Suggestion string
+	Message    string
 }
 
 // ErrorOption configures an ErrorContext.
@@ -219,6 +220,14 @@ type ErrorOption func(*ErrorContext)
 // WithSuggestion appends a helpful suggestion to the error message.
 func WithSuggestion(s string) ErrorOption {
 	return func(ec *ErrorContext) { ec.Suggestion = s }
+}
+
+// WithMessage replaces the code's default message. For a code whose default
+// text describes a different cause (ServiceUnavailable says "all storage
+// backends are temporarily unavailable"; the automatic restore of one object
+// is not that).
+func WithMessage(m string) ErrorOption {
+	return func(ec *ErrorContext) { ec.Message = m }
 }
 
 // WriteS3ErrorWithContext writes an S3-compatible error response with optional
@@ -235,6 +244,8 @@ func WriteS3ErrorWithContext(w http.ResponseWriter, code string, resource string
 	if !exists {
 		message = "Unknown error"
 		code = ErrInternalError
+	} else if ec.Message != "" {
+		message = ec.Message
 	}
 
 	if ec.Suggestion != "" {

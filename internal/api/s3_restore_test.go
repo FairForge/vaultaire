@@ -30,6 +30,8 @@ type stubArchiveDriver struct {
 	restoreCalls int
 	lastDays     int32
 	restoreState string
+	statusCalls  int   // RestoreStatus round trips (HEAD must make none for a downstairs object)
+	restoreErr   error // RestoreObject fails with this (a backend that refuses the recall)
 }
 
 func newStubArchiveDriver() *stubArchiveDriver {
@@ -95,6 +97,9 @@ func (d *stubArchiveDriver) RestoreObject(_ context.Context, _, _ string, days i
 		// still on the staging disk, found live 2026-08-04).
 		return fmt.Errorf("geyser restore: %w (Restore is not allowed for the object's current storage class)", engine.ErrArchived)
 	}
+	if d.restoreErr != nil {
+		return d.restoreErr
+	}
 	d.restoreCalls++
 	d.lastDays = days
 	return nil
@@ -103,6 +108,7 @@ func (d *stubArchiveDriver) RestoreObject(_ context.Context, _, _ string, days i
 func (d *stubArchiveDriver) RestoreStatus(_ context.Context, _, _ string) (*engine.RestoreStatus, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.statusCalls++
 	return &engine.RestoreStatus{Restore: d.restoreState, StorageClass: "GLACIER"}, nil
 }
 

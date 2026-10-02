@@ -434,7 +434,9 @@ Read and left as they are (each is small, or is the stated design):
   `EGRESS_THROTTLE_MAX_STREAMS` means changing that copy.
 - **Same class, next WP:** the auto-restore answer for a demoted, evicted object
   (`s3_engine_adapter.go`, 503 + `Retry-After: 120`) is also a per-object condition counted as a
-  server error. `smart_demotion` is off; it goes into the WP-R13-1 prompt.
+  server error. `smart_demotion` is off; it goes into the WP-R13-1 prompt. **Closed by
+  WP-R13-1 (#542):** marked as a client refusal when the restore was submitted, counted when
+  it could not be.
 
 **Before the flag flips globally** (adds to the [YOU] list above): turn `egress_throttle` on for
 tenant zero alone and run one large download past the allowance through the real path

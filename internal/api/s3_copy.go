@@ -156,12 +156,13 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 	var srcEnc string
 	var srcChunked bool
 	var srcBackend string
+	var srcFloor string
 	if s.db != nil {
 		_ = s.db.QueryRowContext(r.Context(), `
-			SELECT size_bytes, COALESCE(encryption_algorithm, ''), is_chunked, COALESCE(backend_name, '')
+			SELECT size_bytes, COALESCE(encryption_algorithm, ''), is_chunked, COALESCE(backend_name, ''), floor
 			FROM object_head_cache
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-			t.ID, srcBucket, srcKey).Scan(&srcSize, &srcEnc, &srcChunked, &srcBackend)
+			t.ID, srcBucket, srcKey).Scan(&srcSize, &srcEnc, &srcChunked, &srcBackend, &srcFloor)
 	}
 	if srcChunked && s.gci != nil {
 		s.handleChunkedCopy(w, r, t, srcBucket, srcKey, destBucket, destKey, srcSize, directive, requestAttrs)
@@ -194,6 +195,13 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 		case errors.Is(err, engine.ErrAllBackendsUnavailable):
 			w.Header().Set("Retry-After", "30")
 			WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
+		case errors.Is(err, engine.ErrArchived):
+			// The source's bytes are on tape (this was a 500). Same rule as
+			// GET (WP-R13-1): a downstairs source is recalled on the
+			// caller's behalf and the copy answers a retryable 503; an attic
+			// source answers what AWS answers for a GLACIER copy source.
+			writeArchivedRead(w, r, s.smartPromoter, t.ID, srcBucket, srcKey, srcFloor,
+				"The source object is archived on tape. Restore it (POST ?restore), then retry the copy.")
 		case isObjectMissingErr(err):
 			WriteS3Error(w, ErrNoSuchKey, r.URL.Path, generateRequestID())
 		default:

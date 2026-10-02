@@ -372,7 +372,7 @@ func (ir *InventoryRunner) generateReport(ctx context.Context, tenantID, bucket,
 	_, err := ir.writer.write(ctx, tenantID, targetBucket, objectKey, "text/csv", func(out io.Writer) error {
 		rows, err := ir.db.QueryContext(ctx, `
 			SELECT object_key, size_bytes, etag, content_type, updated_at,
-				COALESCE(encryption_algorithm, ''), COALESCE(backend_name, '')
+				COALESCE(encryption_algorithm, ''), COALESCE(backend_name, ''), floor
 			FROM object_head_cache
 			WHERE tenant_id = $1 AND bucket = $2
 			ORDER BY object_key ASC
@@ -383,19 +383,22 @@ func (ir *InventoryRunner) generateReport(ctx context.Context, tenantID, bucket,
 		defer func() { _ = rows.Close() }()
 
 		w := csv.NewWriter(out)
-		if err := w.Write([]string{"Key", "SizeBytes", "ETag", "ContentType", "LastModified", "EncryptionAlgorithm", "BackendName"}); err != nil {
+		// The last column is the class the customer sees — what ListObjects
+		// and HEAD say (WP-R13-1). It used to be BackendName: our internal
+		// driver name, and `geyser` for a Smart-demoted downstairs object.
+		if err := w.Write([]string{"Key", "SizeBytes", "ETag", "ContentType", "LastModified", "EncryptionAlgorithm", "StorageClass"}); err != nil {
 			return err
 		}
 		for rows.Next() {
-			var key, etag, contentType, encAlgo, backendName string
+			var key, etag, contentType, encAlgo, backendName, floor string
 			var sizeBytes int64
 			var updatedAt time.Time
-			if err := rows.Scan(&key, &sizeBytes, &etag, &contentType, &updatedAt, &encAlgo, &backendName); err != nil {
+			if err := rows.Scan(&key, &sizeBytes, &etag, &contentType, &updatedAt, &encAlgo, &backendName, &floor); err != nil {
 				return fmt.Errorf("scan inventory row: %w", err)
 			}
 			if err := w.Write([]string{
 				key, fmt.Sprintf("%d", sizeBytes), etag, contentType,
-				updatedAt.UTC().Format(time.RFC3339), encAlgo, backendName,
+				updatedAt.UTC().Format(time.RFC3339), encAlgo, engine.CustomerStorageClass(floor, backendName),
 			}); err != nil {
 				return err
 			}

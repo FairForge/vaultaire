@@ -60,3 +60,32 @@ func TestResolveStorageClass_PublicRoutesToR2(t *testing.T) {
 
 	assert.Equal(t, "STANDARD", BackendToStorageClass("r2"))
 }
+
+// WP-R13-1: the class a customer sees follows the floor the object is billed
+// on. A downstairs (standard-floor) object is never reported in an archive
+// class, whatever backend holds its bytes; an attic object reports the class
+// of the backend it is on.
+func TestCustomerStorageClass(t *testing.T) {
+	tests := []struct {
+		name, floor, backend, want string
+	}{
+		{"downstairs on the hot backend", "standard", "idrive", "STANDARD"},
+		{"downstairs, Smart-demoted to tape", "standard", "geyser", "STANDARD"},
+		{"downstairs on a region driver", "standard", "idrive-eu-west-1", "STANDARD"},
+		{"downstairs on lyve / r2 / permafrost", "standard", "lyve", "STANDARD"},
+		{"downstairs on the dev backend keeps its class", "standard", "local", "REDUCED_REDUNDANCY"},
+		{"attic on tape", "vault", "geyser", "GLACIER"},
+		{"attic that fell back to the primary is readable, so STANDARD", "vault", "idrive", "STANDARD"},
+		{"a floor that is neither is downstairs", "", "geyser", "STANDARD"},
+		{"no backend recorded", "standard", "", "STANDARD"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, CustomerStorageClass(tt.floor, tt.backend))
+		})
+	}
+	assert.True(t, IsArchiveClass("GLACIER"))
+	assert.True(t, IsArchiveClass("DEEP_ARCHIVE"))
+	assert.False(t, IsArchiveClass("STANDARD"))
+	assert.False(t, IsArchiveClass("REDUCED_REDUNDANCY"))
+}

@@ -44,6 +44,9 @@ func (s *Server) initMetrics() {
 		reg.MustRegister(accountDeletionTenants, accountDeletionObjects, accountDeletionLastRun, accountDeletionRuns)
 		// Egress throttle (WP-R10-9). No tenant label on any of them.
 		reg.MustRegister(egressEngaged, egressWouldThrottle, egressRejected, egressThrottledBytes)
+		// Reads that waited on an automatic restore (WP-R13-1): their 503 is
+		// kept out of vaultaire_errors_total, this is where it shows.
+		reg.MustRegister(smartRestoreWaits)
 		reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 			Name: "vaultaire_egress_throttled_tenants",
 			Help: "Tenants past their monthly egress allowance with the egress_throttle flag on (their downloads are paced).",

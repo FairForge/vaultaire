@@ -55,6 +55,19 @@ if your hot allowance is full. The schedule is switched on per account by us —
 is on for yours, everything you store on Standard simply stays hot. Need specific data to never demote?
 The **pin-hot add-on** is $3/TB/mo for the pinned amount.
 
+**Do I have to restore Standard data that moved to tape?**
+No. A Standard object is `STANDARD` in every listing and `HEAD`, wherever we keep its
+bytes, so `aws s3 sync`, rclone and backup tools download it like any other object —
+there is no restore step and `RestoreObject` is only for Vault. If the bytes have
+already been written to tape, the first read answers `503` with a `Retry-After` header
+while we bring the object back; your client's retry (or the next run of your sync)
+gets it.
+
+**Does the Smart schedule apply to buckets in another region?**
+No. A bucket created in a region other than the default one (`us-central-1`) stays in
+that region on hot storage — its objects are never moved to tape, and they do not
+count against the 15% hot share.
+
 **How is $4.49/TB sustainable? Is this VC-subsidized?**
 No. The tiering math alone is a real margin: at full fill, ~15% on hot storage and
 ~85% on tape blends our cost to about $1.94/TB against $4.49 revenue. On top of

@@ -318,17 +318,21 @@ func TestRequestContentLanguage_DropsControlChars(t *testing.T) {
 	assert.Equal(t, "", requestContentLanguage(r))
 }
 
-// --- ListObjects storage class from backend --------------------------------
+// --- ListObjects storage class: floor first, then the backend ---------------
 
 func TestListObjectsV2_StorageClassFromBackend(t *testing.T) {
 	f := setupA1Fixture(t)
 
+	// sc-glacier is an attic object (written with an archive class, billed on
+	// the vault floor); sc-demoted is a downstairs object the Smart tier
+	// parked on the same backend (WP-R13-1).
 	_, err := f.db.Exec(`
-		INSERT INTO object_head_cache (tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name)
+		INSERT INTO object_head_cache (tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, floor)
 		VALUES
-			($1, $2, 'sc-glacier', 3, 'e1', 'text/plain', 'geyser'),
-			($1, $2, 'sc-idrive', 3, 'e2', 'text/plain', 'idrive')
-		ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET backend_name = EXCLUDED.backend_name`,
+			($1, $2, 'sc-glacier', 3, 'e1', 'text/plain', 'geyser', 'vault'),
+			($1, $2, 'sc-demoted', 3, 'e3', 'text/plain', 'geyser', 'standard'),
+			($1, $2, 'sc-idrive', 3, 'e2', 'text/plain', 'idrive', 'standard')
+		ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET backend_name = EXCLUDED.backend_name, floor = EXCLUDED.floor`,
 		f.tenantID, f.bucket)
 	require.NoError(t, err)
 
@@ -346,6 +350,7 @@ func TestListObjectsV2_StorageClassFromBackend(t *testing.T) {
 		classes[e.Key] = e.StorageClass
 	}
 	assert.Equal(t, "GLACIER", classes["sc-glacier"])
+	assert.Equal(t, "STANDARD", classes["sc-demoted"], "downstairs is never an archive class")
 	assert.Equal(t, "STANDARD", classes["sc-idrive"])
 	// The fixture object rides backend 'local' → REDUCED_REDUNDANCY, matching
 	// what HEAD reports for the same object (the versitygw sweep caught the

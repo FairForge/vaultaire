@@ -41,7 +41,7 @@ There is no age-based tiering engine (deleted in Review R15, WP-R6-4: it never r
 | `sla.go` | `SLAMonitor` | SLA compliance tracking, violation detection — **unreachable** (WP-R6-4) |
 | `analytics.go` | `Analytics`, `BackendMetrics`, `BackendStats` | Per-backend request/latency stats — **unreachable** (WP-R6-4) |
 | `failover.go` | `FailoverManager`, `BackendCircuitBreaker` | Per-backend circuit breaker (5 failures/60s → open, 30s → half-open → probe) + ordered failover execution |
-| `storage_class.go` | `ResolveStorageClass`, `BackendToStorageClass` | S3 storage class ↔ backend name mapping (STANDARD→idrive, GLACIER→geyser, etc.) |
+| `storage_class.go` | `ResolveStorageClass`, `BackendToStorageClass`, `CustomerStorageClass`, `IsArchiveClass` | S3 storage class ↔ backend name mapping (STANDARD→idrive, GLACIER→geyser, etc.). **`CustomerStorageClass(floor, backend)` is the one place the class a customer sees is derived** (WP-R13-1): a `standard`-floor object is never an archive class whatever backend holds it (a Smart-demoted object on `geyser` is STANDARD); a `vault`-floor object reports its backend's class. `BackendToStorageClass` alone is for operator views and for non-current version rows (no floor on record) |
 | `interface.go` | `Restorer`, `RestoreStatus` | Optional driver interface for archive backends (V18.2): `RestoreObject(days)` + `RestoreStatus` (raw x-amz-restore passthrough). Geyser implements it. `ErrArchived`/`ErrRestoreAlreadyInProgress` sentinels in errors.go; `ErrArchived` is client-level for the breaker AND stops failover iteration (other backends would mask the archived state as 404) |
 | `routing.go` | `LocationStore` | PostgreSQL-backed object location CRUD (RecordLocation, LookupBackend, RemoveLocation, CountByBackend, TouchLastAccessed) — nil-DB safe |
 
@@ -77,7 +77,7 @@ Each registered backend gets an independent `BackendCircuitBreaker`:
 
 If the target backend isn't registered, falls back to primary silently. Storage class is a hint, never an error.
 
-`BackendToStorageClass(backendName)` provides the reverse mapping for GET/HEAD responses.
+`BackendToStorageClass(backendName)` is the reverse mapping; responses to customers (GET/HEAD/listings/inventory/dashboard) go through `CustomerStorageClass(floor, backendName)`, which never reports a downstairs object in an archive class.
 
 ## Review history
 
