@@ -1,6 +1,6 @@
 # WP-R8-4 — the chunker's identity is on record
 
-**Worker session, 2026-10-02. PR #PRNUM, branch `wp/R8-4-chunker-identity`, from `main` @ #556.**
+**Worker session, 2026-10-02. PR #557, branch `wp/R8-4-chunker-identity`, from `main` @ #556.**
 Closes R8-11, R8-18, R10-32 and SYNTHESIS table B row WP-R8-4. No migration (`pipeline_config` has
 been a JSONB column of `object_metadata` since 016/051; it was NULL on every row).
 
