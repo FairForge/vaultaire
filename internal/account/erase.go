@@ -32,6 +32,9 @@ const (
 	ByUser
 	// ByEmail binds the account e-mail.
 	ByEmail
+	// ByAccount binds all three: $1 = users.id, $2 = tenants.id ('' when the
+	// user has no tenant row), $3 = the account e-mail.
+	ByAccount
 )
 
 // Rule is one statement of the erasure, bound to one id.
@@ -154,8 +157,12 @@ var Deleted = []Rule{
 	// The privacy policy: "your own entries are removed with your account"
 	// (the audit trail otherwise lives for the life of the service). Rows
 	// keyed by the tenant only (operator actions on the tenant) are kept and
-	// scrubbed below.
+	// scrubbed below. An OPERATOR's erasure is the other half (WP-R10-3d):
+	// what they did to other accounts and to the service is not their own
+	// entry — it is de-identified first, so the DELETE no longer matches it.
+	{"audit_logs", operatorTrailScrub("audit_logs"), ByAccount},
 	{"audit_logs", `DELETE FROM audit_logs WHERE user_id::text = $1 OR performed_by::text = $1`, ByUser},
+	{"audit_logs_archive", operatorTrailScrub("audit_logs_archive"), ByAccount},
 	{"audit_logs_archive", `DELETE FROM audit_logs_archive WHERE user_id::text = $1 OR performed_by::text = $1`, ByUser},
 	// The waitlist row is the sign-up; with the account it is PII with no
 	// purpose left.
@@ -166,6 +173,44 @@ var Deleted = []Rule{
 	{"tenants", `DELETE FROM tenants WHERE id = $1`, ByTenant},
 }
 
+// operatorTrailScrub is the statement that keeps the operator audit trail when
+// the operator's own account is erased (WP-R10-3d). Of the rows that name the
+// user ($1) as subject or actor, a row is NOT the user's own entry when it is
+//
+//   - about another tenant (tenant_id set and not theirs — the admin dashboard
+//     writes the admin as user_id AND performed_by with the subject tenant in
+//     tenant_id: suspend, enable, quota, bandwidth, tier, the erasure trigger),
+//   - an administrative action on the service (event_type 'admin': primary
+//     swap, job triggers, reconcile, waitlist and audit exports), or
+//   - an action with no tenant on a subject that is not the user (a global
+//     flag flip, anything done to another user).
+//
+// Those rows stay, with everything that identifies the erased person removed:
+// user_id / performed_by where they are the user, the client IP and user agent
+// (the actor's — kept when another, surviving operator made the request), and
+// any top-level metadata value equal to their id or e-mail (the primary-swap
+// row carries "admin": <e-mail>). `actor_erased` is added because
+// a NULL performed_by alone reads as "the system did it". Everything else that
+// names the user — sign-ins, their own keys, their own account events — falls
+// through to the DELETE that follows.
+func operatorTrailScrub(table string) string {
+	return `UPDATE ` + table + `
+	   SET user_id      = CASE WHEN user_id::text = $1 THEN NULL ELSE user_id END,
+	       performed_by = CASE WHEN performed_by::text = $1 THEN NULL ELSE performed_by END,
+	       ip         = CASE WHEN performed_by IS NULL OR performed_by::text = $1 THEN NULL ELSE ip END,
+	       user_agent = CASE WHEN performed_by IS NULL OR performed_by::text = $1 THEN NULL ELSE user_agent END,
+	       metadata = (CASE WHEN jsonb_typeof(metadata) = 'object' THEN
+	                       (SELECT COALESCE(jsonb_object_agg(m.k, m.v), '{}'::jsonb)
+	                          FROM jsonb_each(metadata) AS m(k, v)
+	                         WHERE jsonb_typeof(m.v) <> 'string'
+	                            OR lower(m.v #>> '{}') NOT IN (lower($1), lower($3)))
+	                   ELSE '{}'::jsonb END) || '{"actor_erased": true}'::jsonb
+	 WHERE (user_id::text = $1 OR performed_by::text = $1)
+	   AND ((tenant_id IS NOT NULL AND tenant_id <> $2)
+	     OR event_type = 'admin'
+	     OR (tenant_id IS NULL AND user_id::text IS DISTINCT FROM $1))`
+}
+
 // Kept is every tenant/user-keyed table an erasure leaves rows in, with the
 // scrub applied (empty SQL = kept verbatim) and why.
 var Kept = []Rule{
@@ -173,7 +218,9 @@ var Kept = []Rule{
 	// the tenant reference is dropped, the event body is Stripe's record.
 	{"stripe_events", `UPDATE stripe_events SET tenant_id = NULL WHERE tenant_id = $1`, ByTenant},
 	// Operator actions keyed by the tenant only (suspend, quota, tier…):
-	// the security record, with the client IP and user agent dropped.
+	// the security record, with the client IP and user agent dropped. (The
+	// rows an erased OPERATOR leaves behind are de-identified by
+	// operatorTrailScrub in Deleted, before the DELETE of their own entries.)
 	{"audit_logs", `UPDATE audit_logs SET ip = NULL, user_agent = NULL WHERE tenant_id = $1`, ByTenant},
 	{"audit_logs_archive", `UPDATE audit_logs_archive SET ip = NULL, user_agent = NULL WHERE tenant_id = $1`, ByTenant},
 	// Financial ledgers (no PII beyond the tenant id; a dispute needs them).
@@ -231,11 +278,11 @@ func (s *Service) EraseRows(ctx context.Context, userID, tenantID, email string,
 	}
 
 	for _, r := range Deleted {
-		arg, ok := keyArg(r.Key, userID, tenantID, email)
+		args, ok := ruleArgs(r.Key, userID, tenantID, email)
 		if !ok {
 			continue
 		}
-		out, err := tx.ExecContext(ctx, r.SQL, arg)
+		out, err := tx.ExecContext(ctx, r.SQL, args...)
 		if err != nil {
 			return res, fmt.Errorf("erase %s: %w", r.Table, err)
 		}
@@ -247,11 +294,11 @@ func (s *Service) EraseRows(ctx context.Context, userID, tenantID, email string,
 		if r.SQL == "" {
 			continue
 		}
-		arg, ok := keyArg(r.Key, userID, tenantID, email)
+		args, ok := ruleArgs(r.Key, userID, tenantID, email)
 		if !ok {
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, r.SQL, arg); err != nil {
+		if _, err := tx.ExecContext(ctx, r.SQL, args...); err != nil {
 			return res, fmt.Errorf("scrub %s: %w", r.Table, err)
 		}
 	}
@@ -261,15 +308,19 @@ func (s *Service) EraseRows(ctx context.Context, userID, tenantID, email string,
 	return res, nil
 }
 
-// keyArg picks the id a rule binds; a rule whose id is unknown (a user with
-// no tenant row, no e-mail) is skipped rather than run with ”.
-func keyArg(k KeyKind, userID, tenantID, email string) (string, bool) {
+// ruleArgs picks the ids a rule binds; a rule whose id is unknown (a user with
+// no tenant row, no e-mail) is skipped rather than run with an empty id. ByAccount
+// needs only the user: with no tenant of their own every tenant-keyed row
+// they acted on is someone else's, and an empty e-mail matches no metadata.
+func ruleArgs(k KeyKind, userID, tenantID, email string) ([]any, bool) {
 	switch k {
 	case ByUser:
-		return userID, userID != ""
+		return []any{userID}, userID != ""
 	case ByTenant:
-		return tenantID, tenantID != ""
+		return []any{tenantID}, tenantID != ""
+	case ByAccount:
+		return []any{userID, tenantID, email}, userID != ""
 	default:
-		return email, email != ""
+		return []any{email}, email != ""
 	}
 }

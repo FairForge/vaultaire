@@ -56,9 +56,9 @@ func setupEraseFixture(t *testing.T) *eraseFixture {
 		// Residue after a failed run: the deleted list itself is the cleanup,
 		// bound to this fixture's ids only.
 		for _, r := range Deleted {
-			arg, ok := keyArg(r.Key, f.userID, f.tenantID, f.email)
+			args, ok := ruleArgs(r.Key, f.userID, f.tenantID, f.email)
 			if ok {
-				_, _ = db.ExecContext(ctx, r.SQL, arg)
+				_, _ = db.ExecContext(ctx, r.SQL, args...)
 			}
 		}
 		_, _ = db.ExecContext(ctx, `DELETE FROM stripe_events WHERE event_id = $1`, "evt_erase_"+f.suffix)
@@ -159,10 +159,10 @@ func TestEraseRows_RemovesEveryListedTableKeepsTheLedgers(t *testing.T) {
 		if r.SQL[:6] != "DELETE" {
 			continue
 		}
-		arg, _ := keyArg(r.Key, f.userID, f.tenantID, f.email)
+		args, _ := ruleArgs(r.Key, f.userID, f.tenantID, f.email)
 		// Turn the DELETE into a COUNT with the same predicate.
 		where := r.SQL[strings.Index(r.SQL, "WHERE"):]
-		n := f.count("SELECT COUNT(*) FROM "+r.Table+" "+where, arg)
+		n := f.count("SELECT COUNT(*) FROM "+r.Table+" "+where, args...)
 		assert.Zero(t, n, "%s must be empty for the erased account", r.Table)
 	}
 	assert.Zero(t, f.count(`SELECT COUNT(*) FROM multipart_parts WHERE upload_id = $1`, "upload-"+strings.Repeat("a", 24)+f.suffix), "parts cascade with the upload")
@@ -245,4 +245,118 @@ func TestEraseRows_RefusesWhileObjectsRemain(t *testing.T) {
 	assert.ErrorIs(t, err, ErrObjectsRemain, "a head row means bytes on a backend — never orphan them")
 	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM users WHERE id::text = $1`, f.userID), "nothing erased")
 	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM tenants WHERE id = $1`, f.tenantID))
+}
+
+// WP-R10-3d (post-merge finding PM-4): an operator's own erasure must not take
+// the operator audit trail with it. The dashboard's admin handlers write the
+// admin as BOTH user_id and performed_by with the OTHER tenant in tenant_id, so
+// `DELETE … WHERE user_id = $1 OR performed_by = $1` removed the record of every
+// suspension, quota edit and primary swap the admin ever made.
+func TestEraseRows_OperatorErasureKeepsTheOperatorTrail(t *testing.T) {
+	// Arrange
+	f := setupEraseFixture(t)
+	f.seed(time.Now().Add(-time.Hour))
+	ctx := context.Background()
+	u, s := f.userID, f.suffix
+	otherTenant := "tenant-other-" + s
+	otherUser := uuid.New().String()
+	otherAdmin := uuid.New().String()
+	mark := "wp-r10-3d:" + s // rows with no tenant are found by resource
+	t.Cleanup(func() {
+		for _, tbl := range []string{"audit_logs", "audit_logs_archive"} {
+			_, _ = f.db.ExecContext(ctx, `DELETE FROM `+tbl+` WHERE resource = $1`, mark)
+		}
+	})
+	insert := func(table, action, eventType string, userID, tenantID, performedBy any, metadata string) {
+		f.exec(`INSERT INTO `+table+` (user_id, tenant_id, event_type, action, resource, result, ip, user_agent, metadata, performed_by)
+		        VALUES ($1, $2, $3, $4, $5, 'success', '203.0.113.77', 'AdminBrowser/1', $6::jsonb, $7)`,
+			userID, tenantID, eventType, action, mark, metadata, performedBy)
+	}
+	// The operator trail: what the erased admin did to another tenant, to
+	// another user, and to the service itself.
+	insert("audit_logs", "admin.tenant_suspended", "admin", u, otherTenant, u, `{"reason":"abuse"}`)
+	insert("audit_logs", "key.revoked", "key", otherUser, otherTenant, u, `{}`)
+	insert("audit_logs", "admin.primary_swapped", "admin", u, nil, u, fmt.Sprintf(`{"backend":"lyve","admin":%q}`, strings.ToUpper(f.email)))
+	insert("audit_logs", "flag.set", "flag", nil, nil, u, `{"enabled":false}`)
+	insert("audit_logs_archive", "admin.tenant_quota_set", "admin", u, otherTenant, u, fmt.Sprintf(`{"storage_limit_bytes":1,"by":%q}`, u))
+	// Named as the subject by ANOTHER operator's request: the IP is that operator's.
+	insert("audit_logs", "admin.role_changed", "admin", u, otherTenant, otherAdmin, `{}`)
+	// The admin's own entries: a sign-in with no tenant, a key of their own.
+	insert("audit_logs", "auth.login_succeeded", "auth", u, nil, u, `{"via":"password"}`)
+	insert("audit_logs", "key.created", "key", u, f.tenantID, u, `{}`)
+	insert("audit_logs_archive", "auth.login_succeeded", "auth", u, f.tenantID, u, `{}`)
+	// A neighbour: another operator's row about the same tenant is not ours to touch.
+	insert("audit_logs", "admin.tenant_enabled", "admin", otherAdmin, otherTenant, otherAdmin, `{}`)
+
+	// Act
+	_, err := f.svc.EraseRows(ctx, f.userID, f.tenantID, f.email, time.Now())
+	require.NoError(t, err)
+
+	// Assert — nothing names the erased user any more, in either table.
+	for _, tbl := range []string{"audit_logs", "audit_logs_archive"} {
+		assert.Zero(t, f.count(`SELECT COUNT(*) FROM `+tbl+` WHERE user_id::text = $1 OR performed_by::text = $1`, u), "%s still names the erased user", tbl)
+		assert.Zero(t, f.count(`SELECT COUNT(*) FROM `+tbl+` WHERE resource = $1 AND (metadata::text ILIKE '%'||$2||'%' OR metadata::text ILIKE '%'||$3||'%')`, mark, u, f.email),
+			"%s metadata still carries the erased user's id or e-mail", tbl)
+	}
+	// The operator trail is kept, de-identified.
+	type kept struct {
+		userID, performedBy, ip, ua sql.NullString
+		metadata                    string
+	}
+	read := func(table, action string) (kept, bool) {
+		var k kept
+		err := f.db.QueryRowContext(ctx, `SELECT user_id::text, performed_by::text, ip::text, user_agent, COALESCE(metadata, '{}')::text
+		                                    FROM `+table+` WHERE resource = $1 AND action = $2`, mark, action).
+			Scan(&k.userID, &k.performedBy, &k.ip, &k.ua, &k.metadata)
+		if err == sql.ErrNoRows {
+			return k, false
+		}
+		require.NoError(t, err)
+		return k, true
+	}
+	for _, c := range []struct{ table, action string }{
+		{"audit_logs", "admin.tenant_suspended"},
+		{"audit_logs", "admin.primary_swapped"},
+		{"audit_logs", "flag.set"},
+		{"audit_logs_archive", "admin.tenant_quota_set"},
+	} {
+		k, ok := read(c.table, c.action)
+		if !assert.True(t, ok, "%s %s: the operator row must survive the operator's erasure", c.table, c.action) {
+			continue
+		}
+		assert.False(t, k.userID.Valid, "%s: user_id nulled", c.action)
+		assert.False(t, k.performedBy.Valid, "%s: performed_by nulled", c.action)
+		assert.False(t, k.ip.Valid, "%s: ip nulled", c.action)
+		assert.False(t, k.ua.Valid, "%s: user agent nulled", c.action)
+		assert.Contains(t, k.metadata, `"actor_erased": true`, "%s: the row says its actor was erased (NULL alone reads as the system)", c.action)
+	}
+	swap, _ := read("audit_logs", "admin.primary_swapped")
+	assert.Contains(t, swap.metadata, `"backend": "lyve"`, "the rest of the metadata is kept")
+	quota, _ := read("audit_logs_archive", "admin.tenant_quota_set")
+	assert.Contains(t, quota.metadata, `"storage_limit_bytes": 1`)
+	// An action on ANOTHER user keeps its subject.
+	revoked, ok := read("audit_logs", "key.revoked")
+	require.True(t, ok, "an action on another user's key survives")
+	assert.Equal(t, otherUser, revoked.userID.String, "the subject is not the erased user and stays")
+	assert.False(t, revoked.performedBy.Valid)
+	assert.False(t, revoked.ip.Valid)
+	// A surviving operator's request about the erased user keeps that operator's IP.
+	byOther, ok := read("audit_logs", "admin.role_changed")
+	require.True(t, ok)
+	assert.False(t, byOther.userID.Valid, "the erased subject is nulled")
+	assert.Equal(t, otherAdmin, byOther.performedBy.String, "the surviving actor stays")
+	assert.True(t, byOther.ip.Valid, "the IP is the surviving actor's, not the erased user's")
+	// The admin's own entries are removed with the account (the privacy policy).
+	for _, c := range []struct{ table, action string }{
+		{"audit_logs", "auth.login_succeeded"}, {"audit_logs", "key.created"}, {"audit_logs_archive", "auth.login_succeeded"},
+	} {
+		_, ok := read(c.table, c.action)
+		assert.False(t, ok, "%s %s is the user's own entry and goes", c.table, c.action)
+	}
+	// The neighbour's row is untouched.
+	nb, ok := read("audit_logs", "admin.tenant_enabled")
+	require.True(t, ok)
+	assert.Equal(t, otherAdmin, nb.performedBy.String)
+	assert.True(t, nb.ip.Valid, "another operator's row keeps its IP")
+	assert.NotContains(t, nb.metadata, "actor_erased")
 }
