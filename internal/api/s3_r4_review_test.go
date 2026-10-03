@@ -405,7 +405,7 @@ func TestListObjectVersions_PrefixIsLiteralAndClassFromBackend(t *testing.T) {
 	require.NoError(t, xml.Unmarshal(w.Body.Bytes(), &res))
 	require.Len(t, res.Versions, 1)
 	assert.Equal(t, "a_b", res.Versions[0].Key)
-	assert.Equal(t, "REDUCED_REDUNDANCY", res.Versions[0].StorageClass, "same backend→class mapping as List and HEAD")
+	assert.Equal(t, "STANDARD", res.Versions[0].StorageClass, "same backend→class mapping as List and HEAD (local is STANDARD since WP-R7-5)")
 }
 
 func TestPrefixSuccessor(t *testing.T) {

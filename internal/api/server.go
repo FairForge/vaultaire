@@ -99,6 +99,7 @@ type Server struct {
 	multipartReaper    *MultipartReaper
 	quotaReconcileGate jobGate                // single-flight for POST /admin/quota-reconcile (Review R13-05)
 	chunkMover         *ChunkMover            // chunk blobs written before WP-R8-7 → the one address (POST /admin/chunk-move)
+	routingTruth       *RoutingTruthChecker   // boot check + the routing_truth job (WP-R7-5, routing_truth.go)
 	chunkMoveGate      jobGate                // one chunk move at a time
 	jobs               *jobScheduler          // the one background-job scheduler (WP-R13-3, jobs.go)
 	retention          *RetentionJob          // nightly log-table pruner (Review R13-14, checklist item 5)
@@ -301,6 +302,29 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// Dedup GC runner — reconciles ref counts and reclaims orphaned chunks.
 	s.dedupGCRunner = NewDedupGCRunner(s.db, s.engine, s.gci, logger)
 	s.chunkMover = NewChunkMover(s.db, s.engine, logger)
+
+	// Routing truth (WP-R7-5): the boot check runs in Start, the sampled
+	// job daily. Knobs: ROUTING_TRUTH_SAMPLE, ROUTING_TRUTH_PERMAFROST_SAMPLE,
+	// ROUTING_TRUTH_CHUNKED_SAMPLE — a rejected value is logged and the
+	// default kept (R13-19).
+	s.routingTruth = NewRoutingTruthChecker(s.db, s.engine, s.gci, logger)
+	if s.routingTruth != nil {
+		knob := func(name string, set func(int)) {
+			if v := os.Getenv(name); v != "" {
+				if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+					set(n)
+				} else {
+					logger.Warn("invalid "+name+" (need an integer >= 0), keeping default", zap.String("value", v))
+				}
+			}
+		}
+		knob("ROUTING_TRUTH_SAMPLE", func(n int) { s.routingTruth.Sample = n })
+		knob("ROUTING_TRUTH_PERMAFROST_SAMPLE", func(n int) { s.routingTruth.PermafrostSample = n })
+		knob("ROUTING_TRUTH_CHUNKED_SAMPLE", func(n int) { s.routingTruth.ChunkedSample = n })
+		// Every result series at 0 per registered backend from the first
+		// scrape (main.go registers the drivers before NewServer).
+		s.routingTruth.initSeries()
+	}
 
 	// Smart-tier demotion job (5.15.8): keeps ≤15% of a Standard tenant's
 	// quota on the hot backend, flag-gated per tenant (smart_demotion,
@@ -905,6 +929,10 @@ func (s *Server) registerComplianceRoutes() {
 		// Chunk blobs written before WP-R8-7 → the one address. Dry run by
 		// default; ?backend= is required.
 		r.Post("/chunk-move", s.requireAdmin(s.handleChunkMove))
+		// Routing truth (WP-R7-5): the boot check, the rows on no registered
+		// backend, the last run; and the NULL-row resolution (dry run by default).
+		r.Get("/routing-truth", s.requireAdmin(s.handleAdminRoutingTruth))
+		r.Post("/routing-truth/resolve-null", s.requireAdmin(s.handleAdminRoutingTruthResolveNull))
 
 		// Feature flags (1.13): flip kill-switches / per-tenant enablement
 		// at runtime. updated_by comes from the JWT.
@@ -1315,6 +1343,18 @@ func (s *Server) Start() error {
 		}
 		s.accountDeletion.Sessions = s.sessionStore
 		s.jobs.Register(s.accountDeletion.spec())
+	}
+	// Routing truth (WP-R7-5): every backend_name on record must be a
+	// registered driver, and no two names may share a store. One Error line
+	// per finding; it reads three tables and never blocks or fails boot.
+	if s.routingTruth != nil {
+		go func() {
+			bctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+			defer cancel()
+			if _, err := s.routingTruth.BootCheck(bctx); err != nil {
+				s.logger.Error("routing truth: boot check could not read the database", zap.Error(err))
+			}
+		}()
 	}
 	// Every background job (jobs_wiring.go has the table): daily jobs catch
 	// up a few minutes after boot, the hourly ones run once and then tick.

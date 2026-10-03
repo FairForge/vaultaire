@@ -117,8 +117,9 @@ func TestStorageClassDisablesChunking_Public(t *testing.T) {
 }
 
 // R2-07: the x-amz-storage-class header is client input. Internal classes
-// (PUBLIC → r2, RESILIENT → lyve) and classes we map to hub disk
-// (REDUCED_REDUNDANCY → local) must never be honoured from it, and a header
+// (PUBLIC → r2, RESILIENT → lyve) and classes we do not sell
+// (REDUCED_REDUNDANCY — it used to map to the hub's disk; unmapped since
+// WP-R7-5) must never be honoured from it, and a header
 // can never make a cold/resilient bucket's object hotter than its tier.
 func TestResolvePutStorageClass_HeaderIsUntrusted(t *testing.T) {
 	db := cdnTestDB(t)
@@ -129,7 +130,7 @@ func TestResolvePutStorageClass_HeaderIsUntrusted(t *testing.T) {
 	seedPlacementBucket(t, tenantID, "priv-auto", "private", "auto")
 	assert.Equal(t, "", resolvePutStorageClass(ctx, db, eng, tenantID, "priv-auto", "PUBLIC"), "a private object can never be routed to the public store")
 	assert.Equal(t, "", resolvePutStorageClass(ctx, db, eng, tenantID, "priv-auto", "RESILIENT"), "internal tier name")
-	assert.Equal(t, "", resolvePutStorageClass(ctx, db, eng, tenantID, "priv-auto", "REDUCED_REDUNDANCY"), "maps to local = the hub's disk")
+	assert.Equal(t, "", resolvePutStorageClass(ctx, db, eng, tenantID, "priv-auto", "REDUCED_REDUNDANCY"), "not a class we sell (it used to map to local = the hub's disk)")
 	assert.Equal(t, "", resolvePutStorageClass(ctx, db, eng, tenantID, "priv-auto", "STANDARD_IA"), "not a class we sell")
 	assert.Equal(t, "", resolvePutStorageClass(ctx, db, eng, tenantID, "priv-auto", "garbage"))
 	assert.Equal(t, "STANDARD", resolvePutStorageClass(ctx, db, eng, tenantID, "priv-auto", "STANDARD"))

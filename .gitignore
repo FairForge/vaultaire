@@ -110,6 +110,8 @@ cmd/tools/geyser-smoke/
 /uloz-bench-linux
 /validate
 /validate-linux
+/routing-truth
+/routing-truth-linux
 /bench-compare
 /bench-compare-linux
 /lighthouse-bench

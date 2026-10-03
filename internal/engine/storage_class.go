@@ -15,11 +15,19 @@ package engine
 // (180-day minimum retention, 128 KB minimum object size, retrieval caps — see
 // internal/drivers/lyve_README.md). We have never used that: the old mapping
 // sent objects to the Lyve *backend* at its default class, not to Lyve IA.
+//
+// REDUCED_REDUNDANCY is absent too (WP-R7-5, decision in
+// docs/reviews/WP-R7-5.md): it used to route to `local`, the hub's own disk
+// — a single copy on a DATA_PATH that is not backed up (R9-12); 449 of
+// prod's 451 `local` head rows pointed at bytes that were gone. `local` is
+// the development primary and the engine's last resort, never a class a
+// customer can choose; the class degrades to the primary at STANDARD like
+// any other unsold class (the request header never reached here anyway —
+// api.clientStorageClass drops it, R2-07).
 var storageClassToBackend = map[string]string{
-	"STANDARD":           "idrive",
-	"GLACIER":            "geyser",
-	"DEEP_ARCHIVE":       "geyser",
-	"REDUCED_REDUNDANCY": "local",
+	"STANDARD":     "idrive",
+	"GLACIER":      "geyser",
+	"DEEP_ARCHIVE": "geyser",
 
 	// RESILIENT is OUR tier name, not an AWS storage class — it is what the
 	// `resilient` bucket tier_preference resolves to (the $7.99 Lyve-backed
@@ -43,9 +51,11 @@ var backendToStorageClass = map[string]string{
 	"lyve":       "STANDARD",
 	"geyser":     "GLACIER",
 	"permafrost": "STANDARD",
-	"local":      "REDUCED_REDUNDANCY",
-	"s3":         "STANDARD",
-	"r2":         "STANDARD",
+	// local reports STANDARD: on a box where it is the primary (development)
+	// that is the class the object has; nowhere else is it a tier (WP-R7-5).
+	"local": "STANDARD",
+	"s3":    "STANDARD",
+	"r2":    "STANDARD",
 }
 
 func ResolveStorageClass(class string, primaryBackend string, availableDrivers map[string]Driver) (driverName, resolvedClass string) {

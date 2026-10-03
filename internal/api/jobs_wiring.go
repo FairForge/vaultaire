@@ -26,6 +26,7 @@ import (
 //	dedup_gc          02:30  +3 m   2 h      the reconcile or the candidate scan fails
 //	retention         03:30  +1 m   10 m     any table could not be pruned
 //	account_deletion  04:30  +2 m   6 h      a tenant was deferred (Stripe, a backend)
+//	routing_truth     05:30  +6 m   1 h      the head table cannot be read (a backend that cannot be asked is a note)
 //	smart_demotion    06:30  +5 m   6 h      the tenant list cannot be read
 //
 // A single report, chunk, object or tenant that fails inside inventory,
@@ -59,6 +60,9 @@ func (s *Server) registerJobs() {
 	}
 	if s.retention != nil {
 		s.jobs.Register(s.retention.spec())
+	}
+	if s.routingTruth != nil {
+		s.jobs.Register(s.routingTruth.spec())
 	}
 	if s.smartDemotion != nil {
 		// The job needs both backends. Without them (a local or CI build, a

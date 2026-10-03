@@ -207,6 +207,7 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 
 	// Route the read to the backend that holds the source (routing truth).
 	if srcBackend != "" && s.engine != nil {
+		noteRecordedBackend(s.engine, s.logger, "copy_source", srcBackend)
 		s.engine.HintBackend(srcContainer, srcKey, srcBackend)
 	}
 	reader, err := s.engine.Get(r.Context(), srcContainer, srcKey)

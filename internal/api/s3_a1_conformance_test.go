@@ -352,8 +352,8 @@ func TestListObjectsV2_StorageClassFromBackend(t *testing.T) {
 	assert.Equal(t, "GLACIER", classes["sc-glacier"])
 	assert.Equal(t, "STANDARD", classes["sc-demoted"], "downstairs is never an archive class")
 	assert.Equal(t, "STANDARD", classes["sc-idrive"])
-	// The fixture object rides backend 'local' → REDUCED_REDUNDANCY, matching
-	// what HEAD reports for the same object (the versitygw sweep caught the
-	// two paths disagreeing).
-	assert.Equal(t, "REDUCED_REDUNDANCY", classes[f.object])
+	// The fixture object rides backend 'local' → STANDARD since WP-R7-5
+	// (local is no tier), matching what HEAD reports for the same object
+	// (the versitygw sweep caught the two paths disagreeing).
+	assert.Equal(t, "STANDARD", classes[f.object])
 }

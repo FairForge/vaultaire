@@ -112,7 +112,11 @@ Behaviour worth knowing before writing code against it:
   floor (hot). `GLACIER` / `DEEP_ARCHIVE` = the Vault floor (tape): a GET of an
   archived object answers 403 `InvalidObjectState` until `?restore` completes
   (minutes to hours). Listings and HEAD report the class the object actually
-  has.
+  has. Any other class in `x-amz-storage-class` — `REDUCED_REDUNDANCY`,
+  `STANDARD_IA`, `ONEZONE_IA`, `INTELLIGENT_TIERING` — is accepted and stored
+  as the bucket's own tier (`STANDARD` on a plain bucket): we do not sell a
+  single-copy or an infrequent-access class, and nothing is ever placed on the
+  server's own disk.
 - **Quota, not overage.** A PUT past the tenant's quota (per floor when the
   tenant bought a house, else the total) answers 403 `QuotaExceeded`; the free
   tier is 5 GB, 1 bucket, 1 scoped key. Nothing is ever billed per request or
@@ -166,7 +170,8 @@ Webhooks    GET/POST /api/v1/webhooks · PATCH/DELETE /webhooks/{id} · GET /web
 Events      GET /api/v1/events   (object.created/deleted/downloaded, bucket.*, key.*, sts.token_created, webhook.test)
 STS         POST /api/v1/sts/token {"duration_seconds","permissions","bucket_scope","parent_key_id"}
 Admin       /api/v1/admin/*  (admin role: audit, flags, quota-reconcile; jobs = the background jobs' state,
-            POST jobs/{job}/run or dedup-gc | smart-demotion | retention | account-deletion → 202, the run continues)
+            POST jobs/{job}/run or dedup-gc | smart-demotion | retention | account-deletion → 202, the run continues;
+            GET routing-truth = head rows vs. the backends that hold their bytes, POST routing-truth/resolve-null)
 ```
 
 Conventions (Stripe-style):

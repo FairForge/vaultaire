@@ -27,6 +27,7 @@ clean` removes the resulting binaries from the repo root.
 | `onedrive-bench` | bench | `TENANT_N_*` | The driver-path OneDrive/permafrost benchmark (`-files`, `-size-mb`, `-concurrency`) | current |
 | `permafrost-v2`, `permafrost-v3` | bench | `TENANT_N_*` | Raw Graph API benchmarks behind `.private/PERMAFROST_TESTING_RESULTS.md` (v3 = HTTP/1.1 + Range) | historical |
 | `pixeldrain-bench` | bench | `PIXELDRAIN_API_KEY` | CDN option evaluation (`internal/drivers/pixeldrain_README.md`) | historical |
+| `routing-truth` | probe (read-only plan) | `DB_*` or `DATABASE_URL`; optional `DATA_PATH`, `IDRIVE_*`, `TENANT_N_*` | Head rows per recorded backend and tenant, a sample of each class asked of its driver (signed HEAD / stat / Graph), the other routing tables, and the plan per class — writes nothing (WP-R7-5, `docs/reviews/WP-R7-5.md`) | current (2026-10-03) |
 | `uloz-bench` | bench | `ULOZ_LOGIN`, `ULOZ_AUTH_TOKEN` | Uloz.to evaluation (own `CLAUDE.md`) | historical (not in the stack) |
 | `validate` | probe | server URL + keys | S3 conformance drive against a running server; `scripts/validate-backends.sh` cycles backends through it | current |
 
