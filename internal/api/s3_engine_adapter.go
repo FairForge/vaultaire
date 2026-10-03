@@ -356,7 +356,9 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	// Seed the engine's in-memory routing map so GET goes directly to the
 	// correct backend instead of failing over from primary on restart.
 	if cacheHit && cachedBackendName != "" {
-		noteRecordedBackend(a.engine, a.logger, "get", cachedBackendName)
+		if !cachedIsChunked { // a chunked row's name is a sentinel, not a route
+			noteRecordedBackend(a.engine, a.logger, "get", cachedBackendName)
+		}
 		if ce, ok := a.engine.(*engine.CoreEngine); ok {
 			ce.HintBackend(container, artifact, cachedBackendName)
 		}
