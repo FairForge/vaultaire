@@ -107,6 +107,7 @@ var exportExcludedTables = map[string]string{
 // false positive). The schema walk fails on a column missing here.
 var exportNeverColumns = map[string]string{
 	"users.password_hash":                  "credential",
+	"users.password_changed_at":            "false positive (a timestamp, WP-R5-10); the change itself is in the audit section",
 	"users.email_verify_token":             "credential (single-use link)",
 	"tenants.secret_key":                   "credential (the primary pair)",
 	"api_keys.secret_hash":                 "credential",
@@ -357,7 +358,9 @@ const (
 	sqlExportMFA       = `SELECT enabled FROM user_mfa WHERE user_id::text = $1`
 	sqlExportMFAEvents = `SELECT action, success, ip_address AS ip, user_agent, created_at FROM mfa_audit_log WHERE user_id::text = $1 ORDER BY created_at`
 	sqlExportTenant    = `
-		SELECT id, name, email, access_key AS primary_access_key_id, plan, subscription_status, created_at, suspended_at,
+		SELECT id, name, email,
+		       (SELECT key_id FROM api_keys WHERE tenant_id = tenants.id AND is_primary AND revoked_at IS NULL) AS primary_access_key_id,
+		       plan, subscription_status, created_at, suspended_at,
 		       slug, house_period, deletion_stripe_cancelled_at
 		  FROM tenants WHERE id = $1`
 	sqlExportQuotaTotals = `
@@ -402,7 +405,7 @@ const (
 		SELECT upload_id, bucket, object_key AS key, status, content_type, storage_class, metadata, created_at
 		  FROM multipart_uploads WHERE tenant_id = $1 ORDER BY created_at, upload_id`
 	sqlExportAPIKeys = `
-		SELECT id, key_id, name, permissions, bucket_scope, ip_allowlist, expires_at, revoked_at, last_used, created_at
+		SELECT id, key_id, is_primary, name, permissions, bucket_scope, ip_allowlist, expires_at, revoked_at, last_used, created_at
 		  FROM api_keys WHERE user_id::text = $1 ORDER BY created_at, id`
 	sqlExportBandwidth = `
 		SELECT date, ingress_bytes, egress_bytes, requests_count AS requests

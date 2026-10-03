@@ -29,6 +29,9 @@ type User struct {
 	EmailVerified bool
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
+	// PasswordChangedAt is stamped by a password change or reset; a JWT
+	// issued before it is refused (WP-R5-10). Nil = never changed.
+	PasswordChangedAt *time.Time
 }
 
 // Tenant represents an isolated storage namespace
@@ -177,7 +180,7 @@ func (a *AuthService) LoadFromDB(ctx context.Context) error {
 	// abort the whole load — and with it every login after a restart.
 	rows, err := a.sqlDB.QueryContext(ctx, `
 		SELECT id, email, password_hash, COALESCE(company, ''), created_at, updated_at,
-		       COALESCE(email_verified, FALSE)
+		       COALESCE(email_verified, FALSE), password_changed_at
 		FROM users
 	`)
 	if err != nil {
@@ -187,9 +190,13 @@ func (a *AuthService) LoadFromDB(ctx context.Context) error {
 
 	for rows.Next() {
 		u := &User{}
+		var changed sql.NullTime
 		if err := rows.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.Company,
-			&u.CreatedAt, &u.UpdatedAt, &u.EmailVerified); err != nil {
+			&u.CreatedAt, &u.UpdatedAt, &u.EmailVerified, &changed); err != nil {
 			return fmt.Errorf("scan user: %w", err)
+		}
+		if changed.Valid {
+			u.PasswordChangedAt = &changed.Time
 		}
 		a.cacheMu.Lock()
 		a.users[u.Email] = u
@@ -203,6 +210,9 @@ func (a *AuthService) LoadFromDB(ctx context.Context) error {
 	// Load tenants and link to users. COALESCE matches the api_keys load
 	// below: one malformed row (NULL text column) must not abort the whole
 	// credential load — that would leave auth empty after a restart.
+	// tenants.access_key/secret_key are the MIRROR of the live primary pair
+	// (WP-R5-14): they are loaded as the tenant's pair, but the hot index
+	// (keyIndex) is built from api_keys rows only, below.
 	trows, err := a.sqlDB.QueryContext(ctx, `
 		SELECT id, COALESCE(name, ''), COALESCE(email, ''),
 		       COALESCE(access_key, ''), COALESCE(secret_key, ''), created_at
@@ -232,19 +242,19 @@ func (a *AuthService) LoadFromDB(ctx context.Context) error {
 
 		a.cacheMu.Lock()
 		a.tenants[t.ID] = &t
-		if t.AccessKey != "" {
-			a.keyIndex[t.AccessKey] = &t
-		}
 		a.cacheMu.Unlock()
 	}
 	if err := trows.Err(); err != nil {
 		return fmt.Errorf("iterate tenants: %w", err)
 	}
 
-	// Load API keys with scope data. Adds each key to apiKeys and keyIndex
-	// so that scoped VLT_ keys can authenticate S3 requests.
+	// Load API keys with scope data. Every key goes to apiKeys (listings);
+	// only a LIVE key goes to keyIndex (the hot index), and the live primary
+	// becomes the tenant's in-memory pair. The tenant comes from the row
+	// (WP-R5-9); a row without one is listed under the user's tenant but
+	// never indexed.
 	akRows, err := a.sqlDB.QueryContext(ctx, `
-		SELECT id, user_id, name, key_id, secret_hash,
+		SELECT id, user_id, COALESCE(tenant_id, ''), is_primary, name, key_id, secret_hash,
 		       COALESCE(secret_key, ''),
 		       COALESCE(permissions, '["*"]'::jsonb),
 		       COALESCE(bucket_scope, '{}'),
@@ -267,7 +277,7 @@ func (a *AuthService) LoadFromDB(ctx context.Context) error {
 			lastUsed    sql.NullTime
 			revokedAt   sql.NullTime
 		)
-		if err := akRows.Scan(&k.ID, &k.UserID, &k.Name, &k.Key, &k.Hash,
+		if err := akRows.Scan(&k.ID, &k.UserID, &k.TenantID, &k.IsPrimary, &k.Name, &k.Key, &k.Hash,
 			&k.Secret, &permJSON, &bucketScope, &ipAllowlist,
 			&expiresAt, &lastUsed, &k.CreatedAt, &revokedAt); err != nil {
 			return fmt.Errorf("scan api key: %w", err)
@@ -291,13 +301,16 @@ func (a *AuthService) LoadFromDB(ctx context.Context) error {
 		k.Metadata = make(map[string]string)
 
 		a.cacheMu.Lock()
-		if u, ok := a.userIndex[k.UserID]; ok {
-			k.TenantID = u.TenantID
-			if tenant, ok := a.tenants[u.TenantID]; ok {
-				a.keyIndex[k.Key] = tenant
+		rowTenant := k.TenantID != ""
+		if !rowTenant {
+			if u, ok := a.userIndex[k.UserID]; ok {
+				k.TenantID = u.TenantID
 			}
 		}
 		a.apiKeys[k.Key] = &k
+		if rowTenant && k.RevokedAt == nil {
+			a.indexAPIKeyLocked(&k)
+		}
 		a.cacheMu.Unlock()
 	}
 	if err := akRows.Err(); err != nil {
@@ -312,9 +325,11 @@ func (a *AuthService) LoadFromDB(ctx context.Context) error {
 // management API (Review R11-09). tenantID may be empty.
 func (a *AuthService) record(ctx context.Context, e audit.Entry) {
 	if e.TenantID == "" && e.UserID != "" {
+		a.cacheMu.RLock()
 		if u, ok := a.userIndex[e.UserID]; ok {
 			e.TenantID = u.TenantID
 		}
+		a.cacheMu.RUnlock()
 	}
 	audit.Record(ctx, a.sqlDB, e)
 }
@@ -346,7 +361,10 @@ func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password,
 	}
 
 	// Check if user exists
-	if _, exists := a.users[email]; exists {
+	a.cacheMu.RLock()
+	_, exists := a.users[email]
+	a.cacheMu.RUnlock()
+	if exists {
 		return nil, nil, nil, fmt.Errorf("user already exists")
 	}
 
@@ -390,15 +408,20 @@ func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password,
 	// Link tenant to user
 	user.TenantID = tenant.ID
 
-	// The primary API key is the tenant's own S3 key pair.
+	// The primary API key IS the credential (is_primary row, WP-R5-14); the
+	// tenant's access_key/secret_key columns mirror it.
 	apiKey := &APIKey{
-		ID:        uuid.New().String(),
-		UserID:    user.ID,
-		TenantID:  tenant.ID,
-		Name:      "primary",
-		Key:       tenant.AccessKey,
-		Secret:    tenant.SecretKey,
-		CreatedAt: time.Now(),
+		ID:          uuid.New().String(),
+		UserID:      user.ID,
+		TenantID:    tenant.ID,
+		IsPrimary:   true,
+		Name:        "primary",
+		Key:         tenant.AccessKey,
+		Secret:      tenant.SecretKey,
+		Permissions: []string{"*"},
+		BucketScope: []string{},
+		IPAllowlist: []string{},
+		CreatedAt:   time.Now(),
 	}
 
 	// Persist to PostgreSQL so credentials survive restarts — all four rows
@@ -462,10 +485,10 @@ func (a *AuthService) persistNewAccount(ctx context.Context, user *User, tenant 
 		return fmt.Errorf("hash api key secret: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO api_keys (id, user_id, name, key_id, secret_hash, secret_key, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO api_keys (id, user_id, tenant_id, is_primary, name, key_id, secret_hash, secret_key, created_at)
+		VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $8)
 		ON CONFLICT (key_id) DO NOTHING
-	`, apiKey.ID, user.ID, apiKey.Name, apiKey.Key, string(secretHash), apiKey.Secret, apiKey.CreatedAt); err != nil {
+	`, apiKey.ID, user.ID, tenant.ID, apiKey.Name, apiKey.Key, string(secretHash), apiKey.Secret, apiKey.CreatedAt); err != nil {
 		return fmt.Errorf("persist api key: %w", err)
 	}
 
@@ -513,9 +536,13 @@ func (a *AuthService) ValidatePassword(ctx context.Context, email, password stri
 }
 
 // ChangePassword validates the current password and updates to a new one.
-// Updates both the in-memory map and PostgreSQL (if available).
+// Updates both the in-memory map and PostgreSQL (if available). Every JWT
+// issued before the change is dead from here on (WP-R5-10); the dashboard
+// keeps the session the change was made from and revokes the others.
 func (a *AuthService) ChangePassword(ctx context.Context, userID, currentPassword, newPassword string) error {
+	a.cacheMu.RLock()
 	user, exists := a.userIndex[userID]
+	a.cacheMu.RUnlock()
 	if !exists {
 		return fmt.Errorf("user not found")
 	}
@@ -529,19 +556,33 @@ func (a *AuthService) ChangePassword(ctx context.Context, userID, currentPasswor
 		return fmt.Errorf("hash password: %w", err)
 	}
 
-	user.PasswordHash = string(hash)
-
-	if a.sqlDB != nil {
-		_, err = a.sqlDB.ExecContext(ctx,
-			`UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2`,
-			string(hash), userID)
-		if err != nil {
-			return fmt.Errorf("update password in db: %w", err)
-		}
+	changedAt, err := a.setPassword(ctx, user, string(hash))
+	if err != nil {
+		return err
 	}
 
-	a.record(ctx, audit.Entry{UserID: userID, Action: "auth.password_changed", Resource: "user:" + userID})
+	a.record(ctx, audit.Entry{UserID: userID, Action: "auth.password_changed", Resource: "user:" + userID,
+		Metadata: map[string]any{"jwts_invalidated_before": changedAt}})
 	return nil
+}
+
+// setPassword writes a new password hash — the row first, then the
+// in-memory user — and stamps password_changed_at with one timestamp in
+// both places. Returns the stamp.
+func (a *AuthService) setPassword(ctx context.Context, user *User, hash string) (time.Time, error) {
+	changedAt := time.Now().UTC()
+	if a.sqlDB != nil {
+		if _, err := a.sqlDB.ExecContext(ctx,
+			`UPDATE users SET password_hash = $1, updated_at = NOW(), password_changed_at = $3 WHERE id = $2`,
+			hash, user.ID, changedAt); err != nil {
+			return time.Time{}, fmt.Errorf("update password in db: %w", err)
+		}
+	}
+	a.cacheMu.Lock()
+	user.PasswordHash = hash
+	user.PasswordChangedAt = &changedAt
+	a.cacheMu.Unlock()
+	return changedAt, nil
 }
 
 // GetUserByEmail retrieves a user by email
@@ -570,6 +611,8 @@ func (a *AuthService) GetUserByID(ctx context.Context, userID string) (*User, er
 // GetUserIDByTenantID returns the owning user's ID for a given tenant.
 // Returns "" if not found.
 func (a *AuthService) GetUserIDByTenantID(_ context.Context, tenantID string) string {
+	a.cacheMu.RLock()
+	defer a.cacheMu.RUnlock()
 	t, exists := a.tenants[tenantID]
 	if !exists {
 		return ""
@@ -684,16 +727,30 @@ func (a *AuthService) Evict(userID, tenantID string) {
 	delete(a.preferences, userID)
 }
 
+// jwtIssuer is the `iss` every token we mint carries and every token we
+// accept must carry (WP-R5-10).
+const jwtIssuer = "vaultaire"
+
+// ErrJWTRevoked: the token was issued before the user's last password
+// change or reset (WP-R5-10). The holder signs in again.
+var ErrJWTRevoked = errors.New("token issued before the last password change")
+
 // GenerateJWT creates a JWT token for web access
 func (a *AuthService) GenerateJWT(user *User) (string, error) {
+	return a.generateJWTAt(user, time.Now())
+}
+
+// generateJWTAt mints a token with an explicit issue time (tests date a
+// token before a password change).
+func (a *AuthService) generateJWTAt(user *User, issuedAt time.Time) (string, error) {
 	claims := JWTClaims{
 		UserID:   user.ID,
 		Email:    user.Email,
 		TenantID: user.TenantID,
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			Issuer:    "vaultaire",
+			ExpiresAt: jwt.NewNumericDate(issuedAt.Add(24 * time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(issuedAt),
+			Issuer:    jwtIssuer,
 		},
 	}
 
@@ -701,14 +758,18 @@ func (a *AuthService) GenerateJWT(user *User) (string, error) {
 	return token.SignedString(a.jwtSecret)
 }
 
-// ValidateJWT validates a JWT token
+// ValidateJWT validates a JWT token: HMAC signature, expiry, issuer, and —
+// WP-R5-10 — that it was issued no earlier than the user's last password
+// change (`iat` is compared at second precision: a token minted in the same
+// second as the change survives, one minted before it does not). A token
+// for a user this process does not know (erased, evicted) is refused.
 func (a *AuthService) ValidateJWT(tokenString string) (*JWTClaims, error) {
 	token, err := jwt.ParseWithClaims(tokenString, &JWTClaims{}, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method")
 		}
 		return a.jwtSecret, nil
-	})
+	}, jwt.WithIssuer(jwtIssuer), jwt.WithIssuedAt())
 
 	if err != nil {
 		return nil, fmt.Errorf("parse token: %w", err)
@@ -717,6 +778,23 @@ func (a *AuthService) ValidateJWT(tokenString string) (*JWTClaims, error) {
 	claims, ok := token.Claims.(*JWTClaims)
 	if !ok || !token.Valid {
 		return nil, fmt.Errorf("invalid token")
+	}
+	if claims.IssuedAt == nil {
+		return nil, fmt.Errorf("invalid token: no issue time")
+	}
+
+	a.cacheMu.RLock()
+	user, known := a.userIndex[claims.UserID]
+	var changedAt *time.Time
+	if known {
+		changedAt = user.PasswordChangedAt
+	}
+	a.cacheMu.RUnlock()
+	if !known {
+		return nil, fmt.Errorf("invalid token: unknown user")
+	}
+	if changedAt != nil && claims.IssuedAt.Unix() < changedAt.Unix() {
+		return nil, ErrJWTRevoked
 	}
 
 	return claims, nil

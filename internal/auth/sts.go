@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"strings"
 	"time"
 
 	"github.com/lib/pq"
@@ -74,7 +76,10 @@ func GenerateSTSToken(ctx context.Context, db *sql.DB, tenantID, parentKeyID str
 		buckets = []string{}
 	}
 
-	ipRestrict := narrowIPRestrict(parentScope.IPAllowlist, req.IPRestrict)
+	ipRestrict, err := intersectIPRestrict(parentScope.IPAllowlist, req.IPRestrict)
+	if err != nil {
+		return nil, err
+	}
 	if ipRestrict == nil {
 		ipRestrict = []string{}
 	}
@@ -85,6 +90,17 @@ func GenerateSTSToken(ctx context.Context, db *sql.DB, tenantID, parentKeyID str
 	}
 	if ttl > stsMaxTTL {
 		ttl = stsMaxTTL
+	}
+	// A token never outlives its parent (WP-R5-5): clamp to the parent's
+	// expiry, and an expired parent mints nothing.
+	if parentScope.ExpiresAt != nil {
+		left := time.Until(*parentScope.ExpiresAt)
+		if left <= 0 {
+			return nil, fmt.Errorf("%w: the parent key has expired", ErrSTSScope)
+		}
+		if ttl > int(left.Seconds()) {
+			ttl = max(int(left.Seconds()), stsMinTTL)
+		}
 	}
 
 	accessKey, err := generateSTSAccessKey()
@@ -208,14 +224,79 @@ func intersectBucketScope(parent, requested []string) []string {
 	return result
 }
 
-func narrowIPRestrict(parentAllowlist, requested []string) []string {
+// intersectIPRestrict bounds a token's IP restriction by its parent's
+// allowlist (WP-R5-5; R5-10b: the old narrowing returned the REQUESTED
+// list whenever both were set, so a token minted from an IP-restricted key
+// could drop the restriction). No parent restriction → the request's own,
+// validated; no request → the parent's; both → every requested entry that
+// lies inside some parent entry, and ErrSTSScope when none does or an
+// entry does not parse.
+func intersectIPRestrict(parentAllowlist, requested []string) ([]string, error) {
+	for _, r := range requested {
+		if _, _, err := parseIPEntry(r); err != nil {
+			return nil, fmt.Errorf("%w: ip_restrict entry %q is not an IP address or CIDR", ErrSTSScope, r)
+		}
+	}
 	if len(parentAllowlist) == 0 {
-		return requested
+		return requested, nil
 	}
 	if len(requested) == 0 {
-		return parentAllowlist
+		return parentAllowlist, nil
 	}
-	return requested
+	var result []string
+	for _, r := range requested {
+		for _, p := range parentAllowlist {
+			if ipEntryWithin(r, p) {
+				result = append(result, r)
+				break
+			}
+		}
+	}
+	if len(result) == 0 {
+		return nil, fmt.Errorf("%w: ip_restrict does not overlap the parent key's IP allowlist", ErrSTSScope)
+	}
+	return result, nil
+}
+
+// parseIPEntry reads "a.b.c.d", "a.b.c.d/n" or their IPv6 forms into the
+// network it denotes (a bare address is a /32 or /128).
+func parseIPEntry(entry string) (*net.IPNet, int, error) {
+	if strings.Contains(entry, "/") {
+		_, n, err := net.ParseCIDR(entry)
+		if err != nil {
+			return nil, 0, err
+		}
+		ones, _ := n.Mask.Size()
+		return n, ones, nil
+	}
+	ip := net.ParseIP(entry)
+	if ip == nil {
+		return nil, 0, fmt.Errorf("not an ip address: %q", entry)
+	}
+	bits := 128
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+		bits = 32
+	}
+	return &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}, bits, nil
+}
+
+// ipEntryWithin reports whether every address of entry lies inside parent:
+// same family, parent contains the entry's network address, and the entry
+// is no wider than the parent.
+func ipEntryWithin(entry, parent string) bool {
+	e, eOnes, err := parseIPEntry(entry)
+	if err != nil {
+		return false
+	}
+	p, pOnes, err := parseIPEntry(parent)
+	if err != nil {
+		return false
+	}
+	if (e.IP.To4() == nil) != (p.IP.To4() == nil) {
+		return false
+	}
+	return p.Contains(e.IP) && eOnes >= pOnes
 }
 
 func contains(list []string, v string) bool {

@@ -214,3 +214,65 @@ func TestHandleGenerateKey_WithTheGovernanceBypassPermission(t *testing.T) {
 	}
 	t.Fatal("key not created")
 }
+
+// WP-R5-14: the primary pair is rotated, never revoked, from the dashboard.
+func TestHandleRotateKey_ShowsTheNewPairOnce(t *testing.T) {
+	authSvc := auth.NewAuthService(nil, nil)
+	user, _, primary, err := authSvc.CreateUserWithTenant(context.Background(), "rotate@stored.ge", "securepass123", "")
+	require.NoError(t, err)
+	sd := &dashauth.SessionData{UserID: user.ID, TenantID: user.TenantID, Email: user.Email, Role: "user"}
+	require.True(t, primary.IsPrimary)
+
+	r := chi.NewRouter()
+	r.Post("/dashboard/apikeys/{id}/rotate", HandleRotateKey(testAPIKeysTemplate(t), authSvc, zap.NewNop()))
+	req := httptest.NewRequest("POST", "/dashboard/apikeys/"+primary.ID+"/rotate", nil)
+	req = req.WithContext(context.WithValue(req.Context(), dashauth.SessionKey, sd))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	body := rec.Body.String()
+	revealed := body[strings.Index(body, `class="new-key">`)+len(`class="new-key">`):]
+	revealed = revealed[:strings.Index(revealed, "</span>")]
+	assert.NotEqual(t, primary.Key, revealed, "the old key id is not what is revealed")
+	assert.Contains(t, body, `class="new-secret"`, "the new secret is shown once")
+	keys, _ := authSvc.ListAPIKeys(context.Background(), user.ID)
+	var live, revoked int
+	for _, k := range keys {
+		switch {
+		case k.IsPrimary && k.RevokedAt == nil:
+			live++
+			assert.NotEqual(t, primary.Key, k.Key)
+			assert.Equal(t, k.Key, revealed, "the live primary is the pair revealed")
+		case k.ID == primary.ID:
+			revoked++
+			assert.NotNil(t, k.RevokedAt)
+		}
+	}
+	assert.Equal(t, 1, live, "one live primary")
+	assert.Equal(t, 1, revoked)
+}
+
+func TestHandleRevokeKey_PrimaryIsRefused(t *testing.T) {
+	authSvc := auth.NewAuthService(nil, nil)
+	user, _, primary, err := authSvc.CreateUserWithTenant(context.Background(), "revoke-primary@stored.ge", "securepass123", "")
+	require.NoError(t, err)
+	sd := &dashauth.SessionData{UserID: user.ID, TenantID: user.TenantID, Email: user.Email, Role: "user"}
+
+	r := chi.NewRouter()
+	r.Post("/dashboard/apikeys/{id}/revoke", HandleRevokeKey(authSvc, zap.NewNop()))
+	req := httptest.NewRequest("POST", "/dashboard/apikeys/"+primary.ID+"/revoke", nil)
+	req = req.WithContext(context.WithValue(req.Context(), dashauth.SessionKey, sd))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusSeeOther, rec.Code)
+	flash, _ := url.QueryUnescape(rec.Header().Get("Set-Cookie"))
+	assert.Contains(t, flash, "rotate it instead")
+	keys, _ := authSvc.ListAPIKeys(context.Background(), user.ID)
+	for _, k := range keys {
+		if k.ID == primary.ID {
+			assert.Nil(t, k.RevokedAt, "the primary is still live")
+		}
+	}
+}

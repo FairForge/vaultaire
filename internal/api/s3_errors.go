@@ -41,6 +41,7 @@ const (
 	ErrInvalidBucketName         = "InvalidBucketName"
 	ErrInvalidObjectName         = "InvalidObjectName"
 	ErrAccessDenied              = "AccessDenied"
+	ErrInvalidAccessKeyId        = "InvalidAccessKeyId"
 	ErrInvalidRequest            = "InvalidRequest"
 	ErrIncompleteBody            = "IncompleteBody"
 	ErrInternalError             = "InternalError"
@@ -91,6 +92,7 @@ var errorMessages = map[string]string{
 	ErrInvalidBucketName:                 "The specified bucket is not valid",
 	ErrInvalidObjectName:                 "The specified object name is not valid",
 	ErrAccessDenied:                      "Access denied",
+	ErrInvalidAccessKeyId:                "The AWS access key Id you provided does not exist in our records.",
 	ErrInvalidRequest:                    "Invalid request",
 	ErrIncompleteBody:                    "You did not provide the number of bytes specified by the Content-Length HTTP header",
 	ErrInternalError:                     "We encountered an internal error. Please try again",
@@ -138,6 +140,7 @@ var errorStatusCodes = map[string]int{
 	ErrInvalidBucketName:                 http.StatusBadRequest,
 	ErrInvalidObjectName:                 http.StatusBadRequest,
 	ErrAccessDenied:                      http.StatusForbidden,
+	ErrInvalidAccessKeyId:                http.StatusForbidden,
 	ErrInvalidRequest:                    http.StatusBadRequest,
 	ErrIncompleteBody:                    http.StatusBadRequest,
 	ErrInternalError:                     http.StatusInternalServerError,

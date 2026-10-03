@@ -82,8 +82,13 @@
 
 {{if .NewKey}}
 <div class="card card-highlight">
+    {{if .Rotated}}
+    <div class="card-title">Key Rotated — Save These Now</div>
+    <div class="alert alert-success">The old pair stopped working the moment this page loaded; so did any temporary credentials minted from it. Copy the new credentials — the secret will not be shown again.</div>
+    {{else}}
     <div class="card-title">New Key Generated — Save These Now</div>
     <div class="alert alert-success">Copy these credentials. The secret will not be shown again.</div>
+    {{end}}
     <table class="key-reveal">
         <tr>
             <td class="text-muted">Access Key</td>
@@ -124,7 +129,7 @@ aws s3 ls --endpoint-url https://stored.ge</div>
         <tbody>
             {{range .Keys}}
             <tr>
-                <td>{{.Name}}</td>
+                <td>{{.Name}}{{if .IsPrimary}} <span class="badge badge-success" title="The pair you got at signup. It can be rotated, never revoked: your account always keeps one way in.">primary</span>{{end}}</td>
                 <td class="mono">{{.KeyID}}</td>
                 <td>{{.ScopeSummary}}</td>
                 <td>{{.CreatedFmt}}</td>
@@ -132,11 +137,18 @@ aws s3 ls --endpoint-url https://stored.ge</div>
                 <td><span class="badge badge-{{.StatusClass}}">{{.Status}}</span></td>
                 <td>
                     {{if eq .Status "active"}}
-                    <form method="POST" action="/dashboard/apikeys/{{.ID}}/revoke"
+                    <form method="POST" action="/dashboard/apikeys/{{.ID}}/rotate" style="display:inline"
+                          onsubmit="return confirm('Rotate this key? The current pair stops working immediately and a new one is shown once.')">
+                        <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                        <button type="submit" class="btn btn-sm">Rotate</button>
+                    </form>
+                    {{if not .IsPrimary}}
+                    <form method="POST" action="/dashboard/apikeys/{{.ID}}/revoke" style="display:inline"
                           onsubmit="return confirm('Revoke this key? Any applications using it will stop working.')">
                         <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
                         <button type="submit" class="btn btn-sm btn-danger">Revoke</button>
                     </form>
+                    {{end}}
                     {{end}}
                 </td>
             </tr>

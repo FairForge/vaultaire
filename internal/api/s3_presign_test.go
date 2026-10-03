@@ -132,11 +132,18 @@ func newMockDB(t *testing.T) (*Server, sqlmock.Sqlmock, func()) {
 	return s, mock, cleanup
 }
 
+// expectTenantLookup is the one credential lookup (auth.LookupCredential —
+// the api_keys row; the primary pair is an is_primary row, WP-R5-14).
 func expectTenantLookup(mock sqlmock.Sqlmock) {
-	mock.ExpectQuery(`SELECT secret_key, id FROM tenants WHERE access_key`).
+	mock.ExpectQuery(`FROM api_keys ak`).
 		WithArgs(testAccessKey).
-		WillReturnRows(sqlmock.NewRows([]string{"secret_key", "id"}).
-			AddRow(testSecretKey, testPresignTenantID))
+		WillReturnRows(primaryKeyRow(testPresignTenantID, testSecretKey))
+}
+
+// primaryKeyRow is what LookupCredential scans for a live primary row.
+func primaryKeyRow(tenantID, secret string) *sqlmock.Rows {
+	return sqlmock.NewRows([]string{"tenant_id", "secret_key", "permissions", "bucket_scope", "ip_allowlist", "expires_at", "revoked_at", "is_primary"}).
+		AddRow(tenantID, secret, []byte(`["*"]`), "{}", "{}", nil, nil, true)
 }
 
 func TestIsPresignedRequest(t *testing.T) {
@@ -206,9 +213,9 @@ func TestVerifyPresignedURL_InvalidAccessKey(t *testing.T) {
 	s, mock, cleanup := newMockDB(t)
 	defer cleanup()
 
-	mock.ExpectQuery(`SELECT secret_key, id FROM tenants WHERE access_key`).
+	mock.ExpectQuery(`FROM api_keys ak`).
 		WithArgs("NONEXISTENT000000000").
-		WillReturnRows(sqlmock.NewRows([]string{"secret_key", "id"}))
+		WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "secret_key", "permissions", "bucket_scope", "ip_allowlist", "expires_at", "revoked_at", "is_primary"}))
 
 	now := time.Now().UTC()
 	q := signPresignedURL("GET", "/bucket/key", "localhost:8000", "NONEXISTENT000000000", testSecretKey, 3600, now)
@@ -342,22 +349,20 @@ func TestPresignedURL_Integration(t *testing.T) {
 	testContent := "hello from presigned upload"
 	objectKey := "test-upload.txt"
 
-	tenantRow := sqlmock.NewRows([]string{"secret_key", "id"}).
-		AddRow(testSecretKey, testPresignTenantID)
+	tenantRow := primaryKeyRow(testPresignTenantID, testSecretKey)
 	suspendedRow := sqlmock.NewRows([]string{"suspended_at"})
 
 	// Auth expectations (PUT + GET each do tenant lookup + suspended check)
-	mock.ExpectQuery(`SELECT secret_key, id FROM tenants WHERE access_key`).
+	mock.ExpectQuery(`FROM api_keys ak`).
 		WithArgs(testAccessKey).
 		WillReturnRows(tenantRow)
 	mock.ExpectQuery(`SELECT suspended_at FROM tenants WHERE id`).
 		WithArgs(testPresignTenantID).
 		WillReturnRows(suspendedRow)
 
-	tenantRow2 := sqlmock.NewRows([]string{"secret_key", "id"}).
-		AddRow(testSecretKey, testPresignTenantID)
+	tenantRow2 := primaryKeyRow(testPresignTenantID, testSecretKey)
 	suspendedRow2 := sqlmock.NewRows([]string{"suspended_at"})
-	mock.ExpectQuery(`SELECT secret_key, id FROM tenants WHERE access_key`).
+	mock.ExpectQuery(`FROM api_keys ak`).
 		WithArgs(testAccessKey).
 		WillReturnRows(tenantRow2)
 	mock.ExpectQuery(`SELECT suspended_at FROM tenants WHERE id`).
@@ -454,11 +459,11 @@ func TestPresignedURL_ExpiredIntegration(t *testing.T) {
 	}
 	s.router.HandleFunc("/*", s.handleS3Request)
 
-	// Expect tenant lookup, but expiry should fail first
-	mock.ExpectQuery(`SELECT secret_key, id FROM tenants WHERE access_key`).
+	// Expiry fails before any credential lookup; the failure is then
+	// attributed to the key only if it exists (accessKeyExists).
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM api_keys WHERE key_id`).
 		WithArgs(testAccessKey).
-		WillReturnRows(sqlmock.NewRows([]string{"secret_key", "id"}).
-			AddRow(testSecretKey, testPresignTenantID))
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 
 	pastTime := time.Now().UTC().Add(-1 * time.Hour)
 	q := signPresignedURL("GET", "/bucket/key", "localhost:8000", testAccessKey, testSecretKey, 1, pastTime)
@@ -489,9 +494,10 @@ func TestHandleGetPresignedURL(t *testing.T) {
 		config:   &config.Config{Server: config.ServerConfig{Port: 8000}},
 	}
 
-	mock.ExpectQuery(`SELECT access_key, secret_key FROM tenants WHERE id`).
+	// The URL is signed on the live primary ROW (auth.PrimaryPair).
+	mock.ExpectQuery(`SELECT key_id, COALESCE\(secret_key, ''\) FROM api_keys`).
 		WithArgs(testPresignTenantID).
-		WillReturnRows(sqlmock.NewRows([]string{"access_key", "secret_key"}).
+		WillReturnRows(sqlmock.NewRows([]string{"key_id", "secret_key"}).
 			AddRow(testAccessKey, testSecretKey))
 
 	r := httptest.NewRequest("GET", "/api/v1/presigned?bucket=mybucket&key=myfile.txt&method=PUT&expires=7200", nil)
@@ -516,10 +522,9 @@ func TestHandleGetPresignedURL(t *testing.T) {
 	parsedURL, err := url.Parse(resp["url"])
 	require.NoError(t, err)
 
-	mock.ExpectQuery(`SELECT secret_key, id FROM tenants WHERE access_key`).
+	mock.ExpectQuery(`FROM api_keys ak`).
 		WithArgs(testAccessKey).
-		WillReturnRows(sqlmock.NewRows([]string{"secret_key", "id"}).
-			AddRow(testSecretKey, testPresignTenantID))
+		WillReturnRows(primaryKeyRow(testPresignTenantID, testSecretKey))
 
 	verifyReq := httptest.NewRequest("PUT", parsedURL.RequestURI(), bytes.NewReader([]byte("data")))
 	verifyReq.Host = parsedURL.Host

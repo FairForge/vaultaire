@@ -238,6 +238,7 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		dr.Get("/apikeys", handlers.HandleAPIKeys(apikeysTmpl, deps.Auth, deps.Logger))
 		dr.Post("/apikeys", handlers.HandleGenerateKey(apikeysTmpl, deps.Auth, deps.DB, deps.Logger))
 		dr.Post("/apikeys/{id}/revoke", handlers.HandleRevokeKey(deps.Auth, deps.Logger))
+		dr.Post("/apikeys/{id}/rotate", handlers.HandleRotateKey(apikeysTmpl, deps.Auth, deps.Logger))
 
 		// Usage page.
 		usageTmpl := template.Must(baseTmpl.Clone())

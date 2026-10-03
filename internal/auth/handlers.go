@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -79,7 +80,7 @@ func (a *Auth) ValidateRequest(r *http.Request) (string, *KeyScope, error) {
 			a.logger.Warn("no database connection, using test-tenant")
 			return "test-tenant", fullAccess, nil
 		}
-		cred, err := a.lookupCredential(r.Context(), params.AccessKey)
+		cred, err := a.LookupCredential(r.Context(), params.AccessKey)
 		if err != nil {
 			return "", nil, err
 		}
@@ -87,13 +88,13 @@ func (a *Auth) ValidateRequest(r *http.Request) (string, *KeyScope, error) {
 			// A key whose plaintext secret was never stored (legacy rows with
 			// only a bcrypt secret_hash) can never verify: fail closed, but
 			// leave an actionable trail — the key must be regenerated.
-			if cred.secretKey == "" {
+			if cred.SecretKey == "" {
 				a.logger.Warn("access key has no stored secret — cannot verify SigV4 signature; regenerate this API key",
 					zap.String("access_key", params.AccessKey[:min(6, len(params.AccessKey))]+"..."),
-					zap.String("tenant_id", cred.tenantID))
+					zap.String("tenant_id", cred.TenantID))
 				return "", nil, fmt.Errorf("%w: key has no stored secret for signature verification; regenerate this API key", ErrSignatureMismatch)
 			}
-			if err := a.verifySigV4(r, params, cred.secretKey); err != nil {
+			if err := a.verifySigV4(r, params, cred.SecretKey); err != nil {
 				a.logger.Debug("signature verification failed",
 					zap.String("access_key", params.AccessKey[:min(6, len(params.AccessKey))]+"..."),
 					zap.Error(err))
@@ -105,7 +106,7 @@ func (a *Auth) ValidateRequest(r *http.Request) (string, *KeyScope, error) {
 				return "", nil, err
 			}
 		}
-		return cred.tenantID, cred.scope, nil
+		return cred.TenantID, cred.Scope, nil
 	}
 
 	// Basic AWS format (SigV2-era clients) — key-existence only, so it is
@@ -123,13 +124,20 @@ func (a *Auth) ValidateRequest(r *http.Request) (string, *KeyScope, error) {
 	return "", nil, fmt.Errorf("invalid authorization format")
 }
 
-// credential is the result of an access-key lookup: the owning tenant, the
+// Credential is the result of an access-key lookup: the owning tenant, the
 // secret used for signature verification, and the key's scope.
-type credential struct {
-	tenantID  string
-	secretKey string
-	scope     *KeyScope
+type Credential struct {
+	TenantID  string
+	SecretKey string
+	Scope     *KeyScope
 }
+
+// ErrAccessKeyRevoked: the presented access key id exists and is dead — a
+// revoked or rotated key, or an STS token whose parent key is (WP-R5-14 /
+// WP-R5-5). The S3 layer answers InvalidAccessKeyId and counts it as a
+// failure against a KNOWN key: a burst of these after a rotation is
+// someone still holding the old pair.
+var ErrAccessKeyRevoked = errors.New("access key revoked")
 
 // validateAccessKey looks up the tenant ID and key scope by access key,
 // without signature verification (legacy paths and SIGV4_ENFORCE=false).
@@ -138,55 +146,59 @@ func (a *Auth) validateAccessKey(ctx context.Context, accessKey string) (string,
 		a.logger.Warn("no database connection, using test-tenant")
 		return "test-tenant", &KeyScope{Permissions: []string{"*"}}, nil
 	}
-	cred, err := a.lookupCredential(ctx, accessKey)
+	cred, err := a.LookupCredential(ctx, accessKey)
 	if err != nil {
 		return "", nil, err
 	}
-	return cred.tenantID, cred.scope, nil
+	return cred.TenantID, cred.Scope, nil
 }
 
-// lookupCredential resolves an access key to its secret, tenant and scope.
-// Checks the tenants table first (primary keys, full access), then falls
-// back to api_keys for scoped VLT_ keys, then sts_tokens for ASIA keys.
-func (a *Auth) lookupCredential(ctx context.Context, accessKey string) (*credential, error) {
+// LookupCredential resolves an access key to its secret, tenant and scope.
+// It is THE credential lookup — the S3 header-auth path, the presigned-URL
+// verifier and STS all go through it (R5's invariant: one lookup, one
+// revocation check).
+//
+//   - api_keys by key_id (the primary pair is an is_primary row like any
+//     other since WP-R5-14; tenants.access_key is a mirror and is never
+//     read here): a revoked row is ErrAccessKeyRevoked, a row with no
+//     tenant is refused, expiry is reported in the scope and enforced by
+//     the caller.
+//   - sts_tokens for ASIA ids, joined to the parent key: a token whose
+//     parent is revoked, expired or gone is ErrAccessKeyRevoked (WP-R5-5).
+//   - anything else is ErrUnknownAccessKey.
+func (a *Auth) LookupCredential(ctx context.Context, accessKey string) (*Credential, error) {
 	if a.db == nil {
 		return nil, fmt.Errorf("database not initialized")
 	}
 
-	// Try primary tenant key first (full access).
-	var tenantID, secretKey string
-	// COALESCE: a NULL secret_key must resolve to the empty-secret fail-closed
-	// path ("regenerate this API key"), not a scan error that hard-locks the
-	// tenant out even under SIGV4_ENFORCE=false.
-	err := a.db.QueryRowContext(ctx, `SELECT id, COALESCE(secret_key, '') FROM tenants WHERE access_key = $1`, accessKey).
-		Scan(&tenantID, &secretKey)
-	if err == nil {
-		a.logger.Debug("authenticated tenant (primary key)",
-			zap.String("tenant_id", tenantID),
-			zap.String("access_key", accessKey[:min(6, len(accessKey))]+"..."))
-		return &credential{tenantID, secretKey, &KeyScope{Permissions: []string{"*"}}}, nil
-	}
-	if err != sql.ErrNoRows {
-		a.logger.Error("database error during auth", zap.Error(err))
-		return nil, fmt.Errorf("auth lookup failed: %w", err)
-	}
-
-	// Try scoped API key (VLT_ prefix keys from api_keys table).
-	var permJSON []byte
-	var bucketScope, ipAllowlist pq.StringArray
-	var expiresAt sql.NullTime
-	err = a.db.QueryRowContext(ctx, `
-		SELECT t.id, COALESCE(ak.secret_key, ''),
+	var (
+		tenantID, secretKey      string
+		permJSON                 []byte
+		bucketScope, ipAllowlist pq.StringArray
+		expiresAt, revokedAt     sql.NullTime
+		isPrimary                bool
+	)
+	err := a.db.QueryRowContext(ctx, `
+		SELECT COALESCE(ak.tenant_id, ''), COALESCE(ak.secret_key, ''),
 		       COALESCE(ak.permissions, '["*"]'::jsonb),
 		       COALESCE(ak.bucket_scope, '{}'),
 		       COALESCE(ak.ip_allowlist, '{}'),
-		       ak.expires_at
+		       ak.expires_at, ak.revoked_at, ak.is_primary
 		FROM api_keys ak
-		JOIN users u ON u.id = ak.user_id
-		JOIN tenants t ON t.email = u.email
-		WHERE ak.key_id = $1 AND ak.revoked_at IS NULL
-	`, accessKey).Scan(&tenantID, &secretKey, &permJSON, &bucketScope, &ipAllowlist, &expiresAt)
-	if err == nil {
+		WHERE ak.key_id = $1
+	`, accessKey).Scan(&tenantID, &secretKey, &permJSON, &bucketScope, &ipAllowlist, &expiresAt, &revokedAt, &isPrimary)
+	switch {
+	case err == nil:
+		if revokedAt.Valid {
+			a.logger.Debug("revoked access key presented", zap.String("tenant_id", tenantID), zap.Bool("primary", isPrimary))
+			return nil, ErrAccessKeyRevoked
+		}
+		if tenantID == "" {
+			// A row the backfill could not attach to a tenant: it never
+			// authenticates (and never as "default").
+			a.logger.Warn("api key row has no tenant — refused")
+			return nil, fmt.Errorf("%w: key row has no tenant", ErrUnknownAccessKey)
+		}
 		scope := &KeyScope{
 			BucketScope: []string(bucketScope),
 			IPAllowlist: []string(ipAllowlist),
@@ -203,31 +215,43 @@ func (a *Auth) lookupCredential(ctx context.Context, accessKey string) (*credent
 		if expiresAt.Valid {
 			scope.ExpiresAt = &expiresAt.Time
 		}
-
-		a.logger.Debug("authenticated tenant (scoped key)",
+		a.logger.Debug("authenticated tenant (api key)",
 			zap.String("tenant_id", tenantID),
-			zap.String("access_key", accessKey[:min(6, len(accessKey))]+"..."),
+			zap.Bool("primary", isPrimary),
 			zap.Int("permissions", len(scope.Permissions)))
-		return &credential{tenantID, secretKey, scope}, nil
-	}
-	if err != sql.ErrNoRows {
-		a.logger.Error("database error during scoped key auth", zap.Error(err))
+		return &Credential{tenantID, secretKey, scope}, nil
+	case !errors.Is(err, sql.ErrNoRows):
+		a.logger.Error("database error during auth", zap.Error(err))
 		return nil, fmt.Errorf("auth lookup failed: %w", err)
 	}
 
-	// Try STS temporary credential (ASIA prefix keys).
-	if len(accessKey) >= 4 && accessKey[:4] == "ASIA" {
-		var stsPermJSON []byte
-		var stsBucketScope, stsIPRestrict pq.StringArray
-		var stsExpiresAt time.Time
+	// STS temporary credential (ASIA prefix keys), bounded by its parent.
+	if strings.HasPrefix(accessKey, "ASIA") {
+		var (
+			stsPermJSON                   []byte
+			stsBucketScope, stsIPRestrict pq.StringArray
+			stsExpiresAt                  time.Time
+			parentFound, parentRevoked    bool
+			parentExpiresAt               sql.NullTime
+		)
 		err = a.db.QueryRowContext(ctx, `
-			SELECT tenant_id, COALESCE(secret_key, ''), permissions, bucket_scope, ip_restrict, expires_at
-			FROM sts_tokens WHERE access_key = $1
-		`, accessKey).Scan(&tenantID, &secretKey, &stsPermJSON, &stsBucketScope, &stsIPRestrict, &stsExpiresAt)
-		if err == nil {
+			SELECT s.tenant_id, COALESCE(s.secret_key, ''), s.permissions, s.bucket_scope, s.ip_restrict, s.expires_at,
+			       ak.key_id IS NOT NULL, ak.revoked_at IS NOT NULL, ak.expires_at
+			FROM sts_tokens s
+			LEFT JOIN api_keys ak ON ak.key_id = s.parent_key_id
+			WHERE s.access_key = $1
+		`, accessKey).Scan(&tenantID, &secretKey, &stsPermJSON, &stsBucketScope, &stsIPRestrict, &stsExpiresAt,
+			&parentFound, &parentRevoked, &parentExpiresAt)
+		switch {
+		case err == nil:
 			if time.Now().After(stsExpiresAt) {
-				a.logger.Debug("expired STS token", zap.String("access_key", accessKey[:min(6, len(accessKey))]+"..."))
+				a.logger.Debug("expired STS token", zap.String("tenant_id", tenantID))
 				return nil, fmt.Errorf("expired STS token")
+			}
+			if !parentFound || parentRevoked || (parentExpiresAt.Valid && time.Now().After(parentExpiresAt.Time)) {
+				a.logger.Debug("STS token of a dead parent key refused", zap.String("tenant_id", tenantID),
+					zap.Bool("parent_found", parentFound), zap.Bool("parent_revoked", parentRevoked))
+				return nil, fmt.Errorf("%w: the parent key of this token is revoked", ErrAccessKeyRevoked)
 			}
 			scope := &KeyScope{
 				BucketScope: []string(stsBucketScope),
@@ -240,12 +264,9 @@ func (a *Auth) lookupCredential(ctx context.Context, accessKey string) (*credent
 					zap.String("tenant_id", tenantID), zap.Error(jsonErr))
 				scope.Permissions = nil
 			}
-			a.logger.Debug("authenticated tenant (STS token)",
-				zap.String("tenant_id", tenantID),
-				zap.String("access_key", accessKey[:min(6, len(accessKey))]+"..."))
-			return &credential{tenantID, secretKey, scope}, nil
-		}
-		if err != sql.ErrNoRows {
+			a.logger.Debug("authenticated tenant (STS token)", zap.String("tenant_id", tenantID))
+			return &Credential{tenantID, secretKey, scope}, nil
+		case !errors.Is(err, sql.ErrNoRows):
 			a.logger.Error("database error during STS auth", zap.Error(err))
 			return nil, fmt.Errorf("auth lookup failed: %w", err)
 		}

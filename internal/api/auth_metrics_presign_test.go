@@ -27,7 +27,7 @@ func TestR11_PresignFailure_UnknownKeyIsNeverHashed(t *testing.T) {
 
 	ak := "VKghost" + uuid.NewString()[:8]
 	// The id is looked up once to decide key_known; nothing has it.
-	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM tenants WHERE access_key`).
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM api_keys WHERE key_id`).
 		WithArgs(ak).
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 
@@ -55,7 +55,7 @@ func TestR11_PresignFailure_KnownKeyIsHashed(t *testing.T) {
 	s.router.HandleFunc("/*", s.handleS3Request)
 
 	ak := "VKreal" + uuid.NewString()[:8]
-	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM tenants WHERE access_key`).
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM api_keys WHERE key_id`).
 		WithArgs(ak).
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 

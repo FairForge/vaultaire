@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/account"
+	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
@@ -51,6 +52,7 @@ type exportFixture struct {
 	tenantID             string
 	email                string
 	accessKey, secretKey string
+	primaryKeyID         string
 	suffix               string
 	buckets              []string
 	// secrets the fixture wrote — none may appear in an export body
@@ -72,6 +74,7 @@ func setupExportFixture(t *testing.T) *exportFixture {
 	f.tenantID = "tenant-exp-" + f.userID[:8]
 	f.suffix = f.userID[:8]
 	f.email = "export-" + f.suffix + "@test.local"
+	f.primaryKeyID = uuid.New().String()
 	f.accessKey = "VKEXP" + strings.ToUpper(f.suffix)
 	f.secretKey = "SKEXP" + f.suffix + "secret"
 	f.buckets = []string{"exp-a-" + f.suffix, "exp-b-" + f.suffix}
@@ -160,9 +163,12 @@ func (f *exportFixture) seed() {
 	f.exec(`INSERT INTO object_versions (tenant_id, bucket, object_key, version_id, size_bytes, etag, content_type, is_latest, is_delete_marker, backend_name)
 	        VALUES ($1, $2, 'a/1.txt', 'v1', 100, 'etag-0', 'text/plain', TRUE, FALSE, 'local')`, tn, f.buckets[0])
 	f.exec(`INSERT INTO object_locks (tenant_id, bucket, object_key, retention_mode, retain_until_date) VALUES ($1, $2, 'a/1.txt', 'GOVERNANCE', NOW() + INTERVAL '1 year')`, tn, f.buckets[0])
-	f.exec(`INSERT INTO api_keys (id, user_id, name, key_id, secret_hash, secret_key, permissions, bucket_scope, last_used)
-	        VALUES ($1, $2, 'ci key', $3, $4, $5, '["read"]', $6, NOW())`,
-		uuid.New().String(), u, "VLT_EXP"+f.suffix, f.secrets["api_secret_hash"], f.secrets["api_secret_key"], "{"+f.buckets[0]+"}")
+	// The primary pair is an api_keys row (WP-R5-14); tenants.access_key mirrors it.
+	f.exec(`INSERT INTO api_keys (id, user_id, tenant_id, is_primary, name, key_id, secret_hash, secret_key)
+	        VALUES ($1, $2, $3, TRUE, 'primary', $4, 'primaryhash', $5)`, f.primaryKeyID, u, tn, f.accessKey, f.secretKey)
+	f.exec(`INSERT INTO api_keys (id, user_id, tenant_id, name, key_id, secret_hash, secret_key, permissions, bucket_scope, last_used)
+	        VALUES ($1, $2, $3, 'ci key', $4, $5, $6, '["read"]', $7, NOW())`,
+		uuid.New().String(), u, tn, "VLT_EXP"+f.suffix, f.secrets["api_secret_hash"], f.secrets["api_secret_key"], "{"+f.buckets[0]+"}")
 	f.exec(`INSERT INTO user_mfa (user_id, secret, enabled, backup_codes) VALUES ($1, $2, TRUE, $3)`, u, f.secrets["mfa_secret"], "{"+f.secrets["backup_code"]+"}")
 	f.exec(`INSERT INTO oauth_accounts (id, user_id, provider, provider_id, email, name) VALUES ($1, $2, 'github', 'gh-12345', $3, 'Export Person')`, uuid.New().String(), u, f.email)
 	f.exec(`INSERT INTO dashboard_sessions (id, user_id, tenant_id, email, expires_at, ip_address, user_agent) VALUES ($1, $2, $3, $4, NOW() + INTERVAL '1 day', '203.0.113.9', 'ExportBrowser/1.0')`, "sess-exp-"+f.suffix, u, tn, f.email)
@@ -305,8 +311,13 @@ func TestAccountExport_RequestThenRunWritesOneStreamedObject(t *testing.T) {
 	assert.Equal(t, "https://app.example", b0["cors_origins"])
 
 	keysSec := body["api_keys"].([]any)
-	require.Len(t, keysSec, 1)
-	k := keysSec[0].(map[string]any)
+	require.Len(t, keysSec, 2, "the primary pair is an api_keys row too (WP-R5-14)")
+	p := keysSec[0].(map[string]any)
+	assert.Equal(t, true, p["is_primary"])
+	assert.Equal(t, f.accessKey, p["key_id"])
+	assert.NotContains(t, p, "secret_key")
+	k := keysSec[1].(map[string]any)
+	assert.Equal(t, false, k["is_primary"])
 	assert.Equal(t, "ci key", k["name"])
 	assert.Equal(t, "VLT_EXP"+f.suffix, k["key_id"])
 	assert.NotContains(t, k, "secret_hash")
@@ -413,11 +424,25 @@ func TestAccountExport_DownloadIsAPresignedGETOnThePrimaryPair(t *testing.T) {
 	require.Equal(t, 200, rr.Code, rr.Body.String())
 	assert.Equal(t, st.SizeBytes, int64(rr.Body.Len()))
 
-	// Adversarial: rotate the primary pair — the URL must stop working.
-	f.exec(`UPDATE tenants SET access_key = $1, secret_key = $2 WHERE id = $3`, f.accessKey+"NEW", f.secretKey+"NEW", f.tenantID)
+	// Adversarial: rotate the primary pair through the product path — the
+	// URL must stop working (WP-R5-14: a raw rewrite of tenants.access_key
+	// used to be the only thing that killed it, and nothing in the product
+	// did that).
+	svc := auth.NewAuthService(nil, f.db)
+	require.NoError(t, svc.LoadFromDB(context.Background()))
+	rotated, err := svc.RotateAPIKey(context.Background(), f.userID, f.primaryKeyID)
+	require.NoError(t, err)
+	require.True(t, rotated.IsPrimary)
 	rr = get()
 	assert.Equal(t, 403, rr.Code, "a presigned URL of a rotated key is dead: %s", rr.Body.String())
-	assert.Contains(t, rr.Body.String(), "AccessDenied")
+	assert.Contains(t, rr.Body.String(), "InvalidAccessKeyId")
+
+	// A link minted after the rotation is signed on the new pair.
+	link2, _, err := f.svc.DownloadURL(context.Background(), id, f.userID)
+	require.NoError(t, err)
+	u2, err := url.Parse(link2)
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(u2.Query().Get("X-Amz-Credential"), rotated.Key+"/"), u2.Query().Get("X-Amz-Credential"))
 }
 
 func TestAccountExport_AnotherUsersExportIsNotFound(t *testing.T) {

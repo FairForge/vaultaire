@@ -236,9 +236,18 @@ func setupSigV4Tenant(t *testing.T) (*Auth, string, string) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	const ak, sk = "VKSIGV4TESTKEY", "SKsigv4integrationsecret"
+	// The api_keys row IS the credential (WP-R5-14); tenants.access_key is
+	// its mirror. A fixture that wrote only the tenants pair signed nothing.
+	var userID string
+	require.NoError(t, db.QueryRow(`INSERT INTO users (email, password_hash)
+		VALUES ('sigv4@stored.ge', 'x') RETURNING id`).Scan(&userID))
 	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key)
 		VALUES ('sigv4-test-tenant', 'SigV4 Test', 'sigv4@stored.ge', $1, $2)
 		ON CONFLICT (id) DO UPDATE SET access_key = $1, secret_key = $2`, ak, sk)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO api_keys (user_id, tenant_id, is_primary, name, key_id, secret_hash, secret_key)
+		VALUES ($1, 'sigv4-test-tenant', TRUE, 'primary', $2, 'x', $3)
+		ON CONFLICT (key_id) DO UPDATE SET secret_key = $3, revoked_at = NULL`, userID, ak, sk)
 	require.NoError(t, err)
 
 	return NewAuth(db, zap.NewNop()), ak, sk
@@ -324,8 +333,8 @@ func TestValidateRequest_SigV4Enforcement(t *testing.T) {
 			VALUES ('sigv4-legacy-tenant', 'Legacy', 'sigv4-legacy@stored.ge', 'VKLEGACYPRIMARY', 'primary-secret')
 			ON CONFLICT (id) DO NOTHING`)
 		require.NoError(t, err)
-		_, err = db.Exec(`INSERT INTO api_keys (user_id, name, key_id, secret_hash)
-			VALUES ($1, 'legacy', $2, 'bcrypt-hash-only') ON CONFLICT (key_id) DO NOTHING`, userID, ak)
+		_, err = db.Exec(`INSERT INTO api_keys (user_id, tenant_id, name, key_id, secret_hash)
+			VALUES ($1, 'sigv4-legacy-tenant', 'legacy', $2, 'bcrypt-hash-only') ON CONFLICT (key_id) DO NOTHING`, userID, ak)
 		require.NoError(t, err)
 		t.Cleanup(func() {
 			_, _ = db.Exec(`DELETE FROM api_keys WHERE key_id = $1`, ak)
@@ -540,21 +549,27 @@ func TestValidateRequest_NullSecretKeyTenant(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	a := NewAuth(db, zap.NewNop())
 
-	// Migration 005 leaves tenants.secret_key nullable; some environments have
-	// since added NOT NULL. Prefer a real NULL (the reviewed failure mode);
-	// fall back to '' where the schema forbids NULL — both must resolve to the
-	// empty-secret fail-closed path, never a scan error.
+	// api_keys.secret_key (031) is nullable: a primary row whose plaintext
+	// secret was never stored must resolve to the empty-secret fail-closed
+	// path ("regenerate"), never a scan error. (This used to be about
+	// tenants.secret_key; the api_keys row is the credential since WP-R5-14.)
 	const ak = "VKNULLSECRET01"
+	var userID string
+	require.NoError(t, db.QueryRow(`INSERT INTO users (email, password_hash)
+		VALUES ('nullsecret@stored.ge', 'x') RETURNING id`).Scan(&userID))
 	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key)
 		VALUES ('sigv4-nullsecret-tenant', 'NullSecret', 'nullsecret@stored.ge', $1, NULL)
 		ON CONFLICT (id) DO UPDATE SET access_key = $1, secret_key = NULL`, ak)
-	if err != nil {
-		_, err = db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key)
-			VALUES ('sigv4-nullsecret-tenant', 'NullSecret', 'nullsecret@stored.ge', $1, '')
-			ON CONFLICT (id) DO UPDATE SET access_key = $1, secret_key = ''`, ak)
-	}
 	require.NoError(t, err)
-	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM tenants WHERE id = 'sigv4-nullsecret-tenant'`) })
+	_, err = db.Exec(`INSERT INTO api_keys (user_id, tenant_id, is_primary, name, key_id, secret_hash, secret_key)
+		VALUES ($1, 'sigv4-nullsecret-tenant', TRUE, 'primary', $2, 'bcrypt-hash-only', NULL)
+		ON CONFLICT (key_id) DO UPDATE SET secret_key = NULL, revoked_at = NULL`, userID, ak)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = db.Exec(`DELETE FROM api_keys WHERE key_id = $1`, ak)
+		_, _ = db.Exec(`DELETE FROM tenants WHERE id = 'sigv4-nullsecret-tenant'`)
+		_, _ = db.Exec(`DELETE FROM users WHERE id = $1`, userID)
+	})
 
 	t.Run("enforced: fails closed with actionable error", func(t *testing.T) {
 		r := httptest.NewRequest("GET", "http://stored.ge/some-bucket", nil)

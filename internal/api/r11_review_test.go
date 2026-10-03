@@ -519,6 +519,8 @@ func TestR11_AuthFailureReasons(t *testing.T) {
 		known  bool
 	}{
 		{auth.ErrUnknownAccessKey, "unknown_access_key", false},
+		{auth.ErrAccessKeyRevoked, "revoked", true},
+		{fmt.Errorf("%w: the parent key of this token is revoked", auth.ErrAccessKeyRevoked), "revoked", true},
 		{fmt.Errorf("wrap: %w", auth.ErrSignatureMismatch), "signature_mismatch", true},
 		{auth.ErrRequestTimeSkewed, "time_skewed", true},
 		{auth.ErrInvalidContentSHA256, "invalid_content_sha256", true},
@@ -532,12 +534,16 @@ func TestR11_AuthFailureReasons(t *testing.T) {
 		assert.Equal(t, c.reason, reason, c.err.Error())
 		assert.Equal(t, c.known, known, c.err.Error())
 	}
-	r, k := presignFailureReason(ErrExpiredPresignedRequest)
+	r, k := presignFailureReason(errors.New(ErrExpiredPresignedRequest))
 	assert.Equal(t, "presign_expired", r)
 	assert.True(t, k)
-	r, k = presignFailureReason(ErrAccessDenied)
+	r, k = presignFailureReason(errors.New(ErrAccessDenied))
 	assert.Equal(t, "presign_unknown_key", r)
 	assert.False(t, k)
+	r, k = presignFailureReason(presignAuthError(auth.ErrAccessKeyRevoked))
+	assert.Equal(t, "presign_revoked", r, "a presigned URL of a rotated key is known-and-dead")
+	assert.True(t, k)
+	assert.Equal(t, ErrInvalidAccessKeyId, presignAuthError(auth.ErrAccessKeyRevoked).Error())
 }
 
 func TestR11_AuthFailureMetrics_KnownKeyHashedUnknownNot(t *testing.T) {
@@ -565,9 +571,7 @@ func TestR11_S3AuthFailure_IncrementsMetric(t *testing.T) {
 	s, mock, cleanup := newMgmtTestServer(t)
 	defer cleanup()
 	s.router.HandleFunc("/*", s.handleS3Request)
-	mock.ExpectQuery(`SELECT id, COALESCE\(secret_key, ''\) FROM tenants WHERE access_key`).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "secret_key"}))
-	mock.ExpectQuery(`FROM api_keys ak`).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectQuery(`FROM api_keys ak`).WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}))
 
 	before := promtest.ToFloat64(authFailures.WithLabelValues("unknown_access_key", "false"))
 	req := httptest.NewRequest(http.MethodGet, "/some-bucket/key", nil)

@@ -47,35 +47,40 @@ func (s *Server) handleSTSCreateToken(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	parentKeyID := "tenant:" + tenantID
-	parentScope := &auth.KeyScope{Permissions: []string{"*"}}
+	// The default parent is the account's primary pair — a real key row, so
+	// the token dies when the primary is rotated (WP-R5-5: a parent named
+	// by nothing could never be revoked).
+	var parent *auth.APIKey
+	var err error
 	if req.ParentKeyID != "" {
-		parent, err := s.auth.GetOwnedAPIKey(r.Context(), userID, req.ParentKeyID)
-		switch {
-		case errors.Is(err, auth.ErrKeyNotFound):
-			writeManagementError(w, ErrTypeNotFound, "parent_key_not_found", "parent_key_id is not one of your API keys", "parent_key_id")
-			return
-		case errors.Is(err, auth.ErrKeyRevoked):
-			writeManagementError(w, ErrTypeInvalidRequest, "parent_key_revoked", "parent_key_id names a revoked key", "parent_key_id")
-			return
-		case err != nil:
-			s.logger.Error("sts parent key lookup", zap.Error(err))
-			writeManagementError(w, ErrTypeAPI, "internal_error", "failed to resolve parent key", "")
-			return
-		}
-		parentKeyID = parent.Key
-		perms := parent.Permissions
-		if len(perms) == 0 {
-			// A key row without a permission list is a full-access key
-			// (the S3 auth path reads COALESCE(permissions, '["*"]')).
-			perms = []string{"*"}
-		}
-		parentScope = &auth.KeyScope{
-			Permissions: perms,
-			BucketScope: parent.BucketScope,
-			IPAllowlist: parent.IPAllowlist,
-			ExpiresAt:   parent.ExpiresAt,
-		}
+		parent, err = s.auth.GetOwnedAPIKey(r.Context(), userID, req.ParentKeyID)
+	} else {
+		parent, err = s.auth.GetPrimaryAPIKey(r.Context(), tenantID)
+	}
+	switch {
+	case errors.Is(err, auth.ErrKeyNotFound):
+		writeManagementError(w, ErrTypeNotFound, "parent_key_not_found", "parent_key_id is not one of your API keys", "parent_key_id")
+		return
+	case errors.Is(err, auth.ErrKeyRevoked):
+		writeManagementError(w, ErrTypeInvalidRequest, "parent_key_revoked", "parent_key_id names a revoked key", "parent_key_id")
+		return
+	case err != nil:
+		s.logger.Error("sts parent key lookup", zap.Error(err))
+		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to resolve parent key", "")
+		return
+	}
+	parentKeyID := parent.Key
+	perms := parent.Permissions
+	if len(perms) == 0 {
+		// A key row without a permission list is a full-access key
+		// (the S3 auth path reads COALESCE(permissions, '["*"]')).
+		perms = []string{"*"}
+	}
+	parentScope := &auth.KeyScope{
+		Permissions: perms,
+		BucketScope: parent.BucketScope,
+		IPAllowlist: parent.IPAllowlist,
+		ExpiresAt:   parent.ExpiresAt,
 	}
 
 	token, err := auth.GenerateSTSToken(r.Context(), s.db, tenantID, parentKeyID, parentScope, req)

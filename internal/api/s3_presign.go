@@ -3,9 +3,7 @@ package api
 import (
 	"crypto/hmac"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -16,7 +14,6 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/auth"
-	"github.com/lib/pq"
 )
 
 const (
@@ -86,74 +83,16 @@ func (s *Server) verifyPresignedURL(r *http.Request) (string, *auth.KeyScope, er
 		return "", nil, fmt.Errorf("%s: database not available", ErrAccessDenied)
 	}
 
-	// Look up credentials and scope. Try primary tenant key first, then scoped API keys.
-	var secretKey, tenantID string
-	var scope *auth.KeyScope
-
-	err = s.db.QueryRowContext(r.Context(),
-		`SELECT secret_key, id FROM tenants WHERE access_key = $1`, accessKey,
-	).Scan(&secretKey, &tenantID)
-	if errors.Is(err, sql.ErrNoRows) {
-		// Try scoped API key — requires secret_key stored for signature verification.
-		var permJSON []byte
-		var bucketScope, ipAllowlist pq.StringArray
-		var expiresAtDB sql.NullTime
-		err = s.db.QueryRowContext(r.Context(), `
-			SELECT ak.secret_key, t.id,
-			       COALESCE(ak.permissions, '["*"]'::jsonb),
-			       COALESCE(ak.bucket_scope, '{}'),
-			       COALESCE(ak.ip_allowlist, '{}'),
-			       ak.expires_at
-			FROM api_keys ak
-			JOIN users u ON u.id = ak.user_id
-			JOIN tenants t ON t.email = u.email
-			WHERE ak.key_id = $1 AND ak.revoked_at IS NULL
-		`, accessKey).Scan(&secretKey, &tenantID, &permJSON, &bucketScope, &ipAllowlist, &expiresAtDB)
-		if err == nil {
-			if secretKey == "" {
-				return "", nil, fmt.Errorf("%s", ErrAccessDenied)
-			}
-			scope = &auth.KeyScope{
-				BucketScope: []string(bucketScope),
-				IPAllowlist: []string(ipAllowlist),
-			}
-			if jsonErr := json.Unmarshal(permJSON, &scope.Permissions); jsonErr != nil {
-				scope.Permissions = nil // fail closed (R5-14)
-			}
-			if expiresAtDB.Valid {
-				scope.ExpiresAt = &expiresAtDB.Time
-			}
-		} else if errors.Is(err, sql.ErrNoRows) && len(accessKey) >= 4 && accessKey[:4] == "ASIA" {
-			// Try STS temporary credential.
-			var stsPermJSON []byte
-			var stsBucketScope, stsIPRestrict pq.StringArray
-			var stsExpiresAt time.Time
-			err = s.db.QueryRowContext(r.Context(), `
-				SELECT secret_key, tenant_id, permissions, bucket_scope, ip_restrict, expires_at
-				FROM sts_tokens WHERE access_key = $1
-			`, accessKey).Scan(&secretKey, &tenantID, &stsPermJSON, &stsBucketScope, &stsIPRestrict, &stsExpiresAt)
-			if err != nil {
-				return "", nil, fmt.Errorf("%s", ErrAccessDenied)
-			}
-			if time.Now().After(stsExpiresAt) {
-				return "", nil, fmt.Errorf("%s", ErrExpiredPresignedRequest)
-			}
-			scope = &auth.KeyScope{
-				BucketScope: []string(stsBucketScope),
-				IPAllowlist: []string(stsIPRestrict),
-				ExpiresAt:   &stsExpiresAt,
-				Temporary:   true,
-			}
-			if jsonErr := json.Unmarshal(stsPermJSON, &scope.Permissions); jsonErr != nil {
-				scope.Permissions = nil // fail closed (R5-14)
-			}
-		} else {
-			return "", nil, fmt.Errorf("%s", ErrAccessDenied)
-		}
-	} else if err != nil {
+	// One credential lookup for every path (R5's invariant): the api_keys
+	// row, revocation included, then the STS token bounded by its parent.
+	cred, err := auth.NewAuth(s.db, s.logger).LookupCredential(r.Context(), accessKey)
+	if err != nil {
+		return "", nil, presignAuthError(err)
+	}
+	secretKey, tenantID, scope := cred.SecretKey, cred.TenantID, cred.Scope
+	if secretKey == "" {
+		// A key whose plaintext secret was never stored can never verify.
 		return "", nil, fmt.Errorf("%s", ErrAccessDenied)
-	} else {
-		scope = &auth.KeyScope{Permissions: []string{"*"}}
 	}
 
 	canonicalURI := uriEncodePath(r.URL.Path)
@@ -204,6 +143,32 @@ func (s *Server) verifyPresignedURL(r *http.Request) (string, *auth.KeyScope, er
 	}
 
 	return tenantID, scope, nil
+}
+
+// presignError is a presigned-URL failure: Error() is the S3 code the
+// response carries (handleS3Request switches on it), Unwrap() the lookup
+// error behind it, so the metric can tell a revoked key (known-and-dead)
+// from an unknown one.
+type presignError struct {
+	code  string
+	cause error
+}
+
+func (e *presignError) Error() string { return e.code }
+func (e *presignError) Unwrap() error { return e.cause }
+
+// presignAuthError maps a credential-lookup failure to its S3 code: a
+// revoked or rotated key (or an STS token of one) is InvalidAccessKeyId,
+// an expired STS token ExpiredToken, anything else AccessDenied.
+func presignAuthError(err error) error {
+	switch {
+	case errors.Is(err, auth.ErrAccessKeyRevoked):
+		return &presignError{ErrInvalidAccessKeyId, err}
+	case strings.Contains(err.Error(), "expired STS token"):
+		return &presignError{ErrExpiredPresignedRequest, err}
+	default:
+		return &presignError{ErrAccessDenied, err}
+	}
 }
 
 func buildPresignCanonicalQuery(values url.Values) string {
