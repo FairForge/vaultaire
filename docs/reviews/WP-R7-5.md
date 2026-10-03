@@ -380,3 +380,30 @@ admin JWT (`POST /auth/login`).
 7. After steps 2–5 the next run should read: every backend 0 missing, unknown rows 0;
    `RoutingTruthMissing` and `RoutingUnknownBackendRows` resolve on their own. Then WP-R6-1 can
    remove the fan-out.
+
+## Post-merge (2026-10-03, after #560 deployed at 01:35 UTC)
+
+**Prod's boot check** (read-only, journal + `/metrics`): three Error lines — `object_head_cache`
+`<NULL>` 62, `onedrive` 2,613, `object_versions` `onedrive` 3; `vaultaire_routing_shared_store_backends 0`.
+
+**Prod's first `routing_truth` run** (the boot catch-up, 01:42:40 UTC, `ok`, 494 checks):
+`geyser 2/2 present; idrive 10 of 2,036 sampled, 10 error (given up); local 300 of 451 sampled,
+300 missing; lyve 6/6 present; permafrost 20 of 25 present; r2 29/29 present; unknown (NULL) 62,
+onedrive 2,613; chunks: 1 object, 127 chunks, 127 error`. Exactly the picture the note predicted,
+with one difference that was a bug of mine:
+
+**PM-1 (P1, fixed in the follow-up PR): the chunk pass charged the primary's breaker.** The
+whole-object pass calls the driver directly (decision 2); the chunk pass went through
+`chunkStore.exists` → `engine.ExistsOn` → `failover.Execute`, which records a backend failure per
+403. Five chunk HEADs at 01:42:53 opened `idrive`'s breaker (`vaultaire_backend_circuit_open{backend="idrive"} 1`,
+five `backend failed, trying next … idrive exists t-_global/_global/_chunks/…` lines) — and the
+open-breaker branch of the chunk loop then counted the remaining 122 chunks as errors without
+asking anyone, instead of ending the pass. No PUT happened in the window (no head row written
+after 01:30 UTC, `vaultaire_backend_write_failures_total 0`), so nothing moved; it could have.
+Fix: `checkChunk` calls the driver directly at the one address and the legacy addresses
+(`legacyTenants` + `engine.LegacyChunkContext`), an open breaker ends the chunk pass with one
+error, ten consecutive errors give it up — red-first
+`TestRoutingTruth_Run_ChunkChecksNeverChargeTheBreakerAndAreGivenUp` (on #560: 127 errors and an
+open breaker; after: 10 errors, breaker closed). The adversarial pass had asked "does the job
+charge the breaker" of the whole-object path (M9) and not of the chunk path — the same bug on the
+other entry point, the pattern the review meta-notes name.

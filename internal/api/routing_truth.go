@@ -605,8 +605,12 @@ func (c *RoutingTruthChecker) sampleChunked(ctx context.Context, res *RoutingTru
 				continue
 			}
 			if st := c.eng.GetFailoverStatus()[backend]; st == engine.StateOpen.String() {
+				// One error for the run, and the chunk pass is over: the
+				// backend is down for everyone (not 127 "errors" for 127
+				// chunks nobody asked about — prod's first run).
 				ct.Errors++
 				routingChunkChecks.WithLabelValues(backend, "error").Inc()
+				consecutive = routingErrorCutoff
 				continue
 			}
 			result := c.checkChunk(ctx, chunkAddr{scope: scope, hash: ref.PlaintextHash, backend: backend, key: key})
@@ -632,25 +636,38 @@ func (c *RoutingTruthChecker) sampleChunked(ctx context.Context, res *RoutingTru
 	return nil
 }
 
-// checkChunk: the one address first, then the legacy address (a blob
+// checkChunk: the one address first, then the legacy addresses (a blob
 // written before WP-R8-7 under its uploader's prefix is present — and the
-// chunk move's work).
+// chunk move's work). The driver is called directly, like checkWhole: the
+// chunk store's exists goes through engine.ExistsOn and charges the breaker
+// — on prod's first run five 403s on chunk HEADs opened the primary's
+// breaker, which the whole-object pass had been built not to do.
 func (c *RoutingTruthChecker) checkChunk(ctx context.Context, a chunkAddr) string {
+	d, ok := c.eng.GetDriver(a.backend)
+	if !ok {
+		return "error"
+	}
 	cctx, cancel := context.WithTimeout(ctx, routingExistsTimeout)
 	defer cancel()
-	ok, err := c.chunks.exists(cctx, a)
+	present, err := d.Exists(engine.ChunkContext(cctx), chunkContainer, a.key)
 	if err != nil {
 		return "error"
 	}
-	if ok {
+	if present {
 		return "present"
 	}
-	legacy, err := c.chunks.legacyCopyExists(cctx, a)
+	tenants, err := c.chunks.legacyTenants(cctx, a)
 	if err != nil {
 		return "error"
 	}
-	if legacy {
-		return "legacy"
+	for _, tid := range tenants {
+		legacy, err := d.Exists(engine.LegacyChunkContext(cctx, tid), chunkContainer, a.key)
+		if err != nil {
+			return "error"
+		}
+		if legacy {
+			return "legacy"
+		}
 	}
 	return "missing"
 }
