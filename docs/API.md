@@ -162,7 +162,7 @@ Management  /api/v1/manage
   GET/POST /buckets · GET/PATCH/DELETE /buckets/{name} · GET /buckets/{name}/objects
   PUT /buckets/{name}/tier {"tier":"auto|performance|standard|archive|resilient"} · PUT /buckets/{name}/residency
   GET/POST /keys · DELETE /keys/{id} · GET /usage
-  POST /account/export · GET /account/export/{id} · DELETE /account (30-day grace) · POST /account/cancel-deletion
+  POST /account/export (202 + id; the export is rendered by a job into the account's private `_exports` system bucket, kept 7 days) · GET /account/export/{id} (status; when completed a 1 h presigned download URL; 410 once expired) · DELETE /account (30-day grace) · POST /account/cancel-deletion
 Account     /api/v1/user
   GET / · GET /quota · GET /quota/history · GET /usage · GET /usage/alerts · GET /presigned
   GET/POST /apikeys · DELETE /apikeys/{id} · POST /apikeys/{id}/rotate · POST /apikeys/{id}/expire · GET /apikeys/audit

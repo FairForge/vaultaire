@@ -107,7 +107,7 @@ func queryComplianceData(r *http.Request, db *sql.DB, tenantID string) ([]Bucket
 		       default_retention_mode, default_retention_days,
 		       versioning_status, logging_enabled, inventory_enabled,
 		       mfa_delete_enabled
-		FROM buckets WHERE tenant_id = $1 ORDER BY name ASC`, tenantID)
+		FROM buckets WHERE tenant_id = $1 AND name NOT LIKE '\_%' ORDER BY name ASC`, tenantID)
 	if err != nil {
 		return nil, 0, 0
 	}

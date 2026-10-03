@@ -35,7 +35,7 @@ func populateOnboarding(ctx context.Context, db *sql.DB, tenantID string, r *htt
 
 	var bucketCount, objectCount, webhookCount int
 	_ = db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM buckets WHERE tenant_id = $1`, tenantID).Scan(&bucketCount)
+		`SELECT COUNT(*) FROM buckets WHERE tenant_id = $1 AND name NOT LIKE '\_%'`, tenantID).Scan(&bucketCount)
 	_ = db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM object_head_cache WHERE tenant_id = $1`, tenantID).Scan(&objectCount)
 	_ = db.QueryRowContext(ctx,

@@ -93,10 +93,23 @@ var retentionDeletedRows = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Help: "Rows deleted (or PII-scrubbed) by the retention job, by table.",
 }, []string{"table"})
 
+// retentionExportsTTL is the life of a GDPR export object (WP-R10-3b): the
+// privacy policy says "exports: 7 days" — api.exportTTL is the value.
+const retentionExportsTTL = exportTTL
+
+// exportPurger removes expired export objects (the AccountExportService).
+type exportPurger interface {
+	PurgeExpired(ctx context.Context) (int64, error)
+}
+
 // RetentionJob is the nightly log-table pruner.
 type RetentionJob struct {
 	db     *sql.DB
 	logger *zap.Logger
+	// Exports, when set, is the step that deletes expired GDPR export
+	// objects through the customer delete path and marks their rows
+	// 'expired' (WP-R10-3b). Counted under table "account_exports".
+	Exports exportPurger
 
 	Policies  []retentionPolicy
 	BatchSize int
@@ -182,6 +195,18 @@ func (j *RetentionJob) RunOnce(ctx context.Context) (RetentionResult, error) {
 		}
 		if n > 0 {
 			j.logger.Info("retention: pruned", zap.String("table", p.Table), zap.Int64("rows", n), zap.Duration("max_age", p.MaxAge))
+		}
+	}
+	if j.Exports != nil && ctx.Err() == nil {
+		n, err := j.Exports.PurgeExpired(ctx)
+		res.Tables["account_exports"] = n
+		res.Total += n
+		retentionDeletedRows.WithLabelValues("account_exports").Add(float64(n))
+		if err != nil {
+			res.Errors = append(res.Errors, fmt.Sprintf("account_exports: %v", err))
+			j.logger.Error("retention: export purge failed", zap.Int64("rows", n), zap.Error(err))
+		} else if n > 0 {
+			j.logger.Info("retention: expired exports removed", zap.Int64("rows", n), zap.Duration("max_age", retentionExportsTTL))
 		}
 	}
 	res.Duration = j.now().Sub(start).String()

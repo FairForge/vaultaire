@@ -12,19 +12,17 @@ import (
 
 // APIHandler handles all compliance API requests
 type APIHandler struct {
-	gdprService        *GDPRService
-	portabilityService *PortabilityService
-	consentService     *ConsentService
-	breachService      *BreachService
-	ropaService        *ROPAService
-	privacyService     *PrivacyService
-	logger             *zap.Logger
+	gdprService    *GDPRService
+	consentService *ConsentService
+	breachService  *BreachService
+	ropaService    *ROPAService
+	privacyService *PrivacyService
+	logger         *zap.Logger
 }
 
 // NewAPIHandler creates a new compliance API handler
 func NewAPIHandler(
 	gdprService *GDPRService,
-	portabilityService *PortabilityService,
 	consentService *ConsentService,
 	breachService *BreachService,
 	ropaService *ROPAService,
@@ -32,13 +30,12 @@ func NewAPIHandler(
 	logger *zap.Logger,
 ) *APIHandler {
 	return &APIHandler{
-		gdprService:        gdprService,
-		portabilityService: portabilityService,
-		consentService:     consentService,
-		breachService:      breachService,
-		ropaService:        ropaService,
-		privacyService:     privacyService,
-		logger:             logger,
+		gdprService:    gdprService,
+		consentService: consentService,
+		breachService:  breachService,
+		ropaService:    ropaService,
+		privacyService: privacyService,
+		logger:         logger,
 	}
 }
 
@@ -157,69 +154,6 @@ func (h *APIHandler) HandleGetSARStatus(w http.ResponseWriter, r *http.Request) 
 		"id":     sarID,
 		"status": "pending",
 	})
-}
-
-// ============================================================================
-// Portability Handlers (Article 20)
-// ============================================================================
-
-// HandleCreateExport handles POST /api/compliance/export
-func (h *APIHandler) HandleCreateExport(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-
-	userID, ok := ctx.Value(UserIDKey).(uuid.UUID)
-	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	var req struct {
-		Format string `json:"format"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	if req.Format == "" {
-		req.Format = "json"
-	}
-
-	exportReq, err := h.portabilityService.CreateExportRequest(ctx, userID, req.Format)
-	if err != nil {
-		h.logger.Error("failed to create export request", zap.Error(err))
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(exportReq)
-}
-
-// HandleGetExport handles GET /api/compliance/export/:id
-func (h *APIHandler) HandleGetExport(w http.ResponseWriter, r *http.Request) {
-	exportIDStr := chi.URLParam(r, "id")
-	if exportIDStr == "" {
-		http.Error(w, "Export ID required", http.StatusBadRequest)
-		return
-	}
-
-	exportID, err := uuid.Parse(exportIDStr)
-	if err != nil {
-		http.Error(w, "Invalid export ID", http.StatusBadRequest)
-		return
-	}
-
-	exportReq, err := h.portabilityService.GetExportRequest(r.Context(), exportID)
-	if err != nil {
-		h.logger.Error("failed to get export request", zap.Error(err))
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(exportReq)
 }
 
 // ============================================================================

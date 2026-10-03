@@ -40,7 +40,7 @@
     <p>Stored provides full data portability through multiple channels:</p>
     <ul>
         <li><strong>S3-compatible API:</strong> All stored objects are accessible via the standard S3 protocol. You can export your entire data set using any S3-compatible tool — <code>aws-cli</code>, <code>boto3</code>, <code>rclone</code>, <code>s3cmd</code>, Cyberduck, and others — with zero modification.</li>
-        <li><strong>GDPR data export:</strong> The dashboard settings page includes a one-click data export that downloads a JSON file containing all account data: profile, tenant information, quotas, buckets, objects, API keys, and 90 days of bandwidth history.</li>
+        <li><strong>GDPR data export:</strong> The dashboard settings page (and <code>POST /api/v1/manage/account/export</code>) requests a data export; it is prepared within minutes as one JSON file in a private system bucket of your account, downloadable for 7 days through a link only you can see. It contains all account data: profile, tenant information, quotas, buckets, objects, versions, locks, API keys, and 90 days of bandwidth history.</li>
         <li><strong>No proprietary formats:</strong> Objects are returned byte-for-byte through the S3 API. At rest, large objects may be split into chunks and compressed by our engine (which is open source); no proprietary client or format is ever needed to read your data back.</li>
     </ul>
 

@@ -18,7 +18,6 @@ import (
 // setupTestHandler creates a test API handler with all services
 func setupTestHandler() *APIHandler {
 	// Create mock databases
-	portabilityDB := newMockPortabilityDB()
 	consentDB := newMockConsentDB()
 	breachDB := newMockBreachDB()
 	ropaDB := newMockROPADB()
@@ -38,7 +37,6 @@ func setupTestHandler() *APIHandler {
 
 	// Create services
 	gdprService := NewGDPRService(nil, zap.NewNop())
-	portabilityService := NewPortabilityService(portabilityDB, nil, zap.NewNop())
 	consentService := NewConsentService(consentDB, zap.NewNop())
 	breachService := NewBreachService(breachDB, zap.NewNop())
 	ropaService := NewROPAService(ropaDB, zap.NewNop())
@@ -47,7 +45,6 @@ func setupTestHandler() *APIHandler {
 	// Create handler
 	return NewAPIHandler(
 		gdprService,
-		portabilityService,
 		consentService,
 		breachService,
 		ropaService,
@@ -148,58 +145,6 @@ func TestAPIHandler_HandleGetSARStatus(t *testing.T) {
 	handler.HandleGetSARStatus(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
-}
-
-// ============================================================================
-// Portability Handler Tests (Article 20)
-// ============================================================================
-
-func TestAPIHandler_HandleCreateExport(t *testing.T) {
-	handler := setupTestHandler()
-
-	t.Run("creates export request", func(t *testing.T) {
-		body := map[string]interface{}{
-			"format": "json",
-		}
-		bodyBytes, _ := json.Marshal(body)
-
-		req := httptest.NewRequest(http.MethodPost, "/api/compliance/export", bytes.NewReader(bodyBytes))
-		w := httptest.NewRecorder()
-
-		userID := uuid.New()
-		ctx := context.WithValue(req.Context(), UserIDKey, userID)
-		req = req.WithContext(ctx)
-
-		handler.HandleCreateExport(w, req)
-
-		assert.Equal(t, http.StatusCreated, w.Code)
-	})
-
-	t.Run("requires authentication", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/api/compliance/export", nil)
-		w := httptest.NewRecorder()
-
-		handler.HandleCreateExport(w, req)
-
-		assert.Equal(t, http.StatusUnauthorized, w.Code)
-	})
-}
-
-func TestAPIHandler_HandleGetExport(t *testing.T) {
-	handler := setupTestHandler()
-
-	t.Run("retrieves export status", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/api/compliance/export/{id}", nil)
-		w := httptest.NewRecorder()
-
-		rctx := chi.NewRouteContext()
-		rctx.URLParams.Add("id", uuid.New().String())
-		req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
-
-		handler.HandleGetExport(w, req)
-
-		assert.Equal(t, http.StatusInternalServerError, w.Code)
-	})
 }
 
 // ============================================================================

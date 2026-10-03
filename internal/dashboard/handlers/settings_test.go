@@ -57,7 +57,7 @@ func settingsSessionCtx(t *testing.T) context.Context {
 
 func TestHandleSettings_NoDB(t *testing.T) {
 	tmpl := testSettingsTemplate(t)
-	handler := HandleSettings(tmpl, nil, nil, nil, zap.NewNop())
+	handler := HandleSettings(tmpl, nil, nil, nil, nil, zap.NewNop())
 
 	req := httptest.NewRequest("GET", "/dashboard/settings", nil)
 	req = req.WithContext(settingsSessionCtx(t))
@@ -73,7 +73,7 @@ func TestHandleSettings_NoDB(t *testing.T) {
 
 func TestHandleSettings_NoSession(t *testing.T) {
 	tmpl := testSettingsTemplate(t)
-	handler := HandleSettings(tmpl, nil, nil, nil, zap.NewNop())
+	handler := HandleSettings(tmpl, nil, nil, nil, nil, zap.NewNop())
 
 	req := httptest.NewRequest("GET", "/dashboard/settings", nil)
 	w := httptest.NewRecorder()

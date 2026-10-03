@@ -10,6 +10,9 @@ const (
 	ErrTypeConflict       = "conflict_error"
 	ErrTypeRateLimit      = "rate_limit_error"
 	ErrTypeAPI            = "api_error"
+	// ErrTypeGone: the resource existed and is gone for good (an expired
+	// export, WP-R10-3b).
+	ErrTypeGone = "gone_error"
 )
 
 var managementErrorStatus = map[string]int{
@@ -20,6 +23,7 @@ var managementErrorStatus = map[string]int{
 	ErrTypeConflict:       http.StatusConflict,
 	ErrTypeRateLimit:      http.StatusTooManyRequests,
 	ErrTypeAPI:            http.StatusInternalServerError,
+	ErrTypeGone:           http.StatusGone,
 }
 
 type managementError struct {

@@ -141,7 +141,7 @@ Legend: **W** written by, **R** read by (packages), **Ret** retention/cleanup,
 | **Admin / support / public** | | | | | |
 | admin_notes, admin_notifications, abuse_reports | 045/046/047 | dashboard/admin, api | dashboard/admin | — | notes/abuse yes |
 | waitlist_signups | 044 (+065/070) | api/waitlist | dashboard/admin (CSV export) | — | no |
-| account_exports | 038 | api/account_export | same | `expires_at` (no job) | via user |
+| account_exports | 038, 075 | api/account_export (`Request`, the `account_export` job) | same + dashboard settings | object purged by the retention job 7 d after completion, row → `expired` | via user (the export object itself: the runner's object walk) |
 | breach_records, breach_notifications, breach_affected_users | 014 | compliance (`NewBreachPgStore`, `/api/v1/admin/breach*`) | same | — | no (operator log) |
 
 **Orphan tables** (no reader or writer in the binary; decision D-12 = drop by

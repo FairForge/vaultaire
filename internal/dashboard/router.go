@@ -3,12 +3,14 @@ package dashboard
 import (
 	"database/sql"
 	"errors"
-	"github.com/FairForge/vaultaire/internal/account"
 	"html/template"
 	"io/fs"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/FairForge/vaultaire/internal/account"
+	"github.com/FairForge/vaultaire/internal/tenant"
 
 	"github.com/FairForge/vaultaire/internal/api/landing"
 	"github.com/FairForge/vaultaire/internal/auth"
@@ -49,6 +51,7 @@ type Deps struct {
 	Flags         *flags.Service           // Nil-safe; admin feature-flags page (1.13).
 	Quotas        billing.HouseQuotas      // Nil-safe; applies a resized house's floor quotas at once (Phase 1).
 	Account       *account.Service         // The one account-deletion state machine (WP-R10-3); nil = built per request from DB.
+	Exports       handlers.ExportService   // The one GDPR export service (WP-R10-3b); nil = the settings page says export is unavailable.
 	Egress        usage.EgressStatusReader // The API server's live egress counter (WP-R10-9); nil = the recorded month.
 	// CSRFKey keys the session-bound CSRF token (WP-R12-5): CSRFKeyFromSecret
 	// of a secret that survives restarts (prod: JWT_SECRET). Nil = a random
@@ -212,18 +215,20 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		))
 		dr.Get("/buckets", handlers.HandleBuckets(bucketsTmpl, deps.DB, deps.DataPath, deps.Logger))
 		dr.Post("/buckets", handlers.HandleCreateBucket(bucketsTmpl, deps.DB, deps.CreateBucket, deps.Logger))
-		dr.Get("/buckets/{name}", handlers.HandleBucketObjects(bucketObjsTmpl, deps.DB, deps.Logger))
-		dr.Post("/buckets/{name}/restore", handlers.HandleRestoreObject(deps.Engine, deps.DB, deps.Logger))
-		dr.Get("/buckets/{name}/restore-status", handlers.HandleObjectRestoreStatus(deps.Engine, deps.DB, deps.Logger))
-		dr.Get("/buckets/{name}/settings", handlers.HandleBucketSettings(bucketSettingsTmpl, deps.DB, deps.Logger))
-		dr.Post("/buckets/{name}/settings", handlers.HandleUpdateBucketSettings(bucketSettingsTmpl, deps.DB, deps.Logger))
+		// A system bucket (tenant.ExportsBucket, WP-R10-3b) has no page: 404
+		// before any handler, as the S3 API answers NoSuchBucket.
+		dr.With(noSystemBucket).Get("/buckets/{name}", handlers.HandleBucketObjects(bucketObjsTmpl, deps.DB, deps.Logger))
+		dr.With(noSystemBucket).Post("/buckets/{name}/restore", handlers.HandleRestoreObject(deps.Engine, deps.DB, deps.Logger))
+		dr.With(noSystemBucket).Get("/buckets/{name}/restore-status", handlers.HandleObjectRestoreStatus(deps.Engine, deps.DB, deps.Logger))
+		dr.With(noSystemBucket).Get("/buckets/{name}/settings", handlers.HandleBucketSettings(bucketSettingsTmpl, deps.DB, deps.Logger))
+		dr.With(noSystemBucket).Post("/buckets/{name}/settings", handlers.HandleUpdateBucketSettings(bucketSettingsTmpl, deps.DB, deps.Logger))
 
 		// Bucket CDN analytics.
 		analyticsTmpl := template.Must(baseTmpl.Clone())
 		template.Must(analyticsTmpl.ParseFS(Templates,
 			"templates/customer/bucket_analytics.html",
 		))
-		dr.Get("/buckets/{name}/analytics", handlers.HandleBucketAnalytics(analyticsTmpl, deps.DB, deps.Logger))
+		dr.With(noSystemBucket).Get("/buckets/{name}/analytics", handlers.HandleBucketAnalytics(analyticsTmpl, deps.DB, deps.Logger))
 
 		// API key management.
 		apikeysTmpl := template.Must(baseTmpl.Clone())
@@ -246,7 +251,7 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		template.Must(settingsTmpl.ParseFS(Templates,
 			"templates/customer/settings.html",
 		))
-		dr.Get("/settings", handlers.HandleSettings(settingsTmpl, deps.Auth, deps.DB, deps.Sessions, deps.Logger))
+		dr.Get("/settings", handlers.HandleSettings(settingsTmpl, deps.Auth, deps.DB, deps.Sessions, deps.Exports, deps.Logger))
 		dr.Post("/settings/profile", handlers.HandleUpdateProfile(settingsTmpl, deps.Auth, deps.DB, deps.Logger))
 		dr.Post("/settings/password", handlers.HandleChangePassword(settingsTmpl, deps.Auth, deps.DB, deps.Sessions, deps.Logger))
 		dr.Post("/settings/notifications", handlers.HandleUpdateNotifications(settingsTmpl, deps.Auth, deps.DB, deps.Logger))
@@ -273,8 +278,11 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		dr.Post("/settings/mfa/enable", handlers.HandleMFAEnable(mfaSetupTmpl, deps.Auth, deps.MFA, mfaEnrol, deps.Logger))
 		dr.Post("/settings/mfa/disable", handlers.HandleMFADisable(settingsTmpl, deps.Auth, deps.Sessions, deps.Logger))
 
-		// GDPR: data export + account deletion.
-		dr.Post("/settings/export", handlers.HandleExportData(deps.DB, deps.Logger))
+		// GDPR: data export (WP-R10-3b: requested here, rendered by the
+		// account_export job, downloaded through a presigned URL) + account
+		// deletion.
+		dr.Post("/settings/export", handlers.HandleExportData(deps.Exports, deps.DB, deps.Logger))
+		dr.Get("/settings/export/download", handlers.HandleExportDownload(deps.Exports, deps.Logger))
 		dr.Post("/settings/delete-account", handlers.HandleRequestDeletion(deps.DB, deps.Auth, deps.Account, deps.MFA, deps.Logger))
 		dr.Post("/settings/cancel-deletion", handlers.HandleCancelDeletion(deps.DB, deps.Account, deps.Logger))
 
@@ -1117,4 +1125,17 @@ func pageContent(page string) string {
 	default:
 		return `{{define "content"}}<p>Page not found.</p>{{end}}`
 	}
+}
+
+// noSystemBucket answers 404 for a bucket page of a system bucket (its name
+// starts with '_' — tenant.IsSystemBucket): the export bucket is the
+// service's, hidden from the bucket list and never a page.
+func noSystemBucket(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if tenant.IsSystemBucket(chi.URLParam(r, "name")) {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

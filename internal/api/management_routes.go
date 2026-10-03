@@ -99,7 +99,7 @@ func (s *Server) handleMgmtListBuckets(w http.ResponseWriter, r *http.Request) {
 			tenantID, startingAfter, limit+1)
 	} else {
 		rows, dbErr = s.db.QueryContext(r.Context(),
-			`SELECT name, created_at FROM buckets WHERE tenant_id = $1 ORDER BY name LIMIT $2`,
+			`SELECT name, created_at FROM buckets WHERE tenant_id = $1 AND name NOT LIKE '\_%' ORDER BY name LIMIT $2`,
 			tenantID, limit+1)
 	}
 	if dbErr != nil {
@@ -131,9 +131,7 @@ func (s *Server) handleMgmtListBuckets(w http.ResponseWriter, r *http.Request) {
 		buckets = buckets[:limit]
 	}
 
-	var countResult int
-	_ = s.db.QueryRowContext(r.Context(),
-		`SELECT COUNT(*) FROM buckets WHERE tenant_id = $1`, tenantID).Scan(&countResult)
+	countResult, _ := countCustomerBuckets(r.Context(), s.db, tenantID)
 
 	items := make([]interface{}, len(buckets))
 	for i, b := range buckets {
@@ -694,6 +692,10 @@ func mgmtDeletionMessage(at time.Time) string {
 		at.UTC().Format("2006-01-02"))
 }
 
+// handleMgmtExportData — POST /account/export (WP-R10-3b): records the
+// request and answers 202 with the export id. A worker renders it within a
+// minute or so; GET /account/export/{id} reports the status and, once
+// completed, the download URL. 409 while the user already has one pending.
 func (s *Server) handleMgmtExportData(w http.ResponseWriter, r *http.Request) {
 	userID, _ := r.Context().Value(userIDKey).(string)
 	tenantID, _ := r.Context().Value(tenantIDKey).(string)
@@ -701,49 +703,88 @@ func (s *Server) handleMgmtExportData(w http.ResponseWriter, r *http.Request) {
 		writeManagementError(w, ErrTypeAuthentication, "missing_credentials", "user or tenant not found in token", "")
 		return
 	}
-
-	exporter := NewAccountExporter(s.db, s.logger)
-	result, err := exporter.CreateExport(r.Context(), userID, tenantID)
-	if err != nil {
-		s.logger.Error("management export data", zap.Error(err))
-		writeManagementError(w, ErrTypeAPI, "export_failed", "failed to create data export", "")
+	if s.accountExports == nil {
+		writeManagementError(w, ErrTypeAPI, "export_unavailable", "data export is not available on this deployment", "")
 		return
 	}
 
-	audit.Record(r.Context(), s.db, audit.Entry{UserID: userID, TenantID: tenantID, Action: "account.exported",
-		Resource: "export:" + result.ID, Metadata: map[string]any{"bytes": result.SizeBytes, "via": "management_api"}})
-
-	resp := map[string]interface{}{
-		"object":     "data_export",
-		"id":         result.ID,
-		"data":       json.RawMessage(result.Data),
-		"request_id": getRequestID(w),
+	id, err := s.accountExports.Request(r.Context(), userID, tenantID)
+	if errors.Is(err, ErrExportInFlight) {
+		writeManagementError(w, ErrTypeConflict, "export_in_progress", "an export is already being prepared; fetch its status with GET /account/export/{id}", "")
+		return
 	}
-	writeJSON(w, http.StatusOK, resp)
+	if err != nil {
+		s.logger.Error("management export request", zap.Error(err))
+		writeManagementError(w, ErrTypeAPI, "export_failed", "failed to request a data export", "")
+		return
+	}
+
+	audit.Record(r.Context(), s.db, audit.Entry{UserID: userID, TenantID: tenantID, EventType: "account", Action: "account.export_requested",
+		Resource: "export:" + id, Metadata: map[string]any{"via": "management_api"}})
+
+	writeJSON(w, http.StatusAccepted, map[string]interface{}{
+		"object":     "data_export",
+		"id":         id,
+		"status":     "pending",
+		"request_id": getRequestID(w),
+	})
 }
 
+// handleMgmtGetExport — GET /account/export/{id}: the export's status; when
+// completed, a presigned download URL good for one hour (minted per call —
+// call again for a fresh one). 404 for an id that is not the caller's
+// (existence is never confirmed), 410 once the export has expired.
 func (s *Server) handleMgmtGetExport(w http.ResponseWriter, r *http.Request) {
 	userID, _ := r.Context().Value(userIDKey).(string)
 	if userID == "" {
 		writeManagementError(w, ErrTypeAuthentication, "missing_user", "user not found in token", "")
 		return
 	}
+	if s.accountExports == nil {
+		writeManagementError(w, ErrTypeAPI, "export_unavailable", "data export is not available on this deployment", "")
+		return
+	}
 
-	exportID := chi.URLParam(r, "id")
-	exporter := NewAccountExporter(s.db, s.logger)
-	result, err := exporter.GetExport(r.Context(), exportID, userID)
+	st, err := s.accountExports.Get(r.Context(), chi.URLParam(r, "id"), userID)
 	if err != nil {
+		if !errors.Is(err, ErrExportNotFound) {
+			s.logger.Error("management export status", zap.Error(err))
+		}
 		writeManagementError(w, ErrTypeNotFound, "export_not_found", "export not found", "id")
+		return
+	}
+	if st.Expired {
+		writeManagementError(w, ErrTypeGone, "export_expired", "this export has expired (exports are kept for 7 days); request a new one", "id")
 		return
 	}
 
 	resp := map[string]interface{}{
 		"object":          "data_export",
-		"id":              result.ID,
-		"status":          result.Status,
-		"file_size_bytes": result.SizeBytes,
-		"created_at":      result.CreatedAt,
+		"id":              st.ID,
+		"status":          st.Status,
+		"file_size_bytes": st.SizeBytes,
+		"created_at":      st.CreatedAt,
 		"request_id":      getRequestID(w),
+	}
+	if !st.CompletedAt.IsZero() {
+		resp["completed_at"] = st.CompletedAt
+	}
+	if !st.ExpiresAt.IsZero() {
+		resp["expires_at"] = st.ExpiresAt
+	}
+	if st.Status == "failed" && st.Error != "" {
+		resp["error"] = st.Error
+	}
+	if st.Status == "completed" {
+		link, linkExpires, err := s.accountExports.DownloadURL(r.Context(), st.ID, userID)
+		if err != nil {
+			s.logger.Error("management export download url", zap.Error(err))
+			writeManagementError(w, ErrTypeAPI, "export_failed", "failed to sign the download URL", "")
+			return
+		}
+		resp["etag"] = st.ETag
+		resp["download_url"] = link
+		resp["download_url_expires_at"] = linkExpires
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

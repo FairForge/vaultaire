@@ -130,11 +130,29 @@
 
 <div class="card">
     <div class="card-title">Export My Data</div>
-    <p class="text-muted" style="margin-bottom: 1rem;">Download all your data (profile, buckets, objects, usage, API keys) as a JSON file.</p>
+    <p class="text-muted" style="margin-bottom: 1rem;">Request a copy of all your account data (profile, buckets, objects, versions, API keys, usage, sessions) as one JSON file. It is prepared in the background, usually within a minute, and kept for 7 days in a private system bucket of your account — it counts against your storage like any object.</p>
+    {{if .Export}}
+    {{if .Export.Pending}}
+    <div class="alert alert-success" style="margin-bottom: 1rem;">Your export is being prepared (requested {{.Export.Requested}}). Reload this page in a minute.</div>
+    {{else if .Export.Ready}}
+    <div class="alert alert-success" style="margin-bottom: 1rem;">
+        Your export is ready until <strong>{{.Export.ReadyUntil}}</strong>.
+        <a class="btn btn-primary" href="/dashboard/settings/export/download" style="margin-left: 0.5rem;">Download ({{.Export.Size}})</a>
+    </div>
+    {{else if .Export.Expired}}
+    <div class="alert alert-error" style="margin-bottom: 1rem;">Your last export (requested {{.Export.Requested}}) has expired — exports are kept for 7 days. Request a new one below.</div>
+    {{else if .Export.Failed}}
+    <div class="alert alert-error" style="margin-bottom: 1rem;">Your last export (requested {{.Export.Requested}}) could not be prepared. Request it again; if it fails again, contact support.</div>
+    {{end}}
+    {{end}}
+    {{if .ExportAvailable}}
     <form method="POST" action="/dashboard/settings/export">
         <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-        <button type="submit" class="btn btn-primary">Export Data</button>
+        <button type="submit" class="btn {{if and .Export .Export.Pending}}btn-secondary{{else}}btn-primary{{end}}"{{if and .Export .Export.Pending}} disabled{{end}}>Request Export</button>
     </form>
+    {{else}}
+    <p class="text-muted">Data export is not available on this deployment.</p>
+    {{end}}
 </div>
 
 <div class="card" style="border: 1px solid var(--danger);">

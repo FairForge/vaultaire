@@ -53,9 +53,8 @@ func (s *Server) createBucketRegistry(ctx context.Context, tenantID, bucket, reg
 			return out, fmt.Errorf("check bucket ownership %s: %w", bucket, err)
 		}
 		if !out.alreadyOwned {
-			var count int
-			if err := s.db.QueryRowContext(ctx,
-				"SELECT COUNT(*) FROM buckets WHERE tenant_id = $1", tenantID).Scan(&count); err != nil {
+			count, err := countCustomerBuckets(ctx, s.db, tenantID)
+			if err != nil {
 				return out, fmt.Errorf("count buckets for %s: %w", tenantID, err)
 			}
 			if count >= maxBucketsPerTenant {
