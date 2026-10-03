@@ -584,6 +584,36 @@ func TestLocalIsNeverADurableClass(t *testing.T) {
 
 // --- chunked rows -------------------------------------------------------------
 
+// Prod's first run (2026-10-03 01:42 UTC): the whole-object pass asked the
+// driver directly and left the primary's breaker alone — the chunk pass went
+// through the chunk store's ExistsOn, five 403s opened the breaker, and the
+// run then counted 127 "errors" for chunks nobody asked about. The chunk
+// pass now observes the breaker like the whole-object pass, and is given up
+// after the same ten consecutive errors.
+func TestRoutingTruth_Run_ChunkChecksNeverChargeTheBreakerAndAreGivenUp(t *testing.T) {
+	// Arrange: two chunked objects (dozens of chunks) on a primary whose
+	// every Exists fails.
+	f := setupChunkAddrFixture(t)
+	chunks := 0
+	for i := 0; i < routingErrorCutoff+2; i++ {
+		chunks += len(f.put(f.a, fmt.Sprintf("o%02d.bin", i), generateTestData(8*1024)))
+	}
+	require.Greater(t, chunks, routingErrorCutoff, "enough chunks to pass the cutoff")
+	f.fixed.failExists.Store(true)
+	c := NewRoutingTruthChecker(f.db, f.eng, f.adapter.gci, zap.NewNop())
+	c.scopeTenant = f.a.ID
+
+	// Act
+	res, err := c.RunOnce(context.Background())
+	require.NoError(t, err)
+
+	// Assert: ten errors, then given up; the breaker is still closed.
+	assert.Equal(t, routingErrorCutoff, res.Chunks.Errors)
+	assert.Equal(t, routingErrorCutoff, res.Chunks.Chunks, "no chunk is counted that nobody asked about")
+	assert.Zero(t, res.Chunks.Missing)
+	assert.Equal(t, engine.StateClosed.String(), f.eng.GetFailoverStatus()[f.backend], "the job never charges a breaker")
+}
+
 // A chunked row is its chunks: each is checked at the one address through
 // the chunk store (WP-R8-7) — a blob still under its uploader's prefix is
 // present (and the chunk move's work), a blob at neither address is missing,
