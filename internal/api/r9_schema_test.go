@@ -5,6 +5,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/testutil"
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -94,17 +96,25 @@ func TestMgmtListObjects_MigratedColumns(t *testing.T) {
 }
 
 // R9-02: the GDPR export swallowed the same phantom-column errors and shipped
-// an export with empty objects/bandwidth sections.
-func TestAccountExporter_ObjectsAndBandwidth_MigratedColumns(t *testing.T) {
+// an export with empty objects/bandwidth sections. The render now fails loud
+// on a bad query (and TestExportSectionsCoverSchema prepares every section
+// query against the schema); this is the end-to-end half.
+func TestAccountExport_ObjectsAndBandwidth_MigratedColumns(t *testing.T) {
 	db := r9DB(t)
 	tid := r9Tenant(t, db, "test-r9-export")
-	e := NewAccountExporter(db, zap.NewNop())
 
-	objects := e.collectObjects(context.Background(), tid)
+	var buf bytes.Buffer
+	require.NoError(t, renderExport(context.Background(), db, &buf,
+		exportSubject{UserID: uuid.New().String(), TenantID: tid, ExportID: "r9", Now: time.Now()}, 1))
+	var out map[string]any
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &out), buf.String())
+
+	objects := out["objects"].([]any)
 	require.Len(t, objects, 2, "export must list the tenant's objects")
-	assert.EqualValues(t, 100, objects[0]["size"])
+	assert.EqualValues(t, 100, objects[0].(map[string]any)["size"])
+	assert.NotEmpty(t, objects[0].(map[string]any)["last_modified"], "last_modified must come from updated_at")
 
-	bw := e.collectBandwidth(context.Background(), tid)
+	bw := out["bandwidth_usage"].([]any)
 	require.Len(t, bw, 1, "export must include bandwidth usage")
-	assert.EqualValues(t, 3, bw[0]["requests"])
+	assert.EqualValues(t, 3, bw[0].(map[string]any)["requests"])
 }

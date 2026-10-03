@@ -1012,21 +1012,31 @@ func generateManagementPaths() map[string]*PathItem {
 				})),
 		},
 		"/api/v1/manage/account/export": {
-			Post: mut(jsonOp("Management", "Export the account's data (GDPR)", "ManageExportData",
-				"Builds the export synchronously and returns it inline: user profile, tenant, quota, buckets, objects (from the HEAD cache), API keys (no secrets), "+
-					"90 days of bandwidth and the last 1000 events. An `account_exports` row records it; fetch its status with GET /account/export/{id}. No request body.",
+			Post: mut(jsonOp("Management", "Request a data export (GDPR)", "ManageExportData",
+				"Records the request and answers **202** with the export id; a background job renders the export within about a minute into a private system bucket of the account "+
+					"(`_exports`, invisible to ListBuckets; the object counts against the standard-floor quota but is written even when the account is over quota). "+
+					"Poll GET /account/export/{id} for the status and, once `completed`, the download URL. One export at a time per user: **409** `export_in_progress` while one is pending. "+
+					"The export is one JSON document: user profile, security (MFA on/off, MFA events), tenant, quota (totals, floors, house), buckets (every setting), objects "+
+					"(key, size, etag, content type, the storage class the customer sees, timestamps, user metadata, tags), object versions, object locks, multipart uploads in flight, "+
+					"API keys (ids, names, permissions, scope — never a secret), 90 days of bandwidth, events, webhooks (url, events — never the signing secret), OAuth links (provider only), "+
+					"dashboard sessions (created, last seen, user agent, ip), sign-up attribution, the export records and the account's audit trail. Exports are kept for 7 days. No request body.",
 				map[string]Response{
-					"200": jsonResp("The export", ref("DataExport")),
-					"500": errResp("`export_failed`"),
+					"202": jsonResp("The export was requested", ref("DataExportRequested")),
+					"409": errResp("`export_in_progress`"),
+					"500": errResp("`export_failed` · `export_unavailable`"),
 				})),
 		},
 		"/api/v1/manage/account/export/{id}": {
 			Parameters: []Parameter{pathParam("id", "Export id")},
-			Get: mgmt(jsonOp("Management", "Get an export's status", "ManageGetExport",
-				"Status and size of one of the caller's exports. The data itself is only returned by the POST.",
+			Get: mgmt(jsonOp("Management", "Get an export's status and download URL", "ManageGetExport",
+				"The status of one of the caller's exports (`pending` → `completed` | `failed`). When `completed`, `download_url` is a presigned S3 GET of the export object, "+
+					"signed with the account's primary key pair and valid for one hour (`download_url_expires_at`) — call again for a fresh one; a rotated primary key invalidates it. "+
+					"The object itself expires 7 days after completion (`expires_at`): **410** `export_expired` after that (the record stays). "+
+					"**404** for an id that is not the caller's — existence is never confirmed.",
 				map[string]Response{
 					"200": jsonResp("Export status", ref("DataExportStatus")),
 					"404": errResp("`export_not_found` (also when the export belongs to another user)"),
+					"410": errResp("`export_expired`"),
 				})),
 		},
 		"/api/v1/manage/account": {
@@ -1774,28 +1784,25 @@ func generateJSONSchemas() map[string]Schema {
 			"tier":          str("Plan tier"),
 			"request_id":    str(""),
 		}, "object", "tenant_id", "storage_used", "storage_limit", "usage_percent", "tier", "request_id"),
-		"DataExport": object("A synchronous GDPR export (POST /api/v1/manage/account/export)", map[string]*Schema{
-			"object": strEnum("", "data_export"),
-			"id":     str("Export id (empty without a database)"),
-			"data": objectPtr("The export itself", map[string]*Schema{
-				"user":            freeObject("`id`, `email`, and `company`/`role`/`status`/`created_at` when set"),
-				"tenant":          freeObject("`id`, `name`, `plan`"),
-				"quota":           freeObject("`storage_used_bytes`, `storage_limit_bytes`, `tier`"),
-				"buckets":         arrayOf(freeObject("`name`, `visibility`, `created_at`, `metadata`")),
-				"objects":         arrayOf(freeObject("`bucket`, `key`, `size`, `content_type`, `last_modified`")),
-				"api_keys":        arrayOf(freeObject("`id`, `name`, `permissions`, `created_at` — never a secret")),
-				"bandwidth_usage": arrayOf(freeObject("`date`, `ingress_bytes`, `egress_bytes`, `requests` — last 90 days")),
-				"events":          arrayOf(freeObject("`id`, `type`, `data`, `created_at` — last 1000")),
-			}),
+		"DataExportRequested": object("A requested GDPR export (POST /api/v1/manage/account/export)", map[string]*Schema{
+			"object":     strEnum("", "data_export"),
+			"id":         str("Export id — poll GET /account/export/{id}"),
+			"status":     strEnum("", "pending"),
 			"request_id": str(""),
-		}, "object", "id", "data", "request_id"),
+		}, "object", "id", "status", "request_id"),
 		"DataExportStatus": object("", map[string]*Schema{
-			"object":          strEnum("", "data_export"),
-			"id":              str(""),
-			"status":          strEnum("", "processing", "completed", "failed"),
-			"file_size_bytes": integer(""),
-			"created_at":      dateTime(""),
-			"request_id":      str(""),
+			"object":                  strEnum("", "data_export"),
+			"id":                      str(""),
+			"status":                  strEnum("", "pending", "completed", "failed"),
+			"file_size_bytes":         integer("Size of the export object (0 until completed)"),
+			"created_at":              dateTime(""),
+			"completed_at":            dateTime("When the object was written (completed only)"),
+			"expires_at":              dateTime("When the object is removed — 7 days after completion (completed only)"),
+			"etag":                    str("MD5 of the export object (completed only)"),
+			"download_url":            str("Presigned GET of the export object, valid one hour (completed only; never logged — treat as a credential)"),
+			"download_url_expires_at": dateTime("(completed only)"),
+			"error":                   str("Why the export failed (failed only)"),
+			"request_id":              str(""),
 		}, "object", "id", "status", "file_size_bytes", "created_at", "request_id"),
 		"AccountDeletionRequest": object("", map[string]*Schema{
 			"reason": str("Why the account is being closed (required, stored on the user row)"),

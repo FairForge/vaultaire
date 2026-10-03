@@ -328,7 +328,7 @@ func listBuckets(ctx context.Context, db *sql.DB, tenantID string) []BucketRow {
 		     WHERE tenant_id = $1
 		     GROUP BY bucket
 		 ) o ON o.bucket = b.name
-		 WHERE b.tenant_id = $1
+		 WHERE b.tenant_id = $1 AND b.name NOT LIKE '\_%'
 		 ORDER BY b.name`, tenantID)
 	if err != nil {
 		return nil

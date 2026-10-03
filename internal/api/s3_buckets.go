@@ -68,7 +68,7 @@ func (s *Server) ListBuckets(w http.ResponseWriter, r *http.Request) {
 
 	if s.db != nil {
 		rows, dbErr := s.db.QueryContext(ctx,
-			`SELECT name, created_at FROM buckets WHERE tenant_id = $1 ORDER BY name`, tenantID)
+			`SELECT name, created_at FROM buckets WHERE tenant_id = $1 AND name NOT LIKE '\_%' ORDER BY name`, tenantID)
 		if dbErr != nil {
 			s.logger.Error("list buckets from DB", zap.Error(dbErr))
 		} else {
@@ -131,9 +131,8 @@ func (s *Server) freeTierBucketCapBlocksWrite(ctx context.Context, tenantID, buc
 		tenantID, bucket).Scan(&owned); err != nil || owned {
 		return false
 	}
-	var count int
-	if err := s.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM buckets WHERE tenant_id = $1", tenantID).Scan(&count); err != nil {
+	count, err := countCustomerBuckets(ctx, s.db, tenantID)
+	if err != nil {
 		return false
 	}
 	return count >= usage.FreeTierLimits.MaxBuckets

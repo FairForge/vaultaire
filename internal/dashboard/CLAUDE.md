@@ -104,7 +104,8 @@ Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`,
 | `/dashboard/billing/portal` | POST | session | Redirect to Stripe Billing Portal |
 | `/dashboard/compliance` | GET | session | Compliance dashboard: per-bucket security posture, score |
 | `/dashboard/compliance/export` | GET | session | Download compliance report as JSON |
-| `/dashboard/settings/export` | POST | session | Download all user data as JSON (GDPR Article 20) |
+| `/dashboard/settings/export` | POST | session | Request a GDPR export (WP-R10-3b): records it through `handlers.ExportService`, flash, redirect; the `account_export` job renders it; the settings page shows pending / ready-until / expired / failed |
+| `/dashboard/settings/export/download` | GET | session | 302 to a presigned URL of the latest completed export (1 h, minted per click, `Cache-Control: no-store`, Location header only) |
 | `/dashboard/settings/delete-account` | POST | session | Schedule account deletion with 30-day grace (GDPR Article 17) through `internal/account` (WP-R10-3); confirmed by password, or TOTP / re-typed e-mail for OAuth-only accounts (R12-22). The runner erases on the date; nothing is blocked before it (D-16) |
 | `/dashboard/settings/cancel-deletion` | POST | session | Cancel pending account deletion (`account.Service.Cancel`) |
 | `/admin/tenants` | GET | session + admin | Tenant list |

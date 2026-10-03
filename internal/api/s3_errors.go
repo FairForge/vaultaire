@@ -324,7 +324,7 @@ func bucketSuggestion(ctx context.Context, db *sql.DB, tenantID, bucket string) 
 	}
 
 	rows, err := db.QueryContext(ctx,
-		`SELECT name FROM buckets WHERE tenant_id = $1`, tenantID)
+		`SELECT name FROM buckets WHERE tenant_id = $1 AND name NOT LIKE '\_%'`, tenantID)
 	if err != nil {
 		return ""
 	}

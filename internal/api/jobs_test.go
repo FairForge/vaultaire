@@ -530,7 +530,7 @@ func TestJobLockKey_IsStableAndDistinct(t *testing.T) {
 	seen := map[int64]string{}
 	for _, n := range []string{"retention", "account_deletion", "dedup_gc", "smart_demotion", "inventory",
 		"multipart_reaper", "idempotency_cleanup", "sts_cleanup", "session_cleanup", "cdn_rollup",
-		"access_log_delivery", "bandwidth_alerts"} {
+		"access_log_delivery", "bandwidth_alerts", "account_export"} {
 		k := jobLockKey(n)
 		assert.GreaterOrEqual(t, k, int64(0))
 		assert.Empty(t, seen[k], "lock key collision between %s and %s", n, seen[k])

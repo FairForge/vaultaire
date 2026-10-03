@@ -6,9 +6,7 @@ package handlers
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -67,27 +65,4 @@ func TestQueryRecentUsers_MigratedColumns(t *testing.T) {
 	require.NotNil(t, found, "the newest user must be listed")
 	assert.Equal(t, "R9 Co", found.Company)
 	assert.Equal(t, "standard", found.Plan, "plan must come from the tenant joined by email")
-}
-
-// R9-02: the dashboard data export selected object_head_cache.size /
-// last_modified and bandwidth_usage_daily.requests — none exist — and, because
-// the errors were swallowed, exported empty sections.
-func TestCollectExportData_MigratedColumns(t *testing.T) {
-	db := testDashDB(t)
-	defer func() { _ = db.Close() }()
-	userID, tenantID := r9Fixture(t, db)
-
-	req := httptest.NewRequest("POST", "/dashboard/settings/export", nil)
-	out := collectExportData(req, db, userID, tenantID, zap.NewNop())
-
-	var data map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal(out, &data))
-	var objects []map[string]interface{}
-	require.NoError(t, json.Unmarshal(data["objects"], &objects))
-	require.Len(t, objects, 1, "export must include the tenant's objects")
-	assert.EqualValues(t, 123, objects[0]["size"])
-	var bw []map[string]interface{}
-	require.NoError(t, json.Unmarshal(data["bandwidth_usage"], &bw))
-	require.Len(t, bw, 1, "export must include bandwidth usage")
-	assert.EqualValues(t, 7, bw[0]["requests"])
 }

@@ -42,6 +42,7 @@ import (
 //	session_cleanup      1 h    +30 s
 //	bandwidth_alerts     1 h    +40 s
 //	access_log_delivery  5 m    +1 m
+//	account_export       1 m    +15 s   (renders pending GDPR exports, WP-R10-3b)
 //
 // The three cleanups used to wait a full hour after every start before
 // their first pass.
@@ -112,6 +113,9 @@ func (s *Server) registerJobs() {
 	}
 	if s.bandwidthAlerter != nil && s.bandwidthAlerter.db != nil {
 		s.jobs.Register(s.bandwidthAlerter.spec())
+	}
+	if s.accountExports != nil {
+		s.jobs.Register(s.accountExports.spec())
 	}
 	// The logging_enabled gate is loaded here, before the first request can
 	// be recorded against it; every delivery pass refreshes it.

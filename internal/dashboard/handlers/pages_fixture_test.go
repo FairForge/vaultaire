@@ -57,7 +57,7 @@ func TestPages_WriteScreenshotFixtures(t *testing.T) {
 
 	// Settings.
 	w = httptest.NewRecorder()
-	HandleSettings(page("settings.html"), auth.NewAuthService(nil, db), db, nil, zap.NewNop()).ServeHTTP(w,
+	HandleSettings(page("settings.html"), auth.NewAuthService(nil, db), db, nil, nil, zap.NewNop()).ServeHTTP(w,
 		injectSessionWithTenant(httptest.NewRequest("GET", "/dashboard/settings", nil), id))
 	write("settings", w)
 

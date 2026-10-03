@@ -68,6 +68,20 @@ type deliveredObject struct {
 	Size    int64
 	ETag    string
 	Backend string
+	// OverQuota: the tenant was out of quota and the object was written on
+	// the caller's explicit allowance (generatedWriteOptions.AllowOverQuota);
+	// the bytes are accounted all the same.
+	OverQuota bool
+}
+
+// generatedWriteOptions are the per-call choices of writeOpts.
+type generatedWriteOptions struct {
+	// AllowOverQuota writes the object even when the tenant is out of quota
+	// on the floor it lands on. The bytes are force-accounted (never hidden)
+	// and the result says OverQuota. For the one object a customer is owed
+	// whatever their balance: the GDPR export (WP-R10-3b). Reports and
+	// access logs never set it (errTargetQuotaExceeded keeps their rows).
+	AllowOverQuota bool
 }
 
 // write renders body into key of the tenant's bucket. Ownership of the
@@ -79,6 +93,11 @@ type deliveredObject struct {
 // overwrites (inventory: same key per day) or writes a fresh key (access
 // logs: timestamp + random suffix).
 func (g *generatedObjectWriter) write(ctx context.Context, tenantID, bucket, key, contentType string, body func(io.Writer) error) (deliveredObject, error) {
+	return g.writeOpts(ctx, tenantID, bucket, key, contentType, body, generatedWriteOptions{})
+}
+
+// writeOpts is write with per-call options.
+func (g *generatedObjectWriter) writeOpts(ctx context.Context, tenantID, bucket, key, contentType string, body func(io.Writer) error, o generatedWriteOptions) (deliveredObject, error) {
 	if g == nil {
 		return deliveredObject{}, errors.New("generated object writer not configured")
 	}
@@ -127,13 +146,24 @@ func (g *generatedObjectWriter) write(ctx context.Context, tenantID, bucket, key
 
 	class := resolvePutStorageClass(tctx, g.db, g.eng, tenantID, bucket, "")
 	floor := usage.FloorOf(class)
+	overQuota := false
 	if g.quota != nil {
 		ok, qErr := reserveQuota(tctx, g.quota, tenantID, floor, size)
 		if qErr != nil {
 			return deliveredObject{}, fmt.Errorf("reserve quota: %w", qErr)
 		}
 		if !ok {
-			return deliveredObject{}, errTargetQuotaExceeded
+			if !o.AllowOverQuota {
+				return deliveredObject{}, errTargetQuotaExceeded
+			}
+			// The allowance: account the bytes unconditionally (a negative
+			// release adds), so the usage the customer sees is true.
+			if err := releaseQuotaOn(tctx, g.quota, tenantID, floor, -size); err != nil {
+				return deliveredObject{}, fmt.Errorf("account over-quota write: %w", err)
+			}
+			overQuota = true
+			g.logger.Warn("generated object: written past the tenant's quota on an explicit allowance",
+				zap.String("tenant_id", tenantID), zap.String("bucket", bucket), zap.String("key", key), zap.Int64("bytes", size))
 		}
 	}
 	release := func() {
@@ -175,7 +205,7 @@ func (g *generatedObjectWriter) write(ctx context.Context, tenantID, bucket, key
 	dropDisplacedBlob(tctx, g.db, g.eng, g.logger, lostWriteOverwrite, tenantID, bucket, container, key, displaced, backendName)
 	recordObjectVersion(tctx, g.db, tenantID, bucket, key, size, etag, contentType, backendName)
 
-	return deliveredObject{Size: size, ETag: etag, Backend: backendName}, nil
+	return deliveredObject{Size: size, ETag: etag, Backend: backendName, OverQuota: overQuota}, nil
 }
 
 // countingWriter counts bytes written through it.

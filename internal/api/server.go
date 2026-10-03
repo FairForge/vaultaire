@@ -62,6 +62,7 @@ type Server struct {
 	events             chan Event
 	engine             *engine.CoreEngine
 	quotaManager       QuotaManager
+	accountExports     *AccountExportService // the one GDPR export service (WP-R10-3b); nil without DB + engine
 	auth               *auth.AuthService
 	stripe             *billing.StripeService
 	webhookHandler     *billing.WebhookHandler
@@ -418,6 +419,16 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// Start() on the shutdown-cancelled context. Synthetic customer check
 	// (Review R13-13): off unless SYNTHETIC_CHECK_URL is set.
 	s.retention = NewRetentionJob(s.db, logger)
+	// The one GDPR export service (WP-R10-3b): the management API and the
+	// dashboard request through it, the account_export job renders, the
+	// retention job purges expired objects through it.
+	s.accountExports = NewAccountExportService(s.db, s.engine, s.quotaManager, s.gci, getPublicEndpoint(cfg.Server.Port), logger)
+	if s.accountExports != nil {
+		s.accountExports.SSEDefault = s.sseService != nil
+		if s.retention != nil {
+			s.retention.Exports = s.accountExports
+		}
+	}
 	s.synthetic = newSyntheticCheckerFromEnv(os.Getenv, logger)
 	// The one account-deletion state machine (WP-R10-3): the management
 	// API, the user API and the dashboard schedule/cancel through it; the
@@ -795,6 +806,7 @@ func (s *Server) setupRoutes() {
 		Flags:         s.flags,
 		Quotas:        houseQuotas(s.quotaManager),
 		Account:       s.accountSvc,
+		Exports:       dashboardExports(s.accountExports),
 		Egress:        s.egress,
 		// JWT_SECRET is the one secret every deployment must set and it
 		// survives restarts: the CSRF key is derived from it under its own
@@ -853,7 +865,6 @@ func (s *Server) registerComplianceRoutes() {
 
 	complianceHandler := compliance.NewAPIHandler(
 		compliance.NewGDPRService(nil, s.logger),
-		compliance.NewPortabilityService(nil, nil, s.logger),
 		compliance.NewConsentService(nil, s.logger),
 		breachService,
 		compliance.NewROPAService(nil, s.logger),
@@ -875,9 +886,6 @@ func (s *Server) registerComplianceRoutes() {
 		r.Get("/activities", complianceHandler.HandleListProcessingActivities)
 
 		r.Post("/deletion", complianceHandler.HandleCreateDeletionRequest)
-
-		r.Post("/export", complianceHandler.HandleCreateExport)
-		r.Get("/export/{id}", complianceHandler.HandleGetExport)
 
 		r.Post("/consent", complianceHandler.HandleGrantConsent)
 		r.Delete("/consent/{purpose}", complianceHandler.HandleWithdrawConsent)

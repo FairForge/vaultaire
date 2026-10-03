@@ -13,7 +13,7 @@ import (
 
 // HandleSettings renders the settings page with current profile, preferences,
 // and the list of active sessions (devices signed in as this user).
-func HandleSettings(tmpl *template.Template, authSvc *auth.AuthService, db *sql.DB, sessions dashauth.SessionStore, logger *zap.Logger) http.HandlerFunc {
+func HandleSettings(tmpl *template.Template, authSvc *auth.AuthService, db *sql.DB, sessions dashauth.SessionStore, exports ExportService, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
 		if sd == nil {
@@ -38,6 +38,9 @@ func HandleSettings(tmpl *template.Template, authSvc *auth.AuthService, db *sql.
 
 		// Account deletion status.
 		populateDeletionStatus(r.Context(), db, sd.UserID, data)
+
+		// The latest GDPR export (WP-R10-3b).
+		populateExportStatus(r.Context(), exports, sd.UserID, data)
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := tmpl.ExecuteTemplate(w, "base", data); err != nil {

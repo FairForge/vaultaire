@@ -27,7 +27,7 @@ func newAdminBreachTestServer(t *testing.T) (*Server, sqlmock.Sqlmock, func()) {
 
 	breachService := compliance.NewBreachService(nil, logger)
 	complianceHandler := compliance.NewAPIHandler(
-		nil, nil, nil, breachService, nil, nil, logger,
+		nil, nil, breachService, nil, nil, logger,
 	)
 
 	s := &Server{

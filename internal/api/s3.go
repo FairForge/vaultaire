@@ -467,6 +467,12 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A system bucket (WP-R10-3b) does not exist to the S3 API, except for
+	// a read of one of its objects (the presigned export download).
+	if systemBucketRefused(w, r, s3Req) {
+		return
+	}
+
 	if tenantID == "" {
 		tenantID = "default"
 	}
