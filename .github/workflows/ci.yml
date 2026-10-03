@@ -39,6 +39,21 @@ jobs:
           go-version: "1.25"
           cache: true
 
+      - name: Raise the Postgres connection limit
+        # `go test -race ./...` runs every package in parallel on this one
+        # server; 11 packages open their own pools (66 sql.Open sites in the
+        # tests) and the image's default max_connections=100 has failed main
+        # three times with "pq: sorry, too many clients already" (53300) on
+        # merges that touched nothing near the failing package. A service
+        # container takes no command, so the limit is raised with ALTER
+        # SYSTEM (persisted in postgresql.auto.conf) and a container restart.
+        run: |
+          psql -h localhost -U postgres -c "ALTER SYSTEM SET max_connections = 400;"
+          cid=$(docker ps -q --filter "ancestor=postgres:15" | head -1)
+          docker restart "$cid"
+          for i in $(seq 1 30); do pg_isready -h localhost -U postgres && break; sleep 1; done
+          psql -h localhost -U postgres -tAc "SHOW max_connections;"
+
       - name: Set up database
         run: |
           psql -h localhost -U postgres -c "CREATE USER viera SUPERUSER;" || true
