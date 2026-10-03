@@ -220,6 +220,9 @@ func (s *Server) handleMgmtGetBucket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	name := chi.URLParam(r, "name")
+	if mgmtSystemBucketNotFound(w, name) {
+		return
+	}
 
 	if s.db == nil {
 		writeManagementError(w, ErrTypeAPI, "no_database", "database unavailable", "")
@@ -251,6 +254,9 @@ func (s *Server) handleMgmtPatchBucket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	name := chi.URLParam(r, "name")
+	if mgmtSystemBucketNotFound(w, name) {
+		return
+	}
 
 	if s.db == nil {
 		writeManagementError(w, ErrTypeAPI, "no_database", "database unavailable", "")
@@ -314,6 +320,9 @@ func (s *Server) handleMgmtDeleteBucket(w http.ResponseWriter, r *http.Request) 
 	}
 
 	name := chi.URLParam(r, "name")
+	if mgmtSystemBucketNotFound(w, name) {
+		return
+	}
 	// A name that cannot be a bucket cannot be one of ours; it also keeps
 	// the marker path below inside DATA_PATH/<tenant>/ (no "." / "..").
 	if !validateBucketName(name) {
@@ -409,6 +418,9 @@ func (s *Server) handleMgmtListObjects(w http.ResponseWriter, r *http.Request) {
 	}
 
 	bucket := chi.URLParam(r, "name")
+	if mgmtSystemBucketNotFound(w, bucket) {
+		return
+	}
 
 	limit := 20
 	if l := r.URL.Query().Get("limit"); l != "" {
@@ -877,6 +889,9 @@ func (s *Server) handleMgmtSetBucketTier(w http.ResponseWriter, r *http.Request)
 	}
 
 	name := chi.URLParam(r, "name")
+	if mgmtSystemBucketNotFound(w, name) {
+		return
+	}
 
 	if s.db == nil {
 		writeManagementError(w, ErrTypeAPI, "no_database", "database unavailable", "")
@@ -937,6 +952,9 @@ func (s *Server) handleMgmtSetBucketResidency(w http.ResponseWriter, r *http.Req
 	}
 
 	name := chi.URLParam(r, "name")
+	if mgmtSystemBucketNotFound(w, name) {
+		return
+	}
 
 	if s.db == nil {
 		writeManagementError(w, ErrTypeAPI, "no_database", "database unavailable", "")

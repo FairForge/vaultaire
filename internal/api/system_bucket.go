@@ -39,3 +39,17 @@ func countCustomerBuckets(ctx context.Context, db *sql.DB, tenantID string) (int
 	err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM buckets WHERE tenant_id = $1 AND name NOT LIKE '\_%'`, tenantID).Scan(&n)
 	return n, err
 }
+
+// mgmtSystemBucketNotFound answers the management API's bucket_not_found for
+// a per-bucket route that names a system bucket — the same rule as the S3
+// surface (NoSuchBucket) and the dashboard (404): the export bucket is the
+// service's, not the customer's to patch, re-tier, pin or delete (a tier or
+// a pin would move the export objects; a lock or versioning change would
+// make the expiry delete refuse). It reports whether it wrote the response.
+func mgmtSystemBucketNotFound(w http.ResponseWriter, name string) bool {
+	if !tenant.IsSystemBucket(name) {
+		return false
+	}
+	writeManagementError(w, ErrTypeNotFound, "bucket_not_found", "bucket not found", "name")
+	return true
+}
