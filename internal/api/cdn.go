@@ -87,11 +87,12 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 	var backendName string
 	var floor string
 	var lastAccessed time.Time
+	var isChunked bool
 	err = s.db.QueryRowContext(ctx, `
-		SELECT size_bytes, etag, content_type, updated_at, COALESCE(content_disposition, ''), COALESCE(backend_name, ''), floor, last_accessed
+		SELECT size_bytes, etag, content_type, updated_at, COALESCE(content_disposition, ''), COALESCE(backend_name, ''), floor, last_accessed, is_chunked
 		FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-		tenantID, bucket, key).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &contentDisposition, &backendName, &floor, &lastAccessed)
+		tenantID, bucket, key).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &contentDisposition, &backendName, &floor, &lastAccessed, &isChunked)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -178,7 +179,9 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 	// goes straight to the backend that holds the object instead of walking
 	// the failover chain after a restart.
 	if backendName != "" && s.engine != nil {
-		noteRecordedBackend(s.engine, s.logger, "cdn", backendName)
+		if !isChunked { // a chunked row's name is a sentinel ('chunked' / ''), not a route
+			noteRecordedBackend(s.engine, s.logger, "cdn", backendName)
+		}
 		s.engine.HintBackend(container, key, backendName)
 	}
 	// Backend-attribution slot: the engine records which backend served the

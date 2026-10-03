@@ -407,3 +407,35 @@ error, ten consecutive errors give it up — red-first
 open breaker; after: 10 errors, breaker closed). The adversarial pass had asked "does the job
 charge the breaker" of the whole-object path (M9) and not of the chunk path — the same bug on the
 other entry point, the pattern the review meta-notes name.
+
+## Post-merge review (plan driver, 2026-10-03)
+
+Read against the note: `routing_truth.go` (boot check, the job, the collector, the read counter),
+`admin_routing.go` (`resolveNull` writes only under `backend_name IS NULL AND etag unchanged`),
+`store_identity.go` ×2, `storage_class.go`, the scheduler's `result` column (074), the six
+`noteRecordedBackend` call sites. Checked and held: the job calls the driver, never the failover
+(#561 made the chunk pass do the same — the prod breaker was closed again on the box); an open
+breaker is one error; `missing` is re-read; the collector's gauges come from `job_runs` (confirmed on
+prod right after the #561 restart: `…last_run_missing_ratio{local} 1`, `idrive` absent because it had
+no verdict); the restore, delete, batch-delete and copy call sites run after their chunked branches.
+The 403 finding is real: 15 `AccessDenied`/`403` lines in prod's journal since 2026-10-01.
+
+**PM-1 (P2, fixed #562): a chunked row's `backend_name` was read as a route.** A chunked PUT whose
+chunks were all dedup hits stamps the sentinel `'chunked'` (`handleChunkedPut`: `pool.backendName`
+is empty when nothing was stored); a manifest copy stamps `''`. Neither is a driver name, so the
+boot check and the job reported every such row as "rows on no registered backend"
+(`RoutingUnknownBackendRows` fires on a healthy system; the note names a backend `chunked`), and the
+GET and `/cdn` paths counted each read of one as an unknown-backend read (`RoutingUnknownBackendReads`,
+warning). `resolveNull` and the whole-object sample had excluded `is_chunked`; the unknown-row
+query, GET and CDN had not — the same rule on some entry points and not the others. Fix: the
+unknown-row query skips chunked rows (their bytes are the index's and the job checks them chunk by
+chunk); GET and CDN note the backend for whole objects only (the CDN head-row read now carries
+`is_chunked`). `TestRoutingTruth_ChunkedRowsAreNeverUnknownBackendRows` (red: both sentinels
+reported, the job repeated it, the GET counter moved). Prod today: the one chunked row carries
+`idrive`, so nothing changes on the box until the first all-dedup upload or manifest copy.
+
+Noted, not changed: the sentinel `'chunked'` itself (R3-era) — a chunked head row's `backend_name`
+should be NULL or a documented constant everywhere; `handleChunkedCopy` writes `''` and
+`handleChunkedPut` writes the pool's backend or `'chunked'`. One rule belongs with WP-R3-1 (multipart
+through the chunk pipeline). The contiguous `OFFSET` sample window biases towards one tenant/bucket
+per run (the worker noted it); a keyset walk from a random key is the fix when the tables grow.

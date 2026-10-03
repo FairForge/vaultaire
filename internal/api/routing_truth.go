@@ -270,8 +270,13 @@ func (c *RoutingTruthChecker) unknownBackendRows(ctx context.Context) ([]unknown
 	scope := c.scopeTenant
 	type q struct{ table, sql string }
 	queries := []q{
+		// A chunked row's backend_name is not routing truth (its bytes are the
+		// content index's — the chunk rows carry their own backend_id and the
+		// job checks them chunk by chunk): a PUT whose chunks were all dedup
+		// hits stamps the sentinel 'chunked', a manifest copy stamps ''.
 		{"object_head_cache", `SELECT COALESCE(backend_name, ''), COUNT(*) FROM object_head_cache
-			WHERE ($2 = '' OR tenant_id = $2) AND (backend_name IS NULL OR NOT (backend_name = ANY($1::text[]))) GROUP BY 1`},
+			WHERE ($2 = '' OR tenant_id = $2) AND NOT is_chunked
+			  AND (backend_name IS NULL OR NOT (backend_name = ANY($1::text[]))) GROUP BY 1`},
 		{"smart_demotions", `SELECT b, COUNT(*) FROM (
 			SELECT hot_backend AS b FROM smart_demotions WHERE hot_deleted_at IS NULL AND ($2 = '' OR tenant_id = $2)
 			UNION ALL
@@ -854,9 +859,10 @@ func (r *routingCollector) Collect(ch chan<- prometheus.Metric) {
 // unknownReadLogged: one Warn per (op, backend), not one per request.
 var unknownReadLogged sync.Map
 
-// noteRecordedBackend is called by every reader of a head row's backend_name
-// before it hints the engine: a name no driver is registered under is
-// counted and logged once. The request goes on exactly as before (the
+// noteRecordedBackend is called by every reader of a WHOLE object's head row
+// backend_name before it hints the engine (a chunked row's name is a
+// sentinel — 'chunked' or ” — never a route): a name no driver is
+// registered under is counted and logged once. The request goes on exactly as before (the
 // engine's fan-out finds the bytes if any backend has them; WP-R6-1 removes
 // that fallback, which is why these rows must be reconciled first).
 func noteRecordedBackend(eng engine.Engine, logger *zap.Logger, op, backend string) {
