@@ -257,3 +257,34 @@ applies it); `job_runs` retention: ok, 03:56 UTC today.
    every account has, shown once at registration, and it never dies).
 4. Nothing to install: the job rides the existing scheduler and `vaultaire-jobs.yml` (already on
    the install list) gains the job name in `PeriodicJobStale`.
+
+## Post-merge review (plan driver, 2026-10-03)
+
+Read against the note: `account_export.go` (request, claim, render, complete, purge), the sections
+file's statement list and exclusions, `background_put.go` (the over-quota allowance: a negative
+release, accounted), `system_bucket.go`, the S3 dispatcher's refusal, the dashboard's
+`noSystemBucket`, the retention step, migration 075. Checked and held: both the write and the
+purge carry the tenant in the context (the fixed-bucket drivers refuse a call without one since
+WP-R8-7); `completed` is stamped only after the writer returned; the one-in-flight rule is the
+partial unique index; an erasure between claim and write removes the object again; the presigned
+GET is served because `systemBucketRefused` lets `GetObject`/`HeadObject` through.
+
+**PM-1 (P2, fixed #564): the management API did not know the system bucket.** S3 answers
+NoSuchBucket and the dashboard 404s, but `GET/PATCH/DELETE /api/v1/manage/buckets/{name}`,
+`…/objects`, `…/tier` and `…/residency` treated `_exports` as a customer bucket — the red run
+re-tiered the export bucket to `archive` through `PUT …/tier` (the next export would have landed
+on tape behind a presigned GET that answers 503), `PATCH` wrote metadata, `PUT …/residency` pinned
+it. Fix: `mgmtSystemBucketNotFound` first thing in the six handlers (the envelope's
+`bucket_not_found`). `TestMgmt_SystemBucketDoesNotExistOnThePerBucketRoutes`. The same rule on
+the third entry point.
+
+**The primary-pair rotation finding is confirmed in the auth code and is now a SYNTHESIS table A
+row (WP-R5-14):** `lookupCredential` resolves `tenants.access_key` first with no revocation check;
+`RotateAPIKey` / `RevokeAPIKey` write `api_keys` only; nothing writes `tenants.access_key`. A
+customer who rotates a leaked primary key has not revoked anything. It is the next worker prompt.
+
+Noted, not changed: the export bucket is created in the default region, so a tenant whose buckets
+are all pinned to another region has its export (metadata) in Dallas — acceptable for a 7-day
+metadata file, but say so in the privacy line if regions are sold as residency; an operator's own
+export carries their admin audit rows about other tenants (their actions, de-identified per
+WP-R10-3d only at erasure).
