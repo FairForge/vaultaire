@@ -27,6 +27,9 @@ type KeyRow struct {
 	StatusClass  string
 	CreatedFmt   string
 	LastUsedFmt  string
+	// IsPrimary: the account's primary pair — rotated, never revoked
+	// (WP-R5-14).
+	IsPrimary bool
 }
 
 // NewKeyData holds the just-generated key credentials (shown once).
@@ -157,13 +160,59 @@ func HandleRevokeKey(authSvc *auth.AuthService, logger *zap.Logger) http.Handler
 			return
 		}
 
-		if err := authSvc.RevokeAPIKey(r.Context(), sd.UserID, keyID); err != nil {
+		switch err := authSvc.RevokeAPIKey(r.Context(), sd.UserID, keyID); {
+		case errors.Is(err, auth.ErrPrimaryKeyRevoke):
+			middleware.SetFlash(w, "error", "The primary key cannot be revoked — rotate it instead. The old pair stops working the moment the new one is shown.")
+		case err != nil:
 			logger.Warn("revoke API key", zap.Error(err), zap.String("key_id", keyID))
-		} else {
+			middleware.SetFlash(w, "error", "That key could not be revoked.")
+		default:
 			middleware.SetFlash(w, "success", "API key revoked.")
 		}
 
 		http.Redirect(w, r, "/dashboard/apikeys", http.StatusSeeOther)
+	}
+}
+
+// HandleRotateKey handles POST /dashboard/apikeys/{id}/rotate: the old pair
+// is revoked and its successor (same scope, same primary status) is shown
+// once — the only way to kill a leaked primary pair (WP-R5-14).
+func HandleRotateKey(tmpl *template.Template, authSvc *auth.AuthService, logger *zap.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sd := dashauth.GetSession(r.Context())
+		if sd == nil {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+		keyID := chi.URLParam(r, "id")
+		if keyID == "" {
+			http.Redirect(w, r, "/dashboard/apikeys", http.StatusSeeOther)
+			return
+		}
+
+		newKey, err := authSvc.RotateAPIKey(r.Context(), sd.UserID, keyID)
+		if err != nil {
+			logger.Warn("rotate API key", zap.Error(err), zap.String("key_id", keyID))
+			msg := "That key could not be rotated."
+			if errors.Is(err, auth.ErrKeyRevoked) {
+				msg = "That key is already revoked."
+			}
+			middleware.SetFlash(w, "error", msg)
+			http.Redirect(w, r, "/dashboard/apikeys", http.StatusSeeOther)
+			return
+		}
+
+		data := sessionData(sd, "apikeys")
+		withCSRF(r.Context(), data)
+		data["NewKey"] = NewKeyData{Key: newKey.Key, Secret: newKey.Secret}
+		data["Rotated"] = true
+		data["Keys"] = listKeys(r, authSvc, sd.UserID)
+
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := tmpl.ExecuteTemplate(w, "base", data); err != nil {
+			logger.Error("render apikeys after rotate", zap.Error(err))
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		}
 	}
 }
 
@@ -200,6 +249,7 @@ func listKeys(r *http.Request, authSvc *auth.AuthService, userID string) []KeyRo
 			StatusClass:  statusClass,
 			CreatedFmt:   relativeTime(k.CreatedAt),
 			LastUsedFmt:  lastUsed,
+			IsPrimary:    k.IsPrimary,
 		})
 	}
 	return rows

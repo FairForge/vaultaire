@@ -323,12 +323,12 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 				switch errCode {
 				case ErrExpiredPresignedRequest, ErrSignatureDoesNotMatch,
 					ErrAccessDenied, ErrAuthorizationQueryParametersError,
-					ErrInvalidPresignExpires, ErrRequestTimeTooSkewed:
+					ErrInvalidPresignExpires, ErrRequestTimeTooSkewed, ErrInvalidAccessKeyId:
 					WriteS3Error(w, errCode, r.URL.Path, reqID)
 				default:
 					WriteS3Error(w, ErrAccessDenied, r.URL.Path, reqID)
 				}
-				reason, known := presignFailureReason(errCode)
+				reason, known := presignFailureReason(err)
 				if known {
 					// The verifier may have failed before looking the id up.
 					known = s.accessKeyExists(r.Context(), auth.AccessKeyFromRequest(r))
@@ -346,6 +346,10 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 
 				errCode := ErrAccessDenied
 				switch {
+				case errors.Is(err, auth.ErrAccessKeyRevoked):
+					// A revoked or rotated key, or an STS token of one: AWS's
+					// code for a key that no longer exists (WP-R5-14).
+					errCode = ErrInvalidAccessKeyId
 				case errors.Is(err, auth.ErrSignatureMismatch):
 					errCode = ErrSignatureDoesNotMatch
 				case errors.Is(err, auth.ErrRequestTimeSkewed):

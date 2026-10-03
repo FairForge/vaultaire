@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/audit"
+	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/drivers"
@@ -256,8 +257,8 @@ func (s *AccountExportService) DownloadURL(ctx context.Context, exportID, userID
 	case st.Status != "completed" || st.ObjectKey == "":
 		return "", time.Time{}, ErrExportNotReady
 	}
-	var accessKey, secretKey string
-	if err := s.db.QueryRowContext(ctx, `SELECT access_key, secret_key FROM tenants WHERE id = $1`, st.TenantID).Scan(&accessKey, &secretKey); err != nil {
+	accessKey, secretKey, err := auth.PrimaryPair(ctx, s.db, st.TenantID)
+	if err != nil {
 		return "", time.Time{}, fmt.Errorf("read tenant credentials: %w", err)
 	}
 	if accessKey == "" || secretKey == "" {

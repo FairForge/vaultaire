@@ -203,6 +203,20 @@ func (s *Server) handleCreateUserAPIKey(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
+// keyErrorStatus maps the typed key-lifecycle errors: 404 for a key that is
+// not the caller's, 409 for one already revoked or for the primary pair
+// (ErrPrimaryKeyRevoke: rotate it instead), 500 otherwise.
+func keyErrorStatus(err error) int {
+	switch {
+	case errors.Is(err, auth.ErrKeyNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, auth.ErrKeyRevoked), errors.Is(err, auth.ErrPrimaryKeyRevoke):
+		return http.StatusConflict
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
 // handleRotateUserAPIKey rotates an API key
 func (s *Server) handleRotateUserAPIKey(w http.ResponseWriter, r *http.Request) {
 	userID := r.Context().Value(userIDKey).(string)
@@ -210,7 +224,7 @@ func (s *Server) handleRotateUserAPIKey(w http.ResponseWriter, r *http.Request) 
 
 	newKey, err := s.auth.RotateAPIKey(r.Context(), userID, keyID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), keyErrorStatus(err))
 		return
 	}
 
@@ -235,7 +249,7 @@ func (s *Server) handleDeleteUserAPIKey(w http.ResponseWriter, r *http.Request) 
 	keyID := chi.URLParam(r, "keyId")
 
 	if err := s.auth.RevokeAPIKey(r.Context(), userID, keyID); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), keyErrorStatus(err))
 		return
 	}
 

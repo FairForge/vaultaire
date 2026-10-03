@@ -42,6 +42,10 @@ func authFailureReason(err error) (reason string, keyKnown bool) {
 		msg = err.Error()
 	}
 	switch {
+	case errors.Is(err, auth.ErrAccessKeyRevoked):
+		// Known-and-dead: a burst here after a rotation is someone still
+		// signing with the old pair (WP-R5-14).
+		return "revoked", true
 	case errors.Is(err, auth.ErrUnknownAccessKey):
 		return "unknown_access_key", false
 	case errors.Is(err, auth.ErrSignatureMismatch):
@@ -61,13 +65,21 @@ func authFailureReason(err error) (reason string, keyKnown bool) {
 	}
 }
 
-// presignFailureReason classifies a presigned-URL failure by its S3 code.
-// mayBeKnown says the failure is one a real key can produce; whether the id
-// actually exists is decided by accessKeyExists — verifyPresignedURL
+// presignFailureReason classifies a presigned-URL failure by its S3 code
+// (the error's text), and by its cause when the lookup itself refused the
+// key. mayBeKnown says the failure is one a real key can produce; whether
+// the id actually exists is decided by accessKeyExists — verifyPresignedURL
 // answers Expired / TooSkewed BEFORE its credential lookup, so the code
 // alone cannot vouch for the key (post-merge R11-28: it used to, and every
 // random X-Amz-Credential with a stale date minted a new key_hash series).
-func presignFailureReason(code string) (reason string, mayBeKnown bool) {
+func presignFailureReason(err error) (reason string, mayBeKnown bool) {
+	if errors.Is(err, auth.ErrAccessKeyRevoked) {
+		return "presign_revoked", true
+	}
+	code := ""
+	if err != nil {
+		code = err.Error()
+	}
 	switch code {
 	case ErrExpiredPresignedRequest:
 		return "presign_expired", true
@@ -83,17 +95,17 @@ func presignFailureReason(code string) (reason string, mayBeKnown bool) {
 }
 
 // accessKeyExists reports whether some credential of ours has this access
-// key id (tenant primary key, live VLT_ key or STS token). It is the gate
-// before a per-key metric series: only ids that exist may be hashed into
-// one, or the label set is attacker-controlled.
+// key id: an api_keys row — the primary pair is one, and a REVOKED row
+// counts (known-and-dead is the signal, WP-R5-14) — or an STS token. It is
+// the gate before a per-key metric series: only ids that exist may be
+// hashed into one, or the label set is attacker-controlled.
 func (s *Server) accessKeyExists(ctx context.Context, accessKey string) bool {
 	if s.db == nil || accessKey == "" {
 		return false
 	}
 	var exists bool
 	if err := s.db.QueryRowContext(ctx, `
-		SELECT EXISTS(SELECT 1 FROM tenants WHERE access_key = $1)
-		    OR EXISTS(SELECT 1 FROM api_keys WHERE key_id = $1 AND revoked_at IS NULL)
+		SELECT EXISTS(SELECT 1 FROM api_keys WHERE key_id = $1)
 		    OR EXISTS(SELECT 1 FROM sts_tokens WHERE access_key = $1)`, accessKey).Scan(&exists); err != nil {
 		return false
 	}

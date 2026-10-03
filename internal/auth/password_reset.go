@@ -93,7 +93,9 @@ func (a *AuthService) CompletePasswordReset(ctx context.Context, token, newPassw
 		return "", err
 	}
 
+	a.cacheMu.RLock()
 	user, exists := a.userIndex[userID]
+	a.cacheMu.RUnlock()
 	if !exists {
 		return "", fmt.Errorf("user not found")
 	}
@@ -108,18 +110,15 @@ func (a *AuthService) CompletePasswordReset(ctx context.Context, token, newPassw
 		return "", fmt.Errorf("hash password: %w", err)
 	}
 
-	user.PasswordHash = string(hash)
-
-	if a.sqlDB != nil {
-		_, err = a.sqlDB.ExecContext(ctx,
-			`UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2`,
-			string(hash), userID)
-		if err != nil {
-			return "", fmt.Errorf("update password: %w", err)
-		}
+	// Every JWT issued before this moment is dead (WP-R5-10); the caller
+	// revokes the dashboard sessions.
+	changedAt, err := a.setPassword(ctx, user, string(hash))
+	if err != nil {
+		return "", fmt.Errorf("update password: %w", err)
 	}
 
-	a.record(ctx, audit.Entry{UserID: userID, Action: "auth.password_reset", Resource: "user:" + userID})
+	a.record(ctx, audit.Entry{UserID: userID, Action: "auth.password_reset", Resource: "user:" + userID,
+		Metadata: map[string]any{"jwts_invalidated_before": changedAt}})
 	return userID, nil
 }
 

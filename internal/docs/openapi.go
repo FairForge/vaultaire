@@ -1712,6 +1712,7 @@ func generateJSONSchemas() map[string]Schema {
 			"tenant_id":    str(""),
 			"name":         str(""),
 			"key":          str("Access key id"),
+			"is_primary":   boolean("The account's primary pair: rotated, never revoked (409 `primary_key`)"),
 			"secret":       str("Always omitted/empty after creation"),
 			"permissions":  permissions,
 			"bucket_scope": nullable(strArray("")),

@@ -637,8 +637,17 @@ func (s *Server) handleMgmtDeleteKey(w http.ResponseWriter, r *http.Request) {
 	keyID := chi.URLParam(r, "id")
 
 	if err := s.auth.RevokeAPIKey(r.Context(), userID, keyID); err != nil {
-		s.logger.Error("management delete key", zap.Error(err))
-		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to revoke API key", "")
+		switch {
+		case errors.Is(err, auth.ErrPrimaryKeyRevoke):
+			writeManagementError(w, ErrTypeConflict, "primary_key", "the primary key cannot be revoked; rotate it instead", "id")
+		case errors.Is(err, auth.ErrKeyNotFound):
+			writeManagementError(w, ErrTypeNotFound, "key_not_found", "API key not found", "id")
+		case errors.Is(err, auth.ErrKeyRevoked):
+			writeManagementError(w, ErrTypeConflict, "key_revoked", "API key already revoked", "id")
+		default:
+			s.logger.Error("management delete key", zap.Error(err))
+			writeManagementError(w, ErrTypeAPI, "internal_error", "failed to revoke API key", "")
+		}
 		return
 	}
 

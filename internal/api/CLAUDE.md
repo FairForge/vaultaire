@@ -152,7 +152,7 @@ Key files: `metadata.go` (extract/set/validate/merge helpers), `s3_engine_adapte
 
 Scope intersection: requested permissions/buckets are intersected with the parent scope — the account's own full access, or the key named by `parent_key_id` (must be the caller's, unrevoked; Review R11-03). STS tokens can never escalate beyond the parent, and never inherit the GOVERNANCE bypass: a token carries `BypassGovernanceRetention` only when the request names it AND the parent may bypass — `*` on a token does not include it (WP-R4-1). IP restrictions are narrowed (request can only restrict further, not broaden — R5-10b: a token from an IP-restricted parent can still name a different IP, WP-R11-7).
 
-S3 auth: both `validateAccessKey` / `lookupCredential` (`internal/auth/handlers.go`) and `verifyPresignedURL` (s3_presign.go) have an ASIA-prefix fallback that queries `sts_tokens` after checking `tenants` and `api_keys`. Expired tokens are rejected. Cleanup: hourly goroutine in `auth.StartSTSCleanup`.
+S3 auth: `verifyPresignedURL` (s3_presign.go) and the header path both call `auth.Auth.LookupCredential` (WP-R5-14: one lookup — `api_keys` by `key_id`, revocation honoured, then `sts_tokens` joined to the parent key; `tenants.access_key` is a mirror nobody reads). A revoked or rotated key, or a token of one, is 403 `InvalidAccessKeyId` on both paths (`presignAuthError` keeps the S3 code as the error text and the cause behind `Unwrap`), counted as `vaultaire_auth_failures_total{reason="revoked"|"presign_revoked",key_known="true"}` — `accessKeyExists` counts revoked rows as known. The presigned-URL route and the export download link sign on `auth.PrimaryPair` (the live `is_primary` row). The STS route's default parent is `GetPrimaryAPIKey`. Cleanup of expired tokens: the `sts_cleanup` job.
 
 ## Event Log + Webhook Management API (Phase 5.11.6)
 
@@ -194,7 +194,7 @@ Error code `ErrQuotaExceeded` in `s3_errors.go` — 403 status, message includes
 
 1. `handleS3Request` checks `isPresignedRequest(r)` — if query has `X-Amz-Algorithm=AWS4-HMAC-SHA256`, routes to `verifyPresignedURL` (SigV4 query string auth)
 2. Otherwise calls `auth.ValidateRequest(r)` which parses the Authorization header
-3. Both paths return `(tenantID, *auth.KeyScope, error)` — scope carries permissions, bucket restrictions, IP allowlist, expiration and `Temporary` (an STS token); it is put in the request context (`auth.WithKeyScope`, WP-R4-1) for the Object Lock bypass check; `api_keys` rows with `revoked_at` set are never returned (R5-01). Auth lookup order: tenants (primary key) → api_keys (VLT_ scoped) → sts_tokens (ASIA temporary)
+3. Both paths return `(tenantID, *auth.KeyScope, error)` — scope carries permissions, bucket restrictions, IP allowlist, expiration and `Temporary` (an STS token); it is put in the request context (`auth.WithKeyScope`, WP-R4-1) for the Object Lock bypass check; `api_keys` rows with `revoked_at` set are refused as known-and-dead (R5-01, WP-R5-14). Auth lookup order: api_keys by key_id (the primary is an `is_primary` row) → sts_tokens (ASIA temporary, LEFT JOIN the parent key)
 4. On failure, returns appropriate S3 error (presigned errors: `ExpiredToken`, `AuthorizationQueryParametersError`, `SignatureDoesNotMatch`)
 5. On success, scope enforcement runs before operation routing:
    - `IsKeyExpired` → 403 `ExpiredToken`

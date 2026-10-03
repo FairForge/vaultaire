@@ -82,7 +82,8 @@ func searchCustomers(ctx context.Context, db *sql.DB, q string, logger *zap.Logg
 		SELECT t.id, t.name, t.email, COALESCE(t.plan, 'starter'),
 		       t.subscription_status, t.suspended_at
 		FROM tenants t
-		WHERE t.email ILIKE $1 OR t.id = $2 OR t.access_key = $2
+		WHERE t.email ILIKE $1 OR t.id = $2
+		      OR EXISTS (SELECT 1 FROM api_keys ak WHERE ak.tenant_id = t.id AND ak.key_id = $2)
 		      OR t.stripe_customer_id = $2
 		ORDER BY t.name LIMIT 50
 	`, "%"+q+"%", q)

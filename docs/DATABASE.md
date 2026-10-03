@@ -97,7 +97,7 @@ Legend: **W** written by, **R** read by (packages), **Ret** retention/cleanup,
 | **Identity & auth** | | | | | |
 | users | 006 (+018/022/038/070) | auth, dashboard | auth, dashboard, api | account deletion only | — |
 | tenants | 005 (+018/025/039/065/066) | auth, dashboard/admin, billing (house) | auth, api (every S3 req), dashboard | account deletion | is the tenant |
-| api_keys | 006 (+031/064) | auth | auth (every scoped S3 req), dashboard, api | `revoked_at` soft-delete; deletion | via users.email → tenants.email |
+| api_keys | 006 (+031/064/076) | auth | auth (every S3 req — the primary pair is an `is_primary` row, WP-R5-14), dashboard, api | `revoked_at` soft-delete; deletion | `tenant_id` on the row (076; one live primary per tenant) |
 | sts_tokens | 032 | auth | auth, api/presign | hourly `expires_at < NOW()` | yes |
 | user_mfa | 004 | auth | auth (boot load) | — | via user |
 | oauth_accounts | 021 | dashboard/auth | dashboard/auth | deletion | via user |
@@ -174,8 +174,8 @@ index-served.
 | chunk manifest (`crypto/gci.go`) | UNIQUE `(tenant_id, bucket_name, object_key, chunk_index)` on `tenant_chunk_refs` |
 | GCI lookup / sweep / reconcile (`crypto/gci.go`, `api/dedup_gc.go`) | `global_content_index_pkey (dedup_scope, plaintext_hash)`; partial `idx_gci_ref_count`; `idx_gci_last_accessed` |
 | tenant by access key (`auth/handlers.go`) | UNIQUE `tenants_access_key_key` |
-| scoped key (`auth/handlers.go`, `api/s3_presign.go`) | partial `idx_api_keys_active (key_id) WHERE revoked_at IS NULL` → `users_pkey` → `idx_tenants_email` |
-| STS token | `sts_tokens_pkey` |
+| any key (`auth.LookupCredential`, used by `api/s3_presign.go` too) | `api_keys_key_id_key` (unique) — no join since 076 |
+| STS token | `sts_tokens_pkey` → `api_keys_key_id_key` (the parent) |
 | dashboard session get / cleanup | `dashboard_sessions_pkey`; `idx_sessions_expires_at` |
 | idempotency | `idempotency_cache_pkey (tenant_id, idempotency_key)` |
 | bandwidth upsert / month sum (`api/bandwidth.go`) | UNIQUE `(tenant_id, date)` |

@@ -11,7 +11,7 @@ import (
 )
 
 // R5-01: revoke / rotate / expiry must reach the database, because the S3
-// auth path (Auth.lookupCredential) reads api_keys per request and never
+// auth path (Auth.LookupCredential) reads api_keys per request and never
 // looks at the in-memory maps.
 
 func newLifecycleUser(t *testing.T, svc *AuthService, email string) *User {
@@ -29,13 +29,13 @@ func TestRevokeAPIKey_PersistsAndBlocksS3Auth(t *testing.T) {
 	require.NoError(t, err)
 
 	a := NewAuth(db, zap.NewNop())
-	cred, err := a.lookupCredential(context.Background(), key.Key)
+	cred, err := a.LookupCredential(context.Background(), key.Key)
 	require.NoError(t, err)
-	require.Equal(t, user.TenantID, cred.tenantID)
+	require.Equal(t, user.TenantID, cred.TenantID)
 
 	require.NoError(t, svc.RevokeAPIKey(context.Background(), user.ID, key.ID))
 
-	_, err = a.lookupCredential(context.Background(), key.Key)
+	_, err = a.LookupCredential(context.Background(), key.Key)
 	assert.Error(t, err, "a revoked key must not authenticate on the S3 path")
 
 	// Survives a restart: a fresh service loading from the DB sees the revocation.
@@ -67,7 +67,7 @@ func TestRevokeAPIKey_OtherUsersKeyIsNotFound(t *testing.T) {
 	assert.Error(t, svc.RevokeAPIKey(context.Background(), other.ID, key.ID))
 
 	a := NewAuth(db, zap.NewNop())
-	_, err = a.lookupCredential(context.Background(), key.Key)
+	_, err = a.LookupCredential(context.Background(), key.Key)
 	assert.NoError(t, err, "another user's revoke attempt must not touch the key")
 }
 
@@ -83,15 +83,15 @@ func TestRotateAPIKey_PersistsNewKeyAndRevokesOld(t *testing.T) {
 	require.NotEqual(t, old.Key, rotated.Key)
 
 	a := NewAuth(db, zap.NewNop())
-	_, err = a.lookupCredential(context.Background(), old.Key)
+	_, err = a.LookupCredential(context.Background(), old.Key)
 	assert.Error(t, err, "the rotated-away key must stop authenticating")
 
-	cred, err := a.lookupCredential(context.Background(), rotated.Key)
+	cred, err := a.LookupCredential(context.Background(), rotated.Key)
 	require.NoError(t, err, "the new key must be persisted so the S3 path sees it")
-	assert.Equal(t, user.TenantID, cred.tenantID)
-	assert.Equal(t, rotated.Secret, cred.secretKey)
-	assert.ElementsMatch(t, []string{"GetObject", "PutObject"}, cred.scope.Permissions)
-	assert.Equal(t, []string{"photos"}, cred.scope.BucketScope, "scope carries over on rotate")
+	assert.Equal(t, user.TenantID, cred.TenantID)
+	assert.Equal(t, rotated.Secret, cred.SecretKey)
+	assert.ElementsMatch(t, []string{"GetObject", "PutObject"}, cred.Scope.Permissions)
+	assert.Equal(t, []string{"photos"}, cred.Scope.BucketScope, "scope carries over on rotate")
 }
 
 func TestSetAPIKeyExpiration_PersistsAndAppliesToS3Auth(t *testing.T) {
@@ -105,10 +105,10 @@ func TestSetAPIKeyExpiration_PersistsAndAppliesToS3Auth(t *testing.T) {
 	require.NoError(t, svc.SetAPIKeyExpiration(context.Background(), user.ID, key.ID, past))
 
 	a := NewAuth(db, zap.NewNop())
-	cred, err := a.lookupCredential(context.Background(), key.Key)
+	cred, err := a.LookupCredential(context.Background(), key.Key)
 	require.NoError(t, err)
-	require.NotNil(t, cred.scope.ExpiresAt, "expires_at must be persisted")
-	assert.True(t, IsKeyExpired(cred.scope.ExpiresAt))
+	require.NotNil(t, cred.Scope.ExpiresAt, "expires_at must be persisted")
+	assert.True(t, IsKeyExpired(cred.Scope.ExpiresAt))
 }
 
 // R5-05: a permissions-only key (the common case) used to fail the INSERT with
@@ -122,11 +122,11 @@ func TestGenerateAPIKey_PermissionsOnlyPersists(t *testing.T) {
 	require.NoError(t, err)
 
 	a := NewAuth(db, zap.NewNop())
-	cred, err := a.lookupCredential(context.Background(), key.Key)
+	cred, err := a.LookupCredential(context.Background(), key.Key)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"GetObject"}, cred.scope.Permissions)
-	assert.Empty(t, cred.scope.BucketScope)
-	assert.Empty(t, cred.scope.IPAllowlist)
+	assert.Equal(t, []string{"GetObject"}, cred.Scope.Permissions)
+	assert.Empty(t, cred.Scope.BucketScope)
+	assert.Empty(t, cred.Scope.IPAllowlist)
 }
 
 // R5-14: a permissions column that is not a JSON array of strings must not
@@ -141,8 +141,8 @@ func TestLookupCredential_CorruptPermissionsFailClosed(t *testing.T) {
 	require.NoError(t, err)
 
 	a := NewAuth(db, zap.NewNop())
-	cred, err := a.lookupCredential(context.Background(), key.Key)
+	cred, err := a.LookupCredential(context.Background(), key.Key)
 	require.NoError(t, err)
-	assert.Empty(t, cred.scope.Permissions)
-	assert.False(t, CheckPermission(cred.scope.Permissions, "GetObject"))
+	assert.Empty(t, cred.Scope.Permissions)
+	assert.False(t, CheckPermission(cred.Scope.Permissions, "GetObject"))
 }

@@ -90,7 +90,7 @@ The `engine.Driver` interface (in `internal/engine/interface.go`) is the sacred 
 
 ### Key Database Tables
 
-Registration persists to **four tables in order**: `users` -> `tenants` -> `api_keys` -> `tenant_quotas`, in one transaction (R10). Missing any causes failures. S3 auth queries `tenants` first (primary key, full access), then falls back to `api_keys` for scoped VLT_ keys (`revoked_at IS NULL` — revocation/rotation/expiry are persisted there, 064), then `sts_tokens` for ASIA-prefixed temporary credentials.
+Registration persists to **four tables in order**: `users` -> `tenants` -> `api_keys` -> `tenant_quotas`, in one transaction (R10). Missing any causes failures. **The `api_keys` row is the credential (WP-R5-14, migration 076):** the primary pair is an `is_primary` row with its `tenant_id` on it, every lookup (S3 SigV4, presigned URLs, STS minting — one function, `auth.Auth.LookupCredential`) resolves `api_keys` by `key_id` with `revoked_at` honoured, then `sts_tokens` for ASIA-prefixed temporary credentials joined to the parent key (a token dies with its parent). `tenants.access_key/secret_key` are a mirror of the live primary pair, rewritten by a rotation in the same transaction and read by no lookup. The primary is rotated, never revoked (`auth.ErrPrimaryKeyRevoke`, 409). A JWT issued before `users.password_changed_at` is refused.
 
 Other critical tables (73 migration files numbered 003–075 (004 twice, 053 never existed) through `075_account_exports_async.sql`):
 - `object_head_cache` — HEAD/GET metadata cache (~1ms), content-type, ETag, metadata JSONB

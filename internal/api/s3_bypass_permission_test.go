@@ -82,6 +82,9 @@ func setupBypassFixture(t *testing.T) *bypassFixture {
 	f.exec(`INSERT INTO users (id, email, password_hash) VALUES ($1, $2, 'x')`, f.userID, email)
 	f.exec(`INSERT INTO tenants (id, name, email, access_key, secret_key) VALUES ($1, 'Bypass Test', $2, $3, $4)`,
 		f.tenantID, email, f.rootAK, f.rootSK)
+	// The primary pair is an api_keys row (WP-R5-14); the tenants columns mirror it.
+	f.exec(`INSERT INTO api_keys (id, user_id, tenant_id, is_primary, name, key_id, secret_hash, secret_key) VALUES ($1, $2, $3, TRUE, 'primary', $4, 'h', $5)`,
+		uuid.New().String(), f.userID, f.tenantID, f.rootAK, f.rootSK)
 	f.exec(`INSERT INTO buckets (tenant_id, name, visibility, object_lock_enabled) VALUES ($1, $2, 'private', TRUE)`, f.tenantID, f.bucket)
 	f.exec(`INSERT INTO buckets (tenant_id, name, visibility, object_lock_enabled, versioning_status) VALUES ($1, $2, 'private', TRUE, 'Enabled')`, f.tenantID, f.vbucket)
 	for _, b := range []string{f.bucket, f.vbucket} {
@@ -125,8 +128,8 @@ func (f *bypassFixture) key(perms ...string) (ak, sk string) {
 	ak, sk = "VLT_"+strings.ToUpper(strings.ReplaceAll(id[:13], "-", "")), "sk-"+id
 	pj, err := json.Marshal(perms)
 	require.NoError(f.t, err)
-	f.exec(`INSERT INTO api_keys (id, user_id, name, key_id, secret_hash, secret_key, permissions) VALUES ($1, $2, 'scoped', $3, 'h', $4, $5)`,
-		id, f.userID, ak, sk, pj)
+	f.exec(`INSERT INTO api_keys (id, user_id, tenant_id, name, key_id, secret_hash, secret_key, permissions) VALUES ($1, $2, $3, 'scoped', $4, 'h', $5, $6)`,
+		id, f.userID, f.tenantID, ak, sk, pj)
 	return ak, sk
 }
 
@@ -355,7 +358,9 @@ func TestGovernanceBypass_STSTokensOnlyNarrow(t *testing.T) {
 	f := setupBypassFixture(t)
 	ctx := context.Background()
 	mint := func(parent []string, requested ...string) *s3.Client {
-		tok, err := auth.GenerateSTSToken(ctx, f.db, f.tenantID, "parent", &auth.KeyScope{Permissions: parent}, auth.STSRequest{Permissions: requested})
+		// The parent must be a real key row: a token whose parent is gone is
+		// refused at auth time (WP-R5-5). The scope under test is passed in.
+		tok, err := auth.GenerateSTSToken(ctx, f.db, f.tenantID, f.rootAK, &auth.KeyScope{Permissions: parent}, auth.STSRequest{Permissions: requested})
 		require.NoError(t, err)
 		return f.client(tok.AccessKey, tok.SecretKey)
 	}

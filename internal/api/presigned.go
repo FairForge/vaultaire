@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/FairForge/vaultaire/internal/auth"
 )
 
 func (s *Server) handleGetPresignedURL(w http.ResponseWriter, r *http.Request) {
@@ -47,10 +49,9 @@ func (s *Server) handleGetPresignedURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var accessKey, secretKey string
-	err := s.db.QueryRowContext(r.Context(),
-		`SELECT access_key, secret_key FROM tenants WHERE id = $1`, tenantID,
-	).Scan(&accessKey, &secretKey)
+	// Signed on the tenant's live primary pair — the api_keys row, so a
+	// rotation kills every URL minted before it (WP-R5-14).
+	accessKey, secretKey, err := auth.PrimaryPair(r.Context(), s.db, tenantID)
 	if err != nil {
 		http.Error(w, `{"error":"tenant credentials not found"}`, http.StatusNotFound)
 		return
