@@ -195,7 +195,10 @@ func TestResolveStorageClass_Mapping(t *testing.T) {
 		{"STANDARD_IA", "idrive", "STANDARD"},
 		{"GLACIER", "geyser", "GLACIER"},
 		{"DEEP_ARCHIVE", "geyser", "DEEP_ARCHIVE"},
-		{"REDUCED_REDUNDANCY", "local", "REDUCED_REDUNDANCY"},
+		// REDUCED_REDUNDANCY is unmapped since WP-R7-5: local is the dev
+		// primary and the engine's last resort, never a class (R9-12: the
+		// DATA_PATH is not backed up).
+		{"REDUCED_REDUNDANCY", "idrive", "STANDARD"},
 		{"", "idrive", "STANDARD"},
 	}
 
@@ -234,7 +237,7 @@ func TestBackendToStorageClass(t *testing.T) {
 	assert.Equal(t, "STANDARD", BackendToStorageClass("lyve"))
 	assert.Equal(t, "GLACIER", BackendToStorageClass("geyser"))
 	assert.Equal(t, "STANDARD", BackendToStorageClass("permafrost"))
-	assert.Equal(t, "REDUCED_REDUNDANCY", BackendToStorageClass("local"))
+	assert.Equal(t, "STANDARD", BackendToStorageClass("local"), "local is no tier (WP-R7-5)")
 	assert.Equal(t, "STANDARD", BackendToStorageClass("s3"))
 	assert.Equal(t, "STANDARD", BackendToStorageClass("unknown"))
 }

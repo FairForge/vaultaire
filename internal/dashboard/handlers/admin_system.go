@@ -3,9 +3,14 @@ package handlers
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"html/template"
 	"net/http"
 	"runtime"
+	"sort"
+	"strings"
 	"time"
 
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
@@ -47,6 +52,7 @@ func HandleAdminSystem(tmpl *template.Template, db *sql.DB, logger *zap.Logger) 
 			data["DBWaitCount"] = stats.WaitCount
 			data["DBStatus"] = "connected"
 			data["Jobs"] = loadJobRuns(r.Context(), db, logger)
+			data["Routing"] = loadRoutingTruth(r.Context(), db, logger)
 		} else {
 			data["DBStatus"] = "not connected"
 		}
@@ -57,6 +63,59 @@ func HandleAdminSystem(tmpl *template.Template, db *sql.DB, logger *zap.Logger) 
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		}
 	}
+}
+
+// RoutingTruthRow is the routing-truth line of the System page (WP-R7-5):
+// the routing_truth job's last run (its one-line summary from
+// job_runs.result) and the head rows whose backend no driver is registered
+// under — read from the tables, so the line is right after a restart.
+type RoutingTruthRow struct {
+	LastRun     string // relative time of the last run, or "never"
+	Outcome     string
+	Summary     string // the run's note
+	UnknownRows int64  // object_head_cache rows on a backend the job found no driver for ("" included)
+	Unknown     string // "onedrive 2613, (NULL) 62"
+}
+
+// loadRoutingTruth reads the routing_truth job row. The names no driver
+// answers to come from the run's result (the dashboard has no engine to ask).
+func loadRoutingTruth(ctx context.Context, db *sql.DB, logger *zap.Logger) *RoutingTruthRow {
+	var started sql.NullTime
+	var outcome, note sql.NullString
+	var result []byte
+	err := db.QueryRowContext(ctx, `SELECT last_started_at, last_outcome, last_error, result FROM job_runs WHERE job = 'routing_truth'`).
+		Scan(&started, &outcome, &note, &result)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			logger.Warn("admin system: read routing_truth", zap.Error(err))
+		}
+		return nil
+	}
+	row := &RoutingTruthRow{LastRun: "never", Outcome: outcome.String, Summary: note.String}
+	if started.Valid {
+		row.LastRun = relativeTime(started.Time)
+	}
+	var res struct {
+		Unknown map[string]int64 `json:"unknown"`
+	}
+	if len(result) > 0 && json.Unmarshal(result, &res) == nil {
+		names := make([]string, 0, len(res.Unknown))
+		for name := range res.Unknown {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		var parts []string
+		for _, name := range names {
+			row.UnknownRows += res.Unknown[name]
+			label := name
+			if label == "" {
+				label = "(NULL)"
+			}
+			parts = append(parts, fmt.Sprintf("%s %d", label, res.Unknown[name]))
+		}
+		row.Unknown = strings.Join(parts, ", ")
+	}
+	return row
 }
 
 // JobRunRow is one background job as the System page shows it: the job_runs

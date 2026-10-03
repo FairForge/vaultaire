@@ -126,9 +126,11 @@ func TestEnginePut_LocalPrimaryStillAcceptsWrites(t *testing.T) {
 	assert.Len(t, filesUnder(t, dataDir), 1)
 }
 
-// An explicit REDUCED_REDUNDANCY storage class targets local on purpose —
-// that is a requested write, not a silent fallback.
-func TestEnginePut_ExplicitLocalTargetAllowed(t *testing.T) {
+// REDUCED_REDUNDANCY used to target local on purpose. Since WP-R7-5 local is
+// no class at all — the hub's disk is a single copy nobody backs up (R9-12)
+// — so the class degrades to the primary like any other unsold one, and no
+// byte lands on local.
+func TestEnginePut_ReducedRedundancyNoLongerTargetsLocal(t *testing.T) {
 	logger := zap.NewNop()
 	eng := NewEngine(nil, logger, &Config{DefaultBackend: "idrive"})
 
@@ -139,8 +141,8 @@ func TestEnginePut_ExplicitLocalTargetAllowed(t *testing.T) {
 	backend, err := eng.Put(context.Background(), "bucket", "obj.txt",
 		strings.NewReader("data"), WithStorageClass("REDUCED_REDUNDANCY"))
 	require.NoError(t, err)
-	assert.Equal(t, "local", backend)
-	assert.Len(t, filesUnder(t, dataDir), 1)
+	assert.Equal(t, "idrive", backend)
+	assert.Empty(t, filesUnder(t, dataDir))
 }
 
 // Failover between durable backends is still allowed — only the silent hop to

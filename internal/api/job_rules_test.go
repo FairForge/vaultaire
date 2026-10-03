@@ -147,3 +147,71 @@ func TestSyntheticRuleFile_NoLongerReadsTheInProcessGauge(t *testing.T) {
 	assert.NotContains(t, strings.ReplaceAll(raw, "# RetentionJobStale lived here", ""), "vaultaire_retention_last_run_timestamp_seconds")
 	require.Len(t, file.Groups, 1, "only the synthetic group is left")
 }
+
+// The routing rule file (WP-R7-5) reads series the server exports before any
+// run — the result counters at 0 per registered backend, the shared-store
+// gauge — and the last-run gauges only once a run is in job_runs.
+func TestRoutingRuleFile_MatchesTheExportedSeries(t *testing.T) {
+	// Arrange: a server with two backends and a database.
+	jf := setupJobsFixture(t)
+	eng := engine.NewEngine(nil, zap.NewNop(), nil)
+	eng.AddDriver("idrive", drivers.NewLocalDriver(t.TempDir(), zap.NewNop()))
+	eng.AddDriver("geyser", drivers.NewLocalDriver(t.TempDir(), zap.NewNop()))
+	eng.SetPrimary("idrive")
+	s := NewServer(&config.Config{Server: config.ServerConfig{Port: 8000}}, zap.NewNop(), eng, nil, jf.db)
+	require.NotNil(t, s.routingTruth)
+	require.NotNil(t, s.jobs.job(routingTruthJobName), "routing_truth is a job of the scheduler")
+	assert.True(t, s.jobs.job(routingTruthJobName).spec.daily())
+
+	file, raw := readRuleFile(t, "vaultaire-routing.yml")
+	require.Len(t, file.Groups, 1)
+	rules := map[string]struct{ expr, severity string }{}
+	for _, r := range file.Groups[0].Rules {
+		rules[r.Alert] = struct{ expr, severity string }{r.Expr, r.Labels["severity"]}
+	}
+
+	// Assert: the five rules and their severities — a jump pages, drift
+	// warns, unknown rows inform, a shared store pages.
+	for name, sev := range map[string]string{
+		"RoutingTruthMissing": "warning", "RoutingTruthMissingJump": "critical",
+		"RoutingUnknownBackendRows": "info", "RoutingSharedStore": "critical", "RoutingUnknownBackendReads": "warning",
+	} {
+		require.Contains(t, rules, name)
+		assert.Equal(t, sev, rules[name].severity, name)
+	}
+	assert.Contains(t, rules["RoutingTruthMissing"].expr, "vaultaire_routing_truth_last_run_missing_ratio > 0")
+	assert.Contains(t, rules["RoutingTruthMissingJump"].expr, "vaultaire_routing_truth_last_run_missing_ratio offset 25h) > 0.1", "a jump is a delta against yesterday's run, so the known backlog does not page daily")
+	assert.Contains(t, rules["RoutingUnknownBackendRows"].expr, "vaultaire_routing_unknown_backend_rows")
+	assert.Contains(t, rules["RoutingSharedStore"].expr, "vaultaire_routing_shared_store_backends > 0")
+	assert.Contains(t, rules["RoutingUnknownBackendReads"].expr, "increase(vaultaire_routing_unknown_backend_reads_total[")
+
+	// The series at boot, before any run.
+	w := httptest.NewRecorder()
+	s.handleMetrics(w, httptest.NewRequest("GET", "/metrics", nil))
+	body := w.Body.String()
+	for _, series := range []string{
+		`vaultaire_routing_truth_checks_total{backend="idrive",result="missing"} 0`,
+		`vaultaire_routing_truth_checks_total{backend="geyser",result="error"} 0`,
+		`vaultaire_routing_truth_chunk_checks_total{backend="idrive",result="legacy"} 0`,
+		`vaultaire_routing_shared_store_backends 0`,
+	} {
+		assert.True(t, strings.Contains(body, "\n"+series+" ") || strings.Contains(body, "\n"+series+"\n"), "exported before any run: %s", series)
+	}
+	for _, series := range []string{"vaultaire_routing_truth_checks_total", "vaultaire_routing_truth_chunk_checks_total",
+		"vaultaire_routing_truth_last_run_missing_ratio", "vaultaire_routing_unknown_backend_rows",
+		"vaultaire_routing_shared_store_backends", "vaultaire_routing_unknown_backend_reads_total"} {
+		assert.True(t, strings.Contains(raw, series), "the rule file documents %s", series)
+	}
+	// The job is watched by the daily staleness rule.
+	jobs, _ := readRuleFile(t, "vaultaire-jobs.yml")
+	var stale string
+	for _, r := range jobs.Groups[0].Rules {
+		if r.Alert == "JobStale" {
+			stale = r.Expr
+		}
+	}
+	assert.Contains(t, stale, "routing_truth")
+	for _, r := range file.Groups[0].Rules {
+		assert.False(t, regexp.MustCompile(`[{,]\s*job\s*=`).MatchString(r.Expr), "%s selects on Prometheus's own job label", r.Alert)
+	}
+}

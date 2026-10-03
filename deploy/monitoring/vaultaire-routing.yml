@@ -1,0 +1,94 @@
+# Routing truth — install to /etc/prometheus/rules/ (see README).
+#
+# object_head_cache.backend_name is where an object's bytes are supposed to
+# be; GET, DELETE, the demotion ledger, the deletion runner and the erasure
+# sweep all act on it (WP-R7-5). Series from the app's /metrics
+# (internal/api/routing_truth.go):
+#
+#   vaultaire_routing_truth_checks_total{backend,result}        head rows the daily routing_truth job classified:
+#                                                              present | missing (bytes gone, row intact) | changed
+#                                                              (row changed mid-check) | error (backend could not be
+#                                                              asked — an open breaker is ONE error, never N misses) |
+#                                                              unknown_backend (no driver has the name; never asked)
+#   vaultaire_routing_truth_chunk_checks_total{backend,result} chunks of sampled chunked objects at the one address:
+#                                                              present | legacy (under the uploader's prefix — run the
+#                                                              chunk move) | missing | error | unknown_backend
+#   vaultaire_routing_truth_last_run_missing_ratio{backend}    the LAST RUN's missing / (present + missing) per backend,
+#                                                              READ FROM job_runs.result (right after a restart too)
+#   vaultaire_routing_truth_last_run_timestamp_seconds         when that run finished (from job_runs)
+#   vaultaire_routing_unknown_backend_rows{table,backend}      rows whose backend no driver is registered under,
+#                                                              per table (backend="" = NULL); read from the database
+#   vaultaire_routing_shared_store_backends                    registered names that share a store with another name
+#                                                              (same endpoint + bucket, or one driver under two names)
+#   vaultaire_routing_unknown_backend_reads_total{op,backend}  requests (get, delete, delete_objects, copy_source,
+#                                                              restore, cdn) that read a row on an unregistered backend
+#
+# The job runs daily at 05:30 UTC (catch-up a few minutes after a start; JobStale in vaultaire-jobs.yml
+# watches it) and samples ROUTING_TRUTH_SAMPLE rows per backend. It never writes: what the operator does
+# with a finding is the plan in docs/reviews/WP-R7-5.md.
+#
+# Triage:
+#   curl -s -H "Authorization: Bearer <admin JWT>" https://stored.ge/api/v1/admin/routing-truth | jq .
+#   journalctl -u vaultaire | grep 'routing truth'
+#   POST /api/v1/admin/jobs/routing_truth/run     one run now (202; 409 while one is running)
+groups:
+  - name: vaultaire-routing
+    rules:
+      # A registered backend answered "not there" for a row that still says
+      # the bytes are on it: HEAD is 200 and GET is 404 for that object.
+      - alert: RoutingTruthMissing
+        expr: vaultaire_routing_truth_last_run_missing_ratio > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Head rows on {{ $labels.backend }} point at bytes the backend does not have"
+          description: "The routing_truth job's last run found {{ $value | humanizePercentage }} of its sample of {{ $labels.backend }} rows missing on the backend (a row with the backend's bytes gone, not a backend error — those count separately). HEAD answers 200 and GET 404 for those objects. GET /api/v1/admin/routing-truth has the counts; the Warn log line 'head row points at bytes the backend does not have' names tenant, bucket and key. The plan: docs/reviews/WP-R7-5.md."
+
+      # A jump: today's run found a tenth more of a backend's sample missing
+      # than yesterday's. A lost disk, a wiped bucket, a dead account (prod,
+      # 2026-09-21: the reseller account was replaced and 2,007 idrive rows
+      # pointed at the old one — this rule would have paged the next
+      # morning). The known backlog does not page every day: it is the
+      # standing RoutingTruthMissing warning until the plan is run.
+      - alert: RoutingTruthMissingJump
+        expr: (vaultaire_routing_truth_last_run_missing_ratio - vaultaire_routing_truth_last_run_missing_ratio offset 25h) > 0.1
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The share of {{ $labels.backend }} rows with no bytes on the backend jumped by {{ $value | humanizePercentage }} since yesterday"
+          description: "The routing_truth job's sample of {{ $labels.backend }} rows lost {{ $value | humanizePercentage }} more of its bytes than yesterday's. That is a backend that lost data or an account/bucket that changed under us, not drift of single rows. Stop writes to it if it is the primary (POST /api/v1/admin/backends/primary), then follow docs/reviews/WP-R7-5.md."
+
+      # Rows name a backend no driver answers to: their objects are served
+      # only by the engine's fan-out (WP-R6-1 removes it), HEAD lies, the
+      # erasure sweep cannot sweep them.
+      - alert: RoutingUnknownBackendRows
+        expr: sum by (table, backend) (vaultaire_routing_unknown_backend_rows) > 0
+        for: 1h
+        labels:
+          severity: info
+        annotations:
+          summary: "{{ $labels.table }} has {{ $value | humanize }} rows on backend \"{{ $labels.backend }}\", which no driver is registered under"
+          description: "A renamed registration key, a backend removed from the deployment, or rows written before backend_name existed (backend=\"\"). Reconcile them: docs/reviews/WP-R7-5.md (NULL rows: POST /api/v1/admin/routing-truth/resolve-null, dry run by default)."
+
+      # Two names, one store: a stale-copy delete on one removes the other's
+      # live object (WP-R13-2). Configuration, not data — fix the env.
+      - alert: RoutingSharedStore
+        expr: vaultaire_routing_shared_store_backends > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Two registered backends write into the same store"
+          description: "journalctl -u vaultaire | grep 'two registered backends share one store' names them. Until fixed, every stale-copy delete (demotion reclaim, overwrite, delete) on either name can remove a live object of the other."
+
+      # Customers are reading rows that route to no driver.
+      - alert: RoutingUnknownBackendReads
+        expr: increase(vaultaire_routing_unknown_backend_reads_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Requests ({{ $labels.op }}) are reading head rows on unregistered backend \"{{ $labels.backend }}\""
+          description: "{{ $value | humanize }} request(s) in the last hour read a head row whose backend_name is not a registered driver; the engine's fan-out served them if any backend had the bytes. These rows are the ones RoutingUnknownBackendRows counts — reconcile them before WP-R6-1 removes the fan-out."

@@ -21,7 +21,7 @@
 # `exported_job` — a rule on {job="retention"} would never match.
 #
 # Daily jobs (UTC): inventory 00:30, dedup_gc 02:30, retention 03:30,
-# account_deletion 04:30, smart_demotion 06:30. Each catches up a few minutes
+# account_deletion 04:30, routing_truth 05:30, smart_demotion 06:30. Each catches up a few minutes
 # after a start when job_runs has no success since its last scheduled time,
 # and re-checks every hour. A run is "error" (and retried at the next hourly
 # check) only when the run itself failed; one object, chunk, report or tenant
@@ -36,7 +36,7 @@ groups:
   - name: vaultaire-jobs
     rules:
       - alert: JobStale
-        expr: (time() - vaultaire_job_last_success_timestamp_seconds{job_name=~"inventory|dedup_gc|retention|account_deletion|smart_demotion"}) > 36 * 3600
+        expr: (time() - vaultaire_job_last_success_timestamp_seconds{job_name=~"inventory|dedup_gc|retention|account_deletion|routing_truth|smart_demotion"}) > 36 * 3600
         for: 30m
         labels:
           severity: warning

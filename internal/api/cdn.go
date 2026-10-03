@@ -178,6 +178,7 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 	// goes straight to the backend that holds the object instead of walking
 	// the failover chain after a restart.
 	if backendName != "" && s.engine != nil {
+		noteRecordedBackend(s.engine, s.logger, "cdn", backendName)
 		s.engine.HintBackend(container, key, backendName)
 	}
 	// Backend-attribution slot: the engine records which backend served the

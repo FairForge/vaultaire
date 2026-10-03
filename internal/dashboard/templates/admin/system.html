@@ -91,7 +91,20 @@
             </tbody>
         </table>
     </div>
-    <div class="card-detail">Daily (UTC): inventory 00:30, dedup_gc 02:30, retention 03:30, account_deletion 04:30, smart_demotion 06:30 — each catches up a few minutes after a restart. The others run hourly (access_log_delivery every 5 minutes). Schedule and next run: <code>GET /api/v1/admin/jobs</code>.</div>
+    <div class="card-detail">Daily (UTC): inventory 00:30, dedup_gc 02:30, retention 03:30, account_deletion 04:30, routing_truth 05:30, smart_demotion 06:30 — each catches up a few minutes after a restart. The others run hourly (access_log_delivery every 5 minutes). Schedule and next run: <code>GET /api/v1/admin/jobs</code>.</div>
+</div>
+{{end}}
+
+{{if .Routing}}
+<div class="card">
+    <div class="card-title">Routing Truth</div>
+    <div class="card-detail">
+        Last check {{.Routing.LastRun}}
+        {{if .Routing.Outcome}}(<span class="badge badge-{{if eq .Routing.Outcome "ok"}}success{{else if eq .Routing.Outcome "running"}}warning{{else}}danger{{end}}">{{.Routing.Outcome}}</span>){{end}}:
+        {{if .Routing.Summary}}{{.Routing.Summary}}{{else}}no result yet{{end}}.
+        {{if gt .Routing.UnknownRows 0}}<strong>{{.Routing.UnknownRows}} object rows name a backend no driver is registered under</strong> ({{.Routing.Unknown}}) — their reads depend on the engine's fan-out; the plan is <code>docs/reviews/WP-R7-5.md</code>.{{end}}
+        Details: <code>GET /api/v1/admin/routing-truth</code>; run now: <code>POST /api/v1/admin/jobs/routing_truth/run</code>.
+    </div>
 </div>
 {{end}}
 

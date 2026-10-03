@@ -25,6 +25,7 @@ it is **not** committed. It lives in `/etc/default/ntfy-bridge` on the server
 | `alertmanager.yml` | `/etc/prometheus/alertmanager.yml` | route → ntfy webhook receiver, send_resolved, critical-inhibits-warning |
 | `ntfy-bridge.py` | `/opt/vaultaire/monitoring/ntfy-bridge.py` | Alertmanager webhook → readable ntfy push (UTF-8-safe JSON publish) |
 | `ntfy-bridge.service` | `/etc/systemd/system/ntfy-bridge.service` | sandboxed systemd unit (DynamicUser) |
+| `vaultaire-routing.yml` | `/etc/prometheus/rules/` | routing truth (WP-R7-5): head rows whose bytes the recorded backend does not have (warn / page on a jump), rows on a backend no driver is registered under (info), two names on one store (page), reads of such rows (warn) |
 | `vaultaire-backends.yml`, `vaultaire-auth.yml`, `vaultaire-tls.yml`, `vaultaire-synthetic.yml`, `vaultaire-egress.yml`, `vaultaire-jobs.yml` | `/etc/prometheus/rules/` | alert rules: backend probes / auth failures / origin cert / customer-path canary / egress throttle / background jobs (Review R13 + WP-R10-9 + WP-R13-3 — install all six, checklist item 10; on 2026-10-02 only `backends` and `tls` were installed on SLC, next to the older `vaultaire-alerts.yml`) |
 
 ## Install (already done on slc-vaultaire-01, 2026-08-03)
@@ -146,6 +147,28 @@ starts one run (202, 409 while one is running). The label is `job_name`, not
 rule on `{job="retention"}` would never match. `internal/api/job_rules_test.go`
 checks that every job the server registers is named in exactly one staleness
 rule and that every series the file reads is exported.
+
+`vaultaire-routing.yml` — routing truth (WP-R7-5). `object_head_cache.backend_name`
+is where an object's bytes are supposed to be; the daily `routing_truth` job
+(05:30 UTC) samples rows per backend and asks the RECORDED backend only.
+`RoutingTruthMissing` (warning) fires when the last run found any sampled row
+whose bytes the backend does not have; `RoutingTruthMissingJump` (critical) when
+a backend's missing share is a tenth higher than yesterday's run (`offset 25h`)
+— a lost disk, a wiped bucket, a dead account (prod, 2026-09-21: the reseller
+account changed and 2,007 `idrive` rows pointed at the old one; a known backlog
+is the standing warning, not a daily page). Both read
+`vaultaire_routing_truth_last_run_missing_ratio{backend}`, which the app reads
+from `job_runs.result` on every scrape — right after a restart too. A backend
+that could not be asked (an open breaker, a NoSuchBucket, a timeout) is an
+`error`, never a miss. `RoutingUnknownBackendRows` (info, `for: 1h`) reads
+`vaultaire_routing_unknown_backend_rows{table,backend}` — rows whose backend no
+driver is registered under, per table, read from the database; `backend=""` is
+a row with none. `RoutingSharedStore` (critical): two registered names write
+into one store, which makes every stale-copy delete (WP-R13-2) a delete of a
+live object. `RoutingUnknownBackendReads` (warning): customers are reading rows
+that route to no driver. Triage: `GET /api/v1/admin/routing-truth` (admin JWT),
+`journalctl -u vaultaire | grep 'routing truth'`, the plan in
+`docs/reviews/WP-R7-5.md`. `internal/api/job_rules_test.go` checks the series.
 
 `vaultaire-egress.yml` — the egress allowance throttle (WP-R10-9): one
 info-level rule, `EgressThrottleActive` (`vaultaire_egress_throttled_tenants > 0`

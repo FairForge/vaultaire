@@ -153,6 +153,7 @@ func (s *Server) handleDeleteObjects(w http.ResponseWriter, r *http.Request, req
 		// below, in one transaction (R8-08); there is no backend delete.
 		if !isChunked || s.gci == nil {
 			if recordedBackend != "" && s.engine != nil {
+				noteRecordedBackend(s.engine, s.logger, "delete_objects", recordedBackend)
 				s.engine.HintBackend(container, key, recordedBackend)
 			}
 			delErr = s.engine.Delete(r.Context(), container, key)

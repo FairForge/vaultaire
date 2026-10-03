@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -84,6 +85,11 @@ type jobReport struct {
 	// Note is recorded in job_runs.last_error with outcome "ok": per-item
 	// failures and anything else worth reading that did not fail the run.
 	Note string
+	// Result, when set, is recorded as job_runs.result (JSON, migration
+	// 074): the structured outcome of the run — counts a collector, the
+	// admin API or the dashboard read back from the table, so a freshly
+	// started process reports the last run, not zero (WP-R7-5).
+	Result any
 }
 
 // jobSpec describes one job.
@@ -437,7 +443,17 @@ func (j *scheduledJob) execute(ctx context.Context, release func(), run func(con
 		outcome, text = jobOutcomeError, err.Error()
 	}
 	finished := s.now()
-	recordJobFinish(s.db, name, finished, outcome, text, rep.Rows)
+	// The structured result is recorded for a run that produced one and
+	// finished on its own; a result an interrupted run assembled is partial.
+	var result []byte
+	if rep.Result != nil && outcome != jobOutcomeInterrupted {
+		if b, mErr := json.Marshal(rep.Result); mErr == nil {
+			result = b
+		} else {
+			s.logger.Error("job result not recorded", zap.String("job", name), zap.Error(mErr))
+		}
+	}
+	recordJobFinish(s.db, name, finished, outcome, text, rep.Rows, result)
 	jobRuns.WithLabelValues(name, outcome).Inc()
 	s.invalidateLastSuccess()
 
@@ -496,23 +512,31 @@ func recordJobStart(ctx context.Context, db *sql.DB, job string, at time.Time) {
 // recordJobFinish writes the end of a run on its own short context: the run's
 // context may already be cancelled (deadline, shutdown) and the row must
 // still say how the run ended.
-func recordJobFinish(db *sql.DB, job string, at time.Time, outcome, text string, rows int64) {
+//
+// result is the run's structured outcome as JSON (nil = none; the previous
+// result is kept so a failed run does not erase the last good one).
+func recordJobFinish(db *sql.DB, job string, at time.Time, outcome, text string, rows int64, result []byte) {
 	if len(text) > 2000 {
 		text = text[:2000]
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	var res any
+	if len(result) > 0 {
+		res = string(result)
+	}
 	// An upsert: when the start row could not be written (a database blip)
 	// the finish must still record the success — an UPDATE of a missing row
 	// would leave a daily job "never succeeded" and it would run every hour.
 	_, _ = db.ExecContext(ctx, `
-		INSERT INTO job_runs (job, last_started_at, last_finished_at, last_outcome, last_error, rows_affected, last_success_at)
-		VALUES ($1, $2, $2, $3, $4, $5, CASE WHEN $3 = 'ok' THEN $2::timestamptz END)
+		INSERT INTO job_runs (job, last_started_at, last_finished_at, last_outcome, last_error, rows_affected, last_success_at, result)
+		VALUES ($1, $2, $2, $3, $4, $5, CASE WHEN $3 = 'ok' THEN $2::timestamptz END, $6::jsonb)
 		ON CONFLICT (job) DO UPDATE SET
 		       last_finished_at = EXCLUDED.last_finished_at, last_outcome = EXCLUDED.last_outcome,
 		       last_error = EXCLUDED.last_error, rows_affected = EXCLUDED.rows_affected,
-		       last_success_at = COALESCE(EXCLUDED.last_success_at, job_runs.last_success_at)`,
-		job, at, outcome, text, rows)
+		       last_success_at = COALESCE(EXCLUDED.last_success_at, job_runs.last_success_at),
+		       result = COALESCE(EXCLUDED.result, job_runs.result)`,
+		job, at, outcome, text, rows, res)
 }
 
 // lastJobSuccess returns the zero time when the job never succeeded.
@@ -540,12 +564,15 @@ type jobRunRow struct {
 	Outcome      string
 	Error        string
 	Rows         int64
+	// Result is the structured outcome of the last run that wrote one (JSON;
+	// nil for jobs that report counts only through Rows and the note).
+	Result json.RawMessage
 }
 
 // jobRunRows reads job_runs.
 func jobRunRows(ctx context.Context, db *sql.DB) (map[string]jobRunRow, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT job, last_started_at, last_finished_at, last_success_at, last_outcome, last_error, rows_affected
+		SELECT job, last_started_at, last_finished_at, last_success_at, last_outcome, last_error, rows_affected, result
 		  FROM job_runs`)
 	if err != nil {
 		return nil, fmt.Errorf("read job_runs: %w", err)
@@ -554,8 +581,12 @@ func jobRunRows(ctx context.Context, db *sql.DB) (map[string]jobRunRow, error) {
 	out := map[string]jobRunRow{}
 	for rows.Next() {
 		var r jobRunRow
-		if err := rows.Scan(&r.Job, &r.LastStarted, &r.LastFinished, &r.LastSuccess, &r.Outcome, &r.Error, &r.Rows); err != nil {
+		var result []byte
+		if err := rows.Scan(&r.Job, &r.LastStarted, &r.LastFinished, &r.LastSuccess, &r.Outcome, &r.Error, &r.Rows, &result); err != nil {
 			return nil, fmt.Errorf("scan job_runs: %w", err)
+		}
+		if len(result) > 0 {
+			r.Result = json.RawMessage(result)
 		}
 		out[r.Job] = r
 	}

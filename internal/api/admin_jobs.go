@@ -46,6 +46,9 @@ type adminJobView struct {
 	LastError    string     `json:"last_error"`
 	RowsAffected int64      `json:"rows_affected"`
 	NextRunAt    *time.Time `json:"next_run_at,omitempty"`
+	// Result is the structured result of the last run that wrote one
+	// (job_runs.result, migration 074 — routing_truth's counts).
+	Result json.RawMessage `json:"result,omitempty"`
 }
 
 func timePtr(t time.Time, valid bool) *time.Time {
@@ -75,7 +78,7 @@ func (s *jobScheduler) jobViews(ctx context.Context) ([]adminJobView, error) {
 			LastStartedAt:  timePtr(r.LastStarted.Time, r.LastStarted.Valid),
 			LastFinishedAt: timePtr(r.LastFinished.Time, r.LastFinished.Valid),
 			LastSuccessAt:  timePtr(r.LastSuccess.Time, r.LastSuccess.Valid),
-			LastOutcome:    r.Outcome, LastError: r.Error, RowsAffected: r.Rows,
+			LastOutcome:    r.Outcome, LastError: r.Error, RowsAffected: r.Rows, Result: r.Result,
 			NextRunAt: timePtr(j.nextRun(now, r.LastStarted.Time), true),
 		})
 	}

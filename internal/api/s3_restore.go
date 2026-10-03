@@ -40,6 +40,7 @@ func objectRestorer(ce *engine.CoreEngine, db *sql.DB, r *http.Request, tenantID
 	}
 	drv, ok := ce.GetDriver(backendName)
 	if !ok {
+		noteRecordedBackend(ce, nil, "restore", backendName)
 		return nil, class, nil
 	}
 	restorer, _ := drv.(engine.Restorer)

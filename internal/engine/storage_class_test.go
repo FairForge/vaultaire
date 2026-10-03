@@ -73,7 +73,7 @@ func TestCustomerStorageClass(t *testing.T) {
 		{"downstairs, Smart-demoted to tape", "standard", "geyser", "STANDARD"},
 		{"downstairs on a region driver", "standard", "idrive-eu-west-1", "STANDARD"},
 		{"downstairs on lyve / r2 / permafrost", "standard", "lyve", "STANDARD"},
-		{"downstairs on the dev backend keeps its class", "standard", "local", "REDUCED_REDUNDANCY"},
+		{"downstairs on the dev backend (the development primary) is STANDARD — local is no tier (WP-R7-5)", "standard", "local", "STANDARD"},
 		{"attic on tape", "vault", "geyser", "GLACIER"},
 		{"attic that fell back to the primary is readable, so STANDARD", "vault", "idrive", "STANDARD"},
 		{"a floor that is neither is downstairs", "", "geyser", "STANDARD"},

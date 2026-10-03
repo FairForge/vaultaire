@@ -1229,7 +1229,7 @@ func generateAdminPaths() map[string]*PathItem {
 			Get: admin(jsonOp("Admin", "List the background jobs", "AdminListJobs",
 				"Every background job this server runs, joined with its `job_runs` row: the schedule, whether a run is in progress, the last start, finish and success, "+
 					"the last outcome (`ok`, `error`, `interrupted` — the process stopped during the run — or `running`), the rows it affected and when it is next expected. "+
-					"Daily jobs: `inventory` 00:30 UTC, `dedup_gc` 02:30, `retention` 03:30, `account_deletion` 04:30, `smart_demotion` 06:30 (a catch-up check a few minutes after every start, "+
+					"Daily jobs: `inventory` 00:30 UTC, `dedup_gc` 02:30, `retention` 03:30, `account_deletion` 04:30, `routing_truth` 05:30, `smart_demotion` 06:30 (a catch-up check a few minutes after every start, "+
 					"then one per hour; a run happens when `job_runs` has no success since the last scheduled time). Interval jobs: `multipart_reaper`, `cdn_rollup`, `idempotency_cleanup`, "+
 					"`sts_cleanup`, `session_cleanup`, `bandwidth_alerts` (hourly) and `access_log_delivery` (every 5 minutes). On `ok`, `last_error` is the run's note: items that failed "+
 					"without failing the run. A `job_runs` row no job of this process claims is listed with `registered: false`.",
@@ -1317,6 +1317,37 @@ func generateAdminPaths() map[string]*PathItem {
 				queryParam("backend", "Required. A registered backend name (e.g. `idrive`)", &Schema{Type: "string"}),
 				queryParam("dry_run", "Report only (the default). `false` moves and deletes", &Schema{Type: "boolean", Default: true}),
 				queryParam("tenant", "Repeatable. An extra tenant id to look under — an erased tenant whose `account.erased` row shows `chunk_blobs_left` > 0", &Schema{Type: "string"}))),
+		},
+		"/api/v1/admin/routing-truth": {
+			Get: admin(jsonOp("Admin", "The routing truth: head rows vs. the backends that hold their bytes", "AdminRoutingTruth",
+				"`object_head_cache.backend_name` is where an object's bytes are supposed to be — GET, DELETE, the demotion ledger, the deletion runner and the erasure sweep act on it. "+
+					"This answers with three things (WP-R7-5): the boot check (every backend name on record must be a registered driver; two registered names must never share a store), "+
+					"the rows whose backend no driver is registered under — per table, live from the database, `backend` empty for rows with none — and the last run of the daily "+
+					"`routing_truth` job (05:30 UTC), which samples rows per backend and asks the recorded backend only whether the bytes are there: `present`, `missing` (bytes gone, row intact), "+
+					"`changed` (the row changed while it looked), `errors` (the backend could not be asked; an open breaker is one error, never N misses), plus the chunks of sampled chunked objects "+
+					"at their one address (`legacy` = found under the uploader's prefix; run the chunk move). Nothing here writes. Run the job now with `POST /api/v1/admin/jobs/routing_truth/run`. "+
+					"What to do with the findings is the plan in `docs/reviews/WP-R7-5.md`.",
+				map[string]Response{
+					"200": jsonResp("The routing truth", ref("RoutingTruth")),
+					"500": textResp("`could not read the routing tables` / `could not read job_runs`"),
+					"503": textResp("`routing truth not available (no database)`"),
+				})),
+		},
+		"/api/v1/admin/routing-truth/resolve-null": {
+			Post: admin(withParams(jsonOp("Admin", "Resolve head rows that record no backend", "AdminRoutingTruthResolveNull",
+				"Rows with no `backend_name` (multipart completes before Review R3-03) are served only by the engine's fan-out. This is the one place a fan-out is justified: "+
+					"for up to `limit` such rows every registered driver is asked once, with the row's tenant in the context, and the row is `resolved` when exactly ONE holds the bytes, "+
+					"`nowhere` when none does (the object is gone — delete it through S3 DELETE, which releases quota, or the tenant's erasure), `ambiguous` when more than one does, "+
+					"`error` when a backend could not be asked. **Dry run by default**: only `dry_run=false` writes, and then only the resolved rows, under a guard (`backend_name IS NULL` and the etag unchanged). "+
+					"Nothing is ever deleted. Synchronous; call again until `remaining` is 0. Writes an `admin.routing_truth_resolve_null` audit row. No request body.",
+				map[string]Response{
+					"200": jsonResp("What was (or would be) resolved", ref("RoutingTruthResolveNull")),
+					"400": textResp("`dry_run must be true or false`, `limit must be an integer in 1..500`"),
+					"500": textResp("`resolve failed: ...`"),
+					"503": textResp("`routing truth not available (no database)`"),
+				}),
+				queryParam("dry_run", "Report only (the default). `false` writes the resolved rows", &Schema{Type: "boolean", Default: true}),
+				queryParam("limit", "Rows looked at in this call (each costs one HEAD per registered backend)", intRange("", 1, 500)))),
 		},
 		"/api/v1/admin/retention": {
 			Post: admin(jsonOp("Admin", "Start one retention run", "AdminRetention",
@@ -1905,7 +1936,65 @@ func generateJSONSchemas() map[string]Schema {
 			"last_error":       str("The failure text of an `error` run; on `ok`, the run's note (items that failed without failing the run)"),
 			"rows_affected":    integer("The job's own unit: rows pruned, objects moved, chunks swept, reports written, accounts erased"),
 			"next_run_at":      dateTime("When the job is next expected to run; omitted when unknown"),
+			"result":           freeObject("The structured result of the last run that wrote one (`routing_truth`: the per-backend counts); omitted for the other jobs"),
 		}, "job", "schedule", "registered", "running", "last_started_at", "last_finished_at", "last_success_at", "last_outcome", "last_error", "rows_affected"),
+		"RoutingTruth": object("The routing truth (WP-R7-5)", map[string]*Schema{
+			"job":                 str("The job's name in `job_runs`: `routing_truth`"),
+			"registered_backends": strArray("Every registered driver name"),
+			"boot_check": nullable(objectPtr("What the boot check found (null before it ran)", map[string]*Schema{
+				"at":                   dateTime(""),
+				"registered_backends":  strArray(""),
+				"unknown_backend_rows": arrayOf(ref("UnknownBackendRows")),
+				"shared_stores":        arrayOf(ref("SharedStore")),
+			})),
+			"unknown_backend_rows": arrayOf(ref("UnknownBackendRows")),
+			"shared_stores":        arrayOf(ref("SharedStore")),
+			"last_outcome":         strEnum("Empty when the job has never run", "", "ok", "error", "interrupted", "running"),
+			"last_started_at":      nullable(dateTime("")),
+			"last_finished_at":     nullable(dateTime("")),
+			"last_success_at":      nullable(dateTime("")),
+			"last_note":            str("The last run's one-line summary (or its error)"),
+			"last_run": nullable(objectPtr("The last run's counts (`job_runs.result`); null before the first run", map[string]*Schema{
+				"started_at":  dateTime(""),
+				"finished_at": dateTime(""),
+				"backends": freeObject("Per registered backend: `rows` (whole-object head rows naming it), `sampled`, `present`, `missing` (bytes gone, row intact), `changed` (row changed mid-check), " +
+					"`errors` (could not be asked), `missing_ratio` (missing over present + missing), `skipped` (why the backend was not fully sampled: an open breaker, consecutive errors)"),
+				"unknown": freeObject("Head rows on a backend no driver is registered under, by name (`\"\"` = rows with none)"),
+				"chunks": objectPtr("Chunks of the sampled chunked objects, at their one address", map[string]*Schema{
+					"objects": integer(""), "chunks": integer(""), "present": integer(""),
+					"legacy":  integer("Present only under the uploader's prefix (written before WP-R8-7): run the chunk move"),
+					"missing": integer(""), "errors": integer(""), "unknown_backend": integer("The index row names a backend no driver has"),
+				}),
+				"checks":  integer("Calls made (whole rows + chunks) — `job_runs.rows_affected`"),
+				"summary": str("The one-line note"),
+			})),
+		}, "job", "registered_backends", "unknown_backend_rows", "shared_stores", "last_outcome", "last_note"),
+		"UnknownBackendRows": object("Rows of one table whose backend no driver is registered under", map[string]*Schema{
+			"table":   strEnum("", "object_head_cache", "smart_demotions", "object_versions"),
+			"backend": str("The recorded name; empty for rows with none (NULL)"),
+			"rows":    integer(""),
+		}, "table", "backend", "rows"),
+		"SharedStore": object("One store that two or more registered backends write into", map[string]*Schema{
+			"Store":    str("The store (endpoint + bucket, a directory, a fleet) or `<same driver value>` when one driver is registered twice"),
+			"Backends": strArray("The registered names, sorted"),
+		}, "Store", "Backends"),
+		"RoutingTruthResolveNull": object("", map[string]*Schema{
+			"dry_run":    boolean(""),
+			"rows":       integer("NULL rows looked at in this call"),
+			"resolved":   integer("Exactly one backend holds the bytes (written unless a dry run)"),
+			"nowhere":    integer("No backend holds the bytes: the object is gone"),
+			"ambiguous":  integer("More than one backend holds a blob at that key: left alone"),
+			"errors":     integer("A backend could not be asked: nothing written for the row"),
+			"remaining":  integer("NULL rows left after this call"),
+			"by_backend": freeObject("Resolved rows per backend"),
+			"details": arrayOf(objectPtr("", map[string]*Schema{
+				"tenant_id": str(""), "bucket": str(""), "key": str(""),
+				"holders": strArray("The backends that hold a blob at the key"),
+				"verdict": strEnum("", "resolved", "nowhere", "ambiguous", "error"),
+				"written": boolean("The row was updated (never in a dry run)"),
+				"error":   str("Omitted unless the verdict is `error`"),
+			})),
+		}, "dry_run", "rows", "resolved", "nowhere", "ambiguous", "errors", "remaining", "by_backend", "details"),
 		"JobStarted": object("A job run was started and continues on the server", map[string]*Schema{
 			"job":        str("Job name"),
 			"status":     strEnum("", "started"),

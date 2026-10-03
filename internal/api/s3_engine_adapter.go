@@ -356,6 +356,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	// Seed the engine's in-memory routing map so GET goes directly to the
 	// correct backend instead of failing over from primary on restart.
 	if cacheHit && cachedBackendName != "" {
+		noteRecordedBackend(a.engine, a.logger, "get", cachedBackendName)
 		if ce, ok := a.engine.(*engine.CoreEngine); ok {
 			ce.HintBackend(container, artifact, cachedBackendName)
 		}
@@ -2073,6 +2074,7 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 		// transaction (R8-08).
 	} else {
 		if recordedBackend != "" {
+			noteRecordedBackend(a.engine, a.logger, "delete", recordedBackend)
 			if ce, ok := a.engine.(*engine.CoreEngine); ok {
 				ce.HintBackend(container, object, recordedBackend)
 			}
@@ -2231,9 +2233,9 @@ func publicBucketStorageClass(ctx context.Context, db *sql.DB, eng engine.Engine
 //
 // The header is client input (R2-07). Only the classes we sell are honoured
 // from it — STANDARD, GLACIER, DEEP_ARCHIVE (case-insensitive like AWS);
-// internal names (PUBLIC → r2, RESILIENT → lyve), legacy AWS classes that
-// would map onto hub disk (REDUCED_REDUNDANCY → local) and anything unknown
-// fall back to the bucket's own resolution. A cold/resilient bucket tier is
+// internal names (PUBLIC → r2, RESILIENT → lyve), legacy AWS classes
+// (REDUCED_REDUNDANCY — unmapped since WP-R7-5; it used to place on the
+// hub's disk) and anything unknown fall back to the bucket's own resolution. A cold/resilient bucket tier is
 // a placement promise: a header can make an archive object colder
 // (DEEP_ARCHIVE) but never hotter, and a resilient bucket never moves.
 func resolvePutStorageClass(ctx context.Context, db *sql.DB, eng engine.Engine, tenantID, bucket, header string) string {
