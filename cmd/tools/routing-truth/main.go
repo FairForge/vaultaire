@@ -27,6 +27,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/common"
@@ -54,6 +55,10 @@ type row struct{ tenant, bucket, key string }
 func main() {
 	sample := flag.Int("sample", 20, "rows per (backend, tenant) to check through the driver")
 	noProbe := flag.Bool("no-probe", false, "database only: no driver call")
+	onlyBackend := flag.String("backend", "", "probe only this recorded backend ('' for the NULL rows is not probeable; others are still listed)")
+	onlyTenant := flag.String("tenant", "", "probe only this tenant's rows")
+	one := flag.String("one", "", "probe ONE object through a backend's driver and exit: backend:tenant/bucket/key (HEAD, then a 1-byte GET — iDrive answers 403 to a HEAD a GET of the same key serves)")
+	list := flag.String("list", "", "list what a backend holds for a tenant's bucket and exit: backend:tenant/bucket (first 40 keys)")
 	flag.Parse()
 	logger := zap.NewNop()
 
@@ -72,6 +77,11 @@ func main() {
 
 	fmt.Printf("routing truth — read-only plan, %s\n\n", time.Now().UTC().Format(time.RFC3339))
 
+	if *one != "" || *list != "" {
+		probeOne(ctx, logger, *one, *list)
+		return
+	}
+
 	classes, err := loadClasses(ctx, db)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -87,28 +97,7 @@ func main() {
 	// main.go builds it; no server wiring is duplicated beyond that.
 	probes := map[string]engine.Driver{}
 	if !*noProbe {
-		if p := os.Getenv("DATA_PATH"); p != "" {
-			probes["local"] = drivers.NewLocalDriver(p, logger)
-		}
-		if ak := os.Getenv("IDRIVE_ACCESS_KEY"); ak != "" {
-			d, err := drivers.NewIDriveDriver(ak, os.Getenv("IDRIVE_SECRET_KEY"), os.Getenv("IDRIVE_ENDPOINT"), os.Getenv("IDRIVE_REGION"), logger)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "idrive driver:", err)
-			} else {
-				probes["idrive"] = d
-			}
-		}
-		if os.Getenv("TENANT_1_ID") != "" {
-			d, err := drivers.NewOneDriveFleetDriver(logger)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "permafrost driver:", err)
-			} else {
-				// The fleet answers to "permafrost" — and is the only candidate
-				// for rows still named "onedrive" (R7-10).
-				probes["permafrost"] = d
-				probes["onedrive"] = d
-			}
-		}
+		probes = buildProbes(logger)
 	}
 
 	fmt.Println("== head rows per recorded backend and tenant")
@@ -116,12 +105,17 @@ func main() {
 	plan := map[string][]string{}
 	for _, c := range classes {
 		verdict := "-"
-		if d, ok := probes[c.backend]; ok {
+		switch d, ok := probes[c.backend]; {
+		case c.backend == "":
+			verdict = "no backend recorded: POST /api/v1/admin/routing-truth/resolve-null"
+		case (*onlyBackend != "" && c.backend != *onlyBackend) || (*onlyTenant != "" && c.tenant != *onlyTenant):
+			verdict = "not probed (filtered)"
+		case ok:
 			present, missing, errs := probe(ctx, db, d, c, *sample)
 			verdict = fmt.Sprintf("%d present, %d missing, %d error of %d", present, missing, errs, present+missing+errs)
-		} else if !registeredNames[c.backend] {
+		case !registeredNames[c.backend]:
 			verdict = "no driver answers to this name"
-		} else if !*noProbe {
+		case !*noProbe:
 			verdict = "no credentials in env"
 		}
 		fmt.Printf("%-12s %-28s %-16s %8d %12d %-10s %-10s %s\n", label(c.backend), c.tenant, trunc(c.tenantName, 16), c.rows, c.bytes, c.minDate, c.maxDate, verdict)
@@ -282,6 +276,9 @@ func probe(ctx context.Context, db *sql.DB, d engine.Driver, c class, n int) (pr
 			if errs <= 2 {
 				fmt.Fprintf(os.Stderr, "  probe error %s/%s on %s: %v\n", r.bucket, r.key, label(c.backend), err)
 			}
+		case ok && present < 3:
+			present++
+			fmt.Fprintf(os.Stderr, "  present: %s/%s on %s\n", r.bucket, r.key, label(c.backend))
 		case ok:
 			present++
 		default:
@@ -289,4 +286,86 @@ func probe(ctx context.Context, db *sql.DB, d engine.Driver, c class, n int) (pr
 		}
 	}
 	return present, missing, errs
+}
+
+// buildProbes builds the drivers the environment allows, the way main.go does.
+func buildProbes(logger *zap.Logger) map[string]engine.Driver {
+	probes := map[string]engine.Driver{}
+	if p := os.Getenv("DATA_PATH"); p != "" {
+		probes["local"] = drivers.NewLocalDriver(p, logger)
+	}
+	if ak := os.Getenv("IDRIVE_ACCESS_KEY"); ak != "" {
+		d, err := drivers.NewIDriveDriver(ak, os.Getenv("IDRIVE_SECRET_KEY"), os.Getenv("IDRIVE_ENDPOINT"), os.Getenv("IDRIVE_REGION"), logger)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "idrive driver:", err)
+		} else {
+			probes["idrive"] = d
+		}
+	}
+	if os.Getenv("TENANT_1_ID") != "" {
+		d, err := drivers.NewOneDriveFleetDriver(logger)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "permafrost driver:", err)
+		} else {
+			// The fleet answers to "permafrost" — and is the only candidate
+			// for rows still named "onedrive" (R7-10).
+			probes["permafrost"] = d
+			probes["onedrive"] = d
+		}
+	}
+	return probes
+}
+
+// probeOne: -one backend:tenant/bucket/key (HEAD then GET) or -list backend:tenant/bucket.
+func probeOne(ctx context.Context, logger *zap.Logger, one, list string) {
+	probes := buildProbes(logger)
+	spec := one
+	if spec == "" {
+		spec = list
+	}
+	backend, rest, ok := strings.Cut(spec, ":")
+	if !ok {
+		fmt.Fprintln(os.Stderr, "want backend:tenant/bucket[/key]")
+		os.Exit(2)
+	}
+	d, ok := probes[backend]
+	if !ok {
+		fmt.Fprintln(os.Stderr, "no driver for", backend, "in this environment")
+		os.Exit(2)
+	}
+	parts := strings.SplitN(rest, "/", 3)
+	if len(parts) < 2 {
+		fmt.Fprintln(os.Stderr, "want backend:tenant/bucket[/key]")
+		os.Exit(2)
+	}
+	tctx := common.WithTenantID(ctx, parts[0])
+	container := parts[0] + "_" + parts[1]
+	if list != "" {
+		keys, err := d.List(tctx, container, "")
+		fmt.Printf("list %s %s: %d keys, err=%v\n", backend, container, len(keys), err)
+		for i, k := range keys {
+			if i >= 40 {
+				fmt.Println("  …")
+				break
+			}
+			fmt.Println("  ", k)
+		}
+		return
+	}
+	if len(parts) < 3 {
+		fmt.Fprintln(os.Stderr, "want backend:tenant/bucket/key")
+		os.Exit(2)
+	}
+	key := parts[2]
+	exists, err := d.Exists(tctx, container, key)
+	fmt.Printf("HEAD %s %s/%s: exists=%v err=%v\n", backend, container, key, exists, err)
+	rc, err := d.Get(tctx, container, key)
+	if err != nil {
+		fmt.Printf("GET  %s %s/%s: err=%v\n", backend, container, key, err)
+		return
+	}
+	buf := make([]byte, 1)
+	n, rerr := rc.Read(buf)
+	_ = rc.Close()
+	fmt.Printf("GET  %s %s/%s: ok, read %d byte(s), err=%v\n", backend, container, key, n, rerr)
 }

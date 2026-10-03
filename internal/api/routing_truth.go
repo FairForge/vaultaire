@@ -228,6 +228,12 @@ func (c *RoutingTruthChecker) BootCheck(ctx context.Context) (RoutingBootReport,
 	}
 	rep.Unknown = unknown
 	rep.SharedStores = c.eng.SharedStores()
+	if rep.Unknown == nil {
+		rep.Unknown = []unknownRows{}
+	}
+	if rep.SharedStores == nil {
+		rep.SharedStores = []engine.SharedStore{}
+	}
 
 	for _, u := range unknown {
 		name := u.Backend
@@ -468,11 +474,26 @@ func (c *RoutingTruthChecker) sampleSize(backend string) int {
 
 // checkWhole asks the recorded backend, with the row's tenant in the
 // context, whether the object's bytes are there.
+//
+// The driver is called directly, not through the engine's failover: the job
+// OBSERVES the backend's circuit breaker (an open one skips the backend) but
+// never charges it. Through engine.ExistsOn five failing HEADs would open the
+// primary's breaker for 30 s, and every customer PUT in that window would
+// fail over to the next durable backend — a diagnostic must not move
+// customer bytes (prod's primary key answers 403 to every GET/HEAD today,
+// see docs/reviews/WP-R7-5.md). The sample is bounded by routingErrorCutoff.
 func (c *RoutingTruthChecker) checkWhole(ctx context.Context, backend string, h headRef) string {
+	d, ok := c.eng.GetDriver(backend)
+	if !ok {
+		return "error"
+	}
+	if st := c.eng.GetFailoverStatus()[backend]; st == engine.StateOpen.String() {
+		return "error"
+	}
 	cctx, cancel := context.WithTimeout(common.WithTenantID(ctx, h.tenantID), routingExistsTimeout)
 	defer cancel()
 	container := h.tenantID + "_" + h.bucket
-	ok, err := c.eng.ExistsOn(cctx, backend, container, h.key)
+	ok, err := d.Exists(cctx, container, h.key)
 	if err != nil {
 		c.logger.Warn("routing truth: backend could not be asked", zap.String("backend", backend),
 			zap.String("tenant_id", h.tenantID), zap.String("bucket", h.bucket), zap.String("key", h.key), zap.Error(err))
@@ -543,8 +564,9 @@ func (c *RoutingTruthChecker) sampleChunked(ctx context.Context, res *RoutingTru
 	for _, b := range c.eng.GetDriverNames() {
 		registered[b] = true
 	}
+	consecutive := 0 // errors in a row: the chunk store goes through the engine's failover, so a dead backend is given up early
 	for _, h := range objs {
-		if ctx.Err() != nil || ct.Chunks >= routingChunkCap {
+		if ctx.Err() != nil || ct.Chunks >= routingChunkCap || consecutive >= routingErrorCutoff {
 			break
 		}
 		ct.Objects++
@@ -555,7 +577,7 @@ func (c *RoutingTruthChecker) sampleChunked(ctx context.Context, res *RoutingTru
 			continue
 		}
 		for _, ref := range refs {
-			if ctx.Err() != nil || ct.Chunks >= routingChunkCap {
+			if ctx.Err() != nil || ct.Chunks >= routingChunkCap || consecutive >= routingErrorCutoff {
 				break
 			}
 			scope := ref.DedupScope
@@ -592,14 +614,18 @@ func (c *RoutingTruthChecker) sampleChunked(ctx context.Context, res *RoutingTru
 			switch result {
 			case "present":
 				ct.Present++
+				consecutive = 0
 			case "legacy":
 				ct.Present++
 				ct.Legacy++
+				consecutive = 0
 			case "missing":
 				ct.Missing++
+				consecutive = 0
 				c.logger.Warn("routing truth: chunk blob is at no address", zap.String("backend", backend), zap.String("key", h.key), zap.String("hash", shortHash(ref.PlaintextHash)))
 			default:
 				ct.Errors++
+				consecutive++
 			}
 		}
 	}

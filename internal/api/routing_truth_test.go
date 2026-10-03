@@ -224,27 +224,58 @@ func TestRoutingTruth_Run_PresentMissingAndChangedAreToldApart(t *testing.T) {
 func TestRoutingTruth_Run_ABackendErrorIsNeverAMiss(t *testing.T) {
 	// Arrange: a backend that answers NoSuchBucket (misconfigured, not
 	// empty) for every HEAD — isBackendFailure's class, the one a bare 404
-	// check would read as "gone".
+	// check would read as "gone". Six rows: more than the breaker's
+	// threshold of five failures.
 	f := setupRoutingTruthFixture(t)
 	bad := "rt-bad-" + uuid.New().String()[:8]
 	f.eng.AddDriver(bad, &rtDriver{exists: func(context.Context, string, string) (bool, error) {
 		return false, fmt.Errorf("head: %w", &smithy.GenericAPIError{Code: "NoSuchBucket", Message: "The specified bucket does not exist"})
 	}})
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 6; i++ {
 		f.row("b", fmt.Sprintf("k%d", i), bad, false)
 	}
 
 	// Act
 	res := f.run()
 
-	// Assert: three errors, zero missing, the backend is named in the note.
+	// Assert: six errors, zero missing, the backend is named in the note —
+	// and its breaker is still closed: a diagnostic observes the breaker,
+	// it never charges it (an open primary breaker moves customer PUTs to
+	// the next backend for 30 s).
 	b := res.Backends[bad]
 	require.NotNil(t, b)
 	assert.Equal(t, 0, b.Missing)
-	assert.Equal(t, 3, b.Errors)
+	assert.Equal(t, 6, b.Errors)
 	assert.Zero(t, b.MissingRatio)
 	assert.Contains(t, res.Summary, bad+": ")
-	assert.Contains(t, res.Summary, "3 error")
+	assert.Contains(t, res.Summary, "6 error")
+	assert.Equal(t, engine.StateClosed.String(), f.eng.GetFailoverStatus()[bad], "the job never charges a breaker")
+}
+
+func TestRoutingTruth_Run_ABackendThatKeepsFailingIsGivenUpForTheRun(t *testing.T) {
+	// Arrange: forty rows on a backend whose every HEAD fails (prod's primary
+	// key answers 403 to every GET and HEAD, 2026-10-03).
+	f := setupRoutingTruthFixture(t)
+	dead := &rtDriver{exists: func(context.Context, string, string) (bool, error) {
+		return false, errors.New("api error AccessDenied: Access Denied")
+	}}
+	name := "rt-403-" + uuid.New().String()[:8]
+	f.eng.AddDriver(name, dead)
+	for i := 0; i < 40; i++ {
+		f.row("b", fmt.Sprintf("k%02d", i), name, false)
+	}
+
+	// Act
+	res := f.run()
+
+	// Assert: ten calls, then the backend is given up — not forty HEADs at
+	// a backend that is refusing them.
+	b := res.Backends[name]
+	require.NotNil(t, b)
+	assert.Equal(t, int32(routingErrorCutoff), dead.calls.Load())
+	assert.Equal(t, routingErrorCutoff, b.Errors)
+	assert.Equal(t, 0, b.Missing)
+	assert.Contains(t, b.Skipped, "consecutive errors")
 }
 
 func TestRoutingTruth_Run_AnOpenBreakerSkipsTheBackend(t *testing.T) {
