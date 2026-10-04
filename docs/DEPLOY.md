@@ -19,12 +19,17 @@ deliberately not in this file — "the production host" is the one box.
   https, sets HSTS, and forwards to the app on `127.0.0.1:8000`. HAProxy
   appends the real peer as the *last* `X-Forwarded-For` hop — the only header
   `internal/clientip` trusts (R1-01). Its `global` section carries
-  `tune.h2.initial-window-size 4194304` and `tune.h2.max-frame-size 1048576`
-  (set 2026-10-04): HAProxy's default HTTP/2 flow-control window is 65,535
-  bytes, which caps every h2 upload at window ÷ RTT — Cloudflare speaks h2 to
-  the origin, so every upload through `stored.ge` ran at ~1.2 MB/s from Dallas
-  until the window was raised (then 10–44 MB/s). HTTP/1.1 clients never saw
-  it, which is why the bench from the box itself looked fine.
+  `tune.h2.initial-window-size 262144` (set 2026-10-04). HAProxy 2.8's default
+  HTTP/2 window is 65,535 bytes, which caps every h2 upload at window ÷ RTT
+  (~1 MB/s from Dallas) — but a large window costs the other way: at 4 MiB,
+  sixteen h2 streams on one connection fell from 308 to 35 MB/s on the box
+  (HAProxy 2.8 buffers per stream; 3.1 sizes windows dynamically). 256 KB
+  keeps multi-stream uploads at full speed. Uploads from Cloudflare are kept
+  fast by the zone setting **`origin_max_http_version = 1`** (Cloudflare
+  talks HTTP/1.1 to the origin, one connection per request, no h2 window at
+  all): 22–27 MB/s through `stored.ge` from the box, 58 MB/s edge → origin.
+  Leave `tune.h2.max-frame-size` at its default; 1 MiB frames made things
+  worse. Revisit when HAProxy ≥ 3.1 is packaged for the box.
 - **UFW** allows 22, 80 and 443 only. `deploy/ufw-cloudflare-lockdown.sh` is
   the script for narrowing 80/443 to Cloudflare's ranges.
 - **Configuration is the env file** loaded by the unit's `EnvironmentFile=`

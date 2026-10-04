@@ -315,3 +315,28 @@ GET /docs/api        Swagger UI              GET /openapi.json   OpenAPI 3.0
 GET /changelog       dated changes           GET /llms.txt       the plain-text summary of this file
 GET /.well-known/security.txt
 ```
+
+### Direct uploads to R2 (public buckets)
+
+For a **public-read** bucket the bytes can go straight from the client to R2
+on a Vaultaire-issued presigned PUT and never cross the origin (2026-10-04
+bench: 25–28 MB/s from a server, 2–3× a Worker relay). Two calls:
+
+```
+POST /api/v1/manage/buckets/{name}/direct-uploads
+{"key": "img/a.png", "content_type": "image/png"}
+→ 201 {"object":"direct_upload","method":"PUT","url":"https://…r2.cloudflarestorage.com/…","expires_at":…,"complete":"/api/v1/manage/buckets/{name}/direct-uploads/complete"}
+
+PUT <url>   (the client uploads the bytes)
+
+POST /api/v1/manage/buckets/{name}/direct-uploads/complete
+{"key": "img/a.png"}
+→ 200 {"object":"object","size":…,"etag":…,"backend":"r2"}
+```
+
+`complete` HEADs the object on R2, reserves quota and writes the head row, so
+the object lists, HEADs and serves through `/cdn` like any other. A private
+bucket answers `bucket_not_public`; a deployment without an `r2` driver
+answers `direct_upload_unavailable`; completing before the upload answers
+`object_not_uploaded`; a quota overrun removes the uploaded object and
+answers `quota_exceeded`. Presigned URLs live 15 minutes.

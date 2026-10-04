@@ -45,6 +45,8 @@ func (s *Server) registerManagementRoutes() {
 
 		r.Get("/buckets/{name}/objects", s.handleMgmtListObjects)
 		r.Put("/buckets/{name}/tier", s.handleMgmtSetBucketTier)
+		r.Post("/buckets/{name}/direct-uploads", s.handleMgmtCreateDirectUpload)
+		r.Post("/buckets/{name}/direct-uploads/complete", s.handleMgmtCompleteDirectUpload)
 		r.Put("/buckets/{name}/residency", s.handleMgmtSetBucketResidency)
 
 		r.Get("/keys", s.handleMgmtListKeys)

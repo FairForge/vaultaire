@@ -572,3 +572,37 @@ Open on the Cloudflare side: 2FA and password rotation on both logins, the
 Access gate on `/admin`, a Load Balancer with health checks once a second
 origin exists, removing the stale NS1 nameserver records, and Workers for
 Platforms the day a customer Worker runs.
+
+
+## 14. Round 4 (2026-10-04 evening): the five follow-ups, done
+
+| # | Item | Result |
+|---|---|---|
+| 3 | **Range GET overhead** | Found: the handler opened a whole-object `Get` and abandoned it once the Range branch used the backend's native range read, so every 1 MB range paid a whole-object first byte (~200 ms). Fixed: a cached, unencrypted whole object goes straight to `GetRange`; an unsatisfiable range answers 416 before any backend call. Regression test with a counting driver. |
+| 2 | **iDrive concurrency tail** | Reproduced with Postgres sampled every second: at most 2 active sessions and one brief wait on the tenant quota row — **not the database**. The tell: 16-part multipart at 35 MB/s over HTTP/2 vs 187–234 MB/s over HTTP/1.1 to the same origin, and the regression started with the morning's HAProxy tune. Sweep of `tune.h2.initial-window-size` on the box: 4 MiB → 16-stream 35–46 MB/s, ingest 35–41; 1 MiB → 72 / 75; **64 KB default → 308 / 580**; **256 KB → 344 / 644 MB/s**. HAProxy 2.8 buffers per stream, so a big window starves multi-stream uploads while a small one starves far single streams. Resolution: 256 KB on HAProxy **and** `origin_max_http_version = 1` on the zone so Cloudflare uses HTTP/1.1 to the origin: 22–27 MB/s through `stored.ge` from the box, 58 MB/s edge → origin for 64 MiB, 12 MB/s from the Mac (its uplink). F9 is closed properly now; the "F5 withdrawn" line in §13.4 stands. |
+| 1 | **Stripe-interleaved shards** | `erasure-bench -interleave-kb` writes shard j as the j-th piece of every k×stripe block; its own reads rebuild stripe by stripe (test: every pair of lost shards). 64 MiB: PUT 0.8 s, READ 0.46 s, hash ok; 512 MiB: PUT 6.2 s, READ 2.2 s (232 MB/s), hash ok. The edge Worker takes `stripe` from the manifest and decodes 1 MiB stripes in bounded memory — the 512 MiB edge read that failed in §10.2 is in §14.1. |
+| 6 | **Vaultaire-issued direct-to-R2 uploads** | `POST /api/v1/manage/buckets/{name}/direct-uploads` presigns a PUT on the R2 driver for a public-read bucket; `…/complete` HEADs the object, reserves quota and writes the head row (backend `r2`) and version row. Private buckets, bad keys, a missing driver, a complete before the bytes, and a quota overrun are each refused with their own code; handler tests with a stub driver; OpenAPI documented. |
+| 7 | **Programmable buckets without Workers for Platforms** | `rules.stored.ge`: declarative JSON rules per bucket (prefix / content-type / size match; webhook, copy-to, tag, size cap, content-type allow-list) applied by our own Worker on ingest. Demo on prod: 1 MB image → webhook delivered (payload verified on the receiving Worker), derived copy and tag written, 450–600 ms at the Dallas edge; a 6 MB image rejected 413 and an executable rejected 415 before a byte was stored. Covers the bulk of "run my code on my bucket" inside the $5 plan; Workers for Platforms stays the answer for arbitrary customer code. One Cloudflare rule learned: a Worker cannot deliver a webhook to its own hostname. |
+
+### 14.1 Stripe-mode edge reads: any size, bounded memory, verified
+
+Interleaved 1 MiB stripes over idrive:2 lyve:2 r2:1 wasabi:1; the Worker
+decodes stripe by stripe (about n + k stripes in memory). Every output was
+checked against a reference rebuilt locally from the vendor shards with the
+bench's own codec.
+
+| Object | From | Status | TTFB | Total | Winners (varied) | Hash |
+|---|---|---|---|---|---|---|
+| 64 MiB, 4 reads | Mac (Dallas) | 200 | — | 1.9–3.2 s | 4 different sets | = reference, all four |
+| 64 MiB, 2 reads | box (Denver) | 200 | 0.18–0.24 s | 1.2–1.3 s | 2 sets | = reference |
+| **512 MiB**, 2 reads | box | 200 | 0.15–0.29 s | **9.5–14.0 s** (38–57 MB/s) | 2 sets | = reference |
+| 512 MiB, `drop=1` (parity path) | box | 200 | 0.14 s | 9.4 s | lyve ×2 + wasabi + idrive | = reference |
+| 512 MiB, `cache=1` ×2 | box | 200 | 0.16–0.23 s | 9.7–10.7 s | — | = reference; no edge-cache HIT at this size (Cache API limit) |
+
+The first stripe-mode reader concatenated chunks in JavaScript and burned the
+isolate's CPU budget: a 512 MiB read was cut at 170–285 MB after ~40 s.
+Copying each chunk once, straight into WASM memory, took the same read to
+9.5 s with a 0.15 s first byte. So the edge read plane now has no object-size
+ceiling from the isolate; the ceiling is the vendor fetch rate into the
+colo. Whole-block mode stays faster for ≤ 64 MiB (1.2–3 s) and is still the
+right mode for contiguous shards.
