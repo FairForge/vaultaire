@@ -550,6 +550,35 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	}
 	setEchoHeaders(w.Header(), cachedEcho.CacheControl, cachedEcho.Expires, cachedEcho.WebsiteRedirect)
 
+	// The object's identity headers are the same on a 200 and a 206: S3 sends
+	// ETag, Last-Modified, the storage class and the user metadata on ranged
+	// responses too, and multi-range downloaders (aws-cli, rclone, R2 Sippy on
+	// objects >199 MiB) compare the ETag across their ranged GETs — a 206
+	// without one read as "upstream ETag changed during read" (2026-10-04).
+	setIdentityHeaders := func() {
+		w.Header().Set("x-amz-request-id", generateRequestID())
+		if w.Header().Get("x-amz-version-id") == "" {
+			w.Header().Set("x-amz-version-id", "null")
+		}
+		w.Header().Set("Accept-Ranges", "bytes")
+		if w.Header().Get("Cache-Control") == "" {
+			w.Header().Set("Cache-Control", "private, no-cache")
+		}
+		w.Header().Set("x-amz-storage-class", storageClass)
+		if cacheHit {
+			if cachedETag != "" {
+				w.Header().Set("ETag", fmt.Sprintf(`"%s"`, cachedETag))
+			}
+			if !cachedUpdatedAt.IsZero() {
+				w.Header().Set("Last-Modified", cachedUpdatedAt.UTC().Format(http.TimeFormat))
+			}
+			setS3MetadataHeaders(w, cachedMetadata)
+			if n := tagCount(cachedTags); n > 0 {
+				w.Header().Set("x-amz-tagging-count", strconv.Itoa(n))
+			}
+		}
+	}
+
 	rangeHeader := r.Header.Get("Range")
 	if rangeHeader != "" && cacheHit && errors.Is(rangeParseErr(rangeHeader, cachedSize), errMultiRange) {
 		rangeHeader = "" // RFC 9110 §14.2: a multi-range request may be served whole
@@ -581,14 +610,10 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 			{
 				rangeReader = rr
 				// rangeReader already positioned at rng.start — write headers and copy directly
+				setIdentityHeaders()
 				w.Header().Set("Content-Type", contentType)
 				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", rng.start, rng.end, cachedSize))
 				w.Header().Set("Content-Length", strconv.FormatInt(rng.length, 10))
-				w.Header().Set("Accept-Ranges", "bytes")
-				w.Header().Set("x-amz-request-id", generateRequestID())
-				if w.Header().Get("x-amz-version-id") == "" {
-					w.Header().Set("x-amz-version-id", "null")
-				}
 				w.WriteHeader(http.StatusPartialContent)
 				_, _ = io.CopyN(w, rangeReader, rng.length)
 				return
@@ -596,10 +621,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		}
 
 		// Fallback: serveRange with full-object reader (old path)
-		w.Header().Set("x-amz-request-id", generateRequestID())
-		if w.Header().Get("x-amz-version-id") == "" {
-			w.Header().Set("x-amz-version-id", "null")
-		}
+		setIdentityHeaders()
 		if err := serveRange(w, rangeReader, rng, cachedSize, contentType); err != nil {
 			a.logger.Error("range serve failed",
 				zap.Error(err),
@@ -610,31 +632,11 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	}
 
 	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("x-amz-request-id", generateRequestID())
-	if w.Header().Get("x-amz-version-id") == "" {
-		w.Header().Set("x-amz-version-id", "null")
-	}
-	w.Header().Set("Accept-Ranges", "bytes")
 	// The stored per-object Cache-Control (set earlier from head cache) wins;
 	// "private, no-cache" is only the default for objects without one.
-	if w.Header().Get("Cache-Control") == "" {
-		w.Header().Set("Cache-Control", "private, no-cache")
-	}
-	w.Header().Set("x-amz-storage-class", storageClass)
-	if cacheHit {
-		if cachedSize > 0 {
-			w.Header().Set("Content-Length", strconv.FormatInt(cachedSize, 10))
-		}
-		if cachedETag != "" {
-			w.Header().Set("ETag", fmt.Sprintf(`"%s"`, cachedETag))
-		}
-		if !cachedUpdatedAt.IsZero() {
-			w.Header().Set("Last-Modified", cachedUpdatedAt.UTC().Format(http.TimeFormat))
-		}
-		setS3MetadataHeaders(w, cachedMetadata)
-		if n := tagCount(cachedTags); n > 0 {
-			w.Header().Set("x-amz-tagging-count", strconv.Itoa(n))
-		}
+	setIdentityHeaders()
+	if cacheHit && cachedSize > 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(cachedSize, 10))
 	}
 
 	written, err := io.Copy(w, dataReader)
