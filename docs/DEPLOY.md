@@ -18,7 +18,13 @@ deliberately not in this file — "the production host" is the one box.
   terminates TLS with a Let's Encrypt origin certificate, redirects http to
   https, sets HSTS, and forwards to the app on `127.0.0.1:8000`. HAProxy
   appends the real peer as the *last* `X-Forwarded-For` hop — the only header
-  `internal/clientip` trusts (R1-01).
+  `internal/clientip` trusts (R1-01). Its `global` section carries
+  `tune.h2.initial-window-size 4194304` and `tune.h2.max-frame-size 1048576`
+  (set 2026-10-04): HAProxy's default HTTP/2 flow-control window is 65,535
+  bytes, which caps every h2 upload at window ÷ RTT — Cloudflare speaks h2 to
+  the origin, so every upload through `stored.ge` ran at ~1.2 MB/s from Dallas
+  until the window was raised (then 10–44 MB/s). HTTP/1.1 clients never saw
+  it, which is why the bench from the box itself looked fine.
 - **UFW** allows 22, 80 and 443 only. `deploy/ufw-cloudflare-lockdown.sh` is
   the script for narrowing 80/443 to Cloudflare's ranges.
 - **Configuration is the env file** loaded by the unit's `EnvironmentFile=`
