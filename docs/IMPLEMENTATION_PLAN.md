@@ -1525,6 +1525,7 @@ Phase 27 (go-to-market) runs alongside from Stage 0 and is the owner's. Stages 2
 | F-8 | End-to-end encryption as the default or as a mode | **Recommend three modes per space (41.0)** — Normal, Vault, Shared vault — with Normal the default for Standard and Vault the default for the privacy tier; as the default, E2EE kills server-side search, previews and collaboration (Drime and Proton chose the same) |
 | F-9 | The enclave for 41.4 (AWS Nitro, GCP Confidential Space, Azure Confidential Containers) and whether the code measurement is published | Decide when 41.4 starts; the enclave code is open-sourced and its hash published, or the attestation means nothing |
 | F-10 | The edge CDN: community spokes (`.private/EDGE_NODE_STRATEGY.md`, Phase 20/21) or Cloudflare | **By the 2026-10-03 numbers, Cloudflare is the read plane** (an R2 working set at $15/TB with free egress and 105 ms TTFB beats volunteer NVMe at $4/TB in credits plus the trust problem); spokes keep ingest, storage shards and metadata — owner to confirm |
+| F-11 | The erasure codec: Reed-Solomon GF(2^8) for every shape, RaptorQ only where ratelessness matters, Clay/MSR over LRC for repair | **Measured 2026-10-03** (`bench-results/ERASURE-2026-10-03-codecs.md`): RS is 10–20× faster to encode and 2.5–3× to decode than the best RaptorQ at every size to 1 GiB; RaptorQ's two remaining Qualcomm patents run to 2028 and 2030 under an IETF non-assert; LRC is Microsoft-patented into the 2030s, Clay is open. Recommend as stated; the interim-primary question is B2 not Wasabi (90-day minimum) — and iDrive is a key fix, not a re-platform |
 
 ## What the original master plan had that this plan did not — where each went
 
@@ -1756,7 +1757,7 @@ Checked 2026-10-01 against `.private/VAULTAIRE_MASTER_PLAN.md` (steps 1–1320).
 *Depends on: Phase 6 (needs backends to store chunks across). Can start without Phase 7.*
 
 **STATUS (2026-06-04):** 8.1–8.5 shipped + hardened. Reality differs from the sketch below — actual artifacts:
-- **8.1 chunker** ✅ `crypto/chunker.go` (`DefaultChunker`, restic's Rabin chunker — 1 MiB min / 20 average bits ≈ 2 MiB / 16 MiB max, SHA-256; identity on record since WP-R8-4). A streaming `Chunk()` exists but the PUT path does NOT use it yet — see **8.4.1**.
+- **8.1 chunker** ✅ `crypto/chunker.go` (`DefaultChunker`, restic's Rabin chunker — 1 MiB min / 20 average bits ≈ 2 MiB / 16 MiB max, SHA-256; identity on record since WP-R8-4). Candidate successor to read before any change: **Chonkers** (Berger, arXiv 2509.11121, 2025-09, CC BY-SA) — CDC with provable strict bounds on chunk size and edit locality; a chunker change is a knowing dedup reset (WP-R8-4). A streaming `Chunk()` exists but the PUT path does NOT use it yet — see **8.4.1**.
 - **8.2 GCI** ✅ `crypto/gci.go` — Postgres-backed with a 100K-entry in-memory cache (NOT Redis/Bloom as sketched; revisit only if lookup latency bites at scale).
 - **8.3 migration** ✅ shipped as `051_chunking_dedup.sql` (not `021`), tables `global_content_index` / `tenant_chunk_refs` / `object_metadata` + `object_head_cache.is_chunked` (not `chunk_manifests`/`chunk_locations`).
 - **8.4 upload** ✅ `api/s3_engine_adapter.go handleChunkedPut` (PR #300). Hardened: chunks live in a shared `_global` container so cross-tenant/cross-bucket dedup is retrievable (PR #302); atomic manifest replacement on overwrite via `ReplaceObjectManifest` (PR #305). **Open gap → 8.4.1 (PUT still buffers the whole object).**
@@ -1925,7 +1926,7 @@ Checked 2026-10-01 against `.private/VAULTAIRE_MASTER_PLAN.md` (steps 1–1320).
 **File**: `internal/crypto/erasure.go`
 - RS(10, 6): 10 data + 6 parity = 16 shards, tolerates 6 losses <!-- reconstructed: corrected against ADVANCED_ARCHITECTURE.md §5 and LAUNCH_STRATEGY.md §6 — previous reconstruction said RS(14,10)=10+4, which matches no reference doc -->
 - 1.6x overhead (vs 3x replication); evolves to (10,14) then (10,13) as own fleet grows, per LAUNCH_STRATEGY §6 OneDrive-conservative plan
-- Uses `klauspost/reedsolomon` (SIMD-optimized, 200+ GB/s encode — effectively free vs network)
+- Uses `klauspost/reedsolomon` GF(2^8) — **measured 2026-10-03 (`bench-results/ERASURE-2026-10-03-codecs.md`): 14–60 GB/s encode, 1.2–3 GB/s reconstruct on the SLC box; a 1 GiB object ≈ 50 ms to encode, ≈ 0.7 s to rebuild from a six-shard loss on one core. CPU is not the constraint at any shape up to 32 shards; Leopard GF(2^16) is slower here and wins only past a few hundred shards (klauspost switches automatically)**
 
 ### 11.2: Shard Placement Strategy
 - Per `.private/ADVANCED_ARCHITECTURE.md` §4/§6 launch placement (16 shards): own fleet 6 data (needs Phase 6.6), iDrive 4 data, Geyser LA + London 2 parity, permafrost/OneDrive fleet 4 parity across 4 different tenants <!-- reconstructed: corrected — previous placement included Lyve (5 shards); Lyve is the `resilient`/DR leg (#405), not part of the shard plan -->
@@ -1939,16 +1940,16 @@ Checked 2026-10-01 against `.private/VAULTAIRE_MASTER_PLAN.md` (steps 1–1320).
 - After encryption: `chunk → compress → encrypt → erasure encode → store shards`
 - On read: `fetch ≥10 shards (parallel) → decode → decrypt → decompress → reassemble`
 
-### 11.4: RaptorQ for Large Objects
+### 11.4: RaptorQ — for the rateless property, not for speed (re-scoped 2026-10-03, decision F-11)
 **File**: `internal/crypto/raptorq.go`
-- Fountain codes for objects >1GB
-- Rateless: generate unlimited repair shards on demand
-- Better performance than RS for large objects
+- **Measured (`bench-results/ERASURE-2026-10-03-codecs.md`):** the premise "better performance than RS for large objects" is false — Reed-Solomon GF(2^8) encodes 10–20× and decodes 2.5–3× faster than the best RaptorQ implementation at every size to 1 GiB, on the Ryzen box and on an M1. The best pure-Go RaptorQ (`mstephenholl/graptor-q`, MIT, needs Go 1.26) reaches 1.2–2.6 GB/s encode and 0.5–0.9 GB/s decode; `xssnick/raptorq` (MIT, Go 1.25) 0.6–1.4 / 0.46–0.97; both on par with the Rust reference. Still 3–5× faster than the fastest network read, so RaptorQ is *affordable*, just not *faster*.
+- **What it buys:** rateless, interchangeable repair symbols — a backend holds "40 % of the symbols" with no fixed shard position, a new leg gets fresh symbols without re-layout, ≈ K+2 of any symbols rebuild (failure 10⁻⁶ at K+2; not strictly MDS). Use it where that matters: fan-out of many small repair symbols to spokes and edge nodes (Phase 20/21), or a Vault layout whose vendor mix changes. Neither RS nor RaptorQ cuts repair *traffic* below k shards — that is Clay/MSR (11.5).
+- **Patents:** Qualcomm's RFC 6330 IPR (#2554) — the two core patents expired 2024-11/12; US 8,887,020 (to 2028-11) and US 9,419,749 (permanent inactivation, to 2030-12) stand; usable now under Qualcomm's non-assert for a fully RFC-compliant implementation outside wireless WAN standards, unconditionally free from 2031. LT and Tornado codes are fully expired (2017–2019). Pin the licence check here (rule 4 of the track).
+- `google/gofountain` (Raptor R10) is unmaintained and fails its own round trip — never a candidate.
 
-### 11.5: Locally Repairable Codes (LRC)
-- Local parity groups (Azure-style)
-- Faster local repair without full reconstruction
-- Configurable per tier
+### 11.5: Repair-efficient codes — Clay/MSR first, LRC second (re-scoped 2026-10-03)
+- The goal is repair traffic below k shards' worth when one leg dies. **Clay codes** (Vajha et al., FAST '18; the MSR construction in Ceph's erasure plugin, open) give RS's storage overhead and fault tolerance with up to 2.9× less repair traffic and 3× faster repair. **Azure-style LRC is patent-encumbered** (Microsoft's 2012 family into the early 2030s; the 2018 overlapped-LRC patent to 2038) — only with a licence check.
+- Configurable per tier; the own-fleet leg (6.6) is where repair cost is ours and this pays.
 
 ### 11.6: Background Self-Healing Repair
 - Goroutine checks shard availability periodically
@@ -2762,6 +2763,7 @@ Anyone runs a Vaultaire spoke node on their VPS → joins the stored.ge network:
   - (a) **Cache Reserve** in front of `cdn.stored.ge` — one Cache Rule, keeps objects by access not age, works against any origin, no code; objects over 512 MB are not cached on self-serve plans.
   - (b) **R2 + Sippy**: an R2 bucket whose source is `https://s3.stored.ge/<bucket>` with a scoped read-only key per bucket; R2 serves on a hit and streams-and-stores on a miss; a 7–30-day lifecycle rule keeps only the working set. Expiry is by age since upload, not last access, and **Sippy never propagates deletes or overwrites** — so either immutable content-addressed keys (WP-R2-1) or purge-on-delete (34.3) comes first.
   - (c) **307 to a presigned backend URL** for Performance-tier reads (the presigned-redirect lever of the tier matrix: 0× SLC) with the SDK 307-compatibility matrix.
+  - (d) **DR read plane** (after Phase 11): a Worker (objects under ≈ 40 MiB, the 128 MB isolate) or a container holding the shard map and read-only vendor keys reconstructs an erasure-coded object from Lyve / B2 / OneDrive / Geyser directly when the SLC box is down — RS decode runs at 1.2–3 GB/s per core (`bench-results/ERASURE-2026-10-03-codecs.md`), so a 64 MiB object is ≈ 0.1 s of CPU. Hot objects already in R2 keep serving; this closes the cold-miss gap.
   - Per class: PUBLIC → (b); Standard → (a); Performance → (c); Vault never — tape stays out of the read path (40.4). B2 as a direct origin (free egress to Cloudflare, no 3× pool) stays the "Performance Unlimited" SKU of the 2026-09-26 verdict.
 - **Verify on the Vaultaire side with a real R2 bucket before relying on it:** SigV4 from Cloudflare's IPs against `s3.stored.ge`, Range GETs for objects over 199 MiB, ETags from the HEAD cache accepted by Sippy, and the egress accounting of a promotion (WP-R10-9 counts it once per expiry window, not once per viewer — the FAQ says so).
 - **The hot-egress trap:** a public bucket serving 50 TB a month from R2 costs the working set's storage, not bandwidth — cap "public CDN bandwidth" per plan (5.11.12 budgets) and sell overage at $0.01 per GB so nobody can hurt the margin.
