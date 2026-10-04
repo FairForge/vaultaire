@@ -1,0 +1,16 @@
+name = "vt-edge-ec"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+workers_dev = true
+
+[observability]
+enabled = true
+
+[[r2_buckets]]
+binding = "R2"
+bucket_name = "vt-ecbench"
+
+[[rules]]
+type = "CompiledWasm"
+globs = ["**/*.wasm"]
+fallthrough = true
