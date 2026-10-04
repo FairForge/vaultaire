@@ -22,8 +22,9 @@ on the box.
 |---|---------|----------|--------|
 | F1 | **Every aws-sdk-go-v2 client gets 403 `SignatureDoesNotMatch` through `stored.ge`** — rclone 1.71, the load gate, bench-compare, a 40-line SDK probe. The SDK signs `accept-encoding: identity`; Cloudflare rewrites the header on the way to the origin. Same key, same request through `s3.stored.ge`: 200. aws-cli (does not sign the header) passes both ways. | **P1** (rclone is the documented client) | fixed, PR #571: the verifier also tries the canonical request with `accept-encoding: identity` when the header is signed. Re-measured after deploy in §6 |
 | F2 | **Cloudflare's 100 MB body limit**: a single 105 MB `PutObject` through `stored.ge` uploads for 70 s and then gets **413**; the same PUT to the origin succeeds in 17.5 s; multipart (8 MB parts) through Cloudflare succeeds. | P1 (docs + plan) | docs must say "parts ≤ 100 MB or use `s3.stored.ge`"; a Business plan ($200/mo) raises it to 200 MB, Enterprise to 500 MB+ |
+| F9 | **Uploads through Cloudflare are capped at ≈1.2 MB/s per stream** — from the SLC box (16 MiB PUT: 13.6–14.6 s via `stored.ge`, 0.6–1.0 s via the origin; HTTP/2 and HTTP/1.1 identical) and from a Mac (50 MB: 36–42 s via Cloudflare, 6.5 s via the origin). Downloads through Cloudflare are not affected (63 MB/s). HAProxy has no rate limit, kernel windows are 64 MB, the origin direct is 20–28 MB/s on the same PUT. The cap is on the Cloudflare leg (DFW colo for both vantage points). Through Cloudflare the load gate's ConcurrentPut p99 is 2.26 s (gate 2 s) and Multipart p50 21.7 s vs 7.3 s on the origin. | **P1** (the public endpoint is slow for every upload) | not understood yet: Cloudflare plan / WAF body handling / colo; until then every upload guide must name `s3.stored.ge`, and the plan's "Cloudflare in front of everything" is for reads only |
 | F3 | **Load-gate `ConcurrentGet` fails on the origin with Wasabi as primary**: p99 1.303 s against the 500 ms gate (100 readers × 1 MB; p50 107 ms). August 2026 on iDrive: p99 180 ms. The other four gates pass. | P2 | Wasabi first-byte + a tail; see F4. Gate stays red until the primary changes or the gate is re-based |
-| F4 | **Wasabi us-west-1 stalls**: single PUTs that normally take ~1.1 s occasionally take 30–62 s (1 of 30 sequential 16 MiB PUTs; a 60.3 s raw 16 MB PUT, a 61.9 s 128 MiB shard PUT, a 15 s 4 KB PUT via the origin, burst p99 5.2 s). 30 PUTs to **us-central-1** and 30 to Lyve: none above 2.1 s. | P2 | 100-PUT probe per region in §7; candidates: `WASABI_REGION=us-central-1` or a per-PUT timeout + retry in the driver |
+| F4 | **Wasabi PUTs stall, in both regions**: 100 sequential 16 MiB PUTs from SLC — us-west-1: median 1.17 s, 4 stalls (16, 16, 30, 30 s); us-central-1: median 1.34 s, 4 stalls (9, 9, 62, **123 s**). 30 PUTs to Lyve us-east-1: median 1.15 s, max 1.31 s, no stall. The stalls also hit the product: a 15 s 4 KB PUT via the origin, a 7.8 s 8 MB tier PUT, a 61.9 s and a 32.8 s 128 MiB shard PUT, burst p99 5.2 s. | **P1** while Wasabi is the primary | ~4 % of PUTs stall 9–123 s on the account from this box, region-independent. Options: a per-PUT deadline + retry in the fixed-bucket driver (the erasure bench's hedge shape), or Lyve as the interim primary (§8) |
 | F5 | **Whole-object PUT through Vaultaire is 4× slower than raw** for a single 64 MB stream (14.6 MB/s vs 64.6 MB/s to Wasabi; 47.7 MB/s with HTTP/1.1 forced); multipart is not (166–214 MB/s vs 155–298 raw). Range GET of 1 MB chunks: p50 267 ms vs 70 ms raw. | P2 | the single-stream PUT path (ETag stream + materialize) and the range path deserve a profile |
 | F6 | **iDrive is down account-wide**: the us-west-1 regional key pair answers **503 Service Unavailable** on every call (the prod key answers 403). | [YOU] 0 | account repair, not code |
 | F7 | Vaultaire's own metadata paths are where it beats every backend: HEAD 3,973 ops/s (object_head_cache) vs 37 raw; `ListObjectsV2` 2 ms vs 156; multipart abort 11 ms vs 439. | — | as designed |
@@ -106,9 +107,37 @@ each, routing read back from `object_head_cache`:
 | Go SDK / rclone | 403 (F1) until PR #571 deploys — re-run below |
 | Sippy, Cache Reserve, Argo, Workers reassembly | **not run**: the API token is invalid (F8). The 2026-10-03 Cloudflare session proved Sippy-from-Vaultaire locally |
 
-After the F1 fix deploys: *(stage 3 pending — load gate through Cloudflare and
-bench-compare `vaultaire-prod-cf` vs `vaultaire-prod-origin`, appended below
-when done)*
+After the F1 fix deployed (build 3977d8b, 02:13 UTC): rclone 1.71 and the Go
+SDK list and head through `stored.ge`. The same bench-compare run then went
+through Cloudflare and to the origin back-to-back (the origin numbers in this
+pass are lower than §2's: the erasure stage and the stall probe were running
+on the box at the same time, which is why §2 is the origin reference):
+
+| Workload | through Cloudflare | origin, same minutes |
+|---|---|---|
+| cold dial + PUT 1 KB | 448 / 568 ms | 96 / 150 ms |
+| warm PUT 4 KB | 349 ms p50, 2 ops/s, p99 7.9 s | 47 ms, 11 ops/s |
+| warm GET 4 KB | 123 / 203 ms | 34 ms / 7.4 s (one F4 tail) |
+| warm HEAD 4 KB | 81 ms, 12 ops/s | 3,408 ops/s |
+| list 100 | 171 ms | 2 ms |
+| PUT 1 MB | **0.8 MB/s**, p50 1.39 s | 9.3 MB/s |
+| PUT 16 MB | **1.2 MB/s**, p50 12.3 s | 54.8 MB/s |
+| PUT 64 MB single | **1.3 MB/s** (47.8 s) | 67.7 MB/s |
+| multipart 256 MB, 4 / 16 parts | 5.0 / 15.2 MB/s | 31.6 / 26.2 MB/s (contended) |
+| GET 16 MB / 64 MB | 42.7 / 63.2 MB/s | 39.1 / 14.6 MB/s (contended) |
+| concurrent ingest 20 s | 26.6 MB/s, p50 3.4 s | 80.7 MB/s |
+| concurrent download 20 s | 57 MB/s, p99 2.1 s | 230 MB/s |
+| sustained upload 60 s | **4.3 MB/s** | 126 MB/s |
+| integrity / consistency | all ✓ | all ✓ |
+
+Load gate through Cloudflare on the fixed build: ConcurrentPut 46 MB/s, p99
+**2.26 s (gate 2 s ✗)**; ConcurrentGet 83 MB/s, p99 556 ms (gate 500 ms ✗);
+Multipart 208 MB/s, p50 **21.7 s** (origin 7.3 s) ✓; MixedReadWrite 43 MB/s,
+p99 2.43 s ✗; ManagementBurst 40 × 429 ✓. Finding F9: a per-stream upload cap
+of about 1.2 MB/s on the Cloudflare leg, independent of HTTP version and
+vantage point. Reads through Cloudflare cost a hop (+~80 ms per op) and are
+otherwise fine; a public-bucket HIT is the one place Cloudflare is faster
+than the origin.
 
 ## 7. Erasure layouts through Vaultaire's drivers: Reed-Solomon vs RaptorQ
 
@@ -144,8 +173,43 @@ winning legs; "winners" were always Lyve + Wasabi, R2 lost every race from
 SLC. The first-k race IS the straggler experiment: fetching all n and keeping
 the first k turned a 10.7 s R2 fetch into a non-event in every RaptorQ run.
 
-*(stage 2b — all legs live, sync-gate and hedged PUT shapes — appended when
-done)*
+Stage 2b, every leg live (R2 bench bucket recreated, B2 pointed at an
+existing bucket). 64 MiB, 3 runs each; reads are the slowest of the k winners:
+
+| Shape | Codec | PUT all (wall) | READ first-k | decode | lose b2 | lose lyve | lose r2 | lose wasabi |
+|---|---|---|---|---|---|---|---|---|
+| 4+2 wasabi:2 lyve:2 r2:1 b2:1 | RS | 1.0–1.6 s | 0.56–0.87 s (74–115 MB/s) | 30–46 ms | 0.44–0.57 s | 0.58–1.1 s | 0.40–0.60 s | 0.55–0.93 s |
+| same | RaptorQ | 1.1–2.0 s | 0.51–0.90 s (72–125 MB/s) | 122–155 ms | 0.62–0.75 s | 0.61–1.1 s | 0.48–0.58 s | 0.45–1.2 s |
+| 6+4 wasabi:3 lyve:3 r2:2 permafrost:2 | RS | 3.5–3.8 s (permafrost slowest) | 0.40–0.45 s (143–159 MB/s) | 34–42 ms | — | 0.97–1.1 s | 0.41–0.46 s | 1.2–1.3 s |
+| same | RaptorQ | 2.9–3.6 s | 0.63–0.71 s (91–101 MB/s) | 132–162 ms | — | 1.4–1.7 s | 0.53–0.56 s | 1.1–1.5 s |
+| 4+2, **sync gate = wasabi+lyve**, r2/b2 async | RS | commit **0.48–0.64 s (100–134 MB/s)**, fully protected 2.4–7.3 s | 0.51–0.60 s | 33–41 ms | 0.36–0.48 s | 0.58–1.2 s | 0.41–0.63 s | 0.66–1.6 s |
+| 4+2, hedged PUT (2× leg median, min 3 s) | RS | 1.0–2.0 s, 0 hedges fired | 0.46–0.58 s | 30–38 ms | 0.31–0.60 s | 0.57–1.1 s | 0.41–0.56 s | 0.49–1.3 s |
+
+512 MiB, 4+2 over wasabi:2 lyve:2 r2:2, 2 runs each:
+
+| Codec | PUT all | READ first-4 | decode | lose lyve | lose r2 | lose wasabi |
+|---|---|---|---|---|---|---|
+| RS | 9.7 s / **32.8 s** (a Wasabi stall) | 2.2–3.9 s (131–238 MB/s) | 0.24–0.34 s | **41.0 s / 73.9 s** (R2 + Wasabi shards only: R2 delivered 128 MiB shards at 3–6 MB/s) | 2.4–18.2 s | 2.3–2.4 s |
+| RaptorQ | 10.3–12.9 s (R2 slowest) | 3.9–4.3 s (120–130 MB/s) | 1.1–1.4 s | 5.5–7.0 s | 3.0–4.8 s | 2.8–3.1 s |
+
+256 MiB, 4+2, two-vendor and one-vendor shapes (no single-vendor loss
+survivable; shown for the PUT/READ baseline): wasabi:6 RS — PUT 2.0 s (129
+MB/s), READ 1.2 s (207–222 MB/s); wasabi:3 lyve:3 RS — PUT 1.8–2.0 s, READ
+1.7–1.9 s (132–147 MB/s); same with RaptorQ — READ 1.7–1.8 s of which decode
+0.54–0.60 s; one PUT hit a 15.9 s Wasabi stall.
+
+What stage 2b says: (1) losing any one of four vendors costs at most a
+second on a 64 MiB read with RS; (2) the **sync-gate shape is the product
+shape** — commit on the two fast legs in ~0.5 s and let the slow legs land
+behind (R2 from SLC is the slow leg every time, B2 second); (3) RaptorQ costs
+100–130 ms more per 64 MiB and ~1 s more per 512 MiB than RS at every shape,
+and nothing in a fixed k-of-n layout uses its ratelessness — Phase 11 stays
+RS; (4) at 512 MiB the degraded read depends entirely on which legs survive:
+Lyve + Wasabi 2.3 s, R2 + Wasabi 41–74 s — the layout must never let a read
+fall back to R2-only shards from this box; (5) the hedge never fired because
+no leg exceeded 2× its median within 3 s — the F4 stalls were in other runs.
+The Lyve 100-PUT stall probe is void (a scripting error signed it with the
+Wasabi key); the 30-PUT Lyve run stands.
 
 ## 8. Costs, with the measured facts folded in
 
@@ -177,9 +241,9 @@ cacheable; (4) Cloudflare Business ($200/mo) buys only the 200 MB body limit
 
 ## 9. What is still open
 
-- Stage 2b / stage 3 appended when their runs end.
+- F9 root cause (the ~1.2 MB/s Cloudflare upload cap): Cloudflare plan, WAF body handling, or colo; needs a Cloudflare token and a support question.
 - Smart demotion end-to-end on a canary tenant (needs knob changes or 14 days).
 - Archive restore timing once Geyser has moved the object to tape.
 - Sippy / Cache Reserve / Workers edge reassembly: a new Cloudflare token.
 - F5 profile of the single-stream PUT and range-GET paths.
-- F3/F4 decision: Wasabi region or driver timeout + retry, or Lyve as the interim primary.
+- F3/F4 decision: a PUT deadline + retry in the fixed-bucket driver, or Lyve as the interim primary (both regions of Wasabi stall).
