@@ -71,6 +71,13 @@ func TestHandleGet_Range_UsesNativeRangeOnly(t *testing.T) {
 	require.Equal(t, http.StatusPartialContent, w.Code)
 	assert.Equal(t, body[1000:2000], w.Body.Bytes())
 	assert.Equal(t, "bytes 1000-1999/4096", w.Header().Get("Content-Range"))
+	// S3 returns the object's identity on a 206 too; multi-range downloaders
+	// (aws-cli, rclone, R2 Sippy on objects >199 MiB) compare the ETag across
+	// their ranged GETs and treat a missing one as "object changed".
+	assert.NotEmpty(t, w.Header().Get("ETag"), "ETag on 206")
+	assert.NotEmpty(t, w.Header().Get("Last-Modified"), "Last-Modified on 206")
+	assert.Equal(t, "STANDARD", w.Header().Get("x-amz-storage-class"))
+	assert.Equal(t, "bytes", w.Header().Get("Accept-Ranges"))
 	assert.Equal(t, int32(1), counting.ranges.Load(), "one native range read")
 	assert.Equal(t, int32(0), counting.gets.Load(), "no whole-object GET for a ranged read")
 
