@@ -22,7 +22,7 @@ on the box.
 |---|---------|----------|--------|
 | F1 | **Every aws-sdk-go-v2 client gets 403 `SignatureDoesNotMatch` through `stored.ge`** — rclone 1.71, the load gate, bench-compare, a 40-line SDK probe. The SDK signs `accept-encoding: identity`; Cloudflare rewrites the header on the way to the origin. Same key, same request through `s3.stored.ge`: 200. aws-cli (does not sign the header) passes both ways. | **P1** (rclone is the documented client) | fixed, PR #571: the verifier also tries the canonical request with `accept-encoding: identity` when the header is signed. Re-measured after deploy in §6 |
 | F2 | **Cloudflare's 100 MB body limit**: a single 105 MB `PutObject` through `stored.ge` uploads for 70 s and then gets **413**; the same PUT to the origin succeeds in 17.5 s; multipart (8 MB parts) through Cloudflare succeeds. | P1 (docs + plan) | docs must say "parts ≤ 100 MB or use `s3.stored.ge`"; a Business plan ($200/mo) raises it to 200 MB, Enterprise to 500 MB+ |
-| F9 | **Uploads through Cloudflare are capped at ≈1.2 MB/s per stream** — from the SLC box (16 MiB PUT: 13.6–14.6 s via `stored.ge`, 0.6–1.0 s via the origin; HTTP/2 and HTTP/1.1 identical) and from a Mac (50 MB: 36–42 s via Cloudflare, 6.5 s via the origin). Downloads through Cloudflare are not affected (63 MB/s). HAProxy has no rate limit, kernel windows are 64 MB, the origin direct is 20–28 MB/s on the same PUT. The cap is on the Cloudflare leg (DFW colo for both vantage points). Through Cloudflare the load gate's ConcurrentPut p99 is 2.26 s (gate 2 s) and Multipart p50 21.7 s vs 7.3 s on the origin. | **P1** (the public endpoint is slow for every upload) | not understood yet: Cloudflare plan / WAF body handling / colo; until then every upload guide must name `s3.stored.ge`, and the plan's "Cloudflare in front of everything" is for reads only |
+| F9 | **Uploads through Cloudflare were capped at ≈1.2 MB/s per stream.** Root cause (found in round 2, §10): **HAProxy's HTTP/2 flow-control window**, 65,535 bytes by default; Cloudflare speaks HTTP/2 to the origin, so every proxied upload ran at window ÷ RTT (65,535 B ÷ 64 ms ≈ 1 MB/s — measured 0.93 MB/s over h2 and 10 MB/s over h1.1 to the same origin from the same Mac). Fixed on the box: `tune.h2.initial-window-size 4194304`, `tune.h2.max-frame-size 1048576`, graceful reload. After: 10.4 MB/s via Cloudflare from the Mac (its uplink), 44 MB/s from the Dallas edge to the origin for 64 MiB. | was P1, **fixed 2026-10-04** | `docs/DEPLOY.md` records the lines; the config is not in the repo |
 | F3 | **Load-gate `ConcurrentGet` fails on the origin with Wasabi as primary**: p99 1.303 s against the 500 ms gate (100 readers × 1 MB; p50 107 ms). August 2026 on iDrive: p99 180 ms. The other four gates pass. | P2 | Wasabi first-byte + a tail; see F4. Gate stays red until the primary changes or the gate is re-based |
 | F4 | **Wasabi PUTs stall, in both regions**: 100 sequential 16 MiB PUTs from SLC — us-west-1: median 1.17 s, 4 stalls (16, 16, 30, 30 s); us-central-1: median 1.34 s, 4 stalls (9, 9, 62, **123 s**). 30 PUTs to Lyve us-east-1: median 1.15 s, max 1.31 s, no stall. The stalls also hit the product: a 15 s 4 KB PUT via the origin, a 7.8 s 8 MB tier PUT, a 61.9 s and a 32.8 s 128 MiB shard PUT, burst p99 5.2 s. | **P1** while Wasabi is the primary | ~4 % of PUTs stall 9–123 s on the account from this box, region-independent. Options: a per-PUT deadline + retry in the fixed-bucket driver (the erasure bench's hedge shape), or Lyve as the interim primary (§8) |
 | F5 | **Whole-object PUT through Vaultaire is 4× slower than raw** for a single 64 MB stream (14.6 MB/s vs 64.6 MB/s to Wasabi; 47.7 MB/s with HTTP/1.1 forced); multipart is not (166–214 MB/s vs 155–298 raw). Range GET of 1 MB chunks: p50 267 ms vs 70 ms raw. | P2 | the single-stream PUT path (ETag stream + materialize) and the range path deserve a profile |
@@ -241,9 +241,115 @@ cacheable; (4) Cloudflare Business ($200/mo) buys only the 200 MB body limit
 
 ## 9. What is still open
 
-- F9 root cause (the ~1.2 MB/s Cloudflare upload cap): Cloudflare plan, WAF body handling, or colo; needs a Cloudflare token and a support question.
 - Smart demotion end-to-end on a canary tenant (needs knob changes or 14 days).
 - Archive restore timing once Geyser has moved the object to tape.
 - Sippy / Cache Reserve / Workers edge reassembly: a new Cloudflare token.
 - F5 profile of the single-stream PUT and range-GET paths.
 - F3/F4 decision: a PUT deadline + retry in the fixed-bucket driver, or Lyve as the interim primary (both regions of Wasabi stall).
+
+
+## 10. Round 2 (2026-10-04, 02:40–14:40 UTC): Sippy on prod, the edge Worker, the upload cap solved, iDrive back
+
+New credentials arrived mid-day (a Cloudflare account token, R2 S3 keys, a B2
+master key, a new iDrive reseller account). Everything below ran on the
+production origin; Worker and R2 resources live in the bench Cloudflare
+account (`vt-edge-ec.isaacv17.workers.dev`, buckets `vt-sippy-vaultaire`,
+`vt-ecbench`).
+
+### 10.1 R2 Sippy with the production origin as source
+
+`PUT /r2/buckets/vt-sippy-vaultaire/sippy` with `bucketUrl =
+https://s3.stored.ge/sippy-src-20261004` and a Vaultaire tenant key, 7-day
+expiry rule. Reads through a presigned R2 URL from the Mac:
+
+| Object | Cold (R2 → Vaultaire → Wasabi) | Warm (R2) | Bytes |
+|---|---|---|---|
+| 1 MB | TTFB **8.5 s**, 9.3 s total | 0.29 s / 0.40 s | identical |
+| 16 MB | TTFB 4.3 s, 6.3 s total | 0.24–0.30 s / 0.7–0.8 s | identical |
+| 64 MB | TTFB 0.62 s, 2.8 s total | 0.28–0.36 s / 1.8 s | identical |
+
+Sippy works against Vaultaire unmodified (the earlier proof was a tunnel to a
+laptop). The first cold read paid an 8 s first-contact cost that the next two
+did not; the 64 MB cold read was faster than the 16 MB one. Copies appeared in
+R2 after the first read. This is the public-bucket plan (40.1(a)) proven on
+prod; the open item stays WP-R2-1 / 34.3 because Sippy never propagates deletes.
+
+### 10.2 k-of-n reassembly at the edge (Workers + WASM), Reed-Solomon and RaptorQ
+
+A Worker (`scratchpad/edge/vt-edge-ec`, Rust → wasm32 codec with a plain C
+ABI: `reed-solomon-erasure` and `raptorq`, 289 KB) fetches all n shards —
+Wasabi and Lyve via 7-day presigned URLs, R2 via the binding, B2 via a
+presigned URL — keeps the first k whose headers arrive, cancels the rest,
+decodes in WASM and streams the payload. Shards are the ones `erasure-bench
+-keep` wrote from SLC (4+2 over wasabi:2, lyve:2, r2:1, b2:1). Output hashes
+were checked against the concatenated systematic data shards (RS) and across
+different winning subsets (RaptorQ: identical output from four different
+shard sets, which rules out a wrong decode). The B2 leg was dead for the whole
+round (free-tier download cap exhausted by the morning's erasure runs), so
+"lose a whole vendor" leaves 3 of 4 and fails by construction; parity
+reconstruction was forced with `drop=<slot>` instead.
+
+| Request | From | Status | TTFB | Total | Winners | Notes |
+|---|---|---|---|---|---|---|
+| RS 64 MiB, all data shards | Mac | 200 | 0.76–1.09 s | 2.0–2.3 s | wasabi ×2 + lyve ×2 | shards into the edge in 240–374 ms; hash = reference |
+| RS 64 MiB, `drop=1` (parity path) | Mac | 200 | 1.57 s | 2.9 s | lyve ×2, wasabi, **r2 parity** | hash = reference |
+| RS 64 MiB | SLC | 200 | 1.07–1.96 s | 1.7–2.6 s | mixed, R2 won a race once | hash = reference |
+| RS 64 MiB, `drop=1` | SLC | 200 | 0.80 s | 1.45 s | lyve ×2, wasabi, r2 | hash = reference |
+| RS 64 MiB, edge cache HIT | Mac / SLC | 200 | **0.11 s / 0.14 s** | 1.4–1.6 s / 1.1 s | — | `caches.default`, `x-edge-cache: HIT` |
+| RaptorQ 16 MiB | Mac / SLC | 200 | 0.84–1.29 s | 1.1–1.6 s | mixed, incl. `drop=0` | same hash from four different winner sets |
+| RaptorQ 64 MiB | Mac | **500** | — | — | — | k × 16 MiB + 64 MiB output > the 128 MB isolate |
+| RS 512 MiB | SLC | **500** | — | — | — | 6 × 128 MiB shards do not fit either |
+
+What this says: (1) edge reassembly of a 64 MiB object from two vendors is a
+2 s read from anywhere, 1.5 s from the box, and a 0.1 s first byte once the
+edge has it; (2) the parity path costs ~0.6 s more because R2 is the slow
+shard; (3) the 128 MB isolate bounds a whole-block decode at about 64 MiB for
+RS and 16 MiB for RaptorQ — larger objects need **stripe-interleaved shards**
+so the Worker can decode stripe by stripe (the Worker has that mode; the bench
+encoder writes contiguous shards, so it was not exercised); (4) RaptorQ at the
+edge works and interoperates (Go encoder, Rust decoder, both RFC 6330) but
+brings nothing over RS here either; (5) `Date.now()` is frozen during CPU work
+in Workers, so in-Worker decode timings are meaningless — only the
+client-side TTFB minus the fetch marks tell the story.
+
+### 10.3 The upload cap, explained and fixed
+
+A Worker that generates 16 MiB at the edge and PUTs it to a presigned origin
+URL took 19.2 s (0.87 MB/s); 64 MiB hit HAProxy's 50 s client timeout and
+returned 502. Uploading the same bytes from the box to a Worker ran at 16–18
+MB/s, so the client → Cloudflare leg was never the problem. HAProxy's log
+showed Cloudflare arriving over **HTTP/2.0**. From the Mac, `curl --http2`
+to the origin uploaded at 0.93 MB/s and `curl --http1.1` at 10 MB/s; RTT 64
+ms; 65,535 ÷ 0.064 = 1.02 MB/s. That is HAProxy's default
+`tune.h2.initial-window-size`. After `tune.h2.initial-window-size 4194304`
+and `tune.h2.max-frame-size 1048576` with a graceful reload: Mac via
+Cloudflare 10.4 MB/s (uplink-bound), Mac h2 direct 9.1 MB/s, edge → origin
+16 MiB in 1.2 s and 64 MiB in 1.5 s (44 MB/s), box → Cloudflare 26–30 MB/s.
+Finding F1 and F9 were both "Cloudflare" and both turned out to be ours:
+one in the SigV4 verifier, one in HAProxy. Stage 4 (load gate and
+bench-compare through Cloudflare after the fix) is appended in §11.
+
+### 10.4 iDrive: a new reseller account, provisioned by API
+
+The reseller key opened an empty account (the one holding the 2,037 old rows
+is a different account; Isaac will hand it over later). Through the reseller
+API: user `prod@stored.ge` (25 TB quota), all 11 active regions enabled
+(`enable_user_region` takes `region`; `create_access_key` takes `storage_dn`
+and `name`), one read-write key per region, bucket `vaultaire` created in
+us-central-1 and a PUT/GET round trip verified. The pairs are installed on
+prod (primary + 10 regional drivers); boot provisioned the regional buckets;
+health is 17/17 with `idrive` and `idrive-<region>` all closed. Key file:
+`.private/idrive-keys-2026-10-04.env` (gitignored). The primary stays
+`wasabi` until the owner chooses; the 2,037 rows on the old account remain
+unreadable until that account returns or the bench tenants are erased
+(WP-R7-5).
+
+### 10.5 Housekeeping
+
+B2: the free-tier download cap is exhausted for the day (`AccessDenied: download
+bandwidth or transaction (Class B) cap exceeded`) — raise it in the Caps &
+Alerts page before the next B2 leg run. A scoped B2 application key
+(`vaultaire-bench-20261004`) replaced the master key in the bench env; the
+master key should not be used for S3 at all. The Cloudflare token, R2 keys, B2
+master key and iDrive reseller key were pasted in chat and should be rotated
+when this round is over.
