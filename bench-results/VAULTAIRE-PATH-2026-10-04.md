@@ -411,3 +411,131 @@ The primary-backend question is unchanged by the fixes: Wasabi stalled again
 throughout stage 4 and failed the write gate on both paths, Lyve did not stall
 once all day, and iDrive is back with a fresh account at $4.455/TB. That
 decision is the owner's.
+
+
+## 13. Round 3 (2026-10-04, 15:00 UTC →): iDrive as the primary, every leg, and the techniques we should be using
+
+### 13.1 What the documentation says we should be doing (read before this round)
+
+| Area | Technique | Source | Status for us |
+|---|---|---|---|
+| HAProxy in front of an h2 client (Cloudflare) | `tune.h2.initial-window-size` ≥ 1 MiB; HAProxy 3.1 auto-grows the window (64 kB → 1.4 MB per stream) — on 2.8 it must be set | HAProxy manual §tune.h2; Nextcloud/HAProxy threads on "slow uploads over HTTP/2" | **done** (4 MiB window, 1 MiB frames) |
+| Cloudflare → origin | HTTP/2 to Origin is on by default when the origin offers h2; multiplexing settings are Enterprise-only; with h1.1 origins Cloudflare opens more connections | Cloudflare changelog 2025-02-12 | nothing to change now that the window is right |
+| Workers | 128 MB per isolate incl. WASM; 30 s CPU default, up to 5 min on Paid; **six** concurrent subrequests waiting for headers; stream with `TransformStream`, never buffer; `Date.now()` does not advance during CPU work | Workers limits page | the Worker races n = 6 shards → at the six-connection limit; above 6 legs the race must be staged. Whole-block decode must stay ≤ ~64 MiB; otherwise stripe-interleave the shards |
+| Cloudflare body limit | 100 MB Free/Pro, 200 MB Business, up to 5 GB Enterprise | Workers limits page | multipart with parts ≤ 100 MB through `stored.ge`; whole-object uploads above that go to `s3.stored.ge` |
+| Sippy | any S3-compatible source; copies on first read; **never propagates deletes or overwrites**; objects > 199 MiB may take several GETs; ETags may differ after migration; concurrent first reads can fetch the source more than once | Sippy docs | public buckets must use immutable keys (WP-R2-1) or purge on delete; expect double egress on hot cold-misses |
+| Cache Reserve | $0.015/GB-mo + $4.50/M writes + $0.36/M reads; needs TTL ≥ 10 h and Content-Length; designed for Tiered Cache on | Cache Reserve docs | private reads are `no-cache` today (BYPASS) — nothing to store until 40.1(b); not worth enabling yet |
+| Tiered Cache | Smart Tiered Cache is free on every plan: `PATCH /zones/{id}/argo/tiered_caching {"value":"on"}` + `cache/tiered_cache_smart_topology_enable` | Tiered Cache docs | **should be on** for the public `/cdn` path; needs a zone-scoped token (this one has none) |
+| Smart Placement | moves the Worker next to its back ends when that is faster; needs ~15 min of traffic; `cf-placement` header shows `remote-XXX`; 1 % of traffic kept as baseline | Smart Placement docs | A/B deployed as `vt-edge-ec-smart`; readings in §13.4 |
+| S3 clients against stall-prone vendors | AWS's own guidance: aggressive per-request timeouts and retries on a new connection; adaptive retry mode; persistent connection pools | S3 performance design patterns | the fixed-bucket driver has a tuned transport but no per-PUT deadline — the Wasabi stalls (F4) call for one (`WithResponseHeaderTimeout` exists, unused for PUT bodies) |
+| iDrive e2 | 5 MB–5 GB parts, 10,000 parts, 5 TB objects, 5 GB single PUT; regional endpoints are a shared namespace (bucket names collide across customers) | iDrive e2 docs / bench | bench buckets get unique names (`vt-ecbench-idrive-<acct>`); the compare bench now reads `IDRIVE_BENCH_BUCKET` |
+| Lyve Cloud | 10,000 parts, 5 MiB–4 GiB parts; home every bucket in the region whose endpoint created it | Lyve limits page | already the driver's rule (`stored-<region>`) |
+
+### 13.2 iDrive is the primary again
+
+`STORAGE_MODE=idrive` on the new reseller account (bucket `vaultaire`,
+us-central-1), restart, 17/17 healthy, `primary backend set mode=idrive`. A
+3 MB PUT through `stored.ge` landed under the tenant prefix in the iDrive
+bucket in 1.5 s and read back identical. Tiers re-run on the new primary:
+
+| Tier | Backend recorded | Floor | Class | PUT 8 MB | GET 8 MB |
+|---|---|---|---|---|---|
+| performance | **idrive** | standard | STANDARD | 1.75 s | 4.5 s (first read) |
+| standard | **idrive** | standard | STANDARD | 1.79 s | 2.3 s |
+| resilient | lyve | standard | STANDARD | 2.29 s | 1.3 s |
+| archive | geyser | vault | GLACIER | 1.95 s | 2.4 s (landing zone) |
+
+### 13.3 Sippy with the iDrive primary as the source
+
+Same recipe as §10.1, fresh source bucket: cold TTFB **0.97 / 0.83 / 0.67 s**
+for 1 / 16 / 64 MB (Wasabi primary: 8.5 / 4.3 / 0.62 s), warm 0.25–0.29 s,
+bytes identical. The first-contact penalty seen on Wasabi did not recur.
+
+
+### 13.4 Raw backends and both Vaultaire paths, iDrive primary (bench-compare, 15:10–15:28 UTC)
+
+| Workload | iDrive raw (new acct) | Lyve raw | Wasabi raw | R2 raw | **Vaultaire origin → iDrive** | **via Cloudflare** |
+|---|---|---|---|---|---|---|
+| warm PUT 4 KB p50 / p99 | **31 / 87 ms**, 31 ops/s | 83 / 451 ms | 43 / 157 ms | 224 / 534 ms | 34 / 126 ms, 28 ops/s | 156 / 255 ms |
+| warm GET 4 KB p50 / p99 | 27 / 37 ms | 60 / 201 ms | 28 / 69 ms | 157 / 478 ms | 29 / 31 ms | 111 / 120 ms |
+| warm HEAD 4 KB | 37 ops/s | 17 ops/s | 29 ops/s | 10 ops/s | **3,348 ops/s** | 12 ops/s |
+| list 100 | 108 ms | 352 ms | 141 ms | 169 ms | **2 ms** | 177 ms |
+| PUT 16 MB | 76.6 MB/s | 66.7 MB/s | 45.2 MB/s | 30.2 MB/s | 83.7 MB/s | 23.2 MB/s |
+| PUT 64 MB single | **113.9 MB/s** | 75.8 MB/s | 48.1 MB/s | 39.9 MB/s | **85.0 MB/s** (F5 is gone) | 51.0 MB/s |
+| GET 64 MB | 105.4 MB/s | 58.2 MB/s | 51.1 MB/s | 46.7 MB/s | 41.4 MB/s | 39.8 MB/s |
+| multipart 256 MB, 4 / 16 parts | 237 / 316 MB/s | 124 / 162 MB/s | 134 / 286 MB/s | 77 / 170 MB/s | 221 / 39 MB/s | 70 / 73 MB/s |
+| concurrent ingest 20 s | **746 MB/s** | 666 MB/s | 703 MB/s | 212 MB/s | 53 MB/s, p99 11.5 s (see below) | 131 MB/s |
+| concurrent download 20 s | 341 MB/s, p99 3.0 s | 412 MB/s | 404 MB/s | 521 MB/s | 422 MB/s, p99 1.2 s | 196 MB/s |
+| burst 500 small files | **305 ops/s**, p99 87 ms | 129 ops/s | 203 ops/s | 40 ops/s | 128 ops/s | 64 ops/s |
+| sustained upload 60 s | **494 MB/s**, p99 258 ms | 481 MB/s | 208 MB/s | 78 MB/s | **413 MB/s**, p99 419 ms | 90 MB/s |
+| integrity / consistency | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+iDrive on the fresh account is the best backend measured all day: lowest
+small-object latency, no tails, 494 MB/s sustained, 746 MB/s burst ingest.
+Through Vaultaire the origin sustains 413 MB/s and a single 64 MB PUT runs at
+85 MB/s — the "4× single-stream overhead" (F5) was Wasabi's behaviour, not
+the engine's. Two origin rows are odd and were not reproduced by the load
+gate that ran next: concurrent ingest 53 MB/s with p99 11.5 s and the 16-part
+multipart at 39 MB/s (4-part: 221 MB/s). The load gate's 100 concurrent 1 MB
+PUTs a minute later did 102 MB/s with p99 1.03 s, so it is a high-concurrency
+tail on the iDrive path worth a look, not a wall.
+
+### 13.5 Load gates and conformance: **all five pass on both paths**
+
+| Test | Origin (iDrive primary) | Through Cloudflare | Gate |
+|---|---|---|---|
+| ConcurrentPut 100 × 1 MB | 102 MB/s, p99 **1.03 s** | 59 MB/s, p99 **1.77 s** | p99 < 2 s ✓ ✓ |
+| ConcurrentGet 100 readers | 56 MB/s, p99 **283 ms** | 68 MB/s, p99 **487 ms** | p99 < 500 ms ✓ ✓ |
+| Multipart 50 × 100 MB | 138 MB/s, p50 36.6 s | 193 MB/s, p50 26.6 s | 0 5xx ✓ ✓ |
+| MixedReadWrite | 64 MB/s, p99 462 ms | 61 MB/s, p99 1.03 s | p99 < 2 s ✓ ✓ |
+| ManagementBurst | 40 × 429 | 40 × 429 | ✓ ✓ |
+
+This is the first time the gate has passed through Cloudflare, and the first
+pass of ConcurrentGet since the primary left iDrive in September. Conformance
+on the origin: 22 / 22 again.
+
+### 13.6 Erasure layouts with every leg (iDrive, Lyve, Wasabi, R2, Geyser, permafrost)
+
+| Shape | Codec | PUT all (wall; slowest leg) | READ first-k | decode | Lose one vendor (worst / best) |
+|---|---|---|---|---|---|
+| 4+2 idrive:2 lyve:2 r2:1 permafrost:1, 64 MiB ×3 | RS | 2.9–4.2 s (permafrost) | 0.41–0.60 s (107–156 MB/s) | 31–34 ms | lose idrive or lyve 1.2–1.6 s / lose r2 or permafrost 0.33–0.56 s |
+| same | RaptorQ | 2.8–6.1 s | 0.62–1.0 s | 129–183 ms | 1.5–1.7 s / 0.45–0.53 s |
+| **6+4 idrive:2 lyve:2 wasabi:2 r2:2 geyser:1 permafrost:1**, 64 MiB ×2 | RS | 3.4–3.5 s (permafrost) | **0.43–0.54 s (119–150 MB/s)** | 33–34 ms | **every single-vendor loss 0.23–0.68 s**, Geyser included |
+| same | RaptorQ | 3.2–3.6 s | 0.55–0.67 s | 129–141 ms | 0.39–0.62 s |
+| 4+2 idrive:2 lyve:2 r2:2, 512 MiB ×2 | RS | 8.0 / 15.6 s (R2) | 2.1–2.9 s (179–246 MB/s) | 0.28–0.33 s | 2.3–5.4 s |
+| 4+2, **sync gate idrive+lyve**, 64 MiB ×3 | RS | commit **0.33–0.49 s (129–197 MB/s)**, protected 2.7–3.3 s | 0.46–0.69 s | 32–42 ms | 0.35–1.4 s |
+
+Six vendors, one of them tape, one of them a free OneDrive fleet: a 64 MiB
+object reads in half a second and survives losing any one of them for under
+0.7 s extra. The permafrost leg is always the slowest write (2.7–4.2 s) and
+belongs behind the commit gate; Geyser's landing zone reads like disk. With
+iDrive and Lyve as the gate, a write commits in a third of a second.
+
+### 13.7 Edge reassembly with the iDrive leg, and Smart Placement
+
+Manifests `rs64i` / `rq16i` (idrive:2 lyve:2 r2:1 wasabi:1). From the box:
+RS 64 MiB **1.9–3.1 s** (first k in 49–61 ms, shards into the edge in 0.4–1.3
+s), `drop=0` 2.0 s, `lose=idrive` 3.0 s (Lyve ×2 + Wasabi + R2 parity) — all
+the same hash; RaptorQ 16 MiB 1.3–2.2 s. From the Mac: 2.5 s, 2.5 s with the
+whole iDrive leg lost, RaptorQ 1.6 s, cache HIT 0.11 s first byte and 1.4 s
+total. Smart Placement: 40 paired requests over 15 minutes, every one
+`cf-placement: local-DFW`; smart variant p50 TTFB 0.69 s vs 0.78 s default,
+within noise — the Worker fetches from four vendors in four places, which is
+the case the docs say Smart Placement cannot improve. Not worth enabling.
+
+### 13.8 Where everything lands
+
+- **Primary: iDrive.** Best latency, no stalls, 494 MB/s, the designed
+  margin. Lyve stays the Resilient tier and the sync-gate partner. Wasabi is a
+  free third leg. The two Wasabi findings (F3, F4) are moot on this primary.
+- **Cloudflare carries S3 again.** Both load gates pass through `stored.ge`
+  after the HAProxy window fix. The remaining limits are the 100 MB body
+  (multipart, or `s3.stored.ge`) and ~80 ms per private read. Public reads and
+  Sippy are real wins; Smart Placement is not; Cache Reserve waits for 40.1(b);
+  Smart Tiered Cache should be switched on when a zone-scoped token exists.
+- **The edge read plane is proven** for RS and RaptorQ with every vendor,
+  bounded by the 128 MB isolate: stripe-interleaved shards are the design
+  requirement for objects above ~64 MiB.
+- **Open:** the high-concurrency tail on the iDrive path (§13.4), the Smart
+  demotion canary, a timed tape restore, the Wasabi PUT deadline in the driver
+  if Wasabi ever carries a commit path again, B2's cap, key rotation.
