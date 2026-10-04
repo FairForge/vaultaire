@@ -353,3 +353,61 @@ Alerts page before the next B2 leg run. A scoped B2 application key
 master key should not be used for S3 at all. The Cloudflare token, R2 keys, B2
 master key and iDrive reseller key were pasted in chat and should be rotated
 when this round is over.
+
+
+## 11. Stage 4: the public endpoint after the HTTP/2 window fix
+
+Same box, 14:25–14:47 UTC, Wasabi still the primary. The origin was having a
+bad Wasabi hour during this run (warm GET p99 15 s, concurrent-download p95
+15 s, a 53 s PUT through Cloudflare), so read the Cloudflare column against the
+origin column of the same minutes, not against §2.
+
+| Workload | through Cloudflare, before (§6) | **through Cloudflare, after** | origin, same minutes |
+|---|---|---|---|
+| PUT 1 MB | 0.8 MB/s | **1.9 MB/s**, p50 390 ms | 8.5 MB/s |
+| PUT 16 MB | 1.2 MB/s, p50 12.3 s | **18.0 MB/s**, p50 938 ms | 38.4 MB/s |
+| PUT 64 MB single | 1.3 MB/s | **33.3 MB/s** | 63.7 MB/s |
+| multipart 256 MB, 4 / 16 parts | 5.0 / 15.2 MB/s | **51.1 / 21.4 MB/s** | 27.4 / 23.8 MB/s (contended) |
+| concurrent ingest 20 s | 26.6 MB/s | **154.9 MB/s** | 104.8 MB/s (contended) |
+| sustained upload 60 s | 4.3 MB/s | **60.3 MB/s** | 146.9 MB/s |
+| GET 64 MB | 63.2 MB/s | 59.6 MB/s | 20.5 MB/s (a Wasabi tail) |
+| concurrent download 20 s | 57 MB/s | 85.6 MB/s | 65.9 MB/s (p95 15 s) |
+| warm HEAD 4 KB | 81 ms | 81 ms | 3,641 ops/s |
+| list 100 | 171 ms | 183 ms | 3 ms |
+
+Load gate through Cloudflare after the fix: ConcurrentPut 1.9 ops/s with one
+53 s outlier (p50 1.5 s; the same minute's origin run had p99 4.4 s — a
+Wasabi stall, F4, not the proxy); ConcurrentGet 73 MB/s, p99 773 ms;
+Multipart **246 MB/s** (was 208; p50 17.8 s vs 21.7 s); MixedReadWrite p99
+**878 ms, PASS** (was 2.43 s, fail); ManagementBurst pass. Origin in the same
+window: ConcurrentGet p99 299 ms PASS, ConcurrentPut p99 4.4 s fail (stall),
+Multipart p50 42 s (B2 and R2 stage traffic was not running; this is Wasabi).
+
+Raw iDrive on the new account could not be benchmarked by bench-compare: it
+picked the bucket name `vaultaire-bench`, which another iDrive customer owns
+in that region, and every PUT answered 403 while the prod bucket `vaultaire`
+round-trips fine with the same key. Raw R2 from SLC: 82 MB/s sustained
+upload, 464 MB/s concurrent download, 86 MB/s single 64 MB GET, warm ops
+90–230 ms — a good download leg and a slow write leg, as the erasure runs
+showed.
+
+## 12. Where this leaves the Cloudflare question
+
+Two of the three Cloudflare findings were defects on our side and are fixed
+(the SigV4 header rewrite, #571; the HTTP/2 upload window, HAProxy). The third,
+the 100 MB body limit, is the plan's and stays a documentation item. After the
+fixes, uploads through `stored.ge` run at 33–60 MB/s from the box and at the
+client's uplink from a laptop, so the public endpoint can carry S3 again; the
+origin host remains the better choice for bulk uploads only because of the
+100 MB single-request limit. What Cloudflare adds, measured: public-object
+HITs at 0.1 s first byte and $0 egress; Sippy-backed public buckets that fill
+R2 from the prod origin on first read; and a Worker that reassembles a
+k-of-n object from two or three vendors in about two seconds and serves it
+from the edge cache afterwards. What it still costs: one hop (~80 ms) on
+every private read, and the 128 MB isolate, which fixes the shard layout
+(stripe-interleaved) for anything above ~64 MiB.
+
+The primary-backend question is unchanged by the fixes: Wasabi stalled again
+throughout stage 4 and failed the write gate on both paths, Lyve did not stall
+once all day, and iDrive is back with a fresh account at $4.455/TB. That
+decision is the owner's.
