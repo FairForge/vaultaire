@@ -589,3 +589,28 @@ func TestValidateRequest_NullSecretKeyTenant(t *testing.T) {
 		assert.Equal(t, "sigv4-nullsecret-tenant", tenantID)
 	})
 }
+
+// Cloudflare rewrites Accept-Encoding on the way to the origin (it offers the
+// encodings IT supports), so a client that signed the header — aws-sdk-go-v2
+// signs `accept-encoding: identity` on every S3 call — fails verification
+// through stored.ge while the same request through the origin passes
+// (found by the 2026-10-04 Vaultaire-path benchmark: every Go-SDK client,
+// including the load gate, got 403 SignatureDoesNotMatch via Cloudflare).
+// The verifier therefore also tries the value the client most plausibly
+// signed, `identity`. The signature still has to be valid over THAT request,
+// so nothing is weakened: Accept-Encoding carries no authorization meaning.
+func TestVerifySigV4_AcceptEncodingRewrittenByProxy(t *testing.T) {
+	r := httptest.NewRequest("GET", "http://stored.ge/my-bucket?list-type=2", nil)
+	r.Header.Set("Accept-Encoding", "identity")
+	signV4(t, r, testAK, testSecret, "us-east-1", sha256Hex(""), time.Now().UTC())
+	require.Contains(t, r.Header.Get("Authorization"), "accept-encoding;", "the SDK signs Accept-Encoding")
+
+	// What arrives at the origin behind Cloudflare.
+	r.Header.Set("Accept-Encoding", "gzip, br")
+	require.NoError(t, verify(t, r, testSecret), "rewritten Accept-Encoding must still verify")
+
+	// A rewrite of any OTHER signed header is still a mismatch.
+	r.Header.Set("Accept-Encoding", "identity")
+	r.Header.Set("X-Amz-Date", time.Now().UTC().Add(time.Second).Format(timeFormat))
+	require.ErrorIs(t, verify(t, r, testSecret), ErrSignatureMismatch)
+}
