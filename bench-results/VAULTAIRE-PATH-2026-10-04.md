@@ -606,3 +606,27 @@ Copying each chunk once, straight into WASM memory, took the same read to
 ceiling from the isolate; the ceiling is the vendor fetch rate into the
 colo. Whole-block mode stays faster for ≤ 64 MiB (1.2–3 s) and is still the
 right mode for contiguous shards.
+
+
+## 15. The Vault layer with Cloudflare in front (2026-10-04, night)
+
+| Measurement | Result |
+|---|---|
+| 256 MiB PUT to the archive tier through the origin | 7.6 s (35 MB/s) → Geyser, class GLACIER |
+| 256 MiB GET from Geyser's landing zone through the origin | 39–47 s (~6 MB/s); 1 MiB range 0.8 s |
+| Same object, Geyser's own S3 endpoint from the box | 58–64 s (~4 MB/s); range 0.8 s — **Vaultaire is faster than the vendor CLI; Geyser is the bound** |
+| Sippy over the archive bucket, 8 MB object | cold 2.9 s, warm 0.28 s, copy in R2 |
+| Sippy over the archive bucket, 256 MiB object, before #578 | `Sippy upstream ETag changed during read` — Vaultaire's 206 responses carried no ETag (S3 sends it; Sippy pulls >199 MiB objects in parts and compares) |
+| Same after #578 (identity headers on every 206) | cold 29 s, second read 30 s (copy still landing), **third read 2.6 s from R2 (103 MB/s)**, bytes identical. A key that failed once keeps its failed state in R2; use a fresh key |
+
+What this settles for the Vault tiers: placement and reads work; reads are
+slow by nature (4–7 MB/s from tape's landing zone, slower from tape itself);
+the restore path is unit-tested but untimed on prod until Geyser migrates the
+test objects; the "+ Lyve copy" in the cost model is **not implemented** (the
+engine treats the OneDrive fleet as a target-only second-copy role, nothing
+writes a second copy automatically). Cloudflare's one big gift to Vault is
+exactly the last row: a restored object pulled once through Sippy serves at
+line speed from R2 for seven days at $0 egress — "restore once, serve many".
+Next on this layer: a timed tape restore, the second-copy write, a Workflow
+around every restore, and a striped Vault layout so a restore reads k shards
+in parallel instead of one tape stream.
