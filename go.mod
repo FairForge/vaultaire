@@ -36,6 +36,8 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 )
 
+require github.com/xssnick/raptorq v1.6.0
+
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/internal v1.12.0 // indirect
 	github.com/AzureAD/microsoft-authentication-library-for-go v1.8.0 // indirect

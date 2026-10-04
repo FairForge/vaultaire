@@ -82,7 +82,7 @@ func TestReconstruct_RebuildsFromAnyKShards(t *testing.T) {
 	for i := 6; i < 16; i++ {
 		have[i] = append([]byte(nil), shards[i]...)
 	}
-	_, ok := reconstruct(enc, have, 10, shardLen, int64(len(payload)), want)
+	_, ok := reconstruct(&rsCodec{enc: enc, k: 10, m: 6}, have, 10, shardLen, int64(len(payload)), want)
 	assert.True(t, ok)
 
 	// Nine survivors is not enough.
@@ -90,6 +90,6 @@ func TestReconstruct_RebuildsFromAnyKShards(t *testing.T) {
 	for i := 7; i < 16; i++ {
 		have[i] = append([]byte(nil), shards[i]...)
 	}
-	_, ok = reconstruct(enc, have, 10, shardLen, int64(len(payload)), want)
+	_, ok = reconstruct(&rsCodec{enc: enc, k: 10, m: 6}, have, 10, shardLen, int64(len(payload)), want)
 	assert.False(t, ok)
 }

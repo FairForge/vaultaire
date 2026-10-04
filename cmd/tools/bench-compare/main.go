@@ -121,6 +121,13 @@ var endpoints = []Endpoint{
 	{Name: "idrive-eu-west-4", Provider: "idrive", URL: "https://s3.eu-west-4.idrivee2.com", Region: "eu-west-4", AccessKeyEnv: "IDRIVE_EU_WEST_4_ACCESS_KEY", SecretKeyEnv: "IDRIVE_EU_WEST_4_SECRET_KEY", PathStyle: true, FixedBucket: "vaultaire-bench"},
 	{Name: "idrive-eu-central-2", Provider: "idrive", URL: "https://s3.eu-central-2.idrivee2.com", Region: "eu-central-2", AccessKeyEnv: "IDRIVE_EU_CENTRAL_2_ACCESS_KEY", SecretKeyEnv: "IDRIVE_EU_CENTRAL_2_SECRET_KEY", PathStyle: true, FixedBucket: "vaultaire-bench"},
 	{Name: "idrive-ap-southeast-1", Provider: "idrive", URL: "https://s3.ap-southeast-1.idrivee2.com", Region: "ap-southeast-1", AccessKeyEnv: "IDRIVE_AP_SOUTHEAST_1_ACCESS_KEY", SecretKeyEnv: "IDRIVE_AP_SOUTHEAST_1_SECRET_KEY", PathStyle: true, FixedBucket: "vaultaire-bench"},
+	// Wasabi — the interim Standard primary (2026-10-03). Raw endpoint, so the
+	// Vaultaire rows below can be read as "overhead over the backend".
+	{Name: "wasabi-us-west-1", Provider: "wasabi", URL: "https://s3.us-west-1.wasabisys.com", Region: "us-west-1", AccessKeyEnv: "WASABI_ACCESS_KEY", SecretKeyEnv: "WASABI_SECRET_KEY", PathStyle: true, BucketEnv: "WASABI_BUCKET"},
+	// Vaultaire in production, both ways in: through Cloudflare + HAProxy
+	// (what a customer gets) and the direct origin (HAProxy only).
+	{Name: "vaultaire-prod-cf", Provider: "vaultaire", URL: "https://stored.ge", Region: "us-east-1", AccessKeyEnv: "VAULTAIRE_BENCH_ACCESS_KEY", SecretKeyEnv: "VAULTAIRE_BENCH_SECRET_KEY", PathStyle: true},
+	{Name: "vaultaire-prod-origin", Provider: "vaultaire", URL: "https://s3.stored.ge", Region: "us-east-1", AccessKeyEnv: "VAULTAIRE_BENCH_ACCESS_KEY", SecretKeyEnv: "VAULTAIRE_BENCH_SECRET_KEY", PathStyle: true},
 	// Vaultaire end-to-end (tests full S3 stack overhead vs direct-to-backend)
 	{Name: "vaultaire-local", Provider: "vaultaire", URL: "http://localhost:8001", Region: "us-east-1", AccessKeyEnv: "VAULTAIRE_BENCH_ACCESS_KEY", SecretKeyEnv: "VAULTAIRE_BENCH_SECRET_KEY", PathStyle: true},
 }
