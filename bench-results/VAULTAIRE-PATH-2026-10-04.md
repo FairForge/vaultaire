@@ -630,3 +630,66 @@ line speed from R2 for seven days at $0 egress — "restore once, serve many".
 Next on this layer: a timed tape restore, the second-copy write, a Workflow
 around every restore, and a striped Vault layout so a restore reads k shards
 in parallel instead of one tape stream.
+
+
+## 16. Geyser scenarios and optimizations (2026-10-04, 21:00 UTC)
+
+### 16.1 Geyser scales with parallel ranges
+
+256 MiB object in Geyser's landing zone, read as N concurrent byte ranges:
+
+| Streams | Raw Geyser (aws-cli, from the box) | Through the Vaultaire origin (archive tier) |
+|---|---|---|
+| 1 | 47.2 s, 5.4 MB/s | 23.8 s, 10.7 MB/s |
+| 4 | 15.4 s, 16.6 MB/s | 19.4 s, 13.1 MB/s |
+| 8 | 11.8 s, 21.7 MB/s | 9.4 s, 27.2 MB/s |
+| 16 | **6.1 s, 41.6 MB/s** | **6.3 s, 40.8 MB/s** |
+
+Every ranged read was checked: a full-length range and two concatenated
+halves through the origin both hash to the reference. The Vault read path is
+not slow because of tape; it is slow because it reads one stream. The Geyser
+driver's `Get` should fetch a whole object as 8–16 parallel ranges (the same
+shape as the parallel uploader it already has for PUT), which is an 8× lever
+on every Vault restore and on Sippy fills. That is a driver change of a day.
+
+### 16.2 The same lever at the edge
+
+`edge.stored.ge/pget?parts=N&to=<presigned GET>` reads a slow origin as N
+ranges with a six-wide window (Workers allow six subrequests waiting on
+headers) and streams them in order. From the Mac, the 256 MiB tape object:
+direct presigned 48 s; through the edge with 6–16 ranges **14.5–15.7 s**, 0.3
+s first byte, hashes identical. Behind the edge cache the second read is a
+HIT. A GET-presigned URL cannot be HEADed (the method is signed): size comes
+from a `bytes=0-0` probe.
+
+### 16.3 Striped Vault: tape holds the data, free legs hold the parity
+
+| Layout, 64 MiB | PUT (wall; slowest) | READ first-k | Winners | Lose Geyser |
+|---|---|---|---|---|
+| geyser:4 + lyve:1 + permafrost:1 (4+2) | 2.8–3.4 s (permafrost) | 3.3–3.5 s (18–19 MB/s) | 2 tape + 2 parity | impossible (needs 4 of 2) |
+| **geyser:4 + lyve:2 + permafrost:2 (4+4)** | 3.4–4.0 s | **1.4–1.5 s (43–46 MB/s)** | lyve ×2 + permafrost ×2 — **tape never read** | **0.95 s** |
+
+| Layout, 256 MiB | PUT | READ first-4 | Winners |
+|---|---|---|---|
+| geyser:4 + lyve:1 + wasabi:1 | 2.7 s | 17.1 s (two tape shards on the path) | 2 tape + 2 parity |
+| geyser:2 + lyve:2 + wasabi:1 + permafrost:1 | 5.3 s | 7.2 s | 1 tape + 3 disk |
+
+Whole 256 MiB from Geyser through the origin, same hour: 39–47 s. With
+enough free parity the first-k race never waits for tape: the 4+4 shape
+reads 64 MiB in 1.5 s and survives Geyser going away entirely, while the
+tape still holds the complete data at $1.55 per TB. The cost is 100 % extra
+bytes on legs that are free today (fleet, Lyve) — which is the same bytes the
+"second copy" would cost, arranged so they also make reads fast.
+
+### 16.4 What this changes in the Vault design
+
+1. Parallel-range reads in the Geyser driver: 8× on restores, no new
+   vendor, no new cost.
+2. The Vault second copy should be **parity on free legs, not a mirror**: a
+   4+4 layout gives durability against losing Geyser *and* 1.5 s reads of 64
+   MiB objects, for the same byte count as one mirror.
+3. Sippy and the edge `pget` path make restored objects line-speed after
+   the first read, at $0 egress.
+4. Deep Archive stays the disaster leg behind all of it ($0.99/TB-month,
+   never read); no AWS credentials exist on this machine, so it is priced,
+   not measured.

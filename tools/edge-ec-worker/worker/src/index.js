@@ -53,6 +53,45 @@ export default {
     if (url.pathname.startsWith("/del/") && request.method === "DELETE" && request.headers.get("x-edge-admin") === env.EDGE_ADMIN_KEY) {
       await env.R2.delete(url.pathname.slice(5)); return new Response("deleted " + url.pathname.slice(5));
     }
+    if (url.pathname === "/pget") {
+      // Parallel-range streaming through the edge: a slow origin (tape's landing
+      // zone serves one stream at ~5 MB/s) is read as `parts` concurrent ranges,
+      // re-ordered and streamed; optional edge cache of the whole object.
+      const to = url.searchParams.get("to"); const parts = Math.min(16, Number(url.searchParams.get("parts") || 8));
+      const useCache = url.searchParams.get("cache") === "1";
+      const cacheKey = new Request(url.origin + "/pget-cache/" + encodeURIComponent(to.split("?")[0]), { method: "GET" });
+      if (useCache) { const hit = await caches.default.match(cacheKey); if (hit) { const h = new Headers(hit.headers); h.set("x-edge-cache", "HIT"); return new Response(hit.body, { headers: h }); } }
+      // size from a 1-byte range (a GET-presigned URL cannot be HEADed: the method is signed)
+      const probe = await fetch(to, { headers: { range: "bytes=0-0" } });
+      const cr = probe.headers.get("content-range") || "";
+      const size = Number((cr.split("/")[1]) || probe.headers.get("content-length") || 0);
+      try { await probe.body.cancel(); } catch {}
+      const head = probe;
+      if (!(probe.status === 206 || probe.status === 200) || !size) return new Response("probe failed " + probe.status + " " + cr, { status: 502 });
+      const piece = Math.ceil(size / parts);
+      const t1 = Date.now();
+      // Workers allow six subrequests waiting on headers at once: keep a
+      // sliding window of WINDOW ranges in flight, start the next as one drains.
+      const WINDOW = 6;
+      const ranges = []; for (let i = 0; i < parts; i++) { const lo = i * piece, hi = Math.min(size, lo + piece) - 1; if (lo > hi) break; ranges.push([lo, hi]); }
+      const inflight = new Map(); const start = (i) => { if (i < ranges.length && !inflight.has(i)) inflight.set(i, fetch(to, { headers: { range: `bytes=${ranges[i][0]}-${ranges[i][1]}` } })); };
+      for (let i = 0; i < Math.min(WINDOW, ranges.length); i++) start(i);
+      let idx = 0;
+      const body = new ReadableStream({
+        async pull(controller) {
+          if (idx >= ranges.length) { controller.close(); return; }
+          const r = await inflight.get(idx); inflight.delete(idx);
+          if (r.status !== 206 && r.status !== 200) { controller.error(new Error("range " + idx + " " + r.status)); return; }
+          start(idx + WINDOW); idx++;
+          const reader = r.body.getReader(); for (;;) { const { done, value } = await reader.read(); if (done) break; controller.enqueue(value); }
+        },
+      });
+      const fetches = ranges;
+      const headers = { "content-type": head.headers.get("content-type") || "application/octet-stream", "content-length": String(size), "x-edge-parts": String(fetches.length), "x-edge-head-ms": String(t1 - t0) };
+      const resp = new Response(body, { headers });
+      if (useCache) ctx.waitUntil(caches.default.put(cacheKey, resp.clone()));
+      return resp;
+    }
     if (url.pathname.startsWith("/r2/")) {
       const o = await env.R2.get(url.pathname.slice(4));
       if (!o) return new Response("not found", { status: 404 });
