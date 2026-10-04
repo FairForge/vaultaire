@@ -76,6 +76,7 @@ present; everything else is gated on environment variables.
 | `quotaless` | `quotaless.go` | `QUOTALESS_ACCESS_KEY` | — | no | `personal-files/<container>/` | container |
 | `geyser` | `geyser.go` | `GEYSER_ACCESS_KEY` (`GEYSER_BUCKET`, `GEYSER_ENDPOINT`) | `GLACIER`, `DEEP_ARCHIVE` | yes | fixed bucket, keys `t-<tenant>/<container>/<artifact>` | ctx (default `vaultaire`) |
 | `idrive` | `idrive.go` | `IDRIVE_ACCESS_KEY` (`IDRIVE_ENDPOINT`, `IDRIVE_REGION` default `us-central-1`, `IDRIVE_BUCKET` default `vaultaire`) | `STANDARD`; prod primary | no | fixed bucket, keys `t-<tenant>/<container>/<artifact>` | ctx |
+| `wasabi` | `wasabi.go` (`NewWasabiDriver` → `NewFixedBucketS3Driver("wasabi", …)`, the `IDriveDriver` type under its own name) | `WASABI_ACCESS_KEY` (`WASABI_REGION` default `us-west-1`, `WASABI_ENDPOINT` default `https://s3.<region>.wasabisys.com`, `WASABI_BUCKET` default `vaultaire`) | `STANDARD`; **prod primary since 2026-10-03 (interim)** via `STORAGE_MODE=wasabi` | yes (signed HeadBucket) | fixed bucket created at boot if absent, keys `t-<tenant>/<container>/<artifact>`, path-style, HTTP/1.1; Wasabi list $7.99/TB, 90-day minimum per object, no egress/API fees — the partner account is free | tenant from context (`ErrNoTenant` otherwise) |
 | `idrive-<region>` | `idrive.go` + `idrive_regions.go` | `IDRIVE_<REGION>_ACCESS_KEY` **and** `_SECRET_KEY` (region id upper-cased, `-`→`_`) — one pair per region, no fallback to the primary pair | none; reached only via `bucketRegionDriver` for region-pinned buckets | yes | same fixed bucket name in that region, created at boot by `EnsureBucket` | ctx |
 | `r2` | `r2.go` | `R2_ACCOUNT_ID` (`R2_ACCESS_KEY`, `R2_SECRET_KEY`, `R2_JURISDICTION`, `R2_BUCKET` default `vaultaire-public`) | `PUBLIC` only | yes | fixed bucket, keys `t-<tenant>/<container>/<artifact>` | ctx |
 | `permafrost` | `onedrive.go` (`OneDriveDriver`) | `TENANT_1_ID` (fleet of `TENANT_N_*`, N = 1..15) | none | yes | `vaultaire/t-<tenant>/<container>/<artifact>` on the FNV-chosen home tenant | ctx |
@@ -89,8 +90,11 @@ region; the loop skips it and registers the others (sorted) only with their own
 key pair. `SetAvailableIDriveRegions` records the result and `CreateBucket`
 (S3 and dashboard) refuses any other region (`InvalidLocationConstraint`).
 
-**Primary:** `STORAGE_MODE`, else auto-detected iDrive > Quotaless > S3 >
-Geyser > local. Prod is `idrive`.
+**Primary:** `STORAGE_MODE`, else auto-detected iDrive > Wasabi > Quotaless >
+S3 > Geyser > local (`config.DetectStorageMode`). Prod is `wasabi` since
+2026-10-03 (interim: the iDrive key answers 403 on object calls); `idrive`
+stays registered for the rows it holds. STANDARD resolves to the primary,
+whichever it is.
 
 **Not a driver:** `S3Driver` (`s3.go`) does not implement `engine.Driver`
 (`Put` has no options, no `Name`, no `HealthCheck`). It is the embedded base of

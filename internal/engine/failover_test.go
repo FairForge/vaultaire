@@ -187,6 +187,8 @@ func TestResolveStorageClass_Mapping(t *testing.T) {
 		expectedBackend string
 		expectedClass   string
 	}{
+		// STANDARD is unmapped since the Wasabi interim (2026-10-03): it is
+		// the primary's class, whichever backend the primary is.
 		{"STANDARD", "idrive", "STANDARD"},
 		// STANDARD_IA is deliberately unmapped (decision 2026-07-29: no IA
 		// tier, and IMPLEMENTATION_PLAN.md:871 forbids routing customer
@@ -464,4 +466,24 @@ func TestFailoverManager_NotFoundDoesNotOpenBreaker(t *testing.T) {
 		})
 	}
 	assert.Equal(t, "open", fm.GetStatus("local"), "real failures must still open the breaker")
+}
+
+// The Standard tier lands on the primary, not on a registered iDrive driver:
+// with Wasabi as the interim primary (2026-10-03) and the iDrive driver still
+// registered for the rows it already holds, a STANDARD PUT must go to Wasabi.
+func TestResolveStorageClass_StandardFollowsPrimary(t *testing.T) {
+	drivers := map[string]Driver{
+		"idrive": &mockDriver{name: "idrive"},
+		"wasabi": &mockDriver{name: "wasabi"},
+		"geyser": &mockDriver{name: "geyser"},
+	}
+	for _, class := range []string{"STANDARD", "", "STANDARD_IA"} {
+		backend, resolved := ResolveStorageClass(class, "wasabi", drivers)
+		assert.Equal(t, "wasabi", backend, "class=%q", class)
+		assert.Equal(t, "STANDARD", resolved, "class=%q", class)
+	}
+	// The mapped classes still go where they are mapped.
+	backend, _ := ResolveStorageClass("GLACIER", "wasabi", drivers)
+	assert.Equal(t, "geyser", backend)
+	assert.Equal(t, "STANDARD", BackendToStorageClass("wasabi"))
 }

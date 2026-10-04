@@ -340,6 +340,34 @@ func main() {
 		}
 	}
 
+	// 6b. Add Wasabi if credentials available — the interim Standard-tier
+	// primary (owner decision 2026-10-03: the iDrive prod key answers 403 on
+	// object calls while the account is repaired; the partner account is
+	// free). Same fixed-bucket shape as iDrive under its own name; the bucket
+	// is created in the region on first boot. Becomes the primary only via
+	// STORAGE_MODE=wasabi (or when no iDrive pair is set).
+	if accessKey := os.Getenv("WASABI_ACCESS_KEY"); accessKey != "" {
+		secretKey := os.Getenv("WASABI_SECRET_KEY")
+		endpoint, region, bucket := drivers.WasabiConfigFromEnv(os.Getenv)
+		wasabiDriver, err := drivers.NewWasabiDriver(accessKey, secretKey, endpoint, region, bucket, logger)
+		if err != nil {
+			logger.Error("failed to add Wasabi driver", zap.Error(err))
+		} else {
+			bootCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			created, ensureErr := wasabiDriver.EnsureBucket(bootCtx)
+			cancel()
+			if ensureErr != nil {
+				// Registered anyway: a transient HeadBucket failure must not
+				// unregister the primary; the probe keeps reporting it.
+				logger.Error("Wasabi bucket not confirmed at boot", zap.String("bucket", bucket), zap.Error(ensureErr))
+			}
+			eng.AddDriver("wasabi", wasabiDriver)
+			logger.Info("Wasabi driver added",
+				zap.String("endpoint", endpoint), zap.String("region", region),
+				zap.String("bucket", bucket), zap.Bool("bucket_created", created))
+		}
+	}
+
 	// 7. Add Permafrost (OneDrive fleet) — internal parity tier, not customer-facing
 	if os.Getenv("TENANT_1_ID") != "" {
 		onedriveDriver, err := drivers.NewOneDriveFleetDriver(logger)
@@ -351,21 +379,16 @@ func main() {
 		}
 	}
 
-	// 8. Set primary backend (auto-detect best available)
-	storageMode := os.Getenv("STORAGE_MODE")
-	if storageMode == "" {
-		// Auto-detect: prefer iDrive > Quotaless > S3 > Geyser > local
-		if os.Getenv("IDRIVE_ACCESS_KEY") != "" {
-			storageMode = "idrive"
-		} else if os.Getenv("QUOTALESS_ACCESS_KEY") != "" {
-			storageMode = "quotaless"
-		} else if os.Getenv("S3_ACCESS_KEY") != "" {
-			storageMode = "s3"
-		} else if os.Getenv("GEYSER_ACCESS_KEY") != "" {
-			storageMode = "geyser"
-		} else {
-			storageMode = "local"
-		}
+	// 8. Set primary backend: STORAGE_MODE, else the first configured of
+	// iDrive > Wasabi > Quotaless > S3 > Geyser, else local
+	// (config.StorageModeOrder; the dashboard reads the same value).
+	storageMode := config.DetectStorageMode(os.Getenv)
+	if _, ok := eng.GetDriver(storageMode); !ok && storageMode != "local" {
+		// A STORAGE_MODE naming a driver that did not register (bad pair,
+		// typo) would make every PUT fail with "backend not found" and the
+		// boot log say nothing about why. Fail loudly here (WP-F).
+		logger.Fatal("STORAGE_MODE names a backend that is not registered",
+			zap.String("mode", storageMode), zap.Strings("registered", eng.GetDriverNames()))
 	}
 	eng.SetPrimary(storageMode)
 	logger.Info("primary backend set", zap.String("mode", storageMode))

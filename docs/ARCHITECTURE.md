@@ -89,11 +89,13 @@ The engine maps the class to a driver name (`internal/engine/storage_class.go`):
 | unknown / `STANDARD_IA` | primary | class is a hint, never an error |
 
 If the target driver is not registered the write falls back to the primary
-silently. The primary is `STORAGE_MODE`, or auto-detected in
-`cmd/vaultaire/main.go` as iDrive > Quotaless > S3 > Geyser > local (prod:
-`idrive`). The dashboard's own copy of that list in `internal/api/server.go`
-lacks the iDrive branch until WP-R1-4; the engine's choice is the one that
-places objects. No driver sets a vendor storage class on its upstream request.
+silently. The primary is `STORAGE_MODE`, or auto-detected
+(`config.DetectStorageMode`) as iDrive > Wasabi > Quotaless > S3 > Geyser >
+local (prod: `wasabi` since 2026-10-03, the interim primary while the iDrive
+account is repaired; `idrive` stays registered for its rows). The dashboard
+reads the engine's primary (WP-R1-4). STANDARD is the primary's class and is
+not pinned to a backend. No driver sets a vendor storage class on its
+upstream request.
 
 **Region-pinned buckets bypass the engine.** A bucket whose `buckets.region` is
 not the default region (`IDRIVE_REGION`, prod `us-central-1`) is written

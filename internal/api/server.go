@@ -774,17 +774,12 @@ func (s *Server) setupRoutes() {
 	if dataPath == "" {
 		dataPath = "/tmp/vaultaire-data"
 	}
-	storageMode := os.Getenv("STORAGE_MODE")
+	// The mode the dashboard shows is the one the engine places objects
+	// with (WP-R1-4; this used to re-derive it from a list without the
+	// iDrive branch, so prod's dashboard said "local").
+	storageMode := s.engine.GetPrimary()
 	if storageMode == "" {
-		if os.Getenv("QUOTALESS_ACCESS_KEY") != "" {
-			storageMode = "quotaless"
-		} else if os.Getenv("S3_ACCESS_KEY") != "" {
-			storageMode = "s3"
-		} else if os.Getenv("GEYSER_ACCESS_KEY") != "" {
-			storageMode = "geyser"
-		} else {
-			storageMode = "local"
-		}
+		storageMode = config.DetectStorageMode(os.Getenv)
 	}
 	dashboard.RegisterRoutes(s.router, dashboard.Deps{
 		DB:            s.db,

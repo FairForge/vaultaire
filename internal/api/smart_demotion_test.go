@@ -407,3 +407,14 @@ func doJSON(t *testing.T, h http.HandlerFunc, method, target string) *httptest.R
 	h(rr, httptest.NewRequest(method, target, nil))
 	return rr
 }
+
+// The hot copy lives on the primary — Wasabi while it is the interim primary
+// (2026-10-03) — never on a fixed "idrive".
+func TestHotBackendDefault_FollowsPrimary(t *testing.T) {
+	eng := engine.NewEngine(nil, zap.NewNop(), nil)
+	assert.Equal(t, eng.GetPrimary(), hotBackendDefault(eng), "a fresh engine: its default primary")
+	eng.SetPrimary("wasabi")
+	assert.Equal(t, "wasabi", hotBackendDefault(eng))
+	eng.SetPrimary("idrive")
+	assert.Equal(t, "idrive", hotBackendDefault(eng))
+}

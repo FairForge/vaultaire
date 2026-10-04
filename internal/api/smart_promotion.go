@@ -73,7 +73,7 @@ func NewSmartPromoter(db *sql.DB, eng *engine.CoreEngine, logger *zap.Logger) *S
 	}
 	return &SmartPromoter{
 		db: db, eng: eng, logger: logger,
-		HotBackend:   "idrive",
+		HotBackend:   hotBackendDefault(eng),
 		ColdBackend:  "geyser",
 		RestoreDays:  7,
 		RestoreRetry: 6 * time.Hour,

@@ -76,6 +76,23 @@ func TestBuildBackendProbes_IDriveUsesSignedDriverCheck(t *testing.T) {
 	assert.Equal(t, []string{"idrive"}, eng.calls, "probe delegates to the driver's HealthCheck")
 }
 
+// Wasabi (the interim primary, 2026-10-03) is probed like iDrive: a signed
+// HeadBucket through the driver, gated on its own key pair — a dead key is
+// what the probe is for (architecture decision 1).
+func TestBuildBackendProbes_WasabiUsesSignedDriverCheck(t *testing.T) {
+	eng := &fakeDriverChecker{drivers: map[string]error{"wasabi": nil}}
+	got := buildBackendProbes(envOf(map[string]string{"WASABI_ACCESS_KEY": "ak", "WASABI_SECRET_KEY": "sk"}), eng)
+	c := findCheck(t, got, "wasabi")
+	require.NotNil(t, c.probe, "wasabi must get an authenticated probe")
+	require.NoError(t, c.probe(context.Background()))
+	assert.Equal(t, []string{"wasabi"}, eng.calls)
+
+	// No pair, no probe — even with a driver registered under the name.
+	for _, c := range buildBackendProbes(envOf(nil), &fakeDriverChecker{drivers: map[string]error{"wasabi": nil}}) {
+		assert.NotEqual(t, "wasabi", c.name, "wasabi is probed only when WASABI_ACCESS_KEY is set")
+	}
+}
+
 func TestBuildBackendProbes_GeyserUsesSignedDriverCheck(t *testing.T) {
 	eng := &fakeDriverChecker{drivers: map[string]error{"geyser": errors.New("403 Forbidden")}}
 	env := map[string]string{"GEYSER_ACCESS_KEY": "ak", "GEYSER_SECRET_KEY": "sk"}

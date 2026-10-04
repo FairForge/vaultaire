@@ -26,6 +26,11 @@ const (
 var backendCostPerTBCents = map[string]int64{
 	"geyser": 155, // $1.55/TB
 	"idrive": 413, // $4.125/TB annual-plan Y2+ rate, rounded up from 412.5
+	// Wasabi is costed at list ($7.99/TB since 2026-07-01, 90-day minimum
+	// per object) although the partner account is free (interim primary,
+	// 2026-10-03): the modelled view is what the bytes would cost on a paid
+	// account, like Lyve below.
+	"wasabi": 799,
 	// Lyve is costed at its CURRENT list price ($7.99/TB standard, 2026-09-27;
 	// $4.99 IA) even though the account is at $0 under a SaaS promo the owner
 	// puts at ~mid-2028 (2026-07-30 note; the README's older $6.37 was the
@@ -51,6 +56,7 @@ var backendCostPerTBCents = map[string]int64{
 var egressCostPerTBCents = map[string]int64{
 	"geyser":     0,
 	"idrive":     0,
+	"wasabi":     0,    // no egress or API fees
 	"lyve":       1000, // $10/TB modelled — see subsidizedBackends
 	"hetzner":    0,
 	"permafrost": 0,
@@ -67,6 +73,8 @@ var egressCostPerTBCents = map[string]int64{
 // subsidy we are currently living on.
 var subsidizedBackends = map[string]bool{
 	"lyve": true,
+	// The Wasabi partner account (interim primary, 2026-10-03) is not invoiced.
+	"wasabi": true,
 }
 
 // costMode selects which rate card the admin costs page applies.
@@ -282,7 +290,7 @@ func populateCosts(ctx context.Context, db *sql.DB, data map[string]any, logger 
 	totalCostCents += geyserFloorCents + gorillaFixedCents
 
 	// Build backend table rows.
-	backendOrder := []string{"geyser", "idrive", "lyve", "hetzner", "permafrost", "gorilla", "local", "edge"}
+	backendOrder := []string{"geyser", "idrive", "wasabi", "lyve", "hetzner", "permafrost", "gorilla", "local", "edge"}
 	var byBackend []backendCostRow
 	for _, name := range backendOrder {
 		agg := backends[name]

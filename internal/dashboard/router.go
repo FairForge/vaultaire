@@ -43,7 +43,7 @@ type Deps struct {
 	Stripe        *billing.StripeService   // Nil when STRIPE_SECRET_KEY is not set.
 	Google        *oauth2.Config           // Nil when GOOGLE_CLIENT_ID is not set.
 	GitHub        *oauth2.Config           // Nil when GITHUB_CLIENT_ID is not set.
-	StorageMode   string                   // e.g. "local", "s3", "quotaless", "geyser", "idrive"
+	StorageMode   string                   // e.g. "local", "s3", "quotaless", "geyser", "idrive", "wasabi"
 	Email         email.Sender             // Email sender (LogSender if unconfigured).
 	BaseURL       string                   // Base URL for email links (e.g. "https://stored.ge").
 	Engine        *engine.CoreEngine       // Nil-safe; used by admin backends page.
