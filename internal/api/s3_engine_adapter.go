@@ -413,7 +413,32 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		return
 	}
 
-	reader, err := a.engine.Get(r.Context(), container, artifact)
+	// A ranged read of a cached, unencrypted, whole object goes straight to
+	// the backend's native range GET. The full-object Get below used to be
+	// opened first and abandoned once the Range branch took over, which
+	// charged every 1 MB range read the first-byte latency of a whole-object
+	// GET (~200 ms against iDrive and Wasabi in the 2026-10-04 bench; raw
+	// ranges on the same backends: 30–70 ms). An encrypted object still needs
+	// the full ciphertext (R2-02); a multi-range request is served whole.
+	var reader io.ReadCloser
+	var nativeRange *httpRange
+	if rh := r.Header.Get("Range"); rh != "" && cacheHit && cachedEncAlgo == "" &&
+		!errors.Is(rangeParseErr(rh, cachedSize), errMultiRange) {
+		rng, parseErr := parseRangeHeader(rh, cachedSize)
+		if parseErr != nil {
+			// Unsatisfiable against the cached size: 416 before any backend call.
+			writeRangeNotSatisfiable(w, cachedSize)
+			return
+		}
+		if ce, ok := a.engine.(*engine.CoreEngine); ok {
+			if rr, rangeErr := ce.GetRange(r.Context(), container, artifact, rng.start, rng.length); rangeErr == nil {
+				reader, nativeRange = rr, rng
+			}
+		}
+	}
+	if reader == nil {
+		reader, err = a.engine.Get(r.Context(), container, artifact)
+	}
 	if err != nil {
 		if errors.Is(err, engine.ErrAllBackendsUnavailable) {
 			w.Header().Set("Retry-After", "30")
@@ -542,9 +567,18 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		// the backend-native range reads the stored CIPHERTEXT (R2-02 — a
 		// ranged download of an SSE object returned ciphertext).
 		rangeReader := io.Reader(dataReader)
-		if ce, ok := a.engine.(*engine.CoreEngine); ok && cachedEncAlgo == "" {
-			if rr, rangeErr := ce.GetRange(r.Context(), container, artifact, rng.start, rng.length); rangeErr == nil {
+		var rr io.ReadCloser
+		var rangeErr error
+		if nativeRange != nil {
+			rr = reader // opened above, already positioned at rng.start
+		} else if ce, ok := a.engine.(*engine.CoreEngine); ok && cachedEncAlgo == "" {
+			rr, rangeErr = ce.GetRange(r.Context(), container, artifact, rng.start, rng.length)
+			if rangeErr == nil {
 				defer func() { _ = rr.Close() }()
+			}
+		}
+		if rr != nil && rangeErr == nil {
+			{
 				rangeReader = rr
 				// rangeReader already positioned at rng.start — write headers and copy directly
 				w.Header().Set("Content-Type", contentType)

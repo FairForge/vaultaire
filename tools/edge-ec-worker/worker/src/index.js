@@ -43,6 +43,16 @@ export default {
       const ms = Date.now() - t1;
       return new Response(JSON.stringify({ origin_status: r.status, put_ms: ms, mb, mbps: Math.round(mb * 1048576 / 1048.576 / ms) / 1000 * 1000, colo: request.cf && request.cf.colo }), { headers: { "content-type": "application/json" } });
     }
+    if (url.pathname.startsWith("/up/") && (request.method === "PUT" || request.method === "POST")) {
+      // direct-to-R2 through the edge: the body streams into the bound bucket, never touching the origin
+      const key = url.pathname.slice(4);
+      const t1 = Date.now();
+      const o = await env.R2.put(key, request.body, { httpMetadata: { contentType: request.headers.get("content-type") || "application/octet-stream" } });
+      return new Response(JSON.stringify({ key, size: o.size, etag: o.httpEtag, ms: Date.now() - t1, colo: request.cf && request.cf.colo }), { headers: { "content-type": "application/json" } });
+    }
+    if (url.pathname.startsWith("/del/") && request.method === "DELETE" && request.headers.get("x-edge-admin") === env.EDGE_ADMIN_KEY) {
+      await env.R2.delete(url.pathname.slice(5)); return new Response("deleted " + url.pathname.slice(5));
+    }
     if (url.pathname.startsWith("/r2/")) {
       const o = await env.R2.get(url.pathname.slice(4));
       if (!o) return new Response("not found", { status: 404 });
@@ -64,7 +74,10 @@ export default {
     const man = await manObj.json();
     const lose = url.searchParams.get("lose"); // drop every shard of this vendor
     const drop = new Set((url.searchParams.get("drop") || "").split(",").filter(Boolean).map(Number)); // drop these slots
-    const mode = url.searchParams.get("mode") || "whole";
+    // A manifest written with an interleaved layout carries its stripe size;
+    // stripe mode is then the right (and bounded-memory) decode for any size.
+    const STRIPE_EFF = man.stripe || STRIPE;
+    const mode = url.searchParams.get("mode") || (man.stripe ? "stripe" : "whole");
     const n = man.k + man.m;
 
     // Start every shard fetch; keep the first k whose headers arrive.
@@ -133,32 +146,41 @@ export default {
       return resp;
     }
 
-    // Stripe mode (RS): read the k streams in lockstep, decode STRIPE bytes at a time.
-    const readers = winners.map(w => ({ i: w.i, r: w.body.getReader(), buf: new Uint8Array(0) }));
-    const buf = ex.ec_alloc(n * STRIPE);
-    const out = ex.ec_alloc(man.k * STRIPE);
+    // Stripe mode (RS): read the k streams in lockstep, decode STRIPE_EFF bytes at a
+    // time. Each reader keeps a queue of chunks and copies bytes ONCE, straight
+    // into wasm memory — the first version re-concatenated Uint8Arrays per
+    // chunk, which burned the isolate's CPU budget on a 512 MiB object.
+    const readers = winners.map(w => ({ i: w.i, r: w.body.getReader(), q: [], qlen: 0, off: 0, done: false }));
+    const buf = ex.ec_alloc(n * STRIPE_EFF);
+    const out = ex.ec_alloc(man.k * STRIPE_EFF);
     let produced = 0;
-    const self = this;
+    const fill = async (rd, want) => {
+      while (rd.qlen < want && !rd.done) {
+        const { done, value } = await rd.r.read();
+        if (done) { rd.done = true; break; }
+        rd.q.push(value); rd.qlen += value.byteLength;
+      }
+    };
+    // take copies `len` bytes from the reader's queue into wasm memory at dst
+    const take = (rd, len, dst) => {
+      const m8 = mem(); let copied = 0;
+      while (copied < len) {
+        const head = rd.q[0]; const avail = head.byteLength - rd.off; const nb = Math.min(avail, len - copied);
+        m8.set(head.subarray(rd.off, rd.off + nb), dst + copied);
+        copied += nb; rd.off += nb; rd.qlen -= nb;
+        if (rd.off === head.byteLength) { rd.q.shift(); rd.off = 0; }
+      }
+    };
     const stream = new ReadableStream({
       async pull(controller) {
-        if (produced >= man.size) { controller.close(); ex.ec_free(buf, n * STRIPE); ex.ec_free(out, man.k * STRIPE); headers["x-edge-decode-ms"] = String(decodeMs); return; }
-        const want = Math.min(STRIPE, man.shard_len - Math.floor(produced / man.k));
-        // fill each winner's buffer to `want` bytes
-        await Promise.all(readers.map(async rd => {
-          while (rd.buf.length < want) {
-            const { done, value } = await rd.r.read();
-            if (done) break;
-            const nb = new Uint8Array(rd.buf.length + value.byteLength); nb.set(rd.buf); nb.set(value, rd.buf.length); rd.buf = nb;
-          }
-        }));
-        const L = Math.min(want, ...readers.map(rd => rd.buf.length));
+        if (produced >= man.size) { controller.close(); ex.ec_free(buf, n * STRIPE_EFF); ex.ec_free(out, man.k * STRIPE_EFF); return; }
+        const want = Math.min(STRIPE_EFF, man.shard_len - Math.floor(produced / man.k));
+        await Promise.all(readers.map(rd => fill(rd, want)));
+        const L = Math.min(want, ...readers.map(rd => rd.qlen));
         if (L === 0) { controller.error(new Error("short shard")); return; }
-        const m8 = mem();
-        for (const rd of readers) { m8.set(rd.buf.subarray(0, L), buf + rd.i * STRIPE); rd.buf = rd.buf.slice(L); }
+        for (const rd of readers) take(rd, L, buf + rd.i * STRIPE_EFF);
         const outLen = Math.min(man.k * L, man.size - produced);
-        const td = Date.now();
         const rc = ex.rs_decode(man.k, man.m, L, buf, present, out, outLen);
-        decodeMs += Date.now() - td;
         if (rc !== 0) { controller.error(new Error("decode rc=" + rc)); return; }
         controller.enqueue(mem().slice(out, out + outLen));
         produced += outLen;

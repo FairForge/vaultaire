@@ -22,6 +22,9 @@ erasure shards spread over vendors — the read plane the plan calls Phase
 
 Limits found: the 128 MB isolate bounds a whole-block decode at ~64 MiB for RS
 and ~16 MiB for RaptorQ; above that the shards must be stripe-interleaved so
-`mode=stripe` can decode 1 MiB stripes (the erasure bench writes contiguous
-klauspost shards, for which only `mode=whole` is correct). `Date.now()` is
+`mode=stripe` can decode stripe by stripe at any object size. `erasure-bench
+-interleave-kb 1024` writes that layout and the manifest carries
+`"stripe": 1048576`; the Worker then defaults to stripe mode (bounded memory:
+about (n + k) stripes). Contiguous klauspost shards (no `stripe` in the
+manifest) decode whole. `Date.now()` is
 frozen during CPU work in Workers — time decodes from the client.

@@ -109,6 +109,7 @@ func main() {
 	sizeMB := flag.Int("mb", 64, "payload size in MiB")
 	codecName := flag.String("codec", "rs", "erasure codec: rs (Reed-Solomon, klauspost) or raptorq (RFC 6330 fountain code, xssnick/raptorq; shards = round-robin symbol groups, any k of n decode)")
 	symbolKB := flag.Int("symbol-kb", 32, "raptorq symbol size in KiB (RFC 6330 caps a symbol at 65535 bytes)")
+	interleaveKB := flag.Int("interleave-kb", 0, "rs only: interleave the shards in stripes of this many KiB per shard (0 = contiguous klauspost layout); the edge reader's stripe mode needs this")
 	k := flag.Int("data", 10, "data shards")
 	m := flag.Int("parity", 6, "parity shards")
 	layout := flag.String("layout", "lyve:6,geyser:4,onedrive:6", "shard placement backend:count,... (data shards first)")
@@ -149,7 +150,7 @@ func main() {
 	}
 
 	size := int64(*sizeMB) << 20
-	enc, err := newCodec(*codecName, *k, *m, *symbolKB<<10, size)
+	enc, err := newCodecStripe(*codecName, *k, *m, *symbolKB<<10, size, *interleaveKB<<10)
 	if err != nil {
 		fmt.Println("codec:", err)
 		os.Exit(2)

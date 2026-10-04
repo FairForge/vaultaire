@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -273,4 +274,48 @@ func (d *R2Driver) HealthCheck(ctx context.Context) error {
 		return fmt.Errorf("r2 health check (%s): %w", d.bucket, err)
 	}
 	return nil
+}
+
+// PresignPut returns a presigned PUT URL for a direct upload into this
+// driver's bucket under the tenant-prefixed key — the public-bucket upload
+// path where the bytes go client → R2 and never cross the origin (measured
+// 2026-10-04: 25–28 MB/s from the SLC box against 7–12 MB/s relayed through a
+// Worker and the origin's own path). The caller registers the object after
+// the upload with Stat (api direct_upload.go).
+func (d *R2Driver) PresignPut(ctx context.Context, container, artifact, contentType string, ttl time.Duration) (string, error) {
+	key, err := d.key(ctx, "PresignPut", container, artifact)
+	if err != nil {
+		return "", err
+	}
+	in := &s3.PutObjectInput{Bucket: aws.String(d.bucket), Key: aws.String(key)}
+	if contentType != "" {
+		in.ContentType = aws.String(contentType)
+	}
+	out, err := s3.NewPresignClient(d.client).PresignPutObject(ctx, in, s3.WithPresignExpires(ttl))
+	if err != nil {
+		return "", fmt.Errorf("r2 presign put %s: %w", key, err)
+	}
+	return out.URL, nil
+}
+
+// Stat returns the size, ETag and content type of a stored object (HeadObject).
+func (d *R2Driver) Stat(ctx context.Context, container, artifact string) (size int64, etag, contentType string, err error) {
+	key, kerr := d.key(ctx, "Stat", container, artifact)
+	if kerr != nil {
+		return 0, "", "", kerr
+	}
+	out, herr := d.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(d.bucket), Key: aws.String(key)})
+	if herr != nil {
+		return 0, "", "", fmt.Errorf("r2 stat %s: %w", key, herr)
+	}
+	if out.ContentLength != nil {
+		size = *out.ContentLength
+	}
+	if out.ETag != nil {
+		etag = *out.ETag
+	}
+	if out.ContentType != nil {
+		contentType = *out.ContentType
+	}
+	return size, etag, contentType, nil
 }

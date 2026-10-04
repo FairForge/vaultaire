@@ -22,13 +22,23 @@ type codec interface {
 }
 
 func newCodec(name string, k, m, symbol int, size int64) (codec, error) {
+	return newCodecStripe(name, k, m, symbol, size, 0)
+}
+
+// newCodecStripe is newCodec with an interleave stripe for Reed-Solomon: 0 =
+// contiguous shards (klauspost Split: shard j is the j-th k-th of the payload),
+// otherwise the payload is cut into stripes of k×stripe bytes and shard j
+// holds the j-th piece of EVERY stripe. The interleaved layout is what an
+// edge reader needs to decode stripe by stripe inside a 128 MB isolate
+// (tools/edge-ec-worker, mode=stripe) — any object size, bounded memory.
+func newCodecStripe(name string, k, m, symbol int, size int64, stripe int) (codec, error) {
 	switch name {
 	case "rs":
 		enc, err := reedsolomon.New(k, m)
 		if err != nil {
 			return nil, fmt.Errorf("reedsolomon: %w", err)
 		}
-		return &rsCodec{enc: enc, k: k, m: m}, nil
+		return &rsCodec{enc: enc, k: k, m: m, stripe: stripe}, nil
 	case "raptorq":
 		if symbol <= 0 || symbol > 65535 {
 			return nil, fmt.Errorf("raptorq: symbol size %d outside 1..65535 (RFC 6330)", symbol)
@@ -41,13 +51,22 @@ func newCodec(name string, k, m, symbol int, size int64) (codec, error) {
 // --- Reed-Solomon (klauspost) -----------------------------------------------
 
 type rsCodec struct {
-	enc  reedsolomon.Encoder
-	k, m int
+	enc    reedsolomon.Encoder
+	k, m   int
+	stripe int // 0 = contiguous shards; else interleaved stripes of this many bytes per shard
 }
 
-func (c *rsCodec) Name() string { return fmt.Sprintf("RS(%d,%d)", c.k, c.m) }
+func (c *rsCodec) Name() string {
+	if c.stripe > 0 {
+		return fmt.Sprintf("RS(%d,%d,stripe=%dK)", c.k, c.m, c.stripe>>10)
+	}
+	return fmt.Sprintf("RS(%d,%d)", c.k, c.m)
+}
 
 func (c *rsCodec) Shards(payload []byte) ([][]byte, error) {
+	if c.stripe > 0 {
+		return c.shardsInterleaved(payload)
+	}
 	shards, err := c.enc.Split(payload)
 	if err != nil {
 		return nil, fmt.Errorf("split: %w", err)
@@ -58,7 +77,78 @@ func (c *rsCodec) Shards(payload []byte) ([][]byte, error) {
 	return shards, nil
 }
 
+func (c *rsCodec) shardsInterleaved(payload []byte) ([][]byte, error) {
+	n := c.k + c.m
+	block := c.k * c.stripe
+	nStripes := (len(payload) + block - 1) / block
+	shards := make([][]byte, n)
+	for j := range shards {
+		shards[j] = make([]byte, 0, nStripes*c.stripe)
+	}
+	buf := make([]byte, block)
+	for s := 0; s < nStripes; s++ {
+		lo := s * block
+		hi := lo + block
+		if hi > len(payload) {
+			hi = len(payload)
+		}
+		for i := range buf {
+			buf[i] = 0
+		}
+		copy(buf, payload[lo:hi])
+		sub, err := c.enc.Split(buf)
+		if err != nil {
+			return nil, fmt.Errorf("split stripe %d: %w", s, err)
+		}
+		if err := c.enc.Encode(sub); err != nil {
+			return nil, fmt.Errorf("encode stripe %d: %w", s, err)
+		}
+		for j := 0; j < n; j++ {
+			shards[j] = append(shards[j], sub[j]...)
+		}
+	}
+	return shards, nil
+}
+
+func (c *rsCodec) rebuildInterleaved(have [][]byte, size int64) ([]byte, error) {
+	n := c.k + c.m
+	shardLen := 0
+	for _, h := range have {
+		if h != nil {
+			shardLen = len(h)
+			break
+		}
+	}
+	if shardLen == 0 || shardLen%c.stripe != 0 {
+		return nil, fmt.Errorf("interleaved rebuild: shard length %d is not a multiple of the stripe %d", shardLen, c.stripe)
+	}
+	out := make([]byte, 0, size)
+	tmp := make([][]byte, n)
+	for s := 0; s < shardLen/c.stripe; s++ {
+		for j := 0; j < n; j++ {
+			if have[j] == nil {
+				tmp[j] = nil
+				continue
+			}
+			tmp[j] = append([]byte(nil), have[j][s*c.stripe:(s+1)*c.stripe]...)
+		}
+		if err := c.enc.ReconstructData(tmp); err != nil {
+			return nil, fmt.Errorf("reconstruct stripe %d: %w", s, err)
+		}
+		for j := 0; j < c.k; j++ {
+			out = append(out, tmp[j]...)
+		}
+	}
+	if int64(len(out)) < size {
+		return nil, fmt.Errorf("interleaved rebuild: %d bytes < size %d", len(out), size)
+	}
+	return out[:size], nil
+}
+
 func (c *rsCodec) Rebuild(have [][]byte, size int64) ([]byte, error) {
+	if c.stripe > 0 {
+		return c.rebuildInterleaved(have, size)
+	}
 	if err := c.enc.ReconstructData(have); err != nil {
 		return nil, fmt.Errorf("reconstruct: %w", err)
 	}
