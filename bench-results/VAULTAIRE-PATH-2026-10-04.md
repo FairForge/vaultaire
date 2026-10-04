@@ -539,3 +539,36 @@ the case the docs say Smart Placement cannot improve. Not worth enabling.
 - **Open:** the high-concurrency tail on the iDrive path (§13.4), the Smart
   demotion canary, a timed tape restore, the Wasabi PUT deadline in the driver
   if Wasabi ever carries a commit path again, B2's cap, key rotation.
+
+
+### 13.9 Evening: the zone, Workers Paid, and the edge Worker on stored.ge
+
+The stored.ge zone turned out to live under a second Cloudflare login (its own
+account, Free plan). Through that session: Smart Tiered Cache on, minimum TLS
+1.2, Early Hints, an edge rate-limit rule on the sign-in paths, and a
+zone-scoped token for the plan driver. Workers Paid was then bought on that
+account and R2 activated, and the edge Worker was deployed there as
+**`edge.stored.ge`** with its own R2 bucket (shards still on the vendors;
+manifests in the bucket).
+
+| Test on `edge.stored.ge` | From the box (Denver colo) | From a Mac (Dallas colo) |
+|---|---|---|
+| RS 64 MiB, four of six shards | 2.6–3.9 s, first k in 0.34–0.38 s | 3.0 s |
+| RS 64 MiB with the whole iDrive leg lost | 3.2 s | 2.8 s |
+| RaptorQ 16 MiB | 2.3 s | 1.9 s |
+| edge cache HIT | **0.13 s** first byte, 1.2 s total | **0.14 s**, 1.5 s |
+| upload 16 MiB → edge → R2 (`/up/<key>`) | 7–12 MB/s | 1.5–1.7 s (uplink-bound) |
+| Zero Trust Access on a test path | unauthenticated request → 302 to the team login | same |
+
+Same hashes as every earlier run. The Denver colo the box lands on is a little
+further from the vendors than Dallas, which is the whole difference between
+this table and §13.7. An Access application with an owner-only policy gated a
+test path on the first try; gating `stored.ge/admin` is the same one API call.
+Direct-to-R2 through a presigned URL remains faster than relaying through a
+Worker (25–28 MB/s vs 7–12 from the box), so public-bucket uploads should get
+presigned URLs, not a relay.
+
+Open on the Cloudflare side: 2FA and password rotation on both logins, the
+Access gate on `/admin`, a Load Balancer with health checks once a second
+origin exists, removing the stale NS1 nameserver records, and Workers for
+Platforms the day a customer Worker runs.
