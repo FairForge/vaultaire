@@ -55,7 +55,6 @@ import (
 	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
-	"github.com/klauspost/reedsolomon"
 	"go.uber.org/zap"
 )
 
@@ -108,6 +107,8 @@ type result struct {
 
 func main() {
 	sizeMB := flag.Int("mb", 64, "payload size in MiB")
+	codecName := flag.String("codec", "rs", "erasure codec: rs (Reed-Solomon, klauspost) or raptorq (RFC 6330 fountain code, xssnick/raptorq; shards = round-robin symbol groups, any k of n decode)")
+	symbolKB := flag.Int("symbol-kb", 32, "raptorq symbol size in KiB (RFC 6330 caps a symbol at 65535 bytes)")
 	k := flag.Int("data", 10, "data shards")
 	m := flag.Int("parity", 6, "parity shards")
 	layout := flag.String("layout", "lyve:6,geyser:4,onedrive:6", "shard placement backend:count,... (data shards first)")
@@ -147,14 +148,14 @@ func main() {
 		}
 	}
 
-	enc, err := reedsolomon.New(*k, *m)
+	size := int64(*sizeMB) << 20
+	enc, err := newCodec(*codecName, *k, *m, *symbolKB<<10, size)
 	if err != nil {
-		fmt.Println("reedsolomon:", err)
+		fmt.Println("codec:", err)
 		os.Exit(2)
 	}
-	size := int64(*sizeMB) << 20
-	fmt.Printf("scheme RS(%d,%d) = %d shards, payload %d MiB, shard %.1f MiB, overhead %.2fx\n",
-		*k, *m, n, *sizeMB, float64(size)/float64(*k)/(1<<20), float64(n)/float64(*k))
+	fmt.Printf("scheme %s = %d shards, payload %d MiB, shard %.1f MiB, overhead %.2fx\n",
+		enc.Name(), n, *sizeMB, float64(size)/float64(*k)/(1<<20), float64(n)/float64(*k))
 	fmt.Printf("layout: %s\n", describe(slots, *k))
 	if len(syncSet) > 0 {
 		fmt.Printf("commit gate: %s (other legs async)  retries/shard: %d  hedge: %v\n", fmtSet(syncSet), *retries, *hedge)
@@ -171,7 +172,7 @@ func main() {
 	}
 }
 
-func runOnce(ctx context.Context, enc reedsolomon.Encoder, bes map[string]engine.Driver, slots []slot, k int, size int64, container string, run int, timeout time.Duration, keep bool, syncSet map[string]bool) {
+func runOnce(ctx context.Context, enc codec, bes map[string]engine.Driver, slots []slot, k int, size int64, container string, run int, timeout time.Duration, keep bool, syncSet map[string]bool) {
 	payload := make([]byte, size)
 	_, _ = rand.Read(payload)
 	sum := sha256.Sum256(payload)
@@ -179,12 +180,8 @@ func runOnce(ctx context.Context, enc reedsolomon.Encoder, bes map[string]engine
 
 	// Encode.
 	t0 := time.Now()
-	shards, err := enc.Split(payload)
+	shards, err := enc.Shards(payload)
 	if err != nil {
-		fmt.Println("split:", err)
-		return
-	}
-	if err := enc.Encode(shards); err != nil {
 		fmt.Println("encode:", err)
 		return
 	}
@@ -458,7 +455,7 @@ type fetched struct {
 
 // readFirstK requests every shard and reconstructs from the first k that
 // arrive, cancelling the rest.
-func readFirstK(ctx context.Context, enc reedsolomon.Encoder, bes map[string]engine.Driver, slots []slot, k int, container string, key func(int) string, shardLen, size int64, want string, timeout time.Duration) {
+func readFirstK(ctx context.Context, enc codec, bes map[string]engine.Driver, slots []slot, k int, container string, key func(int) string, shardLen, size int64, want string, timeout time.Duration) {
 	rctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	ch := make(chan fetched, len(slots))
@@ -498,7 +495,7 @@ func readFirstK(ctx context.Context, enc reedsolomon.Encoder, bes map[string]eng
 }
 
 // readDegraded rebuilds the payload with every shard on `lost` missing.
-func readDegraded(ctx context.Context, enc reedsolomon.Encoder, bes map[string]engine.Driver, slots []slot, k int, container string, key func(int) string, shardLen, size int64, want string, timeout time.Duration, lost string) {
+func readDegraded(ctx context.Context, enc codec, bes map[string]engine.Driver, slots []slot, k int, container string, key func(int) string, shardLen, size int64, want string, timeout time.Duration, lost string) {
 	var survivors []slot
 	for _, s := range slots {
 		if s.backend != lost {
@@ -551,19 +548,14 @@ func readDegraded(ctx context.Context, enc reedsolomon.Encoder, bes map[string]e
 // reconstruct fills missing shards, joins the data shards and checks the hash.
 // size is the original payload length: Split zero-pads the last shard, so
 // Join must stop at size, not at shardLen*k.
-func reconstruct(enc reedsolomon.Encoder, have [][]byte, k int, shardLen, size int64, want string) (time.Duration, bool) {
+func reconstruct(enc codec, have [][]byte, k int, shardLen, size int64, want string) (time.Duration, bool) {
 	t0 := time.Now()
-	if err := enc.ReconstructData(have); err != nil {
+	out, err := enc.Rebuild(have, size)
+	if err != nil {
 		fmt.Println("  reconstruct:", err)
 		return time.Since(t0), false
 	}
-	var out bytes.Buffer
-	out.Grow(int(size))
-	if err := enc.Join(&out, have, int(size)); err != nil {
-		fmt.Println("  join:", err)
-		return time.Since(t0), false
-	}
-	sum := sha256.Sum256(out.Bytes())
+	sum := sha256.Sum256(out)
 	return time.Since(t0), hex.EncodeToString(sum[:]) == want
 }
 
