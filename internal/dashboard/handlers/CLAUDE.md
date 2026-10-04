@@ -198,7 +198,7 @@ with "$0.00 MRR" zero-state.
 per-tenant margin (revenue minus cost), and negative-margin alerts.
 
 Cost model: `backendCostPerTBCents` map (geyser=155, idrive=413 — the annual-plan
-Y2+ rate, lyve=799 — current list, hetzner=381, permafrost/gorilla/local/edge=0) + fixed costs (Geyser $155/mo floor,
+Y2+ rate, wasabi=799 — list, subsidized like lyve (the partner account is free; interim primary 2026-10-03), lyve=799 — current list, hetzner=381, permafrost/gorilla/local/edge=0) + fixed costs (Geyser $155/mo floor,
 Gorilla configurable). `tierBackend(plan, tier)` maps vault*→geyser,
 standard/performance→idrive, free→local. `egressCostPerTBCents` carries MODELLED
 market rates (lyve=1000 = $10/TB); `subsidizedBackends` (lyve) marks backends

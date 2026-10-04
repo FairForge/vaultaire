@@ -31,17 +31,26 @@ The primary backend is `STORAGE_MODE` when set. Otherwise
 
 ```
 IDRIVE_ACCESS_KEY set     -> idrive
+WASABI_ACCESS_KEY set     -> wasabi
 QUOTALESS_ACCESS_KEY set  -> quotaless
 S3_ACCESS_KEY set         -> s3
 GEYSER_ACCESS_KEY set     -> geyser
 otherwise                 -> local
 ```
 
-Production sets the iDrive pair and runs with `idrive` as primary. Note that
-`internal/api/server.go` re-derives the mode for the dashboard with a copy of
-this list that lacks the iDrive branch; the engine's choice (above) is the one
-that places objects, and WP-R1-4 makes the server take the value from `main`
-instead of re-deriving it.
+The list is `config.StorageModeOrder` (`internal/config/storage_mode.go`);
+`cmd/vaultaire/main.go` and the dashboard both read `config.DetectStorageMode`,
+so the dashboard shows the mode the engine places with (WP-R1-4 done
+2026-10-03; it used to re-derive it from a list without the iDrive branch). A
+`STORAGE_MODE` that names a driver which did not register is a fatal boot
+error, not a silent "backend not found" on every PUT.
+
+Production sets both the iDrive and the Wasabi pair and runs with
+`STORAGE_MODE=wasabi` since 2026-10-03 — the interim primary while the iDrive
+account is repaired (its key answers 403 on object calls). Objects already on
+iDrive stay addressable through their `object_head_cache.backend_name`; the
+STANDARD class follows the primary (`engine.ResolveStorageClass`) rather than
+being pinned to `idrive`.
 
 ## Variables
 
@@ -98,10 +107,11 @@ See `docs/DRIVERS.md` for what each driver does once registered.
 | `QUOTALESS_ACCESS_KEY`, `QUOTALESS_SECRET_KEY`, `QUOTALESS_ENDPOINT` | — | Quotaless storage (dormant in prod). `main.go` and `server.go` default the endpoint differently (`us.` vs `io.quotaless.cloud:8000`) — WP-R1-4 |
 | `GEYSER_ACCESS_KEY`, `GEYSER_SECRET_KEY` | — | Geyser tape S3 credentials |
 | `GEYSER_BUCKET`, `GEYSER_ENDPOINT` | — | Geyser bucket name and endpoint URL |
-| `IDRIVE_ACCESS_KEY`, `IDRIVE_SECRET_KEY` | — | iDrive E2 S3 credentials (prod primary) |
+| `IDRIVE_ACCESS_KEY`, `IDRIVE_SECRET_KEY` | — | iDrive E2 S3 credentials (the long-term primary; prod runs Wasabi meanwhile, 2026-10-03) |
 | `IDRIVE_ENDPOINT`, `IDRIVE_REGION` | `https://s3.<region>.idrivee2.com`, `us-central-1` | The primary's endpoint and region. `IDRIVE_REGION` is also the **default bucket region** (served by the primary through the engine); prod = `us-central-1` (Dallas) |
 | `IDRIVE_BUCKET` | `vaultaire` | The one fixed bucket every iDrive driver (primary and regional) stores into, keys prefixed `t-<tenant>/`. `internal/drivers/idrive.go` (R1-09) |
 | `IDRIVE_<REGION>_ACCESS_KEY`, `IDRIVE_<REGION>_SECRET_KEY`, `IDRIVE_<REGION>_ENDPOINT` | endpoint: `IDriveRegions` table | **Enables** a region (WP-R7-1): an `idrive-<region>` driver is registered only when the region's own key pair is set (region id upper-cased, `-`→`_`, e.g. `IDRIVE_US_WEST_2_ACCESS_KEY`), its fixed `IDRIVE_BUCKET` is created in that region at boot if absent, and it is probed. There is no fallback to the primary pair (403 elsewhere). Regions without a pair cannot be chosen for a bucket (S3 400 `InvalidLocationConstraint`, dashboard option disabled). Account regions: `us-central-1 us-west-2 us-west-4 us-southwest-1 us-southeast-1 us-midwest-1 us-east-1 eu-west-1 eu-west-3 eu-west-4 eu-central-1 eu-south-1 ap-northeast-1` (`internal/drivers/idrive_regions.go`); `deploy/scripts/idrive-region-env.sh` turns the reseller key file into these lines |
+| `WASABI_ACCESS_KEY`, `WASABI_SECRET_KEY`, `WASABI_REGION`, `WASABI_ENDPOINT`, `WASABI_BUCKET` | region `us-west-1`, endpoint `https://s3.<region>.wasabisys.com`, bucket `vaultaire` | **Interim Standard-tier primary** (owner decision 2026-10-03: the iDrive prod key answers 403 on object calls while the account is repaired; the partner account is free). The pair registers the `wasabi` driver — the fixed-bucket driver (`internal/drivers/wasabi.go` → `NewFixedBucketS3Driver`, same `t-<tenant>/…` keys as iDrive) — creates the bucket in the region at boot if absent, and probes it with a signed HeadBucket. It becomes the primary only with `STORAGE_MODE=wasabi` (auto-detect still prefers an iDrive pair). STANDARD is no longer pinned to `idrive`: it is the primary's class (`engine.ResolveStorageClass`), so every Standard PUT follows the switch while rows already on iDrive stay readable (keep `IDRIVE_*` set). Wasabi bills a 90-day minimum per object on a paid account; the dashboard costs it at list ($7.99/TB) and lists it as subsidized |
 | `R2_ACCOUNT_ID`, `R2_ACCESS_KEY`, `R2_SECRET_KEY` | — | Cloudflare R2 S3 credentials. Registers the `r2` driver — **public buckets / CDN origin only, never a tier**: public-read buckets resolve to the internal `PUBLIC` storage class → R2 (`api.resolvePutStorageClass`); no other placement touches it |
 | `R2_JURISDICTION`, `R2_BUCKET` | default, `vaultaire-public` | R2 jurisdiction endpoint (`default`\|`eu`\|`us`\|`fedramp`; `us` endpoint fails TLS as of 2026-09-24) and the single fixed bucket public objects live in (tenant-prefixed keys) |
 | `TENANT_N_ID`, `TENANT_N_CLIENT_ID`, `TENANT_N_SECRET`, `TENANT_N_USER` (N = 1..15) | — | OneDrive fleet (`permafrost` driver, internal parity backend, not customer-facing). `TENANT_1_ID` set = driver registered; a tenant missing any of the four is skipped with a warning. `internal/drivers/onedrive.go` (R1-09). Never renumber tenants: placement is FNV-hashed over the index |

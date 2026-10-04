@@ -73,7 +73,7 @@ Each registered backend gets an independent `BackendCircuitBreaker`:
 ## Storage Class Routing (Phase 5.12.4)
 
 `x-amz-storage-class` header on PUT maps to a target backend:
-- STANDARD → idrive, GLACIER/DEEP_ARCHIVE → geyser, REDUCED_REDUNDANCY → local
+- STANDARD → the primary (unmapped since 2026-10-03, when Wasabi became the interim primary: a fixed `idrive` entry sent every Standard PUT to iDrive whatever the primary was), GLACIER/DEEP_ARCHIVE → geyser, RESILIENT → lyve, PUBLIC → r2; STANDARD_IA and REDUCED_REDUNDANCY unmapped (→ primary at STANDARD)
 - RESILIENT → lyve (internal class — what the `resilient` bucket `tier_preference` resolves to via `tierPreferenceToStorageClass` in `api/s3_engine_adapter.go`; NOT the removed STANDARD_IA mapping: objects land on Lyve at its default class, never Lyve's IA service tier)
 - PUBLIC → r2 (internal class, never sent by clients — set by `api.resolvePutStorageClass` for public-read buckets when an `r2` driver is registered; R2 is the public-bucket / CDN origin only, not a tier)
 

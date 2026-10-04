@@ -122,13 +122,22 @@ type demotionCandidate struct {
 }
 
 // NewSmartDemotionRunner builds the runner; nil when there is no DB or engine.
+// hotBackendDefault is where the Smart tier's hot copy lives: the primary
+// (iDrive, or the interim Wasabi — 2026-10-03), never a fixed "idrive".
+func hotBackendDefault(eng *engine.CoreEngine) string {
+	if p := eng.GetPrimary(); p != "" {
+		return p
+	}
+	return "idrive"
+}
+
 func NewSmartDemotionRunner(db *sql.DB, eng *engine.CoreEngine, fl flagChecker, logger *zap.Logger) *SmartDemotionRunner {
 	if db == nil || eng == nil {
 		return nil
 	}
 	return &SmartDemotionRunner{
 		db: db, eng: eng, flags: fl, logger: logger,
-		HotBackend:          "idrive",
+		HotBackend:          hotBackendDefault(eng),
 		ColdBackend:         "geyser",
 		Tiers:               []string{"standard"},
 		HotFraction:         0.15,

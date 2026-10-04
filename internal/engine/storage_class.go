@@ -24,8 +24,14 @@ package engine
 // customer can choose; the class degrades to the primary at STANDARD like
 // any other unsold class (the request header never reached here anyway —
 // api.clientStorageClass drops it, R2-07).
+// STANDARD is deliberately unmapped: it is the primary backend's class, and
+// the primary is chosen at boot (STORAGE_MODE / config.DetectStorageMode) —
+// iDrive in the long run, Wasabi while the iDrive account is repaired
+// (2026-10-03). A fixed "STANDARD → idrive" entry sent every Standard PUT to
+// the registered iDrive driver whatever the primary was, so the interim
+// switch would have changed nothing. ResolveStorageClass returns the primary
+// for any unmapped class.
 var storageClassToBackend = map[string]string{
-	"STANDARD":     "idrive",
 	"GLACIER":      "geyser",
 	"DEEP_ARCHIVE": "geyser",
 
@@ -48,6 +54,7 @@ var storageClassToBackend = map[string]string{
 
 var backendToStorageClass = map[string]string{
 	"idrive":     "STANDARD",
+	"wasabi":     "STANDARD",
 	"lyve":       "STANDARD",
 	"geyser":     "GLACIER",
 	"permafrost": "STANDARD",

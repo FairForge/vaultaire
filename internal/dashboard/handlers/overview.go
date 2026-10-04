@@ -33,6 +33,7 @@ var backendLocations = map[string]BackendLocation{
 	"quotaless": {City: "EU (Germany)", Country: "DE", Lat: 50.11, Lon: 8.68},
 	"geyser":    {City: "London", Country: "GB", Lat: 51.51, Lon: -0.13},
 	"idrive":    {City: "Los Angeles", Country: "US", Lat: 34.05, Lon: -118.24},
+	"wasabi":    {City: "Hillsboro, Oregon", Country: "US", Lat: 45.52, Lon: -122.99},
 	"lyve":      {City: "US West (Phoenix)", Country: "US", Lat: 33.45, Lon: -112.07},
 }
 
@@ -307,6 +308,7 @@ func populateActivity(ctx context.Context, db *sql.DB, tenantID string, data map
 var backendEnergyKWhPerTBMonth = map[string]float64{
 	"geyser":     0.1, // tape, powered off
 	"idrive":     1.0, // spinning disk
+	"wasabi":     1.0,
 	"s3":         1.0,
 	"lyve":       1.0,
 	"permafrost": 0.5, // SSD (OneDrive fleet; registration key, R7-10)

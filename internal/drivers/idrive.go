@@ -24,9 +24,14 @@ const (
 	TenantIDKey ContextKey = "tenant_id"
 )
 
-// IDriveDriver implements Driver interface for iDrive E2 storage.
+// IDriveDriver implements Driver interface for iDrive E2 storage — and for
+// any other plain S3 endpoint that takes the same shape (one fixed bucket,
+// tenant-prefixed keys; Wasabi is `NewWasabiDriver`). `name` is what the
+// driver registers as and what every error, log line and tenant-less-call
+// metric says: a Wasabi failure never reads "idrive".
 // Uses a fixed bucket with tenant-prefixed keys (like GeyserDriver).
 type IDriveDriver struct {
+	name          string
 	accessKey     string
 	secretKey     string
 	endpoint      string
@@ -38,21 +43,38 @@ type IDriveDriver struct {
 }
 
 // NewIDriveDriver creates a new iDrive E2 storage driver.
-// All objects are stored in `bucket` with keys prefixed by tenant ID.
+// All objects are stored in `IDRIVE_BUCKET` (default `vaultaire`) with keys
+// prefixed by tenant ID.
 func NewIDriveDriver(accessKey, secretKey, endpoint, region string, logger *zap.Logger) (*IDriveDriver, error) {
 	bucket := os.Getenv("IDRIVE_BUCKET")
 	if bucket == "" {
 		bucket = "vaultaire"
 	}
-	// Validate required parameters
-	if endpoint == "" {
-		return nil, fmt.Errorf("idrive: endpoint required")
-	}
-	if accessKey == "" || secretKey == "" {
-		return nil, fmt.Errorf("idrive: credentials required")
-	}
 	if region == "" {
 		region = IDriveFallbackRegion
+	}
+	return NewFixedBucketS3Driver("idrive", accessKey, secretKey, endpoint, region, bucket, logger)
+}
+
+// NewFixedBucketS3Driver is the constructor behind NewIDriveDriver and
+// NewWasabiDriver: a SigV4 S3 endpoint addressed path-style over HTTP/1.1,
+// every object in `bucket` under `t-<tenant>/<container>/<artifact>`. `name`
+// is the registered driver name (`object_head_cache.backend_name`).
+func NewFixedBucketS3Driver(name, accessKey, secretKey, endpoint, region, bucket string, logger *zap.Logger) (*IDriveDriver, error) {
+	if name == "" {
+		return nil, fmt.Errorf("fixed-bucket s3 driver: name required")
+	}
+	if endpoint == "" {
+		return nil, fmt.Errorf("%s: endpoint required", name)
+	}
+	if accessKey == "" || secretKey == "" {
+		return nil, fmt.Errorf("%s: credentials required", name)
+	}
+	if region == "" {
+		return nil, fmt.Errorf("%s: region required", name)
+	}
+	if bucket == "" {
+		return nil, fmt.Errorf("%s: bucket required", name)
 	}
 
 	cfg, err := config.LoadDefaultConfig(context.Background(),
@@ -66,7 +88,7 @@ func NewIDriveDriver(accessKey, secretKey, endpoint, region string, logger *zap.
 		config.WithHTTPClient(TunedHTTPClient(WithHTTP1Only())),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("idrive: load aws config: %w", err)
+		return nil, fmt.Errorf("%s: load aws config: %w", name, err)
 	}
 
 	// Create S3 client with iDrive endpoint
@@ -75,12 +97,15 @@ func NewIDriveDriver(accessKey, secretKey, endpoint, region string, logger *zap.
 		o.UsePathStyle = true // iDrive requires path-style URLs
 	})
 
-	logger.Info("iDrive driver initialized",
+	logger.Info("fixed-bucket S3 driver initialized",
+		zap.String("driver", name),
 		zap.String("endpoint", endpoint),
 		zap.String("region", region),
+		zap.String("bucket", bucket),
 	)
 
 	return &IDriveDriver{
+		name:      name,
 		accessKey: accessKey,
 		secretKey: secretKey,
 		endpoint:  endpoint,
@@ -119,7 +144,7 @@ func (d *IDriveDriver) Get(ctx context.Context, container, artifact string) (io.
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("idrive get %s/%s: %w", container, artifact, err)
+		return nil, fmt.Errorf("%s get %s/%s: %w", d.name, container, artifact, err)
 	}
 
 	// Track egress if we have a tracker and tenant ID
@@ -212,7 +237,7 @@ func (d *IDriveDriver) GetRange(ctx context.Context, container, artifact string,
 
 	result, err := d.client.GetObject(ctx, input)
 	if err != nil {
-		return nil, fmt.Errorf("idrive get stream %s/%s: %w", container, artifact, err)
+		return nil, fmt.Errorf("%s get stream %s/%s: %w", d.name, container, artifact, err)
 	}
 
 	return result.Body, nil
@@ -231,7 +256,7 @@ func (d *IDriveDriver) Delete(ctx context.Context, container, artifact string) e
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		return fmt.Errorf("idrive delete %s: %w", key, err)
+		return fmt.Errorf("%s delete %s: %w", d.name, key, err)
 	}
 	return nil
 }
@@ -254,7 +279,7 @@ func (d *IDriveDriver) List(ctx context.Context, container string, prefix string
 	for paginator.HasMorePages() {
 		output, err := paginator.NextPage(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("idrive list %s: %w", fullPrefix, err)
+			return nil, fmt.Errorf("%s list %s: %w", d.name, fullPrefix, err)
 		}
 		for _, obj := range output.Contents {
 			name := strings.TrimPrefix(*obj.Key, basePrefix)
@@ -280,13 +305,13 @@ func (d *IDriveDriver) Exists(ctx context.Context, container, artifact string) (
 		if s3IsNotFound(err) {
 			return false, nil
 		}
-		return false, fmt.Errorf("idrive exists %s: %w", key, err)
+		return false, fmt.Errorf("%s exists %s: %w", d.name, key, err)
 	}
 	return true, nil
 }
 
 func (d *IDriveDriver) Name() string {
-	return "idrive"
+	return d.name
 }
 
 func (d *IDriveDriver) HealthCheck(ctx context.Context) error {
@@ -294,7 +319,7 @@ func (d *IDriveDriver) HealthCheck(ctx context.Context) error {
 		Bucket: aws.String(d.bucket),
 	})
 	if err != nil {
-		return fmt.Errorf("idrive health check: %w", err)
+		return fmt.Errorf("%s health check: %w", d.name, err)
 	}
 	return nil
 }
@@ -315,12 +340,12 @@ func (d *IDriveDriver) EnsureBucket(ctx context.Context) (created bool, err erro
 		return false, nil
 	}
 	if !s3IsNotFound(err) {
-		return false, fmt.Errorf("idrive head bucket %s in %s: %w", d.bucket, d.region, err)
+		return false, fmt.Errorf("%s head bucket %s in %s: %w", d.name, d.bucket, d.region, err)
 	}
 	if _, err := d.client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(d.bucket)}); err != nil {
-		return false, fmt.Errorf("idrive create bucket %s in %s: %w", d.bucket, d.region, err)
+		return false, fmt.Errorf("%s create bucket %s in %s: %w", d.name, d.bucket, d.region, err)
 	}
-	d.logger.Info("iDrive region bucket created", zap.String("bucket", d.bucket), zap.String("region", d.region))
+	d.logger.Info("fixed bucket created", zap.String("driver", d.name), zap.String("bucket", d.bucket), zap.String("region", d.region))
 	return true, nil
 }
 
@@ -328,9 +353,9 @@ func (d *IDriveDriver) ValidateAuth(ctx context.Context) error {
 	// Try to list buckets - this requires valid authentication
 	_, err := d.client.ListBuckets(ctx, &s3.ListBucketsInput{})
 	if err != nil {
-		return fmt.Errorf("idrive authentication failed: %w", err)
+		return fmt.Errorf("%s authentication failed: %w", d.name, err)
 	}
 
-	d.logger.Info("iDrive authentication validated")
+	d.logger.Info("authentication validated", zap.String("driver", d.name))
 	return nil
 }
