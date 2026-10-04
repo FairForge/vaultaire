@@ -133,8 +133,8 @@ func (a *Auth) verifySigV4(r *http.Request, p *sigV4Params, secretKey string) er
 	scope := strings.Join([]string{p.Date, p.Region, p.Service, aws4Request}, "/")
 	signingKey := a.deriveSigningKey(secretKey, p.Date, p.Region, p.Service)
 
-	verify := func(canonicalURI, canonicalQuery string) bool {
-		canonical := canonicalRequestV4(r, p.SignedHeaders, canonicalURI, canonicalQuery)
+	verify := func(canonicalURI, canonicalQuery string, overrides map[string]string) bool {
+		canonical := canonicalRequestV4(r, p.SignedHeaders, canonicalURI, canonicalQuery, overrides)
 		stringToSign := a.createStringToSign(amzDate, scope, canonical)
 		expected := hex.EncodeToString(hmacSHA256(signingKey, []byte(stringToSign)))
 		return hmac.Equal([]byte(expected), []byte(p.Signature))
@@ -158,17 +158,34 @@ func (a *Auth) verifySigV4(r *http.Request, p *sigV4Params, secretKey string) er
 	if raw := canonicalQueryV4RawSort(r.URL.Query()); raw != queries[0] {
 		queries = append(queries, raw)
 	}
-	for _, u := range uris {
-		for _, q := range queries {
-			if verify(u, q) {
-				return nil
+	// Headers: a proxy in front of the origin may rewrite a header the client
+	// signed. Cloudflare replaces Accept-Encoding with the encodings IT
+	// accepts, and aws-sdk-go-v2 signs `accept-encoding: identity` on every
+	// S3 call — so every Go-SDK client got 403 through stored.ge while the
+	// same request through the origin passed (2026-10-04 benchmark). When the
+	// header is in the signed set, the value the client most plausibly signed
+	// is tried too. The signature must still be valid over that request;
+	// Accept-Encoding carries no authorization meaning.
+	headerVariants := []map[string]string{nil}
+	if strings.Contains(";"+strings.ToLower(p.SignedHeaders)+";", ";accept-encoding;") &&
+		trimAWSSpaces(r.Header.Get("Accept-Encoding")) != "identity" {
+		headerVariants = append(headerVariants, map[string]string{"accept-encoding": "identity"})
+	}
+	for _, h := range headerVariants {
+		for _, u := range uris {
+			for _, q := range queries {
+				if verify(u, q, h) {
+					return nil
+				}
 			}
 		}
 	}
 	return fmt.Errorf("%w", ErrSignatureMismatch)
 }
 
-func canonicalRequestV4(r *http.Request, signedHeaders, canonicalURI, canonicalQuery string) string {
+// overrides substitutes the canonical value of a signed header (lower-case
+// name) — the verifier's proxy-rewrite variants; nil = the request as received.
+func canonicalRequestV4(r *http.Request, signedHeaders, canonicalURI, canonicalQuery string, overrides map[string]string) string {
 	// The payload hash the client declared is used verbatim — including the
 	// UNSIGNED-PAYLOAD and STREAMING-AWS4-HMAC-SHA256-PAYLOAD markers. The
 	// seed signature covers the declaration, not the body bytes.
@@ -183,7 +200,11 @@ func canonicalRequestV4(r *http.Request, signedHeaders, canonicalURI, canonicalQ
 	for _, name := range names {
 		hdrs.WriteString(name)
 		hdrs.WriteByte(':')
-		hdrs.WriteString(canonicalHeaderValueV4(r, name))
+		if v, ok := overrides[name]; ok {
+			hdrs.WriteString(v)
+		} else {
+			hdrs.WriteString(canonicalHeaderValueV4(r, name))
+		}
 		hdrs.WriteByte('\n')
 	}
 
