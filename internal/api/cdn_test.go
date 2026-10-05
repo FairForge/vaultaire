@@ -398,6 +398,12 @@ func TestCDN_RangeRequest_PartialContent(t *testing.T) {
 	assert.Equal(t, fmt.Sprintf("bytes 0-4/%d", len(f.content)), w.Header().Get("Content-Range"))
 	assert.Equal(t, "5", w.Header().Get("Content-Length"))
 	assert.Equal(t, "text/plain", w.Header().Get("Content-Type"))
+	// A 206 carries the object's identity on EVERY path (#578 plain S3,
+	// #585 chunked, checked here for /cdn by WP-VAULT-1): multi-range
+	// downloaders compare the ETag across their ranged GETs.
+	assert.NotEmpty(t, w.Header().Get("ETag"), "a CDN 206 carries the ETag")
+	assert.NotEmpty(t, w.Header().Get("Last-Modified"), "a CDN 206 carries Last-Modified")
+	assert.Equal(t, "bytes", w.Header().Get("Accept-Ranges"))
 }
 
 func TestCDN_RangeRequest_MiddleRange(t *testing.T) {
