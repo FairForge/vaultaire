@@ -313,6 +313,9 @@ func main() {
 				logger.Info("iDrive region bucket provisioned", zap.String("region", region))
 			}
 			ecancel()
+			// The driver calls itself "idrive"; its put-retry series must say
+			// which region stalled (WP-VAULT-1).
+			drv.SetBackendName("idrive-" + region)
 			eng.AddDriver("idrive-"+region, drv)
 			registered = append(registered, region)
 		}

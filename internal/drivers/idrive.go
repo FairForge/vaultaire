@@ -47,6 +47,10 @@ type IDriveDriver struct {
 	// retry on a fresh connection (put_deadline.go).
 	putTimeout time.Duration
 	putClient  *deadlinePutClient
+	// backendName is the name the engine registered this driver under when
+	// that differs from name (a regional driver is "idrive" to itself and
+	// `idrive-<region>` to the engine): the label of its put-retry series.
+	backendName string
 }
 
 // NewIDriveDriver creates a new iDrive E2 storage driver.
@@ -129,8 +133,27 @@ func NewFixedBucketS3Driver(name, accessKey, secretKey, endpoint, region, bucket
 // setPutTimeout installs the per-PUT deadline (0 = off).
 func (d *IDriveDriver) setPutTimeout(base time.Duration) {
 	d.putTimeout = base
-	d.putClient = &deadlinePutClient{Client: d.client, driver: d.name, base: base,
+	d.putClient = &deadlinePutClient{Client: d.client, driver: d.metricsName(), region: d.region, base: base,
 		fresh: TunedHTTPClient(WithHTTP1Only(), WithFreshConnections()), logger: d.logger}
+}
+
+// metricsName is the backend name this driver's series are labelled with.
+func (d *IDriveDriver) metricsName() string {
+	if d.backendName != "" {
+		return d.backendName
+	}
+	return d.name
+}
+
+// SetBackendName tells the driver the name the engine registered it under
+// (cmd/vaultaire: `idrive-<region>` for a regional driver). Name() is
+// unchanged — routing keys on the registration; the name is the label of the
+// driver's put-retry series, which without it counted every region's
+// retries as the primary's.
+func (d *IDriveDriver) SetBackendName(name string) {
+	d.backendName = name
+	driverPutRetries.WithLabelValues(name) // the series exists at 0
+	d.setPutTimeout(d.putTimeout)
 }
 
 // uploadClient is the client Put uploads through: the deadline client when
