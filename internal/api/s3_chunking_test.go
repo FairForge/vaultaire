@@ -73,7 +73,7 @@ func TestHandleGet_ChunkedObject_RangeRequest(t *testing.T) {
 	f := setupChunkingFixture(t)
 
 	content := generateTestData(8 * 1024)
-	putChunkedObject(t, f, "range.bin", content, "application/octet-stream")
+	putETag := putChunkedObject(t, f, "range.bin", content, "application/octet-stream")
 
 	getReq := httptest.NewRequest("GET", "/test-bucket/range.bin", nil)
 	getReq.Header.Set("Range", "bytes=0-99")
@@ -86,6 +86,15 @@ func TestHandleGet_ChunkedObject_RangeRequest(t *testing.T) {
 	assert.Equal(t, content[0:100], body, "range slice must match")
 	assert.Equal(t, "100", gw.Header().Get("Content-Length"))
 	assert.Equal(t, fmt.Sprintf("bytes 0-99/%d", len(content)), gw.Header().Get("Content-Range"))
+
+	// A 206 carries the object's identity exactly like the 200 does: R2 Sippy
+	// pulls a chunked object above 199 MiB as several ranged GETs and refuses
+	// the copy when their ETags differ or are missing (2026-10-05, prod:
+	// "Sippy upstream ETag changed during read" on every chunked object).
+	assert.Equal(t, putETag, gw.Header().Get("ETag"), "206 of a chunked object must carry the ETag")
+	assert.NotEmpty(t, gw.Header().Get("Last-Modified"), "206 of a chunked object must carry Last-Modified")
+	assert.NotEmpty(t, gw.Header().Get("x-amz-storage-class"), "206 of a chunked object must carry the storage class")
+	assert.Equal(t, "bytes", gw.Header().Get("Accept-Ranges"))
 }
 
 func TestHandleGet_ChunkedDedup_SharedContent(t *testing.T) {

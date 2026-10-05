@@ -1819,7 +1819,12 @@ func (a *S3ToEngine) handleChunkedGet(
 		}
 	}
 
-	write200Headers := func() {
+	// The object's identity headers are the same on a 200 and a 206 — the
+	// same rule the plain path follows (setIdentityHeaders in HandleGet):
+	// R2 Sippy reads a chunked object above 199 MiB as several ranged GETs
+	// and compares their ETags, and a 206 without one failed every pull of a
+	// chunked object with "upstream ETag changed during read" (2026-10-05).
+	setIdentityHeaders := func() {
 		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("x-amz-request-id", generateRequestID())
 		if w.Header().Get("x-amz-version-id") == "" {
@@ -1832,9 +1837,6 @@ func (a *S3ToEngine) handleChunkedGet(
 			w.Header().Set("Cache-Control", "private, no-cache")
 		}
 		w.Header().Set("x-amz-storage-class", storageClass)
-		if cachedSize > 0 {
-			w.Header().Set("Content-Length", strconv.FormatInt(cachedSize, 10))
-		}
 		if cachedETag != "" {
 			w.Header().Set("ETag", fmt.Sprintf(`"%s"`, cachedETag))
 		}
@@ -1846,15 +1848,16 @@ func (a *S3ToEngine) handleChunkedGet(
 			w.Header().Set("x-amz-tagging-count", strconv.Itoa(n))
 		}
 	}
+	write200Headers := func() {
+		setIdentityHeaders()
+		if cachedSize > 0 {
+			w.Header().Set("Content-Length", strconv.FormatInt(cachedSize, 10))
+		}
+	}
 	write206Headers := func() {
-		w.Header().Set("Content-Type", contentType)
+		setIdentityHeaders()
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", rng.start, rng.end, cachedSize))
 		w.Header().Set("Content-Length", strconv.FormatInt(rng.length, 10))
-		w.Header().Set("Accept-Ranges", "bytes")
-		w.Header().Set("x-amz-request-id", generateRequestID())
-		if w.Header().Get("x-amz-version-id") == "" {
-			w.Header().Set("x-amz-version-id", "null")
-		}
 		w.WriteHeader(http.StatusPartialContent)
 	}
 
