@@ -8,8 +8,8 @@ database `vaultaire_test_vault`, everything under `-race`; `make lint` 0, `make 
 |---|---|---|
 | 0 | warm-up: the primary cannot be expired; an allowlist of `0.0.0.0/0` / `::/0` is refused | #587 |
 | 1 | Geyser `Get` as parallel ranges | #589 |
-| 2 | the parity second copy for `vault`-floor objects (flag `vault_parity`, migration 077) | _below_ |
-| 3 | `cmd/tools/geyser-restore-probe` | _pending_ |
+| 2 | the parity second copy for `vault`-floor objects (flag `vault_parity`, migration 077) | #590 |
+| 3 | `cmd/tools/geyser-restore-probe` | _below_ |
 | 4 | per-PUT deadline + one retry in the fixed-bucket driver | _pending_ |
 
 ## Part 0 — warm-up (post-merge review of #584)
@@ -309,3 +309,68 @@ Geyser (whole GET and ranges fail on demand) and the leg (one shard's Put fails 
   fallback means Geyser failed a customer read) — one rule, when the metric has a day of zeros.
 - The dashboard does not show a vault object's copy state; `GET /api/v1/admin/jobs` shows the job's
   last result (`protected`, `partial`, `erased`, `leg`).
+
+## Part 3 — `cmd/tools/geyser-restore-probe`
+
+### Why
+
+The restore path of the archive tier is unit-tested (`geyser_restore_test.go`, `s3_restore.go`) and
+**untimed on prod**: Geyser moves an object from its landing zone to tape on its own schedule
+(~13 days), and until then a GET simply works (§15: "the restore path stays untimed until Geyser
+migrates the test objects"). Two objects are waiting: `tier-archive-20261004/obj8.bin` (8 MB) and
+`vault-bench-20261004/v256.bin` (256 MiB).
+
+### What was built
+
+An operator tool (never linked into `cmd/vaultaire` — `TestProductBinaryDoesNotLinkTheProbe` runs
+`go list -deps`), which talks to the **customer endpoint with a customer key and nothing else**:
+
+- **Every visit** (hourly by default, `-once` for cron) is one HEAD and one 1-byte GET (`bytes=0-0`)
+  per object. The 1-byte read is the signal — a HEAD cannot tell the landing zone from tape: the
+  class is GLACIER either way, and `x-amz-restore` is absent for an object nobody restored (live:
+  `v256.bin` has none; `obj8.bin` shows `ongoing-request="false"` with an expiry that follows the
+  clock).
+- **Readable:** on the first sighting the object is downloaded once and its SHA-256 kept in the
+  state file (the baseline). Later visits never download it again.
+- **Refused** (403 `InvalidObjectState` for an attic object; 503 + `Retry-After` for a Smart-demoted
+  one — the prompt named the 503, the attic answer is the 403, the probe records whichever it gets):
+  the customer path runs with timestamps — the whole GET (refused: status, code, `Retry-After`),
+  `RestoreObject` (a 409 `RestoreAlreadyInProgress` is the same wait), a poll of HEAD's
+  `x-amz-restore` every `-poll` until `ongoing-request="false"` or the 1-byte read works, then the
+  whole GET, hashed. **Identical** = the SHA-256 baseline; with no baseline (first seen already on
+  tape), the MD5 of the bytes against the ETag when the ETag is a single-part upload's MD5 (both
+  waiting objects are); otherwise null — never a claimed match. One JSON line per timed restore in
+  `-report`; the object is then done.
+- A restore that does not complete within `-restore-timeout` is reported with the error and **resumed
+  by the next visit** (the first on-tape sighting is kept). Bytes that differ fail the run (exit 1).
+- The SDK's retries are off (`RetryMaxAttempts: 1`): the probe sees the first answer and its timings
+  are the server's.
+
+### Adversarial pass
+
+| # | case | result |
+|---|---|---|
+| 1 | hourly visits while readable | one baseline download ever; each later visit = 1 HEAD + 1 one-byte GET, no RestoreObject |
+| 2 | the refusal is a 503 + `Retry-After: 30` instead of the 403 | recorded as such (`status 503`, `code SlowDown`, `retry_after 30`), the path continues |
+| 3 | different bytes after the restore | `identical: false`, both hashes in the report, the run fails |
+| 4 | first seen already on tape, ETag not an MD5 | `identical: null`; with an MD5 ETag: compared (`identical_by: etag-md5`), and a mismatch is caught |
+| 5 | the restore never completes | report line with `restore not ready after …`, state not done; the next visit completes it and keeps the first on-tape time |
+| 6 | a bug caught by the first red run | the refusal step's pointer was overwritten by the final GET (`status 200` in `get_refused`) — separate variables now |
+
+### Tests
+
+`cmd/tools/geyser-restore-probe/probe_test.go`: 9 tests on `fakeArchive` (staged → tape → restoring →
+restored, 403 or 503 refusals, a restore that never completes, different bytes after it).
+
+### Live (prod, 2026-10-05 17:52 UTC, on SLC with the bench key, `-once`)
+
+```
+tier-archive-20261004/obj8.bin baseline: 8000000 bytes in 0.5 s, sha256 51503108…bab8be94
+tier-archive-20261004/obj8.bin readable (landing zone or restored): class GLACIER, x-amz-restore "ongoing-request=\"false\", expiry-date=\"Mon, 05 Oct 2026 17:52:13 GMT\"", check 1
+vault-bench-20261004/v256.bin baseline: 268435456 bytes in 11.5 s, sha256 80800c19…a53e82dd
+vault-bench-20261004/v256.bin readable (landing zone or restored): class GLACIER, x-amz-restore "", check 1
+```
+
+Both objects are still in the landing zone; the baselines are in `~/vaultaire-bench/restore-probe/state/`
+(the 256 MiB baseline took 11.5 s — Part 1's ranged read; its hash is the one Part 1 compared with
+Geyser's). The timed restore itself is what the hourly visits are waiting for.
