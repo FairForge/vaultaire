@@ -284,6 +284,7 @@ func TestRegisterJobs_EveryLoopIsAJobAndDailyTimesDoNotCollide(t *testing.T) {
 	eng := engine.NewEngine(nil, zap.NewNop(), nil)
 	eng.AddDriver("idrive", drivers.NewLocalDriver(t.TempDir(), zap.NewNop()))
 	eng.AddDriver("geyser", drivers.NewLocalDriver(t.TempDir(), zap.NewNop()))
+	eng.AddDriver("permafrost", drivers.NewLocalDriver(t.TempDir(), zap.NewNop())) // the parity leg (WP-VAULT-1)
 	eng.SetPrimary("idrive")
 
 	// Act
@@ -291,6 +292,7 @@ func TestRegisterJobs_EveryLoopIsAJobAndDailyTimesDoNotCollide(t *testing.T) {
 
 	// Assert: the jobs NewServer registers (account_deletion joins in Start).
 	want := map[string]string{
+		"vault_parity":        "every 2m0s",
 		"inventory":           "daily 00:30 UTC",
 		"dedup_gc":            "daily 02:30 UTC",
 		"retention":           "daily 03:30 UTC",
@@ -326,6 +328,7 @@ func TestRegisterJobs_EveryLoopIsAJobAndDailyTimesDoNotCollide(t *testing.T) {
 	hotOnly.SetPrimary("idrive")
 	s2 := NewServer(&config.Config{Server: config.ServerConfig{Port: 8000}}, zap.NewNop(), hotOnly, nil, jf.db)
 	assert.Nil(t, s2.jobs.job("smart_demotion"))
+	assert.Nil(t, s2.jobs.job("vault_parity"), "no parity leg, no parity job")
 	assert.NotNil(t, s2.jobs.job("retention"))
 }
 

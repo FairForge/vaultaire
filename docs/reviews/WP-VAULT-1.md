@@ -6,9 +6,9 @@ database `vaultaire_test_vault`, everything under `-race`; `make lint` 0, `make 
 
 | Part | What | PR |
 |---|---|---|
-| 0 | warm-up: the primary cannot be expired; an allowlist of `0.0.0.0/0` / `::/0` is refused | _below_ |
-| 1 | Geyser `Get` as parallel ranges | _below_ |
-| 2 | the parity second copy for `vault`-floor objects (flag `vault_parity`, migration 077) | _pending_ |
+| 0 | warm-up: the primary cannot be expired; an allowlist of `0.0.0.0/0` / `::/0` is refused | #587 |
+| 1 | Geyser `Get` as parallel ranges | #589 |
+| 2 | the parity second copy for `vault`-floor objects (flag `vault_parity`, migration 077) | _below_ |
 | 3 | `cmd/tools/geyser-restore-probe` | _pending_ |
 | 4 | per-PUT deadline + one retry in the fixed-bucket driver | _pending_ |
 
@@ -157,12 +157,155 @@ on the writer before `serveRange`, so a `/cdn` 206 already carried them; it is n
 `internal/drivers/geyser_ranges_test.go` (11 tests on the `rangeS3` fake: records every `Range`
 header and the peak in flight), `internal/api/cdn_test.go` (+3 assertions).
 
-### Live proof
+### Live proof (prod, 2026-10-05 17:44–17:52 UTC, from SLC with the bench key)
 
-_After the deploy of this part — recorded below the Part 2 section once run against `s3.stored.ge`._
+`vault-bench-20261004/v256.bin` (256 MiB, floor `vault`, backend `geyser`, in the landing zone), one
+whole-object GET per run — `aws s3api get-object --endpoint-url https://s3.stored.ge` (a single
+request: `aws s3 cp` would range it itself and hit `GetRange`):
+
+| Build | `GEYSER_GET_CONCURRENCY` | Wall | Rate | sha256 |
+|---|---|---|---|---|
+| `ec5fe6b` (before #589) | — (one stream) | 41.8 s | 6.4 MB/s | `80800c19…a53e82dd` |
+| `3bed449` (#589), run 1 | unset = 8 | 13.0 s | 20.6 MB/s | `80800c19…a53e82dd` |
+| `3bed449` (#589), run 2 | unset = 8 | 11.4 s | 23.6 MB/s | `80800c19…a53e82dd` |
+| the origin: Geyser's own endpoint, `aws s3 cp` with the Geyser key, key `t-<tenant>/<tenant>_vault-bench-20261004/v256.bin` | aws-cli's own ranges | 13.2 s | 20.4 MB/s | `80800c19…a53e82dd` |
+
+The three hashes through Vaultaire equal the origin's. `/metrics` on the box, before → after the two
+reads: `vaultaire_geyser_get_ranges_total` 0 → **64** (2 × 32 ranges of 8 MiB),
+`vaultaire_geyser_get_bytes_per_second` count 0 → 2, sum 45.8 MB/s (mean 22.9 MB/s). 3.2–3.7× on
+the default; the bench's 8-stream raw figure was 21.7 MB/s, so the driver is at the measured ceiling
+for 8.
 
 ### [YOU]
 
 - `GEYSER_GET_CONCURRENCY` for prod: 8 is the default (≈ 22 MB/s raw); 16 measured 41.6 MB/s. Both
   are within Geyser's landing-zone behaviour; the cost is 16 × 8 MiB = 128 MiB of buffer per
   concurrent archive read. Recommend `16` once the live proof below confirms the shape.
+
+## Part 2 — the parity second copy for vault-floor objects
+
+### The gap, seen first
+
+The pricing page sells a second copy for the Vault tiers; the engine made none (§15: "the '+ Lyve
+copy' in the cost model is not implemented — the engine treats the OneDrive fleet as a target-only
+second-copy role, nothing writes a second copy automatically"). A vault object lived on Geyser alone.
+The 2026-10-04 §16.3 measurement said what the copy should be: 4+4 with tape holding the data and
+free legs holding the parity reads 64 MiB in 1.4–1.5 s without touching tape and survives losing
+Geyser in 0.95 s — for the same byte count as a mirror.
+
+### What the second copy IS, and IS NOT (for the pricing page's sentence — [YOU])
+
+**IS:** Reed-Solomon 4+4 over the object, stripe by stripe (1 MiB per shard per stripe). The four
+data shards are not stored: they are byte ranges of the object tape already holds. The four parity
+shards — together the object's size, rounded up to whole 4 MiB stripes — are written to the free leg
+(`permafrost`, the OneDrive fleet; `lyve` when permafrost is not registered) by the `vault_parity`
+job, every two minutes, behind the commit. **Any four of the eight shards rebuild the object, so the
+four parity shards alone are a complete copy in information terms**: with Geyser answering an error,
+not found through the failover chain, or an open breaker, a GET is served by rebuilding from the
+parity (the mutation and the fixture prove it — `TestHandleGet_VaultObjectIsServedFromParityWhen*`);
+with a parity shard gone as well, from the data ranges Geyser can still serve plus the parity that is
+left (one range per stripe per missing shard). The prompt's "parity alone cannot rebuild" is wrong
+for k = m: it is exactly the measured "lose Geyser 0.95 s" case.
+
+**IS NOT:** a byte-for-byte mirror a plain GET can read (a read is a decode — 1–3 GB/s per core, nothing);
+**not synchronous** (the window between the commit and the job's pass, two minutes at most, has one
+copy — an object deleted inside it never had two); **not on a second paid vendor** (the leg is a free
+account; the copy's durability is the leg's — on permafrost that is the fleet's placement, which is why
+the shards go through the driver's `Put` and never reorder `TENANT_N`); **not a restore** (an object
+on tape, `ErrArchived`, keeps the restore semantics: the fallback never turns "restore it" into a
+silent rebuild); **not for chunked objects** (a vault-floor object is never chunked —
+`storageClassDisablesChunking` for every class `usage.FloorOf` maps to the attic; asserted by
+`TestVaultParity_AChunkedObjectIsNeverVaultFloor`, counted and logged if a row ever breaks it, never
+encoded). A pricing sentence that is true today, flag on: *"every Vault object is also written, within
+minutes, as a second erasure-coded copy on an independent store, from which it can be served whole if
+the tape library is unreachable."* "Second copy" alone is true in information terms; "mirror" and
+"second vendor of the same grade" are not.
+
+### What was built
+
+- **Migration 077** `vault_parity` (one row per object; `etag`, geometry, `shard_prefix`, `legs[]`,
+  `state complete|partial`, `last_error`, `attempts`, `written_at`).
+- **`internal/api/vault_parity_codec.go`**: `encodeParity` streams the object through one 8 MiB stripe
+  buffer and writes the four parity shards as streams; `parityRebuilder` is a pull-based reader that
+  decodes stripe by stripe for a window `[off, off+n)`, reading the parity streams and asking for a data
+  piece (a range of the object) only when fewer than four parity pieces are present; a stripe with
+  fewer than four pieces is an error naming the shortfall, never zeros; a parity stream that ends short
+  counts as absent from there on.
+- **`internal/api/vault_parity.go`**: the `vault_parity` interval job (2 min, boot +45 s, 1 h ceiling,
+  500 objects / 256 GiB per run; registered only when a leg is — a build with neither permafrost nor
+  lyve logs why): the stale pass (head row gone or etag changed → shards deleted, row deleted), then
+  the pending pass (vault-floor, non-chunked, flag on, no complete row for this etag, partial rows
+  under 20 attempts). The row is written `partial` BEFORE the first byte lands (a crash leaves a row
+  that says so) and `complete` only when all four shards are on the leg; one shard's `Put` failing
+  does not cut the others short (`tolerantWriter`) — the row names the shards that landed and the
+  error, and the next pass retries. Shards: `<tenant>__parity/<digest(bucket,key)>/<etag>/p<j>`,
+  through the leg driver's `Put` with `ContentLength` (permafrost streams it; lyve single-parts it).
+- **The read fallback** in `HandleGet`: for a cache-hit vault-floor row whose `engine.Get` (or ranged
+  `GetRange`) failed with anything but `ErrArchived`, `VaultParity.Open` is tried (flag on for the
+  tenant, row complete for the cached etag + size, leg registered and breaker not open); the 200/206
+  carries the cached identity headers and `x-vaultaire-served-from: parity`; a Range request decodes
+  only its stripes (the shards are read as ranges when the leg can). Counted in
+  `vaultaire_vault_parity_fallback_reads_total{served|unavailable}`.
+- **Erasure**: `HandleDelete` erases the shards at once (best effort; the job's stale pass finishes a
+  leg that could not be reached); the account-deletion runner's new stage **b1** (after the object
+  walk, before the sweep) erases every row's shards and **defers the tenant** when the leg is not
+  registered or its breaker is open (`errParityLegUnavailable`, stage `parity` on the record); the
+  sweep lists the `_parity` container on every pass, rows or not; `account.Deleted` erases the rows.
+- Flag `vault_parity` (default OFF; per tenant first, then `*`), on `/admin/flags`; metrics
+  `vaultaire_vault_parity_objects_total{complete|partial|failed|erased}`, `_bytes_total`,
+  `_fallback_reads_total{served|unavailable}`; `vault_parity` in `vaultaire-jobs.yml`'s periodic list.
+
+### Same logic on other entry points
+
+Every read of a vault object's bytes: the S3 GET (whole and ranged) has the fallback; HEAD serves
+from the cache and needs none; **`/cdn` and CopyObject source reads do not fall back** (a public
+vault bucket and a copy out of the attic while Geyser is down keep failing as before — noted, small).
+Every path that makes a row stale is covered by the one stale query (overwrite by PUT, multipart
+complete, CopyObject destination, DeleteObject — all change or remove the head row's etag). Every
+path that must remove shards: DeleteObject (sync), the job (stale), the deletion runner (stage b1),
+the sweep (the `_parity` container).
+
+### Adversarial pass (mutations seen red)
+
+| # | mutation / case | result |
+|---|---|---|
+| M1 | the GET fallback removed | `TestHandleGet_VaultObjectIsServedFromParityWhenItsBackendFails` red |
+| M2 | `ErrArchived` falls back too | `TestHandleGet_ArchivedVaultObjectKeepsTheRestoreSemantics` red (403 InvalidObjectState stays) |
+| M3 | the delete hook removed | `TestHandleDelete_ErasesTheParityShardsWithTheObject` red |
+| M4 | the deletion runner's stage removed | `TestAccountDeletion_ErasesParityShards…` red |
+| M5 | the etag guard in `Open` removed | `TestVaultParity_OpenRebuildsTheObjectWhenGeyserIsGone` red |
+| M6 | the breaker check in `eraseShards` removed | `TestVaultParity_EraseTenantDefersWhenTheLegCannotBeReached` red |
+| M7 | `_parity` not in the sweep plan | `TestSweepPlan_AlwaysListsTheParityContainer` red |
+| M8 | the rebuilder serves a stripe with < 4 pieces | both "data ranges that are readable" tests red |
+| M9 | `tolerantWriter` dropped (one failed shard cuts the rest) | `TestVaultParity_PartialWriteLeavesARowThatSaysSo` red |
+| M10 | chunked vault rows encoded anyway | `TestVaultParity_AChunkedObjectIsNeverVaultFloor` red |
+| M11 | the flag not checked in the job | `TestVaultParity_FlagOffTenantIsSkipped` red |
+| M12 | the stale pass skipped | `TestVaultParity_StaleShardsAreErased` red |
+| M13 | the row inserted as `complete` before the shards land | **survived** — no test kills the process mid-write; the pre-insert is for a crash, by construction |
+| M14 | an etag change not treated as stale | `TestVaultParity_StaleShardsAreErased` red |
+| — | a parity write that lands on three shards and fails on one | row `partial`, `legs = [permafrost, permafrost, '', permafrost]`, `last_error` names `p2`, three files on the leg; the next pass completes it |
+| — | an erasure with the leg's breaker open / the leg unregistered | deferred, nothing erased, rows kept; with the leg back: shards and rows gone, counted |
+| — | Geyser's breaker open (five failures through the engine) | the GET is served from parity (the chain ended at the primary's "not found") |
+
+### Tests
+
+`internal/api/vault_parity_codec_test.go` (6), `vault_parity_test.go` (15: the job, the fallback
+reader, the S3 GET and DELETE, the account erasure, the sweep plan), on local-driver stand-ins for
+Geyser (whole GET and ranges fail on demand) and the leg (one shard's Put fails on demand).
+
+### Decisions
+
+- **D-VAULT-2a** One leg per deployment (`permafrost`, else `lyve`), all four shards on it. The bench's
+  2+2 split across two legs survives either leg alone only with the data; one leg keeps the write
+  path one driver and the erasure one breaker. `legs[]` is per shard so a split can come later
+  without a migration.
+- **D-VAULT-2b** The fallback is gated by the flag too: off = the copy is neither written nor read.
+  A kill-switch that still reads would be a half-off.
+- **D-VAULT-2c** `/cdn` and CopyObject do not fall back. Public vault buckets are not a thing yet.
+
+### Not done
+
+- A Prometheus rule on `vaultaire_vault_parity_fallback_reads_total{outcome="served"}` (a served
+  fallback means Geyser failed a customer read) — one rule, when the metric has a day of zeros.
+- The dashboard does not show a vault object's copy state; `GET /api/v1/admin/jobs` shows the job's
+  last result (`protected`, `partial`, `erased`, `leg`).

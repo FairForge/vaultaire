@@ -700,6 +700,7 @@ func (s *Server) handleGetObject(w http.ResponseWriter, r *http.Request, req *S3
 	adapter.chunkEncSvc = s.chunkEncSvc
 	adapter.gci = s.gci
 	adapter.smartPromoter = s.smartPromoter
+	adapter.vaultParity = s.vaultParity
 	if s.chunkGetPrefetch > 0 {
 		adapter.chunkGetPrefetch = s.chunkGetPrefetch
 	}
@@ -951,6 +952,7 @@ func (s *Server) handleDeleteObject(w http.ResponseWriter, r *http.Request, req 
 	adapter := NewS3ToEngine(s.engine, s.db, s.logger)
 	adapter.gci = s.gci
 	adapter.quota = s.quotaManager
+	adapter.vaultParity = s.vaultParity
 	adapter.HandleDelete(w, r, req.Bucket, req.Object)
 }
 

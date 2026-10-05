@@ -43,6 +43,7 @@ import (
 //	bandwidth_alerts     1 h    +40 s
 //	access_log_delivery  5 m    +1 m
 //	account_export       1 m    +15 s   (renders pending GDPR exports, WP-R10-3b)
+//	vault_parity         2 m    +45 s   (parity shards of vault-floor objects, WP-VAULT-1; only with a leg)
 //
 // The three cleanups used to wait a full hour after every start before
 // their first pass.
@@ -116,6 +117,17 @@ func (s *Server) registerJobs() {
 	}
 	if s.accountExports != nil {
 		s.jobs.Register(s.accountExports.spec())
+	}
+	if s.vaultParity != nil {
+		// Needs a free leg to write to; without one (a local build, a
+		// deployment with neither permafrost nor lyve) it is not a job of
+		// this process — it would fail every pass and read as stale.
+		if leg, _, ok := s.vaultParity.Leg(); ok {
+			s.jobs.Register(s.vaultParity.spec())
+			logger.Info("vault parity job registered", zap.String("leg", leg))
+		} else {
+			logger.Info("vault parity not scheduled: no parity leg (permafrost or lyve) is registered")
+		}
 	}
 	// The logging_enabled gate is loaded here, before the first request can
 	// be recorded against it; every delivery pass refreshes it.

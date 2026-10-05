@@ -39,7 +39,7 @@ restart. Backed by the `feature_flags` table (migration 059).
 
 Key constants live in `internal/api/flags_wiring.go` (the two dashboard ones
 are re-exported from `dashboard/handlers`); the `Register` calls are in
-`api.NewServer`. Five flags today:
+`api.NewServer`. Seven flags today:
 
 | Flag | Default | Gate site |
 |------|---------|-----------|
@@ -48,6 +48,8 @@ are re-exported from `dashboard/handlers`); the `Register` calls are in
 | `smart_demotion` | false | per tenant inside `SmartDemotionRunner.RunOnce` (`api/smart_demotion.go`) |
 | `quota_checkout` | false | the dashboard billing page's house checkout (`dashboard/handlers/billing_house.go`) |
 | `house_overview` | false | the house on the dashboard overview (`dashboard/handlers/overview.go`) |
+| `egress_throttle` | false | the egress allowance as a rate cap (WP-R10-9; `api/egress_throttle.go`) |
+| `vault_parity` | false | per tenant inside `VaultParity.RunOnce` (the job writes shards) and `VaultParity.Open` (the read fallback) — `api/vault_parity.go`, WP-VAULT-1 |
 
 Adding a flag = key constant + `Register` call + call site (+ a `flagInfos`
 entry in `dashboard/handlers/admin_flags.go`). No schema change.

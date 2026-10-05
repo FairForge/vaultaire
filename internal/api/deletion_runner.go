@@ -110,6 +110,10 @@ type AccountDeletionRunner struct {
 	Stripe subscriptionCanceller
 	// Auth evicts the erased account from the in-process cache (nil-safe).
 	Auth accountEvictor
+	// VaultParity erases the parity shards of the tenant's vault objects
+	// before the sweep (WP-VAULT-1); a leg that cannot be reached defers
+	// the tenant. Nil-safe.
+	VaultParity *VaultParity
 	// Sessions revokes the user's dashboard sessions (nil-safe; the DB
 	// store's rows are deleted by EraseRows anyway).
 	Sessions dashauth.SessionStore
@@ -150,6 +154,9 @@ type TenantErasure struct {
 	LockedErased     int    `json:"locked_erased"`
 	ObjectFailures   int    `json:"object_failures"`
 	MultipartAborted int    `json:"multipart_aborted"`
+	// ParityErased counts vault objects whose parity shards were erased
+	// from the leg (WP-VAULT-1).
+	ParityErased int `json:"parity_erased,omitempty"`
 	// Swept is the number of blobs with no head row the sweep deleted, per
 	// backend (WP-R10-3c). SweptAfterErase of them were found by the pass
 	// after the row erase (a write that was in flight).
@@ -346,6 +353,15 @@ func (r *AccountDeletionRunner) eraseTenant(ctx context.Context, d account.Due) 
 		}
 		if te.ObjectFailures > 0 || remaining > 0 {
 			return r.defer_(te, log, "objects remain", fmt.Errorf("%d head rows left, %d backend failures — resuming next run", remaining, te.ObjectFailures))
+		}
+		// b1. The parity copies of the vault objects (WP-VAULT-1): every
+		// row's shards on the leg, before the sweep; a leg that is not
+		// registered or whose breaker is open defers the tenant — never
+		// "erased" while parity bytes may remain.
+		n, err := r.VaultParity.EraseTenant(ctx, d.TenantID)
+		te.ParityErased += n
+		if err != nil {
+			return r.defer_(te, log, "parity", err)
 		}
 	}
 

@@ -141,6 +141,10 @@ var sweepBucketSources = []struct{ table, query string }{
 	{"object_metadata", `SELECT DISTINCT bucket_name FROM object_metadata WHERE tenant_id::text = $1`},
 	{"tenant_chunk_refs", `SELECT DISTINCT bucket_name FROM tenant_chunk_refs WHERE tenant_id::text = $1`},
 	{"bucket_notifications", `SELECT DISTINCT bucket FROM bucket_notifications WHERE tenant_id = $1`},
+	// vault_parity.bucket is the object's bucket (already listed); the
+	// shards themselves live in the `_parity` container, which planSweep
+	// lists unconditionally (a shard whose row is gone must still be found).
+	{"vault_parity", `SELECT DISTINCT bucket FROM vault_parity WHERE tenant_id = $1`},
 	// object_locations.bucket is the CONTAINER the engine wrote to
 	// (`<tenant>_<bucket>`, or `_global` for a chunk): only the tenant's own
 	// containers count, with the tenant part taken off.
@@ -225,6 +229,13 @@ func (r *AccountDeletionRunner) planSweep(ctx context.Context, tenantID string) 
 		}
 	}
 	sort.Strings(plan.buckets)
+	// The parity shards of the tenant's vault objects live in the `_parity`
+	// system bucket's container (WP-VAULT-1): listed on every sweep, rows or
+	// not — a shard whose row is gone must still be found and deleted. Last,
+	// after the tenant's own buckets.
+	if !seen[parityBucket] {
+		plan.buckets = append(plan.buckets, parityBucket)
+	}
 
 	named, err := queryStrings(ctx, r.db, `
 		SELECT DISTINCT backend_name FROM object_versions WHERE tenant_id = $1 AND COALESCE(backend_name, '') <> ''

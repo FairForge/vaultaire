@@ -66,6 +66,9 @@ func (s *Server) initMetrics() {
 		// refused because their context named no tenant (they used to land
 		// under t-default/). The second starts at 0 for every backend.
 		reg.MustRegister(chunkLegacyReads)
+		// The Vault parity copy (WP-VAULT-1): shards written, erased, and
+		// reads a backend failure sent to the parity.
+		reg.MustRegister(vaultParityObjects, vaultParityBytes, vaultParityFallbacks)
 		// Routing truth (WP-R7-5): the counters, and a collector that reads
 		// the unknown-backend rows and the last run from the tables.
 		reg.MustRegister(routingTruthChecks, routingChunkChecks, routingUnknownReads)
