@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/account"
@@ -598,13 +599,10 @@ func (s *Server) handleMgmtCreateKey(w http.ResponseWriter, r *http.Request) {
 
 	key, err := s.auth.GenerateAPIKey(r.Context(), userID, req.Name, opts)
 	if err != nil {
-		if errors.Is(err, auth.ErrKeyLimitReached) {
-			writeManagementError(w, ErrTypeConflict, "key_limit_exceeded",
-				"this plan's API key limit is reached; revoke a key or upgrade", "")
-			return
+		if !writeKeyScopeError(w, err) {
+			s.logger.Error("management create key", zap.Error(err))
+			writeManagementError(w, ErrTypeAPI, "internal_error", "failed to create API key", "")
 		}
-		s.logger.Error("management create key", zap.Error(err))
-		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to create API key", "")
 		return
 	}
 
@@ -627,6 +625,28 @@ func (s *Server) handleMgmtCreateKey(w http.ResponseWriter, r *http.Request) {
 		"request_id":   getRequestID(w),
 	}
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+// writeKeyScopeError answers the typed refusals of auth.GenerateAPIKey —
+// the same codes on the management API and the user API (WP-R5-12 /
+// WP-R11-6): 400 for a scope that cannot be stored, 409 for the plan's cap.
+// It reports whether err was one of them.
+func writeKeyScopeError(w http.ResponseWriter, err error) bool {
+	switch {
+	case errors.Is(err, auth.ErrInvalidPermission):
+		writeManagementError(w, ErrTypeInvalidRequest, "invalid_permissions", err.Error(), "permissions")
+	case errors.Is(err, auth.ErrInvalidIPAllowlist):
+		writeManagementError(w, ErrTypeInvalidRequest, "invalid_ip_allowlist",
+			"ip_allowlist entries must be IP addresses or CIDR networks: "+strings.TrimPrefix(err.Error(), auth.ErrInvalidIPAllowlist.Error()+": "), "ip_allowlist")
+	case errors.Is(err, auth.ErrExpiryInPast):
+		writeManagementError(w, ErrTypeInvalidRequest, "invalid_expiry", "expires_at must be in the future", "expires_at")
+	case errors.Is(err, auth.ErrKeyLimitReached):
+		writeManagementError(w, ErrTypeConflict, "key_limit_exceeded",
+			"this plan's API key limit is reached; revoke a key or upgrade", "")
+	default:
+		return false
+	}
+	return true
 }
 
 func (s *Server) handleMgmtDeleteKey(w http.ResponseWriter, r *http.Request) {

@@ -70,6 +70,12 @@ func (a *AuthService) GenerateAPIKey(ctx context.Context, userID, name string, o
 	if !exists {
 		return nil, fmt.Errorf("user not found")
 	}
+	// The scope is checked here, once, for every entry point (WP-R5-12):
+	// unknown permissions, allowlist entries that are not an address or a
+	// network, an expiry that has already passed.
+	if err := opts.Validate(time.Now()); err != nil {
+		return nil, err
+	}
 	if err := a.checkKeyCap(ctx, user); err != nil {
 		return nil, err
 	}
@@ -264,7 +270,8 @@ func (a *AuthService) liveSTSChildren(ctx context.Context, parentKeyID string) i
 }
 
 // GetOwnedAPIKey returns the caller's key with this id, or ErrKeyNotFound /
-// ErrKeyRevoked. Used by STS to bound a token to a named parent key.
+// ErrKeyRevoked / ErrKeyExpired. Used by STS to bound a token to a named
+// parent key: an expired parent mints nothing.
 func (a *AuthService) GetOwnedAPIKey(_ context.Context, userID, keyID string) (*APIKey, error) {
 	key := a.findOwnedKey(userID, keyID)
 	if key == nil {
@@ -272,6 +279,9 @@ func (a *AuthService) GetOwnedAPIKey(_ context.Context, userID, keyID string) (*
 	}
 	if key.RevokedAt != nil {
 		return nil, ErrKeyRevoked
+	}
+	if IsKeyExpired(key.ExpiresAt) {
+		return nil, ErrKeyExpired
 	}
 	cp := *key
 	cp.Secret = ""
@@ -308,8 +318,8 @@ func (a *AuthService) ValidateAPIKey(ctx context.Context, key, secret string) (*
 		return nil, fmt.Errorf("API key has been revoked")
 	}
 
-	if apiKey.ExpiresAt != nil && time.Now().After(*apiKey.ExpiresAt) {
-		return nil, fmt.Errorf("API key has expired")
+	if IsKeyExpired(apiKey.ExpiresAt) {
+		return nil, ErrKeyExpired
 	}
 
 	hash := sha256.Sum256([]byte(secret))

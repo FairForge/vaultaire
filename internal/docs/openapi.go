@@ -1027,12 +1027,12 @@ func generateManagementPaths() map[string]*PathItem {
 					"500": errResp("`internal_error`"),
 				})),
 			Post: mut(withBody(jsonOp("Management", "Create an API key", "ManageCreateKey",
-				"Creates a scoped key: `permissions` (S3 operation names, validated), `bucket_scope`, `ip_allowlist` (CIDRs) and `expires_at`. "+
+				"Creates a scoped key: `permissions` (S3 operation names, validated), `bucket_scope`, `ip_allowlist` (IP addresses or CIDR networks, stored canonical) and `expires_at` (must be in the future). "+
 					"`BypassGovernanceRetention` is a privilege, not an operation: it lets the key have `x-amz-bypass-governance-retention` honoured. "+
 					"The secret is returned once. Caps: 50 live keys per account, and the plan's own limit (both 409). Emits `key.created`.",
 				map[string]Response{
 					"201": jsonResp("Key created; `secret` is shown only here", ref("APIKeyCreated")),
-					"400": errResp("`invalid_json` or `invalid_permissions` (`unknown permission: ...`)"),
+					"400": errResp("`invalid_json`, `invalid_permissions` (`unknown permission: ...`), `invalid_ip_allowlist` (an entry that is not an address or a network), or `invalid_expiry` (`expires_at` not in the future)"),
 					"409": errResp("`key_limit_exceeded` (50 per account, or the plan's limit) or `idempotency_key_reuse`"),
 					"500": errResp("`internal_error`"),
 				}),
@@ -1228,7 +1228,7 @@ func generateSTSPaths() map[string]*PathItem {
 				map[string]Response{
 					"201": jsonResp("Credentials; `secret_key` is shown only here", ref("STSToken")),
 					"400": errResp("`invalid_json`, `invalid_permissions` (`unknown permission: ...`), `parent_key_revoked`, or `scope_error` (e.g. `no permissions overlap between parent key and request`)"),
-					"401": errResp("Bearer token missing/invalid, or `missing_user`"),
+					"401": errResp("Bearer token missing/invalid, `missing_user`, or `parent_key_expired` — `parent_key_id` names a key whose `expires_at` has passed"),
 					"404": errResp("`parent_key_not_found` — `parent_key_id` is not one of the caller's keys"),
 					"500": errResp("`internal_error`"),
 				}),
@@ -1629,7 +1629,7 @@ func generateS3Schemas() map[string]Schema {
 func generateJSONSchemas() map[string]Schema {
 	permissions := &Schema{
 		Type:        "array",
-		Description: "S3 operation names the key may perform (`GetObject`, `PutObject`, `ListBuckets`, ...) or `*` for all; empty = full access. `BypassGovernanceRetention` adds the privilege to bypass GOVERNANCE Object Lock retention with `x-amz-bypass-governance-retention` (full-access keys have it)",
+		Description: "S3 operation names the key may perform — every operation the S3 parser knows (`GetObject`, `PutObject`, `ListBuckets`, `GetObjectTagging`, `GetBucketLocation`, ...; the list is `auth.S3Operations`) or `*` for all; empty = full access. `BypassGovernanceRetention` adds the privilege to bypass GOVERNANCE Object Lock retention with `x-amz-bypass-governance-retention` (full-access keys have it)",
 		Items:       &Schema{Type: "string"},
 	}
 	apiKeyProps := func(withSecret, withRequestID bool) map[string]*Schema {
@@ -1822,8 +1822,8 @@ func generateJSONSchemas() map[string]Schema {
 			"name":         str("Key name"),
 			"permissions":  permissions,
 			"bucket_scope": strArray("Buckets the key is limited to"),
-			"ip_allowlist": strArray("CIDRs the key may be used from"),
-			"expires_at":   dateTime("Absolute expiry"),
+			"ip_allowlist": strArray("IP addresses or CIDR networks the key may be used from; validated and stored canonical"),
+			"expires_at":   dateTime("Absolute expiry; must be in the future"),
 		}),
 		"Usage": object("", map[string]*Schema{
 			"object":        strEnum("", "usage"),

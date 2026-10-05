@@ -81,9 +81,12 @@ Password reset rate limiting is in-memory (per-email, 3/hour, sliding window). T
 `scoped_keys.go` — permission check functions reusable by S3 enforcement and future STS (Phase 5.11.5):
 - `CheckPermission(keyPerms, operation)` — `["*"]` allows all; otherwise exact match
 - `CheckBucketScope(scopes, bucket)` — empty = unrestricted
-- `CheckIPAllowlist(allowlist, clientIP)` — supports CIDR and exact IP; empty = unrestricted
+- `CheckIPAllowlist(allowlist, clientIP)` — CIDR networks and single addresses, both sides PARSED (`::FFFF:1.2.3.4` matches `1.2.3.4`, case/zero-padding of IPv6 does not matter — R5-23); empty = unrestricted; a junk entry grants nothing
+- `ValidateIPAllowlist(entries)` — every entry an address or a CIDR network, returned canonical (`net.IP.String` / `net.IPNet.String`); junk is `ErrInvalidIPAllowlist` naming the entry
+- `KeyCreateOptions.Validate(now)` — permissions known, allowlist canonical, `ExpiresAt` after now (`ErrExpiryInPast`); called by `GenerateAPIKey` so the dashboard form, the user API and the management API refuse the same scope the same way (WP-R5-12)
+- `ErrKeyExpired` — a live key past `expires_at`: `GetOwnedAPIKey` (the STS parent → 401 `parent_key_expired`) and `ValidateAPIKey` return it; S3 answers `ExpiredToken` with the key's expiry in the message (`handleS3Request`)
 - `IsKeyExpired(expiresAt)` — nil = never expires
-- `ValidatePermissions(perms)` — validates against `ValidPermissions` map (all S3 operation names from `determineOperation`, plus the one privilege that is not an operation: `BypassGovernanceRetention`)
+- `ValidatePermissions(perms)` — validates against `ValidPermissions`, which is BUILT from `S3Operations` (`s3_operations.go`: the `Op*` constants the S3 parser `determineOperation` assigns and nothing else — `TestS3ParserEmitsOnlyKnownOperations` in `internal/api` reads the parser's source) plus `*` and the one privilege that is not an operation: `BypassGovernanceRetention`. One list (WP-R5-12; the old literal copy lagged the parser by 18 operations). Unknown = `ErrInvalidPermission`
 - `PermBypassGovernanceRetention` / `KeyScope.CanBypassGovernanceRetention()` (WP-R4-1) — whether the key may have `x-amz-bypass-governance-retention` honoured: `*` (primary key, key without a permission list) or the explicit permission; an STS token (`KeyScope.Temporary`) only with the explicit permission; nil scope = no. The permission grants no operation by itself
 - `WithKeyScope(ctx, scope)` / `KeyScopeFromContext(ctx)` — the authenticated key's scope on the request context (set by `api.handleS3Request`, read by the Object Lock bypass check)
 

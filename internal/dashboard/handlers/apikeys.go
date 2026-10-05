@@ -89,6 +89,13 @@ func HandleGenerateKey(tmpl *template.Template, authSvc *auth.AuthService, db *s
 		ipAllowlist := parseCSV(r.FormValue("ip_allowlist"))
 		expiresStr := r.FormValue("expires_at")
 
+		fail := func(msg string) {
+			data["GenerateError"] = msg
+			data["Keys"] = listKeys(r, authSvc, sd.UserID)
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_ = tmpl.ExecuteTemplate(w, "base", data)
+		}
+
 		hasScope := len(perms) > 0 || len(bucketScope) > 0 || len(ipAllowlist) > 0 || expiresStr != ""
 		if hasScope {
 			opts = &auth.KeyCreateOptions{
@@ -97,36 +104,37 @@ func HandleGenerateKey(tmpl *template.Template, authSvc *auth.AuthService, db *s
 				IPAllowlist: ipAllowlist,
 			}
 			if expiresStr != "" {
-				if t, parseErr := time.Parse("2006-01-02", expiresStr); parseErr == nil {
-					eod := t.Add(24*time.Hour - time.Second)
-					opts.ExpiresAt = &eod
-				}
-			}
-			if len(opts.Permissions) > 0 {
-				if err := auth.ValidatePermissions(opts.Permissions); err != nil {
-					data["GenerateError"] = "Invalid permission: " + err.Error()
-					data["Keys"] = listKeys(r, authSvc, sd.UserID)
-					w.Header().Set("Content-Type", "text/html; charset=utf-8")
-					_ = tmpl.ExecuteTemplate(w, "base", data)
+				// A date that does not parse used to be silently dropped
+				// — the key was created without the expiry the form asked
+				// for (WP-R5-12).
+				t, parseErr := time.Parse("2006-01-02", expiresStr)
+				if parseErr != nil {
+					fail("The expiry date must be YYYY-MM-DD.")
 					return
 				}
+				eod := t.Add(24*time.Hour - time.Second)
+				opts.ExpiresAt = &eod
 			}
 		}
 
+		// The scope is validated by the service, the same way for the
+		// dashboard, the user API and the management API (WP-R5-12).
 		key, err := authSvc.GenerateAPIKey(r.Context(), sd.UserID, name, opts)
 		if err != nil {
-			if errors.Is(err, auth.ErrKeyLimitReached) {
-				data["GenerateError"] = fmt.Sprintf("Free tier allows %d extra API key besides the one you got at signup. Revoke one first, or upgrade your plan for more.", usage.FreeTierLimits.MaxAPIKeys)
-				data["Keys"] = listKeys(r, authSvc, sd.UserID)
-				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-				_ = tmpl.ExecuteTemplate(w, "base", data)
-				return
+			switch {
+			case errors.Is(err, auth.ErrKeyLimitReached):
+				fail(fmt.Sprintf("Free tier allows %d extra API key besides the one you got at signup. Revoke one first, or upgrade your plan for more.", usage.FreeTierLimits.MaxAPIKeys))
+			case errors.Is(err, auth.ErrInvalidPermission):
+				fail("Invalid permission: " + err.Error())
+			case errors.Is(err, auth.ErrInvalidIPAllowlist):
+				fail("IP allowlist entries must be IP addresses or CIDR networks (for example 203.0.113.7 or 10.0.0.0/8): " +
+					strings.TrimPrefix(err.Error(), auth.ErrInvalidIPAllowlist.Error()+": ") + ".")
+			case errors.Is(err, auth.ErrExpiryInPast):
+				fail("The expiry date must be in the future.")
+			default:
+				logger.Error("generate API key", zap.Error(err))
+				fail("Failed to generate key. Please try again.")
 			}
-			logger.Error("generate API key", zap.Error(err))
-			data["GenerateError"] = "Failed to generate key. Please try again."
-			data["Keys"] = listKeys(r, authSvc, sd.UserID)
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			_ = tmpl.ExecuteTemplate(w, "base", data)
 			return
 		}
 

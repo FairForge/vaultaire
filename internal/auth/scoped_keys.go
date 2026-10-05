@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -58,41 +59,73 @@ type KeyCreateOptions struct {
 	ExpiresAt   *time.Time
 }
 
-// ValidPermissions is the set of names that may appear in an API key's
-// permissions list. They match the operation strings produced by
-// determineOperation in s3.go, plus one privilege that is not an operation
-// (PermBypassGovernanceRetention).
-var ValidPermissions = map[string]bool{
-	"*":                           true,
-	PermBypassGovernanceRetention: true,
-	"GetObject":                   true,
-	"PutObject":                   true,
-	"DeleteObject":                true,
-	"HeadObject":                  true,
-	"ListObjects":                 true,
-	"ListBuckets":                 true,
-	"CreateBucket":                true,
-	"DeleteBucket":                true,
-	"HeadBucket":                  true,
-	"DeleteObjects":               true,
-	"InitiateMultipartUpload":     true,
-	"UploadPart":                  true,
-	"CompleteMultipartUpload":     true,
-	"AbortMultipartUpload":        true,
-	"ListMultipartUploads":        true,
-	"ListParts":                   true,
-	"GetBucketVersioning":         true,
-	"PutBucketVersioning":         true,
-	"GetBucketNotification":       true,
-	"PutBucketNotification":       true,
-	"GetObjectLockConfiguration":  true,
-	"PutObjectLockConfiguration":  true,
-	"PutObjectRetention":          true,
-	"GetObjectRetention":          true,
-	"PutObjectLegalHold":          true,
-	"GetObjectLegalHold":          true,
-	"PostObject":                  true,
-	"RestoreObject":               true,
+// The typed refusals of a key's scope at creation (WP-R5-12). Every entry
+// point — dashboard form, user API, management API — gets them from
+// GenerateAPIKey, so a junk allowlist entry or an expiry in the past is
+// refused the same way everywhere instead of being stored (R5-23, R12-32: a
+// typo in the allowlist never matched and the key was simply unusable; an
+// expiry in the past made a key that was dead on arrival).
+var (
+	ErrInvalidPermission  = errors.New("unknown permission")
+	ErrInvalidIPAllowlist = errors.New("invalid ip allowlist entry")
+	ErrExpiryInPast       = errors.New("expiry must be in the future")
+	// ErrKeyExpired: the key exists, is not revoked, and its expires_at has
+	// passed. S3 answers ExpiredToken; the JSON APIs a typed 401.
+	ErrKeyExpired = errors.New("API key expired")
+)
+
+// Validate checks the options and canonicalises the IP allowlist in place.
+// now is the clock the expiry is checked against.
+func (o *KeyCreateOptions) Validate(now time.Time) error {
+	if o == nil {
+		return nil
+	}
+	if err := ValidatePermissions(o.Permissions); err != nil {
+		return err
+	}
+	canon, err := ValidateIPAllowlist(o.IPAllowlist)
+	if err != nil {
+		return err
+	}
+	o.IPAllowlist = canon
+	if o.ExpiresAt != nil && !o.ExpiresAt.After(now) {
+		return fmt.Errorf("%w: %s is not after %s", ErrExpiryInPast,
+			o.ExpiresAt.UTC().Format(time.RFC3339), now.UTC().Format(time.RFC3339))
+	}
+	return nil
+}
+
+// ValidateIPAllowlist checks that every entry is an IP address or a CIDR
+// network and returns the list in canonical form (net.IP.String /
+// net.IPNet.String — the form clientip hands CheckIPAllowlist, so
+// `::FFFF:1.2.3.4` and `2001:DB8::1` match the way they are written). A
+// host bit set inside a CIDR is normalised to the network address. Junk is
+// ErrInvalidIPAllowlist naming the entry.
+func ValidateIPAllowlist(entries []string) ([]string, error) {
+	if len(entries) == 0 {
+		return entries, nil
+	}
+	out := make([]string, 0, len(entries))
+	for _, raw := range entries {
+		entry := strings.TrimSpace(raw)
+		if entry == "" {
+			return nil, fmt.Errorf("%w: empty entry", ErrInvalidIPAllowlist)
+		}
+		if strings.Contains(entry, "/") {
+			_, cidr, err := net.ParseCIDR(entry)
+			if err != nil {
+				return nil, fmt.Errorf("%w: %q is not a CIDR network", ErrInvalidIPAllowlist, entry)
+			}
+			out = append(out, cidr.String())
+			continue
+		}
+		ip := net.ParseIP(entry)
+		if ip == nil {
+			return nil, fmt.Errorf("%w: %q is not an IP address or a CIDR network", ErrInvalidIPAllowlist, entry)
+		}
+		out = append(out, ip.String())
+	}
+	return out, nil
 }
 
 // CheckPermission returns true if keyPerms authorizes the given operation.
@@ -125,20 +158,26 @@ func CheckIPAllowlist(allowlist []string, clientIP string) bool {
 	if len(allowlist) == 0 {
 		return true
 	}
-	parsed := net.ParseIP(clientIP)
+	parsed := net.ParseIP(strings.TrimSpace(clientIP))
+	if parsed == nil {
+		return false
+	}
 	for _, entry := range allowlist {
+		entry = strings.TrimSpace(entry)
 		if strings.Contains(entry, "/") {
 			_, cidr, err := net.ParseCIDR(entry)
 			if err != nil {
-				continue
+				continue // refused at creation since WP-R5-12; a legacy row's junk grants nothing
 			}
-			if parsed != nil && cidr.Contains(parsed) {
+			if cidr.Contains(parsed) {
 				return true
 			}
-		} else {
-			if entry == clientIP {
-				return true
-			}
+			continue
+		}
+		// Both sides parsed: `::FFFF:1.2.3.4` matches `1.2.3.4`, `2001:DB8::1`
+		// matches `2001:db8::1` (R5-23 — the string compare never did).
+		if ip := net.ParseIP(entry); ip != nil && ip.Equal(parsed) {
+			return true
 		}
 	}
 	return false
@@ -157,7 +196,7 @@ func IsKeyExpired(expiresAt *time.Time) bool {
 func ValidatePermissions(perms []string) error {
 	for _, p := range perms {
 		if !ValidPermissions[p] {
-			return fmt.Errorf("unknown permission: %q", p)
+			return fmt.Errorf("%w: %q", ErrInvalidPermission, p)
 		}
 	}
 	return nil

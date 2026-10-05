@@ -64,6 +64,11 @@ func (s *Server) handleSTSCreateToken(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, auth.ErrKeyRevoked):
 		writeManagementError(w, ErrTypeInvalidRequest, "parent_key_revoked", "parent_key_id names a revoked key", "parent_key_id")
 		return
+	case errors.Is(err, auth.ErrKeyExpired):
+		// The key's own code (WP-R5-12): a 401 that says "expired", not a
+		// scope error about a parent that cannot mint.
+		writeManagementError(w, ErrTypeAuthentication, "parent_key_expired", "parent_key_id names an expired key", "parent_key_id")
+		return
 	case err != nil:
 		s.logger.Error("sts parent key lookup", zap.Error(err))
 		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to resolve parent key", "")
