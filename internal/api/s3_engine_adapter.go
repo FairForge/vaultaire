@@ -70,6 +70,11 @@ type S3ToEngine struct {
 	// PR B). Nil = no promotion (tests, callers that never set it).
 	smartPromoter *SmartPromoter
 
+	// vaultParity serves a vault-floor object from its parity copy when its
+	// backend fails (WP-VAULT-1) and erases the shards with the object.
+	// Nil-safe.
+	vaultParity *VaultParity
+
 	// flags gates the chunked PUT path (1.13 `chunking` kill-switch +
 	// per-tenant override). Nil (tests, callers that never set it) means
 	// chunking stays on — the pre-flag behavior.
@@ -421,7 +426,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	// ranges on the same backends: 30–70 ms). An encrypted object still needs
 	// the full ciphertext (R2-02); a multi-range request is served whole.
 	var reader io.ReadCloser
-	var nativeRange *httpRange
+	var nativeRange, wantRange *httpRange
 	if rh := r.Header.Get("Range"); rh != "" && cacheHit && cachedEncAlgo == "" &&
 		!errors.Is(rangeParseErr(rh, cachedSize), errMultiRange) {
 		rng, parseErr := parseRangeHeader(rh, cachedSize)
@@ -430,6 +435,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 			writeRangeNotSatisfiable(w, cachedSize)
 			return
 		}
+		wantRange = rng
 		if ce, ok := a.engine.(*engine.CoreEngine); ok {
 			if rr, rangeErr := ce.GetRange(r.Context(), container, artifact, rng.start, rng.length); rangeErr == nil {
 				reader, nativeRange = rr, rng
@@ -438,6 +444,29 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	}
 	if reader == nil {
 		reader, err = a.engine.Get(r.Context(), container, artifact)
+	}
+	// A vault object whose backend failed — an error, not found through the
+	// failover chain, an open breaker — is rebuilt from its parity copy when
+	// there is one (WP-VAULT-1). On tape (ErrArchived) is the object's state,
+	// not a failure: the restore semantics stay.
+	if err != nil && cacheHit && cachedFloor == usage.FloorVault && a.vaultParity != nil && !errors.Is(err, engine.ErrArchived) {
+		off, n := int64(0), cachedSize
+		if wantRange != nil {
+			off, n = wantRange.start, wantRange.length
+		}
+		pr, perr := a.vaultParity.Open(r.Context(), t.ID, bucket, artifact, cachedETag, cachedSize, off, n)
+		if perr == nil {
+			a.logger.Warn("vault object served from its parity copy", zap.String("bucket", bucket), zap.String("key", artifact),
+				zap.NamedError("backend", err))
+			vaultParityFallbacks.WithLabelValues("served").Inc()
+			reader, err = pr, nil
+			nativeRange = wantRange
+			w.Header().Set("x-vaultaire-served-from", "parity")
+		} else {
+			a.logger.Error("vault object: its backend failed and the parity copy cannot serve it",
+				zap.String("bucket", bucket), zap.String("key", artifact), zap.NamedError("backend", err), zap.NamedError("parity", perr))
+			vaultParityFallbacks.WithLabelValues("unavailable").Inc()
+		}
 	}
 	if err != nil {
 		if errors.Is(err, engine.ErrAllBackendsUnavailable) {
@@ -2177,6 +2206,9 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 		// reclaimed) that the delete above did not reach: remove it now and
 		// settle the ledger, so no later job owes this key a delete (WP-R13-2).
 		a.smartPromoter.OnDelete(r.Context(), t.ID, bucket, object)
+		// The parity copy of a vault object goes with it (WP-VAULT-1); a
+		// leg that cannot be reached now is the job's stale pass to finish.
+		a.vaultParity.OnObjectDeleted(r.Context(), t.ID, bucket, object)
 	}
 
 	w.WriteHeader(http.StatusNoContent)

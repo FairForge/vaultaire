@@ -53,6 +53,7 @@ var exportExcludedTables = map[string]string{
 	"object_metadata":    "chunk manifest of a deduplicated object; `objects` carries the object",
 	"tenant_chunk_refs":  "chunk references of a deduplicated object; `objects` carries the object",
 	"smart_demotions":    "Smart-tier placement ledger; the class the customer sees is in `objects`",
+	"vault_parity":       "the parity copy's placement ledger (WP-VAULT-1): where the engine keeps a second copy of an object already in `objects`",
 	"dedup_statistics":   "internal dedup statistics (no customer data)",
 	"access_patterns":    "internal access heuristics (no writer in the product)",
 	"tenant_cost_daily":  "the operator's cost-of-goods ledger, not the customer's data",

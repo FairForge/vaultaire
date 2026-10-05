@@ -74,6 +74,10 @@ var Deleted = []Rule{
 	{"tenant_chunk_refs", `DELETE FROM tenant_chunk_refs WHERE tenant_id::text = $1`, ByTenant},
 	{"object_metadata", `DELETE FROM object_metadata WHERE tenant_id::text = $1`, ByTenant},
 	{"object_head_cache", `DELETE FROM object_head_cache WHERE tenant_id = $1`, ByTenant},
+	// The shards the rows name were erased on the leg before the sweep
+	// (deletion_runner.go stage b1, WP-VAULT-1); a leg that could not be
+	// reached deferred the tenant before this runs.
+	{"vault_parity", `DELETE FROM vault_parity WHERE tenant_id = $1`, ByTenant},
 	{"object_versions", `DELETE FROM object_versions WHERE tenant_id = $1`, ByTenant},
 	{"object_locks", `DELETE FROM object_locks WHERE tenant_id = $1`, ByTenant},
 	{"object_locations", `DELETE FROM object_locations WHERE tenant_id = $1`, ByTenant},

@@ -96,6 +96,7 @@ type Server struct {
 	inventoryRunner    *InventoryRunner
 	dedupGCRunner      *DedupGCRunner
 	smartDemotion      *SmartDemotionRunner
+	vaultParity        *VaultParity
 	smartPromoter      *SmartPromoter
 	multipartReaper    *MultipartReaper
 	quotaReconcileGate jobGate                // single-flight for POST /admin/quota-reconcile (Review R13-05)
@@ -191,6 +192,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	s.flags.Register(flagQuotaCheckout, false)
 	s.flags.Register(flagHouseOverview, false)
 	s.flags.Register(flagEgressThrottle, false)
+	s.flags.Register(flagVaultParity, false)
 	if err := s.flags.Refresh(context.Background()); err != nil {
 		logger.Warn("initial feature flag refresh failed — serving in-code defaults until the background refresh succeeds",
 			zap.Error(err))
@@ -336,6 +338,9 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	}
 	s.smartDemotion = NewSmartDemotionRunner(s.db, s.engine, fc, logger)
 	s.smartPromoter = NewSmartPromoter(s.db, s.engine, logger)
+	// The Vault parity second copy (WP-VAULT-1): the job and the read
+	// fallback, flag-gated per tenant (vault_parity, default OFF).
+	s.vaultParity = NewVaultParity(s.db, s.engine, fc, logger)
 	if s.smartDemotion != nil {
 		s.smartDemotion.Promoter = s.smartPromoter
 		// A rejected knob value is logged, never silently ignored (Review
@@ -1338,6 +1343,7 @@ func (s *Server) Start() error {
 		s.accountDeletion = NewAccountDeletionRunner(s.db, s.logger, s.engine, s.gci, s.quotaManager, s.accountSvc)
 	}
 	if s.accountDeletion != nil {
+		s.accountDeletion.VaultParity = s.vaultParity
 		if s.stripe != nil {
 			s.accountDeletion.Stripe = s.stripe
 		}

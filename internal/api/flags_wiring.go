@@ -46,6 +46,13 @@ const (
 	// counted (vaultaire_egress_would_throttle_total). On globally, a tenant
 	// row with enabled=false is the exemption (synthetic check, demos).
 	flagEgressThrottle = "egress_throttle"
+
+	// flagVaultParity enables the Vault parity second copy (WP-VAULT-1):
+	// the `vault_parity` job writes RS 4+4 parity shards of every
+	// vault-floor object to the free leg, and a read whose backend fails
+	// is rebuilt from them. Default OFF, per tenant first. Checked per
+	// tenant in VaultParity.RunOnce and VaultParity.Open.
+	flagVaultParity = "vault_parity"
 )
 
 // signupsDefaultFromEnv is the `signups` flag's in-code default: the

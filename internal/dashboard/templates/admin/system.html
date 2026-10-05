@@ -91,7 +91,7 @@
             </tbody>
         </table>
     </div>
-    <div class="card-detail">Daily (UTC): inventory 00:30, dedup_gc 02:30, retention 03:30, account_deletion 04:30, routing_truth 05:30, smart_demotion 06:30 — each catches up a few minutes after a restart. The others run hourly (access_log_delivery every 5 minutes). Schedule and next run: <code>GET /api/v1/admin/jobs</code>.</div>
+    <div class="card-detail">Daily (UTC): inventory 00:30, dedup_gc 02:30, retention 03:30, account_deletion 04:30, routing_truth 05:30, smart_demotion 06:30 — each catches up a few minutes after a restart. The others run hourly (access_log_delivery every 5 minutes, account_export every minute, vault_parity every 2 minutes when a parity leg is registered). Schedule and next run: <code>GET /api/v1/admin/jobs</code>.</div>
 </div>
 {{end}}
 
