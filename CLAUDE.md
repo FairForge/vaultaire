@@ -17,6 +17,7 @@ Vaultaire is a universal storage orchestration engine providing a unified S3-com
 - **`.private/IDRIVE_RESELLER_API.md`** — Complete iDrive e2 Reseller API reference, all endpoints, pricing, 6-phase integration plan
 - **`.private/TIER_STRATEGY.md`** — Three-tier GTM: Vault (archive), Standard (smart), Performance (B2 killer). Selling model, use cases, novel features
 - **`.private/PERMAFROST_TESTING_RESULTS.md`** — OneDrive benchmark results v1→v2→v3 (HTTP/1.1 + Range = 214 MB/s fleet)
+- **`docs/CLOUDFLARE.md`** — the Cloudflare operator page: which account holds what, tokens, zone settings applied 2026-10-04, what the edge Workers do, rules learned
 - **`internal/drivers/onedrive_README.md`** — OneDrive integration + dual-transport pattern (HTTP/2 for API, HTTP/1.1 for CDN)
 - **`internal/drivers/lyve_README.md`** — Lyve Cloud 2 ops manual: per-region bucket homing, replication-policy, probe recipes
 - **`internal/drivers/quotaless_README.md`** — Quotaless backend ops manual
