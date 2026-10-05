@@ -9,8 +9,8 @@ database `vaultaire_test_vault`, everything under `-race`; `make lint` 0, `make 
 | 0 | warm-up: the primary cannot be expired; an allowlist of `0.0.0.0/0` / `::/0` is refused | #587 |
 | 1 | Geyser `Get` as parallel ranges | #589 |
 | 2 | the parity second copy for `vault`-floor objects (flag `vault_parity`, migration 077) | #590 |
-| 3 | `cmd/tools/geyser-restore-probe` | _below_ |
-| 4 | per-PUT deadline + one retry in the fixed-bucket driver | _pending_ |
+| 3 | `cmd/tools/geyser-restore-probe` | #591 |
+| 4 | per-PUT deadline + one retry in the fixed-bucket driver | _below_ |
 
 ## Part 0 — warm-up (post-merge review of #584)
 
@@ -310,6 +310,38 @@ Geyser (whole GET and ranges fail on demand) and the leg (one shard's Put fails 
 - The dashboard does not show a vault object's copy state; `GET /api/v1/admin/jobs` shows the job's
   last result (`protected`, `partial`, `erased`, `leg`).
 
+### Live proof (prod `846bf76`, 2026-10-05 18:01–18:05 UTC, bench tenant only)
+
+Prod registers both legs (`TENANT_1_ID` and `LYVE_*` are set), so the leg is **permafrost**. The job
+had already run `ok` with the flag off. Script: `~/vaultaire-bench/wp-vault-1/parity-proof.sh` on SLC.
+
+| Time | Step | Result |
+|---|---|---|
+| 18:01:52 | `vault_parity` ON for the bench tenant only (one `feature_flags` row, `updated_by = 'wp-vault-1 canary 2026-10-05'`) | — |
+| 18:01:52 | `aws s3api put-object --storage-class GLACIER` of a fresh 24 MiB object, `vault-bench-20261004/wp-vault-1/proof-180152.bin` | head row `geyser`, floor `vault`, not chunked |
+| 18:03:27–18:04:02 | the job's next pass | **4 objects protected** (the tenant's three standing vault objects and the proof object), `state = complete`, `legs = permafrost ×4`, 570,425,344 parity bytes; `job_runs.result`: `scanned 6, flag_off 2` (two other tenants' vault rows skipped), `partial 0, failed 0` |
+| 18:04:04 | presigned GET through `s3.stored.ge`, tape copy present | 200, no `x-vaultaire-served-from`, sha256 equal |
+| 18:04:07 | **the object's blob deleted on Geyser directly** (`aws s3 rm` with the Geyser key; HEAD there: 404) — the tape copy of this one object is lost | — |
+| 18:04:08 | the same GET through `s3.stored.ge` | **200, `x-vaultaire-served-from: parity`**, same ETag, class GLACIER, 25,165,824 bytes in 8.7 s, **sha256 equal** |
+| | `Range: bytes=5000000-9999999` | **206**, `content-range: bytes 5000000-9999999/25165824`, from parity, ETag and Last-Modified present, slice equal |
+| | `aws s3api get-object` | rc 0, sha256 equal |
+| 18:04:46 | `aws s3api delete-object` | parity row gone (it is deleted only after its four shards were), head row gone |
+
+`/metrics` before → after: `vaultaire_vault_parity_objects_total{complete}` 0 → 4, `{erased}` 0 → 1,
+`_bytes_total` 0 → 570,425,344, `_fallback_reads_total{served}` 0 → **3**, `{unavailable}` 0.
+
+What this proves live: the write behind the commit, the row, a customer GET (whole and ranged, curl
+and aws-cli) answered byte-exact from the parity when the tape copy is gone, and the erasure with the
+object. What it does not: an open breaker and a Geyser 5xx (not inducible on prod without breaking
+Geyser for everyone — the fixture and mutation M1 cover them), and the permafrost-shard-missing mix.
+
+**State left on prod:** the flag is ON for the bench tenant (`tenant-14a623b16b3f7012`) and its three
+standing vault objects (`obj8.bin`, `v256.bin`, `v256b.bin`) have parity on permafrost — 520 MB. That
+is the canary. Off: `DELETE FROM feature_flags WHERE flag_key = 'vault_parity' AND tenant_id =
+'tenant-14a623b16b3f7012'` (or `/admin/flags`). **Turning the flag off does not erase shards already
+written** — they go when their object or the tenant goes; there is no "unprotect" pass ([YOU] if
+one is wanted).
+
 ## Part 3 — `cmd/tools/geyser-restore-probe`
 
 ### Why
@@ -374,3 +406,66 @@ vault-bench-20261004/v256.bin readable (landing zone or restored): class GLACIER
 Both objects are still in the landing zone; the baselines are in `~/vaultaire-bench/restore-probe/state/`
 (the 256 MiB baseline took 11.5 s — Part 1's ranged read; its hash is the one Part 1 compared with
 Geyser's). The timed restore itself is what the hourly visits are waiting for.
+
+## Part 4 — per-PUT deadline in the fixed-bucket driver
+
+### The measurement, seen first
+
+Bench 2026-10-04 (F4, §13.1): Wasabi stalled about **4 % of PUTs for 9–123 s** in both regions — the
+request is accepted and nothing comes back. A stall is not an error, so the SDK's retryer never sees
+it; the tuned transport sets no response timeout for PUT bodies (`WithResponseHeaderTimeout` exists,
+unused there). The load gate's ConcurrentGet p99 and every upload tail on that day were this.
+
+### What was built (`internal/drivers/put_deadline.go`)
+
+- `deadlinePutClient` is the uploader's view of the S3 client (`IDriveDriver.uploadClient()`; the
+  fixed-bucket driver = `idrive`, `idrive-<region>`, `wasabi`). The multipart bookkeeping calls pass
+  through; **the two calls that carry bytes — `PutObject` and `UploadPart` — get a deadline of
+  `FIXED_BUCKET_PUT_TIMEOUT` per 64 MiB of that request's body** (default 60 s; a 16 MiB part gets
+  60 s, a body of 65 MiB would get 120 s), and when it passes, **one** retry.
+- **The retry is the same request on a connection opened for it**: the body is rewound and the call
+  repeated with `o.HTTPClient` = a client whose transport never reuses a connection
+  (`WithFreshConnections()`, keep-alives off) — a pooled connection may be the one that stalled.
+- **A retry never duplicates a multipart part**: an `UploadPart` goes again with the same part number
+  under the same upload id, which S3 defines as replacing that part; the retry is never around the
+  streamed upload (which cannot be replayed) and never mints a part. `TestFixedBucketPut_AMultipart
+  PartRetryNeverDuplicatesAPart`: part 2 of a 40 MiB upload stalls once — the fake saw part 2 twice
+  under one upload id on two connections, parts 1 and 3 once, a `Complete` naming `[1, 2, 3]`, and
+  the stored object hashes to the body.
+- **Only for silence**: a caller whose own context is done gets nothing replayed; an error answer is
+  the SDK retryer's; a body that cannot be rewound returns the deadline error as it is. A second
+  deadline is the caller's error ("no answer within 60s, twice (after one retry on a fresh
+  connection)") and the engine's failover takes it from there.
+- `FIXED_BUCKET_PUT_TIMEOUT`: a Go duration 1s–1h, `0`/`off` disables; a rejected value is logged at
+  Warn and the default kept (R13-19). `vaultaire_driver_put_retries_total{driver}` on the server
+  registry, at 0 for every fixed-bucket driver from construction.
+
+### Same logic on other entry points
+
+`s3ParallelUpload` has four callers: the fixed-bucket driver (covered — single PUT ≤ 16 MiB, the
+manager's single-part path for unknown sizes, every multipart part), and `lyve`, `r2`, `s3compat`,
+which keep the bare client: the prompt scoped the deadline to the fixed-bucket driver, Lyve showed no
+stalls in the bench, and R2 is the public store. Moving them is passing `deadlinePutClient` — noted.
+Engine-level multipart (`UploadPart` from the S3 API) stages parts and commits through the same
+driver `Put`, so it is covered there. GETs have no deadline (Part 1's ranged read is cancelled by its
+reader).
+
+### Adversarial pass (mutations seen red)
+
+| # | mutation / case | result |
+|---|---|---|
+| M1 | the retry on the pooled client | red — with two idle connections warmed first, the retry landed on a pooled one |
+| M2 | a caller that left is retried | `TestFixedBucketPut_AClientThatLeftIsNotRetried` red |
+| M3 | no rewind before the retry | both the single-PUT and the multipart test red |
+| M4 | `UploadPart` without the deadline | the multipart test red (18.9 s, counter 0) |
+| M5 | a second retry | `TestFixedBucketPut_OneRetryOnly` red |
+| M6 | `Put` bypasses the deadline client | red (10 s stall waited out) |
+| — | both attempts stall | error is `context.DeadlineExceeded`, "one retry", exactly two attempts, nothing stored |
+| — | a 500 answer | not counted as a retry (the SDK's three attempts fit the deadline) |
+| — | CI's first run of this PR | red: the multipart test gave 16 MiB parts a 500 ms deadline, and on the runner under `-race` the honest retry of the part took longer ("no answer within 500ms, twice"). The test now cuts 5 MiB parts through a seeded uploader with a 4 s deadline — only the attempt the fake stalls can pass it. The driver was right; the deadline in prod is 60 s per part |
+| — | the fixture bug the first run showed | a 1 s deadline was shorter than the SDK's own back-off between 500s; the deadline wraps the SDK's attempts, which the 60 s default fits |
+
+### Tests
+
+`internal/drivers/put_deadline_test.go` (9) on `stallS3`: stalls chosen attempts, records each
+attempt's TCP connection, assembles multipart uploads.

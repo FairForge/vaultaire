@@ -21,6 +21,7 @@ type transportConfig struct {
 	insecureTLS           bool
 	responseHeaderTimeout time.Duration
 	http1Only             bool
+	freshConnections      bool
 }
 
 // TransportOption configures TunedHTTPClient.
@@ -34,6 +35,13 @@ func WithInsecureTLS() TransportOption {
 // WithResponseHeaderTimeout sets how long to wait for response headers.
 func WithResponseHeaderTimeout(d time.Duration) TransportOption {
 	return func(c *transportConfig) { c.responseHeaderTimeout = d }
+}
+
+// WithFreshConnections makes every request dial its own connection and
+// close it afterwards (no keep-alive pool). It is the client a request is
+// retried on after a stall: a pooled connection may be the one that stalled.
+func WithFreshConnections() TransportOption {
+	return func(c *transportConfig) { c.freshConnections = true }
 }
 
 // WithHTTP1Only disables HTTP/2 for backends that perform better with H1.
@@ -65,13 +73,12 @@ func cachedDialContext(dialer *net.Dialer) func(ctx context.Context, network, ad
 // TLS session resumption, and large I/O buffers tuned for high-throughput
 // storage operations. Set VAULTAIRE_TUNED_TRANSPORT=false to disable.
 func TunedHTTPClient(opts ...TransportOption) *http.Client {
-	if tunedTransportDisabled {
-		return http.DefaultClient
-	}
-
 	cfg := &transportConfig{}
 	for _, o := range opts {
 		o(cfg)
+	}
+	if tunedTransportDisabled && !cfg.freshConnections {
+		return http.DefaultClient
 	}
 
 	dialer := &net.Dialer{
@@ -88,6 +95,7 @@ func TunedHTTPClient(opts ...TransportOption) *http.Client {
 		ReadBufferSize:        4 << 20,
 		WriteBufferSize:       4 << 20,
 		DisableCompression:    true,
+		DisableKeepAlives:     cfg.freshConnections,
 		ForceAttemptHTTP2:     !cfg.http1Only,
 		DialContext:           cachedDialContext(dialer),
 		TLSClientConfig: &tls.Config{

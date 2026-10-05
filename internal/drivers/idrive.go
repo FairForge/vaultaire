@@ -7,10 +7,12 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"go.uber.org/zap"
 
@@ -40,6 +42,11 @@ type IDriveDriver struct {
 	client        *s3.Client
 	logger        *zap.Logger
 	egressTracker *EgressTracker // Track bandwidth usage
+	// putTimeout is the per-PUT deadline per 64 MiB (FIXED_BUCKET_PUT_TIMEOUT,
+	// 0 = off); putClient is the uploader's client that applies it with one
+	// retry on a fresh connection (put_deadline.go).
+	putTimeout time.Duration
+	putClient  *deadlinePutClient
 }
 
 // NewIDriveDriver creates a new iDrive E2 storage driver.
@@ -104,7 +111,7 @@ func NewFixedBucketS3Driver(name, accessKey, secretKey, endpoint, region, bucket
 		zap.String("bucket", bucket),
 	)
 
-	return &IDriveDriver{
+	d := &IDriveDriver{
 		name:      name,
 		accessKey: accessKey,
 		secretKey: secretKey,
@@ -113,7 +120,27 @@ func NewFixedBucketS3Driver(name, accessKey, secretKey, endpoint, region, bucket
 		bucket:    bucket,
 		client:    client,
 		logger:    logger,
-	}, nil
+	}
+	d.setPutTimeout(fixedBucketPutTimeoutFromEnv(logger))
+	driverPutRetries.WithLabelValues(name) // the series exists at 0
+	return d, nil
+}
+
+// setPutTimeout installs the per-PUT deadline (0 = off).
+func (d *IDriveDriver) setPutTimeout(base time.Duration) {
+	d.putTimeout = base
+	d.putClient = &deadlinePutClient{Client: d.client, driver: d.name, base: base,
+		fresh: TunedHTTPClient(WithHTTP1Only(), WithFreshConnections()), logger: d.logger}
+}
+
+// uploadClient is the client Put uploads through: the deadline client when
+// the driver was built by its constructor, the bare client otherwise (tests
+// that assemble the struct by hand).
+func (d *IDriveDriver) uploadClient() manager.UploadAPIClient {
+	if d.putClient != nil {
+		return d.putClient
+	}
+	return d.client
 }
 
 // getTenantID is the tenant the call is made for; a context that names none
@@ -206,7 +233,7 @@ func (d *IDriveDriver) Put(ctx context.Context, container, artifact string, data
 	// uploader streams parts on the fly, so it also avoids the full-object
 	// buffering the old unknown-length path did via materialize. Small files
 	// still go as a single PutObject.
-	if err := s3ParallelUpload(ctx, d.client, d.bucket, key, options.ContentType, data, options.ContentLength); err != nil {
+	if err := s3ParallelUpload(ctx, d.uploadClient(), d.bucket, key, options.ContentType, data, options.ContentLength); err != nil {
 		return err
 	}
 	return nil
