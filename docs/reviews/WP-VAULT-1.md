@@ -1,6 +1,7 @@
 # WP-VAULT-1 — the Vault layer (queue item 11), after a warm-up from the #584 review
 
-**Worker session, 2026-10-05. Branch per part, one PR each, from `main` @ #585.** Plan queue item 11;
+**Worker session, 2026-10-05. Branch per part, one PR each, from `main` @ #585; each merged and green
+on `main` (CI, Deploy, Security) before the next.** Plan queue item 11;
 the measurements are `bench-results/VAULTAIRE-PATH-2026-10-04.md` §15–§16. Tests on the private test
 database `vaultaire_test_vault`, everything under `-race`; `make lint` 0, `make gosec` 0 before each PR.
 
@@ -10,7 +11,7 @@ database `vaultaire_test_vault`, everything under `-race`; `make lint` 0, `make 
 | 1 | Geyser `Get` as parallel ranges | #589 |
 | 2 | the parity second copy for `vault`-floor objects (flag `vault_parity`, migration 077) | #590 |
 | 3 | `cmd/tools/geyser-restore-probe` | #591 |
-| 4 | per-PUT deadline + one retry in the fixed-bucket driver | _below_ |
+| 4 | per-PUT deadline + one retry in the fixed-bucket driver | #592, label fix #594 |
 
 ## Part 0 — warm-up (post-merge review of #584)
 
@@ -469,3 +470,82 @@ reader).
 
 `internal/drivers/put_deadline_test.go` (9) on `stallS3`: stalls chosen attempts, records each
 attempt's TCP connection, assembles multipart uploads.
+
+### Live check (prod `3bf4d39`, 2026-10-05 18:48 UTC, bench tenant, primary `idrive`)
+
+A stall cannot be induced on prod; this is the regression check of the path every PUT now takes.
+`FIXED_BUCKET_PUT_TIMEOUT` unset (60 s). In a fresh bucket, through `s3.stored.ge`:
+
+| Object | How | Wall | Bytes back |
+|---|---|---|---|
+| 1 MiB | `aws s3api put-object` (the single-PUT path, ≤ 16 MiB) | 0.75 s | equal |
+| 40 MiB | `aws s3api put-object` (one request to Vaultaire → three `UploadPart`s to iDrive through the deadline client) | 1.06 s | equal |
+| 40 MiB | `aws s3 cp` (client-side multipart, 8 MiB parts) | 1.57 s | equal |
+
+`vaultaire_driver_put_retries_total{driver="idrive"}` 0 and `{driver="wasabi"}` 0, before and after:
+no stall occurred, nothing was retried.
+
+**What the check found (fixed in #594):** prod registers ten regional iDrive drivers, and every one
+is built by `NewIDriveDriver` under the internal name `idrive` — so they had the deadline and the
+retry, but a stalling region would have been counted as the primary's. `IDriveDriver.SetBackendName`
+(called by `cmd/vaultaire` with `idrive-<region>`) labels the series with the engine's backend name
+and the Warn line names the region; `Name()` is unchanged.
+`TestFixedBucketPut_RetriesAreCountedUnderTheBackendName`. Live on `2c5dc43` (19:05 UTC): `/metrics`
+carries `vaultaire_driver_put_retries_total` for `idrive`, the ten `idrive-<region>` backends and
+`wasabi`, each at 0.
+
+---
+
+## Decisions (all parts)
+
+| Id | Decision | Reverse by |
+|---|---|---|
+| D-VAULT-0a | An expired key is not rotated (refused), not rotated into a successor without the expiry | one branch in `RotateAPIKey` |
+| D-VAULT-0b | `0.0.0.0/0` / `::/0` in an allowlist is a 400, not a warning | the `ones == 0` branches in `ValidateIPAllowlist` and `intersectIPRestrict` |
+| D-VAULT-1a | The probe range replaces the HEAD the prompt sketched (one round trip fewer; "no size" is answered by construction) | — |
+| D-VAULT-1b | Range size 8 MiB: default buffer 64 MiB per archive read | `geyserGetRangeSize` |
+| D-VAULT-2a | One parity leg per deployment (`permafrost`, else `lyve`), all four shards on it; `legs[]` is per shard for a later split | `vaultParityLegs` |
+| D-VAULT-2b | The flag gates the read fallback too: off = neither written nor read | one check in `Open` |
+| D-VAULT-2c | `/cdn` and CopyObject-source reads do not fall back | — |
+| D-VAULT-2d | The fallback never applies to `ErrArchived`: on tape is a state, the restore semantics stay | — |
+| D-VAULT-3a | The probe's on-tape signal is a refused 1-byte GET, not HEAD | — |
+| D-VAULT-4a | The deadline is per request (`PutObject`, `UploadPart`), never around the streamed upload; scope = the fixed-bucket driver | pass `deadlinePutClient` to lyve/r2/s3compat |
+
+## Not done
+
+- **The timed restore itself.** Both objects are still in Geyser's landing zone; the probe visits
+  hourly and writes `~/vaultaire-bench/restore-probe/report.jsonl` when Geyser moves them.
+- **A Geyser 5xx / open breaker served from parity on prod** — proven on the fixture (and by the
+  deleted-tape-copy case live), not by breaking Geyser.
+- `/cdn` and CopyObject-source fallback (D-VAULT-2c); an "unprotect" pass for a tenant whose flag is
+  turned off; a Prometheus rule on served fallbacks; the dashboard does not show a vault object's
+  copy state.
+- The deadline on `lyve`, `r2`, `s3compat` uploads (D-VAULT-4a).
+- `docs/API.md` line 43 (`AccessDenied` → `InvalidAccessKeyId` for a revoked key), inherited from #584.
+- Mutation M13 (the row pre-inserted `partial` before the bytes land) has no killing test.
+
+## [YOU]
+
+1. **The pricing page's sentence about the second copy.** True today with the flag on: *"every Vault
+   object is also written, within minutes, as a second erasure-coded copy on an independent store,
+   from which it can be served whole if the tape library is unreachable."* Not true: "mirror",
+   "synchronous", "on a second paid vendor". The copy's durability is the free leg's (the OneDrive
+   fleet on prod). Decide the sentence, or decide the leg.
+2. **`vault_parity` beyond the canary.** It is ON for the bench tenant only
+   (`tenant-14a623b16b3f7012`, three objects, 520 MB of parity on permafrost) — the state I left on
+   prod. Global: one `*` row at `/admin/flags`. Prod's whole vault floor today is 5 objects / 568 MB
+   in 3 tenants. Off for the canary: delete its `feature_flags` row (shards already written stay
+   until their object goes).
+3. **`0.0.0.0/0` in an allowlist:** refused with a typed 400 (D-VAULT-0b). Say if it should be
+   allowed with a warning instead.
+4. **`GEYSER_GET_CONCURRENCY` for prod.** Unset = 8 → 11.4–13.0 s for 256 MiB (20.6–23.6 MB/s).
+   The bench measured 41.6 MB/s at 16, for 128 MiB of buffer per concurrent archive read instead of
+   64. Recommend `16`.
+5. **The probe's cron line on SLC** (`crontab -l`, minute 17, under `flock`; the crontab before it is
+   saved as `~/vaultaire-bench/restore-probe/crontab.before-wp-vault-1.*`): remove it when
+   `report.jsonl` holds both objects. Log: `~/vaultaire-bench/restore-probe/probe.log`.
+6. `FIXED_BUCKET_PUT_TIMEOUT` is 60 s per 64 MiB by default; nothing to set. Watch
+   `vaultaire_driver_put_retries_total` — a non-zero rate on `idrive` is the Wasabi behaviour
+   appearing on iDrive.
+7. Install the updated `deploy/monitoring/vaultaire-jobs.yml` on SLC (`vault_parity` joined
+   `PeriodicJobStale`).
