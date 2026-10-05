@@ -68,7 +68,12 @@ type KeyCreateOptions struct {
 var (
 	ErrInvalidPermission  = errors.New("unknown permission")
 	ErrInvalidIPAllowlist = errors.New("invalid ip allowlist entry")
-	ErrExpiryInPast       = errors.New("expiry must be in the future")
+	// ErrUnrestrictedIPAllowlist: an entry such as 0.0.0.0/0 or ::/0 that
+	// admits every address. An allowlist that restricts nothing is a
+	// mistake, not a policy — the way to allow every address is no
+	// allowlist (post-merge review of #584).
+	ErrUnrestrictedIPAllowlist = errors.New("ip allowlist entry restricts nothing")
+	ErrExpiryInPast            = errors.New("expiry must be in the future")
 	// ErrKeyExpired: the key exists, is not revoked, and its expires_at has
 	// passed. S3 answers ExpiredToken; the JSON APIs a typed 401.
 	ErrKeyExpired = errors.New("API key expired")
@@ -115,6 +120,9 @@ func ValidateIPAllowlist(entries []string) ([]string, error) {
 			_, cidr, err := net.ParseCIDR(entry)
 			if err != nil {
 				return nil, fmt.Errorf("%w: %q is not a CIDR network", ErrInvalidIPAllowlist, entry)
+			}
+			if ones, _ := cidr.Mask.Size(); ones == 0 {
+				return nil, fmt.Errorf("%w: %q allows every address; leave the allowlist empty instead", ErrUnrestrictedIPAllowlist, entry)
 			}
 			out = append(out, cidr.String())
 			continue

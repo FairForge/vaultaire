@@ -35,6 +35,11 @@ var (
 	// Rotation kills a leaked primary and hands over its successor in the
 	// same call (WP-R5-14).
 	ErrPrimaryKeyRevoke = errors.New("the primary key cannot be revoked; rotate it instead")
+	// ErrPrimaryKeyExpire: the primary pair never carries an expiry either —
+	// an expired primary is the same lock-out as a revoked one, and the
+	// successor of a rotation inherits the expiry (post-merge review of
+	// #584). Rotation is the remedy for a leaked primary.
+	ErrPrimaryKeyExpire = errors.New("the primary key cannot be given an expiry; rotate it instead")
 )
 
 type APIKey struct {
@@ -369,6 +374,13 @@ func (a *AuthService) RotateAPIKey(ctx context.Context, userID, keyID string) (*
 	if oldKey.RevokedAt != nil {
 		return nil, ErrKeyRevoked
 	}
+	// The successor inherits the expiry, so rotating an expired key would
+	// mint one born dead — and for the primary pair that is the lock-out
+	// WP-R5-14 exists to prevent (post-merge review of #584). A scoped key
+	// that has expired is replaced by a new key, not rotated.
+	if IsKeyExpired(oldKey.ExpiresAt) {
+		return nil, ErrKeyExpired
+	}
 
 	accessKey, err := generateAccessKey()
 	if err != nil {
@@ -494,7 +506,10 @@ func (a *AuthService) RevokeAPIKey(ctx context.Context, userID, keyID string) er
 }
 
 // SetAPIKeyExpiration sets expiration for an API key, persisted so the S3
-// auth path enforces it. A revoked key is ErrKeyRevoked (WP-R11-6).
+// auth path enforces it. A revoked key is ErrKeyRevoked (WP-R11-6); the
+// primary pair is ErrPrimaryKeyExpire — it is rotated, never expired, for
+// the same reason it is never revoked (post-merge review of #584: an
+// account could expire its one way in through this call).
 func (a *AuthService) SetAPIKeyExpiration(ctx context.Context, userID, keyID string, expiresAt time.Time) error {
 	key := a.snapshotOwnedKey(userID, keyID)
 	if key == nil {
@@ -502,6 +517,9 @@ func (a *AuthService) SetAPIKeyExpiration(ctx context.Context, userID, keyID str
 	}
 	if key.RevokedAt != nil {
 		return ErrKeyRevoked
+	}
+	if key.IsPrimary {
+		return ErrPrimaryKeyExpire
 	}
 	if a.sqlDB != nil {
 		if _, err := a.sqlDB.ExecContext(ctx,

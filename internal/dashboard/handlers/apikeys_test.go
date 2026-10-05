@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/FairForge/vaultaire/internal/auth"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
@@ -275,4 +276,50 @@ func TestHandleRevokeKey_PrimaryIsRefused(t *testing.T) {
 			assert.Nil(t, k.RevokedAt, "the primary is still live")
 		}
 	}
+}
+
+// Post-merge review of #584: the dashboard form refuses an allowlist that
+// restricts nothing with a sentence that says what to do instead.
+func TestHandleGenerateKey_UnrestrictedAllowlistIsRefused(t *testing.T) {
+	tmpl := testAPIKeysTemplate(t)
+	authSvc, sd := setupAuthWithUser(t)
+	handler := HandleGenerateKey(tmpl, authSvc, nil, zap.NewNop())
+
+	form := url.Values{"name": {"open"}, "ip_allowlist": {"203.0.113.7, 0.0.0.0/0"}}
+	req := httptest.NewRequest("POST", "/dashboard/apikeys", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req = req.WithContext(context.WithValue(req.Context(), dashauth.SessionKey, sd))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.NotContains(t, body, "new-key")
+	assert.Contains(t, body, `<span class="error">`)
+	assert.Contains(t, body, "0.0.0.0/0")
+	assert.Contains(t, body, "leave the allowlist empty")
+	keys, _ := authSvc.ListAPIKeys(context.Background(), sd.UserID)
+	assert.Len(t, keys, 1, "no key was created")
+}
+
+// An expired key is not rotated into a successor born expired.
+func TestHandleRotateKey_ExpiredKeyIsRefused(t *testing.T) {
+	tmpl := testAPIKeysTemplate(t)
+	authSvc, sd := setupAuthWithUser(t)
+	k, err := authSvc.GenerateAPIKey(context.Background(), sd.UserID, "old", &auth.KeyCreateOptions{Permissions: []string{auth.OpGetObject}})
+	require.NoError(t, err)
+	require.NoError(t, authSvc.SetAPIKeyExpiration(context.Background(), sd.UserID, k.ID, time.Now().Add(-time.Minute)))
+
+	r := chi.NewRouter()
+	r.Post("/dashboard/apikeys/{id}/rotate", HandleRotateKey(tmpl, authSvc, zap.NewNop()))
+	req := httptest.NewRequest("POST", "/dashboard/apikeys/"+k.ID+"/rotate", nil)
+	req = req.WithContext(context.WithValue(req.Context(), dashauth.SessionKey, sd))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusSeeOther, w.Code)
+	flash := strings.Join(w.Header().Values("Set-Cookie"), " ")
+	assert.Contains(t, flash, "flash", "a flash cookie carries the refusal")
+	keys, _ := authSvc.ListAPIKeys(context.Background(), sd.UserID)
+	assert.Len(t, keys, 2, "no successor was minted")
 }

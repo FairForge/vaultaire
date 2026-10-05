@@ -710,7 +710,6 @@ func generateAuthPaths() map[string]*PathItem {
 func generateUserPaths() map[string]*PathItem {
 	keyID := pathParam("keyId", "API key id (the `id` from list/create, not the access key)")
 	keyNotFound := errResp("`key_not_found` — the id is not one of the caller's keys")
-	keyRevoked := errResp("`key_revoked` — the key is already revoked")
 	keyErr500 := errResp("`internal_error`")
 
 	return map[string]*PathItem{
@@ -765,7 +764,7 @@ func generateUserPaths() map[string]*PathItem {
 						"secret": str("New secret access key"),
 					}, "id", "name", "key", "secret")),
 					"404": keyNotFound,
-					"409": keyRevoked,
+					"409": errResp("`key_revoked` — already revoked; or `key_expired` — an expired key is not rotated into a successor born expired: create a new key"),
 					"500": keyErr500,
 				}),
 		},
@@ -791,7 +790,7 @@ func generateUserPaths() map[string]*PathItem {
 					}, "message", "expires_at")),
 					"400": errResp("`invalid_json`, or `invalid_days` (`days` below 1)"),
 					"404": keyNotFound,
-					"409": keyRevoked,
+					"409": errResp("`key_revoked` — already revoked; or `primary_key` — the primary pair is never given an expiry: rotate it"),
 					"500": keyErr500,
 				}),
 				jsonBody("Days from now", objectPtr("", map[string]*Schema{
@@ -1040,7 +1039,7 @@ func generateManagementPaths() map[string]*PathItem {
 					"The secret is returned once. Caps: 50 live keys per account, and the plan's own limit (both 409). Emits `key.created`.",
 				map[string]Response{
 					"201": jsonResp("Key created; `secret` is shown only here", ref("APIKeyCreated")),
-					"400": errResp("`invalid_json`, `invalid_permissions` (`unknown permission: ...`), `invalid_ip_allowlist` (an entry that is not an address or a network), or `invalid_expiry` (`expires_at` not in the future)"),
+					"400": errResp("`invalid_json`, `invalid_permissions` (`unknown permission: ...`), `invalid_ip_allowlist` (an entry that is not an address or a network), `unrestricted_ip_allowlist` (`0.0.0.0/0` or `::/0` — leave `ip_allowlist` empty to allow every address), or `invalid_expiry` (`expires_at` not in the future)"),
 					"409": errResp("`key_limit_exceeded` (50 per account, or the plan's limit) or `idempotency_key_reuse`"),
 					"500": errResp("`internal_error`"),
 				}),
@@ -1237,7 +1236,7 @@ func generateSTSPaths() map[string]*PathItem {
 					"`ttl` defaults to 3600 s and is clamped to 43200 s. Emits `sts.token_created` and writes an audit row.",
 				map[string]Response{
 					"201": jsonResp("Credentials; `secret_key` is shown only here", ref("STSToken")),
-					"400": errResp("`invalid_json`, `invalid_permissions` (`unknown permission: ...`), `parent_key_revoked`, or `scope_error` (e.g. `no permissions overlap between parent key and request`)"),
+					"400": errResp("`invalid_json`, `invalid_permissions` (`unknown permission: ...`), `parent_key_revoked`, or `scope_error` (e.g. `no permissions overlap between parent key and request`, or an `ip_restrict` entry of `0.0.0.0/0` / `::/0` that restricts nothing)"),
 					"401": errResp("Bearer token missing/invalid, `missing_user`, or `parent_key_expired` — `parent_key_id` names a key whose `expires_at` has passed"),
 					"404": errResp("`parent_key_not_found` — `parent_key_id` is not one of the caller's keys"),
 					"500": errResp("`internal_error`"),
