@@ -45,6 +45,11 @@ type GeyserDriver struct {
 	tenantID string
 	logger   *zap.Logger
 	endpoint string
+	// getConcurrency is the number of parallel range streams a Get uses
+	// (GEYSER_GET_CONCURRENCY; 1 = a plain GET); getRangeSize the size of
+	// one range (geyser_get_ranges.go).
+	getConcurrency int
+	getRangeSize   int64
 }
 
 // GeyserOption configures a GeyserDriver.
@@ -89,10 +94,12 @@ func NewGeyserDriver(accessKey, secretKey, bucket, tenantID string, logger *zap.
 			o.BaseEndpoint = aws.String(opts.endpoint)
 			o.UsePathStyle = true // Geyser requires path-style
 		}),
-		bucket:   bucket,
-		tenantID: tenantID,
-		logger:   logger,
-		endpoint: opts.endpoint,
+		bucket:         bucket,
+		tenantID:       tenantID,
+		logger:         logger,
+		endpoint:       opts.endpoint,
+		getConcurrency: geyserGetConcurrencyFromEnv(logger),
+		getRangeSize:   geyserGetRangeSize,
 	}, nil
 }
 
@@ -140,14 +147,12 @@ func (d *GeyserDriver) Get(ctx context.Context, container, artifact string) (io.
 	}
 	key := d.buildKey(tenantID, container, artifact)
 
-	resp, err := d.client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(d.bucket),
-		Key:    aws.String(key),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("geyser get %s: %w", key, geyserWireErr(err))
+	// Ordered parallel ranges (geyser_get_ranges.go); concurrency 1 is the
+	// plain single-stream GET.
+	if d.getConcurrency > 1 {
+		return d.getRanged(ctx, key)
 	}
-	return resp.Body, nil
+	return d.getSingle(ctx, key)
 }
 
 // GetRange reads a byte range from Geyser tape. Implements engine.RangeGetter.

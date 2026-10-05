@@ -202,6 +202,7 @@ GitHub Actions Deploy (`.github/workflows/deploy.yml`):
 | `VERIFY_SECRET` | — | HMAC secret for email verification tokens |
 | `GEYSER_ACCESS_KEY`, `GEYSER_SECRET_KEY` | — | Geyser tape S3 credentials |
 | `GEYSER_BUCKET`, `GEYSER_ENDPOINT` | — | Geyser bucket name and endpoint URL |
+| `GEYSER_GET_CONCURRENCY` | 8 | Parallel range streams per Geyser `Get` (WP-VAULT-1): the first 8 MiB range is a probe (one request — an object on tape answers it with one `InvalidObjectState`, a backend that ignores `Range` answers 200 and is served as is), the rest is fetched by this many streams in order, at most `concurrency × 8 MiB` buffered. `1` = the plain single-stream GET. 1–64; a rejected value is logged at Warn and the default kept. Measured on the landing zone: 1 stream 5.4 MB/s, 8 ≈ 22, 16 ≈ 42 (bench 2026-10-04 §16.1). Metrics `vaultaire_geyser_get_ranges_total`, `vaultaire_geyser_get_bytes_per_second` |
 | `GEYSER_DATACENTER_ID`, `GEYSER_CUSTOMER_ID`, `GEYSER_TAPE_COLLECTION_ID` | — | Geyser console (`GeyserAdminClient`) identifiers — read only by the `cmd/geyser-admin-test` / `cmd/geyser-smoke` tooling, not the server |
 | `IDRIVE_ACCESS_KEY`, `IDRIVE_SECRET_KEY` | — | iDrive E2 S3 credentials |
 | `IDRIVE_BUCKET` | `vaultaire` | The single fixed bucket every iDrive driver stores into (tenant-prefixed keys); also the bucket provisioned per enabled region at boot |
