@@ -137,7 +137,7 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 	if req.Bucket == "" {
 		switch method {
 		case "GET":
-			req.Operation = "ListBuckets"
+			req.Operation = auth.OpListBuckets
 		default:
 			req.Operation = "Unknown"
 		}
@@ -148,53 +148,53 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 		switch method {
 		case "GET":
 			if _, ok := req.Query["versioning"]; ok {
-				req.Operation = "GetBucketVersioning"
+				req.Operation = auth.OpGetBucketVersioning
 			} else if _, ok := req.Query["location"]; ok {
-				req.Operation = "GetBucketLocation"
+				req.Operation = auth.OpGetBucketLocation
 			} else if _, ok := req.Query["notification"]; ok {
-				req.Operation = "GetBucketNotification"
+				req.Operation = auth.OpGetBucketNotification
 			} else if _, ok := req.Query["object-lock"]; ok {
-				req.Operation = "GetObjectLockConfiguration"
+				req.Operation = auth.OpGetObjectLockConfiguration
 			} else if _, ok := req.Query["logging"]; ok {
-				req.Operation = "GetBucketLogging"
+				req.Operation = auth.OpGetBucketLogging
 			} else if _, ok := req.Query["inventory"]; ok {
-				req.Operation = "GetBucketInventory"
+				req.Operation = auth.OpGetBucketInventory
 			} else if _, ok := req.Query["uploads"]; ok {
-				req.Operation = "ListMultipartUploads"
+				req.Operation = auth.OpListMultipartUploads
 			} else if _, ok := req.Query["versions"]; ok {
-				req.Operation = "ListObjectVersions"
+				req.Operation = auth.OpListObjectVersions
 			} else if _, ok := req.Query["acl"]; ok {
-				req.Operation = "GetBucketAcl"
+				req.Operation = auth.OpGetBucketAcl
 			} else {
-				req.Operation = "ListObjects"
+				req.Operation = auth.OpListObjects
 			}
 		case "PUT":
 			if _, ok := req.Query["versioning"]; ok {
-				req.Operation = "PutBucketVersioning"
+				req.Operation = auth.OpPutBucketVersioning
 			} else if _, ok := req.Query["notification"]; ok {
-				req.Operation = "PutBucketNotification"
+				req.Operation = auth.OpPutBucketNotification
 			} else if _, ok := req.Query["object-lock"]; ok {
-				req.Operation = "PutObjectLockConfiguration"
+				req.Operation = auth.OpPutObjectLockConfiguration
 			} else if _, ok := req.Query["logging"]; ok {
-				req.Operation = "PutBucketLogging"
+				req.Operation = auth.OpPutBucketLogging
 			} else if _, ok := req.Query["inventory"]; ok {
-				req.Operation = "PutBucketInventory"
+				req.Operation = auth.OpPutBucketInventory
 			} else if _, ok := req.Query["acl"]; ok {
-				req.Operation = "PutBucketAcl"
+				req.Operation = auth.OpPutBucketAcl
 			} else {
-				req.Operation = "CreateBucket"
+				req.Operation = auth.OpCreateBucket
 			}
 		case "DELETE":
 			if _, ok := req.Query["inventory"]; ok {
-				req.Operation = "DeleteBucketInventory"
+				req.Operation = auth.OpDeleteBucketInventory
 			} else {
-				req.Operation = "DeleteBucket"
+				req.Operation = auth.OpDeleteBucket
 			}
 		case "HEAD":
-			req.Operation = "HeadBucket"
+			req.Operation = auth.OpHeadBucket
 		case "POST":
 			if _, ok := req.Query["delete"]; ok {
-				req.Operation = "DeleteObjects"
+				req.Operation = auth.OpDeleteObjects
 			} else {
 				req.Operation = "Unknown"
 			}
@@ -202,7 +202,7 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 			req.Operation = "Unknown"
 		}
 		switch req.Operation {
-		case "ListObjects", "CreateBucket", "DeleteBucket":
+		case auth.OpListObjects, auth.OpCreateBucket, auth.OpDeleteBucket:
 			if namesSubresource(req.Query, bucketSubresources) {
 				req.Operation = opUnsupportedSubresource
 			}
@@ -213,59 +213,59 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 	switch method {
 	case "GET":
 		if _, ok := req.Query["retention"]; ok {
-			req.Operation = "GetObjectRetention"
+			req.Operation = auth.OpGetObjectRetention
 		} else if _, ok := req.Query["legal-hold"]; ok {
-			req.Operation = "GetObjectLegalHold"
+			req.Operation = auth.OpGetObjectLegalHold
 		} else if _, ok := req.Query["uploadId"]; ok {
-			req.Operation = "ListParts"
+			req.Operation = auth.OpListParts
 		} else if _, ok := req.Query["tagging"]; ok {
-			req.Operation = "GetObjectTagging"
+			req.Operation = auth.OpGetObjectTagging
 		} else if _, ok := req.Query["acl"]; ok {
-			req.Operation = "GetObjectAcl"
+			req.Operation = auth.OpGetObjectAcl
 		} else {
-			req.Operation = "GetObject"
+			req.Operation = auth.OpGetObject
 		}
 	case "PUT":
 		if _, ok := req.Query["retention"]; ok {
-			req.Operation = "PutObjectRetention"
+			req.Operation = auth.OpPutObjectRetention
 		} else if _, ok := req.Query["legal-hold"]; ok {
-			req.Operation = "PutObjectLegalHold"
+			req.Operation = auth.OpPutObjectLegalHold
 		} else if _, ok := req.Query["partNumber"]; ok {
-			req.Operation = "UploadPart"
+			req.Operation = auth.OpUploadPart
 		} else if _, ok := req.Query["tagging"]; ok {
-			req.Operation = "PutObjectTagging"
+			req.Operation = auth.OpPutObjectTagging
 		} else if _, ok := req.Query["acl"]; ok {
 			// Before A1 (2026-09-18) this fell through to PutObject and
 			// overwrote the object's bytes with the ACL XML body.
-			req.Operation = "PutObjectAcl"
+			req.Operation = auth.OpPutObjectAcl
 		} else {
-			req.Operation = "PutObject"
+			req.Operation = auth.OpPutObject
 		}
 	case "DELETE":
 		if _, ok := req.Query["uploadId"]; ok {
-			req.Operation = "AbortMultipartUpload"
+			req.Operation = auth.OpAbortMultipartUpload
 		} else if _, ok := req.Query["tagging"]; ok {
-			req.Operation = "DeleteObjectTagging"
+			req.Operation = auth.OpDeleteObjectTagging
 		} else {
-			req.Operation = "DeleteObject"
+			req.Operation = auth.OpDeleteObject
 		}
 	case "HEAD":
-		req.Operation = "HeadObject"
+		req.Operation = auth.OpHeadObject
 	case "POST":
 		if _, ok := req.Query["uploads"]; ok {
-			req.Operation = "InitiateMultipartUpload"
+			req.Operation = auth.OpInitiateMultipartUpload
 		} else if _, ok := req.Query["uploadId"]; ok {
-			req.Operation = "CompleteMultipartUpload"
+			req.Operation = auth.OpCompleteMultipartUpload
 		} else if _, ok := req.Query["restore"]; ok {
-			req.Operation = "RestoreObject"
+			req.Operation = auth.OpRestoreObject
 		} else {
-			req.Operation = "PostObject"
+			req.Operation = auth.OpPostObject
 		}
 	default:
 		req.Operation = "Unknown"
 	}
 	switch req.Operation {
-	case "GetObject", "PutObject", "DeleteObject", "PostObject":
+	case auth.OpGetObject, auth.OpPutObject, auth.OpDeleteObject, auth.OpPostObject:
 		if namesSubresource(req.Query, objectSubresources) {
 			req.Operation = opUnsupportedSubresource
 		}
@@ -403,7 +403,11 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 	// Enforce key expiration and IP allowlist before any further processing.
 	if scope != nil {
 		if auth.IsKeyExpired(scope.ExpiresAt) {
-			WriteS3Error(w, ErrExpiredPresignedRequest, r.URL.Path, generateRequestID())
+			// The key's own code (WP-R5-12): ExpiredToken, with the key's
+			// expiry in the message — not the presigned URL's "request has
+			// expired" wording and not a generic AccessDenied.
+			WriteS3ErrorWithContext(w, ErrExpiredPresignedRequest, r.URL.Path, generateRequestID(),
+				WithSuggestion("This access key expired at "+scope.ExpiresAt.UTC().Format(time.RFC3339)+". Create or rotate a key in the dashboard."))
 			recordAuthFailure(r, "expired", true)
 			return
 		}

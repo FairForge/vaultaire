@@ -114,6 +114,19 @@
     {{if .MFAError}}<div class="alert alert-error">{{.MFAError}}</div>{{end}}
     {{if .MFAEnabled}}
     <p class="text-muted" style="margin-bottom: 1rem;">2FA is <strong>enabled</strong> for your account.</p>
+    <form method="POST" action="/dashboard/settings/mfa/backup-codes" style="margin-bottom: 1.5rem;">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <p class="text-muted">Lost your backup codes, or never saved them? Generate a new set of ten. Every old code stops working; your authenticator app is unchanged.</p>
+        {{if .HasPassword}}
+        <div class="form-group">
+            <label for="bc-password">Enter your password to regenerate backup codes</label>
+            <input id="bc-password" type="password" name="password" autocomplete="current-password" required>
+        </div>
+        {{else}}
+        <p class="text-muted">This account signs in with Google or GitHub: backup codes can be regenerated within 10 minutes of signing in.</p>
+        {{end}}
+        <button type="submit" class="btn">Regenerate backup codes</button>
+    </form>
     <form method="POST" action="/dashboard/settings/mfa/disable">
         <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
         <div class="form-group">

@@ -70,7 +70,6 @@ read-but-undocumented (marked with their source file).
 | `VAULTAIRE_BASE_URL` | http://localhost:8000 | Base URL for OAuth callbacks |
 | `VERIFY_SECRET` | — | HMAC secret for email verification tokens |
 | `SIGNUPS_ENABLED` | true | Default for the `signups` feature flag (1.13): `false` closes public signups (web form, `/auth/register` API, OAuth signup — all gated at `auth.CreateUserWithTenant`); a `feature_flags` DB row overrides this env in either direction at runtime. Existing-user login always works |
-| `SIGV4_ENFORCE` | (enforced) | `false` is the emergency fallback to access-key-existence-only auth if a client canonicalisation bug surfaces in production. Anything else = full signature verification. `internal/auth/sigv4.go` (R1-09) |
 | `SECURITY_POLICY_URL` | https://stored.ge/legal/aup | `Policy:` line of `/.well-known/security.txt` (RFC 9116, 5.5.6); contact is fixed to security@stored.ge |
 | `ENCRYPTION_MASTER_KEY` | — | SSE-S3 master key (64 hex chars = 32 bytes). Absent = encryption disabled (prod does not set it today — R8) |
 | `TLS_CERT_PROBE_TARGETS` | — (off) | Comma-separated `sni@host:port` (or bare `sni` = `sni:443`) whose served leaf certificate expiry is exported as `vaultaire_tls_cert_expiry_timestamp_seconds{sni}` (hourly verified TLS handshake; an expired/mis-issued cert still reports via the x509 error's leaf). Prod points both public names at the local HAProxy = the origin LE cert. Rules: `deploy/monitoring/vaultaire-tls.yml` |

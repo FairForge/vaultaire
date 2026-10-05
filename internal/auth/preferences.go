@@ -20,17 +20,15 @@ type UserPreferences struct {
 
 // GetUserPreferences retrieves user preferences
 func (a *AuthService) GetUserPreferences(ctx context.Context, userID string) (*UserPreferences, error) {
+	a.cacheMu.RLock()
+	defer a.cacheMu.RUnlock()
 	if _, exists := a.userIndex[userID]; !exists {
 		return nil, fmt.Errorf("user not found")
 	}
 
-	// Check if user has saved preferences
-	if a.preferences == nil {
-		a.preferences = make(map[string]*UserPreferences)
-	}
-
 	if prefs, exists := a.preferences[userID]; exists {
-		return prefs, nil
+		cp := *prefs
+		return &cp, nil
 	}
 
 	// Return defaults
@@ -49,6 +47,8 @@ func (a *AuthService) GetUserPreferences(ctx context.Context, userID string) (*U
 
 // SetUserPreferences saves user preferences
 func (a *AuthService) SetUserPreferences(ctx context.Context, userID string, prefs UserPreferences) error {
+	a.cacheMu.Lock()
+	defer a.cacheMu.Unlock()
 	if _, exists := a.userIndex[userID]; !exists {
 		return fmt.Errorf("user not found")
 	}

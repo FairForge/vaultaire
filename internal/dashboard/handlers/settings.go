@@ -27,10 +27,12 @@ func HandleSettings(tmpl *template.Template, authSvc *auth.AuthService, db *sql.
 		populateProfile(authSvc, db, r, sd, data)
 		populateEmailVerified(r.Context(), db, sd.UserID, data)
 
-		// MFA status for the settings page.
+		// MFA status for the settings page; HasPassword decides whether the
+		// 2FA forms ask for the password or for a fresh sign-in (WP-R12-15).
 		if authSvc != nil {
 			mfaEnabled, _ := authSvc.IsMFAEnabled(r.Context(), sd.UserID)
 			data["MFAEnabled"] = mfaEnabled
+			data["HasPassword"] = hasPassword(r.Context(), authSvc, sd.UserID)
 		}
 
 		// Active sessions list.
@@ -173,7 +175,7 @@ func HandleChangePassword(tmpl *template.Template, authSvc *auth.AuthService, db
 		}
 
 		// Revoke every other session the user has. The current session
-		// token is in the vaultaire_session cookie; preserve it.
+		// token is in the session cookie; preserve it.
 		if sessions != nil {
 			currentToken := ""
 			if c, err := r.Cookie(dashauth.SessionCookieName); err == nil {

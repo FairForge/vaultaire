@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -44,14 +43,6 @@ func AccessKeyFromRequest(r *http.Request) string {
 }
 
 const unsignedPayload = "UNSIGNED-PAYLOAD"
-
-// sigV4Enforced reports whether full signature verification is required.
-// SIGV4_ENFORCE=false is the emergency fallback to pre-verification
-// behavior (access-key existence only) if a client canonicalization bug
-// surfaces in production. Default is enforced.
-func sigV4Enforced() bool {
-	return os.Getenv("SIGV4_ENFORCE") != "false"
-}
 
 // sigV4Params is the parsed content of an AWS4-HMAC-SHA256 Authorization header.
 type sigV4Params struct {

@@ -23,7 +23,9 @@ func (a *AuthService) GenerateEmailVerifyToken(ctx context.Context, userID strin
 	if len(a.verifySecret) == 0 {
 		return "", ErrNoVerifySecret
 	}
+	a.cacheMu.RLock()
 	user, exists := a.userIndex[userID]
+	a.cacheMu.RUnlock()
 	if !exists {
 		return "", fmt.Errorf("user not found")
 	}
@@ -36,9 +38,6 @@ func (a *AuthService) GenerateEmailVerifyToken(ctx context.Context, userID strin
 	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 
 	token := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf("%s|%s", payload, sig)))
-
-	// Store token in memory for lookup.
-	a.verifyTokens[token] = userID
 
 	// Persist to DB.
 	if a.sqlDB != nil {
@@ -93,15 +92,18 @@ func (a *AuthService) VerifyEmail(ctx context.Context, token string) error {
 		return fmt.Errorf("verification token expired")
 	}
 
-	// Mark user as verified.
+	// Mark user as verified. The token is stateless (HMAC + expiry): the
+	// per-process map of issued tokens that used to sit here was written
+	// on every resend and read by nothing (R5-24).
+	a.cacheMu.Lock()
 	user, exists := a.userIndex[userID]
+	if exists {
+		user.EmailVerified = true
+	}
+	a.cacheMu.Unlock()
 	if !exists {
 		return fmt.Errorf("user not found")
 	}
-	user.EmailVerified = true
-
-	// Clean up token.
-	delete(a.verifyTokens, token)
 
 	// Persist to DB.
 	if a.sqlDB != nil {
@@ -119,6 +121,8 @@ func (a *AuthService) VerifyEmail(ctx context.Context, token string) error {
 
 // IsEmailVerified checks whether a user's email has been verified.
 func (a *AuthService) IsEmailVerified(_ context.Context, userID string) bool {
+	a.cacheMu.RLock()
+	defer a.cacheMu.RUnlock()
 	user, exists := a.userIndex[userID]
 	if !exists {
 		return false

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/account"
@@ -531,11 +532,15 @@ func (s *Server) handleMgmtListKeys(w http.ResponseWriter, r *http.Request) {
 			"id":           k.ID,
 			"name":         k.Name,
 			"key":          k.Key,
+			"is_primary":   k.IsPrimary,
 			"permissions":  k.Permissions,
 			"bucket_scope": k.BucketScope,
 			"ip_allowlist": k.IPAllowlist,
 			"expires_at":   k.ExpiresAt,
 			"created_at":   k.CreatedAt,
+			// A revoked key looked live here (R11-17).
+			"revoked_at": k.RevokedAt,
+			"last_used":  k.LastUsed,
 		}
 	}
 
@@ -553,13 +558,10 @@ func (s *Server) handleMgmtCreateKey(w http.ResponseWriter, r *http.Request) {
 	tenantIDForLimit, _ := r.Context().Value(tenantIDKey).(string)
 	if s.db != nil && tenantIDForLimit != "" {
 		var keyCount int
-		// api_keys has no tenant_id (R5-16 / WP-R9-6); resolve the tenant the
-		// same way the S3 auth path does — users.email = tenants.email.
+		// The row carries its tenant since WP-R5-9 (migration 076).
 		_ = s.db.QueryRowContext(r.Context(), `
-			SELECT COUNT(*) FROM api_keys ak
-			JOIN users u ON u.id = ak.user_id
-			JOIN tenants t ON t.email = u.email
-			WHERE t.id = $1 AND ak.revoked_at IS NULL`, tenantIDForLimit).Scan(&keyCount)
+			SELECT COUNT(*) FROM api_keys
+			WHERE tenant_id = $1 AND revoked_at IS NULL`, tenantIDForLimit).Scan(&keyCount)
 		if keyCount >= maxKeysPerTenant {
 			writeManagementError(w, ErrTypeConflict, "key_limit_exceeded",
 				fmt.Sprintf("maximum %d API keys per account", maxKeysPerTenant), "")
@@ -598,13 +600,10 @@ func (s *Server) handleMgmtCreateKey(w http.ResponseWriter, r *http.Request) {
 
 	key, err := s.auth.GenerateAPIKey(r.Context(), userID, req.Name, opts)
 	if err != nil {
-		if errors.Is(err, auth.ErrKeyLimitReached) {
-			writeManagementError(w, ErrTypeConflict, "key_limit_exceeded",
-				"this plan's API key limit is reached; revoke a key or upgrade", "")
-			return
+		if !writeKeyScopeError(w, err) {
+			s.logger.Error("management create key", zap.Error(err))
+			writeManagementError(w, ErrTypeAPI, "internal_error", "failed to create API key", "")
 		}
-		s.logger.Error("management create key", zap.Error(err))
-		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to create API key", "")
 		return
 	}
 
@@ -627,6 +626,28 @@ func (s *Server) handleMgmtCreateKey(w http.ResponseWriter, r *http.Request) {
 		"request_id":   getRequestID(w),
 	}
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+// writeKeyScopeError answers the typed refusals of auth.GenerateAPIKey —
+// the same codes on the management API and the user API (WP-R5-12 /
+// WP-R11-6): 400 for a scope that cannot be stored, 409 for the plan's cap.
+// It reports whether err was one of them.
+func writeKeyScopeError(w http.ResponseWriter, err error) bool {
+	switch {
+	case errors.Is(err, auth.ErrInvalidPermission):
+		writeManagementError(w, ErrTypeInvalidRequest, "invalid_permissions", err.Error(), "permissions")
+	case errors.Is(err, auth.ErrInvalidIPAllowlist):
+		writeManagementError(w, ErrTypeInvalidRequest, "invalid_ip_allowlist",
+			"ip_allowlist entries must be IP addresses or CIDR networks: "+strings.TrimPrefix(err.Error(), auth.ErrInvalidIPAllowlist.Error()+": "), "ip_allowlist")
+	case errors.Is(err, auth.ErrExpiryInPast):
+		writeManagementError(w, ErrTypeInvalidRequest, "invalid_expiry", "expires_at must be in the future", "expires_at")
+	case errors.Is(err, auth.ErrKeyLimitReached):
+		writeManagementError(w, ErrTypeConflict, "key_limit_exceeded",
+			"this plan's API key limit is reached; revoke a key or upgrade", "")
+	default:
+		return false
+	}
+	return true
 }
 
 func (s *Server) handleMgmtDeleteKey(w http.ResponseWriter, r *http.Request) {

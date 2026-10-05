@@ -276,7 +276,8 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		}
 		dr.Get("/settings/mfa", handlers.HandleMFASetup(mfaSetupTmpl, deps.Auth, deps.MFA, mfaEnrol, deps.Logger))
 		dr.Get("/settings/mfa/qr.png", handlers.HandleMFAQR(mfaEnrol, deps.Logger))
-		dr.Post("/settings/mfa/enable", handlers.HandleMFAEnable(mfaSetupTmpl, deps.Auth, deps.MFA, mfaEnrol, deps.Logger))
+		dr.Post("/settings/mfa/enable", handlers.HandleMFAEnable(mfaSetupTmpl, deps.Auth, deps.MFA, mfaEnrol, deps.Sessions, deps.Logger))
+		dr.Post("/settings/mfa/backup-codes", handlers.HandleMFARegenerateBackupCodes(mfaSetupTmpl, deps.Auth, deps.MFA, deps.Sessions, deps.Logger))
 		dr.Post("/settings/mfa/disable", handlers.HandleMFADisable(settingsTmpl, deps.Auth, deps.Sessions, deps.Logger))
 
 		// GDPR: data export (WP-R10-3b: requested here, rendered by the
@@ -870,7 +871,7 @@ func handleVerify2FA(baseTmpl *template.Template, deps Deps, lockout *middleware
 
 func handleLogout(store dashauth.SessionStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if c, err := r.Cookie("vaultaire_session"); err == nil {
+		if c, err := r.Cookie(dashauth.SessionCookieName); err == nil {
 			_ = store.Delete(r.Context(), c.Value)
 		}
 		dashauth.ClearSessionCookie(w)

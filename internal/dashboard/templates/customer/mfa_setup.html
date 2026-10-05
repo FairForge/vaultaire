@@ -3,8 +3,13 @@
 {{if .Enrolled}}
 <div class="page-header">
     <div>
+        {{if .Regenerated}}
+        <h1>New Backup Codes</h1>
+        <p class="text-muted">Your previous backup codes no longer work. Your authenticator app is unchanged.</p>
+        {{else}}
         <h1>Two-Factor Authentication Is On</h1>
         <p class="text-muted">From now on, signing in asks for a code from your authenticator app.</p>
+        {{end}}
     </div>
 </div>
 
@@ -53,6 +58,15 @@
             <label for="totp_code">6-Digit Code</label>
             <input type="text" id="totp_code" name="totp_code" class="mfa-code-input" placeholder="000000" maxlength="6" inputmode="numeric" autocomplete="one-time-code" autofocus required>
         </div>
+        {{if .HasPassword}}
+        <div class="form-group">
+            <label for="mfa-password">Your password</label>
+            <input id="mfa-password" type="password" name="password" autocomplete="current-password" required>
+            <p class="text-muted">Confirms it is you enabling two-factor authentication on this account.</p>
+        </div>
+        {{else}}
+        <p class="text-muted">This account signs in with Google or GitHub. Two-factor authentication can be enabled within 10 minutes of signing in; if that has passed, sign in again first.</p>
+        {{end}}
         <button type="submit" class="btn btn-primary">Enable 2FA</button>
         <a href="/dashboard/settings" class="btn">Cancel</a>
     </form>

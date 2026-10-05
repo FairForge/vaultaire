@@ -34,13 +34,15 @@ type ProfileUpdate struct {
 
 // GetUserProfile retrieves a user's profile
 func (a *AuthService) GetUserProfile(ctx context.Context, userID string) (*UserProfile, error) {
+	// Check MFA status (its own lock; taken before cacheMu, never inside it).
+	mfaEnabled, _ := a.IsMFAEnabled(ctx, userID)
+
+	a.cacheMu.RLock()
+	defer a.cacheMu.RUnlock()
 	user, exists := a.userIndex[userID]
 	if !exists {
 		return nil, fmt.Errorf("user not found")
 	}
-
-	// Check MFA status
-	mfaEnabled, _ := a.IsMFAEnabled(ctx, userID)
 
 	profile := &UserProfile{
 		ID:           user.ID,
@@ -80,6 +82,8 @@ func (a *AuthService) GetUserProfile(ctx context.Context, userID string) (*UserP
 
 // UpdateUserProfile updates user profile fields
 func (a *AuthService) UpdateUserProfile(ctx context.Context, userID string, updates ProfileUpdate) error {
+	a.cacheMu.Lock()
+	defer a.cacheMu.Unlock()
 	user, exists := a.userIndex[userID]
 	if !exists {
 		return fmt.Errorf("user not found")

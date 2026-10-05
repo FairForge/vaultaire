@@ -2,11 +2,13 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"html/template"
 	"image/png"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/FairForge/vaultaire/internal/auth"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
@@ -27,6 +29,70 @@ func sessionID(r *http.Request) string {
 		return c.Value
 	}
 	return ""
+}
+
+// mfaFreshSessionWindow: an OAuth-only account (no password to ask for)
+// may enrol a second factor or regenerate its backup codes only from a
+// session created this recently — a fresh sign-in through Google/GitHub.
+const mfaFreshSessionWindow = 10 * time.Minute
+
+// mfaNow is the clock the freshness check reads; tests move it.
+var mfaNow = time.Now
+
+// confirmMFAIdentity is the check in front of enrolling a second factor and
+// regenerating backup codes (WP-R12-15): a stolen dashboard session must
+// not be enough to enrol the thief's authenticator and lock the owner out,
+// or to mint a fresh set of recovery codes. The password when the account
+// has one (bcrypt, through ValidatePassword); for an OAuth-only account the
+// current session must be younger than mfaFreshSessionWindow — the user has
+// just proven themselves to the identity provider. Returns "" when the
+// identity is confirmed, else the message to show. The same shape as
+// confirmDeletionIdentity (account.go).
+func confirmMFAIdentity(r *http.Request, authSvc *auth.AuthService, sessions dashauth.SessionStore, sd *dashauth.SessionData, what string) string {
+	if authSvc == nil {
+		return "Two-factor settings are not available."
+	}
+	u, err := authSvc.GetUserByID(r.Context(), sd.UserID)
+	if err != nil {
+		return "Two-factor settings are not available."
+	}
+	if u.PasswordHash != "" {
+		password := r.FormValue("password")
+		if password == "" {
+			return "Enter your password to " + what + "."
+		}
+		valid, err := authSvc.ValidatePassword(r.Context(), sd.Email, password)
+		if err != nil || !valid {
+			return "Incorrect password."
+		}
+		return ""
+	}
+	// OAuth-only: a fresh sign-in stands in for the password.
+	if sessions == nil {
+		return "Sign in again with Google or GitHub, then " + what + " within 10 minutes."
+	}
+	infos, err := sessions.ListByUserID(r.Context(), sd.UserID)
+	if err != nil {
+		return "Sign in again with Google or GitHub, then " + what + " within 10 minutes."
+	}
+	current := sessionID(r)
+	for _, si := range infos {
+		if si.ID == current && mfaNow().Sub(si.CreatedAt) < mfaFreshSessionWindow {
+			return ""
+		}
+	}
+	return "This account signs in with Google or GitHub. Sign in again, then " + what + " within 10 minutes."
+}
+
+// hasPassword reports whether the account can be asked for a password
+// (false for an OAuth-only account) — the templates choose the field or the
+// fresh-sign-in note by it.
+func hasPassword(ctx context.Context, authSvc *auth.AuthService, userID string) bool {
+	if authSvc == nil {
+		return false
+	}
+	u, err := authSvc.GetUserByID(ctx, userID)
+	return err == nil && u.PasswordHash != ""
 }
 
 // HandleMFASetup renders the 2FA setup page: the QR code and the manual key
@@ -53,6 +119,7 @@ func HandleMFASetup(tmpl *template.Template, authSvc *auth.AuthService, mfaSvc *
 		data := sessionData(sd, "settings")
 		withCSRF(r.Context(), data)
 		withFlash(r.Context(), data)
+		data["HasPassword"] = hasPassword(r.Context(), authSvc, sd.UserID)
 		// The page shows a secret: no cache may keep it.
 		w.Header().Set("Cache-Control", "no-store")
 
@@ -124,12 +191,16 @@ func HandleMFAQR(store *MFAEnrolmentStore, logger *zap.Logger) http.HandlerFunc 
 }
 
 // HandleMFAEnable handles POST /dashboard/settings/mfa/enable. The request
-// carries the 6-digit code and nothing else that matters: the secret it is
-// checked against is the server's pending one, and the backup codes are
-// generated here, after the code verified, stored hashed, and shown ONCE in
-// this response. Nothing secret is accepted from the client — a `secret` or
-// `backup_codes` field in the form is ignored.
-func HandleMFAEnable(tmpl *template.Template, authSvc *auth.AuthService, mfaSvc *auth.MFAService, store *MFAEnrolmentStore, logger *zap.Logger) http.HandlerFunc {
+// carries the 6-digit code and the account's password (WP-R12-15 — or, for
+// an OAuth-only account, rides a session younger than ten minutes) and
+// nothing else that matters: the secret the code is checked against is the
+// server's pending one, and the backup codes are generated here, after the
+// code verified, stored hashed, and shown ONCE in this response. Nothing
+// secret is accepted from the client — a `secret` or `backup_codes` field in
+// the form is ignored. The password is checked BEFORE the code is consumed,
+// so a refused attempt leaves the pending secret (and the QR code the user
+// scanned) in place.
+func HandleMFAEnable(tmpl *template.Template, authSvc *auth.AuthService, mfaSvc *auth.MFAService, store *MFAEnrolmentStore, sessions dashauth.SessionStore, logger *zap.Logger) http.HandlerFunc {
 	const setupPath = "/dashboard/settings/mfa"
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
@@ -147,6 +218,12 @@ func HandleMFAEnable(tmpl *template.Template, authSvc *auth.AuthService, mfaSvc 
 		// shown again.
 		if enabled, _ := authSvc.IsMFAEnabled(r.Context(), sd.UserID); enabled {
 			http.Redirect(w, r, "/dashboard/settings", http.StatusSeeOther)
+			return
+		}
+
+		if msg := confirmMFAIdentity(r, authSvc, sessions, sd, "enable two-factor authentication"); msg != "" {
+			middleware.SetFlash(w, "error", msg)
+			http.Redirect(w, r, setupPath, http.StatusSeeOther)
 			return
 		}
 
@@ -189,6 +266,60 @@ func HandleMFAEnable(tmpl *template.Template, authSvc *auth.AuthService, mfaSvc 
 		withCSRF(r.Context(), data)
 		data["Enrolled"] = true
 		data["BackupCodes"] = backupCodes
+		// Shown once: this response is the only place the codes ever appear.
+		w.Header().Set("Cache-Control", "no-store")
+		renderMFATemplate(w, tmpl, data, logger)
+	}
+}
+
+// HandleMFARegenerateBackupCodes handles POST
+// /dashboard/settings/mfa/backup-codes (WP-R12-15): a fresh set of ten
+// backup codes, shown once in the response; every old code stops working.
+// It requires the password (or a fresh OAuth sign-in) like enrolment does,
+// and 2FA to be on. It is also the remedy for the crash window between
+// EnableMFA and the response that showed the codes: a user whose codes
+// page never rendered gets a set here instead of being locked to one
+// authenticator.
+func HandleMFARegenerateBackupCodes(tmpl *template.Template, authSvc *auth.AuthService, mfaSvc *auth.MFAService, sessions dashauth.SessionStore, logger *zap.Logger) http.HandlerFunc {
+	const settingsPath = "/dashboard/settings"
+	return func(w http.ResponseWriter, r *http.Request) {
+		sd := dashauth.GetSession(r.Context())
+		if sd == nil {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+		if authSvc == nil || mfaSvc == nil {
+			middleware.SetFlash(w, "error", "Two-factor settings are not available.")
+			http.Redirect(w, r, settingsPath, http.StatusSeeOther)
+			return
+		}
+		if enabled, _ := authSvc.IsMFAEnabled(r.Context(), sd.UserID); !enabled {
+			middleware.SetFlash(w, "error", "Two-factor authentication is not enabled on this account.")
+			http.Redirect(w, r, settingsPath, http.StatusSeeOther)
+			return
+		}
+		if msg := confirmMFAIdentity(r, authSvc, sessions, sd, "regenerate your backup codes"); msg != "" {
+			middleware.SetFlash(w, "error", msg)
+			http.Redirect(w, r, settingsPath, http.StatusSeeOther)
+			return
+		}
+
+		codes, err := mfaSvc.GenerateBackupCodes()
+		if err == nil {
+			err = authSvc.RegenerateBackupCodes(r.Context(), sd.UserID, codes)
+		}
+		if err != nil {
+			logger.Error("regenerate backup codes", zap.String("user", sd.UserID), zap.Error(err))
+			middleware.SetFlash(w, "error", "Your backup codes could not be regenerated. Try again.")
+			http.Redirect(w, r, settingsPath, http.StatusSeeOther)
+			return
+		}
+
+		data := sessionData(sd, "settings")
+		withCSRF(r.Context(), data)
+		data["Enrolled"] = true
+		data["Regenerated"] = true
+		data["BackupCodes"] = codes
 		// Shown once: this response is the only place the codes ever appear.
 		w.Header().Set("Cache-Control", "no-store")
 		renderMFATemplate(w, tmpl, data, logger)

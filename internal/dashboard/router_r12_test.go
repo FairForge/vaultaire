@@ -101,7 +101,7 @@ func TestLogin_LocksAccountAfterRepeatedFailuresEvenWithTheRightPassword(t *test
 	assert.Equal(t, http.StatusUnauthorized, w.Code, "locked: the right password is refused too")
 	assert.Contains(t, w.Body.String(), "Invalid email or password", "the message does not reveal the lock")
 	for _, c := range w.Result().Cookies() {
-		assert.NotEqual(t, "vaultaire_session", c.Name)
+		assert.NotEqual(t, dashauth.SessionCookieName, c.Name)
 	}
 }
 

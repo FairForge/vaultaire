@@ -297,15 +297,41 @@ func TestValidateRequest_SigV4Enforcement(t *testing.T) {
 		require.Error(t, err, "bare access key ID in query must not authenticate under SigV4 enforcement")
 	})
 
-	t.Run("SIGV4_ENFORCE=false falls back to key-existence auth", func(t *testing.T) {
+	// WP-R5-4: the kill-switch is gone. The environment variable that used
+	// to turn every S3 request into key-existence auth is read by nothing;
+	// a wrong signature, a SigV2 header and a bare access key id are all
+	// SignatureDoesNotMatch whatever the environment says.
+	t.Run("SIGV4_ENFORCE=false changes nothing", func(t *testing.T) {
 		t.Setenv("SIGV4_ENFORCE", "false")
 		a, ak, _ := setupSigV4Tenant(t)
+
 		r := httptest.NewRequest("GET", "http://stored.ge/some-bucket", nil)
 		signV4(t, r, ak, "wrong-secret-but-flag-off", "us-east-1", sha256Hex(""), now)
+		_, _, err := a.ValidateRequest(r)
+		require.ErrorIs(t, err, ErrSignatureMismatch, "a wrong signature must never authenticate")
 
-		tenantID, _, err := a.ValidateRequest(r)
-		require.NoError(t, err)
-		assert.Equal(t, "sigv4-test-tenant", tenantID)
+		r = httptest.NewRequest("GET", "http://stored.ge/some-bucket", nil)
+		r.Header.Set("Authorization", "AWS "+ak+":bogus-sigv2-signature")
+		_, _, err = a.ValidateRequest(r)
+		require.ErrorIs(t, err, ErrSignatureMismatch, "SigV2 must never authenticate")
+
+		r = httptest.NewRequest("GET", "http://stored.ge/some-bucket?AWSAccessKeyId="+ak, nil)
+		_, _, err = a.ValidateRequest(r)
+		require.ErrorIs(t, err, ErrSignatureMismatch, "a bare access key id must never authenticate")
+	})
+
+	t.Run("legacy formats are refused even without a database", func(t *testing.T) {
+		// The nil-DB "test-tenant" convenience is for unauthenticated local
+		// development; it never dresses a key-id-only request up as a tenant.
+		a := NewAuth(nil, zap.NewNop())
+		r := httptest.NewRequest("GET", "http://stored.ge/some-bucket", nil)
+		r.Header.Set("Authorization", "AWS VKSOMEKEY:sig")
+		_, _, err := a.ValidateRequest(r)
+		require.ErrorIs(t, err, ErrSignatureMismatch)
+
+		r = httptest.NewRequest("GET", "http://stored.ge/some-bucket?AWSAccessKeyId=VKSOMEKEY", nil)
+		_, _, err = a.ValidateRequest(r)
+		require.ErrorIs(t, err, ErrSignatureMismatch)
 	})
 
 	t.Run("unknown access key still rejected", func(t *testing.T) {
@@ -571,23 +597,12 @@ func TestValidateRequest_NullSecretKeyTenant(t *testing.T) {
 		_, _ = db.Exec(`DELETE FROM users WHERE id = $1`, userID)
 	})
 
-	t.Run("enforced: fails closed with actionable error", func(t *testing.T) {
-		r := httptest.NewRequest("GET", "http://stored.ge/some-bucket", nil)
-		signV4(t, r, ak, "whatever-secret", "us-east-1", sha256Hex(""), now)
-		_, _, err := a.ValidateRequest(r)
-		require.Error(t, err)
-		assert.True(t, errors.Is(err, ErrSignatureMismatch))
-		assert.Contains(t, err.Error(), "regenerate", "must hit the regenerate-key path, not a scan error")
-	})
-
-	t.Run("SIGV4_ENFORCE=false: still authenticates", func(t *testing.T) {
-		t.Setenv("SIGV4_ENFORCE", "false")
-		r := httptest.NewRequest("GET", "http://stored.ge/some-bucket", nil)
-		signV4(t, r, ak, "whatever-secret", "us-east-1", sha256Hex(""), now)
-		tenantID, _, err := a.ValidateRequest(r)
-		require.NoError(t, err, "kill-switch must restore pre-verification behavior for NULL-secret tenants")
-		assert.Equal(t, "sigv4-nullsecret-tenant", tenantID)
-	})
+	r := httptest.NewRequest("GET", "http://stored.ge/some-bucket", nil)
+	signV4(t, r, ak, "whatever-secret", "us-east-1", sha256Hex(""), now)
+	_, _, err = a.ValidateRequest(r)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrSignatureMismatch))
+	assert.Contains(t, err.Error(), "regenerate", "must hit the regenerate-key path, not a scan error")
 }
 
 // Cloudflare rewrites Accept-Encoding on the way to the origin (it offers the

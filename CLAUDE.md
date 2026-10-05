@@ -186,7 +186,6 @@ GitHub Actions Deploy (`.github/workflows/deploy.yml`):
 | `QUOTALESS_ACCESS_KEY`, `QUOTALESS_SECRET_KEY`, `QUOTALESS_ENDPOINT` | — | Quotaless storage |
 | `S3COMPAT_INSECURE_TLS` | — | `true`/`1` skips TLS verification on the `s3compat` (Quotaless) driver — self-signed endpoints only |
 | `VAULTAIRE_TUNED_TRANSPORT` | true | `false` makes every S3-class driver use `http.DefaultClient` (no pooling tuning, no timeouts) instead of `TunedHTTPClient` (`internal/drivers/transport.go`) |
-| `SIGV4_ENFORCE` | true | `false` = emergency key-existence-only S3 auth (no signature check) — WP-R5-4 removes it |
 | `EMAIL_PROVIDER`, `EMAIL_FROM`, `RESEND_API_KEY`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD` | — | Outbound email (`resend` \| `smtp`; see `internal/email/CLAUDE.md`). Prod sets none → `LogSender` (logs recipient/subject only, sends nothing) |
 | `STRIPE_SECRET_KEY` | — | Stripe API key (sk_test_... or sk_live_...) |
 | `STRIPE_WEBHOOK_SECRET` | — | Stripe webhook endpoint secret (whsec_...). **Required with `STRIPE_SECRET_KEY`**: `/webhook/stripe` is mounted only when both are set (an empty secret used to skip signature verification — R10-01). The Stripe endpoint must be created pinned to API version **2023-08-16** (stripe-go v75 rejects any other; R10-03); the handler answers 500 and records nothing when an event cannot be applied, so Stripe retries (R10-02). Contract in `internal/billing/CLAUDE.md` |

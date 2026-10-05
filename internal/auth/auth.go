@@ -68,16 +68,15 @@ type AuthService struct {
 	profiles    map[string]*ProfileUpdate // user profiles
 	preferences map[string]*UserPreferences
 	mfaSettings map[string]*MFASettings // userID -> MFA config
-	// cacheMu guards the credential maps above against Evict (WP-R10-3):
-	// the account-deletion runner removes an erased account from the
-	// in-process cache while requests read it. Only the writers and the
-	// login / S3 / API-key readers take it today; the remaining readers
-	// predate it (WP-R5-14).
+	// cacheMu guards the maps above AND the fields of the *User / *APIKey /
+	// *Tenant values they hold: every reader takes RLock, every writer Lock,
+	// and what leaves the service is a copy (WP-R5-6, proven by
+	// TestAuthService_CredentialCacheIsRaceFree under -race). It began as the
+	// guard against Evict (WP-R10-3) with most readers unlocked.
 	cacheMu        sync.RWMutex
 	totpUsed       map[string]map[string]time.Time // userID -> accepted TOTP codes inside the replay window (R5-15c, R12-38)
 	mfaMu          sync.RWMutex
-	verifySecret   []byte            // HMAC key for email verification tokens
-	verifyTokens   map[string]string // token -> userID (in-memory lookup)
+	verifySecret   []byte // HMAC key for email verification tokens
 	resetRates     map[string][]time.Time
 	resetMu        sync.Mutex
 	signupsEnabled bool // when false, all account creation is rejected
@@ -130,7 +129,6 @@ func NewAuthService(db Database, sqlDB *sql.DB) *AuthService {
 		profiles:       make(map[string]*ProfileUpdate),
 		preferences:    make(map[string]*UserPreferences),
 		mfaSettings:    make(map[string]*MFASettings),
-		verifyTokens:   make(map[string]string),
 		resetRates:     make(map[string][]time.Time),
 		signupsEnabled: true, // default: signups allowed (prod sets SIGNUPS_ENABLED=false to close)
 	}
@@ -589,23 +587,25 @@ func (a *AuthService) setPassword(ctx context.Context, user *User, hash string) 
 func (a *AuthService) GetUserByEmail(ctx context.Context, email string) (*User, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	a.cacheMu.RLock()
+	defer a.cacheMu.RUnlock()
 	user, exists := a.users[email]
-	a.cacheMu.RUnlock()
 	if !exists {
 		return nil, fmt.Errorf("user not found")
 	}
-	return user, nil
+	cp := *user // a copy: the caller reads it outside the lock
+	return &cp, nil
 }
 
 // GetUserByID retrieves a user by ID
 func (a *AuthService) GetUserByID(ctx context.Context, userID string) (*User, error) {
 	a.cacheMu.RLock()
+	defer a.cacheMu.RUnlock()
 	user, exists := a.userIndex[userID]
-	a.cacheMu.RUnlock()
 	if !exists {
 		return nil, fmt.Errorf("user not found")
 	}
-	return user, nil
+	cp := *user
+	return &cp, nil
 }
 
 // GetUserIDByTenantID returns the owning user's ID for a given tenant.
@@ -633,11 +633,14 @@ func (a *AuthService) GetUserByOAuth(ctx context.Context, provider, providerID s
 	if err != nil {
 		return nil, nil //nolint:nilerr // not found is not an error
 	}
+	a.cacheMu.RLock()
+	defer a.cacheMu.RUnlock()
 	user, exists := a.userIndex[userID]
 	if !exists {
 		return nil, nil
 	}
-	return user, nil
+	cp := *user
+	return &cp, nil
 }
 
 // LinkOAuthAccount associates an OAuth provider account with an existing user.
@@ -674,21 +677,19 @@ func (a *AuthService) CreateUserFromOAuth(ctx context.Context, email, company, p
 
 // ValidateS3Request validates S3 API requests and returns tenant
 func (a *AuthService) ValidateS3Request(ctx context.Context, accessKey string) (*Tenant, error) {
-	a.cacheMu.RLock()
+	a.cacheMu.Lock()
+	defer a.cacheMu.Unlock()
 	tenant, exists := a.keyIndex[accessKey]
-	apiKey, hasKey := a.apiKeys[accessKey]
-	a.cacheMu.RUnlock()
 	if !exists {
 		return nil, fmt.Errorf("invalid access key")
 	}
-
-	if hasKey {
+	if apiKey, hasKey := a.apiKeys[accessKey]; hasKey {
 		now := time.Now()
 		apiKey.LastUsed = &now
 		apiKey.UsageCount++
 	}
-
-	return tenant, nil
+	cp := *tenant
+	return &cp, nil
 }
 
 // Evict removes an erased account from the in-process credential cache

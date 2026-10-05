@@ -43,85 +43,79 @@ func NewAuth(db *sql.DB, logger *zap.Logger) *Auth {
 	}
 }
 
-// ValidateRequest validates an S3 request and returns the tenant ID and key scope.
-// With SIGV4_ENFORCE active (the default), AWS4-HMAC-SHA256 requests must carry a
-// valid signature; legacy formats that prove only possession of the access key ID
-// (SigV2 "AWS ak:sig" and the bare AWSAccessKeyId query parameter) are rejected.
+// ValidateRequest authenticates an S3 request and returns the tenant ID and
+// key scope. AWS Signature V4 is the only way in (WP-R5-4): the request must
+// carry an AWS4-HMAC-SHA256 Authorization header whose signature verifies
+// against the key's stored secret. The formats that proved only possession
+// of the access key ID — SigV2 "AWS ak:sig" and the bare AWSAccessKeyId
+// query parameter — answer ErrSignatureMismatch, and there is no switch that
+// turns verification off (SIGV4_ENFORCE=false used to make one env typo
+// into key-existence auth for every tenant).
+//
+// Without a database (local development, unit tests) every request is the
+// "test-tenant" with full access.
 func (a *Auth) ValidateRequest(r *http.Request) (string, *KeyScope, error) {
 	fullAccess := &KeyScope{Permissions: []string{"*"}}
-	enforce := sigV4Enforced()
 
-	// Extract Authorization header
 	authHeader := r.Header.Get("Authorization")
 
-	// If no auth header, check for access key in query (for presigned URLs)
 	if authHeader == "" {
-		if accessKey := r.URL.Query().Get("AWSAccessKeyId"); accessKey != "" {
-			if enforce && a.db != nil {
-				return "", nil, fmt.Errorf("%w: unsigned AWSAccessKeyId query authentication is not supported", ErrSignatureMismatch)
-			}
-			return a.validateAccessKey(r.Context(), accessKey)
+		if r.URL.Query().Get("AWSAccessKeyId") != "" {
+			return "", nil, fmt.Errorf("%w: unsigned AWSAccessKeyId query authentication is not supported", ErrSignatureMismatch)
 		}
-		// For testing without auth, allow but use test-tenant
 		if a.db == nil {
 			return "test-tenant", fullAccess, nil
 		}
 		return "", nil, fmt.Errorf("missing authorization")
 	}
 
-	// AWS Signature v4 format (used by AWS CLI/SDKs)
-	if strings.HasPrefix(authHeader, algorithm) {
-		params, err := parseSigV4AuthHeader(authHeader)
-		if err != nil {
-			a.logger.Debug("failed to parse auth header", zap.Error(err))
-			return "", nil, err
-		}
-		if a.db == nil {
-			a.logger.Warn("no database connection, using test-tenant")
-			return "test-tenant", fullAccess, nil
-		}
-		cred, err := a.LookupCredential(r.Context(), params.AccessKey)
-		if err != nil {
-			return "", nil, err
-		}
-		if enforce {
-			// A key whose plaintext secret was never stored (legacy rows with
-			// only a bcrypt secret_hash) can never verify: fail closed, but
-			// leave an actionable trail — the key must be regenerated.
-			if cred.SecretKey == "" {
-				a.logger.Warn("access key has no stored secret — cannot verify SigV4 signature; regenerate this API key",
-					zap.String("access_key", params.AccessKey[:min(6, len(params.AccessKey))]+"..."),
-					zap.String("tenant_id", cred.TenantID))
-				return "", nil, fmt.Errorf("%w: key has no stored secret for signature verification; regenerate this API key", ErrSignatureMismatch)
-			}
-			if err := a.verifySigV4(r, params, cred.SecretKey); err != nil {
-				a.logger.Debug("signature verification failed",
-					zap.String("access_key", params.AccessKey[:min(6, len(params.AccessKey))]+"..."),
-					zap.Error(err))
-				return "", nil, err
-			}
-			// The signature proves the DECLARED payload hash is authentic;
-			// wrapping the body makes the received bytes live up to it.
-			if err := wrapPayloadVerification(r); err != nil {
-				return "", nil, err
-			}
-		}
-		return cred.TenantID, cred.Scope, nil
-	}
-
-	// Basic AWS format (SigV2-era clients) — key-existence only, so it is
-	// disabled while signatures are enforced.
+	// SigV2-era clients: key-existence only, refused.
 	if strings.HasPrefix(authHeader, "AWS ") {
-		if enforce && a.db != nil {
-			return "", nil, fmt.Errorf("%w: AWS signature version 2 is not supported", ErrSignatureMismatch)
-		}
-		parts := strings.SplitN(strings.TrimPrefix(authHeader, "AWS "), ":", 2)
-		if len(parts) == 2 {
-			return a.validateAccessKey(r.Context(), parts[0])
-		}
+		return "", nil, fmt.Errorf("%w: AWS signature version 2 is not supported", ErrSignatureMismatch)
 	}
 
-	return "", nil, fmt.Errorf("invalid authorization format")
+	if !strings.HasPrefix(authHeader, algorithm) {
+		return "", nil, fmt.Errorf("invalid authorization format")
+	}
+
+	params, err := parseSigV4AuthHeader(authHeader)
+	if err != nil {
+		// The error names parts of the header; the header is the credential
+		// (CodeQL go/clear-text-logging) — the caller gets it, the log does not.
+		a.logger.Debug("failed to parse SigV4 authorization header")
+		return "", nil, err
+	}
+	if a.db == nil {
+		a.logger.Warn("no database connection, using test-tenant")
+		return "test-tenant", fullAccess, nil
+	}
+	cred, err := a.LookupCredential(r.Context(), params.AccessKey)
+	if err != nil {
+		return "", nil, err
+	}
+	// A key whose plaintext secret was never stored (legacy rows with only
+	// a bcrypt secret_hash) can never verify: fail closed, but leave an
+	// actionable trail — the key must be regenerated.
+	if cred.SecretKey == "" {
+		// The DB-derived tenant, never the request-derived key id (CodeQL
+		// go/clear-text-logging on the Authorization header); the metric
+		// carries the per-key signal.
+		a.logger.Warn("access key has no stored secret — cannot verify SigV4 signature; regenerate this API key",
+			zap.String("tenant_id", cred.TenantID))
+		return "", nil, fmt.Errorf("%w: key has no stored secret for signature verification; regenerate this API key", ErrSignatureMismatch)
+	}
+	if err := a.verifySigV4(r, params, cred.SecretKey); err != nil {
+		a.logger.Debug("signature verification failed",
+			zap.String("tenant_id", cred.TenantID),
+			zap.Bool("time_skewed", errors.Is(err, ErrRequestTimeSkewed)))
+		return "", nil, err
+	}
+	// The signature proves the DECLARED payload hash is authentic; wrapping
+	// the body makes the received bytes live up to it.
+	if err := wrapPayloadVerification(r); err != nil {
+		return "", nil, err
+	}
+	return cred.TenantID, cred.Scope, nil
 }
 
 // Credential is the result of an access-key lookup: the owning tenant, the
@@ -138,20 +132,6 @@ type Credential struct {
 // failure against a KNOWN key: a burst of these after a rotation is
 // someone still holding the old pair.
 var ErrAccessKeyRevoked = errors.New("access key revoked")
-
-// validateAccessKey looks up the tenant ID and key scope by access key,
-// without signature verification (legacy paths and SIGV4_ENFORCE=false).
-func (a *Auth) validateAccessKey(ctx context.Context, accessKey string) (string, *KeyScope, error) {
-	if a.db == nil {
-		a.logger.Warn("no database connection, using test-tenant")
-		return "test-tenant", &KeyScope{Permissions: []string{"*"}}, nil
-	}
-	cred, err := a.LookupCredential(ctx, accessKey)
-	if err != nil {
-		return "", nil, err
-	}
-	return cred.TenantID, cred.Scope, nil
-}
 
 // LookupCredential resolves an access key to its secret, tenant and scope.
 // It is THE credential lookup — the S3 header-auth path, the presigned-URL

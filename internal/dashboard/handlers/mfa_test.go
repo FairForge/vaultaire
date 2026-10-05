@@ -92,7 +92,7 @@ func newEnrolFixture(t *testing.T) *enrolFixture {
 	f.store.now = func() time.Time { return *f.clock }
 	tmpl := testMFATemplate(t)
 	f.setup = HandleMFASetup(tmpl, f.auth, f.mfa, f.store, zap.NewNop())
-	f.enbl = HandleMFAEnable(tmpl, f.auth, f.mfa, f.store, zap.NewNop())
+	f.enbl = HandleMFAEnable(tmpl, f.auth, f.mfa, f.store, nil, zap.NewNop())
 	return f
 }
 
@@ -122,7 +122,12 @@ func (f *enrolFixture) open(session string) string {
 	return strings.TrimPrefix(body, "secret:")
 }
 
+// enable posts the enable form. The account's password rides along unless
+// the form names one itself (WP-R12-15: enrolment asks for it).
 func (f *enrolFixture) enable(session, form string) *httptest.ResponseRecorder {
+	if !strings.Contains(form, "password=") {
+		form = "password=password123&" + form
+	}
 	w := httptest.NewRecorder()
 	f.enbl(w, f.req("POST", session, form))
 	return w
@@ -191,7 +196,7 @@ func TestMFAEnrolment_BackupCodesAreShownOnceAfterTheCodeVerified(t *testing.T) 
 	var shown []string
 	tmpl := template.Must(template.New("base").Parse(`{{define "base"}}{{range .BackupCodes}}[{{.}}]{{end}}{{end}}`))
 	f.setup = HandleMFASetup(testMFATemplate(t), f.auth, f.mfa, f.store, zap.NewNop())
-	f.enbl = HandleMFAEnable(tmpl, f.auth, f.mfa, f.store, zap.NewNop())
+	f.enbl = HandleMFAEnable(tmpl, f.auth, f.mfa, f.store, nil, zap.NewNop())
 	secret := f.open(mfaTestSession)
 
 	// Act. ONE code, computed once: the assertion below is about this very
@@ -287,7 +292,7 @@ func TestMFAEnrolment_ARestartMidEnrolmentAsksToScanAgain(t *testing.T) {
 	f := newEnrolFixture(t)
 	secret := f.open(mfaTestSession)
 	f.store = NewMFAEnrolmentStore()
-	f.enbl = HandleMFAEnable(testMFATemplate(t), f.auth, f.mfa, f.store, zap.NewNop())
+	f.enbl = HandleMFAEnable(testMFATemplate(t), f.auth, f.mfa, f.store, nil, zap.NewNop())
 
 	// Act
 	w := f.enable(mfaTestSession, "totp_code="+f.code(secret))
@@ -339,14 +344,16 @@ func TestMFAEnrolment_QRIsRenderedByTheServer(t *testing.T) {
 }
 
 func TestMFAEnrolment_AFailedEnableKeepsThePendingSecret(t *testing.T) {
-	// Arrange: the code is right but enabling fails (here: the user is gone;
-	// in production: the database refused the write).
+	// Arrange: the code is right but the enable cannot go through (here: the
+	// user is gone, so the identity check in front of it fails; in
+	// production: the database refused the write). Either way the scanned QR
+	// code must survive the attempt.
 	f := newEnrolFixture(t)
 	secret := f.open(mfaTestSession)
 	ghost := &dashauth.SessionData{UserID: "no-such-user", Email: "ghost@stored.ge", Role: "user"}
 	_, err := f.store.Begin("ghost-session", ghost.UserID, func() (string, string, error) { return secret, "otpauth://totp/x", nil })
 	require.NoError(t, err)
-	req := httptest.NewRequest("POST", "/dashboard/settings/mfa/enable", strings.NewReader("totp_code="+f.code(secret)))
+	req := httptest.NewRequest("POST", "/dashboard/settings/mfa/enable", strings.NewReader("password=password123&totp_code="+f.code(secret)))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.AddCookie(&http.Cookie{Name: dashauth.SessionCookieName, Value: "ghost-session"})
 	req = req.WithContext(context.WithValue(req.Context(), dashauth.SessionKey, ghost))
@@ -357,7 +364,7 @@ func TestMFAEnrolment_AFailedEnableKeepsThePendingSecret(t *testing.T) {
 
 	// Assert: an error, and the scanned QR code is still the one to use.
 	assert.Equal(t, http.StatusSeeOther, w.Code)
-	assert.Contains(t, flashMsg(t, w), "could not be enabled")
+	assert.Contains(t, flashMsg(t, w), "not available")
 	_, still := f.store.Peek("ghost-session", ghost.UserID)
 	assert.True(t, still, "the pending secret was thrown away with a failed enable")
 }

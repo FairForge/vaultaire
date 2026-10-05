@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -40,7 +41,7 @@ func csrfUnderTest() http.Handler {
 func tokenFor(t *testing.T, session string) string {
 	t.Helper()
 	req := httptest.NewRequest("GET", "https://stored.ge/dashboard", nil)
-	req.AddCookie(&http.Cookie{Name: "vaultaire_session", Value: session})
+	req.AddCookie(&http.Cookie{Name: dashauth.SessionCookieName, Value: session})
 	w := httptest.NewRecorder()
 	csrfUnderTest().ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code)
@@ -66,7 +67,7 @@ func send(p post) *httptest.ResponseRecorder {
 	req := httptest.NewRequest("POST", "https://stored.ge/dashboard/settings/profile", body)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	if p.session != "" {
-		req.AddCookie(&http.Cookie{Name: "vaultaire_session", Value: p.session})
+		req.AddCookie(&http.Cookie{Name: dashauth.SessionCookieName, Value: p.session})
 	}
 	if p.header != "" {
 		req.Header.Set("X-CSRF-Token", p.header)
@@ -114,7 +115,7 @@ func TestCSRF_APlantedCookieValidatesNothing(t *testing.T) {
 func TestCSRF_NoCookieIsIssuedAndAnOldOneIsCleared(t *testing.T) {
 	// Arrange + Act: a first visit.
 	req := httptest.NewRequest("GET", "https://stored.ge/dashboard", nil)
-	req.AddCookie(&http.Cookie{Name: "vaultaire_session", Value: sessionA})
+	req.AddCookie(&http.Cookie{Name: dashauth.SessionCookieName, Value: sessionA})
 	w := httptest.NewRecorder()
 	csrfUnderTest().ServeHTTP(w, req)
 
@@ -125,7 +126,7 @@ func TestCSRF_NoCookieIsIssuedAndAnOldOneIsCleared(t *testing.T) {
 
 	// A browser that still holds the old cookie is told to drop it.
 	req = httptest.NewRequest("GET", "https://stored.ge/dashboard", nil)
-	req.AddCookie(&http.Cookie{Name: "vaultaire_session", Value: sessionA})
+	req.AddCookie(&http.Cookie{Name: dashauth.SessionCookieName, Value: sessionA})
 	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "left-over"})
 	w = httptest.NewRecorder()
 	csrfUnderTest().ServeHTTP(w, req)
@@ -175,7 +176,7 @@ func TestCSRF_TheKeyDecidesTheToken(t *testing.T) {
 
 	other := NewCSRF(DeriveCSRFKey("another-secret"), "https://stored.ge")(okHandler())
 	req := httptest.NewRequest("POST", "https://stored.ge/dashboard/x", nil)
-	req.AddCookie(&http.Cookie{Name: "vaultaire_session", Value: sessionA})
+	req.AddCookie(&http.Cookie{Name: dashauth.SessionCookieName, Value: sessionA})
 	req.Header.Set("X-CSRF-Token", tokenFor(t, sessionA))
 	w := httptest.NewRecorder()
 	other.ServeHTTP(w, req)
@@ -230,7 +231,7 @@ func TestCSRF_OriginOfTheRequestHostIsAccepted(t *testing.T) {
 	post := func(host, origin string) int {
 		req := httptest.NewRequest("POST", "https://"+host+"/dashboard/x", nil)
 		req.Host = host
-		req.AddCookie(&http.Cookie{Name: "vaultaire_session", Value: sessionA})
+		req.AddCookie(&http.Cookie{Name: dashauth.SessionCookieName, Value: sessionA})
 		req.Header.Set("X-CSRF-Token", tokenFor(t, sessionA))
 		req.Header.Set("Origin", origin)
 		w := httptest.NewRecorder()

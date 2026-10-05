@@ -70,6 +70,12 @@ func (a *AuthService) GenerateAPIKey(ctx context.Context, userID, name string, o
 	if !exists {
 		return nil, fmt.Errorf("user not found")
 	}
+	// The scope is checked here, once, for every entry point (WP-R5-12):
+	// unknown permissions, allowlist entries that are not an address or a
+	// network, an expiry that has already passed.
+	if err := opts.Validate(time.Now()); err != nil {
+		return nil, err
+	}
 	if err := a.checkKeyCap(ctx, user); err != nil {
 		return nil, err
 	}
@@ -201,14 +207,25 @@ func (a *AuthService) markRevokedLocked(k *APIKey, at time.Time) {
 	delete(a.keyIndex, k.Key)
 }
 
-// findOwnedKey returns the in-memory key with this id owned by userID.
-func (a *AuthService) findOwnedKey(userID, keyID string) *APIKey {
-	a.cacheMu.RLock()
-	defer a.cacheMu.RUnlock()
+// findOwnedKeyLocked returns the in-memory key with this id owned by
+// userID. Caller holds cacheMu; the pointer is the map's own and must not
+// be read or written after the lock is released.
+func (a *AuthService) findOwnedKeyLocked(userID, keyID string) *APIKey {
 	for _, key := range a.apiKeys {
 		if key.ID == keyID && key.UserID == userID {
 			return key
 		}
+	}
+	return nil
+}
+
+// snapshotOwnedKey returns a copy of the caller's key with this id, or nil.
+func (a *AuthService) snapshotOwnedKey(userID, keyID string) *APIKey {
+	a.cacheMu.RLock()
+	defer a.cacheMu.RUnlock()
+	if key := a.findOwnedKeyLocked(userID, keyID); key != nil {
+		cp := *key
+		return &cp
 	}
 	return nil
 }
@@ -264,18 +281,21 @@ func (a *AuthService) liveSTSChildren(ctx context.Context, parentKeyID string) i
 }
 
 // GetOwnedAPIKey returns the caller's key with this id, or ErrKeyNotFound /
-// ErrKeyRevoked. Used by STS to bound a token to a named parent key.
+// ErrKeyRevoked / ErrKeyExpired. Used by STS to bound a token to a named
+// parent key: an expired parent mints nothing.
 func (a *AuthService) GetOwnedAPIKey(_ context.Context, userID, keyID string) (*APIKey, error) {
-	key := a.findOwnedKey(userID, keyID)
+	key := a.snapshotOwnedKey(userID, keyID)
 	if key == nil {
 		return nil, ErrKeyNotFound
 	}
 	if key.RevokedAt != nil {
 		return nil, ErrKeyRevoked
 	}
-	cp := *key
-	cp.Secret = ""
-	return &cp, nil
+	if IsKeyExpired(key.ExpiresAt) {
+		return nil, ErrKeyExpired
+	}
+	key.Secret = ""
+	return key, nil
 }
 
 // persistRevocation stamps revoked_at on the row. The S3 auth path reads
@@ -297,19 +317,17 @@ func (a *AuthService) persistRevocation(ctx context.Context, userID, keyID strin
 
 // ValidateAPIKey checks if API key is valid
 func (a *AuthService) ValidateAPIKey(ctx context.Context, key, secret string) (*User, error) {
-	a.cacheMu.RLock()
+	a.cacheMu.Lock()
+	defer a.cacheMu.Unlock()
 	apiKey, exists := a.apiKeys[key]
-	a.cacheMu.RUnlock()
 	if !exists {
 		return nil, fmt.Errorf("invalid API key")
 	}
-
 	if apiKey.RevokedAt != nil {
 		return nil, fmt.Errorf("API key has been revoked")
 	}
-
-	if apiKey.ExpiresAt != nil && time.Now().After(*apiKey.ExpiresAt) {
-		return nil, fmt.Errorf("API key has expired")
+	if IsKeyExpired(apiKey.ExpiresAt) {
+		return nil, ErrKeyExpired
 	}
 
 	hash := sha256.Sum256([]byte(secret))
@@ -317,9 +335,7 @@ func (a *AuthService) ValidateAPIKey(ctx context.Context, key, secret string) (*
 		return nil, fmt.Errorf("invalid API secret")
 	}
 
-	a.cacheMu.RLock()
 	user, exists := a.userIndex[apiKey.UserID]
-	a.cacheMu.RUnlock()
 	if !exists {
 		return nil, fmt.Errorf("user not found")
 	}
@@ -328,7 +344,8 @@ func (a *AuthService) ValidateAPIKey(ctx context.Context, key, secret string) (*
 	apiKey.LastUsed = &now
 	apiKey.UsageCount++
 
-	return user, nil
+	cp := *user
+	return &cp, nil
 }
 
 // RotateAPIKey mints a replacement key with the old key's scope, persists
@@ -343,7 +360,9 @@ func (a *AuthService) ValidateAPIKey(ctx context.Context, key, secret string) (*
 // call. STS tokens minted from the old key die with it (the credential
 // lookup joins the parent; WP-R5-5) and are counted on the audit row.
 func (a *AuthService) RotateAPIKey(ctx context.Context, userID, keyID string) (*APIKey, error) {
-	oldKey := a.findOwnedKey(userID, keyID)
+	// A snapshot to build the successor from; the map's own pointer is
+	// touched again only under the lock, below.
+	oldKey := a.snapshotOwnedKey(userID, keyID)
 	if oldKey == nil {
 		return nil, ErrKeyNotFound
 	}
@@ -389,8 +408,8 @@ func (a *AuthService) RotateAPIKey(ctx context.Context, userID, keyID string) (*
 	}
 
 	a.cacheMu.Lock()
-	if oldKey.RevokedAt == nil {
-		a.markRevokedLocked(oldKey, now)
+	if live := a.findOwnedKeyLocked(userID, keyID); live != nil && live.RevokedAt == nil {
+		a.markRevokedLocked(live, now)
 	}
 	a.indexAPIKeyLocked(newKey)
 	a.cacheMu.Unlock()
@@ -450,7 +469,7 @@ func rotatedName(name string) string {
 // path's source of truth), the hot index forgets it, the listing copy is
 // marked. The primary pair is refused (ErrPrimaryKeyRevoke): rotate it.
 func (a *AuthService) RevokeAPIKey(ctx context.Context, userID, keyID string) error {
-	key := a.findOwnedKey(userID, keyID)
+	key := a.snapshotOwnedKey(userID, keyID)
 	if key == nil {
 		return ErrKeyNotFound
 	}
@@ -465,7 +484,9 @@ func (a *AuthService) RevokeAPIKey(ctx context.Context, userID, keyID string) er
 		return err
 	}
 	a.cacheMu.Lock()
-	a.markRevokedLocked(key, time.Now())
+	if live := a.findOwnedKeyLocked(userID, keyID); live != nil {
+		a.markRevokedLocked(live, time.Now())
+	}
 	a.cacheMu.Unlock()
 	a.record(ctx, audit.Entry{UserID: userID, TenantID: key.TenantID, Action: "key.revoked", Resource: "key:" + keyID,
 		Metadata: map[string]any{"name": key.Name, "sts_tokens_invalidated": children}})
@@ -473,11 +494,14 @@ func (a *AuthService) RevokeAPIKey(ctx context.Context, userID, keyID string) er
 }
 
 // SetAPIKeyExpiration sets expiration for an API key, persisted so the S3
-// auth path enforces it.
+// auth path enforces it. A revoked key is ErrKeyRevoked (WP-R11-6).
 func (a *AuthService) SetAPIKeyExpiration(ctx context.Context, userID, keyID string, expiresAt time.Time) error {
-	key := a.findOwnedKey(userID, keyID)
+	key := a.snapshotOwnedKey(userID, keyID)
 	if key == nil {
 		return ErrKeyNotFound
+	}
+	if key.RevokedAt != nil {
+		return ErrKeyRevoked
 	}
 	if a.sqlDB != nil {
 		if _, err := a.sqlDB.ExecContext(ctx,
@@ -486,7 +510,11 @@ func (a *AuthService) SetAPIKeyExpiration(ctx context.Context, userID, keyID str
 			return fmt.Errorf("persist api key expiration %s: %w", keyID, err)
 		}
 	}
-	key.ExpiresAt = &expiresAt
+	a.cacheMu.Lock()
+	if live := a.findOwnedKeyLocked(userID, keyID); live != nil {
+		live.ExpiresAt = &expiresAt
+	}
+	a.cacheMu.Unlock()
 	a.record(ctx, audit.Entry{UserID: userID, TenantID: key.TenantID, Action: "key.expiry_set", Resource: "key:" + keyID,
 		Metadata: map[string]any{"expires_at": expiresAt}})
 	return nil
