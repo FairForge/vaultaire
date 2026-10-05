@@ -80,7 +80,9 @@ func (a *Auth) ValidateRequest(r *http.Request) (string, *KeyScope, error) {
 
 	params, err := parseSigV4AuthHeader(authHeader)
 	if err != nil {
-		a.logger.Debug("failed to parse auth header", zap.Error(err))
+		// The error names parts of the header; the header is the credential
+		// (CodeQL go/clear-text-logging) — the caller gets it, the log does not.
+		a.logger.Debug("failed to parse SigV4 authorization header")
 		return "", nil, err
 	}
 	if a.db == nil {
@@ -95,15 +97,17 @@ func (a *Auth) ValidateRequest(r *http.Request) (string, *KeyScope, error) {
 	// a bcrypt secret_hash) can never verify: fail closed, but leave an
 	// actionable trail — the key must be regenerated.
 	if cred.SecretKey == "" {
+		// The DB-derived tenant, never the request-derived key id (CodeQL
+		// go/clear-text-logging on the Authorization header); the metric
+		// carries the per-key signal.
 		a.logger.Warn("access key has no stored secret — cannot verify SigV4 signature; regenerate this API key",
-			zap.String("access_key", params.AccessKey[:min(6, len(params.AccessKey))]+"..."),
 			zap.String("tenant_id", cred.TenantID))
 		return "", nil, fmt.Errorf("%w: key has no stored secret for signature verification; regenerate this API key", ErrSignatureMismatch)
 	}
 	if err := a.verifySigV4(r, params, cred.SecretKey); err != nil {
 		a.logger.Debug("signature verification failed",
-			zap.String("access_key", params.AccessKey[:min(6, len(params.AccessKey))]+"..."),
-			zap.Error(err))
+			zap.String("tenant_id", cred.TenantID),
+			zap.Bool("time_skewed", errors.Is(err, ErrRequestTimeSkewed)))
 		return "", nil, err
 	}
 	// The signature proves the DECLARED payload hash is authentic; wrapping
