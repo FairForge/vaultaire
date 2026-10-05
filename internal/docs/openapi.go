@@ -705,11 +705,13 @@ func generateAuthPaths() map[string]*PathItem {
 }
 
 // generateUserPaths — internal/api/user_api.go, user_quota.go, usage.go,
-// presigned.go. requireJWT only: no rate limiter, no idempotency, and the
-// key handlers answer failures with http.Error (text/plain).
+// presigned.go. requireJWT only: no rate limiter, no idempotency. The key
+// handlers answer failures in the management envelope (WP-R11-6).
 func generateUserPaths() map[string]*PathItem {
 	keyID := pathParam("keyId", "API key id (the `id` from list/create, not the access key)")
-	keyErr500 := textResp("The auth service failed, including `API key not found` when the id is not one of the caller's keys (Review R11-17: not mapped to 404 on this group)")
+	keyNotFound := errResp("`key_not_found` — the id is not one of the caller's keys")
+	keyRevoked := errResp("`key_revoked` — the key is already revoked")
+	keyErr500 := errResp("`internal_error`")
 
 	return map[string]*PathItem{
 		"/api/v1/user": {
@@ -734,20 +736,20 @@ func generateUserPaths() map[string]*PathItem {
 		},
 		"/api/v1/user/apikeys": {
 			Get: jsonOp("User", "List the caller's API keys", "ListUserAPIKeys",
-				"Every key row of the user, including revoked ones (`revoked_at` set). `secret` is never returned after creation. Plain JSON array, not the list envelope.",
+				"Every key row of the user, including revoked ones (`revoked_at` set). `secret` is never returned after creation. Plain JSON array (always an array, `[]` for none), not the list envelope.",
 				map[string]Response{
 					"200": jsonResp("Keys", arrayOf(ref("UserAPIKey"))),
-					"500": textResp("The auth service failed"),
+					"500": keyErr500,
 				}),
 			Post: withBody(jsonOp("User", "Create an API key", "CreateUserAPIKey",
-				"Creates a scoped key. `permissions` restricts the key to the named S3 operations (validated); `expiry_days` sets `expires_at`. "+
+				"Creates a scoped key. `permissions` restricts the key to the named S3 operations (validated); `expiry_days` sets `expires_at` to now + days and must be at least 1 when present (omit it for no expiry). "+
 					"`BypassGovernanceRetention` is a privilege, not an operation: it lets the key have `x-amz-bypass-governance-retention` honoured. "+
 					"The secret is returned once. Subject to the plan's key cap (409).",
 				map[string]Response{
 					"201": jsonResp("Key created; `secret` is shown only here", ref("UserAPIKeyCreated")),
-					"400": textResp("`Invalid request` (malformed JSON) or `unknown permission: ...`"),
-					"409": textResp("`API key limit reached for this plan; revoke a key or upgrade`"),
-					"500": textResp("The auth service failed"),
+					"400": errResp("`invalid_json`, `invalid_permissions` (`unknown permission: ...`), or `invalid_expiry_days` (`expiry_days` present and below 1)"),
+					"409": errResp("`key_limit_exceeded` — the plan's key cap"),
+					"500": keyErr500,
 				}),
 				jsonBody("Key definition", ref("UserAPIKeyCreateRequest"))),
 		},
@@ -762,32 +764,38 @@ func generateUserPaths() map[string]*PathItem {
 						"key":    str("New access key id"),
 						"secret": str("New secret access key"),
 					}, "id", "name", "key", "secret")),
+					"404": keyNotFound,
+					"409": keyRevoked,
 					"500": keyErr500,
 				}),
 		},
 		"/api/v1/user/apikeys/{keyId}": {
 			Parameters: []Parameter{keyID},
 			Delete: jsonOp("User", "Revoke an API key", "RevokeUserAPIKey",
-				"Sets `revoked_at`; S3 auth stops accepting the key immediately. The audit row is written by the auth service.",
+				"Sets `revoked_at`; S3 auth stops accepting the key immediately. The audit row is written by the auth service. The primary pair cannot be revoked — rotate it.",
 				map[string]Response{
 					"204": {Description: "Revoked"},
+					"404": keyNotFound,
+					"409": errResp("`key_revoked` — already revoked; or `primary_key` — the primary pair is rotated, never revoked"),
 					"500": keyErr500,
 				}),
 		},
 		"/api/v1/user/apikeys/{keyId}/expire": {
 			Parameters: []Parameter{keyID},
 			Post: withBody(jsonOp("User", "Set an API key's expiry", "SetUserAPIKeyExpiration",
-				"Sets `expires_at` to now + `days`. The handler does not reject non-positive values (Review R11-22): `0` or a negative number expires the key at or before now.",
+				"Sets `expires_at` to now + `days`; `days` must be at least 1 (Review R11-22: `0` and negative numbers used to expire the key at or before now).",
 				map[string]Response{
 					"200": jsonResp("Expiry set", objectPtr("", map[string]*Schema{
 						"message":    str("`Expiration set successfully`"),
 						"expires_at": dateTime("The new expiry (RFC 3339)"),
 					}, "message", "expires_at")),
-					"400": textResp("`Invalid request` (malformed JSON)"),
+					"400": errResp("`invalid_json`, or `invalid_days` (`days` below 1)"),
+					"404": keyNotFound,
+					"409": keyRevoked,
 					"500": keyErr500,
 				}),
 				jsonBody("Days from now", objectPtr("", map[string]*Schema{
-					"days": {Type: "integer", Description: "Days from now until the key expires"},
+					"days": intRange("Days from now until the key expires (at least 1)", 1, 36500),
 				}, "days"))),
 		},
 		"/api/v1/user/apikeys/audit": {
@@ -1041,7 +1049,7 @@ func generateManagementPaths() map[string]*PathItem {
 		"/api/v1/manage/keys/{id}": {
 			Parameters: []Parameter{pathParam("id", "API key id")},
 			Delete: mut(jsonOp("Management", "Revoke an API key", "ManageDeleteKey",
-				"Sets `revoked_at` and emits `key.revoked`. An id that is not one of the caller's keys fails as `internal_error` (500), not 404.",
+				"Sets `revoked_at` and emits `key.revoked`. The primary pair cannot be revoked — rotate it through the user API or the dashboard.",
 				map[string]Response{
 					"200": jsonResp("Revoked", objectPtr("", map[string]*Schema{
 						"object":     strEnum("", "api_key"),
@@ -1049,7 +1057,9 @@ func generateManagementPaths() map[string]*PathItem {
 						"deleted":    boolean("Always true"),
 						"request_id": str(""),
 					}, "object", "id", "deleted", "request_id")),
-					"500": errResp("`internal_error` — including an unknown or foreign key id"),
+					"404": errResp("`key_not_found` — the id is not one of the caller's keys"),
+					"409": errResp("`key_revoked` — already revoked; or `primary_key` — the primary pair is rotated, never revoked"),
+					"500": errResp("`internal_error`"),
 				})),
 		},
 		"/api/v1/manage/usage": {
@@ -1644,6 +1654,12 @@ func generateJSONSchemas() map[string]Schema {
 			"expires_at":   nullable(dateTime("Expiry, or null")),
 			"created_at":   dateTime(""),
 		}
+		if !withSecret {
+			// The listing only: the lifecycle state of each row (WP-R11-6).
+			p["is_primary"] = boolean("The account's primary pair: rotated, never revoked")
+			p["revoked_at"] = nullable(dateTime("Set when the key was revoked or rotated away; null = live"))
+			p["last_used"] = nullable(dateTime("Last S3 request with the key in this process, or null"))
+		}
 		if withSecret {
 			p["secret"] = str("Secret access key — returned only by this call")
 		}
@@ -1777,7 +1793,7 @@ func generateJSONSchemas() map[string]Schema {
 		"UserAPIKeyCreateRequest": object("", map[string]*Schema{
 			"name":        str("Key name"),
 			"permissions": permissions,
-			"expiry_days": {Type: "integer", Description: "Days until the key expires; omitted or ≤ 0 = never"},
+			"expiry_days": intRange("Days until the key expires (at least 1); omit for no expiry", 1, 36500),
 		}),
 		"UserAPIKeyCreated": object("Created key with its secret (POST /api/v1/user/apikeys)", map[string]*Schema{
 			"id":          str("Key id"),

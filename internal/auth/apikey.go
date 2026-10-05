@@ -483,11 +483,17 @@ func (a *AuthService) RevokeAPIKey(ctx context.Context, userID, keyID string) er
 }
 
 // SetAPIKeyExpiration sets expiration for an API key, persisted so the S3
-// auth path enforces it.
+// auth path enforces it. A revoked key is ErrKeyRevoked (WP-R11-6).
 func (a *AuthService) SetAPIKeyExpiration(ctx context.Context, userID, keyID string, expiresAt time.Time) error {
 	key := a.findOwnedKey(userID, keyID)
 	if key == nil {
 		return ErrKeyNotFound
+	}
+	a.cacheMu.RLock()
+	revoked := key.RevokedAt != nil
+	a.cacheMu.RUnlock()
+	if revoked {
+		return ErrKeyRevoked
 	}
 	if a.sqlDB != nil {
 		if _, err := a.sqlDB.ExecContext(ctx,
@@ -496,7 +502,9 @@ func (a *AuthService) SetAPIKeyExpiration(ctx context.Context, userID, keyID str
 			return fmt.Errorf("persist api key expiration %s: %w", keyID, err)
 		}
 	}
+	a.cacheMu.Lock()
 	key.ExpiresAt = &expiresAt
+	a.cacheMu.Unlock()
 	a.record(ctx, audit.Entry{UserID: userID, TenantID: key.TenantID, Action: "key.expiry_set", Resource: "key:" + keyID,
 		Metadata: map[string]any{"expires_at": expiresAt}})
 	return nil

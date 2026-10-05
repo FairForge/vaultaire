@@ -126,14 +126,26 @@ func usagePercent(used, limit int64) float64 {
 	return float64(used) / float64(limit) * 100
 }
 
+// The key routes answer failures in the management envelope
+// (writeManagementError — WP-R11-6 / R11-17): 404 `key_not_found` for an id
+// that is not one of the caller's keys, 409 `key_revoked` for a key that is
+// already revoked, 409 `primary_key` for the primary pair, 400 for a scope
+// that cannot be stored, 500 `internal_error` otherwise. They used to be
+// `http.Error(err.Error(), 500)` — "API key not found" one day, a
+// `persist api key: pq: …` string the next. Success bodies are unchanged.
+
 // handleListUserAPIKeys lists all API keys for a user
 func (s *Server) handleListUserAPIKeys(w http.ResponseWriter, r *http.Request) {
 	userID := r.Context().Value(userIDKey).(string)
 
 	keys, err := s.auth.ListAPIKeys(r.Context(), userID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.logger.Error("list user api keys", zap.Error(err))
+		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to list API keys", "")
 		return
+	}
+	if keys == nil {
+		keys = []*auth.APIKey{}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -153,23 +165,23 @@ func (s *Server) handleCreateUserAPIKey(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
+		writeManagementError(w, ErrTypeInvalidRequest, "invalid_json", "request body must be valid JSON", "")
+		return
+	}
+	// Omitted or null = no expiry; present = at least one day (WP-R11-6:
+	// 0 used to mean "never" and a negative number was accepted too).
+	if req.ExpiryDays != nil && *req.ExpiryDays < 1 {
+		writeManagementError(w, ErrTypeInvalidRequest, "invalid_expiry_days", "expiry_days must be at least 1", "expiry_days")
 		return
 	}
 
 	// The requested scope goes INTO the key (R5-13): it used to be echoed in
-	// the response while the stored key stayed full-access.
+	// the response while the stored key stayed full-access. The service
+	// validates it (WP-R5-12).
 	var opts *auth.KeyCreateOptions
-	if len(req.Permissions) > 0 || (req.ExpiryDays != nil && *req.ExpiryDays > 0) {
-		opts = &auth.KeyCreateOptions{}
-		if len(req.Permissions) > 0 {
-			if err := auth.ValidatePermissions(req.Permissions); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			opts.Permissions = req.Permissions
-		}
-		if req.ExpiryDays != nil && *req.ExpiryDays > 0 {
+	if len(req.Permissions) > 0 || req.ExpiryDays != nil {
+		opts = &auth.KeyCreateOptions{Permissions: req.Permissions}
+		if req.ExpiryDays != nil {
 			expiresAt := time.Now().AddDate(0, 0, *req.ExpiryDays)
 			opts.ExpiresAt = &expiresAt
 		}
@@ -177,11 +189,10 @@ func (s *Server) handleCreateUserAPIKey(w http.ResponseWriter, r *http.Request) 
 
 	key, err := s.auth.GenerateAPIKey(r.Context(), userID, req.Name, opts)
 	if err != nil {
-		if errors.Is(err, auth.ErrKeyLimitReached) {
-			http.Error(w, "API key limit reached for this plan; revoke a key or upgrade", http.StatusConflict)
-			return
+		if !writeKeyScopeError(w, err) {
+			s.logger.Error("create user api key", zap.Error(err))
+			writeManagementError(w, ErrTypeAPI, "internal_error", "failed to create API key", "")
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -203,17 +214,21 @@ func (s *Server) handleCreateUserAPIKey(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
-// keyErrorStatus maps the typed key-lifecycle errors: 404 for a key that is
-// not the caller's, 409 for one already revoked or for the primary pair
-// (ErrPrimaryKeyRevoke: rotate it instead), 500 otherwise.
-func keyErrorStatus(err error) int {
+// writeKeyLifecycleError answers the typed key-lifecycle errors in the
+// envelope: 404 for a key that is not the caller's, 409 for one already
+// revoked or for the primary pair (ErrPrimaryKeyRevoke: rotate it instead),
+// 500 otherwise. The same codes as the management API's key routes.
+func (s *Server) writeKeyLifecycleError(w http.ResponseWriter, action string, err error) {
 	switch {
 	case errors.Is(err, auth.ErrKeyNotFound):
-		return http.StatusNotFound
-	case errors.Is(err, auth.ErrKeyRevoked), errors.Is(err, auth.ErrPrimaryKeyRevoke):
-		return http.StatusConflict
+		writeManagementError(w, ErrTypeNotFound, "key_not_found", "API key not found", "keyId")
+	case errors.Is(err, auth.ErrKeyRevoked):
+		writeManagementError(w, ErrTypeConflict, "key_revoked", "API key already revoked", "keyId")
+	case errors.Is(err, auth.ErrPrimaryKeyRevoke):
+		writeManagementError(w, ErrTypeConflict, "primary_key", "the primary key cannot be revoked; rotate it instead", "keyId")
 	default:
-		return http.StatusInternalServerError
+		s.logger.Error(action, zap.Error(err))
+		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to "+action, "")
 	}
 }
 
@@ -224,7 +239,7 @@ func (s *Server) handleRotateUserAPIKey(w http.ResponseWriter, r *http.Request) 
 
 	newKey, err := s.auth.RotateAPIKey(r.Context(), userID, keyID)
 	if err != nil {
-		http.Error(w, err.Error(), keyErrorStatus(err))
+		s.writeKeyLifecycleError(w, "rotate API key", err)
 		return
 	}
 
@@ -249,7 +264,7 @@ func (s *Server) handleDeleteUserAPIKey(w http.ResponseWriter, r *http.Request) 
 	keyID := chi.URLParam(r, "keyId")
 
 	if err := s.auth.RevokeAPIKey(r.Context(), userID, keyID); err != nil {
-		http.Error(w, err.Error(), keyErrorStatus(err))
+		s.writeKeyLifecycleError(w, "revoke API key", err)
 		return
 	}
 
@@ -259,7 +274,9 @@ func (s *Server) handleDeleteUserAPIKey(w http.ResponseWriter, r *http.Request) 
 		zap.String("key_id", keyID))
 }
 
-// handleSetUserAPIKeyExpiration sets expiration for an API key
+// handleSetUserAPIKeyExpiration sets expiration for an API key: now plus
+// `days`, at least one (R11-22: 0 and negative numbers used to expire the
+// key at or before now). A revoked key is 409.
 func (s *Server) handleSetUserAPIKeyExpiration(w http.ResponseWriter, r *http.Request) {
 	userID := r.Context().Value(userIDKey).(string)
 	keyID := chi.URLParam(r, "keyId")
@@ -268,16 +285,21 @@ func (s *Server) handleSetUserAPIKeyExpiration(w http.ResponseWriter, r *http.Re
 		Days int `json:"days"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
+		writeManagementError(w, ErrTypeInvalidRequest, "invalid_json", "request body must be valid JSON", "")
+		return
+	}
+	if req.Days < 1 {
+		writeManagementError(w, ErrTypeInvalidRequest, "invalid_days", "days must be at least 1", "days")
 		return
 	}
 
 	expiresAt := time.Now().AddDate(0, 0, req.Days)
 	if err := s.auth.SetAPIKeyExpiration(r.Context(), userID, keyID, expiresAt); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.writeKeyLifecycleError(w, "set API key expiry", err)
 		return
 	}
 
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(map[string]string{
 		"message":    "Expiration set successfully",

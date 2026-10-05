@@ -532,11 +532,15 @@ func (s *Server) handleMgmtListKeys(w http.ResponseWriter, r *http.Request) {
 			"id":           k.ID,
 			"name":         k.Name,
 			"key":          k.Key,
+			"is_primary":   k.IsPrimary,
 			"permissions":  k.Permissions,
 			"bucket_scope": k.BucketScope,
 			"ip_allowlist": k.IPAllowlist,
 			"expires_at":   k.ExpiresAt,
 			"created_at":   k.CreatedAt,
+			// A revoked key looked live here (R11-17).
+			"revoked_at": k.RevokedAt,
+			"last_used":  k.LastUsed,
 		}
 	}
 
@@ -554,13 +558,10 @@ func (s *Server) handleMgmtCreateKey(w http.ResponseWriter, r *http.Request) {
 	tenantIDForLimit, _ := r.Context().Value(tenantIDKey).(string)
 	if s.db != nil && tenantIDForLimit != "" {
 		var keyCount int
-		// api_keys has no tenant_id (R5-16 / WP-R9-6); resolve the tenant the
-		// same way the S3 auth path does — users.email = tenants.email.
+		// The row carries its tenant since WP-R5-9 (migration 076).
 		_ = s.db.QueryRowContext(r.Context(), `
-			SELECT COUNT(*) FROM api_keys ak
-			JOIN users u ON u.id = ak.user_id
-			JOIN tenants t ON t.email = u.email
-			WHERE t.id = $1 AND ak.revoked_at IS NULL`, tenantIDForLimit).Scan(&keyCount)
+			SELECT COUNT(*) FROM api_keys
+			WHERE tenant_id = $1 AND revoked_at IS NULL`, tenantIDForLimit).Scan(&keyCount)
 		if keyCount >= maxKeysPerTenant {
 			writeManagementError(w, ErrTypeConflict, "key_limit_exceeded",
 				fmt.Sprintf("maximum %d API keys per account", maxKeysPerTenant), "")
