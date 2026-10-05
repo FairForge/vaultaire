@@ -27,7 +27,22 @@ Tokens (local file `~/fairforge/.cloudflare-creds.env`, never in the repo): an *
 | HTTP/3, Brotli, HSTS, always-https, SSL strict | on (pre-existing) | |
 | Cache Reserve, Argo, Load Balancing, WAF managed rules | not available on Free / unsubscribed | Cache Reserve waits for cacheable private reads (plan 40.1(b)); a load balancer waits for a second origin |
 
-## What the edge does today
+## Torn down 2026-10-04 night (nothing of the bench is exposed)
+
+The Workers `vt-edge`, `vt-rules` (and their custom domains `edge.stored.ge`,
+`rules.stored.ge`), the bench-account Workers `vt-edge-ec` / `vt-edge-ec-smart`,
+the Access test app, and every test bucket (`vt-edge`, `vt-ecbench`,
+`vt-sippy-*`, `vbench-user1-r2`) were deleted after the measurements; the
+unauthenticated `/up`, `/pget`, `/relaygen` and `/ingest` endpoints they
+carried no longer exist. The sources live in `tools/edge-ec-worker` and
+`tools/edge-rules-worker`; redeploying is `wrangler deploy` with the production
+account's token, after adding an auth check to any endpoint that writes or
+fetches on behalf of a caller. The zone settings above stay. A zone token
+with `Workers R2 Storage Write` doubles as R2 S3 credentials (access key =
+token id, secret = SHA-256 of the token), which is how the production bucket
+was emptied without a separate R2 key.
+
+## What the edge did (as benchmarked; redeploy from `tools/`)
 
 - **Public objects**: `/cdn/<slug>/<bucket>/<key>` through the proxy, `cache-control: public, max-age=14400`, MISS→HIT, first byte ~100 ms on a HIT, $0 egress.
 - **Private reads**: `cache-control: private, no-cache` → BYPASS; the edge adds a hop (~80 ms). Use `s3.stored.ge` for bulk.
