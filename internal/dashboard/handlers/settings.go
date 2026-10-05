@@ -173,7 +173,7 @@ func HandleChangePassword(tmpl *template.Template, authSvc *auth.AuthService, db
 		}
 
 		// Revoke every other session the user has. The current session
-		// token is in the vaultaire_session cookie; preserve it.
+		// token is in the session cookie; preserve it.
 		if sessions != nil {
 			currentToken := ""
 			if c, err := r.Cookie(dashauth.SessionCookieName); err == nil {

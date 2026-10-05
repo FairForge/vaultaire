@@ -88,7 +88,7 @@ func TestPostRegister(t *testing.T) {
 	cookies := w.Result().Cookies()
 	var sessionCookie *http.Cookie
 	for _, c := range cookies {
-		if c.Name == "vaultaire_session" {
+		if c.Name == dashauth.SessionCookieName {
 			sessionCookie = c
 		}
 	}
@@ -153,7 +153,7 @@ func TestPostLogin(t *testing.T) {
 	cookies := w.Result().Cookies()
 	var found bool
 	for _, c := range cookies {
-		if c.Name == "vaultaire_session" {
+		if c.Name == dashauth.SessionCookieName {
 			found = true
 		}
 	}
@@ -221,7 +221,7 @@ func TestDashboard_RendersOverview(t *testing.T) {
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("GET", "/dashboard/", nil)
-	req.AddCookie(&http.Cookie{Name: "vaultaire_session", Value: token})
+	req.AddCookie(&http.Cookie{Name: dashauth.SessionCookieName, Value: token})
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -263,7 +263,7 @@ func TestBuckets_RendersList(t *testing.T) {
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("GET", "/dashboard/buckets", nil)
-	req.AddCookie(&http.Cookie{Name: "vaultaire_session", Value: token})
+	req.AddCookie(&http.Cookie{Name: dashauth.SessionCookieName, Value: token})
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -288,7 +288,7 @@ func TestBucketObjects_RendersBrowser(t *testing.T) {
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("GET", "/dashboard/buckets/my-bucket", nil)
-	req.AddCookie(&http.Cookie{Name: "vaultaire_session", Value: token})
+	req.AddCookie(&http.Cookie{Name: dashauth.SessionCookieName, Value: token})
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -301,7 +301,7 @@ func TestLogout(t *testing.T) {
 	r, _, _ := setupTestRouter(t)
 
 	req := httptest.NewRequest("GET", "/logout", nil)
-	req.AddCookie(&http.Cookie{Name: "vaultaire_session", Value: "anything"})
+	req.AddCookie(&http.Cookie{Name: dashauth.SessionCookieName, Value: "anything"})
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 

@@ -31,9 +31,9 @@
         </thead>
         <tbody>
             <tr>
-                <td><code>vaultaire_session</code></td>
-                <td>Maintains your authenticated session after login.</td>
-                <td>HttpOnly, Secure, SameSite=Lax</td>
+                <td><code>__Host-vaultaire_session</code></td>
+                <td>Maintains your authenticated session after login. The <code>__Host-</code> prefix means your browser accepts it only from this host, over HTTPS, and never for a subdomain.</td>
+                <td>HttpOnly, Secure, SameSite=Lax, host-only</td>
                 <td>24 hours</td>
             </tr>
             <tr>

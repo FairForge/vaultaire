@@ -314,7 +314,21 @@ func (d *DBStore) CleanupExpired(ctx context.Context) (int64, error) {
 // SessionCookieName is the name of the cookie that holds the dashboard
 // session token. Exported so handlers outside this package can read the
 // current session token (e.g., password change keeping the current device).
-const SessionCookieName = "vaultaire_session"
+//
+// The `__Host-` prefix (WP-R12-14, RFC 6265bis §4.1.3.2): a browser accepts
+// a cookie with this name only from a secure origin, only with `Secure`,
+// only with `Path=/` and never with a `Domain` attribute — so it is
+// host-only by construction and a page on a sibling subdomain
+// (cdn.stored.ge serves customer content) can no longer plant a session
+// cookie for the dashboard, the login-CSRF residue R12 accepted. The CSRF
+// token is HMAC(key, this cookie's value), so it follows the rename.
+const SessionCookieName = "__Host-vaultaire_session"
+
+// LegacySessionCookieName is what the session cookie was called before the
+// prefix. Nothing reads it; a browser that still sends one is told to drop
+// it the next time a session cookie is written or cleared, so a user whose
+// session predates the change signs in once more and carries one cookie.
+const LegacySessionCookieName = "vaultaire_session"
 
 // cookieName is kept as an internal alias for compatibility with the older
 // middleware/cookie helpers below.
@@ -357,7 +371,9 @@ func RequireAdmin(store SessionStore) func(http.Handler) http.Handler {
 	}
 }
 
-// SetSessionCookie writes the session cookie on the response.
+// SetSessionCookie writes the session cookie on the response: Secure,
+// HttpOnly, SameSite=Lax, Path=/ and no Domain — the attributes the
+// `__Host-` prefix requires, or the browser discards it.
 func SetSessionCookie(w http.ResponseWriter, token string, ttl time.Duration) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieName,
@@ -368,15 +384,34 @@ func SetSessionCookie(w http.ResponseWriter, token string, ttl time.Duration) {
 		Secure:   true,
 		MaxAge:   int(ttl.Seconds()),
 	})
+	expireLegacySessionCookie(w)
 }
 
-// ClearSessionCookie removes the session cookie.
+// ClearSessionCookie removes the session cookie. The clearing cookie carries
+// the same attributes as the one it clears: a `__Host-` cookie without
+// `Secure` and `Path=/` is refused by the browser and the session cookie
+// would stay.
 func ClearSessionCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{ // #nosec G124 — Secure, HttpOnly, and SameSite are set on SetSessionCookie; this is ClearSessionCookie
+	http.SetCookie(w, &http.Cookie{
 		Name:     cookieName,
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   true,
+		MaxAge:   -1,
+	})
+	expireLegacySessionCookie(w)
+}
+
+func expireLegacySessionCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     LegacySessionCookieName,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   true,
 		MaxAge:   -1,
 	})
 }

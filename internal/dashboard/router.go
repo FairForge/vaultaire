@@ -870,7 +870,7 @@ func handleVerify2FA(baseTmpl *template.Template, deps Deps, lockout *middleware
 
 func handleLogout(store dashauth.SessionStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if c, err := r.Cookie("vaultaire_session"); err == nil {
+		if c, err := r.Cookie(dashauth.SessionCookieName); err == nil {
 			_ = store.Delete(r.Context(), c.Value)
 		}
 		dashauth.ClearSessionCookie(w)

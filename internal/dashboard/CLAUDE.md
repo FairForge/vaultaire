@@ -42,7 +42,7 @@ Sessions use the `dashboard_sessions` PostgreSQL table. The `SessionStore` inter
 
 Session data is injected into request context via `RequireSession` middleware. Handlers call `dashauth.GetSession(r.Context())` to get `{UserID, TenantID, Email, Role, IPAddress, UserAgent}`.
 
-Cookie: `vaultaire_session`, HttpOnly, Secure, SameSite=Lax. Name is exported as `dashauth.SessionCookieName`.
+Cookie: `__Host-vaultaire_session` (WP-R12-14), HttpOnly, Secure, SameSite=Lax, `Path=/`, no `Domain` — the `__Host-` prefix makes the browser refuse the cookie from any origin but the dashboard's own host over HTTPS, so a sibling subdomain cannot plant one (R12's login-CSRF residue). Name is exported as `dashauth.SessionCookieName`; `SetSessionCookie`/`ClearSessionCookie` also expire the pre-prefix `vaultaire_session` (`LegacySessionCookieName`), which nothing reads: a session from before the change signs in once more. `TestSessionCookie_HostPrefixAttributes`.
 
 Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`, `created_at`, `last_active_at`, and `expires_at` so customers can see their active devices on the settings page and revoke individual ones or sign out every other device. `DBStore.Get` atomically refreshes `last_active_at = NOW()` via `UPDATE ... RETURNING` on every session check. New store methods from Phase 5.8: `ListByUserID` (all non-expired sessions for a user, newest first), `DeleteByUserIDExcept` (wipe all sessions except the current token — used by "sign out all other devices" and by password change so the issuing device stays logged in).
 
@@ -150,7 +150,7 @@ Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`,
 3. If MFA enabled: `handlers.BeginMFAChallenge` (one implementation for the password form and OAuth; cookie name/TTL live in `handlers/mfa_flow.go`) sets the `mfa_pending` cookie (5-min TTL) and redirects to `/login/verify-2fa`
 4. `/login/verify-2fa` validates TOTP code or backup code, then creates session
 5. On success (no MFA or MFA verified): creates session in `deps.Sessions` with 24h TTL
-6. Sets `vaultaire_session` cookie
+6. Sets the `__Host-vaultaire_session` cookie (`dashauth.SetSessionCookie`)
 7. Redirects to `/dashboard`
 8. On error: re-renders form with `.Error` message and preserved form values
 
