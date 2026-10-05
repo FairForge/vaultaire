@@ -348,3 +348,32 @@ func TestNewFixedBucketS3Driver_ReadsThePutTimeoutAndStartsTheSeriesAtZero(t *te
 	assert.Equal(t, 45*time.Second, d.putTimeout)
 	assert.Equal(t, float64(0), retriesOf("idrive-test-region"), "the series exists at 0 so the first retry is an increase")
 }
+
+// Live check 2026-10-05: prod's ten regional iDrive drivers are built by the
+// same constructor under the internal name "idrive", so a stalling region
+// was counted as the primary. A driver registered under another backend name
+// counts its retries under THAT name.
+func TestFixedBucketPut_RetriesAreCountedUnderTheBackendName(t *testing.T) {
+	f := newStallS3()
+	f.stall = func(_ putAttempt, n int) bool { return n == 1 }
+	srv := httptest.NewServer(f)
+	t.Cleanup(srv.Close)
+	core, logs := observer.New(zap.WarnLevel)
+	d, err := NewIDriveDriver("ak", "sk", srv.URL, "eu-west-1", zap.New(core))
+	require.NoError(t, err)
+	d.SetBackendName("idrive-eu-west-1")
+	d.setPutTimeout(time.Second)
+	assert.Equal(t, "idrive", d.Name(), "the driver's own name is unchanged: head rows and routing key on the engine's registration")
+	assert.Equal(t, float64(0), retriesOf("idrive-eu-west-1"), "the region's series exists at 0")
+	primaryBefore := retriesOf("idrive")
+
+	body := randomBody(t, 2048)
+	require.NoError(t, d.Put(tctx(), "c", "r.bin", bytes.NewReader(body), engine.WithContentLength(int64(len(body)))))
+
+	assert.Equal(t, float64(1), retriesOf("idrive-eu-west-1"))
+	assert.Equal(t, primaryBefore, retriesOf("idrive"), "the primary's series did not move")
+	require.Equal(t, 1, logs.Len())
+	fields := logs.All()[0].ContextMap()
+	assert.Equal(t, "idrive-eu-west-1", fields["driver"])
+	assert.Equal(t, "eu-west-1", fields["region"], "the log line names the region too")
+}

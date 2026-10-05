@@ -92,6 +92,7 @@ func putDeadline(base time.Duration, size int64) time.Duration {
 type deadlinePutClient struct {
 	*s3.Client
 	driver string
+	region string
 	base   time.Duration // 0 = no deadline
 	fresh  *http.Client  // a client that never reuses a connection
 	logger *zap.Logger
@@ -153,7 +154,8 @@ func (c *deadlinePutClient) attempt(ctx context.Context, what string, size int64
 	}
 	driverPutRetries.WithLabelValues(c.driver).Inc()
 	c.logger.Warn("put deadline passed, retrying once on a fresh connection",
-		zap.String("driver", c.driver), zap.String("request", what), zap.Duration("deadline", timeout), zap.Int64("bytes", size))
+		zap.String("driver", c.driver), zap.String("region", c.region), zap.String("request", what),
+		zap.Duration("deadline", timeout), zap.Int64("bytes", size))
 
 	rctx, rcancel := context.WithTimeout(ctx, timeout)
 	defer rcancel()
