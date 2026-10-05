@@ -33,6 +33,16 @@ const (
 type Auth struct {
 	db     *sql.DB
 	logger *zap.Logger
+
+	// MissingSignedHeader supplies the value a client most plausibly signed
+	// for a header that is in SignedHeaders but absent from the request —
+	// the verifier's second proxy-rewrite variant after Accept-Encoding. The
+	// one case today: R2 Sippy's multi-part pull signs `if-match: "<etag>"`
+	// and sends no If-Match header, and the server knows the object's ETag.
+	// The hint is a candidate for the signature check, never a bypass — the
+	// signature must still verify with the secret over the request as
+	// received plus that value. Nil = no hint. Set by the S3 layer.
+	MissingSignedHeader func(r *http.Request, tenantID, name string) (string, bool)
 }
 
 // NewAuth creates a new Auth handler
@@ -104,7 +114,7 @@ func (a *Auth) ValidateRequest(r *http.Request) (string, *KeyScope, error) {
 			zap.String("tenant_id", cred.TenantID))
 		return "", nil, fmt.Errorf("%w: key has no stored secret for signature verification; regenerate this API key", ErrSignatureMismatch)
 	}
-	if err := a.verifySigV4(r, params, cred.SecretKey); err != nil {
+	if err := a.verifySigV4(r, params, cred.SecretKey, cred.TenantID); err != nil {
 		a.logger.Debug("signature verification failed",
 			zap.String("tenant_id", cred.TenantID),
 			zap.Bool("time_skewed", errors.Is(err, ErrRequestTimeSkewed)))

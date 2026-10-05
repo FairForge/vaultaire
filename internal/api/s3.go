@@ -338,6 +338,7 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			a := auth.NewAuth(s.db, s.logger)
+			a.MissingSignedHeader = s.missingSignedHeaderHint
 			tenantID, scope, err = a.ValidateRequest(r)
 			if err != nil {
 				s.logger.Error("authentication failed",

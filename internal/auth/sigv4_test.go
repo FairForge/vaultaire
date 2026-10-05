@@ -51,7 +51,7 @@ func verify(t *testing.T, r *http.Request, secret string) error {
 	if err != nil {
 		return err
 	}
-	return a.verifySigV4(r, params, secret)
+	return a.verifySigV4(r, params, secret, "")
 }
 
 func TestVerifySigV4_AcceptsValidSignatures(t *testing.T) {
@@ -628,4 +628,44 @@ func TestVerifySigV4_AcceptEncodingRewrittenByProxy(t *testing.T) {
 	r.Header.Set("Accept-Encoding", "identity")
 	r.Header.Set("X-Amz-Date", time.Now().UTC().Add(time.Second).Format(timeFormat))
 	require.ErrorIs(t, verify(t, r, testSecret), ErrSignatureMismatch)
+}
+
+// R2 Sippy's multi-part pull (objects above ~200 MiB) signs an If-Match
+// header carrying the object's ETag and then sends the request WITHOUT the
+// header (observed on the prod origin 2026-10-05: five parallel part GETs,
+// SignedHeaders=host;if-match;x-amz-content-sha256;x-amz-date, no If-Match
+// on the wire — a Worker's own fetch delivers If-Match intact, so it is
+// Sippy's client that drops it). The only value a client plausibly signs
+// there is the object's current ETag, which the server knows: with that
+// hint the signature verifies, without it the pull is 403 for ever.
+func TestVerifySigV4_IfMatchSignedButNotSent(t *testing.T) {
+	const etag = `"a9345a168bc41cdc3574620305bdc7cc-32"`
+	r := httptest.NewRequest("GET", "http://s3.stored.ge/cf-tests/big2g.bin?response-content-encoding=none", nil)
+	r.Header.Set("Range", "bytes=0-209715199")
+	r.Header.Set("If-Match", etag)
+	signV4(t, r, testAK, testSecret, "us-east-1", unsignedPayload, time.Now().UTC())
+	require.Contains(t, r.Header.Get("Authorization"), "if-match;", "the client signed If-Match")
+
+	// What arrives: the signed header is gone.
+	r.Header.Del("If-Match")
+	require.ErrorIs(t, verify(t, r, testSecret), ErrSignatureMismatch, "no hint, no way to know what was signed")
+
+	a := NewAuth(nil, zap.NewNop())
+	a.MissingSignedHeader = func(_ *http.Request, tenantID, name string) (string, bool) {
+		if tenantID == "tenant-x" && name == "if-match" {
+			return etag, true
+		}
+		return "", false
+	}
+	params, err := parseSigV4AuthHeader(r.Header.Get("Authorization"))
+	require.NoError(t, err)
+	require.NoError(t, a.verifySigV4(r, params, testSecret, "tenant-x"), "the object's own ETag is the value that was signed")
+
+	// The hint is a candidate, never a bypass: a wrong ETag still mismatches,
+	// and a header that IS present is never replaced by the hint.
+	a.MissingSignedHeader = func(*http.Request, string, string) (string, bool) { return `"other"`, true }
+	require.ErrorIs(t, a.verifySigV4(r, params, testSecret, "tenant-x"), ErrSignatureMismatch)
+	r.Header.Set("If-Match", `"present-but-different"`)
+	a.MissingSignedHeader = func(*http.Request, string, string) (string, bool) { return etag, true }
+	require.ErrorIs(t, a.verifySigV4(r, params, testSecret, "tenant-x"), ErrSignatureMismatch)
 }
