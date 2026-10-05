@@ -117,6 +117,7 @@ func TestMFAEnrolment_ThroughTheRouterWithTheRealPage(t *testing.T) {
 	assert.False(t, strings.Contains(page, `name="secret"`), "the secret must not be a form field")
 	assert.False(t, strings.Contains(page, `name="backup_codes"`), "backup codes must not be a form field")
 	assert.False(t, strings.Contains(page, "Backup Codes"), "backup codes are not on the setup page")
+	assert.True(t, strings.Contains(page, `name="password"`), "enrolment asks for the password (WP-R12-15)")
 	key := regexp.MustCompile(`<code>([A-Z2-7]{32})</code>`).FindStringSubmatch(page)
 	require.NotNil(t, key, "the manual key is shown")
 	token := regexp.MustCompile(`name="csrf_token" value="([0-9a-f]{64})"`).FindStringSubmatch(page)
@@ -131,15 +132,22 @@ func TestMFAEnrolment_ThroughTheRouterWithTheRealPage(t *testing.T) {
 	r.ServeHTTP(noSession, httptest.NewRequest("GET", "/dashboard/settings/mfa/qr.png", nil))
 	assert.Equal(t, http.StatusSeeOther, noSession.Code, "no session, no QR code")
 
-	// Act: confirm with the 6-digit code — and nothing else.
+	// Act: confirm with the 6-digit code and the password — and nothing else.
 	code, err := totp.GenerateCode(key[1], time.Now())
 	require.NoError(t, err)
-	form := url.Values{"csrf_token": {token[1]}, "totp_code": {code}}
-	req := httptest.NewRequest("POST", "/dashboard/settings/mfa/enable", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(session)
-	w = httptest.NewRecorder()
-	r.ServeHTTP(w, req)
+	post := func(path string, form url.Values) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", path, strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.AddCookie(session)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w
+	}
+	w = post("/dashboard/settings/mfa/enable", url.Values{"csrf_token": {token[1]}, "totp_code": {code}})
+	require.Equal(t, http.StatusSeeOther, w.Code, "without the password the code alone enrols nothing")
+	on, _ := authSvc.IsMFAEnabled(context.Background(), userID)
+	require.False(t, on)
+	w = post("/dashboard/settings/mfa/enable", url.Values{"csrf_token": {token[1]}, "totp_code": {code}, "password": {"securepass123"}})
 
 	// Assert: enrolled with the server's secret; ten backup codes, shown here.
 	require.Equal(t, http.StatusOK, w.Code)
@@ -158,4 +166,25 @@ func TestMFAEnrolment_ThroughTheRouterWithTheRealPage(t *testing.T) {
 	// The setup page and the QR code are gone once enrolled.
 	assert.Equal(t, http.StatusSeeOther, get("/dashboard/settings/mfa").Code)
 	assert.Equal(t, http.StatusNotFound, get("/dashboard/settings/mfa/qr.png").Code)
+
+	// Regenerate the backup codes from the settings page (WP-R12-15): the
+	// form is there, it needs the password, the old codes die.
+	settings := get("/dashboard/settings")
+	require.Equal(t, http.StatusOK, settings.Code)
+	assert.True(t, strings.Contains(settings.Body.String(), `action="/dashboard/settings/mfa/backup-codes"`))
+	w = post("/dashboard/settings/mfa/backup-codes", url.Values{"csrf_token": {token[1]}})
+	assert.Equal(t, http.StatusSeeOther, w.Code, "no password, no new codes")
+	ok, err = authSvc.ValidateBackupCode(context.Background(), userID, codes[1][1])
+	require.NoError(t, err)
+	assert.True(t, ok, "the old codes still work after a refused attempt")
+	w = post("/dashboard/settings/mfa/backup-codes", url.Values{"csrf_token": {token[1]}, "password": {"securepass123"}})
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
+	fresh := regexp.MustCompile(`<code>([A-Z2-7]{8})</code>`).FindAllStringSubmatch(w.Body.String(), -1)
+	require.Len(t, fresh, 10)
+	assert.True(t, strings.Contains(w.Body.String(), "New Backup Codes"))
+	ok, _ = authSvc.ValidateBackupCode(context.Background(), userID, codes[2][1])
+	assert.False(t, ok, "an old code is dead")
+	ok, _ = authSvc.ValidateBackupCode(context.Background(), userID, fresh[0][1])
+	assert.True(t, ok, "a new code works")
 }

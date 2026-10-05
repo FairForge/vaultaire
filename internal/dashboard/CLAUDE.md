@@ -85,7 +85,8 @@ Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`,
 | `/dashboard/settings/notifications` | POST | session | Update notification preferences |
 | `/dashboard/settings/mfa` | GET | session | 2FA setup page: QR code + manual key of a secret the server keeps pending for the session (10 min) |
 | `/dashboard/settings/mfa/qr.png` | GET | session | The pending secret's QR code, rendered by the server (PNG, `no-store`) |
-| `/dashboard/settings/mfa/enable` | POST | session | The 6-digit code only; on success the response shows the backup codes once |
+| `/dashboard/settings/mfa/enable` | POST | session | The 6-digit code AND the account's password (WP-R12-15 — a stolen session must not enrol the thief's authenticator; an OAuth-only account instead needs a session younger than 10 min, a fresh sign-in); the password is checked before the code is consumed; on success the response shows the backup codes once |
+| `/dashboard/settings/mfa/backup-codes` | POST | session | Regenerate the ten backup codes (WP-R12-15): password (or fresh OAuth sign-in) required, 2FA must be on; every old code dies, the new set is shown once; audit `mfa.backup_codes_regenerated` |
 | `/dashboard/settings/mfa/disable` | POST | session | Disable 2FA — the password is required and verified server-side (an empty field used to skip the check, R5-04); OAuth-only accounts (no password) are told to use the admin reset. Every OTHER session is revoked (R5-22 / R12) |
 | `/dashboard/settings/sessions/revoke-all` | POST | session | Sign out of all OTHER devices (keeps current session) |
 | `/dashboard/settings/sessions/{id}/revoke` | POST | session | Revoke a specific session owned by the current user |

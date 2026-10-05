@@ -91,6 +91,6 @@ func TestPages_WriteScreenshotFixtures(t *testing.T) {
 	code, err := totp.GenerateCode(pending.Secret, time.Now())
 	require.NoError(t, err)
 	w = httptest.NewRecorder()
-	HandleMFAEnable(page("mfa_setup.html"), authSvc, mfaSvc, enrol, zap.NewNop()).ServeHTTP(w, mfaReq("POST", "totp_code="+code))
+	HandleMFAEnable(page("mfa_setup.html"), authSvc, mfaSvc, enrol, nil, zap.NewNop()).ServeHTTP(w, mfaReq("POST", "password=securepass123&totp_code="+code))
 	write("mfa-enrolled", w)
 }

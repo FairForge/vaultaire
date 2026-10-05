@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -20,20 +21,34 @@ type MFASettings struct {
 	BackupCodes []string // Hashed backup codes
 }
 
+// ErrMFANotEnabled: the account has no second factor to act on.
+var ErrMFANotEnabled = errors.New("two-factor authentication is not enabled")
+
+// hashBackupCodes bcrypts the plaintext codes; only the hashes are stored.
+func hashBackupCodes(codes []string) ([]string, error) {
+	hashed := make([]string, len(codes))
+	for i, code := range codes {
+		h, err := bcrypt.GenerateFromPassword([]byte(code), bcrypt.DefaultCost)
+		if err != nil {
+			return nil, fmt.Errorf("hash backup code: %w", err)
+		}
+		hashed[i] = string(h)
+	}
+	return hashed, nil
+}
+
 // EnableMFA activates MFA for a user and persists to the database.
 func (a *AuthService) EnableMFA(ctx context.Context, userID, secret string, backupCodes []string) error {
-	if _, exists := a.userIndex[userID]; !exists {
+	a.cacheMu.RLock()
+	_, exists := a.userIndex[userID]
+	a.cacheMu.RUnlock()
+	if !exists {
 		return fmt.Errorf("user not found")
 	}
 
-	// Hash backup codes before storing.
-	hashedCodes := make([]string, len(backupCodes))
-	for i, code := range backupCodes {
-		hashed, err := bcrypt.GenerateFromPassword([]byte(code), bcrypt.DefaultCost)
-		if err != nil {
-			return fmt.Errorf("hash backup code: %w", err)
-		}
-		hashedCodes[i] = string(hashed)
+	hashedCodes, err := hashBackupCodes(backupCodes)
+	if err != nil {
+		return err
 	}
 
 	// The database first, then this process's copy: a write the database
@@ -70,6 +85,53 @@ func (a *AuthService) EnableMFA(ctx context.Context, userID, secret string, back
 
 	a.record(ctx, audit.Entry{UserID: userID, Action: "mfa.enabled", Resource: "user:" + userID,
 		Metadata: map[string]any{"backup_codes": len(backupCodes)}})
+	return nil
+}
+
+// RegenerateBackupCodes replaces the account's backup codes with codes —
+// every old code stops working, in the database first and then in this
+// process (WP-R12-15). The caller has already confirmed the user's identity
+// (the password, or a fresh sign-in for an OAuth-only account) and shows the
+// new codes once. ErrMFANotEnabled when there is no second factor to attach
+// them to. The audit row is mfa.backup_codes_regenerated.
+func (a *AuthService) RegenerateBackupCodes(ctx context.Context, userID string, codes []string) error {
+	a.mfaMu.RLock()
+	settings, exists := a.mfaSettings[userID]
+	enabled := exists && settings.Enabled
+	a.mfaMu.RUnlock()
+	if !enabled {
+		return ErrMFANotEnabled
+	}
+
+	hashedCodes, err := hashBackupCodes(codes)
+	if err != nil {
+		return err
+	}
+	if a.sqlDB != nil {
+		codesJSON, err := json.Marshal(hashedCodes)
+		if err != nil {
+			return fmt.Errorf("marshal backup codes: %w", err)
+		}
+		res, err := a.sqlDB.ExecContext(ctx, `
+			UPDATE user_mfa SET backup_codes = $1, updated_at = NOW()
+			WHERE user_id = $2 AND enabled = TRUE
+		`, string(codesJSON), userID)
+		if err != nil {
+			return fmt.Errorf("persist regenerated backup codes: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrMFANotEnabled
+		}
+	}
+
+	a.mfaMu.Lock()
+	if settings, ok := a.mfaSettings[userID]; ok {
+		settings.BackupCodes = hashedCodes
+	}
+	a.mfaMu.Unlock()
+
+	a.record(ctx, audit.Entry{UserID: userID, Action: "mfa.backup_codes_regenerated", Resource: "user:" + userID,
+		Metadata: map[string]any{"backup_codes": len(codes)}})
 	return nil
 }
 
