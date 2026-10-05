@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -136,4 +138,40 @@ func TestGetOwnedAPIKey_ExpiredIsItsOwnError(t *testing.T) {
 	require.ErrorIs(t, err, ErrKeyExpired, "not ErrKeyRevoked, not a generic error")
 	_, err = svc.ValidateAPIKey(context.Background(), k.Key, k.Secret)
 	require.ErrorIs(t, err, ErrKeyExpired)
+}
+
+// Post-merge review of #584: an allowlist of 0.0.0.0/0 or ::/0 was
+// accepted silently. An allowlist that restricts nothing is a mistake, not
+// a policy — the way to allow every address is an empty allowlist.
+func TestValidateIPAllowlist_RefusesAnEntryThatRestrictsNothing(t *testing.T) {
+	for _, entry := range []string{"0.0.0.0/0", "::/0", "1.2.3.4/0", "2001:db8::1/0", " 0.0.0.0/0 "} {
+		_, err := ValidateIPAllowlist([]string{entry})
+		require.Error(t, err, entry)
+		assert.True(t, errors.Is(err, ErrUnrestrictedIPAllowlist), "%s: got %v", entry, err)
+		assert.False(t, errors.Is(err, ErrInvalidIPAllowlist), "%s: its own sentinel, not 'invalid'", entry)
+		assert.Contains(t, err.Error(), strings.TrimSpace(entry))
+	}
+	t.Run("hidden among valid entries", func(t *testing.T) {
+		_, err := ValidateIPAllowlist([]string{"203.0.113.7", "10.0.0.0/8", "::/0", "2001:db8::/32"})
+		assert.True(t, errors.Is(err, ErrUnrestrictedIPAllowlist), "got %v", err)
+	})
+	t.Run("a wide but real network is fine", func(t *testing.T) {
+		got, err := ValidateIPAllowlist([]string{"0.0.0.0/1", "128.0.0.0/1", "::/1"})
+		require.NoError(t, err)
+		assert.Equal(t, []string{"0.0.0.0/1", "128.0.0.0/1", "::/1"}, got)
+	})
+}
+
+func TestIntersectIPRestrict_RefusesAnEntryThatRestrictsNothing(t *testing.T) {
+	// No parent allowlist: the request's list is taken as is — so this is
+	// where 0.0.0.0/0 used to get through.
+	for _, entry := range []string{"0.0.0.0/0", "::/0"} {
+		_, err := intersectIPRestrict(nil, []string{"203.0.113.7", entry})
+		require.Error(t, err, entry)
+		assert.True(t, errors.Is(err, ErrSTSScope), "got %v", err)
+		assert.Contains(t, err.Error(), "restricts nothing")
+	}
+	got, err := intersectIPRestrict(nil, []string{"203.0.113.7"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"203.0.113.7"}, got)
 }

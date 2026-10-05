@@ -216,16 +216,22 @@ func (s *Server) handleCreateUserAPIKey(w http.ResponseWriter, r *http.Request) 
 
 // writeKeyLifecycleError answers the typed key-lifecycle errors in the
 // envelope: 404 for a key that is not the caller's, 409 for one already
-// revoked or for the primary pair (ErrPrimaryKeyRevoke: rotate it instead),
-// 500 otherwise. The same codes as the management API's key routes.
+// revoked or expired (`key_expired`: an expired key is not rotated into a
+// successor born expired) or for the primary pair (`primary_key`:
+// ErrPrimaryKeyRevoke / ErrPrimaryKeyExpire — rotate it instead), 500
+// otherwise. The same codes as the management API's key routes.
 func (s *Server) writeKeyLifecycleError(w http.ResponseWriter, action string, err error) {
 	switch {
 	case errors.Is(err, auth.ErrKeyNotFound):
 		writeManagementError(w, ErrTypeNotFound, "key_not_found", "API key not found", "keyId")
 	case errors.Is(err, auth.ErrKeyRevoked):
 		writeManagementError(w, ErrTypeConflict, "key_revoked", "API key already revoked", "keyId")
+	case errors.Is(err, auth.ErrKeyExpired):
+		writeManagementError(w, ErrTypeConflict, "key_expired", "API key expired; create a new key instead of rotating it", "keyId")
 	case errors.Is(err, auth.ErrPrimaryKeyRevoke):
 		writeManagementError(w, ErrTypeConflict, "primary_key", "the primary key cannot be revoked; rotate it instead", "keyId")
+	case errors.Is(err, auth.ErrPrimaryKeyExpire):
+		writeManagementError(w, ErrTypeConflict, "primary_key", "the primary key cannot be given an expiry; rotate it instead", "keyId")
 	default:
 		s.logger.Error(action, zap.Error(err))
 		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to "+action, "")

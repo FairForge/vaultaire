@@ -132,14 +132,6 @@ func TestUserKeyAPI_DaysMustBeAtLeastOne(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 	assert.Equal(t, "invalid_json", env.Error.Code)
 
-	rr, _ = f.do("POST", "/apikeys/"+f.key.ID+"/expire", `{"days":1}`)
-	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	var resp map[string]string
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-	exp, err := time.Parse(time.RFC3339, resp["expires_at"])
-	require.NoError(t, err)
-	assert.True(t, exp.After(time.Now().Add(23*time.Hour)))
-
 	// Create: expiry_days present and below 1 is refused; omitted = no expiry.
 	for _, body := range []string{`{"name":"x","expiry_days":0}`, `{"name":"x","expiry_days":-1}`} {
 		rr, env := f.do("POST", "/apikeys", body)
@@ -152,6 +144,16 @@ func TestUserKeyAPI_DaysMustBeAtLeastOne(t *testing.T) {
 	var created map[string]any
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &created))
 	assert.Nil(t, created["expires_at"])
+
+	// days ≥ 1 on a scoped key is accepted (the primary never takes an
+	// expiry — TestUserKeyAPI_PrimaryCannotBeExpired).
+	rr, _ = f.do("POST", "/apikeys/"+created["id"].(string)+"/expire", `{"days":1}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var resp map[string]string
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	exp, err := time.Parse(time.RFC3339, resp["expires_at"])
+	require.NoError(t, err)
+	assert.True(t, exp.After(time.Now().Add(23*time.Hour)))
 
 	rr, env = f.do("POST", "/apikeys", `{"name":"x","permissions":["Bogus"]}`)
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
@@ -212,4 +214,73 @@ func TestUserKeyAPI_ListIsAnArrayForAUserWithNoKeys(t *testing.T) {
 	rr := httptest.NewRecorder()
 	s.handleListUserAPIKeys(rr, req)
 	assert.Equal(t, "[]\n", rr.Body.String())
+}
+
+// Post-merge review of #584: the primary pair could be expired through this
+// route (409 primary_key now, the revoke shape), and an expired key could
+// be rotated into a successor born expired (409 key_expired).
+func TestUserKeyAPI_PrimaryCannotBeExpired(t *testing.T) {
+	f := newKeyHygieneFixture(t)
+
+	rr, env := f.do("POST", "/apikeys/"+f.key.ID+"/expire", `{"days":30}`)
+	assert.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+	assert.Equal(t, ErrTypeConflict, env.Error.Type)
+	assert.Equal(t, "primary_key", env.Error.Code)
+	assert.Equal(t, "keyId", env.Error.Param)
+	assert.Contains(t, env.Error.Message, "rotate")
+
+	// Rotating first changes nothing: the successor is the primary.
+	rr, _ = f.do("POST", "/apikeys/"+f.key.ID+"/rotate", "")
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var rotated struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &rotated))
+	rr, env = f.do("POST", "/apikeys/"+rotated.ID+"/expire", `{"days":30}`)
+	assert.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+	assert.Equal(t, "primary_key", env.Error.Code)
+
+	keys, err := f.s.auth.ListAPIKeys(context.Background(), f.user.ID)
+	require.NoError(t, err)
+	for _, k := range keys {
+		if k.IsPrimary {
+			assert.Nil(t, k.ExpiresAt, "no primary row carries an expiry")
+		}
+	}
+}
+
+func TestUserKeyAPI_ExpiredKeyIsNotRotated(t *testing.T) {
+	f := newKeyHygieneFixture(t)
+	k, err := f.s.auth.GenerateAPIKey(context.Background(), f.user.ID, "scoped", &auth.KeyCreateOptions{Permissions: []string{auth.OpGetObject}})
+	require.NoError(t, err)
+	require.NoError(t, f.s.auth.SetAPIKeyExpiration(context.Background(), f.user.ID, k.ID, time.Now().Add(-time.Minute)))
+
+	rr, env := f.do("POST", "/apikeys/"+k.ID+"/rotate", "")
+	assert.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+	assert.Equal(t, ErrTypeConflict, env.Error.Type)
+	assert.Equal(t, "key_expired", env.Error.Code)
+	assert.Equal(t, "keyId", env.Error.Param)
+}
+
+// Post-merge review of #584: an allowlist of 0.0.0.0/0 or ::/0 is refused
+// with its own code on the management API (the one JSON route that takes
+// an allowlist) — hidden among valid entries too.
+func TestMgmtKeyAPI_UnrestrictedAllowlistIs400(t *testing.T) {
+	f := newKeyHygieneFixture(t)
+	f.r.Post("/keys", f.s.handleMgmtCreateKey)
+	for _, body := range []string{
+		`{"name":"open","ip_allowlist":["0.0.0.0/0"]}`,
+		`{"name":"open","ip_allowlist":["::/0"]}`,
+		`{"name":"open","ip_allowlist":["203.0.113.7","10.0.0.0/8","0.0.0.0/0"]}`,
+	} {
+		rr, env := f.do("POST", "/keys", body)
+		assert.Equal(t, http.StatusBadRequest, rr.Code, body)
+		assert.Equal(t, ErrTypeInvalidRequest, env.Error.Type)
+		assert.Equal(t, "unrestricted_ip_allowlist", env.Error.Code, body)
+		assert.Equal(t, "ip_allowlist", env.Error.Param)
+		assert.Contains(t, env.Error.Message, "empty")
+	}
+	keys, err := f.s.auth.ListAPIKeys(context.Background(), f.user.ID)
+	require.NoError(t, err)
+	assert.Len(t, keys, 1, "no key was created")
 }

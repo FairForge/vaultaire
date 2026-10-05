@@ -639,6 +639,10 @@ func writeKeyScopeError(w http.ResponseWriter, err error) bool {
 	case errors.Is(err, auth.ErrInvalidIPAllowlist):
 		writeManagementError(w, ErrTypeInvalidRequest, "invalid_ip_allowlist",
 			"ip_allowlist entries must be IP addresses or CIDR networks: "+strings.TrimPrefix(err.Error(), auth.ErrInvalidIPAllowlist.Error()+": "), "ip_allowlist")
+	case errors.Is(err, auth.ErrUnrestrictedIPAllowlist):
+		writeManagementError(w, ErrTypeInvalidRequest, "unrestricted_ip_allowlist",
+			"an ip_allowlist entry restricts nothing: "+strings.TrimPrefix(err.Error(), auth.ErrUnrestrictedIPAllowlist.Error()+": ")+
+				" — leave ip_allowlist empty to allow every address", "ip_allowlist")
 	case errors.Is(err, auth.ErrExpiryInPast):
 		writeManagementError(w, ErrTypeInvalidRequest, "invalid_expiry", "expires_at must be in the future", "expires_at")
 	case errors.Is(err, auth.ErrKeyLimitReached):

@@ -233,8 +233,14 @@ func intersectBucketScope(parent, requested []string) []string {
 // entry does not parse.
 func intersectIPRestrict(parentAllowlist, requested []string) ([]string, error) {
 	for _, r := range requested {
-		if _, _, err := parseIPEntry(r); err != nil {
+		_, ones, err := parseIPEntry(r)
+		if err != nil {
 			return nil, fmt.Errorf("%w: ip_restrict entry %q is not an IP address or CIDR", ErrSTSScope, r)
+		}
+		// 0.0.0.0/0 or ::/0: a restriction that restricts nothing (post-merge
+		// review of #584). Omit ip_restrict to keep the parent's allowlist.
+		if ones == 0 {
+			return nil, fmt.Errorf("%w: ip_restrict entry %q restricts nothing; omit ip_restrict to inherit the parent key's allowlist", ErrSTSScope, r)
 		}
 	}
 	if len(parentAllowlist) == 0 {

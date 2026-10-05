@@ -316,3 +316,27 @@ func TestKeyAPIs_PrimaryRevokeIs409(t *testing.T) {
 	require.NoError(t, f.db.QueryRow(`SELECT revoked_at FROM api_keys WHERE id = $1`, f.key.ID).Scan(&revoked))
 	assert.False(t, revoked.Valid, "the primary is still live")
 }
+
+// Post-merge review of #584: with a parent that has no allowlist the STS
+// route took `ip_restrict` as given — a token "restricted" to 0.0.0.0/0.
+func TestSTSRoute_UnrestrictedIPRestrictIsRefused(t *testing.T) {
+	f := setupLifecycleFixture(t)
+	mint := func(body string) (int, map[string]any) {
+		req := httptest.NewRequest("POST", "/api/v1/sts/token", strings.NewReader(body))
+		c := context.WithValue(req.Context(), userIDKey, f.user.ID)
+		c = context.WithValue(c, tenantIDKey, f.tenant.ID)
+		rr := httptest.NewRecorder()
+		f.srv.handleSTSCreateToken(rr, req.WithContext(c))
+		var resp map[string]any
+		_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+		return rr.Code, resp
+	}
+	for _, entry := range []string{"0.0.0.0/0", "::/0"} {
+		code, resp := mint(`{"ip_restrict":["203.0.113.7","` + entry + `"]}`)
+		assert.Equal(t, 400, code, resp)
+		assert.Equal(t, "scope_error", resp["error"].(map[string]any)["code"])
+	}
+	var n int
+	require.NoError(t, f.db.QueryRow(`SELECT count(*) FROM sts_tokens WHERE tenant_id = $1`, f.tenant.ID).Scan(&n))
+	assert.Equal(t, 0, n, "no token was minted")
+}

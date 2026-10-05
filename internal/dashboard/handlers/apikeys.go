@@ -129,6 +129,10 @@ func HandleGenerateKey(tmpl *template.Template, authSvc *auth.AuthService, db *s
 			case errors.Is(err, auth.ErrInvalidIPAllowlist):
 				fail("IP allowlist entries must be IP addresses or CIDR networks (for example 203.0.113.7 or 10.0.0.0/8): " +
 					strings.TrimPrefix(err.Error(), auth.ErrInvalidIPAllowlist.Error()+": ") + ".")
+			case errors.Is(err, auth.ErrUnrestrictedIPAllowlist):
+				fail("That IP allowlist restricts nothing: " +
+					strings.TrimPrefix(err.Error(), auth.ErrUnrestrictedIPAllowlist.Error()+": ") +
+					". To allow every address, leave the allowlist empty.")
 			case errors.Is(err, auth.ErrExpiryInPast):
 				fail("The expiry date must be in the future.")
 			default:
@@ -202,8 +206,11 @@ func HandleRotateKey(tmpl *template.Template, authSvc *auth.AuthService, logger 
 		if err != nil {
 			logger.Warn("rotate API key", zap.Error(err), zap.String("key_id", keyID))
 			msg := "That key could not be rotated."
-			if errors.Is(err, auth.ErrKeyRevoked) {
+			switch {
+			case errors.Is(err, auth.ErrKeyRevoked):
 				msg = "That key is already revoked."
+			case errors.Is(err, auth.ErrKeyExpired):
+				msg = "That key has expired. Rotating it would hand you another expired key — create a new key instead."
 			}
 			middleware.SetFlash(w, "error", msg)
 			http.Redirect(w, r, "/dashboard/apikeys", http.StatusSeeOther)
