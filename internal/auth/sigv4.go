@@ -92,7 +92,7 @@ func parseSigV4AuthHeader(h string) (*sigV4Params, error) {
 // the stored secret, and compares it in constant time. The credential
 // scope's date/region/service are used verbatim so any region string a
 // client signs with is accepted.
-func (a *Auth) verifySigV4(r *http.Request, p *sigV4Params, secretKey string) error {
+func (a *Auth) verifySigV4(r *http.Request, p *sigV4Params, secretKey, tenantID string) error {
 	// The signed timestamp comes from X-Amz-Date, or — as the SigV4 spec
 	// permits — the standard Date header, converted to ISO8601 basic.
 	amzDate := r.Header.Get("X-Amz-Date")
@@ -161,6 +161,19 @@ func (a *Auth) verifySigV4(r *http.Request, p *sigV4Params, secretKey string) er
 	if strings.Contains(";"+strings.ToLower(p.SignedHeaders)+";", ";accept-encoding;") &&
 		trimAWSSpaces(r.Header.Get("Accept-Encoding")) != "identity" {
 		headerVariants = append(headerVariants, map[string]string{"accept-encoding": "identity"})
+	}
+	// A signed header that never arrived (R2 Sippy signs If-Match with the
+	// object's ETag and drops the header): the value the server can supply
+	// for it is one more candidate, only for headers that are absent.
+	if a.MissingSignedHeader != nil {
+		for _, name := range strings.Split(strings.ToLower(p.SignedHeaders), ";") {
+			if len(r.Header.Values(name)) > 0 || name == "host" || name == "content-length" || name == "transfer-encoding" {
+				continue
+			}
+			if v, ok := a.MissingSignedHeader(r, tenantID, name); ok {
+				headerVariants = append(headerVariants, map[string]string{name: trimAWSSpaces(v)})
+			}
+		}
 	}
 	for _, h := range headerVariants {
 		for _, u := range uris {
