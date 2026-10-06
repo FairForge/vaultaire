@@ -23,10 +23,11 @@ func (a *AuthService) GenerateEmailVerifyToken(ctx context.Context, userID strin
 	if len(a.verifySecret) == 0 {
 		return "", ErrNoVerifySecret
 	}
-	a.cacheMu.RLock()
-	user, exists := a.userIndex[userID]
-	a.cacheMu.RUnlock()
-	if !exists {
+	user, err := a.userByID(ctx, userID)
+	if err != nil {
+		return "", fmt.Errorf("generate verify token: %w", err)
+	}
+	if user == nil {
 		return "", fmt.Errorf("user not found")
 	}
 
@@ -95,15 +96,16 @@ func (a *AuthService) VerifyEmail(ctx context.Context, token string) error {
 	// Mark user as verified. The token is stateless (HMAC + expiry): the
 	// per-process map of issued tokens that used to sit here was written
 	// on every resend and read by nothing (R5-24).
-	a.cacheMu.Lock()
-	user, exists := a.userIndex[userID]
-	if exists {
-		user.EmailVerified = true
+	user, err := a.userByID(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("verify email: %w", err)
 	}
-	a.cacheMu.Unlock()
-	if !exists {
+	if user == nil {
 		return fmt.Errorf("user not found")
 	}
+	a.cacheMu.Lock()
+	user.EmailVerified = true
+	a.cacheMu.Unlock()
 
 	// Persist to DB.
 	if a.sqlDB != nil {

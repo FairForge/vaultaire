@@ -69,12 +69,17 @@ type APIKey struct {
 // GenerateAPIKey creates a new API key for a user.
 // opts may be nil for full-access keys.
 func (a *AuthService) GenerateAPIKey(ctx context.Context, userID, name string, opts *KeyCreateOptions) (*APIKey, error) {
-	a.cacheMu.RLock()
-	user, exists := a.userIndex[userID]
-	a.cacheMu.RUnlock()
-	if !exists {
+	cached, err := a.userByID(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("generate api key: %w", err)
+	}
+	if cached == nil {
 		return nil, fmt.Errorf("user not found")
 	}
+	a.cacheMu.RLock()
+	snapshot := *cached
+	a.cacheMu.RUnlock()
+	user := &snapshot
 	// The scope is checked here, once, for every entry point (WP-R5-12):
 	// unknown permissions, allowlist entries that are not an address or a
 	// network, an expiry that has already passed.

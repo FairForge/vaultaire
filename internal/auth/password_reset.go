@@ -93,15 +93,21 @@ func (a *AuthService) CompletePasswordReset(ctx context.Context, token, newPassw
 		return "", err
 	}
 
-	a.cacheMu.RLock()
-	user, exists := a.userIndex[userID]
-	a.cacheMu.RUnlock()
-	if !exists {
+	// The row's current hash (user_lookup.go): a reset or change made on the
+	// other instance of a deploy overlap must spend this token too.
+	user, err := a.userByID(ctx, userID)
+	if err != nil {
+		return "", fmt.Errorf("complete password reset: %w", err)
+	}
+	if user == nil {
 		return "", fmt.Errorf("user not found")
 	}
+	a.cacheMu.RLock()
+	currentHash := user.PasswordHash
+	a.cacheMu.RUnlock()
 	// The token is bound to the password it was issued against. A used
 	// token, or one issued before a password change, no longer matches.
-	if !hmac.Equal([]byte(fingerprint), []byte(passwordFingerprint(user.PasswordHash))) {
+	if !hmac.Equal([]byte(fingerprint), []byte(passwordFingerprint(currentHash))) {
 		return "", fmt.Errorf("reset token already used or superseded")
 	}
 
