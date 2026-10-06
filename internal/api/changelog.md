@@ -5,6 +5,18 @@ what you need and it shows up here.
 
 ---
 
+## 2026-10-06 — CORS on the S3 API
+
+- **Browser apps can talk to the S3 API directly.** `PUT /<bucket>?cors` takes
+  the standard AWS `CORSConfiguration` (the same document you would give S3,
+  rclone's `backend` commands or the SDKs' `PutBucketCors`), `GET` returns it,
+  `DELETE` removes it. Preflights are answered before authentication, and the
+  real response carries the CORS headers on every status — so a page can read
+  a 403 instead of a network error. Nothing changes for buckets without a
+  configuration: cross-origin browser requests to them are refused as before.
+  List `ETag` under `ExposeHeader` to do browser-side multipart uploads. The
+  public `/cdn` path's CORS setting is separate and unchanged.
+
 ## 2026-09-22 — Quota pricing: pick your TB, flat rate, every tier
 
 - **Every tier is now sold as a quota.** You choose a size in whole TB (any

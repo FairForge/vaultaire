@@ -372,7 +372,7 @@ const (
 	sqlExportBuckets     = `
 		SELECT name, visibility, region, data_residency, versioning_status AS versioning, object_lock_enabled,
 		       default_retention_mode, default_retention_days, mfa_delete_enabled, sse_enabled,
-		       cors_origins, cache_max_age_secs, bandwidth_budget_bytes, cdn_force_download, tier_preference,
+		       cors_origins, cors_rules, cache_max_age_secs, bandwidth_budget_bytes, cdn_force_download, tier_preference,
 		       logging_enabled, logging_target_bucket, logging_prefix,
 		       inventory_enabled, inventory_schedule, inventory_target_bucket, inventory_prefix, inventory_format,
 		       metadata, created_at, updated_at

@@ -144,6 +144,19 @@ Behaviour worth knowing before writing code against it:
   `Cache-Control` from the bucket's cache TTL; HTML/SVG/XML are always
   attachments. Chunked (≥ 64 MiB) and SSE-encrypted objects are not yet served
   by the CDN path (WP-R2-2).
+- **CORS on the S3 API** (2026-10-06): `PUT|GET|DELETE /<bucket>?cors` take and
+  return the AWS `CORSConfiguration` document (≤ 100 rules; origins
+  case-sensitive with at most one `*`; methods GET/PUT/HEAD/POST/DELETE;
+  `ExposeHeader` without wildcards). A bucket has **no** configuration until you
+  put one: every cross-origin browser request is then refused. The browser's
+  `OPTIONS` preflight is answered **before** SigV4 (a browser never signs it) —
+  200 with the matching rule's headers, 403 `AccessForbidden` otherwise — and
+  the real, signed response carries `Access-Control-Allow-Origin`,
+  `Access-Control-Expose-Headers` (list `ETag` to read multipart part ETags from
+  a page) and `Access-Control-Allow-Credentials` on every status, the auth error
+  included. The preflight looks the bucket up by name. Use `s3.stored.ge` from a
+  page for uploads above 100 MB (the `stored.ge` hostname is proxied and capped).
+  The `/cdn` path's CORS (`cors_origins`, default `*`) is separate and unchanged.
 - **Encryption**: SSE-C works per request. SSE-S3 requires the deployment's
   master key, which production does not set today — without it a bucket's
   `sse_enabled` flag has no effect and objects are stored as sent. With the

@@ -27,7 +27,7 @@ func TestDetermineOperation_UnsupportedSubresource(t *testing.T) {
 	p := NewS3Parser(zap.NewNop())
 
 	bucketLevel := []string{
-		"lifecycle", "policy", "policyStatus", "cors", "encryption", "tagging",
+		"lifecycle", "policy", "policyStatus", "encryption", "tagging",
 		"website", "replication", "publicAccessBlock", "ownershipControls",
 		"analytics", "metrics", "intelligent-tiering", "accelerate",
 		"requestPayment",
@@ -102,7 +102,7 @@ func TestUnsupportedSubresource_DeleteDoesNotDeleteTheBucket(t *testing.T) {
 		 ON CONFLICT (tenant_id, name) DO NOTHING`, f.tenantID, empty)
 	require.NoError(t, err)
 
-	for _, sub := range []string{"lifecycle", "policy", "cors", "tagging", "encryption"} {
+	for _, sub := range []string{"lifecycle", "policy", "tagging", "encryption"} {
 		r := httptest.NewRequest("DELETE", "/"+empty+"?"+sub, nil).WithContext(f.ctx())
 		w := httptest.NewRecorder()
 		f.server.handleS3Request(w, r)

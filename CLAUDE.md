@@ -93,9 +93,9 @@ The `engine.Driver` interface (in `internal/engine/interface.go`) is the sacred 
 
 Registration persists to **four tables in order**: `users` -> `tenants` -> `api_keys` -> `tenant_quotas`, in one transaction (R10). Missing any causes failures. **The `api_keys` row is the credential (WP-R5-14, migration 076):** the primary pair is an `is_primary` row with its `tenant_id` on it, every lookup (S3 SigV4, presigned URLs, STS minting — one function, `auth.Auth.LookupCredential`) resolves `api_keys` by `key_id` with `revoked_at` honoured, then `sts_tokens` for ASIA-prefixed temporary credentials joined to the parent key (a token dies with its parent). `tenants.access_key/secret_key` are a mirror of the live primary pair, rewritten by a rotation in the same transaction and read by no lookup. The primary is rotated, never revoked (`auth.ErrPrimaryKeyRevoke`, 409). A JWT issued before `users.password_changed_at` is refused.
 
-Other critical tables (75 migration files numbered 003–077 (004 twice, 053 never existed) through `077_vault_parity.sql`):
+Other critical tables (76 migration files numbered 003–078 (004 twice, 053 never existed) through `078_bucket_cors.sql`; the next number is in `docs/STATUS.md`):
 - `object_head_cache` — HEAD/GET metadata cache (~1ms), content-type, ETag, metadata JSONB
-- `buckets` — bucket registry with visibility, CORS, cache TTL, metadata JSONB, slug
+- `buckets` — bucket registry with visibility, cache TTL, metadata JSONB, slug, and two CORS columns: `cors_origins` (the `/cdn` allow-list) and `cors_rules` (078: the S3 API's `?cors` configuration in the AWS shape, NULL = none — the OPTIONS preflight is answered before SigV4 for the bucket named in the path, `internal/api/s3_cors.go`)
 - `multipart_uploads`, `multipart_parts` — in-progress multipart state; the upload row also keeps the attributes sent on CreateMultipartUpload (content type, `x-amz-meta-*`, cache/disposition/encoding headers, `x-amz-storage-class` — 068, R3) because CompleteMultipartUpload carries only the part list
 - `object_versions` — versioning support (version_id, is_latest, delete markers)
 - `object_locks` — Object Lock / WORM retention and legal holds
