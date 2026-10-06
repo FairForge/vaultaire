@@ -61,6 +61,22 @@ func TestResolveStorageClass_PublicRoutesToR2(t *testing.T) {
 	assert.Equal(t, "STANDARD", BackendToStorageClass("r2"))
 }
 
+// SYNC is our internal class for the Sync.com WebDAV bridge: only a bucket
+// whose tier is `sync`, of a tenant with the `sync_backend` flag, resolves to
+// it (api.resolvePutStorageClass). Without the driver it is the primary, and
+// the customer sees STANDARD.
+func TestResolveStorageClass_SyncRoutesToSync(t *testing.T) {
+	backend, class := ResolveStorageClass("SYNC", "wasabi", map[string]Driver{"wasabi": nil, "sync": nil})
+	assert.Equal(t, "sync", backend)
+	assert.Equal(t, "SYNC", class)
+
+	backend, _ = ResolveStorageClass("SYNC", "wasabi", map[string]Driver{"wasabi": nil})
+	assert.Equal(t, "wasabi", backend)
+
+	assert.Equal(t, "STANDARD", BackendToStorageClass("sync"))
+	assert.Equal(t, "STANDARD", CustomerStorageClass("standard", "sync"))
+}
+
 // WP-R13-1: the class a customer sees follows the floor the object is billed
 // on. A downstairs (standard-floor) object is never reported in an archive
 // class, whatever backend holds its bytes; an attic object reports the class

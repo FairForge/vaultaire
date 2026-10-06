@@ -14,7 +14,7 @@ groups:
       # Primary/durable backends: a failing signed probe for 5 minutes means
       # PUTs are 503ing (fail-loudly) or reads are failing. Page.
       - alert: BackendProbeFailing
-        expr: vaultaire_backend_health{backend!~"lyve|permafrost"} == 0
+        expr: vaultaire_backend_health{backend!~"lyve|permafrost|sync"} == 0
         for: 5m
         labels:
           severity: critical
@@ -44,6 +44,20 @@ groups:
         annotations:
           summary: "Permafrost (OneDrive fleet) probe failing"
           description: "The authenticated Graph probe has failed for 15+ minutes (expired client secret? tenant throttled?). Check `curl -s localhost:8000/health/backends` for last_error and the Azure app registrations' secret expiries."
+
+      # Sync.com's WebDAV bridge (`sync-webdav` on the box) is a target-only
+      # backend holding flagged tenants' buckets only (sync_backend flag) — a
+      # warning. The probe is an authenticated PROPFIND: a 401 means the
+      # bridge's password changed (SYNC_WEBDAV_PASSWORD), a refused
+      # connection means the daemon is down (systemctl status sync-webdav).
+      - alert: SyncProbeFailing
+        expr: vaultaire_backend_health{backend="sync"} == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sync.com WebDAV bridge probe failing"
+          description: "The authenticated PROPFIND against the sync-webdav bridge has failed for 10+ minutes. Check `curl -s localhost:8000/health/backends` for last_error, `systemctl status sync-webdav` and `journalctl -u sync-webdav` on the box (401 = password changed; connection refused = daemon down; 5xx = the bridge cannot reach Sync.com)."
 
       # Durable writes are being rejected. One in 10 minutes is worth a
       # heads-up (letshow writes every minute, so a real outage produces

@@ -243,7 +243,7 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S
 	// are released.
 	// The destination's class decides both where the copy lands and which
 	// floor it is billed on (header, then the destination bucket's tier).
-	destClass := resolvePutStorageClass(r.Context(), s.db, s.engine, t.ID, destBucket,
+	destClass := resolvePutStorageClass(r.Context(), s.db, s.engine, syncPlacementGate(s.flags), t.ID, destBucket,
 		r.Header.Get("x-amz-storage-class"))
 	floor := usage.FloorOf(destClass)
 	quotaOn := s.quotaManager != nil

@@ -888,7 +888,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	// R2 key.
 	resolvedStorageClass := a.storageClass
 	if !a.storageClassResolved {
-		resolvedStorageClass = resolvePutStorageClass(r.Context(), a.db, a.engine, t.ID, bucket,
+		resolvedStorageClass = resolvePutStorageClass(r.Context(), a.db, a.engine, syncPlacementGate(a.flags), t.ID, bucket,
 			r.Header.Get("x-amz-storage-class"))
 	}
 	chunkingDisabledByTier := storageClassDisablesChunking(resolvedStorageClass)
@@ -2254,6 +2254,9 @@ var tierPreferenceToStorageClass = map[string]string{
 	"standard":    "STANDARD",
 	"archive":     "GLACIER",
 	"resilient":   "RESILIENT", // → lyve (engine/storage_class.go)
+	// → the Sync.com WebDAV bridge, and only for a tenant with the
+	// sync_backend flag (resolvePutStorageClass); operator-set only.
+	"sync": "SYNC",
 }
 
 func bucketTierStorageClass(ctx context.Context, db *sql.DB, tenantID, bucket string) string {
@@ -2311,9 +2314,17 @@ func publicBucketStorageClass(ctx context.Context, db *sql.DB, eng engine.Engine
 // hub's disk) and anything unknown fall back to the bucket's own resolution. A cold/resilient bucket tier is
 // a placement promise: a header can make an archive object colder
 // (DEEP_ARCHIVE) but never hotter, and a resilient bucket never moves.
-func resolvePutStorageClass(ctx context.Context, db *sql.DB, eng engine.Engine, tenantID, bucket, header string) string {
+//
+// A `sync` bucket tier resolves to SYNC (→ the Sync.com WebDAV bridge) only
+// when allowSync says the tenant has the `sync_backend` flag; otherwise the
+// bucket places as an `auto` one (Sync's terms: no customer data without its
+// written consent). nil allowSync = never.
+func resolvePutStorageClass(ctx context.Context, db *sql.DB, eng engine.Engine, allowSync func(tenantID string) bool, tenantID, bucket, header string) string {
 	requested := clientStorageClass(header)
 	class := bucketTierStorageClass(ctx, db, tenantID, bucket)
+	if class == "SYNC" && (allowSync == nil || !allowSync(tenantID)) {
+		class = ""
+	}
 	if class != "" && class != "STANDARD" {
 		if class == "GLACIER" && requested == "DEEP_ARCHIVE" {
 			return requested
@@ -2353,7 +2364,7 @@ func clientStorageClass(header string) string {
 // must be addressable as one R2 key for the CDN / direct-serve path.
 func storageClassDisablesChunking(class string) bool {
 	switch class {
-	case "RESILIENT", "GLACIER", "DEEP_ARCHIVE", "PUBLIC":
+	case "RESILIENT", "GLACIER", "DEEP_ARCHIVE", "PUBLIC", "SYNC":
 		return true
 	}
 	return false

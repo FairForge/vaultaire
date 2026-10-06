@@ -40,7 +40,7 @@ import (
 
 // registeredNames are the registration keys cmd/vaultaire/main.go uses; a
 // row on any other name is served by nobody.
-var registeredNames = map[string]bool{"local": true, "idrive": true, "lyve": true, "geyser": true, "r2": true, "permafrost": true, "s3": true, "quotaless": true}
+var registeredNames = map[string]bool{"local": true, "idrive": true, "lyve": true, "geyser": true, "r2": true, "permafrost": true, "s3": true, "quotaless": true, "wasabi": true, "sync": true}
 
 type class struct {
 	backend, tenant, tenantName string

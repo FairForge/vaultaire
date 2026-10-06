@@ -13,7 +13,7 @@ import (
 // everyone.
 func TestCheckPrimaryEligible(t *testing.T) {
 	eng := NewEngine(nil, zap.NewNop(), &Config{DefaultBackend: "idrive"})
-	for _, n := range []string{"idrive", "lyve", "r2", "geyser", "permafrost", "idrive-eu-west-1", "local"} {
+	for _, n := range []string{"idrive", "lyve", "r2", "geyser", "permafrost", "sync", "idrive-eu-west-1", "local"} {
 		eng.AddDriver(n, &mockDriver{name: n})
 	}
 
@@ -21,7 +21,7 @@ func TestCheckPrimaryEligible(t *testing.T) {
 	assert.NoError(t, eng.CheckPrimaryEligible("lyve"))
 	assert.NoError(t, eng.CheckPrimaryEligible("local"), "the dev/hub primary")
 
-	for _, n := range []string{"r2", "geyser", "permafrost", "idrive-eu-west-1"} {
+	for _, n := range []string{"r2", "geyser", "permafrost", "sync", "idrive-eu-west-1"} {
 		err := eng.CheckPrimaryEligible(n)
 		require.ErrorIs(t, err, ErrNotPrimaryEligible, n)
 	}

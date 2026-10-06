@@ -901,7 +901,7 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3
 	// (header, then bucket tier, then public-bucket placement); resolve it
 	// once here, reserve on it, and hand it to the adapter so placement and
 	// billing can never disagree.
-	storageClass := resolvePutStorageClass(r.Context(), s.db, s.engine, req.TenantID, req.Bucket,
+	storageClass := resolvePutStorageClass(r.Context(), s.db, s.engine, syncPlacementGate(s.flags), req.TenantID, req.Bucket,
 		r.Header.Get("x-amz-storage-class"))
 	floor := usage.FloorOf(storageClass)
 	var reserved int64

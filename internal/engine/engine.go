@@ -492,6 +492,9 @@ func (e *CoreEngine) buildCandidateList(preferred string) []string {
 //   - permafrost: the OneDrive fleet, an async second-copy role at ~10 MB/s.
 //   - idrive-<region>: region-pinned buckets; writing a US object to an EU
 //     endpoint (or the reverse) is a data-residency breach.
+//   - sync: the Sync.com WebDAV bridge. Sync's terms forbid reselling the
+//     service without its written consent: customer data lands there only
+//     for a flagged tenant's `sync` bucket (api.resolvePutStorageClass).
 //
 // Failover for a general-purpose write is therefore between the target, the
 // primary and the remaining general-purpose durable backends (idrive, lyve,
@@ -501,6 +504,7 @@ var targetOnlyBackends = map[string]bool{
 	"r2":         true,
 	"geyser":     true,
 	"permafrost": true,
+	"sync":       true,
 	"onedrive":   true, // legacy registration key (tools now use "permafrost", R7-10); keep for old head rows
 }
 
@@ -532,8 +536,9 @@ var ErrNotPrimaryEligible = errors.New("backend cannot be the primary")
 
 // CheckPrimaryEligible reports whether name may become the write primary:
 // it must be a registered driver and not a target-only backend. r2 is the
-// PUBLIC store, geyser is tape, permafrost is the async second-copy fleet and
-// idrive-<region> pins residency — none of them may receive every private
+// PUBLIC store, geyser is tape, permafrost is the async second-copy fleet,
+// sync is a third party's service we may not resell and idrive-<region> pins
+// residency — none of them may receive every private
 // object. local is allowed (it is the dev/hub primary). The admin dashboard
 // used to hand SetPrimary any string, including drivers that do not exist
 // (Review R12 — proven live: primary set to "r2" on a box without an r2
@@ -546,7 +551,7 @@ func (e *CoreEngine) CheckPrimaryEligible(name string) error {
 		return fmt.Errorf("%w: %q is not a registered backend", ErrNotPrimaryEligible, name)
 	}
 	if name != "local" && writeOnlyWhenTargeted(name) {
-		return fmt.Errorf("%w: %q is a target-only backend (public store, tape, second copy or region pin)", ErrNotPrimaryEligible, name)
+		return fmt.Errorf("%w: %q is a target-only backend (public store, tape, second copy, third-party service or region pin)", ErrNotPrimaryEligible, name)
 	}
 	return nil
 }

@@ -35,11 +35,12 @@ var flagInfos = map[string]flagInfo{
 	"chunking":        {2, "Content-defined chunking + dedup on the PUT path. Off = plain whole-object PUTs; reads keep working either way."},
 	"smart_demotion":  {2, "The Smart-tier demotion job: idle downstairs objects move to tape behind the scenes and come back hot on read."},
 	"vault_parity":    {2, "The Vault parity second copy: the vault_parity job writes RS 4+4 parity shards of every vault-floor object to the free leg (permafrost, else lyve) and a read whose tape backend fails is rebuilt from them. Off = no shards are written and none are read."},
+	"sync_backend":    {2, "Lets this tenant's buckets with tier_preference 'sync' (operator-set, SQL only) store on the Sync.com WebDAV bridge. Per tenant only, never a global row: Sync's terms forbid reselling the service without its written consent — our own data, or a customer Sync agreed to in writing."},
 	"egress_throttle": {2, "The egress allowance as a rate cap: a tenant past its monthly allowance has GetObject and /cdn bodies paced (never billed). Off = nothing is slowed, the decision is only counted (vaultaire_egress_would_throttle_total). With the global row on, a tenant row with the flag off exempts that tenant."},
 }
 
 // flagOrder puts the launch levers first.
-var flagOrder = []string{"signups", "quota_checkout", "house_overview", "egress_throttle", "chunking", "smart_demotion", "vault_parity"}
+var flagOrder = []string{"signups", "quota_checkout", "house_overview", "egress_throttle", "chunking", "smart_demotion", "vault_parity", "sync_backend"}
 
 // FlagView is a resolved flag plus what the page says about it.
 type FlagView struct {

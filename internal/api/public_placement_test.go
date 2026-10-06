@@ -84,25 +84,25 @@ func TestResolvePutStorageClass_Precedence(t *testing.T) {
 
 	// Public bucket on the default tier → PUBLIC.
 	seedPlacementBucket(t, tenantID, "pub-auto", "public-read", "auto")
-	assert.Equal(t, "PUBLIC", resolvePutStorageClass(ctx, db, eng, tenantID, "pub-auto", ""))
+	assert.Equal(t, "PUBLIC", resolvePutStorageClass(ctx, db, eng, nil, tenantID, "pub-auto", ""))
 
 	// Explicit header always wins — a client asking for GLACIER gets GLACIER.
-	assert.Equal(t, "GLACIER", resolvePutStorageClass(ctx, db, eng, tenantID, "pub-auto", "GLACIER"))
+	assert.Equal(t, "GLACIER", resolvePutStorageClass(ctx, db, eng, nil, tenantID, "pub-auto", "GLACIER"))
 
 	// Hot tiers (standard/performance = STANDARD) do not override the public
 	// role; cold/resilient tiers keep their placement promise.
 	seedPlacementBucket(t, tenantID, "pub-std", "public-read", "standard")
-	assert.Equal(t, "PUBLIC", resolvePutStorageClass(ctx, db, eng, tenantID, "pub-std", ""))
+	assert.Equal(t, "PUBLIC", resolvePutStorageClass(ctx, db, eng, nil, tenantID, "pub-std", ""))
 	seedPlacementBucket(t, tenantID, "pub-archive", "public-read", "archive")
-	assert.Equal(t, "GLACIER", resolvePutStorageClass(ctx, db, eng, tenantID, "pub-archive", ""))
+	assert.Equal(t, "GLACIER", resolvePutStorageClass(ctx, db, eng, nil, tenantID, "pub-archive", ""))
 	seedPlacementBucket(t, tenantID, "pub-resilient", "public-read", "resilient")
-	assert.Equal(t, "RESILIENT", resolvePutStorageClass(ctx, db, eng, tenantID, "pub-resilient", ""))
+	assert.Equal(t, "RESILIENT", resolvePutStorageClass(ctx, db, eng, nil, tenantID, "pub-resilient", ""))
 
 	// Private bucket → tier only.
 	seedPlacementBucket(t, tenantID, "priv-std", "private", "standard")
-	assert.Equal(t, "STANDARD", resolvePutStorageClass(ctx, db, eng, tenantID, "priv-std", ""))
+	assert.Equal(t, "STANDARD", resolvePutStorageClass(ctx, db, eng, nil, tenantID, "priv-std", ""))
 	seedPlacementBucket(t, tenantID, "priv-auto", "private", "auto")
-	assert.Equal(t, "", resolvePutStorageClass(ctx, db, eng, tenantID, "priv-auto", ""))
+	assert.Equal(t, "", resolvePutStorageClass(ctx, db, eng, nil, tenantID, "priv-auto", ""))
 }
 
 // PUBLIC objects must stay whole (no chunking) — direct-from-R2 serving and
@@ -128,27 +128,27 @@ func TestResolvePutStorageClass_HeaderIsUntrusted(t *testing.T) {
 	ctx := context.Background()
 
 	seedPlacementBucket(t, tenantID, "priv-auto", "private", "auto")
-	assert.Equal(t, "", resolvePutStorageClass(ctx, db, eng, tenantID, "priv-auto", "PUBLIC"), "a private object can never be routed to the public store")
-	assert.Equal(t, "", resolvePutStorageClass(ctx, db, eng, tenantID, "priv-auto", "RESILIENT"), "internal tier name")
-	assert.Equal(t, "", resolvePutStorageClass(ctx, db, eng, tenantID, "priv-auto", "REDUCED_REDUNDANCY"), "not a class we sell (it used to map to local = the hub's disk)")
-	assert.Equal(t, "", resolvePutStorageClass(ctx, db, eng, tenantID, "priv-auto", "STANDARD_IA"), "not a class we sell")
-	assert.Equal(t, "", resolvePutStorageClass(ctx, db, eng, tenantID, "priv-auto", "garbage"))
-	assert.Equal(t, "STANDARD", resolvePutStorageClass(ctx, db, eng, tenantID, "priv-auto", "STANDARD"))
-	assert.Equal(t, "GLACIER", resolvePutStorageClass(ctx, db, eng, tenantID, "priv-auto", "GLACIER"))
-	assert.Equal(t, "DEEP_ARCHIVE", resolvePutStorageClass(ctx, db, eng, tenantID, "priv-auto", "DEEP_ARCHIVE"))
-	assert.Equal(t, "GLACIER", resolvePutStorageClass(ctx, db, eng, tenantID, "priv-auto", "glacier"), "case-insensitive like AWS")
+	assert.Equal(t, "", resolvePutStorageClass(ctx, db, eng, nil, tenantID, "priv-auto", "PUBLIC"), "a private object can never be routed to the public store")
+	assert.Equal(t, "", resolvePutStorageClass(ctx, db, eng, nil, tenantID, "priv-auto", "RESILIENT"), "internal tier name")
+	assert.Equal(t, "", resolvePutStorageClass(ctx, db, eng, nil, tenantID, "priv-auto", "REDUCED_REDUNDANCY"), "not a class we sell (it used to map to local = the hub's disk)")
+	assert.Equal(t, "", resolvePutStorageClass(ctx, db, eng, nil, tenantID, "priv-auto", "STANDARD_IA"), "not a class we sell")
+	assert.Equal(t, "", resolvePutStorageClass(ctx, db, eng, nil, tenantID, "priv-auto", "garbage"))
+	assert.Equal(t, "STANDARD", resolvePutStorageClass(ctx, db, eng, nil, tenantID, "priv-auto", "STANDARD"))
+	assert.Equal(t, "GLACIER", resolvePutStorageClass(ctx, db, eng, nil, tenantID, "priv-auto", "GLACIER"))
+	assert.Equal(t, "DEEP_ARCHIVE", resolvePutStorageClass(ctx, db, eng, nil, tenantID, "priv-auto", "DEEP_ARCHIVE"))
+	assert.Equal(t, "GLACIER", resolvePutStorageClass(ctx, db, eng, nil, tenantID, "priv-auto", "glacier"), "case-insensitive like AWS")
 
 	// A public bucket keeps its PUBLIC placement against every non-cold header.
 	seedPlacementBucket(t, tenantID, "pub-auto", "public-read", "auto")
-	assert.Equal(t, "PUBLIC", resolvePutStorageClass(ctx, db, eng, tenantID, "pub-auto", "STANDARD"))
-	assert.Equal(t, "PUBLIC", resolvePutStorageClass(ctx, db, eng, tenantID, "pub-auto", "REDUCED_REDUNDANCY"))
+	assert.Equal(t, "PUBLIC", resolvePutStorageClass(ctx, db, eng, nil, tenantID, "pub-auto", "STANDARD"))
+	assert.Equal(t, "PUBLIC", resolvePutStorageClass(ctx, db, eng, nil, tenantID, "pub-auto", "REDUCED_REDUNDANCY"))
 
 	// Cold / resilient tiers keep their promise whatever the client says.
 	seedPlacementBucket(t, tenantID, "priv-archive", "private", "archive")
-	assert.Equal(t, "GLACIER", resolvePutStorageClass(ctx, db, eng, tenantID, "priv-archive", "STANDARD"))
-	assert.Equal(t, "GLACIER", resolvePutStorageClass(ctx, db, eng, tenantID, "priv-archive", "PUBLIC"))
-	assert.Equal(t, "DEEP_ARCHIVE", resolvePutStorageClass(ctx, db, eng, tenantID, "priv-archive", "DEEP_ARCHIVE"), "colder is fine")
+	assert.Equal(t, "GLACIER", resolvePutStorageClass(ctx, db, eng, nil, tenantID, "priv-archive", "STANDARD"))
+	assert.Equal(t, "GLACIER", resolvePutStorageClass(ctx, db, eng, nil, tenantID, "priv-archive", "PUBLIC"))
+	assert.Equal(t, "DEEP_ARCHIVE", resolvePutStorageClass(ctx, db, eng, nil, tenantID, "priv-archive", "DEEP_ARCHIVE"), "colder is fine")
 	seedPlacementBucket(t, tenantID, "priv-resilient", "private", "resilient")
-	assert.Equal(t, "RESILIENT", resolvePutStorageClass(ctx, db, eng, tenantID, "priv-resilient", "STANDARD"))
-	assert.Equal(t, "RESILIENT", resolvePutStorageClass(ctx, db, eng, tenantID, "priv-resilient", "GLACIER"), "the resilient tier is a placement promise, not a temperature")
+	assert.Equal(t, "RESILIENT", resolvePutStorageClass(ctx, db, eng, nil, tenantID, "priv-resilient", "STANDARD"))
+	assert.Equal(t, "RESILIENT", resolvePutStorageClass(ctx, db, eng, nil, tenantID, "priv-resilient", "GLACIER"), "the resilient tier is a placement promise, not a temperature")
 }

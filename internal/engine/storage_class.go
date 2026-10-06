@@ -50,6 +50,13 @@ var storageClassToBackend = map[string]string{
 	// api.resolvePutStorageClass when the bucket is public-read and an r2
 	// driver is registered; falls back to the primary like every mapping.
 	"PUBLIC": "r2",
+
+	// SYNC is OUR internal class for the Sync.com WebDAV bridge (never sent
+	// by clients): set by api.resolvePutStorageClass only for a bucket whose
+	// tier_preference is `sync` AND whose tenant has the `sync_backend` flag
+	// (Sync's terms: no customer data without its written consent). Falls
+	// back to the primary like every mapping when no `sync` driver exists.
+	"SYNC": "sync",
 }
 
 var backendToStorageClass = map[string]string{
@@ -63,6 +70,7 @@ var backendToStorageClass = map[string]string{
 	"local": "STANDARD",
 	"s3":    "STANDARD",
 	"r2":    "STANDARD",
+	"sync":  "STANDARD",
 }
 
 func ResolveStorageClass(class string, primaryBackend string, availableDrivers map[string]Driver) (driverName, resolvedClass string) {

@@ -122,7 +122,7 @@ func TestEnginePut_AutoBucketOverwriteStaysOnPrimary(t *testing.T) {
 
 func TestBuildWriteCandidateList_TargetOnlyBackends(t *testing.T) {
 	eng := NewEngine(nil, nopLogger(), &Config{DefaultBackend: "idrive"})
-	for _, n := range []string{"idrive", "lyve", "s3", "r2", "geyser", "permafrost", "idrive-eu-west-1", "local"} {
+	for _, n := range []string{"idrive", "lyve", "s3", "r2", "geyser", "permafrost", "sync", "idrive-eu-west-1", "local"} {
 		eng.AddDriver(n, newMemDriver(n))
 	}
 	eng.SetPrimary("idrive")
@@ -133,7 +133,7 @@ func TestBuildWriteCandidateList_TargetOnlyBackends(t *testing.T) {
 		assert.ElementsMatch(t, []string{"idrive", "lyve", "s3"}, c)
 	})
 	t.Run("explicit target is honoured first, then general-purpose backends", func(t *testing.T) {
-		for _, target := range []string{"r2", "geyser", "permafrost", "idrive-eu-west-1"} {
+		for _, target := range []string{"r2", "geyser", "permafrost", "sync", "idrive-eu-west-1"} {
 			c := eng.buildWriteCandidateList(target)
 			assert.Equal(t, target, c[0], "target %s", target)
 			assert.ElementsMatch(t, []string{target, "idrive", "lyve", "s3"}, c, "target %s", target)
@@ -153,6 +153,8 @@ func TestEnginePut_NeverFailsOverToTargetOnlyBackend(t *testing.T) {
 	idrive := newMemDriver("idrive")
 	idrive.putErr = fmt.Errorf("dial tcp: connection refused")
 	r2, geyser, eu := newMemDriver("r2"), newMemDriver("geyser"), newMemDriver("idrive-eu-west-1")
+	syncDrv := newMemDriver("sync")
+	eng.AddDriver("sync", syncDrv)
 	eng.AddDriver("idrive", idrive)
 	eng.AddDriver("r2", r2)
 	eng.AddDriver("geyser", geyser)
@@ -165,6 +167,7 @@ func TestEnginePut_NeverFailsOverToTargetOnlyBackend(t *testing.T) {
 	assert.False(t, r2.has("t_b", "k"), "a private object must never land on the public R2 store")
 	assert.False(t, geyser.has("t_b", "k"), "a STANDARD object must never land on tape")
 	assert.False(t, eu.has("t_b", "k"), "a US object must never land in an EU region")
+	assert.False(t, syncDrv.has("t_b", "k"), "customer data reaches Sync.com only for a flagged tenant's bucket (the ToS)")
 	assert.EqualValues(t, 1, eng.WriteFailures())
 }
 

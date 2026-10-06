@@ -52,7 +52,7 @@ in `cmd/vaultaire/main.go`; the engine addresses them by that key.
 | Method | On missing object | Other requirements |
 |--------|-------------------|--------------------|
 | `Get` | Must be classifiable as a **miss** by `engine.isBackendFailure` / `api.isObjectMissingErr`: `engine.NotFoundError`, an error wrapping `os.ErrNotExist`, or an aws-sdk-go-v2 chain carrying HTTP 404 / `NoSuchKey` / `NotFound`. Anything else is a backend failure and charges the breaker. `ErrArchived` for tape-evicted objects. | Return the body unread (the engine never buffers). Pass `ctx` to the SDK; wrap with `%w` so `errors.Is(err, context.Canceled)` works. |
-| `GetRange` | as `Get` | Body positioned at `offset`, at most `length` bytes. Only `idrive` (+ regions), `lyve`, `geyser` and `r2` implement it; `local`, `s3`, `quotaless` and `permafrost` get `Get` + discard. |
+| `GetRange` | as `Get` | Body positioned at `offset`, at most `length` bytes. Only `idrive` (+ regions), `lyve`, `geyser`, `r2` and `sync` implement it; `local`, `s3`, `quotaless` and `permafrost` get `Get` + discard. |
 | `Put` | n/a. Returns no ETag and no size — the API computes the MD5 ETag on the stream and knows the size. | Stream `data` once; may read `PutOptions.ContentLength`. Never read past a failure; a partially consumed body must surface as an error, never a truncated success. A cancelled ctx mid-body is a client abort. |
 | `Delete` | Idempotent preferred (204 on missing). A vendor 404 must classify as a miss — the API treats it as success and still removes the head row. | |
 | `List` | Empty slice, not an error, for an empty or missing container. | Keys **relative to the container** (the `t-<tenant>/<container>/` prefix stripped), filtered by `prefix`, **all pages**. Order unspecified (the API sorts). Used only on the no-DB fallback path. |
@@ -80,6 +80,7 @@ present; everything else is gated on environment variables.
 | `idrive-<region>` | `idrive.go` + `idrive_regions.go` | `IDRIVE_<REGION>_ACCESS_KEY` **and** `_SECRET_KEY` (region id upper-cased, `-`→`_`) — one pair per region, no fallback to the primary pair | none; reached only via `bucketRegionDriver` for region-pinned buckets | yes | same fixed bucket name in that region, created at boot by `EnsureBucket` | ctx |
 | `r2` | `r2.go` | `R2_ACCOUNT_ID` (`R2_ACCESS_KEY`, `R2_SECRET_KEY`, `R2_JURISDICTION`, `R2_BUCKET` default `vaultaire-public`) | `PUBLIC` only | yes | fixed bucket, keys `t-<tenant>/<container>/<artifact>` | ctx |
 | `permafrost` | `onedrive.go` (`OneDriveDriver`) | `TENANT_1_ID` (fleet of `TENANT_N_*`, N = 1..15) | none | yes | `vaultaire/t-<tenant>/<container>/<artifact>` on the FNV-chosen home tenant | ctx |
+| `sync` | `webdav.go` (`WebDAVDriver`, generic WebDAV — `webdav_README.md`) | `SYNC_WEBDAV_PASSWORD` (`SYNC_WEBDAV_URL` default `http://127.0.0.1:4918`, `SYNC_WEBDAV_USER` `sync`, `SYNC_WEBDAV_ROOT` `vaultaire`) | `SYNC` only: a bucket with `tier_preference = 'sync'` of a tenant with the `sync_backend` flag; `STORAGE_MODE=sync` is a boot Fatal | yes | `<root>/t-<tenant>/<container>/<artifact>` on Sync.com's local bridge; key segments `""`/`.`/`..`/`~…` mapped reversibly | ctx |
 
 The 13 iDrive regions are the ones the reseller account has
 (`internal/drivers/idrive_regions.go`): `us-central-1 us-west-2 us-west-4
@@ -119,6 +120,7 @@ customer-facing, registered only where the OneDrive fleet env is present.
 | idrive (+ regions) | SDK `%w` | OK | OK | signed `HeadBucket` | as s3compat; `GetRange` | OK | `Name()` is `idrive` for every regional registration (engine uses keys) |
 | geyser | SDK `%w`; `InvalidObjectState` → `engine.ErrArchived`; `Restorer` implemented | OK (paginated after R7) | OK | signed `HeadBucket` | **`materialize` always**: ≤64 MiB in RAM, else temp file; no multipart | OK | drops `ContentLength` (R7-03); cold reads answer 403 `InvalidObjectState` at the API |
 | r2 | SDK `%w` (`NoSuchKey`); nil on missing Delete | OK | OK | signed `HeadBucket` | as s3compat; `GetRange` | OK | — |
+| sync (WebDAV) | `engine.NotFoundError` on 404; nil on missing Delete (a key that is a folder is never deleted) | OK: Depth-1 PROPFIND walk, relative keys, prefix-pruned, sorted | Depth-0 PROPFIND (not HEAD) | authenticated Depth-0 PROPFIND of the root | streamed PUT (Content-Length when known, else chunked); size verified by PROPFIND after a known-length PUT; `GetRange` (a 200 to a Range is skipped + limited) | OK | file `a` and folder `a` cannot coexist (key `a` vs `a/b`); empty folders remain after Delete |
 | permafrost | string error containing `itemNotFound`/`404` — matched by the classifiers' string fallbacks only (WP-R7-4) | union of all fleet tenants, paginated, **direct children only** (R7-06) | Graph metadata GET per tenant | authenticated Graph `GET /drives/{id}` on one rotating tenant | <10 MiB one stream; ≥10 MiB 2–8 ranges **fully buffered**; Put ≤4 MiB `ReadAll`, else 60 MiB session chunks; unknown length → whole object in memory | HTTP OK; **sleeps ignore ctx** | driver-level retries (5 attempts, up to 30 s jitter + `Retry-After`) |
 
 Target-only backends (`local`, `r2`, `geyser`, `permafrost`, `idrive-<region>`)
@@ -144,6 +146,7 @@ restart, WP-R7-6). `VAULTAIRE_TUNED_TRANSPORT=false` returns
 | idrive (+ regions, one transport each) | h1 pinned | none | SDK 3 | as s3compat | `WhenSupported` — accepted | `WhenSupported` |
 | geyser | h1 pinned (h2 collapses ingest ~9×) | **300 s** | SDK 3 | `materialize` → single `PutObject` | `WhenSupported` — accepted | `WhenSupported` |
 | r2 | h1 pinned | none | SDK 3 | as s3compat | **`WhenRequired`** (R2 answers 501 to streaming trailers) | `WhenRequired` |
+| sync (WebDAV) | h1 pinned | **300 s** (a bridge may answer a PUT after its own upload) | none (breaker only); one PUT retry after recreating a missing folder when the body rewinds | streamed `PUT`, parents by `MKCOL` (cached) | n/a | stored size via PROPFIND |
 | permafrost | h2 for the Graph API, h1 for CDN downloads and upload sessions (three transports per fleet tenant) | none | **driver: 5 attempts, jitter ≤30 s + unbounded `Retry-After`**; chunk 3 attempts 1/2/4 s | ≤4 MiB single PUT; upload session 60 MiB chunks, sequential | Graph (n/a) | n/a |
 | lyve console probe | h1 | none | one 403 retry after 10 s, ctx-aware | — | SigV4 `iam` | — |
 
@@ -164,7 +167,8 @@ vary by vendor) and a dead key looks healthy to a TCP dial. `buildBackendProbes`
 registered; a stat of `DATA_PATH`, which is what catches a vanished data
 directory), iDrive (primary and every region with its own key pair), Geyser,
 R2 and Lyve through the driver's `HealthCheck` — a **signed** `HeadBucket` —
-and permafrost with a bearer-token Graph GET; Lyve uses the console
+permafrost with a bearer-token Graph GET and `sync` with an authenticated
+WebDAV PROPFIND (a wrong bridge password is a 401); Lyve uses the console
 `RSCustomerDetails` action instead when `LYVE_PROBE_*` root credentials are
 set (never the data-plane key). `quotaless` keeps the plain TCP dial from
 `configuredBackends` (its signed-list `HealthCheck` is not wired to a probe)
@@ -193,7 +197,7 @@ alert rules; they never alter routing.
 5. Document it: a row in `internal/drivers/CLAUDE.md`, an env-var row in the
    root `CLAUDE.md`, a `<name>_README.md` ops manual next to the driver
    (existing ones: `idrive_README.md`, `lyve_README.md`, `geyser_README.md`,
-   `onedrive_README.md`, `quotaless_README.md`), and this file.
+   `onedrive_README.md`, `quotaless_README.md`, `webdav_README.md`), and this file.
 6. Tests: the cross-driver conformance suite (`internal/drivers/conformance_test.go`)
    and, for S3-class drivers, the miss/failure shapes against an `httptest`
    server (see `internal/engine/failover_sdk_errors_test.go`).

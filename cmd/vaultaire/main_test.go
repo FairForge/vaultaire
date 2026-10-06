@@ -12,6 +12,15 @@ import (
 	"go.uber.org/zap"
 )
 
+// The Sync.com bridge is never the primary: Sync's terms forbid reselling it
+// without written consent, and the primary takes every tenant's objects.
+func TestRefusedPrimary(t *testing.T) {
+	assert.Error(t, refusedPrimary("sync"))
+	for _, ok := range []string{"local", "idrive", "wasabi", "quotaless", "s3", "geyser", "permafrost"} {
+		assert.NoError(t, refusedPrimary(ok), ok)
+	}
+}
+
 type recordingShutdowner struct {
 	name  string
 	order *[]string

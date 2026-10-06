@@ -382,6 +382,23 @@ func main() {
 		}
 	}
 
+	// 7b. Sync.com's encrypted WebDAV bridge (`sync-webdav`, on this box,
+	// localhost only) — a TARGET-ONLY backend like permafrost: never the
+	// primary, never a failover destination (engine targetOnlyBackends), and
+	// placed on only for a bucket with tier_preference 'sync' of a tenant
+	// with the sync_backend flag. Sync's terms forbid reselling the service
+	// without its written consent. See internal/drivers/webdav_README.md.
+	if syncCfg, ok := drivers.SyncWebDAVConfigFromEnv(os.Getenv); ok {
+		syncDriver, err := drivers.NewWebDAVDriver("sync", syncCfg.URL, syncCfg.User, syncCfg.Password, syncCfg.Root, logger)
+		if err != nil {
+			logger.Error("failed to add Sync WebDAV driver", zap.Error(err))
+		} else {
+			eng.AddDriver("sync", syncDriver)
+			logger.Info("Sync WebDAV driver added (target-only; sync_backend flag)",
+				zap.String("url", syncCfg.URL), zap.String("root", syncCfg.Root))
+		}
+	}
+
 	// 8. Set primary backend: STORAGE_MODE, else the first configured of
 	// iDrive > Wasabi > Quotaless > S3 > Geyser, else local
 	// (config.StorageModeOrder; the dashboard reads the same value).
@@ -392,6 +409,9 @@ func main() {
 		// boot log say nothing about why. Fail loudly here (WP-F).
 		logger.Fatal("STORAGE_MODE names a backend that is not registered",
 			zap.String("mode", storageMode), zap.Strings("registered", eng.GetDriverNames()))
+	}
+	if err := refusedPrimary(storageMode); err != nil {
+		logger.Fatal("STORAGE_MODE names a backend that may not be the primary", zap.Error(err))
 	}
 	eng.SetPrimary(storageMode)
 	logger.Info("primary backend set", zap.String("mode", storageMode))
@@ -441,4 +461,15 @@ func main() {
 		logger.Fatal("server failed", zap.Error(err))
 	}
 	logger.Info("shutdown complete")
+}
+
+// refusedPrimary refuses a STORAGE_MODE that names a backend which must never
+// take every tenant's objects: `sync` (Sync.com's bridge — its terms forbid
+// reselling the service without written consent). config.DetectStorageMode
+// never picks it; this stops an operator's STORAGE_MODE=sync.
+func refusedPrimary(mode string) error {
+	if mode == "sync" {
+		return fmt.Errorf("%q is a target-only backend (Sync.com: customer data only for flagged tenants)", mode)
+	}
+	return nil
 }

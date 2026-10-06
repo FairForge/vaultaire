@@ -41,6 +41,9 @@ func (d *LocalDriver) StoreID() string {
 	return "dir:" + abs
 }
 
+// A WebDAV backend: the server and the root folder objects live under.
+func (d *WebDAVDriver) StoreID() string { return "dav:" + d.origin + d.escapedPath(nil, true) }
+
 // The fleet: the sorted set of its account ids.
 func (d *OneDriveDriver) StoreID() string {
 	ids := make([]string, 0, len(d.tenants))
