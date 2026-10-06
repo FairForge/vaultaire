@@ -4,6 +4,13 @@ on:
   push:
     branches: [main, develop]
   pull_request:
+  # The merge queue (main ruleset, 2026-10-06): a queued PR is tested on a
+  # temporary merge branch and merged only when build-and-test is green
+  # there. This is what lets the ruleset keep strict_required_status_checks
+  # WITHOUT every merge forcing every open PR to rebase and rerun — the
+  # cause of the PR-stack churn of 2026-10-05. Never add a paths filter to
+  # this event or to pull_request: the required check must always report.
+  merge_group:
   # Manual lever for dropped/delayed push triggers (see deploy.yml note).
   workflow_dispatch:
 

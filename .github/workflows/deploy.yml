@@ -5,6 +5,31 @@ on:
     branches:
       - develop
       - main
+    # A docs-only merge used to redeploy prod (16 of the 60 deploys of the
+    # week to 2026-10-06), and every deploy stops the service — in-flight
+    # uploads of other sessions' live tests died with it. The paths below
+    # never reach the binary. NOT ignored: internal/api/*.md and
+    # internal/dashboard/{templates,static} — they are go:embed'ed, a change
+    # there IS a product change. A push that mixes an ignored path with any
+    # other file still deploys.
+    paths-ignore:
+      - "docs/**"
+      - ".private/**"
+      - "bench-results/**"
+      - "deploy/**"
+      - "cmd/tools/**"
+      - "tests/**"
+      - ".claude/**"
+      - ".github/dependabot.yml"
+      - ".github/*.md"
+      - ".github/CODEOWNERS"
+      - ".pre-commit-config.yaml"
+      - ".golangci.yml"
+      - "README.md"
+      - "LICENSE"
+      - "CLAUDE.md"
+      - "**/CLAUDE.md"
+      - "**/*_README.md"
   # Manual lever: GitHub occasionally drops/delays push triggers (observed
   # 2026-07-19, ~25 min with zero runs for the merge SHA). This also gives a
   # clean re-deploy button for DR drills: gh workflow run deploy.yml --ref main
