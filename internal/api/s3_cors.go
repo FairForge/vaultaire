@@ -10,19 +10,36 @@ package api
 //
 // The shape is AWS's. PutBucketCors stores the rules on the bucket
 // (`buckets.cors_rules`, migration 078; NULL = none, the default for every
-// bucket), GetBucketCors returns them, DeleteBucketCors drops them. The
-// OPTIONS preflight is answered BEFORE authentication (`handleS3Preflight`,
-// registered for OPTIONS on the S3 catch-all pattern) for the bucket named
-// in the path; the actual response carries the headers of the first rule
-// matching Origin + method on EVERY status, the auth error included
-// (`applyS3CORS`, the first thing `handleS3Request` does), so a browser can
-// read a 403 instead of seeing a network error. Bucket names are per tenant
-// (the PK is tenant_id + name) and a preflight carries no credential, so the
-// lookup is by NAME across tenants: any tenant's rule under that name that
-// allows the origin and method lets the browser send the real, signed
-// request, which is then authorised exactly as before. What the lookup
-// reveals — "some bucket of that name allows this origin" — is what AWS
-// reveals too.
+// bucket), GetBucketCors returns them, DeleteBucketCors drops them.
+//
+// Bucket names are per tenant (the PK is tenant_id + name), so who may see
+// which rule is decided in three places:
+//
+//   - The OPTIONS preflight (`handleS3Preflight`, registered for OPTIONS on
+//     the S3 catch-all pattern) carries no credential, and a path-style URL
+//     names no tenant: it is answered from the UNION of every same-named
+//     bucket's rules (`corsRuleForRequest`). It only lets the browser SEND
+//     the real, signed request, which is then authorised exactly as before.
+//     What it reveals — "some bucket of that name allows this origin" — is
+//     what AWS reveals too; "no bucket" and "no rule" are the one 403.
+//   - A response written once the request is authenticated carries the
+//     headers of the CALLER'S OWN bucket only (`applyS3CORSForTenant`, called
+//     by `handleS3Request` after the key's gates and before the operation, so
+//     a success and an operation error both carry them). A bucket without a
+//     configuration gets no CORS header, whatever another tenant configured
+//     under the same name. (Until 2026-10-06 the by-name lookup ran here too:
+//     tenant A's rules — Allow-Credentials, Expose-Headers — were applied to
+//     tenant B's signed responses.)
+//   - A response written before a tenant is known (a bad signature, an
+//     unknown, expired or IP-refused key) may carry Access-Control-Allow-Origin
+//     alone when some same-named bucket's rule allows origin + method
+//     (`applyS3CORSPreAuth`), so a page can read the error XML — never
+//     credentials, exposed headers, methods or max-age.
+//
+// Every S3 response to a request with an Origin carries `Vary: Origin`,
+// whether a rule matched or not (a shared cache must not serve one origin's
+// answer to another). An OPTIONS under an application prefix (`/api`,
+// `/auth`, `/dashboard`, `/admin`, `/webhook`) is not an S3 preflight: 404.
 //
 // Matching, like AWS: origins are compared case-sensitively (scheme, host,
 // port) and may hold ONE `*`; methods are one of GET/PUT/HEAD/POST/DELETE;
@@ -240,7 +257,7 @@ func setS3CORSHeaders(h http.Header, rule *CORSRule, origin string, requested []
 	if len(rule.ExposeHeaders) > 0 {
 		h.Set("Access-Control-Expose-Headers", strings.Join(rule.ExposeHeaders, ", "))
 	}
-	h.Add("Vary", "Origin")
+	addVary(h, "Origin")
 	if preflight {
 		if len(requested) > 0 {
 			h.Set("Access-Control-Allow-Headers", strings.Join(requested, ", "))
@@ -248,10 +265,26 @@ func setS3CORSHeaders(h http.Header, rule *CORSRule, origin string, requested []
 		if rule.MaxAgeSeconds != nil {
 			h.Set("Access-Control-Max-Age", fmt.Sprint(*rule.MaxAgeSeconds))
 		}
-		h.Add("Vary", "Access-Control-Request-Method")
-		h.Add("Vary", "Access-Control-Request-Headers")
+		addVary(h, "Access-Control-Request-Method")
+		addVary(h, "Access-Control-Request-Headers")
 	}
 }
+
+// addVary adds a Vary token once.
+func addVary(h http.Header, token string) {
+	for _, v := range h.Values("Vary") {
+		for _, t := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(t), token) {
+				return
+			}
+		}
+	}
+	h.Add("Vary", token)
+}
+
+// corsAppPrefixes are the first path segments of the application's own
+// routes: an OPTIONS under one of them is never an S3 preflight.
+var corsAppPrefixes = map[string]bool{"api": true, "auth": true, "dashboard": true, "admin": true, "webhook": true}
 
 // corsBucketFromPath: the S3 API is path-style here (the parser's
 // parsePath); a preflight for `/` names no bucket.
@@ -263,10 +296,12 @@ func corsBucketFromPath(p string) string {
 	return p
 }
 
-// corsRuleForRequest finds the first rule of any tenant's bucket of that
-// name that allows the request. Nil without a database, without a bucket
-// name, and on any error (logged): CORS is answered best-effort and never
-// fails a request.
+// corsRuleForRequest finds the first rule of ANY tenant's bucket of that
+// name that allows the request — the union a preflight is answered from, and
+// what a pre-authentication error may reveal Allow-Origin for. Never use it
+// for a response the caller's own bucket decides (corsRuleForTenant). Nil
+// without a database, without a bucket name, and on any error (logged): CORS
+// is answered best-effort and never fails a request.
 func (s *Server) corsRuleForRequest(ctx context.Context, bucket, origin, method string, requested []string, preflight bool) *CORSRule {
 	if s.db == nil || bucket == "" || strings.HasPrefix(bucket, "_") {
 		return nil
@@ -299,11 +334,47 @@ func (s *Server) corsRuleForRequest(ctx context.Context, bucket, origin, method 
 	return nil
 }
 
-// applyS3CORS is the first thing handleS3Request does: a request that
-// carries an Origin gets the matching rule's headers on whatever response
-// follows — the auth error included. Nothing is added for a plain S3 client
-// (no Origin) or an origin no rule allows.
-func (s *Server) applyS3CORS(w http.ResponseWriter, r *http.Request) {
+// corsRuleForTenant finds the first rule of the tenant's OWN bucket that
+// allows origin + method (headers are not checked on an actual request —
+// AWS). Nil as corsRuleForRequest.
+func (s *Server) corsRuleForTenant(ctx context.Context, tenantID, bucket, origin, method string) *CORSRule {
+	if s.db == nil || tenantID == "" || bucket == "" || strings.HasPrefix(bucket, "_") {
+		return nil
+	}
+	var raw []byte
+	err := s.db.QueryRowContext(ctx,
+		`SELECT cors_rules FROM buckets WHERE tenant_id = $1 AND name = $2 AND cors_rules IS NOT NULL`,
+		tenantID, bucket).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		s.logger.Warn("cors: bucket lookup failed", zap.String("tenant_id", tenantID),
+			zap.String("bucket", bucket), zap.Error(err))
+		return nil
+	}
+	var rules []CORSRule
+	if err := json.Unmarshal(raw, &rules); err != nil {
+		s.logger.Warn("cors: stored rules do not parse", zap.String("tenant_id", tenantID),
+			zap.String("bucket", bucket), zap.Error(err))
+		return nil
+	}
+	return corsMatchRule(rules, origin, method, nil, false)
+}
+
+// varyOrigin is the first thing handleS3Request does: every response to a
+// request that carries an Origin varies on it, matched or not.
+func varyOrigin(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("Origin") != "" {
+		addVary(w.Header(), "Origin")
+	}
+}
+
+// applyS3CORSPreAuth is called by handleS3Request just before it writes a
+// response for a request whose tenant is not known (an auth failure): ONLY
+// Access-Control-Allow-Origin, when some same-named bucket's rule allows the
+// origin and method, so a page can read the error.
+func (s *Server) applyS3CORSPreAuth(w http.ResponseWriter, r *http.Request) {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
 		return
@@ -312,13 +383,40 @@ func (s *Server) applyS3CORS(w http.ResponseWriter, r *http.Request) {
 	if rule == nil {
 		return
 	}
+	if allow := corsAllowedOrigin(rule, origin); allow != "" {
+		w.Header().Set("Access-Control-Allow-Origin", allow)
+		addVary(w.Header(), "Origin")
+	}
+}
+
+// applyS3CORSForTenant is called by handleS3Request once the caller is
+// authenticated, before the operation runs: the headers of the caller's own
+// bucket's matching rule, on whatever response follows. Nothing for a plain
+// S3 client (no Origin), a bucket without a configuration or an origin no
+// rule of it allows.
+func (s *Server) applyS3CORSForTenant(w http.ResponseWriter, r *http.Request, tenantID string) {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return
+	}
+	rule := s.corsRuleForTenant(r.Context(), tenantID, corsBucketFromPath(r.URL.Path), origin, r.Method)
+	if rule == nil {
+		return
+	}
 	setS3CORSHeaders(w.Header(), rule, origin, nil, false)
 }
 
-// handleS3Preflight answers a browser's OPTIONS before any authentication.
+// handleS3Preflight answers a browser's OPTIONS before any authentication,
+// from the union of every same-named bucket's rules (no tenant is knowable).
 // 200 + the rule's headers on a match; 403 AccessForbidden with AWS's
-// CORSResponse message otherwise; 400 when the request is not a preflight.
+// CORSResponse message otherwise (no bucket and no rule alike); 400 when the
+// request is not a preflight; 404 under an application prefix.
 func (s *Server) handleS3Preflight(w http.ResponseWriter, r *http.Request) {
+	if corsAppPrefixes[corsBucketFromPath(r.URL.Path)] {
+		http.NotFound(w, r)
+		return
+	}
+	varyOrigin(w, r)
 	origin := r.Header.Get("Origin")
 	method := r.Header.Get("Access-Control-Request-Method")
 	if origin == "" || method == "" {

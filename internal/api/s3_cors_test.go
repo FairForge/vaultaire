@@ -10,26 +10,34 @@ package api
 //
 // The shape is AWS's: PutBucketCors / GetBucketCors / DeleteBucketCors on
 // the bucket, default none; the OPTIONS preflight is answered BEFORE SigV4
-// (a browser never signs it) for the bucket named in the path; the actual
-// response carries the headers of the first matching rule on every status,
-// the auth error included, so a browser can read a 403 instead of seeing a
-// network error.
+// (a browser never signs it) for the bucket named in the path, from the
+// union of every same-named bucket's rules (names are per tenant). A signed
+// response carries the headers of the CALLER'S OWN bucket's matching rule,
+// on every status; an auth error (no tenant known yet) carries
+// Access-Control-Allow-Origin alone, so a browser can read a 403 instead of
+// seeing a network error. Until 2026-10-06 the by-name lookup decided the
+// signed responses too: tenant A's rules leaked onto tenant B's bucket.
 
 import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/FairForge/vaultaire/internal/testutil"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -413,15 +421,17 @@ func TestCORSActualResponse_HeadersOnEveryStatus(t *testing.T) {
 	f := setupCORSFixture(t, false)
 	f.setRules(t, storedRules)
 
-	// the 403 of the auth gate carries the headers (a browser can read it)
+	// the 403 of the auth gate carries Allow-Origin (a browser can read it)
+	// and nothing else: no tenant is known yet, so no rule's credentials or
+	// exposed headers may be applied
 	r := httptest.NewRequest("PUT", "/"+f.bucket+"/photo.jpg", strings.NewReader("x"))
 	r.Header.Set("Origin", "https://app.example")
 	w := httptest.NewRecorder()
 	f.server.router.ServeHTTP(w, r)
 	require.Equal(t, http.StatusForbidden, w.Code)
 	assert.Equal(t, "https://app.example", w.Header().Get("Access-Control-Allow-Origin"))
-	assert.Equal(t, "ETag, x-amz-version-id", w.Header().Get("Access-Control-Expose-Headers"))
-	assert.Equal(t, "true", w.Header().Get("Access-Control-Allow-Credentials"))
+	assert.Empty(t, w.Header().Get("Access-Control-Expose-Headers"))
+	assert.Empty(t, w.Header().Get("Access-Control-Allow-Credentials"))
 	assert.Contains(t, strings.Join(w.Header().Values("Vary"), ","), "Origin")
 
 	// an origin no rule allows: no CORS headers at all (the browser refuses)
@@ -431,6 +441,7 @@ func TestCORSActualResponse_HeadersOnEveryStatus(t *testing.T) {
 	f.server.router.ServeHTTP(w, r)
 	assert.Equal(t, http.StatusForbidden, w.Code)
 	assert.Empty(t, w.Header().Get("Access-Control-Allow-Origin"))
+	assert.Contains(t, strings.Join(w.Header().Values("Vary"), ","), "Origin", "Vary: Origin whether or not a rule matched")
 
 	// a method the origin's rule lacks: no headers either (DELETE is not in rule 1)
 	r = httptest.NewRequest("DELETE", "/"+f.bucket+"/photo.jpg", nil)
@@ -459,30 +470,175 @@ func TestCORSActualResponse_OnASuccess(t *testing.T) {
 	assert.Equal(t, "ETag, x-amz-version-id", w.Header().Get("Access-Control-Expose-Headers"))
 }
 
-// Bucket names are per tenant (the PK is tenant_id + name); a preflight
-// carries no credential, so it is answered for the bucket NAME: any tenant's
-// configuration under that name that allows the origin and method lets the
-// browser send the real, signed request, which is then authorised as usual.
-func TestCORSPreflight_ByBucketNameAcrossTenants(t *testing.T) {
-	f := setupCORSFixture(t, false)
-	other := f.tenantID + "-b"
+// addSameNamedBucket: a second tenant owning a bucket of the fixture's name,
+// with the given stored rules ("" = no configuration). Returns its id; the
+// access key is "AK-<id>", the secret "SK-<id>".
+func (f *corsFixture) addSameNamedBucket(t *testing.T, suffix, rulesJSON string) string {
+	t.Helper()
+	other := f.tenantID + suffix
 	_, err := f.db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key) VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (id) DO NOTHING`, other, "CORS other", other+"@test.local", "AK-"+other, "SK-"+other)
 	require.NoError(t, err)
+	var rules any
+	if rulesJSON != "" {
+		rules = rulesJSON
+	}
 	_, err = f.db.Exec(`INSERT INTO buckets (tenant_id, name, visibility, cors_rules) VALUES ($1, $2, 'private', $3::jsonb)
-		ON CONFLICT (tenant_id, name) DO NOTHING`, other, f.bucket,
-		`[{"allowed_origins":["https://second.example"],"allowed_methods":["DELETE"]}]`)
+		ON CONFLICT (tenant_id, name) DO UPDATE SET cors_rules = EXCLUDED.cors_rules`, other, f.bucket, rules)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		_, _ = f.db.Exec("DELETE FROM buckets WHERE tenant_id = $1", other)
 		_, _ = f.db.Exec("DELETE FROM tenants WHERE id = $1", other)
 	})
-	// f's bucket has no configuration; the other tenant's same-named bucket has
+	f.primaryKey(t, other)
+	return other
+}
+
+// primaryKey gives the tenant a primary pair the S3 gate accepts (an
+// api_keys row, WP-R5-14): access key "AK-<id>", secret "SK-<id>".
+func (f *corsFixture) primaryKey(t *testing.T, tenantID string) (ak, sk string) {
+	t.Helper()
+	ak, sk = "AK-"+tenantID, "SK-"+tenantID
+	userID := uuid.New().String()
+	_, err := f.db.Exec(`INSERT INTO users (id, email, password_hash) VALUES ($1, $2, 'x')`,
+		userID, "key-"+userID[:8]+"@test.local")
+	require.NoError(t, err)
+	_, err = f.db.Exec(`INSERT INTO api_keys (id, user_id, tenant_id, is_primary, name, key_id, secret_hash, secret_key)
+		VALUES ($1, $2, $3, TRUE, 'primary', $4, 'h', $5)`, uuid.New().String(), userID, tenantID, ak, sk)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = f.db.Exec(`DELETE FROM api_keys WHERE user_id = $1`, userID)
+		_, _ = f.db.Exec(`DELETE FROM users WHERE id = $1`, userID)
+	})
+	return ak, sk
+}
+
+// signedS3 sends a SigV4-signed request (the real gate: fixture testMode
+// false) through an httptest server and returns the response, body drained.
+func signedS3(t *testing.T, f *corsFixture, method, path, ak, sk, origin string) *http.Response {
+	t.Helper()
+	ts := httptest.NewServer(f.server.router)
+	t.Cleanup(ts.Close)
+	ctx := context.Background()
+	req, err := http.NewRequestWithContext(ctx, method, ts.URL+path, nil)
+	require.NoError(t, err)
+	req.Header.Set("X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD")
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
+	signer := v4.NewSigner(func(o *v4.SignerOptions) { o.DisableURIPathEscaping = true })
+	require.NoError(t, signer.SignHTTP(ctx, aws.Credentials{AccessKeyID: ak, SecretAccessKey: sk},
+		req, "UNSIGNED-PAYLOAD", "s3", "us-east-1", time.Now().UTC()))
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	return resp
+}
+
+func assertNoACHeaders(t *testing.T, h http.Header, msg string) {
+	t.Helper()
+	for k := range h {
+		assert.False(t, strings.HasPrefix(strings.ToLower(k), "access-control-"), "%s: unexpected %s: %v", msg, k, h.Values(k))
+	}
+}
+
+// Bucket names are per tenant (the PK is tenant_id + name); a preflight
+// carries no credential, so it is answered for the bucket NAME: the union of
+// every same-named bucket's rules decides whether the browser may SEND the
+// real, signed request. What it may READ is decided by the caller's own
+// bucket (TestCORSActualResponse_* below).
+func TestCORSPreflight_UnionOfSameNamedBuckets(t *testing.T) {
+	f := setupCORSFixture(t, false)
+	f.setRules(t, storedRules)
+	f.addSameNamedBucket(t, "-b", `[{"allowed_origins":["https://second.example"],"allowed_methods":["DELETE"]}]`)
+
+	// the other tenant's rule answers
 	w := preflight(f, "/"+f.bucket+"/k", "https://second.example", "DELETE", "")
 	assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	assert.Equal(t, "https://second.example", w.Header().Get("Access-Control-Allow-Origin"))
+	// … and so does the fixture's own
+	w = preflight(f, "/"+f.bucket+"/k", "https://app.example", "PUT", "")
+	assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	// neither allows this: the one 403, whatever the reason
 	w = preflight(f, "/"+f.bucket+"/k", "https://second.example", "PUT", "")
 	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), "<Code>AccessForbidden</Code>")
+	assert.Contains(t, strings.Join(w.Header().Values("Vary"), ","), "Origin")
+}
+
+// (a) tenant B's bucket has no configuration, tenant A's same-named bucket
+// has a permissive one: B's own signed response carries NO CORS header.
+func TestCORSActualResponse_NoRuleBleedAcrossTenants(t *testing.T) {
+	f := setupCORSFixture(t, false)
+	f.setRules(t, `[{"allowed_origins":["*"],"allowed_methods":["GET","PUT","HEAD","POST","DELETE"],"expose_headers":["ETag"]},
+		{"allowed_origins":["https://app.example"],"allowed_methods":["GET"]}]`)
+	b := f.addSameNamedBucket(t, "-b", "")
+
+	for _, origin := range []string{"https://app.example", "https://any.example"} {
+		resp := signedS3(t, f, "GET", "/"+f.bucket+"/photo.jpg", "AK-"+b, "SK-"+b, origin)
+		assert.NotEqual(t, http.StatusForbidden, resp.StatusCode, "the signature is good")
+		assertNoACHeaders(t, resp.Header, origin)
+		assert.Contains(t, strings.Join(resp.Header.Values("Vary"), ","), "Origin", origin)
+	}
+	// a listing (another operation, another status) too
+	resp := signedS3(t, f, "GET", "/"+f.bucket+"?list-type=2", "AK-"+b, "SK-"+b, "https://app.example")
+	assertNoACHeaders(t, resp.Header, "listing")
+}
+
+// (b) B has its own rule; A's same-named bucket has a broader one. B's
+// signed response carries B's rule, not A's.
+func TestCORSActualResponse_CallersOwnRule(t *testing.T) {
+	f := setupCORSFixture(t, false)
+	f.setRules(t, `[{"allowed_origins":["*"],"allowed_methods":["GET"]}]`) // A: `*`, nothing exposed
+	b := f.addSameNamedBucket(t, "-b",
+		`[{"allowed_origins":["https://b-app.example"],"allowed_methods":["GET"],"expose_headers":["ETag"]}]`)
+
+	resp := signedS3(t, f, "GET", "/"+f.bucket+"/photo.jpg", "AK-"+b, "SK-"+b, "https://b-app.example")
+	assert.Equal(t, "https://b-app.example", resp.Header.Get("Access-Control-Allow-Origin"))
+	assert.Equal(t, "true", resp.Header.Get("Access-Control-Allow-Credentials"))
+	assert.Equal(t, "ETag", resp.Header.Get("Access-Control-Expose-Headers"))
+
+	// an origin only A's rule allows: nothing on B's response
+	resp = signedS3(t, f, "GET", "/"+f.bucket+"/photo.jpg", "AK-"+b, "SK-"+b, "https://elsewhere.example")
+	assertNoACHeaders(t, resp.Header, "A's wildcard")
+
+	// and A, signed, gets A's rule (`*`, no credentials, nothing exposed)
+	akA, skA := f.primaryKey(t, f.tenantID)
+	resp = signedS3(t, f, "GET", "/"+f.bucket+"/photo.jpg", akA, skA, "https://b-app.example")
+	assert.Equal(t, "*", resp.Header.Get("Access-Control-Allow-Origin"))
+	assert.Empty(t, resp.Header.Get("Access-Control-Allow-Credentials"))
+	assert.Empty(t, resp.Header.Get("Access-Control-Expose-Headers"))
+}
+
+// (c) a response written before a tenant is known (a bad signature) may
+// carry Access-Control-Allow-Origin so the browser reads the error — nothing
+// else.
+func TestCORSActualResponse_AuthFailureCarriesOnlyAllowOrigin(t *testing.T) {
+	f := setupCORSFixture(t, false)
+	f.setRules(t, storedRules)
+
+	ak, _ := f.primaryKey(t, f.tenantID)
+	resp := signedS3(t, f, "PUT", "/"+f.bucket+"/photo.jpg", ak, "wrong-secret", "https://app.example")
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	assert.Equal(t, "https://app.example", resp.Header.Get("Access-Control-Allow-Origin"))
+	for _, h := range []string{"Access-Control-Allow-Credentials", "Access-Control-Expose-Headers",
+		"Access-Control-Allow-Methods", "Access-Control-Allow-Headers", "Access-Control-Max-Age"} {
+		assert.Empty(t, resp.Header.Get(h), h)
+	}
+	assert.Contains(t, strings.Join(resp.Header.Values("Vary"), ","), "Origin")
+}
+
+// (d) an OPTIONS to an application route is not an S3 preflight.
+func TestCORSPreflight_NotForAppRoutes(t *testing.T) {
+	f := setupCORSFixture(t, false)
+	f.server.registerWhoamiRoute()
+	for _, p := range []string{"/api/v1/whoami", "/api/v1/whatever", "/auth/login", "/dashboard/", "/admin/stats", "/webhook/stripe", "/api"} {
+		w := preflight(f, p, "https://app.example", "GET", "")
+		assert.Equal(t, http.StatusNotFound, w.Code, "%s: %s", p, w.Body.String())
+		assert.NotContains(t, w.Body.String(), "CORSResponse", p)
+		assert.Empty(t, w.Header().Get("Access-Control-Allow-Origin"), p)
+	}
 }
 
 // Without a database (the degraded dev path) a preflight is refused and an
