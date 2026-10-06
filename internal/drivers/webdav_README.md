@@ -72,11 +72,24 @@ An S3 key `a` and a key `a/b` in the same container conflict — the second PUT
 fails (S3 allows both). `photos/` (marker) + `photos/x.jpg` works (the marker
 is the file `~` in the folder).
 
+**Request URLs** (CodeQL `go/request-forgery`): the configured URL is parsed
+once in the constructor (http/https, a host, no userinfo/query/fragment) and
+kept as a `url.URL` holding only scheme + host. Every request URL is a copy of
+it with only `Path`/`RawPath` set (`requestURL`); the escaped path must match
+what `escapedPath` produces (absolute, `url.PathEscape`d segments — no `?`,
+`#`, raw `\`, scheme), may hold no empty, `.` or `..` segment (also between
+backslashes, which Windows-backed servers split on), no encoded `/` or NUL,
+and must be the root folder or below it (or exactly the server's own folder,
+the health check's fallback). The built request's scheme + host are compared
+to the configured ones before it is sent. A refusal wraps
+`engine.ErrInvalidInput` (no breaker charge). Keys that try to climb
+(`..\..\x`, `a\..\b`) are refused; `%2e%2e` is a literal name (`%252e%252e`).
+
 ## Operations
 
 | Op | Request | Notes |
 |---|---|---|
-| `Put` | `PUT` (streamed; `Content-Length` when `PutOptions` carries it, else chunked) | Missing folders: the deepest unknown parent is `MKCOL`ed first (201/405 = exists), on 409 every ancestor top-down; known folders are cached (`sync.Map`, per process). A PUT answered 404/409 (a folder removed behind the cache) recreates the folders and is retried once when the body can be rewound or was not read; otherwise the error wraps `engine.ErrNoFailover`. With a known length the stored size is checked by `PROPFIND` Depth 0 `getcontentlength`: a short object is an error ("truncated upload"). Overwrite replaces. |
+| `Put` | `PUT` (streamed; `Content-Length` when `PutOptions` carries it, else chunked) | Missing folders: the deepest unknown parent is `MKCOL`ed first (201/405 = exists), on 409 every ancestor top-down; known folders are cached (`sync.Map`, per process). One MKCOL per path at a time in the process (concurrent PUTs into a new folder otherwise race and a server answers the loser **423 Locked** — x/net/webdav does; found by `webdav-bench` parity), and a 423 from another process is retried 5× (100 ms × attempt). A PUT answered 404/409 (a folder removed behind the cache) recreates the folders and is retried once when the body can be rewound or was not read; otherwise the error wraps `engine.ErrNoFailover`. With a known length the stored size is checked by `PROPFIND` Depth 0 `getcontentlength`: a short object is an error ("truncated upload"). Overwrite replaces. |
 | `Get` | `GET` | 404 → `engine.NotFoundError` (the engine's miss: no breaker charge), like local/OneDrive |
 | `GetRange` | `GET` + `Range: bytes=off-end` | 206 accepted (`Content-Range` start checked); a server that ignores Range and answers **200** has the bytes before the offset discarded and the rest limited — never the wrong bytes; 416 / offset past the end = empty |
 | `Delete` | `PROPFIND` Depth 0, then `DELETE` | A WebDAV DELETE of a folder is recursive, so a key that is a folder is left alone (`DeleteObject("a")` never removes `a/b`); 404 = nil |
@@ -189,5 +202,10 @@ unicode), GetRange 206 and a server that ignores Range, not-found mapping,
 delete (missing = nil; never a folder), List (prefix, nesting, empty folders,
 href shapes, a foreign href), WalkTenant (neighbour tenants, Remove twice, bad
 ids, fn error), no tenant → `ErrNoTenant` + chunk context, HealthCheck (ok /
-401 / down), a server that truncates a PUT, 5xx returned. `webdav_config_test.go`
+401 / down), a server that truncates a PUT, 5xx returned. `webdav_guard_test.go`
+— the request-URL guard (scheme/host fixed, root escapes / `%2e%2e` /
+backslash dot segments / query / fragment / encoded `/` refused), hostile keys
+end to end (no request off the root or to another host), 32 concurrent PUTs
+into new folders (the 423 race), a MKCOL 423 retried. Benchmark:
+`cmd/tools/webdav-bench` (cmd/tools/README.md). `webdav_config_test.go`
 — env defaults and `StoreID`.

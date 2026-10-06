@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -37,8 +39,14 @@ import (
 // so an S3 key `a` and a key `a/b` in the same container conflict (the second
 // PUT fails); S3 allows both.
 type WebDAVDriver struct {
-	name     string
-	origin   string   // scheme://host[:port]
+	name string
+	// base is the configured server — Scheme and Host only, parsed and
+	// checked once in the constructor. Every request URL is a copy of it
+	// with only the path set (requestURL): scheme and host never derive
+	// from a key.
+	base     url.URL
+	basePath string   // decoded path of the URL's own folder ("/" at the top)
+	rootPath string   // decoded path of the root folder (= basePath without a root)
 	baseSegs []string // decoded path segments of the URL's own path
 	rootSegs []string // the configured root folder, below the URL's path
 	username string
@@ -49,6 +57,8 @@ type WebDAVDriver struct {
 	// known holds collection paths (escaped, no trailing slash) this process
 	// has created or seen, so a PUT into a known folder costs no MKCOL.
 	known sync.Map
+	// mkcolLocks serialises the MKCOL of one path (path → *sync.Mutex).
+	mkcolLocks sync.Map
 }
 
 const (
@@ -60,6 +70,10 @@ const (
 	webdavMetaTimeout = 60 * time.Second
 	// webdavMaxMultistatus caps one PROPFIND answer we parse.
 	webdavMaxMultistatus = 64 << 20
+	// webdavLockedRetries / webdavLockedBackoff: a MKCOL answered 423 Locked
+	// is retried this many times, waiting attempt × backoff in between.
+	webdavLockedRetries = 5
+	webdavLockedBackoff = 100 * time.Millisecond
 )
 
 // WebDAVConfig is one WebDAV backend's settings.
@@ -147,7 +161,9 @@ func NewWebDAVDriver(name, baseURL, username, password, root string, logger *zap
 
 	d := &WebDAVDriver{
 		name:     name,
-		origin:   u.Scheme + "://" + u.Host,
+		base:     url.URL{Scheme: u.Scheme, Host: u.Host},
+		basePath: "/" + strings.Join(baseSegs, "/"),
+		rootPath: "/" + strings.Join(append(append([]string(nil), baseSegs...), rootSegs...), "/"),
 		baseSegs: baseSegs,
 		rootSegs: rootSegs,
 		username: username,
@@ -160,7 +176,7 @@ func NewWebDAVDriver(name, baseURL, username, password, root string, logger *zap
 	}
 	logger.Info("WebDAV driver initialized",
 		zap.String("backend", name),
-		zap.String("url", d.origin+d.escapedPath(nil, false)),
+		zap.String("url", d.origin()+d.escapedPath(nil, false)),
 		zap.String("user", username))
 	return d, nil
 }
@@ -269,11 +285,74 @@ func (d *WebDAVDriver) ObjectKey(ctx context.Context, container, artifact string
 	return tenantKey(contextTenant(ctx), container, artifact)
 }
 
-// request sends one authenticated request to an escaped path.
+// origin is scheme://host[:port] of the configured server.
+func (d *WebDAVDriver) origin() string { return d.base.Scheme + "://" + d.base.Host }
+
+// webdavEscapedPath is what escapedPath can produce: an absolute path of
+// url.PathEscape'd segments — unreserved and sub-delim characters and %XX
+// escapes; never '?', '#', '\', a scheme or a raw space.
+var webdavEscapedPath = regexp.MustCompile(`^/(?:[A-Za-z0-9\-._~!$&'()*+,;=:@/]|%[0-9A-Fa-f]{2})*$`)
+
+// requestURL turns an escaped path into the URL a request goes to: a copy of
+// the configured base (scheme and host from the constructor, never from the
+// path) with only Path/RawPath set. The path must be what escapedPath makes
+// — absolute, no '?'/'#', no empty, "." or ".." segment (also between
+// backslashes, which some servers treat as separators), no encoded '/' or
+// NUL — and must be the root folder or below it, or exactly the server's own
+// folder (the health check's fallback). Anything else is refused with
+// engine.ErrInvalidInput before a request is built.
+func (d *WebDAVDriver) requestURL(escaped string) (*url.URL, error) {
+	if !webdavEscapedPath.MatchString(escaped) {
+		return nil, fmt.Errorf("%w: webdav request path %q is not an escaped absolute path", engine.ErrInvalidInput, escaped)
+	}
+	decoded, err := url.PathUnescape(escaped)
+	if err != nil {
+		return nil, fmt.Errorf("%w: webdav request path %q: %w", engine.ErrInvalidInput, escaped, err)
+	}
+	if escaped != "/" {
+		for _, raw := range strings.Split(strings.TrimSuffix(escaped, "/"), "/")[1:] {
+			seg, err := url.PathUnescape(raw)
+			if err != nil {
+				return nil, fmt.Errorf("%w: webdav request path %q: %w", engine.ErrInvalidInput, escaped, err)
+			}
+			if seg == "" || strings.ContainsAny(seg, "/\x00") {
+				return nil, fmt.Errorf("%w: webdav request path %q has an empty or invalid segment", engine.ErrInvalidInput, escaped)
+			}
+			for _, part := range strings.Split(seg, `\`) {
+				if part == "." || part == ".." {
+					return nil, fmt.Errorf("%w: webdav request path %q has a dot segment", engine.ErrInvalidInput, escaped)
+				}
+			}
+		}
+	}
+	clean := path.Clean(decoded)
+	underRoot := clean == d.rootPath || strings.HasPrefix(clean, strings.TrimSuffix(d.rootPath, "/")+"/")
+	if !underRoot && clean != d.basePath {
+		return nil, fmt.Errorf("%w: webdav request path %q is outside the root %q", engine.ErrInvalidInput, escaped, d.rootPath)
+	}
+	u := d.base // a copy: Scheme and Host come from the configuration only
+	u.Path = decoded
+	u.RawPath = escaped
+	if u.Scheme != d.base.Scheme || u.Host != d.base.Host || u.User != nil || u.Opaque != "" || u.RawQuery != "" || u.Fragment != "" {
+		return nil, fmt.Errorf("%w: webdav request URL left the configured server %s", engine.ErrInvalidInput, d.origin())
+	}
+	return &u, nil
+}
+
+// request sends one authenticated request to an escaped path. The URL comes
+// from requestURL (configured scheme + host, path under the root), and the
+// built request is checked once more against the configured server.
 func (d *WebDAVDriver) request(ctx context.Context, method, path string, body io.Reader, length int64, header map[string]string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, method, d.origin+path, body)
+	u, err := d.requestURL(path)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, method, u.String(), body)
 	if err != nil {
 		return nil, fmt.Errorf("build %s request: %w", method, err)
+	}
+	if req.URL.Scheme != d.base.Scheme || req.URL.Host != d.base.Host {
+		return nil, fmt.Errorf("%w: webdav %s request to %s://%s, configured %s", engine.ErrInvalidInput, method, req.URL.Scheme, req.URL.Host, d.origin())
 	}
 	if length > 0 {
 		req.ContentLength = length
@@ -505,7 +584,33 @@ func (d *WebDAVDriver) parentPaths(names []string) []string {
 	return out
 }
 
+// mkcol creates one collection. Concurrent PUTs into a new folder all want
+// the same MKCOLs, and a server answers the ones that overlap 423 Locked
+// (x/net/webdav does), so one MKCOL per path runs at a time in this process
+// (the others then find it known), and a 423 — another process holding the
+// folder for a moment — is retried a few times.
 func (d *WebDAVDriver) mkcol(ctx context.Context, path string) (int, error) {
+	mu, _ := d.mkcolLocks.LoadOrStore(path, &sync.Mutex{})
+	m := mu.(*sync.Mutex)
+	m.Lock()
+	defer m.Unlock()
+	if _, ok := d.known.Load(path); ok {
+		return http.StatusMethodNotAllowed, nil // exists
+	}
+	for attempt := 1; ; attempt++ {
+		code, err := d.mkcolOnce(ctx, path)
+		if code != http.StatusLocked || attempt > webdavLockedRetries {
+			return code, err
+		}
+		select {
+		case <-ctx.Done():
+			return code, fmt.Errorf("%w (waiting out a 423: %w)", err, ctx.Err())
+		case <-time.After(time.Duration(attempt) * webdavLockedBackoff):
+		}
+	}
+}
+
+func (d *WebDAVDriver) mkcolOnce(ctx context.Context, path string) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, webdavMetaTimeout)
 	defer cancel()
 	resp, err := d.request(ctx, "MKCOL", path+"/", nil, 0, nil)

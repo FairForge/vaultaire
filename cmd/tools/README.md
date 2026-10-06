@@ -30,9 +30,59 @@ clean` removes the resulting binaries from the repo root.
 | `pixeldrain-bench` | bench | `PIXELDRAIN_API_KEY` | CDN option evaluation (`internal/drivers/pixeldrain_README.md`) | historical |
 | `routing-truth` | probe (read-only plan) | `DB_*` or `DATABASE_URL`; optional `DATA_PATH`, `IDRIVE_*`, `TENANT_N_*` | Head rows per recorded backend and tenant, a sample of each class asked of its driver (signed HEAD / stat / Graph), the other routing tables, and the plan per class — writes nothing (WP-R7-5, `docs/reviews/WP-R7-5.md`) | current (2026-10-03) |
 | `uloz-bench` | bench | `ULOZ_LOGIN`, `ULOZ_AUTH_TOKEN` | Uloz.to evaluation (own `CLAUDE.md`) | historical (not in the stack) |
+| `webdav-bench` | bench | `WEBDAV_PASSWORD` (env only); `-url` (default the Sync bridge `http://127.0.0.1:4918`), `-user` (`sync`) | A WebDAV endpoint for Stored's workloads through the real `WebDAVDriver` (+ raw WebDAV where the driver hides it): small objects, large streams, ranges, consistency, listing, the Vault parity I/O pattern, opt-in limits probes; every read sha256-verified; bridge RSS/CPU from `/proc` — see below | current (2026-10-06, PR #614) |
 | `validate` | probe | server URL + keys | S3 conformance drive against a running server; `scripts/validate-backends.sh` cycles backends through it | current |
 
 Deleted in Review R15: `quotaless-bench`, `quotaless-bench-v2`, `quotaless-debug`,
 `quotaless-full-bench` (the Quotaless account is dead and the driver is slated
 for removal — WP-R7-3). `tools/geyser-grabber` (a browser extension that
 captures Vail console calls) stays under `tools/`; it is not Go.
+
+## `webdav-bench`
+
+Benchmarks a WebDAV server for Stored's workloads — first the Sync.com bridge
+(`sync-webdav`, `internal/drivers/webdav_README.md`). Object traffic goes
+through the real driver (`drivers.NewWebDAVDriver`, tenant `-tenant` in the
+context), so MKCOL caching, the post-PUT size check (a Depth 0 PROPFIND after
+every known-length PUT), Range handling and the PROPFIND walk are on the
+measured path; raw WebDAV requests are used where the driver hides what is
+measured. Data comes from a seeded ChaCha8 generator, streamed (1 GiB is never
+in memory); **every read is byte-verified** (sha256) and a difference is
+printed as `!!! MISMATCH` (exit status 2; other errors exit 1).
+
+| Suite | Default | Measures |
+|---|---|---|
+| `small` | yes | 4 KiB / 64 KiB / 1 MiB × concurrency 1 / 8 / 32, `-n` (200) objects per cell: PUT, GET, Exists, Delete — ops/s, MB/s, p50/p95/p99 |
+| `large` | yes | 16 MiB / 256 MiB / 1 GiB × concurrency 1 / 4 (= objects per cell): PUT and GET MB/s, GET time to first byte |
+| `range` | yes | one 256 MiB object, 100 random reads of 64 KiB and of 4 MiB (`GetRange`): latency, bytes verified |
+| `consistency` | yes | `-consistency-n` (50) rounds: PUT v1 → GET, PUT v2 → GET, DELETE → GET (not found). A stale read is polled every 50 ms (≤ 30 s) and reported with the time it took to resolve |
+| `listing` | yes | 1,000 then 10,000 tiny files in one folder (`-list-counts`, capped by `-list-max`): driver `List` and one raw `PROPFIND Depth: 1`, each timed and counted |
+| `parity` | yes | Vault's RS leg as I/O only: for 64 MiB / 256 MiB / 1 GiB with k=4 (shard = size/4), write m=4 shards concurrently, read them back concurrently, a degraded read of k shards; then 1,000 × 1 MiB shards at concurrency 16 in one folder vs a 2-level hex fan-out (`aa/bb/name`) |
+| `limits` | **opt-in** | Sync's documented limits: total path length 200 / 248 / 249 / 300 / 1000 chars (`-limits-paths`; does PUT succeed, does GET read back), names with `: ? * < > \| " \`, trailing `.`, leading/trailing space, `%`, `#`, `+`, unicode, emoji, `CON`/`NUL`/`AUX`, `.DS_Store`, `desktop.ini`, `~$x` (PUT status/body, read back, listed). `-limits-folder` adds the 50,000-files-per-folder probe: up to `-limits-folder-max` (50,001) zero-byte files at `-limits-conc` (64), progress every 1,000, the first failure's index, status and body. Slow |
+| resources | always | `/proc/<pid>` of `-proc` (`sync-webdav`) once a second when it runs on this host: peak RSS, mean/peak CPU; size of `-spill-dir` (the bridge's `--upload-temp-dir`): peak and at the end |
+
+Everything is written under `<-root>/t-<tenant>/run-<timestamp>/` (default
+`_bench/t-bench/…`) and that folder is deleted at the end (`-cleanup=false`
+keeps it); each case drops its own folder when it finishes, so the bridge's
+spill directory holds one case at a time. The password is read from
+`WEBDAV_PASSWORD` only — there is no flag — and is never printed. Output: a
+table on stdout, the full report (rows, mismatches, errors, consistency
+events, limits probes, resources) as JSON to `-out`. Sizes take `4KiB`,
+`16MiB`, `1GiB` or bytes; every list flag is comma-separated (`-h` for all).
+
+On SLC (the bridge listens on localhost only):
+
+```bash
+GOOS=linux GOARCH=amd64 go build -o webdav-bench ./cmd/tools/webdav-bench
+scp webdav-bench vaultaire-slc:/tmp/
+# on the box, as a user that can read the bridge's credentials:
+WEBDAV_PASSWORD=$(sudo grep ^SYNC_WEBDAV_PASSWORD= /opt/vaultaire/configs/.env | cut -d= -f2-) \
+  /tmp/webdav-bench -run small,large,range,consistency,parity -spill-dir /var/lib/sync-webdav/spool -out results.json
+# the limits probes (opt-in; -limits-folder takes a long while):
+WEBDAV_PASSWORD=… /tmp/webdav-bench -run limits -limits-folder -out limits.json
+```
+
+`main_test.go` runs every suite in tiny sizes against `golang.org/x/net/webdav`
+(httptest + Basic auth), checks cleanup and that the password never appears
+in the output, and that a server corrupting GET bodies is reported as a
+mismatch — so the tool cannot rot.
