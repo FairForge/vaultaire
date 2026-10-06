@@ -232,11 +232,11 @@ GitHub Actions Deploy (`.github/workflows/deploy.yml`):
 This file is in a public repository (Review R14-20 / decision D-20): the hostnames and paths here are deliberately here and not in README.md.
 
 - Server: `slc-vaultaire-01` (Ubuntu 24.04, Salt Lake City), SSH alias `vaultaire-slc`
-- Binary at `/opt/vaultaire/bin/vaultaire`, config at `/opt/vaultaire/configs/.env`
+- Two app slots `vaultaire@8000` / `vaultaire@8001` behind HAProxy, one active (`/opt/vaultaire/ACTIVE_PORT`; binaries `/opt/vaultaire/bin/vaultaire-800x`); config at `/opt/vaultaire/configs/.env`. Deploys, `.env` restarts and rollbacks go through `sudo vaultaire-switch deploy|restart|rollback|status` (zero downtime; `docs/DEPLOY.md`); the old `vaultaire.service` is masked. Logs: `journalctl -u 'vaultaire@*'`
 - HAProxy fronts the service; Cloudflare proxies stored.ge
 - UFW firewall: ports 22, 80, 443 only
 - Daily PostgreSQL backups at 3am UTC (7-day retention) in `/opt/vaultaire/backups/`
-- Deploy: push to `main` triggers `.github/workflows/deploy.yml` (build → migrate → swap → health check)
+- Deploy: push to `main` (merge queue; docs-only pushes skip it) triggers `.github/workflows/deploy.yml` (build → migrate with `lock_timeout` → `vaultaire-switch deploy` → public `/version` check). Migrations must stay additive: the previous build keeps serving the new schema until the switch
 - Health: `curl https://stored.ge/health`
 - Auth-failure signal: `/metrics` exports `vaultaire_auth_failures_total{reason,key_known}` and `vaultaire_auth_failures_by_key_total{key_hash}` (Review R11-10) plus the dashboard's `vaultaire_dashboard_login_failures_total{reason}` / `_lockouts_total` (Review R12); rules in `deploy/monitoring/vaultaire-auth.yml` page on a burst against a real key and warn on dashboard stuffing/lockouts. Dashboard accounts lock for 15 min after 10 failed sign-ins in 15 min
 - Cross-compile: `GOOS=linux GOARCH=amd64 go build -o vaultaire-bin ./cmd/vaultaire`

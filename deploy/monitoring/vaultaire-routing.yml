@@ -29,7 +29,7 @@
 #
 # Triage:
 #   curl -s -H "Authorization: Bearer <admin JWT>" https://stored.ge/api/v1/admin/routing-truth | jq .
-#   journalctl -u vaultaire | grep 'routing truth'
+#   journalctl -u 'vaultaire@*' | grep 'routing truth'
 #   POST /api/v1/admin/jobs/routing_truth/run     one run now (202; 409 while one is running)
 groups:
   - name: vaultaire-routing
@@ -81,7 +81,7 @@ groups:
           severity: critical
         annotations:
           summary: "Two registered backends write into the same store"
-          description: "journalctl -u vaultaire | grep 'two registered backends share one store' names them. Until fixed, every stale-copy delete (demotion reclaim, overwrite, delete) on either name can remove a live object of the other."
+          description: "journalctl -u 'vaultaire@*' | grep 'two registered backends share one store' names them. Until fixed, every stale-copy delete (demotion reclaim, overwrite, delete) on either name can remove a live object of the other."
 
       # Customers are reading rows that route to no driver.
       - alert: RoutingUnknownBackendReads

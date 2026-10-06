@@ -15,8 +15,8 @@
 # Nothing is billed and nothing but the stream guard is refused.
 #
 # Before flipping `egress_throttle` globally, watch the dry run:
-#   curl -s localhost:8000/metrics | grep vaultaire_egress_would_throttle_total
-#   journalctl -u vaultaire | grep "egress allowance spent"      (names the tenant, used, allowance, rate)
+#   curl -s localhost:8010/metrics | grep vaultaire_egress_would_throttle_total
+#   journalctl -u 'vaultaire@*' | grep "egress allowance spent"      (names the tenant, used, allowance, rate)
 # and exempt the tenants that must never be slowed (the synthetic-check
 # tenant, demos) with a per-tenant row, flag off, on /admin/flags.
 #
@@ -34,4 +34,4 @@ groups:
           severity: info
         annotations:
           summary: "{{ $value }} tenant(s) past their egress allowance are being rate-limited"
-          description: "Downloads of these tenants are paced until the allowance resets on the 1st (UTC); nothing is billed. journalctl -u vaultaire | grep 'egress allowance spent' names them; /admin/tenants/{id} shows used / allowance / override. Refusals by the stream guard: vaultaire_egress_throttle_rejected_total."
+          description: "Downloads of these tenants are paced until the allowance resets on the 1st (UTC); nothing is billed. journalctl -u 'vaultaire@*' | grep 'egress allowance spent' names them; /admin/tenants/{id} shows used / allowance / override. Refusals by the stream guard: vaultaire_egress_throttle_rejected_total."

@@ -24,7 +24,9 @@ Restart=always
 RestartSec=5
 LimitNOFILE=1048576
 # The engine drains HTTP, flushes the trackers and closes the DB on SIGTERM
-# (cmd/vaultaire/main.go); give a long upload that was still in flight time.
+# within its own shutdownTimeout (30 s, cmd/vaultaire/main.go); this is only
+# systemd's outer bound before SIGKILL. Long transfers get their time from
+# vaultaire-switch's drain (up to 10 min) before the stop.
 TimeoutStopSec=90
 KillMode=mixed
 

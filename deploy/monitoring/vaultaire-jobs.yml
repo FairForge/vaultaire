@@ -31,7 +31,7 @@
 #
 # Triage:
 #   curl -s -H "Authorization: Bearer <admin JWT>" https://stored.ge/api/v1/admin/jobs | jq .
-#   journalctl -u vaultaire | grep -E '"job run (failed|interrupted|completed)"'
+#   journalctl -u 'vaultaire@*' | grep -E '"job run (failed|interrupted|completed)"'
 #   POST /api/v1/admin/jobs/<job>/run     start one run now (202; 409 while one is running)
 groups:
   - name: vaultaire-jobs
@@ -43,7 +43,7 @@ groups:
           severity: warning
         annotations:
           summary: "Daily job {{ $labels.job_name }} has not succeeded in 36 hours"
-          description: "{{ $labels.job_name }} last succeeded {{ $value | humanizeDuration }} ago (a value near the age of the epoch means it has never succeeded). It is due once a day and retried hourly while it fails. GET /api/v1/admin/jobs shows the last outcome and error; journalctl -u vaultaire | grep 'job run'."
+          description: "{{ $labels.job_name }} last succeeded {{ $value | humanizeDuration }} ago (a value near the age of the epoch means it has never succeeded). It is due once a day and retried hourly while it fails. GET /api/v1/admin/jobs shows the last outcome and error; journalctl -u 'vaultaire@*' | grep 'job run'."
 
       - alert: PeriodicJobStale
         expr: (time() - vaultaire_job_last_success_timestamp_seconds{job_name=~"multipart_reaper|cdn_rollup|idempotency_cleanup|sts_cleanup|session_cleanup|bandwidth_alerts|access_log_delivery|account_export|vault_parity"}) > 3 * 3600
@@ -52,7 +52,7 @@ groups:
           severity: warning
         annotations:
           summary: "Periodic job {{ $labels.job_name }} has not succeeded in 3 hours"
-          description: "{{ $labels.job_name }} runs every hour (access_log_delivery every 5 minutes, account_export every minute) and last succeeded {{ $value | humanizeDuration }} ago. GET /api/v1/admin/jobs; journalctl -u vaultaire | grep 'job run failed'."
+          description: "{{ $labels.job_name }} runs every hour (access_log_delivery every 5 minutes, account_export every minute) and last succeeded {{ $value | humanizeDuration }} ago. GET /api/v1/admin/jobs; journalctl -u 'vaultaire@*' | grep 'job run failed'."
 
       - alert: JobFailing
         expr: increase(vaultaire_job_runs_total{outcome="error"}[6h]) >= 3
@@ -87,4 +87,4 @@ groups:
           severity: critical
         annotations:
           summary: "A customer object lost its bytes to a stale-copy delete ({{ $labels.source }})"
-          description: "The delete of a stale copy removed bytes a write of the same key had just stored: the object lists and HEADs but cannot be read. journalctl -u vaultaire | grep 'stale copy: the delete of a stale copy' gives tenant, bucket and key; the customer must upload the object again. Source {{ $labels.source }}: reclaim = the smart_demotion job, delete = DeleteObject on a demoted key, overwrite = a write that replaced an object on another backend."
+          description: "The delete of a stale copy removed bytes a write of the same key had just stored: the object lists and HEADs but cannot be read. journalctl -u 'vaultaire@*' | grep 'stale copy: the delete of a stale copy' gives tenant, bucket and key; the customer must upload the object again. Source {{ $labels.source }}: reclaim = the smart_demotion job, delete = DeleteObject on a demoted key, overwrite = a write that replaced an object on another backend."

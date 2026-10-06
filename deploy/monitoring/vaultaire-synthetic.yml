@@ -13,8 +13,8 @@
 # customer PUTs with every backend probe green. This rule set does.
 #
 # Manual triage when SyntheticCheckFailing fires:
-#   journalctl -u vaultaire | grep "synthetic customer check FAILED"   (names the op + status)
-#   curl -s localhost:8000/metrics | grep vaultaire_synthetic
+#   journalctl -u 'vaultaire@*' | grep "synthetic customer check FAILED"   (names the op + status)
+#   curl -s localhost:8010/metrics | grep vaultaire_synthetic
 #
 # RetentionJobStale lived here until WP-R13-3: it is JobStale{job_name="retention"}
 # in vaultaire-jobs.yml now, on a series that survives a restart.
@@ -28,7 +28,7 @@ groups:
           severity: critical
         annotations:
           summary: "Customer S3 path is failing (synthetic check)"
-          description: "The signed PUT/HEAD/GET/DELETE canary through the public endpoint has failed for 5 minutes. Backends may be green — this is the path customers take. journalctl -u vaultaire | grep 'synthetic customer check FAILED'."
+          description: "The signed PUT/HEAD/GET/DELETE canary through the public endpoint has failed for 5 minutes. Backends may be green — this is the path customers take. journalctl -u 'vaultaire@*' | grep 'synthetic customer check FAILED'."
 
       - alert: SyntheticCheckStale
         expr: (time() - vaultaire_synthetic_check_last_success_timestamp_seconds) > 15 * 60
