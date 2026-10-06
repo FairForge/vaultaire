@@ -1061,6 +1061,23 @@ func generateManagementPaths() map[string]*PathItem {
 					"500": errResp("`internal_error`"),
 				})),
 		},
+		"/api/v1/whoami": {
+			Get: &Operation{
+				Tags:    []string{"Management"},
+				Summary: "What this key is (SigV4)",
+				Description: "Signed with an S3 key pair like any S3 request (header or presigned SigV4), not a JWT: answers the tenant the key belongs to, the key id, " +
+					"whether it is the account's **primary** pair, a **scoped** key or a temporary **sts** token, its permissions, bucket scope, IP allowlist and expiry — never a secret. " +
+					"For an edge gateway or an app that holds only a customer's key and needs to partition per tenant (plan 42.7). The same gates as the S3 API: a revoked, rotated or expired key, " +
+					"a wrong signature, an address outside the key's allowlist or a suspended account are refused with the management error envelope. `Cache-Control: no-store`.",
+				OperationID: "WhoAmI",
+				Security:    sigv4(),
+				Responses: map[string]Response{
+					"200": jsonResp("The key", ref("WhoAmI")),
+					"401": errResp("`invalid_credentials` · `signature_mismatch` · `key_revoked` · `key_expired` · `request_time_skewed` · `presigned_url_expired`"),
+					"403": errResp("`ip_denied` · `account_suspended` · `reserved_tenant`"),
+				},
+			},
+		},
 		"/api/v1/manage/usage": {
 			Get: mgmt(jsonOp("Management", "Get tenant usage", "ManageGetUsage",
 				"Storage used and limit for the JWT's tenant plus the plan tier.",
@@ -1840,6 +1857,19 @@ func generateJSONSchemas() map[string]Schema {
 			"ip_allowlist": strArray("IP addresses or CIDR networks the key may be used from; validated and stored canonical"),
 			"expires_at":   dateTime("Absolute expiry; must be in the future"),
 		}),
+		"WhoAmI": object("What a SigV4-signed key is (GET /api/v1/whoami)", map[string]*Schema{
+			"object":       strEnum("", "whoami"),
+			"tenant_id":    str("The tenant the key belongs to"),
+			"key_id":       str("The access key id the request was signed with"),
+			"key_type":     strEnum("", "primary", "scoped", "sts"),
+			"key_name":     str("The key's name (empty for an STS token)"),
+			"permissions":  strArray("Operations the key may perform; `*` = all"),
+			"bucket_scope": strArray("Buckets the key is restricted to; empty = all"),
+			"ip_allowlist": strArray("Addresses / CIDRs the key may be used from; empty = any"),
+			"expires_at":   dateTime("When the key or token expires; null = never"),
+			"temporary":    boolean("true for an STS token"),
+			"request_id":   str(""),
+		}, "object", "tenant_id", "key_id", "key_type", "key_name", "permissions", "bucket_scope", "ip_allowlist", "expires_at", "temporary", "request_id"),
 		"Usage": object("", map[string]*Schema{
 			"object":        strEnum("", "usage"),
 			"tenant_id":     str(""),

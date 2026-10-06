@@ -157,6 +157,14 @@ Behaviour worth knowing before writing code against it:
   included. The preflight looks the bucket up by name. Use `s3.stored.ge` from a
   page for uploads above 100 MB (the `stored.ge` hostname is proxied and capped).
   The `/cdn` path's CORS (`cors_origins`, default `*`) is separate and unchanged.
+- **`GET /api/v1/whoami`** (2026-10-06): signed with an S3 key pair (SigV4,
+  header or presigned), not a JWT — answers the tenant the key belongs to, the
+  key id, whether it is the account's **primary** pair, a **scoped** key or a
+  temporary **sts** token, its permissions, bucket scope, IP allowlist and
+  expiry, never a secret. For an edge gateway or an app that holds only a
+  customer's key and needs to know the tenant. Refusals use the JSON error
+  envelope of the management API (401 `invalid_credentials` / `key_revoked` /
+  `key_expired`, 403 `ip_denied` / `account_suspended`).
 - **Encryption**: SSE-C works per request. SSE-S3 requires the deployment's
   master key, which production does not set today — without it a bucket's
   `sse_enabled` flag has no effect and objects are stored as sent. With the
