@@ -250,22 +250,44 @@ func TestGeyserGet_ETagChangeUnderTheReaderIsAnError(t *testing.T) {
 	assert.Contains(t, err.Error(), "changed")
 }
 
+// issuedCounter counts the requests the driver hands to its HTTP client —
+// the driver's side of the wire. The fake's own counter (rangeS3.gets) is
+// the server's side: a request the driver sent just before Close can reach
+// the httptest handler after Close has returned (the handler goroutine is
+// scheduled late, or reads a request already in the connection's buffer),
+// so it cannot tell "issued after Close" from "arrived after Close".
+type issuedCounter struct {
+	doer   *http.Client
+	issued int32
+}
+
+func (c *issuedCounter) Do(req *http.Request) (*http.Response, error) {
+	atomic.AddInt32(&c.issued, 1)
+	return c.doer.Do(req)
+}
+
 func TestGeyserGet_CloseStopsTheRangesNotYetStarted(t *testing.T) {
 	f := newRangeS3(64 << 20) // 64 ranges of 1 MiB
 	f.delay = 30 * time.Millisecond
 	d := newRangeGeyser(t, f, 4, 1<<20)
+	counter := &issuedCounter{doer: &http.Client{}}
+	d.client = s3.New(s3.Options{BaseEndpoint: aws.String(d.endpoint), Region: "us-west-2",
+		Credentials: credentials.NewStaticCredentialsProvider("test", "test", ""), UsePathStyle: true,
+		HTTPClient: counter})
 	rc, err := d.Get(context.Background(), "arc", "x.bin")
 	require.NoError(t, err)
 	buf := make([]byte, 1<<20)
 	_, err = io.ReadFull(rc, buf) // the probe's bytes
 	require.NoError(t, err)
 	require.NoError(t, rc.Close())
-	started := atomic.LoadInt32(&f.gets)
-	assert.Less(t, started, int32(16), "a reader that left after one range did not get 64 ranges fetched for it (%d started)", started)
+	// Close waits for every fetcher (wg.Wait), so what the driver has issued
+	// by now is final: this is the number to hold it to.
+	issued := atomic.LoadInt32(&counter.issued)
+	assert.Less(t, issued, int32(16), "a reader that left after one range did not get 64 ranges fetched for it (%d issued)", issued)
 	assert.Eventually(t, func() bool { return atomic.LoadInt32(&f.inFlight) == 0 }, 2*time.Second, 10*time.Millisecond,
 		"every in-flight range request ended with the reader")
-	time.Sleep(100 * time.Millisecond)
-	assert.Equal(t, started, atomic.LoadInt32(&f.gets), "nothing started after Close")
+	assert.Equal(t, issued, atomic.LoadInt32(&counter.issued), "nothing issued after Close")
+	assert.LessOrEqual(t, atomic.LoadInt32(&f.gets), issued, "the backend saw no request the driver did not issue before Close")
 }
 
 func TestGeyserGet_ShortRangeIsAnErrorNotSilence(t *testing.T) {
