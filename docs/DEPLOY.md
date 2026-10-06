@@ -67,10 +67,11 @@ deploy  scp binary + internal/database/migrations/ to /tmp on the host, then ove
         1. migrate   for f in $(ls /tmp/vaultaire-migrations/*.sql | sort); do
                         psql -w -v ON_ERROR_STOP=1 -h 127.0.0.1 -U vaultaire -d vaultaire -f "$f" </dev/null
                      done
-        2. keep      cp bin/vaultaire bin/vaultaire.prev
-        3. swap      systemctl stop vaultaire; mv /tmp/vaultaire-linux bin/vaultaire; chmod +x; systemctl start vaultaire
-        4. gate      sleep 15; curl -sf --retry 5 http://localhost:8000/health/live
-        5. rollback  on a failed gate: stop, restore vaultaire.prev, start, re-check, exit 1
+        2. swap      sudo /usr/local/sbin/vaultaire-switch deploy /tmp/vaultaire-linux
+                     = install into the idle slot, start it, wait for /health/live,
+                       switch HAProxy to it, drain and stop the old slot
+        3. rollback  manual: sudo /usr/local/sbin/vaultaire-switch rollback
+                     (the previous build still sits in the other slot)
 ```
 
 Points that matter:
@@ -81,15 +82,78 @@ Points that matter:
   missing password fail instead of prompting — a prompt once ate the rest of
   the script as password attempts and skipped the binary swap while the job
   still exited 0. `ON_ERROR_STOP` makes a broken migration fail the deploy
-  before the swap. Schema and runner rules: `docs/DATABASE.md`.
+  before the swap. Schema and runner rules: `docs/DATABASE.md`. During the
+  drain window both builds run against the migrated schema, so a migration
+  must stay additive (it always had to be: a rollback runs the old binary on
+  the new schema too).
 - **The gate is liveness, not readiness.** `/health/live` answers "does the
   new process boot and serve HTTP". `/health` reflects backend probes, which a
   rollback cannot fix — the old binary would report the same.
-- **Rollback is automatic** to `vaultaire.prev`, and the job exits 1 so the
-  failure is visible. If the rollback binary is unhealthy too, the log says
-  "manual intervention required".
+- **A dead-on-arrival build never takes traffic.** The switch script starts
+  it in the idle slot and only moves HAProxy once it answers; otherwise it
+  stops the slot, prints the journal and exits 1 — the job fails loudly and
+  the active slot was never touched.
 - The deploy runs under the GitHub `production` environment; its SSH key, host
   and user are environment secrets deployable only from `main`.
+- **Docs-only pushes do not deploy** (`paths-ignore` on `deploy.yml`, 2026-10-06):
+  `docs/`, `.private/`, `bench-results/`, `deploy/`, `cmd/tools/`, `tests/`,
+  the `CLAUDE.md` files, `*_README.md`, lint/pre-commit config. The
+  `go:embed`ed `internal/api/*.md` and the dashboard templates are NOT ignored.
+  PRs merge through the **merge queue** (`merge_group` in `ci.yml`, the rule
+  on the main ruleset): `gh pr merge --auto` enqueues; the PR is tested on the
+  merge branch and squash-merged there, so strict status checks hold without
+  every merge forcing every open PR to rebase.
+
+### Zero-downtime deploys (2026-10-06)
+
+Until 2026-10-06 a deploy was `systemctl stop; mv; systemctl start`: every
+merge to `main` — docs included — dropped the service for ~15 s and every
+upload in flight with it. Now the box runs **two slots**:
+
+```
+vaultaire@8000  "blue"    /opt/vaultaire/bin/vaultaire-8000     one of them active,
+vaultaire@8001  "green"   /opt/vaultaire/bin/vaultaire-8001     the other stopped
+/opt/vaultaire/ACTIVE_PORT        which one (the switch script's state)
+/opt/vaultaire/bin/vaultaire      symlink to the active slot's binary
+```
+
+- **Unit**: `deploy/systemd/vaultaire@.service` → `/etc/systemd/system/vaultaire@.service`
+  (`ExecStart=/bin/sh -c 'PORT=%i exec /opt/vaultaire/bin/vaultaire-%i'` — the
+  slot's port must win over the `PORT` in `.env`, and `EnvironmentFile=`
+  overrides `Environment=`). Exactly one slot is enabled at boot; the switch
+  script enables the active one and disables the other. The old single
+  `vaultaire.service` is stopped and disabled.
+- **HAProxy**: every backend (`s3_backend`, `api_backend`, `dashboard_backend`)
+  lists `server blue 127.0.0.1:8000 …` and `server green 127.0.0.1:8001 …`, the
+  idle one with `disabled`; a `frontend metrics_internal` on `127.0.0.1:8010`
+  routes to `api_backend` so Prometheus (`targets: ['localhost:8010']`) always
+  scrapes the active slot, whichever it is. The admin socket
+  (`/run/haproxy/admin.sock`, level admin) is what the script drives.
+- **The switch** (`deploy/scripts/vaultaire-switch`, installed at
+  `/usr/local/sbin/vaultaire-switch`, root:root 0755; the deploy user may run
+  it through `deploy/sudoers/vaultaire-deploy`): `deploy <binary>` installs
+  into the idle slot, `systemctl restart vaultaire@<idle>`, waits up to 90 s
+  for `/health/live`, then `set server <be>/<new> state ready` + `health up`
+  on the three backends, waits for HAProxy to report it UP, sets the old
+  server to `drain` (no new connections, open ones finish), rewrites
+  `haproxy.cfg` so a reload lands in the same state (validated with
+  `haproxy -c` first; a backup is `haproxy.cfg.bak-switch`), writes
+  `ACTIVE_PORT`, moves the symlink, flips boot enablement, waits up to 10 min
+  for the old slot's sessions to reach 0, sets it `maint` and stops it.
+  `rollback` is the same switch towards the idle slot, whose binary is the
+  previous build. `status` prints both slots and what HAProxy says.
+- **Why one active slot, not two**: the pending-TOTP secret of an MFA enrolment
+  and the credential cache are per process, the egress month counter is one
+  per process, and the synthetic check would run twice — none of that is safe
+  with two instances taking traffic. During the drain window the old slot only
+  finishes what it already had.
+- **Cutover record (2026-10-06)**: the template, script and sudoers installed;
+  `vaultaire-8000` and `vaultaire-8001` copied from the running binary;
+  HAProxy backends and the metrics frontend added and reloaded; Prometheus
+  target moved to `:8010`; `vaultaire-switch deploy` run once with the current
+  build — it started `vaultaire@8001`, switched, drained and stopped the legacy
+  `vaultaire.service` (which held `:8000`); `/version` through `stored.ge`
+  unchanged throughout.
 
 ### CI (`ci.yml`)
 

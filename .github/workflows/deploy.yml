@@ -182,33 +182,13 @@ jobs:
             PGPASSWORD=$(grep DB_PASSWORD /opt/vaultaire/configs/.env | cut -d= -f2) \
               psql -w -v ON_ERROR_STOP=1 -h 127.0.0.1 -U vaultaire -d vaultaire -f "$f" < /dev/null
           done
-          # Keep the previous binary for one-command rollback.
-          cp -f /opt/vaultaire/bin/vaultaire /opt/vaultaire/bin/vaultaire.prev 2>/dev/null || true
-          sudo /bin/systemctl stop vaultaire
-          sudo /bin/mv /tmp/vaultaire-linux /opt/vaultaire/bin/vaultaire
-          sudo /bin/chmod +x /opt/vaultaire/bin/vaultaire
-          sudo /bin/systemctl start vaultaire
-          sleep 15
-          # Gate on LIVENESS (/health/live), not readiness (/health): /health
-          # returns 503 when an external backend is unreachable, which a
-          # rollback cannot fix — the old binary would 503 too. /health/live
-          # answers the only question a binary swap can affect: does the new
-          # process boot and serve HTTP.
-          if ! curl -sf --retry 5 --retry-delay 2 --retry-connrefused http://localhost:8000/health/live; then
-            echo "Health check FAILED — rolling back to previous binary"
-            # Rollback reuses exactly the NOPASSWD'd commands (systemctl,
-            # mv /tmp/vaultaire-linux, chmod): stage .prev via /tmp because
-            # 'sudo cp' is not in the sudoers allowlist.
-            sudo /bin/systemctl stop vaultaire
-            cp -f /opt/vaultaire/bin/vaultaire.prev /tmp/vaultaire-linux
-            sudo /bin/mv /tmp/vaultaire-linux /opt/vaultaire/bin/vaultaire
-            sudo /bin/chmod +x /opt/vaultaire/bin/vaultaire
-            sudo /bin/systemctl start vaultaire
-            sleep 5
-            curl -sf http://localhost:8000/health/live \
-              && echo "Rollback binary is serving" \
-              || echo "Rollback ALSO unhealthy — manual intervention required"
-            exit 1
-          fi
           rm -rf /tmp/vaultaire-migrations
+          # Zero-downtime swap (2026-10-06, docs/DEPLOY.md "Zero-downtime deploys"):
+          # the new binary goes into the IDLE slot (vaultaire@8000 / vaultaire@8001),
+          # is started, must answer /health/live, then HAProxy is switched to it and
+          # the old slot drained and stopped. If the new binary never becomes live
+          # the script exits 1 with its journal and the active slot is untouched —
+          # there is nothing to roll back. `sudo vaultaire-switch rollback` is the
+          # manual lever back to the previous build (it still sits in the other slot).
+          sudo /usr/local/sbin/vaultaire-switch deploy /tmp/vaultaire-linux
           EOF
