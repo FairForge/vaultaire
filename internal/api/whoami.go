@@ -12,8 +12,15 @@ package api
 // Authentication is the S3 path's (header or presigned SigV4, the same
 // LookupCredential, the same expiry / IP allowlist / suspension gates, the
 // same failure metrics), the envelope is the management API's JSON.
+//
+// The key id reported is the one the chosen auth path VERIFIED (post-merge
+// review of #604: it was auth.AccessKeyFromRequest, which prefers the
+// Authorization header — a valid presigned URL sent with a junk header named
+// another key's id, name and type), and a request carrying both mechanisms
+// is refused, as AWS refuses it.
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -28,8 +35,11 @@ import (
 )
 
 // registerWhoamiRoute mounts the call on the production router, before the
-// S3 catch-all (server.go). GET only.
+// S3 catch-all (server.go). GET only. The JSON API limiter (the one every
+// /api/v1 JSON group shares, 100/min per tenant) applies once the signature
+// has proved the tenant: handleWhoami runs it after authentication.
 func (s *Server) registerWhoamiRoute() {
+	s.jsonAPIMiddleware()
 	s.router.Get("/api/v1/whoami", s.handleWhoami)
 }
 
@@ -47,12 +57,34 @@ type whoamiResponse struct {
 	RequestID   string   `json:"request_id"`
 }
 
+// hasPresignQueryAuth: the query carries presigned SigV4 parameters.
+func hasPresignQueryAuth(r *http.Request) bool {
+	q := r.URL.Query()
+	return q.Has("X-Amz-Algorithm") || q.Has("X-Amz-Credential") || q.Has("X-Amz-Signature")
+}
+
 func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
-	reqID := generateRequestID()
+	// The body's request_id is the response's X-Request-Id (requestIDMiddleware
+	// sets it; minted here only when the handler is mounted bare).
+	reqID := getRequestID(w)
+	if reqID == "" {
+		reqID = generateRequestID()
+		w.Header().Set("X-Request-Id", reqID)
+	}
 	w.Header().Set("Cache-Control", "no-store")
+
+	// One authentication mechanism per request (AWS's rule): refused before
+	// either is read, so an unverified credential can never stand in for the
+	// verified one.
+	if r.Header.Get("Authorization") != "" && hasPresignQueryAuth(r) {
+		writeManagementError(w, ErrTypeInvalidRequest, "invalid_request",
+			"only one authentication mechanism is allowed: an Authorization header or presigned query parameters, not both", "")
+		return
+	}
 
 	var (
 		tenantID string
+		keyID    string // the access key id the chosen auth path verified
 		scope    *auth.KeyScope
 		err      error
 	)
@@ -64,17 +96,20 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 			tenantID = "test"
 		}
 		scope = &auth.KeyScope{Permissions: []string{"*"}}
+		keyID = attemptedAccessKey(r)
 	case isPresignedRequest(r):
 		tenantID, scope, err = s.verifyPresignedURL(r)
 		if err != nil {
 			reason, known := presignFailureReason(err)
 			if known {
-				known = s.accessKeyExists(r.Context(), auth.AccessKeyFromRequest(r))
+				known = s.accessKeyExists(r.Context(), attemptedAccessKey(r))
 			}
 			recordAuthFailure(r, reason, known)
-			writeManagementError(w, ErrTypeAuthentication, whoamiAuthCode(err), "the request is not signed with a valid key", reqID)
+			writeManagementError(w, ErrTypeAuthentication, whoamiAuthCode(err), "the request is not signed with a valid key", "")
 			return
 		}
+		// verifyPresignedURL looked up and verified X-Amz-Credential's id.
+		keyID = auth.PresignedAccessKey(r)
 	default:
 		a := auth.NewAuth(s.db, s.logger)
 		a.MissingSignedHeader = s.missingSignedHeaderHint
@@ -82,34 +117,46 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			reason, known := authFailureReason(err)
 			recordAuthFailure(r, reason, known)
-			writeManagementError(w, ErrTypeAuthentication, whoamiAuthCode(err), "the request is not signed with a valid key", reqID)
+			writeManagementError(w, ErrTypeAuthentication, whoamiAuthCode(err), "the request is not signed with a valid key", "")
 			return
 		}
+		// ValidateRequest looked up and verified the header Credential's id.
+		keyID = auth.HeaderAccessKey(r)
 	}
 
 	if tenantID != "" && engine.IsReservedTenantID(tenantID) {
-		writeManagementError(w, ErrTypePermission, "reserved_tenant", "the credential resolves to a reserved tenant id", reqID)
+		writeManagementError(w, ErrTypePermission, "reserved_tenant", "the credential resolves to a reserved tenant id", "")
 		return
 	}
 	if scope != nil {
 		if auth.IsKeyExpired(scope.ExpiresAt) {
 			recordAuthFailure(r, "expired", true)
 			writeManagementError(w, ErrTypeAuthentication, "key_expired",
-				"this access key expired at "+scope.ExpiresAt.UTC().Format(time.RFC3339), reqID)
+				"this access key expired at "+scope.ExpiresAt.UTC().Format(time.RFC3339), "")
 			return
 		}
 		if !auth.CheckIPAllowlist(scope.IPAllowlist, extractClientIP(r)) {
 			recordAuthFailure(r, "ip_denied", true)
-			writeManagementError(w, ErrTypePermission, "ip_denied", "this key is restricted by IP address", reqID)
+			writeManagementError(w, ErrTypePermission, "ip_denied", "this key is restricted by IP address", "")
 			return
 		}
 	}
 	if s.db != nil && !s.testMode && isTenantSuspended(r.Context(), s.db, tenantID) {
-		writeManagementError(w, ErrTypePermission, "account_suspended", "this account is suspended", reqID)
+		writeManagementError(w, ErrTypePermission, "account_suspended", "this account is suspended", "")
 		return
 	}
 
-	keyID := auth.AccessKeyFromRequest(r)
+	// The JSON API limiter, keyed on the tenant the signature proved.
+	rl, _ := s.jsonAPIMiddleware()
+	ctx := context.WithValue(r.Context(), tenantIDKey, tenantID)
+	rl.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.writeWhoami(w, r, tenantID, keyID, scope, reqID)
+	})).ServeHTTP(w, r.WithContext(ctx))
+}
+
+// writeWhoami answers 200 for a verified key. keyID is the id the auth path
+// verified; only that id under that tenant is looked up.
+func (s *Server) writeWhoami(w http.ResponseWriter, r *http.Request, tenantID, keyID string, scope *auth.KeyScope, reqID string) {
 	resp := whoamiResponse{
 		Object:      "whoami",
 		TenantID:    tenantID,
@@ -167,6 +214,10 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 // whoamiAuthCode: the management-envelope code for an S3 auth failure.
 func whoamiAuthCode(err error) string {
 	switch {
+	case errors.Is(err, auth.ErrSTSTokenExpired):
+		// First: the presigned path carries it as ExpiredToken's code, the
+		// header path as plain text — both are an expired key (OpenAPI).
+		return "key_expired"
 	case errors.Is(err, auth.ErrAccessKeyRevoked):
 		return "key_revoked"
 	case errors.Is(err, auth.ErrSignatureMismatch):

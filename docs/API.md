@@ -162,9 +162,13 @@ Behaviour worth knowing before writing code against it:
   key id, whether it is the account's **primary** pair, a **scoped** key or a
   temporary **sts** token, its permissions, bucket scope, IP allowlist and
   expiry, never a secret. For an edge gateway or an app that holds only a
-  customer's key and needs to know the tenant. Refusals use the JSON error
-  envelope of the management API (401 `invalid_credentials` / `key_revoked` /
-  `key_expired`, 403 `ip_denied` / `account_suspended`).
+  customer's key and needs to know the tenant. `key_id` is the key the
+  signature was verified with. Refusals use the JSON error envelope of the
+  management API (400 `invalid_request` when a request carries both an
+  `Authorization` header and presigned `X-Amz-*` query parameters — one
+  mechanism per request, as on AWS; 401 `invalid_credentials` / `key_revoked` /
+  `key_expired` — an expired STS token included, on both paths; 403
+  `ip_denied` / `account_suspended`). Rate-limited per tenant like the JSON API.
 - **Encryption**: SSE-C works per request. SSE-S3 requires the deployment's
   master key, which production does not set today — without it a bucket's
   `sse_enabled` flag has no effect and objects are stored as sent. With the

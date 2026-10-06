@@ -143,6 +143,10 @@ type Credential struct {
 // someone still holding the old pair.
 var ErrAccessKeyRevoked = errors.New("access key revoked")
 
+// ErrSTSTokenExpired: the presented id is an STS token past its expiry. The
+// text is the one callers matched before it was typed ("expired STS token").
+var ErrSTSTokenExpired = errors.New("expired STS token")
+
 // LookupCredential resolves an access key to its secret, tenant and scope.
 // It is THE credential lookup — the S3 header-auth path, the presigned-URL
 // verifier and STS all go through it (R5's invariant: one lookup, one
@@ -236,7 +240,7 @@ func (a *Auth) LookupCredential(ctx context.Context, accessKey string) (*Credent
 		case err == nil:
 			if time.Now().After(stsExpiresAt) {
 				a.logger.Debug("expired STS token", zap.String("tenant_id", tenantID))
-				return nil, fmt.Errorf("expired STS token")
+				return nil, ErrSTSTokenExpired
 			}
 			if !parentFound || parentRevoked || (parentExpiresAt.Valid && time.Now().After(parentExpiresAt.Time)) {
 				a.logger.Debug("STS token of a dead parent key refused", zap.String("tenant_id", tenantID),
