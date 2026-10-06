@@ -600,7 +600,7 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 	// CreateMultipartUpload is honoured exactly like PUT's (R10-24: it used
 	// to be dropped, so a GLACIER multipart landed downstairs). The floor
 	// follows the class.
-	tierClass := resolvePutStorageClass(r.Context(), s.db, s.engine, t.ID, bucket, requestedClass)
+	tierClass := resolvePutStorageClass(r.Context(), s.db, s.engine, syncPlacementGate(s.flags), t.ID, bucket, requestedClass)
 	floor := usage.FloorOf(tierClass)
 	quotaOn := s.quotaManager != nil
 	var reservedBytes int64

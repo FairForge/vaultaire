@@ -25,6 +25,7 @@ import (
 //	idrive (+ every idrive-<region>), lyve, geyser, r2   t-<tenant>/…  in one fixed bucket
 //	s3compat, quotaless                                  <root>/<tenant>_<bucket>/…
 //	local                                                <base>/<tenant>_<bucket>/…
+//	sync (WebDAVDriver, webdav.go)                       <root>/t-<tenant>/… (PROPFIND walk)
 //
 // Who cannot: the plain `s3` driver (a container is a real bucket — nothing to
 // list by prefix) and permafrost (a folder tree on fifteen accounts; its List

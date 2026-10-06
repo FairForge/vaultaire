@@ -144,7 +144,7 @@ func (g *generatedObjectWriter) writeOpts(ctx context.Context, tenantID, bucket,
 	container := t.NamespaceContainer(bucket)
 	tctx := common.WithTenantID(ctx, tenantID)
 
-	class := resolvePutStorageClass(tctx, g.db, g.eng, tenantID, bucket, "")
+	class := resolvePutStorageClass(tctx, g.db, g.eng, nil, tenantID, bucket, "")
 	floor := usage.FloorOf(class)
 	overQuota := false
 	if g.quota != nil {

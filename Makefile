@@ -129,7 +129,7 @@ clean:
 	rm -f permafrost-parallel permafrost-parallel-linux permafrost-stress permafrost-stress-linux
 	rm -f permafrost-v2 permafrost-v2-linux permafrost-v3 permafrost-v3-linux
 	rm -f pixeldrain-bench pixeldrain-bench-linux pipeline-bench quotaless-bench-v2 quotaless-bench-v2-linux
-	rm -f uloz-bench uloz-bench-linux validate validate-linux
+	rm -f uloz-bench uloz-bench-linux validate validate-linux webdav-bench webdav-bench-linux
 	rm -f *.bin *.test test*.txt test_output.log downloaded.txt cache_benchmark_results.txt compress.txt
 	rm -rf bench-results/quotaless-*/
 	find . -name __pycache__ -type d -prune -exec rm -rf {} +

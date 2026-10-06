@@ -21,6 +21,8 @@ import (
 //
 // Probes are now authenticated where we can sign:
 //   - idrive / geyser → the driver's own HealthCheck (a signed HeadBucket)
+//   - sync            → the WebDAV driver's HealthCheck (an authenticated
+//     PROPFIND: a wrong bridge password is a 401)
 //   - lyve            → console RSCustomerDetails with the root key
 //     (catches auth/suspension; one 403 retried, see LyveConsoleClient)
 //   - anything else   → TCP dial (backend-agnostic fallback)
@@ -100,6 +102,7 @@ func buildBackendProbes(getenv func(string) string, eng driverChecker) []backend
 		{"geyser", "GEYSER_ACCESS_KEY"},
 		{"r2", "R2_ACCESS_KEY"},
 		{"permafrost", "TENANT_1_ID"},
+		{"sync", "SYNC_WEBDAV_PASSWORD"},
 	} {
 		if (d.envKey != "" && getenv(d.envKey) == "") || !registered[d.name] {
 			continue

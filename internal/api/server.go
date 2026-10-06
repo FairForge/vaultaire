@@ -186,13 +186,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	//              the chunked/dedup PUT path (reads unaffected).
 	s.flags = flags.New(s.db, logger)
 	audit.SetLogger(logger)
-	s.flags.Register(flagSignups, signupsDefaultFromEnv())
-	s.flags.Register(flagChunking, true)
-	s.flags.Register(flagSmartDemotion, false)
-	s.flags.Register(flagQuotaCheckout, false)
-	s.flags.Register(flagHouseOverview, false)
-	s.flags.Register(flagEgressThrottle, false)
-	s.flags.Register(flagVaultParity, false)
+	registerFlags(s.flags)
 	if err := s.flags.Refresh(context.Background()); err != nil {
 		logger.Warn("initial feature flag refresh failed — serving in-code defaults until the background refresh succeeds",
 			zap.Error(err))

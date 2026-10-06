@@ -93,6 +93,25 @@ func TestBuildBackendProbes_WasabiUsesSignedDriverCheck(t *testing.T) {
 	}
 }
 
+// The Sync.com WebDAV bridge gets the driver's authenticated PROPFIND (a
+// wrong password is a 401), gated on its password like the others on their
+// key — never a TCP dial, which a running bridge with a stale password passes.
+func TestBuildBackendProbes_SyncUsesAuthenticatedDriverCheck(t *testing.T) {
+	eng := &fakeDriverChecker{drivers: map[string]error{"sync": nil}}
+	got := buildBackendProbes(envOf(map[string]string{"SYNC_WEBDAV_PASSWORD": "pw"}), eng)
+	c := findCheck(t, got, "sync")
+	require.NotNil(t, c.probe, "sync must get an authenticated probe")
+	require.NoError(t, c.probe(context.Background()))
+	assert.Equal(t, []string{"sync"}, eng.calls)
+
+	for _, c := range buildBackendProbes(envOf(nil), &fakeDriverChecker{drivers: map[string]error{"sync": nil}}) {
+		assert.NotEqual(t, "sync", c.name, "sync is probed only when SYNC_WEBDAV_PASSWORD is set")
+	}
+	for _, c := range buildBackendProbes(envOf(map[string]string{"SYNC_WEBDAV_PASSWORD": "pw"}), &fakeDriverChecker{drivers: map[string]error{}}) {
+		assert.NotEqual(t, "sync", c.name, "a driver that failed to register is not probed")
+	}
+}
+
 func TestBuildBackendProbes_GeyserUsesSignedDriverCheck(t *testing.T) {
 	eng := &fakeDriverChecker{drivers: map[string]error{"geyser": errors.New("403 Forbidden")}}
 	env := map[string]string{"GEYSER_ACCESS_KEY": "ak", "GEYSER_SECRET_KEY": "sk"}

@@ -117,6 +117,8 @@ cmd/tools/geyser-smoke/
 /lighthouse-bench
 /onedrive-bench
 /onedrive-bench-linux
+/webdav-bench
+/webdav-bench-linux
 /permafrost-benchmark
 /permafrost-benchmark-linux
 /permafrost-fleet

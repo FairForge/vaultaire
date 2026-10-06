@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Vaultaire is a universal storage orchestration engine providing a unified S3-compatible API across multiple storage backends (local, iDrive e2 (primary, per-region), Seagate Lyve Cloud, Geyser (tape), Cloudflare R2 (public buckets only), OneDrive fleet (permafrost, internal), Quotaless/S3-compat (dormant)). It is the core of FairForge's commercial product stored.ge — prices live in `internal/api/landing/prices.json`.
+Vaultaire is a universal storage orchestration engine providing a unified S3-compatible API across multiple storage backends (local, iDrive e2 (primary, per-region), Seagate Lyve Cloud, Geyser (tape), Cloudflare R2 (public buckets only), OneDrive fleet (permafrost, internal), Sync.com via its encrypted WebDAV bridge (`sync`, target-only, flag-gated; generic WebDAV driver), Quotaless/S3-compat (dormant)). It is the core of FairForge's commercial product stored.ge — prices live in `internal/api/landing/prices.json`.
 
 **Language**: Go 1.25 | **Database**: PostgreSQL 15+ | **Router**: chi/v5 | **Logging**: Uber Zap
 
@@ -73,14 +73,14 @@ make fmt                  # go fmt + gofmt -s -w
 ```
 API Layer (internal/api)      S3 protocol translation, auth middleware, HTTP handlers
 Engine Layer (internal/engine) Backend orchestration, breaker-based failover, storage-class placement, smart demotion (flag-gated); the tiering/caching/ML/cost paths are inert (WP-R6-4)
-Driver Layer (internal/drivers) Storage provider implementations (local, s3, lyve, quotaless, onedrive, geyser, idrive, r2)
+Driver Layer (internal/drivers) Storage provider implementations (local, s3, lyve, quotaless, onedrive, geyser, idrive, r2, wasabi, webdav)
 ```
 
 ### Entry Point
 
 `cmd/vaultaire` is the only product binary; everything under `cmd/tools/` is an operator probe or benchmark (table in `cmd/tools/README.md`), never linked into the product (`go list -deps ./cmd/vaultaire`) and excluded from the Security workflow's gosec run.
 
-`cmd/vaultaire/main.go` — initializes drivers from environment variables, opens PostgreSQL (optional — the DB handle is opened lazily and never pinged at boot (R9-06 / WP-R9-4): a dead Postgres still logs "connected" and every DB call then fails), starts the HTTP server. Storage mode: `STORAGE_MODE`, else auto-detected iDrive > Wasabi > Quotaless > S3 > Geyser > local (`config.DetectStorageMode`; Lyve, R2 and permafrost are registered when their env vars are set but never auto-selected as primary). A `STORAGE_MODE` naming an unregistered driver is a fatal boot error. Prod runs `STORAGE_MODE=idrive` again since 2026-10-04 15:08 UTC (the new reseller account; the Wasabi interim of 2026-10-03 lasted one day — the `wasabi` driver stays registered and dormant).
+`cmd/vaultaire/main.go` — initializes drivers from environment variables, opens PostgreSQL (optional — the DB handle is opened lazily and never pinged at boot (R9-06 / WP-R9-4): a dead Postgres still logs "connected" and every DB call then fails), starts the HTTP server. Storage mode: `STORAGE_MODE`, else auto-detected iDrive > Wasabi > Quotaless > S3 > Geyser > local (`config.DetectStorageMode`; Lyve, R2, permafrost and sync are registered when their env vars are set but never auto-selected as primary; `STORAGE_MODE=sync` is refused at boot). A `STORAGE_MODE` naming an unregistered driver is a fatal boot error. Prod runs `STORAGE_MODE=idrive` again since 2026-10-04 15:08 UTC (the new reseller account; the Wasabi interim of 2026-10-03 lasted one day — the `wasabi` driver stays registered and dormant).
 
 ### Dual Terminology
 
@@ -213,6 +213,7 @@ GitHub Actions Deploy (`.github/workflows/deploy.yml`):
 | `WASABI_ACCESS_KEY`, `WASABI_SECRET_KEY`, `WASABI_REGION`, `WASABI_ENDPOINT`, `WASABI_BUCKET` | region `us-west-1`, endpoint `https://s3.<region>.wasabisys.com`, bucket `vaultaire` | **Interim Standard-tier primary** (owner decision 2026-10-03: the iDrive prod key answers 403 on object calls while the account is repaired; the partner account is free). The pair registers the `wasabi` driver — the fixed-bucket driver (`internal/drivers/wasabi.go` → `NewFixedBucketS3Driver`, same `t-<tenant>/…` keys as iDrive) — creates the bucket in the region at boot if absent, and probes it with a signed HeadBucket. It becomes the primary only with `STORAGE_MODE=wasabi` (auto-detect still prefers an iDrive pair). STANDARD is no longer pinned to `idrive`: it is the primary's class (`engine.ResolveStorageClass`), so every Standard PUT follows the switch while rows already on iDrive stay readable (keep `IDRIVE_*` set). Wasabi bills a 90-day minimum per object on a paid account; the dashboard costs it at list ($7.99/TB) and lists it as subsidized |
 | `R2_ACCOUNT_ID`, `R2_ACCESS_KEY`, `R2_SECRET_KEY` | — | Cloudflare R2 S3 credentials. Registers the `r2` driver — **public buckets / CDN origin only, never a tier**: public-read buckets resolve to the internal `PUBLIC` storage class → R2 (`api.resolvePutStorageClass`); no other placement touches it |
 | `R2_JURISDICTION`, `R2_BUCKET` | default, `vaultaire-public` | R2 jurisdiction endpoint (`default`\|`eu`\|`us`\|`fedramp`; `us` endpoint fails TLS as of 2026-09-24) and the single fixed bucket public objects live in (tenant-prefixed keys) |
+| `SYNC_WEBDAV_PASSWORD`, `SYNC_WEBDAV_URL`, `SYNC_WEBDAV_USER`, `SYNC_WEBDAV_ROOT` | password: — (required); `http://127.0.0.1:4918`, `sync`, `vaultaire` | Sync.com's encrypted WebDAV bridge (`sync-webdav`, runs on the box, localhost only). The password (the bridge's generated one, `sync-webdav credentials`) registers the `sync` driver (`internal/drivers/webdav.go`, a generic WebDAV driver) and its authenticated PROPFIND probe. **Target-only, never the primary** (`STORAGE_MODE=sync` is a boot Fatal; never a failover destination): objects land there only for a bucket with `tier_preference = 'sync'` (operator-set) of a tenant with the `sync_backend` flag (default off, per tenant). Sync's terms forbid reselling the service without its written consent — customer data only with that consent; our own data is fine. Ops manual + systemd unit: `internal/drivers/webdav_README.md` |
 | `TENANT_N_ID`, `TENANT_N_CLIENT_ID`, `TENANT_N_SECRET`, `TENANT_N_USER` | — | OneDrive fleet accounts, N=1..15 (`NewOneDriveFleetDriver`). `TENANT_1_ID` set = the `permafrost` driver is registered and probed. **Never reorder** the N slots — placement is keyed on them; see `internal/drivers/onedrive_README.md` |
 | `ENCRYPTION_MASTER_KEY` | — | SSE-S3 master key (64 hex chars = 32 bytes). Absent = encryption disabled |
 | `MULTIPART_MAX_UPLOAD_BYTES` | 53687091200 (50 GiB) | Per-upload in-flight byte cap for multipart parts (0 = unlimited) |

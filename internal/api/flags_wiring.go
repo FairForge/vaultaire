@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"github.com/FairForge/vaultaire/internal/dashboard/handlers"
+	"github.com/FairForge/vaultaire/internal/flags"
 )
 
 // Day-one feature flags (1.13 live-iteration kit). Adding a flag is a key
@@ -53,7 +54,37 @@ const (
 	// is rebuilt from them. Default OFF, per tenant first. Checked per
 	// tenant in VaultParity.RunOnce and VaultParity.Open.
 	flagVaultParity = "vault_parity"
+
+	// flagSyncBackend lets a tenant's buckets whose tier_preference is
+	// `sync` (set by an operator; no customer-facing control offers it)
+	// place their objects on the Sync.com WebDAV bridge ("sync" driver).
+	// Default OFF and never a global row: Sync's terms forbid reselling the
+	// service without its written consent, so customer data lands there
+	// only for tenants named one by one (our own, or with that consent).
+	// Checked in resolvePutStorageClass via syncPlacementGate.
+	flagSyncBackend = "sync_backend"
 )
+
+// registerFlags registers every flag with its in-code default.
+func registerFlags(fl *flags.Service) {
+	fl.Register(flagSignups, signupsDefaultFromEnv())
+	fl.Register(flagChunking, true)
+	fl.Register(flagSmartDemotion, false)
+	fl.Register(flagQuotaCheckout, false)
+	fl.Register(flagHouseOverview, false)
+	fl.Register(flagEgressThrottle, false)
+	fl.Register(flagVaultParity, false)
+	fl.Register(flagSyncBackend, false)
+}
+
+// syncPlacementGate is resolvePutStorageClass's `sync_backend` check; nil
+// (no flag service) = never.
+func syncPlacementGate(fl *flags.Service) func(tenantID string) bool {
+	if fl == nil {
+		return nil
+	}
+	return func(tenantID string) bool { return fl.Enabled(flagSyncBackend, tenantID) }
+}
 
 // signupsDefaultFromEnv is the `signups` flag's in-code default: the
 // SIGNUPS_ENABLED env var (unset or unparsable = enabled, matching the
