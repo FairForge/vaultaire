@@ -919,20 +919,31 @@ func TestEgress_ShutdownRecordsBytesOfResponsesStillInFlight(t *testing.T) {
 	_, err = io.CopyN(io.Discard, resp.Body, mib)
 	require.NoError(t, err)
 	var live int64
+	var stableFor int
 	require.Eventually(t, func() bool { // the server fills the socket buffers, then blocks
 		n := f.used()
-		stable := n == live && n >= mib
+		if n == live && n >= mib {
+			stableFor++
+		} else {
+			stableFor = 0
+		}
 		live = n
-		return stable
-	}, 5*time.Second, 100*time.Millisecond)
+		return stableFor >= 5 // unchanged for half a second
+	}, 10*time.Second, 100*time.Millisecond)
 	f.srv.bandwidthTracker.Flush()
 	require.Equal(t, int64(0), f.recorded(), "nothing is recorded while the response is open")
 
 	// Act 1: the shutdown flush.
 	f.srv.flushTrackers(context.Background())
 
-	// Assert 1: the database has what the live counter has.
-	assert.Equal(t, live, f.recorded())
+	// Assert 1: the database has what the live counter had at the flush.
+	// The kernel may let the blocked writer put a little more into the
+	// socket buffers between the sample above and the flush (CI 2026-10-06:
+	// 3.9 MiB sampled, 5.5 MiB flushed — twice in a day), so the bound is
+	// the window [sampled, counter after the flush], never a stale sample.
+	rec := f.recorded()
+	assert.GreaterOrEqual(t, rec, live, "the drain handed over at least the bytes seen in flight")
+	assert.LessOrEqual(t, rec, f.used(), "and never more than the counter holds")
 
 	// Act 2: the response then ends (the drain timed out and the handler
 	// finished late) and the tracker flushes again.
