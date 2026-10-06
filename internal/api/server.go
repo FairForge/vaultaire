@@ -820,6 +820,9 @@ func (s *Server) setupRoutes() {
 	s.logger.Info("Registering STS routes")
 	s.registerSTSRoutes()
 
+	// GET /api/v1/whoami — a SigV4-signed key asks what it is (whoami.go).
+	s.registerWhoamiRoute()
+
 	s.logger.Info("Registering webhook and event routes")
 	s.registerWebhookRoutes()
 
