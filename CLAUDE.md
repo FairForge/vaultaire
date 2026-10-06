@@ -80,7 +80,7 @@ Driver Layer (internal/drivers) Storage provider implementations (local, s3, lyv
 
 `cmd/vaultaire` is the only product binary; everything under `cmd/tools/` is an operator probe or benchmark (table in `cmd/tools/README.md`), never linked into the product (`go list -deps ./cmd/vaultaire`) and excluded from the Security workflow's gosec run.
 
-`cmd/vaultaire/main.go` — initializes drivers from environment variables, opens PostgreSQL (optional — the DB handle is opened lazily and never pinged at boot (R9-06 / WP-R9-4): a dead Postgres still logs "connected" and every DB call then fails), starts the HTTP server. Storage mode: `STORAGE_MODE`, else auto-detected iDrive > Wasabi > Quotaless > S3 > Geyser > local (`config.DetectStorageMode`; Lyve, R2 and permafrost are registered when their env vars are set but never auto-selected as primary). A `STORAGE_MODE` naming an unregistered driver is a fatal boot error. Prod runs `STORAGE_MODE=wasabi` since 2026-10-03 (interim, until the iDrive account is repaired — [YOU] 0).
+`cmd/vaultaire/main.go` — initializes drivers from environment variables, opens PostgreSQL (optional — the DB handle is opened lazily and never pinged at boot (R9-06 / WP-R9-4): a dead Postgres still logs "connected" and every DB call then fails), starts the HTTP server. Storage mode: `STORAGE_MODE`, else auto-detected iDrive > Wasabi > Quotaless > S3 > Geyser > local (`config.DetectStorageMode`; Lyve, R2 and permafrost are registered when their env vars are set but never auto-selected as primary). A `STORAGE_MODE` naming an unregistered driver is a fatal boot error. Prod runs `STORAGE_MODE=idrive` again since 2026-10-04 15:08 UTC (the new reseller account; the Wasabi interim of 2026-10-03 lasted one day — the `wasabi` driver stays registered and dormant).
 
 ### Dual Terminology
 
@@ -180,7 +180,7 @@ GitHub Actions Deploy (`.github/workflows/deploy.yml`):
 | `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` | localhost, 5432, vaultaire, viera, "" | PostgreSQL connection |
 | `ENV` | — | Set in the prod `.env` but read by nothing |
 | `DATA_PATH` | /tmp/vaultaire-data | Local storage directory |
-| `STORAGE_MODE` | auto-detect | The primary backend by driver name (`idrive`, `wasabi`, `quotaless`, `s3`, `geyser`, `local`); must be registered or boot fails loudly. Prod: `wasabi` (interim, 2026-10-03) |
+| `STORAGE_MODE` | auto-detect | The primary backend by driver name (`idrive`, `wasabi`, `quotaless`, `s3`, `geyser`, `local`); must be registered or boot fails loudly. Prod: `idrive` (since 2026-10-04; `wasabi` was the interim for one day) |
 | `S3_ACCESS_KEY`, `S3_SECRET_KEY` | — | AWS S3 credentials |
 | `LYVE_ACCESS_KEY`, `LYVE_SECRET_KEY`, `LYVE_REGION` | region: us-west-1 | Seagate Lyve Cloud 2 — buckets are homed per region; see `internal/drivers/lyve_README.md` |
 | `LYVE_PROBE_ACCESS_KEY`, `LYVE_PROBE_SECRET_KEY`, `LYVE_PROBE_CUSTOMER` | unset → the probe is the driver's signed HeadBucket; customer `v01` | Root key for the console `RSCustomerDetails` probe (root-only). It never falls back to `LYVE_*` (R7-19): the data-plane key should be the scoped `vaultaire-prod` user, which the console refuses; see `deploy/monitoring/README.md` |
