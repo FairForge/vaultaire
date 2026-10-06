@@ -1,0 +1,32 @@
+# Vaultaire as two slots behind HAProxy (docs/STATUS.md item 4, 2026-10-06;
+# docs/DEPLOY.md "Zero-downtime deploys"): vaultaire@8000 ("blue") and
+# vaultaire@8001 ("green"), ONE active at a time. A deploy installs the new
+# binary into the idle slot, starts it, waits for /health/live, switches
+# HAProxy to it and drains the old one — no request is dropped. Exactly one
+# slot is enabled at boot (the switch script enables the active one).
+#
+# Install: /etc/systemd/system/vaultaire@.service, then systemctl daemon-reload.
+[Unit]
+Description=Vaultaire Storage Engine (slot on port %i)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=user1
+Group=user1
+WorkingDirectory=/opt/vaultaire
+EnvironmentFile=/opt/vaultaire/configs/.env
+# The slot's port must win over the PORT in .env; EnvironmentFile= overrides
+# Environment=, so it is set on the exec line. Each slot runs its own binary.
+ExecStart=/bin/sh -c 'PORT=%i exec /opt/vaultaire/bin/vaultaire-%i'
+Restart=always
+RestartSec=5
+LimitNOFILE=1048576
+# The engine drains HTTP, flushes the trackers and closes the DB on SIGTERM
+# (cmd/vaultaire/main.go); give a long upload that was still in flight time.
+TimeoutStopSec=90
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target
