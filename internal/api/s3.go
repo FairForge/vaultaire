@@ -312,10 +312,12 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// CORS headers for a browser's request, before authentication, so every
-	// status below — the auth 403 included — is readable from a page on an
-	// origin the bucket allows (s3_cors.go). Nothing for a plain S3 client.
-	s.applyS3CORS(w, r)
+	// CORS (s3_cors.go): every response to a browser's request varies on
+	// Origin. Which rule's headers it carries is decided once the tenant is
+	// known (applyS3CORSForTenant below — the caller's own bucket only); a
+	// response written before that (an auth failure) may carry
+	// Access-Control-Allow-Origin alone (applyS3CORSPreAuth).
+	varyOrigin(w, r)
 
 	var tenantID string
 	var scope *auth.KeyScope
@@ -331,6 +333,7 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 
 				errCode := err.Error()
 				reqID := generateRequestID()
+				s.applyS3CORSPreAuth(w, r)
 				switch errCode {
 				case ErrExpiredPresignedRequest, ErrSignatureDoesNotMatch,
 					ErrAccessDenied, ErrAuthorizationQueryParametersError,
@@ -373,6 +376,7 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 					errCode = ErrSignatureDoesNotMatch
 				}
 				reqID := generateRequestID()
+				s.applyS3CORSPreAuth(w, r)
 				if hint := authErrorHint(err.Error()); hint != "" {
 					WriteS3ErrorWithContext(w, errCode, r.URL.Path, reqID, WithSuggestion(hint))
 				} else {
@@ -402,6 +406,7 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 	if tenantID != "" && engine.IsReservedTenantID(tenantID) {
 		s.logger.Error("request refused: the credential resolves to a reserved tenant id",
 			zap.String("tenant_id", tenantID), zap.String("path", r.URL.Path))
+		s.applyS3CORSPreAuth(w, r)
 		WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
 		return
 	}
@@ -418,18 +423,25 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 			// The key's own code (WP-R5-12): ExpiredToken, with the key's
 			// expiry in the message — not the presigned URL's "request has
 			// expired" wording and not a generic AccessDenied.
+			s.applyS3CORSPreAuth(w, r)
 			WriteS3ErrorWithContext(w, ErrExpiredPresignedRequest, r.URL.Path, generateRequestID(),
 				WithSuggestion("This access key expired at "+scope.ExpiresAt.UTC().Format(time.RFC3339)+". Create or rotate a key in the dashboard."))
 			recordAuthFailure(r, "expired", true)
 			return
 		}
 		if !auth.CheckIPAllowlist(scope.IPAllowlist, extractClientIP(r)) {
+			s.applyS3CORSPreAuth(w, r)
 			WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
 				WithSuggestion("This key is restricted by IP address."))
 			recordAuthFailure(r, "ip_denied", true)
 			return
 		}
 	}
+
+	// The caller is who the key says: the CORS headers of ITS bucket (never
+	// another tenant's same-named one) on every response from here on — the
+	// operation's success and its errors alike.
+	s.applyS3CORSForTenant(w, r, tenantID)
 
 	if tenantID != "" {
 		s.logger.Info("authenticated request",

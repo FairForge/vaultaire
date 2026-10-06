@@ -148,14 +148,26 @@ Behaviour worth knowing before writing code against it:
   return the AWS `CORSConfiguration` document (≤ 100 rules; origins
   case-sensitive with at most one `*`; methods GET/PUT/HEAD/POST/DELETE;
   `ExposeHeader` without wildcards). A bucket has **no** configuration until you
-  put one: every cross-origin browser request is then refused. The browser's
-  `OPTIONS` preflight is answered **before** SigV4 (a browser never signs it) —
-  200 with the matching rule's headers, 403 `AccessForbidden` otherwise — and
-  the real, signed response carries `Access-Control-Allow-Origin`,
-  `Access-Control-Expose-Headers` (list `ETag` to read multipart part ETags from
-  a page) and `Access-Control-Allow-Credentials` on every status, the auth error
-  included. The preflight looks the bucket up by name. Use `s3.stored.ge` from a
-  page for uploads above 100 MB (the `stored.ge` hostname is proxied and capped).
+  put one, and a bucket without a configuration never gets CORS headers on its
+  responses: a page cannot read them. Bucket names are per account, and a
+  browser's `OPTIONS` preflight is answered **before** SigV4 (a browser never
+  signs it, and a path-style URL names no account), so it is answered from the
+  rules of **any** bucket of that name — 200 with the matching rule's headers,
+  403 `AccessForbidden` otherwise (the same answer for "no such bucket" and "no
+  rule allows it"). The preflight only lets the browser *send* the real
+  request. What it may *read* is decided by **your** bucket: the signed
+  response carries the headers of the first rule of your own bucket that allows
+  the origin and method — `Access-Control-Allow-Origin`,
+  `Access-Control-Allow-Methods`, `Access-Control-Expose-Headers` (list `ETag`
+  to read multipart part ETags from a page) and
+  `Access-Control-Allow-Credentials` (when the rule names the origin rather
+  than `*`) — on success and on every error the operation returns. A response
+  written before the key is known (a bad signature, an unknown, expired or
+  IP-refused key) carries `Access-Control-Allow-Origin` alone, when a rule of
+  some bucket of that name allows the origin, so the page can read the error.
+  Every S3 response to a request with an `Origin` carries `Vary: Origin`. Use
+  `s3.stored.ge` from a page for uploads above 100 MB (the `stored.ge` hostname
+  is proxied and capped).
   The `/cdn` path's CORS (`cors_origins`, default `*`) is separate and unchanged.
 - **`GET /api/v1/whoami`** (2026-10-06): signed with an S3 key pair (SigV4,
   header or presigned), not a JWT — answers the tenant the key belongs to, the

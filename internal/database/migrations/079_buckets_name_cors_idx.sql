@@ -1,0 +1,11 @@
+-- 079: an index for the by-name CORS lookup (2026-10-06, fix of 078).
+--
+-- Bucket names are unique only per tenant (the PK is tenant_id + name), so
+-- the PK cannot serve `WHERE name = $1 AND cors_rules IS NOT NULL`: the
+-- lookup a browser's OPTIONS preflight (answered before SigV4, from the union
+-- of every same-named bucket's rules) and a pre-authentication error
+-- (Access-Control-Allow-Origin only) make on every request that carries an
+-- Origin. Partial: only buckets with a CORS configuration are indexed — the
+-- default is NULL, so the index stays tiny. A signed response reads the
+-- caller's own bucket by the PK (tenant_id, name).
+CREATE INDEX IF NOT EXISTS idx_buckets_name_with_cors ON buckets (name) WHERE cors_rules IS NOT NULL;
