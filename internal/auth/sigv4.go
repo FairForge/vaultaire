@@ -28,14 +28,32 @@ var ErrRequestTimeSkewed = errors.New("request time too skewed")
 var ErrUnknownAccessKey = errors.New("invalid access key")
 
 // AccessKeyFromRequest returns the access key id a request presents (SigV4
-// header Credential or the presigned X-Amz-Credential), or "". Used only to
-// bucket auth-failure metrics; never logged in clear.
+// header Credential, else the presigned X-Amz-Credential), or "". It prefers
+// the header whatever path authenticated the request, so it is never the key
+// that was VERIFIED: a caller that needs that, or the credential of the path
+// it attempted, picks HeaderAccessKey or PresignedAccessKey by the same
+// branch that chose the auth path (post-merge #604). Never logged in clear.
 func AccessKeyFromRequest(r *http.Request) string {
+	if ak := HeaderAccessKey(r); ak != "" {
+		return ak
+	}
+	return PresignedAccessKey(r)
+}
+
+// HeaderAccessKey is the access key id of the SigV4 Authorization header —
+// the one ValidateRequest looks up and verifies — or "".
+func HeaderAccessKey(r *http.Request) string {
 	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, algorithm) {
 		if p, err := parseSigV4AuthHeader(h); err == nil {
 			return p.AccessKey
 		}
 	}
+	return ""
+}
+
+// PresignedAccessKey is the access key id of the presigned X-Amz-Credential
+// query parameter — the one the presigned-URL verifier looks up — or "".
+func PresignedAccessKey(r *http.Request) string {
 	if c := r.URL.Query().Get("X-Amz-Credential"); c != "" {
 		return strings.SplitN(c, "/", 2)[0]
 	}

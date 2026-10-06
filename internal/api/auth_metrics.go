@@ -112,6 +112,19 @@ func (s *Server) accessKeyExists(ctx context.Context, accessKey string) bool {
 	return exists
 }
 
+// attemptedAccessKey is the access key id of the auth path the request takes
+// — the presigned X-Amz-Credential when isPresignedRequest (the branch
+// handleS3Request and handleWhoami choose by), else the Authorization
+// header's Credential. A failure is attributed to the credential that was
+// tried, never to one the request merely carries (post-merge #604:
+// auth.AccessKeyFromRequest prefers the header whatever path ran).
+func attemptedAccessKey(r *http.Request) string {
+	if isPresignedRequest(r) {
+		return auth.PresignedAccessKey(r)
+	}
+	return auth.HeaderAccessKey(r)
+}
+
 // recordAuthFailure increments the counters for one rejected request.
 func recordAuthFailure(r *http.Request, reason string, keyKnown bool) {
 	known := "false"
@@ -120,7 +133,7 @@ func recordAuthFailure(r *http.Request, reason string, keyKnown bool) {
 	}
 	authFailures.WithLabelValues(reason, known).Inc()
 	if keyKnown {
-		if ak := auth.AccessKeyFromRequest(r); ak != "" {
+		if ak := attemptedAccessKey(r); ak != "" {
 			authFailuresByKey.WithLabelValues(accessKeyHash(ak)).Inc()
 		}
 	}

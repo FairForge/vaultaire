@@ -345,7 +345,7 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 				reason, known := presignFailureReason(err)
 				if known {
 					// The verifier may have failed before looking the id up.
-					known = s.accessKeyExists(r.Context(), auth.AccessKeyFromRequest(r))
+					known = s.accessKeyExists(r.Context(), attemptedAccessKey(r))
 				}
 				recordAuthFailure(r, reason, known)
 				return
