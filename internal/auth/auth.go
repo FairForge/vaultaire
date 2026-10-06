@@ -93,6 +93,9 @@ type AuthService struct {
 // account-creation path at the source.
 var ErrSignupsDisabled = errors.New("signups are currently disabled")
 
+// ErrUserExists: the e-mail address already has an account.
+var ErrUserExists = errors.New("user already exists")
+
 // MinPasswordLength is the shortest password CreateUserWithTenant accepts.
 const MinPasswordLength = 8
 
@@ -358,12 +361,15 @@ func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password,
 		return nil, nil, nil, fmt.Errorf("invalid email address")
 	}
 
-	// Check if user exists
-	a.cacheMu.RLock()
-	_, exists := a.users[email]
-	a.cacheMu.RUnlock()
-	if exists {
-		return nil, nil, nil, fmt.Errorf("user already exists")
+	// Check if user exists — in the database when there is one (another
+	// instance may have registered the address since this one booted). The
+	// users.email unique constraint stays the final arbiter (persistNewAccount).
+	existing, err := a.userByEmail(ctx, email)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("check existing user: %w", err)
+	}
+	if existing != nil {
+		return nil, nil, nil, ErrUserExists
 	}
 
 	// Password policy lives here, not in the forms: the web form enforced
@@ -456,13 +462,19 @@ func (a *AuthService) persistNewAccount(ctx context.Context, user *User, tenant 
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		INSERT INTO users (id, email, password_hash, company, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (email) DO NOTHING
 	`, user.ID, user.Email, user.PasswordHash, user.Company,
-		user.CreatedAt, user.UpdatedAt); err != nil {
+		user.CreatedAt, user.UpdatedAt)
+	if err != nil {
 		return fmt.Errorf("persist user: %w", err)
+	}
+	// A concurrent registration of the same address (on this instance or the
+	// other one of a deploy overlap) won the unique constraint.
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return ErrUserExists
 	}
 
 	// tenants.name = company name; tenants.email = owner email.
@@ -506,23 +518,30 @@ func (a *AuthService) persistNewAccount(ctx context.Context, user *User, tenant 
 	return nil
 }
 
-// ValidatePassword checks if password is correct
+// ValidatePassword checks if password is correct. With a database the hash
+// is the row's current one, read on every call (user_lookup.go): a password
+// changed, or an account registered or erased, on another instance decides
+// this sign-in too.
 func (a *AuthService) ValidatePassword(ctx context.Context, email, password string) (bool, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 
-	a.cacheMu.RLock()
-	user, exists := a.users[email]
-	a.cacheMu.RUnlock()
-	if !exists {
+	user, err := a.userByEmail(ctx, email)
+	if err != nil {
+		return false, fmt.Errorf("validate password: %w", err)
+	}
+	if user == nil {
 		return false, nil
 	}
+	a.cacheMu.RLock()
+	hash := user.PasswordHash
+	a.cacheMu.RUnlock()
 
 	// OAuth-only users have no password — reject login via password form.
-	if user.PasswordHash == "" {
+	if hash == "" {
 		return false, nil
 	}
 
-	err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password))
+	err = bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 	if errors.Is(err, bcrypt.ErrMismatchedHashAndPassword) {
 		return false, nil
 	}
@@ -538,14 +557,18 @@ func (a *AuthService) ValidatePassword(ctx context.Context, email, password stri
 // issued before the change is dead from here on (WP-R5-10); the dashboard
 // keeps the session the change was made from and revokes the others.
 func (a *AuthService) ChangePassword(ctx context.Context, userID, currentPassword, newPassword string) error {
-	a.cacheMu.RLock()
-	user, exists := a.userIndex[userID]
-	a.cacheMu.RUnlock()
-	if !exists {
+	user, err := a.userByID(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("change password: %w", err)
+	}
+	if user == nil {
 		return fmt.Errorf("user not found")
 	}
+	a.cacheMu.RLock()
+	current := user.PasswordHash
+	a.cacheMu.RUnlock()
 
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(currentPassword)); err != nil {
+	if err := bcrypt.CompareHashAndPassword([]byte(current), []byte(currentPassword)); err != nil {
 		return fmt.Errorf("current password is incorrect")
 	}
 
@@ -583,27 +606,34 @@ func (a *AuthService) setPassword(ctx context.Context, user *User, hash string) 
 	return changedAt, nil
 }
 
-// GetUserByEmail retrieves a user by email
+// GetUserByEmail retrieves a user by email — the database row when there
+// is one (sign-in, password-reset and OAuth flows decide on it).
 func (a *AuthService) GetUserByEmail(ctx context.Context, email string) (*User, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
-	a.cacheMu.RLock()
-	defer a.cacheMu.RUnlock()
-	user, exists := a.users[email]
-	if !exists {
+	user, err := a.userByEmail(ctx, email)
+	if err != nil {
+		return nil, fmt.Errorf("get user by email: %w", err)
+	}
+	if user == nil {
 		return nil, fmt.Errorf("user not found")
 	}
+	a.cacheMu.RLock()
+	defer a.cacheMu.RUnlock()
 	cp := *user // a copy: the caller reads it outside the lock
 	return &cp, nil
 }
 
-// GetUserByID retrieves a user by ID
+// GetUserByID retrieves a user by ID — the database row when there is one.
 func (a *AuthService) GetUserByID(ctx context.Context, userID string) (*User, error) {
-	a.cacheMu.RLock()
-	defer a.cacheMu.RUnlock()
-	user, exists := a.userIndex[userID]
-	if !exists {
+	user, err := a.userByID(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("get user by id: %w", err)
+	}
+	if user == nil {
 		return nil, fmt.Errorf("user not found")
 	}
+	a.cacheMu.RLock()
+	defer a.cacheMu.RUnlock()
 	cp := *user
 	return &cp, nil
 }
@@ -633,12 +663,15 @@ func (a *AuthService) GetUserByOAuth(ctx context.Context, provider, providerID s
 	if err != nil {
 		return nil, nil //nolint:nilerr // not found is not an error
 	}
-	a.cacheMu.RLock()
-	defer a.cacheMu.RUnlock()
-	user, exists := a.userIndex[userID]
-	if !exists {
+	user, err := a.userByID(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("get user by oauth: %w", err)
+	}
+	if user == nil {
 		return nil, nil
 	}
+	a.cacheMu.RLock()
+	defer a.cacheMu.RUnlock()
 	cp := *user
 	return &cp, nil
 }
@@ -791,6 +824,24 @@ func (a *AuthService) ValidateJWT(tokenString string) (*JWTClaims, error) {
 		changedAt = user.PasswordChangedAt
 	}
 	a.cacheMu.RUnlock()
+	if !known && a.sqlDB != nil {
+		// A user this process has not cached may have registered on the
+		// other instance of a deploy overlap: one read, on a miss only (the
+		// signature is already verified, so a miss cannot be provoked
+		// without the JWT key). A cached user is not re-read per request.
+		ctx, cancel := context.WithTimeout(context.Background(), jwtLookupTimeout)
+		u, err := a.userByID(ctx, claims.UserID)
+		cancel()
+		if err != nil {
+			return nil, fmt.Errorf("validate token: %w", err)
+		}
+		if u != nil {
+			known = true
+			a.cacheMu.RLock()
+			changedAt = u.PasswordChangedAt
+			a.cacheMu.RUnlock()
+		}
+	}
 	if !known {
 		return nil, fmt.Errorf("invalid token: unknown user")
 	}

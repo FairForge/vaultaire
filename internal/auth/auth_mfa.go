@@ -39,10 +39,11 @@ func hashBackupCodes(codes []string) ([]string, error) {
 
 // EnableMFA activates MFA for a user and persists to the database.
 func (a *AuthService) EnableMFA(ctx context.Context, userID, secret string, backupCodes []string) error {
-	a.cacheMu.RLock()
-	_, exists := a.userIndex[userID]
-	a.cacheMu.RUnlock()
-	if !exists {
+	user, err := a.userByID(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("enable mfa: %w", err)
+	}
+	if user == nil {
 		return fmt.Errorf("user not found")
 	}
 
@@ -95,6 +96,9 @@ func (a *AuthService) EnableMFA(ctx context.Context, userID, secret string, back
 // new codes once. ErrMFANotEnabled when there is no second factor to attach
 // them to. The audit row is mfa.backup_codes_regenerated.
 func (a *AuthService) RegenerateBackupCodes(ctx context.Context, userID string, codes []string) error {
+	if err := a.refreshMFA(ctx, userID); err != nil {
+		return err
+	}
 	a.mfaMu.RLock()
 	settings, exists := a.mfaSettings[userID]
 	enabled := exists && settings.Enabled
@@ -154,19 +158,29 @@ func (a *AuthService) DisableMFA(ctx context.Context, userID string) error {
 	return nil
 }
 
-// IsMFAEnabled checks if a user has MFA enabled.
-func (a *AuthService) IsMFAEnabled(_ context.Context, userID string) (bool, error) {
+// IsMFAEnabled checks if a user has MFA enabled. With a database the
+// user_mfa row decides (an MFA change made on the other instance of a deploy
+// overlap must hold here — sign-in must not skip a factor enabled there). On
+// a read error the cached state is returned WITH the error, so a caller that
+// ignores the error still gets the last known state, never a blanket "off".
+func (a *AuthService) IsMFAEnabled(ctx context.Context, userID string) (bool, error) {
+	refreshErr := a.refreshMFA(ctx, userID)
+
 	a.mfaMu.RLock()
 	defer a.mfaMu.RUnlock()
 
 	if settings, exists := a.mfaSettings[userID]; exists {
-		return settings.Enabled, nil
+		return settings.Enabled, refreshErr
 	}
-	return false, nil
+	return false, refreshErr
 }
 
-// GetMFASecret retrieves the TOTP secret for a user with MFA enabled.
-func (a *AuthService) GetMFASecret(_ context.Context, userID string) (string, error) {
+// GetMFASecret retrieves the TOTP secret for a user with MFA enabled — the
+// user_mfa row's when there is a database.
+func (a *AuthService) GetMFASecret(ctx context.Context, userID string) (string, error) {
+	if err := a.refreshMFA(ctx, userID); err != nil {
+		return "", err
+	}
 	a.mfaMu.RLock()
 	defer a.mfaMu.RUnlock()
 
@@ -223,8 +237,15 @@ func (a *AuthService) ConsumeTOTPCode(userID, code string) bool {
 	return true
 }
 
-// ValidateBackupCode checks and consumes a single-use backup code.
+// ValidateBackupCode checks and consumes a single-use backup code. With a
+// database the codes are the user_mfa row's, and the consumption is a
+// compare-and-swap on that row: a code used on the other instance of a
+// deploy overlap (or concurrently here) is refused.
 func (a *AuthService) ValidateBackupCode(ctx context.Context, userID, code string) (bool, error) {
+	if err := a.refreshMFA(ctx, userID); err != nil {
+		return false, err
+	}
+
 	a.mfaMu.Lock()
 	defer a.mfaMu.Unlock()
 
@@ -236,16 +257,31 @@ func (a *AuthService) ValidateBackupCode(ctx context.Context, userID, code strin
 	for i, hashedCode := range settings.BackupCodes {
 		if bcrypt.CompareHashAndPassword([]byte(hashedCode), []byte(code)) == nil {
 			// Code matches — remove it (single use).
-			settings.BackupCodes = append(settings.BackupCodes[:i], settings.BackupCodes[i+1:]...)
+			remaining := make([]string, 0, len(settings.BackupCodes)-1)
+			remaining = append(remaining, settings.BackupCodes[:i]...)
+			remaining = append(remaining, settings.BackupCodes[i+1:]...)
 
-			// Persist updated codes.
 			if a.sqlDB != nil {
-				codesJSON, _ := json.Marshal(settings.BackupCodes)
-				_, _ = a.sqlDB.ExecContext(ctx, `
+				before, err := json.Marshal(settings.BackupCodes)
+				if err != nil {
+					return false, fmt.Errorf("marshal backup codes: %w", err)
+				}
+				after, err := json.Marshal(remaining)
+				if err != nil {
+					return false, fmt.Errorf("marshal backup codes: %w", err)
+				}
+				res, err := a.sqlDB.ExecContext(ctx, `
 					UPDATE user_mfa SET backup_codes = $1, updated_at = NOW()
-					WHERE user_id = $2
-				`, string(codesJSON), userID)
+					WHERE user_id = $2 AND enabled = TRUE AND backup_codes = $3
+				`, string(after), userID, string(before))
+				if err != nil {
+					return false, fmt.Errorf("consume backup code: %w", err)
+				}
+				if n, _ := res.RowsAffected(); n == 0 {
+					return false, nil // the row changed under us: used elsewhere
+				}
 			}
+			settings.BackupCodes = remaining
 
 			return true, nil
 		}

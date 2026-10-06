@@ -28,8 +28,10 @@ func TestLoadFromDB(t *testing.T) {
 	reader := NewAuthService(nil, db)
 
 	// Verify maps are empty before load
-	_, err = reader.GetUserByEmail(ctx, "loadtest@stored.ge")
-	require.Error(t, err, "user should not be in memory before LoadFromDB")
+	reader.cacheMu.RLock()
+	_, cached := reader.users["loadtest@stored.ge"]
+	reader.cacheMu.RUnlock()
+	require.False(t, cached, "user should not be in memory before LoadFromDB")
 
 	err = reader.LoadFromDB(ctx)
 	require.NoError(t, err)

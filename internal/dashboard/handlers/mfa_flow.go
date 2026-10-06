@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"net/http"
 
 	"github.com/FairForge/vaultaire/internal/audit"
@@ -81,7 +82,13 @@ func BeginMFAChallenge(w http.ResponseWriter, r *http.Request, status MFAStatus,
 	if status == nil || ch == nil {
 		return false, nil
 	}
-	enabled, _ := status.IsMFAEnabled(r.Context(), c.UserID)
+	// The MFA state is read from the database (auth.IsMFAEnabled); when it
+	// cannot be read the sign-in fails closed — no session without knowing
+	// whether a second factor is owed.
+	enabled, err := status.IsMFAEnabled(r.Context(), c.UserID)
+	if err != nil {
+		return false, fmt.Errorf("read mfa state: %w", err)
+	}
 	if !enabled {
 		return false, nil
 	}
