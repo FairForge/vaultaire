@@ -1,6 +1,8 @@
 # /etc/sudoers.d/vaultaire-deploy (mode 0440, root:root): what the deploy
-# user may run as root without a password. Since 2026-10-06 the deploy is one
-# root-owned script (deploy/scripts/vaultaire-switch); the five commands of
-# the stop/swap/start era stay for one more cycle and can then go.
-user1 ALL=(ALL) NOPASSWD: /usr/local/sbin/vaultaire-switch
-user1 ALL=(ALL) NOPASSWD: /bin/systemctl stop vaultaire, /bin/systemctl start vaultaire, /bin/systemctl restart vaultaire, /bin/mv /tmp/vaultaire-linux /opt/vaultaire/bin/vaultaire, /bin/chmod +x /opt/vaultaire/bin/vaultaire
+# user may run as root without a password. Pinned to the exact invocations
+# (2026-10-06): sudo matches arguments literally, so no other file or verb is
+# reachable (an open `vaultaire-switch` entry let the deploy key copy any root
+# file out and delete it). The stop/swap/start commands of the single-unit era
+# are gone and vaultaire.service is masked; deploys go through vaultaire-switch.
+# Install: visudo -cf <file> && install -o root -g root -m 0440 <file> /etc/sudoers.d/vaultaire-deploy
+user1 ALL=(root) NOPASSWD: /usr/local/sbin/vaultaire-switch deploy /tmp/vaultaire-linux, /usr/local/sbin/vaultaire-switch restart, /usr/local/sbin/vaultaire-switch rollback, /usr/local/sbin/vaultaire-switch status

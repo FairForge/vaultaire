@@ -104,7 +104,7 @@ groups:
           severity: warning
         annotations:
           summary: "A driver call on {{ $labels.backend }} carried no tenant and was refused"
-          description: "{{ $value | printf \"%.0f\" }} call(s) in the last hour on {{ $labels.backend }} named no tenant in their context (they would have addressed t-default/). journalctl -u vaultaire | grep 'driver call refused' names the operation; the caller needs common.WithTenantID or engine.ChunkContext."
+          description: "{{ $value | printf \"%.0f\" }} call(s) in the last hour on {{ $labels.backend }} named no tenant in their context (they would have addressed t-default/). journalctl -u 'vaultaire@*' | grep 'driver call refused' names the operation; the caller needs common.WithTenantID or engine.ChunkContext."
 
       # WP-R8-7. Chunk blobs written before the one address existed are read
       # from the uploading tenant's prefix until the chunk move has run

@@ -179,7 +179,12 @@ jobs:
             # not prompt — a prompt reads the rest of this script off stdin as
             # password attempts, silently skipping the binary swap below while
             # the job still exits 0 (observed 2026-06-08..07-09 on prod).
-            PGPASSWORD=$(grep DB_PASSWORD /opt/vaultaire/configs/.env | cut -d= -f2) \
+            # lock_timeout: the old build is still serving while migrations run
+            # (zero-downtime deploys), so a DDL that has to wait for a lock gives up
+            # after 5 s and fails the deploy instead of queueing every query on that
+            # table behind it. Migrations must stay additive: the build before this
+            # one keeps running against the migrated schema until the switch.
+            PGOPTIONS='-c lock_timeout=5s' PGPASSWORD=$(grep DB_PASSWORD /opt/vaultaire/configs/.env | cut -d= -f2) \
               psql -w -v ON_ERROR_STOP=1 -h 127.0.0.1 -U vaultaire -d vaultaire -f "$f" < /dev/null
           done
           rm -rf /tmp/vaultaire-migrations
@@ -190,5 +195,17 @@ jobs:
           # the script exits 1 with its journal and the active slot is untouched —
           # there is nothing to roll back. `sudo vaultaire-switch rollback` is the
           # manual lever back to the previous build (it still sits in the other slot).
+          # The invocation is pinned in sudoers: exactly this path, nothing else.
           sudo /usr/local/sbin/vaultaire-switch deploy /tmp/vaultaire-linux
           EOF
+
+      - name: Verify the public endpoint serves this build
+        run: |
+          want="${GITHUB_SHA::12}"
+          for _ in $(seq 1 12); do
+            got=$(curl -sf --max-time 10 https://stored.ge/version | sed -n 's/.*"version":"\([0-9a-f]*\)".*/\1/p')
+            [ "$got" = "$want" ] && { echo "stored.ge serves $got"; exit 0; }
+            sleep 5
+          done
+          echo "::error::stored.ge/version reports '${got:-nothing}', expected $want"
+          exit 1

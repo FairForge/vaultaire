@@ -67,8 +67,9 @@ curl -XPOST http://localhost:9093/api/v2/alerts -H 'Content-Type: application/js
 ```
 
 Real end-to-end (VaultaireDown; ~90s of prod downtime):
-`systemctl stop vaultaire`, wait for the push (10s scrape + 1m `for:` +
-10s group_wait ≈ 85s), `systemctl start vaultaire`. Verified 2026-08-03:
+`sudo systemctl stop vaultaire@$(cat /opt/vaultaire/ACTIVE_PORT)` (the active
+slot; HAProxy then has no server), wait for the push (10s scrape + 1m `for:` +
+10s group_wait ≈ 85s), `sudo systemctl start vaultaire@$(cat /opt/vaultaire/ACTIVE_PORT)`. Verified 2026-08-03:
 delivered at ~85s, RESOLVED notice followed after restart.
 
 ## Alert rules in this directory
@@ -167,7 +168,7 @@ a row with none. `RoutingSharedStore` (critical): two registered names write
 into one store, which makes every stale-copy delete (WP-R13-2) a delete of a
 live object. `RoutingUnknownBackendReads` (warning): customers are reading rows
 that route to no driver. Triage: `GET /api/v1/admin/routing-truth` (admin JWT),
-`journalctl -u vaultaire | grep 'routing truth'`, the plan in
+`journalctl -u 'vaultaire@*' | grep 'routing truth'`, the plan in
 `docs/reviews/WP-R7-5.md`. `internal/api/job_rules_test.go` checks the series.
 
 `vaultaire-egress.yml` — the egress allowance throttle (WP-R10-9): one

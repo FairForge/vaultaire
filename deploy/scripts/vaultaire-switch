@@ -1,31 +1,43 @@
 #!/bin/bash
 # vaultaire-switch — zero-downtime deploys on the box (docs/STATUS.md item 4,
-# 2026-10-06; docs/DEPLOY.md "Zero-downtime deploys").
+# 2026-10-06; docs/DEPLOY.md "Zero-downtime deploys"; hardened 2026-10-06).
 #
 # Two slots, vaultaire@8000 ("blue") and vaultaire@8001 ("green"), one active
 # at a time behind HAProxy (every backend lists both servers, the idle one
 # `disabled`). Installed at /usr/local/sbin/vaultaire-switch, root:root 0755;
-# the deploy user runs it through sudoers (deploy/sudoers/vaultaire-deploy).
+# the deploy user runs it through sudoers (deploy/sudoers/vaultaire-deploy),
+# which pins the exact invocations below — sudo matches arguments literally.
 #
-#   vaultaire-switch deploy <binary>   install into the idle slot, start it,
-#                                      wait for /health/live, switch HAProxy,
-#                                      drain and stop the old slot
-#   vaultaire-switch rollback          switch back to the idle slot (it holds
-#                                      the previous build) the same way
-#   vaultaire-switch status            what is active, what runs, what HAProxy says
+#   vaultaire-switch deploy /tmp/vaultaire-linux
+#                         install the staged build into the idle slot, start it,
+#                         prove it is live and is that slot's own process,
+#                         validate the HAProxy config for the switched state,
+#                         switch, drain and stop the old slot
+#   vaultaire-switch restart
+#                         the same with the ACTIVE build (picks up .env edits
+#                         and anything else read at boot, without downtime)
+#   vaultaire-switch rollback
+#                         switch back to the idle slot (it holds the previous
+#                         build) the same way
+#   vaultaire-switch status
+#                         what is active, what runs, what HAProxy says
 #
-# `deploy` exits 1 WITHOUT switching when the new binary never becomes live
-# (the active slot is untouched; nothing to roll back). After the switch a
-# drain that times out is logged, never fatal: the old slot is stopped and
-# the engine finishes what it can within TimeoutStopSec.
+# Every failure before the switch leaves the active slot untouched and the
+# idle slot's previous build in place (deploy and restart restore it), so
+# `rollback` always has something good to go back to. One run at a time
+# (flock). Deploy only accepts the one staged path, as a regular file owned by
+# the deploy user: no symlink, no other file can be turned into a binary.
 set -euo pipefail
 
 BIN_DIR=/opt/vaultaire/bin
 STATE=/opt/vaultaire/ACTIVE_PORT
+STAGED=/tmp/vaultaire-linux
 CFG=/etc/haproxy/haproxy.cfg
 SOCK=/run/haproxy/admin.sock
+LOCK=/run/vaultaire-switch.lock
 BACKENDS="s3_backend api_backend dashboard_backend"
 RUN_USER=user1
+CFG_BACKUPS=5                          # timestamped haproxy.cfg backups kept
 HEALTH_TIMEOUT=${HEALTH_TIMEOUT:-90}   # seconds for the new slot to answer /health/live
 UP_TIMEOUT=${UP_TIMEOUT:-30}           # seconds for HAProxy to report the new slot UP
 DRAIN_TIMEOUT=${DRAIN_TIMEOUT:-600}    # seconds for the old slot's sessions to finish
@@ -37,9 +49,14 @@ die() { log "ERROR: $*" >&2; exit 1; }
 
 name_of() { case "$1" in 8000) echo blue ;; 8001) echo green ;; *) die "unknown slot $1" ;; esac; }
 other_of() { case "$1" in 8000) echo 8001 ;; 8001) echo 8000 ;; *) die "unknown slot $1" ;; esac; }
-active_port() { if [ -f "$STATE" ]; then cat "$STATE"; else echo 8000; fi; }
+active_port() {
+  local p=8000
+  [ -f "$STATE" ] && p=$(cat "$STATE")
+  case "$p" in 8000|8001) echo "$p" ;; *) die "corrupt $STATE: '$p'" ;; esac
+}
 
-# One command on HAProxy's admin socket (one command per connection).
+# One command on HAProxy's admin socket (one command per connection). Prints
+# HAProxy's answer; the runtime "set server" commands answer nothing on success.
 hap() {
   python3 - "$SOCK" "$1" <<'PY'
 import socket, sys
@@ -60,11 +77,20 @@ sys.stdout.write(out.decode(errors="replace"))
 PY
 }
 
+# A runtime "set" command that must succeed: any answer is an error message.
+hap_set() {
+  local out
+  out=$(hap "$1") || return 1
+  out=$(printf '%s' "$out" | tr -d '\r' | sed '/^[[:space:]]*$/d')
+  [ -z "$out" ] || { log "HAProxy refused '$1': $out" >&2; return 1; }
+}
+
 # scur (current sessions) of one server, summed over the backends.
 sessions_of() {
-  local srv=$1 total=0 be n
+  local srv=$1 total=0 be n stat
+  stat=$(hap "show stat")
   for be in $BACKENDS; do
-    n=$(hap "show stat" | awk -F, -v be="$be" -v sv="$srv" '$1==be && $2==sv {print $5}')
+    n=$(printf '%s\n' "$stat" | awk -F, -v be="$be" -v sv="$srv" '$1==be && $2==sv {print $5}')
     total=$((total + ${n:-0}))
   done
   echo "$total"
@@ -73,12 +99,22 @@ sessions_of() {
 # status (UP/DOWN/MAINT…) of one server in one backend.
 status_of() { hap "show stat" | awk -F, -v be="$1" -v sv="$2" '$1==be && $2==sv {print $18}'; }
 
+# The slot answers /health/live AND the process listening on its port is that
+# slot's own systemd MainPID — not a stray process (a legacy unit, a manual
+# run) that happens to hold the port with another build.
 wait_live() {
   local port=$1 deadline=$((SECONDS + HEALTH_TIMEOUT))
   until curl -sf "http://127.0.0.1:$port/health/live" >/dev/null 2>&1; do
-    [ $SECONDS -lt $deadline ] || return 1
+    [ $SECONDS -lt $deadline ] || { log "slot :$port never answered /health/live within ${HEALTH_TIMEOUT}s" >&2; return 1; }
     sleep 1
   done
+  local pid listeners
+  pid=$(systemctl show -p MainPID --value "vaultaire@$port")
+  listeners=$(ss -Hltnp "sport = :$port" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u)
+  if [ -z "$pid" ] || [ "$pid" = 0 ] || ! printf '%s\n' "$listeners" | grep -qx "$pid"; then
+    log ":$port answers but is not vaultaire@$port's process (MainPID=${pid:-none}, listeners: $(echo $listeners))" >&2
+    return 1
+  fi
 }
 
 wait_up() {
@@ -95,43 +131,66 @@ wait_up() {
   done
 }
 
-# Rewrite haproxy.cfg so a reload lands in the same state: the active slot's
-# server lines without `disabled`, the idle slot's with it. Validated first.
-rewrite_cfg() {
+# haproxy.cfg with <on>'s server lines enabled and <off>'s disabled, wherever
+# `disabled` sat on the line. Written to a temp file in /etc/haproxy (same
+# filesystem, so the final rename is atomic) and validated; prints its path.
+render_cfg() {
   local on=$1 off=$2 tmp
-  tmp=$(mktemp)
+  tmp=$(mktemp "$(dirname "$CFG")/.haproxy.cfg.switch.XXXXXX")
   awk -v on="$on" -v off="$off" '
     $1 == "server" && ($2 == on || $2 == off) {
-      sub(/[[:space:]]+disabled[[:space:]]*$/, "")
-      if ($2 == off) $0 = $0 " disabled"
+      line = $0
+      gsub(/[[:space:]]+disabled([[:space:]]|$)/, " ", line)
+      sub(/[[:space:]]+$/, "", line)
+      if ($2 == off) line = line " disabled"
+      $0 = line
     }
     { print }' "$CFG" > "$tmp"
-  if haproxy -c -q -f "$tmp"; then
-    cp -f "$CFG" "$CFG.bak-switch"
-    cat "$tmp" > "$CFG"
-  else
-    log "WARNING: rewritten haproxy.cfg does not validate — left unchanged (runtime state is switched)"
+  chmod 0644 "$tmp"
+  if ! haproxy -c -q -f "$tmp" >&2; then
+    rm -f "$tmp"
+    log "the haproxy.cfg for the switched state does not validate" >&2
+    return 1
   fi
-  rm -f "$tmp"
+  echo "$tmp"
 }
 
-# Make <port> the active slot: HAProxy ready + health up on it, drain the
-# other, cfg rewritten, state file, symlink, boot enablement.
+# Replace haproxy.cfg with a validated render: timestamped backup, atomic rename,
+# old backups pruned.
+install_cfg() {
+  local tmp=$1
+  cp -p "$CFG" "$CFG.bak-switch-$(date -u +%Y%m%dT%H%M%SZ)"
+  mv -f "$tmp" "$CFG"
+  ls -1t "$CFG".bak-switch-* 2>/dev/null | tail -n +$((CFG_BACKUPS + 1)) | xargs -r rm -f
+}
+
+# Put <name> back into maintenance everywhere (undo a half-done switch).
+unready() { local be; for be in $BACKENDS; do hap "set server $be/$1 state maint" >/dev/null || true; done; }
+
+# Make <port> the active slot. <cfg> is the validated render for that state.
+# Before traffic moves, any failure undoes what was done and leaves the old
+# slot serving; after it, only the drain can time out (logged, not fatal).
 activate() {
-  local new=$1 old new_name old_name be
+  local new=$1 cfg=$2 old new_name old_name be
   old=$(other_of "$new"); new_name=$(name_of "$new"); old_name=$(name_of "$old")
 
   for be in $BACKENDS; do
-    hap "set server $be/$new_name state ready" >/dev/null
-    hap "set server $be/$new_name health up" >/dev/null
+    if ! hap_set "set server $be/$new_name state ready" || ! hap_set "set server $be/$new_name health up"; then
+      unready "$new_name"; rm -f "$cfg"
+      return 1
+    fi
   done
-  wait_up "$new_name" || die "HAProxy never reported $new_name UP (check 'show stat'); the old slot still serves"
+  if ! wait_up "$new_name"; then
+    unready "$new_name"; rm -f "$cfg"
+    log "HAProxy never reported $new_name UP within ${UP_TIMEOUT}s (check 'show stat'); the old slot still serves" >&2
+    return 1
+  fi
   for be in $BACKENDS; do
-    hap "set server $be/$old_name state drain" >/dev/null
+    hap_set "set server $be/$old_name state drain" || log "WARNING: could not drain $be/$old_name" >&2
   done
   log "traffic switched to $new_name (:$new); $old_name (:$old) draining"
 
-  rewrite_cfg "$new_name" "$old_name"
+  install_cfg "$cfg"
   echo "$new" > "$STATE"
   ln -sfn "vaultaire-$new" "$BIN_DIR/vaultaire"
   systemctl enable --quiet "vaultaire@$new" || true
@@ -141,35 +200,73 @@ activate() {
   while :; do
     n=$(sessions_of "$old_name")
     [ "$n" = 0 ] && break
-    if [ $SECONDS -ge $deadline ]; then log "WARNING: $n session(s) still open on $old_name after ${DRAIN_TIMEOUT}s — stopping anyway (TimeoutStopSec applies)"; break; fi
+    if [ $SECONDS -ge $deadline ]; then
+      # The engine's own shutdown (cmd/vaultaire/main.go shutdownTimeout, 30 s)
+      # is what remains for these: a transfer longer than the drain plus that
+      # is cut.
+      log "WARNING: $n session(s) still open on $old_name after ${DRAIN_TIMEOUT}s — stopping anyway; the engine gives them 30 s more"
+      break
+    fi
     sleep 2
   done
   for be in $BACKENDS; do
-    hap "set server $be/$old_name state maint" >/dev/null
+    hap_set "set server $be/$old_name state maint" || log "WARNING: could not set $be/$old_name to maint" >&2
   done
   systemctl stop "vaultaire@$old" 2>/dev/null || true
-  # The pre-2026-10-06 single unit listened on 8000; stop it when it is still the one there.
-  if [ "$old" = 8000 ] && systemctl is-active --quiet vaultaire.service; then
-    log "stopping the legacy vaultaire.service (it held :8000)"
-    systemctl stop vaultaire.service; systemctl disable --quiet vaultaire.service || true
-  fi
   log "active: $new_name (:$new) $(curl -s "http://127.0.0.1:$new/version" || true)"
 }
 
-cmd_deploy() {
-  local bin=$1 active idle
-  [ -f "$bin" ] || die "no such file: $bin"
-  active=$(active_port); idle=$(other_of "$active")
-  log "active slot :$active; installing $bin into slot :$idle"
-  install -o "$RUN_USER" -g "$RUN_USER" -m 0755 "$bin" "$BIN_DIR/vaultaire-$idle"
-  rm -f "$bin"
-  systemctl restart "vaultaire@$idle"
+# Start <idle> with what is now in its binary and switch to it. On any failure
+# before the switch: stop the idle slot, restore <prev> (if given) as its
+# binary, exit 1 — the active slot is never touched.
+start_and_switch() {
+  local idle=$1 prev=${2:-} active cfg
+  active=$(other_of "$idle")
+  fail() {
+    systemctl stop "vaultaire@$idle" 2>/dev/null || true
+    if [ -n "$prev" ] && [ -f "$prev" ]; then mv -f "$prev" "$BIN_DIR/vaultaire-$idle"; log "restored slot :$idle's previous build" >&2; fi
+    die "$1 — the active slot :$active was not touched"
+  }
+  systemctl restart "vaultaire@$idle" || fail "could not start vaultaire@$idle"
   if ! wait_live "$idle"; then
     journalctl -u "vaultaire@$idle" --no-pager -n 30 || true
-    systemctl stop "vaultaire@$idle" || true
-    die "slot :$idle never answered /health/live within ${HEALTH_TIMEOUT}s — the active slot :$active was not touched"
+    fail "slot :$idle is not live"
   fi
-  activate "$idle"
+  log "slot :$idle live: $(curl -s "http://127.0.0.1:$idle/version" || true)"
+  cfg=$(render_cfg "$(name_of "$idle")" "$(name_of "$active")") || fail "haproxy.cfg would not validate"
+  activate "$idle" "$cfg" || fail "HAProxy did not take slot :$idle"
+  [ -z "$prev" ] || rm -f "$prev"
+}
+
+# Keep the idle slot's current build aside so a failed deploy can restore it.
+stash_idle() {
+  local idle=$1 prev="$BIN_DIR/vaultaire-$1.prev"
+  if [ -f "$BIN_DIR/vaultaire-$idle" ]; then cp -p "$BIN_DIR/vaultaire-$idle" "$prev"; echo "$prev"; fi
+}
+
+cmd_deploy() {
+  local bin=$1 active idle prev owner
+  [ "$bin" = "$STAGED" ] || die "deploy only takes $STAGED"
+  [ -f "$bin" ] && [ ! -L "$bin" ] || die "$bin is not a regular file"
+  owner=$(stat -c %U "$bin")
+  [ "$owner" = "$RUN_USER" ] || die "$bin belongs to $owner, not $RUN_USER"
+  [ "$(head -c 4 "$bin" | od -An -tx1 | tr -d ' \n')" = 7f454c46 ] || die "$bin is not an ELF binary"
+  active=$(active_port); idle=$(other_of "$active")
+  log "active slot :$active; installing $bin into slot :$idle"
+  prev=$(stash_idle "$idle")
+  install -o "$RUN_USER" -g "$RUN_USER" -m 0755 "$bin" "$BIN_DIR/vaultaire-$idle"
+  rm -f "$bin"
+  start_and_switch "$idle" "$prev"
+}
+
+cmd_restart() {
+  local active idle prev
+  active=$(active_port); idle=$(other_of "$active")
+  [ -x "$BIN_DIR/vaultaire-$active" ] || die "slot :$active has no binary"
+  log "restarting the active build (:$active) through slot :$idle"
+  prev=$(stash_idle "$idle")
+  install -o "$RUN_USER" -g "$RUN_USER" -m 0755 "$BIN_DIR/vaultaire-$active" "$BIN_DIR/vaultaire-$idle"
+  start_and_switch "$idle" "$prev"
 }
 
 cmd_rollback() {
@@ -177,31 +274,36 @@ cmd_rollback() {
   active=$(active_port); idle=$(other_of "$active")
   [ -x "$BIN_DIR/vaultaire-$idle" ] || die "slot :$idle has no binary to roll back to"
   log "rolling back from :$active to :$idle ($(ls -l "$BIN_DIR/vaultaire-$idle" | awk '{print $6, $7, $8}'))"
-  systemctl restart "vaultaire@$idle"
-  wait_live "$idle" || die "slot :$idle never answered /health/live — the active slot :$active was not touched"
-  activate "$idle"
+  start_and_switch "$idle"
 }
 
 cmd_status() {
-  local active be srv
+  local active be srv stat
   active=$(active_port)
   echo "active slot: :$active ($(name_of "$active"))"
   for p in 8000 8001; do
     printf "vaultaire@%s: %s, enabled=%s, bin=%s\n" "$p" "$(systemctl is-active "vaultaire@$p" 2>/dev/null || true)" \
       "$(systemctl is-enabled "vaultaire@$p" 2>/dev/null || true)" "$(ls -l "$BIN_DIR/vaultaire-$p" 2>/dev/null | awk '{print $6, $7, $8}')"
   done
-  printf "legacy vaultaire.service: %s\n" "$(systemctl is-active vaultaire.service 2>/dev/null || true)"
+  printf "legacy vaultaire.service: %s\n" "$(systemctl is-enabled vaultaire.service 2>/dev/null || true)"
+  stat=$(hap "show stat")
   for be in $BACKENDS; do
     for srv in blue green; do
-      printf "%-18s %-6s %-8s sessions=%s\n" "$be" "$srv" "$(status_of "$be" "$srv")" \
-        "$(hap "show stat" | awk -F, -v be="$be" -v sv="$srv" '$1==be && $2==sv {print $5}')"
+      printf "%-18s %-6s %s\n" "$be" "$srv" \
+        "$(printf '%s\n' "$stat" | awk -F, -v be="$be" -v sv="$srv" '$1==be && $2==sv {print $18, "sessions=" $5}')"
     done
   done
 }
 
+locked() {
+  exec 9>"$LOCK"
+  flock -w 1200 9 || die "another vaultaire-switch run holds $LOCK"
+}
+
 case "${1:-}" in
-  deploy)   [ $# = 2 ] || die "usage: vaultaire-switch deploy <binary>"; cmd_deploy "$2" ;;
-  rollback) cmd_rollback ;;
+  deploy)   [ $# = 2 ] || die "usage: vaultaire-switch deploy $STAGED"; locked; cmd_deploy "$2" ;;
+  restart)  [ $# = 1 ] || die "usage: vaultaire-switch restart"; locked; cmd_restart ;;
+  rollback) [ $# = 1 ] || die "usage: vaultaire-switch rollback"; locked; cmd_rollback ;;
   status)   cmd_status ;;
-  *) echo "usage: vaultaire-switch deploy <binary> | rollback | status" >&2; exit 2 ;;
+  *) echo "usage: vaultaire-switch deploy $STAGED | restart | rollback | status" >&2; exit 2 ;;
 esac

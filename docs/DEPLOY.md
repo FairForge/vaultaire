@@ -16,7 +16,7 @@ deliberately not in this file — "the production host" is the one box.
   `DATA_PATH`.
 - **Cloudflare** proxies `stored.ge` (and the CDN host); **HAProxy** on the box
   terminates TLS with a Let's Encrypt origin certificate, redirects http to
-  https, sets HSTS, and forwards to the app on `127.0.0.1:8000`. HAProxy
+  https, sets HSTS, and forwards to the active app slot (`127.0.0.1:8000` or `:8001`, below). HAProxy
   appends the real peer as the *last* `X-Forwarded-For` hop — the only header
   `internal/clientip` trusts (R1-01). Its `global` section carries
   `tune.h2.initial-window-size 262144` (set 2026-10-04). HAProxy 2.8's default
@@ -39,18 +39,22 @@ deliberately not in this file — "the production host" is the one box.
 
 | Path | What |
 |------|------|
-| `/opt/vaultaire/bin/vaultaire` | the running binary; `vaultaire.prev` beside it is the previous release for rollback |
+| `/opt/vaultaire/bin/vaultaire-8000`, `vaultaire-8001` | the two slots' binaries (zero-downtime deploys, below); `vaultaire` is a symlink to the active one, the idle one holds the previous build |
+| `/opt/vaultaire/ACTIVE_PORT` | which slot is active (`vaultaire-switch`'s state) |
 | `/opt/vaultaire/configs/.env` | the env file (`EnvironmentFile=`); also where the deploy job reads `DB_PASSWORD` for migrations |
 | `/opt/vaultaire/data` | `DATA_PATH` of the `local` driver |
 | `/opt/vaultaire/backups/` | nightly PostgreSQL dumps (below) |
 | `/opt/vaultaire/monitoring/ntfy-bridge.py` | Alertmanager → ntfy push bridge |
-| `/etc/systemd/system/vaultaire.service` | the unit. Stop timeout is the distro default (90 s) and the unit still `Wants=redis-server` — WP-R1-1 sets `TimeoutStopSec=45` and drops Redis |
+| `/etc/systemd/system/vaultaire@.service` | the slot template (`deploy/systemd/vaultaire@.service`). The single-unit `vaultaire.service` is **masked** since 2026-10-06 (its file kept at `/root/vaultaire.service.retired-20261006`) so nothing can start the old build on `:8000` |
+| `/usr/local/sbin/vaultaire-switch` | the deploy/restart/rollback script (`deploy/scripts/vaultaire-switch`) |
+| `/opt/vaultaire/bin/health-check.sh` | cron every 5 min, probes the active slot (`deploy/scripts/health-check.sh`) |
 | `/etc/prometheus/rules/*.yml` | alert rules (installed by hand from `deploy/monitoring/`) |
 | `/etc/haproxy/haproxy.cfg`, `/etc/haproxy/certs/*-le.pem` | edge config and the origin cert the certbot deploy hook rebuilds |
 
-The deploy user's sudo is limited to `systemctl {stop,start} vaultaire`,
-`mv /tmp/vaultaire-linux …` and `chmod` — exactly the commands the pipeline
-runs.
+The deploy user's passwordless sudo is pinned to four exact invocations
+(`deploy/sudoers/vaultaire-deploy`): `vaultaire-switch deploy /tmp/vaultaire-linux`,
+`restart`, `rollback` and `status`. sudo matches arguments literally, so no
+other file or verb is reachable.
 
 ## The pipeline: push to `main`
 
@@ -130,18 +134,37 @@ vaultaire@8001  "green"   /opt/vaultaire/bin/vaultaire-8001     the other stoppe
   scrapes the active slot, whichever it is. The admin socket
   (`/run/haproxy/admin.sock`, level admin) is what the script drives.
 - **The switch** (`deploy/scripts/vaultaire-switch`, installed at
-  `/usr/local/sbin/vaultaire-switch`, root:root 0755; the deploy user may run
-  it through `deploy/sudoers/vaultaire-deploy`): `deploy <binary>` installs
-  into the idle slot, `systemctl restart vaultaire@<idle>`, waits up to 90 s
-  for `/health/live`, then `set server <be>/<new> state ready` + `health up`
-  on the three backends, waits for HAProxy to report it UP, sets the old
-  server to `drain` (no new connections, open ones finish), rewrites
-  `haproxy.cfg` so a reload lands in the same state (validated with
-  `haproxy -c` first; a backup is `haproxy.cfg.bak-switch`), writes
-  `ACTIVE_PORT`, moves the symlink, flips boot enablement, waits up to 10 min
-  for the old slot's sessions to reach 0, sets it `maint` and stops it.
-  `rollback` is the same switch towards the idle slot, whose binary is the
-  previous build. `status` prints both slots and what HAProxy says.
+  `/usr/local/sbin/vaultaire-switch`, root:root 0755; the deploy user's sudo is
+  pinned to `deploy /tmp/vaultaire-linux`, `restart`, `rollback`, `status`).
+  One run at a time (`flock /run/vaultaire-switch.lock`).
+  - `deploy /tmp/vaultaire-linux` accepts only that path, as a regular file
+    (not a symlink) owned by the deploy user and starting with an ELF header;
+    keeps the idle slot's current build aside, installs the new one into the
+    idle slot and `systemctl restart vaultaire@<idle>`.
+  - **Gates before any traffic moves** (each failure stops the idle slot,
+    restores its previous build and exits 1 — the active slot is never
+    touched): `/health/live` within 90 s; the process listening on the port
+    is that slot's systemd `MainPID` (not a stray process holding the port);
+    `haproxy.cfg` rendered for the switched state validates with `haproxy -c`;
+    every `set server` on the admin socket answers cleanly; HAProxy reports
+    the new server UP within 30 s (otherwise it goes back to `maint`).
+  - Then: the old server to `drain`, the validated config installed
+    atomically (temp file in `/etc/haproxy` + rename; timestamped
+    `haproxy.cfg.bak-switch-*`, the last five kept), `ACTIVE_PORT`, the
+    symlink and boot enablement flipped, up to 10 min for the old slot's
+    sessions to reach 0 (a transfer still open after that gets the engine's
+    own 30 s shutdown), then `maint` and stop.
+  - `restart` runs the same path with the **active** build copied into the
+    idle slot — the zero-downtime way to pick up `.env` edits. `rollback`
+    switches to the idle slot (the previous build) through the same gates.
+    `status` prints both slots, the legacy unit's state and HAProxy's view.
+  - The deploy job runs every migration with `PGOPTIONS='-c lock_timeout=5s'`
+    (the old build keeps serving while they run, so a DDL that must wait for a
+    lock fails the deploy instead of stalling the table) and, after the
+    switch, fails unless `https://stored.ge/version` reports the commit it
+    deployed. **Migrations must stay additive**: the build before is still
+    serving the migrated schema until the switch, and `rollback` runs it
+    against the new schema.
 - **Why one active slot, not two**: the pending-TOTP secret of an MFA enrolment
   and the credential cache are per process, the egress month counter is one
   per process, and the synthetic check would run twice — none of that is safe
@@ -216,15 +239,15 @@ app :8000/metrics  <- Prometheus (:9090, on the box, 10 s scrape)
 
 | Question | Where to look |
 |----------|---------------|
-| Is the process up? | `curl -s https://stored.ge/health/live` (200 = serving); `systemctl status vaultaire` |
-| Is it ready / which backends are healthy? | `curl -s https://stored.ge/health` — JSON with per-backend probe state and counts; `curl -s localhost:8000/health/backends` on the box for the detailed list (keep it off the public edge); `/health/ready` for the readiness verdict; `/status` is the HTML page |
-| What is running? | `curl -s https://stored.ge/version` — still the hard-coded `0.1.0` until WP-R1-3 stamps the commit at build |
-| Logs | `journalctl -u vaultaire -f` (Zap JSON; request ids in `X-Request-Id` / the S3 `RequestId`). Password-reset bodies are no longer logged (R14-01) |
-| Metrics right now | `curl -s localhost:8000/metrics \| grep vaultaire_backend_health` on the box; `localhost:9090` for Prometheus, `curl -s localhost:9090/api/v1/rules` for loaded rules |
+| Is the process up? | `curl -s https://stored.ge/health/live` (200 = serving); `sudo vaultaire-switch status` (both slots, what HAProxy routes to) |
+| Is it ready / which backends are healthy? | `curl -s https://stored.ge/health` — JSON with per-backend probe state and counts; `curl -s localhost:$(cat /opt/vaultaire/ACTIVE_PORT)/health/backends` on the box for the detailed list (keep it off the public edge); `/health/ready` for the readiness verdict; `/status` is the HTML page |
+| What is running? | `curl -s https://stored.ge/version` — the commit and build time; the deploy job fails if it does not report the commit it just deployed |
+| Logs | `journalctl -u 'vaultaire@*' -f` (both slots; `-u vaultaire@8001` for one) (Zap JSON; request ids in `X-Request-Id` / the S3 `RequestId`). Password-reset bodies are no longer logged (R14-01) |
+| Metrics right now | `curl -s localhost:8010/metrics \| grep vaultaire_backend_health` on the box (HAProxy routes `:8010` to the active slot); `localhost:9090` for Prometheus, `curl -s localhost:9090/api/v1/rules` for loaded rules |
 | Deploy did not run | `gh run list --workflow deploy.yml`; `gh workflow run deploy.yml --ref main` to re-trigger |
-| Deploy rolled back | the job log says which gate failed; `journalctl -u vaultaire --since -10m` for the new binary's boot error (a missing `JWT_SECRET`, a migration that broke a query the new code needs) |
-| Roll back by hand | repeat the pipeline's own steps: `sudo systemctl stop vaultaire; cp /opt/vaultaire/bin/vaultaire.prev /tmp/vaultaire-linux; sudo mv /tmp/vaultaire-linux /opt/vaultaire/bin/vaultaire; sudo chmod +x …; sudo systemctl start vaultaire` |
-| Backend key dead | `vaultaire_backend_health{backend="…"}` is 0 and `BackendProbeFailing` fires; rotate the key in the env file and `sudo systemctl restart vaultaire` (env is read at boot only) |
+| Deploy failed | nothing was switched: the job log says which gate failed (not live, not the slot's own process, HAProxy config invalid, HAProxy never reported it UP, public `/version` mismatch, a migration hit `lock_timeout`); `journalctl -u vaultaire@<idle port> --since -10m` for the new binary's boot error (a missing `JWT_SECRET`, a migration that broke a query the new code needs) |
+| Roll back by hand | `sudo vaultaire-switch rollback` — switches to the idle slot, which holds the previous build, with the same gates and no downtime |
+| Backend key dead | `vaultaire_backend_health{backend="…"}` is 0 and `BackendProbeFailing` fires; rotate the key in the env file and `sudo vaultaire-switch restart` (env is read at boot only; restart boots the active build in the other slot and switches, no downtime) |
 | Cert expiry alert | `sudo certbot renew --cert-name <sni> --force-renewal`; `--dry-run` is a false signal on this box (staging CA) |
 | Change a feature flag | `PUT /api/v1/admin/flags/{key}` with an admin JWT, or the dashboard `/admin/flags`; ~15 s to take effect, no restart |
 
