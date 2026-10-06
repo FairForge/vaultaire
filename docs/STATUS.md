@@ -9,7 +9,7 @@ Updated: 2026-10-06. Single writer: the plan driver folds worker results in; a w
 - Prometheus loads `vaultaire-{alerts,backends,tls}.yml` only; `auth`, `synthetic`, `egress`, `jobs`, `routing` are not installed.
 - Backups: on the box, `0664`, 7 days, nothing leaves the host (WP-R9-7). HAProxy: no `/metrics` deny; `tune.h2.initial-window-size 262144`.
 - Flags: `signups` off (env); `egress_throttle`, `smart_demotion`, `quota_checkout`, `house_overview` OFF; `vault_parity` ON for the bench tenant only; `chunking` on (code default).
-- Migrations: `077_vault_parity.sql` latest. **Next: 078.**
+- Migrations: `078_bucket_cors.sql` latest. **Next: 079.**
 
 ## Launch
 
@@ -18,8 +18,8 @@ Updated: 2026-10-06. Single writer: the plan driver folds worker results in; a w
 
 ## Worker queue (one item per session; done = merged, deployed, verified, this file updated)
 
-1. **GitHub churn** — `merge_group` in `ci.yml` + the merge-queue rule on the main ruleset, `paths-ignore` on `deploy.yml`, dependabot `golang.org/x/*` group, this file. *(in progress 2026-10-06)*
-2. **Bucket CORS** — `PutBucketCors` / `GetBucketCors` / `DeleteBucketCors` in the AWS XML shape, stored per bucket, default none; the OPTIONS preflight answered before SigV4 for buckets with a matching rule; the actual-response headers on a matching origin; `ETag` and `x-amz-*` exposed; migration 078; `docs/API.md:106` and `llms.txt` corrected (they claim `?cors` today; it answers 501). *(next)*
+1. ~~**GitHub churn**~~ — **done 2026-10-06, #601** + the merge-queue rule on the main ruleset (SQUASH, ALLGREEN, up to 5 built / 5 merged, min 1, 60 min check timeout): `gh pr merge --auto --squash` now enqueues, the PR is tested on the merge branch and merged there; `paths-ignore` on `deploy.yml`; dependabot `golang.org/x/*` group; this file.
+2. ~~**Bucket CORS**~~ — **done 2026-10-06** (`internal/api/s3_cors.go`, migration 078): `PutBucketCors` / `GetBucketCors` / `DeleteBucketCors` in the AWS shape, default none; the OPTIONS preflight answered before SigV4 (by bucket name across tenants); the matching rule's headers on every status of the real request; `docs/API.md` + the changelog. Live proof against `s3.stored.ge` after the deploy is the next thing to do.
 3. **`whoami`** — `GET /api/v1/whoami` signed with the key (SigV4): tenant id, key id, permissions, bucket scope, expiry, whether it is an STS token — so an edge gateway can partition its cache per tenant (plan 42.7).
 4. **Zero-downtime deploy** — two instances (`vaultaire@8000` / `vaultaire@8001`) behind HAProxy with a drain-and-switch in `deploy.yml`; one active at a time (the pending-TOTP secret and the auth cache are per process); `docs/DEPLOY.md`.
 5. Parked: **WP-R11-3** webhook outbox (asked 2026-10-02, unanswered; returns with the first app that purges an edge copy on delete). Old queue items 6 (encryption track), 7 (WP-R2-1), 12 (edge follow-ups): the 2026-10-06 review recommends post-launch; await Isaac.

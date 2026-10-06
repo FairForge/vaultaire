@@ -32,6 +32,9 @@ const (
 	OpPutBucketAcl               = "PutBucketAcl"
 	OpGetObjectLockConfiguration = "GetObjectLockConfiguration"
 	OpPutObjectLockConfiguration = "PutObjectLockConfiguration"
+	OpGetBucketCors              = "GetBucketCors"
+	OpPutBucketCors              = "PutBucketCors"
+	OpDeleteBucketCors           = "DeleteBucketCors"
 	OpGetObject                  = "GetObject"
 	OpPutObject                  = "PutObject"
 	OpDeleteObject               = "DeleteObject"
@@ -67,6 +70,7 @@ var S3Operations = []string{
 	OpGetBucketInventory, OpPutBucketInventory, OpDeleteBucketInventory,
 	OpGetBucketAcl, OpPutBucketAcl,
 	OpGetObjectLockConfiguration, OpPutObjectLockConfiguration,
+	OpGetBucketCors, OpPutBucketCors, OpDeleteBucketCors,
 	OpGetObject, OpPutObject, OpDeleteObject, OpDeleteObjects, OpHeadObject,
 	OpPostObject, OpRestoreObject,
 	OpGetObjectTagging, OpPutObjectTagging, OpDeleteObjectTagging,

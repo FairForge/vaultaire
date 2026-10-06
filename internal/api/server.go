@@ -853,7 +853,18 @@ func (s *Server) setupRoutes() {
 	s.router.Head("/changelog", s.handleChangelog)
 
 	s.logger.Info("Registering S3 catch-all handler")
+	s.registerS3CatchAll()
+}
+
+// registerS3CatchAll mounts the S3 API: every method of every unmatched
+// path goes to handleS3Request, except OPTIONS, which is the browser's CORS
+// preflight and is answered before any authentication (s3_cors.go). chi
+// keeps one handler per method per pattern; the OPTIONS registration after
+// the catch-all replaces the catch-all's entry for that method only. The
+// /cdn OPTIONS route is registered on its own pattern and is unaffected.
+func (s *Server) registerS3CatchAll() {
 	s.router.HandleFunc("/*", s.handleS3Request)
+	s.router.Options("/*", s.handleS3Preflight)
 }
 
 func (s *Server) registerComplianceRoutes() {

@@ -58,13 +58,16 @@ const (
 	ErrXAmzContentSHA256Mismatch = "XAmzContentSHA256Mismatch"
 	ErrInvalidArgument           = "InvalidArgument"
 	ErrAccountSuspended          = "AccountSuspended"
-	ErrSlowDown                  = "SlowDown"
-	ErrNoSuchUpload              = "NoSuchUpload"
-	ErrInvalidPart               = "InvalidPart"
-	ErrInvalidPartOrder          = "InvalidPartOrder"
-	ErrEntityTooSmall            = "EntityTooSmall"
-	ErrInvalidPartNumber         = "InvalidPartNumber"
-	ErrNoSuchVersion             = "NoSuchVersion"
+	// CORS (s3_cors.go): AWS's code for a refused preflight, and for GetBucketCors of a bucket without one.
+	ErrCORSForbidden           = "AccessForbidden"
+	ErrNoSuchCORSConfiguration = "NoSuchCORSConfiguration"
+	ErrSlowDown                = "SlowDown"
+	ErrNoSuchUpload            = "NoSuchUpload"
+	ErrInvalidPart             = "InvalidPart"
+	ErrInvalidPartOrder        = "InvalidPartOrder"
+	ErrEntityTooSmall          = "EntityTooSmall"
+	ErrInvalidPartNumber       = "InvalidPartNumber"
+	ErrNoSuchVersion           = "NoSuchVersion"
 	// A1 conformance (2026-09-18): the former "ObjectLocked" code was not an
 	// AWS error code — lock-protected operations answer AccessDenied on the
 	// wire, with the lock detail appended to the message via WithSuggestion.
@@ -109,6 +112,8 @@ var errorMessages = map[string]string{
 	ErrXAmzContentSHA256Mismatch:         "The provided 'x-amz-content-sha256' header does not match what was computed",
 	ErrInvalidArgument:                   "Invalid argument",
 	ErrAccountSuspended:                  "Your account has been suspended. Contact support for assistance.",
+	ErrCORSForbidden:                     "CORSResponse: This CORS request is not allowed. This is usually because the evalution of Origin, request method / Access-Control-Request-Method or Access-Control-Request-Headers are not whitelisted by the resource's CORS spec.",
+	ErrNoSuchCORSConfiguration:           "The CORS configuration does not exist",
 	ErrSlowDown:                          "Please reduce your request rate: this account has used its monthly egress allowance and already has the maximum number of rate-limited downloads in progress. Retry shortly.",
 	ErrNoSuchUpload:                      "The specified multipart upload does not exist. The upload ID may be invalid, or the upload may have been aborted or completed.",
 	ErrInvalidPart:                       "One or more of the specified parts could not be found. The part may not have been uploaded, or the specified entity tag may not match the part's entity tag.",
@@ -157,6 +162,8 @@ var errorStatusCodes = map[string]int{
 	ErrXAmzContentSHA256Mismatch:         http.StatusBadRequest,
 	ErrInvalidArgument:                   http.StatusBadRequest,
 	ErrAccountSuspended:                  http.StatusForbidden,
+	ErrCORSForbidden:                     http.StatusForbidden,
+	ErrNoSuchCORSConfiguration:           http.StatusNotFound,
 	ErrSlowDown:                          http.StatusServiceUnavailable,
 	ErrNoSuchUpload:                      http.StatusNotFound,
 	ErrInvalidPart:                       http.StatusBadRequest,

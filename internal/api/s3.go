@@ -165,6 +165,8 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 				req.Operation = auth.OpListObjectVersions
 			} else if _, ok := req.Query["acl"]; ok {
 				req.Operation = auth.OpGetBucketAcl
+			} else if _, ok := req.Query["cors"]; ok {
+				req.Operation = auth.OpGetBucketCors
 			} else {
 				req.Operation = auth.OpListObjects
 			}
@@ -181,12 +183,16 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 				req.Operation = auth.OpPutBucketInventory
 			} else if _, ok := req.Query["acl"]; ok {
 				req.Operation = auth.OpPutBucketAcl
+			} else if _, ok := req.Query["cors"]; ok {
+				req.Operation = auth.OpPutBucketCors
 			} else {
 				req.Operation = auth.OpCreateBucket
 			}
 		case "DELETE":
 			if _, ok := req.Query["inventory"]; ok {
 				req.Operation = auth.OpDeleteBucketInventory
+			} else if _, ok := req.Query["cors"]; ok {
+				req.Operation = auth.OpDeleteBucketCors
 			} else {
 				req.Operation = auth.OpDeleteBucket
 			}
@@ -305,6 +311,11 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		r.URL.Path == "/metrics" || r.URL.Path == "/version" {
 		return
 	}
+
+	// CORS headers for a browser's request, before authentication, so every
+	// status below — the auth 403 included — is readable from a page on an
+	// origin the bucket allows (s3_cors.go). Nothing for a plain S3 client.
+	s.applyS3CORS(w, r)
 
 	var tenantID string
 	var scope *auth.KeyScope
@@ -627,6 +638,12 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		s.handlePutBucketInventory(cw, r, s3Req)
 	case "DeleteBucketInventory":
 		s.handleDeleteBucketInventory(cw, r, s3Req)
+	case "GetBucketCors":
+		s.handleGetBucketCors(cw, r, s3Req)
+	case "PutBucketCors":
+		s.handlePutBucketCors(cw, r, s3Req)
+	case "DeleteBucketCors":
+		s.handleDeleteBucketCors(cw, r, s3Req)
 	case "RestoreObject":
 		s.handleRestoreObject(cw, r, s3Req)
 	case "GetObjectTagging":
