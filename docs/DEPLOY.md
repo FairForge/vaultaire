@@ -147,13 +147,18 @@ vaultaire@8001  "green"   /opt/vaultaire/bin/vaultaire-8001     the other stoppe
   per process, and the synthetic check would run twice — none of that is safe
   with two instances taking traffic. During the drain window the old slot only
   finishes what it already had.
-- **Cutover record (2026-10-06)**: the template, script and sudoers installed;
-  `vaultaire-8000` and `vaultaire-8001` copied from the running binary;
-  HAProxy backends and the metrics frontend added and reloaded; Prometheus
-  target moved to `:8010`; `vaultaire-switch deploy` run once with the current
-  build — it started `vaultaire@8001`, switched, drained and stopped the legacy
-  `vaultaire.service` (which held `:8000`); `/version` through `stored.ge`
-  unchanged throughout.
+- **Cutover record (2026-10-06, 16:48–16:50 UTC)**: the template, script and
+  sudoers installed; `vaultaire-8000` and `vaultaire-8001` copied from the
+  running binary; HAProxy backends and the metrics frontend added and reloaded
+  (the first edit anchored on `default_backend s3_backend` in the stats block
+  and left an invalid file on disk — the running process was unaffected; it was
+  restored from the backup and redone on the `^backend` line); Prometheus
+  target moved to `:8010`; `vaultaire-switch deploy` run twice with the current
+  build — the first started `vaultaire@8001`, switched, drained and stopped the
+  legacy `vaultaire.service` (which held `:8000`), the second went back to
+  `vaultaire@8000`; 8.5 s each, 0 non-200 answers on a 1 s probe of
+  `stored.ge/health/live` across the first. #605 and #604 then deployed
+  through the script (9 s from install to active).
 
 ### CI (`ci.yml`)
 
