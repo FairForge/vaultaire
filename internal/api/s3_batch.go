@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sync"
 
 	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/tenant"
@@ -14,6 +15,11 @@ import (
 
 // maxBatchDeleteKeys is the S3 spec limit per DeleteObjects request.
 const maxBatchDeleteKeys = 1000
+
+// batchDeleteConcurrency is how many keys of one DeleteObjects request are
+// deleted at once (Sync: ~1 s per delete, ~14/s per account — 16 in flight
+// keeps a bridge busy without queueing the whole batch on its slots).
+const batchDeleteConcurrency = 16
 
 // maxBatchDeleteBodyBytes caps the request body size to avoid unbounded
 // memory use. 1000 keys × ~1KB per <Object> entry fits comfortably in 2 MiB.
@@ -57,7 +63,19 @@ type DeleteError struct {
 // S3 DeleteObjects is idempotent per key: a missing key is reported as
 // "Deleted" (not an error), matching AWS behavior. When <Quiet>true</Quiet>
 // is set, only errors are returned.
+//
+// The keys are deleted batchDeleteConcurrency at a time (results in request
+// order, a key named twice is deleted once) under the long-operation
+// keep-alive (s3_long_op.go): on Sync a delete costs ~1 s, so a 1,000-key
+// batch run one key after another outlasted Cloudflare's 100 s and the
+// client's disconnect stopped it halfway.
 func (s *Server) handleDeleteObjects(w http.ResponseWriter, r *http.Request, req *S3Request) {
+	s.runLongS3Op(w, r, func(w http.ResponseWriter, r *http.Request) {
+		s.deleteObjects(w, r, req)
+	})
+}
+
+func (s *Server) deleteObjects(w http.ResponseWriter, r *http.Request, req *S3Request) {
 	t, err := tenant.FromContext(r.Context())
 	if err != nil || t == nil {
 		WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
@@ -100,113 +118,37 @@ func (s *Server) handleDeleteObjects(w http.ResponseWriter, r *http.Request, req
 
 	result := DeleteResult{Xmlns: "http://s3.amazonaws.com/doc/2006-03-01/"}
 
+	// One outcome per distinct key, computed in parallel; reported per
+	// requested entry in request order.
+	first := make(map[string]int, len(delReq.Objects))
+	var unique []string
 	for _, obj := range delReq.Objects {
-		key := obj.Key
-		if key == "" {
-			if !delReq.Quiet {
-				result.Errors = append(result.Errors, DeleteError{
-					Key:     key,
-					Code:    ErrInvalidRequest,
-					Message: "Key is required",
-				})
-			} else {
-				result.Errors = append(result.Errors, DeleteError{
-					Code:    ErrInvalidRequest,
-					Message: "Key is required",
-				})
-			}
+		if _, seen := first[obj.Key]; !seen {
+			first[obj.Key] = len(unique)
+			unique = append(unique, obj.Key)
+		}
+	}
+	outcomes := make([]*DeleteError, len(unique))
+	sem := make(chan struct{}, batchDeleteConcurrency)
+	var wg sync.WaitGroup
+	for i, key := range unique {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, key string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			outcomes[i] = s.batchDeleteKey(r, t, bucket, container, key)
+		}(i, key)
+	}
+	wg.Wait()
+
+	for _, obj := range delReq.Objects {
+		if e := outcomes[first[obj.Key]]; e != nil {
+			result.Errors = append(result.Errors, *e)
 			continue
 		}
-
-		if lockErr := checkObjectLock(r.Context(), s.db, t.ID, bucket, key, isObjectLockBypass(r)); lockErr != nil {
-			result.Errors = append(result.Errors, DeleteError{
-				Key:     key,
-				Code:    ErrAccessDenied,
-				Message: errorMessages[ErrAccessDenied] + " " + lockDeniedHint(r),
-			})
-			continue
-		}
-
-		// Chunked objects live under _chunks/, not container/key: their
-		// delete decrements GCI ref counts (mirrors single-key HandleDelete)
-		// so dedup GC can reclaim the physical chunks. backend_name is the
-		// routing truth: without the hint a DELETE after a restart went to
-		// the primary alone, was answered "not found", and the bytes stayed
-		// on the real backend while the head row went (R6-05, WP-R6-1).
-		var isChunked bool
-		var recordedBackend string
-		if s.db != nil {
-			if rowErr := s.db.QueryRowContext(r.Context(),
-				`SELECT is_chunked, COALESCE(backend_name, '') FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-				t.ID, bucket, key).Scan(&isChunked, &recordedBackend); rowErr != nil && !errors.Is(rowErr, sql.ErrNoRows) {
-				// Never guess "whole" for a possibly chunked object (R8-07).
-				s.logger.Error("batch delete: head cache read failed", zap.Error(rowErr), zap.String("key", key))
-				result.Errors = append(result.Errors, DeleteError{
-					Key: key, Code: ErrInternalError, Message: "Internal error while deleting",
-				})
-				continue
-			}
-		}
-
-		var delErr error
-		// A chunked object's manifest is released together with its head row
-		// below, in one transaction (R8-08); there is no backend delete.
-		if !isChunked || s.gci == nil {
-			if recordedBackend != "" && s.engine != nil {
-				noteRecordedBackend(s.engine, s.logger, "delete_objects", recordedBackend)
-				s.engine.HintBackend(container, key, recordedBackend)
-			}
-			delErr = s.engine.Delete(r.Context(), container, key)
-			// A miss is idempotent (AWS behaviour) in every shape a driver
-			// produces it — the SDK's NoSuchKey/NotFound included (R6-25);
-			// an unreachable backend is NOT a miss (R6-02).
-			if delErr != nil && isObjectMissingErr(delErr) {
-				delErr = nil
-			}
-		}
-
-		if delErr != nil {
-			s.logger.Error("batch delete: delete failed",
-				zap.Error(delErr),
-				zap.String("container", container),
-				zap.String("key", key))
-			result.Errors = append(result.Errors, DeleteError{
-				Key:     key,
-				Code:    ErrInternalError,
-				Message: "Internal error while deleting",
-			})
-			continue
-		}
-
-		// Success (or idempotent miss) — remove the billing record and
-		// release exactly the bytes it held (atomic via RETURNING, WP-1).
-		if s.db != nil {
-			deleted, found, cacheErr := deleteHeadRowReleasing(r.Context(), s.db, manifestReleaser(s.gci), t.ID, bucket, key)
-			switch {
-			case cacheErr != nil && isChunked:
-				// Row and manifest rolled back together: the object is intact
-				// and the client retries this key.
-				s.logger.Error("batch delete: chunked delete failed",
-					zap.Error(cacheErr), zap.String("key", key))
-				result.Errors = append(result.Errors, DeleteError{
-					Key: key, Code: ErrInternalError, Message: "Internal error while deleting",
-				})
-				continue
-			case cacheErr != nil:
-				s.logger.Error("batch delete: head cache delete failed",
-					zap.Error(cacheErr), zap.String("key", key))
-			case found && deleted.Size > 0:
-				ctx, cancel := quotaCtx(r)
-				s.releaseQuota(ctx, t.ID, deleted.Floor, deleted.Size)
-				cancel()
-			}
-			// The second copy of a Smart-demoted object and its ledger row,
-			// exactly as single DELETE (WP-R13-2).
-			s.smartPromoter.OnDelete(r.Context(), t.ID, bucket, key)
-		}
-
 		if !delReq.Quiet {
-			result.Deleted = append(result.Deleted, DeletedItem{Key: key})
+			result.Deleted = append(result.Deleted, DeletedItem{Key: obj.Key})
 		}
 	}
 
@@ -230,4 +172,99 @@ func (s *Server) handleDeleteObjects(w http.ResponseWriter, r *http.Request, req
 		zap.Int("deleted", len(result.Deleted)),
 		zap.Int("errors", len(result.Errors)),
 		zap.Bool("quiet", delReq.Quiet))
+}
+
+// batchDeleteKey deletes one key of a DeleteObjects batch and returns its
+// error entry, or nil when the key is deleted (or was already missing — S3
+// batch delete is idempotent per key). Safe to run concurrently for
+// distinct keys.
+func (s *Server) batchDeleteKey(r *http.Request, t *tenant.Tenant, bucket, container, key string) *DeleteError {
+	if key == "" {
+		return &DeleteError{Key: key, Code: ErrInvalidRequest, Message: "Key is required"}
+	}
+
+	if lockErr := checkObjectLock(r.Context(), s.db, t.ID, bucket, key, isObjectLockBypass(r)); lockErr != nil {
+		return &DeleteError{
+			Key:     key,
+			Code:    ErrAccessDenied,
+			Message: errorMessages[ErrAccessDenied] + " " + lockDeniedHint(r),
+		}
+	}
+
+	// Chunked objects live under _chunks/, not container/key: their
+	// delete decrements GCI ref counts (mirrors single-key HandleDelete)
+	// so dedup GC can reclaim the physical chunks. backend_name is the
+	// routing truth: without the hint a DELETE after a restart went to
+	// the primary alone, was answered "not found", and the bytes stayed
+	// on the real backend while the head row went (R6-05, WP-R6-1).
+	var isChunked bool
+	var recordedBackend string
+	if s.db != nil {
+		if rowErr := s.db.QueryRowContext(r.Context(),
+			`SELECT is_chunked, COALESCE(backend_name, '') FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+			t.ID, bucket, key).Scan(&isChunked, &recordedBackend); rowErr != nil && !errors.Is(rowErr, sql.ErrNoRows) {
+			// Never guess "whole" for a possibly chunked object (R8-07).
+			s.logger.Error("batch delete: head cache read failed", zap.Error(rowErr), zap.String("key", key))
+			return &DeleteError{
+				Key: key, Code: ErrInternalError, Message: "Internal error while deleting",
+			}
+		}
+	}
+
+	var delErr error
+	// A chunked object's manifest is released together with its head row
+	// below, in one transaction (R8-08); there is no backend delete.
+	if !isChunked || s.gci == nil {
+		if recordedBackend != "" && s.engine != nil {
+			noteRecordedBackend(s.engine, s.logger, "delete_objects", recordedBackend)
+			s.engine.HintBackend(container, key, recordedBackend)
+		}
+		delErr = s.engine.Delete(r.Context(), container, key)
+		// A miss is idempotent (AWS behaviour) in every shape a driver
+		// produces it — the SDK's NoSuchKey/NotFound included (R6-25);
+		// an unreachable backend is NOT a miss (R6-02).
+		if delErr != nil && isObjectMissingErr(delErr) {
+			delErr = nil
+		}
+	}
+
+	if delErr != nil {
+		s.logger.Error("batch delete: delete failed",
+			zap.Error(delErr),
+			zap.String("container", container),
+			zap.String("key", key))
+		return &DeleteError{
+			Key:     key,
+			Code:    ErrInternalError,
+			Message: "Internal error while deleting",
+		}
+	}
+
+	// Success (or idempotent miss) — remove the billing record and
+	// release exactly the bytes it held (atomic via RETURNING, WP-1).
+	if s.db != nil {
+		deleted, found, cacheErr := deleteHeadRowReleasing(r.Context(), s.db, manifestReleaser(s.gci), t.ID, bucket, key)
+		switch {
+		case cacheErr != nil && isChunked:
+			// Row and manifest rolled back together: the object is intact
+			// and the client retries this key.
+			s.logger.Error("batch delete: chunked delete failed",
+				zap.Error(cacheErr), zap.String("key", key))
+			return &DeleteError{
+				Key: key, Code: ErrInternalError, Message: "Internal error while deleting",
+			}
+		case cacheErr != nil:
+			s.logger.Error("batch delete: head cache delete failed",
+				zap.Error(cacheErr), zap.String("key", key))
+		case found && deleted.Size > 0:
+			ctx, cancel := quotaCtx(r)
+			s.releaseQuota(ctx, t.ID, deleted.Floor, deleted.Size)
+			cancel()
+		}
+		// The second copy of a Smart-demoted object and its ledger row,
+		// exactly as single DELETE (WP-R13-2).
+		s.smartPromoter.OnDelete(r.Context(), t.ID, bucket, key)
+	}
+
+	return nil
 }
