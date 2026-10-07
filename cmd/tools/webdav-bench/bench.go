@@ -20,16 +20,21 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/drivers"
+	"github.com/FairForge/vaultaire/internal/engine"
 )
 
 // config is every knob of a run (flags in main.go).
 type config struct {
 	URL, User, Password, Root string
-	Tenant                    string
-	Suites                    []string
-	Out                       string
-	Cleanup                   bool
-	Seed                      int64
+	// URLs / Passwords (-urls, WEBDAV_PASSWORDS): several bridges of one
+	// folder, driven through the multi-bridge driver; URL/Password are the
+	// first (the raw client's).
+	URLs, Passwords []string
+	Tenant          string
+	Suites          []string
+	Out             string
+	Cleanup         bool
+	Seed            int64
 
 	SmallSizes []int64
 	SmallConc  []int
@@ -59,6 +64,12 @@ type config struct {
 	ParitySmallSize  int64
 	ParitySmallConc  int
 
+	CrossN       int
+	CrossSize    int64
+	CrossPoll    time.Duration
+	CrossTimeout time.Duration
+	CrossConc    int
+
 	Proc        string
 	SpillDir    string
 	SampleEvery time.Duration
@@ -68,15 +79,27 @@ type config struct {
 	IdleTimeout    time.Duration
 	PutTimeout     time.Duration
 	MaxConcurrency int
-	Attempts       int
-	OpTimeout      time.Duration
+	// LargeConcurrency (multi-bridge): large transfers per bridge and
+	// direction (0 = the driver's default, 3).
+	LargeConcurrency int
+	Attempts         int
+	OpTimeout        time.Duration
 }
 
 // defaultSuites run without -run; limits is opt-in (it probes failure modes
-// and its folder probe writes 50,001 files).
+// and its folder probe writes 50,001 files), and so is crossbridge (it needs
+// -urls with two bridges or more, and waits out Sync's propagation).
 var defaultSuites = []string{"small", "large", "range", "consistency", "listing", "parity"}
 
-var allSuites = append(append([]string(nil), defaultSuites...), "limits")
+var allSuites = append(append([]string(nil), defaultSuites...), "limits", "crossbridge")
+
+// benchDriver is what the suites use of a driver: the single-server
+// WebDAVDriver (-url) or the multi-bridge one (-urls).
+type benchDriver interface {
+	engine.Driver
+	GetRange(ctx context.Context, container, artifact string, offset, length int64) (io.ReadCloser, error)
+	Stats() drivers.WebDAVStats
+}
 
 // Row is one measured operation of one case.
 type Row struct {
@@ -129,7 +152,8 @@ type StallResult struct {
 // bench is one run: the real driver, a raw client, and the report.
 type bench struct {
 	cfg       config
-	drv       *drivers.WebDAVDriver
+	drv       benchDriver
+	bridges   []*drivers.WebDAVDriver // one single-server driver per -urls bridge (crossbridge)
 	raw       *rawClient
 	ctx       context.Context // carries the tenant
 	container string          // the run folder (= the driver's container)
@@ -175,13 +199,35 @@ func run(ctx context.Context, cfg config, out io.Writer) (*Report, error) {
 			return nil, fmt.Errorf("unknown suite %q (have %s)", s, strings.Join(allSuites, ","))
 		}
 	}
-	drv, err := drivers.NewWebDAVDriver("webdav-bench", cfg.URL, cfg.User, cfg.Password, cfg.Root, zap.NewNop(),
+	limits := []drivers.WebDAVOption{
 		drivers.WithWebDAVIdleTimeout(cfg.IdleTimeout),
 		drivers.WithWebDAVPutTimeout(cfg.PutTimeout),
 		drivers.WithWebDAVMaxConcurrency(cfg.MaxConcurrency),
-		drivers.WithWebDAVRetries(cfg.Attempts, -1))
-	if err != nil {
-		return nil, fmt.Errorf("driver: %w", err)
+		drivers.WithWebDAVRetries(cfg.Attempts, -1),
+	}
+	var drv benchDriver
+	var bridges []*drivers.WebDAVDriver
+	if len(cfg.URLs) > 0 {
+		mc := drivers.WebDAVConfig{User: cfg.User, Root: cfg.Root, LargeConcurrency: cfg.LargeConcurrency}
+		for i, u := range cfg.URLs {
+			mc.Bridges = append(mc.Bridges, drivers.WebDAVBridge{URL: u, Password: cfg.Passwords[i]})
+			one, err := drivers.NewWebDAVDriver("webdav-bench", u, cfg.User, cfg.Passwords[i], cfg.Root, zap.NewNop(), limits...)
+			if err != nil {
+				return nil, fmt.Errorf("bridge %d: %w", i, err)
+			}
+			bridges = append(bridges, one)
+		}
+		m, err := drivers.NewMultiWebDAVDriver("webdav-bench", mc, zap.NewNop(), limits...)
+		if err != nil {
+			return nil, fmt.Errorf("driver: %w", err)
+		}
+		drv = m
+	} else {
+		one, err := drivers.NewWebDAVDriver("webdav-bench", cfg.URL, cfg.User, cfg.Password, cfg.Root, zap.NewNop(), limits...)
+		if err != nil {
+			return nil, fmt.Errorf("driver: %w", err)
+		}
+		drv = one
 	}
 	raw, err := newRawClient(cfg.URL, cfg.User, cfg.Password, cfg.OpTimeout)
 	if err != nil {
@@ -193,25 +239,26 @@ func run(ctx context.Context, cfg config, out io.Writer) (*Report, error) {
 	b := &bench{
 		cfg:       cfg,
 		drv:       drv,
+		bridges:   bridges,
 		raw:       raw,
 		ctx:       common.WithTenantID(ctx, cfg.Tenant),
 		container: runID,
 		out:       out,
 		rep: &Report{
-			Started: time.Now().UTC(), URL: cfg.URL, Root: cfg.Root, Tenant: cfg.Tenant, RunID: runID,
+			Started: time.Now().UTC(), URL: reportURL(cfg), Root: cfg.Root, Tenant: cfg.Tenant, RunID: runID,
 			Host: host, Suites: cfg.Suites, Seed: cfg.Seed, Mismatches: []string{}, Errors: []string{},
 		},
 	}
 	if err := drv.HealthCheck(b.ctx); err != nil {
 		return nil, fmt.Errorf("health check (URL, user, password?): %w", err)
 	}
-	fprintf(out, "webdav-bench %s → %s root=%s run=%s suites=%s\n", host, cfg.URL, cfg.Root, runID, strings.Join(cfg.Suites, ","))
+	fprintf(out, "webdav-bench %s → %s root=%s run=%s suites=%s\n", host, reportURL(cfg), cfg.Root, runID, strings.Join(cfg.Suites, ","))
 
 	smp := startSampler(ctx, cfg.Proc, cfg.SpillDir, cfg.SampleEvery)
 	suites := map[string]func(){
 		"small": b.suiteSmall, "large": b.suiteLarge, "range": b.suiteRange,
 		"consistency": b.suiteConsistency, "listing": b.suiteListing,
-		"parity": b.suiteParity, "limits": b.suiteLimits,
+		"parity": b.suiteParity, "limits": b.suiteLimits, "crossbridge": b.suiteCrossbridge,
 	}
 	for _, s := range cfg.Suites {
 		if ctx.Err() != nil {

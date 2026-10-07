@@ -388,17 +388,26 @@ func main() {
 	// placed on only for a bucket with tier_preference 'sync' of a tenant
 	// with the sync_backend flag. Sync's terms forbid reselling the service
 	// without its written consent. See internal/drivers/webdav_README.md.
-	if syncCfg, ok := drivers.SyncWebDAVConfigFromEnv(os.Getenv); ok {
+	// One or several bridges (SYNC_WEBDAV_URLS + SYNC_WEBDAV_PASSWORDS): each
+	// key lives on one bridge (HRW), reads fall back, writes do not
+	// (internal/drivers/webdav_multi.go). Passwords are never logged.
+	syncCfg, syncOK, syncErr := drivers.SyncWebDAVConfigFromEnv(os.Getenv)
+	if syncOK {
 		for _, w := range syncCfg.Warnings {
 			logger.Warn(w)
 		}
-		syncDriver, err := drivers.NewWebDAVDriver("sync", syncCfg.URL, syncCfg.User, syncCfg.Password, syncCfg.Root, logger, syncCfg.Options()...)
+	}
+	switch {
+	case syncErr != nil:
+		logger.Error("failed to add Sync WebDAV driver: bad bridge configuration", zap.Error(syncErr))
+	case syncOK:
+		syncDriver, err := drivers.NewMultiWebDAVDriver("sync", syncCfg, logger)
 		if err != nil {
 			logger.Error("failed to add Sync WebDAV driver", zap.Error(err))
 		} else {
 			eng.AddDriver("sync", syncDriver)
 			logger.Info("Sync WebDAV driver added (target-only; sync_backend flag)",
-				zap.String("url", syncCfg.URL), zap.String("root", syncCfg.Root))
+				zap.Int("bridges", syncDriver.Bridges()), zap.String("root", syncCfg.Root))
 		}
 	}
 

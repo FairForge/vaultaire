@@ -15,7 +15,17 @@
 //	WEBDAV_PASSWORD=$(cat ~/.config/sync-webdav/password) \
 //	  ./webdav-bench -run small,large,range,consistency,parity -out results.json
 //
-// The password is read from WEBDAV_PASSWORD only (never a flag, never
+// Several bridges of one folder (Sync: one bridge process per device
+// profile) are driven through the multi-bridge driver with -urls and
+// WEBDAV_PASSWORDS (comma-separated, same order); the opt-in crossbridge
+// suite writes through bridge i and measures when bridge j sees the write,
+// the overwrite and the delete:
+//
+//	WEBDAV_PASSWORDS=p0,p1,p2,p3,p4 ./webdav-bench \
+//	  -urls http://127.0.0.1:4918,http://127.0.0.1:4919,http://127.0.0.1:4920,http://127.0.0.1:4921,http://127.0.0.1:4922 \
+//	  -run small,large,crossbridge -out multi.json
+//
+// The password is read from WEBDAV_PASSWORD(S) only (never a flag, never
 // printed). Everything is written under <root>/t-<tenant>/run-<timestamp>/
 // and deleted at the end (-cleanup=false keeps it). See cmd/tools/README.md.
 package main
@@ -68,10 +78,17 @@ func parseFlags(args []string, getenv func(string) string) (config, error) {
 	fs := flag.NewFlagSet("webdav-bench", flag.ContinueOnError)
 	var c config
 	fs.StringVar(&c.URL, "url", "http://127.0.0.1:4918", "WebDAV server URL (no credentials)")
+	urls := fs.String("urls", "", "comma-separated bridge URLs of ONE folder: drive the multi-bridge driver (passwords from WEBDAV_PASSWORDS, same order); overrides -url")
+	fs.IntVar(&c.CrossN, "crossbridge-n", 20, "crossbridge: rounds (write via bridge i, wait until bridge j sees it; then overwrite, then delete)")
+	crossSize := fs.String("crossbridge-size", "64KiB", "crossbridge: object size")
+	fs.DurationVar(&c.CrossPoll, "crossbridge-poll", 250*time.Millisecond, "crossbridge: poll interval on the reading bridge")
+	fs.DurationVar(&c.CrossTimeout, "crossbridge-timeout", 10*time.Minute, "crossbridge: give up on one visibility wait after this long")
+	fs.IntVar(&c.CrossConc, "crossbridge-conc", 4, "crossbridge: rounds in parallel")
+	fs.IntVar(&c.LargeConcurrency, "large-concurrency", 0, "multi-bridge driver: transfers ≥ 16 MiB per bridge and direction (0 = the default, 3; SYNC_WEBDAV_LARGE_CONCURRENCY in the server)")
 	fs.StringVar(&c.User, "user", "sync", "Basic auth user (password from WEBDAV_PASSWORD)")
 	fs.StringVar(&c.Root, "root", "_bench", "folder under the URL the bench writes in")
 	fs.StringVar(&c.Tenant, "tenant", "bench", "driver tenant (folder t-<tenant> under -root)")
-	runList := fs.String("run", strings.Join(defaultSuites, ","), "suites: "+strings.Join(allSuites, ",")+" (limits is opt-in)")
+	runList := fs.String("run", strings.Join(defaultSuites, ","), "suites: "+strings.Join(allSuites, ",")+" (limits and crossbridge are opt-in; crossbridge needs -urls)")
 	fs.StringVar(&c.Out, "out", "", "JSON results file")
 	fs.BoolVar(&c.Cleanup, "cleanup", true, "delete the run folder at the end")
 	fs.Int64Var(&c.Seed, "seed", 1, "data generator seed")
@@ -112,12 +129,28 @@ func parseFlags(args []string, getenv func(string) string) (config, error) {
 	if fs.NArg() > 0 {
 		return config{}, fmt.Errorf("unexpected arguments %v (the password is read from WEBDAV_PASSWORD only)", fs.Args())
 	}
-	c.Password = getenv("WEBDAV_PASSWORD")
-	if c.Password == "" {
-		return config{}, fmt.Errorf("set WEBDAV_PASSWORD")
+	if *urls != "" {
+		for _, u := range strings.Split(*urls, ",") {
+			c.URLs = append(c.URLs, strings.TrimSpace(u))
+		}
+		if pw := getenv("WEBDAV_PASSWORDS"); pw != "" {
+			c.Passwords = strings.Split(pw, ",")
+		}
+		if len(c.Passwords) != len(c.URLs) {
+			return config{}, fmt.Errorf("-urls names %d bridges: set WEBDAV_PASSWORDS to as many comma-separated passwords (it has %d)", len(c.URLs), len(c.Passwords))
+		}
+		c.URL, c.Password = c.URLs[0], c.Passwords[0]
+	} else {
+		c.Password = getenv("WEBDAV_PASSWORD")
+		if c.Password == "" {
+			return config{}, fmt.Errorf("set WEBDAV_PASSWORD")
+		}
 	}
 
 	var err error
+	if c.CrossSize, err = parseSize(*crossSize); err != nil {
+		return config{}, err
+	}
 	for _, s := range strings.Split(*runList, ",") {
 		if s = strings.TrimSpace(s); s != "" {
 			c.Suites = append(c.Suites, s)
@@ -152,6 +185,12 @@ func parseFlags(args []string, getenv func(string) string) (config, error) {
 	}
 	if c.MaxConcurrency < 1 || c.Attempts < 1 || c.IdleTimeout < 0 || c.PutTimeout < 0 || c.OpTimeout < 0 {
 		return config{}, fmt.Errorf("-max-concurrency and -retries must be ≥ 1, the timeouts ≥ 0")
+	}
+	if contains(c.Suites, "crossbridge") && len(c.URLs) < 2 {
+		return config{}, fmt.Errorf("the crossbridge suite needs -urls with two bridges or more")
+	}
+	if c.CrossN < 1 || c.CrossConc < 1 || c.CrossPoll <= 0 || c.CrossTimeout <= 0 || c.LargeConcurrency < 0 {
+		return config{}, fmt.Errorf("-crossbridge-n/-conc must be ≥ 1, -crossbridge-poll/-timeout > 0, -large-concurrency ≥ 0")
 	}
 	if c.SampleEvery <= 0 {
 		c.SampleEvery = time.Second

@@ -57,7 +57,20 @@ groups:
           severity: warning
         annotations:
           summary: "Sync.com WebDAV bridge probe failing"
-          description: "The authenticated PROPFIND against the sync-webdav bridge has failed for 10+ minutes. Check `curl -s localhost:8000/health/backends` for last_error, `systemctl status sync-webdav` and `journalctl -u sync-webdav` on the box (401 = password changed; connection refused = daemon down; 5xx = the bridge cannot reach Sync.com)."
+          description: "The authenticated PROPFIND against the sync-webdav bridge has failed for 10+ minutes (with several bridges: EVERY bridge is down). Check `curl -s localhost:8000/health/backends` for last_error, `systemctl status sync-webdav` and `journalctl -u sync-webdav` on the box (401 = password changed; connection refused = daemon down; 5xx = the bridge cannot reach Sync.com)."
+
+      # One of several Sync bridges (SYNC_WEBDAV_URLS) is down while the
+      # backend stays up: reads of that bridge's keys go to another bridge
+      # (and answer 503 for objects that bridge cannot see yet), WRITES of
+      # its keys fail (~1/N of the sync traffic). A warning.
+      - alert: SyncBridgeDown
+        expr: vaultaire_webdav_bridge_up{backend="sync"} == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sync WebDAV bridge {{ $labels.bridge }} down"
+          description: "Bridge {{ $labels.bridge }} (index into SYNC_WEBDAV_URLS) has failed its authenticated PROPFIND for 10+ minutes; the writes of its ~1/N of the keys fail meanwhile. Check `curl -s localhost:8000/health/backends`, the bridge's systemd unit and its journal (401 = that bridge's password changed: SYNC_WEBDAV_PASSWORDS; connection refused = the process is down)."
 
       # Durable writes are being rejected. One in 10 minutes is worth a
       # heads-up (letshow writes every minute, so a real outage produces

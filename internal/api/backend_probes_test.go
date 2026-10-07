@@ -110,6 +110,18 @@ func TestBuildBackendProbes_SyncUsesAuthenticatedDriverCheck(t *testing.T) {
 	for _, c := range buildBackendProbes(envOf(map[string]string{"SYNC_WEBDAV_PASSWORD": "pw"}), &fakeDriverChecker{drivers: map[string]error{}}) {
 		assert.NotEqual(t, "sync", c.name, "a driver that failed to register is not probed")
 	}
+
+	// Several bridges (SYNC_WEBDAV_PASSWORDS): one probe of the backend,
+	// which probes every bridge (healthy while one is up).
+	multi := buildBackendProbes(envOf(map[string]string{"SYNC_WEBDAV_PASSWORDS": "a,b"}), &fakeDriverChecker{drivers: map[string]error{"sync": nil}})
+	n := 0
+	for _, c := range multi {
+		if c.name == "sync" {
+			n++
+			assert.NotNil(t, c.probe)
+		}
+	}
+	assert.Equal(t, 1, n, "the multi-bridge form is probed too, once")
 }
 
 func TestBuildBackendProbes_GeyserUsesSignedDriverCheck(t *testing.T) {
