@@ -78,6 +78,11 @@ var Deleted = []Rule{
 	// (deletion_runner.go stage b1, WP-VAULT-1); a leg that could not be
 	// reached deferred the tenant before this runs.
 	{"vault_parity", `DELETE FROM vault_parity WHERE tenant_id = $1`, ByTenant},
+	// The pack store's member index (080, internal/packstore). The bytes stay
+	// in their pack until pack_gc rewrites it: a pack whose rows no longer
+	// cover its member_count is rewritten at the next run, whatever its live
+	// ratio. packs rows carry no tenant id (infrastructure, kept).
+	{"pack_members", `DELETE FROM pack_members WHERE tenant_id = $1`, ByTenant},
 	{"object_versions", `DELETE FROM object_versions WHERE tenant_id = $1`, ByTenant},
 	{"object_locks", `DELETE FROM object_locks WHERE tenant_id = $1`, ByTenant},
 	{"object_locations", `DELETE FROM object_locations WHERE tenant_id = $1`, ByTenant},
