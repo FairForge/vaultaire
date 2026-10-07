@@ -645,6 +645,15 @@ func buildBackends(logger *zap.Logger) map[string]engine.Driver {
 			add("wasabi", nil, err)
 		}
 	}
+	// Sync.com bridges (prod's vars: SYNC_WEBDAV_URLS + SYNC_WEBDAV_PASSWORDS,
+	// or the single SYNC_WEBDAV_PASSWORD) through the multi-bridge driver; set
+	// SYNC_WEBDAV_ROOT to keep the bench out of prod's object root.
+	if cfg, ok, err := drivers.SyncWebDAVConfigFromEnv(os.Getenv); err != nil {
+		add("sync", nil, err)
+	} else if ok {
+		d, err := drivers.NewMultiWebDAVDriver("sync", cfg, logger)
+		add("sync", d, err)
+	}
 	names := make([]string, 0, len(bes))
 	for n := range bes {
 		names = append(names, n)
