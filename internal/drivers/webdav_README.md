@@ -96,7 +96,7 @@ to the configured ones before it is sent. A refusal wraps
 | `Exists` | `PROPFIND` Depth 0 | Not HEAD (some bridges special-case it); a folder is not an object |
 | `List` | `PROPFIND` Depth 1 per folder, recursively | Depth infinity is often disabled. Keys relative to the container, sorted; folders skipped and pruned by the prefix; hrefs may be absolute URLs or paths, percent-encoded any way, with or without the trailing slash; an href outside the folder asked for is an error |
 | `WalkTenant` | the same walk of `t-<tenant>/` | `engine.TenantWalker` for the erasure sweep: every file with a `Remove` bound to the listed resource; `""` / `/` ids refused (`checkWalkTenant`); a listing that cannot finish is an error. Empty folders are left behind (names only) |
-| `HealthCheck` | authenticated `PROPFIND` Depth 0 of the root (the server URL when the root folder does not exist yet) | A wrong password is a 401 → failure (architecture decision 1: never a bare GET). Probed by `api/backend_probes.go` when `SYNC_WEBDAV_PASSWORD` is set; alert `SyncProbeFailing` (warning, 10 m) in `deploy/monitoring/vaultaire-backends.yml` |
+| `HealthCheck` | authenticated `PROPFIND` Depth 0 of the root (the server URL when the root folder does not exist yet) | A wrong password is a 401 → failure (architecture decision 1: never a bare GET). Probed by `api/backend_probes.go` when `SYNC_WEBDAV_PASSWORD` or `SYNC_WEBDAV_PASSWORDS` is set (several bridges: every bridge, healthy while one is — see above); alert `SyncProbeFailing` (warning, 10 m) in `deploy/monitoring/vaultaire-backends.yml` |
 
 HTTP: `TunedHTTPClient(WithHTTP1Only(), WithResponseHeaderTimeout(5m))`
 (`VAULTAIRE_TUNED_TRANSPORT=false` = `http.DefaultClient`); 60 s per
@@ -122,24 +122,76 @@ DELETE); and with 4 concurrent 256 MiB PUTs it **stopped reading one body after
 | Retries | 3 attempts, jittered backoff from 250 ms (×2) | `WithWebDAVRetries` | On 500/502/503/504, 423, a transport error (reset, EOF, refused), a stall or a timeout — for PROPFIND, MKCOL (423 keeps its own 5× loop), DELETE and a GET **before its body reached the caller**. A PUT only when the body can be sent again: seekable → rewound; non-seekable with a known length ≤ 8 MiB → held in memory for it (the engine hands drivers a non-seekable reader); larger → never buffered, and a failure after its bytes went out wraps `engine.ErrNoFailover`. A 2xx is never retried; a caller whose context is done is never retried |
 
 Metrics (on `drivers.Collectors()`, every series at 0 per backend from the
-constructor): `vaultaire_webdav_requests_total{backend,method,outcome}` — one
+constructor): `vaultaire_webdav_requests_total{backend,bridge,method,outcome}` — one
 per attempt, outcome `ok | http_4xx | locked | http_5xx | transport_error |
-stall | timeout | canceled`; `vaultaire_webdav_stalls_total{backend,direction}`
-(`upload | download`); `vaultaire_webdav_retries_total{backend,method}`.
+stall | timeout | canceled`; `vaultaire_webdav_stalls_total{backend,bridge,direction}`
+(`upload | download`); `vaultaire_webdav_retries_total{backend,bridge,method}` (`bridge` = the index into `SYNC_WEBDAV_URLS`, `"0"` for one server).
 `WebDAVDriver.Stats()` returns the same stall/retry counts for one driver
 (the bench prints them). Tests: `webdav_resilience_test.go` (a handler that
 reads 62 KB then blocks, one that sends 100 KB then blocks, one that never
 answers headers, flaky 5xx/423, an in-flight peak counter).
 
+## Several bridges (`webdav_multi.go`, `MultiWebDAVDriver`)
+
+One `sync-webdav` process is single-core and CPU-bound. The box runs
+several — one per Sync device profile, each with its OWN WebDAV password, all
+mounted on the same Sync folder (`http://127.0.0.1:4918` … `:4922`) — and the
+backend `sync` spreads over them. `cmd/vaultaire` always builds the
+`MultiWebDAVDriver` (one bridge = the old single-server behaviour).
+
+Live on SLC (2026-10-07), against the real bridges:
+
+| Load | PUT | GET |
+|---|---|---|
+| 256 MiB, 1 bridge | 30 MB/s | 84 MB/s |
+| 256 MiB, 2 concurrent per bridge × 5 | 131 MB/s | 353 MB/s |
+| 256 MiB, 3 concurrent per bridge × 5 | 156 MB/s | 450 MB/s (0 errors, 0 stalls) |
+| 64 KiB, 8 concurrent per bridge × 5 | 21/s | 41/s (DELETE 15/s — metadata writes are limited per Sync account, not per bridge) |
+
+Occasional HTTP 500s (0.1–0.25 %) under load are absorbed by the retries.
+
+**Cross-bridge staleness** is what the design rests on: every bridge caches
+metadata. A file written through bridge A is visible through bridge B after
+**1.5–13 s**; an overwrite after **~30 s (once 310 s)**; a delete after
+**~30 s**. Within ONE bridge every read is consistent (0 stale reads in
+hundreds of rounds). `webdav-bench -urls … -run crossbridge` measures it.
+
+| | |
+|---|---|
+| Routing | Every key lives on ONE bridge: rendezvous (HRW) hashing — FNV-1a + splitmix64 of `bridge-id ‖ 0 ‖ <resource path below the root>` (`t-<tenant>/<container>/<key…>`), highest score wins; the bridge id is its URL (scheme://host + path). 10k keys over 5 bridges land within ±15 %; removing a bridge moves only its keys (~1/N), adding one only takes ~1/(N+1). `Put`, `Get`, `GetRange`, `Exists`, `Delete` go to the key's bridge |
+| Changing the bridge set | Restart with the new `SYNC_WEBDAV_URLS`. The ~1/N keys that move are read from their new bridge, which may not yet see the old bridge's last writes (≤ minutes, see above). Changing a bridge's **URL** (port) is a remove + an add |
+| Fallback reads | `Get`/`GetRange`/`Exists`/`List` whose bridge is unhealthy — its last probe failed, or 3 consecutive transport errors / stalls / timeouts / 5xx-after-retries opened its breaker for 30 s, or this very call failed that way — go to the next bridge in the key's HRW order. **A fallback bridge's NOT FOUND (or `Exists` false) is never reported as such**: the object may have been written through the dead bridge seconds ago. It is `ErrWebDAVBridgeStale`, which wraps `engine.ErrAllBackendsUnavailable` → the API answers **503 + Retry-After**. A live key bridge's miss is a miss (authoritative). A 401/403/4xx is never failed over. When no bridge looks healthy the key's own bridge is asked. Counted in `vaultaire_webdav_fallback_reads_total{backend,outcome=served\|stale_miss\|failed}` |
+| Writes | **Never fail over**: a `Put`/`Delete` of a down bridge's key fails (the caller retries — immutable, content-addressed callers like parity shards and packs retry later). Writing elsewhere would leave the key's own bridge stale for minutes |
+| `List` | Through ONE bridge (the container's HRW bridge, with the read fallback). It may miss an object written through another bridge in the last seconds-to-minutes (nothing is, while the bridge set is unchanged) |
+| `WalkTenant` (erasure sweep) | The **union of every bridge's walk** of `t-<tenant>/`, each object once — an object written through any bridge within the staleness window is still found; each object's `Remove` goes to its routed bridge. A bridge that cannot list fails the walk → the sweep defers the tenant (never "erased" while a bridge may still name an object) |
+| Large transfers | A body ≥ 16 MiB (or of unknown length) takes one of `SYNC_WEBDAV_LARGE_CONCURRENCY` (default **3**) slots **per bridge and direction** on top of the per-bridge total cap (`SYNC_WEBDAV_MAX_CONCURRENCY`, 8). Upload and download slots are separate, so a copy between two keys of one bridge cannot deadlock; a download slot is taken at the GET's headers (by `Content-Length`) and given back at the body's `Close` |
+| Health | `HealthCheck` probes every bridge in parallel: the backend is healthy while **≥ 1** bridge is (`SyncProbeFailing` = all down). Per bridge `vaultaire_webdav_bridge_up{backend,bridge}` (1/0); alert `SyncBridgeDown` (warning, 10 m) in `deploy/monitoring/vaultaire-backends.yml`; transitions are logged |
+| Per bridge | Each bridge is a full `WebDAVDriver`: its own password, concurrency cap, idle timeout, retries; the `vaultaire_webdav_*` counters carry `bridge="<index into SYNC_WEBDAV_URLS>"` (`"0"` for a single server) |
+| `StoreID` | `dav-multi:` + every bridge's `dav:` id, sorted |
+
+**Never use Sync's modification times for age decisions.** The bridge reports
+a WRONG `getlastmodified` for every file (live, 2026-10-07: a file uploaded
+now lists as `1970-01-21T17:35:39Z`; an rclone `--min-age` retention deleted
+fresh files because of it). The driver never asks for it — `PROPFIND` requests
+`resourcetype` + `getcontentlength` only (`propfindBody`, guarded by
+`TestWebDAV_NeverAsksForModTimes`) — and no listing, walk, health or fallback
+decision rests on a server time. `engine.TenantObject` carries no modtime; if
+one is ever added, for `sync` it is unreliable. Any age-based job over `sync`
+(retention, GC grace) must take its times from our own tables
+(`object_head_cache`, `global_content_index`), never from the bridge.
+
 ## Configuration (`sync` instance)
 
 | Env | Default | |
 |---|---|---|
-| `SYNC_WEBDAV_PASSWORD` | — | **Required to register** the `sync` driver: the bridge's generated password (`sync-webdav credentials`) |
-| `SYNC_WEBDAV_URL` | `http://127.0.0.1:4918` | The bridge |
+| `SYNC_WEBDAV_PASSWORD` | — | **Required to register** the `sync` driver with ONE bridge: the bridge's generated password (`sync-webdav credentials`) |
+| `SYNC_WEBDAV_URL` | `http://127.0.0.1:4918` | The bridge (single form) |
+| `SYNC_WEBDAV_URLS` | — | **Several bridges**: comma-separated URLs, 1..16, distinct (same rules as `SYNC_WEBDAV_URL`: http/https, a host, no credentials/query/fragment). Set = the single form is ignored (warning) |
+| `SYNC_WEBDAV_PASSWORDS` | — | One password per `SYNC_WEBDAV_URLS` entry, same order, comma-separated (a password cannot contain a comma). Secrets: never logged, never in an error (errors name the bridge index). Counts must match; a list that does not validate leaves `sync` unregistered with a boot Error |
+| `SYNC_WEBDAV_LARGE_CONCURRENCY` | `3` | Transfers ≥ 16 MiB per bridge and direction (1..256) |
 | `SYNC_WEBDAV_USER` | `sync` | |
 | `SYNC_WEBDAV_ROOT` | `vaultaire` | Folder under the bridge's root objects live in |
-| `SYNC_WEBDAV_MAX_CONCURRENCY` | `8` | Requests in flight to the bridge (1..256). The bridge 500s some requests at 32 |
+| `SYNC_WEBDAV_MAX_CONCURRENCY` | `8` | Requests in flight to EACH bridge (1..256). The bridge 500s some requests at 32 |
 | `SYNC_WEBDAV_IDLE_TIMEOUT` | `60s` | A transfer the bridge makes no progress on for this long is cancelled (1s..1h). A rejected value of either is logged at Warn and the default kept |
 
 ## The Sync.com bridge (`sync-webdav`)
@@ -236,5 +288,5 @@ ids, fn error), no tenant → `ErrNoTenant` + chunk context, HealthCheck (ok /
 backslash dot segments / query / fragment / encoded `/` refused), hostile keys
 end to end (no request off the root or to another host), 32 concurrent PUTs
 into new folders (the 423 race), a MKCOL 423 retried. Benchmark:
-`cmd/tools/webdav-bench` (cmd/tools/README.md). `webdav_config_test.go`
+`cmd/tools/webdav-bench` (cmd/tools/README.md). `webdav_multi_test.go` — HRW spread (10k keys over 5 bridges ±15 %) and stability (removing a bridge moves only its keys), each op on the routed bridge (one x/net/webdav server per bridge, own password, request log), fallback served / stale miss never NotFound / 5xx fallback / 401 not failed over, WalkTenant union + Remove on the routed bridge + a bridge that cannot list fails the walk, List fallback, health aggregation + gauge, large PUT/GET caps, `SYNC_WEBDAV_URLS` parsing (no password in any error), no modtime asked. `webdav_config_test.go`
 — env defaults and `StoreID`.

@@ -26,25 +26,25 @@ func TestWebDAVDriver_StoreID(t *testing.T) {
 func TestSyncWebDAVConfigFromEnv(t *testing.T) {
 	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
 
-	_, ok := SyncWebDAVConfigFromEnv(env(nil))
+	_, ok, _ := SyncWebDAVConfigFromEnv(env(nil))
 	assert.False(t, ok, "no password = no sync driver")
 
-	c, ok := SyncWebDAVConfigFromEnv(env(map[string]string{"SYNC_WEBDAV_PASSWORD": "pw"}))
+	c, ok, _ := SyncWebDAVConfigFromEnv(env(map[string]string{"SYNC_WEBDAV_PASSWORD": "pw"}))
 	assert.True(t, ok)
-	assert.Equal(t, WebDAVConfig{URL: "http://127.0.0.1:4918", User: "sync", Password: "pw", Root: "vaultaire"}, c)
+	assert.Equal(t, WebDAVConfig{URL: "http://127.0.0.1:4918", User: "sync", Password: "pw", Root: "vaultaire", Bridges: []WebDAVBridge{{URL: "http://127.0.0.1:4918", Password: "pw"}}}, c)
 
-	c, ok = SyncWebDAVConfigFromEnv(env(map[string]string{
+	c, ok, _ = SyncWebDAVConfigFromEnv(env(map[string]string{
 		"SYNC_WEBDAV_PASSWORD": "pw", "SYNC_WEBDAV_URL": "http://127.0.0.1:5000/",
 		"SYNC_WEBDAV_USER": "other", "SYNC_WEBDAV_ROOT": "stored/prod",
 	}))
 	assert.True(t, ok)
-	assert.Equal(t, WebDAVConfig{URL: "http://127.0.0.1:5000/", User: "other", Password: "pw", Root: "stored/prod"}, c)
+	assert.Equal(t, WebDAVConfig{URL: "http://127.0.0.1:5000/", User: "other", Password: "pw", Root: "stored/prod", Bridges: []WebDAVBridge{{URL: "http://127.0.0.1:5000/", Password: "pw"}}}, c)
 }
 
 func TestSyncWebDAVConfigFromEnv_Limits(t *testing.T) {
 	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
 
-	c, ok := SyncWebDAVConfigFromEnv(env(map[string]string{
+	c, ok, _ := SyncWebDAVConfigFromEnv(env(map[string]string{
 		"SYNC_WEBDAV_PASSWORD": "pw", "SYNC_WEBDAV_MAX_CONCURRENCY": "4", "SYNC_WEBDAV_IDLE_TIMEOUT": "30s",
 	}))
 	assert.True(t, ok)
@@ -53,7 +53,7 @@ func TestSyncWebDAVConfigFromEnv_Limits(t *testing.T) {
 	assert.Empty(t, c.Warnings)
 	assert.Len(t, c.Options(), 2)
 
-	c, ok = SyncWebDAVConfigFromEnv(env(map[string]string{
+	c, ok, _ = SyncWebDAVConfigFromEnv(env(map[string]string{
 		"SYNC_WEBDAV_PASSWORD": "pw", "SYNC_WEBDAV_MAX_CONCURRENCY": "0", "SYNC_WEBDAV_IDLE_TIMEOUT": "fast",
 	}))
 	assert.True(t, ok, "a bad limit keeps the default, it does not drop the driver")
@@ -62,6 +62,6 @@ func TestSyncWebDAVConfigFromEnv_Limits(t *testing.T) {
 	assert.Len(t, c.Warnings, 2)
 	assert.Empty(t, c.Options())
 
-	c, _ = SyncWebDAVConfigFromEnv(env(map[string]string{"SYNC_WEBDAV_PASSWORD": "pw", "SYNC_WEBDAV_MAX_CONCURRENCY": "1000"}))
+	c, _, _ = SyncWebDAVConfigFromEnv(env(map[string]string{"SYNC_WEBDAV_PASSWORD": "pw", "SYNC_WEBDAV_MAX_CONCURRENCY": "1000"}))
 	assert.Len(t, c.Warnings, 1, "above 256 is refused")
 }
