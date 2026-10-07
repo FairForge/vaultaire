@@ -22,7 +22,8 @@ import (
 // Probes are now authenticated where we can sign:
 //   - idrive / geyser → the driver's own HealthCheck (a signed HeadBucket)
 //   - sync            → the WebDAV driver's HealthCheck (an authenticated
-//     PROPFIND: a wrong bridge password is a 401)
+//     PROPFIND of EVERY bridge: a wrong bridge password is a 401; healthy
+//     while one bridge is up, each bridge in vaultaire_webdav_bridge_up)
 //   - lyve            → console RSCustomerDetails with the root key
 //     (catches auth/suspension; one 403 retried, see LyveConsoleClient)
 //   - anything else   → TCP dial (backend-agnostic fallback)
@@ -102,9 +103,9 @@ func buildBackendProbes(getenv func(string) string, eng driverChecker) []backend
 		{"geyser", "GEYSER_ACCESS_KEY"},
 		{"r2", "R2_ACCESS_KEY"},
 		{"permafrost", "TENANT_1_ID"},
-		{"sync", "SYNC_WEBDAV_PASSWORD"},
+		{"sync", "SYNC_WEBDAV_PASSWORD|SYNC_WEBDAV_PASSWORDS"},
 	} {
-		if (d.envKey != "" && getenv(d.envKey) == "") || !registered[d.name] {
+		if !anyEnvSet(getenv, d.envKey) || !registered[d.name] {
 			continue
 		}
 		checks = append(checks, backendCheck{name: d.name, probe: driverProbe(d.name)})
@@ -137,6 +138,20 @@ func buildBackendProbes(getenv func(string) string, eng driverChecker) []backend
 	}
 
 	return checks
+}
+
+// anyEnvSet: keys is "" (always) or env names separated by "|", one of
+// which must be set.
+func anyEnvSet(getenv func(string) string, keys string) bool {
+	if keys == "" {
+		return true
+	}
+	for _, k := range strings.Split(keys, "|") {
+		if getenv(k) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // lyveProbeCredentials returns the key pair + customer id for the console

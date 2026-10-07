@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -61,7 +62,7 @@ func env(m map[string]string) func(string) string { return func(k string) string
 func TestSmoke_EverySuiteAgainstXNetWebDAV(t *testing.T) {
 	srv, fs := davServer(t, nil)
 	out := filepath.Join(t.TempDir(), "results.json")
-	cfg, err := parseFlags(tinyArgs(srv.URL, out, strings.Join(allSuites, ",")), env(map[string]string{"WEBDAV_PASSWORD": testPass}))
+	cfg, err := parseFlags(tinyArgs(srv.URL, out, strings.Join(append(append([]string(nil), defaultSuites...), "limits"), ",")), env(map[string]string{"WEBDAV_PASSWORD": testPass}))
 	require.NoError(t, err)
 
 	var log bytes.Buffer
@@ -259,4 +260,69 @@ func TestSmoke_OpTimeoutEndsAHungOp(t *testing.T) {
 	assert.Less(t, time.Since(start), 30*time.Second)
 	assert.Positive(t, rep.Stalls.OpTimeouts)
 	assert.NotEmpty(t, rep.Errors)
+}
+
+// sharedBridges are n WebDAV servers on ONE file system (Sync's bridges all
+// mount the same folder), bridge i with password "bridge-pw-<i>".
+func sharedBridges(t *testing.T, n int) []string {
+	t.Helper()
+	fs := webdav.NewMemFS()
+	h := &webdav.Handler{FileSystem: fs, LockSystem: webdav.NewMemLS()}
+	var urls []string
+	for i := 0; i < n; i++ {
+		pass := fmt.Sprintf("bridge-pw-%d", i)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			u, p, ok := r.BasicAuth()
+			if !ok || u != "sync" || p != pass {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			h.ServeHTTP(w, r)
+		}))
+		t.Cleanup(srv.Close)
+		urls = append(urls, srv.URL)
+	}
+	return urls
+}
+
+func TestParseFlags_Bridges(t *testing.T) {
+	c, err := parseFlags([]string{"-urls", "http://127.0.0.1:4918,http://127.0.0.1:4919"},
+		env(map[string]string{"WEBDAV_PASSWORDS": "a,b"}))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"http://127.0.0.1:4918", "http://127.0.0.1:4919"}, c.URLs)
+	assert.Equal(t, []string{"a", "b"}, c.Passwords)
+	assert.Equal(t, "http://127.0.0.1:4918", c.URL, "the raw client uses the first bridge")
+	assert.NotContains(t, c.Suites, "crossbridge", "opt-in")
+
+	_, err = parseFlags([]string{"-urls", "http://127.0.0.1:4918,http://127.0.0.1:4919"}, env(map[string]string{"WEBDAV_PASSWORDS": "a"}))
+	assert.ErrorContains(t, err, "WEBDAV_PASSWORDS")
+	_, err = parseFlags([]string{"-urls", "http://127.0.0.1:4918"}, env(map[string]string{"WEBDAV_PASSWORD": "a"}))
+	assert.ErrorContains(t, err, "WEBDAV_PASSWORDS")
+	_, err = parseFlags([]string{"-run", "crossbridge"}, env(map[string]string{"WEBDAV_PASSWORD": "a"}))
+	assert.ErrorContains(t, err, "-urls", "crossbridge needs two bridges")
+}
+
+// -urls drives the multi-bridge driver; crossbridge writes through bridge i
+// and measures when bridge j sees the write, the overwrite and the delete.
+func TestSmoke_MultiBridgeAndCrossbridge(t *testing.T) {
+	urls := sharedBridges(t, 3)
+	args := append(tinyArgs(urls[0], "", "small,consistency,crossbridge"),
+		"-urls", strings.Join(urls, ","), "-crossbridge-n", "4", "-crossbridge-poll", "10ms")
+	cfg, err := parseFlags(args, env(map[string]string{"WEBDAV_PASSWORDS": "bridge-pw-0,bridge-pw-1,bridge-pw-2"}))
+	require.NoError(t, err)
+	var log bytes.Buffer
+	rep, err := run(context.Background(), cfg, &log)
+	require.NoError(t, err)
+	assert.Empty(t, rep.Mismatches, log.String())
+	assert.Empty(t, rep.Errors, log.String())
+	assert.NotContains(t, log.String(), "bridge-pw-", "no password is printed")
+	ops := map[string]int{}
+	for _, r := range rep.Rows {
+		ops[r.Suite+"/"+r.Op] += r.N
+	}
+	for _, want := range []string{"crossbridge/visible new", "crossbridge/visible overwrite", "crossbridge/visible delete"} {
+		assert.Equal(t, 4, ops[want], want)
+	}
+	assert.Positive(t, ops["small/PUT"])
+	assert.Contains(t, rep.Cleanup, "deleted")
 }

@@ -67,6 +67,12 @@ type WebDAVDriver struct {
 	limits webdavSettings
 	sem    chan struct{}
 	counts webdavCounters
+
+	// bodyGate (optional; the multi-bridge driver's large-transfer cap) runs
+	// when a GET answer's body is about to be handed out, with its
+	// Content-Length (-1 = unknown); it may wait under ctx, and its release
+	// runs at the body's Close.
+	bodyGate func(ctx context.Context, size int64) (release func(), err error)
 }
 
 const (
@@ -84,14 +90,25 @@ const (
 	webdavLockedBackoff = 100 * time.Millisecond
 )
 
-// WebDAVConfig is one WebDAV backend's settings. MaxConcurrency and
-// IdleTimeout are 0 for the defaults (Options turns them into options);
-// Warnings name env values that were rejected (the caller logs them).
+// WebDAVConfig is one WebDAV backend's settings. Bridges are the servers it
+// spreads over (the `sync` instance: one per Sync bridge process,
+// webdav_multi.go); URL and Password are the first bridge's, for the
+// single-server constructor. MaxConcurrency, LargeConcurrency and
+// IdleTimeout are 0 for the defaults (Options turns the per-bridge ones into
+// options); Warnings name env values that were rejected (the caller logs
+// them).
 type WebDAVConfig struct {
 	URL, User, Password, Root string
+	Bridges                   []WebDAVBridge
 	MaxConcurrency            int
+	LargeConcurrency          int
 	IdleTimeout               time.Duration
 	Warnings                  []string
+}
+
+// WebDAVBridge is one server of a backend: its URL and its own password.
+type WebDAVBridge struct {
+	URL, Password string
 }
 
 // Defaults of the `sync` instance: Sync.com's `sync-webdav` bridge listens on
@@ -100,25 +117,29 @@ const (
 	SyncWebDAVDefaultURL  = "http://127.0.0.1:4918"
 	SyncWebDAVDefaultUser = "sync"
 	SyncWebDAVDefaultRoot = "vaultaire"
+	// SyncWebDAVMaxBridges bounds SYNC_WEBDAV_URLS.
+	SyncWebDAVMaxBridges = 16
 )
 
-// SyncWebDAVConfigFromEnv reads the `sync` instance's settings:
-// SYNC_WEBDAV_PASSWORD (required — ok is false without it), SYNC_WEBDAV_URL,
-// SYNC_WEBDAV_USER, SYNC_WEBDAV_ROOT, and the limits
-// SYNC_WEBDAV_MAX_CONCURRENCY and SYNC_WEBDAV_IDLE_TIMEOUT (a rejected value
-// is a Warning and the default is kept).
-func SyncWebDAVConfigFromEnv(getenv func(string) string) (WebDAVConfig, bool) {
+// SyncWebDAVConfigFromEnv reads the `sync` instance's settings. The bridges
+// are either one — SYNC_WEBDAV_PASSWORD (+ SYNC_WEBDAV_URL, default
+// 127.0.0.1:4918) — or several: SYNC_WEBDAV_URLS and SYNC_WEBDAV_PASSWORDS,
+// comma-separated, same order, 1..16, distinct URLs (the list wins over the
+// single form, with a warning). Then SYNC_WEBDAV_USER, SYNC_WEBDAV_ROOT and
+// the limits SYNC_WEBDAV_MAX_CONCURRENCY, SYNC_WEBDAV_LARGE_CONCURRENCY and
+// SYNC_WEBDAV_IDLE_TIMEOUT (a rejected limit is a Warning and the default
+// is kept). ok is false when no password is set at all (no sync driver);
+// err is a bridge list that cannot be used — it never quotes a password.
+func SyncWebDAVConfigFromEnv(getenv func(string) string) (_ WebDAVConfig, ok bool, _ error) {
 	c := WebDAVConfig{
-		URL:      getenv("SYNC_WEBDAV_URL"),
+		URL:      strings.TrimSpace(getenv("SYNC_WEBDAV_URL")),
 		User:     getenv("SYNC_WEBDAV_USER"),
 		Password: getenv("SYNC_WEBDAV_PASSWORD"),
 		Root:     getenv("SYNC_WEBDAV_ROOT"),
 	}
-	if c.Password == "" {
-		return WebDAVConfig{}, false
-	}
-	if c.URL == "" {
-		c.URL = SyncWebDAVDefaultURL
+	urls, passwords := strings.TrimSpace(getenv("SYNC_WEBDAV_URLS")), getenv("SYNC_WEBDAV_PASSWORDS")
+	if c.Password == "" && urls == "" && passwords == "" {
+		return WebDAVConfig{}, false, nil
 	}
 	if c.User == "" {
 		c.User = SyncWebDAVDefaultUser
@@ -127,7 +148,97 @@ func SyncWebDAVConfigFromEnv(getenv func(string) string) (WebDAVConfig, bool) {
 		c.Root = SyncWebDAVDefaultRoot
 	}
 	parseWebDAVLimits(&c, getenv)
-	return c, true
+
+	if urls == "" && passwords == "" {
+		if c.URL == "" {
+			c.URL = SyncWebDAVDefaultURL
+		}
+		c.Bridges = []WebDAVBridge{{URL: c.URL, Password: c.Password}}
+		return c, true, nil
+	}
+	if urls == "" {
+		return c, true, errors.New("SYNC_WEBDAV_PASSWORDS is set without SYNC_WEBDAV_URLS")
+	}
+	if passwords == "" {
+		return c, true, errors.New("SYNC_WEBDAV_URLS is set without SYNC_WEBDAV_PASSWORDS (one password per bridge, same order)")
+	}
+	if c.URL != "" || c.Password != "" {
+		c.Warnings = append(c.Warnings, "SYNC_WEBDAV_URLS is set: SYNC_WEBDAV_URL and SYNC_WEBDAV_PASSWORD are ignored")
+	}
+	ul, pl := strings.Split(urls, ","), strings.Split(passwords, ",")
+	if len(ul) != len(pl) {
+		return c, true, fmt.Errorf("SYNC_WEBDAV_URLS names %d bridges, SYNC_WEBDAV_PASSWORDS has %d passwords", len(ul), len(pl))
+	}
+	bridges := make([]WebDAVBridge, len(ul))
+	for i := range ul {
+		bridges[i] = WebDAVBridge{URL: strings.TrimSpace(ul[i]), Password: strings.TrimSpace(pl[i])}
+	}
+	if err := checkWebDAVBridges("sync", bridges); err != nil {
+		return c, true, fmt.Errorf("SYNC_WEBDAV_URLS: %w", err)
+	}
+	c.Bridges = bridges
+	c.URL, c.Password = bridges[0].URL, bridges[0].Password
+	return c, true, nil
+}
+
+// checkWebDAVBridges validates a bridge list: 1..16 bridges, each URL one
+// NewWebDAVDriver accepts, a password each, no server twice. Errors name a
+// bridge by index and never quote a password.
+func checkWebDAVBridges(name string, bridges []WebDAVBridge) error {
+	if len(bridges) == 0 {
+		return fmt.Errorf("webdav %s: no bridge configured", name)
+	}
+	if len(bridges) > SyncWebDAVMaxBridges {
+		return fmt.Errorf("webdav %s: %d bridges, at most %d", name, len(bridges), SyncWebDAVMaxBridges)
+	}
+	seen := map[string]int{}
+	for i, b := range bridges {
+		u, err := parseWebDAVURL(name, b.URL)
+		if err != nil {
+			return fmt.Errorf("bridge %d: %w", i, err)
+		}
+		if b.Password == "" {
+			return fmt.Errorf("webdav %s: bridge %d has no password", name, i)
+		}
+		id := bridgeID(u)
+		if j, dup := seen[id]; dup {
+			return fmt.Errorf("webdav %s: bridges %d and %d are the same server %s", name, j, i, id)
+		}
+		seen[id] = i
+	}
+	return nil
+}
+
+// parseWebDAVURL checks a configured server URL: http or https, a host, no
+// credentials (a URL lands in error messages), no query or fragment. An
+// error never quotes the URL (it may hold userinfo).
+func parseWebDAVURL(name, raw string) (*url.URL, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, fmt.Errorf("webdav %s: a URL is required", name)
+	}
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return nil, fmt.Errorf("webdav %s: the URL does not parse", name)
+	}
+	if u.User != nil {
+		return nil, fmt.Errorf("webdav %s: put the credentials in the username/password settings, not in the URL", name)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("webdav %s: URL scheme must be http or https, got %q", name, u.Scheme)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("webdav %s: URL has no host", name)
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return nil, fmt.Errorf("webdav %s: URL must not carry a query or fragment", name)
+	}
+	return u, nil
+}
+
+// bridgeID is a server's identity (routing seed, duplicate check):
+// scheme://host + the path without its trailing slash.
+func bridgeID(u *url.URL) string {
+	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host) + strings.TrimSuffix(u.EscapedPath(), "/")
 }
 
 // NewWebDAVDriver builds a driver. name is the engine's backend name (the
@@ -141,24 +252,9 @@ func NewWebDAVDriver(name, baseURL, username, password, root string, logger *zap
 	if strings.TrimSpace(name) == "" {
 		return nil, errors.New("webdav: a backend name is required")
 	}
-	if strings.TrimSpace(baseURL) == "" {
-		return nil, fmt.Errorf("webdav %s: a URL is required", name)
-	}
-	u, err := url.Parse(strings.TrimSpace(baseURL))
+	u, err := parseWebDAVURL(name, baseURL)
 	if err != nil {
-		return nil, fmt.Errorf("webdav %s: parse URL: %w", name, err)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return nil, fmt.Errorf("webdav %s: URL scheme must be http or https, got %q", name, u.Scheme)
-	}
-	if u.Host == "" {
-		return nil, fmt.Errorf("webdav %s: URL has no host", name)
-	}
-	if u.User != nil {
-		return nil, fmt.Errorf("webdav %s: put the credentials in the username/password settings, not in the URL", name)
-	}
-	if u.RawQuery != "" || u.Fragment != "" {
-		return nil, fmt.Errorf("webdav %s: URL must not carry a query or fragment", name)
+		return nil, err
 	}
 	if password == "" {
 		return nil, fmt.Errorf("webdav %s: a password is required", name)
@@ -175,11 +271,11 @@ func NewWebDAVDriver(name, baseURL, username, password, root string, logger *zap
 		logger = zap.NewNop()
 	}
 	InitTenantlessSeries(name)
-	InitWebDAVSeries(name)
 	limits := defaultWebDAVSettings()
 	for _, o := range opts {
 		o(&limits)
 	}
+	InitWebDAVSeries(name, limits.bridge)
 
 	d := &WebDAVDriver{
 		name:     name,
@@ -202,6 +298,7 @@ func NewWebDAVDriver(name, baseURL, username, password, root string, logger *zap
 		zap.String("backend", name),
 		zap.String("url", d.origin()+d.escapedPath(nil, false)),
 		zap.String("user", username),
+		zap.String("bridge", limits.bridge),
 		zap.Int("max_concurrency", limits.maxConcurrency),
 		zap.Duration("idle_timeout", limits.idleTimeout),
 		zap.Duration("put_timeout_per_64MiB", limits.putTimeout),
@@ -379,14 +476,32 @@ func drainClose(resp *http.Response) {
 func statusError(resp *http.Response) error {
 	excerpt, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
 	_ = resp.Body.Close()
-	msg := strings.TrimSpace(string(excerpt))
-	if msg != "" {
-		return fmt.Errorf("unexpected status %s: %s", resp.Status, msg)
+	return &webdavStatusError{code: resp.StatusCode, status: resp.Status, excerpt: strings.TrimSpace(string(excerpt))}
+}
+
+// webdavStatusError is an answer we did not want (statusError). The
+// multi-bridge driver reads the code: a 5xx left after the retries is a
+// bridge in trouble (a read may go to another bridge), a 4xx is not.
+type webdavStatusError struct {
+	code            int
+	status, excerpt string
+}
+
+func (e *webdavStatusError) Error() string {
+	if e.excerpt != "" {
+		return "unexpected status " + e.status + ": " + e.excerpt
 	}
-	return fmt.Errorf("unexpected status %s", resp.Status)
+	return "unexpected status " + e.status
 }
 
 // --- PROPFIND -------------------------------------------------------------
+
+// propfindBody asks for the type and the size only — never getlastmodified
+// or creationdate: Sync's bridge reports a wrong modification time for
+// every file (live, 2026-10-07: a file uploaded now lists as 1970-01-21;
+// rclone --min-age retention deleted fresh files because of it). No
+// decision in this driver — listing, walk, health, fallback — rests on a
+// server's modtime.
 
 const propfindBody = `<?xml version="1.0" encoding="utf-8"?>` +
 	`<D:propfind xmlns:D="DAV:"><D:prop><D:resourcetype/><D:getcontentlength/></D:prop></D:propfind>`
@@ -848,7 +963,16 @@ func (d *WebDAVDriver) get(ctx context.Context, path, what string, header map[st
 		return nil, err
 	}
 	resp := call.resp
-	resp.Body = &downloadBody{rc: resp.Body, call: call, d: d, what: what}
+	body := &downloadBody{rc: resp.Body, call: call, d: d, what: what}
+	resp.Body = body
+	if d.bodyGate != nil && (resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent) {
+		release, err := d.bodyGate(ctx, resp.ContentLength)
+		if err != nil {
+			_ = body.Close()
+			return nil, err
+		}
+		body.release = release
+	}
 	return resp, nil
 }
 
@@ -1026,32 +1150,52 @@ func (d *WebDAVDriver) WalkTenant(ctx context.Context, tenantID string, fn func(
 	if err := checkWalkTenant(tenantID); err != nil {
 		return err
 	}
+	return d.walkTenantNames(ctx, tenantID, func(names []string) error {
+		return fn(tenantObject(names, func(ctx context.Context) error { return d.removeNames(ctx, names) }))
+	})
+}
+
+// walkTenantNames visits every file under `<root>/t-<tenant>/` with its
+// resource names below the root (tenant folder first). The id must have
+// passed checkWalkTenant.
+func (d *WebDAVDriver) walkTenantNames(ctx context.Context, tenantID string, fn func(names []string) error) error {
 	tenantDir := []string{davName("t-" + tenantID)}
-	err := d.walk(ctx, tenantDir, nil, func(rel []string, path string) error {
-		obj := engine.TenantObject{
-			Remove: func(ctx context.Context) error {
-				if err := d.deletePath(ctx, path); err != nil {
-					return fmt.Errorf("%s delete %s: %w", d.name, path, err)
-				}
-				return nil
-			},
-		}
-		if len(rel) == 1 {
-			obj.Artifact = keySegment(rel[0])
-		} else {
-			obj.Container = keySegment(rel[0])
-			parts := make([]string, len(rel)-1)
-			for i, s := range rel[1:] {
-				parts[i] = keySegment(s)
-			}
-			obj.Artifact = strings.Join(parts, "/")
-		}
-		return fn(obj)
+	err := d.walk(ctx, tenantDir, nil, func(rel []string, _ string) error {
+		return fn(append(append([]string(nil), tenantDir...), rel...))
 	})
 	if err != nil {
 		return fmt.Errorf("%s walk t-%s/: %w", d.name, tenantID, err)
 	}
 	return nil
+}
+
+// removeNames deletes the file at resource names (below the root); a miss
+// is not an error.
+func (d *WebDAVDriver) removeNames(ctx context.Context, names []string) error {
+	path := d.escapedPath(names, false)
+	if err := d.deletePath(ctx, path); err != nil {
+		return fmt.Errorf("%s delete %s: %w", d.name, path, err)
+	}
+	return nil
+}
+
+// tenantObject is the walk's view of a file at names (tenant folder first).
+// It carries no modification time: a WebDAV server's (Sync's bridge's) is
+// not to be trusted (see propfindBody).
+func tenantObject(names []string, remove func(ctx context.Context) error) engine.TenantObject {
+	rel := names[1:]
+	obj := engine.TenantObject{Remove: remove}
+	if len(rel) == 1 {
+		obj.Artifact = keySegment(rel[0])
+		return obj
+	}
+	obj.Container = keySegment(rel[0])
+	parts := make([]string, len(rel)-1)
+	for i, s := range rel[1:] {
+		parts[i] = keySegment(s)
+	}
+	obj.Artifact = strings.Join(parts, "/")
+	return obj
 }
 
 // HealthCheck is an authenticated Depth 0 PROPFIND of the root folder — a

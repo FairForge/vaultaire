@@ -66,7 +66,7 @@ func TestWebDAVDriver_PutStallIsBounded(t *testing.T) {
 		})
 	}, WithWebDAVIdleTimeout(davTestIdle), fastRetries)
 	t.Cleanup(release)
-	before := promtest.ToFloat64(webdavStalls.WithLabelValues("sync", "upload"))
+	before := promtest.ToFloat64(webdavStalls.WithLabelValues("sync", "0", "upload"))
 
 	const size = 64 << 20
 	start := time.Now()
@@ -79,7 +79,7 @@ func TestWebDAVDriver_PutStallIsBounded(t *testing.T) {
 	assert.ErrorIs(t, err, engine.ErrNoFailover, "the stream was consumed")
 	assert.Less(t, elapsed, 10*time.Second, "bounded by the idle timeout, not hung")
 	assert.Equal(t, int32(1), f.methods.put.Load(), "a consumed stream is never replayed")
-	assert.Equal(t, before+1, promtest.ToFloat64(webdavStalls.WithLabelValues("sync", "upload")))
+	assert.Equal(t, before+1, promtest.ToFloat64(webdavStalls.WithLabelValues("sync", "0", "upload")))
 }
 
 // A rewindable body is sent again after a stall, and the object is stored.
@@ -161,7 +161,7 @@ func TestWebDAVDriver_GetStallIsBounded(t *testing.T) {
 		})
 	}, WithWebDAVIdleTimeout(davTestIdle), fastRetries)
 	t.Cleanup(release)
-	before := promtest.ToFloat64(webdavStalls.WithLabelValues("sync", "download"))
+	before := promtest.ToFloat64(webdavStalls.WithLabelValues("sync", "0", "download"))
 
 	rc, err := f.drv.Get(davCtx("tenant-a"), "c", "k")
 	require.NoError(t, err)
@@ -181,7 +181,7 @@ func TestWebDAVDriver_GetStallIsBounded(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrWebDAVStalled)
 	assert.Less(t, time.Since(start), 10*time.Second)
-	assert.Equal(t, before+1, promtest.ToFloat64(webdavStalls.WithLabelValues("sync", "download")))
+	assert.Equal(t, before+1, promtest.ToFloat64(webdavStalls.WithLabelValues("sync", "0", "download")))
 }
 
 // A GET that gets no answer at all within the idle timeout is a stall
@@ -421,11 +421,11 @@ func TestWebDAVDriver_Metrics(t *testing.T) {
 	require.NoError(t, err)
 
 	for _, dir := range []string{"upload", "download"} {
-		assert.Zero(t, promtest.ToFloat64(webdavStalls.WithLabelValues(backend, dir)))
+		assert.Zero(t, promtest.ToFloat64(webdavStalls.WithLabelValues(backend, "0", dir)))
 	}
 	for _, m := range []string{"GET", "PUT", "PROPFIND", "MKCOL", "DELETE"} {
-		assert.Zero(t, promtest.ToFloat64(webdavRetries.WithLabelValues(backend, m)))
-		assert.Zero(t, promtest.ToFloat64(webdavRequests.WithLabelValues(backend, m, "ok")))
+		assert.Zero(t, promtest.ToFloat64(webdavRetries.WithLabelValues(backend, "0", m)))
+		assert.Zero(t, promtest.ToFloat64(webdavRequests.WithLabelValues(backend, "0", m, "ok")))
 	}
 	assert.Positive(t, promtest.CollectAndCount(webdavRequests), "series exist before any request")
 
@@ -433,10 +433,10 @@ func TestWebDAVDriver_Metrics(t *testing.T) {
 	require.NoError(t, d.Put(ctx, "c", "k", strings.NewReader("v"), engine.WithContentLength(1)))
 	assert.Equal(t, "v", string(readAllClose(t, mustGet(ctx, t, d, "c", "k"))))
 
-	assert.Equal(t, 1.0, promtest.ToFloat64(webdavRequests.WithLabelValues(backend, "GET", "http_5xx")))
-	assert.Equal(t, 1.0, promtest.ToFloat64(webdavRequests.WithLabelValues(backend, "GET", "ok")))
-	assert.Equal(t, 1.0, promtest.ToFloat64(webdavRetries.WithLabelValues(backend, "GET")))
-	assert.Equal(t, 1.0, promtest.ToFloat64(webdavRequests.WithLabelValues(backend, "PUT", "ok")))
+	assert.Equal(t, 1.0, promtest.ToFloat64(webdavRequests.WithLabelValues(backend, "0", "GET", "http_5xx")))
+	assert.Equal(t, 1.0, promtest.ToFloat64(webdavRequests.WithLabelValues(backend, "0", "GET", "ok")))
+	assert.Equal(t, 1.0, promtest.ToFloat64(webdavRetries.WithLabelValues(backend, "0", "GET")))
+	assert.Equal(t, 1.0, promtest.ToFloat64(webdavRequests.WithLabelValues(backend, "0", "PUT", "ok")))
 	st := d.Stats()
 	assert.Equal(t, int64(1), st.Retries)
 	assert.Zero(t, st.UploadStalls+st.DownloadStalls)

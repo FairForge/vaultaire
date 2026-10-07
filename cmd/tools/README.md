@@ -59,6 +59,7 @@ printed as `!!! MISMATCH` (exit status 2; other errors exit 1).
 | `listing` | yes | 1,000 then 10,000 tiny files in one folder (`-list-counts`, capped by `-list-max`): driver `List` and one raw `PROPFIND Depth: 1`, each timed and counted |
 | `parity` | yes | Vault's RS leg as I/O only: for 64 MiB / 256 MiB / 1 GiB with k=4 (shard = size/4), write m=4 shards concurrently, read them back concurrently, a degraded read of k shards; then 1,000 × 1 MiB shards at concurrency 16 in one folder vs a 2-level hex fan-out (`aa/bb/name`) |
 | `limits` | **opt-in** | Sync's documented limits: total path length 200 / 248 / 249 / 300 / 1000 chars (`-limits-paths`; does PUT succeed, does GET read back), names with `: ? * < > \| " \`, trailing `.`, leading/trailing space, `%`, `#`, `+`, unicode, emoji, `CON`/`NUL`/`AUX`, `.DS_Store`, `desktop.ini`, `~$x` (PUT status/body, read back, listed). `-limits-folder` adds the 50,000-files-per-folder probe: up to `-limits-folder-max` (50,001) zero-byte files at `-limits-conc` (64), progress every 1,000, the first failure's index, status and body. Slow |
+| `crossbridge` | **opt-in**, needs `-urls` (≥ 2) | Cross-bridge staleness: `-crossbridge-n` (20) rounds, `-crossbridge-conc` (4) at a time, each pairing bridge i with j (every pair in turn): PUT v1 through i (single-server driver), poll j every `-crossbridge-poll` (250 ms) until it serves those bytes; PUT v2 through i, wait until j serves v2; DELETE through i, wait until j answers not found. Rows `visible new / overwrite / delete` = the waits (p50/p95/max); a wait past `-crossbridge-timeout` (10 m) is an error. Live 2026-10-07: new 1.5–13 s, overwrite ~30 s (once 310 s), delete ~30 s |
 | resources | always | `/proc/<pid>` of `-proc` (`sync-webdav`) once a second when it runs on this host: peak RSS, mean/peak CPU; size of `-spill-dir` (the bridge's `--upload-temp-dir`): peak and at the end |
 
 Everything is written under `<-root>/t-<tenant>/run-<timestamp>/` (default
@@ -90,9 +91,18 @@ WEBDAV_PASSWORD=$(sudo grep ^SYNC_WEBDAV_PASSWORD= /opt/vaultaire/configs/.env |
   /tmp/webdav-bench -run small,large,range,consistency,parity -spill-dir /var/lib/sync-webdav/spool -out results.json
 # the limits probes (opt-in; -limits-folder takes a long while):
 WEBDAV_PASSWORD=… /tmp/webdav-bench -run limits -limits-folder -out limits.json
+# several bridges of one folder, through the multi-bridge driver the server uses
+# (one key per bridge by HRW; -large-concurrency = SYNC_WEBDAV_LARGE_CONCURRENCY):
+WEBDAV_PASSWORDS=$(sudo grep ^SYNC_WEBDAV_PASSWORDS= /opt/vaultaire/configs/.env | cut -d= -f2-) \
+  /tmp/webdav-bench -urls "$(sudo grep ^SYNC_WEBDAV_URLS= /opt/vaultaire/configs/.env | cut -d= -f2-)" \
+  -run small,large,crossbridge -out multi.json
 ```
 
-`main_test.go` runs every suite in tiny sizes against `golang.org/x/net/webdav`
+`-urls a,b,…` (with `WEBDAV_PASSWORDS`, comma-separated, same order) drives
+`drivers.NewMultiWebDAVDriver` instead of the single-server driver; the raw
+client uses the first bridge. The stall/retry summary sums every bridge.
+
+`main_test.go` runs every suite in tiny sizes against `golang.org/x/net/webdav` (and `-urls` + `crossbridge` against three servers on one file system)
 (httptest + Basic auth), checks cleanup and that the password never appears
 in the output, and that a server corrupting GET bodies is reported as a
 mismatch, and that a PUT the server stops reading fails its op (driver idle timeout, or `-op-timeout` with it off) and is counted — so the tool cannot rot.

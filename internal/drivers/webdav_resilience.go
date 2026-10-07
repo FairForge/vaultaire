@@ -98,6 +98,7 @@ type webdavSettings struct {
 	maxConcurrency int
 	attempts       int
 	backoff        time.Duration
+	bridge         string // the metrics' bridge label ("0" for a single server)
 }
 
 func defaultWebDAVSettings() webdavSettings {
@@ -107,6 +108,7 @@ func defaultWebDAVSettings() webdavSettings {
 		maxConcurrency: WebDAVDefaultMaxConcurrency,
 		attempts:       WebDAVDefaultAttempts,
 		backoff:        webdavDefaultBackoff,
+		bridge:         "0",
 	}
 }
 
@@ -169,7 +171,8 @@ func (c WebDAVConfig) Options() []WebDAVOption {
 	return out
 }
 
-// parseWebDAVLimits reads SYNC_WEBDAV_MAX_CONCURRENCY (1..256) and
+// parseWebDAVLimits reads SYNC_WEBDAV_MAX_CONCURRENCY (1..256, per bridge),
+// SYNC_WEBDAV_LARGE_CONCURRENCY (1..256, per bridge and direction) and
 // SYNC_WEBDAV_IDLE_TIMEOUT (a duration 1s..1h, or 0/off). A rejected value
 // is a warning and the default is kept (the R13-19 rule).
 func parseWebDAVLimits(c *WebDAVConfig, getenv func(string) string) {
@@ -180,6 +183,15 @@ func parseWebDAVLimits(c *WebDAVConfig, getenv func(string) string) {
 				v, webdavMaxConcurrencyLimit, WebDAVDefaultMaxConcurrency))
 		} else {
 			c.MaxConcurrency = n
+		}
+	}
+	if v := strings.TrimSpace(getenv("SYNC_WEBDAV_LARGE_CONCURRENCY")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > webdavMaxConcurrencyLimit {
+			c.Warnings = append(c.Warnings, fmt.Sprintf("invalid SYNC_WEBDAV_LARGE_CONCURRENCY %q (need 1..%d), keeping %d",
+				v, webdavMaxConcurrencyLimit, WebDAVDefaultLargeConcurrency))
+		} else {
+			c.LargeConcurrency = n
 		}
 	}
 	if v := strings.TrimSpace(getenv("SYNC_WEBDAV_IDLE_TIMEOUT")); v != "" {
@@ -212,15 +224,15 @@ var (
 	webdavRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_webdav_requests_total",
 		Help: "Requests (attempts) a WebDAV driver sent, by backend, method and outcome (ok, http_4xx, locked, http_5xx, transport_error, stall, timeout, canceled).",
-	}, []string{"backend", "method", "outcome"})
+	}, []string{"backend", "bridge", "method", "outcome"})
 	webdavStalls = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_webdav_stalls_total",
 		Help: "WebDAV transfers cancelled because the server made no progress for the idle timeout, by backend and direction (upload, download).",
-	}, []string{"backend", "direction"})
+	}, []string{"backend", "bridge", "direction"})
 	webdavRetries = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_webdav_retries_total",
 		Help: "WebDAV requests sent again after a transient failure (5xx, 423, transport error, stall, timeout), by backend and method.",
-	}, []string{"backend", "method"})
+	}, []string{"backend", "bridge", "method"})
 )
 
 var (
@@ -228,17 +240,18 @@ var (
 	webdavOutcomes = []string{"ok", "http_4xx", "locked", "http_5xx", "transport_error", "stall", "timeout", "canceled"}
 )
 
-// InitWebDAVSeries creates a backend's WebDAV series at 0, so the first
-// stall or retry is an increase a rule can see.
-func InitWebDAVSeries(backend string) {
+// InitWebDAVSeries creates a backend bridge's WebDAV series at 0, so the
+// first stall or retry is an increase a rule can see. bridge is the index
+// of the bridge ("0" for a single-server driver).
+func InitWebDAVSeries(backend, bridge string) {
 	for _, m := range webdavMethods {
-		webdavRetries.WithLabelValues(backend, m)
+		webdavRetries.WithLabelValues(backend, bridge, m)
 		for _, o := range webdavOutcomes {
-			webdavRequests.WithLabelValues(backend, m, o)
+			webdavRequests.WithLabelValues(backend, bridge, m, o)
 		}
 	}
 	for _, d := range []string{"upload", "download"} {
-		webdavStalls.WithLabelValues(backend, d)
+		webdavStalls.WithLabelValues(backend, bridge, d)
 	}
 }
 
@@ -261,7 +274,7 @@ func (d *WebDAVDriver) Stats() WebDAVStats {
 }
 
 func (d *WebDAVDriver) stalled(direction string) {
-	webdavStalls.WithLabelValues(d.name, direction).Inc()
+	webdavStalls.WithLabelValues(d.name, d.limits.bridge, direction).Inc()
 	if direction == "upload" {
 		d.counts.uploadStalls.Add(1)
 	} else {
@@ -270,7 +283,7 @@ func (d *WebDAVDriver) stalled(direction string) {
 }
 
 func (d *WebDAVDriver) retried(method string) {
-	webdavRetries.WithLabelValues(d.name, method).Inc()
+	webdavRetries.WithLabelValues(d.name, d.limits.bridge, method).Inc()
 	d.counts.retries.Add(1)
 }
 
@@ -496,7 +509,7 @@ func (d *WebDAVDriver) send(ctx context.Context, method, path string, body io.Re
 }
 
 func (d *WebDAVDriver) count(method, outcome string) {
-	webdavRequests.WithLabelValues(d.name, method, outcome).Inc()
+	webdavRequests.WithLabelValues(d.name, d.limits.bridge, method, outcome).Inc()
 }
 
 // backoff waits before attempt+1: backoff × 2^(attempt-1), jittered to
@@ -575,6 +588,7 @@ type downloadBody struct {
 	what    string
 	counted atomic.Bool
 	once    sync.Once
+	release func() // a multi-bridge large-transfer slot (nil = none)
 }
 
 func (b *downloadBody) Read(p []byte) (int, error) {
@@ -595,6 +609,9 @@ func (b *downloadBody) Close() error {
 	b.once.Do(func() {
 		err = b.rc.Close()
 		b.call.finish()
+		if b.release != nil {
+			b.release()
+		}
 	})
 	return err
 }
