@@ -549,3 +549,5 @@ carries `vaultaire_driver_put_retries_total` for `idrive`, the ten `idrive-<regi
    appearing on iDrive.
 7. Install the updated `deploy/monitoring/vaultaire-jobs.yml` on SLC (`vault_parity` joined
    `PeriodicJobStale`).
+
+**2026-10-07 update (D-VAULT-2a):** the leg order is now `sync, permafrost, lyve`, overridable with `VAULT_PARITY_LEGS`. Owner decision after the Sync reseller approval; measured rebuild from parity alone: lyve ~240 MB/s, sync ~110, permafrost ~60 (`bench-results/SYNC-WORKLOADS-2026-10-07.md`). Rows keep their recorded legs.

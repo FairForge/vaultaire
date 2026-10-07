@@ -670,3 +670,43 @@ func TestSweepPlan_AlwaysListsTheParityContainer(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, plan.buckets, parityBucket, "a shard whose row is gone must still be found: %v", plan.buckets)
 }
+
+// Sync is the first parity leg when it is registered (owner decision
+// 2026-10-07: Sync approved the reseller use; its parity rebuilds at
+// ~110 MB/s vs ~60 for the OneDrive fleet). VAULT_PARITY_LEGS overrides the
+// order; unknown names are ignored; an empty override keeps the default.
+func TestVaultParity_LegPreference(t *testing.T) {
+	local := func() engine.Driver { return drivers.NewLocalDriver(t.TempDir(), zap.NewNop()) }
+	newEng := func(names ...string) *engine.CoreEngine {
+		eng := engine.NewEngine(nil, zap.NewNop(), nil)
+		for _, n := range names {
+			eng.AddDriver(n, local())
+		}
+		return eng
+	}
+	cases := []struct {
+		name, env string
+		drivers   []string
+		want      string
+	}{
+		{"sync first by default", "", []string{"lyve", "permafrost", "sync"}, "sync"},
+		{"permafrost without sync", "", []string{"lyve", "permafrost"}, "permafrost"},
+		{"lyve last", "", []string{"lyve"}, "lyve"},
+		{"override order", "lyve,sync", []string{"lyve", "permafrost", "sync"}, "lyve"},
+		{"unknown names skipped", "nope, permafrost", []string{"permafrost", "sync"}, "permafrost"},
+		{"blank override = default", " , ", []string{"permafrost", "sync"}, "sync"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("VAULT_PARITY_LEGS", tc.env)
+			db, err := sql.Open("postgres", "") // never dialled: Leg() reads no row
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = db.Close() })
+			p := NewVaultParity(db, newEng(tc.drivers...), nil, zap.NewNop())
+			require.NotNil(t, p)
+			got, _, ok := p.Leg()
+			require.True(t, ok)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
