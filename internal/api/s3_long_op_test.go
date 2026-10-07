@@ -36,7 +36,13 @@ type slowDriver struct {
 }
 
 func (d *slowDriver) Put(ctx context.Context, c, a string, r io.Reader, opts ...engine.PutOption) error {
-	time.Sleep(d.delay)
+	// A real driver's write dies with its context (the SDK and the WebDAV
+	// driver both abort on cancellation).
+	select {
+	case <-time.After(d.delay):
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	if d.failPut {
 		_, _ = io.Copy(io.Discard, r)
 		return errors.New("slow backend: write refused")

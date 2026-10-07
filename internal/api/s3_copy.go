@@ -93,7 +93,25 @@ func resolveCopyTags(taggingDirective string, request, source objectAttrs) map[s
 // (default, "COPY") or take it from the request ("REPLACE"). Self-copy is now
 // handled by the same Get→Put streaming path because LocalDriver.Put is atomic
 // (writes via temp+rename) and no longer truncates the source mid-read.
+//
+// The copy runs under the long-operation keep-alive (s3_long_op.go): the
+// destination is ONE backend PUT, which on a slow backend (the sync tier,
+// ~30 MB/s per object) outlasts Cloudflare's 100 s origin timeout. Every
+// refusal (auth, copy source, free-tier cap, object lock, preconditions,
+// missing source, quota) is decided before the destination write starts and,
+// inside the threshold, keeps its own status;
+// a copy still writing after the threshold answers 200 + whitespace +
+// CopyObjectResult (or an <Error> document), and finishes even if the client
+// goes away. x-amz-version-id is known only after the copy and is not
+// delivered on that slow path (the ETag is in the body).
 func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S3Request) {
+	s.runLongS3Op(w, r, func(w http.ResponseWriter, r *http.Request) {
+		s.copyObject(w, r, req)
+	})
+}
+
+// copyObject is CopyObject itself (see handleCopyObject).
+func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Request) {
 	t, err := tenant.FromContext(r.Context())
 	if err != nil || t == nil {
 		WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
