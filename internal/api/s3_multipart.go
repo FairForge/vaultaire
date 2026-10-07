@@ -438,7 +438,16 @@ func (s *Server) multipartUploadAttrs(r *http.Request, uploadID string) (objectA
 	return a, class, nil
 }
 
+// handleCompleteMultipartUpload runs the complete with the long-operation
+// keep-alive (s3_long_op.go): the assembled object is one backend PUT, which
+// on a slow backend outlasts Cloudflare's 100 s origin timeout.
 func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Request, bucket, object string) {
+	s.runLongS3Op(w, r, func(w http.ResponseWriter, r *http.Request) {
+		s.completeMultipartUpload(w, r, bucket, object)
+	})
+}
+
+func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request, bucket, object string) {
 	t, err := tenant.FromContext(r.Context())
 	if err != nil || t == nil {
 		WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())

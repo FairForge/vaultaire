@@ -54,22 +54,26 @@ var (
 )
 
 type Server struct {
-	config             *config.Config
-	logger             *zap.Logger
-	router             chi.Router
-	httpServer         *http.Server
-	db                 *sql.DB
-	events             chan Event
-	engine             *engine.CoreEngine
-	quotaManager       QuotaManager
-	accountExports     *AccountExportService // the one GDPR export service (WP-R10-3b); nil without DB + engine
-	auth               *auth.AuthService
-	stripe             *billing.StripeService
-	webhookHandler     *billing.WebhookHandler
-	meteredReporter    *billing.MeteredReporter
-	requestCount       int64
-	siteStats          *sitestats.Collector // cookieless public-site counts (site_stats.go)
-	testMode           bool
+	config          *config.Config
+	logger          *zap.Logger
+	router          chi.Router
+	httpServer      *http.Server
+	db              *sql.DB
+	events          chan Event
+	engine          *engine.CoreEngine
+	quotaManager    QuotaManager
+	accountExports  *AccountExportService // the one GDPR export service (WP-R10-3b); nil without DB + engine
+	auth            *auth.AuthService
+	stripe          *billing.StripeService
+	webhookHandler  *billing.WebhookHandler
+	meteredReporter *billing.MeteredReporter
+	requestCount    int64
+	siteStats       *sitestats.Collector // cookieless public-site counts (site_stats.go)
+	testMode        bool
+	// longOpThreshold / longOpInterval: the keep-alive of slow
+	// CompleteMultipartUpload / DeleteObjects (s3_long_op.go); 0 = 10 s / 10 s.
+	longOpThreshold    time.Duration
+	longOpInterval     time.Duration
 	errorCount         int64
 	metricsOnce        sync.Once
 	jsonAPIOnce        sync.Once
