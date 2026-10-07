@@ -1,6 +1,7 @@
 package drivers
 
 import (
+	"bytes"
 	"context"
 	"encoding/xml"
 	"errors"
@@ -59,6 +60,13 @@ type WebDAVDriver struct {
 	known sync.Map
 	// mkcolLocks serialises the MKCOL of one path (path → *sync.Mutex).
 	mkcolLocks sync.Map
+
+	// limits, sem and counts bound a server that stops talking
+	// (webdav_resilience.go): idle and PUT deadlines, retries, and a slot
+	// per request in flight.
+	limits webdavSettings
+	sem    chan struct{}
+	counts webdavCounters
 }
 
 const (
@@ -76,9 +84,14 @@ const (
 	webdavLockedBackoff = 100 * time.Millisecond
 )
 
-// WebDAVConfig is one WebDAV backend's settings.
+// WebDAVConfig is one WebDAV backend's settings. MaxConcurrency and
+// IdleTimeout are 0 for the defaults (Options turns them into options);
+// Warnings name env values that were rejected (the caller logs them).
 type WebDAVConfig struct {
 	URL, User, Password, Root string
+	MaxConcurrency            int
+	IdleTimeout               time.Duration
+	Warnings                  []string
 }
 
 // Defaults of the `sync` instance: Sync.com's `sync-webdav` bridge listens on
@@ -91,7 +104,9 @@ const (
 
 // SyncWebDAVConfigFromEnv reads the `sync` instance's settings:
 // SYNC_WEBDAV_PASSWORD (required — ok is false without it), SYNC_WEBDAV_URL,
-// SYNC_WEBDAV_USER, SYNC_WEBDAV_ROOT.
+// SYNC_WEBDAV_USER, SYNC_WEBDAV_ROOT, and the limits
+// SYNC_WEBDAV_MAX_CONCURRENCY and SYNC_WEBDAV_IDLE_TIMEOUT (a rejected value
+// is a Warning and the default is kept).
 func SyncWebDAVConfigFromEnv(getenv func(string) string) (WebDAVConfig, bool) {
 	c := WebDAVConfig{
 		URL:      getenv("SYNC_WEBDAV_URL"),
@@ -111,6 +126,7 @@ func SyncWebDAVConfigFromEnv(getenv func(string) string) (WebDAVConfig, bool) {
 	if c.Root == "" {
 		c.Root = SyncWebDAVDefaultRoot
 	}
+	parseWebDAVLimits(&c, getenv)
 	return c, true
 }
 
@@ -119,8 +135,9 @@ func SyncWebDAVConfigFromEnv(getenv func(string) string) (WebDAVConfig, bool) {
 // exposes (e.g. http://127.0.0.1:4918 for the Sync bridge, or
 // https://uXXXX.your-storagebox.de); root is the folder under it objects
 // live in ("" = the URL's own path). Credentials go in username/password,
-// never in the URL: a URL lands in error messages.
-func NewWebDAVDriver(name, baseURL, username, password, root string, logger *zap.Logger) (*WebDAVDriver, error) {
+// never in the URL: a URL lands in error messages. opts tune the limits
+// (webdav_resilience.go); the defaults suit Sync's bridge.
+func NewWebDAVDriver(name, baseURL, username, password, root string, logger *zap.Logger, opts ...WebDAVOption) (*WebDAVDriver, error) {
 	if strings.TrimSpace(name) == "" {
 		return nil, errors.New("webdav: a backend name is required")
 	}
@@ -158,6 +175,11 @@ func NewWebDAVDriver(name, baseURL, username, password, root string, logger *zap
 		logger = zap.NewNop()
 	}
 	InitTenantlessSeries(name)
+	InitWebDAVSeries(name)
+	limits := defaultWebDAVSettings()
+	for _, o := range opts {
+		o(&limits)
+	}
 
 	d := &WebDAVDriver{
 		name:     name,
@@ -173,11 +195,17 @@ func NewWebDAVDriver(name, baseURL, username, password, root string, logger *zap
 		// stream. Honours VAULTAIRE_TUNED_TRANSPORT.
 		client: TunedHTTPClient(WithHTTP1Only(), WithResponseHeaderTimeout(webdavResponseHeaderTimeout)),
 		logger: logger,
+		limits: limits,
+		sem:    make(chan struct{}, limits.maxConcurrency),
 	}
 	logger.Info("WebDAV driver initialized",
 		zap.String("backend", name),
 		zap.String("url", d.origin()+d.escapedPath(nil, false)),
-		zap.String("user", username))
+		zap.String("user", username),
+		zap.Int("max_concurrency", limits.maxConcurrency),
+		zap.Duration("idle_timeout", limits.idleTimeout),
+		zap.Duration("put_timeout_per_64MiB", limits.putTimeout),
+		zap.Int("attempts", limits.attempts))
 	return d, nil
 }
 
@@ -339,31 +367,6 @@ func (d *WebDAVDriver) requestURL(escaped string) (*url.URL, error) {
 	return &u, nil
 }
 
-// request sends one authenticated request to an escaped path. The URL comes
-// from requestURL (configured scheme + host, path under the root), and the
-// built request is checked once more against the configured server.
-func (d *WebDAVDriver) request(ctx context.Context, method, path string, body io.Reader, length int64, header map[string]string) (*http.Response, error) {
-	u, err := d.requestURL(path)
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequestWithContext(ctx, method, u.String(), body)
-	if err != nil {
-		return nil, fmt.Errorf("build %s request: %w", method, err)
-	}
-	if req.URL.Scheme != d.base.Scheme || req.URL.Host != d.base.Host {
-		return nil, fmt.Errorf("%w: webdav %s request to %s://%s, configured %s", engine.ErrInvalidInput, method, req.URL.Scheme, req.URL.Host, d.origin())
-	}
-	if length > 0 {
-		req.ContentLength = length
-	}
-	req.SetBasicAuth(d.username, d.password)
-	for k, v := range header {
-		req.Header.Set(k, v)
-	}
-	return d.client.Do(req)
-}
-
 // drainClose reads a little of an unwanted body so the connection can be
 // reused, then closes it.
 func drainClose(resp *http.Response) {
@@ -419,15 +422,13 @@ type davEntry struct {
 // propfind asks for resourcetype + getcontentlength at depth "0" or "1".
 // found is false on a 404.
 func (d *WebDAVDriver) propfind(ctx context.Context, path, depth string) (entries []davEntry, found bool, err error) {
-	ctx, cancel := context.WithTimeout(ctx, webdavMetaTimeout)
-	defer cancel()
-	resp, err := d.request(ctx, "PROPFIND", path, strings.NewReader(propfindBody), 0, map[string]string{
-		"Depth":        depth,
-		"Content-Type": "application/xml; charset=utf-8",
-	})
+	call, err := d.do(ctx, davSpec{method: "PROPFIND", path: path, body: propfindBody, timeout: webdavMetaTimeout,
+		header: map[string]string{"Depth": depth, "Content-Type": "application/xml; charset=utf-8"}})
 	if err != nil {
 		return nil, false, err
 	}
+	defer call.finish()
+	resp := call.resp
 	switch resp.StatusCode {
 	case http.StatusMultiStatus:
 	case http.StatusNotFound:
@@ -611,12 +612,12 @@ func (d *WebDAVDriver) mkcol(ctx context.Context, path string) (int, error) {
 }
 
 func (d *WebDAVDriver) mkcolOnce(ctx context.Context, path string) (int, error) {
-	ctx, cancel := context.WithTimeout(ctx, webdavMetaTimeout)
-	defer cancel()
-	resp, err := d.request(ctx, "MKCOL", path+"/", nil, 0, nil)
+	call, err := d.do(ctx, davSpec{method: "MKCOL", path: path + "/", timeout: webdavMetaTimeout, noRetry423: true})
 	if err != nil {
 		return 0, err
 	}
+	defer call.finish()
+	resp := call.resp
 	switch resp.StatusCode {
 	case http.StatusCreated, http.StatusOK, http.StatusNoContent, http.StatusMethodNotAllowed:
 		// 405 = it already exists (RFC 4918 §9.3.1).
@@ -679,13 +680,17 @@ func (d *WebDAVDriver) forgetCollections(dirs []string) {
 
 // --- engine.Driver ----------------------------------------------------------
 
-// Put streams the object to the server (never buffered). The folders it
-// needs are created first (cached). A PUT answered 404/409 — a folder
-// removed behind the cache — recreates them and is retried once when the
-// body can be rewound (or was not read at all). With a known length the
-// stored size is checked afterwards: a server that kept fewer bytes than it
-// was sent (a full disk on a bridge's spill directory) is an error, never a
-// silently short object. Overwrites replace.
+// Put streams the object to the server. The folders it needs are created
+// first (cached). A PUT answered 404/409 — a folder removed behind the cache
+// — recreates them and is sent once more; a transient failure (5xx, 423, a
+// transport error, a stall, the deadline) is sent again up to the retry
+// limit. Either needs the body again: a seekable body is rewound, a
+// non-seekable one of known length ≤ 8 MiB is held in memory for it
+// (webdavRetryBufferMax), a larger one is never buffered — a failure after
+// its bytes went out is returned with engine.ErrNoFailover. With a known
+// length the stored size is checked afterwards: a server that kept fewer
+// bytes than it was sent (a full disk on a bridge's spill directory) is an
+// error, never a silently short object. Overwrites replace.
 func (d *WebDAVDriver) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...engine.PutOption) error {
 	key, names, err := d.object(ctx, "Put", container, artifact)
 	if err != nil {
@@ -697,40 +702,48 @@ func (d *WebDAVDriver) Put(ctx context.Context, container, artifact string, data
 	if err := d.ensureCollections(ctx, dirs); err != nil {
 		return fmt.Errorf("%s put %s: %w", d.name, key, err)
 	}
-
-	var start int64 = -1
-	if s, ok := data.(io.Seeker); ok {
-		if pos, serr := s.Seek(0, io.SeekCurrent); serr == nil {
-			start = pos
-		}
-	}
-	body := &countingReader{Reader: data}
-	code, err := d.put(ctx, path, body, o)
+	src, rewind, err := replayableBody(data, o.ContentLength)
 	if err != nil {
 		return fmt.Errorf("%s put %s: %w", d.name, key, err)
 	}
-	if code == http.StatusConflict || code == http.StatusNotFound {
-		d.forgetCollections(dirs)
-		if err := d.ensureCollections(ctx, dirs); err != nil {
-			return fmt.Errorf("%s put %s: recreate folders: %w", d.name, key, err)
+
+	foldersRecreated := false
+	transientTries := 0
+	for {
+		body := &uploadBody{r: src}
+		code, transient, err := d.put(ctx, path, body, o)
+		if err == nil && code != http.StatusConflict && code != http.StatusNotFound {
+			break // 2xx
 		}
-		if body.n > 0 {
-			s, ok := data.(io.Seeker)
-			if !ok || start < 0 {
-				return fmt.Errorf("%s put %s: the server answered %d after the body was sent and it cannot be rewound: %w",
-					d.name, key, code, engine.ErrNoFailover)
+		if err == nil { // 404/409: a folder went missing behind the cache
+			if foldersRecreated {
+				return fmt.Errorf("%s put %s: the server answered %d with every folder created", d.name, key, code)
 			}
-			if _, serr := s.Seek(start, io.SeekStart); serr != nil {
-				return fmt.Errorf("%s put %s: rewind: %w: %w", d.name, key, serr, engine.ErrNoFailover)
+			foldersRecreated = true
+			d.forgetCollections(dirs)
+			if err := d.ensureCollections(ctx, dirs); err != nil {
+				return fmt.Errorf("%s put %s: recreate folders: %w", d.name, key, err)
 			}
+			if rerr := rewindFor(body, rewind); rerr != nil {
+				return fmt.Errorf("%s put %s: the server answered %d after the body was sent and %w", d.name, key, code, rerr)
+			}
+			continue
 		}
-		body = &countingReader{Reader: data}
-		code, err = d.put(ctx, path, body, o)
-		if err != nil {
-			return fmt.Errorf("%s put %s (retry): %w", d.name, key, err)
+		transientTries++
+		if !transient || transientTries >= d.limits.attempts || ctx.Err() != nil {
+			if body.consumed() > 0 && rewind == nil {
+				return fmt.Errorf("%s put %s: %w: %w", d.name, key, err, engine.ErrNoFailover)
+			}
+			return fmt.Errorf("%s put %s: %w", d.name, key, err)
 		}
-		if code == http.StatusConflict || code == http.StatusNotFound {
-			return fmt.Errorf("%s put %s: the server answered %d with every folder created", d.name, key, code)
+		if rerr := rewindFor(body, rewind); rerr != nil {
+			return fmt.Errorf("%s put %s: %w; no retry: %w", d.name, key, err, rerr)
+		}
+		d.retried(http.MethodPut)
+		d.logger.Warn("webdav PUT retried", zap.String("backend", d.name), zap.String("key", key),
+			zap.Int("attempt", transientTries), zap.Error(err))
+		if berr := d.backoff(ctx, transientTries); berr != nil {
+			return fmt.Errorf("%s put %s: %w (giving up a retry: %w)", d.name, key, err, berr)
 		}
 	}
 
@@ -752,9 +765,55 @@ func (d *WebDAVDriver) Put(ctx context.Context, container, artifact string, data
 	return nil
 }
 
-// put sends one PUT. A 404/409 is returned as a code, not an error, so the
-// caller can create the folders; any other non-2xx is an error.
-func (d *WebDAVDriver) put(ctx context.Context, path string, body *countingReader, o engine.PutOptions) (int, error) {
+// replayableBody returns the reader a PUT sends and how to start it over
+// (nil = it cannot be): a seekable body is rewound to where it stands now; a
+// non-seekable body of known length ≤ webdavRetryBufferMax is read into
+// memory first; anything else streams once.
+func replayableBody(data io.Reader, length int64) (io.Reader, func() error, error) {
+	if s, ok := data.(io.Seeker); ok {
+		if start, err := s.Seek(0, io.SeekCurrent); err == nil {
+			return data, func() error {
+				_, err := s.Seek(start, io.SeekStart)
+				return err
+			}, nil
+		}
+	}
+	if length > 0 && length <= webdavRetryBufferMax {
+		buf := make([]byte, length)
+		if _, err := io.ReadFull(data, buf); err != nil {
+			return nil, nil, fmt.Errorf("read the %d-byte body: %w", length, err)
+		}
+		r := bytes.NewReader(buf)
+		return r, func() error {
+			_, err := r.Seek(0, io.SeekStart)
+			return err
+		}, nil
+	}
+	return data, nil, nil
+}
+
+// rewindFor makes the source ready for another attempt after body's: the
+// attempt is fenced off (the transport may still be reading it), then the
+// source is rewound — or, when it cannot be, left as it is if the attempt
+// took no byte of it.
+func rewindFor(body *uploadBody, rewind func() error) error {
+	n := body.fence()
+	if rewind == nil {
+		if n > 0 {
+			return fmt.Errorf("the body cannot be rewound: %w", engine.ErrNoFailover)
+		}
+		return nil
+	}
+	if err := rewind(); err != nil {
+		return fmt.Errorf("rewind: %w: %w", err, engine.ErrNoFailover)
+	}
+	return nil
+}
+
+// put sends one PUT attempt. A 2xx or 404/409 is returned as a code with a
+// nil error (404/409 so the caller can create the folders); anything else
+// is an error, transient when a retry may cure it.
+func (d *WebDAVDriver) put(ctx context.Context, path string, body *uploadBody, o engine.PutOptions) (int, bool, error) {
 	header := map[string]string{"Content-Type": "application/octet-stream"}
 	if o.ContentType != "" {
 		header["Content-Type"] = o.ContentType
@@ -762,19 +821,35 @@ func (d *WebDAVDriver) put(ctx context.Context, path string, body *countingReade
 	// ContentLength 0 = unknown: chunked transfer encoding. (A known empty
 	// body is indistinguishable from "unknown" in PutOptions; chunked
 	// carries zero bytes just as well.)
-	resp, err := d.request(ctx, http.MethodPut, path, body, o.ContentLength, header)
+	timeout := webdavPutDeadline(d.limits.putTimeout, o.ContentLength)
+	call, transient, err := d.send(ctx, http.MethodPut, path, body, o.ContentLength, header, timeout, watchUpload)
 	if err != nil {
-		return 0, err
+		return 0, transient, err
 	}
+	defer call.finish()
+	resp := call.resp
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
 		drainClose(resp)
-		return resp.StatusCode, nil
+		return resp.StatusCode, false, nil
 	case resp.StatusCode == http.StatusConflict || resp.StatusCode == http.StatusNotFound:
 		drainClose(resp)
-		return resp.StatusCode, nil
+		return resp.StatusCode, false, nil
 	}
-	return resp.StatusCode, statusError(resp)
+	return resp.StatusCode, transient, statusError(resp)
+}
+
+// get sends a GET (retried until an answer that is not transient) and hands
+// back the answer with its body wrapped for the idle watchdog; Close of the
+// body ends the call.
+func (d *WebDAVDriver) get(ctx context.Context, path, what string, header map[string]string) (*http.Response, error) {
+	call, err := d.do(ctx, davSpec{method: http.MethodGet, path: path, header: header, stream: true})
+	if err != nil {
+		return nil, err
+	}
+	resp := call.resp
+	resp.Body = &downloadBody{rc: resp.Body, call: call, d: d, what: what}
+	return resp, nil
 }
 
 // Get streams the object. A 404 is the engine's NotFoundError.
@@ -783,7 +858,7 @@ func (d *WebDAVDriver) Get(ctx context.Context, container, artifact string) (io.
 	if err != nil {
 		return nil, err
 	}
-	resp, err := d.request(ctx, http.MethodGet, d.escapedPath(names, false), nil, 0, nil)
+	resp, err := d.get(ctx, d.escapedPath(names, false), d.name+" get "+key, nil)
 	if err != nil {
 		return nil, fmt.Errorf("%s get %s: %w", d.name, key, err)
 	}
@@ -812,7 +887,7 @@ func (d *WebDAVDriver) GetRange(ctx context.Context, container, artifact string,
 	if length > 0 {
 		rng = fmt.Sprintf("bytes=%d-%d", offset, offset+length-1)
 	}
-	resp, err := d.request(ctx, http.MethodGet, d.escapedPath(names, false), nil, 0, map[string]string{"Range": rng})
+	resp, err := d.get(ctx, d.escapedPath(names, false), d.name+" get range "+key, map[string]string{"Range": rng})
 	if err != nil {
 		return nil, fmt.Errorf("%s get range %s: %w", d.name, key, err)
 	}
@@ -878,12 +953,12 @@ func (d *WebDAVDriver) Delete(ctx context.Context, container, artifact string) e
 }
 
 func (d *WebDAVDriver) deletePath(ctx context.Context, path string) error {
-	ctx, cancel := context.WithTimeout(ctx, webdavMetaTimeout)
-	defer cancel()
-	resp, err := d.request(ctx, http.MethodDelete, path, nil, 0, nil)
+	call, err := d.do(ctx, davSpec{method: http.MethodDelete, path: path, timeout: webdavMetaTimeout})
 	if err != nil {
 		return err
 	}
+	defer call.finish()
+	resp := call.resp
 	if resp.StatusCode == http.StatusNotFound || (resp.StatusCode >= 200 && resp.StatusCode < 300) {
 		drainClose(resp)
 		return nil

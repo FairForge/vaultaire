@@ -389,7 +389,10 @@ func main() {
 	// with the sync_backend flag. Sync's terms forbid reselling the service
 	// without its written consent. See internal/drivers/webdav_README.md.
 	if syncCfg, ok := drivers.SyncWebDAVConfigFromEnv(os.Getenv); ok {
-		syncDriver, err := drivers.NewWebDAVDriver("sync", syncCfg.URL, syncCfg.User, syncCfg.Password, syncCfg.Root, logger)
+		for _, w := range syncCfg.Warnings {
+			logger.Warn(w)
+		}
+		syncDriver, err := drivers.NewWebDAVDriver("sync", syncCfg.URL, syncCfg.User, syncCfg.Password, syncCfg.Root, logger, syncCfg.Options()...)
 		if err != nil {
 			logger.Error("failed to add Sync WebDAV driver", zap.Error(err))
 		} else {

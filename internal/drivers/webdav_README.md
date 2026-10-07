@@ -100,9 +100,36 @@ to the configured ones before it is sent. A refusal wraps
 
 HTTP: `TunedHTTPClient(WithHTTP1Only(), WithResponseHeaderTimeout(5m))`
 (`VAULTAIRE_TUNED_TRANSPORT=false` = `http.DefaultClient`); 60 s per
-PROPFIND/MKCOL/DELETE. Basic auth on every request; credentials in a URL are
-refused (a URL lands in error messages); the password is never logged. 5xx,
-timeouts and 401/403 are returned as errors — the engine's breaker handles them.
+PROPFIND/MKCOL/DELETE attempt. Basic auth on every request; credentials in a URL are
+refused (a URL lands in error messages); the password is never logged. 401/403
+and what is left after the retries below are returned as errors — the
+engine's breaker handles them.
+
+## Stalls, retries, concurrency (`webdav_resilience.go`)
+
+The live bench against the bridge (2026-10-06, SLC) found: every op is a
+0.5–1 s round trip and throughput saturates at ~10–25 ops/s; at 32 concurrent
+requests the bridge answered some GETs and DELETEs **500** (once at 8, on
+DELETE); and with 4 concurrent 256 MiB PUTs it **stopped reading one body after
+62 KB and never answered** while serving everything else — the client sat in
+`io.Copy` for 45+ minutes. Every request now goes through one path (`send`):
+
+| Bound | Default | Option / env | What it does |
+|---|---|---|---|
+| Concurrency cap | 8 | `WithWebDAVMaxConcurrency`, `SYNC_WEBDAV_MAX_CONCURRENCY` (1..256) | A per-driver semaphore: a request waits for a slot under the caller's context. PROPFIND/MKCOL/DELETE/PUT hold it for the whole request; a **GET gives it back at the headers** (its body streams to a caller that may be copying it into this same driver — held slots would let 8 such copies deadlock it) |
+| Idle timeout | 60 s | `WithWebDAVIdleTimeout`, `SYNC_WEBDAV_IDLE_TIMEOUT` (1s..1h) | PUT: the server consumes no body byte for that long (the timer runs only while the transport holds bytes the server has not taken — never while the caller's source is slow). GET: no answer for that long, or a body that yields no byte for that long **while the caller is inside `Read`** (the caller's own pace is never a stall). The request is cancelled with `ErrWebDAVStalled` (wraps `engine.ErrTimeout`) |
+| PUT deadline | 2 min per started 64 MiB, ≤ 6 h | `WithWebDAVPutTimeout` | Known-length PUTs only (the fixed-bucket `putDeadline` scaling, ≈ 0.5 MB/s floor). Bounds the wait after the last body byte (the bridge may answer only after its own upload to Sync). A GET has the idle timeout only |
+| Retries | 3 attempts, jittered backoff from 250 ms (×2) | `WithWebDAVRetries` | On 500/502/503/504, 423, a transport error (reset, EOF, refused), a stall or a timeout — for PROPFIND, MKCOL (423 keeps its own 5× loop), DELETE and a GET **before its body reached the caller**. A PUT only when the body can be sent again: seekable → rewound; non-seekable with a known length ≤ 8 MiB → held in memory for it (the engine hands drivers a non-seekable reader); larger → never buffered, and a failure after its bytes went out wraps `engine.ErrNoFailover`. A 2xx is never retried; a caller whose context is done is never retried |
+
+Metrics (on `drivers.Collectors()`, every series at 0 per backend from the
+constructor): `vaultaire_webdav_requests_total{backend,method,outcome}` — one
+per attempt, outcome `ok | http_4xx | locked | http_5xx | transport_error |
+stall | timeout | canceled`; `vaultaire_webdav_stalls_total{backend,direction}`
+(`upload | download`); `vaultaire_webdav_retries_total{backend,method}`.
+`WebDAVDriver.Stats()` returns the same stall/retry counts for one driver
+(the bench prints them). Tests: `webdav_resilience_test.go` (a handler that
+reads 62 KB then blocks, one that sends 100 KB then blocks, one that never
+answers headers, flaky 5xx/423, an in-flight peak counter).
 
 ## Configuration (`sync` instance)
 
@@ -112,6 +139,8 @@ timeouts and 401/403 are returned as errors — the engine's breaker handles the
 | `SYNC_WEBDAV_URL` | `http://127.0.0.1:4918` | The bridge |
 | `SYNC_WEBDAV_USER` | `sync` | |
 | `SYNC_WEBDAV_ROOT` | `vaultaire` | Folder under the bridge's root objects live in |
+| `SYNC_WEBDAV_MAX_CONCURRENCY` | `8` | Requests in flight to the bridge (1..256). The bridge 500s some requests at 32 |
+| `SYNC_WEBDAV_IDLE_TIMEOUT` | `60s` | A transfer the bridge makes no progress on for this long is cancelled (1s..1h). A rejected value of either is logged at Warn and the default kept |
 
 ## The Sync.com bridge (`sync-webdav`)
 

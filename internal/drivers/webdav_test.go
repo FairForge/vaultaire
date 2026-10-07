@@ -51,7 +51,7 @@ type sync32 struct {
 
 // newDAVFixture starts the server. wrap (optional) sits between the auth
 // check and the WebDAV handler, to misbehave on purpose.
-func newDAVFixture(t *testing.T, wrap func(http.Handler) http.Handler) *davFixture {
+func newDAVFixture(t *testing.T, wrap func(http.Handler) http.Handler, opts ...WebDAVOption) *davFixture {
 	t.Helper()
 	f := &davFixture{fs: webdav.NewMemFS()}
 	var h http.Handler = &webdav.Handler{FileSystem: f.fs, LockSystem: webdav.NewMemLS()}
@@ -80,7 +80,7 @@ func newDAVFixture(t *testing.T, wrap func(http.Handler) http.Handler) *davFixtu
 		h.ServeHTTP(w, r)
 	}))
 	t.Cleanup(f.srv.Close)
-	drv, err := NewWebDAVDriver("sync", f.srv.URL, davTestUser, davTestPass, "vaultaire", zap.NewNop())
+	drv, err := NewWebDAVDriver("sync", f.srv.URL, davTestUser, davTestPass, "vaultaire", zap.NewNop(), opts...)
 	require.NoError(t, err)
 	f.drv = drv
 	return f
@@ -248,13 +248,20 @@ func TestWebDAVDriver_RecreatesCollectionDeletedBehindItsBack(t *testing.T) {
 	require.NoError(t, f.drv.Put(ctx, "c", "dir/two", strings.NewReader("2"), engine.WithContentLength(1)))
 	assert.Equal(t, "2", string(readAllClose(t, mustGet(ctx, t, f.drv, "c", "dir/two"))))
 
-	// A stream that was already sent cannot be retried: an error, never a
-	// silently short object; the collections are recreated for the next call.
+	// A small stream of known length is held in memory (≤ 8 MiB), so it is
+	// retried too.
 	require.NoError(t, f.fs.RemoveAll(context.Background(), "/vaultaire/t-tenant-a/c"))
-	err := f.drv.Put(ctx, "c", "dir/three", onlyReader{strings.NewReader("3")}, engine.WithContentLength(1))
+	require.NoError(t, f.drv.Put(ctx, "c", "dir/small", onlyReader{strings.NewReader("s")}, engine.WithContentLength(1)))
+	assert.Equal(t, "s", string(readAllClose(t, mustGet(ctx, t, f.drv, "c", "dir/small"))))
+
+	// A stream of unknown length that was already sent cannot be retried: an
+	// error, never a silently short object; the collections are recreated for
+	// the next call.
+	require.NoError(t, f.fs.RemoveAll(context.Background(), "/vaultaire/t-tenant-a/c"))
+	err := f.drv.Put(ctx, "c", "dir/three", onlyReader{strings.NewReader("3")})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, engine.ErrNoFailover)
-	require.NoError(t, f.drv.Put(ctx, "c", "dir/three", onlyReader{strings.NewReader("3")}, engine.WithContentLength(1)))
+	require.NoError(t, f.drv.Put(ctx, "c", "dir/three", onlyReader{strings.NewReader("3")}))
 }
 
 func TestWebDAVDriver_SpecialCharacterKeys(t *testing.T) {

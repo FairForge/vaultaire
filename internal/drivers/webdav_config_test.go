@@ -2,6 +2,7 @@ package drivers
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -38,4 +39,29 @@ func TestSyncWebDAVConfigFromEnv(t *testing.T) {
 	}))
 	assert.True(t, ok)
 	assert.Equal(t, WebDAVConfig{URL: "http://127.0.0.1:5000/", User: "other", Password: "pw", Root: "stored/prod"}, c)
+}
+
+func TestSyncWebDAVConfigFromEnv_Limits(t *testing.T) {
+	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+
+	c, ok := SyncWebDAVConfigFromEnv(env(map[string]string{
+		"SYNC_WEBDAV_PASSWORD": "pw", "SYNC_WEBDAV_MAX_CONCURRENCY": "4", "SYNC_WEBDAV_IDLE_TIMEOUT": "30s",
+	}))
+	assert.True(t, ok)
+	assert.Equal(t, 4, c.MaxConcurrency)
+	assert.Equal(t, 30*time.Second, c.IdleTimeout)
+	assert.Empty(t, c.Warnings)
+	assert.Len(t, c.Options(), 2)
+
+	c, ok = SyncWebDAVConfigFromEnv(env(map[string]string{
+		"SYNC_WEBDAV_PASSWORD": "pw", "SYNC_WEBDAV_MAX_CONCURRENCY": "0", "SYNC_WEBDAV_IDLE_TIMEOUT": "fast",
+	}))
+	assert.True(t, ok, "a bad limit keeps the default, it does not drop the driver")
+	assert.Zero(t, c.MaxConcurrency)
+	assert.Zero(t, c.IdleTimeout)
+	assert.Len(t, c.Warnings, 2)
+	assert.Empty(t, c.Options())
+
+	c, _ = SyncWebDAVConfigFromEnv(env(map[string]string{"SYNC_WEBDAV_PASSWORD": "pw", "SYNC_WEBDAV_MAX_CONCURRENCY": "1000"}))
+	assert.Len(t, c.Warnings, 1, "above 256 is refused")
 }

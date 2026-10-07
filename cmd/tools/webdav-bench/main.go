@@ -29,6 +29,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/FairForge/vaultaire/internal/drivers"
 )
 
 func main() {
@@ -99,6 +101,11 @@ func parseFlags(args []string, getenv func(string) string) (config, error) {
 	fs.StringVar(&c.Proc, "proc", "sync-webdav", "process to sample from /proc (same host only; empty = off)")
 	fs.StringVar(&c.SpillDir, "spill-dir", "", "directory whose size is sampled (the bridge's --upload-temp-dir)")
 	fs.DurationVar(&c.SampleEvery, "sample-every", time.Second, "resource sampling interval")
+	fs.DurationVar(&c.IdleTimeout, "idle-timeout", drivers.WebDAVDefaultIdleTimeout, "driver: fail a transfer the server makes no progress on for this long (0 = off)")
+	fs.DurationVar(&c.PutTimeout, "put-timeout", drivers.WebDAVDefaultPutTimeout, "driver: PUT deadline per started 64 MiB (0 = off)")
+	fs.IntVar(&c.MaxConcurrency, "max-concurrency", drivers.WebDAVDefaultMaxConcurrency, "driver: requests in flight to the server (SYNC_WEBDAV_MAX_CONCURRENCY in the server)")
+	fs.IntVar(&c.Attempts, "retries", drivers.WebDAVDefaultAttempts, "driver: attempts for a transient failure (1 = no retry)")
+	fs.DurationVar(&c.OpTimeout, "op-timeout", 30*time.Minute, "fail one operation (and one raw request) after this long (0 = off)")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
@@ -142,6 +149,9 @@ func parseFlags(args []string, getenv func(string) string) (config, error) {
 	}
 	if c.ParityK < 1 || c.ParityM < 1 {
 		return config{}, fmt.Errorf("-parity-k and -parity-m must be ≥ 1")
+	}
+	if c.MaxConcurrency < 1 || c.Attempts < 1 || c.IdleTimeout < 0 || c.PutTimeout < 0 || c.OpTimeout < 0 {
+		return config{}, fmt.Errorf("-max-concurrency and -retries must be ≥ 1, the timeouts ≥ 0")
 	}
 	if c.SampleEvery <= 0 {
 		c.SampleEvery = time.Second

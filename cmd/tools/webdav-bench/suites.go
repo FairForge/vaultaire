@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -20,7 +21,9 @@ import (
 // sha256 of what was sent.
 func (b *bench) putGen(key string, seed uint64, size int64) ([]byte, error) {
 	g := newGen(seed, size).hashing()
-	if err := b.drv.Put(b.ctx, b.container, key, g, engine.WithContentLength(size)); err != nil {
+	ctx, cancel := b.opCtx()
+	defer cancel()
+	if err := b.drv.Put(ctx, b.container, key, g, engine.WithContentLength(size)); err != nil {
 		return nil, err
 	}
 	return g.Sum(), nil
@@ -30,7 +33,9 @@ func (b *bench) putGen(key string, seed uint64, size int64) ([]byte, error) {
 // sha256); a difference is a MISMATCH. ttfb is the time to the first byte.
 func (b *bench) getVerify(key string, want []byte, size int64) (ttfb time.Duration, err error) {
 	start := time.Now()
-	rc, err := b.drv.Get(b.ctx, b.container, key)
+	ctx, cancel := b.opCtx()
+	defer cancel()
+	rc, err := b.drv.Get(ctx, b.container, key)
 	if err != nil {
 		return 0, err
 	}
@@ -101,7 +106,9 @@ func (b *bench) suiteSmall() {
 			b.addRow(row("small", cs, "GET", lat, errs, wall, int64(n-errs)*size))
 
 			lat, errs, wall = b.pool(n, conc, "small Exists "+cs, func(i int) error {
-				ok, err := b.drv.Exists(b.ctx, b.container, key(i))
+				ctx, cancel := b.opCtx()
+				defer cancel()
+				ok, err := b.drv.Exists(ctx, b.container, key(i))
 				if err == nil && !ok && hashes[i] != nil {
 					return fmt.Errorf("Exists %s = false after a successful PUT", key(i))
 				}
@@ -110,7 +117,9 @@ func (b *bench) suiteSmall() {
 			b.addRow(row("small", cs, "Exists", lat, errs, wall, 0))
 
 			lat, errs, wall = b.pool(n, conc, "small Delete "+cs, func(i int) error {
-				return b.drv.Delete(b.ctx, b.container, key(i))
+				ctx, cancel := b.opCtx()
+				defer cancel()
+				return b.drv.Delete(ctx, b.container, key(i))
 			})
 			b.addRow(row("small", cs, "Delete", lat, errs, wall, 0))
 			b.dropFolder(folder)
@@ -183,7 +192,9 @@ func (b *bench) suiteRange() {
 		}
 		cs := fmt.Sprintf("%s in %s", sizeName(rs), sizeName(size))
 		lat, errs, wall := b.pool(len(offs), 1, "range GET "+cs, func(i int) error {
-			rc, err := b.drv.GetRange(b.ctx, b.container, key, offs[i], rs)
+			ctx, cancel := b.opCtx()
+			defer cancel()
+			rc, err := b.drv.GetRange(ctx, b.container, key, offs[i], rs)
 			if err != nil {
 				return err
 			}
@@ -291,7 +302,7 @@ func (b *bench) suiteConsistency() {
 		}
 
 		t = time.Now()
-		if err := b.drv.Delete(b.ctx, b.container, key); err != nil {
+		if err := b.op(func(ctx context.Context) error { return b.drv.Delete(ctx, b.container, key) }); err != nil {
 			b.fail("consistency DELETE %s: %v", key, err)
 			continue
 		}
@@ -330,7 +341,9 @@ func (b *bench) suiteConsistency() {
 // readState reads key and names what it holds: "v1", "v2", "missing", or
 // "other" (bytes that were never written).
 func (b *bench) readState(key string, h1, h2 []byte) (string, error) {
-	rc, err := b.drv.Get(b.ctx, b.container, key)
+	ctx, cancel := b.opCtx()
+	defer cancel()
+	rc, err := b.drv.Get(ctx, b.container, key)
 	if isNotFound(err) {
 		return "missing", nil
 	}
@@ -383,7 +396,11 @@ func (b *bench) suiteListing() {
 		cs := fmt.Sprintf("%d files", n)
 
 		t := time.Now()
-		keys, err := b.drv.List(b.ctx, b.container, folder+"/")
+		var keys []string
+		err := b.op(func(ctx context.Context) (err error) {
+			keys, err = b.drv.List(ctx, b.container, folder+"/")
+			return err
+		})
 		d := time.Since(t)
 		r := row("listing", cs, "List drv", []time.Duration{d}, 0, d, 0)
 		if err != nil {
