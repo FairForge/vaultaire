@@ -89,6 +89,9 @@ type MultiWebDAVDriver struct {
 	staged      atomic.Int64 // staging files now
 	stagedPeak  atomic.Int64 // most staging files at once (tests)
 	mcache      *manifestCache
+	// stripeSettle is the pause between the cleanup passes of a failed
+	// striped upload (an in-flight piece a bridge stores late).
+	stripeSettle time.Duration
 }
 
 // webdavBridge is one server of a MultiWebDAVDriver.
@@ -172,6 +175,7 @@ func NewMultiWebDAVDriver(name string, cfg WebDAVConfig, logger *zap.Logger, opt
 		}
 	}
 	m.stripeSlots = make(chan struct{}, len(cfg.Bridges)*large)
+	m.stripeSettle = webdavDefaultStripeSettle
 	m.mcache = newManifestCache(webdavManifestCacheEntries, webdavManifestCacheTTL, func() time.Time { return m.now() })
 	for i, bc := range cfg.Bridges {
 		label := strconv.Itoa(i)
