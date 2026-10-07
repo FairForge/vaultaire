@@ -84,6 +84,11 @@ const (
 	// generation is an orphan (a striped upload never runs that long).
 	WebDAVDefaultStripeGrace = 6 * time.Hour
 
+	// webdavStripeSweeps / webdavDefaultStripeSettle: the extra cleanup
+	// passes after a failed striped upload, and the pause before each.
+	webdavStripeSweeps        = 2
+	webdavDefaultStripeSettle = 2 * time.Second
+
 	stripeManifestFormat = "vaultaire-webdav-stripe/1"
 	stripeManifestMax    = 4 << 20
 	stripeKeyFile        = "key" + WebDAVLeafMarker
@@ -306,7 +311,7 @@ func (m *MultiWebDAVDriver) putStriped(ctx context.Context, key string, names []
 
 	n := int((size + m.stripePiece - 1) / m.stripePiece)
 	man.Pieces = make([]stripePiece, n)
-	uploaded := make([]bool, n)
+	started := 0 // pieces whose upload began: a cancelled one may still land
 	pctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var (
@@ -341,6 +346,7 @@ func (m *MultiWebDAVDriver) putStriped(ctx context.Context, key string, names []
 			break
 		}
 		man.Pieces[i] = stripePiece{Size: sz, SHA256: sum}
+		started = i + 1
 		wg.Add(1)
 		go func(i int, f *os.File, sz int64) {
 			defer wg.Done()
@@ -348,19 +354,15 @@ func (m *MultiWebDAVDriver) putStriped(ctx context.Context, key string, names []
 			defer m.unstage(f)
 			if err := m.putPiece(pctx, key, dir, i, f, sz); err != nil {
 				fail(fmt.Errorf("piece %d: %w", i, err))
-				return
 			}
-			mu.Lock()
-			uploaded[i] = true
-			mu.Unlock()
 		}(i, f, sz)
 	}
-	wg.Wait()
+	wg.Wait() // every piece goroutine has returned (and unstaged its file) before any cleanup
 	if firstErr == nil && ctx.Err() != nil {
 		firstErr = ctx.Err()
 	}
 	if firstErr != nil {
-		m.dropGeneration(ctx, key, man, uploaded)
+		m.dropGeneration(ctx, key, man, started)
 		err := fmt.Errorf("%s put %s (striped, %d pieces): %w", m.name, key, n, firstErr)
 		if consumed {
 			err = fmt.Errorf("%w: %w", err, engine.ErrNoFailover)
@@ -383,7 +385,7 @@ func (m *MultiWebDAVDriver) putStriped(ctx context.Context, key string, names []
 	err = kbridge.drv.putNames(ctx, key+" (stripe manifest)", manifestNamesOf(names), bytes.NewReader(mb), engine.WithContentLength(int64(len(mb))))
 	m.note(ctx, kbridge, err)
 	if err != nil {
-		m.dropGeneration(ctx, key, man, uploaded)
+		m.dropGeneration(ctx, key, man, n)
 		return fmt.Errorf("%s put %s: stripe manifest: %w: %w", m.name, key, err, engine.ErrNoFailover)
 	}
 	// The plain file of a previous small version would shadow the manifest.
@@ -467,20 +469,37 @@ func (m *MultiWebDAVDriver) putSmall(ctx context.Context, key string, names []st
 }
 
 // dropGeneration deletes what a failed striped upload wrote (best effort,
-// detached from a cancelled caller); what stays is the reaper's.
-func (m *MultiWebDAVDriver) dropGeneration(ctx context.Context, key string, man *stripeManifest, uploaded []bool) {
+// detached from a cancelled caller); what stays is the reaper's. Every
+// piece the upload STARTED is deleted, confirmed or not: a PUT cancelled
+// after the bridge stored it has no confirmation, and one the bridge
+// receives only after the client gave up lands after a first pass — so the
+// pass is repeated webdavStripeSweeps times, stripeSettle apart. Each pass
+// deletes by name on each piece's own bridge (never a listing, which a
+// bridge's stale view could leave short).
+func (m *MultiWebDAVDriver) dropGeneration(ctx context.Context, key string, man *stripeManifest, started int) {
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
 	defer cancel()
-	var errs []error
-	for i, ok := range uploaded {
-		if ok {
+	pass := func() []error {
+		var errs []error
+		for i := 0; i < started; i++ {
 			if err := m.removeRouted(cctx, append(append([]string(nil), man.Dir...), pieceName(i))); err != nil {
 				errs = append(errs, err)
 			}
 		}
+		if err := m.removeRouted(cctx, append(append([]string(nil), man.Dir...), stripeKeyFile)); err != nil {
+			errs = append(errs, err)
+		}
+		return errs
 	}
-	if err := m.removeRouted(cctx, append(append([]string(nil), man.Dir...), stripeKeyFile)); err != nil {
-		errs = append(errs, err)
+	errs := pass()
+	for round := 0; round < webdavStripeSweeps && len(errs) == 0 && m.stripeSettle > 0; round++ {
+		t := time.NewTimer(m.stripeSettle)
+		select {
+		case <-t.C:
+		case <-cctx.Done():
+			t.Stop()
+		}
+		errs = pass()
 	}
 	if len(errs) > 0 {
 		webdavStripeOrphans.WithLabelValues(m.name, "left").Inc()

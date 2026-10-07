@@ -33,12 +33,14 @@ const (
 func newStriped(t *testing.T, bs []*bridgeServer, mutate func(*WebDAVConfig), opts ...WebDAVOption) *MultiWebDAVDriver {
 	t.Helper()
 	dir := t.TempDir()
-	return newMulti(t, bs, func(c *WebDAVConfig) {
+	m := newMulti(t, bs, func(c *WebDAVConfig) {
 		c.StripeMin, c.StripePiece, c.StagingDir = testStripeMin, testPiece, dir
 		if mutate != nil {
 			mutate(c)
 		}
 	}, opts...)
+	m.stripeSettle = 50 * time.Millisecond
+	return m
 }
 
 func randBody(t *testing.T, n int) []byte {
@@ -189,10 +191,12 @@ func TestStripe_UnknownLengthIsNotStriped(t *testing.T) {
 // object does not exist, the pieces that landed are deleted, and the error
 // says the body is spent (no failover to another backend).
 func TestStripe_APieceFailingLeavesNoObject(t *testing.T) {
-	// Arrange: bridge 1 refuses every piece upload
-	bs := newBridges(t, 3, true, func(i int, h http.Handler) http.Handler {
+	// Arrange: piece 3 is refused, on whichever bridge its name routes to
+	// (piece names carry a random generation: a per-bridge refusal would miss
+	// every piece now and then)
+	bs := newBridges(t, 3, true, func(_ int, h http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if i == 1 && r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/p0") {
+			if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/p00003") {
 				http.Error(w, "boom", http.StatusInternalServerError)
 				return
 			}
@@ -497,4 +501,51 @@ func TestStripe_GenerationNames(t *testing.T) {
 	}
 	assert.False(t, strings.Contains(davName("a%s"), "%s"), "davName never writes the manifest marker")
 	assert.False(t, strings.Contains(davName("a%p"), "%p"), "davName never writes the stripe folder suffix")
+}
+
+// A piece fails while others are in flight: one in-flight piece is stored by
+// the bridge but its answer comes late (the client cancels it — no
+// confirmation), another reaches the bridge only after the client gave up
+// (the bridge stores it after the cleanup began). The cleanup must delete
+// every piece it STARTED, settle, and sweep again: nothing of the
+// generation may stay (CI #629: p00004 left behind).
+func TestStripe_AFailedPieceLeavesNoInFlightPieceBehind(t *testing.T) {
+	// Arrange
+	bs := newBridges(t, 3, true, func(_ int, h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPut {
+				switch {
+				case strings.Contains(r.URL.Path, "/p00001"):
+					_, _ = io.Copy(io.Discard, r.Body)
+					http.Error(w, "boom", http.StatusInternalServerError)
+					return
+				case strings.Contains(r.URL.Path, "/p00000"):
+					h.ServeHTTP(w, r) // stored…
+					time.Sleep(150 * time.Millisecond)
+					return // …answered after the client cancelled
+				case strings.Contains(r.URL.Path, "/p00002"):
+					time.Sleep(150 * time.Millisecond) // arrives after the client gave up
+					h.ServeHTTP(w, r)
+					return
+				}
+			}
+			h.ServeHTTP(w, r)
+		})
+	})
+	m := newStriped(t, bs, nil)
+	m.stripeSettle = 250 * time.Millisecond
+	ctx := davCtx("tenant-a")
+	body := randBody(t, 4*testPiece)
+
+	// Act
+	err := m.Put(ctx, "bucket", "racy", onlyReader{bytes.NewReader(body)}, engine.WithContentLength(int64(len(body))))
+
+	// Assert
+	require.Error(t, err)
+	files := fsFiles(t, bs[0].fs, "/vaultaire")
+	assert.Empty(t, filesWith(files, "%p/"), "no piece or key file of the failed generation: %v", files)
+	assert.Equal(t, int64(0), m.staged.Load(), "no staging file left")
+	entries, rerr := os.ReadDir(m.stagingDir)
+	require.NoError(t, rerr)
+	assert.Empty(t, entries)
 }
