@@ -1,11 +1,13 @@
 package api
 
 import (
+	"context"
 	"net/http/httptest"
 	"os"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/FairForge/vaultaire/internal/config"
 	"github.com/FairForge/vaultaire/internal/drivers"
@@ -47,7 +49,8 @@ func TestJobRuleFile_MatchesTheRegisteredJobsAndTheExportedSeries(t *testing.T) 
 	eng.AddDriver("idrive", drivers.NewLocalDriver(t.TempDir(), zap.NewNop()))
 	eng.AddDriver("geyser", drivers.NewLocalDriver(t.TempDir(), zap.NewNop()))
 	eng.AddDriver("permafrost", drivers.NewLocalDriver(t.TempDir(), zap.NewNop())) // the parity leg: vault_parity joins the table
-	eng.AddDriver("sync", drivers.NewLocalDriver(t.TempDir(), zap.NewNop()))       // the pack store backend: pack_gc joins the table
+	// the pack store backend, and one that stripes: pack_gc and stripe_gc join the table
+	eng.AddDriver("sync", stripingLocal{drivers.NewLocalDriver(t.TempDir(), zap.NewNop())})
 	eng.SetPrimary("idrive")
 	s := NewServer(&config.Config{Server: config.ServerConfig{Port: 8000}}, zap.NewNop(), eng, nil, jf.db)
 	s.accountDeletion = NewAccountDeletionRunner(jf.db, zap.NewNop(), eng, s.gci, nil, s.accountSvc)
@@ -216,4 +219,12 @@ func TestRoutingRuleFile_MatchesTheExportedSeries(t *testing.T) {
 	for _, r := range file.Groups[0].Rules {
 		assert.False(t, regexp.MustCompile(`[{,]\s*job\s*=`).MatchString(r.Expr), "%s selects on Prometheus's own job label", r.Alert)
 	}
+}
+
+// stripingLocal is a local driver that answers the stripe reaper (the
+// prod `sync` backend, drivers.MultiWebDAVDriver, stripes large objects).
+type stripingLocal struct{ *drivers.LocalDriver }
+
+func (stripingLocal) ReapOrphanStripes(context.Context, time.Duration) (drivers.StripeReapResult, error) {
+	return drivers.StripeReapResult{}, nil
 }

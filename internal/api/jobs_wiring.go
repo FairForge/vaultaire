@@ -45,6 +45,7 @@ import (
 //	account_export       1 m    +15 s   (renders pending GDPR exports, WP-R10-3b)
 //	vault_parity         2 m    +45 s   (parity shards of vault-floor objects, WP-VAULT-1; only with a leg)
 //	pack_gc              1 h    +7 m    (the pack store, internal/packstore; only with the sync backend)
+//	stripe_gc            1 h    +9 m    (orphan pieces of striped objects, drivers/webdav_stripe.go; only with the sync backend)
 //
 // The three cleanups used to wait a full hour after every start before
 // their first pass.
@@ -132,6 +133,9 @@ func (s *Server) registerJobs() {
 	}
 	if s.packGC != nil {
 		s.jobs.Register(s.packGC.spec())
+	}
+	if g := newStripeGC(s.engine, logger); g != nil {
+		s.jobs.Register(g.spec())
 	}
 	// The logging_enabled gate is loaded here, before the first request can
 	// be recorded against it; every delivery pass refreshes it.

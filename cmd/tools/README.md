@@ -99,6 +99,8 @@ WEBDAV_PASSWORDS=$(sudo grep ^SYNC_WEBDAV_PASSWORDS= /opt/vaultaire/configs/.env
   -run small,large,crossbridge -out multi.json
 ```
 
+`-stripe-min <bytes>` (and `-stripe-piece`) exercises the multi-bridge driver's striping of large objects (default `-1` = never, so throughput stays comparable with older runs).
+
 `-urls a,b,…` (with `WEBDAV_PASSWORDS`, comma-separated, same order) drives
 `drivers.NewMultiWebDAVDriver` instead of the single-server driver; the raw
 client uses the first bridge. The stall/retry summary sums every bridge.

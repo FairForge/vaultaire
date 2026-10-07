@@ -225,6 +225,29 @@ one is ever added, for `sync` it is unreliable. Any age-based job over `sync`
 (retention, GC grace) must take its times from our own tables
 (`object_head_cache`, `global_content_index`), never from the bridge.
 
+## Striped large objects (`webdav_stripe.go`)
+
+One object is one PUT to one bridge, and one bridge uploads at ~30 MB/s
+(prod 2026-10-07: 2 GiB in 71 s, 5 GiB in 167 s) — while five bridges move
+156 MB/s up / 450 down when they work in parallel. So the multi-bridge driver
+**stripes a Put of a known length ≥ `SYNC_WEBDAV_STRIPE_MIN`** (default
+512 MiB) into pieces of `SYNC_WEBDAV_STRIPE_PIECE` (default 256 MiB), each
+routed by HRW on its own name — the pieces spread over every bridge — and
+uploaded in parallel. Smaller objects, and bodies of unknown length
+(`ContentLength` 0), are one file as before.
+
+| | |
+|---|---|
+| Layout | `t-<tenant>/<container>/…/<leaf>%s` = the **manifest** (the object); `t-<tenant>/<container>%p/<hh>/<h>/<gen>/p00000%o …` = the pieces and `key%o` (which object they are for). `<h>` = 32 hex of sha256(key), `<hh>` its first two; `<gen>` = `g<UTC yyyymmddThhmmssZ>-<16 hex>` — the generation's age without a server modtime. `%s` and `%p` are never produced by the name mapping (a literal `%` is `%25`), so an ordinary object can never be read as a manifest and a container listing never shows a piece |
+| Manifest | JSON: format `vaultaire-webdav-stripe/1`, logical size, piece size, generation, the generation's folder, each piece's size + sha256. Validated on read (folder inside the object's container, sizes add up) |
+| Write | key file → pieces (≤ K staged on disk under `SYNC_WEBDAV_STAGING_DIR` and in flight, K = bridges × `SYNC_WEBDAV_LARGE_CONCURRENCY` = 15 by default; each from a seekable section of its staging file, so a bridge's 5xx is resent; each size-verified; each holds a large-upload slot of ITS bridge) → **manifest last** → the key's previous plain `%o` file deleted → the previous generation's pieces deleted. A failure before the manifest deletes what landed (else the reaper does); the Put error wraps `ErrNoFailover` once the body is spent |
+| Read | The manifest and a plain object share the key's bridge (routed by the `%o` name). Get/GetRange read `%o` first, the manifest on a miss; pieces stream in order, the next one **prefetched** (its GET opened while the current one is read); a range opens only the pieces it spans; a whole piece is sha256-verified at its end. A piece missing at open (overwritten since the manifest was read) → the manifest is read once more; a piece missing mid-stream is a 503 (`ErrAllBackendsUnavailable`), never a mix of versions or a miss. Each piece read goes to the bridge that wrote it (fallback rules as above) |
+| Overwrite / Delete | Striped → striped: new generation, manifest replaced, old pieces deleted. Striped → plain: the plain file, then the manifest and its pieces go. Plain → striped: the plain file goes after the manifest. Delete: plain file, manifest, then pieces. A Put/Delete of a plain object costs one Depth 0 PROPFIND more (does a manifest exist?) |
+| List / WalkTenant | `List` reports the logical object (once, even beside a leftover plain file). `WalkTenant` (erasure sweep) reports the manifest under the object's name and every piece / key file as a file of container `<container>%p` — each with its own `Remove`, so the sweep deletes all of it |
+| Reaper | `ReapOrphanStripes(ctx, olderThan)` — the **`stripe_gc` job** (1 h, boot +9 m): generations whose NAME says they are older than 6 h and that no manifest references (key file missing, or the object's manifest names another generation) are deleted, file by file through each file's bridge, then the folder. A generation whose key file does not match its folder, or whose manifest cannot be read, is kept (an error in the result). Never a server modtime |
+| Crash window | A crash between writing the manifest and deleting an old plain `%o` file leaves both; Get serves the plain file until the next write of the key |
+| Metrics | `vaultaire_webdav_stripe_pieces_total{backend,op=written\|read\|deleted}`, `vaultaire_webdav_stripe_put_bytes_total{backend}`, `vaultaire_webdav_stripe_orphans_total{backend,outcome=left\|reaped}` (a Warn names every generation a failed write could not delete) |
+
 ## Configuration (`sync` instance)
 
 | Env | Default | |
@@ -238,6 +261,9 @@ one is ever added, for `sync` it is unreliable. Any age-based job over `sync`
 | `SYNC_WEBDAV_ROOT` | `vaultaire` | Folder under the bridge's root objects live in |
 | `SYNC_WEBDAV_MAX_CONCURRENCY` | `8` | Requests in flight to EACH bridge (1..256). The bridge 500s some requests at 32 |
 | `SYNC_WEBDAV_IDLE_TIMEOUT` | `60s` | A transfer the bridge makes no progress on for this long is cancelled (1s..1h). A rejected value of either is logged at Warn and the default kept |
+| `SYNC_WEBDAV_STRIPE_MIN` | `512MiB` | A known-length Put this large or larger is striped (sizes: bytes or K/M/G/T(iB)); `0`/`off` = never. Below the piece size it becomes the piece size (warning) |
+| `SYNC_WEBDAV_STRIPE_PIECE` | `256MiB` | Piece size, 16MiB..4GiB |
+| `SYNC_WEBDAV_STAGING_DIR` | `<tmp>/vaultaire-stripes` | Absolute path; holds at most K pieces at once (15 × 256 MiB = 3.75 GiB by default) |
 
 ## The Sync.com bridge (`sync-webdav`)
 

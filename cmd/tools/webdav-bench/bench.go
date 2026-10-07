@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -82,8 +83,13 @@ type config struct {
 	// LargeConcurrency (multi-bridge): large transfers per bridge and
 	// direction (0 = the driver's default, 3).
 	LargeConcurrency int
-	Attempts         int
-	OpTimeout        time.Duration
+	// StripeMin / StripePiece (multi-bridge): stripe a known-length object
+	// this large into pieces (-1 = never, the bench default, so throughput
+	// stays comparable with older runs; 0 = the driver's default).
+	StripeMin   int64
+	StripePiece int64
+	Attempts    int
+	OpTimeout   time.Duration
 }
 
 // defaultSuites run without -run; limits is opt-in (it probes failure modes
@@ -208,7 +214,8 @@ func run(ctx context.Context, cfg config, out io.Writer) (*Report, error) {
 	var drv benchDriver
 	var bridges []*drivers.WebDAVDriver
 	if len(cfg.URLs) > 0 {
-		mc := drivers.WebDAVConfig{User: cfg.User, Root: cfg.Root, LargeConcurrency: cfg.LargeConcurrency}
+		mc := drivers.WebDAVConfig{User: cfg.User, Root: cfg.Root, LargeConcurrency: cfg.LargeConcurrency,
+			StripeMin: cfg.StripeMin, StripePiece: cfg.StripePiece, StagingDir: filepath.Join(os.TempDir(), "webdav-bench-stripes")}
 		for i, u := range cfg.URLs {
 			mc.Bridges = append(mc.Bridges, drivers.WebDAVBridge{URL: u, Password: cfg.Passwords[i]})
 			one, err := drivers.NewWebDAVDriver("webdav-bench", u, cfg.User, cfg.Passwords[i], cfg.Root, zap.NewNop(), limits...)
