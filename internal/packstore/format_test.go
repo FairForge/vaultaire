@@ -100,3 +100,10 @@ func TestLayout_NamesAndPathLengths(t *testing.T) {
 	}
 	assert.LessOrEqual(t, len(folders), 256)
 }
+
+func TestEncodeTail_RefusesAFooterTheReaderWouldRefuse(t *testing.T) {
+	// One member whose key alone exceeds the footer limit.
+	big := strings.Repeat("k", int(maxFooterBytes)+1)
+	_, err := encodeTail([]FooterMember{{Tenant: "t", Key: big, Offset: 0, Length: 1, SHA256: "x"}})
+	require.ErrorIs(t, err, ErrBadPack)
+}
