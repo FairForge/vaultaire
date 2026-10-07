@@ -88,6 +88,7 @@ type MultiWebDAVDriver struct {
 	stripeSlots chan struct{}
 	staged      atomic.Int64 // staging files now
 	stagedPeak  atomic.Int64 // most staging files at once (tests)
+	mcache      *manifestCache
 }
 
 // webdavBridge is one server of a MultiWebDAVDriver.
@@ -171,6 +172,7 @@ func NewMultiWebDAVDriver(name string, cfg WebDAVConfig, logger *zap.Logger, opt
 		}
 	}
 	m.stripeSlots = make(chan struct{}, len(cfg.Bridges)*large)
+	m.mcache = newManifestCache(webdavManifestCacheEntries, webdavManifestCacheTTL, func() time.Time { return m.now() })
 	for i, bc := range cfg.Bridges {
 		label := strconv.Itoa(i)
 		all := append(append(cfg.Options(), opts...), withWebDAVBridge(label))
@@ -442,6 +444,7 @@ func (m *MultiWebDAVDriver) Put(ctx context.Context, container, artifact string,
 		return err
 	}
 	o := engine.ApplyPutOptions(opts...)
+	m.mcache.drop(manifestCacheKey(names)) // whatever this write ends as, the cached version is not it
 	if m.stripes(o) {
 		return m.putStriped(ctx, key, names, order, container, artifact, data, o)
 	}
@@ -469,6 +472,7 @@ func (m *MultiWebDAVDriver) Put(ctx context.Context, container, artifact string,
 // dropManifest deletes the key's manifest on its bridge b (if any), then
 // its pieces (best effort: what stays is the reaper's).
 func (m *MultiWebDAVDriver) dropManifest(ctx context.Context, b *webdavBridge, key string, names []string, container, artifact string) error {
+	m.mcache.drop(manifestCacheKey(names))
 	e, found, err := b.drv.stat(ctx, manifestNamesOf(names))
 	if err != nil {
 		return err
@@ -559,6 +563,7 @@ func (m *MultiWebDAVDriver) Delete(ctx context.Context, container, artifact stri
 		return err
 	}
 	b := m.bridges[order[0]]
+	m.mcache.drop(manifestCacheKey(names))
 	err = b.drv.Delete(ctx, container, artifact)
 	if err == nil {
 		err = m.dropManifest(ctx, b, key, names, container, artifact) // a striped object: manifest, then pieces

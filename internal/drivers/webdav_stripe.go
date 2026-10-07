@@ -35,14 +35,18 @@ import (
 // is never produced by davName, which writes a literal '%' as "%25"):
 //
 //	t-<tenant>/<container>/…/<leaf>%s                  the manifest (the object)
-//	t-<tenant>/<container>%p/<hh>/<h>/<gen>/key%o      which object the pieces are for
-//	t-<tenant>/<container>%p/<hh>/<h>/<gen>/p00000%o   piece 0, p00001%o, …
+//	t-<tenant>/<container>%p/<hh>/<h>-<gen>/key%o      which object the pieces are for
+//	t-<tenant>/<container>%p/<hh>/<h>-<gen>/p00000%o   piece 0, p00001%o, …
 //
 // <h> is the first 32 hex digits of sha256(artifact) (keys run to 1,024
 // characters; a name to 248), <hh> its first two; <gen> is a generation —
 // "g<UTC time>-<random>" — so a reaper can tell an old one from a running
 // upload without a server modtime (Sync's bridges report 1970 for every
-// file). The manifest's leaf marker `%s` is not the plain object's `%o`, so
+// file). One folder per upload and nothing shared between uploads of a key:
+// deleting a generation deletes its folder, and no per-key folder is left
+// behind (an `<hh>` folder holds ≤ 50,000 entries on Sync). Manifests of the
+// first layout (#626: `<hh>/<h>/<gen>/`) still read; the reaper removes its
+// empty key folders. The manifest's leaf marker `%s` is not the plain object's `%o`, so
 // an ordinary object can never be read as a manifest whatever its bytes.
 // The manifest and the plain file share the key's bridge (HRW on the `%o`
 // names): an object is either, and Get reads `%o` first, the manifest on a
@@ -185,7 +189,44 @@ func stripeKeyHash(artifact string) string {
 // the object's own (names[0], names[1]).
 func stripeDir(tenantFolder, containerName, artifact, gen string) []string {
 	h := stripeKeyHash(artifact)
-	return []string{tenantFolder, containerName + webdavStripeDirSuffix, h[:2], h, gen}
+	return []string{tenantFolder, containerName + webdavStripeDirSuffix, h[:2], h + "-" + gen}
+}
+
+// splitKeyGen splits a generation folder name of the current layout,
+// `<32 hex>-<gen>`.
+func splitKeyGen(name string) (h, gen string, ok bool) {
+	if len(name) < 34 || name[32] != '-' || !isHex32(name[:32]) {
+		return "", "", false
+	}
+	if _, ok := stripeGenTime(name[33:]); !ok {
+		return "", "", false
+	}
+	return name[:32], name[33:], true
+}
+
+func isHex32(s string) bool {
+	if len(s) != 32 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if !isHex(s[i]) || ('A' <= s[i] && s[i] <= 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+// dirGen is the generation a generation folder (either layout) holds.
+func dirGen(dir []string) string {
+	switch len(dir) {
+	case 4:
+		if _, g, ok := splitKeyGen(dir[3]); ok {
+			return g
+		}
+	case 5:
+		return dir[4]
+	}
+	return ""
 }
 
 func pieceName(i int) string { return fmt.Sprintf("p%05d", i) + WebDAVLeafMarker }
@@ -216,10 +257,10 @@ func (man *stripeManifest) validate(names []string) error {
 	if man.Format != stripeManifestFormat {
 		return fmt.Errorf("unknown stripe manifest format %q", man.Format)
 	}
-	if len(man.Dir) != 5 || man.Dir[0] != names[0] || man.Dir[1] != names[1]+webdavStripeDirSuffix {
+	if (len(man.Dir) != 4 && len(man.Dir) != 5) || man.Dir[0] != names[0] || man.Dir[1] != names[1]+webdavStripeDirSuffix {
 		return errors.New("stripe manifest names a folder outside the object's container")
 	}
-	if _, ok := stripeGenTime(man.Gen); !ok || man.Dir[4] != man.Gen {
+	if _, ok := stripeGenTime(man.Gen); !ok || dirGen(man.Dir) != man.Gen {
 		return fmt.Errorf("stripe manifest generation %q does not match its folder", man.Gen)
 	}
 	if man.PieceSize <= 0 || len(man.Pieces) == 0 {
@@ -351,6 +392,7 @@ func (m *MultiWebDAVDriver) putStriped(ctx context.Context, key string, names []
 			m.name, key, err, engine.ErrNoFailover)
 	}
 	webdavStripeBytes.WithLabelValues(m.name).Add(float64(size))
+	m.mcache.put(manifestCacheKey(names), man)
 	if old != nil && old.Gen != gen {
 		if err := m.deleteStripe(ctx, key, old); err != nil {
 			webdavStripeOrphans.WithLabelValues(m.name, "left").Inc()
@@ -446,8 +488,30 @@ func (m *MultiWebDAVDriver) dropGeneration(ctx context.Context, key string, man 
 			zap.String("backend", m.name), zap.String("key", key), zap.String("gen", man.Gen), zap.Error(errors.Join(errs...)))
 		return
 	}
-	b := m.bridges[m.rank(man.Dir)[0]]
-	_ = b.drv.removeDir(cctx, man.Dir)
+	m.removeGenerationDir(cctx, man.Dir)
+}
+
+// removeGenerationDir deletes a generation's folder once its files are
+// deleted, and a first-layout key folder it leaves empty (best effort: a
+// bridge that does not see the deletions yet keeps them — the reaper's).
+func (m *MultiWebDAVDriver) removeGenerationDir(ctx context.Context, dir []string) {
+	b := m.bridges[m.rank(dir)[0]]
+	if _, files, err := b.drv.children(ctx, dir); err != nil || len(files) > 0 {
+		return // never a recursive delete of files we did not delete
+	}
+	if err := b.drv.removeDir(ctx, dir); err != nil || len(dir) != 5 {
+		return
+	}
+	_ = m.removeEmptyDir(ctx, b, dir[:4])
+}
+
+// removeEmptyDir deletes the folder at names when it holds nothing.
+func (m *MultiWebDAVDriver) removeEmptyDir(ctx context.Context, b *webdavBridge, names []string) bool {
+	dirs, files, err := b.drv.children(ctx, names)
+	if err != nil || len(dirs) > 0 || len(files) > 0 {
+		return false
+	}
+	return b.drv.removeDir(ctx, names) == nil
 }
 
 // removeRouted deletes the file at names through its routed bridge.
@@ -475,8 +539,7 @@ func (m *MultiWebDAVDriver) deleteStripe(ctx context.Context, key string, man *s
 	if len(errs) > 0 {
 		return fmt.Errorf("%s delete %s (striped, gen %s): %w", m.name, key, man.Gen, errors.Join(errs...))
 	}
-	b := m.bridges[m.rank(man.Dir)[0]]
-	_ = b.drv.removeDir(ctx, man.Dir) // empty by now; a stale view keeps it — the reaper's
+	m.removeGenerationDir(ctx, man.Dir)
 	return nil
 }
 
@@ -511,6 +574,14 @@ func (m *MultiWebDAVDriver) readManifestOn(ctx context.Context, b *webdavBridge,
 // manifest's pieces. whole = Get (offset 0, to the end, verified pieces).
 func (m *MultiWebDAVDriver) openOn(ctx context.Context, b *webdavBridge, key string, names []string,
 	notFound error, offset, length int64, whole bool) (io.ReadCloser, error) {
+	ck := manifestCacheKey(names)
+	if man, ok := m.mcache.get(ck); ok {
+		r, err := m.openStripe(ctx, key, ck, man, offset, length)
+		if !errors.Is(err, errStripePieceGone) {
+			return r, err
+		}
+		m.mcache.drop(ck) // replaced or deleted elsewhere: resolve the key again
+	}
 	var rc io.ReadCloser
 	var err error
 	if whole {
@@ -528,11 +599,14 @@ func (m *MultiWebDAVDriver) openOn(ctx context.Context, b *webdavBridge, key str
 		}
 		return nil, merr
 	}
-	r, oerr := m.openStripe(ctx, key, man, offset, length)
+	m.mcache.put(ck, man)
+	r, oerr := m.openStripe(ctx, key, ck, man, offset, length)
 	if errors.Is(oerr, errStripePieceGone) {
+		m.mcache.drop(ck)
 		// Overwritten since the manifest was read: once more, from the new one.
 		if man2, err2 := m.readManifestOn(ctx, b, key, names, notFound); err2 == nil && man2.Gen != man.Gen {
-			return m.openStripe(ctx, key, man2, offset, length)
+			m.mcache.put(ck, man2)
+			return m.openStripe(ctx, key, ck, man2, offset, length)
 		}
 	}
 	return r, oerr
@@ -545,9 +619,12 @@ type stripeSeg struct {
 }
 
 // openStripe opens [offset, offset+length) of a striped object (length <= 0
-// = to the end): the first piece now (its errors are the open's), the next
-// one prefetched while the current one is read.
-func (m *MultiWebDAVDriver) openStripe(ctx context.Context, key string, man *stripeManifest, offset, length int64) (io.ReadCloser, error) {
+// = to the end): the first piece and the second at the same time (a range
+// across a boundary waits for one round trip, not two; a whole read has the
+// next piece on its way before the first byte), then always one ahead. The
+// first piece's errors are the open's. ck is the manifest's cache key (a
+// piece found gone mid-read drops the entry).
+func (m *MultiWebDAVDriver) openStripe(ctx context.Context, key, ck string, man *stripeManifest, offset, length int64) (io.ReadCloser, error) {
 	if offset < 0 {
 		return nil, fmt.Errorf("%s get range %s: %w: negative offset", m.name, key, engine.ErrInvalidInput)
 	}
@@ -568,13 +645,19 @@ func (m *MultiWebDAVDriver) openStripe(ctx context.Context, key string, man *str
 		to := min(end-start, man.Pieces[i].Size)
 		segs = append(segs, stripeSeg{piece: i, from: from, to: to})
 	}
-	r := &stripeReader{m: m, ctx: ctx, key: key, man: man, segs: segs}
-	first, err := m.readSeg(ctx, key, man, segs[0])
-	if err != nil {
-		return nil, err
-	}
-	r.cur = first
+	r := &stripeReader{m: m, ctx: ctx, key: key, ck: ck, man: man, segs: segs}
+	first := make(chan openResult, 1)
+	go func() {
+		rc, err := m.readSeg(ctx, key, man, segs[0])
+		first <- openResult{rc, err}
+	}()
 	r.prefetch(1)
+	res := <-first
+	if res.err != nil {
+		_ = r.Close()
+		return nil, res.err
+	}
+	r.cur = res.rc
 	return r, nil
 }
 
@@ -646,6 +729,7 @@ type stripeReader struct {
 	m    *MultiWebDAVDriver
 	ctx  context.Context
 	key  string
+	ck   string
 	man  *stripeManifest
 	segs []stripeSeg
 	idx  int
@@ -679,7 +763,7 @@ func (r *stripeReader) Read(p []byte) (int, error) {
 			res := <-r.next
 			r.next = nil
 			if res.err != nil {
-				r.err = res.err
+				r.fail(res.err)
 				return 0, r.err
 			}
 			r.cur = res.rc
@@ -696,9 +780,17 @@ func (r *stripeReader) Read(p []byte) (int, error) {
 			continue
 		}
 		if err != nil {
-			r.err = err
+			r.fail(err)
 		}
 		return n, err
+	}
+}
+
+// fail ends the read; a piece found gone drops the cached manifest.
+func (r *stripeReader) fail(err error) {
+	r.err = err
+	if errors.Is(err, errStripePieceGone) {
+		r.m.mcache.drop(r.ck)
 	}
 }
 
@@ -730,6 +822,7 @@ type StripeReapResult struct {
 	Live           int      `json:"generations_live"`
 	Reaped         int      `json:"generations_reaped"`
 	FilesDeleted   int      `json:"files_deleted"`
+	FoldersRemoved int      `json:"folders_removed"`
 	UnknownFolders int      `json:"unknown_folders"`
 	Errors         []string `json:"errors,omitempty"`
 }
@@ -795,59 +888,84 @@ func (m *MultiWebDAVDriver) reapContainer(ctx context.Context, lb *webdavBridge,
 		return fmt.Errorf("%s reap stripes: list %s: %w", m.name, strings.Join(top, "/"), err)
 	}
 	for _, hh := range hhs {
-		hs, _, err := lb.drv.children(ctx, append(append([]string(nil), top...), hh))
+		hhDir := append(append([]string(nil), top...), hh)
+		entries, _, err := lb.drv.children(ctx, hhDir)
 		if err != nil {
-			return fmt.Errorf("%s reap stripes: list %s/%s: %w", m.name, strings.Join(top, "/"), hh, err)
+			return fmt.Errorf("%s reap stripes: list %s: %w", m.name, strings.Join(hhDir, "/"), err)
 		}
-		for _, h := range hs {
-			hdir := append(append([]string(nil), top...), hh, h)
-			gens, _, err := lb.drv.children(ctx, hdir)
+		for _, e := range entries {
+			if ctx.Err() != nil {
+				return nil
+			}
+			dir := append(append([]string(nil), hhDir...), e)
+			if _, gen, ok := splitKeyGen(e); ok {
+				m.reapGeneration(ctx, lb, dir, gen, cutoff, res)
+				continue
+			}
+			if !isHex32(e) {
+				res.UnknownFolders++
+				continue
+			}
+			// A key folder of the first layout (#626): its generations, then
+			// the folder once nothing is left in it. No upload writes this
+			// layout any more, so an empty one is never in use.
+			gens, files, err := lb.drv.children(ctx, dir)
 			if err != nil {
-				return fmt.Errorf("%s reap stripes: list %s: %w", m.name, strings.Join(hdir, "/"), err)
+				return fmt.Errorf("%s reap stripes: list %s: %w", m.name, strings.Join(dir, "/"), err)
 			}
-			left := len(gens)
+			left := len(gens) + len(files)
 			for _, g := range gens {
-				if ctx.Err() != nil {
-					return nil
+				if m.reapGeneration(ctx, lb, append(append([]string(nil), dir...), g), g, cutoff, res) {
+					left--
 				}
-				dir := append(append([]string(nil), hdir...), g)
-				t, ok := stripeGenTime(g)
-				if !ok {
-					res.UnknownFolders++
-					continue
-				}
-				res.Generations++
-				if t.After(cutoff) {
-					res.Young++
-					continue
-				}
-				live, err := m.generationLive(ctx, dir)
-				if err != nil {
-					res.fail("%s: %v", strings.Join(dir, "/"), err)
-					continue
-				}
-				if live {
-					res.Live++
-					continue
-				}
-				n, err := m.removeGeneration(ctx, lb, dir)
-				res.FilesDeleted += n
-				if err != nil {
-					res.fail("%s: %v", strings.Join(dir, "/"), err)
-					continue
-				}
-				res.Reaped++
-				left--
-				webdavStripeOrphans.WithLabelValues(m.name, "reaped").Inc()
-				m.logger.Info("webdav stripe: orphan generation reaped", zap.String("backend", m.name),
-					zap.String("dir", strings.Join(dir, "/")), zap.Int("files", n))
 			}
-			if left == 0 && len(gens) > 0 {
-				_ = lb.drv.removeDir(ctx, hdir)
+			if left == 0 && m.removeEmptyDir(ctx, lb, dir) {
+				res.FoldersRemoved++
 			}
 		}
 	}
 	return nil
+}
+
+// reapGeneration judges one generation folder and deletes it when its name
+// says it is past the grace and no manifest references it; true when the
+// folder is gone. An empty one (an upload that died after its MKCOL) is a
+// folder removed, not a generation reaped.
+func (m *MultiWebDAVDriver) reapGeneration(ctx context.Context, lb *webdavBridge, dir []string, gen string, cutoff time.Time, res *StripeReapResult) bool {
+	t, ok := stripeGenTime(gen)
+	if !ok {
+		res.UnknownFolders++
+		return false
+	}
+	res.Generations++
+	if t.After(cutoff) {
+		res.Young++
+		return false
+	}
+	live, err := m.generationLive(ctx, dir)
+	if err != nil {
+		res.fail("%s: %v", strings.Join(dir, "/"), err)
+		return false
+	}
+	if live {
+		res.Live++
+		return false
+	}
+	n, err := m.removeGeneration(ctx, lb, dir)
+	res.FilesDeleted += n
+	if err != nil {
+		res.fail("%s: %v", strings.Join(dir, "/"), err)
+		return false
+	}
+	if n == 0 {
+		res.FoldersRemoved++
+		return true
+	}
+	res.Reaped++
+	webdavStripeOrphans.WithLabelValues(m.name, "reaped").Inc()
+	m.logger.Info("webdav stripe: orphan generation reaped", zap.String("backend", m.name),
+		zap.String("dir", strings.Join(dir, "/")), zap.Int("files", n))
+	return true
 }
 
 // generationLive: the manifest of the object the key file names references
@@ -878,7 +996,9 @@ func (m *MultiWebDAVDriver) generationLive(ctx context.Context, dir []string) (b
 	if strings.Contains(k.Container, "/") || davName(k.Container)+webdavStripeDirSuffix != dir[1] {
 		return false, errors.New("stripe key file names another container")
 	}
-	if h := stripeKeyHash(k.Artifact); dir[2] != h[:2] || dir[3] != h {
+	h := stripeKeyHash(k.Artifact)
+	owned := dir[2] == h[:2] && ((len(dir) == 4 && strings.HasPrefix(dir[3], h+"-")) || (len(dir) == 5 && dir[3] == h))
+	if !owned {
 		return false, errors.New("stripe key file names another object")
 	}
 	names := []string{dir[0], davName(k.Container)}
@@ -899,7 +1019,7 @@ func (m *MultiWebDAVDriver) generationLive(ctx context.Context, dir []string) (b
 	if err != nil {
 		return false, err
 	}
-	return man.Gen == dir[4], nil
+	return man.Gen == dirGen(dir), nil
 }
 
 // removeGeneration deletes every file of a generation's folder (each through
