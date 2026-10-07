@@ -227,6 +227,9 @@ func (m *MultiWebDAVDriver) object(ctx context.Context, op, container, artifact 
 		return "", nil, err
 	}
 	names, err := objectNames(tenantID, container, artifact)
+	if err == nil {
+		err = checkNames(names)
+	}
 	if err != nil {
 		return "", nil, fmt.Errorf("%s %s %s/%s: %w", m.name, op, container, artifact, err)
 	}
@@ -418,7 +421,7 @@ func (m *MultiWebDAVDriver) Put(ctx context.Context, container, artifact string,
 func (m *MultiWebDAVDriver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
 	key, order, err := m.object(ctx, "Get", container, artifact)
 	if err != nil {
-		return nil, err
+		return nil, unstorableMiss(err, container, artifact)
 	}
 	return readFrom(ctx, m, "get "+key, order,
 		func(b *webdavBridge) (io.ReadCloser, error) { return b.drv.Get(ctx, container, artifact) },
@@ -429,7 +432,7 @@ func (m *MultiWebDAVDriver) Get(ctx context.Context, container, artifact string)
 func (m *MultiWebDAVDriver) GetRange(ctx context.Context, container, artifact string, offset, length int64) (io.ReadCloser, error) {
 	key, order, err := m.object(ctx, "GetRange", container, artifact)
 	if err != nil {
-		return nil, err
+		return nil, unstorableMiss(err, container, artifact)
 	}
 	return readFrom(ctx, m, "get range "+key, order,
 		func(b *webdavBridge) (io.ReadCloser, error) {
@@ -442,6 +445,9 @@ func (m *MultiWebDAVDriver) GetRange(ctx context.Context, container, artifact st
 // ErrWebDAVBridgeStale.
 func (m *MultiWebDAVDriver) Exists(ctx context.Context, container, artifact string) (bool, error) {
 	key, order, err := m.object(ctx, "Exists", container, artifact)
+	if errors.Is(err, errNameTooLong) {
+		return false, nil // never stored
+	}
 	if err != nil {
 		return false, err
 	}
@@ -453,6 +459,9 @@ func (m *MultiWebDAVDriver) Exists(ctx context.Context, container, artifact stri
 // Delete removes the object through its bridge only.
 func (m *MultiWebDAVDriver) Delete(ctx context.Context, container, artifact string) error {
 	_, order, err := m.object(ctx, "Delete", container, artifact)
+	if errors.Is(err, errNameTooLong) {
+		return nil // never stored
+	}
 	if err != nil {
 		return err
 	}

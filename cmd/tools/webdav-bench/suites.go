@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"github.com/FairForge/vaultaire/internal/drivers"
 	"hash/fnv"
 	"io"
 	"math/rand/v2"
@@ -384,7 +385,8 @@ func (b *bench) suiteListing() {
 		if n > created {
 			from := created
 			lat, errs, wall := b.pool(n-from, b.cfg.ListConc, "listing create", func(i int) error {
-				code, body, err := b.raw.put(b.ctx, append(segs[:len(segs):len(segs)], name(from+i)), []byte{'x'})
+				// Objects as the driver writes them: the leaf carries the marker.
+				code, body, err := b.raw.put(b.ctx, append(segs[:len(segs):len(segs)], name(from+i)+drivers.WebDAVLeafMarker), []byte{'x'})
 				if err == nil && !ok2xx(code) {
 					err = fmt.Errorf("PUT %s: %d %s", name(from+i), code, body)
 				}

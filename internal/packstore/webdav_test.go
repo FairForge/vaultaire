@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/drivers"
+	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -61,7 +62,7 @@ func TestStore_OnTheWebDAVDriver(t *testing.T) {
 
 	// Assert: one PUT, the file where the layout says
 	assert.Equal(t, int32(1), puts.Load())
-	path := "/vaultaire/t-_global/_packs/" + sp.Name
+	path := "/vaultaire/t-_global/_packs/" + sp.Name + drivers.WebDAVLeafMarker
 	fi, err := fs.Stat(ctx, path)
 	require.NoError(t, err, path)
 	assert.Equal(t, sp.Size, fi.Size())
@@ -95,6 +96,22 @@ func TestStore_OnTheWebDAVDriver(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, names, 1)
 	assert.True(t, strings.HasSuffix(names[0], ".pack") && validPackName(names[0]))
+
+	// Recover reads a pack back through the driver (its leaf-marked name
+	// on the server); every member is already live, so it records none.
+	n, err := s.Recover(ctx, names[0])
+	require.NoError(t, err)
+	assert.Zero(t, n)
+
+	// A pack file no row names is found by the GC listing and deleted.
+	stray := strings.Repeat("a", 64)
+	strayName := "aa/" + stray + ".pack"
+	require.NoError(t, drv.Put(bctx(ctx), DefaultContainer, strayName, strings.NewReader("x"), engine.WithContentLength(1)))
+	res, err = s.GC(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.OrphansDeleted)
+	_, err = fs.Stat(ctx, "/vaultaire/t-_global/_packs/"+strayName+drivers.WebDAVLeafMarker)
+	assert.True(t, os.IsNotExist(err), "the orphan is gone from the server")
 }
 
 // A pack is uploaded from its staging file, so a transient answer after the
@@ -138,7 +155,7 @@ func TestStore_PackUploadIsRetriedAfterATransientAnswer(t *testing.T) {
 	got, err := readMember(t, s, tenant, "k")
 	require.NoError(t, err)
 	assert.Equal(t, body, got)
-	fi, err := fs.Stat(ctx, "/vaultaire/t-_global/_packs/"+sp.Name)
+	fi, err := fs.Stat(ctx, "/vaultaire/t-_global/_packs/"+sp.Name+drivers.WebDAVLeafMarker)
 	require.NoError(t, err)
 	assert.Equal(t, sp.Size, fi.Size())
 }

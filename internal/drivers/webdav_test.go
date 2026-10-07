@@ -168,8 +168,9 @@ func TestWebDAVDriver_PutGetRoundTrip(t *testing.T) {
 	got := readAllClose(t, mustGet(ctx, t, f.drv, "tenant-a_photos", "a.txt"))
 	assert.Equal(t, body, got)
 
-	// The object sits at <root>/t-<tenant>/<container>/<artifact>.
-	fi, err := f.fs.Stat(context.Background(), "/vaultaire/t-tenant-a/tenant-a_photos/a.txt")
+	// The object sits at <root>/t-<tenant>/<container>/<artifact>%o (the
+	// leaf marker: no folder name carries it).
+	fi, err := f.fs.Stat(context.Background(), "/vaultaire/t-tenant-a/tenant-a_photos/a.txt%o")
 	require.NoError(t, err)
 	assert.Equal(t, int64(len(body)), fi.Size())
 }
@@ -573,7 +574,7 @@ func TestWebDAVDriver_RefusesCallsWithoutTenant(t *testing.T) {
 	// The chunk context addresses the one chunk prefix.
 	cctx := engine.ChunkContext(ctx)
 	require.NoError(t, f.drv.Put(cctx, engine.ChunkContainer, "_chunks/h1", strings.NewReader("c"), engine.WithContentLength(1)))
-	_, statErr := f.fs.Stat(context.Background(), "/vaultaire/t-_global/_global/_chunks/h1")
+	_, statErr := f.fs.Stat(context.Background(), "/vaultaire/t-_global/_global/_chunks/h1%o")
 	assert.NoError(t, statErr)
 	assert.Equal(t, "t-_global/_global/_chunks/h1", f.drv.ObjectKey(cctx, engine.ChunkContainer, "_chunks/h1"))
 }

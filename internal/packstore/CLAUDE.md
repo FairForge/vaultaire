@@ -28,7 +28,14 @@ writers (jobs), never the synchronous S3 PUT path. First backend: `sync`
   WebDAV driver — never a customer prefix, so the erasure sweep never walks
   it). 256 folders, created once each (the WebDAV driver caches its MKCOLs);
   `MaxPerFolder` (50,000) refuses a seal into a full folder (`ErrFolderFull`).
-  Path on the WebDAV driver: 89 characters + the root.
+  On the WebDAV driver the file is `t-_global/_packs/<aa>/<sha256>.pack%o`
+  (`%o` = the driver's object-leaf marker, `drivers.WebDAVLeafMarker`, since
+  2026-10-07 — packs written before it are not listed, so GC and `Recover` see
+  only marked ones; there were none on prod). The longest name is the
+  71-character leaf, against Sync's 248 per name. `List`, `Get`, `Delete`
+  take and return the unmarked `<aa>/<sha256>.pack` — the marker is the
+  driver's business (`TestStore_OnTheWebDAVDriver` covers seal, read, GC
+  compaction, `Recover` and orphan deletion through it).
 - `format.go`: header `VLTPACK1` | members back to back | footer JSON
   `{"version":1,"members":[{tenant,key,offset,length,sha256}]}` | trailer
   (footer length u64 BE, footer sha256, `VLTPEND1`, 48 bytes). `ReadIndex`

@@ -29,16 +29,16 @@ import (
 // and Nextcloud. See webdav_README.md.
 //
 // Layout is the fixed-bucket shape of iDrive/R2/Geyser under a configured
-// root folder: `<root>/t-<tenant>/<container>/<artifact…>`, the tenant taken
+// root folder: `<root>/t-<tenant>/<container>/<artifact…>%o`, the tenant taken
 // from the call's context (a call without one is refused, tenant_ctx.go).
 // Every key segment is a WebDAV path segment, mapped reversibly (davName) so
 // that every S3 key is one Sync.com's bridge stores — the characters and
 // names it refuses or silently drops are percent-encoded; "" (a trailing
 // `/`), "." and ".." never reach the server as such.
 //
-// Known limit: WebDAV cannot hold a file `a` and a folder `a` side by side,
-// so an S3 key `a` and a key `a/b` in the same container conflict (the second
-// PUT fails with engine.ErrInvalidInput); S3 allows both.
+// Every object's leaf carries WebDAVLeafMarker (`%o`) and no folder does,
+// so S3 keys `a` and `a/b` coexist — on one server and across bridges that
+// cannot see each other's writes yet.
 type WebDAVDriver struct {
 	name string
 	// base is the configured server — Scheme and Host only, parsed and
@@ -413,8 +413,21 @@ func unhex(c byte) byte {
 // be safe for characters outside the BMP (unmeasured).
 const webdavMaxNameUnits = 248
 
+// errNameTooLong: a mapped name longer than the bridge takes. A PUT of
+// such a key is the caller's error (it wraps engine.ErrInvalidInput); a
+// read, Exists or Delete of one is a miss — it can never have been stored.
+var errNameTooLong = fmt.Errorf("%w: key segment too long for WebDAV", engine.ErrInvalidInput)
+
+// unstorableMiss turns errNameTooLong into the read's answer: not found.
+func unstorableMiss(err error, container, artifact string) error {
+	if errors.Is(err, errNameTooLong) {
+		return engine.ErrNotFound(container, artifact)
+	}
+	return err
+}
+
 // checkNames refuses a mapped name the bridge would refuse for its length —
-// before any request, as the caller's error.
+// before any request.
 func checkNames(names []string) error {
 	for _, n := range names {
 		units := 0
@@ -422,7 +435,7 @@ func checkNames(names []string) error {
 			units += utf16.RuneLen(r)
 		}
 		if units > webdavMaxNameUnits {
-			return fmt.Errorf("%w: a key segment is %d characters once mapped for WebDAV (max %d)", engine.ErrInvalidInput, units, webdavMaxNameUnits)
+			return fmt.Errorf("%w: %d characters once mapped (max %d)", errNameTooLong, units, webdavMaxNameUnits)
 		}
 	}
 	return nil
@@ -459,19 +472,43 @@ func tenantNames(tenantID, container string) ([]string, error) {
 	return []string{davName("t-" + tenantID), davName(container)}, nil
 }
 
-// objectNames are the resource names of an object, root excluded.
+// WebDAVLeafMarker ends the resource name of every object (the leaf of
+// its path); folder names never carry it. S3 allows a key `x` and a key
+// `x/y`; WebDAV cannot hold a file and a folder of one name — and with
+// several bridges the check cannot even be made: `x` and `x/y` route to
+// different bridges, the second one has not seen `x` yet (cross-bridge
+// staleness, 1.5 s – 5 min), creates the folder, and Sync's cloud keeps the
+// folder and loses the file (prod, 2026-10-07). With the marker `x` is the
+// file `x%o` and `x/y` the folder `x` holding `y%o`. Unambiguous: davName
+// writes a literal '%' as "%25", so a mapped name holds '%' only before two
+// hex digits or as the empty-segment name "%" — never before 'o'.
+const WebDAVLeafMarker = "%o"
+
+// leafName is the resource name of an object's last key segment.
+func leafName(seg string) string { return davName(seg) + WebDAVLeafMarker }
+
+// leafSegment is leafName's inverse; ok is false for a file without the
+// marker (written before it, or by something else) — not an object.
+func leafSegment(name string) (string, bool) {
+	if !strings.HasSuffix(name, WebDAVLeafMarker) {
+		return "", false
+	}
+	return keySegment(strings.TrimSuffix(name, WebDAVLeafMarker)), true
+}
+
+// objectNames are the resource names of an object, root excluded: folders
+// davName-mapped, the leaf leafName-mapped. The length is not checked here
+// (object does it: a PUT refuses, a read misses).
 func objectNames(tenantID, container, artifact string) ([]string, error) {
 	names, err := tenantNames(tenantID, container)
 	if err != nil {
 		return nil, err
 	}
-	for _, s := range strings.Split(artifact, "/") {
+	segs := strings.Split(artifact, "/")
+	for _, s := range segs[:len(segs)-1] {
 		names = append(names, davName(s))
 	}
-	if err := checkNames(names); err != nil {
-		return nil, err
-	}
-	return names, nil
+	return append(names, leafName(segs[len(segs)-1])), nil
 }
 
 // object resolves a call to its tenant key (for errors) and resource names.
@@ -481,6 +518,9 @@ func (d *WebDAVDriver) object(ctx context.Context, op, container, artifact strin
 		return "", nil, err
 	}
 	names, err := objectNames(tenantID, container, artifact)
+	if err == nil {
+		err = checkNames(names)
+	}
 	if err != nil {
 		return "", nil, fmt.Errorf("%s %s %s/%s: %w", d.name, op, container, artifact, err)
 	}
@@ -1078,7 +1118,7 @@ func (d *WebDAVDriver) get(ctx context.Context, path, what string, header map[st
 func (d *WebDAVDriver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
 	key, names, err := d.object(ctx, "Get", container, artifact)
 	if err != nil {
-		return nil, err
+		return nil, unstorableMiss(err, container, artifact)
 	}
 	resp, err := d.get(ctx, d.escapedPath(names, false), d.name+" get "+key, nil)
 	if err != nil {
@@ -1100,7 +1140,7 @@ func (d *WebDAVDriver) Get(ctx context.Context, container, artifact string) (io.
 func (d *WebDAVDriver) GetRange(ctx context.Context, container, artifact string, offset, length int64) (io.ReadCloser, error) {
 	key, names, err := d.object(ctx, "GetRange", container, artifact)
 	if err != nil {
-		return nil, err
+		return nil, unstorableMiss(err, container, artifact)
 	}
 	if offset < 0 {
 		return nil, fmt.Errorf("%s get range %s: %w: negative offset", d.name, key, engine.ErrInvalidInput)
@@ -1158,6 +1198,9 @@ type limitedBody struct {
 // object). That costs a PROPFIND per delete.
 func (d *WebDAVDriver) Delete(ctx context.Context, container, artifact string) error {
 	key, names, err := d.object(ctx, "Delete", container, artifact)
+	if errors.Is(err, errNameTooLong) {
+		return nil // never stored
+	}
 	if err != nil {
 		return err
 	}
@@ -1192,6 +1235,9 @@ func (d *WebDAVDriver) deletePath(ctx context.Context, path string) error {
 // A folder is not an object.
 func (d *WebDAVDriver) Exists(ctx context.Context, container, artifact string) (bool, error) {
 	key, names, err := d.object(ctx, "Exists", container, artifact)
+	if errors.Is(err, errNameTooLong) {
+		return false, nil // never stored
+	}
 	if err != nil {
 		return false, err
 	}
@@ -1214,7 +1260,7 @@ func (d *WebDAVDriver) List(ctx context.Context, container, prefix string) ([]st
 	if err != nil {
 		return nil, fmt.Errorf("%s list %s: %w", d.name, container, err)
 	}
-	keyOf := func(rel []string) string {
+	dirKey := func(rel []string) string {
 		segs := make([]string, len(rel))
 		for i, s := range rel {
 			segs[i] = keySegment(s)
@@ -1224,11 +1270,19 @@ func (d *WebDAVDriver) List(ctx context.Context, container, prefix string) ([]st
 	var out []string
 	err = d.walk(ctx, names,
 		func(rel []string) bool {
-			dir := keyOf(rel) + "/"
+			dir := dirKey(rel) + "/"
 			return strings.HasPrefix(dir, prefix) || strings.HasPrefix(prefix, dir)
 		},
 		func(rel []string, _ string) error {
-			if k := keyOf(rel); strings.HasPrefix(k, prefix) {
+			leaf, ok := leafSegment(rel[len(rel)-1])
+			if !ok {
+				return nil // a file without the marker is not an object
+			}
+			k := leaf
+			if len(rel) > 1 {
+				k = dirKey(rel[:len(rel)-1]) + "/" + leaf
+			}
+			if strings.HasPrefix(k, prefix) {
 				out = append(out, k)
 			}
 			return nil
@@ -1283,16 +1337,24 @@ func (d *WebDAVDriver) removeNames(ctx context.Context, names []string) error {
 func tenantObject(names []string, remove func(ctx context.Context) error) engine.TenantObject {
 	rel := names[1:]
 	obj := engine.TenantObject{Remove: remove}
+	// The leaf: an object's carries the marker; a file without it (written
+	// before the marker, or by something else) is still the tenant's and
+	// is walked — the erasure sweep must remove it too.
+	last := rel[len(rel)-1]
+	leaf, ok := leafSegment(last)
+	if !ok {
+		leaf = keySegment(last)
+	}
 	if len(rel) == 1 {
-		obj.Artifact = keySegment(rel[0])
+		obj.Artifact = leaf
 		return obj
 	}
 	obj.Container = keySegment(rel[0])
-	parts := make([]string, len(rel)-1)
-	for i, s := range rel[1:] {
-		parts[i] = keySegment(s)
+	parts := make([]string, 0, len(rel)-1)
+	for _, s := range rel[1 : len(rel)-1] {
+		parts = append(parts, keySegment(s))
 	}
-	obj.Artifact = strings.Join(parts, "/")
+	obj.Artifact = strings.Join(append(parts, leaf), "/")
 	return obj
 }
 

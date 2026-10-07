@@ -172,7 +172,7 @@ func TestWebDAVDriver_SyncNameRules(t *testing.T) {
 	for i, s := range syncHostileSegments {
 		keys = append(keys, fmt.Sprintf("d%02d/%s", i, s), fmt.Sprintf("%s/f%02d", s, i))
 	}
-	keys = append(keys, "photos/", "photos/x.jpg", "a//b", strings.Repeat("é", 248))
+	keys = append(keys, "photos/", "photos/x.jpg", "a//b", strings.Repeat("é", 246), strings.Repeat("é", 248)+"/f")
 	for i, k := range keys {
 		body := fmt.Sprintf("body-%d", i)
 		require.NoError(t, f.drv.Put(ctx, "c", k, strings.NewReader(body), engine.WithContentLength(int64(len(body)))), "%q", k)
@@ -197,13 +197,13 @@ func TestWebDAVDriver_SyncNameRules(t *testing.T) {
 	assert.Zero(t, discarded.Load(), "the bridge dropped a file the driver sent")
 }
 
-// A segment longer than the bridge takes (248 UTF-16 units once mapped) is
-// invalid input before any request; 248 is fine.
+// A segment longer than the bridge takes (248 UTF-16 units once mapped,
+// the leaf marker included) is invalid input before any request.
 func TestWebDAVDriver_SegmentLongerThanSyncTakesIsRefusedUpFront(t *testing.T) {
 	var refused, discarded atomic.Int32
 	f := newDAVFixture(t, syncRules(&refused, &discarded))
 	ctx := davCtx("tenant-a")
-	require.NoError(t, f.drv.Put(ctx, "c", "ok/"+strings.Repeat("L", 248), strings.NewReader("x"), engine.WithContentLength(1)))
+	require.NoError(t, f.drv.Put(ctx, "c", strings.Repeat("D", 248)+"/"+strings.Repeat("L", 246), strings.NewReader("x"), engine.WithContentLength(1)))
 	puts, mkcols := f.methods.put.Load(), f.methods.mkcol.Load()
 	for _, k := range []string{
 		strings.Repeat("L", 249),
@@ -219,8 +219,7 @@ func TestWebDAVDriver_SegmentLongerThanSyncTakesIsRefusedUpFront(t *testing.T) {
 	assert.Zero(t, refused.Load())
 }
 
-// A name the server refuses (400) or a file where a folder is needed (a key
-// `x` and a key `x/y`) is the caller's error — engine.ErrInvalidInput, which
+// A name the server refuses (400 / 414) is the caller's error — engine.ErrInvalidInput, which
 // never charges a breaker (the sync breaker opened on five bad names and
 // sent every tenant's sync-tier writes to the primary). A 5xx is not.
 func TestWebDAVDriver_RefusedNamesAreInvalidInput(t *testing.T) {
@@ -245,12 +244,7 @@ func TestWebDAVDriver_RefusedNamesAreInvalidInput(t *testing.T) {
 		assert.ErrorIs(t, err, engine.ErrInvalidInput, k)
 	}
 
-	require.NoError(t, f.drv.Put(ctx, "c", "x", strings.NewReader("file"), engine.WithContentLength(4)))
-	err := f.drv.Put(ctx, "c", "x/y", strings.NewReader("y"), engine.WithContentLength(1))
-	require.Error(t, err)
-	assert.ErrorIs(t, err, engine.ErrInvalidInput)
-
-	err = f.drv.Put(ctx, "c", "broken", strings.NewReader("x"), engine.WithContentLength(1))
+	err := f.drv.Put(ctx, "c", "broken", strings.NewReader("x"), engine.WithContentLength(1))
 	require.Error(t, err)
 	assert.False(t, errors.Is(err, engine.ErrInvalidInput), "a 5xx is the server's trouble: %v", err)
 }
