@@ -240,10 +240,9 @@ func (w *Writer) upload(ctx context.Context, tail []byte) (*SealedPack, error) {
 		return nil, err
 	}
 	if upload {
-		if _, err := w.f.Seek(0, io.SeekStart); err != nil {
-			return nil, fmt.Errorf("rewind staging file: %w", err)
-		}
-		if err := s.backend.Put(bctx(ctx), s.o.Container, name, io.LimitReader(w.f, size), engine.WithContentLength(size)); err != nil {
+		// A section of the staging file is seekable: the driver rewinds it
+		// and sends the pack again after a transient answer (a bridge's 500).
+		if err := s.backend.Put(bctx(ctx), s.o.Container, name, io.NewSectionReader(w.f, 0, size), engine.WithContentLength(size)); err != nil {
 			return nil, fmt.Errorf("upload pack %s to %s: %w", name, s.name, err)
 		}
 		if err := s.verify(ctx, name, size, tail[len(tail)-int(TrailerSize):]); err != nil {
