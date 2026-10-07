@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/stretchr/testify/assert"
@@ -93,4 +95,50 @@ func TestStore_OnTheWebDAVDriver(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, names, 1)
 	assert.True(t, strings.HasSuffix(names[0], ".pack") && validPackName(names[0]))
+}
+
+// A pack is uploaded from its staging file, so a transient answer after the
+// body went out is retried by the driver (it rewinds a seekable body) —
+// prod's bridges answer a 500 to roughly one PUT in a few hundred, and a
+// non-rewindable body turned that into a failed seal (pack-bench on Sync,
+// 2026-10-07).
+func TestStore_PackUploadIsRetriedAfterATransientAnswer(t *testing.T) {
+	// Arrange: the first PUT reads the whole body, then answers 500
+	db := openTestDB(t)
+	fs := webdav.NewMemFS()
+	var puts atomic.Int32
+	h := &webdav.Handler{FileSystem: fs, LockSystem: webdav.NewMemLS()}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut && puts.Add(1) == 1 {
+			_, _ = io.Copy(io.Discard, r.Body)
+			http.Error(w, "bridge hiccup", http.StatusInternalServerError)
+			return
+		}
+		h.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	drv, err := drivers.NewWebDAVDriver(uniq("davretry"), srv.URL, "u", "p", "vaultaire", zap.NewNop(),
+		drivers.WithWebDAVRetries(3, time.Millisecond))
+	require.NoError(t, err)
+	s := newTestStore(t, db, drv, nil)
+	ctx := context.Background()
+	tenant := uniq("tenant")
+	body := randBytes(t, 9<<20) // above the driver's 8 MiB in-memory replay buffer
+	w, err := s.NewWriter()
+	require.NoError(t, err)
+	_, err = w.Add(ctx, tenant, "k", int64(len(body)), bytes.NewReader(body))
+	require.NoError(t, err)
+
+	// Act
+	sp, err := w.Flush(ctx)
+
+	// Assert
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), puts.Load())
+	got, err := readMember(t, s, tenant, "k")
+	require.NoError(t, err)
+	assert.Equal(t, body, got)
+	fi, err := fs.Stat(ctx, "/vaultaire/t-_global/_packs/"+sp.Name)
+	require.NoError(t, err)
+	assert.Equal(t, sp.Size, fi.Size())
 }
