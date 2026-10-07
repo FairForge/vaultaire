@@ -303,6 +303,13 @@ func (f *FailoverManager) Execute(ctx context.Context, backends []string, fn fun
 			if errors.Is(err, ErrArchived) {
 				return "", fmt.Errorf("all backends failed: %w", err)
 			}
+			// Invalid input is the caller's request, final wherever it is
+			// seen: a key the target backend cannot hold (a name Sync's
+			// bridge refuses) must not be stored on the next candidate —
+			// silently off the tier its bucket promises.
+			if errors.Is(err, ErrInvalidInput) {
+				return "", fmt.Errorf("all backends failed: %w", err)
+			}
 			// A consumed non-rewindable body makes every further attempt a
 			// doomed retry against a drained stream: it would charge healthy
 			// backends' breakers for a failure that is not theirs — or worse,

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf16"
 
 	"go.uber.org/zap"
 
@@ -30,15 +31,14 @@ import (
 // Layout is the fixed-bucket shape of iDrive/R2/Geyser under a configured
 // root folder: `<root>/t-<tenant>/<container>/<artifact…>`, the tenant taken
 // from the call's context (a call without one is refused, tenant_ctx.go).
-// Every key segment is a WebDAV path segment, so S3 keys that cannot be one
-// are mapped reversibly (davName): "" (a trailing `/`, an S3 folder marker,
-// or `a//b`), "." and ".." would otherwise be normalised away by the server —
-// ".." would climb out of the tenant's folder — and a segment that starts
-// with "~" gets one more, which keeps the mapping one-to-one.
+// Every key segment is a WebDAV path segment, mapped reversibly (davName) so
+// that every S3 key is one Sync.com's bridge stores — the characters and
+// names it refuses or silently drops are percent-encoded; "" (a trailing
+// `/`), "." and ".." never reach the server as such.
 //
 // Known limit: WebDAV cannot hold a file `a` and a folder `a` side by side,
 // so an S3 key `a` and a key `a/b` in the same container conflict (the second
-// PUT fails); S3 allows both.
+// PUT fails with engine.ErrInvalidInput); S3 allows both.
 type WebDAVDriver struct {
 	name string
 	// base is the configured server — Scheme and Host only, parsed and
@@ -325,27 +325,107 @@ func plainSegments(p string) ([]string, error) {
 // Name returns the engine backend name the driver was built with.
 func (d *WebDAVDriver) Name() string { return d.name }
 
-// davName maps one key segment onto a WebDAV resource name, reversibly:
-// "" → "~", "." → "~.", ".." → "~..", "~x" → "~~x"; everything else is
-// itself. The server never sees an empty, "." or ".." segment.
+// davName maps one key segment onto a WebDAV resource name, reversibly, so
+// that every S3 key is one Sync.com's bridge stores (rules measured on
+// prod's bridges 2026-10-07, webdav_README.md "Key mapping"): '%' and the
+// characters Sync refuses (`: ? * " < > | \`, control characters but tab)
+// are percent-encoded wherever they are; so is a leading space or '~', a
+// trailing '.' or space, and the first character of a Windows device name
+// (CON, PRN, AUX, NUL, COM0-9, LPT0-9 — also with an extension), of
+// desktop.ini / Thumbs.db (refused) and of .DS_Store (accepted and silently
+// dropped). "" (a trailing `/` or `a//b`) is "%" — never a real name, since a
+// real '%' is "%25". "." and ".." come out as "%2E" and ".%2E": the server
+// never sees an empty, "." or ".." segment. Plain names map to themselves.
 func davName(seg string) string {
-	switch {
-	case seg == "":
-		return "~"
-	case seg == "." || seg == "..":
-		return "~" + seg
-	case strings.HasPrefix(seg, "~"):
-		return "~" + seg
+	if seg == "" {
+		return "%"
 	}
-	return seg
+	first := seg[0] == ' ' || seg[0] == '~' || syncReservedName(seg)
+	last := len(seg) - 1
+	var b strings.Builder
+	for i := 0; i < len(seg); i++ {
+		c := seg[i]
+		if c == '%' || strings.IndexByte(`:?*"<>|\`, c) >= 0 || (c < 0x20 && c != '\t') || c == 0x7f ||
+			(i == 0 && first) || (i == last && (c == '.' || c == ' ')) {
+			fmt.Fprintf(&b, "%%%02X", c)
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
 }
 
-// keySegment is davName's inverse.
+// syncReservedName: a name Sync refuses or drops because of what it is, not
+// of a character in it (case-insensitive).
+func syncReservedName(seg string) bool {
+	switch strings.ToLower(seg) {
+	case "desktop.ini", "thumbs.db", ".ds_store":
+		return true
+	}
+	stem, _, _ := strings.Cut(seg, ".")
+	stem = strings.ToUpper(strings.TrimRight(stem, " "))
+	switch stem {
+	case "CON", "PRN", "AUX", "NUL":
+		return true
+	}
+	return len(stem) == 4 && (strings.HasPrefix(stem, "COM") || strings.HasPrefix(stem, "LPT")) &&
+		stem[3] >= '0' && stem[3] <= '9'
+}
+
+// keySegment is davName's inverse ("%XX" decoded; a '%' not followed by two
+// hex digits is kept as it is).
 func keySegment(name string) string {
-	if name == "~" {
+	if name == "%" {
 		return ""
 	}
-	return strings.TrimPrefix(name, "~")
+	if !strings.Contains(name, "%") {
+		return name
+	}
+	var b strings.Builder
+	for i := 0; i < len(name); i++ {
+		if name[i] == '%' && i+2 < len(name) && isHex(name[i+1]) && isHex(name[i+2]) {
+			b.WriteByte(unhex(name[i+1])<<4 | unhex(name[i+2]))
+			i += 2
+			continue
+		}
+		b.WriteByte(name[i])
+	}
+	return b.String()
+}
+
+func isHex(c byte) bool {
+	return ('0' <= c && c <= '9') || ('a' <= c && c <= 'f') || ('A' <= c && c <= 'F')
+}
+
+func unhex(c byte) byte {
+	switch {
+	case c >= 'a':
+		return c - 'a' + 10
+	case c >= 'A':
+		return c - 'A' + 10
+	}
+	return c - '0'
+}
+
+// webdavMaxNameUnits is the longest resource name Sync's bridge takes: 248
+// characters (measured 2026-10-07 — 248 created, 249 refused; 248 × 'é' =
+// 496 bytes accepted, so characters, not bytes). Counted in UTF-16 units to
+// be safe for characters outside the BMP (unmeasured).
+const webdavMaxNameUnits = 248
+
+// checkNames refuses a mapped name the bridge would refuse for its length —
+// before any request, as the caller's error.
+func checkNames(names []string) error {
+	for _, n := range names {
+		units := 0
+		for _, r := range n {
+			units += utf16.RuneLen(r)
+		}
+		if units > webdavMaxNameUnits {
+			return fmt.Errorf("%w: a key segment is %d characters once mapped for WebDAV (max %d)", engine.ErrInvalidInput, units, webdavMaxNameUnits)
+		}
+	}
+	return nil
 }
 
 // escapedPath is the escaped URL path of base + root + names (names are
@@ -387,6 +467,9 @@ func objectNames(tenantID, container, artifact string) ([]string, error) {
 	}
 	for _, s := range strings.Split(artifact, "/") {
 		names = append(names, davName(s))
+	}
+	if err := checkNames(names); err != nil {
+		return nil, err
 	}
 	return names, nil
 }
@@ -477,6 +560,14 @@ func statusError(resp *http.Response) error {
 	excerpt, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
 	_ = resp.Body.Close()
 	return &webdavStatusError{code: resp.StatusCode, status: resp.Status, excerpt: strings.TrimSpace(string(excerpt))}
+}
+
+// refusedNameStatus: an answer to a PUT or MKCOL that refuses the name
+// itself (Sync's bridge: 400 for a name it does not take; 414 for a path too
+// long) — the caller's error (engine.ErrInvalidInput), never a sign the
+// server is unwell, so no breaker is charged for it.
+func refusedNameStatus(code int) bool {
+	return code == http.StatusBadRequest || code == http.StatusRequestURITooLong
 }
 
 // webdavStatusError is an answer we did not want (statusError). The
@@ -742,6 +833,9 @@ func (d *WebDAVDriver) mkcolOnce(ctx context.Context, path string) (int, error) 
 		drainClose(resp)
 		return resp.StatusCode, nil
 	default:
+		if refusedNameStatus(resp.StatusCode) {
+			return resp.StatusCode, fmt.Errorf("%w: MKCOL %s: the server refused the name: %w", engine.ErrInvalidInput, path, statusError(resp))
+		}
 		return resp.StatusCode, fmt.Errorf("MKCOL %s: %w", path, statusError(resp))
 	}
 }
@@ -779,7 +873,7 @@ func (d *WebDAVDriver) ensureCollections(ctx context.Context, dirs []string) err
 			return err
 		}
 		if code == http.StatusConflict || code == http.StatusNotFound {
-			return fmt.Errorf("MKCOL %s: the server answered %d with every parent created", p, code)
+			return fmt.Errorf("%w: MKCOL %s: the server answered %d with every parent created (a file where a folder is needed?)", engine.ErrInvalidInput, p, code)
 		}
 		d.known.Store(p, struct{}{})
 	}
@@ -832,7 +926,9 @@ func (d *WebDAVDriver) Put(ctx context.Context, container, artifact string, data
 		}
 		if err == nil { // 404/409: a folder went missing behind the cache
 			if foldersRecreated {
-				return fmt.Errorf("%s put %s: the server answered %d with every folder created", d.name, key, code)
+				// A file where the key needs a folder (keys `a` and `a/b`;
+				// WebDAV cannot hold both): the caller's key, not the server.
+				return fmt.Errorf("%w: %s put %s: the server answered %d with every folder created (a file where a folder is needed?)", engine.ErrInvalidInput, d.name, key, code)
 			}
 			foldersRecreated = true
 			d.forgetCollections(dirs)
@@ -950,6 +1046,8 @@ func (d *WebDAVDriver) put(ctx context.Context, path string, body *uploadBody, o
 	case resp.StatusCode == http.StatusConflict || resp.StatusCode == http.StatusNotFound:
 		drainClose(resp)
 		return resp.StatusCode, false, nil
+	case refusedNameStatus(resp.StatusCode):
+		return resp.StatusCode, false, fmt.Errorf("%w: the server refused the name: %w", engine.ErrInvalidInput, statusError(resp))
 	}
 	return resp.StatusCode, transient, statusError(resp)
 }

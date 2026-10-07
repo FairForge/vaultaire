@@ -23,6 +23,10 @@ func bodyReadErrorCode(err error) string {
 	return ErrInternalError
 }
 
+// refusedKeySuggestion explains a 400 for a key the bucket's storage
+// backend cannot hold (engine.ErrInvalidInput from the driver).
+const refusedKeySuggestion = "This object key cannot be stored on this bucket's storage tier (a path segment it does not accept, or one that is too long). Use a different key."
+
 // S3Error represents an S3 error response
 type S3Error struct {
 	XMLName   xml.Name `xml:"Error"`

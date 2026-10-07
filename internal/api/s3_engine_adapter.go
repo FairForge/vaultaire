@@ -1091,6 +1091,11 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 			// Quota exhaustion is a client condition, never a 500.
 			WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
 				WithSuggestion("Storage quota exceeded. Upgrade at https://stored.ge/dashboard/billing"))
+		case errors.Is(err, engine.ErrInvalidInput):
+			// The bucket's backend cannot hold this key (a name Sync's
+			// bridge refuses): the client's request, never a retryable 503.
+			WriteS3ErrorWithContext(w, ErrInvalidArgument, r.URL.Path, generateRequestID(),
+				WithSuggestion(refusedKeySuggestion))
 		default:
 			a.logger.Error("engine put failed",
 				zap.Error(err),
