@@ -3,6 +3,7 @@ package api
 import (
 	"github.com/FairForge/vaultaire/internal/dashboard"
 	"github.com/FairForge/vaultaire/internal/drivers"
+	"github.com/FairForge/vaultaire/internal/packstore"
 	"net/http"
 	"sort"
 	"sync/atomic"
@@ -69,6 +70,8 @@ func (s *Server) initMetrics() {
 		// The Vault parity copy (WP-VAULT-1): shards written, erased, and
 		// reads a backend failure sent to the parity.
 		reg.MustRegister(vaultParityObjects, vaultParityBytes, vaultParityFallbacks)
+		// The pack store (Phase 37): packs sealed, GC, member reads.
+		reg.MustRegister(packstore.Collectors()...)
 		// Routing truth (WP-R7-5): the counters, and a collector that reads
 		// the unknown-backend rows and the last run from the tables.
 		reg.MustRegister(routingTruthChecks, routingChunkChecks, routingUnknownReads)

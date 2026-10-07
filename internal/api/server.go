@@ -97,6 +97,7 @@ type Server struct {
 	dedupGCRunner      *DedupGCRunner
 	smartDemotion      *SmartDemotionRunner
 	vaultParity        *VaultParity
+	packGC             *packGC // the pack store GC (internal/packstore, Phase 37); nil without the sync backend
 	smartPromoter      *SmartPromoter
 	multipartReaper    *MultipartReaper
 	quotaReconcileGate jobGate                // single-flight for POST /admin/quota-reconcile (Review R13-05)
@@ -335,6 +336,8 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// The Vault parity second copy (WP-VAULT-1): the job and the read
 	// fallback, flag-gated per tenant (vault_parity, default OFF).
 	s.vaultParity = NewVaultParity(s.db, s.engine, fc, logger)
+	// The pack store GC (Phase 37): only with the `sync` backend registered.
+	s.packGC = newPackGC(s.db, s.engine, os.Getenv("PACKSTORE_STAGING_DIR"), logger)
 	if s.smartDemotion != nil {
 		s.smartDemotion.Promoter = s.smartPromoter
 		// A rejected knob value is logged, never silently ignored (Review

@@ -9,7 +9,7 @@ Updated: 2026-10-06. Single writer: the plan driver folds worker results in; a w
 - Prometheus loads `vaultaire-{alerts,backends,tls}.yml` only; `auth`, `synthetic`, `egress`, `jobs`, `routing` are not installed.
 - Backups: on the box, `0664`, 7 days, nothing leaves the host (WP-R9-7). HAProxy: no `/metrics` deny; `tune.h2.initial-window-size 262144`.
 - Flags: `signups` off (env); `egress_throttle`, `smart_demotion`, `quota_checkout`, `house_overview` OFF; `vault_parity` ON for the bench tenant only; `chunking` on (code default).
-- Migrations: `079_buckets_name_cors_idx.sql` latest. **Next: 080.**
+- Migrations: `080_pack_store.sql` latest. **Next: 081.**
 
 ## Launch
 

@@ -47,6 +47,7 @@ func TestJobRuleFile_MatchesTheRegisteredJobsAndTheExportedSeries(t *testing.T) 
 	eng.AddDriver("idrive", drivers.NewLocalDriver(t.TempDir(), zap.NewNop()))
 	eng.AddDriver("geyser", drivers.NewLocalDriver(t.TempDir(), zap.NewNop()))
 	eng.AddDriver("permafrost", drivers.NewLocalDriver(t.TempDir(), zap.NewNop())) // the parity leg: vault_parity joins the table
+	eng.AddDriver("sync", drivers.NewLocalDriver(t.TempDir(), zap.NewNop()))       // the pack store backend: pack_gc joins the table
 	eng.SetPrimary("idrive")
 	s := NewServer(&config.Config{Server: config.ServerConfig{Port: 8000}}, zap.NewNop(), eng, nil, jf.db)
 	s.accountDeletion = NewAccountDeletionRunner(jf.db, zap.NewNop(), eng, s.gci, nil, s.accountSvc)
