@@ -159,8 +159,9 @@ func ReadIndex(r io.ReaderAt, size int64) (*Footer, error) {
 // (the WebDAV driver caches the collections it has made), and a capacity of
 // 256 × 50,000 packs before Sync's per-folder limit — ~3 EB at 256 MiB. The
 // MaxPerFolder guard refuses a seal into a full folder. On the WebDAV driver
-// the full path is `<root>/t-_global/_packs/aa/<64 hex>.pack`: 89 characters
-// plus the root, against Sync's 248.
+// the full path is `<root>/t-_global/_packs/aa/<64 hex>.pack%o` (`%o` = the
+// driver's object-leaf marker, drivers.WebDAVLeafMarker): the longest name
+// is the 71-character leaf, against Sync's 248 per name.
 
 // packFolder is the first-level folder of a pack.
 func packFolder(sum string) string { return sum[:2] }

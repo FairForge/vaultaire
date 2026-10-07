@@ -49,11 +49,12 @@ global `sync_backend` row.
 
 ## Layout and key mapping
 
-`<root>/t-<tenant>/<container>/<artifact…>` below the server URL — the
+`<root>/t-<tenant>/<container>/<artifact…>%o` below the server URL — the
 fixed-bucket shape of iDrive/R2/Geyser (`tenantKey`), with the tenant from the
-call's context. A call whose context names no tenant is refused with
-`ErrNoTenant` (`tenant_ctx.go`); chunk blobs (`engine.ChunkContext`) sit at
-`t-_global/_global/_chunks/<hash>`. `ObjectKey` (engine.KeyAddresser) and
+call's context, and every object's **leaf marked `%o`** (below). A call whose
+context names no tenant is refused with `ErrNoTenant` (`tenant_ctx.go`); chunk
+blobs (`engine.ChunkContext`) sit at `t-_global/_global/_chunks/<hash>%o`,
+packs (`internal/packstore`) at `t-_global/_packs/<aa>/<sha256>.pack%o`. `ObjectKey` (engine.KeyAddresser) and
 `StoreID` (`dav:<origin><path>/<root>/`, the routing-truth shared-store check)
 are implemented.
 
@@ -81,20 +82,40 @@ The mapping (plain names map to themselves):
 | device name, `desktop.ini`, `Thumbs.db`, `.DS_Store` (any case) | first character `%XX` (`CON` → `%43ON`, `.DS_Store` → `%2EDS_Store`) |
 | `""` (trailing `/` — an S3 folder marker, or `a//b`) | `%` |
 
-`keySegment` decodes `%XX`. A mapped name over 248 UTF-16 units is refused as
-`engine.ErrInvalidInput` before any request. `TestDavName_RoundTripsAndIsAlwaysSyncSafe`
+**Object leaves carry a marker** (`WebDAVLeafMarker` = `%o`, 2026-10-07): the
+last segment of every object is `davName(seg) + "%o"`, folders stay
+`davName(seg)`. S3 allows a key `x` and a key `x/y`; WebDAV cannot hold a file
+and a folder of one name, and with several bridges the driver cannot even
+check: `x` and `x/y` route to different bridges, the second has not seen `x`
+yet (cross-bridge staleness 1.5 s – 5 min), creates the folder, and Sync's
+cloud keeps the folder and **loses the file** (prod: PUT `x`, PUT `x/y`, GET
+`x` → 503). With the marker `x` is the file `x%o` and `x/y` the folder `x`
+holding `y%o` — disjoint on every bridge. Unambiguous because a mapped name
+holds `%` only before two hex digits or as the empty-segment name `%`, never
+before `o`. `photos/` (an S3 folder marker) is the file `%%o` in the folder
+`photos`. A file without the marker (written before 2026-10-07, or by
+something else) is not an object: List skips it, Get/Exists miss it; the
+erasure walk (`WalkTenant`) still returns it so an erasure removes it.
+`TestMultiWebDAV_FileAndFolderOfTheSameNameSurviveCrossBridgeSync` reproduces
+the loss (two bridges, separate file systems, a folder-wins cloud sync).
+
+`keySegment` decodes `%XX`. A mapped name over 248 UTF-16 units — **the leaf
+marker included, so 246 for an object's last segment** — is refused on PUT as
+`engine.ErrInvalidInput` before any request; Get/GetRange answer not-found,
+Exists false and Delete succeeds for such a key (it can never have been
+stored; the S3 layer used to answer 500). `TestDavName_RoundTripsAndIsAlwaysSyncSafe`
 checks 20,000 random segments against an independent statement of the rules;
 `TestWebDAVDriver_SyncNameRules` runs every hostile key through the driver
 against a server that refuses/drops exactly like the bridge.
 
 **Refused names are the caller's error.** A PUT or MKCOL answered 400 or 414,
-and a key that needs a folder where a file is (`x` and `x/y` — WebDAV cannot
-hold both; S3 can), wrap `engine.ErrInvalidInput`: no breaker is charged, the
+and a PUT still answered 404/409 with every folder created (a file where a
+folder is needed — only possible against an unmarked file now), wrap
+`engine.ErrInvalidInput`: no breaker is charged, the
 failover chain stops (the object is never stored on the next candidate), and
 the S3 API answers **400 InvalidArgument**. Before (2026-10-07) five bad names
 opened the `sync` breaker and every tenant's sync-tier writes went silently to
-the primary for 30 s; the client got 503 and retried forever. `photos/`
-(marker) + `photos/x.jpg` works (the marker is the file `%` in the folder).
+the primary for 30 s; the client got 503 and retried forever.
 
 **Request URLs** (CodeQL `go/request-forgery`): the configured URL is parsed
 once in the constructor (http/https, a host, no userinfo/query/fragment) and

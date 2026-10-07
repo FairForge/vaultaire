@@ -308,7 +308,7 @@ func TestMultiWebDAV_FallbackReadOnADeadBridge(t *testing.T) {
 	require.NoError(t, m.Put(ctx, "c", synced, strings.NewReader("old news"), engine.WithContentLength(8)))
 	require.NoError(t, m.Put(ctx, "c", fresh, strings.NewReader("just now"), engine.WithContentLength(8)))
 	// Sync has carried `synced` to the other bridge; `fresh` not yet.
-	putFile(t, bs[1].fs, "/vaultaire/t-tenant-a/c/"+synced, "old news")
+	putFile(t, bs[1].fs, "/vaultaire/t-tenant-a/c/"+synced+"%o", "old news")
 
 	bs[0].srv.Close() // connection refused from now on
 
@@ -403,13 +403,13 @@ func TestMultiWebDAV_WalkTenantUnionsBridges(t *testing.T) {
 	bs := newBridges(t, 3, false, nil)
 	m := newMulti(t, bs, nil)
 	ctx := davCtx("tenant-a")
-	putFile(t, bs[0].fs, "/vaultaire/t-tenant-a/c/only-on-0", "x")
-	putFile(t, bs[1].fs, "/vaultaire/t-tenant-a/c/deep/only-on-1", "x")
+	putFile(t, bs[0].fs, "/vaultaire/t-tenant-a/c/only-on-0%o", "x")
+	putFile(t, bs[1].fs, "/vaultaire/t-tenant-a/c/deep/only-on-1%o", "x")
 	for _, b := range bs {
-		putFile(t, b.fs, "/vaultaire/t-tenant-a/c/everywhere", "x")
+		putFile(t, b.fs, "/vaultaire/t-tenant-a/c/everywhere%o", "x")
 	}
-	putFile(t, bs[2].fs, "/vaultaire/t-tenant-a/top-level", "x")
-	putFile(t, bs[2].fs, "/vaultaire/t-tenant-b/c/neighbour", "x")
+	putFile(t, bs[2].fs, "/vaultaire/t-tenant-a/top-level%o", "x")
+	putFile(t, bs[2].fs, "/vaultaire/t-tenant-b/c/neighbour%o", "x")
 
 	var got []string
 	removes := map[string]func(context.Context) error{}
@@ -462,8 +462,8 @@ func TestMultiWebDAV_ListFallsBack(t *testing.T) {
 	bs := newBridges(t, 2, true, nil)
 	m := newMulti(t, bs, nil)
 	ctx := davCtx("tenant-a")
-	putFile(t, bs[0].fs, "/vaultaire/t-tenant-a/c/a", "x")
-	putFile(t, bs[0].fs, "/vaultaire/t-tenant-a/c/b", "x")
+	putFile(t, bs[0].fs, "/vaultaire/t-tenant-a/c/a%o", "x")
+	putFile(t, bs[0].fs, "/vaultaire/t-tenant-a/c/b%o", "x")
 	keys, err := m.List(ctx, "c", "")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"a", "b"}, keys)
