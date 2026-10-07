@@ -201,16 +201,32 @@ benchmarks measured nothing — `docs/SCALE_TESTING.md`); the load gate is
 
 ## Backups
 
-A cron job at **03:00 UTC** runs `/opt/vaultaire/bin/pg-backup.sh`: `pg_dump |
-gzip` of the database plus a tarball of `configs/` and the Prometheus rules,
-into `/opt/vaultaire/backups/`, **7 files retained**, all **on the box**. The
-dump is plain SQL, so a restore is `zcat <dump> | psql`, not `pg_restore`
-(and needs psql ≥ 16.10 for the `\restrict` header). Nothing leaves the host
-yet: off-box encrypted copies, `-Fc` format, `chmod 600` and a written restore
-runbook are WP-R9-7 (`docs/reviews/R9-database.md`, R9-12). A restore loses
-whatever was written only to local disk since the dump (`DATA_PATH`
-containers, multipart staging, and up to 24 h of head-cache/quota/chunk-ref
-rows).
+A cron job at **03:00 UTC** (user1) runs `/opt/vaultaire/bin/pg-backup.sh`
+(`deploy/scripts/pg-backup.sh`, installed by hand — `deploy/**` never deploys):
+`pg_dump | gzip` of the database (size and `CREATE TABLE` asserted) plus
+tarballs of `configs/` and the Prometheus rules into `/opt/vaultaire/backups/`,
+**7 days** kept on the box, every file private (`umask 077`). Then the dump and
+the rules are copied **off the box to Sync.com** — Stored's own
+end-to-end-encrypted account, through the local `sync-webdav` bridge on `:4918`
+(`rclone` WebDAV; credentials `/opt/vaultaire/configs/sync-backup.env`, user1
+0600) — into `_ops/backups/YYYY/MM/` under the bridge's `/vaultaire/` mount,
+each upload size-verified, **30 days** kept there. The `configs/` tarball
+(secrets) stays on the box. A failed upload is a failed run (`BACKUP FAILED -
+OFFBOX: …` in `/opt/vaultaire/logs/backup.log`).
+
+- **Retention is by the date in the file name, never by modtime:** the Sync
+  bridge reports every file as modified in January 1970; a `--min-age` sweep
+  deleted fresh backups on 2026-10-07 (caught and fixed the same run).
+- **Restore:** `set -a; . /opt/vaultaire/configs/sync-backup.env; set +a;
+  rclone lsf -R syncbk:_ops/backups` → `rclone copyto syncbk:_ops/backups/<y>/<m>/<file> .`
+  → `zcat <dump> | psql` (plain SQL, psql ≥ 16.10 for the `\restrict` header).
+  Verified 2026-10-07: the downloaded dump is byte-identical to the local one.
+- **History:** the run failed on 2026-10-05 and -06 (`config tar failed`) —
+  two root-only `.env` copies from the 2026-10-04 primary swap were unreadable
+  to user1; fixed (every `.env*` in `configs/` is `root:user1 0640` or
+  owner-only). Keep new `.env` backups readable by group user1.
+- Still open from WP-R9-7: `-Fc` format, a written restore runbook drill, and an
+  alert on a failed run (today only the log says so).
 
 ## Monitoring
 
