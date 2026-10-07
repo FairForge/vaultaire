@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -196,4 +197,66 @@ func TestGenerator(t *testing.T) {
 		require.NoError(t, err, in)
 		assert.Equal(t, want, got, in)
 	}
+}
+
+// stallingServer stops reading every PUT body larger than 1 MiB after
+// 62 KB and never answers (the Sync bridge, live, 2026-10-06).
+func stallingServer(t *testing.T) *httptest.Server {
+	release := make(chan struct{})
+	srv, _ := davServer(t, func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPut && r.ContentLength > 1<<20 {
+				_, _ = io.CopyN(io.Discard, r.Body, 62<<10)
+				select {
+				case <-r.Context().Done():
+				case <-release:
+				}
+				return
+			}
+			h.ServeHTTP(w, r)
+		})
+	})
+	t.Cleanup(func() { close(release) }) // before the server's Close (LIFO)
+	return srv
+}
+
+// A stalled PUT fails its op (the driver's idle timeout) and is counted;
+// the suite carries on and the run ends.
+func TestSmoke_StalledPutFailsTheOp(t *testing.T) {
+	srv := stallingServer(t)
+	args := append(tinyArgs(srv.URL, "", "large"), "-large-sizes", "300KiB,32MiB", "-large-conc", "1",
+		"-idle-timeout", "200ms", "-retries", "2")
+	cfg, err := parseFlags(args, env(map[string]string{"WEBDAV_PASSWORD": testPass}))
+	require.NoError(t, err)
+	assert.Equal(t, 200*time.Millisecond, cfg.IdleTimeout)
+	assert.Equal(t, 2, cfg.Attempts)
+
+	var log bytes.Buffer
+	start := time.Now()
+	rep, err := run(context.Background(), cfg, &log)
+	require.NoError(t, err)
+	assert.Less(t, time.Since(start), 30*time.Second)
+	assert.Empty(t, rep.Mismatches)
+	assert.NotEmpty(t, rep.Errors, "the stalled PUT is an error")
+	assert.Equal(t, int64(2), rep.Stalls.UploadStalls, "one stall per attempt")
+	assert.Equal(t, int64(1), rep.Stalls.Retries)
+	var table bytes.Buffer
+	printTable(&table, rep)
+	assert.Contains(t, table.String(), "stalls: upload 2")
+}
+
+// With the driver's idle timeout off, -op-timeout still ends the op.
+func TestSmoke_OpTimeoutEndsAHungOp(t *testing.T) {
+	srv := stallingServer(t)
+	args := append(tinyArgs(srv.URL, "", "large"), "-large-sizes", "4MiB", "-large-conc", "1",
+		"-idle-timeout", "0", "-op-timeout", "300ms")
+	cfg, err := parseFlags(args, env(map[string]string{"WEBDAV_PASSWORD": testPass}))
+	require.NoError(t, err)
+
+	start := time.Now()
+	rep, err := run(context.Background(), cfg, io.Discard)
+	require.NoError(t, err)
+	assert.Less(t, time.Since(start), 30*time.Second)
+	assert.Positive(t, rep.Stalls.OpTimeouts)
+	assert.NotEmpty(t, rep.Errors)
 }

@@ -70,6 +70,16 @@ table on stdout, the full report (rows, mismatches, errors, consistency
 events, limits probes, resources) as JSON to `-out`. Sizes take `4KiB`,
 `16MiB`, `1GiB` or bytes; every list flag is comma-separated (`-h` for all).
 
+Stalls never hang a suite: the driver is built with the server's bounds
+(`-idle-timeout` 60s, `-put-timeout` 2m per 64 MiB, `-max-concurrency` 8,
+`-retries` 3 — `internal/drivers/webdav_resilience.go`), and `-op-timeout`
+(30m, 0 = off) cancels any one operation and any raw request but the run
+folder's recursive DELETE. A stalled op is an error on its row; the summary
+line `stalls: upload N, download N …; retries N; ops cut off by -op-timeout N`
+(and `stalls` in the JSON) counts them. The 2026-10-06 run hung 45+ minutes on
+a 256 MiB PUT the bridge stopped reading after 62 KB — that is what these
+bounds are for.
+
 On SLC (the bridge listens on localhost only):
 
 ```bash
@@ -85,4 +95,4 @@ WEBDAV_PASSWORD=… /tmp/webdav-bench -run limits -limits-folder -out limits.jso
 `main_test.go` runs every suite in tiny sizes against `golang.org/x/net/webdav`
 (httptest + Basic auth), checks cleanup and that the password never appears
 in the output, and that a server corrupting GET bodies is reported as a
-mismatch — so the tool cannot rot.
+mismatch, and that a PUT the server stops reading fails its op (driver idle timeout, or `-op-timeout` with it off) and is counted — so the tool cannot rot.

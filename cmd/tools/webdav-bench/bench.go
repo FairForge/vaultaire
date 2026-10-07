@@ -62,6 +62,14 @@ type config struct {
 	Proc        string
 	SpillDir    string
 	SampleEvery time.Duration
+
+	// The driver's limits (drivers.WebDAVOption) and the bench's own bound
+	// on one operation: a stalled op fails, it never hangs a suite.
+	IdleTimeout    time.Duration
+	PutTimeout     time.Duration
+	MaxConcurrency int
+	Attempts       int
+	OpTimeout      time.Duration
 }
 
 // defaultSuites run without -run; limits is opt-in (it probes failure modes
@@ -105,7 +113,17 @@ type Report struct {
 	Consistency *ConsistencyResult `json:"consistency,omitempty"`
 	Limits      *LimitsResult      `json:"limits,omitempty"`
 	Resources   *ResourceResult    `json:"resources,omitempty"`
+	Stalls      StallResult        `json:"stalls"`
 	Cleanup     string             `json:"cleanup"`
+}
+
+// StallResult is what bounded the run: the driver's stalls (no progress for
+// -idle-timeout) and retries, and ops cut off by -op-timeout.
+type StallResult struct {
+	UploadStalls   int64 `json:"upload_stalls"`
+	DownloadStalls int64 `json:"download_stalls"`
+	Retries        int64 `json:"retries"`
+	OpTimeouts     int64 `json:"op_timeouts"`
 }
 
 // bench is one run: the real driver, a raw client, and the report.
@@ -119,6 +137,31 @@ type bench struct {
 
 	mu  sync.Mutex
 	rep *Report
+
+	opTimeouts atomic.Int64
+}
+
+// opCtx is the context of one operation: the run's, bounded by -op-timeout.
+func (b *bench) opCtx() (context.Context, context.CancelFunc) {
+	if b.cfg.OpTimeout <= 0 {
+		return context.WithCancel(b.ctx)
+	}
+	return context.WithTimeout(b.ctx, b.cfg.OpTimeout)
+}
+
+// op runs fn under opCtx.
+func (b *bench) op(fn func(ctx context.Context) error) error {
+	ctx, cancel := b.opCtx()
+	defer cancel()
+	return b.noteTimeout(fn(ctx))
+}
+
+// noteTimeout counts an op that -op-timeout cut off (not the run ending).
+func (b *bench) noteTimeout(err error) error {
+	if err != nil && errors.Is(err, context.DeadlineExceeded) && b.ctx.Err() == nil {
+		b.opTimeouts.Add(1)
+	}
+	return err
 }
 
 // run executes the configured suites and returns the report; it never
@@ -132,11 +175,15 @@ func run(ctx context.Context, cfg config, out io.Writer) (*Report, error) {
 			return nil, fmt.Errorf("unknown suite %q (have %s)", s, strings.Join(allSuites, ","))
 		}
 	}
-	drv, err := drivers.NewWebDAVDriver("webdav-bench", cfg.URL, cfg.User, cfg.Password, cfg.Root, zap.NewNop())
+	drv, err := drivers.NewWebDAVDriver("webdav-bench", cfg.URL, cfg.User, cfg.Password, cfg.Root, zap.NewNop(),
+		drivers.WithWebDAVIdleTimeout(cfg.IdleTimeout),
+		drivers.WithWebDAVPutTimeout(cfg.PutTimeout),
+		drivers.WithWebDAVMaxConcurrency(cfg.MaxConcurrency),
+		drivers.WithWebDAVRetries(cfg.Attempts, -1))
 	if err != nil {
 		return nil, fmt.Errorf("driver: %w", err)
 	}
-	raw, err := newRawClient(cfg.URL, cfg.User, cfg.Password)
+	raw, err := newRawClient(cfg.URL, cfg.User, cfg.Password, cfg.OpTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -177,6 +224,9 @@ func run(ctx context.Context, cfg config, out io.Writer) (*Report, error) {
 		fprintf(out, "== %s done in %s\n", s, time.Since(start).Round(time.Millisecond))
 	}
 	b.rep.Resources = smp.stop()
+	st := drv.Stats()
+	b.rep.Stalls = StallResult{UploadStalls: st.UploadStalls, DownloadStalls: st.DownloadStalls,
+		Retries: st.Retries, OpTimeouts: b.opTimeouts.Load()}
 
 	if cfg.Cleanup {
 		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Minute)
@@ -273,7 +323,7 @@ func (b *bench) pool(n, conc int, label string, fn func(i int) error) ([]time.Du
 					return
 				}
 				t := time.Now()
-				err := fn(i)
+				err := b.noteTimeout(fn(i))
 				lat[i] = time.Since(t)
 				if err != nil {
 					if errs.Add(1) <= 3 {
@@ -363,6 +413,9 @@ func printTable(w io.Writer, rep *Report) {
 		}
 		fprintln(w)
 	}
+	s := rep.Stalls
+	fprintf(w, "stalls: upload %d, download %d (no progress for the idle timeout); retries %d; ops cut off by -op-timeout %d\n",
+		s.UploadStalls, s.DownloadStalls, s.Retries, s.OpTimeouts)
 	fprintf(w, "cleanup: %s\n", rep.Cleanup)
 	if len(rep.Errors) > 0 {
 		fprintf(w, "errors: %d (first: %s)\n", len(rep.Errors), rep.Errors[0])

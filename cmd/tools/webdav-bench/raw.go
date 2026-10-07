@@ -20,10 +20,13 @@ import (
 type rawClient struct {
 	base       url.URL
 	user, pass string
-	hc         *http.Client
+	hc         *http.Client // bounded by -op-timeout
+	hcFolder   *http.Client // unbounded: a folder's recursive DELETE
 }
 
-func newRawClient(rawURL, user, pass string) (*rawClient, error) {
+// newRawClient builds the client; opTimeout (0 = none) bounds every request
+// but a folder's recursive DELETE, which may take long on a full folder.
+func newRawClient(rawURL, user, pass string, opTimeout time.Duration) (*rawClient, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse -url: %w", err)
@@ -31,19 +34,21 @@ func newRawClient(rawURL, user, pass string) (*rawClient, error) {
 	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil {
 		return nil, fmt.Errorf("-url must be http(s)://host[:port][/path] without credentials")
 	}
+	tr := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		MaxIdleConns:          512,
+		MaxIdleConnsPerHost:   512,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: 10 * time.Minute,
+		ForceAttemptHTTP2:     false,
+	}
 	return &rawClient{
-		base: url.URL{Scheme: u.Scheme, Host: u.Host, Path: strings.TrimSuffix(u.Path, "/")},
-		user: user,
-		pass: pass,
-		hc: &http.Client{Transport: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
-			DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-			MaxIdleConns:          512,
-			MaxIdleConnsPerHost:   512,
-			IdleConnTimeout:       90 * time.Second,
-			ResponseHeaderTimeout: 10 * time.Minute,
-			ForceAttemptHTTP2:     false,
-		}},
+		base:     url.URL{Scheme: u.Scheme, Host: u.Host, Path: strings.TrimSuffix(u.Path, "/")},
+		user:     user,
+		pass:     pass,
+		hc:       &http.Client{Transport: tr, Timeout: opTimeout},
+		hcFolder: &http.Client{Transport: tr},
 	}, nil
 }
 
@@ -94,7 +99,11 @@ func (r *rawClient) do(ctx context.Context, method string, segs []string, dir bo
 	for k, v := range hdr {
 		req.Header.Set(k, v)
 	}
-	resp, err := r.hc.Do(req)
+	hc := r.hc
+	if method == http.MethodDelete && dir {
+		hc = r.hcFolder
+	}
+	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("%s %s: %w", method, u.RawPath, err)
 	}
