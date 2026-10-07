@@ -398,9 +398,11 @@ func TestStripe_StaleManifestIsReadAgain(t *testing.T) {
 	stale.Store(raw)
 	putBytes(ctx, t, m, "bucket", "k", v2)
 
-	// Act: the first manifest read answers v1's (its pieces are gone)
+	// Act: another process (no cached manifest) whose first manifest read
+	// answers v1's (its pieces are gone)
+	reader := newStriped(t, bs, nil)
 	serveStale.Store(true)
-	got := readAllClose(t, mustGetM(ctx, t, m, "bucket", "k"))
+	got := readAllClose(t, mustGetM(ctx, t, reader, "bucket", "k"))
 
 	// Assert
 	assert.Equal(t, v2, got)
