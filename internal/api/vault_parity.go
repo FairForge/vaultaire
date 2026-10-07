@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -26,7 +27,7 @@ import (
 // The four DATA shards are not stored — they are byte ranges of the object
 // the tape already holds. The four PARITY shards, together exactly the
 // object's size (rounded up to whole stripes), are written to a free leg —
-// `permafrost` (the OneDrive fleet) when it is registered, else `lyve` — by
+// the first registered of `sync`, `permafrost`, `lyve` (VAULT_PARITY_LEGS) — by
 // the `vault_parity` job behind the commit. Any four of the eight shards
 // rebuild the object, so the four parity shards ALONE are a complete copy in
 // information terms: when Geyser answers an error, is not found, or its
@@ -67,9 +68,32 @@ const (
 	vaultParityMaxAttempts = 20
 )
 
-// vaultParityLegs is the preference order of the free legs: the first one
-// registered takes every parity shard of a deployment.
-var vaultParityLegs = []string{"permafrost", "lyve"}
+// vaultParityLegs is the default preference order of the parity legs: the
+// first one registered takes every new parity shard of a deployment. Sync
+// first (owner decision 2026-10-07: Sync approved the reseller use; its
+// parity rebuilds at ~110 MB/s vs ~60 for the OneDrive fleet and ~240 for
+// Lyve, which is free only until its promo ends —
+// bench-results/SYNC-WORKLOADS-2026-10-07.md). VAULT_PARITY_LEGS
+// (comma-separated driver names) overrides it. Shards already written keep
+// the leg their row records (vault_parity.legs), whatever the order now.
+var vaultParityLegs = []string{"sync", "permafrost", "lyve"}
+
+// parityLegsFromEnv is VAULT_PARITY_LEGS split and trimmed, or the default
+// when it names nothing. Names no driver is registered under are skipped by
+// Leg(), so a typo falls through to the next leg rather than disabling the
+// job.
+func parityLegsFromEnv(getenv func(string) string) []string {
+	var legs []string
+	for _, n := range strings.Split(getenv("VAULT_PARITY_LEGS"), ",") {
+		if n = strings.TrimSpace(n); n != "" {
+			legs = append(legs, n)
+		}
+	}
+	if len(legs) == 0 {
+		return append([]string(nil), vaultParityLegs...)
+	}
+	return legs
+}
 
 var (
 	vaultParityObjects = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -125,6 +149,10 @@ type VaultParity struct {
 	MaxBytesPerRun   int64
 	Stripe           int
 
+	// Legs is the parity-leg preference order (VAULT_PARITY_LEGS, else
+	// vaultParityLegs).
+	Legs []string
+
 	// scopeTenant limits a run to one tenant (tests on the shared DB).
 	scopeTenant string
 	now         func() time.Time
@@ -141,13 +169,18 @@ func NewVaultParity(db *sql.DB, eng engine.Engine, fl flagChecker, logger *zap.L
 	}
 	return &VaultParity{db: db, eng: ce, flags: fl, logger: logger,
 		JobName: "vault_parity", Every: 2 * time.Minute, BootDelay: 45 * time.Second, MaxRunTime: time.Hour,
-		MaxObjectsPerRun: 500, MaxBytesPerRun: 256 << 30, Stripe: vaultParityStripe, now: time.Now}
+		MaxObjectsPerRun: 500, MaxBytesPerRun: 256 << 30, Stripe: vaultParityStripe, now: time.Now,
+		Legs: parityLegsFromEnv(os.Getenv)}
 }
 
-// Leg is the free leg this deployment writes parity to: the first registered
-// of vaultParityLegs.
+// Leg is the leg this deployment writes new parity to: the first registered
+// of p.Legs.
 func (p *VaultParity) Leg() (string, engine.Driver, bool) {
-	for _, name := range vaultParityLegs {
+	legs := p.Legs
+	if len(legs) == 0 {
+		legs = vaultParityLegs
+	}
+	for _, name := range legs {
 		if d, ok := p.eng.GetDriver(name); ok {
 			return name, d, true
 		}
@@ -190,7 +223,7 @@ func (p *VaultParity) RunOnce(ctx context.Context) (VaultParityResult, error) {
 	var res VaultParityResult
 	legName, _, ok := p.Leg()
 	if !ok {
-		return res, errors.New("no parity leg is registered (permafrost or lyve)")
+		return res, fmt.Errorf("no parity leg is registered (%s)", strings.Join(p.Legs, ", "))
 	}
 	res.Leg = legName
 	if err := p.eraseStale(ctx, &res); err != nil {
