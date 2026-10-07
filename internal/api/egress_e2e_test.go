@@ -587,14 +587,14 @@ func TestEgress_AThousandConnections(t *testing.T) {
 
 	// Act: straight into the handler (1,000 real sockets would exhaust the
 	// test's file descriptors; the handler is what an attacker reaches).
-	var refused, served, other atomic.Int64
+	var refused, served, other, committed atomic.Int64
 	var peak atomic.Int32
 	var wg sync.WaitGroup
 	for i := 0; i < conns; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			rec := httptest.NewRecorder()
+			rec := &commitRecorder{ResponseRecorder: httptest.NewRecorder(), committed: &committed}
 			req := httptest.NewRequest(http.MethodGet, f.s3Path("obj.bin"), nil).WithContext(ctx)
 			h.ServeHTTP(rec, req)
 			switch rec.Code {
@@ -612,7 +612,11 @@ func TestEgress_AThousandConnections(t *testing.T) {
 		if n := tn.throttledStreams[0].Load(); n > peak.Load() {
 			peak.Store(n)
 		}
-		return refused.Load() == conns-16
+		// A slot is taken in admit, before the object is read and the 200
+		// written: cancel only once all sixteen holders have committed their
+		// status, or a holder still reading is cancelled into an error (the
+		// merge-queue flake of 2026-10-07: served 15, other 1).
+		return refused.Load() == conns-16 && committed.Load() == 16
 	}, 20*time.Second, 5*time.Millisecond)
 	held := tn.throttledStreams[0].Load()
 	cancel() // the sixteen clients disconnect
@@ -1039,4 +1043,32 @@ func TestEgress_StreamGuardRefusalIsNotAServerError(t *testing.T) {
 	// The middleware counts after the handler returns; the client is ahead.
 	require.Eventually(t, func() bool { return atomic.LoadInt64(&f.srv.errorCount) == errsBefore+1 },
 		5*time.Second, time.Millisecond)
+}
+
+// commitRecorder counts a response once its 200 is committed (an explicit
+// WriteHeader(200) or the first body write), so a test can wait for paced
+// responses that hold a slot to actually be serving before it disconnects
+// them. httptest.ResponseRecorder itself is not safe to read mid-response.
+type commitRecorder struct {
+	*httptest.ResponseRecorder
+	committed *atomic.Int64
+	once      sync.Once
+	wrote     bool
+}
+
+func (c *commitRecorder) WriteHeader(code int) {
+	if !c.wrote {
+		c.wrote = true
+		if code == http.StatusOK {
+			c.once.Do(func() { c.committed.Add(1) })
+		}
+	}
+	c.ResponseRecorder.WriteHeader(code)
+}
+
+func (c *commitRecorder) Write(b []byte) (int, error) {
+	if !c.wrote {
+		c.WriteHeader(http.StatusOK)
+	}
+	return c.ResponseRecorder.Write(b)
 }
