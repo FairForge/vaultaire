@@ -36,7 +36,7 @@ func TestWebDAVDriver_RequestURLGuard(t *testing.T) {
 		"/remote.php/dav/vaultaire/t-a/c/dir/",
 		"/remote.php/dav/vaultaire/t-a/c/%252e%252e", // a literal "%2e%2e" name
 		"/remote.php/dav/vaultaire/t-a/c/a%5Cb",      // a literal backslash
-		"/remote.php/dav/vaultaire/t-a/c/~..",        // davName("..")
+		"/remote.php/dav/vaultaire/t-a/c/.%252E",     // davName("..")
 	} {
 		_, err := d.requestURL(ok)
 		assert.NoError(t, err, ok)

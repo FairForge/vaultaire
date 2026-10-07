@@ -705,6 +705,11 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 			WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
 			return
 		}
+		if errors.Is(uploadErr, engine.ErrInvalidInput) {
+			WriteS3ErrorWithContext(w, ErrInvalidArgument, r.URL.Path, generateRequestID(),
+				WithSuggestion(refusedKeySuggestion))
+			return
+		}
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return
 	}

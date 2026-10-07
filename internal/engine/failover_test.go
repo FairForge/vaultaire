@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -486,4 +487,43 @@ func TestResolveStorageClass_StandardFollowsPrimary(t *testing.T) {
 	backend, _ := ResolveStorageClass("GLACIER", "wasabi", drivers)
 	assert.Equal(t, "geyser", backend)
 	assert.Equal(t, "STANDARD", BackendToStorageClass("wasabi"))
+}
+
+// Invalid input is the caller's answer, final wherever it is seen: a name
+// the target backend refuses (Sync's bridge, 2026-10-07) must neither charge
+// its breaker nor be stored on the next candidate — the object would land
+// silently on the primary, off the tier its bucket promises.
+func TestFailoverManager_InvalidInputEndsTheChain(t *testing.T) {
+	fm := NewFailoverManager(zap.NewNop())
+	fm.Register("sync")
+	fm.Register("idrive")
+
+	for i := 0; i < 3*failureThreshold; i++ {
+		var called []string
+		_, err := fm.Execute(context.Background(), []string{"sync", "idrive"}, func(name string) error {
+			called = append(called, name)
+			if name == "sync" {
+				return fmt.Errorf("bridge 3: %w: the server refused the name", ErrInvalidInput)
+			}
+			return nil
+		})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidInput)
+		assert.False(t, errors.Is(err, ErrAllBackendsUnavailable))
+		assert.Equal(t, []string{"sync"}, called, "the next candidate must not store it")
+	}
+	assert.Equal(t, "closed", fm.GetStatus("sync"))
+}
+
+func TestEnginePut_InvalidInputIsNotAWriteFailure(t *testing.T) {
+	eng := NewEngine(nil, zap.NewNop(), &Config{DefaultBackend: "primary"})
+	primary := &mockDriver{name: "primary", putErr: fmt.Errorf("%w: refused name", ErrInvalidInput)}
+	backup := &mockDriver{name: "backup"}
+	eng.AddDriver("primary", primary)
+	eng.AddDriver("backup", backup)
+
+	_, err := eng.Put(context.Background(), "container", "CON", strings.NewReader("hello"))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidInput)
+	assert.False(t, errors.Is(err, ErrAllBackendsUnavailable))
 }

@@ -57,20 +57,44 @@ call's context. A call whose context names no tenant is refused with
 `StoreID` (`dav:<origin><path>/<root>/`, the routing-truth shared-store check)
 are implemented.
 
-Each `/`-separated key segment is one WebDAV path segment, `url.PathEscape`d
-(spaces, unicode, `%`, `+`, `#`, `?` are fine). Segments WebDAV cannot hold are
-mapped reversibly (`davName` / `keySegment`):
+Each `/`-separated key segment is one WebDAV path segment, `url.PathEscape`d,
+after a reversible mapping (`davName` / `keySegment`) that makes every S3 key
+one Sync.com's bridge stores. The rules were measured on prod's bridges
+(2026-10-07: raw PUT through one bridge, GET through the four others 150 s
+later):
 
-| key segment | resource name | why |
-|---|---|---|
-| `""` (trailing `/` — an S3 folder marker, or `a//b`) | `~` | an empty segment is a collection URL |
-| `.` / `..` | `~.` / `~..` | servers normalise them away; `..` would climb out of the tenant's folder |
-| `~anything` | `~~anything` | keeps the mapping one-to-one |
+| Sync's bridge | names |
+|---|---|
+| **400** | any of `: ? * " < > \| \`, a control character (tab is fine), a leading space or `~`, a trailing `.` or space, `CON PRN AUX NUL COM1-9 LPT1-9` (any case, also with an extension: `con.txt`, `aux.c`), `desktop.ini`, `Thumbs.db` (any case) |
+| **201 and silently dropped** | `.DS_Store` (GET 404 on every bridge) |
+| **too long** | a name over 248 characters (249 → 400; 248 × `é` = 496 bytes is accepted: characters, not bytes; per name, not per path) |
+| fine | Unicode, `% # ; & = + @ ^ $`, inner `~`, tab, `.hidden`, `thumbs.db.x`, `ehthumbs.db`, `Icon`, `x.tmp`; names are case-sensitive (`case` and `CASE` coexist) |
 
-**Known limit:** WebDAV cannot hold a file `a` and a folder `a` side by side.
-An S3 key `a` and a key `a/b` in the same container conflict — the second PUT
-fails (S3 allows both). `photos/` (marker) + `photos/x.jpg` works (the marker
-is the file `~` in the folder).
+The mapping (plain names map to themselves):
+
+| key segment | resource name |
+|---|---|
+| `%` | `%25` (so a real `%` is never an escape) |
+| `: ? * " < > \| \`, control chars but tab, DEL | `%XX` wherever they are |
+| leading space or `~` | that character `%XX` (`~x` → `%7Ex`) |
+| trailing `.` or space | that character `%XX` (`trail.` → `trail%2E`; `.` → `%2E`, `..` → `.%2E`) |
+| device name, `desktop.ini`, `Thumbs.db`, `.DS_Store` (any case) | first character `%XX` (`CON` → `%43ON`, `.DS_Store` → `%2EDS_Store`) |
+| `""` (trailing `/` — an S3 folder marker, or `a//b`) | `%` |
+
+`keySegment` decodes `%XX`. A mapped name over 248 UTF-16 units is refused as
+`engine.ErrInvalidInput` before any request. `TestDavName_RoundTripsAndIsAlwaysSyncSafe`
+checks 20,000 random segments against an independent statement of the rules;
+`TestWebDAVDriver_SyncNameRules` runs every hostile key through the driver
+against a server that refuses/drops exactly like the bridge.
+
+**Refused names are the caller's error.** A PUT or MKCOL answered 400 or 414,
+and a key that needs a folder where a file is (`x` and `x/y` — WebDAV cannot
+hold both; S3 can), wrap `engine.ErrInvalidInput`: no breaker is charged, the
+failover chain stops (the object is never stored on the next candidate), and
+the S3 API answers **400 InvalidArgument**. Before (2026-10-07) five bad names
+opened the `sync` breaker and every tenant's sync-tier writes went silently to
+the primary for 30 s; the client got 503 and retried forever. `photos/`
+(marker) + `photos/x.jpg` works (the marker is the file `%` in the folder).
 
 **Request URLs** (CodeQL `go/request-forgery`): the configured URL is parsed
 once in the constructor (http/https, a host, no userinfo/query/fragment) and
