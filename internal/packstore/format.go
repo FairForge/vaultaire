@@ -66,14 +66,13 @@ func encodeTail(members []FooterMember) ([]byte, error) {
 		return nil, fmt.Errorf("encode pack footer: %w", err)
 	}
 	// The reader refuses a footer above maxFooterBytes (parseTrailer); never
-	// write one it would refuse — and bound the allocation below.
+	// write one it would refuse.
 	if uint64(len(footer)) > maxFooterBytes {
 		return nil, fmt.Errorf("%w: footer of %d bytes exceeds %d", ErrBadPack, len(footer), uint64(maxFooterBytes))
 	}
 	sum := sha256.Sum256(footer)
-	out := make([]byte, 0, len(footer)+int(TrailerSize))
-	out = append(out, footer...)
-	out = binary.BigEndian.AppendUint64(out, uint64(len(footer)))
+	// The trailer goes on the end of the footer's own fresh slice.
+	out := binary.BigEndian.AppendUint64(footer, uint64(len(footer)))
 	out = append(out, sum[:]...)
 	out = append(out, trailerMagic...)
 	return out, nil

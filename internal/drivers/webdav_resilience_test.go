@@ -219,6 +219,22 @@ func flaky(method string, n int32, code int) (func(http.Handler) http.Handler, *
 	}, &seen
 }
 
+// flakyAfterReading is flaky, but the failing answers come only after the
+// server has read `read` bytes of the request body.
+func flakyAfterReading(method string, n int32, code int, read int64) (func(http.Handler) http.Handler, *atomic.Int32) {
+	var seen atomic.Int32
+	return func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == method && seen.Add(1) <= n {
+				_, _ = io.CopyN(io.Discard, r.Body, read)
+				http.Error(w, "bridge hiccup", code)
+				return
+			}
+			h.ServeHTTP(w, r)
+		})
+	}, &seen
+}
+
 // Idempotent requests are retried on 500/502/503/504/423.
 func TestWebDAVDriver_TransientAnswersAreRetried(t *testing.T) {
 	for _, code := range []int{500, 502, 503, 504, 423} {
@@ -306,7 +322,10 @@ func TestWebDAVDriver_PutRetries(t *testing.T) {
 	assert.Equal(t, int32(2), seen.Load())
 	assert.True(t, bytes.Equal(payload, readAllClose(t, mustGet(ctx, t, f.drv, "c", "seekable"))))
 
-	wrap, seen = flaky(http.MethodPut, 1, http.StatusServiceUnavailable)
+	// The bridge takes 1 MiB of the stream before it answers: an attempt the
+	// transport had not yet sent a byte of is resent (nothing was lost), so
+	// a 503 answered before the body started would make this case a race.
+	wrap, seen = flakyAfterReading(http.MethodPut, 1, http.StatusServiceUnavailable, 1<<20)
 	f = newDAVFixture(t, wrap, fastRetries)
 	err := f.drv.Put(ctx, "c", "stream", onlyReader{bytes.NewReader(payload)}, engine.WithContentLength(big))
 	require.Error(t, err)
