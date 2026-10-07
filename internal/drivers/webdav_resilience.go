@@ -7,6 +7,7 @@ import (
 	"io"
 	mrand "math/rand/v2"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -194,6 +195,7 @@ func parseWebDAVLimits(c *WebDAVConfig, getenv func(string) string) {
 			c.LargeConcurrency = n
 		}
 	}
+	parseWebDAVStripes(c, getenv)
 	if v := strings.TrimSpace(getenv("SYNC_WEBDAV_IDLE_TIMEOUT")); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil || d < time.Second || d > time.Hour {
@@ -203,6 +205,67 @@ func parseWebDAVLimits(c *WebDAVConfig, getenv func(string) string) {
 			c.IdleTimeout = d
 		}
 	}
+}
+
+// parseWebDAVStripes reads SYNC_WEBDAV_STRIPE_MIN (a size such as 512MiB,
+// or 0/off = never stripe), SYNC_WEBDAV_STRIPE_PIECE (16MiB..4GiB) and
+// SYNC_WEBDAV_STAGING_DIR (an absolute path). A rejected value is a warning
+// and the default is kept; a minimum below the piece size becomes the piece
+// size.
+func parseWebDAVStripes(c *WebDAVConfig, getenv func(string) string) {
+	if v := strings.TrimSpace(getenv("SYNC_WEBDAV_STRIPE_PIECE")); v != "" {
+		n, err := parseByteSize(v)
+		if err != nil || n < webdavStripePieceMin || n > webdavStripePieceMax {
+			c.Warnings = append(c.Warnings, fmt.Sprintf("invalid SYNC_WEBDAV_STRIPE_PIECE %q (need 16MiB..4GiB), keeping %d", v, WebDAVDefaultStripePiece))
+		} else {
+			c.StripePiece = n
+		}
+	}
+	if v := strings.TrimSpace(getenv("SYNC_WEBDAV_STRIPE_MIN")); v != "" {
+		if strings.EqualFold(v, "off") || v == "0" {
+			c.StripeMin = -1
+		} else if n, err := parseByteSize(v); err != nil || n <= 0 {
+			c.Warnings = append(c.Warnings, fmt.Sprintf("invalid SYNC_WEBDAV_STRIPE_MIN %q (need a size such as 512MiB, or off), keeping %d", v, WebDAVDefaultStripeMin))
+		} else {
+			piece := c.StripePiece
+			if piece <= 0 {
+				piece = WebDAVDefaultStripePiece
+			}
+			if n < piece {
+				c.Warnings = append(c.Warnings, fmt.Sprintf("SYNC_WEBDAV_STRIPE_MIN %q is below the piece size, using %d", v, piece))
+				n = piece
+			}
+			c.StripeMin = n
+		}
+	}
+	if v := strings.TrimSpace(getenv("SYNC_WEBDAV_STAGING_DIR")); v != "" {
+		if !filepath.IsAbs(v) {
+			c.Warnings = append(c.Warnings, fmt.Sprintf("invalid SYNC_WEBDAV_STAGING_DIR %q (need an absolute path), keeping %s", v, defaultStagingDir()))
+		} else {
+			c.StagingDir = filepath.Clean(v)
+		}
+	}
+}
+
+// parseByteSize reads a byte count with an optional binary suffix (KiB,
+// MiB, GiB, TiB; K, M, G, T are the same).
+func parseByteSize(v string) (int64, error) {
+	s := strings.TrimSpace(v)
+	mult := int64(1)
+	for _, u := range []struct {
+		suf string
+		m   int64
+	}{{"TiB", 1 << 40}, {"GiB", 1 << 30}, {"MiB", 1 << 20}, {"KiB", 1 << 10}, {"T", 1 << 40}, {"G", 1 << 30}, {"M", 1 << 20}, {"K", 1 << 10}} {
+		if strings.HasSuffix(s, u.suf) {
+			s, mult = strings.TrimSpace(strings.TrimSuffix(s, u.suf)), u.m
+			break
+		}
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n < 0 || n > (1<<62)/mult {
+		return 0, fmt.Errorf("not a size: %q", v)
+	}
+	return n * mult, nil
 }
 
 // webdavPutDeadline is the deadline of one PUT of size bytes: base per

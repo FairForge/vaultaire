@@ -84,6 +84,8 @@ func parseFlags(args []string, getenv func(string) string) (config, error) {
 	fs.DurationVar(&c.CrossPoll, "crossbridge-poll", 250*time.Millisecond, "crossbridge: poll interval on the reading bridge")
 	fs.DurationVar(&c.CrossTimeout, "crossbridge-timeout", 10*time.Minute, "crossbridge: give up on one visibility wait after this long")
 	fs.IntVar(&c.CrossConc, "crossbridge-conc", 4, "crossbridge: rounds in parallel")
+	fs.Int64Var(&c.StripeMin, "stripe-min", -1, "multi-bridge driver: stripe objects of at least this many bytes over the bridges (-1 = never, 0 = the driver default 512 MiB; SYNC_WEBDAV_STRIPE_MIN in the server)")
+	fs.Int64Var(&c.StripePiece, "stripe-piece", 0, "multi-bridge driver: stripe piece size in bytes (0 = the default 256 MiB)")
 	fs.IntVar(&c.LargeConcurrency, "large-concurrency", 0, "multi-bridge driver: transfers ≥ 16 MiB per bridge and direction (0 = the default, 3; SYNC_WEBDAV_LARGE_CONCURRENCY in the server)")
 	fs.StringVar(&c.User, "user", "sync", "Basic auth user (password from WEBDAV_PASSWORD)")
 	fs.StringVar(&c.Root, "root", "_bench", "folder under the URL the bench writes in")

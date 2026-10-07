@@ -38,7 +38,8 @@ var callsWithoutTenant = prometheus.NewCounterVec(prometheus.CounterOpts{
 // registry.
 func Collectors() []prometheus.Collector {
 	return []prometheus.Collector{callsWithoutTenant, geyserGetRanges, geyserGetBytesPerSecond, driverPutRetries,
-		webdavRequests, webdavStalls, webdavRetries, webdavBridgeUp, webdavFallbackReads}
+		webdavRequests, webdavStalls, webdavRetries, webdavBridgeUp, webdavFallbackReads,
+		webdavStripePieces, webdavStripeBytes, webdavStripeOrphans}
 }
 
 // InitTenantlessSeries creates the refused-call series at 0 for a backend, so

@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -78,6 +79,15 @@ type MultiWebDAVDriver struct {
 	ids     []string // HRW seeds (bridgeID of each URL), by index
 	logger  *zap.Logger
 	now     func() time.Time
+
+	// Striping (webdav_stripe.go): a known-length Put ≥ stripeMin (≤ 0 =
+	// never) is stored as stripePiece pieces staged in stripeSlots files.
+	stripeMin   int64
+	stripePiece int64
+	stagingDir  string
+	stripeSlots chan struct{}
+	staged      atomic.Int64 // staging files now
+	stagedPeak  atomic.Int64 // most staging files at once (tests)
 }
 
 // webdavBridge is one server of a MultiWebDAVDriver.
@@ -141,7 +151,26 @@ func NewMultiWebDAVDriver(name string, cfg WebDAVConfig, logger *zap.Logger, opt
 	if large < 1 {
 		large = WebDAVDefaultLargeConcurrency
 	}
-	m := &MultiWebDAVDriver{name: name, logger: logger, now: time.Now}
+	m := &MultiWebDAVDriver{name: name, logger: logger, now: time.Now,
+		stripeMin: cfg.StripeMin, stripePiece: cfg.StripePiece, stagingDir: cfg.StagingDir}
+	if m.stripePiece <= 0 {
+		m.stripePiece = WebDAVDefaultStripePiece
+	}
+	if m.stripeMin == 0 {
+		m.stripeMin = WebDAVDefaultStripeMin
+	}
+	if m.stripeMin > 0 && m.stripeMin < m.stripePiece {
+		return nil, fmt.Errorf("webdav: stripe minimum %d is below the piece size %d", m.stripeMin, m.stripePiece)
+	}
+	if m.stagingDir == "" {
+		m.stagingDir = defaultStagingDir()
+	}
+	if m.stripeMin > 0 {
+		if err := os.MkdirAll(m.stagingDir, 0o700); err != nil {
+			return nil, fmt.Errorf("webdav: stripe staging dir %s: %w", m.stagingDir, err)
+		}
+	}
+	m.stripeSlots = make(chan struct{}, len(cfg.Bridges)*large)
 	for i, bc := range cfg.Bridges {
 		label := strconv.Itoa(i)
 		all := append(append(cfg.Options(), opts...), withWebDAVBridge(label))
@@ -163,8 +192,10 @@ func NewMultiWebDAVDriver(name string, cfg WebDAVConfig, logger *zap.Logger, opt
 	for _, o := range []string{"served", "stale_miss", "failed"} {
 		webdavFallbackReads.WithLabelValues(name, o)
 	}
+	initStripeSeries(name)
 	logger.Info("WebDAV backend spread over bridges",
-		zap.String("backend", name), zap.Int("bridges", len(m.bridges)), zap.Int("large_concurrency", large))
+		zap.String("backend", name), zap.Int("bridges", len(m.bridges)), zap.Int("large_concurrency", large),
+		zap.Int64("stripe_min", m.stripeMin), zap.Int64("stripe_piece", m.stripePiece), zap.String("staging_dir", m.stagingDir))
 	return m, nil
 }
 
@@ -222,18 +253,27 @@ func (m *MultiWebDAVDriver) rank(names []string) []int {
 // object resolves a call to its tenant key (for errors), its resource names
 // and its bridges in HRW order.
 func (m *MultiWebDAVDriver) object(ctx context.Context, op, container, artifact string) (string, []int, error) {
+	key, _, order, err := m.resolve(ctx, op, container, artifact)
+	return key, order, err
+}
+
+// resolve is object plus the object's resource names (leaf `%o`).
+func (m *MultiWebDAVDriver) resolve(ctx context.Context, op, container, artifact string) (string, []string, []int, error) {
 	tenantID, err := requireTenant(ctx, m.name, op, "", m.logger)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	names, err := objectNames(tenantID, container, artifact)
+	if err == nil {
+		err = checkNames(manifestNamesOf(names))
+	}
 	if err == nil {
 		err = checkNames(names)
 	}
 	if err != nil {
-		return "", nil, fmt.Errorf("%s %s %s/%s: %w", m.name, op, container, artifact, err)
+		return "", nil, nil, fmt.Errorf("%s %s %s/%s: %w", m.name, op, container, artifact, err)
 	}
-	return tenantKey(tenantID, container, artifact), m.rank(names), nil
+	return tenantKey(tenantID, container, artifact), names, m.rank(names), nil
 }
 
 // bridgeFor is the index of the bridge a key lives on.
@@ -397,12 +437,16 @@ func (m *MultiWebDAVDriver) Bridges() int { return len(m.bridges) }
 // Put writes through the key's bridge only (no failover: see the type).
 // A body of ≥ 16 MiB or of unknown length waits for a large-upload slot.
 func (m *MultiWebDAVDriver) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...engine.PutOption) error {
-	key, order, err := m.object(ctx, "Put", container, artifact)
+	key, names, order, err := m.resolve(ctx, "Put", container, artifact)
 	if err != nil {
 		return err
 	}
+	o := engine.ApplyPutOptions(opts...)
+	if m.stripes(o) {
+		return m.putStriped(ctx, key, names, order, container, artifact, data, o)
+	}
 	b := m.bridges[order[0]]
-	if isLarge(engine.ApplyPutOptions(opts...).ContentLength) {
+	if isLarge(o.ContentLength) {
 		release, err := acquireSlot(ctx, b.largeUp, fmt.Sprintf("large-upload slots of bridge %d", b.idx))
 		if err != nil {
 			return fmt.Errorf("%s put %s: %w", m.name, key, err)
@@ -414,29 +458,71 @@ func (m *MultiWebDAVDriver) Put(ctx context.Context, container, artifact string,
 	if err != nil {
 		return fmt.Errorf("bridge %d: %w", b.idx, err)
 	}
+	// A striped previous version: its manifest would be shadowed by the
+	// plain file now, but its pieces must go.
+	if err := m.dropManifest(ctx, b, key, names, container, artifact); err != nil {
+		return fmt.Errorf("bridge %d: the object is stored, the previous striped version not removed: %w: %w", b.idx, err, engine.ErrNoFailover)
+	}
+	return nil
+}
+
+// dropManifest deletes the key's manifest on its bridge b (if any), then
+// its pieces (best effort: what stays is the reaper's).
+func (m *MultiWebDAVDriver) dropManifest(ctx context.Context, b *webdavBridge, key string, names []string, container, artifact string) error {
+	e, found, err := b.drv.stat(ctx, manifestNamesOf(names))
+	if err != nil {
+		return err
+	}
+	if !found || e.dir {
+		return nil
+	}
+	man, err := m.readManifestOn(ctx, b, key, names, engine.ErrNotFound(container, artifact))
+	if notFoundErr(err) {
+		return nil
+	}
+	if err != nil {
+		m.logger.Warn("webdav stripe: unreadable manifest removed — its pieces are left to the reaper",
+			zap.String("backend", m.name), zap.String("key", key), zap.Error(err))
+		man = nil
+	}
+	if err := b.drv.removeNames(ctx, manifestNamesOf(names)); err != nil {
+		return err
+	}
+	if man != nil {
+		if err := m.deleteStripe(ctx, key, man); err != nil {
+			webdavStripeOrphans.WithLabelValues(m.name, "left").Inc()
+			m.logger.Warn("webdav stripe: pieces not deleted — left to the reaper",
+				zap.String("backend", m.name), zap.String("key", key), zap.String("gen", man.Gen), zap.Error(err))
+		}
+	}
 	return nil
 }
 
 // Get streams the object from its bridge, or from a fallback (see readFrom).
 func (m *MultiWebDAVDriver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
-	key, order, err := m.object(ctx, "Get", container, artifact)
+	key, names, order, err := m.resolve(ctx, "Get", container, artifact)
 	if err != nil {
 		return nil, unstorableMiss(err, container, artifact)
 	}
+	nf := engine.ErrNotFound(container, artifact)
 	return readFrom(ctx, m, "get "+key, order,
-		func(b *webdavBridge) (io.ReadCloser, error) { return b.drv.Get(ctx, container, artifact) },
+		func(b *webdavBridge) (io.ReadCloser, error) { return m.openOn(ctx, b, key, names, nf, 0, 0, true) },
 		func(_ io.ReadCloser, err error) bool { return notFoundErr(err) })
 }
 
 // GetRange implements engine.RangeGetter, like Get.
 func (m *MultiWebDAVDriver) GetRange(ctx context.Context, container, artifact string, offset, length int64) (io.ReadCloser, error) {
-	key, order, err := m.object(ctx, "GetRange", container, artifact)
+	key, names, order, err := m.resolve(ctx, "GetRange", container, artifact)
 	if err != nil {
 		return nil, unstorableMiss(err, container, artifact)
 	}
+	if offset < 0 {
+		return nil, fmt.Errorf("%s get range %s: %w: negative offset", m.name, key, engine.ErrInvalidInput)
+	}
+	nf := engine.ErrNotFound(container, artifact)
 	return readFrom(ctx, m, "get range "+key, order,
 		func(b *webdavBridge) (io.ReadCloser, error) {
-			return b.drv.GetRange(ctx, container, artifact, offset, length)
+			return m.openOn(ctx, b, key, names, nf, offset, length, false)
 		},
 		func(_ io.ReadCloser, err error) bool { return notFoundErr(err) })
 }
@@ -444,7 +530,7 @@ func (m *MultiWebDAVDriver) GetRange(ctx context.Context, container, artifact st
 // Exists asks the key's bridge, or a fallback; a fallback's "no" is
 // ErrWebDAVBridgeStale.
 func (m *MultiWebDAVDriver) Exists(ctx context.Context, container, artifact string) (bool, error) {
-	key, order, err := m.object(ctx, "Exists", container, artifact)
+	key, names, order, err := m.resolve(ctx, "Exists", container, artifact)
 	if errors.Is(err, errNameTooLong) {
 		return false, nil // never stored
 	}
@@ -452,13 +538,20 @@ func (m *MultiWebDAVDriver) Exists(ctx context.Context, container, artifact stri
 		return false, err
 	}
 	return readFrom(ctx, m, "exists "+key, order,
-		func(b *webdavBridge) (bool, error) { return b.drv.Exists(ctx, container, artifact) },
+		func(b *webdavBridge) (bool, error) {
+			ok, err := b.drv.Exists(ctx, container, artifact)
+			if err != nil || ok {
+				return ok, err
+			}
+			e, found, err := b.drv.stat(ctx, manifestNamesOf(names))
+			return found && !e.dir, err
+		},
 		func(ok bool, err error) bool { return err == nil && !ok })
 }
 
 // Delete removes the object through its bridge only.
 func (m *MultiWebDAVDriver) Delete(ctx context.Context, container, artifact string) error {
-	_, order, err := m.object(ctx, "Delete", container, artifact)
+	key, names, order, err := m.resolve(ctx, "Delete", container, artifact)
 	if errors.Is(err, errNameTooLong) {
 		return nil // never stored
 	}
@@ -467,6 +560,9 @@ func (m *MultiWebDAVDriver) Delete(ctx context.Context, container, artifact stri
 	}
 	b := m.bridges[order[0]]
 	err = b.drv.Delete(ctx, container, artifact)
+	if err == nil {
+		err = m.dropManifest(ctx, b, key, names, container, artifact) // a striped object: manifest, then pieces
+	}
 	m.note(ctx, b, err)
 	if err != nil {
 		return fmt.Errorf("bridge %d: %w", b.idx, err)
@@ -509,7 +605,7 @@ func (m *MultiWebDAVDriver) WalkTenant(ctx context.Context, tenantID string, fn 
 				return nil
 			}
 			seen[k] = struct{}{}
-			routed := m.bridges[m.rank(names)[0]]
+			routed := m.bridges[m.rank(routingNames(names))[0]] // a manifest goes where its object would
 			return fn(tenantObject(names, func(ctx context.Context) error { return routed.drv.removeNames(ctx, names) }))
 		})
 		m.note(ctx, b, err)

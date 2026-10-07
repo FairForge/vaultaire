@@ -103,7 +103,13 @@ type WebDAVConfig struct {
 	MaxConcurrency            int
 	LargeConcurrency          int
 	IdleTimeout               time.Duration
-	Warnings                  []string
+	// StripeMin (0 = WebDAVDefaultStripeMin, < 0 = never), StripePiece (0 =
+	// WebDAVDefaultStripePiece) and StagingDir ("" = <tmp>/vaultaire-stripes)
+	// configure the multi-bridge driver's striping (webdav_stripe.go).
+	StripeMin   int64
+	StripePiece int64
+	StagingDir  string
+	Warnings    []string
 }
 
 // WebDAVBridge is one server of a backend: its URL and its own password.
@@ -945,6 +951,12 @@ func (d *WebDAVDriver) Put(ctx context.Context, container, artifact string, data
 	if err != nil {
 		return err
 	}
+	return d.putNames(ctx, key, names, data, opts...)
+}
+
+// putNames is Put at resource names below the root (key names the object
+// in errors and logs).
+func (d *WebDAVDriver) putNames(ctx context.Context, key string, names []string, data io.Reader, opts ...engine.PutOption) error {
 	o := engine.ApplyPutOptions(opts...)
 	dirs := d.parentPaths(names)
 	path := d.escapedPath(names, false)
@@ -1120,6 +1132,11 @@ func (d *WebDAVDriver) Get(ctx context.Context, container, artifact string) (io.
 	if err != nil {
 		return nil, unstorableMiss(err, container, artifact)
 	}
+	return d.getNames(ctx, key, names, engine.ErrNotFound(container, artifact))
+}
+
+// getNames is Get at resource names; a 404 is notFound (wrapped).
+func (d *WebDAVDriver) getNames(ctx context.Context, key string, names []string, notFound error) (io.ReadCloser, error) {
 	resp, err := d.get(ctx, d.escapedPath(names, false), d.name+" get "+key, nil)
 	if err != nil {
 		return nil, fmt.Errorf("%s get %s: %w", d.name, key, err)
@@ -1129,7 +1146,7 @@ func (d *WebDAVDriver) Get(ctx context.Context, container, artifact string) (io.
 		return resp.Body, nil
 	case http.StatusNotFound:
 		drainClose(resp)
-		return nil, fmt.Errorf("%s get %s: %w", d.name, key, engine.ErrNotFound(container, artifact))
+		return nil, fmt.Errorf("%s get %s: %w", d.name, key, notFound)
 	}
 	return nil, fmt.Errorf("%s get %s: %w", d.name, key, statusError(resp))
 }
@@ -1142,6 +1159,11 @@ func (d *WebDAVDriver) GetRange(ctx context.Context, container, artifact string,
 	if err != nil {
 		return nil, unstorableMiss(err, container, artifact)
 	}
+	return d.getRangeNames(ctx, key, names, offset, length, engine.ErrNotFound(container, artifact))
+}
+
+// getRangeNames is GetRange at resource names; a 404 is notFound (wrapped).
+func (d *WebDAVDriver) getRangeNames(ctx context.Context, key string, names []string, offset, length int64, notFound error) (io.ReadCloser, error) {
 	if offset < 0 {
 		return nil, fmt.Errorf("%s get range %s: %w: negative offset", d.name, key, engine.ErrInvalidInput)
 	}
@@ -1182,7 +1204,7 @@ func (d *WebDAVDriver) GetRange(ctx context.Context, container, artifact string,
 		return io.NopCloser(strings.NewReader("")), nil
 	case http.StatusNotFound:
 		drainClose(resp)
-		return nil, fmt.Errorf("%s get range %s: %w", d.name, key, engine.ErrNotFound(container, artifact))
+		return nil, fmt.Errorf("%s get range %s: %w", d.name, key, notFound)
 	}
 	return nil, fmt.Errorf("%s get range %s: %w", d.name, key, statusError(resp))
 }
@@ -1268,20 +1290,25 @@ func (d *WebDAVDriver) List(ctx context.Context, container, prefix string) ([]st
 		return strings.Join(segs, "/")
 	}
 	var out []string
+	seen := map[string]struct{}{}
 	err = d.walk(ctx, names,
 		func(rel []string) bool {
 			dir := dirKey(rel) + "/"
 			return strings.HasPrefix(dir, prefix) || strings.HasPrefix(prefix, dir)
 		},
 		func(rel []string, _ string) error {
-			leaf, ok := leafSegment(rel[len(rel)-1])
+			leaf, ok := objectLeafSegment(rel[len(rel)-1])
 			if !ok {
-				return nil // a file without the marker is not an object
+				return nil // a file without a marker is not an object
 			}
 			k := leaf
 			if len(rel) > 1 {
 				k = dirKey(rel[:len(rel)-1]) + "/" + leaf
 			}
+			if _, dup := seen[k]; dup {
+				return nil // a striped object's manifest beside a plain file (an interrupted overwrite)
+			}
+			seen[k] = struct{}{}
 			if strings.HasPrefix(k, prefix) {
 				out = append(out, k)
 			}
@@ -1321,6 +1348,42 @@ func (d *WebDAVDriver) walkTenantNames(ctx context.Context, tenantID string, fn 
 	return nil
 }
 
+// children lists the direct members of the folder at resource names: its
+// sub-folders and its files (resource names). A missing folder is empty.
+func (d *WebDAVDriver) children(ctx context.Context, names []string) (dirs, files []string, err error) {
+	path := d.escapedPath(names, true)
+	entries, found, err := d.propfind(ctx, path, "1")
+	if err != nil || !found {
+		return nil, nil, err
+	}
+	top := append(d.prefixSegs(), names...)
+	for _, e := range entries {
+		sub, ok := relSegments(e, top)
+		if !ok {
+			return nil, nil, fmt.Errorf("list %s: the server returned %q from outside the folder", path, "/"+strings.Join(e.segs, "/"))
+		}
+		if len(sub) != 1 {
+			continue // the folder itself
+		}
+		if e.dir {
+			dirs = append(dirs, sub[0])
+		} else {
+			files = append(files, sub[0])
+		}
+	}
+	return dirs, files, nil
+}
+
+// removeDir deletes the (empty or not) folder at resource names; a miss is
+// not an error. Only for folders the driver owns outright (stripe pieces).
+func (d *WebDAVDriver) removeDir(ctx context.Context, names []string) error {
+	path := d.escapedPath(names, true)
+	if err := d.deletePath(ctx, path); err != nil {
+		return fmt.Errorf("%s delete %s: %w", d.name, path, err)
+	}
+	return nil
+}
+
 // removeNames deletes the file at resource names (below the root); a miss
 // is not an error.
 func (d *WebDAVDriver) removeNames(ctx context.Context, names []string) error {
@@ -1341,7 +1404,7 @@ func tenantObject(names []string, remove func(ctx context.Context) error) engine
 	// before the marker, or by something else) is still the tenant's and
 	// is walked — the erasure sweep must remove it too.
 	last := rel[len(rel)-1]
-	leaf, ok := leafSegment(last)
+	leaf, ok := objectLeafSegment(last)
 	if !ok {
 		leaf = keySegment(last)
 	}
