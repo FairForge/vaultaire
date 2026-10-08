@@ -98,8 +98,9 @@ func resolveCopyTags(taggingDirective string, request, source objectAttrs) map[s
 // destination is ONE backend PUT, which on a slow backend (the sync tier,
 // ~30 MB/s per object) outlasts Cloudflare's 100 s origin timeout. Every
 // refusal (auth, copy source, free-tier cap, object lock, preconditions,
-// missing source, quota) is decided before the destination write starts and,
-// inside the threshold, keeps its own status;
+// missing source, quota) is decided before the destination write starts and
+// keeps its own status however long it took — the keep-alive threshold runs
+// from longOpBegin, after the last refusal;
 // a copy still writing after the threshold answers 200 + whitespace +
 // CopyObjectResult (or an <Error> document), and finishes even if the client
 // goes away. x-amz-version-id is known only after the copy and is not
@@ -300,6 +301,9 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 			cancel()
 		}
 	}
+
+	// Every refusal is behind us: from here the keep-alive may commit.
+	longOpBegin(r)
 
 	// Stream source → MD5 hasher → destination, tallying bytes as we go so
 	// the persisted size never depends on the source cache row being present.

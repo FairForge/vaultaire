@@ -118,6 +118,10 @@ func (s *Server) deleteObjects(w http.ResponseWriter, r *http.Request, req *S3Re
 
 	result := DeleteResult{Xmlns: "http://s3.amazonaws.com/doc/2006-03-01/"}
 
+	// The request is valid and the caller known: from here the keep-alive
+	// may commit.
+	longOpBegin(r)
+
 	// One outcome per distinct key, computed in parallel; reported per
 	// requested entry in request order.
 	first := make(map[string]int, len(delReq.Objects))

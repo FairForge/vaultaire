@@ -61,7 +61,7 @@ func (s *Server) initMetrics() {
 		reg.MustRegister(smartRestoreWaits)
 		// Detached long S3 operations (s3_long_op.go): what a stopping process
 		// waits for, and what it gave up on.
-		reg.MustRegister(longOpsInFlight, longOpsAbandoned)
+		reg.MustRegister(longOpsInFlight, longOpsAbandoned, longOpOutcomes)
 		// Writes destroyed by the delete of a stale copy (R13-06: detected,
 		// not preventable before WP-R2-1). Every source is there at 0.
 		reg.MustRegister(staleCopyLostWrites)

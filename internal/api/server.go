@@ -54,24 +54,25 @@ var (
 )
 
 type Server struct {
-	config          *config.Config
-	logger          *zap.Logger
-	router          chi.Router
-	httpServer      *http.Server
-	longOpsReg      *longOpRegistry // detached long S3 operations in flight (s3_long_op.go)
-	longOpsOnce     sync.Once
-	db              *sql.DB
-	events          chan Event
-	engine          *engine.CoreEngine
-	quotaManager    QuotaManager
-	accountExports  *AccountExportService // the one GDPR export service (WP-R10-3b); nil without DB + engine
-	auth            *auth.AuthService
-	stripe          *billing.StripeService
-	webhookHandler  *billing.WebhookHandler
-	meteredReporter *billing.MeteredReporter
-	requestCount    int64
-	siteStats       *sitestats.Collector // cookieless public-site counts (site_stats.go)
-	testMode        bool
+	config           *config.Config
+	logger           *zap.Logger
+	router           chi.Router
+	httpServer       *http.Server
+	longOpsReg       *longOpRegistry // detached long S3 operations in flight (s3_long_op.go)
+	longOpPreludeMax time.Duration   // tests; 0 = defaultLongOpPreludeMax
+	longOpsOnce      sync.Once
+	db               *sql.DB
+	events           chan Event
+	engine           *engine.CoreEngine
+	quotaManager     QuotaManager
+	accountExports   *AccountExportService // the one GDPR export service (WP-R10-3b); nil without DB + engine
+	auth             *auth.AuthService
+	stripe           *billing.StripeService
+	webhookHandler   *billing.WebhookHandler
+	meteredReporter  *billing.MeteredReporter
+	requestCount     int64
+	siteStats        *sitestats.Collector // cookieless public-site counts (site_stats.go)
+	testMode         bool
 	// longOpThreshold / longOpInterval: the keep-alive of slow
 	// CompleteMultipartUpload / DeleteObjects (s3_long_op.go); 0 = 10 s / 10 s.
 	longOpThreshold    time.Duration
