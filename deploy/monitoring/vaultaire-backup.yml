@@ -1,0 +1,37 @@
+# Database backups — install to /etc/prometheus/rules/ (see README).
+#
+# Series are written by deploy/scripts/pg-backup.sh (cron 03:00 UTC, user1) into
+# node_exporter's textfile directory /var/lib/prometheus/node-exporter/*.prom
+# (the Debian default; `node_textfile_scrape_error` 0 = the collector reads it):
+#   vaultaire_backup_last_success_timestamp_seconds         the pg_dump passed its size + DDL asserts
+#   vaultaire_backup_offbox_last_success_timestamp_seconds  the dump is on Sync.com, size verified
+#
+# A run that fails writes nothing — the timestamps simply age. 26 h = one daily
+# run missed with two hours of slack; `or absent(...)` covers a box where the
+# script never wrote the file (new install, directory not writable by user1,
+# node_exporter without the textfile collector).
+#
+# Triage:
+#   tail /opt/vaultaire/logs/backup.log          BACKUP FAILED - <stage> says which stage
+#   /opt/vaultaire/bin/pg-backup.sh               re-run by hand as user1
+#   ls -la /var/lib/prometheus/node-exporter/     the two .prom files, 0644, group user1 on the dir
+groups:
+  - name: vaultaire-backup
+    rules:
+      - alert: BackupStale
+        expr: (time() - vaultaire_backup_last_success_timestamp_seconds) > 26 * 3600 or absent(vaultaire_backup_last_success_timestamp_seconds)
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No successful database dump in > 26 h"
+          description: "pg-backup.sh has not reported a dump that passed its asserts for over 26 hours (or never has on this box). Check /opt/vaultaire/logs/backup.log on slc-vaultaire-01 and re-run /opt/vaultaire/bin/pg-backup.sh."
+
+      - alert: BackupOffboxStale
+        expr: (time() - vaultaire_backup_offbox_last_success_timestamp_seconds) > 26 * 3600 or absent(vaultaire_backup_offbox_last_success_timestamp_seconds)
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No off-box copy of the database dump in > 26 h"
+          description: "The dump has not reached Sync.com with a verified size for over 26 hours: a disk loss would take the only copy. Check the OFFBOX lines in /opt/vaultaire/logs/backup.log (sync-webdav bridge on :4918, rclone) and re-run /opt/vaultaire/bin/pg-backup.sh."
