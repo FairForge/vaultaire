@@ -1,0 +1,38 @@
+# Long S3 operations — install to /etc/prometheus/rules/ (see README).
+#
+# Series come from the app's /metrics (internal/api/s3_long_op.go):
+#   vaultaire_s3_long_op_total{op,outcome}        CompleteMultipartUpload / CopyObject / DeleteObjects by outcome:
+#                                                   ok, error_before_commit (a real 4xx/5xx the client saw),
+#                                                   error_after_commit (an <Error> document INSIDE a committed
+#                                                   200 — the request metrics and the access log say 200)
+#   vaultaire_s3_long_ops_in_flight{op}           detached operations running now
+#   vaultaire_s3_long_ops_abandoned_total{op}     operations a stopping process cancelled at 15 min of age
+#
+# Triage:
+#   journalctl -u 'vaultaire@*' -o cat | grep -E 'long S3 operation (answered after keep-alive|abandoned)'
+#   the Warn line of an abandoned operation names op, tenant, bucket, key and age
+groups:
+  - name: vaultaire-longops
+    rules:
+      # Three or more failures after the commit in 15 min on one operation:
+      # clients are getting 200s that carry errors — a backend that accepts
+      # the request and fails the write, or a bug past the preconditions.
+      - alert: LongOpFailingAfterCommit
+        expr: sum by (op) (increase(vaultaire_s3_long_op_total{outcome="error_after_commit"}[15m])) >= 3
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.op }}: {{ $value | humanize }} failures after the 200 was committed (15 min)"
+          description: "The client received 200 + <Error> for {{ $labels.op }} {{ $value | humanize }} times in 15 minutes. The request metrics say 200; find the operations in the journal ('long S3 operation answered after keep-alive' with status >= 300) and the backend errors just before them."
+
+      # A deploy cut an operation that had run 15 min: the client got a
+      # broken body and (for a complete) must retry.
+      - alert: LongOpsAbandonedAtShutdown
+        expr: sum by (op) (increase(vaultaire_s3_long_ops_abandoned_total[30m])) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.op }}: {{ $value | humanize }} operation(s) abandoned by a stopping process"
+          description: "A slot stopped with {{ $labels.op }} still running after 15 min from its start and cancelled it (see the 'long S3 operation abandoned at shutdown' Warn line for tenant, bucket, key, age). A CompleteMultipartUpload is safe to retry; check what made it that slow."

@@ -29,6 +29,7 @@ import (
 type slowDriver struct {
 	engine.Driver
 	delay     time.Duration
+	getDelay  time.Duration // a slow source lookup (CopyObject preconditions)
 	failPut   bool
 	deletes   atomic.Int32
 	inFlight  atomic.Int32
@@ -48,6 +49,17 @@ func (d *slowDriver) Put(ctx context.Context, c, a string, r io.Reader, opts ...
 		return errors.New("slow backend: write refused")
 	}
 	return d.Driver.Put(ctx, c, a, r, opts...)
+}
+
+func (d *slowDriver) Get(ctx context.Context, c, a string) (io.ReadCloser, error) {
+	if d.getDelay > 0 {
+		select {
+		case <-time.After(d.getDelay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return d.Driver.Get(ctx, c, a)
 }
 
 func (d *slowDriver) Delete(ctx context.Context, c, a string) error {
@@ -153,7 +165,8 @@ func TestRunLongS3Op_SlowOperationCommits200WithWhitespaceThenTheResult(t *testi
 	r := httptest.NewRequest("POST", "/b/k?uploadId=x", nil)
 
 	// Act
-	srv.runLongS3Op(w, r, longOpInfo{Op: "test"}, func(w http.ResponseWriter, _ *http.Request) {
+	srv.runLongS3Op(w, r, longOpInfo{Op: "test"}, func(w http.ResponseWriter, r *http.Request) {
+		longOpBegin(r) // the slow work starts at once
 		time.Sleep(150 * time.Millisecond)
 		w.Header().Set("Content-Type", "application/xml")
 		_, _ = w.Write([]byte(xml.Header + "<CompleteMultipartUploadResult><ETag>\"e-2\"</ETag></CompleteMultipartUploadResult>"))
@@ -178,7 +191,8 @@ func TestRunLongS3Op_SlowFailureIsAnErrorDocumentIn200(t *testing.T) {
 	r := httptest.NewRequest("POST", "/b/k?uploadId=x", nil)
 
 	// Act
-	srv.runLongS3Op(w, r, longOpInfo{Op: "test"}, func(w http.ResponseWriter, _ *http.Request) {
+	srv.runLongS3Op(w, r, longOpInfo{Op: "test"}, func(w http.ResponseWriter, r *http.Request) {
+		longOpBegin(r) // the slow work starts at once
 		time.Sleep(100 * time.Millisecond)
 		WriteS3Error(w, ErrServiceUnavailable, "/b/k", "req-2")
 	})

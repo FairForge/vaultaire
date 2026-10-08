@@ -647,6 +647,9 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
+	// Every refusal is behind us: from here the keep-alive may commit.
+	longOpBegin(r)
+
 	// Stream assembled parts to backend via pipe
 	pr, pw := io.Pipe()
 	containerName := t.NamespaceContainer(bucket)

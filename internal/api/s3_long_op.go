@@ -85,6 +85,63 @@ const (
 	longOpBatch    = "DeleteObjects"
 )
 
+// Outcomes of vaultaire_s3_long_op_total: a failure after the 200 is
+// committed is invisible to the request metrics (they say 200).
+const (
+	longOpOK                = "ok"
+	longOpErrorBeforeCommit = "error_before_commit"
+	longOpErrorAfterCommit  = "error_after_commit"
+	// defaultLongOpPreludeMax is how long an operation may spend in its
+	// preconditions (before longOpBegin) without the keep-alive going out:
+	// a dependency stuck there still gets the 200 before Cloudflare's 100 s.
+	defaultLongOpPreludeMax = 60 * time.Second
+)
+
+var longOpOutcomes = func() *prometheus.CounterVec {
+	c := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vaultaire_s3_long_op_total",
+		Help: "Long S3 operations by outcome: ok, error_before_commit (a real 4xx/5xx), error_after_commit (an <Error> document inside a committed 200 — invisible to the request metrics). Rules: deploy/monitoring/vaultaire-longops.yml.",
+	}, []string{"op", "outcome"})
+	for _, op := range []string{longOpComplete, longOpCopy, longOpBatch} {
+		for _, o := range []string{longOpOK, longOpErrorBeforeCommit, longOpErrorAfterCommit} {
+			c.WithLabelValues(op, o)
+		}
+	}
+	return c
+}()
+
+// longOpGate is what an operation closes when its cheap preconditions are
+// resolved and its slow work starts (longOpBegin): the keep-alive threshold
+// runs from there, so a refusal decided before it keeps its own status
+// however long the lookups took (a slow source head lookup on CopyObject
+// used to turn NoSuchKey into 200 + <Error>). An operation that never
+// begins gets the keep-alive after longOpPreludeMax anyway.
+type longOpGate struct {
+	once  sync.Once
+	begun chan struct{}
+}
+
+type longOpGateKey struct{}
+
+// longOpBegin marks the start of the operation's slow work. No-op outside
+// runLongS3Op.
+func longOpBegin(r *http.Request) {
+	if g, ok := r.Context().Value(longOpGateKey{}).(*longOpGate); ok && g != nil {
+		g.once.Do(func() { close(g.begun) })
+	}
+}
+
+func longOpOutcome(code int, committed bool) string {
+	switch {
+	case code < 300:
+		return longOpOK
+	case committed:
+		return longOpErrorAfterCommit
+	default:
+		return longOpErrorBeforeCommit
+	}
+}
+
 var (
 	longOpsInFlight = func() *prometheus.GaugeVec {
 		g := prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -253,7 +310,8 @@ func (b *bufferedResponse) code() int {
 func (s *Server) runLongS3Op(w http.ResponseWriter, r *http.Request, info longOpInfo, op func(http.ResponseWriter, *http.Request)) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), longOpMaxDuration)
 	defer cancel()
-	opReq := r.WithContext(ctx)
+	gate := &longOpGate{begun: make(chan struct{})}
+	opReq := r.WithContext(context.WithValue(ctx, longOpGateKey{}, gate))
 
 	entry := &longOpEntry{longOpInfo: info, started: time.Now(), cancel: cancel}
 	if t, err := tenant.FromContext(r.Context()); err == nil && t != nil {
@@ -282,17 +340,34 @@ func (s *Server) runLongS3Op(w http.ResponseWriter, r *http.Request, info longOp
 	}()
 
 	threshold, interval := s.longOpTimings()
-	timer := time.NewTimer(threshold)
-	defer timer.Stop()
-	select {
-	case <-done:
-		for k, v := range rec.header {
-			w.Header()[k] = v
+	preludeMax := s.longOpPreludeMax
+	if preludeMax <= 0 {
+		preludeMax = defaultLongOpPreludeMax
+	}
+	prelude := time.NewTimer(preludeMax)
+	defer prelude.Stop()
+	var thresholdC <-chan time.Time
+	begun := gate.begun
+	for committed := false; !committed; {
+		select {
+		case <-done:
+			for k, v := range rec.header {
+				w.Header()[k] = v
+			}
+			w.WriteHeader(rec.code())
+			_, _ = w.Write(rec.body.Bytes())
+			longOpOutcomes.WithLabelValues(info.Op, longOpOutcome(rec.code(), false)).Inc()
+			return
+		case <-begun:
+			begun = nil
+			timer := time.NewTimer(threshold)
+			defer timer.Stop()
+			thresholdC = timer.C
+		case <-thresholdC:
+			committed = true
+		case <-prelude.C:
+			committed = true
 		}
-		w.WriteHeader(rec.code())
-		_, _ = w.Write(rec.body.Bytes())
-		return
-	case <-timer.C:
 	}
 
 	// Commit: 200, then whitespace until the operation is done. Write errors
@@ -309,6 +384,7 @@ func (s *Server) runLongS3Op(w http.ResponseWriter, r *http.Request, info longOp
 		case <-done:
 			_, _ = w.Write(committedBody(rec, r.URL.Path))
 			_ = rc.Flush()
+			longOpOutcomes.WithLabelValues(info.Op, longOpOutcome(rec.code(), true)).Inc()
 			s.log().Info("long S3 operation answered after keep-alive",
 				zap.String("path", r.URL.Path), zap.Int("status", rec.code()))
 			return
