@@ -47,6 +47,7 @@ type memUpload struct {
 	Bucket   string
 	Key      string
 	Status   string // "active", "completed", "aborted"
+	ETag     string // the assembled object's ETag once completed
 	Parts    map[int]memPart
 	Created  time.Time
 	Attrs    objectAttrs
@@ -442,7 +443,7 @@ func (s *Server) multipartUploadAttrs(r *http.Request, uploadID string) (objectA
 // keep-alive (s3_long_op.go): the assembled object is one backend PUT, which
 // on a slow backend outlasts Cloudflare's 100 s origin timeout.
 func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Request, bucket, object string) {
-	s.runLongS3Op(w, r, func(w http.ResponseWriter, r *http.Request) {
+	s.runLongS3Op(w, r, longOpInfo{Op: longOpComplete, Bucket: bucket, Key: object}, func(w http.ResponseWriter, r *http.Request) {
 		s.completeMultipartUpload(w, r, bucket, object)
 	})
 }
@@ -464,6 +465,16 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	if !active {
+		// A retry of a complete that landed but whose answer never reached
+		// the client (a deploy cut the keep-alive after the commit): the same
+		// result again, as AWS answers a repeated complete with the same
+		// parts. Anything else about a non-active upload is NoSuchUpload.
+		if res, ok := s.completedUploadResult(r, t.ID, uploadID, bucket, object); ok {
+			w.Header().Set("Content-Type", "application/xml")
+			w.Header().Set("ETag", res.ETag)
+			_ = xml.NewEncoder(w).Encode(res)
+			return
+		}
 		WriteS3Error(w, ErrNoSuchUpload, r.URL.Path, generateRequestID())
 		return
 	}
@@ -751,6 +762,7 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 		memUploadsMu.Lock()
 		if mu, ok := memUploads[uploadID]; ok {
 			mu.Status = "completed"
+			mu.ETag = finalETag
 		}
 		memUploadsMu.Unlock()
 	}
@@ -1047,4 +1059,102 @@ type ListMultipartUploadItem struct {
 	Key       string `xml:"Key"`
 	UploadID  string `xml:"UploadId"`
 	Initiated string `xml:"Initiated"`
+}
+
+// completedUploadResult is the CompleteMultipartUploadResult of a retry
+// against an upload this tenant already completed, when the part list the
+// retry names (or, with no list, every part of the upload) assembles to the
+// ETag the key holds now — i.e. the object the first complete produced is
+// still there. Any other case (not completed, other parts, the key
+// overwritten since) is not a retry: ok is false and the caller answers
+// NoSuchUpload. The parts rows outlive the completion (the reaper purges
+// them after MULTIPART_TERMINAL_RETENTION_DAYS), which is the retry window.
+func (s *Server) completedUploadResult(r *http.Request, tenantID, uploadID, bucket, object string) (CompleteMultipartUploadResult, bool) {
+	none := CompleteMultipartUploadResult{}
+	if !validUploadID(uploadID) {
+		return none, false
+	}
+	req, _, err := parseCompleteMultipartBody(r)
+	if err != nil {
+		return none, false
+	}
+	var uploaded []partRecord
+	var currentETag string
+	if s.db != nil {
+		var status string
+		err := s.db.QueryRowContext(r.Context(), `
+			SELECT status FROM multipart_uploads WHERE upload_id = $1 AND tenant_id = $2`, uploadID, tenantID).Scan(&status)
+		if err != nil || status != "completed" {
+			return none, false
+		}
+		rows, err := s.db.QueryContext(r.Context(), `
+			SELECT part_number, etag, size_bytes FROM multipart_parts WHERE upload_id = $1 ORDER BY part_number ASC`, uploadID)
+		if err != nil {
+			return none, false
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var p partRecord
+			if err := rows.Scan(&p.PartNumber, &p.ETag, &p.Size); err != nil {
+				return none, false
+			}
+			uploaded = append(uploaded, p)
+		}
+		if err := rows.Err(); err != nil {
+			return none, false
+		}
+		if err := s.db.QueryRowContext(r.Context(), `
+			SELECT etag FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+			tenantID, bucket, object).Scan(&currentETag); err != nil {
+			return none, false
+		}
+	} else {
+		memUploadsMu.RLock()
+		mu, ok := memUploads[uploadID]
+		if ok && mu.TenantID == tenantID && mu.Status == "completed" {
+			currentETag = mu.ETag
+			for pn, mp := range mu.Parts {
+				uploaded = append(uploaded, partRecord{PartNumber: pn, ETag: mp.ETag, Size: mp.Size})
+			}
+		}
+		memUploadsMu.RUnlock()
+		if !ok || mu.Status != "completed" {
+			return none, false
+		}
+		sortParts(uploaded)
+	}
+	parts := uploaded
+	if len(req.Parts) > 0 {
+		byNumber := make(map[int]partRecord, len(uploaded))
+		for _, p := range uploaded {
+			byNumber[p.PartNumber] = p
+		}
+		parts = parts[:0:0]
+		for _, rp := range req.Parts {
+			up, ok := byNumber[rp.PartNumber]
+			if !ok || strings.Trim(rp.ETag, "\"") != strings.Trim(up.ETag, "\"") {
+				return none, false
+			}
+			parts = append(parts, up)
+		}
+	}
+	if len(parts) == 0 {
+		return none, false
+	}
+	h := md5.New() // #nosec G401 — S3 spec requires MD5 for multipart ETags
+	for _, p := range parts {
+		if decoded, err := hex.DecodeString(strings.Trim(p.ETag, "\"")); err == nil {
+			h.Write(decoded)
+		}
+	}
+	etag := fmt.Sprintf("\"%x-%d\"", h.Sum(nil), len(parts))
+	if strings.Trim(etag, "\"") != strings.Trim(currentETag, "\"") {
+		return none, false
+	}
+	return CompleteMultipartUploadResult{
+		Location: fmt.Sprintf("http://%s/%s/%s", r.Host, bucket, object),
+		Bucket:   bucket,
+		Key:      object,
+		ETag:     etag,
+	}, true
 }

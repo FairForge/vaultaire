@@ -41,6 +41,10 @@ CFG_BACKUPS=5                          # timestamped haproxy.cfg backups kept
 HEALTH_TIMEOUT=${HEALTH_TIMEOUT:-90}   # seconds for the new slot to answer /health/live
 UP_TIMEOUT=${UP_TIMEOUT:-30}           # seconds for HAProxy to report the new slot UP
 DRAIN_TIMEOUT=${DRAIN_TIMEOUT:-600}    # seconds for the old slot's sessions to finish
+LONG_OP_TIMEOUT=${LONG_OP_TIMEOUT:-900} # seconds for its detached long S3 operations (CompleteMultipartUpload,
+                                        # CopyObject, DeleteObjects: 200 + keep-alive already sent) — the
+                                        # process's own bound is 15 min from each operation's start, and both
+                                        # fit the 1200 s lock below
 
 log() { echo "[vaultaire-switch] $*"; }
 die() { log "ERROR: $*" >&2; exit 1; }
@@ -94,6 +98,18 @@ sessions_of() {
     total=$((total + ${n:-0}))
   done
   echo "$total"
+}
+
+# Detached long S3 operations still running on a slot, from its own port
+# (/health answers `long_ops_in_flight` to loopback only). A slot that does
+# not answer counts as 0: nothing left to wait for.
+long_ops_of() {
+  curl -s --max-time 5 "http://127.0.0.1:$1/health" 2>/dev/null | python3 -c '
+import json, sys
+try:
+    print(int(json.load(sys.stdin).get("long_ops_in_flight", 0)))
+except Exception:
+    print(0)'
 }
 
 # status (UP/DOWN/MAINT…) of one server in one backend.
@@ -196,11 +212,21 @@ activate() {
   systemctl enable --quiet "vaultaire@$new" || true
   systemctl disable --quiet "vaultaire@$old" 2>/dev/null || true
 
-  local deadline=$((SECONDS + DRAIN_TIMEOUT)) n
+  # Wait for the old slot: its HAProxy sessions (DRAIN_TIMEOUT) and the long
+  # operations it has detached from their clients (LONG_OP_TIMEOUT, the larger
+  # bound — a long operation is also a session, so the session bound alone would
+  # have stopped a complete that had already answered 200 + whitespace).
+  local started=$SECONDS n l elapsed
   while :; do
-    n=$(sessions_of "$old_name")
-    [ "$n" = 0 ] && break
-    if [ $SECONDS -ge $deadline ]; then
+    n=$(sessions_of "$old_name"); l=$(long_ops_of "$old")
+    [ "$n" = 0 ] && [ "$l" = 0 ] && break
+    elapsed=$((SECONDS - started))
+    if [ "$l" != 0 ]; then
+      if [ "$elapsed" -ge "$LONG_OP_TIMEOUT" ]; then
+        log "WARNING: $l long operation(s) still running on $old_name after ${LONG_OP_TIMEOUT}s — stopping anyway; the process cancels and logs each one at 15 min of age"
+        break
+      fi
+    elif [ "$elapsed" -ge "$DRAIN_TIMEOUT" ]; then
       # The engine's own shutdown (cmd/vaultaire/main.go shutdownTimeout, 30 s)
       # is what remains for these: a transfer longer than the drain plus that
       # is cut.

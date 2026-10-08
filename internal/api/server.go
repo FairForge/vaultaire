@@ -58,6 +58,8 @@ type Server struct {
 	logger          *zap.Logger
 	router          chi.Router
 	httpServer      *http.Server
+	longOpsReg      *longOpRegistry // detached long S3 operations in flight (s3_long_op.go)
+	longOpsOnce     sync.Once
 	db              *sql.DB
 	events          chan Event
 	engine          *engine.CoreEngine
@@ -1397,9 +1399,21 @@ func (s *Server) Start() error {
 // of buffered bandwidth (egress metering = billing data once Stripe meters
 // are on), CDN analytics, and access-log events on every deploy. Flush order
 // matters: drain first so in-flight requests can't record behind the flush.
+// Shutdown is the stop sequence's first half (cmd/vaultaire gracefulShutdown;
+// the engine, which closes the database, is the second): the HTTP drain
+// bounded by ctx, then the wait for the detached long operations that drain
+// leaves running — up to longOpDrainBound from each one's start, the rest
+// cancelled and logged — then the trackers' flush. The flush gets its own
+// short context: by then ctx has usually expired, and a flush that fails on
+// a dead context would drop every byte counted during the drain.
 func (s *Server) Shutdown(ctx context.Context) error {
 	err := s.httpServer.Shutdown(ctx)
-	s.flushTrackers(ctx)
+	if n := s.drainLongOps(longOpDrainBound); n > 0 {
+		s.log().Warn("long S3 operations abandoned at shutdown", zap.Int("count", n))
+	}
+	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+	s.flushTrackers(fctx)
 	return err
 }
 

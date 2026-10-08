@@ -22,9 +22,13 @@ import (
 	"go.uber.org/zap"
 )
 
-// shutdownTimeout bounds the whole stop sequence: HTTP drain (in-flight
-// uploads/downloads), the trackers' synchronous flush, then the engine.
-// systemd's TimeoutStopSec must stay above this.
+// shutdownTimeout bounds the HTTP drain (in-flight uploads/downloads) and
+// the engine's close. Between the two, api.Server.Shutdown waits for the long
+// S3 operations the drain leaves running (CompleteMultipartUpload, CopyObject,
+// DeleteObjects: detached from their clients once 200 + keep-alive is sent)
+// up to 15 min from each one's start (api longOpDrainBound), with its own
+// clock; systemd's TimeoutStopSec (deploy/systemd/vaultaire@.service, 1000 s)
+// must stay above the sum.
 const shutdownTimeout = 30 * time.Second
 
 // shutdowner is the slice of *api.Server and *engine.CoreEngine that the
@@ -34,9 +38,10 @@ type shutdowner interface {
 }
 
 // gracefulShutdown stops the process in the only order that works: the HTTP
-// server first — its Shutdown waits for in-flight requests and then flushes
-// the buffered bandwidth/CDN/access-log trackers, both of which need the
-// database — and the engine second, because engine.Shutdown closes the
+// server first — its Shutdown waits for in-flight requests, then for the
+// detached long operations, and then flushes the buffered
+// bandwidth/CDN/access-log trackers, all of which need the database — and
+// the engine second, because engine.Shutdown closes the
 // *sql.DB that both of them share (review R1-03: the previous order closed
 // the pool under draining requests and the flush).
 func gracefulShutdown(ctx context.Context, logger *zap.Logger, srv, eng shutdowner) {

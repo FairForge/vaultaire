@@ -70,7 +70,7 @@ type DeleteError struct {
 // batch run one key after another outlasted Cloudflare's 100 s and the
 // client's disconnect stopped it halfway.
 func (s *Server) handleDeleteObjects(w http.ResponseWriter, r *http.Request, req *S3Request) {
-	s.runLongS3Op(w, r, func(w http.ResponseWriter, r *http.Request) {
+	s.runLongS3Op(w, r, longOpInfo{Op: longOpBatch, Bucket: req.Bucket}, func(w http.ResponseWriter, r *http.Request) {
 		s.deleteObjects(w, r, req)
 	})
 }
