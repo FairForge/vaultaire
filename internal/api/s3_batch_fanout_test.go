@@ -44,14 +44,68 @@ type countingSQLDriver struct {
 }
 
 type queryLog struct {
-	mu      sync.Mutex
-	queries []string
+	mu       sync.Mutex
+	queries  []string
+	inFlight map[string]int // statements running now, by text
+	peaks    map[string]int // the most that ran at once, by text
+	running  int
+	peak     int
 }
 
 func (l *queryLog) add(q string) {
 	l.mu.Lock()
 	l.queries = append(l.queries, q)
 	l.mu.Unlock()
+}
+
+// enter/leave bracket a statement's execution so peaks can be read.
+func (l *queryLog) enter(q string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.inFlight == nil {
+		l.inFlight, l.peaks = map[string]int{}, map[string]int{}
+	}
+	l.queries = append(l.queries, q)
+	l.inFlight[q]++
+	if l.inFlight[q] > l.peaks[q] {
+		l.peaks[q] = l.inFlight[q]
+	}
+	l.running++
+	if l.running > l.peak {
+		l.peak = l.running
+	}
+}
+
+func (l *queryLog) leave(q string) {
+	l.mu.Lock()
+	l.inFlight[q]--
+	l.running--
+	l.mu.Unlock()
+}
+
+func (l *queryLog) resetPeaks() {
+	l.mu.Lock()
+	l.peaks, l.peak = map[string]int{}, 0
+	l.mu.Unlock()
+}
+
+// peakOf is the most statements naming table that ran at once.
+func (l *queryLog) peakOf(table string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := 0
+	for q, p := range l.peaks {
+		if strings.Contains(q, table) && p > n {
+			n = p
+		}
+	}
+	return n
+}
+
+func (l *queryLog) peakTotal() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.peak
 }
 
 func (l *queryLog) reset() {
@@ -95,12 +149,14 @@ type countingConn struct {
 }
 
 func (c *countingConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
-	c.log.add(query)
+	c.log.enter(query)
+	defer c.log.leave(query)
 	return c.Conn.(driver.QueryerContext).QueryContext(ctx, query, args)
 }
 
 func (c *countingConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
-	c.log.add(query)
+	c.log.enter(query)
+	defer c.log.leave(query)
 	return c.Conn.(driver.ExecerContext).ExecContext(ctx, query, args)
 }
 
