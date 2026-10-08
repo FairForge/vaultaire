@@ -471,12 +471,19 @@ func (p *VaultParity) reconcileTenantLeg(ctx context.Context, res *VaultParityRe
 			kept = append(kept, folder)
 			continue
 		}
-		if err := p.eraseOrphanFolder(tctx, drv, container, folder, folders[folder], folders, named); err != nil {
+		dirsGone, err := p.eraseOrphanFolder(tctx, drv, container, folder, folders[folder], folders, named)
+		if err != nil {
 			res.OrphansFailed++
 			vaultParityOrphans.WithLabelValues("failed").Inc()
 			res.Errors = append(res.Errors, fmt.Sprintf("reconcile: erase %s on %s: %v", folder, legName, err))
 			kept = append(kept, folder)
 			continue
+		}
+		if !dirsGone {
+			// The shards are gone but a folder stayed (a bridge that still
+			// listed them answered "not empty"): the sighting stays, and a
+			// later pass removes the folders (forgetSightings).
+			kept = append(kept, folder)
 		}
 		res.OrphansErased++
 		vaultParityOrphans.WithLabelValues("erased").Inc()
@@ -487,55 +494,108 @@ func (p *VaultParity) reconcileTenantLeg(ctx context.Context, res *VaultParityRe
 	if res.ReconcileTruncated {
 		return // the unseen candidates keep their sightings
 	}
-	// Sightings of folders that are no longer candidates on this leg (the
-	// row appeared, the folder is gone, or they were erased above). An
-	// empty array, never NULL: `= ANY(NULL)` is NULL and deletes nothing.
-	if kept == nil {
-		kept = []string{}
+	p.forgetSightings(tctx, res, tenantID, legName, drv, container, kept, folders, named)
+}
+
+// forgetSightings drops the sightings of folders that are no longer
+// candidates on this leg: the row appeared (named — its folder is never
+// touched), or the folder holds no file any more — erased by an earlier
+// pass or by someone else. For the latter the empty `<etag>` and `<digest>`
+// folders are removed first, and the sighting is kept until they are: the
+// listing is of files only, so a folder left behind by a lagging bridge
+// would otherwise never be met again (prod 2026-10-08: the `<digest>`
+// folder of an erased orphan stayed on all five Sync bridges).
+func (p *VaultParity) forgetSightings(ctx context.Context, res *VaultParityResult, tenantID, legName string,
+	drv engine.Driver, container string, kept []string, folders map[string][]string, named map[string]bool) {
+	keep := map[string]bool{}
+	for _, k := range kept {
+		keep[k] = true
+	}
+	rows, err := p.db.QueryContext(ctx, `SELECT prefix FROM vault_parity_orphans WHERE tenant_id = $1 AND leg = $2`, tenantID, legName)
+	if err != nil {
+		res.Errors = append(res.Errors, "reconcile: sightings: "+err.Error())
+		return
+	}
+	var stale []string
+	for rows.Next() {
+		var prefix string
+		if err := rows.Scan(&prefix); err != nil {
+			_ = rows.Close()
+			res.Errors = append(res.Errors, "reconcile: sightings: "+err.Error())
+			return
+		}
+		if !keep[prefix] {
+			stale = append(stale, prefix)
+		}
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		res.Errors = append(res.Errors, "reconcile: sightings: "+err.Error())
+		return
+	}
+	rm, canRemove := drv.(emptyDirRemover)
+	var forget []string
+	for _, prefix := range stale {
+		if !named[prefix] && canRemove && !p.removeOrphanDirs(ctx, rm, container, prefix, folders, named) {
+			continue // a folder is still there: try again next pass
+		}
+		forget = append(forget, prefix)
+	}
+	if len(forget) == 0 {
+		return
 	}
 	if _, err := p.db.ExecContext(ctx, `
-		DELETE FROM vault_parity_orphans WHERE tenant_id = $1 AND leg = $2 AND NOT (prefix = ANY($3))`,
-		tenantID, legName, pq.Array(kept)); err != nil {
+		DELETE FROM vault_parity_orphans WHERE tenant_id = $1 AND leg = $2 AND prefix = ANY($3)`,
+		tenantID, legName, pq.Array(forget)); err != nil {
 		res.Errors = append(res.Errors, "reconcile: forget sightings: "+err.Error())
 	}
 }
 
-// eraseOrphanFolder deletes every file under folder, then the folder, then
-// its `<digest>` parent when nothing else (on the leg or in a row) sits
-// under it. The folder removals are best effort (not every leg has folders).
-func (p *VaultParity) eraseOrphanFolder(ctx context.Context, drv engine.Driver, container, folder string, files []string, folders map[string][]string, named map[string]bool) error {
+// eraseOrphanFolder deletes every file under folder, then removes the
+// empty folders (removeOrphanDirs). dirsGone is false when a folder stayed
+// (the caller keeps the sighting so a later pass finishes it); err is a
+// file delete that failed.
+func (p *VaultParity) eraseOrphanFolder(ctx context.Context, drv engine.Driver, container, folder string, files []string, folders map[string][]string, named map[string]bool) (dirsGone bool, err error) {
 	for _, f := range files {
 		if err := drv.Delete(ctx, container, f); err != nil && !isObjectMissingErr(err) {
-			return fmt.Errorf("delete %s: %w", f, err)
+			return false, fmt.Errorf("delete %s: %w", f, err)
 		}
 	}
 	rm, ok := drv.(emptyDirRemover)
 	if !ok {
-		return nil
+		return true, nil // no folders on this leg
 	}
+	return p.removeOrphanDirs(ctx, rm, container, folder, folders, named), nil
+}
+
+// removeOrphanDirs removes the empty `<etag>` folder, then its `<digest>`
+// parent unless another folder on the leg or a row's prefix sits under it.
+// True when nothing of the orphan's folders is left.
+func (p *VaultParity) removeOrphanDirs(ctx context.Context, rm emptyDirRemover, container, folder string, folders map[string][]string, named map[string]bool) bool {
 	if err := rm.RemoveEmptyDir(ctx, container, folder); err != nil {
-		p.logger.Debug("vault parity: orphan folder not removed", zap.String("folder", folder), zap.Error(err))
-		return nil
+		p.logger.Info("vault parity: orphan folder not removed yet", zap.String("folder", folder), zap.Error(err))
+		return false
 	}
 	i := strings.Index(folder, "/")
 	if i <= 0 {
-		return nil
+		return true
 	}
 	digest := folder[:i]
 	for other := range folders {
 		if other != folder && strings.HasPrefix(other, digest+"/") {
-			return nil
+			return true // the digest folder holds another etag's shards
 		}
 	}
 	for other := range named {
 		if strings.HasPrefix(other, digest+"/") {
-			return nil
+			return true
 		}
 	}
 	if err := rm.RemoveEmptyDir(ctx, container, digest); err != nil {
-		p.logger.Debug("vault parity: orphan digest folder not removed", zap.String("folder", digest), zap.Error(err))
+		p.logger.Info("vault parity: orphan digest folder not removed yet", zap.String("folder", digest), zap.Error(err))
+		return false
 	}
-	return nil
+	return true
 }
 
 type parityRow struct {

@@ -2,8 +2,10 @@ package api
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -133,4 +135,51 @@ func TestVaultParity_ReconcileWalkIsBoundedPerRun(t *testing.T) {
 	res := f.run()
 	assert.Equal(t, 4, res.OrphansFound)
 	assert.True(t, res.ReconcileTruncated)
+}
+
+// stickyDirLeg is the parity leg whose RemoveEmptyDir answers "not empty"
+// for its first `fails` calls — a Sync bridge that still lists the shards
+// another bridge has just deleted.
+type stickyDirLeg struct {
+	*flakyLegDriver
+	fails atomic.Int32
+}
+
+func (d *stickyDirLeg) RemoveEmptyDir(ctx context.Context, container, dir string) error {
+	if d.fails.Add(-1) >= 0 {
+		return errors.New("not empty (stale bridge)")
+	}
+	return d.LocalDriver.RemoveEmptyDir(ctx, container, dir)
+}
+
+func TestVaultParity_AFolderALaggingBridgeKeptIsRemovedOnALaterPass(t *testing.T) {
+	// Arrange: the erase pass deletes the shards but the folder removal is
+	// refused once (prod 2026-10-08: the <digest> folder stayed on every bridge).
+	f := setupParityFixture(t)
+	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM vault_parity_orphans WHERE tenant_id = $1`, f.tenantID) })
+	sticky := &stickyDirLeg{flakyLegDriver: f.leg}
+	f.eng.AddDriver("permafrost", sticky)
+	orphanDir := f.plantOrphan("fedcba9876543210fedcba98/0000000000000000000000000000000f")
+	f.run()
+	f.ageOrphans(2 * time.Hour)
+	sticky.fails.Store(1)
+
+	// Act 1: the erase pass — shards go, the folder removal is refused.
+	res := f.run()
+	assert.Equal(t, 1, res.OrphansErased)
+	assert.Empty(t, f.shardFiles())
+	_, statErr := os.Stat(orphanDir)
+	require.NoError(t, statErr, "the folder is still there after the refused removal")
+	assert.Equal(t, 1, f.orphanRows(), "the sighting stays until the folders are gone")
+
+	// Act 2: the next pass finds no file (not a candidate) and finishes the folders.
+	res = f.run()
+
+	// Assert
+	assert.Equal(t, 0, res.OrphansFound)
+	_, statErr = os.Stat(orphanDir)
+	assert.True(t, os.IsNotExist(statErr), "the <etag> folder is removed on the later pass")
+	_, statErr = os.Stat(filepath.Dir(orphanDir))
+	assert.True(t, os.IsNotExist(statErr), "and the <digest> folder")
+	assert.Equal(t, 0, f.orphanRows(), "then the sighting is forgotten")
 }
