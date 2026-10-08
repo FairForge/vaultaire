@@ -26,6 +26,7 @@ it is **not** committed. It lives in `/etc/default/ntfy-bridge` on the server
 | `ntfy-bridge.py` | `/opt/vaultaire/monitoring/ntfy-bridge.py` | Alertmanager webhook → readable ntfy push (UTF-8-safe JSON publish) |
 | `ntfy-bridge.service` | `/etc/systemd/system/ntfy-bridge.service` | sandboxed systemd unit (DynamicUser) |
 | `vaultaire-routing.yml` | `/etc/prometheus/rules/` | routing truth (WP-R7-5): head rows whose bytes the recorded backend does not have (warn / page on a jump), rows on a backend no driver is registered under (info), two names on one store (page), reads of such rows (warn) |
+| `vaultaire-backup.yml` | `/etc/prometheus/rules/` | BackupStale / BackupOffboxStale (critical, > 26 h or series absent) on the two timestamps `deploy/scripts/pg-backup.sh` writes into node_exporter's textfile directory `/var/lib/prometheus/node-exporter/` (installed 2026-10-08; the directory is `root:user1 0775` so the user1 cron can write it) |
 | `vaultaire-backends.yml`, `vaultaire-auth.yml`, `vaultaire-tls.yml`, `vaultaire-synthetic.yml`, `vaultaire-egress.yml`, `vaultaire-jobs.yml` | `/etc/prometheus/rules/` | alert rules: backend probes / auth failures / origin cert / customer-path canary / egress throttle / background jobs (Review R13 + WP-R10-9 + WP-R13-3 — install all six, checklist item 10; on 2026-10-02 only `backends` and `tls` were installed on SLC, next to the older `vaultaire-alerts.yml`) |
 
 ## Install (already done on slc-vaultaire-01, 2026-08-03)

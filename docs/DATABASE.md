@@ -224,9 +224,11 @@ policy and the DPA state the same numbers.
    (hourly).
 10. **Backups run daily and are non-empty** — `0 3 * * *
     /opt/vaultaire/bin/pg-backup.sh` on prod, 7-day retention, size and DDL
-    asserts; plain-SQL format, no off-box copy and no in-repo restore runbook
-    yet (WP-R9-7). A restore loses everything on `DATA_PATH` (the `local`
-    driver) and up to 24 h of DB writes.
+    asserts, the dump copied off-box to Sync.com right after them (30 days
+    there), `BackupStale` / `BackupOffboxStale` after 26 h without a success
+    (`docs/DEPLOY.md` § Backups); plain-SQL format and no in-repo restore
+    runbook drill yet (WP-R9-7). A restore loses everything on `DATA_PATH`
+    (the `local` driver) and up to 24 h of DB writes.
 11. **No unguarded DDL** in any migration.
 12. **Byte counts are `bigint`**; `tenant_id` is TEXT on every live table
     (058 converted the chunk tables); JSONB columns are unconstrained and

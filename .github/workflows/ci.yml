@@ -90,6 +90,9 @@ jobs:
         with:
           version: v2.4.0
 
+      - name: Deploy scripts
+        run: bash deploy/scripts/pg-backup_test.sh
+
       - name: Smoke test
         run: |
           go build -ldflags "-X github.com/FairForge/vaultaire/internal/api.BuildSHA=${GITHUB_SHA::12} -X github.com/FairForge/vaultaire/internal/api.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o vaultaire ./cmd/vaultaire

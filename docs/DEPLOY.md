@@ -202,18 +202,31 @@ benchmarks measured nothing — `docs/SCALE_TESTING.md`); the load gate is
 ## Backups
 
 A cron job at **03:00 UTC** (user1) runs `/opt/vaultaire/bin/pg-backup.sh`
-(`deploy/scripts/pg-backup.sh`, installed by hand — `deploy/**` never deploys):
-`pg_dump | gzip` of the database (size and `CREATE TABLE` asserted) plus
-tarballs of `configs/` and the Prometheus rules into `/opt/vaultaire/backups/`,
-**7 days** kept on the box, every file private (`umask 077`). Then the dump and
-the rules are copied **off the box to Sync.com** — Stored's own
-end-to-end-encrypted account, through the local `sync-webdav` bridge on `:4918`
-(`rclone` WebDAV; credentials `/opt/vaultaire/configs/sync-backup.env`, user1
-0600) — into `_ops/backups/YYYY/MM/` under the bridge's `/vaultaire/` mount,
-each upload size-verified, **30 days** kept there. The `configs/` tarball
-(secrets) stays on the box. A failed upload is a failed run (`BACKUP FAILED -
-OFFBOX: …` in `/opt/vaultaire/logs/backup.log`).
+(`deploy/scripts/pg-backup.sh`, installed by hand — `deploy/**` never deploys;
+tests: `bash deploy/scripts/pg-backup_test.sh`, run by CI). In this order:
+`pg_dump | gzip` of the database into `/opt/vaultaire/backups/` (size and
+`CREATE TABLE` asserted), then **the dump goes off the box at once** to Sync.com
+— Stored's own end-to-end-encrypted account, through the local `sync-webdav`
+bridge on `:4918` (`rclone` WebDAV; credentials
+`/opt/vaultaire/configs/sync-backup.env`, user1 0600) — into
+`_ops/backups/YYYY/MM/` under the bridge's `/vaultaire/` mount, size-verified;
+only then the tarballs of `configs/` (stays on the box: secrets) and of the
+Prometheus rules (goes off-box too). **7 days** kept on the box, **30 days** on
+Sync, every file private (`umask 077`). A failed stage is a failed run
+(`BACKUP FAILED - <stage>` in `/opt/vaultaire/logs/backup.log`), but a tar that
+fails no longer holds the dump's upload back (that is how the off-box copy was
+missing from 2026-10-05 to -07: a root-only file in `configs/`).
 
+- **Alerting:** the script writes `vaultaire_backup_last_success_timestamp_seconds`
+  (dump passed its asserts) and `vaultaire_backup_offbox_last_success_timestamp_seconds`
+  (dump on Sync, size verified) into node_exporter's textfile directory
+  `/var/lib/prometheus/node-exporter/` (`root:user1 0775`); rules
+  `deploy/monitoring/vaultaire-backup.yml` page `BackupStale` /
+  `BackupOffboxStale` after 26 h without one, or when the series is absent.
+- **`DB_PASSWORD`** is read from `configs/.env` as everything after the first
+  `=` with one level of surrounding quotes removed (what systemd's
+  `EnvironmentFile` does) — a password containing `=` or wrapped in quotes
+  works; `cut -d= -f2` used to truncate it.
 - **Retention is by the date in the file name, never by modtime:** the Sync
   bridge reports every file as modified in January 1970; a `--min-age` sweep
   deleted fresh backups on 2026-10-07 (caught and fixed the same run).
@@ -221,12 +234,12 @@ OFFBOX: …` in `/opt/vaultaire/logs/backup.log`).
   rclone lsf -R syncbk:_ops/backups` → `rclone copyto syncbk:_ops/backups/<y>/<m>/<file> .`
   → `zcat <dump> | psql` (plain SQL, psql ≥ 16.10 for the `\restrict` header).
   Verified 2026-10-07: the downloaded dump is byte-identical to the local one.
-- **History:** the run failed on 2026-10-05 and -06 (`config tar failed`) —
-  two root-only `.env` copies from the 2026-10-04 primary swap were unreadable
-  to user1; fixed (every `.env*` in `configs/` is `root:user1 0640` or
-  owner-only). Keep new `.env` backups readable by group user1.
-- Still open from WP-R9-7: `-Fc` format, a written restore runbook drill, and an
-  alert on a failed run (today only the log says so).
+- **History:** the run failed on 2026-10-05, -06 and -07 (`config tar failed`,
+  then a bridge 500) — two root-only `.env` copies from the 2026-10-04 primary
+  swap were unreadable to user1 and the dump's upload sat behind the tar; the
+  order is fixed and every `.env*` in `configs/` is `root:user1 0640` or
+  owner-only. Keep new `.env` backups readable by group user1.
+- Still open from WP-R9-7: `-Fc` format and a written restore runbook drill.
 
 ## Monitoring
 
