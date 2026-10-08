@@ -60,16 +60,46 @@ func matchesWebhookFilter(filter []string, eventType string) bool {
 	return false
 }
 
+// emitEvent records the event and dispatches the tenant's webhooks in a
+// goroutine that reads them first.
 func emitEvent(ctx context.Context, db *sql.DB, logger *zap.Logger, eventType, tenantID string, data map[string]interface{}) {
 	if db == nil {
 		return
 	}
+	eventID, dataJSON, ok := recordEvent(ctx, db, logger, eventType, tenantID, data)
+	if !ok {
+		return
+	}
+	go dispatchWebhooks(db, logger, eventID, eventType, tenantID, dataJSON) // #nosec G118 -- intentional fire-and-forget after response
+}
 
-	eventID := uuid.New().String()
+// emitEventTo records the event and delivers it to endpoints a caller
+// already loaded (loadWebhookEndpoints): the row is always written (it is
+// the tenant's event log), the goroutine only when there is an endpoint.
+// A batch that emits per key reads the tenant's webhooks once (post-merge
+// review of #631).
+func emitEventTo(ctx context.Context, db *sql.DB, logger *zap.Logger, endpoints []webhookEndpoint, eventType, tenantID string, data map[string]interface{}) {
+	if db == nil {
+		return
+	}
+	eventID, dataJSON, ok := recordEvent(ctx, db, logger, eventType, tenantID, data)
+	if !ok || len(endpoints) == 0 {
+		return
+	}
+	go func() { // #nosec G118 -- intentional fire-and-forget after response
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		deliverToEndpoints(ctx, db, logger, endpoints, eventID, eventType, tenantID, dataJSON)
+	}()
+}
+
+// recordEvent inserts the events row; false when nothing was recorded.
+func recordEvent(ctx context.Context, db *sql.DB, logger *zap.Logger, eventType, tenantID string, data map[string]interface{}) (eventID string, dataJSON []byte, ok bool) {
+	eventID = uuid.New().String()
 	dataJSON, err := json.Marshal(data)
 	if err != nil {
 		logger.Error("marshal event data", zap.Error(err))
-		return
+		return "", nil, false
 	}
 
 	_, err = db.ExecContext(ctx, `
@@ -81,38 +111,34 @@ func emitEvent(ctx context.Context, db *sql.DB, logger *zap.Logger, eventType, t
 			zap.Error(err),
 			zap.String("type", eventType),
 			zap.String("tenant_id", tenantID))
-		return
+		return "", nil, false
 	}
-
-	go dispatchWebhooks(db, logger, eventID, eventType, tenantID, dataJSON) // #nosec G118 -- intentional fire-and-forget after response
+	return eventID, dataJSON, true
 }
 
-func dispatchWebhooks(db *sql.DB, logger *zap.Logger, eventID, eventType, tenantID string, payload []byte) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+// webhookEndpoint is one enabled webhook_endpoints row.
+type webhookEndpoint struct {
+	id     string
+	url    string
+	filter []string
+	secret string
+}
 
+// loadWebhookEndpoints reads the tenant's enabled webhook endpoints.
+func loadWebhookEndpoints(ctx context.Context, db *sql.DB, logger *zap.Logger, tenantID string) ([]webhookEndpoint, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT id, url, event_filter, secret
 		FROM webhook_endpoints
 		WHERE tenant_id = $1 AND enabled = TRUE`,
 		tenantID)
 	if err != nil {
-		logger.Error("query webhook endpoints for dispatch",
-			zap.Error(err),
-			zap.String("tenant_id", tenantID))
-		return
+		return nil, fmt.Errorf("query webhook endpoints: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	type endpoint struct {
-		id     string
-		url    string
-		filter []string
-		secret string
-	}
-	var endpoints []endpoint
+	var endpoints []webhookEndpoint
 	for rows.Next() {
-		var ep endpoint
+		var ep webhookEndpoint
 		if err := rows.Scan(&ep.id, &ep.url, pq.Array(&ep.filter), &ep.secret); err != nil {
 			logger.Error("scan webhook endpoint", zap.Error(err))
 			continue
@@ -122,7 +148,29 @@ func dispatchWebhooks(db *sql.DB, logger *zap.Logger, eventID, eventType, tenant
 	if err := rows.Err(); err != nil {
 		logger.Warn("iterate rows", zap.Error(err))
 	}
+	return endpoints, nil
+}
 
+func dispatchWebhooks(db *sql.DB, logger *zap.Logger, eventID, eventType, tenantID string, payload []byte) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	endpoints, err := loadWebhookEndpoints(ctx, db, logger, tenantID)
+	if err != nil {
+		logger.Error("query webhook endpoints for dispatch",
+			zap.Error(err),
+			zap.String("tenant_id", tenantID))
+		return
+	}
+	deliverToEndpoints(ctx, db, logger, endpoints, eventID, eventType, tenantID, payload)
+}
+
+// deliverToEndpoints posts the event to every endpoint whose filter
+// matches it, recording each delivery.
+func deliverToEndpoints(ctx context.Context, db *sql.DB, logger *zap.Logger, endpoints []webhookEndpoint, eventID, eventType, tenantID string, payload []byte) {
+	if len(endpoints) == 0 {
+		return
+	}
 	eventPayload := map[string]interface{}{
 		"id":         eventID,
 		"type":       eventType,

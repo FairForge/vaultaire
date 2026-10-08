@@ -130,7 +130,9 @@ func (s *Server) deleteObjects(w http.ResponseWriter, r *http.Request, req *S3Re
 	}
 	outcomes := make([]*DeleteError, len(unique))
 	sem := make(chan struct{}, batchDeleteConcurrency)
-	aftermath := s.objectDeleteAftermath()
+	// The notification targets and the webhooks are read once for the whole
+	// batch; a key fires nothing when there are none.
+	aftermath := s.objectDeleteAftermath().forBatch(r.Context(), t.ID, bucket)
 	var wg sync.WaitGroup
 	for i, key := range unique {
 		wg.Add(1)

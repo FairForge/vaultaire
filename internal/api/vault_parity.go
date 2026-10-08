@@ -482,7 +482,11 @@ func (p *VaultParity) protect(ctx context.Context, c parityCandidate) (state str
 
 	src, err := p.eng.Get(tctx, (&tenant.Tenant{ID: c.tenantID}).NamespaceContainer(c.bucket), c.key)
 	if err != nil {
-		ferr := p.finishRow(ctx, c, make([]string, l.m), "", fmt.Errorf("read the object: %w", err))
+		// Nothing was written, but the row keeps naming every shard: an
+		// earlier attempt's shards at this prefix were kept for this write
+		// to overwrite (clearPriorShards), and a row that named none would
+		// orphan them — a delete erases only what the row names.
+		ferr := p.finishRow(ctx, c, intent, "", fmt.Errorf("read the object: %w", err))
 		if errors.Is(ferr, errParityRowGone) {
 			return rowGone()
 		}

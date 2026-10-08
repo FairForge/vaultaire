@@ -33,6 +33,45 @@ type objectDeleteAftermath struct {
 	vaultParity   *VaultParity
 	notify        *NotificationDispatcher
 	logger        *zap.Logger
+	// fanout: the targets of the notification and the event, resolved ONCE
+	// for a batch (forBatch); nil = resolved per key, in the dispatch
+	// goroutines (single DELETE).
+	fanout *deleteFanout
+}
+
+// deleteFanout is where a batch's per-key notification and event go: the
+// bucket's enabled bucket_notifications rows and the tenant's enabled
+// webhook_endpoints rows. Both empty = no per-key goroutine at all. Before
+// this (post-merge review of #631) a 1,000-key DeleteObjects started 2,000
+// goroutines, each with its own query, against a 50-connection pool, to
+// find 2,000 times that there was nothing to deliver to.
+type deleteFanout struct {
+	targets   []notifyTarget
+	endpoints []webhookEndpoint
+}
+
+// forBatch resolves the fanout once for every key of a batch on bucket. A
+// load that fails is logged and treated as no target: the per-key loads
+// would fail the same way and deliver nothing either, at 1,000 times the
+// cost; the event rows are still written per key and `GET /api/v1/events`
+// serves them.
+func (d objectDeleteAftermath) forBatch(ctx context.Context, tenantID, bucket string) objectDeleteAftermath {
+	f := &deleteFanout{}
+	if d.db == nil {
+		d.fanout = f
+		return d
+	}
+	var err error
+	if f.targets, err = d.notify.Targets(ctx, tenantID, bucket); err != nil {
+		d.logger.Error("batch delete: notification targets not loaded; no notification for this batch",
+			zap.Error(err), zap.String("tenant_id", tenantID), zap.String("bucket", bucket))
+	}
+	if f.endpoints, err = loadWebhookEndpoints(ctx, d.db, d.logger, tenantID); err != nil {
+		d.logger.Error("batch delete: webhook endpoints not loaded; no webhook for this batch",
+			zap.Error(err), zap.String("tenant_id", tenantID), zap.String("bucket", bucket))
+	}
+	d.fanout = f
+	return d
 }
 
 func (s *Server) objectDeleteAftermath() objectDeleteAftermath {
@@ -88,9 +127,15 @@ func (d objectDeleteAftermath) settle(ctx context.Context, tenantID, bucket, key
 		// that cannot be reached now is the job's stale pass to finish.
 		d.vaultParity.OnObjectDeleted(ctx, tenantID, bucket, key)
 	}
+	// Per key, in a batch too (AWS fires ObjectRemoved per key) — from the
+	// batch's one load of the targets when there is one.
+	data := map[string]interface{}{"bucket": bucket, "key": key}
+	if d.fanout != nil {
+		d.notify.FireTo(d.fanout.targets, tenantID, bucket, "s3:ObjectRemoved:Delete", key, 0, "")
+		emitEventTo(ctx, d.db, d.logger, d.fanout.endpoints, "object.deleted", tenantID, data)
+		return nil
+	}
 	d.notify.Fire(tenantID, bucket, "s3:ObjectRemoved:Delete", key, 0, "")
-	emitEvent(ctx, d.db, d.logger, "object.deleted", tenantID, map[string]interface{}{
-		"bucket": bucket, "key": key,
-	})
+	emitEvent(ctx, d.db, d.logger, "object.deleted", tenantID, data)
 	return nil
 }

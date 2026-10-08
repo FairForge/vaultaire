@@ -1021,3 +1021,36 @@ func TestVaultParity_EncodeFailureKeepsAnUndeletedShardOnTheRow(t *testing.T) {
 	assert.Equal(t, []string{"permafrost", "permafrost", "permafrost", "permafrost"}, legs)
 	assert.Len(t, f.shardFiles(), 4)
 }
+
+// (6) A retry whose source read fails must keep naming the shards the
+// earlier attempt wrote: clearPriorShards left them in place for the write
+// to overwrite, and a row that then says "no shard anywhere" orphans them —
+// OnObjectDeleted (and the stale pass) erase only what the row names.
+func TestVaultParity_ARetryThatCannotReadTheObjectKeepsTheEarlierShardsOnTheRow(t *testing.T) {
+	f := setupParityFixture(t)
+	f.object("films/eighteen.mkv", 2<<20+9)
+	f.leg.failSuffix.Store("/p2")
+	res := f.run()
+	require.Equal(t, 1, res.Partial, "%+v", res)
+	require.Len(t, f.shardFiles(), 3, "three shards of the first attempt are on the leg")
+
+	// The retry: the leg is fine, the object cannot be read.
+	f.leg.failSuffix.Store("")
+	f.geyser.failGet.Store(true)
+	res = f.run()
+	assert.Equal(t, 1, res.Failed, "%+v", res)
+	state, legs, lastErr, attempts := f.row("films/eighteen.mkv")
+	assert.Equal(t, "partial", state)
+	assert.Equal(t, []string{"permafrost", "permafrost", "permafrost", "permafrost"}, legs,
+		"the row still names every shard the earlier attempt may have left on the leg")
+	assert.Contains(t, lastErr, "read the object")
+	assert.Equal(t, 2, attempts)
+	assert.Len(t, f.shardFiles(), 3, "the retry wrote nothing and deleted nothing")
+
+	// The object is deleted: every shard goes with it.
+	_, err := f.db.Exec(`DELETE FROM object_head_cache WHERE tenant_id = $1 AND object_key = $2`, f.tenantID, "films/eighteen.mkv")
+	require.NoError(t, err)
+	f.svc.OnObjectDeleted(context.Background(), f.tenantID, f.bucket, "films/eighteen.mkv")
+	assert.Empty(t, f.shardFiles(), "no shard outlives the row")
+	assert.Equal(t, 0, f.countRows())
+}

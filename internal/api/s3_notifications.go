@@ -364,7 +364,8 @@ type S3EventIdentity struct {
 	PrincipalID string `json:"principalId"`
 }
 
-// Fire dispatches a notification event asynchronously.
+// Fire dispatches a notification event asynchronously: the bucket's
+// targets are read in the goroutine, then delivered.
 func (d *NotificationDispatcher) Fire(tenantID, bucket, eventName, objectKey string, size int64, etag string) {
 	if d == nil {
 		return
@@ -373,31 +374,46 @@ func (d *NotificationDispatcher) Fire(tenantID, bucket, eventName, objectKey str
 	go d.dispatch(tenantID, bucket, eventName, objectKey, size, etag)
 }
 
-func (d *NotificationDispatcher) dispatch(tenantID, bucket, eventName, objectKey string, size int64, etag string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+// FireTo dispatches to targets a caller already loaded (Targets): nothing
+// is started when there are none. A batch that fires per key resolves the
+// bucket's targets once instead of once per key (post-merge review of
+// #631: a 1,000-key DeleteObjects started 1,000 goroutines each querying
+// bucket_notifications to find none).
+func (d *NotificationDispatcher) FireTo(targets []notifyTarget, tenantID, bucket, eventName, objectKey string, size int64, etag string) {
+	if d == nil || len(targets) == 0 {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		d.deliverTo(ctx, targets, tenantID, bucket, eventName, objectKey, size, etag)
+	}()
+}
 
+// notifyTarget is one enabled bucket_notifications row.
+type notifyTarget struct {
+	url    string
+	filter string
+}
+
+// Targets reads the bucket's enabled notification targets. Nil-safe.
+func (d *NotificationDispatcher) Targets(ctx context.Context, tenantID, bucket string) ([]notifyTarget, error) {
+	if d == nil {
+		return nil, nil
+	}
 	rows, err := d.db.QueryContext(ctx, `
 		SELECT target_url, event_filter
 		FROM bucket_notifications
 		WHERE tenant_id = $1 AND bucket = $2 AND enabled = TRUE
 	`, tenantID, bucket)
 	if err != nil {
-		d.logger.Error("query notifications for dispatch",
-			zap.Error(err),
-			zap.String("tenant_id", tenantID),
-			zap.String("bucket", bucket))
-		return
+		return nil, fmt.Errorf("query notification targets of %s: %w", bucket, err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	type target struct {
-		url    string
-		filter string
-	}
-	var targets []target
+	var targets []notifyTarget
 	for rows.Next() {
-		var t target
+		var t notifyTarget
 		if err := rows.Scan(&t.url, &t.filter); err != nil {
 			d.logger.Error("scan notification target", zap.Error(err))
 			continue
@@ -407,7 +423,29 @@ func (d *NotificationDispatcher) dispatch(tenantID, bucket, eventName, objectKey
 	if err := rows.Err(); err != nil {
 		d.logger.Warn("iterate rows", zap.Error(err))
 	}
+	return targets, nil
+}
 
+func (d *NotificationDispatcher) dispatch(tenantID, bucket, eventName, objectKey string, size int64, etag string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	targets, err := d.Targets(ctx, tenantID, bucket)
+	if err != nil {
+		d.logger.Error("query notifications for dispatch",
+			zap.Error(err),
+			zap.String("tenant_id", tenantID),
+			zap.String("bucket", bucket))
+		return
+	}
+	d.deliverTo(ctx, targets, tenantID, bucket, eventName, objectKey, size, etag)
+}
+
+// deliverTo posts the event to every target whose filter matches it.
+func (d *NotificationDispatcher) deliverTo(ctx context.Context, targets []notifyTarget, tenantID, bucket, eventName, objectKey string, size int64, etag string) {
+	if len(targets) == 0 {
+		return
+	}
 	payload := S3Event{
 		Records: []S3EventRecord{{
 			EventVersion: "2.1",
