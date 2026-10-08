@@ -74,8 +74,11 @@ const (
 // parity rebuilds at ~110 MB/s vs ~60 for the OneDrive fleet and ~240 for
 // Lyve, which is free only until its promo ends —
 // bench-results/SYNC-WORKLOADS-2026-10-07.md). VAULT_PARITY_LEGS
-// (comma-separated driver names) overrides it. Shards already written keep
-// the leg their row records (vault_parity.legs), whatever the order now.
+// (comma-separated driver names) overrides it. A complete row keeps the leg
+// it records (vault_parity.legs), whatever the order now; a partial row
+// retried after the order changed has its old leg's shards erased before
+// the new leg is written (clearPriorShards) — or is skipped this run when
+// that leg cannot be reached, so no shard is ever left with no row naming it.
 var vaultParityLegs = []string{"sync", "permafrost", "lyve"}
 
 // parityLegsFromEnv is VAULT_PARITY_LEGS split and trimmed, or the default
@@ -121,17 +124,24 @@ func init() {
 
 // VaultParityResult is one run's outcome (job_runs.result).
 type VaultParityResult struct {
-	Scanned        int      `json:"scanned"`
-	Protected      int      `json:"protected"`
-	Partial        int      `json:"partial"`
-	Failed         int      `json:"failed"`
-	Erased         int      `json:"erased"`
-	EraseFailed    int      `json:"erase_failed"`
-	ChunkedSkipped int      `json:"chunked_skipped"`
-	FlagOff        int      `json:"flag_off"`
-	BytesWritten   int64    `json:"bytes_written"`
-	Leg            string   `json:"leg"`
-	Errors         []string `json:"errors,omitempty"`
+	Scanned     int `json:"scanned"`
+	Protected   int `json:"protected"`
+	Partial     int `json:"partial"`
+	Failed      int `json:"failed"`
+	Erased      int `json:"erased"`
+	EraseFailed int `json:"erase_failed"`
+	// Skipped: candidates whose row names shards that could not be erased
+	// this run (an earlier etag, or another leg): never rewritten, retried
+	// next run.
+	Skipped int `json:"skipped,omitempty"`
+	// DeletedMeanwhile: objects deleted (or overwritten) while their shards
+	// were being written; the shards were erased with the row.
+	DeletedMeanwhile int      `json:"deleted_meanwhile,omitempty"`
+	ChunkedSkipped   int      `json:"chunked_skipped"`
+	FlagOff          int      `json:"flag_off"`
+	BytesWritten     int64    `json:"bytes_written"`
+	Leg              string   `json:"leg"`
+	Errors           []string `json:"errors,omitempty"`
 }
 
 // VaultParity writes, erases and reads the parity copy.
@@ -348,9 +358,15 @@ func (p *VaultParity) protectPending(ctx context.Context, res *VaultParityResult
 		state, written, err := p.protect(ctx, c)
 		res.BytesWritten += written
 		switch {
+		case err == nil && state == "gone":
+			res.DeletedMeanwhile++
+			vaultParityObjects.WithLabelValues("erased").Inc()
 		case err == nil:
 			res.Protected++
 			vaultParityObjects.WithLabelValues("complete").Inc()
+		case state == "skipped":
+			res.Skipped++
+			res.Errors = append(res.Errors, fmt.Sprintf("protect %s/%s (skipped, its earlier shards are not erased): %v", c.bucket, c.key, err))
 		case state == "partial":
 			res.Partial++
 			res.Errors = append(res.Errors, fmt.Sprintf("protect %s/%s (partial): %v", c.bucket, c.key, err))
@@ -399,17 +415,32 @@ func (t *tolerantWriter) Write(p []byte) (int, error) {
 }
 
 // protect encodes one object and writes its four parity shards to the leg.
-// The row is written 'partial' BEFORE the first byte lands, so a crash
-// mid-write leaves a row that says so; it becomes 'complete' only when every
-// shard is on the leg. Returns the row's state and the bytes written.
+//
+// The row is the only thing that names a shard, so a shard must never
+// outlive its row and a row must never forget a shard (post-merge review of
+// #629): any shard an existing row names that this write will not overwrite
+// in place is erased first, or the candidate is skipped this run; the row
+// is written 'partial' with the INTENDED leg of every shard before the
+// first byte lands, so a concurrent delete knows where to look; a shard
+// that failed is deleted and stays recorded unless that delete succeeded;
+// and a finish that updates no row — the object was deleted or overwritten
+// meanwhile and its row erased — deletes the shards just written. Returns
+// the row's state ('complete', 'partial', 'failed', 'skipped', 'gone') and
+// the bytes written.
 func (p *VaultParity) protect(ctx context.Context, c parityCandidate) (state string, written int64, err error) {
 	legName, leg, ok := p.Leg()
 	if !ok {
 		return "failed", 0, errors.New("no parity leg registered")
 	}
+	if err := p.clearPriorShards(ctx, c, legName); err != nil {
+		return "skipped", 0, err
+	}
 	l := parityLayout{k: vaultParityK, m: vaultParityM, stripe: p.Stripe, size: c.size}
 	prefix := shardPrefix(c.bucket, c.key, c.etag)
-	empty := make([]string, l.m)
+	intent := make([]string, l.m)
+	for j := range intent {
+		intent[j] = legName
+	}
 	if _, err := p.db.ExecContext(ctx, `
 		INSERT INTO vault_parity (tenant_id, bucket, object_key, etag, size_bytes, data_shards, parity_shards,
 		                          stripe_bytes, shard_bytes, shard_prefix, legs, state, attempts, created_at, updated_at)
@@ -420,18 +451,45 @@ func (p *VaultParity) protect(ctx context.Context, c parityCandidate) (state str
 		    state = 'partial', written_at = NULL, last_error = NULL,
 		    attempts = CASE WHEN vault_parity.etag = EXCLUDED.etag THEN vault_parity.attempts + 1 ELSE 1 END,
 		    updated_at = NOW()`,
-		c.tenantID, c.bucket, c.key, c.etag, c.size, l.k, l.m, l.stripe, l.shardBytes(), prefix, pq.Array(empty)); err != nil {
+		c.tenantID, c.bucket, c.key, c.etag, c.size, l.k, l.m, l.stripe, l.shardBytes(), prefix, pq.Array(intent)); err != nil {
 		return "failed", 0, fmt.Errorf("vault parity: row: %w", err)
 	}
 
 	tctx := common.WithTenantID(ctx, c.tenantID)
+	container := parityContainer(c.tenantID)
+	// deleteShard removes one shard of this write; true when it is provably
+	// gone (deleted, or never there).
+	deleteShard := func(j int) bool {
+		dctx := common.WithTenantID(context.WithoutCancel(ctx), c.tenantID)
+		if derr := leg.Delete(dctx, container, shardArtifact(prefix, j)); derr != nil && !isObjectMissingErr(derr) {
+			p.logger.Warn("vault parity: shard of a failed write not deleted; it stays on the row",
+				zap.Int("shard", j), zap.String("leg", legName), zap.Error(derr))
+			return false
+		}
+		return true
+	}
+	// rowGone: the finish updated no row — it was erased meanwhile (the
+	// object deleted or overwritten) — so the shards just written have no
+	// row and go now, every one of them.
+	rowGone := func() (string, int64, error) {
+		for j := 0; j < l.m; j++ {
+			deleteShard(j)
+		}
+		p.logger.Info("vault parity: object deleted during the write; its shards erased",
+			zap.String("bucket", c.bucket), zap.String("key", c.key))
+		return "gone", 0, nil
+	}
+
 	src, err := p.eng.Get(tctx, (&tenant.Tenant{ID: c.tenantID}).NamespaceContainer(c.bucket), c.key)
 	if err != nil {
-		return "failed", 0, p.finishRow(ctx, c, empty, "", fmt.Errorf("read the object: %w", err))
+		ferr := p.finishRow(ctx, c, make([]string, l.m), "", fmt.Errorf("read the object: %w", err))
+		if errors.Is(ferr, errParityRowGone) {
+			return rowGone()
+		}
+		return "failed", 0, ferr
 	}
 	defer func() { _ = src.Close() }()
 
-	container := parityContainer(c.tenantID)
 	writers := make([]io.Writer, l.m)
 	tolerant := make([]*tolerantWriter, l.m)
 	putErrs := make([]error, l.m)
@@ -467,31 +525,79 @@ func (p *VaultParity) protect(ctx context.Context, c parityCandidate) (state str
 	legs := make([]string, l.m)
 	var errs []error
 	for j := 0; j < l.m; j++ {
+		var shardErr error
 		switch {
 		case encErr != nil:
 			// The encode stopped: nothing on the leg is a whole shard.
-			_ = leg.Delete(tctx, container, shardArtifact(prefix, j))
+			shardErr = encErr
 		case putErrs[j] != nil:
-			errs = append(errs, fmt.Errorf("shard p%d: %w", j, putErrs[j]))
+			shardErr = putErrs[j]
 		case tolerant[j].err != nil:
-			errs = append(errs, fmt.Errorf("shard p%d: %w", j, tolerant[j].err))
+			shardErr = tolerant[j].err
 		default:
 			legs[j] = legName
 			written += l.shardBytes()
+			continue
+		}
+		if encErr == nil {
+			errs = append(errs, fmt.Errorf("shard p%d: %w", j, shardErr))
+		}
+		// Whatever a failed Put left behind is deleted; the leg stays on
+		// the row unless it provably is, so the next pass erases it.
+		if !deleteShard(j) {
+			legs[j] = legName
 		}
 	}
-	if encErr != nil {
-		return "failed", 0, p.finishRow(ctx, c, legs, "", encErr)
+	var ferr error
+	switch {
+	case encErr != nil:
+		state, ferr = "failed", p.finishRow(ctx, c, legs, "", encErr)
+	case len(errs) > 0:
+		vaultParityBytes.Add(float64(written))
+		state, ferr = "partial", p.finishRow(ctx, c, legs, "", errors.Join(errs...))
+	default:
+		vaultParityBytes.Add(float64(written))
+		state, ferr = "complete", p.finishRow(ctx, c, legs, "complete", nil)
 	}
-	vaultParityBytes.Add(float64(written))
-	if len(errs) > 0 {
-		return "partial", written, p.finishRow(ctx, c, legs, "", errors.Join(errs...))
+	if errors.Is(ferr, errParityRowGone) {
+		return rowGone()
 	}
-	return "complete", written, p.finishRow(ctx, c, legs, "complete", nil)
+	return state, written, ferr
 }
 
+// clearPriorShards erases what an existing row of this key names that the
+// coming write will not overwrite in place: every shard of a row with
+// another etag (the stale pass could not erase it this run), the shards on
+// another leg of a row with this etag (the leg order changed since). A
+// shard on this leg at this prefix is replaced by the write itself. An
+// error means the candidate must not be written this run.
+func (p *VaultParity) clearPriorShards(ctx context.Context, c parityCandidate, legName string) error {
+	r, err := p.loadRow(ctx, c.tenantID, c.bucket, c.key)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("vault parity: prior row: %w", err)
+	}
+	if r.etag != c.etag {
+		if err := p.eraseShards(ctx, *r); err != nil {
+			return fmt.Errorf("prior shards of etag %s: %w", r.etag, err)
+		}
+		return nil
+	}
+	if err := p.deleteRecordedShards(ctx, *r, legName); err != nil {
+		return fmt.Errorf("prior shards on another leg: %w", err)
+	}
+	return nil
+}
+
+// errParityRowGone: a finish updated no row — it was erased while the
+// shards were being written (the object deleted or overwritten).
+var errParityRowGone = errors.New("vault parity: row gone during the write")
+
 // finishRow records the outcome on the row; it returns cause (or the row
-// error) so the caller's error is the real one.
+// error) so the caller's error is the real one. errParityRowGone when the
+// row is no longer there for this etag: the caller owns the shards it wrote.
 func (p *VaultParity) finishRow(ctx context.Context, c parityCandidate, legs []string, state string, cause error) error {
 	var lastErr sql.NullString
 	if cause != nil {
@@ -509,11 +615,16 @@ func (p *VaultParity) finishRow(ctx context.Context, c parityCandidate, legs []s
 	if state != "complete" {
 		args = append(args, lastErr)
 	}
-	if _, err := p.db.ExecContext(context.WithoutCancel(ctx), q, args...); err != nil {
+	result, err := p.db.ExecContext(context.WithoutCancel(ctx), q, args...)
+	if err != nil {
 		p.logger.Error("vault parity: finish row", zap.Error(err), zap.String("bucket", c.bucket), zap.String("key", c.key))
 		if cause == nil {
 			return fmt.Errorf("vault parity: finish row: %w", err)
 		}
+		return cause
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		return errParityRowGone
 	}
 	return cause
 }
@@ -522,15 +633,31 @@ func (p *VaultParity) finishRow(ctx context.Context, c parityCandidate, legs []s
 // right now (not registered, or its breaker is open). An erasure defers.
 var errParityLegUnavailable = errors.New("parity leg unavailable")
 
-// eraseShards deletes every written shard of a row, then the row. A leg
-// that is not registered or whose breaker is open is errParityLegUnavailable
-// and the row stays (the bytes may still be there).
+// eraseShards deletes every shard a row records, then the row. A leg that
+// is not registered or whose breaker is open is errParityLegUnavailable and
+// the row stays (the bytes may still be there).
 func (p *VaultParity) eraseShards(ctx context.Context, r parityRow) error {
+	if err := p.deleteRecordedShards(ctx, r, ""); err != nil {
+		return err
+	}
+	if _, err := p.db.ExecContext(ctx, `DELETE FROM vault_parity WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND etag = $4`,
+		r.tenantID, r.bucket, r.key, r.etag); err != nil {
+		return fmt.Errorf("delete row: %w", err)
+	}
+	return nil
+}
+
+// deleteRecordedShards deletes the shards a row records, except those on
+// keepLeg (about to be overwritten in place by a write at the same prefix).
+// The first leg that is not registered or whose breaker is open stops it
+// with errParityLegUnavailable; a delete that fails stops it with its error.
+// A shard already missing is fine.
+func (p *VaultParity) deleteRecordedShards(ctx context.Context, r parityRow, keepLeg string) error {
 	tctx := common.WithTenantID(ctx, r.tenantID)
 	container := parityContainer(r.tenantID)
 	status := p.eng.GetFailoverStatus()
 	for j, legName := range r.legs {
-		if legName == "" {
+		if legName == "" || legName == keepLeg {
 			continue
 		}
 		drv, ok := p.eng.GetDriver(legName)
@@ -544,10 +671,6 @@ func (p *VaultParity) eraseShards(ctx context.Context, r parityRow) error {
 		if err := drv.Delete(tctx, container, shardArtifact(r.prefix, j)); err != nil && !isObjectMissingErr(err) {
 			return fmt.Errorf("delete shard p%d on %s: %w", j, legName, err)
 		}
-	}
-	if _, err := p.db.ExecContext(ctx, `DELETE FROM vault_parity WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND etag = $4`,
-		r.tenantID, r.bucket, r.key, r.etag); err != nil {
-		return fmt.Errorf("delete row: %w", err)
 	}
 	return nil
 }

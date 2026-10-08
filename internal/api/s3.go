@@ -982,6 +982,10 @@ func (s *Server) handleDeleteObject(w http.ResponseWriter, r *http.Request, req 
 	adapter.gci = s.gci
 	adapter.quota = s.quotaManager
 	adapter.vaultParity = s.vaultParity
+	// Without the promoter the delete's aftermath cannot settle a
+	// Smart-demoted object's second copy (it was missing here until the
+	// 2026-10-07 review; only the batch path had it).
+	adapter.smartPromoter = s.smartPromoter
 	adapter.HandleDelete(w, r, req.Bucket, req.Object)
 }
 

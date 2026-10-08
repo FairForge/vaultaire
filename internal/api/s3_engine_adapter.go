@@ -2177,50 +2177,22 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 		}
 	}
 
-	if a.db != nil {
-		// DELETE...RETURNING releases exactly the bytes this request removed
-		// (the row is the billing record — WP-1). Logical size for chunked;
-		// a chunked object's manifest goes in the same transaction (R8-08).
-		deleted, found, delErr := deleteHeadRowReleasing(r.Context(), a.db, manifestReleaser(a.gci), t.ID, bucket, object)
-		switch {
-		case delErr != nil && isChunked:
-			// The manifest is still intact (rolled back with the row): the
-			// client retries. Answering 204 here would leave a live object.
-			a.logger.Error("chunked delete failed",
-				zap.Error(delErr),
-				zap.String("tenant_id", t.ID),
-				zap.String("bucket", bucket),
-				zap.String("object", object))
-			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-			return
-		case delErr != nil:
-			// The blob is already gone; the drifted row is the only loss.
-			a.logger.Error("head cache delete failed", zap.Error(delErr))
-		case found:
-			a.releaseQuotaForDelete(r, t.ID, deleted)
-		}
-		// The retention (expired, governance-bypassed, or none) goes with the
-		// object: the PUT-side lock check no longer needs a head row, so a
-		// stale lock row would refuse the next upload to this key.
-		if _, lockDelErr := a.db.ExecContext(r.Context(), `
-			DELETE FROM object_locks WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-			t.ID, bucket, object); lockDelErr != nil {
-			a.logger.Error("object lock row delete failed", zap.Error(lockDelErr))
-		}
-		// A Smart-demoted object has a second copy (the hot one, until it is
-		// reclaimed) that the delete above did not reach: remove it now and
-		// settle the ledger, so no later job owes this key a delete (WP-R13-2).
-		a.smartPromoter.OnDelete(r.Context(), t.ID, bucket, object)
-		// The parity copy of a vault object goes with it (WP-VAULT-1); a
-		// leg that cannot be reached now is the job's stale pass to finish.
-		a.vaultParity.OnObjectDeleted(r.Context(), t.ID, bucket, object)
+	// Everything after the bytes — the head row (billing), the lock row, the
+	// Smart second copy, the parity shards, the notification — is the one
+	// aftermath DeleteObjects runs too (object_delete_shared.go).
+	if err := a.objectDeleteAftermath().settle(r.Context(), t.ID, bucket, object, isChunked); err != nil {
+		// The manifest is still intact (rolled back with the row): the
+		// client retries. Answering 204 here would leave a live object.
+		a.logger.Error("chunked delete failed",
+			zap.Error(err),
+			zap.String("tenant_id", t.ID),
+			zap.String("bucket", bucket),
+			zap.String("object", object))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return
 	}
 
 	w.WriteHeader(http.StatusNoContent)
-	a.notifySvc.Fire(t.ID, bucket, "s3:ObjectRemoved:Delete", object, 0, "")
-	emitEvent(r.Context(), a.db, a.logger, "object.deleted", t.ID, map[string]interface{}{
-		"bucket": bucket, "key": object,
-	})
 }
 
 // errRegionDriverUnavailable: the bucket is pinned to a region this process
