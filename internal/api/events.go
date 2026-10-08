@@ -73,26 +73,6 @@ func emitEvent(ctx context.Context, db *sql.DB, logger *zap.Logger, eventType, t
 	go dispatchWebhooks(db, logger, eventID, eventType, tenantID, dataJSON) // #nosec G118 -- intentional fire-and-forget after response
 }
 
-// emitEventTo records the event and delivers it to endpoints a caller
-// already loaded (loadWebhookEndpoints): the row is always written (it is
-// the tenant's event log), the goroutine only when there is an endpoint.
-// A batch that emits per key reads the tenant's webhooks once (post-merge
-// review of #631).
-func emitEventTo(ctx context.Context, db *sql.DB, logger *zap.Logger, endpoints []webhookEndpoint, eventType, tenantID string, data map[string]interface{}) {
-	if db == nil {
-		return
-	}
-	eventID, dataJSON, ok := recordEvent(ctx, db, logger, eventType, tenantID, data)
-	if !ok || len(endpoints) == 0 {
-		return
-	}
-	go func() { // #nosec G118 -- intentional fire-and-forget after response
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		deliverToEndpoints(ctx, db, logger, endpoints, eventID, eventType, tenantID, dataJSON)
-	}()
-}
-
 // recordEvent inserts the events row; false when nothing was recorded.
 func recordEvent(ctx context.Context, db *sql.DB, logger *zap.Logger, eventType, tenantID string, data map[string]interface{}) (eventID string, dataJSON []byte, ok bool) {
 	eventID = uuid.New().String()

@@ -374,22 +374,6 @@ func (d *NotificationDispatcher) Fire(tenantID, bucket, eventName, objectKey str
 	go d.dispatch(tenantID, bucket, eventName, objectKey, size, etag)
 }
 
-// FireTo dispatches to targets a caller already loaded (Targets): nothing
-// is started when there are none. A batch that fires per key resolves the
-// bucket's targets once instead of once per key (post-merge review of
-// #631: a 1,000-key DeleteObjects started 1,000 goroutines each querying
-// bucket_notifications to find none).
-func (d *NotificationDispatcher) FireTo(targets []notifyTarget, tenantID, bucket, eventName, objectKey string, size int64, etag string) {
-	if d == nil || len(targets) == 0 {
-		return
-	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		d.deliverTo(ctx, targets, tenantID, bucket, eventName, objectKey, size, etag)
-	}()
-}
-
 // notifyTarget is one enabled bucket_notifications row.
 type notifyTarget struct {
 	url    string

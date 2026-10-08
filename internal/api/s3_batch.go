@@ -16,6 +16,10 @@ import (
 // maxBatchDeleteKeys is the S3 spec limit per DeleteObjects request.
 const maxBatchDeleteKeys = 1000
 
+// batchDeliveryWorkers is how many of a batch's per-key notifications and
+// webhooks are delivered at once (object_delete_shared.go, deleteFanout).
+const batchDeliveryWorkers = 4
+
 // batchDeleteConcurrency is how many keys of one DeleteObjects request are
 // deleted at once (Sync: ~1 s per delete, ~14/s per account — 16 in flight
 // keeps a bridge busy without queueing the whole batch on its slots).
@@ -161,6 +165,9 @@ func (s *Server) deleteObjects(w http.ResponseWriter, r *http.Request, req *S3Re
 		}(i, key)
 	}
 	wg.Wait()
+	// Per-key notifications and webhooks: in key order, from a bounded
+	// worker set, after the response has been built (they do not block it).
+	aftermath.fanout.deliverInOrder(aftermath, t.ID, bucket, func(key string) int { return first[key] })
 
 	for _, obj := range delReq.Objects {
 		if e := outcomes[first[obj.Key]]; e != nil {
