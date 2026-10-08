@@ -72,7 +72,7 @@ func (s *Server) initMetrics() {
 		reg.MustRegister(chunkLegacyReads)
 		// The Vault parity copy (WP-VAULT-1): shards written, erased, and
 		// reads a backend failure sent to the parity.
-		reg.MustRegister(vaultParityObjects, vaultParityBytes, vaultParityFallbacks)
+		reg.MustRegister(vaultParityObjects, vaultParityBytes, vaultParityFallbacks, vaultParityOrphans)
 		// The pack store (Phase 37): packs sealed, GC, member reads.
 		reg.MustRegister(packstore.Collectors()...)
 		// Routing truth (WP-R7-5): the counters, and a collector that reads

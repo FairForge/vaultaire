@@ -582,6 +582,19 @@ func (m *MultiWebDAVDriver) Delete(ctx context.Context, container, artifact stri
 // List lists the container through ONE bridge (the container's HRW bridge,
 // with the read fallback). It may miss an object another bridge wrote in
 // the last seconds to minutes (cross-bridge staleness); WalkTenant does not.
+// RemoveEmptyDir asks every bridge (a folder may exist on any of them); the
+// first bridge that refuses because the folder is not empty wins, other
+// errors are per bridge and the rest still get asked.
+func (m *MultiWebDAVDriver) RemoveEmptyDir(ctx context.Context, container, dir string) error {
+	var firstErr error
+	for _, b := range m.bridges {
+		if err := b.drv.RemoveEmptyDir(ctx, container, dir); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
 func (m *MultiWebDAVDriver) List(ctx context.Context, container, prefix string) ([]string, error) {
 	tenantID, err := requireTenant(ctx, m.name, "List", "", m.logger)
 	if err != nil {
