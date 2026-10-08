@@ -1374,6 +1374,37 @@ func (d *WebDAVDriver) children(ctx context.Context, names []string) (dirs, file
 	return dirs, files, nil
 }
 
+// RemoveEmptyDir removes the folder at dir under container when it holds
+// nothing (the vault parity reconcile pass, after the shards under it are
+// deleted); a missing folder is fine, a non-empty one is left and reported.
+func (d *WebDAVDriver) RemoveEmptyDir(ctx context.Context, container, dir string) error {
+	tenantID, err := requireTenant(ctx, d.name, "RemoveEmptyDir", "", d.logger)
+	if err != nil {
+		return err
+	}
+	names, err := tenantNames(tenantID, container)
+	if err != nil {
+		return fmt.Errorf("%s remove dir %s: %w", d.name, dir, err)
+	}
+	for _, seg := range strings.Split(strings.Trim(dir, "/"), "/") {
+		if seg != "" {
+			names = append(names, seg)
+		}
+	}
+	dirs, files, err := d.children(ctx, names)
+	if err != nil {
+		return fmt.Errorf("%s remove dir %s: %w", d.name, dir, err)
+	}
+	if len(dirs)+len(files) > 0 {
+		return fmt.Errorf("%s remove dir %s: not empty", d.name, dir)
+	}
+	if err := d.removeDir(ctx, names); err != nil {
+		return err
+	}
+	d.forgetCollections(d.parentPaths(append(names, "_")))
+	return nil
+}
+
 // removeDir deletes the (empty or not) folder at resource names; a miss is
 // not an error. Only for folders the driver owns outright (stripe pieces).
 func (d *WebDAVDriver) removeDir(ctx context.Context, names []string) error {

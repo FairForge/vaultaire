@@ -482,6 +482,17 @@ func (d *LocalDriver) RemoveDirectory(ctx context.Context, container, dir string
 	return nil
 }
 
+// RemoveEmptyDir removes dir under container when it is empty; a missing or
+// non-empty directory is left (the error says which). Used by the vault
+// parity reconcile pass for the folders a Delete leaves.
+func (d *LocalDriver) RemoveEmptyDir(ctx context.Context, container, dir string) error {
+	fullPath := filepath.Join(d.basePath, container, filepath.FromSlash(dir))
+	if err := os.Remove(fullPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove empty directory %s: %w", dir, err)
+	}
+	return nil
+}
+
 // DirectoryExists checks if a directory exists
 func (d *LocalDriver) DirectoryExists(ctx context.Context, container, dir string) (bool, error) {
 	fullPath := filepath.Join(d.basePath, container, dir)

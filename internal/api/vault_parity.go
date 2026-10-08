@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -111,6 +112,10 @@ var (
 		Name: "vaultaire_vault_parity_fallback_reads_total",
 		Help: "Reads of a vault object whose backend failed: served (rebuilt from the parity copy) or unavailable (no usable parity either).",
 	}, []string{"outcome"})
+	vaultParityOrphans = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vaultaire_vault_parity_orphans_total",
+		Help: "Parity shard folders no row names, as the job's reconcile pass meets them: found (a sighting; counted on every pass), erased (gone after two sightings at least VAULT_PARITY_ORPHAN_GRACE apart), failed (a delete that did not go through).",
+	}, []string{"outcome"})
 )
 
 func init() {
@@ -120,6 +125,34 @@ func init() {
 	for _, o := range []string{"served", "unavailable"} {
 		vaultParityFallbacks.WithLabelValues(o)
 	}
+	for _, o := range []string{"found", "erased", "failed"} {
+		vaultParityOrphans.WithLabelValues(o)
+	}
+}
+
+const (
+	// defaultOrphanGrace: a shard folder no row names is erased only once it
+	// has been seen on two passes this far apart (VAULT_PARITY_ORPHAN_GRACE).
+	defaultOrphanGrace = time.Hour
+	// defaultMaxOrphanCandidatesPerRun bounds the reconcile walk of one run.
+	defaultMaxOrphanCandidatesPerRun = 2000
+	// defaultMaxReconcileTenantsPerRun: tenants walked per run (in rotation).
+	defaultMaxReconcileTenantsPerRun = 25
+)
+
+// orphanGraceFromEnv is VAULT_PARITY_ORPHAN_GRACE (1m–24h), else the default;
+// a rejected value is logged at Warn and the default kept.
+func orphanGraceFromEnv(getenv func(string) string, logger *zap.Logger) time.Duration {
+	raw := strings.TrimSpace(getenv("VAULT_PARITY_ORPHAN_GRACE"))
+	if raw == "" {
+		return defaultOrphanGrace
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < time.Minute || d > 24*time.Hour {
+		logger.Warn("VAULT_PARITY_ORPHAN_GRACE rejected; default kept", zap.String("value", raw), zap.Duration("default", defaultOrphanGrace))
+		return defaultOrphanGrace
+	}
+	return d
 }
 
 // VaultParityResult is one run's outcome (job_runs.result).
@@ -130,6 +163,16 @@ type VaultParityResult struct {
 	Failed      int `json:"failed"`
 	Erased      int `json:"erased"`
 	EraseFailed int `json:"erase_failed"`
+	// The reconcile pass (shard folders no row names, PR 5 of Prompt 2a):
+	// candidates met this run, erased after the grace, deletes that failed;
+	// the legs walked (registered, breaker closed), tenants walked, and
+	// whether the per-run bound cut the walk short.
+	OrphansFound       int      `json:"orphans_found"`
+	OrphansErased      int      `json:"orphans_erased"`
+	OrphansFailed      int      `json:"orphans_failed"`
+	ReconciledLegs     []string `json:"reconciled_legs,omitempty"`
+	ReconcileTenants   int      `json:"reconcile_tenants"`
+	ReconcileTruncated bool     `json:"reconcile_truncated,omitempty"`
 	// Skipped: candidates whose row names shards that could not be erased
 	// this run (an earlier etag, or another leg): never rewritten, retried
 	// next run.
@@ -163,6 +206,15 @@ type VaultParity struct {
 	// vaultParityLegs).
 	Legs []string
 
+	// The reconcile pass: a shard folder no row names is erased once it has
+	// been a candidate on two passes OrphanGrace apart; at most
+	// MaxOrphanCandidatesPerRun candidates and MaxReconcileTenantsPerRun
+	// tenants (in rotation, reconcileCursor) per run.
+	OrphanGrace               time.Duration
+	MaxOrphanCandidatesPerRun int
+	MaxReconcileTenantsPerRun int
+	reconcileCursor           string
+
 	// scopeTenant limits a run to one tenant (tests on the shared DB).
 	scopeTenant string
 	now         func() time.Time
@@ -180,7 +232,9 @@ func NewVaultParity(db *sql.DB, eng engine.Engine, fl flagChecker, logger *zap.L
 	return &VaultParity{db: db, eng: ce, flags: fl, logger: logger,
 		JobName: "vault_parity", Every: 2 * time.Minute, BootDelay: 45 * time.Second, MaxRunTime: time.Hour,
 		MaxObjectsPerRun: 500, MaxBytesPerRun: 256 << 30, Stripe: vaultParityStripe, now: time.Now,
-		Legs: parityLegsFromEnv(os.Getenv)}
+		Legs:        parityLegsFromEnv(os.Getenv),
+		OrphanGrace: orphanGraceFromEnv(os.Getenv, logger), MaxOrphanCandidatesPerRun: defaultMaxOrphanCandidatesPerRun,
+		MaxReconcileTenantsPerRun: defaultMaxReconcileTenantsPerRun}
 }
 
 // Leg is the leg this deployment writes new parity to: the first registered
@@ -242,7 +296,246 @@ func (p *VaultParity) RunOnce(ctx context.Context) (VaultParityResult, error) {
 	if err := p.protectPending(ctx, &res); err != nil {
 		return res, err
 	}
-	return res, nil
+	p.reconcileOrphans(ctx, &res)
+	return res, ctx.Err()
+}
+
+// emptyDirRemover is the optional driver surface the reconcile pass uses to
+// take away the empty `<digest>/<etag>/` folders a Delete leaves (local,
+// webdav; nothing to do on an S3 leg). Best effort.
+type emptyDirRemover interface {
+	RemoveEmptyDir(ctx context.Context, container, dir string) error
+}
+
+// reconcileOrphans is the pass over `<tenant>__parity/` on every registered
+// leg whose breaker is closed: a `<digest>/<etag>/` folder no row names is
+// a candidate; a candidate first seen at least OrphanGrace ago is erased
+// (its files, then its folders) and forgotten; one that gained its row or
+// vanished is forgotten. Nothing here fails the run: a leg that cannot be
+// listed or a delete that fails is a note. The walk is bounded per run.
+func (p *VaultParity) reconcileOrphans(ctx context.Context, res *VaultParityResult) {
+	type leg struct {
+		name string
+		drv  engine.Driver
+	}
+	status := p.eng.GetFailoverStatus()
+	names := p.Legs
+	if len(names) == 0 {
+		names = vaultParityLegs
+	}
+	var legs []leg
+	for _, name := range names {
+		drv, ok := p.eng.GetDriver(name)
+		if !ok {
+			continue
+		}
+		if status[name] == engine.StateOpen.String() {
+			res.Errors = append(res.Errors, fmt.Sprintf("reconcile: %s skipped, circuit breaker open", name))
+			continue
+		}
+		legs = append(legs, leg{name, drv})
+		res.ReconciledLegs = append(res.ReconciledLegs, name)
+	}
+	if len(legs) == 0 {
+		return
+	}
+	tenants, err := p.reconcileTenants(ctx)
+	if err != nil {
+		res.Errors = append(res.Errors, "reconcile: tenants: "+err.Error())
+		return
+	}
+	budget := p.MaxOrphanCandidatesPerRun
+	if budget <= 0 {
+		budget = defaultMaxOrphanCandidatesPerRun
+	}
+	grace := p.OrphanGrace
+	if grace <= 0 {
+		grace = defaultOrphanGrace
+	}
+	for _, tenantID := range tenants {
+		if ctx.Err() != nil {
+			return
+		}
+		res.ReconcileTenants++
+		for _, l := range legs {
+			if res.ReconcileTruncated {
+				return
+			}
+			p.reconcileTenantLeg(ctx, res, tenantID, l.name, l.drv, grace, &budget)
+		}
+	}
+}
+
+// reconcileTenants is the tenants this run walks: the scoped one, or the
+// next page of the tenants table after the cursor (wrapping at the end).
+func (p *VaultParity) reconcileTenants(ctx context.Context) ([]string, error) {
+	if p.scopeTenant != "" {
+		return []string{p.scopeTenant}, nil
+	}
+	limit := p.MaxReconcileTenantsPerRun
+	if limit <= 0 {
+		limit = defaultMaxReconcileTenantsPerRun
+	}
+	rows, err := p.db.QueryContext(ctx, `SELECT id FROM tenants WHERE id > $1 ORDER BY id LIMIT $2`, p.reconcileCursor, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(ids) < limit {
+		p.reconcileCursor = "" // wrap: the next run starts over
+	} else {
+		p.reconcileCursor = ids[len(ids)-1]
+	}
+	return ids, nil
+}
+
+// reconcileTenantLeg is one tenant's parity container on one leg.
+func (p *VaultParity) reconcileTenantLeg(ctx context.Context, res *VaultParityResult, tenantID, legName string, drv engine.Driver, grace time.Duration, budget *int) {
+	tctx := common.WithTenantID(ctx, tenantID)
+	container := parityContainer(tenantID)
+	names, err := drv.List(tctx, container, "")
+	if err != nil {
+		res.Errors = append(res.Errors, fmt.Sprintf("reconcile: list %s on %s: %v", container, legName, err))
+		return
+	}
+	// The folders the leg holds and the files under each.
+	folders := map[string][]string{}
+	for _, name := range names {
+		i := strings.LastIndex(name, "/")
+		if i <= 0 {
+			continue // not <digest>/<etag>/<file>
+		}
+		folders[name[:i]] = append(folders[name[:i]], name)
+	}
+	// The folders rows name.
+	named := map[string]bool{}
+	rows, err := p.db.QueryContext(ctx, `SELECT shard_prefix FROM vault_parity WHERE tenant_id = $1`, tenantID)
+	if err != nil {
+		res.Errors = append(res.Errors, "reconcile: rows of "+tenantID+": "+err.Error())
+		return
+	}
+	for rows.Next() {
+		var prefix string
+		if err := rows.Scan(&prefix); err != nil {
+			_ = rows.Close()
+			res.Errors = append(res.Errors, "reconcile: rows of "+tenantID+": "+err.Error())
+			return
+		}
+		named[prefix] = true
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		res.Errors = append(res.Errors, "reconcile: rows of "+tenantID+": "+err.Error())
+		return
+	}
+	var candidates []string
+	for folder := range folders {
+		if !named[folder] {
+			candidates = append(candidates, folder)
+		}
+	}
+	sort.Strings(candidates)
+	if len(candidates) > *budget {
+		candidates = candidates[:*budget]
+		res.ReconcileTruncated = true
+	}
+	*budget -= len(candidates)
+
+	now := p.now()
+	var kept []string // sightings that stay: still candidates, not yet erased
+	for _, folder := range candidates {
+		res.OrphansFound++
+		vaultParityOrphans.WithLabelValues("found").Inc()
+		var firstSeen time.Time
+		err := p.db.QueryRowContext(ctx, `
+			INSERT INTO vault_parity_orphans (tenant_id, leg, prefix, first_seen, last_seen) VALUES ($1, $2, $3, $4, $4)
+			ON CONFLICT (tenant_id, leg, prefix) DO UPDATE SET last_seen = EXCLUDED.last_seen
+			RETURNING first_seen`, tenantID, legName, folder, now).Scan(&firstSeen)
+		if err != nil {
+			res.Errors = append(res.Errors, "reconcile: sighting of "+folder+": "+err.Error())
+			kept = append(kept, folder)
+			continue
+		}
+		if now.Sub(firstSeen) < grace {
+			kept = append(kept, folder)
+			continue
+		}
+		if err := p.eraseOrphanFolder(tctx, drv, container, folder, folders[folder], folders, named); err != nil {
+			res.OrphansFailed++
+			vaultParityOrphans.WithLabelValues("failed").Inc()
+			res.Errors = append(res.Errors, fmt.Sprintf("reconcile: erase %s on %s: %v", folder, legName, err))
+			kept = append(kept, folder)
+			continue
+		}
+		res.OrphansErased++
+		vaultParityOrphans.WithLabelValues("erased").Inc()
+		p.logger.Warn("vault parity: orphan shards erased (no row named them)",
+			zap.String("tenant_id", tenantID), zap.String("leg", legName), zap.String("folder", folder),
+			zap.Int("files", len(folders[folder])), zap.Duration("first_seen_ago", now.Sub(firstSeen)))
+	}
+	if res.ReconcileTruncated {
+		return // the unseen candidates keep their sightings
+	}
+	// Sightings of folders that are no longer candidates on this leg (the
+	// row appeared, the folder is gone, or they were erased above). An
+	// empty array, never NULL: `= ANY(NULL)` is NULL and deletes nothing.
+	if kept == nil {
+		kept = []string{}
+	}
+	if _, err := p.db.ExecContext(ctx, `
+		DELETE FROM vault_parity_orphans WHERE tenant_id = $1 AND leg = $2 AND NOT (prefix = ANY($3))`,
+		tenantID, legName, pq.Array(kept)); err != nil {
+		res.Errors = append(res.Errors, "reconcile: forget sightings: "+err.Error())
+	}
+}
+
+// eraseOrphanFolder deletes every file under folder, then the folder, then
+// its `<digest>` parent when nothing else (on the leg or in a row) sits
+// under it. The folder removals are best effort (not every leg has folders).
+func (p *VaultParity) eraseOrphanFolder(ctx context.Context, drv engine.Driver, container, folder string, files []string, folders map[string][]string, named map[string]bool) error {
+	for _, f := range files {
+		if err := drv.Delete(ctx, container, f); err != nil && !isObjectMissingErr(err) {
+			return fmt.Errorf("delete %s: %w", f, err)
+		}
+	}
+	rm, ok := drv.(emptyDirRemover)
+	if !ok {
+		return nil
+	}
+	if err := rm.RemoveEmptyDir(ctx, container, folder); err != nil {
+		p.logger.Debug("vault parity: orphan folder not removed", zap.String("folder", folder), zap.Error(err))
+		return nil
+	}
+	i := strings.Index(folder, "/")
+	if i <= 0 {
+		return nil
+	}
+	digest := folder[:i]
+	for other := range folders {
+		if other != folder && strings.HasPrefix(other, digest+"/") {
+			return nil
+		}
+	}
+	for other := range named {
+		if strings.HasPrefix(other, digest+"/") {
+			return nil
+		}
+	}
+	if err := rm.RemoveEmptyDir(ctx, container, digest); err != nil {
+		p.logger.Debug("vault parity: orphan digest folder not removed", zap.String("folder", digest), zap.Error(err))
+	}
+	return nil
 }
 
 type parityRow struct {
