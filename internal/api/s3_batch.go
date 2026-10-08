@@ -130,6 +130,7 @@ func (s *Server) deleteObjects(w http.ResponseWriter, r *http.Request, req *S3Re
 	}
 	outcomes := make([]*DeleteError, len(unique))
 	sem := make(chan struct{}, batchDeleteConcurrency)
+	aftermath := s.objectDeleteAftermath()
 	var wg sync.WaitGroup
 	for i, key := range unique {
 		wg.Add(1)
@@ -137,7 +138,20 @@ func (s *Server) deleteObjects(w http.ResponseWriter, r *http.Request, req *S3Re
 		go func(i int, key string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			outcomes[i] = s.batchDeleteKey(r, t, bucket, container, key)
+			// This goroutine is outside net/http's per-request recover and
+			// outside runLongS3Op's (the op goroutine only): a panic in one
+			// key's delete took the whole process down. It is that key's
+			// error entry; the other keys complete and the response is
+			// still well-formed.
+			defer func() {
+				if p := recover(); p != nil {
+					s.log().Error("batch delete: key delete panicked",
+						zap.Any("panic", p), zap.String("tenant_id", t.ID),
+						zap.String("bucket", bucket), zap.String("key", key))
+					outcomes[i] = &DeleteError{Key: key, Code: ErrInternalError, Message: "Internal error while deleting"}
+				}
+			}()
+			outcomes[i] = s.batchDeleteKey(r, t, bucket, container, key, aftermath)
 		}(i, key)
 	}
 	wg.Wait()
@@ -178,7 +192,7 @@ func (s *Server) deleteObjects(w http.ResponseWriter, r *http.Request, req *S3Re
 // error entry, or nil when the key is deleted (or was already missing — S3
 // batch delete is idempotent per key). Safe to run concurrently for
 // distinct keys.
-func (s *Server) batchDeleteKey(r *http.Request, t *tenant.Tenant, bucket, container, key string) *DeleteError {
+func (s *Server) batchDeleteKey(r *http.Request, t *tenant.Tenant, bucket, container, key string, aftermath objectDeleteAftermath) *DeleteError {
 	if key == "" {
 		return &DeleteError{Key: key, Code: ErrInvalidRequest, Message: "Key is required"}
 	}
@@ -240,30 +254,17 @@ func (s *Server) batchDeleteKey(r *http.Request, t *tenant.Tenant, bucket, conta
 		}
 	}
 
-	// Success (or idempotent miss) — remove the billing record and
-	// release exactly the bytes it held (atomic via RETURNING, WP-1).
-	if s.db != nil {
-		deleted, found, cacheErr := deleteHeadRowReleasing(r.Context(), s.db, manifestReleaser(s.gci), t.ID, bucket, key)
-		switch {
-		case cacheErr != nil && isChunked:
-			// Row and manifest rolled back together: the object is intact
-			// and the client retries this key.
-			s.logger.Error("batch delete: chunked delete failed",
-				zap.Error(cacheErr), zap.String("key", key))
-			return &DeleteError{
-				Key: key, Code: ErrInternalError, Message: "Internal error while deleting",
-			}
-		case cacheErr != nil:
-			s.logger.Error("batch delete: head cache delete failed",
-				zap.Error(cacheErr), zap.String("key", key))
-		case found && deleted.Size > 0:
-			ctx, cancel := quotaCtx(r)
-			s.releaseQuota(ctx, t.ID, deleted.Floor, deleted.Size)
-			cancel()
+	// Success (or idempotent miss): the one aftermath single DELETE runs —
+	// billing record, lock row, Smart copy, parity shards, notification
+	// (object_delete_shared.go).
+	if err := aftermath.settle(r.Context(), t.ID, bucket, key, isChunked); err != nil {
+		// Row and manifest rolled back together: the object is intact
+		// and the client retries this key.
+		s.logger.Error("batch delete: chunked delete failed",
+			zap.Error(err), zap.String("key", key))
+		return &DeleteError{
+			Key: key, Code: ErrInternalError, Message: "Internal error while deleting",
 		}
-		// The second copy of a Smart-demoted object and its ledger row,
-		// exactly as single DELETE (WP-R13-2).
-		s.smartPromoter.OnDelete(r.Context(), t.ID, bucket, key)
 	}
 
 	return nil

@@ -2,11 +2,13 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -146,4 +148,55 @@ func TestDeleteObjects_OperationDetection(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "DeleteObjects", s3Req.Operation)
 	assert.Equal(t, "mybucket", s3Req.Bucket)
+}
+
+// panickingDeleteDriver is a backend whose Delete panics — the shape of a
+// nil dereference inside a driver.
+type panickingDeleteDriver struct {
+	engine.Driver
+	panicKey string
+}
+
+func (d *panickingDeleteDriver) Delete(ctx context.Context, container, artifact string) error {
+	if artifact == d.panicKey {
+		panic("driver: nil pointer dereference in Delete")
+	}
+	return d.Driver.Delete(ctx, container, artifact)
+}
+
+// Since #621 every key of a DeleteObjects batch is deleted in its own
+// goroutine, outside net/http's per-request recover AND outside
+// runLongS3Op's (which covers only the op goroutine): a panic in one key
+// took the whole process down. It must be that key's <Error> entry; the
+// other keys still complete and the response is well-formed.
+func TestDeleteObjects_APanicInOneKeyIsThatKeysErrorNotAProcessCrash(t *testing.T) {
+	server, tnt, tempDir, cleanup := setupCopyTestServer(t)
+	defer cleanup()
+	putObject(t, server, tnt, tempDir, "bucket1", "fine.txt", "alpha")
+	putObject(t, server, tnt, tempDir, "bucket1", "boom.txt", "beta")
+	putObject(t, server, tnt, tempDir, "bucket1", "also-fine.txt", "gamma")
+	local, ok := server.engine.GetDriver("local")
+	require.True(t, ok)
+	server.engine.AddDriver("local", &panickingDeleteDriver{Driver: local, panicKey: "boom.txt"})
+
+	body := `<Delete>
+  <Object><Key>fine.txt</Key></Object>
+  <Object><Key>boom.txt</Key></Object>
+  <Object><Key>also-fine.txt</Key></Object>
+</Delete>`
+	code, respBody := deleteObjects(t, server, tnt, "bucket1", body)
+	require.Equal(t, 200, code, respBody)
+
+	var result DeleteResult
+	require.NoError(t, xml.Unmarshal([]byte(respBody), &result))
+	require.Len(t, result.Errors, 1, respBody)
+	assert.Equal(t, "boom.txt", result.Errors[0].Key)
+	assert.Equal(t, ErrInternalError, result.Errors[0].Code)
+	assert.Len(t, result.Deleted, 2)
+	for _, k := range []string{"fine.txt", "also-fine.txt"} {
+		code, _ := getObject(t, server, tnt, "bucket1", k)
+		assert.Equal(t, 404, code, "%s should be deleted", k)
+	}
+	code, _ = getObject(t, server, tnt, "bucket1", "boom.txt")
+	assert.Equal(t, 200, code, "the key whose delete panicked is still there")
 }

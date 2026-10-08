@@ -43,15 +43,36 @@ import (
 type flakyGetDriver struct {
 	*drivers.LocalDriver
 	failGet, failRange atomic.Bool
-	rangeGets          atomic.Int32
-	dir                string
+	// truncateGet: Get answers, then the stream breaks after a few bytes —
+	// the encoder fails mid-object.
+	truncateGet atomic.Bool
+	rangeGets   atomic.Int32
+	dir         string
 }
 
 func (d *flakyGetDriver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
 	if d.failGet.Load() {
 		return nil, errors.New("geyser: connection reset by peer")
 	}
-	return d.LocalDriver.Get(ctx, container, artifact)
+	rc, err := d.LocalDriver.Get(ctx, container, artifact)
+	if err == nil && d.truncateGet.Load() {
+		return &brokenStream{Reader: io.LimitReader(rc, 4096), Closer: rc}, nil
+	}
+	return rc, err
+}
+
+// brokenStream serves its first bytes, then a read error.
+type brokenStream struct {
+	io.Reader
+	io.Closer
+}
+
+func (b *brokenStream) Read(p []byte) (int, error) {
+	n, err := b.Reader.Read(p)
+	if errors.Is(err, io.EOF) {
+		return n, errors.New("geyser: stream reset mid-object")
+	}
+	return n, err
 }
 
 func (d *flakyGetDriver) GetRange(ctx context.Context, container, artifact string, offset, length int64) (io.ReadCloser, error) {
@@ -78,7 +99,21 @@ type flakyLegDriver struct {
 	*drivers.LocalDriver
 	failSuffix atomic.Value // string
 	failGet    atomic.Bool
+	failDelete atomic.Bool
 	puts       atomic.Int32
+	// holdPuts: every Put announces itself on putEntered and waits for
+	// putRelease to close before writing a byte — the window between the
+	// row write and the shard writes, held open for a test.
+	holdPuts   atomic.Bool
+	putEntered chan struct{}
+	putRelease chan struct{}
+}
+
+func (d *flakyLegDriver) Delete(ctx context.Context, container, artifact string) error {
+	if d.failDelete.Load() {
+		return errors.New("permafrost: 503 service unavailable")
+	}
+	return d.LocalDriver.Delete(ctx, container, artifact)
 }
 
 func (d *flakyLegDriver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
@@ -90,6 +125,10 @@ func (d *flakyLegDriver) Get(ctx context.Context, container, artifact string) (i
 
 func (d *flakyLegDriver) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...engine.PutOption) error {
 	d.puts.Add(1)
+	if d.holdPuts.Load() {
+		d.putEntered <- struct{}{}
+		<-d.putRelease
+	}
 	if s, _ := d.failSuffix.Load().(string); s != "" && strings.HasSuffix(artifact, s) {
 		_, _ = io.Copy(io.Discard, io.LimitReader(data, 4096)) // read a little, then fail like a vendor would
 		return errors.New("permafrost: 503 service unavailable")
@@ -130,7 +169,8 @@ func setupParityFixture(t *testing.T) *parityFixture {
 	f.eng.AddDriver("idrive", drivers.NewLocalDriver(t.TempDir(), logger))
 	f.geyser = &flakyGetDriver{LocalDriver: drivers.NewLocalDriver(f.geyserDir, logger), dir: f.geyserDir}
 	f.eng.AddDriver("geyser", f.geyser)
-	f.leg = &flakyLegDriver{LocalDriver: drivers.NewLocalDriver(f.legDir, logger)}
+	f.leg = &flakyLegDriver{LocalDriver: drivers.NewLocalDriver(f.legDir, logger),
+		putEntered: make(chan struct{}, 8), putRelease: make(chan struct{})}
 	f.eng.AddDriver("permafrost", f.leg)
 	f.eng.SetPrimary("idrive")
 
@@ -709,4 +749,275 @@ func TestVaultParity_LegPreference(t *testing.T) {
 			assert.Equal(t, tc.want, got)
 		})
 	}
+}
+
+// --- both delete paths share one aftermath ------------------------------------
+
+// server is the Server the S3 handlers run on, wired the way the product
+// wires it (vault parity, the Smart promoter, the engine): the single
+// DELETE and DeleteObjects paths are both driven through it.
+func (f *parityFixture) server() *Server {
+	return &Server{engine: f.eng, db: f.db, logger: f.logger, vaultParity: f.svc,
+		smartPromoter: NewSmartPromoter(f.db, f.eng, f.logger)}
+}
+
+func (f *parityFixture) lockRow(key string) {
+	f.t.Helper()
+	_, err := f.db.Exec(`INSERT INTO object_locks (tenant_id, bucket, object_key, retention_mode, retain_until_date)
+		VALUES ($1, $2, $3, 'GOVERNANCE', NOW() - INTERVAL '1 day')`, f.tenantID, f.bucket, key)
+	require.NoError(f.t, err)
+}
+
+func (f *parityFixture) lockRows() int {
+	var n int
+	require.NoError(f.t, f.db.QueryRow(`SELECT COUNT(*) FROM object_locks WHERE tenant_id = $1`, f.tenantID).Scan(&n))
+	return n
+}
+
+func (f *parityFixture) ledgerRow(key string) {
+	f.t.Helper()
+	_, err := f.db.Exec(`INSERT INTO smart_demotions (tenant_id,bucket,object_key,etag,size_bytes,hot_backend,cold_backend,reason,demoted_at)
+		VALUES ($1,$2,$3,'e',100,'idrive','geyser','idle',NOW())`, f.tenantID, f.bucket, key)
+	require.NoError(f.t, err)
+	f.t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM smart_demotions WHERE tenant_id = $1`, f.tenantID) })
+}
+
+func (f *parityFixture) openLedgerRows() int {
+	var n int
+	require.NoError(f.t, f.db.QueryRow(`SELECT COUNT(*) FROM smart_demotions WHERE tenant_id = $1 AND hot_deleted_at IS NULL`, f.tenantID).Scan(&n))
+	return n
+}
+
+// Everything that happens after an object's bytes are gone — the parity
+// shards and their row, the expired lock row, the Smart ledger — is ONE
+// helper both delete paths call (object_delete_shared.go), the way the
+// write paths share object_write_shared.go. Post-merge review of #621/#629:
+// DeleteObjects had drifted from single DELETE (no parity erase, no lock
+// row cleanup), and the single DELETE handler built its adapter without
+// the Smart promoter, so only the batch path settled a demoted object.
+func TestObjectDelete_BothPathsEraseParityShardsLockRowsAndTheSmartLedger(t *testing.T) {
+	f := setupParityFixture(t)
+	srv := f.server()
+	for _, key := range []string{"films/single.mkv", "films/batch-a.mkv", "films/batch-b.mkv"} {
+		f.object(key, 1<<20)
+		f.lockRow(key)
+		f.ledgerRow(key)
+	}
+	f.run()
+	require.Len(t, f.shardFiles(), 12)
+	require.Equal(t, 3, f.lockRows())
+	require.Equal(t, 3, f.openLedgerRows())
+
+	t.Run("single DELETE through the server", func(t *testing.T) {
+		req := httptest.NewRequest("DELETE", "/"+f.bucket+"/films/single.mkv", nil)
+		req = req.WithContext(s3Ctx(req.Context(), f.tn))
+		w := httptest.NewRecorder()
+		srv.handleDeleteObject(w, req, &S3Request{Bucket: f.bucket, Object: "films/single.mkv", TenantID: f.tenantID})
+		require.Equal(t, http.StatusNoContent, w.Code, w.Body.String())
+		assert.Len(t, f.shardFiles(), 8, "the shards of the deleted object are gone")
+		state, _, _, _ := f.row("films/single.mkv")
+		assert.Empty(t, state, "and its row")
+		assert.Equal(t, 2, f.lockRows(), "the expired lock row goes with the object")
+		assert.Equal(t, 2, f.openLedgerRows(), "the Smart ledger row is settled")
+	})
+
+	t.Run("DeleteObjects through the server", func(t *testing.T) {
+		body := `<Delete><Object><Key>films/batch-a.mkv</Key></Object><Object><Key>films/batch-b.mkv</Key></Object></Delete>`
+		req := httptest.NewRequest("POST", "/"+f.bucket+"?delete", strings.NewReader(body))
+		req = req.WithContext(s3Ctx(req.Context(), f.tn))
+		w := httptest.NewRecorder()
+		srv.handleDeleteObjects(w, req, &S3Request{Bucket: f.bucket, TenantID: f.tenantID})
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		assert.NotContains(t, w.Body.String(), "<Error>")
+		assert.Empty(t, f.shardFiles(), "the shards of both objects are gone at once, not at the job's stale pass")
+		assert.Equal(t, 0, f.countRows())
+		assert.Equal(t, 0, f.lockRows())
+		assert.Equal(t, 0, f.openLedgerRows())
+	})
+}
+
+// --- shards never outlive their row (post-merge review of #629) ------------------
+
+// openLegBreaker opens the parity leg's circuit breaker: five backend
+// failures through the engine.
+func (f *parityFixture) openLegBreaker() {
+	f.t.Helper()
+	f.leg.failGet.Store(true)
+	ctx := common.WithTenantID(context.Background(), f.tenantID)
+	for i := 0; i < 5; i++ {
+		f.eng.HintBackend("c", "k", "permafrost")
+		_, _ = f.eng.Get(ctx, "c", "k")
+	}
+	require.Equal(f.t, engine.StateOpen.String(), f.eng.GetFailoverStatus()["permafrost"], "the breaker is open")
+	f.leg.failGet.Store(false)
+}
+
+// (3) The row of an overwritten object whose stale shards could not be
+// erased this run (the leg's breaker is open) used to be rewritten by the
+// protect pass with the new etag and empty legs — the old shards were
+// orphaned on the leg with no row naming them. The candidate is skipped
+// instead, the row kept, and the stale pass tries again next run.
+func TestVaultParity_ProtectNeverRewritesARowWhoseShardsAreNotProvablyGone(t *testing.T) {
+	f := setupParityFixture(t)
+	_, etag1 := f.object("films/fourteen.mkv", 1<<20+9)
+	f.run()
+	require.Len(t, f.shardFiles(), 4)
+	_, etag2 := f.object("films/fourteen.mkv", 1<<20+1000)
+	require.NotEqual(t, etag1, etag2)
+	f.openLegBreaker()
+
+	res := f.run()
+	assert.Equal(t, 1, res.EraseFailed, "%+v", res)
+	assert.Equal(t, 0, res.Protected, "the candidate is skipped while its old shards may still be on the leg")
+	assert.Equal(t, 0, res.Erased)
+	require.NotEmpty(t, res.Errors)
+	assert.Contains(t, strings.Join(res.Errors, "\n"), "circuit breaker open")
+	files := f.shardFiles()
+	assert.Len(t, files, 4, "nothing new written, nothing orphaned: %v", files)
+	for _, s := range files {
+		assert.Contains(t, s, etag1)
+	}
+	state, legs, _, _ := f.row("films/fourteen.mkv")
+	assert.Equal(t, "complete", state, "the row still names the old shards")
+	assert.Equal(t, []string{"permafrost", "permafrost", "permafrost", "permafrost"}, legs)
+	var rowETag string
+	require.NoError(t, f.db.QueryRow(`SELECT etag FROM vault_parity WHERE tenant_id = $1 AND object_key = $2`, f.tenantID, "films/fourteen.mkv").Scan(&rowETag))
+	assert.Equal(t, etag1, rowETag)
+}
+
+// (3b) The same for the same etag on a different leg: a partial row whose
+// shards sit on permafrost, retried after `sync` became the first leg. The
+// permafrost shards are erased before the sync write; when they cannot be,
+// the candidate is skipped and the row keeps naming them.
+func TestVaultParity_RetryOnANewLegErasesTheOldLegsShardsFirst(t *testing.T) {
+	f := setupParityFixture(t)
+	f.object("films/fifteen.mkv", 2<<20+1)
+	f.leg.failSuffix.Store("/p2")
+	res := f.run()
+	require.Equal(t, 1, res.Partial, "%+v", res)
+	require.Len(t, f.shardFiles(), 3)
+	f.leg.failSuffix.Store("")
+
+	// The leg order switches: sync is registered and first.
+	syncDir := t.TempDir()
+	f.eng.AddDriver("sync", drivers.NewLocalDriver(syncDir, f.logger))
+	syncFiles := func() int {
+		n := 0
+		_ = filepath.Walk(filepath.Join(syncDir, parityContainer(f.tenantID)), func(_ string, info os.FileInfo, err error) error {
+			if err == nil && !info.IsDir() {
+				n++
+			}
+			return nil
+		})
+		return n
+	}
+
+	t.Run("old leg unreachable: skipped, row kept", func(t *testing.T) {
+		f.openLegBreaker()
+		res := f.run()
+		assert.Equal(t, "sync", res.Leg)
+		assert.Equal(t, 0, res.Protected, "%+v", res)
+		assert.Contains(t, strings.Join(res.Errors, "\n"), "circuit breaker open")
+		assert.Len(t, f.shardFiles(), 3, "the permafrost shards are still named by the row")
+		assert.Equal(t, 0, syncFiles(), "nothing written to sync while permafrost's shards are not provably gone")
+		state, legs, _, attempts := f.row("films/fifteen.mkv")
+		assert.Equal(t, "partial", state)
+		assert.Equal(t, []string{"permafrost", "permafrost", "", "permafrost"}, legs)
+		assert.Equal(t, 1, attempts, "a skipped candidate is not an attempt")
+	})
+
+	t.Run("old leg reachable: erased, then written to the new leg", func(t *testing.T) {
+		// A fresh engine: the breaker the previous case opened is not this one's.
+		eng := engine.NewEngine(nil, f.logger, nil)
+		eng.AddDriver("idrive", drivers.NewLocalDriver(t.TempDir(), f.logger))
+		eng.AddDriver("geyser", f.geyser)
+		eng.AddDriver("permafrost", f.leg)
+		eng.AddDriver("sync", drivers.NewLocalDriver(syncDir, f.logger))
+		eng.SetPrimary("idrive")
+		f.svc.eng = eng
+		res := f.run()
+		assert.Equal(t, 1, res.Protected, "%+v", res)
+		assert.Empty(t, f.shardFiles(), "no shard left on permafrost")
+		assert.Equal(t, 4, syncFiles())
+		state, legs, _, attempts := f.row("films/fifteen.mkv")
+		assert.Equal(t, "complete", state)
+		assert.Equal(t, []string{"sync", "sync", "sync", "sync"}, legs)
+		assert.Equal(t, 2, attempts)
+	})
+}
+
+// (4) A DELETE while the job streams the shards: the row sat 'partial' with
+// empty legs, OnObjectDeleted found nothing to erase and dropped the row,
+// then the four shards landed with no row naming them. The row now records
+// the intended leg of every shard before the first byte (so the erase knows
+// where to look), and a finish that updates no row — the row was deleted
+// meanwhile — deletes the shards it just wrote. Zero shards left, either way.
+func TestVaultParity_DeleteDuringTheShardWriteLeavesNoShard(t *testing.T) {
+	f := setupParityFixture(t)
+	f.object("films/sixteen.mkv", 1<<20+5)
+	f.leg.holdPuts.Store(true)
+
+	done := make(chan VaultParityResult, 1)
+	go func() {
+		res, _ := f.svc.RunOnce(context.Background())
+		done <- res
+	}()
+	// The job has written its row and is inside Put on every shard, no byte
+	// written yet.
+	for i := 0; i < 4; i++ {
+		select {
+		case <-f.leg.putEntered:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the job never reached the leg")
+		}
+	}
+	state, legs, _, _ := f.row("films/sixteen.mkv")
+	assert.Equal(t, "partial", state)
+	assert.Equal(t, []string{"permafrost", "permafrost", "permafrost", "permafrost"}, legs, "the intent: every shard's leg is on the row before it is written")
+
+	// The object is deleted now: single DELETE's aftermath.
+	_, err := f.db.Exec(`DELETE FROM object_head_cache WHERE tenant_id = $1 AND object_key = $2`, f.tenantID, "films/sixteen.mkv")
+	require.NoError(t, err)
+	f.svc.OnObjectDeleted(context.Background(), f.tenantID, f.bucket, "films/sixteen.mkv")
+	assert.Equal(t, 0, f.countRows(), "the delete dropped the row")
+
+	f.leg.holdPuts.Store(false)
+	close(f.leg.putRelease)
+	select {
+	case res := <-done:
+		assert.Equal(t, 0, res.Protected, "%+v", res)
+	case <-time.After(30 * time.Second):
+		t.Fatal("the job never finished")
+	}
+	assert.Empty(t, f.shardFiles(), "the shards written after the delete are gone")
+	assert.Equal(t, 0, f.countRows())
+}
+
+// (5) An encode failure (the source stream broke) deletes what it wrote,
+// best effort; a shard whose delete failed stays recorded on the row so the
+// next pass retries it in place rather than forgetting it.
+func TestVaultParity_EncodeFailureKeepsAnUndeletedShardOnTheRow(t *testing.T) {
+	f := setupParityFixture(t)
+	f.object("films/seventeen.mkv", 1<<20+3)
+	f.geyser.truncateGet.Store(true)
+	f.leg.failDelete.Store(true)
+
+	res := f.run()
+	assert.Equal(t, 1, res.Failed, "%+v", res)
+	assert.Equal(t, 0, res.Protected)
+	state, legs, lastErr, _ := f.row("films/seventeen.mkv")
+	assert.Equal(t, "partial", state)
+	assert.Equal(t, []string{"permafrost", "permafrost", "permafrost", "permafrost"}, legs,
+		"a shard whose delete failed is still the row's to erase")
+	assert.Contains(t, lastErr, "stream reset")
+
+	// The next pass, with the source and the leg healthy, completes it in place.
+	f.geyser.truncateGet.Store(false)
+	f.leg.failDelete.Store(false)
+	res = f.run()
+	assert.Equal(t, 1, res.Protected, "%+v", res)
+	state, legs, _, _ = f.row("films/seventeen.mkv")
+	assert.Equal(t, "complete", state)
+	assert.Equal(t, []string{"permafrost", "permafrost", "permafrost", "permafrost"}, legs)
+	assert.Len(t, f.shardFiles(), 4)
 }
