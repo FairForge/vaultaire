@@ -59,6 +59,9 @@ func (s *Server) initMetrics() {
 		// Reads that waited on an automatic restore (WP-R13-1): their 503 is
 		// kept out of vaultaire_errors_total, this is where it shows.
 		reg.MustRegister(smartRestoreWaits)
+		// Detached long S3 operations (s3_long_op.go): what a stopping process
+		// waits for, and what it gave up on.
+		reg.MustRegister(longOpsInFlight, longOpsAbandoned)
 		// Writes destroyed by the delete of a stale copy (R13-06: detected,
 		// not preventable before WP-R2-1). Every source is there at 0.
 		reg.MustRegister(staleCopyLostWrites)

@@ -134,7 +134,7 @@ func TestRunLongS3Op_FastOperationKeepsItsStatus(t *testing.T) {
 	r := httptest.NewRequest("POST", "/b/k?uploadId=x", nil)
 
 	// Act
-	srv.runLongS3Op(w, r, func(w http.ResponseWriter, _ *http.Request) {
+	srv.runLongS3Op(w, r, longOpInfo{Op: "test"}, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("ETag", `"abc"`)
 		WriteS3Error(w, ErrNoSuchUpload, "/b/k", "req-1")
 	})
@@ -153,7 +153,7 @@ func TestRunLongS3Op_SlowOperationCommits200WithWhitespaceThenTheResult(t *testi
 	r := httptest.NewRequest("POST", "/b/k?uploadId=x", nil)
 
 	// Act
-	srv.runLongS3Op(w, r, func(w http.ResponseWriter, _ *http.Request) {
+	srv.runLongS3Op(w, r, longOpInfo{Op: "test"}, func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(150 * time.Millisecond)
 		w.Header().Set("Content-Type", "application/xml")
 		_, _ = w.Write([]byte(xml.Header + "<CompleteMultipartUploadResult><ETag>\"e-2\"</ETag></CompleteMultipartUploadResult>"))
@@ -178,7 +178,7 @@ func TestRunLongS3Op_SlowFailureIsAnErrorDocumentIn200(t *testing.T) {
 	r := httptest.NewRequest("POST", "/b/k?uploadId=x", nil)
 
 	// Act
-	srv.runLongS3Op(w, r, func(w http.ResponseWriter, _ *http.Request) {
+	srv.runLongS3Op(w, r, longOpInfo{Op: "test"}, func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(100 * time.Millisecond)
 		WriteS3Error(w, ErrServiceUnavailable, "/b/k", "req-2")
 	})
@@ -196,7 +196,7 @@ func TestRunLongS3Op_APanicIsAnInternalErrorNotACrash(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/b?delete", nil)
 
-	srv.runLongS3Op(w, r, func(http.ResponseWriter, *http.Request) { panic("boom") })
+	srv.runLongS3Op(w, r, longOpInfo{Op: "test"}, func(http.ResponseWriter, *http.Request) { panic("boom") })
 
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 	assert.Contains(t, w.Body.String(), "<Code>InternalError</Code>")
@@ -211,7 +211,7 @@ func TestRunLongS3Op_OperationContextOutlivesTheClient(t *testing.T) {
 	go func() { time.Sleep(40 * time.Millisecond); cancel() }()
 
 	// Act
-	srv.runLongS3Op(httptest.NewRecorder(), r, func(w http.ResponseWriter, r *http.Request) {
+	srv.runLongS3Op(httptest.NewRecorder(), r, longOpInfo{Op: "test"}, func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(120 * time.Millisecond)
 		opErr = r.Context().Err()
 		w.WriteHeader(http.StatusOK)

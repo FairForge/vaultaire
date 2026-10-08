@@ -20,7 +20,8 @@ Driver layer   internal/drivers      One implementation of engine.Driver per
 `cmd/vaultaire/main.go` builds the engine, registers drivers from environment
 variables, sets the primary backend, connects PostgreSQL (optional; the process
 degrades to a no-DB fallback) and starts the HTTP server. Shutdown order is
-fixed: HTTP drain and tracker flush first, then the engine (which closes the
+fixed: HTTP drain, the wait for detached long S3 operations (≤ 15 min from
+each one's start) and the tracker flush first, then the engine (which closes the
 DB).
 
 There is one process, one PostgreSQL and one set of drivers. There is **no**

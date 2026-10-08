@@ -4,10 +4,13 @@ package api
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"runtime"
 	"sync"
 	"time"
+
+	"github.com/FairForge/vaultaire/internal/clientip"
 
 	dashhandlers "github.com/FairForge/vaultaire/internal/dashboard/handlers"
 	"github.com/FairForge/vaultaire/internal/engine"
@@ -165,6 +168,12 @@ func (s *Server) handleHealthEnhanced(w http.ResponseWriter, r *http.Request) {
 
 	if s.engine != nil {
 		resp["circuit_breakers"] = s.engine.GetFailoverStatus()
+	}
+	// The slot's own port (vaultaire-switch polls it before stopping the old
+	// slot): how many detached long operations it would cut. Not through
+	// HAProxy — the peer it appends is never loopback.
+	if ip := net.ParseIP(clientip.FromRequest(r)); ip != nil && ip.IsLoopback() {
+		resp["long_ops_in_flight"] = s.longOps().count()
 	}
 
 	// Add backend details if requested

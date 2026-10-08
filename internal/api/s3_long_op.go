@@ -6,8 +6,11 @@ import (
 	"encoding/xml"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/tenant"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
 
@@ -40,7 +43,24 @@ import (
 // request it finishes it, so a client that goes away mid-assembly leaves a
 // completed object with its head row, quota and upload status written
 // together — never bytes on the backend without a row, or a half-done batch.
-// The handler waits for the operation either way (graceful shutdown drains it).
+// The handler waits for the operation either way.
+//
+// A deploy is the one thing that can still cut it: the HTTP drain
+// (cmd/vaultaire shutdownTimeout, 30 s) returns with these handlers still
+// running, and the engine closing the database under them killed every
+// complete, copy or batch that had already sent 200 + whitespace — several
+// deploys a day. Every operation is registered while it runs
+// (longOpRegistry: the gauge vaultaire_s3_long_ops_in_flight{op}, the
+// `long_ops_in_flight` field of /health read from the slot's own port, which
+// vaultaire-switch polls before it stops a slot); Server.Shutdown waits for
+// them after the drain and before the trackers flush and the engine closes
+// (drainLongOps) — up to longOpDrainBound measured from EACH operation's
+// start, so an operation never gets more than that in a deploy and the
+// script's wait and the process's own stay inside one budget. Past the bound
+// the rest is cancelled (its context), logged with op/tenant/bucket/key/age
+// and counted in vaultaire_s3_long_ops_abandoned_total{op}; a cancelled
+// CompleteMultipartUpload leaves its upload active and its parts on disk, so
+// the client's retry finishes the same upload (s3_multipart.go).
 
 const (
 	defaultLongOpThreshold = 10 * time.Second
@@ -48,7 +68,143 @@ const (
 	// longOpMaxDuration bounds an operation once detached from its client
 	// (a 50 GiB complete at 30 MB/s is ~30 min).
 	longOpMaxDuration = 6 * time.Hour
+	// longOpDrainBound is how long a stopping process waits for a detached
+	// operation, from the operation's start (decision 2026-10-08: the
+	// longest measured operation is a 2 GiB copy through Cloudflare at
+	// 120 s; vaultaire-switch waits the same 900 s and its lock is 1200 s).
+	longOpDrainBound = 15 * time.Minute
+	// longOpCancelGrace is how long drainLongOps lets a cancelled operation
+	// unwind (answer its client, release its reservation) before returning.
+	longOpCancelGrace = 5 * time.Second
 )
+
+// The three operations, as the metrics label them.
+const (
+	longOpComplete = "CompleteMultipartUpload"
+	longOpCopy     = "CopyObject"
+	longOpBatch    = "DeleteObjects"
+)
+
+var (
+	longOpsInFlight = func() *prometheus.GaugeVec {
+		g := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "vaultaire_s3_long_ops_in_flight",
+			Help: "Detached long S3 operations (CompleteMultipartUpload, CopyObject, DeleteObjects) running right now, by operation. A stopping process waits for them up to 15 min from each one's start.",
+		}, []string{"op"})
+		for _, op := range []string{longOpComplete, longOpCopy, longOpBatch} {
+			g.WithLabelValues(op)
+		}
+		return g
+	}()
+	longOpsAbandoned = func() *prometheus.CounterVec {
+		c := prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "vaultaire_s3_long_ops_abandoned_total",
+			Help: "Long S3 operations a stopping process cancelled because they were still running 15 min after their start, by operation. Each one has a Warn line with tenant, bucket, key and age.",
+		}, []string{"op"})
+		for _, op := range []string{longOpComplete, longOpCopy, longOpBatch} {
+			c.WithLabelValues(op)
+		}
+		return c
+	}()
+)
+
+// longOpInfo names an operation for the registry, the log and the metrics.
+type longOpInfo struct {
+	Op, Bucket, Key string
+}
+
+type longOpEntry struct {
+	longOpInfo
+	tenant  string
+	started time.Time
+	cancel  context.CancelFunc
+}
+
+// longOpRegistry is the set of detached operations in flight.
+type longOpRegistry struct {
+	mu  sync.Mutex
+	ops map[*longOpEntry]struct{}
+}
+
+func (g *longOpRegistry) add(e *longOpEntry) {
+	g.mu.Lock()
+	if g.ops == nil {
+		g.ops = make(map[*longOpEntry]struct{})
+	}
+	g.ops[e] = struct{}{}
+	g.mu.Unlock()
+	longOpsInFlight.WithLabelValues(e.Op).Inc()
+}
+
+func (g *longOpRegistry) remove(e *longOpEntry) {
+	g.mu.Lock()
+	_, ok := g.ops[e]
+	delete(g.ops, e)
+	g.mu.Unlock()
+	if ok {
+		longOpsInFlight.WithLabelValues(e.Op).Dec()
+	}
+}
+
+func (g *longOpRegistry) count() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return len(g.ops)
+}
+
+func (g *longOpRegistry) snapshot() []*longOpEntry {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	out := make([]*longOpEntry, 0, len(g.ops))
+	for e := range g.ops {
+		out = append(out, e)
+	}
+	return out
+}
+
+// longOps is the server's registry (built on first use: bare test servers).
+func (s *Server) longOps() *longOpRegistry {
+	s.longOpsOnce.Do(func() { s.longOpsReg = &longOpRegistry{} })
+	return s.longOpsReg
+}
+
+// drainLongOps waits for the detached operations in flight until each has
+// had `bound` since its start, cancels the ones still running, logs and
+// counts them, and returns how many were cancelled. Called by Server.Shutdown
+// after the HTTP drain (no new operation can start) and before the trackers
+// flush and the engine closes the database.
+func (s *Server) drainLongOps(bound time.Duration) int {
+	reg := s.longOps()
+	for {
+		ops := reg.snapshot()
+		if len(ops) == 0 {
+			return 0
+		}
+		var youngest time.Time
+		for _, e := range ops {
+			if e.started.After(youngest) {
+				youngest = e.started
+			}
+		}
+		if wait := time.Until(youngest.Add(bound)); wait > 0 {
+			time.Sleep(min(wait, 50*time.Millisecond))
+			continue
+		}
+		for _, e := range ops {
+			s.log().Warn("long S3 operation abandoned at shutdown",
+				zap.String("op", e.Op), zap.String("tenant", e.tenant),
+				zap.String("bucket", e.Bucket), zap.String("key", e.Key),
+				zap.Duration("age", time.Since(e.started)))
+			longOpsAbandoned.WithLabelValues(e.Op).Inc()
+			e.cancel()
+		}
+		deadline := time.Now().Add(longOpCancelGrace)
+		for reg.count() > 0 && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		return len(ops)
+	}
+}
 
 func (s *Server) longOpTimings() (threshold, interval time.Duration) {
 	threshold, interval = s.longOpThreshold, s.longOpInterval
@@ -92,16 +248,25 @@ func (b *bufferedResponse) code() int {
 }
 
 // runLongS3Op runs op (an S3 handler body) with the keep-alive described
-// above. op must not hijack or stream: it writes one small response.
-func (s *Server) runLongS3Op(w http.ResponseWriter, r *http.Request, op func(http.ResponseWriter, *http.Request)) {
+// above, registered under info while it runs. op must not hijack or stream:
+// it writes one small response.
+func (s *Server) runLongS3Op(w http.ResponseWriter, r *http.Request, info longOpInfo, op func(http.ResponseWriter, *http.Request)) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), longOpMaxDuration)
 	defer cancel()
 	opReq := r.WithContext(ctx)
+
+	entry := &longOpEntry{longOpInfo: info, started: time.Now(), cancel: cancel}
+	if t, err := tenant.FromContext(r.Context()); err == nil && t != nil {
+		entry.tenant = t.ID
+	}
+	reg := s.longOps()
+	reg.add(entry)
 
 	rec := &bufferedResponse{header: http.Header{}}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		defer reg.remove(entry)
 		// The goroutine is outside net/http's per-request recover: a panic
 		// here would take the process down.
 		defer func() {

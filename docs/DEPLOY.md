@@ -151,9 +151,16 @@ vaultaire@8001  "green"   /opt/vaultaire/bin/vaultaire-8001     the other stoppe
   - Then: the old server to `drain`, the validated config installed
     atomically (temp file in `/etc/haproxy` + rename; timestamped
     `haproxy.cfg.bak-switch-*`, the last five kept), `ACTIVE_PORT`, the
-    symlink and boot enablement flipped, up to 10 min for the old slot's
-    sessions to reach 0 (a transfer still open after that gets the engine's
-    own 30 s shutdown), then `maint` and stop.
+    symlink and boot enablement flipped, then the wait for the old slot: up
+    to 10 min (`DRAIN_TIMEOUT`) for its sessions to reach 0, and up to 15 min
+    (`LONG_OP_TIMEOUT`) while it reports detached long S3 operations
+    (`long_ops_in_flight` on its own `/health`: a CompleteMultipartUpload,
+    CopyObject or DeleteObjects that has already sent 200 + keep-alive), then
+    `maint` and stop. On SIGTERM the process itself drains HTTP for 30 s, waits
+    for those operations until each is 15 min old, cancels and logs the rest
+    (`vaultaire_s3_long_ops_abandoned_total`), flushes and exits
+    (`TimeoutStopSec=1000`). Before 2026-10-08 a complete that outlived the
+    30 s died with the engine on every deploy that landed during it.
   - `restart` runs the same path with the **active** build copied into the
     idle slot — the zero-downtime way to pick up `.env` edits. `rollback`
     switches to the idle slot (the previous build) through the same gates.

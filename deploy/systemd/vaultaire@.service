@@ -23,11 +23,14 @@ ExecStart=/bin/sh -c 'PORT=%i exec /opt/vaultaire/bin/vaultaire-%i'
 Restart=always
 RestartSec=5
 LimitNOFILE=1048576
-# The engine drains HTTP, flushes the trackers and closes the DB on SIGTERM
-# within its own shutdownTimeout (30 s, cmd/vaultaire/main.go); this is only
-# systemd's outer bound before SIGKILL. Long transfers get their time from
-# vaultaire-switch's drain (up to 10 min) before the stop.
-TimeoutStopSec=90
+# On SIGTERM the process drains HTTP (30 s, cmd/vaultaire/main.go
+# shutdownTimeout), then waits for the long S3 operations it has detached
+# from their clients — up to 15 min from each one's start (internal/api
+# longOpDrainBound) — then flushes the trackers and closes the DB. This is
+# only systemd's outer bound before SIGKILL: above 30 + 900 s plus slack.
+# Transfers get their time from vaultaire-switch's drain (up to 10 min, and
+# up to 15 min while a long operation runs) before the stop.
+TimeoutStopSec=1000
 KillMode=mixed
 
 [Install]

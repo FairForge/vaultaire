@@ -105,7 +105,7 @@ func resolveCopyTags(taggingDirective string, request, source objectAttrs) map[s
 // goes away. x-amz-version-id is known only after the copy and is not
 // delivered on that slow path (the ETag is in the body).
 func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, req *S3Request) {
-	s.runLongS3Op(w, r, func(w http.ResponseWriter, r *http.Request) {
+	s.runLongS3Op(w, r, longOpInfo{Op: longOpCopy, Bucket: req.Bucket, Key: req.Object}, func(w http.ResponseWriter, r *http.Request) {
 		s.copyObject(w, r, req)
 	})
 }
