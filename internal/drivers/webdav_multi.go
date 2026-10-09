@@ -582,17 +582,86 @@ func (m *MultiWebDAVDriver) Delete(ctx context.Context, container, artifact stri
 // List lists the container through ONE bridge (the container's HRW bridge,
 // with the read fallback). It may miss an object another bridge wrote in
 // the last seconds to minutes (cross-bridge staleness); WalkTenant does not.
-// RemoveEmptyDir asks every bridge (a folder may exist on any of them); the
-// first bridge that refuses because the folder is not empty wins, other
-// errors are per bridge and the rest still get asked.
+// RemoveEmptyDir removes the folder at dir under container when it holds
+// nothing — on the ONE account every bridge mounts. A collection DELETE is
+// recursive (RFC 4918 §9.6.1) and a bridge lags the others' writes by
+// seconds to minutes, so one bridge's empty view proves nothing: every
+// bridge must list the folder empty first (the first that does not stops
+// it, ErrDirNotEmpty), then ONE DELETE goes through one bridge, then every
+// bridge lists it again (something that appeared in between is reported —
+// it cannot be undone). A missing folder is fine.
 func (m *MultiWebDAVDriver) RemoveEmptyDir(ctx context.Context, container, dir string) error {
-	var firstErr error
-	for _, b := range m.bridges {
-		if err := b.drv.RemoveEmptyDir(ctx, container, dir); err != nil && firstErr == nil {
-			firstErr = err
+	tenantID, err := requireTenant(ctx, m.name, "RemoveEmptyDir", "", m.logger)
+	if err != nil {
+		return err
+	}
+	names, err := dirNames(tenantID, container, dir)
+	if err != nil {
+		return fmt.Errorf("%s remove dir %s: %w", m.name, dir, err)
+	}
+	if err := m.removeEmptyNames(ctx, names); err != nil {
+		return fmt.Errorf("%s remove dir %s: %w", m.name, dir, err)
+	}
+	return nil
+}
+
+// removeEmptyNames is RemoveEmptyDir on resource names (also the stripe
+// reaper's key folders).
+func (m *MultiWebDAVDriver) removeEmptyNames(ctx context.Context, names []string) error {
+	order := m.rank(names)
+	for _, i := range order {
+		b := m.bridges[i]
+		empty, err := b.drv.emptyDir(ctx, names)
+		m.note(ctx, b, err)
+		if err != nil {
+			return fmt.Errorf("bridge %d: %w", b.idx, err)
+		}
+		if !empty {
+			return fmt.Errorf("bridge %d: %w", b.idx, ErrDirNotEmpty)
 		}
 	}
-	return firstErr
+	b := m.bridges[order[0]]
+	err := b.drv.removeDir(ctx, names)
+	m.note(ctx, b, err)
+	if err != nil {
+		return fmt.Errorf("bridge %d: %w", b.idx, err)
+	}
+	for _, other := range m.bridges {
+		other.drv.forgetCollections(other.drv.parentPaths(append(append([]string(nil), names...), "_")))
+	}
+	for _, i := range order {
+		other := m.bridges[i]
+		if empty, err := other.drv.emptyDir(ctx, names); err == nil && !empty {
+			m.logger.Error("webdav: something appeared in a folder while it was being removed — it went with the folder",
+				zap.String("backend", m.name), zap.String("folder", strings.Join(names, "/")), zap.Int("bridge", other.idx))
+			return fmt.Errorf("bridge %d: content appeared during the removal of %s", other.idx, strings.Join(names, "/"))
+		}
+	}
+	return nil
+}
+
+// ListDir lists the direct members of the folder dir under container ("" =
+// the container) through ONE bridge (the folder's HRW bridge, with the read
+// fallback): sub-folders and object names, in key space. A bridge may not
+// see another's last writes yet — callers that delete on what it says go
+// through RemoveEmptyDir, which asks every bridge.
+func (m *MultiWebDAVDriver) ListDir(ctx context.Context, container, dir string) (dirs, files []string, err error) {
+	tenantID, err := requireTenant(ctx, m.name, "ListDir", "", m.logger)
+	if err != nil {
+		return nil, nil, err
+	}
+	names, err := listDirNames(tenantID, container, dir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%s list dir %s: %w", m.name, dir, err)
+	}
+	type listing struct{ dirs, files []string }
+	l, err := readFrom(ctx, m, "list dir "+strings.Join(names, "/"), m.rank(names),
+		func(b *webdavBridge) (listing, error) {
+			d, f, err := b.drv.listDirNames(ctx, names)
+			return listing{d, f}, err
+		},
+		func(listing, error) bool { return false })
+	return l.dirs, l.files, err
 }
 
 func (m *MultiWebDAVDriver) List(ctx context.Context, container, prefix string) ([]string, error) {

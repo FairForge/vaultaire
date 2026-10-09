@@ -544,9 +544,57 @@ func (d *OneDriveDriver) List(ctx context.Context, container string, prefix stri
 		return nil, tErr
 	}
 	folderPath := fmt.Sprintf("%s/t-%s/%s", odRootFolder, tenantID, container)
-
-	seen := make(map[string]bool)
+	children, err := d.children(ctx, folderPath)
+	if err != nil {
+		return nil, err
+	}
 	var artifacts []string
+	for _, c := range children {
+		if prefix == "" || strings.HasPrefix(c.name, prefix) {
+			artifacts = append(artifacts, c.name)
+		}
+	}
+	return artifacts, nil
+}
+
+// ListDir lists the direct members of the folder dir under container ("" =
+// the container) on every account of the fleet: sub-folder names and file
+// names, the union (a folder on any account is a folder). One Graph listing
+// per account. The vault parity reconcile walks `<digest>/<etag>/` with it —
+// List alone sees only the container's direct children.
+func (d *OneDriveDriver) ListDir(ctx context.Context, container, dir string) (dirs, files []string, err error) {
+	tenantID, tErr := requireTenant(ctx, d.Name(), "ListDir", "", d.logger)
+	if tErr != nil {
+		return nil, nil, tErr
+	}
+	folderPath := fmt.Sprintf("%s/t-%s/%s", odRootFolder, tenantID, container)
+	if sub := strings.Trim(dir, "/"); sub != "" {
+		folderPath += "/" + sub
+	}
+	children, err := d.children(ctx, folderPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, c := range children {
+		if c.folder {
+			dirs = append(dirs, c.name)
+		} else {
+			files = append(files, c.name)
+		}
+	}
+	return dirs, files, nil
+}
+
+type odChild struct {
+	name   string
+	folder bool
+}
+
+// children is the union of the folder's direct children on every account
+// (a name once; a folder on any account is a folder).
+func (d *OneDriveDriver) children(ctx context.Context, folderPath string) ([]odChild, error) {
+	seen := make(map[string]int)
+	var out []odChild
 	for _, t := range d.tenants {
 		driveID, err := t.getDriveID(ctx)
 		if err != nil {
@@ -562,14 +610,15 @@ func (d *OneDriveDriver) List(ctx context.Context, container string, prefix stri
 			resp, err := t.graphDo(ctx, req)
 			if err != nil {
 				if strings.Contains(err.Error(), "404") {
-					break // this account holds nothing under the container
+					break // this account holds nothing under the folder
 				}
 				return nil, fmt.Errorf("onedrive list %s: %w", folderPath, err)
 			}
 
 			var result struct {
 				Value []struct {
-					Name string `json:"name"`
+					Name   string           `json:"name"`
+					Folder *json.RawMessage `json:"folder"`
 				} `json:"value"`
 				NextLink string `json:"@odata.nextLink"`
 			}
@@ -579,15 +628,18 @@ func (d *OneDriveDriver) List(ctx context.Context, container string, prefix stri
 				return nil, fmt.Errorf("onedrive list decode: %w", decodeErr)
 			}
 			for _, item := range result.Value {
-				if (prefix == "" || strings.HasPrefix(item.Name, prefix)) && !seen[item.Name] {
-					seen[item.Name] = true
-					artifacts = append(artifacts, item.Name)
+				i, ok := seen[item.Name]
+				if !ok {
+					seen[item.Name] = len(out)
+					out = append(out, odChild{name: item.Name, folder: item.Folder != nil})
+					continue
 				}
+				out[i].folder = out[i].folder || item.Folder != nil
 			}
 			u = result.NextLink
 		}
 	}
-	return artifacts, nil
+	return out, nil
 }
 
 // Exists checks if an artifact exists in OneDrive (home tenant first, then

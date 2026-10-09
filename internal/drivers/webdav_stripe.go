@@ -521,16 +521,9 @@ func (m *MultiWebDAVDriver) removeGenerationDir(ctx context.Context, dir []strin
 	if err := b.drv.removeDir(ctx, dir); err != nil || len(dir) != 5 {
 		return
 	}
-	_ = m.removeEmptyDir(ctx, b, dir[:4])
-}
-
-// removeEmptyDir deletes the folder at names when it holds nothing.
-func (m *MultiWebDAVDriver) removeEmptyDir(ctx context.Context, b *webdavBridge, names []string) bool {
-	dirs, files, err := b.drv.children(ctx, names)
-	if err != nil || len(dirs) > 0 || len(files) > 0 {
-		return false
-	}
-	return b.drv.removeDir(ctx, names) == nil
+	// The key folder of the first layout may hold the key's live generation:
+	// removed only when every bridge lists it empty (removeEmptyNames).
+	_ = m.removeEmptyNames(ctx, dir[:4])
 }
 
 // removeRouted deletes the file at names through its routed bridge.
@@ -938,7 +931,7 @@ func (m *MultiWebDAVDriver) reapContainer(ctx context.Context, lb *webdavBridge,
 					left--
 				}
 			}
-			if left == 0 && m.removeEmptyDir(ctx, lb, dir) {
+			if left == 0 && m.removeEmptyNames(ctx, dir) == nil {
 				res.FoldersRemoved++
 			}
 		}
