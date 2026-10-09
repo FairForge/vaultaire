@@ -1193,10 +1193,12 @@ func (s *Server) completedUploadResult(r *http.Request, tenantID, uploadID, buck
 // (buckets.updated_at, stamped by every configuration write, is not after
 // multipart_uploads.created_at): then the current default is the one that
 // applied. Otherwise nothing is written — a lock that may be owed is logged
-// and counted (vaultaire_complete_replay_lock_undetermined_total). A lock
-// row is written only when the key has none at all (an expired one is never
-// re-dated, an explicit one never touched), its retain-until counted from
-// when the object landed (the head row's updated_at). The version row is
+// and counted (vaultaire_complete_replay_lock_undetermined_total). A
+// retention is written only when the key has none (an expired one is never
+// re-dated, an explicit one never touched; a row holding only a legal hold —
+// an empty retention_mode — has none, and keeps its hold: Prompt 2b 0.6), its
+// retain-until counted from when the object landed (the head row's
+// updated_at). The version row is
 // checked and written under a transaction-scoped advisory lock on the key:
 // concurrent retries each saw "no latest row" and each inserted one.
 func (s *Server) reassertCompletedRows(r *http.Request, tenantID, uploadID, bucket, object string) {
@@ -1208,7 +1210,8 @@ func (s *Server) reassertCompletedRows(r *http.Request, tenantID, uploadID, buck
 	var unchanged, hasLock, defaultNow bool
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT b.updated_at <= u.created_at,
-		       EXISTS(SELECT 1 FROM object_locks l WHERE l.tenant_id = $1 AND l.bucket = $2 AND l.object_key = $3),
+		       EXISTS(SELECT 1 FROM object_locks l WHERE l.tenant_id = $1 AND l.bucket = $2 AND l.object_key = $3
+		              AND l.retention_mode <> ''),
 		       b.object_lock_enabled AND b.default_retention_mode IN ('GOVERNANCE', 'COMPLIANCE') AND b.default_retention_days > 0
 		FROM buckets b
 		JOIN multipart_uploads u ON u.upload_id = $4 AND u.tenant_id = b.tenant_id
@@ -1234,7 +1237,9 @@ func (s *Server) reassertCompletedRows(r *http.Request, tenantID, uploadID, buck
 			FROM object_head_cache h
 			JOIN buckets b ON b.tenant_id = h.tenant_id AND b.name = h.bucket
 			WHERE h.tenant_id = $1 AND h.bucket = $2 AND h.object_key = $3
-			ON CONFLICT (tenant_id, bucket, object_key) DO NOTHING`,
+			ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
+			    retention_mode = EXCLUDED.retention_mode, retain_until_date = EXCLUDED.retain_until_date, updated_at = NOW()
+			WHERE object_locks.retention_mode = ''`,
 			tenantID, bucket, object); err != nil {
 			s.log().Error("complete retry: default retention not re-asserted", zap.Error(err),
 				zap.String("tenant_id", tenantID), zap.String("bucket", bucket), zap.String("key", object))
@@ -1259,19 +1264,18 @@ var completeReplayLockUndetermined = prometheus.NewCounter(prometheus.CounterOpt
 var reassertVersionWrittenHook = func() {}
 
 // reassertVersionRow writes the version row of the key's current bytes when
-// no latest row describes them, in one transaction under an advisory lock
-// on the key.
+// no latest row describes them, in one transaction under the key's version
+// lock, every statement on the transaction's connection.
 func (s *Server) reassertVersionRow(ctx context.Context, tenantID, bucket, object string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('object_versions/' || $1 || '/' || $2 || '/' || $3, 0))`,
-		tenantID, bucket, object); err != nil {
+	if err := lockVersionKey(ctx, tx, tenantID, bucket, object); err != nil {
 		return err
 	}
-	vStatus := getBucketVersioningStatus(ctx, s.db, tenantID, bucket)
+	vStatus := bucketVersioningStatus(ctx, tx, tenantID, bucket)
 	if vStatus != "Enabled" && vStatus != "Suspended" {
 		return nil
 	}

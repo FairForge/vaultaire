@@ -2037,35 +2037,15 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 	}
 
 	if a.db != nil && (vStatus == "Enabled" || vStatus == "Suspended") && reqVersionID != "" {
-		result, err := a.db.ExecContext(r.Context(), `
-			DELETE FROM object_versions
-			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND version_id = $4`,
-			t.ID, bucket, object, reqVersionID)
+		found, err := deleteVersion(r.Context(), a.db, t.ID, bucket, object, reqVersionID)
 		if err != nil {
 			a.logger.Error("delete version failed", zap.Error(err))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 			return
 		}
-		rows, _ := result.RowsAffected()
-		if rows == 0 {
+		if !found {
 			WriteS3Error(w, ErrNoSuchVersion, r.URL.Path, generateRequestID())
 			return
-		}
-
-		var hasRemaining bool
-		_ = a.db.QueryRowContext(r.Context(), `
-			SELECT EXISTS(SELECT 1 FROM object_versions
-			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3)`,
-			t.ID, bucket, object).Scan(&hasRemaining)
-
-		if hasRemaining {
-			_, _ = a.db.ExecContext(r.Context(), `
-				UPDATE object_versions SET is_latest = TRUE
-				WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
-				AND created_at = (
-					SELECT MAX(created_at) FROM object_versions
-					WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
-				)`, t.ID, bucket, object)
 		}
 
 		w.Header().Set("x-amz-version-id", reqVersionID)
@@ -2080,16 +2060,9 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 	if a.db != nil && vStatus == "Enabled" && reqVersionID == "" {
 		markerID := generateVersionID()
 
-		_, _ = a.db.ExecContext(r.Context(), `
-			UPDATE object_versions SET is_latest = FALSE
-			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND is_latest = TRUE`,
-			t.ID, bucket, object)
-
-		_, _ = a.db.ExecContext(r.Context(), `
-			INSERT INTO object_versions
-				(tenant_id, bucket, object_key, version_id, size_bytes, etag, content_type, is_latest, is_delete_marker)
-			VALUES ($1, $2, $3, $4, 0, '', 'application/octet-stream', TRUE, TRUE)`,
-			t.ID, bucket, object, markerID)
+		if err := writeDeleteMarker(r.Context(), a.db, t.ID, bucket, object, markerID); err != nil {
+			a.logger.Error("delete marker not written", zap.Error(err), zap.String("bucket", bucket), zap.String("object", object))
+		}
 
 		// The head-cache row is the billing record (WP-1): DELETE...RETURNING
 		// captures the removed size atomically, so a concurrent writer or

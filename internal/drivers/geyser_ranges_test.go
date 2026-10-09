@@ -149,6 +149,10 @@ func sum(b []byte) string { h := sha256.Sum256(b); return fmt.Sprintf("%x", h) }
 func TestGeyserGet_ReadsAnObjectAsOrderedParallelRanges(t *testing.T) {
 	const mib = 1 << 20
 	f := newRangeS3(10*mib + 12345) // 11 ranges of 1 MiB, the last one partial
+	// Each answer is held 20 ms: an instant fake let a slow CI runner finish
+	// one range before the next was sent (peak 1 — a flake in the queue run
+	// of #642, 2026-10-09).
+	f.delay = 20 * time.Millisecond
 	d := newRangeGeyser(t, f, 4, mib)
 	rangesBefore := promtest.ToFloat64(geyserGetRanges)
 

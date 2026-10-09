@@ -188,9 +188,13 @@ type VaultParityResult struct {
 	SightingsPruned      int                        `json:"sightings_pruned,omitempty"`
 	ReconcileAt          time.Time                  `json:"reconcile_at,omitempty"`
 	ReconcileCursors     map[string]reconcileCursor `json:"reconcile_cursors,omitempty"`
-	// WorkStopped: the erase and protect passes ended at their share of the
-	// run (the reconcile keeps its own time slice).
+	// WorkStopped: a protect was not started because its estimate did not
+	// fit before the run's deadline (the reconcile runs first, in its own
+	// time slice).
 	WorkStopped bool `json:"work_stopped,omitempty"`
+	// TooLarge: candidates whose protect estimate exceeds a whole run
+	// (MaxRunTime): never started — they would be cut on every run.
+	TooLarge int `json:"too_large,omitempty"`
 	// Skipped: candidates whose row names shards that could not be erased
 	// this run (an earlier etag, or another leg): never rewritten, retried
 	// next run.
@@ -219,6 +223,11 @@ type VaultParity struct {
 	MaxObjectsPerRun int
 	MaxBytesPerRun   int64
 	Stripe           int
+	// ProtectRate and ProtectOverhead are a protect's size estimate
+	// (size/rate + overhead): a protect is started only when it can finish
+	// before the run's deadline (VAULT_PARITY_PROTECT_RATE).
+	ProtectRate     int64
+	ProtectOverhead time.Duration
 
 	// Legs is the parity-leg preference order (VAULT_PARITY_LEGS, else
 	// vaultParityLegs).
@@ -260,6 +269,7 @@ func NewVaultParity(db *sql.DB, eng engine.Engine, fl flagChecker, logger *zap.L
 	return &VaultParity{db: db, eng: ce, flags: fl, logger: logger,
 		JobName: "vault_parity", Every: 2 * time.Minute, BootDelay: 45 * time.Second, MaxRunTime: time.Hour,
 		MaxObjectsPerRun: 500, MaxBytesPerRun: 256 << 30, Stripe: vaultParityStripe, now: time.Now,
+		ProtectRate: protectRateFromEnv(os.Getenv, logger), ProtectOverhead: defaultProtectOverhead,
 		Legs:        parityLegsFromEnv(os.Getenv),
 		OrphanGrace: orphanGraceFromEnv(os.Getenv, logger), MaxOrphanCandidatesPerRun: defaultMaxOrphanCandidatesPerRun,
 		MaxReconcileTenantsPerRun: defaultMaxReconcileTenantsPerRun,
@@ -303,7 +313,10 @@ func (p *VaultParity) spec() jobSpec {
 				notes = append(notes, fmt.Sprintf("%d item(s) failed, first: %s", n, res.Errors[0]))
 			}
 			if res.WorkStopped {
-				notes = append(notes, "erase/protect stopped at their share of the run")
+				notes = append(notes, "a protect whose estimate did not fit before the run's deadline was left for the next run")
+			}
+			if res.TooLarge > 0 {
+				notes = append(notes, fmt.Sprintf("%d protect(s) estimated longer than a whole run, never started", res.TooLarge))
 			}
 			if res.ReconcileStopped != "" {
 				notes = append(notes, "reconcile stopped at its "+res.ReconcileStopped+", resumes at its cursor")
@@ -332,36 +345,67 @@ func (p *VaultParity) RunOnce(ctx context.Context) (VaultParityResult, error) {
 	res.Leg = legName
 	due := st.At.IsZero() || p.now().Sub(st.At) >= p.reconcileEvery()
 
-	// When the reconcile is due it keeps a slice of the run: the erase and
-	// protect passes START nothing in the last slice before the run's
-	// deadline (a backlog of protects used to take the whole hour and the
-	// reconcile never ran). What has started runs to the run's own deadline
-	// (Prompt 2a.3 H1: a protect cut at the slice — a 66–79 GB object at
-	// Geyser's ~22 MB/s — burnt one of its 20 attempts every run); the
-	// reconcile then has what is left.
-	starts, stopStarts := ctx, context.CancelFunc(func() {})
-	if dl, ok := ctx.Deadline(); ok && due {
-		starts, stopStarts = context.WithDeadline(ctx, dl.Add(-min(p.reconcileSlice(), time.Until(dl)/2)))
-	}
-	err := p.eraseStale(ctx, starts, &res)
-	if err == nil {
-		err = p.protectPending(ctx, starts, &res)
-	}
-	stopStarts()
-	if err != nil {
-		if starts.Err() == nil || ctx.Err() != nil {
-			return res, err
+	// When the reconcile is due it runs FIRST, in its own slice; the erase
+	// and protect passes have what is left (Prompt 2b 0.1: run last, it was
+	// starved — a protect started just before its slice ran to the run's
+	// deadline, RunOnce returned, and the reconcile never ran while the
+	// backlog exceeded one run). A protect is started only when its size
+	// estimate fits before the run's deadline, so nothing started is cut.
+	if due {
+		rctx, cancel := context.WithTimeout(ctx, p.reconcileSlice())
+		p.reconcileOrphans(rctx, &res, st)
+		cancel()
+		if ctx.Err() != nil {
+			return res, ctx.Err()
 		}
-		res.WorkStopped = true
-	}
-	if !due {
+	} else {
 		res.ReconcileDeferred = true
-		return res, ctx.Err()
 	}
-	rctx, cancel := context.WithTimeout(ctx, p.reconcileSlice())
-	p.reconcileOrphans(rctx, &res, st)
-	cancel()
+	if err := p.eraseStale(ctx, &res); err != nil {
+		return res, err
+	}
+	if err := p.protectPending(ctx, &res); err != nil {
+		return res, err
+	}
 	return res, ctx.Err()
+}
+
+const (
+	// defaultProtectRate is the throughput a protect's estimate assumes:
+	// the object is read from Geyser at ~22 MB/s (8 range streams, bench
+	// 2026-10-04 §16.1) and the parity written to Sync at ~27 MB/s.
+	defaultProtectRate = 20 << 20
+	// defaultProtectOverhead is the fixed part of the estimate (the row,
+	// four shard PUTs' first bytes, the finish).
+	defaultProtectOverhead = 30 * time.Second
+)
+
+// protectRateFromEnv is VAULT_PARITY_PROTECT_RATE in MB/s (1–10000), else
+// the default; a rejected value is logged at Warn and the default kept.
+func protectRateFromEnv(getenv func(string) string, logger *zap.Logger) int64 {
+	raw := strings.TrimSpace(getenv("VAULT_PARITY_PROTECT_RATE"))
+	if raw == "" {
+		return defaultProtectRate
+	}
+	var mb int64
+	if _, err := fmt.Sscanf(raw, "%d", &mb); err != nil || mb < 1 || mb > 10000 || fmt.Sprint(mb) != raw {
+		logger.Warn("VAULT_PARITY_PROTECT_RATE rejected; default kept", zap.String("value", raw), zap.Int64("default_mb_per_s", defaultProtectRate>>20))
+		return defaultProtectRate
+	}
+	return mb << 20
+}
+
+// protectEstimate is how long a protect of size bytes is expected to take.
+func (p *VaultParity) protectEstimate(size int64) time.Duration {
+	rate := p.ProtectRate
+	if rate <= 0 {
+		rate = defaultProtectRate
+	}
+	overhead := p.ProtectOverhead
+	if overhead <= 0 {
+		overhead = defaultProtectOverhead
+	}
+	return overhead + time.Duration(float64(size)/float64(rate)*float64(time.Second))
 }
 
 type parityRow struct {
@@ -376,8 +420,8 @@ type parityRow struct {
 }
 
 // eraseStale erases the shards of rows whose object is gone or has a new
-// etag; a new erase starts only while starts is live.
-func (p *VaultParity) eraseStale(ctx, starts context.Context, res *VaultParityResult) error {
+// etag; a new erase starts only while the run is live.
+func (p *VaultParity) eraseStale(ctx context.Context, res *VaultParityResult) error {
 	rows, err := p.db.QueryContext(ctx, `
 		SELECT v.tenant_id, v.bucket, v.object_key, v.etag, v.shard_prefix, v.legs
 		FROM vault_parity v
@@ -406,8 +450,8 @@ func (p *VaultParity) eraseStale(ctx, starts context.Context, res *VaultParityRe
 		return fmt.Errorf("vault parity: stale rows: %w", err)
 	}
 	for _, r := range stale {
-		if starts.Err() != nil {
-			return starts.Err()
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 		if err := p.eraseShards(ctx, r); err != nil {
 			res.EraseFailed++
@@ -427,8 +471,10 @@ type parityCandidate struct {
 }
 
 // protectPending protects the vault-floor objects without a complete row; a
-// new protect starts only while starts is live, a started one runs on ctx.
-func (p *VaultParity) protectPending(ctx, starts context.Context, res *VaultParityResult) error {
+// protect starts only when its estimate fits before the run's deadline
+// (a smaller one later in the list may still fit), and one whose estimate
+// exceeds a whole run is never started and is named.
+func (p *VaultParity) protectPending(ctx context.Context, res *VaultParityResult) error {
 	rows, err := p.db.QueryContext(ctx, `
 		SELECT o.tenant_id, o.bucket, o.object_key, o.etag, o.size_bytes, o.is_chunked
 		FROM object_head_cache o
@@ -456,9 +502,10 @@ func (p *VaultParity) protectPending(ctx, starts context.Context, res *VaultPari
 		return fmt.Errorf("vault parity: candidates: %w", err)
 	}
 	var budget int64
+	deadline, hasDeadline := ctx.Deadline()
 	for _, c := range cands {
-		if starts.Err() != nil {
-			return starts.Err()
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 		res.Scanned++
 		if c.chunked {
@@ -476,6 +523,15 @@ func (p *VaultParity) protectPending(ctx, starts context.Context, res *VaultPari
 		}
 		if p.MaxBytesPerRun > 0 && budget+c.size > p.MaxBytesPerRun && budget > 0 {
 			break
+		}
+		if est := p.protectEstimate(c.size); p.MaxRunTime > 0 && est > p.MaxRunTime {
+			res.TooLarge++
+			res.Errors = append(res.Errors, fmt.Sprintf("protect %s/%s not started: estimated %s exceeds a whole run (%s)",
+				c.bucket, c.key, est.Round(time.Second), p.MaxRunTime))
+			continue
+		} else if hasDeadline && time.Until(deadline) < est {
+			res.WorkStopped = true
+			continue
 		}
 		budget += c.size
 		state, written, err := p.protect(ctx, c)
@@ -789,15 +845,21 @@ func (p *VaultParity) eraseShards(ctx context.Context, r parityRow) error {
 // keepLeg (about to be overwritten in place by a write at the same prefix).
 // The first leg that is not registered or whose breaker is open stops it
 // with errParityLegUnavailable; a delete that fails stops it with its error.
-// A shard already missing is fine. The `<etag>` folder the deletes empty is
-// left to the reconcile (an empty folder no row names goes at its first
-// sighting): only the job writes shards and only the job removes folders,
-// under one lock — so no removal can race a write. It used to be removed
-// here, up to 11 Sync calls inside a DELETE's post-commit budget.
+// A shard already missing is fine. Before the first delete a `complete` row
+// is made `partial` (Prompt 2b 0.2): a delete stopped mid-shards — a leg
+// 5xx, the caller's budget — used to leave a `complete` row naming shards
+// that are gone, which a same-content re-upload (same etag: the stale pass
+// ignores it, protect skips a complete row) never re-protected. A `partial`
+// row is protected again on a re-upload and erased by the stale pass
+// otherwise; when it cannot be marked, nothing is deleted. The `<etag>`
+// folder the deletes empty is left to the reconcile (an empty folder no row
+// names goes at its first sighting): only the job writes shards and only
+// the job removes folders, under one lock — so no removal can race a write.
 func (p *VaultParity) deleteRecordedShards(ctx context.Context, r parityRow, keepLeg string) error {
 	tctx := common.WithTenantID(ctx, r.tenantID)
 	container := parityContainer(r.tenantID)
 	status := p.eng.GetFailoverStatus()
+	marked := false
 	for j, legName := range r.legs {
 		if legName == "" || legName == keepLeg {
 			continue
@@ -809,10 +871,30 @@ func (p *VaultParity) deleteRecordedShards(ctx context.Context, r parityRow, kee
 		if status[legName] == engine.StateOpen.String() {
 			return fmt.Errorf("%w: %s circuit breaker open", errParityLegUnavailable, legName)
 		}
-
+		if !marked {
+			if err := p.markIncomplete(ctx, r); err != nil {
+				return err
+			}
+			marked = true
+		}
 		if err := drv.Delete(tctx, container, shardArtifact(r.prefix, j)); err != nil && !isObjectMissingErr(err) {
 			return fmt.Errorf("delete shard p%d on %s: %w", j, legName, err)
 		}
+	}
+	return nil
+}
+
+// markIncomplete makes a `complete` row of this etag `partial` with a fresh
+// attempt count, on its own clock: its shards are about to be deleted.
+func (p *VaultParity) markIncomplete(ctx context.Context, r parityRow) error {
+	mctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), parityRowDeleteTimeout)
+	defer cancel()
+	if _, err := p.db.ExecContext(mctx, `
+		UPDATE vault_parity SET state = 'partial', written_at = NULL, attempts = 0,
+		       last_error = 'shards being deleted (a delete that stopped here left this row partial)', updated_at = NOW()
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND etag = $4 AND state = 'complete'`,
+		r.tenantID, r.bucket, r.key, r.etag); err != nil {
+		return fmt.Errorf("mark the row partial before its shard deletes: %w", err)
 	}
 	return nil
 }

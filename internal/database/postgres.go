@@ -38,20 +38,8 @@ type Tenant struct {
 
 // NewPostgres creates a new PostgreSQL connection
 func NewPostgres(cfg Config, logger *zap.Logger) (*Postgres, error) {
-	if cfg.SSLMode == "" {
-		cfg.SSLMode = "disable"
-	}
-
-	// Build DSN - CRITICAL: Never include empty password field
-	var dsn string
-	if cfg.Password != "" {
-		dsn = fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
-			cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.Database, cfg.SSLMode)
-	} else {
-		// Omit password field entirely when empty
-		dsn = fmt.Sprintf("host=%s port=%d user=%s dbname=%s sslmode=%s",
-			cfg.Host, cfg.Port, cfg.User, cfg.Database, cfg.SSLMode)
-	}
+	// Never an empty password field; always a connect timeout (Config.DSN).
+	dsn := cfg.DSN()
 
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
@@ -116,3 +104,24 @@ func (p *Postgres) DB() *sql.DB {
 }
 
 // Exec executes a query without returning any rows
+
+// ConnectTimeoutSeconds bounds a new connection's whole establishment (dial,
+// TLS, startup, auth). lib/pq ignores the context during the startup
+// handshake, so a Postgres that accepts TCP and never answers hung every new
+// connection without bound (Prompt 2b 0.4).
+const ConnectTimeoutSeconds = 5
+
+// DSN is the lib/pq key=value DSN of cfg: sslmode defaults to disable, the
+// password field is omitted when empty, connect_timeout is always set.
+func (cfg Config) DSN() string {
+	sslMode := cfg.SSLMode
+	if sslMode == "" {
+		sslMode = "disable"
+	}
+	if cfg.Password != "" {
+		return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s connect_timeout=%d",
+			cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.Database, sslMode, ConnectTimeoutSeconds)
+	}
+	return fmt.Sprintf("host=%s port=%d user=%s dbname=%s sslmode=%s connect_timeout=%d",
+		cfg.Host, cfg.Port, cfg.User, cfg.Database, sslMode, ConnectTimeoutSeconds)
+}

@@ -105,8 +105,14 @@ func TestVaultParity_ACandidateThatGainsItsRowIsForgotten(t *testing.T) {
 	assert.Equal(t, 1, res.OrphansFound)
 	f.ageOrphans(2 * time.Hour)
 
-	// The row appears (the protect pass runs): the folder is now named by a row.
+	// The row appears (the protect pass runs; the reconcile — which runs
+	// first since Prompt 2b 0.1 — is not due this run): the folder is now
+	// named by a row, and the next reconcile forgets the sighting.
 	f.svc.MaxObjectsPerRun = 500
+	f.svc.ReconcileEvery = time.Hour
+	res = f.run()
+	require.True(t, res.ReconcileDeferred, "%+v", res)
+	f.svc.ReconcileEvery = time.Nanosecond
 	res = f.run()
 	assert.Equal(t, 0, res.OrphansErased)
 	assert.Equal(t, 0, f.orphanRows())

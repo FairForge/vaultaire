@@ -60,12 +60,7 @@ func DSN() string {
 // swap Database and render it here, so the result is valid whether the
 // session was configured by DATABASE_URL or by the TEST_DB_* defaults.
 func DSNFor(cfg database.Config) string {
-	if cfg.Password != "" {
-		return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
-			cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.Database, cfg.SSLMode)
-	}
-	return fmt.Sprintf("host=%s port=%d user=%s dbname=%s sslmode=%s",
-		cfg.Host, cfg.Port, cfg.User, cfg.Database, cfg.SSLMode)
+	return cfg.DSN()
 }
 
 // parseURL converts postgres://user:pass@host:port/db?sslmode=x into a Config.

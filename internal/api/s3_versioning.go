@@ -210,8 +210,16 @@ func getBucketVersioningStatus(ctx context.Context, db *sql.DB, tenantID, bucket
 	if db == nil {
 		return "disabled"
 	}
+	return bucketVersioningStatus(ctx, db, tenantID, bucket)
+}
+
+// bucketVersioningStatus reads the status through q: inside a transaction,
+// on the transaction's own connection (Prompt 2b 0.3: read through the pool
+// while a transaction held a connection, a pool of N froze at N concurrent
+// Complete retries).
+func bucketVersioningStatus(ctx context.Context, q rowQuerier, tenantID, bucket string) string {
 	var status string
-	err := db.QueryRowContext(ctx,
+	err := q.QueryRowContext(ctx,
 		`SELECT versioning_status FROM buckets WHERE tenant_id = $1 AND name = $2`,
 		tenantID, bucket).Scan(&status)
 	if err != nil {

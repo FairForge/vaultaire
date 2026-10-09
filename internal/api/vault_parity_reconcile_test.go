@@ -93,14 +93,16 @@ func TestVaultParity_AnEmptySiblingFolderNoLongerPinsASighting(t *testing.T) {
 // TestVaultParity_TheDeletePathSendsNoFolderCallAndTheRowGoesWithItsShards.)
 
 func TestVaultParity_AnOverwriteRemovesTheOldEtagFolder(t *testing.T) {
-	// Since Prompt 2a.3 H1 the stale pass leaves the folder and the same
-	// run's reconcile (due on every run here) removes it.
+	// Since Prompt 2a.3 H1 the stale pass leaves the folder and the next
+	// reconcile (due on every run here; it runs first since Prompt 2b 0.1)
+	// removes it.
 	f := setupParityFixture(t)
 	_, etag := f.object("ow.bin", f.stripe+3)
 	f.run()
 	old := f.parityPath(shardPrefix(f.bucket, "ow.bin", etag))
 	require.True(t, exists(old))
 	f.object("ow.bin", f.stripe+9) // new bytes, new etag
+	f.run()
 	f.run()
 	assert.False(t, exists(old), "the reconcile removes the folder the stale pass emptied")
 	assert.Len(t, f.shardFiles(), 4)
@@ -203,18 +205,19 @@ func (d *slowLeg) Put(ctx context.Context, container, artifact string, data io.R
 }
 
 func TestVaultParity_ReconcileRunsWhenProtectUsesTheRun(t *testing.T) {
-	// Arrange: a protect backlog longer than the run (20 objects × 4 shards
+	// Arrange: a protect backlog longer than the run (40 objects × 4 shards
 	// × 100 ms on a 3 s run) and an orphan to find. Before: the protect pass
 	// ran to the run's deadline and RunOnce returned — the reconcile walked
 	// 0 tenants, on every run while the backlog lasted.
 	f := setupParityFixture(t)
 	f.cleanSightings()
 	f.plantOrphan("cccc0000cccc0000cccc0000/e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1")
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 40; i++ {
 		f.object(fmt.Sprintf("backlog-%02d.bin", i), f.stripe+3)
 	}
 	f.eng.AddDriver("permafrost", &slowLeg{flakyLegDriver: f.leg, delay: 100 * time.Millisecond})
 	f.svc.ReconcileSlice = time.Second
+	f.svc.ProtectOverhead = 150 * time.Millisecond
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
