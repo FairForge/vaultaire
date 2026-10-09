@@ -692,9 +692,12 @@ func (m *MultiWebDAVDriver) put(ctx context.Context, key string, names []string,
 	}
 	// The write and the removal of a striped version are one commit under
 	// the key's lock, like the striped path's (Prompt 2b B3).
-	unlock := m.keyLocks.lock(manifestCacheKey(names))
+	unlock, err := m.keyLocks.lock(ctx, manifestCacheKey(names))
+	if err != nil {
+		return fmt.Errorf("%s put %s: %w", m.name, key, err)
+	}
 	defer unlock()
-	err := b.drv.Put(ctx, container, artifact, data, opts...)
+	err = b.drv.Put(ctx, container, artifact, data, opts...)
 	m.note(ctx, b, err)
 	if err != nil {
 		return fmt.Errorf("bridge %d: %w", b.idx, err)
@@ -724,9 +727,20 @@ func (m *MultiWebDAVDriver) dropManifest(ctx context.Context, b *webdavBridge, k
 		return nil
 	}
 	if err != nil {
-		m.logger.Warn("webdav stripe: unreadable manifest removed — its pieces are left to the reaper",
-			zap.String("backend", m.name), zap.String("key", key), zap.Error(err))
-		man = nil
+		// An invalid manifest that still names its generation: that
+		// generation is retired like any replaced one (gone an hour later),
+		// not left to the reaper's 6 h grace (Prompt 2b.2 C3). One that
+		// names none, or that could not be read at all: the reaper decides.
+		var inv *manifestInvalidError
+		if errors.As(err, &inv) && inv.gen != nil {
+			m.logger.Warn("webdav stripe: invalid manifest removed — the generation it names is retired",
+				zap.String("backend", m.name), zap.String("key", key), zap.String("gen", inv.gen.Gen), zap.Error(err))
+			man = inv.gen
+		} else {
+			m.logger.Warn("webdav stripe: unreadable manifest removed — its pieces are left to the reaper",
+				zap.String("backend", m.name), zap.String("key", key), zap.Error(err))
+			man = nil
+		}
 	}
 	if err := b.drv.removeNames(ctx, manifestNamesOf(names)); err != nil {
 		return err
@@ -812,7 +826,10 @@ func (m *MultiWebDAVDriver) Delete(ctx context.Context, container, artifact stri
 
 func (m *MultiWebDAVDriver) delete(ctx context.Context, key string, names []string, order []int, container, artifact string) error {
 	m.mcache.drop(manifestCacheKey(names))
-	unlock := m.keyLocks.lock(manifestCacheKey(names))
+	unlock, err := m.keyLocks.lock(ctx, manifestCacheKey(names))
+	if err != nil {
+		return fmt.Errorf("%s delete %s: %w", m.name, key, err)
+	}
 	defer unlock()
 	b := m.bridges[order[0]]
 	found, err := m.deleteOn(ctx, b, key, names, container, artifact)

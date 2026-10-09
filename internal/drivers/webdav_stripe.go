@@ -78,8 +78,24 @@ import (
 // when neither matches; without a size it serves the `%o` file.
 //
 // Unknown length (ContentLength 0): never striped — the body streams to one
-// bridge as before (every engine caller states the length; aws-chunked
-// streams are decoded to a known length upstream).
+// bridge as before. Which callers state sizes (Prompt 2b.2 C3 audit):
+//
+//   - written with their length (WithContentLength): PutObject (aws-chunked
+//     streams decoded to a known length upstream), CompleteMultipartUpload
+//     (the parts' total), CopyObject (the source head row's size — it wrote
+//     unsized before 2b.2: a large copy onto `sync` was one plain file on
+//     one bridge, above the stripe minimum), the background PUT, vault
+//     parity shards, chunk blobs, packs, Smart demotion and promotion.
+//     The one unsized writer: a PutObject sent with chunked transfer
+//     encoding and no x-amz-decoded-content-length (no length known before
+//     the body ends) — it lands plain, like any unknown length.
+//   - read with the recorded size (engine.WithExpectedSize): GET and its
+//     second range attempt, /cdn, CopyObject's source (2b.2 — it took the
+//     stale plain file), the vault parity job's read of the object and its
+//     data ranges. Read unsized, which takes the `%o` file first: parity
+//     shards and stripe pieces (immutable names: one version only), the
+//     routing-truth job (Exists only), Smart demotion (hot = the primary,
+//     never `sync`), Smart promotion and the chunk store (never `sync`).
 
 const (
 	// WebDAVStripeMarker ends the resource name of a striped object's
@@ -180,6 +196,33 @@ type stripeKey struct {
 	Artifact  string    `json:"artifact"`
 	Heartbeat time.Time `json:"heartbeat,omitempty"`
 }
+
+// validateDir checks what a manifest says about its generation: format,
+// folder (inside the object's container) and generation name. A manifest
+// that passes it names a generation that may be retired even when the rest
+// of it is unreadable.
+func (man *stripeManifest) validateDir(names []string) error {
+	if man.Format != stripeManifestFormat {
+		return fmt.Errorf("unknown stripe manifest format %q", man.Format)
+	}
+	if (len(man.Dir) != 4 && len(man.Dir) != 5) || man.Dir[0] != names[0] || man.Dir[1] != names[1]+webdavStripeDirSuffix {
+		return errors.New("stripe manifest names a folder outside the object's container")
+	}
+	if _, ok := stripeGenTime(man.Gen); !ok || dirGen(man.Dir) != man.Gen {
+		return fmt.Errorf("stripe manifest generation %q does not match its folder", man.Gen)
+	}
+	return nil
+}
+
+// manifestInvalidError: a manifest that was read but is not a valid one.
+// gen is the generation it still names (nil when even that is not known).
+type manifestInvalidError struct {
+	gen *stripeManifest
+	err error
+}
+
+func (e *manifestInvalidError) Error() string { return e.err.Error() }
+func (e *manifestInvalidError) Unwrap() error { return e.err }
 
 // --- names -----------------------------------------------------------------
 
@@ -294,14 +337,8 @@ func stripeGenTime(gen string) (time.Time, bool) {
 
 // validate checks a manifest read for an object at names.
 func (man *stripeManifest) validate(names []string) error {
-	if man.Format != stripeManifestFormat {
-		return fmt.Errorf("unknown stripe manifest format %q", man.Format)
-	}
-	if (len(man.Dir) != 4 && len(man.Dir) != 5) || man.Dir[0] != names[0] || man.Dir[1] != names[1]+webdavStripeDirSuffix {
-		return errors.New("stripe manifest names a folder outside the object's container")
-	}
-	if _, ok := stripeGenTime(man.Gen); !ok || dirGen(man.Dir) != man.Gen {
-		return fmt.Errorf("stripe manifest generation %q does not match its folder", man.Gen)
+	if err := man.validateDir(names); err != nil {
+		return err
 	}
 	if man.PieceSize <= 0 || len(man.Pieces) == 0 {
 		return errors.New("stripe manifest has no pieces")
@@ -438,7 +475,10 @@ func (m *MultiWebDAVDriver) putStriped(ctx context.Context, key string, names []
 // previous generation.
 func (m *MultiWebDAVDriver) commitStripe(ctx context.Context, key string, names []string, order []int,
 	container, artifact string, man *stripeManifest) error {
-	unlock := m.keyLocks.lock(manifestCacheKey(names))
+	unlock, err := m.keyLocks.lock(ctx, manifestCacheKey(names))
+	if err != nil {
+		return fmt.Errorf("%s put %s: %w", m.name, key, err)
+	}
 	defer unlock()
 	kbridge := m.bridges[order[0]]
 	nf := engine.ErrNotFound(container, artifact)
@@ -595,36 +635,57 @@ func (m *MultiWebDAVDriver) stripeGraceOrDefault() time.Duration {
 // removal, a delete): interleaved, both used to delete each other's file
 // and the object was gone (Prompt 2b B3). Across the two slots a commit of
 // the same key can overlap only during a deploy's drain.
+//
+// The plain path holds it for its whole upload (the PUT, then the removal
+// of a striped version), so a call of the same key waits behind a slow
+// upload: the wait honours the caller's context, and a wait that runs out
+// is engine.ErrPartiallyUnavailable — the key is busy, a 503, never a
+// backend failure (Prompt 2b.2 C3: a Delete with a 200 ms deadline waited
+// behind a stalled PUT for as long as the PUT took). Shrinking the lock to
+// the commit — upload to a temporary name, then MOVE — works on Sync's
+// bridge (live 2026-10-09: MOVE onto a new name 201 in 0.54 s, onto an
+// existing one with Overwrite: T 204 in 1.05 s, Overwrite: F 412, the other
+// bridges saw the result at once), but costs every plain PUT one more
+// round trip (~0.5–1 s) and one more Sync metadata write — the account-wide
+// bottleneck (~15–21 metadata writes/s): not done.
 type keyLocker struct {
 	mu sync.Mutex
 	m  map[string]*keyLock
 }
 
 type keyLock struct {
-	mu   sync.Mutex
+	held chan struct{} // capacity 1: full while held
 	refs int
 }
 
-func (l *keyLocker) lock(k string) (unlock func()) {
+func (l *keyLocker) lock(ctx context.Context, k string) (unlock func(), _ error) {
 	l.mu.Lock()
 	if l.m == nil {
 		l.m = map[string]*keyLock{}
 	}
 	e := l.m[k]
 	if e == nil {
-		e = &keyLock{}
+		e = &keyLock{held: make(chan struct{}, 1)}
 		l.m[k] = e
 	}
 	e.refs++
 	l.mu.Unlock()
-	e.mu.Lock()
-	return func() {
-		e.mu.Unlock()
+	drop := func() {
 		l.mu.Lock()
 		if e.refs--; e.refs == 0 {
 			delete(l.m, k)
 		}
 		l.mu.Unlock()
+	}
+	select {
+	case e.held <- struct{}{}:
+		return func() {
+			<-e.held
+			drop()
+		}, nil
+	case <-ctx.Done():
+		drop()
+		return nil, fmt.Errorf("%w: the key is busy (another write or delete of it is running here): %w", engine.ErrPartiallyUnavailable, ctx.Err())
 	}
 }
 
@@ -813,10 +874,14 @@ func (m *MultiWebDAVDriver) readManifestOn(ctx context.Context, b *webdavBridge,
 	}
 	var man stripeManifest
 	if err := json.Unmarshal(raw, &man); err != nil {
-		return nil, fmt.Errorf("%s read %s: stripe manifest: %w", m.name, key, err)
+		return nil, &manifestInvalidError{err: fmt.Errorf("%s read %s: stripe manifest: %w", m.name, key, err)}
 	}
 	if err := man.validate(names); err != nil {
-		return nil, fmt.Errorf("%s read %s: %w", m.name, key, err)
+		inv := &manifestInvalidError{err: fmt.Errorf("%s read %s: %w", m.name, key, err)}
+		if man.validateDir(names) == nil {
+			inv.gen = &man
+		}
+		return nil, inv
 	}
 	return &man, nil
 }
