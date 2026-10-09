@@ -1414,12 +1414,13 @@ func (s *Server) Start() error {
 func (s *Server) Shutdown(ctx context.Context) error {
 	stopStarted := time.Now()
 	err := s.httpServer.Shutdown(ctx)
-	if n := s.drainLongOps(longOpDrainBoundFromEnv(s.log(), os.Getenv)); n > 0 {
+	longBound := longOpDrainBoundFromEnv(s.log(), os.Getenv)
+	if n := s.drainLongOps(longBound); n > 0 {
 		s.log().Warn("long S3 operations abandoned at shutdown", zap.Int("count", n))
 	}
 	// The notifications and webhooks those operations (and every request
 	// before them) queued: delivered, or recorded as failed (event_delivery.go).
-	s.drainDeliveries(stopStarted)
+	s.drainDeliveries(stopStarted, longBound)
 	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 	defer cancel()
 	s.flushTrackers(fctx)

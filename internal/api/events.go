@@ -81,7 +81,7 @@ func emitEvent(ctx context.Context, db *sql.DB, logger *zap.Logger, eventType, t
 func submitEventDelivery(ctx context.Context, db *sql.DB, logger *zap.Logger, eventID, eventType, tenantID string, payload []byte) {
 	lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	defer cancel()
-	endpoints, err := tenantWebhookEndpoints(lctx, db, logger, tenantID)
+	endpoints, gen, err := tenantWebhookEndpoints(lctx, db, logger, tenantID)
 	if err != nil {
 		logger.Error("query webhook endpoints for dispatch", zap.Error(err), zap.String("tenant_id", tenantID))
 		return
@@ -89,7 +89,7 @@ func submitEventDelivery(ctx context.Context, db *sql.DB, logger *zap.Logger, ev
 	if len(owedRows(endpoints, eventID, eventType)) == 0 {
 		return
 	}
-	eventDeliveries.submit(webhookJob(db, logger, endpoints, eventID, eventType, tenantID, payload))
+	eventDeliveries.submit(webhookJob(db, logger, endpoints, gen, eventID, eventType, tenantID, payload))
 }
 
 // recordEvent inserts the events row; false when nothing was recorded.
