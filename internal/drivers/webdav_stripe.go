@@ -513,12 +513,11 @@ func (m *MultiWebDAVDriver) dropGeneration(ctx context.Context, key string, man 
 // removeGenerationDir deletes a generation's folder once its files are
 // deleted, and a first-layout key folder it leaves empty (best effort: a
 // bridge that does not see the deletions yet keeps them — the reaper's).
+// A collection DELETE is recursive, so the folder goes only when EVERY
+// bridge lists it empty (removeEmptyNames; Prompt 2b A6 — one bridge's
+// empty view used to decide it).
 func (m *MultiWebDAVDriver) removeGenerationDir(ctx context.Context, dir []string) {
-	b := m.bridges[m.rank(dir)[0]]
-	if _, files, err := b.drv.children(ctx, dir); err != nil || len(files) > 0 {
-		return // never a recursive delete of files we did not delete
-	}
-	if err := b.drv.removeDir(ctx, dir); err != nil || len(dir) != 5 {
+	if err := m.removeEmptyNames(ctx, dir); err != nil || len(dir) != 5 {
 		return
 	}
 	// The key folder of the first layout may hold the key's live generation:
@@ -1019,23 +1018,32 @@ func (m *MultiWebDAVDriver) generationLive(ctx context.Context, dir []string) (b
 		names = append(names, davName(s))
 	}
 	names = append(names, leafName(segs[len(segs)-1]))
+	// The manifest is asked of EVERY bridge (Prompt 2b A6): one that has not
+	// seen the commit yet answers "none" for a live generation. Live when
+	// any bridge's manifest names it; a bridge that cannot answer keeps the
+	// generation (never a delete on doubt).
 	what := strings.Join(names, "/")
-	man, err := readFrom(ctx, m, "get stripe manifest "+what, m.rank(names),
-		func(b *webdavBridge) (*stripeManifest, error) {
-			return m.readManifestOn(ctx, b, what, names, engine.ErrNotFound(k.Container, k.Artifact))
-		},
-		func(_ *stripeManifest, err error) bool { return notFoundErr(err) })
-	if notFoundErr(err) {
-		return false, nil
+	for _, b := range m.bridges {
+		man, err := m.readManifestOn(ctx, b, what, names, engine.ErrNotFound(k.Container, k.Artifact))
+		m.note(ctx, b, err)
+		if notFoundErr(err) {
+			continue
+		}
+		if err != nil {
+			return false, fmt.Errorf("bridge %d: %w", b.idx, err)
+		}
+		if man.Gen == dirGen(dir) {
+			return true, nil
+		}
 	}
-	if err != nil {
-		return false, err
-	}
-	return man.Gen == dirGen(dir), nil
+	return false, nil
 }
 
 // removeGeneration deletes every file of a generation's folder (each through
-// its bridge), then the folder.
+// its bridge), then the folder — only once every bridge lists it empty (a
+// collection DELETE is recursive: a file another bridge sees and lb does
+// not would go with it, Prompt 2b A6). A folder a bridge still shows
+// something in is left for the next pass.
 func (m *MultiWebDAVDriver) removeGeneration(ctx context.Context, lb *webdavBridge, dir []string) (int, error) {
 	_, files, err := lb.drv.children(ctx, dir)
 	if err != nil {
@@ -1053,7 +1061,10 @@ func (m *MultiWebDAVDriver) removeGeneration(ctx context.Context, lb *webdavBrid
 	if len(errs) > 0 {
 		return n, errors.Join(errs...)
 	}
-	return n, lb.drv.removeDir(ctx, dir)
+	if err := m.removeEmptyNames(ctx, dir); err != nil && !errors.Is(err, ErrDirNotEmpty) {
+		return n, err
+	}
+	return n, nil
 }
 
 // defaultStagingDir is where pieces are staged without SYNC_WEBDAV_STAGING_DIR.

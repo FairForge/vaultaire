@@ -68,6 +68,11 @@ type WebDAVDriver struct {
 	sem    chan struct{}
 	counts webdavCounters
 
+	// folders counts files per folder against Sync's 50,000 limit
+	// (webdav_folder_limit.go); folderFileLimit overrides it (tests).
+	folders         folderTracker
+	folderFileLimit int
+
 	// bodyGate (optional; the multi-bridge driver's large-transfer cap) runs
 	// when a GET answer's body is about to be handed out, with its
 	// Content-Length (-1 = unknown); it may wait under ctx, and its release
@@ -694,12 +699,19 @@ func (d *WebDAVDriver) propfind(ctx context.Context, path, depth string) (entrie
 	if err := xml.NewDecoder(io.LimitReader(resp.Body, webdavMaxMultistatus)).Decode(&ms); err != nil {
 		return nil, true, fmt.Errorf("parse multistatus: %w", err)
 	}
+	files := 0
 	for _, r := range ms.Responses {
 		e, err := parseDavEntry(r)
 		if err != nil {
 			return nil, true, err
 		}
 		entries = append(entries, e)
+		if !e.dir {
+			files++
+		}
+	}
+	if depth == "1" {
+		d.recordFolder(path, files)
 	}
 	return entries, true, nil
 }
@@ -957,6 +969,16 @@ func (d *WebDAVDriver) Put(ctx context.Context, container, artifact string, data
 // putNames is Put at resource names below the root (key names the object
 // in errors and logs).
 func (d *WebDAVDriver) putNames(ctx context.Context, key string, names []string, data io.Reader, opts ...engine.PutOption) error {
+	folder := d.escapedPath(names[:len(names)-1], true)
+	err := d.putNamesOnce(ctx, key, names, data, opts...)
+	if err != nil {
+		return d.fullFolderErr(ctx, key, folder, err)
+	}
+	d.notePut(folder)
+	return nil
+}
+
+func (d *WebDAVDriver) putNamesOnce(ctx context.Context, key string, names []string, data io.Reader, opts ...engine.PutOption) error {
 	o := engine.ApplyPutOptions(opts...)
 	dirs := d.parentPaths(names)
 	path := d.escapedPath(names, false)

@@ -72,6 +72,22 @@ groups:
           summary: "Sync WebDAV bridge {{ $labels.bridge }} down"
           description: "Bridge {{ $labels.bridge }} (index into SYNC_WEBDAV_URLS) has failed its authenticated PROPFIND for 10+ minutes; the writes of its ~1/N of the keys fail meanwhile. Check `curl -s localhost:8000/health/backends`, the bridge's systemd unit and its journal (401 = that bridge's password changed: SYNC_WEBDAV_PASSWORDS; connection refused = the process is down)."
 
+      # Sync refuses writes into a folder that holds 50,000 files (its hard
+      # limit; folders are unlimited). Keys' `/` segments are folders, so a
+      # flat bucket past 50,000 keys stops taking writes — refused as 400s
+      # (the driver turns them into invalid input, never a bridge failure).
+      # The gauge is the largest folder a bridge has counted (every listing,
+      # and every 1,000th PUT into a folder). Warn at 40,000 (Prompt 2b A5);
+      # the fix is a layout decision (a hash fan-out level), not a restart.
+      - alert: SyncFolderNearFileLimit
+        expr: max by (backend) (vaultaire_webdav_folder_files_max) > 40000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A {{ $labels.backend }} folder holds over 40,000 files (Sync's limit is 50,000)"
+          description: "A WebDAV bridge counted more than 40,000 files in one folder ({{ $value }}). At 50,000 Sync refuses every write into it (answered 400 InvalidInput, counted in vaultaire_webdav_folder_full_total). Find the bucket (a flat key space on the sync tier) and move its writes off sync or decide the fan-out layout (Prompt 2b A5)."
+
       # Durable writes are being rejected. One in 10 minutes is worth a
       # heads-up (letshow writes every minute, so a real outage produces
       # several quickly); five is a page. Same alertname so the critical

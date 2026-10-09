@@ -41,25 +41,41 @@ import (
 //     adding or removing a bridge moves only ~1/N of the keys (after such a
 //     change a moved key may read stale until Sync has carried the old
 //     bridge's last writes over — minutes at worst);
-//   - a read (Get, GetRange, Exists, List) whose bridge is unhealthy — the
-//     last probe failed, or 3 consecutive transport errors / stalls /
-//     timeouts / 5xx-after-retries opened its breaker for 30 s, or this very
-//     call failed that way — falls back to the next bridge in the key's HRW
-//     order. A fallback bridge's NOT FOUND is never reported as not found:
-//     the object may have been written through the dead bridge seconds ago.
-//     It is ErrWebDAVBridgeStale, which wraps engine.ErrAllBackendsUnavailable
-//     (the API answers 503 + Retry-After, the client retries);
+//   - a read (Get, GetRange, Exists) of an IMMUTABLE name (immutableObject:
+//     a parity shard `<digest>/<etag>/p<j>`, a pack `<aa>/<sha256>.pack`;
+//     inside the driver a stripe piece and a generation's key file) whose
+//     bridge is unhealthy — the last probe failed, or 3 consecutive transport
+//     errors / stalls / timeouts / 5xx-after-retries opened its breaker for
+//     30 s, or this very call failed that way — falls back to the next
+//     bridge in the key's HRW order: whatever another bridge holds under
+//     that name is the right bytes. A fallback bridge's NOT FOUND is never
+//     reported as not found: the object may have been written through the
+//     dead bridge seconds ago. It is ErrWebDAVBridgeStale, which wraps
+//     engine.ErrAllBackendsUnavailable (the API answers 503 + Retry-After,
+//     the client retries);
+//   - a read of a MUTABLE name (an object's `%o` file, a striped object's
+//     `%s` manifest) is answered by its routed bridge only (Prompt 2b A1: a
+//     fallback that still saw the PREVIOUS version — an overwrite reaches
+//     the other bridges after ~30 s, once 310 s; a delete after ~30 s —
+//     served old bytes under the new head row's ETag, or a deleted object
+//     "existed"). Routed bridge unavailable = ErrWebDAVBridgeDown (a 503 +
+//     Retry-After), never another bridge's copy;
 //   - writes never fail over: a Put or Delete whose bridge is down fails
 //     (immutable, content-addressed callers — parity shards, packs — retry
 //     later). Writing through another bridge would leave the key's own
 //     bridge stale for up to minutes;
-//   - List reads one bridge (the container's HRW bridge, with the same
-//     fallback): it may miss an object written through another bridge in
-//     the last seconds (none is written through another bridge while the
-//     bridge set is unchanged). WalkTenant — the erasure sweep — unions the
-//     listings of EVERY bridge (each object once) and fails when any bridge
-//     cannot list (the sweep then defers the tenant); each object's Remove
-//     goes to its routed bridge;
+//   - List and WalkTenant — the erasure sweep — union the listings of EVERY
+//     bridge (each object once) and fail when any bridge cannot list (the
+//     sweep then defers the tenant). No product path calls List on this
+//     driver (engine.List reads the primary, which `sync` can never be; the
+//     sweep walks, the parity reconcile uses ListDir), so the union is the
+//     safe default, not a hot path. A walked object's Remove goes to the
+//     bridge that listed it and to its routed bridge;
+//   - Delete asks the other bridges when the routed one does not see the
+//     object (a write through another bridge a moment ago, a changed bridge
+//     set) and deletes it wherever it is seen; a bridge that cannot answer
+//     then fails the delete (Prompt 2b A4: a routed miss was a success and
+//     the bytes stayed);
 //   - HealthCheck probes every bridge: healthy while ≥ 1 is; per-bridge
 //     state in vaultaire_webdav_bridge_up{backend,bridge}.
 //
@@ -126,14 +142,23 @@ const (
 // engine.ErrAllBackendsUnavailable: never a miss, a retryable 503.
 var ErrWebDAVBridgeStale = fmt.Errorf("%w: the object's bridge is unavailable and the other bridges may not see it yet", engine.ErrAllBackendsUnavailable)
 
+// ErrWebDAVBridgeDown is a read of a mutable name whose bridge is
+// unavailable: another bridge may hold an older version, so none is asked.
+// It wraps engine.ErrAllBackendsUnavailable: a retryable 503.
+var ErrWebDAVBridgeDown = fmt.Errorf("%w: the object's bridge is unavailable and another bridge may hold an older version", engine.ErrAllBackendsUnavailable)
+
 var (
 	webdavBridgeUp = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "vaultaire_webdav_bridge_up",
 		Help: "1 when the last probe of a WebDAV backend's bridge succeeded, 0 when it failed, by backend and bridge index.",
 	}, []string{"backend", "bridge"})
+	webdavDeleteElsewhere = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vaultaire_webdav_delete_elsewhere_total",
+		Help: "Deletes on a multi-bridge WebDAV backend whose object was not on its routed bridge but on another (a write through another bridge a moment ago, a changed bridge set), by backend.",
+	}, []string{"backend"})
 	webdavFallbackReads = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_webdav_fallback_reads_total",
-		Help: "Reads a multi-bridge WebDAV backend sent to another bridge than the key's, by backend and outcome (served, stale_miss, failed).",
+		Help: "Reads a multi-bridge WebDAV backend sent to another bridge than the key's, by backend and outcome (served, stale_miss, failed), and reads of a mutable name refused because its own bridge was unavailable (routed_down).",
 	}, []string{"backend", "outcome"})
 )
 
@@ -195,7 +220,8 @@ func NewMultiWebDAVDriver(name string, cfg WebDAVConfig, logger *zap.Logger, opt
 		m.bridges = append(m.bridges, b)
 		m.ids = append(m.ids, bridgeID(u))
 	}
-	for _, o := range []string{"served", "stale_miss", "failed"} {
+	webdavDeleteElsewhere.WithLabelValues(name)
+	for _, o := range []string{"served", "stale_miss", "failed", "routed_down"} {
 		webdavFallbackReads.WithLabelValues(name, o)
 	}
 	initStripeSeries(name)
@@ -301,7 +327,7 @@ func (m *MultiWebDAVDriver) healthy(b *webdavBridge) bool {
 // reset, a stall, a timeout, a 5xx/423 left after the retries) — not that
 // the object is missing, the request was refused (4xx) or the caller left.
 func bridgeUnavailable(err error) bool {
-	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, engine.ErrInvalidInput) {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, engine.ErrInvalidInput) || errors.Is(err, errWebDAVSource) {
 		return false
 	}
 	var nf engine.NotFoundError
@@ -427,6 +453,82 @@ func readFrom[T any](ctx context.Context, m *MultiWebDAVDriver, what string, ord
 	return zero, fmt.Errorf("%s %s: bridge %d (the key's) %s; fallback: %w", m.name, what, routed, reason, lastErr)
 }
 
+// readRouted runs op on the key's own bridge only: the read of a mutable
+// name. When that bridge is marked down (and another is not) or answers as
+// an unavailable bridge, the read is ErrWebDAVBridgeDown — never another
+// bridge's copy, which may be an older version.
+func readRouted[T any](ctx context.Context, m *MultiWebDAVDriver, what string, order []int, op func(b *webdavBridge) (T, error)) (T, error) {
+	var zero T
+	routed := order[0]
+	b := m.bridges[routed]
+	if !m.healthy(b) && m.anyHealthyBut(routed) {
+		webdavFallbackReads.WithLabelValues(m.name, "routed_down").Inc()
+		return zero, fmt.Errorf("%s %s: bridge %d (the key's) is marked down: %w", m.name, what, routed, ErrWebDAVBridgeDown)
+	}
+	v, err := op(b)
+	m.note(ctx, b, err)
+	if ctx.Err() == nil && bridgeUnavailable(err) {
+		webdavFallbackReads.WithLabelValues(m.name, "routed_down").Inc()
+		return zero, fmt.Errorf("%s %s: bridge %d (the key's) failed (%s): %w", m.name, what, routed, err.Error(), ErrWebDAVBridgeDown)
+	}
+	return v, err
+}
+
+func (m *MultiWebDAVDriver) anyHealthyBut(skip int) bool {
+	for i, b := range m.bridges {
+		if i != skip && m.healthy(b) {
+			return true
+		}
+	}
+	return false
+}
+
+// immutableObject reports an object name whose bytes never change once
+// written (the content is in the name), so any bridge's copy is the right
+// one: a vault parity shard (`<tenant>__parity` — a bucket name no S3
+// bucket can take — `<24 hex>/<etag>/p<j>`) and a pack (tenant `_global`,
+// container `_packs`, `<aa>/<64 hex>.pack`).
+func immutableObject(tenantID, container, artifact string) bool {
+	segs := strings.Split(artifact, "/")
+	switch {
+	case strings.HasSuffix(container, "__parity"):
+		return len(segs) == 3 && len(segs[0]) == 24 && isLowerHex(segs[0]) && segs[1] != "" &&
+			len(segs[2]) >= 2 && segs[2][0] == 'p' && isDigits(segs[2][1:])
+	case tenantID == engine.ChunkAddressTenant && container == "_packs":
+		sum := strings.TrimSuffix(segs[len(segs)-1], ".pack")
+		return len(segs) == 2 && strings.HasSuffix(segs[1], ".pack") && len(sum) == 64 && isLowerHex(sum) && segs[0] == sum[:2]
+	}
+	return false
+}
+
+func isLowerHex(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if !('0' <= s[i] && s[i] <= '9' || 'a' <= s[i] && s[i] <= 'f') {
+			return false
+		}
+	}
+	return s != ""
+}
+
+func isDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return s != ""
+}
+
+// readObject is the read of an object name: with the fallback for an
+// immutable one, from its own bridge only for a mutable one.
+func readObject[T any](ctx context.Context, m *MultiWebDAVDriver, container, artifact, what string, order []int,
+	op func(b *webdavBridge) (T, error), missed func(T, error) bool) (T, error) {
+	if immutableObject(contextTenant(ctx), container, artifact) {
+		return readFrom(ctx, m, what, order, op, missed)
+	}
+	return readRouted(ctx, m, what, order, op)
+}
+
 func notFoundErr(err error) bool {
 	var nf engine.NotFoundError
 	return err != nil && errors.As(err, &nf)
@@ -513,7 +615,7 @@ func (m *MultiWebDAVDriver) Get(ctx context.Context, container, artifact string)
 		return nil, unstorableMiss(err, container, artifact)
 	}
 	nf := engine.ErrNotFound(container, artifact)
-	return readFrom(ctx, m, "get "+key, order,
+	return readObject(ctx, m, container, artifact, "get "+key, order,
 		func(b *webdavBridge) (io.ReadCloser, error) { return m.openOn(ctx, b, key, names, nf, 0, 0, true) },
 		func(_ io.ReadCloser, err error) bool { return notFoundErr(err) })
 }
@@ -528,15 +630,16 @@ func (m *MultiWebDAVDriver) GetRange(ctx context.Context, container, artifact st
 		return nil, fmt.Errorf("%s get range %s: %w: negative offset", m.name, key, engine.ErrInvalidInput)
 	}
 	nf := engine.ErrNotFound(container, artifact)
-	return readFrom(ctx, m, "get range "+key, order,
+	return readObject(ctx, m, container, artifact, "get range "+key, order,
 		func(b *webdavBridge) (io.ReadCloser, error) {
 			return m.openOn(ctx, b, key, names, nf, offset, length, false)
 		},
 		func(_ io.ReadCloser, err error) bool { return notFoundErr(err) })
 }
 
-// Exists asks the key's bridge, or a fallback; a fallback's "no" is
-// ErrWebDAVBridgeStale.
+// Exists asks the key's bridge — or, for an immutable name, a fallback,
+// whose "no" is ErrWebDAVBridgeStale; never true from another bridge for a
+// mutable name (ErrWebDAVBridgeDown).
 func (m *MultiWebDAVDriver) Exists(ctx context.Context, container, artifact string) (bool, error) {
 	key, names, order, err := m.resolve(ctx, "Exists", container, artifact)
 	if errors.Is(err, errNameTooLong) {
@@ -545,7 +648,7 @@ func (m *MultiWebDAVDriver) Exists(ctx context.Context, container, artifact stri
 	if err != nil {
 		return false, err
 	}
-	return readFrom(ctx, m, "exists "+key, order,
+	return readObject(ctx, m, container, artifact, "exists "+key, order,
 		func(b *webdavBridge) (bool, error) {
 			ok, err := b.drv.Exists(ctx, container, artifact)
 			if err != nil || ok {
@@ -557,7 +660,13 @@ func (m *MultiWebDAVDriver) Exists(ctx context.Context, container, artifact stri
 		func(ok bool, err error) bool { return err == nil && !ok })
 }
 
-// Delete removes the object through its bridge only.
+// Delete removes the object through its routed bridge. When that bridge
+// does not see it (neither the `%o` file nor a manifest) — a write through
+// another bridge a moment ago, or a bridge-set change that re-routed the
+// key — every other bridge is asked (a PROPFIND each, answered from the
+// bridge's metadata cache) and the object is deleted wherever it is seen;
+// a bridge that cannot answer then fails the delete: a miss is never
+// "deleted" on one bridge's word (Prompt 2b A4).
 func (m *MultiWebDAVDriver) Delete(ctx context.Context, container, artifact string) error {
 	key, names, order, err := m.resolve(ctx, "Delete", container, artifact)
 	if errors.Is(err, errNameTooLong) {
@@ -566,22 +675,62 @@ func (m *MultiWebDAVDriver) Delete(ctx context.Context, container, artifact stri
 	if err != nil {
 		return err
 	}
-	b := m.bridges[order[0]]
 	m.mcache.drop(manifestCacheKey(names))
-	err = b.drv.Delete(ctx, container, artifact)
-	if err == nil {
-		err = m.dropManifest(ctx, b, key, names, container, artifact) // a striped object: manifest, then pieces
-	}
+	b := m.bridges[order[0]]
+	found, err := m.deleteOn(ctx, b, key, names, container, artifact)
 	m.note(ctx, b, err)
 	if err != nil {
 		return fmt.Errorf("bridge %d: %w", b.idx, err)
 	}
+	if found {
+		return nil
+	}
+	var errs []error
+	for _, i := range order[1:] {
+		o := m.bridges[i]
+		seen, err := m.deleteOn(ctx, o, key, names, container, artifact)
+		m.note(ctx, o, err)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("bridge %d: %w", o.idx, err))
+			continue
+		}
+		if seen {
+			webdavDeleteElsewhere.WithLabelValues(m.name).Inc()
+			m.logger.Info("webdav delete: the object was on another bridge than its routed one",
+				zap.String("backend", m.name), zap.String("key", key), zap.Int("bridge", o.idx), zap.Int("routed", b.idx))
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("%s delete %s: the routed bridge %d does not see the object and another bridge could not be asked: %w: %w",
+			m.name, key, b.idx, errors.Join(errs...), ErrWebDAVBridgeDown)
+	}
 	return nil
 }
 
-// List lists the container through ONE bridge (the container's HRW bridge,
-// with the read fallback). It may miss an object another bridge wrote in
-// the last seconds to minutes (cross-bridge staleness); WalkTenant does not.
+// deleteOn deletes the object at names as bridge b sees it — the `%o` file
+// and a striped version's manifest and pieces; found says whether b saw
+// either.
+func (m *MultiWebDAVDriver) deleteOn(ctx context.Context, b *webdavBridge, key string, names []string, container, artifact string) (bool, error) {
+	e, found, err := b.drv.stat(ctx, names)
+	if err != nil {
+		return false, err
+	}
+	plain := found && !e.dir
+	if plain {
+		if err := b.drv.removeNames(ctx, names); err != nil {
+			return true, err
+		}
+	}
+	me, mfound, err := b.drv.stat(ctx, manifestNamesOf(names))
+	if err != nil {
+		return plain, err
+	}
+	if !mfound || me.dir {
+		return plain, nil
+	}
+	return true, m.dropManifest(ctx, b, key, names, container, artifact) // manifest, then pieces
+}
+
 // RemoveEmptyDir removes the folder at dir under container when it holds
 // nothing — on the ONE account every bridge mounts. A collection DELETE is
 // recursive (RFC 4918 §9.6.1) and a bridge lags the others' writes by
@@ -671,24 +820,45 @@ func (m *MultiWebDAVDriver) ListDir(ctx context.Context, container, dir string) 
 	return l.dirs, l.files, err
 }
 
+// List is the union of every bridge's listing of the container (each key
+// once, sorted), so a key written through any bridge is listed even while
+// the others cannot see it yet; a bridge that cannot list fails it — a
+// caller acting on "not listed" must never act on one bridge's view. A key
+// deleted a moment ago may still be listed by a lagging bridge. No product
+// path calls it today (engine.List reads the primary, which `sync` can
+// never be; the erasure sweep walks with WalkTenant, the parity reconcile
+// lists with ListDir) — Prompt 2b A3.
 func (m *MultiWebDAVDriver) List(ctx context.Context, container, prefix string) ([]string, error) {
 	tenantID, err := requireTenant(ctx, m.name, "List", "", m.logger)
 	if err != nil {
 		return nil, err
 	}
-	names, err := tenantNames(tenantID, container)
-	if err != nil {
+	if _, err := tenantNames(tenantID, container); err != nil {
 		return nil, fmt.Errorf("%s list %s: %w", m.name, container, err)
 	}
-	return readFrom(ctx, m, "list "+tenantKey(tenantID, container, prefix), m.rank(names),
-		func(b *webdavBridge) ([]string, error) { return b.drv.List(ctx, container, prefix) },
-		func([]string, error) bool { return false })
+	seen := map[string]struct{}{}
+	for _, b := range m.bridges {
+		keys, err := b.drv.List(ctx, container, prefix)
+		m.note(ctx, b, err)
+		if err != nil {
+			return nil, fmt.Errorf("%s list %s: bridge %d: %w", m.name, tenantKey(tenantID, container, prefix), b.idx, err)
+		}
+		for _, k := range keys {
+			seen[k] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for k := range seen {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // WalkTenant implements engine.TenantWalker for the erasure sweep: the union
 // of every bridge's walk of `t-<tenant>/` (an object written through any
 // bridge is found even while the others cannot see it yet), each object
-// once, its Remove on the object's routed bridge. A bridge that cannot
+// once, its Remove on the bridge that listed it and on its routed bridge. A bridge that cannot
 // list fails the walk — the sweep defers the tenant rather than call it
 // erased while a bridge may still name an object.
 func (m *MultiWebDAVDriver) WalkTenant(ctx context.Context, tenantID string, fn func(engine.TenantObject) error) error {
@@ -703,8 +873,21 @@ func (m *MultiWebDAVDriver) WalkTenant(ctx context.Context, tenantID string, fn 
 				return nil
 			}
 			seen[k] = struct{}{}
-			routed := m.bridges[m.rank(routingNames(names))[0]] // a manifest goes where its object would
-			return fn(tenantObject(names, func(ctx context.Context) error { return routed.drv.removeNames(ctx, names) }))
+			// Removed through the bridge that listed it (it sees the file)
+			// and through its routed bridge (a manifest goes where its
+			// object would): the routed bridge alone answered 404 for a file
+			// written through another bridge a moment ago, and the bytes
+			// stayed (Prompt 2b A4).
+			lister, routed := b, m.bridges[m.rank(routingNames(names))[0]]
+			return fn(tenantObject(names, func(ctx context.Context) error {
+				if err := lister.drv.removeNames(ctx, names); err != nil {
+					return err
+				}
+				if routed != lister {
+					return routed.drv.removeNames(ctx, names)
+				}
+				return nil
+			}))
 		})
 		m.note(ctx, b, err)
 		if err != nil {

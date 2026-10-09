@@ -90,6 +90,12 @@ jobs:
           USER: ${{ secrets.SSH_USER_DEV }}
         run: |
           ssh-keyscan -t ed25519 "$HOST" >> ~/.ssh/known_hosts
+          # Keepalives: vaultaire-switch waits silently for the old slot to
+          # drain (up to 600 s of sessions, 900 s of long operations); an idle
+          # session was cut after ~4 min (2026-10-09, 9af3ab4: "client_loop:
+          # send disconnect: Broken pipe" — the switch finished on the box,
+          # the job failed and skipped the /version check).
+          printf 'Host *\n  ServerAliveInterval 30\n  ServerAliveCountMax 40\n' >> ~/.ssh/config
           # Clear stale staging artifacts before uploading. A prior failed deploy or a
           # stray instance can leave /tmp/vaultaire-linux behind; unlinking frees the
           # path even when the file is still held by a running process, which otherwise
@@ -177,6 +183,12 @@ jobs:
           USER: ${{ secrets.SSH_USER_PROD }}
         run: |
           ssh-keyscan -t ed25519 "$HOST" >> ~/.ssh/known_hosts
+          # Keepalives: vaultaire-switch waits silently for the old slot to
+          # drain (up to 600 s of sessions, 900 s of long operations); an idle
+          # session was cut after ~4 min (2026-10-09, 9af3ab4: "client_loop:
+          # send disconnect: Broken pipe" — the switch finished on the box,
+          # the job failed and skipped the /version check).
+          printf 'Host *\n  ServerAliveInterval 30\n  ServerAliveCountMax 40\n' >> ~/.ssh/config
           # Clear stale staging artifacts before uploading. A prior failed deploy or a
           # stray instance can leave /tmp/vaultaire-linux behind; unlinking frees the
           # path even when the file is still held by a running process, which otherwise
