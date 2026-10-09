@@ -187,6 +187,11 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 	// Backend-attribution slot: the engine records which backend served the
 	// bytes so CDN egress lands in backend_bandwidth_daily too.
 	ctx, _ = common.WithBackendNote(ctx)
+	if !isChunked {
+		// The recorded size: a backend holding two versions of the key after
+		// an interrupted commit serves the one of this size (Prompt 2b B3).
+		ctx = engine.WithExpectedSize(ctx, sizeBytes)
+	}
 	reader, err := s.engine.Get(ctx, container, key)
 	if err != nil {
 		s.logger.Error("cdn engine.Get failed",

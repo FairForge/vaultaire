@@ -53,15 +53,29 @@ import (
 // miss.
 //
 // Write order — nothing references a piece before every piece is verified:
-// key file, pieces (≤ K staged on disk and in flight, K = bridges × large
-// slots; each from a seekable section of its staging file so the driver's
-// own retry resends it; size-verified), then the manifest (replacing an
-// older one), then the plain `%o` file of a previous small version is
-// deleted, then the previous generation's pieces. A failure before the
-// manifest leaves pieces nobody references: deleted at once when possible,
-// else by ReapOrphanStripes after a grace period (the stripe_gc job). A
-// crash between the manifest and the deletion of an old `%o` file leaves
-// both; Get then serves the `%o` file until the next write of the key.
+// key file (with a heartbeat), pieces (≤ K staged on disk and in flight, K =
+// bridges × large slots, one upload at most K minus one bridge's slots;
+// each from a seekable section of its staging file so the driver's own
+// retry resends it; size-verified), the key file's heartbeat rewritten every
+// 30 min meanwhile, then a last heartbeat and a stat of every piece on its
+// bridge (a piece the reaper took fails the PUT — Prompt 2b B1), then — under
+// the key's commit lock, which the plain path's write takes too (B3) — the
+// manifest (replacing an older one), the plain `%o` file of a previous small
+// version deleted, and the previous generation RETIRED: a `retired%o` marker
+// with its time, deleted by the reaper an hour later so GETs already
+// streaming it finish (B4). A delete retires the same way. A manifest PUT
+// that fails is resolved by reading the manifest back (B2): it names this
+// generation = committed; another or none = this generation is dropped;
+// unreadable = nothing deleted, the error returned (the reaper decides by
+// manifest). A failure before the manifest leaves pieces nobody references:
+// deleted at once when possible, else by ReapOrphanStripes after a grace
+// period (the stripe_gc job), counted from the generation's latest
+// heartbeat. A crash between the manifest and the deletion of an old `%o`
+// file leaves both; a read that knows the recorded size
+// (engine.WithExpectedSize — the API's GET) serves the one of that size
+// (the plain file is below the stripe minimum, the manifest at or above it,
+// so the sizes differ whenever the threshold has not moved), and answers 503
+// when neither matches; without a size it serves the `%o` file.
 //
 // Unknown length (ContentLength 0): never striped — the body streams to one
 // bridge as before (every engine caller states the length; aws-chunked
@@ -92,8 +106,25 @@ const (
 	stripeManifestFormat = "vaultaire-webdav-stripe/1"
 	stripeManifestMax    = 4 << 20
 	stripeKeyFile        = "key" + WebDAVLeafMarker
+	stripeRetiredFile    = "retired" + WebDAVLeafMarker
 	stripeGenTimeLayout  = "20060102T150405Z"
+
+	// WebDAVDefaultStripeHeartbeat: a running upload rewrites its key file's
+	// heartbeat this often.
+	WebDAVDefaultStripeHeartbeat = 30 * time.Minute
+	// WebDAVDefaultStripeRetireGrace: a retired generation (overwritten or
+	// deleted) is reaped this long after its marker.
+	WebDAVDefaultStripeRetireGrace = time.Hour
+	// webdavStagingStale: a staging file left in the shared root (the layout
+	// before per-process folders) is removed at boot past this age — no
+	// upload runs longer (the long-op cap is 6 h).
+	webdavStagingStale = 7 * time.Hour
 )
+
+// errStripeAmbiguous: a striped object has both a plain file and a manifest
+// (an interrupted commit) and neither has the size the caller's record says.
+// Retryable (503), never someone else's bytes.
+var errStripeAmbiguous = fmt.Errorf("%w: the object has two stored versions and neither has its recorded size", engine.ErrAllBackendsUnavailable)
 
 // errStripePieceGone: a piece the manifest names is not on its bridge — the
 // object was overwritten or deleted during the read. Retryable (503), never
@@ -111,7 +142,7 @@ var (
 	}, []string{"backend"})
 	webdavStripeOrphans = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_webdav_stripe_orphans_total",
-		Help: "Piece generations no manifest references, by backend and outcome (left: a failed upload could not delete them; reaped: deleted by the reaper).",
+		Help: "Piece generations no manifest references, by backend and outcome (left: a failed upload could not delete them; retired: replaced or deleted, kept an hour for running reads; reaped: deleted by the reaper).",
 	}, []string{"backend", "outcome"})
 )
 
@@ -120,7 +151,7 @@ func initStripeSeries(backend string) {
 		webdavStripePieces.WithLabelValues(backend, op)
 	}
 	webdavStripeBytes.WithLabelValues(backend)
-	for _, o := range []string{"left", "reaped"} {
+	for _, o := range []string{"left", "reaped", "retired"} {
 		webdavStripeOrphans.WithLabelValues(backend, o)
 	}
 }
@@ -140,10 +171,13 @@ type stripePiece struct {
 	SHA256 string `json:"sha256"`
 }
 
-// stripeKey is the content of a generation's key file.
+// stripeKey is the content of a generation's key file. Heartbeat is the
+// last time the upload was seen running (rewritten every
+// stripeHeartbeat): the reaper counts the grace from it.
 type stripeKey struct {
-	Container string `json:"container"`
-	Artifact  string `json:"artifact"`
+	Container string    `json:"container"`
+	Artifact  string    `json:"artifact"`
+	Heartbeat time.Time `json:"heartbeat,omitempty"`
 }
 
 // --- names -----------------------------------------------------------------
@@ -299,13 +333,9 @@ func (m *MultiWebDAVDriver) putStriped(ctx context.Context, key string, names []
 	gen := newStripeGen(m.now())
 	dir := stripeDir(names[0], names[1], artifact, gen)
 	man := &stripeManifest{Format: stripeManifestFormat, Size: size, PieceSize: m.stripePiece, Gen: gen, Dir: dir}
-
-	kb, err := json.Marshal(stripeKey{Container: container, Artifact: artifact})
-	if err != nil {
-		return fmt.Errorf("%s put %s: %w", m.name, key, err)
-	}
 	keyNames := append(append([]string(nil), dir...), stripeKeyFile)
-	if err := m.putSmall(ctx, key+" (stripe key)", keyNames, kb); err != nil {
+	hb := &stripeHeartbeat{m: m, key: key, names: keyNames, file: stripeKey{Container: container, Artifact: artifact}}
+	if err := hb.beat(ctx); err != nil {
 		return fmt.Errorf("%s put %s: stripe key file: %w", m.name, key, err)
 	}
 
@@ -314,6 +344,7 @@ func (m *MultiWebDAVDriver) putStriped(ctx context.Context, key string, names []
 	started := 0 // pieces whose upload began: a cancelled one may still land
 	pctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	stopBeats := hb.run(pctx)
 	var (
 		wg       sync.WaitGroup
 		mu       sync.Mutex
@@ -327,10 +358,19 @@ func (m *MultiWebDAVDriver) putStriped(ctx context.Context, key string, names []
 		mu.Unlock()
 		cancel()
 	}
+	// One upload holds at most its own share of the staging slots, so
+	// another striped PUT still progresses (Prompt 2b B5).
+	own := make(chan struct{}, m.perUploadSlots())
 	consumed := false
 	for i := 0; i < n && pctx.Err() == nil; i++ {
+		releaseOwn, err := acquireSlot(pctx, own, "stripe staging slots of this upload")
+		if err != nil {
+			fail(err)
+			break
+		}
 		release, err := acquireSlot(pctx, m.stripeSlots, "stripe staging slots")
 		if err != nil {
+			releaseOwn()
 			fail(err)
 			break
 		}
@@ -342,6 +382,7 @@ func (m *MultiWebDAVDriver) putStriped(ctx context.Context, key string, names []
 		consumed = consumed || err == nil || !errors.Is(err, errStageCreate)
 		if err != nil {
 			release()
+			releaseOwn()
 			fail(fmt.Errorf("piece %d: %w", i, err))
 			break
 		}
@@ -350,6 +391,7 @@ func (m *MultiWebDAVDriver) putStriped(ctx context.Context, key string, names []
 		wg.Add(1)
 		go func(i int, f *os.File, sz int64) {
 			defer wg.Done()
+			defer releaseOwn()
 			defer release()
 			defer m.unstage(f)
 			if err := m.putPiece(pctx, key, dir, i, f, sz); err != nil {
@@ -358,8 +400,26 @@ func (m *MultiWebDAVDriver) putStriped(ctx context.Context, key string, names []
 		}(i, f, sz)
 	}
 	wg.Wait() // every piece goroutine has returned (and unstaged its file) before any cleanup
+	stopBeats()
 	if firstErr == nil && ctx.Err() != nil {
 		firstErr = ctx.Err()
+	}
+	if firstErr == nil {
+		firstErr = hb.fresh() // the reaper may have judged a silent upload dead
+	}
+	if firstErr == nil {
+		// The last heartbeat before the commit, then every piece is asked
+		// for on the bridge it was written through: a generation the reaper
+		// took (or a bridge that lost a piece) fails the PUT here — the
+		// manifest of a missing piece is never written (Prompt 2b B1).
+		if err := hb.beat(ctx); err != nil {
+			firstErr = fmt.Errorf("stripe key file heartbeat: %w", err)
+		} else if m.beforeVerify != nil {
+			m.beforeVerify()
+		}
+		if firstErr == nil {
+			firstErr = m.verifyPieces(ctx, key, man)
+		}
 	}
 	if firstErr != nil {
 		m.dropGeneration(ctx, key, man, started)
@@ -369,10 +429,19 @@ func (m *MultiWebDAVDriver) putStriped(ctx context.Context, key string, names []
 		}
 		return err
 	}
+	return m.commitStripe(ctx, key, names, order, container, artifact, man)
+}
 
-	// Commit: the manifest replaces whatever the key was.
+// commitStripe makes man the key's version, under the key's commit lock:
+// the manifest, the removal of a previous plain file, the retirement of the
+// previous generation.
+func (m *MultiWebDAVDriver) commitStripe(ctx context.Context, key string, names []string, order []int,
+	container, artifact string, man *stripeManifest) error {
+	unlock := m.keyLocks.lock(manifestCacheKey(names))
+	defer unlock()
 	kbridge := m.bridges[order[0]]
-	old, oerr := m.readManifestOn(ctx, kbridge, key, names, engine.ErrNotFound(container, artifact))
+	nf := engine.ErrNotFound(container, artifact)
+	old, oerr := m.readManifestOn(ctx, kbridge, key, names, nf)
 	if oerr != nil && !notFoundErr(oerr) {
 		m.logger.Warn("webdav stripe: previous manifest unreadable — its pieces are left to the reaper",
 			zap.String("backend", m.name), zap.String("key", key), zap.Error(oerr))
@@ -385,24 +454,177 @@ func (m *MultiWebDAVDriver) putStriped(ctx context.Context, key string, names []
 	err = kbridge.drv.putNames(ctx, key+" (stripe manifest)", manifestNamesOf(names), bytes.NewReader(mb), engine.WithContentLength(int64(len(mb))))
 	m.note(ctx, kbridge, err)
 	if err != nil {
-		m.dropGeneration(ctx, key, man, n)
-		return fmt.Errorf("%s put %s: stripe manifest: %w: %w", m.name, key, err, engine.ErrNoFailover)
+		// Ambiguous: the bridge may have stored it and answered 5xx or
+		// timed out. The manifest itself says (Prompt 2b B2); a generation
+		// is never deleted without proof that no manifest names it.
+		cur, rerr := m.readManifestOn(context.WithoutCancel(ctx), kbridge, key, names, nf)
+		switch {
+		case rerr == nil && cur.Gen == man.Gen:
+			m.logger.Warn("webdav stripe: the manifest PUT failed but the manifest was stored — committed",
+				zap.String("backend", m.name), zap.String("key", key), zap.String("gen", man.Gen), zap.Error(err))
+		case rerr == nil || notFoundErr(rerr):
+			m.dropGeneration(ctx, key, man, len(man.Pieces))
+			return fmt.Errorf("%s put %s: stripe manifest: %w: %w", m.name, key, err, engine.ErrNoFailover)
+		default:
+			webdavStripeOrphans.WithLabelValues(m.name, "left").Inc()
+			return fmt.Errorf("%s put %s: stripe manifest: %w; whether it was stored is unknown (reading it back: %w) — nothing deleted: %w",
+				m.name, key, err, rerr, engine.ErrNoFailover)
+		}
+	}
+	if m.afterManifest != nil {
+		m.afterManifest()
 	}
 	// The plain file of a previous small version would shadow the manifest.
 	if err := kbridge.drv.removeNames(ctx, names); err != nil {
 		return fmt.Errorf("%s put %s: the striped object is stored, but the previous plain file could not be removed and still shadows it: %w: %w",
 			m.name, key, err, engine.ErrNoFailover)
 	}
-	webdavStripeBytes.WithLabelValues(m.name).Add(float64(size))
+	webdavStripeBytes.WithLabelValues(m.name).Add(float64(man.Size))
 	m.mcache.put(manifestCacheKey(names), man)
-	if old != nil && old.Gen != gen {
-		if err := m.deleteStripe(ctx, key, old); err != nil {
-			webdavStripeOrphans.WithLabelValues(m.name, "left").Inc()
-			m.logger.Warn("webdav stripe: previous generation not deleted — left to the reaper",
-				zap.String("backend", m.name), zap.String("key", key), zap.String("gen", old.Gen), zap.Error(err))
+	if old != nil && old.Gen != man.Gen {
+		m.retireStripe(ctx, key, old)
+	}
+	return nil
+}
+
+// perUploadSlots is the staging slots one upload may hold: all of them
+// minus one bridge's large slots (at least one).
+func (m *MultiWebDAVDriver) perUploadSlots() int {
+	return max(1, cap(m.stripeSlots)-m.largePerBridge)
+}
+
+// verifyPieces asks every piece's bridge (the one it was written through)
+// for it: present, of its size.
+func (m *MultiWebDAVDriver) verifyPieces(ctx context.Context, key string, man *stripeManifest) error {
+	for i, p := range man.Pieces {
+		pn := append(append([]string(nil), man.Dir...), pieceName(i))
+		b := m.bridges[m.rank(pn)[0]]
+		e, found, err := b.drv.stat(ctx, pn)
+		m.note(ctx, b, err)
+		if err != nil {
+			return fmt.Errorf("verify piece %d on bridge %d: %w", i, b.idx, err)
+		}
+		if !found || e.dir || (e.size >= 0 && e.size != p.Size) {
+			return fmt.Errorf("verify piece %d on bridge %d: missing or of another size before the commit (reaped?)", i, b.idx)
 		}
 	}
 	return nil
+}
+
+// stripeHeartbeat keeps a running upload's key file fresh.
+type stripeHeartbeat struct {
+	m     *MultiWebDAVDriver
+	key   string
+	names []string
+	file  stripeKey
+	mu    sync.Mutex
+	last  time.Time // the last heartbeat written
+}
+
+// beat writes the key file with the heartbeat now.
+func (h *stripeHeartbeat) beat(ctx context.Context) error {
+	now := h.m.now().UTC()
+	f := h.file
+	f.Heartbeat = now
+	kb, err := json.Marshal(f)
+	if err != nil {
+		return err
+	}
+	if err := h.m.putSmall(ctx, h.key+" (stripe key)", h.names, kb); err != nil {
+		return err
+	}
+	h.mu.Lock()
+	h.last = now
+	h.mu.Unlock()
+	return nil
+}
+
+// run beats every stripeHeartbeat until the returned stop.
+func (h *stripeHeartbeat) run(ctx context.Context) (stop func()) {
+	every := h.m.stripeHeartbeat
+	if every <= 0 {
+		return func() {}
+	}
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if err := h.beat(ctx); err != nil && ctx.Err() == nil {
+					h.m.logger.Warn("webdav stripe: heartbeat not written", zap.String("backend", h.m.name),
+						zap.String("key", h.key), zap.Error(err))
+				}
+			}
+		}
+	}()
+	var once sync.Once
+	return func() { once.Do(func() { close(done); wg.Wait() }) }
+}
+
+// fresh fails an upload whose last heartbeat is older than half the
+// reaper's grace: the reaper may have judged it dead.
+func (h *stripeHeartbeat) fresh() error {
+	h.mu.Lock()
+	last := h.last
+	h.mu.Unlock()
+	if age := h.m.now().Sub(last); age > h.m.stripeGraceOrDefault()/2 {
+		return fmt.Errorf("the upload's heartbeat is %s old (the reaper's grace is %s): its pieces may be gone", age.Round(time.Second), h.m.stripeGraceOrDefault())
+	}
+	return nil
+}
+
+func (m *MultiWebDAVDriver) stripeGraceOrDefault() time.Duration {
+	if m.stripeGrace > 0 {
+		return m.stripeGrace
+	}
+	return WebDAVDefaultStripeGrace
+}
+
+// keyLocker serialises the commits of one key in this process (the plain
+// path's write + manifest removal, the striped path's manifest + plain
+// removal, a delete): interleaved, both used to delete each other's file
+// and the object was gone (Prompt 2b B3). Across the two slots a commit of
+// the same key can overlap only during a deploy's drain.
+type keyLocker struct {
+	mu sync.Mutex
+	m  map[string]*keyLock
+}
+
+type keyLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+func (l *keyLocker) lock(k string) (unlock func()) {
+	l.mu.Lock()
+	if l.m == nil {
+		l.m = map[string]*keyLock{}
+	}
+	e := l.m[k]
+	if e == nil {
+		e = &keyLock{}
+		l.m[k] = e
+	}
+	e.refs++
+	l.mu.Unlock()
+	e.mu.Lock()
+	return func() {
+		e.mu.Unlock()
+		l.mu.Lock()
+		if e.refs--; e.refs == 0 {
+			delete(l.m, k)
+		}
+		l.mu.Unlock()
+	}
 }
 
 var errStageCreate = errors.New("create staging file")
@@ -533,25 +755,21 @@ func (m *MultiWebDAVDriver) removeRouted(ctx context.Context, names []string) er
 	return err
 }
 
-// deleteStripe deletes a generation's pieces (each through its bridge), its
-// key file and its folder.
-func (m *MultiWebDAVDriver) deleteStripe(ctx context.Context, key string, man *stripeManifest) error {
-	var errs []error
-	for i := range man.Pieces {
-		if err := m.removeRouted(ctx, append(append([]string(nil), man.Dir...), pieceName(i))); err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		webdavStripePieces.WithLabelValues(m.name, "deleted").Inc()
+// retireStripe marks a replaced or deleted generation retired: a
+// `retired%o` file holding the time, after which the reaper deletes it
+// (WebDAVDefaultStripeRetireGrace) — a GET that was already streaming it
+// finishes (Prompt 2b B4: it was deleted right after the commit and every
+// running read of the old version failed). A marker that cannot be written
+// leaves the generation to the reaper's ordinary grace.
+func (m *MultiWebDAVDriver) retireStripe(ctx context.Context, key string, man *stripeManifest) {
+	names := append(append([]string(nil), man.Dir...), stripeRetiredFile)
+	if err := m.putSmall(context.WithoutCancel(ctx), key+" (stripe retired)", names, []byte(m.now().UTC().Format(time.RFC3339Nano))); err != nil {
+		webdavStripeOrphans.WithLabelValues(m.name, "left").Inc()
+		m.logger.Warn("webdav stripe: previous generation not marked retired — left to the reaper",
+			zap.String("backend", m.name), zap.String("key", key), zap.String("gen", man.Gen), zap.Error(err))
+		return
 	}
-	if err := m.removeRouted(ctx, append(append([]string(nil), man.Dir...), stripeKeyFile)); err != nil {
-		errs = append(errs, err)
-	}
-	if len(errs) > 0 {
-		return fmt.Errorf("%s delete %s (striped, gen %s): %w", m.name, key, man.Gen, errors.Join(errs...))
-	}
-	m.removeGenerationDir(ctx, man.Dir)
-	return nil
+	webdavStripeOrphans.WithLabelValues(m.name, "retired").Inc()
 }
 
 // --- read --------------------------------------------------------------------
@@ -586,12 +804,39 @@ func (m *MultiWebDAVDriver) readManifestOn(ctx context.Context, b *webdavBridge,
 func (m *MultiWebDAVDriver) openOn(ctx context.Context, b *webdavBridge, key string, names []string,
 	notFound error, offset, length int64, whole bool) (io.ReadCloser, error) {
 	ck := manifestCacheKey(names)
-	if man, ok := m.mcache.get(ck); ok {
+	want, sized := engine.ExpectedSize(ctx)
+	if man, ok := m.mcache.get(ck); ok && (!sized || man.Size == want) && !m.genRetired(ctx, man) {
 		r, err := m.openStripe(ctx, key, ck, man, offset, length)
 		if !errors.Is(err, errStripePieceGone) {
 			return r, err
 		}
-		m.mcache.drop(ck) // replaced or deleted elsewhere: resolve the key again
+	}
+	m.mcache.drop(ck) // absent, retired, replaced or deleted elsewhere: resolve the key again
+	if sized {
+		// The caller knows the committed size: a plain file of another size
+		// is not the committed version (both files after an interrupted
+		// commit — Prompt 2b B3); the manifest of that size is.
+		e, found, err := b.drv.stat(ctx, names)
+		if err != nil {
+			return nil, err
+		}
+		if found && !e.dir && e.size >= 0 && e.size != want {
+			man, merr := m.readManifestOn(ctx, b, key, names, notFound)
+			if merr == nil && man.Size == want {
+				m.mcache.put(ck, man)
+				return m.openStripe(ctx, key, ck, man, offset, length)
+			}
+			if merr != nil && !notFoundErr(merr) {
+				return nil, merr
+			}
+			if merr == nil {
+				m.logger.Error("webdav: an object has a plain file and a manifest, neither of its recorded size",
+					zap.String("backend", m.name), zap.String("key", key), zap.Int64("recorded", want),
+					zap.Int64("plain", e.size), zap.Int64("manifest", man.Size))
+				return nil, fmt.Errorf("%s get %s: %w", m.name, key, errStripeAmbiguous)
+			}
+			// Only the plain file: serve it (the record may lag a write).
+		}
 	}
 	var rc io.ReadCloser
 	var err error
@@ -610,6 +855,19 @@ func (m *MultiWebDAVDriver) openOn(ctx context.Context, b *webdavBridge, key str
 		}
 		return nil, merr
 	}
+	if m.genRetired(ctx, man) {
+		// A manifest naming a retired generation was read just as it was
+		// replaced: once more; a second retired one is a stale view (503),
+		// never the old bytes (Prompt 2b B4).
+		man2, err2 := m.readManifestOn(ctx, b, key, names, notFound)
+		if err2 != nil {
+			return nil, err2
+		}
+		if man2.Gen == man.Gen || m.genRetired(ctx, man2) {
+			return nil, fmt.Errorf("%s get %s: the manifest names a retired generation (%s): %w", m.name, key, man2.Gen, ErrWebDAVBridgeStale)
+		}
+		man = man2
+	}
 	m.mcache.put(ck, man)
 	r, oerr := m.openStripe(ctx, key, ck, man, offset, length)
 	if errors.Is(oerr, errStripePieceGone) {
@@ -621,6 +879,18 @@ func (m *MultiWebDAVDriver) openOn(ctx context.Context, b *webdavBridge, key str
 		}
 	}
 	return r, oerr
+}
+
+// genRetired reports whether a cached manifest's generation has been
+// retired (replaced or deleted — by this process or another slot): its
+// pieces stay an hour for reads already streaming, so a missing piece no
+// longer tells a cache it is stale (Prompt 2b B4). One stat on the
+// marker's own bridge; an error reads as retired (resolve again).
+func (m *MultiWebDAVDriver) genRetired(ctx context.Context, man *stripeManifest) bool {
+	names := append(append([]string(nil), man.Dir...), stripeRetiredFile)
+	b := m.bridges[m.rank(names)[0]]
+	_, found, err := b.drv.stat(ctx, names)
+	return err != nil || found
 }
 
 // stripeSeg is one piece's part of a read.
@@ -938,10 +1208,15 @@ func (m *MultiWebDAVDriver) reapContainer(ctx context.Context, lb *webdavBridge,
 	return nil
 }
 
-// reapGeneration judges one generation folder and deletes it when its name
-// says it is past the grace and no manifest references it; true when the
-// folder is gone. An empty one (an upload that died after its MKCOL) is a
-// folder removed, not a generation reaped.
+// reapGeneration judges one generation folder and deletes it when it is
+// past the grace and no manifest references it; true when the folder is
+// gone. The grace is counted from the generation's latest sign of life: its
+// name's time, its key file's heartbeat (on any bridge — a running upload
+// rewrites it every 30 min, Prompt 2b B1), or, for a retired generation,
+// its `retired%o` marker plus WebDAVDefaultStripeRetireGrace (B4). The
+// heartbeat is read again as the last thing before the files go. An empty
+// one (an upload that died after its MKCOL) is a folder removed, not a
+// generation reaped.
 func (m *MultiWebDAVDriver) reapGeneration(ctx context.Context, lb *webdavBridge, dir []string, gen string, cutoff time.Time, res *StripeReapResult) bool {
 	t, ok := stripeGenTime(gen)
 	if !ok {
@@ -949,9 +1224,30 @@ func (m *MultiWebDAVDriver) reapGeneration(ctx context.Context, lb *webdavBridge
 		return false
 	}
 	res.Generations++
-	if t.After(cutoff) {
-		res.Young++
+	retiredAt, retired, err := m.retiredAt(ctx, dir)
+	if err != nil {
+		res.fail("%s: %v", strings.Join(dir, "/"), err)
 		return false
+	}
+	if retired {
+		if m.now().Sub(retiredAt) < m.retireGraceOrDefault() {
+			res.Young++
+			return false
+		}
+	} else {
+		if t.After(cutoff) {
+			res.Young++
+			return false
+		}
+		k, _, err := m.readKeyFile(ctx, dir)
+		if err != nil {
+			res.fail("%s: %v", strings.Join(dir, "/"), err)
+			return false
+		}
+		if k.Heartbeat.After(cutoff) {
+			res.Young++
+			return false
+		}
 	}
 	live, err := m.generationLive(ctx, dir)
 	if err != nil {
@@ -960,6 +1256,20 @@ func (m *MultiWebDAVDriver) reapGeneration(ctx context.Context, lb *webdavBridge
 	}
 	if live {
 		res.Live++
+		return false
+	}
+	if m.beforeReapDelete != nil {
+		m.beforeReapDelete()
+	}
+	// The last thing before the DELETEs: a heartbeat since the judgement is
+	// a running upload (Prompt 2b A6). A retired generation was committed
+	// and replaced: its upload is over.
+	if k, _, err := m.readKeyFile(ctx, dir); !retired && (err != nil || k.Heartbeat.After(cutoff)) {
+		if err != nil {
+			res.fail("%s: %v", strings.Join(dir, "/"), err)
+		} else {
+			res.Young++
+		}
 		return false
 	}
 	n, err := m.removeGeneration(ctx, lb, dir)
@@ -979,30 +1289,90 @@ func (m *MultiWebDAVDriver) reapGeneration(ctx context.Context, lb *webdavBridge
 	return true
 }
 
+func (m *MultiWebDAVDriver) retireGraceOrDefault() time.Duration {
+	if m.stripeRetireGrace > 0 {
+		return m.stripeRetireGrace
+	}
+	return WebDAVDefaultStripeRetireGrace
+}
+
+// retiredAt reads a generation's `retired%o` marker (immutable once
+// written: the read fallback applies).
+func (m *MultiWebDAVDriver) retiredAt(ctx context.Context, dir []string) (time.Time, bool, error) {
+	names := append(append([]string(nil), dir...), stripeRetiredFile)
+	rc, err := readFrom(ctx, m, "get stripe retired "+strings.Join(dir, "/"), m.rank(names),
+		func(b *webdavBridge) (io.ReadCloser, error) {
+			return b.drv.getNames(ctx, strings.Join(names, "/"), names, engine.ErrNotFound(dir[1], stripeRetiredFile))
+		},
+		func(_ io.ReadCloser, err error) bool { return notFoundErr(err) })
+	if notFoundErr(err) || errors.Is(err, ErrWebDAVBridgeStale) {
+		// A marker one bridge has not seen yet is no marker yet: the
+		// ordinary (longer) grace applies.
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	raw, err := io.ReadAll(io.LimitReader(rc, 256))
+	_ = rc.Close()
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	t, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(raw)))
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("stripe retired marker: %w", err)
+	}
+	return t, true, nil
+}
+
+// readKeyFile reads a generation's key file on EVERY bridge: the latest
+// heartbeat any of them shows (a rewrite reaches the other bridges after
+// ~30 s); found when any bridge has it. A bridge that cannot answer is an
+// error (never a delete on doubt).
+func (m *MultiWebDAVDriver) readKeyFile(ctx context.Context, dir []string) (stripeKey, bool, error) {
+	keyNames := append(append([]string(nil), dir...), stripeKeyFile)
+	var out stripeKey
+	found := false
+	for _, b := range m.bridges {
+		rc, err := b.drv.getNames(ctx, strings.Join(keyNames, "/"), keyNames, engine.ErrNotFound(dir[1], stripeKeyFile))
+		m.note(ctx, b, err)
+		if notFoundErr(err) {
+			continue
+		}
+		if err != nil {
+			return stripeKey{}, false, fmt.Errorf("stripe key file on bridge %d: %w", b.idx, err)
+		}
+		raw, err := io.ReadAll(io.LimitReader(rc, 64<<10))
+		_ = rc.Close()
+		if err != nil {
+			return stripeKey{}, false, fmt.Errorf("stripe key file on bridge %d: %w", b.idx, err)
+		}
+		var k stripeKey
+		if err := json.Unmarshal(raw, &k); err != nil {
+			return stripeKey{}, false, fmt.Errorf("stripe key file: %w", err)
+		}
+		if !found || k.Heartbeat.After(out.Heartbeat) {
+			hb := out.Heartbeat
+			out = k
+			if hb.After(k.Heartbeat) {
+				out.Heartbeat = hb
+			}
+		}
+		found = true
+	}
+	return out, found, nil
+}
+
 // generationLive: the manifest of the object the key file names references
 // this generation. A missing key file (the upload died before writing it)
 // is not live; a key file that does not belong to its folder is an error.
 func (m *MultiWebDAVDriver) generationLive(ctx context.Context, dir []string) (bool, error) {
-	keyNames := append(append([]string(nil), dir...), stripeKeyFile)
-	rc, err := readFrom(ctx, m, "get stripe key "+strings.Join(dir, "/"), m.rank(keyNames),
-		func(b *webdavBridge) (io.ReadCloser, error) {
-			return b.drv.getNames(ctx, strings.Join(keyNames, "/"), keyNames, engine.ErrNotFound(dir[1], stripeKeyFile))
-		},
-		func(_ io.ReadCloser, err error) bool { return notFoundErr(err) })
-	if notFoundErr(err) {
+	k, found, err := m.readKeyFile(ctx, dir)
+	if err != nil {
+		return false, err
+	}
+	if !found {
 		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	raw, err := io.ReadAll(io.LimitReader(rc, 64<<10))
-	_ = rc.Close()
-	if err != nil {
-		return false, err
-	}
-	var k stripeKey
-	if err := json.Unmarshal(raw, &k); err != nil {
-		return false, fmt.Errorf("stripe key file: %w", err)
 	}
 	if strings.Contains(k.Container, "/") || davName(k.Container)+webdavStripeDirSuffix != dir[1] {
 		return false, errors.New("stripe key file names another container")
