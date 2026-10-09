@@ -1411,7 +1411,7 @@ func (s *Server) Start() error {
 // a dead context would drop every byte counted during the drain.
 func (s *Server) Shutdown(ctx context.Context) error {
 	err := s.httpServer.Shutdown(ctx)
-	if n := s.drainLongOps(longOpDrainBound); n > 0 {
+	if n := s.drainLongOps(longOpDrainBoundFromEnv(s.log(), os.Getenv)); n > 0 {
 		s.log().Warn("long S3 operations abandoned at shutdown", zap.Int("count", n))
 	}
 	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)

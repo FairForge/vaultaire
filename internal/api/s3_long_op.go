@@ -552,3 +552,22 @@ func (s *Server) longOpBucketExists(r *http.Request, tenantID, bucket string) (b
 	}
 	return exists, nil
 }
+
+// longOpDrainBoundFromEnv is LONG_OP_DRAIN_BOUND (a Go duration, 1s–15m;
+// default and ceiling longOpDrainBound): a lab lowers it to watch a cut
+// happen. Never above 15 min — vaultaire-switch's wait and the unit's
+// TimeoutStopSec are sized for it. A rejected value is logged at Warn and
+// the default kept (R13-19).
+func longOpDrainBoundFromEnv(logger *zap.Logger, getenv func(string) string) time.Duration {
+	raw := getenv("LONG_OP_DRAIN_BOUND")
+	if raw == "" {
+		return longOpDrainBound
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < time.Second || d > longOpDrainBound {
+		logger.Warn("LONG_OP_DRAIN_BOUND rejected; the default is kept",
+			zap.String("value", raw), zap.Duration("default", longOpDrainBound))
+		return longOpDrainBound
+	}
+	return d
+}

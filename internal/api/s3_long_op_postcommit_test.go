@@ -472,3 +472,15 @@ func TestLongOps_AFailureAfterTheCommitDuringADrainIsPersisted(t *testing.T) {
 		f.tenantID).Scan(&n))
 	assert.Equal(t, 1, n)
 }
+
+func TestLongOpDrainBoundFromEnv(t *testing.T) {
+	env := func(v string) func(string) string { return func(string) string { return v } }
+	core, logs := observer.New(zap.WarnLevel)
+	logger := zap.New(core)
+	assert.Equal(t, longOpDrainBound, longOpDrainBoundFromEnv(logger, env("")))
+	assert.Equal(t, 30*time.Second, longOpDrainBoundFromEnv(logger, env("30s")))
+	for _, bad := range []string{"soon", "0s", "500ms", "16m", "-1m"} {
+		assert.Equal(t, longOpDrainBound, longOpDrainBoundFromEnv(logger, env(bad)), bad)
+	}
+	assert.Equal(t, 5, logs.FilterMessage("LONG_OP_DRAIN_BOUND rejected; the default is kept").Len())
+}
