@@ -135,13 +135,22 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 		return
 	}
 	destKey := req.Object
+	// A copy into a bucket that does not exist is NoSuchBucket, before the
+	// keep-alive can commit a 200 (it used to answer 200 + a result).
+	if exists, bErr := s.longOpBucketExists(r, t.ID, destBucket); bErr != nil {
+		s.log().Error("copy: bucket lookup failed", zap.Error(bErr), zap.String("bucket", destBucket))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return
+	} else if !exists {
+		s.writeNoSuchBucket(w, r, t.ID, destBucket)
+		return
+	}
 
 	// Object Lock on the DESTINATION, before anything is read or written: the
 	// copy replaces the key's bytes in place, so a copy over a
 	// COMPLIANCE-retained key destroyed it (R3-01, live-proven).
 	if lockErr := checkObjectLock(r.Context(), s.db, t.ID, destBucket, destKey, isObjectLockBypass(r)); lockErr != nil {
-		WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
-			WithSuggestion(lockDeniedHint(r)))
+		writeObjectLockRefusal(w, r, s.log(), lockErr)
 		return
 	}
 
@@ -307,7 +316,10 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 
 	// Stream source → MD5 hasher → destination, tallying bytes as we go so
 	// the persisted size never depends on the source cache row being present.
-	counter := &countingReader{r: reader}
+	// The source stream is the write's body: a shutdown's cut stops it at
+	// once (the destination stores nothing), the call may still answer for
+	// longOpAnswerGrace (s3_long_op.go).
+	counter := &countingReader{r: &cutReader{ctx: r.Context(), r: reader}}
 	hasher := md5.New() // #nosec G401 — S3 spec requires MD5 for ETags
 	tee := io.TeeReader(counter, hasher)
 
@@ -318,7 +330,9 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	// Placement is the shared helper: a region-pinned destination bucket
 	// goes to its region driver or is refused (R3-08 — copy used to write
 	// the primary under a residency label).
-	backendName, err := placeObject(r.Context(), s.db, s.engine, t.ID, destBucket, destContainer, destKey, tee, putOpts...)
+	putCtx, putCancel := backendCallCtx(r.Context(), s.longOpAnswerGrace())
+	backendName, err := placeObject(putCtx, s.db, s.engine, t.ID, destBucket, destContainer, destKey, tee, putOpts...)
+	putCancel()
 	if err != nil {
 		releaseReservation()
 		switch {
@@ -344,6 +358,10 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	etag := fmt.Sprintf("%x", hasher.Sum(nil))
 	now := time.Now().UTC()
 
+	// The destination holds the bytes: the bookkeeping runs to the end.
+	pctx, pcancel := postCommit(r.Context())
+	defer pcancel()
+
 	// Update object_head_cache for the copied object. Every attribute column
 	// is written (R3-05: the old upsert left the displaced object's
 	// encryption_algorithm on the row, so a plain copy over an SSE key was
@@ -353,8 +371,8 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	var displaced displacedRow
 	if s.db != nil {
 		var dbErr error
-		displaced, dbErr = atomicHeadUpsertReleasing(r.Context(), s.db, manifestReleaser(s.gci), t.ID, destBucket, destKey, func(tx *sql.Tx) error {
-			return upsertWholeObjectHeadRow(r.Context(), tx, t.ID, destBucket, destKey, counter.n, etag, backendName, floor, attrs)
+		displaced, dbErr = atomicHeadUpsertReleasing(pctx, s.db, manifestReleaser(s.gci), t.ID, destBucket, destKey, func(tx *sql.Tx) error {
+			return upsertWholeObjectHeadRow(pctx, tx, t.ID, destBucket, destKey, counter.n, etag, backendName, floor, attrs)
 		})
 		if dbErr != nil {
 			releaseReservation()
@@ -369,18 +387,18 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	}
 
 	if quotaOn {
-		ctx, cancel := quotaCtx(r)
-		s.settlePutQuota(ctx, t.ID, floor, reservedBytes, counter.n, displaced)
-		cancel()
+		s.settlePutQuota(pctx, t.ID, floor, reservedBytes, counter.n, displaced)
 	}
+
+	// Version row + the bucket's default retention before the displaced
+	// blob's delete (which may take staleCopyTimeout).
+	versionID := recordObjectVersion(pctx, s.db, t.ID, destBucket, destKey, counter.n, etag, attrs.ContentType, backendName)
+	applyObjectLockOnPut(pctx, s.db, t.ID, destBucket, destKey, r)
 
 	// The destination's previous blob on another backend (a demoted object
 	// copied over, R13-10) — exactly as plain PUT.
-	dropDisplacedBlob(r.Context(), s.db, s.engine, s.logger, lostWriteOverwrite,
+	dropDisplacedBlob(pctx, s.db, s.engine, s.logger, lostWriteOverwrite,
 		t.ID, destBucket, t.NamespaceContainer(destBucket), destKey, displaced, backendName)
-
-	versionID := recordObjectVersion(r.Context(), s.db, t.ID, destBucket, destKey, counter.n, etag, attrs.ContentType, backendName)
-	applyObjectLockOnPut(r.Context(), s.db, t.ID, destBucket, destKey, r)
 
 	result := CopyObjectResult{
 		ETag:         fmt.Sprintf(`"%s"`, etag),
@@ -552,6 +570,11 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 
 	physicalSize := int64(0) // a copy adds no new physical bytes
 	dedupRatio := float32(0)
+	// Every refusal is behind us: from here the keep-alive may commit (the
+	// chunked path never said so and waited out the 60 s prelude cap).
+	longOpBegin(r)
+	// The install is ONE transaction — a shutdown's cut rolls it back whole;
+	// once it has committed, the rest runs to the end.
 	displaced, dbErr := atomicHeadUpsert(r.Context(), s.db, t.ID, destBucket, destKey, func(tx *sql.Tx) error {
 		// Each destination ref is a new reference to its chunk. Incremented
 		// inside the same tx so a failed install leaves counts untouched.
@@ -610,6 +633,13 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	pctx, pcancel := postCommit(r.Context())
+	defer pcancel()
+
+	// The bucket's default retention, as on every other write (the chunked
+	// copy wrote none).
+	applyObjectLockOnPut(pctx, s.db, t.ID, destBucket, destKey, r)
+
 	// A stale whole-object blob at the destination key (previously a plain
 	// object) must not survive the overwrite — same invariant as chunked PUT.
 	// The displaced row's backend is the hint (R2-20 / WP-R6-1); a miss in
@@ -617,16 +647,14 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 	if displaced.Backend != "" && s.engine != nil {
 		s.engine.HintBackend(t.NamespaceContainer(destBucket), destKey, displaced.Backend)
 	}
-	if blobErr := s.engine.Delete(r.Context(), t.NamespaceContainer(destBucket), destKey); blobErr != nil &&
+	if blobErr := s.engine.Delete(pctx, t.NamespaceContainer(destBucket), destKey); blobErr != nil &&
 		!isObjectMissingErr(blobErr) {
 		s.logger.Warn("chunked copy: stale destination blob delete failed",
 			zap.Error(blobErr), zap.String("bucket", destBucket), zap.String("key", destKey))
 	}
 
 	if quotaOn {
-		ctx, cancel := quotaCtx(r)
-		s.settlePutQuota(ctx, t.ID, chunkedObjectFloor, reservedBytes, srcMeta.LogicalSize, displaced)
-		cancel()
+		s.settlePutQuota(pctx, t.ID, chunkedObjectFloor, reservedBytes, srcMeta.LogicalSize, displaced)
 	}
 
 	now := time.Now().UTC()

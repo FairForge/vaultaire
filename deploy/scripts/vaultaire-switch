@@ -101,15 +101,25 @@ sessions_of() {
 }
 
 # Detached long S3 operations still running on a slot, from its own port
-# (/health answers `long_ops_in_flight` to loopback only). A slot that does
-# not answer counts as 0: nothing left to wait for.
+# (/health answers `long_ops_in_flight` to loopback only). A slot whose unit is
+# not running has nothing left (0). A running slot that does not answer — busy,
+# or a poll that timed out — is unknown ("?"), never 0: the caller keeps
+# waiting until LONG_OP_TIMEOUT (Prompt 2a.2 G1; it used to stop the slot on
+# the first failed poll).
 long_ops_of() {
-  curl -s --max-time 5 "http://127.0.0.1:$1/health" 2>/dev/null | python3 -c '
+  local body n
+  if ! systemctl is-active --quiet "vaultaire@$1"; then
+    echo 0
+    return
+  fi
+  body=$(curl -s --max-time 5 "http://127.0.0.1:$1/health" 2>/dev/null) || body=""
+  n=$(printf '%s' "$body" | python3 -c '
 import json, sys
 try:
-    print(int(json.load(sys.stdin).get("long_ops_in_flight", 0)))
+    print(int(json.load(sys.stdin)["long_ops_in_flight"]))
 except Exception:
-    print(0)'
+    print("?")' 2>/dev/null) || n="?"
+  echo "${n:-?}"
 }
 
 # status (UP/DOWN/MAINT…) of one server in one backend.
@@ -223,7 +233,7 @@ activate() {
     elapsed=$((SECONDS - started))
     if [ "$l" != 0 ]; then
       if [ "$elapsed" -ge "$LONG_OP_TIMEOUT" ]; then
-        log "WARNING: $l long operation(s) still running on $old_name after ${LONG_OP_TIMEOUT}s — stopping anyway; the process cancels and logs each one at 15 min of age"
+        log "WARNING: $l long operation(s) (? = the slot did not answer) still running on $old_name after ${LONG_OP_TIMEOUT}s — stopping anyway; the process cuts each one at 15 min of age and records it (s3_long_op_incidents)"
         break
       fi
     elif [ "$elapsed" -ge "$DRAIN_TIMEOUT" ]; then

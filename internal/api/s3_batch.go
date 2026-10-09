@@ -119,6 +119,16 @@ func (s *Server) deleteObjects(w http.ResponseWriter, r *http.Request, req *S3Re
 
 	bucket := req.Bucket
 	container := t.NamespaceContainer(bucket)
+	// A batch against a bucket that does not exist is NoSuchBucket, before
+	// the keep-alive can commit a 200 (it used to answer every key Deleted).
+	if exists, bErr := s.longOpBucketExists(r, t.ID, bucket); bErr != nil {
+		s.log().Error("batch delete: bucket lookup failed", zap.Error(bErr), zap.String("bucket", bucket))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return
+	} else if !exists {
+		s.writeNoSuchBucket(w, r, t.ID, bucket)
+		return
+	}
 
 	result := DeleteResult{Xmlns: "http://s3.amazonaws.com/doc/2006-03-01/"}
 
@@ -143,8 +153,16 @@ func (s *Server) deleteObjects(w http.ResponseWriter, r *http.Request, req *S3Re
 	aftermath := s.objectDeleteAftermath().forBatch(r.Context(), t.ID, bucket)
 	var wg sync.WaitGroup
 	for i, key := range unique {
-		wg.Add(1)
 		sem <- struct{}{}
+		// A shutdown cut the batch: the keys not started yet are not
+		// attempted — an InternalError the client retries, never a guess.
+		if r.Context().Err() != nil {
+			<-sem
+			outcomes[i] = &DeleteError{Key: key, Code: ErrInternalError,
+				Message: "Not attempted: the server is restarting. Retry this key."}
+			continue
+		}
+		wg.Add(1)
 		go func(i int, key string) {
 			defer wg.Done()
 			defer func() { <-sem }()
@@ -177,6 +195,11 @@ func (s *Server) deleteObjects(w http.ResponseWriter, r *http.Request, req *S3Re
 		if !delReq.Quiet {
 			result.Deleted = append(result.Deleted, DeletedItem{Key: obj.Key})
 		}
+	}
+	// Every key failed: a 200 to the request metrics, a failure to the
+	// outcome counter.
+	if len(result.Errors) == len(delReq.Objects) {
+		longOpFailed(r)
 	}
 
 	xmlData, err := xml.MarshalIndent(result, "", "  ")
@@ -211,6 +234,12 @@ func (s *Server) batchDeleteKey(r *http.Request, t *tenant.Tenant, bucket, conta
 	}
 
 	if lockErr := checkObjectLock(r.Context(), s.db, t.ID, bucket, key, isObjectLockBypass(r)); lockErr != nil {
+		// Locked = AccessDenied; a lookup that failed (a database error, a
+		// shutdown's cut) says nothing about a lock.
+		if !errors.Is(lockErr, errObjectLocked) {
+			s.logger.Error("batch delete: object lock lookup failed", zap.Error(lockErr), zap.String("key", key))
+			return &DeleteError{Key: key, Code: ErrInternalError, Message: "Internal error while deleting"}
+		}
 		return &DeleteError{
 			Key:     key,
 			Code:    ErrAccessDenied,
@@ -246,7 +275,12 @@ func (s *Server) batchDeleteKey(r *http.Request, t *tenant.Tenant, bucket, conta
 			noteRecordedBackend(s.engine, s.logger, "delete_objects", recordedBackend)
 			s.engine.HintBackend(container, key, recordedBackend)
 		}
-		delErr = s.engine.Delete(r.Context(), container, key)
+		// A delete already in flight when a shutdown cuts the batch may
+		// still answer for longOpAnswerGrace: bytes it removed get their
+		// row settled (s3_long_op.go).
+		dctx, dcancel := backendCallCtx(r.Context(), s.longOpAnswerGrace())
+		delErr = s.engine.Delete(dctx, container, key)
+		dcancel()
 		// A miss is idempotent (AWS behaviour) in every shape a driver
 		// produces it — the SDK's NoSuchKey/NotFound included (R6-25);
 		// an unreachable backend is NOT a miss (R6-02).
@@ -269,11 +303,11 @@ func (s *Server) batchDeleteKey(r *http.Request, t *tenant.Tenant, bucket, conta
 
 	// Success (or idempotent miss): the one aftermath single DELETE runs —
 	// billing record, lock row, Smart copy, parity shards, notification
-	// (object_delete_shared.go).
+	// (object_delete_shared.go), detached from the cut.
 	if err := aftermath.settle(r.Context(), t.ID, bucket, key, isChunked); err != nil {
-		// Row and manifest rolled back together: the object is intact
-		// and the client retries this key.
-		s.logger.Error("batch delete: chunked delete failed",
+		// The row (and a chunked manifest) is still there: the client
+		// retries this key — a backend miss, then the row.
+		s.logger.Error("batch delete: delete bookkeeping failed",
 			zap.Error(err), zap.String("key", key))
 		return &DeleteError{
 			Key: key, Code: ErrInternalError, Message: "Internal error while deleting",

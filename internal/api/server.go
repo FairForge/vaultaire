@@ -61,6 +61,8 @@ type Server struct {
 	longOpsReg       *longOpRegistry // detached long S3 operations in flight (s3_long_op.go)
 	longOpPreludeMax time.Duration   // tests; 0 = defaultLongOpPreludeMax
 	longOpsOnce      sync.Once
+	longOpGrace      time.Duration // tests; 0 = defaultLongOpAnswerGrace
+	draining         atomic.Bool   // Shutdown has started (s3_long_op.go)
 	db               *sql.DB
 	events           chan Event
 	engine           *engine.CoreEngine

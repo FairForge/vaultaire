@@ -6,11 +6,17 @@
 #                                                   error_after_commit (an <Error> document INSIDE a committed
 #                                                   200 — the request metrics and the access log say 200)
 #   vaultaire_s3_long_ops_in_flight{op}           detached operations running now
-#   vaultaire_s3_long_ops_abandoned_total{op}     operations a stopping process cancelled at 15 min of age
+#   vaultaire_s3_long_ops_abandoned_total{op}     operations a stopping slot cut at 15 min of age
+#   vaultaire_s3_long_ops_drain_errors_total{op}  operations that failed inside their committed 200 while
+#                                                   their slot was stopping
+# The last two are read from the s3_long_op_incidents table, which the STOPPING
+# slot writes before its database closes: Prometheus scrapes only the active
+# slot, so an in-process counter of the stopping one was never seen.
 #
 # Triage:
 #   journalctl -u 'vaultaire@*' -o cat | grep -E 'long S3 operation (answered after keep-alive|abandoned)'
 #   the Warn line of an abandoned operation names op, tenant, bucket, key and age
+#   SELECT * FROM s3_long_op_incidents ORDER BY created_at DESC LIMIT 20;  (slot + version too)
 groups:
   - name: vaultaire-longops
     rules:
@@ -35,4 +41,15 @@ groups:
           severity: warning
         annotations:
           summary: "{{ $labels.op }}: {{ $value | humanize }} operation(s) abandoned by a stopping process"
-          description: "A slot stopped with {{ $labels.op }} still running after 15 min from its start and cancelled it (see the 'long S3 operation abandoned at shutdown' Warn line for tenant, bucket, key, age). A CompleteMultipartUpload is safe to retry; check what made it that slow."
+          description: "A slot stopped with {{ $labels.op }} still running after 15 min from its start and cut it (s3_long_op_incidents has tenant, bucket, key, age, slot and version; the stopping slot's journal has the Warn line). A CompleteMultipartUpload is safe to retry and a retry repairs its rows; check what made it that slow."
+
+      # An operation failed after its 200 while its slot was being stopped —
+      # the active slot's LongOpFailingAfterCommit never sees these.
+      - alert: LongOpsFailedDuringDrain
+        expr: sum by (op) (increase(vaultaire_s3_long_ops_drain_errors_total[30m])) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.op }}: {{ $value | humanize }} failure(s) after the commit on a stopping slot"
+          description: "A stopping slot sent 200 + <Error> for {{ $labels.op }} while it drained. Rows in s3_long_op_incidents (outcome error_after_commit) name tenant, bucket, key, slot and version; the backend error is in that slot's journal just before."

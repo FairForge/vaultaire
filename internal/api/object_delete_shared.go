@@ -149,30 +149,30 @@ func (a *S3ToEngine) objectDeleteAftermath() objectDeleteAftermath {
 }
 
 // settle runs the aftermath for one key whose bytes are gone (or were never
-// there — S3 DELETE is idempotent). A chunked object releases its manifest
-// in the head row's transaction (R8-08): a failure there leaves the object
-// intact and is returned, so the caller answers an error and the client
-// retries; a failed row delete of a whole object is only logged (the blob
-// is already gone; the drifted row is the only loss). Everything after the
-// row is best effort and never fails the delete.
+// there — S3 DELETE is idempotent). It runs detached from the request
+// (postCommit): the backend delete has happened, so neither a client that
+// hangs up nor a shutdown's cut may stop it halfway (Prompt 2a.2 G1: a cut
+// batch reported its keys Deleted and kept every head row — HEAD 200, GET
+// 404, still billed). A head row that cannot be deleted is returned as an
+// error, so the caller answers one and the client's retry (a backend miss,
+// idempotent) settles the key; a chunked object releases its manifest in
+// that same transaction (R8-08) and stays intact on failure. Everything
+// after the row is best effort and never fails the delete.
 func (d objectDeleteAftermath) settle(ctx context.Context, tenantID, bucket, key string, isChunked bool) error {
+	ctx, cancel := postCommit(ctx)
+	defer cancel()
 	if d.db != nil {
 		deleted, found, delErr := deleteHeadRowReleasing(ctx, d.db, manifestReleaser(d.gci), tenantID, bucket, key)
 		switch {
 		case delErr != nil && isChunked:
 			return fmt.Errorf("chunked delete: %w", delErr)
 		case delErr != nil:
-			d.logger.Error("head cache delete failed", zap.Error(delErr),
-				zap.String("tenant_id", tenantID), zap.String("bucket", bucket), zap.String("key", key))
+			return fmt.Errorf("head row delete: %w", delErr)
 		case found && deleted.Size > 0 && d.quota != nil:
-			// Detached from the request: the delete has committed, so the
-			// bookkeeping completes even if the client has disconnected.
-			qctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-			if err := releaseQuotaOn(qctx, d.quota, tenantID, deleted.Floor, deleted.Size); err != nil {
+			if err := releaseQuotaOn(ctx, d.quota, tenantID, deleted.Floor, deleted.Size); err != nil {
 				d.logger.Error("quota release after delete failed",
 					zap.Error(err), zap.String("tenant_id", tenantID), zap.Int64("bytes", deleted.Size))
 			}
-			cancel()
 		}
 		// The retention (expired, governance-bypassed, or none) goes with the
 		// object: the PUT-side lock check no longer needs a head row, so a

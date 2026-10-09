@@ -15,7 +15,6 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/google/uuid"
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -75,7 +74,6 @@ func TestLongOps_PastTheBoundTheRestIsCancelledLoggedAndCounted(t *testing.T) {
 	core, logs := observer.New(zap.WarnLevel)
 	srv.logger = zap.New(core)
 	uploadID, body := uploadTwoParts(t, srv, tnt, "cut.bin")
-	before := testutil.ToFloat64(longOpsAbandoned.WithLabelValues("CompleteMultipartUpload"))
 	done, cancelClient := startComplete(srv, tnt, "cut.bin", uploadID, body)
 	defer cancelClient()
 	require.Eventually(t, func() bool { return srv.longOps().count() == 1 }, time.Second, 5*time.Millisecond)
@@ -104,7 +102,7 @@ func TestLongOps_PastTheBoundTheRestIsCancelledLoggedAndCounted(t *testing.T) {
 	assert.Equal(t, "test-bucket", fields["bucket"])
 	assert.Equal(t, "cut.bin", fields["key"])
 	assert.Contains(t, fields, "age")
-	assert.Equal(t, before+1, testutil.ToFloat64(longOpsAbandoned.WithLabelValues("CompleteMultipartUpload")))
+
 	// Nothing half-done: no object, and the upload is still there to retry.
 	getW := doS3Request(srv, tnt, "GET", "/test-bucket/cut.bin", nil)
 	assert.Equal(t, http.StatusNotFound, getW.Code)
