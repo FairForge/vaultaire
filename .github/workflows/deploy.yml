@@ -67,10 +67,12 @@ jobs:
     if: github.ref == 'refs/heads/develop'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (for migrations)
+      - name: Checkout (for migrations + the DB_PASSWORD parser)
         uses: actions/checkout@v7
         with:
-          sparse-checkout: internal/database/migrations
+          sparse-checkout: |
+            internal/database/migrations
+            deploy/scripts
 
       - name: Download artifact
         uses: actions/download-artifact@v4
@@ -92,17 +94,25 @@ jobs:
           # stray instance can leave /tmp/vaultaire-linux behind; unlinking frees the
           # path even when the file is still held by a running process, which otherwise
           # makes scp fail with "dest open ... Failure" (ETXTBSY).
-          ssh "${USER}@${HOST}" 'rm -f /tmp/vaultaire-linux; rm -rf /tmp/vaultaire-migrations'
+          ssh "${USER}@${HOST}" 'rm -f /tmp/vaultaire-linux /tmp/vaultaire-db-password.sh; rm -rf /tmp/vaultaire-migrations'
           scp vaultaire-linux "${USER}@${HOST}:/tmp/"
           scp -r internal/database/migrations "${USER}@${HOST}:/tmp/vaultaire-migrations"
+          scp deploy/scripts/db-password.sh "${USER}@${HOST}:/tmp/vaultaire-db-password.sh"
           ssh "${USER}@${HOST}" 'bash -s' <<'EOF'
           set -e
+          # The password exactly as pg-backup.sh reads it (deploy/scripts/db-password.sh:
+          # everything after the first `=`, one quote level removed, DB_PASSWORD_OLD never
+          # matched). The old grep-and-cut one-liner broke on any rotated password with
+          # an `=` in it. A missing line fails the deploy here, before any migration.
+          . /tmp/vaultaire-db-password.sh
+          DB_PW=$(db_password_from_env /opt/vaultaire/configs/.env)
+          rm -f /tmp/vaultaire-db-password.sh
           for f in $(ls /tmp/vaultaire-migrations/*.sql | sort); do
             # -w + </dev/null: if the DB password is unavailable, psql must FAIL,
             # not prompt — a prompt reads the rest of this script off stdin as
             # password attempts, silently skipping the binary swap below while
             # the job still exits 0 (observed 2026-06-08..07-09 on prod).
-            PGPASSWORD=$(grep DB_PASSWORD /opt/vaultaire/configs/.env | cut -d= -f2) \
+            PGPASSWORD="$DB_PW" \
               psql -w -v ON_ERROR_STOP=1 -h 127.0.0.1 -U vaultaire -d vaultaire -f "$f" < /dev/null
           done
           # Keep the previous binary for one-command rollback.
@@ -144,10 +154,12 @@ jobs:
     # environment secrets deployable only from main, not as repo-level secrets.
     environment: production
     steps:
-      - name: Checkout (for migrations)
+      - name: Checkout (for migrations + the DB_PASSWORD parser)
         uses: actions/checkout@v7
         with:
-          sparse-checkout: internal/database/migrations
+          sparse-checkout: |
+            internal/database/migrations
+            deploy/scripts
 
       - name: Download artifact
         uses: actions/download-artifact@v4
@@ -169,11 +181,19 @@ jobs:
           # stray instance can leave /tmp/vaultaire-linux behind; unlinking frees the
           # path even when the file is still held by a running process, which otherwise
           # makes scp fail with "dest open ... Failure" (ETXTBSY).
-          ssh "${USER}@${HOST}" 'rm -f /tmp/vaultaire-linux; rm -rf /tmp/vaultaire-migrations'
+          ssh "${USER}@${HOST}" 'rm -f /tmp/vaultaire-linux /tmp/vaultaire-db-password.sh; rm -rf /tmp/vaultaire-migrations'
           scp vaultaire-linux "${USER}@${HOST}:/tmp/"
           scp -r internal/database/migrations "${USER}@${HOST}:/tmp/vaultaire-migrations"
+          scp deploy/scripts/db-password.sh "${USER}@${HOST}:/tmp/vaultaire-db-password.sh"
           ssh "${USER}@${HOST}" 'bash -s' <<'EOF'
           set -e
+          # The password exactly as pg-backup.sh reads it (deploy/scripts/db-password.sh:
+          # everything after the first `=`, one quote level removed, DB_PASSWORD_OLD never
+          # matched). The old grep-and-cut one-liner broke on any rotated password with
+          # an `=` in it. A missing line fails the deploy here, before any migration.
+          . /tmp/vaultaire-db-password.sh
+          DB_PW=$(db_password_from_env /opt/vaultaire/configs/.env)
+          rm -f /tmp/vaultaire-db-password.sh
           for f in $(ls /tmp/vaultaire-migrations/*.sql | sort); do
             # -w + </dev/null: if the DB password is unavailable, psql must FAIL,
             # not prompt — a prompt reads the rest of this script off stdin as
@@ -184,7 +204,7 @@ jobs:
             # after 5 s and fails the deploy instead of queueing every query on that
             # table behind it. Migrations must stay additive: the build before this
             # one keeps running against the migrated schema until the switch.
-            PGOPTIONS='-c lock_timeout=5s' PGPASSWORD=$(grep DB_PASSWORD /opt/vaultaire/configs/.env | cut -d= -f2) \
+            PGOPTIONS='-c lock_timeout=5s' PGPASSWORD="$DB_PW" \
               psql -w -v ON_ERROR_STOP=1 -h 127.0.0.1 -U vaultaire -d vaultaire -f "$f" < /dev/null
           done
           rm -rf /tmp/vaultaire-migrations
