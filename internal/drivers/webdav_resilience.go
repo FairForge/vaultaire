@@ -99,8 +99,10 @@ var ErrWebDAVStalled = fmt.Errorf("%w: the WebDAV server made no progress", engi
 var errAttemptOver = errors.New("webdav: request attempt is over")
 
 // errWebDAVSource: a PUT's own body could not be read (the caller's source
-// failed) — the caller's error, never the server's.
-var errWebDAVSource = errors.New("webdav: reading the request body failed")
+// failed, or came in below the minimum rate) — the caller's error, never
+// the server's. It wraps engine.ErrCallerAborted, which the engine's
+// breaker never charges either (Prompt 2b.2 C1).
+var errWebDAVSource = fmt.Errorf("webdav: reading the request body failed: %w", engine.ErrCallerAborted)
 
 // paceDeadline is a PUT's deadline that runs only while the server is the
 // bottleneck: paused while the transport waits for the source's bytes. A
@@ -174,6 +176,11 @@ type webdavSettings struct {
 	attempts       int
 	backoff        time.Duration
 	bridge         string // the metrics' bridge label ("0" for a single server)
+	// sourceMinRate (bytes/s, 0 = off) averaged over sourceWindow of time
+	// spent waiting for the source: below it an upload fails as the
+	// caller's (webdav_source.go).
+	sourceMinRate int64
+	sourceWindow  time.Duration
 }
 
 func defaultWebDAVSettings() webdavSettings {
@@ -184,6 +191,8 @@ func defaultWebDAVSettings() webdavSettings {
 		attempts:       WebDAVDefaultAttempts,
 		backoff:        webdavDefaultBackoff,
 		bridge:         "0",
+		sourceMinRate:  WebDAVDefaultSourceMinRate,
+		sourceWindow:   WebDAVDefaultSourceWindow,
 	}
 }
 
@@ -243,6 +252,9 @@ func (c WebDAVConfig) Options() []WebDAVOption {
 	if c.IdleTimeout > 0 {
 		out = append(out, WithWebDAVIdleTimeout(c.IdleTimeout))
 	}
+	if c.SourceMinRate != 0 {
+		out = append(out, WithWebDAVSourceMinRate(max(c.SourceMinRate, 0), 0))
+	}
 	return out
 }
 
@@ -270,6 +282,16 @@ func parseWebDAVLimits(c *WebDAVConfig, getenv func(string) string) {
 		}
 	}
 	parseWebDAVStripes(c, getenv)
+	if v := strings.TrimSpace(getenv("SYNC_WEBDAV_SOURCE_MIN_RATE")); v != "" {
+		if strings.EqualFold(v, "off") || v == "0" {
+			c.SourceMinRate = -1
+		} else if n, err := parseByteSize(v); err != nil || n <= 0 || n > 1<<30 {
+			c.Warnings = append(c.Warnings, fmt.Sprintf("invalid SYNC_WEBDAV_SOURCE_MIN_RATE %q (need bytes per second such as 32KiB, or off), keeping %d",
+				v, WebDAVDefaultSourceMinRate))
+		} else {
+			c.SourceMinRate = n
+		}
+	}
 	if v := strings.TrimSpace(getenv("SYNC_WEBDAV_IDLE_TIMEOUT")); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil || d < time.Second || d > time.Hour {
@@ -614,6 +636,16 @@ func (d *WebDAVDriver) send(ctx context.Context, method, path string, body io.Re
 	if ub != nil {
 		ub.wd, ub.dl = call.wd, call.dl
 	}
+	// A body below the minimum rate cancels the attempt that waits in it
+	// (its slot is freed), not only the next read that returns.
+	var guard *sourceGuard
+	if ub != nil {
+		guard, _ = ub.r.(*sourceGuard)
+	}
+	if guard != nil {
+		guard.setOnSlow(cancel)
+		defer guard.setOnSlow(nil)
+	}
 	req, err := http.NewRequestWithContext(actx, method, u.String(), body)
 	if err != nil {
 		call.finish()
@@ -645,6 +677,9 @@ func (d *WebDAVDriver) send(ctx context.Context, method, path string, body io.Re
 		var srcErr error
 		if ub != nil {
 			srcErr = ub.sourceErr()
+		}
+		if srcErr == nil && guard != nil && guard.tooSlow() {
+			srcErr = guard.tooSlowErr()
 		}
 		switch {
 		case ctx.Err() != nil:

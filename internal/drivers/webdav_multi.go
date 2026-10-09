@@ -44,7 +44,8 @@ import (
 //     bridge's last writes over — minutes at worst);
 //   - a read (Get, GetRange, Exists) of an IMMUTABLE name (immutableObject:
 //     a parity shard `<digest>/<etag>/p<j>`, a pack `<aa>/<sha256>.pack`;
-//     inside the driver a stripe piece and a generation's key file) whose
+//     inside the driver a stripe piece — never a generation's key file,
+//     whose heartbeat is rewritten: the reaper reads it on every bridge) whose
 //     bridge is unhealthy — the last probe failed, or 3 consecutive transport
 //     errors / stalls / timeouts / 5xx-after-retries opened its breaker for
 //     30 s, or this very call failed that way — falls back to the next
@@ -134,6 +135,7 @@ type webdavBridge struct {
 	probeDown atomic.Bool  // the last HealthCheck failed
 	failures  atomic.Int32 // consecutive unavailable answers
 	openUntil atomic.Int64 // unix nanos: skipped for reads until then
+	trialAt   atomic.Int64 // unix nanos of the last trial read while marked down
 }
 
 const (
@@ -147,6 +149,9 @@ const (
 	// breaker for bridgeCooldown (reads skip it; writes still try it).
 	bridgeTripAfter = 3
 	bridgeCooldown  = 30 * time.Second
+	// bridgeTrialEvery: a read routed to a bridge marked down is tried
+	// anyway this often (its answer marks it up).
+	bridgeTrialEvery = 5 * time.Second
 )
 
 // ErrWebDAVBridgeStale is a read whose bridge was unavailable and whose
@@ -412,6 +417,9 @@ func (m *MultiWebDAVDriver) note(ctx context.Context, b *webdavBridge, err error
 	}
 	if !bridgeUnavailable(err) {
 		b.failures.Store(0)
+		if answered(err) {
+			m.markUp(b)
+		}
 		return
 	}
 	if b.failures.Add(1) >= bridgeTripAfter {
@@ -421,6 +429,38 @@ func (m *MultiWebDAVDriver) note(ctx context.Context, b *webdavBridge, err error
 				zap.String("backend", m.name), zap.Int("bridge", b.idx), zap.Duration("for", bridgeCooldown), zap.Error(err))
 		}
 	}
+}
+
+// answered: err (not an unavailable one) is the bridge's own answer — a
+// success, a miss, a refusal — so the bridge is up. A caller's source that
+// broke, or invalid input refused before any request, proves nothing.
+func answered(err error) bool {
+	if err == nil {
+		return true
+	}
+	var se *webdavStatusError
+	return notFoundErr(err) || errors.As(err, &se)
+}
+
+// markUp: a bridge marked down (its probe, or its own breaker) that has just
+// answered a real request is up again — not only at the next probe: a
+// bridge restarted at 17:09:57 kept every read of its keys at 503 until the
+// probe at 17:10:35 (Prompt 2b.2 C1 P3).
+func (m *MultiWebDAVDriver) markUp(b *webdavBridge) {
+	wasDown := b.probeDown.Swap(false)
+	b.openUntil.Store(0)
+	if wasDown {
+		webdavBridgeUp.WithLabelValues(m.name, b.label).Set(1)
+		m.logger.Info("webdav bridge back up (it answered a request)", zap.String("backend", m.name), zap.Int("bridge", b.idx))
+	}
+}
+
+// trial lets one real request through to a bridge marked down every
+// bridgeTrialEvery, so that its first answer can mark it up (markUp).
+func (m *MultiWebDAVDriver) trial(b *webdavBridge) bool {
+	now := m.now().UnixNano()
+	last := b.trialAt.Load()
+	return now-last >= int64(bridgeTrialEvery) && b.trialAt.CompareAndSwap(last, now)
 }
 
 // --- large transfers -------------------------------------------------------------
@@ -519,7 +559,7 @@ func readRouted[T any](ctx context.Context, m *MultiWebDAVDriver, what string, o
 	var zero T
 	routed := order[0]
 	b := m.bridges[routed]
-	if !m.healthy(b) && m.anyHealthyBut(routed) {
+	if !m.healthy(b) && m.anyHealthyBut(routed) && !m.trial(b) {
 		webdavFallbackReads.WithLabelValues(m.name, "routed_down").Inc()
 		return zero, fmt.Errorf("%s %s: bridge %d (the key's) is marked down: %w", m.name, what, routed, ErrWebDAVBridgeDown)
 	}
@@ -530,6 +570,29 @@ func readRouted[T any](ctx context.Context, m *MultiWebDAVDriver, what string, o
 		return zero, fmt.Errorf("%s %s: bridge %d (the key's) failed (%s): %w", m.name, what, routed, err.Error(), ErrWebDAVBridgeDown)
 	}
 	return v, err
+}
+
+// settle gives the engine the error of a call routed to bridge routed in
+// the engine's terms (Prompt 2b.2 C1). The engine's breaker is the whole
+// backend's: one bridge out — refused, stalled, 5xx after the retries,
+// marked down by its probe or its own breaker — is not the backend out
+// while another bridge is healthy, so that is engine.ErrPartiallyUnavailable
+// (a 503 + Retry-After for this object, no breaker charge, no failover —
+// ≈ 20 % of reads with one of five bridges down used to open the breaker,
+// and every `sync` read then answered 503 for 30 s, repeatedly). Only when
+// no other bridge is healthy is the failure the backend's. A body source
+// that broke is the caller's: engine.ErrCallerAborted.
+func (m *MultiWebDAVDriver) settle(ctx context.Context, routed int, err error) error {
+	if err == nil || ctx.Err() != nil || errors.Is(err, engine.ErrPartiallyUnavailable) || errors.Is(err, engine.ErrCallerAborted) {
+		return err
+	}
+	if !bridgeUnavailable(err) && !errors.Is(err, engine.ErrAllBackendsUnavailable) {
+		return err
+	}
+	if !m.anyHealthyBut(routed) {
+		return err // every other bridge is down too: the backend is
+	}
+	return fmt.Errorf("%w: %w", engine.ErrPartiallyUnavailable, err)
 }
 
 func (m *MultiWebDAVDriver) anyHealthyBut(skip int) bool {
@@ -607,7 +670,14 @@ func (m *MultiWebDAVDriver) Put(ctx context.Context, container, artifact string,
 	if err != nil {
 		return err
 	}
+	return m.settle(ctx, order[0], m.put(ctx, key, names, order, container, artifact, data, opts...))
+}
+
+func (m *MultiWebDAVDriver) put(ctx context.Context, key string, names []string, order []int,
+	container, artifact string, data io.Reader, opts ...engine.PutOption) error {
 	o := engine.ApplyPutOptions(opts...)
+	// One rate guard for the whole body, staged or streamed (P2-b).
+	data = guardSource(data, m.bridges[0].drv.limits)
 	m.mcache.drop(manifestCacheKey(names)) // whatever this write ends as, the cached version is not it
 	if m.stripes(o) {
 		return m.putStriped(ctx, key, names, order, container, artifact, data, o)
@@ -624,7 +694,7 @@ func (m *MultiWebDAVDriver) Put(ctx context.Context, container, artifact string,
 	// the key's lock, like the striped path's (Prompt 2b B3).
 	unlock := m.keyLocks.lock(manifestCacheKey(names))
 	defer unlock()
-	err = b.drv.Put(ctx, container, artifact, data, opts...)
+	err := b.drv.Put(ctx, container, artifact, data, opts...)
 	m.note(ctx, b, err)
 	if err != nil {
 		return fmt.Errorf("bridge %d: %w", b.idx, err)
@@ -674,9 +744,10 @@ func (m *MultiWebDAVDriver) Get(ctx context.Context, container, artifact string)
 		return nil, unstorableMiss(err, container, artifact)
 	}
 	nf := engine.ErrNotFound(container, artifact)
-	return readObject(ctx, m, container, artifact, "get "+key, order,
+	rc, err := readObject(ctx, m, container, artifact, "get "+key, order,
 		func(b *webdavBridge) (io.ReadCloser, error) { return m.openOn(ctx, b, key, names, nf, 0, 0, true) },
 		func(_ io.ReadCloser, err error) bool { return notFoundErr(err) })
+	return rc, m.settle(ctx, order[0], err)
 }
 
 // GetRange implements engine.RangeGetter, like Get.
@@ -689,11 +760,12 @@ func (m *MultiWebDAVDriver) GetRange(ctx context.Context, container, artifact st
 		return nil, fmt.Errorf("%s get range %s: %w: negative offset", m.name, key, engine.ErrInvalidInput)
 	}
 	nf := engine.ErrNotFound(container, artifact)
-	return readObject(ctx, m, container, artifact, "get range "+key, order,
+	rc, err := readObject(ctx, m, container, artifact, "get range "+key, order,
 		func(b *webdavBridge) (io.ReadCloser, error) {
 			return m.openOn(ctx, b, key, names, nf, offset, length, false)
 		},
 		func(_ io.ReadCloser, err error) bool { return notFoundErr(err) })
+	return rc, m.settle(ctx, order[0], err)
 }
 
 // Exists asks the key's bridge — or, for an immutable name, a fallback,
@@ -707,7 +779,7 @@ func (m *MultiWebDAVDriver) Exists(ctx context.Context, container, artifact stri
 	if err != nil {
 		return false, err
 	}
-	return readObject(ctx, m, container, artifact, "exists "+key, order,
+	ok, err := readObject(ctx, m, container, artifact, "exists "+key, order,
 		func(b *webdavBridge) (bool, error) {
 			ok, err := b.drv.Exists(ctx, container, artifact)
 			if err != nil || ok {
@@ -717,6 +789,7 @@ func (m *MultiWebDAVDriver) Exists(ctx context.Context, container, artifact stri
 			return found && !e.dir, err
 		},
 		func(ok bool, err error) bool { return err == nil && !ok })
+	return ok, m.settle(ctx, order[0], err)
 }
 
 // Delete removes the object through its routed bridge. When that bridge
@@ -734,6 +807,10 @@ func (m *MultiWebDAVDriver) Delete(ctx context.Context, container, artifact stri
 	if err != nil {
 		return err
 	}
+	return m.settle(ctx, order[0], m.delete(ctx, key, names, order, container, artifact))
+}
+
+func (m *MultiWebDAVDriver) delete(ctx context.Context, key string, names []string, order []int, container, artifact string) error {
 	m.mcache.drop(manifestCacheKey(names))
 	unlock := m.keyLocks.lock(manifestCacheKey(names))
 	defer unlock()

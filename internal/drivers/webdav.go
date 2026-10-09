@@ -87,6 +87,9 @@ const (
 	webdavResponseHeaderTimeout = 5 * time.Minute
 	// webdavMetaTimeout bounds one PROPFIND/MKCOL/DELETE.
 	webdavMetaTimeout = 60 * time.Second
+	// webdavListTimeout bounds one Depth 1 PROPFIND (a listing), which the
+	// idle watchdog bounds first while it streams.
+	webdavListTimeout = 10 * time.Minute
 	// webdavMaxMultistatus caps one PROPFIND answer we parse.
 	webdavMaxMultistatus = 64 << 20
 	// webdavLockedRetries / webdavLockedBackoff: a MKCOL answered 423 Locked
@@ -108,6 +111,9 @@ type WebDAVConfig struct {
 	MaxConcurrency            int
 	LargeConcurrency          int
 	IdleTimeout               time.Duration
+	// SourceMinRate: the slowest request body an upload may stream, in
+	// bytes/s over a minute (0 = WebDAVDefaultSourceMinRate, < 0 = off).
+	SourceMinRate int64
 	// StripeMin (0 = WebDAVDefaultStripeMin, < 0 = never), StripePiece (0 =
 	// WebDAVDefaultStripePiece) and StagingDir ("" = <tmp>/vaultaire-stripes)
 	// configure the multi-bridge driver's striping (webdav_stripe.go).
@@ -679,13 +685,24 @@ type davEntry struct {
 // propfind asks for resourcetype + getcontentlength at depth "0" or "1".
 // found is false on a 404.
 func (d *WebDAVDriver) propfind(ctx context.Context, path, depth string) (entries []davEntry, found bool, err error) {
-	call, err := d.do(ctx, davSpec{method: "PROPFIND", path: path, body: propfindBody, timeout: webdavMetaTimeout,
-		header: map[string]string{"Depth": depth, "Content-Type": "application/xml; charset=utf-8"}})
+	spec := davSpec{method: "PROPFIND", path: path, body: propfindBody, timeout: webdavMetaTimeout,
+		header: map[string]string{"Depth": depth, "Content-Type": "application/xml; charset=utf-8"}}
+	if depth == "1" {
+		// A listing (up to 50,000 entries on Sync) is bounded by the idle
+		// watchdog while it streams, not cut at a fixed 60 s; a bridge that
+		// stops talking is cut after the idle timeout (Prompt 2b.2 C1).
+		spec.stream, spec.timeout = true, webdavListTimeout
+	}
+	call, err := d.do(ctx, spec)
 	if err != nil {
 		return nil, false, err
 	}
 	defer call.finish()
 	resp := call.resp
+	var body io.Reader = resp.Body
+	if spec.stream {
+		body = &downloadBody{rc: resp.Body, call: call, d: d, what: "PROPFIND " + path}
+	}
 	switch resp.StatusCode {
 	case http.StatusMultiStatus:
 	case http.StatusNotFound:
@@ -696,7 +713,7 @@ func (d *WebDAVDriver) propfind(ctx context.Context, path, depth string) (entrie
 	}
 	defer func() { _ = resp.Body.Close() }()
 	var ms davMultistatus
-	if err := xml.NewDecoder(io.LimitReader(resp.Body, webdavMaxMultistatus)).Decode(&ms); err != nil {
+	if err := xml.NewDecoder(io.LimitReader(body, webdavMaxMultistatus)).Decode(&ms); err != nil {
 		return nil, true, fmt.Errorf("parse multistatus: %w", err)
 	}
 	files := 0
@@ -985,7 +1002,7 @@ func (d *WebDAVDriver) putNamesOnce(ctx context.Context, key string, names []str
 	if err := d.ensureCollections(ctx, dirs); err != nil {
 		return fmt.Errorf("%s put %s: %w", d.name, key, err)
 	}
-	src, rewind, err := replayableBody(data, o.ContentLength)
+	src, rewind, err := replayableBody(guardSource(data, d.limits), o.ContentLength)
 	if err != nil {
 		return fmt.Errorf("%s put %s: %w", d.name, key, err)
 	}
@@ -1065,8 +1082,15 @@ func replayableBody(data io.Reader, length int64) (io.Reader, func() error, erro
 	}
 	if length > 0 && length <= webdavRetryBufferMax {
 		buf := make([]byte, length)
-		if _, err := io.ReadFull(data, buf); err != nil {
-			return nil, nil, fmt.Errorf("read the %d-byte body: %w", length, err)
+		if n, err := io.ReadFull(data, buf); err != nil {
+			// The caller's source broke (a client gone mid-body): never the
+			// server's failure — no bridge charge, no folder check
+			// (Prompt 2b.2 C1 P2-a).
+			err = fmt.Errorf("read the %d-byte body: %w: %w", length, errWebDAVSource, err)
+			if n > 0 {
+				err = fmt.Errorf("%w: %w", err, engine.ErrNoFailover)
+			}
+			return nil, nil, err
 		}
 		r := bytes.NewReader(buf)
 		return r, func() error {

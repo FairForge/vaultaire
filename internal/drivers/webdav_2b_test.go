@@ -120,6 +120,7 @@ func TestMultiWebDAV_AnOverwrittenObjectIsNeverServedStaleFromAFallback(t *testi
 	ctx := davCtx("tenant-a")
 	require.NoError(t, m.Put(ctx, "c", a, strings.NewReader("version-2"), engine.WithContentLength(9)))
 	m.bridges[0].probeDown.Store(true)
+	m.bridges[0].trialAt.Store(time.Now().UnixNano()) // its trial read just ran (2b.2)
 
 	// Act
 	_, err := m.Get(ctx, "c", a)
@@ -137,6 +138,7 @@ func TestMultiWebDAV_ADeletedObjectNeverExistsOnAFallback(t *testing.T) {
 	require.NoError(t, m.Put(ctx, "c", a, strings.NewReader("version-2"), engine.WithContentLength(9)))
 	require.NoError(t, m.Delete(ctx, "c", a))
 	m.bridges[0].probeDown.Store(true)
+	m.bridges[0].trialAt.Store(time.Now().UnixNano())
 
 	ok, err := m.Exists(ctx, "c", a)
 

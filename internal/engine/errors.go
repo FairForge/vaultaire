@@ -60,3 +60,32 @@ var (
 	// whose recall is already running. API layer maps it to 409.
 	ErrRestoreAlreadyInProgress = fmt.Errorf("object restore already in progress")
 )
+
+var (
+	// ErrPartiallyUnavailable: part of a backend cannot serve THIS call
+	// right now — the one server of a multi-server backend the object lives
+	// on (one Sync bridge of five), or an object caught mid-change (a
+	// striped object whose piece went with an overwrite during the read) —
+	// while the backend as a whole is healthy. It is never a backend failure
+	// (no breaker charge: one bridge down used to open the whole `sync`
+	// breaker, and every read of every bridge answered 503 for 30 s, again
+	// and again — Prompt 2b.2 C1), never failed over to another backend
+	// (writes stay on their tier, a fallback's "not found" is no verdict)
+	// and never a miss. It wraps ErrAllBackendsUnavailable, so every caller
+	// answers it as one: S3 503 + Retry-After, the head row kept.
+	ErrPartiallyUnavailable = fmt.Errorf("%w: part of the backend is unavailable for this object", ErrAllBackendsUnavailable)
+
+	// ErrCallerAborted: the request body could not be read — the client
+	// went away mid-body (Go's server hands the handler the read error
+	// BEFORE it cancels the request context, so the context.Canceled rule
+	// does not cover it), a decoded stream broke, or it came in slower than
+	// the minimum rate (ErrSourceTooSlow). The caller's failure: never a
+	// backend failure, never failed over (the body is consumed). The API
+	// answers 400 (IncompleteBody / RequestTimeout) to a client still there.
+	ErrCallerAborted = fmt.Errorf("the request body could not be read")
+
+	// ErrSourceTooSlow: the request body arrived below the minimum rate a
+	// backend allows an upload to hold its connection (Sync's bridges:
+	// SYNC_WEBDAV_SOURCE_MIN_RATE). Wraps ErrCallerAborted.
+	ErrSourceTooSlow = fmt.Errorf("%w: it arrived below the minimum rate", ErrCallerAborted)
+)

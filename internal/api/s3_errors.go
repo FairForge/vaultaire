@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/auth"
+	"github.com/FairForge/vaultaire/internal/engine"
 )
 
 // bodyReadErrorCode maps a request-body read failure to its S3 error code: a
@@ -19,6 +20,14 @@ import (
 func bodyReadErrorCode(err error) string {
 	if errors.Is(err, auth.ErrContentSHA256Mismatch) {
 		return ErrXAmzContentSHA256Mismatch
+	}
+	// The body arrived too slowly / broke off (engine.ErrCallerAborted from
+	// a driver or the engine — Prompt 2b.2 C1): the client's request.
+	if errors.Is(err, engine.ErrSourceTooSlow) {
+		return ErrRequestTimeout
+	}
+	if errors.Is(err, engine.ErrCallerAborted) {
+		return ErrIncompleteBody
 	}
 	return ErrInternalError
 }

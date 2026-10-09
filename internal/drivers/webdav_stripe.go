@@ -124,12 +124,13 @@ const (
 // errStripeAmbiguous: a striped object has both a plain file and a manifest
 // (an interrupted commit) and neither has the size the caller's record says.
 // Retryable (503), never someone else's bytes.
-var errStripeAmbiguous = fmt.Errorf("%w: the object has two stored versions and neither has its recorded size", engine.ErrAllBackendsUnavailable)
+var errStripeAmbiguous = fmt.Errorf("%w: the object has two stored versions and neither has its recorded size", engine.ErrPartiallyUnavailable)
 
 // errStripePieceGone: a piece the manifest names is not on its bridge — the
 // object was overwritten or deleted during the read. Retryable (503), never
-// a miss.
-var errStripePieceGone = fmt.Errorf("%w: a piece of the striped object is gone (overwritten or deleted during the read)", engine.ErrAllBackendsUnavailable)
+// a miss. Both are an object's state, never the backend's health
+// (engine.ErrPartiallyUnavailable: no breaker charge).
+var errStripePieceGone = fmt.Errorf("%w: a piece of the striped object is gone (overwritten or deleted during the read)", engine.ErrPartiallyUnavailable)
 
 var (
 	webdavStripePieces = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -644,15 +645,36 @@ func (m *MultiWebDAVDriver) stage(data io.Reader, sz int64) (*os.File, string, e
 		}
 	}
 	h := sha256.New()
-	w, err := io.CopyN(io.MultiWriter(f, h), data, sz)
+	src := &readErrRecorder{r: data}
+	w, err := io.CopyN(io.MultiWriter(f, h), src, sz)
 	if err != nil {
 		m.unstage(f)
 		if errors.Is(err, io.EOF) {
 			return nil, "", fmt.Errorf("%w: the body ended after %d of the piece's %d bytes (shorter than its declared length)", engine.ErrInvalidInput, w, sz)
 		}
+		if src.err != nil {
+			// The caller's body broke while a piece was staged: never a
+			// bridge's or the backend's failure (Prompt 2b.2 C1).
+			return nil, "", fmt.Errorf("stage piece: %w: %w", errWebDAVSource, err)
+		}
 		return nil, "", fmt.Errorf("stage piece: %w", err)
 	}
 	return f, hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// readErrRecorder remembers its reader's own error (a staging copy fails
+// on a read or on a write; only a read is the caller's).
+type readErrRecorder struct {
+	r   io.Reader
+	err error
+}
+
+func (r *readErrRecorder) Read(p []byte) (int, error) {
+	n, err := r.r.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) {
+		r.err = err
+	}
+	return n, err
 }
 
 func (m *MultiWebDAVDriver) unstage(f *os.File) {
