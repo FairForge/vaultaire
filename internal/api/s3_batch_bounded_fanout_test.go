@@ -19,9 +19,10 @@ import (
 // Prompt 2a, PR 4: with a notification target and a webhook configured, a
 // 1,000-key DeleteObjects used to start one goroutine per key for each —
 // 2,000 concurrent POSTs and 1,000 webhook_deliveries inserts against the
-// 50-connection pool. A batch now delivers its per-key events from one
-// bounded worker set (batchDeliveryWorkers), in key order; the events rows
-// are still written per key as before.
+// 50-connection pool. A batch now hands its per-key events to the
+// process-wide delivery pool (event_delivery.go), in key order (start
+// order); the events rows are still written per key as before. The test
+// installs a 4-worker pool so its bounds stay tight.
 
 // keyOf extracts the object key from either payload shape the target receives.
 func keyOf(r *http.Request) string {
@@ -49,6 +50,8 @@ func TestDeleteObjects_ABatchDeliversFromABoundedWorkerSetInKeyOrder(t *testing.
 	f := setupBatchFanoutFixture(t)
 	webhookAllowPrivateTargets.Store(true)
 	t.Cleanup(func() { webhookAllowPrivateTargets.Store(false) })
+	const batchDeliveryWorkers = 4
+	useDeliveryPool(t, newDeliveryPool(batchDeliveryWorkers, deliveryQueueSize))
 
 	var mu sync.Mutex
 	var inFlight, peakPosts int
@@ -100,8 +103,9 @@ func TestDeleteObjects_ABatchDeliversFromABoundedWorkerSetInKeyOrder(t *testing.
 	assert.LessOrEqual(t, f.log.peakOf("INSERT INTO webhook_deliveries"), batchDeliveryWorkers, "concurrent delivery inserts")
 	assert.LessOrEqual(t, f.log.peakTotal(), batchDeleteConcurrency+batchDeliveryWorkers, "concurrent statements overall")
 
-	// In key order: each key once, dispatched in request order. Four workers
-	// pull from one ordered queue, each doing two POSTs in turn, so arrivals
+	// In key order: each key once, started in request order. Four workers
+	// pull from one ordered queue (a notification job then a webhook job
+	// per key), so arrivals
 	// can lead or trail their position by a few workers' worth under
 	// scheduling jitter (CI saw 8 with a bound of 8) — never the 60+ of the
 	// per-key goroutines this replaced.

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -327,8 +328,21 @@ func NewNotificationDispatcher(db *sql.DB, logger *zap.Logger) *NotificationDisp
 	return &NotificationDispatcher{
 		db:     db,
 		logger: logger,
-		client: webhookClient(5 * time.Second),
+		client: sharedWebhookClient(),
 	}
+}
+
+var (
+	sharedWebhookClientOnce sync.Once
+	sharedWebhookClientVal  *http.Client
+)
+
+// sharedWebhookClient is the one webhookClient every delivery uses: a
+// client per dispatcher or per event (as before) is a transport per
+// request, each holding its idle connections' goroutines for 30 s.
+func sharedWebhookClient() *http.Client {
+	sharedWebhookClientOnce.Do(func() { sharedWebhookClientVal = webhookClient(5 * time.Second) })
+	return sharedWebhookClientVal
 }
 
 // S3Event is the S3-compatible notification payload.
@@ -364,14 +378,19 @@ type S3EventIdentity struct {
 	PrincipalID string `json:"principalId"`
 }
 
-// Fire dispatches a notification event asynchronously: the bucket's
-// targets are read in the goroutine, then delivered.
+// Fire dispatches a notification event asynchronously on the process-wide
+// delivery pool (event_delivery.go): the bucket's targets are read by the
+// job, then delivered.
 func (d *NotificationDispatcher) Fire(tenantID, bucket, eventName, objectKey string, size int64, etag string) {
 	if d == nil {
 		return
 	}
-
-	go d.dispatch(tenantID, bucket, eventName, objectKey, size, etag)
+	eventDeliveries.submit(deliveryJob{
+		kind: deliveryKindNotification,
+		run: func(ctx context.Context) {
+			d.dispatch(ctx, tenantID, bucket, eventName, objectKey, size, etag)
+		},
+	})
 }
 
 // notifyTarget is one enabled bucket_notifications row.
@@ -410,8 +429,8 @@ func (d *NotificationDispatcher) Targets(ctx context.Context, tenantID, bucket s
 	return targets, nil
 }
 
-func (d *NotificationDispatcher) dispatch(tenantID, bucket, eventName, objectKey string, size int64, etag string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func (d *NotificationDispatcher) dispatch(ctx context.Context, tenantID, bucket, eventName, objectKey string, size int64, etag string) {
+	ctx, cancel := context.WithTimeout(ctx, notificationDeliveryTimeout)
 	defer cancel()
 
 	targets, err := d.Targets(ctx, tenantID, bucket)
@@ -513,5 +532,5 @@ func (d *NotificationDispatcher) FireSync(tenantID, bucket, eventName, objectKey
 	if d == nil {
 		return
 	}
-	d.dispatch(tenantID, bucket, eventName, objectKey, size, etag)
+	d.dispatch(context.Background(), tenantID, bucket, eventName, objectKey, size, etag)
 }

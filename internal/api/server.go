@@ -1406,14 +1406,20 @@ func (s *Server) Start() error {
 // the engine, which closes the database, is the second): the HTTP drain
 // bounded by ctx, then the wait for the detached long operations that drain
 // leaves running — up to longOpDrainBound from each one's start, the rest
-// cancelled and logged — then the trackers' flush. The flush gets its own
+// cancelled and logged — then the pending notification/webhook deliveries
+// (at most deliveryDrainBound, the rest recorded as failed), then the
+// trackers' flush. The flush gets its own
 // short context: by then ctx has usually expired, and a flush that fails on
 // a dead context would drop every byte counted during the drain.
 func (s *Server) Shutdown(ctx context.Context) error {
+	stopStarted := time.Now()
 	err := s.httpServer.Shutdown(ctx)
 	if n := s.drainLongOps(longOpDrainBoundFromEnv(s.log(), os.Getenv)); n > 0 {
 		s.log().Warn("long S3 operations abandoned at shutdown", zap.Int("count", n))
 	}
+	// The notifications and webhooks those operations (and every request
+	// before them) queued: delivered, or recorded as failed (event_delivery.go).
+	s.drainDeliveries(stopStarted)
 	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 	defer cancel()
 	s.flushTrackers(fctx)

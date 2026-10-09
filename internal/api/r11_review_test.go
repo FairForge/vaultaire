@@ -331,7 +331,7 @@ func TestR11_WebhookDispatch_UsesGuardedClient(t *testing.T) {
 		WithArgs(sqlmock.AnyArg(), "wh-1", "ev-1", "failed", 0, sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
-	dispatchWebhooks(db, zap.NewNop(), "ev-1", "webhook.test", "t1", []byte(`{}`))
+	dispatchWebhooks(context.Background(), db, zap.NewNop(), "ev-1", "webhook.test", "t1", []byte(`{}`))
 
 	select {
 	case <-hit:

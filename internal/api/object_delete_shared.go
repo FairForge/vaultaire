@@ -51,11 +51,12 @@ type deleteFanout struct {
 	targets   []notifyTarget
 	endpoints []webhookEndpoint
 
-	// pending: one entry per settled key, delivered by the batch's worker
-	// set once every key is done (deliverInOrder) — never a goroutine per
-	// key (Prompt 2a PR 4: a 1,000-key batch with one target and one
-	// webhook meant 2,000 concurrent POSTs and 1,000 webhook_deliveries
-	// inserts against the 50-connection pool).
+	// pending: one entry per settled key, handed to the process-wide
+	// delivery pool once every key is done (deliverInOrder) — never a
+	// goroutine per key (Prompt 2a PR 4: a 1,000-key batch with one target
+	// and one webhook meant 2,000 concurrent POSTs and 1,000
+	// webhook_deliveries inserts against the 50-connection pool), nor a
+	// worker set per batch (2a.2: concurrent batches piled up).
 	mu      sync.Mutex
 	pending []pendingDelivery
 }
@@ -75,11 +76,16 @@ func (f *deleteFanout) enqueue(p pendingDelivery) {
 	f.mu.Unlock()
 }
 
-// deliverInOrder delivers every pending key's notification and webhook in
-// the order position gives (the request's key order), from
-// batchDeliveryWorkers goroutines, detached from the request like the
-// per-key goroutines it replaces: the response does not wait for the
-// targets. Nothing to deliver to = nothing started.
+// deliverInOrder hands every pending key's notification and webhook to
+// the process-wide delivery pool (event_delivery.go) in the order position
+// gives (the request's key order) — a notification job then a webhook job
+// per key, each with its own deadline. "In key order" is START order: the
+// pool's workers take jobs from one FIFO queue, so a key's delivery never
+// starts before an earlier key's, and arrivals may still interleave by up
+// to the worker count. Detached from the response like before: it does not
+// wait for the targets. What the queue cannot take is recorded at once as
+// failed `dropped: overloaded` (one statement), never a waiting goroutine.
+// Nothing to deliver to = nothing submitted.
 func (f *deleteFanout) deliverInOrder(d objectDeleteAftermath, tenantID, bucket string, position func(key string) int) {
 	f.mu.Lock()
 	pending := f.pending
@@ -89,29 +95,25 @@ func (f *deleteFanout) deliverInOrder(d objectDeleteAftermath, tenantID, bucket 
 		return
 	}
 	sort.SliceStable(pending, func(i, j int) bool { return position(pending[i].key) < position(pending[j].key) })
-	queue := make(chan pendingDelivery)
-	workers := batchDeliveryWorkers
-	if workers > len(pending) {
-		workers = len(pending)
-	}
-	for i := 0; i < workers; i++ {
-		go func() { // #nosec G118 -- detached delivery after the response, as before
-			for p := range queue {
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				d.notify.deliverTo(ctx, f.targets, tenantID, bucket, "s3:ObjectRemoved:Delete", p.key, 0, "")
-				if p.eventID != "" {
-					deliverToEndpoints(ctx, d.db, d.logger, f.endpoints, p.eventID, "object.deleted", tenantID, p.dataJSON)
-				}
-				cancel()
-			}
-		}()
-	}
-	go func() {
-		for _, p := range pending {
-			queue <- p
+	const eventName, eventType = "s3:ObjectRemoved:Delete", "object.deleted"
+	jobs := make([]deliveryJob, 0, 2*len(pending))
+	for _, p := range pending {
+		if len(f.targets) > 0 {
+			key := p.key
+			jobs = append(jobs, deliveryJob{
+				kind: deliveryKindNotification,
+				run: func(ctx context.Context) {
+					ctx, cancel := context.WithTimeout(ctx, notificationDeliveryTimeout)
+					defer cancel()
+					d.notify.deliverTo(ctx, f.targets, tenantID, bucket, eventName, key, 0, "")
+				},
+			})
 		}
-		close(queue)
-	}()
+		if p.eventID != "" && len(owedRows(f.endpoints, p.eventID, eventType)) > 0 {
+			jobs = append(jobs, webhookJob(d.db, d.logger, f.endpoints, p.eventID, eventType, tenantID, p.dataJSON))
+		}
+	}
+	eventDeliveries.submit(jobs...)
 }
 
 // forBatch resolves the fanout once for every key of a batch on bucket. A
