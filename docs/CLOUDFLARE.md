@@ -48,7 +48,7 @@ was emptied without a separate R2 key.
 - **Public objects**: `/cdn/<slug>/<bucket>/<key>` through the proxy, `cache-control: public, max-age=14400`, MISS→HIT, first byte ~100 ms on a HIT, $0 egress.
 - **Private reads**: `cache-control: private, no-cache` → BYPASS; the edge adds a hop (~80 ms). Use `s3.stored.ge` for bulk.
 - **Uploads**: through `stored.ge` at the client's uplink (after the h2 fix); bodies over 100 MB must be multipart or go to `s3.stored.ge`.
-- **Sippy**: an R2 bucket with `source.bucketUrl = https://s3.stored.ge/<bucket>` and a tenant key fills from the origin on first read (works on the archive tier too; needs ETag on 206, fixed in #578; objects >199 MiB are pulled in parts; a key that failed once keeps its failed state).
+- **Sippy**: an R2 bucket with `source.bucketUrl = https://s3.stored.ge/<bucket>` and a tenant key fills from the origin on first read (works on the archive tier too; needs ETag on 206, fixed in #578; objects >199 MiB are pulled in parts; a key that failed once was seen keeping its failed state on 2026-10-05; on 2026-10-09 failed pulls of unchanged objects resumed on the next view).
 - **`edge.stored.ge`** (`tools/edge-ec-worker`): `/ec/<manifest>` k-of-n reassembly (whole or stripe mode), `/pget?parts=N&to=<presigned>` parallel-range streaming of a slow origin (six-wide window), `/up/<key>` → R2, `/del/<key>` (admin header), `/relaygen`, `/echo`.
 - **`rules.stored.ge`** (`tools/edge-rules-worker`): declarative per-bucket rules on ingest (webhook, copy-to, tag, size cap, content-type allow-list). Needs no Workers for Platforms.
 - **Access**: `edge.stored.ge/admin-gate-test` is gated to the owner e-mails as the proof; gating `stored.ge/admin` is one API call.
@@ -97,6 +97,10 @@ Everything ran from the Salt Lake box against `s3.stored.ge` (bench tenant) and 
 - **Traces** (open beta) are configured at `/zones/{zone}/observability/tracing/{settings,rules}`; the zone token lacks *Zone Observability Write*, so whether `traceparent` reaches Vaultaire is untested.
 - **Containers on `ctx.container`:** cold ≈ 0.26 s in the DO, wake ≈ 0.3–0.5 s, warm ≈ 3 ms; an idle container stops 20–25 s after its last request with SIGTERM then SIGKILL ≈ 5 s later, even when PID 1 ignores SIGTERM.
 - **EmDash 1.0** stores media in any S3-compatible bucket with path-style requests — `https://stored.ge` works as its endpoint (browser uploads go to presigned URLs, so the bucket needs CORS rules).
+
+## Findings 2026-10-09, evening: Sippy vs the DO copier on the same objects
+
+Same objects, the prod origin, origin bytes from Stored's own access log on the source bucket. Sippy lands on the first view up to 500 MiB (7 of 7, listed 11–32 s later, byte-exact), 600–650 MiB 2 of 3, 750 MiB–1.5 GiB 0 of 6 (200 MiB parts, up to five in flight, abandoned after ~25–30 s; the viewer still receives the whole object; an in-progress multipart upload is left in R2). A failed key resumes on the next view and fetches only the missing parts — every failed key landed by the second or third view. Warming with small ranged GETs does not work (eight on a 2 GiB object read 7.6 GiB from the origin and never landed). Origin reads per promotion: once below 200 MiB, twice for 200–650 MiB, 3–5× above, plus one per concurrent cold viewer; the DO copier reads once (five simultaneous triggers started one job) and listed 300 MiB in 6.6 s, 1 GiB in 10 s, 5 GiB in 40 s, all byte-exact. Sippy's first byte to the first viewer: 0.8–2.5 s (a direct origin read: 0.65–0.76 s). Split adopted in plan 40.1(e): Sippy below 512 MiB (with a copier push for hot objects), the copier above, Sippy kept as the fallback, a 1-day abort-incomplete-multipart rule on Sippy buckets.
 
 ## Open
 
