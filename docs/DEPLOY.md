@@ -157,9 +157,13 @@ vaultaire@8001  "green"   /opt/vaultaire/bin/vaultaire-8001     the other stoppe
     (`long_ops_in_flight` on its own `/health`: a CompleteMultipartUpload,
     CopyObject or DeleteObjects that has already sent 200 + keep-alive), then
     `maint` and stop. On SIGTERM the process itself drains HTTP for 30 s, waits
-    for those operations until each is 15 min old, cancels and logs the rest
-    (`vaultaire_s3_long_ops_abandoned_total`), flushes and exits
-    (`TimeoutStopSec=1000`). Before 2026-10-08 the only protection was the
+    for those operations, cuts each one when it is 15 min old (its own start;
+    `LONG_OP_DRAIN_BOUND`), logs it and writes it to `s3_long_op_incidents`
+    (the active slot exports `vaultaire_s3_long_ops_abandoned_total` from that
+    table), drains the webhook/notification queue for up to 30 s (the rest is
+    recorded as failed `dropped: shutdown`), flushes and exits
+    (`TimeoutStopSec=1000`). A cut stops only the backend write or delete
+    itself; the bookkeeping after a call that succeeded always finishes. Before 2026-10-08 the only protection was the
     session wait: an operation whose client was still connected is a session
     and was waited for up to the 10 min `DRAIN_TIMEOUT`; one whose client had
     gone (the operation runs detached from it), or one older than that, got
@@ -168,7 +172,18 @@ vaultaire@8001  "green"   /opt/vaultaire/bin/vaultaire-8001     the other stoppe
     through Cloudflare at 120 s, and the #634 live proof — a 2 GiB complete
     during `vaultaire-switch restart`, 200 after 32 s, byte-exact — had its
     client attached, so the session wait alone would have covered it too.
-    TODO(2a.2-G1): the 2a.2 drain proof with the client killed after the 200.
+    Prompt 2a.2 (2026-10-09, #644) proved the detached case on prod: a 2 GiB
+    complete into a Sync-tier bucket, client killed 15 s in (after the 200
+    was committed), then `vaultaire-switch restart` — the old slot kept
+    running while `/health` said `long_ops_in_flight: 1`, the operation
+    answered at 25.8 s and was stopped 0.2 s later; the GET was byte-exact.
+    The cut itself (an operation still running at its bound) was proven in a
+    lab with `LONG_OP_DRAIN_BOUND=1s` and a 22 MB/s backend: cut at 30.2 s
+    (after the 30 s HTTP drain), an `s3_long_op_incidents` row written, the
+    next process exporting `vaultaire_s3_long_ops_abandoned_total 1`, the
+    upload still `active`, and the retry completing byte-exact. A failed
+    `/health` poll of a running slot now counts as unknown (`?`), never 0:
+    the wait continues to `LONG_OP_TIMEOUT`.
   - `restart` runs the same path with the **active** build copied into the
     idle slot — the zero-downtime way to pick up `.env` edits. `rollback`
     switches to the idle slot (the previous build) through the same gates.
