@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 	"golang.org/x/net/webdav"
 )
 
@@ -155,4 +157,37 @@ func TestMultiWebDAV_ListDirNamesSubfoldersAndFiles(t *testing.T) {
 	assert.Empty(t, dirs)
 	assert.Empty(t, files)
 	_ = os.ErrNotExist
+}
+
+// Prompt 2a.3 H1: the re-list after the DELETE cannot catch a write that
+// landed between "every bridge lists empty" and the DELETE — that write went
+// with the folder and the re-list sees nothing. What the re-list CAN see is
+// content that appeared after the DELETE: it survived. Before: reported as
+// an Error ("it went with the folder") and returned as a failure.
+func TestMultiWebDAV_ContentAfterTheDeleteSurvivedAndIsNoFailure(t *testing.T) {
+	// Arrange: every DELETE is followed at once by a write into the folder.
+	var shared webdav.FileSystem
+	bs := newBridges(t, 3, true, func(_ int, h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h.ServeHTTP(w, r)
+			if r.Method == http.MethodDelete {
+				putFile(t, shared, "/vaultaire/t-tenant-a/c__parity/d1/e2/late", "x")
+			}
+		})
+	})
+	shared = bs[0].fs
+	putFile(t, shared, "/vaultaire/t-tenant-a/c__parity/d1/e2/p0%o", "x")
+	require.NoError(t, shared.RemoveAll(context.Background(), "/vaultaire/t-tenant-a/c__parity/d1/e2/p0%o"))
+	core, logs := observer.New(zap.WarnLevel)
+	m, err := NewMultiWebDAVDriver("sync", multiConfig(bs), zap.New(core), fastRetries)
+	require.NoError(t, err)
+
+	// Act
+	err = m.RemoveEmptyDir(davCtx("tenant-a"), "c__parity", "d1/e2")
+
+	// Assert: success; the survivor is there; a Warn, never an Error.
+	require.NoError(t, err)
+	assert.True(t, fsHas(shared, "/vaultaire/t-tenant-a/c__parity/d1/e2/late"))
+	assert.Equal(t, 1, logs.FilterLevelExact(zap.WarnLevel).Len())
+	assert.Equal(t, 0, logs.FilterLevelExact(zap.ErrorLevel).Len())
 }

@@ -585,6 +585,33 @@ func (d *OneDriveDriver) ListDir(ctx context.Context, container, dir string) (di
 	return dirs, files, nil
 }
 
+// RemoveEmptyDir removes the folder at dir under container when no account
+// of the fleet holds anything in it (one listing per account, the union),
+// then deletes it on every account that has it (Delete sweeps the fleet).
+// ErrDirNotEmpty when an account holds something; a folder missing
+// everywhere is fine; the container itself is refused. A Graph folder DELETE
+// is recursive: the caller makes the window between the listing and the
+// DELETE empty — the vault parity reconcile, the only writer and the only
+// remover of its folders, under the job's lock (Prompt 2a.3 H1: emptied
+// permafrost folders were listed again on every walk, forever).
+func (d *OneDriveDriver) RemoveEmptyDir(ctx context.Context, container, dir string) error {
+	sub := strings.Trim(dir, "/")
+	if sub == "" {
+		return fmt.Errorf("onedrive remove dir: %q is the container, not a folder", dir)
+	}
+	dirs, files, err := d.ListDir(ctx, container, sub)
+	if err != nil {
+		return fmt.Errorf("onedrive remove dir %s: %w", sub, err)
+	}
+	if len(files)+len(dirs) > 0 {
+		return fmt.Errorf("onedrive remove dir %s: %w", sub, ErrDirNotEmpty)
+	}
+	if err := d.Delete(ctx, container, sub); err != nil && !odIsNotFound(err) {
+		return fmt.Errorf("onedrive remove dir %s: %w", sub, err)
+	}
+	return nil
+}
+
 type odChild struct {
 	name   string
 	folder bool

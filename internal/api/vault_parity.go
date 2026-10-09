@@ -321,29 +321,35 @@ func (p *VaultParity) spec() jobSpec {
 // complete row. The leg is read once per run.
 func (p *VaultParity) RunOnce(ctx context.Context) (VaultParityResult, error) {
 	var res VaultParityResult
+	// The reconcile state is carried into every result, a failed run's too:
+	// the scheduler records it, and an empty one wiped every leg's cursor.
+	st := p.loadReconcileState(ctx)
+	res.ReconcileAt, res.ReconcileCursors = st.At, st.cursors()
 	legName, _, ok := p.Leg()
 	if !ok {
 		return res, fmt.Errorf("no parity leg is registered (%s)", strings.Join(p.Legs, ", "))
 	}
 	res.Leg = legName
-	st := p.loadReconcileState(ctx)
-	res.ReconcileAt, res.ReconcileCursors = st.At, st.cursors()
 	due := st.At.IsZero() || p.now().Sub(st.At) >= p.reconcileEvery()
 
 	// When the reconcile is due it keeps a slice of the run: the erase and
-	// protect passes stop that much before the run's deadline (a backlog of
-	// protects used to take the whole hour and the reconcile never ran).
-	work, cancelWork := ctx, context.CancelFunc(func() {})
+	// protect passes START nothing in the last slice before the run's
+	// deadline (a backlog of protects used to take the whole hour and the
+	// reconcile never ran). What has started runs to the run's own deadline
+	// (Prompt 2a.3 H1: a protect cut at the slice — a 66–79 GB object at
+	// Geyser's ~22 MB/s — burnt one of its 20 attempts every run); the
+	// reconcile then has what is left.
+	starts, stopStarts := ctx, context.CancelFunc(func() {})
 	if dl, ok := ctx.Deadline(); ok && due {
-		work, cancelWork = context.WithDeadline(ctx, dl.Add(-min(p.reconcileSlice(), time.Until(dl)/2)))
+		starts, stopStarts = context.WithDeadline(ctx, dl.Add(-min(p.reconcileSlice(), time.Until(dl)/2)))
 	}
-	err := p.eraseStale(work, &res)
+	err := p.eraseStale(ctx, starts, &res)
 	if err == nil {
-		err = p.protectPending(work, &res)
+		err = p.protectPending(ctx, starts, &res)
 	}
-	cancelWork()
+	stopStarts()
 	if err != nil {
-		if work.Err() == nil || ctx.Err() != nil {
+		if starts.Err() == nil || ctx.Err() != nil {
 			return res, err
 		}
 		res.WorkStopped = true
@@ -369,7 +375,9 @@ type parityRow struct {
 	attempts                    int
 }
 
-func (p *VaultParity) eraseStale(ctx context.Context, res *VaultParityResult) error {
+// eraseStale erases the shards of rows whose object is gone or has a new
+// etag; a new erase starts only while starts is live.
+func (p *VaultParity) eraseStale(ctx, starts context.Context, res *VaultParityResult) error {
 	rows, err := p.db.QueryContext(ctx, `
 		SELECT v.tenant_id, v.bucket, v.object_key, v.etag, v.shard_prefix, v.legs
 		FROM vault_parity v
@@ -398,8 +406,8 @@ func (p *VaultParity) eraseStale(ctx context.Context, res *VaultParityResult) er
 		return fmt.Errorf("vault parity: stale rows: %w", err)
 	}
 	for _, r := range stale {
-		if ctx.Err() != nil {
-			return ctx.Err()
+		if starts.Err() != nil {
+			return starts.Err()
 		}
 		if err := p.eraseShards(ctx, r); err != nil {
 			res.EraseFailed++
@@ -418,7 +426,9 @@ type parityCandidate struct {
 	chunked                     bool
 }
 
-func (p *VaultParity) protectPending(ctx context.Context, res *VaultParityResult) error {
+// protectPending protects the vault-floor objects without a complete row; a
+// new protect starts only while starts is live, a started one runs on ctx.
+func (p *VaultParity) protectPending(ctx, starts context.Context, res *VaultParityResult) error {
 	rows, err := p.db.QueryContext(ctx, `
 		SELECT o.tenant_id, o.bucket, o.object_key, o.etag, o.size_bytes, o.is_chunked
 		FROM object_head_cache o
@@ -447,8 +457,8 @@ func (p *VaultParity) protectPending(ctx context.Context, res *VaultParityResult
 	}
 	var budget int64
 	for _, c := range cands {
-		if ctx.Err() != nil {
-			return ctx.Err()
+		if starts.Err() != nil {
+			return starts.Err()
 		}
 		res.Scanned++
 		if c.chunked {
@@ -750,14 +760,25 @@ func (p *VaultParity) finishRow(ctx context.Context, c parityCandidate, legs []s
 // right now (not registered, or its breaker is open). An erasure defers.
 var errParityLegUnavailable = errors.New("parity leg unavailable")
 
+// parityRowDeleteTimeout bounds the row delete that follows the shard
+// deletes, on its own clock.
+const parityRowDeleteTimeout = 5 * time.Second
+
 // eraseShards deletes every shard a row records, then the row. A leg that
 // is not registered or whose breaker is open is errParityLegUnavailable and
-// the row stays (the bytes may still be there).
+// the row stays (the bytes may still be there). Once the shards are
+// provably gone the row delete runs on its own deadline, whatever is left of
+// the caller's (Prompt 2a.3 H1: a delete whose budget ended there left a
+// `complete` row naming 0 shards, which a same-content re-upload never
+// re-protected). No folder is removed here: only the reconcile does, under
+// the job lock.
 func (p *VaultParity) eraseShards(ctx context.Context, r parityRow) error {
 	if err := p.deleteRecordedShards(ctx, r, ""); err != nil {
 		return err
 	}
-	if _, err := p.db.ExecContext(ctx, `DELETE FROM vault_parity WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND etag = $4`,
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), parityRowDeleteTimeout)
+	defer cancel()
+	if _, err := p.db.ExecContext(rctx, `DELETE FROM vault_parity WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND etag = $4`,
 		r.tenantID, r.bucket, r.key, r.etag); err != nil {
 		return fmt.Errorf("delete row: %w", err)
 	}
@@ -768,12 +789,15 @@ func (p *VaultParity) eraseShards(ctx context.Context, r parityRow) error {
 // keepLeg (about to be overwritten in place by a write at the same prefix).
 // The first leg that is not registered or whose breaker is open stops it
 // with errParityLegUnavailable; a delete that fails stops it with its error.
-// A shard already missing is fine.
+// A shard already missing is fine. The `<etag>` folder the deletes empty is
+// left to the reconcile (an empty folder no row names goes at its first
+// sighting): only the job writes shards and only the job removes folders,
+// under one lock — so no removal can race a write. It used to be removed
+// here, up to 11 Sync calls inside a DELETE's post-commit budget.
 func (p *VaultParity) deleteRecordedShards(ctx context.Context, r parityRow, keepLeg string) error {
 	tctx := common.WithTenantID(ctx, r.tenantID)
 	container := parityContainer(r.tenantID)
 	status := p.eng.GetFailoverStatus()
-	emptied := map[string]engine.Driver{}
 	for j, legName := range r.legs {
 		if legName == "" || legName == keepLeg {
 			continue
@@ -788,20 +812,6 @@ func (p *VaultParity) deleteRecordedShards(ctx context.Context, r parityRow, kee
 
 		if err := drv.Delete(tctx, container, shardArtifact(r.prefix, j)); err != nil && !isObjectMissingErr(err) {
 			return fmt.Errorf("delete shard p%d on %s: %w", j, legName, err)
-		}
-		emptied[legName] = drv
-	}
-	// The `<etag>` folder the deletes emptied goes too (best effort, through
-	// the safe removal: on Sync every bridge must list it empty, which right
-	// after the deletes a lagging bridge often does not — the reconcile pass
-	// finishes it). Left behind, every overwrite kept an empty folder that
-	// pinned the `<digest>` (and a sighting) forever.
-	for legName, drv := range emptied {
-		if rm, ok := drv.(emptyDirRemover); ok {
-			if err := rm.RemoveEmptyDir(tctx, container, r.prefix); err != nil {
-				p.logger.Debug("vault parity: shard folder left for the reconcile pass", zap.String("leg", legName),
-					zap.String("folder", r.prefix), zap.Error(err))
-			}
 		}
 	}
 	return nil

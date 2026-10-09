@@ -587,9 +587,16 @@ func (m *MultiWebDAVDriver) Delete(ctx context.Context, container, artifact stri
 // recursive (RFC 4918 §9.6.1) and a bridge lags the others' writes by
 // seconds to minutes, so one bridge's empty view proves nothing: every
 // bridge must list the folder empty first (the first that does not stops
-// it, ErrDirNotEmpty), then ONE DELETE goes through one bridge, then every
-// bridge lists it again (something that appeared in between is reported —
-// it cannot be undone). A missing folder is fine.
+// it, ErrDirNotEmpty), then ONE DELETE goes through one bridge. A missing
+// folder is fine.
+//
+// Nothing here can see a write that lands between the last empty listing
+// and the DELETE: it goes with the folder. The callers make that window
+// empty — the vault parity job is the only writer of its shards and the
+// only remover of its folders, under one lock; the stripe reaper removes
+// only first-layout key folders, which no upload writes any more. The
+// listing after the DELETE sees only what came after it, which survived:
+// logged at Warn, not a failure.
 func (m *MultiWebDAVDriver) RemoveEmptyDir(ctx context.Context, container, dir string) error {
 	tenantID, err := requireTenant(ctx, m.name, "RemoveEmptyDir", "", m.logger)
 	if err != nil {
@@ -632,9 +639,9 @@ func (m *MultiWebDAVDriver) removeEmptyNames(ctx context.Context, names []string
 	for _, i := range order {
 		other := m.bridges[i]
 		if empty, err := other.drv.emptyDir(ctx, names); err == nil && !empty {
-			m.logger.Error("webdav: something appeared in a folder while it was being removed — it went with the folder",
+			m.logger.Warn("webdav: something was written into a folder right after its removal — it survived (the folder exists again)",
 				zap.String("backend", m.name), zap.String("folder", strings.Join(names, "/")), zap.Int("bridge", other.idx))
-			return fmt.Errorf("bridge %d: content appeared during the removal of %s", other.idx, strings.Join(names, "/"))
+			return nil
 		}
 	}
 	return nil
