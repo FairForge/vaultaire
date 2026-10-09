@@ -486,11 +486,37 @@ func (d *LocalDriver) RemoveDirectory(ctx context.Context, container, dir string
 // non-empty directory is left (the error says which). Used by the vault
 // parity reconcile pass for the folders a Delete leaves.
 func (d *LocalDriver) RemoveEmptyDir(ctx context.Context, container, dir string) error {
+	if strings.Trim(dir, "/") == "" {
+		return fmt.Errorf("remove empty directory: no folder below the container: %w", engine.ErrInvalidInput)
+	}
 	fullPath := filepath.Join(d.basePath, container, filepath.FromSlash(dir))
 	if err := os.Remove(fullPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove empty directory %s: %w", dir, err)
 	}
 	return nil
+}
+
+// ListDir lists the direct members of dir under container ("" = the
+// container): sub-folder names and file names (the driver's own temp and
+// .meta files left out). A missing directory is empty.
+func (d *LocalDriver) ListDir(ctx context.Context, container, dir string) (dirs, files []string, err error) {
+	entries, err := os.ReadDir(filepath.Join(d.basePath, container, filepath.FromSlash(dir)))
+	if os.IsNotExist(err) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("list directory %s: %w", dir, err)
+	}
+	for _, e := range entries {
+		switch {
+		case e.IsDir():
+			dirs = append(dirs, e.Name())
+		case isAtomicWriteTemp(e.Name()) || strings.HasSuffix(e.Name(), ".meta"):
+		default:
+			files = append(files, e.Name())
+		}
+	}
+	return dirs, files, nil
 }
 
 // DirectoryExists checks if a directory exists

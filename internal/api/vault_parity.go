@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -114,7 +113,7 @@ var (
 	}, []string{"outcome"})
 	vaultParityOrphans = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_vault_parity_orphans_total",
-		Help: "Parity shard folders no row names, as the job's reconcile pass meets them: found (a sighting; counted on every pass), erased (gone after two sightings at least VAULT_PARITY_ORPHAN_GRACE apart), failed (a delete that did not go through).",
+		Help: "Parity shard folders no row names, as the job's reconcile pass meets them: found (a new sighting — once per folder), erased (its files deleted after two sightings at least VAULT_PARITY_ORPHAN_GRACE apart — once per folder), failed (a delete that did not go through).",
 	}, []string{"outcome"})
 )
 
@@ -173,6 +172,25 @@ type VaultParityResult struct {
 	ReconciledLegs     []string `json:"reconciled_legs,omitempty"`
 	ReconcileTenants   int      `json:"reconcile_tenants"`
 	ReconcileTruncated bool     `json:"reconcile_truncated,omitempty"`
+	// Prompt 2a.2 G3: the legs not reconciled and why ("sync: not
+	// registered"), empty folders removed, folder listings spent (the
+	// per-run budget — on Sync each is a PROPFIND against the account's
+	// ~14 ops/s), why the walk stopped short ("time slice", "listing
+	// budget"), sightings pruned (an erased tenant, a leg gone), and the
+	// reconcile's own state, carried from run to run in job_runs.result:
+	// when it last ran (it runs at most every ReconcileEvery) and where each
+	// leg's walk resumes.
+	SkippedLegs          []string                   `json:"skipped_legs,omitempty"`
+	OrphanFoldersRemoved int                        `json:"orphan_folders_removed,omitempty"`
+	ReconcileListings    int                        `json:"reconcile_listings"`
+	ReconcileStopped     string                     `json:"reconcile_stopped,omitempty"`
+	ReconcileDeferred    bool                       `json:"reconcile_deferred,omitempty"`
+	SightingsPruned      int                        `json:"sightings_pruned,omitempty"`
+	ReconcileAt          time.Time                  `json:"reconcile_at,omitempty"`
+	ReconcileCursors     map[string]reconcileCursor `json:"reconcile_cursors,omitempty"`
+	// WorkStopped: the erase and protect passes ended at their share of the
+	// run (the reconcile keeps its own time slice).
+	WorkStopped bool `json:"work_stopped,omitempty"`
 	// Skipped: candidates whose row names shards that could not be erased
 	// this run (an earlier etag, or another leg): never rewritten, retried
 	// next run.
@@ -213,7 +231,17 @@ type VaultParity struct {
 	OrphanGrace               time.Duration
 	MaxOrphanCandidatesPerRun int
 	MaxReconcileTenantsPerRun int
-	reconcileCursor           string
+	// ReconcileEvery: the reconcile runs at most this often
+	// (VAULT_PARITY_RECONCILE_EVERY, 30 min); ReconcileSlice: the share of
+	// the run it keeps for itself when it is due; MaxReconcileListingsPerRun:
+	// folder listings per leg per run (each one PROPFIND on a WebDAV leg,
+	// one Graph call per account on the OneDrive fleet).
+	ReconcileEvery             time.Duration
+	ReconcileSlice             time.Duration
+	MaxReconcileListingsPerRun int
+	// reconcileMem is the reconcile state when job_runs has none (a test
+	// calling RunOnce directly; a first run).
+	reconcileMem reconcileState
 
 	// scopeTenant limits a run to one tenant (tests on the shared DB).
 	scopeTenant string
@@ -234,7 +262,9 @@ func NewVaultParity(db *sql.DB, eng engine.Engine, fl flagChecker, logger *zap.L
 		MaxObjectsPerRun: 500, MaxBytesPerRun: 256 << 30, Stripe: vaultParityStripe, now: time.Now,
 		Legs:        parityLegsFromEnv(os.Getenv),
 		OrphanGrace: orphanGraceFromEnv(os.Getenv, logger), MaxOrphanCandidatesPerRun: defaultMaxOrphanCandidatesPerRun,
-		MaxReconcileTenantsPerRun: defaultMaxReconcileTenantsPerRun}
+		MaxReconcileTenantsPerRun: defaultMaxReconcileTenantsPerRun,
+		ReconcileEvery:            reconcileEveryFromEnv(os.Getenv, logger), ReconcileSlice: defaultReconcileSlice,
+		MaxReconcileListingsPerRun: defaultMaxReconcileListingsPerRun}
 }
 
 // Leg is the leg this deployment writes new parity to: the first registered
@@ -272,6 +302,12 @@ func (p *VaultParity) spec() jobSpec {
 			if n := len(res.Errors); n > 0 {
 				notes = append(notes, fmt.Sprintf("%d item(s) failed, first: %s", n, res.Errors[0]))
 			}
+			if res.WorkStopped {
+				notes = append(notes, "erase/protect stopped at their share of the run")
+			}
+			if res.ReconcileStopped != "" {
+				notes = append(notes, "reconcile stopped at its "+res.ReconcileStopped+", resumes at its cursor")
+			}
 			if res.ChunkedSkipped > 0 {
 				notes = append(notes, fmt.Sprintf("%d chunked vault-floor row(s) — an invariant is broken, see the log", res.ChunkedSkipped))
 			}
@@ -290,312 +326,36 @@ func (p *VaultParity) RunOnce(ctx context.Context) (VaultParityResult, error) {
 		return res, fmt.Errorf("no parity leg is registered (%s)", strings.Join(p.Legs, ", "))
 	}
 	res.Leg = legName
-	if err := p.eraseStale(ctx, &res); err != nil {
-		return res, err
+	st := p.loadReconcileState(ctx)
+	res.ReconcileAt, res.ReconcileCursors = st.At, st.cursors()
+	due := st.At.IsZero() || p.now().Sub(st.At) >= p.reconcileEvery()
+
+	// When the reconcile is due it keeps a slice of the run: the erase and
+	// protect passes stop that much before the run's deadline (a backlog of
+	// protects used to take the whole hour and the reconcile never ran).
+	work, cancelWork := ctx, context.CancelFunc(func() {})
+	if dl, ok := ctx.Deadline(); ok && due {
+		work, cancelWork = context.WithDeadline(ctx, dl.Add(-min(p.reconcileSlice(), time.Until(dl)/2)))
 	}
-	if err := p.protectPending(ctx, &res); err != nil {
-		return res, err
+	err := p.eraseStale(work, &res)
+	if err == nil {
+		err = p.protectPending(work, &res)
 	}
-	p.reconcileOrphans(ctx, &res)
+	cancelWork()
+	if err != nil {
+		if work.Err() == nil || ctx.Err() != nil {
+			return res, err
+		}
+		res.WorkStopped = true
+	}
+	if !due {
+		res.ReconcileDeferred = true
+		return res, ctx.Err()
+	}
+	rctx, cancel := context.WithTimeout(ctx, p.reconcileSlice())
+	p.reconcileOrphans(rctx, &res, st)
+	cancel()
 	return res, ctx.Err()
-}
-
-// emptyDirRemover is the optional driver surface the reconcile pass uses to
-// take away the empty `<digest>/<etag>/` folders a Delete leaves (local,
-// webdav; nothing to do on an S3 leg). Best effort.
-type emptyDirRemover interface {
-	RemoveEmptyDir(ctx context.Context, container, dir string) error
-}
-
-// reconcileOrphans is the pass over `<tenant>__parity/` on every registered
-// leg whose breaker is closed: a `<digest>/<etag>/` folder no row names is
-// a candidate; a candidate first seen at least OrphanGrace ago is erased
-// (its files, then its folders) and forgotten; one that gained its row or
-// vanished is forgotten. Nothing here fails the run: a leg that cannot be
-// listed or a delete that fails is a note. The walk is bounded per run.
-func (p *VaultParity) reconcileOrphans(ctx context.Context, res *VaultParityResult) {
-	type leg struct {
-		name string
-		drv  engine.Driver
-	}
-	status := p.eng.GetFailoverStatus()
-	names := p.Legs
-	if len(names) == 0 {
-		names = vaultParityLegs
-	}
-	var legs []leg
-	for _, name := range names {
-		drv, ok := p.eng.GetDriver(name)
-		if !ok {
-			continue
-		}
-		if status[name] == engine.StateOpen.String() {
-			res.Errors = append(res.Errors, fmt.Sprintf("reconcile: %s skipped, circuit breaker open", name))
-			continue
-		}
-		legs = append(legs, leg{name, drv})
-		res.ReconciledLegs = append(res.ReconciledLegs, name)
-	}
-	if len(legs) == 0 {
-		return
-	}
-	tenants, err := p.reconcileTenants(ctx)
-	if err != nil {
-		res.Errors = append(res.Errors, "reconcile: tenants: "+err.Error())
-		return
-	}
-	budget := p.MaxOrphanCandidatesPerRun
-	if budget <= 0 {
-		budget = defaultMaxOrphanCandidatesPerRun
-	}
-	grace := p.OrphanGrace
-	if grace <= 0 {
-		grace = defaultOrphanGrace
-	}
-	for _, tenantID := range tenants {
-		if ctx.Err() != nil {
-			return
-		}
-		res.ReconcileTenants++
-		for _, l := range legs {
-			if res.ReconcileTruncated {
-				return
-			}
-			p.reconcileTenantLeg(ctx, res, tenantID, l.name, l.drv, grace, &budget)
-		}
-	}
-}
-
-// reconcileTenants is the tenants this run walks: the scoped one, or the
-// next page of the tenants table after the cursor (wrapping at the end).
-func (p *VaultParity) reconcileTenants(ctx context.Context) ([]string, error) {
-	if p.scopeTenant != "" {
-		return []string{p.scopeTenant}, nil
-	}
-	limit := p.MaxReconcileTenantsPerRun
-	if limit <= 0 {
-		limit = defaultMaxReconcileTenantsPerRun
-	}
-	rows, err := p.db.QueryContext(ctx, `SELECT id FROM tenants WHERE id > $1 ORDER BY id LIMIT $2`, p.reconcileCursor, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if len(ids) < limit {
-		p.reconcileCursor = "" // wrap: the next run starts over
-	} else {
-		p.reconcileCursor = ids[len(ids)-1]
-	}
-	return ids, nil
-}
-
-// reconcileTenantLeg is one tenant's parity container on one leg.
-func (p *VaultParity) reconcileTenantLeg(ctx context.Context, res *VaultParityResult, tenantID, legName string, drv engine.Driver, grace time.Duration, budget *int) {
-	tctx := common.WithTenantID(ctx, tenantID)
-	container := parityContainer(tenantID)
-	names, err := drv.List(tctx, container, "")
-	if err != nil {
-		res.Errors = append(res.Errors, fmt.Sprintf("reconcile: list %s on %s: %v", container, legName, err))
-		return
-	}
-	// The folders the leg holds and the files under each.
-	folders := map[string][]string{}
-	for _, name := range names {
-		i := strings.LastIndex(name, "/")
-		if i <= 0 {
-			continue // not <digest>/<etag>/<file>
-		}
-		folders[name[:i]] = append(folders[name[:i]], name)
-	}
-	// The folders rows name.
-	named := map[string]bool{}
-	rows, err := p.db.QueryContext(ctx, `SELECT shard_prefix FROM vault_parity WHERE tenant_id = $1`, tenantID)
-	if err != nil {
-		res.Errors = append(res.Errors, "reconcile: rows of "+tenantID+": "+err.Error())
-		return
-	}
-	for rows.Next() {
-		var prefix string
-		if err := rows.Scan(&prefix); err != nil {
-			_ = rows.Close()
-			res.Errors = append(res.Errors, "reconcile: rows of "+tenantID+": "+err.Error())
-			return
-		}
-		named[prefix] = true
-	}
-	_ = rows.Close()
-	if err := rows.Err(); err != nil {
-		res.Errors = append(res.Errors, "reconcile: rows of "+tenantID+": "+err.Error())
-		return
-	}
-	var candidates []string
-	for folder := range folders {
-		if !named[folder] {
-			candidates = append(candidates, folder)
-		}
-	}
-	sort.Strings(candidates)
-	if len(candidates) > *budget {
-		candidates = candidates[:*budget]
-		res.ReconcileTruncated = true
-	}
-	*budget -= len(candidates)
-
-	now := p.now()
-	var kept []string // sightings that stay: still candidates, not yet erased
-	for _, folder := range candidates {
-		res.OrphansFound++
-		vaultParityOrphans.WithLabelValues("found").Inc()
-		var firstSeen time.Time
-		err := p.db.QueryRowContext(ctx, `
-			INSERT INTO vault_parity_orphans (tenant_id, leg, prefix, first_seen, last_seen) VALUES ($1, $2, $3, $4, $4)
-			ON CONFLICT (tenant_id, leg, prefix) DO UPDATE SET last_seen = EXCLUDED.last_seen
-			RETURNING first_seen`, tenantID, legName, folder, now).Scan(&firstSeen)
-		if err != nil {
-			res.Errors = append(res.Errors, "reconcile: sighting of "+folder+": "+err.Error())
-			kept = append(kept, folder)
-			continue
-		}
-		if now.Sub(firstSeen) < grace {
-			kept = append(kept, folder)
-			continue
-		}
-		dirsGone, err := p.eraseOrphanFolder(tctx, drv, container, folder, folders[folder], folders, named)
-		if err != nil {
-			res.OrphansFailed++
-			vaultParityOrphans.WithLabelValues("failed").Inc()
-			res.Errors = append(res.Errors, fmt.Sprintf("reconcile: erase %s on %s: %v", folder, legName, err))
-			kept = append(kept, folder)
-			continue
-		}
-		if !dirsGone {
-			// The shards are gone but a folder stayed (a bridge that still
-			// listed them answered "not empty"): the sighting stays, and a
-			// later pass removes the folders (forgetSightings).
-			kept = append(kept, folder)
-		}
-		res.OrphansErased++
-		vaultParityOrphans.WithLabelValues("erased").Inc()
-		p.logger.Warn("vault parity: orphan shards erased (no row named them)",
-			zap.String("tenant_id", tenantID), zap.String("leg", legName), zap.String("folder", folder),
-			zap.Int("files", len(folders[folder])), zap.Duration("first_seen_ago", now.Sub(firstSeen)))
-	}
-	if res.ReconcileTruncated {
-		return // the unseen candidates keep their sightings
-	}
-	p.forgetSightings(tctx, res, tenantID, legName, drv, container, kept, folders, named)
-}
-
-// forgetSightings drops the sightings of folders that are no longer
-// candidates on this leg: the row appeared (named — its folder is never
-// touched), or the folder holds no file any more — erased by an earlier
-// pass or by someone else. For the latter the empty `<etag>` and `<digest>`
-// folders are removed first, and the sighting is kept until they are: the
-// listing is of files only, so a folder left behind by a lagging bridge
-// would otherwise never be met again (prod 2026-10-08: the `<digest>`
-// folder of an erased orphan stayed on all five Sync bridges).
-func (p *VaultParity) forgetSightings(ctx context.Context, res *VaultParityResult, tenantID, legName string,
-	drv engine.Driver, container string, kept []string, folders map[string][]string, named map[string]bool) {
-	keep := map[string]bool{}
-	for _, k := range kept {
-		keep[k] = true
-	}
-	rows, err := p.db.QueryContext(ctx, `SELECT prefix FROM vault_parity_orphans WHERE tenant_id = $1 AND leg = $2`, tenantID, legName)
-	if err != nil {
-		res.Errors = append(res.Errors, "reconcile: sightings: "+err.Error())
-		return
-	}
-	var stale []string
-	for rows.Next() {
-		var prefix string
-		if err := rows.Scan(&prefix); err != nil {
-			_ = rows.Close()
-			res.Errors = append(res.Errors, "reconcile: sightings: "+err.Error())
-			return
-		}
-		if !keep[prefix] {
-			stale = append(stale, prefix)
-		}
-	}
-	_ = rows.Close()
-	if err := rows.Err(); err != nil {
-		res.Errors = append(res.Errors, "reconcile: sightings: "+err.Error())
-		return
-	}
-	rm, canRemove := drv.(emptyDirRemover)
-	var forget []string
-	for _, prefix := range stale {
-		if !named[prefix] && canRemove && !p.removeOrphanDirs(ctx, rm, container, prefix, folders, named) {
-			continue // a folder is still there: try again next pass
-		}
-		forget = append(forget, prefix)
-	}
-	if len(forget) == 0 {
-		return
-	}
-	if _, err := p.db.ExecContext(ctx, `
-		DELETE FROM vault_parity_orphans WHERE tenant_id = $1 AND leg = $2 AND prefix = ANY($3)`,
-		tenantID, legName, pq.Array(forget)); err != nil {
-		res.Errors = append(res.Errors, "reconcile: forget sightings: "+err.Error())
-	}
-}
-
-// eraseOrphanFolder deletes every file under folder, then removes the
-// empty folders (removeOrphanDirs). dirsGone is false when a folder stayed
-// (the caller keeps the sighting so a later pass finishes it); err is a
-// file delete that failed.
-func (p *VaultParity) eraseOrphanFolder(ctx context.Context, drv engine.Driver, container, folder string, files []string, folders map[string][]string, named map[string]bool) (dirsGone bool, err error) {
-	for _, f := range files {
-		if err := drv.Delete(ctx, container, f); err != nil && !isObjectMissingErr(err) {
-			return false, fmt.Errorf("delete %s: %w", f, err)
-		}
-	}
-	rm, ok := drv.(emptyDirRemover)
-	if !ok {
-		return true, nil // no folders on this leg
-	}
-	return p.removeOrphanDirs(ctx, rm, container, folder, folders, named), nil
-}
-
-// removeOrphanDirs removes the empty `<etag>` folder, then its `<digest>`
-// parent unless another folder on the leg or a row's prefix sits under it.
-// True when nothing of the orphan's folders is left.
-func (p *VaultParity) removeOrphanDirs(ctx context.Context, rm emptyDirRemover, container, folder string, folders map[string][]string, named map[string]bool) bool {
-	if err := rm.RemoveEmptyDir(ctx, container, folder); err != nil {
-		p.logger.Info("vault parity: orphan folder not removed yet", zap.String("folder", folder), zap.Error(err))
-		return false
-	}
-	i := strings.Index(folder, "/")
-	if i <= 0 {
-		return true
-	}
-	digest := folder[:i]
-	for other := range folders {
-		if other != folder && strings.HasPrefix(other, digest+"/") {
-			return true // the digest folder holds another etag's shards
-		}
-	}
-	for other := range named {
-		if strings.HasPrefix(other, digest+"/") {
-			return true
-		}
-	}
-	if err := rm.RemoveEmptyDir(ctx, container, digest); err != nil {
-		p.logger.Info("vault parity: orphan digest folder not removed yet", zap.String("folder", digest), zap.Error(err))
-		return false
-	}
-	return true
 }
 
 type parityRow struct {
@@ -1013,6 +773,7 @@ func (p *VaultParity) deleteRecordedShards(ctx context.Context, r parityRow, kee
 	tctx := common.WithTenantID(ctx, r.tenantID)
 	container := parityContainer(r.tenantID)
 	status := p.eng.GetFailoverStatus()
+	emptied := map[string]engine.Driver{}
 	for j, legName := range r.legs {
 		if legName == "" || legName == keepLeg {
 			continue
@@ -1027,6 +788,20 @@ func (p *VaultParity) deleteRecordedShards(ctx context.Context, r parityRow, kee
 
 		if err := drv.Delete(tctx, container, shardArtifact(r.prefix, j)); err != nil && !isObjectMissingErr(err) {
 			return fmt.Errorf("delete shard p%d on %s: %w", j, legName, err)
+		}
+		emptied[legName] = drv
+	}
+	// The `<etag>` folder the deletes emptied goes too (best effort, through
+	// the safe removal: on Sync every bridge must list it empty, which right
+	// after the deletes a lagging bridge often does not — the reconcile pass
+	// finishes it). Left behind, every overwrite kept an empty folder that
+	// pinned the `<digest>` (and a sighting) forever.
+	for legName, drv := range emptied {
+		if rm, ok := drv.(emptyDirRemover); ok {
+			if err := rm.RemoveEmptyDir(tctx, container, r.prefix); err != nil {
+				p.logger.Debug("vault parity: shard folder left for the reconcile pass", zap.String("leg", legName),
+					zap.String("folder", r.prefix), zap.Error(err))
+			}
 		}
 	}
 	return nil

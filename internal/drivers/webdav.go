@@ -1374,29 +1374,48 @@ func (d *WebDAVDriver) children(ctx context.Context, names []string) (dirs, file
 	return dirs, files, nil
 }
 
+// ErrDirNotEmpty: a folder removal refused because the folder holds
+// something (RemoveEmptyDir).
+var ErrDirNotEmpty = errors.New("folder not empty")
+
+// dirNames are the resource names of the folder dir under container: each
+// segment davName-mapped exactly like an object's folders. dir must name a
+// folder below the container — never the container itself.
+func dirNames(tenantID, container, dir string) ([]string, error) {
+	trimmed := strings.Trim(dir, "/")
+	if trimmed == "" {
+		return nil, fmt.Errorf("%w: no folder below the container", engine.ErrInvalidInput)
+	}
+	names, err := tenantNames(tenantID, container)
+	if err != nil {
+		return nil, err
+	}
+	for _, seg := range strings.Split(trimmed, "/") {
+		names = append(names, davName(seg))
+	}
+	return names, checkNames(names)
+}
+
 // RemoveEmptyDir removes the folder at dir under container when it holds
 // nothing (the vault parity reconcile pass, after the shards under it are
-// deleted); a missing folder is fine, a non-empty one is left and reported.
+// deleted); a missing folder is fine, a non-empty one is left and reported
+// (ErrDirNotEmpty). One server: its view is the account's. Several bridges
+// on one account: MultiWebDAVDriver.RemoveEmptyDir.
 func (d *WebDAVDriver) RemoveEmptyDir(ctx context.Context, container, dir string) error {
 	tenantID, err := requireTenant(ctx, d.name, "RemoveEmptyDir", "", d.logger)
 	if err != nil {
 		return err
 	}
-	names, err := tenantNames(tenantID, container)
+	names, err := dirNames(tenantID, container, dir)
 	if err != nil {
 		return fmt.Errorf("%s remove dir %s: %w", d.name, dir, err)
 	}
-	for _, seg := range strings.Split(strings.Trim(dir, "/"), "/") {
-		if seg != "" {
-			names = append(names, seg)
-		}
-	}
-	dirs, files, err := d.children(ctx, names)
+	empty, err := d.emptyDir(ctx, names)
 	if err != nil {
 		return fmt.Errorf("%s remove dir %s: %w", d.name, dir, err)
 	}
-	if len(dirs)+len(files) > 0 {
-		return fmt.Errorf("%s remove dir %s: not empty", d.name, dir)
+	if !empty {
+		return fmt.Errorf("%s remove dir %s: %w", d.name, dir, ErrDirNotEmpty)
 	}
 	if err := d.removeDir(ctx, names); err != nil {
 		return err
@@ -1405,8 +1424,61 @@ func (d *WebDAVDriver) RemoveEmptyDir(ctx context.Context, container, dir string
 	return nil
 }
 
+// emptyDir: the folder at names holds nothing on this server (a missing
+// folder is empty).
+func (d *WebDAVDriver) emptyDir(ctx context.Context, names []string) (bool, error) {
+	dirs, files, err := d.children(ctx, names)
+	if err != nil {
+		return false, err
+	}
+	return len(dirs)+len(files) == 0, nil
+}
+
+// ListDir lists the direct members of the folder dir under container ("" =
+// the container): sub-folder names and object names, in key space (the
+// inverse of the name mapping; a file without the leaf marker keeps its
+// decoded name). A missing folder is empty. One PROPFIND.
+func (d *WebDAVDriver) ListDir(ctx context.Context, container, dir string) (dirs, files []string, err error) {
+	tenantID, err := requireTenant(ctx, d.name, "ListDir", "", d.logger)
+	if err != nil {
+		return nil, nil, err
+	}
+	names, err := listDirNames(tenantID, container, dir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%s list dir %s: %w", d.name, dir, err)
+	}
+	return d.listDirNames(ctx, names)
+}
+
+func listDirNames(tenantID, container, dir string) ([]string, error) {
+	if strings.Trim(dir, "/") == "" {
+		return tenantNames(tenantID, container)
+	}
+	return dirNames(tenantID, container, dir)
+}
+
+func (d *WebDAVDriver) listDirNames(ctx context.Context, names []string) (dirs, files []string, err error) {
+	rd, rf, err := d.children(ctx, names)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%s list dir: %w", d.name, err)
+	}
+	for _, n := range rd {
+		dirs = append(dirs, keySegment(n))
+	}
+	for _, n := range rf {
+		if leaf, ok := objectLeafSegment(n); ok {
+			files = append(files, leaf)
+			continue
+		}
+		files = append(files, keySegment(n))
+	}
+	return dirs, files, nil
+}
+
 // removeDir deletes the (empty or not) folder at resource names; a miss is
-// not an error. Only for folders the driver owns outright (stripe pieces).
+// not an error. Recursive on WebDAV: only for a folder every member of which
+// is being deleted (a dead stripe generation), or once every bridge has
+// listed it empty (RemoveEmptyDir, MultiWebDAVDriver.removeEmptyNames).
 func (d *WebDAVDriver) removeDir(ctx context.Context, names []string) error {
 	path := d.escapedPath(names, true)
 	if err := d.deletePath(ctx, path); err != nil {

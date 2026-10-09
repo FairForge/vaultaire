@@ -223,3 +223,29 @@ func TestOneDriveSweepShape_ListsDirectChildrenAndDeletesEachItemOnEveryAccount(
 		}
 	}
 }
+
+// Prompt 2a.2 G3: the vault parity reconcile walks `<digest>/<etag>/` on the
+// permafrost leg; List sees only the container's direct children (a digest
+// folder), so the walk was a silent no-op there. ListDir lists any folder's
+// direct children, sub-folders told from files, the union of the fleet.
+func TestOneDriveListDir_ListsAFoldersChildrenOnEveryAccount(t *testing.T) {
+	ctx := common.WithTenantID(context.Background(), "x")
+	d, stubs := stubFleet(2, zap.NewNop())
+	childrenURL := func(tn *odTenant, path string) string {
+		return graphBase + "/drives/" + tn.driveID + "/items/root:/" + odEscapePath(odRootFolder+"/t-x/"+path) + ":/children?$top=999"
+	}
+	a, b := d.tenants[0], d.tenants[1]
+	stubs[0].routes["GET "+childrenURL(a, "c__parity/d1")] = odRoute{200, `{"value":[{"name":"e1","folder":{"childCount":4}}]}`}
+	stubs[1].routes["GET "+childrenURL(b, "c__parity/d1")] = odRoute{200, `{"value":[{"name":"e2","folder":{"childCount":0}},{"name":"stray"}]}`}
+	stubs[0].routes["GET "+childrenURL(a, "c__parity/d1/e1")] = odRoute{200, `{"value":[{"name":"p0","file":{}},{"name":"p1","file":{}}]}`}
+
+	dirs, files, err := d.ListDir(ctx, "c__parity", "d1")
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"e1", "e2"}, dirs)
+	assert.Equal(t, []string{"stray"}, files)
+
+	dirs, files, err = d.ListDir(ctx, "c__parity", "d1/e1")
+	require.NoError(t, err)
+	assert.Empty(t, dirs)
+	assert.ElementsMatch(t, []string{"p0", "p1"}, files)
+}
