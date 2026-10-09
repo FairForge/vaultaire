@@ -55,6 +55,22 @@ parse_case "empty value prints nothing"   'DB_PASSWORD=' ""
 printf 'DB_USER=x\n' > "$TMP/env"
 if db_password_from_env "$TMP/env" >/dev/null; then fail "missing line: expected a non-zero return"; else pass "missing line returns 1"; fi
 
+# --- 2c. write_metric never ends the run silently --------------------------------------
+# A printf failing inside write_metric (a full disk) ended the run through set -e with no
+# line at all: the ERR trap is not inherited by functions (Prompt 2a.3 H3).
+# shellcheck disable=SC2034 # LOG, METRICS_DIR and STAGE are read by the sourced functions
+wm_out=$(
+  LOG=$TMP/wm.log METRICS_DIR=$TMP STAGE=offbox
+  # shellcheck disable=SC2317,SC2329 # shadows the builtin inside the sourced write_metric
+  printf() { return 1; }
+  set -e
+  write_metric vaultaire_test_metric "test"
+  echo continued
+) || true
+check "2c: a failed metric write does not end the run" [ "$wm_out" = continued ]
+check "2c: it is logged with its stage" grep -q 'METRICS: cannot write vaultaire_test_metric (non-fatal, stage=offbox)' "$TMP/wm.log"
+check "2c: no temporary file is left behind" [ -z "$(find "$TMP" -maxdepth 1 -name '.vaultaire_test_metric.*')" ]
+
 # --- 2b. deploy.yml reads the password with the SAME parser ---------------------------
 # deploy.yml sources deploy/scripts/db-password.sh on the box; pg-backup.sh (one installed
 # file) carries its own copy. Both must answer every fixture identically, and the workflow

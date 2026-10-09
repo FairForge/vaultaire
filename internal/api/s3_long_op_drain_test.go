@@ -235,7 +235,9 @@ func TestMetrics_LongOpsInFlightGauge(t *testing.T) {
 	// Assert
 	assert.Contains(t, w.Body.String(), `vaultaire_s3_long_ops_in_flight{op="CompleteMultipartUpload"} 1`)
 	assert.Contains(t, after.Body.String(), `vaultaire_s3_long_ops_in_flight{op="CompleteMultipartUpload"} 0`)
-	assert.Contains(t, after.Body.String(), `vaultaire_s3_long_ops_abandoned_total{op="CompleteMultipartUpload"}`)
+	// No database here: the incident counts (read from s3_long_op_incidents)
+	// are unknown, so not exported (Prompt 2a.3 H3) — the in-flight gauge is.
+	assert.NotContains(t, after.Body.String(), `vaultaire_s3_long_ops_abandoned_total{op="CompleteMultipartUpload"}`)
 	for _, op := range []string{"CopyObject", "DeleteObjects"} {
 		assert.Contains(t, after.Body.String(), fmt.Sprintf(`vaultaire_s3_long_ops_in_flight{op="%s"} 0`, op), "every op has a series from boot")
 	}

@@ -211,10 +211,17 @@ func longOpFailed(r *http.Request) {
 // longOpFinished counts an operation's outcome; one that failed inside its
 // committed 200 while this process is stopping is also written to
 // s3_long_op_incidents (the active slot reports it: this one is not
-// scraped any more). A cut operation already has its row.
-func (s *Server) longOpFinished(e *longOpEntry, outcome string, failed bool) {
+// scraped any more). A cut operation already has its row. A 200 the
+// operation marked failed (every key of a batch an error) is
+// error_after_commit only when the keep-alive had committed the 200 —
+// answered before that, it is error_before_commit (Prompt 2a.3 H3).
+func (s *Server) longOpFinished(e *longOpEntry, code int, committed, failed bool) {
+	outcome := longOpOutcome(code, committed)
 	if failed && outcome == longOpOK {
-		outcome = longOpErrorAfterCommit
+		outcome = longOpErrorBeforeCommit
+		if committed {
+			outcome = longOpErrorAfterCommit
+		}
 	}
 	longOpOutcomes.WithLabelValues(e.Op, outcome).Inc()
 	if outcome == longOpErrorAfterCommit && s.draining.Load() && !e.cut.Load() {
@@ -336,6 +343,11 @@ func (s *Server) drainLongOps(bound time.Duration) int {
 		}
 		now := time.Now()
 		overstayed := true
+		// Every operation due is cancelled first, then their rows are
+		// written in one statement (Prompt 2a.3 H3: each row used to be
+		// written — 5 s timeout — before its own cancel, so with a stalled
+		// database K operations were cut K × 5 s late).
+		var due []longOpIncident
 		for _, e := range ops {
 			if e.cutAt.IsZero() && !now.Before(e.started.Add(bound)) {
 				e.cutAt = now
@@ -345,14 +357,15 @@ func (s *Server) drainLongOps(bound time.Duration) int {
 					zap.String("op", e.Op), zap.String("tenant", e.tenant),
 					zap.String("bucket", e.Bucket), zap.String("key", e.Key),
 					zap.Duration("age", age))
-				s.recordLongOpIncident(e, longOpAbandoned, age)
 				e.cancel()
+				due = append(due, longOpIncident{e: e, outcome: longOpAbandoned, age: age})
 				cut++
 			}
 			if e.cutAt.IsZero() || now.Before(e.cutAt.Add(longOpCancelGrace)) {
 				overstayed = false
 			}
 		}
+		s.recordLongOpIncidents(due)
 		if overstayed {
 			return cut
 		}
@@ -460,7 +473,7 @@ func (s *Server) runLongS3Op(w http.ResponseWriter, r *http.Request, info longOp
 			w.WriteHeader(rec.code())
 			_, _ = w.Write(rec.body.Bytes())
 			_ = http.NewResponseController(w).Flush()
-			s.longOpFinished(entry, longOpOutcome(rec.code(), false), failed.Load())
+			s.longOpFinished(entry, rec.code(), false, failed.Load())
 			return
 		case <-begun:
 			begun = nil
@@ -488,7 +501,7 @@ func (s *Server) runLongS3Op(w http.ResponseWriter, r *http.Request, info longOp
 		case <-done:
 			_, _ = w.Write(committedBody(rec, r.URL.Path))
 			_ = rc.Flush()
-			s.longOpFinished(entry, longOpOutcome(rec.code(), true), failed.Load())
+			s.longOpFinished(entry, rec.code(), true, failed.Load())
 			s.log().Info("long S3 operation answered after keep-alive",
 				zap.String("path", r.URL.Path), zap.Int("status", rec.code()))
 			return

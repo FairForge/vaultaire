@@ -193,7 +193,8 @@ func (s *Server) deleteObjects(w http.ResponseWriter, r *http.Request, req *S3Re
 		}
 	}
 	// Every key failed: a 200 to the request metrics, a failure to the
-	// outcome counter.
+	// outcome counter (error_before_commit, or error_after_commit when the
+	// keep-alive had already committed the 200).
 	if len(result.Errors) == len(delReq.Objects) {
 		longOpFailed(r)
 	}

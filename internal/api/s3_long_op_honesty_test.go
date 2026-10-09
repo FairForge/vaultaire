@@ -1,6 +1,7 @@
 package api
 
 import (
+	"database/sql"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -9,9 +10,11 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/tenant"
+	dbtestutil "github.com/FairForge/vaultaire/internal/testutil"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 )
 
 // Long-op honesty (Prompt 2a, PR 3): a refusal must stay a real 4xx however
@@ -276,6 +279,22 @@ func TestLongOpRuleFile_MatchesTheExportedSeries(t *testing.T) {
 			series := fmt.Sprintf(`vaultaire_s3_long_op_total{op="%s",outcome="%s"}`, op, outcome)
 			assert.True(t, strings.Contains(body, "\n"+series+" "), "exported from boot: %s", series)
 		}
+		// The incident counts come from the table: no series while it has
+		// never been read (unknown is not zero — Prompt 2a.3 H3).
+		assert.NotContains(t, body, fmt.Sprintf("\nvaultaire_s3_long_ops_abandoned_total{op=\"%s\"} ", op))
+	}
+
+	// Read once, every op has both series.
+	db, err := sql.Open("postgres", dbtestutil.DSN())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	if db.Ping() != nil {
+		t.Skip("test database unreachable")
+	}
+	w = httptest.NewRecorder()
+	(&Server{db: db, logger: zap.NewNop()}).handleMetrics(w, httptest.NewRequest("GET", "/metrics", nil))
+	body = w.Body.String()
+	for _, op := range []string{longOpComplete, longOpCopy, longOpBatch} {
 		assert.True(t, strings.Contains(body, fmt.Sprintf("\nvaultaire_s3_long_ops_abandoned_total{op=\"%s\"} ", op)))
 		assert.True(t, strings.Contains(body, fmt.Sprintf("\nvaultaire_s3_long_ops_drain_errors_total{op=\"%s\"} ", op)))
 	}

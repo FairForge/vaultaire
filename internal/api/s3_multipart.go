@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/md5" // #nosec G501 — S3 spec requires MD5 for ETags
 	"database/sql"
 	"encoding/hex"
@@ -23,6 +24,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/FairForge/vaultaire/internal/usage"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
 
@@ -174,10 +176,12 @@ func (s *Server) handleInitiateMultipartUpload(w http.ResponseWriter, r *http.Re
 }
 
 // multipartUploadActive reports whether uploadID is an active upload owned by
-// tenantID. Every multipart query is keyed by upload_id AND tenant_id: the id
-// also names the staging directory, so an id that is not this tenant's must
-// never reach the filesystem.
-func (s *Server) multipartUploadActive(r *http.Request, tenantID, uploadID string) (bool, error) {
+// tenantID FOR bucket/object. Every multipart query is keyed by upload_id AND
+// tenant_id: the id also names the staging directory, so an id that is not
+// this tenant's must never reach the filesystem. And by the upload's own
+// bucket and key (Prompt 2a.3 H3): an upload for a.bin completed at
+// /bucket/b.bin used to create b.bin — AWS answers NoSuchUpload.
+func (s *Server) multipartUploadActive(r *http.Request, tenantID, bucket, object, uploadID string) (bool, error) {
 	if !validUploadID(uploadID) {
 		return false, nil
 	}
@@ -185,8 +189,8 @@ func (s *Server) multipartUploadActive(r *http.Request, tenantID, uploadID strin
 		var status string
 		err := s.db.QueryRowContext(r.Context(), `
 			SELECT status FROM multipart_uploads
-			WHERE upload_id = $1 AND tenant_id = $2
-		`, uploadID, tenantID).Scan(&status)
+			WHERE upload_id = $1 AND tenant_id = $2 AND bucket = $3 AND object_key = $4
+		`, uploadID, tenantID, bucket, object).Scan(&status)
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil
 		}
@@ -198,7 +202,7 @@ func (s *Server) multipartUploadActive(r *http.Request, tenantID, uploadID strin
 	memUploadsMu.RLock()
 	mu, ok := memUploads[uploadID]
 	memUploadsMu.RUnlock()
-	return ok && mu.TenantID == tenantID && mu.Status == "active", nil
+	return ok && mu.TenantID == tenantID && mu.Bucket == bucket && mu.Key == object && mu.Status == "active", nil
 }
 
 func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket, object string) {
@@ -229,7 +233,7 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 	}
 
 	// Verify upload exists, is active, and belongs to this tenant
-	active, err := s.multipartUploadActive(r, t.ID, uploadID)
+	active, err := s.multipartUploadActive(r, t.ID, bucket, object, uploadID)
 	if err != nil {
 		s.logger.Error("failed to query multipart upload", zap.Error(err))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
@@ -458,7 +462,7 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 	uploadID := r.URL.Query().Get("uploadId")
 
 	// Verify upload is active and belongs to this tenant
-	active, err := s.multipartUploadActive(r, t.ID, uploadID)
+	active, err := s.multipartUploadActive(r, t.ID, bucket, object, uploadID)
 	if err != nil {
 		s.logger.Error("failed to query multipart upload", zap.Error(err))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
@@ -473,7 +477,7 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 			// The first complete may have been cut after its commit, before
 			// its version row and the bucket's default retention were
 			// written (Prompt 2a.2 G1): the retry puts back what is missing.
-			s.reassertCompletedRows(r, t.ID, bucket, object)
+			s.reassertCompletedRows(r, t.ID, uploadID, bucket, object)
 			w.Header().Set("Content-Type", "application/xml")
 			w.Header().Set("ETag", res.ETag)
 			_ = xml.NewEncoder(w).Encode(res)
@@ -846,8 +850,8 @@ func (s *Server) handleAbortMultipartUpload(w http.ResponseWriter, r *http.Reque
 	if s.db != nil {
 		result, err := s.db.ExecContext(r.Context(), `
 			UPDATE multipart_uploads SET status = 'aborted'
-			WHERE upload_id = $1 AND tenant_id = $2 AND status = 'active'
-		`, uploadID, t.ID)
+			WHERE upload_id = $1 AND tenant_id = $2 AND bucket = $3 AND object_key = $4 AND status = 'active'
+		`, uploadID, t.ID, bucket, object)
 		if err != nil {
 			s.logger.Error("failed to abort multipart upload", zap.Error(err))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
@@ -860,7 +864,7 @@ func (s *Server) handleAbortMultipartUpload(w http.ResponseWriter, r *http.Reque
 	} else {
 		memUploadsMu.Lock()
 		mu, ok := memUploads[uploadID]
-		if !ok || mu.TenantID != t.ID || mu.Status != "active" {
+		if !ok || mu.TenantID != t.ID || mu.Bucket != bucket || mu.Key != object || mu.Status != "active" {
 			memUploadsMu.Unlock()
 			WriteS3Error(w, ErrNoSuchUpload, r.URL.Path, generateRequestID())
 			return
@@ -889,7 +893,7 @@ func (s *Server) handleListParts(w http.ResponseWriter, r *http.Request, bucket,
 	uploadID := r.URL.Query().Get("uploadId")
 
 	// Verify upload exists and is active
-	active, err := s.multipartUploadActive(r, t.ID, uploadID)
+	active, err := s.multipartUploadActive(r, t.ID, bucket, object, uploadID)
 	if err != nil {
 		s.logger.Error("failed to query multipart upload for list parts", zap.Error(err))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
@@ -1078,7 +1082,8 @@ type ListMultipartUploadItem struct {
 }
 
 // completedUploadResult is the CompleteMultipartUploadResult of a retry
-// against an upload this tenant already completed, when the part list the
+// against an upload this tenant already completed AT THIS bucket/key, when
+// the part list the
 // retry names (or, with no list, every part of the upload) assembles to the
 // ETag the key holds now — i.e. the object the first complete produced is
 // still there. Any other case (not completed, other parts, the key
@@ -1099,7 +1104,8 @@ func (s *Server) completedUploadResult(r *http.Request, tenantID, uploadID, buck
 	if s.db != nil {
 		var status string
 		err := s.db.QueryRowContext(r.Context(), `
-			SELECT status FROM multipart_uploads WHERE upload_id = $1 AND tenant_id = $2`, uploadID, tenantID).Scan(&status)
+			SELECT status FROM multipart_uploads WHERE upload_id = $1 AND tenant_id = $2 AND bucket = $3 AND object_key = $4`,
+			uploadID, tenantID, bucket, object).Scan(&status)
 		if err != nil || status != "completed" {
 			return none, false
 		}
@@ -1127,7 +1133,8 @@ func (s *Server) completedUploadResult(r *http.Request, tenantID, uploadID, buck
 	} else {
 		memUploadsMu.RLock()
 		mu, ok := memUploads[uploadID]
-		if ok && mu.TenantID == tenantID && mu.Status == "completed" {
+		ok = ok && mu.TenantID == tenantID && mu.Bucket == bucket && mu.Key == object
+		if ok && mu.Status == "completed" {
 			currentETag = mu.ETag
 			for pn, mp := range mu.Parts {
 				uploaded = append(uploaded, partRecord{PartNumber: pn, ETag: mp.ETag, Size: mp.Size})
@@ -1177,58 +1184,116 @@ func (s *Server) completedUploadResult(r *http.Request, tenantID, uploadID, buck
 
 // reassertCompletedRows puts back what a complete cut after its commit may
 // have missed (Prompt 2a.2 G1): the bucket's default retention and the
-// version row of the key's current bytes. Idempotent, and it only ever
-// strengthens: a lock row is written when the key has none or only an
-// expired one (an explicit retention set since is never shortened, an
-// unexpired one never re-dated), its retain-until counted from when the
-// object landed (the head row's updated_at), not from the retry; a version
-// row only when no latest row describes the current ETag.
-func (s *Server) reassertCompletedRows(r *http.Request, tenantID, bucket, object string) {
+// version row of the key's current bytes — but only what the object SHOULD
+// have had when it was created (Prompt 2a.3 H3: the replay wrote the
+// bucket's CURRENT default, so an object completed before a 3650-day
+// COMPLIANCE default was enabled became undeletable; AWS applies a default
+// only at creation). The bucket's configuration as of the completion is
+// known only when it has not changed since the upload began
+// (buckets.updated_at, stamped by every configuration write, is not after
+// multipart_uploads.created_at): then the current default is the one that
+// applied. Otherwise nothing is written — a lock that may be owed is logged
+// and counted (vaultaire_complete_replay_lock_undetermined_total). A lock
+// row is written only when the key has none at all (an expired one is never
+// re-dated, an explicit one never touched), its retain-until counted from
+// when the object landed (the head row's updated_at). The version row is
+// checked and written under a transaction-scoped advisory lock on the key:
+// concurrent retries each saw "no latest row" and each inserted one.
+func (s *Server) reassertCompletedRows(r *http.Request, tenantID, uploadID, bucket, object string) {
 	if s.db == nil {
 		return
 	}
 	ctx, cancel := postCommit(r.Context())
 	defer cancel()
-	if _, err := s.db.ExecContext(ctx, `
-		INSERT INTO object_locks (tenant_id, bucket, object_key, retention_mode, retain_until_date, updated_at)
-		SELECT h.tenant_id, h.bucket, h.object_key, b.default_retention_mode,
-		       h.updated_at + make_interval(days => b.default_retention_days), NOW()
-		FROM object_head_cache h
-		JOIN buckets b ON b.tenant_id = h.tenant_id AND b.name = h.bucket
-		WHERE h.tenant_id = $1 AND h.bucket = $2 AND h.object_key = $3
-		  AND b.object_lock_enabled AND b.default_retention_mode IN ('GOVERNANCE', 'COMPLIANCE')
-		  AND b.default_retention_days > 0
-		ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
-			retention_mode = EXCLUDED.retention_mode,
-			retain_until_date = EXCLUDED.retain_until_date,
-			updated_at = NOW()
-		WHERE object_locks.retain_until_date IS NULL OR object_locks.retain_until_date <= NOW()`,
-		tenantID, bucket, object); err != nil {
-		s.log().Error("complete retry: default retention not re-asserted", zap.Error(err),
+	var unchanged, hasLock, defaultNow bool
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT b.updated_at <= u.created_at,
+		       EXISTS(SELECT 1 FROM object_locks l WHERE l.tenant_id = $1 AND l.bucket = $2 AND l.object_key = $3),
+		       b.object_lock_enabled AND b.default_retention_mode IN ('GOVERNANCE', 'COMPLIANCE') AND b.default_retention_days > 0
+		FROM buckets b
+		JOIN multipart_uploads u ON u.upload_id = $4 AND u.tenant_id = b.tenant_id
+		WHERE b.tenant_id = $1 AND b.name = $2`,
+		tenantID, bucket, object, uploadID).Scan(&unchanged, &hasLock, &defaultNow); err != nil {
+		s.log().Error("complete retry: bucket configuration not read; nothing re-asserted", zap.Error(err),
+			zap.String("tenant_id", tenantID), zap.String("bucket", bucket), zap.String("key", object))
+		return
+	}
+	if !unchanged {
+		if !hasLock && defaultNow {
+			completeReplayLockUndetermined.Inc()
+			s.log().Warn("complete retry: the key has no retention and the bucket's configuration changed since the upload began — the default at completion is unknown, no lock written",
+				zap.String("tenant_id", tenantID), zap.String("bucket", bucket), zap.String("key", object), zap.String("upload_id", uploadID))
+		}
+		return
+	}
+	if !hasLock && defaultNow {
+		if _, err := s.db.ExecContext(ctx, `
+			INSERT INTO object_locks (tenant_id, bucket, object_key, retention_mode, retain_until_date, updated_at)
+			SELECT h.tenant_id, h.bucket, h.object_key, b.default_retention_mode,
+			       h.updated_at + make_interval(days => b.default_retention_days), NOW()
+			FROM object_head_cache h
+			JOIN buckets b ON b.tenant_id = h.tenant_id AND b.name = h.bucket
+			WHERE h.tenant_id = $1 AND h.bucket = $2 AND h.object_key = $3
+			ON CONFLICT (tenant_id, bucket, object_key) DO NOTHING`,
+			tenantID, bucket, object); err != nil {
+			s.log().Error("complete retry: default retention not re-asserted", zap.Error(err),
+				zap.String("tenant_id", tenantID), zap.String("bucket", bucket), zap.String("key", object))
+		}
+	}
+	if err := s.reassertVersionRow(ctx, tenantID, bucket, object); err != nil {
+		s.log().Error("complete retry: version row not re-asserted", zap.Error(err),
 			zap.String("tenant_id", tenantID), zap.String("bucket", bucket), zap.String("key", object))
 	}
+}
 
+// completeReplayLockUndetermined counts complete retries that found the key
+// without retention while the bucket's configuration had changed since the
+// upload began: the default at completion is unknown, no lock is written.
+var completeReplayLockUndetermined = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "vaultaire_complete_replay_lock_undetermined_total",
+	Help: "CompleteMultipartUpload retries that found the key without retention while the bucket's configuration changed since the upload began: the default retention at completion cannot be determined, so none was written (a Warn line names the key).",
+})
+
+// reassertVersionWrittenHook runs after the version write, before its
+// commit (tests hold two retries there).
+var reassertVersionWrittenHook = func() {}
+
+// reassertVersionRow writes the version row of the key's current bytes when
+// no latest row describes them, in one transaction under an advisory lock
+// on the key.
+func (s *Server) reassertVersionRow(ctx context.Context, tenantID, bucket, object string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('object_versions/' || $1 || '/' || $2 || '/' || $3, 0))`,
+		tenantID, bucket, object); err != nil {
+		return err
+	}
 	vStatus := getBucketVersioningStatus(ctx, s.db, tenantID, bucket)
 	if vStatus != "Enabled" && vStatus != "Suspended" {
-		return
+		return nil
 	}
 	var size int64
 	var etag, contentType, backend string
 	var described bool
-	err := s.db.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, `
 		SELECT h.size_bytes, h.etag, h.content_type, COALESCE(h.backend_name, ''),
 		       EXISTS(SELECT 1 FROM object_versions v
 		              WHERE v.tenant_id = h.tenant_id AND v.bucket = h.bucket AND v.object_key = h.object_key
 		                AND v.is_latest AND NOT v.is_delete_marker AND v.etag = h.etag)
 		FROM object_head_cache h
 		WHERE h.tenant_id = $1 AND h.bucket = $2 AND h.object_key = $3`,
-		tenantID, bucket, object).Scan(&size, &etag, &contentType, &backend, &described)
-	if err != nil {
-		s.log().Error("complete retry: version row not re-asserted", zap.Error(err),
-			zap.String("tenant_id", tenantID), zap.String("bucket", bucket), zap.String("key", object))
-		return
+		tenantID, bucket, object).Scan(&size, &etag, &contentType, &backend, &described); err != nil {
+		return err
 	}
-	if !described {
-		recordObjectVersion(ctx, s.db, tenantID, bucket, object, size, etag, contentType, backend)
+	if described {
+		return nil
 	}
+	if err := writeObjectVersion(ctx, tx, vStatus, tenantID, bucket, object, size, etag, contentType, backend); err != nil {
+		return err
+	}
+	reassertVersionWrittenHook()
+	return tx.Commit()
 }
