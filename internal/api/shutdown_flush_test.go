@@ -28,6 +28,8 @@ func TestShutdown_FlushesBufferedTrackers(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 	require.NoError(t, db.Ping())
+	// Shutdown closes the process's delivery pool: give it a private one.
+	useDeliveryPool(t, newDeliveryPool(1, 1))
 
 	s := NewServer(
 		&config.Config{Server: config.ServerConfig{Port: 0}},

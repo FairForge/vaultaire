@@ -60,8 +60,11 @@ func matchesWebhookFilter(filter []string, eventType string) bool {
 	return false
 }
 
-// emitEvent records the event and dispatches the tenant's webhooks in a
-// goroutine that reads them first.
+// emitEvent records the event and hands its delivery to the tenant's
+// webhooks to the process-wide delivery pool (event_delivery.go) — only
+// when the tenant has a webhook for it: the list comes from the targets
+// cache (event_targets.go), so a tenant without one submits nothing and,
+// once cached, queries nothing here.
 func emitEvent(ctx context.Context, db *sql.DB, logger *zap.Logger, eventType, tenantID string, data map[string]interface{}) {
 	if db == nil {
 		return
@@ -70,7 +73,23 @@ func emitEvent(ctx context.Context, db *sql.DB, logger *zap.Logger, eventType, t
 	if !ok {
 		return
 	}
-	go dispatchWebhooks(db, logger, eventID, eventType, tenantID, dataJSON) // #nosec G118 -- intentional fire-and-forget after response
+	submitEventDelivery(ctx, db, logger, eventID, eventType, tenantID, dataJSON)
+}
+
+// submitEventDelivery queues one recorded event for the tenant's matching
+// webhooks; nothing when there are none.
+func submitEventDelivery(ctx context.Context, db *sql.DB, logger *zap.Logger, eventID, eventType, tenantID string, payload []byte) {
+	lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
+	endpoints, err := tenantWebhookEndpoints(lctx, db, logger, tenantID)
+	if err != nil {
+		logger.Error("query webhook endpoints for dispatch", zap.Error(err), zap.String("tenant_id", tenantID))
+		return
+	}
+	if len(owedRows(endpoints, eventID, eventType)) == 0 {
+		return
+	}
+	eventDeliveries.submit(webhookJob(db, logger, endpoints, eventID, eventType, tenantID, payload))
 }
 
 // recordEvent inserts the events row; false when nothing was recorded.
@@ -131,8 +150,8 @@ func loadWebhookEndpoints(ctx context.Context, db *sql.DB, logger *zap.Logger, t
 	return endpoints, nil
 }
 
-func dispatchWebhooks(db *sql.DB, logger *zap.Logger, eventID, eventType, tenantID string, payload []byte) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+func dispatchWebhooks(ctx context.Context, db *sql.DB, logger *zap.Logger, eventID, eventType, tenantID string, payload []byte) {
+	ctx, cancel := context.WithTimeout(ctx, webhookDeliveryTimeout)
 	defer cancel()
 
 	endpoints, err := loadWebhookEndpoints(ctx, db, logger, tenantID)
@@ -168,7 +187,7 @@ func deliverToEndpoints(ctx context.Context, db *sql.DB, logger *zap.Logger, end
 	// resolved addresses re-checked against the private ranges at dial
 	// time (Review R11-04 — the default client followed redirects and
 	// dialled anything the stored URL named).
-	client := webhookClient(5 * time.Second)
+	client := sharedWebhookClient()
 	for _, ep := range endpoints {
 		if !matchesWebhookFilter(ep.filter, eventType) {
 			continue
@@ -221,6 +240,10 @@ func deliverWebhook(ctx context.Context, db *sql.DB, logger *zap.Logger, client 
 }
 
 func recordDelivery(ctx context.Context, db *sql.DB, logger *zap.Logger, deliveryID, webhookID, eventID, status string, responseCode int, responseBody string, latencyMs int) {
+	// Detached: the delivery's own deadline (or the shutdown cut) is what
+	// usually ended it, and the row must still be written.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO webhook_deliveries (id, webhook_id, event_id, status, response_code, response_body, latency_ms)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)`,

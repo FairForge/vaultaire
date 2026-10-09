@@ -342,6 +342,7 @@ func (s *Server) deleteBucketRegistry(ctx context.Context, tenantID, bucket stri
 	if err := tx.Commit(); err != nil {
 		return out, fmt.Errorf("delete bucket %s: commit: %w", bucket, err)
 	}
+	forgetNotifyTargets(tenantID, bucket)
 	out.state = bucketDeleteDone
 	return out, nil
 }

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -175,6 +176,7 @@ func (s *Server) handlePutBucketNotification(w http.ResponseWriter, r *http.Requ
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return
 	}
+	forgetNotifyTargets(t.ID, req.Bucket)
 
 	s.logger.Info("bucket notification config updated",
 		zap.String("tenant_id", t.ID),
@@ -327,8 +329,21 @@ func NewNotificationDispatcher(db *sql.DB, logger *zap.Logger) *NotificationDisp
 	return &NotificationDispatcher{
 		db:     db,
 		logger: logger,
-		client: webhookClient(5 * time.Second),
+		client: sharedWebhookClient(),
 	}
+}
+
+var (
+	sharedWebhookClientOnce sync.Once
+	sharedWebhookClientVal  *http.Client
+)
+
+// sharedWebhookClient is the one webhookClient every delivery uses: a
+// client per dispatcher or per event (as before) is a transport per
+// request, each holding its idle connections' goroutines for 30 s.
+func sharedWebhookClient() *http.Client {
+	sharedWebhookClientOnce.Do(func() { sharedWebhookClientVal = webhookClient(5 * time.Second) })
+	return sharedWebhookClientVal
 }
 
 // S3Event is the S3-compatible notification payload.
@@ -364,14 +379,44 @@ type S3EventIdentity struct {
 	PrincipalID string `json:"principalId"`
 }
 
-// Fire dispatches a notification event asynchronously: the bucket's
-// targets are read in the goroutine, then delivered.
+// Fire dispatches a notification event asynchronously on the process-wide
+// delivery pool (event_delivery.go) — only when the bucket has a target for
+// it: the list comes from the targets cache (event_targets.go), so a bucket
+// without one submits nothing and, once cached, queries nothing here.
 func (d *NotificationDispatcher) Fire(tenantID, bucket, eventName, objectKey string, size int64, etag string) {
 	if d == nil {
 		return
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	targets, err := d.bucketNotifyTargets(ctx, tenantID, bucket)
+	if err != nil {
+		d.logger.Error("query notifications for dispatch",
+			zap.Error(err), zap.String("tenant_id", tenantID), zap.String("bucket", bucket))
+		return
+	}
+	matched := false
+	for _, t := range targets {
+		matched = matched || matchesEventFilter(t.filter, eventName)
+	}
+	if !matched {
+		return
+	}
+	eventDeliveries.submit(d.notificationJob(targets, tenantID, bucket, eventName, objectKey, size, etag))
+}
 
-	go d.dispatch(tenantID, bucket, eventName, objectKey, size, etag)
+// notificationJob delivers one event to the targets given, with its own
+// deadline.
+func (d *NotificationDispatcher) notificationJob(targets []notifyTarget, tenantID, bucket, eventName, objectKey string, size int64, etag string) deliveryJob {
+	return deliveryJob{
+		tenant: tenantID,
+		kind:   deliveryKindNotification,
+		run: func(ctx context.Context) {
+			ctx, cancel := context.WithTimeout(ctx, notificationDeliveryTimeout)
+			defer cancel()
+			d.deliverTo(ctx, targets, tenantID, bucket, eventName, objectKey, size, etag)
+		},
+	}
 }
 
 // notifyTarget is one enabled bucket_notifications row.
@@ -410,8 +455,8 @@ func (d *NotificationDispatcher) Targets(ctx context.Context, tenantID, bucket s
 	return targets, nil
 }
 
-func (d *NotificationDispatcher) dispatch(tenantID, bucket, eventName, objectKey string, size int64, etag string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func (d *NotificationDispatcher) dispatch(ctx context.Context, tenantID, bucket, eventName, objectKey string, size int64, etag string) {
+	ctx, cancel := context.WithTimeout(ctx, notificationDeliveryTimeout)
 	defer cancel()
 
 	targets, err := d.Targets(ctx, tenantID, bucket)
@@ -513,5 +558,5 @@ func (d *NotificationDispatcher) FireSync(tenantID, bucket, eventName, objectKey
 	if d == nil {
 		return
 	}
-	d.dispatch(tenantID, bucket, eventName, objectKey, size, etag)
+	d.dispatch(context.Background(), tenantID, bucket, eventName, objectKey, size, etag)
 }
