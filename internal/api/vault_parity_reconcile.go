@@ -32,13 +32,17 @@ import (
 // cursor (tenant, digest) is in job_runs.result, which survives a deploy.
 // A leg without ListDir (S3) is listed flat, once per tenant.
 //
-// A candidate is an `<etag>` folder no row names: one with shard files, or
-// an empty one on a leg that can remove folders (an overwrite or delete
-// whose folder removal a lagging bridge refused). Both get a sighting and
-// are acted on only past the grace. A `<digest>` folder is removed when
-// nothing is left in it and no row names a folder under it. Every folder
-// removal goes through RemoveEmptyDir, which on Sync deletes only what every
-// bridge lists empty (a collection DELETE is recursive).
+// A candidate is an `<etag>` folder no row names ON THAT LEG (a row's `legs`
+// say where its shards are): one with shard files gets a sighting and is
+// erased only past the grace; an empty one, on a leg that can remove
+// folders, is removed at once (the delete, erasure and overwrite paths
+// delete shards and the row, never a folder — Prompt 2a.3 H1). A `<digest>`
+// folder is removed when nothing is left in it and no row names a folder
+// under it. Every folder removal goes through RemoveEmptyDir, which on Sync
+// deletes only what every bridge lists empty (a collection DELETE is
+// recursive). What makes a removal safe is that only this job writes shards
+// and only this job removes folders, under the job's lock: nothing can be
+// written into a folder between its empty listing and its DELETE.
 
 const (
 	// defaultReconcileEvery: the reconcile runs at most this often
@@ -313,7 +317,7 @@ func (w *parityWalk) tenant(ctx context.Context, tenantID, after string) (done b
 	p := w.p
 	tctx := common.WithTenantID(ctx, tenantID)
 	container := parityContainer(tenantID)
-	before, err := p.namedPrefixes(ctx, tenantID)
+	before, err := p.namedPrefixes(ctx, tenantID, w.leg)
 	if err != nil {
 		w.res.Errors = append(w.res.Errors, "reconcile: rows of "+tenantID+": "+err.Error())
 		return ctx.Err() == nil, after
@@ -326,7 +330,7 @@ func (w *parityWalk) tenant(ctx context.Context, tenantID, after string) (done b
 	// The rows are read again AFTER the listing: a row is inserted before
 	// its folder is created, so a folder the listing saw without a row in
 	// this read has none.
-	named, err := p.namedPrefixes(ctx, tenantID)
+	named, err := p.namedPrefixes(ctx, tenantID, w.leg)
 	if err != nil {
 		w.res.Errors = append(w.res.Errors, "reconcile: rows of "+tenantID+": "+err.Error())
 		return false, after
@@ -514,6 +518,22 @@ func namedUnder(named map[string]bool, digest string) bool {
 func (w *parityWalk) candidate(ctx, tctx context.Context, tenantID, container, prefix string, files []string,
 	rm emptyDirRemover) bool {
 	p := w.p
+	if len(files) == 0 && rm != nil {
+		// An empty folder no row names holds nothing to wait for: only the
+		// job writes shards and only the job removes folders, under one
+		// lock, so it goes at its first sighting (the delete and overwrite
+		// paths leave theirs here since Prompt 2a.3 H1). A sighting it
+		// already has (files erased, folder refused) is forgotten with it.
+		if err := rm.RemoveEmptyDir(tctx, container, prefix); err != nil {
+			if !errors.Is(err, drivers.ErrDirNotEmpty) {
+				w.res.Errors = append(w.res.Errors, fmt.Sprintf("reconcile: remove %s on %s: %v", prefix, w.leg, err))
+			}
+			return false
+		}
+		w.res.OrphanFoldersRemoved++
+		p.forget(ctx, w.res, tenantID, w.leg, []string{prefix})
+		return true
+	}
 	now := p.now()
 	var firstSeen time.Time
 	var inserted bool
@@ -574,9 +594,12 @@ func (w *parityWalk) candidate(ctx, tctx context.Context, tenantID, container, p
 	return true
 }
 
-// namedPrefixes is the shard folders the tenant's rows name.
-func (p *VaultParity) namedPrefixes(ctx context.Context, tenantID string) (map[string]bool, error) {
-	rows, err := p.db.QueryContext(ctx, `SELECT shard_prefix FROM vault_parity WHERE tenant_id = $1`, tenantID)
+// namedPrefixes is the shard folders the tenant's rows name ON THIS LEG: a
+// row names its prefix on each leg its `legs` records a shard on. A copy of
+// the same folder on another leg is no row's (Prompt 2a.3 H1: matched by the
+// path alone, it was never a candidate).
+func (p *VaultParity) namedPrefixes(ctx context.Context, tenantID, leg string) (map[string]bool, error) {
+	rows, err := p.db.QueryContext(ctx, `SELECT shard_prefix FROM vault_parity WHERE tenant_id = $1 AND $2 = ANY(legs)`, tenantID, leg)
 	if err != nil {
 		return nil, err
 	}

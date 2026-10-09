@@ -88,22 +88,13 @@ func TestVaultParity_AnEmptySiblingFolderNoLongerPinsASighting(t *testing.T) {
 	assert.Equal(t, 0, f.orphanRows())
 }
 
-func TestVaultParity_ADeleteRemovesTheShardFolderItEmptied(t *testing.T) {
-	// Before: the <etag> folder stayed after DeleteObject (exists = true).
-	f := setupParityFixture(t)
-	_, etag := f.object("del.bin", f.stripe+3)
-	f.run()
-	prefix := shardPrefix(f.bucket, "del.bin", etag)
-	require.True(t, exists(f.parityPath(prefix)))
-	_, err := f.db.Exec(`DELETE FROM object_head_cache WHERE tenant_id = $1 AND object_key = 'del.bin'`, f.tenantID)
-	require.NoError(t, err)
-
-	f.svc.OnObjectDeleted(context.Background(), f.tenantID, f.bucket, "del.bin")
-
-	assert.False(t, exists(f.parityPath(prefix)), "the emptied <etag> folder goes with its shards")
-}
+// (TestVaultParity_ADeleteRemovesTheShardFolderItEmptied, #646: the delete
+// path no longer removes folders — the reconcile does, Prompt 2a.3 H1:
+// TestVaultParity_TheDeletePathSendsNoFolderCallAndTheRowGoesWithItsShards.)
 
 func TestVaultParity_AnOverwriteRemovesTheOldEtagFolder(t *testing.T) {
+	// Since Prompt 2a.3 H1 the stale pass leaves the folder and the same
+	// run's reconcile (due on every run here) removes it.
 	f := setupParityFixture(t)
 	_, etag := f.object("ow.bin", f.stripe+3)
 	f.run()
@@ -111,7 +102,7 @@ func TestVaultParity_AnOverwriteRemovesTheOldEtagFolder(t *testing.T) {
 	require.True(t, exists(old))
 	f.object("ow.bin", f.stripe+9) // new bytes, new etag
 	f.run()
-	assert.False(t, exists(old), "the stale pass removes the folder it emptied")
+	assert.False(t, exists(old), "the reconcile removes the folder the stale pass emptied")
 	assert.Len(t, f.shardFiles(), 4)
 }
 

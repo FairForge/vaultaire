@@ -249,3 +249,44 @@ func TestOneDriveListDir_ListsAFoldersChildrenOnEveryAccount(t *testing.T) {
 	assert.Empty(t, dirs)
 	assert.ElementsMatch(t, []string{"p0", "p1"}, files)
 }
+
+// Prompt 2a.3 H1: the parity reconcile walks permafrost with ListDir, but the
+// fleet could not remove a folder — every emptied `<etag>`/`<digest>` folder
+// was listed again on every walk, forever. RemoveEmptyDir removes a folder
+// only when no account of the fleet holds anything in it.
+func TestOneDriveRemoveEmptyDir_RemovesAFolderEmptyOnEveryAccount(t *testing.T) {
+	ctx := common.WithTenantID(context.Background(), "x")
+	d, stubs := stubFleet(2, zap.NewNop())
+	path := d.ObjectKey(ctx, "c__parity", "d1/e1")
+	for i, tn := range d.tenants {
+		stubs[i].routes["GET "+graphBase+"/drives/"+tn.driveID+"/items/root:/"+odEscapePath(odRootFolder+"/"+path)+":/children?$top=999"] = odRoute{200, `{"value":[]}`}
+		stubs[i].routes["GET "+itemURL(tn, path)] = odRoute{200, `{"id":"F` + tn.name + `"}`}
+		stubs[i].routes["DELETE "+graphBase+"/drives/"+tn.driveID+"/items/F"+tn.name] = odRoute{204, ""}
+	}
+
+	require.NoError(t, d.RemoveEmptyDir(ctx, "c__parity", "d1/e1"))
+	assert.True(t, stubs[0].sawMethod("DELETE"))
+	assert.True(t, stubs[1].sawMethod("DELETE"))
+}
+
+func TestOneDriveRemoveEmptyDir_NeverDeletesWhatOneAccountHolds(t *testing.T) {
+	ctx := common.WithTenantID(context.Background(), "x")
+	d, stubs := stubFleet(2, zap.NewNop())
+	path := d.ObjectKey(ctx, "c__parity", "d1/e1")
+	b := d.tenants[1]
+	stubs[1].routes["GET "+graphBase+"/drives/"+b.driveID+"/items/root:/"+odEscapePath(odRootFolder+"/"+path)+":/children?$top=999"] = odRoute{200, `{"value":[{"name":"p0","file":{}}]}`}
+
+	err := d.RemoveEmptyDir(ctx, "c__parity", "d1/e1")
+
+	require.ErrorIs(t, err, ErrDirNotEmpty)
+	assert.False(t, stubs[0].sawMethod("DELETE"))
+	assert.False(t, stubs[1].sawMethod("DELETE"))
+}
+
+func TestOneDriveRemoveEmptyDir_MissingIsFineAndNeverTheContainer(t *testing.T) {
+	ctx := common.WithTenantID(context.Background(), "x")
+	d, _ := stubFleet(2, zap.NewNop())
+	require.NoError(t, d.RemoveEmptyDir(ctx, "c__parity", "nope/none"))
+	assert.Error(t, d.RemoveEmptyDir(ctx, "c__parity", ""))
+	assert.Error(t, d.RemoveEmptyDir(ctx, "c__parity", "/"))
+}
