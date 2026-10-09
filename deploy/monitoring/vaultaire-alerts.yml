@@ -1,0 +1,67 @@
+groups:
+  - name: vaultaire
+    rules:
+      - alert: VaultaireDown
+        expr: up{job="vaultaire"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Vaultaire is down"
+          description: "Vaultaire has been unreachable for more than 1 minute."
+
+      - alert: VaultaireHighErrorRate
+        expr: rate(vaultaire_errors_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High error rate on Vaultaire"
+          description: "Error rate is {{ $value }}/s over the last 5 minutes."
+
+  - name: node
+    rules:
+      - alert: DiskSpaceLow
+        expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) < 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk space below 10%"
+          description: "Root filesystem has {{ $value | humanizePercentage }} free."
+
+      - alert: DiskSpaceCritical
+        expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) < 0.05
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Disk space below 5%"
+          description: "Root filesystem has {{ $value | humanizePercentage }} free."
+
+      - alert: HighMemoryUsage
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Memory usage above 90%"
+          description: "Memory usage is {{ $value | humanizePercentage }}."
+
+      - alert: HighCPUUsage
+        expr: (1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m]))) > 0.9
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CPU usage above 90%"
+          description: "CPU usage has been {{ $value | humanizePercentage }} for 10 minutes."
+
+      - alert: NodeDown
+        expr: up{job="node"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Node exporter is down"
+          description: "Cannot scrape node_exporter metrics."
