@@ -83,7 +83,14 @@ func submitEventDelivery(ctx context.Context, db *sql.DB, logger *zap.Logger, ev
 	defer cancel()
 	endpoints, gen, err := tenantWebhookEndpoints(lctx, db, logger, tenantID)
 	if err != nil {
+		// Skipped: counted, and every webhook known from the last good read
+		// that the event matches gets its failed row — through the pool, off
+		// the request (Prompt 2b 0.6: skipped events were invisible).
+		deliveriesDropped.WithLabelValues(deliveryKindWebhook, "lookup_failed").Inc()
 		logger.Error("query webhook endpoints for dispatch", zap.Error(err), zap.String("tenant_id", tenantID))
+		if owed := owedRows(endpoints, eventID, eventType); len(owed) > 0 {
+			eventDeliveries.submit(droppedRowsJob(db, logger, tenantID, owed, deliveryDroppedLookupFailed))
+		}
 		return
 	}
 	if len(owedRows(endpoints, eventID, eventType)) == 0 {

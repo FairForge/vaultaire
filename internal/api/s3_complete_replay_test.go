@@ -13,6 +13,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/account"
 	"github.com/FairForge/vaultaire/internal/testutil"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -188,14 +189,15 @@ func TestLongOpIncidents_AnAccountErasureNeverLowersTheExportedCount(t *testing.
 	// from 2 to 0, which increase() reads as a counter reset (a false alert
 	// at the next incident).
 	f := longOpFixture(t, 0)
-	_, err := f.db.Exec(`INSERT INTO s3_long_op_incidents (outcome, op, tenant_id, bucket, object_key) VALUES
-		('abandoned', 'CompleteMultipartUpload', $1, 'test-bucket', 'a'), ('abandoned', 'CompleteMultipartUpload', $1, 'test-bucket', 'b')`, f.tenantID)
-	require.NoError(t, err)
-	var before int
-	require.NoError(t, f.db.QueryRow(`SELECT count(*) FROM s3_long_op_incidents`).Scan(&before))
-
+	var ids pq.Int64Array
+	require.NoError(t, f.db.QueryRow(`WITH ins AS (INSERT INTO s3_long_op_incidents (outcome, op, tenant_id, bucket, object_key) VALUES
+		('abandoned', 'CompleteMultipartUpload', $1, 'test-bucket', 'a'), ('abandoned', 'CompleteMultipartUpload', $1, 'test-bucket', 'b')
+		RETURNING id) SELECT array_agg(id) FROM ins`, f.tenantID).Scan(&ids))
+	// Only the rows this test wrote are removed afterwards (blanked, they no
+	// longer name the tenant; the test DB is shared — Review R15).
+	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM s3_long_op_incidents WHERE id = ANY($1)`, ids) })
 	userID := uuid.NewString()
-	_, err = f.db.Exec(`INSERT INTO users (id, email, password_hash, company, status, deletion_scheduled_at)
+	_, err := f.db.Exec(`INSERT INTO users (id, email, password_hash, company, status, deletion_scheduled_at)
 		VALUES ($1, $2, 'x', 'H3', 'pending_deletion', NOW() - INTERVAL '1 hour')`, userID, "h3-"+userID[:8]+"@test.local")
 	require.NoError(t, err)
 	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM users WHERE id::text = $1`, userID) })
@@ -203,13 +205,10 @@ func TestLongOpIncidents_AnAccountErasureNeverLowersTheExportedCount(t *testing.
 	require.NoError(t, err)
 
 	var after, personal int
-	require.NoError(t, f.db.QueryRow(`SELECT count(*) FROM s3_long_op_incidents`).Scan(&after))
-	require.NoError(t, f.db.QueryRow(`SELECT count(*) FROM s3_long_op_incidents WHERE tenant_id = $1 OR object_key IN ('a', 'b') AND bucket = 'test-bucket'`, f.tenantID).Scan(&personal))
-	assert.Equal(t, before, after, "the rows stay, counted")
+	require.NoError(t, f.db.QueryRow(`SELECT count(*), count(*) FILTER (WHERE tenant_id <> '' OR bucket <> '' OR object_key <> '')
+		FROM s3_long_op_incidents WHERE id = ANY($1)`, ids).Scan(&after, &personal))
+	assert.Equal(t, 2, after, "the rows stay, counted")
 	assert.Equal(t, 0, personal, "nothing of the account is left on them")
-	t.Cleanup(func() {
-		_, _ = f.db.Exec(`DELETE FROM s3_long_op_incidents WHERE tenant_id = '' AND op = 'CompleteMultipartUpload' AND age_seconds = 0 AND slot = ''`)
-	})
 }
 
 func collectIncidentSeries(t *testing.T, c prometheus.Collector) map[string]float64 {
@@ -306,4 +305,31 @@ func TestLongOps_TheDrainCutsEveryDueOperationBeforeWritingItsIncident(t *testin
 	for k, at := range cancelled {
 		assert.Less(t, at.Sub(start), time.Second, "%s cut %v after the drain began", k, at.Sub(start))
 	}
+}
+
+func TestCompleteMultipartUpload_AReplayGivesALegalHoldOnlyKeyItsOwedDefaultRetention(t *testing.T) {
+	// Arrange: the default retention was lost to a cut; the key then got a
+	// legal hold (a row with retention_mode = ''). Before: any lock row
+	// counted as "the key has a lock" — the owed 30-day retention never came
+	// back.
+	f := longOpFixture(t, 30)
+	uploadID, body := f.complete(t, "held.bin")
+	_, err := f.db.Exec(`DELETE FROM object_locks WHERE tenant_id = $1 AND object_key = 'held.bin'`, f.tenantID)
+	require.NoError(t, err)
+	_, err = f.db.Exec(`INSERT INTO object_locks (tenant_id, bucket, object_key, legal_hold) VALUES ($1, 'test-bucket', 'held.bin', TRUE)`, f.tenantID)
+	require.NoError(t, err)
+
+	// Act
+	require.Equal(t, http.StatusOK, f.replay(t, "held.bin", uploadID, body).Code)
+
+	// Assert: the retention is back, the hold kept.
+	var mode string
+	var hold bool
+	var until sql.NullTime
+	require.NoError(t, f.db.QueryRow(`SELECT retention_mode, retain_until_date, legal_hold FROM object_locks WHERE tenant_id = $1 AND object_key = 'held.bin'`,
+		f.tenantID).Scan(&mode, &until, &hold))
+	assert.Equal(t, "COMPLIANCE", mode)
+	assert.True(t, hold)
+	require.True(t, until.Valid)
+	assert.WithinDuration(t, time.Now().Add(30*24*time.Hour), until.Time, time.Hour)
 }

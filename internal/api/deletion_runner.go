@@ -401,6 +401,12 @@ func (r *AccountDeletionRunner) eraseTenant(ctx context.Context, d account.Due) 
 		return r.defer_(te, log, "erase rows", err)
 	}
 	te.Rows = rows.Rows
+	// The webhook endpoints went with the rows: move the tenant's webhook
+	// generation so a job queued before the erase re-reads them (and finds
+	// none) instead of POSTing with what it captured (Prompt 2b 0.6).
+	if d.TenantID != "" {
+		forgetWebhookEndpoints(d.TenantID)
+	}
 
 	// c2. Once more over the backends, now that the credentials are gone: a
 	// write that was in flight during the sweep may have put its bytes down

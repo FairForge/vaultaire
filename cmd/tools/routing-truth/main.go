@@ -171,7 +171,7 @@ func openDB() (*sql.DB, error) {
 		port, _ := strconv.Atoi(getenv("DB_PORT", "5432"))
 		cfg := database.Config{Host: getenv("DB_HOST", "localhost"), Port: port, Database: getenv("DB_NAME", "vaultaire"),
 			User: getenv("DB_USER", "viera"), Password: os.Getenv("DB_PASSWORD"), SSLMode: getenv("DB_SSLMODE", "disable")}
-		dsn = fmt.Sprintf("host=%s port=%d dbname=%s user=%s password=%s sslmode=%s", cfg.Host, cfg.Port, cfg.Database, cfg.User, cfg.Password, cfg.SSLMode)
+		dsn = cfg.DSN()
 	}
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {

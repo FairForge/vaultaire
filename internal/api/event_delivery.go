@@ -59,15 +59,17 @@ const (
 	deliveryKindWebhook      = "webhook"
 	deliveryDroppedOverload  = "dropped: overloaded"
 	deliveryDroppedShutdown  = "dropped: shutdown"
+	// deliveryDroppedLookupFailed: the event's targets could not be read.
+	deliveryDroppedLookupFailed = "dropped: lookup failed"
 )
 
 var deliveriesDropped = func() *prometheus.CounterVec {
 	c := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_event_deliveries_dropped_total",
-		Help: "Bucket notifications and webhooks never attempted: the process-wide delivery queue was full (overloaded), the process was stopping (shutdown), or the webhook was deleted or disabled while its job was queued (removed). A dropped webhook has a failed webhook_deliveries row while its webhook row exists.",
+		Help: "Bucket notifications and webhooks never attempted: the process-wide delivery queue was full (overloaded), the process was stopping (shutdown), the webhook was deleted or disabled while its job was queued (removed), or the event's targets could not be read (lookup_failed — counted once per event, whether or not the tenant or bucket had a target). A dropped webhook has a failed webhook_deliveries row while its webhook row exists (lookup_failed: when the webhook is known from the last good read).",
 	}, []string{"kind", "reason"})
 	for _, k := range []string{deliveryKindNotification, deliveryKindWebhook} {
-		for _, r := range []string{"overloaded", "shutdown", "removed"} {
+		for _, r := range []string{"overloaded", "shutdown", "removed", "lookup_failed"} {
 			c.WithLabelValues(k, r)
 		}
 	}
@@ -443,6 +445,24 @@ func webhookJob(db *sql.DB, logger *zap.Logger, endpoints []webhookEndpoint, gen
 			deliverToEndpoints(ctx, db, logger, eps, eventID, eventType, tenantID, payload)
 		},
 		owed: func(context.Context) []droppedDelivery { return owedRows(endpoints, eventID, eventType) },
+	}
+}
+
+// droppedRowsJob writes failed rows for deliveries that will not be
+// attempted; dropped itself, it owes the same rows.
+func droppedRowsJob(db *sql.DB, logger *zap.Logger, tenantID string, rows []droppedDelivery, reason string) deliveryJob {
+	return deliveryJob{
+		tenant: tenantID,
+		kind:   deliveryKindWebhook,
+		db:     db,
+		run: func(ctx context.Context) {
+			ctx, cancel := context.WithTimeout(ctx, webhookDeliveryTimeout)
+			defer cancel()
+			if _, err := insertDroppedDeliveries(ctx, db, rows, reason); err != nil {
+				logger.Error("skipped webhook deliveries not recorded", zap.Error(err), zap.Int("rows", len(rows)), zap.String("reason", reason))
+			}
+		},
+		owed: func(context.Context) []droppedDelivery { return rows },
 	}
 }
 

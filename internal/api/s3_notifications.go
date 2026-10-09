@@ -391,6 +391,7 @@ func (d *NotificationDispatcher) Fire(tenantID, bucket, eventName, objectKey str
 	defer cancel()
 	targets, err := d.bucketNotifyTargets(ctx, tenantID, bucket)
 	if err != nil {
+		deliveriesDropped.WithLabelValues(deliveryKindNotification, "lookup_failed").Inc()
 		d.logger.Error("query notifications for dispatch",
 			zap.Error(err), zap.String("tenant_id", tenantID), zap.String("bucket", bucket))
 		return

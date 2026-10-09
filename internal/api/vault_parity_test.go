@@ -197,7 +197,8 @@ func setupParityFixture(t *testing.T) *parityFixture {
 	f.svc.scopeTenant = f.tenantID
 	f.svc.JobName = "test_vault_parity_" + f.tenantID[:8]
 	f.svc.Stripe = f.stripe
-	f.svc.ReconcileEvery = time.Nanosecond // every run reconciles (the 30 min spacing has its own test)
+	f.svc.ReconcileEvery = time.Nanosecond        // every run reconciles (the 30 min spacing has its own test)
+	f.svc.ProtectOverhead = 10 * time.Millisecond // the fixture's objects are small; the estimate has its own tests
 	return f
 }
 

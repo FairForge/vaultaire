@@ -187,21 +187,113 @@ func placeObject(ctx context.Context, db *sql.DB, eng engine.Engine, tenantID, b
 
 // recordObjectVersion writes the object_versions ledger row for a completed
 // write on a versioned bucket and returns the version id to echo in
-// x-amz-version-id ("" for an unversioned bucket or no DB). Enabled buckets
-// get a fresh id, Suspended buckets the "null" version, exactly as plain PUT.
-// Versioning is metadata-only today (WP-R2-1): the row describes the key's
-// current bytes; older rows describe bytes that were overwritten in place.
+// x-amz-version-id ("" for an unversioned bucket, no DB, or a write that
+// failed). Enabled buckets get a fresh id, Suspended buckets the "null"
+// version, exactly as plain PUT. Versioning is metadata-only today
+// (WP-R2-1): the row describes the key's current bytes; older rows describe
+// bytes that were overwritten in place. The status read and the write run
+// in one transaction under the key's version lock (lockVersionKey), on one
+// connection (Prompt 2b 0.5: two writes of a key each cleared the latest
+// flag, then each inserted a latest row).
 func recordObjectVersion(ctx context.Context, db *sql.DB, tenantID, bucket, key string,
 	size int64, etag, contentType, backendName string) string {
 	if db == nil {
 		return ""
 	}
-	vStatus := getBucketVersioningStatus(ctx, db, tenantID, bucket)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := lockVersionKey(ctx, tx, tenantID, bucket, key); err != nil {
+		return ""
+	}
+	vStatus := bucketVersioningStatus(ctx, tx, tenantID, bucket)
 	if vStatus != "Enabled" && vStatus != "Suspended" {
 		return ""
 	}
-	versionID, _ := writeVersionRow(ctx, db, vStatus, tenantID, bucket, key, size, etag, contentType, backendName)
+	versionID, err := writeVersionRow(ctx, tx, vStatus, tenantID, bucket, key, size, etag, contentType, backendName)
+	if err != nil || tx.Commit() != nil {
+		return ""
+	}
 	return versionID
+}
+
+// lockVersionKey takes the transaction-scoped advisory lock every write of a
+// key's object_versions rows holds (version writes, delete markers, version
+// deletes, a Complete retry's re-assert): one latest row per key.
+func lockVersionKey(ctx context.Context, tx *sql.Tx, tenantID, bucket, key string) error {
+	_, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('object_versions/' || $1 || '/' || $2 || '/' || $3, 0))`,
+		tenantID, bucket, key)
+	if err != nil {
+		return fmt.Errorf("lock the version rows of %s/%s: %w", bucket, key, err)
+	}
+	return nil
+}
+
+// versionRowUpdatedHook runs between a version write's two statements
+// (tests hold two writers there).
+var versionRowUpdatedHook = func() {}
+
+// writeDeleteMarker makes a delete marker the key's latest version, under
+// the key's version lock.
+func writeDeleteMarker(ctx context.Context, db *sql.DB, tenantID, bucket, key, markerID string) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := lockVersionKey(ctx, tx, tenantID, bucket, key); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE object_versions SET is_latest = FALSE
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND is_latest = TRUE`, tenantID, bucket, key); err != nil {
+		return err
+	}
+	versionRowUpdatedHook()
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO object_versions
+			(tenant_id, bucket, object_key, version_id, size_bytes, etag, content_type, is_latest, is_delete_marker)
+		VALUES ($1, $2, $3, $4, 0, '', 'application/octet-stream', TRUE, TRUE)`, tenantID, bucket, key, markerID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// deleteVersion removes one version of a key and, when no latest version is
+// left, makes the newest remaining one latest — under the key's version
+// lock. found is false when no such version exists.
+func deleteVersion(ctx context.Context, db *sql.DB, tenantID, bucket, key, versionID string) (found bool, err error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := lockVersionKey(ctx, tx, tenantID, bucket, key); err != nil {
+		return false, err
+	}
+	res, err := tx.ExecContext(ctx, `
+		DELETE FROM object_versions
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND version_id = $4`, tenantID, bucket, key, versionID)
+	if err != nil {
+		return false, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return false, nil
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE object_versions SET is_latest = TRUE
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
+		  AND version_id = (SELECT version_id FROM object_versions
+		                    WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
+		                    ORDER BY created_at DESC, version_id DESC LIMIT 1)
+		  AND NOT EXISTS (SELECT 1 FROM object_versions
+		                  WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND is_latest)`,
+		tenantID, bucket, key); err != nil {
+		return true, err
+	}
+	return true, tx.Commit()
 }
 
 // execer is what a version write needs: a *sql.DB or a *sql.Tx.
@@ -210,7 +302,8 @@ type execer interface {
 }
 
 // writeObjectVersion is the version write of recordObjectVersion inside the
-// caller's transaction (vStatus already read): the first error is returned.
+// caller's transaction (vStatus already read, the key's version lock held):
+// the first error is returned.
 func writeObjectVersion(ctx context.Context, tx execer, vStatus, tenantID, bucket, key string,
 	size int64, etag, contentType, backendName string) error {
 	_, err := writeVersionRow(ctx, tx, vStatus, tenantID, bucket, key, size, etag, contentType, backendName)
@@ -231,6 +324,7 @@ func writeVersionRow(ctx context.Context, q execer, vStatus, tenantID, bucket, k
 		tenantID, bucket, key); err != nil {
 		return versionID, err
 	}
+	versionRowUpdatedHook()
 	_, err := q.ExecContext(ctx, `
 		INSERT INTO object_versions
 			(tenant_id, bucket, object_key, version_id, size_bytes, etag, content_type, is_latest, is_delete_marker, backend_name)

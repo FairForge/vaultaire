@@ -43,6 +43,9 @@ type cachedEndpoints struct {
 	list []webhookEndpoint
 	err  error
 	at   time.Time
+	// known is the last list read successfully, kept on a failure entry:
+	// the webhooks an event skipped on a failed lookup owe a failed row.
+	known []webhookEndpoint
 }
 
 type cachedNotifyTargets struct {
@@ -88,30 +91,43 @@ func webhookGeneration(tenantID string) uint64 {
 
 // tenantWebhookEndpoints is the tenant's enabled webhooks and the
 // generation they were read at, from the cache when it is fresh (a failure
-// is remembered for deliveryTargetsFailureTTL).
+// is remembered for deliveryTargetsFailureTTL). On a failure the list is
+// the last one read successfully (nil when there is none) — the webhooks
+// the event will not reach, which owe a failed row.
 func tenantWebhookEndpoints(ctx context.Context, db *sql.DB, logger *zap.Logger, tenantID string) ([]webhookEndpoint, uint64, error) {
 	deliveryTargets.mu.Lock()
 	c, ok := deliveryTargets.webhooks[tenantID]
 	gen := deliveryTargets.webhookGens[tenantID]
 	deliveryTargets.mu.Unlock()
 	if ok && cacheFresh(c.at, c.err, deliveryTargets.lookupTTL) {
-		return c.list, gen, c.err
+		if c.err != nil {
+			return c.known, gen, c.err
+		}
+		return c.list, gen, nil
 	}
 	list, err := loadWebhookEndpoints(ctx, db, logger, tenantID)
-	rememberWebhookEndpoints(tenantID, gen, list, err)
+	known := rememberWebhookEndpoints(tenantID, gen, list, err)
 	if err != nil {
-		return nil, gen, err
+		return known, gen, err
 	}
 	return list, gen, nil
 }
 
 // rememberWebhookEndpoints caches what a load that started at generation
-// gen read (or its failure) — unless an invalidation came in between.
-func rememberWebhookEndpoints(tenantID string, gen uint64, list []webhookEndpoint, loadErr error) {
+// gen read (or its failure, with the last list read successfully) — unless
+// an invalidation came in between. It returns that last good list.
+func rememberWebhookEndpoints(tenantID string, gen uint64, list []webhookEndpoint, loadErr error) (known []webhookEndpoint) {
 	deliveryTargets.mu.Lock()
+	prev, had := deliveryTargets.webhooks[tenantID]
+	if had {
+		known = prev.known
+		if prev.err == nil {
+			known = prev.list
+		}
+	}
 	if deliveryTargets.webhookGens[tenantID] != gen {
 		deliveryTargets.mu.Unlock()
-		return
+		return known
 	}
 	if len(deliveryTargets.webhooks) > deliveryTargetsMaxEntries {
 		for id, c := range deliveryTargets.webhooks {
@@ -120,8 +136,9 @@ func rememberWebhookEndpoints(tenantID string, gen uint64, list []webhookEndpoin
 			}
 		}
 	}
-	deliveryTargets.webhooks[tenantID] = cachedEndpoints{list: list, err: loadErr, at: time.Now()}
+	deliveryTargets.webhooks[tenantID] = cachedEndpoints{list: list, err: loadErr, at: time.Now(), known: known}
 	deliveryTargets.mu.Unlock()
+	return known
 }
 
 // bucketNotifyTargets is the bucket's enabled notification targets, from
