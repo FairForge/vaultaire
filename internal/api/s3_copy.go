@@ -42,6 +42,31 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// errCopySourceSize: a copy source whose bytes are not the size its head
+// row records — another version of the key, or a drifted row. The copy
+// fails (500) rather than store those bytes under a new ETag.
+var errCopySourceSize = errors.New("the copy source's bytes are not its recorded size")
+
+// exactSizeReader fails a stream that ends before, or runs past, want
+// bytes: the driver sees a broken body and stores nothing.
+type exactSizeReader struct {
+	r    io.Reader
+	want int64
+	n    int64
+}
+
+func (e *exactSizeReader) Read(p []byte) (int, error) {
+	n, err := e.r.Read(p)
+	e.n += int64(n)
+	if e.n > e.want {
+		return n, fmt.Errorf("%w: more than %d bytes", errCopySourceSize, e.want)
+	}
+	if errors.Is(err, io.EOF) && e.n < e.want {
+		return n, fmt.Errorf("%w: %d of %d bytes", errCopySourceSize, e.n, e.want)
+	}
+	return n, err
+}
+
 // resolveCopyContentType picks the content-type for a CopyObject destination.
 //
 // Per S3 spec: when x-amz-metadata-directive is "REPLACE" the request's own
@@ -238,7 +263,18 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 		noteRecordedBackend(s.engine, s.logger, "copy_source", srcBackend)
 		s.engine.HintBackend(srcContainer, srcKey, srcBackend)
 	}
-	reader, err := s.engine.Get(r.Context(), srcContainer, srcKey)
+	// The source's recorded size goes with the read and the write (Prompt
+	// 2b.2 C3): a backend holding two versions of the key after an
+	// interrupted commit (the multi-bridge Sync driver's plain file and
+	// striped manifest) serves the one of this size — the copy took the
+	// stale plain bytes and recorded their MD5 as the new object — and a
+	// destination of known length is striped over the Sync bridges (an
+	// unsized one was one plain file on one bridge, ~30 MB/s).
+	gctx := r.Context()
+	if srcSize > 0 {
+		gctx = engine.WithExpectedSize(gctx, srcSize)
+	}
+	reader, err := s.engine.Get(gctx, srcContainer, srcKey)
 	if err != nil {
 		switch {
 		case errors.Is(err, engine.ErrAllBackendsUnavailable):
@@ -320,10 +356,19 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	// once (the destination stores nothing), the call may still answer for
 	// longOpAnswerGrace (s3_long_op.go).
 	counter := &countingReader{r: &cutReader{ctx: r.Context(), r: reader}}
+	var src io.Reader = counter
+	if srcSize > 0 {
+		// Bytes that are not the recorded size are not the source: the
+		// write fails rather than store them under a new ETag.
+		src = &exactSizeReader{r: counter, want: srcSize}
+	}
 	hasher := md5.New() // #nosec G401 — S3 spec requires MD5 for ETags
-	tee := io.TeeReader(counter, hasher)
+	tee := io.TeeReader(src, hasher)
 
 	putOpts := []engine.PutOption{engine.WithContentType(attrs.ContentType)}
+	if srcSize > 0 {
+		putOpts = append(putOpts, engine.WithContentLength(srcSize))
+	}
 	if destClass != "" {
 		putOpts = append(putOpts, engine.WithStorageClass(destClass))
 	}

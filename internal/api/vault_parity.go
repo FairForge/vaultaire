@@ -659,7 +659,9 @@ func (p *VaultParity) protect(ctx context.Context, c parityCandidate) (state str
 		return "gone", 0, nil
 	}
 
-	src, err := p.eng.Get(tctx, (&tenant.Tenant{ID: c.tenantID}).NamespaceContainer(c.bucket), c.key)
+	// Sized like every read of an object (Prompt 2b.2 C3): a backend that
+	// can hold two versions of a key serves the one of the row's size.
+	src, err := p.eng.Get(engine.WithExpectedSize(tctx, c.size), (&tenant.Tenant{ID: c.tenantID}).NamespaceContainer(c.bucket), c.key)
 	if err != nil {
 		// Nothing was written, but the row keeps naming every shard: an
 		// earlier attempt's shards at this prefix were kept for this write
@@ -1051,7 +1053,7 @@ func (p *VaultParity) Open(ctx context.Context, tenantID, bucket, key, etag stri
 		if m == 0 {
 			return piece, nil
 		}
-		rc, err := p.eng.GetRange(common.WithTenantID(ctx, tenantID), objContainer, key, o, m)
+		rc, err := p.eng.GetRange(engine.WithExpectedSize(common.WithTenantID(ctx, tenantID), size), objContainer, key, o, m)
 		if err != nil {
 			return nil, err
 		}

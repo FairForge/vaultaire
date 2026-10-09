@@ -638,7 +638,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		if nativeRange != nil {
 			rr = reader // opened above, already positioned at rng.start
 		} else if ce, ok := a.engine.(*engine.CoreEngine); ok && cachedEncAlgo == "" {
-			rr, rangeErr = ce.GetRange(r.Context(), container, artifact, rng.start, rng.length)
+			rr, rangeErr = ce.GetRange(gctx, container, artifact, rng.start, rng.length)
 			if rangeErr == nil {
 				defer func() { _ = rr.Close() }()
 			}
