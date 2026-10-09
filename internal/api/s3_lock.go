@@ -493,6 +493,21 @@ func checkObjectLock(ctx context.Context, db *sql.DB, tenantID, bucket, key stri
 
 var errObjectLocked = &objectLockedError{}
 
+// writeObjectLockRefusal answers a checkObjectLock error: 403 AccessDenied
+// when the key is locked, 500 InternalError for anything else — a lookup
+// that failed (a database error, a context a shutdown cut) says nothing
+// about the lock, and answering it "AccessDenied … Object Lock" sent the
+// client after a retention that is not there (Prompt 2a.2 G1).
+func writeObjectLockRefusal(w http.ResponseWriter, r *http.Request, logger *zap.Logger, err error) {
+	if errors.Is(err, errObjectLocked) {
+		WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
+			WithSuggestion(lockDeniedHint(r)))
+		return
+	}
+	logger.Error("object lock lookup failed", zap.Error(err), zap.String("path", r.URL.Path))
+	WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+}
+
 type objectLockedError struct{}
 
 func (e *objectLockedError) Error() string {

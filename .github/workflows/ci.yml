@@ -91,7 +91,9 @@ jobs:
           version: v2.4.0
 
       - name: Deploy scripts
-        run: bash deploy/scripts/pg-backup_test.sh
+        run: |
+          bash deploy/scripts/pg-backup_test.sh
+          bash deploy/scripts/vaultaire-switch_test.sh
 
       - name: Smoke test
         run: |

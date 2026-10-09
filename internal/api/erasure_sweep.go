@@ -155,15 +155,16 @@ var sweepBucketSources = []struct{ table, query string }{
 // sweepBucketTablesExcluded are tenant tables with a bucket-like column that
 // are not a source, and why.
 var sweepBucketTablesExcluded = map[string]string{
-	"s3_access_log":      "a log of what requests named — any string, existing or not",
-	"cdn_access_log":     "a log, purged after 2 days",
-	"cdn_stats_daily":    "a rollup of the log",
-	"abuse_reports":      "the reporter's claim, not the tenant's bucket list",
-	"access_patterns":    "no writer (R6: the tiering path is inert)",
-	"artifacts":          "no writer (R9 orphan table, D-12)",
-	"change_history":     "no writer (D-12)",
-	"retention_policies": "no writer (D-12)",
-	"tiering_policies":   "no writer (R6: inert)",
+	"s3_access_log":        "a log of what requests named — any string, existing or not",
+	"s3_long_op_incidents": "a long operation a stopping slot cut (082): a bucket that holds bytes also has its buckets row or head rows",
+	"cdn_access_log":       "a log, purged after 2 days",
+	"cdn_stats_daily":      "a rollup of the log",
+	"abuse_reports":        "the reporter's claim, not the tenant's bucket list",
+	"access_patterns":      "no writer (R6: the tiering path is inert)",
+	"artifacts":            "no writer (R9 orphan table, D-12)",
+	"change_history":       "no writer (D-12)",
+	"retention_policies":   "no writer (D-12)",
+	"tiering_policies":     "no writer (R6: inert)",
 }
 
 // sweepPlan is what one tenant's sweep runs over, read before the rows are

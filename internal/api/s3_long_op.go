@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/tenant"
@@ -56,11 +59,28 @@ import (
 // them after the drain and before the trackers flush and the engine closes
 // (drainLongOps) — up to longOpDrainBound measured from EACH operation's
 // start, so an operation never gets more than that in a deploy and the
-// script's wait and the process's own stay inside one budget. Past the bound
-// the rest is cancelled (its context), logged with op/tenant/bucket/key/age
-// and counted in vaultaire_s3_long_ops_abandoned_total{op}; a cancelled
-// CompleteMultipartUpload leaves its upload active and its parts on disk, so
-// the client's retry finishes the same upload (s3_multipart.go).
+// script's wait and the process's own stay inside one budget. An operation
+// past its bound is cut (its context), logged with op/tenant/bucket/key/age
+// and written to s3_long_op_incidents (082) while the database is still
+// open: Prometheus scrapes only the active slot, so the slot that is
+// stopping cannot be the one that reports it — the active slot exports
+// vaultaire_s3_long_ops_abandoned_total{op} from the table (Prompt 2a.2 G1).
+//
+// What a cut may stop is the backend write or delete itself, and nothing
+// after it (Prompt 2a.2 G1: a cut that landed in the bookkeeping left a
+// completed object without its bucket's default retention — a COMPLIANCE
+// object a DELETE could remove — or new bytes under the old head row):
+//   - the body a write streams is cut at once (cutReader): a backend never
+//     commits an object whose body failed;
+//   - the call itself runs on backendCallCtx, which ends longOpAnswerGrace
+//     after the cut: a write whose whole body was sent is given that long to
+//     answer, so bytes that landed get their row;
+//   - everything after a backend call that succeeded — head row, version
+//     row, Object Lock, quota, parity/Smart hooks, upload status — runs on
+//     postCommit, detached from the cut, with its own short timeout.
+// A cut CompleteMultipartUpload leaves its upload active and its parts on
+// disk, so the client's retry finishes the same upload; a retry of one that
+// had landed re-asserts its lock and version rows (s3_multipart.go).
 
 const (
 	defaultLongOpThreshold = 10 * time.Second
@@ -73,10 +93,63 @@ const (
 	// longest measured operation is a 2 GiB copy through Cloudflare at
 	// 120 s; vaultaire-switch waits the same 900 s and its lock is 1200 s).
 	longOpDrainBound = 15 * time.Minute
-	// longOpCancelGrace is how long drainLongOps lets a cancelled operation
-	// unwind (answer its client, release its reservation) before returning.
-	longOpCancelGrace = 5 * time.Second
+	// longOpCancelGrace is how long drainLongOps lets a cut operation
+	// unwind before returning: the answer grace of its backend call plus its
+	// bookkeeping (vaultaire-switch's 900 s + this stays inside the unit's
+	// TimeoutStopSec of 1000 s).
+	longOpCancelGrace = 60 * time.Second
+	// defaultLongOpAnswerGrace is how long a backend write or delete already
+	// in flight when its operation is cut may still take to answer.
+	defaultLongOpAnswerGrace = 20 * time.Second
+	// postCommitTimeout bounds the bookkeeping that follows a backend call
+	// that succeeded (postCommit).
+	postCommitTimeout = 30 * time.Second
 )
+
+// errLongOpCut is what a cut operation's body reads return.
+var errLongOpCut = errors.New("long S3 operation cut at shutdown")
+
+// postCommit is the context of the bookkeeping after a backend write or
+// delete that succeeded: detached from the operation's cut and from the
+// client, bounded by postCommitTimeout. Values (tenant, gate) are kept.
+func postCommit(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), postCommitTimeout)
+}
+
+// backendCallCtx is the context of the backend write or delete an operation
+// makes: it ends `grace` after ctx does, not with it, so a call whose body
+// is already complete can still answer (and its bytes get their row) when
+// the operation is cut. The body itself is cut at once (cutReader).
+func backendCallCtx(ctx context.Context, grace time.Duration) (context.Context, context.CancelFunc) {
+	if grace <= 0 {
+		grace = defaultLongOpAnswerGrace
+	}
+	bctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stop := context.AfterFunc(ctx, func() { time.AfterFunc(grace, cancel) })
+	return bctx, func() { stop(); cancel() }
+}
+
+// longOpAnswerGrace is the server's answer grace (tests shorten it).
+func (s *Server) longOpAnswerGrace() time.Duration {
+	if s.longOpGrace > 0 {
+		return s.longOpGrace
+	}
+	return defaultLongOpAnswerGrace
+}
+
+// cutReader is a write's body that fails as soon as its operation is cut:
+// the backend sees a broken body and stores nothing.
+type cutReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c *cutReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, fmt.Errorf("%w: %w", errLongOpCut, err)
+	}
+	return c.r.Read(p)
+}
 
 // The three operations, as the metrics label them.
 const (
@@ -123,6 +196,32 @@ type longOpGate struct {
 
 type longOpGateKey struct{}
 
+type longOpFailedKey struct{}
+
+// longOpFailed marks an operation that answers 200 as failed all the same —
+// a DeleteObjects whose every key is an error entry: the request metrics
+// say 200, so the outcome counter must not say ok. No-op outside
+// runLongS3Op.
+func longOpFailed(r *http.Request) {
+	if f, ok := r.Context().Value(longOpFailedKey{}).(*atomic.Bool); ok && f != nil {
+		f.Store(true)
+	}
+}
+
+// longOpFinished counts an operation's outcome; one that failed inside its
+// committed 200 while this process is stopping is also written to
+// s3_long_op_incidents (the active slot reports it: this one is not
+// scraped any more). A cut operation already has its row.
+func (s *Server) longOpFinished(e *longOpEntry, outcome string, failed bool) {
+	if failed && outcome == longOpOK {
+		outcome = longOpErrorAfterCommit
+	}
+	longOpOutcomes.WithLabelValues(e.Op, outcome).Inc()
+	if outcome == longOpErrorAfterCommit && s.draining.Load() && !e.cut.Load() {
+		s.recordLongOpIncident(e, longOpErrorAfterCommit, time.Since(e.started))
+	}
+}
+
 // longOpBegin marks the start of the operation's slow work. No-op outside
 // runLongS3Op.
 func longOpBegin(r *http.Request) {
@@ -153,16 +252,6 @@ var (
 		}
 		return g
 	}()
-	longOpsAbandoned = func() *prometheus.CounterVec {
-		c := prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "vaultaire_s3_long_ops_abandoned_total",
-			Help: "Long S3 operations a stopping process cancelled because they were still running 15 min after their start, by operation. Each one has a Warn line with tenant, bucket, key and age.",
-		}, []string{"op"})
-		for _, op := range []string{longOpComplete, longOpCopy, longOpBatch} {
-			c.WithLabelValues(op)
-		}
-		return c
-	}()
 )
 
 // longOpInfo names an operation for the registry, the log and the metrics.
@@ -175,6 +264,10 @@ type longOpEntry struct {
 	tenant  string
 	started time.Time
 	cancel  context.CancelFunc
+	// cutAt is when drainLongOps cut the operation (read and written by the
+	// drain only); cut says so to the operation's own goroutine.
+	cutAt time.Time
+	cut   atomic.Bool
 }
 
 // longOpRegistry is the set of detached operations in flight.
@@ -225,41 +318,45 @@ func (s *Server) longOps() *longOpRegistry {
 	return s.longOpsReg
 }
 
-// drainLongOps waits for the detached operations in flight until each has
-// had `bound` since its start, cancels the ones still running, logs and
-// counts them, and returns how many were cancelled. Called by Server.Shutdown
-// after the HTTP drain (no new operation can start) and before the trackers
-// flush and the engine closes the database.
+// drainLongOps waits for the detached operations in flight, cuts each one
+// when it has had `bound` since its own start (an operation 14 min old gets
+// one more minute, not the youngest one's fifteen), logs it and writes its
+// s3_long_op_incidents row, and returns how many it cut once none is left —
+// or once every one left has overstayed longOpCancelGrace after its cut.
+// Called by Server.Shutdown after the HTTP drain (no new operation can
+// start) and before the trackers flush and the engine closes the database.
 func (s *Server) drainLongOps(bound time.Duration) int {
 	reg := s.longOps()
+	s.draining.Store(true)
+	cut := 0
 	for {
 		ops := reg.snapshot()
 		if len(ops) == 0 {
-			return 0
+			return cut
 		}
-		var youngest time.Time
+		now := time.Now()
+		overstayed := true
 		for _, e := range ops {
-			if e.started.After(youngest) {
-				youngest = e.started
+			if e.cutAt.IsZero() && !now.Before(e.started.Add(bound)) {
+				e.cutAt = now
+				e.cut.Store(true)
+				age := now.Sub(e.started)
+				s.log().Warn("long S3 operation abandoned at shutdown",
+					zap.String("op", e.Op), zap.String("tenant", e.tenant),
+					zap.String("bucket", e.Bucket), zap.String("key", e.Key),
+					zap.Duration("age", age))
+				s.recordLongOpIncident(e, longOpAbandoned, age)
+				e.cancel()
+				cut++
+			}
+			if e.cutAt.IsZero() || now.Before(e.cutAt.Add(longOpCancelGrace)) {
+				overstayed = false
 			}
 		}
-		if wait := time.Until(youngest.Add(bound)); wait > 0 {
-			time.Sleep(min(wait, 50*time.Millisecond))
-			continue
+		if overstayed {
+			return cut
 		}
-		for _, e := range ops {
-			s.log().Warn("long S3 operation abandoned at shutdown",
-				zap.String("op", e.Op), zap.String("tenant", e.tenant),
-				zap.String("bucket", e.Bucket), zap.String("key", e.Key),
-				zap.Duration("age", time.Since(e.started)))
-			longOpsAbandoned.WithLabelValues(e.Op).Inc()
-			e.cancel()
-		}
-		deadline := time.Now().Add(longOpCancelGrace)
-		for reg.count() > 0 && time.Now().Before(deadline) {
-			time.Sleep(10 * time.Millisecond)
-		}
-		return len(ops)
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -313,18 +410,24 @@ func (s *Server) runLongS3Op(w http.ResponseWriter, r *http.Request, info longOp
 	gate := &longOpGate{begun: make(chan struct{})}
 	opReq := r.WithContext(context.WithValue(ctx, longOpGateKey{}, gate))
 
+	failed := &atomic.Bool{}
+	opReq = opReq.WithContext(context.WithValue(opReq.Context(), longOpFailedKey{}, failed))
+
 	entry := &longOpEntry{longOpInfo: info, started: time.Now(), cancel: cancel}
 	if t, err := tenant.FromContext(r.Context()); err == nil && t != nil {
 		entry.tenant = t.ID
 	}
 	reg := s.longOps()
 	reg.add(entry)
+	// Out of the registry only once the answer is written and flushed: a
+	// stopping process waits for the registry, and an entry removed when the
+	// operation returned let it exit before the last bytes went out.
+	defer reg.remove(entry)
 
 	rec := &bufferedResponse{header: http.Header{}}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		defer reg.remove(entry)
 		// The goroutine is outside net/http's per-request recover: a panic
 		// here would take the process down.
 		defer func() {
@@ -356,7 +459,8 @@ func (s *Server) runLongS3Op(w http.ResponseWriter, r *http.Request, info longOp
 			}
 			w.WriteHeader(rec.code())
 			_, _ = w.Write(rec.body.Bytes())
-			longOpOutcomes.WithLabelValues(info.Op, longOpOutcome(rec.code(), false)).Inc()
+			_ = http.NewResponseController(w).Flush()
+			s.longOpFinished(entry, longOpOutcome(rec.code(), false), failed.Load())
 			return
 		case <-begun:
 			begun = nil
@@ -384,7 +488,7 @@ func (s *Server) runLongS3Op(w http.ResponseWriter, r *http.Request, info longOp
 		case <-done:
 			_, _ = w.Write(committedBody(rec, r.URL.Path))
 			_ = rc.Flush()
-			longOpOutcomes.WithLabelValues(info.Op, longOpOutcome(rec.code(), true)).Inc()
+			s.longOpFinished(entry, longOpOutcome(rec.code(), true), failed.Load())
 			s.log().Info("long S3 operation answered after keep-alive",
 				zap.String("path", r.URL.Path), zap.Int("status", rec.code()))
 			return
@@ -429,4 +533,41 @@ func (s *Server) log() *zap.Logger {
 		return zap.NewNop()
 	}
 	return s.logger
+}
+
+// longOpBucketExists is the bucket check a long operation makes before
+// longOpBegin, ListObjects' rule (a registry row, or objects recorded under
+// the name for buckets older than the registry). No DB = exists.
+func (s *Server) longOpBucketExists(r *http.Request, tenantID, bucket string) (bool, error) {
+	if s.db == nil {
+		return true, nil
+	}
+	var exists bool
+	err := s.db.QueryRowContext(r.Context(), `
+		SELECT EXISTS(SELECT 1 FROM buckets WHERE tenant_id = $1 AND name = $2)
+		    OR EXISTS(SELECT 1 FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2)`,
+		tenantID, bucket).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("bucket %s lookup: %w", bucket, err)
+	}
+	return exists, nil
+}
+
+// longOpDrainBoundFromEnv is LONG_OP_DRAIN_BOUND (a Go duration, 1s–15m;
+// default and ceiling longOpDrainBound): a lab lowers it to watch a cut
+// happen. Never above 15 min — vaultaire-switch's wait and the unit's
+// TimeoutStopSec are sized for it. A rejected value is logged at Warn and
+// the default kept (R13-19).
+func longOpDrainBoundFromEnv(logger *zap.Logger, getenv func(string) string) time.Duration {
+	raw := getenv("LONG_OP_DRAIN_BOUND")
+	if raw == "" {
+		return longOpDrainBound
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < time.Second || d > longOpDrainBound {
+		logger.Warn("LONG_OP_DRAIN_BOUND rejected; the default is kept",
+			zap.String("value", raw), zap.Duration("default", longOpDrainBound))
+		return longOpDrainBound
+	}
+	return d
 }

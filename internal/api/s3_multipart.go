@@ -470,6 +470,10 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 		// result again, as AWS answers a repeated complete with the same
 		// parts. Anything else about a non-active upload is NoSuchUpload.
 		if res, ok := s.completedUploadResult(r, t.ID, uploadID, bucket, object); ok {
+			// The first complete may have been cut after its commit, before
+			// its version row and the bucket's default retention were
+			// written (Prompt 2a.2 G1): the retry puts back what is missing.
+			s.reassertCompletedRows(r, t.ID, bucket, object)
 			w.Header().Set("Content-Type", "application/xml")
 			w.Header().Set("ETag", res.ETag)
 			_ = xml.NewEncoder(w).Encode(res)
@@ -484,8 +488,7 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 	// multipart complete over a COMPLIANCE-retained key destroyed it (R3-01,
 	// live-proven). Refused with the same 403 as PUT.
 	if lockErr := checkObjectLock(r.Context(), s.db, t.ID, bucket, object, isObjectLockBypass(r)); lockErr != nil {
-		WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
-			WithSuggestion(lockDeniedHint(r)))
+		writeObjectLockRefusal(w, r, s.log(), lockErr)
 		return
 	}
 
@@ -692,10 +695,16 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 	if attrs.ContentType != "" {
 		completeOpts = append(completeOpts, engine.WithContentType(attrs.ContentType))
 	}
+	// A shutdown's cut stops the body at once (the backend stores nothing);
+	// the call itself may still answer for longOpAnswerGrace, so assembled
+	// bytes that landed get their head row (s3_long_op.go).
 	var backendName string
+	putCtx, putCancel := backendCallCtx(r.Context(), s.longOpAnswerGrace())
+	defer putCancel()
 	go func() {
 		var putErr error
-		backendName, putErr = placeObject(r.Context(), s.db, s.engine, t.ID, bucket, containerName, object, pr, completeOpts...)
+		backendName, putErr = placeObject(putCtx, s.db, s.engine, t.ID, bucket, containerName, object,
+			&cutReader{ctx: r.Context(), r: pr}, completeOpts...)
 		_ = pr.Close()
 		errCh <- putErr
 	}()
@@ -728,6 +737,11 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// The backend holds the assembled bytes: everything from here runs to the
+	// end, whatever happens to the operation (a shutdown's cut, the client).
+	pctx, pcancel := postCommit(r.Context())
+	defer pcancel()
+
 	// Head row + upload status in ONE transaction. The head row is the only
 	// thing HEAD/GET/DELETE and the bill read: answering 200 without it means
 	// the object is invisible and unbilled forever (R3-10 — it used to log
@@ -736,8 +750,8 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 	var displaced displacedRow
 	if s.db != nil {
 		var dbErr error
-		displaced, dbErr = atomicHeadUpsertReleasing(r.Context(), s.db, manifestReleaser(s.gci), t.ID, bucket, object, func(tx *sql.Tx) error {
-			if err := upsertWholeObjectHeadRow(r.Context(), tx, t.ID, bucket, object, totalSize, etagValue, backendName, floor, attrs); err != nil {
+		displaced, dbErr = atomicHeadUpsertReleasing(pctx, s.db, manifestReleaser(s.gci), t.ID, bucket, object, func(tx *sql.Tx) error {
+			if err := upsertWholeObjectHeadRow(pctx, tx, t.ID, bucket, object, totalSize, etagValue, backendName, floor, attrs); err != nil {
 				return err
 			}
 			// Unconditional on purpose: the upload was active when this
@@ -747,7 +761,7 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 			// complete of the same upload writes identical bytes and an
 			// identical row (the displaced size it releases is the size the
 			// other request reserved, so the bill stays exact).
-			if _, err := tx.ExecContext(r.Context(), `
+			if _, err := tx.ExecContext(pctx, `
 				UPDATE multipart_uploads SET status = 'completed'
 				WHERE upload_id = $1 AND tenant_id = $2`, uploadID, t.ID); err != nil {
 				return fmt.Errorf("mark upload completed: %w", err)
@@ -771,20 +785,19 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 	}
 
 	if quotaOn && displaced.Size > 0 {
-		ctx, cancel := quotaCtx(r)
-		s.releaseQuota(ctx, t.ID, displaced.Floor, displaced.Size)
-		cancel()
+		s.releaseQuota(pctx, t.ID, displaced.Floor, displaced.Size)
 	}
+
+	// Versioning ledger row + bucket default retention, exactly as plain PUT
+	// (R3-09: multipart objects never appeared in object_versions) — before
+	// the displaced blob's delete, which may take staleCopyTimeout.
+	versionID := recordObjectVersion(pctx, s.db, t.ID, bucket, object, totalSize, etagValue, attrs.ContentType, backendName)
+	applyObjectLockOnPut(pctx, s.db, t.ID, bucket, object, r)
 
 	// The key's previous blob on another backend (a demoted object replaced
 	// by a multipart upload, R13-10) — exactly as plain PUT.
-	dropDisplacedBlob(r.Context(), s.db, s.engine, s.logger, lostWriteOverwrite,
+	dropDisplacedBlob(pctx, s.db, s.engine, s.logger, lostWriteOverwrite,
 		t.ID, bucket, t.NamespaceContainer(bucket), object, displaced, backendName)
-
-	// Versioning ledger row + bucket default retention, exactly as plain PUT
-	// (R3-09: multipart objects never appeared in object_versions).
-	versionID := recordObjectVersion(r.Context(), s.db, t.ID, bucket, object, totalSize, etagValue, attrs.ContentType, backendName)
-	applyObjectLockOnPut(r.Context(), s.db, t.ID, bucket, object, r)
 
 	// Clean up temp files
 	_ = os.RemoveAll(multipartDir(uploadID))
@@ -1160,4 +1173,62 @@ func (s *Server) completedUploadResult(r *http.Request, tenantID, uploadID, buck
 		Key:      object,
 		ETag:     etag,
 	}, true
+}
+
+// reassertCompletedRows puts back what a complete cut after its commit may
+// have missed (Prompt 2a.2 G1): the bucket's default retention and the
+// version row of the key's current bytes. Idempotent, and it only ever
+// strengthens: a lock row is written when the key has none or only an
+// expired one (an explicit retention set since is never shortened, an
+// unexpired one never re-dated), its retain-until counted from when the
+// object landed (the head row's updated_at), not from the retry; a version
+// row only when no latest row describes the current ETag.
+func (s *Server) reassertCompletedRows(r *http.Request, tenantID, bucket, object string) {
+	if s.db == nil {
+		return
+	}
+	ctx, cancel := postCommit(r.Context())
+	defer cancel()
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO object_locks (tenant_id, bucket, object_key, retention_mode, retain_until_date, updated_at)
+		SELECT h.tenant_id, h.bucket, h.object_key, b.default_retention_mode,
+		       h.updated_at + make_interval(days => b.default_retention_days), NOW()
+		FROM object_head_cache h
+		JOIN buckets b ON b.tenant_id = h.tenant_id AND b.name = h.bucket
+		WHERE h.tenant_id = $1 AND h.bucket = $2 AND h.object_key = $3
+		  AND b.object_lock_enabled AND b.default_retention_mode IN ('GOVERNANCE', 'COMPLIANCE')
+		  AND b.default_retention_days > 0
+		ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
+			retention_mode = EXCLUDED.retention_mode,
+			retain_until_date = EXCLUDED.retain_until_date,
+			updated_at = NOW()
+		WHERE object_locks.retain_until_date IS NULL OR object_locks.retain_until_date <= NOW()`,
+		tenantID, bucket, object); err != nil {
+		s.log().Error("complete retry: default retention not re-asserted", zap.Error(err),
+			zap.String("tenant_id", tenantID), zap.String("bucket", bucket), zap.String("key", object))
+	}
+
+	vStatus := getBucketVersioningStatus(ctx, s.db, tenantID, bucket)
+	if vStatus != "Enabled" && vStatus != "Suspended" {
+		return
+	}
+	var size int64
+	var etag, contentType, backend string
+	var described bool
+	err := s.db.QueryRowContext(ctx, `
+		SELECT h.size_bytes, h.etag, h.content_type, COALESCE(h.backend_name, ''),
+		       EXISTS(SELECT 1 FROM object_versions v
+		              WHERE v.tenant_id = h.tenant_id AND v.bucket = h.bucket AND v.object_key = h.object_key
+		                AND v.is_latest AND NOT v.is_delete_marker AND v.etag = h.etag)
+		FROM object_head_cache h
+		WHERE h.tenant_id = $1 AND h.bucket = $2 AND h.object_key = $3`,
+		tenantID, bucket, object).Scan(&size, &etag, &contentType, &backend, &described)
+	if err != nil {
+		s.log().Error("complete retry: version row not re-asserted", zap.Error(err),
+			zap.String("tenant_id", tenantID), zap.String("bucket", bucket), zap.String("key", object))
+		return
+	}
+	if !described {
+		recordObjectVersion(ctx, s.db, tenantID, bucket, object, size, etag, contentType, backend)
+	}
 }

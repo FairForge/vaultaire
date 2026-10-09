@@ -88,6 +88,7 @@ func newSlowMultipartServer(t *testing.T, delay time.Duration) (*Server, *tenant
 	srv.engine.SetPrimary("local")
 	srv.longOpThreshold = 50 * time.Millisecond
 	srv.longOpInterval = 20 * time.Millisecond
+	srv.longOpGrace = 100 * time.Millisecond
 	return srv, tnt, slow
 }
 

@@ -263,6 +263,8 @@ func TestLongOpRuleFile_MatchesTheExportedSeries(t *testing.T) {
 	}
 	assert.True(t, names["LongOpFailingAfterCommit"], "a burst of error_after_commit pages")
 	assert.True(t, names["LongOpsAbandonedAtShutdown"], "an abandoned operation is reported")
+	assert.True(t, names["LongOpsFailedDuringDrain"], "a failure on a stopping slot is reported")
+	assert.Contains(t, raw, "vaultaire_s3_long_ops_drain_errors_total")
 	assert.Contains(t, raw, `outcome="error_after_commit"`)
 
 	s := &Server{}
@@ -275,5 +277,6 @@ func TestLongOpRuleFile_MatchesTheExportedSeries(t *testing.T) {
 			assert.True(t, strings.Contains(body, "\n"+series+" "), "exported from boot: %s", series)
 		}
 		assert.True(t, strings.Contains(body, fmt.Sprintf("\nvaultaire_s3_long_ops_abandoned_total{op=\"%s\"} ", op)))
+		assert.True(t, strings.Contains(body, fmt.Sprintf("\nvaultaire_s3_long_ops_drain_errors_total{op=\"%s\"} ", op)))
 	}
 }

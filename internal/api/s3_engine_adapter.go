@@ -783,8 +783,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		// must still refuse the overwrite — the write below replaces the
 		// backend bytes in place (R2-01).
 		if lockErr := checkObjectLock(r.Context(), a.db, t.ID, bucket, artifact, isObjectLockBypass(r)); lockErr != nil {
-			WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
-				WithSuggestion(lockDeniedHint(r)))
+			writeObjectLockRefusal(w, r, a.logger, lockErr)
 			return
 		}
 		var existingETag string
@@ -2033,8 +2032,7 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 	// marker here unbilled and hid the retained object and the next PUT
 	// overwrote it (R2-01). Refusing the marker is the documented deviation.
 	if lockErr := checkObjectLock(r.Context(), a.db, t.ID, bucket, object, isObjectLockBypass(r)); lockErr != nil {
-		WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
-			WithSuggestion(lockDeniedHint(r)))
+		writeObjectLockRefusal(w, r, a.logger, lockErr)
 		return
 	}
 
@@ -2181,9 +2179,10 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 	// Smart second copy, the parity shards, the notification — is the one
 	// aftermath DeleteObjects runs too (object_delete_shared.go).
 	if err := a.objectDeleteAftermath().settle(r.Context(), t.ID, bucket, object, isChunked); err != nil {
-		// The manifest is still intact (rolled back with the row): the
-		// client retries. Answering 204 here would leave a live object.
-		a.logger.Error("chunked delete failed",
+		// The row (and a chunked object's manifest) is still there: the
+		// client retries — a backend miss, then the row. Answering 204 here
+		// would leave a live (or phantom) object.
+		a.logger.Error("delete bookkeeping failed",
 			zap.Error(err),
 			zap.String("tenant_id", t.ID),
 			zap.String("bucket", bucket),
