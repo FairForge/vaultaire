@@ -64,10 +64,10 @@ const (
 var deliveriesDropped = func() *prometheus.CounterVec {
 	c := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_event_deliveries_dropped_total",
-		Help: "Bucket notifications and webhooks never attempted: the process-wide delivery queue was full (overloaded) or the process was stopping (shutdown). A dropped webhook has a failed webhook_deliveries row.",
+		Help: "Bucket notifications and webhooks never attempted: the process-wide delivery queue was full (overloaded), the process was stopping (shutdown), or the webhook was deleted or disabled while its job was queued (removed). A dropped webhook has a failed webhook_deliveries row while its webhook row exists.",
 	}, []string{"kind", "reason"})
 	for _, k := range []string{deliveryKindNotification, deliveryKindWebhook} {
-		for _, r := range []string{"overloaded", "shutdown"} {
+		for _, r := range []string{"overloaded", "shutdown", "removed"} {
 			c.WithLabelValues(k, r)
 		}
 	}
@@ -115,7 +115,13 @@ type deliveryPool struct {
 	capacity   int // queued jobs, all tenants
 	maxQueued  int // queued jobs, one tenant
 	maxRunning int // running jobs, one tenant
-	logger     *zap.Logger
+	// reserve is the part of capacity only a tenant with nothing queued may
+	// take: tenants with a backlog stop at capacity-reserve, so a tenant's
+	// first job is accepted even when four others fill their shares
+	// (Prompt 2a.3 H2: 4 × 2,048 = the whole queue, and a fifth tenant's
+	// single delivery was dropped).
+	reserve int
+	logger  *zap.Logger
 
 	startOnce  sync.Once
 	base       context.Context
@@ -140,7 +146,7 @@ func newDeliveryPool(workers, queue int) *deliveryPool {
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &deliveryPool{
 		workers: workers, capacity: queue,
-		maxQueued: max(queue/4, 1), maxRunning: max(workers/4, 1),
+		maxQueued: max(queue/4, 1), maxRunning: max(workers/4, 1), reserve: queue / 8,
 		base: ctx, cancelBase: cancel, tenants: map[string]*tenantDeliveries{},
 	}
 	p.cond = sync.NewCond(&p.mu)
@@ -245,8 +251,9 @@ func (p *deliveryPool) pending() int {
 }
 
 // submit queues jobs in order without blocking; every job the queue cannot
-// take — the pool full, its tenant over its share, or the process stopping
-// — is recorded as dropped at once. Once one job of a tenant is dropped the
+// take — the pool full (for a tenant with jobs queued: full but the
+// reserve), its tenant over its share, or the process stopping — is
+// recorded as dropped at once. Once one job of a tenant is dropped the
 // rest of its jobs in this call are too (start order stays submit order).
 func (p *deliveryPool) submit(jobs ...deliveryJob) {
 	if len(jobs) == 0 {
@@ -262,7 +269,9 @@ func (p *deliveryPool) submit(jobs ...deliveryJob) {
 			continue
 		}
 		td := p.tenants[j.tenant]
-		if cut[j.tenant] || p.queued >= p.capacity || (td != nil && len(td.jobs) >= p.maxQueued) {
+		idle := td == nil || len(td.jobs) == 0
+		full := p.queued >= p.capacity || (!idle && p.queued >= p.capacity-p.reserve)
+		if cut[j.tenant] || full || (td != nil && len(td.jobs) >= p.maxQueued) {
 			cut[j.tenant] = true
 			overloaded = append(overloaded, j)
 			continue
@@ -312,29 +321,46 @@ func (p *deliveryPool) recordDropped(jobs []deliveryJob, reason string) {
 		p.log().Warn("bucket notifications dropped", zap.Int("count", notifications), zap.String("reason", reason))
 	}
 	for db, rs := range rows {
-		if err := insertDroppedDeliveries(ctx, db, rs, reason); err != nil {
+		filtered, err := insertDroppedDeliveries(ctx, db, rs, reason)
+		if err != nil {
 			p.log().Error("dropped webhook deliveries not recorded", zap.Error(err), zap.Int("rows", len(rs)), zap.String("reason", reason))
+		}
+		if filtered > 0 {
+			p.log().Warn("dropped webhook deliveries without a row: their webhook or event is gone",
+				zap.Int("rows", filtered), zap.String("reason", reason))
 		}
 	}
 }
 
-func insertDroppedDeliveries(ctx context.Context, db *sql.DB, rows []droppedDelivery, reason string) error {
+// insertDroppedDeliveries writes the failure rows, 1,000 per statement.
+// Only rows whose webhook and event still exist are inserted (a webhook
+// deleted meanwhile used to fail the whole statement on its foreign key:
+// 0 rows, every other tenant's included — Prompt 2a.3 H2); filtered is
+// how many were left out.
+func insertDroppedDeliveries(ctx context.Context, db *sql.DB, rows []droppedDelivery, reason string) (filtered int, err error) {
 	for len(rows) > 0 {
 		n := min(len(rows), 1000)
 		ids, hooks, events := make([]string, n), make([]string, n), make([]string, n)
 		for i, r := range rows[:n] {
 			ids[i], hooks[i], events[i] = uuid.New().String(), r.webhookID, r.eventID
 		}
-		if _, err := db.ExecContext(ctx, `
+		res, err := db.ExecContext(ctx, `
 			INSERT INTO webhook_deliveries (id, webhook_id, event_id, status, response_code, response_body, latency_ms)
 			SELECT u.id, u.hook, u.event, 'failed', 0, $4, 0
-			FROM unnest($1::text[], $2::text[], $3::text[]) AS u(id, hook, event)`,
-			pq.Array(ids), pq.Array(hooks), pq.Array(events), reason); err != nil {
-			return err
+			FROM unnest($1::text[], $2::text[], $3::text[]) AS u(id, hook, event)
+			JOIN webhook_endpoints w ON w.id = u.hook
+			JOIN events e ON e.id = u.event
+			FOR KEY SHARE OF w, e`,
+			pq.Array(ids), pq.Array(hooks), pq.Array(events), reason)
+		if err != nil {
+			return filtered, err
+		}
+		if got, err := res.RowsAffected(); err == nil {
+			filtered += n - int(got)
 		}
 		rows = rows[n:]
 	}
-	return nil
+	return filtered, nil
 }
 
 // drain is the stop sequence's wait: up to bound for every accepted job,
@@ -383,21 +409,26 @@ func (p *deliveryPool) drain(bound time.Duration) int {
 }
 
 // drainDeliveries is Server.Shutdown's call: what is left of the long-op
-// budget (measured from the stop's start), at most deliveryDrainBound.
-func (s *Server) drainDeliveries(stopStarted time.Time) int {
+// budget (longBound, LONG_OP_DRAIN_BOUND's value, measured from the stop's
+// start), at most deliveryDrainBound.
+func (s *Server) drainDeliveries(stopStarted time.Time, longBound time.Duration) int {
 	p := eventDeliveries
 	p.mu.Lock()
 	if p.logger == nil {
 		p.logger = s.log()
 	}
 	p.mu.Unlock()
-	bound := min(deliveryDrainBound, time.Until(stopStarted.Add(longOpDrainBound)))
+	bound := min(deliveryDrainBound, time.Until(stopStarted.Add(longBound)))
 	return p.drain(max(bound, time.Second))
 }
 
 // webhookJob delivers one recorded event to the endpoints given, with its
-// own deadline; never run, it owes a failed row per matching endpoint.
-func webhookJob(db *sql.DB, logger *zap.Logger, endpoints []webhookEndpoint, eventID, eventType, tenantID string, payload []byte) deliveryJob {
+// own deadline; never run, it owes a failed row per matching endpoint. gen
+// is the tenant's webhook generation the endpoints were read at: when the
+// webhook CRUD has moved it since, the job re-reads its endpoints' rows at
+// start (Prompt 2a.3 H2: a deleted, disabled or re-pointed webhook got POSTs
+// with its old URL and secret for as long as the job waited in the queue).
+func webhookJob(db *sql.DB, logger *zap.Logger, endpoints []webhookEndpoint, gen uint64, eventID, eventType, tenantID string, payload []byte) deliveryJob {
 	return deliveryJob{
 		tenant: tenantID,
 		kind:   deliveryKindWebhook,
@@ -405,7 +436,11 @@ func webhookJob(db *sql.DB, logger *zap.Logger, endpoints []webhookEndpoint, eve
 		run: func(ctx context.Context) {
 			ctx, cancel := context.WithTimeout(ctx, webhookDeliveryTimeout)
 			defer cancel()
-			deliverToEndpoints(ctx, db, logger, endpoints, eventID, eventType, tenantID, payload)
+			eps := endpoints
+			if webhookGeneration(tenantID) != gen {
+				eps = revalidateEndpoints(ctx, db, logger, endpoints, eventID, eventType, tenantID)
+			}
+			deliverToEndpoints(ctx, db, logger, eps, eventID, eventType, tenantID, payload)
 		},
 		owed: func(context.Context) []droppedDelivery { return owedRows(endpoints, eventID, eventType) },
 	}
@@ -416,6 +451,66 @@ func owedRows(endpoints []webhookEndpoint, eventID, eventType string) []droppedD
 	for _, ep := range endpoints {
 		if matchesWebhookFilter(ep.filter, eventType) {
 			out = append(out, droppedDelivery{webhookID: ep.id, eventID: eventID})
+		}
+	}
+	return out
+}
+
+// endpointSkipped is the body of the row a webhook disabled while its job
+// was queued gets (a deleted one cannot have a row: the foreign key).
+const endpointSkipped = "skipped: endpoint removed"
+
+// revalidateEndpoints re-reads the job's endpoints (one query): the current
+// URL, secret and filter of each still enabled; a disabled one is recorded
+// `skipped: endpoint removed`, a deleted one logged — both counted. When
+// the read fails the job keeps what it captured.
+func revalidateEndpoints(ctx context.Context, db *sql.DB, logger *zap.Logger, endpoints []webhookEndpoint,
+	eventID, eventType, tenantID string) []webhookEndpoint {
+	ids := make([]string, len(endpoints))
+	for i, ep := range endpoints {
+		ids[i] = ep.id
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT id, url, event_filter, secret, enabled FROM webhook_endpoints WHERE tenant_id = $1 AND id = ANY($2)`,
+		tenantID, pq.Array(ids))
+	if err != nil {
+		logger.Warn("webhook endpoints not re-read before delivery; the captured ones are used", zap.Error(err), zap.String("tenant_id", tenantID))
+		return endpoints
+	}
+	defer func() { _ = rows.Close() }()
+	type current struct {
+		ep      webhookEndpoint
+		enabled bool
+	}
+	now := map[string]current{}
+	for rows.Next() {
+		var c current
+		var filter pq.StringArray
+		if err := rows.Scan(&c.ep.id, &c.ep.url, &filter, &c.ep.secret, &c.enabled); err != nil {
+			logger.Warn("webhook endpoints not re-read before delivery; the captured ones are used", zap.Error(err), zap.String("tenant_id", tenantID))
+			return endpoints
+		}
+		c.ep.filter = []string(filter)
+		now[c.ep.id] = c
+	}
+	if err := rows.Err(); err != nil {
+		logger.Warn("webhook endpoints not re-read before delivery; the captured ones are used", zap.Error(err), zap.String("tenant_id", tenantID))
+		return endpoints
+	}
+	var out []webhookEndpoint
+	for _, ep := range endpoints {
+		c, ok := now[ep.id]
+		switch {
+		case ok && c.enabled:
+			out = append(out, c.ep)
+		case !matchesWebhookFilter(ep.filter, eventType):
+		case ok:
+			deliveriesDropped.WithLabelValues(deliveryKindWebhook, "removed").Inc()
+			recordDelivery(ctx, db, logger, uuid.New().String(), ep.id, eventID, "failed", 0, endpointSkipped, 0)
+		default:
+			deliveriesDropped.WithLabelValues(deliveryKindWebhook, "removed").Inc()
+			logger.Info("webhook deleted while its delivery was queued; not sent",
+				zap.String("tenant_id", tenantID), zap.String("webhook_id", ep.id), zap.String("event_id", eventID))
 		}
 	}
 	return out

@@ -49,6 +49,9 @@ type objectDeleteAftermath struct {
 type deleteFanout struct {
 	targets   []notifyTarget
 	endpoints []webhookEndpoint
+	// webhookGen: the tenant's webhook generation the endpoints were read
+	// at (a queued job re-reads them when it moved).
+	webhookGen uint64
 
 	// pending: one entry per settled key, handed to the process-wide
 	// delivery pool once every key is done (deliverInOrder) — never a
@@ -101,7 +104,7 @@ func (f *deleteFanout) deliverInOrder(d objectDeleteAftermath, tenantID, bucket 
 			jobs = append(jobs, d.notify.notificationJob(f.targets, tenantID, bucket, eventName, p.key, 0, ""))
 		}
 		if p.eventID != "" && len(owedRows(f.endpoints, p.eventID, eventType)) > 0 {
-			jobs = append(jobs, webhookJob(d.db, d.logger, f.endpoints, p.eventID, eventType, tenantID, p.dataJSON))
+			jobs = append(jobs, webhookJob(d.db, d.logger, f.endpoints, f.webhookGen, p.eventID, eventType, tenantID, p.dataJSON))
 		}
 	}
 	eventDeliveries.submit(jobs...)
@@ -119,17 +122,19 @@ func (d objectDeleteAftermath) forBatch(ctx context.Context, tenantID, bucket st
 		return d
 	}
 	var err error
+	notifyGen := notifyGeneration(tenantID, bucket)
+	f.webhookGen = webhookGeneration(tenantID)
 	if f.targets, err = d.notify.Targets(ctx, tenantID, bucket); err != nil {
 		d.logger.Error("batch delete: notification targets not loaded; no notification for this batch",
 			zap.Error(err), zap.String("tenant_id", tenantID), zap.String("bucket", bucket))
 	} else if d.notify != nil {
-		rememberNotifyTargets(tenantID, bucket, f.targets)
+		rememberNotifyTargets(tenantID, bucket, notifyGen, f.targets, nil)
 	}
 	if f.endpoints, err = loadWebhookEndpoints(ctx, d.db, d.logger, tenantID); err != nil {
 		d.logger.Error("batch delete: webhook endpoints not loaded; no webhook for this batch",
 			zap.Error(err), zap.String("tenant_id", tenantID), zap.String("bucket", bucket))
 	} else {
-		rememberWebhookEndpoints(tenantID, f.endpoints)
+		rememberWebhookEndpoints(tenantID, f.webhookGen, f.endpoints, nil)
 	}
 	d.fanout = f
 	return d
