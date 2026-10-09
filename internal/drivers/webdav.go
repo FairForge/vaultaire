@@ -1476,7 +1476,9 @@ func (d *WebDAVDriver) listDirNames(ctx context.Context, names []string) (dirs, 
 }
 
 // removeDir deletes the (empty or not) folder at resource names; a miss is
-// not an error. Only for folders the driver owns outright (stripe pieces).
+// not an error. Recursive on WebDAV: only for a folder every member of which
+// is being deleted (a dead stripe generation), or once every bridge has
+// listed it empty (RemoveEmptyDir, MultiWebDAVDriver.removeEmptyNames).
 func (d *WebDAVDriver) removeDir(ctx context.Context, names []string) error {
 	path := d.escapedPath(names, true)
 	if err := d.deletePath(ctx, path); err != nil {

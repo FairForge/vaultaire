@@ -63,9 +63,10 @@ func TestVaultParity_OrphanShardsAreErasedOnTheSecondPassAfterTheGrace(t *testin
 	assert.Len(t, f.shardFiles(), 8, "first pass never deletes")
 	assert.Equal(t, 1, f.orphanRows())
 
-	// Act 2: a second pass inside the grace — still nothing.
+	// Act 2: a second pass inside the grace — still nothing, and the same
+	// orphan is not "found" again (Prompt 2a.2: it was counted on every pass).
 	res = f.run()
-	assert.Equal(t, 1, res.OrphansFound)
+	assert.Equal(t, 0, res.OrphansFound)
 	assert.Equal(t, 0, res.OrphansErased)
 	assert.Len(t, f.shardFiles(), 8)
 
