@@ -300,6 +300,13 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 		}
 		firstAttempt = false
 		perr := d.Put(ctx, container, artifact, sizeReader, opts...)
+		// The SOURCE failed (a client that went away mid-body: Go's server
+		// hands the handler the read error before it cancels the context):
+		// the caller's failure, whatever the driver made of it — an SDK
+		// does not always wrap the body's error (Prompt 2b.2 C1).
+		if srcErr := sizeReader.sourceErr(); perr != nil && srcErr != nil && !errors.Is(perr, ErrCallerAborted) {
+			perr = fmt.Errorf("%w: %w (%w)", ErrCallerAborted, srcErr, perr)
+		}
 		if perr != nil && !seekable && sizeReader.bytesRead > 0 {
 			return fmt.Errorf("%w: %w", ErrNoFailover, perr)
 		}
@@ -450,12 +457,29 @@ func (e *CoreEngine) GetMetrics(ctx context.Context) (map[string]interface{}, er
 type sizeTrackingReader struct {
 	io.Reader
 	bytesRead int64
+
+	mu     sync.Mutex
+	srcErr error // the source's own read failure (never io.EOF)
 }
 
 func (r *sizeTrackingReader) Read(p []byte) (n int, err error) {
 	n, err = r.Reader.Read(p)
 	r.bytesRead += int64(n)
+	if err != nil && !errors.Is(err, io.EOF) {
+		r.mu.Lock()
+		if r.srcErr == nil {
+			r.srcErr = err
+		}
+		r.mu.Unlock()
+	}
 	return
+}
+
+// sourceErr is the first read error of the source itself, if any.
+func (r *sizeTrackingReader) sourceErr() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.srcErr
 }
 
 // buildCandidateList returns an ordered list of backends to try: preferred

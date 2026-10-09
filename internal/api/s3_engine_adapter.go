@@ -1091,6 +1091,12 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 			w.Header().Set("Retry-After", "300")
 			WriteS3ErrorWithContext(w, ErrServiceUnavailable, r.URL.Path, generateRequestID(),
 				WithSuggestion("This bucket's region is not enabled on this deployment."))
+		case errors.Is(err, engine.ErrCallerAborted):
+			// The client's body broke off or trickled below the minimum
+			// rate: its request, never the backend's (Prompt 2b.2 C1).
+			a.logger.Info("put body not received",
+				zap.String("container", container), zap.String("artifact", artifact), zap.Error(err))
+			WriteS3Error(w, bodyReadErrorCode(err), r.URL.Path, generateRequestID())
 		case errors.Is(err, engine.ErrAllBackendsUnavailable):
 			w.Header().Set("Retry-After", "30")
 			WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())

@@ -137,6 +137,13 @@ func isBackendFailure(err error) bool {
 	if errors.Is(err, context.Canceled) {
 		return false
 	}
+	// The body source failed (the client dropped mid-body before the
+	// context was cancelled, or trickled below the minimum rate), or the
+	// backend says only the part holding THIS object is out (one bridge of
+	// several): neither is the backend's health (Prompt 2b.2 C1).
+	if errors.Is(err, ErrCallerAborted) || errors.Is(err, ErrPartiallyUnavailable) {
+		return false
+	}
 	// Object-not-found: os.Remove/Open on a missing path, or our own type.
 	if errors.Is(err, os.ErrNotExist) {
 		return false
@@ -308,6 +315,14 @@ func (f *FailoverManager) Execute(ctx context.Context, backends []string, fn fun
 			// bridge refuses) must not be stored on the next candidate —
 			// silently off the tier its bucket promises.
 			if errors.Is(err, ErrInvalidInput) {
+				return "", fmt.Errorf("all backends failed: %w", err)
+			}
+			// The part of this backend that holds the object is out while
+			// the rest is up (one Sync bridge of five): the object is there,
+			// only not reachable now. Another backend's answer — a miss, or
+			// a write off the object's tier — would be wrong (Prompt 2b.2
+			// C1). A caller whose body broke cannot be served anywhere.
+			if errors.Is(err, ErrPartiallyUnavailable) || errors.Is(err, ErrCallerAborted) {
 				return "", fmt.Errorf("all backends failed: %w", err)
 			}
 			// A consumed non-rewindable body makes every further attempt a
