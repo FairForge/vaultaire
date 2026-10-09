@@ -23,7 +23,10 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:15
+        # The official image from the ECR Public mirror: Docker Hub refuses
+        # anonymous pulls from the shared runner IPs (toomanyrequests,
+        # 2026-10-09: every build-and-test failed in Initialize containers).
+        image: public.ecr.aws/docker/library/postgres:15
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: vaultaire
