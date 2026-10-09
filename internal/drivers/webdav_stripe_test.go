@@ -235,6 +235,10 @@ func TestStripe_OverwritesReplaceTheGeneration(t *testing.T) {
 	putBytes(ctx, t, m, "bucket", "k", v2)
 
 	assert.Equal(t, v2, readAllClose(t, mustGetM(ctx, t, m, "bucket", "k")))
+	// The old generation is retired (Prompt 2b B4), gone once the reaper
+	// runs an hour later.
+	assert.Len(t, filesWith(allFiles(t, bs[:1]), strings.TrimSuffix(gen1[0], "key%o")+stripeRetiredFile), 1, "retired")
+	reapRetired(t, m)
 	files := allFiles(t, bs[:1])
 	assert.Len(t, filesWith(files, "/p0"), 4, "only the new generation's pieces")
 	assert.Empty(t, filesWith(files, strings.TrimSuffix(gen1[0], "key%o")), "the old generation is gone")
@@ -242,6 +246,7 @@ func TestStripe_OverwritesReplaceTheGeneration(t *testing.T) {
 	// striped → plain: the manifest and its pieces go
 	putBytes(ctx, t, m, "bucket", "k", small)
 	assert.Equal(t, small, readAllClose(t, mustGetM(ctx, t, m, "bucket", "k")))
+	reapRetired(t, m)
 	files = allFiles(t, bs[:1])
 	assert.Empty(t, filesWith(files, "%p/"), "no pieces left")
 	assert.Empty(t, filesWith(files, "k%s"))
@@ -264,6 +269,8 @@ func TestStripe_DeleteRemovesManifestThenPieces(t *testing.T) {
 	require.Len(t, filesWith(allFiles(t, bs[:1]), "/p0"), 4)
 
 	require.NoError(t, m.Delete(ctx, "bucket", "gone"))
+	assert.Empty(t, filesWith(allFiles(t, bs[:1]), "gone%s"), "the manifest goes at once")
+	reapRetired(t, m) // the pieces an hour later (Prompt 2b B4)
 
 	files := allFiles(t, bs[:1])
 	assert.Empty(t, filesWith(files, "gone%s"))
@@ -368,7 +375,7 @@ func TestStripe_StagingIsBounded(t *testing.T) {
 
 	putBytes(ctx, t, m, "bucket", "bounded", body)
 
-	assert.Equal(t, int64(2), m.stagedPeak.Load(), "K = 2 bridges × 1 slot, and it was reached")
+	assert.Equal(t, int64(1), m.stagedPeak.Load(), "K = 2 bridges × 1 slot; one upload takes K minus one bridge's slots (Prompt 2b B5)")
 	assert.LessOrEqual(t, peak.Load(), int32(2), "never more than K pieces in flight")
 	assert.Equal(t, int64(0), m.staged.Load())
 	assert.Equal(t, body, readAllClose(t, mustGetM(ctx, t, m, "bucket", "bounded")))

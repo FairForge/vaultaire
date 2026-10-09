@@ -242,3 +242,14 @@ func TestMultiWebDAV_AFullFolderIsInvalidInputNotABridgeFailure(t *testing.T) {
 	assert.True(t, m.healthy(m.bridges[0]))
 	assert.Equal(t, float64(5), promtest.ToFloat64(webdavFolderFilesMax.WithLabelValues("sync", "0")))
 }
+
+// reapRetired runs the reaper as it would run past the retire grace.
+func reapRetired(t *testing.T, m *MultiWebDAVDriver) {
+	t.Helper()
+	real := m.now
+	m.now = func() time.Time { return real().Add(WebDAVDefaultStripeRetireGrace + time.Minute) }
+	defer func() { m.now = real }()
+	res, err := m.ReapOrphanStripes(context.Background(), WebDAVDefaultStripeGrace)
+	require.NoError(t, err)
+	require.Empty(t, res.Errors, "%+v", res)
+}

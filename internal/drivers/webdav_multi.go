@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -108,6 +109,18 @@ type MultiWebDAVDriver struct {
 	// stripeSettle is the pause between the cleanup passes of a failed
 	// striped upload (an in-flight piece a bridge stores late).
 	stripeSettle time.Duration
+	// stripeHeartbeat (≤ 0 = only at the start and before the commit),
+	// stripeGrace (the reaper's, for the upload's own freshness check) and
+	// stripeRetireGrace: Prompt 2b B1/B4.
+	stripeHeartbeat   time.Duration
+	stripeGrace       time.Duration
+	stripeRetireGrace time.Duration
+	largePerBridge    int
+	// keyLocks serialises the commits of one key (Prompt 2b B3).
+	keyLocks keyLocker
+	// Test hooks: before the pieces are verified, after the manifest is
+	// written, before the reaper's deletes.
+	beforeVerify, afterManifest, beforeReapDelete func()
 }
 
 // webdavBridge is one server of a MultiWebDAVDriver.
@@ -181,7 +194,8 @@ func NewMultiWebDAVDriver(name string, cfg WebDAVConfig, logger *zap.Logger, opt
 		large = WebDAVDefaultLargeConcurrency
 	}
 	m := &MultiWebDAVDriver{name: name, logger: logger, now: time.Now,
-		stripeMin: cfg.StripeMin, stripePiece: cfg.StripePiece, stagingDir: cfg.StagingDir}
+		stripeMin: cfg.StripeMin, stripePiece: cfg.StripePiece, stagingDir: cfg.StagingDir,
+		stripeHeartbeat: WebDAVDefaultStripeHeartbeat, largePerBridge: large}
 	if m.stripePiece <= 0 {
 		m.stripePiece = WebDAVDefaultStripePiece
 	}
@@ -195,6 +209,16 @@ func NewMultiWebDAVDriver(name string, cfg WebDAVConfig, logger *zap.Logger, opt
 		m.stagingDir = defaultStagingDir()
 	}
 	if m.stripeMin > 0 {
+		// One folder per process (`p<pid>`): the two slots share /tmp (the
+		// unit has no PrivateTmp), so a boot sweep removes only the folders
+		// of processes that are gone — never the other slot's in-flight
+		// pieces (Prompt 2b B5).
+		root := m.stagingDir
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			return nil, fmt.Errorf("webdav: stripe staging dir %s: %w", root, err)
+		}
+		sweepStaging(root, logger)
+		m.stagingDir = filepath.Join(root, fmt.Sprintf("p%d", os.Getpid()))
 		if err := os.MkdirAll(m.stagingDir, 0o700); err != nil {
 			return nil, fmt.Errorf("webdav: stripe staging dir %s: %w", m.stagingDir, err)
 		}
@@ -229,6 +253,40 @@ func NewMultiWebDAVDriver(name string, cfg WebDAVConfig, logger *zap.Logger, opt
 		zap.String("backend", name), zap.Int("bridges", len(m.bridges)), zap.Int("large_concurrency", large),
 		zap.Int64("stripe_min", m.stripeMin), zap.Int64("stripe_piece", m.stripePiece), zap.String("staging_dir", m.stagingDir))
 	return m, nil
+}
+
+// sweepStaging removes what dead processes left in the staging root: the
+// `p<pid>` folder of a process that no longer exists, and a staging file of
+// the shared-root layout older than webdavStagingStale. Best effort.
+func sweepStaging(root string, logger *zap.Logger) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	removed := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() && strings.HasPrefix(name, "p") {
+			pid, err := strconv.Atoi(name[1:])
+			if err != nil || pid <= 0 || pid == os.Getpid() || pidAlive(pid) {
+				continue
+			}
+			if os.RemoveAll(filepath.Join(root, name)) == nil {
+				removed++
+			}
+			continue
+		}
+		if !e.IsDir() && strings.HasPrefix(name, "piece-") {
+			if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > webdavStagingStale {
+				if os.Remove(filepath.Join(root, name)) == nil {
+					removed++
+				}
+			}
+		}
+	}
+	if removed > 0 {
+		logger.Info("webdav stripe: staging left by stopped processes removed", zap.String("dir", root), zap.Int("entries", removed))
+	}
 }
 
 // withWebDAVBridge sets the metrics' bridge label.
@@ -562,6 +620,10 @@ func (m *MultiWebDAVDriver) Put(ctx context.Context, container, artifact string,
 		}
 		defer release()
 	}
+	// The write and the removal of a striped version are one commit under
+	// the key's lock, like the striped path's (Prompt 2b B3).
+	unlock := m.keyLocks.lock(manifestCacheKey(names))
+	defer unlock()
 	err = b.drv.Put(ctx, container, artifact, data, opts...)
 	m.note(ctx, b, err)
 	if err != nil {
@@ -575,8 +637,9 @@ func (m *MultiWebDAVDriver) Put(ctx context.Context, container, artifact string,
 	return nil
 }
 
-// dropManifest deletes the key's manifest on its bridge b (if any), then
-// its pieces (best effort: what stays is the reaper's).
+// dropManifest deletes the key's manifest on its bridge b (if any) and
+// retires its generation (the reaper deletes it an hour later, so reads
+// already streaming it finish — Prompt 2b B4).
 func (m *MultiWebDAVDriver) dropManifest(ctx context.Context, b *webdavBridge, key string, names []string, container, artifact string) error {
 	m.mcache.drop(manifestCacheKey(names))
 	e, found, err := b.drv.stat(ctx, manifestNamesOf(names))
@@ -599,11 +662,7 @@ func (m *MultiWebDAVDriver) dropManifest(ctx context.Context, b *webdavBridge, k
 		return err
 	}
 	if man != nil {
-		if err := m.deleteStripe(ctx, key, man); err != nil {
-			webdavStripeOrphans.WithLabelValues(m.name, "left").Inc()
-			m.logger.Warn("webdav stripe: pieces not deleted — left to the reaper",
-				zap.String("backend", m.name), zap.String("key", key), zap.String("gen", man.Gen), zap.Error(err))
-		}
+		m.retireStripe(ctx, key, man) // reads already streaming it finish (Prompt 2b B4)
 	}
 	return nil
 }
@@ -676,6 +735,8 @@ func (m *MultiWebDAVDriver) Delete(ctx context.Context, container, artifact stri
 		return err
 	}
 	m.mcache.drop(manifestCacheKey(names))
+	unlock := m.keyLocks.lock(manifestCacheKey(names))
+	defer unlock()
 	b := m.bridges[order[0]]
 	found, err := m.deleteOn(ctx, b, key, names, container, artifact)
 	m.note(ctx, b, err)

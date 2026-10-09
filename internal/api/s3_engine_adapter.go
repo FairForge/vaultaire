@@ -427,6 +427,14 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	// the full ciphertext (R2-02); a multi-range request is served whole.
 	var reader io.ReadCloser
 	var nativeRange, wantRange *httpRange
+	// The recorded size goes with the read: a backend holding two versions
+	// of the key after an interrupted commit (the multi-bridge Sync
+	// driver's plain file and striped manifest) serves the one of this
+	// size, never the other (Prompt 2b B3).
+	gctx := r.Context()
+	if cacheHit {
+		gctx = engine.WithExpectedSize(gctx, cachedSize)
+	}
 	if rh := r.Header.Get("Range"); rh != "" && cacheHit && cachedEncAlgo == "" &&
 		!errors.Is(rangeParseErr(rh, cachedSize), errMultiRange) {
 		rng, parseErr := parseRangeHeader(rh, cachedSize)
@@ -437,13 +445,13 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		}
 		wantRange = rng
 		if ce, ok := a.engine.(*engine.CoreEngine); ok {
-			if rr, rangeErr := ce.GetRange(r.Context(), container, artifact, rng.start, rng.length); rangeErr == nil {
+			if rr, rangeErr := ce.GetRange(gctx, container, artifact, rng.start, rng.length); rangeErr == nil {
 				reader, nativeRange = rr, rng
 			}
 		}
 	}
 	if reader == nil {
-		reader, err = a.engine.Get(r.Context(), container, artifact)
+		reader, err = a.engine.Get(gctx, container, artifact)
 	}
 	// A vault object whose backend failed — an error, not found through the
 	// failover chain, an open breaker — is rebuilt from its parity copy when

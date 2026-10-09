@@ -225,6 +225,7 @@ func TestStripe_DeleteAndOverwriteLeaveNoEmptyFolders(t *testing.T) {
 	putBytes(ctx, t, m, "bucket", "b", randBody(t, 7)) // striped → plain
 	putBytes(ctx, t, m, "bucket", "c", randBody(t, 2*testPiece))
 	require.NoError(t, m.Delete(ctx, "bucket", "c"))
+	reapRetired(t, m)
 
 	var deep []string
 	for _, d := range fsDirs(t, bs[0].fs, "/vaultaire/t-tenant-a/bucket%p") {
