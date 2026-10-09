@@ -23,7 +23,10 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:15
+        # The official image from the ECR Public mirror: Docker Hub refuses
+        # anonymous pulls from the shared runner IPs (toomanyrequests,
+        # 2026-10-09: every build-and-test failed in Initialize containers).
+        image: public.ecr.aws/docker/library/postgres:15
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: vaultaire
@@ -56,7 +59,7 @@ jobs:
         # SYSTEM (persisted in postgresql.auto.conf) and a container restart.
         run: |
           psql -h localhost -U postgres -c "ALTER SYSTEM SET max_connections = 400;"
-          cid=$(docker ps -q --filter "ancestor=postgres:15" | head -1)
+          cid=$(docker ps -q --filter "ancestor=public.ecr.aws/docker/library/postgres:15" | head -1)
           docker restart "$cid"
           for i in $(seq 1 30); do pg_isready -h localhost -U postgres && break; sleep 1; done
           psql -h localhost -U postgres -tAc "SHOW max_connections;"
