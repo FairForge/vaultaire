@@ -494,7 +494,7 @@ func immutableObject(tenantID, container, artifact string) bool {
 	case strings.HasSuffix(container, "__parity"):
 		return len(segs) == 3 && len(segs[0]) == 24 && isLowerHex(segs[0]) && segs[1] != "" &&
 			len(segs[2]) >= 2 && segs[2][0] == 'p' && isDigits(segs[2][1:])
-	case tenantID == "_global" && container == "_packs":
+	case tenantID == engine.ChunkAddressTenant && container == "_packs":
 		sum := strings.TrimSuffix(segs[len(segs)-1], ".pack")
 		return len(segs) == 2 && strings.HasSuffix(segs[1], ".pack") && len(sum) == 64 && isLowerHex(sum) && segs[0] == sum[:2]
 	}
