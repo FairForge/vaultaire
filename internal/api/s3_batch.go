@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/FairForge/vaultaire/internal/auth"
+	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"go.uber.org/zap"
 )
@@ -291,6 +292,11 @@ func (s *Server) batchDeleteKey(r *http.Request, t *tenant.Tenant, bucket, conta
 			zap.Error(delErr),
 			zap.String("container", container),
 			zap.String("key", key))
+		if errors.Is(delErr, engine.ErrAllBackendsUnavailable) {
+			// The backend holding the bytes is unreachable: the row stays
+			// and the client retries this key (Prompt 2b.2 C2).
+			return &DeleteError{Key: key, Code: ErrServiceUnavailable, Message: errorMessages[ErrServiceUnavailable]}
+		}
 		return &DeleteError{
 			Key:     key,
 			Code:    ErrInternalError,

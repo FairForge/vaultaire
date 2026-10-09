@@ -351,10 +351,22 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 	return usedBackend, nil
 }
 
-// Delete removes an artifact from the backend that holds it, falling back to
-// the primary. It stops at the first backend that reports success (or a miss
-// — the API layer treats a miss as an idempotent delete), so a second copy on
-// another backend is NOT removed here; that is WP-R6-1.
+// Delete removes an artifact from the backend that holds it. It stops at
+// the first backend that reports success (or a miss — the API layer treats a
+// miss as an idempotent delete), so a second copy on another backend is NOT
+// removed here; that is WP-R6-1.
+//
+// A delete of an object KNOWN to be on a registered backend other than the
+// primary (the head row's backend_name hinted, this process's Put, the
+// object_locations row) asks that backend only: when it fails — a backend
+// failure, an open breaker, part of it out — the delete fails
+// (ErrAllBackendsUnavailable: the API answers 503 + Retry-After and keeps
+// the head row, the quota and the aftermath, so the client retries). It used
+// to fall back to the primary, whose DELETE of an absent key succeeds on
+// every S3-class store: DeleteObject answered 204 and dropped the head row
+// while the bytes stayed on the recorded backend (Prompt 2b.2 C2; on Sync
+// only the account-erasure sweep would ever have found them). A row naming
+// an UNREGISTERED backend keeps the fallback to the primary until WP-R6-1.
 //
 // The backend is resolved like Get does: hint / in-memory map first, then the
 // durable object_locations row. Resolving from the in-memory map alone meant
@@ -379,7 +391,10 @@ func (e *CoreEngine) Delete(ctx context.Context, container, artifact string) err
 	}
 
 	candidates := []string{targetBackend}
-	if targetBackend != e.primary {
+	e.mu.RLock()
+	_, registered := e.drivers[targetBackend]
+	e.mu.RUnlock()
+	if targetBackend != e.primary && !registered {
 		candidates = append(candidates, e.primary)
 	}
 
