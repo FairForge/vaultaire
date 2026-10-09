@@ -13,7 +13,7 @@ Tokens (local file `~/fairforge/.cloudflare-creds.env`, never in the repo): an *
 
 ## DNS (stored.ge)
 
-`stored.ge`, `www`, `api` → `38.147.105.54` **proxied**; **`s3.stored.ge` → same IP, DNS-only** (the direct origin: no 100 MB body limit, no edge hop); `edge.stored.ge` and `rules.stored.ge` are Worker custom domains (`AAAA 100::`, proxied); mail at Outlook; stale `NS` records pointing at NS1 remain and should be deleted.
+`stored.ge`, `www`, `api` → `38.147.105.54` **proxied**; **`s3.stored.ge` → same IP, DNS-only** (the direct origin: no 100 MB body limit, no edge hop); `edge.stored.ge` and `rules.stored.ge` were Worker custom domains and no longer resolve (NXDOMAIN, checked 2026-10-09 — torn down with their Workers, below); mail at Outlook; stale `NS` records pointing at NS1 remain and should be deleted.
 
 ## Zone settings applied (2026-10-04)
 
@@ -84,6 +84,19 @@ Everything ran from the Salt Lake box against `s3.stored.ge` (bench tenant) and 
 9. **Pro zone trial — decision memo:** not yet. Pro ($20/mo) buys the WAF custom rules with `is_timed_hmac_valid_v0` (signed public links checked at the edge, zero Worker on the byte path) and 20 cache rules, and still no Cache Reserve, no change to the 100 MB body limit. Today a signed private link costs $0.30 per million through the gateway Worker and there is no public-link traffic to put on the byte path; trial the month when `/cdn` carries real signed-link volume or when the WAF managed ruleset is wanted for the dashboard. The Dynamic Workers prototype (one Phase 31 rule, no network, CPU cap) was not run — the session's time went to the If-Match defect.
 
 **Torn down 2026-10-05 evening:** Workers `vt-gw` (+ custom domain `gw.stored.ge`) and `vt-ifmatch-probe`; R2 bucket `vt-sippy-range` (three abandoned Sippy multipart uploads aborted first — the bucket refused to delete until then); iDrive bucket `vt-firstread-20261005` (created and deleted inside one test); Vaultaire bucket `cf-tests-20261005` (bench tenant, 20 objects); the R2 credentials file and 5 GB of test files on the box; the packet captures. **Kept:** the zone cache rule above (a fix, documented), and a Worker `ql-proxy` on the fairforge account that this session did not create and did not touch. Nothing unauthenticated that writes or fetches is up.
+
+## Findings 2026-10-09 (Birthday Week 2026 claims, live-tested on the lab account, everything deleted after)
+
+- **Large objects into R2 without Sippy — the DO copier works** (plan 40.1(e)). Against the prod origin: one Durable Object streaming one GET into `R2.put()` landed 300 MiB in 13 s, 1 GiB in 31 s, 2 GiB in 57 s; a coordinator DO fanning parts out to 8 child DOs landed 2 GiB in 17–29 s and **5 GiB in 39 s**; all byte-exact (SHA-256 of the R2 copy computed inside Cloudflare = the hash recorded at upload), zero retries. One outbound fetch inside a DO stayed open 13.8 minutes. Limits that still bind: six open connections per invocation (8 parallel parts in one DO → `Response closed due to connection limit`; ≤ 3 parts per DO), a single `R2.put()` of ≥ 5 GiB is refused only after the whole body streamed (multipart only above ~4.9 GiB), a DO left in "retrying" after a connection-limit failure needs a watchdog alarm. Sippy stays for small objects and as the fallback.
+- **Subrequests:** the default is 10,000 per invocation, not a million; `limits.subrequests` raises it to 10,000,000 (120,000 calls in one request measured). A Worker fetching another workers.dev Worker of the same account gets 404 without the `global_fetch_strictly_public` compatibility flag.
+- **Long outbound connections:** idle-trickle fetches of 16 and 21 minutes completed from a DO and from a plain Worker.
+- **Dynamic Workers:** 10 concurrent per request into a Durable Object (the 11th throws); a plain Worker request is still capped at 4.
+- **Headers:** `stored.ge` answers up to a 127 KiB header; Cloudflare refuses at 128 KiB before the request reaches HAProxy.
+- **R2 credentials scoped to one bucket** work (every other bucket refused, `vaultaire-public` included); creating a token scoped to one Worker fails (API 1004).
+- **Post-quantum TLS:** `stored.ge`, `stored.cloud` and R2 negotiate X25519MLKEM768; the Cloudflare → origin leg is classical (HAProxy 2.8.16 on OpenSSL 3.0.13 has no ML-KEM — OpenSSL 3.5+ or a Tunnel fixes it); Vaultaire's own backend connections are classical everywhere except R2 (iDrive, Wasabi, Geyser, B2: X25519; Lyve: P-521). Workers' WebCrypto does ML-KEM-768/1024 and ML-DSA-44/65/87 behind `webcrypto_modern_algorithms` and interoperates with Go's `crypto/mlkem` both ways.
+- **Traces** (open beta) are configured at `/zones/{zone}/observability/tracing/{settings,rules}`; the zone token lacks *Zone Observability Write*, so whether `traceparent` reaches Vaultaire is untested.
+- **Containers on `ctx.container`:** cold ≈ 0.26 s in the DO, wake ≈ 0.3–0.5 s, warm ≈ 3 ms; an idle container stops 20–25 s after its last request with SIGTERM then SIGKILL ≈ 5 s later, even when PID 1 ignores SIGTERM.
+- **EmDash 1.0** stores media in any S3-compatible bucket with path-style requests — `https://stored.ge` works as its endpoint (browser uploads go to presigned URLs, so the bucket needs CORS rules).
 
 ## Open
 
