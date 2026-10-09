@@ -111,6 +111,15 @@ var (
 		Name: "vaultaire_vault_parity_fallback_reads_total",
 		Help: "Reads of a vault object whose backend failed: served (rebuilt from the parity copy) or unavailable (no usable parity either).",
 	}, []string{"outcome"})
+	// Set by every run (Prompt 2b.2 C4): what the parity does not cover.
+	vaultParityUnprotectedBytes = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "vaultaire_vault_parity_unprotected_bytes",
+		Help: "Bytes of vault-floor objects with no complete parity copy of their current version, as the job's last run counted them (pending, partial, too large for a run, chunked).",
+	})
+	vaultParityUnprotectedObjects = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "vaultaire_vault_parity_unprotected_objects",
+		Help: "Vault-floor objects with no complete parity copy of their current version, as the job's last run counted them, by reason: too_large (a protect estimated longer than a whole run — never started, never takes a slot), other (pending, partial, chunked).",
+	}, []string{"reason"})
 	vaultParityOrphans = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_vault_parity_orphans_total",
 		Help: "Parity shard folders no row names, as the job's reconcile pass meets them: found (a new sighting — once per folder), erased (its files deleted after two sightings at least VAULT_PARITY_ORPHAN_GRACE apart — once per folder), failed (a delete that did not go through).",
@@ -126,6 +135,9 @@ func init() {
 	}
 	for _, o := range []string{"found", "erased", "failed"} {
 		vaultParityOrphans.WithLabelValues(o)
+	}
+	for _, r := range []string{"too_large", "other"} {
+		vaultParityUnprotectedObjects.WithLabelValues(r)
 	}
 }
 
@@ -255,6 +267,9 @@ type VaultParity struct {
 	// scopeTenant limits a run to one tenant (tests on the shared DB).
 	scopeTenant string
 	now         func() time.Time
+	// beforeFinish (tests) runs after the shards are written, before the
+	// row records them.
+	beforeFinish func(parityCandidate)
 }
 
 // NewVaultParity returns nil without a database or a driver-exposing engine.
@@ -468,38 +483,30 @@ type parityCandidate struct {
 	tenantID, bucket, key, etag string
 	size                        int64
 	chunked                     bool
+	// rowAt is the row's updated_at as this protect wrote it: its finish
+	// records the outcome only on a row nothing touched since (Prompt 2b.2
+	// C4 — a delete marks the row and erases shards meanwhile).
+	rowAt time.Time
 }
 
 // protectPending protects the vault-floor objects without a complete row; a
 // protect starts only when its estimate fits before the run's deadline
-// (a smaller one later in the list may still fit), and one whose estimate
-// exceeds a whole run is never started and is named.
+// (a smaller one later in the list may still fit). The run's slots
+// (MaxObjectsPerRun) go to candidates it can protect (Prompt 2b.2 C4): an
+// object whose estimate exceeds a whole run is left out of the candidates
+// (counted, named, never started — it used to stay at the head of the
+// oldest-first list with no row and take a slot every run, so a newer
+// object behind it was never protected), and a candidate skipped on sight —
+// a chunked row (a broken invariant), a tenant whose flag is off — is
+// passed over without a slot, the list read on past it.
 func (p *VaultParity) protectPending(ctx context.Context, res *VaultParityResult) error {
-	rows, err := p.db.QueryContext(ctx, `
-		SELECT o.tenant_id, o.bucket, o.object_key, o.etag, o.size_bytes, o.is_chunked
-		FROM object_head_cache o
-		LEFT JOIN vault_parity v
-		  ON v.tenant_id = o.tenant_id AND v.bucket = o.bucket AND v.object_key = o.object_key
-		WHERE o.floor = 'vault' AND o.size_bytes > 0
-		  AND (v.tenant_id IS NULL OR v.etag <> o.etag OR (v.state <> 'complete' AND v.attempts < $2))
-		  AND ($1 = '' OR o.tenant_id = $1)
-		ORDER BY o.updated_at
-		LIMIT $3`, p.scopeTenant, vaultParityMaxAttempts, p.MaxObjectsPerRun)
+	maxSize := p.maxProtectableSize()
+	if err := p.countUnprotected(ctx, res, maxSize); err != nil {
+		return err
+	}
+	cands, err := p.protectCandidates(ctx, res, maxSize)
 	if err != nil {
-		return fmt.Errorf("vault parity: candidates: %w", err)
-	}
-	var cands []parityCandidate
-	for rows.Next() {
-		var c parityCandidate
-		if err := rows.Scan(&c.tenantID, &c.bucket, &c.key, &c.etag, &c.size, &c.chunked); err != nil {
-			_ = rows.Close()
-			return fmt.Errorf("vault parity: scan candidate: %w", err)
-		}
-		cands = append(cands, c)
-	}
-	_ = rows.Close()
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("vault parity: candidates: %w", err)
+		return err
 	}
 	var budget int64
 	deadline, hasDeadline := ctx.Deadline()
@@ -507,29 +514,10 @@ func (p *VaultParity) protectPending(ctx context.Context, res *VaultParityResult
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		res.Scanned++
-		if c.chunked {
-			// Never handled: the archive classes disable chunking at the
-			// PUT (storageClassDisablesChunking), so this row is a broken
-			// invariant, not a case.
-			res.ChunkedSkipped++
-			p.logger.Error("vault parity: a chunked object is on the vault floor — invariant broken, not protected",
-				zap.String("tenant_id", c.tenantID), zap.String("bucket", c.bucket), zap.String("key", c.key))
-			continue
-		}
-		if !p.enabled(c.tenantID) {
-			res.FlagOff++
-			continue
-		}
 		if p.MaxBytesPerRun > 0 && budget+c.size > p.MaxBytesPerRun && budget > 0 {
 			break
 		}
-		if est := p.protectEstimate(c.size); p.MaxRunTime > 0 && est > p.MaxRunTime {
-			res.TooLarge++
-			res.Errors = append(res.Errors, fmt.Sprintf("protect %s/%s not started: estimated %s exceeds a whole run (%s)",
-				c.bucket, c.key, est.Round(time.Second), p.MaxRunTime))
-			continue
-		} else if hasDeadline && time.Until(deadline) < est {
+		if est := p.protectEstimate(c.size); hasDeadline && time.Until(deadline) < est {
 			res.WorkStopped = true
 			continue
 		}
@@ -557,6 +545,146 @@ func (p *VaultParity) protectPending(ctx context.Context, res *VaultParityResult
 		}
 	}
 	return nil
+}
+
+// vaultParityCandidatePages bounds the pages of candidates one run reads
+// past skipped rows (each max(MaxObjectsPerRun, 100) rows).
+const vaultParityCandidatePages = 20
+
+// maxProtectableSize is the largest object a protect may take on — its
+// estimate fits a whole run (-1 = no limit, MaxRunTime unset).
+func (p *VaultParity) maxProtectableSize() int64 {
+	if p.MaxRunTime <= 0 {
+		return -1
+	}
+	if p.protectEstimate(0) > p.MaxRunTime {
+		return 0
+	}
+	lo, hi := int64(0), int64(1)<<50
+	for lo < hi { // the estimate grows with the size: the largest that fits
+		mid := lo + (hi-lo+1)/2
+		if p.protectEstimate(mid) <= p.MaxRunTime {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	return lo
+}
+
+// unprotectedFrom: vault-floor objects with no complete parity row of their
+// current etag ($1 = the run's tenant scope, ” = all).
+const unprotectedFrom = `
+		FROM object_head_cache o
+		LEFT JOIN vault_parity v
+		  ON v.tenant_id = o.tenant_id AND v.bucket = o.bucket AND v.object_key = o.object_key
+		WHERE o.floor = 'vault' AND o.size_bytes > 0
+		  AND (v.tenant_id IS NULL OR v.etag <> o.etag OR v.state <> 'complete')
+		  AND ($1 = '' OR o.tenant_id = $1)`
+
+// countUnprotected sets the unprotected gauges, and names the objects too
+// large for a run (res.TooLarge, res.Errors — the first 20).
+func (p *VaultParity) countUnprotected(ctx context.Context, res *VaultParityResult, maxSize int64) error {
+	var all, large int
+	var allBytes int64
+	if err := p.db.QueryRowContext(ctx, `
+		SELECT COUNT(*), COALESCE(SUM(o.size_bytes), 0)::BIGINT,
+		       COUNT(*) FILTER (WHERE $2::BIGINT >= 0 AND o.size_bytes > $2::BIGINT AND NOT o.is_chunked)`+unprotectedFrom,
+		p.scopeTenant, maxSize).Scan(&all, &allBytes, &large); err != nil {
+		return fmt.Errorf("vault parity: count unprotected: %w", err)
+	}
+	vaultParityUnprotectedBytes.Set(float64(allBytes))
+	vaultParityUnprotectedObjects.WithLabelValues("too_large").Set(float64(large))
+	vaultParityUnprotectedObjects.WithLabelValues("other").Set(float64(all - large))
+	res.TooLarge = large
+	if large == 0 {
+		return nil
+	}
+	rows, err := p.db.QueryContext(ctx, `SELECT o.bucket, o.object_key, o.size_bytes`+unprotectedFrom+`
+		  AND $2::BIGINT >= 0 AND o.size_bytes > $2::BIGINT AND NOT o.is_chunked
+		ORDER BY o.updated_at LIMIT 20`, p.scopeTenant, maxSize)
+	if err != nil {
+		return fmt.Errorf("vault parity: too large: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var bucket, key string
+		var size int64
+		if err := rows.Scan(&bucket, &key, &size); err != nil {
+			return fmt.Errorf("vault parity: too large: %w", err)
+		}
+		res.Errors = append(res.Errors, fmt.Sprintf("protect %s/%s not started: estimated %s exceeds a whole run (%s)",
+			bucket, key, p.protectEstimate(size).Round(time.Second), p.MaxRunTime))
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("vault parity: too large: %w", err)
+	}
+	return nil
+}
+
+// protectCandidates reads up to MaxObjectsPerRun objects to protect, oldest
+// first: the ones it will not protect (a chunked row, a flag-off tenant)
+// are counted and passed over without a slot, and objects larger than
+// maxSize are not read at all.
+func (p *VaultParity) protectCandidates(ctx context.Context, res *VaultParityResult, maxSize int64) ([]parityCandidate, error) {
+	if p.MaxObjectsPerRun <= 0 {
+		return nil, nil
+	}
+	page := max(p.MaxObjectsPerRun, 100)
+	var (
+		cands            []parityCandidate
+		curAt            time.Time
+		curT, curB, curK string
+		first            = true
+	)
+	for n := 0; n < vaultParityCandidatePages && len(cands) < p.MaxObjectsPerRun; n++ {
+		rows, err := p.db.QueryContext(ctx, `
+			SELECT o.tenant_id, o.bucket, o.object_key, o.etag, o.size_bytes, o.is_chunked, o.updated_at`+unprotectedFrom+`
+			  AND (v.tenant_id IS NULL OR v.etag <> o.etag OR v.attempts < $2)
+			  AND ($3::BIGINT < 0 OR o.size_bytes <= $3::BIGINT)
+			  AND ($4::BOOLEAN OR (o.updated_at, o.tenant_id, o.bucket, o.object_key) > ($5::TIMESTAMPTZ, $6::TEXT, $7::TEXT, $8::TEXT))
+			ORDER BY o.updated_at, o.tenant_id, o.bucket, o.object_key
+			LIMIT $9`, p.scopeTenant, vaultParityMaxAttempts, maxSize, first, curAt, curT, curB, curK, page)
+		if err != nil {
+			return nil, fmt.Errorf("vault parity: candidates: %w", err)
+		}
+		read := 0
+		for rows.Next() {
+			var c parityCandidate
+			if err := rows.Scan(&c.tenantID, &c.bucket, &c.key, &c.etag, &c.size, &c.chunked, &curAt); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("vault parity: scan candidate: %w", err)
+			}
+			read++
+			curT, curB, curK = c.tenantID, c.bucket, c.key
+			if len(cands) >= p.MaxObjectsPerRun {
+				continue
+			}
+			res.Scanned++
+			switch {
+			case c.chunked:
+				// Never handled: the archive classes disable chunking at
+				// the PUT (storageClassDisablesChunking), so this row is a
+				// broken invariant, not a case.
+				res.ChunkedSkipped++
+				p.logger.Error("vault parity: a chunked object is on the vault floor — invariant broken, not protected",
+					zap.String("tenant_id", c.tenantID), zap.String("bucket", c.bucket), zap.String("key", c.key))
+			case !p.enabled(c.tenantID):
+				res.FlagOff++
+			default:
+				cands = append(cands, c)
+			}
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("vault parity: candidates: %w", err)
+		}
+		first = false
+		if read < page {
+			break
+		}
+	}
+	return cands, nil
 }
 
 // shardPrefix is the artifact prefix of an object's shards inside the
@@ -620,7 +748,7 @@ func (p *VaultParity) protect(ctx context.Context, c parityCandidate) (state str
 	for j := range intent {
 		intent[j] = legName
 	}
-	if _, err := p.db.ExecContext(ctx, `
+	if err := p.db.QueryRowContext(ctx, `
 		INSERT INTO vault_parity (tenant_id, bucket, object_key, etag, size_bytes, data_shards, parity_shards,
 		                          stripe_bytes, shard_bytes, shard_prefix, legs, state, attempts, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'partial',1,NOW(),NOW())
@@ -629,8 +757,9 @@ func (p *VaultParity) protect(ctx context.Context, c parityCandidate) (state str
 		    shard_bytes = EXCLUDED.shard_bytes, shard_prefix = EXCLUDED.shard_prefix, legs = EXCLUDED.legs,
 		    state = 'partial', written_at = NULL, last_error = NULL,
 		    attempts = CASE WHEN vault_parity.etag = EXCLUDED.etag THEN vault_parity.attempts + 1 ELSE 1 END,
-		    updated_at = NOW()`,
-		c.tenantID, c.bucket, c.key, c.etag, c.size, l.k, l.m, l.stripe, l.shardBytes(), prefix, pq.Array(intent)); err != nil {
+		    updated_at = NOW()
+		RETURNING updated_at`,
+		c.tenantID, c.bucket, c.key, c.etag, c.size, l.k, l.m, l.stripe, l.shardBytes(), prefix, pq.Array(intent)).Scan(&c.rowAt); err != nil {
 		return "failed", 0, fmt.Errorf("vault parity: row: %w", err)
 	}
 
@@ -733,6 +862,9 @@ func (p *VaultParity) protect(ctx context.Context, c parityCandidate) (state str
 			legs[j] = legName
 		}
 	}
+	if p.beforeFinish != nil {
+		p.beforeFinish(c)
+	}
 	var ferr error
 	switch {
 	case encErr != nil:
@@ -788,15 +920,21 @@ func (p *VaultParity) finishRow(ctx context.Context, c parityCandidate, legs []s
 	if cause != nil {
 		lastErr = sql.NullString{String: cause.Error(), Valid: true}
 	}
+	// The row is the one this protect wrote — its etag AND its updated_at: a
+	// delete that ran meanwhile marked it (markIncomplete) and may have
+	// erased shards this write had just put down; completing it would name
+	// shards that are gone, for good on a same-content re-upload (Prompt
+	// 2b.2 C4). Such a finish is errParityRowGone: the caller erases what it
+	// wrote and the next run protects again.
 	var q string
 	if state == "complete" {
 		q = `UPDATE vault_parity SET legs = $4, state = 'complete', last_error = NULL, written_at = NOW(), updated_at = NOW()
-		     WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND etag = $5`
+		     WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND etag = $5 AND updated_at = $6`
 	} else {
-		q = `UPDATE vault_parity SET legs = $4, state = 'partial', last_error = $6, written_at = NULL, updated_at = NOW()
-		     WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND etag = $5`
+		q = `UPDATE vault_parity SET legs = $4, state = 'partial', last_error = $7, written_at = NULL, updated_at = NOW()
+		     WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND etag = $5 AND updated_at = $6`
 	}
-	args := []any{c.tenantID, c.bucket, c.key, pq.Array(legs), c.etag}
+	args := []any{c.tenantID, c.bucket, c.key, pq.Array(legs), c.etag, c.rowAt}
 	if state != "complete" {
 		args = append(args, lastErr)
 	}
@@ -886,15 +1024,19 @@ func (p *VaultParity) deleteRecordedShards(ctx context.Context, r parityRow, kee
 	return nil
 }
 
-// markIncomplete makes a `complete` row of this etag `partial` with a fresh
-// attempt count, on its own clock: its shards are about to be deleted.
+// markIncomplete makes the row of this etag `partial` (a `complete` one with
+// a fresh attempt count), on its own clock: its shards are about to be
+// deleted. A `partial` row is marked too (its updated_at): a protect
+// writing it right now must not complete it over shards this delete
+// removes (Prompt 2b.2 C4).
 func (p *VaultParity) markIncomplete(ctx context.Context, r parityRow) error {
 	mctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), parityRowDeleteTimeout)
 	defer cancel()
 	if _, err := p.db.ExecContext(mctx, `
-		UPDATE vault_parity SET state = 'partial', written_at = NULL, attempts = 0,
+		UPDATE vault_parity SET state = 'partial', written_at = NULL,
+		       attempts = CASE WHEN state = 'complete' THEN 0 ELSE attempts END,
 		       last_error = 'shards being deleted (a delete that stopped here left this row partial)', updated_at = NOW()
-		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND etag = $4 AND state = 'complete'`,
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND etag = $4`,
 		r.tenantID, r.bucket, r.key, r.etag); err != nil {
 		return fmt.Errorf("mark the row partial before its shard deletes: %w", err)
 	}

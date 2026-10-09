@@ -97,6 +97,11 @@ type deliveryJob struct {
 	// owed lists the rows of a webhook job that never runs (nil for a
 	// notification).
 	owed func(ctx context.Context) []droppedDelivery
+	// dropped is set on a job that only records the rows of deliveries
+	// already dropped (and counted) for this reason: if the pool drops the
+	// job too, its rows keep this reason and nothing is counted again
+	// (Prompt 2b.2 C4 — a lookup_failed event was counted as overloaded too).
+	dropped string
 }
 
 // tenantDeliveries is one tenant's FIFO and how many of its jobs run.
@@ -308,28 +313,38 @@ func (p *deliveryPool) recordDropped(jobs []deliveryJob, reason string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	rows := map[*sql.DB][]droppedDelivery{}
+	type sink struct {
+		db     *sql.DB
+		reason string
+	}
+	rows := map[sink][]droppedDelivery{}
 	notifications := 0
 	for _, j := range jobs {
-		deliveriesDropped.WithLabelValues(j.kind, label).Inc()
+		why := reason
+		if j.dropped != "" {
+			why = j.dropped // already counted when it was dropped
+		} else {
+			deliveriesDropped.WithLabelValues(j.kind, label).Inc()
+		}
 		if j.kind == deliveryKindNotification {
 			notifications++
 		}
 		if j.owed != nil && j.db != nil {
-			rows[j.db] = append(rows[j.db], j.owed(ctx)...)
+			k := sink{j.db, why}
+			rows[k] = append(rows[k], j.owed(ctx)...)
 		}
 	}
 	if notifications > 0 {
 		p.log().Warn("bucket notifications dropped", zap.Int("count", notifications), zap.String("reason", reason))
 	}
-	for db, rs := range rows {
-		filtered, err := insertDroppedDeliveries(ctx, db, rs, reason)
+	for k, rs := range rows {
+		filtered, err := insertDroppedDeliveries(ctx, k.db, rs, k.reason)
 		if err != nil {
-			p.log().Error("dropped webhook deliveries not recorded", zap.Error(err), zap.Int("rows", len(rs)), zap.String("reason", reason))
+			p.log().Error("dropped webhook deliveries not recorded", zap.Error(err), zap.Int("rows", len(rs)), zap.String("reason", k.reason))
 		}
 		if filtered > 0 {
 			p.log().Warn("dropped webhook deliveries without a row: their webhook or event is gone",
-				zap.Int("rows", filtered), zap.String("reason", reason))
+				zap.Int("rows", filtered), zap.String("reason", k.reason))
 		}
 	}
 }
@@ -462,7 +477,8 @@ func droppedRowsJob(db *sql.DB, logger *zap.Logger, tenantID string, rows []drop
 				logger.Error("skipped webhook deliveries not recorded", zap.Error(err), zap.Int("rows", len(rows)), zap.String("reason", reason))
 			}
 		},
-		owed: func(context.Context) []droppedDelivery { return rows },
+		owed:    func(context.Context) []droppedDelivery { return rows },
+		dropped: reason,
 	}
 }
 
