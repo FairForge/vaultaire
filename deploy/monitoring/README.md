@@ -26,8 +26,48 @@ it is **not** committed. It lives in `/etc/default/ntfy-bridge` on the server
 | `ntfy-bridge.py` | `/opt/vaultaire/monitoring/ntfy-bridge.py` | Alertmanager webhook → readable ntfy push (UTF-8-safe JSON publish) |
 | `ntfy-bridge.service` | `/etc/systemd/system/ntfy-bridge.service` | sandboxed systemd unit (DynamicUser) |
 | `vaultaire-routing.yml` | `/etc/prometheus/rules/` | routing truth (WP-R7-5): head rows whose bytes the recorded backend does not have (warn / page on a jump), rows on a backend no driver is registered under (info), two names on one store (page), reads of such rows (warn) |
-| `vaultaire-backup.yml` | `/etc/prometheus/rules/` | BackupStale / BackupOffboxStale (critical, > 26 h or series absent) on the two timestamps `deploy/scripts/pg-backup.sh` writes into node_exporter's textfile directory `/var/lib/prometheus/node-exporter/` (installed 2026-10-08; the directory is `root:user1 0775` so the user1 cron can write it) |
-| `vaultaire-backends.yml`, `vaultaire-auth.yml`, `vaultaire-tls.yml`, `vaultaire-synthetic.yml`, `vaultaire-egress.yml`, `vaultaire-jobs.yml` | `/etc/prometheus/rules/` | alert rules: backend probes / auth failures / origin cert / customer-path canary / egress throttle / background jobs (Review R13 + WP-R10-9 + WP-R13-3 — install all six, checklist item 10; on 2026-10-02 only `backends` and `tls` were installed on SLC, next to the older `vaultaire-alerts.yml`) |
+| `vaultaire-backup.yml` | `/etc/prometheus/rules/` | BackupStale / BackupOffboxStale (critical) and BackupRunIncomplete (warning, Prompt 2a.2) — > 26 h or series absent — on the three timestamps `deploy/scripts/pg-backup.sh` writes into its own directory `/opt/vaultaire/metrics/` (user1), which node_exporter reads through root-owned symlinks (see "Backup metrics" below). Installed 2026-10-08; the run timestamp + symlink layout are the 2a.2 change |
+| `vaultaire-longops.yml` | `/etc/prometheus/rules/` | LongOpFailingAfterCommit (warning: ≥ 3 `<Error>` documents inside a committed 200 in 15 min, per op) and LongOpsAbandonedAtShutdown (warning: a stopping slot cancelled a CompleteMultipartUpload / CopyObject / DeleteObjects still running 15 min after its start) on `vaultaire_s3_long_op_total{op,outcome}` / `vaultaire_s3_long_ops_abandoned_total{op}` (`internal/api/s3_long_op.go`, #635). Installed on SLC 2026-10-08. TODO(2a.2-G1): the abandoned counter is now exported by the ACTIVE slot from the persisted table (migration 082) — the stopping slot was never scraped |
+| `vaultaire-backends.yml`, `vaultaire-auth.yml`, `vaultaire-tls.yml`, `vaultaire-synthetic.yml`, `vaultaire-egress.yml`, `vaultaire-jobs.yml` | `/etc/prometheus/rules/` | alert rules: backend probes / auth failures / origin cert / customer-path canary / egress throttle / background jobs (Review R13 + WP-R10-9 + WP-R13-3 — install all six, checklist item 10). On SLC (checked 2026-10-09): `backends`, `tls`, `backup`, `longops` and the older `vaultaire-alerts.yml` are installed; `auth`, `synthetic`, `egress`, `jobs` and `routing` are NOT |
+
+## Backup metrics (node_exporter textfile collector)
+
+`pg-backup.sh` runs as user1 (cron 03:00 UTC) and writes three `.prom` files —
+`vaultaire_backup_{,offbox_,run_}last_success_timestamp_seconds.prom` — into
+**its own directory `/opt/vaultaire/metrics/`** (user1, 0755; files 0644 by
+atomic rename). node_exporter 1.7.0 on the box reads ONE textfile directory
+(`--collector.textfile.directory`, default `/var/lib/prometheus/node-exporter`,
+not repeatable in that version), so that directory holds one root-owned
+**symlink** per backup file; node_exporter follows them (it opens each `*.prom`
+entry by path). The textfile directory itself goes back to `root:root 0755`:
+until 2a.2 it was `root:user1 0775` without the sticky bit, so the app user
+could replace the root-owned `apt.prom` / `nvme.prom` / `ipmitool_sensor.prom`.
+
+Install (once, as root on slc-vaultaire-01; the script itself goes to
+`/opt/vaultaire/bin/pg-backup.sh` as before):
+
+```bash
+sudo -u user1 install -d -m 0755 /opt/vaultaire/metrics
+# carry the current timestamps over so nothing reads as absent until 03:00
+for m in vaultaire_backup_last_success_timestamp_seconds vaultaire_backup_offbox_last_success_timestamp_seconds; do
+  sudo -u user1 cp -p /var/lib/prometheus/node-exporter/$m.prom /opt/vaultaire/metrics/$m.prom
+done
+for m in vaultaire_backup_last_success_timestamp_seconds vaultaire_backup_offbox_last_success_timestamp_seconds vaultaire_backup_run_last_success_timestamp_seconds; do
+  ln -sfn /opt/vaultaire/metrics/$m.prom /var/lib/prometheus/node-exporter/$m.prom
+done
+chown root:root /var/lib/prometheus/node-exporter && chmod 0755 /var/lib/prometheus/node-exporter
+install -m 0755 -o user1 -g user1 deploy/scripts/pg-backup.sh /opt/vaultaire/bin/pg-backup.sh
+install -m 0644 deploy/monitoring/vaultaire-backup.yml /etc/prometheus/rules/
+promtool check rules /etc/prometheus/rules/vaultaire-backup.yml && systemctl reload prometheus
+# one run now: writes the run timestamp the new symlink points at
+sudo -u user1 /opt/vaultaire/bin/pg-backup.sh; tail -4 /opt/vaultaire/logs/backup.log
+```
+
+Without that hand run `vaultaire_backup_run_last_success_timestamp_seconds` is
+absent until 03:00 UTC: `BackupRunIncomplete` fires 10 min after the rules
+reload, and the dangling symlink sets `node_textfile_scrape_error 1` (the
+collector skips a file it cannot open).
+Check: `curl -s 127.0.0.1:9100/metrics | grep -E '^vaultaire_backup|node_textfile_scrape_error'`.
 
 ## Install (already done on slc-vaultaire-01, 2026-08-03)
 
