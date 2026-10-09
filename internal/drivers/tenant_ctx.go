@@ -38,7 +38,7 @@ var callsWithoutTenant = prometheus.NewCounterVec(prometheus.CounterOpts{
 // registry.
 func Collectors() []prometheus.Collector {
 	return []prometheus.Collector{callsWithoutTenant, geyserGetRanges, geyserGetBytesPerSecond, driverPutRetries,
-		webdavRequests, webdavStalls, webdavRetries, webdavBridgeUp, webdavFallbackReads,
+		webdavRequests, webdavStalls, webdavRetries, webdavBridgeUp, webdavFallbackReads, webdavDeleteElsewhere, webdavFolderFilesMax, webdavFolderFull,
 		webdavStripePieces, webdavStripeBytes, webdavStripeOrphans}
 }
 

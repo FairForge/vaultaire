@@ -47,7 +47,13 @@ import (
 //     default 2 min per started 64 MiB — the fixed-bucket putDeadline
 //     scaling, ≈ 0.5 MB/s floor — capped at 6 h): the bridge may answer
 //     only after its own upload to Sync, so the wait after the last body
-//     byte is bounded by this, not by the idle timer;
+//     byte is bounded by this, not by the idle timer. It counts only the
+//     time the SERVER is the bottleneck: it is paused while the transport
+//     waits in the source's Read (Prompt 2b A2 — a slow client through
+//     Cloudflare ran it out, the bridge's breaker was charged and a healthy
+//     bridge went down for every tenant). A source that fails (the client
+//     went away mid-body) is the caller's error: never retried, never a
+//     bridge fault (errWebDAVSource, engine.ErrNoFailover);
 //   - retries (WithWebDAVRetries, default 3 attempts, jittered exponential
 //     backoff from 250 ms) of a transient failure — 500/502/503/504, 423
 //     Locked, a transport error (reset, EOF, refused), a stall or a timeout
@@ -91,6 +97,74 @@ var ErrWebDAVStalled = fmt.Errorf("%w: the WebDAV server made no progress", engi
 // errAttemptOver ends a body read that the transport makes after its
 // request has been given up (a retry is about to rewind the source).
 var errAttemptOver = errors.New("webdav: request attempt is over")
+
+// errWebDAVSource: a PUT's own body could not be read (the caller's source
+// failed) — the caller's error, never the server's.
+var errWebDAVSource = errors.New("webdav: reading the request body failed")
+
+// paceDeadline is a PUT's deadline that runs only while the server is the
+// bottleneck: paused while the transport waits for the source's bytes. A
+// nil paceDeadline does nothing.
+type paceDeadline struct {
+	mu        sync.Mutex
+	remaining time.Duration
+	since     time.Time
+	running   bool
+	stopped   bool
+	timer     *time.Timer
+	fired     atomic.Bool
+}
+
+func newPaceDeadline(d time.Duration, cancel context.CancelFunc) *paceDeadline {
+	p := &paceDeadline{remaining: d}
+	p.timer = time.AfterFunc(time.Hour, func() {
+		p.fired.Store(true)
+		cancel()
+	})
+	p.timer.Stop()
+	return p
+}
+
+// resume starts the clock again (the server holds the transfer up).
+func (p *paceDeadline) resume() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.stopped || p.running {
+		return
+	}
+	p.running, p.since = true, time.Now()
+	p.timer.Reset(p.remaining)
+}
+
+// pause stops the clock (the transport waits for the source).
+func (p *paceDeadline) pause() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.running {
+		return
+	}
+	p.running = false
+	p.timer.Stop()
+	p.remaining = max(p.remaining-time.Since(p.since), 0)
+}
+
+func (p *paceDeadline) stop() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.stopped, p.running = true, false
+	p.timer.Stop()
+}
+
+func (p *paceDeadline) hasFired() bool { return p != nil && p.fired.Load() }
 
 // webdavSettings are a driver's limits (WebDAVOption).
 type webdavSettings struct {
@@ -316,6 +390,8 @@ func InitWebDAVSeries(backend, bridge string) {
 	for _, d := range []string{"upload", "download"} {
 		webdavStalls.WithLabelValues(backend, bridge, d)
 	}
+	webdavFolderFilesMax.WithLabelValues(backend, bridge)
+	webdavFolderFull.WithLabelValues(backend)
 }
 
 // WebDAVStats are one driver's own counts (the bench reports them).
@@ -397,7 +473,9 @@ type uploadBody struct {
 	r      io.Reader
 	n      int64
 	wd     *watchdog
+	dl     *paceDeadline
 	fenced bool
+	srcErr error // the source's own read failure
 }
 
 func (u *uploadBody) Read(p []byte) (int, error) {
@@ -407,12 +485,23 @@ func (u *uploadBody) Read(p []byte) (int, error) {
 		return 0, errAttemptOver
 	}
 	u.wd.disarm()
+	u.dl.pause() // the caller's pace is not the server's
 	n, err := u.r.Read(p)
+	u.dl.resume()
 	u.n += int64(n)
 	if err == nil {
 		u.wd.arm()
+	} else if !errors.Is(err, io.EOF) {
+		u.srcErr = err
 	}
 	return n, err
+}
+
+// sourceErr is the source's own read failure, if any.
+func (u *uploadBody) sourceErr() error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.srcErr
 }
 
 // fence ends the attempt's reads and returns the bytes it consumed.
@@ -438,6 +527,7 @@ func (u *uploadBody) consumed() int64 {
 type davCall struct {
 	resp    *http.Response
 	wd      *watchdog
+	dl      *paceDeadline
 	cancel  context.CancelFunc
 	slot    sync.Once
 	release func()
@@ -447,6 +537,7 @@ func (c *davCall) releaseSlot() { c.slot.Do(c.release) }
 
 func (c *davCall) finish() {
 	c.wd.disarm()
+	c.dl.stop()
 	c.releaseSlot()
 	c.cancel()
 }
@@ -504,9 +595,11 @@ func (d *WebDAVDriver) send(ctx context.Context, method, path string, body io.Re
 	if err != nil {
 		return nil, false, err
 	}
+	ub, _ := body.(*uploadBody)
 	var actx context.Context
 	var cancel context.CancelFunc
-	if timeout > 0 {
+	paced := timeout > 0 && mode == watchUpload && ub != nil
+	if timeout > 0 && !paced {
 		actx, cancel = context.WithTimeout(ctx, timeout)
 	} else {
 		actx, cancel = context.WithCancel(ctx)
@@ -515,8 +608,11 @@ func (d *WebDAVDriver) send(ctx context.Context, method, path string, body io.Re
 	if mode != watchNone {
 		call.wd = newWatchdog(d.limits.idleTimeout, cancel)
 	}
-	if ub, ok := body.(*uploadBody); ok {
-		ub.wd = call.wd
+	if paced {
+		call.dl = newPaceDeadline(timeout, cancel)
+	}
+	if ub != nil {
+		ub.wd, ub.dl = call.wd, call.dl
 	}
 	req, err := http.NewRequestWithContext(actx, method, u.String(), body)
 	if err != nil {
@@ -538,16 +634,27 @@ func (d *WebDAVDriver) send(ctx context.Context, method, path string, body io.Re
 	// Upload: armed until the transport takes the first bytes (then the
 	// body re-arms it); download: armed until the headers arrive.
 	call.wd.arm()
+	call.dl.resume()
 	resp, err := d.client.Do(req) //nolint:bodyclose // the caller owns call.resp and closes it (drainClose / statusError / downloadBody.Close)
 	call.wd.disarm()
+	call.dl.pause()
 	if err != nil {
 		stalled := call.wd.hasFired()
-		timedOut := errors.Is(actx.Err(), context.DeadlineExceeded)
+		timedOut := errors.Is(actx.Err(), context.DeadlineExceeded) || call.dl.hasFired()
 		call.finish()
+		var srcErr error
+		if ub != nil {
+			srcErr = ub.sourceErr()
+		}
 		switch {
 		case ctx.Err() != nil:
 			d.count(method, "canceled")
 			return nil, false, fmt.Errorf("%s: %w", method, ctx.Err())
+		case srcErr != nil:
+			// The caller's body broke: not the server, and no retry can
+			// send what the source no longer has.
+			d.count(method, "canceled")
+			return nil, false, fmt.Errorf("%s: %w: %w: %w", method, errWebDAVSource, srcErr, engine.ErrNoFailover)
 		case stalled:
 			d.count(method, "stall")
 			dir, what := "download", "no answer"

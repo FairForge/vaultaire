@@ -294,51 +294,81 @@ func TestMultiWebDAV_OneBridge(t *testing.T) {
 
 // --- fallback reads ------------------------------------------------------------
 
-// The routed bridge is down: a read falls back to the next bridge in HRW
-// order and is served when that bridge sees the object; when it does not,
-// the answer is a retryable "unavailable", never NotFound — the object may
-// have been written through the dead bridge seconds ago.
+// The routed bridge is down. An IMMUTABLE name (a parity shard) falls back
+// to the next bridge in HRW order and is served when that bridge sees it;
+// when it does not, the answer is a retryable "unavailable", never NotFound
+// — the object may have been written through the dead bridge seconds ago.
+// A MUTABLE name (an object's `%o` file) is never served by another bridge,
+// which may hold an older version (Prompt 2b A1): 503, routed_down.
 func TestMultiWebDAV_FallbackReadOnADeadBridge(t *testing.T) {
 	bs := newBridges(t, 2, false, nil)
 	m := newMulti(t, bs, nil)
 	ctx := davCtx("tenant-a")
-
-	synced := keyOnBridge(ctx, t, m, "c", "synced", 0)
-	fresh := keyOnBridge(ctx, t, m, "c", "fresh", 0)
-	require.NoError(t, m.Put(ctx, "c", synced, strings.NewReader("old news"), engine.WithContentLength(8)))
-	require.NoError(t, m.Put(ctx, "c", fresh, strings.NewReader("just now"), engine.WithContentLength(8)))
+	const pc = "tenant-a__parity"
+	shard := func(prefix string) string {
+		for i := 0; ; i++ {
+			a := fmt.Sprintf("%024x/0123456789abcdef0123456789abcdef/p%d", i, len(prefix)%4)
+			if idx, _ := m.bridgeFor(ctx, pc, a); idx == 0 {
+				return a
+			}
+		}
+	}
+	synced, fresh := shard("synced"), shard("fresh-")
+	for synced == fresh {
+		fresh = shard("x")
+	}
+	require.NoError(t, m.Put(ctx, pc, synced, strings.NewReader("old news"), engine.WithContentLength(8)))
+	require.NoError(t, m.Put(ctx, pc, fresh, strings.NewReader("just now"), engine.WithContentLength(8)))
 	// Sync has carried `synced` to the other bridge; `fresh` not yet.
-	putFile(t, bs[1].fs, "/vaultaire/t-tenant-a/c/"+synced+"%o", "old news")
+	putFile(t, bs[1].fs, "/vaultaire/t-tenant-a/"+pc+"/"+synced+"%o", "old news")
+	mutable := keyOnBridge(ctx, t, m, "c", "obj", 0)
+	require.NoError(t, m.Put(ctx, "c", mutable, strings.NewReader("v2"), engine.WithContentLength(2)))
+	putFile(t, bs[1].fs, "/vaultaire/t-tenant-a/c/"+mutable+"%o", "v1")
 
 	bs[0].srv.Close() // connection refused from now on
 
 	// No probe has run: the refused connection itself sends the read on.
-	assert.Equal(t, "old news", string(readAllClose(t, mustMultiGet(ctx, t, m, "c", synced))))
-	rc, err := m.GetRange(ctx, "c", synced, 4, 4)
+	assert.Equal(t, "old news", string(readAllClose(t, mustMultiGet(ctx, t, m, pc, synced))))
+	rc, err := m.GetRange(ctx, pc, synced, 4, 4)
 	require.NoError(t, err)
 	assert.Equal(t, "news", string(readAllClose(t, rc)))
-	ok, err := m.Exists(ctx, "c", synced)
+	ok, err := m.Exists(ctx, pc, synced)
 	require.NoError(t, err)
 	assert.True(t, ok)
 
-	_, err = m.Get(ctx, "c", fresh)
+	_, err = m.Get(ctx, pc, fresh)
 	assertStaleMiss(t, err)
-	_, err = m.GetRange(ctx, "c", fresh, 0, 2)
+	_, err = m.GetRange(ctx, pc, fresh, 0, 2)
 	assertStaleMiss(t, err)
-	ok, err = m.Exists(ctx, "c", fresh)
+	ok, err = m.Exists(ctx, pc, fresh)
 	assertStaleMiss(t, err)
 	assert.False(t, ok)
 
+	// The mutable object: never bridge 1's v1.
+	_, err = m.Get(ctx, "c", mutable)
+	assertRoutedDown(t, err)
+	_, err = m.Exists(ctx, "c", mutable)
+	assertRoutedDown(t, err)
+
 	// After the probe marks it down the routed bridge is not even tried.
 	require.NoError(t, m.HealthCheck(ctx), "one of two bridges is up: the backend is up")
-	assert.Equal(t, "old news", string(readAllClose(t, mustMultiGet(ctx, t, m, "c", synced))))
+	assert.Equal(t, "old news", string(readAllClose(t, mustMultiGet(ctx, t, m, pc, synced))))
+	_, err = m.Get(ctx, "c", mutable)
+	assertRoutedDown(t, err)
 
 	// Writes never fail over: a key of the dead bridge fails.
-	err = m.Put(ctx, "c", fresh, strings.NewReader("again"), engine.WithContentLength(5))
+	err = m.Put(ctx, pc, fresh, strings.NewReader("again"), engine.WithContentLength(5))
 	require.Error(t, err)
 	assert.Zero(t, bs[1].count(http.MethodPut, fresh), "no write on the fallback bridge")
-	require.Error(t, m.Delete(ctx, "c", fresh))
-	assert.Zero(t, bs[1].count(http.MethodDelete, fresh))
+}
+
+func assertRoutedDown(t *testing.T, err error) {
+	t.Helper()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrWebDAVBridgeDown)
+	assert.ErrorIs(t, err, engine.ErrAllBackendsUnavailable, "the API answers 503 + Retry-After")
+	var nf engine.NotFoundError
+	assert.False(t, errors.As(err, &nf), "never NotFound: %v", err)
 }
 
 func assertStaleMiss(t *testing.T, err error) {
@@ -364,7 +394,8 @@ func TestMultiWebDAV_RoutedMissIsAMiss(t *testing.T) {
 	assert.Empty(t, bs[2].requests())
 }
 
-// A bridge that keeps answering 5xx after its retries is also passed over.
+// A bridge that keeps answering 5xx after its retries: a mutable object is
+// a 503 (never another bridge's copy), an immutable one is passed over.
 func TestMultiWebDAV_FallbackOnPersistent5xx(t *testing.T) {
 	bs := newBridges(t, 2, true, func(i int, h http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -379,7 +410,16 @@ func TestMultiWebDAV_FallbackOnPersistent5xx(t *testing.T) {
 	ctx := davCtx("tenant-a")
 	a := keyOnBridge(ctx, t, m, "c", "k", 0)
 	require.NoError(t, m.Put(ctx, "c", a, strings.NewReader("v"), engine.WithContentLength(1)))
-	assert.Equal(t, "v", string(readAllClose(t, mustMultiGet(ctx, t, m, "c", a))))
+	_, err := m.Get(ctx, "c", a)
+	assertRoutedDown(t, err)
+	var p string
+	for i := 0; p == ""; i++ {
+		if c := fmt.Sprintf("%024x/e/p0", i); func() bool { idx, _ := m.bridgeFor(ctx, "tenant-a__parity", c); return idx == 0 }() {
+			p = c
+		}
+	}
+	require.NoError(t, m.Put(ctx, "tenant-a__parity", p, strings.NewReader("s"), engine.WithContentLength(1)))
+	assert.Equal(t, "s", string(readAllClose(t, mustMultiGet(ctx, t, m, "tenant-a__parity", p))))
 }
 
 // A 401 on the routed bridge is not an outage to hide: it is returned.
@@ -428,11 +468,13 @@ func TestMultiWebDAV_WalkTenantUnionsBridges(t *testing.T) {
 	require.NoError(t, removes["c|everywhere"](context.Background()))
 	want, err := m.bridgeFor(davCtx("tenant-a"), "c", "everywhere")
 	require.NoError(t, err)
+	// Removed through the bridge that listed it first (bridge 0) and through
+	// its routed bridge (Prompt 2b A4), nowhere else.
 	for i, b := range bs {
-		if i == want {
-			assert.Equal(t, 1, b.count(http.MethodDelete, "everywhere"))
+		if i == want || i == 0 {
+			assert.Equal(t, 1, b.count(http.MethodDelete, "everywhere"), "bridge %d", i)
 		} else {
-			assert.Empty(t, b.requests(), "bridge %d is not the object's bridge", i)
+			assert.Empty(t, b.requests(), "bridge %d neither listed it first nor is its bridge", i)
 		}
 	}
 	// The top-level file (no container) is removed at its own path.
@@ -441,7 +483,14 @@ func TestMultiWebDAV_WalkTenantUnionsBridges(t *testing.T) {
 	for _, b := range bs {
 		total += b.count(http.MethodDelete, "/vaultaire/t-tenant-a/top-level")
 	}
-	assert.Equal(t, 1, total)
+	// Listed by bridge 2 only: deleted there and on its routed bridge.
+	routedTop := m.rank([]string{"t-tenant-a", "top-level%o"})[0]
+	wantTotal := 2
+	if routedTop == 2 {
+		wantTotal = 1
+	}
+	assert.Equal(t, wantTotal, total)
+	assert.Equal(t, 1, bs[2].count(http.MethodDelete, "/vaultaire/t-tenant-a/top-level"))
 	_ = ctx
 }
 
@@ -458,27 +507,23 @@ func TestMultiWebDAV_WalkTenantFailsWhenABridgeCannotList(t *testing.T) {
 }
 
 // List goes through one bridge and falls back when it is down.
-func TestMultiWebDAV_ListFallsBack(t *testing.T) {
-	bs := newBridges(t, 2, true, nil)
+func TestMultiWebDAV_ListUnionsEveryBridge(t *testing.T) {
+	// Prompt 2b A3. Before: one bridge (the container's) listed — `c` (written
+	// through bridge 1 a moment ago) was missing.
+	bs := newBridges(t, 2, false, nil)
 	m := newMulti(t, bs, nil)
 	ctx := davCtx("tenant-a")
 	putFile(t, bs[0].fs, "/vaultaire/t-tenant-a/c/a%o", "x")
 	putFile(t, bs[0].fs, "/vaultaire/t-tenant-a/c/b%o", "x")
+	putFile(t, bs[1].fs, "/vaultaire/t-tenant-a/c/b%o", "x")
+	putFile(t, bs[1].fs, "/vaultaire/t-tenant-a/c/c%o", "x")
 	keys, err := m.List(ctx, "c", "")
 	require.NoError(t, err)
-	assert.Equal(t, []string{"a", "b"}, keys)
-	listed := 0
-	for _, b := range bs {
-		if b.count("PROPFIND", "/t-tenant-a/c") > 0 {
-			listed++
-		}
-	}
-	assert.Equal(t, 1, listed, "one bridge lists")
+	assert.Equal(t, []string{"a", "b", "c"}, keys)
 
-	bs[0].srv.Close()
 	bs[1].srv.Close()
 	_, err = m.List(ctx, "c", "")
-	require.Error(t, err)
+	require.Error(t, err, "a bridge that cannot list fails the listing")
 }
 
 // --- health --------------------------------------------------------------------
