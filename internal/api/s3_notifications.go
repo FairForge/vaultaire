@@ -176,6 +176,7 @@ func (s *Server) handlePutBucketNotification(w http.ResponseWriter, r *http.Requ
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return
 	}
+	forgetNotifyTargets(t.ID, req.Bucket)
 
 	s.logger.Info("bucket notification config updated",
 		zap.String("tenant_id", t.ID),
@@ -379,18 +380,43 @@ type S3EventIdentity struct {
 }
 
 // Fire dispatches a notification event asynchronously on the process-wide
-// delivery pool (event_delivery.go): the bucket's targets are read by the
-// job, then delivered.
+// delivery pool (event_delivery.go) — only when the bucket has a target for
+// it: the list comes from the targets cache (event_targets.go), so a bucket
+// without one submits nothing and, once cached, queries nothing here.
 func (d *NotificationDispatcher) Fire(tenantID, bucket, eventName, objectKey string, size int64, etag string) {
 	if d == nil {
 		return
 	}
-	eventDeliveries.submit(deliveryJob{
-		kind: deliveryKindNotification,
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	targets, err := d.bucketNotifyTargets(ctx, tenantID, bucket)
+	if err != nil {
+		d.logger.Error("query notifications for dispatch",
+			zap.Error(err), zap.String("tenant_id", tenantID), zap.String("bucket", bucket))
+		return
+	}
+	matched := false
+	for _, t := range targets {
+		matched = matched || matchesEventFilter(t.filter, eventName)
+	}
+	if !matched {
+		return
+	}
+	eventDeliveries.submit(d.notificationJob(targets, tenantID, bucket, eventName, objectKey, size, etag))
+}
+
+// notificationJob delivers one event to the targets given, with its own
+// deadline.
+func (d *NotificationDispatcher) notificationJob(targets []notifyTarget, tenantID, bucket, eventName, objectKey string, size int64, etag string) deliveryJob {
+	return deliveryJob{
+		tenant: tenantID,
+		kind:   deliveryKindNotification,
 		run: func(ctx context.Context) {
-			d.dispatch(ctx, tenantID, bucket, eventName, objectKey, size, etag)
+			ctx, cancel := context.WithTimeout(ctx, notificationDeliveryTimeout)
+			defer cancel()
+			d.deliverTo(ctx, targets, tenantID, bucket, eventName, objectKey, size, etag)
 		},
-	})
+	}
 }
 
 // notifyTarget is one enabled bucket_notifications row.

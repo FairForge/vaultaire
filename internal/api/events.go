@@ -60,10 +60,11 @@ func matchesWebhookFilter(filter []string, eventType string) bool {
 	return false
 }
 
-// emitEvent records the event and hands the tenant's webhooks to the
-// process-wide delivery pool (event_delivery.go), which reads them first.
-// A full queue records the deliveries as failed at once (the endpoints are
-// read then, to name them).
+// emitEvent records the event and hands its delivery to the tenant's
+// webhooks to the process-wide delivery pool (event_delivery.go) — only
+// when the tenant has a webhook for it: the list comes from the targets
+// cache (event_targets.go), so a tenant without one submits nothing and,
+// once cached, queries nothing here.
 func emitEvent(ctx context.Context, db *sql.DB, logger *zap.Logger, eventType, tenantID string, data map[string]interface{}) {
 	if db == nil {
 		return
@@ -72,28 +73,23 @@ func emitEvent(ctx context.Context, db *sql.DB, logger *zap.Logger, eventType, t
 	if !ok {
 		return
 	}
-	eventDeliveries.submit(dispatchJob(db, logger, eventID, eventType, tenantID, dataJSON))
+	submitEventDelivery(ctx, db, logger, eventID, eventType, tenantID, dataJSON)
 }
 
-// dispatchJob is the delivery-pool job of one recorded event: it reads the
-// tenant's webhooks and delivers; never run, it reads them to record each
-// matching one as failed.
-func dispatchJob(db *sql.DB, logger *zap.Logger, eventID, eventType, tenantID string, payload []byte) deliveryJob {
-	return deliveryJob{
-		kind: deliveryKindWebhook,
-		db:   db,
-		run: func(ctx context.Context) {
-			dispatchWebhooks(ctx, db, logger, eventID, eventType, tenantID, payload)
-		},
-		owed: func(ctx context.Context) []droppedDelivery {
-			endpoints, err := loadWebhookEndpoints(ctx, db, logger, tenantID)
-			if err != nil {
-				logger.Error("webhook endpoints of a dropped delivery not loaded", zap.Error(err), zap.String("tenant_id", tenantID))
-				return nil
-			}
-			return owedRows(endpoints, eventID, eventType)
-		},
+// submitEventDelivery queues one recorded event for the tenant's matching
+// webhooks; nothing when there are none.
+func submitEventDelivery(ctx context.Context, db *sql.DB, logger *zap.Logger, eventID, eventType, tenantID string, payload []byte) {
+	lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
+	endpoints, err := tenantWebhookEndpoints(lctx, db, logger, tenantID)
+	if err != nil {
+		logger.Error("query webhook endpoints for dispatch", zap.Error(err), zap.String("tenant_id", tenantID))
+		return
 	}
+	if len(owedRows(endpoints, eventID, eventType)) == 0 {
+		return
+	}
+	eventDeliveries.submit(webhookJob(db, logger, endpoints, eventID, eventType, tenantID, payload))
 }
 
 // recordEvent inserts the events row; false when nothing was recorded.

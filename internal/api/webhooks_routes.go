@@ -102,6 +102,7 @@ func (s *Server) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to create webhook", "")
 		return
 	}
+	forgetWebhookEndpoints(tenantID)
 
 	audit.Record(r.Context(), s.db, audit.Entry{
 		TenantID: tenantID, Action: "webhook.created", Resource: "webhook:" + id,
@@ -289,6 +290,7 @@ func (s *Server) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to update webhook", "")
 		return
 	}
+	forgetWebhookEndpoints(tenantID)
 
 	audit.Record(r.Context(), s.db, audit.Entry{
 		TenantID: tenantID, Action: "webhook.updated", Resource: "webhook:" + webhookID,
@@ -326,6 +328,7 @@ func (s *Server) handleDeleteWebhook(w http.ResponseWriter, r *http.Request) {
 		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to delete webhook", "")
 		return
 	}
+	forgetWebhookEndpoints(tenantID)
 
 	rows, _ := result.RowsAffected()
 	if rows == 0 {
@@ -471,7 +474,7 @@ func (s *Server) handleTestWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	eventDeliveries.submit(dispatchJob(s.db, s.logger, eventID, "webhook.test", tenantID, dataJSON))
+	submitEventDelivery(r.Context(), s.db, s.logger, eventID, "webhook.test", tenantID, dataJSON)
 
 	resp := map[string]interface{}{
 		"object":     "webhook_test",

@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"sort"
 	"sync"
-	"time"
 
 	"github.com/FairForge/vaultaire/internal/crypto"
 	"go.uber.org/zap"
@@ -99,15 +98,7 @@ func (f *deleteFanout) deliverInOrder(d objectDeleteAftermath, tenantID, bucket 
 	jobs := make([]deliveryJob, 0, 2*len(pending))
 	for _, p := range pending {
 		if len(f.targets) > 0 {
-			key := p.key
-			jobs = append(jobs, deliveryJob{
-				kind: deliveryKindNotification,
-				run: func(ctx context.Context) {
-					ctx, cancel := context.WithTimeout(ctx, notificationDeliveryTimeout)
-					defer cancel()
-					d.notify.deliverTo(ctx, f.targets, tenantID, bucket, eventName, key, 0, "")
-				},
-			})
+			jobs = append(jobs, d.notify.notificationJob(f.targets, tenantID, bucket, eventName, p.key, 0, ""))
 		}
 		if p.eventID != "" && len(owedRows(f.endpoints, p.eventID, eventType)) > 0 {
 			jobs = append(jobs, webhookJob(d.db, d.logger, f.endpoints, p.eventID, eventType, tenantID, p.dataJSON))
@@ -131,10 +122,14 @@ func (d objectDeleteAftermath) forBatch(ctx context.Context, tenantID, bucket st
 	if f.targets, err = d.notify.Targets(ctx, tenantID, bucket); err != nil {
 		d.logger.Error("batch delete: notification targets not loaded; no notification for this batch",
 			zap.Error(err), zap.String("tenant_id", tenantID), zap.String("bucket", bucket))
+	} else if d.notify != nil {
+		rememberNotifyTargets(tenantID, bucket, f.targets)
 	}
 	if f.endpoints, err = loadWebhookEndpoints(ctx, d.db, d.logger, tenantID); err != nil {
 		d.logger.Error("batch delete: webhook endpoints not loaded; no webhook for this batch",
 			zap.Error(err), zap.String("tenant_id", tenantID), zap.String("bucket", bucket))
+	} else {
+		rememberWebhookEndpoints(tenantID, f.endpoints)
 	}
 	d.fanout = f
 	return d

@@ -22,7 +22,7 @@ import (
 // 50-connection pool. A batch now hands its per-key events to the
 // process-wide delivery pool (event_delivery.go), in key order (start
 // order); the events rows are still written per key as before. The test
-// installs a 4-worker pool so its bounds stay tight.
+// installs a pool that runs 4 jobs per tenant so its bounds stay tight.
 
 // keyOf extracts the object key from either payload shape the target receives.
 func keyOf(r *http.Request) string {
@@ -51,7 +51,7 @@ func TestDeleteObjects_ABatchDeliversFromABoundedWorkerSetInKeyOrder(t *testing.
 	webhookAllowPrivateTargets.Store(true)
 	t.Cleanup(func() { webhookAllowPrivateTargets.Store(false) })
 	const batchDeliveryWorkers = 4
-	useDeliveryPool(t, newDeliveryPool(batchDeliveryWorkers, deliveryQueueSize))
+	useDeliveryPool(t, newDeliveryPool(4*batchDeliveryWorkers, deliveryQueueSize)) // 4 running per tenant
 
 	var mu sync.Mutex
 	var inFlight, peakPosts int

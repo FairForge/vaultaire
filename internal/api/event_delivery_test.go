@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -83,7 +84,7 @@ func TestDeleteObjects_HangingNotificationTargetsDoNotStarveTheWebhook(t *testin
 	f := setupBatchFanoutFixture(t)
 	webhookAllowPrivateTargets.Store(true)
 	t.Cleanup(func() { webhookAllowPrivateTargets.Store(false) })
-	useDeliveryPool(t, newDeliveryPool(4, 64))
+	useDeliveryPool(t, newDeliveryPool(16, 64)) // 4 running per tenant
 	hang1, _ := hangingTarget(t)
 	hang2, _ := hangingTarget(t)
 	var hooks atomic.Int32
@@ -109,8 +110,9 @@ func TestEventDeliveries_AreBoundedProcessWideAcrossConcurrentBatches(t *testing
 	// keys at once. Before: 4 workers PER BATCH = 80 POSTs hanging at once,
 	// plus a feeder goroutine per batch, and no limit on how many batches pile
 	// up. Now one process-wide pool (here 8 workers, a 40-job queue): at most
-	// 8 POSTs in flight; past the queue a key's webhook is recorded as
-	// failed `dropped: overloaded` instead of waiting in a goroutine.
+	// 8 POSTs in flight (and 2 for one tenant); past the tenant's share of
+	// the queue a key's webhook is recorded as failed `dropped: overloaded`
+	// instead of waiting in a goroutine.
 	f := setupBatchFanoutFixture(t)
 	webhookAllowPrivateTargets.Store(true)
 	t.Cleanup(func() { webhookAllowPrivateTargets.Store(false) })
@@ -145,7 +147,7 @@ func TestEventDeliveries_AreBoundedProcessWideAcrossConcurrentBatches(t *testing
 
 	// Assert: the wire is bounded by the pool, and everything past the queue
 	// has its failure row at once (none of it waits in a goroutine).
-	assert.LessOrEqual(t, int(inFlight.Load()), workers, "POSTs in flight process-wide")
+	assert.LessOrEqual(t, int(inFlight.Load()), workers/4, "POSTs in flight for one tenant")
 	dropped := f.webhookRows("failed", "dropped: overloaded")
 	// 2,000 jobs (a notification + a webhook per key), at most workers +
 	// queue of them accepted: every webhook job beyond that is a row.
@@ -154,13 +156,13 @@ func TestEventDeliveries_AreBoundedProcessWideAcrossConcurrentBatches(t *testing
 }
 
 func TestEventDeliveries_ShutdownDrainsThenRecordsTheRestAsFailed(t *testing.T) {
-	// Arrange: a blackholed webhook, 2 workers, 10 keys queued behind them.
+	// Arrange: a blackholed webhook, 2 running for the tenant, 8 keys queued behind them.
 	// Before: the pending deliveries vanished with the process — no row, no
 	// log line; GET /api/v1/events showed the events with no delivery.
 	f := setupBatchFanoutFixture(t)
 	webhookAllowPrivateTargets.Store(true)
 	t.Cleanup(func() { webhookAllowPrivateTargets.Store(false) })
-	pool := newDeliveryPool(2, 64)
+	pool := newDeliveryPool(8, 64) // 2 running per tenant
 	useDeliveryPool(t, pool)
 	core, logs := observer.New(zap.WarnLevel)
 	pool.logger = zap.New(core)
@@ -187,4 +189,87 @@ func TestEventDeliveries_ShutdownDrainsThenRecordsTheRestAsFailed(t *testing.T) 
 	// After the drain nothing new starts: a late delivery is a row, not a goroutine.
 	f.deleteObjects(f.objects(1))
 	assert.Equal(t, 9, f.webhookRows("failed", "dropped: shutdown"))
+}
+
+func TestEventDeliveries_OneTenantsBlackholeDoesNotDropAnotherTenantsWebhook(t *testing.T) {
+	// Arrange: tenant A has a blackholed webhook and runs 10 concurrent
+	// 50-key batches; tenant B has a working webhook and does one PUT. Pool:
+	// 8 workers, a 64-job queue (per tenant: 2 running, 16 queued). Before:
+	// A's jobs held every worker and filled the shared queue, so B's
+	// delivery was dropped `overloaded` (or waited behind A's 10 s POSTs).
+	a := setupBatchFanoutFixture(t)
+	b := setupBatchFanoutFixture(t)
+	webhookAllowPrivateTargets.Store(true)
+	t.Cleanup(func() { webhookAllowPrivateTargets.Store(false) })
+	useDeliveryPool(t, newDeliveryPool(8, 64))
+	hole, _ := hangingTarget(t)
+	a.addWebhook(hole.URL + "/hook")
+	var bHooks atomic.Int32
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bHooks.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(ok.Close)
+	_, err := b.db.Exec(`INSERT INTO webhook_endpoints (id, tenant_id, url, event_filter, secret)
+		VALUES ($1, $2, $3, '{object.created}', 'whsec_test')`, uuid.New().String(), b.tenantID, ok.URL+"/hook")
+	require.NoError(t, err)
+	_, err = a.db.Exec(`
+		INSERT INTO object_head_cache (tenant_id, bucket, object_key, size_bytes, etag, backend_name, floor, is_chunked, content_type)
+		SELECT $1, $2, 'b' || bb || '/' || i, 1, 'etag', 'local', 'standard', false, 'application/octet-stream'
+		FROM generate_series(1, 10) AS bb, generate_series(1, 50) AS i`, a.tenantID, a.bucket)
+	require.NoError(t, err)
+	var wg sync.WaitGroup
+	for bb := 1; bb <= 10; bb++ {
+		wg.Add(1)
+		go func(bb int) {
+			defer wg.Done()
+			body := "<Delete>"
+			for i := 1; i <= 50; i++ {
+				body += fmt.Sprintf("<Object><Key>b%d/%d</Key></Object>", bb, i)
+			}
+			a.deleteObjects(body + "</Delete>")
+		}(bb)
+	}
+	wg.Wait()
+
+	// Act: B's PUT event while A's backlog is in the pool.
+	start := time.Now()
+	emitEvent(context.Background(), b.db, zap.NewNop(), "object.created", b.tenantID, map[string]interface{}{"bucket": b.bucket, "key": "x"})
+
+	// Assert: B's webhook is delivered and recorded promptly, never dropped.
+	require.Eventually(t, func() bool { return b.webhookRows("delivered", "%") == 1 }, 3*time.Second, 10*time.Millisecond,
+		"B delivered=%d overloaded=%d", b.webhookRows("delivered", "%"), b.webhookRows("failed", "dropped: overloaded"))
+	t.Logf("tenant B delivered after %v", time.Since(start))
+	assert.Equal(t, 0, b.webhookRows("failed", "dropped: overloaded"))
+	assert.Greater(t, a.webhookRows("failed", "dropped: overloaded"), 0, "A's own overflow is A's rows")
+}
+
+func TestEventDeliveries_ATenantWithNoTargetsSubmitsNothingAndQueriesNothing(t *testing.T) {
+	// Arrange: a tenant with no webhook and no bucket notification. Before:
+	// every GET (object.downloaded) and PUT submitted a pool job that read
+	// webhook_endpoints / bucket_notifications — one query per request, and
+	// a slot in the shared queue.
+	f := setupBatchFanoutFixture(t)
+	pool := newDeliveryPool(4, 64)
+	useDeliveryPool(t, pool)
+	notify := NewNotificationDispatcher(f.db, zap.NewNop())
+	get := func() {
+		emitEvent(context.Background(), f.db, zap.NewNop(), "object.downloaded", f.tenantID, map[string]interface{}{"bucket": f.bucket, "key": "k"})
+		notify.Fire(f.tenantID, f.bucket, "s3:ObjectCreated:Put", "k", 1, "etag")
+	}
+	get() // the first request of the TTL reads the lists once
+
+	// Act
+	f.log.reset()
+	for i := 0; i < 10; i++ {
+		get()
+	}
+	f.log.settled(t)
+
+	// Assert: only the tenant's event log rows; no target read, no job.
+	assert.Equal(t, 0, f.log.count("webhook_endpoints"))
+	assert.Equal(t, 0, f.log.count("bucket_notifications"))
+	assert.Equal(t, 10, f.log.count("INSERT INTO events"), "the events rows are written as before")
+	assert.Equal(t, 10, f.log.total(), "no other statement")
+	assert.EqualValues(t, 0, pool.accepted.Load(), "nothing submitted")
 }
