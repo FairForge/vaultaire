@@ -62,7 +62,8 @@ func (s *Server) initMetrics() {
 		// Detached long S3 operations (s3_long_op.go): what a process waits
 		// for when it stops, and — from s3_long_op_incidents, written by the
 		// slot that stopped — what it gave up on.
-		reg.MustRegister(longOpsInFlight, longOpOutcomes, newLongOpIncidentsCollector(s.db, s.log()), deliveriesDropped, deliveriesPending)
+		reg.MustRegister(longOpsInFlight, longOpOutcomes, newLongOpIncidentsCollector(s.db, s.log()), deliveriesDropped, deliveriesPending,
+			completeReplayLockUndetermined)
 		// Writes destroyed by the delete of a stale copy (R13-06: detected,
 		// not preventable before WP-R2-1). Every source is there at 0.
 		reg.MustRegister(staleCopyLostWrites)

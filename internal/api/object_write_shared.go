@@ -200,15 +200,38 @@ func recordObjectVersion(ctx context.Context, db *sql.DB, tenantID, bucket, key 
 	if vStatus != "Enabled" && vStatus != "Suspended" {
 		return ""
 	}
+	versionID, _ := writeVersionRow(ctx, db, vStatus, tenantID, bucket, key, size, etag, contentType, backendName)
+	return versionID
+}
+
+// execer is what a version write needs: a *sql.DB or a *sql.Tx.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// writeObjectVersion is the version write of recordObjectVersion inside the
+// caller's transaction (vStatus already read): the first error is returned.
+func writeObjectVersion(ctx context.Context, tx execer, vStatus, tenantID, bucket, key string,
+	size int64, etag, contentType, backendName string) error {
+	_, err := writeVersionRow(ctx, tx, vStatus, tenantID, bucket, key, size, etag, contentType, backendName)
+	return err
+}
+
+// writeVersionRow makes the key's current bytes its latest version: a new
+// id with versioning Enabled, "null" when Suspended.
+func writeVersionRow(ctx context.Context, q execer, vStatus, tenantID, bucket, key string,
+	size int64, etag, contentType, backendName string) (string, error) {
 	versionID := "null"
 	if vStatus == "Enabled" {
 		versionID = generateVersionID()
 	}
-	_, _ = db.ExecContext(ctx, `
+	if _, err := q.ExecContext(ctx, `
 		UPDATE object_versions SET is_latest = FALSE
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND is_latest = TRUE`,
-		tenantID, bucket, key)
-	_, _ = db.ExecContext(ctx, `
+		tenantID, bucket, key); err != nil {
+		return versionID, err
+	}
+	_, err := q.ExecContext(ctx, `
 		INSERT INTO object_versions
 			(tenant_id, bucket, object_key, version_id, size_bytes, etag, content_type, is_latest, is_delete_marker, backend_name)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, FALSE, $8)
@@ -217,7 +240,7 @@ func recordObjectVersion(ctx context.Context, db *sql.DB, tenantID, bucket, key 
 			content_type = EXCLUDED.content_type, is_latest = TRUE,
 			is_delete_marker = FALSE, backend_name = EXCLUDED.backend_name`,
 		tenantID, bucket, key, versionID, size, etag, contentType, backendName)
-	return versionID
+	return versionID, err
 }
 
 // newUploadID returns "upload-" + 32 hex chars from crypto/rand (R5-28: the

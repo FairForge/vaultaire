@@ -81,7 +81,11 @@ var Deleted = []Rule{
 	{"vault_parity_orphans", `DELETE FROM vault_parity_orphans WHERE tenant_id = $1`, ByTenant},
 	// Long operations a stopping slot could not finish (082): op, bucket and
 	// key of the tenant's requests.
-	{"s3_long_op_incidents", `DELETE FROM s3_long_op_incidents WHERE tenant_id = $1`, ByTenant},
+	// Blanked, not deleted (Prompt 2a.3 H3): the rows are the counts behind
+	// vaultaire_s3_long_ops_{abandoned,drain_errors}_total, which must
+	// never fall; without tenant, bucket and key a row holds nothing of
+	// the account (op, outcome, age, slot, build).
+	{"s3_long_op_incidents", `UPDATE s3_long_op_incidents SET tenant_id = '', bucket = '', object_key = '' WHERE tenant_id = $1`, ByTenant},
 	// The pack store's member index (080, internal/packstore). The bytes stay
 	// in their pack until pack_gc rewrites it: a pack whose rows no longer
 	// cover its member_count is rewritten at the next run, whatever its live

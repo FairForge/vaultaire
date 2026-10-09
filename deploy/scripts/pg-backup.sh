@@ -74,12 +74,20 @@ db_password_from_env() {
 # write_metric NAME HELP — writes `NAME <now>` to METRICS_DIR/NAME.prom (atomic rename,
 # world-readable: node_exporter runs as its own user). Non-fatal: a backup that landed
 # is a success whatever the metrics directory says; the absence then raises the alert.
+# Every step is checked here: the ERR trap is not inherited by functions, so a printf
+# or chmod failing under set -e (a full disk) used to end the run with no line at all.
 write_metric() {
   local name=$1 help=$2 tmp
-  tmp=$(mktemp "$METRICS_DIR/.$name.XXXXXX" 2>>"$LOG") || { echo "$(date): METRICS: cannot write to $METRICS_DIR (non-fatal)" >> "$LOG"; return 0; }
-  printf '# HELP %s %s\n# TYPE %s gauge\n%s %s\n' "$name" "$help" "$name" "$name" "$(date +%s)" > "$tmp"
-  chmod 0644 "$tmp"
-  mv -f "$tmp" "$METRICS_DIR/$name.prom" || echo "$(date): METRICS: cannot publish $name (non-fatal)" >> "$LOG"
+  tmp=$(mktemp "$METRICS_DIR/.$name.XXXXXX" 2>>"$LOG") || { metric_failed "cannot write to $METRICS_DIR"; return 0; }
+  printf '# HELP %s %s\n# TYPE %s gauge\n%s %s\n' "$name" "$help" "$name" "$name" "$(date +%s)" > "$tmp" || { rm -f "$tmp"; metric_failed "cannot write $name"; return 0; }
+  chmod 0644 "$tmp" || { rm -f "$tmp"; metric_failed "cannot chmod $name"; return 0; }
+  mv -f "$tmp" "$METRICS_DIR/$name.prom" || { rm -f "$tmp"; metric_failed "cannot publish $name"; return 0; }
+}
+
+# metric_failed WHAT — the metrics line of a failed write_metric, with the stage; never
+# fatal itself (on a full disk the log line may not land either).
+metric_failed() {
+  echo "$(date): METRICS: $1 (non-fatal, stage=$STAGE)" >> "$LOG" || true
 }
 
 # offbox_copy FILE — uploads BACKUP_DIR/FILE to OFFBOX_DIR/FILE and verifies the size

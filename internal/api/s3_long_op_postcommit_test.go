@@ -292,16 +292,19 @@ func TestDeleteObjects_EveryKeyFailedIsNotCountedOK(t *testing.T) {
 	for _, k := range []string{"a", "b"} {
 		require.Equal(t, http.StatusOK, f.put(t, k, []byte(k)))
 	}
-	before := outcomeCount(longOpBatch, longOpErrorAfterCommit)
+	before := outcomeCount(longOpBatch, longOpErrorBeforeCommit)
+	beforeAfter := outcomeCount(longOpBatch, longOpErrorAfterCommit)
 	beforeOK := outcomeCount(longOpBatch, longOpOK)
 
-	// Act
+	// Act: answered before the keep-alive committed anything.
 	w := doS3Request(f.server, f.tenant, "POST", "/test-bucket?delete", strings.NewReader(batchBody([]string{"a", "b"})))
 
-	// Assert
+	// Assert: a failure, and one BEFORE the commit (Prompt 2a.3 H3: it was
+	// labelled error_after_commit — no 200 had been committed).
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, 2, strings.Count(w.Body.String(), "<Code>AccessDenied</Code>"))
-	assert.Equal(t, before+1, outcomeCount(longOpBatch, longOpErrorAfterCommit))
+	assert.Equal(t, before+1, outcomeCount(longOpBatch, longOpErrorBeforeCommit))
+	assert.Equal(t, beforeAfter, outcomeCount(longOpBatch, longOpErrorAfterCommit))
 	assert.Equal(t, beforeOK, outcomeCount(longOpBatch, longOpOK))
 }
 
