@@ -23,12 +23,12 @@ proves `createdb` + all migrations yields a schema where registration works).
 Because psql executes the file statement by statement outside a transaction,
 `CREATE INDEX CONCURRENTLY` is allowed.
 
-**Numbering.** 68 files, `003`–`070`. `001`, `002` and `053` never existed;
+**Numbering.** 79 files, `003`–`081` (2026-10-09) <!-- TODO(2a.2-G1): 80 files, 003–082 -->. `001`, `002` and `053` never existed;
 there are two `004_*` files (`004_backend_health.sql`, `004_mfa.sql`); `066`
 and `067` collided once — the bucket-region default shipped as `066` in #502 the
 same day `066_floor_quotas.sql` landed in #504 and was renumbered to `067`
 (safe because the runner has no tracking table and the statements are
-idempotent). **The next free number is 072** — check with
+idempotent). The next free number is in `docs/STATUS.md` — check with
 `ls internal/database/migrations | tail -1` before creating a file.
 
 Rules for a new migration:
@@ -48,7 +48,7 @@ Rules for a new migration:
   the migrated test database, so a query naming a column the migrations do not
   create fails in CI, not in prod
 
-### Migrations after the R9 review (065–070)
+### Migrations after the R9 review (065–081)
 
 | File | Change |
 |------|--------|
@@ -57,6 +57,11 @@ Rules for a new migration:
 | `067_bucket_region_default.sql` | `buckets.region` default becomes the primary's real region `us-central-1`; rows carrying the old `us-west-1` placeholder (a region the account never had) are relabelled — they were always stored by the primary |
 | `068_multipart_upload_attrs.sql` | `multipart_uploads` gains `content_type`, `metadata JSONB`, `storage_class`, `content_disposition`, `content_encoding`, `content_language`, `cache_control`, `http_expires`, `website_redirect_location` — CreateMultipartUpload is where clients send them; Complete carries only the part list and now copies them to the head row |
 | `069_head_cache_byte_order_index.sql` | `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_object_head_cache_key_c ON object_head_cache (tenant_id, bucket, object_key COLLATE "C")` — S3 listings are UTF-8 byte order, prod's collation is `en_US.UTF-8`; listing queries now order and range on `object_key COLLATE "C"` and this index serves both |
+| `081_vault_parity_orphans.sql` | `vault_parity_orphans` (PK `(tenant_id, leg, prefix)`, `first_seen`, `last_seen`) — first sightings of parity shard folders (`<digest>/<etag>` in the tenant's `_parity` container) that no `vault_parity` row names, found by the `vault_parity` job's reconcile pass (Prompt 2a, #638/#640); a folder is erased only after two sightings at least `VAULT_PARITY_ORPHAN_GRACE` (1 h) apart. Erased with the account; in the export |
+| `080_pack_store.sql` | `packs` (one row per content-addressed `<aa>/<sha256>.pack` file on a slow per-file backend: inserted before the upload, `sealed_at` with its members, `retired_at` before GC deletes the file; no tenant id — infrastructure) and `pack_members` (`id`, `pack_id` → `packs` CASCADE, `tenant_id`, `member_key` — one live member per (tenant, key) —, `byte_offset`/`byte_length`, `sha256`, `deleted_at`) — the pack store (`internal/packstore`, Phase 37, #617). No writer is wired yet; `pack_members` is erased with the account, `packs` rows are kept |
+| `079_buckets_name_cors_idx.sql` | `idx_buckets_name_with_cors` — partial index on `buckets (name) WHERE cors_rules IS NOT NULL`: the OPTIONS preflight looks rules up by bucket name across tenants (#612) |
+| `078_bucket_cors.sql` | `buckets.cors_rules JSONB` — the S3 API's `?cors` configuration in the AWS shape (`PutBucketCors`), NULL = none; `cors_origins` stays the `/cdn` allow-list (#603) |
+<!-- TODO(2a.2-G1): row for 082 (the table of long S3 operations abandoned at shutdown) -->
 | `077_vault_parity.sql` | `vault_parity` — the Vault parity second copy (WP-VAULT-1): one row per vault-floor object (PK `(tenant_id, bucket, object_key)`), `etag` the shards were computed from, `size_bytes`, `data_shards`/`parity_shards` (4+4), `stripe_bytes`, `shard_bytes`, `shard_prefix` (artifact prefix in the tenant's `_parity` container), `legs TEXT[]` (backend per parity shard, `''` = not written), `state` (`complete`/`partial`, CHECK), `last_error`, `attempts`, `written_at`; partial index on the incomplete rows. Written by the `vault_parity` job; erased with the account |
 | `074_job_runs_result.sql` | `job_runs.result JSONB` — the structured outcome of a job's last run that wrote one (WP-R7-5: the `routing_truth` job's per-backend counts). The admin API, the dashboard's System page and the `vaultaire_routing_truth_last_run_*` collector read the last run from here, so a freshly started process reports it rather than 0 (Review R13-14). A failed run keeps the previous result |
 | `071_retention_job.sql` | `job_runs` (`job` PK, `last_started_at`, `last_finished_at`, `last_success_at`, `last_outcome`, `last_error`, `rows_affected`) — the persisted state of every background job (Review R13-14 created it for the retention job; since WP-R13-3 the one scheduler in `internal/api/jobs.go` writes a row per job — five daily ones, seven interval ones — and reads `last_success_at` to decide whether a daily run is owed and to export `vaultaire_job_last_success_timestamp_seconds{job_name}`; `GET /api/v1/admin/jobs` is the table as JSON) — and the time indexes the job's range deletes need: `s3_access_log (logged_at)`, `stripe_events (processed_at)`, `webhook_deliveries (created_at)`, `access_patterns (last_seen)`, `quota_usage_events ("timestamp")` |
@@ -123,6 +128,8 @@ Legend: **W** written by, **R** read by (packages), **Ret** retention/cleanup,
 | object_versions | 026 | api/s3 (PUT/DELETE) | api (GET ?versionId, ListObjectVersions) | deletion; never trimmed (versioning metadata-only, WP-R2-1) | yes |
 | object_locks | 028 | api/s3_lock | api (PUT/DELETE guard) | deletion | yes |
 | object_locations | 048 | engine (Put, incl. per chunk) | engine (map miss), dashboard overview/costs | deletion | yes (`bucket` holds the container `<tenant>_<bucket>`, R6-14) |
+| vault_parity | 077 | api/vault_parity (the `vault_parity` job, DeleteObject/DeleteObjects aftermath) | api/vault_parity (GET fallback, stale pass, reconcile) | row deleted with its shards when stale; deletion | yes |
+| vault_parity_orphans | 081 | api/vault_parity (reconcile) | same | sighting dropped when the folder is erased, gains its row or is gone; deletion | yes |
 | smart_demotions | 062 (+063) | api/smart_demotion, smart_promotion | same | reclaim after grace; not in deletion | yes |
 | multipart_uploads / multipart_parts | 024 (+068) | api/s3_multipart | api, reaper | reaper: abort 48 h idle, purge 7 d terminal; not in deletion | yes |
 | idempotency_cache | 029 | api/idempotency | same | hourly, 24 h | yes |
@@ -133,6 +140,8 @@ Legend: **W** written by, **R** read by (packages), **Ret** retention/cleanup,
 | object_metadata | 016 (+058) | crypto/gci | crypto/gci | deletion | yes |
 | tenant_encryption_keys | 037 | crypto/sse | crypto/sse | deletion | yes |
 | dedup_statistics | 016 | — | — | — | orphan (UUID tenant_id) |
+| **Pack store** | | | | | |
+| packs / pack_members | 080 | packstore (no writer wired yet) | packstore, api/pack_gc | pack GC (retired/expired/orphan, compaction); `pack_members` in deletion | packs no, pack_members yes |
 | **Events, webhooks, logs** | | | | | |
 | events | 033 (+057) | api/events (13 emit sites), billing/metered | api/events, dashboard, admin_support, export | deletion only; no retention (WP-R9-2) | yes |
 | webhook_endpoints / webhook_deliveries | 033 (+056) | api/webhooks | api/webhooks, events | cascade endpoint→deliveries, event→deliveries; deletion | yes |

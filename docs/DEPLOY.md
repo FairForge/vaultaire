@@ -159,8 +159,16 @@ vaultaire@8001  "green"   /opt/vaultaire/bin/vaultaire-8001     the other stoppe
     `maint` and stop. On SIGTERM the process itself drains HTTP for 30 s, waits
     for those operations until each is 15 min old, cancels and logs the rest
     (`vaultaire_s3_long_ops_abandoned_total`), flushes and exits
-    (`TimeoutStopSec=1000`). Before 2026-10-08 a complete that outlived the
-    30 s died with the engine on every deploy that landed during it.
+    (`TimeoutStopSec=1000`). Before 2026-10-08 the only protection was the
+    session wait: an operation whose client was still connected is a session
+    and was waited for up to the 10 min `DRAIN_TIMEOUT`; one whose client had
+    gone (the operation runs detached from it), or one older than that, got
+    the process's 30 s and then the engine closed under it. No such cut was
+    observed in production: the longest operation measured is a 2 GiB copy
+    through Cloudflare at 120 s, and the #634 live proof — a 2 GiB complete
+    during `vaultaire-switch restart`, 200 after 32 s, byte-exact — had its
+    client attached, so the session wait alone would have covered it too.
+    TODO(2a.2-G1): the 2a.2 drain proof with the client killed after the 200.
   - `restart` runs the same path with the **active** build copied into the
     idle slot — the zero-downtime way to pick up `.env` edits. `rollback`
     switches to the idle slot (the previous build) through the same gates.
