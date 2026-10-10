@@ -88,3 +88,17 @@ groups:
         annotations:
           summary: "A customer object lost its bytes to a stale-copy delete ({{ $labels.source }})"
           description: "The delete of a stale copy removed bytes a write of the same key had just stored: the object lists and HEADs but cannot be read. journalctl -u 'vaultaire@*' | grep 'stale copy: the delete of a stale copy' gives tenant, bucket and key; the customer must upload the object again. Source {{ $labels.source }}: reclaim = the smart_demotion job, delete = DeleteObject on a demoted key, overwrite = a write that replaced an object on another backend."
+
+      # Vault parity (WP-VAULT-1, Prompt 2b.3 D2.3): an object whose protect
+      # is estimated longer than a whole run (VAULT_PARITY_MAX_RUN_TIME at
+      # VAULT_PARITY_PROTECT_RATE) is never started — it has no second copy
+      # for as long as that lasts. A standing condition, never a failed run:
+      # only this rule says so.
+      - alert: VaultParityObjectTooLarge
+        expr: vaultaire_vault_parity_unprotected_objects{reason="too_large"} > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} vault object(s) too large for a parity run"
+          description: "The vault_parity job never starts a protect estimated longer than a whole run, so these objects have no parity copy. GET /api/v1/admin/jobs → vault_parity result.notes names the first 20. Raise VAULT_PARITY_MAX_RUN_TIME (or the rate estimate) or accept them unprotected."
