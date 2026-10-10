@@ -74,7 +74,7 @@ server. `workflow_dispatch` is the manual lever (`gh workflow run deploy.yml
 branch and never cancelled mid-flight.
 
 ```
-build   GOOS=linux GOARCH=amd64 go build ./cmd/vaultaire  (Go 1.26)  -> artifact
+build   GOOS=linux GOARCH=amd64 go build ./cmd/vaultaire  (go.mod toolchain, 1.26.9)  -> artifact
 deploy  scp binary + internal/database/migrations/ to /tmp on the host, then over ssh:
         1. migrate   for f in $(ls /tmp/vaultaire-migrations/*.sql | sort); do
                         psql -w -v ON_ERROR_STOP=1 -h 127.0.0.1 -U vaultaire -d vaultaire -f "$f" </dev/null
