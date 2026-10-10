@@ -118,7 +118,7 @@ var (
 	})
 	vaultParityUnprotectedObjects = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "vaultaire_vault_parity_unprotected_objects",
-		Help: "Vault-floor objects with no complete parity copy of their current version, as the job's last run counted them, by reason: too_large (a protect estimated longer than a whole run — never started, never takes a slot), other (pending, partial, chunked).",
+		Help: "Vault-floor objects with no complete parity copy of their current version, as the job's last run counted them, by reason: too_large (a protect estimated longer than a whole run — never started, never takes a slot), flag_off (the tenant's vault_parity flag is off — never protected while it is), other (pending, partial, chunked).",
 	}, []string{"reason"})
 	vaultParityOrphans = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_vault_parity_orphans_total",
@@ -219,6 +219,10 @@ type VaultParityResult struct {
 	BytesWritten     int64    `json:"bytes_written"`
 	Leg              string   `json:"leg"`
 	Errors           []string `json:"errors,omitempty"`
+	// Notes: standing conditions, not failures of this run — the objects
+	// too large for a run (the first 20). They used to be Errors, so the
+	// admin page said "N failed" on every run (Prompt 2b.3 D2.3).
+	Notes []string `json:"notes,omitempty"`
 }
 
 // VaultParity writes, erases and reads the parity copy.
@@ -331,7 +335,11 @@ func (p *VaultParity) spec() jobSpec {
 				notes = append(notes, "a protect whose estimate did not fit before the run's deadline was left for the next run")
 			}
 			if res.TooLarge > 0 {
-				notes = append(notes, fmt.Sprintf("%d protect(s) estimated longer than a whole run, never started", res.TooLarge))
+				note := fmt.Sprintf("%d protect(s) estimated longer than a whole run, never started", res.TooLarge)
+				if len(res.Notes) > 0 {
+					note += ", first: " + res.Notes[0]
+				}
+				notes = append(notes, note)
 			}
 			if res.ReconcileStopped != "" {
 				notes = append(notes, "reconcile stopped at its "+res.ReconcileStopped+", resumes at its cursor")
@@ -582,41 +590,71 @@ const unprotectedFrom = `
 		  AND (v.tenant_id IS NULL OR v.etag <> o.etag OR v.state <> 'complete')
 		  AND ($1 = '' OR o.tenant_id = $1)`
 
-// countUnprotected sets the unprotected gauges, and names the objects too
-// large for a run (res.TooLarge, res.Errors — the first 20).
+// countUnprotected sets the unprotected gauges — per tenant, so a tenant
+// whose flag is off is flag_off, not "other" (Prompt 2b.3 D2.3: with the
+// flag off per tenant, every vault object counted as other) — and names the
+// objects too large for a run (res.TooLarge, res.Notes — the first 20).
 func (p *VaultParity) countUnprotected(ctx context.Context, res *VaultParityResult, maxSize int64) error {
-	var all, large int
+	rows, err := p.db.QueryContext(ctx, `
+		SELECT o.tenant_id, COUNT(*), COALESCE(SUM(o.size_bytes), 0)::BIGINT,
+		       COUNT(*) FILTER (WHERE $2::BIGINT >= 0 AND o.size_bytes > $2::BIGINT AND NOT o.is_chunked)`+unprotectedFrom+`
+		GROUP BY o.tenant_id`, p.scopeTenant, maxSize)
+	if err != nil {
+		return fmt.Errorf("vault parity: count unprotected: %w", err)
+	}
+	var other, large, flagOff int
 	var allBytes int64
-	if err := p.db.QueryRowContext(ctx, `
-		SELECT COUNT(*), COALESCE(SUM(o.size_bytes), 0)::BIGINT,
-		       COUNT(*) FILTER (WHERE $2::BIGINT >= 0 AND o.size_bytes > $2::BIGINT AND NOT o.is_chunked)`+unprotectedFrom,
-		p.scopeTenant, maxSize).Scan(&all, &allBytes, &large); err != nil {
+	var largeTenants []string
+	for rows.Next() {
+		var tenantID string
+		var n, l int
+		var b int64
+		if err := rows.Scan(&tenantID, &n, &b, &l); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("vault parity: count unprotected: %w", err)
+		}
+		allBytes += b
+		switch {
+		case !p.enabled(tenantID):
+			flagOff += n
+		default:
+			large += l
+			other += n - l
+			if l > 0 {
+				largeTenants = append(largeTenants, tenantID)
+			}
+		}
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
 		return fmt.Errorf("vault parity: count unprotected: %w", err)
 	}
 	vaultParityUnprotectedBytes.Set(float64(allBytes))
 	vaultParityUnprotectedObjects.WithLabelValues("too_large").Set(float64(large))
-	vaultParityUnprotectedObjects.WithLabelValues("other").Set(float64(all - large))
+	vaultParityUnprotectedObjects.WithLabelValues("flag_off").Set(float64(flagOff))
+	vaultParityUnprotectedObjects.WithLabelValues("other").Set(float64(other))
 	res.TooLarge = large
 	if large == 0 {
 		return nil
 	}
-	rows, err := p.db.QueryContext(ctx, `SELECT o.bucket, o.object_key, o.size_bytes`+unprotectedFrom+`
+	lrows, err := p.db.QueryContext(ctx, `SELECT o.bucket, o.object_key, o.size_bytes`+unprotectedFrom+`
 		  AND $2::BIGINT >= 0 AND o.size_bytes > $2::BIGINT AND NOT o.is_chunked
-		ORDER BY o.updated_at LIMIT 20`, p.scopeTenant, maxSize)
+		  AND o.tenant_id = ANY($3)
+		ORDER BY o.updated_at LIMIT 20`, p.scopeTenant, maxSize, pq.Array(largeTenants))
 	if err != nil {
 		return fmt.Errorf("vault parity: too large: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
+	defer func() { _ = lrows.Close() }()
+	for lrows.Next() {
 		var bucket, key string
 		var size int64
-		if err := rows.Scan(&bucket, &key, &size); err != nil {
+		if err := lrows.Scan(&bucket, &key, &size); err != nil {
 			return fmt.Errorf("vault parity: too large: %w", err)
 		}
-		res.Errors = append(res.Errors, fmt.Sprintf("protect %s/%s not started: estimated %s exceeds a whole run (%s)",
+		res.Notes = append(res.Notes, fmt.Sprintf("protect %s/%s not started: estimated %s exceeds a whole run (%s)",
 			bucket, key, p.protectEstimate(size).Round(time.Second), p.MaxRunTime))
 	}
-	if err := rows.Err(); err != nil {
+	if err := lrows.Err(); err != nil {
 		return fmt.Errorf("vault parity: too large: %w", err)
 	}
 	return nil
@@ -995,11 +1033,28 @@ func (p *VaultParity) eraseShards(ctx context.Context, r parityRow) error {
 // folder the deletes empty is left to the reconcile (an empty folder no row
 // names goes at its first sighting): only the job writes shards and only
 // the job removes folders, under one lock — so no removal can race a write.
-func (p *VaultParity) deleteRecordedShards(ctx context.Context, r parityRow, keepLeg string) error {
+//
+// The row is marked again when the deletes stop — on an error, and after
+// the last one (Prompt 2b.3 D2.2): a protect that upserted AFTER the first
+// mark (its finish guard matches its own upsert) and wrote fresh shards
+// that these deletes then removed was completed over them — `complete` with
+// 2 of 4 shards, never re-protected on a same-content re-upload. Touched
+// again, a protect still writing mismatches at its finish (rowGone erases
+// what it wrote), and one that has finished is flipped to `partial` and
+// protected again by the next run.
+func (p *VaultParity) deleteRecordedShards(ctx context.Context, r parityRow, keepLeg string) (err error) {
 	tctx := common.WithTenantID(ctx, r.tenantID)
 	container := parityContainer(r.tenantID)
 	status := p.eng.GetFailoverStatus()
 	marked := false
+	defer func() {
+		if !marked {
+			return
+		}
+		if merr := p.markIncomplete(ctx, r); merr != nil && err == nil {
+			err = merr
+		}
+	}()
 	for j, legName := range r.legs {
 		if legName == "" || legName == keepLeg {
 			continue

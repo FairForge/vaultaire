@@ -73,6 +73,9 @@ func (s *Server) initMetrics() {
 		// refused because their context named no tenant (they used to land
 		// under t-default/). The second starts at 0 for every backend.
 		reg.MustRegister(chunkLegacyReads)
+		// CopyObject sources whose bytes are not their head row's size
+		// (Prompt 2b.3 D2.1): drift, or a concurrent overwrite. 503s.
+		reg.MustRegister(copySourceSizeMismatch)
 		// The Vault parity copy (WP-VAULT-1): shards written, erased, and
 		// reads a backend failure sent to the parity.
 		reg.MustRegister(vaultParityObjects, vaultParityBytes, vaultParityFallbacks, vaultParityOrphans,

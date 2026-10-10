@@ -17,6 +17,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/FairForge/vaultaire/internal/usage"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
 
@@ -44,11 +45,25 @@ func (c *countingReader) Read(p []byte) (int, error) {
 
 // errCopySourceSize: a copy source whose bytes are not the size its head
 // row records — another version of the key, or a drifted row. The copy
-// fails (500) rather than store those bytes under a new ETag.
+// fails rather than store those bytes under a new ETag: 503 + Retry-After
+// (a retry after the row is repaired succeeds), counted in
+// vaultaire_copy_source_size_mismatch_total (Prompt 2b.3 D2.1).
 var errCopySourceSize = errors.New("the copy source's bytes are not its recorded size")
 
+var copySourceSizeMismatch = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "vaultaire_copy_source_size_mismatch_total",
+	Help: "CopyObject requests refused because the source's bytes were not the size its head row records (a drifted row, or the key overwritten between the row read and the read of its bytes); answered 503.",
+})
+
 // exactSizeReader fails a stream that ends before, or runs past, want
-// bytes: the driver sees a broken body and stores nothing.
+// bytes: the driver sees a broken body and stores nothing. A sized writer
+// reads exactly want bytes and never reads on (the S3-class single part,
+// a stripe's pieces), so the read that reaches want probes the source for
+// one more byte before it returns — excess fails it with no byte of that
+// read released, which a writer using io.ReadFull would otherwise keep
+// (Prompt 2b.3 D2.1: a 20-byte source recorded as 10 was stored as its
+// 10-byte prefix, 200). The source is a backend's GET body, framed: the
+// probe gets EOF at once.
 type exactSizeReader struct {
 	r    io.Reader
 	want int64
@@ -59,10 +74,26 @@ func (e *exactSizeReader) Read(p []byte) (int, error) {
 	n, err := e.r.Read(p)
 	e.n += int64(n)
 	if e.n > e.want {
-		return n, fmt.Errorf("%w: more than %d bytes", errCopySourceSize, e.want)
+		return 0, fmt.Errorf("%w: more than %d bytes", errCopySourceSize, e.want)
 	}
 	if errors.Is(err, io.EOF) && e.n < e.want {
 		return n, fmt.Errorf("%w: %d of %d bytes", errCopySourceSize, e.n, e.want)
+	}
+	if e.n == e.want && err == nil {
+		var one [1]byte
+		for i := 0; i < 3; i++ { // a reader may answer (0, nil): ask again
+			m, perr := e.r.Read(one[:])
+			if m > 0 {
+				e.n += int64(m)
+				return 0, fmt.Errorf("%w: more than %d bytes", errCopySourceSize, e.want)
+			}
+			if perr != nil {
+				if errors.Is(perr, io.EOF) {
+					return n, io.EOF
+				}
+				return 0, perr
+			}
+		}
 	}
 	return n, err
 }
@@ -386,6 +417,16 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	if err != nil {
 		releaseReservation()
 		switch {
+		case errors.Is(err, errCopySourceSize):
+			// The source's head row and its bytes disagree: drift, or the key
+			// overwritten between the row read and the read of the bytes. A
+			// retry after the row is repaired (or the overwrite settled) works.
+			copySourceSizeMismatch.Inc()
+			s.logger.Warn("copy: the source's bytes are not its recorded size (head-row drift or a concurrent overwrite) — 503",
+				zap.String("tenant_id", t.ID), zap.String("source_bucket", srcBucket), zap.String("source_key", srcKey),
+				zap.Int64("recorded_size", srcSize), zap.Error(err))
+			w.Header().Set("Retry-After", "30")
+			WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
 		case errors.Is(err, errRegionDriverUnavailable):
 			s.logger.Error("copy: region-pinned bucket has no driver — refused",
 				zap.String("bucket", destBucket), zap.Error(err))
