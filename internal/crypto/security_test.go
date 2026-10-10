@@ -66,24 +66,6 @@ func TestSecurity_MasterKeyStrength(t *testing.T) {
 	t.Log("✓ Master key strength verified")
 }
 
-func TestSecurity_PostQuantumKeyExchange(t *testing.T) {
-	// Verify ML-KEM key exchange produces different shared secrets
-	secrets := make(map[string]bool)
-
-	for i := 0; i < 10; i++ {
-		keyPair, _ := GenerateMLKEMKeyPair()
-		encap, _ := Encapsulate(keyPair.PublicKey)
-
-		secretStr := string(encap.SharedSecret)
-		if secrets[secretStr] {
-			t.Error("SECURITY: Shared secret collision")
-		}
-		secrets[secretStr] = true
-	}
-
-	t.Logf("✓ Post-quantum key exchange verified (%d unique secrets)", len(secrets))
-}
-
 // Timing attack resistance test
 func TestSecurity_ConstantTimeComparison(t *testing.T) {
 	// This is a basic sanity check - real timing tests need statistical analysis

@@ -174,7 +174,7 @@ func graphTransport() *http.Transport {
         ForceAttemptHTTP2:   true,
         ...
     }
-    _ = http2.ConfigureTransport(t)
+    // HTTP/2 comes from ForceAttemptHTTP2 (the standard library); x/net http2.ConfigureTransport is deprecated
     return t
 }
 

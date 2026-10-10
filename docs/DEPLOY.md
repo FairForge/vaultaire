@@ -8,28 +8,36 @@ deliberately not in this file — "the production host" is the one box.
 
 ## What production is
 
-- **One host** (Ubuntu 24.04) running **one static Go binary** under systemd,
-  with a local PostgreSQL 16 and a local Prometheus. There is no container
+- **One host** (Ubuntu 26.04.1, kernel 7.0 — upgraded from 24.04 on
+  2026-10-10) running **one static Go binary** under systemd, with a local
+  PostgreSQL 18 (18.6, `pg_upgradecluster` from 16 the same day), Redis 8.0.5
+  and a local Prometheus. There is no container
   image, no Helm chart, no worker fleet and no second region. The object bytes
   live on the storage backends (`docs/DRIVERS.md`); the box holds the
   database, the chunk/multipart staging under `/tmp`, and the `local` driver's
   `DATA_PATH`.
-- **Cloudflare** proxies `stored.ge` (and the CDN host); **HAProxy** on the box
+- **Cloudflare** proxies `stored.ge` (and the CDN host); **HAProxy 3.2.9**
+  (OpenSSL 3.5.5) on the box
   terminates TLS with a Let's Encrypt origin certificate, redirects http to
   https, sets HSTS, and forwards to the active app slot (`127.0.0.1:8000` or `:8001`, below). HAProxy
   appends the real peer as the *last* `X-Forwarded-For` hop — the only header
-  `internal/clientip` trusts (R1-01). Its `global` section carries
-  `tune.h2.initial-window-size 262144` (set 2026-10-04). HAProxy 2.8's default
+  `internal/clientip` trusts (R1-01). With OpenSSL 3.5 the origin negotiates
+  the post-quantum hybrid **X25519MLKEM768** (Cloudflare → origin included),
+  and OpenSSH 10.2 negotiates `mlkem768x25519-sha256`. Its `global` section carries
+  `tune.h2.initial-window-size 262144` = **256 KiB** (set 2026-10-04; the
+  comment above it in the box's `haproxy.cfg` says 4 MiB — the value is what
+  counts). Measured on HAProxy 2.8: its default
   HTTP/2 window is 65,535 bytes, which caps every h2 upload at window ÷ RTT
   (~1 MB/s from Dallas) — but a large window costs the other way: at 4 MiB,
   sixteen h2 streams on one connection fell from 308 to 35 MB/s on the box
-  (HAProxy 2.8 buffers per stream; 3.1 sizes windows dynamically). 256 KB
+  (2.8 buffers per stream; 3.1+ sizes windows dynamically). 256 KiB
   keeps multi-stream uploads at full speed. Uploads from Cloudflare are kept
   fast by the zone setting **`origin_max_http_version = 1`** (Cloudflare
   talks HTTP/1.1 to the origin, one connection per request, no h2 window at
   all): 22–27 MB/s through `stored.ge` from the box, 58 MB/s edge → origin.
   Leave `tune.h2.max-frame-size` at its default; 1 MiB frames made things
-  worse. Revisit when HAProxy ≥ 3.1 is packaged for the box.
+  worse. The box now runs 3.2, so the window (and the h1 origin setting) can
+  be re-measured; until then both stay as they are.
 - **UFW** allows 22, 80 and 443 only. `deploy/ufw-cloudflare-lockdown.sh` is
   the script for narrowing 80/443 to Cloudflare's ranges.
 - **Configuration is the env file** loaded by the unit's `EnvironmentFile=`
@@ -66,7 +74,7 @@ server. `workflow_dispatch` is the manual lever (`gh workflow run deploy.yml
 branch and never cancelled mid-flight.
 
 ```
-build   GOOS=linux GOARCH=amd64 go build ./cmd/vaultaire  (Go 1.25)  -> artifact
+build   GOOS=linux GOARCH=amd64 go build ./cmd/vaultaire  (go.mod toolchain, 1.26.9)  -> artifact
 deploy  scp binary + internal/database/migrations/ to /tmp on the host, then over ssh:
         1. migrate   for f in $(ls /tmp/vaultaire-migrations/*.sql | sort); do
                         psql -w -v ON_ERROR_STOP=1 -h 127.0.0.1 -U vaultaire -d vaultaire -f "$f" </dev/null
@@ -219,9 +227,9 @@ vaultaire@8001  "green"   /opt/vaultaire/bin/vaultaire-8001     the other stoppe
 
 ### CI (`ci.yml`)
 
-Every push and PR: PostgreSQL 15 service container, all migrations applied
+Every push and PR: PostgreSQL 18 service container (prod's major), all migrations applied
 with `ON_ERROR_STOP`, `go build ./...`, `go test -race ./...` (with
-`DATABASE_URL` and `JWT_SECRET`), golangci-lint v2.4.0, then a smoke boot that
+`DATABASE_URL` and `JWT_SECRET`), golangci-lint v2.14.0, then a smoke boot that
 must answer `/health/live` and `/status`. A second job drives the landing
 page's house builder in headless Chrome. The Security workflow (`security.yml`)
 runs gosec (green since Review R15; `make gosec` is the same command), Trivy

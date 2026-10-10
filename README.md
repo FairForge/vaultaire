@@ -1,7 +1,7 @@
 # Vaultaire
 
 [![CI](https://github.com/FairForge/vaultaire/actions/workflows/ci.yml/badge.svg)](https://github.com/FairForge/vaultaire/actions/workflows/ci.yml)
-[![Go 1.25](https://img.shields.io/badge/go-1.25-00ADD8.svg)](https://go.dev/)
+[![Go 1.26](https://img.shields.io/badge/go-1.26-00ADD8.svg)](https://go.dev/)
 [![S3 Compatible](https://img.shields.io/badge/S3-Compatible-orange.svg)](https://docs.aws.amazon.com/AmazonS3/latest/API/Welcome.html)
 [![Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 

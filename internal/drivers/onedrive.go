@@ -38,7 +38,6 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"go.uber.org/zap"
-	"golang.org/x/net/http2"
 
 	mrand "math/rand/v2"
 )
@@ -1130,7 +1129,6 @@ func odGraphTransport(dial func(ctx context.Context, network, addr string) (net.
 			ClientSessionCache: tlsCache,
 		},
 	}
-	_ = http2.ConfigureTransport(t)
 	return t
 }
 

@@ -282,22 +282,22 @@ func (s *ImageScanner) ParseTrivyOutput(data []byte) (*ScanResult, error) {
 func GenerateSecurityReport(result *ScanResult) string {
 	var sb strings.Builder
 
-	sb.WriteString(fmt.Sprintf("Security Scan Report: %s\n", result.Image))
-	sb.WriteString(fmt.Sprintf("Scanner: %s\n", result.Scanner))
-	sb.WriteString(fmt.Sprintf("Scanned: %s\n", result.ScannedAt.Format(time.RFC3339)))
+	fmt.Fprintf(&sb, "Security Scan Report: %s\n", result.Image)
+	fmt.Fprintf(&sb, "Scanner: %s\n", result.Scanner)
+	fmt.Fprintf(&sb, "Scanned: %s\n", result.ScannedAt.Format(time.RFC3339))
 	sb.WriteString(strings.Repeat("-", 60) + "\n")
 
 	counts := result.CountBySeverity()
-	sb.WriteString(fmt.Sprintf("CRITICAL: %d\n", counts[SeverityCritical]))
-	sb.WriteString(fmt.Sprintf("HIGH: %d\n", counts[SeverityHigh]))
-	sb.WriteString(fmt.Sprintf("MEDIUM: %d\n", counts[SeverityMedium]))
-	sb.WriteString(fmt.Sprintf("LOW: %d\n", counts[SeverityLow]))
+	fmt.Fprintf(&sb, "CRITICAL: %d\n", counts[SeverityCritical])
+	fmt.Fprintf(&sb, "HIGH: %d\n", counts[SeverityHigh])
+	fmt.Fprintf(&sb, "MEDIUM: %d\n", counts[SeverityMedium])
+	fmt.Fprintf(&sb, "LOW: %d\n", counts[SeverityLow])
 	sb.WriteString(strings.Repeat("-", 60) + "\n")
 
 	for _, v := range result.Vulnerabilities {
-		sb.WriteString(fmt.Sprintf("[%s] %s - %s@%s\n", v.Severity.String(), v.ID, v.Package, v.Version))
+		fmt.Fprintf(&sb, "[%s] %s - %s@%s\n", v.Severity.String(), v.ID, v.Package, v.Version)
 		if v.FixedIn != "" {
-			sb.WriteString(fmt.Sprintf("  Fixed in: %s\n", v.FixedIn))
+			fmt.Fprintf(&sb, "  Fixed in: %s\n", v.FixedIn)
 		}
 	}
 

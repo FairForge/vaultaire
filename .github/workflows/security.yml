@@ -25,7 +25,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.25'
+          go-version-file: go.mod
       - name: Install gosec
         run: go install github.com/securego/gosec/v2/cmd/gosec@latest
       - name: Run gosec
@@ -68,13 +68,13 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.25'
+          go-version-file: go.mod
       # govulncheck reports only vulnerabilities whose functions the binary
-      # actually reaches (Review R15: the two x/crypto CVEs Trivy flags are
-      # in packages this code does not call). Advisory until the toolchain
-      # moves to Go 1.26, which the fixed x/ modules require (D-24).
+      # actually reaches (Review R15). It was advisory until the toolchain
+      # moved to Go 1.26 (D-24, 2026-10-10), which the fixed x/ modules
+      # require; with x/crypto 0.58 it reports 0 reachable, so it now fails
+      # the job.
       - name: Check for reachable vulnerabilities (govulncheck)
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
-        continue-on-error: true

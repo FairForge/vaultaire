@@ -498,27 +498,27 @@ func (m *HAMonitor) GetPrometheusMetrics() string {
 
 	sb.WriteString("# HELP vaultaire_ha_backends_total Total number of backends\n")
 	sb.WriteString("# TYPE vaultaire_ha_backends_total gauge\n")
-	sb.WriteString(fmt.Sprintf("vaultaire_ha_backends_total %d\n", latest.TotalBackends))
+	fmt.Fprintf(&sb, "vaultaire_ha_backends_total %d\n", latest.TotalBackends)
 
 	sb.WriteString("# HELP vaultaire_ha_backends_healthy Number of healthy backends\n")
 	sb.WriteString("# TYPE vaultaire_ha_backends_healthy gauge\n")
-	sb.WriteString(fmt.Sprintf("vaultaire_ha_backends_healthy %d\n", latest.HealthyBackends))
+	fmt.Fprintf(&sb, "vaultaire_ha_backends_healthy %d\n", latest.HealthyBackends)
 
 	sb.WriteString("# HELP vaultaire_ha_backends_unhealthy Number of unhealthy backends\n")
 	sb.WriteString("# TYPE vaultaire_ha_backends_unhealthy gauge\n")
-	sb.WriteString(fmt.Sprintf("vaultaire_ha_backends_unhealthy %d\n", latest.UnhealthyBackends))
+	fmt.Fprintf(&sb, "vaultaire_ha_backends_unhealthy %d\n", latest.UnhealthyBackends)
 
 	sb.WriteString("# HELP vaultaire_ha_latency_avg_ms Average latency in milliseconds\n")
 	sb.WriteString("# TYPE vaultaire_ha_latency_avg_ms gauge\n")
-	sb.WriteString(fmt.Sprintf("vaultaire_ha_latency_avg_ms %.2f\n", float64(latest.AverageLatency.Milliseconds())))
+	fmt.Fprintf(&sb, "vaultaire_ha_latency_avg_ms %.2f\n", float64(latest.AverageLatency.Milliseconds()))
 
 	sb.WriteString("# HELP vaultaire_ha_health_score System health score 0-100\n")
 	sb.WriteString("# TYPE vaultaire_ha_health_score gauge\n")
-	sb.WriteString(fmt.Sprintf("vaultaire_ha_health_score %.2f\n", m.calculateHealthScoreLocked()))
+	fmt.Fprintf(&sb, "vaultaire_ha_health_score %.2f\n", m.calculateHealthScoreLocked())
 
 	sb.WriteString("# HELP vaultaire_ha_uptime_seconds System uptime in seconds\n")
 	sb.WriteString("# TYPE vaultaire_ha_uptime_seconds counter\n")
-	sb.WriteString(fmt.Sprintf("vaultaire_ha_uptime_seconds %.2f\n", time.Since(m.startTime).Seconds()))
+	fmt.Fprintf(&sb, "vaultaire_ha_uptime_seconds %.2f\n", time.Since(m.startTime).Seconds())
 
 	return sb.String()
 }
