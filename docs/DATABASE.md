@@ -3,8 +3,9 @@
 PostgreSQL schema, migration runner and invariants for Vaultaire. The schema
 tables are merged from the database review (`docs/reviews/R9-database.md`,
 2026-09-26) and brought up to migration 071; runner rules come from
-`internal/database/CLAUDE.md`. Prod is PostgreSQL 16.13; local dev and CI use
-15.x.
+`internal/database/CLAUDE.md`. Prod is PostgreSQL 18.6 (upgraded from 16 with
+`pg_upgradecluster` on 2026-10-10); CI uses 18 to match; local dev may be
+older (15.x works).
 
 ## Migrations
 

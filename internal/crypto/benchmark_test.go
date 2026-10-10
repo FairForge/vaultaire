@@ -112,30 +112,3 @@ func BenchmarkKeyDerivation_Cached(b *testing.B) {
 		_, _ = keyManager.DeriveTenantKey(fmt.Sprintf("tenant-%d", i%100), 1)
 	}
 }
-
-func BenchmarkMLKEM_KeyGen(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		_, _ = GenerateMLKEMKeyPair()
-	}
-}
-
-func BenchmarkMLKEM_Encapsulate(b *testing.B) {
-	keyPair, _ := GenerateMLKEMKeyPair()
-
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		_, _ = Encapsulate(keyPair.PublicKey)
-	}
-}
-
-func BenchmarkMLKEM_Decapsulate(b *testing.B) {
-	keyPair, _ := GenerateMLKEMKeyPair()
-	encap, _ := Encapsulate(keyPair.PublicKey)
-
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		_, _ = Decapsulate(keyPair.PrivateKey, encap.Ciphertext)
-	}
-}

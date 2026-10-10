@@ -36,7 +36,6 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
-	"golang.org/x/net/http2"
 )
 
 const (
@@ -136,7 +135,6 @@ func graphTransport() *http.Transport {
 			ClientSessionCache: tlsSessionCache,
 		},
 	}
-	_ = http2.ConfigureTransport(t)
 	return t
 }
 

@@ -26,7 +26,7 @@ jobs:
         # The official image from the ECR Public mirror: Docker Hub refuses
         # anonymous pulls from the shared runner IPs (toomanyrequests,
         # 2026-10-09: every build-and-test failed in Initialize containers).
-        image: public.ecr.aws/docker/library/postgres:15
+        image: public.ecr.aws/docker/library/postgres:18
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: vaultaire
@@ -46,7 +46,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: "1.25"
+          go-version: "1.26"
           cache: true
 
       - name: Raise the Postgres connection limit
@@ -59,7 +59,7 @@ jobs:
         # SYSTEM (persisted in postgresql.auto.conf) and a container restart.
         run: |
           psql -h localhost -U postgres -c "ALTER SYSTEM SET max_connections = 400;"
-          cid=$(docker ps -q --filter "ancestor=public.ecr.aws/docker/library/postgres:15" | head -1)
+          cid=$(docker ps -q --filter "ancestor=public.ecr.aws/docker/library/postgres:18" | head -1)
           docker restart "$cid"
           for i in $(seq 1 30); do pg_isready -h localhost -U postgres && break; sleep 1; done
           psql -h localhost -U postgres -tAc "SHOW max_connections;"
@@ -91,7 +91,7 @@ jobs:
       - name: Lint
         uses: golangci/golangci-lint-action@v7
         with:
-          version: v2.4.0
+          version: v2.14.0
 
       - name: Deploy scripts
         run: |
@@ -127,7 +127,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: "1.25"
+          go-version: "1.26"
           cache: true
       - name: Set up Node (pointer.mjs drives Chrome over the DevTools protocol)
         uses: actions/setup-node@v6

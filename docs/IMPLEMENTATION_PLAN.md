@@ -1150,7 +1150,7 @@ bandwidth from us — wrap cloudSync instead of proxying bytes.*
 - Formal audit deferred to Q4 2026 (Type I), H1 2027 (Type II observation)
 
 ### 5.14.4: Post-Quantum SSE-S3 Encryption
-**File**: `internal/crypto/sse_s3.go`, `internal/crypto/postquantum.go`, migration `037_sse_s3.sql`
+**File**: `internal/crypto/sse_s3.go` (stdlib `crypto/mlkem`; the dead `postquantum.go` was deleted 2026-10-10, D-3), migration `037_sse_s3.sql`
 > **Phase 5.14.4 COMPLETE** — PR #256
 - ML-KEM-768 (NIST FIPS 203) for key encapsulation — quantum-resistant
 - AES-256-GCM for symmetric data encryption — hardware-accelerated

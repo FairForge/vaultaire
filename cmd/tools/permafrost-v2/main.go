@@ -3,7 +3,7 @@
 // Optimizations over v1 (permafrost-stress):
 //   - Raw HTTP data path (no Microsoft Graph SDK overhead)
 //   - 1MB read/write buffers (was 256KB)
-//   - http2.ConfigureTransport for explicit HTTP/2 settings
+//   - ForceAttemptHTTP2 (the standard library's HTTP/2) on the API transport
 //   - Chunked uploads for files >=4MB (10MB chunks aligned to 320KiB)
 //   - Downloads via @microsoft.graph.downloadUrl (skips 302 redirect)
 //   - Pre-warming to remove TLS handshake from benchmark timings
@@ -38,7 +38,6 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
-	"golang.org/x/net/http2"
 )
 
 const (
@@ -66,7 +65,6 @@ func tunedTransport() *http.Transport {
 		}).DialContext,
 		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
 	}
-	_ = http2.ConfigureTransport(t)
 	return t
 }
 

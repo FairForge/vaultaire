@@ -9,7 +9,6 @@ Encryption, key management, and chunking/dedup primitives for Vaultaire. The "po
 - **chunk_encryption.go** — `ChunkEncryptionService`: per-chunk convergent encryption (AES-256-GCM with HKDF-derived deterministic nonce). Same tenant + same content → same ciphertext (dedup-safe). Ciphertext format: `[nonce 12B][GCM ciphertext+tag]` (28B overhead). **R8-01 (2026-09-27):** the key is fixed by `(tenant, plaintextHash)` but the sealed bytes are the chunk AFTER the compression decision (raw or zstd, per request Content-Type), so the nonce is `HKDF(convergentKey, salt = SHA-256(sealed bytes), info "vaultaire-chunk-nonce-v2")` — a function of the message, never of the plaintext identity alone (the v1 derivation reused one (key, nonce) for two different messages when two stores compressed differently — NIST SP 800-38D §8). Decrypt reads the nonce from the blob prefix, so v1 blobs still decrypt (`TestChunkEncryption_LegacyV1BlobDecrypts`). Key version is hard-coded 1 end to end — rotation and crypto-shredding do not exist yet (WP-R8-1, `docs/reviews/R8-crypto-dedup.md`)
 - **encryption.go** — `Encryptor` interface: AES-256-GCM, ChaCha20-Poly1305, Noop. Only `NewChunkEncryptionService` reaches it from the product; the rest is unreachable (Review R0 → R8)
 - **keymanager.go** — Multi-tenant HKDF key derivation with version tracking and TTL cache. Version tracking is in-memory only and `RotateKey` has no product caller (rotation/shredding are no-ops, WP-R8-1)
-- **postquantum.go** — ML-KEM-768 via cloudflare/circl. **Unreachable from the product** (its only consumer, `pipeline.go`, was removed in Review R0); SSE-S3 uses Go stdlib `crypto/mlkem`. Deletion pending decision D-3 in `docs/reviews/R0-dead-code.md`
 - **compression.go** — LZ4/Zstd/Snappy compression with auto-detection
 - **chunker.go** — Content-defined chunking via `restic/chunker` (Rabin fingerprinting): `RabinChunker`, `DefaultChunker()`, ≈2 MiB real average. **Its identity is one constant set and on record (WP-R8-4)**: `ChunkerIdentity` = library `github.com/restic/chunker` @ `v0.4.0` (pinned in go.mod; `TestChunkerIdentity_MatchesGoMod`), polynomial `0x2ADD89E3B790BB`, min 1 MiB, **average bits 20** (passed explicitly now — it was the library's default, never ours), max 16 MiB; written into every chunked object's `object_metadata.pipeline_config` (`PipelineConfig.Chunker`, `RecordedPipeline`), and `TestRabinChunker_GoldenBoundaries` cuts a fixed 24 MiB pseudo-random input at eleven recorded offsets, so a dependency bump or any change to the set fails the build. Decision (status quo, to be confirmed by Isaac): keep the 2 MiB average — `SetAverageBits(22)` would reset dedup for everything stored
 - **gci.go** — Global content index for deduplication
@@ -29,9 +28,7 @@ Encryption, key management, and chunking/dedup primitives for Vaultaire. The "po
 
 **Activation**: set `ENCRYPTION_MASTER_KEY` env var (64 hex chars). When absent, SSE-S3 is disabled gracefully. Per-bucket via `sse_enabled` column, per-request via `x-amz-server-side-encryption: AES256` header.
 
-**Two ML-KEM implementations** still exist in the package, but only one is live:
-- `sse_s3.go` — Go stdlib `crypto/mlkem` (SSE-S3, the product path)
-- `postquantum.go` — cloudflare/circl, dead since the pipeline was removed (R0, decision D-3)
+**One ML-KEM implementation**: `sse_s3.go`, Go stdlib `crypto/mlkem`. The dead cloudflare/circl copy (`postquantum.go`) was deleted on 2026-10-10 (decision D-3) and `github.com/cloudflare/circl` left go.mod with it.
 
 ## Chunking + Dedup Architecture (Phase 8.3-8.5)
 

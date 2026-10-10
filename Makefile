@@ -69,7 +69,7 @@ gosec:
 	gosec -severity medium -exclude-dir=tests -exclude-dir=cmd/tools -exclude=G101,G115,G301,G304 ./...
 
 # Unreachable functions in the product binary (R0's tool of record).
-# x/tools v0.50 needs the Go 1.26 toolchain; GOTOOLCHAIN=auto downloads it.
+# x/tools v0.50 needs Go 1.26 — the toolchain go.mod pins (GOTOOLCHAIN=auto fetches it).
 deadcode:
 	go run golang.org/x/tools/cmd/deadcode@v0.50.0 ./cmd/vaultaire
 

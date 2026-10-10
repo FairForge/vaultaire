@@ -35,7 +35,6 @@ import (
 	"net/http"
 	"os"
 
-	"golang.org/x/net/http2"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -159,14 +158,13 @@ func newClient(apiKey string) *pdClient {
 		}).DialContext,
 		DisableCompression: true,
 		// Pixeldrain is HTTP/1.1 only (no HTTP/2 server support).
-		// ForceAttemptHTTP2 + ConfigureTransport are harmless but unused.
+		// ForceAttemptHTTP2 is harmless but unused.
 		ForceAttemptHTTP2: true,
 		TLSClientConfig: &tls.Config{
 			MinVersion:         tls.VersionTLS12,
 			ClientSessionCache: tls.NewLRUClientSessionCache(128),
 		},
 	}
-	_ = http2.ConfigureTransport(transport)
 	return &pdClient{
 		apiKey: apiKey,
 		http: &http.Client{

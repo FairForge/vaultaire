@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Vaultaire is a universal storage orchestration engine providing a unified S3-compatible API across multiple storage backends (local, iDrive e2 (primary, per-region), Seagate Lyve Cloud, Geyser (tape), Cloudflare R2 (public buckets only), OneDrive fleet (permafrost, internal), Sync.com via its encrypted WebDAV bridge (`sync`, target-only, flag-gated; generic WebDAV driver), Quotaless/S3-compat (dormant)). It is the core of FairForge's commercial product stored.ge — prices live in `internal/api/landing/prices.json`.
 
-**Language**: Go 1.25 | **Database**: PostgreSQL 15+ | **Router**: chi/v5 | **Logging**: Uber Zap
+**Language**: Go 1.26 | **Database**: PostgreSQL 18 (prod 18.6; local dev may run older) | **Router**: chi/v5 | **Logging**: Uber Zap
 
 ## Strategic Reference Documents
 
@@ -59,7 +59,7 @@ make test-load            # tests/load (env-gated SigV4 load gate, needs VAULTAI
 # Lint + security (configs: .golangci.yml, .github/workflows/security.yml)
 make lint                 # golangci-lint run ./...  (errcheck, rowserrcheck, noctx, errorlint, revive ctx-first, …)
 make gosec                # the Security workflow's gosec command, verbatim (must stay at 0 issues)
-make deadcode             # unreachable functions in cmd/vaultaire (x/tools deadcode; downloads the 1.26 toolchain)
+make deadcode             # unreachable functions in cmd/vaultaire (x/tools deadcode)
 make clean                # bin/, coverage files and every tool binary that used to pile up in the repo root
 
 # Format
@@ -164,7 +164,7 @@ Branch protection: direct pushes to main are blocked; CI must pass before merge.
 ## CI/CD
 
 GitHub Actions CI (`.github/workflows/ci.yml`) runs on every push/PR:
-- PostgreSQL 15 service container
+- PostgreSQL 18 service container (matches prod)
 - `go build ./...`
 - `go test ./...` with DATABASE_URL and JWT_SECRET env vars
 - golangci-lint
@@ -214,7 +214,7 @@ GitHub Actions Deploy (`.github/workflows/deploy.yml`):
 | `IDRIVE_BUCKET` | `vaultaire` | The single fixed bucket every iDrive driver stores into (tenant-prefixed keys); also the bucket provisioned per enabled region at boot |
 | `IDRIVE_ENDPOINT`, `IDRIVE_REGION` | `https://s3.<region>.idrivee2.com`, `us-central-1` | The primary's endpoint and region. `IDRIVE_REGION` is also the **default bucket region** (served by the primary through the engine); prod = `us-central-1` (Dallas) |
 | `IDRIVE_<REGION>_ACCESS_KEY`, `IDRIVE_<REGION>_SECRET_KEY`, `IDRIVE_<REGION>_ENDPOINT` | endpoint: `IDriveRegions` table | **Enables** a region (WP-R7-1): an `idrive-<region>` driver is registered only when the region's own key pair is set (region id upper-cased, `-`→`_`, e.g. `IDRIVE_US_WEST_2_ACCESS_KEY`), its fixed `IDRIVE_BUCKET` is created in that region at boot if absent, and it is probed. There is no fallback to the primary pair (403 elsewhere). Regions without a pair cannot be chosen for a bucket (S3 400 `InvalidLocationConstraint`, dashboard option disabled). Account regions: `us-central-1 us-west-2 us-west-4 us-southwest-1 us-southeast-1 us-midwest-1 us-east-1 eu-west-1 eu-west-3 eu-west-4 eu-central-1 eu-south-1 ap-northeast-1` (`internal/drivers/idrive_regions.go`); `deploy/scripts/idrive-region-env.sh` turns the reseller key file into these lines |
-| `WASABI_ACCESS_KEY`, `WASABI_SECRET_KEY`, `WASABI_REGION`, `WASABI_ENDPOINT`, `WASABI_BUCKET` | region `us-west-1`, endpoint `https://s3.<region>.wasabisys.com`, bucket `vaultaire` | **Interim Standard-tier primary** (owner decision 2026-10-03: the iDrive prod key answers 403 on object calls while the account is repaired; the partner account is free). The pair registers the `wasabi` driver — the fixed-bucket driver (`internal/drivers/wasabi.go` → `NewFixedBucketS3Driver`, same `t-<tenant>/…` keys as iDrive) — creates the bucket in the region at boot if absent, and probes it with a signed HeadBucket. It becomes the primary only with `STORAGE_MODE=wasabi` (auto-detect still prefers an iDrive pair). STANDARD is no longer pinned to `idrive`: it is the primary's class (`engine.ResolveStorageClass`), so every Standard PUT follows the switch while rows already on iDrive stay readable (keep `IDRIVE_*` set). Wasabi bills a 90-day minimum per object on a paid account; the dashboard costs it at list ($7.99/TB) and lists it as subsidized |
+| `WASABI_ACCESS_KEY`, `WASABI_SECRET_KEY`, `WASABI_REGION`, `WASABI_ENDPOINT`, `WASABI_BUCKET` | region `us-west-1`, endpoint `https://s3.<region>.wasabisys.com`, bucket `vaultaire` | **Registered, dormant** on prod (it was the interim Standard-tier primary for one day, 2026-10-03 → 2026-10-04 15:08 UTC, while the old iDrive key answered 403; prod runs `STORAGE_MODE=idrive` again). The pair registers the `wasabi` driver — the fixed-bucket driver (`internal/drivers/wasabi.go` → `NewFixedBucketS3Driver`, same `t-<tenant>/…` keys as iDrive) — creates the bucket in the region at boot if absent, and probes it with a signed HeadBucket. It becomes the primary only with `STORAGE_MODE=wasabi` (auto-detect still prefers an iDrive pair). STANDARD is no longer pinned to `idrive`: it is the primary's class (`engine.ResolveStorageClass`), so every Standard PUT follows the switch while rows already on iDrive stay readable (keep `IDRIVE_*` set). Wasabi bills a 90-day minimum per object on a paid account; the dashboard costs it at list ($7.99/TB) and lists it as subsidized |
 | `R2_ACCOUNT_ID`, `R2_ACCESS_KEY`, `R2_SECRET_KEY` | — | Cloudflare R2 S3 credentials. Registers the `r2` driver — **public buckets / CDN origin only, never a tier**: public-read buckets resolve to the internal `PUBLIC` storage class → R2 (`api.resolvePutStorageClass`); no other placement touches it |
 | `R2_JURISDICTION`, `R2_BUCKET` | default, `vaultaire-public` | R2 jurisdiction endpoint (`default`\|`eu`\|`us`\|`fedramp`; `us` endpoint fails TLS as of 2026-09-24) and the single fixed bucket public objects live in (tenant-prefixed keys) |
 | `SYNC_WEBDAV_PASSWORD`, `SYNC_WEBDAV_URL`, `SYNC_WEBDAV_USER`, `SYNC_WEBDAV_ROOT` | password: — (required); `http://127.0.0.1:4918`, `sync`, `vaultaire` | Sync.com's encrypted WebDAV bridge (`sync-webdav`, runs on the box, localhost only). The password (the bridge's generated one, `sync-webdav credentials`) registers the `sync` driver (`internal/drivers/webdav.go`, a generic WebDAV driver) and its authenticated PROPFIND probe. **Target-only, never the primary** (`STORAGE_MODE=sync` is a boot Fatal; never a failover destination): objects land there only for a bucket with `tier_preference = 'sync'` (operator-set) of a tenant with the `sync_backend` flag (default off, per tenant). Sync's terms forbid reselling the service without its written consent — customer data only with that consent; our own data is fine. Ops manual + systemd unit: `internal/drivers/webdav_README.md` |
@@ -245,7 +245,7 @@ GitHub Actions Deploy (`.github/workflows/deploy.yml`):
 
 This file is in a public repository (Review R14-20 / decision D-20): the hostnames and paths here are deliberately here and not in README.md.
 
-- Server: `slc-vaultaire-01` (Ubuntu 24.04, Salt Lake City), SSH alias `vaultaire-slc`
+- Server: `slc-vaultaire-01` (Ubuntu 26.04.1, kernel 7.0, Salt Lake City — upgraded 2026-10-10: HAProxy 3.2.9 / OpenSSL 3.5.5, OpenSSH 10.2, Redis 8.0.5, PostgreSQL 18.6), SSH alias `vaultaire-slc`
 - Two app slots `vaultaire@8000` / `vaultaire@8001` behind HAProxy, one active (`/opt/vaultaire/ACTIVE_PORT`; binaries `/opt/vaultaire/bin/vaultaire-800x`); config at `/opt/vaultaire/configs/.env`. Deploys, `.env` restarts and rollbacks go through `sudo vaultaire-switch deploy|restart|rollback|status` (zero downtime; `docs/DEPLOY.md`); the old `vaultaire.service` is masked. Logs: `journalctl -u 'vaultaire@*'`
 - HAProxy fronts the service; Cloudflare proxies stored.ge
 - UFW firewall: ports 22, 80, 443 only
