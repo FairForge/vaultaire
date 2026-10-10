@@ -57,6 +57,10 @@ There is no age-based tiering engine (deleted in Review R15, WP-R6-4: it never r
 
 `HintBackend(container, artifact, backend string)` — seeds `objectBackends` so GET routes to the correct backend without a failed failover attempt. The S3 adapter calls this with `backend_name` from `object_head_cache` on every GET to ensure correct routing after restart.
 
+## Parallel ranged reads (2026-10-10)
+
+`VersionedRangeGetter` (interface.go) is the optional driver interface of a range read that reports the object's identity (`RangeInfo{ETag, Size}`); implement it only where a range is one plain request (today `IDriveDriver`: idrive, idrive-<region>, wasabi — never Geyser). `parallel_range.go`: `ParallelRangeSource` resolves the backend Get would ask first (`preferredBackend`) and returns its `VersionedRangeGetter` only while its breaker is CLOSED; the caller reads ranges from the driver directly and settles the whole read with ONE `RecordReadOutcome(backend, err)` (failover rules: client-level outcomes are not charged). Used by `api/s3_large_get.go` behind the `parallel_get` flag.
+
 ## Circuit Breaker (Phase 5.12.4)
 
 Each registered backend gets an independent `BackendCircuitBreaker`:

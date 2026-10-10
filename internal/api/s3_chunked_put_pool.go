@@ -17,11 +17,13 @@ import (
 // ≤ ~19 chunks of ≤ 16 MB). Override via CHUNK_PUT_CONCURRENCY.
 const defaultChunkStoreConcurrency = 8
 
-// defaultChunkGetPrefetch bounds how many chunks a chunked GET fetches ahead
-// of the write cursor. Each buffered chunk holds up to 16 MB and GETs are
-// typically more concurrent than PUTs, so the default is smaller than the
-// store pool's. Override via CHUNK_GET_PREFETCH.
-const defaultChunkGetPrefetch = 4
+// defaultChunkGetPrefetch caps how many chunks a chunked GET holds at once
+// (in flight + fetched + being written); the byte window
+// (CHUNK_GET_WINDOW_BYTES, 64 MiB) is the other bound, so at the real ~2 MiB
+// average chunk the window is ~32 chunks. It was 4 until 2026-10-10: 8 MiB in
+// flight ÷ iDrive's 100–600 ms per chunk = 14–50 MB/s (s3_large_get.go).
+// Override via CHUNK_GET_PREFETCH (1 = sequential fetches).
+const defaultChunkGetPrefetch = 32
 
 // takenChunkRef identifies one GCI reference taken during a chunked PUT so
 // an aborted upload can compensate it (F10).

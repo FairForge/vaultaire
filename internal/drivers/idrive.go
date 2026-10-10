@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -291,6 +292,37 @@ func (d *IDriveDriver) GetRange(ctx context.Context, container, artifact string,
 	}
 
 	return result.Body, nil
+}
+
+// GetRangeInfo reads bytes [offset, offset+length) and reports the object's
+// ETag and total size from the response (engine.VersionedRangeGetter): the
+// parallel ranged GET checks every range against the others.
+func (d *IDriveDriver) GetRangeInfo(ctx context.Context, container, artifact string, offset, length int64) (io.ReadCloser, engine.RangeInfo, error) {
+	tenantID, tErr := d.getTenantID(ctx, "GetRangeInfo")
+	if tErr != nil {
+		return nil, engine.RangeInfo{}, tErr
+	}
+	if length <= 0 {
+		return nil, engine.RangeInfo{}, fmt.Errorf("%s get range info %s/%s: %w: length %d", d.name, container, artifact, engine.ErrInvalidInput, length)
+	}
+	key := d.buildKey(tenantID, container, artifact)
+	result, err := d.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(d.bucket),
+		Key:    aws.String(key),
+		Range:  aws.String(fmt.Sprintf("bytes=%d-%d", offset, offset+length-1)),
+	})
+	if err != nil {
+		return nil, engine.RangeInfo{}, fmt.Errorf("%s get range %s/%s: %w", d.name, container, artifact, err)
+	}
+	info := engine.RangeInfo{ETag: strings.Trim(aws.ToString(result.ETag), `"`), Size: -1}
+	if cr := aws.ToString(result.ContentRange); cr != "" {
+		if i := strings.LastIndexByte(cr, '/'); i >= 0 {
+			if n, perr := strconv.ParseInt(cr[i+1:], 10, 64); perr == nil {
+				info.Size = n
+			}
+		}
+	}
+	return result.Body, info, nil
 }
 
 // Delete removes an artifact from iDrive

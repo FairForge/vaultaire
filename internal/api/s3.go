@@ -733,6 +733,10 @@ func (s *Server) handleGetObject(w http.ResponseWriter, r *http.Request, req *S3
 	if s.chunkGetPrefetch > 0 {
 		adapter.chunkGetPrefetch = s.chunkGetPrefetch
 	}
+	if s.largeGet.budget != nil { // a Server built by NewServer
+		adapter.largeGet = s.largeGet
+	}
+	adapter.flags = s.flags
 
 	s.logger.Debug("S3 GET translating to engine",
 		zap.String("s3.bucket", req.Bucket),

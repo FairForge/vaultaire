@@ -24,6 +24,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/flags"
+	"github.com/FairForge/vaultaire/internal/parfetch"
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/FairForge/vaultaire/internal/usage"
 	"go.uber.org/zap"
@@ -61,10 +62,17 @@ type S3ToEngine struct {
 	// CHUNK_PUT_CONCURRENCY via the Server; 1 = sequential stores).
 	chunkStoreConcurrency int
 
-	// chunkGetPrefetch bounds how many chunks a chunked GET fetches ahead of
-	// the write cursor (default defaultChunkGetPrefetch; env
-	// CHUNK_GET_PREFETCH via the Server; 1 = sequential fetches).
+	// chunkGetPrefetch bounds how many chunks a chunked GET holds at once
+	// — in flight, fetched and being written (default
+	// defaultChunkGetPrefetch; env CHUNK_GET_PREFETCH via the Server; 1 =
+	// sequential fetches). The byte window is largeGet.chunkWindowBytes.
 	chunkGetPrefetch int
+
+	// largeGet shapes the parallel large-GET paths (s3_large_get.go):
+	// chunked read-ahead window and hedging, the `parallel_get` ranged
+	// reads of whole objects, the process-wide budget (Server-owned; nil =
+	// unlimited in tests).
+	largeGet largeGetConfig
 
 	// smartPromoter brings Smart-demoted objects back hot on read (5.15.8
 	// PR B). Nil = no promotion (tests, callers that never set it).
@@ -139,6 +147,7 @@ func NewS3ToEngine(e engine.Engine, db *sql.DB, logger *zap.Logger) *S3ToEngine 
 		notifySvc:             NewNotificationDispatcher(db, logger),
 		chunkStoreConcurrency: defaultChunkStoreConcurrency,
 		chunkGetPrefetch:      defaultChunkGetPrefetch,
+		largeGet:              defaultLargeGetConfig(),
 	}
 }
 
@@ -444,11 +453,26 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 			return
 		}
 		wantRange = rng
-		if ce, ok := a.engine.(*engine.CoreEngine); ok {
-			if rr, rangeErr := ce.GetRange(gctx, container, artifact, rng.start, rng.length); rangeErr == nil {
-				reader, nativeRange = rr, rng
+		// A large range of a whole object on a backend with cheap ranges
+		// is read as parallel ranges within it (`parallel_get`, s3_large_get.go).
+		if cachedFloor != usage.FloorVault {
+			if pr := a.openParallelGet(gctx, t.ID, container, artifact, cachedSize, rng.start, rng.length); pr != nil {
+				reader, nativeRange = pr, rng
 			}
 		}
+		if reader == nil {
+			if ce, ok := a.engine.(*engine.CoreEngine); ok {
+				if rr, rangeErr := ce.GetRange(gctx, container, artifact, rng.start, rng.length); rangeErr == nil {
+					reader, nativeRange = rr, rng
+				}
+			}
+		}
+	}
+	// A whole large object, same rule. Never an encrypted object (the
+	// ciphertext is decrypted whole), never a vault-floor one (tape and
+	// restore semantics stay on the single stream).
+	if reader == nil && cacheHit && cachedEncAlgo == "" && cachedFloor != usage.FloorVault && r.Header.Get("Range") == "" {
+		reader = a.openParallelGet(gctx, t.ID, container, artifact, cachedSize, 0, cachedSize)
 	}
 	if reader == nil {
 		reader, err = a.engine.Get(gctx, container, artifact)
@@ -1684,10 +1708,17 @@ func (a *S3ToEngine) fetchAndVerifyChunk(ctx context.Context, d chunkDesc, tenan
 	}
 	defer func() { _ = rdr.Close() }()
 
-	data, err := io.ReadAll(rdr)
-	if err != nil {
+	// One allocation of the chunk's recorded size (+ the read slack
+	// bytes.Buffer wants): io.ReadAll grows from 512 bytes, copying a 2 MiB
+	// chunk ~12 times and leaving ~4 MiB of garbage per chunk.
+	var buf bytes.Buffer
+	if d.size > 0 && d.size <= 64<<20 {
+		buf.Grow(int(d.size) + bytes.MinRead)
+	}
+	if _, err := buf.ReadFrom(rdr); err != nil {
 		return nil, fmt.Errorf("read chunk %s: %w", d.plaintextHash[:16], err)
 	}
+	data := buf.Bytes()
 
 	if d.encrypted && a.chunkEncSvc != nil {
 		data, err = a.chunkEncSvc.DecryptChunkData(tenantID, d.plaintextHash, data, d.ciphertextHash)
@@ -1756,45 +1787,12 @@ func (a *S3ToEngine) handleChunkedGet(
 	}
 
 	// Preflight: resolve every chunk's location from the index without reading
-	// data. A missing index entry means the manifest is unresolvable — return an
-	// error so HandleGet falls through (→ NoSuchKey) before any byte is written.
-	descs := make([]chunkDesc, len(refs))
-	for i, ref := range refs {
-		scope := ref.DedupScope
-		if scope == "" {
-			scope = crypto.GlobalDedupScope
-		}
-		lookup, lookupErr := a.gci.LookupChunk(ctx, scope, ref.PlaintextHash)
-		if lookupErr != nil {
-			return fmt.Errorf("lookup chunk %s: %w", ref.PlaintextHash[:16], lookupErr)
-		}
-		if lookup == nil || lookup.Entry == nil {
-			return fmt.Errorf("chunk %s missing from index", ref.PlaintextHash[:16])
-		}
-		storageKey := lookup.Entry.StorageKey
-		if storageKey == "" {
-			storageKey = "_chunks/" + ref.PlaintextHash
-		}
-		// The GCI row's ciphertext hash is authoritative (it was computed from
-		// the blob actually stored); per-ref copies are a fallback for rows
-		// written before the hash lived on the index.
-		var ctHash string
-		if lookup.Entry.CiphertextHash != nil {
-			ctHash = *lookup.Entry.CiphertextHash
-		} else if ref.CiphertextHash != nil {
-			ctHash = *ref.CiphertextHash
-		}
-		descs[i] = chunkDesc{
-			scope:          scope,
-			storageKey:     storageKey,
-			backendID:      lookup.Entry.BackendID,
-			plaintextHash:  ref.PlaintextHash,
-			offset:         ref.ChunkOffset,
-			size:           lookup.Entry.SizeBytes,
-			compressed:     lookup.Entry.CompressionAlgo != nil,
-			encrypted:      lookup.Entry.Encrypted,
-			ciphertextHash: ctHash,
-		}
+	// data — one query per dedup scope. A missing index entry means the
+	// manifest is unresolvable — return an error so HandleGet answers 500
+	// before any byte is written.
+	descs, err := a.resolveChunkDescs(ctx, refs)
+	if err != nil {
+		return err
 	}
 
 	contentType := cachedContentType
@@ -1908,55 +1906,53 @@ func (a *S3ToEngine) handleChunkedGet(
 		w.WriteHeader(http.StatusPartialContent)
 	}
 
-	// Stream the plan with bounded prefetch: while chunk i streams to the
-	// client, up to `prefetch` later chunks are already being fetched and
-	// verified — the sequential loop paid one full backend round-trip per
-	// chunk, the same ceiling the parallel chunk-store pool removed on PUT.
-	// A slot is held from fetch-start until the writer consumes the chunk,
-	// so in-flight + fetched-but-unwritten buffers never exceed `prefetch`
-	// chunks (≤16 MB each). Results arrive per-index on buffered channels;
-	// the writer consumes strictly in index order, so ordering, verification
-	// (inside fetchAndVerifyChunk, before any byte is written), and the
-	// error contract below are identical to the sequential loop.
-	prefetch := a.chunkGetPrefetch
-	if prefetch < 1 {
-		prefetch = 1
+	// Stream the plan through a bounded, hedged read-ahead (internal/
+	// parfetch): up to CHUNK_GET_WINDOW_BYTES of chunks — at most
+	// CHUNK_GET_PREFETCH of them — are fetched and verified while earlier
+	// ones stream to the client; a chunk still not done after the hedge
+	// delay is requested again and the first verified copy wins (the
+	// content address makes either copy valid). The writer consumes
+	// strictly in plan order, so ordering, verification (inside
+	// fetchAndVerifyChunk, before any byte is written) and the error
+	// contract below are those of the sequential loop. A chunk holds its
+	// full size from fetch start until the next one is taken.
+	sizes := make([]int64, len(plan))
+	var planTotal int64
+	for i, p := range plan {
+		sizes[i] = p.desc.size
+		planTotal += p.take
 	}
-	type fetchOut struct {
-		data []byte
-		err  error
-	}
-	fctx, cancelFetch := context.WithCancel(ctx)
-	defer cancelFetch()
-	results := make([]chan fetchOut, len(plan))
-	for i := range results {
-		results[i] = make(chan fetchOut, 1) // buffered: a cancelled writer never strands the fetcher
-	}
-	slots := make(chan struct{}, prefetch)
-	go func() {
-		for i := range plan {
-			select {
-			case slots <- struct{}{}:
-			case <-fctx.Done():
-				return
-			}
-			go func(i int) {
-				data, ferr := a.fetchAndVerifyChunk(fctx, plan[i].desc, t.ID)
-				results[i] <- fetchOut{data: data, err: ferr}
-			}(i)
+	streamStart := time.Now()
+	stream := parfetch.Start(ctx, a.chunkStreamConfig(), sizes, func(fctx context.Context, i int) ([]byte, error) {
+		data, ferr := a.fetchAndVerifyChunk(fctx, plan[i].desc, t.ID)
+		if ferr != nil {
+			return nil, ferr
 		}
-	}()
+		p := plan[i]
+		if p.skip != 0 || p.take != int64(len(data)) {
+			end := p.skip + p.take
+			if end > int64(len(data)) {
+				end = int64(len(data))
+			}
+			data = data[p.skip:end]
+		}
+		return data, nil
+	})
+	defer stream.Close()
 
 	// The first chunk is fetched + verified BEFORE headers are committed, so
 	// a corrupt first chunk produces a clean 500. After that the status is
 	// fixed; a failure aborts the body without serving bad bytes.
 	headersWritten := false
 	var written int64
-	for i, p := range plan {
-		out := <-results[i]
-		data, ferr := out.data, out.err
-		<-slots
+	var streamErr error
+	defer func() {
+		observeLargeGet("chunked", streamErr, streamErr == nil && headersWritten && written == planTotal, written, streamStart)
+	}()
+	for _, p := range plan {
+		slice, ferr := stream.Next()
 		if ferr != nil {
+			streamErr = ferr
 			if !headersWritten {
 				if errors.Is(ferr, errChunkIntegrity) {
 					a.logger.Error("chunk integrity verification failed",
@@ -1988,17 +1984,9 @@ func (a *S3ToEngine) handleChunkedGet(
 			headersWritten = true
 		}
 
-		slice := data
-		if p.skip != 0 || p.take != int64(len(data)) {
-			end := p.skip + p.take
-			if end > int64(len(data)) {
-				end = int64(len(data))
-			}
-			slice = data[p.skip:end]
-		}
 		n, werr := w.Write(slice)
 		written += int64(n)
-		if werr != nil {
+		if werr != nil { // the client went away: an abort, not a failed read
 			a.logger.Error("failed to stream chunk to client",
 				zap.Error(werr),
 				zap.String("container", container),

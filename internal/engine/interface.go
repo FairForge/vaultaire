@@ -91,6 +91,25 @@ type RangeGetter interface {
 	GetRange(ctx context.Context, container, artifact string, offset, length int64) (io.ReadCloser, error)
 }
 
+// RangeInfo is the identity of the object a range was read from: its ETag
+// as the backend reports it (quotes stripped) and its total size.
+type RangeInfo struct {
+	ETag string
+	Size int64
+}
+
+// VersionedRangeGetter is an optional interface for drivers whose ranged
+// reads are real and cheap (one ranged request, no restore semantics) and
+// report the object's identity with each range. The parallel ranged GET
+// (internal/api, `parallel_get` flag) reads a large whole object as many
+// ranges at once and compares every range's RangeInfo, so a concurrent
+// overwrite can never splice two objects into one body. Implement it ONLY
+// where a range costs one plain request: never on tape/archive backends.
+// Today: the fixed-bucket S3 driver (idrive, idrive-<region>, wasabi).
+type VersionedRangeGetter interface {
+	GetRangeInfo(ctx context.Context, container, artifact string, offset, length int64) (io.ReadCloser, RangeInfo, error)
+}
+
 // Restorer is an optional interface for archive-class drivers (Geyser tape)
 // whose objects can be evicted to cold storage and need an explicit recall
 // before Get succeeds (V18.2 minimum recall slice). Wire semantics mirror

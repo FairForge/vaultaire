@@ -75,6 +75,7 @@ func registerFlags(fl *flags.Service) {
 	fl.Register(flagEgressThrottle, false)
 	fl.Register(flagVaultParity, false)
 	fl.Register(flagSyncBackend, false)
+	fl.Register(flagParallelGet, false)
 }
 
 // syncPlacementGate is resolvePutStorageClass's `sync_backend` check; nil
