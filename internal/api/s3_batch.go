@@ -184,14 +184,26 @@ func (s *Server) deleteObjects(w http.ResponseWriter, r *http.Request, req *S3Re
 	// delivery pool, after the response has been built (they do not block it).
 	aftermath.fanout.deliverInOrder(aftermath, t.ID, bucket, func(key string) int { return first[key] })
 
+	unavailable, firstUnavailable := 0, ""
 	for _, obj := range delReq.Objects {
 		if e := outcomes[first[obj.Key]]; e != nil {
 			result.Errors = append(result.Errors, *e)
+			if e.Code == ErrServiceUnavailable {
+				if unavailable == 0 {
+					firstUnavailable = e.Key
+				}
+				unavailable++
+			}
 			continue
 		}
 		if !delReq.Quiet {
 			result.Deleted = append(result.Deleted, DeletedItem{Key: obj.Key})
 		}
+	}
+	if unavailable > 0 {
+		s.logger.Warn("batch delete: keys whose backend is unavailable answered ServiceUnavailable",
+			zap.String("tenant_id", t.ID), zap.String("bucket", bucket),
+			zap.Int("keys", unavailable), zap.String("first_key", firstUnavailable))
 	}
 	// Every key failed: a 200 to the request metrics, a failure to the
 	// outcome counter (error_before_commit, or error_after_commit when the
@@ -288,15 +300,19 @@ func (s *Server) batchDeleteKey(r *http.Request, t *tenant.Tenant, bucket, conta
 	}
 
 	if delErr != nil {
+		if errors.Is(delErr, engine.ErrAllBackendsUnavailable) {
+			// The backend holding the bytes is unreachable: the row stays
+			// and the client retries this key (Prompt 2b.2 C2). Logged once
+			// for the whole batch, never per key (Prompt 2b.3 D1.7: 1,000
+			// Error lines with stack traces per batch against a down bridge).
+			s.logger.Debug("batch delete: the key's backend is unavailable",
+				zap.Error(delErr), zap.String("container", container), zap.String("key", key))
+			return &DeleteError{Key: key, Code: ErrServiceUnavailable, Message: errorMessages[ErrServiceUnavailable]}
+		}
 		s.logger.Error("batch delete: delete failed",
 			zap.Error(delErr),
 			zap.String("container", container),
 			zap.String("key", key))
-		if errors.Is(delErr, engine.ErrAllBackendsUnavailable) {
-			// The backend holding the bytes is unreachable: the row stays
-			// and the client retries this key (Prompt 2b.2 C2).
-			return &DeleteError{Key: key, Code: ErrServiceUnavailable, Message: errorMessages[ErrServiceUnavailable]}
-		}
 		return &DeleteError{
 			Key:     key,
 			Code:    ErrInternalError,

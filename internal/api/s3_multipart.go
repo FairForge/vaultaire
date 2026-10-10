@@ -308,14 +308,28 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 	tmp := f.Name()
 
 	hasher := md5.New() // #nosec G401 — S3 spec requires MD5 for ETags
-	size, err := io.Copy(f, io.TeeReader(body, hasher))
+	src := &readErrReader{r: body}
+	size, err := io.Copy(f, io.TeeReader(src, hasher))
 	if closeErr := f.Close(); closeErr != nil && err == nil {
 		err = closeErr
 	}
 	if err != nil {
 		_ = os.Remove(tmp)
-		s.logger.Error("failed to write part data", zap.Error(err))
-		WriteS3Error(w, bodyReadErrorCode(err), r.URL.Path, generateRequestID())
+		code := bodyReadErrorCode(err)
+		if code == ErrInternalError && src.err != nil {
+			// The client's body broke off (a reset, a dropped tunnel): its
+			// request, like PutObject's — not a 500 with a stack trace
+			// (Prompt 2b.3 D1.8; the part goes to disk, so engine.Put's
+			// tagging never sees it).
+			code = ErrIncompleteBody
+		}
+		if code == ErrInternalError {
+			s.logger.Error("failed to write part data", zap.Error(err))
+		} else {
+			s.logger.Info("upload part: the request body could not be read",
+				zap.String("upload_id", uploadID), zap.Int("part", partNumber), zap.Int64("received", size), zap.Error(err))
+		}
+		WriteS3Error(w, code, r.URL.Path, generateRequestID())
 		return
 	}
 
@@ -723,11 +737,10 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 				WithSuggestion("This bucket's region is not enabled on this deployment."))
 			return
 		}
-		s.logger.Error("multipart backend storage failed",
-			zap.Error(uploadErr),
-			zap.String("bucket", bucket),
-			zap.String("key", object))
 		if errors.Is(uploadErr, engine.ErrAllBackendsUnavailable) {
+			// A 503 the client retries: Warn, no stack trace (Prompt 2b.3 D1.7).
+			s.logger.Warn("multipart complete: the backend is unavailable — 503",
+				zap.Error(uploadErr), zap.String("bucket", bucket), zap.String("key", object))
 			w.Header().Set("Retry-After", "30")
 			WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
 			return
@@ -737,6 +750,10 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 				WithSuggestion(refusedKeySuggestion))
 			return
 		}
+		s.logger.Error("multipart backend storage failed",
+			zap.Error(uploadErr),
+			zap.String("bucket", bucket),
+			zap.String("key", object))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return
 	}

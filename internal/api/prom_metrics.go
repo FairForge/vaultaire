@@ -3,6 +3,7 @@ package api
 import (
 	"github.com/FairForge/vaultaire/internal/dashboard"
 	"github.com/FairForge/vaultaire/internal/drivers"
+	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/packstore"
 	"net/http"
 	"sort"
@@ -85,6 +86,7 @@ func (s *Server) initMetrics() {
 			reg.MustRegister(newRoutingCollector(s.routingTruth))
 		}
 		reg.MustRegister(drivers.Collectors()...)
+		reg.MustRegister(engine.Collectors()...)
 		if s.engine != nil {
 			for _, name := range s.engine.GetDriverNames() {
 				drivers.InitTenantlessSeries(name)

@@ -72,6 +72,22 @@ groups:
           summary: "Sync WebDAV bridge {{ $labels.bridge }} down"
           description: "Bridge {{ $labels.bridge }} (index into SYNC_WEBDAV_URLS) has failed its authenticated PROPFIND for 10+ minutes; the writes of its ~1/N of the keys fail meanwhile. Check `curl -s localhost:8000/health/backends`, the bridge's systemd unit and its journal (401 = that bridge's password changed: SYNC_WEBDAV_PASSWORDS; connection refused = the process is down)."
 
+      # Two or more Sync bridges down at once (Prompt 2b.3 D1.2). One down is
+      # a warning (above); with 2+ down, 2/N of the sync keys answer 503 for
+      # every write and every read of a mutable name, and the engine's
+      # breaker stays closed by design (the rest answers: "partial") — so
+      # nothing else pages. 4 of 5 down used to be "partial" forever.
+      # vaultaire_engine_partial_unavailable_total{backend="sync"} counts
+      # the 503s that cost.
+      - alert: SyncBridgesDown
+        expr: count(vaultaire_webdav_bridge_up{backend="sync"} == 0) >= 2
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $value }} Sync WebDAV bridges down"
+          description: "{{ $value }} of the sync-webdav bridges have failed their authenticated PROPFIND for 5+ minutes: their keys' writes and mutable reads answer 503 (vaultaire_engine_partial_unavailable_total{backend=\"sync\"}), and the engine's sync breaker stays closed while any bridge answers. Check `systemctl status 'sync-webdav@*'`, their journals, and the /etc/hosts pin for us-api.sync.com."
+
       # Sync refuses writes into a folder that holds 50,000 files (its hard
       # limit; folders are unlimited). Keys' `/` segments are folders, so a
       # flat bucket past 50,000 keys stops taking writes — refused as 400s

@@ -665,11 +665,24 @@ func (d *WebDAVDriver) send(ctx context.Context, method, path string, body io.Re
 
 	// Upload: armed until the transport takes the first bytes (then the
 	// body re-arms it); download: armed until the headers arrive.
+	// A trial read (isBridgeTrial) waits bridgeTrialTimeout for the answer,
+	// not the idle watchdog's 60 s; the body then streams normally.
+	var trialFired atomic.Bool
+	var trialTimer *time.Timer
+	if mode != watchUpload && isBridgeTrial(ctx) {
+		trialTimer = time.AfterFunc(bridgeTrialTimeout, func() { trialFired.Store(true); cancel() })
+	}
 	call.wd.arm()
 	call.dl.resume()
-	resp, err := d.client.Do(req) //nolint:bodyclose // the caller owns call.resp and closes it (drainClose / statusError / downloadBody.Close)
+	resp, err := d.client.Do(req) // the caller owns call.resp and closes it (drainClose / statusError / downloadBody.Close)
 	call.wd.disarm()
 	call.dl.pause()
+	if trialTimer != nil && !trialTimer.Stop() && err == nil {
+		// The answer and the deadline crossed: the attempt's context is
+		// cancelled, so its body cannot be read — a timeout.
+		drainClose(resp)
+		err = context.Canceled
+	}
 	if err != nil {
 		stalled := call.wd.hasFired()
 		timedOut := errors.Is(actx.Err(), context.DeadlineExceeded) || call.dl.hasFired()
@@ -698,6 +711,9 @@ func (d *WebDAVDriver) send(ctx context.Context, method, path string, body io.Re
 			}
 			d.stalled(dir)
 			return nil, true, fmt.Errorf("%s: %s for %s: %w (%s)", method, what, d.limits.idleTimeout, ErrWebDAVStalled, err.Error())
+		case trialFired.Load():
+			d.count(method, "timeout")
+			return nil, false, fmt.Errorf("%s: trial read: no answer within %s: %w (%s)", method, bridgeTrialTimeout, engine.ErrTimeout, err.Error())
 		case timedOut:
 			d.count(method, "timeout")
 			return nil, true, fmt.Errorf("%s: no answer within %s: %w (%s)", method, timeout, engine.ErrTimeout, err.Error())
@@ -735,6 +751,19 @@ func (d *WebDAVDriver) backoff(ctx context.Context, attempt int) error {
 	}
 }
 
+// bridgeTrialKey marks a trial read of a bridge marked down (readRouted):
+// one attempt, and at most bridgeTrialTimeout waiting for the answer.
+type bridgeTrialKey struct{}
+
+func withBridgeTrial(ctx context.Context) context.Context {
+	return context.WithValue(ctx, bridgeTrialKey{}, true)
+}
+
+func isBridgeTrial(ctx context.Context) bool {
+	v, _ := ctx.Value(bridgeTrialKey{}).(bool)
+	return v
+}
+
 // davSpec is an idempotent request (PROPFIND, MKCOL, DELETE, GET).
 type davSpec struct {
 	method, path string
@@ -753,6 +782,10 @@ func (d *WebDAVDriver) do(ctx context.Context, s davSpec) (*davCall, error) {
 	if s.stream {
 		mode = watchDownload
 	}
+	attempts := d.limits.attempts
+	if isBridgeTrial(ctx) {
+		attempts = 1
+	}
 	for attempt := 1; ; attempt++ {
 		var body io.Reader
 		if s.body != "" {
@@ -762,7 +795,7 @@ func (d *WebDAVDriver) do(ctx context.Context, s davSpec) (*davCall, error) {
 		if call != nil && s.noRetry423 && call.resp.StatusCode == http.StatusLocked {
 			transient = false
 		}
-		if !transient || attempt >= d.limits.attempts || ctx.Err() != nil {
+		if !transient || attempt >= attempts || ctx.Err() != nil {
 			return call, err
 		}
 		if call != nil {
