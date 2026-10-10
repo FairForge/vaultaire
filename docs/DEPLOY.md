@@ -8,9 +8,13 @@ deliberately not in this file — "the production host" is the one box.
 
 ## What production is
 
-- **One host** (Ubuntu 26.04.1, kernel 7.0 — upgraded from 24.04 on
-  2026-10-10) running **one static Go binary** under systemd, with a local
-  PostgreSQL 18 (18.6, `pg_upgradecluster` from 16 the same day), Redis 8.0.5
+- **One host** (Ubuntu 26.04.1, kernel 7.0 — upgraded in place from 24.04 on
+  2026-10-10, two reboots at 12:11 and 12:24 UTC: the 24.04 full-upgrade, then
+  the release upgrade) running **one static Go binary** under systemd, with a local
+  PostgreSQL 18 (18.6, `pg_upgradecluster -m dump` from 16 the same day; the
+  old **16/main cluster is parked, stopped, on port 5433** with the
+  `postgresql-16` package installed — the rollback until it is dropped, see
+  Backups), Redis 8.0.5
   and a local Prometheus. There is no container
   image, no Helm chart, no worker fleet and no second region. The object bytes
   live on the storage backends (`docs/DRIVERS.md`); the box holds the
@@ -25,8 +29,7 @@ deliberately not in this file — "the production host" is the one box.
   the post-quantum hybrid **X25519MLKEM768** (Cloudflare → origin included),
   and OpenSSH 10.2 negotiates `mlkem768x25519-sha256`. Its `global` section carries
   `tune.h2.initial-window-size 262144` = **256 KiB** (set 2026-10-04; the
-  comment above it in the box's `haproxy.cfg` says 4 MiB — the value is what
-  counts). Measured on HAProxy 2.8: its default
+  comment above it said 4 MiB until 2026-10-10 — corrected, Prompt 2b.3 D3). Measured on HAProxy 2.8: its default
   HTTP/2 window is 65,535 bytes, which caps every h2 upload at window ÷ RTT
   (~1 MB/s from Dallas) — but a large window costs the other way: at 4 MiB,
   sixteen h2 streams on one connection fell from 308 to 35 MB/s on the box
@@ -37,7 +40,27 @@ deliberately not in this file — "the production host" is the one box.
   all): 22–27 MB/s through `stored.ge` from the box, 58 MB/s edge → origin.
   Leave `tune.h2.max-frame-size` at its default; 1 MiB frames made things
   worse. The box now runs 3.2, so the window (and the h1 origin setting) can
-  be re-measured; until then both stay as they are.
+  be re-measured; until then both stay as they are. **What 3.2.9 offers for
+  that bench** (its keyword dump, `haproxy -dKcfg`): `tune.h2.fe.rxbuf` /
+  `tune.h2.be.rxbuf` (a receive-buffer budget per *connection* shared by its
+  streams — the way to give one stream a large window without 16 streams
+  each holding one, which is exactly the 2.8 trade-off above), separate
+  `tune.h2.fe.`/`be.initial-window-size`, `tune.h2.fe.max-total-streams` and
+  `tune.h2.fe.glitches-threshold` (closes a connection that sends too many
+  invalid frames — abuse protection, worth a value). Not changed: tuning is a
+  bench, not a docs PR.
+- **`haproxy.cfg` is box state, not in the repo**: `vaultaire-switch` renders
+  it (the active slot's `server` lines enabled, the other's `disabled`) on
+  every deploy, so a repo copy would be stale after the next switch. Edit it
+  the way the switch does — under `/run/vaultaire-switch.lock` (flock), into a
+  temp file, `haproxy -c -q` on the temp file, timestamped backup, atomic
+  `mv`, `systemctl reload haproxy` (seamless: the old worker exits 0), with
+  the `server` lines matching `/opt/vaultaire/ACTIVE_PORT`. 2026-10-10: the
+  `http_front` `http-request redirect` moved above its `use_backend` (3.2
+  warned "an 'http-request' rule placed after a 'use_backend' rule will still
+  be processed before" — no behaviour change: plain http still 302s to https,
+  ACME paths still reach `acme_backend`); `haproxy -c` is now clean
+  (backup `haproxy.cfg.bak-2b3-20261010T130312Z`).
 - **UFW** allows 22, 80 and 443 only. `deploy/ufw-cloudflare-lockdown.sh` is
   the script for narrowing 80/443 to Cloudflare's ranges.
 - **Configuration is the env file** loaded by the unit's `EnvironmentFile=`
@@ -277,7 +300,24 @@ missing from 2026-10-05 to -07: a root-only file in `configs/`).
   swap were unreadable to user1 and the dump's upload sat behind the tar; the
   order is fixed and every `.env*` in `configs/` is `root:user1 0640` or
   owner-only. Keep new `.env` backups readable by group user1.
-- Still open from WP-R9-7: `-Fc` format and a written restore runbook drill.
+- **Restore drill on PostgreSQL 18 — 2026-10-10 13:04 UTC (Prompt 2b.3 D3):**
+  the newest off-box dump (`vaultaire_20261010_122900.sql.gz`, 33 MB, taken on
+  18.6 after the upgrade) downloaded from Sync in 3 s, sha256 = the local copy;
+  `createdb vaultaire_drill` + `gzip -dc | psql -v ON_ERROR_STOP=1` (psql 18.6)
+  restored in 3 s with 0 errors: 96 tables in both, 1,065,969 rows vs
+  1,065,980 in prod at that minute — the only differences `events` (+8) and
+  `quota_usage_events` (+3), written since 12:29; `users` 5, `tenants` 5,
+  `api_keys` 8, `buckets` 34, `object_head_cache` 5,421, `object_versions`
+  205,604, `vault_parity` 6, `audit_logs` 22 equal; 313 MB vs 314 MB. Dropped
+  after. The steps: the Restore line above, then a per-table `count(*)` over
+  `information_schema.tables` in both databases, then `dropdb`.
+- **Dropping the PG 16 rollback** (owner's call, not done): with the drill
+  passed and three nightly dumps on 18 by then, proposed **2026-10-13**:
+  `sudo pg_dropcluster 16 main && sudo apt purge postgresql-16 postgresql-client-16`,
+  and the pre-upgrade dumps `/root/pre-2604-20261010T120755Z/` (pg_dumpall,
+  `/etc`, configs, binaries — secrets inside) deleted the same day, with the
+  upgrade session's scratchpad copy of them.
+- Still open from WP-R9-7: `-Fc` format and the drill as a script.
 
 ## Monitoring
 

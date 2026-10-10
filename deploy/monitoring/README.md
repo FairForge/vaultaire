@@ -33,6 +33,20 @@ it is **not** committed. It lives in `/etc/default/ntfy-bridge` on the server
 
 ## Backup metrics (node_exporter textfile collector)
 
+**Verified on Ubuntu 26.04.1 (2026-10-10, after the in-place upgrade):**
+nothing in the collector changed — the textfile directory, its ownership and
+the two `vaultaire_backup_*` series read as before, and the 12:29 UTC backup
+run on PostgreSQL 18 updated both; Prometheus loads the rule files from
+`/etc/prometheus/rules/*.yml`. **Installed vs repo on 2026-10-10** (sha256):
+`vaultaire-alerts`, `-backends`, `-backup`, `-jobs`, `-longops`, `-tls` =
+repo; 35 rules load. `vaultaire-jobs.yml` had **never been installed** until
+13:48 UTC that day (Prompt 2b.3 D2 put it there) — `JobStale`,
+`PeriodicJobStale`, `JobFailing`, `AccountDeletionDeferred` and the stale-copy
+rule were not live before. Still **not installed** (owner item):
+`vaultaire-auth.yml`, `vaultaire-egress.yml`, `vaultaire-routing.yml`,
+`vaultaire-synthetic.yml` (the last needs `SYNTHETIC_CHECK_URL` set first, or
+its absent-series rule fires).
+
 `pg-backup.sh` runs as user1 (cron 03:00 UTC) and writes three `.prom` files —
 `vaultaire_backup_{,offbox_,run_}last_success_timestamp_seconds.prom` — into
 **its own directory `/opt/vaultaire/metrics/`** (user1, 0755; files 0644 by
