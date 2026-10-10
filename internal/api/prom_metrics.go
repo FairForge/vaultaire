@@ -76,6 +76,17 @@ func (s *Server) initMetrics() {
 		// CopyObject sources whose bytes are not their head row's size
 		// (Prompt 2b.3 D2.1): drift, or a concurrent overwrite. 503s.
 		reg.MustRegister(copySourceSizeMismatch)
+		reg.MustRegister(largeGetCollectors()...)
+		if b := s.largeGet.budget; b != nil {
+			reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+				Name: "vaultaire_large_get_budget_bytes_in_use",
+				Help: "Bytes of the process-wide large-GET read-ahead budget (LARGE_GET_PARALLEL_BUDGET_BYTES) taken now.",
+			}, func() float64 { return float64(b.InUse()) }))
+			reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+				Name: "vaultaire_large_get_budget_bytes",
+				Help: "Size of the process-wide large-GET read-ahead budget (LARGE_GET_PARALLEL_BUDGET_BYTES).",
+			}, func() float64 { return float64(b.Limit()) }))
+		}
 		// The Vault parity copy (WP-VAULT-1): shards written, erased, and
 		// reads a backend failure sent to the parity.
 		reg.MustRegister(vaultParityObjects, vaultParityBytes, vaultParityFallbacks, vaultParityOrphans,

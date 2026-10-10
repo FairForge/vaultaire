@@ -129,9 +129,14 @@ type Server struct {
 	// chunkGetPrefetch, when > 0, overrides the adapter's default chunked-GET
 	// prefetch depth (env CHUNK_GET_PREFETCH).
 	chunkGetPrefetch int
-	emailSender      email.Sender
-	baseURL          string
-	startTime        time.Time
+
+	// largeGet shapes the parallel large-GET paths and owns the one
+	// process-wide read-ahead budget (s3_large_get.go; env
+	// CHUNK_GET_WINDOW_BYTES, CHUNK_GET_HEDGE_AFTER, LARGE_GET_*).
+	largeGet    largeGetConfig
+	emailSender email.Sender
+	baseURL     string
+	startTime   time.Time
 	// flags is the runtime feature-flag service (1.13): DB table + ~15s
 	// cache, global kill-switches + per-tenant enablement, flipped via the
 	// admin API / dashboard with no deploy or restart.
@@ -425,6 +430,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 			logger.Warn("invalid CHUNK_GET_PREFETCH, keeping default", zap.String("value", v))
 		}
 	}
+	s.largeGet = largeGetConfigFromEnv(os.Getenv, logger)
 
 	// Retention (Review R13-14): nightly prune of the log tables; started in
 	// Start() on the shutdown-cancelled context. Synthetic customer check
