@@ -248,6 +248,12 @@ func (f *FailoverManager) Register(backend string) {
 // "not found" — is a verdict about the object, and the aggregate is
 // ErrAllBackendsUnavailable (the API answers 503 + Retry-After, never 404).
 func (f *FailoverManager) Execute(ctx context.Context, backends []string, fn func(driverName string) error) (string, error) {
+	return f.ExecuteOp(ctx, "other", backends, fn)
+}
+
+// ExecuteOp is Execute for the engine call op (the label of
+// vaultaire_engine_partial_unavailable_total).
+func (f *FailoverManager) ExecuteOp(ctx context.Context, op string, backends []string, fn func(driverName string) error) (string, error) {
 	var (
 		lastErr          error
 		firstErr         error // outcome of the first candidate that was actually asked
@@ -323,6 +329,9 @@ func (f *FailoverManager) Execute(ctx context.Context, backends []string, fn fun
 			// a write off the object's tier — would be wrong (Prompt 2b.2
 			// C1). A caller whose body broke cannot be served anywhere.
 			if errors.Is(err, ErrPartiallyUnavailable) || errors.Is(err, ErrCallerAborted) {
+				if errors.Is(err, ErrPartiallyUnavailable) {
+					partialUnavailable.WithLabelValues(backend, op).Inc()
+				}
 				return "", fmt.Errorf("all backends failed: %w", err)
 			}
 			// A consumed non-rewindable body makes every further attempt a

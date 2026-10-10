@@ -194,7 +194,11 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	reader, err := s.engine.Get(ctx, container, key)
 	if err != nil {
-		s.logger.Error("cdn engine.Get failed",
+		logGet := s.logger.Error
+		if errors.Is(err, engine.ErrAllBackendsUnavailable) {
+			logGet = s.logger.Warn // a 503 the client retries, no stack trace (Prompt 2b.3 D1.7)
+		}
+		logGet("cdn engine.Get failed",
 			zap.String("container", container),
 			zap.String("key", key),
 			zap.Error(err))

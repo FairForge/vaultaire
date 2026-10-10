@@ -6,6 +6,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -30,6 +31,21 @@ func bodyReadErrorCode(err error) string {
 		return ErrIncompleteBody
 	}
 	return ErrInternalError
+}
+
+// readErrReader records the first read failure of its source (never
+// io.EOF), so a handler can tell the source's error from its writer's.
+type readErrReader struct {
+	r   io.Reader
+	err error
+}
+
+func (c *readErrReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) && c.err == nil {
+		c.err = err
+	}
+	return n, err
 }
 
 // refusedKeySuggestion explains a 400 for a key the bucket's storage

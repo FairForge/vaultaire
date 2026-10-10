@@ -355,7 +355,12 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	// The source stream is the write's body: a shutdown's cut stops it at
 	// once (the destination stores nothing), the call may still answer for
 	// longOpAnswerGrace (s3_long_op.go).
-	counter := &countingReader{r: &cutReader{ctx: r.Context(), r: reader}}
+	// The source's own read failure (a backend GET body that stalled):
+	// engine.Put tags any source error as the caller's — right for a
+	// client's body, wrong here, so the copy answers 503, not 500 (Prompt
+	// 2b.3 D1.6).
+	source := &readErrReader{r: reader}
+	counter := &countingReader{r: &cutReader{ctx: r.Context(), r: source}}
 	var src io.Reader = counter
 	if srcSize > 0 {
 		// Bytes that are not the recorded size are not the source: the
@@ -388,6 +393,12 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 			WriteS3ErrorWithContext(w, ErrServiceUnavailable, r.URL.Path, generateRequestID(),
 				WithSuggestion("This bucket's region is not enabled on this deployment."))
 		case errors.Is(err, engine.ErrAllBackendsUnavailable):
+			w.Header().Set("Retry-After", "30")
+			WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
+		case source.err != nil && r.Context().Err() == nil:
+			s.logger.Warn("copy: the source could not be read — 503",
+				zap.String("tenant_id", t.ID), zap.String("source_bucket", srcBucket), zap.String("source_key", srcKey),
+				zap.NamedError("source_error", source.err))
 			w.Header().Set("Retry-After", "30")
 			WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
 		default:

@@ -138,3 +138,34 @@ func TestDelete_RecordedMissAndUnregisteredNames(t *testing.T) {
 type missDeleter struct{ *deleteRecorder }
 
 func (m missDeleter) Delete(_ context.Context, c, a string) error { return ErrNotFound(c, a) }
+
+// Prompt 2b.3 D1.5: a FAILED delete kept the head row but dropped the
+// engine's own routing record, so the next call for the key without a new
+// hint went to the primary. Before (9bc9d1e): the retry asked the primary
+// and "succeeded" (primary.deletes 1) while the bytes stayed on sync.
+func TestDelete_AFailedDeleteKeepsTheRoutingRecord(t *testing.T) {
+	// Arrange
+	e := NewEngine(nil, zap.NewNop(), &Config{DefaultBackend: "primary"})
+	primary := newDeleteRecorder("primary", nil)
+	recorded := newDeleteRecorder("sync", errors.New("connection refused"))
+	e.AddDriver("primary", primary)
+	e.AddDriver("sync", recorded)
+	e.HintBackend("c", "k", "sync")
+	require.Error(t, e.Delete(context.Background(), "c", "k"))
+
+	// Act: the retry, with no new hint.
+	err := e.Delete(context.Background(), "c", "k")
+
+	// Assert
+	assert.ErrorIs(t, err, ErrAllBackendsUnavailable)
+	assert.Equal(t, 2, recorded.deletes, "the retry asks the recorded backend again")
+	assert.Zero(t, primary.deletes)
+
+	// And a successful delete drops it.
+	recorded.mu.Lock()
+	recorded.fail = nil
+	recorded.mu.Unlock()
+	require.NoError(t, e.Delete(context.Background(), "c", "k"))
+	_, ok := e.objectBackends.Load(objectKey("c", "k"))
+	assert.False(t, ok)
+}

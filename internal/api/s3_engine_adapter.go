@@ -2144,6 +2144,9 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 				// The backend that holds the bytes is unreachable: the
 				// client retries; the head row must NOT be removed (a
 				// "miss" verdict from a fallback is not a verdict, R6-02).
+				a.logger.Warn("delete: the object's backend is unavailable — 503, the row is kept",
+					zap.String("tenant_id", t.ID), zap.String("bucket", bucket), zap.String("key", object),
+					zap.String("backend", recordedBackend), zap.Error(err))
 				w.Header().Set("Retry-After", "30")
 				WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
 				return

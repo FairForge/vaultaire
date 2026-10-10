@@ -154,7 +154,7 @@ func (e *CoreEngine) Get(ctx context.Context, container, artifact string) (io.Re
 	candidates := e.buildCandidateList(preferredBackend)
 
 	var reader io.ReadCloser
-	usedBackend, err := e.failover.Execute(ctx, candidates, func(driverName string) error {
+	usedBackend, err := e.failover.ExecuteOp(ctx, "get", candidates, func(driverName string) error {
 		d, ok := e.drivers[driverName]
 		if !ok {
 			return fmt.Errorf("driver %s not found", driverName)
@@ -192,7 +192,7 @@ func (e *CoreEngine) GetRange(ctx context.Context, container, artifact string, o
 	candidates := e.buildCandidateList(preferredBackend)
 
 	var reader io.ReadCloser
-	_, err := e.failover.Execute(ctx, candidates, func(driverName string) error {
+	_, err := e.failover.ExecuteOp(ctx, "get_range", candidates, func(driverName string) error {
 		d, ok := e.drivers[driverName]
 		if !ok {
 			return fmt.Errorf("driver %s not found", driverName)
@@ -281,7 +281,7 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 	}
 	firstAttempt := true
 
-	usedBackend, err := e.failover.Execute(ctx, candidates, func(driverName string) error {
+	usedBackend, err := e.failover.ExecuteOp(ctx, "put", candidates, func(driverName string) error {
 		d, ok := e.drivers[driverName]
 		if !ok {
 			return fmt.Errorf("driver %s not found", driverName)
@@ -398,7 +398,7 @@ func (e *CoreEngine) Delete(ctx context.Context, container, artifact string) err
 		candidates = append(candidates, e.primary)
 	}
 
-	_, lastErr := e.failover.Execute(ctx, candidates, func(driverName string) error {
+	_, lastErr := e.failover.ExecuteOp(ctx, "delete", candidates, func(driverName string) error {
 		d, ok := e.drivers[driverName]
 		if !ok {
 			return fmt.Errorf("driver %s not found", driverName)
@@ -406,10 +406,14 @@ func (e *CoreEngine) Delete(ctx context.Context, container, artifact string) err
 		return d.Delete(ctx, container, artifact)
 	})
 
-	e.objectBackends.Delete(key)
-
-	if e.locations != nil {
-		_ = e.locations.RemoveLocation(ctx, tenantID, container, artifact)
+	// A failed delete keeps the routing records with the head row, so the
+	// retry asks the same backend (Prompt 2b.3 D1.5); a miss is gone too.
+	var nf NotFoundError
+	if lastErr == nil || errors.As(lastErr, &nf) {
+		e.objectBackends.Delete(key)
+		if e.locations != nil {
+			_ = e.locations.RemoveLocation(ctx, tenantID, container, artifact)
+		}
 	}
 
 	return lastErr
