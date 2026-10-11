@@ -54,8 +54,10 @@ var storageClassToBackend = map[string]string{
 	// SYNC is OUR internal class for the Sync.com WebDAV bridge (never sent
 	// by clients): set by api.resolvePutStorageClass only for a bucket whose
 	// tier_preference is `sync` AND whose tenant has the `sync_backend` flag
-	// (Sync's terms: no customer data without its written consent). Falls
-	// back to the primary like every mapping when no `sync` driver exists.
+	// (Sync's terms: no customer data without its written consent). Unlike
+	// every other mapping it NEVER falls back to the primary: `sync` is a
+	// strict target, and with no `sync` driver the write is a 503
+	// (Prompt 2b.6 G1 — see ResolveStorageClass).
 	"SYNC": "sync",
 }
 
@@ -73,6 +75,14 @@ var backendToStorageClass = map[string]string{
 	"sync":  "STANDARD",
 }
 
+// ResolveStorageClass maps a class onto the backend that stores it. An
+// unmapped class is the primary's; a mapped class whose driver is not
+// registered degrades to the primary (R6-04) — except a strict target
+// (strictTargetBackends), which is returned as is, registered or not. The
+// resolver used to hand the primary back for SYNC when no sync driver was
+// registered, so CoreEngine.Put never saw the strict target and a sync-tier
+// object landed on the primary with a 200 (Prompt 2b.6 G1). Put refuses an
+// unregistered strict target with ErrStrictTargetUnregistered.
 func ResolveStorageClass(class string, primaryBackend string, availableDrivers map[string]Driver) (driverName, resolvedClass string) {
 	if class == "" {
 		return primaryBackend, "STANDARD"
@@ -84,7 +94,7 @@ func ResolveStorageClass(class string, primaryBackend string, availableDrivers m
 		return primaryBackend, "STANDARD"
 	}
 
-	if _, available := availableDrivers[targetBackend]; available {
+	if _, available := availableDrivers[targetBackend]; available || strictTarget(targetBackend) {
 		return targetBackend, canonical
 	}
 

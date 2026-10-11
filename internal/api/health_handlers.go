@@ -239,14 +239,20 @@ func (s *Server) handleHealthEnhanced(w http.ResponseWriter, r *http.Request) {
 }
 
 // primaryBreakerReason is the /health reason when the primary's breaker is
-// open: every write is then falling over (or 503ing) and every read of the
-// primary's objects 503s, whatever its probe says (Prompt 2b.5 F2.2 — on
+// not closed: every write is then falling over (or 503ing) and every read of
+// the primary's objects 503s, whatever its probe says (Prompt 2b.5 F2.2 — on
 // 2026-10-11 the breaker was open 8.7 h while /health said "healthy").
+// Half-open counts (Prompt 2b.6 G2): the breaker reports it 30 s after
+// opening and keeps it until a request charges or clears it, so on a dead
+// primary with sparse traffic matching only "open" said healthy most of the
+// time while vaultaire_backend_circuit_open was 1. No breaker for the
+// primary yet is nothing to report.
 func primaryBreakerReason(primary string, breakers map[string]string) string {
-	if primary == "" || breakers[primary] != "open" {
+	state := breakers[primary]
+	if primary == "" || state == "" || state == engine.StateClosed.String() {
 		return ""
 	}
-	return "circuit breaker open on the primary backend " + primary
+	return "circuit breaker " + state + " on the primary backend " + primary
 }
 
 // withPrimaryBreakerOpen counts the primary as one unhealthy backend: a

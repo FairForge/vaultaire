@@ -240,3 +240,38 @@ func TestObjectCanary_ScopedKeyWithoutListBucketIsHealthy(t *testing.T) {
 	assert.True(t, st.Healthy, st.LastError)
 	assert.Equal(t, int32(1), m.puts.Load())
 }
+
+// Prompt 2b.6 G2: the breaker reports half-open 30 s after opening and stays
+// there until a request charges or clears it, so on a dead primary with
+// sparse traffic /health said "healthy" with no reason most of the time
+// while vaultaire_backend_circuit_open was 1 (before: reason "" for
+// half-open). Anything but closed is the primary's reason, named by state.
+func TestHealth_HalfOpenPrimaryIsDegradedLikeTheGauge(t *testing.T) {
+	half := engine.StateHalfOpen.String()
+	assert.Equal(t, "circuit breaker half-open on the primary backend idrive",
+		primaryBreakerReason("idrive", map[string]string{"idrive": half}))
+	assert.Equal(t, "circuit breaker open on the primary backend idrive",
+		primaryBreakerReason("idrive", map[string]string{"idrive": engine.StateOpen.String()}))
+	assert.Empty(t, primaryBreakerReason("idrive", map[string]string{"idrive": engine.StateClosed.String()}))
+	assert.Empty(t, primaryBreakerReason("idrive", map[string]string{"lyve": half}), "no breaker for the primary yet: nothing to report")
+	assert.Empty(t, primaryBreakerReason("", map[string]string{"idrive": half}))
+
+	// The gauge agrees: half-open counts as not closed.
+	fake := &halfOpenEngineMetrics{statuses: map[string]string{"idrive": half}, primary: "idrive"}
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(newBackendCollector(NewBackendHealthChecker(), fake))
+	require.NoError(t, promtestutil.GatherAndCompare(reg, strings.NewReader(`
+# HELP vaultaire_backend_circuit_open 1 if the engine's circuit breaker for the backend is not closed (open or half-open).
+# TYPE vaultaire_backend_circuit_open gauge
+vaultaire_backend_circuit_open{backend="idrive"} 1
+`), "vaultaire_backend_circuit_open"))
+}
+
+type halfOpenEngineMetrics struct {
+	statuses map[string]string
+	primary  string
+}
+
+func (f *halfOpenEngineMetrics) GetFailoverStatus() map[string]string { return f.statuses }
+func (f *halfOpenEngineMetrics) WriteFailures() int64                 { return 0 }
+func (f *halfOpenEngineMetrics) GetPrimary() string                   { return f.primary }

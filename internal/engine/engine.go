@@ -255,7 +255,20 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 	// had only closed the "local" branch). The engine must never re-derive
 	// placement.
 	options := ApplyPutOptions(opts...)
+	e.mu.RLock()
 	targetBackend, _ := ResolveStorageClass(options.StorageClass, e.primary, e.drivers)
+	_, targetRegistered := e.drivers[targetBackend]
+	e.mu.RUnlock()
+
+	// A strict target with no driver on this process (a redeploy without
+	// SYNC_WEBDAV_URLS) is a 503 the client retries — never the primary in
+	// its place, which stored the object off the bucket's tier and answered
+	// 200 (Prompt 2b.6 G1). Before any byte is read: the API writes no head
+	// row and releases its reservation.
+	if strictTarget(targetBackend) && !targetRegistered {
+		e.strictTargetUnregistered(targetBackend, "put")
+		return "", fmt.Errorf("put %s/%s: %w: %w: %q", container, artifact, ErrAllBackendsUnavailable, ErrStrictTargetUnregistered, targetBackend)
+	}
 
 	// Build candidate list: target first, then primary, then the
 	// general-purpose durable backends — target-only backends (local, r2,
@@ -579,6 +592,12 @@ func writeOnlyWhenTargeted(name string) bool {
 var strictTargetBackends = map[string]bool{
 	"sync": true,
 }
+
+// ErrStrictTargetUnregistered is the cause, wrapped in
+// ErrAllBackendsUnavailable (503 + Retry-After), of a write placed on a
+// strict target that no driver is registered under on this process: never
+// another backend in its place (Prompt 2b.6 G1).
+var ErrStrictTargetUnregistered = errors.New("strict target backend is not registered")
 
 // strictTarget reports whether name is asked alone when it is the target of
 // a write or the recorded backend of a read.
