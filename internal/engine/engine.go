@@ -152,7 +152,7 @@ func (e *CoreEngine) Get(ctx context.Context, container, artifact string) (io.Re
 
 	// Build candidate list: preferred backend first, then primary, then
 	// others — a strict target alone (E1.1).
-	candidates := e.readCandidates(preferredBackend)
+	candidates := e.readCandidates(preferredBackend, "get")
 
 	var reader io.ReadCloser
 	usedBackend, err := e.failover.ExecuteOp(ctx, "get", candidates, func(driverName string) error {
@@ -190,7 +190,7 @@ func (e *CoreEngine) GetRange(ctx context.Context, container, artifact string, o
 		}
 	}
 
-	candidates := e.readCandidates(preferredBackend)
+	candidates := e.readCandidates(preferredBackend, "get_range")
 
 	var reader io.ReadCloser
 	_, err := e.failover.ExecuteOp(ctx, "get_range", candidates, func(driverName string) error {
@@ -395,7 +395,12 @@ func (e *CoreEngine) Delete(ctx context.Context, container, artifact string) err
 	e.mu.RLock()
 	_, registered := e.drivers[targetBackend]
 	e.mu.RUnlock()
-	if targetBackend != e.primary && !registered {
+	switch {
+	case strictTarget(targetBackend) && !registered:
+		// The primary's DELETE of an absent key succeeds: 204 and the row
+		// dropped while the bytes stay on the strict backend (F3.1).
+		e.strictTargetUnregistered(targetBackend, "delete")
+	case targetBackend != e.primary && !registered:
 		candidates = append(candidates, e.primary)
 	}
 
@@ -579,15 +584,32 @@ var strictTargetBackends = map[string]bool{
 // a write or the recorded backend of a read.
 func strictTarget(name string) bool { return strictTargetBackends[name] }
 
+// IsStrictTarget is strictTarget for the API layer.
+func IsStrictTarget(name string) bool { return strictTarget(name) }
+
 // readCandidates is the Get/GetRange candidate list for an object recorded
-// on preferred: preferred alone when it is a strict target.
-func (e *CoreEngine) readCandidates(preferred string) []string {
+// on preferred: preferred alone when it is a strict target — and nobody when
+// that strict target is not registered on this process (Prompt 2b.5 F3.1:
+// a redeploy without SYNC_WEBDAV_URLS fanned every sync-row read out to the
+// primary, which served whatever older copy of the key it held, 200).
+// ExecuteOp over no candidate is ErrAllBackendsUnavailable: 503.
+func (e *CoreEngine) readCandidates(preferred, op string) []string {
 	if strictTarget(preferred) {
 		if _, ok := e.drivers[preferred]; ok {
 			return []string{preferred}
 		}
+		e.strictTargetUnregistered(preferred, op)
+		return nil
 	}
 	return e.buildCandidateList(preferred)
+}
+
+// strictTargetUnregistered logs and counts a call routed to a strict target
+// that no driver is registered under.
+func (e *CoreEngine) strictTargetUnregistered(name, op string) {
+	strictUnregistered.WithLabelValues(name, op).Inc()
+	e.logger.Error("call routed to a strict backend that is not registered on this process — answered 503, never another backend",
+		zap.String("backend", name), zap.String("op", op))
 }
 
 // buildWriteCandidateList is buildCandidateList restricted to backends that
@@ -600,6 +622,8 @@ func (e *CoreEngine) buildWriteCandidateList(target string) []string {
 		if _, ok := e.drivers[target]; ok {
 			return []string{target}
 		}
+		e.strictTargetUnregistered(target, "put")
+		return nil
 	}
 	all := e.buildCandidateList(target)
 	writable := make([]string, 0, len(all))

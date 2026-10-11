@@ -50,8 +50,11 @@ func NewLyveDriver(accessKey, secretKey, tenantID, region string, logger *zap.Lo
 		// guards against a vendor-side gateway upgrade silently flipping us
 		// onto h2, where Go multiplexes all concurrent transfers onto one
 		// TCP connection (measured 9× ingest collapse on Geyser, the one
-		// gateway that does speak h2).
-		config.WithHTTPClient(TunedHTTPClient(WithHTTP1Only())),
+		// gateway that does speak h2). Response headers within 60 s like the
+		// fixed-bucket drivers (Prompt 2b.5 F3.4: the 2b.4 bound missed
+		// lyve, prod's primary since 2026-10-11 — a hung GET lasted until
+		// the caller's deadline).
+		config.WithHTTPClient(s3ObjectHTTPClient()),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)

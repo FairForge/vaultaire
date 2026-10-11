@@ -17,7 +17,15 @@ download diagnosis 2026-10-09). No I/O of its own: the caller supplies
   mean: the tail would inflate a mean and stop the hedging it is for. A part
   whose timer fires while every slot is taken looks again after another
   delay — it never gives up (2b.4 E2.1: a part that missed its slot never
-  hedged, and a hung first attempt held the whole ordered stream).
+  hedged, and a hung first attempt held the whole ordered stream). An error
+  never ends a part's hedging either (Prompt 2b.5 F3.2): when an attempt
+  fails while another is still out, the timer is re-armed and that one gets
+  a slot-hedge — at most two in flight, **three attempts per part** (an
+  error-then-hung-retry and a hung original whose hedge errored both used to
+  wait for the caller's deadline). Re-arms wait the fixed `HedgeAfter`, and
+  only the winning attempt's own fetch time feeds the median (F3.3: a part's
+  time included its wait for a slot, the wait fed the next delay, and a
+  brownout compounded 20 ms → 5 s, 14.7 s for 0.4 s of work).
 - **`MaxHedges` is per stream; nothing bounds hedges process-wide.** Measured
   3.8 % extra backend GETs under iDrive-shaped latency, 24 % under a hostile
   profile; prod's first two streams made 20 hedges, 13 won. Watch
@@ -27,7 +35,8 @@ download diagnosis 2026-10-09). No I/O of its own: the caller supplies
 - `StrictSizes` (opt-in): a part whose bytes are not its declared size is a
   failed attempt (`ErrPartSize`, retried once). Off by default — both callers
   check lengths themselves (SHA-256 per chunk, `io.ReadFull` per range); a
-  new caller that does not must set it.
+  new caller that does not must set it. No caller sets it today — it is
+  wired nowhere, on purpose (Prompt 2b.5 F3.9).
 - `Next()` returns parts strictly in order (`io.EOF` after the last; errors
   sticky). `Close()` cancels, waits for every goroutine, returns all budget.
 - `Reader` adapts a stream to `io.ReadCloser` + `io.WriterTo`; a part failure
@@ -37,4 +46,6 @@ download diagnosis 2026-10-09). No I/O of its own: the caller supplies
 Used by `internal/api/s3_large_get.go` (chunked GET + `parallel_get` ranged
 GET). Tests: `stream_test.go` (order under out-of-order completion, hedge
 cancels the loser, a part that missed a hedge slot hedges later,
-StrictSizes, window/count/budget bounds, Close/cancel leak checks).
+StrictSizes, window/count/budget bounds, Close/cancel leak checks) and
+`hedge_rearm_test.go` (error-then-hang, hung original + failed hedge,
+MaxHedges under re-arms, randomized byte-exact, the delay not compounding).

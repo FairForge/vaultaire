@@ -469,8 +469,18 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		}
 		if reader == nil {
 			if ce, ok := a.engine.(*engine.CoreEngine); ok {
-				if rr, rangeErr := ce.GetRange(gctx, container, artifact, rng.start, rng.length); rangeErr == nil {
+				rr, rangeErr := ce.GetRange(gctx, container, artifact, rng.start, rng.length)
+				switch {
+				case rangeErr == nil:
 					reader, nativeRange = rr, rng
+				case errors.Is(rangeErr, engine.ErrAllBackendsUnavailable) && engine.IsStrictTarget(cachedBackendName):
+					// A strict backend (sync) that could not be asked: the
+					// whole-object GET below would ask it alone again and
+					// charge its breaker a second time for one request (3
+					// ranged reads opened it instead of 5 — Prompt 2b.5
+					// F3.7). Elsewhere the fallback stays: a vendor whose
+					// range path fails may still serve the whole object.
+					err = rangeErr
 				}
 			}
 		}
@@ -481,7 +491,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	if reader == nil && cacheHit && cachedEncAlgo == "" && cachedFloor != usage.FloorVault && r.Header.Get("Range") == "" {
 		reader = a.openParallelGet(gctx, t.ID, container, artifact, cachedSize, 0, cachedSize)
 	}
-	if reader == nil {
+	if reader == nil && err == nil {
 		reader, err = a.engine.Get(gctx, container, artifact)
 	}
 	// A vault object whose backend failed — an error, not found through the

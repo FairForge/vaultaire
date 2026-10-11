@@ -22,10 +22,21 @@ var fallover = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Help: "Engine calls that moved on from a failed backend (or one whose breaker was open) to the next candidate, by the backend that failed, the one asked next, and op (get, get_range, put, delete, other).",
 }, []string{"from", "to", "op"})
 
+// strictUnregistered counts calls routed to a strict target (`sync`) that no
+// driver is registered under on this process: each is a 503, never another
+// backend's (possibly stale) copy (Prompt 2b.5 F3.1).
+var strictUnregistered = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "vaultaire_engine_strict_target_unregistered_total",
+	Help: "Engine calls routed to a strict backend (sync) that is not registered on this process, answered 503, by backend and op (get, get_range, put, delete).",
+}, []string{"backend", "op"})
+
 // Collectors are the engine's metrics, for the server's registry.
 func Collectors() []prometheus.Collector {
-	return []prometheus.Collector{partialUnavailable, fallover}
+	return []prometheus.Collector{partialUnavailable, fallover, strictUnregistered}
 }
+
+// StrictUnregisteredCounter is vaultaire_engine_strict_target_unregistered_total.
+func StrictUnregisteredCounter() *prometheus.CounterVec { return strictUnregistered }
 
 // PartialUnavailableCounter is vaultaire_engine_partial_unavailable_total
 // (tests read it).

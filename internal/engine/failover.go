@@ -269,7 +269,7 @@ func (f *FailoverManager) ExecuteOp(ctx context.Context, op string, backends []s
 		firstErr         error // outcome of the first candidate that was actually asked
 		firstUnavailable bool  // first candidate skipped (open breaker) or failed as a backend
 		first            = true
-		walkedPast       string // the last backend that failed or was skipped as open
+		walkedPast       string // the first backend failed or skipped as open since the last one asked
 	)
 
 	for _, backend := range backends {
@@ -298,7 +298,12 @@ func (f *FailoverManager) ExecuteOp(ctx context.Context, op string, backends []s
 			}
 			f.logger.Debug("circuit breaker open, skipping backend",
 				zap.String("backend", backend))
-			walkedPast = backend
+			// The backend the request was walking away from keeps the
+			// label: [idrive fails, lyve open, s3 serves] is idrive→s3,
+			// never lyve→s3 (Prompt 2b.5 F3.6).
+			if walkedPast == "" {
+				walkedPast = backend
+			}
 			continue
 		}
 

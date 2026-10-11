@@ -329,15 +329,20 @@ type attempt struct {
 	data  []byte
 	err   error
 	hedge bool
+	took  time.Duration // this attempt's own fetch time
 }
+
+// maxPartAttempts caps the fetches of one part: the first, one immediate
+// retry after an error, and hedges after the delay while an attempt is
+// still out — at most two in flight at once.
+const maxPartAttempts = 3
 
 func (s *Stream) runPart(i int) {
 	defer s.wg.Done()
 	pctx, cancel := context.WithCancel(s.ctx)
 	defer cancel()
 
-	ch := make(chan attempt, 2) // never more than two attempts: no send blocks
-	start := time.Now()
+	ch := make(chan attempt, maxPartAttempts) // no send ever blocks
 	launch := func(hedge, slot bool) {
 		s.wg.Add(1)
 		go func() {
@@ -345,11 +350,12 @@ func (s *Stream) runPart(i int) {
 			if slot {
 				defer s.hedges.Add(-1)
 			}
+			start := time.Now()
 			data, err := s.fetch(pctx, i)
 			if err == nil && s.cfg.StrictSizes && int64(len(data)) != s.sizes[i] {
 				data, err = nil, fmt.Errorf("%w: part %d is %d bytes, declared %d", ErrPartSize, i, len(data), s.sizes[i])
 			}
-			ch <- attempt{data: data, err: err, hedge: hedge}
+			ch <- attempt{data: data, err: err, hedge: hedge, took: time.Since(start)}
 		}()
 	}
 	launch(false, false)
@@ -359,13 +365,29 @@ func (s *Stream) runPart(i int) {
 		timer  *time.Timer
 		timerC <-chan time.Time
 	)
-	if hedging {
-		timer = time.NewTimer(s.hedgeDelay())
-		defer timer.Stop()
+	// arm (re)starts the hedge timer. A re-arm waits the fixed HedgeAfter,
+	// never hedgeDelay(): the running median it reads is fed by parts that
+	// themselves waited, and a wait that feeds the next wait compounded to
+	// 14.7 s for 0.4 s of work (Prompt 2b.5 F3.3).
+	arm := func(d time.Duration) {
+		if timer == nil {
+			timer = time.NewTimer(d)
+		} else {
+			timer.Reset(d)
+		}
 		timerC = timer.C
 	}
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
+	if hedging {
+		arm(s.hedgeDelay())
+	}
 
-	pending, hedged := 1, false
+	pending, launched := 1, 1
+	retried := false // the one immediate retry after an error is spent
 	var firstErr error
 	for {
 		select {
@@ -377,22 +399,31 @@ func (s *Stream) runPart(i int) {
 						h()
 					}
 				}
-				s.observe(time.Since(start))
-				cancel() // the other attempt, if any, is the loser
+				s.observe(a.took)
+				cancel() // the others, if any, are the losers
 				s.results[i] <- result{data: a.data}
 				return
 			}
 			if firstErr == nil {
 				firstErr = a.err
 			}
-			if hedging && !hedged && pctx.Err() == nil {
-				hedged = true
+			canLaunch := hedging && launched < maxPartAttempts && pctx.Err() == nil
+			if canLaunch && pending == 0 && !retried {
+				// Nothing else in flight: ask again at once (once).
+				retried = true
+				launched++
 				pending++
 				if h := s.cfg.Hooks.Hedged; h != nil {
 					h("error")
 				}
 				launch(true, false)
-				continue
+			}
+			if canLaunch && timerC == nil {
+				// An attempt is still out (it may hang): it gets a hedge of
+				// its own after the delay — an error never ends the
+				// hedging of a part (Prompt 2b.5 F3.2: an error-then-hang,
+				// or a hang whose hedge errored, waited forever).
+				arm(s.cfg.HedgeAfter)
 			}
 			if pending == 0 {
 				s.results[i] <- result{err: firstErr}
@@ -400,7 +431,7 @@ func (s *Stream) runPart(i int) {
 			}
 		case <-timerC:
 			timerC = nil
-			if hedged || pending == 0 {
+			if pending == 0 || pending >= 2 || launched >= maxPartAttempts {
 				continue
 			}
 			if s.hedges.Add(1) > int32(s.cfg.MaxHedges) {
@@ -409,11 +440,10 @@ func (s *Stream) runPart(i int) {
 				// holds the whole ordered stream (2b.4 E2.1: a part that
 				// missed its slot never hedged and the download stalled).
 				s.hedges.Add(-1)
-				timer.Reset(s.hedgeDelay())
-				timerC = timer.C
+				arm(s.cfg.HedgeAfter)
 				continue
 			}
-			hedged = true
+			launched++
 			pending++
 			if h := s.cfg.Hooks.Hedged; h != nil {
 				h("slow")
