@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"syscall"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -56,24 +57,52 @@ func TestIsObjectMissingErr(t *testing.T) {
 			true,
 		},
 		{
-			"local driver path error text",
+			"local driver path error, typed",
+			fmt.Errorf("artifact not found: %w", &os.PathError{Op: "open", Path: "/tmp/vaultaire-data/t1_b/k", Err: syscall.ENOENT}),
+			true,
+		},
+		// Prompt 2b.5 F1.1: the text is never read. Every driver puts the
+		// key in its message, so these strings are what a 403 or a 5xx on a
+		// key NAMED like a miss looks like — never a miss.
+		{
+			"text only: path error text",
 			errors.New("open /tmp/vaultaire-data/t1_b/k: no such file or directory"),
-			true,
+			false,
 		},
 		{
-			"aws-sdk GetObject miss (iDrive/Lyve/S3 drivers)",
+			"text only: SDK miss words",
 			errors.New("get t1_b/k: idrive get t1/b/k: operation error S3: GetObject, https response error StatusCode: 404, RequestID: X, HostID: Y, api error NoSuchKey: The specified key does not exist"),
-			true,
+			false,
 		},
 		{
-			"aws-sdk HeadObject miss",
+			"text only: HeadObject miss words",
 			errors.New("get t1_b/k: api error NotFound: Not Found"),
-			true,
+			false,
 		},
 		{
-			"bare 404 status text",
+			"text only: bare 404 status text",
 			errors.New("unexpected status code: 404"),
-			true,
+			false,
+		},
+		{
+			"sdk 403 AccessDenied on a key named 'page not found'",
+			fmt.Errorf("get t1_b/errors/page not found.html: %w", sdkErr("GetObject", 403, &smithy.GenericAPIError{Code: "AccessDenied", Message: "Access Denied"})),
+			false,
+		},
+		{
+			"sdk HEAD 403 without a body (code Forbidden) on a key named NotFound-0",
+			fmt.Errorf("head t1_b/NotFound-0: %w", sdkErr("HeadObject", 403, &smithy.GenericAPIError{Code: "Forbidden", Message: "Forbidden"})),
+			false,
+		},
+		{
+			"sdk 500 whose body says NotFound",
+			sdkErr("GetObject", 500, &smithy.GenericAPIError{Code: "InternalError", Message: "upstream NotFound"}),
+			false,
+		},
+		{
+			"partially unavailable wrapping a typed NotFoundError is NOT a miss",
+			fmt.Errorf("get t1_b/k: %w: %w", engine.ErrPartiallyUnavailable, engine.ErrNotFound("t1_b", "k")),
+			false,
 		},
 		{
 			"connection refused is a backend failure",
@@ -144,7 +173,7 @@ func TestIsObjectMissingErr(t *testing.T) {
 		{
 			"unavailable wrapping a fallback's not-found is NOT a miss",
 			fmt.Errorf("get t1_b/k: %w: all backends failed: %w", engine.ErrAllBackendsUnavailable,
-				errors.New("open /tmp/vaultaire-data/t1_b/k: no such file or directory")),
+				&os.PathError{Op: "open", Path: "/tmp/vaultaire-data/t1_b/k", Err: syscall.ENOENT}),
 			false,
 		},
 		{
@@ -163,6 +192,9 @@ func TestIsObjectMissingErr(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.missing, isObjectMissingErr(tt.err))
+			// The breaker's half and the handlers' half agree on every
+			// shape (Prompt 2b.5 F1.1: one predicate).
+			assert.Equal(t, engine.IsObjectMiss(tt.err), isObjectMissingErr(tt.err))
 		})
 	}
 }

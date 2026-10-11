@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -114,11 +115,17 @@ func newChunkStorePool(
 	return p
 }
 
-// fail records the first error and cancels in-flight work. Later errors are
-// dropped — they are almost always cascades of the first cancellation.
+// fail records the first real error and cancels in-flight work. Later errors
+// are cascades of that cancellation and are dropped — but a cancelled
+// sibling can report before the cause does (its fall-over to the next
+// backend dies with context.Canceled while the cause is still on its way to
+// the collector), so a cancellation is replaced by the first error that is
+// not one: the handler maps the cause (a backend that could not be asked →
+// 503 + Retry-After), never the sibling's "context canceled" → 500 (prod
+// 2026-10-11 03:51, six 500s on a 1 GiB chunked PUT; Prompt 2b.5 F1.3).
 func (p *chunkStorePool) fail(err error) {
 	p.mu.Lock()
-	if p.firstErr == nil {
+	if p.firstErr == nil || (errors.Is(p.firstErr, context.Canceled) && !errors.Is(err, context.Canceled)) {
 		p.firstErr = err
 	}
 	p.mu.Unlock()

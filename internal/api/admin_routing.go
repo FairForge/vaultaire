@@ -208,8 +208,16 @@ func (c *RoutingTruthChecker) resolveNull(ctx context.Context, dry bool, limit i
 				d.Verdict, d.ErrorMsg = "error", "circuit breaker open on "+b
 				break
 			}
+			// The driver directly, like checkWhole: observe the breaker,
+			// never charge it — five NULL rows against a primary answering
+			// 403 opened it through ExistsOn and moved live PUTs
+			// (Prompt 2b.5 F1.4).
+			drv, ok := c.eng.GetDriver(b)
+			if !ok {
+				continue
+			}
 			cctx, cancel := context.WithTimeout(common.WithTenantID(ctx, h.tenantID), routingExistsTimeout)
-			ok, eErr := c.eng.ExistsOn(cctx, b, container, h.key)
+			ok, eErr := drv.Exists(cctx, container, h.key)
 			cancel()
 			if eErr != nil {
 				d.Verdict, d.ErrorMsg = "error", b+": "+eErr.Error()

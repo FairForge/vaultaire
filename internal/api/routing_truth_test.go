@@ -664,3 +664,29 @@ func TestRoutingTruth_Run_ChunkedRowsAreCheckedChunkByChunkAtTheOneAddress(t *te
 	assert.Equal(t, 1, res.Chunks.UnknownBackend)
 	assert.Equal(t, len(chunksGone), res.Chunks.Missing)
 }
+
+// Prompt 2b.5 F1.4: resolve-null asks each driver directly — it observes a
+// breaker, never charges it. Through engine.ExistsOn five NULL rows against
+// a primary answering 403 opened its breaker and moved live PUTs to the next
+// backend (before: open after one dry run of six rows).
+func TestRoutingTruth_Admin_ResolveNullNeverChargesABreaker(t *testing.T) {
+	f := setupRoutingTruthFixture(t)
+	forbidden, fi := newForbiddenIDrive(t, "idrive")
+	f.eng.AddDriver("idrive", forbidden)
+	f.eng.SetPrimary("idrive")
+	for i := 0; i < 6; i++ {
+		f.row("b", fmt.Sprintf("null-%d", i), "", false)
+	}
+	s := newRoutingTruthServer(t, f)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/routing-truth/resolve-null?dry_run=true", nil)
+	w := httptest.NewRecorder()
+	s.handleAdminRoutingTruthResolveNull(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var res resolveNullResult
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &res))
+
+	assert.Equal(t, 6, res.Errors, "a 403 is an error for every row")
+	assert.GreaterOrEqual(t, fi.objectCalls.Load(), int32(6), "the forbidden backend was asked")
+	assert.Equal(t, engine.StateClosed.String(), f.eng.GetFailoverStatus()["idrive"], "observed, never charged")
+}

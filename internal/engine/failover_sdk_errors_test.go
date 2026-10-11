@@ -12,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/smithy-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -91,14 +92,32 @@ func TestIsBackendFailure_RealSDKErrorShapes(t *testing.T) {
 		{"GET 503 SlowDown", "GET", 503, xmlSlowDown, true},
 		{"GET 403 AccessDenied — dead key IS a failure", "GET", 403, xmlAccessDenied, true},
 		{"HEAD 500 empty body", "HEAD", 500, "", true},
+		// The 2026-10-11 iDrive shape (Prompt 2b.5 F2.3): an object-level 403
+		// is charged and is never a miss — GET/PUT/DELETE carry AccessDenied,
+		// HeadObject has no body (the SDK names it Forbidden).
+		{"HEAD 403 empty body (code Forbidden) — dead key IS a failure", "HEAD", 403, "", true},
+		{"DELETE 403 AccessDenied", "DELETE", 403, xmlAccessDenied, true},
+		{"GET 500 whose message says NotFound", "GET", 500, `<?xml version="1.0" encoding="UTF-8"?><Error><Code>InternalError</Code><Message>upstream NotFound</Message></Error>`, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			err := s3ErrorFrom(t, tc.op, tc.status, tc.body)
 			t.Logf("error text: %v", err)
 			assert.Equal(t, tc.wantFailure, isBackendFailure(err))
+			// Every shape here is a miss or a failure, never both.
+			assert.Equal(t, !tc.wantFailure, IsObjectMiss(err))
+			// The same error on a key whose NAME reads like a miss: the
+			// verdict is the error's type, never its text (F1.1).
+			named := fmt.Errorf("idrive get t-a/c/errors/page not found.html (NotFound-0, 404.html): %w", err)
+			assert.Equal(t, tc.wantFailure, isBackendFailure(named))
+			assert.Equal(t, !tc.wantFailure, IsObjectMiss(named))
 		})
 	}
+	var apiErr smithy.APIError
+	require.ErrorAs(t, s3ErrorFrom(t, "HEAD", 403, ""), &apiErr)
+	assert.Equal(t, "Forbidden", apiErr.ErrorCode(), "the HeadObject 403 shape")
+	require.ErrorAs(t, s3ErrorFrom(t, "GET", 403, xmlAccessDenied), &apiErr)
+	assert.Equal(t, "AccessDenied", apiErr.ErrorCode())
 }
 
 // A refused connection (backend down) must still trip the breaker.

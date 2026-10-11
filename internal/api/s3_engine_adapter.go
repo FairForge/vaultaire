@@ -411,8 +411,10 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	// plain path: a whole-object blob can exist at this key from before the
 	// object was chunked (or before an overwrite), and falling through served
 	// the previous object's bytes under the current version's ETag/size. The
-	// preflight resolves every chunk before any byte is written, so the 500
-	// is always clean.
+	// preflight resolves every chunk before any byte is written, so the
+	// status is always clean: 503 + Retry-After when a chunk's backend could
+	// not be asked (sync and backup clients retry a 503 and alert on a 500 —
+	// Prompt 2b.5 F1.2), else 500.
 	if cacheHit && cachedIsChunked && a.gci != nil {
 		chunkErr := a.handleChunkedGet(w, r, t, bucket, artifact,
 			cachedSize, cachedETag, cachedContentType, cachedUpdatedAt,
@@ -422,6 +424,11 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 				zap.Error(chunkErr),
 				zap.String("bucket", bucket),
 				zap.String("artifact", artifact))
+			if errors.Is(chunkErr, engine.ErrAllBackendsUnavailable) {
+				w.Header().Set("Retry-After", "30")
+				WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
+				return
+			}
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		}
 		return
@@ -1087,6 +1094,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 			case errors.Is(chunkErr, errBadDigest):
 				WriteS3Error(w, ErrBadDigest, r.URL.Path, generateRequestID())
 			case errors.Is(chunkErr, engine.ErrAllBackendsUnavailable):
+				w.Header().Set("Retry-After", "30")
 				WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
 			default:
 				WriteS3Error(w, bodyReadErrorCode(chunkErr), r.URL.Path, generateRequestID())

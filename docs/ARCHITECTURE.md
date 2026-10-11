@@ -156,7 +156,9 @@ may lag or drift — smart demotion updates the head row only (R6-14, WP-R6-1).
 
 **Not found vs. unavailable.** `isBackendFailure`
 (`internal/engine/failover.go`) and `isObjectMissingErr`
-(`internal/api/not_found.go`) are two halves of one taxonomy, kept in sync:
+(`internal/api/not_found.go`) are two halves of one taxonomy; both call
+`engine.IsObjectMiss`, which decides by error TYPE only — never by text, which
+carries the customer's key (Prompt 2b.5 F1.1):
 
 | Outcome | Examples | Breaker | S3 answer |
 |---------|----------|---------|-----------|

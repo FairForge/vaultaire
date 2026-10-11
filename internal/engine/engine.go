@@ -410,7 +410,7 @@ func (e *CoreEngine) Delete(ctx context.Context, container, artifact string) err
 	// A failed delete keeps the routing records with the head row, so the
 	// retry asks the same backend (Prompt 2b.3 D1.5); a miss is gone too —
 	// any backend's miss, the local driver's *fs.PathError included (E1.4).
-	if lastErr == nil || isObjectMiss(lastErr) {
+	if lastErr == nil || IsObjectMiss(lastErr) {
 		e.objectBackends.Delete(key)
 		if e.locations != nil {
 			_ = e.locations.RemoveLocation(ctx, tenantID, container, artifact)

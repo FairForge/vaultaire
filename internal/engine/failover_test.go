@@ -411,12 +411,6 @@ func TestIsBackendFailure_ClassifiesErrors(t *testing.T) {
 		ErrQuotaExceeded,
 		ErrInvalidInput,
 		PermissionError{TenantID: "t", Action: "write"},
-		fmt.Errorf("remove /data/c/k: no such file or directory"),
-		fmt.Errorf("operation error S3: GetObject, NoSuchKey: key does not exist"),
-		// aws-sdk-go-v2 formats the status as "StatusCode: 404" (the lowercase
-		// "status code:" was v1). Real, typed SDK chains are covered by
-		// failover_sdk_errors_test.go; this is the stringified fallback.
-		fmt.Errorf("https response error StatusCode: 404, RequestID: X, api error NotFound: Not Found"),
 		&NotFoundError{Container: "c", Artifact: "a"},
 		fmt.Errorf("all backends failed: %w", NotFoundError{Container: "c", Artifact: "a"}),
 	}
@@ -429,6 +423,13 @@ func TestIsBackendFailure_ClassifiesErrors(t *testing.T) {
 		fmt.Errorf("lookup e2-us-east-1.idrive.com: no such host"),
 		fmt.Errorf("context deadline exceeded"),
 		fmt.Errorf("https response error status code: 503"),
+		// Prompt 2b.5 F1.1: the text is never read — a driver's message
+		// carries the key, so these are a failure on a key NAMED like a miss.
+		// Real, typed SDK chains are covered by failover_sdk_errors_test.go.
+		fmt.Errorf("remove /data/c/k: no such file or directory"),
+		fmt.Errorf("operation error S3: GetObject, NoSuchKey: key does not exist"),
+		fmt.Errorf("https response error StatusCode: 404, RequestID: X, api error NotFound: Not Found"),
+		fmt.Errorf("idrive get t-a/c/errors/page not found.html: AccessDenied"),
 		fmt.Errorf("unexpected EOF"),
 		ErrTimeout,
 	}
