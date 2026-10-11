@@ -64,6 +64,13 @@ var copySourceSizeMismatch = prometheus.NewCounter(prometheus.CounterOpts{
 // (Prompt 2b.3 D2.1: a 20-byte source recorded as 10 was stored as its
 // 10-byte prefix, 200). The source is a backend's GET body, framed: the
 // probe gets EOF at once.
+//
+// Invariant: r is a FRAMED backend body (engine.Get's reader), never a
+// client's request body. The one-byte probe blocks until the source says
+// EOF; a body that withholds EOF (a client that keeps its connection open
+// after its declared bytes) would hold the copy until the read deadline.
+// copyObject is its only user — pinned by
+// TestExactSizeReader_OnlyUserIsTheCopyPath (2b.4 E2.5).
 type exactSizeReader struct {
 	r    io.Reader
 	want int64

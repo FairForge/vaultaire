@@ -36,7 +36,7 @@ func NewChunkEncryptionService(km *KeyManager) *ChunkEncryptionService {
 // (R8-01).
 //
 // Ciphertext format: [nonce (12B)][GCM ciphertext + tag (len(data)+16)]
-// Overhead: 28 bytes per chunk.
+// Overhead: ChunkEncryptionOverhead (28) bytes per chunk.
 func (s *ChunkEncryptionService) EncryptChunkData(tenantID string, plaintextHash string, data []byte) ([]byte, string, error) {
 	convergentKey, err := s.deriveConvergentKey(tenantID, plaintextHash)
 	if err != nil {
@@ -153,3 +153,8 @@ func (s *ChunkEncryptionService) deriveNonce(convergentKey []byte, sealed []byte
 	}
 	return nonce, nil
 }
+
+// ChunkEncryptionOverhead is what EncryptChunkData adds to a chunk: the
+// 12-byte nonce and the 16-byte GCM tag. A reader sizing a buffer for a
+// stored chunk from its recorded size adds it.
+const ChunkEncryptionOverhead = 12 + 16

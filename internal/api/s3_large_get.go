@@ -287,6 +287,7 @@ type parallelGetReader struct {
 	eng     *engine.CoreEngine
 	backend string
 	start   time.Time
+	length  int64 // the bytes the stream yields: all of them is done
 	n       int64
 	once    sync.Once
 }
@@ -306,7 +307,11 @@ func (r *parallelGetReader) WriteTo(w io.Writer) (int64, error) {
 func (r *parallelGetReader) Close() error {
 	r.once.Do(func() {
 		err := r.Err()
-		done := r.Done()
+		// A Range GET is written with io.CopyN, which stops after exactly
+		// length bytes without the read that would see EOF: every byte
+		// delivered is done too (2b.4 E2.2 — it was counted "aborted" and
+		// recorded no breaker success).
+		done := r.Done() || (err == nil && r.n == r.length)
 		_ = r.Reader.Close()
 		switch {
 		case done:
@@ -404,5 +409,5 @@ func (a *S3ToEngine) openParallelGet(ctx context.Context, tenantID, container, a
 		return nil
 	}
 	common.SetBackendUsed(ctx, backend)
-	return &parallelGetReader{Reader: parfetch.NewReader(stream, first), eng: ce, backend: backend, start: start}
+	return &parallelGetReader{Reader: parfetch.NewReader(stream, first), eng: ce, backend: backend, start: start, length: length}
 }
