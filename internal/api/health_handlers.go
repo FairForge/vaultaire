@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/http"
 	"runtime"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -125,6 +127,20 @@ func (b *BackendHealthChecker) GetOverallStatus() (status string, healthy int, t
 	}
 }
 
+// failingBackends names the backends whose last probe failed, sorted.
+func (b *BackendHealthChecker) failingBackends() []string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	var out []string
+	for id, st := range b.backends {
+		if !st.Healthy {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // GetBackendStates returns all backend states
 func (b *BackendHealthChecker) GetBackendStates() map[string]*BackendHealthState {
 	b.mu.RLock()
@@ -166,8 +182,21 @@ func (s *Server) handleHealthEnhanced(w http.ResponseWriter, r *http.Request) {
 		"backends_total":   total,
 	}
 
+	var reasons []string
+	if failing := s.healthChecker.failingBackends(); len(failing) > 0 {
+		reasons = append(reasons, "probe failing on "+strings.Join(failing, ", "))
+	}
 	if s.engine != nil {
-		resp["circuit_breakers"] = s.engine.GetFailoverStatus()
+		breakers := s.engine.GetFailoverStatus()
+		resp["circuit_breakers"] = breakers
+		if reason := primaryBreakerReason(s.engine.GetPrimary(), breakers); reason != "" {
+			status, healthy, total = withPrimaryBreakerOpen(s.healthChecker, s.engine.GetPrimary(), healthy, total)
+			resp["status"], resp["backends_healthy"], resp["backends_total"] = status, healthy, total
+			reasons = append(reasons, reason)
+		}
+	}
+	if len(reasons) > 0 {
+		resp["reason"] = strings.Join(reasons, "; ")
 	}
 	// The slot's own port (vaultaire-switch polls it before stopping the old
 	// slot): how many detached long operations it would cut. Not through
@@ -207,6 +236,33 @@ func (s *Server) handleHealthEnhanced(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// primaryBreakerReason is the /health reason when the primary's breaker is
+// open: every write is then falling over (or 503ing) and every read of the
+// primary's objects 503s, whatever its probe says (Prompt 2b.5 F2.2 — on
+// 2026-10-11 the breaker was open 8.7 h while /health said "healthy").
+func primaryBreakerReason(primary string, breakers map[string]string) string {
+	if primary == "" || breakers[primary] != "open" {
+		return ""
+	}
+	return "circuit breaker open on the primary backend " + primary
+}
+
+// withPrimaryBreakerOpen counts the primary as one unhealthy backend: a
+// healthy probe of it is taken back, an unprobed primary is added.
+func withPrimaryBreakerOpen(hc *BackendHealthChecker, primary string, healthy, total int) (string, int, int) {
+	if st, ok := hc.GetBackendStates()[primary]; ok {
+		if st.Healthy {
+			healthy--
+		}
+	} else {
+		total++
+	}
+	if healthy <= 0 {
+		return "unhealthy", 0, total
+	}
+	return "degraded", healthy, total
 }
 
 // handleLiveness is a simple liveness probe (process alive?)

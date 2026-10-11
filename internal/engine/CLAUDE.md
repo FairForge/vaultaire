@@ -98,3 +98,19 @@ If the target backend isn't registered, falls back to primary silently. Storage 
 - **Quota** (`internal/usage/`) — quota accounting lives entirely in the API layer since WP-1 (single reservation site in `handlePutObject`, atomic displaced-size capture on head-cache upserts, releases on delete). The engine does no quota work.
 
 **Metrics** (`metrics.go`, `engine.Collectors()`, registered in `api/prom_metrics.go`): `vaultaire_engine_fallover_total{from,to,op}` — every time `ExecuteOp` moved on from a backend that failed (or whose breaker was open) to ask the next candidate (Prompt 2b.4 E1.1; before, a Warn `backend failed, trying next` only); a strict target never appears as `from`. `vaultaire_engine_partial_unavailable_total{backend,op}` — every `ErrPartiallyUnavailable` answer `FailoverManager.ExecuteOp` saw (op `get`, `get_range`, `put`, `delete`, `other` for `Execute`). Never a breaker charge, so this is the only count of what one Sync bridge out costs (Prompt 2b.3 D1.2).
+
+**An object-level 403 on the recorded backend** (the 2026-10-11 iDrive shape: HeadBucket/List 200, every object call `AccessDenied`, HeadObject a bodiless 403 the SDK names `Forbidden`). It is a backend failure — charged to the breaker, never a miss (`failover_sdk_errors_test.go`, `api/backend_403_test.go` with the real fixed-bucket driver), and the probe sees it within one interval (the object canary, `api/backend_canary.go`, Prompt 2b.5 F2). What each path answers:
+
+| Path | Breaker closed | Breaker open |
+|------|----------------|--------------|
+| GetObject / Range GET | 503 + Retry-After (charged) | 503 + Retry-After |
+| Chunked GET (a chunk row on that backend) | 503 + Retry-After (F1.2; was 500) | 503 + Retry-After |
+| HeadObject | 200 from `object_head_cache`, no backend call (non-negotiable 2) | same |
+| DeleteObject / DeleteObjects key | 503 + Retry-After / per-key `ServiceUnavailable`, head row kept | same |
+| PutObject STANDARD, the backend is the primary | 503 + Retry-After (a consumed body is never replayed) | 200 on the next write candidate, the row records it |
+| Chunked PUT, the backend is the primary | each chunk falls over to the next candidate; nowhere left → 503 + Retry-After, the cause reported (F1.3) | chunks land on the next candidate |
+| Vault object GET | rebuilt from the parity copy when there is one (`x-vaultaire-served-from: parity`) | same |
+| CDN / CopyObject source | 503 | 503 |
+| dedup GC, deletion runner, erasure sweep, demotion reclaim, parity erase | the call is an error: the row is kept / the tenant deferred, never "erased" | same (an open breaker defers) |
+| `routing_truth` | `error` (observed, never charged), never `missing` | `error` |
+| `resolve-null` | `error` for the row, the breaker observed, never charged (F1.4) | `error` |
