@@ -63,15 +63,16 @@ func TestResolveStorageClass_PublicRoutesToR2(t *testing.T) {
 
 // SYNC is our internal class for the Sync.com WebDAV bridge: only a bucket
 // whose tier is `sync`, of a tenant with the `sync_backend` flag, resolves to
-// it (api.resolvePutStorageClass). Without the driver it is the primary, and
-// the customer sees STANDARD.
+// it (api.resolvePutStorageClass). Without the driver it is still `sync` —
+// a strict target is never substituted (Prompt 2b.6 G1: Put refuses it,
+// 503) — and the customer sees STANDARD.
 func TestResolveStorageClass_SyncRoutesToSync(t *testing.T) {
 	backend, class := ResolveStorageClass("SYNC", "wasabi", map[string]Driver{"wasabi": nil, "sync": nil})
 	assert.Equal(t, "sync", backend)
 	assert.Equal(t, "SYNC", class)
 
 	backend, _ = ResolveStorageClass("SYNC", "wasabi", map[string]Driver{"wasabi": nil})
-	assert.Equal(t, "wasabi", backend)
+	assert.Equal(t, "sync", backend, "never the primary in its place")
 
 	assert.Equal(t, "STANDARD", BackendToStorageClass("sync"))
 	assert.Equal(t, "STANDARD", CustomerStorageClass("standard", "sync"))

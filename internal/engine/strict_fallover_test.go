@@ -60,3 +60,61 @@ func TestStrictTarget_UnregisteredAsksNobody(t *testing.T) {
 	err = eng.Delete(context.Background(), "c", "k")
 	assert.ErrorIs(t, err, ErrAllBackendsUnavailable, "the primary's DELETE of an absent key would be a 204 that drops the row")
 }
+
+// Prompt 2b.6 G1: the write side through the entry point. ResolveStorageClass
+// handed the primary back for SYNC when no sync driver was registered, so
+// Put never reached buildWriteCandidateList's strict guard (before:
+// used="idrive" err=nil, the primary written once, put counter +0).
+func TestStrictTarget_PutWithoutTheDriver_AsksNobody(t *testing.T) {
+	eng := NewEngine(nil, nopLogger(), &Config{DefaultBackend: "idrive"})
+	primary := &mockDriver{name: "idrive"}
+	eng.AddDriver("idrive", primary)
+	eng.AddDriver("lyve", &mockDriver{name: "lyve"})
+	before := promtest.ToFloat64(StrictUnregisteredCounter().WithLabelValues("sync", "put"))
+
+	used, err := eng.Put(context.Background(), "c", "k", strings.NewReader("new bytes"), WithStorageClass("SYNC"))
+
+	t.Logf("Put(SYNC) without a sync driver: used=%q err=%v", used, err)
+	assert.ErrorIs(t, err, ErrAllBackendsUnavailable, "503 + Retry-After at the API")
+	assert.ErrorIs(t, err, ErrStrictTargetUnregistered, "typed: the cause is the missing driver, not a failing backend")
+	assert.Empty(t, used)
+	assert.Zero(t, primary.putCount, "the primary is never written")
+	assert.Equal(t, 1.0, promtest.ToFloat64(StrictUnregisteredCounter().WithLabelValues("sync", "put"))-before)
+}
+
+// The resolver never substitutes another backend for a strict target: it
+// names the target, registered or not, and Put refuses it.
+func TestResolveStorageClass_StrictTargetIsNeverSubstituted(t *testing.T) {
+	for class, backend := range storageClassToBackend {
+		if !strictTarget(backend) {
+			continue
+		}
+		got, resolved := ResolveStorageClass(class, "idrive", map[string]Driver{"idrive": nil})
+		assert.Equal(t, backend, got, "class %s", class)
+		assert.Equal(t, class, resolved)
+	}
+}
+
+// R6-04 is unchanged for the target-only backends that are not strict: a
+// target that fails is followed by the primary (the class-mapped ones,
+// geyser and r2, are covered at the handler in api's
+// TestStrictTargetWrite_NonStrictTargetsStillDegradeToThePrimary).
+func TestWriteCandidates_NonStrictTargetOnlyStillFallToThePrimary(t *testing.T) {
+	for _, name := range []string{"local", "r2", "geyser", "permafrost", "idrive-us-west-2"} {
+		t.Run(name, func(t *testing.T) {
+			require.True(t, writeOnlyWhenTargeted(name))
+			require.False(t, strictTarget(name))
+			eng := NewEngine(nil, nopLogger(), &Config{DefaultBackend: "lyve"})
+			eng.AddDriver("lyve", &mockDriver{name: "lyve"})
+			eng.AddDriver(name, &mockDriver{name: name, putErr: errors.New("dial tcp: connection refused")})
+			cands := eng.buildWriteCandidateList(name)
+			require.NotEmpty(t, cands)
+			assert.Equal(t, name, cands[0])
+			assert.Contains(t, cands, "lyve", "the primary follows a failing non-strict target")
+		})
+	}
+	for _, class := range []string{"GLACIER", "DEEP_ARCHIVE", "PUBLIC", "RESILIENT"} {
+		got, _ := ResolveStorageClass(class, "idrive", map[string]Driver{"idrive": nil})
+		assert.Equal(t, "idrive", got, "class %s without its driver degrades to the primary", class)
+	}
+}
