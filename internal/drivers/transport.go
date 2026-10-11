@@ -20,6 +20,7 @@ var tunedTransportDisabled = strings.EqualFold(os.Getenv("VAULTAIRE_TUNED_TRANSP
 type transportConfig struct {
 	insecureTLS           bool
 	responseHeaderTimeout time.Duration
+	completeHeaderTimeout time.Duration
 	http1Only             bool
 	freshConnections      bool
 }
@@ -35,6 +36,35 @@ func WithInsecureTLS() TransportOption {
 // WithResponseHeaderTimeout sets how long to wait for response headers.
 func WithResponseHeaderTimeout(d time.Duration) TransportOption {
 	return func(c *transportConfig) { c.responseHeaderTimeout = d }
+}
+
+// WithCompleteMultipartHeaderTimeout gives CompleteMultipartUpload (POST
+// ?uploadId=) its own, longer response-header timeout. The vendor assembles
+// the object before it answers, and a header timeout is an error the SDK's
+// retryer re-sends: a Complete that legitimately took longer than the
+// general timeout was sent twice, the second answered NoSuchUpload (→ 500)
+// after the first had committed (Prompt 2b.5 F3.8).
+func WithCompleteMultipartHeaderTimeout(d time.Duration) TransportOption {
+	return func(c *transportConfig) { c.completeHeaderTimeout = d }
+}
+
+// completeMultipartHeaderTimeout is the Complete's own bound: minutes, not
+// the 60 s of every other call.
+var completeMultipartHeaderTimeout = 10 * time.Minute
+
+// completeSplitTransport sends CompleteMultipartUpload through complete (the
+// same transport with the longer header timeout), everything else through
+// the embedded one.
+type completeSplitTransport struct {
+	*http.Transport
+	complete *http.Transport
+}
+
+func (t *completeSplitTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method == http.MethodPost && req.URL.Query().Has("uploadId") {
+		return t.complete.RoundTrip(req)
+	}
+	return t.Transport.RoundTrip(req)
 }
 
 // WithFreshConnections makes every request dial its own connection and
@@ -109,5 +139,10 @@ func TunedHTTPClient(opts ...TransportOption) *http.Client {
 		transport.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
 	}
 
+	if cfg.completeHeaderTimeout > 0 && cfg.responseHeaderTimeout > 0 {
+		complete := transport.Clone()
+		complete.ResponseHeaderTimeout = cfg.completeHeaderTimeout
+		return &http.Client{Transport: &completeSplitTransport{Transport: transport, complete: complete}}
+	}
 	return &http.Client{Transport: transport}
 }

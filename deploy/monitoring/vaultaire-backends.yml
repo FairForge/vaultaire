@@ -39,6 +39,21 @@ groups:
           summary: "The primary backend {{ $labels.backend }} is failing its probe"
           description: "{{ $labels.backend }} is the write primary (STORAGE_MODE) and has failed its signed probe (HeadBucket + object canary) for 5+ minutes: PUTs fall over or 503, reads of its objects 503. Check `curl -s localhost:8000/health/backends` for last_error; switching STORAGE_MODE is the owner's call (docs/DEPLOY.md)."
 
+      # A backend whose probe fails now and then without ever staying down
+      # for BackendProbeFailing's 5 minutes (Prompt 2b.5 F3.11): wasabi's
+      # signed HeadBucket timed out at 15 s 1–6×/h for two days (35 failures
+      # in 11 h, latency otherwise 33 ms) while it took 185 fall-over chunk
+      # PUTs — a stalling write candidate must be visible. A backend down
+      # right now is BackendProbeFailing's, not this rule's.
+      - alert: BackendProbeFlapping
+        expr: (increase(vaultaire_backend_probe_failures_total[1h]) > 10) unless on(backend) (vaultaire_backend_health == 0)
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.backend }}: {{ $value | printf \"%.0f\" }} failed probes in the last hour"
+          description: "{{ $labels.backend }} failed more than 10 probes in an hour without staying down (timeouts, intermittent 5xx). If it is a write candidate its PUTs stall too. `curl -s localhost:8000/health/backends` shows the last error; journalctl -u 'vaultaire@*' | grep 'backend health check failed'."
+
       # Lyve is the fallback leg, and its console action intermittently 403s
       # for root in ~5-minute windows — so a longer `for` and a warning.
       - alert: LyveProbeFailing

@@ -470,7 +470,13 @@ func (m *MultiWebDAVDriver) noteCall(ctx context.Context, b *webdavBridge, err e
 		}
 		return
 	}
-	b.lastFail.Store(m.now().UnixNano())
+	// A metadata failure is no data-path evidence either way (Prompt 2b.5
+	// F3.5): three bridges 502ing only their PROPFINDs counted as "failing"
+	// and made a fourth bridge's one data failure a backend failure instead
+	// of partial. It still counts toward the bridge's own breaker.
+	if !meta {
+		b.lastFail.Store(m.now().UnixNano())
+	}
 	if b.failures.Add(1) >= bridgeTripAfter {
 		until := m.now().Add(bridgeCooldown)
 		if b.openUntil.Swap(until.UnixNano()) < m.now().UnixNano() {

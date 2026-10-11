@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -28,9 +29,20 @@ type ContextKey string
 // until TCP gave up, and a large GET's ordered stream waited on it. The
 // clock starts once the request body is written, so a PUT's upload time is
 // not in it (FIXED_BUCKET_PUT_TIMEOUT covers PUTs); what it bounds after a
-// body is the vendor's processing before it answers — 60 s is far past any
-// CompleteMultipartUpload seen on iDrive or Wasabi. A var for tests.
+// body is the vendor's processing before it answers. CompleteMultipartUpload
+// has its own, of minutes (WithCompleteMultipartHeaderTimeout, Prompt 2b.5
+// F3.8): a header timeout is retried by the SDK, and a re-sent Complete
+// whose first copy committed answers NoSuchUpload. A var for tests.
 var fixedBucketResponseHeaderTimeout = 60 * time.Second
+
+// s3ObjectHTTPClient is the client of the S3-class drivers that serve
+// customer reads (the fixed-bucket drivers, lyve): HTTP/1.1, response
+// headers within fixedBucketResponseHeaderTimeout, a Complete within
+// minutes.
+func s3ObjectHTTPClient() *http.Client {
+	return TunedHTTPClient(WithHTTP1Only(), WithResponseHeaderTimeout(fixedBucketResponseHeaderTimeout),
+		WithCompleteMultipartHeaderTimeout(completeMultipartHeaderTimeout))
+}
 
 const (
 	// TenantIDKey is the context key for tenant ID
@@ -107,7 +119,7 @@ func NewFixedBucketS3Driver(name, accessKey, secretKey, endpoint, region, bucket
 		// HTTP/1.1 pinned (2026-08-05 ALPN audit): iDrive gateways refuse h2
 		// at ALPN today — no-op now, insurance against a silent vendor flip
 		// onto h2 single-connection multiplexing (see lyve.go / geyser.go).
-		config.WithHTTPClient(TunedHTTPClient(WithHTTP1Only(), WithResponseHeaderTimeout(fixedBucketResponseHeaderTimeout))),
+		config.WithHTTPClient(s3ObjectHTTPClient()),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("%s: load aws config: %w", name, err)

@@ -141,9 +141,9 @@ func TestBuildWriteCandidateList_TargetOnlyBackends(t *testing.T) {
 	})
 	t.Run("a strict target is asked alone (Prompt 2b.4 E1.1)", func(t *testing.T) {
 		assert.Equal(t, []string{"sync"}, eng.buildWriteCandidateList("sync"))
-		assert.Equal(t, []string{"sync"}, eng.readCandidates("sync"))
-		assert.Equal(t, "geyser", eng.readCandidates("geyser")[0])
-		assert.Greater(t, len(eng.readCandidates("geyser")), 1, "tape keeps its read fall-over")
+		assert.Equal(t, []string{"sync"}, eng.readCandidates("sync", "get"))
+		assert.Equal(t, "geyser", eng.readCandidates("geyser", "get")[0])
+		assert.Greater(t, len(eng.readCandidates("geyser", "get")), 1, "tape keeps its read fall-over")
 	})
 	t.Run("a target-only primary is still writable", func(t *testing.T) {
 		g := NewEngine(nil, nopLogger(), &Config{DefaultBackend: "geyser"})

@@ -199,6 +199,14 @@ rotation into a false alert. Without the probe pair the Lyve probe is the
 driver's signed `HeadBucket` on `stored-<LYVE_REGION>`; only when no Lyve
 driver is registered does it degrade to the old TCP dial.
 
+`BackendProbeFlapping` (warning, Prompt 2b.5 F3.11): more than 10 failed
+probes of one backend in an hour. Measured on prod 2026-10-09..11: the
+`wasabi` HeadBucket timed out at the 15 s probe timeout 1–6 times an hour
+(`vaultaire_backend_probe_failures_total{backend="wasabi"}` +35 in 11 h,
+latency otherwise 33 ms) and health never stayed 0 for 5 minutes, so nothing
+fired — while wasabi, third in the STANDARD write candidates, took 185
+fall-over chunk PUTs during the iDrive outage.
+
 Also probed since R7: every `idrive-<region>` driver that has its own
 `IDRIVE_<REGION>_ACCESS_KEY`/`_SECRET_KEY` pair (signed HeadBucket, starts
 staggered across one 30 s interval — regions running on the primary pair are
