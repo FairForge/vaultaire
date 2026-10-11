@@ -29,7 +29,7 @@ it is **not** committed. It lives in `/etc/default/ntfy-bridge` on the server
 | `vaultaire-backup.yml` | `/etc/prometheus/rules/` | BackupStale / BackupOffboxStale (critical) and BackupRunIncomplete (warning, Prompt 2a.2) — > 26 h or series absent — on the three timestamps `deploy/scripts/pg-backup.sh` writes into its own directory `/opt/vaultaire/metrics/` (user1), which node_exporter reads through root-owned symlinks (see "Backup metrics" below). Installed 2026-10-08; the run timestamp + symlink layout are the 2a.2 change |
 | `vaultaire-longops.yml` | `/etc/prometheus/rules/` | LongOpFailingAfterCommit (warning: ≥ 3 `<Error>` documents inside a committed 200 in 15 min, per op) and LongOpsAbandonedAtShutdown (warning: a stopping slot cancelled a CompleteMultipartUpload / CopyObject / DeleteObjects still running 15 min after its start) on `vaultaire_s3_long_op_total{op,outcome}` / `vaultaire_s3_long_ops_abandoned_total{op}` (`internal/api/s3_long_op.go`, #635). Since Prompt 2a.2 G1 (#644) also LongOpsFailedDuringDrain (warning: `vaultaire_s3_long_ops_drain_errors_total{op}`). Both shutdown counters are exported by the ACTIVE slot from `s3_long_op_incidents` (migration 082), which the stopping slot writes before its DB closes — the stopping slot itself is never scraped, so the in-process counter of #635 could not fire. Installed on SLC 2026-10-09 (sha256 = repo) |
 | `vaultaire-alerts.yml` | `/etc/prometheus/rules/` | the box's original rules (installed 2026-04-04, no source in the repo until Prompt 2b.2 C5 — copied from the box, sha256 `c40d860b…`): VaultaireDown / NodeDown (critical, `up{job=…} == 0` for 1 min), VaultaireHighErrorRate (warning, `rate(vaultaire_errors_total[5m]) > 0.1` for 5 min), DiskSpaceLow / DiskSpaceCritical (< 10 % / < 5 % free on `/`), HighMemoryUsage (> 90 %), HighCPUUsage (> 90 % for 10 min) |
-| `vaultaire-backends.yml`, `vaultaire-auth.yml`, `vaultaire-tls.yml`, `vaultaire-synthetic.yml`, `vaultaire-egress.yml`, `vaultaire-jobs.yml` | `/etc/prometheus/rules/` | alert rules: backend probes / auth failures / origin cert / customer-path canary / egress throttle / background jobs (Review R13 + WP-R10-9 + WP-R13-3 — install all six, checklist item 10). On SLC (checked 2026-10-09): `backends`, `tls`, `backup`, `longops` and `alerts` are installed (sha256 = repo); `auth`, `synthetic`, `egress`, `jobs` and `routing` are NOT |
+| `vaultaire-backends.yml`, `vaultaire-auth.yml`, `vaultaire-tls.yml`, `vaultaire-synthetic.yml`, `vaultaire-egress.yml`, `vaultaire-jobs.yml` | `/etc/prometheus/rules/` | alert rules: backend probes / auth failures / origin cert / customer-path canary / egress throttle / background jobs (Review R13 + WP-R10-9 + WP-R13-3 — install all six, checklist item 10). On SLC (checked 2026-10-11): `alerts`, `backends`, `backup`, `jobs`, `longops`, `tls`, `auth` and `egress` are installed (sha256 = repo, 42 rules); `routing` is held back (it fires on the WP-R7-5 backlog — see below) and `synthetic` waits for `SYNTHETIC_CHECK_URL` |
 
 ## Backup metrics (node_exporter textfile collector)
 
@@ -42,10 +42,23 @@ run on PostgreSQL 18 updated both; Prometheus loads the rule files from
 repo; 35 rules load. `vaultaire-jobs.yml` had **never been installed** until
 13:48 UTC that day (Prompt 2b.3 D2 put it there) — `JobStale`,
 `PeriodicJobStale`, `JobFailing`, `AccountDeletionDeferred` and the stale-copy
-rule were not live before. Still **not installed** (owner item):
-`vaultaire-auth.yml`, `vaultaire-egress.yml`, `vaultaire-routing.yml`,
-`vaultaire-synthetic.yml` (the last needs `SYNTHETIC_CHECK_URL` set first, or
-its absent-series rule fires).
+rule were not live before.
+
+**2026-10-11 (Prompt 2b.4 E4.1):** `vaultaire-auth.yml` and
+`vaultaire-egress.yml` installed (sha256 = repo; 35 → 41 rules), then
+`vaultaire-backends.yml` re-installed with `SyncPartialUnavailable` (42).
+None of the new rules fired in the hours after. (`BackendWriteFailures` and
+`BackendCircuitOpen` did, from 03:50 UTC — the iDrive key's object calls
+answering AccessDenied, found by the Prompt 2b.4 E3 bench; cleared once the
+primary moved to `lyve` at 12:45.) **`vaultaire-routing.yml` is held back**
+(on the box as `/root/vaultaire-routing.yml.held-2b4`): installed at 03:08 UTC
+it fired at once — `RoutingTruthMissing` on `idrive` and `local` (missing
+ratio 1: the rows of the replaced iDrive reseller account and the old `local`
+rows) and `RoutingUnknownBackendRows` pending (2,613 + 3 `onedrive` rows, 62
+NULL). That is the known WP-R7-5 backlog, not a new fault; installed, it is a
+warning in ntfy forever. Install it after the owner's routing-truth backfill
+(`docs/reviews/WP-R7-5.md`, bench tenants → erase). `vaultaire-synthetic.yml`
+stays out until `SYNTHETIC_CHECK_URL` is set (its absent-series rule fires).
 
 `pg-backup.sh` runs as user1 (cron 03:00 UTC) and writes three `.prom` files —
 `vaultaire_backup_{,offbox_,run_}last_success_timestamp_seconds.prom` — into

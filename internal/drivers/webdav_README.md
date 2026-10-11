@@ -329,6 +329,14 @@ ReadWritePaths=/var/lib/sync-webdav
 WantedBy=multi-user.target
 ```
 
+**On the prod box (2026-10-11):** the first bridge (port 4918) runs as
+`sync-webdav.service`; bridges 4919–4922 as `sync-webdav@<port>.service`.
+`sync-webdav@4918.service` also exists — a stale, **disabled** instance of
+the template from the first multi-bridge setup. It is not a down bridge:
+leave it (or `systemctl list-units 'sync-webdav*'` shows five running, which
+is the healthy state). `vaultaire_webdav_bridge_up{backend="sync"}` is the
+truth per bridge.
+
 ```bash
 sudo systemctl daemon-reload && sudo systemctl enable --now sync-webdav
 curl -s -u sync:"$SYNC_WEBDAV_PASSWORD" -X PROPFIND -H 'Depth: 0' http://127.0.0.1:4918/ -o /dev/null -w '%{http_code}\n'   # 207

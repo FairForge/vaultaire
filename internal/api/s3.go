@@ -327,7 +327,10 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		if isPresignedRequest(r) {
 			tenantID, scope, err = s.verifyPresignedURL(r)
 			if err != nil {
-				s.logger.Error("presigned URL verification failed",
+				// A refused credential is the client's outcome, not ours: Info,
+				// no stack (Prompt 2b.4 E4.2 — scanners sent dozens an hour at
+				// Error). The signal is vaultaire_auth_failures_total.
+				s.logger.Info("presigned URL verification failed",
 					zap.Error(err),
 					zap.String("path", r.URL.Path))
 
@@ -355,7 +358,7 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 			a.MissingSignedHeader = s.missingSignedHeaderHint
 			tenantID, scope, err = a.ValidateRequest(r)
 			if err != nil {
-				s.logger.Error("authentication failed",
+				s.logger.Info("authentication failed", // the client's outcome (E4.2)
 					zap.Error(err),
 					zap.String("path", r.URL.Path))
 
