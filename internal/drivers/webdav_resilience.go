@@ -670,7 +670,7 @@ func (d *WebDAVDriver) send(ctx context.Context, method, path string, body io.Re
 	var trialFired atomic.Bool
 	var trialTimer *time.Timer
 	if mode != watchUpload && isBridgeTrial(ctx) {
-		trialTimer = time.AfterFunc(bridgeTrialTimeout, func() { trialFired.Store(true); cancel() })
+		trialTimer = time.AfterFunc(bridgeTrialTimeout(), func() { trialFired.Store(true); cancel() })
 	}
 	call.wd.arm()
 	call.dl.resume()
@@ -713,7 +713,7 @@ func (d *WebDAVDriver) send(ctx context.Context, method, path string, body io.Re
 			return nil, true, fmt.Errorf("%s: %s for %s: %w (%s)", method, what, d.limits.idleTimeout, ErrWebDAVStalled, err.Error())
 		case trialFired.Load():
 			d.count(method, "timeout")
-			return nil, false, fmt.Errorf("%s: trial read: no answer within %s: %w (%s)", method, bridgeTrialTimeout, engine.ErrTimeout, err.Error())
+			return nil, false, fmt.Errorf("%s: trial read: no answer within %s: %w (%s)", method, bridgeTrialTimeout(), engine.ErrTimeout, err.Error())
 		case timedOut:
 			d.count(method, "timeout")
 			return nil, true, fmt.Errorf("%s: no answer within %s: %w (%s)", method, timeout, engine.ErrTimeout, err.Error())
@@ -757,6 +757,18 @@ type bridgeTrialKey struct{}
 
 func withBridgeTrial(ctx context.Context) context.Context {
 	return context.WithValue(ctx, bridgeTrialKey{}, true)
+}
+
+// withoutBridgeTrial is ctx for a call on ANOTHER bridge than the trial's:
+// a striped object's pieces and markers (Prompt 2b.4 E1.2). The trial is the
+// routed bridge's own call; a piece GET on a healthy bridge inherited it —
+// one attempt, the trial's short wait — and its slow first byte was noted
+// against that bridge.
+func withoutBridgeTrial(ctx context.Context) context.Context {
+	if !isBridgeTrial(ctx) {
+		return ctx
+	}
+	return context.WithValue(ctx, bridgeTrialKey{}, false)
 }
 
 func isBridgeTrial(ctx context.Context) bool {

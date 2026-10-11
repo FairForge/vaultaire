@@ -88,6 +88,19 @@ groups:
           summary: "{{ $value }} Sync WebDAV bridges down"
           description: "{{ $value }} of the sync-webdav bridges have failed their authenticated PROPFIND for 5+ minutes: their keys' writes and mutable reads answer 503 (vaultaire_engine_partial_unavailable_total{backend=\"sync\"}), and the engine's sync breaker stays closed while any bridge answers. Check `systemctl status 'sync-webdav@*'`, their journals, and the /etc/hosts pin for us-api.sync.com."
 
+      # The data path is failing while the probes pass (Prompt 2b.4 E1.1):
+      # the 2b.3 D1.1 scenario — the spill directory unwritable, or the
+      # 2026-10-07 Route 53 shape (PROPFIND from cache passes, GET/PUT 5xx)
+      # — keeps every bridge "up" to SyncBridgesDown, so nothing paged. Each
+      # partial answer is a 503 a customer saw.
+      - alert: SyncPartialUnavailable
+        expr: sum by (backend) (increase(vaultaire_engine_partial_unavailable_total[10m])) > 50
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.backend }}: {{ $value | printf \"%.0f\" }} partial-unavailable 503s in 10 min"
+          description: "More than 50 calls in 10 minutes were answered 503 because the part of {{ $labels.backend }} holding the object is out while the rest answers (one or two Sync bridges failing on the data path; their probes may still pass). Check `journalctl -u 'vaultaire@*' | grep -i bridge`, `systemctl status 'sync-webdav@*'`, the bridges' spill directory (/var/lib/syncdav/spill) and disk, and vaultaire_webdav_requests_total{outcome!=\"ok\"} by bridge."
+
       # Sync refuses writes into a folder that holds 50,000 files (its hard
       # limit; folders are unlimited). Keys' `/` segments are folders, so a
       # flat bucket past 50,000 keys stops taking writes — refused as 400s

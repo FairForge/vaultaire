@@ -144,15 +144,6 @@ func isBackendFailure(err error) bool {
 	if errors.Is(err, ErrCallerAborted) || errors.Is(err, ErrPartiallyUnavailable) {
 		return false
 	}
-	// Object-not-found: os.Remove/Open on a missing path, or our own type.
-	if errors.Is(err, os.ErrNotExist) {
-		return false
-	}
-	var nf NotFoundError
-	var nfp *NotFoundError
-	if errors.As(err, &nf) || errors.As(err, &nfp) {
-		return false
-	}
 	// Other client-level engine errors. Archived-on-tape is an object state,
 	// not a backend health signal (V18.2).
 	if errors.Is(err, ErrQuotaExceeded) || errors.Is(err, ErrInvalidInput) ||
@@ -171,8 +162,33 @@ func isBackendFailure(err error) bool {
 	if errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchBucket" {
 		return true
 	}
-	if isSDKNotFound(err) {
+	return !isObjectMiss(err)
+}
+
+// isObjectMiss reports a backend's "the object is not there": os.ErrNotExist
+// (the local driver's *fs.PathError), our NotFoundError, an aws-sdk-go-v2
+// NoSuchKey/NotFound/404 — never NoSuchBucket, a misconfigured backend. The
+// one miss predicate of the engine: isBackendFailure (a miss is no failure)
+// and Delete (a miss is gone, its route too — Prompt 2b.4 E1.4) share it.
+func isObjectMiss(err error) bool {
+	if err == nil {
 		return false
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchBucket" {
+		return false
+	}
+	// Object-not-found: os.Remove/Open on a missing path, or our own type.
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	var nf NotFoundError
+	var nfp *NotFoundError
+	if errors.As(err, &nf) || errors.As(err, &nfp) {
+		return true
+	}
+	if isSDKNotFound(err) {
+		return true
 	}
 	// Precise string fallbacks for drivers that do not wrap a typed error:
 	// the Graph API's item-absence code (permafrost), the local driver's path
@@ -183,10 +199,10 @@ func isBackendFailure(err error) bool {
 	msg := err.Error()
 	for _, s := range []string{"no such file or directory", "NoSuchKey", "NotFound", "itemNotFound", "StatusCode: 404"} {
 		if strings.Contains(msg, s) {
-			return false
+			return true
 		}
 	}
-	return true
+	return false
 }
 
 // isSDKNotFound reports an aws-sdk-go-v2 error chain that means "the object is
@@ -259,6 +275,7 @@ func (f *FailoverManager) ExecuteOp(ctx context.Context, op string, backends []s
 		firstErr         error // outcome of the first candidate that was actually asked
 		firstUnavailable bool  // first candidate skipped (open breaker) or failed as a backend
 		first            = true
+		walkedPast       string // the last backend that failed or was skipped as open
 	)
 
 	for _, backend := range backends {
@@ -287,9 +304,14 @@ func (f *FailoverManager) ExecuteOp(ctx context.Context, op string, backends []s
 			}
 			f.logger.Debug("circuit breaker open, skipping backend",
 				zap.String("backend", backend))
+			walkedPast = backend
 			continue
 		}
 
+		if walkedPast != "" {
+			fallover.WithLabelValues(walkedPast, backend, op).Inc()
+			walkedPast = ""
+		}
 		if err := fn(backend); err != nil {
 			// Only genuine backend-health failures trip the circuit breaker.
 			// Benign client-level outcomes (object not found, quota exceeded,
@@ -302,6 +324,7 @@ func (f *FailoverManager) ExecuteOp(ctx context.Context, op string, backends []s
 				f.logger.Warn("backend failed, trying next",
 					zap.String("backend", backend),
 					zap.Error(err))
+				walkedPast = backend
 			}
 			if isFirst {
 				firstErr = err

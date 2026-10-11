@@ -541,7 +541,7 @@ func (m *MultiWebDAVDriver) verifyPieces(ctx context.Context, key string, man *s
 		pn := append(append([]string(nil), man.Dir...), pieceName(i))
 		b := m.bridges[m.rank(pn)[0]]
 		e, found, err := b.drv.stat(ctx, pn)
-		m.note(ctx, b, err)
+		m.noteMeta(ctx, b, err)
 		if err != nil {
 			return fmt.Errorf("verify piece %d on bridge %d: %w", i, b.idx, err)
 		}
@@ -890,10 +890,13 @@ func (m *MultiWebDAVDriver) readManifestOn(ctx context.Context, b *webdavBridge,
 // manifest's pieces. whole = Get (offset 0, to the end, verified pieces).
 func (m *MultiWebDAVDriver) openOn(ctx context.Context, b *webdavBridge, key string, names []string,
 	notFound error, offset, length int64, whole bool) (io.ReadCloser, error) {
+	// A trial (readRouted) is b's own calls only: the pieces and the retired
+	// marker live on other bridges and are read as any read (E1.2).
+	pctx := withoutBridgeTrial(ctx)
 	ck := manifestCacheKey(names)
 	want, sized := engine.ExpectedSize(ctx)
-	if man, ok := m.mcache.get(ck); ok && (!sized || man.Size == want) && !m.genRetired(ctx, man) {
-		r, err := m.openStripe(ctx, key, ck, man, offset, length)
+	if man, ok := m.mcache.get(ck); ok && (!sized || man.Size == want) && !m.genRetired(pctx, man) {
+		r, err := m.openStripe(pctx, key, ck, man, offset, length)
 		if !errors.Is(err, errStripePieceGone) {
 			return r, err
 		}
@@ -911,7 +914,7 @@ func (m *MultiWebDAVDriver) openOn(ctx context.Context, b *webdavBridge, key str
 			man, merr := m.readManifestOn(ctx, b, key, names, notFound)
 			if merr == nil && man.Size == want {
 				m.mcache.put(ck, man)
-				return m.openStripe(ctx, key, ck, man, offset, length)
+				return m.openStripe(pctx, key, ck, man, offset, length)
 			}
 			if merr != nil && !notFoundErr(merr) {
 				return nil, merr
@@ -942,7 +945,7 @@ func (m *MultiWebDAVDriver) openOn(ctx context.Context, b *webdavBridge, key str
 		}
 		return nil, merr
 	}
-	if m.genRetired(ctx, man) {
+	if m.genRetired(pctx, man) {
 		// A manifest naming a retired generation was read just as it was
 		// replaced: once more; a second retired one is a stale view (503),
 		// never the old bytes (Prompt 2b B4).
@@ -950,19 +953,19 @@ func (m *MultiWebDAVDriver) openOn(ctx context.Context, b *webdavBridge, key str
 		if err2 != nil {
 			return nil, err2
 		}
-		if man2.Gen == man.Gen || m.genRetired(ctx, man2) {
+		if man2.Gen == man.Gen || m.genRetired(pctx, man2) {
 			return nil, fmt.Errorf("%s get %s: the manifest names a retired generation (%s): %w", m.name, key, man2.Gen, ErrWebDAVBridgeStale)
 		}
 		man = man2
 	}
 	m.mcache.put(ck, man)
-	r, oerr := m.openStripe(ctx, key, ck, man, offset, length)
+	r, oerr := m.openStripe(pctx, key, ck, man, offset, length)
 	if errors.Is(oerr, errStripePieceGone) {
 		m.mcache.drop(ck)
 		// Overwritten since the manifest was read: once more, from the new one.
 		if man2, err2 := m.readManifestOn(ctx, b, key, names, notFound); err2 == nil && man2.Gen != man.Gen {
 			m.mcache.put(ck, man2)
-			return m.openStripe(ctx, key, ck, man2, offset, length)
+			return m.openStripe(pctx, key, ck, man2, offset, length)
 		}
 	}
 	return r, oerr
@@ -1036,7 +1039,7 @@ func (m *MultiWebDAVDriver) readSeg(ctx context.Context, key string, man *stripe
 	whole := s.from == 0 && s.to == p.Size
 	what := fmt.Sprintf("%s (piece %d)", key, s.piece)
 	gone := fmt.Errorf("%w: piece %d", errStripePieceGone, s.piece)
-	rc, err := readFrom(ctx, m, "get "+what, m.rank(pn),
+	rc, err := readFrom(ctx, m, "get "+what, false, m.rank(pn),
 		func(b *webdavBridge) (io.ReadCloser, error) {
 			if whole {
 				return b.drv.getNames(ctx, what, pn, gone)
@@ -1387,7 +1390,7 @@ func (m *MultiWebDAVDriver) retireGraceOrDefault() time.Duration {
 // written: the read fallback applies).
 func (m *MultiWebDAVDriver) retiredAt(ctx context.Context, dir []string) (time.Time, bool, error) {
 	names := append(append([]string(nil), dir...), stripeRetiredFile)
-	rc, err := readFrom(ctx, m, "get stripe retired "+strings.Join(dir, "/"), m.rank(names),
+	rc, err := readFrom(ctx, m, "get stripe retired "+strings.Join(dir, "/"), false, m.rank(names),
 		func(b *webdavBridge) (io.ReadCloser, error) {
 			return b.drv.getNames(ctx, strings.Join(names, "/"), names, engine.ErrNotFound(dir[1], stripeRetiredFile))
 		},
