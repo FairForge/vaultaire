@@ -19,6 +19,12 @@ import (
 	"go.uber.org/zap"
 )
 
+// refusedEndpoint is a local port nothing listens on: the error-path tests
+// fail at once instead of dialing the real e2.idrive.com, which hung every
+// connection on 2026-10-11 and pushed this package to the 10-minute test
+// timeout in CI (597 s).
+const refusedEndpoint = "http://127.0.0.1:1"
+
 func TestNewIDriveDriver(t *testing.T) {
 	t.Run("creates driver with valid config", func(t *testing.T) {
 		// Given: Valid iDrive E2 configuration
@@ -58,7 +64,7 @@ func TestIDriveDriver_Operations(t *testing.T) {
 		driver, _ := NewIDriveDriver(
 			"test-key",
 			"test-secret",
-			"https://e2.idrive.com",
+			refusedEndpoint,
 			"us-west-1",
 			zap.NewNop(),
 		)
@@ -77,7 +83,7 @@ func TestIDriveDriver_Operations(t *testing.T) {
 		driver, _ := NewIDriveDriver(
 			"test-key",
 			"test-secret",
-			"https://e2.idrive.com",
+			refusedEndpoint,
 			"us-west-1",
 			zap.NewNop(),
 		)
@@ -93,7 +99,7 @@ func TestIDriveDriver_ErrorHandling(t *testing.T) {
 		driver, _ := NewIDriveDriver(
 			"test-key",
 			"test-secret",
-			"https://e2.idrive.com",
+			refusedEndpoint,
 			"us-west-1",
 			zap.NewNop(),
 		)
@@ -118,7 +124,7 @@ func TestIDriveDriver_ValidateAuth(t *testing.T) {
 		driver, _ := NewIDriveDriver(
 			"test-key",
 			"test-secret",
-			"https://e2.idrive.com",
+			refusedEndpoint,
 			"us-west-1",
 			zap.NewNop(),
 		)
@@ -162,7 +168,7 @@ func TestIDriveDriver_StreamingUpload(t *testing.T) {
 		driver, _ := NewIDriveDriver(
 			"test-key",
 			"test-secret",
-			"https://e2.idrive.com",
+			refusedEndpoint,
 			"us-west-1",
 			zap.NewNop(),
 		)
@@ -184,7 +190,7 @@ func TestIDriveDriver_EgressTracking(t *testing.T) {
 		driver, _ := NewIDriveDriver(
 			"test-key",
 			"test-secret",
-			"https://e2.idrive.com",
+			refusedEndpoint,
 			"us-west-1",
 			zap.NewNop(),
 		)

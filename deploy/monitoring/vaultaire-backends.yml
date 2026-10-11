@@ -4,10 +4,15 @@
 #   vaultaire_backend_health{backend}              1/0, last probe result
 #   vaultaire_backend_probe_failures_total{backend}
 #   vaultaire_backend_circuit_open{backend}        engine breaker not closed
+#   vaultaire_primary_backend{backend}             1 for the write primary (STORAGE_MODE)
 #   vaultaire_backend_write_failures_total         PUTs rejected, all durable backends failed
 #
 # Probes are AUTHENTICATED (signed HeadBucket for idrive/geyser, console
 # RSCustomerDetails for lyve) — a revoked key trips these; a TCP dial never did.
+# Every S3-class probe (idrive, idrive-<region>, wasabi, lyve, r2, s3compat)
+# also HEADs our canary object t-_probe/_probe/<host> (Prompt 2b.5 F2.1): on
+# 2026-10-11 the iDrive key passed HeadBucket and 403'd every object call for
+# 9+ hours while all of these stayed green.
 groups:
   - name: vaultaire-backends
     rules:
@@ -20,7 +25,19 @@ groups:
           severity: critical
         annotations:
           summary: "Backend {{ $labels.backend }} failing authenticated probe"
-          description: "{{ $labels.backend }} has failed its signed health probe for 5+ minutes (dead key? account suspended? outage?). Check `curl -s localhost:8000/health/backends` on the box for last_error."
+          description: "{{ $labels.backend }} has failed its signed health probe for 5+ minutes (dead key? account suspended? outage? an object canary HEAD refused = the key sees the bucket but not its objects). Check `curl -s localhost:8000/health/backends` on the box for last_error."
+
+      # The PRIMARY failing its probe pages whatever its name: lyve (the
+      # primary since 2026-10-11) is otherwise only the 15-minute warning
+      # below. Every write lands on (or falls over from) the primary.
+      - alert: PrimaryBackendProbeFailing
+        expr: (vaultaire_backend_health == 0) and on(backend) (vaultaire_primary_backend == 1)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The primary backend {{ $labels.backend }} is failing its probe"
+          description: "{{ $labels.backend }} is the write primary (STORAGE_MODE) and has failed its signed probe (HeadBucket + object canary) for 5+ minutes: PUTs fall over or 503, reads of its objects 503. Check `curl -s localhost:8000/health/backends` for last_error; switching STORAGE_MODE is the owner's call (docs/DEPLOY.md)."
 
       # Lyve is the fallback leg, and its console action intermittently 403s
       # for root in ~5-minute windows — so a longer `for` and a warning.
@@ -148,6 +165,19 @@ groups:
         annotations:
           summary: "Circuit breaker open for {{ $labels.backend }}"
           description: "The engine's circuit breaker for {{ $labels.backend }} has been open/half-open for 3+ minutes (5 backend failures within 60s trips it)."
+
+      # The same on the PRIMARY is a page (Prompt 2b.5 F2.2): every write is
+      # falling over or 503ing and /health says "degraded" with the reason.
+      # 2026-10-11: open 8.7 h on idrive as a warning. Same alertname, so the
+      # critical inhibits the warning.
+      - alert: BackendCircuitOpen
+        expr: (vaultaire_backend_circuit_open == 1) and on(backend) (vaultaire_primary_backend == 1)
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Circuit breaker open on the PRIMARY backend {{ $labels.backend }}"
+          description: "The engine's breaker for the write primary {{ $labels.backend }} has been open/half-open for 3+ minutes: PUTs fall over to the next candidate (or 503), reads of its objects answer 503. Check /health (reason), `curl -s localhost:8000/health/backends` and the journal's 'backend failed, trying next' lines."
 
       # The legacy HighErrorRate rule keyed off vaultaire_errors_total, which
       # never incremented before 2026-09-22. It now counts 5xx responses; this

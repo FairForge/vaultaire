@@ -144,12 +144,31 @@ delivered at ~85s, RESOLVED notice followed after restart.
 ## Alert rules in this directory
 
 `vaultaire-backends.yml` — backend-outage rules (BackendProbeFailing,
-LyveProbeFailing, BackendWriteFailures warning/critical, BackendCircuitOpen,
+PrimaryBackendProbeFailing, LyveProbeFailing, BackendWriteFailures
+warning/critical, BackendCircuitOpen warning + critical on the primary,
 VaultaireServerErrorRatio). They key off the `vaultaire_backend_*` series the
-app exports from `/metrics` (`internal/api/prom_metrics.go`); the probes
-behind `vaultaire_backend_health` are AUTHENTICATED (signed HeadBucket for
-idrive/geyser via the driver, console `RSCustomerDetails` for lyve — root key,
-one 403 retry), so a dead access key fires them. A TCP dial never did.
+app exports from `/metrics` (`internal/api/prom_metrics.go`) and
+`vaultaire_primary_backend{backend}` (1 for the write primary — the rules
+join `on(backend)`); the probes behind `vaultaire_backend_health` are
+AUTHENTICATED (signed HeadBucket for idrive/geyser via the driver, console
+`RSCustomerDetails` for lyve — root key, one 403 retry), so a dead access key
+fires them. A TCP dial never did.
+
+**Object canary (Prompt 2b.5 F2.1).** A key can pass HeadBucket and
+ListObjects and be refused every object call — iDrive on 2026-10-11, 9+ hours
+with `/health` "healthy". Every S3-class probe (`idrive`, `idrive-<region>`,
+`wasabi`, `lyve`, `r2`, `s3compat`) therefore also HEADs
+`t-_probe/_probe/<hostname>` (reserved tenant `_probe`; written on the first
+probe when absent, re-written once if it disappears, then the probe fails;
+a HEAD 403 — S3's answer for an absent key to a credential without
+ListBucket — gets the one PUT too, which a dead key refuses);
+any error is `vaultaire_backend_health` 0, `vaultaire_backend_probe_failures_total`
++1 and the SDK error in the Warn line and `last_error`. Never on `geyser`
+(tape) or `permafrost`; `sync` keeps its PROPFIND. **Cost:** one HEAD per
+probe (30 s; 60 s on Lyve's console probe) per backend ≈ 86,400 requests a
+month per backend, below every vendor's free request floor, plus one tiny
+object each. `/health` also reports `degraded` with a `reason` while the
+PRIMARY's breaker is open (it never answers 503 — HAProxy checks it).
 
 The original rules (`VaultaireDown`, `VaultaireHighErrorRate`, node rules)
 live only on the box in `/etc/prometheus/rules/vaultaire-alerts.yml`.

@@ -152,6 +152,7 @@ type backendCollector struct {
 	probeFailures *prometheus.Desc
 	probeLatency  *prometheus.Desc
 	circuitOpen   *prometheus.Desc
+	primary       *prometheus.Desc
 	writeFailures *prometheus.Desc
 }
 
@@ -171,6 +172,9 @@ func newBackendCollector(hc *BackendHealthChecker, eng engineMetricsSource) *bac
 		circuitOpen: prometheus.NewDesc("vaultaire_backend_circuit_open",
 			"1 if the engine's circuit breaker for the backend is not closed (open or half-open).",
 			[]string{"backend"}, nil),
+		primary: prometheus.NewDesc("vaultaire_primary_backend",
+			"1 for the engine's write primary (STORAGE_MODE); the rules join on it to page on the primary's breaker (Prompt 2b.5 F2.2).",
+			[]string{"backend"}, nil),
 		writeFailures: prometheus.NewDesc("vaultaire_backend_write_failures_total",
 			"PUTs rejected because every eligible durable backend failed (fail-loudly path).",
 			nil, nil),
@@ -182,6 +186,7 @@ func (c *backendCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.probeFailures
 	ch <- c.probeLatency
 	ch <- c.circuitOpen
+	ch <- c.primary
 	ch <- c.writeFailures
 }
 
@@ -218,6 +223,9 @@ func (c *backendCollector) Collect(ch chan<- prometheus.Metric) {
 			open = 1
 		}
 		ch <- prometheus.MustNewConstMetric(c.circuitOpen, prometheus.GaugeValue, open, n)
+	}
+	if p, ok := c.eng.(interface{ GetPrimary() string }); ok && p.GetPrimary() != "" {
+		ch <- prometheus.MustNewConstMetric(c.primary, prometheus.GaugeValue, 1, p.GetPrimary())
 	}
 	ch <- prometheus.MustNewConstMetric(c.writeFailures, prometheus.CounterValue, float64(c.eng.WriteFailures()))
 }

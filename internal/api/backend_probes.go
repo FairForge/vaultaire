@@ -20,7 +20,10 @@ import (
 // prod's iDrive key was dead for two weeks while /health said "healthy".
 //
 // Probes are now authenticated where we can sign:
-//   - idrive / geyser → the driver's own HealthCheck (a signed HeadBucket)
+//   - idrive / geyser → the driver's own HealthCheck (a signed HeadBucket);
+//     on every S3-class backend (idrive, idrive-<region>, wasabi, lyve, r2,
+//     s3compat) followed by a signed HEAD of our canary object
+//     (backend_canary.go — never on geyser or permafrost)
 //   - sync            → the WebDAV driver's HealthCheck (an authenticated
 //     PROPFIND of EVERY bridge: a wrong bridge password is a 401; healthy
 //     while one bridge is up, each bridge in vaultaire_webdav_bridge_up)
@@ -135,6 +138,21 @@ func buildBackendProbes(getenv func(string) string, eng driverChecker) []backend
 			probe:        driverProbe(name),
 			initialDelay: defaultProbeInterval * time.Duration(i+1) / time.Duration(len(regions)+1),
 		})
+	}
+
+	// The S3-class probes also HEAD an object of ours (backend_canary.go,
+	// Prompt 2b.5 F2.1): a key that can see the bucket but not its objects
+	// passed HeadBucket for ≥ 9 h on 2026-10-11.
+	if dg, ok := eng.(driverGetter); ok {
+		key := probeCanaryKey()
+		for i := range checks {
+			if !canaryBackend(checks[i].name) || !registered[checks[i].name] {
+				continue
+			}
+			if drv, ok := dg.GetDriver(checks[i].name); ok {
+				checks[i].probe = withObjectCanary(checks[i].probe, drv, key)
+			}
+		}
 	}
 
 	return checks
