@@ -133,11 +133,17 @@ func TestBuildWriteCandidateList_TargetOnlyBackends(t *testing.T) {
 		assert.ElementsMatch(t, []string{"idrive", "lyve", "s3"}, c)
 	})
 	t.Run("explicit target is honoured first, then general-purpose backends", func(t *testing.T) {
-		for _, target := range []string{"r2", "geyser", "permafrost", "sync", "idrive-eu-west-1"} {
+		for _, target := range []string{"r2", "geyser", "permafrost", "idrive-eu-west-1"} {
 			c := eng.buildWriteCandidateList(target)
 			assert.Equal(t, target, c[0], "target %s", target)
 			assert.ElementsMatch(t, []string{target, "idrive", "lyve", "s3"}, c, "target %s", target)
 		}
+	})
+	t.Run("a strict target is asked alone (Prompt 2b.4 E1.1)", func(t *testing.T) {
+		assert.Equal(t, []string{"sync"}, eng.buildWriteCandidateList("sync"))
+		assert.Equal(t, []string{"sync"}, eng.readCandidates("sync"))
+		assert.Equal(t, "geyser", eng.readCandidates("geyser")[0])
+		assert.Greater(t, len(eng.readCandidates("geyser")), 1, "tape keeps its read fall-over")
 	})
 	t.Run("a target-only primary is still writable", func(t *testing.T) {
 		g := NewEngine(nil, nopLogger(), &Config{DefaultBackend: "geyser"})

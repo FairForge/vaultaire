@@ -139,8 +139,7 @@ func errorsIsPartial(err error) bool { return errors.Is(err, engine.ErrPartially
 // request, so it is one attempt with a short wait for the answer. Before:
 // three attempts, each up to the 60 s idle watchdog (here: retries × hang).
 func TestMultiWebDAV_ATrialReadOfAStalledBridgeIsOneShortAttempt(t *testing.T) {
-	defer func(d time.Duration) { bridgeTrialTimeout = d }(bridgeTrialTimeout)
-	bridgeTrialTimeout = 200 * time.Millisecond
+	defer setBridgeTrialTimeout(setBridgeTrialTimeout(200 * time.Millisecond))
 	var stall atomic.Bool
 	var gets atomic.Int32
 	bs := newBridges(t, 2, true, func(i int, h http.Handler) http.Handler {

@@ -150,8 +150,9 @@ func (e *CoreEngine) Get(ctx context.Context, container, artifact string) (io.Re
 		}
 	}
 
-	// Build candidate list: preferred backend first, then primary, then others.
-	candidates := e.buildCandidateList(preferredBackend)
+	// Build candidate list: preferred backend first, then primary, then
+	// others — a strict target alone (E1.1).
+	candidates := e.readCandidates(preferredBackend)
 
 	var reader io.ReadCloser
 	usedBackend, err := e.failover.ExecuteOp(ctx, "get", candidates, func(driverName string) error {
@@ -189,7 +190,7 @@ func (e *CoreEngine) GetRange(ctx context.Context, container, artifact string, o
 		}
 	}
 
-	candidates := e.buildCandidateList(preferredBackend)
+	candidates := e.readCandidates(preferredBackend)
 
 	var reader io.ReadCloser
 	_, err := e.failover.ExecuteOp(ctx, "get_range", candidates, func(driverName string) error {
@@ -407,9 +408,9 @@ func (e *CoreEngine) Delete(ctx context.Context, container, artifact string) err
 	})
 
 	// A failed delete keeps the routing records with the head row, so the
-	// retry asks the same backend (Prompt 2b.3 D1.5); a miss is gone too.
-	var nf NotFoundError
-	if lastErr == nil || errors.As(lastErr, &nf) {
+	// retry asks the same backend (Prompt 2b.3 D1.5); a miss is gone too —
+	// any backend's miss, the local driver's *fs.PathError included (E1.4).
+	if lastErr == nil || isObjectMiss(lastErr) {
 		e.objectBackends.Delete(key)
 		if e.locations != nil {
 			_ = e.locations.RemoveLocation(ctx, tenantID, container, artifact)
@@ -557,12 +558,49 @@ func writeOnlyWhenTargeted(name string) bool {
 	return targetOnlyBackends[name] || strings.HasPrefix(name, "idrive-")
 }
 
+// strictTargetBackends never have another backend asked after their own
+// failure — for writes nor reads (Prompt 2b.4 E1.1). For `sync` a fall-over
+// is never right: a write landed on the primary is off the tier the bucket
+// promises (and answered 200), and a read of a key whose older copy sits on
+// the primary (written before the tier flag, or by an earlier fall-over;
+// WP-R6-1 never removes it) served the OLD bytes under the new head row's
+// ETag. Once three bridges were failing, or the breaker was open, both
+// happened. A strict backend that fails answers ErrAllBackendsUnavailable
+// (503 + Retry-After) — the region-pinned precedent (errRegionDriverUnavailable).
+//
+// This departs from R6-04 (a down backend falls to the primary) for these
+// backends only. The other target-only backends keep the fall-over: tape,
+// the second-copy fleet and region pins are decisions not taken here.
+var strictTargetBackends = map[string]bool{
+	"sync": true,
+}
+
+// strictTarget reports whether name is asked alone when it is the target of
+// a write or the recorded backend of a read.
+func strictTarget(name string) bool { return strictTargetBackends[name] }
+
+// readCandidates is the Get/GetRange candidate list for an object recorded
+// on preferred: preferred alone when it is a strict target.
+func (e *CoreEngine) readCandidates(preferred string) []string {
+	if strictTarget(preferred) {
+		if _, ok := e.drivers[preferred]; ok {
+			return []string{preferred}
+		}
+	}
+	return e.buildCandidateList(preferred)
+}
+
 // buildWriteCandidateList is buildCandidateList restricted to backends that
 // are safe write targets for THIS object. A failing durable backend must
 // surface as a 5xx to the client, not as a silent write to the hub's local
 // disk, to the public store, to tape or to the wrong jurisdiction (which lies
 // about durability or placement, and bills the wrong tier).
 func (e *CoreEngine) buildWriteCandidateList(target string) []string {
+	if strictTarget(target) && target != e.primary {
+		if _, ok := e.drivers[target]; ok {
+			return []string{target}
+		}
+	}
 	all := e.buildCandidateList(target)
 	writable := make([]string, 0, len(all))
 	for _, name := range all {
