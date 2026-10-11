@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -124,8 +123,8 @@ func (b *BackendCircuitBreaker) State() CircuitState {
 // backend out of routing for openDuration (and, with it, misplace writes on
 // the next candidate and turn reads into fake 404s).
 //
-// The API layer's isObjectMissingErr (internal/api/not_found.go) is the other
-// half of this taxonomy — keep the two in sync.
+// The miss half of this taxonomy is IsObjectMiss, which the API layer's
+// isObjectMissingErr (internal/api/not_found.go) calls — one predicate.
 func isBackendFailure(err error) bool {
 	if err == nil {
 		return false
@@ -156,22 +155,32 @@ func isBackendFailure(err error) bool {
 	}
 	// aws-sdk-go-v2, by type (R6-01). Every S3-class driver (idrive, lyve,
 	// r2, geyser, s3compat, quotaless) wraps the SDK error with %w. A missing
-	// BUCKET is a misconfigured backend — decided here, before the string
-	// fallbacks, because its message also carries "StatusCode: 404".
+	// BUCKET is a misconfigured backend, not an absent object.
 	var apiErr smithy.APIError
 	if errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchBucket" {
 		return true
 	}
-	return !isObjectMiss(err)
+	return !IsObjectMiss(err)
 }
 
-// isObjectMiss reports a backend's "the object is not there": os.ErrNotExist
-// (the local driver's *fs.PathError), our NotFoundError, an aws-sdk-go-v2
-// NoSuchKey/NotFound/404 — never NoSuchBucket, a misconfigured backend. The
-// one miss predicate of the engine: isBackendFailure (a miss is no failure)
-// and Delete (a miss is gone, its route too — Prompt 2b.4 E1.4) share it.
-func isObjectMiss(err error) bool {
+// IsObjectMiss reports a backend's "the object is not there", by TYPE only:
+// os.ErrNotExist (the local driver's *fs.PathError), our NotFoundError (the
+// WebDAV/Sync and permafrost drivers), an aws-sdk-go-v2 NoSuchKey/NotFound/404
+// — never NoSuchBucket, a misconfigured backend. It is the one miss predicate:
+// isBackendFailure (a miss is no failure), Delete (a miss is gone, its route
+// too — Prompt 2b.4 E1.4) and the API's isObjectMissingErr all use it.
+//
+// An error that says the backend could not be asked — ErrAllBackendsUnavailable
+// or ErrPartiallyUnavailable anywhere in the chain — is never a miss, whatever
+// a fallback said inside it (R6-02). And the error TEXT is never read: every
+// driver puts the key in its message ("idrive get <container>/<key>: …"), so a
+// substring test turned a 403 or a 5xx on `errors/page not found.html` into
+// 404 NoSuchKey, a dropped route and an uncharged breaker (Prompt 2b.5 F1.1).
+func IsObjectMiss(err error) bool {
 	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrAllBackendsUnavailable) || errors.Is(err, ErrPartiallyUnavailable) {
 		return false
 	}
 	var apiErr smithy.APIError
@@ -187,22 +196,7 @@ func isObjectMiss(err error) bool {
 	if errors.As(err, &nf) || errors.As(err, &nfp) {
 		return true
 	}
-	if isSDKNotFound(err) {
-		return true
-	}
-	// Precise string fallbacks for drivers that do not wrap a typed error:
-	// the Graph API's item-absence code (permafrost), the local driver's path
-	// text when it arrives pre-formatted, and the SDK's own v2 formatting in
-	// case a driver stringifies with %v. Same list as isObjectMissingErr.
-	// Kept narrow so real failures ("no such host", "connection refused")
-	// still trip the breaker.
-	msg := err.Error()
-	for _, s := range []string{"no such file or directory", "NoSuchKey", "NotFound", "itemNotFound", "StatusCode: 404"} {
-		if strings.Contains(msg, s) {
-			return true
-		}
-	}
-	return false
+	return isSDKNotFound(err)
 }
 
 // isSDKNotFound reports an aws-sdk-go-v2 error chain that means "the object is

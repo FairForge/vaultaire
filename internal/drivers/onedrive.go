@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -240,11 +241,25 @@ func (d *OneDriveDriver) tenantsFor(path string) []*odTenant {
 	return ordered
 }
 
-// odIsNotFound reports whether a Graph error is an item-absence (the wrapped
-// errors carry the HTTP status in their text — the driver's existing
-// convention, see List/Exists).
+// odStatusError is a Graph answer >= 400 (other than throttling and the
+// retried 5xx): the account, the status and an excerpt of the body.
+type odStatusError struct {
+	tenant string
+	status int
+	body   []byte
+}
+
+func (e *odStatusError) Error() string {
+	return fmt.Sprintf("onedrive [%s] HTTP %d: %s", e.tenant, e.status, e.body)
+}
+
+// odIsNotFound reports whether a Graph error is an item-absence: a 404 by
+// STATUS. It read "404" in the error text until Prompt 2b.5 F1.1 — and the
+// callers wrap the path into that text, so a key named `404.html` answered
+// with a 500 or a 403 was "absent".
 func odIsNotFound(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "404")
+	var se *odStatusError
+	return errors.As(err, &se) && se.status == http.StatusNotFound
 }
 
 // logFallbackHit records an operation that found its object on a non-home
@@ -359,11 +374,12 @@ func (d *OneDriveDriver) Get(ctx context.Context, container, artifact string) (i
 		dlURL    string
 		fileSize int64
 	)
-	var lastErr error
+	var lastErr, downErr error
 	for i, cand := range d.tenantsFor(path) {
 		driveID, err := cand.getDriveID(ctx)
 		if err != nil {
-			lastErr = fmt.Errorf("onedrive get drive: %w", err)
+			downErr = fmt.Errorf("onedrive get drive: %w", err)
+			lastErr = downErr
 			continue
 		}
 		dlURL, fileSize, err = cand.getDownloadURL(ctx, driveID, path)
@@ -380,6 +396,12 @@ func (d *OneDriveDriver) Get(ctx context.Context, container, artifact string) (i
 		}
 	}
 	if t == nil {
+		// Absent on every account that answered — a miss only when every
+		// account answered (an unreachable one may hold it). Typed, so the
+		// engine never reads the text (Prompt 2b.5 F1.1).
+		if downErr == nil && odIsNotFound(lastErr) {
+			return nil, fmt.Errorf("%w: %w", engine.ErrNotFound(container, artifact), lastErr)
+		}
 		return nil, lastErr
 	}
 
@@ -530,7 +552,10 @@ func (d *OneDriveDriver) Delete(ctx context.Context, container, artifact string)
 	if deleted {
 		return nil
 	}
-	return probeErr
+	if probeErr != nil {
+		return fmt.Errorf("%w: %w", engine.ErrNotFound(container, artifact), probeErr)
+	}
+	return nil
 }
 
 // List returns artifacts under a container with optional prefix filtering.
@@ -635,7 +660,7 @@ func (d *OneDriveDriver) children(ctx context.Context, folderPath string) ([]odC
 			req, _ := http.NewRequestWithContext(ctx, "GET", u, nil)
 			resp, err := t.graphDo(ctx, req)
 			if err != nil {
-				if strings.Contains(err.Error(), "404") {
+				if odIsNotFound(err) {
 					break // this account holds nothing under the folder
 				}
 				return nil, fmt.Errorf("onedrive list %s: %w", folderPath, err)
@@ -819,7 +844,7 @@ func (t *odTenant) graphDo(ctx context.Context, req *http.Request) (*http.Respon
 		if resp.StatusCode >= 400 {
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 			_ = resp.Body.Close()
-			return nil, fmt.Errorf("onedrive [%s] HTTP %d: %s", t.name, resp.StatusCode, b)
+			return nil, &odStatusError{tenant: t.name, status: resp.StatusCode, body: b}
 		}
 		return resp, nil
 	}
