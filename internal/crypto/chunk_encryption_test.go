@@ -214,3 +214,15 @@ func TestChunkEncryption_LegacyV1BlobDecrypts(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, plaintext, got)
 }
+
+func TestChunkEncryption_OverheadIsTheConstant(t *testing.T) {
+	// The chunked GET sizes its read buffer with ChunkEncryptionOverhead.
+	svc := newTestChunkEncryptionService(t)
+	for _, n := range []int{0, 1, 2 << 20} {
+		data := make([]byte, n)
+		sum := sha256.Sum256(data)
+		ct, _, err := svc.EncryptChunkData("t", hex.EncodeToString(sum[:]), data)
+		require.NoError(t, err)
+		assert.Equal(t, n+ChunkEncryptionOverhead, len(ct))
+	}
+}

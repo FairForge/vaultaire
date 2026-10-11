@@ -505,3 +505,33 @@ func TestParallelGet_ClientGoneMidStreamLeaksNothing(t *testing.T) {
 		t.Fatalf("goroutines %d -> %d:\n%s", before, n, strings.TrimSpace(string(buf[:k])))
 	}
 }
+
+func TestParallelGet_RangeRequestCountedOkAndRecordsBreakerSuccess(t *testing.T) {
+	// Arrange: a Range GET is written with io.CopyN, which stops after
+	// exactly the range's bytes without the read that would see EOF —
+	// the stream was counted "aborted" and never recorded a success
+	// (2b.4 E2.2).
+	f := setupParallelFixture(t, true)
+	content := randomBytes(4 << 20)
+	f.put(t, "big.bin", content)
+	ok := largeGetStreams.WithLabelValues("ranged", "ok")
+	aborted := largeGetStreams.WithLabelValues("ranged", "aborted")
+	okBefore, abortedBefore := testutil.ToFloat64(ok), testutil.ToFloat64(aborted)
+	// Four charged failures: a fifth would open the breaker, a success
+	// clears them.
+	for i := 0; i < 4; i++ {
+		f.eng.RecordReadOutcome("ranged", errors.New("ranged: connection reset by peer"))
+	}
+
+	// Act
+	w := f.get(t, "big.bin", map[string]string{"Range": "bytes=0-3145727"})
+
+	// Assert
+	require.Equal(t, http.StatusPartialContent, w.Code)
+	assert.True(t, bytes.Equal(content[:3<<20], w.Body.Bytes()))
+	assert.Greater(t, f.drv.ranges.Load(), int32(1), "served by the parallel reader")
+	assert.Equal(t, okBefore+1, testutil.ToFloat64(ok), "ok %v→%v", okBefore, testutil.ToFloat64(ok))
+	assert.Equal(t, abortedBefore, testutil.ToFloat64(aborted), "aborted %v→%v", abortedBefore, testutil.ToFloat64(aborted))
+	f.eng.RecordReadOutcome("ranged", errors.New("ranged: connection reset by peer"))
+	assert.Equal(t, "closed", f.eng.GetFailoverStatus()["ranged"], "the read's success cleared the earlier failures")
+}

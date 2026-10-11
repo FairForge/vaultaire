@@ -413,3 +413,65 @@ func TestHedgeDelay_FollowsTheMedianNotTheTail(t *testing.T) {
 	fresh := &Stream{cfg: Config{HedgeAfter: 400 * time.Millisecond, HedgeFactor: 3}}
 	assert.Equal(t, 400*time.Millisecond, fresh.hedgeDelay())
 }
+
+func TestStream_PartThatMissedAHedgeSlotHedgesLater(t *testing.T) {
+	// Arrange: 9 parts whose FIRST attempt hangs until cancelled; a hedge
+	// answers at once. MaxHedges = 8, so one part finds every slot taken
+	// when its timer fires (2b.4 E2.1: it never hedged again and the whole
+	// ordered stream waited on its hung first attempt).
+	data, sizes := parts(9, 64)
+	var calls [9]atomic.Int32
+	var hedgedParts sync.Map
+	fetch := func(ctx context.Context, i int) ([]byte, error) {
+		if calls[i].Add(1) == 1 {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		hedgedParts.Store(i, true)
+		// Hold the hedge slot a moment so the ninth part's timer sees
+		// all eight taken.
+		if err := sleepCtx(ctx, 300*time.Millisecond); err != nil {
+			return nil, err
+		}
+		return data[i], nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Act
+	s := Start(ctx, Config{HedgeAfter: 200 * time.Millisecond, MaxHedges: 8}, sizes, fetch)
+	defer s.Close()
+	got, err := drain(t, s)
+
+	// Assert
+	n := 0
+	hedgedParts.Range(func(_, _ any) bool { n++; return true })
+	require.NoError(t, err, "parts delivered: %d/9, parts that ever got a hedge: %d", len(got), n)
+	assert.Equal(t, data, got)
+	assert.Equal(t, 9, n)
+}
+
+func TestStream_StrictSizesRefusesAPartOfTheWrongLength(t *testing.T) {
+	// Arrange: parts declared 100 bytes, fetched as 150, 50 and 0.
+	sizes := []int64{100, 100, 100}
+	lens := []int{150, 50, 0}
+	fetch := func(_ context.Context, i int) ([]byte, error) {
+		return make([]byte, lens[i]), nil
+	}
+
+	for _, strict := range []bool{false, true} {
+		// Act
+		s := Start(context.Background(), Config{StrictSizes: strict}, sizes, fetch)
+		got, err := drain(t, s)
+		s.Close()
+
+		// Assert
+		if !strict {
+			require.NoError(t, err)
+			assert.Len(t, got, 3, "no contract without StrictSizes")
+			continue
+		}
+		require.ErrorIs(t, err, ErrPartSize)
+		assert.Empty(t, got)
+	}
+}

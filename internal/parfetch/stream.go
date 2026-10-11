@@ -22,6 +22,7 @@ package parfetch
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sort"
 	"sync"
@@ -121,8 +122,16 @@ type Config struct {
 	Budget *Budget
 	// FreeParts is how many held parts need no budget (min 1).
 	FreeParts int
-	Hooks     Hooks
+	// StrictSizes makes a part whose bytes are not exactly its declared
+	// size a failed attempt (ErrPartSize; retried once like any error).
+	// Off, the length is the caller's to check — both callers in
+	// internal/api do (SHA-256 per chunk, io.ReadFull per range).
+	StrictSizes bool
+	Hooks       Hooks
 }
+
+// ErrPartSize is a part whose bytes are not its declared size (StrictSizes).
+var ErrPartSize = errors.New("parfetch: part is not its declared size")
 
 // FetchFunc returns part i's bytes. It must honour ctx: a hedge loser and a
 // closed stream are ended by cancelling it.
@@ -337,17 +346,23 @@ func (s *Stream) runPart(i int) {
 				defer s.hedges.Add(-1)
 			}
 			data, err := s.fetch(pctx, i)
+			if err == nil && s.cfg.StrictSizes && int64(len(data)) != s.sizes[i] {
+				data, err = nil, fmt.Errorf("%w: part %d is %d bytes, declared %d", ErrPartSize, i, len(data), s.sizes[i])
+			}
 			ch <- attempt{data: data, err: err, hedge: hedge}
 		}()
 	}
 	launch(false, false)
 
 	hedging := s.cfg.HedgeAfter > 0
-	var timerC <-chan time.Time
+	var (
+		timer  *time.Timer
+		timerC <-chan time.Time
+	)
 	if hedging {
-		t := time.NewTimer(s.hedgeDelay())
-		defer t.Stop()
-		timerC = t.C
+		timer = time.NewTimer(s.hedgeDelay())
+		defer timer.Stop()
+		timerC = timer.C
 	}
 
 	pending, hedged := 1, false
@@ -389,7 +404,13 @@ func (s *Stream) runPart(i int) {
 				continue
 			}
 			if s.hedges.Add(1) > int32(s.cfg.MaxHedges) {
+				// Every hedge slot is taken: look again after another
+				// delay. Never give up — a part whose first attempt hangs
+				// holds the whole ordered stream (2b.4 E2.1: a part that
+				// missed its slot never hedged and the download stalled).
 				s.hedges.Add(-1)
+				timer.Reset(s.hedgeDelay())
+				timerC = timer.C
 				continue
 			}
 			hedged = true

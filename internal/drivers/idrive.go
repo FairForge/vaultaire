@@ -22,6 +22,16 @@ import (
 
 type ContextKey string
 
+// fixedBucketResponseHeaderTimeout bounds the wait for a fixed-bucket
+// backend's response headers (2b.4 E2.1). The client had none, and no
+// overall Timeout: a GET the vendor accepted and never answered lasted
+// until TCP gave up, and a large GET's ordered stream waited on it. The
+// clock starts once the request body is written, so a PUT's upload time is
+// not in it (FIXED_BUCKET_PUT_TIMEOUT covers PUTs); what it bounds after a
+// body is the vendor's processing before it answers — 60 s is far past any
+// CompleteMultipartUpload seen on iDrive or Wasabi. A var for tests.
+var fixedBucketResponseHeaderTimeout = 60 * time.Second
+
 const (
 	// TenantIDKey is the context key for tenant ID
 	TenantIDKey ContextKey = "tenant_id"
@@ -97,7 +107,7 @@ func NewFixedBucketS3Driver(name, accessKey, secretKey, endpoint, region, bucket
 		// HTTP/1.1 pinned (2026-08-05 ALPN audit): iDrive gateways refuse h2
 		// at ALPN today — no-op now, insurance against a silent vendor flip
 		// onto h2 single-connection multiplexing (see lyve.go / geyser.go).
-		config.WithHTTPClient(TunedHTTPClient(WithHTTP1Only())),
+		config.WithHTTPClient(TunedHTTPClient(WithHTTP1Only(), WithResponseHeaderTimeout(fixedBucketResponseHeaderTimeout))),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("%s: load aws config: %w", name, err)

@@ -1710,10 +1710,16 @@ func (a *S3ToEngine) fetchAndVerifyChunk(ctx context.Context, d chunkDesc, tenan
 
 	// One allocation of the chunk's recorded size (+ the read slack
 	// bytes.Buffer wants): io.ReadAll grows from 512 bytes, copying a 2 MiB
-	// chunk ~12 times and leaving ~4 MiB of garbage per chunk.
+	// chunk ~12 times and leaving ~4 MiB of garbage per chunk. An encrypted
+	// blob is the size plus the nonce and tag: without them the slack left
+	// after the last byte is 484, under MinRead, and the buffer regrew once.
 	var buf bytes.Buffer
 	if d.size > 0 && d.size <= 64<<20 {
-		buf.Grow(int(d.size) + bytes.MinRead)
+		n := int(d.size) + bytes.MinRead
+		if d.encrypted {
+			n += crypto.ChunkEncryptionOverhead
+		}
+		buf.Grow(n)
 	}
 	if _, err := buf.ReadFrom(rdr); err != nil {
 		return nil, fmt.Errorf("read chunk %s: %w", d.plaintextHash[:16], err)
