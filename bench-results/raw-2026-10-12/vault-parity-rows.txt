@@ -1,0 +1,4 @@
+tb-arch-1012|tb-1791815295/single-8mb.bin|8388608|complete|1|{sync,sync,sync,sync}|00:00:04.880295|
+tb-arch-1012|tb-1791815295/single-64mb.bin|67108864|complete|1|{sync,sync,sync,sync}|00:00:05.961146|
+tb-arch-1012|tb-1791815295/single-256mb.bin|268435456|complete|1|{sync,sync,sync,sync}|00:00:22.376563|
+tb-arch-1012|tb-1791815295/mpu-256mb.bin|268435456|complete|1|{sync,sync,sync,sync}|00:00:20.276528|

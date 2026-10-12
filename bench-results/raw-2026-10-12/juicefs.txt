@@ -1,0 +1,48 @@
+== stdorigin: juicefs bench -p 1 (1 GiB big, 100 small)
+Time used: 31.5 s, CPU: 6.9%, Memory: 468.4 MiB
+|   Write big file |     452.15 MiB/s |   2.26 s/file |
+|    Read big file |      46.29 MiB/s |  22.12 s/file |
+| Write small file |     14.2 files/s | 70.57 ms/file |
+|  Read small file |   5024.4 files/s |  0.20 ms/file |
+|        Stat file |  29235.0 files/s |  0.03 ms/file |
+|   FUSE operation | 17930 operations |    2.91 ms/op |
+== stdorigin: juicefs bench -p 4
+Time used: 41.6 s, CPU: 21.9%, Memory: 754.1 MiB
+|   Write big file |     634.70 MiB/s |   6.45 s/file |
+|    Read big file |     161.21 MiB/s |  25.41 s/file |
+| Write small file |     42.2 files/s | 94.74 ms/file |
+|  Read small file |  12854.0 files/s |  0.31 ms/file |
+|        Stat file |  89847.8 files/s |  0.04 ms/file |
+|   FUSE operation | 71685 operations |    3.12 ms/op |
+stdorigin umount (flush) 2.056458934 s
+stdorigin cold seq read 1 GiB: 80.067 MB/s
+stdorigin warm seq read (local cache): 17349. MB/s
+stdorigin 200x10KB create+sync: 15.28 s
+stdorigin ls 200: 6.539 ms
+stdorigin 4k write+fsync: 71.35 ms
+stdorigin delete all: .0756 s
+== sync: juicefs bench -p 1 (1 GiB big, 100 small)
+Time used: 294.4 s, CPU: 0.9%, Memory: 417.8 MiB
+|   Write big file |      45.79 MiB/s |    22.36 s/file |
+|    Read big file |      22.52 MiB/s |    45.48 s/file |
+| Write small file |      0.4 files/s | 2264.32 ms/file |
+|  Read small file |   3267.9 files/s |    0.31 ms/file |
+|        Stat file |  21380.2 files/s |    0.05 ms/file |
+|   FUSE operation | 18062 operations |     18.71 ms/op |
+== sync: juicefs bench -p 4
+Time used: 255.0 s, CPU: 4.1%, Memory: 676.6 MiB
+|   Write big file |      62.81 MiB/s |    65.22 s/file |
+|    Read big file |      55.32 MiB/s |    74.05 s/file |
+| Write small file |      3.5 files/s | 1155.08 ms/file |
+|  Read small file |  12434.8 files/s |    0.32 ms/file |
+|        Stat file |  83987.5 files/s |    0.05 ms/file |
+|   FUSE operation | 71897 operations |     17.38 ms/op |
+sync umount (flush) 2.072629466 s
+sync cold seq read 1 GiB: 11.308 MB/s
+sync warm seq read (local cache): 14963. MB/s
+sync 200x10KB create+sync: 412.6 s
+sync ls 200: 7.471 ms
+sync 4k write+fsync: 3715. ms
+sync delete all: .1192 s
+== objbench against the origin (raw object aptitude of the std tier)
+2026/10/12 15:10:28.249437 juicefs[234177] <FATAL>: unknown option: "--bucket" [reorderOptions@main.go:265]

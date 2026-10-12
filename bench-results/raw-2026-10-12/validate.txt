@@ -1,0 +1,82 @@
+
+╔══════════════════════════════════════════════════════════════════╗
+║         stored.ge — End-to-End Product Validation               ║
+╠══════════════════════════════════════════════════════════════════╣
+║  Endpoint: https://s3.stored.ge                                ║
+║  Bucket:   validate-1012                                       ║
+║  Time:     2026-10-12T14:47:14Z                                ║
+╚══════════════════════════════════════════════════════════════════╝
+
+  CreateBucket                                  PASS (11ms)
+    → bucket ready
+  PUT small (1 KB)                              PASS (107ms)
+    → 0.01 MB/s
+  PUT medium (1 MB)                             PASS (109ms)
+    → 9.4 MB/s
+  GET + integrity verify                        PASS (340ms)
+    → 4.1 MB/s download, SHA-256 verified
+  HEAD metadata                                 PASS (1ms)
+    → size=1048576, etag="2e857879c11ae0fa68bff860ecd26d60"
+  ListObjectsV2                                 PASS (1ms)
+    → 3 objects listed
+  DELETE + confirm 404                          PASS (140ms)
+    → confirmed 404 after delete
+  Multipart upload (100 MB)                     PASS (14.646s)
+    → 56.5 MB/s upload, integrity verified
+  Range request (bytes 0-1023)                  PASS (335ms)
+    → 1024 bytes, verified correct
+  Range request (mid-file)                      PASS (63ms)
+    → mid-file range verified (video streaming works)
+  Presigned PUT (browser upload)                PASS (97ms)
+    → browser-direct upload works
+  Presigned GET (browser download)              PASS (55ms)
+    → shareable download links work
+  Content-Type preservation                     PASS (114ms)
+    → image/jpeg preserved
+  Content-Disposition (download filename)       PASS (158ms)
+    → download filename preserved
+  User metadata (x-amz-meta-*)                  PASS (62ms)
+    → x-amz-meta-* round-trips correctly
+  Object tagging (PUT/GET/DELETE)               PASS (77ms)
+    → PUT/GET/DELETE tagging works
+  Bucket versioning lifecycle                   PASS (277ms)
+    → 3 versions stored, old version readable
+  Overwrite preserves ETag correctness          PASS (182ms)
+    → overwrite returns correct data + ETag
+  Concurrent PUT (10 workers)                   PASS (102ms)
+    → 10 concurrent PUTs, zero failures
+  rclone compatibility                          PASS (201ms)
+    → lsd + copyto + cat verified
+  Dedup (same content twice)                    PASS (812ms)
+    → same content stored under 2 keys, both readable
+  Cleanup test bucket                           PASS (1.947s)
+    → cleaned 24 objects + bucket
+
+═══════════════════════════════════════════════════════════════════
+                        VALIDATION REPORT
+═══════════════════════════════════════════════════════════════════
+
+  Total: 22 | Passed: 22 | Failed: 0 | Skipped: 0
+
+  📊 PERFORMANCE:
+     • get_mbps: 4.1
+     • multipart_100mb_mbps: 56.5
+     • put_medium_mbps: 9.4
+     • put_small_mbps: 0.01
+
+  ✓ CAPABILITIES CONFIRMED:
+     • S3 PUT/GET/HEAD/DELETE/LIST
+     • SHA-256 data integrity
+     • Multipart uploads (large files)
+     • Range requests (video streaming) ✓
+     • Presigned URLs (browser uploads/downloads) ✓ ✓ ✓
+     • Content-Type + Content-Disposition preservation ✓ ✓
+     • User metadata (x-amz-meta-*)
+     • Object tagging ✓
+     • Bucket versioning (point-in-time recovery) ✓ ✓
+     • Concurrent access (no corruption)
+     • rclone compatibility
+
+═══════════════════════════════════════════════════════════════════
+  RESULT: ALL TESTS PASSED
+═══════════════════════════════════════════════════════════════════

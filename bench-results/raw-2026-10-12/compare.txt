@@ -1,0 +1,115 @@
+Host:      slc-vaultaire-01 (linux/amd64)
+Output:    results-20261012/compare.json
+Transport: tuned (MaxIdleConnsPerHost=200, 4MB buffers, compression=off)
+Endpoints: 3 (smoke=false)
+
+[1/3] lyve-us-west-1  (https://s3.us-west-1.global.lyve.seagate.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: vbench-lyve-us-west-1
+  cold_dial_put_1kb        4204ms  p50=413ms p95=680ms p99=680ms
+  warm_put_4kb            24423ms      4 ops/s  p50=277ms p95=446ms p99=452ms
+  warm_get_4kb             7223ms     14 ops/s  p50=47ms p95=286ms p99=338ms
+  warm_head_4kb            1930ms     26 ops/s  p50=43ms p95=48ms p99=49ms
+  warm_copy_4kb            1072ms      9 ops/s  p50=55ms p95=372ms p99=372ms
+  warm_delete_single       1487ms     20 ops/s  p50=49ms p95=129ms p99=143ms
+  delete_batch_100          375ms    266 ops/s
+  list_100                  136ms  returned=100
+  list_prefix                26ms  returned=30
+  medium_put_1mb            452ms    11.0 MB/s  p50=62ms p95=209ms p99=209ms
+  medium_get_1mb            354ms    14.1 MB/s  p50=51ms p95=159ms p99=159ms
+  medium_put_16mb          1278ms    62.6 MB/s  p50=301ms p95=435ms p99=435ms
+  medium_get_16mb           788ms   101.5 MB/s  p50=134ms p95=268ms p99=268ms
+  large_put_64mb            608ms   105.1 MB/s
+  large_get_64mb            474ms   134.8 MB/s
+  multipart_put_256mb      1521ms   168.2 MB/s
+  multipart_put_256mb_16p   1105ms   231.6 MB/s
+  large_put_64mb_h1         487ms   131.4 MB/s
+  multipart_put_256mb_h1_16p   1085ms   235.8 MB/s
+  mpu_abort                2128ms      2 ops/s  p50=384ms p95=567ms p99=567ms
+  concurrent_ingest_20s    1534ms   748.2 MB/s    187 ops/s  p50=110ms p95=302ms p99=420ms
+  concurrent_download_20s   2500ms   459.1 MB/s    115 ops/s  p50=124ms p95=494ms p99=1671ms
+  range_get_1mb_chunks      916ms    17.5 MB/s     17 ops/s  p50=50ms p95=176ms p99=176ms
+  burst_small_files_500    2298ms     0.8 MB/s    218 ops/s  p50=47ms p95=62ms p99=116ms
+  integrity_16mb            627ms  ✓ checksum match
+  integrity_robust_16mb     722ms    22.1 MB/s  ✓ verified (put_retries=0, get_retries=0)
+  integrity_chunked_16mb    626ms    25.5 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   1874ms  p50=46ms p95=100ms p99=100ms  ✓ 20/20 consistent
+  consistency_overwrite    1386ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write    893ms  ✓ 10/10 immediately visible in listing
+  rate_limit_escalation    1013ms    316 ops/s  max_clean=128 | ✓8w:96ops/s(0e) ✓16w:238ops/s(0e) ✓32w:402ops/s(0e) ✓64w:588ops/s(0e) ✓128w:1037ops/s(0e)
+  sustained_upload_60s    60001ms   609.6 MB/s     38 ops/s  p50=105ms p95=126ms p99=204ms  00s:598MB/s 10s:613MB/s 20s:605MB/s 30s:616MB/s 40s:606MB/s 50s:619MB/s
+
+[2/3] vaultaire-prod-cf  (https://stored.ge)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: vbench-user1-vaultaire
+  cold_dial_put_1kb        4862ms  p50=374ms p95=1037ms p99=1037ms
+  warm_put_4kb            25100ms      4 ops/s  p50=213ms p95=550ms p99=650ms
+  warm_get_4kb            20627ms      5 ops/s  p50=197ms p95=233ms p99=465ms
+  warm_head_4kb            6429ms      8 ops/s  p50=129ms p95=134ms p99=135ms
+  warm_copy_4kb            2999ms      3 ops/s  p50=267ms p95=647ms p99=647ms
+  warm_delete_single       6760ms      4 ops/s  p50=199ms p95=427ms p99=482ms
+  delete_batch_100          888ms    113 ops/s
+  list_100                  306ms  returned=100
+  list_prefix               154ms  returned=30
+  medium_put_1mb           5884ms     0.8 MB/s  p50=1095ms p95=1503ms p99=1503ms
+  medium_get_1mb           3022ms     1.7 MB/s  p50=602ms p95=642ms p99=642ms
+  medium_put_16mb          7465ms    10.7 MB/s  p50=1444ms p95=1701ms p99=1701ms
+  medium_get_16mb          4875ms    16.4 MB/s  p50=1009ms p95=1015ms p99=1015ms
+  large_put_64mb           3360ms    19.0 MB/s
+  large_get_64mb           1765ms    36.3 MB/s
+  multipart_put_256mb      6735ms    38.0 MB/s
+  multipart_put_256mb_16p   3578ms    71.5 MB/s
+  large_put_64mb_h1        2170ms    29.5 MB/s
+  multipart_put_256mb_h1_16p   3260ms    78.5 MB/s
+  mpu_abort                1420ms      4 ops/s  p50=265ms p95=356ms p99=356ms
+  concurrent_ingest_20s    6730ms   170.6 MB/s     43 ops/s  p50=636ms p95=1574ms p99=1920ms
+  concurrent_download_20s   8396ms   136.7 MB/s     34 ops/s  p50=761ms p95=1301ms p99=1768ms
+  range_get_1mb_chunks    10207ms     1.6 MB/s      2 ops/s  p50=624ms p95=848ms p99=848ms
+  burst_small_files_500   10064ms     0.2 MB/s     50 ops/s  p50=188ms p95=233ms p99=544ms
+  integrity_16mb           3381ms  ✓ checksum match
+  integrity_robust_16mb    3704ms     4.3 MB/s  ✓ verified (put_retries=0, get_retries=0)
+  integrity_chunked_16mb   3272ms     4.9 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write  10573ms  p50=217ms p95=261ms p99=261ms  ✓ 20/20 consistent
+  consistency_overwrite   10002ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write   3412ms  ✓ 10/10 immediately visible in listing
+  rate_limit_escalation    4464ms     72 ops/s  max_clean=128 | ✓8w:28ops/s(0e) ✓16w:72ops/s(0e) ✓32w:63ops/s(0e) ✓64w:79ops/s(0e) ✓128w:161ops/s(0e)
+  sustained_upload_60s    60001ms    80.8 MB/s      5 ops/s  p50=737ms p95=1067ms p99=1581ms  00s:70MB/s 10s:86MB/s 20s:88MB/s 30s:82MB/s 40s:80MB/s 50s:78MB/s
+
+[3/3] vaultaire-prod-origin  (https://s3.stored.ge)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: vbench-user1-vaultaire
+  cold_dial_put_1kb        1666ms  p50=78ms p95=627ms p99=627ms
+  warm_put_4kb             8379ms     12 ops/s  p50=66ms p95=194ms p99=467ms
+  warm_get_4kb             6540ms     15 ops/s  p50=60ms p95=78ms p99=422ms
+  warm_head_4kb              15ms   3250 ops/s
+  warm_copy_4kb            1254ms      8 ops/s  p50=133ms p95=142ms p99=142ms
+  warm_delete_single       2000ms     15 ops/s  p50=62ms p95=89ms p99=91ms
+  delete_batch_100          473ms    211 ops/s
+  list_100                    2ms  returned=100
+  list_prefix                 1ms  returned=30
+  medium_put_1mb            758ms     6.6 MB/s  p50=107ms p95=325ms p99=325ms
+  medium_get_1mb            660ms     7.6 MB/s  p50=74ms p95=351ms p99=351ms
+  medium_put_16mb          1225ms    65.3 MB/s  p50=231ms p95=356ms p99=356ms
+  medium_get_16mb          1325ms    60.4 MB/s  p50=188ms p95=566ms p99=566ms
+  large_put_64mb           1665ms    38.4 MB/s
+  large_get_64mb           1483ms    43.2 MB/s
+  multipart_put_256mb      4496ms    56.9 MB/s
+  multipart_put_256mb_16p   1360ms   188.2 MB/s
+  large_put_64mb_h1        1411ms    45.3 MB/s
+  multipart_put_256mb_h1_16p   1313ms   194.9 MB/s
+  mpu_abort                  12ms    399 ops/s  p50=2ms p95=3ms p99=3ms
+  concurrent_ingest_20s   11128ms   103.2 MB/s     26 ops/s  p50=1122ms p95=2379ms p99=2430ms
+  concurrent_download_20s   8628ms   133.0 MB/s     33 ops/s  p50=706ms p95=2119ms p99=2538ms
+  range_get_1mb_chunks     1804ms     8.9 MB/s      9 ops/s  p50=109ms p95=162ms p99=162ms
+  burst_small_files_500    3895ms     0.5 MB/s    128 ops/s  p50=65ms p95=94ms p99=386ms
+  integrity_16mb           1720ms  ✓ checksum match
+  integrity_robust_16mb    1481ms    10.8 MB/s  ✓ verified (put_retries=0, get_retries=0)
+  integrity_chunked_16mb   1026ms    15.6 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   2730ms  p50=61ms p95=64ms p99=64ms  ✓ 20/20 consistent
+  consistency_overwrite    2027ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write    781ms  ✓ 10/10 immediately visible in listing
+  rate_limit_escalation    3000ms    107 ops/s  max_clean=128 | ✓8w:101ops/s(0e) ✓16w:43ops/s(0e) ✓32w:96ops/s(0e) ✓64w:151ops/s(0e) ✓128w:198ops/s(0e)
+  sustained_upload_60s    60001ms   336.3 MB/s     21 ops/s  p50=147ms p95=435ms p99=995ms  00s:128MB/s 10s:320MB/s 20s:398MB/s 30s:405MB/s 40s:384MB/s 50s:382MB/s
+
+
+✅ Done in 10m42s. Results: results-20261012/compare.json

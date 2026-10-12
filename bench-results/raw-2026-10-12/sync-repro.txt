@@ -1,0 +1,9 @@
+sync-repro1    mpu_put_1024mb               22.67 s  47.4 MB/s  [64 parts x 16 MiB, 8 wide, complete 20.6 s]
+sync-repro1    get_mpu_1024mb               24.33 s  44.1 MB/s  ttfb 2919 ms  ok
+sync-repro2    mpu_put_1024mb               22.75 s  47.2 MB/s  [64 parts x 16 MiB, 8 wide, complete 21.0 s]
+sync-repro2    get_mpu_1024mb               24.22 s  44.3 MB/s  ttfb 2895 ms  ok
+sync-repro3    mpu_put_1024mb               34.48 s  31.1 MB/s  [64 parts x 16 MiB, 8 wide, complete 32.6 s]
+sync-repro3    get_mpu_1024mb               23.84 s  45.0 MB/s  ttfb 3148 ms  ok
+Oct 12 15:13:07 slc-vaultaire-01 sh[206806]: {"level":"info","ts":1791817987.720535,"caller":"api/s3_long_op.go:505","msg":"long S3 operation answered after keep-alive","path":"/tb-sync-1012/tb-1791817965/mpu-1024mb.bin","status":200}
+Oct 12 15:14:00 slc-vaultaire-01 sh[206806]: {"level":"info","ts":1791818040.22152,"caller":"api/s3_long_op.go:505","msg":"long S3 operation answered after keep-alive","path":"/tb-sync-1012/tb-1791818017/mpu-1024mb.bin","status":200}
+Oct 12 15:15:03 slc-vaultaire-01 sh[206806]: {"level":"info","ts":1791818103.761672,"caller":"api/s3_long_op.go:505","msg":"long S3 operation answered after keep-alive","path":"/tb-sync-1012/tb-1791818069/mpu-1024mb.bin","status":200}

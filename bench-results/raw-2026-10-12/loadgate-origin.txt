@@ -1,0 +1,44 @@
+=== RUN   TestLoad_ConcurrentPut
+    s3_load_test.go:62: [ConcurrentPut] Results:
+    s3_load_test.go:62:   Requests:   100 in 616ms
+    s3_load_test.go:62:   Throughput: 162.2 ops/s, 170.12 MB/s
+    s3_load_test.go:62:   Latency:    p50=243ms  p99=616ms  max=616ms
+    s3_load_test.go:62:   Status:     200:100
+    s3_load_test.go:66: [ConcurrentPut] goroutines: 4 before, 4 after (growth 0)
+--- PASS: TestLoad_ConcurrentPut (9.02s)
+=== RUN   TestLoad_ConcurrentGet
+    s3_load_test.go:128: [ConcurrentGet] Results:
+    s3_load_test.go:128:   Requests:   100 in 960ms
+    s3_load_test.go:128:   Throughput: 104.1 ops/s, 109.20 MB/s
+    s3_load_test.go:128:   Latency:    p50=90ms  p99=119ms  max=119ms
+    s3_load_test.go:128:   Status:     200:100
+    s3_load_test.go:132: [ConcurrentGet] goroutines: 5 before, 5 after (growth 0)
+--- PASS: TestLoad_ConcurrentGet (10.13s)
+=== RUN   TestLoad_Multipart
+    s3_load_test.go:181: [Multipart] Results:
+    s3_load_test.go:181:   Requests:   50 in 23.095s
+    s3_load_test.go:181:   Throughput: 2.2 ops/s, 227.01 MB/s
+    s3_load_test.go:181:   Latency:    p50=19.127s  p99=23.095s  max=23.095s
+    s3_load_test.go:181:   Status:     200:50
+    s3_load_test.go:185: [Multipart] goroutines: 6 before, 9 after (growth 3)
+--- PASS: TestLoad_Multipart (26.71s)
+=== RUN   TestLoad_MixedReadWrite
+    s3_load_test.go:272: [MixedReadWrite] Results:
+    s3_load_test.go:272:   Requests:   100 in 700ms
+    s3_load_test.go:272:   Throughput: 142.8 ops/s, 149.74 MB/s
+    s3_load_test.go:272:   Latency:    p50=104ms  p99=196ms  max=196ms
+    s3_load_test.go:272:   Status:     200:100
+    s3_load_test.go:276: [MixedReadWrite] goroutines: 10 before, 10 after (growth 0)
+--- PASS: TestLoad_MixedReadWrite (7.43s)
+=== RUN   TestLoad_ManagementBurst
+    s3_load_test.go:345: [ManagementBurst] 429s: 40/50, 5xx: 0/50
+    s3_load_test.go:355: [ManagementBurst] Results:
+    s3_load_test.go:355:   Requests:   50 in 3ms
+    s3_load_test.go:355:   Throughput: 15818.8 ops/s, 0.00 MB/s
+    s3_load_test.go:355:   Latency:    p50=3ms  p99=3ms  max=3ms
+    s3_load_test.go:355:   Status:     200:10 429:40
+    s3_load_test.go:359: [ManagementBurst] goroutines: 10 before, 10 after (growth 0)
+--- PASS: TestLoad_ManagementBurst (0.25s)
+=== RUN   TestLoad_Uploader_PartSize
+--- PASS: TestLoad_Uploader_PartSize (0.00s)
+PASS

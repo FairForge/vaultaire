@@ -1,0 +1,25 @@
+|    basic |        list objects |                                             pass |
+|     sync |         special key |                                             pass |
+|     sync |    put a big object |                                             pass |
+|     sync | put an empty object |                                             pass |
+|     sync |    multipart upload |                                             pass |
+|     sync |  change owner/group |                                      not support |
+|     sync |   change permission |                                      not support |
+|     sync |        change mtime |                                      not support |
++----------+---------------------+--------------------------------------------------+
+Start Performance Testing ...
+Benchmark finished! block-size: 4.0 MiB, big-object-size: 64 MiB, small-object-size: 128 KiB, small-objects: 100, NumThreads: 4
++--------------------+---------------------+----------------------+
+|        ITEM        |        VALUE        |         COST         |
++--------------------+---------------------+----------------------+
+|     upload objects |        102.99 MiB/s |     155.35 ms/object |
+|   download objects |         94.91 MiB/s |     168.58 ms/object |
+|  put small objects |     52.10 objects/s |      76.78 ms/object |
+|  get small objects |     59.22 objects/s |      67.55 ms/object |
+|       list objects | 157044.26 objects/s | 2.95 ms/ 116 objects |
+|       head objects |   7139.86 objects/s |       0.56 ms/object |
+|     delete objects |     59.87 objects/s |      66.82 ms/object |
+| change permissions |         not support |          not support |
+| change owner/group |         not support |          not support |
+|       update mtime |         not support |          not support |
++--------------------+---------------------+----------------------+
