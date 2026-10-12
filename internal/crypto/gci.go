@@ -90,21 +90,35 @@ type GlobalContentIndex struct {
 	cache *gciCache // In-memory cache for hot lookups
 }
 
+// gciCacheTTL bounds how long a cached index row is served without reading
+// the table. Rows are repointed by other processes — the chunk move run on
+// the admin slot, the key re-encrypt job, the inactive slot during a
+// zero-downtime switch — and InvalidateCache only reaches this process: a
+// moved chunk was read at its old address until a restart (Stage 1a A3).
+const gciCacheTTL = 5 * time.Minute
+
 // gciCache provides fast in-memory lookups for hot chunks
 type gciCache struct {
-	entries map[string]*GCIEntry
+	entries map[string]gciCached
 	maxSize int
+	now     func() time.Time // time.Now; tests move the clock
 	mu      sync.RWMutex
+}
+
+func newGCICache(maxSize int) *gciCache {
+	return &gciCache{entries: make(map[string]gciCached), maxSize: maxSize, now: time.Now}
+}
+
+type gciCached struct {
+	entry    *GCIEntry
+	storedAt time.Time
 }
 
 // NewGlobalContentIndex creates a new GCI instance
 func NewGlobalContentIndex(db *sql.DB) *GlobalContentIndex {
 	return &GlobalContentIndex{
-		db: db,
-		cache: &gciCache{
-			entries: make(map[string]*GCIEntry),
-			maxSize: 100000, // Cache up to 100K hot chunks
-		},
+		db:    db,
+		cache: newGCICache(100000), // Cache up to 100K hot chunks
 	}
 }
 
@@ -861,10 +875,16 @@ func (g *GlobalContentIndex) GetGlobalCompressionStats(ctx context.Context) (*Co
 
 // Cache methods
 
+// get returns the cached row, or nil when there is none or it is older
+// than gciCacheTTL (the caller then reads the table and sets it again).
 func (c *gciCache) get(hash string) *GCIEntry {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.entries[hash]
+	e, ok := c.entries[hash]
+	if !ok || c.now().Sub(e.storedAt) >= gciCacheTTL {
+		return nil
+	}
+	return e.entry
 }
 
 func (c *gciCache) set(hash string, entry *GCIEntry) {
@@ -883,7 +903,7 @@ func (c *gciCache) set(hash string, entry *GCIEntry) {
 		}
 	}
 
-	c.entries[hash] = entry
+	c.entries[hash] = gciCached{entry: entry, storedAt: c.now()}
 }
 
 func (c *gciCache) delete(hash string) {
@@ -895,5 +915,5 @@ func (c *gciCache) delete(hash string) {
 func (c *gciCache) clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.entries = make(map[string]*GCIEntry)
+	c.entries = make(map[string]gciCached)
 }

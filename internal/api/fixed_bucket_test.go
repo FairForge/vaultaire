@@ -44,6 +44,27 @@ type fixedBucketDriver struct {
 	onObject      func(n int)  // called before object n of a walk is handed out
 	// failGetUnder: reads under this tenant's prefix fail (not a miss).
 	failGetUnder atomic.Value
+	// failReadAfter > 0: a read hands out this many bytes, then fails
+	// (a backend connection dropped mid-body).
+	failReadAfter atomic.Int64
+}
+
+// midBodyFailure is a body that breaks after n bytes.
+type midBodyFailure struct {
+	io.ReadCloser
+	left int64
+}
+
+func (m *midBodyFailure) Read(p []byte) (int, error) {
+	if m.left <= 0 {
+		return 0, errors.New("fixed: connection reset by peer")
+	}
+	if int64(len(p)) > m.left {
+		p = p[:m.left]
+	}
+	n, err := m.ReadCloser.Read(p)
+	m.left -= int64(n)
+	return n, err
 }
 
 func (d *fixedBucketDriver) tenant(ctx context.Context) (string, error) {
@@ -80,6 +101,9 @@ func (d *fixedBucketDriver) Get(ctx context.Context, container, artifact string)
 	f, err := os.Open(d.path(tn, container, artifact))
 	if err != nil {
 		return nil, engine.ErrNotFound(container, artifact)
+	}
+	if n := d.failReadAfter.Load(); n > 0 {
+		return &midBodyFailure{ReadCloser: f, left: n}, nil
 	}
 	return f, nil
 }

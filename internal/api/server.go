@@ -1310,9 +1310,41 @@ func (s *Server) requestIDMiddleware(next http.Handler) http.Handler {
 // vaultaire_errors_total feeds the VaultaireServerErrorRatio page; without
 // this a tenant past its egress allowance could fire it by opening more
 // downloads than the stream guard admits (503 SlowDown, WP-R10-9).
-type requestOutcome struct{ clientRefusal atomic.Bool }
+//
+// abort is the other mark: the body this request already started cannot be
+// finished (a chunked GET whose chunk failed after the status line). The
+// middleware records the request like any other — the access log, the
+// bandwidth and the log line run in the handlers it wraps — and then panics
+// with http.ErrAbortHandler, which makes net/http reset the connection
+// (HTTP/1) or the stream (HTTP/2) instead of ending the body cleanly.
+type requestOutcome struct {
+	clientRefusal atomic.Bool
+	abort         atomic.Bool
+}
 
 type requestOutcomeKey struct{}
+
+// abortResponse cuts the response of this request: a body was started and
+// cannot be finished, so no client may see a clean end. Behind
+// loggingMiddleware the cut is made there, after every post-request record
+// has been written; anywhere else (a test calling the handler, a future
+// mount without the middleware) it is made here.
+func abortResponse(ctx context.Context) {
+	if oc, ok := ctx.Value(requestOutcomeKey{}).(*requestOutcome); ok {
+		oc.abort.Store(true)
+		return
+	}
+	panic(http.ErrAbortHandler)
+}
+
+// cutUnlessClientGone is abortResponse for a body copy that failed: when
+// the client is still there the failure was the source's, and the response
+// is cut; when it went away there is nothing to cut.
+func cutUnlessClientGone(ctx context.Context) {
+	if ctx.Err() == nil {
+		abortResponse(ctx)
+	}
+}
 
 // markClientRefusal keeps the response of this request out of the 5xx count.
 func markClientRefusal(ctx context.Context) {
@@ -1338,6 +1370,9 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 			zap.String("request_id", w.Header().Get("X-Request-Id")),
 			zap.Duration("latency", time.Since(start)),
 		)
+		if oc.abort.Load() {
+			panic(http.ErrAbortHandler) // reset, never a clean end of a short body
+		}
 	})
 }
 

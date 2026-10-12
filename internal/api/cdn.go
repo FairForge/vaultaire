@@ -255,6 +255,7 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 			s.logger.Error("cdn range serve failed",
 				zap.String("key", key),
 				zap.Error(err))
+			cutUnlessClientGone(ctx)
 			return
 		}
 		if s.bandwidthTracker != nil && s.egress == nil {
@@ -272,6 +273,7 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("cdn stream failed",
 			zap.String("key", key),
 			zap.Error(err))
+		cutUnlessClientGone(ctx)
 		return
 	}
 

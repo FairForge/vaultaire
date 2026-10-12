@@ -563,10 +563,7 @@ func TestGCI_Cache(t *testing.T) {
 
 // TestGCI_CacheEviction tests that cache evicts old entries when full
 func TestGCI_CacheEviction(t *testing.T) {
-	cache := &gciCache{
-		entries: make(map[string]*GCIEntry),
-		maxSize: 10, // Small size for testing
-	}
+	cache := newGCICache(10)
 
 	// Fill cache beyond max
 	for i := 0; i < 15; i++ {
@@ -586,10 +583,7 @@ func TestGCI_CacheEviction(t *testing.T) {
 // Benchmark tests
 
 func BenchmarkGCI_LookupChunk_Cached(b *testing.B) {
-	cache := &gciCache{
-		entries: make(map[string]*GCIEntry),
-		maxSize: 100000,
-	}
+	cache := newGCICache(100000)
 
 	hash := "benchmark_hash_12345678901234567890123456789012345678901234567"
 	cache.set(hash, &GCIEntry{
@@ -607,10 +601,7 @@ func BenchmarkGCI_LookupChunk_Cached(b *testing.B) {
 }
 
 func BenchmarkGCI_CacheSet(b *testing.B) {
-	cache := &gciCache{
-		entries: make(map[string]*GCIEntry),
-		maxSize: 100000,
-	}
+	cache := newGCICache(100000)
 
 	entry := &GCIEntry{
 		PlaintextHash: "benchmark_hash",

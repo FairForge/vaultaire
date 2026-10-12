@@ -153,3 +153,30 @@ func (e *CoreEngine) ExistsOn(ctx context.Context, backend, container, artifact 
 	}
 	return exists, nil
 }
+
+// CanAsk reports, without asking the backend and without charging its
+// breaker, whether a call to the named backend could be made now: nil, or
+// ErrAllBackendsUnavailable wrapping ErrBackendNotRegistered (no driver by
+// that name) or naming the open breaker. The chunked GET checks every
+// backend of its plan with it before the first header is written, so a dead
+// backend under chunk 7 is a 503, not a 200 that stops short.
+//
+// Only OPEN refuses. A half-open breaker lets the call through, as the
+// failover does: that call is the probe that closes it, and on a backend
+// whose only traffic is chunk reads, refusing half-open would keep it
+// refused for good.
+func (e *CoreEngine) CanAsk(backend string) error {
+	e.mu.RLock()
+	_, ok := e.drivers[backend]
+	e.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("%w: %w: %q", ErrAllBackendsUnavailable, ErrBackendNotRegistered, backend)
+	}
+	e.failover.mu.RLock()
+	b := e.failover.breakers[backend]
+	e.failover.mu.RUnlock()
+	if b != nil && b.State() == StateOpen {
+		return fmt.Errorf("%w: circuit breaker open on %q", ErrAllBackendsUnavailable, backend)
+	}
+	return nil
+}

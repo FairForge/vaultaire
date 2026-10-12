@@ -120,7 +120,15 @@ func TestChunkedGet_MidStreamFailureAborts(t *testing.T) {
 		allowKeys: map[string]bool{"_chunks/" + firstHash: true}}
 	f.adapter.engine = ie
 
-	w := getChunked(t, f, "abort.bin")
+	// No middleware here: the cut is a panic with http.ErrAbortHandler in
+	// the handler, which net/http turns into a reset connection.
+	var w *httptest.ResponseRecorder
+	require.PanicsWithValue(t, http.ErrAbortHandler, func() {
+		req := httptest.NewRequest("GET", "/test-bucket/abort.bin", nil)
+		req = req.WithContext(s3Ctx(req.Context(), f.tenant))
+		w = httptest.NewRecorder()
+		f.adapter.HandleGet(w, req, "test-bucket", "abort.bin")
+	}, "a failure after the status line cuts the connection")
 	require.Equal(t, http.StatusOK, w.Code, "status was already committed when the failure hit")
 	body, _ := io.ReadAll(w.Body)
 	require.Less(t, len(body), len(content), "body must be truncated, not complete")
