@@ -18,7 +18,7 @@ Updated: 2026-10-12 (Stage 1a Prompt 1 = WP-R8-1 DONE — #681 chunked-GET hones
 ## Launch
 
 - Date of record: 2026-10-31 (plan). The 2026-10-06 plan review recommends opening signups the day the owner checklist is done and making the public push Black Friday, 2026-11-27 — Isaac's call.
-- Owner checklist: SYNTHESIS "Pre-launch checklist", plus the 2026-10-06 review's launch table: Stripe endpoint + six prices, an e-mail provider (Email Service proven), the synthetic tenant + the five rule files, backups off-box, 2FA on both Cloudflare logins + rotation of the 2026-10-03 credentials + the Lyve root key off the data plane + the `/metrics` deny, the DMCA designated agent + an NCMEC runbook, the flags (`egress_throttle` exemptions then on, `signups`), decisions D-19/D-21/D-23/D-25/D-26, the master key, `0.0.0.0/0` refused.
+- Owner checklist: SYNTHESIS "Pre-launch checklist", plus the 2026-10-06 review's launch table: Stripe endpoint + six prices, ~~an e-mail provider~~ **done 2026-10-12: Cloudflare Email Service live on `stored.cloud`, reset mail delivered (`docs/CLOUDFLARE.md` item 7)**, the synthetic tenant + the five rule files, backups off-box, 2FA on both Cloudflare logins + rotation of the 2026-10-03 credentials + the Lyve root key off the data plane + the `/metrics` deny, the DMCA designated agent + an NCMEC runbook, the flags (`egress_throttle` exemptions then on, `signups`), decisions D-19/D-21/D-23/D-25/D-26, the master key, `0.0.0.0/0` refused.
 
 ## Worker queue (one item per session; done = merged, deployed, verified, this file updated)
 
