@@ -9,7 +9,7 @@ import (
 
 func TestParseAttribution(t *testing.T) {
 	a := ParseAttribution("https://lowendtalk.com/discussion/12345?x=1", " let ", "forum", "launch\x00day")
-	assert.Equal(t, "lowendtalk.com", a.Referrer, "host only — no path, no query")
+	assert.Equal(t, "lowendtalk.com", a.Referrer, "host only, no path, no query")
 	assert.Equal(t, "let", a.UTMSource)
 	assert.Equal(t, "forum", a.UTMMedium)
 	assert.Equal(t, "launchday", a.UTMCampaign, "control characters dropped")

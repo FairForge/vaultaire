@@ -1,6 +1,6 @@
-// r9_schema_test.go — Review R9: dashboard queries that referenced columns the
+// r9_schema_test.go, Review R9: dashboard queries that referenced columns the
 // migrated schema does not have (R9-02 dashboard export, R9-09 admin recent
-// users). Real database on purpose — sqlmock cannot catch phantom columns.
+// users). Real database on purpose, sqlmock cannot catch phantom columns.
 package handlers
 
 import (

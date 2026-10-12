@@ -1,4 +1,4 @@
-# Engine lane — charter
+# Engine lane, charter
 
 *Added 2026-10-12. The lane that owns `cmd/vaultaire` and everything the three surfaces stand on. Contract: `docs/ARCHITECTURE_CONTRACT.md`. Backlog: the FULL-PLAN TRACK in `docs/IMPLEMENTATION_PLAN.md`, Stage 1 first.*
 

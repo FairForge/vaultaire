@@ -23,7 +23,7 @@ func TestLogSender_Send(t *testing.T) {
 	logger := zap.New(core)
 
 	// Review R14-01 (R1-08): prod runs LogSender, so the log line must never
-	// carry the body — a password-reset body contains the reset token.
+	// carry the body, a password-reset body contains the reset token.
 	const token = "tok-SECRET-9f8e7d6c"
 	html := `<a href="https://stored.ge/reset-password?token=` + token + `">Reset</a>`
 	text := "https://stored.ge/reset-password?token=" + token
@@ -35,7 +35,7 @@ func TestLogSender_Send(t *testing.T) {
 	require.Equal(t, 1, logs.Len())
 
 	entry := logs.All()[0]
-	assert.Equal(t, "email (dev mode — not sent)", entry.Message)
+	assert.Equal(t, "email (dev mode, not sent)", entry.Message)
 
 	fields := make(map[string]string)
 	for _, f := range entry.Context {
@@ -85,7 +85,7 @@ func TestResendSender_Send(t *testing.T) {
 	sender := &ResendSender{apiKey: "test-api-key", from: "noreply@stored.ge", rl: newTestRateLimiter()}
 	origSend := sender.Send
 
-	// Patch the URL by wrapping Send — instead, use httptest.NewServer and
+	// Patch the URL by wrapping Send, instead, use httptest.NewServer and
 	// override the Resend URL for testing. Since we can't easily override a
 	// const URL, we'll test the request building via the mock server.
 	_ = origSend

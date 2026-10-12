@@ -67,12 +67,12 @@ func TestPostRegister(t *testing.T) {
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
-	// B2 (5.15.6): signup renders the minted S3 credentials ONCE — no blind
+	// B2 (5.15.6): signup renders the minted S3 credentials ONCE, no blind
 	// redirect that discards the secret. The page shows both keys and a way on.
 	assert.Equal(t, http.StatusOK, w.Code)
 	body := w.Body.String()
 	assert.Regexp(t, `VK[0-9a-f]+`, body, "access key must be shown")
-	assert.Regexp(t, `SK[0-9a-f]+`, body, "secret key must be shown — this is the only time it is visible")
+	assert.Regexp(t, `SK[0-9a-f]+`, body, "secret key must be shown, this is the only time it is visible")
 	assert.Contains(t, body, "/dashboard", "must link on to the dashboard")
 	assert.Contains(t, body, "once", "must warn the secret is shown only once")
 

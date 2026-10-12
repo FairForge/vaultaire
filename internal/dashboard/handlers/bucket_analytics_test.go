@@ -59,7 +59,7 @@ func TestHandleBucketAnalytics_NilDB(t *testing.T) {
 	// Act
 	handler.ServeHTTP(w, req)
 
-	// Assert — renders with defaults, no crash
+	// Assert, renders with defaults, no crash
 	assert.Equal(t, http.StatusOK, w.Code)
 	body := w.Body.String()
 	assert.Contains(t, body, "test-bucket")
@@ -78,7 +78,7 @@ func TestHandleBucketAnalytics_NoSession(t *testing.T) {
 	// Act
 	handler.ServeHTTP(w, req)
 
-	// Assert — redirects to login
+	// Assert, redirects to login
 	assert.Equal(t, http.StatusSeeOther, w.Code)
 	assert.Equal(t, "/login", w.Header().Get("Location"))
 }
@@ -105,7 +105,7 @@ func TestHandleBucketAnalytics_EmptyBucketName(t *testing.T) {
 	// Act
 	handler.ServeHTTP(w, req)
 
-	// Assert — redirects to bucket list
+	// Assert, redirects to bucket list
 	assert.Equal(t, http.StatusSeeOther, w.Code)
 	assert.Equal(t, "/dashboard/buckets", w.Header().Get("Location"))
 }

@@ -56,7 +56,7 @@ func TestHandleAdminSystem_AdminSession(t *testing.T) {
 	assert.NotContains(t, body, `<span class="memory">0 B</span>`)
 }
 
-// WP-R13-3: the System page lists job_runs — what GET /api/v1/admin/jobs
+// WP-R13-3: the System page lists job_runs, what GET /api/v1/admin/jobs
 // returns, for an operator without a JWT at hand.
 func TestHandleAdminSystem_ListsBackgroundJobs(t *testing.T) {
 	// Arrange: a job of this test's own (job_runs is shared by every package).
@@ -90,7 +90,7 @@ func TestHandleAdminSystem_ListsBackgroundJobs(t *testing.T) {
 // is right after a restart.
 func TestHandleAdminSystem_ShowsTheRoutingTruthLine(t *testing.T) {
 	// Arrange: a routing_truth row as the job writes it. The job name is the
-	// production one — the page reads exactly that row — so the row is
+	// production one, the page reads exactly that row, so the row is
 	// written only when no other process holds one, and restored after.
 	db, err := sql.Open("postgres", testutil.DSN())
 	require.NoError(t, err)

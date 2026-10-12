@@ -9,7 +9,7 @@ Universal storage orchestration engine. One S3-compatible API, multiple storage 
 
 ## What is Vaultaire?
 
-Vaultaire provides a single S3-compatible API that routes data across multiple storage backends — local disk, iDrive e2, Seagate Lyve Cloud, Geyser tape, Cloudflare R2 and more. It handles multi-tenant isolation, streaming I/O, billing, and backend failover so you don't have to.
+Vaultaire provides a single S3-compatible API that routes data across multiple storage backends, local disk, iDrive e2, Seagate Lyve Cloud, Geyser tape, Cloudflare R2 and more. It handles multi-tenant isolation, streaming I/O, billing, and backend failover so you don't have to.
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
@@ -19,11 +19,11 @@ Vaultaire provides a single S3-compatible API that routes data across multiple s
 └─────────────┘     └─────────────┘     └─────────────┘
 ```
 
-**S3 API** — Standard S3 protocol. Works with AWS CLI, SDKs, rclone, s3cmd, JuiceFS.
+**S3 API**, Standard S3 protocol. Works with AWS CLI, SDKs, rclone, s3cmd, JuiceFS.
 
-**Engine** — Orchestrates placement by storage class, circuit-breaker failover and smart demotion across backends.
+**Engine**, Orchestrates placement by storage class, circuit-breaker failover and smart demotion across backends.
 
-**Drivers** — Pluggable storage backends. Add new ones by implementing the `engine.Driver` interface (`internal/engine/interface.go`).
+**Drivers**, Pluggable storage backends. Add new ones by implementing the `engine.Driver` interface (`internal/engine/interface.go`).
 
 ## Quick Start
 
@@ -46,17 +46,17 @@ aws s3 cp file.txt s3://my-bucket/ --endpoint-url http://localhost:8000
 
 ## Features
 
-- **S3-compatible API** — PUT, GET, DELETE, LIST, HEAD, multipart uploads, versioning, object lock
-- **Multi-backend routing** — local filesystem, iDrive e2 (primary, per-region), Seagate Lyve Cloud, Geyser tape, Cloudflare R2 (public buckets)
-- **Multi-tenant isolation** — namespaced storage with per-tenant quotas and billing
-- **Streaming I/O** — processes 1KB to 1TB files without buffering into memory
-- **Stripe billing** — subscriptions, webhook-driven plan changes
-- **Circuit breakers** — per-backend breakers, ordered failover across backends
-- **Object versioning** — enable/suspend per bucket, version-aware GET/DELETE
-- **Object lock** — GOVERNANCE/COMPLIANCE retention modes, legal hold
-- **Bucket notifications** — webhook delivery on object events
-- **PostgreSQL-backed metadata cache** — HEAD/GET metadata served from `object_head_cache` without touching the backend
-- **Monitoring** — Prometheus metrics, structured logging (Zap)
+- **S3-compatible API**, PUT, GET, DELETE, LIST, HEAD, multipart uploads, versioning, object lock
+- **Multi-backend routing**, local filesystem, iDrive e2 (primary, per-region), Seagate Lyve Cloud, Geyser tape, Cloudflare R2 (public buckets)
+- **Multi-tenant isolation**, namespaced storage with per-tenant quotas and billing
+- **Streaming I/O**, processes 1KB to 1TB files without buffering into memory
+- **Stripe billing**, subscriptions, webhook-driven plan changes
+- **Circuit breakers**, per-backend breakers, ordered failover across backends
+- **Object versioning**, enable/suspend per bucket, version-aware GET/DELETE
+- **Object lock**, GOVERNANCE/COMPLIANCE retention modes, legal hold
+- **Bucket notifications**, webhook delivery on object events
+- **PostgreSQL-backed metadata cache**, HEAD/GET metadata served from `object_head_cache` without touching the backend
+- **Monitoring**, Prometheus metrics, structured logging (Zap)
 
 ## Configuration
 
@@ -79,7 +79,7 @@ See [docs/CONFIG.md](docs/CONFIG.md) for the full environment variable reference
 ## Project Structure
 
 ```
-cmd/vaultaire/       Entry point — driver init, DB connect, HTTP server
+cmd/vaultaire/       Entry point, driver init, DB connect, HTTP server
 internal/
   api/               S3 protocol handlers, auth middleware, error responses
   engine/            Backend orchestration, placement, failover
@@ -118,7 +118,7 @@ TDD is the standard workflow. Tests use [testify](https://github.com/stretchr/te
 
 ## Security
 
-Report vulnerabilities to security@stored.ge — see [/.well-known/security.txt](https://stored.ge/.well-known/security.txt).
+Report vulnerabilities to security@stored.ge, see [/.well-known/security.txt](https://stored.ge/.well-known/security.txt).
 
 ## License
 

@@ -1,4 +1,4 @@
-{{define "title"}}Enable 2FA — Stored{{end}}
+{{define "title"}}Enable 2FA, Stored{{end}}
 {{define "content"}}
 {{if .Enrolled}}
 <div class="page-header">
@@ -21,7 +21,7 @@
         <code>{{.}}</code>
         {{end}}
     </div>
-    <p class="text-muted">Store them somewhere safe — a password manager, or on paper. We keep only a hash of each and cannot show them again; if you lose both the codes and your authenticator, contact support.</p>
+    <p class="text-muted">Store them somewhere safe, a password manager, or on paper. We keep only a hash of each and cannot show them again; if you lose both the codes and your authenticator, contact support.</p>
     <a href="/dashboard/settings" class="btn btn-primary">I have saved them</a>
 </div>
 {{else}}

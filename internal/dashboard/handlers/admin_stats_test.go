@@ -19,7 +19,7 @@ func statsTemplate(t *testing.T) *template.Template {
 }
 
 // The traffic page reads the cookieless aggregates back: a day row, the
-// top tables and the funnel — against the migrated schema, since sqlmock
+// top tables and the funnel, against the migrated schema, since sqlmock
 // cannot tell a phantom column from a real one (R9).
 func TestHandleAdminStats_RendersAggregates(t *testing.T) {
 	db := testDashDB(t)

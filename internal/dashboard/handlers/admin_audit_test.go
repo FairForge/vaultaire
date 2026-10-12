@@ -148,6 +148,6 @@ func TestHandleAdminAuditExport_CSVIsAuditedAndEscaped(t *testing.T) {
 	body := w.Body.String()
 	assert.True(t, strings.HasPrefix(body, "timestamp,event_type,action,result,severity,performed_by,user_id,tenant_id,resource,ip,user_agent,error,metadata\n"))
 	assert.Contains(t, body, "2026-09-30T12:00:00Z,auth,auth.login_failed,success,warning,admin-1,u-1,t-1,,203.0.113.7,curl/8,,")
-	assert.Contains(t, body, `"{""email"":""=HYPERLINK`, "the metadata cell is quoted JSON — it starts with { so no prefix")
+	assert.Contains(t, body, `"{""email"":""=HYPERLINK`, "the metadata cell is quoted JSON, it starts with { so no prefix")
 	require.NoError(t, mock.ExpectationsWereMet())
 }

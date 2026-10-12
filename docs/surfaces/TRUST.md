@@ -1,4 +1,4 @@
-# Trust lane — charter ("least access, any access a public event")
+# Trust lane, charter ("least access, any access a public event")
 
 *Added 2026-10-12. Lives at trust.stored.cloud. Contract: `docs/ARCHITECTURE_CONTRACT.md`. Plan homes: Phase 43 (the Cape model), 43.6 the transparency log (F-16), decision F-14 (the master key), F-18 (the attested box), 41.4 (the attested data plane), 10.7 (isolation audit).*
 

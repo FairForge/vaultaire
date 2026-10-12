@@ -75,7 +75,7 @@ func TestMFAPendingStore_Peek(t *testing.T) {
 }
 
 // R5-15d: expired challenges used to stay in memory until their own token
-// was presented again — an attacker who could pass the first factor grew the
+// was presented again, an attacker who could pass the first factor grew the
 // store by one entry per attempt forever. Create now sweeps inline.
 func TestMFAPendingStore_SweepsExpiredOnCreate(t *testing.T) {
 	store := NewMFAPendingStore()

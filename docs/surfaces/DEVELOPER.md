@@ -1,4 +1,4 @@
-# Developer surface — charter ("the Stripe of storage")
+# Developer surface, charter ("the Stripe of storage")
 
 *Added 2026-10-12. Lives at stored.cloud/developers, docs.stored.cloud, s3.stored.cloud and the management API. Contract: `docs/ARCHITECTURE_CONTRACT.md`. Plan homes: Phases 5.10, 5.11, 26, 31, 42.1, 18; WP-SSEC-1; WP-DOMAIN-1.*
 
@@ -14,7 +14,7 @@
 
 **Metrics.** Conformance pass rate (versitygw BATS and our suite); documented operations / total operations in OpenAPI; time-to-first-successful-PUT for a new key; 4xx caused by our divergence from S3; docs search zero-result rate; status-page incidents with a post-mortem.
 
-**The Stripe standard, and where we are.** Idempotency keys (shipped), webhooks (shipped, outbox pending WP-R11-3), API version header (shipped), sandbox / test-mode tenants (not built — 26.1), SDKs in the languages that matter (26.6, not built), a docs portal with a changelog (26.5 → docs.stored.cloud), an API explorer (26.7), a status page (5.14.12 → status.stored.cloud), per-space quotas and the plan ladder (42.1), resellers (Phase 18).
+**The Stripe standard, and where we are.** Idempotency keys (shipped), webhooks (shipped, outbox pending WP-R11-3), API version header (shipped), sandbox / test-mode tenants (not built, 26.1), SDKs in the languages that matter (26.6, not built), a docs portal with a changelog (26.5 → docs.stored.cloud), an API explorer (26.7), a status page (5.14.12 → status.stored.cloud), per-space quotas and the plan ladder (42.1), resellers (Phase 18).
 
 **The first ten.**
 

@@ -50,7 +50,7 @@ func TestHandleBuckets_RegionPickerFromTable(t *testing.T) {
 }
 
 // The region gate itself lives in the API layer's registry
-// (createBucketRegistry — TestManagementCreateBucket_UnavailableRegion); the
+// (createBucketRegistry, TestManagementCreateBucket_UnavailableRegion); the
 // dashboard only renders the verdict, naming the region the customer picked.
 func TestHandleCreateBucket_RegionNotEnabledIsRefused(t *testing.T) {
 	fc := &fakeCreator{result: BucketCreateResult{State: BucketCreateRegionUnavailable}}

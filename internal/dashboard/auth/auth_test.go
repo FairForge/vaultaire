@@ -113,7 +113,7 @@ func TestMemoryStore(t *testing.T) {
 		if !ids[t1] || !ids[t2] {
 			t.Errorf("expected both tokens in list, got %+v", list)
 		}
-		// Newest first — the second-created session should sort ahead.
+		// Newest first, the second-created session should sort ahead.
 		if list[0].ID != t2 {
 			t.Errorf("expected newest first (%s), got %s", t2, list[0].ID)
 		}

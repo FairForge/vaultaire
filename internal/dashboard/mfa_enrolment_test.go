@@ -32,8 +32,8 @@ var (
 
 // No template this binary serves loads a script or a stylesheet from another
 // host, and the CSP names no host at all. The 2FA setup page loaded a QR
-// library from cdn.jsdelivr.net without SRI — on the page that shows a new
-// TOTP secret — and `script-src` allowed the whole CDN.
+// library from cdn.jsdelivr.net without SRI, on the page that shows a new
+// TOTP secret, and `script-src` allowed the whole CDN.
 func TestNoServedTemplateOrCSPNamesAnExternalScriptHost(t *testing.T) {
 	var files int
 	require.NoError(t, fs.WalkDir(Templates, "templates", func(p string, d fs.DirEntry, err error) error {
@@ -61,7 +61,7 @@ func TestNoServedTemplateOrCSPNamesAnExternalScriptHost(t *testing.T) {
 	}))
 
 	// The policy: every source is a keyword ('self', 'none', 'unsafe-inline')
-	// or the data: scheme — never a host, a scheme://, or a wildcard.
+	// or the data: scheme, never a host, a scheme://, or a wildcard.
 	for _, directive := range strings.Split(middleware.ContentSecurityPolicy, ";") {
 		fields := strings.Fields(directive)
 		require.NotEmpty(t, fields)
@@ -132,7 +132,7 @@ func TestMFAEnrolment_ThroughTheRouterWithTheRealPage(t *testing.T) {
 	r.ServeHTTP(noSession, httptest.NewRequest("GET", "/dashboard/settings/mfa/qr.png", nil))
 	assert.Equal(t, http.StatusSeeOther, noSession.Code, "no session, no QR code")
 
-	// Act: confirm with the 6-digit code and the password — and nothing else.
+	// Act: confirm with the 6-digit code and the password, and nothing else.
 	code, err := totp.GenerateCode(key[1], time.Now())
 	require.NoError(t, err)
 	post := func(path string, form url.Values) *httptest.ResponseRecorder {

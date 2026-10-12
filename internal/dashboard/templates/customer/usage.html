@@ -1,4 +1,4 @@
-{{define "title"}}Usage — Stored{{end}}
+{{define "title"}}Usage, Stored{{end}}
 {{define "content"}}
 <div class="page-header">
     <div>
@@ -7,7 +7,7 @@
     </div>
 </div>
 
-<div class="egress-callout">Egress: $0.00 — always free</div>
+<div class="egress-callout">Egress: $0.00, always free</div>
 
 <div class="card-grid">
     <div class="card">
@@ -42,7 +42,7 @@
 
 {{if .HasChartData}}
 <div class="card" hx-get="/dashboard/usage" hx-trigger="every 30s" hx-select=".chart-wrap" hx-swap="innerHTML" hx-target=".chart-wrap">
-    <div class="card-title">Bandwidth — Last 30 Days</div>
+    <div class="card-title">Bandwidth, Last 30 Days</div>
     <div class="chart-wrap">
         <svg viewBox="0 0 640 240" class="usage-chart" role="img" aria-label="Bandwidth usage chart for the last 30 days">
             <text x="0" y="12" class="chart-label">{{.ChartMaxLabel}}</text>
@@ -70,7 +70,7 @@
 </div>
 {{else}}
 <div class="card">
-    <div class="card-title">Bandwidth — Last 30 Days</div>
+    <div class="card-title">Bandwidth, Last 30 Days</div>
     <p class="text-muted empty-state">No bandwidth data yet. Upload or download objects to see usage.</p>
 </div>
 {{end}}

@@ -1,4 +1,4 @@
-{{define "title"}}GDPR Compliance — Stored{{end}}
+{{define "title"}}GDPR Compliance, Stored{{end}}
 {{define "content"}}
 <div class="card">
     <p class="text-muted">Last updated: September 30, 2026</p>
@@ -7,19 +7,19 @@
 
     <h2 id="contents">Contents</h2>
     <ul>
-        <li><a href="#principles">Article 5 — Data Processing Principles</a></li>
-        <li><a href="#erasure">Article 17 — Right to Erasure</a></li>
-        <li><a href="#portability">Article 20 — Data Portability</a></li>
-        <li><a href="#by-design">Article 25 — Data Protection by Design</a></li>
-        <li><a href="#processing">Article 28 — Data Processing</a></li>
-        <li><a href="#security">Article 32 — Security of Processing</a></li>
-        <li><a href="#breach-notification">Articles 33/34 — Breach Notification</a></li>
+        <li><a href="#principles">Article 5, Data Processing Principles</a></li>
+        <li><a href="#erasure">Article 17, Right to Erasure</a></li>
+        <li><a href="#portability">Article 20, Data Portability</a></li>
+        <li><a href="#by-design">Article 25, Data Protection by Design</a></li>
+        <li><a href="#processing">Article 28, Data Processing</a></li>
+        <li><a href="#security">Article 32, Security of Processing</a></li>
+        <li><a href="#breach-notification">Articles 33/34, Breach Notification</a></li>
         <li><a href="#data-residency">Data Residency</a></li>
         <li><a href="#sub-processors">Sub-processors</a></li>
         <li><a href="#contact">Contact</a></li>
     </ul>
 
-    <h2 id="principles">Article 5 — Data Processing Principles</h2>
+    <h2 id="principles">Article 5, Data Processing Principles</h2>
     <p>Stored adheres to the core GDPR principles in the design and operation of our service:</p>
     <ul>
         <li><strong>Data minimization:</strong> We store only the objects you upload and the minimal account metadata required to operate the service (email, hashed password, billing information). We do not collect analytics, behavioral data, or advertising profiles.</li>
@@ -27,33 +27,33 @@
         <li><strong>Storage limitation:</strong> Account data is retained only for the duration of your account. Upon account deletion, a 30-day grace period allows data recovery, after which the account is closed and our deletion job erases your objects, keys and account records on the scheduled date; backups age out within 7 days. Large objects are stored in deduplicated blocks: the blocks of your objects are released on that date and deleted by the storage collector once its seven-day safety period has passed, except a block that is byte-for-byte identical to one another customer stores, which remains as that customer's data.</li>
     </ul>
 
-    <h2 id="erasure">Article 17 — Right to Erasure</h2>
+    <h2 id="erasure">Article 17, Right to Erasure</h2>
     <p>Data subjects have the right to request deletion of their personal data. Stored supports this through:</p>
     <ul>
         <li><strong>Account deletion:</strong> Available via the dashboard settings page or the management API (<code>DELETE /account</code>). Initiates a 30-day grace period, after which the account is closed, the subscription is cancelled and our deletion job erases your objects, keys and account records on the scheduled date. Large objects are stored in deduplicated blocks: the blocks of your objects are released on that date and deleted by the storage collector once its seven-day safety period has passed, except a block that is byte-for-byte identical to one another customer stores, which remains as that customer's data.</li>
         <li><strong>Object deletion:</strong> Individual objects can be deleted at any time via the S3-compatible API (<code>DELETE</code> operation) or dashboard.</li>
         <li><strong>Cancellation:</strong> Account deletion can be cancelled during the 30-day grace period via the dashboard settings page.</li>
     </ul>
-    <p><strong>Object Lock exemption:</strong> Objects protected by Object Lock (WORM retention) cannot be deleted until the retention period expires. This is a legal compliance mechanism — if you use Object Lock for regulatory retention, erasure requests are deferred until the retention period concludes.</p>
+    <p><strong>Object Lock exemption:</strong> Objects protected by Object Lock (WORM retention) cannot be deleted until the retention period expires. This is a legal compliance mechanism, if you use Object Lock for regulatory retention, erasure requests are deferred until the retention period concludes.</p>
 
-    <h2 id="portability">Article 20 — Data Portability</h2>
+    <h2 id="portability">Article 20, Data Portability</h2>
     <p>Stored provides full data portability through multiple channels:</p>
     <ul>
-        <li><strong>S3-compatible API:</strong> All stored objects are accessible via the standard S3 protocol. You can export your entire data set using any S3-compatible tool — <code>aws-cli</code>, <code>boto3</code>, <code>rclone</code>, <code>s3cmd</code>, Cyberduck, and others — with zero modification.</li>
+        <li><strong>S3-compatible API:</strong> All stored objects are accessible via the standard S3 protocol. You can export your entire data set using any S3-compatible tool, <code>aws-cli</code>, <code>boto3</code>, <code>rclone</code>, <code>s3cmd</code>, Cyberduck, and others, with zero modification.</li>
         <li><strong>GDPR data export:</strong> The dashboard settings page (and <code>POST /api/v1/manage/account/export</code>) requests a data export; it is prepared within minutes as one JSON file in a private system bucket of your account, downloadable for 7 days through a link only you can see. It contains all account data: profile, tenant information, quotas, buckets, objects, versions, locks, API keys, and 90 days of bandwidth history.</li>
         <li><strong>No proprietary formats:</strong> Objects are returned byte-for-byte through the S3 API. At rest, large objects may be split into chunks and compressed by our engine (which is open source); no proprietary client or format is ever needed to read your data back.</li>
     </ul>
 
-    <h2 id="by-design">Article 25 — Data Protection by Design</h2>
+    <h2 id="by-design">Article 25, Data Protection by Design</h2>
     <p>Privacy and security are built into Stored from the ground up:</p>
     <ul>
-                <li><strong>Encryption:</strong> all connections are encrypted in transit (TLS 1.2 or higher; HSTS is enforced at our edge). At rest you can encrypt with your own keys (SSE-C — the key travels with each request and is never stored) or client-side; server-managed encryption at rest (SSE-S3, AES-256-GCM with ML-KEM-768 key encapsulation) is implemented and tested but <strong>not yet enabled in production</strong>. Objects held by our storage sub-processors are additionally subject to those providers' own at-rest encryption.</li>
+                <li><strong>Encryption:</strong> all connections are encrypted in transit (TLS 1.2 or higher; HSTS is enforced at our edge). At rest you can encrypt with your own keys (SSE-C, the key travels with each request and is never stored) or client-side; server-managed encryption at rest (SSE-S3, AES-256-GCM with ML-KEM-768 key encapsulation) is implemented and tested but <strong>not yet enabled in production</strong>. Objects held by our storage sub-processors are additionally subject to those providers' own at-rest encryption.</li>
         <li><strong>Scoped API keys:</strong> API keys can be scoped to specific buckets and operations, following the principle of least privilege.</li>
         <li><strong>Two-factor authentication:</strong> TOTP-based 2FA is available for all accounts and enforced for administrative access.</li>
         <li><strong>No tracking:</strong> Stored does not use analytics cookies, advertising trackers, or third-party behavioral tracking scripts.</li>
     </ul>
 
-    <h2 id="processing">Article 28 — Data Processing</h2>
+    <h2 id="processing">Article 28, Data Processing</h2>
     <p>When you use Stored, FairForge LLC acts as a <strong>Data Processor</strong> on your behalf. Our processing obligations are formalized in our <a href="/legal/dpa">Data Processing Agreement</a>, which covers:</p>
     <ul>
         <li>Processing only on documented instructions from the Controller.</li>
@@ -64,10 +64,10 @@
     </ul>
     <p>To execute a DPA for your organization, visit our <a href="/legal/dpa">DPA page</a> or contact <strong>privacy@stored.ge</strong>.</p>
 
-    <h2 id="security">Article 32 — Security of Processing</h2>
+    <h2 id="security">Article 32, Security of Processing</h2>
     <p>Stored implements appropriate technical and organizational measures to ensure a level of security appropriate to the risk:</p>
     <ul>
-        <li><strong>Encryption:</strong> TLS 1.2+ in transit (HSTS at the edge); SSE-C or client-side encryption at rest on request — server-managed SSE-S3 (AES-256-GCM, ML-KEM-768) is implemented but not yet enabled in production.</li>
+        <li><strong>Encryption:</strong> TLS 1.2+ in transit (HSTS at the edge); SSE-C or client-side encryption at rest on request, server-managed SSE-S3 (AES-256-GCM, ML-KEM-768) is implemented but not yet enabled in production.</li>
         <li><strong>Access controls:</strong> Per-tenant credentials, scoped API keys, role-based dashboard access.</li>
         <li><strong>Integrity:</strong> ETag (MD5) verification on every upload, Object Lock (WORM) for immutable retention, MFA Delete for versioned objects.</li>
         <li><strong>Audit logging:</strong> API operations, account access, and administrative actions are logged.</li>
@@ -75,7 +75,7 @@
         <li><strong>Backups:</strong> Daily PostgreSQL backups with 7-day retention, currently on the production host (off-host copies planned before launch).</li>
     </ul>
 
-    <h2 id="breach-notification">Articles 33/34 — Breach Notification</h2>
+    <h2 id="breach-notification">Articles 33/34, Breach Notification</h2>
     <p>Stored maintains a breach response workflow compliant with GDPR Articles 33 and 34:</p>
     <ul>
         <li><strong>72-hour notification:</strong> In the event of a personal data breach, we will notify affected Controllers without undue delay, and in no case later than 72 hours after becoming aware of the breach.</li>
@@ -123,9 +123,9 @@
             </tr>
         </thead>
         <tbody>
-            <tr><td>iDrive Inc.</td><td>Object storage — Standard tier, per-bucket region</td><td>United States / EU</td></tr>
-            <tr><td>Seagate Technology (Lyve Cloud)</td><td>Object storage — resilient tier, failover</td><td>United States</td></tr>
-            <tr><td>Geyser Data Inc.</td><td>Tape archive — Vault tier (all regions)</td><td>United States (Los Angeles)</td></tr>
+            <tr><td>iDrive Inc.</td><td>Object storage, Standard tier, per-bucket region</td><td>United States / EU</td></tr>
+            <tr><td>Seagate Technology (Lyve Cloud)</td><td>Object storage, resilient tier, failover</td><td>United States</td></tr>
+            <tr><td>Geyser Data Inc.</td><td>Tape archive, Vault tier (all regions)</td><td>United States (Los Angeles)</td></tr>
             <tr><td>Cloudflare Inc.</td><td>CDN, DDoS protection, TLS; R2 storage for public-read buckets</td><td>Global (edge network) / United States</td></tr>
             <tr><td>Microsoft Corporation (OneDrive)</td><td>Internal parity copies, when enabled</td><td>United States</td></tr>
             <tr><td>Stripe Inc.</td><td>Payment processing</td><td>United States</td></tr>

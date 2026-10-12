@@ -13,7 +13,7 @@ import (
 
 // WP-R12-5 (Review R12-19): the CSRF token is an HMAC over the session id
 // with a server key. It used to be a bare random cookie compared with the
-// submitted value — unsigned and not bound to the session, so any page that
+// submitted value, unsigned and not bound to the session, so any page that
 // could set a cookie for the registrable domain (a `*.stored.ge` host)
 // forged a valid pair.
 
@@ -119,7 +119,7 @@ func TestCSRF_NoCookieIsIssuedAndAnOldOneIsCleared(t *testing.T) {
 	w := httptest.NewRecorder()
 	csrfUnderTest().ServeHTTP(w, req)
 
-	// Assert: nothing to plant against — the token lives in the page only.
+	// Assert: nothing to plant against, the token lives in the page only.
 	for _, c := range w.Result().Cookies() {
 		assert.NotEqual(t, "csrf_token", c.Name, "no CSRF cookie is set any more")
 	}
@@ -162,7 +162,7 @@ func tokenForNoSession(t *testing.T) string {
 	w := httptest.NewRecorder()
 	csrfUnderTest().ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code)
-	require.Empty(t, w.Body.String(), "no session, no token — never the HMAC of an empty string")
+	require.Empty(t, w.Body.String(), "no session, no token, never the HMAC of an empty string")
 	return "x"
 }
 

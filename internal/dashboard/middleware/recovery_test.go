@@ -65,7 +65,7 @@ func TestRecovery_NoPanic_Passthrough(t *testing.T) {
 }
 
 func TestRecovery_PanicWithNonStringValue(t *testing.T) {
-	// Arrange — panics with a non-string value (e.g. int).
+	// Arrange, panics with a non-string value (e.g. int).
 	core, logs := observer.New(zap.ErrorLevel)
 	logger := zap.New(core)
 

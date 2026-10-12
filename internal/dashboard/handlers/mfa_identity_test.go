@@ -16,7 +16,7 @@ import (
 )
 
 // WP-R12-15: enrolling a second factor and regenerating backup codes ask
-// for the password — a stolen dashboard session must not be enough to
+// for the password, a stolen dashboard session must not be enough to
 // enrol the thief's authenticator and lock the owner out, nor to mint a
 // fresh set of recovery codes. An OAuth-only account (no password) needs a
 // session younger than ten minutes instead: a fresh sign-in.

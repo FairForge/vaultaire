@@ -1,4 +1,4 @@
-{{define "title"}}EU Data Act Compliance — Stored{{end}}
+{{define "title"}}EU Data Act Compliance, Stored{{end}}
 {{define "content"}}
 <div class="card">
     <p class="text-muted">Last updated: September 30, 2026</p>
@@ -7,24 +7,24 @@
 
     <h2 id="contents">Contents</h2>
     <ul>
-        <li><a href="#switching">Article 23 — Switching Between Providers</a></li>
-        <li><a href="#no-fees">Article 24 — No Switching Fees</a></li>
-        <li><a href="#interoperability">Article 25 — Interoperability</a></li>
-        <li><a href="#porting">Article 26 — Porting Assistance</a></li>
-        <li><a href="#no-lock-in">Article 27 — No Vendor Lock-in</a></li>
+        <li><a href="#switching">Article 23, Switching Between Providers</a></li>
+        <li><a href="#no-fees">Article 24, No Switching Fees</a></li>
+        <li><a href="#interoperability">Article 25, Interoperability</a></li>
+        <li><a href="#porting">Article 26, Porting Assistance</a></li>
+        <li><a href="#no-lock-in">Article 27, No Vendor Lock-in</a></li>
         <li><a href="#comparison">How Stored Compares</a></li>
         <li><a href="#contact">Contact</a></li>
     </ul>
 
-    <h2 id="switching">Article 23 — Switching Between Providers</h2>
+    <h2 id="switching">Article 23, Switching Between Providers</h2>
     <p>The Data Act requires cloud providers to support customers in switching to another provider or to on-premises infrastructure. Stored makes switching effortless:</p>
     <ul>
-        <li><strong>S3-compatible API:</strong> Stored implements the industry-standard S3 protocol. Migrating to or from Stored requires zero code changes — the same tools, SDKs, and scripts work across all S3-compatible providers.</li>
+        <li><strong>S3-compatible API:</strong> Stored implements the industry-standard S3 protocol. Migrating to or from Stored requires zero code changes, the same tools, SDKs, and scripts work across all S3-compatible providers.</li>
         <li><strong>Standard tools work:</strong> <code>aws-cli</code>, <code>boto3</code>, <code>rclone</code>, <code>s3cmd</code>, Cyberduck, and any S3-compatible client work with stored.ge without modification. Switch providers by changing an endpoint URL.</li>
         <li><strong>No proprietary dependencies:</strong> We do not require proprietary SDKs, agents, or client software.</li>
     </ul>
 
-    <h2 id="no-fees">Article 24 — No Switching Fees</h2>
+    <h2 id="no-fees">Article 24, No Switching Fees</h2>
     <p>The Data Act prohibits cloud providers from charging fees that discourage switching. Stored goes beyond the minimum requirements:</p>
     <ul>
         <li><strong>No egress fees for switching:</strong> Stored does not charge egress fees. Download your data at any time at no additional cost.</li>
@@ -33,7 +33,7 @@
         <li><strong>No hidden migration costs:</strong> There are no charges for API calls, data listing, or metadata access during a migration.</li>
     </ul>
 
-    <h2 id="interoperability">Article 25 — Interoperability</h2>
+    <h2 id="interoperability">Article 25, Interoperability</h2>
     <p>The Data Act requires cloud services to ensure interoperability with other services using open interfaces and standards. Stored is built on open standards:</p>
     <ul>
         <li><strong>Full S3 API compatibility:</strong> GET, PUT, DELETE, LIST, HEAD, multipart upload, Object Lock, version history, pre-signed URLs, and more.</li>
@@ -42,7 +42,7 @@
         <li><strong>Standard metadata:</strong> Object metadata uses standard HTTP headers and user-defined <code>x-amz-meta-*</code> headers, fully portable across providers.</li>
     </ul>
 
-    <h2 id="porting">Article 26 — Porting Assistance</h2>
+    <h2 id="porting">Article 26, Porting Assistance</h2>
     <p>The Data Act requires providers to support customers during the porting process with a reasonable transition period. Stored provides:</p>
     <ul>
         <li><strong>30-day retention after cancellation:</strong> After account deletion is requested, all data is retained for 30 days. During this period, you can access and export your data normally or cancel the deletion entirely.</li>
@@ -51,7 +51,7 @@
         <li><strong>Documentation:</strong> Our API documentation and S3 compatibility guide are publicly available to assist with migration planning.</li>
     </ul>
 
-    <h2 id="no-lock-in">Article 27 — No Vendor Lock-in</h2>
+    <h2 id="no-lock-in">Article 27, No Vendor Lock-in</h2>
     <p>The Data Act requires cloud providers to remove barriers to switching by using open standards. Stored is architecturally lock-in free:</p>
     <ul>
         <li><strong>Open protocol:</strong> The S3 API is an open, widely-implemented protocol supported by hundreds of tools and libraries.</li>
@@ -73,11 +73,11 @@
             <tr>
                 <td>Switching fees</td>
                 <td>None</td>
-                <td>Egress fees ($0.01–0.09/GB)</td>
+                <td>Egress fees ($0.01 to 0.09/GB)</td>
             </tr>
             <tr>
                 <td>Vendor lock-in</td>
-                <td>None — standard S3 API</td>
+                <td>None, standard S3 API</td>
                 <td>Proprietary SDKs, APIs, or formats common</td>
             </tr>
             <tr>

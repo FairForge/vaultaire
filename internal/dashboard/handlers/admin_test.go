@@ -75,7 +75,7 @@ func TestHandleAdminOverview_NoSession(t *testing.T) {
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
-	// Assert — redirects to login when session missing
+	// Assert, redirects to login when session missing
 	assert.Equal(t, http.StatusSeeOther, w.Code)
 	assert.Equal(t, "/login", w.Header().Get("Location"))
 }
