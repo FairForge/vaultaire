@@ -1,0 +1,3 @@
+tb-arch-1012|geyser|f|vault|4|612368384
+tb-pub-1012|r2|f|standard|10|101711872
+tb-sync-1012|sync|f|standard|1|1073741824

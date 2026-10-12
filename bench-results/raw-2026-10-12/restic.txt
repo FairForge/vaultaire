@@ -1,0 +1,7 @@
+== restic origin
+backup 1.2 GiB + 2200 files: 17.246 s
+incremental (no change): 1.2565 s
+Summary: Restored 2205 files/dirs (1.214 GiB) in 0:05
+restore: 6.1376 s
+restore byte-identical: yes
+check: 1.2609 s

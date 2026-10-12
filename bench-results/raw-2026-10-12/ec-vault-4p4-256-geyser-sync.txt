@@ -1,0 +1,11 @@
+backends configured: b2, geyser, idrive, local, lyve, permafrost, pixeldrain, r2, sync, wasabi
+scheme RS(4,4) = 8 shards, payload 256 MiB, shard 64.0 MiB, overhead 2.00x
+layout: geyser=0-3(data) sync=4-7(parity)
+commit gate: all legs sync  retries/shard: 1  hedge: false
+
+== run 1/1 ==
+encode        24ms  (10598 MB/s)
+PUT all  8    9.6s  payload 27 MB/s, wire 53 MB/s   [geyser slowest 6.9s, sync slowest 9.6s]  retries 0
+READ first-4   2.3s  109 MB/s  fetch 2.2s + decode 143ms  winners geyser:2,sync:2  retries 0  hash ok
+READ lose:geyser     2.3s  112 MB/s  fetch 2.1s + decode 187ms  from sync:4  retries 0  hash ok
+READ lose:sync       3.0s  87 MB/s  fetch 2.8s + decode 143ms  from geyser:4  retries 0  hash ok
