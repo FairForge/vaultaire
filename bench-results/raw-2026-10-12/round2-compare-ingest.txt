@@ -1,0 +1,12 @@
+Host:      slc-vaultaire-01 (linux/amd64)
+Output:    results-20261012b/compare-ingest.json
+Transport: tuned (MaxIdleConnsPerHost=200, 4MB buffers, compression=off)
+Endpoints: 1 (smoke=false)
+
+[1/1] vaultaire-prod-origin  (https://s3.stored.ge)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: vbench-user1-vaultaire
+  concurrent_ingest_20s   12162ms    94.4 MB/s     24 ops/s  p50=1304ms p95=2318ms p99=2559ms
+
+
+✅ Done in 14s. Results: results-20261012b/compare-ingest.json

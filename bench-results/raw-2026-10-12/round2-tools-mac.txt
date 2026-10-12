@@ -1,0 +1,57 @@
+161M	tools-data
+[17:55:24] == rclone rclone v1.71.0
+[17:55:36] rclone sync (stored) rc=0 11s 503 copied
+[17:55:39] rclone re-sync no-op (stored) rc=0 3s 0 copied
+[17:55:40] rclone check (stored) rc=0 1s 2026/10/12 11:55:40 NOTICE: S3 bucket tb-tools-1012 path rclone: 503 matching files
+[17:55:44] rclone sync (storedcf) rc=0 4s 0 copied
+[17:55:48] rclone re-sync no-op (storedcf) rc=0 4s 0 copied
+[17:55:48] rclone check (storedcf) rc=0 0s 2026/10/12 11:55:48 NOTICE: S3 bucket tb-tools-1012 path rclone: 503 matching files
+[17:55:55] rclone copy down rc=0 7s
+[17:55:55] rclone download byte-identical
+           0 1999-12-31 17:00:00        -1 rclone
+Total objects: 503
+Total size: 161.383 MiB (169222144 Byte)
+[17:56:06] rclone delete rc=0 10s
+[17:56:06] == s5cmd v2.3.0-Homebrew
+[17:56:10] s5cmd cp 500 small rc=0 4s 500
+[17:56:14] s5cmd cp 3x32 MiB rc=0 4s
+[17:56:15] s5cmd ls rc=0 1s      500 rows
+[17:56:20] s5cmd cp down rc=0 5s
+[17:56:21] s5cmd download byte-identical
+[17:56:24] s5cmd rm rc=0 3s
+[17:56:26] == mc mc version RELEASE.2025-08-13T08-35-41Z (commit-id=7394ce0dd2a80935aded936b09fa12cbb3cb8096)
+[17:56:38] mc mirror rc=0 12s
+Name      : b1.bin
+Date      : 2026-10-12 11:56:29 MDT
+Size      : 32 MiB
+ETag      : 4cea81120cb78e9176c0c97e708bc579-2
+Type      : file
+Metadata  :
+[17:56:39] mc ls -r rc=0 1s      503 rows
+[17:56:46] mc mirror down rc=0 7s
+[17:56:46] mc download byte-identical
+[17:56:50] mc rm rc=0 4s
+[17:56:57] == duck Cyberduck 9.5.4 (45528). Not registered. Purchase a donation key to support the development of this software.
+[17:57:00] duck upload 32 MiB rc=1 3s
+[17:57:03] duck list rc=1 3s 1 rows
+[17:57:06] duck download rc=1 3s
+[17:57:06] duck download DIFFERS
+[17:57:09] duck delete rc=1
+remove_bucket: tb-tools-1012
+[17:57:11] tools done
+[18:09:43] duck --region us-east-1 upload 32 MiB rc=1 3s Unknown. Failure to read attributes of duck.
+[18:09:46] duck --region us-east-1 list rc=1 Unknown. Failure to read attributes of duck.
+[18:09:49] duck --region us-east-1 download rc=1 3s DIFFERS
+[18:09:51] duck --region us-central-1 upload 32 MiB rc=1 2s Unknown. Failure to read attributes of duck.
+[18:09:54] duck --region us-central-1 list rc=1 Unknown. Failure to read attributes of duck.
+[18:09:56] duck --region us-central-1 download rc=1 2s DIFFERS
+[18:09:59] duck list buckets (no region) rc=0 sync-lab sync-pub tb-duck-1012
+[18:10:01] duck2 done
+[18:14:50] duck upload to bucket root rc=1 3s Unknown. Cannot read bucket location.
+[18:14:52] duck list bucket rc=1 Unknown. Cannot read bucket location.
+[18:14:55] duck download from root rc=1 3s DIFFERS Unknown. Cannot read bucket location.
+HEAD /tb-duck-1012/duck -> An error occurred (404) when calling the HeadObject operation: Not Found
+HEAD /tb-duck-1012/duck/ -> An error occurred (404) when calling the HeadObject operation: Not Found
+[18:14:58] created duck/ marker
+[18:15:01] duck upload into duck/ after marker rc=1 3s Unknown. Cannot read bucket location.
+[18:15:02] duck3 done

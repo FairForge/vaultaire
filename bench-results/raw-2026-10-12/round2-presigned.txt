@@ -1,0 +1,24 @@
+== presigned (item 4) 17:54:57
+cors set: [{"AllowedHeaders": ["*"], "AllowedMethods": ["PUT", "GET", "HEAD"], "AllowedOrigins": ["https://app.example.test"], "ExposeHeaders": ["ETag", "x-amz-request-id"], "MaxAgeSeconds": 3000}]
+[cf] preflight single: HTTP/2 200  | access-control-allow-credentials: true | access-control-allow-headers: content-type | access-control-allow-methods: PUT, GET, HEAD | access-control-allow-origin: https://app.example.test | access-control-expose-headers: ETag, x-amz-request-id | access-control-max-age: 3000 | server: cloudflare | cf-cache-status: DYNAMIC | cf-ray: a497f90d48d46ba1-DFW
+[cf] PUT single 8 MiB via presigned: 200 1.04s 8.1 MB/s
+[cf] PUT single 150 MiB via presigned: 413 0.29s 14.0 MB/s
+[cf] preflight part: HTTP/2 200  | access-control-expose-headers: ETag, x-amz-request-id
+[cf] part 1: HTTP/2 200  etag=yes expose=yes
+[cf] part 2: HTTP/2 200  etag=yes expose=yes
+[cf] part 3: HTTP/2 200  etag=yes expose=yes
+[cf] complete: etag="20a4f8b33105982c6ff31c6b78c0ee00-3" total 4.5s
+[cf] presigned GET 48 MiB: 200 1.783228 bytes-ok=True
+[cf] preflight wrong origin: HTTP/2 403
+[origin] preflight single: HTTP/2 200  | access-control-allow-credentials: true | access-control-allow-headers: content-type | access-control-allow-methods: PUT, GET, HEAD | access-control-allow-origin: https://app.example.test | access-control-expose-headers: ETag, x-amz-request-id | access-control-max-age: 3000 | server: stored.ge
+[origin] PUT single 8 MiB via presigned: 200 0.98s 8.6 MB/s
+[origin] PUT single 150 MiB via presigned: 200 4.45s 35.4 MB/s
+[origin] preflight part: HTTP/2 200  | access-control-expose-headers: ETag, x-amz-request-id
+[origin] part 1: HTTP/2 200  etag=yes expose=yes
+[origin] part 2: HTTP/2 200  etag=yes expose=yes
+[origin] part 3: HTTP/2 200  etag=yes expose=yes
+[origin] complete: etag="20a4f8b33105982c6ff31c6b78c0ee00-3" total 5.1s
+[origin] presigned GET 48 MiB: 200 1.943397 bytes-ok=True
+[origin] preflight wrong origin: HTTP/2 403
+bucket deleted
+== tools (item 3) 17:55:22

@@ -1,0 +1,45 @@
+make_bucket: tb-nc-1012
+make_bucket: tb-dup-1012
+[18:04:47] == Nextcloud 31 (sqlite) with Stored as external storage
+[18:05:03] nextcloud status: {"installed":true,"maintenance":false,"needsDbUpgrade":false,"version":"31.0.14.1","versionstring":"31.0.14","edition":"
+files_external 1.23.1 enabled
+[18:05:04] mount id 1
+  - status: ok
+  - code: 0
+  - message
+201
+[18:05:21] nc webdav PUT 32 MiB 15s
+[18:06:26] nc webdav PUT 100 × 8 KiB 65s (dir may need MKCOL)
+mkcol 201
+[18:08:25] nc webdav PUT 100 × 8 KiB into small2 118s
+[18:08:28] nc webdav GET 32 MiB 2s byte-identical
+[18:08:29] what landed in the bucket:      102 keys; sample: nc-32m.bin small2/ small2/s1.txt
++---------+-------+-----+---------+---------+--------+--------------+
+| 2       | 101   | 0   | 1       | 0       | 0      | 00:00:01     |
++---------+-------+-----+---------+---------+--------+--------------+
+[18:08:31] == Duplicati (docker) backup → Stored
+[18:08:35] duplicati backup rc=100 2s
+[18:08:36] duplicati incremental rc=100 1s
+[18:08:37] duplicati test all rc=100 1s ErrorID: DatabaseDoesNotExist Database file does not exist: /r/dup.sqlite
+[18:09:28] duplicati restore rc=100 51s
+[18:09:28] duplicati restore big.bin DIFFERS/missing (   at Duplicati.CommandLine.Program.RunCommandLine(TextWriter outwriter, TextWriter errwriter, Action`1 setup, String[] )
+[18:09:29] bucket keys:        0
+remove_bucket: tb-nc-1012
+remove_bucket: tb-dup-1012
+[18:09:36] apps done
+[18:11:13] duplicati backup 256 MiB + 300 files rc=100 52s
+[18:12:04] duplicati incremental rc=100 51s
+[18:12:55] duplicati test all (full remote verification) rc=100 51s    at Duplicati.CommandLine.Program.ParseCommandLine(TextWriter outwriter, Action`1 setup, Boolean& verboseErrors, String[] args)    at Duplicati.CommandLine.Pr
+[18:13:47] duplicati restore all rc=100 52s
+[18:13:47] duplicati restore big.bin DIFFERS/missing (   at Duplicati.CommandLine.Program.RunCommandLine(TextWriter outwriter, TextWriter errwriter, Action`1 setup, String[] )
+[18:13:49] duplicati bucket keys:        0  Total Size: 0
+remove_bucket: tb-dup-1012
+[18:13:50] duplicati done
+[18:16:48] duplicati backup 256 MiB + 300 files rc=0 29s  Duration of backup: 00:00:28.1267883;
+[18:16:52] duplicati incremental rc=0 4s
+[18:17:03] duplicati test all (full remote verification) rc=0 11s   Downloading file duplicati-b3217e22879004b269223cfcc5e12498b.dblock.zip.aes (49.02 MiB) ... Examined 16 files and found no errors
+[18:17:15] duplicati restore all rc=0 12s
+[18:17:16] duplicati restore big.bin byte-identical (     301 files restored)
+[18:17:17] duplicati bucket keys:       16  Total Size: 273497984
+remove_bucket: tb-dup-1012
+[18:17:19] duplicati done
