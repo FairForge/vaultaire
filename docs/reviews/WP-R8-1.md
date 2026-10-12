@@ -421,3 +421,265 @@ the WP-R14-6 copy flipped the same day and the multipart caveat stated
 three places (password manager, the box's `.env`, an offline copy), and **no
 tenant-key rotation before P2-a and P2-b are fixed** — both are rotation-time
 risks, not key-setting risks.
+
+## Follow-ups built in Stage 1a Prompt 2A (2026-10-12)
+
+One PR, branch `wp-r8-1-followups`, migration **085** (WP-R2-1 Part B, #684,
+merged first with 086 — the deploy applies every file, so 085 lands after 086
+harmlessly; the next number is 087). It is what unblocks
+setting `ENCRYPTION_MASTER_KEY` on prod: A1 is the item that gated it, A2/A3
+are the two rotation-time P2s above, A4 the P3 index, A5 the install design of
+2026-10-12 (the key from a TPM-sealed systemd credential).
+
+### The bugs, seen first
+
+| Item | Red test | Before | After |
+|---|---|---|---|
+| A1 generated objects | `TestGeneratedObject_IntoSSEBucket_IsEncrypted` (export, access log, inventory into an `sse_enabled` bucket) | export blob 10,179 B plaintext (first byte `{`), log 108 B, report 184 B; head row `encryption_algorithm = ''` | 0x02 SSE blobs (plaintext + 1,121 B), head row `ML-KEM-768+AES-256-GCM` v1, plaintext size + MD5 ETag, GET returns the plaintext |
+| A1 too large | `TestGeneratedObject_TooLargeIsRefusedNeverPlaintext` | export `completed` with a plaintext blob; report written | export `failed` at once with the reason the dashboard shows, no blob; report refused (a note), rows of a log kept with no SSE service; `vaultaire_generated_object_refused_total{kind,reason}` +1 |
+| A1 audit: CopyObject | `TestCopyObject_PlaintextSourceIntoSSEBucket_IsEncrypted` | 50 B plaintext copy in the SSE bucket | sealed; > 256 MiB 413; no SSE service 503; nothing written on a refusal |
+| A1 audit: PUT, no key on the slot | `TestHandlePut_SSEBucketWithNoSSEService_IsRefused` | 200, plaintext stored | 503 + Retry-After, nothing stored |
+| A1 audit: direct upload | `TestMgmtDirectUpload_SSEBucketIsRefused` | 201 presign / 200 complete (plaintext on R2) | 400 `bucket_encrypted` at both; the uploaded plaintext deleted from R2 |
+| A1 audit: CDN (read side) | `TestCDN_SSEObject_IsDecrypted` | 200 + 1,135 B of ciphertext (`0x02…`) under a 14-byte object | 200 plaintext, Range on the plaintext; no SSE service 500; SSE-C 403 |
+| A2 chunked GET across a swap | `TestChunkedGet_ReencryptSwapAndRetiredDelete_DuringTheStream_BodyCompletes` (real client over `httptest`, reader paused between chunk 1 and 2 across rotate + swap + retired delete) | 200, 2,666,282 of 20,971,520 bytes, `unexpected EOF`, `truncated_total{fetch}` +1 | 200, 20,971,520 bytes exact, `rereads_total{moved}` +1, no cut |
+| A3 lazy re-wrap | `TestMasterKeyRewrap_RowCreatedAfterTheBootCheck_IsRewrappedAtFirstUse` (crypto) | a store with B alone: `ErrKeyUnwrap` on the row the A-store created after the B+A check | re-wrapped at the B+A store's first use; B alone opens it, same secrets |
+| A3 the job | `TestKeyReencrypt_WithPrevious_RewrapsRowsTheOldSlotCreated` | (new) | run 1 `rewrapped=1`, run 2 `rewrapped=0 unwrap_failures=0`, B alone serves the object |
+| A5 | `TestMasterKey_FromCredentialDirectory_AndFile_PrecedenceAndFailLoud`, `TestMasterKeysOrFatal_RefusesTheBootAndNeverLogsTheKey` | the env only; a malformed value = "encryption is OFF" and the slot served | credential > file > env; set-but-unusable = fatal; the source named, never the value |
+
+### What was built
+
+- **A1 — every writer into an `sse_enabled` bucket seals or refuses.**
+  `generatedObjectWriter.writeOpts` (`background_put.go`) reads the target
+  bucket ONCE and strictly (`SELECT sse_enabled …`: no row = gone, a DB error
+  is an error — never "not encrypted"); with `sse_enabled` and a non-empty
+  body it reads the spool (≤ 256 MiB, the size is known before) and seals it
+  with `EncryptBytes` exactly as `HandlePut` does; the head row goes through
+  the new `upsertWholeObjectHeadRowEnc` (`encryption_algorithm`,
+  `encryption_key_version`; size and ETag the plaintext's). Above 256 MiB
+  (`errGeneratedTooLargeForSSE`) or with no SSE service on the process
+  (`errGeneratedSSEUnavailable`) the object is refused before quota or
+  backend. The writer is told its SSE service by the server (`reportWriter.sse`,
+  `AccountExportService.SetSSE`, which also keeps `SSEDefault`). The export
+  run fails the row at once on a too-large refusal (a retry would refuse
+  again); the settings page shows "larger than 256 MiB … contact support"
+  (`exportView.TooLargeToEncrypt`, marker pinned by
+  `TestExportTooLargeReason_IsTheOneTheDashboardShows`). Inventory: the error
+  is the run's note (as any report that was not written). Access log: Warn,
+  rows kept (an object is ≤ 1,000 lines: the too-large case cannot happen; no
+  SSE service is transient — another slot delivers).
+- **A2 — the re-read.** `fetchAndVerifyChunk`: when `chunkStore.get` answers
+  a MISS (after the legacy fallback; never on an error), `rereadChunk` reads
+  the row once past the cache (`GlobalContentIndex.LookupChunkFresh`, which
+  refreshes the cache) and, if the row names another storage key, backend,
+  key version or ciphertext hash, fetches there and opens with the recorded
+  version; the plaintext hash and so the integrity check are unchanged. An
+  unchanged or vanished row is the real miss (cut as before).
+  `vaultaire_chunked_get_rereads_total{outcome=moved|missing}`.
+  `keyReencryptRetireAfter` = **1 h**. Why 15 min was wrong: it was sized on
+  another process's cached row (`gciCacheTTL` 5 min); the reader that holds an
+  address longest is a stream on its plan — 10 GiB at 10 MB/s is 17 min, a
+  tenant paced at the 64 KiB/s floor 17 min per 64 MiB chunk. With the
+  re-read the grace only covers a reader that cannot re-read (an older build
+  during a switch).
+- **A3 — re-wrap at first use and from the job.** `TenantKeys.Version` keeps
+  `usedPrevious` and calls `rewrapRow` (the guarded UPDATE `RewrapAll` used,
+  now shared: `WHERE chunk_key_wrapped = $old AND kem_seed_wrapped = $old`, a
+  lost race matches nothing); `OnRewrap` is the one place the counter moves
+  (`checkTenantKeys` installs `tenantKeysRewrapped.Inc`; the boot pass no
+  longer adds its own count, so nothing is counted twice). `RewrapTenant` is
+  `RewrapAll` over one tenant. `KeyReencryptRunner.RunOnce` starts with
+  `rewrapMaster` while `HasPrevious()`: result `master_rekey`, `rewrapped`,
+  `unwrap_failures`, in the run's Info line and `key_reencrypt.result`; the
+  unwrap-failures gauge and the Error line naming the rows are refreshed
+  there too. Runbook steps 3/4 rewritten (`docs/ENCRYPTION.md` "Rotating the
+  master key").
+- **A4** — `085_gci_backend_storage_key_idx.sql`:
+  `idx_gci_backend_storage_key ON global_content_index (backend_id, storage_key)`.
+- **A5 — the key from a credential or a file.** `crypto.LoadMasterKeys`
+  (`master_key_source.go`): per key, `$CREDENTIALS_DIRECTORY/encryption_master_key`
+  (`_previous`), then `ENCRYPTION_MASTER_KEY_FILE` (`_PREVIOUS_FILE`), then the
+  variable; trimmed; 64 hex. A credential directory without the key falls
+  through (a unit can carry other credentials); a credential that exists but
+  cannot be read, a `_FILE` that cannot be read, any malformed value, or
+  PREVIOUS without a master = `ErrMasterKeySource`; `masterKeysOrFatal`
+  (server) logs `encryption master key: refusing to start` at Fatal. One Info
+  line `master key: credential|file|env` (+ `previous_source`), a Warn naming
+  lower sources also set. Errors never quote the value (encoding/hex's error
+  names the offending character — replaced). `NewTenantKeys` failing with a
+  usable-looking key (PREVIOUS = master) is Fatal too. The unit template
+  carries the commented `LoadCredentialEncrypted=` lines; the runbook's
+  "Setting the master key" is the on-box ceremony (generate → `systemd-creds
+  encrypt --with-key=tpm2+host` → `ssss-split -t 2 -n 3 -x` → each share
+  `age`-encrypted to a different offline recipient → unit line →
+  `vaultaire-switch restart` → the log lines), with recovery and suspected
+  exposure.
+
+### The same bug elsewhere: the audit
+
+Every writer that bypasses `HandlePut`, and every reader of an object's bytes:
+
+| Entry point | Today | Now |
+|---|---|---|
+| `HandlePut` (S3 PUT, presigned PUT) | sealed when the process has the key; with no key on the slot: **plaintext into an `sse_enabled` bucket**; `isBucketSSEEnabled` read a DB error as "not encrypted" | strict read (500 on a DB error), 503 with no SSE service; `isBucketSSEEnabled` deleted |
+| CompleteMultipartUpload | plaintext by design (WP-R3-1/WP-R3-3) | unchanged — the known caveat, said in the copy |
+| UploadPartCopy | 501 | unchanged |
+| CopyObject, whole plaintext source | **plaintext** in the destination | sealed (`sseSealingReader`: hasher/counter see the plaintext, the backend gets size + 1,121 B), 413 > 256 MiB (before the read when the size is recorded; after it, nothing stored, when not), 503 without the key; response `x-amz-server-side-encryption: AES256` |
+| CopyObject, chunked plaintext source | manifest copy: **plaintext chunks named from an encrypted bucket** | 501 |
+| CopyObject, encrypted source | 501 (whole) / manifest copy (AES256-CE) | unchanged |
+| Direct upload (management API) | a `public-read` bucket can be `sse_enabled` (created with the key, made public on the dashboard): **plaintext on R2** | 400 `bucket_encrypted` at create and complete; complete deletes the uploaded bytes |
+| Generated objects (export, access log, inventory) | **plaintext** | A1 |
+| Dashboard | no object-write path (it uses the management API) | — |
+| Restore, smart demotion/promotion, parity, chunk move, re-encrypt | move existing blobs byte for byte (the head row's encryption stays true) | unchanged |
+| S3 GET / HEAD / presigned GET | decrypts / reports | unchanged |
+| `/cdn` GET | **streamed the raw blob** (R8-04's shape: ciphertext under the plaintext Content-Length) | decrypts SSE-S3; 500 without the key; 403 SSE-C |
+| `/cdn` chunked object | not served (reads the raw key) | unchanged — WP-R2-2 |
+
+A2's re-read: `handleChunkedGet` is the only reader of a resolved plan (full
+and ranged GET both go through `fetchAndVerifyChunk`); the chunk move and the
+re-encrypt job read under the chunk lock from a row they just read; the
+chunked copy moves no bytes; the CDN does not serve chunked objects.
+
+### Adversarial pass on my own code
+
+1. *A sealed copy whose source is shorter than its record.*
+   `exactSizeReader` fails inside the sealer's read → the error reaches
+   `placeObject` unchanged → `errCopySourceSize` → 503, nothing stored (the
+   existing mapping). Covered by the existing `copy_sized_test.go`, green.
+2. *A copy of unknown size into an SSE bucket.* `srcSize <= 0`: the sealer
+   reads at most 256 MiB + 1 and refuses beyond (`errCopyTooLargeForSSE` →
+   413) — never unbounded memory.
+3. *An empty generated object or copy into an SSE bucket* stays empty and
+   plaintext, exactly as an empty PUT (`size > 0` in `shouldEncrypt`).
+4. *The re-read and a hedged duplicate fetch* both re-read: two row reads,
+   two `moved` counts for one chunk — the counter is per fetch, documented.
+5. *A re-read that lands on a backend that cannot be asked* (breaker open
+   since the preflight): the second `get` errors → cut, `truncated{fetch}`,
+   never a 200 that ends early. A DB error on the re-read is a Warn and the
+   original miss stands (`missing`).
+6. *Lazy re-wrap on a hot path.* Only on a version LOAD (cached 1 h), only
+   when PREVIOUS opened it: one guarded UPDATE per row per process, then never
+   again. Two processes: the second UPDATE matches 0 rows
+   (`TestMasterKeyRewrap_ConcurrentFirstUse_OneWriteLands`: 8 goroutines, 1
+   write).
+7. *The old slot after the new slot re-wrapped a row* (inherent to a master
+   re-key, boot pass included): an uncached load there fails closed (500)
+   until the old slot is stopped. Written into runbook step 3.
+8. *A credential directory set by systemd for other credentials* must not
+   make the env/file key fatal: not-exist falls through
+   (subtest "a credential directory without the key falls through").
+9. *A test re-wrapping the whole shared table under master B* breaks every
+   other package's rows on the shared test DB — the existing crypto and api
+   re-wrap tests did exactly that; they now use `RewrapTenant` /
+   `checkTenantKeys(…, tenant)`.
+10. *Counting twice.* The boot pass used to `Add(res.Rewrapped)`; with the hook
+    it would have counted twice — the `Add` is gone.
+11. *The strict `sse_enabled` read on every PUT* is one PK lookup per PUT
+    (before: only with a master key). The presigned PUT's `sqlmock` script
+    lists it now.
+
+### Tests
+
+New: `generated_sse_test.go` (A1 ×6, the dashboard marker, A5 Fatal),
+`chunk_reread_test.go` (A2 moved + real miss), `master_key_source_test.go`
+(A5, 14 subtests), in `tenant_keys_test.go` the A3 red test and the
+concurrent first use, in `key_versioning_test.go` the A3 job test;
+`export_test.go` (dashboard) the too-large view. Changed: the two re-wrap
+tests per package scoped to their tenant; the presign `sqlmock` script.
+Gates on the branch: `make lint` 0 issues (golangci-lint v2.14),
+gosec 0 issues (354 files, the Makefile flags via `go run`),
+`make test-integration` on `vaultaire_test_r81_2a` (through 085) EXIT 0
+before the merge of #684, and `-race` over `internal/api`, `crypto`,
+`database`, `account`, `dashboard/...` through 086 after it (green, #684's
+source-walking test included); `TestSQLLiteralsMatchSchema`, `TestExportSectionsCoverSchema`,
+the `internal/account` schema walk, `TestChunkBlobCalls_GoThroughTheChunkStore`
+and `job_rules_test.go` are in it.
+
+### Live proof (local, 2026-10-12)
+
+Private DB `vaultaire_live_r81_2a` through 085, `STORAGE_MODE=local`, aws-cli
+2.28, this branch's binary vs origin/main's (`8d69ed0`).
+
+- **Export into `_exports`** (key from a file): `master key: file`;
+  `_exports` `sse_enabled = t`; blob 4,314 B = 3,193 + 1,121, first byte
+  `0x02`, no plaintext; head row `ML-KEM-768+AES-256-GCM` v1, etag
+  `8ab76acc…`; the presigned download 200, 3,193 B, `x-amz-server-side-encryption: AES256`,
+  JSON with 24 sections, MD5 = the recorded ETag.
+- **A chunked GET across a rotation** (200 MiB random object, 94 encrypted
+  chunks; `curl --limit-rate 2M` on a presigned URL; at t+6 s rotate →
+  `key_reencrypt` run → all 94 swapped and retired → `retire_after` moved back
+  → run → 94 old addresses deleted, while the GET had 24 MB):
+  - origin/main: **200, then 87,589,891 of 209,715,200 bytes, curl exit 18**,
+    `truncated_total{fetch} 1`, "chunk failure mid-stream; cutting the
+    connection … `.k2` on local".
+  - this branch: **200, 209,715,200 bytes, sha256 equal**,
+    `rereads_total{moved} 55`, `truncated_total` 0,
+    `key_reencrypt_chunks_total{reencrypted} 94, {retired_deleted} 94`.
+- **The master re-key overlap** (P2 = B + previous A boots first; P1 = A only
+  takes a new tenant's first encrypted write; P2 reads it; both stop; P3 = B
+  alone):
+  - origin/main: P2 GET ok, `rewrapped_total 0`; P3 boot
+    `tenant keys checked rows=7 unwrap_failures=1` + the Error line naming
+    `tenant-318f9c8fc9dbb56f v1`; **P3 GET 500**.
+  - this branch: P2 GET ok, `rewrapped_total` 5 (boot) → **6**; P3 boot
+    `rows=6 unwrap_failures=0`; **P3 GET 200**.
+  - the job path (nobody reads the row; P1 stopped): `key re-encrypt run
+    master_rekey=true rewrapped=1 unwrap_failures=0`, then `rewrapped=0
+    unwrap_failures=0`, the same on `GET /api/v1/admin/jobs`; P3 with B alone
+    `rows=8 unwrap_failures=0`, GET 200.
+- **Key sources:** a fake `$CREDENTIALS_DIRECTORY` with the file and env also
+  set → `master key: credential` + Warn `ignored: [ENCRYPTION_MASTER_KEY_FILE,
+  ENCRYPTION_MASTER_KEY]`, the key appears 0 times in the log; a 30-character
+  file → **exit 1**, Fatal `… (from the file): must be 64 hex characters (32
+  bytes), got 30 characters`; a missing file → exit 1; a malformed credential
+  with a good env present → exit 1 (the credential wins, and is wrong).
+  origin/main with `ENCRYPTION_MASTER_KEY=abc`: "failed to initialize the
+  tenant key store: encryption is OFF" and `/health` 200 — serving.
+
+### Prod (read-only)
+
+After the deploy: see the follow-up docs PR (the counts, `/version`, `/health`,
+the synthetic check and the canary through the switch).
+
+### Decisions
+
+1. **The master key: YES — Isaac can set it once this PR is deployed**, by
+   `docs/ENCRYPTION.md` "Setting the master key (the on-box ceremony)". WP-R14-6
+   copy the same day (claims rows 1/26/27, `billing.html:96`, the landing
+   line), with "multipart uploads are not yet encrypted at rest" until
+   WP-R3-1/WP-R3-3; "encrypted at rest with keys we hold", never
+   "zero-knowledge" (the owner's "I can never read it" exists only
+   client-side: SSE-C today, Vault mode F-12 later). Once the key is set, the
+   owner's lean is WP-R3-1 ahead of WP-R6-1. Tenant-key rotation is safe from
+   this deploy on (A2/A3 in).
+2. Carried unchanged: the 11 iDrive criticals (silence the ten regions, keep
+   `idrive` — Isaac); `wasabi` target-only and the two #677 bypasses →
+   WP-R6-1; PG 16 drop 2026-10-13; the Sync.com sub-processor sentence;
+   gey48; `tenant_encryption_keys` → the D-12 drop.
+3. Taken here: a malformed `ENCRYPTION_MASTER_KEY` in the environment is now
+   fatal too (it was "encryption OFF" and the slot served — the silent-off the
+   prompt forbids for the file); PREVIOUS without a master is fatal; the
+   `/cdn` path was added to the audit and fixed (it served ciphertext).
+
+### Not done
+
+- `x-amz-server-side-encryption: AES256` on a PUT to a process without a key
+  (and a bucket that is not `sse_enabled`) still stores plaintext and says
+  nothing: refusing it would break clients that send the header to prod today
+  (no key). It resolves itself once the key is set; AWS always honours it.
+- Streaming SSE (> 256 MiB) — WP-R3-3. The CDN still does not serve chunked
+  objects (WP-R2-2).
+- The key file's permissions are not checked (a world-readable
+  `ENCRYPTION_MASTER_KEY_FILE` is accepted); prod uses the credential, which
+  systemd restricts to the unit's user.
+- The slots still run as `user1` (the deploy SSH identity, in `sudo`): the
+  install design recommends a dedicated service user before the ceremony.
+
+### [YOU]
+
+- Install `deploy/systemd/vaultaire@.service` from this commit on the box
+  (`deploy/**` is installed by hand) — done by the worker after the merge, see
+  the follow-up; the credential lines stay commented until the ceremony.
+- The ceremony itself, when you decide: `docs/ENCRYPTION.md` "Setting the
+  master key" (needs `libtss2-rc0 ssss age` on the box and three `age1…`
+  recipients whose identities are offline).
+- WP-R14-6 copy the same day.

@@ -20,7 +20,7 @@ import (
 var (
 	tenantKeysRewrapped = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "vaultaire_tenant_keys_rewrapped_total",
-		Help: "Tenant key versions re-wrapped from ENCRYPTION_MASTER_KEY_PREVIOUS to ENCRYPTION_MASTER_KEY at boot (a master re-key; no data is re-encrypted).",
+		Help: "Tenant key versions re-wrapped from ENCRYPTION_MASTER_KEY_PREVIOUS to ENCRYPTION_MASTER_KEY — at boot, by the key_reencrypt job while PREVIOUS is set, or at a row's first use (a master re-key; no data is re-encrypted).",
 	})
 	tenantKeysUnwrapFailures = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "vaultaire_tenant_keys_unwrap_failures",
@@ -31,23 +31,64 @@ var (
 // tenantKeysBootTimeout bounds the boot pass (one row per tenant version).
 const tenantKeysBootTimeout = 2 * time.Minute
 
+// masterKeysOrFatal loads the master keys (crypto.LoadMasterKeys: the
+// systemd credential, <NAME>_FILE, then the environment) and stops the
+// process when a source is set but unusable. One Info line names where each
+// key came from — never the value; a lower source that was also set is a
+// Warn (a stale copy of a key the runbook removes).
+func masterKeysOrFatal(logger *zap.Logger, getenv func(string) string, readFile func(string) ([]byte, error)) crypto.MasterKeys {
+	mk, err := crypto.LoadMasterKeys(getenv, readFile)
+	if err != nil {
+		logger.Fatal("encryption master key: refusing to start", zap.Error(err))
+		return crypto.MasterKeys{}
+	}
+	if mk.Master == "" {
+		return mk
+	}
+	fields := []zap.Field{zap.String("source", mk.MasterSource)}
+	if mk.Previous != "" {
+		fields = append(fields, zap.String("previous_source", mk.PreviousSource))
+	}
+	logger.Info("master key: "+mk.MasterSource, fields...)
+	if len(mk.Ignored) > 0 {
+		logger.Warn("master key: lower-precedence sources are also set and ignored — remove them (docs/ENCRYPTION.md)",
+			zap.Strings("ignored", mk.Ignored))
+	}
+	return mk
+}
+
 // checkTenantKeysAtBoot runs the key store's re-wrap pass: with
 // ENCRYPTION_MASTER_KEY_PREVIOUS set, every row that opens only under the
 // previous key is re-wrapped under the current one; without it, the pass
 // only checks that every row opens. One Info line with the counts; one
 // Error line naming the rows that open under neither key.
 func checkTenantKeysAtBoot(ctx context.Context, keys *crypto.TenantKeys, logger *zap.Logger) {
+	checkTenantKeys(ctx, keys, logger, "")
+}
+
+// checkTenantKeys is the boot check, over one tenant's rows when only is set
+// (tests: the key table is shared with other packages' tenants, and a
+// re-wrap under another master breaks their reads).
+func checkTenantKeys(ctx context.Context, keys *crypto.TenantKeys, logger *zap.Logger, only string) {
 	ctx, cancel := context.WithTimeout(ctx, tenantKeysBootTimeout)
 	defer cancel()
-	res, err := keys.RewrapAll(ctx)
+	// Every re-wrap — this pass, the job's, a first use — is counted once,
+	// where it lands.
+	keys.OnRewrap(tenantKeysRewrapped.Inc)
+	var res crypto.RewrapResult
+	var err error
+	if only != "" {
+		res, err = keys.RewrapTenant(ctx, only)
+	} else {
+		res, err = keys.RewrapAll(ctx)
+	}
 	if err != nil {
 		logger.Error("tenant keys: boot check could not read the key table", zap.Error(err))
 		return
 	}
-	tenantKeysRewrapped.Add(float64(res.Rewrapped))
 	tenantKeysUnwrapFailures.Set(float64(len(res.Failed)))
 	if keys.HasPrevious() {
-		logger.Info("tenant keys re-wrapped under the new master key — remove ENCRYPTION_MASTER_KEY_PREVIOUS once every slot has booted with it",
+		logger.Info("tenant keys re-wrapped under the new master key — keep ENCRYPTION_MASTER_KEY_PREVIOUS until the old slot is stopped and a key_reencrypt run (or a restart) reports rewrapped=0 unwrap_failures=0 (docs/ENCRYPTION.md)",
 			zap.Int("rows", res.Rows), zap.Int("rewrapped", res.Rewrapped), zap.Int("rewrap_errors", res.RewrapErrored),
 			zap.Int("unwrap_failures", len(res.Failed)))
 	} else {

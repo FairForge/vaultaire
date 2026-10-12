@@ -167,7 +167,24 @@ const (
 	truncatedDecrypt   = "decrypt"
 )
 
+// chunkedGetRereads counts the chunked GET's second look at a chunk's index
+// row after its resolved address answered "not there" (WP-R8-1 follow-up
+// A2): moved = the row names another blob now (a re-encrypt swap, a chunk
+// move, a re-store) and the read went there; missing = the row is unchanged
+// (or gone): a real miss, the body is cut as before.
+var chunkedGetRereads = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "vaultaire_chunked_get_rereads_total",
+	Help: "Chunked GETs whose resolved chunk address answered not-found and re-read the chunk's index row once: moved (the row named a new blob, the read continued there) | missing (the row is unchanged, gone or could not be read: the miss stands, the body is cut).",
+}, []string{"outcome"})
+
+const (
+	rereadMoved   = "moved"
+	rereadMissing = "missing"
+)
+
 func init() {
+	chunkedGetRereads.WithLabelValues(rereadMoved)
+	chunkedGetRereads.WithLabelValues(rereadMissing)
 	for _, p := range []string{"chunked", "ranged"} {
 		for _, r := range []string{"slow", "error"} {
 			largeGetHedges.WithLabelValues(p, r)
@@ -188,7 +205,7 @@ func init() {
 
 // largeGetCollectors are registered on the server registry.
 func largeGetCollectors() []prometheus.Collector {
-	return []prometheus.Collector{largeGetHedges, largeGetHedgesWon, largeGetInflight, largeGetFallbacks, largeGetStreams, largeGetThroughput, chunkedGetTruncated}
+	return []prometheus.Collector{largeGetHedges, largeGetHedgesWon, largeGetInflight, largeGetFallbacks, largeGetStreams, largeGetThroughput, chunkedGetTruncated, chunkedGetRereads}
 }
 
 func largeGetHooks(path string) parfetch.Hooks {

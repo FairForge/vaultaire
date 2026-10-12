@@ -117,6 +117,14 @@ func loadHeadAttrs(ctx context.Context, db *sql.DB, tenantID, bucket, key string
 	return a, nil
 }
 
+// objectEncryption is what a whole object's blob is sealed with: the zero
+// value is plaintext; SSE-S3 is crypto.SSEAlgorithm + the tenant key version
+// the blob records (WP-R8-1).
+type objectEncryption struct {
+	Algorithm  string
+	KeyVersion *int
+}
+
 // upsertWholeObjectHeadRow writes the head row for a WHOLE, UNENCRYPTED
 // object (multipart complete, plain copy) inside the caller's transaction.
 // Every attribute column is set explicitly: an upsert that only touched
@@ -127,20 +135,28 @@ func loadHeadAttrs(ctx context.Context, db *sql.DB, tenantID, bucket, key string
 // manifest in the same transaction.
 func upsertWholeObjectHeadRow(ctx context.Context, tx *sql.Tx, tenantID, bucket, key string,
 	size int64, etag, backendName, floor string, attrs objectAttrs) error {
+	return upsertWholeObjectHeadRowEnc(ctx, tx, tenantID, bucket, key, size, etag, backendName, floor, attrs, objectEncryption{})
+}
+
+// upsertWholeObjectHeadRowEnc is upsertWholeObjectHeadRow for a blob sealed
+// with enc (a generated object or a copy into an sse_enabled bucket, WP-R8-1
+// follow-up A1): size and etag are the PLAINTEXT's, as HandlePut records them.
+func upsertWholeObjectHeadRowEnc(ctx context.Context, tx *sql.Tx, tenantID, bucket, key string,
+	size int64, etag, backendName, floor string, attrs objectAttrs, enc objectEncryption) error {
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO object_head_cache
 			(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata,
 			 encryption_algorithm, content_disposition, content_encoding, content_language,
-			 cache_control, http_expires, website_redirect_location, floor, is_chunked, tags, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '', $9, $10, $11, $12, $13, $14, $15, FALSE, $16, NOW())
+			 cache_control, http_expires, website_redirect_location, floor, is_chunked, tags, encryption_key_version, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $17, $9, $10, $11, $12, $13, $14, $15, FALSE, $16, $18, NOW())
 		ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
 			size_bytes                = EXCLUDED.size_bytes,
 			etag                      = EXCLUDED.etag,
 			content_type              = EXCLUDED.content_type,
 			backend_name              = EXCLUDED.backend_name,
 			metadata                  = EXCLUDED.metadata,
-			encryption_algorithm      = '',
-			encryption_key_version    = NULL,
+			encryption_algorithm      = EXCLUDED.encryption_algorithm,
+			encryption_key_version    = EXCLUDED.encryption_key_version,
 			content_disposition       = EXCLUDED.content_disposition,
 			content_encoding          = EXCLUDED.content_encoding,
 			content_language          = EXCLUDED.content_language,
@@ -154,7 +170,7 @@ func upsertWholeObjectHeadRow(ctx context.Context, tx *sql.Tx, tenantID, bucket,
 			updated_at                = NOW()`,
 		tenantID, bucket, key, size, etag, attrs.ContentType, backendName, attrs.metadataJSON(),
 		attrs.ContentDisposition, attrs.ContentEncoding, attrs.ContentLanguage,
-		attrs.CacheControl, attrs.Expires, attrs.WebsiteRedirect, floor, attrs.tagsJSON())
+		attrs.CacheControl, attrs.Expires, attrs.WebsiteRedirect, floor, attrs.tagsJSON(), enc.Algorithm, enc.KeyVersion)
 	if err != nil {
 		return fmt.Errorf("upsert head row %s/%s: %w", bucket, key, err)
 	}

@@ -203,12 +203,14 @@ func TestMasterKeyRewrap_PreviousKeyToCurrent(t *testing.T) {
 	require.ErrorIs(t, err, ErrKeyUnwrap)
 
 	// Boot with both: every row is re-wrapped, the secrets unchanged.
+	// (Scoped to the test's tenant: the table is shared with other
+	// packages, whose rows a re-wrap under B would make unreadable to them.)
 	during := newTestKeys(t, db, testMasterB, testMasterA)
-	res, err := during.RewrapAll(ctx)
+	res, err := during.RewrapTenant(ctx, tenant)
 	require.NoError(t, err)
-	assert.GreaterOrEqual(t, res.Rewrapped, 2)
+	assert.Equal(t, 2, res.Rewrapped)
 	assert.NotContains(t, res.Failed, tenant+" v1")
-	res, err = during.RewrapAll(ctx)
+	res, err = during.RewrapTenant(ctx, tenant)
 	require.NoError(t, err)
 	assert.NotContains(t, strings.Join(res.Failed, ","), tenant)
 
@@ -224,6 +226,86 @@ func TestMasterKeyRewrap_PreviousKeyToCurrent(t *testing.T) {
 	assert.ErrorIs(t, err, ErrKeyUnwrap, "the old master opens nothing any more")
 }
 
+// WP-R8-1 follow-up A3: the two-slot switch keeps the OLD slot (old master
+// only) serving after the new slot's boot check ran. A tenant's first
+// encrypted write on the old slot in that window wraps v1 under the old
+// master; the new slot opens it through PREVIOUS and nothing shows — until
+// PREVIOUS is removed and no key opens the row. The new slot must re-wrap
+// it at first use.
+func TestMasterKeyRewrap_RowCreatedAfterTheBootCheck_IsRewrappedAtFirstUse(t *testing.T) {
+	db := getTestDB(t)
+	ctx := context.Background()
+	tenant := keyTenant(t, db)
+
+	// The new slot boots with B + previous A; its check finds nothing of
+	// this tenant (scoped: the table is shared with other packages).
+	newSlot := newTestKeys(t, db, testMasterB, testMasterA)
+	var rewraps int
+	newSlot.OnRewrap(func() { rewraps++ })
+	res, err := newSlot.RewrapTenant(ctx, tenant)
+	require.NoError(t, err)
+	require.Zero(t, res.Rows)
+
+	// The old slot (A only) is still serving: the tenant's first encrypted
+	// write creates v1 under A.
+	oldSlot := newTestKeys(t, db, testMasterA, "")
+	created, err := oldSlot.Current(ctx, tenant)
+	require.NoError(t, err)
+
+	// The new slot reads it (through PREVIOUS) — and leaves it under B.
+	got, err := newSlot.Version(ctx, tenant, 1)
+	require.NoError(t, err)
+	assert.Equal(t, created.ChunkKey, got.ChunkKey)
+	assert.Equal(t, 1, rewraps, "one row re-wrapped at first use")
+
+	// PREVIOUS removed: a third start with B alone opens it.
+	third := newTestKeys(t, db, testMasterB, "")
+	again, err := third.Version(ctx, tenant, 1)
+	require.NoError(t, err, "before: ErrKeyUnwrap — the tenant's every encrypted read and write 500")
+	assert.Equal(t, created.ChunkKey, again.ChunkKey, "the same secret: nothing re-encrypted")
+	assert.Equal(t, created.KEM.Bytes(), again.KEM.Bytes())
+
+	// A second use re-wraps nothing; the boot pass finds nothing left.
+	_, err = newTestKeys(t, db, testMasterB, testMasterA).Version(ctx, tenant, 1)
+	require.NoError(t, err)
+	res, err = newSlot.RewrapTenant(ctx, tenant)
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Rows)
+	assert.Zero(t, res.Rewrapped)
+}
+
+// Two processes opening the same old-master row at once: both read the
+// secret, one re-wrap lands (the UPDATE is guarded on the old bytes), the
+// row opens under the new master after.
+func TestMasterKeyRewrap_ConcurrentFirstUse_OneWriteLands(t *testing.T) {
+	db := getTestDB(t)
+	ctx := context.Background()
+	tenant := keyTenant(t, db)
+	created, err := newTestKeys(t, db, testMasterA, "").Current(ctx, tenant)
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	total := 0
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			k := newTestKeys(t, db, testMasterB, testMasterA)
+			k.OnRewrap(func() { mu.Lock(); total++; mu.Unlock() })
+			kv, err := k.Version(ctx, tenant, 1)
+			assert.NoError(t, err)
+			if err == nil {
+				assert.Equal(t, created.ChunkKey, kv.ChunkKey)
+			}
+		}()
+	}
+	wg.Wait()
+	assert.Equal(t, 1, total, "the guarded UPDATE lands once")
+	_, err = newTestKeys(t, db, testMasterB, "").Version(ctx, tenant, 1)
+	require.NoError(t, err)
+}
+
 func TestMasterKeyRewrap_UnwrapsUnderNeither(t *testing.T) {
 	db := getTestDB(t)
 	ctx := context.Background()
@@ -233,7 +315,7 @@ func TestMasterKeyRewrap_UnwrapsUnderNeither(t *testing.T) {
 
 	third := "1111111111111111111111111111111111111111111111111111111111111111"
 	wrong := newTestKeys(t, db, testMasterB, third)
-	res, err := wrong.RewrapAll(ctx)
+	res, err := wrong.RewrapTenant(ctx, tenant)
 	require.NoError(t, err)
 	assert.Contains(t, res.Failed, tenant+" v1", "a row neither key opens is reported")
 

@@ -237,7 +237,7 @@ func (at *S3AccessLogTracker) writeAccessLogObject(ctx context.Context, tenantID
 	}
 	now := time.Now().UTC()
 	objectKey := fmt.Sprintf("%s%s-%s", prefix, now.Format("2006-01-02-15-04-05"), randomHex6())
-	_, err := at.writer.write(ctx, tenantID, targetBucket, objectKey, "text/plain", func(w io.Writer) error {
+	_, err := at.writer.write(ctx, generatedKindAccessLog, tenantID, targetBucket, objectKey, "text/plain", func(w io.Writer) error {
 		bw := bufio.NewWriter(w)
 		for _, r := range records {
 			if _, err := bw.WriteString(formatAccessLogLine(r)); err != nil {

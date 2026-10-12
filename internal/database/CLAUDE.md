@@ -73,6 +73,7 @@ All migrations are in `migrations/` and are idempotent (`CREATE IF NOT EXISTS`, 
 | 072 | Account-deletion runner (WP-R10-3): `tenants.deletion_stripe_cancelled_at` (the idempotency stamp of the runner's Stripe cancel) + partial index `idx_users_deletion_due` on `users (deletion_scheduled_at) WHERE status = 'pending_deletion'`. The erase itself is `internal/account/erase.go`; `TestErasedTablesCoverSchema` fails when a migration adds a tenant/user-keyed table that no erase rule names |
 | 070 | Sign-up attribution (Review R12, checklist item 7): `referrer`, `utm_source`, `utm_medium`, `utm_campaign` on `waitlist_signups` and `signup_referrer`, `signup_utm_source`, `signup_utm_medium`, `signup_utm_campaign` on `users` (TEXT NOT NULL DEFAULT ''; referrer = host only, utm values capped at 100 chars) |
 | 080 | Pack store (Phase 37, `internal/packstore`): `packs` (backend, name `<aa>/<sha256>.pack`, folder, size, sha256, member_count, live_bytes, created_at / sealed_at / retired_at; no tenant id, infrastructure) and `pack_members` (pack_id → packs ON DELETE CASCADE, tenant_id, member_key, byte_offset, byte_length, sha256, deleted_at tombstone; unique live (tenant_id, member_key)); erased by `account.EraseRows`, excluded from the export |
+| 085 | `idx_gci_backend_storage_key ON global_content_index (backend_id, storage_key)` (WP-R8-1 A4): the `key_reencrypt` job asks, per retired chunk address past its grace, whether a row names it again — a sequential scan per address before |
 
 ## Key Tables
 

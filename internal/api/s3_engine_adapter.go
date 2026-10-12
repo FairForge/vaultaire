@@ -1014,6 +1014,26 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		metadataSize > chunkThreshold && !chunkingDisabledByVersioning && !chunkingDisabledByTier &&
 		!chunkingDisabledByRegion && chunkingOn
 
+	// Whether the bucket requires encryption, read once and strictly: a
+	// database error used to read as "not encrypted" and the body was
+	// stored plaintext. A process with no SSE service (no master key on this
+	// slot) refuses a write into an sse_enabled bucket instead of storing
+	// it plaintext — R8-04's rule for the read, on the write side (WP-R8-1
+	// follow-up A1). SSE-C is the customer's own key: not affected.
+	bucketSSE, sseErr := bucketSSEEnabled(r.Context(), a.db, t.ID, bucket)
+	if sseErr != nil {
+		a.logger.Error("PUT: bucket encryption setting unreadable", zap.Error(sseErr), zap.String("bucket", bucket))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return
+	}
+	if bucketSSE && a.sseService == nil && !crypto.HasSSECHeaders(r) {
+		a.logger.Error("PUT into an encrypted bucket refused: ENCRYPTION_MASTER_KEY is not configured on this process",
+			zap.String("bucket", bucket), zap.String("object", artifact))
+		w.Header().Set("Retry-After", "30")
+		WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
+		return
+	}
+
 	if crypto.HasSSECHeaders(r) {
 		if r.Header.Get("x-amz-server-side-encryption") != "" {
 			WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(),
@@ -1063,8 +1083,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		encryptionAlgorithm = crypto.SSECAlgorithm
 	} else {
 		shouldEncrypt := a.sseService != nil && !willChunkEncrypt && size > 0 && size <= crypto.MaxEncryptableSize &&
-			(r.Header.Get("x-amz-server-side-encryption") == "AES256" ||
-				isBucketSSEEnabled(r.Context(), a.db, t.ID, bucket))
+			(r.Header.Get("x-amz-server-side-encryption") == "AES256" || bucketSSE)
 
 		if shouldEncrypt {
 			if _, err := a.sseService.Current(r.Context(), t.ID); err != nil {
@@ -1114,8 +1133,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	// to be encrypted (no chunk service, chunking flag off, versioned bucket,
 	// whole-object tier) means it must be refused here (R8-03).
 	if a.sseService != nil && !willChunkEncrypt && encryptionAlgorithm == "" && metadataSize > crypto.MaxEncryptableSize &&
-		(r.Header.Get("x-amz-server-side-encryption") == "AES256" ||
-			isBucketSSEEnabled(r.Context(), a.db, t.ID, bucket)) {
+		(r.Header.Get("x-amz-server-side-encryption") == "AES256" || bucketSSE) {
 		WriteS3ErrorWithContext(w, ErrEntityTooLarge, r.URL.Path, generateRequestID(),
 			WithSuggestion("Objects larger than 256 MiB cannot yet be server-side encrypted. Upload without encryption, or split the object."))
 		return
@@ -1801,6 +1819,23 @@ func (a *S3ToEngine) fetchAndVerifyChunk(ctx context.Context, d chunkDesc, tenan
 	// (chunk_store.go); blobs written before WP-R8-7 are found at their old
 	// address until the chunk move has run.
 	rdr, err := a.chunks().get(ctx, chunkAddr{scope: d.scope, hash: d.plaintextHash, backend: d.backendID, key: d.storageKey})
+	if err != nil && isObjectMissingErr(err) {
+		// The plan was resolved when the GET began; the blob may have moved
+		// since — a re-encrypt swap whose old address was deleted after its
+		// grace, a chunk move — while this stream was still on its plan (a
+		// long or paced download). One read of the row past the cache: a
+		// row that names another blob is read there and opened with the
+		// version it records (same plaintext hash, so the check below is
+		// unchanged); an unchanged row is a real miss (WP-R8-1 A2). Never on
+		// an error: "could not ask" is not "not there".
+		if moved, ok := a.rereadChunk(ctx, d); ok {
+			chunkedGetRereads.WithLabelValues(rereadMoved).Inc()
+			d = moved
+			rdr, err = a.chunks().get(ctx, chunkAddr{scope: d.scope, hash: d.plaintextHash, backend: d.backendID, key: d.storageKey})
+		} else {
+			chunkedGetRereads.WithLabelValues(rereadMissing).Inc()
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("fetch chunk %s: %w", d.plaintextHash[:16], err)
 	}
@@ -1843,6 +1878,43 @@ func (a *S3ToEngine) fetchAndVerifyChunk(ctx context.Context, d chunkDesc, tenan
 		return nil, fmt.Errorf("%w: chunk %s (%d bytes)", errChunkIntegrity, d.plaintextHash[:16], len(data))
 	}
 	return data, nil
+}
+
+// rereadChunk reads the chunk's index row past the GCI cache and returns the
+// desc it describes now, ok only when the row names another blob than d
+// (address, backend, key version or ciphertext). A row gone or unchanged, or
+// a read that failed, is not ok: the caller's miss stands.
+func (a *S3ToEngine) rereadChunk(ctx context.Context, d chunkDesc) (chunkDesc, bool) {
+	if a.gci == nil {
+		return d, false
+	}
+	res, err := a.gci.LookupChunkFresh(ctx, d.scope, d.plaintextHash)
+	if err != nil {
+		a.logger.Warn("chunked GET: re-read of a missing chunk's row failed", zap.String("hash", shortHash(d.plaintextHash)), zap.Error(err))
+		return d, false
+	}
+	if res == nil || !res.Exists || res.Entry == nil {
+		return d, false
+	}
+	e := res.Entry
+	n := d
+	n.storageKey = e.StorageKey
+	if n.storageKey == "" {
+		n.storageKey = "_chunks/" + d.plaintextHash
+	}
+	n.backendID = e.BackendID
+	if e.CiphertextHash != nil {
+		n.ciphertextHash = *e.CiphertextHash
+	}
+	if e.EncryptionKeyVersion != nil {
+		n.keyVersion = *e.EncryptionKeyVersion
+	}
+	n.encrypted = e.Encrypted
+	n.compressed = e.CompressionAlgo != nil
+	n.size = e.SizeBytes
+	changed := n.storageKey != d.storageKey || n.backendID != d.backendID ||
+		n.keyVersion != d.keyVersion || n.ciphertextHash != d.ciphertextHash
+	return n, changed
 }
 
 // handleChunkedGet serves a chunked object by streaming its content-defined
@@ -2492,15 +2564,25 @@ func storageClassDisablesChunking(class string) bool {
 	return false
 }
 
-func isBucketSSEEnabled(ctx context.Context, db *sql.DB, tenantID, bucket string) bool {
+// bucketSSEEnabled reports whether the bucket requires SSE-S3. A database
+// error is an error, never "not encrypted" (the old isBucketSSEEnabled read
+// it as false and the body was stored plaintext — WP-R8-1 follow-up A1):
+// false, nil only when the bucket has no row or its row says no.
+func bucketSSEEnabled(ctx context.Context, db *sql.DB, tenantID, bucket string) (bool, error) {
 	if db == nil {
-		return false
+		return false, nil
 	}
 	var enabled bool
 	err := db.QueryRowContext(ctx,
 		"SELECT sse_enabled FROM buckets WHERE tenant_id = $1 AND name = $2",
 		tenantID, bucket).Scan(&enabled)
-	return err == nil && enabled
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read sse_enabled of %s: %w", bucket, err)
+	}
+	return enabled, nil
 }
 
 // HandleList processes S3 LIST requests

@@ -28,8 +28,14 @@ import (
 //
 // Limits of this first cut: an overwrite of a key whose bytes sit on another
 // backend leaves the old blob for the erasure sweep; the uploaded object is
-// registered without encryption or user metadata; a complete that never comes
-// leaves an unregistered blob R2's lifecycle must expire.
+// registered without user metadata; a complete that never comes leaves an
+// unregistered blob R2's lifecycle must expire.
+//
+// The bytes never cross the origin, so they cannot be encrypted at rest: a
+// bucket that requires encryption (sse_enabled — a bucket created while a
+// master key is set and made public afterwards) is refused at create, and at
+// complete the plaintext the client already put on R2 is removed (WP-R8-1
+// follow-up A1: no plaintext byte in an sse_enabled bucket).
 
 // DirectUploader is what a backend offers for direct uploads. The R2 driver
 // implements it.
@@ -57,31 +63,39 @@ func (s *Server) directUploader() (DirectUploader, error) {
 	return du, nil
 }
 
-// directUploadBucket checks the bucket is the tenant's and public-read.
-// It writes the management error itself and returns false when not.
-func (s *Server) directUploadBucket(w http.ResponseWriter, r *http.Request, tenantID, bucket string) bool {
+// directUploadBucket checks the bucket is the tenant's, public-read, and
+// does not require encryption. It writes the management error itself and
+// returns false when not; encrypted reports the refusal was the bucket's
+// encryption (complete then removes the bytes already on R2).
+func (s *Server) directUploadBucket(w http.ResponseWriter, r *http.Request, tenantID, bucket string) (ok, encrypted bool) {
 	if s.db == nil {
 		writeManagementError(w, ErrTypeAPI, "internal_error", "no database", "")
-		return false
+		return false, false
 	}
 	var visibility string
+	var sseEnabled bool
 	err := s.db.QueryRowContext(r.Context(),
-		"SELECT visibility FROM buckets WHERE tenant_id = $1 AND name = $2", tenantID, bucket).Scan(&visibility)
+		"SELECT visibility, sse_enabled FROM buckets WHERE tenant_id = $1 AND name = $2", tenantID, bucket).Scan(&visibility, &sseEnabled)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeManagementError(w, ErrTypeNotFound, "bucket_not_found", "bucket not found", "name")
-		return false
+		return false, false
 	}
 	if err != nil {
 		s.logger.Error("direct upload: read bucket", zap.Error(err))
 		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to read bucket", "")
-		return false
+		return false, false
 	}
 	if visibility != "public-read" {
 		writeManagementError(w, ErrTypeInvalidRequest, "bucket_not_public",
 			"direct uploads are offered for public-read buckets only (the ones served from R2); upload through the S3 endpoint instead", "name")
-		return false
+		return false, false
 	}
-	return true
+	if sseEnabled {
+		writeManagementError(w, ErrTypeInvalidRequest, "bucket_encrypted",
+			"this bucket encrypts objects at rest, and a direct upload never passes through the server that encrypts them; upload through the S3 endpoint instead", "name")
+		return false, true
+	}
+	return true, false
 }
 
 func validDirectUploadKey(key string) bool {
@@ -125,7 +139,7 @@ func (s *Server) handleMgmtCreateDirectUpload(w http.ResponseWriter, r *http.Req
 		writeManagementError(w, ErrTypeInvalidRequest, "direct_upload_unavailable", "direct uploads are not enabled on this deployment", "")
 		return
 	}
-	if !s.directUploadBucket(w, r, tenantID, bucket) {
+	if ok, _ := s.directUploadBucket(w, r, tenantID, bucket); !ok {
 		return
 	}
 	ctx := common.WithTenantID(r.Context(), tenantID)
@@ -178,11 +192,21 @@ func (s *Server) handleMgmtCompleteDirectUpload(w http.ResponseWriter, r *http.R
 		writeManagementError(w, ErrTypeInvalidRequest, "direct_upload_unavailable", "direct uploads are not enabled on this deployment", "")
 		return
 	}
-	if !s.directUploadBucket(w, r, tenantID, bucket) {
-		return
-	}
 	ctx := common.WithTenantID(r.Context(), tenantID)
 	container := tenantID + "_" + bucket
+	if ok, encrypted := s.directUploadBucket(w, r, tenantID, bucket); !ok {
+		if encrypted {
+			// The client already put plaintext on R2 for a bucket that
+			// requires encryption: it must not stay there.
+			if drv, exists := s.engine.GetDriver("r2"); exists {
+				if delErr := drv.Delete(ctx, container, req.Key); delErr != nil && !isObjectMissingErr(delErr) {
+					s.logger.Error("direct upload: could not remove the refused plaintext upload from R2",
+						zap.String("tenant_id", tenantID), zap.String("bucket", bucket), zap.String("key", req.Key), zap.Error(delErr))
+				}
+			}
+		}
+		return
+	}
 	size, etag, contentType, err := du.Stat(ctx, container, req.Key)
 	if err != nil {
 		writeManagementError(w, ErrTypeNotFound, "object_not_uploaded",

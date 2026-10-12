@@ -21,10 +21,16 @@ const keyReencryptJobName = "key_reencrypt"
 
 const (
 	// keyReencryptRetireAfter: how long the old address of a re-encrypted
-	// chunk is kept. A reader that resolved the row before the swap (its own
-	// in-flight GET, or another process's cached row — gciCacheTTL is 5 min)
-	// still finds the blob it was told about.
-	keyReencryptRetireAfter = 15 * time.Minute
+	// chunk is kept, for a reader that resolved the row before the swap.
+	// The bound that matters is not another process's cached row
+	// (gciCacheTTL, 5 min) but a stream still on its plan: a chunked GET
+	// resolves every chunk when it starts, and 10 GiB at 10 MB/s is 17 min
+	// (a tenant paced at the 64 KiB/s egress floor needs 17 min per 64 MiB
+	// chunk). 15 min cut those at their next chunk. The GET now re-reads a
+	// chunk's row when its address answers "not there" (WP-R8-1 A2), so the
+	// grace is the fallback for a reader that cannot re-read (an older
+	// build during a switch, a cached plan elsewhere): 1 h.
+	keyReencryptRetireAfter = time.Hour
 	// keyReencryptScanLimit bounds one run's candidate scan; the byte budget
 	// usually stops it first.
 	keyReencryptScanLimit    = 10000
@@ -83,6 +89,13 @@ type KeyReencryptRunner struct {
 
 // KeyReencryptResult is one run's outcome, recorded as job_runs.result.
 type KeyReencryptResult struct {
+	// Rewrapped / UnwrapFailures: the master re-key pass, run first while
+	// ENCRYPTION_MASTER_KEY_PREVIOUS is set (WP-R8-1 follow-up A3). PREVIOUS
+	// may be removed once the old slot is stopped and a run reports both 0.
+	Rewrapped      int  `json:"rewrapped"`
+	UnwrapFailures int  `json:"unwrap_failures"`
+	MasterRekey    bool `json:"master_rekey,omitempty"`
+
 	Candidates     int   `json:"candidates"`
 	Reencrypted    int   `json:"reencrypted"`
 	Failed         int   `json:"failed"`
@@ -133,7 +146,8 @@ func (k *KeyReencryptRunner) spec() jobSpec {
 	return jobSpec{Name: k.JobName, Every: 10 * time.Minute, BootDelay: 4 * time.Minute, MaxRunTime: 30 * time.Minute,
 		Run: func(ctx context.Context) (jobReport, error) {
 			res, err := k.RunOnce(ctx)
-			k.logger.Info("key re-encrypt run", zap.Int("candidates", res.Candidates), zap.Int("reencrypted", res.Reencrypted),
+			k.logger.Info("key re-encrypt run", zap.Bool("master_rekey", res.MasterRekey), zap.Int("rewrapped", res.Rewrapped),
+				zap.Int("unwrap_failures", res.UnwrapFailures), zap.Int("candidates", res.Candidates), zap.Int("reencrypted", res.Reencrypted),
 				zap.Int("failed", res.Failed), zap.Int64("bytes", res.Bytes), zap.Bool("budget_reached", res.BudgetReached),
 				zap.Int("retired_deleted", res.RetiredDeleted), zap.Int("retired_kept", res.RetiredKept),
 				zap.Int("retired_failed", res.RetiredFailed), zap.Error(err))
@@ -146,14 +160,56 @@ func (k *KeyReencryptRunner) spec() jobSpec {
 		}}
 }
 
-// RunOnce does one pass: retired blobs first, then the re-encryption.
+// RunOnce does one pass: the master re-wrap while a master re-key is in
+// progress, retired blobs, then the re-encryption.
 func (k *KeyReencryptRunner) RunOnce(ctx context.Context) (KeyReencryptResult, error) {
 	var res KeyReencryptResult
+	if err := k.rewrapMaster(ctx, &res); err != nil {
+		return res, err
+	}
 	if err := k.deleteRetired(ctx, &res); err != nil {
 		return res, err
 	}
 	err := k.reencrypt(ctx, &res)
 	return res, err
+}
+
+// rewrapMaster re-wraps, while ENCRYPTION_MASTER_KEY_PREVIOUS is set, every
+// tenant key row that opens only under it. The boot pass sees the rows that
+// existed at boot; the old slot of a two-slot switch keeps creating rows
+// under the old master for up to LONG_OP_TIMEOUT after it, and a row nobody
+// reads before PREVIOUS is removed would then open under no key (WP-R8-1
+// follow-up A3). The run's result says when PREVIOUS can go.
+func (k *KeyReencryptRunner) rewrapMaster(ctx context.Context, res *KeyReencryptResult) error {
+	keys := k.enc.Keys()
+	if keys == nil || !keys.HasPrevious() {
+		return nil
+	}
+	res.MasterRekey = true
+	var rr crypto.RewrapResult
+	var err error
+	if k.onlyScope != "" {
+		rr, err = keys.RewrapTenant(ctx, k.onlyScope)
+	} else {
+		rr, err = keys.RewrapAll(ctx)
+	}
+	if err != nil {
+		return fmt.Errorf("master re-wrap pass: %w", err)
+	}
+	res.Rewrapped = rr.Rewrapped
+	res.UnwrapFailures = len(rr.Failed)
+	if k.onlyScope == "" {
+		tenantKeysUnwrapFailures.Set(float64(len(rr.Failed)))
+	}
+	if len(rr.Failed) > 0 {
+		shown := rr.Failed
+		if len(shown) > 50 {
+			shown = shown[:50]
+		}
+		k.logger.Error("tenant keys that open under no configured master key: these tenants' encrypted objects answer 500 until the right ENCRYPTION_MASTER_KEY (or _PREVIOUS) is set",
+			zap.Int("count", len(rr.Failed)), zap.Strings("first", shown))
+	}
+	return nil
 }
 
 // deleteRetired deletes old addresses past their grace.

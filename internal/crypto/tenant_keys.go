@@ -39,7 +39,15 @@ type TenantKeys struct {
 	mu       sync.Mutex
 	versions map[versionKey]cachedVersion // (tenant, version) → unwrapped key
 	current  map[string]cachedCurrent     // tenant → newest version number
+
+	// onRewrap, when set, is called once per row re-wrapped from the
+	// previous master to the current one (the api counts it).
+	onRewrap func()
 }
+
+// OnRewrap sets the function called once per row re-wrapped under the
+// current master key (boot pass, job pass or first use). Set before use.
+func (k *TenantKeys) OnRewrap(fn func()) { k.onRewrap = fn }
 
 // KeyVersion is one unwrapped tenant key version.
 type KeyVersion struct {
@@ -305,9 +313,19 @@ func (k *TenantKeys) Version(ctx context.Context, tenantID string, version int) 
 	if err != nil {
 		return nil, fmt.Errorf("load tenant key %s v%d: %w", tenantID, version, err)
 	}
-	kv, _, err := k.unwrapVersion(tenantID, version, ckw, ksw, pub)
+	kv, usedPrevious, err := k.unwrapVersion(tenantID, version, ckw, ksw, pub)
 	if err != nil {
 		return nil, err
+	}
+	if usedPrevious {
+		// A row still wrapped under the previous master (a master re-key in
+		// progress) is re-wrapped under the current one at its first use:
+		// the boot pass only sees the rows that existed at boot, and the
+		// old slot of a two-slot switch keeps creating rows under the old
+		// master until it stops (WP-R8-1 follow-up A3). A failed or lost
+		// write is harmless — the next use, the job's pass or the next boot
+		// re-wraps it.
+		_, _ = k.rewrapRow(ctx, tenantID, version, kv, ckw, ksw)
 	}
 
 	k.mu.Lock()
@@ -388,12 +406,28 @@ type RewrapResult struct {
 	RewrapErrored int      // rows that unwrapped but could not be written back
 }
 
-// RewrapAll is the boot pass of a master re-key: every row that opens under
+// RewrapAll is the pass of a master re-key: every row that opens under
 // ENCRYPTION_MASTER_KEY_PREVIOUS and not under ENCRYPTION_MASTER_KEY is
 // re-wrapped under the latter. Without a previous key it only checks that
 // every row opens. No data is re-encrypted: the wrapped secrets are the same
-// bytes before and after.
+// bytes before and after. It runs at boot and, while PREVIOUS is set, at the
+// start of every key_reencrypt run (a row another slot wrapped under the
+// old master after this one's boot check is caught there, or at its first
+// use by Version).
 func (k *TenantKeys) RewrapAll(ctx context.Context) (RewrapResult, error) {
+	return k.rewrapRows(ctx, "")
+}
+
+// RewrapTenant is RewrapAll over one tenant's rows (tests on the shared
+// database; the re-encrypt job when it is scoped to one tenant).
+func (k *TenantKeys) RewrapTenant(ctx context.Context, tenantID string) (RewrapResult, error) {
+	if tenantID == "" {
+		return RewrapResult{}, errors.New("rewrap: tenant ID required")
+	}
+	return k.rewrapRows(ctx, tenantID)
+}
+
+func (k *TenantKeys) rewrapRows(ctx context.Context, onlyTenant string) (RewrapResult, error) {
 	var res RewrapResult
 	type row struct {
 		tenant        string
@@ -402,7 +436,7 @@ func (k *TenantKeys) RewrapAll(ctx context.Context) (RewrapResult, error) {
 	}
 	rows, err := k.db.QueryContext(ctx, `
 		SELECT tenant_id, key_version, chunk_key_wrapped, kem_seed_wrapped, kem_public_key
-		  FROM tenant_key_versions ORDER BY tenant_id, key_version`)
+		  FROM tenant_key_versions WHERE ($1 = '' OR tenant_id = $1) ORDER BY tenant_id, key_version`, onlyTenant)
 	if err != nil {
 		return res, fmt.Errorf("read tenant keys: %w", err)
 	}
@@ -431,28 +465,47 @@ func (k *TenantKeys) RewrapAll(ctx context.Context) (RewrapResult, error) {
 		if !usedPrevious {
 			continue
 		}
-		ckw, err := wrapKey(k.master, r.tenant, r.version, purposeChunkKey, kv.ChunkKey[:])
+		wrote, err := k.rewrapRow(ctx, r.tenant, r.version, kv, r.ckw, r.ksw)
 		if err != nil {
 			res.RewrapErrored++
 			continue
 		}
-		ksw, err := wrapKey(k.master, r.tenant, r.version, purposeKEMSeed, kv.KEM.Bytes())
-		if err != nil {
-			res.RewrapErrored++
-			continue
+		if wrote {
+			res.Rewrapped++
 		}
-		// Guarded on the old bytes: a second process re-wrapping the same
-		// row at the same boot writes once.
-		if _, err := k.db.ExecContext(ctx, `
-			UPDATE tenant_key_versions SET chunk_key_wrapped = $3, kem_seed_wrapped = $4
-			 WHERE tenant_id = $1 AND key_version = $2 AND chunk_key_wrapped = $5 AND kem_seed_wrapped = $6`,
-			r.tenant, r.version, ckw, ksw, r.ckw, r.ksw); err != nil {
-			res.RewrapErrored++
-			continue
-		}
-		res.Rewrapped++
 	}
 	return res, nil
+}
+
+// rewrapRow writes a version's secrets back wrapped under the current master
+// key, guarded on the old wrapped bytes: of two processes re-wrapping the
+// same row (two slots' boot passes, a first use racing the job), one write
+// lands and the other matches nothing. wrote reports whether this call's
+// write landed.
+func (k *TenantKeys) rewrapRow(ctx context.Context, tenantID string, version int, kv *KeyVersion, oldCKW, oldKSW []byte) (bool, error) {
+	ckw, err := wrapKey(k.master, tenantID, version, purposeChunkKey, kv.ChunkKey[:])
+	if err != nil {
+		return false, err
+	}
+	ksw, err := wrapKey(k.master, tenantID, version, purposeKEMSeed, kv.KEM.Bytes())
+	if err != nil {
+		return false, err
+	}
+	res, err := k.db.ExecContext(ctx, `
+		UPDATE tenant_key_versions SET chunk_key_wrapped = $3, kem_seed_wrapped = $4
+		 WHERE tenant_id = $1 AND key_version = $2 AND chunk_key_wrapped = $5 AND kem_seed_wrapped = $6`,
+		tenantID, version, ckw, ksw, oldCKW, oldKSW)
+	if err != nil {
+		return false, fmt.Errorf("re-wrap tenant key %s v%d: %w", tenantID, version, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("re-wrap tenant key %s v%d: %w", tenantID, version, err)
+	}
+	if n == 1 && k.onRewrap != nil {
+		k.onRewrap()
+	}
+	return n == 1, nil
 }
 
 // wrapKey seals a tenant secret under a master key. The AAD binds the blob to

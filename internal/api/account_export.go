@@ -153,6 +153,20 @@ func NewAccountExportService(db *sql.DB, eng engine.Engine, quota QuotaManager, 
 	}
 }
 
+// SetSSE gives the service this process's SSE-S3 service: new `_exports`
+// buckets are sse_enabled when it is set (as createBucketRegistry does for
+// customer buckets), and the writer seals the export into such a bucket
+// (WP-R8-1 follow-up A1 — the bucket said encrypted, the bytes were not).
+func (s *AccountExportService) SetSSE(sse *crypto.SSEService) {
+	if s == nil {
+		return
+	}
+	s.SSEDefault = sse != nil
+	if s.writer != nil {
+		s.writer.sse = sse
+	}
+}
+
 // Request records a pending export and returns its id. ErrExportInFlight
 // when the user already has one pending.
 func (s *AccountExportService) Request(ctx context.Context, userID, tenantID string) (string, error) {
@@ -348,7 +362,11 @@ func (s *AccountExportService) RunOnce(ctx context.Context) (ExportRunResult, er
 		tried = append(tried, c.id)
 		log := s.logger.With(zap.String("export_id", c.id), zap.String("tenant_id", c.tenantID), zap.Int("attempt", c.attempts))
 		if err := s.renderOne(ctx, c, log); err != nil {
-			if c.attempts >= exportMaxAttempts {
+			// An export too large to be encrypted into its sse_enabled
+			// bucket is refused, never written plaintext — and every retry
+			// would be refused the same way: it fails now, with the reason
+			// the dashboard shows (WP-R8-1 follow-up A1).
+			if c.attempts >= exportMaxAttempts || errors.Is(err, errGeneratedTooLargeForSSE) {
 				res.Failed++
 				accountExportsTotal.WithLabelValues("failed").Inc()
 				s.mark(ctx, c.id, `UPDATE account_exports SET status = 'failed', error_message = $2, claimed_at = NULL WHERE id = $1::uuid AND status = 'pending'`, err.Error())
@@ -397,7 +415,7 @@ func (s *AccountExportService) renderOne(ctx context.Context, c *claimed, log *z
 	tctx := common.WithTenantID(ctx, c.tenantID)
 	delivered, err := s.writer.writeOpts(tctx, c.tenantID, tenant.ExportsBucket, key, exportContentType, func(w io.Writer) error {
 		return renderExport(ctx, s.db, w, exportSubject{UserID: c.userID, TenantID: c.tenantID, ExportID: c.id, Now: s.now()}, s.PageSize)
-	}, generatedWriteOptions{AllowOverQuota: true})
+	}, generatedWriteOptions{AllowOverQuota: true, Kind: generatedKindExport})
 	if err != nil {
 		return err
 	}
