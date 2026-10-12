@@ -627,6 +627,49 @@ func refusedNameStatus(code int) bool {
 	return code == http.StatusBadRequest || code == http.StatusRequestURITooLong
 }
 
+// ErrWebDAVRefusedGenerated: the server refused (400/414) a name the DRIVER
+// generated — a stripe piece or key file, a vault parity shard, a pack —
+// which the driver's own mapping already accepted. No caller chose that
+// name, so it is not engine.ErrInvalidInput: the refusal is retried like a
+// 5xx and, left after the retries, is the bridge in trouble (the
+// multi-bridge driver's `bridgeUnavailable`: engine.ErrPartiallyUnavailable
+// while another bridge is healthy, the S3 API's 503 + Retry-After). On
+// 2026-10-12 a bridge's transient 400 on one piece of a 1 GiB striped
+// complete reached the customer as 400 "check your key" (bench finding 2).
+var ErrWebDAVRefusedGenerated = errors.New("the server refused a name the driver generated")
+
+// generatedNames reports resource names (below the root) the driver made up
+// itself, whose refusal by the server can never be the caller's key: a
+// striped object's generation tree (`<container>%p/…` — `%` is
+// percent-encoded in every mapped customer name, so `%p` is reserved), a
+// vault parity shard (`<tenant>__parity/…`) and a pack (`t-_global/_packs/…`).
+// A striped object's manifest (`<leaf>%s`) is NOT generated: its leaf is
+// the caller's key.
+func generatedNames(names []string) bool {
+	if len(names) < 3 {
+		return false
+	}
+	switch {
+	case strings.HasSuffix(names[1], webdavStripeDirSuffix):
+		return true
+	case strings.HasSuffix(names[1], "__parity"):
+		return true
+	case names[0] == "t-"+engine.ChunkAddressTenant && names[1] == "_packs":
+		return true
+	}
+	return false
+}
+
+// refusedName turns a refused-name answer into the driver's error for it:
+// the caller's (engine.ErrInvalidInput) for a name they chose, the server's
+// (ErrWebDAVRefusedGenerated, transient) for one the driver generated.
+func refusedName(resp *http.Response, generated bool) (transient bool, err error) {
+	if generated {
+		return true, fmt.Errorf("%w: %w", ErrWebDAVRefusedGenerated, statusError(resp))
+	}
+	return false, fmt.Errorf("%w: the server refused the name: %w", engine.ErrInvalidInput, statusError(resp))
+}
+
 // webdavStatusError is an answer we did not want (statusError). The
 // multi-bridge driver reads the code: a 5xx left after the retries is a
 // bridge in trouble (a read may go to another bridge), a 4xx is not.
@@ -871,7 +914,10 @@ func (d *WebDAVDriver) parentPaths(names []string) []string {
 // (x/net/webdav does), so one MKCOL per path runs at a time in this process
 // (the others then find it known), and a 423 — another process holding the
 // folder for a moment — is retried a few times.
-func (d *WebDAVDriver) mkcol(ctx context.Context, path string) (int, error) {
+//
+// A refusal (400/414) of a folder the driver GENERATED (generated) is
+// retried like a transient answer, up to the driver's attempts.
+func (d *WebDAVDriver) mkcol(ctx context.Context, path string, generated bool) (int, error) {
 	mu, _ := d.mkcolLocks.LoadOrStore(path, &sync.Mutex{})
 	m := mu.(*sync.Mutex)
 	m.Lock()
@@ -879,8 +925,22 @@ func (d *WebDAVDriver) mkcol(ctx context.Context, path string) (int, error) {
 	if _, ok := d.known.Load(path); ok {
 		return http.StatusMethodNotAllowed, nil // exists
 	}
+	refusals := 0
 	for attempt := 1; ; attempt++ {
-		code, err := d.mkcolOnce(ctx, path)
+		code, err := d.mkcolOnce(ctx, path, generated)
+		if errors.Is(err, ErrWebDAVRefusedGenerated) {
+			refusals++
+			if refusals >= d.limits.attempts || ctx.Err() != nil {
+				return code, err
+			}
+			d.retried("MKCOL")
+			d.logger.Warn("webdav MKCOL of a generated folder refused, retried",
+				zap.String("backend", d.name), zap.Int("attempt", refusals), zap.Error(err))
+			if berr := d.backoff(ctx, refusals); berr != nil {
+				return code, fmt.Errorf("%w (giving up a retry: %w)", err, berr)
+			}
+			continue
+		}
 		if code != http.StatusLocked || attempt > webdavLockedRetries {
 			return code, err
 		}
@@ -892,7 +952,7 @@ func (d *WebDAVDriver) mkcol(ctx context.Context, path string) (int, error) {
 	}
 }
 
-func (d *WebDAVDriver) mkcolOnce(ctx context.Context, path string) (int, error) {
+func (d *WebDAVDriver) mkcolOnce(ctx context.Context, path string, generated bool) (int, error) {
 	call, err := d.do(ctx, davSpec{method: "MKCOL", path: path + "/", timeout: webdavMetaTimeout, noRetry423: true})
 	if err != nil {
 		return 0, err
@@ -909,7 +969,8 @@ func (d *WebDAVDriver) mkcolOnce(ctx context.Context, path string) (int, error) 
 		return resp.StatusCode, nil
 	default:
 		if refusedNameStatus(resp.StatusCode) {
-			return resp.StatusCode, fmt.Errorf("%w: MKCOL %s: the server refused the name: %w", engine.ErrInvalidInput, path, statusError(resp))
+			_, err := refusedName(resp, generated)
+			return resp.StatusCode, fmt.Errorf("MKCOL %s: %w", path, err)
 		}
 		return resp.StatusCode, fmt.Errorf("MKCOL %s: %w", path, statusError(resp))
 	}
@@ -918,7 +979,7 @@ func (d *WebDAVDriver) mkcolOnce(ctx context.Context, path string) (int, error) 
 // ensureCollections makes sure every folder in dirs (top down) exists. The
 // deepest unknown one is tried first — usually the only one missing; a 409
 // (a parent is missing too) creates each from the top.
-func (d *WebDAVDriver) ensureCollections(ctx context.Context, dirs []string) error {
+func (d *WebDAVDriver) ensureCollections(ctx context.Context, dirs []string, generated bool) error {
 	first := -1
 	for i, p := range dirs {
 		if _, ok := d.known.Load(p); !ok {
@@ -934,7 +995,7 @@ func (d *WebDAVDriver) ensureCollections(ctx context.Context, dirs []string) err
 			d.known.Store(p, struct{}{})
 		}
 	}
-	code, err := d.mkcol(ctx, dirs[len(dirs)-1])
+	code, err := d.mkcol(ctx, dirs[len(dirs)-1], generated)
 	if err != nil {
 		return err
 	}
@@ -943,7 +1004,7 @@ func (d *WebDAVDriver) ensureCollections(ctx context.Context, dirs []string) err
 		return nil
 	}
 	for _, p := range dirs[first:] {
-		code, err := d.mkcol(ctx, p)
+		code, err := d.mkcol(ctx, p, generated)
 		if err != nil {
 			return err
 		}
@@ -999,7 +1060,8 @@ func (d *WebDAVDriver) putNamesOnce(ctx context.Context, key string, names []str
 	o := engine.ApplyPutOptions(opts...)
 	dirs := d.parentPaths(names)
 	path := d.escapedPath(names, false)
-	if err := d.ensureCollections(ctx, dirs); err != nil {
+	generated := generatedNames(names)
+	if err := d.ensureCollections(ctx, dirs, generated); err != nil {
 		return fmt.Errorf("%s put %s: %w", d.name, key, err)
 	}
 	src, rewind, err := replayableBody(guardSource(data, d.limits), o.ContentLength)
@@ -1011,7 +1073,7 @@ func (d *WebDAVDriver) putNamesOnce(ctx context.Context, key string, names []str
 	transientTries := 0
 	for {
 		body := &uploadBody{r: src}
-		code, transient, err := d.put(ctx, path, body, o)
+		code, transient, err := d.put(ctx, path, body, o, generated)
 		if err == nil && code != http.StatusConflict && code != http.StatusNotFound {
 			break // 2xx
 		}
@@ -1023,7 +1085,7 @@ func (d *WebDAVDriver) putNamesOnce(ctx context.Context, key string, names []str
 			}
 			foldersRecreated = true
 			d.forgetCollections(dirs)
-			if err := d.ensureCollections(ctx, dirs); err != nil {
+			if err := d.ensureCollections(ctx, dirs, generated); err != nil {
 				return fmt.Errorf("%s put %s: recreate folders: %w", d.name, key, err)
 			}
 			if rerr := rewindFor(body, rewind); rerr != nil {
@@ -1121,8 +1183,10 @@ func rewindFor(body *uploadBody, rewind func() error) error {
 
 // put sends one PUT attempt. A 2xx or 404/409 is returned as a code with a
 // nil error (404/409 so the caller can create the folders); anything else
-// is an error, transient when a retry may cure it.
-func (d *WebDAVDriver) put(ctx context.Context, path string, body *uploadBody, o engine.PutOptions) (int, bool, error) {
+// is an error, transient when a retry may cure it. A refused name (400/414)
+// is the caller's error — unless the driver generated it (generated), then
+// it is transient and, if it stays, ErrWebDAVRefusedGenerated.
+func (d *WebDAVDriver) put(ctx context.Context, path string, body *uploadBody, o engine.PutOptions, generated bool) (int, bool, error) {
 	header := map[string]string{"Content-Type": "application/octet-stream"}
 	if o.ContentType != "" {
 		header["Content-Type"] = o.ContentType
@@ -1145,7 +1209,8 @@ func (d *WebDAVDriver) put(ctx context.Context, path string, body *uploadBody, o
 		drainClose(resp)
 		return resp.StatusCode, false, nil
 	case refusedNameStatus(resp.StatusCode):
-		return resp.StatusCode, false, fmt.Errorf("%w: the server refused the name: %w", engine.ErrInvalidInput, statusError(resp))
+		t, err := refusedName(resp, generated)
+		return resp.StatusCode, t, err
 	}
 	return resp.StatusCode, transient, statusError(resp)
 }

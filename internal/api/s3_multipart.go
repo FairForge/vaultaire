@@ -746,6 +746,13 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		if errors.Is(uploadErr, engine.ErrInvalidInput) {
+			// The client's key, decided on a backend answer: never silent
+			// (bench 2026-10-12 finding 2 — a bridge's transient refusal
+			// of a stripe piece reached the customer as this 400 with no
+			// line in the log).
+			s.logger.Warn("multipart complete: the backend refused the key — 400",
+				zap.Error(uploadErr), zap.String("bucket", bucket), zap.String("key", object),
+				zap.String("upload_id", uploadID), zap.String("storage_class", tierClass))
 			WriteS3ErrorWithContext(w, ErrInvalidArgument, r.URL.Path, generateRequestID(),
 				WithSuggestion(refusedKeySuggestion))
 			return

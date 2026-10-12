@@ -169,8 +169,8 @@ func (d *WebDAVDriver) folderAtLimit(ctx context.Context, path string) (int, boo
 // the limit; otherwise it returns err.
 func (d *WebDAVDriver) fullFolderErr(ctx context.Context, key, folder string, err error) error {
 	var se *webdavStatusError
-	if err == nil || ctx.Err() != nil || errors.Is(err, engine.ErrInvalidInput) || !errors.As(err, &se) {
-		return err // only a refusal by the server can be a full folder
+	if err == nil || ctx.Err() != nil || errors.Is(err, engine.ErrInvalidInput) || errors.Is(err, ErrWebDAVRefusedGenerated) || !errors.As(err, &se) {
+		return err // only a refusal by the server can be a full folder; a generated folder never fills
 	}
 	n, full := d.folderAtLimit(ctx, folder)
 	if !full {

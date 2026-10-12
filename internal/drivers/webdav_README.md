@@ -113,9 +113,26 @@ and a PUT still answered 404/409 with every folder created (a file where a
 folder is needed — only possible against an unmarked file now), wrap
 `engine.ErrInvalidInput`: no breaker is charged, the
 failover chain stops (the object is never stored on the next candidate), and
-the S3 API answers **400 InvalidArgument**. Before (2026-10-07) five bad names
-opened the `sync` breaker and every tenant's sync-tier writes went silently to
-the primary for 30 s; the client got 503 and retried forever.
+the S3 API answers **400 InvalidArgument** (logged at Warn with the bucket,
+key and upload id — it was silent until 2026-10-12). Before (2026-10-07) five
+bad names opened the `sync` breaker and every tenant's sync-tier writes went
+silently to the primary for 30 s; the client got 503 and retried forever.
+
+**A refused name the driver generated is the bridge's error, not the caller's**
+(bench 2026-10-12 finding 2: the first 1 GiB complete on the Sync tier was a
+customer-visible 400 "check your key" for a bridge's transient 400 on ONE stripe
+piece; the aws-cli replay and three reruns succeeded). `generatedNames` tells
+them apart by the resource names: a striped object's generation tree
+(`<container>%p/…` — `%` is percent-encoded in every mapped customer name, so
+`%p` is reserved), a vault parity shard (`<tenant>__parity/…`) and a pack
+(`t-_global/_packs/…`); a striped object's manifest (`<leaf>%s`) is NOT
+generated — its leaf is the caller's key. For such a name a 400/414 on PUT or
+MKCOL is retried like a 5xx (PUT when the body can be sent again — stripe pieces
+and shards are seekable —, MKCOL up to the driver's attempts) and, left after
+the retries, is `ErrWebDAVRefusedGenerated`: `bridgeUnavailable`, so the
+multi-bridge driver answers `engine.ErrPartiallyUnavailable` while another
+bridge is healthy (the S3 API's **503 + Retry-After**), charged as the backend
+when no other bridge is. Tests `webdav_generated_names_test.go`.
 
 **Request URLs** (CodeQL `go/request-forgery`): the configured URL is parsed
 once in the constructor (http/https, a host, no userinfo/query/fragment) and

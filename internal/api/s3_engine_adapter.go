@@ -1216,7 +1216,10 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 				WithSuggestion("Storage quota exceeded. Upgrade at https://stored.ge/dashboard/billing"))
 		case errors.Is(err, engine.ErrInvalidInput):
 			// The bucket's backend cannot hold this key (a name Sync's
-			// bridge refuses): the client's request, never a retryable 503.
+			// bridge refuses): the client's request, never a retryable 503
+			// — and never silent (bench 2026-10-12 finding 2).
+			a.logger.Warn("put: the backend refused the key — 400",
+				zap.Error(err), zap.String("container", container), zap.String("artifact", artifact))
 			WriteS3ErrorWithContext(w, ErrInvalidArgument, r.URL.Path, generateRequestID(),
 				WithSuggestion(refusedKeySuggestion))
 		default:
