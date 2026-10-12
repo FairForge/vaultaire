@@ -347,3 +347,77 @@ Taken in code:
 - Decide the master key (Decision 1). If yes: `openssl rand -hex 32` on the
   box, keep the key in the password manager, put it in `.env`, then
   `sudo vaultaire-switch restart`, then look for `tenant keys checked … unwrap_failures=0`.
+
+## Post-merge review (2026-10-12, the plan driver)
+
+Both PRs read against the code on `main` (`a05bf41`), CI / Security / Deploy
+green on both merge commits, prod `/version` = `a05bf411c91d`, the rule file
+installed on the box. The targeted tests re-run on a private database
+(`vaultaire_test_r81`) with `-race`: green.
+
+**Every claim above holds.** Checked in particular: the red tests are at the
+handler (`key_versioning_test.go` drives the chunked PUT/GET, the job, the
+endpoint behind its middleware, the boot re-wrap and the shred); the job never
+deletes in the run that retires (`deleteRetired` runs first and selects
+`retire_after <= now`, a retirement is `now + 15 min`);
+`TestChunkBlobCalls_GoThroughTheChunkStore` stays green; the wrap AAD is
+`"vaultaire-tenant-key"‖0‖tenant‖0‖u32 version‖purpose` with two fixed
+purposes (no ambiguity); the 0x02 header is bound as GCM AAD; a wrong master
+fails closed and `unwrapVersion` falls back to `ENCRYPTION_MASTER_KEY_PREVIOUS`
+at read time too; the `.k<N>` storage key is safe against the chunk move
+(`chunkKeyIdentity` rejects a 67-character hash → `Unrecognized`, never an
+orphan; a retired plain key whose row now points elsewhere is `Unrecognized`
+too, never deleted); the Part A preflight skips an empty `backend_id` (legacy
+rows keep the fan-out path); the idempotency cache keys on method + path, so
+one `Idempotency-Key` on two tenants is `idempotency_key_reuse`, never a
+replay. The six deviations taken in code are accepted.
+
+**No P0/P1.** Two P2 and two P3, all handed to Stage 1a Prompt 2 (Part A):
+
+- **P2-a — a chunked GET that outlives the 15-minute grace is cut.**
+  `handleChunkedGet` resolves its plan once (`resolveChunkDescs`) and
+  `fetchAndVerifyChunk` (`s3_engine_adapter.go:1763`) asks `chunkStore.get`
+  for the address it resolved; a miss falls to the legacy prefixes and then
+  errors — nothing re-reads the row. After the swap the old address lives
+  `keyReencryptRetireAfter` (15 min). A GET still on its plan after that (a
+  10 GiB chunked object at 10 MB/s is 17 min; a paced tenant at the 64 KiB/s
+  floor needs 17 min per 64 MiB chunk once `egress_throttle` is on; prefetch
+  is at most 4 chunks ahead) is cut at its next chunk — honestly, by Part A,
+  but a download that worked before the rotation now fails. Item 4 of the
+  adversarial pass covers other processes' caches (5 min < 15 min), not a
+  stream in flight. Fix: on a miss at the resolved address re-read the row
+  past the cache and fetch the new address once (same plaintext hash, so the
+  integrity check is unchanged), and lengthen the grace to 1 h.
+- **P2-b — the master re-key's boot check misses a row created after it
+  ran.** `RewrapAll` runs once at boot; `Version()` opens a row under the
+  previous key at runtime but drops `usedPrevious` (`kv, _, err :=`) and
+  writes nothing back. The two-slot switch keeps the OLD slot (old master
+  only) serving for up to `LONG_OP_TIMEOUT` (900 s) after the new slot's
+  check ran; a first-time-encrypting tenant's `createFirst` on the old slot
+  in that window wraps v1 under the old master. The new slot opens it through
+  the fallback, so nothing is visible; the runbook's step 4 ("check
+  `unwrap_failures=0`, remove PREVIOUS, restart") then leaves a row no key
+  opens: that tenant's every encrypted read AND write (`Current` → `Version`)
+  is 500 until PREVIOUS is put back. The runbook's "the second slot finds
+  nothing left to do" is true only for rows older than the first slot's
+  check. Fix: re-wrap lazily in `Version()` when the previous key opened the
+  row (guarded on the old bytes, as `RewrapAll` does); run `RewrapAll` from
+  the `key_reencrypt` job while `HasPrevious()`; runbook step 4 = remove
+  PREVIOUS only after a run with it set reports `rewrapped=0` and the old slot
+  is stopped.
+- **P3-a** — `deleteRetired`'s liveness query (`WHERE backend_id = $1 AND
+  storage_key = $2`) has no index on `global_content_index`: one sequential
+  scan per retired address per run. Fine at 2,296 rows; an index in the next
+  migration.
+- **P3-b** — the worker's own finding: `generatedObjectWriter` writes
+  plaintext into `sse_enabled` buckets (`_exports` is created `sse_enabled`
+  when a master key is set). This is the one item that gates setting the
+  master key; it is Part A1 of the next prompt.
+
+**Decision 1 (the master key), the driver's verdict for Isaac:** YES, the day
+Part A of Stage 1a Prompt 2 is deployed (generated objects encrypted), with
+the WP-R14-6 copy flipped the same day and the multipart caveat stated
+("multipart uploads are not yet encrypted at rest" until WP-R3-3), the key in
+three places (password manager, the box's `.env`, an offline copy), and **no
+tenant-key rotation before P2-a and P2-b are fixed** — both are rotation-time
+risks, not key-setting risks.
