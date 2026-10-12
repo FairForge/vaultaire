@@ -635,10 +635,26 @@ Private DB `vaultaire_live_r81_2a` through 085, `STORAGE_MODE=local`, aws-cli
   origin/main with `ENCRYPTION_MASTER_KEY=abc`: "failed to initialize the
   tenant key store: encryption is OFF" and `/health` 200 — serving.
 
-### Prod (read-only)
+### Prod (read-only, after the deploy, 2026-10-12 ~16:00 UTC)
 
-After the deploy: see the follow-up docs PR (the counts, `/version`, `/health`,
-the synthetic check and the canary through the switch).
+- #685 merged as `c74f70e`; Deploy green; public `/version` =
+  `c74f70e384c5` (build 15:56:20Z); `/health` 200 `degraded` through the
+  switch (7/18 backends — the 11 iDrive criticals, firing on purpose,
+  untouched); the primary's (`lyve`) signed probe 0 failures, TLS probes ok.
+- `sudo -u postgres psql vaultaire -f <file>`: `tenant_key_versions` 0,
+  encrypted GCI rows 0, `sse_enabled` buckets 0, head rows with an
+  `encryption_algorithm` 0, `retired_chunk_blobs` 0, failed exports 0 —
+  unchanged; `idx_gci_backend_storage_key` present (085 applied after #684's
+  086); `account_export` job `ok` at 15:57:55 UTC on the new build.
+- No `master key:` / `encryption initialized` line at boot — no key, as
+  expected; `vaultaire_generated_object_refused_total` and
+  `vaultaire_chunked_get_rereads_total` exported at 0.
+- The synthetic customer check exports nothing: `SYNTHETIC_CHECK_*` is still
+  unset on prod (owner checklist), so "synthetic green" could not be shown.
+- `deploy/systemd/vaultaire@.service` installed by hand
+  (`sudo -S sh -c '…'`, password on stdin): the box's unit was byte-equal to
+  `origin/main`'s before; the diff was only the commented credential block;
+  `systemctl daemon-reload`; the active slot stayed up, `/health` 200.
 
 ### Decisions
 
@@ -676,9 +692,9 @@ the synthetic check and the canary through the switch).
 
 ### [YOU]
 
-- Install `deploy/systemd/vaultaire@.service` from this commit on the box
-  (`deploy/**` is installed by hand) — done by the worker after the merge, see
-  the follow-up; the credential lines stay commented until the ceremony.
+- ~~Install `deploy/systemd/vaultaire@.service` on the box~~ — done by the
+  worker after the merge (above); the credential lines stay commented until
+  the ceremony.
 - The ceremony itself, when you decide: `docs/ENCRYPTION.md` "Setting the
   master key" (needs `libtss2-rc0 ssss age` on the box and three `age1…`
   recipients whose identities are offline).
