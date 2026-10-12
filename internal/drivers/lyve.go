@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	"github.com/FairForge/vaultaire/internal/engine"
@@ -138,6 +139,40 @@ func (d *LyveDriver) GetRange(ctx context.Context, container, artifact string, o
 		return nil, fmt.Errorf("get range: %w", err)
 	}
 	return result.Body, nil
+}
+
+// GetRangeInfo reads bytes [offset, offset+length) and reports the object's
+// ETag and total size from the response (engine.VersionedRangeGetter): the
+// parallel ranged GET (flag `parallel_get`) checks every range against the
+// others. Until the 2026-10-12 bench only the fixed-bucket driver had it,
+// so on the Lyve primary every multipart-uploaded object read back as one
+// stream (38–70 MB/s against 124 for a chunked one).
+func (d *LyveDriver) GetRangeInfo(ctx context.Context, container, artifact string, offset, length int64) (io.ReadCloser, engine.RangeInfo, error) {
+	tenantID, tErr := d.getTenantID(ctx, "GetRangeInfo")
+	if tErr != nil {
+		return nil, engine.RangeInfo{}, tErr
+	}
+	if length <= 0 {
+		return nil, engine.RangeInfo{}, fmt.Errorf("lyve get range info %s/%s: %w: length %d", container, artifact, engine.ErrInvalidInput, length)
+	}
+	key := d.buildTenantKey(tenantID, container, artifact)
+	result, err := d.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(d.getBucket()),
+		Key:    aws.String(key),
+		Range:  aws.String(fmt.Sprintf("bytes=%d-%d", offset, offset+length-1)),
+	})
+	if err != nil {
+		return nil, engine.RangeInfo{}, fmt.Errorf("lyve get range %s/%s: %w", container, artifact, err)
+	}
+	info := engine.RangeInfo{ETag: strings.Trim(aws.ToString(result.ETag), `"`), Size: -1}
+	if cr := aws.ToString(result.ContentRange); cr != "" {
+		if i := strings.LastIndexByte(cr, '/'); i >= 0 {
+			if n, perr := strconv.ParseInt(cr[i+1:], 10, 64); perr == nil {
+				info.Size = n
+			}
+		}
+	}
+	return result.Body, info, nil
 }
 
 func (d *LyveDriver) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...engine.PutOption) error {

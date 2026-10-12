@@ -425,6 +425,11 @@ func bridgeUnavailable(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, engine.ErrInvalidInput) || errors.Is(err, errWebDAVSource) {
 		return false
 	}
+	// A 400 on a name the driver generated, left after the retries: the
+	// bridge, not the caller (bench 2026-10-12 finding 2).
+	if errors.Is(err, ErrWebDAVRefusedGenerated) {
+		return true
+	}
 	var nf engine.NotFoundError
 	if errors.As(err, &nf) {
 		return false
