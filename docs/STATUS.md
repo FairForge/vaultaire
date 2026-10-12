@@ -32,12 +32,12 @@ Updated: 2026-10-12 (Stage 1a Prompt 1 = WP-R8-1 DONE — #681 chunked-GET hones
 
 ## Lanes
 
-Four lanes since 2026-10-12 (charters in `docs/surfaces/`, the shared rules in `docs/ARCHITECTURE_CONTRACT.md`). WIP: one deep code lane + one surface lane in code at a time; docs lanes in parallel. Until 2026-10-31 the Engine lane is the only code lane.
+Four lanes since 2026-10-12 (charters in `docs/surfaces/`, the shared rules in `docs/ARCHITECTURE_CONTRACT.md`). WIP: one deep code lane + one surface lane in code at a time; docs lanes in parallel. **All four lanes build now, dark until proven** (owner, 2026-10-12 evening): flags OFF, new hosts, additive migrations numbered here at prompt time; the launch path is guarded by CI, conformance, the synthetic check and the Stage-6 freeze on launch-path changes only; a flag flips after a proof on tenant zero; review is the pacing bottleneck, so PRs stay small and keystones go first.
 
 - **Engine**: this repository's core — write path, keys, drivers, jobs, the keystones K1–K5; one worker prompt per turn, the plan driver reviews every PR before the next prompt.
-- **Developer surface**: S3 + management API, DX, docs (docs.stored.cloud), SDKs, Phase 26/31/42.1, WP-SSEC-1 — Standard mode by default. Documents until launch.
-- **Consumer surface**: stored.cloud/photos + the apps (other repositories — stored.pics on Ente's clients, snapshelter, hearth — against prod's public API as ordinary tenants; an engine ask becomes a queue item here); Private by default only after the recovery vault (F-19). Documents until launch.
-- **Trust**: Phase 43, the transparency log (43.6), the privacy page from `modes.json`, the F-14 ceremony, the F-18 box. Documents until launch, then the ceremony.
+- **Developer surface**: S3 + management API, DX, docs (docs.stored.cloud), SDKs, Phase 26/31/42.1, WP-SSEC-1 — Standard mode by default. First code: docs.stored.cloud from the OpenAPI, status.stored.cloud, the client-side tools guide, sandbox tenants (flagged).
+- **Consumer surface**: stored.cloud/photos + the apps (other repositories — stored.pics on Ente's clients, snapshelter, hearth — against prod's public API as ordinary tenants; an engine ask becomes a queue item here); Private by default only after the recovery vault (F-19). First code: stored.pics back on the box against s3.stored.cloud, the 42.7 adapter, K5's in-process realm; Ente's clients already carry on-device search and faces.
+- **Trust**: Phase 43, the transparency log (43.6), the privacy page from `modes.json`, the F-14 ceremony, the F-18 box. First code: K4 `internal/translog` + trust.stored.cloud with signed statements, 43.1 inventory, 43.3 clocks; then the ceremony (the credential read and the export-writer fix shipped in #685, migration 085).
 - **Owner decision batch (weekly)**: F-17a/b, F-8's crowd choice (after launch), F-18 purchase, the 43.3 retention table, D-1..D-24 leftovers.
 
 ### Convergence checklist (the lanes stay on one engine)
