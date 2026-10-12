@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/FairForge/vaultaire/internal/hosts"
@@ -33,12 +34,27 @@ func hostCanonicalMiddleware(h hosts.Hosts) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if shouldRedirectToCanonical(h, r) {
 				w.Header().Set("Cache-Control", "no-store")
-				http.Redirect(w, r, h.Canonical+r.URL.RequestURI(), http.StatusMovedPermanently)
+				// #nosec G710 -- not an open redirect: scheme and host are the configured canonical origin; only the path (leading slashes collapsed) and the query come from the request
+				http.Redirect(w, r, canonicalTarget(h, r), http.StatusMovedPermanently)
 				return
 			}
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// canonicalTarget is the canonical origin with the request's path and query.
+// The path's leading slashes and backslashes are collapsed to one "/", so the
+// target never reads as protocol-relative ("//other.host/...") to a browser.
+func canonicalTarget(h hosts.Hosts, r *http.Request) string {
+	u, err := url.Parse(h.Canonical)
+	if err != nil {
+		return h.Canonical + "/"
+	}
+	u.Path = "/" + strings.TrimLeft(r.URL.Path, "/\\")
+	u.RawPath = ""
+	u.RawQuery = r.URL.RawQuery
+	return u.String()
 }
 
 // hostSet is the server's host set; a Server built without NewServer (unit

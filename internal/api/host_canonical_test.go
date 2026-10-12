@@ -3,6 +3,8 @@ package api
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -166,4 +168,21 @@ func TestHostCanonical_WiredIntoServer(t *testing.T) {
 	srv.httpServer.Handler.ServeHTTP(w, browserGET("stored.ge", "/.well-known/security.txt"))
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), "Contact: mailto:security@stored.cloud")
+}
+
+// The target's host is always the canonical origin: a protocol-relative or
+// backslash path cannot turn the 301 into a redirect to another site.
+func TestHostCanonical_TargetHostIsAlwaysCanonical(t *testing.T) {
+	h := canonicalHandler(t)
+	for _, target := range []string{"//evil.example/x", "/%2F%2Fevil.example/x", "/\\evil.example/x"} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, browserGET("stored.ge", target))
+		require.Equal(t, http.StatusMovedPermanently, w.Code, target)
+		loc, err := url.Parse(w.Header().Get("Location"))
+		require.NoError(t, err, target)
+		assert.Equal(t, "https", loc.Scheme, target)
+		assert.Equal(t, "stored.cloud", loc.Host, target)
+		assert.True(t, strings.HasPrefix(loc.Path, "/"), target)
+		assert.False(t, strings.HasPrefix(loc.EscapedPath(), "//"), "%s: a // path is protocol-relative to a browser resolving it", target)
+	}
 }
