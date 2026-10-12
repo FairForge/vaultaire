@@ -150,6 +150,21 @@ var (
 		Help:    "Per-stream throughput of complete large GETs (bytes ÷ wall time).",
 		Buckets: []float64{8e6, 16e6, 32e6, 64e6, 100e6, 150e6, 200e6, 300e6, 500e6, 1e9},
 	}, []string{"path"})
+	// chunkedGetTruncated counts chunked GETs whose body was cut after the
+	// status line: the connection is reset, never ended cleanly (Stage 1a
+	// Part A). reason = fetch (a chunk could not be read) | integrity (its
+	// bytes did not hash to the index) | decrypt (it did not decrypt).
+	chunkedGetTruncated = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vaultaire_chunked_get_truncated_total",
+		Help: "Chunked GETs cut after the status line was sent, by reason: fetch | integrity | decrypt. The connection is reset so no client can take the short body for the object.",
+	}, []string{"reason"})
+)
+
+// Reasons of vaultaire_chunked_get_truncated_total.
+const (
+	truncatedFetch     = "fetch"
+	truncatedIntegrity = "integrity"
+	truncatedDecrypt   = "decrypt"
 )
 
 func init() {
@@ -166,11 +181,14 @@ func init() {
 	for _, r := range []string{"budget", "first_part"} {
 		largeGetFallbacks.WithLabelValues(r)
 	}
+	for _, r := range []string{truncatedFetch, truncatedIntegrity, truncatedDecrypt} {
+		chunkedGetTruncated.WithLabelValues(r)
+	}
 }
 
 // largeGetCollectors are registered on the server registry.
 func largeGetCollectors() []prometheus.Collector {
-	return []prometheus.Collector{largeGetHedges, largeGetHedgesWon, largeGetInflight, largeGetFallbacks, largeGetStreams, largeGetThroughput}
+	return []prometheus.Collector{largeGetHedges, largeGetHedgesWon, largeGetInflight, largeGetFallbacks, largeGetStreams, largeGetThroughput, chunkedGetTruncated}
 }
 
 func largeGetHooks(path string) parfetch.Hooks {

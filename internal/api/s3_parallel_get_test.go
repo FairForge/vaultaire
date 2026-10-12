@@ -148,6 +148,7 @@ func ctxTenant(ctx context.Context) string {
 type parallelFixture struct {
 	*adapterTestFixture
 	drv *rangedDriver
+	cut bool // the last get's response was cut (http.ErrAbortHandler)
 }
 
 func setupParallelFixture(t *testing.T, flagOn bool) *parallelFixture {
@@ -187,7 +188,20 @@ func (f *parallelFixture) get(t *testing.T, key string, hdr map[string]string) *
 	}
 	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
-	f.adapter.HandleGet(w, req, "test-bucket", key)
+	// A body cut after the status line is the http.ErrAbortHandler panic
+	// (Stage 1a Part A); it is recorded, any other panic is not ours.
+	f.cut = false
+	func() {
+		defer func() {
+			if p := recover(); p != nil {
+				if p != http.ErrAbortHandler {
+					panic(p)
+				}
+				f.cut = true
+			}
+		}()
+		f.adapter.HandleGet(w, req, "test-bucket", key)
+	}()
 	return w
 }
 
@@ -370,11 +384,15 @@ func TestParallelGet_MidStreamFailureIsABrokenBody(t *testing.T) {
 				return 0
 			}
 
+			// The handler cuts the connection (Stage 1a Part A): with no
+			// middleware around it the cut is the http.ErrAbortHandler panic
+			// net/http turns into a reset.
 			w := f.get(t, "big.bin", nil)
+			assert.True(t, f.cut, "a failure after the status line cuts the connection")
 
 			require.Equal(t, http.StatusOK, w.Code, "headers were committed before the failure")
 			assert.Equal(t, strconv.Itoa(len(content)), w.Header().Get("Content-Length"),
-				"the promised length stays: the short body is what the client detects")
+				"the promised length stays")
 			body := w.Body.Bytes()
 			require.Less(t, len(body), len(content), "never silent: the body is cut short")
 			assert.True(t, bytes.Equal(content[:len(body)], body), "an exact prefix, nothing out of order")

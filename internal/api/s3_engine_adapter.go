@@ -693,7 +693,13 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", rng.start, rng.end, cachedSize))
 				w.Header().Set("Content-Length", strconv.FormatInt(rng.length, 10))
 				w.WriteHeader(http.StatusPartialContent)
-				_, _ = io.CopyN(w, rangeReader, rng.length)
+				if _, err := io.CopyN(w, rangeReader, rng.length); err != nil {
+					a.logger.Error("range stream failed",
+						zap.Error(err),
+						zap.String("container", container),
+						zap.String("artifact", artifact))
+					cutUnlessClientGone(r.Context())
+				}
 				return
 			}
 		}
@@ -705,6 +711,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 				zap.Error(err),
 				zap.String("container", container),
 				zap.String("artifact", artifact))
+			cutUnlessClientGone(r.Context())
 		}
 		return
 	}
@@ -723,6 +730,11 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 			zap.Error(err),
 			zap.String("container", container),
 			zap.String("artifact", artifact))
+		// A source that failed mid-body (a backend read, the parallel
+		// ranged reader) cuts the connection: the status line is out and a
+		// client without a Content-Length to count against would take a
+		// clean end for the object (Stage 1a Part A, same bug as chunked).
+		cutUnlessClientGone(r.Context())
 		return
 	}
 
@@ -1691,6 +1703,22 @@ func (a *S3ToEngine) storeChunkLocked(ctx context.Context, scope, storageKey str
 	return chunkStoreResult{backend: bn, ciphertextHash: entry.CiphertextHash}, nil
 }
 
+// errChunkDecrypt marks a chunk that was read but did not decrypt.
+var errChunkDecrypt = errors.New("chunk decryption failed")
+
+// truncatedReason is the vaultaire_chunked_get_truncated_total reason of a
+// chunk failure.
+func truncatedReason(err error) string {
+	switch {
+	case errors.Is(err, errChunkIntegrity):
+		return truncatedIntegrity
+	case errors.Is(err, errChunkDecrypt):
+		return truncatedDecrypt
+	default:
+		return truncatedFetch
+	}
+}
+
 // errChunkIntegrity signals that a fetched chunk's bytes did not hash to its
 // expected plaintext hash. The object exists but is corrupt — this is distinct
 // from a missing/unresolvable manifest (which falls through to NoSuchKey).
@@ -1747,7 +1775,7 @@ func (a *S3ToEngine) fetchAndVerifyChunk(ctx context.Context, d chunkDesc, tenan
 	if d.encrypted && a.chunkEncSvc != nil {
 		data, err = a.chunkEncSvc.DecryptChunkData(tenantID, d.plaintextHash, data, d.ciphertextHash)
 		if err != nil {
-			return nil, fmt.Errorf("decrypt chunk %s: %w", d.plaintextHash[:16], err)
+			return nil, fmt.Errorf("%w: chunk %s: %w", errChunkDecrypt, d.plaintextHash[:16], err)
 		}
 	}
 
@@ -1772,11 +1800,14 @@ func (a *S3ToEngine) fetchAndVerifyChunk(ctx context.Context, d chunkDesc, tenan
 // object — and corrupt data is never served. Range requests touch only the
 // chunks that overlap the requested byte range (located via chunk_offset).
 //
-// Fallthrough contract: the manifest is fully resolved (all chunk index entries
-// present) BEFORE any byte is written, so a resolution failure returns an error
-// and the caller falls through to the normal GET path. Once the first chunk is
-// committed the status is fixed; a later integrity/fetch failure aborts the body
-// (a short read the client detects) rather than serving bad bytes. A corrupt
+// Error contract: the manifest is fully resolved (all chunk index entries
+// present) and every backend of the plan is one that can be asked (registered,
+// breaker not open) BEFORE any byte is written, so either failure returns an
+// error HandleGet answers (503 for a backend that cannot be asked, else 500).
+// Once the first chunk is committed the status is fixed; a later
+// fetch/integrity/decrypt failure CUTS the connection (abortResponse →
+// http.ErrAbortHandler, counted in vaultaire_chunked_get_truncated_total)
+// rather than serving bad bytes or ending a short body cleanly. A corrupt
 // FIRST chunk yields a clean 500 (handled here — never a fallthrough to 404).
 //
 // Per-chunk convergent encryption (AES256-CE) is handled via fetchAndVerifyChunk
@@ -1888,6 +1919,26 @@ func (a *S3ToEngine) handleChunkedGet(
 		}
 	}
 
+	// Every backend the plan reads from must be one we can ask NOW, before
+	// the status line: a dead backend under chunk 7 used to commit a 200 and
+	// stop the body short (Stage 1a Part A). Unregistered or breaker open =
+	// ErrAllBackendsUnavailable, which HandleGet answers 503 + Retry-After.
+	// The breaker is observed, never charged, and no backend is asked — a
+	// HEAD per chunk would double the requests of every read.
+	if ca, ok := a.engine.(interface{ CanAsk(string) error }); ok {
+		seen := map[string]bool{}
+		for _, p := range plan {
+			b := p.desc.backendID
+			if b == "" || seen[b] {
+				continue
+			}
+			seen[b] = true
+			if err := ca.CanAsk(b); err != nil {
+				return fmt.Errorf("chunk %s: %w", shortHash(p.desc.plaintextHash), err)
+			}
+		}
+	}
+
 	// The object's identity headers are the same on a 200 and a 206 — the
 	// same rule the plain path follows (setIdentityHeaders in HandleGet):
 	// R2 Sippy reads a chunked object above 199 MiB as several ranged GETs
@@ -1992,10 +2043,24 @@ func (a *S3ToEngine) handleChunkedGet(
 				// to the plain path, which could hold a stale blob).
 				return ferr
 			}
-			a.logger.Error("chunk failure mid-stream; aborting response",
+			if ctx.Err() != nil {
+				// The client went away: nothing to cut, nothing to count.
+				return nil
+			}
+			// The status line is out: the only honest end is a cut. A
+			// client that counts bytes would see a short body, but one that
+			// has no Content-Length to count against (HTTP/2 through a
+			// proxy, a re-chunking hop) would take a clean end for the
+			// object.
+			reason := truncatedReason(ferr)
+			chunkedGetTruncated.WithLabelValues(reason).Inc()
+			a.logger.Error("chunk failure mid-stream; cutting the connection",
 				zap.Error(ferr),
+				zap.String("reason", reason),
 				zap.String("bucket", bucket),
-				zap.String("artifact", artifact))
+				zap.String("artifact", artifact),
+				zap.Int64("written", written))
+			abortResponse(ctx)
 			return nil
 		}
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/stretchr/testify/assert"
@@ -98,4 +99,31 @@ func TestOn_GoesThroughTheBackendsBreaker(t *testing.T) {
 	// Assert: unavailable — never a miss.
 	require.ErrorIs(t, err, ErrAllBackendsUnavailable)
 	assert.Equal(t, StateOpen.String(), eng.GetFailoverStatus()["p"])
+}
+
+// CanAsk observes, never charges: unregistered and OPEN refuse with the
+// sentinel the API answers 503 for; half-open passes (the read is the probe).
+func TestCanAsk_ObservesTheBreakerNeverCharges(t *testing.T) {
+	eng := NewEngine(nil, zap.NewNop(), &Config{DefaultBackend: "p"})
+	eng.AddDriver("p", &stubDriver{name: "p", data: map[string][]byte{}, healthy: true})
+
+	require.NoError(t, eng.CanAsk("p"))
+	err := eng.CanAsk("ghost")
+	require.ErrorIs(t, err, ErrAllBackendsUnavailable)
+	require.ErrorIs(t, err, ErrBackendNotRegistered)
+	assert.False(t, IsObjectMiss(err))
+
+	b := eng.failover.breakers["p"]
+	for i := 0; i < failureThreshold; i++ {
+		b.RecordFailure()
+	}
+	err = eng.CanAsk("p")
+	require.ErrorIs(t, err, ErrAllBackendsUnavailable, "open refuses")
+	assert.Equal(t, "open", eng.GetFailoverStatus()["p"], "asking did not change it")
+
+	b.mu.Lock()
+	b.lastOpenedAt = time.Now().Add(-openDuration)
+	b.mu.Unlock()
+	require.NoError(t, eng.CanAsk("p"), "half-open passes: that read is the probe that closes it")
+	assert.Equal(t, "half-open", eng.GetFailoverStatus()["p"])
 }

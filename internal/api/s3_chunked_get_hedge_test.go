@@ -28,8 +28,11 @@ type hangEngine struct {
 	hang     map[string]bool
 	mu       sync.Mutex
 	attempts map[string]int
-	gets     atomic.Int32
-	cur, max atomic.Int32
+	// hangAlways: every attempt of a hung key hangs, the hedge too — the
+	// body cannot finish before the client goes.
+	hangAlways bool
+	gets       atomic.Int32
+	cur, max   atomic.Int32
 }
 
 func (e *hangEngine) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
@@ -49,7 +52,7 @@ func (e *hangEngine) Get(ctx context.Context, container, artifact string) (io.Re
 	e.attempts[artifact]++
 	n := e.attempts[artifact]
 	e.mu.Unlock()
-	if e.hang[artifact] && n == 1 {
+	if e.hang[artifact] && (n == 1 || e.hangAlways) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
@@ -163,9 +166,13 @@ func TestChunkedGet_ClientGoneMidStreamLeaksNothing(t *testing.T) {
 	for _, k := range keys[1:] {
 		hang[k] = true
 	}
-	he := &hangEngine{Engine: f.eng, hang: hang, attempts: map[string]int{}}
+	// Every attempt hangs: with first-attempt-only hangs the hedge finished
+	// all 32 MiB inside the 100 ms on a fast machine and the test failed on
+	// main (Stage 1a Part A).
+	he := &hangEngine{Engine: f.eng, hang: hang, attempts: map[string]int{}, hangAlways: true}
 	f.adapter.engine = he
 	f.adapter.largeGet.chunkHedgeAfter = 20 * time.Millisecond
+	truncatedBefore := testutil.ToFloat64(chunkedGetTruncated.WithLabelValues(truncatedFetch))
 	runtime.GC()
 	before := runtime.NumGoroutine()
 
@@ -176,6 +183,8 @@ func TestChunkedGet_ClientGoneMidStreamLeaksNothing(t *testing.T) {
 	f.adapter.HandleGet(rec, req, "test-bucket", "gone.bin")
 
 	assert.Less(t, rec.Body.Len(), len(content))
+	assert.Equal(t, truncatedBefore, testutil.ToFloat64(chunkedGetTruncated.WithLabelValues(truncatedFetch)),
+		"a client that went away is no truncation (and no cut: HandleGet returned)")
 	deadline := time.Now().Add(3 * time.Second)
 	for runtime.NumGoroutine() > before+1 && time.Now().Before(deadline) {
 		runtime.GC()
