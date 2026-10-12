@@ -12,6 +12,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/config"
+	"github.com/FairForge/vaultaire/internal/hosts"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -459,7 +460,7 @@ func TestLlmsTxt(t *testing.T) {
 	assert.Equal(t, "text/plain; charset=utf-8", w.Header().Get("Content-Type"))
 
 	body := w.Body.String()
-	assert.Contains(t, body, "stored.ge")
+	assert.Contains(t, body, "Endpoint "+hosts.Get().S3+", region")
 	assert.Contains(t, body, "S3-compatible endpoints")
 	assert.Contains(t, body, "JSON API")
 	assert.Contains(t, body, "Bearer JWT")

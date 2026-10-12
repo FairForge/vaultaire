@@ -70,6 +70,9 @@ func (s *Server) handleGetPresignedURL(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getBaseURL() string {
+	if s.hosts.S3 != "" {
+		return s.hosts.S3 // NewServer read it (internal/hosts)
+	}
 	port := 8000
 	if s.config != nil {
 		port = s.config.Server.Port

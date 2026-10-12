@@ -939,11 +939,12 @@
                 x.fillText(signText(), 36, CH + 60);
                 x.font = '20px Silkscreen';
                 x.fillStyle = '#6b6b6b';
-                x.fillText(tb + ' TB · ' + money(t.total) + '/mo · built on Stored · stored.ge', 36, CH + 96);
+                var dom = (document.getElementById('receipt') || { dataset: {} }).dataset.domain || '';
+                x.fillText(tb + ' TB · ' + money(t.total) + '/mo · built on Stored' + (dom ? ' · ' + dom : ''), 36, CH + 96);
                 x.textAlign = 'right';
                 x.fillStyle = '#2b2b2b';
                 x.font = '800 30px Montserrat';
-                x.fillText('STORED.GE', CW - 36, CH + 76);
+                x.fillText('STORED', CW - 36, CH + 76);
                 c.toBlob(function (blob) {
                     if (!blob) { toast('could not save image'); return; }
                     var a = document.createElement('a');

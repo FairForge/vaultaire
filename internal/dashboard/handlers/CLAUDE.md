@@ -1,6 +1,6 @@
 # internal/dashboard/handlers
 
-HTTP handlers for the stored.ge customer dashboard. Each handler receives a pre-parsed `*template.Template` (base layout + page content) and renders it with data from PostgreSQL.
+HTTP handlers for the Stored customer dashboard. Each handler receives a pre-parsed `*template.Template` (base layout + page content) and renders it with data from PostgreSQL.
 
 ## Overview Handler (`overview.go`)
 

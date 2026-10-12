@@ -100,13 +100,13 @@
         </tr>
         <tr>
             <td class="text-muted">Endpoint</td>
-            <td class="mono">https://stored.ge</td>
+            <td class="mono">{{host "s3"}}</td>
         </tr>
     </table>
     <div class="code-block">
 aws configure set aws_access_key_id {{.NewKey.Key}}
 aws configure set aws_secret_access_key {{.NewKey.Secret}}
-aws s3 ls --endpoint-url https://stored.ge</div>
+aws s3 ls --endpoint-url {{host "s3"}}</div>
 </div>
 {{end}}
 

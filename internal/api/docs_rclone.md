@@ -9,7 +9,7 @@ rclone config create stored s3 \
   provider=Other \
   access_key_id=your_access_key \
   secret_access_key=your_secret_key \
-  endpoint=https://stored.ge \
+  endpoint=__HOST_S3__ \
   region=us-east-1
 ```
 
@@ -24,7 +24,7 @@ rclone mkdir stored:backups # create a bucket
 
 Run `rclone config` → `n` (new remote) → name it `stored` →
 storage type `s3` → provider `Other` → enter your access key and secret →
-region `us-east-1` → endpoint `https://stored.ge` → accept defaults for the rest.
+region `us-east-1` → endpoint `__HOST_S3__` → accept defaults for the rest.
 
 ## Everyday commands
 
@@ -76,4 +76,4 @@ can't read) — everything else works normally.
   the allowance it only takes longer. No lock-in by design.
 - While you are rate-limited, keep `--transfers` (times `--multi-thread-streams`) at 16
   or fewer: parallel downloads beyond that are answered `503 SlowDown` and retried.
-- Questions? [FAQ](/docs/faq) · [support@stored.ge](mailto:support@stored.ge)
+- Questions? [FAQ](/docs/faq) · [__SUPPORT_EMAIL__](mailto:__SUPPORT_EMAIL__)

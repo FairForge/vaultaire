@@ -141,7 +141,7 @@ func (s *Server) freeTierBucketCapBlocksWrite(ctx context.Context, tenantID, buc
 // writeFreeTierBucketCap answers the refusal the way CreateBucket does.
 func writeFreeTierBucketCap(w http.ResponseWriter, r *http.Request) {
 	WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
-		WithSuggestion(fmt.Sprintf("Free tier allows %d bucket. Upgrade at https://stored.ge/dashboard/billing", usage.FreeTierLimits.MaxBuckets)))
+		WithSuggestion(fmt.Sprintf("Free tier allows %d bucket. Upgrade at %s", usage.FreeTierLimits.MaxBuckets, billingURL())))
 }
 
 // CreateBucket handles S3 CreateBucket operation

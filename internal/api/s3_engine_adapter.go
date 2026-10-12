@@ -1213,7 +1213,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		case errors.Is(err, engine.ErrQuotaExceeded):
 			// Quota exhaustion is a client condition, never a 500.
 			WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
-				WithSuggestion("Storage quota exceeded. Upgrade at https://stored.ge/dashboard/billing"))
+				WithSuggestion("Storage quota exceeded. Upgrade at "+billingURL()))
 		case errors.Is(err, engine.ErrInvalidInput):
 			// The bucket's backend cannot hold this key (a name Sync's
 			// bridge refuses): the client's request, never a retryable 503.
@@ -2470,7 +2470,7 @@ func bucketTierStorageClass(ctx context.Context, db *sql.DB, tenantID, bucket st
 // publicBucketStorageClass returns "PUBLIC" when the bucket is public-read and
 // an r2 driver is registered on the engine, else "". R2's role of record is
 // public buckets / CDN origin only (SMART_TIER_DESIGN.md, 2026-09-19): $0
-// egress behind the Cloudflare-proxied cdn.stored.ge host. Without an r2
+// egress behind the Cloudflare-proxied CDN host (internal/hosts). Without an r2
 // driver (dev, CI, R2 outage at boot) public objects land on the primary
 // exactly as before.
 func publicBucketStorageClass(ctx context.Context, db *sql.DB, eng engine.Engine, tenantID, bucket string) string {

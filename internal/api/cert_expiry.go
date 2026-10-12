@@ -26,7 +26,8 @@ import (
 //
 // Targets come from TLS_CERT_PROBE_TARGETS: a comma-separated list of
 // `sni@host:port` (or just `sni`, meaning `sni@sni:443`). On SLC that is
-// `stored.ge@127.0.0.1:443,stored.cloud@127.0.0.1:443` — dial the local
+// `stored.ge@127.0.0.1:443,stored.cloud@127.0.0.1:443` (+ s3.stored.cloud
+// and cdn.stored.cloud once certbot carries them, WP-DOMAIN-1) — dial the local
 // HAProxy with the public SNI so the probe sees the ORIGIN cert, not
 // Cloudflare's edge cert. The handshake is fully verified; when verification
 // fails (expired, wrong name, unknown CA) the leaf is taken from the x509

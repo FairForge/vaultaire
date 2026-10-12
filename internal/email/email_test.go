@@ -16,6 +16,8 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 	"go.uber.org/zap/zaptest/observer"
+
+	"github.com/FairForge/vaultaire/internal/hosts"
 )
 
 func TestLogSender_Send(t *testing.T) {
@@ -198,6 +200,27 @@ func TestNewSender_EnvRouting(t *testing.T) {
 	t.Setenv("EMAIL_PROVIDER", "mailgun")
 	s = NewSender(logger)
 	assert.IsType(t, &LogSender{}, s)
+}
+
+// The From default is on the canonical domain (internal/hosts, WP-DOMAIN-1);
+// EMAIL_FROM wins.
+func TestNewSender_FromDefaultsToTheCanonicalDomain(t *testing.T) {
+	prev := hosts.Get()
+	t.Cleanup(func() { hosts.Set(prev) })
+	hosts.Set(hosts.Hosts{Canonical: "https://stored.cloud", S3: "https://s3.stored.cloud", CDN: "https://cdn.stored.cloud", BaseURL: "https://stored.cloud"})
+	logger := zaptest.NewLogger(t)
+	t.Setenv("EMAIL_PROVIDER", "resend")
+	t.Setenv("RESEND_API_KEY", "re_test123")
+
+	t.Setenv("EMAIL_FROM", "")
+	s, ok := NewSender(logger).(*ResendSender)
+	require.True(t, ok)
+	assert.Equal(t, "noreply@stored.cloud", s.from)
+
+	t.Setenv("EMAIL_FROM", "hello@stored.cloud")
+	s, ok = NewSender(logger).(*ResendSender)
+	require.True(t, ok)
+	assert.Equal(t, "hello@stored.cloud", s.from)
 }
 
 // rewriteTransport redirects HTTPS requests to the test server.

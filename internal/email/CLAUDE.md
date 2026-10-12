@@ -15,7 +15,7 @@ Email service abstraction for Vaultaire. Provides a `Sender` interface with thre
 | Variable | Required | Purpose |
 |----------|----------|---------|
 | `EMAIL_PROVIDER` | No | `resend`, `smtp`, or unset (log sender) |
-| `EMAIL_FROM` | No | Sender address (default `noreply@stored.ge`) |
+| `EMAIL_FROM` | No | Sender address (default `noreply@<canonical domain>` from `internal/hosts`) |
 | `RESEND_API_KEY` | When `resend` | Resend API key |
 | `SMTP_HOST` | When `smtp` | SMTP server hostname |
 | `SMTP_PORT` | When `smtp` | SMTP port (587 for STARTTLS, 465 for implicit TLS) |

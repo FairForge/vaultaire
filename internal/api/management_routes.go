@@ -189,7 +189,7 @@ func (s *Server) handleMgmtCreateBucket(w http.ResponseWriter, r *http.Request) 
 		return
 	case bucketCreateCapFree:
 		writeManagementError(w, ErrTypePermission, "free_tier_bucket_limit",
-			fmt.Sprintf("Free tier allows %d bucket. Upgrade at https://stored.ge/dashboard/billing", usage.FreeTierLimits.MaxBuckets), "")
+			fmt.Sprintf("Free tier allows %d bucket. Upgrade at %s", usage.FreeTierLimits.MaxBuckets, billingURL()), "")
 		return
 	case bucketCreateInvalidRegion:
 		writeManagementError(w, ErrTypeInvalidRequest, "invalid_region", "region is not a known region id", "region")

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/FairForge/vaultaire/internal/dashboard/middleware"
+	"github.com/FairForge/vaultaire/internal/hosts"
 	"go.uber.org/zap"
 )
 
@@ -122,7 +123,7 @@ func HandleAbuseSubmit(tmpl *template.Template, db *sql.DB, logger *zap.Logger) 
 		if err := db.QueryRowContext(r.Context(),
 			`SELECT COUNT(*) FROM abuse_reports WHERE reporter_email = $1 AND created_at > NOW() - INTERVAL '24 hours'`,
 			email).Scan(&today); err == nil && today >= abusePerReporterDay {
-			renderErr(http.StatusTooManyRequests, "You have reached today's limit of reports from this address. Email abuse@stored.ge if this is urgent.")
+			renderErr(http.StatusTooManyRequests, "You have reached today's limit of reports from this address. Email "+hosts.Get().AbuseEmail()+" if this is urgent.")
 			return
 		}
 

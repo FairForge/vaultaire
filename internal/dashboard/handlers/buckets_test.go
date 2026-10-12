@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/hosts"
 	"github.com/FairForge/vaultaire/internal/testutil"
 
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
@@ -336,6 +337,7 @@ func TestHandleBucketObjects_CDNData(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires database")
 	}
+	useProdHosts(t)
 	db := testDashDB(t)
 	defer func() { _ = db.Close() }()
 	cleanupDashBucketData(t, db)
@@ -378,9 +380,9 @@ func TestHandleBucketObjects_CDNData(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	body := w.Body.String()
 	assert.Contains(t, body, "vis=public-read")
-	assert.Contains(t, body, "cdn=https://cdn.stored.ge/cdnco/pub-bucket")
+	assert.Contains(t, body, "cdn=https://cdn.stored.cloud/cdnco/pub-bucket")
 	assert.Contains(t, body, "preview=image")
-	assert.Contains(t, body, "url=https://cdn.stored.ge/cdnco/pub-bucket/photo.jpg")
+	assert.Contains(t, body, "url=https://cdn.stored.cloud/cdnco/pub-bucket/photo.jpg")
 }
 
 func TestHandleBucketObjects_NoCDNForPrivate(t *testing.T) {
@@ -424,7 +426,7 @@ func TestHandleBucketObjects_NoCDNForPrivate(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	body := w.Body.String()
 	assert.Contains(t, body, "vis=private")
-	assert.NotContains(t, body, "cdn=https://cdn.stored.ge")
+	assert.NotContains(t, body, "cdn="+hosts.Get().CDNBase())
 }
 
 func TestDashboardJS_Exists(t *testing.T) {

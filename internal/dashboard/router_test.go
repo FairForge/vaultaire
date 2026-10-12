@@ -12,6 +12,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/auth"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/FairForge/vaultaire/internal/email"
+	"github.com/FairForge/vaultaire/internal/hosts"
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -318,4 +319,25 @@ func TestStaticAssets(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), "--primary")
+}
+
+// WP-DOMAIN-1: the reveal-once credentials page shows the S3 endpoint
+// (s3.stored.cloud), never the web/OAuth base URL — they differ once the S3
+// API has its own host.
+func TestPostRegister_CredentialsShowTheS3Endpoint(t *testing.T) {
+	logger := zap.NewNop()
+	authSvc := auth.NewAuthService(nil, nil)
+	r := chi.NewRouter()
+	RegisterRoutes(r, Deps{
+		Auth: authSvc, Sessions: dashauth.NewMemoryStore(), Logger: logger, Email: email.NewSender(logger),
+		BaseURL: "https://stored.cloud",
+		Hosts:   hosts.Hosts{Canonical: "https://stored.cloud", S3: "https://s3.stored.cloud", CDN: "https://cdn.stored.cloud", BaseURL: "https://stored.cloud"},
+	})
+	form := url.Values{"email": {"endpoint@example.com"}, "password": {"securepass123"}, "company": {"E"}}
+	req := httptest.NewRequest("POST", "/register", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `id="cred-endpoint" value="https://s3.stored.cloud"`)
 }

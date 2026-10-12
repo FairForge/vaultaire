@@ -655,7 +655,7 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 		}
 		if !ok {
 			WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
-				WithSuggestion("Upgrade at https://stored.ge/dashboard/billing"))
+				WithSuggestion("Upgrade at "+billingURL()))
 			return
 		}
 		reservedBytes = totalSize

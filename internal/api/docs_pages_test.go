@@ -12,7 +12,7 @@ import (
 
 func docsGet(t *testing.T, slug string) *httptest.ResponseRecorder {
 	t.Helper()
-	s := &Server{logger: zap.NewNop()}
+	s := &Server{logger: zap.NewNop(), hosts: prodHosts()}
 	req := httptest.NewRequest(http.MethodGet, "/docs/"+slug, nil)
 	w := httptest.NewRecorder()
 	s.handleDocsPage(slug)(w, req)
@@ -25,7 +25,7 @@ func TestDocsHub_LinksGuidesAndReference(t *testing.T) {
 	assert.Contains(t, w.Header().Get("Content-Type"), "text/html")
 	for _, link := range []string{
 		`href="/docs/getting-started"`, `href="/docs/rclone"`,
-		`href="/docs/faq"`, `href="/docs/api"`, "support@stored.ge",
+		`href="/docs/faq"`, `href="/docs/api"`, "support@stored.cloud",
 	} {
 		assert.Contains(t, w.Body.String(), link)
 	}
@@ -37,13 +37,13 @@ func TestDocsGuides_RenderMarkdown(t *testing.T) {
 		want []string
 	}{
 		{"getting-started", []string{
-			"<h1", "Getting Started", "https://stored.ge", "us-east-1", "aws configure",
+			"<h1", "Getting Started", "https://s3.stored.cloud", "us-east-1", "aws configure",
 		}},
 		{"rclone", []string{
-			"<h1", "rclone", "rclone config create stored s3", "endpoint=https://stored.ge",
+			"<h1", "rclone", "rclone config create stored s3", "endpoint=https://s3.stored.cloud",
 		}},
 		{"faq", []string{
-			"<h1", "Frequently Asked", "$4.49/TB", "$6.99/TB", "sold as a quota", "support@stored.ge",
+			"<h1", "Frequently Asked", "$4.49/TB", "$6.99/TB", "sold as a quota", "support@stored.cloud",
 		}},
 	}
 	for _, tt := range tests {
@@ -60,7 +60,7 @@ func TestDocsGuides_RenderMarkdown(t *testing.T) {
 }
 
 func TestDocsPage_HeadReturnsNoBody(t *testing.T) {
-	s := &Server{logger: zap.NewNop()}
+	s := &Server{logger: zap.NewNop(), hosts: prodHosts()}
 	req := httptest.NewRequest(http.MethodHead, "/docs/faq", nil)
 	w := httptest.NewRecorder()
 	s.handleDocsPage("faq")(w, req)

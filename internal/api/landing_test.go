@@ -31,7 +31,7 @@ func TestHandleRoot_BrowserGetsLandingPage(t *testing.T) {
 	defer func() { _ = res.Body.Close() }()
 	require.Equal(t, http.StatusOK, res.StatusCode)
 	assert.Contains(t, res.Header.Get("Content-Type"), "text/html")
-	assert.Contains(t, w.Body.String(), "stored.ge", "embedded landing page should render")
+	assert.Contains(t, w.Body.String(), "Stored", "embedded landing page should render")
 }
 
 func TestHandleRoot_HeadReturnsNoBody(t *testing.T) {
@@ -78,7 +78,7 @@ func TestHandleRoot_SignupsOpen_ShowsRegisterCTA(t *testing.T) {
 // The old page marketed a dropped Lyve/VPS product with fabricated stats and a
 // dead "Sign In Coming Soon" modal. None of that may ever come back.
 func TestLanding_NoDeadProduct(t *testing.T) {
-	for _, page := range []string{string(landingClosed), string(landingOpen)} {
+	for _, page := range []string{string(landingPages(prodHosts())[0]), string(landingPages(prodHosts())[1])} {
 		for _, banned := range []string{"VPS", "Lyve", "Coming Soon", "10PB", "waitlist-modal"} {
 			assert.NotContains(t, page, banned)
 		}
@@ -93,8 +93,8 @@ func TestLanding_FooterLinks(t *testing.T) {
 		`href="/legal/cookies"`, `href="/legal/dpa"`, `href="/legal/gdpr"`,
 		`href="/legal/baa"`, `href="/legal/data-act"`,
 	} {
-		assert.Contains(t, string(landingClosed), link)
-		assert.Contains(t, string(landingOpen), link)
+		assert.Contains(t, string(landingPages(prodHosts())[0]), link)
+		assert.Contains(t, string(landingPages(prodHosts())[1]), link)
 	}
 }
 
@@ -131,7 +131,7 @@ func TestIsS3RootRequest(t *testing.T) {
 // hero scene's tags, the builder's starter and its receipt all agree. The
 // beacon for the cookieless site statistics is wired in too.
 func TestLanding_ExampleStory(t *testing.T) {
-	for _, page := range []string{string(landingClosed), string(landingOpen)} {
+	for _, page := range []string{string(landingPages(prodHosts())[0]), string(landingPages(prodHosts())[1])} {
 		for _, want := range []string{
 			"rclone copy ~/backups stored:backups", "03:00:12 backups", "21:44:08 projects", "09:15:51 photos",
 			"PHOTOS 1 TB", "PROJECTS 1 TB", `data-pack="b"`, "1 dresser of backups", "1 storage box of photos", "$18.98",

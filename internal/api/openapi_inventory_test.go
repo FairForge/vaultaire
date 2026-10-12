@@ -6,12 +6,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/FairForge/vaultaire/internal/config"
-	"github.com/FairForge/vaultaire/internal/docs"
-	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+
+	"github.com/FairForge/vaultaire/internal/config"
+	"github.com/FairForge/vaultaire/internal/docs"
+	"github.com/FairForge/vaultaire/internal/engine"
+	"github.com/FairForge/vaultaire/internal/hosts"
 )
 
 // TestOpenAPIRouteInventory prints every registered chi route next to its
@@ -37,7 +39,7 @@ func TestOpenAPIRouteInventory(t *testing.T) {
 		}))
 	sort.Strings(routes)
 
-	spec := docs.GenerateOpenAPISpec()
+	spec := docs.GenerateOpenAPISpec(hosts.Get())
 	specOps := map[string]bool{}
 	for path, item := range spec.Paths {
 		for method, op := range map[string]any{

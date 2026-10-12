@@ -942,7 +942,7 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3
 			}
 			if !ok {
 				WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
-					WithSuggestion("Upgrade at https://stored.ge/dashboard/billing"))
+					WithSuggestion("Upgrade at "+billingURL()))
 				return
 			}
 			reserved = size

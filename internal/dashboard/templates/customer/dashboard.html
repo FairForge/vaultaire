@@ -147,35 +147,35 @@
             <label class="tab-label" for="onboard-tab-js">JavaScript</label>
             <label class="tab-label" for="onboard-tab-curl">cURL</label>
         </div>
-        <div class="tab-panel panel-rclone"><pre id="snippet-rclone">rclone config create storedge s3 \
+        <div class="tab-panel panel-rclone"><pre id="snippet-rclone">rclone config create stored s3 \
   provider=Other \
   access_key_id={{.Onboarding.AccessKey}} \
   secret_access_key=YOUR_SECRET_KEY \
-  endpoint=https://stored.ge \
+  endpoint={{host "s3"}} \
   region=us-east-1
 
-rclone mkdir storedge:my-first-bucket
-rclone copy ./hello.txt storedge:my-first-bucket/</pre>
+rclone mkdir stored:my-first-bucket
+rclone copy ./hello.txt stored:my-first-bucket/</pre>
             <button type="button" class="btn-copy" data-copy-target="snippet-rclone">Copy</button></div>
         <div class="tab-panel panel-cli"><pre id="snippet-cli">aws configure set aws_access_key_id {{.Onboarding.AccessKey}}
 aws configure set aws_secret_access_key YOUR_SECRET_KEY
-aws --endpoint-url https://stored.ge s3 mb s3://my-first-bucket
-aws --endpoint-url https://stored.ge s3 cp ./hello.txt s3://my-first-bucket/</pre>
+aws --endpoint-url {{host "s3"}} s3 mb s3://my-first-bucket
+aws --endpoint-url {{host "s3"}} s3 cp ./hello.txt s3://my-first-bucket/</pre>
             <button type="button" class="btn-copy" data-copy-target="snippet-cli">Copy</button></div>
         <div class="tab-panel panel-s3cmd"><pre id="snippet-s3cmd">s3cmd --access_key={{.Onboarding.AccessKey}} \
   --secret_key=YOUR_SECRET_KEY \
-  --host=stored.ge --host-bucket=stored.ge \
+  --host={{host "s3host"}} --host-bucket={{host "s3host"}} \
   mb s3://my-first-bucket
 
 s3cmd --access_key={{.Onboarding.AccessKey}} \
   --secret_key=YOUR_SECRET_KEY \
-  --host=stored.ge --host-bucket=stored.ge \
+  --host={{host "s3host"}} --host-bucket={{host "s3host"}} \
   put ./hello.txt s3://my-first-bucket/</pre>
             <button type="button" class="btn-copy" data-copy-target="snippet-s3cmd">Copy</button></div>
         <div class="tab-panel panel-python"><pre id="snippet-python">import boto3
 
 s3 = boto3.client('s3',
-    endpoint_url='https://stored.ge',
+    endpoint_url='{{host "s3"}}',
     aws_access_key_id='{{.Onboarding.AccessKey}}',
     aws_secret_access_key='YOUR_SECRET_KEY')
 
@@ -185,7 +185,7 @@ s3.put_object(Bucket='my-first-bucket', Key='hello.txt', Body=b'Hello!')</pre>
         <div class="tab-panel panel-js"><pre id="snippet-js">import { S3Client, CreateBucketCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 
 const client = new S3Client({
-  endpoint: "https://stored.ge",
+  endpoint: "{{host "s3"}}",
   region: "us-east-1",
   credentials: {
     accessKeyId: "{{.Onboarding.AccessKey}}",
@@ -201,11 +201,11 @@ await client.send(new PutObjectCommand({
 }));</pre>
             <button type="button" class="btn-copy" data-copy-target="snippet-js">Copy</button></div>
         <div class="tab-panel panel-curl"><pre id="snippet-curl"># curl 7.75+ signs S3 requests itself (SigV4)
-curl -X PUT https://stored.ge/my-first-bucket \
+curl -X PUT {{host "s3"}}/my-first-bucket \
   --aws-sigv4 "aws:amz:us-east-1:s3" \
   --user "{{.Onboarding.AccessKey}}:YOUR_SECRET_KEY"
 
-curl -X PUT https://stored.ge/my-first-bucket/hello.txt \
+curl -X PUT {{host "s3"}}/my-first-bucket/hello.txt \
   --aws-sigv4 "aws:amz:us-east-1:s3" \
   --user "{{.Onboarding.AccessKey}}:YOUR_SECRET_KEY" \
   -d "Hello!"</pre>

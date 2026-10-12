@@ -7,12 +7,12 @@
 <meta name="description" content="S3-compatible object storage with automatic tiering across hot storage and tape. $__PRICE_STD__/TB, tape-backed archive at $__PRICE_VAULT__/TB. Flat per-TB quota, no API fees, no retrieval fees.">
 <meta property="og:title" content="Stored, S3-compatible storage that optimizes itself">
 <meta property="og:description" content="One endpoint. Your data auto-tiers across hot storage and tape, $__PRICE_STD__/TB, archive at $__PRICE_VAULT__/TB. Flat quota, no API fees.">
-<meta property="og:url" content="https://stored.ge">
-<meta property="og:image" content="https://stored.ge/og.png">
+<meta property="og:url" content="{{.Web}}">
+<meta property="og:image" content="{{.Web}}/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:image" content="https://stored.ge/og.png">
+<meta name="twitter:image" content="{{.Web}}/og.png">
 <meta name="theme-color" content="#101010" media="(prefers-color-scheme: dark)">
 <meta name="theme-color" content="#383838" media="(prefers-color-scheme: light)">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%22-4 -4 22 22%22 shape-rendering=%22crispEdges%22%3E%3Crect x=%22-4%22 y=%22-4%22 width=%2222%22 height=%2222%22 fill=%22%23333%22/%3E%3Cpath fill=%22%23fff%22 d=%22M0 0h14v1h-14zM0 1h1v1h-1zM13 1h1v1h-1zM0 2h1v1h-1zM13 2h1v1h-1zM0 3h1v1h-1zM13 3h1v1h-1zM0 4h1v1h-1zM13 4h1v1h-1zM0 5h1v1h-1zM13 5h1v1h-1zM13 6h1v1h-1zM13 7h1v1h-1zM13 8h1v1h-1zM0 9h4v1h-4zM13 9h1v1h-1zM0 10h1v1h-1zM13 10h1v1h-1zM0 11h4v1h-4zM13 11h1v1h-1zM3 12h1v1h-1zM13 12h1v1h-1zM0 13h4v1h-4zM5 13h9v1h-9z%22/%3E%3C/svg%3E">
@@ -90,7 +90,7 @@ __SPRITES__
             <pre><span class="p">$</span> rclone copy ~/backups stored:backups -P
 <span class="out">Transferred:   63.921 GiB / 63.921 GiB, 100%, 312.4 MiB/s
 Elapsed time:      3m29.5s</span>
-<span class="p">$</span> aws s3 ls --endpoint-url https://stored.ge
+<span class="p">$</span> aws s3 ls --endpoint-url {{.S3}}
 <span class="out">2026-06-30 03:00:12 backups
 2026-07-12 21:44:08 projects
 2026-07-23 09:15:51 photos</span>
@@ -292,11 +292,11 @@ __BUILDER__
                 <pre id="uc-backup-snip">export AWS_ACCESS_KEY_ID=YOUR_KEY
 export AWS_SECRET_ACCESS_KEY=YOUR_SECRET
 
-restic -r s3:https://stored.ge/backups init
-restic -r s3:https://stored.ge/backups backup /home /etc
+restic -r s3:{{.S3}}/backups init
+restic -r s3:{{.S3}}/backups backup /home /etc
 
 # verify what you'd restore
-restic -r s3:https://stored.ge/backups snapshots</pre>
+restic -r s3:{{.S3}}/backups snapshots</pre>
             </div>
         </div>
 
@@ -317,7 +317,7 @@ restic -r s3:https://stored.ge/backups snapshots</pre>
 
 s3 = boto3.client(
     "s3",
-    endpoint_url="https://stored.ge",
+    endpoint_url="{{.S3}}",
     aws_access_key_id="YOUR_KEY",
     aws_secret_access_key="YOUR_SECRET",
 )
@@ -345,11 +345,11 @@ url = s3.generate_presigned_url(
             <div class="snippet">
                 <div class="snippet-head"><span>aws-cli, public assets</span><button class="copy-btn" data-copy="uc-media-snip">copy</button></div>
                 <pre id="uc-media-snip">aws s3 cp ./dist s3://site-assets/ --recursive \
-  --endpoint-url https://stored.ge
+  --endpoint-url {{.S3}}
 
 # time-limited download link for a paid file
 aws s3 presign s3://downloads/album.zip \
-  --endpoint-url https://stored.ge --expires-in 86400</pre>
+  --endpoint-url {{.S3}} --expires-in 86400</pre>
             </div>
         </div>
 
@@ -369,7 +369,7 @@ aws s3 presign s3://downloads/album.zip \
                 <pre id="uc-worm-snip">aws s3api put-object-retention \
   --bucket audit-logs --key 2026/07/ledger.csv \
   --retention Mode=COMPLIANCE,RetainUntilDate=2027-07-25T00:00:00Z \
-  --endpoint-url https://stored.ge</pre>
+  --endpoint-url {{.S3}}</pre>
             </div>
         </div>
 
@@ -388,7 +388,7 @@ aws s3 presign s3://downloads/album.zip \
                 <div class="snippet-head"><span>duckdb, query in place</span><button class="copy-btn" data-copy="uc-lake-snip">copy</button></div>
                 <pre id="uc-lake-snip">-- duckdb
 INSTALL httpfs; LOAD httpfs;
-SET s3_endpoint='stored.ge';
+SET s3_endpoint='{{.S3Host}}';
 SET s3_access_key_id='YOUR_KEY';
 SET s3_secret_access_key='YOUR_SECRET';
 
@@ -428,7 +428,7 @@ SELECT count(*) FROM 's3://lake/events/2026/*.parquet';</pre>
                     <div class="snippet-head"><span>shell</span><button class="copy-btn" data-copy="res-rclone-snip">copy</button></div>
                     <pre id="res-rclone-snip">rclone config create stored s3 provider=Other \
   access_key_id=YOUR_KEY secret_access_key=YOUR_SECRET \
-  endpoint=https://stored.ge region=us-east-1
+  endpoint={{.S3}} region=us-east-1
 
 rclone sync ~/photos stored:photos -P      # keep in sync
 rclone mount stored:photos ~/mnt/photos    # use as a drive
@@ -440,9 +440,9 @@ rclone sync b2:old-bucket stored:photos    # leave your old provider</pre>
                 <p>Client-side encrypted, deduplicated, incremental backups. Your keys never leave your machine, we store ciphertext and can't read a byte of it.</p>
                 <div class="snippet">
                     <div class="snippet-head"><span>shell</span><button class="copy-btn" data-copy="res-restic-snip">copy</button></div>
-                    <pre id="res-restic-snip">restic -r s3:https://stored.ge/backups init
-restic -r s3:https://stored.ge/backups backup /srv/data
-restic -r s3:https://stored.ge/backups forget --keep-daily 7 --keep-weekly 8 --prune</pre>
+                    <pre id="res-restic-snip">restic -r s3:{{.S3}}/backups init
+restic -r s3:{{.S3}}/backups backup /srv/data
+restic -r s3:{{.S3}}/backups forget --keep-daily 7 --keep-weekly 8 --prune</pre>
                 </div>
             </div>
             <div class="res-card" data-card="awscli">
@@ -450,20 +450,20 @@ restic -r s3:https://stored.ge/backups forget --keep-daily 7 --keep-weekly 8 --p
                 <p>Every S3 operation we support, from cron jobs and CI pipelines. Multipart, versioning, tagging, lock, it's all the same flags you already know, plus <code>--endpoint-url</code>.</p>
                 <div class="snippet">
                     <div class="snippet-head"><span>shell</span><button class="copy-btn" data-copy="res-awscli-snip">copy</button></div>
-                    <pre id="res-awscli-snip">alias s3ge='aws --endpoint-url https://stored.ge'
+                    <pre id="res-awscli-snip">alias s3st='aws --endpoint-url {{.S3}}'
 
-s3ge s3 mb s3://ci-artifacts
-s3ge s3 cp build.tar.gz s3://ci-artifacts/v1.4.2/
-s3ge s3api list-object-versions --bucket ci-artifacts --prefix v1.4.2/</pre>
+s3st s3 mb s3://ci-artifacts
+s3st s3 cp build.tar.gz s3://ci-artifacts/v1.4.2/
+s3st s3api list-object-versions --bucket ci-artifacts --prefix v1.4.2/</pre>
                 </div>
             </div>
             <div class="res-card" data-card="cyberduck">
                 <h3>Cyberduck &amp; friends<small>point-and-click</small></h3>
-                <p>Any S3-capable GUI works: Cyberduck, Mountain Duck, S3 Browser, Transmit. Add a connection with server <code>stored.ge</code>, port 443, and your keys, then drag and drop. Handy for the team members who are never going to open a terminal.</p>
+                <p>Any S3-capable GUI works: Cyberduck, Mountain Duck, S3 Browser, Transmit. Add a connection with server <code>{{.S3Host}}</code>, port 443, and your keys, then drag and drop. Handy for the team members who are never going to open a terminal.</p>
                 <div class="snippet">
                     <div class="snippet-head"><span>cyberduck, connection settings</span><button class="copy-btn" data-copy="res-duck-snip">copy</button></div>
                     <pre id="res-duck-snip">Protocol:   Amazon S3
-Server:     stored.ge
+Server:     {{.S3Host}}
 Port:       443
 Access Key: YOUR_KEY
 Secret Key: YOUR_SECRET</pre>
@@ -475,7 +475,7 @@ Secret Key: YOUR_SECRET</pre>
                 <div class="snippet">
                     <div class="snippet-head"><span>shell</span><button class="copy-btn" data-copy="res-juicefs-snip">copy</button></div>
                     <pre id="res-juicefs-snip">juicefs format --storage s3 \
-  --bucket https://stored.ge/myfs \
+  --bucket {{.S3}}/myfs \
   --access-key YOUR_KEY --secret-key YOUR_SECRET \
   redis://localhost/1 myfs
 
@@ -490,7 +490,7 @@ juicefs mount redis://localhost/1 ~/jfs</pre>
                     <pre id="res-sdk-snip">import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 
 const s3 = new S3Client({
-  endpoint: "https://stored.ge",
+  endpoint: "{{.S3}}",
   region: "us-east-1",
   credentials: { accessKeyId: KEY, secretAccessKey: SECRET },
 });
@@ -507,7 +507,7 @@ await s3.send(new PutObjectCommand({
                     <div class="snippet-head"><span>shell</span><button class="copy-btn" data-copy="res-presign-snip">copy</button></div>
                     <pre id="res-presign-snip"># 24h download link
 aws s3 presign s3://downloads/build.zip \
-  --endpoint-url https://stored.ge --expires-in 86400</pre>
+  --endpoint-url {{.S3}} --expires-in 86400</pre>
                 </div>
             </div>
             <div class="res-card" data-card="keys">
@@ -515,7 +515,7 @@ aws s3 presign s3://downloads/build.zip \
                 <p>Mint API keys locked to specific buckets and permissions, with optional IP allowlists and expiry. Need something shorter-lived? STS issues temporary credentials that can only narrow, never escalate, the parent key's scope.</p>
                 <div class="snippet">
                     <div class="snippet-head"><span>shell, temporary credentials</span><button class="copy-btn" data-copy="res-keys-snip">copy</button></div>
-                    <pre id="res-keys-snip">curl -X POST https://stored.ge/api/v1/sts/token \
+                    <pre id="res-keys-snip">curl -X POST {{.Web}}/api/v1/sts/token \
   -H "Authorization: Bearer $JWT" \
   -d '{"duration_seconds": 3600,
        "buckets": ["user-uploads"],
@@ -527,7 +527,7 @@ aws s3 presign s3://downloads/build.zip \
                 <p>Subscribe an HTTPS endpoint to <code>object.created</code>, <code>object.deleted</code>, bucket and key events. Deliveries are HMAC-signed and logged with response codes, so you can actually debug them.</p>
                 <div class="snippet">
                     <div class="snippet-head"><span>shell</span><button class="copy-btn" data-copy="res-hooks-snip">copy</button></div>
-                    <pre id="res-hooks-snip">curl -X POST https://stored.ge/api/v1/webhooks \
+                    <pre id="res-hooks-snip">curl -X POST {{.Web}}/api/v1/webhooks \
   -H "Authorization: Bearer $JWT" \
   -d '{"url": "https://api.example.com/on-upload",
        "events": ["object.created"]}'</pre>
@@ -538,8 +538,8 @@ aws s3 presign s3://downloads/build.zip \
                 <p>Flip a bucket to public-read and objects are fetchable at a plain URL, correct content types, range requests for video seeking, and per-bucket bandwidth budgets so surprise traffic can't run up a surprise bill.</p>
                 <div class="snippet">
                     <div class="snippet-head"><span>what a visitor fetches</span><button class="copy-btn" data-copy="res-public-snip">copy</button></div>
-                    <pre id="res-public-snip">https://stored.ge/site-assets/logo.svg
-https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
+                    <pre id="res-public-snip">{{.CDN}}your-name/site-assets/logo.svg
+{{.CDN}}your-name/podcast/episode-042.mp3   # range requests work</pre>
                 </div>
             </div>
             <div class="res-card" data-card="lock">
@@ -550,7 +550,7 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
                     <pre id="res-lock-snip">aws s3api put-object-legal-hold \
   --bucket evidence --key case-1138/disk.img \
   --legal-hold Status=ON \
-  --endpoint-url https://stored.ge</pre>
+  --endpoint-url {{.S3}}</pre>
                 </div>
             </div>
         </div>
@@ -690,7 +690,7 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
             <svg class="px" style="--w:16;--h:26" viewBox="0 0 16 26" aria-hidden="true" focusable="false"><use href="#s-mascot"/></svg>
             <div class="support-bubble">
                 <p class="support-hi">Hi! Stuck on something?</p>
-                <p>Support is founder-direct and replies target &lt;4h: <a href="mailto:support@stored.ge">support@stored.ge</a></p>
+                <p>Support is founder-direct and replies target &lt;4h: <a href="mailto:{{.Support}}">{{.Support}}</a></p>
             </div>
         </div>
     </div>
@@ -749,7 +749,7 @@ https://stored.ge/podcast/episode-042.mp3   # range requests work</pre>
             <div>
                 <h3>Support</h3>
                 <ul class="footer-links">
-                    <li><a href="mailto:support@stored.ge">support@stored.ge</a></li>
+                    <li><a href="mailto:{{.Support}}">{{.Support}}</a></li>
                     <li><a href="/abuse">Report abuse</a></li>
                     <li><a href="/login">Sign in</a></li>
                 </ul>

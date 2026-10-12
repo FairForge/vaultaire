@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/FairForge/vaultaire/internal/hosts"
 )
 
 // /.well-known/security.txt (RFC 9116) — launch sequence 5.5.6: researchers
@@ -13,7 +15,9 @@ import (
 // registered before the S3 catch-all (it used to fall through to the S3
 // handler and answer 403 AccessDenied).
 //
-// Contact is fixed (security@stored.ge). The Expires field is required by the
+// Contact, Canonical and the Policy default come from the one host source
+// (internal/hosts, WP-DOMAIN-1): security@<canonical domain> and the
+// canonical origin — stored.cloud on prod. The Expires field is required by the
 // RFC and must be under a year out; it is computed once per process start
 // (start of that UTC day + 364 days), so a deploy refreshes it and a binary
 // that somehow runs for a year serves a stale-but-not-lying date (the day it
@@ -22,23 +26,18 @@ import (
 // abuse/CSAM/DMCA process) and can be pointed at a dedicated disclosure page
 // via SECURITY_POLICY_URL once one exists.
 
-const (
-	securityTxtContact   = "mailto:security@stored.ge"
-	securityTxtCanonical = "https://stored.ge/.well-known/security.txt"
-	securityPolicyURLDef = "https://stored.ge/legal/aup"
-	securityTxtValidity  = 364 * 24 * time.Hour
-)
+const securityTxtValidity = 364 * 24 * time.Hour
 
-// securityTxtBody renders the file for a given generation time and policy
-// URL. Pure so the test can pin the time.
-func securityTxtBody(now time.Time, policyURL string) string {
+// securityTxtBody renders the file for a given generation time, host set and
+// policy URL. Pure so the test can pin the time.
+func securityTxtBody(now time.Time, h hosts.Hosts, policyURL string) string {
 	day := now.UTC().Truncate(24 * time.Hour)
 	expires := day.Add(securityTxtValidity).Format(time.RFC3339)
 	var b strings.Builder
-	fmt.Fprintf(&b, "Contact: %s\n", securityTxtContact)
+	fmt.Fprintf(&b, "Contact: mailto:%s\n", h.SecurityEmail())
 	fmt.Fprintf(&b, "Expires: %s\n", expires)
 	fmt.Fprintf(&b, "Preferred-Languages: en\n")
-	fmt.Fprintf(&b, "Canonical: %s\n", securityTxtCanonical)
+	fmt.Fprintf(&b, "Canonical: %s\n", h.URL("/.well-known/security.txt"))
 	if policyURL != "" {
 		fmt.Fprintf(&b, "Policy: %s\n", policyURL)
 	}
@@ -49,9 +48,9 @@ func securityTxtBody(now time.Time, policyURL string) string {
 func (s *Server) initSecurityTxt() {
 	policy := os.Getenv("SECURITY_POLICY_URL")
 	if policy == "" {
-		policy = securityPolicyURLDef
+		policy = s.hostSet().URL("/legal/aup")
 	}
-	s.securityTxt = securityTxtBody(time.Now(), policy)
+	s.securityTxt = securityTxtBody(time.Now(), s.hostSet(), policy)
 }
 
 func (s *Server) handleSecurityTxt(w http.ResponseWriter, r *http.Request) {

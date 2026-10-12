@@ -1,4 +1,4 @@
-/* stored.ge billing: the house steppers. Prices come from data attributes
+/* Stored billing: the house steppers. Prices come from data attributes
    the server fills from prices.json; the maths mirrors billing.QuoteHouse
    (annual = per TB per month billed yearly; the attic's monthly price has a
    flat minimum for 1 TB). No inline handlers (CSP), works without JS. */

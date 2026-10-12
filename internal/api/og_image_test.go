@@ -31,8 +31,8 @@ func TestOGImage_ServesPNG(t *testing.T) {
 
 // The landing page must point social cards at the image.
 func TestLanding_HasSocialPreview(t *testing.T) {
-	for _, page := range []string{string(landingClosed), string(landingOpen)} {
-		assert.Contains(t, page, `property="og:image" content="https://stored.ge/og.png"`)
+	for _, page := range []string{string(landingPages(prodHosts())[0]), string(landingPages(prodHosts())[1])} {
+		assert.Contains(t, page, `property="og:image" content="https://stored.cloud/og.png"`)
 		assert.Contains(t, page, `name="twitter:card" content="summary_large_image"`)
 	}
 }

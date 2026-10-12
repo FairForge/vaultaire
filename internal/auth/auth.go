@@ -19,7 +19,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// User represents a stored.ge customer
+// User represents a Stored customer
 type User struct {
 	ID            string
 	Email         string

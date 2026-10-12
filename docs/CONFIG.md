@@ -66,11 +66,14 @@ read-but-undocumented (marked with their source file).
 | `DATA_PATH` | /tmp/vaultaire-data | Local storage directory for the always-registered `local` driver. `internal/api/management_routes.go` still defaults to `/tmp/vaultaire` — one of the two mismatches WP-R1-4 unifies |
 | `STORAGE_MODE` | auto-detect | Force the primary backend (`idrive`, `quotaless`, `s3`, `geyser`, `local`) |
 | `JWT_SECRET` | — | **Required** — JWT signing key for the JSON API and dashboard. The dashboard's CSRF key is derived from it (its own label, never the secret itself); rotating it makes every open dashboard page reload once |
-| `VAULTAIRE_ENDPOINT` | http://localhost:8000 | The public S3 endpoint echoed to customers (registration response, dashboard, credential download). Prod sets `https://stored.ge`. Read in `internal/auth/handlers.go` and `internal/api/server.go` (R1-09) |
-| `VAULTAIRE_BASE_URL` | http://localhost:8000 | Base URL for OAuth callbacks |
+| `VAULTAIRE_ENDPOINT` | the canonical origin | The public S3 endpoint echoed to customers (registration response, dashboard credentials page, OpenAPI, llms.txt, landing). Prod sets `https://stored.ge`; target `https://s3.stored.cloud`. Read once in `internal/hosts` |
+| `VAULTAIRE_BASE_URL` | the canonical origin | Base URL for OAuth callbacks and e-mail links; target prod `https://stored.cloud` |
+| `VAULTAIRE_PUBLIC_HOST` | `VAULTAIRE_BASE_URL`, else http://localhost:8000 | Canonical web + dashboard origin (WP-DOMAIN-1, F-17). `internal/hosts` is the one source of every host the code prints or matches; target prod `https://stored.cloud`. Malformed = Warn + default |
+| `VAULTAIRE_ALIAS_HOSTS` | — | Bare host names whose browser page views 301 to the canonical origin (`internal/api/host_canonical.go`; never an S3 request, never an `s3.*` host); target prod `stored.ge,www.stored.ge,www.stored.cloud` |
+| `CDN_PUBLIC_HOST` | `https://cdn.<canonical host>`, else the canonical origin + `/cdn/` | Public-read object origin; target prod `https://cdn.stored.cloud`, later the non-brand content domain. `cdn.stored.ge` keeps routing to the CDN forever |
 | `VERIFY_SECRET` | — | HMAC secret for email verification tokens |
 | `SIGNUPS_ENABLED` | true | Default for the `signups` feature flag (1.13): `false` closes public signups (web form, `/auth/register` API, OAuth signup — all gated at `auth.CreateUserWithTenant`); a `feature_flags` DB row overrides this env in either direction at runtime. Existing-user login always works |
-| `SECURITY_POLICY_URL` | https://stored.ge/legal/aup | `Policy:` line of `/.well-known/security.txt` (RFC 9116, 5.5.6); contact is fixed to security@stored.ge |
+| `SECURITY_POLICY_URL` | `<canonical origin>/legal/aup` | `Policy:` line of `/.well-known/security.txt` (RFC 9116, 5.5.6); the contact is `security@<canonical domain>` |
 | `ENCRYPTION_MASTER_KEY` | — | Master key (64 hex chars = 32 bytes) wrapping every tenant key version. Absent = encryption disabled (prod does not set it today). Sources, in order: the systemd credential `encryption_master_key` (prod, `docs/ENCRYPTION.md`), `ENCRYPTION_MASTER_KEY_FILE`, this variable; set but unusable = fatal boot |
 | `ENCRYPTION_MASTER_KEY_FILE` | — | A file holding the master key; `ENCRYPTION_MASTER_KEY_PREVIOUS_FILE` the same for a master re-key |
 | `TLS_CERT_PROBE_TARGETS` | — (off) | Comma-separated `sni@host:port` (or bare `sni` = `sni:443`) whose served leaf certificate expiry is exported as `vaultaire_tls_cert_expiry_timestamp_seconds{sni}` (hourly verified TLS handshake; an expired/mis-issued cert still reports via the x509 error's leaf). Prod points both public names at the local HAProxy = the origin LE cert. Rules: `deploy/monitoring/vaultaire-tls.yml` |
@@ -144,7 +147,7 @@ See `docs/DRIVERS.md` for what each driver does once registered.
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | — | Google OAuth client |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | — | GitHub OAuth App |
 | `EMAIL_PROVIDER` | (log) | `resend` or `smtp` selects a real sender; anything else (including unset — what prod runs today) is `LogSender`, which logs recipient, subject and body sizes only and sends nothing. `internal/email/email.go` (R1-09) |
-| `EMAIL_FROM` | noreply@stored.ge | From address for every sender |
+| `EMAIL_FROM` | `noreply@<canonical domain>` | From address for every sender (stored.cloud once `VAULTAIRE_PUBLIC_HOST` is set; SPF/DKIM/DMARC on that domain first) |
 | `RESEND_API_KEY` | — | Required with `EMAIL_PROVIDER=resend`; empty falls back to the log sender with a warning |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD` | — | Required (host + port) with `EMAIL_PROVIDER=smtp`; missing falls back to the log sender with a warning |
 

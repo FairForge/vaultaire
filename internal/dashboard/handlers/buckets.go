@@ -14,6 +14,7 @@ import (
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
+	"github.com/FairForge/vaultaire/internal/hosts"
 	"github.com/FairForge/vaultaire/internal/usage"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
@@ -243,7 +244,7 @@ func HandleBucketObjects(tmpl *template.Template, db *sql.DB, logger *zap.Logger
 			data["Visibility"] = vis
 			cdnBase := ""
 			if vis == "public-read" && slug != "" {
-				cdnBase = cdnBaseHost + slug + "/" + bucketName
+				cdnBase = hosts.Get().CDNBase() + slug + "/" + bucketName
 				data["CDNBaseURL"] = cdnBase
 			}
 			populateBucketObjects(r.Context(), db, sd.TenantID, bucketName, prefix, cdnBase, data)

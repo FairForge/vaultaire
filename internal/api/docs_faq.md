@@ -8,7 +8,7 @@ data across enterprise S3 (hot) and tape libraries (cold) based on access patter
 Anything that speaks S3 works: aws-cli, rclone, restic, boto3, JuiceFS, Cyberduck.
 
 **What's the endpoint and region?**
-Endpoint `https://stored.ge`, region `us-east-1`, path-style addressing. See
+Endpoint `__HOST_S3__`, region `us-east-1`, path-style addressing. See
 [Getting Started](/docs/getting-started).
 
 **Is there a free tier?**
@@ -147,5 +147,5 @@ The full list is the [OpenAPI spec](/openapi.json).
 ## Support
 
 **How do I get help?**
-Email [support@stored.ge](mailto:support@stored.ge) — founder-direct, target
+Email [__SUPPORT_EMAIL__](mailto:__SUPPORT_EMAIL__) — founder-direct, target
 response under 4 hours. For abuse reports, see [/abuse](/abuse).
