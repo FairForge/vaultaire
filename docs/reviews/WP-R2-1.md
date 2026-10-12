@@ -334,7 +334,39 @@ session, SQL from a file:
 - No `storage_key` columns, no `retired_blobs` (086 not yet applied).
 - Longest object key: 60 bytes; longest leaf: 32 bytes.
 
-**After the deploy:** appended below by the deploy check.
+**After the deploy** (#684 merged as `1f24e5a`; `/version` = `1f24e5a7394f`,
+built 15:24:10 UTC, active slot 8001; checked 15:26 UTC):
+
+- `object_head_cache`: 5,421 rows, **0** with a `storage_key`.
+- `object_versions`: 205,604 rows, **0** with a `storage_key`, **0** with an
+  `encryption_algorithm`.
+- `smart_demotions` with a `storage_key`: **0**.
+- `retired_blobs` depth: **0**.
+- `/health` 200, three in a row (`degraded` as before: the 11 iDrive criticals,
+  untouched).
+- Errors since the switch: the three routing-truth boot findings every boot
+  logs (WP-R7-5 rows, WP-R6-1). Nothing about storage keys or retirement.
+- Canary: the iDrive regional probes keep failing as before. Primary `lyve`.
+- `routing_truth`, `smart_demotion` and `vault_parity` jobs: last outcome `ok`.
+
+The head rows fell from 7,488 to 5,421 between the two snapshots. The cause is
+one tenant's own churn, not this deploy:
+
+- `tenant-14a623b16b3f7012` logged 10,049 `object.created`, 10,388
+  `object.deleted` and 8 `bucket.deleted` events between 14:26 and 15:17 UTC.
+- That window ended before this build served (15:24).
+
+**Not shown:**
+
+- **No synthetic check runs on prod.** `SYNTHETIC_CHECK_URL` is not in the
+  prod `.env`, and the active slot exports no `vaultaire_synthetic_check_*`
+  series. "Synthetic green through the switch" cannot be claimed from prod. It
+  stays a [YOU] row (R13-13 checklist item 4).
+- The two-slot switch completed: `/version` moved to the new sha and `/health`
+  stayed 200.
+
+Nothing changes for any customer: every address column is NULL, so every
+reader resolves `<key>` exactly as before.
 
 ## Decisions (to report; not built here)
 
@@ -422,7 +454,10 @@ Recommendation for 2C:
 
 ## [YOU]
 
-Nothing for this half: it ships inert.
+- Nothing to switch for this half: it ships inert.
+- The prod synthetic check is not configured (`SYNTHETIC_CHECK_URL` and its
+  tenant/keys). It is the customer-path signal 2C's deploy should be watched
+  with.
 
 ---
 
