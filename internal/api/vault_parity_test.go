@@ -411,7 +411,7 @@ func TestVaultParity_OpenRebuildsTheObjectWhenGeyserIsGone(t *testing.T) {
 	f.geyser.failRange.Store(true)
 	ctx := context.Background()
 
-	rc, err := f.svc.Open(ctx, f.tenantID, f.bucket, "films/six.mkv", etag, int64(size), 0, int64(size))
+	rc, err := f.svc.Open(ctx, f.tenantID, f.bucket, "films/six.mkv", "", etag, int64(size), 0, int64(size))
 	require.NoError(t, err)
 	got, err := io.ReadAll(rc)
 	require.NoError(t, err)
@@ -420,7 +420,7 @@ func TestVaultParity_OpenRebuildsTheObjectWhenGeyserIsGone(t *testing.T) {
 	assert.Equal(t, int32(0), f.geyser.rangeGets.Load(), "tape was never asked")
 
 	// A window.
-	rc, err = f.svc.Open(ctx, f.tenantID, f.bucket, "films/six.mkv", etag, int64(size), 300_000, 500_000)
+	rc, err = f.svc.Open(ctx, f.tenantID, f.bucket, "films/six.mkv", "", etag, int64(size), 300_000, 500_000)
 	require.NoError(t, err)
 	got, err = io.ReadAll(rc)
 	require.NoError(t, err)
@@ -428,11 +428,11 @@ func TestVaultParity_OpenRebuildsTheObjectWhenGeyserIsGone(t *testing.T) {
 	assert.True(t, bytes.Equal(body[300_000:800_000], got))
 
 	// The row is bound to the etag it was computed from.
-	_, err = f.svc.Open(ctx, f.tenantID, f.bucket, "films/six.mkv", "someotheretag", int64(size), 0, int64(size))
+	_, err = f.svc.Open(ctx, f.tenantID, f.bucket, "films/six.mkv", "", "someotheretag", int64(size), 0, int64(size))
 	assert.True(t, errors.Is(err, errParityUnavailable), "got %v", err)
 	// And to the flag.
 	f.svc.flags = stubFlags{on: map[string]bool{}}
-	_, err = f.svc.Open(ctx, f.tenantID, f.bucket, "films/six.mkv", etag, int64(size), 0, int64(size))
+	_, err = f.svc.Open(ctx, f.tenantID, f.bucket, "films/six.mkv", "", etag, int64(size), 0, int64(size))
 	assert.True(t, errors.Is(err, errParityUnavailable), "got %v", err)
 }
 
@@ -447,7 +447,7 @@ func TestVaultParity_OpenUsesTheDataRangesThatAreReadableWhenAShardIsGone(t *tes
 	require.NoError(t, os.Remove(filepath.Join(f.legDir, parityContainer(f.tenantID), shardArtifact(prefix, 1))))
 	f.geyser.failGet.Store(true)
 
-	rc, err := f.svc.Open(context.Background(), f.tenantID, f.bucket, "films/seven.mkv", etag, int64(size), 0, int64(size))
+	rc, err := f.svc.Open(context.Background(), f.tenantID, f.bucket, "films/seven.mkv", "", etag, int64(size), 0, int64(size))
 	require.NoError(t, err)
 	got, err := io.ReadAll(rc)
 	require.NoError(t, err)
@@ -458,7 +458,7 @@ func TestVaultParity_OpenUsesTheDataRangesThatAreReadableWhenAShardIsGone(t *tes
 
 	// Ranges down too: the read fails, it does not serve zeros.
 	f.geyser.failRange.Store(true)
-	rc, err = f.svc.Open(context.Background(), f.tenantID, f.bucket, "films/seven.mkv", etag, int64(size), 0, int64(size))
+	rc, err = f.svc.Open(context.Background(), f.tenantID, f.bucket, "films/seven.mkv", "", etag, int64(size), 0, int64(size))
 	require.NoError(t, err, "Open plans; the shortfall shows on read")
 	_, err = io.ReadAll(rc)
 	require.Error(t, err)

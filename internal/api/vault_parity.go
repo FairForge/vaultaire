@@ -491,6 +491,7 @@ type parityCandidate struct {
 	tenantID, bucket, key, etag string
 	size                        int64
 	chunked                     bool
+	storageKey                  string // the row's blob address ("" = the key, WP-R2-1)
 	// rowAt is the row's updated_at as this protect wrote it: its finish
 	// records the outcome only on a row nothing touched since (Prompt 2b.2
 	// C4 — a delete marks the row and erases shards meanwhile).
@@ -677,7 +678,7 @@ func (p *VaultParity) protectCandidates(ctx context.Context, res *VaultParityRes
 	)
 	for n := 0; n < vaultParityCandidatePages && len(cands) < p.MaxObjectsPerRun; n++ {
 		rows, err := p.db.QueryContext(ctx, `
-			SELECT o.tenant_id, o.bucket, o.object_key, o.etag, o.size_bytes, o.is_chunked, o.updated_at`+unprotectedFrom+`
+			SELECT o.tenant_id, o.bucket, o.object_key, o.etag, o.size_bytes, o.is_chunked, o.updated_at, COALESCE(o.storage_key, '')`+unprotectedFrom+`
 			  AND (v.tenant_id IS NULL OR v.etag <> o.etag OR v.attempts < $2)
 			  AND ($3::BIGINT < 0 OR o.size_bytes <= $3::BIGINT)
 			  AND ($4::BOOLEAN OR (o.updated_at, o.tenant_id, o.bucket, o.object_key) > ($5::TIMESTAMPTZ, $6::TEXT, $7::TEXT, $8::TEXT))
@@ -689,7 +690,7 @@ func (p *VaultParity) protectCandidates(ctx context.Context, res *VaultParityRes
 		read := 0
 		for rows.Next() {
 			var c parityCandidate
-			if err := rows.Scan(&c.tenantID, &c.bucket, &c.key, &c.etag, &c.size, &c.chunked, &curAt); err != nil {
+			if err := rows.Scan(&c.tenantID, &c.bucket, &c.key, &c.etag, &c.size, &c.chunked, &curAt, &c.storageKey); err != nil {
 				_ = rows.Close()
 				return nil, fmt.Errorf("vault parity: scan candidate: %w", err)
 			}
@@ -828,7 +829,8 @@ func (p *VaultParity) protect(ctx context.Context, c parityCandidate) (state str
 
 	// Sized like every read of an object (Prompt 2b.2 C3): a backend that
 	// can hold two versions of a key serves the one of the row's size.
-	src, err := p.eng.Get(engine.WithExpectedSize(tctx, c.size), (&tenant.Tenant{ID: c.tenantID}).NamespaceContainer(c.bucket), c.key)
+	srcContainer, srcBlob := objectBlobAddress(c.tenantID, c.bucket, c.key, c.storageKey)
+	src, err := p.eng.Get(engine.WithExpectedSize(tctx, c.size), srcContainer, srcBlob)
 	if err != nil {
 		// Nothing was written, but the row keeps naming every shard: an
 		// earlier attempt's shards at this prefix were kept for this write
@@ -1181,8 +1183,9 @@ func (p *VaultParity) EraseTenant(ctx context.Context, tenantID string) (int, er
 // must be complete for this etag and size, the flag on for the tenant, the
 // leg registered. Parity shards are read as streams from the leg (a range
 // of each when the leg can); a data piece the parity cannot replace is a
-// range of the object from its own backend. Nil-safe.
-func (p *VaultParity) Open(ctx context.Context, tenantID, bucket, key, etag string, size, off, n int64) (io.ReadCloser, error) {
+// range of the object from its own backend, read at blob — the artifact the
+// object's row addresses (WP-R2-1). Nil-safe.
+func (p *VaultParity) Open(ctx context.Context, tenantID, bucket, key, blob, etag string, size, off, n int64) (io.ReadCloser, error) {
 	if p == nil {
 		return nil, errParityUnavailable
 	}
@@ -1223,18 +1226,18 @@ func (p *VaultParity) Open(ctx context.Context, tenantID, bucket, key, etag stri
 		if !ok || status[legName] == engine.StateOpen.String() {
 			continue
 		}
-		artifact := shardArtifact(r.prefix, j)
+		shard := shardArtifact(r.prefix, j)
 		var rc io.ReadCloser
 		var oerr error
 		if rg, isRange := drv.(engine.RangeGetter); isRange && (firstStripe > 0 || lastStripe < l.stripes()) {
-			rc, oerr = rg.GetRange(tctx, container, artifact, firstStripe*int64(l.stripe), (lastStripe-firstStripe)*int64(l.stripe))
+			rc, oerr = rg.GetRange(tctx, container, shard, firstStripe*int64(l.stripe), (lastStripe-firstStripe)*int64(l.stripe))
 			if oerr == nil {
 				// The rebuilder skips to the first stripe itself; a ranged
 				// stream already starts there.
 				rc = &offsetAdjusted{ReadCloser: rc, pad: firstStripe * int64(l.stripe)}
 			}
 		} else {
-			rc, oerr = drv.Get(tctx, container, artifact)
+			rc, oerr = drv.Get(tctx, container, shard)
 		}
 		if oerr != nil {
 			p.logger.Warn("vault parity: shard unreadable", zap.Int("shard", j), zap.String("leg", legName), zap.Error(oerr))
@@ -1244,13 +1247,16 @@ func (p *VaultParity) Open(ctx context.Context, tenantID, bucket, key, etag stri
 		opened++
 	}
 	objContainer := (&tenant.Tenant{ID: tenantID}).NamespaceContainer(bucket)
+	if blob == "" {
+		blob = key
+	}
 	dataPiece := func(ctx context.Context, stripe int64, shard int) ([]byte, error) {
 		piece := make([]byte, l.stripe)
 		o, m := l.dataPieceRange(stripe, shard)
 		if m == 0 {
 			return piece, nil
 		}
-		rc, err := p.eng.GetRange(engine.WithExpectedSize(common.WithTenantID(ctx, tenantID), size), objContainer, key, o, m)
+		rc, err := p.eng.GetRange(engine.WithExpectedSize(common.WithTenantID(ctx, tenantID), size), objContainer, blob, o, m)
 		if err != nil {
 			return nil, err
 		}

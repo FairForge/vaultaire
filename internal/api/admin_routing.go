@@ -174,7 +174,7 @@ func (s *Server) handleAdminRoutingTruthResolveNull(w http.ResponseWriter, r *ht
 // resolveNull is the work of the handler above.
 func (c *RoutingTruthChecker) resolveNull(ctx context.Context, dry bool, limit int) (resolveNullResult, error) {
 	res := resolveNullResult{DryRun: dry, ByBackend: map[string]int{}, Details: []resolveNullRow{}}
-	rows, err := c.db.QueryContext(ctx, `SELECT tenant_id, bucket, object_key, COALESCE(etag, '') FROM object_head_cache
+	rows, err := c.db.QueryContext(ctx, `SELECT tenant_id, bucket, object_key, COALESCE(etag, ''), COALESCE(storage_key, '') FROM object_head_cache
 		WHERE backend_name IS NULL AND NOT is_chunked AND ($1 = '' OR tenant_id = $1)
 		ORDER BY tenant_id, bucket, object_key LIMIT $2`, c.scopeTenant, limit)
 	if err != nil {
@@ -183,7 +183,7 @@ func (c *RoutingTruthChecker) resolveNull(ctx context.Context, dry bool, limit i
 	var refs []headRef
 	for rows.Next() {
 		var h headRef
-		if err := rows.Scan(&h.tenantID, &h.bucket, &h.key, &h.etag); err != nil {
+		if err := rows.Scan(&h.tenantID, &h.bucket, &h.key, &h.etag, &h.storageKey); err != nil {
 			_ = rows.Close()
 			return res, err
 		}
@@ -202,7 +202,8 @@ func (c *RoutingTruthChecker) resolveNull(ctx context.Context, dry bool, limit i
 		}
 		res.Rows++
 		d := resolveNullRow{Tenant: h.tenantID, Bucket: h.bucket, Key: h.key, Holders: []string{}}
-		container := h.tenantID + "_" + h.bucket
+		// Every driver is asked for the row's address (WP-R2-1).
+		container, blob := objectBlobAddress(h.tenantID, h.bucket, h.key, h.storageKey)
 		for _, b := range backends {
 			if st := c.eng.GetFailoverStatus()[b]; st == engine.StateOpen.String() {
 				d.Verdict, d.ErrorMsg = "error", "circuit breaker open on "+b
@@ -217,7 +218,7 @@ func (c *RoutingTruthChecker) resolveNull(ctx context.Context, dry bool, limit i
 				continue
 			}
 			cctx, cancel := context.WithTimeout(common.WithTenantID(ctx, h.tenantID), routingExistsTimeout)
-			ok, eErr := drv.Exists(cctx, container, h.key)
+			ok, eErr := drv.Exists(cctx, container, blob)
 			cancel()
 			if eErr != nil {
 				d.Verdict, d.ErrorMsg = "error", b+": "+eErr.Error()
@@ -242,8 +243,9 @@ func (c *RoutingTruthChecker) resolveNull(ctx context.Context, dry bool, limit i
 			res.ByBackend[d.Holders[0]]++
 			if !dry {
 				n, wErr := c.db.ExecContext(ctx, `UPDATE object_head_cache SET backend_name = $1
-					WHERE tenant_id = $2 AND bucket = $3 AND object_key = $4 AND backend_name IS NULL AND COALESCE(etag, '') = $5`,
-					d.Holders[0], h.tenantID, h.bucket, h.key, h.etag)
+					WHERE tenant_id = $2 AND bucket = $3 AND object_key = $4 AND backend_name IS NULL AND COALESCE(etag, '') = $5
+					  AND COALESCE(storage_key, '') = $6`,
+					d.Holders[0], h.tenantID, h.bucket, h.key, h.etag, h.storageKey)
 				if wErr != nil {
 					d.Verdict, d.ErrorMsg = "error", "write: "+wErr.Error()
 					res.Resolved--

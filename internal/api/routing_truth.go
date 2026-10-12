@@ -142,6 +142,7 @@ func NewRoutingTruthChecker(db *sql.DB, eng *engine.CoreEngine, gci *crypto.Glob
 // headRef names one whole-object head row.
 type headRef struct {
 	tenantID, bucket, key, etag string
+	storageKey                  string // the row's blob address ("" = the key, WP-R2-1)
 }
 
 // --- the result ---------------------------------------------------------------
@@ -406,7 +407,7 @@ func (c *RoutingTruthChecker) sampleBackend(ctx context.Context, backend string,
 	if bt.Rows > int64(n) {
 		offset = rand.Int64N(bt.Rows - int64(n) + 1) // #nosec G404 — a sampling window, not a secret
 	}
-	rows, err := c.db.QueryContext(ctx, `SELECT tenant_id, bucket, object_key, COALESCE(etag, '') FROM object_head_cache
+	rows, err := c.db.QueryContext(ctx, `SELECT tenant_id, bucket, object_key, COALESCE(etag, ''), COALESCE(storage_key, '') FROM object_head_cache
 		WHERE backend_name = $1 AND NOT is_chunked AND ($2 = '' OR tenant_id = $2)
 		ORDER BY tenant_id, bucket, object_key OFFSET $3 LIMIT $4`, backend, c.scopeTenant, offset, n)
 	if err != nil {
@@ -415,7 +416,7 @@ func (c *RoutingTruthChecker) sampleBackend(ctx context.Context, backend string,
 	var refs []headRef
 	for rows.Next() {
 		var h headRef
-		if err := rows.Scan(&h.tenantID, &h.bucket, &h.key, &h.etag); err != nil {
+		if err := rows.Scan(&h.tenantID, &h.bucket, &h.key, &h.etag, &h.storageKey); err != nil {
 			_ = rows.Close()
 			return fmt.Errorf("routing truth: scan %s: %w", backend, err)
 		}
@@ -478,7 +479,8 @@ func (c *RoutingTruthChecker) sampleSize(backend string) int {
 }
 
 // checkWhole asks the recorded backend, with the row's tenant in the
-// context, whether the object's bytes are there.
+// context, whether the object's bytes are there — at the row's address
+// (storage_key, WP-R2-1; the key when it records none).
 //
 // The driver is called directly, not through the engine's failover: the job
 // OBSERVES the backend's circuit breaker (an open one skips the backend) but
@@ -497,8 +499,8 @@ func (c *RoutingTruthChecker) checkWhole(ctx context.Context, backend string, h 
 	}
 	cctx, cancel := context.WithTimeout(common.WithTenantID(ctx, h.tenantID), routingExistsTimeout)
 	defer cancel()
-	container := h.tenantID + "_" + h.bucket
-	ok, err := d.Exists(cctx, container, h.key)
+	container, blob := objectBlobAddress(h.tenantID, h.bucket, h.key, h.storageKey)
+	ok, err := d.Exists(cctx, container, blob)
 	if err != nil {
 		c.logger.Warn("routing truth: backend could not be asked", zap.String("backend", backend),
 			zap.String("tenant_id", h.tenantID), zap.String("bucket", h.bucket), zap.String("key", h.key), zap.Error(err))
@@ -511,8 +513,9 @@ func (c *RoutingTruthChecker) checkWhole(ctx context.Context, backend string, h 
 	// delete or an erasure that landed meanwhile is not drift.
 	var one int
 	rerr := c.db.QueryRowContext(ctx, `SELECT 1 FROM object_head_cache
-		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND backend_name = $4 AND COALESCE(etag, '') = $5 AND NOT is_chunked`,
-		h.tenantID, h.bucket, h.key, backend, h.etag).Scan(&one)
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND backend_name = $4 AND COALESCE(etag, '') = $5 AND NOT is_chunked
+		  AND COALESCE(storage_key, '') = $6`,
+		h.tenantID, h.bucket, h.key, backend, h.etag, h.storageKey).Scan(&one)
 	if errors.Is(rerr, sql.ErrNoRows) {
 		return "changed"
 	}

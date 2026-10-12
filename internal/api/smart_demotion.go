@@ -119,6 +119,7 @@ type demotionCandidate struct {
 	bucket, key, etag string
 	size              int64
 	reason            string
+	storageKey        string // the row's blob address ("" = the key, WP-R2-1)
 }
 
 // NewSmartDemotionRunner builds the runner; nil when there is no DB or engine.
@@ -352,7 +353,7 @@ func (r *SmartDemotionRunner) planTenant(ctx context.Context, tenantID string, q
 
 	var cands []demotionCandidate
 	idleRows, err := r.db.QueryContext(ctx,
-		`SELECT o.bucket, o.object_key, o.etag, o.size_bytes `+eligible+
+		`SELECT o.bucket, o.object_key, o.etag, o.size_bytes, COALESCE(o.storage_key, '') `+eligible+
 			` AND o.last_accessed < $4 ORDER BY o.last_accessed ASC LIMIT $5`,
 		tenantID, r.HotBackend, ageCutoff, idleCutoff, r.MaxObjectsPerTenant)
 	if err != nil {
@@ -361,7 +362,7 @@ func (r *SmartDemotionRunner) planTenant(ctx context.Context, tenantID string, q
 	var idleBytes int64
 	for idleRows.Next() {
 		var c demotionCandidate
-		if err := idleRows.Scan(&c.bucket, &c.key, &c.etag, &c.size); err != nil {
+		if err := idleRows.Scan(&c.bucket, &c.key, &c.etag, &c.size, &c.storageKey); err != nil {
 			_ = idleRows.Close()
 			return stats, nil, fmt.Errorf("scan idle: %w", err)
 		}
@@ -378,7 +379,7 @@ func (r *SmartDemotionRunner) planTenant(ctx context.Context, tenantID string, q
 	remaining := stats.HotBytesBefore - idleBytes - stats.HotBudgetBytes
 	if remaining > 0 && len(cands) < r.MaxObjectsPerTenant {
 		lruRows, err := r.db.QueryContext(ctx,
-			`SELECT o.bucket, o.object_key, o.etag, o.size_bytes `+eligible+
+			`SELECT o.bucket, o.object_key, o.etag, o.size_bytes, COALESCE(o.storage_key, '') `+eligible+
 				` AND o.last_accessed >= $4 ORDER BY o.last_accessed ASC LIMIT $5`,
 			tenantID, r.HotBackend, ageCutoff, idleCutoff, r.MaxObjectsPerTenant-len(cands))
 		if err != nil {
@@ -386,7 +387,7 @@ func (r *SmartDemotionRunner) planTenant(ctx context.Context, tenantID string, q
 		}
 		for lruRows.Next() && remaining > 0 {
 			var c demotionCandidate
-			if err := lruRows.Scan(&c.bucket, &c.key, &c.etag, &c.size); err != nil {
+			if err := lruRows.Scan(&c.bucket, &c.key, &c.etag, &c.size, &c.storageKey); err != nil {
 				_ = lruRows.Close()
 				return stats, nil, fmt.Errorf("scan lru: %w", err)
 			}
@@ -407,13 +408,15 @@ func (r *SmartDemotionRunner) planTenant(ctx context.Context, tenantID string, q
 // Returns (false, nil) when the object changed during the copy.
 func (r *SmartDemotionRunner) demote(ctx context.Context, hot, cold engine.Driver, tenantID string, c demotionCandidate) (bool, error) {
 	tctx := common.WithTenantID(ctx, tenantID) // drivers key blobs by tenant from ctx
-	container := tenantID + "_" + c.bucket     // engine container = tenant.NamespaceContainer(bucket)
+	// The cold copy is written under the SAME address the hot one is at (the
+	// row's storage_key, WP-R2-1): a demotion moves bytes, never renames.
+	container, blob := objectBlobAddress(tenantID, c.bucket, c.key, c.storageKey)
 
-	rc, err := hot.Get(tctx, container, c.key)
+	rc, err := hot.Get(tctx, container, blob)
 	if err != nil {
 		return false, fmt.Errorf("read hot: %w", err)
 	}
-	putErr := cold.Put(tctx, container, c.key, rc, engine.WithContentLength(c.size))
+	putErr := cold.Put(tctx, container, blob, rc, engine.WithContentLength(c.size))
 	_ = rc.Close()
 	if putErr != nil {
 		return false, fmt.Errorf("write cold: %w", putErr)
@@ -431,8 +434,8 @@ func (r *SmartDemotionRunner) demote(ctx context.Context, hot, cold engine.Drive
 	upd, err := tx.ExecContext(ctx,
 		`UPDATE object_head_cache SET backend_name = $1
 		 WHERE tenant_id = $2 AND bucket = $3 AND object_key = $4
-		   AND backend_name = $5 AND etag = $6 AND NOT is_chunked`,
-		r.ColdBackend, tenantID, c.bucket, c.key, r.HotBackend, c.etag)
+		   AND backend_name = $5 AND etag = $6 AND NOT is_chunked AND COALESCE(storage_key, '') = $7`,
+		r.ColdBackend, tenantID, c.bucket, c.key, r.HotBackend, c.etag, c.storageKey)
 	if err != nil {
 		return false, fmt.Errorf("flip routing: %w", err)
 	}
@@ -443,10 +446,10 @@ func (r *SmartDemotionRunner) demote(ctx context.Context, hot, cold engine.Drive
 		// an archive storage class) — then the blob there is theirs. An
 		// object DELETED during the copy has no row at all: the copy is
 		// garbage too (it used to stay on tape, WP-R13-2).
-		var cur string
-		qerr := r.db.QueryRowContext(ctx, `SELECT COALESCE(backend_name,'') FROM object_head_cache WHERE tenant_id=$1 AND bucket=$2 AND object_key=$3`, tenantID, c.bucket, c.key).Scan(&cur)
-		if errors.Is(qerr, sql.ErrNoRows) || (qerr == nil && cur != r.ColdBackend) {
-			if delErr := cold.Delete(tctx, container, c.key); delErr != nil && !isObjectMissingErr(delErr) {
+		var cur, curKey string
+		qerr := r.db.QueryRowContext(ctx, `SELECT COALESCE(backend_name,''), COALESCE(storage_key,'') FROM object_head_cache WHERE tenant_id=$1 AND bucket=$2 AND object_key=$3`, tenantID, c.bucket, c.key).Scan(&cur, &curKey)
+		if errors.Is(qerr, sql.ErrNoRows) || (qerr == nil && (cur != r.ColdBackend || blobArtifact(c.key, curKey) != blob)) {
+			if delErr := cold.Delete(tctx, container, blob); delErr != nil && !isObjectMissingErr(delErr) {
 				r.logger.Warn("smart demotion: stale cold copy not removed",
 					zap.String("tenant", tenantID), zap.String("bucket", c.bucket), zap.String("key", c.key), zap.Error(delErr))
 			}
@@ -454,13 +457,14 @@ func (r *SmartDemotionRunner) demote(ctx context.Context, hot, cold engine.Drive
 		return false, nil
 	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO smart_demotions (tenant_id, bucket, object_key, etag, size_bytes, hot_backend, cold_backend, reason, demoted_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+		`INSERT INTO smart_demotions (tenant_id, bucket, object_key, etag, size_bytes, hot_backend, cold_backend, reason, demoted_at, storage_key)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10, ''))
 		 ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
 		   etag = EXCLUDED.etag, size_bytes = EXCLUDED.size_bytes, hot_backend = EXCLUDED.hot_backend,
 		   cold_backend = EXCLUDED.cold_backend, reason = EXCLUDED.reason, demoted_at = EXCLUDED.demoted_at,
+		   storage_key = EXCLUDED.storage_key,
 		   hot_deleted_at = NULL, hot_outcome = '', promote_requested_at = NULL, restore_requested_at = NULL`,
-		tenantID, c.bucket, c.key, c.etag, c.size, r.HotBackend, r.ColdBackend, c.reason, r.now()); err != nil {
+		tenantID, c.bucket, c.key, c.etag, c.size, r.HotBackend, r.ColdBackend, c.reason, r.now(), c.storageKey); err != nil {
 		return false, fmt.Errorf("ledger: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -469,7 +473,7 @@ func (r *SmartDemotionRunner) demote(ctx context.Context, hot, cold engine.Drive
 
 	// Keep the engine's in-memory routing map consistent for this process;
 	// other processes/restarts read backend_name from the head cache on GET.
-	r.eng.HintBackend(container, c.key, r.ColdBackend)
+	r.eng.HintBackend(container, blob, r.ColdBackend)
 	r.logger.Info("smart demotion: object demoted",
 		zap.String("tenant", tenantID), zap.String("bucket", c.bucket), zap.String("key", c.key),
 		zap.Int64("bytes", c.size), zap.String("reason", c.reason))

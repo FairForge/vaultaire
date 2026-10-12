@@ -78,6 +78,8 @@ var exportExcludedTables = map[string]string{
 	"sts_tokens":             "temporary credentials (secret_key); expire within hours",
 	"tenant_encryption_keys": "key material (read by nothing since 084)",
 	"tenant_key_versions":    "key material (wrapped tenant keys, WP-R8-1)",
+	// storage bookkeeping
+	"retired_blobs": "addresses of displaced object blobs awaiting deletion (WP-R2-1): storage bookkeeping, not the customer's data; the objects themselves are in `objects`",
 	// scaffolding with no writer in the product (D-12)
 	"artifacts":                    "no writer (D-12 scaffolding)",
 	"billing_charges":              "no writer (D-12 scaffolding)",

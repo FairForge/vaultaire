@@ -71,6 +71,9 @@ type displacedRow struct {
 	Floor   string
 	Backend string // backend_name of the displaced row ("" when new/unknown) — the hint for its stale blob (R8-20)
 	Chunked bool   // the displaced row was a chunked object: no whole blob lives at its key
+	// StorageKey is the displaced row's blob address ("" = <key>, WP-R2-1):
+	// where its whole blob is, when it is not at the key.
+	StorageKey string
 }
 
 // settlePutQuota reconciles a successful write's up-front reservation
@@ -205,10 +208,10 @@ func atomicHeadUpsertReleasing(ctx context.Context, db *sql.DB, gci chunkManifes
 	var displaced displacedRow
 	var displacedChunked bool
 	err = tx.QueryRowContext(ctx, `
-		SELECT size_bytes, floor, COALESCE(backend_name, ''), is_chunked FROM object_head_cache
+		SELECT size_bytes, floor, COALESCE(backend_name, ''), is_chunked, COALESCE(storage_key, '') FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
 		FOR UPDATE`,
-		tenantID, bucket, key).Scan(&displaced.Size, &displaced.Floor, &displaced.Backend, &displacedChunked)
+		tenantID, bucket, key).Scan(&displaced.Size, &displaced.Floor, &displaced.Backend, &displacedChunked, &displaced.StorageKey)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return displacedRow{}, fmt.Errorf("lock head-cache row: %w", err)
 	}
@@ -222,6 +225,21 @@ func atomicHeadUpsertReleasing(ctx context.Context, db *sql.DB, gci chunkManifes
 
 	if err := upsert(tx); err != nil {
 		return displacedRow{}, fmt.Errorf("upsert head-cache row: %w", err)
+	}
+	// WP-R2-1 (2B): every writer of this build puts its bytes in place at
+	// <key>, so the row it leaves has no storage key — whatever a 2C slot
+	// recorded on the row it replaced (the two-slot window). The blob that
+	// row named is displaced: queued for the collector, unless a version row
+	// keeps it. 2C turns this into the writer's own address.
+	if displaced.StorageKey != "" {
+		if _, err := tx.ExecContext(ctx, `UPDATE object_head_cache SET storage_key = NULL
+			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`, tenantID, bucket, key); err != nil {
+			return displacedRow{}, fmt.Errorf("clear the displaced storage key: %w", err)
+		}
+		if err := retireBlob(ctx, tx, tenantID, bucket, key, displaced.StorageKey, displaced.Backend, retiredOverwritten); err != nil &&
+			!errors.Is(err, errUnaddressableBlob) {
+			return displacedRow{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return displacedRow{}, fmt.Errorf("commit head-cache upsert: %w", err)
@@ -253,8 +271,8 @@ func deleteHeadRowReleasing(ctx context.Context, db *sql.DB, gci chunkManifestRe
 	err = tx.QueryRowContext(ctx, `
 		DELETE FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
-		RETURNING size_bytes, floor, COALESCE(backend_name, ''), is_chunked`,
-		tenantID, bucket, key).Scan(&row.Size, &row.Floor, &row.Backend, &chunked)
+		RETURNING size_bytes, floor, COALESCE(backend_name, ''), is_chunked, COALESCE(storage_key, '')`,
+		tenantID, bucket, key).Scan(&row.Size, &row.Floor, &row.Backend, &chunked, &row.StorageKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		return displacedRow{}, false, nil
 	}

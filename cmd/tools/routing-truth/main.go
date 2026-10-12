@@ -247,7 +247,8 @@ func probe(ctx context.Context, db *sql.DB, d engine.Driver, c class, n int) (pr
 	if c.backend == "" {
 		b = nil
 	}
-	rows, err := db.QueryContext(ctx, `SELECT tenant_id, bucket, object_key FROM object_head_cache
+	// The row's address (WP-R2-1): storage_key, else the key.
+	rows, err := db.QueryContext(ctx, `SELECT tenant_id, bucket, COALESCE(storage_key, object_key) FROM object_head_cache
 		WHERE tenant_id = $1 AND NOT is_chunked AND ($2::text IS NULL AND backend_name IS NULL OR backend_name = $2::text)
 		ORDER BY random() LIMIT $3`, c.tenant, b, n) // #nosec G404 — a sample
 	if err != nil {

@@ -453,18 +453,19 @@ func (s *AccountExportService) deleteExportObject(ctx context.Context, tenantID,
 	t := &tenant.Tenant{ID: tenantID}
 	container := t.NamespaceContainer(tenant.ExportsBucket)
 	tctx := common.WithTenantID(ctx, tenantID)
-	var backend string
-	err := s.db.QueryRowContext(tctx, `SELECT COALESCE(backend_name, '') FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-		tenantID, tenant.ExportsBucket, key).Scan(&backend)
+	var backend, storageKey string
+	err := s.db.QueryRowContext(tctx, `SELECT COALESCE(backend_name, ''), COALESCE(storage_key, '') FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+		tenantID, tenant.ExportsBucket, key).Scan(&backend, &storageKey)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		s.logger.Error("account export: read head row", zap.String("tenant_id", tenantID), zap.Error(err))
 	}
+	blob := blobArtifact(key, storageKey) // the row's address (WP-R2-1)
 	if backend != "" {
 		if ce, ok := s.eng.(*engine.CoreEngine); ok {
-			ce.HintBackend(container, key, backend)
+			ce.HintBackend(container, blob, backend)
 		}
 	}
-	if err := s.eng.Delete(tctx, container, key); err != nil && !isObjectMissingErr(err) {
+	if err := s.eng.Delete(tctx, container, blob); err != nil && !isObjectMissingErr(err) {
 		s.logger.Error("account export: delete object", zap.String("tenant_id", tenantID), zap.String("key", key), zap.Error(err))
 	}
 	row, found, err := deleteHeadRowReleasing(tctx, s.db, manifestReleaser(s.gci), tenantID, tenant.ExportsBucket, key)
