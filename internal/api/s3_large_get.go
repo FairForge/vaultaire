@@ -174,7 +174,7 @@ const (
 // (or gone): a real miss, the body is cut as before.
 var chunkedGetRereads = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "vaultaire_chunked_get_rereads_total",
-	Help: "Chunked GETs whose resolved chunk address answered not-found and re-read the chunk's index row once: moved (the row named a new blob, the read continued there) | missing (nothing changed: a real miss, the body is cut).",
+	Help: "Chunked GETs whose resolved chunk address answered not-found and re-read the chunk's index row once: moved (the row named a new blob, the read continued there) | missing (the row is unchanged, gone or could not be read: the miss stands, the body is cut).",
 }, []string{"outcome"})
 
 const (

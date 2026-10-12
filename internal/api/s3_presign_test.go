@@ -381,6 +381,9 @@ func TestPresignedURL_Integration(t *testing.T) {
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery(`SELECT versioning_status FROM buckets`).
 		WillReturnError(sql.ErrNoRows)
+	// WP-R8-1 A1: whether the bucket requires encryption, read strictly once.
+	mock.ExpectQuery(`SELECT sse_enabled FROM buckets`).
+		WillReturnError(sql.ErrNoRows)
 	mock.ExpectBegin()
 	// R15-17: writers of one key serialise on a per-key advisory lock BEFORE
 	// the probe (a missing row cannot be FOR UPDATE-locked).
