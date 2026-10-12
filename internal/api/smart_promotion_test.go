@@ -118,7 +118,7 @@ func TestSmartPromotion_NotDemotedObjectsUntouched(t *testing.T) {
 	assert.Equal(t, "geyser", p.OnRead(context.Background(), f.tenantID, "vault", "archive.bin", "etag-vault-archive.bin"))
 	_, err := f.db.Exec(`UPDATE object_head_cache SET floor = 'vault' WHERE tenant_id = $1 AND object_key = 'archive.bin'`, f.tenantID)
 	require.NoError(t, err)
-	assert.Equal(t, archivedNotSmart, p.OnArchivedRead(context.Background(), f.tenantID, "vault", "archive.bin", usage.FloorVault), "Vault keeps Glacier semantics")
+	assert.Equal(t, archivedNotSmart, p.OnArchivedRead(context.Background(), f.tenantID, "vault", "archive.bin", "archive.bin", usage.FloorVault), "Vault keeps Glacier semantics")
 	assert.Equal(t, "geyser", f.backendOf("vault", "archive.bin"))
 }
 
@@ -146,7 +146,7 @@ func TestSmartPromotion_EvictedObjectAutoRestoresThenCopiesBack(t *testing.T) {
 
 	// The GET path's ErrArchived branch consults OnArchivedRead: ours →
 	// restoring, and a second call must not re-submit the restore.
-	assert.Equal(t, archivedRestoring, p.OnArchivedRead(context.Background(), f.tenantID, "b", "doc", usage.FloorStandard))
+	assert.Equal(t, archivedRestoring, p.OnArchivedRead(context.Background(), f.tenantID, "b", "doc", "doc", usage.FloorStandard))
 	assert.Equal(t, 1, stub.restoreCalls, "restore submitted once")
 
 	// A request older than RestoreRetry with the object STILL on tape is
@@ -155,9 +155,9 @@ func TestSmartPromotion_EvictedObjectAutoRestoresThenCopiesBack(t *testing.T) {
 	f.now = f.now.Add(p.RestoreRetry + time.Minute)
 	later := f.now
 	p.now = func() time.Time { return later }
-	assert.Equal(t, archivedRestoring, p.OnArchivedRead(context.Background(), f.tenantID, "b", "doc", usage.FloorStandard))
+	assert.Equal(t, archivedRestoring, p.OnArchivedRead(context.Background(), f.tenantID, "b", "doc", "doc", usage.FloorStandard))
 	assert.Equal(t, 2, stub.restoreCalls, "stale request re-submitted")
-	assert.Equal(t, archivedRestoring, p.OnArchivedRead(context.Background(), f.tenantID, "b", "doc", usage.FloorStandard))
+	assert.Equal(t, archivedRestoring, p.OnArchivedRead(context.Background(), f.tenantID, "b", "doc", "doc", usage.FloorStandard))
 	assert.Equal(t, 2, stub.restoreCalls, "and stamped, so not on every read")
 
 	// Restore lands; the daily job's PromotePending copies it back.

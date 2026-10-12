@@ -90,6 +90,9 @@ type ledgerRow struct {
 	promoteRequested bool
 	restoreRequested bool
 	restoreAt        time.Time // when the last restore was submitted (zero when never)
+	// storageKey is the address the demotion copied the bytes under ("" =
+	// <key>, WP-R2-1): every copy the row knows about is at it.
+	storageKey string
 }
 
 // lookup reads the ledger row that describes the object as it is demoted
@@ -101,10 +104,10 @@ func (p *SmartPromoter) lookup(ctx context.Context, tenantID, bucket, key string
 	var row ledgerRow
 	var hotDeleted, promoteReq, restoreReq sql.NullTime
 	err := p.db.QueryRowContext(ctx,
-		`SELECT etag, size_bytes, hot_deleted_at, promote_requested_at, restore_requested_at
+		`SELECT etag, size_bytes, hot_deleted_at, promote_requested_at, restore_requested_at, COALESCE(storage_key, '')
 		 FROM smart_demotions WHERE tenant_id=$1 AND bucket=$2 AND object_key=$3
 		   AND hot_outcome NOT IN ('kept_changed', 'object_gone')`,
-		tenantID, bucket, key).Scan(&row.etag, &row.size, &hotDeleted, &promoteReq, &restoreReq)
+		tenantID, bucket, key).Scan(&row.etag, &row.size, &hotDeleted, &promoteReq, &restoreReq, &row.storageKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		return row, false, nil
 	}
@@ -132,7 +135,7 @@ func (p *SmartPromoter) OnRead(ctx context.Context, tenantID, bucket, key, etag 
 	}
 
 	if !row.hotDeleted {
-		if p.flipBack(ctx, tenantID, bucket, key, etag) {
+		if p.flipBack(ctx, tenantID, bucket, key, etag, row.storageKey) {
 			return p.HotBackend
 		}
 		return p.ColdBackend
@@ -145,7 +148,7 @@ func (p *SmartPromoter) OnRead(ctx context.Context, tenantID, bucket, key, etag 
 			 WHERE tenant_id=$1 AND bucket=$2 AND object_key=$3 AND promote_requested_at IS NULL`,
 			tenantID, bucket, key, p.now())
 	}
-	p.schedule(tenantID, bucket, key, etag, row.size)
+	p.schedule(tenantID, bucket, key, etag, row.storageKey, row.size)
 	return p.ColdBackend
 }
 
@@ -175,7 +178,8 @@ var smartRestoreWaits = prometheus.NewCounterVec(prometheus.CounterOpts{
 }, []string{"result"})
 
 // OnArchivedRead is called when a read (S3 GET, copy source, CDN) of an
-// object failed with ErrArchived. floor is the head row's floor.
+// object failed with ErrArchived. floor is the head row's floor; blob is the
+// artifact the read asked for (the row's address, WP-R2-1) — what is recalled.
 //
 // The rule (WP-R13-1): a downstairs object is STANDARD to the customer, who
 // can therefore never be asked for a restore — RestoreObject refuses a
@@ -185,7 +189,7 @@ var smartRestoreWaits = prometheus.NewCounterVec(prometheus.CounterOpts{
 // archive) is restored too, it just has nothing to copy it back hot.
 // An attic object keeps Glacier semantics unless it carries a ledger row
 // (an attic write that fell back to the hot backend and was demoted later).
-func (p *SmartPromoter) OnArchivedRead(ctx context.Context, tenantID, bucket, key, floor string) archivedRead {
+func (p *SmartPromoter) OnArchivedRead(ctx context.Context, tenantID, bucket, key, blob, floor string) archivedRead {
 	if p == nil {
 		return archivedNotSmart
 	}
@@ -200,14 +204,14 @@ func (p *SmartPromoter) OnArchivedRead(ctx context.Context, tenantID, bucket, ke
 	}
 	switch {
 	case ok:
-		if p.requestRestore(ctx, tenantID, bucket, key, row) {
+		if p.requestRestore(ctx, tenantID, bucket, key, blob, row) {
 			return p.countWait(archivedRestoring)
 		}
 		return p.countWait(archivedRestoreFailed)
 	case downstairs:
 		p.logger.Warn("smart promotion: standard-floor object is on tape with no demotion ledger row — restoring on read",
 			zap.String("tenant", tenantID), zap.String("bucket", bucket), zap.String("key", key))
-		if p.submitRestore(ctx, tenantID, bucket, key) {
+		if p.submitRestore(ctx, tenantID, bucket, blob) {
 			return p.countWait(archivedRestoring)
 		}
 		return p.countWait(archivedRestoreFailed)
@@ -224,9 +228,10 @@ func (p *SmartPromoter) countWait(a archivedRead) archivedRead {
 	return a
 }
 
-// submitRestore asks the cold backend to recall one object. True when the
-// recall was accepted or is already running.
-func (p *SmartPromoter) submitRestore(ctx context.Context, tenantID, bucket, key string) bool {
+// submitRestore asks the cold backend to recall one object's blob (blob = the
+// artifact its row addresses). True when the recall was accepted or is
+// already running.
+func (p *SmartPromoter) submitRestore(ctx context.Context, tenantID, bucket, blob string) bool {
 	cold, ok := p.eng.GetDriver(p.ColdBackend)
 	if !ok {
 		return false
@@ -236,25 +241,25 @@ func (p *SmartPromoter) submitRestore(ctx context.Context, tenantID, bucket, key
 		p.logger.Warn("smart promotion: cold backend cannot restore", zap.String("backend", p.ColdBackend))
 		return false
 	}
-	err := restorer.RestoreObject(common.WithTenantID(ctx, tenantID), tenantID+"_"+bucket, key, p.RestoreDays)
+	err := restorer.RestoreObject(common.WithTenantID(ctx, tenantID), tenantID+"_"+bucket, blob, p.RestoreDays)
 	if err != nil && !errors.Is(err, engine.ErrRestoreAlreadyInProgress) {
 		p.logger.Warn("smart promotion: auto-restore request failed",
-			zap.String("tenant", tenantID), zap.String("bucket", bucket), zap.String("key", key), zap.Error(err))
+			zap.String("tenant", tenantID), zap.String("bucket", bucket), zap.String("blob", blob), zap.Error(err))
 		return false
 	}
 	p.logger.Info("smart promotion: auto-restore requested",
-		zap.String("tenant", tenantID), zap.String("bucket", bucket), zap.String("key", key))
+		zap.String("tenant", tenantID), zap.String("bucket", bucket), zap.String("blob", blob))
 	return true
 }
 
 // requestRestore submits the recall for a ledger row unless one was
 // submitted within RestoreRetry, and stamps the row. True when a recall is
 // on its way (just submitted, already running, or recently requested).
-func (p *SmartPromoter) requestRestore(ctx context.Context, tenantID, bucket, key string, row ledgerRow) bool {
+func (p *SmartPromoter) requestRestore(ctx context.Context, tenantID, bucket, key, blob string, row ledgerRow) bool {
 	now := p.now()
 	stale := row.restoreRequested && p.RestoreRetry > 0 && now.Sub(row.restoreAt) > p.RestoreRetry
 	if !row.restoreRequested || stale {
-		if !p.submitRestore(ctx, tenantID, bucket, key) {
+		if !p.submitRestore(ctx, tenantID, bucket, blob) {
 			return false
 		}
 	}
@@ -284,8 +289,8 @@ const (
 // vaultaire_errors_total (the 5xx page) — a customer syncing a bucket of
 // evicted objects must not page the operator. A restore that could not be
 // submitted is ours and counts.
-func writeArchivedRead(w http.ResponseWriter, r *http.Request, p *SmartPromoter, tenantID, bucket, key, floor, notSmartHint string) {
-	switch p.OnArchivedRead(r.Context(), tenantID, bucket, key, floor) {
+func writeArchivedRead(w http.ResponseWriter, r *http.Request, p *SmartPromoter, tenantID, bucket, key, blob, floor, notSmartHint string) {
+	switch p.OnArchivedRead(r.Context(), tenantID, bucket, key, blob, floor) {
 	case archivedRestoring:
 		markClientRefusal(r.Context())
 		w.Header().Set("Retry-After", autoRestoreRetryAfter)
@@ -303,9 +308,10 @@ func writeArchivedRead(w http.ResponseWriter, r *http.Request, p *SmartPromoter,
 }
 
 // flipBack re-routes a demoted object to the hot backend while its hot copy
-// still exists. Conditional on backend+etag; the cold copy is dropped
-// best-effort afterwards (tape bytes cost money).
-func (p *SmartPromoter) flipBack(ctx context.Context, tenantID, bucket, key, etag string) bool {
+// still exists. Conditional on backend+etag+address (storageKey, the
+// ledger's: both copies are at it); the cold copy is dropped best-effort
+// afterwards (tape bytes cost money).
+func (p *SmartPromoter) flipBack(ctx context.Context, tenantID, bucket, key, etag, storageKey string) bool {
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false
@@ -315,8 +321,9 @@ func (p *SmartPromoter) flipBack(ctx context.Context, tenantID, bucket, key, eta
 	// demote the object straight back on the idle rule.
 	res, err := tx.ExecContext(ctx,
 		`UPDATE object_head_cache SET backend_name=$1, last_accessed=NOW()
-		 WHERE tenant_id=$2 AND bucket=$3 AND object_key=$4 AND backend_name=$5 AND etag=$6`,
-		p.HotBackend, tenantID, bucket, key, p.ColdBackend, etag)
+		 WHERE tenant_id=$2 AND bucket=$3 AND object_key=$4 AND backend_name=$5 AND etag=$6
+		   AND COALESCE(storage_key, '') = $7`,
+		p.HotBackend, tenantID, bucket, key, p.ColdBackend, etag, storageKey)
 	if err != nil {
 		return false
 	}
@@ -344,10 +351,10 @@ func (p *SmartPromoter) flipBack(ctx context.Context, tenantID, bucket, key, eta
 	if err := tx.Commit(); err != nil {
 		return false
 	}
-	container := tenantID + "_" + bucket
-	p.eng.HintBackend(container, key, p.HotBackend)
+	container, blob := objectBlobAddress(tenantID, bucket, key, storageKey)
+	p.eng.HintBackend(container, blob, p.HotBackend)
 	if cold, ok := p.eng.GetDriver(p.ColdBackend); ok {
-		if err := cold.Delete(common.WithTenantID(ctx, tenantID), container, key); err != nil {
+		if err := cold.Delete(common.WithTenantID(ctx, tenantID), container, blob); err != nil {
 			p.logger.Warn("smart promotion: cold copy not removed after flip-back", zap.Error(err))
 		}
 	}
@@ -356,7 +363,7 @@ func (p *SmartPromoter) flipBack(ctx context.Context, tenantID, bucket, key, eta
 	return true
 }
 
-func (p *SmartPromoter) schedule(tenantID, bucket, key, etag string, size int64) {
+func (p *SmartPromoter) schedule(tenantID, bucket, key, etag, storageKey string, size int64) {
 	id := tenantID + "/" + bucket + "/" + key
 	if _, loaded := p.inflight.LoadOrStore(id, struct{}{}); loaded {
 		return
@@ -365,7 +372,7 @@ func (p *SmartPromoter) schedule(tenantID, bucket, key, etag string, size int64)
 		defer p.inflight.Delete(id)
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
 		defer cancel()
-		if _, err := p.promote(ctx, tenantID, bucket, key, etag, size); err != nil {
+		if _, err := p.promote(ctx, tenantID, bucket, key, etag, storageKey, size); err != nil {
 			p.logger.Warn("smart promotion: copy-back failed (daily job retries)",
 				zap.String("tenant", tenantID), zap.String("bucket", bucket), zap.String("key", key), zap.Error(err))
 		}
@@ -383,8 +390,9 @@ func (p *SmartPromoter) schedule(tenantID, bucket, key, etag string, size int64)
 
 // promote copies one object cold→hot and flips routing under an etag guard.
 // Outcomes: "promoted", "restore_requested" (evicted, recall submitted),
-// "changed" (object rewritten meanwhile; ledger dropped).
-func (p *SmartPromoter) promote(ctx context.Context, tenantID, bucket, key, etag string, size int64) (string, error) {
+// "changed" (object rewritten meanwhile; ledger dropped). storageKey is the
+// ledger's address: the copy-back reads and writes it, never a rename.
+func (p *SmartPromoter) promote(ctx context.Context, tenantID, bucket, key, etag, storageKey string, size int64) (string, error) {
 	hot, ok := p.eng.GetDriver(p.HotBackend)
 	if !ok {
 		return "", fmt.Errorf("hot backend %q not registered", p.HotBackend)
@@ -394,7 +402,7 @@ func (p *SmartPromoter) promote(ctx context.Context, tenantID, bucket, key, etag
 		return "", fmt.Errorf("cold backend %q not registered", p.ColdBackend)
 	}
 	tctx := common.WithTenantID(ctx, tenantID)
-	container := tenantID + "_" + bucket
+	container, blob := objectBlobAddress(tenantID, bucket, key, storageKey)
 
 	// The ledger row is a claim about the past; the head row is the object.
 	// A copy-back may only start for an object that is still the demoted one
@@ -408,25 +416,25 @@ func (p *SmartPromoter) promote(ctx context.Context, tenantID, bucket, key, etag
 	if err != nil {
 		return "", err
 	}
-	if !rt.headRow || rt.backend != p.ColdBackend || rt.etag != etag {
+	if !rt.headRow || rt.backend != p.ColdBackend || rt.etag != etag || rt.blob != blob {
 		if _, err := p.settler().settle(ctx, lostWriteReclaim, tenantID, bucket, key, false); err != nil {
 			return "", fmt.Errorf("settle stale ledger row: %w", err)
 		}
 		return "changed", nil
 	}
 
-	rc, err := cold.Get(tctx, container, key)
+	rc, err := cold.Get(tctx, container, blob)
 	if err != nil {
 		if errors.Is(err, engine.ErrArchived) {
 			row, found, lerr := p.lookup(ctx, tenantID, bucket, key)
 			if lerr == nil && found {
-				_ = p.requestRestore(ctx, tenantID, bucket, key, row)
+				_ = p.requestRestore(ctx, tenantID, bucket, key, blob, row)
 			}
 			return "restore_requested", nil
 		}
 		return "", fmt.Errorf("read cold: %w", err)
 	}
-	putErr := hot.Put(tctx, container, key, rc, engine.WithContentLength(size))
+	putErr := hot.Put(tctx, container, blob, rc, engine.WithContentLength(size))
 	_ = rc.Close()
 	if putErr != nil {
 		return "", fmt.Errorf("write hot: %w", putErr)
@@ -445,8 +453,9 @@ func (p *SmartPromoter) promote(ctx context.Context, tenantID, bucket, key, etag
 	// demote the object straight back on the idle rule.
 	res, err := tx.ExecContext(ctx,
 		`UPDATE object_head_cache SET backend_name=$1, last_accessed=NOW()
-		 WHERE tenant_id=$2 AND bucket=$3 AND object_key=$4 AND backend_name=$5 AND etag=$6`,
-		p.HotBackend, tenantID, bucket, key, p.ColdBackend, etag)
+		 WHERE tenant_id=$2 AND bucket=$3 AND object_key=$4 AND backend_name=$5 AND etag=$6
+		   AND COALESCE(storage_key, '') = $7`,
+		p.HotBackend, tenantID, bucket, key, p.ColdBackend, etag, storageKey)
 	if err != nil {
 		return "", fmt.Errorf("flip routing: %w", err)
 	}
@@ -471,15 +480,15 @@ func (p *SmartPromoter) promote(ctx context.Context, tenantID, bucket, key, etag
 		// nothing live routes to the hot backend at this key: a PUT that
 		// landed hot overwrote it with the NEW bytes, which are not ours to
 		// delete.
-		var cur string
-		qerr := p.db.QueryRowContext(ctx, `SELECT COALESCE(backend_name,'') FROM object_head_cache WHERE tenant_id=$1 AND bucket=$2 AND object_key=$3`, tenantID, bucket, key).Scan(&cur)
-		if errors.Is(qerr, sql.ErrNoRows) || (qerr == nil && cur != p.HotBackend) {
-			_ = hot.Delete(tctx, container, key)
+		var cur, curKey string
+		qerr := p.db.QueryRowContext(ctx, `SELECT COALESCE(backend_name,''), COALESCE(storage_key,'') FROM object_head_cache WHERE tenant_id=$1 AND bucket=$2 AND object_key=$3`, tenantID, bucket, key).Scan(&cur, &curKey)
+		if errors.Is(qerr, sql.ErrNoRows) || (qerr == nil && (cur != p.HotBackend || blobArtifact(key, curKey) != blob)) {
+			_ = hot.Delete(tctx, container, blob)
 		}
 		return "changed", nil
 	}
-	p.eng.HintBackend(container, key, p.HotBackend)
-	if err := cold.Delete(tctx, container, key); err != nil {
+	p.eng.HintBackend(container, blob, p.HotBackend)
+	if err := cold.Delete(tctx, container, blob); err != nil {
 		p.logger.Warn("smart promotion: cold copy not removed after copy-back", zap.Error(err))
 	}
 	p.logger.Info("smart promotion: copied back to hot",
@@ -495,7 +504,7 @@ func (p *SmartPromoter) PromotePending(ctx context.Context) (int, []string) {
 		return 0, nil
 	}
 	rows, err := p.db.QueryContext(ctx,
-		`SELECT tenant_id, bucket, object_key, etag, size_bytes FROM smart_demotions
+		`SELECT tenant_id, bucket, object_key, etag, size_bytes, COALESCE(storage_key, '') FROM smart_demotions
 		 WHERE promote_requested_at IS NOT NULL AND hot_deleted_at IS NOT NULL AND hot_outcome = 'deleted'
 		   AND ($1 = '' OR tenant_id = $1)
 		 ORDER BY promote_requested_at ASC LIMIT 1000`, p.scopeTenant)
@@ -503,13 +512,13 @@ func (p *SmartPromoter) PromotePending(ctx context.Context) (int, []string) {
 		return 0, []string{fmt.Sprintf("promote pending: list: %v", err)}
 	}
 	type item struct {
-		tenant, bucket, key, etag string
-		size                      int64
+		tenant, bucket, key, etag, storageKey string
+		size                                  int64
 	}
 	var items []item
 	for rows.Next() {
 		var it item
-		if err := rows.Scan(&it.tenant, &it.bucket, &it.key, &it.etag, &it.size); err != nil {
+		if err := rows.Scan(&it.tenant, &it.bucket, &it.key, &it.etag, &it.size, &it.storageKey); err != nil {
 			_ = rows.Close()
 			return 0, []string{fmt.Sprintf("promote pending: scan: %v", err)}
 		}
@@ -526,7 +535,7 @@ func (p *SmartPromoter) PromotePending(ctx context.Context) (int, []string) {
 		if ctx.Err() != nil {
 			break
 		}
-		outcome, err := p.promote(ctx, it.tenant, it.bucket, it.key, it.etag, it.size)
+		outcome, err := p.promote(ctx, it.tenant, it.bucket, it.key, it.etag, it.storageKey, it.size)
 		if err != nil && ctx.Err() != nil {
 			break // cut by the stop: the row is still pending for the next run
 		}

@@ -269,25 +269,36 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		zap.String("artifact", artifact),
 		zap.String("version_id", reqVersionID))
 
+	// version: a non-current version whose bytes were kept under their own
+	// address (object_versions.storage_key, WP-R2-1) — served from its row,
+	// never from the head row, which describes the current object.
+	var version *versionBlob
 	if reqVersionID != "" && a.db != nil {
 		var isDeleteMarker, isLatest bool
-		var vETag, vContentType string
+		var vETag, vContentType, vStorageKey, vBackend, vEncAlgo string
 		var vSize int64
 		var vCreatedAt time.Time
 		err := a.db.QueryRowContext(r.Context(), `
-			SELECT is_delete_marker, is_latest, etag, content_type, size_bytes, created_at
+			SELECT is_delete_marker, is_latest, etag, content_type, size_bytes, created_at,
+			       COALESCE(storage_key, ''), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, '')
 			FROM object_versions
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND version_id = $4`,
-			t.ID, bucket, artifact, reqVersionID).Scan(&isDeleteMarker, &isLatest, &vETag, &vContentType, &vSize, &vCreatedAt)
+			t.ID, bucket, artifact, reqVersionID).Scan(&isDeleteMarker, &isLatest, &vETag, &vContentType, &vSize, &vCreatedAt,
+			&vStorageKey, &vBackend, &vEncAlgo)
 		if err != nil {
 			WriteS3Error(w, ErrNoSuchVersion, r.URL.Path, generateRequestID())
 			return
 		}
-		if !isDeleteMarker && !isLatest && !a.versionBytesIntact(r.Context(), t.ID, bucket, artifact, reqVersionID) {
-			// R2-03: versions are metadata-only — every PUT overwrites the
-			// one blob at this key — so the bytes of a non-current version
-			// no longer exist. Answering 200 with the CURRENT object's bytes
-			// under the requested version id (the previous behaviour) made
+		if !isDeleteMarker && !isLatest && vStorageKey != "" {
+			version = &versionBlob{etag: vETag, contentType: vContentType, size: vSize, createdAt: vCreatedAt,
+				storageKey: vStorageKey, backend: vBackend, encAlgo: vEncAlgo}
+		}
+		if !isDeleteMarker && !isLatest && version == nil && !a.versionBytesIntact(r.Context(), t.ID, bucket, artifact, reqVersionID) {
+			// R2-03: a version written before WP-R2-1's writers (2C) kept
+			// no bytes — every PUT overwrote the one blob at this key — so
+			// the bytes of such a non-current version no longer exist.
+			// Answering 200 with the CURRENT object's bytes under the
+			// requested version id (the previous behaviour) made
 			// restore tools restore the wrong data. Fail loudly until
 			// WP-R2-1 keeps one blob per version. The one non-current
 			// version whose bytes ARE intact — the newest live version
@@ -349,21 +360,36 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	var cachedEcho putEchoHeaders
 	var cachedIsChunked bool
 	var cachedFloor string
+	var cachedStorageKey string
 	var cacheHit bool
 	if a.db != nil {
 		err := a.db.QueryRowContext(r.Context(), `
-			SELECT content_type, size_bytes, etag, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(tags, '{}'), COALESCE(content_disposition, ''), COALESCE(content_encoding, ''), COALESCE(content_language, ''), COALESCE(cache_control, ''), COALESCE(http_expires, ''), COALESCE(website_redirect_location, ''), is_chunked, floor
+			SELECT content_type, size_bytes, etag, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(tags, '{}'), COALESCE(content_disposition, ''), COALESCE(content_encoding, ''), COALESCE(content_language, ''), COALESCE(cache_control, ''), COALESCE(http_expires, ''), COALESCE(website_redirect_location, ''), is_chunked, floor, COALESCE(storage_key, '')
 			FROM object_head_cache
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-			t.ID, bucket, artifact).Scan(&cachedContentType, &cachedSize, &cachedETag, &cachedUpdatedAt, &cachedMetadata, &cachedBackendName, &cachedEncAlgo, &cachedTags, &cachedContentDisposition, &cachedContentEncoding, &cachedContentLanguage, &cachedEcho.CacheControl, &cachedEcho.Expires, &cachedEcho.WebsiteRedirect, &cachedIsChunked, &cachedFloor)
+			t.ID, bucket, artifact).Scan(&cachedContentType, &cachedSize, &cachedETag, &cachedUpdatedAt, &cachedMetadata, &cachedBackendName, &cachedEncAlgo, &cachedTags, &cachedContentDisposition, &cachedContentEncoding, &cachedContentLanguage, &cachedEcho.CacheControl, &cachedEcho.Expires, &cachedEcho.WebsiteRedirect, &cachedIsChunked, &cachedFloor, &cachedStorageKey)
 		if err == nil {
 			cacheHit = true
 		}
 	}
+	if version != nil {
+		// The version's own row describes its bytes; the head row's user
+		// metadata, tags and echo headers belong to the current object and
+		// are not sent with an older version's body (no per-version copy of
+		// them exists). The floor stays the key's.
+		cacheHit = true
+		cachedSize, cachedETag, cachedContentType, cachedUpdatedAt = version.size, version.etag, version.contentType, version.createdAt
+		cachedBackendName, cachedEncAlgo, cachedStorageKey, cachedIsChunked = version.backend, version.encAlgo, version.storageKey, false
+		cachedMetadata, cachedTags = []byte("{}"), []byte("{}")
+		cachedContentDisposition, cachedContentEncoding, cachedContentLanguage, cachedEcho = "", "", "", putEchoHeaders{}
+	}
+	// Where the object's bytes are (WP-R2-1): the row's own address, <key>
+	// when it records none.
+	_, blob := objectBlobAddress(t.ID, bucket, artifact, cachedStorageKey)
 
 	// Smart-tier read-time promotion: a demoted object being read comes
 	// back hot (routing flip inside the grace window, async copy-back after).
-	if cacheHit && a.smartPromoter != nil && cachedBackendName == a.smartPromoter.ColdBackend && !cachedIsChunked {
+	if cacheHit && version == nil && a.smartPromoter != nil && cachedBackendName == a.smartPromoter.ColdBackend && !cachedIsChunked {
 		cachedBackendName = a.smartPromoter.OnRead(r.Context(), t.ID, bucket, artifact, cachedETag)
 	}
 
@@ -374,7 +400,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 			noteRecordedBackend(a.engine, a.logger, "get", cachedBackendName)
 		}
 		if ce, ok := a.engine.(*engine.CoreEngine); ok {
-			ce.HintBackend(container, artifact, cachedBackendName)
+			ce.HintBackend(container, blob, cachedBackendName)
 		}
 	}
 	// The class this response reports: the floor decides, not the backend
@@ -382,7 +408,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	// listings give.
 	storageClass := engine.CustomerStorageClass(cachedFloor, cachedBackendName)
 
-	if cacheHit && a.db != nil {
+	if cacheHit && version == nil && a.db != nil {
 		go func() { // #nosec G118 -- fire-and-forget access-time touch; must outlive the request, request ctx would cancel it
 			_, _ = a.db.ExecContext(context.Background(), `
 				UPDATE object_head_cache SET last_accessed = NOW()
@@ -463,13 +489,13 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		// A large range of a whole object on a backend with cheap ranges
 		// is read as parallel ranges within it (`parallel_get`, s3_large_get.go).
 		if cachedFloor != usage.FloorVault {
-			if pr := a.openParallelGet(gctx, t.ID, container, artifact, cachedSize, rng.start, rng.length); pr != nil {
+			if pr := a.openParallelGet(gctx, t.ID, container, blob, cachedSize, rng.start, rng.length); pr != nil {
 				reader, nativeRange = pr, rng
 			}
 		}
 		if reader == nil {
 			if ce, ok := a.engine.(*engine.CoreEngine); ok {
-				rr, rangeErr := ce.GetRange(gctx, container, artifact, rng.start, rng.length)
+				rr, rangeErr := ce.GetRange(gctx, container, blob, rng.start, rng.length)
 				switch {
 				case rangeErr == nil:
 					reader, nativeRange = rr, rng
@@ -489,10 +515,10 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	// ciphertext is decrypted whole), never a vault-floor one (tape and
 	// restore semantics stay on the single stream).
 	if reader == nil && cacheHit && cachedEncAlgo == "" && cachedFloor != usage.FloorVault && r.Header.Get("Range") == "" {
-		reader = a.openParallelGet(gctx, t.ID, container, artifact, cachedSize, 0, cachedSize)
+		reader = a.openParallelGet(gctx, t.ID, container, blob, cachedSize, 0, cachedSize)
 	}
 	if reader == nil && err == nil {
-		reader, err = a.engine.Get(gctx, container, artifact)
+		reader, err = a.engine.Get(gctx, container, blob)
 	}
 	// A vault object whose backend failed — an error, not found through the
 	// failover chain, an open breaker — is rebuilt from its parity copy when
@@ -503,7 +529,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		if wantRange != nil {
 			off, n = wantRange.start, wantRange.length
 		}
-		pr, perr := a.vaultParity.Open(r.Context(), t.ID, bucket, artifact, cachedETag, cachedSize, off, n)
+		pr, perr := a.vaultParity.Open(r.Context(), t.ID, bucket, artifact, blob, cachedETag, cachedSize, off, n)
 		if perr == nil {
 			a.logger.Warn("vault object served from its parity copy", zap.String("bucket", bucket), zap.String("key", artifact),
 				zap.NamedError("backend", err))
@@ -526,7 +552,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 			// reader's behalf and the answer is a retryable 503 (Smart
 			// customers never issue restores themselves); an attic object
 			// answers Glacier's 403 InvalidObjectState.
-			writeArchivedRead(w, r, a.smartPromoter, t.ID, bucket, artifact, cachedFloor,
+			writeArchivedRead(w, r, a.smartPromoter, t.ID, bucket, artifact, blob, cachedFloor,
 				"This object is archived on tape. Request a restore (POST ?restore or the dashboard Restore button), then retry — restores typically begin within minutes.")
 		} else if isObjectMissingErr(err) {
 			reqID := generateRequestID()
@@ -679,7 +705,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		if nativeRange != nil {
 			rr = reader // opened above, already positioned at rng.start
 		} else if ce, ok := a.engine.(*engine.CoreEngine); ok && cachedEncAlgo == "" {
-			rr, rangeErr = ce.GetRange(gctx, container, artifact, rng.start, rng.length)
+			rr, rangeErr = ce.GetRange(gctx, container, blob, rng.start, rng.length)
 			if rangeErr == nil {
 				defer func() { _ = rr.Close() }()
 			}
@@ -771,6 +797,16 @@ func (a *S3ToEngine) versionBytesIntact(ctx context.Context, tenantID, bucket, k
 		return false
 	}
 	return newestLive == versionID
+}
+
+// versionBlob is a non-current version whose bytes were kept (WP-R2-1):
+// everything a GET of it needs, from its object_versions row.
+type versionBlob struct {
+	etag, contentType   string
+	size                int64
+	createdAt           time.Time
+	storageKey, backend string
+	encAlgo             string
 }
 
 // detectContentType determines MIME type from extension
@@ -2216,6 +2252,9 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 	}
 
 	if a.db != nil && (vStatus == "Enabled" || vStatus == "Suspended") && reqVersionID != "" {
+		// A version that kept its bytes (WP-R2-1) has its blob queued in
+		// retired_blobs in the same transaction as the row delete (the
+		// collector is 2C's); one the head row still names is kept.
 		found, err := deleteVersion(r.Context(), a.db, t.ID, bucket, object, reqVersionID)
 		if err != nil {
 			a.logger.Error("delete version failed", zap.Error(err))
@@ -2258,6 +2297,14 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 		}
 		if found {
 			a.releaseQuotaForDelete(r, t.ID, marked)
+			// The blob the head row named stays while a version keeps it
+			// (the undelete path); one no version names is displaced.
+			if marked.StorageKey != "" {
+				if err := retireBlobNow(r.Context(), a.db, t.ID, bucket, object, marked.StorageKey, marked.Backend, retiredOverwritten); err != nil {
+					a.logger.Warn("delete marker: the displaced blob is not queued for the collector — the erasure sweep is its only remover",
+						zap.Error(err), zap.String("bucket", bucket), zap.String("object", object), zap.String("storage_key", marked.StorageKey))
+				}
+			}
 		}
 
 		w.Header().Set("x-amz-version-id", markerID)
@@ -2277,15 +2324,15 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 	// was answered "not found", and the bytes stayed on the real backend
 	// forever while the head row — and the customer's bill — went away (R6-05).
 	var isChunked bool
-	var recordedBackend string
+	var recordedBackend, storageKey string
 	if a.db != nil {
 		// A failed read here must not be guessed away: treating a chunked
 		// object as whole sends it to the backend delete, which "succeeds" as
 		// an idempotent miss, and the head row goes while the manifest and
 		// its GCI references leak forever (R8-07).
 		if rowErr := a.db.QueryRowContext(r.Context(),
-			`SELECT is_chunked, COALESCE(backend_name, '') FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-			t.ID, bucket, object).Scan(&isChunked, &recordedBackend); rowErr != nil && !errors.Is(rowErr, sql.ErrNoRows) {
+			`SELECT is_chunked, COALESCE(backend_name, ''), COALESCE(storage_key, '') FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+			t.ID, bucket, object).Scan(&isChunked, &recordedBackend, &storageKey); rowErr != nil && !errors.Is(rowErr, sql.ErrNoRows) {
 			a.logger.Error("head cache read before delete failed", zap.Error(rowErr),
 				zap.String("bucket", bucket), zap.String("object", object))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
@@ -2293,18 +2340,34 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 		}
 	}
 
-	if isChunked && a.gci != nil {
-		// Nothing to delete on the backend: the chunks stay until dedup GC.
-		// The manifest is released together with the head row below, in one
-		// transaction (R8-08).
+	// The blob the row names (WP-R2-1); kept when a version row keeps it
+	// (a Suspended bucket's plain DELETE of a key whose current bytes are
+	// also an Enabled-era version).
+	blob := blobArtifact(object, storageKey)
+	keptByVersion := false
+	if storageKey != "" && a.db != nil {
+		named, nErr := versionKeepsBlob(r.Context(), a.db, t.ID, bucket, object, storageKey)
+		if nErr != nil {
+			a.logger.Error("delete: could not tell whether a version keeps the blob", zap.Error(nErr),
+				zap.String("bucket", bucket), zap.String("object", object))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+		keptByVersion = named
+	}
+
+	if (isChunked && a.gci != nil) || keptByVersion {
+		// Nothing to delete on the backend: the chunks stay until dedup GC
+		// (the manifest is released together with the head row below, in one
+		// transaction, R8-08), and a version's bytes stay with the version.
 	} else {
 		if recordedBackend != "" {
 			noteRecordedBackend(a.engine, a.logger, "delete", recordedBackend)
 			if ce, ok := a.engine.(*engine.CoreEngine); ok {
-				ce.HintBackend(container, object, recordedBackend)
+				ce.HintBackend(container, blob, recordedBackend)
 			}
 		}
-		if err := a.engine.Delete(r.Context(), container, object); err != nil {
+		if err := a.engine.Delete(r.Context(), container, blob); err != nil {
 			if errors.Is(err, engine.ErrAllBackendsUnavailable) {
 				// The backend that holds the bytes is unreachable: the
 				// client retries; the head row must NOT be removed (a

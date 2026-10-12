@@ -248,14 +248,16 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	var srcEnc string
 	var srcChunked bool
 	var srcBackend string
-	var srcFloor string
+	var srcFloor, srcStorageKey string
 	if s.db != nil {
 		_ = s.db.QueryRowContext(r.Context(), `
-			SELECT size_bytes, COALESCE(encryption_algorithm, ''), is_chunked, COALESCE(backend_name, ''), floor
+			SELECT size_bytes, COALESCE(encryption_algorithm, ''), is_chunked, COALESCE(backend_name, ''), floor, COALESCE(storage_key, '')
 			FROM object_head_cache
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-			t.ID, srcBucket, srcKey).Scan(&srcSize, &srcEnc, &srcChunked, &srcBackend, &srcFloor)
+			t.ID, srcBucket, srcKey).Scan(&srcSize, &srcEnc, &srcChunked, &srcBackend, &srcFloor, &srcStorageKey)
 	}
+	// The source's bytes are at its row's address (WP-R2-1).
+	srcBlob := blobArtifact(srcKey, srcStorageKey)
 	// A plaintext source copied into an sse_enabled bucket is sealed there
 	// exactly as a PUT into it is (WP-R8-1 follow-up A1: it used to land
 	// plaintext). Refused before anything is read or written when it cannot
@@ -330,7 +332,7 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	// Route the read to the backend that holds the source (routing truth).
 	if srcBackend != "" && s.engine != nil {
 		noteRecordedBackend(s.engine, s.logger, "copy_source", srcBackend)
-		s.engine.HintBackend(srcContainer, srcKey, srcBackend)
+		s.engine.HintBackend(srcContainer, srcBlob, srcBackend)
 	}
 	// The source's recorded size goes with the read and the write (Prompt
 	// 2b.2 C3): a backend holding two versions of the key after an
@@ -343,7 +345,7 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	if srcSize > 0 {
 		gctx = engine.WithExpectedSize(gctx, srcSize)
 	}
-	reader, err := s.engine.Get(gctx, srcContainer, srcKey)
+	reader, err := s.engine.Get(gctx, srcContainer, srcBlob)
 	if err != nil {
 		switch {
 		case errors.Is(err, engine.ErrAllBackendsUnavailable):
@@ -354,7 +356,7 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 			// GET (WP-R13-1): a downstairs source is recalled on the
 			// caller's behalf and the copy answers a retryable 503; an attic
 			// source answers what AWS answers for a GLACIER copy source.
-			writeArchivedRead(w, r, s.smartPromoter, t.ID, srcBucket, srcKey, srcFloor,
+			writeArchivedRead(w, r, s.smartPromoter, t.ID, srcBucket, srcKey, srcBlob, srcFloor,
 				"The source object is archived on tape. Restore it (POST ?restore), then retry the copy.")
 		case isObjectMissingErr(err):
 			WriteS3Error(w, ErrNoSuchKey, r.URL.Path, generateRequestID())

@@ -424,7 +424,9 @@ risks, not key-setting risks.
 
 ## Follow-ups built in Stage 1a Prompt 2A (2026-10-12)
 
-One PR, branch `wp-r8-1-followups`, migration **085**. It is what unblocks
+One PR, branch `wp-r8-1-followups`, migration **085** (WP-R2-1 Part B, #684,
+merged first with 086 — the deploy applies every file, so 085 lands after 086
+harmlessly; the next number is 087). It is what unblocks
 setting `ENCRYPTION_MASTER_KEY` on prod: A1 is the item that gated it, A2/A3
 are the two rotation-time P2s above, A4 the P3 index, A5 the install design of
 2026-10-12 (the key from a TPM-sealed systemd credential).
@@ -585,8 +587,10 @@ concurrent first use, in `key_versioning_test.go` the A3 job test;
 tests per package scoped to their tenant; the presign `sqlmock` script.
 Gates on the branch: `make lint` 0 issues (golangci-lint v2.14),
 gosec 0 issues (354 files, the Makefile flags via `go run`),
-`make test-integration` on `vaultaire_test_r81_2a` (through 085) — see the PR
-for the final run; `TestSQLLiteralsMatchSchema`, `TestExportSectionsCoverSchema`,
+`make test-integration` on `vaultaire_test_r81_2a` (through 085) EXIT 0
+before the merge of #684, and `-race` over `internal/api`, `crypto`,
+`database`, `account`, `dashboard/...` through 086 after it (green, #684's
+source-walking test included); `TestSQLLiteralsMatchSchema`, `TestExportSectionsCoverSchema`,
 the `internal/account` schema walk, `TestChunkBlobCalls_GoThroughTheChunkStore`
 and `job_rules_test.go` are in it.
 

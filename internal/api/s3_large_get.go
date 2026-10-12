@@ -368,11 +368,11 @@ func (r *parallelGetReader) Close() error {
 }
 
 // openParallelGet opens bytes [offset, offset+length) of a whole object as
-// parallel ranged reads, or returns nil: the caller then takes the single
-// stream. objectSize is the recorded size every range must report. The
+// parallel ranged reads of its blob (the row's address, WP-R2-1), or
+// returns nil: the caller then takes the single stream. objectSize is the recorded size every range must report. The
 // first range is read before this returns, so any failure up to there is a
 // clean fallback — nothing has been sent.
-func (a *S3ToEngine) openParallelGet(ctx context.Context, tenantID, container, artifact string, objectSize, offset, length int64) io.ReadCloser {
+func (a *S3ToEngine) openParallelGet(ctx context.Context, tenantID, container, blob string, objectSize, offset, length int64) io.ReadCloser {
 	cfg := a.largeGet
 	if length < cfg.minBytes || cfg.partBytes <= 0 || cfg.parallelParts < 2 {
 		return nil
@@ -384,7 +384,7 @@ func (a *S3ToEngine) openParallelGet(ctx context.Context, tenantID, container, a
 	if !ok {
 		return nil
 	}
-	backend, rg, ok := ce.ParallelRangeSource(ctx, container, artifact)
+	backend, rg, ok := ce.ParallelRangeSource(ctx, container, blob)
 	if !ok {
 		return nil
 	}
@@ -407,7 +407,7 @@ func (a *S3ToEngine) openParallelGet(ctx context.Context, tenantID, container, a
 	fetch := func(fctx context.Context, i int) ([]byte, error) {
 		off := offset + int64(i)*cfg.partBytes
 		want := sizes[i]
-		rc, info, err := rg.GetRangeInfo(fctx, container, artifact, off, want)
+		rc, info, err := rg.GetRangeInfo(fctx, container, blob, off, want)
 		if err != nil {
 			return nil, fmt.Errorf("range %d (%d+%d) on %s: %w", i, off, want, backend, err)
 		}
@@ -447,7 +447,7 @@ func (a *S3ToEngine) openParallelGet(ctx context.Context, tenantID, container, a
 			largeGetFallbacks.WithLabelValues("first_part").Inc()
 			a.logger.Warn("parallel get: first range failed, taking the single stream",
 				zap.String("backend", backend), zap.String("container", container),
-				zap.String("artifact", artifact), zap.Error(err))
+				zap.String("blob", blob), zap.Error(err))
 		}
 		return nil
 	}

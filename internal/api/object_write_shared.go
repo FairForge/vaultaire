@@ -15,6 +15,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -165,6 +166,7 @@ func upsertWholeObjectHeadRowEnc(ctx context.Context, tx *sql.Tx, tenantID, buck
 			floor                     = EXCLUDED.floor,
 			is_chunked                = FALSE,
 			tags                      = EXCLUDED.tags,
+			storage_key               = NULL, -- written in place at <key> (WP-R2-1: 2C writes an address)
 			updated_at                = NOW()`,
 		tenantID, bucket, key, size, etag, attrs.ContentType, backendName, attrs.metadataJSON(),
 		attrs.ContentDisposition, attrs.ContentEncoding, attrs.ContentLanguage,
@@ -290,14 +292,23 @@ func deleteVersion(ctx context.Context, db *sql.DB, tenantID, bucket, key, versi
 	if err := lockVersionKey(ctx, tx, tenantID, bucket, key); err != nil {
 		return false, err
 	}
-	res, err := tx.ExecContext(ctx, `
+	var storageKey, backend string
+	err = tx.QueryRowContext(ctx, `
 		DELETE FROM object_versions
-		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND version_id = $4`, tenantID, bucket, key, versionID)
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND version_id = $4
+		RETURNING COALESCE(storage_key, ''), COALESCE(backend_name, '')`, tenantID, bucket, key, versionID).Scan(&storageKey, &backend)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
 	if err != nil {
 		return false, err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return false, nil
+	// A version that kept its bytes (WP-R2-1): its blob goes to the
+	// collector with the row delete, unless the head row or another version
+	// still names it. Retired, not deleted here: a GET that resolved the
+	// version a moment ago may still be reading it.
+	if err := retireBlob(ctx, tx, tenantID, bucket, key, storageKey, backend, retiredVersionDeleted); err != nil {
+		return true, err
 	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE object_versions SET is_latest = TRUE
@@ -349,7 +360,10 @@ func writeVersionRow(ctx context.Context, q execer, vStatus, tenantID, bucket, k
 		ON CONFLICT (tenant_id, bucket, object_key, version_id) DO UPDATE SET
 			size_bytes = EXCLUDED.size_bytes, etag = EXCLUDED.etag,
 			content_type = EXCLUDED.content_type, is_latest = TRUE,
-			is_delete_marker = FALSE, backend_name = EXCLUDED.backend_name`,
+			is_delete_marker = FALSE, backend_name = EXCLUDED.backend_name,
+			-- this build writes in place at <key>: the "null" version it
+			-- rewrites keeps no bytes of its own (WP-R2-1; 2C records them)
+			storage_key = NULL, encryption_algorithm = NULL`,
 		tenantID, bucket, key, versionID, size, etag, contentType, backendName)
 	return versionID, err
 }

@@ -560,6 +560,7 @@ func (r *AccountDeletionRunner) walkObjects(ctx context.Context, d account.Due, 
 	type headRow struct {
 		bucket, key, backend string
 		chunked              bool
+		storageKey           string // the row's blob address ("" = the key, WP-R2-1)
 	}
 	var lastBucket, lastKey string
 	for {
@@ -577,7 +578,7 @@ func (r *AccountDeletionRunner) walkObjects(ctx context.Context, d account.Due, 
 			return true, nil
 		}
 		rows, err := r.db.QueryContext(ctx, `
-			SELECT bucket, object_key, COALESCE(backend_name, ''), is_chunked
+			SELECT bucket, object_key, COALESCE(backend_name, ''), is_chunked, COALESCE(storage_key, '')
 			  FROM object_head_cache
 			 WHERE tenant_id = $1 AND (bucket, object_key) > ($2, $3)
 			 ORDER BY bucket, object_key
@@ -588,7 +589,7 @@ func (r *AccountDeletionRunner) walkObjects(ctx context.Context, d account.Due, 
 		var batch []headRow
 		for rows.Next() {
 			var h headRow
-			if err := rows.Scan(&h.bucket, &h.key, &h.backend, &h.chunked); err != nil {
+			if err := rows.Scan(&h.bucket, &h.key, &h.backend, &h.chunked, &h.storageKey); err != nil {
 				_ = rows.Close()
 				return false, fmt.Errorf("scan object: %w", err)
 			}
@@ -603,7 +604,7 @@ func (r *AccountDeletionRunner) walkObjects(ctx context.Context, d account.Due, 
 		}
 		for _, h := range batch {
 			lastBucket, lastKey = h.bucket, h.key
-			if err := r.deleteObject(tctx, t, h.bucket, h.key, h.backend, h.chunked, te); err != nil {
+			if err := r.deleteObject(tctx, t, h.bucket, h.key, h.storageKey, h.backend, h.chunked, te); err != nil {
 				te.ObjectFailures++
 				accountDeletionObjects.WithLabelValues("failed").Inc()
 				log.Error("account deletion: object left in place", zap.String("bucket", h.bucket),
@@ -619,27 +620,30 @@ func (r *AccountDeletionRunner) walkObjects(ctx context.Context, d account.Due, 
 // deleteObject removes one object the way S3 DELETE does (s3_engine_adapter):
 // whole objects go from the recorded backend first, then the head row;
 // chunked objects release their manifest with the head row and leave the
-// _global chunks to dedup GC.
-func (r *AccountDeletionRunner) deleteObject(ctx context.Context, t *tenant.Tenant, bucket, key, backend string, chunked bool, te *TenantErasure) error {
-	container := t.NamespaceContainer(bucket)
+// _global chunks to dedup GC. A whole object's blob is at the row's address
+// (storageKey, WP-R2-1; the key when it records none). Retained version
+// blobs and anything else no row names are the sweep's (erasure_sweep.go).
+func (r *AccountDeletionRunner) deleteObject(ctx context.Context, t *tenant.Tenant, bucket, key, storageKey, backend string, chunked bool, te *TenantErasure) error {
+	container, blob := objectBlobAddress(t.ID, bucket, key, storageKey)
 	if !chunked {
 		// A demoted object whose hot copy is not yet reclaimed has bytes on
 		// TWO backends; the recorded one is the cold copy. Delete the hot
-		// copy first (a failure keeps the row so the next run retries).
-		var hot string
+		// copy first (a failure keeps the row so the next run retries) — at
+		// the address the demotion copied under.
+		var hot, hotKey string
 		err := r.db.QueryRowContext(ctx, `
-			SELECT hot_backend FROM smart_demotions
+			SELECT hot_backend, COALESCE(storage_key, '') FROM smart_demotions
 			 WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND hot_deleted_at IS NULL`,
-			t.ID, bucket, key).Scan(&hot)
+			t.ID, bucket, key).Scan(&hot, &hotKey)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("read demotion ledger: %w", err)
 		}
-		if hot != "" && hot != backend {
-			if err := r.deleteOnBackend(ctx, container, key, hot); err != nil {
+		if hotBlob := blobArtifact(key, hotKey); hot != "" && (hot != backend || hotBlob != blob) {
+			if err := r.deleteOnBackend(ctx, container, hotBlob, hot); err != nil {
 				return fmt.Errorf("hot copy on %s: %w", hot, err)
 			}
 		}
-		if err := r.deleteOnBackend(ctx, container, key, backend); err != nil {
+		if err := r.deleteOnBackend(ctx, container, blob, backend); err != nil {
 			return err
 		}
 	}
@@ -664,16 +668,17 @@ func (r *AccountDeletionRunner) deleteObject(ctx context.Context, t *tenant.Tena
 	return nil
 }
 
-// deleteOnBackend deletes one blob where the head row says it is (the R6-05
-// rule: hint first, or a post-restart delete goes to the primary alone). A
-// miss is fine — the row drifted; anything else is the caller's failure.
-func (r *AccountDeletionRunner) deleteOnBackend(ctx context.Context, container, key, backend string) error {
+// deleteOnBackend deletes one blob (blob = the row's address) where the head
+// row says it is (the R6-05 rule: hint first, or a post-restart delete goes
+// to the primary alone). A miss is fine — the row drifted; anything else is
+// the caller's failure.
+func (r *AccountDeletionRunner) deleteOnBackend(ctx context.Context, container, blob, backend string) error {
 	if backend != "" {
 		if ce, ok := r.eng.(*engine.CoreEngine); ok {
-			ce.HintBackend(container, key, backend)
+			ce.HintBackend(container, blob, backend)
 		}
 	}
-	if err := r.eng.Delete(ctx, container, key); err != nil && !isObjectMissingErr(err) {
+	if err := r.eng.Delete(ctx, container, blob); err != nil && !isObjectMissingErr(err) {
 		return fmt.Errorf("backend delete: %w", err)
 	}
 	return nil
