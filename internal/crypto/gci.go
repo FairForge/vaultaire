@@ -145,7 +145,19 @@ func (g *GlobalContentIndex) LookupChunk(ctx context.Context, scope, plaintextHa
 			IsNewChunk: false,
 		}, nil
 	}
+	return g.lookupChunkDB(ctx, scope, plaintextHash)
+}
 
+// LookupChunkFresh reads the chunk's row from the database, past the cache
+// (and refreshes the cache with it). The chunked GET asks it once when the
+// address it resolved answers "not there": the row may name a new blob since
+// (a re-encrypt swap, a chunk move) — WP-R8-1 follow-up A2.
+func (g *GlobalContentIndex) LookupChunkFresh(ctx context.Context, scope, plaintextHash string) (*ChunkLookupResult, error) {
+	return g.lookupChunkDB(ctx, scope, plaintextHash)
+}
+
+// lookupChunkDB is the database half of LookupChunk.
+func (g *GlobalContentIndex) lookupChunkDB(ctx context.Context, scope, plaintextHash string) (*ChunkLookupResult, error) {
 	// Query database
 	var entry GCIEntry
 	var compressedSize sql.NullInt64

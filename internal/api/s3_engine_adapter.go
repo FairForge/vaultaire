@@ -1783,6 +1783,23 @@ func (a *S3ToEngine) fetchAndVerifyChunk(ctx context.Context, d chunkDesc, tenan
 	// (chunk_store.go); blobs written before WP-R8-7 are found at their old
 	// address until the chunk move has run.
 	rdr, err := a.chunks().get(ctx, chunkAddr{scope: d.scope, hash: d.plaintextHash, backend: d.backendID, key: d.storageKey})
+	if err != nil && isObjectMissingErr(err) {
+		// The plan was resolved when the GET began; the blob may have moved
+		// since — a re-encrypt swap whose old address was deleted after its
+		// grace, a chunk move — while this stream was still on its plan (a
+		// long or paced download). One read of the row past the cache: a
+		// row that names another blob is read there and opened with the
+		// version it records (same plaintext hash, so the check below is
+		// unchanged); an unchanged row is a real miss (WP-R8-1 A2). Never on
+		// an error: "could not ask" is not "not there".
+		if moved, ok := a.rereadChunk(ctx, d); ok {
+			chunkedGetRereads.WithLabelValues(rereadMoved).Inc()
+			d = moved
+			rdr, err = a.chunks().get(ctx, chunkAddr{scope: d.scope, hash: d.plaintextHash, backend: d.backendID, key: d.storageKey})
+		} else {
+			chunkedGetRereads.WithLabelValues(rereadMissing).Inc()
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("fetch chunk %s: %w", d.plaintextHash[:16], err)
 	}
@@ -1825,6 +1842,43 @@ func (a *S3ToEngine) fetchAndVerifyChunk(ctx context.Context, d chunkDesc, tenan
 		return nil, fmt.Errorf("%w: chunk %s (%d bytes)", errChunkIntegrity, d.plaintextHash[:16], len(data))
 	}
 	return data, nil
+}
+
+// rereadChunk reads the chunk's index row past the GCI cache and returns the
+// desc it describes now, ok only when the row names another blob than d
+// (address, backend, key version or ciphertext). A row gone or unchanged, or
+// a read that failed, is not ok: the caller's miss stands.
+func (a *S3ToEngine) rereadChunk(ctx context.Context, d chunkDesc) (chunkDesc, bool) {
+	if a.gci == nil {
+		return d, false
+	}
+	res, err := a.gci.LookupChunkFresh(ctx, d.scope, d.plaintextHash)
+	if err != nil {
+		a.logger.Warn("chunked GET: re-read of a missing chunk's row failed", zap.String("hash", shortHash(d.plaintextHash)), zap.Error(err))
+		return d, false
+	}
+	if res == nil || !res.Exists || res.Entry == nil {
+		return d, false
+	}
+	e := res.Entry
+	n := d
+	n.storageKey = e.StorageKey
+	if n.storageKey == "" {
+		n.storageKey = "_chunks/" + d.plaintextHash
+	}
+	n.backendID = e.BackendID
+	if e.CiphertextHash != nil {
+		n.ciphertextHash = *e.CiphertextHash
+	}
+	if e.EncryptionKeyVersion != nil {
+		n.keyVersion = *e.EncryptionKeyVersion
+	}
+	n.encrypted = e.Encrypted
+	n.compressed = e.CompressionAlgo != nil
+	n.size = e.SizeBytes
+	changed := n.storageKey != d.storageKey || n.backendID != d.backendID ||
+		n.keyVersion != d.keyVersion || n.ciphertextHash != d.ciphertextHash
+	return n, changed
 }
 
 // handleChunkedGet serves a chunked object by streaming its content-defined

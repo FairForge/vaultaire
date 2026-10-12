@@ -47,6 +47,9 @@ type fixedBucketDriver struct {
 	// failReadAfter > 0: a read hands out this many bytes, then fails
 	// (a backend connection dropped mid-body).
 	failReadAfter atomic.Int64
+	// onGet, when set, runs at the start of every Get (a test pauses a
+	// reader there: the address it was told about can change meanwhile).
+	onGet func(container, artifact string)
 }
 
 // midBodyFailure is a body that breaks after n bytes.
@@ -88,6 +91,9 @@ func (d *fixedBucketDriver) path(tenant, container, artifact string) string {
 func (d *fixedBucketDriver) Name() string { return "fixed" }
 
 func (d *fixedBucketDriver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
+	if d.onGet != nil {
+		d.onGet(container, artifact)
+	}
 	if d.failGet.Load() {
 		return nil, errors.New("fixed: connection refused")
 	}

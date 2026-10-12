@@ -21,10 +21,16 @@ const keyReencryptJobName = "key_reencrypt"
 
 const (
 	// keyReencryptRetireAfter: how long the old address of a re-encrypted
-	// chunk is kept. A reader that resolved the row before the swap (its own
-	// in-flight GET, or another process's cached row — gciCacheTTL is 5 min)
-	// still finds the blob it was told about.
-	keyReencryptRetireAfter = 15 * time.Minute
+	// chunk is kept, for a reader that resolved the row before the swap.
+	// The bound that matters is not another process's cached row
+	// (gciCacheTTL, 5 min) but a stream still on its plan: a chunked GET
+	// resolves every chunk when it starts, and 10 GiB at 10 MB/s is 17 min
+	// (a tenant paced at the 64 KiB/s egress floor needs 17 min per 64 MiB
+	// chunk). 15 min cut those at their next chunk. The GET now re-reads a
+	// chunk's row when its address answers "not there" (WP-R8-1 A2), so the
+	// grace is the fallback for a reader that cannot re-read (an older
+	// build during a switch, a cached plan elsewhere): 1 h.
+	keyReencryptRetireAfter = time.Hour
 	// keyReencryptScanLimit bounds one run's candidate scan; the byte budget
 	// usually stops it first.
 	keyReencryptScanLimit    = 10000
