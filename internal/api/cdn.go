@@ -88,11 +88,12 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 	var floor string
 	var lastAccessed time.Time
 	var isChunked bool
+	var storageKey string
 	err = s.db.QueryRowContext(ctx, `
-		SELECT size_bytes, etag, content_type, updated_at, COALESCE(content_disposition, ''), COALESCE(backend_name, ''), floor, last_accessed, is_chunked
+		SELECT size_bytes, etag, content_type, updated_at, COALESCE(content_disposition, ''), COALESCE(backend_name, ''), floor, last_accessed, is_chunked, COALESCE(storage_key, '')
 		FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-		tenantID, bucket, key).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &contentDisposition, &backendName, &floor, &lastAccessed, &isChunked)
+		tenantID, bucket, key).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &contentDisposition, &backendName, &floor, &lastAccessed, &isChunked, &storageKey)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -153,7 +154,9 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	container := fmt.Sprintf("%s_%s", tenantID, bucket)
+	// The object's bytes are at the row's address (WP-R2-1), <key> when it
+	// records none.
+	container, blob := objectBlobAddress(tenantID, bucket, key, storageKey)
 	// Tenant-scoped backends (iDrive, Geyser) build their storage keys from
 	// the context tenant, not the container name. Serving without it made
 	// every driver look under tenant "default" — public objects on those
@@ -182,7 +185,7 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 		if !isChunked { // a chunked row's name is a sentinel ('chunked' / ''), not a route
 			noteRecordedBackend(s.engine, s.logger, "cdn", backendName)
 		}
-		s.engine.HintBackend(container, key, backendName)
+		s.engine.HintBackend(container, blob, backendName)
 	}
 	// Backend-attribution slot: the engine records which backend served the
 	// bytes so CDN egress lands in backend_bandwidth_daily too.
@@ -192,7 +195,7 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 		// an interrupted commit serves the one of this size (Prompt 2b B3).
 		ctx = engine.WithExpectedSize(ctx, sizeBytes)
 	}
-	reader, err := s.engine.Get(ctx, container, key)
+	reader, err := s.engine.Get(ctx, container, blob)
 	if err != nil {
 		logGet := s.logger.Error
 		if errors.Is(err, engine.ErrAllBackendsUnavailable) {
@@ -221,7 +224,7 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 			// a retryable 503 that is one object's state, not a server
 			// failure; an attic object is not readable until its owner
 			// restores it.
-			switch s.smartPromoter.OnArchivedRead(ctx, tenantID, bucket, key, floor) {
+			switch s.smartPromoter.OnArchivedRead(ctx, tenantID, bucket, key, blob, floor) {
 			case archivedRestoring:
 				markClientRefusal(ctx)
 				w.Header().Set("Retry-After", autoRestoreRetryAfter)

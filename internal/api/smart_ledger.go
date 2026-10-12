@@ -81,23 +81,28 @@ type keyRoute struct {
 	backend string // the backend its whole blob is on; "" for a chunked row (no whole blob anywhere)
 	etag    string
 	unknown bool // live, whole, and no backend on record: no copy may be deleted
+	// blob is the artifact its whole blob is at on that backend: the row's
+	// storage_key, or the key when it records none (WP-R2-1).
+	blob string
 }
 
 // routeOf reads the key's route. With lock, the head row is taken FOR UPDATE
 // (q must be a transaction): every writer and deleter of the key then waits
 // for the caller's commit before it can change the row.
 func routeOf(ctx context.Context, q rowQuerier, tenantID, bucket, key string, lock bool) (keyRoute, error) {
-	query := `SELECT COALESCE(backend_name,''), COALESCE(etag,''), is_chunked FROM object_head_cache
+	query := `SELECT COALESCE(backend_name,''), COALESCE(etag,''), is_chunked, COALESCE(storage_key,'') FROM object_head_cache
 		WHERE tenant_id=$1 AND bucket=$2 AND object_key=$3`
 	if lock {
 		query += ` FOR UPDATE`
 	}
 	var rt keyRoute
 	var chunked bool
-	err := q.QueryRowContext(ctx, query, tenantID, bucket, key).Scan(&rt.backend, &rt.etag, &chunked)
+	var storageKey string
+	err := q.QueryRowContext(ctx, query, tenantID, bucket, key).Scan(&rt.backend, &rt.etag, &chunked, &storageKey)
 	switch {
 	case err == nil:
 		rt.live, rt.headRow = true, true
+		rt.blob = blobArtifact(key, storageKey)
 		if chunked {
 			rt.backend = "" // the object is its chunks: no whole blob at this key is live
 		} else if rt.backend == "" {
@@ -110,7 +115,8 @@ func routeOf(ctx context.Context, q rowQuerier, tenantID, bucket, key string, lo
 
 	// No head row. On a versioning-enabled bucket that is also the state of a
 	// key whose current version is a delete marker — and then the newest live
-	// version's bytes are still at the key (versionBytesIntact).
+	// version's bytes are still at the key (versionBytesIntact), or at the
+	// address its row records (WP-R2-1).
 	var latestIsMarker bool
 	err = q.QueryRowContext(ctx, `SELECT is_delete_marker FROM object_versions
 		WHERE tenant_id=$1 AND bucket=$2 AND object_key=$3 AND is_latest = TRUE LIMIT 1`,
@@ -121,9 +127,9 @@ func routeOf(ctx context.Context, q rowQuerier, tenantID, bucket, key string, lo
 	if err != nil {
 		return keyRoute{}, fmt.Errorf("read latest version: %w", err)
 	}
-	err = q.QueryRowContext(ctx, `SELECT COALESCE(backend_name,''), COALESCE(etag,'') FROM object_versions
+	err = q.QueryRowContext(ctx, `SELECT COALESCE(backend_name,''), COALESCE(etag,''), COALESCE(storage_key,'') FROM object_versions
 		WHERE tenant_id=$1 AND bucket=$2 AND object_key=$3 AND is_delete_marker = FALSE
-		ORDER BY created_at DESC LIMIT 1`, tenantID, bucket, key).Scan(&rt.backend, &rt.etag)
+		ORDER BY created_at DESC LIMIT 1`, tenantID, bucket, key).Scan(&rt.backend, &rt.etag, &storageKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		return keyRoute{}, nil
 	}
@@ -132,22 +138,29 @@ func routeOf(ctx context.Context, q rowQuerier, tenantID, bucket, key string, lo
 	}
 	rt.live = true
 	rt.unknown = rt.backend == ""
+	rt.blob = blobArtifact(key, storageKey)
 	return rt, nil
 }
 
-// deleteCopyOn removes the key's blob on ONE named backend, through its
-// driver. Never through engine.Delete: that falls back to the primary when
+// routesTo reports whether the key's live bytes are the blob at (backend,
+// blob): the one copy no cleanup may touch.
+func (rt keyRoute) routesTo(backend, blob string) bool {
+	return rt.backend == backend && rt.blob == blob
+}
+
+// deleteCopyOn removes one blob (blob = the artifact: a row's address) on ONE
+// named backend, through its driver. Never through engine.Delete: that falls back to the primary when
 // the named backend misses, and the primary is where the live bytes of an
 // overwritten object are. Two registered driver names never share a store
 // (cmd/vaultaire/main.go registers each backend once; the default iDrive
 // region is the primary and gets no `idrive-<region>` twin), so a delete on
 // a backend the key does not route to cannot reach the bytes it does route to.
-func deleteCopyOn(ctx context.Context, eng *engine.CoreEngine, backend, tenantID, container, key string) error {
+func deleteCopyOn(ctx context.Context, eng *engine.CoreEngine, backend, tenantID, container, blob string) error {
 	drv, ok := eng.GetDriver(backend)
 	if !ok {
 		return fmt.Errorf("backend %q not registered", backend)
 	}
-	if err := drv.Delete(common.WithTenantID(ctx, tenantID), container, key); err != nil && !isObjectMissingErr(err) {
+	if err := drv.Delete(common.WithTenantID(ctx, tenantID), container, blob); err != nil && !isObjectMissingErr(err) {
 		return err
 	}
 	return nil
@@ -163,9 +176,11 @@ func deleteCopyOn(ctx context.Context, eng *engine.CoreEngine, backend, tenantID
 // What it cannot see: a writer whose bytes landed before the delete and
 // whose transaction had not begun when this ran (the gap between a PUT's
 // backend write returning and its BeginTx — the measured-size and digest
-// checks, no I/O). That write is lost undetected.
+// checks, no I/O). That write is lost undetected. blob is the artifact the
+// delete removed: a write that went to its own address (WP-R2-1, 2C) can
+// never be the bytes a stale-copy delete removed, and is not looked for.
 func checkLostWrite(ctx context.Context, db *sql.DB, eng *engine.CoreEngine, logger *zap.Logger,
-	source, tenantID, bucket, key string, deletedFrom []string) {
+	source, tenantID, bucket, key, blob string, deletedFrom []string) {
 	if len(deletedFrom) == 0 {
 		return
 	}
@@ -194,14 +209,14 @@ func checkLostWrite(ctx context.Context, db *sql.DB, eng *engine.CoreEngine, log
 		return
 	}
 	for _, b := range deletedFrom {
-		if b != rt.backend {
+		if !rt.routesTo(b, blob) {
 			continue
 		}
 		drv, ok := eng.GetDriver(b)
 		if !ok {
 			return
 		}
-		exists, exErr := drv.Exists(common.WithTenantID(ctx, tenantID), tenantID+"_"+bucket, key)
+		exists, exErr := drv.Exists(common.WithTenantID(ctx, tenantID), tenantID+"_"+bucket, blob)
 		if exErr != nil {
 			logger.Warn("stale copy: a row appeared on the backend a stale copy was deleted from and its bytes could not be checked",
 				zap.String("source", source), zap.String("tenant", tenantID), zap.String("bucket", bucket),
@@ -227,9 +242,13 @@ func checkLostWrite(ctx context.Context, db *sql.DB, eng *engine.CoreEngine, log
 // again (another writer put it back there in the meantime) the blob is that
 // writer's. A writer that has written and not yet committed is the window
 // described at the top of this file; checkLostWrite follows the delete.
+//
+// A displaced row that recorded its own address (WP-R2-1) is not this
+// function's: its blob was queued in retired_blobs inside the write's
+// transaction (atomicHeadUpsertReleasing).
 func dropDisplacedBlob(ctx context.Context, db *sql.DB, eng engine.Engine, logger *zap.Logger, source string,
 	tenantID, bucket, container, key string, displaced displacedRow, written string) {
-	if db == nil || displaced.Chunked || displaced.Backend == "" || written == "" || displaced.Backend == written {
+	if db == nil || displaced.Chunked || displaced.StorageKey != "" || displaced.Backend == "" || written == "" || displaced.Backend == written {
 		return
 	}
 	ce, ok := eng.(*engine.CoreEngine)
@@ -262,7 +281,7 @@ func dropDisplacedBlob(ctx context.Context, db *sql.DB, eng engine.Engine, logge
 			zap.String("backend", displaced.Backend))
 		return
 	}
-	if rt.live && (rt.unknown || rt.backend == displaced.Backend) {
+	if rt.live && (rt.unknown || rt.routesTo(displaced.Backend, key)) {
 		return
 	}
 	if err := deleteCopyOn(dctx, ce, displaced.Backend, tenantID, container, key); err != nil {
@@ -274,7 +293,7 @@ func dropDisplacedBlob(ctx context.Context, db *sql.DB, eng engine.Engine, logge
 	logger.Info("displaced blob removed",
 		zap.String("tenant", tenantID), zap.String("bucket", bucket), zap.String("key", key),
 		zap.String("from", displaced.Backend), zap.String("object_now_on", written))
-	checkLostWrite(dctx, db, ce, logger, source, tenantID, bucket, key, []string{displaced.Backend})
+	checkLostWrite(dctx, db, ce, logger, source, tenantID, bucket, key, key, []string{displaced.Backend})
 }
 
 // Ledger outcomes (smart_demotions.hot_outcome).
@@ -331,11 +350,11 @@ func (l *ledgerSettler) settle(ctx context.Context, source, tenantID, bucket, ke
 	if err != nil {
 		return "", err
 	}
-	var etag, hotBackend, coldBackend, prevOutcome string
+	var etag, hotBackend, coldBackend, prevOutcome, storageKey string
 	var hotDeletedAt sql.NullTime
-	err = tx.QueryRowContext(ctx, `SELECT etag, hot_backend, cold_backend, hot_deleted_at, hot_outcome FROM smart_demotions
+	err = tx.QueryRowContext(ctx, `SELECT etag, hot_backend, cold_backend, hot_deleted_at, hot_outcome, COALESCE(storage_key, '') FROM smart_demotions
 		WHERE tenant_id=$1 AND bucket=$2 AND object_key=$3 FOR UPDATE`,
-		tenantID, bucket, key).Scan(&etag, &hotBackend, &coldBackend, &hotDeletedAt, &prevOutcome)
+		tenantID, bucket, key).Scan(&etag, &hotBackend, &coldBackend, &hotDeletedAt, &prevOutcome, &storageKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
@@ -347,10 +366,23 @@ func (l *ledgerSettler) settle(ctx context.Context, source, tenantID, bucket, ke
 		return "", nil // settled before
 	}
 
+	// Both copies the row knows are at the address the demotion copied
+	// under (WP-R2-1; the key itself for every row before 2C).
+	blob := blobArtifact(key, storageKey)
+	// A copy a version row keeps is a version's bytes, not ours to delete
+	// (a bucket versioned after the demotion; demotion itself skips
+	// versioned buckets).
+	keptByVersion := false
+	if storageKey != "" {
+		if keptByVersion, err = versionKeepsBlob(ctx, tx, tenantID, bucket, key, storageKey); err != nil {
+			return "", err
+		}
+	}
+
 	var outcome string
 	var stale []string
 	switch {
-	case rt.headRow && !rt.unknown && rt.backend == coldBackend && rt.etag == etag:
+	case rt.headRow && !rt.unknown && rt.routesTo(coldBackend, blob) && rt.etag == etag:
 		if !hotOnRecord || !graceElapsed {
 			return "", nil
 		}
@@ -364,10 +396,13 @@ func (l *ledgerSettler) settle(ctx context.Context, source, tenantID, bucket, ke
 		if rt.live {
 			outcome = ledgerKeptChanged
 		}
-		if hotOnRecord && hotBackend != rt.backend {
+		if keptByVersion {
+			break
+		}
+		if hotOnRecord && !rt.routesTo(hotBackend, blob) {
 			stale = append(stale, hotBackend)
 		}
-		if coldBackend != rt.backend {
+		if !rt.routesTo(coldBackend, blob) {
 			stale = append(stale, coldBackend)
 		}
 	}
@@ -376,7 +411,7 @@ func (l *ledgerSettler) settle(ctx context.Context, source, tenantID, bucket, ke
 		l.beforeDelete(bucket, key)
 	}
 	for _, b := range stale {
-		if delErr := deleteCopyOn(ctx, l.eng, b, tenantID, container, key); delErr != nil {
+		if delErr := deleteCopyOn(ctx, l.eng, b, tenantID, container, blob); delErr != nil {
 			// An orphan costs money, never data. An open row stays open and
 			// the next reclaim retries; a row whose hot copy was reclaimed
 			// long ago is retried by whatever touches the key next.
@@ -407,7 +442,7 @@ func (l *ledgerSettler) settle(ctx context.Context, source, tenantID, bucket, ke
 		if l.afterDelete != nil {
 			l.afterDelete(bucket, key)
 		}
-		checkLostWrite(ctx, l.db, l.eng, l.logger, source, tenantID, bucket, key, stale)
+		checkLostWrite(ctx, l.db, l.eng, l.logger, source, tenantID, bucket, key, blob, stale)
 	}
 	return outcome, nil
 }

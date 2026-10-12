@@ -387,7 +387,7 @@ func TestPresignedURL_Integration(t *testing.T) {
 	mock.ExpectExec(`SELECT pg_advisory_xact_lock`).
 		WithArgs(testPresignTenantID, sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectQuery(`SELECT size_bytes, floor, COALESCE\(backend_name, ''\), is_chunked FROM object_head_cache`).
+	mock.ExpectQuery(`SELECT size_bytes, floor, COALESCE\(backend_name, ''\), is_chunked, COALESCE\(storage_key, ''\) FROM object_head_cache`).
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectExec(`INSERT INTO object_head_cache`).
 		WillReturnResult(sqlmock.NewResult(0, 1))

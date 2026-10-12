@@ -787,12 +787,13 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	var contentEncoding string
 	var contentLanguage string
 	var echo putEchoHeaders
+	var storageKey string
 
 	err = s.db.QueryRowContext(r.Context(), `
-		SELECT size_bytes, etag, content_type, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(tags, '{}'), COALESCE(content_disposition, ''), COALESCE(content_encoding, ''), COALESCE(content_language, ''), COALESCE(cache_control, ''), COALESCE(http_expires, ''), COALESCE(website_redirect_location, ''), floor
+		SELECT size_bytes, etag, content_type, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(tags, '{}'), COALESCE(content_disposition, ''), COALESCE(content_encoding, ''), COALESCE(content_language, ''), COALESCE(cache_control, ''), COALESCE(http_expires, ''), COALESCE(website_redirect_location, ''), floor, COALESCE(storage_key, '')
 		FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
-	`, t.ID, req.Bucket, req.Object).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &metadataJSON, &backendName, &encAlgo, &tagsJSON, &contentDisposition, &contentEncoding, &contentLanguage, &echo.CacheControl, &echo.Expires, &echo.WebsiteRedirect, &floor)
+	`, t.ID, req.Bucket, req.Object).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &metadataJSON, &backendName, &encAlgo, &tagsJSON, &contentDisposition, &contentEncoding, &contentLanguage, &echo.CacheControl, &echo.Expires, &echo.WebsiteRedirect, &floor, &storageKey)
 
 	if errors.Is(err, sql.ErrNoRows) {
 		s.logger.Warn("HEAD: object not in metadata cache",
@@ -853,7 +854,8 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	if engine.IsArchiveClass(storageClass) && s.engine != nil {
 		if drv, exists := s.engine.GetDriver(backendName); exists {
 			if restorer, isRestorer := drv.(engine.Restorer); isRestorer {
-				if st, stErr := restorer.RestoreStatus(r.Context(), t.NamespaceContainer(req.Bucket), req.Object); stErr == nil {
+				// The restore state of the blob the row addresses (WP-R2-1).
+				if st, stErr := restorer.RestoreStatus(r.Context(), t.NamespaceContainer(req.Bucket), blobArtifact(req.Object, storageKey)); stErr == nil {
 					if st.Restore != "" {
 						w.Header().Set("x-amz-restore", st.Restore)
 					}

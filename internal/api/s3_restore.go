@@ -24,27 +24,30 @@ type restoreRequestXML struct {
 // the object has no restore concept for the customer: it is on a backend
 // without one, or it is a downstairs (standard-floor) object — STANDARD to
 // the customer wherever the Smart tier parked its bytes (WP-R13-1). The
-// second return is the class the customer sees.
-func objectRestorer(ce *engine.CoreEngine, db *sql.DB, r *http.Request, tenantID, bucket, object string) (engine.Restorer, string, error) {
-	var backendName, floor string
+// second return is the class the customer sees, the third the artifact the
+// object's bytes are at (its row's storage_key, WP-R2-1; the key when it
+// records none) — what a restore recalls.
+func objectRestorer(ce *engine.CoreEngine, db *sql.DB, r *http.Request, tenantID, bucket, object string) (engine.Restorer, string, string, error) {
+	var backendName, floor, storageKey string
 	err := db.QueryRowContext(r.Context(), `
-		SELECT COALESCE(backend_name, ''), floor FROM object_head_cache
+		SELECT COALESCE(backend_name, ''), floor, COALESCE(storage_key, '') FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-		tenantID, bucket, object).Scan(&backendName, &floor)
+		tenantID, bucket, object).Scan(&backendName, &floor, &storageKey)
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
+	blob := blobArtifact(object, storageKey)
 	class := engine.CustomerStorageClass(floor, backendName)
 	if ce == nil || !engine.IsArchiveClass(class) {
-		return nil, class, nil
+		return nil, class, blob, nil
 	}
 	drv, ok := ce.GetDriver(backendName)
 	if !ok {
 		noteRecordedBackend(ce, nil, "restore", backendName)
-		return nil, class, nil
+		return nil, class, blob, nil
 	}
 	restorer, _ := drv.(engine.Restorer)
-	return restorer, class, nil
+	return restorer, class, blob, nil
 }
 
 // handleRestoreObject implements POST /{bucket}/{key}?restore (V18.2 minimum
@@ -62,7 +65,7 @@ func (s *Server) handleRestoreObject(w http.ResponseWriter, r *http.Request, req
 		return
 	}
 
-	restorer, class, lookupErr := objectRestorer(s.engine, s.db, r, t.ID, req.Bucket, req.Object)
+	restorer, class, blob, lookupErr := objectRestorer(s.engine, s.db, r, t.ID, req.Bucket, req.Object)
 	if errors.Is(lookupErr, sql.ErrNoRows) {
 		reqID := generateRequestID()
 		if suggestion := keySuggestion(r.Context(), s.db, t.ID, req.Bucket, req.Object); suggestion != "" {
@@ -103,7 +106,7 @@ func (s *Server) handleRestoreObject(w http.ResponseWriter, r *http.Request, req
 		}
 	}
 
-	if restoreErr := restorer.RestoreObject(r.Context(), t.NamespaceContainer(req.Bucket), req.Object, days); restoreErr != nil {
+	if restoreErr := restorer.RestoreObject(r.Context(), t.NamespaceContainer(req.Bucket), blob, days); restoreErr != nil {
 		switch {
 		case errors.Is(restoreErr, engine.ErrRestoreAlreadyInProgress):
 			WriteS3Error(w, ErrRestoreAlreadyInProgress, r.URL.Path, generateRequestID())

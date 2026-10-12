@@ -150,6 +150,10 @@ var sweepBucketSources = []struct{ table, query string }{
 	// containers count, with the tenant part taken off.
 	{"object_locations", `SELECT DISTINCT substr(bucket, length($1) + 2) FROM object_locations
 	                       WHERE tenant_id = $1 AND left(bucket, length($1) + 1) = $1 || '_'`},
+	// retired_blobs.container is the engine container too (WP-R2-1): a
+	// displaced blob waiting for the collector is in the tenant's bucket.
+	{"retired_blobs", `SELECT DISTINCT substr(container, length($1) + 2) FROM retired_blobs
+	                    WHERE tenant_id = $1 AND left(container, length($1) + 1) = $1 || '_'`},
 }
 
 // sweepBucketTablesExcluded are tenant tables with a bucket-like column that

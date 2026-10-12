@@ -130,11 +130,20 @@ type candidate struct {
 	key      string
 	size     int64
 	etag     string
+	blob     string // where the whole object's bytes are: storage_key, else the key (WP-R2-1)
+}
+
+// address is the artifact the object's bytes are at ("" blob = the key).
+func (c candidate) address() string {
+	if c.blob != "" {
+		return c.blob
+	}
+	return c.key
 }
 
 func selectCandidates(ctx context.Context, db *sql.DB, minSize int64, tenantFilter, bucketFilter string, limit int) ([]candidate, error) {
 	query := `
-		SELECT tenant_id, bucket, object_key, size_bytes, etag
+		SELECT tenant_id, bucket, object_key, size_bytes, etag, COALESCE(storage_key, object_key)
 		FROM object_head_cache
 		WHERE is_chunked = FALSE
 		  AND encryption_algorithm = ''
@@ -169,7 +178,7 @@ func selectCandidates(ctx context.Context, db *sql.DB, minSize int64, tenantFilt
 	var out []candidate
 	for rows.Next() {
 		var c candidate
-		if err := rows.Scan(&c.tenantID, &c.bucket, &c.key, &c.size, &c.etag); err != nil {
+		if err := rows.Scan(&c.tenantID, &c.bucket, &c.key, &c.size, &c.etag, &c.blob); err != nil {
 			return nil, fmt.Errorf("scan candidate: %w", err)
 		}
 		out = append(out, c)
@@ -183,7 +192,7 @@ func migrateObject(ctx context.Context, d *deps, c candidate, dryRun, keepOrigin
 
 	// The object is read where its tenant's requests wrote it: drivers key by
 	// the tenant in the context and refuse a call that names none.
-	reader, err := d.eng.Get(common.WithTenantID(ctx, c.tenantID), container, c.key)
+	reader, err := d.eng.Get(common.WithTenantID(ctx, c.tenantID), container, c.address())
 	if err != nil {
 		return nil, fmt.Errorf("get object %s/%s: %w", c.bucket, c.key, err)
 	}
@@ -314,7 +323,7 @@ func migrateObject(ctx context.Context, d *deps, c candidate, dryRun, keepOrigin
 	// Step 2: flip is_chunked flag
 	if _, err := d.db.ExecContext(ctx, `
 		UPDATE object_head_cache
-		SET is_chunked = TRUE, size_bytes = $4, updated_at = NOW()
+		SET is_chunked = TRUE, size_bytes = $4, storage_key = NULL, updated_at = NOW()
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
 	`, c.tenantID, c.bucket, c.key, measuredSize); err != nil {
 		return nil, fmt.Errorf("flip is_chunked: %w", err)
@@ -322,7 +331,7 @@ func migrateObject(ctx context.Context, d *deps, c candidate, dryRun, keepOrigin
 
 	// Step 3: delete the monolithic copy (only after flag flip)
 	if !keepOriginal {
-		if err := d.eng.Delete(common.WithTenantID(ctx, c.tenantID), container, c.key); err != nil {
+		if err := d.eng.Delete(common.WithTenantID(ctx, c.tenantID), container, c.address()); err != nil {
 			d.log.Warn("delete original failed (object is migrated, original leaked)",
 				zap.String("key", c.key), zap.Error(err))
 		}
