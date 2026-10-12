@@ -1,0 +1,33 @@
+File: vaultaire-prof
+Type: cpu
+Time: 2026-10-12 12:01:24 MDT
+Duration: 10.16s, Total samples = 14.11s (138.91%)
+Showing nodes accounting for 13.89s, 98.44% of 14.11s total
+Dropped 119 nodes (cum <= 0.07s)
+Showing top 25 nodes out of 125
+      flat  flat%   sum%        cum   cum%
+    10.62s 75.27% 75.27%     10.62s 75.27%  syscall.rawsyscalln
+     1.71s 12.12% 87.38%      1.71s 12.12%  crypto/md5.block
+     0.63s  4.46% 91.85%      0.63s  4.46%  runtime.kevent
+     0.30s  2.13% 93.98%      0.30s  2.13%  crypto/internal/fips140/sha256.blockSHA2
+     0.26s  1.84% 95.82%      0.26s  1.84%  runtime.pthread_cond_wait
+     0.23s  1.63% 97.45%      0.23s  1.63%  runtime.fcntl
+     0.11s  0.78% 98.23%      0.11s  0.78%  runtime.pthread_cond_signal
+     0.01s 0.071% 98.30%      0.15s  1.06%  github.com/lib/pq.(*conn).recvMessage
+     0.01s 0.071% 98.37%      9.47s 67.12%  internal/poll.(*FD).Write
+     0.01s 0.071% 98.44%      0.57s  4.04%  net/http.(*body).readLocked
+         0     0% 98.44%      0.70s  4.96%  bufio.(*Reader).Read
+         0     0% 98.44%      0.30s  2.13%  crypto/internal/fips140/sha256.(*Digest).Write
+         0     0% 98.44%      0.30s  2.13%  crypto/internal/fips140/sha256.block
+         0     0% 98.44%      1.71s 12.12%  crypto/md5.(*digest).Write
+         0     0% 98.44%      0.36s  2.55%  database/sql.(*DB).QueryContext
+         0     0% 98.44%      0.36s  2.55%  database/sql.(*DB).QueryContext.func1
+         0     0% 98.44%      0.36s  2.55%  database/sql.(*DB).QueryRowContext
+         0     0% 98.44%      0.09s  0.64%  database/sql.(*DB).execDC
+         0     0% 98.44%      0.09s  0.64%  database/sql.(*DB).execDC.func2
+         0     0% 98.44%      0.36s  2.55%  database/sql.(*DB).query
+         0     0% 98.44%      0.42s  2.98%  database/sql.(*DB).queryDC
+         0     0% 98.44%      0.42s  2.98%  database/sql.(*DB).queryDC.func1
+         0     0% 98.44%      0.46s  3.26%  database/sql.(*DB).retry
+         0     0% 98.44%      0.09s  0.64%  database/sql.ctxDriverExec
+         0     0% 98.44%      0.42s  2.98%  database/sql.ctxDriverQuery

@@ -1,0 +1,16 @@
+smoke-std-origin small_put_4k                 n=30 p50 76 ms  p95 494 ms  max 687 ms
+smoke-std-origin small_get_4k                 n=30 p50 57 ms  p95 72 ms  max 245 ms  ok
+smoke-std-origin small_head_4k                n=30 p50 0 ms  p95 1 ms  max 1 ms
+smoke-std-origin list_prefix                  0.00 s  [30 keys listed]
+smoke-std-origin small_delete                 n=30 p50 65 ms  p95 78 ms  max 87 ms
+smoke-std-origin single_put_8mb               0.48 s  17.5 MB/s
+smoke-std-origin get_single_8mb               1.21 s  7.0 MB/s  ttfb 165 ms  ok
+smoke-std-origin single_put_64mb              4.28 s  15.7 MB/s
+smoke-std-origin get_single_64mb              0.97 s  68.9 MB/s  ttfb 156 ms  ok
+smoke-std-origin single_put_256mb             1.26 s  213.9 MB/s
+smoke-std-origin get_single_256mb             2.87 s  93.7 MB/s  ttfb 568 ms  ok
+smoke-std-origin mpu_put_256mb                2.16 s  124.2 MB/s  [16 parts x 16 MiB, 8 wide, complete 1.6 s]
+smoke-std-origin get_mpu_256mb                4.16 s  64.5 MB/s  ttfb 109 ms  ok
+smoke-std-origin mpu_put_1024mb               4.73 s  226.9 MB/s  [64 parts x 16 MiB, 8 wide, complete 2.7 s]
+smoke-std-origin get_mpu_1024mb               23.07 s  46.5 MB/s  ttfb 131 ms  ok
+smoke-std-origin range_get_1mb                n=20 p50 67 ms  p95 79 ms  max 80 ms  [of mpu-1024mb.bin]

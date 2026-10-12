@@ -62,7 +62,9 @@ asks the archive restore state. Raw lines in `raw-2026-10-12/`.
    must not wait for. Also: **a key without a file extension is never cached**
    (`cf-cache-status: DYNAMIC` on a 4 KiB `…/small/000` from both vantages) — the
    known extension rule; a cache rule for `/cdn/*` or the docs must say it.
-4. **The concurrent-ingest tail on the origin is Vaultaire's, not iDrive's.** 20 s of
+4. ~~The concurrent-ingest tail on the origin is Vaultaire's~~ — **withdrawn the same
+   day, see §8.2: it is the bench client's HTTP/2 transport; the origin ingests at
+   614–859 MB/s with p99 0.7 s from a plain HTTP/1.1 client.** The original text: 20 s of
    1 MiB PUTs from 16 workers: raw Lyve 748 MB/s p99 420 ms; via the origin 103 MB/s
    p99 2.4 s (10-04 on iDrive: 53 MB/s p99 11.5 s, blamed on the h2 window then).
    Sustained 16 MiB uploads are fine (336 MB/s vs 610 raw), the load gate's 100 × 1 MB
@@ -246,8 +248,8 @@ numbers (31 ms small ops) would roughly triple the small-file rate.
 ## 7. Open after today
 
 - Finding 1 (parallel_get on lyve) and finding 2 (unlogged 400 on complete; sync
-  refusals of generated names) are code; finding 3 needs the zone A/B (owner);
-  finding 4 needs a profile of the PUT path under concurrency.
+  refusals of generated names) are code → PR #693, same day (§8.7); finding 3
+  needs the zone A/B (owner); finding 4 is withdrawn (§8.2).
 - Archive restore timing: keep the hourly probe; the 10-04 objects hit ~13 days on
   2026-10-17.
 - A second-datacenter client (any $5 VPS) for the real customer column.
@@ -259,3 +261,186 @@ what it held before (sync-lab, sync-pub, tier-archive-20261004, vault-bench-2026
 upcap-20261004, the three pre-existing versioned validate buckets, vbench-*). restic
 0.19.1 installed at `~/bin/restic` on SLC; results in
 `~/vaultaire-bench/results-20261012/` and `raw-2026-10-12/` here.
+
+## 8. Second round, same day: "can we do all?"
+
+Everything in §7 that did not need the owner, a second datacenter or the tape
+clock was run between 17:50 and 18:40 UTC. Prod moved twice meanwhile
+(`c74f70e` at 15:56, `3aece84` at 18:01 — both copy/docs-and-WP-R8-1 builds, no
+data-path change); which build a number is from is stated where it matters.
+Raw lines: `raw-2026-10-12/round2-*` (the SLC run log, the Mac tools and apps logs, ingest JSON lines from SLC, the Mac and the local instance, the smoke run, the presigned transcript, the local pprof top).
+
+### 8.1 Smoke on the new build (`c74f70e`, Standard, origin, from SLC)
+
+4 KiB PUT p50 76 ms (p95 494), GET 57, HEAD 0, DELETE 65; 256 MiB single PUT
+214 MB/s, its GET 94 MB/s (chunked); multipart 256 MiB 124 MB/s up / 64 down;
+multipart 1 GiB 227 MB/s up / **46.5 MB/s down** (the finding-1 shape, still
+there before #693); 1 MiB ranges p50 67 ms; 0 mismatches. Same picture as the
+morning, slightly better on the small PUT.
+
+### 8.2 The concurrent-ingest tail is the bench client's, not Vaultaire's (finding 4 retracted)
+
+`cmd/tools/ingestbench` (new: N workers × fixed-size PUTs, per-PUT latency) with
+a plain HTTP/1.1 client, bench tenant, 4 MiB objects, 1 GiB per run:
+
+| path (from SLC) | workers | MB/s | ops/s | p50 | p99 |
+|---|---|---|---|---|---|
+| origin `s3.stored.ge` (HAProxy + TLS) | 2 | 72 | 17 | 101 ms | 334 ms |
+| origin | 8 | 318 | 76 | 94 | 302 |
+| origin | 32 | **614** | 147 | 108 | **705** |
+| origin | 64 | **859** | 205 | 212 | 709 |
+| loopback `:8001` | 8 | 282 | 67 | 97 | 433 |
+| loopback | 32 | 687 | 164 | 113 | 668 |
+| loopback | 64 | 887 | 212 | 202 | 689 |
+| origin, 64 KiB objects | 32 | 29 | **441** | 66 | 200 |
+| origin, 32 workers, **HTTP/2 allowed** (one connection, 32 streams) | 32 | **114** | 27 | 1277 | **2307** |
+| origin, HTTP/1.1 again, same minute | 32 | 791 | 189 | 134 | 407 |
+| bench-compare `concurrent_ingest_20s`, same minute | 32 | 94 | 24 | 1304 | 2559 |
+| origin, HTTP/2, 1 / 4 / 16 workers | 1 / 4 / 16 | 32 / 111 / 168 | | 122 / 120 / 417 | 186 / 461 / 990 |
+| `stored.ge` (Cloudflare), HTTP/2 / HTTP/1.1 | 32 | 181 / 321 | | 631 / 274 | 972 / 976 |
+
+So the origin ingests 4 MiB objects at 600–860 MB/s with a p99 of 0.7 s and
+441 small PUTs/s, and HAProxy + TLS cost nothing measurable against loopback.
+The 103 MB/s / p99 2.4 s of §3 came from bench-compare's own client (its
+transport allows HTTP/2: one connection, 32 streams, one flow-control window —
+the same shape the 10-04 report blamed on iDrive). Run back to back with the same tool: HTTP/2 allowed 114 MB/s p99 2.3 s,
+HTTP/1.1 791 MB/s p99 0.4 s, bench-compare in between 94 MB/s p99 2.6 s. The
+h2 path is HAProxy's per-stream flow control (`tune.h2.initial-window-size
+262144`, set on 2026-10-04 for the Cloudflare→origin hop): one stream from the
+box does 32 MB/s, 4 streams 111, 16 streams 168, and 32 streams on one
+connection fall back to 114. From the Mac at 66 ms the origin barely cares
+(1 stream 8.5 vs 8.2 MB/s, 8 streams 28 vs 33) but the Cloudflare host does:
+8 streams 13.8 MB/s with two 21 s stalls on h2 vs 51 MB/s on HTTP/1.1. Go
+clients multiplex every request onto one h2 connection per host, and rclone
+and restic leave HTTP/2 on by default — so this is a real customer shape for
+many-small-files uploads, and the fix is an HAProxy knob (a larger
+`tune.h2.fe.initial-window-size`, HAProxy 3.2 has the frontend-only form) plus
+a docs line ("`--disable-http2` for bulk uploads"), not a Vaultaire change. The
+morning's finding 4 is withdrawn: there is no per-PUT serialisation to profile
+on prod.
+
+**The local profile agrees.** The product binary with `net/http/pprof` patched
+in (never committed), local driver, a private migrated DB, two freshly
+registered tenants, 32 workers × 4 MiB: CPU is 22 % of one core over the run,
+three quarters of it the disk `write(2)` and 12 % the MD5 of the ETag;
+`reserveQuota` (one `SELECT … FOR UPDATE` on the tenant's quota row per PUT)
+held no goroutine at the sampled instant and the head-row upsert held 6 of 30.
+Per-PUT service time is ~90 ms at 8 workers (p99 177 ms, 369 MB/s on the Mac's
+SSD); more workers only queue (32: p50 378 ms, 64: p50 709 ms, same MB/s).
+
+### 8.3 Two tenants at once: shared capacity, no cross-tenant lock
+
+Prod has no second key I may use (signups are closed; `bench2`'s secret is not
+stored — `api_keys.secret_key` is empty and the `tenants` mirror is stale; a
+mint is the owner's), so this ran on the local instance above: tenants A and B
+each with 32 workers get 167 + 167 MB/s where A alone got 306–356, each at the
+p50 of a 64-worker solo run (747 vs 709 ms); with 16 + 16 workers 183 + 182 MB/s
+at p99 0.75–0.8 s. The box is one pool; a tenant's quota row lock never shows
+up. For the prod column with a real second tenant the same two commands run
+from `~/vaultaire-bench` the moment a key exists.
+
+### 8.4 Striped Sync objects: every range is right, each costs 1.3–3.3 s to first byte
+
+1 GiB multipart to `sync-lab` (4 × 256 MiB pieces on the bridges, complete
+25 s), then `GetObject` with `Range` through the origin, bytes compared to the
+source:
+
+| range | bytes | time | result |
+|---|---|---|---|
+| first MiB of piece 0 | 1 MiB | 4.9 s | ok |
+| 2 bytes across the 256 MiB seam | 2 | 3.3 s | ok |
+| first MiB of piece 1 | 1 MiB | 1.9 s | ok |
+| 1 MiB either side of the seam | 2 MiB | 1.5 s | ok |
+| 2 bytes across the 512 MiB and 768 MiB seams | 2 + 2 | 1.6 / 3.4 s | ok |
+| 200 MiB → 600 MiB (three pieces) | 400 MiB | 9.8 s (43 MB/s) | ok |
+| last byte, last MiB, `bytes=-1048576` | 1 / 1 MiB / 1 MiB | 3.2 / 1.3 / 1.6 s | ok |
+| past the end | — | — | 416 RangeNotSatisfiable |
+| whole object | 1 GiB | 8.9 s (121 MB/s) | ok |
+
+`Content-Range` is exact on every answer. The time is the bridge's open of a
+piece, not Vaultaire: a 2-byte read pays the same 1.6–3.3 s as a megabyte.
+
+### 8.5 Presigned browser uploads: both hosts, with the one difference known
+
+A boto3 "backend" set `?cors` (one origin, PUT/GET/HEAD, ExposeHeaders ETag) and
+signed URLs; a curl "browser" sent the preflight and the uploads with `Origin`:
+
+| step | `stored.ge` (Cloudflare) | `s3.stored.ge` (origin) |
+|---|---|---|
+| preflight PUT, allowed origin | 200, rules echoed, max-age 3000 | 200, same |
+| preflight, foreign origin | 403 | 403 |
+| presigned single PUT 8 MiB | 200, 1.0 s | 200, 1.0 s |
+| presigned single PUT 150 MiB | **413** in 0.3 s | 200, 4.5 s |
+| presigned UploadPart × 3 (16 MiB) | 200, **ETag exposed** | 200, ETag exposed |
+| CompleteMultipartUpload (backend) | ok, 4.5 s total | ok, 5.1 s |
+| presigned GET 48 MiB with Origin | 200, bytes equal | 200, bytes equal |
+
+A browser can do single PUTs up to 100 MB and multipart of any size through
+`stored.ge`, and anything through `s3.stored.ge`. Nothing to fix; the docs'
+"multipart above 100 MB on the Cloudflare host" rule is confirmed.
+
+### 8.6 Customer tools nobody had pointed at Stored
+
+All from the Mac (66 ms RTT, 25–40 MB/s link) unless noted; dataset 500 small
+files (4–256 KiB) + 3 × 32 MiB, 161 MiB.
+
+| tool | result |
+|---|---|
+| **rclone 1.71** sync / re-sync no-op / check / copy down / delete, origin and `stored.ge` | all pass, 503 files, byte-identical; sync 11 s, no-op 3 s, check 1 s, download 7 s |
+| **rclone mount 1.60** on the box, `--vfs-cache-mode writes` | 256 MiB write lands in S3 8.9 s after `close`; 200 × 10 KiB created in 0.2 s, all 200 in S3 after 10 s; cold read 256 MiB 69 MB/s, sha equal; 200 small reads 13 s (66 ms each, the HEAD+GET pair); 10 MiB at +100 MiB 0.73 s |
+| **s5cmd 2.3** cp 500 small (32 workers) / 3 × 32 MiB / ls / cp down / rm | all pass, byte-identical; 4 s / 4 s / 1 s / 5 s / 3 s |
+| **mc** (MinIO client) mirror / stat / ls -r / mirror down / rm | all pass, byte-identical; 12 s / 1 s / 7 s / 4 s |
+| **Duplicati** (docker, `s3-client=aws`, path-style, **`use-ssl=true`**) | backup 256 MiB + 300 files 28 s, incremental 4 s, `test all` with full remote verification 11 s "no errors", restore 301 files 12 s byte-identical; 16 keys, 274 MB |
+| Duplicati with its default (plain HTTP) | fails: HAProxy answers the http listing with a 302 to https and the AWS SDK reports "Error Code Found" — a docs line ("tick Use SSL") |
+| **Nextcloud 31** `files_external` amazons3, path-style, region us-east-1 | mount verifies; WebDAV PUT 32 MiB 15 s, GET 2 s byte-identical; **100 × 8 KiB through Nextcloud 65–118 s** (0.65–1.2 s per file — Nextcloud's own stat/write/stat per file over S3, 102 keys landed) |
+| **Cyberduck 9.5** (`duck`) | list buckets works; **every bucket-scoped operation fails "Cannot read bucket location"** — `GET ?location` answers the bucket's region column (`us-central-1`, an iDrive id) in the body and `x-amz-bucket-region`, and Cyberduck refuses a region it cannot map (`--region` does not override it) |
+
+The Cyberduck one is a product decision: answer the SigV4 signing region
+(`us-east-1`, what every other S3-compatible answers) on `?location` and keep
+the placement region on the dashboard / a Stored header, or keep the truthful
+answer and lose Cyberduck, Mountain Duck and anything on their S3 library.
+Recommendation: the former — nothing signs against `us-central-1`, and the
+bucket's placement is already in the dashboard and the management API.
+
+### 8.7 Lyve parallel GET after #693
+
+`a77f7d5` went live at 18:22 UTC (the merge queue deployed it 19 minutes after
+the PR opened); the bench tenant already had `parallel_get` ON. Same tierbench
+shape as §8.1, three vantages, within the next four minutes:
+
+| whole-object GET (Lyve, bench tenant) | before #693 (§8.1 / §2) | after, origin | after, loopback | after, Cloudflare |
+|---|---|---|---|---|
+| multipart 1 GiB | 38–46 MB/s | **135 MB/s** (7.9 s, TTFB 0.95 s) | 86 MB/s | **93 MB/s** |
+| multipart 256 MiB | 57–64 MB/s | **99 MB/s** | 107 MB/s | 81 MB/s |
+| single 256 MiB (chunked path, unchanged) | 94–124 MB/s | 82 MB/s | 91 MB/s | — |
+| 1 MiB ranges of the 1 GiB object, p50 | 67 ms | 119 ms | 107 ms | 164 ms |
+
+`vaultaire_large_get_streams_total{path="ranged",outcome="ok"}` went 0 → 7 with
+0 errors and 0 fallbacks; the server-side throughput histogram puts the seven
+streams at 64–150 MB/s (mean 95). Finding 1 is closed: a multipart upload on the
+Standard tier now reads back at the chunked path's speed or better, ~3× what the
+morning measured. The 1 MiB ranges got ~50 ms slower in this run (119 vs 67 ms
+p50) — one run, the box's Lyve path at that minute; worth a glance in the next
+bench rather than a change now. One side note from the Cloudflare pass: a
+256 MiB *single* PUT through `stored.ge` answered **502**, not 413, in this run
+(the morning's 256 MiB single via CF was skipped by `-max-single-mb 100`); the
+100 MB rule stands either way.
+
+### 8.8 What changed in the open list
+
+- Finding 1 and 2: PR #693 (`GetRangeInfo` on Lyve; a bridge's 400 on a
+  generated name is retried, then 503 + Retry-After, and every `ErrInvalidInput`
+  the complete/put handlers answer is logged with bucket, key, upload id).
+- Finding 4: withdrawn (§8.2). bench-compare's transport should disable HTTP/2
+  like tierbench and ingestbench do, or its ingest numbers stay a client
+  artefact.
+- New: GetBucketLocation vs Cyberduck (§8.6); Duplicati's "Use SSL" docs line;
+  the Nextcloud per-file cost is Nextcloud's, worth a sentence in the docs.
+- Still open: the zone A/B (owner), a real second tenant on prod (a key),
+  the second-datacenter client, the tape clock (2026-10-17), iDrive.
+
+**Cleanup:** `tb-smoke-1012`, `tb-ingest-1012`, `tb-ingest-1012c`,
+`tb-presign-1012`, `tb-tools-1012`, `tb-duck-1012`, `tb-nc-1012`, `tb-dup-1012`
+and `sync-lab/range-1012/` deleted; the local profiling database dropped and the
+patched binary discarded; the Nextcloud and Duplicati containers removed; the
+`claude+contention` sign-up never happened (403, signups closed).
