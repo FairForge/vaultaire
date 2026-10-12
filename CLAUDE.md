@@ -10,6 +10,7 @@ Vaultaire is a universal storage orchestration engine providing a unified S3-com
 
 ## Strategic Reference Documents
 
+- **`docs/ARCHITECTURE_CONTRACT.md`** — the one page every worker prompt cites (2026-10-12): one brand Stored on stored.cloud, modes Private / Standard / Public per surface, keys only through the one hierarchy, no global convergent key, every access-widening act in the transparency log, the attested data plane, the four lanes. Lane charters: `docs/surfaces/{ENGINE,DEVELOPER,CONSUMER,TRUST}.md`
 - **`.private/LAUNCH_STRATEGY.md`** — Launch day offerings, 18-month roadmap, self-hosted fleet buying sequence, Quotaless exit plan
 - **`.private/VAULT_SERIES_ECONOMICS.md`** — Vault1/3/5/10/18/50/100 tiers with overselling, LET marketing, per-tier COGS
 - **`.private/ADVANCED_ARCHITECTURE.md`** — FastCDC, global content index, convergent encryption, federation protocol, seamless node addition
