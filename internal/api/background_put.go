@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5" // #nosec G501 -- S3 ETags are MD5 by specification
 	"database/sql"
@@ -15,6 +16,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/FairForge/vaultaire/internal/usage"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
 
@@ -41,7 +43,44 @@ var (
 	// errTargetQuotaExceeded: the tenant is out of quota on the floor the
 	// report would be billed on. Rows are kept for the next pass.
 	errTargetQuotaExceeded = errors.New("target tenant over quota")
+	// errGeneratedTooLargeForSSE: the target bucket is sse_enabled and the
+	// object is larger than SSE-S3 can seal (whole-object, in memory). The
+	// object is refused, never stored plaintext (WP-R8-1 follow-up A1).
+	errGeneratedTooLargeForSSE = errors.New("the object is too large to be encrypted at rest (SSE-S3 seals objects of at most 256 MiB) and the target bucket requires encryption; it was not written")
+	// errGeneratedSSEUnavailable: the target bucket is sse_enabled and this
+	// process has no master key (unset on a slot): refused, never plaintext
+	// (R8-04's rule, on the write side).
+	errGeneratedSSEUnavailable = errors.New("the target bucket requires encryption and this server has no encryption key configured; it was not written")
 )
+
+// maxSSEObjectSize is the largest object SSE-S3 seals: crypto.MaxEncryptableSize.
+// A variable so a test can exercise the refusal without a 256 MiB body.
+var maxSSEObjectSize = crypto.MaxEncryptableSize
+
+// The writers on vaultaire_generated_object_refused_total, and the reasons.
+const (
+	generatedKindExport    = "export"
+	generatedKindAccessLog = "access_log"
+	generatedKindInventory = "inventory"
+
+	refusedTooLargeForSSE = "too_large_for_sse"
+	refusedSSEUnavailable = "sse_unavailable"
+)
+
+// generatedObjectRefused counts generated objects refused instead of being
+// stored plaintext in an sse_enabled bucket.
+var generatedObjectRefused = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "vaultaire_generated_object_refused_total",
+	Help: "System-generated objects (GDPR export, access log, inventory report) not written because the target bucket is sse_enabled and the object could not be encrypted: too_large_for_sse (over the 256 MiB SSE-S3 limit) | sse_unavailable (no master key on this process). Never stored plaintext.",
+}, []string{"kind", "reason"})
+
+func init() {
+	for _, k := range []string{generatedKindExport, generatedKindAccessLog, generatedKindInventory} {
+		for _, r := range []string{refusedTooLargeForSSE, refusedSSEUnavailable} {
+			generatedObjectRefused.WithLabelValues(k, r)
+		}
+	}
+}
 
 // generatedObjectWriter delivers system-generated objects through the
 // customer write path.
@@ -51,6 +90,14 @@ type generatedObjectWriter struct {
 	quota  QuotaManager               // nil = no accounting (tests without a manager)
 	gci    *crypto.GlobalContentIndex // nil = a displaced chunked row's manifest is not released
 	logger *zap.Logger
+	// sse seals the object when the target bucket is sse_enabled, exactly as
+	// HandlePut does (WP-R8-1 follow-up A1). nil = this process has no
+	// master key: a write into an sse_enabled bucket is refused, never
+	// stored plaintext.
+	sse *crypto.SSEService
+	// maxSSE is the largest object SSE-S3 seals (whole-object, in memory):
+	// crypto.MaxEncryptableSize; tests lower it.
+	maxSSE int64
 }
 
 func newGeneratedObjectWriter(db *sql.DB, eng engine.Engine, quota QuotaManager, gci *crypto.GlobalContentIndex, logger *zap.Logger) *generatedObjectWriter {
@@ -60,7 +107,7 @@ func newGeneratedObjectWriter(db *sql.DB, eng engine.Engine, quota QuotaManager,
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	return &generatedObjectWriter{db: db, eng: eng, quota: quota, gci: gci, logger: logger}
+	return &generatedObjectWriter{db: db, eng: eng, quota: quota, gci: gci, logger: logger, maxSSE: maxSSEObjectSize}
 }
 
 // deliveredObject describes what write stored.
@@ -82,9 +129,13 @@ type generatedWriteOptions struct {
 	// whatever their balance: the GDPR export (WP-R10-3b). Reports and
 	// access logs never set it (errTargetQuotaExceeded keeps their rows).
 	AllowOverQuota bool
+	// Kind names the writer on vaultaire_generated_object_refused_total:
+	// generatedKindExport | generatedKindAccessLog | generatedKindInventory.
+	Kind string
 }
 
-// write renders body into key of the tenant's bucket. Ownership of the
+// write renders body into key of the tenant's bucket; kind names the writer
+// (generatedKindAccessLog, generatedKindInventory). Ownership of the
 // target bucket is re-checked now, not at config time; Object Lock on the
 // key is honoured; placement, quota, head row and the version ledger follow
 // plain PUT (placeObject, reserveQuota, upsertWholeObjectHeadRow,
@@ -92,8 +143,8 @@ type generatedWriteOptions struct {
 // blob under the key; the caller keeps its source rows and the next pass
 // overwrites (inventory: same key per day) or writes a fresh key (access
 // logs: timestamp + random suffix).
-func (g *generatedObjectWriter) write(ctx context.Context, tenantID, bucket, key, contentType string, body func(io.Writer) error) (deliveredObject, error) {
-	return g.writeOpts(ctx, tenantID, bucket, key, contentType, body, generatedWriteOptions{})
+func (g *generatedObjectWriter) write(ctx context.Context, kind, tenantID, bucket, key, contentType string, body func(io.Writer) error) (deliveredObject, error) {
+	return g.writeOpts(ctx, tenantID, bucket, key, contentType, body, generatedWriteOptions{Kind: kind})
 }
 
 // writeOpts is write with per-call options.
@@ -105,13 +156,16 @@ func (g *generatedObjectWriter) writeOpts(ctx context.Context, tenantID, bucket,
 		return deliveredObject{}, errors.New("generated object: tenant, bucket and key are required")
 	}
 
-	var exists bool
-	if err := g.db.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM buckets WHERE tenant_id = $1 AND name = $2)`, tenantID, bucket).Scan(&exists); err != nil {
-		return deliveredObject{}, fmt.Errorf("check target bucket %s: %w", bucket, err)
-	}
-	if !exists {
+	// One read: the bucket is still the tenant's, and whether it requires
+	// encryption. An error is an error — never "not encrypted".
+	var sseBucket bool
+	err := g.db.QueryRowContext(ctx,
+		`SELECT sse_enabled FROM buckets WHERE tenant_id = $1 AND name = $2`, tenantID, bucket).Scan(&sseBucket)
+	if errors.Is(err, sql.ErrNoRows) {
 		return deliveredObject{}, errTargetBucketGone
+	}
+	if err != nil {
+		return deliveredObject{}, fmt.Errorf("check target bucket %s: %w", bucket, err)
 	}
 	if err := checkObjectLock(ctx, g.db, tenantID, bucket, key, false); err != nil {
 		return deliveredObject{}, fmt.Errorf("target key %s/%s: %w", bucket, key, err)
@@ -144,6 +198,48 @@ func (g *generatedObjectWriter) writeOpts(ctx context.Context, tenantID, bucket,
 	container := t.NamespaceContainer(bucket)
 	tctx := common.WithTenantID(ctx, tenantID)
 
+	// An sse_enabled bucket gets what HandlePut gives it (WP-R8-1 follow-up
+	// A1): the body sealed with SSE-S3 under the tenant's current key, the
+	// head row recording the algorithm and the version, size and ETag the
+	// plaintext's. What cannot be sealed — over the SSE-S3 limit, or no
+	// master key on this process — is refused before anything is reserved or
+	// written: never stored plaintext. An empty body has nothing to seal (as
+	// on PUT).
+	var putBody io.Reader = spool
+	putSize := size
+	var enc objectEncryption
+	if sseBucket && size > 0 {
+		reason, refusal := "", error(nil)
+		switch {
+		case g.sse == nil:
+			reason, refusal = refusedSSEUnavailable, errGeneratedSSEUnavailable
+		case size > g.maxSSE:
+			reason, refusal = refusedTooLargeForSSE, errGeneratedTooLargeForSSE
+		}
+		if refusal != nil {
+			kind := o.Kind
+			if kind == "" {
+				kind = "other"
+			}
+			generatedObjectRefused.WithLabelValues(kind, reason).Inc()
+			g.logger.Warn("generated object refused: its bucket requires encryption and it cannot be encrypted — never stored plaintext",
+				zap.String("kind", kind), zap.String("reason", reason), zap.String("tenant_id", tenantID),
+				zap.String("bucket", bucket), zap.String("key", key), zap.Int64("bytes", size))
+			return deliveredObject{}, refusal
+		}
+		plaintext := make([]byte, size)
+		if _, err := io.ReadFull(spool, plaintext); err != nil {
+			return deliveredObject{}, fmt.Errorf("read spool for encryption: %w", err)
+		}
+		ciphertext, keyVersion, encErr := g.sse.EncryptBytes(tctx, tenantID, plaintext)
+		if encErr != nil {
+			return deliveredObject{}, fmt.Errorf("encrypt %s/%s: %w", bucket, key, encErr)
+		}
+		putBody = bytes.NewReader(ciphertext)
+		putSize = int64(len(ciphertext))
+		enc = objectEncryption{Algorithm: crypto.SSEAlgorithm, KeyVersion: &keyVersion}
+	}
+
 	class := resolvePutStorageClass(tctx, g.db, g.eng, nil, tenantID, bucket, "")
 	floor := usage.FloorOf(class)
 	overQuota := false
@@ -174,11 +270,11 @@ func (g *generatedObjectWriter) writeOpts(ctx context.Context, tenantID, bucket,
 		}
 	}
 
-	opts := []engine.PutOption{engine.WithContentLength(size), engine.WithContentType(contentType)}
+	opts := []engine.PutOption{engine.WithContentLength(putSize), engine.WithContentType(contentType)}
 	if class != "" {
 		opts = append(opts, engine.WithStorageClass(class))
 	}
-	backendName, err := placeObject(tctx, g.db, g.eng, tenantID, bucket, container, key, spool, opts...)
+	backendName, err := placeObject(tctx, g.db, g.eng, tenantID, bucket, container, key, putBody, opts...)
 	if err != nil {
 		release()
 		return deliveredObject{}, fmt.Errorf("store %s/%s: %w", bucket, key, err)
@@ -186,7 +282,7 @@ func (g *generatedObjectWriter) writeOpts(ctx context.Context, tenantID, bucket,
 
 	attrs := objectAttrs{ContentType: contentType}
 	displaced, dbErr := atomicHeadUpsertReleasing(tctx, g.db, manifestReleaser(g.gci), tenantID, bucket, key, func(tx *sql.Tx) error {
-		return upsertWholeObjectHeadRow(tctx, tx, tenantID, bucket, key, size, etag, backendName, floor, attrs)
+		return upsertWholeObjectHeadRowEnc(tctx, tx, tenantID, bucket, key, size, etag, backendName, floor, attrs, enc)
 	})
 	if dbErr != nil {
 		// The blob is durable but invisible and unbilled (HEAD/GET/LIST read

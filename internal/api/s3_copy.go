@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"crypto/md5" // #nosec G501 — S3 spec requires MD5 for ETags
 	"database/sql"
 	"encoding/json"
@@ -255,6 +256,16 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
 			t.ID, srcBucket, srcKey).Scan(&srcSize, &srcEnc, &srcChunked, &srcBackend, &srcFloor)
 	}
+	// A plaintext source copied into an sse_enabled bucket is sealed there
+	// exactly as a PUT into it is (WP-R8-1 follow-up A1: it used to land
+	// plaintext). Refused before anything is read or written when it cannot
+	// be: no master key on this process, or over the SSE-S3 limit.
+	destSSE, sseErr := bucketSSEEnabled(r.Context(), s.db, t.ID, destBucket)
+	if sseErr != nil {
+		s.logger.Error("copy: destination encryption setting unreadable", zap.Error(sseErr), zap.String("bucket", destBucket))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return
+	}
 	if srcChunked && s.gci != nil {
 		// A manifest copy moves no data: the chunks stay at their one
 		// address on the primary (WP-R8-7). A destination bucket pinned to
@@ -276,12 +287,32 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 				WithSuggestion("Copying a large (chunked) object into a bucket pinned to a region is not supported yet. Download it and upload it into that bucket."))
 			return
 		}
+		if destSSE && srcEnc == "" {
+			// A manifest copy moves no bytes: the destination would name
+			// the source's PLAINTEXT chunks from an encrypted bucket.
+			WriteS3ErrorWithContext(w, ErrNotImplemented, r.URL.Path, generateRequestID(),
+				WithSuggestion("Copying a large unencrypted object into a bucket that encrypts at rest is not supported yet. Download it and upload it into that bucket."))
+			return
+		}
 		s.handleChunkedCopy(w, r, t, srcBucket, srcKey, destBucket, destKey, srcSize, directive, requestAttrs)
 		return
 	}
 	if srcEnc != "" || srcChunked {
 		WriteS3ErrorWithContext(w, ErrNotImplemented, r.URL.Path, generateRequestID(),
 			WithSuggestion("Copying encrypted or chunked objects is not yet supported. Download and re-upload instead."))
+		return
+	}
+
+	if destSSE && s.sseService == nil {
+		s.logger.Error("copy into an encrypted bucket refused: ENCRYPTION_MASTER_KEY is not configured on this process",
+			zap.String("bucket", destBucket), zap.String("key", destKey))
+		w.Header().Set("Retry-After", "30")
+		WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
+		return
+	}
+	if destSSE && srcSize > maxSSEObjectSize {
+		WriteS3ErrorWithContext(w, ErrEntityTooLarge, r.URL.Path, generateRequestID(),
+			WithSuggestion("The destination bucket encrypts objects at rest, and objects larger than 256 MiB cannot yet be server-side encrypted."))
 		return
 	}
 
@@ -407,10 +438,23 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	}
 	hasher := md5.New() // #nosec G401 — S3 spec requires MD5 for ETags
 	tee := io.TeeReader(src, hasher)
+	var sealer *sseSealingReader
+	putLength := srcSize
+	if destSSE {
+		// The hasher and the counter see the plaintext; the backend gets
+		// the sealed blob, of a length known in advance.
+		sealer = &sseSealingReader{src: tee, max: maxSSEObjectSize, seal: func(p []byte) ([]byte, int, error) {
+			return s.sseService.EncryptBytes(r.Context(), t.ID, p)
+		}}
+		tee = sealer
+		if srcSize > 0 {
+			putLength = srcSize + int64(crypto.SSEOverheadBytes)
+		}
+	}
 
 	putOpts := []engine.PutOption{engine.WithContentType(attrs.ContentType)}
-	if srcSize > 0 {
-		putOpts = append(putOpts, engine.WithContentLength(srcSize))
+	if putLength > 0 {
+		putOpts = append(putOpts, engine.WithContentLength(putLength))
 	}
 	if destClass != "" {
 		putOpts = append(putOpts, engine.WithStorageClass(destClass))
@@ -434,6 +478,11 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 				zap.Int64("recorded_size", srcSize), zap.Error(err))
 			w.Header().Set("Retry-After", "30")
 			WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
+		case errors.Is(err, errCopyTooLargeForSSE):
+			// The source had no recorded size and turned out larger than
+			// SSE-S3 seals: nothing was stored.
+			WriteS3ErrorWithContext(w, ErrEntityTooLarge, r.URL.Path, generateRequestID(),
+				WithSuggestion("The destination bucket encrypts objects at rest, and objects larger than 256 MiB cannot yet be server-side encrypted."))
 		case errors.Is(err, errRegionDriverUnavailable):
 			s.logger.Error("copy: region-pinned bucket has no driver — refused",
 				zap.String("bucket", destBucket), zap.Error(err))
@@ -476,7 +525,7 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	if s.db != nil {
 		var dbErr error
 		displaced, dbErr = atomicHeadUpsertReleasing(pctx, s.db, manifestReleaser(s.gci), t.ID, destBucket, destKey, func(tx *sql.Tx) error {
-			return upsertWholeObjectHeadRow(pctx, tx, t.ID, destBucket, destKey, counter.n, etag, backendName, floor, attrs)
+			return upsertWholeObjectHeadRowEnc(pctx, tx, t.ID, destBucket, destKey, counter.n, etag, backendName, floor, attrs, sealer.encryption())
 		})
 		if dbErr != nil {
 			releaseReservation()
@@ -518,6 +567,9 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 
 	w.Header().Set("Content-Type", "application/xml")
 	w.Header().Set("x-amz-request-id", generateRequestID())
+	if sealer.encryption().Algorithm != "" {
+		w.Header().Set("x-amz-server-side-encryption", "AES256")
+	}
 	if versionID != "" {
 		w.Header().Set("x-amz-version-id", versionID)
 	}
@@ -778,4 +830,53 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(xml.Header))
 	_, _ = w.Write(xmlData)
+}
+
+// errCopyTooLargeForSSE: a copy into an sse_enabled bucket whose source had
+// no recorded size turned out larger than SSE-S3 seals.
+var errCopyTooLargeForSSE = errors.New("copy source too large for SSE-S3")
+
+// sseSealingReader seals its source with SSE-S3 on the first Read and then
+// serves the sealed blob (WP-R8-1 follow-up A1: a copy into an sse_enabled
+// bucket). The source's own errors pass through untouched, so the copy maps
+// them as it does for a plain stream. An empty source is passed through
+// unsealed, as an empty PUT is stored.
+type sseSealingReader struct {
+	src     io.Reader
+	max     int64
+	seal    func([]byte) ([]byte, int, error)
+	out     io.Reader
+	version int
+	sealed  bool
+}
+
+func (s *sseSealingReader) Read(p []byte) (int, error) {
+	if s.out == nil {
+		plaintext, err := io.ReadAll(io.LimitReader(s.src, s.max+1))
+		if err != nil {
+			return 0, err
+		}
+		if int64(len(plaintext)) > s.max {
+			return 0, errCopyTooLargeForSSE
+		}
+		if len(plaintext) == 0 {
+			s.out = bytes.NewReader(nil)
+		} else {
+			ct, v, err := s.seal(plaintext)
+			if err != nil {
+				return 0, fmt.Errorf("seal copy: %w", err)
+			}
+			s.out, s.version, s.sealed = bytes.NewReader(ct), v, true
+		}
+	}
+	return s.out.Read(p)
+}
+
+// encryption is what the stored blob is sealed with (nil reader: plaintext).
+func (s *sseSealingReader) encryption() objectEncryption {
+	if s == nil || !s.sealed {
+		return objectEncryption{}
+	}
+	v := s.version
+	return objectEncryption{Algorithm: crypto.SSEAlgorithm, KeyVersion: &v}
 }

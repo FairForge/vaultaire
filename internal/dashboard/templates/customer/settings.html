@@ -154,6 +154,8 @@
     </div>
     {{else if .Export.Expired}}
     <div class="alert alert-error" style="margin-bottom: 1rem;">Your last export (requested {{.Export.Requested}}) has expired — exports are kept for 7 days. Request a new one below.</div>
+    {{else if .Export.TooLargeToEncrypt}}
+    <div class="alert alert-error" style="margin-bottom: 1rem;">Your last export (requested {{.Export.Requested}}) is larger than 256 MiB, the most we can encrypt at rest in one file, so it was not written. Contact support and we will prepare it for you.</div>
     {{else if .Export.Failed}}
     <div class="alert alert-error" style="margin-bottom: 1rem;">Your last export (requested {{.Export.Requested}}) could not be prepared. Request it again; if it fails again, contact support.</div>
     {{end}}

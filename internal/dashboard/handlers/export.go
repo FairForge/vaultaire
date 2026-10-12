@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/audit"
@@ -143,7 +144,16 @@ type exportView struct {
 	ReadyUntil string
 	Size       string
 	Error      string
+	// TooLargeToEncrypt: the export was refused because it is larger than
+	// the server can encrypt into its (encrypted) bucket — a retry fails the
+	// same way, so the page says so instead of "request it again".
+	TooLargeToEncrypt bool
 }
+
+// ExportTooLargeToEncryptMarker is the phrase the export service's error
+// carries when an export was refused for its size (api.errGeneratedTooLargeForSSE;
+// a test in internal/api pins the two together).
+const ExportTooLargeToEncryptMarker = "too large to be encrypted at rest"
 
 // populateExportStatus adds the latest export's state to the page data.
 func populateExportStatus(ctx context.Context, exports ExportService, userID string, data map[string]any) {
@@ -168,6 +178,7 @@ func populateExportStatus(ctx context.Context, exports ExportService, userID str
 	case latest.Status == "failed":
 		v.Failed = true
 		v.Error = latest.Error
+		v.TooLargeToEncrypt = strings.Contains(latest.Error, ExportTooLargeToEncryptMarker)
 	}
 	data["Export"] = v
 }

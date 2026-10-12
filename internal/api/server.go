@@ -300,6 +300,9 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// Both deliver through the customer write path (Review R13-02 / R6-21):
 	// "<tenant>_<bucket>" namespace, tenant in ctx, quota, head row.
 	reportWriter := newGeneratedObjectWriter(s.db, s.engine, s.quotaManager, s.gci, logger)
+	if reportWriter != nil {
+		reportWriter.sse = s.sseService // an sse_enabled target bucket gets SSE-S3, as a PUT does
+	}
 	s.accessLogTracker = NewS3AccessLogTracker(s.db)
 	s.accessLogTracker.SetLogger(logger)
 	s.accessLogTracker.SetWriter(reportWriter)
@@ -442,7 +445,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// retention job purges expired objects through it.
 	s.accountExports = NewAccountExportService(s.db, s.engine, s.quotaManager, s.gci, getPublicEndpoint(cfg.Server.Port), logger)
 	if s.accountExports != nil {
-		s.accountExports.SSEDefault = s.sseService != nil
+		s.accountExports.SetSSE(s.sseService)
 		if s.retention != nil {
 			s.retention.Exports = s.accountExports
 		}

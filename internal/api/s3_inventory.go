@@ -416,7 +416,7 @@ func (ir *InventoryRunner) generateReport(ctx context.Context, tenantID, bucket,
 	objectKey := fmt.Sprintf("%s%s/%sT00-00Z/manifest.csv", prefix, bucket, date.UTC().Format("2006-01-02"))
 
 	var written int
-	_, err := ir.writer.write(ctx, tenantID, targetBucket, objectKey, "text/csv", func(out io.Writer) error {
+	_, err := ir.writer.write(ctx, generatedKindInventory, tenantID, targetBucket, objectKey, "text/csv", func(out io.Writer) error {
 		rows, err := ir.db.QueryContext(ctx, `
 			SELECT object_key, size_bytes, etag, content_type, updated_at,
 				COALESCE(encryption_algorithm, ''), COALESCE(backend_name, ''), floor

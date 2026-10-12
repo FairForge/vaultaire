@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/common"
+	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
@@ -88,14 +90,41 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 	var floor string
 	var lastAccessed time.Time
 	var isChunked bool
+	var encAlgo string
 	err = s.db.QueryRowContext(ctx, `
-		SELECT size_bytes, etag, content_type, updated_at, COALESCE(content_disposition, ''), COALESCE(backend_name, ''), floor, last_accessed, is_chunked
+		SELECT size_bytes, etag, content_type, updated_at, COALESCE(content_disposition, ''), COALESCE(backend_name, ''), floor, last_accessed, is_chunked,
+		       COALESCE(encryption_algorithm, '')
 		FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-		tenantID, bucket, key).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &contentDisposition, &backendName, &floor, &lastAccessed, &isChunked)
+		tenantID, bucket, key).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &contentDisposition, &backendName, &floor, &lastAccessed, &isChunked, &encAlgo)
 	if err != nil {
 		http.NotFound(w, r)
 		return
+	}
+	// An encrypted whole object (WP-R8-1 follow-up A1, the read side): the
+	// blob is ciphertext, and streaming it handed the reader garbage cut to
+	// the plaintext Content-Length. SSE-S3 is opened here as the S3 GET
+	// opens it; SSE-C needs the customer's key, which a public link cannot
+	// carry; a process with no SSE service fails closed (R8-04). A chunked
+	// object's per-chunk encryption is not this column's business here.
+	if !isChunked && encAlgo != "" {
+		switch {
+		case encAlgo == crypto.SSECAlgorithm:
+			http.Error(w, "this object is encrypted with a customer-provided key and cannot be served publicly", http.StatusForbidden)
+			return
+		case s.sseService == nil:
+			s.logger.Error("cdn: encrypted object read with no SSE service: ENCRYPTION_MASTER_KEY is not configured on this process",
+				zap.String("bucket", bucket), zap.String("key", key))
+			w.Header().Set("Cache-Control", "no-store")
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		case sizeBytes > crypto.MaxEncryptableSize:
+			s.logger.Error("cdn: encrypted object larger than SSE-S3 seals — row inconsistent",
+				zap.String("bucket", bucket), zap.String("key", key), zap.Int64("size", sizeBytes))
+			w.Header().Set("Cache-Control", "no-store")
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	cacheControl := fmt.Sprintf("public, max-age=%d, stale-while-revalidate=600", cacheMaxAgeSecs)
@@ -241,6 +270,21 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = reader.Close() }()
 
+	var body io.Reader = reader
+	if !isChunked && encAlgo != "" {
+		plaintext, decErr := s.openSSEBlob(ctx, tenantID, reader, sizeBytes)
+		if decErr != nil {
+			s.logger.Error("cdn: SSE-S3 decryption failed", zap.String("bucket", bucket), zap.String("key", key), zap.Error(decErr))
+			for _, h := range []string{"Content-Length", "ETag", "Content-Disposition", "Accept-Ranges", "Last-Modified"} {
+				w.Header().Del(h)
+			}
+			w.Header().Set("Cache-Control", "no-store")
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		body = bytes.NewReader(plaintext)
+	}
+
 	rangeHeader := r.Header.Get("Range")
 	if rangeHeader != "" && errors.Is(rangeParseErr(rangeHeader, sizeBytes), errMultiRange) {
 		rangeHeader = "" // served whole (RFC 9110 §14.2)
@@ -251,7 +295,7 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 			writeRangeNotSatisfiable(w, sizeBytes)
 			return
 		}
-		if err := serveRange(w, reader, rng, sizeBytes, contentType); err != nil {
+		if err := serveRange(w, body, rng, sizeBytes, contentType); err != nil {
 			s.logger.Error("cdn range serve failed",
 				zap.String("key", key),
 				zap.Error(err))
@@ -268,7 +312,7 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	written, err := io.Copy(w, reader)
+	written, err := io.Copy(w, body)
 	if err != nil {
 		s.logger.Error("cdn stream failed",
 			zap.String("key", key),
@@ -290,4 +334,21 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 		zap.String("bucket", bucket),
 		zap.String("key", key),
 		zap.Int64("bytes", written))
+}
+
+// openSSEBlob reads an SSE-S3 blob of a plaintext of size bytes (bounded: the
+// size plus the fixed overhead) and opens it with the version it records.
+func (s *Server) openSSEBlob(ctx context.Context, tenantID string, r io.Reader, size int64) ([]byte, error) {
+	ciphertext, err := io.ReadAll(io.LimitReader(r, size+int64(crypto.SSEOverheadBytes)+1))
+	if err != nil {
+		return nil, fmt.Errorf("read encrypted blob: %w", err)
+	}
+	plaintext, err := s.sseService.DecryptBytes(ctx, tenantID, ciphertext)
+	if err != nil {
+		return nil, fmt.Errorf("open encrypted blob: %w", err)
+	}
+	if int64(len(plaintext)) != size {
+		return nil, fmt.Errorf("decrypted %d bytes, the row records %d", len(plaintext), size)
+	}
+	return plaintext, nil
 }

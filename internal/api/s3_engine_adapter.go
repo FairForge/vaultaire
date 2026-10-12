@@ -978,6 +978,26 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		metadataSize > chunkThreshold && !chunkingDisabledByVersioning && !chunkingDisabledByTier &&
 		!chunkingDisabledByRegion && chunkingOn
 
+	// Whether the bucket requires encryption, read once and strictly: a
+	// database error used to read as "not encrypted" and the body was
+	// stored plaintext. A process with no SSE service (no master key on this
+	// slot) refuses a write into an sse_enabled bucket instead of storing
+	// it plaintext — R8-04's rule for the read, on the write side (WP-R8-1
+	// follow-up A1). SSE-C is the customer's own key: not affected.
+	bucketSSE, sseErr := bucketSSEEnabled(r.Context(), a.db, t.ID, bucket)
+	if sseErr != nil {
+		a.logger.Error("PUT: bucket encryption setting unreadable", zap.Error(sseErr), zap.String("bucket", bucket))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return
+	}
+	if bucketSSE && a.sseService == nil && !crypto.HasSSECHeaders(r) {
+		a.logger.Error("PUT into an encrypted bucket refused: ENCRYPTION_MASTER_KEY is not configured on this process",
+			zap.String("bucket", bucket), zap.String("object", artifact))
+		w.Header().Set("Retry-After", "30")
+		WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
+		return
+	}
+
 	if crypto.HasSSECHeaders(r) {
 		if r.Header.Get("x-amz-server-side-encryption") != "" {
 			WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(),
@@ -1027,8 +1047,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		encryptionAlgorithm = crypto.SSECAlgorithm
 	} else {
 		shouldEncrypt := a.sseService != nil && !willChunkEncrypt && size > 0 && size <= crypto.MaxEncryptableSize &&
-			(r.Header.Get("x-amz-server-side-encryption") == "AES256" ||
-				isBucketSSEEnabled(r.Context(), a.db, t.ID, bucket))
+			(r.Header.Get("x-amz-server-side-encryption") == "AES256" || bucketSSE)
 
 		if shouldEncrypt {
 			if _, err := a.sseService.Current(r.Context(), t.ID); err != nil {
@@ -1078,8 +1097,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	// to be encrypted (no chunk service, chunking flag off, versioned bucket,
 	// whole-object tier) means it must be refused here (R8-03).
 	if a.sseService != nil && !willChunkEncrypt && encryptionAlgorithm == "" && metadataSize > crypto.MaxEncryptableSize &&
-		(r.Header.Get("x-amz-server-side-encryption") == "AES256" ||
-			isBucketSSEEnabled(r.Context(), a.db, t.ID, bucket)) {
+		(r.Header.Get("x-amz-server-side-encryption") == "AES256" || bucketSSE) {
 		WriteS3ErrorWithContext(w, ErrEntityTooLarge, r.URL.Path, generateRequestID(),
 			WithSuggestion("Objects larger than 256 MiB cannot yet be server-side encrypted. Upload without encryption, or split the object."))
 		return
@@ -2429,15 +2447,25 @@ func storageClassDisablesChunking(class string) bool {
 	return false
 }
 
-func isBucketSSEEnabled(ctx context.Context, db *sql.DB, tenantID, bucket string) bool {
+// bucketSSEEnabled reports whether the bucket requires SSE-S3. A database
+// error is an error, never "not encrypted" (the old isBucketSSEEnabled read
+// it as false and the body was stored plaintext — WP-R8-1 follow-up A1):
+// false, nil only when the bucket has no row or its row says no.
+func bucketSSEEnabled(ctx context.Context, db *sql.DB, tenantID, bucket string) (bool, error) {
 	if db == nil {
-		return false
+		return false, nil
 	}
 	var enabled bool
 	err := db.QueryRowContext(ctx,
 		"SELECT sse_enabled FROM buckets WHERE tenant_id = $1 AND name = $2",
 		tenantID, bucket).Scan(&enabled)
-	return err == nil && enabled
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read sse_enabled of %s: %w", bucket, err)
+	}
+	return enabled, nil
 }
 
 // HandleList processes S3 LIST requests
