@@ -114,6 +114,10 @@ type AccountDeletionRunner struct {
 	// before the sweep (WP-VAULT-1); a leg that cannot be reached defers
 	// the tenant. Nil-safe.
 	VaultParity *VaultParity
+	// Keys forgets the erased tenant's unwrapped keys in this process (nil
+	// without a master key). The rows themselves — the crypto-shred — go
+	// with account.EraseRows (WP-R8-1).
+	Keys *crypto.TenantKeys
 	// Sessions revokes the user's dashboard sessions (nil-safe; the DB
 	// store's rows are deleted by EraseRows anyway).
 	Sessions dashauth.SessionStore
@@ -173,7 +177,11 @@ type TenantErasure struct {
 	SweptBackends   []string         `json:"swept_backends,omitempty"`
 	UnsweptBackends []string         `json:"unswept_backends,omitempty"`
 	Rows            map[string]int64 `json:"rows,omitempty"`
-	Error           string           `json:"error,omitempty"`
+	// KeysShredded counts the tenant key versions deleted with the rows
+	// (WP-R8-1): from then on every blob sealed under them — a copy the
+	// sweep missed, a backup of a backend — is unreadable.
+	KeysShredded int64  `json:"keys_shredded,omitempty"`
+	Error        string `json:"error,omitempty"`
 }
 
 // AccountDeletionResult is one run's outcome.
@@ -401,6 +409,10 @@ func (r *AccountDeletionRunner) eraseTenant(ctx context.Context, d account.Due) 
 		return r.defer_(te, log, "erase rows", err)
 	}
 	te.Rows = rows.Rows
+	te.KeysShredded = rows.Rows["tenant_key_versions"]
+	if r.Keys != nil && d.TenantID != "" {
+		r.Keys.Forget(d.TenantID)
+	}
 	// The webhook endpoints went with the rows: move the tenant's webhook
 	// generation so a job queued before the erase re-reads them (and finds
 	// none) instead of POSTing with what it captured (Prompt 2b 0.6).
@@ -472,6 +484,7 @@ func (r *AccountDeletionRunner) auditMeta(ctx context.Context, te TenantErasure,
 		"chunk_blobs_left": te.ChunkBlobsLeft, "swept_backends": te.SweptBackends,
 		"unswept_backends": te.UnsweptBackends,
 		"rows":             te.Rows,
+		"keys_shredded":    te.KeysShredded,
 	}
 	if te.Error != "" {
 		// An erased account with an error: the pass after the row erase did

@@ -76,7 +76,8 @@ var exportExcludedTables = map[string]string{
 	"idempotency_cache": "24-hour request cache",
 	// credentials and key material
 	"sts_tokens":             "temporary credentials (secret_key); expire within hours",
-	"tenant_encryption_keys": "key material",
+	"tenant_encryption_keys": "key material (read by nothing since 084)",
+	"tenant_key_versions":    "key material (wrapped tenant keys, WP-R8-1)",
 	// scaffolding with no writer in the product (D-12)
 	"artifacts":                    "no writer (D-12 scaffolding)",
 	"billing_charges":              "no writer (D-12 scaffolding)",
@@ -124,6 +125,7 @@ var exportNeverColumns = map[string]string{
 	"global_content_index.plaintext_hash":  "dedup index, not customer data",
 	"tenant_chunk_refs.ciphertext_hash":    "dedup index, not customer data",
 	"tenant_chunk_refs.plaintext_hash":     "dedup index, not customer data",
+	"retired_chunk_blobs.plaintext_hash":   "re-encrypt bookkeeping (WP-R8-1), not customer data; no tenant column — never a section",
 	"object_metadata.content_hash":         "dedup index, not customer data",
 	"deletion_requests.proof_hash":         "D-12 scaffolding, no writer",
 	"pseudonym_mappings.original_hash":     "D-12 scaffolding, no writer",

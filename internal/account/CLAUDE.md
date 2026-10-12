@@ -38,7 +38,7 @@ manifests, head rows, versions, locks, locations, `smart_demotions`,
 `cdn_access_log`, `cdn_stats_daily`, `access_patterns`, `bandwidth_*`,
 `tenant_cost_daily`, `dedup_statistics`, `idempotency_cache`; the quota ledgers
 and their `tenant_quotas` children; `tiering_policies`, `retention_policies`,
-per-tenant `feature_flags`, `tenant_encryption_keys`, `sts_tokens`,
+per-tenant `feature_flags`, `tenant_encryption_keys` (read by nothing since 084), `tenant_key_versions` (the crypto-shred, WP-R8-1: every blob sealed under the tenant's keys — a copy the sweep missed, a backend's backup — is unreadable from this commit on; the runner reports `keys_shredded`), `sts_tokens`,
 `admin_notifications`, `admin_notes` (about the tenant AND authored by the user —
 its `admin_user_id` FK has no ON DELETE), `change_history`, `dashboard_sessions`;
 `api_keys`, `user_mfa`, `mfa_audit_log`, `oauth_accounts`, `user_activities`, the

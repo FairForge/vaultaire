@@ -8,6 +8,9 @@
 #   vaultaire_stale_copy_lost_writes_total{source}      objects whose bytes the delete of a stale copy removed while a
 #                                                        write of the same key was in flight (reclaim / delete / overwrite)
 #   vaultaire_account_exports_total{result}             GDPR exports: completed / retried / failed / expired (WP-R10-3b)
+#   vaultaire_key_rotation_pending{kind}                encrypted chunks / SSE-S3 objects below their tenant's newest key
+#                                                        version, READ FROM the tables (WP-R8-1)
+#   vaultaire_tenant_keys_unwrap_failures               tenant key versions no configured master key opens (boot check)
 #
 # The last-success series is read from the database, not kept in memory: a
 # process that has just started reports the success of the process before it.
@@ -46,13 +49,13 @@ groups:
           description: "{{ $labels.job_name }} last succeeded {{ $value | humanizeDuration }} ago (a value near the age of the epoch means it has never succeeded). It is due once a day and retried hourly while it fails. GET /api/v1/admin/jobs shows the last outcome and error; journalctl -u 'vaultaire@*' | grep 'job run'."
 
       - alert: PeriodicJobStale
-        expr: (time() - vaultaire_job_last_success_timestamp_seconds{job_name=~"multipart_reaper|cdn_rollup|idempotency_cleanup|sts_cleanup|session_cleanup|bandwidth_alerts|access_log_delivery|account_export|vault_parity|pack_gc|stripe_gc"}) > 3 * 3600
+        expr: (time() - vaultaire_job_last_success_timestamp_seconds{job_name=~"multipart_reaper|cdn_rollup|idempotency_cleanup|sts_cleanup|session_cleanup|bandwidth_alerts|access_log_delivery|account_export|vault_parity|pack_gc|stripe_gc|key_reencrypt"}) > 3 * 3600
         for: 30m
         labels:
           severity: warning
         annotations:
           summary: "Periodic job {{ $labels.job_name }} has not succeeded in 3 hours"
-          description: "{{ $labels.job_name }} runs every hour (access_log_delivery every 5 minutes, account_export every minute) and last succeeded {{ $value | humanizeDuration }} ago. GET /api/v1/admin/jobs; journalctl -u 'vaultaire@*' | grep 'job run failed'."
+          description: "{{ $labels.job_name }} runs every hour (access_log_delivery every 5 minutes, account_export every minute, key_reencrypt every 10 minutes) and last succeeded {{ $value | humanizeDuration }} ago. GET /api/v1/admin/jobs; journalctl -u 'vaultaire@*' | grep 'job run failed'."
 
       - alert: JobFailing
         expr: increase(vaultaire_job_runs_total{outcome="error"}[6h]) >= 3
@@ -102,3 +105,31 @@ groups:
         annotations:
           summary: "{{ $value }} vault object(s) too large for a parity run"
           description: "The vault_parity job never starts a protect estimated longer than a whole run, so these objects have no parity copy. GET /api/v1/admin/jobs → vault_parity result.notes names the first 20. Raise VAULT_PARITY_MAX_RUN_TIME (or the rate estimate) or accept them unprotected."
+
+      # Tenant key versions (WP-R8-1, docs/ENCRYPTION.md). A key row that
+      # opens under neither ENCRYPTION_MASTER_KEY nor _PREVIOUS makes every
+      # encrypted read of its tenant a 500 (never ciphertext): the wrong master
+      # key is configured, or a re-key removed PREVIOUS before every slot had
+      # booted with it.
+      - alert: TenantKeysUnwrapFailing
+        expr: vaultaire_tenant_keys_unwrap_failures > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $value }} tenant key version(s) open under no configured master key"
+          description: "Those tenants' encrypted objects answer 500 until the right key is set. journalctl -u 'vaultaire@*' | grep 'open under no configured master key' names the first 50 (tenant vN). Put the old key back as ENCRYPTION_MASTER_KEY_PREVIOUS and restart (sudo vaultaire-switch restart): the boot re-wraps them."
+
+      # After a rotation the key_reencrypt job moves the tenant's chunks onto
+      # the new version (KEY_REENCRYPT_MAX_GB_PER_RUN per 10-minute run). A
+      # chunk backlog that does not drain in a day is a job that cannot read
+      # or write the chunks. The whole-object backlog (kind="whole") waits for
+      # WP-R2-1 and is not alerted on.
+      - alert: KeyReencryptBacklogStuck
+        expr: vaultaire_key_rotation_pending{kind="chunk"} > 0 and delta(vaultaire_key_rotation_pending{kind="chunk"}[6h]) >= 0
+        for: 24h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} chunk(s) still on an old tenant key version after a day"
+          description: "The key_reencrypt job is not moving them. GET /api/v1/admin/jobs → key_reencrypt (result.errors, last_error); journalctl -u 'vaultaire@*' | grep 'key re-encrypt'."

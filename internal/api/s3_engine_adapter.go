@@ -907,6 +907,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 
 	metadataSize := size
 	var encryptionAlgorithm string
+	var encryptionKeyVersion *int // SSE-S3: the tenant key version the blob is sealed under (WP-R8-1)
 
 	// A large object takes the chunked path, which — when per-chunk convergent
 	// encryption is available — encrypts each chunk itself. Whole-object SSE-S3
@@ -1030,7 +1031,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 				isBucketSSEEnabled(r.Context(), a.db, t.ID, bucket))
 
 		if shouldEncrypt {
-			if err := a.sseService.EnsureTenantKey(r.Context(), t.ID); err != nil {
+			if _, err := a.sseService.Current(r.Context(), t.ID); err != nil {
 				a.logger.Error("failed to ensure tenant encryption key", zap.Error(err))
 				WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 				return
@@ -1051,12 +1052,13 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 				return
 			}
 
-			ciphertext, encErr := a.sseService.EncryptBytes(r.Context(), t.ID, plaintext)
+			ciphertext, keyVersion, encErr := a.sseService.EncryptBytes(r.Context(), t.ID, plaintext)
 			if encErr != nil {
 				a.logger.Error("SSE-S3 encryption failed", zap.Error(encErr))
 				WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 				return
 			}
+			encryptionKeyVersion = &keyVersion
 
 			hashingBody = bytes.NewReader(ciphertext)
 			size = int64(len(ciphertext))
@@ -1215,8 +1217,8 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		displaced, dbErr := atomicHeadUpsertReleasing(r.Context(), a.db, manifestReleaser(a.gci), t.ID, bucket, artifact, func(tx *sql.Tx) error {
 			_, execErr := tx.ExecContext(r.Context(), `
 				INSERT INTO object_head_cache
-					(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, content_encoding, content_language, cache_control, http_expires, website_redirect_location, floor, is_chunked, tags, updated_at)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, FALSE, $17, NOW())
+					(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, content_encoding, content_language, cache_control, http_expires, website_redirect_location, floor, is_chunked, tags, encryption_key_version, updated_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, FALSE, $17, $18, NOW())
 				ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
 					size_bytes            = EXCLUDED.size_bytes,
 					etag                  = EXCLUDED.etag,
@@ -1224,6 +1226,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 					backend_name          = EXCLUDED.backend_name,
 					metadata              = EXCLUDED.metadata,
 					encryption_algorithm  = EXCLUDED.encryption_algorithm,
+					encryption_key_version = EXCLUDED.encryption_key_version,
 					content_disposition   = EXCLUDED.content_disposition,
 					content_encoding      = EXCLUDED.content_encoding,
 					content_language      = EXCLUDED.content_language,
@@ -1234,7 +1237,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 					is_chunked            = EXCLUDED.is_chunked,
 					tags                  = EXCLUDED.tags,
 					updated_at            = NOW()
-			`, t.ID, bucket, artifact, metadataSize, etag, contentType, backendName, metaJSON, encryptionAlgorithm, contentDisposition, contentEncoding, contentLanguage, echoHdrs.CacheControl, echoHdrs.Expires, echoHdrs.WebsiteRedirect, usage.FloorOf(resolvedStorageClass), tagsJSON)
+			`, t.ID, bucket, artifact, metadataSize, etag, contentType, backendName, metaJSON, encryptionAlgorithm, contentDisposition, contentEncoding, contentLanguage, echoHdrs.CacheControl, echoHdrs.Expires, echoHdrs.WebsiteRedirect, usage.FloorOf(resolvedStorageClass), tagsJSON, encryptionKeyVersion)
 			return execErr
 		})
 		a.displaced = displaced
@@ -1457,11 +1460,16 @@ func (a *S3ToEngine) handleChunkedPut(
 			// request's Content-Type (or a different zstd version) can hash a
 			// blob that was never stored, making the object fail its
 			// integrity check on every GET.
+			// The key version likewise (WP-R8-1): a dedup hit after a
+			// rotation points at a blob sealed under the OLD version, and
+			// the ref says so until the re-encrypt job moves the blob.
 			var refCiphertextHash *string
-			if lookup.Entry != nil && lookup.Entry.CiphertextHash != nil {
+			var refKeyVersion *int
+			if lookup.Entry != nil {
 				refCiphertextHash = lookup.Entry.CiphertextHash
+				refKeyVersion = lookup.Entry.EncryptionKeyVersion
 			}
-			pool.addRef(chunk.Index, chunk.Offset, chunk.Hash, refCiphertextHash)
+			pool.addRef(chunk.Index, chunk.Offset, chunk.Hash, refCiphertextHash, refKeyVersion)
 			continue
 		}
 
@@ -1548,6 +1556,7 @@ func (a *S3ToEngine) handleChunkedPut(
 				backend_name          = EXCLUDED.backend_name,
 				metadata              = EXCLUDED.metadata,
 				encryption_algorithm  = EXCLUDED.encryption_algorithm,
+				encryption_key_version = NULL, -- versions live on the chunks
 				content_disposition   = EXCLUDED.content_disposition,
 				content_encoding      = EXCLUDED.content_encoding,
 				content_language      = EXCLUDED.content_language,
@@ -1643,6 +1652,7 @@ func (a *S3ToEngine) handleChunkedPut(
 type chunkStoreResult struct {
 	backend        string  // backend holding the blob (the row's when reused)
 	ciphertextHash *string // SHA-256 of the blob that is actually stored, nil if unencrypted
+	keyVersion     *int    // the tenant key version that blob is sealed under, nil if unencrypted
 	reused         bool    // an existing row was found under the lock; nothing was written
 }
 
@@ -1660,10 +1670,11 @@ func (a *S3ToEngine) storeChunkLocked(ctx context.Context, scope, storageKey str
 
 	var rowBackend string
 	var rowCiphertextHash sql.NullString
+	var rowKeyVersion sql.NullInt32
 	err = tx.QueryRowContext(ctx, `
-		SELECT backend_id, ciphertext_hash FROM global_content_index
+		SELECT backend_id, ciphertext_hash, encryption_key_version FROM global_content_index
 		WHERE dedup_scope = $1 AND plaintext_hash = $2
-		FOR UPDATE`, scope, entry.PlaintextHash).Scan(&rowBackend, &rowCiphertextHash)
+		FOR UPDATE`, scope, entry.PlaintextHash).Scan(&rowBackend, &rowCiphertextHash, &rowKeyVersion)
 	switch {
 	case err == nil:
 		rows, incErr := a.gci.IncrementRefTx(ctx, tx, scope, entry.PlaintextHash)
@@ -1680,6 +1691,10 @@ func (a *S3ToEngine) storeChunkLocked(ctx context.Context, scope, storageKey str
 		if rowCiphertextHash.Valid {
 			h := rowCiphertextHash.String
 			res.ciphertextHash = &h
+		}
+		if rowKeyVersion.Valid {
+			v := int(rowKeyVersion.Int32)
+			res.keyVersion = &v
 		}
 		return res, nil
 	case errors.Is(err, sql.ErrNoRows):
@@ -1700,7 +1715,7 @@ func (a *S3ToEngine) storeChunkLocked(ctx context.Context, scope, storageKey str
 	if err := tx.Commit(); err != nil {
 		return chunkStoreResult{}, fmt.Errorf("commit chunk store: %w", err)
 	}
-	return chunkStoreResult{backend: bn, ciphertextHash: entry.CiphertextHash}, nil
+	return chunkStoreResult{backend: bn, ciphertextHash: entry.CiphertextHash, keyVersion: entry.EncryptionKeyVersion}, nil
 }
 
 // errChunkDecrypt marks a chunk that was read but did not decrypt.
@@ -1735,6 +1750,7 @@ type chunkDesc struct {
 	compressed     bool   // true if chunk is stored compressed (needs decompression on read)
 	encrypted      bool   // true if chunk is stored encrypted (needs decryption on read)
 	ciphertextHash string // SHA-256 of encrypted blob for integrity verification
+	keyVersion     int    // tenant key version the blob is sealed under (the row's, else the ref's)
 }
 
 // fetchAndVerifyChunk reads one chunk from the global container into a bounded
@@ -1773,7 +1789,7 @@ func (a *S3ToEngine) fetchAndVerifyChunk(ctx context.Context, d chunkDesc, tenan
 	data := buf.Bytes()
 
 	if d.encrypted && a.chunkEncSvc != nil {
-		data, err = a.chunkEncSvc.DecryptChunkData(tenantID, d.plaintextHash, data, d.ciphertextHash)
+		data, err = a.chunkEncSvc.DecryptChunkData(ctx, tenantID, d.keyVersion, d.plaintextHash, data, d.ciphertextHash)
 		if err != nil {
 			return nil, fmt.Errorf("%w: chunk %s: %w", errChunkDecrypt, d.plaintextHash[:16], err)
 		}

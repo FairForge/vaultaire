@@ -43,6 +43,7 @@ import (
 //	bandwidth_alerts     1 h    +40 s
 //	access_log_delivery  5 m    +1 m
 //	account_export       1 m    +15 s   (renders pending GDPR exports, WP-R10-3b)
+//	key_reencrypt        10 m   +4 m    (chunks onto the tenant's newest key, WP-R8-1; only with a master key)
 //	vault_parity         2 m    +45 s   (parity shards of vault-floor objects, WP-VAULT-1; only with a leg)
 //	pack_gc              1 h    +7 m    (the pack store, internal/packstore; only with the sync backend)
 //	stripe_gc            1 h    +9 m    (orphan pieces of striped objects, drivers/webdav_stripe.go; only with the sync backend)
@@ -119,6 +120,9 @@ func (s *Server) registerJobs() {
 	}
 	if s.accountExports != nil {
 		s.jobs.Register(s.accountExports.spec())
+	}
+	if s.keyReencrypt != nil {
+		s.jobs.Register(s.keyReencrypt.spec())
 	}
 	if s.vaultParity != nil {
 		// Needs a free leg to write to; without one (a local build, a

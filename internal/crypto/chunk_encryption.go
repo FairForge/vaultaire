@@ -1,6 +1,7 @@
 package crypto
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/sha256"
@@ -12,22 +13,32 @@ import (
 )
 
 // ChunkEncryptionService provides per-chunk convergent encryption.
-// Same tenant + same content always produces the same ciphertext,
-// enabling deduplication of encrypted chunks within a tenant.
+// Same tenant + same key version + same content always produces the same
+// ciphertext, enabling deduplication of encrypted chunks within a tenant.
+//
+// The tenant input of the convergent key is the RANDOM chunk key of one
+// version of the tenant's key (TenantKeys, WP-R8-1): a chunk is sealed under
+// the tenant's current version, and the version is recorded with the blob
+// (global_content_index.encryption_key_version) so it is opened under the
+// same one after any number of rotations.
 type ChunkEncryptionService struct {
-	km *KeyManager
+	keys *TenantKeys
 }
 
-// NewChunkEncryptionService creates a new service backed by the given KeyManager.
-func NewChunkEncryptionService(km *KeyManager) *ChunkEncryptionService {
-	return &ChunkEncryptionService{km: km}
+// NewChunkEncryptionService creates a new service backed by the tenant key store.
+func NewChunkEncryptionService(keys *TenantKeys) *ChunkEncryptionService {
+	return &ChunkEncryptionService{keys: keys}
 }
 
-// EncryptChunkData derives a convergent key from the tenant key + plaintext hash,
-// then encrypts with AES-256-GCM using a deterministic nonce (HKDF-derived
-// from the key and the bytes being sealed). Returns ciphertext (nonce
-// prepended) and the ciphertext hash (SHA-256 of the encrypted blob, for
-// integrity verification on read).
+// Keys is the store this service seals under.
+func (s *ChunkEncryptionService) Keys() *TenantKeys { return s.keys }
+
+// EncryptChunkData seals a chunk under the tenant's CURRENT key version and
+// returns that version with the blob, for the caller to record. The
+// convergent key is SHA-256(chunkKey_v ‖ plaintext hash); the nonce is
+// HKDF-derived from the key and the bytes being sealed. Returns ciphertext
+// (nonce prepended), the ciphertext hash (SHA-256 of the encrypted blob, for
+// integrity verification on read) and the key version.
 //
 // plaintextHash is the chunk's dedup identity (SHA-256 of the chunk BEFORE
 // compression); data is what is actually sealed — the raw chunk or its zstd
@@ -37,12 +48,30 @@ func NewChunkEncryptionService(km *KeyManager) *ChunkEncryptionService {
 //
 // Ciphertext format: [nonce (12B)][GCM ciphertext + tag (len(data)+16)]
 // Overhead: ChunkEncryptionOverhead (28) bytes per chunk.
-func (s *ChunkEncryptionService) EncryptChunkData(tenantID string, plaintextHash string, data []byte) ([]byte, string, error) {
-	convergentKey, err := s.deriveConvergentKey(tenantID, plaintextHash)
+func (s *ChunkEncryptionService) EncryptChunkData(ctx context.Context, tenantID string, plaintextHash string, data []byte) ([]byte, string, int, error) {
+	kv, err := s.keys.Current(ctx, tenantID)
 	if err != nil {
-		return nil, "", fmt.Errorf("derive convergent key: %w", err)
+		return nil, "", 0, fmt.Errorf("tenant key: %w", err)
 	}
+	ct, ctHash, err := sealChunk(kv, plaintextHash, data)
+	if err != nil {
+		return nil, "", 0, err
+	}
+	return ct, ctHash, kv.Version, nil
+}
 
+// EncryptChunkDataVersion seals under one given version (the re-encrypt job:
+// it seals under the version it read from the table, never a cached one).
+func (s *ChunkEncryptionService) EncryptChunkDataVersion(ctx context.Context, tenantID string, keyVersion int, plaintextHash string, data []byte) ([]byte, string, error) {
+	kv, err := s.keys.Version(ctx, tenantID, keyVersion)
+	if err != nil {
+		return nil, "", fmt.Errorf("tenant key: %w", err)
+	}
+	return sealChunk(kv, plaintextHash, data)
+}
+
+func sealChunk(kv *KeyVersion, plaintextHash string, data []byte) ([]byte, string, error) {
+	convergentKey := chunkConvergentKey(kv, plaintextHash)
 	block, err := aes.NewCipher(convergentKey)
 	if err != nil {
 		return nil, "", fmt.Errorf("create AES cipher: %w", err)
@@ -53,7 +82,7 @@ func (s *ChunkEncryptionService) EncryptChunkData(tenantID string, plaintextHash
 		return nil, "", fmt.Errorf("create GCM: %w", err)
 	}
 
-	nonce, err := s.deriveNonce(convergentKey, data, gcm.NonceSize())
+	nonce, err := deriveChunkNonce(convergentKey, data, gcm.NonceSize())
 	if err != nil {
 		return nil, "", fmt.Errorf("derive nonce: %w", err)
 	}
@@ -63,14 +92,13 @@ func (s *ChunkEncryptionService) EncryptChunkData(tenantID string, plaintextHash
 	ciphertext = gcm.Seal(ciphertext, nonce, data, nil)
 
 	hash := sha256.Sum256(ciphertext)
-	ciphertextHash := hex.EncodeToString(hash[:])
-
-	return ciphertext, ciphertextHash, nil
+	return ciphertext, hex.EncodeToString(hash[:]), nil
 }
 
-// DecryptChunkData derives the same convergent key and decrypts.
-// Verifies ciphertextHash before decryption to detect storage corruption.
-func (s *ChunkEncryptionService) DecryptChunkData(tenantID string, plaintextHash string, ciphertext []byte, expectedCiphertextHash string) ([]byte, error) {
+// DecryptChunkData opens a chunk under the key version its blob was sealed
+// with (the index row's, else the ref's). Verifies ciphertextHash before
+// decryption to detect storage corruption.
+func (s *ChunkEncryptionService) DecryptChunkData(ctx context.Context, tenantID string, keyVersion int, plaintextHash string, ciphertext []byte, expectedCiphertextHash string) ([]byte, error) {
 	if expectedCiphertextHash != "" {
 		hash := sha256.Sum256(ciphertext)
 		if hex.EncodeToString(hash[:]) != expectedCiphertextHash {
@@ -78,12 +106,12 @@ func (s *ChunkEncryptionService) DecryptChunkData(tenantID string, plaintextHash
 		}
 	}
 
-	convergentKey, err := s.deriveConvergentKey(tenantID, plaintextHash)
+	kv, err := s.keys.Version(ctx, tenantID, keyVersion)
 	if err != nil {
-		return nil, fmt.Errorf("derive convergent key: %w", err)
+		return nil, fmt.Errorf("tenant key: %w", err)
 	}
 
-	block, err := aes.NewCipher(convergentKey)
+	block, err := aes.NewCipher(chunkConvergentKey(kv, plaintextHash))
 	if err != nil {
 		return nil, fmt.Errorf("create AES cipher: %w", err)
 	}
@@ -109,23 +137,16 @@ func (s *ChunkEncryptionService) DecryptChunkData(tenantID string, plaintextHash
 	return plaintext, nil
 }
 
-// deriveConvergentKey produces a 32-byte AES key deterministically from
-// the tenant's master key and the chunk's plaintext hash.
-func (s *ChunkEncryptionService) deriveConvergentKey(tenantID string, plaintextHash string) ([]byte, error) {
-	tenantKey, err := s.km.DeriveTenantKey(tenantID, 1)
-	if err != nil {
-		return nil, fmt.Errorf("derive tenant key: %w", err)
-	}
-
+// chunkConvergentKey = SHA-256(chunkKey_v ‖ plaintext hash bytes).
+func chunkConvergentKey(kv *KeyVersion, plaintextHash string) []byte {
 	hashBytes, err := hex.DecodeString(plaintextHash)
 	if err != nil {
 		hashBytes = []byte(plaintextHash)
 	}
-
-	return DeriveConvergentKey(tenantKey, hashBytes), nil
+	return DeriveConvergentKey(kv.ChunkKey[:], hashBytes)
 }
 
-// deriveNonce produces a deterministic nonce from the convergent key and the
+// deriveChunkNonce produces a deterministic nonce from the convergent key and the
 // SHA-256 of the bytes that are about to be sealed.
 //
 // The convergent key is a function of (tenant, plaintext hash) only, while the
@@ -144,7 +165,7 @@ func (s *ChunkEncryptionService) deriveConvergentKey(tenantID string, plaintextH
 //
 // Decryption reads the nonce from the blob prefix, so blobs sealed under the
 // previous derivation (salt = plaintext hash) keep decrypting unchanged.
-func (s *ChunkEncryptionService) deriveNonce(convergentKey []byte, sealed []byte, nonceSize int) ([]byte, error) {
+func deriveChunkNonce(convergentKey []byte, sealed []byte, nonceSize int) ([]byte, error) {
 	salt := sha256.Sum256(sealed)
 	hkdfReader := hkdf.New(sha256.New, convergentKey, salt[:], []byte("vaultaire-chunk-nonce-v2"))
 	nonce := make([]byte, nonceSize)

@@ -720,6 +720,7 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 				backend_name          = EXCLUDED.backend_name,
 				metadata              = EXCLUDED.metadata,
 				encryption_algorithm  = EXCLUDED.encryption_algorithm,
+				encryption_key_version = NULL, -- versions live on the chunks
 				content_disposition   = EXCLUDED.content_disposition,
 				floor                 = EXCLUDED.floor,
 				is_chunked            = EXCLUDED.is_chunked,

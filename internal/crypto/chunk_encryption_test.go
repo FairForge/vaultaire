@@ -1,6 +1,7 @@
 package crypto
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/sha256"
@@ -8,17 +9,26 @@ import (
 	"io"
 	"testing"
 
+	"github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/hkdf"
 )
 
+// chunkTestTenants are the tenant ids this file seals under; their key rows
+// are removed after each test (the keys are stored, WP-R8-1).
+var chunkTestTenants = []string{"tenant-aaa-111", "tenant-bbb-222", "tenant-aaa", "tenant-bbb",
+	"tenant-ccc-333", "tenant-ddd-444", "tenant-eee-555", "tenant-fff-666", "tenant-r8-nonce", "tenant-r8-legacy", "t"}
+
 func newTestChunkEncryptionService(t *testing.T) *ChunkEncryptionService {
 	t.Helper()
-	masterHex := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	km, err := NewKeyManager(&KeyManagerConfig{MasterKeyHex: masterHex, EnableCaching: true})
-	require.NoError(t, err)
-	return NewChunkEncryptionService(km)
+	db := getTestDB(t)
+	clean := func() {
+		_, _ = db.Exec(`DELETE FROM tenant_key_versions WHERE tenant_id = ANY($1)`, pq.Array(chunkTestTenants))
+	}
+	clean()
+	t.Cleanup(clean)
+	return NewChunkEncryptionService(newTestKeys(t, db, testMasterA, ""))
 }
 
 func TestChunkEncryption_RoundTrip(t *testing.T) {
@@ -28,13 +38,13 @@ func TestChunkEncryption_RoundTrip(t *testing.T) {
 	hash := sha256.Sum256(plaintext)
 	plaintextHash := hex.EncodeToString(hash[:])
 
-	ciphertext, ctHash, err := svc.EncryptChunkData(tenantID, plaintextHash, plaintext)
+	ciphertext, ctHash, _, err := svc.EncryptChunkData(context.Background(), tenantID, plaintextHash, plaintext)
 	require.NoError(t, err)
 	assert.NotEmpty(t, ctHash)
 	assert.NotEqual(t, plaintext, ciphertext)
 	assert.Greater(t, len(ciphertext), len(plaintext))
 
-	decrypted, err := svc.DecryptChunkData(tenantID, plaintextHash, ciphertext, ctHash)
+	decrypted, err := svc.DecryptChunkData(context.Background(), tenantID, 1, plaintextHash, ciphertext, ctHash)
 	require.NoError(t, err)
 	assert.Equal(t, plaintext, decrypted)
 }
@@ -46,10 +56,10 @@ func TestChunkEncryption_Convergent(t *testing.T) {
 	hash := sha256.Sum256(plaintext)
 	plaintextHash := hex.EncodeToString(hash[:])
 
-	ct1, hash1, err := svc.EncryptChunkData(tenantID, plaintextHash, plaintext)
+	ct1, hash1, _, err := svc.EncryptChunkData(context.Background(), tenantID, plaintextHash, plaintext)
 	require.NoError(t, err)
 
-	ct2, hash2, err := svc.EncryptChunkData(tenantID, plaintextHash, plaintext)
+	ct2, hash2, _, err := svc.EncryptChunkData(context.Background(), tenantID, plaintextHash, plaintext)
 	require.NoError(t, err)
 
 	assert.Equal(t, ct1, ct2, "same tenant + same content must produce identical ciphertext")
@@ -62,10 +72,10 @@ func TestChunkEncryption_DifferentTenants(t *testing.T) {
 	hash := sha256.Sum256(plaintext)
 	plaintextHash := hex.EncodeToString(hash[:])
 
-	ct1, _, err := svc.EncryptChunkData("tenant-aaa", plaintextHash, plaintext)
+	ct1, _, _, err := svc.EncryptChunkData(context.Background(), "tenant-aaa", plaintextHash, plaintext)
 	require.NoError(t, err)
 
-	ct2, _, err := svc.EncryptChunkData("tenant-bbb", plaintextHash, plaintext)
+	ct2, _, _, err := svc.EncryptChunkData(context.Background(), "tenant-bbb", plaintextHash, plaintext)
 	require.NoError(t, err)
 
 	assert.NotEqual(t, ct1, ct2, "different tenants must produce different ciphertext")
@@ -78,7 +88,7 @@ func TestChunkEncryption_IntegrityCheck(t *testing.T) {
 	hash := sha256.Sum256(plaintext)
 	plaintextHash := hex.EncodeToString(hash[:])
 
-	ciphertext, _, err := svc.EncryptChunkData(tenantID, plaintextHash, plaintext)
+	ciphertext, _, _, err := svc.EncryptChunkData(context.Background(), tenantID, plaintextHash, plaintext)
 	require.NoError(t, err)
 
 	// Tamper with ciphertext
@@ -86,12 +96,12 @@ func TestChunkEncryption_IntegrityCheck(t *testing.T) {
 	copy(tampered, ciphertext)
 	tampered[len(tampered)-1] ^= 0xFF
 
-	_, err = svc.DecryptChunkData(tenantID, plaintextHash, tampered, "deadbeef")
+	_, err = svc.DecryptChunkData(context.Background(), tenantID, 1, plaintextHash, tampered, "deadbeef")
 	assert.Error(t, err, "tampered ciphertext with wrong hash must fail integrity check")
 
 	// Correct hash but tampered data should fail GCM auth
 	tamperedHash := sha256.Sum256(tampered)
-	_, err = svc.DecryptChunkData(tenantID, plaintextHash, tampered, hex.EncodeToString(tamperedHash[:]))
+	_, err = svc.DecryptChunkData(context.Background(), tenantID, 1, plaintextHash, tampered, hex.EncodeToString(tamperedHash[:]))
 	assert.Error(t, err, "tampered ciphertext must fail GCM decryption")
 }
 
@@ -102,10 +112,10 @@ func TestChunkEncryption_DeterministicNonce(t *testing.T) {
 	hash := sha256.Sum256(plaintext)
 	plaintextHash := hex.EncodeToString(hash[:])
 
-	ct1, _, err := svc.EncryptChunkData(tenantID, plaintextHash, plaintext)
+	ct1, _, _, err := svc.EncryptChunkData(context.Background(), tenantID, plaintextHash, plaintext)
 	require.NoError(t, err)
 
-	ct2, _, err := svc.EncryptChunkData(tenantID, plaintextHash, plaintext)
+	ct2, _, _, err := svc.EncryptChunkData(context.Background(), tenantID, plaintextHash, plaintext)
 	require.NoError(t, err)
 
 	// Nonce is the first 12 bytes — must be identical for convergent encryption
@@ -119,13 +129,13 @@ func TestChunkEncryption_EmptyData(t *testing.T) {
 	hash := sha256.Sum256(plaintext)
 	plaintextHash := hex.EncodeToString(hash[:])
 
-	ciphertext, ctHash, err := svc.EncryptChunkData(tenantID, plaintextHash, plaintext)
+	ciphertext, ctHash, _, err := svc.EncryptChunkData(context.Background(), tenantID, plaintextHash, plaintext)
 	require.NoError(t, err)
 	assert.NotEmpty(t, ctHash)
 	// 12 bytes nonce + 16 bytes GCM tag = 28 bytes overhead minimum
 	assert.Equal(t, 28, len(ciphertext))
 
-	decrypted, err := svc.DecryptChunkData(tenantID, plaintextHash, ciphertext, ctHash)
+	decrypted, err := svc.DecryptChunkData(context.Background(), tenantID, 1, plaintextHash, ciphertext, ctHash)
 	require.NoError(t, err)
 	assert.Empty(t, decrypted)
 }
@@ -137,11 +147,11 @@ func TestChunkEncryption_DecryptWithoutHash(t *testing.T) {
 	hash := sha256.Sum256(plaintext)
 	plaintextHash := hex.EncodeToString(hash[:])
 
-	ciphertext, _, err := svc.EncryptChunkData(tenantID, plaintextHash, plaintext)
+	ciphertext, _, _, err := svc.EncryptChunkData(context.Background(), tenantID, plaintextHash, plaintext)
 	require.NoError(t, err)
 
 	// Empty expectedCiphertextHash skips integrity check
-	decrypted, err := svc.DecryptChunkData(tenantID, plaintextHash, ciphertext, "")
+	decrypted, err := svc.DecryptChunkData(context.Background(), tenantID, 1, plaintextHash, ciphertext, "")
 	require.NoError(t, err)
 	assert.Equal(t, plaintext, decrypted)
 }
@@ -163,24 +173,24 @@ func TestChunkEncryption_NonceBoundToSealedBytes(t *testing.T) {
 	raw := chunk
 	compressed := []byte("zstd(chunk) — a different message under the same convergent key")
 
-	ctRaw, hRaw, err := svc.EncryptChunkData(tenantID, plaintextHash, raw)
+	ctRaw, hRaw, _, err := svc.EncryptChunkData(context.Background(), tenantID, plaintextHash, raw)
 	require.NoError(t, err)
-	ctZ, hZ, err := svc.EncryptChunkData(tenantID, plaintextHash, compressed)
+	ctZ, hZ, _, err := svc.EncryptChunkData(context.Background(), tenantID, plaintextHash, compressed)
 	require.NoError(t, err)
 
 	assert.NotEqual(t, ctRaw[:12], ctZ[:12],
 		"different sealed bytes under one convergent key must get different nonces")
 
 	// Both still decrypt (the nonce travels with the blob).
-	gotRaw, err := svc.DecryptChunkData(tenantID, plaintextHash, ctRaw, hRaw)
+	gotRaw, err := svc.DecryptChunkData(context.Background(), tenantID, 1, plaintextHash, ctRaw, hRaw)
 	require.NoError(t, err)
 	assert.Equal(t, raw, gotRaw)
-	gotZ, err := svc.DecryptChunkData(tenantID, plaintextHash, ctZ, hZ)
+	gotZ, err := svc.DecryptChunkData(context.Background(), tenantID, 1, plaintextHash, ctZ, hZ)
 	require.NoError(t, err)
 	assert.Equal(t, compressed, gotZ)
 
 	// Convergence is preserved: the same sealed bytes give the same blob.
-	ctRaw2, hRaw2, err := svc.EncryptChunkData(tenantID, plaintextHash, raw)
+	ctRaw2, hRaw2, _, err := svc.EncryptChunkData(context.Background(), tenantID, plaintextHash, raw)
 	require.NoError(t, err)
 	assert.Equal(t, ctRaw, ctRaw2)
 	assert.Equal(t, hRaw, hRaw2)
@@ -196,8 +206,9 @@ func TestChunkEncryption_LegacyV1BlobDecrypts(t *testing.T) {
 	sum := sha256.Sum256(plaintext)
 	plaintextHash := hex.EncodeToString(sum[:])
 
-	key, err := svc.deriveConvergentKey(tenantID, plaintextHash)
+	kv, err := svc.keys.Current(context.Background(), tenantID)
 	require.NoError(t, err)
+	key := chunkConvergentKey(kv, plaintextHash)
 	block, err := aes.NewCipher(key)
 	require.NoError(t, err)
 	gcm, err := cipher.NewGCM(block)
@@ -210,7 +221,7 @@ func TestChunkEncryption_LegacyV1BlobDecrypts(t *testing.T) {
 	legacy := append(append([]byte{}, nonce...), gcm.Seal(nil, nonce, plaintext, nil)...)
 	legacySum := sha256.Sum256(legacy)
 
-	got, err := svc.DecryptChunkData(tenantID, plaintextHash, legacy, hex.EncodeToString(legacySum[:]))
+	got, err := svc.DecryptChunkData(context.Background(), tenantID, 1, plaintextHash, legacy, hex.EncodeToString(legacySum[:]))
 	require.NoError(t, err)
 	assert.Equal(t, plaintext, got)
 }
@@ -221,7 +232,7 @@ func TestChunkEncryption_OverheadIsTheConstant(t *testing.T) {
 	for _, n := range []int{0, 1, 2 << 20} {
 		data := make([]byte, n)
 		sum := sha256.Sum256(data)
-		ct, _, err := svc.EncryptChunkData("t", hex.EncodeToString(sum[:]), data)
+		ct, _, _, err := svc.EncryptChunkData(context.Background(), "t", hex.EncodeToString(sum[:]), data)
 		require.NoError(t, err)
 		assert.Equal(t, n+ChunkEncryptionOverhead, len(ct))
 	}

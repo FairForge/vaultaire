@@ -83,6 +83,7 @@ func cleanupTenantChunkRows(db *sql.DB, tenantID, scope string) {
 	}
 	_, _ = db.Exec(`DELETE FROM tenant_chunk_refs WHERE tenant_id::text = $1`, tenantID)
 	_, _ = db.Exec(`DELETE FROM object_metadata WHERE tenant_id::text = $1`, tenantID)
+	_, _ = db.Exec(`DELETE FROM retired_chunk_blobs WHERE dedup_scope = $1`, scope)
 	for _, p := range pairs {
 		_, _ = db.Exec(`DELETE FROM global_content_index g
 			WHERE g.dedup_scope = $1 AND g.plaintext_hash = $2

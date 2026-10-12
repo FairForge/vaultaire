@@ -95,7 +95,9 @@ func TestStoreChunkLocked_ReusesExistingRowUnderLock(t *testing.T) {
 func TestHandlePut_ChunkingFlagOff_SSEBucketStillEncrypts(t *testing.T) {
 	f := setupEncryptedChunkingFixture(t)
 	svc := withChunkingFlag(t, f)
-	sse, err := crypto.NewSSEService(f.db, testSSEMasterKey)
+	// One master key for both encryptions, as in prod: they share the
+	// tenant's key store since WP-R8-1.
+	sse, err := testSSEService(f.db, keyTestMasterA)
 	require.NoError(t, err)
 	f.adapter.sseService = sse
 	markBucketSSE(t, f)
@@ -132,7 +134,9 @@ func TestHandlePut_ChunkingFlagOff_SSEBucketStillEncrypts(t *testing.T) {
 func TestHandlePut_ChunkingFlagOff_SSEBucketOversize_Rejected(t *testing.T) {
 	f := setupEncryptedChunkingFixture(t)
 	svc := withChunkingFlag(t, f)
-	sse, err := crypto.NewSSEService(f.db, testSSEMasterKey)
+	// One master key for both encryptions, as in prod: they share the
+	// tenant's key store since WP-R8-1.
+	sse, err := testSSEService(f.db, keyTestMasterA)
 	require.NoError(t, err)
 	f.adapter.sseService = sse
 	markBucketSSE(t, f)
@@ -153,7 +157,7 @@ func TestHandlePut_ChunkingFlagOff_SSEBucketOversize_Rejected(t *testing.T) {
 // plaintext Content-Length (live: 41,943,040 bytes of garbage, status 200).
 func TestHandleGet_SSEObjectWithoutService_Fails(t *testing.T) {
 	f := setupAdapterFixture(t)
-	sse, err := crypto.NewSSEService(f.db, testSSEMasterKey)
+	sse, err := testSSEService(f.db, testSSEMasterKey)
 	require.NoError(t, err)
 	f.adapter.sseService = sse
 	t.Cleanup(func() {

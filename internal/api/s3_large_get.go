@@ -258,6 +258,13 @@ func (a *S3ToEngine) resolveChunkDescs(ctx context.Context, refs []crypto.Tenant
 		} else if ref.CiphertextHash != nil {
 			ctHash = *ref.CiphertextHash
 		}
+		// The key version likewise (WP-R8-1): the row's is the blob's (the
+		// re-encrypt job changes it with the blob); the ref's copy only
+		// stands in for rows sealed before 084 carried one.
+		keyVersion := ref.EncryptionKeyVersion
+		if lookup.Entry.EncryptionKeyVersion != nil {
+			keyVersion = *lookup.Entry.EncryptionKeyVersion
+		}
 		descs[i] = chunkDesc{
 			scope:          scopeOf[i],
 			storageKey:     storageKey,
@@ -268,6 +275,7 @@ func (a *S3ToEngine) resolveChunkDescs(ctx context.Context, refs []crypto.Tenant
 			compressed:     lookup.Entry.CompressionAlgo != nil,
 			encrypted:      lookup.Entry.Encrypted,
 			ciphertextHash: ctHash,
+			keyVersion:     keyVersion,
 		}
 	}
 	return descs, nil
