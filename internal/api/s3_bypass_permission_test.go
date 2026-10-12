@@ -169,7 +169,11 @@ func (f *bypassFixture) intact(bucket, key string) bool {
 	f.t.Helper()
 	var n int
 	require.NoError(f.t, f.db.QueryRow(`SELECT COUNT(*) FROM object_head_cache WHERE tenant_id=$1 AND bucket=$2 AND object_key=$3`, f.tenantID, bucket, key).Scan(&n))
-	b, err := os.ReadFile(filepath.Join(f.tempDir, f.tenantID+"_"+bucket, key)) // #nosec G304 -- test fixture path
+	var b []byte
+	err := os.ErrNotExist
+	if n == 1 {
+		b, err = os.ReadFile(blobPath(f.t, f.db, f.tempDir, f.tenantID, bucket, key)) // #nosec G304 -- test fixture path
+	}
 	var locks int
 	require.NoError(f.t, f.db.QueryRow(`SELECT COUNT(*) FROM object_locks WHERE tenant_id=$1 AND bucket=$2 AND object_key=$3 AND retain_until_date > NOW() + INTERVAL '29 days'`, f.tenantID, bucket, key).Scan(&locks))
 	return n == 1 && err == nil && string(b) == "retained bytes of "+key && locks == 1

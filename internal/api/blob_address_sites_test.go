@@ -61,7 +61,7 @@ func TestCopyObject_SourceIsTheRowsStorageKey(t *testing.T) {
 	f.server.handleCopyObject(w, r, &S3Request{Bucket: "b", Object: "dest", TenantID: f.tenantID})
 
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-	assert.Equal(t, "fresh source bytes", f.read(f.hotPath("b", "dest")), "the copy read the source row's address")
+	assert.Equal(t, "fresh source bytes", f.read(f.hotPath("b", f.headAddr("b", "dest"))), "the copy read the source row's address")
 }
 
 func TestSmartDemotion_CopiesUnderTheStorageKeyAndFlipBackKeepsIt(t *testing.T) {

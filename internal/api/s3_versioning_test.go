@@ -292,12 +292,12 @@ func TestVersioning_GetSpecificVersion(t *testing.T) {
 	assert.Equal(t, vid2, w.Header().Get("x-amz-version-id"))
 	assert.Equal(t, "second version", w.Body.String())
 
-	// R2-03: versions are metadata-only (the backend holds one blob per key),
-	// so a non-current version must fail loudly rather than answer 200 with
-	// the current object's bytes under the old version id.
+	// R2-03, closed by WP-R2-1 Part C: every version keeps its own blob, so
+	// a non-current version answers with ITS bytes, never the current ones.
 	w = f.getObjectVersion(t, key, vid1)
-	assert.Equal(t, http.StatusNotImplemented, w.Code)
-	assert.NotContains(t, w.Body.String(), "second version")
+	assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, vid1, w.Header().Get("x-amz-version-id"))
+	assert.Equal(t, "first version", w.Body.String())
 }
 
 // The newest live version behind a delete marker still has its bytes on the

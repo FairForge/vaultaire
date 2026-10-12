@@ -348,6 +348,11 @@ func TestPresignedURL_Integration(t *testing.T) {
 
 	testContent := "hello from presigned upload"
 	objectKey := "test-upload.txt"
+	// A known blob address (WP-R2-1 Part C): the id's randomness pinned.
+	prevRand := blobIDRand
+	blobIDRand = bytes.NewReader(make([]byte, 17))
+	t.Cleanup(func() { blobIDRand = prevRand })
+	const zeroID = "00000000000000000000000000"
 
 	tenantRow := primaryKeyRow(testPresignTenantID, testSecretKey)
 	suspendedRow := sqlmock.NewRows([]string{"suspended_at"})
@@ -375,6 +380,9 @@ func TestPresignedURL_Integration(t *testing.T) {
 	// must model the real transactional flow or the handler correctly 500s.
 	// R2-01: the Object Lock check runs before the head-row lookup and no
 	// longer depends on a head row existing.
+	// WP-R2-1 Part C: the key's room for its address (the bucket's tier).
+	mock.ExpectQuery(`SELECT tier_preference FROM buckets`).
+		WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery(`SELECT retention_mode, retain_until_date, legal_hold FROM object_locks`).
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery(`SELECT etag FROM object_head_cache`).
@@ -384,23 +392,35 @@ func TestPresignedURL_Integration(t *testing.T) {
 	// WP-R8-1 A1: whether the bucket requires encryption, read strictly once.
 	mock.ExpectQuery(`SELECT sse_enabled FROM buckets`).
 		WillReturnError(sql.ErrNoRows)
+	// The pointer flip (blob_flip.go): the head lock, the version lock, the
+	// probe, the upsert naming the address, its read-back, the bucket's
+	// versioning status, commit.
 	mock.ExpectBegin()
-	// R15-17: writers of one key serialise on a per-key advisory lock BEFORE
-	// the probe (a missing row cannot be FOR UPDATE-locked).
-	mock.ExpectExec(`SELECT pg_advisory_xact_lock`).
+	mock.ExpectExec(`SELECT pg_advisory_xact_lock\(hashtext\(`).
 		WithArgs(testPresignTenantID, sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectQuery(`SELECT size_bytes, floor, COALESCE\(backend_name, ''\), is_chunked, COALESCE\(storage_key, ''\) FROM object_head_cache`).
+	mock.ExpectExec(`SELECT pg_advisory_xact_lock\(hashtextextended\(`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT size_bytes, floor, COALESCE\(backend_name, ''\), is_chunked, COALESCE\(storage_key, ''\)`).
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectExec(`INSERT INTO object_head_cache`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT is_chunked, COALESCE\(storage_key, ''\) FROM object_head_cache`).
+		WillReturnRows(sqlmock.NewRows([]string{"is_chunked", "storage_key"}).AddRow(false, objectKey+"@"+zeroID))
+	mock.ExpectQuery(`SELECT versioning_status FROM buckets`).
+		WillReturnError(sql.ErrNoRows)
 	mock.ExpectCommit()
 
-	// HandleGet internals: versioning check, object_head_cache lookup
+	// HandleGet internals: versioning check, the head row (naming the
+	// address the PUT wrote).
 	mock.ExpectQuery(`SELECT versioning_status FROM buckets`).
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery(`SELECT content_type, size_bytes, etag`).
-		WillReturnError(sql.ErrNoRows)
+		WillReturnRows(sqlmock.NewRows([]string{"content_type", "size_bytes", "etag", "updated_at", "metadata", "backend_name",
+			"encryption_algorithm", "tags", "content_disposition", "content_encoding", "content_language", "cache_control",
+			"http_expires", "website_redirect_location", "is_chunked", "floor", "storage_key"}).
+			AddRow("text/plain", len(testContent), etagOf([]byte(testContent)), time.Now(), []byte("{}"), "local",
+				"", []byte("{}"), "", "", "", "", "", "", false, "standard", objectKey+"@"+zeroID))
 
 	// Async fire-and-forget: emitEvent inserts, notification/webhook dispatch queries.
 	// These may or may not execute before the test ends. Pre-register expectations

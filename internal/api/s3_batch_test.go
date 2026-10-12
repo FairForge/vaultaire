@@ -158,7 +158,7 @@ type panickingDeleteDriver struct {
 }
 
 func (d *panickingDeleteDriver) Delete(ctx context.Context, container, artifact string) error {
-	if artifact == d.panicKey {
+	if artifact == d.panicKey || strings.HasPrefix(artifact, d.panicKey+"@") { // the key's blob address (WP-R2-1)
 		panic("driver: nil pointer dereference in Delete")
 	}
 	return d.Driver.Delete(ctx, container, artifact)

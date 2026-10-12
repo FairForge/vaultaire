@@ -62,17 +62,18 @@ func TestMgmtDirectUpload_PublicBucketOnly_ThenRegistersTheObject(t *testing.T) 
 	_, err := f.db.Exec(`UPDATE buckets SET visibility = 'public-read' WHERE tenant_id = $1 AND name = $2`, f.tenantID, f.bucket)
 	require.NoError(t, err)
 
-	// Public: a presigned PUT comes back with the key under the tenant container.
+	// Public: a presigned PUT comes back with its own address under the tenant container.
 	w = f.mgmtBucketCall(t, "POST", f.bucket, "/direct-uploads", `{"key":"img/a.png","content_type":"image/png"}`, f.server.handleMgmtCreateDirectUpload)
 	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
 	var created mgmtDirectUpload
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &created))
 	assert.Equal(t, "PUT", created.Method)
-	assert.Contains(t, created.URL, f.tenantID+"_"+f.bucket+"/img/a.png")
+	assert.Contains(t, created.URL, f.tenantID+"_"+f.bucket+"/"+created.StorageKey)
 	assert.Equal(t, 1, stub.presigned)
+	complete := `{"key":"img/a.png","storage_key":"` + created.StorageKey + `"}`
 
 	// Complete before the bytes exist: refused, nothing registered.
-	w = f.mgmtBucketCall(t, "POST", f.bucket, "/direct-uploads/complete", `{"key":"img/a.png"}`, f.server.handleMgmtCompleteDirectUpload)
+	w = f.mgmtBucketCall(t, "POST", f.bucket, "/direct-uploads/complete", complete, f.server.handleMgmtCompleteDirectUpload)
 	require.Equal(t, http.StatusNotFound, w.Code, w.Body.String())
 	var n int
 	require.NoError(t, f.db.QueryRow(`SELECT count(*) FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key = 'img/a.png'`, f.tenantID, f.bucket).Scan(&n))
@@ -80,8 +81,8 @@ func TestMgmtDirectUpload_PublicBucketOnly_ThenRegistersTheObject(t *testing.T) 
 
 	// The client PUTs to R2 (here: into the stub's store), then completes.
 	ctx := common.WithTenantID(context.Background(), f.tenantID)
-	require.NoError(t, stub.Driver.Put(ctx, f.tenantID+"_"+f.bucket, "img/a.png", strings.NewReader(strings.Repeat("x", 5000))))
-	w = f.mgmtBucketCall(t, "POST", f.bucket, "/direct-uploads/complete", `{"key":"img/a.png"}`, f.server.handleMgmtCompleteDirectUpload)
+	require.NoError(t, stub.Driver.Put(ctx, f.tenantID+"_"+f.bucket, created.StorageKey, strings.NewReader(strings.Repeat("x", 5000))))
+	w = f.mgmtBucketCall(t, "POST", f.bucket, "/direct-uploads/complete", complete, f.server.handleMgmtCompleteDirectUpload)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	var done mgmtDirectUploadComplete
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &done))

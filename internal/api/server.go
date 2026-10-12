@@ -106,7 +106,8 @@ type Server struct {
 	accessLogTracker   *S3AccessLogTracker
 	inventoryRunner    *InventoryRunner
 	dedupGCRunner      *DedupGCRunner
-	keyReencrypt       *KeyReencryptRunner // nil without ENCRYPTION_MASTER_KEY (WP-R8-1)
+	keyReencrypt       *KeyReencryptRunner   // nil without ENCRYPTION_MASTER_KEY (WP-R8-1)
+	retiredBlobs       *RetiredBlobCollector // nil without a database (WP-R2-1 Part C)
 	smartDemotion      *SmartDemotionRunner
 	vaultParity        *VaultParity
 	packGC             *packGC // the pack store GC (internal/packstore, Phase 37); nil without the sync backend
@@ -334,6 +335,9 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		s.keyReencrypt = NewKeyReencryptRunner(s.db, s.engine, s.gci, s.chunkEncSvc, logger)
 	}
 	s.chunkMover = NewChunkMover(s.db, s.engine, logger)
+	// The retired_blobs collector (WP-R2-1 Part C): the one deleter of
+	// displaced whole-object blobs.
+	s.retiredBlobs = NewRetiredBlobCollector(s.db, s.engine, logger)
 
 	// Routing truth (WP-R7-5): the boot check runs in Start, the sampled
 	// job daily. Knobs: ROUTING_TRUTH_SAMPLE, ROUTING_TRUTH_PERMAFROST_SAMPLE,

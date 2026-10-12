@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/md5" // #nosec G505 -- S3 ETag semantics
 	"encoding/hex"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -19,8 +18,9 @@ import (
 
 // WP-R2-1 (Stage 1a Prompt 2B): every reader of whole-object bytes honours
 // the blob's own address — object_head_cache.storage_key, NULL = <key>.
-// No writer sets one yet (2C), so each test sets it by SQL, with a STALE
-// blob left at <key>: a reader that still reads <key> serves the wrong bytes.
+// Each test points the row by SQL at a blob it planted, with a STALE blob
+// left at <key>: a reader that still reads <key> serves the wrong bytes.
+// (Since Part C the writers set addresses themselves: blob_writers_test.go.)
 
 func etagOf(b []byte) string {
 	sum := md5.Sum(b) // #nosec G401 -- S3 ETag semantics
@@ -192,9 +192,12 @@ func TestGetVersion_NonCurrentWithoutBytes_Still501(t *testing.T) {
 	versionedAdapter(t, f)
 	vid1 := putWhole(t, f, "n.txt", []byte("one")).Header().Get("x-amz-version-id")
 	putWhole(t, f, "n.txt", []byte("two"))
+	// A version written before Part C kept no bytes: no address on its row.
+	_, err := f.db.Exec(`UPDATE object_versions SET storage_key = NULL WHERE tenant_id = $1 AND version_id = $2`, f.tenantID, vid1)
+	require.NoError(t, err)
 
 	w := getWith(t, f, "/test-bucket/n.txt?versionId="+vid1, "n.txt", nil)
-	assert.Equal(t, http.StatusNotImplemented, w.Code, "no storage_key on the version row: today's answer until 2C")
+	assert.Equal(t, http.StatusNotImplemented, w.Code, "no storage_key on the version row: the R2-03 answer stays for pre-C versions")
 }
 
 func TestGetVersion_SSES3VersionOpensUnderItsOwnKeyVersion(t *testing.T) {
@@ -206,19 +209,13 @@ func TestGetVersion_SSES3VersionOpensUnderItsOwnKeyVersion(t *testing.T) {
 
 	putSSE(t, f, "s.txt", one)
 	var vid1 string
-	require.NoError(t, f.db.QueryRow(`SELECT version_id FROM object_versions WHERE tenant_id = $1 AND object_key = 's.txt' AND is_latest`,
-		f.tenantID).Scan(&vid1))
-	// The v1 ciphertext, kept under its own address.
-	container := f.tenant.NamespaceContainer("test-bucket")
-	rc, err := f.eng.Get(tctxOf(f), container, "s.txt")
+	var kv1 *int
+	require.NoError(t, f.db.QueryRow(`SELECT version_id, encryption_key_version FROM object_versions WHERE tenant_id = $1 AND object_key = 's.txt' AND is_latest`,
+		f.tenantID).Scan(&vid1, &kv1))
+	require.NotNil(t, kv1, "the version row records the key version (087)")
+	_, err := keys.Rotate(context.Background(), f.tenantID)
 	require.NoError(t, err)
-	sealed, err := io.ReadAll(rc)
-	_ = rc.Close()
-	require.NoError(t, err)
-	_, err = keys.Rotate(context.Background(), f.tenantID)
-	require.NoError(t, err)
-	putSSE(t, f, "s.txt", two)
-	keepVersionBytes(t, f, "s.txt", vid1, "s.txt@v1", sealed, crypto.SSEAlgorithm)
+	putSSE(t, f, "s.txt", two) // Part C: v1's sealed blob stays at its own address
 
 	w := getWith(t, f, "/test-bucket/s.txt?versionId="+vid1, "s.txt", nil)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
@@ -263,36 +260,15 @@ func TestDeleteVersion_WithBytes_RetiresTheBlob(t *testing.T) {
 	assert.Equal(t, f.tenant.NamespaceContainer("test-bucket"), container)
 }
 
-// A version whose blob the head row still names (the current version) is
-// never retired by its version delete: the current object reads it.
-func TestDeleteVersion_BlobTheHeadRowNames_NotRetired(t *testing.T) {
-	f := setupAdapterFixture(t)
-	versionedAdapter(t, f)
-	putWhole(t, f, "c.txt", []byte("one"))
-	cur := []byte("current")
-	vid2 := putWhole(t, f, "c.txt", cur).Header().Get("x-amz-version-id")
-	keepVersionBytes(t, f, "c.txt", vid2, "c.txt@v2", cur, "")
-	pointRowAt(t, f, "test-bucket", "c.txt", "c.txt@v2", cur)
-
-	req := httptest.NewRequest("DELETE", "/test-bucket/c.txt?versionId="+vid2, nil)
-	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
-	w := httptest.NewRecorder()
-	f.adapter.HandleDelete(w, req, "test-bucket", "c.txt")
-
-	require.Equal(t, http.StatusNoContent, w.Code)
-	assert.Empty(t, retiredBlobs(t, f))
-}
-
 // --- the previous slot meets a 2C row (the two-slot window) ------------------
 
-// A PUT from this build writes in place at <key>: it must clear a storage_key
-// a 2C slot left on the row (or the row would keep naming the old blob) and
-// retire the blob it displaced.
-func TestPut_OverARowWithStorageKey_ClearsItAndRetiresTheDisplacedBlob(t *testing.T) {
+// A PUT over a row that names an address writes its own address and
+// retires the one it displaced (Part C; Part B's in-place write cleared it).
+func TestPut_OverARowWithStorageKey_RetiresTheDisplacedBlob(t *testing.T) {
 	f := setupChunkingFixture(t)
 	cleanupBlobRows(t, f)
-	old, next := []byte("bytes a 2C slot wrote"), []byte("bytes this slot writes in place")
-	putWhole(t, f, "p", []byte("legacy"))
+	old, next := []byte("bytes at an address"), []byte("bytes of the next write")
+	putWhole(t, f, "p", []byte("first"))
 	container := f.tenant.NamespaceContainer("test-bucket")
 	require.NoError(t, f.fixed.Put(tctxOf(f), container, "p@v1", bytes.NewReader(old)))
 	pointRowAt(t, f, "test-bucket", "p", "p@v1", old)
@@ -301,10 +277,10 @@ func TestPut_OverARowWithStorageKey_ClearsItAndRetiresTheDisplacedBlob(t *testin
 
 	w := getWith(t, f, "/test-bucket/p", "p", nil)
 	assert.Equal(t, next, w.Body.Bytes())
-	var sk *string
+	var sk string
 	require.NoError(t, f.db.QueryRow(`SELECT storage_key FROM object_head_cache WHERE tenant_id = $1 AND object_key = 'p'`, f.tenantID).Scan(&sk))
-	assert.Nil(t, sk, "an in-place write leaves the row at <key>")
-	assert.Equal(t, map[string]string{"p@v1": "overwritten"}, retiredBlobs(t, f))
+	assert.True(t, isBlobAddressOf("p", sk), "the write's own address: %q", sk)
+	assert.Equal(t, retiredOverwritten, retiredBlobs(t, f)["p@v1"])
 }
 
 func TestDelete_DeletesTheRowsStorageKey(t *testing.T) {
@@ -327,9 +303,9 @@ func TestDelete_DeletesTheRowsStorageKey(t *testing.T) {
 	assert.False(t, ok, "the blob the row named is deleted")
 }
 
-// A Suspended bucket rewrites its "null" version in place: the row must not
-// keep an address a 2C slot recorded on it.
-func TestPut_SuspendedNullVersionRewrite_ClearsTheVersionsAddress(t *testing.T) {
+// A Suspended bucket rewrites its "null" version: the row takes the new
+// write's address and encryption, never keeps what it named before.
+func TestPut_SuspendedNullVersionRewrite_TakesTheNewAddress(t *testing.T) {
 	f := setupAdapterFixture(t)
 	versionedAdapter(t, f)
 	_, err := f.db.Exec(`UPDATE buckets SET versioning_status = 'Suspended' WHERE tenant_id = $1`, f.tenantID)
@@ -341,9 +317,11 @@ func TestPut_SuspendedNullVersionRewrite_ClearsTheVersionsAddress(t *testing.T) 
 
 	putWhole(t, f, "n.txt", []byte("two"))
 
-	var sk, enc *string
+	var sk, head string
+	var enc *string
 	require.NoError(t, f.db.QueryRow(`SELECT storage_key, encryption_algorithm FROM object_versions
 		WHERE tenant_id = $1 AND object_key = 'n.txt' AND version_id = 'null'`, f.tenantID).Scan(&sk, &enc))
-	assert.Nil(t, sk)
+	require.NoError(t, f.db.QueryRow(`SELECT storage_key FROM object_head_cache WHERE tenant_id = $1 AND object_key = 'n.txt'`, f.tenantID).Scan(&head))
+	assert.Equal(t, head, sk, "the null version names the new write's blob")
 	assert.Nil(t, enc)
 }

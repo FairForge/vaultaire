@@ -49,13 +49,13 @@ groups:
           description: "{{ $labels.job_name }} last succeeded {{ $value | humanizeDuration }} ago (a value near the age of the epoch means it has never succeeded). It is due once a day and retried hourly while it fails. GET /api/v1/admin/jobs shows the last outcome and error; journalctl -u 'vaultaire@*' | grep 'job run'."
 
       - alert: PeriodicJobStale
-        expr: (time() - vaultaire_job_last_success_timestamp_seconds{job_name=~"multipart_reaper|cdn_rollup|idempotency_cleanup|sts_cleanup|session_cleanup|bandwidth_alerts|access_log_delivery|account_export|vault_parity|pack_gc|stripe_gc|key_reencrypt"}) > 3 * 3600
+        expr: (time() - vaultaire_job_last_success_timestamp_seconds{job_name=~"multipart_reaper|cdn_rollup|idempotency_cleanup|sts_cleanup|session_cleanup|bandwidth_alerts|access_log_delivery|account_export|vault_parity|pack_gc|stripe_gc|key_reencrypt|retired_blobs"}) > 3 * 3600
         for: 30m
         labels:
           severity: warning
         annotations:
           summary: "Periodic job {{ $labels.job_name }} has not succeeded in 3 hours"
-          description: "{{ $labels.job_name }} runs every hour (access_log_delivery every 5 minutes, account_export every minute, key_reencrypt every 10 minutes) and last succeeded {{ $value | humanizeDuration }} ago. GET /api/v1/admin/jobs; journalctl -u 'vaultaire@*' | grep 'job run failed'."
+          description: "{{ $labels.job_name }} runs every hour (access_log_delivery every 5 minutes, account_export every minute, key_reencrypt and retired_blobs every 10 minutes) and last succeeded {{ $value | humanizeDuration }} ago. GET /api/v1/admin/jobs; journalctl -u 'vaultaire@*' | grep 'job run failed'."
 
       - alert: JobFailing
         expr: increase(vaultaire_job_runs_total{outcome="error"}[6h]) >= 3
@@ -133,3 +133,12 @@ groups:
         annotations:
           summary: "{{ $value }} chunk(s) still on an old tenant key version after a day"
           description: "The key_reencrypt job is not moving them. GET /api/v1/admin/jobs → key_reencrypt (result.errors, last_error); journalctl -u 'vaultaire@*' | grep 'key re-encrypt'."
+
+      - alert: RetiredBlobsBacklogStuck
+        expr: vaultaire_retired_blobs_backlog > 0
+        for: 6h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} retired whole-object blob(s) past their grace for 6 hours"
+          description: "Blobs a write displaced, a version delete released or a failed write left (retired_blobs) are due and the retired_blobs job is not deleting them: it is not running, their backend is unregistered or its breaker open (result.skipped_backends), or the deletes fail. Costs storage, never data. GET /api/v1/admin/jobs → retired_blobs; journalctl -u 'vaultaire@*' | grep 'retired blob'."

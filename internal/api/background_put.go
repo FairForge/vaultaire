@@ -138,11 +138,11 @@ type generatedWriteOptions struct {
 // (generatedKindAccessLog, generatedKindInventory). Ownership of the
 // target bucket is re-checked now, not at config time; Object Lock on the
 // key is honoured; placement, quota, head row and the version ledger follow
-// plain PUT (placeObject, reserveQuota, upsertWholeObjectHeadRow,
-// recordObjectVersion). A failure after the backend write leaves a durable
-// blob under the key; the caller keeps its source rows and the next pass
-// overwrites (inventory: same key per day) or writes a fresh key (access
-// logs: timestamp + random suffix).
+// plain PUT (placeObject at a new address, reserveQuota, the commitBlobWrite
+// flip with the version row). A failure after the backend write leaves the
+// key's previous object as it was and the new blob queued as an orphan; the
+// caller keeps its source rows and the next pass writes again (inventory:
+// same key per day) or a fresh key (access logs: timestamp + random suffix).
 func (g *generatedObjectWriter) write(ctx context.Context, kind, tenantID, bucket, key, contentType string, body func(io.Writer) error) (deliveredObject, error) {
 	return g.writeOpts(ctx, tenantID, bucket, key, contentType, body, generatedWriteOptions{Kind: kind})
 }
@@ -274,32 +274,40 @@ func (g *generatedObjectWriter) writeOpts(ctx context.Context, tenantID, bucket,
 	if class != "" {
 		opts = append(opts, engine.WithStorageClass(class))
 	}
-	backendName, err := placeObject(tctx, g.db, g.eng, tenantID, bucket, container, key, putBody, opts...)
+	// A new address per write (WP-R2-1): the report this one replaces stays
+	// readable until the flip, and a failure leaves it untouched.
+	blob, err := newBlobAddress(key)
+	if err != nil {
+		release()
+		return deliveredObject{}, err
+	}
+	backendName, err := placeObject(tctx, g.db, g.eng, tenantID, bucket, container, blob, putBody, opts...)
 	if err != nil {
 		release()
 		return deliveredObject{}, fmt.Errorf("store %s/%s: %w", bucket, key, err)
 	}
 
 	attrs := objectAttrs{ContentType: contentType}
-	displaced, dbErr := atomicHeadUpsertReleasing(tctx, g.db, manifestReleaser(g.gci), tenantID, bucket, key, func(tx *sql.Tx) error {
-		return upsertWholeObjectHeadRowEnc(tctx, tx, tenantID, bucket, key, size, etag, backendName, floor, attrs, enc)
-	})
+	flip, dbErr := commitBlobWrite(tctx, g.db, manifestReleaser(g.gci), blobWrite{TenantID: tenantID, Bucket: bucket, Key: key,
+		Version: &versionWrite{Size: size, ETag: etag, ContentType: contentType, Backend: backendName,
+			Blob: versionBlobRef{StorageKey: blob, Enc: enc}},
+		Upsert: func(tx *sql.Tx) error {
+			return upsertWholeObjectHeadRowEnc(tctx, tx, tenantID, bucket, key, blob, size, etag, backendName, floor, attrs, enc)
+		}})
 	if dbErr != nil {
-		// The blob is durable but invisible and unbilled (HEAD/GET/LIST read
-		// the head row only); the next pass writes it again. Same rule as
-		// plain PUT (R3-10): never report success without the row.
+		// The blob is an orphan no row names (queued for the collector); the
+		// next pass writes afresh. Same rule as plain PUT (R3-10): never
+		// report success without the row.
 		release()
+		retireOrphanWrite(tctx, g.db, g.logger, tenantID, bucket, blob, backendName)
 		return deliveredObject{}, fmt.Errorf("head row for %s/%s: %w", bucket, key, dbErr)
 	}
+	displaced := flip.Displaced
 	if g.quota != nil && displaced.Size > 0 {
 		if err := releaseQuotaOn(context.WithoutCancel(tctx), g.quota, tenantID, displaced.Floor, displaced.Size); err != nil {
 			g.logger.Error("generated object: release overwritten object failed", zap.Error(err), zap.String("tenant_id", tenantID))
 		}
 	}
-	// A report that replaces one stored on another backend (the target
-	// bucket changed tier or visibility between two runs): as plain PUT.
-	dropDisplacedBlob(tctx, g.db, g.eng, g.logger, lostWriteOverwrite, tenantID, bucket, container, key, displaced, backendName)
-	recordObjectVersion(tctx, g.db, tenantID, bucket, key, size, etag, contentType, backendName)
 
 	return deliveredObject{Size: size, ETag: etag, Backend: backendName, OverQuota: overQuota}, nil
 }

@@ -74,7 +74,10 @@ func TestHandlePut_RegionPinnedBucketIsNeverChunked(t *testing.T) {
 		assert.False(t, isChunked, "stored whole")
 		assert.Equal(t, "idrive-eu-west-1", backend)
 		noChunks(t)
-		assert.Equal(t, []string{"t-" + f.tenantID + "/" + f.tenant.NamespaceContainer("test-bucket") + "/eu.bin"}, eu.blobs())
+		var addr string
+		require.NoError(t, f.db.QueryRow(`SELECT storage_key FROM object_head_cache
+			 WHERE tenant_id = $1 AND bucket = 'test-bucket' AND object_key = 'eu.bin'`, f.tenantID).Scan(&addr))
+		assert.Equal(t, []string{"t-" + f.tenantID + "/" + f.tenant.NamespaceContainer("test-bucket") + "/" + addr}, eu.blobs())
 		assert.Empty(t, f.fixed.blobs(), "nothing on the primary")
 	})
 }

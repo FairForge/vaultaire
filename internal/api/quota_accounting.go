@@ -74,6 +74,12 @@ type displacedRow struct {
 	// StorageKey is the displaced row's blob address ("" = <key>, WP-R2-1):
 	// where its whole blob is, when it is not at the key.
 	StorageKey string
+	// Found: a row was displaced (Size may be 0 for an empty object).
+	Found bool
+	// etag and enc describe the displaced blob, for the version row that
+	// keeps it (anchorDisplacedVersion).
+	etag string
+	enc  objectEncryption
 }
 
 // settlePutQuota reconciles a successful write's up-front reservation
@@ -184,67 +190,14 @@ func manifestReleaser(g *crypto.GlobalContentIndex) chunkManifestReleaser {
 // serve the OLD object's bytes from the stale manifest.
 func atomicHeadUpsertReleasing(ctx context.Context, db *sql.DB, gci chunkManifestReleaser,
 	tenantID, bucket, key string, upsert func(tx *sql.Tx) error) (displacedRow, error) {
-	tx, err := db.BeginTx(ctx, nil)
+	// One transaction for every head-row writer (blob_flip.go): the upsert
+	// names its own address (NULL for a chunked row), and a displaced whole
+	// blob at another address is retired, unless a row still names it.
+	res, err := commitBlobWrite(ctx, db, gci, blobWrite{TenantID: tenantID, Bucket: bucket, Key: key, Upsert: upsert})
 	if err != nil {
-		return displacedRow{}, fmt.Errorf("begin head-cache upsert: %w", err)
+		return displacedRow{}, err
 	}
-	defer func() { _ = tx.Rollback() }()
-
-	// Serialise writers of the same key BEFORE the probe. A row that does not
-	// exist yet cannot be locked by FOR UPDATE, so two concurrent first
-	// writers of a new key both saw "no previous row", both reported
-	// displaced = 0, and the loser's reserved bytes were never released — the
-	// tenant's ledger over-counted by one object until an admin reconcile
-	// (Review R15-17, TestAtomicHeadUpsert_ConcurrentFirstWritersAccountOnce).
-	// A transaction-scoped advisory lock on the key closes the gap for every
-	// writer (plain/chunked PUT, copy, multipart complete, background reports)
-	// since they all come through here; it is released at commit/rollback.
-	if _, err := tx.ExecContext(ctx,
-		`SELECT pg_advisory_xact_lock(hashtext($1 || '/' || $2 || '/' || $3)::bigint)`,
-		tenantID, bucket, key); err != nil {
-		return displacedRow{}, fmt.Errorf("lock head-cache key: %w", err)
-	}
-
-	var displaced displacedRow
-	var displacedChunked bool
-	err = tx.QueryRowContext(ctx, `
-		SELECT size_bytes, floor, COALESCE(backend_name, ''), is_chunked, COALESCE(storage_key, '') FROM object_head_cache
-		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
-		FOR UPDATE`,
-		tenantID, bucket, key).Scan(&displaced.Size, &displaced.Floor, &displaced.Backend, &displacedChunked, &displaced.StorageKey)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return displacedRow{}, fmt.Errorf("lock head-cache row: %w", err)
-	}
-
-	displaced.Chunked = displacedChunked
-	if displacedChunked && gci != nil {
-		if relErr := gci.DeleteObjectChunksTx(ctx, tx, tenantID, bucket, key); relErr != nil {
-			return displacedRow{}, fmt.Errorf("release displaced chunk manifest: %w", relErr)
-		}
-	}
-
-	if err := upsert(tx); err != nil {
-		return displacedRow{}, fmt.Errorf("upsert head-cache row: %w", err)
-	}
-	// WP-R2-1 (2B): every writer of this build puts its bytes in place at
-	// <key>, so the row it leaves has no storage key — whatever a 2C slot
-	// recorded on the row it replaced (the two-slot window). The blob that
-	// row named is displaced: queued for the collector, unless a version row
-	// keeps it. 2C turns this into the writer's own address.
-	if displaced.StorageKey != "" {
-		if _, err := tx.ExecContext(ctx, `UPDATE object_head_cache SET storage_key = NULL
-			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`, tenantID, bucket, key); err != nil {
-			return displacedRow{}, fmt.Errorf("clear the displaced storage key: %w", err)
-		}
-		if err := retireBlob(ctx, tx, tenantID, bucket, key, displaced.StorageKey, displaced.Backend, retiredOverwritten); err != nil &&
-			!errors.Is(err, errUnaddressableBlob) {
-			return displacedRow{}, err
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return displacedRow{}, fmt.Errorf("commit head-cache upsert: %w", err)
-	}
-	return displaced, nil
+	return res.Displaced, nil
 }
 
 // deleteHeadRowReleasing removes an object's head-cache row (the billing

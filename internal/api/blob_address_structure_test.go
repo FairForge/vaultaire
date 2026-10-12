@@ -20,9 +20,10 @@ import (
 // call whose artifact argument is a bare key/object/artifact variable fails
 // the test unless it is one of the sites listed below with the reason it may.
 //
-// The writers are listed: they write IN PLACE at <key> in this build and 2C
-// gives each its own address (this list is 2C's checklist). Calls split over
-// several lines are not seen — keep the artifact on the call's line.
+// Since Part C (087) no writer names a raw key either: every write goes to
+// its own address (newBlobAddress), so the list holds only what is not a
+// customer object. Calls split over several lines are not seen — keep the
+// artifact on the call's line.
 func TestWholeObjectReads_GoThroughTheBlobAddress(t *testing.T) {
 	// call name → index of the artifact argument.
 	artifactArg := map[string]int{
@@ -36,22 +37,6 @@ func TestWholeObjectReads_GoThroughTheBlobAddress(t *testing.T) {
 
 	// file → trimmed code fragments allowed to pass a raw key, and why.
 	allowed := map[string]map[string]string{
-		"object_write_shared.go": {
-			"drv.Put(ctx, container, key, body, opts...)":  "writer (placeObject): in place at <key> until 2C",
-			"ce.HintBackend(container, key, regionDriver)": "writer (placeObject)",
-			"eng.Put(ctx, container, key, body, opts...)":  "writer (placeObject)",
-		},
-		"s3_engine_adapter.go": {
-			"a.engine.Delete(ctx, t.NamespaceContainer(bucket), artifact)":              "chunked PUT: the legacy whole blob at <key> (a displaced addressed blob is retired in the upsert tx)",
-			"ce.HintBackend(t.NamespaceContainer(bucket), artifact, displaced.Backend)": "chunked PUT: the same legacy <key> blob",
-		},
-		"s3_copy.go": {
-			"s.engine.HintBackend(t.NamespaceContainer(destBucket), destKey, displaced.Backend)": "chunked copy: the legacy whole blob at <key>",
-			"s.engine.Delete(pctx, t.NamespaceContainer(destBucket), destKey)":                   "chunked copy: the legacy whole blob at <key>",
-		},
-		"direct_upload.go": {
-			"drv.Delete(ctx, container, req.Key)": "direct upload over quota: the bytes the client just PUT at <key> on R2 (writer)",
-		},
 		"backend_canary.go": {
 			"drv.Exists(cctx, probeCanaryContainer, key)":                                                                 "the probe canary, not a customer object",
 			"drv.Put(cctx, probeCanaryContainer, key, bytes.NewReader(body), engine.WithContentLength(int64(len(body))))": "the probe canary",
@@ -60,7 +45,9 @@ func TestWholeObjectReads_GoThroughTheBlobAddress(t *testing.T) {
 
 	var offenders []string
 	used := map[string]bool{}
-	seen := 0 // storage calls inspected: the walk saw the package
+	seen := 0   // storage calls inspected: the walk saw the package
+	placed := 0 // placeObject calls: a writer's blob argument is its own address (Part C)
+	place := regexp.MustCompile(`\bplaceObject\(`)
 	files, err := filepath.Glob("*.go")
 	require.NoError(t, err)
 	for _, path := range files {
@@ -76,6 +63,16 @@ func TestWholeObjectReads_GoThroughTheBlobAddress(t *testing.T) {
 			}
 			if strings.Contains(code, "hunkContainer") || strings.Contains(code, "shard") || strings.Contains(code, "parityContainer") {
 				continue // chunk blobs (chunk store) and parity shards have their own addresses
+			}
+			for _, loc := range place.FindAllStringIndex(code, -1) {
+				argList, ok := callArgs(code[loc[1]:])
+				if !ok || strings.HasPrefix(strings.TrimSpace(code), "func ") {
+					continue
+				}
+				placed++
+				if args := splitArgs(argList); len(args) > 6 && rawKey.MatchString(strings.TrimSpace(args[6])) {
+					offenders = append(offenders, path+":"+strconv.Itoa(n+1)+": placeObject writes at a raw key: "+args[6])
+				}
 			}
 			for _, loc := range call.FindAllStringSubmatchIndex(code, -1) {
 				name := code[loc[2]:loc[3]]
@@ -99,6 +96,7 @@ func TestWholeObjectReads_GoThroughTheBlobAddress(t *testing.T) {
 		}
 	}
 	assert.Greater(t, seen, 40, "the walk saw the package's storage calls")
+	assert.GreaterOrEqual(t, placed, 4, "the walk saw the writers' placeObject calls")
 	sort.Strings(offenders)
 	assert.Empty(t, offenders, "a whole-object storage call on a raw key: resolve the address (objectBlobAddress / blobArtifact of the row's storage_key), or list the site here with why it may")
 	var stale []string

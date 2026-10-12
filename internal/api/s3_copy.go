@@ -210,6 +210,12 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 		return
 	}
 
+	// The destination key must leave room for its blob address (WP-R2-1).
+	if why, tooLong := blobKeyTooLong(r.Context(), s.db, t.ID, destBucket, destKey); tooLong {
+		WriteS3ErrorWithContext(w, ErrKeyTooLong, r.URL.Path, generateRequestID(), WithSuggestion(why))
+		return
+	}
+
 	// Object Lock on the DESTINATION, before anything is read or written: the
 	// copy replaces the key's bytes in place, so a copy over a
 	// COMPLIANCE-retained key destroyed it (R3-01, live-proven).
@@ -464,8 +470,17 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	// Placement is the shared helper: a region-pinned destination bucket
 	// goes to its region driver or is refused (R3-08 — copy used to write
 	// the primary under a residency label).
+	// A new address (WP-R2-1): the destination's current object — the
+	// source itself, for a copy onto its own key — is never written over.
+	destBlob, addrErr := blobAddressFor(s.db, destKey)
+	if addrErr != nil {
+		releaseReservation()
+		s.logger.Error("copy: no blob address", zap.Error(addrErr))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return
+	}
 	putCtx, putCancel := backendCallCtx(r.Context(), s.longOpAnswerGrace())
-	backendName, err := placeObject(putCtx, s.db, s.engine, t.ID, destBucket, destContainer, destKey, tee, putOpts...)
+	backendName, err := placeObject(putCtx, s.db, s.engine, t.ID, destBucket, destContainer, destBlob, tee, putOpts...)
 	putCancel()
 	if err != nil {
 		releaseReservation()
@@ -517,20 +532,25 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	pctx, pcancel := postCommit(r.Context())
 	defer pcancel()
 
-	// Update object_head_cache for the copied object. Every attribute column
-	// is written (R3-05: the old upsert left the displaced object's
-	// encryption_algorithm on the row, so a plain copy over an SSE key was
-	// served through the decryptor — live GET 500). A failed head write is a
-	// 500, never a 200 with no row (R10 ledger row / R3-10): the blob is
-	// durable and the client's retry is idempotent.
+	// Update object_head_cache for the copied object through the pointer
+	// flip (WP-R2-1): the head row names the new address, the version row is
+	// written in the same transaction, the displaced blob is retired. Every
+	// attribute column is written (R3-05). A failed head write is a 500,
+	// never a 200 with no row (R3-10): the destination is untouched and the
+	// new blob is queued as an orphan.
 	var displaced displacedRow
+	var versionID string
 	if s.db != nil {
-		var dbErr error
-		displaced, dbErr = atomicHeadUpsertReleasing(pctx, s.db, manifestReleaser(s.gci), t.ID, destBucket, destKey, func(tx *sql.Tx) error {
-			return upsertWholeObjectHeadRowEnc(pctx, tx, t.ID, destBucket, destKey, counter.n, etag, backendName, floor, attrs, sealer.encryption())
-		})
+		enc := sealer.encryption()
+		flip, dbErr := commitBlobWrite(pctx, s.db, manifestReleaser(s.gci), blobWrite{TenantID: t.ID, Bucket: destBucket, Key: destKey,
+			Version: &versionWrite{Size: counter.n, ETag: etag, ContentType: attrs.ContentType, Backend: backendName,
+				Blob: versionBlobRef{StorageKey: destBlob, Enc: enc}},
+			Upsert: func(tx *sql.Tx) error {
+				return upsertWholeObjectHeadRowEnc(pctx, tx, t.ID, destBucket, destKey, destBlob, counter.n, etag, backendName, floor, attrs, enc)
+			}})
 		if dbErr != nil {
 			releaseReservation()
+			retireOrphanWrite(pctx, s.db, s.logger, t.ID, destBucket, destBlob, backendName)
 			s.logger.Error("copy: head row write failed — failing the request",
 				zap.Error(dbErr),
 				zap.String("tenant_id", t.ID),
@@ -539,21 +559,15 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 			return
 		}
+		displaced, versionID = flip.Displaced, flip.VersionID
 	}
 
 	if quotaOn {
 		s.settlePutQuota(pctx, t.ID, floor, reservedBytes, counter.n, displaced)
 	}
 
-	// Version row + the bucket's default retention before the displaced
-	// blob's delete (which may take staleCopyTimeout).
-	versionID := recordObjectVersion(pctx, s.db, t.ID, destBucket, destKey, counter.n, etag, attrs.ContentType, backendName)
+	// The bucket's default retention.
 	applyObjectLockOnPut(pctx, s.db, t.ID, destBucket, destKey, r)
-
-	// The destination's previous blob on another backend (a demoted object
-	// copied over, R13-10) — exactly as plain PUT.
-	dropDisplacedBlob(pctx, s.db, s.engine, s.logger, lostWriteOverwrite,
-		t.ID, destBucket, t.NamespaceContainer(destBucket), destKey, displaced, backendName)
 
 	result := CopyObjectResult{
 		ETag:         fmt.Sprintf(`"%s"`, etag),
@@ -778,6 +792,7 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 				content_disposition   = EXCLUDED.content_disposition,
 				floor                 = EXCLUDED.floor,
 				is_chunked            = EXCLUDED.is_chunked,
+				storage_key           = NULL, -- a chunked object has no whole blob
 				updated_at            = NOW()
 		`, t.ID, destBucket, destKey, srcMeta.LogicalSize, srcETag, contentType,
 			destUserMeta, srcEncAlgo, destDisposition, chunkedObjectFloor)
@@ -799,18 +814,9 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 	// copy wrote none).
 	applyObjectLockOnPut(pctx, s.db, t.ID, destBucket, destKey, r)
 
-	// A stale whole-object blob at the destination key (previously a plain
-	// object) must not survive the overwrite — same invariant as chunked PUT.
-	// The displaced row's backend is the hint (R2-20 / WP-R6-1); a miss in
-	// any driver's shape is fine (R6-25).
-	if displaced.Backend != "" && s.engine != nil {
-		s.engine.HintBackend(t.NamespaceContainer(destBucket), destKey, displaced.Backend)
-	}
-	if blobErr := s.engine.Delete(pctx, t.NamespaceContainer(destBucket), destKey); blobErr != nil &&
-		!isObjectMissingErr(blobErr) {
-		s.logger.Warn("chunked copy: stale destination blob delete failed",
-			zap.Error(blobErr), zap.String("bucket", destBucket), zap.String("key", destKey))
-	}
+	// A whole blob the destination held before (a plain object, at <key> or
+	// at its address) was retired inside the install's transaction (the
+	// flip, WP-R2-1): the collector removes it after its grace.
 
 	if quotaOn {
 		s.settlePutQuota(pctx, t.ID, chunkedObjectFloor, reservedBytes, srcMeta.LogicalSize, displaced)

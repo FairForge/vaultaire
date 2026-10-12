@@ -126,29 +126,31 @@ type objectEncryption struct {
 }
 
 // upsertWholeObjectHeadRow writes the head row for a WHOLE, UNENCRYPTED
-// object (multipart complete, plain copy) inside the caller's transaction.
+// object (multipart complete, plain copy, direct upload) whose blob is at
+// storageKey (WP-R2-1: the writer's new address) inside the caller's
+// transaction.
 // Every attribute column is set explicitly: an upsert that only touched
 // size/etag/content_type kept the displaced object's encryption_algorithm,
 // metadata and cache headers, so a plaintext object overwriting an SSE one
 // was served through the decryptor (live: GET 500, R3-05). is_chunked is
 // forced FALSE — the caller's atomicHeadUpsertReleasing frees a displaced
 // manifest in the same transaction.
-func upsertWholeObjectHeadRow(ctx context.Context, tx *sql.Tx, tenantID, bucket, key string,
+func upsertWholeObjectHeadRow(ctx context.Context, tx *sql.Tx, tenantID, bucket, key, storageKey string,
 	size int64, etag, backendName, floor string, attrs objectAttrs) error {
-	return upsertWholeObjectHeadRowEnc(ctx, tx, tenantID, bucket, key, size, etag, backendName, floor, attrs, objectEncryption{})
+	return upsertWholeObjectHeadRowEnc(ctx, tx, tenantID, bucket, key, storageKey, size, etag, backendName, floor, attrs, objectEncryption{})
 }
 
 // upsertWholeObjectHeadRowEnc is upsertWholeObjectHeadRow for a blob sealed
 // with enc (a generated object or a copy into an sse_enabled bucket, WP-R8-1
 // follow-up A1): size and etag are the PLAINTEXT's, as HandlePut records them.
-func upsertWholeObjectHeadRowEnc(ctx context.Context, tx *sql.Tx, tenantID, bucket, key string,
+func upsertWholeObjectHeadRowEnc(ctx context.Context, tx *sql.Tx, tenantID, bucket, key, storageKey string,
 	size int64, etag, backendName, floor string, attrs objectAttrs, enc objectEncryption) error {
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO object_head_cache
 			(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata,
 			 encryption_algorithm, content_disposition, content_encoding, content_language,
-			 cache_control, http_expires, website_redirect_location, floor, is_chunked, tags, encryption_key_version, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $17, $9, $10, $11, $12, $13, $14, $15, FALSE, $16, $18, NOW())
+			 cache_control, http_expires, website_redirect_location, floor, is_chunked, tags, encryption_key_version, storage_key, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $17, $9, $10, $11, $12, $13, $14, $15, FALSE, $16, $18, NULLIF($19, ''), NOW())
 		ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
 			size_bytes                = EXCLUDED.size_bytes,
 			etag                      = EXCLUDED.etag,
@@ -166,25 +168,26 @@ func upsertWholeObjectHeadRowEnc(ctx context.Context, tx *sql.Tx, tenantID, buck
 			floor                     = EXCLUDED.floor,
 			is_chunked                = FALSE,
 			tags                      = EXCLUDED.tags,
-			storage_key               = NULL, -- written in place at <key> (WP-R2-1: 2C writes an address)
+			storage_key               = EXCLUDED.storage_key, -- the writer's own address (WP-R2-1)
 			updated_at                = NOW()`,
 		tenantID, bucket, key, size, etag, attrs.ContentType, backendName, attrs.metadataJSON(),
 		attrs.ContentDisposition, attrs.ContentEncoding, attrs.ContentLanguage,
-		attrs.CacheControl, attrs.Expires, attrs.WebsiteRedirect, floor, attrs.tagsJSON(), enc.Algorithm, enc.KeyVersion)
+		attrs.CacheControl, attrs.Expires, attrs.WebsiteRedirect, floor, attrs.tagsJSON(), enc.Algorithm, enc.KeyVersion, storageKey)
 	if err != nil {
 		return fmt.Errorf("upsert head row %s/%s: %w", bucket, key, err)
 	}
 	return nil
 }
 
-// placeObject writes body where the bucket's placement says (WP-R7-1): a
+// placeObject writes body at blob — the write's own address (newBlobAddress,
+// WP-R2-1), never the bare key — where the bucket's placement says (WP-R7-1): a
 // bucket pinned to a region this process serves goes straight to that
 // region's driver; a region with no driver is REFUSED with
 // errRegionDriverUnavailable (never silently the primary — that is a
 // residency breach recorded as normal); everything else goes through the
 // engine, which maps the storage class in opts to a backend. Returns the
 // backend that took the bytes — the head row's backend_name.
-func placeObject(ctx context.Context, db *sql.DB, eng engine.Engine, tenantID, bucket, container, key string,
+func placeObject(ctx context.Context, db *sql.DB, eng engine.Engine, tenantID, bucket, container, blob string,
 	body io.Reader, opts ...engine.PutOption) (string, error) {
 	regionDriver, err := bucketRegionDriver(ctx, db, eng, tenantID, bucket)
 	if err != nil {
@@ -193,15 +196,15 @@ func placeObject(ctx context.Context, db *sql.DB, eng engine.Engine, tenantID, b
 	if regionDriver != "" {
 		if ce, ok := eng.(*engine.CoreEngine); ok {
 			if drv, exists := ce.GetDriver(regionDriver); exists {
-				if putErr := drv.Put(ctx, container, key, body, opts...); putErr != nil {
-					return "", fmt.Errorf("region driver %s put %s/%s: %w", regionDriver, container, key, putErr)
+				if putErr := drv.Put(ctx, container, blob, body, opts...); putErr != nil {
+					return "", fmt.Errorf("region driver %s put %s/%s: %w", regionDriver, container, blob, putErr)
 				}
-				ce.HintBackend(container, key, regionDriver)
+				ce.HintBackend(container, blob, regionDriver)
 				return regionDriver, nil
 			}
 		}
 	}
-	return eng.Put(ctx, container, key, body, opts...)
+	return eng.Put(ctx, container, blob, body, opts...)
 }
 
 // recordObjectVersion writes the object_versions ledger row for a completed
@@ -231,7 +234,7 @@ func recordObjectVersion(ctx context.Context, db *sql.DB, tenantID, bucket, key 
 	if vStatus != "Enabled" && vStatus != "Suspended" {
 		return ""
 	}
-	versionID, err := writeVersionRow(ctx, tx, vStatus, tenantID, bucket, key, size, etag, contentType, backendName)
+	versionID, err := writeVersionRow(ctx, tx, vStatus, tenantID, bucket, key, size, etag, contentType, backendName, versionBlobRef{})
 	if err != nil || tx.Commit() != nil {
 		return ""
 	}
@@ -280,17 +283,40 @@ func writeDeleteMarker(ctx context.Context, db *sql.DB, tenantID, bucket, key, m
 	return tx.Commit()
 }
 
+// headRepoint is what a version delete did to the head row (the billing
+// record): the caller settles quota from it.
+type headRepoint struct {
+	Changed bool
+	Dropped bool // no live version with bytes is left: the head row is gone
+	OldSize int64
+	NewSize int64
+	Floor   string
+	Backend string // the dropped/old row's backend
+}
+
 // deleteVersion removes one version of a key and, when no latest version is
-// left, makes the newest remaining one latest — under the key's version
-// lock. found is false when no such version exists.
-func deleteVersion(ctx context.Context, db *sql.DB, tenantID, bucket, key, versionID string) (found bool, err error) {
+// left, makes the newest remaining one latest — under the key's head-row
+// lock and version lock (the flip's order). found is false when no such
+// version exists.
+//
+// Deleting the CURRENT version of a key whose head row names that version's
+// blob (WP-R2-1 Part C) re-points the head row, in the same transaction, to
+// the newly-latest version's address, size, ETag, type and encryption — or
+// drops it when the newly-latest is a delete marker, no version is left, or
+// it kept no bytes. The deleted version's blob is retired unless a row still
+// names it. A head row that does not name the deleted version's blob (every
+// row written before 2C) is left as it was.
+func deleteVersion(ctx context.Context, db *sql.DB, tenantID, bucket, key, versionID string) (found bool, rp headRepoint, err error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, err
+		return false, rp, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := lockHeadKey(ctx, tx, tenantID, bucket, key); err != nil {
+		return false, rp, err
+	}
 	if err := lockVersionKey(ctx, tx, tenantID, bucket, key); err != nil {
-		return false, err
+		return false, rp, err
 	}
 	var storageKey, backend string
 	err = tx.QueryRowContext(ctx, `
@@ -298,17 +324,10 @@ func deleteVersion(ctx context.Context, db *sql.DB, tenantID, bucket, key, versi
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND version_id = $4
 		RETURNING COALESCE(storage_key, ''), COALESCE(backend_name, '')`, tenantID, bucket, key, versionID).Scan(&storageKey, &backend)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return false, rp, nil
 	}
 	if err != nil {
-		return false, err
-	}
-	// A version that kept its bytes (WP-R2-1): its blob goes to the
-	// collector with the row delete, unless the head row or another version
-	// still names it. Retired, not deleted here: a GET that resolved the
-	// version a moment ago may still be reading it.
-	if err := retireBlob(ctx, tx, tenantID, bucket, key, storageKey, backend, retiredVersionDeleted); err != nil {
-		return true, err
+		return false, rp, err
 	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE object_versions SET is_latest = TRUE
@@ -319,9 +338,70 @@ func deleteVersion(ctx context.Context, db *sql.DB, tenantID, bucket, key, versi
 		  AND NOT EXISTS (SELECT 1 FROM object_versions
 		                  WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND is_latest)`,
 		tenantID, bucket, key); err != nil {
-		return true, err
+		return true, rp, err
 	}
-	return true, tx.Commit()
+	if storageKey != "" {
+		if rp, err = repointHeadAfterVersionDelete(ctx, tx, tenantID, bucket, key, storageKey); err != nil {
+			return true, rp, err
+		}
+	}
+	// A version that kept its bytes (WP-R2-1): its blob goes to the
+	// collector with the row delete, unless the head row or another version
+	// still names it. Retired, not deleted here: a GET that resolved the
+	// version a moment ago may still be reading it.
+	if err := retireBlob(ctx, tx, tenantID, bucket, key, storageKey, backend, retiredVersionDeleted); err != nil {
+		return true, rp, err
+	}
+	return true, rp, tx.Commit()
+}
+
+// repointHeadAfterVersionDelete is deleteVersion's head-row step, inside its
+// transaction: only a head row that names deletedBlob is touched.
+func repointHeadAfterVersionDelete(ctx context.Context, tx *sql.Tx, tenantID, bucket, key, deletedBlob string) (headRepoint, error) {
+	var rp headRepoint
+	err := tx.QueryRowContext(ctx, `
+		SELECT size_bytes, floor, COALESCE(backend_name, '') FROM object_head_cache
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND storage_key = $4 AND NOT is_chunked
+		FOR UPDATE`, tenantID, bucket, key, deletedBlob).Scan(&rp.OldSize, &rp.Floor, &rp.Backend)
+	if errors.Is(err, sql.ErrNoRows) {
+		return headRepoint{}, nil // the head row names other bytes (or none): not this delete's business
+	}
+	if err != nil {
+		return headRepoint{}, fmt.Errorf("read the head row of the deleted version: %w", err)
+	}
+	rp.Changed = true
+	// The newly-latest version, when it is a live version that kept bytes.
+	res, err := tx.ExecContext(ctx, `
+		UPDATE object_head_cache h SET
+			size_bytes = v.size_bytes, etag = v.etag, content_type = v.content_type,
+			backend_name = v.backend_name, storage_key = v.storage_key,
+			encryption_algorithm = COALESCE(v.encryption_algorithm, ''), encryption_key_version = v.encryption_key_version,
+			-- no per-version copy of these exists: they described the deleted version
+			metadata = '{}', tags = '{}', content_disposition = '', content_encoding = '', content_language = '',
+			cache_control = '', http_expires = '', website_redirect_location = '',
+			updated_at = v.created_at
+		FROM object_versions v
+		WHERE h.tenant_id = $1 AND h.bucket = $2 AND h.object_key = $3
+		  AND v.tenant_id = h.tenant_id AND v.bucket = h.bucket AND v.object_key = h.object_key
+		  AND v.is_latest AND NOT v.is_delete_marker AND v.storage_key IS NOT NULL`,
+		tenantID, bucket, key)
+	if err != nil {
+		return headRepoint{}, fmt.Errorf("re-point the head row: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 1 {
+		if err := tx.QueryRowContext(ctx, `SELECT size_bytes FROM object_head_cache
+			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`, tenantID, bucket, key).Scan(&rp.NewSize); err != nil {
+			return headRepoint{}, fmt.Errorf("read the re-pointed head row: %w", err)
+		}
+		return rp, nil
+	}
+	// Nothing live with bytes is latest: the key has no current object.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM object_head_cache
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`, tenantID, bucket, key); err != nil {
+		return headRepoint{}, fmt.Errorf("drop the head row: %w", err)
+	}
+	rp.Dropped = true
+	return rp, nil
 }
 
 // execer is what a version write needs: a *sql.DB or a *sql.Tx.
@@ -333,15 +413,18 @@ type execer interface {
 // caller's transaction (vStatus already read, the key's version lock held):
 // the first error is returned.
 func writeObjectVersion(ctx context.Context, tx execer, vStatus, tenantID, bucket, key string,
-	size int64, etag, contentType, backendName string) error {
-	_, err := writeVersionRow(ctx, tx, vStatus, tenantID, bucket, key, size, etag, contentType, backendName)
+	size int64, etag, contentType, backendName string, blob versionBlobRef) error {
+	_, err := writeVersionRow(ctx, tx, vStatus, tenantID, bucket, key, size, etag, contentType, backendName, blob)
 	return err
 }
 
 // writeVersionRow makes the key's current bytes its latest version: a new
-// id with versioning Enabled, "null" when Suspended.
+// id with versioning Enabled, "null" when Suspended (a rewrite of the "null"
+// row replaces its address: the blob it named is no longer named and the
+// flip retires it). blob is the version's own address and encryption; the
+// zero value = no bytes retained (the chunked path).
 func writeVersionRow(ctx context.Context, q execer, vStatus, tenantID, bucket, key string,
-	size int64, etag, contentType, backendName string) (string, error) {
+	size int64, etag, contentType, backendName string, blob versionBlobRef) (string, error) {
 	versionID := "null"
 	if vStatus == "Enabled" {
 		versionID = generateVersionID()
@@ -355,16 +438,17 @@ func writeVersionRow(ctx context.Context, q execer, vStatus, tenantID, bucket, k
 	versionRowUpdatedHook()
 	_, err := q.ExecContext(ctx, `
 		INSERT INTO object_versions
-			(tenant_id, bucket, object_key, version_id, size_bytes, etag, content_type, is_latest, is_delete_marker, backend_name)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, FALSE, $8)
+			(tenant_id, bucket, object_key, version_id, size_bytes, etag, content_type, is_latest, is_delete_marker, backend_name,
+			 storage_key, encryption_algorithm, encryption_key_version)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, FALSE, $8, NULLIF($9, ''), NULLIF($10, ''), $11)
 		ON CONFLICT (tenant_id, bucket, object_key, version_id) DO UPDATE SET
 			size_bytes = EXCLUDED.size_bytes, etag = EXCLUDED.etag,
 			content_type = EXCLUDED.content_type, is_latest = TRUE,
 			is_delete_marker = FALSE, backend_name = EXCLUDED.backend_name,
-			-- this build writes in place at <key>: the "null" version it
-			-- rewrites keeps no bytes of its own (WP-R2-1; 2C records them)
-			storage_key = NULL, encryption_algorithm = NULL`,
-		tenantID, bucket, key, versionID, size, etag, contentType, backendName)
+			storage_key = EXCLUDED.storage_key, encryption_algorithm = EXCLUDED.encryption_algorithm,
+			encryption_key_version = EXCLUDED.encryption_key_version`,
+		tenantID, bucket, key, versionID, size, etag, contentType, backendName,
+		blob.StorageKey, blob.Enc.Algorithm, blob.Enc.KeyVersion)
 	return versionID, err
 }
 

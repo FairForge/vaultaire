@@ -1,0 +1,196 @@
+package api
+
+// WP-R2-1 Part C (087): the pointer flip. A whole-object writer has already
+// put its bytes at a NEW address (newBlobAddress); commitBlobWrite then runs
+// ONE transaction, under the key's head-row lock and its version lock, that
+//
+//   - upserts the head row naming the new address (the caller's upsert),
+//   - writes the version row of the new bytes with that address and its
+//     encryption (versioned buckets) — recordObjectVersion's separate
+//     transaction is gone for these writers, so a crash can no longer leave
+//     a head row without its version row,
+//   - decides the displaced blob's fate: a version row that keeps it keeps
+//     it (Enabled: the previous version is now non-current and names its
+//     bytes); otherwise it is retired (retired_blobs, 'overwritten'), never
+//     deleted here.
+//
+// Nothing before the commit touches the old bytes, so a failure anywhere
+// leaves the previous object exactly as it was (R2-05, R3-15); two
+// concurrent writers each commit a row that describes its own blob (R2-15).
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+)
+
+// blobWrite is one writer's commit.
+type blobWrite struct {
+	TenantID, Bucket, Key string
+	// Upsert writes the head row inside the flip's transaction. It must set
+	// storage_key itself: the new address for a whole object, NULL for a
+	// chunked one.
+	Upsert func(tx *sql.Tx) error
+	// Version, when set, is the version row of the written bytes, written
+	// in the same transaction when the bucket is versioned.
+	Version *versionWrite
+}
+
+// versionWrite is what the version row of a write records.
+type versionWrite struct {
+	Size              int64
+	ETag, ContentType string
+	Backend           string
+	Blob              versionBlobRef
+}
+
+// versionBlobRef is a version row's own blob: its address ("" = no bytes
+// retained) and what it is sealed with.
+type versionBlobRef struct {
+	StorageKey string
+	Enc        objectEncryption
+}
+
+// flipResult is what the flip found and wrote.
+type flipResult struct {
+	Displaced displacedRow
+	VersionID string // "" for an unversioned bucket
+}
+
+// headFlipHook runs inside the flip's transaction after the head-row upsert;
+// an error rolls the whole write back (tests: a failure after the backend
+// write).
+var headFlipHook = func(tenantID, bucket, key string) error { return nil }
+
+// commitBlobWrite is the flip (see the file comment). Lock order: the head
+// row's advisory lock, then the version lock — every path that takes both
+// takes them in this order (deleteVersion too).
+func commitBlobWrite(ctx context.Context, db *sql.DB, gci chunkManifestReleaser, w blobWrite) (flipResult, error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return flipResult{}, fmt.Errorf("begin head-cache upsert: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Serialise writers of the same key BEFORE the probe. A row that does not
+	// exist yet cannot be locked by FOR UPDATE, so two concurrent first
+	// writers of a new key both saw "no previous row", both reported
+	// displaced = 0, and the loser's reserved bytes were never released
+	// (Review R15-17, TestAtomicHeadUpsert_ConcurrentFirstWritersAccountOnce).
+	if err := lockHeadKey(ctx, tx, w.TenantID, w.Bucket, w.Key); err != nil {
+		return flipResult{}, err
+	}
+	if w.Version != nil {
+		if err := lockVersionKey(ctx, tx, w.TenantID, w.Bucket, w.Key); err != nil {
+			return flipResult{}, err
+		}
+	}
+
+	var displaced displacedRow
+	err = tx.QueryRowContext(ctx, `
+		SELECT size_bytes, floor, COALESCE(backend_name, ''), is_chunked, COALESCE(storage_key, ''),
+		       etag, COALESCE(encryption_algorithm, ''), encryption_key_version
+		FROM object_head_cache
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
+		FOR UPDATE`,
+		w.TenantID, w.Bucket, w.Key).Scan(&displaced.Size, &displaced.Floor, &displaced.Backend, &displaced.Chunked,
+		&displaced.StorageKey, &displaced.etag, &displaced.enc.Algorithm, &displaced.enc.KeyVersion)
+	switch {
+	case err == nil:
+		displaced.Found = true
+	case errors.Is(err, sql.ErrNoRows):
+	default:
+		return flipResult{}, fmt.Errorf("lock head-cache row: %w", err)
+	}
+
+	if displaced.Chunked && gci != nil {
+		if relErr := gci.DeleteObjectChunksTx(ctx, tx, w.TenantID, w.Bucket, w.Key); relErr != nil {
+			return flipResult{}, fmt.Errorf("release displaced chunk manifest: %w", relErr)
+		}
+	}
+
+	if err := w.Upsert(tx); err != nil {
+		return flipResult{}, fmt.Errorf("upsert head-cache row: %w", err)
+	}
+	if err := headFlipHook(w.TenantID, w.Bucket, w.Key); err != nil {
+		return flipResult{}, err
+	}
+	var newChunked bool
+	var newSK string
+	if err := tx.QueryRowContext(ctx, `SELECT is_chunked, COALESCE(storage_key, '') FROM object_head_cache
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`, w.TenantID, w.Bucket, w.Key).Scan(&newChunked, &newSK); err != nil {
+		return flipResult{}, fmt.Errorf("read the written head row: %w", err)
+	}
+
+	var res flipResult
+	if w.Version != nil {
+		vStatus := bucketVersioningStatus(ctx, tx, w.TenantID, w.Bucket)
+		if vStatus == "Enabled" || vStatus == "Suspended" {
+			if displaced.Found && !displaced.Chunked {
+				if err := anchorDisplacedVersion(ctx, tx, w.TenantID, w.Bucket, w.Key, displaced); err != nil {
+					return flipResult{}, err
+				}
+			}
+			v := w.Version
+			res.VersionID, err = writeVersionRow(ctx, tx, vStatus, w.TenantID, w.Bucket, w.Key, v.Size, v.ETag, v.ContentType, v.Backend, v.Blob)
+			if err != nil {
+				return flipResult{}, fmt.Errorf("write version row: %w", err)
+			}
+		}
+	}
+
+	// The displaced blob: kept while a row names it (a version, the new
+	// row itself when the address is the same — a concurrent complete of the
+	// same upload), retired otherwise. A blob with no recorded backend
+	// cannot be addressed by the collector: left for the erasure sweep.
+	if displaced.Found && !displaced.Chunked {
+		dAddr := blobArtifact(w.Key, displaced.StorageKey)
+		nAddr := ""
+		if !newChunked {
+			nAddr = blobArtifact(w.Key, newSK)
+		}
+		if dAddr != nAddr {
+			if err := retireBlob(ctx, tx, w.TenantID, w.Bucket, w.Key, dAddr, displaced.Backend, retiredOverwritten); err != nil &&
+				!errors.Is(err, errUnaddressableBlob) {
+				return flipResult{}, err
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return flipResult{}, fmt.Errorf("commit head-cache upsert: %w", err)
+	}
+	res.Displaced = displaced
+	return res, nil
+}
+
+// lockHeadKey takes the transaction-scoped advisory lock every head-row
+// writer of a key holds.
+func lockHeadKey(ctx context.Context, tx *sql.Tx, tenantID, bucket, key string) error {
+	if _, err := tx.ExecContext(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext($1 || '/' || $2 || '/' || $3)::bigint)`,
+		tenantID, bucket, key); err != nil {
+		return fmt.Errorf("lock head-cache key: %w", err)
+	}
+	return nil
+}
+
+// anchorDisplacedVersion makes the latest version row that describes the
+// displaced head row name its blob: a row a 2C writer wrote already does
+// (re-asserted with the head row's backend and encryption — a demotion may
+// have moved it since); a version row of a blob written in place before 2C
+// (storage_key NULL, the bytes at <key>) gets <key> as its address, so the
+// bytes the next write no longer overwrites stay that version's. Only when
+// the etags agree: a version row that describes other bytes is left as it is.
+func anchorDisplacedVersion(ctx context.Context, tx *sql.Tx, tenantID, bucket, key string, d displacedRow) error {
+	addr := blobArtifact(key, d.StorageKey)
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE object_versions SET storage_key = $4, backend_name = NULLIF($5, ''),
+		       encryption_algorithm = NULLIF($6, ''), encryption_key_version = $7
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND is_latest AND NOT is_delete_marker
+		  AND etag = $8 AND (storage_key IS NULL OR storage_key = $4)`,
+		tenantID, bucket, key, addr, d.Backend, d.enc.Algorithm, d.enc.KeyVersion, d.etag); err != nil {
+		return fmt.Errorf("anchor the displaced version's blob: %w", err)
+	}
+	return nil
+}

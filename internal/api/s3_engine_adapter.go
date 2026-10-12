@@ -874,6 +874,13 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		size = 0
 	}
 
+	// The key must leave room for its blob address (WP-R2-1): refused
+	// before any body byte is read.
+	if why, tooLong := blobKeyTooLong(r.Context(), a.db, t.ID, bucket, artifact); tooLong {
+		WriteS3ErrorWithContext(w, ErrKeyTooLong, r.URL.Path, generateRequestID(), WithSuggestion(why))
+		return
+	}
+
 	if a.db != nil {
 		// The lock lives in object_locks, not on the head row: a retained
 		// key whose head row is gone (delete marker, crash between deletes)
@@ -1187,11 +1194,22 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		putOpts = append(putOpts, engine.WithStorageClass(storageClass))
 	}
 
+	// The bytes go to a NEW address (WP-R2-1): nothing before the head-row
+	// flip touches the object the key holds now, so any failure below
+	// leaves it intact (R2-05), and two concurrent PUTs each commit a row
+	// that describes their own blob (R2-15).
+	blob, addrErr := blobAddressFor(a.db, artifact)
+	if addrErr != nil {
+		a.logger.Error("PUT: no blob address", zap.Error(addrErr))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return
+	}
+
 	// Placement (region driver for a pinned bucket, else the engine) is the
 	// shared helper so multipart complete and CopyObject cannot drift from
 	// it again (R3-08).
 	var backendName string
-	backendName, err = placeObject(r.Context(), a.db, a.engine, t.ID, bucket, container, artifact, hashingBody, putOpts...)
+	backendName, err = placeObject(r.Context(), a.db, a.engine, t.ID, bucket, container, blob, hashingBody, putOpts...)
 	if err != nil {
 		switch {
 		case errors.Is(err, errRegionDriverUnavailable):
@@ -1237,7 +1255,8 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	// on plain bodies too, R2-06) and a driver may commit a body that ended
 	// early; either way the head row and the bill must never describe bytes
 	// that were not received. A body with no declared size at all records
-	// what arrived.
+	// what arrived. A refusal here leaves the blob at its own address, no
+	// row naming it: queued as an orphan (R7-12), never committed.
 	if !sizeDeclared {
 		metadataSize = bodyCounter.n
 	} else if bodyCounter.n != metadataSize {
@@ -1246,12 +1265,14 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 			zap.Bool("aws_chunked", chunked),
 			zap.Int64("declared", metadataSize),
 			zap.Int64("measured", bodyCounter.n))
+		retireOrphanWrite(r.Context(), a.db, a.logger, t.ID, bucket, blob, backendName)
 		WriteS3Error(w, ErrIncompleteBody, r.URL.Path, generateRequestID())
 		return
 	}
 
 	etag := fmt.Sprintf("%x", hasher.Sum(nil))
 	if wantMD5 != "" && etag != wantMD5 {
+		retireOrphanWrite(r.Context(), a.db, a.logger, t.ID, bucket, blob, backendName)
 		WriteS3Error(w, ErrBadDigest, r.URL.Path, generateRequestID())
 		return
 	}
@@ -1267,15 +1288,24 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	contentLanguage := requestContentLanguage(r)
 	echoHdrs := requestEchoHeaders(r)
 
+	// The displaced row's blob — on this backend or another (a Smart-demoted
+	// object rewritten hot, R13-10) — is retired inside the flip: removed by
+	// the collector after its grace, never while a row names it.
+	var versionID string
 	if a.db != nil {
-		// atomicHeadUpsert locks the previous row and returns its size in
-		// the same transaction as the upsert, so the overwritten bytes are
-		// captured atomically — a concurrent DELETE cannot double-release.
-		displaced, dbErr := atomicHeadUpsertReleasing(r.Context(), a.db, manifestReleaser(a.gci), t.ID, bucket, artifact, func(tx *sql.Tx) error {
-			_, execErr := tx.ExecContext(r.Context(), `
+		// The pointer flip (commitBlobWrite): the head row names the new
+		// address, the version row is written in the same transaction, the
+		// displaced blob is retired (or kept by its version), and the
+		// previous row's size is captured under its lock — a concurrent
+		// DELETE cannot double-release.
+		flip, dbErr := commitBlobWrite(r.Context(), a.db, manifestReleaser(a.gci), blobWrite{TenantID: t.ID, Bucket: bucket, Key: artifact,
+			Version: &versionWrite{Size: metadataSize, ETag: etag, ContentType: contentType, Backend: backendName,
+				Blob: versionBlobRef{StorageKey: blob, Enc: objectEncryption{Algorithm: encryptionAlgorithm, KeyVersion: encryptionKeyVersion}}},
+			Upsert: func(tx *sql.Tx) error {
+				_, execErr := tx.ExecContext(r.Context(), `
 				INSERT INTO object_head_cache
-					(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, content_encoding, content_language, cache_control, http_expires, website_redirect_location, floor, is_chunked, tags, encryption_key_version, updated_at)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, FALSE, $17, $18, NOW())
+					(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, content_encoding, content_language, cache_control, http_expires, website_redirect_location, floor, is_chunked, tags, encryption_key_version, storage_key, updated_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, FALSE, $17, $18, $19, NOW())
 				ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
 					size_bytes            = EXCLUDED.size_bytes,
 					etag                  = EXCLUDED.etag,
@@ -1293,18 +1323,22 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 					floor                 = EXCLUDED.floor,
 					is_chunked            = EXCLUDED.is_chunked,
 					tags                  = EXCLUDED.tags,
+					storage_key           = EXCLUDED.storage_key,
 					updated_at            = NOW()
-			`, t.ID, bucket, artifact, metadataSize, etag, contentType, backendName, metaJSON, encryptionAlgorithm, contentDisposition, contentEncoding, contentLanguage, echoHdrs.CacheControl, echoHdrs.Expires, echoHdrs.WebsiteRedirect, usage.FloorOf(resolvedStorageClass), tagsJSON, encryptionKeyVersion)
-			return execErr
-		})
-		a.displaced = displaced
+			`, t.ID, bucket, artifact, metadataSize, etag, contentType, backendName, metaJSON, encryptionAlgorithm, contentDisposition, contentEncoding, contentLanguage, echoHdrs.CacheControl, echoHdrs.Expires, echoHdrs.WebsiteRedirect, usage.FloorOf(resolvedStorageClass), tagsJSON, encryptionKeyVersion, blob)
+				return execErr
+			}})
+		a.displaced = flip.Displaced
+		versionID = flip.VersionID
 		if dbErr != nil {
 			// HEAD serves exclusively from object_head_cache — returning 200
 			// without the row means every subsequent HEAD/GET 404s and the
-			// bytes are never billed. The blob is already durable, so the
-			// client's retry is safe and idempotent (upsert). Fail loudly.
+			// bytes are never billed. Nothing changed for the key: the
+			// previous object is intact, the new blob is an orphan queued
+			// for the collector, and the client's retry writes afresh.
 			a.displaced = displacedRow{}
 			a.putLogicalBytes = 0
+			retireOrphanWrite(r.Context(), a.db, a.logger, t.ID, bucket, blob, backendName)
 			a.logger.Error("failed to cache object metadata — failing PUT",
 				zap.Error(dbErr),
 				zap.String("tenant_id", t.ID),
@@ -1314,16 +1348,6 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 			return
 		}
 	}
-
-	// The row this PUT replaced may have routed to ANOTHER backend — a
-	// Smart-demoted object rewritten hot, a class or visibility change, a
-	// failover. Its blob there has nothing pointing at it any more: remove
-	// it (R13-10 — it stayed on tape forever; the chunked path already did
-	// this). Same backend = overwritten in place, nothing to do.
-	dropDisplacedBlob(r.Context(), a.db, a.engine, a.logger, lostWriteOverwrite,
-		t.ID, bucket, container, artifact, a.displaced, backendName)
-
-	versionID := recordObjectVersion(r.Context(), a.db, t.ID, bucket, artifact, metadataSize, etag, contentType, backendName)
 
 	applyObjectLockOnPut(r.Context(), a.db, t.ID, bucket, artifact, r)
 
@@ -1623,6 +1647,7 @@ func (a *S3ToEngine) handleChunkedPut(
 				floor                 = EXCLUDED.floor,
 				is_chunked            = EXCLUDED.is_chunked,
 				tags                  = EXCLUDED.tags,
+				storage_key           = NULL, -- a chunked object has no whole blob
 				updated_at            = NOW()
 		`, t.ID, bucket, artifact, measuredSize, etag, contentType, backendName, metaJSON, chunkEncAlgo, contentDisposition, contentEncoding, contentLanguage, echoHdrs.CacheControl, echoHdrs.Expires, echoHdrs.WebsiteRedirect, tagsJSON, chunkedObjectFloor)
 		return execErr
@@ -1641,23 +1666,10 @@ func (a *S3ToEngine) handleChunkedPut(
 	manifestInstalled = true
 	a.putLogicalBytes = measuredSize
 
-	// A whole-object blob may exist at this key from before the object was
-	// chunked (every pre-WP-C large object, or a plain-path overwrite). It is
-	// now stale — remove it so nothing can ever serve those bytes. Best-effort:
-	// the chunked GET path no longer falls through to the plain path, so a
-	// failed delete costs orphaned disk, not wrong data.
-	// The displaced row's backend_name is where that blob lives (R8-20): hint
-	// it, or a blob that landed off-primary is looked for in the wrong place.
-	if displaced.Backend != "" {
-		if ce, ok := a.engine.(*engine.CoreEngine); ok {
-			ce.HintBackend(t.NamespaceContainer(bucket), artifact, displaced.Backend)
-		}
-	}
-	if blobErr := a.engine.Delete(ctx, t.NamespaceContainer(bucket), artifact); blobErr != nil &&
-		!isObjectMissingErr(blobErr) {
-		a.logger.Warn("stale whole-object blob delete failed after chunked PUT",
-			zap.Error(blobErr), zap.String("bucket", bucket), zap.String("object", artifact))
-	}
+	// A whole-object blob this key held before (every pre-WP-C large object,
+	// or a plain-path overwrite; at <key> or at its address) was retired in
+	// the install's transaction (the flip, WP-R2-1): nothing can serve it,
+	// and the collector removes it after its grace.
 
 	versionID := recordObjectVersion(ctx, a.db, t.ID, bucket, artifact, measuredSize, etag, contentType, backendName)
 
@@ -2256,9 +2268,10 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 
 	if a.db != nil && (vStatus == "Enabled" || vStatus == "Suspended") && reqVersionID != "" {
 		// A version that kept its bytes (WP-R2-1) has its blob queued in
-		// retired_blobs in the same transaction as the row delete (the
-		// collector is 2C's); one the head row still names is kept.
-		found, err := deleteVersion(r.Context(), a.db, t.ID, bucket, object, reqVersionID)
+		// retired_blobs in the same transaction as the row delete; deleting
+		// the current version re-points the head row to the newly-latest
+		// version (or drops it), and the bill follows the head row.
+		found, rp, err := deleteVersion(r.Context(), a.db, t.ID, bucket, object, reqVersionID)
 		if err != nil {
 			a.logger.Error("delete version failed", zap.Error(err))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
@@ -2267,6 +2280,18 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 		if !found {
 			WriteS3Error(w, ErrNoSuchVersion, r.URL.Path, generateRequestID())
 			return
+		}
+		if rp.Changed {
+			a.releaseQuotaForDelete(r, t.ID, displacedRow{Size: rp.OldSize, Floor: rp.Floor})
+			if !rp.Dropped && rp.NewSize > 0 && a.quota != nil {
+				// The re-pointed object is billed whatever the limit: its
+				// bytes are already stored (a negative release adds).
+				qctx, cancel := quotaCtx(r)
+				if qErr := releaseQuotaOn(qctx, a.quota, t.ID, rp.Floor, -rp.NewSize); qErr != nil {
+					a.logger.Error("quota: the re-pointed current version not accounted", zap.Error(qErr), zap.String("tenant_id", t.ID))
+				}
+				cancel()
+			}
 		}
 
 		w.Header().Set("x-amz-version-id", reqVersionID)

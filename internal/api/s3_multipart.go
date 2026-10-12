@@ -101,6 +101,12 @@ func (s *Server) handleInitiateMultipartUpload(w http.ResponseWriter, r *http.Re
 			WithSuggestion("SSE-C is not yet supported for multipart uploads."))
 		return
 	}
+	// The key must leave room for its blob address (WP-R2-1): refused
+	// before any part is uploaded.
+	if why, tooLong := blobKeyTooLong(r.Context(), s.db, t.ID, bucket, object); tooLong {
+		WriteS3ErrorWithContext(w, ErrKeyTooLong, r.URL.Path, generateRequestID(), WithSuggestion(why))
+		return
+	}
 
 	// The object's attributes travel on THIS request (Content-Type,
 	// x-amz-meta-*, Cache-Control, ..., x-amz-storage-class); Complete only
@@ -668,6 +674,19 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
+	// The address the assembled object goes to (WP-R2-1), recorded on the
+	// upload row BEFORE the backend write: a retry of a complete whose head
+	// row did not commit — and a concurrent complete of the same upload —
+	// writes the same address, never a second one, and the collector keeps
+	// an address an active upload names.
+	blob, err := s.completeBlobAddress(r.Context(), t.ID, uploadID, object)
+	if err != nil {
+		releaseReservation()
+		s.logger.Error("complete multipart: no blob address", zap.Error(err), zap.String("upload_id", uploadID))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return
+	}
+
 	// Every refusal is behind us: from here the keep-alive may commit.
 	longOpBegin(r)
 
@@ -721,8 +740,7 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 	defer putCancel()
 	go func() {
 		var putErr error
-		backendName, putErr = placeObject(putCtx, s.db, s.engine, t.ID, bucket, containerName, object,
-			&cutReader{ctx: r.Context(), r: pr}, completeOpts...)
+		backendName, putErr = placeObject(putCtx, s.db, s.engine, t.ID, bucket, containerName, blob, &cutReader{ctx: r.Context(), r: pr}, completeOpts...)
 		_ = pr.Close()
 		errCh <- putErr
 	}()
@@ -770,39 +788,50 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 	pctx, pcancel := postCommit(r.Context())
 	defer pcancel()
 
-	// Head row + upload status in ONE transaction. The head row is the only
-	// thing HEAD/GET/DELETE and the bill read: answering 200 without it means
-	// the object is invisible and unbilled forever (R3-10 — it used to log
-	// and return 200). The status flips in the same transaction so a failed
-	// complete stays 'active' and the client's retry is not NoSuchUpload.
+	// Head row + version row + upload status in ONE transaction (the
+	// pointer flip, WP-R2-1). The head row is the only thing HEAD/GET/DELETE
+	// and the bill read: answering 200 without it means the object is
+	// invisible and unbilled forever (R3-10). The status flips in the same
+	// transaction so a failed complete stays 'active' and the client's retry
+	// is not NoSuchUpload; the key's previous object is untouched until the
+	// commit (R3-15).
 	var displaced displacedRow
+	var versionID string
 	if s.db != nil {
-		var dbErr error
-		displaced, dbErr = atomicHeadUpsertReleasing(pctx, s.db, manifestReleaser(s.gci), t.ID, bucket, object, func(tx *sql.Tx) error {
-			if err := upsertWholeObjectHeadRow(pctx, tx, t.ID, bucket, object, totalSize, etagValue, backendName, floor, attrs); err != nil {
-				return err
-			}
-			// Unconditional on purpose: the upload was active when this
-			// request started and every part was read in full, so a reaper
-			// abort that raced the assembly must not turn a fully written
-			// object into "new bytes under the old head row"; a concurrent
-			// complete of the same upload writes identical bytes and an
-			// identical row (the displaced size it releases is the size the
-			// other request reserved, so the bill stays exact).
-			if _, err := tx.ExecContext(pctx, `
-				UPDATE multipart_uploads SET status = 'completed'
-				WHERE upload_id = $1 AND tenant_id = $2`, uploadID, t.ID); err != nil {
-				return fmt.Errorf("mark upload completed: %w", err)
-			}
-			return nil
-		})
+		flip, dbErr := commitBlobWrite(pctx, s.db, manifestReleaser(s.gci), blobWrite{TenantID: t.ID, Bucket: bucket, Key: object,
+			Version: &versionWrite{Size: totalSize, ETag: etagValue, ContentType: attrs.ContentType, Backend: backendName,
+				Blob: versionBlobRef{StorageKey: blob}},
+			Upsert: func(tx *sql.Tx) error {
+				if err := upsertWholeObjectHeadRow(pctx, tx, t.ID, bucket, object, blob, totalSize, etagValue, backendName, floor, attrs); err != nil {
+					return err
+				}
+				// Unconditional on purpose: the upload was active when this
+				// request started and every part was read in full, so a reaper
+				// abort that raced the assembly must not leave a fully written
+				// object without its row; a concurrent complete of the same
+				// upload wrote the same address and an identical row (the
+				// displaced size it releases is the size the other request
+				// reserved, so the bill stays exact).
+				if _, err := tx.ExecContext(pctx, `
+					UPDATE multipart_uploads SET status = 'completed'
+					WHERE upload_id = $1 AND tenant_id = $2`, uploadID, t.ID); err != nil {
+					return fmt.Errorf("mark upload completed: %w", err)
+				}
+				return nil
+			}})
 		if dbErr != nil {
 			releaseReservation()
+			// The assembled blob is an orphan while no row names it. Queued
+			// for the collector, which keeps it while the upload is active
+			// (its retry commits this same address) and removes it once the
+			// upload is aborted or reaped.
+			retireOrphanWrite(pctx, s.db, s.logger, t.ID, bucket, blob, backendName)
 			s.logger.Error("multipart complete: head row write failed — failing the request",
 				zap.Error(dbErr), zap.String("bucket", bucket), zap.String("key", object))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 			return
 		}
+		displaced, versionID = flip.Displaced, flip.VersionID
 	} else {
 		memUploadsMu.Lock()
 		if mu, ok := memUploads[uploadID]; ok {
@@ -816,16 +845,8 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 		s.releaseQuota(pctx, t.ID, displaced.Floor, displaced.Size)
 	}
 
-	// Versioning ledger row + bucket default retention, exactly as plain PUT
-	// (R3-09: multipart objects never appeared in object_versions) — before
-	// the displaced blob's delete, which may take staleCopyTimeout.
-	versionID := recordObjectVersion(pctx, s.db, t.ID, bucket, object, totalSize, etagValue, attrs.ContentType, backendName)
+	// The bucket's default retention, exactly as plain PUT.
 	applyObjectLockOnPut(pctx, s.db, t.ID, bucket, object, r)
-
-	// The key's previous blob on another backend (a demoted object replaced
-	// by a multipart upload, R13-10) — exactly as plain PUT.
-	dropDisplacedBlob(pctx, s.db, s.engine, s.logger, lostWriteOverwrite,
-		t.ID, bucket, t.NamespaceContainer(bucket), object, displaced, backendName)
 
 	// Clean up temp files
 	_ = os.RemoveAll(multipartDir(uploadID))
@@ -1306,22 +1327,46 @@ func (s *Server) reassertVersionRow(ctx context.Context, tenantID, bucket, objec
 	var size int64
 	var etag, contentType, backend string
 	var described bool
+	var blob versionBlobRef
 	if err := tx.QueryRowContext(ctx, `
 		SELECT h.size_bytes, h.etag, h.content_type, COALESCE(h.backend_name, ''),
+		       COALESCE(h.storage_key, ''), COALESCE(h.encryption_algorithm, ''), h.encryption_key_version,
 		       EXISTS(SELECT 1 FROM object_versions v
 		              WHERE v.tenant_id = h.tenant_id AND v.bucket = h.bucket AND v.object_key = h.object_key
 		                AND v.is_latest AND NOT v.is_delete_marker AND v.etag = h.etag)
 		FROM object_head_cache h
 		WHERE h.tenant_id = $1 AND h.bucket = $2 AND h.object_key = $3`,
-		tenantID, bucket, object).Scan(&size, &etag, &contentType, &backend, &described); err != nil {
+		tenantID, bucket, object).Scan(&size, &etag, &contentType, &backend,
+		&blob.StorageKey, &blob.Enc.Algorithm, &blob.Enc.KeyVersion, &described); err != nil {
 		return err
 	}
 	if described {
 		return nil
 	}
-	if err := writeObjectVersion(ctx, tx, vStatus, tenantID, bucket, object, size, etag, contentType, backend); err != nil {
+	// The version names the head row's own blob (WP-R2-1).
+	if err := writeObjectVersion(ctx, tx, vStatus, tenantID, bucket, object, size, etag, contentType, backend, blob); err != nil {
 		return err
 	}
 	reassertVersionWrittenHook()
 	return tx.Commit()
+}
+
+// completeBlobAddress is the address a CompleteMultipartUpload writes the
+// assembled object to (WP-R2-1): the one the upload row records when an
+// earlier complete chose it, else a new one recorded now — before any byte
+// is written. Without a database (the in-memory uploads of tests and dev)
+// the key itself: no row could name another address.
+func (s *Server) completeBlobAddress(ctx context.Context, tenantID, uploadID, object string) (string, error) {
+	fresh, err := blobAddressFor(s.db, object)
+	if err != nil || s.db == nil {
+		return fresh, err
+	}
+	var chosen string
+	if err := s.db.QueryRowContext(ctx, `
+		UPDATE multipart_uploads SET storage_key = COALESCE(storage_key, $3)
+		WHERE upload_id = $1 AND tenant_id = $2
+		RETURNING storage_key`, uploadID, tenantID, fresh).Scan(&chosen); err != nil {
+		return "", fmt.Errorf("record the address of upload %s: %w", uploadID, err)
+	}
+	return chosen, nil
 }

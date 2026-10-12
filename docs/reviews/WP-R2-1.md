@@ -495,3 +495,241 @@ the worst-case container (UUID tenant, 63-character bucket):
 | Sync | leaf of 219 mapped units |
 | Permafrost | 223 characters (documented 400-character path limit) |
 | Local | leaf of 228 bytes |
+
+---
+
+# Part C, PR C1: the writers (Stage 1a Prompt 2C, migration 087)
+
+Lane: Engine. Contract: `docs/ARCHITECTURE_CONTRACT.md` line 4 (keys through
+the one hierarchy — C2's re-encryption) and `docs/surfaces/ENGINE.md` (first
+ten, item 1; the lane promise "bytes that are never lost"): from this PR on, no
+write can destroy bytes a row names.
+
+## What was built
+
+**The address.** `newBlobAddress(key)` = `key + "@" + 26` lower-case Crockford
+base32 characters from `crypto/rand` (130 bits), in `blob_address.go` next to
+`objectBlobAddress`. Independent of the version id (an unversioned bucket's
+write gets one too), never reused, never `generateVersionID`.
+`isBlobAddressOf(key, addr)` is the exact-shape check (direct-upload complete).
+
+**Key length (Decision 1).** `blobKeyTooLong`, before any body byte, on PUT,
+CreateMultipartUpload, the CopyObject destination and the direct-upload
+presign: `400 KeyTooLongError` when `len(key) > 857` (1024 − 140 − 27); for a
+bucket whose `tier_preference` is `sync` also when the WebDAV-mapped key plus
+the address does not fit the bridge's 248-unit names —
+`drivers.WebDAVArtifactFits`, the driver's own `davName` / `leafName` /
+`checkNames` (no copy), checked on `key + "@" + 26 zeros` (so a leaf of 219
+`l` passes, 220 is refused; every folder segment is checked too).
+
+**Migration 087** (additive, idempotent, applied twice clean):
+`multipart_uploads.storage_key` (the address a complete chose, written
+BEFORE its backend write) and `object_versions.encryption_key_version`
+(Decision 2, written by the version write from the head row's value), plus a
+partial index on active uploads that carry an address. The previous build
+names neither column.
+
+**The flip** (`blob_flip.go`, `commitBlobWrite`). ONE transaction: the head
+row's advisory lock, then `lockVersionKey` (the same order in `deleteVersion`;
+no path takes them the other way), the displaced row probed `FOR UPDATE`, a
+displaced chunk manifest released, the caller's upsert (which writes its own
+`storage_key`: the new address, `NULL` for a chunked row), then — versioned
+bucket — the version row with the address, `encryption_algorithm` and
+`encryption_key_version`, then the displaced blob's fate: kept while any row
+names it, otherwise `retireBlob(…, overwritten)` on the displaced row's
+backend. `atomicHeadUpsertReleasing` is now this function without a version
+write (the chunked paths); its Part B "clear the address" step is gone because
+every upsert names its own. `recordObjectVersion`'s separate transaction is
+gone for the four writers; quota settles from the displaced row exactly as
+before.
+
+- **Enabled bucket:** the displaced blob is the previous version's; the
+  version row names it, so it is kept. A version row written in place
+  *before* Part C (no address, same etag as the head row) is **anchored**:
+  `anchorDisplacedVersion` gives it `<key>` as its address (with the head
+  row's backend and encryption), since the first Part C write no longer
+  overwrites that blob. Every object's current version on prod therefore
+  becomes retrievable as soon as it is overwritten.
+- **Suspended bucket:** the `null` row is rewritten with the new address; the
+  blob it named is no longer named and is retired.
+- **Unversioned:** retired.
+
+**Writers.**
+
+| Writer | Address | Failure after the write |
+|--------|---------|-------------------------|
+| PUT (`HandlePut`) | new | short body (R7-12) / bad digest / flip error → `orphan_write`, head row untouched |
+| CompleteMultipartUpload | `completeBlobAddress`: the upload row's, else a new one recorded on it first | `orphan_write`; the collector keeps it while the upload is active, the retry writes the same address |
+| CopyObject | new (a copy onto its own key reads the old address, writes a new one) | `orphan_write` |
+| generated objects (`background_put.go`) | new | `orphan_write` |
+| direct-upload complete | the presign's (`storage_key` in its response; complete accepts only `req.Key + "@" + 26` of the alphabet, Stat on R2) | `orphan_write`; over-quota, Object Lock and the encrypted-bucket refusal delete that address |
+| chunked PUT / chunked copy | content-addressed (unchanged) | — ; their direct `engine.Delete` of the legacy `<key>` blob is now the flip's retire |
+
+`dropDisplacedBlob` is deleted: a displaced blob on another backend (R13-10)
+is retired in the write's transaction like any other. `checkLostWrite` stays as
+the detector for an in-place write by a Part B slot during the switch.
+
+**`retireOrphanWrite`** queues `(backend, container, address)` with
+`retire_after = now`. Never a direct delete: a commit that reported an error
+may still have committed, and only the collector's re-check knows.
+
+**DELETE `?versionId` of the current version** (`deleteVersion`): under both
+locks, the head row is re-pointed — only if it names the deleted version's
+blob — to the newly-latest live version with an address (size, ETag, type,
+backend, address, encryption; user metadata, tags and echo headers cleared:
+no per-version copy exists), or dropped when the newly-latest is a marker,
+none, or a version without bytes. The bill follows (`headRepoint`: release the
+old size, force-account the new). A head row that names other bytes (every
+pre-C row) is left alone, as before.
+
+**The collector** (`retired_blobs.go`, job `retired_blobs`, every 10 min,
++5 min boot delay, ≤ 9 min): up to 1,000 due rows, oldest first. Per row,
+under the key's head-row lock: `blobNamedBy` — the head row (incl. `<key>`
+when its address is NULL), a version that keeps bytes, the newest version
+behind a delete marker for `<key>`, an open demotion ledger row, an active
+upload. Named → kept, row dropped (a later displacement re-queues it); only an
+active upload → kept, re-asked in 1 h; free → `Delete` on the RECORDED
+backend's driver (tenant in the context; a miss counts as deleted), then the
+row. An unregistered backend or an open breaker → skipped, the row waits, the
+run is `ok` with a note naming the backends. Metrics
+`vaultaire_retired_blobs_total{outcome=deleted|kept|skipped|failed}` and
+`vaultaire_retired_blobs_backlog` (due rows, read from the table); rule
+`RetiredBlobsBacklogStuck` (> 0 for 6 h, warning) and `retired_blobs` added
+to `PeriodicJobStale`.
+
+**Residuals of B closed (item 10).** Direct-upload complete runs the flip,
+so a blob it displaces is queued (and it now releases the displaced row's
+quota, which it never did). The `null`-version rewrite queues the blob it no
+longer names.
+
+Also found and fixed on the way: direct-upload complete stored R2's ETag with
+its quotes (HEAD answered `""…""`); it is trimmed now. Direct-upload complete
+now honours Object Lock on the key (it did not check).
+
+## Decisions taken here
+
+- **`blobNamedBy` is backend-agnostic.** A row naming the address on any
+  backend keeps it. The cost is a possible leak (two backends holding one
+  address after a failover between a complete and its retry); the benefit is
+  that a stale `backend_name` on a version row can never cost bytes.
+- **Anchoring pre-C versions to `<key>`** (above). Risk, in the two-slot
+  window only: a Part B slot that writes in place at `<key>` after a Part C
+  slot anchored that blob to the previous version overwrites the version's
+  bytes; `GET ?versionId` then serves the newer bytes under the old ETag. It
+  needs a Part B request (a long op draining on the old slot) to land on the
+  same key within the switch. The alternative — never anchoring — loses every
+  pre-C object's previous bytes on its first overwrite, which is what every
+  build did until now.
+- **A complete's address is reused by its retry**, including when the retry
+  sends a different part list: no row named the first bytes, so overwriting
+  them is safe.
+- **The row-less export purge** only finds a pre-C export at `<key>`; a Part
+  C export whose head row vanished is left to the erasure sweep (the
+  `_exports` bucket has no S3 writer).
+- **The R2-15 test is deterministic**: a backend whose first Put pauses after
+  storing its bytes; PUT B writes and commits in that window.
+
+## Tests
+
+Red first. "Before" = the same tests on `origin/main` (`5632e3c`) + 087, in a
+scratch worktree, with a test-only stub of the new symbols (never
+committed).
+
+| Test | Before | After |
+|------|--------|-------|
+| `TestPut_WritesNewAddress_RetiresTheOld` | the row has no address (`""`) | pass |
+| `TestPut_FailureAfterWrite_OldObjectIntact` (R2-05) | 200: no flip to fail (the injection point is Part C's); `TestPut_ShortBody` shows the destruction | pass |
+| `TestPut_ShortBody_IncompleteBody` (R7-12) | 400, and GET then served `only half`: the object was replaced by the truncated body | pass |
+| `TestPut_ConcurrentSameKey_RowDescribesItsBytes` (R2-15) | row ETag `1f09…` ≠ MD5 of the served bytes `fa57…` | pass |
+| `TestPut_KeyTooLong_RefusedBeforeBody` (857 boundary, Sync leaf 219/220) | the body was read; no `KeyTooLongError` | pass |
+| `TestComplete_NewAddress_RetryReusesIt` (R3-15 + replay + collector keeps an active upload's address) | 200: no flip to fail; no address recorded | pass |
+| `TestCopy_NewAddress` (incl. a copy onto its own key) | in place (`""`) | pass |
+| `TestGeneratedObject_NewAddress` | in place (`""`) | pass |
+| `TestReclaim_NeverDeletesAReput` (R13-06: a real PUT lands during the reclaim) | GET 404: the reclaim deleted the new bytes | pass |
+| `TestVersioned_OverwriteKeepsV1Bytes` | 501 | pass |
+| `TestVersioned_LegacyVersionKeepsItsBytesAtTheKey` | error (no address to plant from) | pass |
+| `TestDeleteCurrentVersion_RepointsHead` | GET still served `version two, longer` | pass |
+| `TestRetiredBlobs_Collector_DueOnly` / `_StillNamedKept` / `_OpenBreakerSkipped` | no collector | pass |
+| `TestDirectUpload_PresignsAndCommitsTheAddress` / `_RejectsAForeignStorageKey` | no address; a foreign `storage_key` was accepted (200) | pass |
+| `TestNewBlobAddress_Shape` | — | pass |
+| `TestWholeObjectReads_GoThroughTheBlobAddress` | 6 listed writer sites | 0 writer sites; also fails a `placeObject` whose blob is a raw key |
+
+Part B tests that encoded "this build writes in place" were rewritten to the
+new semantics (`TestPut_OverARowWithStorageKey_RetiresTheDisplacedBlob`,
+`TestPut_SuspendedNullVersionRewrite_TakesTheNewAddress`, the 501 test now
+plants a pre-C version, the SSE-S3 version test uses real retained bytes);
+`TestDeleteVersion_BlobTheHeadRowNames_NotRetired` and the three
+`dropDisplacedBlob` tests went with their subject. Tests that read the blob
+at `<key>` on disk now resolve the row's address (`blobPath`).
+
+## Live proof (local, 2026-10-12)
+
+This branch built (`make build`), `STORAGE_MODE=local`, a private DB
+`vaultaire_live_r21c` migrated through 087, driven with aws-cli as a
+registered tenant:
+
+- **Overwrite.** `PUT x` twice: the head row names `x@andyx957…`; the first
+  blob `x@6nht026a…` is in `retired_blobs` (`local`, `overwritten`, inside its
+  24 h grace); both files on disk, nothing at `x`; GET serves the second body.
+- **Concurrent PUTs.** 12 parallel PUTs of different 3 MB bodies, three
+  rounds: every round MD5(GET) = the row's ETag; 36 writes left 1 live
+  address and 35 retired rows — every blob accounted for.
+- **Versions.** Versioning Enabled, v1 `one`, v2 `two, longer`:
+  `get-object --version-id v1` → `"5bbf5a52…"`, 4 bytes, body `one` (it was
+  501). `object_versions` rows carry `k@rdxnk…` / `k@d8ere…`; nothing retired.
+  `delete-object --version-id v2` → GET `k` serves `one` (the head row
+  re-pointed), `k@d8ere…` retired as `version_deleted`.
+- **A failure after the write.** `put-object --content-md5 <wrong>` over `f`
+  → `BadDigest`; GET `f` still serves the customer's object; the refused
+  body sits at `f@t4argx…`, queued `orphan_write`, due now.
+- **The collector.** With every queued row made due (the grace skipped by
+  SQL) and one row planted naming `x`'s LIVE address, the scheduler's own
+  `retired_blobs` run: `due 39, deleted 38, kept 1, skipped 0, failed 0`;
+  `job_runs`: `retired_blobs | ok | 38`, result as above;
+  `vaultaire_retired_blobs_total{outcome="deleted"} 38`, `{kept} 1`,
+  `vaultaire_retired_blobs_backlog 0`. On disk only the four live addresses
+  remain; GET `x`, `f`, `k` and `race` (MD5 = row ETag) all still serve.
+
+## Gates
+
+- `go test -race ./...` on a fresh private DB (`vaultaire_r21c`, through
+  087): every package `ok` after the last fixes (`internal/api` 219 s).
+- `golangci-lint` v2.14.0 (CI's): 0 issues. `gosec@latest` with the
+  Makefile's flags (the Security workflow's command): 0 issues. (gosec
+  v2.22.10 reports two findings in `internal/loadtest/chaos.go` and
+  `internal/api/s3_list.go`, files this PR does not touch.)
+- `TestSQLLiteralsMatchSchema`, `TestErasedTablesCoverSchema`,
+  `TestExportSectionsCoverSchema`, `TestSweepBucketSourcesCoverSchema`,
+  `TestWholeObjectReads_GoThroughTheBlobAddress`: pass.
+
+## Not done / residuals (C2's and after)
+
+- **Billing of retained versions** (C2 item 12): a non-current version's
+  blob is stored and not billed; until C2 the bill still follows the head
+  row only. Retired blobs inside their grace are not billed either (a day).
+- **`key_reencrypt` for whole SSE-S3 objects and versions** (C2 item 13),
+  **`keyRotationPendingSQL` counting versions** (item 11; the column is now
+  written), the public docs (`llms.txt`, `docs/API.md`, changelog: item 14).
+- **Pre-C versions stay 501** unless they were the latest when the first
+  Part C write displaced them (anchored), or the newest behind a marker.
+- **The two-slot window:** a Part B slot's in-place write at `<key>` lands
+  over a blob a Part C slot anchored to a version (see Decisions). Also: a
+  direct upload presigned by the old slot (address-less) cannot be
+  completed on the new one (`invalid_storage_key`); the client presigns
+  again (15-min TTL).
+- **A failed backend write** (as opposed to a write that landed) is not
+  queued: S3-class backends store nothing, but a local or WebDAV partial file
+  stays until the erasure sweep. It no longer overwrites anything.
+- **The delete marker on a locked key** is still refused (R2-01's documented
+  deviation); with bytes retained per version it can follow AWS — a
+  separate, deliberate change.
+- **DeleteObjects stays versioning-unaware** (WP-R3-4), out of scope.
+- The CDN purge-on-overwrite need is gone for new writes (each has its own
+  address); nothing purged existing caches.
+
+## [YOU]
+
+- The prod synthetic check is still not configured (`SYNTHETIC_CHECK_*` +
+  its tenant). Until it is, the C1 deploy is proven with an aws-cli round trip
+  on the bench tenant: PUT twice, GET, `get-object --version-id` on a
+  versioned bucket, and the `retired_blobs` row of the first PUT.
