@@ -484,7 +484,7 @@ func TestMasterKeyRewrap_PreviousKeyAtBoot(t *testing.T) {
 	keys, err := crypto.NewTenantKeys(f.db, keyTestMasterB, keyTestMasterA)
 	require.NoError(t, err)
 	rewrappedBefore := testutil.ToFloat64(tenantKeysRewrapped)
-	checkTenantKeysAtBoot(context.Background(), keys, zap.New(core))
+	checkTenantKeys(context.Background(), keys, zap.New(core), f.tenantID) // scoped: the table is shared
 	assert.GreaterOrEqual(t, testutil.ToFloat64(tenantKeysRewrapped)-rewrappedBefore, float64(1))
 	require.Len(t, logs.FilterMessageSnippet("re-wrapped").All(), 1, "one Info line with the count")
 
@@ -498,6 +498,48 @@ func TestMasterKeyRewrap_PreviousKeyAtBoot(t *testing.T) {
 	assert.Equal(t, "whole object under master A", w.Body.String())
 }
 
+// WP-R8-1 follow-up A3: while PREVIOUS is set, every key_reencrypt run
+// re-wraps the rows another slot created under the old master after this
+// slot's boot check, and its result says when PREVIOUS can go.
+func TestKeyReencrypt_WithPrevious_RewrapsRowsTheOldSlotCreated(t *testing.T) {
+	f, _ := setupKeyedChunkingFixture(t) // the old slot: master A
+	putSSE(t, f, "late.txt", []byte("first encrypted write, on the old slot"))
+
+	// The new slot (B + previous A) booted before that row existed.
+	newKeys, err := crypto.NewTenantKeys(f.db, keyTestMasterB, keyTestMasterA)
+	require.NoError(t, err)
+	f.adapter.chunkEncSvc = crypto.NewChunkEncryptionService(newKeys)
+	k := newKeyReencryptForTest(t, f)
+	rewrappedBefore := testutil.ToFloat64(tenantKeysRewrapped)
+	newKeys.OnRewrap(tenantKeysRewrapped.Inc)
+
+	res, err := k.RunOnce(context.Background())
+	require.NoError(t, err)
+	t.Logf("run with PREVIOUS set: %+v", res)
+	assert.True(t, res.MasterRekey)
+	assert.Equal(t, 1, res.Rewrapped, "the old slot's row is re-wrapped by the job")
+	assert.Zero(t, res.UnwrapFailures)
+	assert.Equal(t, rewrappedBefore+1, testutil.ToFloat64(tenantKeysRewrapped))
+
+	res, err = k.RunOnce(context.Background())
+	require.NoError(t, err)
+	assert.Zero(t, res.Rewrapped, "rewrapped=0 unwrap_failures=0: PREVIOUS may go once the old slot is stopped")
+	assert.Zero(t, res.UnwrapFailures)
+
+	// PREVIOUS removed: B alone serves the object.
+	f.adapter.sseService = crypto.NewSSEService(testTenantKeys(t, f.db, keyTestMasterB))
+	w := getChunkedAs(t, f, f.tenant, "test-bucket", "late.txt")
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, "first encrypted write, on the old slot", w.Body.String())
+
+	// Without PREVIOUS the pass does not run.
+	f.adapter.chunkEncSvc = crypto.NewChunkEncryptionService(testTenantKeys(t, f.db, keyTestMasterB))
+	k2 := newKeyReencryptForTest(t, f)
+	res, err = k2.RunOnce(context.Background())
+	require.NoError(t, err)
+	assert.False(t, res.MasterRekey)
+}
+
 func TestMasterKeyRewrap_UnwrapsUnderNeither_ReadsFailClosed(t *testing.T) {
 	f, _ := setupKeyedChunkingFixture(t)
 	content := generateTestData(8 << 10)
@@ -509,7 +551,7 @@ func TestMasterKeyRewrap_UnwrapsUnderNeither_ReadsFailClosed(t *testing.T) {
 	core, logs := observer.New(zap.InfoLevel)
 	keys, err := crypto.NewTenantKeys(f.db, keyTestMasterB, third)
 	require.NoError(t, err)
-	checkTenantKeysAtBoot(context.Background(), keys, zap.New(core))
+	checkTenantKeys(context.Background(), keys, zap.New(core), f.tenantID)
 	assert.GreaterOrEqual(t, testutil.ToFloat64(tenantKeysUnwrapFailures), float64(1))
 	errLines := logs.FilterLevelExact(zap.ErrorLevel).All()
 	require.Len(t, errLines, 1)
