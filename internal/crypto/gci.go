@@ -18,19 +18,24 @@ const GlobalDedupScope = "_global"
 
 // GCIEntry represents an entry in the Global Content Index
 type GCIEntry struct {
-	DedupScope      string    `json:"dedup_scope"`
-	PlaintextHash   string    `json:"plaintext_hash"`
-	BackendID       string    `json:"backend_id"`
-	StorageKey      string    `json:"storage_key"`
-	SizeBytes       int64     `json:"size_bytes"`
-	CompressedSize  *int64    `json:"compressed_size,omitempty"`
-	CompressionAlgo *string   `json:"compression_algo,omitempty"`
-	Encrypted       bool      `json:"encrypted"`
-	EncryptionAlgo  *string   `json:"encryption_algo,omitempty"`
-	CiphertextHash  *string   `json:"ciphertext_hash,omitempty"` // SHA-256 of the stored (encrypted) blob; nil for unencrypted chunks
-	RefCount        int       `json:"ref_count"`
-	FirstSeenAt     time.Time `json:"first_seen_at"`
-	LastAccessedAt  time.Time `json:"last_accessed_at"`
+	DedupScope      string  `json:"dedup_scope"`
+	PlaintextHash   string  `json:"plaintext_hash"`
+	BackendID       string  `json:"backend_id"`
+	StorageKey      string  `json:"storage_key"`
+	SizeBytes       int64   `json:"size_bytes"`
+	CompressedSize  *int64  `json:"compressed_size,omitempty"`
+	CompressionAlgo *string `json:"compression_algo,omitempty"`
+	Encrypted       bool    `json:"encrypted"`
+	EncryptionAlgo  *string `json:"encryption_algo,omitempty"`
+	CiphertextHash  *string `json:"ciphertext_hash,omitempty"` // SHA-256 of the stored (encrypted) blob; nil for unencrypted chunks
+	// EncryptionKeyVersion is the tenant key version the blob was sealed
+	// under (WP-R8-1, migration 084); nil for unencrypted chunks and rows
+	// sealed before 084. Like CiphertextHash it describes the BLOB: the
+	// re-encrypt job changes both together.
+	EncryptionKeyVersion *int      `json:"encryption_key_version,omitempty"`
+	RefCount             int       `json:"ref_count"`
+	FirstSeenAt          time.Time `json:"first_seen_at"`
+	LastAccessedAt       time.Time `json:"last_accessed_at"`
 }
 
 // TenantChunkRef represents a tenant's reference to a global chunk
@@ -147,11 +152,12 @@ func (g *GlobalContentIndex) LookupChunk(ctx context.Context, scope, plaintextHa
 	var compressionAlgo sql.NullString
 	var encryptionAlgo sql.NullString
 	var ciphertextHash sql.NullString
+	var keyVersion sql.NullInt32
 
 	err := g.db.QueryRowContext(ctx, `
 		SELECT dedup_scope, plaintext_hash, backend_id, storage_key, size_bytes,
 		       compressed_size, compression_algo, encrypted, encryption_algo,
-		       ciphertext_hash, ref_count, first_seen_at, last_accessed_at
+		       ciphertext_hash, ref_count, first_seen_at, last_accessed_at, encryption_key_version
 		FROM global_content_index
 		WHERE dedup_scope = $1 AND plaintext_hash = $2
 	`, scope, plaintextHash).Scan(
@@ -168,6 +174,7 @@ func (g *GlobalContentIndex) LookupChunk(ctx context.Context, scope, plaintextHa
 		&entry.RefCount,
 		&entry.FirstSeenAt,
 		&entry.LastAccessedAt,
+		&keyVersion,
 	)
 
 	if err == sql.ErrNoRows {
@@ -192,6 +199,10 @@ func (g *GlobalContentIndex) LookupChunk(ctx context.Context, scope, plaintextHa
 	}
 	if ciphertextHash.Valid {
 		entry.CiphertextHash = &ciphertextHash.String
+	}
+	if keyVersion.Valid {
+		v := int(keyVersion.Int32)
+		entry.EncryptionKeyVersion = &v
 	}
 
 	// Add to cache
@@ -237,7 +248,7 @@ func (g *GlobalContentIndex) LookupChunks(ctx context.Context, scope string, has
 	rows, err := g.db.QueryContext(ctx, `
 		SELECT dedup_scope, plaintext_hash, backend_id, storage_key, size_bytes,
 		       compressed_size, compression_algo, encrypted, encryption_algo,
-		       ciphertext_hash, ref_count, first_seen_at, last_accessed_at
+		       ciphertext_hash, ref_count, first_seen_at, last_accessed_at, encryption_key_version
 		FROM global_content_index
 		WHERE dedup_scope = $1 AND plaintext_hash = ANY($2)
 	`, scope, uncachedHashes)
@@ -252,6 +263,7 @@ func (g *GlobalContentIndex) LookupChunks(ctx context.Context, scope string, has
 		var compressionAlgo sql.NullString
 		var encryptionAlgo sql.NullString
 		var ciphertextHash sql.NullString
+		var keyVersion sql.NullInt32
 
 		err := rows.Scan(
 			&entry.DedupScope,
@@ -267,6 +279,7 @@ func (g *GlobalContentIndex) LookupChunks(ctx context.Context, scope string, has
 			&entry.RefCount,
 			&entry.FirstSeenAt,
 			&entry.LastAccessedAt,
+			&keyVersion,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan chunk row: %w", err)
@@ -283,6 +296,10 @@ func (g *GlobalContentIndex) LookupChunks(ctx context.Context, scope string, has
 		}
 		if ciphertextHash.Valid {
 			entry.CiphertextHash = &ciphertextHash.String
+		}
+		if keyVersion.Valid {
+			v := int(keyVersion.Int32)
+			entry.EncryptionKeyVersion = &v
 		}
 
 		// Update result
@@ -304,8 +321,8 @@ func (g *GlobalContentIndex) LookupChunks(ctx context.Context, scope string, has
 // a reference on it instead.
 const insertChunkSQL = `
 	INSERT INTO global_content_index
-	(dedup_scope, plaintext_hash, backend_id, storage_key, size_bytes, compressed_size, compression_algo, encrypted, encryption_algo, ciphertext_hash, ref_count)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+	(dedup_scope, plaintext_hash, backend_id, storage_key, size_bytes, compressed_size, compression_algo, encrypted, encryption_algo, ciphertext_hash, ref_count, encryption_key_version)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 	ON CONFLICT (dedup_scope, plaintext_hash) DO UPDATE SET
 		ref_count = global_content_index.ref_count + 1,
 		marked_for_deletion = FALSE,
@@ -321,7 +338,8 @@ func (g *GlobalContentIndex) InsertChunk(ctx context.Context, entry *GCIEntry) e
 	}
 	_, err := g.db.ExecContext(ctx, insertChunkSQL,
 		entry.DedupScope, entry.PlaintextHash, entry.BackendID, entry.StorageKey, entry.SizeBytes,
-		entry.CompressedSize, entry.CompressionAlgo, entry.Encrypted, entry.EncryptionAlgo, entry.CiphertextHash, entry.RefCount)
+		entry.CompressedSize, entry.CompressionAlgo, entry.Encrypted, entry.EncryptionAlgo, entry.CiphertextHash, entry.RefCount,
+		entry.EncryptionKeyVersion)
 
 	if err != nil {
 		return fmt.Errorf("failed to insert chunk: %w", err)
@@ -347,7 +365,8 @@ func (g *GlobalContentIndex) InsertChunkTx(ctx context.Context, tx *sql.Tx, entr
 	}
 	_, err := tx.ExecContext(ctx, insertChunkSQL,
 		entry.DedupScope, entry.PlaintextHash, entry.BackendID, entry.StorageKey, entry.SizeBytes,
-		entry.CompressedSize, entry.CompressionAlgo, entry.Encrypted, entry.EncryptionAlgo, entry.CiphertextHash, entry.RefCount)
+		entry.CompressedSize, entry.CompressionAlgo, entry.Encrypted, entry.EncryptionAlgo, entry.CiphertextHash, entry.RefCount,
+		entry.EncryptionKeyVersion)
 
 	if err != nil {
 		return fmt.Errorf("failed to insert chunk: %w", err)

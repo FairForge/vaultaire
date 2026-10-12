@@ -11,8 +11,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/FairForge/vaultaire/internal/crypto"
 )
 
 // R2-02: a Range GET on an encrypted object must slice the PLAINTEXT. The
@@ -42,7 +40,7 @@ func rangeGet(t *testing.T, f *adapterTestFixture, key, rng string, hdr func(*ht
 
 func TestHandleGet_Range_SSES3_ServesPlaintextSlice(t *testing.T) {
 	f := setupAdapterFixture(t)
-	svc, err := crypto.NewSSEService(f.db, testSSEMasterKey)
+	svc, err := testSSEService(f.db, testSSEMasterKey)
 	require.NoError(t, err)
 	f.adapter.sseService = svc
 	t.Cleanup(func() { _, _ = f.db.Exec("DELETE FROM tenant_encryption_keys WHERE tenant_id = $1", f.tenantID) })

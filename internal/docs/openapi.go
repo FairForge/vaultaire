@@ -1406,6 +1406,22 @@ func generateAdminPaths() map[string]*PathItem {
 				queryParam("dry_run", "Report only (the default). `false` moves and deletes", &Schema{Type: "boolean", Default: true}),
 				queryParam("tenant", "Repeatable. An extra tenant id to look under — an erased tenant whose `account.erased` row shows `chunk_blobs_left` > 0", &Schema{Type: "string"}))),
 		},
+		"/api/v1/admin/tenants/{tenant_id}/encryption-key/rotate": {
+			Parameters: []Parameter{pathParam("tenant_id", "The tenant whose key is rotated")},
+			Post: admin(jsonOp("Admin", "Rotate one tenant's encryption key", "AdminRotateTenantKey",
+				"Adds the tenant's next key version (WP-R8-1, `docs/ENCRYPTION.md`): new writes are sealed under it at once on the server that answered and "+
+					"within a minute on every other; every object keeps opening under the version it was sealed with. The `key_reencrypt` job then moves the "+
+					"tenant's chunks onto the new version (whole SSE-S3 objects stay on theirs until WP-R2-1). A tenant with no key gets its first. "+
+					"Send an `Idempotency-Key`: a retry with the same key replays the first answer instead of rotating twice. Writes an `admin.key_rotate` audit row. No request body.",
+				map[string]Response{
+					"200": jsonResp("The new version", &Schema{Type: "object", Properties: map[string]*Schema{
+						"tenant_id":   {Type: "string"},
+						"key_version": {Type: "integer"},
+					}}),
+					"404": jsonResp("`{\"error\":\"tenant_not_found\"}`", ref("SimpleError")),
+					"503": jsonResp("`{\"error\":\"encryption_disabled\"}`: no ENCRYPTION_MASTER_KEY on this server", ref("SimpleError")),
+				})),
+		},
 		"/api/v1/admin/routing-truth": {
 			Get: admin(jsonOp("Admin", "The routing truth: head rows vs. the backends that hold their bytes", "AdminRoutingTruth",
 				"`object_head_cache.backend_name` is where an object's bytes are supposed to be — GET, DELETE, the demotion ledger, the deletion runner and the erasure sweep act on it. "+

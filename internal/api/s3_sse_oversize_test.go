@@ -34,7 +34,7 @@ func oversizePut(t *testing.T, f *adapterTestFixture, key string, mutate func(*h
 // object larger than the encryptable cap must be rejected, never stored plaintext.
 func TestHandlePut_SSEHeaderOversize_Rejected(t *testing.T) {
 	f := setupChunkingFixture(t)
-	svc, err := crypto.NewSSEService(f.db, testSSEMasterKey)
+	svc, err := testSSEService(f.db, testSSEMasterKey)
 	require.NoError(t, err)
 	f.adapter.sseService = svc
 
@@ -56,7 +56,7 @@ func TestHandlePut_SSEHeaderOversize_Rejected(t *testing.T) {
 // reject oversize objects rather than silently storing them unencrypted.
 func TestHandlePut_SSEBucketOversize_Rejected(t *testing.T) {
 	f := setupChunkingFixture(t)
-	svc, err := crypto.NewSSEService(f.db, testSSEMasterKey)
+	svc, err := testSSEService(f.db, testSSEMasterKey)
 	require.NoError(t, err)
 	f.adapter.sseService = svc
 
@@ -78,7 +78,7 @@ func TestHandlePut_SSEBucketOversize_Rejected(t *testing.T) {
 // still be accepted (the guard only fires when encryption is required).
 func TestHandlePut_NoSSEOversize_NotRejected(t *testing.T) {
 	f := setupChunkingFixture(t)
-	svc, err := crypto.NewSSEService(f.db, testSSEMasterKey)
+	svc, err := testSSEService(f.db, testSSEMasterKey)
 	require.NoError(t, err)
 	f.adapter.sseService = svc // service present, but no SSE requested for this bucket/object
 

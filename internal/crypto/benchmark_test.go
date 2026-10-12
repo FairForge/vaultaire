@@ -3,7 +3,6 @@ package crypto
 import (
 	"bytes"
 	"crypto/rand"
-	"fmt"
 	"testing"
 )
 
@@ -77,38 +76,5 @@ func BenchmarkChunking_Rabin(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		_, _ = chunker.ChunkBytes(data)
-	}
-}
-
-func BenchmarkKeyDerivation_HKDF(b *testing.B) {
-	masterKey, _ := GenerateMasterKey()
-	keyManager, _ := NewKeyManager(&KeyManagerConfig{
-		MasterKey:     masterKey,
-		EnableCaching: false, // Disable cache to measure actual derivation
-	})
-
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		_, _ = keyManager.DeriveTenantKey(fmt.Sprintf("tenant-%d", i%100), 1)
-	}
-}
-
-func BenchmarkKeyDerivation_Cached(b *testing.B) {
-	masterKey, _ := GenerateMasterKey()
-	keyManager, _ := NewKeyManager(&KeyManagerConfig{
-		MasterKey:     masterKey,
-		EnableCaching: true,
-	})
-
-	// Warm cache
-	for i := 0; i < 100; i++ {
-		_, _ = keyManager.DeriveTenantKey(fmt.Sprintf("tenant-%d", i), 1)
-	}
-
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		_, _ = keyManager.DeriveTenantKey(fmt.Sprintf("tenant-%d", i%100), 1)
 	}
 }

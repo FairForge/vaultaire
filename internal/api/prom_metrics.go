@@ -76,6 +76,13 @@ func (s *Server) initMetrics() {
 		// CopyObject sources whose bytes are not their head row's size
 		// (Prompt 2b.3 D2.1): drift, or a concurrent overwrite. 503s.
 		reg.MustRegister(copySourceSizeMismatch)
+		// Tenant key versions (WP-R8-1): the boot re-wrap, rows no key
+		// opens, the re-encrypt job, and the rotation backlog (from the
+		// tables).
+		reg.MustRegister(tenantKeysRewrapped, tenantKeysUnwrapFailures, keyReencryptChunks)
+		if s.tenantKeys != nil {
+			reg.MustRegister(newKeyRotationPendingCollector(s.db, s.log()))
+		}
 		reg.MustRegister(largeGetCollectors()...)
 		if b := s.largeGet.budget; b != nil {
 			reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{

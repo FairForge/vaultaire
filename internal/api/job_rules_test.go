@@ -52,6 +52,8 @@ func TestJobRuleFile_MatchesTheRegisteredJobsAndTheExportedSeries(t *testing.T) 
 	// the pack store backend, and one that stripes: pack_gc and stripe_gc join the table
 	eng.AddDriver("sync", stripingLocal{drivers.NewLocalDriver(t.TempDir(), zap.NewNop())})
 	eng.SetPrimary("idrive")
+	// A master key: key_reencrypt joins the table (WP-R8-1).
+	t.Setenv("ENCRYPTION_MASTER_KEY", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 	s := NewServer(&config.Config{Server: config.ServerConfig{Port: 8000}}, zap.NewNop(), eng, nil, jf.db)
 	s.accountDeletion = NewAccountDeletionRunner(jf.db, zap.NewNop(), eng, s.gci, nil, s.accountSvc)
 	require.NotNil(t, s.accountDeletion)
@@ -124,10 +126,19 @@ func TestJobRuleFile_MatchesTheRegisteredJobsAndTheExportedSeries(t *testing.T) 
 		`vaultaire_stale_copy_lost_writes_total{source="reclaim"}`,
 		`vaultaire_stale_copy_lost_writes_total{source="delete"}`,
 		`vaultaire_stale_copy_lost_writes_total{source="overwrite"}`,
+		`vaultaire_job_last_success_timestamp_seconds{job_name="key_reencrypt"}`,
+		`vaultaire_key_rotation_pending{kind="chunk"}`,
+		`vaultaire_key_rotation_pending{kind="whole"}`,
+		`vaultaire_tenant_keys_unwrap_failures`,
 	} {
 		assert.True(t, strings.Contains(body, "\n"+series+" "), "exported before any run: %s", series)
 	}
-	for _, series := range []string{"vaultaire_job_last_success_timestamp_seconds", "vaultaire_job_runs_total", "vaultaire_account_deletion_tenants_total", "vaultaire_stale_copy_lost_writes_total"} {
+	for _, name := range []string{"TenantKeysUnwrapFailing", "KeyReencryptBacklogStuck"} {
+		require.Contains(t, rules, name)
+	}
+	assert.Equal(t, "critical", rules["TenantKeysUnwrapFailing"].severity, "a tenant's encrypted reads are 500s")
+	for _, series := range []string{"vaultaire_job_last_success_timestamp_seconds", "vaultaire_job_runs_total", "vaultaire_account_deletion_tenants_total", "vaultaire_stale_copy_lost_writes_total",
+		"vaultaire_key_rotation_pending", "vaultaire_tenant_keys_unwrap_failures"} {
 		assert.True(t, strings.Contains(raw, series), "the rule file documents %s", series)
 	}
 	assert.False(t, strings.Contains(body, `tenant_id="`), "no tenant label on any series")
@@ -163,6 +174,8 @@ func TestRoutingRuleFile_MatchesTheExportedSeries(t *testing.T) {
 	eng.AddDriver("idrive", drivers.NewLocalDriver(t.TempDir(), zap.NewNop()))
 	eng.AddDriver("geyser", drivers.NewLocalDriver(t.TempDir(), zap.NewNop()))
 	eng.SetPrimary("idrive")
+	// A master key: key_reencrypt joins the table (WP-R8-1).
+	t.Setenv("ENCRYPTION_MASTER_KEY", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 	s := NewServer(&config.Config{Server: config.ServerConfig{Port: 8000}}, zap.NewNop(), eng, nil, jf.db)
 	require.NotNil(t, s.routingTruth)
 	require.NotNil(t, s.jobs.job(routingTruthJobName), "routing_truth is a job of the scheduler")

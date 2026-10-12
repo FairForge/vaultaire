@@ -97,6 +97,7 @@ type Server struct {
 	mfaService         *auth.MFAService
 	mfaPendingStore    *dashboard.MFAPendingStore
 	sseService         *crypto.SSEService
+	tenantKeys         *crypto.TenantKeys // nil: no ENCRYPTION_MASTER_KEY (WP-R8-1)
 	chunkEncSvc        *crypto.ChunkEncryptionService
 	gci                *crypto.GlobalContentIndex
 	cdnRateLimiter     *RateLimiter
@@ -104,6 +105,7 @@ type Server struct {
 	accessLogTracker   *S3AccessLogTracker
 	inventoryRunner    *InventoryRunner
 	dedupGCRunner      *DedupGCRunner
+	keyReencrypt       *KeyReencryptRunner // nil without ENCRYPTION_MASTER_KEY (WP-R8-1)
 	smartDemotion      *SmartDemotionRunner
 	vaultParity        *VaultParity
 	packGC             *packGC // the pack store GC (internal/packstore, Phase 37); nil without the sync backend
@@ -247,21 +249,17 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	s.mfaPendingStore = dashboard.NewMFAPendingStore()
 
 	if masterKey := os.Getenv("ENCRYPTION_MASTER_KEY"); masterKey != "" && s.db != nil {
-		sseSvc, sseErr := crypto.NewSSEService(s.db, masterKey)
-		if sseErr != nil {
-			logger.Error("failed to initialize SSE-S3 service", zap.Error(sseErr))
+		// One key store for both encryptions (WP-R8-1): stored-random,
+		// versioned tenant keys wrapped under the master key.
+		keys, keysErr := crypto.NewTenantKeys(s.db, masterKey, os.Getenv("ENCRYPTION_MASTER_KEY_PREVIOUS"))
+		if keysErr != nil {
+			logger.Error("failed to initialize the tenant key store: encryption is OFF", zap.Error(keysErr))
 		} else {
-			s.sseService = sseSvc
-			logger.Info("SSE-S3 encryption service initialized (ML-KEM-768+AES-256-GCM)")
-		}
-
-		kmConfig := &crypto.KeyManagerConfig{MasterKeyHex: masterKey, CacheMaxAge: 1 * time.Hour, EnableCaching: true}
-		km, kmErr := crypto.NewKeyManager(kmConfig)
-		if kmErr != nil {
-			logger.Error("failed to initialize key manager for chunk encryption", zap.Error(kmErr))
-		} else {
-			s.chunkEncSvc = crypto.NewChunkEncryptionService(km)
-			logger.Info("chunk encryption service initialized (AES-256-GCM convergent)")
+			s.tenantKeys = keys
+			s.sseService = crypto.NewSSEService(keys)
+			s.chunkEncSvc = crypto.NewChunkEncryptionService(keys)
+			logger.Info("encryption initialized: SSE-S3 (ML-KEM-768+AES-256-GCM) and chunk convergent (AES-256-GCM), versioned tenant keys")
+			checkTenantKeysAtBoot(context.Background(), keys, logger)
 		}
 	}
 
@@ -313,6 +311,9 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 
 	// Dedup GC runner — reconciles ref counts and reclaims orphaned chunks.
 	s.dedupGCRunner = NewDedupGCRunner(s.db, s.engine, s.gci, logger)
+	if s.chunkEncSvc != nil && s.engine != nil {
+		s.keyReencrypt = NewKeyReencryptRunner(s.db, s.engine, s.gci, s.chunkEncSvc, logger)
+	}
 	s.chunkMover = NewChunkMover(s.db, s.engine, logger)
 
 	// Routing truth (WP-R7-5): the boot check runs in Start, the sampled
@@ -963,6 +964,10 @@ func (s *Server) registerComplianceRoutes() {
 		// Chunk blobs written before WP-R8-7 → the one address. Dry run by
 		// default; ?backend= is required.
 		r.Post("/chunk-move", s.requireAdmin(s.handleChunkMove))
+		// Tenant key rotation (WP-R8-1). Idempotency-Key replays the first
+		// answer: a retried request does not rotate twice.
+		_, im := s.jsonAPIMiddleware()
+		r.With(im.Middleware).Post("/tenants/{tenant_id}/encryption-key/rotate", s.requireAdmin(s.handleRotateTenantKey))
 		// Routing truth (WP-R7-5): the boot check, the rows on no registered
 		// backend, the last run; and the NULL-row resolution (dry run by default).
 		r.Get("/routing-truth", s.requireAdmin(s.handleAdminRoutingTruth))
@@ -1412,6 +1417,7 @@ func (s *Server) Start() error {
 			s.accountDeletion.Auth = s.auth
 		}
 		s.accountDeletion.Sessions = s.sessionStore
+		s.accountDeletion.Keys = s.tenantKeys
 		s.jobs.Register(s.accountDeletion.spec())
 	}
 	// Routing truth (WP-R7-5): every backend_name on record must be a

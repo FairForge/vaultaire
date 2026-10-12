@@ -45,6 +45,7 @@ type chunkStoreOutcome struct {
 	backend        string
 	storedBytes    int64
 	ciphertextHash string
+	keyVersion     *int // the tenant key version the stored blob is sealed under (nil: unencrypted)
 	err            error
 }
 
@@ -153,11 +154,18 @@ func (p *chunkStorePool) noteDuplicate(c *crypto.Chunk) bool {
 	return true
 }
 
-// addRef records one taken GCI reference and its manifest row.
-func (p *chunkStorePool) addRef(index int, offset int64, hash string, ciphertextHash *string) {
+// addRef records one taken GCI reference and its manifest row. keyVersion
+// is the version of the BLOB the reference points at — the row's, copied
+// exactly like its ciphertext hash, never the tenant's current version
+// (WP-R8-1); nil (an unencrypted chunk) records the column's default.
+func (p *chunkStorePool) addRef(index int, offset int64, hash string, ciphertextHash *string, keyVersion *int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.takenRefs = append(p.takenRefs, takenChunkRef{scope: p.scope, hash: hash})
+	v := 1
+	if keyVersion != nil {
+		v = *keyVersion
+	}
 	p.newRefs = append(p.newRefs, crypto.TenantChunkRef{
 		TenantID:             p.refTenantID,
 		BucketName:           p.bucket,
@@ -166,7 +174,7 @@ func (p *chunkStorePool) addRef(index int, offset int64, hash string, ciphertext
 		ChunkOffset:          offset,
 		PlaintextHash:        hash,
 		DedupScope:           p.scope,
-		EncryptionKeyVersion: 1,
+		EncryptionKeyVersion: v,
 		CiphertextHash:       ciphertextHash,
 	})
 }
@@ -198,6 +206,7 @@ func (p *chunkStorePool) storeOne(job chunkStoreJob) chunkStoreOutcome {
 	var encrypted bool
 	var encryptionAlgo *string
 	var ciphertextHash string
+	var keyVersion *int
 
 	if crypto.ShouldCompress(chunk.Data, p.contentType) {
 		compressed, compErr := crypto.CompressBuffer(chunk.Data)
@@ -211,13 +220,14 @@ func (p *chunkStorePool) storeOne(job chunkStoreJob) chunkStoreOutcome {
 	}
 
 	if p.a.chunkEncSvc != nil {
-		ct, ctHash, encErr := p.a.chunkEncSvc.EncryptChunkData(p.encTenantID, chunk.Hash, storeData)
+		ct, ctHash, kv, encErr := p.a.chunkEncSvc.EncryptChunkData(p.ctx, p.encTenantID, chunk.Hash, storeData)
 		if encErr != nil {
 			return chunkStoreOutcome{chunk: job.chunk,
 				err: fmt.Errorf("encrypt chunk %s: %w", chunk.Hash[:16], encErr)}
 		}
 		storeData = ct
 		ciphertextHash = ctHash
+		keyVersion = &kv
 		encrypted = true
 		algo := "AES256-CE"
 		encryptionAlgo = &algo
@@ -243,6 +253,8 @@ func (p *chunkStorePool) storeOne(job chunkStoreJob) chunkStoreOutcome {
 		EncryptionAlgo:  encryptionAlgo,
 		CiphertextHash:  entryCiphertextHash,
 		RefCount:        1,
+		// The version is a property of the blob, recorded with it (084).
+		EncryptionKeyVersion: keyVersion,
 	})
 	if storeErr != nil {
 		return chunkStoreOutcome{chunk: job.chunk,
@@ -259,12 +271,14 @@ func (p *chunkStorePool) storeOne(job chunkStoreJob) chunkStoreOutcome {
 		if res.ciphertextHash != nil {
 			ciphertextHash = *res.ciphertextHash
 		}
+		keyVersion = res.keyVersion // the stored blob's, not the one sealed here
 	}
 	return chunkStoreOutcome{
 		chunk:          job.chunk,
 		backend:        res.backend,
 		storedBytes:    storedBytes,
 		ciphertextHash: ciphertextHash,
+		keyVersion:     keyVersion,
 	}
 }
 
@@ -297,7 +311,7 @@ func (p *chunkStorePool) collect() {
 			h := out.ciphertextHash
 			ctHash = &h
 		}
-		p.addRef(out.chunk.Index, out.chunk.Offset, out.chunk.Hash, ctHash)
+		p.addRef(out.chunk.Index, out.chunk.Offset, out.chunk.Hash, ctHash, out.keyVersion)
 		for _, wtr := range waiters {
 			rows, incErr := p.a.gci.IncrementRef(p.ctx, p.scope, out.chunk.Hash)
 			if incErr != nil {
@@ -310,7 +324,7 @@ func (p *chunkStorePool) collect() {
 				p.fail(fmt.Errorf("chunk %s vanished while upload held a reference", out.chunk.Hash[:16]))
 				break
 			}
-			p.addRef(wtr.index, wtr.offset, out.chunk.Hash, ctHash)
+			p.addRef(wtr.index, wtr.offset, out.chunk.Hash, ctHash, out.keyVersion)
 		}
 	}
 }

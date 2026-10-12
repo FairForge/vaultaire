@@ -2,15 +2,12 @@ package crypto
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/mlkem"
 	"crypto/rand"
-	"database/sql"
-	"encoding/hex"
-	"fmt"
-	"os"
+	"encoding/binary"
 	"testing"
-
-	"github.com/FairForge/vaultaire/internal/testutil"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -18,173 +15,118 @@ import (
 	_ "github.com/lib/pq"
 )
 
-func testMasterKeyHex() string {
-	return "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-}
-
-func TestSSEService_NewSSEService(t *testing.T) {
-	t.Run("valid key", func(t *testing.T) {
-		svc, err := NewSSEService(nil, testMasterKeyHex())
-		require.NoError(t, err)
-		require.NotNil(t, svc)
-	})
-
-	t.Run("invalid hex", func(t *testing.T) {
-		_, err := NewSSEService(nil, "not-hex")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "decode master key")
-	})
-
-	t.Run("wrong length", func(t *testing.T) {
-		_, err := NewSSEService(nil, "0123456789abcdef")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "32 bytes")
-	})
-}
-
-func TestSSEService_SeedEncryptDecrypt(t *testing.T) {
-	masterKey, _ := hex.DecodeString(testMasterKeyHex())
-
-	seed := make([]byte, mlkem.SeedSize)
-	_, err := rand.Read(seed)
-	require.NoError(t, err)
-
-	encrypted, err := encryptSeed(masterKey, seed)
-	require.NoError(t, err)
-	assert.Greater(t, len(encrypted), len(seed))
-
-	decrypted, err := decryptSeed(masterKey, encrypted)
-	require.NoError(t, err)
-	assert.Equal(t, seed, decrypted)
-}
-
-func TestSSEService_SeedDecryptWrongKey(t *testing.T) {
-	masterKey, _ := hex.DecodeString(testMasterKeyHex())
-	wrongKey := make([]byte, 32)
-	_, _ = rand.Read(wrongKey)
-
-	seed := make([]byte, mlkem.SeedSize)
-	_, _ = rand.Read(seed)
-
-	encrypted, err := encryptSeed(masterKey, seed)
-	require.NoError(t, err)
-
-	_, err = decryptSeed(wrongKey, encrypted)
-	require.Error(t, err)
+func newTestSSE(t *testing.T) (*SSEService, *TenantKeys, string) {
+	t.Helper()
+	db := getTestDB(t)
+	keys := newTestKeys(t, db, testMasterA, "")
+	return NewSSEService(keys), keys, keyTenant(t, db)
 }
 
 func TestSSEService_EncryptDecrypt_RoundTrip(t *testing.T) {
-	dsn := testutil.DSN() // R9: vaultaire_test by default; DATABASE_URL still wins
-
-	db, err := sql.Open("postgres", dsn)
-	require.NoError(t, err)
-	defer func() { _ = db.Close() }()
-
-	svc, err := NewSSEService(db, testMasterKeyHex())
-	require.NoError(t, err)
-
+	svc, _, tenantID := newTestSSE(t)
 	ctx := context.Background()
-	tenantID := fmt.Sprintf("sse-test-%d", os.Getpid())
 
-	t.Cleanup(func() {
-		_, _ = db.Exec("DELETE FROM tenant_encryption_keys WHERE tenant_id = $1", tenantID)
-	})
-
-	err = svc.EnsureTenantKey(ctx, tenantID)
+	v, err := svc.Current(ctx, tenantID)
 	require.NoError(t, err)
+	assert.Equal(t, 1, v)
 
 	plaintext := []byte("hello, post-quantum world!")
-	ciphertext, err := svc.EncryptBytes(ctx, tenantID, plaintext)
+	ciphertext, kv, err := svc.EncryptBytes(ctx, tenantID, plaintext)
 	require.NoError(t, err)
+	assert.Equal(t, 1, kv)
 
 	decrypted, err := svc.DecryptBytes(ctx, tenantID, ciphertext)
 	require.NoError(t, err)
 	assert.Equal(t, plaintext, decrypted)
 }
 
-func TestSSEService_EncryptedFormat(t *testing.T) {
-	dsn := testutil.DSN() // R9: vaultaire_test by default; DATABASE_URL still wins
-
-	db, err := sql.Open("postgres", dsn)
-	require.NoError(t, err)
-	defer func() { _ = db.Close() }()
-
-	svc, err := NewSSEService(db, testMasterKeyHex())
-	require.NoError(t, err)
-
+// WP-R8-1: a 0x02 blob names its key version (bound as AAD); a 0x01 blob —
+// the format before — opens as version 1.
+func TestSSES3_V2BlobCarriesVersion_V1BlobStillDecrypts(t *testing.T) {
+	svc, keys, tenantID := newTestSSE(t)
 	ctx := context.Background()
-	tenantID := fmt.Sprintf("sse-fmt-%d", os.Getpid())
 
-	t.Cleanup(func() {
-		_, _ = db.Exec("DELETE FROM tenant_encryption_keys WHERE tenant_id = $1", tenantID)
-	})
+	v1blob, v, err := svc.EncryptBytes(ctx, tenantID, []byte("sealed under v1"))
+	require.NoError(t, err)
+	require.Equal(t, 1, v)
+	_, err = keys.Rotate(ctx, tenantID)
+	require.NoError(t, err)
+	v2blob, v, err := svc.EncryptBytes(ctx, tenantID, []byte("sealed under v2"))
+	require.NoError(t, err)
+	require.Equal(t, 2, v)
 
-	require.NoError(t, svc.EnsureTenantKey(ctx, tenantID))
+	assert.Equal(t, SSEVersion, v2blob[0])
+	assert.Equal(t, uint32(2), binary.BigEndian.Uint32(v2blob[1:5]), "the version is in the blob")
+	got, err := SSEBlobKeyVersion(v2blob)
+	require.NoError(t, err)
+	assert.Equal(t, 2, got)
+	got, err = SSEBlobKeyVersion(v1blob)
+	require.NoError(t, err)
+	assert.Equal(t, 1, got)
 
-	plaintext := []byte("format check")
-	ct, err := svc.EncryptBytes(ctx, tenantID, plaintext)
+	for blob, want := range map[*[]byte]string{&v1blob: "sealed under v1", &v2blob: "sealed under v2"} {
+		pt, err := svc.DecryptBytes(ctx, tenantID, *blob)
+		require.NoError(t, err)
+		assert.Equal(t, want, string(pt), "each blob opens under the version it records")
+	}
+
+	// The version field is authenticated: pointing a v2 blob at v1 fails.
+	moved := append([]byte(nil), v2blob...)
+	binary.BigEndian.PutUint32(moved[1:5], 1)
+	_, err = svc.DecryptBytes(ctx, tenantID, moved)
+	assert.Error(t, err)
+
+	// A 0x01 blob as the old code wrote it (no version, no AAD), sealed
+	// against the tenant's version 1 key.
+	kv1, err := keys.Version(ctx, tenantID, 1)
+	require.NoError(t, err)
+	shared, kemCT := kv1.Encap.Encapsulate()
+	aesKey, err := deriveSSEKey(shared)
+	require.NoError(t, err)
+	block, err := aes.NewCipher(aesKey)
+	require.NoError(t, err)
+	gcm, err := cipher.NewGCM(block)
+	require.NoError(t, err)
+	nonce := make([]byte, 12)
+	_, _ = rand.Read(nonce)
+	legacy := append([]byte{SSEVersionV1}, kemCT...)
+	legacy = append(legacy, nonce...)
+	legacy = gcm.Seal(legacy, nonce, []byte("written before 084"), nil)
+	pt, err := svc.DecryptBytes(ctx, tenantID, legacy)
+	require.NoError(t, err)
+	assert.Equal(t, "written before 084", string(pt))
+}
+
+func TestSSEService_EncryptedFormat(t *testing.T) {
+	svc, _, tenantID := newTestSSE(t)
+	ct, _, err := svc.EncryptBytes(context.Background(), tenantID, []byte("format check"))
 	require.NoError(t, err)
 
 	assert.Equal(t, SSEVersion, ct[0])
-	assert.Equal(t, mlkem.CiphertextSize768, len(ct[1:1+mlkem.CiphertextSize768]))
-
-	nonceStart := 1 + mlkem.CiphertextSize768
-	nonce := ct[nonceStart : nonceStart+12]
-	assert.Len(t, nonce, 12)
+	nonceStart := sseHeaderBytes + mlkem.CiphertextSize768
+	assert.Len(t, ct[nonceStart:nonceStart+12], 12)
 }
 
 func TestSSEService_EncryptedSizeOverhead(t *testing.T) {
-	dsn := testutil.DSN() // R9: vaultaire_test by default; DATABASE_URL still wins
-
-	db, err := sql.Open("postgres", dsn)
-	require.NoError(t, err)
-	defer func() { _ = db.Close() }()
-
-	svc, err := NewSSEService(db, testMasterKeyHex())
-	require.NoError(t, err)
-
-	ctx := context.Background()
-	tenantID := fmt.Sprintf("sse-size-%d", os.Getpid())
-
-	t.Cleanup(func() {
-		_, _ = db.Exec("DELETE FROM tenant_encryption_keys WHERE tenant_id = $1", tenantID)
-	})
-
-	require.NoError(t, svc.EnsureTenantKey(ctx, tenantID))
-
+	svc, _, tenantID := newTestSSE(t)
 	for _, size := range []int{0, 1, 100, 4096, 65536} {
 		plaintext := make([]byte, size)
 		_, _ = rand.Read(plaintext)
 
-		ct, err := svc.EncryptBytes(ctx, tenantID, plaintext)
+		ct, _, err := svc.EncryptBytes(context.Background(), tenantID, plaintext)
 		require.NoError(t, err)
-		assert.Equal(t, size+SSEOverheadBytes, len(ct),
-			"overhead mismatch for plaintext size %d", size)
+		assert.Equal(t, size+SSEOverheadBytes, len(ct), "overhead mismatch for plaintext size %d", size)
 	}
 }
 
 func TestSSEService_DecryptWrongTenant(t *testing.T) {
-	dsn := testutil.DSN() // R9: vaultaire_test by default; DATABASE_URL still wins
-
-	db, err := sql.Open("postgres", dsn)
-	require.NoError(t, err)
-	defer func() { _ = db.Close() }()
-
-	svc, err := NewSSEService(db, testMasterKeyHex())
-	require.NoError(t, err)
-
+	svc, _, tenant1 := newTestSSE(t)
+	tenant2 := keyTenant(t, getTestDB(t))
 	ctx := context.Background()
-	tenant1 := fmt.Sprintf("sse-t1-%d", os.Getpid())
-	tenant2 := fmt.Sprintf("sse-t2-%d", os.Getpid())
+	_, err := svc.Current(ctx, tenant2)
+	require.NoError(t, err)
 
-	t.Cleanup(func() {
-		_, _ = db.Exec("DELETE FROM tenant_encryption_keys WHERE tenant_id IN ($1, $2)", tenant1, tenant2)
-	})
-
-	require.NoError(t, svc.EnsureTenantKey(ctx, tenant1))
-	require.NoError(t, svc.EnsureTenantKey(ctx, tenant2))
-
-	ct, err := svc.EncryptBytes(ctx, tenant1, []byte("secret data"))
+	ct, _, err := svc.EncryptBytes(ctx, tenant1, []byte("secret data"))
 	require.NoError(t, err)
 
 	_, err = svc.DecryptBytes(ctx, tenant2, ct)
@@ -192,126 +134,51 @@ func TestSSEService_DecryptWrongTenant(t *testing.T) {
 }
 
 func TestSSEService_DecryptCorruptedData(t *testing.T) {
-	dsn := testutil.DSN() // R9: vaultaire_test by default; DATABASE_URL still wins
-
-	db, err := sql.Open("postgres", dsn)
-	require.NoError(t, err)
-	defer func() { _ = db.Close() }()
-
-	svc, err := NewSSEService(db, testMasterKeyHex())
-	require.NoError(t, err)
-
+	svc, _, tenantID := newTestSSE(t)
 	ctx := context.Background()
-	tenantID := fmt.Sprintf("sse-corrupt-%d", os.Getpid())
-
-	t.Cleanup(func() {
-		_, _ = db.Exec("DELETE FROM tenant_encryption_keys WHERE tenant_id = $1", tenantID)
-	})
-
-	require.NoError(t, svc.EnsureTenantKey(ctx, tenantID))
-
-	ct, err := svc.EncryptBytes(ctx, tenantID, []byte("original"))
+	ct, _, err := svc.EncryptBytes(ctx, tenantID, []byte("original"))
 	require.NoError(t, err)
 
-	tampered := make([]byte, len(ct))
-	copy(tampered, ct)
+	tampered := append([]byte(nil), ct...)
 	tampered[len(tampered)-1] ^= 0xff
-
 	_, err = svc.DecryptBytes(ctx, tenantID, tampered)
 	require.Error(t, err)
 }
 
 func TestSSEService_DecryptBadVersion(t *testing.T) {
-	data := make([]byte, 1+mlkem.CiphertextSize768+12+32)
+	svc, _, tenantID := newTestSSE(t)
+	data := make([]byte, SSEOverheadBytes+32)
 	data[0] = 0xFF
-
-	dsn := testutil.DSN() // R9: vaultaire_test by default; DATABASE_URL still wins
-
-	db, err := sql.Open("postgres", dsn)
-	require.NoError(t, err)
-	defer func() { _ = db.Close() }()
-
-	svc, err := NewSSEService(db, testMasterKeyHex())
-	require.NoError(t, err)
-
-	tenantID := fmt.Sprintf("sse-ver-%d", os.Getpid())
-	t.Cleanup(func() {
-		_, _ = db.Exec("DELETE FROM tenant_encryption_keys WHERE tenant_id = $1", tenantID)
-	})
-	require.NoError(t, svc.EnsureTenantKey(context.Background(), tenantID))
-
-	_, err = svc.DecryptBytes(context.Background(), tenantID, data)
+	_, err := svc.DecryptBytes(context.Background(), tenantID, data)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported SSE version")
 }
 
 func TestSSEService_DecryptTooShort(t *testing.T) {
-	dsn := testutil.DSN() // R9: vaultaire_test by default; DATABASE_URL still wins
-
-	db, err := sql.Open("postgres", dsn)
-	require.NoError(t, err)
-	defer func() { _ = db.Close() }()
-
-	svc, err := NewSSEService(db, testMasterKeyHex())
-	require.NoError(t, err)
-
-	tenantID := fmt.Sprintf("sse-short-%d", os.Getpid())
-	t.Cleanup(func() {
-		_, _ = db.Exec("DELETE FROM tenant_encryption_keys WHERE tenant_id = $1", tenantID)
-	})
-	require.NoError(t, svc.EnsureTenantKey(context.Background(), tenantID))
-
-	_, err = svc.DecryptBytes(context.Background(), tenantID, []byte("too short"))
+	svc, _, tenantID := newTestSSE(t)
+	_, err := svc.DecryptBytes(context.Background(), tenantID, []byte{SSEVersion, 0, 0})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "too short")
 }
 
-func TestSSEService_EnsureTenantKey_Idempotent(t *testing.T) {
-	dsn := testutil.DSN() // R9: vaultaire_test by default; DATABASE_URL still wins
-
-	db, err := sql.Open("postgres", dsn)
-	require.NoError(t, err)
-	defer func() { _ = db.Close() }()
-
-	svc, err := NewSSEService(db, testMasterKeyHex())
-	require.NoError(t, err)
-
+func TestSSEService_DecryptShreddedKey(t *testing.T) {
+	svc, keys, tenantID := newTestSSE(t)
 	ctx := context.Background()
-	tenantID := fmt.Sprintf("sse-idem-%d", os.Getpid())
-
-	t.Cleanup(func() {
-		_, _ = db.Exec("DELETE FROM tenant_encryption_keys WHERE tenant_id = $1", tenantID)
-	})
-
-	require.NoError(t, svc.EnsureTenantKey(ctx, tenantID))
-	require.NoError(t, svc.EnsureTenantKey(ctx, tenantID))
-
-	var count int
-	err = db.QueryRow("SELECT COUNT(*) FROM tenant_encryption_keys WHERE tenant_id = $1", tenantID).Scan(&count)
+	ct, _, err := svc.EncryptBytes(ctx, tenantID, []byte("erased with the account"))
 	require.NoError(t, err)
-	assert.Equal(t, 1, count)
+
+	_, err = getTestDB(t).Exec(`DELETE FROM tenant_key_versions WHERE tenant_id = $1`, tenantID)
+	require.NoError(t, err)
+	keys.Forget(tenantID)
+
+	_, err = svc.DecryptBytes(ctx, tenantID, ct)
+	assert.ErrorIs(t, err, ErrNoTenantKey, "the key rows are gone: the blob is unreadable for good")
 }
 
 func TestSSEService_EmptyPlaintext(t *testing.T) {
-	dsn := testutil.DSN() // R9: vaultaire_test by default; DATABASE_URL still wins
-
-	db, err := sql.Open("postgres", dsn)
-	require.NoError(t, err)
-	defer func() { _ = db.Close() }()
-
-	svc, err := NewSSEService(db, testMasterKeyHex())
-	require.NoError(t, err)
-
+	svc, _, tenantID := newTestSSE(t)
 	ctx := context.Background()
-	tenantID := fmt.Sprintf("sse-empty-%d", os.Getpid())
-
-	t.Cleanup(func() {
-		_, _ = db.Exec("DELETE FROM tenant_encryption_keys WHERE tenant_id = $1", tenantID)
-	})
-
-	require.NoError(t, svc.EnsureTenantKey(ctx, tenantID))
-
-	ct, err := svc.EncryptBytes(ctx, tenantID, []byte{})
+	ct, _, err := svc.EncryptBytes(ctx, tenantID, []byte{})
 	require.NoError(t, err)
 	assert.Equal(t, SSEOverheadBytes, len(ct))
 
@@ -321,7 +188,8 @@ func TestSSEService_EmptyPlaintext(t *testing.T) {
 }
 
 func TestSSEOverheadConstant(t *testing.T) {
-	assert.Equal(t, 1117, SSEOverheadBytes)
+	assert.Equal(t, 1121, SSEOverheadBytes, "0x02: one version byte, four key-version bytes, the KEM ciphertext, nonce, tag")
+	assert.Equal(t, 1117, sseV1OverheadBytes)
 }
 
 func TestDeriveSSEKey(t *testing.T) {

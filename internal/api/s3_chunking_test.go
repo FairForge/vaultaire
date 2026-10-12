@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/engine"
@@ -492,6 +491,7 @@ func setupChunkingFixture(t *testing.T) *adapterTestFixture {
 	t.Cleanup(func() {
 		cleanupTenantChunkRows(f.db, tenantUUID.String(), tenantUUID.String())
 		_, _ = f.db.Exec("DELETE FROM object_head_cache WHERE tenant_id = $1", f.tenantID)
+		_, _ = f.db.Exec("DELETE FROM tenant_key_versions WHERE tenant_id = $1", f.tenantID)
 		_, _ = f.db.Exec("DELETE FROM tenants WHERE id = $1", f.tenantID)
 	})
 
@@ -1134,13 +1134,7 @@ func setupEncryptedChunkingFixture(t *testing.T) *adapterTestFixture {
 	f := setupChunkingFixture(t)
 
 	masterHex := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	km, err := crypto.NewKeyManager(&crypto.KeyManagerConfig{
-		MasterKeyHex:  masterHex,
-		CacheMaxAge:   1 * time.Hour,
-		EnableCaching: true,
-	})
-	require.NoError(t, err)
-	f.adapter.chunkEncSvc = crypto.NewChunkEncryptionService(km)
+	f.adapter.chunkEncSvc = crypto.NewChunkEncryptionService(testTenantKeys(t, f.db, masterHex))
 	return f
 }
 
@@ -1156,14 +1150,10 @@ func TestChunkedEncryption_SkipsWholeObjectSSE(t *testing.T) {
 	f := setupChunkingFixture(t) // chunkThreshold = 1024
 
 	masterHex := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	sse, err := crypto.NewSSEService(f.db, masterHex)
+	sse, err := testSSEService(f.db, masterHex)
 	require.NoError(t, err)
 	f.adapter.sseService = sse
-	km, err := crypto.NewKeyManager(&crypto.KeyManagerConfig{
-		MasterKeyHex: masterHex, CacheMaxAge: time.Hour, EnableCaching: true,
-	})
-	require.NoError(t, err)
-	f.adapter.chunkEncSvc = crypto.NewChunkEncryptionService(km)
+	f.adapter.chunkEncSvc = crypto.NewChunkEncryptionService(testTenantKeys(t, f.db, masterHex))
 
 	content := generateTestData(8 * 1024) // > 1 KB threshold → chunks
 

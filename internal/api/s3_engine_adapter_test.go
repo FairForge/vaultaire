@@ -69,6 +69,7 @@ func setupAdapterFixture(t *testing.T) *adapterTestFixture {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		_, _ = db.Exec("DELETE FROM object_head_cache WHERE tenant_id = $1", tenantID)
+		_, _ = db.Exec("DELETE FROM tenant_key_versions WHERE tenant_id = $1", tenantID)
 		_, _ = db.Exec("DELETE FROM tenants WHERE id = $1", tenantID)
 	})
 

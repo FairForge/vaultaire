@@ -1,44 +1,10 @@
 package crypto
 
 import (
-	"bytes"
 	"testing"
-	"time"
 )
 
 // Security Tests - verify cryptographic properties
-
-func TestSecurity_KeyRotation(t *testing.T) {
-	masterKey, _ := GenerateMasterKey()
-	keyManager, _ := NewKeyManager(&KeyManagerConfig{MasterKey: masterKey})
-
-	tenantID := "rotation-test"
-
-	// Get key version 1
-	key1, v1, _ := keyManager.GetTenantKey(tenantID)
-
-	// Rotate key
-	newVersion, _ := keyManager.RotateKey(tenantID)
-
-	// Get key version 2
-	key2, v2, _ := keyManager.GetTenantKey(tenantID)
-
-	if v1 == v2 {
-		t.Error("Version should change after rotation")
-	}
-
-	if bytes.Equal(key1, key2) {
-		t.Error("SECURITY: Key should change after rotation")
-	}
-
-	// Old version should still be derivable (for decryption of old data)
-	oldKey, _ := keyManager.DeriveTenantKey(tenantID, v1)
-	if !bytes.Equal(key1, oldKey) {
-		t.Error("Old key version should be derivable")
-	}
-
-	t.Logf("✓ Key rotation verified: v%d → v%d", v1, newVersion)
-}
 
 func TestSecurity_MasterKeyStrength(t *testing.T) {
 	// Verify master key has sufficient entropy
@@ -64,40 +30,4 @@ func TestSecurity_MasterKeyStrength(t *testing.T) {
 	}
 
 	t.Log("✓ Master key strength verified")
-}
-
-// Timing attack resistance test
-func TestSecurity_ConstantTimeComparison(t *testing.T) {
-	// This is a basic sanity check - real timing tests need statistical analysis
-	masterKey, _ := GenerateMasterKey()
-	keyManager, _ := NewKeyManager(&KeyManagerConfig{MasterKey: masterKey})
-
-	key1, _, _ := keyManager.GetTenantKey("tenant-1")
-	key2, _, _ := keyManager.GetTenantKey("tenant-2")
-
-	// Measure time to derive keys (should be constant regardless of tenant)
-	start := time.Now()
-	for i := 0; i < 1000; i++ {
-		_, _ = keyManager.DeriveTenantKey("tenant-1", 1)
-	}
-	time1 := time.Since(start)
-
-	start = time.Now()
-	for i := 0; i < 1000; i++ {
-		_, _ = keyManager.DeriveTenantKey("tenant-2", 1)
-	}
-	time2 := time.Since(start)
-
-	// Times should be similar (within 50% - this is a rough check)
-	ratio := float64(time1) / float64(time2)
-	if ratio < 0.5 || ratio > 2.0 {
-		t.Logf("Warning: Timing difference detected: %v vs %v (ratio: %.2f)", time1, time2, ratio)
-	}
-
-	// Keys should be different
-	if bytes.Equal(key1, key2) {
-		t.Error("Different tenants should have different keys")
-	}
-
-	t.Logf("✓ Key derivation timing: tenant-1=%v, tenant-2=%v", time1, time2)
 }

@@ -137,8 +137,12 @@ var Deleted = []Rule{
 	// --- tenant configuration and credentials ---
 	{"tiering_policies", `DELETE FROM tiering_policies WHERE tenant_id = $1`, ByTenant},
 	{"retention_policies", `DELETE FROM retention_policies WHERE tenant_id = $1`, ByTenant},
-	{"feature_flags", `DELETE FROM feature_flags WHERE tenant_id = $1`, ByTenant}, // per-tenant overrides; '*' is the global row
-	{"tenant_encryption_keys", `DELETE FROM tenant_encryption_keys WHERE tenant_id = $1`, ByTenant},
+	{"feature_flags", `DELETE FROM feature_flags WHERE tenant_id = $1`, ByTenant},                   // per-tenant overrides; '*' is the global row
+	{"tenant_encryption_keys", `DELETE FROM tenant_encryption_keys WHERE tenant_id = $1`, ByTenant}, // read by nothing since 084; D-12 drop
+	// The crypto-shred (WP-R8-1): the tenant's key versions. Every blob
+	// sealed under them — a copy the sweep before this did not reach, a
+	// backend's own backup — is unreadable from this commit on.
+	{"tenant_key_versions", `DELETE FROM tenant_key_versions WHERE tenant_id = $1`, ByTenant},
 	{"sts_tokens", `DELETE FROM sts_tokens WHERE tenant_id = $1`, ByTenant},
 	{"admin_notifications", `DELETE FROM admin_notifications WHERE tenant_id = $1`, ByTenant},
 	{"admin_notes", `DELETE FROM admin_notes WHERE tenant_id = $1`, ByTenant},

@@ -813,7 +813,7 @@ func TestEgress_EveryObjectBodyPathGoesThroughTheThrottle(t *testing.T) {
 	cfg := usage.EgressThrottle{MinBytesPerSec: 256 * mib, Factor: 1, MaxStreams: 16}
 	f := setupEgressFixture(t, 1024*mib, cfg, nil)
 	f.enforced.Store(true)
-	sse, err := crypto.NewSSEService(f.db, strings.Repeat("ab", 32))
+	sse, err := testSSEService(f.db, strings.Repeat("ab", 32))
 	require.NoError(t, err)
 	gci := crypto.NewGlobalContentIndex(f.db)
 
