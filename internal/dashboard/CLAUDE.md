@@ -1,6 +1,6 @@
 # internal/dashboard
 
-Web dashboard for stored.ge customers and admins. Uses htmx + Go templates, embedded into the single binary.
+Web dashboard for Stored customers and admins. Uses htmx + Go templates, embedded into the single binary.
 
 ## Architecture
 
@@ -31,7 +31,7 @@ Web dashboard for stored.ge customers and admins. Uses htmx + Go templates, embe
 - `/dashboard/*` and `/admin/*` subrouters have `chi.NotFound` handlers that render a branded 404 HTML page (`handlers/errors.go`).
 - Recovery middleware catches panics, logs the stack trace, and renders a self-contained 500 page. Wired into both subrouters.
 - Top-level unknown paths still fall through to the S3 catch-all handler (returns XML errors for API clients). No top-level HTML 404.
-- Every response gets `X-Request-Id` (UUID) and `Server: stored.ge` headers via middleware in `server.go`.
+- Every response gets `X-Request-Id` (UUID) and `Server: Stored` headers via middleware in `server.go`. Hosts and addresses in templates come from `{{host "web"|"s3"|"s3host"|"cdn"|"cdnhost"|"domain"|"support"|"security"|"abuse"|"brand"|"aliases"}}` (`handlers/assets.go`, `internal/hosts`); `TestNoStaleHostInTemplatesAndLanding` (internal/api) fails on a typed domain in any template.
 - `GET /status` is a public (no auth) HTML status page showing operational status, uptime, version, and backend health.
 
 ## Session Auth

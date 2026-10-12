@@ -5,6 +5,9 @@ import (
 	_ "embed"
 	"html/template"
 	"net/http"
+	"net/url"
+
+	"github.com/FairForge/vaultaire/internal/hosts"
 )
 
 //go:embed landing.html
@@ -12,20 +15,55 @@ var landingTemplateSrc string
 
 // The landing page has two variants driven by the signups feature flag: closed
 // renders a waitlist capture, open renders working /register CTAs. Both are
-// rendered once at process start; handleRoot just picks one per request, so
-// flipping the flag converts the page without a deploy.
-var (
-	landingClosed = mustRenderLanding(false)
-	landingOpen   = mustRenderLanding(true)
-)
+// rendered once per server, at NewServer, with the server's hosts (the page
+// prints the S3 endpoint and the canonical origin — internal/hosts,
+// WP-DOMAIN-1); handleRoot just picks one per request, so flipping the flag
+// converts the page without a deploy.
 
-func mustRenderLanding(signupsOpen bool) []byte {
+// landingData is what landing.src.html may print.
+type landingData struct {
+	SignupsOpen bool
+	Web         string // canonical origin (og:url, the JSON API)
+	S3          string // S3 endpoint
+	S3Host      string // its bare host (DuckDB, Cyberduck)
+	CDN         string // public-object URL prefix
+	Domain      string // canonical domain (the house image caption)
+	Support     string // support address
+}
+
+func mustRenderLanding(signupsOpen bool, h hosts.Hosts) []byte {
 	tmpl := template.Must(template.New("landing").Parse(landingTemplateSrc))
+	s3Host := h.S3
+	if u, err := url.Parse(h.S3); err == nil && u.Host != "" {
+		s3Host = u.Host
+	}
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, struct{ SignupsOpen bool }{signupsOpen}); err != nil {
+	if err := tmpl.Execute(&buf, landingData{
+		SignupsOpen: signupsOpen, Web: h.Canonical, S3: h.S3, S3Host: s3Host,
+		CDN: h.CDNBase(), Domain: h.Domain(), Support: h.SupportEmail(),
+	}); err != nil {
 		panic("render landing page: " + err.Error())
 	}
 	return buf.Bytes()
+}
+
+// landingPages renders both variants for a host set: [closed, open].
+func landingPages(h hosts.Hosts) [2][]byte {
+	return [2][]byte{mustRenderLanding(false, h), mustRenderLanding(true, h)}
+}
+
+// landingPage is the server's rendered variant; a Server built without
+// NewServer (unit tests) renders from the process's hosts on first use.
+func (s *Server) landingPage(open bool) []byte {
+	s.landingOnce.Do(func() {
+		if s.landing[0] == nil {
+			s.landing = landingPages(s.hostSet())
+		}
+	})
+	if open {
+		return s.landing[1]
+	}
+	return s.landing[0]
 }
 
 // handleRoot serves the public marketing landing page for browser visitors to "/".
@@ -40,10 +78,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	page := landingClosed
-	if s.flags != nil && s.flags.Enabled(flagSignups, "") {
-		page = landingOpen
-	}
+	page := s.landingPage(s.flags != nil && s.flags.Enabled(flagSignups, ""))
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// Short TTL so a launch-day signups-flag flip propagates within a minute.

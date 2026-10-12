@@ -18,7 +18,8 @@ import (
 type csrfKey struct{}
 
 // csrfKeyLabel separates the CSRF key from every other use of the secret it
-// is derived from. Changing it invalidates the token of every open page.
+// is derived from. Changing it invalidates the token of every open page, so
+// it keeps its v1 text although the brand is Stored since F-17.
 const csrfKeyLabel = "stored.ge dashboard csrf token key v1"
 
 // legacyCSRFCookie is the cookie the old double-submit scheme set. Nothing

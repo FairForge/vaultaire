@@ -16,7 +16,7 @@ key. Old keys keep working until you revoke them.
 
 | Setting | Value |
 |---------|-------|
-| Endpoint | `https://stored.ge` |
+| Endpoint | `__HOST_S3__` |
 | Region | `us-east-1` |
 | Access Key ID | from step 1 |
 | Secret Access Key | from step 1 |
@@ -38,10 +38,10 @@ aws configure
 Then create a bucket and upload a file:
 
 ```
-aws --endpoint-url https://stored.ge s3 mb s3://my-first-bucket
+aws --endpoint-url __HOST_S3__ s3 mb s3://my-first-bucket
 echo "hello Stored" > hello.txt
-aws --endpoint-url https://stored.ge s3 cp hello.txt s3://my-first-bucket/
-aws --endpoint-url https://stored.ge s3 ls s3://my-first-bucket/
+aws --endpoint-url __HOST_S3__ s3 cp hello.txt s3://my-first-bucket/
+aws --endpoint-url __HOST_S3__ s3 ls s3://my-first-bucket/
 ```
 
 That's it — your file is stored, and the engine places it for you.
@@ -54,7 +54,7 @@ That's it — your file is stored, and the engine places it for you.
 import boto3
 s3 = boto3.client(
     "s3",
-    endpoint_url="https://stored.ge",
+    endpoint_url="__HOST_S3__",
     region_name="us-east-1",
     aws_access_key_id="your_access_key",
     aws_secret_access_key="your_secret_key",
@@ -63,7 +63,7 @@ s3.upload_file("hello.txt", "my-first-bucket", "hello.txt")
 ```
 
 **Backup tools:** see the one-page [rclone guide](/docs/rclone). restic works
-out of the box: `restic -r s3:https://stored.ge/my-bucket init`.
+out of the box: `restic -r s3:__HOST_S3__/my-bucket init`.
 
 ## 5. What happens to your data
 
@@ -85,4 +85,4 @@ out of the box: `restic -r s3:https://stored.ge/my-bucket init`.
 
 - [rclone setup](/docs/rclone) — sync, mount, and migrate
 - [FAQ](/docs/faq) — pricing, trust, and technical details
-- [Pricing](/#pricing) · [Status](/status) · [support@stored.ge](mailto:support@stored.ge)
+- [Pricing](/#pricing) · [Status](/status) · [__SUPPORT_EMAIL__](mailto:__SUPPORT_EMAIL__)

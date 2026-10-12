@@ -13,11 +13,10 @@ import (
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/FairForge/vaultaire/internal/dashboard/middleware"
 	"github.com/FairForge/vaultaire/internal/drivers"
+	"github.com/FairForge/vaultaire/internal/hosts"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 )
-
-const cdnBaseHost = "https://cdn.stored.ge/"
 
 // dashboardTierPreferences are the tier_preference values the bucket settings
 // form offers (templates/customer/bucket_settings.html). The management API
@@ -86,7 +85,7 @@ func HandleBucketSettings(tmpl *template.Template, db *sql.DB, logger *zap.Logge
 		}
 
 		if vis == "public-read" && slug != "" {
-			data["CDNBaseURL"] = cdnBaseHost + slug + "/" + bucketName
+			data["CDNBaseURL"] = hosts.Get().CDNBase() + slug + "/" + bucketName
 		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")

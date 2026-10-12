@@ -10,11 +10,13 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/FairForge/vaultaire/internal/hosts"
 )
 
 func TestOpenAPISpec_Generation(t *testing.T) {
 	t.Run("generates valid OpenAPI 3.0 spec", func(t *testing.T) {
-		spec := GenerateOpenAPISpec()
+		spec := GenerateOpenAPISpec(hosts.Get())
 
 		assert.Equal(t, "3.0.3", spec.OpenAPI)
 		assert.Equal(t, "Stored Storage API", spec.Info.Title)
@@ -24,7 +26,7 @@ func TestOpenAPISpec_Generation(t *testing.T) {
 	})
 
 	t.Run("includes S3 operations", func(t *testing.T) {
-		spec := GenerateOpenAPISpec()
+		spec := GenerateOpenAPISpec(hosts.Get())
 
 		// Check for key S3 operations
 		assert.Contains(t, spec.Paths, "/")
@@ -33,7 +35,7 @@ func TestOpenAPISpec_Generation(t *testing.T) {
 	})
 
 	t.Run("includes authentication schemas", func(t *testing.T) {
-		spec := GenerateOpenAPISpec()
+		spec := GenerateOpenAPISpec(hosts.Get())
 
 		// Review R14: the JSON API is Bearer JWT; X-API-Key auth was
 		// deleted in R11 and must not be advertised.
@@ -47,7 +49,7 @@ func TestOpenAPISpec_Generation(t *testing.T) {
 	})
 
 	t.Run("generates JSON correctly", func(t *testing.T) {
-		spec := GenerateOpenAPISpec()
+		spec := GenerateOpenAPISpec(hosts.Get())
 
 		data, err := json.MarshalIndent(spec, "", "  ")
 		require.NoError(t, err)
@@ -80,7 +82,7 @@ func TestOpenAPIJSONHandler(t *testing.T) {
 		req := httptest.NewRequest("GET", "/openapi.json", nil)
 		rec := httptest.NewRecorder()
 
-		handler := OpenAPIJSONHandler()
+		handler := OpenAPIJSONHandler(hosts.Get())
 		handler.ServeHTTP(rec, req)
 
 		assert.Equal(t, http.StatusOK, rec.Code)
@@ -94,7 +96,7 @@ func TestOpenAPIJSONHandler(t *testing.T) {
 }
 
 func TestOpenAPISpec_Operations(t *testing.T) {
-	spec := GenerateOpenAPISpec()
+	spec := GenerateOpenAPISpec(hosts.Get())
 
 	t.Run("ListBuckets operation", func(t *testing.T) {
 		path, exists := spec.Paths["/"]
@@ -130,7 +132,7 @@ func TestOpenAPISpec_Operations(t *testing.T) {
 }
 
 func TestOpenAPISpec_Schemas(t *testing.T) {
-	spec := GenerateOpenAPISpec()
+	spec := GenerateOpenAPISpec(hosts.Get())
 
 	t.Run("Bucket schema", func(t *testing.T) {
 		schema, exists := spec.Components.Schemas["Bucket"]
@@ -188,7 +190,7 @@ func operations(spec *OpenAPISpec) []struct {
 // JSON API (the drift guard in internal/api ties it to the router; this
 // checks the shape of what is documented).
 func TestOpenAPISpec_JSONAPICoverage(t *testing.T) {
-	spec := GenerateOpenAPISpec()
+	spec := GenerateOpenAPISpec(hosts.Get())
 	ops := operations(spec)
 	require.GreaterOrEqual(t, len(ops), 59, "7 S3 + 52 JSON operations")
 
@@ -327,4 +329,27 @@ func TestOpenAPISpec_JSONAPICoverage(t *testing.T) {
 
 		assert.NotNil(t, spec.Paths["/api/v1/manage/buckets/{name}"].Patch, "PATCH is documented now that PathItem has the field")
 	})
+}
+
+// TestOpenAPI_ServersCanonicalThenAlias: the S3 endpoint is "Production",
+// stored.ge follows as the alias served forever (the www names are web-only),
+// then local development; the contact is on the canonical domain.
+func TestOpenAPI_ServersCanonicalThenAlias(t *testing.T) {
+	spec := GenerateOpenAPISpec(hosts.Hosts{
+		Canonical: "https://stored.cloud",
+		S3:        "https://s3.stored.cloud",
+		CDN:       "https://cdn.stored.cloud",
+		BaseURL:   "https://stored.cloud",
+		Aliases:   []string{"stored.ge", "www.stored.ge", "www.stored.cloud"},
+	})
+	assert.Equal(t, []Server{
+		{URL: "https://s3.stored.cloud", Description: "Production"},
+		{URL: "https://stored.ge", Description: "Alias, served forever"},
+		{URL: "http://localhost:8000", Description: "Local development"},
+	}, spec.Servers)
+	assert.Equal(t, "support@stored.cloud", spec.Info.Contact.Email)
+
+	// A development host set lists only the local server.
+	dev := GenerateOpenAPISpec(hosts.Defaults(8000))
+	assert.Equal(t, []Server{{URL: "http://localhost:8000", Description: "Local development"}}, dev.Servers)
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pixel-art sprite generator for the stored.ge landing page.
+"""Pixel-art sprite generator for the Stored landing page.
 
 Sprites are authored as ASCII grids (or drawn procedurally), then emitted as
 SVG <symbol>s: one <path> per colour, each row's horizontal runs merged into

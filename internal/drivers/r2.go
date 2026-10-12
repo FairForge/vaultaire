@@ -21,7 +21,7 @@ import (
 //
 // Role of record (SMART_TIER_DESIGN.md, revised 2026-09-19): PUBLIC BUCKETS /
 // CDN ORIGIN ONLY. R2 charges $0 egress and sits next to the Cloudflare-proxied
-// cdn.stored.ge host, so public objects served through the CDN cost nothing
+// CDN host (internal/hosts), so public objects served through the CDN cost nothing
 // to read and (once a custom domain exists) can bypass SLC entirely. It is NOT
 // a storage tier: the only thing that routes here is a public-read bucket (see
 // api.publicBucketStorageClass / engine "PUBLIC" class).

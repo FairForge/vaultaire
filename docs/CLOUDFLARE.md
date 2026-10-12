@@ -15,6 +15,19 @@ Tokens (local file `~/fairforge/.cloudflare-creds.env`, never in the repo): an *
 
 `stored.ge`, `www`, `api` → `38.147.105.54` **proxied**; **`s3.stored.ge` → same IP, DNS-only** (the direct origin: no 100 MB body limit, no edge hop); `edge.stored.ge` and `rules.stored.ge` were Worker custom domains and no longer resolve (NXDOMAIN, checked 2026-10-09 — torn down with their Workers, below); mail at Outlook; stale `NS` records pointing at NS1 remain and should be deleted.
 
+## DNS (stored.cloud) — target state, WP-DOMAIN-1 (not applied as of 2026-10-12)
+
+stored.cloud is the canonical domain (F-17). The zone (`85615649…`, same account) already serves the app on the apex (200 on `/health`). The owner click-list in the WP-DOMAIN-1 PR brings it to the stored.ge shape:
+
+| Name | Target | Proxy | Why |
+|---|---|---|---|
+| `stored.cloud`, `www` | `38.147.105.54` | **proxied** | the web + dashboard; `www` 301s to the apex in Go (`VAULTAIRE_ALIAS_HOSTS`) |
+| **`s3.stored.cloud`** | same IP | **DNS-only** (recommended, F-17b) | as `s3.stored.ge`: no 100 MB body limit, no edge hop, TLS ends at our origin (an SSE-C key is never plaintext inside the edge) |
+| `cdn.stored.cloud` | same IP | proxied | public-read objects until the non-brand content domain exists (`CDN_PUBLIC_HOST`) |
+| `app.`, `docs.`, `trust.`, `status.` | — | — | part 2 of WP-DOMAIN-1 |
+
+Re-create on this zone the three rules the stored.ge zone carries (below): the sign-in rate limit, **"S3 API is never cached"**, and the HEAD cache rule; the zone settings (origin HTTP/1.1, TLS 1.2 minimum, Smart Tiered Cache) the same. DNSSEC: the DS record at Porkbun (pending since 2026-09-20). The origin certificate needs the `s3.stored.cloud` and `cdn.stored.cloud` SANs (certbot) and `TLS_CERT_PROBE_TARGETS` gains them. stored.ge is served forever: its zone stays as it is, the web 301s in Go, the S3 API answers there with no redirect.
+
 ## Zone settings applied (2026-10-04)
 
 | Setting | Value | Why |

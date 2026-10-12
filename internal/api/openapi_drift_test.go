@@ -7,13 +7,15 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/FairForge/vaultaire/internal/config"
-	"github.com/FairForge/vaultaire/internal/docs"
-	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+
+	"github.com/FairForge/vaultaire/internal/config"
+	"github.com/FairForge/vaultaire/internal/docs"
+	"github.com/FairForge/vaultaire/internal/engine"
+	"github.com/FairForge/vaultaire/internal/hosts"
 )
 
 // TestOpenAPIDriftGuard — B4 Tier-0 docs drift guard (5.15.6).
@@ -53,7 +55,7 @@ func TestOpenAPIDriftGuard(t *testing.T) {
 			return nil
 		}))
 
-	spec := docs.GenerateOpenAPISpec()
+	spec := docs.GenerateOpenAPISpec(hosts.Get())
 	specOps := map[string]bool{} // "METHOD /path"
 	for path, item := range spec.Paths {
 		for method, op := range map[string]any{

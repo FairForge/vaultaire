@@ -12,6 +12,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/billing"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/FairForge/vaultaire/internal/flags"
+	"github.com/FairForge/vaultaire/internal/hosts"
 	"go.uber.org/zap"
 )
 
@@ -86,7 +87,7 @@ func HandleUpgrade(stripe *billing.StripeService, db *sql.DB, baseURL string, lo
 		// (Review R10-05).
 		if db != nil {
 			if h, err := loadHouse(r.Context(), db, sd.TenantID); err == nil && (h.active || h.liveOther) {
-				http.Error(w, "This account already has a subscription. Resize your house on the billing page or email support@stored.ge.", http.StatusConflict)
+				http.Error(w, "This account already has a subscription. Resize your house on the billing page or email "+hosts.Get().SupportEmail()+".", http.StatusConflict)
 				return
 			}
 		}

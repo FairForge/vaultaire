@@ -115,7 +115,7 @@
             </div>
             <div id="tab-aws" class="tab-panel">
                 <pre class="code-block">aws s3 cp s3://{{.BucketName}}/path/to/file.jpg . \
-  --endpoint-url https://stored.ge</pre>
+  --endpoint-url {{host "s3"}}</pre>
             </div>
             <div id="tab-js" class="tab-panel">
                 <pre class="code-block">const url = "{{.CDNBaseURL}}/path/to/file.jpg";
@@ -138,7 +138,7 @@ with open("file.jpg", "wb") as f:
         <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border);">
             <div style="font-weight:600;font-size:0.9rem;margin-bottom:0.5rem;">Quick Upload</div>
             <pre class="code-block">aws s3 cp ./myfile.jpg s3://{{.BucketName}}/ \
-  --endpoint-url https://stored.ge
+  --endpoint-url {{host "s3"}}
 
 # After uploading, your file is available at:
 # {{.CDNBaseURL}}/myfile.jpg</pre>

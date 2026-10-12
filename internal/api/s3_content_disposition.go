@@ -32,7 +32,7 @@ func isInlineRenderable(contentType string) bool {
 		ct = strings.TrimSpace(ct[:i])
 	}
 	// Never inline active/scriptable types on the shared-origin public CDN
-	// (cdn.stored.ge/{slug}/...): text/html and image/svg+xml execute
+	// (the CDN host, /{slug}/...): text/html and image/svg+xml execute
 	// JavaScript in that origin, so a tenant could host stored XSS / phishing
 	// on the branded domain. Force them to attachment regardless of prefix.
 	// X-Content-Type-Options: nosniff does not help — these are correctly

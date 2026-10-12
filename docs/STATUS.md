@@ -49,12 +49,12 @@ Four lanes since 2026-10-12 (charters in `docs/surfaces/`, the shared rules in `
 | Transparency-log event types covered / defined | 0 / 6 (43.6 not started) | 6 / 6 |
 | Conformance pass rate | 22/22 (2026-10-04) | 100 % every release |
 | Documented API operations / total | OpenAPI 59 ops (R14) | every route |
-| Hosts in customer copy that are not stored.cloud | ~92 files mention stored.ge | 0 after WP-DOMAIN-1
+| Hosts in customer copy that are not stored.cloud | 0 typed in anything the binary serves (WP-DOMAIN-1 part 1: templates, landing, guides, llms.txt, OpenAPI, security.txt, e-mail — `internal/hosts`, guarded by `TestNoStaleHostInTemplatesAndLanding`); prod prints stored.cloud once the `.env` click-list is done | 0
 - **Lab**: a local worktree + `lab/<topic>` branch off `origin/main`, own test DB (`vaultaire_test_<name>`) and port; findings in a new per-topic file; never a checkout in the main checkout.
 
 ## Known stale claims (fix with the next docs PR that touches the file)
 
-- Everywhere: `stored.ge` as the brand or canonical host (≈ 92 files; WP-DOMAIN-1, F-17); `.private/STAGE2_RUNBOOK.md` generates the master key on the Mac (rewrite to the on-box ceremony, F-14); CLAUDE.md's env table still says the key comes from `.env`.
+- ~~Everywhere: `stored.ge` as the brand or canonical host (≈ 92 files)~~ — the binary's copy is swept (WP-DOMAIN-1 part 1); what still says stored.ge is the repo's own docs (README, `docs/API.md`, `docs/index.md`, `docs/guides/*`, operator pages), history (`docs/reviews/*`), `cmd/tools` defaults and test fixtures (SigV4 fixtures keep it: a valid signed host forever) — the repo guides go with WP-DOMAIN-1 part 2; `.private/STAGE2_RUNBOOK.md` generates the master key on the Mac (rewrite to the on-box ceremony, F-14); CLAUDE.md's env table still says the key comes from `.env`.
 
 - Plan `:889` "5.12.2 R2 driver DROPPED" — it shipped in #466 and is registered on prod. Plan `:2506` and `:1898` still say "demand-gated". Plan `:2904` names 073 as the latest migration.
 - Landing: "30-day minimum per object" (D-21 says drop), the Performance-tier egress line (`landing.src.html:622`), "free unlimited egress" on wind-down (`:686`). SYNTHESIS prod facts: the h2 window is 256 KiB, not 4 MiB; the iDrive-regions row is both DONE and open.

@@ -15,6 +15,8 @@ import (
 	"go.uber.org/zap"
 
 	_ "github.com/lib/pq"
+
+	"github.com/FairForge/vaultaire/internal/hosts"
 )
 
 func testBucketSettingsTemplate(t *testing.T) *template.Template {
@@ -126,6 +128,7 @@ func TestHandleBucketSettings_ReadsFromDB(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires database")
 	}
+	useProdHosts(t)
 	db := testDashDB(t)
 	defer func() { _ = db.Close() }()
 	cleanupDashBucketData(t, db)
@@ -154,7 +157,7 @@ func TestHandleBucketSettings_ReadsFromDB(t *testing.T) {
 	body := w.Body.String()
 	assert.Contains(t, body, "public-bucket Settings")
 	assert.Contains(t, body, `<span class="vis">public-read</span>`)
-	assert.Contains(t, body, "cdn.stored.ge/settings-co/public-bucket")
+	assert.Contains(t, body, "https://cdn.stored.cloud/settings-co/public-bucket")
 	assert.Contains(t, body, "https://example.com")
 	assert.Contains(t, body, "7200")
 }
@@ -190,7 +193,7 @@ func TestHandleBucketSettings_CDNHiddenForPrivate(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	body := w.Body.String()
 	assert.Contains(t, body, `<span class="vis">private</span>`)
-	assert.NotContains(t, body, "cdn.stored.ge")
+	assert.NotContains(t, body, hosts.Get().CDNBase())
 }
 
 func TestHandleUpdateBucketSettings_ToggleToPublic(t *testing.T) {
@@ -639,4 +642,13 @@ func TestHandleUpdateBucketSettings_ResilientNotOfferedByTheForm(t *testing.T) {
 	var pref string
 	require.NoError(t, db.QueryRow(`SELECT tier_preference FROM buckets WHERE tenant_id = 'test-dash-tp4' AND name = 'res-bucket'`).Scan(&pref))
 	assert.Equal(t, "auto", pref, "a value the form does not offer is not stored")
+}
+
+// useProdHosts installs the WP-DOMAIN-1 prod host set for one test (the CDN
+// URLs come from internal/hosts) and restores the previous one.
+func useProdHosts(t *testing.T) {
+	t.Helper()
+	prev := hosts.Get()
+	t.Cleanup(func() { hosts.Set(prev) })
+	hosts.Set(hosts.Hosts{Canonical: "https://stored.cloud", S3: "https://s3.stored.cloud", CDN: "https://cdn.stored.cloud", BaseURL: "https://stored.cloud"})
 }

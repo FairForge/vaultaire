@@ -13,6 +13,7 @@ import (
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/FairForge/vaultaire/internal/dashboard/middleware"
 	"github.com/FairForge/vaultaire/internal/flags"
+	"github.com/FairForge/vaultaire/internal/hosts"
 	"github.com/FairForge/vaultaire/internal/usage"
 	"github.com/stripe/stripe-go/v75"
 	"go.uber.org/zap"
@@ -228,12 +229,12 @@ func HandleHouseCheckout(svc HouseBilling, db *sql.DB, quotas billing.HouseQuota
 			return
 		}
 		if svc == nil || db == nil {
-			back(w, r, "error", "Checkout isn't open yet — billing is not configured. Email support@stored.ge and we will set it up by hand.")
+			back(w, r, "error", "Checkout isn't open yet — billing is not configured. Email "+hosts.Get().SupportEmail()+" and we will set it up by hand.")
 			return
 		}
 		if ready, why := svc.HouseCheckoutReady(); !ready {
 			logger.Warn("house checkout refused: not ready", zap.String("why", why), zap.String("tenant", sd.TenantID))
-			back(w, r, "error", "Checkout isn't open yet. Email support@stored.ge and we will set it up by hand.")
+			back(w, r, "error", "Checkout isn't open yet. Email "+hosts.Get().SupportEmail()+" and we will set it up by hand.")
 			return
 		}
 
@@ -249,7 +250,7 @@ func HandleHouseCheckout(svc HouseBilling, db *sql.DB, quotas billing.HouseQuota
 			// Resize. The period is fixed for the life of the subscription
 			// and a floor cannot shrink below what is stored on it.
 			if string(order.Period) != h.period {
-				back(w, r, "error", fmt.Sprintf("Your house is billed %s; to switch, email support@stored.ge.", periodWord(h.period)))
+				back(w, r, "error", fmt.Sprintf("Your house is billed %s; to switch, email %s.", periodWord(h.period), hosts.Get().SupportEmail()))
 				return
 			}
 			if order.Std < wholeTBUp(h.usedStd) {
@@ -280,7 +281,7 @@ func HandleHouseCheckout(svc HouseBilling, db *sql.DB, quotas billing.HouseQuota
 		}
 
 		if h.liveOther {
-			back(w, r, "error", fmt.Sprintf("This account already has a subscription (%s). Email support@stored.ge and we will move it to a house — a second checkout would bill you twice.", h.status))
+			back(w, r, "error", fmt.Sprintf("This account already has a subscription (%s). Email %s and we will move it to a house — a second checkout would bill you twice.", h.status, hosts.Get().SupportEmail()))
 			return
 		}
 
@@ -290,7 +291,7 @@ func HandleHouseCheckout(svc HouseBilling, db *sql.DB, quotas billing.HouseQuota
 			customerID, err = svc.CreateCustomer(r.Context(), sd.Email, sd.TenantID)
 			if err != nil {
 				logger.Error("create stripe customer for house checkout", zap.Error(err), zap.String("tenant", sd.TenantID))
-				back(w, r, "error", "We couldn't open a billing account for you. Email support@stored.ge and we will sort it out.")
+				back(w, r, "error", "We couldn't open a billing account for you. Email "+hosts.Get().SupportEmail()+" and we will sort it out.")
 				return
 			}
 		}
@@ -304,7 +305,7 @@ func HandleHouseCheckout(svc HouseBilling, db *sql.DB, quotas billing.HouseQuota
 			return
 		}
 		if live {
-			back(w, r, "error", "You already have a subscription on this account — give the page a minute to catch up, then resize your house below. If it does not appear, email support@stored.ge.")
+			back(w, r, "error", "You already have a subscription on this account — give the page a minute to catch up, then resize your house below. If it does not appear, email "+hosts.Get().SupportEmail()+".")
 			return
 		}
 		base := strings.TrimRight(baseURL, "/")

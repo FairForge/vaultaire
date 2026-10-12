@@ -3,6 +3,8 @@ package landing
 import (
 	"net/url"
 	"strings"
+
+	"github.com/FairForge/vaultaire/internal/hosts"
 )
 
 // Attribution is where a sign-up came from (pre-launch checklist item 7):
@@ -70,7 +72,9 @@ func referrerHost(raw string) string {
 		return ""
 	}
 	// Our own pages are not a source.
-	if host == "stored.ge" || strings.HasSuffix(host, ".stored.ge") || host == "localhost" {
+	// (internal/hosts: the configured origins, stored.cloud, stored.ge,
+	// stored.pics and their subdomains, localhost.)
+	if hosts.Get().IsOwn(host) {
 		return ""
 	}
 	return host

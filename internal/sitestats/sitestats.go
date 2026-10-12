@@ -28,6 +28,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/FairForge/vaultaire/internal/hosts"
 )
 
 // Kinds of row in site_stats_daily.
@@ -331,14 +333,9 @@ func ReferrerHost(ref string) string {
 	return cut(host, maxLabel)
 }
 
-func isOwnHost(host string) bool {
-	for _, own := range []string{"stored.ge", "stored.cloud", "localhost"} {
-		if host == own || strings.HasSuffix(host, "."+own) {
-			return true
-		}
-	}
-	return false
-}
+// isOwnHost: the canonical origin, every alias, the S3 and CDN hosts, our
+// registrable domains and their subdomains (internal/hosts, WP-DOMAIN-1).
+func isOwnHost(host string) bool { return hosts.Get().IsOwn(host) }
 
 // CountryCode keeps a two-character upper-case code (Cloudflare uses "XX"
 // for unknown and "T1" for Tor); anything else becomes "".

@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/FairForge/vaultaire/internal/hosts"
 )
 
 // TestLanding_WriteVariants is a hook for the browser checks, not a test of
@@ -18,6 +20,6 @@ func TestLanding_WriteVariants(t *testing.T) {
 	if dir == "" {
 		t.Skip("LANDING_OUT not set")
 	}
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "closed.html"), landingClosed, 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "open.html"), landingOpen, 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "closed.html"), landingPages(hosts.Get())[0], 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "open.html"), landingPages(hosts.Get())[1], 0o644))
 }

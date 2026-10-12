@@ -267,7 +267,7 @@ func egressAlertMessage(thresholdPct int, st usage.EgressStatus) (subject, body 
 			"You have downloaded %s this month, which is all of your %s egress allowance. "+
 				"Until the allowance resets on %s (UTC), downloads from your account are rate-limited to %s in total. "+
 				"Nothing is billed and nothing is deleted; uploads, listings and deletes are not affected. "+
-				"The allowance follows your quota: adding storage at https://stored.ge/dashboard/billing raises it within a minute.",
+				"The allowance follows your quota: adding storage at "+billingURL()+" raises it within a minute.",
 			formatBandwidthBytes(used), formatBandwidthBytes(allowance), reset, rate)
 		return subject, body
 	}

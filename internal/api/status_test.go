@@ -64,7 +64,7 @@ func TestRequestIDMiddleware_SetsHeaders(t *testing.T) {
 
 	// Assert
 	assert.NotEmpty(t, rec.Header().Get("X-Request-Id"))
-	assert.Equal(t, "stored.ge", rec.Header().Get("Server"))
+	assert.Equal(t, "Stored", rec.Header().Get("Server"))
 
 	// Verify the request ID looks like a UUID (36 chars with dashes).
 	rid := rec.Header().Get("X-Request-Id")

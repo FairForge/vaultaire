@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/FairForge/vaultaire/internal/hosts"
 )
 
 // ErrRateLimited is returned when a recipient exceeds the per-recipient
@@ -26,7 +28,8 @@ type Sender interface {
 func NewSender(logger *zap.Logger) Sender {
 	from := os.Getenv("EMAIL_FROM")
 	if from == "" {
-		from = "noreply@stored.ge"
+		// The canonical domain (internal/hosts, WP-DOMAIN-1): stored.cloud.
+		from = "noreply@" + hosts.Get().Domain()
 	}
 
 	rl := &rateLimiter{

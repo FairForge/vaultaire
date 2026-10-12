@@ -32,6 +32,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/email"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/flags"
+	"github.com/FairForge/vaultaire/internal/hosts"
 	"github.com/FairForge/vaultaire/internal/sitestats"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -138,6 +139,11 @@ type Server struct {
 	largeGet    largeGetConfig
 	emailSender email.Sender
 	baseURL     string
+	hosts       hosts.Hosts // the one host source (WP-DOMAIN-1), installed with hosts.Set at boot
+	landing     [2][]byte   // the landing page rendered with hosts: [closed, open] (landing.go)
+	landingOnce sync.Once
+	docsPages   map[string][]byte // /docs pages rendered with hosts (docs_pages.go)
+	docsOnce    sync.Once
 	startTime   time.Time
 	// flags is the runtime feature-flag service (1.13): DB table + ~15s
 	// cache, global kill-switches + per-tenant enablement, flipped via the
@@ -171,6 +177,12 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		events:       make(chan Event, 1000),
 		startTime:    time.Now(),
 	}
+	// Every host the product prints or matches (WP-DOMAIN-1): read once,
+	// installed for the templates, the copy and the e-mail sender.
+	s.hosts = hosts.FromEnv(os.Getenv, cfg.Server.Port, logger)
+	hosts.Set(s.hosts)
+	s.landing = landingPages(s.hosts) // a template error fails the boot, as before
+
 	s.healthChecker = NewBackendHealthChecker()
 	s.certMonitor = newCertExpiryMonitorFromEnv(os.Getenv, logger)
 	s.initSecurityTxt()
@@ -447,7 +459,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// The one GDPR export service (WP-R10-3b): the management API and the
 	// dashboard request through it, the account_export job renders, the
 	// retention job purges expired objects through it.
-	s.accountExports = NewAccountExportService(s.db, s.engine, s.quotaManager, s.gci, getPublicEndpoint(cfg.Server.Port), logger)
+	s.accountExports = NewAccountExportService(s.db, s.engine, s.quotaManager, s.gci, s.hosts.S3, logger)
 	if s.accountExports != nil {
 		s.accountExports.SetSSE(s.sseService)
 		if s.retention != nil {
@@ -527,11 +539,9 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	s.bandwidthAlerter = NewBandwidthAlerter(s.db, logger)
 	s.bandwidthAlerter.SetEgressReader(s.egress)
 
-	// Base URL for OAuth callbacks and email links.
-	baseURL := os.Getenv("VAULTAIRE_BASE_URL")
-	if baseURL == "" {
-		baseURL = fmt.Sprintf("http://localhost:%d", cfg.Server.Port)
-	}
+	// Base URL for OAuth callbacks and email links (VAULTAIRE_BASE_URL, else
+	// the canonical origin — internal/hosts).
+	baseURL := s.hosts.BaseURL
 	s.baseURL = baseURL
 	s.emailSender = email.NewSender(logger)
 	if s.meteredReporter != nil {
@@ -560,6 +570,9 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	}
 
 	s.router.Use(s.requestIDMiddleware)
+	// Web aliases (stored.ge, www.*) 301 to the canonical origin for browser
+	// page views only; S3 requests pass through (host_canonical.go).
+	s.router.Use(hostCanonicalMiddleware(s.hosts))
 	s.router.Use(s.requestLimitsMiddleware)
 	s.router.Use(s.versionMiddleware)
 	s.router.Use(s.loggingMiddleware)
@@ -572,7 +585,9 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 
 	s.setupRoutes()
 
-	// CDN host-based router: cdn.stored.ge → CDN handler, everything else → normal router.
+	// CDN host-based router: the CDN hosts (internal/hosts.IsCDNHost —
+	// CDN_PUBLIC_HOST, cdn.<canonical>, cdn.<alias>, cdn.stored.ge forever)
+	// → CDN handler, everything else → normal router.
 	cdnRouter := chi.NewRouter()
 	cdnRouter.Get("/{slug}/{bucket}/*", s.handleCDNRequest)
 	cdnRouter.Head("/{slug}/{bucket}/*", s.handleCDNRequest)
@@ -595,7 +610,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// belong in the handlers via context, not on the whole server.
 	s.httpServer = &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Server.Port),
-		Handler:           CDNHostRouter(cdnRouter, s.router),
+		Handler:           CDNHostRouter(s.hosts, cdnRouter, s.router),
 		ReadHeaderTimeout: 15 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    1 << 20, // 1 MB
@@ -767,8 +782,8 @@ func (s *Server) setupRoutes() {
 	}
 	s.router.Get("/docs/api", docs.SwaggerUIHandler())
 	s.router.Head("/docs/api", docs.SwaggerUIHandler())
-	s.router.Get("/openapi.json", docs.OpenAPIJSONHandler())
-	s.router.Head("/openapi.json", docs.OpenAPIJSONHandler())
+	s.router.Get("/openapi.json", docs.OpenAPIJSONHandler(s.hosts))
+	s.router.Head("/openapi.json", docs.OpenAPIJSONHandler(s.hosts))
 
 	s.logger.Info("Registering user API routes")
 	s.registerUserAPIRoutes()
@@ -821,6 +836,7 @@ func (s *Server) setupRoutes() {
 		StorageMode:   storageMode,
 		Email:         s.emailSender,
 		BaseURL:       s.baseURL,
+		Hosts:         s.hosts,
 		Engine:        s.engine,
 		HealthChecker: &healthCheckerAdapter{s.healthChecker},
 		Flags:         s.flags,
@@ -1007,7 +1023,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		r.Context(), req.Email, req.Password, req.Company)
 	if err != nil {
 		if errors.Is(err, auth.ErrSignupsDisabled) {
-			http.Error(w, "Signups are currently closed. Join the waitlist at https://stored.ge", http.StatusForbidden)
+			http.Error(w, "Signups are currently closed. Join the waitlist at "+s.hostSet().Canonical, http.StatusForbidden)
 			return
 		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -1027,7 +1043,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(map[string]string{
 		"accessKeyId":     apiKey.Key,
 		"secretAccessKey": apiKey.Secret,
-		"endpoint":        getPublicEndpoint(s.config.Server.Port),
+		"endpoint":        s.getBaseURL(),
 	}); err != nil {
 		s.logger.Error("failed to encode register response", zap.Error(err))
 	}
@@ -1079,6 +1095,9 @@ func registerStripePlans(s *billing.StripeService) {
 // getPublicEndpoint returns the public S3 endpoint from the VAULTAIRE_ENDPOINT
 // environment variable. This is set in /opt/vaultaire/configs/.env on the
 // production server. Falls back to localhost for local development.
+//
+// Kept for a Server built without NewServer (tests); NewServer
+// reads the endpoint into s.hosts.S3 (internal/hosts).
 func getPublicEndpoint(port int) string {
 	if ep := os.Getenv("VAULTAIRE_ENDPOINT"); ep != "" {
 		return ep
@@ -1309,7 +1328,7 @@ func (s *Server) requestLimitsMiddleware(next http.Handler) http.Handler {
 func (s *Server) requestIDMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Request-Id", uuid.New().String())
-		w.Header().Set("Server", "stored.ge")
+		w.Header().Set("Server", hosts.BrandName)
 		// Client IP for the audit trail comes from internal/clientip only
 		// (R1-01); stashed once here so service-layer audit writes see it.
 		ctx := audit.WithRequest(r.Context(), clientip.FromRequest(r), r.UserAgent())

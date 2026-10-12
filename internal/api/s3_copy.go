@@ -394,7 +394,7 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 			}
 			if !ok {
 				WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
-					WithSuggestion("Upgrade at https://stored.ge/dashboard/billing"))
+					WithSuggestion("Upgrade at "+billingURL()))
 				return
 			}
 			reservedBytes = srcSize
@@ -405,7 +405,7 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 			used, limit, uErr := s.quotaManager.GetUsage(r.Context(), t.ID)
 			if uErr == nil && limit > 0 && used >= limit {
 				WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
-					WithSuggestion("Upgrade at https://stored.ge/dashboard/billing"))
+					WithSuggestion("Upgrade at "+billingURL()))
 				return
 			}
 		}
@@ -666,7 +666,7 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 		}
 		if !ok {
 			WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
-				WithSuggestion("Upgrade at https://stored.ge/dashboard/billing"))
+				WithSuggestion("Upgrade at "+billingURL()))
 			return
 		}
 		reservedBytes = srcSize

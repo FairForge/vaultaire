@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
+
+	"github.com/FairForge/vaultaire/internal/hosts"
 )
 
 // OpenAPISpec represents an OpenAPI 3.0 specification
@@ -181,13 +184,16 @@ type Tag struct {
 	Description string `json:"description,omitempty"`
 }
 
-// GenerateOpenAPISpec creates the complete OpenAPI specification
-func GenerateOpenAPISpec() *OpenAPISpec {
+// GenerateOpenAPISpec creates the complete OpenAPI specification. The
+// contact address and the servers come from the one host source
+// (internal/hosts, WP-DOMAIN-1).
+func GenerateOpenAPISpec(h hosts.Hosts) *OpenAPISpec {
 	return &OpenAPISpec{
 		OpenAPI: "3.0.3",
 		Info: Info{
 			Title: "Stored Storage API",
-			Description: "Two APIs on one host.\n\n" +
+			Description: "Two APIs. The S3 API's endpoint is the Production server below (" + h.S3 + "); the JSON API lives under `/api/v1` " +
+				"on the web origin (" + h.Canonical + "). Both answer on every Stored host name.\n\n" +
 				"**S3 API**, the root paths (`/`, `/{bucket}`, `/{bucket}/{key}`) speak the S3 wire protocol: " +
 				"AWS Signature Version 4, region `us-east-1`, path-style addressing, XML bodies. Use them with any S3 client " +
 				"and the access key / secret from registration or a scoped API key.\n\n" +
@@ -202,23 +208,14 @@ func GenerateOpenAPISpec() *OpenAPISpec {
 			Version: "1.1.0",
 			Contact: Contact{
 				Name:  "Stored Support",
-				Email: "support@stored.ge",
+				Email: h.SupportEmail(),
 			},
 			License: License{
 				Name: "MIT",
 				URL:  "https://opensource.org/licenses/MIT",
 			},
 		},
-		Servers: []Server{
-			{
-				URL:         "https://stored.ge",
-				Description: "Production",
-			},
-			{
-				URL:         "http://localhost:8000",
-				Description: "Local development",
-			},
-		},
+		Servers: openAPIServers(h),
 		Tags: []Tag{
 			{Name: "Buckets", Description: "S3 bucket operations (SigV4)"},
 			{Name: "Objects", Description: "S3 object operations (SigV4)"},
@@ -2246,9 +2243,26 @@ func generateHeaders() map[string]Header {
 	}
 }
 
+// openAPIServers lists the S3 endpoint first ("Production"), then every web
+// alias that is a bare domain (stored.ge: the S3 API answers there forever,
+// with no redirect — F-17), then local development.
+func openAPIServers(h hosts.Hosts) []Server {
+	const local = "http://localhost:8000"
+	var out []Server
+	if h.S3 != "" && h.S3 != local && !strings.Contains(h.S3, "://localhost") && !strings.Contains(h.S3, "://127.") {
+		out = append(out, Server{URL: h.S3, Description: "Production"})
+		for _, a := range h.Aliases {
+			if !strings.HasPrefix(a, "www.") {
+				out = append(out, Server{URL: "https://" + a, Description: "Alias, served forever"})
+			}
+		}
+	}
+	return append(out, Server{URL: local, Description: "Local development"})
+}
+
 // OpenAPIJSONHandler returns an HTTP handler that serves the OpenAPI spec as JSON
-func OpenAPIJSONHandler() http.HandlerFunc {
-	spec := GenerateOpenAPISpec()
+func OpenAPIJSONHandler(h hosts.Hosts) http.HandlerFunc {
+	spec := GenerateOpenAPISpec(h)
 	specJSON, _ := json.MarshalIndent(spec, "", "  ")
 
 	return func(w http.ResponseWriter, r *http.Request) {

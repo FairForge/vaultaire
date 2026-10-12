@@ -4,10 +4,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/FairForge/vaultaire/internal/api/landing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+
+	"github.com/FairForge/vaultaire/internal/api/landing"
+	"github.com/FairForge/vaultaire/internal/hosts"
 )
 
 // What the public pages say happens past the egress allowance comes from ONE
@@ -20,11 +22,11 @@ func TestEgressCopy_OneSourceOnEveryServedPage(t *testing.T) {
 	require.NotEmpty(t, e.PastAllowance)
 	require.NotEmpty(t, e.PastAllowanceShort)
 	require.NotEmpty(t, e.OneAllowance)
-	docs := renderDocsPages(zap.NewNop())
+	docs := renderDocsPages(zap.NewNop(), hosts.Get())
 	pages := map[string]string{
 		"faq":      string(docs["faq"]),
 		"rclone":   string(docs["rclone"]),
-		"llms.txt": llmsTxtBody(),
+		"llms.txt": llmsTxtBody(hosts.Get()),
 		"landing":  landingTemplateSrc,
 	}
 

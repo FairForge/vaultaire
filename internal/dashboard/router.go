@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/account"
+	"github.com/FairForge/vaultaire/internal/hosts"
 	"github.com/FairForge/vaultaire/internal/tenant"
 
 	"github.com/FairForge/vaultaire/internal/api/landing"
@@ -45,7 +46,8 @@ type Deps struct {
 	GitHub        *oauth2.Config           // Nil when GITHUB_CLIENT_ID is not set.
 	StorageMode   string                   // e.g. "local", "s3", "quotaless", "geyser", "idrive", "wasabi"
 	Email         email.Sender             // Email sender (LogSender if unconfigured).
-	BaseURL       string                   // Base URL for email links (e.g. "https://stored.ge").
+	BaseURL       string                   // Base URL for email links and OAuth (VAULTAIRE_BASE_URL).
+	Hosts         hosts.Hosts              // The one host source (WP-DOMAIN-1); zero = hosts.Get().
 	Engine        *engine.CoreEngine       // Nil-safe; used by admin backends page.
 	HealthChecker handlers.HealthChecker   // Nil-safe; backend health state provider.
 	Flags         *flags.Service           // Nil-safe; admin feature-flags page (1.13).
@@ -57,6 +59,15 @@ type Deps struct {
 	// of a secret that survives restarts (prod: JWT_SECRET). Nil = a random
 	// key for this process — forms opened before a restart then fail once.
 	CSRFKey []byte
+}
+
+// hostSet is deps.Hosts, or the process's host set when the caller left it
+// zero (tests).
+func (d Deps) hostSet() hosts.Hosts {
+	if d.Hosts.Canonical != "" {
+		return d.Hosts
+	}
+	return hosts.Get()
 }
 
 // CSRFKeyFromSecret derives the CSRF key from a persistent server secret
@@ -617,7 +628,7 @@ func signupCredsRenderer(baseTmpl *template.Template, deps Deps) func(w http.Res
 			"Page":      "credentials",
 			"AccessKey": accessKey,
 			"SecretKey": secret,
-			"Endpoint":  deps.BaseURL,
+			"Endpoint":  deps.hostSet().S3, // the S3 endpoint, never the web base URL (WP-DOMAIN-1)
 		}); err != nil {
 			deps.Logger.Error("render signup credentials", zap.Error(err))
 		}

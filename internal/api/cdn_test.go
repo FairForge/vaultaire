@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/FairForge/vaultaire/internal/hosts"
 	"github.com/FairForge/vaultaire/internal/testutil"
 
 	"github.com/FairForge/vaultaire/internal/common"
@@ -329,7 +330,7 @@ func TestCDNHostRouter_RoutesToCDN(t *testing.T) {
 		t.Fatal("fallback should not be called for CDN host")
 	})
 
-	handler := CDNHostRouter(cdnHandler, fallback)
+	handler := CDNHostRouter(hosts.Defaults(8000), cdnHandler, fallback)
 
 	for _, host := range []string{"cdn.stored.ge", "cdn.stored.cloud"} {
 		cdnCalled = false
@@ -351,7 +352,7 @@ func TestCDNHostRouter_FallsBackForOtherHosts(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	handler := CDNHostRouter(cdnHandler, fallback)
+	handler := CDNHostRouter(hosts.Defaults(8000), cdnHandler, fallback)
 
 	for _, host := range []string{"stored.ge", "api.stored.ge", "localhost:8000", ""} {
 		fallbackCalled = false
@@ -372,13 +373,43 @@ func TestCDNHostRouter_StripsPort(t *testing.T) {
 		t.Fatal("fallback should not be called")
 	})
 
-	handler := CDNHostRouter(cdnHandler, fallback)
+	handler := CDNHostRouter(hosts.Defaults(8000), cdnHandler, fallback)
 
 	req := httptest.NewRequest("GET", "/slug/bucket/key", nil)
 	req.Host = "cdn.stored.ge:443"
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 	assert.True(t, cdnCalled)
+}
+
+// TestCDNHostRouter_EnvAndLegacyHosts: the CDN_PUBLIC_HOST host routes to
+// the CDN handler, and so does cdn.stored.ge (served forever, WP-DOMAIN-1);
+// the canonical, alias and S3 hosts do not.
+func TestCDNHostRouter_EnvAndLegacyHosts(t *testing.T) {
+	var hit string
+	cdnHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hit = "cdn" })
+	fallback := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hit = "main" })
+
+	h := prodHosts()
+	h.CDN = "https://usercontent.example" // the non-brand content domain, once registered
+	handler := CDNHostRouter(h, cdnHandler, fallback)
+
+	for host, want := range map[string]string{
+		"usercontent.example":     "cdn",
+		"usercontent.example:443": "cdn",
+		"cdn.stored.ge":           "cdn",
+		"cdn.stored.cloud":        "cdn",
+		"stored.cloud":            "main",
+		"stored.ge":               "main",
+		"s3.stored.cloud":         "main",
+		"cdn.example.com":         "main",
+	} {
+		hit = ""
+		req := httptest.NewRequest("GET", "/slug/bucket/key", nil)
+		req.Host = host
+		handler.ServeHTTP(httptest.NewRecorder(), req)
+		assert.Equal(t, want, hit, host)
+	}
 }
 
 func TestCDN_RangeRequest_PartialContent(t *testing.T) {

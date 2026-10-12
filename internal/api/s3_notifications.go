@@ -479,7 +479,7 @@ func (d *NotificationDispatcher) deliverTo(ctx context.Context, targets []notify
 	payload := S3Event{
 		Records: []S3EventRecord{{
 			EventVersion: "2.1",
-			EventSource:  "stored.ge",
+			EventSource:  "stored.ge", // a wire identifier consumers match on (like "aws:s3"), not a host — kept (WP-DOMAIN-1)
 			EventName:    eventName,
 			EventTime:    time.Now().UTC().Format(time.RFC3339),
 			S3: S3EventS3{
