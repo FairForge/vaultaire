@@ -17,6 +17,15 @@ User=user1
 Group=user1
 WorkingDirectory=/opt/vaultaire
 EnvironmentFile=/opt/vaultaire/configs/.env
+# The encryption master key (docs/ENCRYPTION.md "Setting the master key";
+# WP-R8-1 follow-up A5): sealed on this box with
+# `systemd-creds encrypt --with-key=tpm2+host --name=encryption_master_key`,
+# decrypted by systemd into $CREDENTIALS_DIRECTORY for this service only. It
+# is never in .env. Uncomment after the ceremony; during a master re-key the
+# old key is handed over as encryption_master_key_previous the same way.
+# A credential that is present but unreadable or malformed refuses the boot.
+#LoadCredentialEncrypted=encryption_master_key:/etc/vaultaire/credentials/encryption_master_key.cred
+#LoadCredentialEncrypted=encryption_master_key_previous:/etc/vaultaire/credentials/encryption_master_key_previous.cred
 # The slot's port must win over the PORT in .env; EnvironmentFile= overrides
 # Environment=, so it is set on the exec line. Each slot runs its own binary.
 ExecStart=/bin/sh -c 'PORT=%i exec /opt/vaultaire/bin/vaultaire-%i'

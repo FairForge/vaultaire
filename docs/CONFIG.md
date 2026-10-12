@@ -71,7 +71,8 @@ read-but-undocumented (marked with their source file).
 | `VERIFY_SECRET` | — | HMAC secret for email verification tokens |
 | `SIGNUPS_ENABLED` | true | Default for the `signups` feature flag (1.13): `false` closes public signups (web form, `/auth/register` API, OAuth signup — all gated at `auth.CreateUserWithTenant`); a `feature_flags` DB row overrides this env in either direction at runtime. Existing-user login always works |
 | `SECURITY_POLICY_URL` | https://stored.ge/legal/aup | `Policy:` line of `/.well-known/security.txt` (RFC 9116, 5.5.6); contact is fixed to security@stored.ge |
-| `ENCRYPTION_MASTER_KEY` | — | SSE-S3 master key (64 hex chars = 32 bytes). Absent = encryption disabled (prod does not set it today — R8) |
+| `ENCRYPTION_MASTER_KEY` | — | Master key (64 hex chars = 32 bytes) wrapping every tenant key version. Absent = encryption disabled (prod does not set it today). Sources, in order: the systemd credential `encryption_master_key` (prod, `docs/ENCRYPTION.md`), `ENCRYPTION_MASTER_KEY_FILE`, this variable; set but unusable = fatal boot |
+| `ENCRYPTION_MASTER_KEY_FILE` | — | A file holding the master key; `ENCRYPTION_MASTER_KEY_PREVIOUS_FILE` the same for a master re-key |
 | `TLS_CERT_PROBE_TARGETS` | — (off) | Comma-separated `sni@host:port` (or bare `sni` = `sni:443`) whose served leaf certificate expiry is exported as `vaultaire_tls_cert_expiry_timestamp_seconds{sni}` (hourly verified TLS handshake; an expired/mis-issued cert still reports via the x509 error's leaf). Prod points both public names at the local HAProxy = the origin LE cert. Rules: `deploy/monitoring/vaultaire-tls.yml` |
 
 ### Upload path and background jobs

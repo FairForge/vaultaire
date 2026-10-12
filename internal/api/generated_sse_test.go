@@ -24,6 +24,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // WP-R8-1 follow-up A1 (Stage 1a Prompt 2A): no plaintext byte lands in an
@@ -421,4 +423,36 @@ func firstByte(b []byte) byte {
 // service's error carries the marker the page looks for.
 func TestExportTooLargeReason_IsTheOneTheDashboardShows(t *testing.T) {
 	assert.Contains(t, errGeneratedTooLargeForSSE.Error(), handlers.ExportTooLargeToEncryptMarker)
+}
+
+// A5 at the server: a master key source that is set but unusable stops the
+// boot (Fatal), the Info line names the source and never the value.
+func TestMasterKeysOrFatal_RefusesTheBootAndNeverLogsTheKey(t *testing.T) {
+	key := strings.Repeat("ab", 32)
+	dir := t.TempDir()
+	good := filepath.Join(dir, "k")
+	require.NoError(t, os.WriteFile(good, []byte(key+"\n"), 0o600))
+	bad := filepath.Join(dir, "bad")
+	require.NoError(t, os.WriteFile(bad, []byte(key[:40]), 0o600))
+
+	core, logs := observer.New(zap.InfoLevel)
+	logger := zap.New(core, zap.WithFatalHook(zapcore.WriteThenPanic))
+	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+
+	mk := masterKeysOrFatal(logger, env(map[string]string{"ENCRYPTION_MASTER_KEY_FILE": good, "ENCRYPTION_MASTER_KEY": key}), os.ReadFile)
+	assert.Equal(t, key, mk.Master)
+	require.Len(t, logs.FilterMessage("master key: file").All(), 1, "one Info line naming the source")
+	require.Len(t, logs.FilterMessageSnippet("ignored").All(), 1, "the env copy is named as ignored")
+
+	assert.Panics(t, func() {
+		masterKeysOrFatal(logger, env(map[string]string{"ENCRYPTION_MASTER_KEY_FILE": bad}), os.ReadFile)
+	}, "a malformed file is a refused boot, never encryption off")
+	fatal := logs.FilterLevelExact(zapcore.FatalLevel).All()
+	require.Len(t, fatal, 1)
+	for _, e := range logs.All() {
+		assert.NotContains(t, e.Message, key[:40])
+		for _, v := range e.ContextMap() {
+			assert.NotContains(t, fmt.Sprint(v), key[:40], "never the value")
+		}
+	}
 }

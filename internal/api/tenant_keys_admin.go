@@ -31,6 +31,32 @@ var (
 // tenantKeysBootTimeout bounds the boot pass (one row per tenant version).
 const tenantKeysBootTimeout = 2 * time.Minute
 
+// masterKeysOrFatal loads the master keys (crypto.LoadMasterKeys: the
+// systemd credential, <NAME>_FILE, then the environment) and stops the
+// process when a source is set but unusable. One Info line names where each
+// key came from — never the value; a lower source that was also set is a
+// Warn (a stale copy of a key the runbook removes).
+func masterKeysOrFatal(logger *zap.Logger, getenv func(string) string, readFile func(string) ([]byte, error)) crypto.MasterKeys {
+	mk, err := crypto.LoadMasterKeys(getenv, readFile)
+	if err != nil {
+		logger.Fatal("encryption master key: refusing to start", zap.Error(err))
+		return crypto.MasterKeys{}
+	}
+	if mk.Master == "" {
+		return mk
+	}
+	fields := []zap.Field{zap.String("source", mk.MasterSource)}
+	if mk.Previous != "" {
+		fields = append(fields, zap.String("previous_source", mk.PreviousSource))
+	}
+	logger.Info("master key: "+mk.MasterSource, fields...)
+	if len(mk.Ignored) > 0 {
+		logger.Warn("master key: lower-precedence sources are also set and ignored — remove them (docs/ENCRYPTION.md)",
+			zap.Strings("ignored", mk.Ignored))
+	}
+	return mk
+}
+
 // checkTenantKeysAtBoot runs the key store's re-wrap pass: with
 // ENCRYPTION_MASTER_KEY_PREVIOUS set, every row that opens only under the
 // previous key is re-wrapped under the current one; without it, the pass

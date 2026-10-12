@@ -248,12 +248,16 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	s.mfaService = auth.NewMFAService("Stored")
 	s.mfaPendingStore = dashboard.NewMFAPendingStore()
 
-	if masterKey := os.Getenv("ENCRYPTION_MASTER_KEY"); masterKey != "" && s.db != nil {
+	// The master key: a systemd credential, a file or the environment
+	// (WP-R8-1 follow-up A5). A source that is set but unusable refuses the
+	// boot — it used to log "encryption is OFF" and serve, writing new
+	// objects plaintext into buckets that require encryption.
+	if mk := masterKeysOrFatal(logger, os.Getenv, os.ReadFile); mk.Master != "" && s.db != nil {
 		// One key store for both encryptions (WP-R8-1): stored-random,
 		// versioned tenant keys wrapped under the master key.
-		keys, keysErr := crypto.NewTenantKeys(s.db, masterKey, os.Getenv("ENCRYPTION_MASTER_KEY_PREVIOUS"))
+		keys, keysErr := crypto.NewTenantKeys(s.db, mk.Master, mk.Previous)
 		if keysErr != nil {
-			logger.Error("failed to initialize the tenant key store: encryption is OFF", zap.Error(keysErr))
+			logger.Fatal("the tenant key store cannot start with the configured master key — refusing to serve with encryption off", zap.Error(keysErr))
 		} else {
 			s.tenantKeys = keys
 			s.sseService = crypto.NewSSEService(keys)
