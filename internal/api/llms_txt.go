@@ -8,7 +8,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/api/landing"
 )
 
-// /llms.txt — the plain-text summary an AI assistant reads before it writes
+// /llms.txt, the plain-text summary an AI assistant reads before it writes
 // code against Stored. Prices come from the one price file
 // (internal/api/landing/prices.json) so this never quotes a retired number
 // again (Review R14-04: it said "$3.99/TB" for four months). The route list

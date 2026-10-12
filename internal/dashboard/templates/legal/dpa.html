@@ -1,4 +1,4 @@
-{{define "title"}}Data Processing Agreement — Stored{{end}}
+{{define "title"}}Data Processing Agreement, Stored{{end}}
 {{define "content"}}
 <div class="card">
     <p class="text-muted">Last updated: September 30, 2026</p>
@@ -30,9 +30,9 @@
     <h2 id="processing-purposes">Processing Purposes</h2>
     <p>The Processor processes personal data solely for the following purposes, as instructed by the Controller:</p>
     <ul>
-        <li><strong>Storage</strong> — persisting objects uploaded by the Controller via the S3-compatible API.</li>
-        <li><strong>Delivery</strong> — serving objects to authorized requesters via API or CDN.</li>
-        <li><strong>Caching</strong> — temporarily caching object metadata for performance optimization.</li>
+        <li><strong>Storage</strong>, persisting objects uploaded by the Controller via the S3-compatible API.</li>
+        <li><strong>Delivery</strong>, serving objects to authorized requesters via API or CDN.</li>
+        <li><strong>Caching</strong>, temporarily caching object metadata for performance optimization.</li>
     </ul>
     <p>The Processor does not access, analyze, profile, or otherwise process the content of stored objects beyond the technical operations listed above.</p>
 
@@ -51,12 +51,12 @@
     <h2 id="security">Security Measures</h2>
     <p>The Processor implements the following technical and organizational measures:</p>
     <ul>
-        <li><strong>Encryption in transit</strong> — all API and dashboard traffic is encrypted via TLS 1.2 or higher.</li>
-        <li><strong>Encryption at rest</strong> — available under Controller-supplied keys (SSE-C) or client-side encryption; server-managed encryption at rest (SSE-S3) is implemented but not yet enabled in production. Objects held by storage sub-processors are subject to those providers' own at-rest encryption.</li>
-        <li><strong>Access controls</strong> — production access is limited to authorized personnel via SSH key authentication. Customer data access requires S3 credentials (access key + secret key) or authenticated dashboard session.</li>
-        <li><strong>Authentication</strong> — passwords hashed with bcrypt (cost 10), TOTP two-factor authentication available, session tokens are cryptographically random, dashboard accounts lock for 15 minutes after 10 failed sign-ins.</li>
-        <li><strong>Monitoring</strong> — S3 access logs retained 30 days, event and usage records 90 days, public-link access logs 2 days after aggregation, webhook delivery records 30 days, data-export files 7 days (all purged automatically by a nightly job); every sign-in outcome, credential change and administrative action is written to an audit log; authentication-failure bursts page the operator.</li>
-        <li><strong>Backups</strong> — daily PostgreSQL backups with 7-day retention, currently held on the production host (off-host copies are planned before launch); object data itself lives with the storage sub-processors, not on that host.</li>
+        <li><strong>Encryption in transit</strong>, all API and dashboard traffic is encrypted via TLS 1.2 or higher.</li>
+        <li><strong>Encryption at rest</strong>, available under Controller-supplied keys (SSE-C) or client-side encryption; server-managed encryption at rest (SSE-S3) is implemented but not yet enabled in production. Objects held by storage sub-processors are subject to those providers' own at-rest encryption.</li>
+        <li><strong>Access controls</strong>, production access is limited to authorized personnel via SSH key authentication. Customer data access requires S3 credentials (access key + secret key) or authenticated dashboard session.</li>
+        <li><strong>Authentication</strong>, passwords hashed with bcrypt (cost 10), TOTP two-factor authentication available, session tokens are cryptographically random, dashboard accounts lock for 15 minutes after 10 failed sign-ins.</li>
+        <li><strong>Monitoring</strong>, S3 access logs retained 30 days, event and usage records 90 days, public-link access logs 2 days after aggregation, webhook delivery records 30 days, data-export files 7 days (all purged automatically by a nightly job); every sign-in outcome, credential change and administrative action is written to an audit log; authentication-failure bursts page the operator.</li>
+        <li><strong>Backups</strong>, daily PostgreSQL backups with 7-day retention, currently held on the production host (off-host copies are planned before launch); object data itself lives with the storage sub-processors, not on that host.</li>
     </ul>
 
     <h2 id="sub-processors">Sub-processors</h2>
@@ -70,9 +70,9 @@
             </tr>
         </thead>
         <tbody>
-            <tr><td>iDrive Inc.</td><td>Object storage — Standard tier, per-bucket region</td><td>United States / EU</td></tr>
-            <tr><td>Seagate Technology (Lyve Cloud)</td><td>Object storage — resilient tier, failover</td><td>United States</td></tr>
-            <tr><td>Geyser Data Inc.</td><td>Tape archive — Vault tier (all regions)</td><td>United States (Los Angeles)</td></tr>
+            <tr><td>iDrive Inc.</td><td>Object storage, Standard tier, per-bucket region</td><td>United States / EU</td></tr>
+            <tr><td>Seagate Technology (Lyve Cloud)</td><td>Object storage, resilient tier, failover</td><td>United States</td></tr>
+            <tr><td>Geyser Data Inc.</td><td>Tape archive, Vault tier (all regions)</td><td>United States (Los Angeles)</td></tr>
             <tr><td>Cloudflare Inc.</td><td>CDN, DDoS protection, TLS; R2 storage for public-read buckets</td><td>Global (edge network) / United States</td></tr>
             <tr><td>Microsoft Corporation (OneDrive)</td><td>Internal parity copies, when enabled</td><td>United States</td></tr>
             <tr><td>Stripe Inc.</td><td>Payment processing</td><td>United States</td></tr>

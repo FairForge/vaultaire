@@ -1,4 +1,4 @@
-{{define "title"}}Billing — Stored{{end}}
+{{define "title"}}Billing, Stored{{end}}
 {{define "head"}}
 <style>
 .comparison-table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
@@ -33,7 +33,7 @@
 {{if eq .SubscriptionStatus "past_due"}}<div class="alert alert-error"><strong>Your last payment did not go through.</strong> Stripe will retry the card over the next days; your storage stays exactly as it is meanwhile. Update the card under <em>Manage Payment</em> to keep the house when the retries end.</div>{{end}}
 {{if and .HouseIntent (not .House.Enabled)}}<div class="alert alert-info"><strong>Your house from the site:</strong> {{.HouseIntent.StdTB}} TB downstairs (Standard) and {{.HouseIntent.VaultTB}} TB in the attic (Vault) &middot; <strong>{{.HouseIntent.Monthly}}/mo</strong> billed yearly. Whole-TB checkout is on its way; until then pick a plan below or <a href="mailto:support@stored.ge">ask us</a> and we will set it up by hand.{{if .HouseIntent.RoomURL}} <a href="{{.HouseIntent.RoomURL}}">Reopen your house</a>.{{end}}</div>{{end}}
 
-<div class="egress-callout">Egress: $0.00 — always free</div>
+<div class="egress-callout">Egress: $0.00, always free</div>
 
 <div class="card-grid">
     <div class="card">
@@ -89,7 +89,7 @@
     <div class="value-stack">
         <div class="value-item">
             <span class="value-check">&#10003;</span>
-            <span>S3-compatible API — works with rclone, JuiceFS, aws-cli</span>
+            <span>S3-compatible API, works with rclone, JuiceFS, aws-cli</span>
         </div>
         <div class="value-item">
             <span class="value-check">&#10003;</span>
@@ -101,11 +101,11 @@
         </div>
         <div class="value-item">
             <span class="value-check">&#10003;</span>
-            <span>Free egress — no download fees, ever</span>
+            <span>Free egress, no download fees, ever</span>
         </div>
         <div class="value-item">
             <span class="value-check">&#10003;</span>
-            <span>No vendor lock-in — standard S3 protocol</span>
+            <span>No vendor lock-in, standard S3 protocol</span>
         </div>
     </div>
 </div>

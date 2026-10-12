@@ -64,7 +64,7 @@ func NewSender(logger *zap.Logger) Sender {
 }
 
 // LogSender logs that an email would have been sent instead of sending it.
-// Used in development and as the zero-config fallback — which is what prod
+// Used in development and as the zero-config fallback, which is what prod
 // runs until EMAIL_PROVIDER is set. It logs the recipient, the subject and
 // the body sizes only: a password-reset or verification body carries a
 // bearer token, and journald is not a place for those (Review R14-01 /
@@ -79,7 +79,7 @@ func (s *LogSender) Send(_ context.Context, to, subject, htmlBody, textBody stri
 	if err := s.rl.check(to); err != nil {
 		return err
 	}
-	s.logger.Info("email (dev mode — not sent)",
+	s.logger.Info("email (dev mode, not sent)",
 		zap.String("to", to),
 		zap.String("subject", subject),
 		zap.Int("html_bytes", len(htmlBody)),

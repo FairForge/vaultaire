@@ -114,7 +114,7 @@ func TestHandleCancelDeletion_Success(t *testing.T) {
 }
 
 // WP-R10-3 / R12-22: an OAuth-only account (empty password hash) used to be
-// refused with "Incorrect password." forever — bcrypt against "" never
+// refused with "Incorrect password." forever, bcrypt against "" never
 // matches. Without 2FA it confirms by re-typing the account e-mail.
 func TestHandleRequestDeletion_OAuthOnlyConfirmsWithEmail(t *testing.T) {
 	db, mock, err := sqlmock.New()

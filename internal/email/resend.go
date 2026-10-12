@@ -10,7 +10,7 @@ import (
 )
 
 // ResendSender sends emails via the Resend API (https://resend.com).
-// Uses raw net/http — no external SDK dependency.
+// Uses raw net/http, no external SDK dependency.
 type ResendSender struct {
 	apiKey string
 	from   string

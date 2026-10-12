@@ -21,7 +21,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// Review R12 — the sign-in flow: every outcome is an audit row, repeated
+// Review R12, the sign-in flow: every outcome is an audit row, repeated
 // failures lock the account, a TOTP code is single-use, public pages carry
 // the security headers and /static/ does not list directories.
 

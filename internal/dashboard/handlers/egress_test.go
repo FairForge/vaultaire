@@ -41,7 +41,7 @@ func renderOverview(t *testing.T, tenantID string, eg usage.EgressStatusReader) 
 }
 
 func TestOverview_EgressBar_UnderTheAllowance(t *testing.T) {
-	// Arrange: a free-tier tenant, no live counter wired — the recorded month.
+	// Arrange: a free-tier tenant, no live counter wired, the recorded month.
 	db := testDashDB(t)
 	t.Cleanup(func() { _ = db.Close() })
 	id := houseTenant(t, db, 0, 0)

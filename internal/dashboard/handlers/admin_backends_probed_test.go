@@ -39,7 +39,7 @@ func TestHandleAdminBackends_UnprobedIsNotUnhealthy(t *testing.T) {
 
 	assert.Equal(t, 1, countSubstring(body, ">not probed<"), "exactly one unprobed backend (local)")
 	assert.Equal(t, 1, countSubstring(body, ">healthy<"), "idrive")
-	assert.Equal(t, 1, countSubstring(body, ">unhealthy<"), "geyser — a real failing probe still reads unhealthy")
+	assert.Equal(t, 1, countSubstring(body, ">unhealthy<"), "geyser, a real failing probe still reads unhealthy")
 }
 
 func countSubstring(s, sub string) int {

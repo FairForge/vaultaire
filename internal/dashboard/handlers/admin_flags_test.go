@@ -63,7 +63,7 @@ func openHandlersFlagsDB(t *testing.T) (*sql.DB, string) {
 }
 
 func TestHandleAdminFlags_RendersResolvedFlags(t *testing.T) {
-	// Nil-DB service — the page must render from defaults alone.
+	// Nil-DB service, the page must render from defaults alone.
 	svc := flags.New(nil, zap.NewNop())
 	svc.Register("chunking", true)
 

@@ -13,7 +13,7 @@ import (
 
 // WP-R4-1: the served key form offers the GOVERNANCE bypass as a permission
 // and says what it does. Every value the form can post is a permission the
-// API accepts — a checkbox the validator refuses would fail the whole form.
+// API accepts, a checkbox the validator refuses would fail the whole form.
 func TestAPIKeysPage_OffersTheGovernanceBypassPermission(t *testing.T) {
 	// Arrange
 	tmpl := template.Must(template.New("").Funcs(handlers.TemplateFuncs()).ParseFS(Templates,

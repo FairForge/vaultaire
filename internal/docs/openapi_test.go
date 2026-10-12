@@ -184,7 +184,7 @@ func operations(spec *OpenAPISpec) []struct {
 	return out
 }
 
-// TestOpenAPISpec_JSONAPICoverage — Review R14: the spec documents the whole
+// TestOpenAPISpec_JSONAPICoverage, Review R14: the spec documents the whole
 // JSON API (the drift guard in internal/api ties it to the router; this
 // checks the shape of what is documented).
 func TestOpenAPISpec_JSONAPICoverage(t *testing.T) {

@@ -1,4 +1,4 @@
-{{define "title"}}API Keys — Stored{{end}}
+{{define "title"}}API Keys, Stored{{end}}
 {{define "content"}}
 <div class="page-header">
     <div>
@@ -83,10 +83,10 @@
 {{if .NewKey}}
 <div class="card card-highlight">
     {{if .Rotated}}
-    <div class="card-title">Key Rotated — Save These Now</div>
-    <div class="alert alert-success">The old pair stopped working the moment this page loaded; so did any temporary credentials minted from it. Copy the new credentials — the secret will not be shown again.</div>
+    <div class="card-title">Key Rotated, Save These Now</div>
+    <div class="alert alert-success">The old pair stopped working the moment this page loaded; so did any temporary credentials minted from it. Copy the new credentials, the secret will not be shown again.</div>
     {{else}}
-    <div class="card-title">New Key Generated — Save These Now</div>
+    <div class="card-title">New Key Generated, Save These Now</div>
     <div class="alert alert-success">Copy these credentials. The secret will not be shown again.</div>
     {{end}}
     <table class="key-reveal">

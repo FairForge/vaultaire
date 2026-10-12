@@ -18,7 +18,7 @@ import (
 )
 
 // WP-R12-5: R12's CSRF matrix, re-run over EVERY state-changing route of the
-// two session chains as the router registers them (chi.Walk — a route added
+// two session chains as the router registers them (chi.Walk, a route added
 // later is in the matrix without anyone remembering to add it). For each:
 // no token, a wrong token, another session's valid token, a planted
 // cookie + matching value (the old scheme's forgery), a good token sent

@@ -188,10 +188,10 @@ func GenerateOpenAPISpec() *OpenAPISpec {
 		Info: Info{
 			Title: "Stored Storage API",
 			Description: "Two APIs on one host.\n\n" +
-				"**S3 API** — the root paths (`/`, `/{bucket}`, `/{bucket}/{key}`) speak the S3 wire protocol: " +
+				"**S3 API**, the root paths (`/`, `/{bucket}`, `/{bucket}/{key}`) speak the S3 wire protocol: " +
 				"AWS Signature Version 4, region `us-east-1`, path-style addressing, XML bodies. Use them with any S3 client " +
 				"and the access key / secret from registration or a scoped API key.\n\n" +
-				"**JSON API** — everything under `/api/v1` is JSON and authenticated with `Authorization: Bearer <JWT>`; " +
+				"**JSON API**, everything under `/api/v1` is JSON and authenticated with `Authorization: Bearer <JWT>`; " +
 				"the JWT comes from `POST /auth/login` (24 h). Operations tagged Admin additionally require the JWT's user to have role `admin`. " +
 				"Operations with no security listed (registration, login, password reset, waitlist) are public.\n\n" +
 				"JSON API conventions: a single resource is returned as an object with an `object` type field and a `request_id`; " +
@@ -430,7 +430,7 @@ func idempotent(op *Operation) *Operation {
 		}
 	}
 	if _, ok := op.Responses["409"]; !ok {
-		op.Responses["409"] = errResp("`idempotency_key_reuse` — the Idempotency-Key was already used with a different method or path")
+		op.Responses["409"] = errResp("`idempotency_key_reuse`, the Idempotency-Key was already used with a different method or path")
 	}
 	return op
 }
@@ -605,7 +605,7 @@ func generateS3Paths() map[string]*PathItem {
 	}
 }
 
-// generateAuthPaths — internal/api/server.go handleRegister / handleLogin /
+// generateAuthPaths, internal/api/server.go handleRegister / handleLogin /
 // handlePasswordReset / handlePasswordResetComplete, and waitlist.go.
 // These handlers answer errors with http.Error (text/plain).
 func generateAuthPaths() map[string]*PathItem {
@@ -690,7 +690,7 @@ func generateAuthPaths() map[string]*PathItem {
 		"/api/ping": {
 			Post: withBody(publicOp("Site", "Count one named click on the public site", "SitePing",
 				"The landing page's `navigator.sendBeacon` target. Counts the event into the day's cookieless site "+
-					"statistics (page, referring host, campaign labels, country from Cloudflare, device class — totals only, no identifier). "+
+					"statistics (page, referring host, campaign labels, country from Cloudflare, device class, totals only, no identifier). "+
 					"Event names come from a closed list (`builder.edit`, `builder.attic`, `builder.share`, `builder.save`, `builder.pack`, "+
 					"`build.view`, `pricing.view`, `calc.move`, `age.scrub`, `copy`, `waitlist.submit`, `cta.register`, `uc.*`, `res.*`); "+
 					"anything else, and any non-browser user agent, is ignored with the same 204 so the page never sees an error.",
@@ -704,12 +704,12 @@ func generateAuthPaths() map[string]*PathItem {
 	}
 }
 
-// generateUserPaths — internal/api/user_api.go, user_quota.go, usage.go,
+// generateUserPaths, internal/api/user_api.go, user_quota.go, usage.go,
 // presigned.go. requireJWT only: no rate limiter, no idempotency. The key
 // handlers answer failures in the management envelope (WP-R11-6).
 func generateUserPaths() map[string]*PathItem {
 	keyID := pathParam("keyId", "API key id (the `id` from list/create, not the access key)")
-	keyNotFound := errResp("`key_not_found` — the id is not one of the caller's keys")
+	keyNotFound := errResp("`key_not_found`, the id is not one of the caller's keys")
 	keyErr500 := errResp("`internal_error`")
 
 	return map[string]*PathItem{
@@ -719,7 +719,7 @@ func generateUserPaths() map[string]*PathItem {
 				map[string]Response{
 					"200": jsonResp("The account", ref("UserInfo")),
 					"401": errResp("Bearer token missing/invalid (text/plain from the middleware), or `missing_credentials` when the token carries no user or tenant"),
-					"404": errResp("`user_not_found` — the JWT's user row no longer exists"),
+					"404": errResp("`user_not_found`, the JWT's user row no longer exists"),
 					"500": errResp("`db_error`"),
 				}),
 			Delete: withBody(jsonOp("User", "Schedule account deletion", "ScheduleAccountDeletionViaUser",
@@ -747,7 +747,7 @@ func generateUserPaths() map[string]*PathItem {
 				map[string]Response{
 					"201": jsonResp("Key created; `secret` is shown only here", ref("UserAPIKeyCreated")),
 					"400": errResp("`invalid_json`, `invalid_permissions` (`unknown permission: ...`), or `invalid_expiry_days` (`expiry_days` present and below 1)"),
-					"409": errResp("`key_limit_exceeded` — the plan's key cap"),
+					"409": errResp("`key_limit_exceeded`, the plan's key cap"),
 					"500": keyErr500,
 				}),
 				jsonBody("Key definition", ref("UserAPIKeyCreateRequest"))),
@@ -764,18 +764,18 @@ func generateUserPaths() map[string]*PathItem {
 						"secret": str("New secret access key"),
 					}, "id", "name", "key", "secret")),
 					"404": keyNotFound,
-					"409": errResp("`key_revoked` — already revoked; or `key_expired` — an expired key is not rotated into a successor born expired: create a new key"),
+					"409": errResp("`key_revoked`, already revoked; or `key_expired`, an expired key is not rotated into a successor born expired: create a new key"),
 					"500": keyErr500,
 				}),
 		},
 		"/api/v1/user/apikeys/{keyId}": {
 			Parameters: []Parameter{keyID},
 			Delete: jsonOp("User", "Revoke an API key", "RevokeUserAPIKey",
-				"Sets `revoked_at`; S3 auth stops accepting the key immediately. The audit row is written by the auth service. The primary pair cannot be revoked — rotate it.",
+				"Sets `revoked_at`; S3 auth stops accepting the key immediately. The audit row is written by the auth service. The primary pair cannot be revoked, rotate it.",
 				map[string]Response{
 					"204": {Description: "Revoked"},
 					"404": keyNotFound,
-					"409": errResp("`key_revoked` — already revoked; or `primary_key` — the primary pair is rotated, never revoked"),
+					"409": errResp("`key_revoked`, already revoked; or `primary_key`, the primary pair is rotated, never revoked"),
 					"500": keyErr500,
 				}),
 		},
@@ -790,7 +790,7 @@ func generateUserPaths() map[string]*PathItem {
 					}, "message", "expires_at")),
 					"400": errResp("`invalid_json`, or `invalid_days` (`days` below 1)"),
 					"404": keyNotFound,
-					"409": errResp("`key_revoked` — already revoked; or `primary_key` — the primary pair is never given an expiry: rotate it"),
+					"409": errResp("`key_revoked`, already revoked; or `primary_key`, the primary pair is never given an expiry: rotate it"),
 					"500": keyErr500,
 				}),
 				jsonBody("Days from now", objectPtr("", map[string]*Schema{
@@ -803,7 +803,7 @@ func generateUserPaths() map[string]*PathItem {
 					"`total_count` is the size of the page, not the total.",
 				map[string]Response{
 					"200": jsonResp("Audit rows", listSchema("", ref("AuditRow"))),
-					"400": errResp("`invalid_cursor` — the cursor is not one this endpoint issued"),
+					"400": errResp("`invalid_cursor`, the cursor is not one this endpoint issued"),
 					"500": errResp("`db_error`"),
 				}),
 				queryParam("action", "Exact `action` to filter on, e.g. `key.revoked`", &Schema{Type: "string"}),
@@ -815,7 +815,7 @@ func generateUserPaths() map[string]*PathItem {
 				"Storage used and limit for the JWT's tenant, the plan tier, and whether an upgrade is possible (`tier != enterprise`).",
 				map[string]Response{
 					"200": jsonResp("Quota", ref("QuotaInfo")),
-					"401": textResp("`unauthorized` — Bearer token missing/invalid, or no tenant in the token"),
+					"401": textResp("`unauthorized`, Bearer token missing/invalid, or no tenant in the token"),
 					"500": textResp("`failed to get quota`"),
 				}),
 		},
@@ -824,7 +824,7 @@ func generateUserPaths() map[string]*PathItem {
 				"One row per day of `quota_usage_events` in the last 30 days, newest first. Plain JSON array (may be `null` when there were no events).",
 				map[string]Response{
 					"200": jsonResp("Daily usage", nullable(arrayOf(ref("UsageHistoryEntry")))),
-					"401": textResp("`unauthorized` — Bearer token missing/invalid, or no tenant in the token"),
+					"401": textResp("`unauthorized`, Bearer token missing/invalid, or no tenant in the token"),
 					"500": textResp("`failed to get history`"),
 				}),
 		},
@@ -833,7 +833,7 @@ func generateUserPaths() map[string]*PathItem {
 				"Storage used/limit and the percentage for the JWT's tenant.",
 				map[string]Response{
 					"200": jsonResp("Usage", ref("UsageStats")),
-					"401": textResp("`unauthorized` — Bearer token missing/invalid, or no tenant in the token"),
+					"401": textResp("`unauthorized`, Bearer token missing/invalid, or no tenant in the token"),
 					"500": textResp("`failed to get usage`"),
 				}),
 		},
@@ -842,7 +842,7 @@ func generateUserPaths() map[string]*PathItem {
 				"At most one alert: `INFO` at 70 %, `WARNING` at 80 %, `CRITICAL` at 90 % of the storage limit; an empty array below 70 %.",
 				map[string]Response{
 					"200": jsonResp("Alerts", arrayOf(ref("UsageAlert"))),
-					"401": textResp("`unauthorized` — Bearer token missing/invalid, or no tenant in the token"),
+					"401": textResp("`unauthorized`, Bearer token missing/invalid, or no tenant in the token"),
 					"500": textResp("`failed to get usage`"),
 				}),
 		},
@@ -856,7 +856,7 @@ func generateUserPaths() map[string]*PathItem {
 						"method":     strEnum("HTTP method the URL is signed for", "GET", "PUT"),
 					}, "url", "expires_at", "method")),
 					"400": jsonResp("`bucket and key are required`, `method must be GET or PUT`, or `expires must be between 1 and 604800 seconds`", ref("SimpleError")),
-					"401": jsonResp("`unauthorized` — Bearer token missing/invalid, or no tenant in the token", ref("SimpleError")),
+					"401": jsonResp("`unauthorized`, Bearer token missing/invalid, or no tenant in the token", ref("SimpleError")),
 					"404": jsonResp("`tenant credentials not found`", ref("SimpleError")),
 					"500": jsonResp("`database not available`", ref("SimpleError")),
 				}),
@@ -868,7 +868,7 @@ func generateUserPaths() map[string]*PathItem {
 	}
 }
 
-// generateManagementPaths — internal/api/management_routes.go. Chain:
+// generateManagementPaths, internal/api/management_routes.go. Chain:
 // requireJWT → ManagementRateLimiter → idempotency middleware.
 func generateManagementPaths() map[string]*PathItem {
 	name := pathParam("name", "Bucket name")
@@ -891,8 +891,8 @@ func generateManagementPaths() map[string]*PathItem {
 					"Free-tier tenants are capped at one bucket (403); every tenant at 1000 (409).",
 				map[string]Response{
 					"201": jsonResp("Bucket created", ref("ManagedBucket")),
-					"400": errResp("`invalid_json`, `missing_parameter` (name), `invalid_bucket_name` (3–63 chars, lowercase alphanumeric and hyphens), `invalid_region` (not a known region id), `region_unavailable` (known region with no driver here)"),
-					"403": errResp("`free_tier_bucket_limit` — the free tier allows one bucket; upgrade at /dashboard/billing"),
+					"400": errResp("`invalid_json`, `missing_parameter` (name), `invalid_bucket_name` (3 to 63 chars, lowercase alphanumeric and hyphens), `invalid_region` (not a known region id), `region_unavailable` (known region with no driver here)"),
+					"403": errResp("`free_tier_bucket_limit`, the free tier allows one bucket; upgrade at /dashboard/billing"),
 					"409": errResp("`bucket_exists` (the tenant already owns it), `bucket_limit_exceeded` (1000 per account), or `idempotency_key_reuse`"),
 					"500": errResp("`internal_error`"),
 				}),
@@ -923,7 +923,7 @@ func generateManagementPaths() map[string]*PathItem {
 				map[string]Response{
 					"200": jsonResp("Deleted", ref("BucketDeleted")),
 					"404": errResp("`bucket_not_found` (also for a name that cannot be a bucket)"),
-					"409": errResp("`bucket_not_empty` — the message lists what is still in it; or `idempotency_key_reuse`"),
+					"409": errResp("`bucket_not_empty`, the message lists what is still in it; or `idempotency_key_reuse`"),
 					"500": errResp("`internal_error`"),
 				})),
 		},
@@ -1039,7 +1039,7 @@ func generateManagementPaths() map[string]*PathItem {
 					"The secret is returned once. Caps: 50 live keys per account, and the plan's own limit (both 409). Emits `key.created`.",
 				map[string]Response{
 					"201": jsonResp("Key created; `secret` is shown only here", ref("APIKeyCreated")),
-					"400": errResp("`invalid_json`, `invalid_permissions` (`unknown permission: ...`), `invalid_ip_allowlist` (an entry that is not an address or a network), `unrestricted_ip_allowlist` (`0.0.0.0/0` or `::/0` — leave `ip_allowlist` empty to allow every address), or `invalid_expiry` (`expires_at` not in the future)"),
+					"400": errResp("`invalid_json`, `invalid_permissions` (`unknown permission: ...`), `invalid_ip_allowlist` (an entry that is not an address or a network), `unrestricted_ip_allowlist` (`0.0.0.0/0` or `::/0`, leave `ip_allowlist` empty to allow every address), or `invalid_expiry` (`expires_at` not in the future)"),
 					"409": errResp("`key_limit_exceeded` (50 per account, or the plan's limit) or `idempotency_key_reuse`"),
 					"500": errResp("`internal_error`"),
 				}),
@@ -1048,7 +1048,7 @@ func generateManagementPaths() map[string]*PathItem {
 		"/api/v1/manage/keys/{id}": {
 			Parameters: []Parameter{pathParam("id", "API key id")},
 			Delete: mut(jsonOp("Management", "Revoke an API key", "ManageDeleteKey",
-				"Sets `revoked_at` and emits `key.revoked`. The primary pair cannot be revoked — rotate it through the user API or the dashboard.",
+				"Sets `revoked_at` and emits `key.revoked`. The primary pair cannot be revoked, rotate it through the user API or the dashboard.",
 				map[string]Response{
 					"200": jsonResp("Revoked", objectPtr("", map[string]*Schema{
 						"object":     strEnum("", "api_key"),
@@ -1056,8 +1056,8 @@ func generateManagementPaths() map[string]*PathItem {
 						"deleted":    boolean("Always true"),
 						"request_id": str(""),
 					}, "object", "id", "deleted", "request_id")),
-					"404": errResp("`key_not_found` — the id is not one of the caller's keys"),
-					"409": errResp("`key_revoked` — already revoked; or `primary_key` — the primary pair is rotated, never revoked"),
+					"404": errResp("`key_not_found`, the id is not one of the caller's keys"),
+					"409": errResp("`key_revoked`, already revoked; or `primary_key`, the primary pair is rotated, never revoked"),
 					"500": errResp("`internal_error`"),
 				})),
 		},
@@ -1066,7 +1066,7 @@ func generateManagementPaths() map[string]*PathItem {
 				Tags:    []string{"Management"},
 				Summary: "What this key is (SigV4)",
 				Description: "Signed with an S3 key pair like any S3 request (header or presigned SigV4), not a JWT: answers the tenant the key belongs to, the key id, " +
-					"whether it is the account's **primary** pair, a **scoped** key or a temporary **sts** token, its permissions, bucket scope, IP allowlist and expiry — never a secret. " +
+					"whether it is the account's **primary** pair, a **scoped** key or a temporary **sts** token, its permissions, bucket scope, IP allowlist and expiry, never a secret. " +
 					"For an edge gateway or an app that holds only a customer's key and needs to partition per tenant (plan 42.7). The same gates as the S3 API: a revoked, rotated or expired key, " +
 					"a wrong signature, an address outside the key's allowlist or a suspended account are refused with the management error envelope. `key_id` is the id the signature was verified with. " +
 					"A request that carries both an `Authorization` header and presigned `X-Amz-*` query parameters is refused **400** `invalid_request` (one authentication mechanism per request, as on AWS). " +
@@ -1096,7 +1096,7 @@ func generateManagementPaths() map[string]*PathItem {
 					"Poll GET /account/export/{id} for the status and, once `completed`, the download URL. One export at a time per user: **409** `export_in_progress` while one is pending. "+
 					"The export is one JSON document: user profile, security (MFA on/off, MFA events), tenant, quota (totals, floors, house), buckets (every setting), objects "+
 					"(key, size, etag, content type, the storage class the customer sees, timestamps, user metadata, tags), object versions, object locks, multipart uploads in flight, "+
-					"API keys (ids, names, permissions, scope — never a secret), 90 days of bandwidth, events, webhooks (url, events — never the signing secret), OAuth links (provider only), "+
+					"API keys (ids, names, permissions, scope, never a secret), 90 days of bandwidth, events, webhooks (url, events, never the signing secret), OAuth links (provider only), "+
 					"dashboard sessions (created, last seen, user agent, ip), sign-up attribution, the export records and the account's audit trail. Exports are kept for 7 days. No request body.",
 				map[string]Response{
 					"202": jsonResp("The export was requested", ref("DataExportRequested")),
@@ -1108,9 +1108,9 @@ func generateManagementPaths() map[string]*PathItem {
 			Parameters: []Parameter{pathParam("id", "Export id")},
 			Get: mgmt(jsonOp("Management", "Get an export's status and download URL", "ManageGetExport",
 				"The status of one of the caller's exports (`pending` → `completed` | `failed`). When `completed`, `download_url` is a presigned S3 GET of the export object, "+
-					"signed with the account's primary key pair and valid for one hour (`download_url_expires_at`) — call again for a fresh one; a rotated primary key invalidates it. "+
+					"signed with the account's primary key pair and valid for one hour (`download_url_expires_at`), call again for a fresh one; a rotated primary key invalidates it. "+
 					"The object itself expires 7 days after completion (`expires_at`): **410** `export_expired` after that (the record stays). "+
-					"**404** for an id that is not the caller's — existence is never confirmed.",
+					"**404** for an id that is not the caller's, existence is never confirmed.",
 				map[string]Response{
 					"200": jsonResp("Export status", ref("DataExportStatus")),
 					"404": errResp("`export_not_found` (also when the export belongs to another user)"),
@@ -1120,7 +1120,7 @@ func generateManagementPaths() map[string]*PathItem {
 		"/api/v1/manage/account": {
 			Delete: mut(withBody(jsonOp("Management", "Schedule account deletion (GDPR)", "ManageDeleteAccount",
 				"Marks the user `pending_deletion` with `deletion_scheduled_at` = now + 30 days. Login keeps working during the grace period; "+
-					"a second call returns the existing date. Reverse it with POST /account/cancel-deletion. On that date the deletion job cancels the Stripe subscription and erases every object (on its recorded backend), key, session and account record; backups age out within 7 days. Nothing changes during the grace period — export and cancellation keep working. `reason` is capped at 500 characters.",
+					"a second call returns the existing date. Reverse it with POST /account/cancel-deletion. On that date the deletion job cancels the Stripe subscription and erases every object (on its recorded backend), key, session and account record; backups age out within 7 days. Nothing changes during the grace period, export and cancellation keep working. `reason` is capped at 500 characters.",
 				map[string]Response{
 					"200": jsonResp("Deletion scheduled", ref("AccountDeletionScheduled")),
 					"400": errResp("`invalid_json`, or `missing_parameter` when `reason` is empty"),
@@ -1133,13 +1133,13 @@ func generateManagementPaths() map[string]*PathItem {
 				"Clears the scheduled deletion and sets the user back to `active`. Fails (500 `cancel_failed`) when nothing is pending. No request body.",
 				map[string]Response{
 					"200": jsonResp("Cancelled", ref("AccountDeletionCancelled")),
-					"500": errResp("`cancel_failed` — including when no deletion was pending"),
+					"500": errResp("`cancel_failed`, including when no deletion was pending"),
 				})),
 		},
 	}
 }
 
-// generateWebhookPaths — internal/api/webhooks_routes.go and events.go.
+// generateWebhookPaths, internal/api/webhooks_routes.go and events.go.
 // Webhooks: requireJWT → rate limiter → idempotency; events: no idempotency.
 func generateWebhookPaths() map[string]*PathItem {
 	id := pathParam("id", "Webhook id")
@@ -1244,7 +1244,7 @@ func generateWebhookPaths() map[string]*PathItem {
 	}
 }
 
-// generateSTSPaths — internal/api/sts_routes.go (requireJWT only).
+// generateSTSPaths, internal/api/sts_routes.go (requireJWT only).
 func generateSTSPaths() map[string]*PathItem {
 	return map[string]*PathItem{
 		"/api/v1/sts/token": {
@@ -1257,8 +1257,8 @@ func generateSTSPaths() map[string]*PathItem {
 				map[string]Response{
 					"201": jsonResp("Credentials; `secret_key` is shown only here", ref("STSToken")),
 					"400": errResp("`invalid_json`, `invalid_permissions` (`unknown permission: ...`), `parent_key_revoked`, or `scope_error` (e.g. `no permissions overlap between parent key and request`, or an `ip_restrict` entry of `0.0.0.0/0` / `::/0` that restricts nothing)"),
-					"401": errResp("Bearer token missing/invalid, `missing_user`, or `parent_key_expired` — `parent_key_id` names a key whose `expires_at` has passed"),
-					"404": errResp("`parent_key_not_found` — `parent_key_id` is not one of the caller's keys"),
+					"401": errResp("Bearer token missing/invalid, `missing_user`, or `parent_key_expired`, `parent_key_id` names a key whose `expires_at` has passed"),
+					"404": errResp("`parent_key_not_found`, `parent_key_id` is not one of the caller's keys"),
 					"500": errResp("`internal_error`"),
 				}),
 				jsonBody("Requested scope", ref("STSRequest"))),
@@ -1266,7 +1266,7 @@ func generateSTSPaths() map[string]*PathItem {
 	}
 }
 
-// generateAdminPaths — the /api/v1/admin group in internal/api/server.go:
+// generateAdminPaths, the /api/v1/admin group in internal/api/server.go:
 // requireJWT + requireAdmin. Breach handlers live in internal/compliance
 // (http.Error text on failure); flags in admin_flags.go; audit in
 // admin_audit.go; the triggers in dedup_gc.go, smart_demotion.go and
@@ -1316,7 +1316,7 @@ func generateAdminPaths() map[string]*PathItem {
 		"/api/v1/admin/jobs": {
 			Get: admin(jsonOp("Admin", "List the background jobs", "AdminListJobs",
 				"Every background job this server runs, joined with its `job_runs` row: the schedule, whether a run is in progress, the last start, finish and success, "+
-					"the last outcome (`ok`, `error`, `interrupted` — the process stopped during the run — or `running`), the rows it affected and when it is next expected. "+
+					"the last outcome (`ok`, `error`, `interrupted`, the process stopped during the run, or `running`), the rows it affected and when it is next expected. "+
 					"Daily jobs: `inventory` 00:30 UTC, `dedup_gc` 02:30, `retention` 03:30, `account_deletion` 04:30, `routing_truth` 05:30, `smart_demotion` 06:30 (a catch-up check a few minutes after every start, "+
 					"then one per hour; a run happens when `job_runs` has no success since the last scheduled time). Interval jobs: `multipart_reaper`, `cdn_rollup`, `idempotency_cleanup`, "+
 					"`sts_cleanup`, `session_cleanup`, `bandwidth_alerts` (hourly) and `access_log_delivery` (every 5 minutes). On `ok`, `last_error` is the run's note: items that failed "+
@@ -1335,7 +1335,7 @@ func generateAdminPaths() map[string]*PathItem {
 			Post: admin(withParams(jsonOp("Admin", "Start one run of a background job", "AdminRunJob",
 				"Starts one run now and answers **202** as soon as the run holds the job's advisory lock; the run continues on the server after the response "+
 					"(a closed connection does not cancel it, a shutdown does). The result is in `GET /api/v1/admin/jobs` (`last_outcome`, `rows_affected`, `last_error`) and in the log. "+
-					"**409** `already_running` while another run of the job — the scheduler's, another trigger's, or another process's — holds the lock. "+
+					"**409** `already_running` while another run of the job, the scheduler's, another trigger's, or another process's, holds the lock. "+
 					"`dry_run=true` is supported by `smart_demotion` only: it is synchronous, answers 200 with the report, moves nothing and is not recorded as a run. "+
 					"Writes an `admin.<job>` audit row. No request body.",
 				map[string]Response{
@@ -1362,7 +1362,7 @@ func generateAdminPaths() map[string]*PathItem {
 		"/api/v1/admin/smart-demotion": {
 			Post: admin(withParams(jsonOp("Admin", "Start one Smart-tier demotion run", "AdminSmartDemotion",
 				"The same call as `POST /api/v1/admin/jobs/smart_demotion/run`: the hot→cold demotion job (it also runs on its own every day at 06:30 UTC). "+
-					"Answers 202 once the run has started. `dry_run=true` is synchronous and reports what would move without moving it — the flag-dark verification path "+
+					"Answers 202 once the run has started. `dry_run=true` is synchronous and reports what would move without moving it, the flag-dark verification path "+
 					"before enabling `smart_demotion` for a tenant. Writes an `admin.smart_demotion` audit row. No request body.",
 				map[string]Response{
 					"200": jsonResp("`dry_run=true`: what the run would do", ref("SmartDemotionResult")),
@@ -1392,19 +1392,19 @@ func generateAdminPaths() map[string]*PathItem {
 					"(`t-_global/_global/<storage_key>` on a fixed-bucket backend). Blobs written before WP-R8-7 are under the uploading tenant's prefix "+
 					"(`t-<tenant>/_global/…`). This call works on ONE backend: for every index row there it copies a verified old copy to the one address, "+
 					"reads it back, verifies size and hash, and only then deletes the old copies; blobs under a tenant's chunk container with no index row "+
-					"(orphans) are deleted. Dry run by default: only `dry_run=false` changes anything. Idempotent and resumable — a run stopped anywhere is "+
+					"(orphans) are deleted. Dry run by default: only `dry_run=false` changes anything. Idempotent and resumable, a run stopped anywhere is "+
 					"finished by the next one. Synchronous, on a context detached from the request (a proxy timeout does not stop it; the result is also in "+
 					"the `chunk move` log line). Done when `at_address == rows` and `orphans == 0`. Writes an `admin.chunk_move` audit row. No request body.",
 				map[string]Response{
 					"200": jsonResp("What the run did (or, for a dry run, would do)", ref("ChunkMoveResult")),
 					"400": textResp("`backend is required`, `dry_run must be true or false`, an unregistered backend or a `tenant` that is not a tenant id"),
 					"409": jsonResp("A chunk move is already running", ref("JobAlreadyRunning")),
-					"500": textResp("`chunk move failed (see the log)` — what was done is kept"),
+					"500": textResp("`chunk move failed (see the log)`, what was done is kept"),
 					"503": textResp("`chunk move not available` (no database or engine)"),
 				}),
 				queryParam("backend", "Required. A registered backend name (e.g. `idrive`)", &Schema{Type: "string"}),
 				queryParam("dry_run", "Report only (the default). `false` moves and deletes", &Schema{Type: "boolean", Default: true}),
-				queryParam("tenant", "Repeatable. An extra tenant id to look under — an erased tenant whose `account.erased` row shows `chunk_blobs_left` > 0", &Schema{Type: "string"}))),
+				queryParam("tenant", "Repeatable. An extra tenant id to look under, an erased tenant whose `account.erased` row shows `chunk_blobs_left` > 0", &Schema{Type: "string"}))),
 		},
 		"/api/v1/admin/tenants/{tenant_id}/encryption-key/rotate": {
 			Parameters: []Parameter{pathParam("tenant_id", "The tenant whose key is rotated")},
@@ -1424,9 +1424,9 @@ func generateAdminPaths() map[string]*PathItem {
 		},
 		"/api/v1/admin/routing-truth": {
 			Get: admin(jsonOp("Admin", "The routing truth: head rows vs. the backends that hold their bytes", "AdminRoutingTruth",
-				"`object_head_cache.backend_name` is where an object's bytes are supposed to be — GET, DELETE, the demotion ledger, the deletion runner and the erasure sweep act on it. "+
+				"`object_head_cache.backend_name` is where an object's bytes are supposed to be, GET, DELETE, the demotion ledger, the deletion runner and the erasure sweep act on it. "+
 					"This answers with three things (WP-R7-5): the boot check (every backend name on record must be a registered driver; two registered names must never share a store), "+
-					"the rows whose backend no driver is registered under — per table, live from the database, `backend` empty for rows with none — and the last run of the daily "+
+					"the rows whose backend no driver is registered under, per table, live from the database, `backend` empty for rows with none, and the last run of the daily "+
 					"`routing_truth` job (05:30 UTC), which samples rows per backend and asks the recorded backend only whether the bytes are there: `present`, `missing` (bytes gone, row intact), "+
 					"`changed` (the row changed while it looked), `errors` (the backend could not be asked; an open breaker is one error, never N misses), plus the chunks of sampled chunked objects "+
 					"at their one address (`legacy` = found under the uploader's prefix; run the chunk move). Nothing here writes. Run the job now with `POST /api/v1/admin/jobs/routing_truth/run`. "+
@@ -1441,7 +1441,7 @@ func generateAdminPaths() map[string]*PathItem {
 			Post: admin(withParams(jsonOp("Admin", "Resolve head rows that record no backend", "AdminRoutingTruthResolveNull",
 				"Rows with no `backend_name` (multipart completes before Review R3-03) are served only by the engine's fan-out. This is the one place a fan-out is justified: "+
 					"for up to `limit` such rows every registered driver is asked once, with the row's tenant in the context, and the row is `resolved` when exactly ONE holds the bytes, "+
-					"`nowhere` when none does (the object is gone — delete it through S3 DELETE, which releases quota, or the tenant's erasure), `ambiguous` when more than one does, "+
+					"`nowhere` when none does (the object is gone, delete it through S3 DELETE, which releases quota, or the tenant's erasure), `ambiguous` when more than one does, "+
 					"`error` when a backend could not be asked. **Dry run by default**: only `dry_run=false` writes, and then only the resolved rows, under a guard (`backend_name IS NULL` and the etag unchanged). "+
 					"Nothing is ever deleted. Synchronous; call again until `remaining` is 0. Writes an `admin.routing_truth_resolve_null` audit row. No request body.",
 				map[string]Response{
@@ -1457,7 +1457,7 @@ func generateAdminPaths() map[string]*PathItem {
 			Post: admin(jsonOp("Admin", "Start one retention run", "AdminRetention",
 				"The same call as `POST /api/v1/admin/jobs/retention/run`: prunes the log tables past their retention periods (s3_access_log 30 d, events / quota_usage_events / stripe_events 90 d, "+
 					"webhook_deliveries 30 d, cdn_access_log 2 d after rollup, waitlist sign-up IP/user agent cleared after 90 d; audit_logs never) in batches under "+
-					"the job's advisory lock — the nightly 03:30 UTC run and this trigger cannot overlap. Answers 202 once the run has started. Writes an `admin.retention` audit row. No request body.",
+					"the job's advisory lock, the nightly 03:30 UTC run and this trigger cannot overlap. Answers 202 once the run has started. Writes an `admin.retention` audit row. No request body.",
 				map[string]Response{
 					"202": jsonResp("The run was started", ref("JobStarted")),
 					"409": jsonResp("A run is already in progress", ref("JobAlreadyRunning")),
@@ -1467,10 +1467,10 @@ func generateAdminPaths() map[string]*PathItem {
 		},
 		"/api/v1/admin/account-deletion": {
 			Post: admin(jsonOp("Admin", "Start one account-deletion run", "AdminAccountDeletion",
-				"The same call as `POST /api/v1/admin/jobs/account_deletion/run`: erases every account whose 30-day grace period has ended (WP-R10-3) — per tenant, cancel the Stripe subscription, "+
+				"The same call as `POST /api/v1/admin/jobs/account_deletion/run`: erases every account whose 30-day grace period has ended (WP-R10-3), per tenant, cancel the Stripe subscription, "+
 					"delete every object on its recorded backend (chunked manifests released, multipart uploads aborted), then remove every tenant/user row in one transaction, revoke sessions and "+
 					"write an `account.erased` audit row. A tenant that Stripe or a backend refuses is deferred: the run's outcome is `error` with the per-tenant reasons in `last_error`, "+
-					"and the hourly check retries it. One advisory lock — the daily 04:30 UTC run and this trigger cannot overlap. Answers 202 once the run has started. "+
+					"and the hourly check retries it. One advisory lock, the daily 04:30 UTC run and this trigger cannot overlap. Answers 202 once the run has started. "+
 					"Writes an `admin.account_deletion` audit row. No request body.",
 				map[string]Response{
 					"202": jsonResp("The run was started", ref("JobStarted")),
@@ -1518,7 +1518,7 @@ func generateAdminPaths() map[string]*PathItem {
 					"Filters combine with AND. `total_count` is the size of the page.",
 				map[string]Response{
 					"200": jsonResp("Audit rows", listSchema("", ref("AuditRow"))),
-					"400": errResp("`invalid_cursor` — the cursor is not one this endpoint issued"),
+					"400": errResp("`invalid_cursor`, the cursor is not one this endpoint issued"),
 					"500": errResp("`db_error`"),
 				}),
 				queryParam("tenant_id", "Rows for this tenant", &Schema{Type: "string"}),
@@ -1674,7 +1674,7 @@ func generateS3Schemas() map[string]Schema {
 func generateJSONSchemas() map[string]Schema {
 	permissions := &Schema{
 		Type:        "array",
-		Description: "S3 operation names the key may perform — every operation the S3 parser knows (`GetObject`, `PutObject`, `ListBuckets`, `GetObjectTagging`, `GetBucketLocation`, ...; the list is `auth.S3Operations`) or `*` for all; empty = full access. `BypassGovernanceRetention` adds the privilege to bypass GOVERNANCE Object Lock retention with `x-amz-bypass-governance-retention` (full-access keys have it)",
+		Description: "S3 operation names the key may perform, every operation the S3 parser knows (`GetObject`, `PutObject`, `ListBuckets`, `GetObjectTagging`, `GetBucketLocation`, ...; the list is `auth.S3Operations`) or `*` for all; empty = full access. `BypassGovernanceRetention` adds the privilege to bypass GOVERNANCE Object Lock retention with `x-amz-bypass-governance-retention` (full-access keys have it)",
 		Items:       &Schema{Type: "string"},
 	}
 	apiKeyProps := func(withSecret, withRequestID bool) map[string]*Schema {
@@ -1696,7 +1696,7 @@ func generateJSONSchemas() map[string]Schema {
 			p["last_used"] = nullable(dateTime("Last S3 request with the key in this process, or null"))
 		}
 		if withSecret {
-			p["secret"] = str("Secret access key — returned only by this call")
+			p["secret"] = str("Secret access key, returned only by this call")
 		}
 		if withRequestID {
 			p["request_id"] = str("")
@@ -1834,7 +1834,7 @@ func generateJSONSchemas() map[string]Schema {
 			"id":          str("Key id"),
 			"name":        str(""),
 			"key":         str("Access key id"),
-			"secret":      str("Secret access key — returned only by this call"),
+			"secret":      str("Secret access key, returned only by this call"),
 			"permissions": permissions,
 			"expires_at":  nullable(dateTime("")),
 			"created_at":  dateTime(""),
@@ -1842,7 +1842,7 @@ func generateJSONSchemas() map[string]Schema {
 
 		// Management
 		"ManagedBucketCreateRequest": object("", map[string]*Schema{
-			"name":   str("3–63 characters, lowercase alphanumeric and hyphens"),
+			"name":   str("3 to 63 characters, lowercase alphanumeric and hyphens"),
 			"region": str("Region id the bucket is homed in (e.g. `us-central-1`, `eu-west-1`); omit for the deployment default. Only regions with an enabled driver are accepted"),
 		}, "name"),
 		"ManagedBucket": object("A bucket as the management API returns it", map[string]*Schema{
@@ -1900,7 +1900,7 @@ func generateJSONSchemas() map[string]Schema {
 		}, "object", "tenant_id", "storage_used", "storage_limit", "usage_percent", "tier", "request_id"),
 		"DataExportRequested": object("A requested GDPR export (POST /api/v1/manage/account/export)", map[string]*Schema{
 			"object":     strEnum("", "data_export"),
-			"id":         str("Export id — poll GET /account/export/{id}"),
+			"id":         str("Export id, poll GET /account/export/{id}"),
 			"status":     strEnum("", "pending"),
 			"request_id": str(""),
 		}, "object", "id", "status", "request_id"),
@@ -1911,9 +1911,9 @@ func generateJSONSchemas() map[string]Schema {
 			"file_size_bytes":         integer("Size of the export object (0 until completed)"),
 			"created_at":              dateTime(""),
 			"completed_at":            dateTime("When the object was written (completed only)"),
-			"expires_at":              dateTime("When the object is removed — 7 days after completion (completed only)"),
+			"expires_at":              dateTime("When the object is removed, 7 days after completion (completed only)"),
 			"etag":                    str("MD5 of the export object (completed only)"),
-			"download_url":            str("Presigned GET of the export object, valid one hour (completed only; never logged — treat as a credential)"),
+			"download_url":            str("Presigned GET of the export object, valid one hour (completed only; never logged, treat as a credential)"),
 			"download_url_expires_at": dateTime("(completed only)"),
 			"error":                   str("Why the export failed (failed only)"),
 			"request_id":              str(""),
@@ -1940,7 +1940,7 @@ func generateJSONSchemas() map[string]Schema {
 			"id":         str("Webhook id (UUID)"),
 			"url":        str("Delivery URL"),
 			"events":     strArray("Event filters (exact types, `prefix.*`, or `*`)"),
-			"secret":     str("`whsec_...` HMAC-SHA256 key for `X-Webhook-Signature` — returned only on create"),
+			"secret":     str("`whsec_...` HMAC-SHA256 key for `X-Webhook-Signature`, returned only on create"),
 			"enabled":    boolean(""),
 			"created_at": dateTime(""),
 			"updated_at": dateTime("Present on list and update"),
@@ -1975,7 +1975,7 @@ func generateJSONSchemas() map[string]Schema {
 		"STSToken": object("Temporary S3 credentials", map[string]*Schema{
 			"object":     strEnum("", "sts_token"),
 			"access_key": str("`ASIA`-prefixed access key id"),
-			"secret_key": str("Secret access key — returned only by this call"),
+			"secret_key": str("Secret access key, returned only by this call"),
 			"expiration": dateTime("When the credentials stop working (RFC 3339)"),
 			"request_id": str(""),
 		}, "object", "access_key", "secret_key", "expiration", "request_id"),
@@ -2086,7 +2086,7 @@ func generateJSONSchemas() map[string]Schema {
 					"legacy":  integer("Present only under the uploader's prefix (written before WP-R8-7): run the chunk move"),
 					"missing": integer(""), "errors": integer(""), "unknown_backend": integer("The index row names a backend no driver has"),
 				}),
-				"checks":  integer("Calls made (whole rows + chunks) — `job_runs.rows_affected`"),
+				"checks":  integer("Calls made (whole rows + chunks), `job_runs.rows_affected`"),
 				"summary": str("The one-line note"),
 			})),
 		}, "job", "registered_backends", "unknown_backend_rows", "shared_stores", "last_outcome", "last_note"),
@@ -2134,7 +2134,7 @@ func generateJSONSchemas() map[string]Schema {
 			"moved":           integer("Chunks copied to the one address and verified"),
 			"bytes_moved":     integer("Stored bytes copied"),
 			"legacy_deleted":  integer("Old copies deleted"),
-			"missing":         integer("Chunks with no copy that verifies anywhere — the objects that reference them cannot be read"),
+			"missing":         integer("Chunks with no copy that verifies anywhere, the objects that reference them cannot be read"),
 			"failed":          integer("Chunks (or listings) that could not be decided or done; the next run retries"),
 			"orphans":         integer("Blobs under a tenant's chunk container with no index row"),
 			"orphans_deleted": integer("Orphans deleted"),
@@ -2176,7 +2176,7 @@ func generateSecuritySchemes() map[string]SecurityScheme {
 			Type:         "http",
 			Scheme:       "bearer",
 			BearerFormat: "JWT",
-			Description: "`Authorization: Bearer <JWT>` — the token from `POST /auth/login` (HS256, 24 h). " +
+			Description: "`Authorization: Bearer <JWT>`, the token from `POST /auth/login` (HS256, 24 h). " +
 				"Its claims carry the user, email and tenant every JSON endpoint acts on. Missing or invalid: 401 text/plain.",
 		},
 		"S3Signature": {
@@ -2201,7 +2201,7 @@ func generateParameters() map[string]Parameter {
 		"Limit": {
 			Name:        "limit",
 			In:          "query",
-			Description: "Page size; default 20, values outside 1–100 fall back to the default",
+			Description: "Page size; default 20, values outside 1 to 100 fall back to the default",
 			Schema:      intRange("", 1, 100),
 		},
 		"Cursor": {
@@ -2222,9 +2222,9 @@ func generateResponses() map[string]Response {
 	}
 	return map[string]Response{
 		"Unauthorized": textResp("Bearer token missing (`Unauthorized - missing token`) or rejected (`Invalid token: ...`)"),
-		"Forbidden":    textResp("`admin access required` — the JWT's user does not have role `admin`"),
+		"Forbidden":    textResp("`admin access required`, the JWT's user does not have role `admin`"),
 		"RateLimited": {
-			Description: "`rate_limit_exceeded` — the tenant's budget (100/min, burst 10) is spent; `Retry-After` says when to try again",
+			Description: "`rate_limit_exceeded`, the tenant's budget (100/min, burst 10) is spent; `Retry-After` says when to try again",
 			Headers:     rl,
 			Content:     map[string]MediaType{"application/json": {Schema: ref("JSONError")}},
 		},
@@ -2270,7 +2270,7 @@ const swaggerUIHTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>API Reference — Stored</title>
+    <title>API Reference, Stored</title>
     <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.10.3/swagger-ui.css">
     <style>
         html { box-sizing: border-box; overflow: -moz-scrollbars-vertical; overflow-y: scroll; }

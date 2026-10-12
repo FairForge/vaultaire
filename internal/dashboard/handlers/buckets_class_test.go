@@ -16,7 +16,7 @@ import (
 
 // WP-R13-1: the object browser shows the attic column, the restore status and
 // the Restore button for ATTIC objects only. A downstairs object the Smart
-// tier parked on the cold backend is not "in the attic" — it downloads like
+// tier parked on the cold backend is not "in the attic", it downloads like
 // any other object and reading it brings it back.
 
 // fakeArchive is a cold backend with a restore concept.

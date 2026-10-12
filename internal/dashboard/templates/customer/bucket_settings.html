@@ -1,4 +1,4 @@
-{{define "title"}}{{.BucketName}} Settings — Stored{{end}}
+{{define "title"}}{{.BucketName}} Settings, Stored{{end}}
 {{define "content"}}
 <div class="page-header">
     <div>
@@ -153,7 +153,7 @@ with open("file.jpg", "wb") as f:
             <input type="number" name="cache_max_age" value="{{.CacheMaxAge}}" min="0" max="86400"
                    style="max-width: 200px;">
             <p class="text-muted" style="font-size: 0.8rem; margin-top: 0.25rem;">
-                How long CDN edge servers cache objects (0–86400). Default: 3600 (1 hour).
+                How long CDN edge servers cache objects (0 to 86400). Default: 3600 (1 hour).
             </p>
         </div>
     </div>

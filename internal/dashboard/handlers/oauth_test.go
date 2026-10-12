@@ -156,7 +156,7 @@ func TestFindOrCreateOAuthUser_ExistingEmail(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, user)
 	assert.Equal(t, existing.ID, user.ID) // Same user, not a new one
-	assert.Nil(t, apiKey)                 // No new key minted — nothing to reveal
+	assert.Nil(t, apiKey)                 // No new key minted, nothing to reveal
 }
 
 func TestFindOrCreateOAuthUser_ExistingOAuth(t *testing.T) {
@@ -174,7 +174,7 @@ func TestFindOrCreateOAuthUser_ExistingOAuth(t *testing.T) {
 
 	// Should be the same user (looked up by email since no DB for GetUserByOAuth).
 	assert.Equal(t, first.ID, second.ID)
-	assert.Nil(t, secondKey) // Repeat login is not a signup — no reveal
+	assert.Nil(t, secondKey) // Repeat login is not a signup, no reveal
 }
 
 // oauthCallbackFixture wires HandleOAuthCallback against a fake token
@@ -285,7 +285,7 @@ func TestParseGoogleUser_RequiresVerifiedEmail(t *testing.T) {
 }
 
 // R5-06 / WP-R5-2: an OAuth sign-in for an account that has TOTP enabled must
-// stop at the second factor exactly like the password form does — a pending
+// stop at the second factor exactly like the password form does, a pending
 // challenge and a redirect to /login/verify-2fa, never a session.
 type fakeChallenger struct{ began []MFAChallenge }
 

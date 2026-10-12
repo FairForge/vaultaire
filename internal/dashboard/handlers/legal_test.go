@@ -22,7 +22,7 @@ func legalTmpl(t *testing.T, content string) *template.Template {
 
 func TestHandleLegalPage_ReturnsHTML(t *testing.T) {
 	// Arrange
-	tmpl := legalTmpl(t, `{{define "title"}}Test — stored.ge{{end}}{{define "content"}}<h1>Test Page</h1>{{end}}`)
+	tmpl := legalTmpl(t, `{{define "title"}}Test, stored.ge{{end}}{{define "content"}}<h1>Test Page</h1>{{end}}`)
 	handler := handlers.HandleLegalPage(tmpl)
 	req := httptest.NewRequest(http.MethodGet, "/legal/test", nil)
 	rec := httptest.NewRecorder()
@@ -142,8 +142,8 @@ func TestHandleLegalPage_GDPR(t *testing.T) {
 	// Arrange
 	tmpl := legalTmpl(t, `{{define "content"}}`+
 		`<h1>GDPR Compliance</h1>`+
-		`<h2 id="portability">Article 20 — Data Portability</h2>`+
-		`<h2 id="breach-notification">Articles 33/34 — Breach Notification</h2>`+
+		`<h2 id="portability">Article 20, Data Portability</h2>`+
+		`<h2 id="breach-notification">Articles 33/34, Breach Notification</h2>`+
 		`{{end}}`)
 	handler := handlers.HandleLegalPage(tmpl)
 	req := httptest.NewRequest(http.MethodGet, "/legal/gdpr", nil)
@@ -164,8 +164,8 @@ func TestHandleLegalPage_DataAct(t *testing.T) {
 	// Arrange
 	tmpl := legalTmpl(t, `{{define "content"}}`+
 		`<h1>EU Data Act Compliance</h1>`+
-		`<h2 id="switching">Article 23 — Switching Between Providers</h2>`+
-		`<h2 id="interoperability">Article 25 — Interoperability</h2>`+
+		`<h2 id="switching">Article 23, Switching Between Providers</h2>`+
+		`<h2 id="interoperability">Article 25, Interoperability</h2>`+
 		`{{end}}`)
 	handler := handlers.HandleLegalPage(tmpl)
 	req := httptest.NewRequest(http.MethodGet, "/legal/data-act", nil)

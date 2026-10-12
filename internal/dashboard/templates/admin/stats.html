@@ -1,4 +1,4 @@
-{{define "title"}}Traffic — Stored admin{{end}}
+{{define "title"}}Traffic, Stored admin{{end}}
 {{define "content"}}
 <div class="dashboard-header">
     <h1>Traffic</h1>
@@ -48,7 +48,7 @@
                 <tbody>{{range .Rows}}<tr><td>{{.Name}}</td><td>{{.N}}</td></tr>{{end}}</tbody>
             </table>
         </div>
-        {{else}}<p class="text-muted">—</p>{{end}}
+        {{else}}<p class="text-muted">, </p>{{end}}
     </div>
     {{end}}
 </div>

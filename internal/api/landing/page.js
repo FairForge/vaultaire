@@ -2,7 +2,7 @@
     // Where this visit came from: the landing URL's utm_* labels and the
     // referring site (host only). Sent with the waitlist e-mail and appended
     // to /register links so a sign-up can be attributed to the post that
-    // produced it. No cookie, no storage — the values live on this page only.
+    // produced it. No cookie, no storage, the values live on this page only.
     function attribution() {
         var out = {};
         try {
@@ -80,7 +80,7 @@
                     body: JSON.stringify(withHouse({ email: email }))
                 });
             } catch (e) { /* endpoint degrades to 200; confirmation is best-effort */ }
-            form.innerHTML = '<span class="waitlist-ok">You\'re on the list — see you October 31.</span>';
+            form.innerHTML = '<span class="waitlist-ok">You\'re on the list, see you October 31.</span>';
         });
     });
     {{end}}
@@ -104,7 +104,7 @@
         var TOTAL_TB = 25, R = 78, GAP = 3;
         var C = 2 * Math.PI * R;
         // keyframes: [day, hot%, optimized%, tape%]
-        // keyframes: [day, hot%, restored%, tape%] — idle ≥14d demotes; ~15% hot at steady state
+        // keyframes: [day, hot%, restored%, tape%], idle ≥14d demotes; ~15% hot at steady state
         var KF = [[0, 100, 0, 0], [14, 100, 0, 0], [30, 45, 3, 52], [60, 24, 4, 72], [120, 15, 5, 80]];
         var segs = {
             hot:  document.getElementById('seg-hot'),

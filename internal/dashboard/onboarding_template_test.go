@@ -10,10 +10,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// B4 (5.15.6): the onboarding quickstart must be copy-paste RUNNABLE —
+// B4 (5.15.6): the onboarding quickstart must be copy-paste RUNNABLE,
 // real access key injected, rclone + s3cmd tabs present, and a copy button
 // per snippet. The secret is never in dashboard HTML (reveal-once at signup
-// per B2) — snippets carry the YOUR_SECRET_KEY placeholder.
+// per B2), snippets carry the YOUR_SECRET_KEY placeholder.
 func renderOverview(t *testing.T, data map[string]any) string {
 	t.Helper()
 	tmpl := template.Must(template.New("").Funcs(handlers.TemplateFuncs()).ParseFS(Templates,
@@ -37,7 +37,7 @@ func TestOnboardingTabs_RunnableConfig(t *testing.T) {
 
 	// Real access key is injected into every snippet family.
 	assert.Contains(t, body, "VKb4testkey123", "the user's real access key must be injected")
-	// The secret NEVER appears in dashboard HTML — placeholder only.
+	// The secret NEVER appears in dashboard HTML, placeholder only.
 	assert.Contains(t, body, "YOUR_SECRET_KEY", "snippets must carry the secret placeholder")
 
 	// rclone tab (the tool the LET audience actually uses).

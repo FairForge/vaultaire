@@ -12,7 +12,7 @@ import (
 )
 
 // WP-R12-14: the session cookie carries the `__Host-` prefix, so it is
-// host-only by the browser's rules — Secure, Path=/, no Domain — and a
+// host-only by the browser's rules, Secure, Path=/, no Domain, and a
 // sibling subdomain cannot plant one. The clearing cookie must satisfy the
 // same rules or the browser keeps the session; the pre-prefix cookie is
 // expired alongside so a browser carries one session cookie, not two.

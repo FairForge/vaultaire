@@ -1,11 +1,11 @@
-{{define "title"}}Audit Log — Stored admin{{end}}
+{{define "title"}}Audit Log, Stored admin{{end}}
 {{define "content"}}
 <div class="dashboard-header">
     <h1>Audit Log</h1>
     <a href="{{.ExportURL}}" class="btn btn-sm">Export CSV</a>
 </div>
 
-<p class="text-muted" style="margin-bottom:1rem">Every key, password, MFA, account, flag, admin and sign-in event — who did it, from which address, and the outcome. Failed and refused actions are marked.</p>
+<p class="text-muted" style="margin-bottom:1rem">Every key, password, MFA, account, flag, admin and sign-in event, who did it, from which address, and the outcome. Failed and refused actions are marked.</p>
 
 <div class="card" style="margin-bottom:1.5rem">
     <form action="/admin/audit" method="GET" style="display:flex;gap:0.75rem;flex-wrap:wrap;align-items:end">

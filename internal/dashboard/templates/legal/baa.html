@@ -1,4 +1,4 @@
-{{define "title"}}Business Associate Agreement — Stored{{end}}
+{{define "title"}}Business Associate Agreement, Stored{{end}}
 {{define "content"}}
 <div class="card">
     <p class="text-muted">Last updated: September 30, 2026</p>
@@ -43,7 +43,7 @@
     <p>Business Associate shall implement administrative, physical, and technical safeguards that reasonably and appropriately protect the confidentiality, integrity, and availability of ePHI, as required by 45 CFR §164.306 and §164.312. Stored provides the following safeguards:</p>
 
     <h3>3.1 Encryption at Rest</h3>
-    <p>Encryption at rest is available under keys the Covered Entity supplies with each request (SSE-C — never stored by us) or applied client-side before upload. Server-managed encryption at rest (SSE-S3, AES-256-GCM with ML-KEM-768 key encapsulation and per-tenant keys) is implemented and tested but <strong>not yet enabled in production</strong>; Covered Entities storing ePHI should use SSE-C or client-side encryption until it is. Objects held by our storage subcontractors are additionally subject to those providers' own at-rest encryption.</p>
+    <p>Encryption at rest is available under keys the Covered Entity supplies with each request (SSE-C, never stored by us) or applied client-side before upload. Server-managed encryption at rest (SSE-S3, AES-256-GCM with ML-KEM-768 key encapsulation and per-tenant keys) is implemented and tested but <strong>not yet enabled in production</strong>; Covered Entities storing ePHI should use SSE-C or client-side encryption until it is. Objects held by our storage subcontractors are additionally subject to those providers' own at-rest encryption.</p>
 
     <h3>3.2 Encryption in Transit</h3>
     <p>All data in transit is encrypted via TLS 1.2 or higher. HSTS is enforced at our edge (one-year max-age, preload) and plain HTTP is redirected to HTTPS. API endpoints are accessible only over HTTPS.</p>
@@ -67,7 +67,7 @@
     <p>Stored maintains audit logs for account access, API operations, and administrative actions. Event logging and webhook notifications are available for real-time monitoring of object operations.</p>
 
     <h2 id="breach-notification">4. Breach Notification</h2>
-    <p>Business Associate shall comply with the breach notification requirements of 45 CFR §§164.400–414:</p>
+    <p>Business Associate shall comply with the breach notification requirements of 45 CFR §§164.400 to 414:</p>
     <ul>
         <li><strong>Discovery and notification:</strong> Business Associate shall report to Covered Entity any Breach of Unsecured PHI without unreasonable delay, and in no case later than <strong>72 hours</strong> after discovery of the Breach.</li>
         <li><strong>Content of notification:</strong> Notification shall include, to the extent available: (a) identification of each individual whose PHI has been or is reasonably believed to have been affected; (b) a description of the type of PHI involved; (c) a description of what Business Associate is doing to investigate, mitigate, and prevent recurrence; (d) contact information for questions.</li>

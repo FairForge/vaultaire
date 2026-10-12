@@ -93,7 +93,7 @@ func TestHandleRevokeSession_DeletesOwnedSession(t *testing.T) {
 
 func TestHandleRevokeSession_RefusesOtherUser(t *testing.T) {
 	// Attempting to revoke another user's session must silently no-op
-	// — i.e., the target token must still exist after the request.
+	//, i.e., the target token must still exist after the request.
 	store := dashauth.NewMemoryStore()
 	ctx := context.Background()
 
@@ -114,13 +114,13 @@ func TestHandleRevokeSession_RefusesOtherUser(t *testing.T) {
 
 	assert.Equal(t, http.StatusSeeOther, w.Code)
 	if sd, _ := store.Get(ctx, victimToken); sd == nil {
-		t.Error("victim session must NOT be deleted — cross-user revoke attempted")
+		t.Error("victim session must NOT be deleted, cross-user revoke attempted")
 	}
 }
 
 func TestHandleRevokeSession_RefusesSelf(t *testing.T) {
 	// Revoking the issuing session would immediately log the user out
-	// mid-request — disallowed; they should use /logout instead.
+	// mid-request, disallowed; they should use /logout instead.
 	store := dashauth.NewMemoryStore()
 	ctx := context.Background()
 
@@ -151,7 +151,7 @@ func TestHandleRevokeAllOtherSessions(t *testing.T) {
 	keep, _ := store.Create(ctx, dashauth.SessionData{UserID: "u1"}, time.Hour)
 	a, _ := store.Create(ctx, dashauth.SessionData{UserID: "u1"}, time.Hour)
 	b, _ := store.Create(ctx, dashauth.SessionData{UserID: "u1"}, time.Hour)
-	// Another user — must not be affected.
+	// Another user, must not be affected.
 	other, _ := store.Create(ctx, dashauth.SessionData{UserID: "u2"}, time.Hour)
 
 	handler := HandleRevokeAllOtherSessions(store, zap.NewNop())

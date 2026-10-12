@@ -113,7 +113,7 @@ func TestHouseScene_LargeQuotaAggregates(t *testing.T) {
 }
 
 func TestHouseScene_FreeTierAndLegacy(t *testing.T) {
-	// Free tier: 5 GB total, nothing whole-TB about it — one box, sized honestly.
+	// Free tier: 5 GB total, nothing whole-TB about it, one box, sized honestly.
 	sc := BuildHouseScene(FloorState{LimitBytes: 5 * usage.GB, UsedBytes: 1 * usage.GB, Buckets: []BucketBytes{{"stuff", usage.GB}}}, FloorState{}, "")
 	st := storage(sc.Pieces)
 	require.Len(t, st, 1)

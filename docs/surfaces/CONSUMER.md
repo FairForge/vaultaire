@@ -1,6 +1,6 @@
-# Consumer surface — charter ("the Apple of storage")
+# Consumer surface, charter ("the Apple of storage")
 
-*Added 2026-10-12. Lives at stored.cloud/photos (stored.pics redirects there) and in the apps. Contract: `docs/ARCHITECTURE_CONTRACT.md`. Plan homes: 42.3 Stored, Phase 10.0 (the Ente model, F-12, F-13), 41.1–41.2, 43.5; decision F-19.*
+*Added 2026-10-12. Lives at stored.cloud/photos (stored.pics redirects there) and in the apps. Contract: `docs/ARCHITECTURE_CONTRACT.md`. Plan homes: 42.3 Stored, Phase 10.0 (the Ente model, F-12, F-13), 41.1 to 41.2, 43.5; decision F-19.*
 
 **Who it is for.** A person who will never read documentation. They want their photos and files safe forever, beautiful, shareable with family, findable, and recoverable when they forget a password.
 

@@ -68,7 +68,7 @@ func newAuthWithMFAUser(t *testing.T) *auth.AuthService {
 // --- WP-R12-8: enrolment keeps the pending secret server-side ----------------
 //
 // The TOTP secret and the ten backup codes used to come back from the browser
-// in hidden fields (a user could enrol a secret of their choosing — R12-23 /
+// in hidden fields (a user could enrol a secret of their choosing, R12-23 /
 // R5-15b). The pending secret now lives in MFAEnrolmentStore, keyed by the
 // session; the enable POST carries the 6-digit code and nothing else; the
 // backup codes are generated when the code has verified and shown once.
@@ -154,7 +154,7 @@ func TestMFAEnrolment_SetupShowsTheSecretAndNoBackupCodes(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 	body := w.Body.String()
 	assert.Contains(t, body, "secret:")
-	assert.NotContains(t, body, "codes:", "backup codes are shown once, after the code verified — not on the setup page")
+	assert.NotContains(t, body, "codes:", "backup codes are shown once, after the code verified, not on the setup page")
 	assert.Equal(t, "no-store", w.Header().Get("Cache-Control"), "a page that shows a secret is never cached")
 	assert.Equal(t, 1, f.store.Len())
 	assert.False(t, f.enabled())
@@ -163,7 +163,7 @@ func TestMFAEnrolment_SetupShowsTheSecretAndNoBackupCodes(t *testing.T) {
 func TestMFAEnrolment_AClientSuppliedSecretIsNeverAccepted(t *testing.T) {
 	// Arrange: the page was opened (a pending secret exists server-side); the
 	// user posts a secret of their own choosing with a code that is valid for
-	// it — what the hidden field used to allow.
+	// it, what the hidden field used to allow.
 	f := newEnrolFixture(t)
 	pending := f.open(mfaTestSession)
 	const chosen = "JBSWY3DPEHPK3PXP"
@@ -172,7 +172,7 @@ func TestMFAEnrolment_AClientSuppliedSecretIsNeverAccepted(t *testing.T) {
 	// Act
 	w := f.enable(mfaTestSession, "secret="+chosen+"&totp_code="+f.code(chosen)+"&backup_codes=CODE1,CODE2")
 
-	// Assert: refused — the code is checked against the server's secret.
+	// Assert: refused, the code is checked against the server's secret.
 	assert.Equal(t, http.StatusSeeOther, w.Code)
 	assert.Equal(t, "/dashboard/settings/mfa", w.Header().Get("Location"))
 	assert.False(t, f.enabled(), "a secret from the form enrolled the account")
@@ -201,7 +201,7 @@ func TestMFAEnrolment_BackupCodesAreShownOnceAfterTheCodeVerified(t *testing.T) 
 
 	// Act. ONE code, computed once: the assertion below is about this very
 	// code, and a second totp.GenerateCode after a slow enable (ten bcrypt
-	// hashes — 15 s under -race on CI) can fall in the next 30-second step.
+	// hashes, 15 s under -race on CI) can fall in the next 30-second step.
 	code := f.code(secret)
 	w := f.enable(mfaTestSession, "totp_code="+code)
 
@@ -256,7 +256,7 @@ func TestMFAEnrolment_ASecondTabSeesTheSameSecretAndOnlyOneEnrols(t *testing.T) 
 	require.Equal(t, http.StatusOK, f.enable(mfaTestSession, "totp_code="+f.code(tab1)).Code)
 	w := f.enable(mfaTestSession, "totp_code="+f.code(tab2))
 
-	// Assert: already enrolled — nothing is replaced, no codes are shown.
+	// Assert: already enrolled, nothing is replaced, no codes are shown.
 	assert.Equal(t, http.StatusSeeOther, w.Code)
 	assert.Equal(t, "/dashboard/settings", w.Header().Get("Location"))
 	stored, _ := f.auth.GetMFASecret(context.Background(), f.userID())
@@ -287,7 +287,7 @@ func TestMFAEnrolment_AnExpiredPendingSecretIsRefused(t *testing.T) {
 }
 
 func TestMFAEnrolment_ARestartMidEnrolmentAsksToScanAgain(t *testing.T) {
-	// Arrange: the page was opened by the process before this one — the
+	// Arrange: the page was opened by the process before this one, the
 	// pending store is in memory and a deploy empties it.
 	f := newEnrolFixture(t)
 	secret := f.open(mfaTestSession)
