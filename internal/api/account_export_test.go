@@ -515,6 +515,15 @@ func TestAccountExport_RetentionOnAnExportWhoseHeadRowIsAlreadyGone(t *testing.T
 	require.NoError(t, err)
 	f.run()
 	f.exec(`UPDATE account_exports SET expires_at = NOW() - INTERVAL '1 minute' WHERE id = $1`, id)
+	// An export written in place by a build before WP-R2-1 Part C: its blob
+	// at <key>. (A Part C export's address is on its head row only; with the
+	// row gone it is left for the erasure sweep — the _exports bucket has no
+	// S3 writer, so only a bug removes that row.)
+	for _, p := range f.exportFiles() {
+		if i := strings.LastIndexByte(p, '@'); i > 0 {
+			require.NoError(t, os.Rename(p, p[:i]))
+		}
+	}
 	f.exec(`DELETE FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2`, f.tenantID, tenant.ExportsBucket)
 
 	n, err := f.svc.PurgeExpired(context.Background())
@@ -691,7 +700,10 @@ func TestAccountExport_ErasureRemovesTheExportObjectAndRow(t *testing.T) {
 	st, err := svc.Get(context.Background(), id, d.userID)
 	require.NoError(t, err)
 	require.Equal(t, "completed", st.Status, st.Error)
-	exportBlob := filepath.Join(d.primary, d.tenantID+"_"+tenant.ExportsBucket, st.ObjectKey)
+	var exportAddr string
+	require.NoError(t, d.db.QueryRow(`SELECT storage_key FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+		d.tenantID, tenant.ExportsBucket, st.ObjectKey).Scan(&exportAddr))
+	exportBlob := filepath.Join(d.primary, d.tenantID+"_"+tenant.ExportsBucket, exportAddr)
 	_, statErr := os.Stat(exportBlob)
 	require.NoError(t, statErr, "the export blob exists before the erasure")
 

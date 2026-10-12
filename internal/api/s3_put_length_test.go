@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -35,7 +34,7 @@ func adapterPut(t *testing.T, f *adapterTestFixture, key string, body []byte, hd
 
 func adapterDisk(t *testing.T, f *adapterTestFixture, key string) string {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(f.tempDir, f.tenant.NamespaceContainer("test-bucket"), key))
+	b, err := os.ReadFile(blobPath(t, f.db, f.tempDir, f.tenantID, "test-bucket", key)) // #nosec G304 -- test fixture path
 	require.NoError(t, err)
 	return string(b)
 }

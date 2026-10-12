@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -43,7 +42,7 @@ func (f *versioningFixture) putObjectRaw(t *testing.T, key, content string) *htt
 
 func onDisk(t *testing.T, f *versioningFixture, key string) string {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(f.tempDir, f.tenant.NamespaceContainer(f.bucket), key))
+	b, err := os.ReadFile(blobPath(t, f.db, f.tempDir, f.tenantID, f.bucket, key)) // #nosec G304 -- test fixture path
 	require.NoError(t, err)
 	return string(b)
 }

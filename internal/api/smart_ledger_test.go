@@ -3,9 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
-	"encoding/xml"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -133,39 +131,67 @@ func (f *ledgerFixture) blob(dir, bucket, key, body string) {
 }
 
 // --- R13-10: an overwrite must not leave the cold copy behind ---------------
+//
+// Since WP-R2-1 Part C the displaced copy is RETIRED in the write's
+// transaction (retired_blobs) and deleted by the collector after its grace —
+// never inline, never while a row (here: an open demotion ledger row) names it.
+
+// collectRetiredLater runs the retired_blobs collector a day and a bit later.
+func (f *ledgerFixture) collectRetiredLater() RetiredBlobsResult {
+	f.t.Helper()
+	c := f.collector()
+	c.now = func() time.Time { return time.Now().Add(retiredBlobGrace + time.Hour) }
+	res, err := c.RunOnce(context.Background())
+	require.NoError(f.t, err)
+	return res
+}
 
 func TestOverwriteOfDemotedObject_PlainPutRemovesTheColdCopy(t *testing.T) {
 	// Arrange: demoted, hot copy reclaimed — the only bytes are on tape.
 	f := setupLedgerFixture(t)
+	cleanupRetired(t, f)
 	f.demoted("b", "report.pdf", true)
 
 	// Act: the customer uploads the key again; a plain PUT lands hot.
 	f.put("b", "report.pdf", "new bytes")
 
-	// Assert: the old bytes on the cold backend are gone, the new ones live.
+	// Assert: the new bytes live at their own address; the old cold copy
+	// is retired, then collected.
 	assert.Equal(t, "idrive", f.backendOf("b", "report.pdf"))
-	assert.Equal(t, "new bytes", f.read(f.hotPath("b", "report.pdf")))
+	assert.Equal(t, "new bytes", f.read(f.hotPath("b", f.headAddr("b", "report.pdf"))))
+	assert.Equal(t, retiredOverwritten, f.retired()["report.pdf"], "the displaced cold copy is queued for the collector")
+	assert.True(t, f.coldExists("b", "report.pdf"), "kept through the grace")
+	f.collectRetiredLater()
 	assert.False(t, f.coldExists("b", "report.pdf"), "the displaced cold copy has nothing pointing at it — it must be deleted")
+	assert.Equal(t, "new bytes", f.get("b", "report.pdf").Body.String())
 }
 
 func TestOverwriteOfDemotedObject_InsideTheGraceKeepsTheNewHotBytes(t *testing.T) {
 	// Arrange: demoted a moment ago — the hot copy is still there.
 	f := setupLedgerFixture(t)
+	cleanupRetired(t, f)
 	f.demoted("b", "k", false)
 	require.True(t, f.hotExists("b", "k"))
 
 	// Act
 	f.put("b", "k", "new bytes")
+	addr := f.headAddr("b", "k")
 
-	// Assert: the PUT replaced the hot copy in place; only the cold copy goes.
-	assert.Equal(t, "new bytes", f.read(f.hotPath("b", "k")))
-	assert.False(t, f.coldExists("b", "k"))
+	// Assert: the new bytes are at their own address; the ledger's copies
+	// (hot and cold, both at <key>) are the ledger's — the collector keeps
+	// them while its row is open.
+	assert.Equal(t, "new bytes", f.read(f.hotPath("b", addr)))
+	f.collectRetiredLater()
+	assert.True(t, f.coldExists("b", "k"), "an open ledger row names the cold copy")
 
-	// The reclaim, a day later, closes the ledger and touches nothing live.
+	// The reclaim, a day later, closes the ledger, drops both stale copies
+	// and touches nothing live.
 	f.runner.now = func() time.Time { return f.now.Add(48 * time.Hour) }
 	_, err := f.runner.RunOnce(context.Background(), false)
 	require.NoError(t, err)
-	assert.Equal(t, "new bytes", f.read(f.hotPath("b", "k")))
+	assert.Equal(t, "new bytes", f.read(f.hotPath("b", addr)))
+	assert.False(t, f.hotExists("b", "k"))
+	assert.False(t, f.coldExists("b", "k"))
 	_, closed, outcome, ok := f.ledger("b", "k")
 	require.True(t, ok)
 	assert.True(t, closed)
@@ -175,6 +201,7 @@ func TestOverwriteOfDemotedObject_InsideTheGraceKeepsTheNewHotBytes(t *testing.T
 func TestOverwriteOfDemotedObject_CopyObjectRemovesTheColdCopy(t *testing.T) {
 	// Arrange
 	f := setupLedgerFixture(t)
+	cleanupRetired(t, f)
 	f.demoted("b", "dest", true)
 	f.put("b", "src", "source bytes")
 
@@ -187,60 +214,53 @@ func TestOverwriteOfDemotedObject_CopyObjectRemovesTheColdCopy(t *testing.T) {
 	// Assert
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	assert.Equal(t, "idrive", f.backendOf("b", "dest"))
-	assert.Equal(t, "source bytes", f.read(f.hotPath("b", "dest")))
+	assert.Equal(t, "source bytes", f.read(f.hotPath("b", f.headAddr("b", "dest"))))
+	assert.Equal(t, retiredOverwritten, f.retired()["dest"])
+	f.collectRetiredLater()
 	assert.False(t, f.coldExists("b", "dest"), "CopyObject onto a demoted key leaked the cold copy")
 }
 
 func TestOverwriteOfDemotedObject_MultipartCompleteRemovesTheColdCopy(t *testing.T) {
 	// Arrange
 	f := setupLedgerFixture(t)
+	cleanupRetired(t, f)
 	f.demoted("b", "big.bin", true)
-
-	w := httptest.NewRecorder()
-	f.server.handleInitiateMultipartUpload(w, f.req("POST", "/b/big.bin?uploads", nil), "b", "big.bin")
-	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-	var init struct {
-		UploadID string `xml:"UploadId"`
-	}
-	require.NoError(t, xml.Unmarshal(w.Body.Bytes(), &init))
-	t.Cleanup(func() { _ = os.RemoveAll(multipartDir(init.UploadID)) })
-
-	w = httptest.NewRecorder()
-	f.server.handleUploadPart(w, f.req("PUT", "/b/big.bin?partNumber=1&uploadId="+init.UploadID, []byte("multipart bytes")), "b", "big.bin")
-	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-	etag := w.Header().Get("ETag")
+	uploadID, body := f.startUpload("b", "big.bin", "multipart bytes")
 
 	// Act
-	body := fmt.Sprintf(`<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part></CompleteMultipartUpload>`, etag)
-	w = httptest.NewRecorder()
-	f.server.handleCompleteMultipartUpload(w, f.req("POST", "/b/big.bin?uploadId="+init.UploadID, []byte(body)), "b", "big.bin")
+	w := f.complete("b", "big.bin", uploadID, body)
 
 	// Assert
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	assert.Equal(t, "idrive", f.backendOf("b", "big.bin"))
-	assert.Equal(t, "multipart bytes", f.read(f.hotPath("b", "big.bin")))
+	assert.Equal(t, "multipart bytes", f.read(f.hotPath("b", f.headAddr("b", "big.bin"))))
+	assert.Equal(t, retiredOverwritten, f.retired()["big.bin"])
+	f.collectRetiredLater()
 	assert.False(t, f.coldExists("b", "big.bin"), "CompleteMultipartUpload onto a demoted key leaked the cold copy")
 }
 
 func TestOverwriteOfDemotedObject_ArchiveClassPutKeepsTheColdBytesAndTheReclaimDropsTheStaleHotCopy(t *testing.T) {
 	// Arrange: demoted inside the grace; the customer then PUTs the key with
-	// an archive class — THEIR bytes land on the cold backend at this key.
+	// an archive class — THEIR bytes land on the cold backend, at their own
+	// address.
 	f := setupLedgerFixture(t)
+	cleanupRetired(t, f)
 	f.demoted("b", "k", false)
 
 	// Act
 	f.put("b", "k", "attic bytes", "x-amz-storage-class", "GLACIER")
+	addr := f.headAddr("b", "k")
 
 	// Assert: nothing of theirs was deleted.
 	require.Equal(t, "geyser", f.backendOf("b", "k"))
-	assert.Equal(t, "attic bytes", f.read(f.coldPath("b", "k")), "the cold blob is the customer's new object")
+	assert.Equal(t, "attic bytes", f.read(f.coldPath("b", addr)), "the cold blob is the customer's new object")
 
-	// The reclaim after the grace: the cold copy is theirs (kept), the hot
-	// copy is the OLD object and nothing routes to it — it goes.
+	// The reclaim after the grace: both copies at <key> are the OLD object
+	// and nothing routes to them — they go; the new object stays.
 	f.runner.now = func() time.Time { return f.now.Add(48 * time.Hour) }
 	_, err := f.runner.RunOnce(context.Background(), false)
 	require.NoError(t, err)
-	assert.Equal(t, "attic bytes", f.read(f.coldPath("b", "k")))
+	assert.Equal(t, "attic bytes", f.read(f.coldPath("b", addr)))
 	assert.False(t, f.hotExists("b", "k"), "the stale hot copy of the replaced object stayed on paid storage")
 	_, closed, outcome, _ := f.ledger("b", "k")
 	assert.True(t, closed)
@@ -589,45 +609,6 @@ func TestSmartDemotion_ObjectDeletedDuringTheCopyLeavesNoColdCopy(t *testing.T) 
 	assert.False(t, f.coldExists("b", "racy"), "the cold copy of a deleted object was left on tape")
 }
 
-func TestDisplacedBlob_NotDeletedWhenTheKeyRoutesBackThere(t *testing.T) {
-	// Arrange: a writer displaced a cold-routed row with a hot write, and by
-	// the time it cleans up, another writer has put the key back on the cold
-	// backend (a PUT with an archive class). The blob there is live.
-	f := setupLedgerFixture(t)
-	f.object("b", "k", 100, 30, 1, onBackend("geyser")) // the row as the second writer left it
-	container := f.tenantID + "_b"
-
-	// Act
-	dropDisplacedBlob(context.Background(), f.db, f.eng, zap.NewNop(), lostWriteOverwrite,
-		f.tenantID, "b", container, "k", displacedRow{Size: 100, Backend: "geyser"}, "idrive")
-
-	// Assert
-	assert.True(t, f.coldExists("b", "k"), "a blob the head row routes to must never be deleted as displaced")
-}
-
-func TestDisplacedBlob_UnknownOrSameBackendIsLeftAlone(t *testing.T) {
-	// Arrange: the key routes hot; a blob sits on each backend.
-	f := setupLedgerFixture(t)
-	f.object("b", "k", 100, 30, 1)
-	f.blob(f.coldDir, "b", "k", "cold blob")
-	container := f.tenantID + "_b"
-
-	for _, d := range []displacedRow{
-		{Size: 100, Backend: "idrive"},                // same backend: overwritten in place
-		{Size: 100, Backend: ""},                      // legacy row with no backend on record
-		{Size: 100, Backend: "no-such-driver"},        // a backend this process does not serve
-		{Size: 100, Backend: "geyser", Chunked: true}, // a chunked row never had a whole blob there
-	} {
-		// Act
-		dropDisplacedBlob(context.Background(), f.db, f.eng, zap.NewNop(), lostWriteOverwrite,
-			f.tenantID, "b", container, "k", d, "idrive")
-
-		// Assert
-		assert.True(t, f.hotExists("b", "k"), "%+v", d)
-		assert.True(t, f.coldExists("b", "k"), "%+v", d)
-	}
-}
-
 func scrapeMetrics(t *testing.T, s *Server) string {
 	t.Helper()
 	w := httptest.NewRecorder()
@@ -661,25 +642,3 @@ func (d *hungDriver) Delete(ctx context.Context, _, _ string) error {
 // engine already knows: the backend's circuit breaker is open. The blob is
 // then left (an orphan costs money; the wait cost the customer's write path
 // during the outage the failover exists for).
-func TestDisplacedBlob_NotAttemptedWhileTheOldBackendsBreakerIsOpen(t *testing.T) {
-	// Arrange: the old backend is down and its breaker has opened.
-	f := setupLedgerFixture(t)
-	down := &hungDriver{LocalDriver: drivers.NewLocalDriver(t.TempDir(), zap.NewNop())}
-	f.eng.AddDriver("lyve", down)
-	f.object("b", "k", 100, 30, 1) // the row as the overwrite left it: routes to idrive
-	container := f.tenantID + "_b"
-	for i := 0; i < 10 && f.eng.GetFailoverStatus()["lyve"] == "closed"; i++ {
-		f.eng.HintBackend(container, "probe", "lyve")
-		_, _ = f.eng.Get(context.Background(), container, "probe")
-	}
-	require.NotEqual(t, "closed", f.eng.GetFailoverStatus()["lyve"], "fixture: the breaker must be open")
-
-	// Act
-	start := time.Now()
-	dropDisplacedBlob(context.Background(), f.db, f.eng, zap.NewNop(), lostWriteOverwrite,
-		f.tenantID, "b", container, "k", displacedRow{Size: 100, Backend: "lyve"}, "idrive")
-
-	// Assert: no call to the dead backend, no wait.
-	assert.Equal(t, int32(0), down.deletes.Load(), "a delete was sent to a backend whose breaker is open")
-	assert.Less(t, time.Since(start), 5*time.Second)
-}

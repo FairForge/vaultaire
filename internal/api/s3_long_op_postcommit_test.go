@@ -132,8 +132,10 @@ func waitRecorder(t *testing.T, ch <-chan *httptest.ResponseRecorder) *httptest.
 
 func TestCompleteMultipartUpload_CutInTheBookkeepingStillAppliesTheDefaultRetention(t *testing.T) {
 	// Arrange: a COMPLIANCE-30d bucket; the key's current row routes to a
-	// second backend whose delete (the displaced blob) takes 600 ms — the
-	// cut lands there, after the commit.
+	// second backend whose delete is slow. Since WP-R2-1 Part C the
+	// displaced blob is retired inside the commit's transaction — the
+	// bookkeeping after the commit makes no backend call that a cut could
+	// land in, and the slow backend is never asked.
 	f := longOpFixture(t, 30)
 	otherDir := t.TempDir()
 	other := &slowDeleteDriver{Driver: drivers.NewLocalDriver(otherDir, zap.NewNop()), delay: 600 * time.Millisecond, deleting: make(chan struct{}, 1)}
@@ -142,21 +144,25 @@ func TestCompleteMultipartUpload_CutInTheBookkeepingStillAppliesTheDefaultRetent
 		INSERT INTO object_head_cache (tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name)
 		VALUES ($1, 'test-bucket', 'worm.bin', 5, 'old', 'application/octet-stream', 'other')`, f.tenantID)
 	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM retired_blobs WHERE tenant_id = $1`, f.tenantID) })
 	uploadID, body := uploadTwoParts(t, f.server, f.tenant, "worm.bin")
 
-	// Act: the complete runs; the stop sequence cuts it during the displaced delete.
+	// Act: the complete runs; the stop sequence cuts right after.
 	done := startS3(f.server, f, "POST", "/test-bucket/worm.bin?uploadId="+uploadID, body)
-	select {
-	case <-other.deleting:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the complete never reached the displaced blob's delete")
-	}
-	f.server.drainLongOps(0)
 	w := waitRecorder(t, done)
+	f.server.drainLongOps(0)
 
 	// Assert: the client was told it succeeded — so the object must carry
 	// the bucket's retention: a DELETE is refused.
 	require.Contains(t, w.Body.String(), "<ETag>", w.Body.String())
+	select {
+	case <-other.deleting:
+		t.Fatal("the displaced blob was deleted inline: it must be retired for the collector")
+	default:
+	}
+	var backend string
+	require.NoError(t, f.db.QueryRow(`SELECT backend_id FROM retired_blobs WHERE tenant_id = $1 AND storage_key = 'worm.bin'`, f.tenantID).Scan(&backend))
+	assert.Equal(t, "other", backend, "the displaced blob is retired on the backend it is on")
 	assert.Equal(t, 1, f.lockRows(t, "worm.bin"), "the default retention must be written after a cut")
 	del := doS3Request(f.server, f.tenant, "DELETE", "/test-bucket/worm.bin", nil)
 	assert.Equal(t, http.StatusForbidden, del.Code, "a COMPLIANCE object must not be deletable")

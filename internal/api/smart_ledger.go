@@ -24,8 +24,10 @@ import (
 //
 // Two things remove them:
 //
-//   - dropDisplacedBlob, after every whole-object write: the blob of the row
-//     the write replaced, when it is on another backend than the new one;
+//   - the pointer flip of every whole-object write (commitBlobWrite, WP-R2-1
+//     Part C): the blob of the row the write replaced, on whatever backend,
+//     is retired in the write's transaction and deleted by the retired_blobs
+//     collector after its grace;
 //   - ledgerSettler.settle, for the copies the demotion ledger knows: called
 //     by the daily reclaim (after the grace) and by DeleteObject (at once).
 //
@@ -33,16 +35,16 @@ import (
 // its backend — "route" being the head row, or the newest live version
 // behind a delete marker (its bytes are what GET ?versionId still serves).
 //
-// What neither can do is order itself against a writer. A PUT writes its
-// bytes to the backend BEFORE its head-row transaction (the in-place
-// overwrite, WP-R2-1), so a PUT of the same key that is between those two
-// steps is invisible to any lock taken here: a delete of a "stale" copy can
-// remove bytes that landed a moment earlier and are about to become the
-// object. That cannot be prevented without WP-R2-1; it is detected —
-// checkLostWrite re-reads the row after the delete (waiting for a writer
-// whose transaction is open) and, when the key now routes to the backend the
-// delete ran on and the bytes are not there, logs at Error with the key and
-// counts it.
+// A writer is never at risk from them any more (R13-06, closed by WP-R2-1
+// Part C): a write puts its bytes at a NEW address before its head-row
+// transaction, and a stale-copy delete only ever names an older address —
+// the ledger's, or a displaced row's. Before, a PUT wrote in place at <key>,
+// and the reclaim's delete of a "stale" copy at <key> could remove bytes
+// that had just landed. checkLostWrite stays as the detector of that class
+// (a row written in place by a build before Part C during a two-slot
+// switch): it re-reads the row after the delete and, when the key routes to
+// the backend and address the delete ran on and the bytes are not there,
+// logs at Error with the key and counts it.
 
 // staleCopyLostWrites counts writes a stale-copy delete destroyed. Every
 // source exists at 0 from boot so a rule on increase() has a series to read.
@@ -51,7 +53,7 @@ var staleCopyLostWrites = newStaleCopyLostWrites()
 const (
 	lostWriteReclaim   = "reclaim"   // the daily job (hot-copy reclaim, stale promotion)
 	lostWriteDelete    = "delete"    // DeleteObject / DeleteObjects settling a demoted key
-	lostWriteOverwrite = "overwrite" // PutObject / CopyObject / CompleteMultipartUpload dropping a displaced blob
+	lostWriteOverwrite = "overwrite" // the in-place overwrite's displaced-blob delete; gone with WP-R2-1 Part C, the series stays at 0 for the rules
 )
 
 func newStaleCopyLostWrites() *prometheus.CounterVec {
@@ -231,69 +233,6 @@ func checkLostWrite(ctx context.Context, db *sql.DB, eng *engine.CoreEngine, log
 		}
 		return
 	}
-}
-
-// dropDisplacedBlob removes the whole blob of the head row a write replaced,
-// when that row routed to ANOTHER backend than the one just written (same
-// backend = the write overwrote it in place). Best-effort and detached from
-// the request: the write is committed; a failed delete costs an orphan.
-//
-// The row is re-read first: when the key routes to the displaced backend
-// again (another writer put it back there in the meantime) the blob is that
-// writer's. A writer that has written and not yet committed is the window
-// described at the top of this file; checkLostWrite follows the delete.
-//
-// A displaced row that recorded its own address (WP-R2-1) is not this
-// function's: its blob was queued in retired_blobs inside the write's
-// transaction (atomicHeadUpsertReleasing).
-func dropDisplacedBlob(ctx context.Context, db *sql.DB, eng engine.Engine, logger *zap.Logger, source string,
-	tenantID, bucket, container, key string, displaced displacedRow, written string) {
-	if db == nil || displaced.Chunked || displaced.StorageKey != "" || displaced.Backend == "" || written == "" || displaced.Backend == written {
-		return
-	}
-	ce, ok := eng.(*engine.CoreEngine)
-	if !ok {
-		return
-	}
-	if _, registered := ce.GetDriver(displaced.Backend); !registered {
-		return
-	}
-	// This runs inside the write's request, straight on the old backend's
-	// driver. When that backend is the one in an outage — the primary is down
-	// and writes fail over — every overwrite displaces a row that routed to
-	// it, and each PUT would wait for the dead backend (up to
-	// staleCopyTimeout) before answering. The engine's breaker already knows:
-	// leave the blob (an orphan costs money) and keep the write path fast
-	// during the outage the failover exists for.
-	if st := ce.GetFailoverStatus()[displaced.Backend]; st != "" && st != "closed" {
-		logger.Warn("displaced blob left in place: its backend is unavailable (circuit breaker not closed) — orphan on the backend the object left",
-			zap.String("tenant", tenantID), zap.String("bucket", bucket), zap.String("key", key),
-			zap.String("backend", displaced.Backend), zap.String("breaker", st))
-		return
-	}
-	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), staleCopyTimeout)
-	defer cancel()
-
-	rt, err := routeOf(dctx, db, tenantID, bucket, key, false)
-	if err != nil {
-		logger.Warn("displaced blob left in place: the key's route could not be read", zap.Error(err),
-			zap.String("tenant", tenantID), zap.String("bucket", bucket), zap.String("key", key),
-			zap.String("backend", displaced.Backend))
-		return
-	}
-	if rt.live && (rt.unknown || rt.routesTo(displaced.Backend, key)) {
-		return
-	}
-	if err := deleteCopyOn(dctx, ce, displaced.Backend, tenantID, container, key); err != nil {
-		logger.Warn("displaced blob not removed — orphan on the backend the object left",
-			zap.Error(err), zap.String("tenant", tenantID), zap.String("bucket", bucket), zap.String("key", key),
-			zap.String("backend", displaced.Backend))
-		return
-	}
-	logger.Info("displaced blob removed",
-		zap.String("tenant", tenantID), zap.String("bucket", bucket), zap.String("key", key),
-		zap.String("from", displaced.Backend), zap.String("object_now_on", written))
-	checkLostWrite(dctx, db, ce, logger, source, tenantID, bucket, key, key, []string{displaced.Backend})
 }
 
 // Ledger outcomes (smart_demotions.hot_outcome).

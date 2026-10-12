@@ -315,7 +315,7 @@ func TestCopyObject_MetadataDirectiveCopyAndReplace(t *testing.T) {
 		}
 		w := f.copyObject(t, "src.txt", "never.txt", hdr)
 		assert.Equal(t, http.StatusBadRequest, w.Code)
-		_, err := os.Stat(filepath.Join(f.tempDir, f.tenant.NamespaceContainer(f.bucket), "never.txt"))
+		err := noBlobOf(f.tempDir, f.tenantID, f.bucket, "never.txt")
 		assert.True(t, os.IsNotExist(err))
 	})
 }
@@ -361,7 +361,7 @@ func TestMultipartComplete_RegionPinnedBucket(t *testing.T) {
 	t.Run("no driver for the region → refused, nothing on the primary", func(t *testing.T) {
 		w := f.mpUpload(t, "eu.bin", []byte("EU-BYTES"), nil)
 		assert.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
-		_, err := os.Stat(filepath.Join(f.tempDir, f.tenant.NamespaceContainer(f.bucket), "eu.bin"))
+		err := noBlobOf(f.tempDir, f.tenantID, f.bucket, "eu.bin")
 		assert.True(t, os.IsNotExist(err), "a region-pinned object must never land on the primary")
 	})
 
@@ -372,7 +372,7 @@ func TestMultipartComplete_RegionPinnedBucket(t *testing.T) {
 		w := f.mpUpload(t, "eu.bin", []byte("EU-BYTES"), nil)
 		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 		assert.Equal(t, "idrive-eu-west-1", f.headRow(t, "eu.bin").Backend)
-		b, err := os.ReadFile(filepath.Join(euDir, f.tenant.NamespaceContainer(f.bucket), "eu.bin"))
+		b, err := os.ReadFile(blobPath(t, f.db, euDir, f.tenantID, f.bucket, "eu.bin")) // #nosec G304 -- test fixture path
 		require.NoError(t, err)
 		assert.Equal(t, "EU-BYTES", string(b))
 	})
@@ -385,7 +385,7 @@ func TestCopyObject_RegionPinnedBucket(t *testing.T) {
 
 	w := f.copyObject(t, "src.bin", "eu-copy.bin", nil)
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
-	_, err := os.Stat(filepath.Join(f.tempDir, f.tenant.NamespaceContainer(f.bucket), "eu-copy.bin"))
+	err := noBlobOf(f.tempDir, f.tenantID, f.bucket, "eu-copy.bin")
 	assert.True(t, os.IsNotExist(err))
 
 	euDir := t.TempDir()

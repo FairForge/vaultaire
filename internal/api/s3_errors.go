@@ -86,6 +86,7 @@ const (
 	ErrRequestTimeTooSkewed      = "RequestTimeTooSkewed"
 	ErrXAmzContentSHA256Mismatch = "XAmzContentSHA256Mismatch"
 	ErrInvalidArgument           = "InvalidArgument"
+	ErrKeyTooLong                = "KeyTooLongError"
 	ErrAccountSuspended          = "AccountSuspended"
 	// CORS (s3_cors.go): AWS's code for a refused preflight, and for GetBucketCors of a bucket without one.
 	ErrCORSForbidden           = "AccessForbidden"
@@ -140,6 +141,7 @@ var errorMessages = map[string]string{
 	ErrRequestTimeTooSkewed:              "The difference between the request time and the server's time is too large",
 	ErrXAmzContentSHA256Mismatch:         "The provided 'x-amz-content-sha256' header does not match what was computed",
 	ErrInvalidArgument:                   "Invalid argument",
+	ErrKeyTooLong:                        "Your key is too long",
 	ErrAccountSuspended:                  "Your account has been suspended. Contact support for assistance.",
 	ErrCORSForbidden:                     "CORSResponse: This CORS request is not allowed. This is usually because the evalution of Origin, request method / Access-Control-Request-Method or Access-Control-Request-Headers are not whitelisted by the resource's CORS spec.",
 	ErrNoSuchCORSConfiguration:           "The CORS configuration does not exist",
@@ -190,6 +192,7 @@ var errorStatusCodes = map[string]int{
 	ErrRequestTimeTooSkewed:              http.StatusForbidden,
 	ErrXAmzContentSHA256Mismatch:         http.StatusBadRequest,
 	ErrInvalidArgument:                   http.StatusBadRequest,
+	ErrKeyTooLong:                        http.StatusBadRequest,
 	ErrAccountSuspended:                  http.StatusForbidden,
 	ErrCORSForbidden:                     http.StatusForbidden,
 	ErrNoSuchCORSConfiguration:           http.StatusNotFound,

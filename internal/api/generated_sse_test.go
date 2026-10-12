@@ -152,7 +152,7 @@ func TestGeneratedObject_IntoSSEBucket_IsEncrypted(t *testing.T) {
 		require.Equal(t, 200, rr.Code, rr.Body.String())
 		plain := rr.Body.Bytes()
 		assert.Contains(t, string(plain), "GetObject secret-key-name 200")
-		requireSSEBlob(t, filepath.Join(f.tempDir, f.tenant.NamespaceContainer(f.logBucket), key), plain)
+		requireSSEBlob(t, blobPath(t, f.db, f.tempDir, f.tenantID, f.logBucket, key), plain)
 		h := readHeadEnc(t, f.db, f.tenantID, f.logBucket, key)
 		assert.Equal(t, crypto.SSEAlgorithm, h.algo)
 		assert.True(t, h.version.Valid)
@@ -187,7 +187,7 @@ func TestGeneratedObject_IntoSSEBucket_IsEncrypted(t *testing.T) {
 		require.Equal(t, 200, rr.Code, rr.Body.String())
 		plain := rr.Body.Bytes()
 		assert.Contains(t, string(plain), "inventoried.txt,5,")
-		requireSSEBlob(t, filepath.Join(f.tempDir, f.tenant.NamespaceContainer(f.invBucket), key), plain)
+		requireSSEBlob(t, blobPath(t, f.db, f.tempDir, f.tenantID, f.invBucket, key), plain)
 		h := readHeadEnc(t, f.db, f.tenantID, f.invBucket, key)
 		assert.Equal(t, crypto.SSEAlgorithm, h.algo)
 		assert.Equal(t, md5hex(plain), h.etag)
@@ -294,7 +294,7 @@ func TestCopyObject_PlaintextSourceIntoSSEBucket_IsEncrypted(t *testing.T) {
 	w := copyTo("dst.txt")
 	require.Equal(t, 200, w.Code, w.Body.String())
 
-	requireSSEBlob(t, filepath.Join(f.tempDir, f.tenant.NamespaceContainer(f.logBucket), "dst.txt"), content)
+	requireSSEBlob(t, blobPath(t, f.db, f.tempDir, f.tenantID, f.logBucket, "dst.txt"), content)
 	h := readHeadEnc(t, f.db, f.tenantID, f.logBucket, "dst.txt")
 	assert.Equal(t, crypto.SSEAlgorithm, h.algo)
 	assert.True(t, h.version.Valid)
@@ -360,11 +360,12 @@ func TestMgmtDirectUpload_SSEBucketIsRefused(t *testing.T) {
 
 	// Bytes uploaded while the bucket was not encrypted, completed after.
 	ctx := common.WithTenantID(context.Background(), f.tenantID)
-	require.NoError(t, stub.Driver.Put(ctx, f.tenantID+"_"+f.bucket, "img/b.png", strings.NewReader("png bytes")))
-	w = f.mgmtBucketCall(t, "POST", f.bucket, "/direct-uploads/complete", `{"key":"img/b.png"}`, f.server.handleMgmtCompleteDirectUpload)
+	const addr = "img/b.png@0123456789abcdefghjkmnpqrs" // the address the presign handed out
+	require.NoError(t, stub.Driver.Put(ctx, f.tenantID+"_"+f.bucket, addr, strings.NewReader("png bytes")))
+	w = f.mgmtBucketCall(t, "POST", f.bucket, "/direct-uploads/complete", `{"key":"img/b.png","storage_key":"`+addr+`"}`, f.server.handleMgmtCompleteDirectUpload)
 	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
 	assert.Contains(t, w.Body.String(), "bucket_encrypted")
-	_, getErr := stub.Driver.Get(ctx, f.tenantID+"_"+f.bucket, "img/b.png")
+	_, getErr := stub.Driver.Get(ctx, f.tenantID+"_"+f.bucket, addr)
 	assert.Error(t, getErr, "the plaintext bytes are removed from R2")
 	var n int
 	require.NoError(t, f.db.QueryRow(`SELECT count(*) FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2`, f.tenantID, f.bucket).Scan(&n))

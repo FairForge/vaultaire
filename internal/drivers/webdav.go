@@ -458,6 +458,21 @@ func checkNames(names []string) error {
 	return nil
 }
 
+// WebDAVArtifactFits reports whether an artifact (a key, or a blob address
+// <key>@<id>) maps onto resource names the bridge takes: every folder
+// segment and the marked leaf within webdavMaxNameUnits — the driver's own
+// mapping (davName, leafName, checkNames), for a caller that must refuse a
+// key before its body is read (WP-R2-1: the address adds 27 characters to
+// the leaf). The tenant and container names are not part of it.
+func WebDAVArtifactFits(artifact string) error {
+	segs := strings.Split(artifact, "/")
+	names := make([]string, 0, len(segs))
+	for _, s := range segs[:len(segs)-1] {
+		names = append(names, davName(s))
+	}
+	return checkNames(append(names, leafName(segs[len(segs)-1])))
+}
+
 // escapedPath is the escaped URL path of base + root + names (names are
 // resource names, already davName-mapped). dir appends the trailing slash.
 func (d *WebDAVDriver) escapedPath(names []string, dir bool) string {

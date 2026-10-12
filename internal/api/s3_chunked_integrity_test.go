@@ -14,8 +14,6 @@ import (
 	"bytes"
 	"context"
 	"net/http"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -34,16 +32,21 @@ func TestChunkedGet_NeverServesStaleWholeObjectBlob(t *testing.T) {
 	oldBytes := []byte("OLD VERSION BYTES — must never be served again")
 	_, err := f.eng.Put(context.Background(), container, "swap.bin", bytes.NewReader(oldBytes))
 	require.NoError(t, err)
+	_, err = f.db.Exec(`INSERT INTO object_head_cache (tenant_id, bucket, object_key, size_bytes, etag, backend_name)
+		VALUES ($1, 'test-bucket', 'swap.bin', $2, 'old-etag', 'local')`, f.tenantID, len(oldBytes))
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM retired_blobs WHERE tenant_id = $1`, f.tenantID) })
 
 	// v2: chunked overwrite.
 	newBytes := generateTestData(8 * 1024)
 	require.Equal(t, http.StatusOK, stringTenantPut(t, f, "swap.bin", newBytes).Code)
 
-	// The chunked PUT must have removed the stale whole-object blob.
-	stalePath := filepath.Join(f.tempDir, container, "swap.bin")
-	_, statErr := os.Stat(stalePath)
-	assert.True(t, os.IsNotExist(statErr),
-		"chunked PUT must delete the stale whole-object blob at the same key")
+	// The chunked PUT retired the stale whole-object blob in its install
+	// transaction (WP-R2-1 Part C): the collector deletes it after its grace.
+	var reason string
+	require.NoError(t, f.db.QueryRow(`SELECT reason FROM retired_blobs WHERE tenant_id = $1 AND storage_key = 'swap.bin'`, f.tenantID).Scan(&reason),
+		"chunked PUT must retire the stale whole-object blob at the same key")
+	assert.Equal(t, retiredOverwritten, reason)
 
 	// Healthy chunked GET returns the new bytes.
 	gw := stringTenantGet(t, f, "swap.bin")

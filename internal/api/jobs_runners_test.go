@@ -306,6 +306,7 @@ func TestRegisterJobs_EveryLoopIsAJobAndDailyTimesDoNotCollide(t *testing.T) {
 		"bandwidth_alerts":    "every 1h0m0s",
 		"access_log_delivery": "every 5m0s",
 		"account_export":      "every 1m0s",
+		"retired_blobs":       "every 10m0s",
 	}
 	got := map[string]string{}
 	daily := map[string]string{"04:30": "account_deletion"}
