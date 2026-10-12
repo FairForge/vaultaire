@@ -65,6 +65,12 @@ func startGet(t *testing.T, ts *httptest.Server, key string) <-chan getResult {
 
 func TestChunkedGet_ReencryptSwapAndRetiredDelete_DuringTheStream_BodyCompletes(t *testing.T) {
 	f, keys := setupKeyedChunkingFixture(t)
+	// No hedge: a hedged second fetch of the paused chunk (the hook holds
+	// only the first) would read the old blob before the delete whenever the
+	// swap outlasts CHUNK_GET_HEDGE_AFTER (CI), and the read under test is
+	// the one that finds the address gone. A hedge goes through the same
+	// fetchAndVerifyChunk.
+	f.adapter.largeGet.chunkHedgeAfter = 0
 	content, chunks := putMultiChunk(t, f, "long.bin")
 	second := chunks[1]
 
