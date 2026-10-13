@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -257,7 +258,7 @@ func TestHandleGet_IfNoneMatch_304(t *testing.T) {
 
 	content := []byte("conditional content")
 	container := f.tenant.NamespaceContainer("test-bucket")
-	_, err := f.eng.Put(context.Background(), container, "cond.txt", bytes.NewReader(content))
+	_, err := f.eng.Put(common.WithTenantID(context.Background(), f.tenantID), container, "cond.txt", bytes.NewReader(content))
 	require.NoError(t, err)
 
 	_, err = f.db.Exec(`
@@ -289,7 +290,7 @@ func TestHandleGet_IfNoneMatch_NoMatch_Returns200(t *testing.T) {
 
 	content := []byte("fresh content")
 	container := f.tenant.NamespaceContainer("test-bucket")
-	_, err := f.eng.Put(context.Background(), container, "fresh.txt", bytes.NewReader(content))
+	_, err := f.eng.Put(common.WithTenantID(context.Background(), f.tenantID), container, "fresh.txt", bytes.NewReader(content))
 	require.NoError(t, err)
 
 	_, err = f.db.Exec(`
@@ -318,7 +319,7 @@ func TestHandleGet_ETagAndLastModifiedOnResponse(t *testing.T) {
 
 	content := []byte("header test content")
 	container := f.tenant.NamespaceContainer("test-bucket")
-	_, err := f.eng.Put(context.Background(), container, "headers.txt", bytes.NewReader(content))
+	_, err := f.eng.Put(common.WithTenantID(context.Background(), f.tenantID), container, "headers.txt", bytes.NewReader(content))
 	require.NoError(t, err)
 
 	_, err = f.db.Exec(`
@@ -347,7 +348,7 @@ func TestHandlePut_IfMatch_412(t *testing.T) {
 
 	content := []byte("original content")
 	container := f.tenant.NamespaceContainer("test-bucket")
-	_, err := f.eng.Put(context.Background(), container, "locked.txt", bytes.NewReader(content))
+	_, err := f.eng.Put(common.WithTenantID(context.Background(), f.tenantID), container, "locked.txt", bytes.NewReader(content))
 	require.NoError(t, err)
 
 	_, err = f.db.Exec(`
@@ -376,7 +377,7 @@ func TestHandlePut_IfMatch_MatchingETag_Succeeds(t *testing.T) {
 
 	content := []byte("original content")
 	container := f.tenant.NamespaceContainer("test-bucket")
-	_, err := f.eng.Put(context.Background(), container, "update.txt", bytes.NewReader(content))
+	_, err := f.eng.Put(common.WithTenantID(context.Background(), f.tenantID), container, "update.txt", bytes.NewReader(content))
 	require.NoError(t, err)
 
 	_, err = f.db.Exec(`
@@ -525,7 +526,7 @@ func TestHandleGet_S3CacheControlHeader(t *testing.T) {
 
 	content := []byte("cache control test")
 	container := f.tenant.NamespaceContainer("test-bucket")
-	_, err := f.eng.Put(context.Background(), container, "cc.txt", bytes.NewReader(content))
+	_, err := f.eng.Put(common.WithTenantID(context.Background(), f.tenantID), container, "cc.txt", bytes.NewReader(content))
 	require.NoError(t, err)
 
 	_, err = f.db.Exec(`

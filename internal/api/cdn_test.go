@@ -113,7 +113,7 @@ func setupCDNFixture(t *testing.T) *cdnTestFixture {
 	containerDir := filepath.Join(tempDir, container)
 	require.NoError(t, os.MkdirAll(containerDir, 0755))
 
-	ctx := context.Background()
+	ctx := common.WithTenantID(context.Background(), tenantID)
 	_, err = eng.Put(ctx, container, key, bytes.NewReader(content))
 	require.NoError(t, err)
 
@@ -296,7 +296,7 @@ func TestCDN_NestedKeyPath(t *testing.T) {
 	content := []byte("fake jpeg data")
 
 	container := f.tenantID + "_" + f.bucket
-	ctx := context.Background()
+	ctx := common.WithTenantID(context.Background(), f.tenantID)
 	_, err := f.server.engine.Put(ctx, container, nestedKey, bytes.NewReader(content))
 	require.NoError(t, err)
 

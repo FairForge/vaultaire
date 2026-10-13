@@ -23,7 +23,7 @@ func TestExecuteOp_CountsAFalloverFromTheFailedBackendToTheNext(t *testing.T) {
 	before := promtest.ToFloat64(FalloverCounter().WithLabelValues("idrive", "lyve", "put"))
 
 	// Act
-	used, err := eng.Put(context.Background(), "c", "k", strings.NewReader("x"))
+	used, err := eng.Put(tenantCtx(), "c", "k", strings.NewReader("x"))
 
 	// Assert
 	require.NoError(t, err)
@@ -50,7 +50,7 @@ func TestDelete_ALocalStyleMissDropsTheRoute(t *testing.T) {
 	eng.HintBackend("c", "k", "lyve")
 
 	// Act
-	err := eng.Delete(context.Background(), "c", "k")
+	err := eng.Delete(tenantCtx(), "c", "k")
 
 	// Assert
 	require.Error(t, err)

@@ -15,12 +15,13 @@ const (
 	UserIDKey   contextKey = "user_id"
 )
 
-// GetTenantID extracts tenant ID from context
+// GetTenantID is the tenant the context names, "" when none. It used to
+// answer "default" — a shared namespace every caller that forgot the tenant
+// wrote into and read from (R6-22); the engine now refuses such a call
+// (engine.ErrNoTenant), and so do the fixed-bucket drivers (WP-R8-7).
 func GetTenantID(ctx context.Context) string {
-	if tenantID, ok := ctx.Value(TenantIDKey).(string); ok {
-		return tenantID
-	}
-	return "default"
+	tenantID, _ := ctx.Value(TenantIDKey).(string)
+	return tenantID
 }
 
 // WithTenantID adds tenant ID to context

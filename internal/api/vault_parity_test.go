@@ -447,7 +447,9 @@ func TestVaultParity_OpenUsesTheDataRangesThatAreReadableWhenAShardIsGone(t *tes
 	require.NoError(t, os.Remove(filepath.Join(f.legDir, parityContainer(f.tenantID), shardArtifact(prefix, 1))))
 	f.geyser.failGet.Store(true)
 
-	rc, err := f.svc.Open(context.Background(), f.tenantID, f.bucket, "films/seven.mkv", "", etag, int64(size), 0, int64(size))
+	// The data ranges come from the object's recorded backend (WP-R6-1:
+	// the caller names it, as the GET does).
+	rc, err := f.svc.Open(engine.WithRecordedBackend(context.Background(), "geyser"), f.tenantID, f.bucket, "films/seven.mkv", "", etag, int64(size), 0, int64(size))
 	require.NoError(t, err)
 	got, err := io.ReadAll(rc)
 	require.NoError(t, err)

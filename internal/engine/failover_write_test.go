@@ -90,7 +90,7 @@ func TestEnginePut_BackendFailureFailsLoudly(t *testing.T) {
 	eng.AddDriver("idrive", failing)
 	eng.AddDriver("local", &fileWritingDriver{dir: dataDir})
 
-	ctx := context.Background()
+	ctx := tenantCtx()
 	backend, err := eng.Put(ctx, "bucket", "obj.txt", strings.NewReader("customer data"))
 
 	require.Error(t, err, "write must fail when the durable backend fails")
@@ -120,7 +120,7 @@ func TestEnginePut_LocalPrimaryStillAcceptsWrites(t *testing.T) {
 	dataDir := t.TempDir()
 	eng.AddDriver("local", &fileWritingDriver{dir: dataDir})
 
-	backend, err := eng.Put(context.Background(), "bucket", "obj.txt", strings.NewReader("dev data"))
+	backend, err := eng.Put(tenantCtx(), "bucket", "obj.txt", strings.NewReader("dev data"))
 	require.NoError(t, err)
 	assert.Equal(t, "local", backend)
 	assert.Len(t, filesUnder(t, dataDir), 1)
@@ -138,7 +138,7 @@ func TestEnginePut_ReducedRedundancyNoLongerTargetsLocal(t *testing.T) {
 	eng.AddDriver("idrive", &mockDriver{name: "idrive"})
 	eng.AddDriver("local", &fileWritingDriver{dir: dataDir})
 
-	backend, err := eng.Put(context.Background(), "bucket", "obj.txt",
+	backend, err := eng.Put(tenantCtx(), "bucket", "obj.txt",
 		strings.NewReader("data"), WithStorageClass("REDUCED_REDUNDANCY"))
 	require.NoError(t, err)
 	assert.Equal(t, "idrive", backend)
@@ -156,7 +156,7 @@ func TestEnginePut_DurableToDurableFailoverPreserved(t *testing.T) {
 	eng.AddDriver("s3", &mockDriver{name: "s3"})
 	eng.AddDriver("local", &fileWritingDriver{dir: dataDir})
 
-	backend, err := eng.Put(context.Background(), "bucket", "obj.txt", strings.NewReader("data"))
+	backend, err := eng.Put(tenantCtx(), "bucket", "obj.txt", strings.NewReader("data"))
 	require.NoError(t, err)
 	assert.Equal(t, "s3", backend)
 	assert.Empty(t, filesUnder(t, dataDir))
@@ -169,7 +169,7 @@ func TestEnginePut_ClientErrorsKeepIdentity(t *testing.T) {
 	eng := NewEngine(nil, logger, &Config{DefaultBackend: "idrive"})
 	eng.AddDriver("idrive", &mockDriver{name: "idrive", putErr: ErrQuotaExceeded})
 
-	_, err := eng.Put(context.Background(), "bucket", "obj.txt", strings.NewReader("data"))
+	_, err := eng.Put(tenantCtx(), "bucket", "obj.txt", strings.NewReader("data"))
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrQuotaExceeded))
 	assert.False(t, errors.Is(err, ErrAllBackendsUnavailable),

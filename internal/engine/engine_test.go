@@ -23,7 +23,7 @@ func TestCoreEngine_ImplementsInterface(t *testing.T) {
 	}
 
 	// Test health check
-	err := engine.HealthCheck(context.Background())
+	err := engine.HealthCheck(tenantCtx())
 	if err != nil {
 		t.Errorf("HealthCheck failed: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestHintBackend(t *testing.T) {
 
 	eng.HintBackend("bucket", "key", "idrive-eu-west-1")
 
-	reader, err := eng.Get(context.Background(), "bucket", "key")
+	reader, err := eng.Get(tenantCtx(), "bucket", "key")
 	if err != nil {
 		t.Fatalf("Get after HintBackend failed: %v", err)
 	}

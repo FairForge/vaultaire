@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/testutil"
 
 	"github.com/FairForge/vaultaire/internal/crypto"
@@ -96,7 +97,7 @@ func TestHandleGet_ContentTypeFromCache(t *testing.T) {
 
 	content := []byte("fake video content for testing")
 	container := f.tenant.NamespaceContainer("test-bucket")
-	_, err := f.eng.Put(context.Background(), container, "video.mp4", bytes.NewReader(content))
+	_, err := f.eng.Put(common.WithTenantID(context.Background(), f.tenantID), container, "video.mp4", bytes.NewReader(content))
 	require.NoError(t, err)
 
 	_, err = f.db.Exec(`
@@ -126,7 +127,7 @@ func TestHandleGet_ContentTypeFallsBackToExtension(t *testing.T) {
 
 	content := []byte("some json data")
 	container := f.tenant.NamespaceContainer("test-bucket")
-	_, err := f.eng.Put(context.Background(), container, "data.json", bytes.NewReader(content))
+	_, err := f.eng.Put(common.WithTenantID(context.Background(), f.tenantID), container, "data.json", bytes.NewReader(content))
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("GET", "/test-bucket/data.json", nil)
@@ -145,7 +146,7 @@ func TestHandleGet_RangeRequest(t *testing.T) {
 
 	content := []byte("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 	container := f.tenant.NamespaceContainer("test-bucket")
-	_, err := f.eng.Put(context.Background(), container, "alphabet.txt", bytes.NewReader(content))
+	_, err := f.eng.Put(common.WithTenantID(context.Background(), f.tenantID), container, "alphabet.txt", bytes.NewReader(content))
 	require.NoError(t, err)
 
 	_, err = f.db.Exec(`
@@ -177,7 +178,7 @@ func TestHandleGet_RangeRequest_Unsatisfiable(t *testing.T) {
 
 	content := []byte("short")
 	container := f.tenant.NamespaceContainer("test-bucket")
-	_, err := f.eng.Put(context.Background(), container, "small.txt", bytes.NewReader(content))
+	_, err := f.eng.Put(common.WithTenantID(context.Background(), f.tenantID), container, "small.txt", bytes.NewReader(content))
 	require.NoError(t, err)
 
 	_, err = f.db.Exec(`
@@ -204,7 +205,7 @@ func TestHandleGet_RangeIgnoredWithoutCache(t *testing.T) {
 
 	content := []byte("no cache content")
 	container := f.tenant.NamespaceContainer("test-bucket")
-	_, err := f.eng.Put(context.Background(), container, "nocache.txt", bytes.NewReader(content))
+	_, err := f.eng.Put(common.WithTenantID(context.Background(), f.tenantID), container, "nocache.txt", bytes.NewReader(content))
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("GET", "/test-bucket/nocache.txt", nil)
@@ -226,7 +227,7 @@ func TestHandleGet_ContentLengthSetFromCache(t *testing.T) {
 
 	content := []byte("content with known size")
 	container := f.tenant.NamespaceContainer("test-bucket")
-	_, err := f.eng.Put(context.Background(), container, "sized.txt", bytes.NewReader(content))
+	_, err := f.eng.Put(common.WithTenantID(context.Background(), f.tenantID), container, "sized.txt", bytes.NewReader(content))
 	require.NoError(t, err)
 
 	_, err = f.db.Exec(`

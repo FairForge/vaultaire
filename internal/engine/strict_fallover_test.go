@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -31,7 +30,7 @@ func TestFallover_LabelKeepsTheFailedBackendWhenTheNextIsOpen(t *testing.T) {
 	ab := promtest.ToFloat64(FalloverCounter().WithLabelValues("idrive", "lyve", "put"))
 	bc := promtest.ToFloat64(FalloverCounter().WithLabelValues("lyve", "s3", "put"))
 
-	used, err := eng.Put(context.Background(), "c", "k", strings.NewReader("x"))
+	used, err := eng.Put(tenantCtx(), "c", "k", strings.NewReader("x"))
 	require.NoError(t, err)
 	assert.Equal(t, "s3", used)
 	dAC := promtest.ToFloat64(FalloverCounter().WithLabelValues("idrive", "s3", "put")) - ac
@@ -50,14 +49,16 @@ func TestStrictTarget_UnregisteredAsksNobody(t *testing.T) {
 	eng.AddDriver("lyve", &mockDriver{name: "lyve"})
 	before := promtest.ToFloat64(StrictUnregisteredCounter().WithLabelValues("sync", "get"))
 
-	assert.Empty(t, eng.readCandidates("sync", "get"), "a strict recorded backend that is not registered asks nobody")
+	c, err := eng.readCandidates("sync", "get")
+	assert.Empty(t, c, "a strict recorded backend that is not registered asks nobody")
+	assert.ErrorIs(t, err, ErrBackendNotRegistered)
 	assert.Empty(t, eng.buildWriteCandidateList("sync"), "nor is it written anywhere else")
 	assert.Equal(t, 1.0, promtest.ToFloat64(StrictUnregisteredCounter().WithLabelValues("sync", "get"))-before)
 
 	eng.HintBackend("c", "k", "sync")
-	_, err := eng.Get(context.Background(), "c", "k")
+	_, err = eng.Get(tenantCtx(), "c", "k")
 	assert.ErrorIs(t, err, ErrAllBackendsUnavailable, "503, never the primary's copy")
-	err = eng.Delete(context.Background(), "c", "k")
+	err = eng.Delete(tenantCtx(), "c", "k")
 	assert.ErrorIs(t, err, ErrAllBackendsUnavailable, "the primary's DELETE of an absent key would be a 204 that drops the row")
 }
 
@@ -72,7 +73,7 @@ func TestStrictTarget_PutWithoutTheDriver_AsksNobody(t *testing.T) {
 	eng.AddDriver("lyve", &mockDriver{name: "lyve"})
 	before := promtest.ToFloat64(StrictUnregisteredCounter().WithLabelValues("sync", "put"))
 
-	used, err := eng.Put(context.Background(), "c", "k", strings.NewReader("new bytes"), WithStorageClass("SYNC"))
+	used, err := eng.Put(tenantCtx(), "c", "k", strings.NewReader("new bytes"), WithStorageClass("SYNC"))
 
 	t.Logf("Put(SYNC) without a sync driver: used=%q err=%v", used, err)
 	assert.ErrorIs(t, err, ErrAllBackendsUnavailable, "503 + Retry-After at the API")

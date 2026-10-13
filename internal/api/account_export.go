@@ -479,7 +479,7 @@ func (s *AccountExportService) deleteExportObject(ctx context.Context, tenantID,
 			ce.HintBackend(container, blob, backend)
 		}
 	}
-	if err := s.eng.Delete(tctx, container, blob); err != nil && !isObjectMissingErr(err) {
+	if err := s.eng.Delete(engine.WithRecordedBackend(tctx, backend), container, blob); err != nil && !isObjectMissingErr(err) {
 		s.logger.Error("account export: delete object", zap.String("tenant_id", tenantID), zap.String("key", key), zap.Error(err))
 	}
 	row, found, err := deleteHeadRowReleasing(tctx, s.db, manifestReleaser(s.gci), tenantID, tenant.ExportsBucket, key)

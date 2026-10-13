@@ -32,7 +32,7 @@ func TestPut_RefusesAChunkBlobOutsideTheChunkContext(t *testing.T) {
 
 	// Act
 	_, errTenant := eng.Put(common.WithTenantID(context.Background(), "tenant-a"), ChunkContainer, "_chunks/h", bytes.NewReader([]byte("x")))
-	_, errNone := eng.Put(context.Background(), ChunkContainer, "_chunks/h", bytes.NewReader([]byte("x")))
+	_, errNone := eng.Put(tenantCtx(), ChunkContainer, "_chunks/h", bytes.NewReader([]byte("x")))
 	errOn := eng.PutOn(common.WithTenantID(context.Background(), "tenant-a"), "p", ChunkContainer, "_chunks/h", bytes.NewReader([]byte("x")))
 	bn, errOK := eng.Put(ChunkContext(context.Background()), ChunkContainer, "_chunks/h", bytes.NewReader([]byte("x")))
 

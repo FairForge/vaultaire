@@ -497,6 +497,7 @@ type parityCandidate struct {
 	size                        int64
 	chunked                     bool
 	storageKey                  string // the row's blob address ("" = the key, WP-R2-1)
+	backend                     string // the row's backend_name: the one backend the object is read from (WP-R6-1)
 	// rowAt is the row's updated_at as this protect wrote it: its finish
 	// records the outcome only on a row nothing touched since (Prompt 2b.2
 	// C4 — a delete marks the row and erases shards meanwhile).
@@ -684,7 +685,7 @@ func (p *VaultParity) protectCandidates(ctx context.Context, res *VaultParityRes
 	for n := 0; n < vaultParityCandidatePages && len(cands) < p.MaxObjectsPerRun; n++ {
 		rows, err := p.db.QueryContext(ctx, `
 			SELECT o.tenant_id, o.bucket, o.object_key, o.etag, o.size_bytes, o.is_chunked, o.updated_at, COALESCE(o.storage_key, ''),
-			       COALESCE(o.encryption_algorithm, '')`+unprotectedFrom+`
+			       COALESCE(o.encryption_algorithm, ''), COALESCE(o.backend_name, '')`+unprotectedFrom+`
 			  AND (v.tenant_id IS NULL OR v.etag <> o.etag OR v.attempts < $2)
 			  AND ($3::BIGINT < 0 OR o.size_bytes <= $3::BIGINT)
 			  AND ($4::BOOLEAN OR (o.updated_at, o.tenant_id, o.bucket, o.object_key) > ($5::TIMESTAMPTZ, $6::TEXT, $7::TEXT, $8::TEXT))
@@ -697,7 +698,7 @@ func (p *VaultParity) protectCandidates(ctx context.Context, res *VaultParityRes
 		for rows.Next() {
 			var c parityCandidate
 			var enc string
-			if err := rows.Scan(&c.tenantID, &c.bucket, &c.key, &c.etag, &c.size, &c.chunked, &curAt, &c.storageKey, &enc); err != nil {
+			if err := rows.Scan(&c.tenantID, &c.bucket, &c.key, &c.etag, &c.size, &c.chunked, &curAt, &c.storageKey, &enc, &c.backend); err != nil {
 				_ = rows.Close()
 				return nil, fmt.Errorf("vault parity: scan candidate: %w", err)
 			}
@@ -844,7 +845,8 @@ func (p *VaultParity) protect(ctx context.Context, c parityCandidate) (state str
 	// Sized like every read of an object (Prompt 2b.2 C3): a backend that
 	// can hold two versions of a key serves the one of the row's size.
 	srcContainer, srcBlob := objectBlobAddress(c.tenantID, c.bucket, c.key, c.storageKey)
-	src, err := p.eng.Get(engine.WithExpectedSize(tctx, c.size), srcContainer, srcBlob)
+	// From the backend the row records, and no other (WP-R6-1).
+	src, err := p.eng.Get(engine.WithExpectedSize(engine.WithRecordedBackend(tctx, c.backend), c.size), srcContainer, srcBlob)
 	if err != nil {
 		// Nothing was written, but the row keeps naming every shard: an
 		// earlier attempt's shards at this prefix were kept for this write

@@ -34,7 +34,7 @@ func s3ErrorFrom(t *testing.T, op string, status int, body string) error {
 		_, _ = w.Write([]byte(body))
 	}))
 	t.Cleanup(srv.Close)
-	return s3CallAgainst(context.Background(), t, srv.URL, op)
+	return s3CallAgainst(tenantCtx(), t, srv.URL, op)
 }
 
 func s3CallAgainst(ctx context.Context, t *testing.T, endpoint, op string) error {
@@ -127,7 +127,7 @@ func TestIsBackendFailure_ConnectionRefusedIsFailure(t *testing.T) {
 	addr := l.Addr().String()
 	require.NoError(t, l.Close())
 
-	err = s3CallAgainst(context.Background(), t, "http://"+addr, "GET")
+	err = s3CallAgainst(tenantCtx(), t, "http://"+addr, "GET")
 	assert.True(t, isBackendFailure(err), "connection refused must count: %v", err)
 }
 

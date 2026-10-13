@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/testutil"
 
 	"github.com/FairForge/vaultaire/internal/crypto"
@@ -114,7 +115,7 @@ func seedObject(t *testing.T, f *testFixture, key string, content []byte) string
 	ctx := context.Background()
 
 	container := f.tenant.NamespaceContainer("test-bucket")
-	_, err := f.eng.Put(ctx, container, key, bytes.NewReader(content), engine.WithContentLength(int64(len(content))))
+	_, err := f.eng.Put(common.WithTenantID(ctx, f.tenantID), container, key, bytes.NewReader(content), engine.WithContentLength(int64(len(content))))
 	require.NoError(t, err)
 
 	h := md5.New() // #nosec G401
@@ -209,7 +210,7 @@ func TestMigrate_ConvertsObject(t *testing.T) {
 
 	// Original deleted
 	container := f.tenant.NamespaceContainer("test-bucket")
-	_, getErr := f.eng.Get(ctx, container, "convert.bin")
+	_, getErr := f.eng.Get(common.WithTenantID(ctx, f.tenantID), container, "convert.bin")
 	assert.Error(t, getErr, "original monolithic object should be deleted")
 
 	// Manifest exists with correct chunk count
@@ -262,7 +263,7 @@ func TestMigrate_VerifiesETagBeforeDelete(t *testing.T) {
 	assert.False(t, isChunked, "is_chunked must remain FALSE")
 
 	container := f.tenant.NamespaceContainer("test-bucket")
-	reader, getErr := f.eng.Get(ctx, container, "bad-etag.bin")
+	reader, getErr := f.eng.Get(common.WithTenantID(ctx, f.tenantID), container, "bad-etag.bin")
 	require.NoError(t, getErr, "original must not be deleted on etag mismatch")
 	_ = reader.Close()
 }
@@ -297,7 +298,7 @@ func TestMigrate_KeepOriginal(t *testing.T) {
 
 	// Original still present
 	container := f.tenant.NamespaceContainer("test-bucket")
-	reader, getErr := f.eng.Get(ctx, container, "keep.bin")
+	reader, getErr := f.eng.Get(common.WithTenantID(ctx, f.tenantID), container, "keep.bin")
 	require.NoError(t, getErr, "original should be kept with --keep-original")
 	_ = reader.Close()
 }
@@ -398,7 +399,7 @@ func reassembleFromChunks(t *testing.T, f *testFixture, key string) []byte {
 		require.NoError(t, rows.Scan(&hash))
 
 		storageKey := "_chunks/" + hash
-		reader, getErr := f.eng.Get(ctx, "_global", storageKey)
+		reader, getErr := f.eng.Get(engine.ChunkContext(ctx), "_global", storageKey)
 		require.NoError(t, getErr)
 		_, copyErr := io.Copy(&buf, reader)
 		require.NoError(t, copyErr)

@@ -106,7 +106,7 @@ func TestFailoverManager_TriesNextOnFailure(t *testing.T) {
 	fm.Register("backend-b")
 
 	callOrder := []string{}
-	used, err := fm.Execute(context.Background(), []string{"backend-a", "backend-b"}, func(name string) error {
+	used, err := fm.Execute(tenantCtx(), []string{"backend-a", "backend-b"}, func(name string) error {
 		callOrder = append(callOrder, name)
 		if name == "backend-a" {
 			return fmt.Errorf("backend-a failed")
@@ -125,7 +125,7 @@ func TestFailoverManager_AllFail(t *testing.T) {
 	fm.Register("backend-a")
 	fm.Register("backend-b")
 
-	_, err := fm.Execute(context.Background(), []string{"backend-a", "backend-b"}, func(name string) error {
+	_, err := fm.Execute(tenantCtx(), []string{"backend-a", "backend-b"}, func(name string) error {
 		return fmt.Errorf("%s failed", name)
 	})
 
@@ -145,7 +145,7 @@ func TestFailoverManager_SkipsOpenCircuitBreaker(t *testing.T) {
 	}
 
 	callOrder := []string{}
-	used, err := fm.Execute(context.Background(), []string{"backend-a", "backend-b"}, func(name string) error {
+	used, err := fm.Execute(tenantCtx(), []string{"backend-a", "backend-b"}, func(name string) error {
 		callOrder = append(callOrder, name)
 		return nil
 	})
@@ -254,7 +254,7 @@ func TestEnginePut_WithStorageClass(t *testing.T) {
 	eng.AddDriver("idrive", idriveMock)
 	eng.AddDriver("geyser", geyserMock)
 
-	ctx := context.Background()
+	ctx := tenantCtx()
 	data := strings.NewReader("test data")
 
 	backend, err := eng.Put(ctx, "container", "artifact.dat", data, WithStorageClass("GLACIER"))
@@ -271,7 +271,7 @@ func TestEnginePut_StorageClassFallback(t *testing.T) {
 	idriveMock := &mockDriver{name: "idrive"}
 	eng.AddDriver("idrive", idriveMock)
 
-	ctx := context.Background()
+	ctx := tenantCtx()
 	data := strings.NewReader("test data")
 
 	// GLACIER maps to geyser which doesn't exist → falls back to primary (idrive)
@@ -281,7 +281,9 @@ func TestEnginePut_StorageClassFallback(t *testing.T) {
 	assert.Equal(t, 1, idriveMock.putCount)
 }
 
-func TestEngineGet_FailoverOnError(t *testing.T) {
+// WP-R6-1: a read is the recorded backend's alone. It used to fail over to
+// the backup, which served whatever copy of the key it held.
+func TestEngineGet_RecordedBackendDown_NoFailover(t *testing.T) {
 	logger := zap.NewNop()
 	eng := NewEngine(nil, logger, &Config{DefaultBackend: "primary"})
 
@@ -293,13 +295,10 @@ func TestEngineGet_FailoverOnError(t *testing.T) {
 	// Record object on primary
 	eng.objectBackends.Store("container/obj.txt", "primary")
 
-	ctx := context.Background()
+	ctx := tenantCtx()
 	reader, err := eng.Get(ctx, "container", "obj.txt")
-	require.NoError(t, err)
-	defer func() { _ = reader.Close() }()
-
-	data, _ := io.ReadAll(reader)
-	assert.Equal(t, "hello from backup", string(data))
+	assert.Nil(t, reader)
+	assert.ErrorIs(t, err, ErrAllBackendsUnavailable, "503: the backend that holds it could not be asked")
 }
 
 func TestEngineGet_AllBackendsFail(t *testing.T) {
@@ -311,7 +310,7 @@ func TestEngineGet_AllBackendsFail(t *testing.T) {
 	eng.AddDriver("primary", primaryMock)
 	eng.AddDriver("backup", backupMock)
 
-	ctx := context.Background()
+	ctx := tenantCtx()
 	_, err := eng.Get(ctx, "container", "obj.txt")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "all backends failed")
@@ -326,7 +325,7 @@ func TestEnginePut_FailoverOnError(t *testing.T) {
 	eng.AddDriver("primary", primaryMock)
 	eng.AddDriver("backup", backupMock)
 
-	ctx := context.Background()
+	ctx := tenantCtx()
 	data := strings.NewReader("hello")
 
 	backend, err := eng.Put(ctx, "container", "obj.txt", data)
@@ -447,13 +446,13 @@ func TestFailoverManager_NotFoundDoesNotOpenBreaker(t *testing.T) {
 
 	notFound := &os.PathError{Op: "remove", Path: "/data/load-test/k", Err: os.ErrNotExist}
 	for i := 0; i < 3*failureThreshold; i++ {
-		_, err := fm.Execute(context.Background(), []string{"local"}, func(string) error { return notFound })
+		_, err := fm.Execute(tenantCtx(), []string{"local"}, func(string) error { return notFound })
 		require.Error(t, err) // caller still sees the not-found
 	}
 
 	// Breaker must still be CLOSED — a real op should be attempted, not rejected.
 	attempted := false
-	used, err := fm.Execute(context.Background(), []string{"local"}, func(string) error {
+	used, err := fm.Execute(tenantCtx(), []string{"local"}, func(string) error {
 		attempted = true
 		return nil
 	})
@@ -463,7 +462,7 @@ func TestFailoverManager_NotFoundDoesNotOpenBreaker(t *testing.T) {
 
 	// A genuine backend failure SHOULD still open it.
 	for i := 0; i < failureThreshold; i++ {
-		_, _ = fm.Execute(context.Background(), []string{"local"}, func(string) error {
+		_, _ = fm.Execute(tenantCtx(), []string{"local"}, func(string) error {
 			return fmt.Errorf("connection refused")
 		})
 	}
@@ -501,7 +500,7 @@ func TestFailoverManager_InvalidInputEndsTheChain(t *testing.T) {
 
 	for i := 0; i < 3*failureThreshold; i++ {
 		var called []string
-		_, err := fm.Execute(context.Background(), []string{"sync", "idrive"}, func(name string) error {
+		_, err := fm.Execute(tenantCtx(), []string{"sync", "idrive"}, func(name string) error {
 			called = append(called, name)
 			if name == "sync" {
 				return fmt.Errorf("bridge 3: %w: the server refused the name", ErrInvalidInput)
@@ -523,7 +522,7 @@ func TestEnginePut_InvalidInputIsNotAWriteFailure(t *testing.T) {
 	eng.AddDriver("primary", primary)
 	eng.AddDriver("backup", backup)
 
-	_, err := eng.Put(context.Background(), "container", "CON", strings.NewReader("hello"))
+	_, err := eng.Put(tenantCtx(), "container", "CON", strings.NewReader("hello"))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrInvalidInput)
 	assert.False(t, errors.Is(err, ErrAllBackendsUnavailable))
