@@ -924,6 +924,9 @@ func (s *Server) headVersion(w http.ResponseWriter, r *http.Request, tenantID st
 		tenantID, req.Bucket, req.Object, vid).Scan(&marker, &latest, &etag, &contentType, &size, &createdAt,
 		&storageKey, &backend, &encAlgo, &floor)
 	if errors.Is(err, sql.ErrNoRows) {
+		if isUnanchoredNullVersion(r.Context(), s.db, tenantID, req.Bucket, req.Object, vid) {
+			return false // the current object is the null version (GET answers the same)
+		}
 		WriteS3Error(w, ErrNoSuchVersion, r.URL.Path, generateRequestID())
 		return true
 	}

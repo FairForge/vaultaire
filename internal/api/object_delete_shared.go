@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/FairForge/vaultaire/internal/crypto"
 	"go.uber.org/zap"
@@ -194,8 +195,14 @@ func (d objectDeleteAftermath) settle(ctx context.Context, tenantID, bucket, key
 		// that cannot be reached now is the job's stale pass to finish.
 		d.vaultParity.OnObjectDeleted(ctx, tenantID, bucket, key)
 	}
-	// Per key, in a batch too (AWS fires ObjectRemoved per key) — from the
-	// batch's one load of the targets when there is one.
+	d.announce(ctx, tenantID, bucket, key)
+	return nil
+}
+
+// announce fires a removed key's s3:ObjectRemoved:Delete notification and
+// object.deleted event: per key, in a batch too (AWS fires ObjectRemoved per
+// key) — from the batch's one load of the targets when there is one.
+func (d objectDeleteAftermath) announce(ctx context.Context, tenantID, bucket, key string) {
 	data := map[string]interface{}{"bucket": bucket, "key": key}
 	if d.fanout != nil {
 		// The events row now (the tenant's log, as before); the deliveries
@@ -207,9 +214,78 @@ func (d objectDeleteAftermath) settle(ctx context.Context, tenantID, bucket, key
 			}
 		}
 		d.fanout.enqueue(p)
-		return nil
+		return
 	}
 	d.notify.Fire(tenantID, bucket, "s3:ObjectRemoved:Delete", key, 0, "")
 	emitEvent(ctx, d.db, d.logger, "object.deleted", tenantID, data)
-	return nil
+}
+
+// The two versioned flavours of a delete, shared by DELETE and DeleteObjects
+// (Stage 1a Prompt 3, Part 0: the batch ignored <VersionId> and wrote no
+// marker — R3-09, WP-R3-4 — which since WP-R2-1 C2 left the latest version
+// billed and unreachable). Object Lock is the caller's (checked before
+// either); the notification is the caller's (announce).
+
+// deleteVersionReleasing is DELETE ?versionId: the version row goes (the head
+// row re-pointed or dropped when it was the current object's, deleteVersion)
+// and the bill follows — the current object's bytes when the deleted version
+// was its blob, the retained version's own bytes otherwise. found is false
+// for a version id the key does not have.
+func (d objectDeleteAftermath) deleteVersionReleasing(ctx context.Context, tenantID, bucket, key, versionID string) (bool, error) {
+	found, rp, err := deleteVersion(ctx, d.db, tenantID, bucket, key, versionID)
+	if err != nil || !found {
+		return found, err
+	}
+	rel := displacedRow{ReplacedVersion: rp.VersionReleased}
+	if rp.Changed {
+		rel.Size, rel.Floor = rp.OldSize, rp.Floor
+	}
+	d.releaseDetached(ctx, tenantID, rel)
+	return true, nil
+}
+
+// deleteBehindMarker is a DELETE with no version id on an Enabled bucket: a
+// delete marker becomes the latest version (a pre-versioning object is
+// anchored as the null version first, writeDeleteMarker) and the head row
+// goes; a version that keeps the head row's blob keeps it and its bill, a
+// blob no version names is retired. Returns the marker's version id.
+func (d objectDeleteAftermath) deleteBehindMarker(ctx context.Context, tenantID, bucket, key string) (string, error) {
+	markerID := generateVersionID()
+	if err := writeDeleteMarker(ctx, d.db, tenantID, bucket, key, markerID); err != nil {
+		return "", fmt.Errorf("write the delete marker: %w", err)
+	}
+	// The head-cache row is the billing record (WP-1): DELETE...RETURNING
+	// captures the removed size atomically. An object chunked before
+	// versioning was enabled releases its manifest in the same transaction
+	// (R8-07).
+	marked, found, err := deleteHeadRowReleasing(ctx, d.db, manifestReleaser(d.gci), tenantID, bucket, key)
+	if err != nil {
+		return "", fmt.Errorf("delete-marker head row: %w", err)
+	}
+	if found {
+		d.releaseDetached(ctx, tenantID, marked)
+		// The blob the head row named stays while a version keeps it (the
+		// undelete path); one no version names is displaced.
+		if marked.StorageKey != "" {
+			if err := retireBlobNow(ctx, d.db, tenantID, bucket, key, marked.StorageKey, marked.Backend, retiredOverwritten); err != nil {
+				d.logger.Warn("delete marker: the displaced blob is not queued for the collector — the erasure sweep is its only remover",
+					zap.Error(err), zap.String("bucket", bucket), zap.String("object", key), zap.String("storage_key", marked.StorageKey))
+			}
+		}
+	}
+	return markerID, nil
+}
+
+// releaseDetached releases what removing d frees, on a context detached
+// from the request: the row change has committed.
+func (d objectDeleteAftermath) releaseDetached(ctx context.Context, tenantID string, rel displacedRow) {
+	if d.quota == nil || len(rel.releases()) == 0 {
+		return
+	}
+	qctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := releaseDisplacedOn(qctx, d.quota, tenantID, rel); err != nil {
+		d.logger.Error("quota release after delete failed",
+			zap.Error(err), zap.String("tenant_id", tenantID), zap.Int64("bytes", rel.Size))
+	}
 }

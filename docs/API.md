@@ -141,7 +141,14 @@ Behaviour worth knowing before writing code against it:
   write and the usage numbers. A non-current version written before
   2026-10-12 kept no bytes: `GET`/`HEAD ?versionId` of one answers **501**
   (the newest version behind a delete marker is the exception: its bytes
-  were never overwritten).
+  were never overwritten). An object written before versioning was enabled
+  is the key's `null` version: the first overwrite or delete marker keeps it
+  as one (since 2026-10-13), and `?versionId=null` reads or deletes it.
+  `DeleteObjects` on a versioned bucket writes a marker per key (no
+  `VersionId`) or deletes the named version (`VersionId`), with
+  `DeleteMarker` / `DeleteMarkerVersionId` / `VersionId` in its response.
+  A chunked object (> 64 MiB) written before versioning was enabled is not
+  kept as a `null` version: its first overwrite or delete marker releases it.
 - **Regions**: a bucket's region is fixed at creation and must be one the
   deployment has a key pair for; otherwise 400 `InvalidLocationConstraint`.
   Vault objects go to the tape backend and public-read objects to the CDN

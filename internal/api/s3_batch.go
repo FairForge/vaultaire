@@ -49,7 +49,10 @@ type DeleteResult struct {
 
 // DeletedItem reports a successfully deleted key.
 type DeletedItem struct {
-	Key string `xml:"Key"`
+	Key                   string `xml:"Key"`
+	VersionID             string `xml:"VersionId,omitempty"`
+	DeleteMarker          bool   `xml:"DeleteMarker,omitempty"`
+	DeleteMarkerVersionID string `xml:"DeleteMarkerVersionId,omitempty"`
 }
 
 // DeleteError reports a per-key failure within a batch delete.
@@ -133,34 +136,45 @@ func (s *Server) deleteObjects(w http.ResponseWriter, r *http.Request, req *S3Re
 	// may commit.
 	longOpBegin(r)
 
-	// One outcome per distinct key, computed in parallel; reported per
-	// requested entry in request order.
-	first := make(map[string]int, len(delReq.Objects))
-	var unique []string
+	// One outcome per distinct (key, version id), computed in parallel;
+	// reported per requested entry in request order.
+	first := make(map[DeleteRequestKey]int, len(delReq.Objects))
+	firstKey := make(map[string]int, len(delReq.Objects))
+	var unique []DeleteRequestKey
 	for _, obj := range delReq.Objects {
-		if _, seen := first[obj.Key]; !seen {
-			first[obj.Key] = len(unique)
-			unique = append(unique, obj.Key)
+		id := DeleteRequestKey{Key: obj.Key, VersionID: obj.VersionID}
+		if _, seen := first[id]; !seen {
+			first[id] = len(unique)
+			unique = append(unique, id)
+		}
+		if _, seen := firstKey[obj.Key]; !seen {
+			firstKey[obj.Key] = len(firstKey)
 		}
 	}
+	// A versioned bucket's keys go through DELETE's versioned flavours: a
+	// <VersionId> deletes that version, no version id on an Enabled bucket
+	// writes a delete marker (Stage 1a Prompt 3, Part 0; R3-09).
+	vStatus := getBucketVersioningStatus(r.Context(), s.db, t.ID, bucket)
 	outcomes := make([]*DeleteError, len(unique))
+	deleted := make([]DeletedItem, len(unique))
 	sem := make(chan struct{}, batchDeleteConcurrency)
 	// The notification targets and the webhooks are read once for the whole
 	// batch; a key fires nothing when there are none.
 	aftermath := s.objectDeleteAftermath().forBatch(r.Context(), t.ID, bucket)
 	var wg sync.WaitGroup
-	for i, key := range unique {
+	for i, id := range unique {
 		sem <- struct{}{}
 		// A shutdown cut the batch: the keys not started yet are not
 		// attempted — an InternalError the client retries, never a guess.
 		if r.Context().Err() != nil {
 			<-sem
-			outcomes[i] = &DeleteError{Key: key, Code: ErrInternalError,
+			outcomes[i] = &DeleteError{Key: id.Key, Code: ErrInternalError,
 				Message: "Not attempted: the server is restarting. Retry this key."}
 			continue
 		}
 		wg.Add(1)
-		go func(i int, key string) {
+		go func(i int, id DeleteRequestKey) {
+			key := id.Key
 			defer wg.Done()
 			defer func() { <-sem }()
 			// This goroutine is outside net/http's per-request recover and
@@ -176,17 +190,19 @@ func (s *Server) deleteObjects(w http.ResponseWriter, r *http.Request, req *S3Re
 					outcomes[i] = &DeleteError{Key: key, Code: ErrInternalError, Message: "Internal error while deleting"}
 				}
 			}()
-			outcomes[i] = s.batchDeleteKey(r, t, bucket, container, key, aftermath)
-		}(i, key)
+			deleted[i] = DeletedItem{Key: key, VersionID: id.VersionID}
+			outcomes[i] = s.batchDeleteEntry(r, t, bucket, container, id, vStatus, aftermath, &deleted[i])
+		}(i, id)
 	}
 	wg.Wait()
 	// Per-key notifications and webhooks: in key order, on the process-wide
 	// delivery pool, after the response has been built (they do not block it).
-	aftermath.fanout.deliverInOrder(aftermath, t.ID, bucket, func(key string) int { return first[key] })
+	aftermath.fanout.deliverInOrder(aftermath, t.ID, bucket, func(key string) int { return firstKey[key] })
 
 	unavailable, firstUnavailable := 0, ""
 	for _, obj := range delReq.Objects {
-		if e := outcomes[first[obj.Key]]; e != nil {
+		at := first[DeleteRequestKey{Key: obj.Key, VersionID: obj.VersionID}]
+		if e := outcomes[at]; e != nil {
 			result.Errors = append(result.Errors, *e)
 			if e.Code == ErrServiceUnavailable {
 				if unavailable == 0 {
@@ -197,7 +213,7 @@ func (s *Server) deleteObjects(w http.ResponseWriter, r *http.Request, req *S3Re
 			continue
 		}
 		if !delReq.Quiet {
-			result.Deleted = append(result.Deleted, DeletedItem{Key: obj.Key})
+			result.Deleted = append(result.Deleted, deleted[at])
 		}
 	}
 	if unavailable > 0 {
@@ -232,6 +248,50 @@ func (s *Server) deleteObjects(w http.ResponseWriter, r *http.Request, req *S3Re
 		zap.Int("deleted", len(result.Deleted)),
 		zap.Int("errors", len(result.Errors)),
 		zap.Bool("quiet", delReq.Quiet))
+}
+
+// batchDeleteEntry deletes one entry of a DeleteObjects batch: on a
+// versioned bucket through DELETE's versioned flavours (a version id, or a
+// marker on an Enabled bucket — object_delete_shared.go, the same code the
+// single DELETE runs), otherwise batchDeleteKey. item is the entry's
+// Deleted element, filled in on success.
+func (s *Server) batchDeleteEntry(r *http.Request, t *tenant.Tenant, bucket, container string, id DeleteRequestKey,
+	vStatus string, aftermath objectDeleteAftermath, item *DeletedItem) *DeleteError {
+	versioned := s.db != nil && (vStatus == "Enabled" || vStatus == "Suspended")
+	byVersion := versioned && id.VersionID != "" && !isUnanchoredNullVersion(r.Context(), s.db, t.ID, bucket, id.Key, id.VersionID)
+	marker := versioned && vStatus == "Enabled" && id.VersionID == ""
+	if id.Key == "" || (!byVersion && !marker) {
+		return s.batchDeleteKey(r, t, bucket, container, id.Key, aftermath)
+	}
+	if lockErr := checkObjectLock(r.Context(), s.db, t.ID, bucket, id.Key, isObjectLockBypass(r)); lockErr != nil {
+		if !errors.Is(lockErr, errObjectLocked) {
+			s.logger.Error("batch delete: object lock lookup failed", zap.Error(lockErr), zap.String("key", id.Key))
+			return &DeleteError{Key: id.Key, Code: ErrInternalError, Message: "Internal error while deleting"}
+		}
+		return &DeleteError{Key: id.Key, Code: ErrAccessDenied, Message: errorMessages[ErrAccessDenied] + " " + lockDeniedHint(r)}
+	}
+	// The row change commits detached from a shutdown's cut, as settle does.
+	ctx, cancel := postCommit(r.Context())
+	defer cancel()
+	if byVersion {
+		found, err := aftermath.deleteVersionReleasing(ctx, t.ID, bucket, id.Key, id.VersionID)
+		if err != nil {
+			s.logger.Error("batch delete: version delete failed", zap.Error(err), zap.String("key", id.Key))
+			return &DeleteError{Key: id.Key, Code: ErrInternalError, Message: "Internal error while deleting"}
+		}
+		if !found {
+			return &DeleteError{Key: id.Key, Code: ErrNoSuchVersion, Message: errorMessages[ErrNoSuchVersion]}
+		}
+	} else {
+		markerID, err := aftermath.deleteBehindMarker(ctx, t.ID, bucket, id.Key)
+		if err != nil {
+			s.logger.Error("batch delete: delete marker failed", zap.Error(err), zap.String("key", id.Key))
+			return &DeleteError{Key: id.Key, Code: ErrInternalError, Message: "Internal error while deleting"}
+		}
+		item.DeleteMarker, item.DeleteMarkerVersionID = true, markerID
+	}
+	aftermath.announce(ctx, t.ID, bucket, id.Key)
+	return nil
 }
 
 // batchDeleteKey deletes one key of a DeleteObjects batch and returns its
