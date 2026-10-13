@@ -338,3 +338,35 @@ a completed object:
 - Two-slot window of this deploy: for ≤ 15 min the old slot writes multipart
   whole (plaintext; prod has no key and 0 sse buckets) and serves a chunked
   public object 404; both slots read both shapes.
+
+# Post-merge review (2026-10-13)
+
+By the plan driver, the same day, on `dcb7462`: the non-test diffs of #702
+and #703 read against the sections above and against Part 0's table in
+`docs/reviews/WP-R2-1.md`; CI on `main` green for `5880398`, `08d4f24` and
+`dcb7462`; no `Co-Authored-By` trailer on either PR. **Every claim holds; no
+P0/P1.** Checked and found right: `deleteBehindMarker` calls `retireBlobNow`
+whatever `KeptByVersion` says, but `retireBlob` re-checks `blobStillNamed`
+inside its transaction, so a blob a version keeps is never queued; the batch
+checks Object Lock on both versioned flavours before the row change;
+`anchorNullVersion` can only fire for a pre-versioning object (a Suspended
+write writes a `null` version row, so "no version row at all" means exactly
+that); every refusal of `decidePlacement` precedes `longOpBegin`;
+`stagedPartsReader` reports a corrupt part with the part's last bytes, so a
+consumer that reads exactly Content-Length still fails.
+
+| # | Sev | Where | Scenario | Fix or hand-off |
+|---|-----|-------|----------|-----------------|
+| PM-1 | **P2** | `s3_multipart.go:787-795`, `s3_copy.go:875` (`sseSealingReader`), `s3_engine_adapter.go:1060` | A sealed Complete holds plaintext + ciphertext (512 MiB at the cap) per request with no bound — the PUT's documented exception, but multipart is the path every client takes, so one authenticated tenant with N concurrent 256 MiB Completes holds N × 512 MiB. | **WP-R8-5** (streaming SSE: the buffer goes; Prompt 4). WP-R2-6 keeps the chunked pool's bound. |
+| PM-2 | P3 | `s3_copy.go:343` | A whole plaintext source > 256 MiB copied into a chunkable `sse_enabled` bucket is 413, where a PUT of the same bytes chunk-encrypts: the whole-source copy does not ask `decidePlacement`. | WP-R8-5 (the cap goes). |
+| PM-3 | P3 | `s3_multipart.go:120` (Create), `placement.go` (`SSERequested`) | `x-amz-server-side-encryption: AES256` on CreateMultipartUpload is not persisted (the note's own residual), so Complete places such an upload into a non-sse bucket as plaintext where the PUT seals. | WP-R8-5: column 089 `multipart_uploads.sse_requested`. |
+| PM-4 | P3, ceremony | `bucket_create.go:113` | Every new bucket is `sse_enabled` with a key, one later made public too: PUBLIC-class objects on R2 will be sealed and `/cdn` opens them on every hit (`cdn.go:356`, whole-buffer today). Nothing at the edge reads R2 raw (Sippy pulls through the S3 API), so it is a cost, not a break. | WP-R8-5 A5: decide "seal public objects" (keeps the one-sentence invariant) or not. |
+| PM-5 | P3, ceremony | `direct_upload.go:98` | A direct upload refuses an `sse_enabled` bucket (the client puts plaintext on R2; the server never sees it), so after the ceremony every new bucket refuses direct uploads. | Product consequence for the F-14 ceremony note; not a code change. |
+| PM-6 | note | `smart_demotion` | Large Standard objects are now chunked and the Smart tier skips chunked rows: its COGS saving on large objects is gone while the flag is OFF; to weigh when it is turned on (the note says so). | Listed. |
+
+The next prompt (Stage 1a Prompt 4) is **WP-R8-5 streaming SSE** (= K1, =
+WP-R3-3): decision 1 above, recommended by the worker and accepted — the
+ceremony waits for it. Its Part 0 probes four things this review did not
+drive at the handlers: two concurrent chunked Completes of one upload, a
+chunked Complete racing the reaper, a sealed Complete's version row, and the
+response header of a PUT asking `AES256` on a keyless process.
