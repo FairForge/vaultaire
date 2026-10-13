@@ -1,6 +1,7 @@
 package crypto
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/md5" // #nosec G401 G501 — S3 spec requires MD5 for SSE-C key validation
@@ -13,39 +14,133 @@ import (
 )
 
 const (
+	// SSECAlgorithm is the row value of an SSE-C object written before
+	// WP-R8-5 Part B: [nonce 12][AES-GCM ct+tag] under the customer's key,
+	// one GCM over the object. Such a blob is only opened (SSECDecrypt);
+	// no writer makes it.
 	SSECAlgorithm = "AES256-SSE-C"
-	SSECOverhead  = 28 // 12 nonce + 16 GCM tag
+	// SSECAlgorithmV3 is the row value of an SSE-C object in the streaming
+	// format (stream.go, kind 0x02): what every SSE-C write makes since
+	// WP-R8-5 Part B. The row says which format a blob is in: an old blob
+	// starts with a random nonce byte, so a magic byte alone would collide
+	// once in 256.
+	SSECAlgorithmV3 = "AES256-SSE-C-v3"
+	SSECOverhead    = 28 // 12 nonce + 16 GCM tag (the old format)
+	// legacySSECMaxBlob bounds the old-format opener: no old SSE-C blob was
+	// written over 256 MiB (the old PUT refused larger ones).
+	legacySSECMaxBlob = 256<<20 + SSECOverhead
 )
 
 var ErrSSECKeyMismatch = errors.New("ssec: decryption failed — wrong key")
 
-func SSECEncrypt(key, plaintext []byte) ([]byte, error) {
+// IsSSEC reports whether a row's encryption_algorithm is SSE-C (either
+// format): the customer's key is needed to read it.
+func IsSSEC(algorithm string) bool {
+	return algorithm == SSECAlgorithm || algorithm == SSECAlgorithmV3
+}
+
+// SSECSealedLength is the stored length of an SSE-C object of size bytes in
+// the streaming format.
+func SSECSealedLength(size int64) int64 {
+	return StreamCiphertextLength(StreamHeaderSSEC, StreamSegmentSize, size)
+}
+
+// ssecAEAD derives the DEK of a streaming SSE-C blob: HKDF-SHA256 over the
+// customer's key, the blob's random salt and its header.
+func ssecAEAD(key []byte, h *StreamHeader) (cipher.AEAD, error) {
 	if len(key) != 32 {
 		return nil, fmt.Errorf("ssec: key must be 32 bytes, got %d", len(key))
 	}
-
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, fmt.Errorf("ssec: create cipher: %w", err)
+	if h.Kind != StreamKindSSEC {
+		return nil, fmt.Errorf("%w: kind 0x%02x is not SSE-C", ErrStreamCorrupt, h.Kind)
 	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("ssec: create GCM: %w", err)
-	}
-
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return nil, fmt.Errorf("ssec: generate nonce: %w", err)
-	}
-
-	ciphertext := gcm.Seal(nil, nonce, plaintext, nil)
-
-	buf := make([]byte, 0, len(nonce)+len(ciphertext))
-	buf = append(buf, nonce...)
-	buf = append(buf, ciphertext...)
-	return buf, nil
+	return streamAEAD(key, h.Salt, ssecStreamInfo, h.Raw)
 }
 
+// SSECSeal returns a reader of the streaming SSE-C blob of src (exactly size
+// bytes) under the customer's key. The DEK is derived before it returns:
+// the caller may zero key at once.
+func SSECSeal(key []byte, src io.Reader, size int64) (io.Reader, error) {
+	salt := make([]byte, streamSaltSize)
+	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
+		return nil, fmt.Errorf("ssec: salt: %w", err)
+	}
+	raw, err := newStreamHeader(StreamKindSSEC, salt, StreamSegmentSize)
+	if err != nil {
+		return nil, err
+	}
+	h, err := ParseStreamHeader(raw)
+	if err != nil {
+		return nil, err
+	}
+	aead, err := ssecAEAD(key, h)
+	if err != nil {
+		return nil, err
+	}
+	return newStreamSealer(src, aead, raw, StreamSegmentSize, size)
+}
+
+// SSECOpen opens a whole streaming SSE-C blob read from src. The header and
+// the first segment are verified before it returns: a first segment that
+// does not open is ErrSSECKeyMismatch (the key is not stored, so a wrong key
+// and a damaged first segment look alike — as with the old format); a later
+// one is ErrStreamCorrupt from the reader. The DEK is derived before it
+// returns: the caller may zero key at once.
+func SSECOpen(key []byte, src io.Reader) (io.Reader, error) {
+	h, err := ReadStreamHeader(src)
+	if err != nil {
+		return nil, err
+	}
+	aead, err := ssecAEAD(key, h)
+	if err != nil {
+		return nil, err
+	}
+	o := newStreamOpener(src, aead, h)
+	if err := o.prime(); err != nil {
+		if errors.Is(err, ErrStreamCorrupt) {
+			return nil, ErrSSECKeyMismatch
+		}
+		return nil, err
+	}
+	return o, nil
+}
+
+// SSECOpenRange opens a planned range of a streaming SSE-C object of size
+// bytes whose header is h; src is the stored bytes the plan names. A first
+// segment that does not open is ErrSSECKeyMismatch.
+func SSECOpenRange(key []byte, h *StreamHeader, size int64, rg StreamRange, src io.Reader) (io.Reader, error) {
+	aead, err := ssecAEAD(key, h)
+	if err != nil {
+		return nil, err
+	}
+	r, err := openRange(src, aead, h, size, rg)
+	if err != nil {
+		if errors.Is(err, ErrStreamCorrupt) {
+			return nil, ErrSSECKeyMismatch
+		}
+		return nil, err
+	}
+	return r, nil
+}
+
+// SSECOpenLegacy opens a whole old-format SSE-C blob read from src (≤ 256
+// MiB by construction): the compatibility opener, bounded.
+func SSECOpenLegacy(key []byte, src io.Reader) (io.Reader, error) {
+	data, err := io.ReadAll(io.LimitReader(src, legacySSECMaxBlob+1))
+	if err != nil {
+		return nil, fmt.Errorf("ssec: read: %w", err)
+	}
+	if len(data) > legacySSECMaxBlob {
+		return nil, errors.New("ssec: old-format blob longer than any old write")
+	}
+	pt, err := SSECDecrypt(key, data)
+	if err != nil {
+		return nil, err
+	}
+	return bytes.NewReader(pt), nil
+}
+
+// SSECDecrypt opens an old-format SSE-C blob ([nonce][ct+tag]).
 func SSECDecrypt(key, data []byte) ([]byte, error) {
 	if len(key) != 32 {
 		return nil, fmt.Errorf("ssec: key must be 32 bytes, got %d", len(key))

@@ -305,27 +305,28 @@ Server-side encryption with customer-provided 256-bit AES keys. Stateless — ke
 - `x-amz-server-side-encryption-customer-key: <base64-encoded 32-byte key>`
 - `x-amz-server-side-encryption-customer-key-MD5: <base64-encoded MD5 of raw key>`
 
+**Streaming since WP-R8-5 Part B**: SSE-C is kind 0x02 of the codec (`internal/crypto/stream.go`): header `[0x03][0x02][salt 16][segment_size][nonce_prefix]`, DEK = HKDF-SHA256(customer key, the blob's random salt, "vaultaire-sse-c-stream-v3" ‖ header) — one customer key over many objects never repeats a (key, nonce) — 1 MiB segments, no size limit. Row value **`AES256-SSE-C-v3`** (`crypto.SSECAlgorithmV3`); a row of `AES256-SSE-C` (`crypto.SSECAlgorithm`) is a blob of the old format `[nonce 12][ct+tag]`, opened whole by `crypto.SSECOpenLegacy` (bounded, ≤ 256 MiB + 28). The ROW tells the formats apart, never the first byte: an old blob starts with a random nonce byte (0x03 once in 256, `TestSSEC_MagicCollision_OldBlobStartingWith0x03`). Every check is `crypto.IsSSEC(alg)`.
+
 **PUT flow** (s3_engine_adapter.go HandlePut):
 1. `HasSSECHeaders(r)` check runs BEFORE SSE-S3 check (mutually exclusive)
 2. `ParseSSECHeaders(r)` validates algorithm, decodes key, verifies MD5
-3. ReadAll plaintext through TeeReader (ETag on plaintext)
-4. `SSECEncrypt(key, plaintext)` → AES-256-GCM ciphertext (28B overhead)
-5. Key zeroed immediately after encryption
-6. `encryption_algorithm = "AES256-SSE-C"` stored in object_head_cache
+3. `crypto.SSECSeal(key, body, size)` → a sealing reader (the MD5 tee before it: ETag on plaintext); the DEK is derived before it returns and the key is zeroed at once
+4. The backend PUT carries `SSECSealedLength(size)`; a short/long body fails the sealer's read (400), a Content-MD5 mismatch retires the written blob
+5. `encryption_algorithm = "AES256-SSE-C-v3"` stored in object_head_cache
 
-**GET flow** (s3_engine_adapter.go HandleGet):
-1. If `encryption_algorithm == "AES256-SSE-C"` and no SSE-C headers → 403
-2. Parse headers, decrypt with `SSECDecrypt`, key zeroed after
-3. Wrong key → 403 with "does not match" message
+**GET flow** (s3_engine_adapter.go HandleGet, the sealed branch shared with SSE-S3 — `sseCOpener`, `openSealedGet`):
+1. If `crypto.IsSSEC(encryption_algorithm)` and no SSE-C headers → 403, before any backend call
+2. Parse headers; the open (whole, or a Range by segment for a v3 blob — an old-format blob is read whole and sliced) verifies the first segment before the status line; the key is zeroed once it returns
+3. Wrong key → 403 with "does not match" message (decided at the first segment: a wrong key and a damaged first segment look alike, as before)
 4. Response header: `x-amz-server-side-encryption-customer-algorithm: AES256`
 
 **HEAD flow** (s3.go handleHeadObject):
-- If `encryption_algorithm == "AES256-SSE-C"` and no SSE-C headers → 403
+- If `crypto.IsSSEC(encryption_algorithm)` and no SSE-C headers → 403
 - With headers → 200 + `x-amz-server-side-encryption-customer-algorithm: AES256`
 
-**Multipart**: SSE-C headers on InitiateMultipartUpload → 501 NotImplemented
+**Multipart**: SSE-C headers on InitiateMultipartUpload → 501 NotImplemented (WP-SSEC-1: the key on Create, every UploadPart and Complete)
 
-**CopyObject**: SSE-C not handled — deferred to future phase
+**CopyObject**: an SSE-C source → 501 (it needs the `x-amz-copy-source-server-side-encryption-customer-*` key); `/cdn` → 403
 
 **Key files**: `internal/crypto/ssec.go` (encrypt/decrypt/header parsing), `internal/crypto/CLAUDE.md`
 

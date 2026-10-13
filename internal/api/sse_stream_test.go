@@ -15,6 +15,7 @@ import (
 	"crypto/md5" // #nosec G501 — S3 ETag semantics
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/xml"
@@ -544,16 +545,15 @@ func TestCDN_SealedPublicObject_StreamsAndRanges(t *testing.T) {
 // SSE-S3 path — one that seals or opens (Seal / Open / OpenRange on the
 // service, openSealed*, newSSEWriteSealer) — never reads a stream whole
 // (io.ReadAll) nor sizes a buffer by a variable (make([]byte, n)). The
-// exceptions are named: the 0x01/0x02 compatibility opener (bounded: no such
-// blob is over 256 MiB) and, until WP-R8-5 Part B, the SSE-C branches of
-// the PUT and the GET (a customer-key seal is still one GCM).
+// exceptions are named: the compatibility openers of the formats written
+// before WP-R8-5 (bounded: no such blob is over 256 MiB) — SSE-S3 0x01/0x02
+// and old-format SSE-C.
 func TestSSEPaths_NeverBufferTheObject(t *testing.T) {
 	allowed := map[string]string{
-		"internal/crypto/sse_s3.go:Open":              "the 0x01/0x02 compatibility opener",
-		"internal/api/s3_engine_adapter.go:HandleGet": "SSE-C, WP-R8-5 Part B",
-		"internal/api/s3_engine_adapter.go:HandlePut": "SSE-C, WP-R8-5 Part B",
+		"internal/crypto/sse_s3.go:Open":         "the 0x01/0x02 compatibility opener",
+		"internal/crypto/ssec.go:SSECOpenLegacy": "the old-format SSE-C compatibility opener",
 	}
-	sealing := regexp.MustCompile(`(^|\.)(sse|sseService|SSE|svc)\.(Seal|Open|OpenRange)$|(^|\.)(openSealed|openSealedRange|openSealedGet|newSSEWriteSealer)$`)
+	sealing := regexp.MustCompile(`(^|\.)(sse|sseService|SSE|svc)\.(Seal|Open|OpenRange)$|(^|\.)(openSealed|openSealedRange|openSealedGet|newSSEWriteSealer)$|(^|\.)SSEC(Seal|Open|OpenRange|OpenLegacy|Decrypt)$`)
 	var violations, paths []string
 	for _, dir := range []string{"../crypto", "."} {
 		entries, err := os.ReadDir(dir)
@@ -616,13 +616,15 @@ func TestSSEPaths_NeverBufferTheObject(t *testing.T) {
 	t.Logf("SSE-S3 paths: %v", paths)
 	assert.Empty(t, violations, "a whole-object buffer on an SSE-S3 path")
 	for _, must := range []string{"internal/api/sse_stream.go:openSealed", "internal/api/s3_copy.go:copyObject",
+		"internal/api/s3_engine_adapter.go:HandlePut", "internal/api/s3_engine_adapter.go:HandleGet", "internal/crypto/ssec.go:SSECOpenLegacy",
 		"internal/api/background_put.go:writeOpts", "internal/api/key_reencrypt_whole.go:reencryptObject",
 		"internal/api/sse_stream.go:openSealedGet", "internal/api/cdn.go:handleCDNRequest"} {
 		assert.Contains(t, paths, must, "the walk sees every SSE-S3 path")
 	}
 
 	// The names of the old whole-object API are gone from the product code.
-	for _, gone := range []string{"MaxEncryptableSize", "maxSSEObjectSize", "sseSealingReader", "openSSEBlob", "EncryptBytes(", "errCopyTooLargeForSSE", "refuseTooLargeToSeal"} {
+	for _, gone := range []string{"MaxEncryptableSize", "maxSSEObjectSize", "sseSealingReader", "openSSEBlob", "EncryptBytes(", "errCopyTooLargeForSSE", "refuseTooLargeToSeal",
+		"SSECEncrypt(", "ssecMaxObjectSize"} {
 		for _, dir := range []string{"../crypto", "."} {
 			entries, err := os.ReadDir(dir)
 			require.NoError(t, err)
@@ -693,4 +695,149 @@ func TestSSEBlobsOpened_OnTheServersRegistry(t *testing.T) {
 	for _, f := range []string{"0x01", "0x02", "0x03"} {
 		assert.Contains(t, body, `vaultaire_sse_blobs_opened_total{format="`+f+`"}`)
 	}
+}
+
+// --- WP-R8-5 Part B: SSE-C on the streaming codec ---------------------------
+
+func ssecHeaders(key []byte) map[string]string {
+	sum := md5.Sum(key) // #nosec G401 -- the SSE-C key MD5 header
+	return map[string]string{
+		"x-amz-server-side-encryption-customer-algorithm": "AES256",
+		"x-amz-server-side-encryption-customer-key":       base64.StdEncoding.EncodeToString(key),
+		"x-amz-server-side-encryption-customer-key-MD5":   base64.StdEncoding.EncodeToString(sum[:]),
+	}
+}
+
+func (f *sealedFixture) getWith(t *testing.T, key, rng string, hdr map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	r := httptest.NewRequest("GET", "/test-bucket/"+key, nil)
+	if rng != "" {
+		r.Header.Set("Range", rng)
+	}
+	for k, v := range hdr {
+		r.Header.Set(k, v)
+	}
+	r = r.WithContext(s3Ctx(r.Context(), f.tenant))
+	w := httptest.NewRecorder()
+	f.server.handleS3Request(w, r)
+	return w
+}
+
+// legacySSECBlob is an SSE-C blob as the writer before Part B made it:
+// [nonce 12][AES-GCM ct+tag]. firstBytes, when set, are forced into the
+// nonce (the magic-collision case).
+func legacySSECBlob(t *testing.T, key, pt []byte, firstBytes ...byte) []byte {
+	t.Helper()
+	block, err := aes.NewCipher(key)
+	require.NoError(t, err)
+	gcm, err := cipher.NewGCM(block)
+	require.NoError(t, err)
+	nonce := make([]byte, 12)
+	_, _ = rand.Read(nonce)
+	copy(nonce, firstBytes)
+	return gcm.Seal(append([]byte(nil), nonce...), nonce, pt, nil)
+}
+
+func TestSSEC_Put_Get_Range_OverTheOldCap(t *testing.T) {
+	// Before (Part A): the SSE-C PUT io.ReadAll'd the body and sealed it with
+	// one GCM, 413 over 256 MiB; the GET read the whole blob first.
+	f := setupSealedFixture(t)
+	key := bytes.Repeat([]byte{0x5c}, 32)
+	hdr := ssecHeaders(key)
+	body := mpBody(3*crypto.StreamSegmentSize+4321, 6) // 4 segments of the default 1 MiB
+	w := f.putWith(t, "c.bin", body, hdr)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, "AES256", w.Header().Get("x-amz-server-side-encryption-customer-algorithm"))
+	row := f.row(t, "c.bin")
+	assert.Equal(t, crypto.SSECAlgorithmV3, row.enc)
+	raw, err := os.ReadFile(f.blobFile(t, "c.bin"))
+	require.NoError(t, err)
+	assert.Equal(t, []byte{crypto.StreamFormat, crypto.StreamKindSSEC}, raw[:2])
+	assert.Equal(t, crypto.SSECSealedLength(int64(len(body))), int64(len(raw)))
+	assert.Zero(t, plaintextOnBackend(t, f.fixed.dir, f.tempDir))
+
+	g := f.getWith(t, "c.bin", "", hdr)
+	require.Equal(t, http.StatusOK, g.Code, g.Body.String())
+	assert.Equal(t, body, g.Body.Bytes())
+	assert.Equal(t, "AES256", g.Header().Get("x-amz-server-side-encryption-customer-algorithm"))
+
+	size := int64(len(body))
+	for _, rg := range [][2]int64{{0, 0}, {crypto.StreamSegmentSize - 3, crypto.StreamSegmentSize + 3}, {size - 1, size - 1}} {
+		f.rd.reset()
+		g = f.getWith(t, "c.bin", fmt.Sprintf("bytes=%d-%d", rg[0], rg[1]), hdr)
+		require.Equal(t, http.StatusPartialContent, g.Code, g.Body.String())
+		assert.Equal(t, body[rg[0]:rg[1]+1], g.Body.Bytes())
+		assert.Equal(t, int32(0), f.rd.gets.Load(), "by segment, never the whole blob")
+		assert.Equal(t, int32(2), f.rd.ranges.Load())
+	}
+
+	// A wrong key: 403 before the status line, whole or ranged; no key: 403.
+	wrong := ssecHeaders(bytes.Repeat([]byte{0x11}, 32))
+	for _, rng := range []string{"", "bytes=10-20"} {
+		g = f.getWith(t, "c.bin", rng, wrong)
+		assert.Equal(t, http.StatusForbidden, g.Code, "range %q", rng)
+		assert.NotContains(t, g.Body.String(), mpMarker)
+	}
+	g = f.getWith(t, "c.bin", "", nil)
+	assert.Equal(t, http.StatusForbidden, g.Code)
+
+	// The size gate is gone: a declared length over the old cap is read
+	// (this short body is the client's 400, never a 413).
+	r := httptest.NewRequest("PUT", "/test-bucket/big.bin", bytes.NewReader([]byte("tiny")))
+	r.ContentLength = 256<<20 + 1
+	for k, v := range hdr {
+		r.Header.Set(k, v)
+	}
+	r = r.WithContext(f.ctx(r.Context()))
+	pw := httptest.NewRecorder()
+	f.server.handleS3Request(pw, r)
+	assert.Equal(t, http.StatusBadRequest, pw.Code, pw.Body.String())
+	assert.Contains(t, pw.Body.String(), ErrIncompleteBody)
+}
+
+func TestSSEC_OldBlob_StillOpens(t *testing.T) {
+	f := setupSealedFixture(t)
+	key := bytes.Repeat([]byte{0x7e}, 32)
+	hdr := ssecHeaders(key)
+	body := mpBody(5000, 3)
+	require.Equal(t, http.StatusOK, f.putWith(t, "old.bin", body, hdr).Code)
+	// As the old writer left it: the old format, the old row value.
+	require.NoError(t, os.WriteFile(f.blobFile(t, "old.bin"), legacySSECBlob(t, key, body), 0o600))
+	_, err := f.db.Exec(`UPDATE object_head_cache SET encryption_algorithm = $3 WHERE tenant_id = $1 AND object_key = $2`,
+		f.tenantID, "old.bin", crypto.SSECAlgorithm)
+	require.NoError(t, err)
+
+	g := f.getWith(t, "old.bin", "", hdr)
+	require.Equal(t, http.StatusOK, g.Code, g.Body.String())
+	assert.Equal(t, body, g.Body.Bytes())
+	g = f.getWith(t, "old.bin", "bytes=1000-1999", hdr)
+	require.Equal(t, http.StatusPartialContent, g.Code, g.Body.String())
+	assert.Equal(t, body[1000:2000], g.Body.Bytes())
+	g = f.getWith(t, "old.bin", "", ssecHeaders(bytes.Repeat([]byte{1}, 32)))
+	assert.Equal(t, http.StatusForbidden, g.Code)
+}
+
+// An old SSE-C blob starts with its random nonce: one in 256 starts with the
+// 0x03 magic, one in 65,536 with 0x03 0x02 (what a streaming SSE-C header
+// starts with). The row says which format a blob is in, so such a blob is
+// opened as the old format it is — whole and ranged.
+func TestSSEC_MagicCollision_OldBlobStartingWith0x03(t *testing.T) {
+	f := setupSealedFixture(t)
+	key := bytes.Repeat([]byte{0x2a}, 32)
+	hdr := ssecHeaders(key)
+	body := mpBody(4000, 9)
+	require.Equal(t, http.StatusOK, f.putWith(t, "coll.bin", body, hdr).Code)
+	blob := legacySSECBlob(t, key, body, crypto.StreamFormat, crypto.StreamKindSSEC)
+	require.Equal(t, []byte{crypto.StreamFormat, crypto.StreamKindSSEC}, blob[:2])
+	require.NoError(t, os.WriteFile(f.blobFile(t, "coll.bin"), blob, 0o600))
+	_, err := f.db.Exec(`UPDATE object_head_cache SET encryption_algorithm = $3 WHERE tenant_id = $1 AND object_key = $2`,
+		f.tenantID, "coll.bin", crypto.SSECAlgorithm)
+	require.NoError(t, err)
+
+	g := f.getWith(t, "coll.bin", "", hdr)
+	require.Equal(t, http.StatusOK, g.Code, g.Body.String())
+	assert.Equal(t, body, g.Body.Bytes())
+	g = f.getWith(t, "coll.bin", "bytes=100-199", hdr)
+	require.Equal(t, http.StatusPartialContent, g.Code, g.Body.String())
+	assert.Equal(t, body[100:200], g.Body.Bytes())
 }

@@ -332,7 +332,7 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	// ceremony every object a new bucket holds is sealed or chunk-encrypted.
 	// SSE-C needs the customer's key on the copy (x-amz-copy-source-server-
 	// side-encryption-customer-*): still 501.
-	srcSealedS3 := !srcChunked && srcEnc != "" && srcEnc != crypto.SSECAlgorithm
+	srcSealedS3 := !srcChunked && srcEnc != "" && !crypto.IsSSEC(srcEnc)
 	if (srcEnc != "" && !sourceWhole && !srcSealedS3) || (srcChunked && !sourceWhole) {
 		WriteS3ErrorWithContext(w, ErrNotImplemented, r.URL.Path, generateRequestID(),
 			WithSuggestion("Copying objects encrypted with a customer-provided key (SSE-C) is not yet supported. Download and re-upload instead."))
@@ -388,9 +388,9 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	if srcSealedS3 {
 		// Opened as it streams: the header and first segment are verified
 		// before anything is reserved or written (sse_stream.go).
-		reader, err = openSealed(r.Context(), s.sseService, sealedSource{
+		reader, err = openSealed(r.Context(), sseS3Opener{svc: s.sseService, tenantID: t.ID}, sealedSource{
 			whole: func() (io.ReadCloser, error) { return s.engine.Get(gctx, srcContainer, srcBlob) },
-		}, sealedRead{TenantID: t.ID, Size: srcSize})
+		}, sealedRead{Size: srcSize})
 		if errors.Is(err, errSealedUnreadable) {
 			s.logger.Error("copy: the encrypted source does not open", zap.Error(err),
 				zap.String("bucket", srcBucket), zap.String("key", srcKey))
