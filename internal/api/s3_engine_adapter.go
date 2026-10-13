@@ -24,7 +24,6 @@ import (
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/flags"
-	"github.com/FairForge/vaultaire/internal/parfetch"
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/FairForge/vaultaire/internal/usage"
 	"go.uber.org/zap"
@@ -980,92 +979,24 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	var encryptionAlgorithm string
 	var encryptionKeyVersion *int // SSE-S3: the tenant key version the blob is sealed under (WP-R8-1)
 
-	// A large object takes the chunked path, which — when per-chunk convergent
-	// encryption is available — encrypts each chunk itself. Whole-object SSE-S3
-	// must be skipped for such objects: otherwise the object is encrypted twice
-	// (SSE-S3 then per-chunk) and GET, which only peels the per-chunk layer,
-	// returns SSE ciphertext (silent corruption). SSE-S3 is also non-determin-
-	// istic (random KEM ciphertext + nonce), which would defeat the determin-
-	// istic chunk dedup. Objects >256 MiB already skip SSE-S3 via the size cap;
-	// this closes the 64–256 MiB band. (WP-7)
-	chunkThreshold := a.chunkingThreshold
-	if chunkThreshold <= 0 {
-		chunkThreshold = 64 * 1024 * 1024 // 64 MB default
-	}
-	// Versioned buckets keep the plain path: tenant_chunk_refs has no
-	// version_id, so a chunked overwrite destroys the previous version's
-	// manifest while object_versions still advertises it as retrievable —
-	// silent version data loss. Until manifests are version-aware (post-launch
-	// WP), versioning-enabled/suspended buckets store whole objects exactly as
-	// they did before chunking existed. Must match the gate below so SSE-S3
-	// still applies where chunking is skipped.
-	chunkingDisabledByVersioning := false
-	if a.db != nil {
-		vs := getBucketVersioningStatus(r.Context(), a.db, t.ID, bucket)
-		chunkingDisabledByVersioning = vs == "Enabled" || vs == "Suspended"
-	}
-	// Resolve the storage class once: explicit x-amz-storage-class header wins,
-	// then the bucket's tier_preference. Needed this early because a RESILIENT
-	// or archive-class (GLACIER/DEEP_ARCHIVE) resolution must keep the object
-	// on the PLAIN path — chunk blobs always land on the engine's primary
-	// backend (the GCI's `_global` container is shared across tenants and
-	// tiers), so a chunked object would silently break the tier's placement
-	// promise. For archive that meant >64 MB objects got hot-tier COGS on
-	// iDrive while sold as "on tape". Whole objects on Lyve/Geyser are fine
-	// (Lyve multiparts at 214 MB/s, Geyser ingests 227 MB/s sustained).
-	// Deliberate trade: resilient/archive objects skip dedup.
-	// Public-read buckets resolve to PUBLIC (→ the R2 public-bucket/CDN
-	// backend) when no cold/resilient tier or explicit header says otherwise;
-	// PUBLIC objects stay whole too, so the CDN path can address them as one
-	// R2 key.
+	// Where the bytes go — chunked, whole and sealed, whole, or refused — is
+	// ONE decision, made the same way for a CompleteMultipartUpload of the
+	// same bytes and class (placement.go, WP-R3-1). A chunked object is
+	// encrypted chunk by chunk (never SSE-S3 as well: GET peels one layer,
+	// and a random seal would defeat the deterministic chunk dedup, WP-7);
+	// the region pin, versioning, the tier and the `chunking` flag are read
+	// once, the bucket's encryption setting strictly (R8-03, R8-04).
 	resolvedStorageClass := a.storageClass
 	if !a.storageClassResolved {
 		resolvedStorageClass = resolvePutStorageClass(r.Context(), a.db, a.engine, syncPlacementGate(a.flags), t.ID, bucket,
 			r.Header.Get("x-amz-storage-class"))
 	}
-	chunkingDisabledByTier := storageClassDisablesChunking(resolvedStorageClass)
-	// A bucket pinned to a region promises where its bytes live (WP-R7-1):
-	// the plain path places through the region's driver or refuses the
-	// write, never the primary. A chunk blob has one address on the engine's
-	// primary (WP-R8-7) and a dedup hit may reference a chunk any tenant
-	// uploaded anywhere, so a chunked object cannot keep that promise — and
-	// with no driver for the region the plain path refused the PUT while the
-	// chunked path accepted it. A pinned bucket stores whole objects. Asked
-	// only where it can matter (one bucket read per large PUT).
-	chunkingDisabledByRegion := false
-	if a.gci != nil && a.db != nil && metadataSize > chunkThreshold {
-		if name, rErr := bucketRegionDriver(r.Context(), a.db, a.engine, t.ID, bucket); name != "" || rErr != nil {
-			chunkingDisabledByRegion = true
-		}
-	}
-	// Mirrors the chunked-path gate below exactly — including the `chunking`
-	// kill-switch. When this said "the chunk path will encrypt it" but the
-	// flag then kept the object out of the chunk path, an SSE bucket's large
-	// object was stored as plaintext (R8-03).
-	// The flag is read ONCE per request: a refresh between two reads could
-	// skip SSE here and then keep the object out of the chunk path below.
-	chunkingOn := a.chunkingEnabled(t.ID)
-	willChunkEncrypt := a.gci != nil && a.chunkEncSvc != nil &&
-		metadataSize > chunkThreshold && !chunkingDisabledByVersioning && !chunkingDisabledByTier &&
-		!chunkingDisabledByRegion && chunkingOn
-
-	// Whether the bucket requires encryption, read once and strictly: a
-	// database error used to read as "not encrypted" and the body was
-	// stored plaintext. A process with no SSE service (no master key on this
-	// slot) refuses a write into an sse_enabled bucket instead of storing
-	// it plaintext — R8-04's rule for the read, on the write side (WP-R8-1
-	// follow-up A1). SSE-C is the customer's own key: not affected.
-	bucketSSE, sseErr := bucketSSEEnabled(r.Context(), a.db, t.ID, bucket)
-	if sseErr != nil {
-		a.logger.Error("PUT: bucket encryption setting unreadable", zap.Error(sseErr), zap.String("bucket", bucket))
-		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-		return
-	}
-	if bucketSSE && a.sseService == nil && !crypto.HasSSECHeaders(r) {
-		a.logger.Error("PUT into an encrypted bucket refused: ENCRYPTION_MASTER_KEY is not configured on this process",
-			zap.String("bucket", bucket), zap.String("object", artifact))
-		w.Header().Set("Retry-After", "30")
-		WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
+	placement := a.decidePlacement(r.Context(), placementRequest{
+		TenantID: t.ID, Bucket: bucket, Class: resolvedStorageClass, Size: metadataSize,
+		SSEC: crypto.HasSSECHeaders(r), SSERequested: r.Header.Get("x-amz-server-side-encryption") == "AES256",
+	})
+	if placement.Refusal != nil {
+		placement.Refusal.write(w, r)
 		return
 	}
 
@@ -1117,8 +1048,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		size = int64(len(ciphertext))
 		encryptionAlgorithm = crypto.SSECAlgorithm
 	} else {
-		shouldEncrypt := a.sseService != nil && !willChunkEncrypt && size > 0 && size <= crypto.MaxEncryptableSize &&
-			(r.Header.Get("x-amz-server-side-encryption") == "AES256" || bucketSSE)
+		shouldEncrypt := placement.Kind == placeWholeSealed
 
 		if shouldEncrypt {
 			if _, err := a.sseService.Current(r.Context(), t.ID); err != nil {
@@ -1156,44 +1086,23 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		}
 	}
 
-	// Encryption-required guard: SSE-S3 encrypts the whole object in memory and
-	// is capped at crypto.MaxEncryptableSize. When encryption is required (an
-	// explicit x-amz-server-side-encryption header, or a bucket that defaults to
-	// SSE) but the object exceeds that cap, SSE was skipped above
-	// (encryptionAlgorithm == ""). Silently storing such an object as plaintext
-	// would violate the bucket's encryption guarantee, so reject it instead.
-	// (SSE-C already rejects oversize objects in its own branch above.)
-	// When the object WILL take the chunked path with per-chunk convergent
-	// encryption, no 256 MiB limit applies; any other reason it is not going
-	// to be encrypted (no chunk service, chunking flag off, versioned bucket,
-	// whole-object tier) means it must be refused here (R8-03).
-	if a.sseService != nil && !willChunkEncrypt && encryptionAlgorithm == "" && metadataSize > crypto.MaxEncryptableSize &&
-		(r.Header.Get("x-amz-server-side-encryption") == "AES256" || bucketSSE) {
-		WriteS3ErrorWithContext(w, ErrEntityTooLarge, r.URL.Path, generateRequestID(),
-			WithSuggestion("Objects larger than 256 MiB cannot yet be server-side encrypted. Upload without encryption, or split the object."))
-		return
-	}
-
-	// Chunked upload path: objects above the threshold are split into
-	// content-defined chunks and deduplicated via the GCI. When chunkEncSvc
-	// is set, per-chunk convergent encryption is applied (Phase 10) —
-	// chunking and encryption are no longer mutually exclusive. (chunkThreshold
-	// was computed above, where it also gates SSE-S3 skip.)
+	// Chunked upload path (the placement said so): content-defined chunks,
+	// deduplicated via the GCI, per-chunk convergent encryption when
+	// chunkEncSvc is set (Phase 10).
 	// Only UNENCRYPTED bodies may enter the chunked path. At this point
 	// encryptionAlgorithm != "" means the body is already ciphertext:
 	// SSE-C always (encrypted above with the customer's key — chunking it
 	// would chunk ciphertext, then stamp AES256-CE over the SSE-C marker and
 	// serve raw ciphertext on GET with no key check), or SSE-S3 when the
 	// per-chunk service wasn't available. Per-chunk encryption (AES256-CE)
-	// happens INSIDE handleChunkedPut on plaintext; whole-object SSE-S3 was
-	// deliberately skipped above (willChunkEncrypt) for bodies heading here.
-	if a.gci != nil && metadataSize > chunkThreshold && !chunkingDisabledByVersioning &&
-		!chunkingDisabledByTier && !chunkingDisabledByRegion && encryptionAlgorithm == "" && chunkingOn {
+	// happens INSIDE handleChunkedPut on plaintext; whole-object SSE-S3 is
+	// never decided for a body the placement sends here.
+	if placement.Kind == placeChunked && encryptionAlgorithm == "" {
 		{
 			// WP-C: no uuid.Parse gate — tenant IDs are strings ("tenant-<hex>"
 			// from registration). The old gate silently skipped chunking for
 			// every real tenant.
-			chunkErr := a.handleChunkedPut(r, w, t, t.ID, bucket, artifact, metadataSize, hashingBody, hasher, wantMD5)
+			chunkErr := a.handleChunkedPut(r, w, t, bucket, artifact, metadataSize, hashingBody, hasher, wantMD5)
 			if chunkErr == nil {
 				return
 			}
@@ -1423,315 +1332,63 @@ func (a *S3ToEngine) chunkingEnabled(tenantID string) bool {
 	return a.flags.Enabled(flagChunking, tenantID)
 }
 
-// handleChunkedPut splits a large object into content-defined chunks,
-// deduplicates via the Global Content Index, and stores each unique chunk
-// individually. Returns nil on success (response already written) or an
-// error to signal fallback to the normal path.
+// handleChunkedPut is the PUT's side of the chunked write: the request's
+// attributes and ETag (the whole-stream MD5, checked against Content-MD5)
+// into the reader-driven core (storeChunkedObject, chunked_write.go), then
+// Object Lock, the response and s3:ObjectCreated:Put. Returns nil on success
+// (response already written) or an error HandlePut answers.
 func (a *S3ToEngine) handleChunkedPut(
 	r *http.Request, w http.ResponseWriter,
-	t *tenant.Tenant, tenantID string,
+	t *tenant.Tenant,
 	bucket, artifact string,
 	metadataSize int64,
 	hashingBody io.Reader,
 	hasher hash.Hash,
 	wantMD5 string,
 ) error {
-	// Tag set for the head row (validated in HandlePut before the body was
-	// read; re-parsed here because the chunked path builds its own row).
-	chunkTags, _ := parseTaggingHeader(r.Header.Get("x-amz-tagging"))
-	tagsJSON, _ := json.Marshal(chunkTags)
 	ctx := r.Context()
-
-	// pctx cancels the chunker, the store workers, and their DB work as one
-	// unit: the first error anywhere stops the whole upload promptly.
-	pctx, cancelStores := context.WithCancel(ctx)
-	defer cancelStores()
-
-	chunker, err := crypto.DefaultChunker()
+	// Validated by HandlePut before the body was read.
+	attrs, err := objectAttrsFromRequest(r)
 	if err != nil {
-		return fmt.Errorf("create chunker: %w", err)
+		return fmt.Errorf("request attributes: %w", err)
 	}
-
-	chunkCh, err := chunker.ChunkContext(pctx, hashingBody)
+	declared := int64(-1)
+	if putSizeDeclared(r) {
+		declared = metadataSize
+	}
+	res, err := a.storeChunkedObject(ctx, chunkedWrite{
+		TenantID: t.ID, Bucket: bucket, Key: artifact,
+		Body: hashingBody, DeclaredSize: declared, Attrs: attrs,
+		ETag: func() (string, error) {
+			etag := fmt.Sprintf("%x", hasher.Sum(nil))
+			if wantMD5 != "" && etag != wantMD5 {
+				return "", fmt.Errorf("content-md5 %s, computed %s: %w", wantMD5, etag, errBadDigest)
+			}
+			return etag, nil
+		},
+	})
 	if err != nil {
-		return fmt.Errorf("start streaming chunker: %w", err)
-	}
-
-	var physicalSize int64
-	var measuredSize int64
-	var chunkCount int
-	backendName := "chunked"
-
-	contentType := r.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
-
-	// Dedup scope: encrypted chunks are namespaced to the tenant (their
-	// convergent key is per-tenant, so identical plaintext yields distinct
-	// ciphertext — cross-tenant dedup would hand one tenant another's
-	// undecryptable bytes). Unencrypted chunks stay globally shared.
-	encrypting := a.chunkEncSvc != nil
-	dedupScope := crypto.GlobalDedupScope
-	if encrypting {
-		// The tenant ID becomes the dedup-scope partition, so it must not
-		// be the shared scope's name. The S3 front door refuses reserved
-		// ids (handleS3Request); this is the same rule where it is
-		// load-bearing.
-		if engine.IsReservedTenantID(t.ID) {
-			return fmt.Errorf("tenant ID is reserved: it collides with the shared dedup scope")
-		}
-		dedupScope = t.ID
-	}
-
-	// New-chunk stores fan out to a bounded worker pool — the store step is a
-	// full HTTPS round-trip to the backend, and running stores one at a time
-	// capped engine-path uploads at chunk_size ÷ round-trip (~19 MB/s to
-	// iDrive). This dispatcher loop stays sequential for every dedup
-	// decision; only compress → encrypt → storeChunkLocked runs on workers.
-	pool := newChunkStorePool(pctx, a, cancelStores,
-		tenantID, t.ID, bucket, artifact, dedupScope, contentType, encrypting)
-
-	// Every chunk processed takes one GCI reference (fresh insert at
-	// ref_count 1, ON CONFLICT increment, or IncrementRef on a dedup hit). If
-	// the PUT aborts before the manifest install commits, those references are
-	// orphaned — nothing ever releases them, so shared chunks become
-	// unsweepable forever (F10). Compensate on every error path; after a
-	// successful install the manifest owns the references. Decrements run on a
-	// cancellation-immune context: the abort may BE a cancellation. This defer
-	// only reads pool state after join() — every return below joins first.
-	manifestInstalled := false
-	defer func() {
-		if manifestInstalled {
-			return
-		}
-		compCtx := context.WithoutCancel(ctx)
-		for _, ref := range pool.compensationRefs() {
-			if _, decErr := a.gci.DecrementRef(compCtx, ref.scope, ref.hash); decErr != nil {
-				a.logger.Warn("compensating ref decrement failed after aborted chunked PUT (reconcile will heal)",
-					zap.String("hash", ref.hash), zap.Error(decErr))
-			}
-		}
-	}()
-
-	for result := range chunkCh {
-		if result.Err != nil {
-			pool.fail(fmt.Errorf("chunking stream: %w", result.Err))
-			break
-		}
-
-		chunk := result.Chunk
-		measuredSize += int64(chunk.Size)
-		chunkCount++
-
-		if pool.failed() {
-			break
-		}
-
-		// A duplicate of a hash that is being stored right now waits for that
-		// store instead of racing it into a second store of the same blob.
-		if pool.noteDuplicate(&chunk) {
-			continue
-		}
-
-		lookup, lookupErr := a.gci.LookupChunk(pctx, dedupScope, chunk.Hash)
-		if lookupErr != nil {
-			pool.fail(fmt.Errorf("lookup chunk %s: %w", chunk.Hash[:16], lookupErr))
-			break
-		}
-
-		mustStore := lookup.IsNewChunk
-		if !mustStore {
-			rows, incErr := a.gci.IncrementRef(pctx, dedupScope, chunk.Hash)
-			if incErr != nil {
-				pool.fail(fmt.Errorf("increment ref %s: %w", chunk.Hash[:16], incErr))
-				break
-			}
-			if rows == 0 {
-				// The chunk vanished between lookup and increment — GC swept
-				// it (the lookup was likely served from a stale cache entry).
-				// Treat it as new: re-store the data and re-insert the row.
-				// Proceeding without this installs a manifest pointing at
-				// deleted data (WP-6).
-				a.logger.Warn("dedup hit on vanished chunk — re-storing",
-					zap.String("hash", chunk.Hash[:16]),
-					zap.String("scope", dedupScope))
-				mustStore = true
-				lookup.Entry = nil
-			}
-		}
-
-		if !mustStore {
-			// The ciphertext hash describes the blob that is actually stored,
-			// so on a dedup hit it is copied from the index row — never
-			// recomputed. The stored blob's compression was decided by the
-			// FIRST upload's Content-Type; recomputing under the current
-			// request's Content-Type (or a different zstd version) can hash a
-			// blob that was never stored, making the object fail its
-			// integrity check on every GET.
-			// The key version likewise (WP-R8-1): a dedup hit after a
-			// rotation points at a blob sealed under the OLD version, and
-			// the ref says so until the re-encrypt job moves the blob.
-			var refCiphertextHash *string
-			var refKeyVersion *int
-			if lookup.Entry != nil {
-				refCiphertextHash = lookup.Entry.CiphertextHash
-				refKeyVersion = lookup.Entry.EncryptionKeyVersion
-			}
-			pool.addRef(chunk.Index, chunk.Offset, chunk.Hash, refCiphertextHash, refKeyVersion)
-			continue
-		}
-
-		pool.submit(chunk)
-	}
-
-	if joinErr := pool.join(); joinErr != nil {
-		return joinErr
-	}
-	physicalSize = pool.physicalSize
-	if pool.backendName != "" {
-		backendName = pool.backendName
-	}
-	newRefs := pool.sortedRefs()
-
-	// Reject declared-vs-measured mismatch before installing the manifest:
-	// stored chunks without refs are swept by dedup GC, but a manifest with
-	// a client-invented logical size would poison billing permanently.
-	if putSizeDeclared(r) && measuredSize != metadataSize {
-		return fmt.Errorf("declared %d, measured %d: %w",
-			metadataSize, measuredSize, errDecodedLengthMismatch)
-	}
-
-	// physicalSize stays truthful: 0 means fully deduplicated — this upload
-	// added no new physical bytes. (It was previously forced to measuredSize,
-	// which reported a perfect dedup as "no dedup" and poisoned any COGS math
-	// built on physical_size.) dedup_ratio 0 is the fully-deduped sentinel.
-	dedupRatio := float32(0)
-	if physicalSize > 0 {
-		dedupRatio = float32(measuredSize) / float32(physicalSize)
-	}
-
-	etag := fmt.Sprintf("%x", hasher.Sum(nil))
-	if wantMD5 != "" && etag != wantMD5 {
-		// Before the manifest install: the stored chunks are ref-released by
-		// the deferred compensator and swept by GC.
-		return fmt.Errorf("content-md5 %s, computed %s: %w", wantMD5, etag, errBadDigest)
-	}
-	contentDisposition := sanitizeContentDisposition(r.Header.Get("Content-Disposition"))
-	contentEncoding := requestContentEncoding(r)
-	contentLanguage := requestContentLanguage(r)
-	echoHdrs := requestEchoHeaders(r)
-	userMeta := extractS3Metadata(r) // validated by HandlePut before the body was read
-	metaJSON, _ := json.Marshal(userMeta)
-
-	chunkEncAlgo := ""
-	if a.chunkEncSvc != nil {
-		chunkEncAlgo = "AES256-CE"
-	}
-
-	if a.db == nil {
-		return fmt.Errorf("chunked path requires a database")
-	}
-
-	// Manifest swap and head-cache upsert commit in ONE transaction. Split
-	// across two, a failed upsert left the old manifest already destroyed
-	// while the head cache still advertised the old ETag/size — split-brain
-	// with no compensating action. atomicHeadUpsert locks the head row first,
-	// so concurrent overwrites of the same key serialize before touching the
-	// manifest (consistent lock order: head row → manifest tables).
-	// The version row is written in the same transaction (the flip,
-	// WP-R2-1): a chunked object keeps no whole blob, so its version names
-	// none — but a Suspended bucket's null-version rewrite must release and
-	// retire the retained bytes it replaces exactly as a whole write does.
-	flip, dbErr := commitBlobWrite(ctx, a.db, nil, blobWrite{TenantID: t.ID, Bucket: bucket, Key: artifact,
-		Version: &versionWrite{Size: measuredSize, ETag: etag, ContentType: contentType, Backend: backendName},
-		Upsert: func(tx *sql.Tx) error {
-			if metaErr := a.gci.ReplaceObjectManifestTx(ctx, tx, tenantID, bucket, artifact, newRefs, &crypto.ObjectMeta{
-				TenantID:       tenantID,
-				BucketName:     bucket,
-				ObjectKey:      artifact,
-				TotalSize:      measuredSize,
-				ChunkCount:     chunkCount,
-				ContentType:    &contentType,
-				LogicalSize:    measuredSize,
-				PhysicalSize:   &physicalSize,
-				DedupRatio:     &dedupRatio,
-				PipelineConfig: chunkedPipeline(chunker, encrypting),
-			}); metaErr != nil {
-				return fmt.Errorf("replace object manifest: %w", metaErr)
-			}
-			_, execErr := tx.ExecContext(ctx, `
-			INSERT INTO object_head_cache
-				(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, content_encoding, content_language, cache_control, http_expires, website_redirect_location, floor, is_chunked, tags, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $17, TRUE, $16, NOW())
-			ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
-				size_bytes            = EXCLUDED.size_bytes,
-				etag                  = EXCLUDED.etag,
-				content_type          = EXCLUDED.content_type,
-				backend_name          = EXCLUDED.backend_name,
-				metadata              = EXCLUDED.metadata,
-				encryption_algorithm  = EXCLUDED.encryption_algorithm,
-				encryption_key_version = NULL, -- versions live on the chunks
-				content_disposition   = EXCLUDED.content_disposition,
-				content_encoding      = EXCLUDED.content_encoding,
-				content_language      = EXCLUDED.content_language,
-				cache_control         = EXCLUDED.cache_control,
-				http_expires          = EXCLUDED.http_expires,
-				website_redirect_location = EXCLUDED.website_redirect_location,
-				floor                 = EXCLUDED.floor,
-				is_chunked            = EXCLUDED.is_chunked,
-				tags                  = EXCLUDED.tags,
-				storage_key           = NULL, -- a chunked object has no whole blob
-				updated_at            = NOW()
-		`, t.ID, bucket, artifact, measuredSize, etag, contentType, backendName, metaJSON, chunkEncAlgo, contentDisposition, contentEncoding, contentLanguage, echoHdrs.CacheControl, echoHdrs.Expires, echoHdrs.WebsiteRedirect, tagsJSON, chunkedObjectFloor)
-			return execErr
-		}})
-	a.displaced = flip.Displaced
-	if dbErr != nil {
-		// Manifest swap and head upsert rolled back together: the previous
-		// version is fully intact (old manifest, old head row) and the retry
-		// re-runs the whole swap. This request's ref increments are released
-		// by the deferred compensator (F10); chunk blobs whose refs drop to
-		// zero are reclaimed by dedup GC.
 		a.displaced = displacedRow{}
 		a.putLogicalBytes = 0
-		return fmt.Errorf("install chunked object %s/%s: %w", bucket, artifact, dbErr)
+		return err
 	}
-	manifestInstalled = true
-	a.putLogicalBytes = measuredSize
-
-	// A whole-object blob this key held before (every pre-WP-C large object,
-	// or a plain-path overwrite; at <key> or at its address) was retired in
-	// the install's transaction (the flip, WP-R2-1): nothing can serve it,
-	// and the collector removes it after its grace.
-
-	versionID := flip.VersionID
+	a.displaced = res.Flip.Displaced
+	a.putLogicalBytes = res.Size
 
 	applyObjectLockOnPut(ctx, a.db, t.ID, bucket, artifact, r)
 
-	w.Header().Set("ETag", fmt.Sprintf(`"%s"`, etag))
+	w.Header().Set("ETag", fmt.Sprintf(`"%s"`, res.ETag))
 	w.Header().Set("x-amz-request-id", generateRequestID())
-	w.Header().Set("x-amz-object-size", strconv.FormatInt(measuredSize, 10))
-	if versionID != "" {
-		w.Header().Set("x-amz-version-id", versionID)
+	w.Header().Set("x-amz-object-size", strconv.FormatInt(res.Size, 10))
+	if res.Flip.VersionID != "" {
+		w.Header().Set("x-amz-version-id", res.Flip.VersionID)
 	}
 	w.WriteHeader(http.StatusOK)
 
-	a.logger.Info("chunked artifact stored (streaming)",
-		zap.String("tenant_id", t.ID),
-		zap.String("s3.bucket", bucket),
-		zap.String("s3.object", artifact),
-		zap.String("backend", backendName),
-		zap.String("etag", etag),
-		zap.Int("chunks", chunkCount),
-		zap.Float32("dedup_ratio", dedupRatio),
-		zap.Int64("size", measuredSize))
-
-	a.notifySvc.Fire(t.ID, bucket, "s3:ObjectCreated:Put", artifact, measuredSize, etag)
+	a.notifySvc.Fire(t.ID, bucket, "s3:ObjectCreated:Put", artifact, res.Size, res.ETag)
 	emitEvent(ctx, a.db, a.logger, "object.created", t.ID, map[string]interface{}{
-		"bucket": bucket, "key": artifact, "size": measuredSize, "etag": etag, "chunked": true,
+		"bucket": bucket, "key": artifact, "size": res.Size, "etag": res.ETag, "chunked": true,
 	})
-
 	return nil
 }
 
@@ -2047,13 +1704,8 @@ func (a *S3ToEngine) handleChunkedGet(
 	setEchoHeaders(w.Header(), cachedEcho.CacheControl, cachedEcho.Expires, cachedEcho.WebsiteRedirect)
 
 	// Build the byte plan: which chunks to read and the (skip, take) slice within
-	// each. Full GET takes every chunk whole; a range takes only overlapping
-	// chunks, trimmed to the requested bounds.
-	type chunkSlice struct {
-		desc chunkDesc
-		skip int64
-		take int64
-	}
+	// each (chunkPlan). Full GET takes every chunk whole; a range takes only
+	// overlapping chunks, trimmed to the requested bounds.
 	var (
 		plan    []chunkSlice
 		rng     *httpRange
@@ -2067,29 +1719,9 @@ func (a *S3ToEngine) handleChunkedGet(
 		}
 		rng = parsed
 		isRange = true
-		for _, d := range descs {
-			chunkStart := d.offset
-			chunkEnd := d.offset + d.size - 1
-			if chunkEnd < rng.start {
-				continue
-			}
-			if chunkStart > rng.end {
-				break
-			}
-			skip := int64(0)
-			if rng.start > chunkStart {
-				skip = rng.start - chunkStart
-			}
-			takeEnd := chunkEnd
-			if rng.end < takeEnd {
-				takeEnd = rng.end
-			}
-			plan = append(plan, chunkSlice{desc: d, skip: skip, take: takeEnd - (chunkStart + skip) + 1})
-		}
+		plan = chunkPlan(descs, rng.start, rng.end)
 	} else {
-		for _, d := range descs {
-			plan = append(plan, chunkSlice{desc: d, skip: 0, take: d.size})
-		}
+		plan = chunkPlan(descs, 0, -1)
 	}
 
 	// Every backend the plan reads from must be one we can ask NOW, before
@@ -2164,28 +1796,12 @@ func (a *S3ToEngine) handleChunkedGet(
 	// fetchAndVerifyChunk, before any byte is written) and the error
 	// contract below are those of the sequential loop. A chunk holds its
 	// full size from fetch start until the next one is taken.
-	sizes := make([]int64, len(plan))
 	var planTotal int64
-	for i, p := range plan {
-		sizes[i] = p.desc.size
+	for _, p := range plan {
 		planTotal += p.take
 	}
 	streamStart := time.Now()
-	stream := parfetch.Start(ctx, a.chunkStreamConfig(), sizes, func(fctx context.Context, i int) ([]byte, error) {
-		data, ferr := a.fetchAndVerifyChunk(fctx, plan[i].desc, t.ID)
-		if ferr != nil {
-			return nil, ferr
-		}
-		p := plan[i]
-		if p.skip != 0 || p.take != int64(len(data)) {
-			end := p.skip + p.take
-			if end > int64(len(data)) {
-				end = int64(len(data))
-			}
-			data = data[p.skip:end]
-		}
-		return data, nil
-	})
+	stream := a.startChunkStream(ctx, t.ID, plan)
 	defer stream.Close()
 
 	// The first chunk is fetched + verified BEFORE headers are committed, so

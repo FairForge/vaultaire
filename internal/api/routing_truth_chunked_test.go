@@ -25,8 +25,16 @@ func TestRoutingTruth_ChunkedRowsAreNeverUnknownBackendRows(t *testing.T) {
 	content := generateTestData(8 * 1024)
 	f.seedChunked(t, "first.bin", content)
 	f.seedChunked(t, "again.bin", content)                       // every chunk a dedup hit → backend_name 'chunked'
-	w := f.copyObject(t, "first.bin", "dest-bucket", "copy.bin") // a manifest copy → backend_name ''
+	w := f.copyObject(t, "first.bin", "dest-bucket", "copy.bin") // a manifest copy → the sentinel too (WP-R3-1)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var copyBackend string
+	require.NoError(t, f.db.QueryRow(`SELECT backend_name FROM object_head_cache WHERE tenant_id = $1 AND bucket = 'dest-bucket' AND object_key = 'copy.bin'`,
+		f.tenantID).Scan(&copyBackend))
+	require.Equal(t, chunkedBackendSentinel, copyBackend, "every chunked write stamps the sentinel (WP-R3-1)")
+	// A manifest copy written before WP-R3-1 stamped '': such rows stay on
+	// prod and must read the same.
+	_, err := f.db.Exec(`UPDATE object_head_cache SET backend_name = '' WHERE tenant_id = $1 AND bucket = 'dest-bucket' AND object_key = 'copy.bin'`, f.tenantID)
+	require.NoError(t, err)
 
 	var names []string
 	rows, err := f.db.Query(`SELECT DISTINCT COALESCE(backend_name, '<NULL>') FROM object_head_cache WHERE tenant_id = $1 AND is_chunked ORDER BY 1`, f.tenantID)
@@ -39,7 +47,7 @@ func TestRoutingTruth_ChunkedRowsAreNeverUnknownBackendRows(t *testing.T) {
 	require.NoError(t, rows.Err())
 	require.NoError(t, rows.Close())
 	require.Contains(t, names, "chunked", "the all-dedup PUT stamps the sentinel (precondition of this test)")
-	require.Contains(t, names, "", "the manifest copy stamps '' (precondition of this test)")
+	require.Contains(t, names, "", "an older manifest copy's '' (precondition of this test)")
 
 	c := NewRoutingTruthChecker(f.db, f.server.engine, f.adapter.gci, zap.NewNop())
 	require.NotNil(t, c)

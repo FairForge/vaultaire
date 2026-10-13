@@ -95,7 +95,7 @@ GET    /<bucket>/<key>                GetObject      (Range; If-Match / If-None-
 HEAD   /<bucket>/<key>                HeadObject     (from cache; all conditionals)
 DELETE /<bucket>/<key>                DeleteObject   (?versionId; delete marker on versioned buckets)
 POST   /<bucket>?delete               DeleteObjects  (≤ 1 000 keys, quiet mode)
-PUT    /<bucket>/<key> + x-amz-copy-source            CopyObject (metadata/tagging directives; encrypted sources 501)
+PUT    /<bucket>/<key> + x-amz-copy-source            CopyObject (metadata/tagging directives; whole SSE sources 501)
 POST   /<bucket>/<key>?uploads        CreateMultipartUpload
 PUT    /<bucket>/<key>?partNumber=&uploadId=          UploadPart (≥ 5 MB except the last; UploadPartCopy 501)
 POST   /<bucket>/<key>?uploadId=      CompleteMultipartUpload
@@ -156,8 +156,9 @@ Behaviour worth knowing before writing code against it:
 - **Public buckets** (`?acl` public-read) are served unauthenticated from
   `cdn.stored.ge` with Range, conditionals, per-bucket CORS and a
   `Cache-Control` from the bucket's cache TTL; HTML/SVG/XML are always
-  attachments. Chunked (≥ 64 MiB) and SSE-encrypted objects are not yet served
-  by the CDN path (WP-R2-2).
+  attachments. Chunked objects (> 64 MiB) are served through the content
+  index, Range included (since 2026-10-13); SSE-S3 objects are opened; an
+  SSE-C object answers 403 (its key cannot travel on a public link).
 - **CORS on the S3 API** (2026-10-06): `PUT|GET|DELETE /<bucket>?cors` take and
   return the AWS `CORSConfiguration` document (≤ 100 rules; origins
   case-sensitive with at most one `*`; methods GET/PUT/HEAD/POST/DELETE;
@@ -195,11 +196,22 @@ Behaviour worth knowing before writing code against it:
   mechanism per request, as on AWS; 401 `invalid_credentials` / `key_revoked` /
   `key_expired` — an expired STS token included, on both paths; 403
   `ip_denied` / `account_suspended`). Rate-limited per tenant like the JSON API.
-- **Encryption**: SSE-C works per request. SSE-S3 requires the deployment's
-  master key, which production does not set today — without it a bucket's
-  `sse_enabled` flag has no effect and objects are stored as sent. With the
-  key, an object too large to encrypt whole (> 256 MiB on the non-chunked
-  path) is refused 413 rather than stored plaintext.
+- **Encryption**: SSE-C works per request (not on multipart uploads: 501).
+  SSE-S3 requires the deployment's master key, which production does not set
+  today — without it a write into an `sse_enabled` bucket is refused 503 +
+  `Retry-After` (CreateMultipartUpload and CompleteMultipartUpload too)
+  rather than stored plaintext. With the key, objects over 64 MiB are
+  encrypted chunk by chunk, smaller ones sealed whole, and an object that can
+  be neither (> 256 MiB into a versioned, region-pinned or archive / resilient /
+  public bucket) is refused 413 — **a multipart upload exactly like a PUT of
+  the same bytes** (since 2026-10-13; it was stored plaintext before).
+- **Large uploads** (> 64 MiB, a single PUT or a multipart upload): stored as
+  content-defined chunks, deduplicated and compressed, unless the bucket is
+  versioned, pinned to a region, or of the archive / resilient / public /
+  Sync tier. A multipart object keeps the `<md5-of-part-md5s>-<N>` ETag
+  aws-cli computes. A copy of a chunked object into a bucket that cannot hold
+  chunks is stored whole there (fresh MD5 ETag); a copy into one that can
+  shares the chunks and keeps the source's ETag.
 
 ## JSON API
 

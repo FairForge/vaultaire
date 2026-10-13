@@ -21,8 +21,10 @@ import (
 // Cloudflare: the edge gives up on an origin that sends no byte for 100 s and
 // answers 504, and the client's retry redoes the whole operation. On a slow
 // backend both run far longer than that — a complete streams the assembled
-// object into ONE backend PUT (~30 MB/s on a Sync bridge: 2 GiB ≈ 70 s), a
-// 1,000-key batch delete costs ~1 s per key there (bench 2026-10-07).
+// object into ONE backend PUT (~30 MB/s on a Sync bridge: 2 GiB ≈ 70 s) or,
+// placed as a PUT of its bytes would be (WP-R3-1), through the chunk
+// pipeline (every chunk stored before the install), a 1,000-key batch
+// delete costs ~1 s per key there (bench 2026-10-07).
 //
 // runLongS3Op does what AWS documents for these operations: an operation that
 // is not done after longOpThreshold commits `200 OK` (Content-Type

@@ -120,6 +120,21 @@ func (s *Server) handleInitiateMultipartUpload(w http.ResponseWriter, r *http.Re
 	}
 	storageClass := clientStorageClass(r.Header.Get("x-amz-storage-class"))
 
+	// An encrypted bucket on a process with no master key: refused before a
+	// single part is staged, as a PUT is (WP-R3-1; the placement asks again
+	// at Complete — the key or the bucket's setting may change in between).
+	// The size is not known yet: the 413 is Complete's.
+	if bucketSSE, sseErr := bucketSSEEnabled(r.Context(), s.db, t.ID, bucket); sseErr != nil {
+		s.logger.Error("create multipart: bucket encryption setting unreadable", zap.Error(sseErr), zap.String("bucket", bucket))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return
+	} else if bucketSSE && s.sseService == nil {
+		s.logger.Error("multipart upload into an encrypted bucket refused: ENCRYPTION_MASTER_KEY is not configured on this process",
+			zap.String("bucket", bucket), zap.String("object", object))
+		refuseNoMasterKey.write(w, r)
+		return
+	}
+
 	uploadID, err := newUploadID()
 	if err != nil {
 		s.logger.Error("failed to generate upload id", zap.Error(err))
@@ -464,8 +479,10 @@ func (s *Server) multipartUploadAttrs(r *http.Request, uploadID string) (objectA
 }
 
 // handleCompleteMultipartUpload runs the complete with the long-operation
-// keep-alive (s3_long_op.go): the assembled object is one backend PUT, which
-// on a slow backend outlasts Cloudflare's 100 s origin timeout.
+// keep-alive (s3_long_op.go): the assembled object is one backend PUT — or
+// every chunk of it through the chunk pipeline, when a PUT of the same bytes
+// would be chunked (WP-R3-1, placement.go) — which on a slow backend
+// outlasts Cloudflare's 100 s origin timeout.
 func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Request, bucket, object string) {
 	s.runLongS3Op(w, r, longOpInfo{Op: longOpComplete, Bucket: bucket, Key: object}, func(w http.ResponseWriter, r *http.Request) {
 		s.completeMultipartUpload(w, r, bucket, object)
@@ -636,19 +653,32 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// The class: the header sent on CreateMultipartUpload is honoured exactly
+	// like PUT's (R10-24: it used to be dropped, so a GLACIER multipart
+	// landed downstairs), then the bucket's tier — aws-cli's default
+	// multipart uploads must not ignore tier placement. The floor follows.
+	tierClass := resolvePutStorageClass(r.Context(), s.db, s.engine, syncPlacementGate(s.flags), t.ID, bucket, requestedClass)
+	floor := usage.FloorOf(tierClass)
+
+	// Placed exactly as a single PUT of the same bytes and class (WP-R3-1,
+	// placement.go): chunked, whole and SSE-sealed, whole — or refused here,
+	// before anything is reserved or written and before the keep-alive can
+	// commit a 200: 503 when the bucket encrypts and this process has no
+	// master key (asked again: Create's answer may be stale), 413 when the
+	// object can be neither chunk-encrypted nor sealed in one piece.
+	adapter := s.writeAdapter()
+	placement := adapter.decidePlacement(r.Context(), placementRequest{
+		TenantID: t.ID, Bucket: bucket, Class: tierClass, Size: totalSize,
+	})
+	if placement.Refusal != nil {
+		placement.Refusal.write(w, r)
+		return
+	}
+
 	// WP-1: multipart bypasses the PUT handler's reservation, so reserve the
 	// assembled size here before streaming to the backend. If the object
 	// overwrites an existing key, the overwritten bytes are captured
 	// atomically by the head-cache upsert and released after success.
-	// Multipart bypasses the tier-aware plain-PUT path, so resolve the
-	// bucket's tier here too — without this, aws-cli's default multipart
-	// uploads would ignore tier placement (a resilient-tier bucket would
-	// silently store on the primary backend). The class header sent on
-	// CreateMultipartUpload is honoured exactly like PUT's (R10-24: it used
-	// to be dropped, so a GLACIER multipart landed downstairs). The floor
-	// follows the class.
-	tierClass := resolvePutStorageClass(r.Context(), s.db, s.engine, syncPlacementGate(s.flags), t.ID, bucket, requestedClass)
-	floor := usage.FloorOf(tierClass)
 	quotaOn := s.quotaManager != nil
 	var reservedBytes int64
 	if quotaOn {
@@ -674,172 +704,171 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	// The address the assembled object goes to (WP-R2-1), recorded on the
-	// upload row BEFORE the backend write: a retry of a complete whose head
-	// row did not commit — and a concurrent complete of the same upload —
-	// writes the same address, never a second one, and the collector keeps
-	// an address an active upload names.
-	blob, err := s.completeBlobAddress(r.Context(), t.ID, uploadID, object)
-	if err != nil {
-		releaseReservation()
-		s.logger.Error("complete multipart: no blob address", zap.Error(err), zap.String("upload_id", uploadID))
-		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-		return
+	// The address a WHOLE assembled object goes to (WP-R2-1), recorded on
+	// the upload row BEFORE the backend write: a retry of a complete whose
+	// head row did not commit — and a concurrent complete of the same
+	// upload — writes the same address, never a second one, and the
+	// collector keeps an address an active upload names. A chunked object
+	// has no whole blob: none is chosen (an address an earlier, whole
+	// attempt recorded stays on the row and names nothing — its orphan is
+	// queued, kept while the upload is active, collected after).
+	var blob string
+	if placement.Kind != placeChunked {
+		if blob, err = s.completeBlobAddress(r.Context(), t.ID, uploadID, object); err != nil {
+			releaseReservation()
+			s.logger.Error("complete multipart: no blob address", zap.Error(err), zap.String("upload_id", uploadID))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
 	}
 
 	// Every refusal is behind us: from here the keep-alive may commit.
 	longOpBegin(r)
 
-	// Stream assembled parts to backend via pipe
-	pr, pw := io.Pipe()
 	containerName := t.NamespaceContainer(bucket)
-
-	errCh := make(chan error, 1)
-
-	// Writer goroutine: read temp files in order, write into pipe. Bounded by
-	// the reader: once the backend write returns, pr is closed and every
-	// further pw.Write fails with ErrClosedPipe, so the goroutine exits.
-	go func() {
-		defer func() {
-			if err := pw.Close(); err != nil {
-				s.logger.Debug("pipe writer close", zap.Error(err))
-			}
-		}()
-		for _, p := range parts {
-			pp := partFilePath(uploadID, p.PartNumber)
-			f, err := os.Open(pp) // #nosec G304 — path derived from validated uploadID
-			if err != nil {
-				_ = pw.CloseWithError(fmt.Errorf("open part %d: %w", p.PartNumber, err))
-				return
-			}
-			_, copyErr := io.Copy(pw, f)
-			_ = f.Close()
-			if copyErr != nil {
-				_ = pw.CloseWithError(fmt.Errorf("stream part %d: %w", p.PartNumber, copyErr))
-				return
-			}
-		}
-	}()
-
-	// Upload the assembled stream where the bucket's placement says: the
-	// region driver for a region-pinned bucket (R3-08: complete used to go
-	// straight to the engine, i.e. the primary, under a residency label), else
-	// the backend the resolved class picks.
-	completeOpts := []engine.PutOption{engine.WithContentLength(totalSize)}
-	if tierClass != "" {
-		completeOpts = append(completeOpts, engine.WithStorageClass(tierClass))
-	}
-	if attrs.ContentType != "" {
-		completeOpts = append(completeOpts, engine.WithContentType(attrs.ContentType))
-	}
+	// The staged parts, in order, as one stream, each re-hashed against the
+	// ETag its UploadPart answered as it is read (multipart_staged.go).
+	staged := newStagedPartsReader(uploadID, parts)
+	defer func() { _ = staged.Close() }()
 	// A shutdown's cut stops the body at once (the backend stores nothing);
-	// the call itself may still answer for longOpAnswerGrace, so assembled
-	// bytes that landed get their head row (s3_long_op.go).
-	var backendName string
+	// the call itself may still answer for longOpAnswerGrace, so bytes that
+	// landed get their head row (s3_long_op.go).
 	putCtx, putCancel := backendCallCtx(r.Context(), s.longOpAnswerGrace())
 	defer putCancel()
-	go func() {
-		var putErr error
-		backendName, putErr = placeObject(putCtx, s.db, s.engine, t.ID, bucket, containerName, blob, &cutReader{ctx: r.Context(), r: pr}, completeOpts...)
-		_ = pr.Close()
-		errCh <- putErr
-	}()
-
-	if uploadErr := <-errCh; uploadErr != nil {
-		releaseReservation()
-		if errors.Is(uploadErr, errRegionDriverUnavailable) {
-			s.logger.Error("multipart complete: region-pinned bucket has no driver — refused",
-				zap.String("bucket", bucket), zap.Error(uploadErr))
-			w.Header().Set("Retry-After", "300")
-			WriteS3ErrorWithContext(w, ErrServiceUnavailable, r.URL.Path, generateRequestID(),
-				WithSuggestion("This bucket's region is not enabled on this deployment."))
-			return
+	body := &cutReader{ctx: r.Context(), r: staged}
+	markCompleted := func(ctx context.Context, tx *sql.Tx) error {
+		// Unconditional on purpose: the upload was active when this request
+		// started and every part was read in full, so a reaper abort that
+		// raced the assembly must not leave a fully written object without
+		// its row; a concurrent complete of the same upload wrote the same
+		// bytes and an identical row (the displaced size it releases is the
+		// size the other request reserved, so the bill stays exact).
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE multipart_uploads SET status = 'completed'
+			WHERE upload_id = $1 AND tenant_id = $2`, uploadID, t.ID); err != nil {
+			return fmt.Errorf("mark upload completed: %w", err)
 		}
-		if errors.Is(uploadErr, engine.ErrAllBackendsUnavailable) {
-			// A 503 the client retries: Warn, no stack trace (Prompt 2b.3 D1.7).
-			s.logger.Warn("multipart complete: the backend is unavailable — 503",
-				zap.Error(uploadErr), zap.String("bucket", bucket), zap.String("key", object))
-			w.Header().Set("Retry-After", "30")
-			WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
-			return
-		}
-		if errors.Is(uploadErr, engine.ErrInvalidInput) {
-			// The client's key, decided on a backend answer: never silent
-			// (bench 2026-10-12 finding 2 — a bridge's transient refusal
-			// of a stripe piece reached the customer as this 400 with no
-			// line in the log).
-			s.logger.Warn("multipart complete: the backend refused the key — 400",
-				zap.Error(uploadErr), zap.String("bucket", bucket), zap.String("key", object),
-				zap.String("upload_id", uploadID), zap.String("storage_class", tierClass))
-			WriteS3ErrorWithContext(w, ErrInvalidArgument, r.URL.Path, generateRequestID(),
-				WithSuggestion(refusedKeySuggestion))
-			return
-		}
-		s.logger.Error("multipart backend storage failed",
-			zap.Error(uploadErr),
-			zap.String("bucket", bucket),
-			zap.String("key", object))
-		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-		return
+		return nil
 	}
 
-	// The backend holds the assembled bytes: everything from here runs to the
-	// end, whatever happens to the operation (a shutdown's cut, the client).
+	var displaced displacedRow
+	var versionID, backendName string
+	if placement.Kind == placeChunked {
+		// The chunk pipeline (chunked_write.go): dedup, compression, per-chunk
+		// encryption; the manifest, the head row (is_chunked, no address, the
+		// -N ETag) and the upload's status in one transaction, run to the end
+		// once every chunk is stored. A cut or a failure before that gives
+		// back every chunk reference this Complete took (orphan chunk blobs
+		// are dedup GC's after its 7-day grace); nothing is committed.
+		res, cErr := adapter.storeChunkedObject(putCtx, chunkedWrite{
+			TenantID: t.ID, Bucket: bucket, Key: object,
+			Body: body, DeclaredSize: totalSize, Attrs: attrs,
+			ETag: func() (string, error) {
+				if !staged.verified() {
+					return "", fmt.Errorf("%w: not every part was read and checked", errStagedPartCorrupt)
+				}
+				return etagValue, nil
+			},
+			DetachInstall: true,
+			InTx:          markCompleted,
+		})
+		if cErr != nil {
+			releaseReservation()
+			s.writeCompleteStoreError(w, r, cErr, bucket, object, uploadID, tierClass)
+			return
+		}
+		displaced, versionID, backendName = res.Flip.Displaced, res.Flip.VersionID, chunkedBackendSentinel
+	} else {
+		var src io.Reader = body
+		putLength := totalSize
+		var sealer *sseSealingReader
+		if placement.Kind == placeWholeSealed {
+			// SSE-S3 seals in one piece: the assembled plaintext (≤
+			// maxSSEObjectSize, 256 MiB) and its ciphertext are held in
+			// memory — the PUT's documented exception to streaming. The
+			// ETag stays the -N of the parts; size and ETag are the
+			// plaintext's, as a sealed PUT records them.
+			sealer = &sseSealingReader{src: body, max: maxSSEObjectSize, size: totalSize,
+				seal: func(p []byte) ([]byte, int, error) {
+					return s.sseService.EncryptBytes(r.Context(), t.ID, p)
+				}}
+			src = sealer
+			putLength = totalSize + int64(crypto.SSEOverheadBytes)
+		}
+		// Upload the assembled stream where the bucket's placement says: the
+		// region driver for a region-pinned bucket (R3-08: complete used to go
+		// straight to the engine, i.e. the primary, under a residency label),
+		// else the backend the resolved class picks.
+		completeOpts := []engine.PutOption{engine.WithContentLength(putLength)}
+		if tierClass != "" {
+			completeOpts = append(completeOpts, engine.WithStorageClass(tierClass))
+		}
+		if attrs.ContentType != "" {
+			completeOpts = append(completeOpts, engine.WithContentType(attrs.ContentType))
+		}
+		var uploadErr error
+		backendName, uploadErr = placeObject(putCtx, s.db, s.engine, t.ID, bucket, containerName, blob, src, completeOpts...)
+		if uploadErr == nil && !staged.verified() {
+			// A backend that took the declared length without reading to
+			// the end: the bytes it holds were never checked. Not committed.
+			uploadErr = fmt.Errorf("%w: the backend stopped reading before the last part was checked", errStagedPartCorrupt)
+			retireOrphanWrite(putCtx, s.db, s.logger, t.ID, bucket, blob, backendName)
+		}
+		if uploadErr != nil {
+			releaseReservation()
+			s.writeCompleteStoreError(w, r, uploadErr, bucket, object, uploadID, tierClass)
+			return
+		}
+
+		// The backend holds the assembled bytes: everything from here runs to
+		// the end, whatever happens to the operation (a shutdown's cut, the
+		// client).
+		pctx, pcancel := postCommit(r.Context())
+		defer pcancel()
+
+		// Head row + version row + upload status in ONE transaction (the
+		// pointer flip, WP-R2-1). The head row is the only thing
+		// HEAD/GET/DELETE and the bill read: answering 200 without it means
+		// the object is invisible and unbilled forever (R3-10). The status
+		// flips in the same transaction so a failed complete stays 'active'
+		// and the client's retry is not NoSuchUpload; the key's previous
+		// object is untouched until the commit (R3-15).
+		enc := sealer.encryption()
+		if s.db != nil {
+			flip, dbErr := commitBlobWrite(pctx, s.db, manifestReleaser(s.gci), blobWrite{TenantID: t.ID, Bucket: bucket, Key: object,
+				Version: &versionWrite{Size: totalSize, ETag: etagValue, ContentType: attrs.ContentType, Backend: backendName,
+					Blob: versionBlobRef{StorageKey: blob, Enc: enc}},
+				Upsert: func(tx *sql.Tx) error {
+					if err := upsertWholeObjectHeadRowEnc(pctx, tx, t.ID, bucket, object, blob, totalSize, etagValue, backendName, floor, attrs, enc); err != nil {
+						return err
+					}
+					return markCompleted(pctx, tx)
+				}})
+			if dbErr != nil {
+				releaseReservation()
+				// The assembled blob is an orphan while no row names it. Queued
+				// for the collector, which keeps it while the upload is active
+				// (its retry commits this same address) and removes it once the
+				// upload is aborted or reaped.
+				retireOrphanWrite(pctx, s.db, s.logger, t.ID, bucket, blob, backendName)
+				s.logger.Error("multipart complete: head row write failed — failing the request",
+					zap.Error(dbErr), zap.String("bucket", bucket), zap.String("key", object))
+				WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+				return
+			}
+			displaced, versionID = flip.Displaced, flip.VersionID
+		} else {
+			memUploadsMu.Lock()
+			if mu, ok := memUploads[uploadID]; ok {
+				mu.Status = "completed"
+				mu.ETag = finalETag
+			}
+			memUploadsMu.Unlock()
+		}
+	}
+
 	pctx, pcancel := postCommit(r.Context())
 	defer pcancel()
-
-	// Head row + version row + upload status in ONE transaction (the
-	// pointer flip, WP-R2-1). The head row is the only thing HEAD/GET/DELETE
-	// and the bill read: answering 200 without it means the object is
-	// invisible and unbilled forever (R3-10). The status flips in the same
-	// transaction so a failed complete stays 'active' and the client's retry
-	// is not NoSuchUpload; the key's previous object is untouched until the
-	// commit (R3-15).
-	var displaced displacedRow
-	var versionID string
-	if s.db != nil {
-		flip, dbErr := commitBlobWrite(pctx, s.db, manifestReleaser(s.gci), blobWrite{TenantID: t.ID, Bucket: bucket, Key: object,
-			Version: &versionWrite{Size: totalSize, ETag: etagValue, ContentType: attrs.ContentType, Backend: backendName,
-				Blob: versionBlobRef{StorageKey: blob}},
-			Upsert: func(tx *sql.Tx) error {
-				if err := upsertWholeObjectHeadRow(pctx, tx, t.ID, bucket, object, blob, totalSize, etagValue, backendName, floor, attrs); err != nil {
-					return err
-				}
-				// Unconditional on purpose: the upload was active when this
-				// request started and every part was read in full, so a reaper
-				// abort that raced the assembly must not leave a fully written
-				// object without its row; a concurrent complete of the same
-				// upload wrote the same address and an identical row (the
-				// displaced size it releases is the size the other request
-				// reserved, so the bill stays exact).
-				if _, err := tx.ExecContext(pctx, `
-					UPDATE multipart_uploads SET status = 'completed'
-					WHERE upload_id = $1 AND tenant_id = $2`, uploadID, t.ID); err != nil {
-					return fmt.Errorf("mark upload completed: %w", err)
-				}
-				return nil
-			}})
-		if dbErr != nil {
-			releaseReservation()
-			// The assembled blob is an orphan while no row names it. Queued
-			// for the collector, which keeps it while the upload is active
-			// (its retry commits this same address) and removes it once the
-			// upload is aborted or reaped.
-			retireOrphanWrite(pctx, s.db, s.logger, t.ID, bucket, blob, backendName)
-			s.logger.Error("multipart complete: head row write failed — failing the request",
-				zap.Error(dbErr), zap.String("bucket", bucket), zap.String("key", object))
-			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-			return
-		}
-		displaced, versionID = flip.Displaced, flip.VersionID
-	} else {
-		memUploadsMu.Lock()
-		if mu, ok := memUploads[uploadID]; ok {
-			mu.Status = "completed"
-			mu.ETag = finalETag
-		}
-		memUploadsMu.Unlock()
-	}
 
 	if quotaOn {
 		for _, rel := range displaced.releases() {
@@ -879,6 +908,50 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 
 	notifySvc := NewNotificationDispatcher(s.db, s.logger)
 	notifySvc.Fire(t.ID, bucket, "s3:ObjectCreated:CompleteMultipartUpload", object, totalSize, etagValue)
+}
+
+// writeCompleteStoreError answers a Complete whose bytes could not be stored
+// (whole or chunked): nothing was committed and the reservation is already
+// released.
+func (s *Server) writeCompleteStoreError(w http.ResponseWriter, r *http.Request, err error, bucket, object, uploadID, tierClass string) {
+	switch {
+	case errors.Is(err, errRegionDriverUnavailable):
+		s.logger.Error("multipart complete: region-pinned bucket has no driver — refused",
+			zap.String("bucket", bucket), zap.Error(err))
+		w.Header().Set("Retry-After", "300")
+		WriteS3ErrorWithContext(w, ErrServiceUnavailable, r.URL.Path, generateRequestID(),
+			WithSuggestion("This bucket's region is not enabled on this deployment."))
+	case errors.Is(err, engine.ErrAllBackendsUnavailable):
+		// A 503 the client retries: Warn, no stack trace (Prompt 2b.3 D1.7).
+		s.logger.Warn("multipart complete: the backend is unavailable — 503",
+			zap.Error(err), zap.String("bucket", bucket), zap.String("key", object))
+		w.Header().Set("Retry-After", "30")
+		WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
+	case errors.Is(err, engine.ErrInvalidInput):
+		// The client's key, decided on a backend answer: never silent
+		// (bench 2026-10-12 finding 2 — a bridge's transient refusal of a
+		// stripe piece reached the customer as this 400 with no line in the
+		// log).
+		s.logger.Warn("multipart complete: the backend refused the key — 400",
+			zap.Error(err), zap.String("bucket", bucket), zap.String("key", object),
+			zap.String("upload_id", uploadID), zap.String("storage_class", tierClass))
+		WriteS3ErrorWithContext(w, ErrInvalidArgument, r.URL.Path, generateRequestID(),
+			WithSuggestion(refusedKeySuggestion))
+	case errors.Is(err, errStagedPartCorrupt):
+		// The server's own staging copy changed or shrank at rest: an
+		// internal error, nothing stored under the client's ETags. The
+		// upload stays active; the client uploads the part again.
+		s.logger.Error("multipart complete: a staged part failed its check — nothing committed",
+			zap.Error(err), zap.String("bucket", bucket), zap.String("key", object), zap.String("upload_id", uploadID))
+		WriteS3ErrorWithContext(w, ErrInternalError, r.URL.Path, generateRequestID(),
+			WithSuggestion("A part of this upload no longer matches what was uploaded. Upload the part again, then complete."))
+	default:
+		s.logger.Error("multipart backend storage failed",
+			zap.Error(err),
+			zap.String("bucket", bucket),
+			zap.String("key", object))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+	}
 }
 
 func (s *Server) handleAbortMultipartUpload(w http.ResponseWriter, r *http.Request, bucket, object string) {

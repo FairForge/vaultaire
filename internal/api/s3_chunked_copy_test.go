@@ -31,6 +31,9 @@ func setupChunkedCopyFixture(t *testing.T) *chunkedCopyFixture {
 	adapter := NewS3ToEngine(f.server.engine, f.db, zap.NewNop())
 	adapter.gci = gci
 	adapter.chunkingThreshold = 1024
+	// The server places writes with the same threshold (WP-R3-1: a chunked
+	// source is copied as a manifest only where a PUT of it would chunk).
+	f.server.chunkingThreshold = 1024
 
 	tid := f.tenantID
 	// Both buckets exist: a copy into a missing bucket is NoSuchBucket.
@@ -146,7 +149,9 @@ func TestChunkedCopy_QuotaExceededRejected(t *testing.T) {
 	assert.Equal(t, int64(0), f.used(t), "rejected copy must not leak reserved bytes")
 }
 
-func TestChunkedCopy_VersionedDestinationRefused(t *testing.T) {
+// WP-R3-1: a chunked source into a versioned bucket is re-stored WHOLE
+// there, with its version row (manifests carry no version id). Before: 501.
+func TestChunkedCopy_VersionedDestination_StoredWholeWithItsVersion(t *testing.T) {
 	f := setupChunkedCopyFixture(t)
 
 	content := generateTestData(8 * 1024)
@@ -163,12 +168,24 @@ func TestChunkedCopy_VersionedDestinationRefused(t *testing.T) {
 	})
 
 	w := f.copyObject(t, "vsrc.bin", "dest-bucket", "vcopy.bin")
-	assert.Equal(t, http.StatusNotImplemented, w.Code,
-		"chunked copy into a versioned bucket must be refused (manifests aren't version-aware)")
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 
 	var n int
 	require.NoError(t, f.db.QueryRow(
 		`SELECT COUNT(*) FROM tenant_chunk_refs WHERE tenant_id::text = $1 AND object_key = 'vcopy.bin'`,
 		f.tenantID).Scan(&n))
-	assert.Zero(t, n, "refused copy must leave no manifest rows")
+	assert.Zero(t, n, "no manifest in a versioned bucket")
+	var chunked bool
+	require.NoError(t, f.db.QueryRow(`SELECT is_chunked FROM object_head_cache WHERE tenant_id = $1 AND bucket = 'dest-bucket' AND object_key = 'vcopy.bin'`,
+		f.tenantID).Scan(&chunked))
+	assert.False(t, chunked)
+	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM object_versions WHERE tenant_id = $1 AND bucket = 'dest-bucket' AND object_key = 'vcopy.bin'
+		AND storage_key IS NOT NULL`, f.tenantID).Scan(&n))
+	assert.Equal(t, 1, n, "the copy is a version that keeps its bytes")
+	gr := httptest.NewRequest("GET", "/dest-bucket/vcopy.bin", nil)
+	gr = gr.WithContext(s3Ctx(gr.Context(), f.tenant))
+	gw := httptest.NewRecorder()
+	f.adapter.HandleGet(gw, gr, "dest-bucket", "vcopy.bin")
+	require.Equal(t, http.StatusOK, gw.Code)
+	assert.Equal(t, content, gw.Body.Bytes())
 }

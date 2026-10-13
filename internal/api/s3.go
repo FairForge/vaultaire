@@ -727,19 +727,7 @@ func (s *Server) serveGetObject(cw *countingResponseWriter, r *http.Request, req
 
 // handleGetObject handles S3 GET requests
 func (s *Server) handleGetObject(w http.ResponseWriter, r *http.Request, req *S3Request) {
-	adapter := NewS3ToEngine(s.engine, s.db, s.logger)
-	adapter.sseService = s.sseService
-	adapter.chunkEncSvc = s.chunkEncSvc
-	adapter.gci = s.gci
-	adapter.smartPromoter = s.smartPromoter
-	adapter.vaultParity = s.vaultParity
-	if s.chunkGetPrefetch > 0 {
-		adapter.chunkGetPrefetch = s.chunkGetPrefetch
-	}
-	if s.largeGet.budget != nil { // a Server built by NewServer
-		adapter.largeGet = s.largeGet
-	}
-	adapter.flags = s.flags
+	adapter := s.readAdapter()
 
 	s.logger.Debug("S3 GET translating to engine",
 		zap.String("s3.bucket", req.Bucket),
@@ -980,6 +968,42 @@ func (s *Server) headVersion(w http.ResponseWriter, r *http.Request, tenantID st
 	return true
 }
 
+// readAdapter is the adapter a read runs on: the S3 GET and the CDN's read
+// of a chunked object (one chunk read-ahead configuration for both).
+func (s *Server) readAdapter() *S3ToEngine {
+	a := NewS3ToEngine(s.engine, s.db, s.logger)
+	a.sseService = s.sseService
+	a.chunkEncSvc = s.chunkEncSvc
+	a.gci = s.gci
+	a.smartPromoter = s.smartPromoter
+	a.vaultParity = s.vaultParity
+	if s.chunkGetPrefetch > 0 {
+		a.chunkGetPrefetch = s.chunkGetPrefetch
+	}
+	if s.largeGet.budget != nil { // a Server built by NewServer
+		a.largeGet = s.largeGet
+	}
+	a.flags = s.flags
+	return a
+}
+
+// writeAdapter is the adapter a write runs on: the server's encryption
+// services, content index, flags and chunk knobs — the one place a PUT and a
+// CompleteMultipartUpload take them from, so the two place the same bytes
+// the same way (WP-R3-1).
+func (s *Server) writeAdapter() *S3ToEngine {
+	a := NewS3ToEngine(s.engine, s.db, s.logger)
+	a.sseService = s.sseService
+	a.chunkEncSvc = s.chunkEncSvc
+	a.gci = s.gci
+	a.flags = s.flags
+	if s.chunkPutConcurrency > 0 {
+		a.chunkStoreConcurrency = s.chunkPutConcurrency
+	}
+	a.chunkingThreshold = s.chunkingThreshold
+	return a
+}
+
 // handlePutObject handles PUT requests
 func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3Request) {
 	// WP-1: single quota reservation site. Reserve the declared size before
@@ -1036,15 +1060,8 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3
 		}
 	}
 
-	adapter := NewS3ToEngine(s.engine, s.db, s.logger)
-	adapter.sseService = s.sseService
-	adapter.chunkEncSvc = s.chunkEncSvc
-	adapter.gci = s.gci
-	adapter.flags = s.flags
+	adapter := s.writeAdapter()
 	adapter.storageClass, adapter.storageClassResolved = storageClass, true
-	if s.chunkPutConcurrency > 0 {
-		adapter.chunkStoreConcurrency = s.chunkPutConcurrency
-	}
 
 	s.logger.Debug("S3 PUT translating to engine",
 		zap.String("s3.bucket", req.Bucket),
