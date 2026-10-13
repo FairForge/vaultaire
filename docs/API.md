@@ -196,15 +196,19 @@ Behaviour worth knowing before writing code against it:
   mechanism per request, as on AWS; 401 `invalid_credentials` / `key_revoked` /
   `key_expired` — an expired STS token included, on both paths; 403
   `ip_denied` / `account_suspended`). Rate-limited per tenant like the JSON API.
-- **Encryption**: SSE-C works per request (not on multipart uploads: 501).
-  SSE-S3 requires the deployment's master key, which production does not set
-  today — without it a write into an `sse_enabled` bucket is refused 503 +
-  `Retry-After` (CreateMultipartUpload and CompleteMultipartUpload too)
-  rather than stored plaintext. With the key, objects over 64 MiB are
-  encrypted chunk by chunk, smaller ones sealed whole, and an object that can
-  be neither (> 256 MiB into a versioned, region-pinned or archive / resilient /
-  public bucket) is refused 413 — **a multipart upload exactly like a PUT of
-  the same bytes** (since 2026-10-13; it was stored plaintext before).
+- **Encryption**: SSE-C works per request (not on multipart uploads: 501;
+  not as a CopyObject source: 501). SSE-S3 requires the deployment's master
+  key, which production does not set today — without it a write into an
+  `sse_enabled` bucket, or one that sends `x-amz-server-side-encryption:
+  AES256`, is refused 503 + `Retry-After` (CreateMultipartUpload and
+  CompleteMultipartUpload too) rather than stored plaintext. With the key,
+  objects over 64 MiB are encrypted chunk by chunk where they can be chunked,
+  and every other object is sealed whole **at any size** — sealed as it
+  streams, 1 MiB at a time (since 2026-10-13, WP-R8-5; over 256 MiB it was a
+  413 before) — **a multipart upload exactly like a PUT of the same bytes**,
+  the header sent on CreateMultipartUpload included. A `Range` of a sealed
+  object reads only the segments it spans; a sealed object can be copied
+  (it was 501).
 - **Large uploads** (> 64 MiB, a single PUT or a multipart upload): stored as
   content-defined chunks, deduplicated and compressed, unless the bucket is
   versioned, pinned to a region, or of the archive / resilient / public /

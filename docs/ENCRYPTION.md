@@ -28,9 +28,16 @@ tenant_key_versions  (one row per tenant per version; the newest encrypts)
   made it unreadable.
 - **Every blob records the version it was sealed under.** A chunk records it
   on its index row (`global_content_index.encryption_key_version`, with a copy
-  on each ref). A whole SSE-S3 object records it in its blob header (format
-  `0x02`: `[0x02][version u32][KEM ct][nonce][ct+tag]`, header authenticated)
-  and on `object_head_cache.encryption_key_version`. A read always uses the
+  on each ref). A whole SSE-S3 object records it in its blob header and
+  on `object_head_cache.encryption_key_version`. The format is **`0x03`**
+  since WP-R8-5 (`internal/crypto/stream.go`): `[0x03][0x01][version u32][KEM
+  ct 1088][segment_size u32][nonce_prefix 7]`, then the object in 1 MiB
+  segments, each AES-256-GCM under a per-object DEK with the header as AAD and
+  a nonce of `prefix ‖ index ‖ last` — sealed and opened as it streams, one
+  segment in memory, so there is no size limit and a `Range` reads only the
+  segments it spans. Blobs written before (`0x02`: `[0x02][version
+  u32][KEM ct][nonce][ct+tag]`, `0x01`: no version) still open; prod holds
+  none. A read always uses the
   recorded version; a write always uses the newest.
 - **Dedup across a rotation.** The same bytes uploaded after a rotation
   dedup onto the existing blob, sealed under the old version, and the new
@@ -38,21 +45,30 @@ tenant_key_versions  (one row per tenant per version; the newest encrypts)
 - **Every writer into an `sse_enabled` bucket seals or refuses** (WP-R8-1
   follow-up A1): PutObject; the generated objects — the GDPR export into
   `_exports`, a delivered access log, an inventory report — sealed exactly as a
-  PUT (above 256 MiB refused, never written plaintext: the export goes
-  `failed` with a reason the dashboard shows, a log or report is a Warn and a
-  job note, `vaultaire_generated_object_refused_total{kind,reason}`);
-  CopyObject of a plaintext source (sealed; above 256 MiB 413; a chunked
-  plaintext source 501); a direct upload (refused — its bytes never pass
+  PUT, at any size since WP-R8-5 (only a process without the key refuses one:
+  `vaultaire_generated_object_refused_total{kind,reason="sse_unavailable"}`);
+  CopyObject of a plaintext source (sealed, at any size; a chunked
+  plaintext source 501) and of a sealed source (opened as it streams and
+  sealed again for its destination — it was 501); a direct upload (refused — its bytes never pass
   through us; at complete the plaintext already on R2 is removed). A process
   with no master key refuses every write into an `sse_enabled` bucket (503)
   and every encrypted read (500) — R8-04's rule both ways. The `/cdn` path
   opens SSE-S3 objects (it streamed the ciphertext before).
   A multipart upload is placed exactly as a PUT of its bytes (WP-R3-1,
   2026-10-13, `internal/api/placement.go`): chunked and chunk-encrypted when
-  a PUT would chunk, sealed whole up to 256 MiB, **413** above that on a
-  placement that cannot chunk (versioned, region-pinned, GLACIER /
-  DEEP_ARCHIVE, RESILIENT, PUBLIC, SYNC), **503** without the key — at
-  CreateMultipartUpload and again at Complete. A chunked source copied
+  a PUT would chunk, sealed whole at any size on a placement that cannot
+  chunk (versioned, region-pinned, GLACIER / DEEP_ARCHIVE, RESILIENT,
+  PUBLIC, SYNC — over 256 MiB that was a 413 until WP-R8-5), **503** without
+  the key — at CreateMultipartUpload and again at Complete. The
+  `x-amz-server-side-encryption: AES256` header asks for the same as an
+  `sse_enabled` bucket, on a PUT and on CreateMultipartUpload (kept on
+  `multipart_uploads.sse_requested`, 089): sealed, or 503 without the key.
+  **Public objects are sealed too** (WP-R8-5 decision A5): a bucket made
+  public keeps the one rule; nothing at the edge reads R2 raw (Sippy pulls
+  through the S3 API, the Workers through `/cdn`), and `/cdn` opens a sealed
+  object as it streams — one ML-KEM decapsulation and one AES-GCM pass over
+  the bytes per hit (measured in `docs/reviews/WP-R8-5.md`); the bytes cached
+  at the edge are the plaintext, as before. A chunked source copied
   into a placement that cannot chunk is re-stored whole there, sealed when
   the destination encrypts.
 - **Not encrypted:** the staged parts of an open multipart upload, on the
@@ -116,7 +132,9 @@ key, so nothing plaintext lands in between.
 4. Outside the service: the letplay app (Maxko) and `~user1/letshow` on the
    box can go too (no cron writes to the demo any more, checked 2026-10-13).
 
-Prerequisites (once): the build of Stage 1a Prompt 2A deployed (`/version`);
+Prerequisites (once): the build of WP-R8-5 Part A (streaming SSE: no size
+refused for encryption, sealed copies, sealed parity) deployed (`/version`)
+— it includes Stage 1a Prompt 2A;
 `deploy/systemd/vaultaire@.service` of the same commit installed;
 `apt install libtss2-rc0 ssss age` (systemd-creds needs the TPM library —
 `systemd-creds has-tpm2` must say `yes`, not `partial`); three age recipients
@@ -164,9 +182,9 @@ unset K
    `.env` would be named there — remove it). A credential that is present but
    unreadable or malformed refuses the boot (`encryption master key: refusing
    to start`): the switch then leaves the active slot untouched.
-7. What changes: **new** buckets get `sse_enabled`; objects up to 256 MiB in
-   such a bucket, or sent with `x-amz-server-side-encryption: AES256`, are
-   sealed whole; chunked objects are sealed per chunk in the tenant's own
+7. What changes: **new** buckets get `sse_enabled`; objects in such a
+   bucket, or sent with `x-amz-server-side-encryption: AES256`, are sealed
+   whole at any size (streaming, `0x03`) where they are not chunked; chunked objects are sealed per chunk in the tenant's own
    dedup scope; a tenant's first key version is created on its first
    encrypted write. Existing objects are not touched.
 
@@ -215,8 +233,10 @@ curl -X POST -H "Authorization: Bearer <admin JWT>" -H "Idempotency-Key: $(uuidg
   `key_reencrypt_whole.go`): the same job, after the chunks, on what is left
   of the SAME per-run budget. Each blob — a head row's or a retained
   version's (`object_versions.storage_key`) — is read from the backend its row
-  records, checked (the 0x02 header names the row's version; the plaintext
-  matches the ETag), re-sealed under N and written to a **new** address
+  records, checked (the header names the row's version; the plaintext
+  matches the ETag — after the write, as both stream), re-sealed under N as
+  `0x03` (a `0x02`/`0x01` blob too: a rotation is what upgrades the format;
+  no format-only pass is scheduled — prod holds none) and written to a **new** address
   `<key>@<26>` on the same backend. One transaction (head-row lock, then
   version lock) re-points every row still naming the old address at the old
   version; the ETag does not change. The old address goes to `retired_blobs`

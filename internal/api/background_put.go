@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"crypto/md5" // #nosec G501 -- S3 ETags are MD5 by specification
 	"database/sql"
@@ -43,19 +42,11 @@ var (
 	// errTargetQuotaExceeded: the tenant is out of quota on the floor the
 	// report would be billed on. Rows are kept for the next pass.
 	errTargetQuotaExceeded = errors.New("target tenant over quota")
-	// errGeneratedTooLargeForSSE: the target bucket is sse_enabled and the
-	// object is larger than SSE-S3 can seal (whole-object, in memory). The
-	// object is refused, never stored plaintext (WP-R8-1 follow-up A1).
-	errGeneratedTooLargeForSSE = errors.New("the object is too large to be encrypted at rest (SSE-S3 seals objects of at most 256 MiB) and the target bucket requires encryption; it was not written")
 	// errGeneratedSSEUnavailable: the target bucket is sse_enabled and this
 	// process has no master key (unset on a slot): refused, never plaintext
 	// (R8-04's rule, on the write side).
 	errGeneratedSSEUnavailable = errors.New("the target bucket requires encryption and this server has no encryption key configured; it was not written")
 )
-
-// maxSSEObjectSize is the largest object SSE-S3 seals: crypto.MaxEncryptableSize.
-// A variable so a test can exercise the refusal without a 256 MiB body.
-var maxSSEObjectSize = crypto.MaxEncryptableSize
 
 // The writers on vaultaire_generated_object_refused_total, and the reasons.
 const (
@@ -63,7 +54,6 @@ const (
 	generatedKindAccessLog = "access_log"
 	generatedKindInventory = "inventory"
 
-	refusedTooLargeForSSE = "too_large_for_sse"
 	refusedSSEUnavailable = "sse_unavailable"
 )
 
@@ -71,12 +61,12 @@ const (
 // stored plaintext in an sse_enabled bucket.
 var generatedObjectRefused = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "vaultaire_generated_object_refused_total",
-	Help: "System-generated objects (GDPR export, access log, inventory report) not written because the target bucket is sse_enabled and the object could not be encrypted: too_large_for_sse (over the 256 MiB SSE-S3 limit) | sse_unavailable (no master key on this process). Never stored plaintext.",
+	Help: "System-generated objects (GDPR export, access log, inventory report) not written because the target bucket is sse_enabled and the object could not be encrypted: sse_unavailable (no master key on this process). Never stored plaintext. (too_large_for_sse is gone: SSE-S3 seals any size since WP-R8-5.)",
 }, []string{"kind", "reason"})
 
 func init() {
 	for _, k := range []string{generatedKindExport, generatedKindAccessLog, generatedKindInventory} {
-		for _, r := range []string{refusedTooLargeForSSE, refusedSSEUnavailable} {
+		for _, r := range []string{refusedSSEUnavailable} {
 			generatedObjectRefused.WithLabelValues(k, r)
 		}
 	}
@@ -95,9 +85,6 @@ type generatedObjectWriter struct {
 	// master key: a write into an sse_enabled bucket is refused, never
 	// stored plaintext.
 	sse *crypto.SSEService
-	// maxSSE is the largest object SSE-S3 seals (whole-object, in memory):
-	// crypto.MaxEncryptableSize; tests lower it.
-	maxSSE int64
 }
 
 func newGeneratedObjectWriter(db *sql.DB, eng engine.Engine, quota QuotaManager, gci *crypto.GlobalContentIndex, logger *zap.Logger) *generatedObjectWriter {
@@ -107,7 +94,7 @@ func newGeneratedObjectWriter(db *sql.DB, eng engine.Engine, quota QuotaManager,
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	return &generatedObjectWriter{db: db, eng: eng, quota: quota, gci: gci, logger: logger, maxSSE: maxSSEObjectSize}
+	return &generatedObjectWriter{db: db, eng: eng, quota: quota, gci: gci, logger: logger}
 }
 
 // deliveredObject describes what write stored.
@@ -199,24 +186,18 @@ func (g *generatedObjectWriter) writeOpts(ctx context.Context, tenantID, bucket,
 	tctx := common.WithTenantID(ctx, tenantID)
 
 	// An sse_enabled bucket gets what HandlePut gives it (WP-R8-1 follow-up
-	// A1): the body sealed with SSE-S3 under the tenant's current key, the
-	// head row recording the algorithm and the version, size and ETag the
-	// plaintext's. What cannot be sealed — over the SSE-S3 limit, or no
-	// master key on this process — is refused before anything is reserved or
-	// written: never stored plaintext. An empty body has nothing to seal (as
-	// on PUT).
+	// A1): the body sealed with SSE-S3 under the tenant's current key as it
+	// streams from the spool file (WP-R8-5: at any size, one segment in
+	// memory), the head row recording the algorithm and the version, size
+	// and ETag the plaintext's. What cannot be sealed — no master key on
+	// this process — is refused before anything is reserved or written:
+	// never stored plaintext. An empty body has nothing to seal (as on PUT).
 	var putBody io.Reader = spool
 	putSize := size
 	var enc objectEncryption
 	if sseBucket && size > 0 {
-		reason, refusal := "", error(nil)
-		switch {
-		case g.sse == nil:
-			reason, refusal = refusedSSEUnavailable, errGeneratedSSEUnavailable
-		case size > g.maxSSE:
-			reason, refusal = refusedTooLargeForSSE, errGeneratedTooLargeForSSE
-		}
-		if refusal != nil {
+		if g.sse == nil {
+			reason, refusal := refusedSSEUnavailable, errGeneratedSSEUnavailable
 			kind := o.Kind
 			if kind == "" {
 				kind = "other"
@@ -227,17 +208,13 @@ func (g *generatedObjectWriter) writeOpts(ctx context.Context, tenantID, bucket,
 				zap.String("bucket", bucket), zap.String("key", key), zap.Int64("bytes", size))
 			return deliveredObject{}, refusal
 		}
-		plaintext := make([]byte, size)
-		if _, err := io.ReadFull(spool, plaintext); err != nil {
-			return deliveredObject{}, fmt.Errorf("read spool for encryption: %w", err)
-		}
-		ciphertext, keyVersion, encErr := g.sse.EncryptBytes(tctx, tenantID, plaintext)
+		sealer, encErr := newSSEWriteSealer(tctx, g.sse, tenantID, spool, size)
 		if encErr != nil {
 			return deliveredObject{}, fmt.Errorf("encrypt %s/%s: %w", bucket, key, encErr)
 		}
-		putBody = bytes.NewReader(ciphertext)
-		putSize = int64(len(ciphertext))
-		enc = objectEncryption{Algorithm: crypto.SSEAlgorithm, KeyVersion: &keyVersion}
+		putBody = sealer
+		putSize = g.sse.SealedLength(size)
+		enc = sealer.encryption()
 	}
 
 	class := resolvePutStorageClass(tctx, g.db, g.eng, nil, tenantID, bucket, "")

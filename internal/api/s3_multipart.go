@@ -54,6 +54,8 @@ type memUpload struct {
 	Created  time.Time
 	Attrs    objectAttrs
 	Class    string
+	// SSERequested: x-amz-server-side-encryption: AES256 on Create (089).
+	SSERequested bool
 }
 
 type memPart struct {
@@ -120,18 +122,27 @@ func (s *Server) handleInitiateMultipartUpload(w http.ResponseWriter, r *http.Re
 	}
 	storageClass := clientStorageClass(r.Header.Get("x-amz-storage-class"))
 
-	// An encrypted bucket on a process with no master key: refused before a
-	// single part is staged, as a PUT is (WP-R3-1; the placement asks again
-	// at Complete — the key or the bucket's setting may change in between).
-	// The size is not known yet: the 413 is Complete's.
-	if bucketSSE, sseErr := bucketSSEEnabled(r.Context(), s.db, t.ID, bucket); sseErr != nil {
+	// An encrypted bucket, or a request asking x-amz-server-side-encryption:
+	// AES256, on a process with no master key: refused before a single part
+	// is staged, as a PUT is (WP-R3-1; the placement asks again at Complete —
+	// the key or the bucket's setting may change in between). The header is
+	// kept on the upload row (089, WP-R8-5): Complete carries only the parts.
+	sseRequested := r.Header.Get("x-amz-server-side-encryption") == "AES256"
+	bucketSSE, sseErr := bucketSSEEnabled(r.Context(), s.db, t.ID, bucket)
+	switch {
+	case sseErr != nil:
 		s.logger.Error("create multipart: bucket encryption setting unreadable", zap.Error(sseErr), zap.String("bucket", bucket))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return
-	} else if bucketSSE && s.sseService == nil {
+	case bucketSSE && s.sseService == nil:
 		s.logger.Error("multipart upload into an encrypted bucket refused: ENCRYPTION_MASTER_KEY is not configured on this process",
 			zap.String("bucket", bucket), zap.String("object", object))
 		refuseNoMasterKey.write(w, r)
+		return
+	case sseRequested && s.sseService == nil:
+		s.logger.Error("multipart upload asking for SSE-S3 refused: ENCRYPTION_MASTER_KEY is not configured on this process",
+			zap.String("bucket", bucket), zap.String("object", object))
+		refuseNoMasterKeyRequested.write(w, r)
 		return
 	}
 
@@ -148,11 +159,11 @@ func (s *Server) handleInitiateMultipartUpload(w http.ResponseWriter, r *http.Re
 			INSERT INTO multipart_uploads
 				(upload_id, tenant_id, bucket, object_key, status, content_type, metadata, storage_class,
 				 content_disposition, content_encoding, content_language, cache_control, http_expires,
-				 website_redirect_location)
-			VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10, $11, $12, $13)
+				 website_redirect_location, sse_requested)
+			VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		`, uploadID, t.ID, bucket, object, attrs.ContentType, attrs.metadataJSON(), storageClass,
 			attrs.ContentDisposition, attrs.ContentEncoding, attrs.ContentLanguage,
-			attrs.CacheControl, attrs.Expires, attrs.WebsiteRedirect)
+			attrs.CacheControl, attrs.Expires, attrs.WebsiteRedirect, sseRequested)
 		if err != nil {
 			s.logger.Error("failed to create multipart upload record", zap.Error(err))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
@@ -169,6 +180,8 @@ func (s *Server) handleInitiateMultipartUpload(w http.ResponseWriter, r *http.Re
 			Created:  time.Now(),
 			Attrs:    attrs,
 			Class:    storageClass,
+
+			SSERequested: sseRequested,
 		}
 		memUploadsMu.Unlock()
 	}
@@ -186,6 +199,13 @@ func (s *Server) handleInitiateMultipartUpload(w http.ResponseWriter, r *http.Re
 		zap.String("uploadID", uploadID),
 		zap.String("tenant_id", t.ID))
 
+	// AWS answers x-amz-server-side-encryption on Create when the object
+	// will be encrypted at rest: here, when the bucket or the request asks
+	// for it (a key is present, or the request was refused above) — the
+	// object is then sealed or chunk-encrypted at Complete.
+	if bucketSSE || sseRequested {
+		w.Header().Set("x-amz-server-side-encryption", "AES256")
+	}
 	w.Header().Set("Content-Type", "application/xml")
 	if err := xml.NewEncoder(w).Encode(InitiateMultipartUploadResult{
 		Bucket:   bucket,
@@ -448,26 +468,27 @@ func parseCompleteMultipartBody(r *http.Request) (CompleteMultipartUploadRequest
 
 // multipartUploadAttrs loads the attributes and storage class recorded on
 // the upload row at CreateMultipartUpload.
-func (s *Server) multipartUploadAttrs(r *http.Request, uploadID string) (objectAttrs, string, error) {
+func (s *Server) multipartUploadAttrs(r *http.Request, uploadID string) (objectAttrs, string, bool, error) {
 	if s.db == nil {
 		memUploadsMu.RLock()
 		defer memUploadsMu.RUnlock()
 		if mu, ok := memUploads[uploadID]; ok {
-			return mu.Attrs, mu.Class, nil
+			return mu.Attrs, mu.Class, mu.SSERequested, nil
 		}
-		return objectAttrs{ContentType: "application/octet-stream"}, "", nil
+		return objectAttrs{ContentType: "application/octet-stream"}, "", false, nil
 	}
 	var a objectAttrs
 	var metaJSON []byte
 	var class string
+	var sseRequested bool
 	err := s.db.QueryRowContext(r.Context(), `
 		SELECT content_type, metadata, storage_class, content_disposition, content_encoding,
-		       content_language, cache_control, http_expires, website_redirect_location
+		       content_language, cache_control, http_expires, website_redirect_location, sse_requested
 		FROM multipart_uploads WHERE upload_id = $1`, uploadID).Scan(
 		&a.ContentType, &metaJSON, &class, &a.ContentDisposition, &a.ContentEncoding,
-		&a.ContentLanguage, &a.CacheControl, &a.Expires, &a.WebsiteRedirect)
+		&a.ContentLanguage, &a.CacheControl, &a.Expires, &a.WebsiteRedirect, &sseRequested)
 	if err != nil {
-		return objectAttrs{}, "", fmt.Errorf("load upload attributes: %w", err)
+		return objectAttrs{}, "", false, fmt.Errorf("load upload attributes: %w", err)
 	}
 	if len(metaJSON) > 0 {
 		_ = json.Unmarshal(metaJSON, &a.Metadata)
@@ -475,7 +496,7 @@ func (s *Server) multipartUploadAttrs(r *http.Request, uploadID string) (objectA
 	if a.ContentType == "" {
 		a.ContentType = "application/octet-stream"
 	}
-	return a, class, nil
+	return a, class, sseRequested, nil
 }
 
 // handleCompleteMultipartUpload runs the complete with the long-operation
@@ -646,7 +667,7 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 	finalETag := fmt.Sprintf("\"%x-%d\"", etagHasher.Sum(nil), len(parts))
 	etagValue := strings.Trim(finalETag, "\"")
 
-	attrs, requestedClass, err := s.multipartUploadAttrs(r, uploadID)
+	attrs, requestedClass, sseRequested, err := s.multipartUploadAttrs(r, uploadID)
 	if err != nil {
 		s.logger.Error("complete multipart: upload attributes unavailable", zap.Error(err))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
@@ -660,19 +681,28 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 	tierClass := resolvePutStorageClass(r.Context(), s.db, s.engine, syncPlacementGate(s.flags), t.ID, bucket, requestedClass)
 	floor := usage.FloorOf(tierClass)
 
-	// Placed exactly as a single PUT of the same bytes and class (WP-R3-1,
-	// placement.go): chunked, whole and SSE-sealed, whole — or refused here,
+	// Placed exactly as a single PUT of the same bytes, class and SSE header
+	// (WP-R3-1, placement.go; the header kept from Create, 089): chunked,
+	// whole and SSE-sealed (at any size, WP-R8-5), whole — or refused here,
 	// before anything is reserved or written and before the keep-alive can
-	// commit a 200: 503 when the bucket encrypts and this process has no
-	// master key (asked again: Create's answer may be stale), 413 when the
-	// object can be neither chunk-encrypted nor sealed in one piece.
+	// commit a 200: 503 when encryption is required and this process has no
+	// master key (asked again: Create's answer may be stale).
 	adapter := s.writeAdapter()
 	placement := adapter.decidePlacement(r.Context(), placementRequest{
-		TenantID: t.ID, Bucket: bucket, Class: tierClass, Size: totalSize,
+		TenantID: t.ID, Bucket: bucket, Class: tierClass, Size: totalSize, SSERequested: sseRequested,
 	})
 	if placement.Refusal != nil {
 		placement.Refusal.write(w, r)
 		return
+	}
+	if placement.Kind == placeWholeSealed {
+		// The tenant key, before the keep-alive can commit a 200: the seal
+		// below then takes it from the key store's cache.
+		if _, kErr := s.sseService.Current(r.Context(), t.ID); kErr != nil {
+			s.logger.Error("complete: SSE-S3 tenant key unavailable", zap.Error(kErr))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
 	}
 
 	// WP-1: multipart bypasses the PUT handler's reservation, so reserve the
@@ -753,6 +783,9 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 
 	var displaced displacedRow
 	var versionID, backendName string
+	// Encrypted at rest (sealed or chunk-encrypted): the response says so,
+	// as AWS's does.
+	encryptedAtRest := placement.Kind == placeWholeSealed || (placement.Kind == placeChunked && placement.ChunkEncrypted)
 	if placement.Kind == placeChunked {
 		// The chunk pipeline (chunked_write.go): dedup, compression, per-chunk
 		// encryption; the manifest, the head row (is_chunked, no address, the
@@ -781,19 +814,20 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 	} else {
 		var src io.Reader = body
 		putLength := totalSize
-		var sealer *sseSealingReader
+		var sealer *sseWriteSealer
 		if placement.Kind == placeWholeSealed {
-			// SSE-S3 seals in one piece: the assembled plaintext (≤
-			// maxSSEObjectSize, 256 MiB) and its ciphertext are held in
-			// memory — the PUT's documented exception to streaming. The
-			// ETag stays the -N of the parts; size and ETag are the
+			// Sealed as the parts stream (WP-R8-5, = WP-R3-3: this held the
+			// assembled plaintext and its ciphertext, 2 × size per request).
+			// The ETag stays the -N of the parts; size and ETag are the
 			// plaintext's, as a sealed PUT records them.
-			sealer = &sseSealingReader{src: body, max: maxSSEObjectSize, size: totalSize,
-				seal: func(p []byte) ([]byte, int, error) {
-					return s.sseService.EncryptBytes(r.Context(), t.ID, p)
-				}}
+			var sErr error
+			if sealer, sErr = newSSEWriteSealer(r.Context(), s.sseService, t.ID, body, totalSize); sErr != nil {
+				releaseReservation()
+				s.writeCompleteStoreError(w, r, sErr, bucket, object, uploadID, tierClass)
+				return
+			}
 			src = sealer
-			putLength = totalSize + int64(crypto.SSEOverheadBytes)
+			putLength = s.sseService.SealedLength(totalSize)
 		}
 		// Upload the assembled stream where the bucket's placement says: the
 		// region driver for a region-pinned bucket (R3-08: complete used to go
@@ -896,6 +930,9 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 	w.Header().Set("ETag", finalETag)
 	if versionID != "" {
 		w.Header().Set("x-amz-version-id", versionID)
+	}
+	if encryptedAtRest {
+		w.Header().Set("x-amz-server-side-encryption", "AES256")
 	}
 	if err := xml.NewEncoder(w).Encode(CompleteMultipartUploadResult{
 		Location: location,

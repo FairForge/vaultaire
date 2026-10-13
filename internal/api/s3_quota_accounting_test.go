@@ -589,9 +589,11 @@ func TestMultipart_AwsChunkedPartsDecoded(t *testing.T) {
 		"multipart must bill the decoded logical size")
 }
 
-// Copying an encrypted source must be refused (NotImplemented): the copy
-// path streams raw stored bytes, so it would both bill ciphertext size and
-// hand back undecryptable data on GET.
+// Copying an encrypted source never copies raw stored bytes (that would bill
+// the ciphertext's size and hand back undecryptable data on GET). Since
+// WP-R8-5 an SSE-S3 source is opened as it streams; on a process with no
+// master key it fails closed (500, nothing written — this was 501 when every
+// encrypted source was refused); an SSE-C source is still 501.
 func TestQuotaAccounting_CopyEncryptedSourceRejected(t *testing.T) {
 	f := setupQuotaAccountingFixture(t, 100<<20)
 
@@ -611,7 +613,17 @@ func TestQuotaAccounting_CopyEncryptedSourceRejected(t *testing.T) {
 	w := httptest.NewRecorder()
 	f.server.handleCopyObject(w, req, f.s3Req("test-bucket", "enc-copy.bin"))
 
-	assert.Equal(t, 501, w.Code, "copying an encrypted source must be NotImplemented, not silent corruption")
+	assert.Equal(t, 500, w.Code, "no SSE service: fail closed, never the ciphertext")
+	var n int
+	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM object_head_cache WHERE tenant_id = $1 AND object_key = 'enc-copy.bin'`, f.tenantID).Scan(&n))
+	assert.Zero(t, n)
+
+	_, err = f.db.Exec(`UPDATE object_head_cache SET encryption_algorithm = $3 WHERE tenant_id = $1 AND object_key = $2`,
+		f.tenantID, "enc-src.bin", crypto.SSECAlgorithm)
+	require.NoError(t, err)
+	w = httptest.NewRecorder()
+	f.server.handleCopyObject(w, req, f.s3Req("test-bucket", "enc-copy.bin"))
+	assert.Equal(t, 501, w.Code, "an SSE-C source needs the customer's key: NotImplemented")
 }
 
 // The reconciliation job rewrites storage_used_bytes from the

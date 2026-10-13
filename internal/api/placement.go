@@ -17,14 +17,17 @@ package api
 //     the `chunking` flag is on and the request is not SSE-C. The chunks are
 //     encrypted (AES256-CE) whenever the process has the chunk encryptor —
 //     whatever the bucket says;
-//   - refused 503 + Retry-After when the bucket is sse_enabled and this
-//     process has no SSE service (no master key), SSE-C excepted (the
-//     customer's own key) — R8-04's rule for the read, on the write side;
-//   - whole and SSE-S3 sealed when encryption is required (sse_enabled, or
-//     x-amz-server-side-encryption: AES256), the object is not chunk-
-//     encrypted and it fits in one seal (maxSSEObjectSize, 256 MiB);
-//   - refused 413 when encryption is required, the SSE service exists, and
-//     the object neither chunk-encrypts nor fits in one seal;
+//   - refused 503 + Retry-After when encryption is required (the bucket is
+//     sse_enabled, or the request asks x-amz-server-side-encryption:
+//     AES256) and this process has no SSE service (no master key), SSE-C
+//     excepted (the customer's own key) — R8-04's rule for the read, on the
+//     write side; a request that asked for encryption is never stored
+//     plaintext with a 200 (WP-R8-5 Part 0, W-4);
+//   - whole and SSE-S3 sealed when encryption is required and the object is
+//     not chunk-encrypted, at any size: the streaming codec (WP-R8-5,
+//     internal/crypto/stream.go) holds one segment, never the object, so
+//     no size is refused for encryption (the 256 MiB cap and its 413 are
+//     gone);
 //   - whole plaintext otherwise.
 //
 // The bucket's encryption setting is read strictly: a read that fails is a
@@ -42,7 +45,7 @@ type placementKind int
 
 const (
 	placeWhole       placementKind = iota // one blob, as received
-	placeWholeSealed                      // one blob, SSE-S3 sealed (≤ maxSSEObjectSize, held in memory to seal)
+	placeWholeSealed                      // one blob, SSE-S3 sealed as it streams (format 0x03)
 	placeChunked                          // the chunk pipeline: content-defined chunks, dedup, per-chunk encryption
 )
 
@@ -103,8 +106,8 @@ var (
 	refuseUnreadableEncryption = &placementRefusal{Status: http.StatusInternalServerError, Code: ErrInternalError}
 	refuseNoMasterKey          = &placementRefusal{Status: http.StatusServiceUnavailable, Code: ErrServiceUnavailable, RetryAfter: "30",
 		Suggestion: "This bucket encrypts objects at rest and the server's encryption key is not available right now. Nothing was stored; retry later."}
-	refuseTooLargeToSeal = &placementRefusal{Status: http.StatusRequestEntityTooLarge, Code: ErrEntityTooLarge,
-		Suggestion: "Objects larger than 256 MiB cannot yet be server-side encrypted in this bucket's storage class. Upload without encryption, or split the object."}
+	refuseNoMasterKeyRequested = &placementRefusal{Status: http.StatusServiceUnavailable, Code: ErrServiceUnavailable, RetryAfter: "30",
+		Suggestion: "The request asks for server-side encryption (x-amz-server-side-encryption: AES256) and the server's encryption key is not available right now. Nothing was stored; retry later."}
 )
 
 // decidePlacement is the one placement decision (file comment). It reads the
@@ -151,15 +154,15 @@ func (a *S3ToEngine) decidePlacement(ctx context.Context, req placementRequest) 
 			zap.String("bucket", req.Bucket))
 		return writePlacement{Refusal: refuseNoMasterKey}
 	}
+	if req.SSERequested && a.sseService == nil && !req.SSEC {
+		a.logger.Error("write asking for SSE-S3 refused: ENCRYPTION_MASTER_KEY is not configured on this process",
+			zap.String("bucket", req.Bucket))
+		return writePlacement{Refusal: refuseNoMasterKeyRequested}
+	}
 
 	encryptionRequired := (req.SSERequested || bucketSSE) && !req.SSEC
-	if a.sseService != nil && encryptionRequired && !chunkEncrypt {
-		if req.Size > 0 && req.Size <= maxSSEObjectSize {
-			return writePlacement{Kind: placeWholeSealed}
-		}
-		if req.Size > maxSSEObjectSize {
-			return writePlacement{Refusal: refuseTooLargeToSeal}
-		}
+	if a.sseService != nil && encryptionRequired && !chunkEncrypt && req.Size > 0 {
+		return writePlacement{Kind: placeWholeSealed}
 	}
 	if chunkable {
 		return writePlacement{Kind: placeChunked, ChunkEncrypted: chunkEncrypt}

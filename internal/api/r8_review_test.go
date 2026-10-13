@@ -128,10 +128,11 @@ func TestHandlePut_ChunkingFlagOff_SSEBucketStillEncrypts(t *testing.T) {
 	assert.Equal(t, content, body)
 }
 
-// R8-03 (b): flag off + SSE bucket + object above the whole-object SSE cap →
-// the encryption-required guard must fire (413), exactly as when no chunk
-// encryption service exists at all.
-func TestHandlePut_ChunkingFlagOff_SSEBucketOversize_Rejected(t *testing.T) {
+// R8-03 (b): flag off + SSE bucket + an object over the old whole-object SSE
+// cap → never stored plaintext. Before WP-R8-5 the guard answered 413; the
+// object is now sealed whole as it streams (this one's body is short of its
+// declared length: the client's 400 IncompleteBody, nothing stored).
+func TestHandlePut_ChunkingFlagOff_SSEBucketOverTheOldCap_SealedNotRefused(t *testing.T) {
 	f := setupEncryptedChunkingFixture(t)
 	svc := withChunkingFlag(t, f)
 	// One master key for both encryptions, as in prod: they share the
@@ -148,8 +149,11 @@ func TestHandlePut_ChunkingFlagOff_SSEBucketOversize_Rejected(t *testing.T) {
 
 	require.NoError(t, svc.Set(context.Background(), flagChunking, flags.GlobalTenant, false, "test"))
 	w = oversizePut(t, f, "big-flag-off.bin", nil)
-	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code,
-		"flag off: an oversize object that cannot be encrypted must be rejected, not stored plaintext")
+	assert.Equal(t, http.StatusBadRequest, w.Code, "flag off: sealed whole as it streams — the short body is the client's")
+	assert.Contains(t, w.Body.String(), ErrIncompleteBody)
+	var n int
+	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM object_head_cache WHERE tenant_id = $1 AND object_key = 'big-flag-off.bin'`, f.tenantID).Scan(&n))
+	assert.Zero(t, n, "never stored")
 }
 
 // R8-04: a GET of an SSE-S3 object on a process with no SSE service (master

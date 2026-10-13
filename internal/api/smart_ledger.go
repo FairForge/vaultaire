@@ -86,13 +86,16 @@ type keyRoute struct {
 	// blob is the artifact its whole blob is at on that backend: the row's
 	// storage_key, or the key when it records none (WP-R2-1).
 	blob string
+	// encAlgo is the head row's encryption: a sealed blob is longer than the
+	// object (storedBlobLength, WP-R8-5).
+	encAlgo string
 }
 
 // routeOf reads the key's route. With lock, the head row is taken FOR UPDATE
 // (q must be a transaction): every writer and deleter of the key then waits
 // for the caller's commit before it can change the row.
 func routeOf(ctx context.Context, q rowQuerier, tenantID, bucket, key string, lock bool) (keyRoute, error) {
-	query := `SELECT COALESCE(backend_name,''), COALESCE(etag,''), is_chunked, COALESCE(storage_key,'') FROM object_head_cache
+	query := `SELECT COALESCE(backend_name,''), COALESCE(etag,''), is_chunked, COALESCE(storage_key,''), COALESCE(encryption_algorithm,'') FROM object_head_cache
 		WHERE tenant_id=$1 AND bucket=$2 AND object_key=$3`
 	if lock {
 		query += ` FOR UPDATE`
@@ -100,7 +103,7 @@ func routeOf(ctx context.Context, q rowQuerier, tenantID, bucket, key string, lo
 	var rt keyRoute
 	var chunked bool
 	var storageKey string
-	err := q.QueryRowContext(ctx, query, tenantID, bucket, key).Scan(&rt.backend, &rt.etag, &chunked, &storageKey)
+	err := q.QueryRowContext(ctx, query, tenantID, bucket, key).Scan(&rt.backend, &rt.etag, &chunked, &storageKey, &rt.encAlgo)
 	switch {
 	case err == nil:
 		rt.live, rt.headRow = true, true

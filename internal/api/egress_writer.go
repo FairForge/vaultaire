@@ -45,8 +45,9 @@ func (w *egressWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
-// Write sends p. Handlers hand over a 16 MiB chunk, or a whole decrypted
-// object of up to 256 MiB, in one call: it is cut into pieces no larger than
+// Write sends p. Handlers hand over up to a 16 MiB chunk in one call (a
+// sealed object streams one 1 MiB segment at a time since WP-R8-5 — no
+// whole decrypted object is ever written at once): it is cut into pieces no larger than
 // the token bucket's burst, and the tenant's position is re-read every
 // egressReevalBytes so a download that crosses the allowance mid-stream
 // slows down. A paced wait ends at once when the client goes away.

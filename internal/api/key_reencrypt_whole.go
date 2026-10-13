@@ -8,15 +8,18 @@ package api
 // resumes the same way: every run rescans the rows still below the newest
 // version, oldest key first, so what moved drops out.
 //
-// One blob at a time (whole SSE-S3 objects are ≤ 256 MiB and sealed in one
-// piece, crypto.MaxEncryptableSize — the PUT path buffers them too):
+// One blob at a time, streamed (WP-R8-5: one segment in memory, never the
+// object; a 0x01/0x02 blob — ≤ 256 MiB, written before — is opened whole by
+// the compatibility opener and re-sealed as 0x03 like any other):
 //
 //  1. read it from the backend its row RECORDS (never the fan-out; tenant in
-//     the context), check the 0x02 header names the version the row does,
-//     open it under that version and check the plaintext against the ETag;
-//  2. seal it under the newest version and write it to a NEW address
-//     (newBlobAddress) on the SAME backend, in the same container — never
-//     over the old bytes, which a GET may be reading;
+//     the context), check the header names the version the row does, open
+//     it under that version as it streams;
+//  2. seal it under the newest version as it streams and write it to a NEW
+//     address (newBlobAddress) on the SAME backend, in the same container —
+//     never over the old bytes, which a GET may be reading; the plaintext's
+//     MD5 is checked against the row's ETag once written (a mismatch queues
+//     the new blob as an orphan, nothing re-pointed);
 //  3. one transaction, under the head-row lock then the version lock (the
 //     flip's order): every row that still names the old address AND the old
 //     key version — the head row, the version rows — is re-pointed to the
@@ -47,7 +50,7 @@ package api
 // version and are not candidates).
 
 import (
-	"bytes"
+	"bufio"
 	"context"
 	"crypto/md5" // #nosec G501 -- S3 ETag semantics (the plaintext's MD5), an integrity check, not a MAC
 	"database/sql"
@@ -224,40 +227,42 @@ func (k *KeyReencryptRunner) reencryptObject(ctx context.Context, ce *engine.Cor
 	if err != nil {
 		return "failed", fmt.Errorf("read the blob: %w", err)
 	}
-	sealed, err := io.ReadAll(io.LimitReader(rc, crypto.MaxEncryptableSize+crypto.SSEOverheadBytes+1))
-	_ = rc.Close()
-	if err != nil {
-		return "failed", fmt.Errorf("read the blob: %w", err)
-	}
-	if v, err := crypto.SSEBlobKeyVersion(sealed); err != nil {
+	defer func() { _ = rc.Close() }()
+	// The version check reads the header only: the longest a 0x01/0x02/0x03
+	// header check needs (a whole 0x02 blob's overhead, 1,121 bytes).
+	br := bufio.NewReaderSize(rc, crypto.SSEOverheadBytes)
+	head, _ := br.Peek(crypto.SSEOverheadBytes)
+	if v, err := crypto.SSEBlobKeyVersion(head); err != nil {
 		return "failed", fmt.Errorf("the blob's header: %w", err)
 	} else if v != c.keyVersion {
 		return "failed", fmt.Errorf("the blob is sealed under v%d, its row says v%d", v, c.keyVersion)
 	}
-	plaintext, err := k.sse.DecryptBytes(tctx, c.tenantID, sealed)
+	plaintext, err := k.sse.Open(tctx, c.tenantID, br)
 	if err != nil {
 		return "failed", fmt.Errorf("open under v%d: %w", c.keyVersion, err)
 	}
-	if len(c.etag) == 32 && !strings.Contains(c.etag, "-") {
-		sum := md5.Sum(plaintext) // #nosec G401 -- S3 ETag semantics
-		if hex.EncodeToString(sum[:]) != c.etag {
-			return "failed", errors.New("the opened bytes do not match the row's ETag")
-		}
-	}
 
-	// 2. Seal under the newest version, at a new address on the same backend.
-	resealed, newVersion, err := k.sse.EncryptBytes(tctx, c.tenantID, plaintext)
+	// 2. Seal under the newest version as it streams, at a new address on
+	// the same backend; the plaintext's MD5 is taken on the way.
+	hasher := md5.New() // #nosec G401 -- S3 ETag semantics
+	sealer, err := newSSEWriteSealer(tctx, k.sse, c.tenantID,
+		io.TeeReader(&plaintextSized{r: plaintext, want: c.size}, hasher), c.size)
 	if err != nil {
 		return "failed", fmt.Errorf("seal under the newest version: %w", err)
 	}
+	newVersion := sealer.version
 	newAddr, err := newBlobAddress(c.key)
 	if err != nil {
 		return "failed", err
 	}
-	if err := drv.Put(tctx, container, newAddr, bytes.NewReader(resealed), engine.WithContentLength(int64(len(resealed)))); err != nil {
+	if err := drv.Put(tctx, container, newAddr, sealer, engine.WithContentLength(k.sse.SealedLength(c.size))); err != nil {
 		// A partial file on a local/WebDAV backend is the erasure sweep's
 		// (as for any failed write); S3-class backends store nothing.
 		return "failed", fmt.Errorf("write the re-sealed blob: %w", err)
+	}
+	if len(c.etag) == 32 && !strings.Contains(c.etag, "-") && hex.EncodeToString(hasher.Sum(nil)) != c.etag {
+		retireOrphanWrite(ctx, k.db, k.logger, c.tenantID, c.bucket, newAddr, c.backend)
+		return "failed", errors.New("the opened bytes do not match the row's ETag")
 	}
 	ce.HintBackend(container, newAddr, c.backend)
 	keyReencryptBeforeSwapHook(newAddr)

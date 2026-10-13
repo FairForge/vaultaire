@@ -5,6 +5,27 @@ what you need and it shows up here.
 
 ---
 
+## 2026-10-13: Encryption at rest has no size limit
+
+- **Any object can be encrypted at rest.** Server-side encryption
+  (`x-amz-server-side-encryption: AES256`, or a bucket that encrypts by
+  default) now seals an object as it streams, one megabyte at a time, so
+  there is no size limit any more: uploads over 256 MiB into Vault, Object
+  Lock, versioned or region-pinned buckets are encrypted instead of refused
+  with `413 EntityTooLarge`.
+- **Ranged downloads of encrypted objects read only what they need.** A
+  `Range` request on an encrypted object fetches and decrypts just the
+  megabytes the range covers.
+- **Encrypted objects can be copied.** `CopyObject` (and `aws s3 mv`,
+  rclone moves) of an encrypted object used to answer `501 NotImplemented`;
+  it now copies it, encrypted again in its destination. Objects encrypted
+  with your own key (SSE-C) still cannot be copied server-side.
+- **`x-amz-server-side-encryption` on multipart uploads.** The header sent
+  on `CreateMultipartUpload` is honoured at `CompleteMultipartUpload`, and
+  both answer it when the object is encrypted. A request that asks for
+  encryption while the server cannot encrypt is refused with a retryable
+  `503`, never stored unencrypted.
+
 ## 2026-10-13: Large uploads are deduplicated, compressed and encrypted
 
 - **Multipart uploads are stored like single uploads.** Every upload over
@@ -15,8 +36,8 @@ what you need and it shows up here.
   compressed. The ETag stays the `<md5>-<parts>` aws-cli computes.
 - **Encrypted buckets encrypt multipart uploads.** A multipart upload into a
   bucket that encrypts at rest is encrypted (chunk by chunk, or sealed
-  whole up to 256 MiB). One that cannot be encrypted is refused with
-  `413 EntityTooLarge` instead of being stored as sent.
+  whole). One that cannot be encrypted is refused instead of being stored
+  as sent (the 256 MiB limit this entry named is gone, see above).
 - **Every part is checked again before it is stored.** If a staged part no
   longer matches what you uploaded, CompleteMultipartUpload fails and nothing
   is written; upload the part again.

@@ -104,7 +104,12 @@ func serveRange(w http.ResponseWriter, reader io.Reader, rng *httpRange, totalSi
 			return fmt.Errorf("discard %d prefix bytes: %w", rng.start, err)
 		}
 	}
+	return writeRangeBody(w, reader, rng, totalSize, contentType)
+}
 
+// writeRangeBody answers 206 with rng.length bytes of reader, which is
+// already positioned at rng.start (a sealed object opened by segment).
+func writeRangeBody(w http.ResponseWriter, reader io.Reader, rng *httpRange, totalSize int64, contentType string) error {
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", rng.start, rng.end, totalSize))
 	w.Header().Set("Content-Length", strconv.FormatInt(rng.length, 10))

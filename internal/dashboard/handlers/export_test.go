@@ -121,7 +121,6 @@ func TestPopulateExportStatus_TheThreeStates(t *testing.T) {
 		"expired":   {&ExportStatus{Status: "expired", CreatedAt: at}, exportView{Expired: true, Requested: "October 3, 2026 09:00 UTC"}},
 		"past date": {&ExportStatus{Status: "completed", CreatedAt: at, Expired: true}, exportView{Expired: true, Requested: "October 3, 2026 09:00 UTC"}},
 		"failed":    {&ExportStatus{Status: "failed", CreatedAt: at, Error: "boom"}, exportView{Failed: true, Error: "boom", Requested: "October 3, 2026 09:00 UTC"}},
-		"too large": {&ExportStatus{Status: "failed", CreatedAt: at, Error: "the object is " + ExportTooLargeToEncryptMarker + " (…)"}, exportView{Failed: true, TooLargeToEncrypt: true, Error: "the object is " + ExportTooLargeToEncryptMarker + " (…)", Requested: "October 3, 2026 09:00 UTC"}},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

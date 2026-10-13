@@ -277,6 +277,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		} else {
 			s.tenantKeys = keys
 			s.sseService = crypto.NewSSEService(keys)
+			countSSEOpens(s.sseService)
 			s.chunkEncSvc = crypto.NewChunkEncryptionService(keys)
 			logger.Info("encryption initialized: SSE-S3 (ML-KEM-768+AES-256-GCM) and chunk convergent (AES-256-GCM), versioned tenant keys")
 			checkTenantKeysAtBoot(context.Background(), keys, logger)
@@ -381,6 +382,9 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// The Vault parity second copy (WP-VAULT-1): the job and the read
 	// fallback, flag-gated per tenant (vault_parity, default OFF).
 	s.vaultParity = NewVaultParity(s.db, s.engine, fc, logger)
+	if s.vaultParity != nil {
+		s.vaultParity.SSE = s.sseService
+	}
 	// The pack store GC (Phase 37): only with the `sync` backend registered.
 	s.packGC = newPackGC(s.db, s.engine, os.Getenv("PACKSTORE_STAGING_DIR"), logger)
 	if s.smartDemotion != nil {

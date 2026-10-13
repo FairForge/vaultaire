@@ -17,7 +17,6 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/crypto"
-	"github.com/FairForge/vaultaire/internal/dashboard/handlers"
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -52,8 +51,9 @@ func sseFor(t *testing.T, db *sql.DB, tenantIDs ...string) *crypto.SSEService {
 	return sse
 }
 
-// requireSSEBlob: the bytes on the backend are a 0x02 SSE-S3 blob and the
-// plaintext is not in them.
+// requireSSEBlob: the bytes on the backend are a 0x03 SSE-S3 blob (WP-R8-5)
+// of the length the codec's length function gives at its header's segment
+// size, and the plaintext is not in them.
 func requireSSEBlob(t *testing.T, path string, plaintext []byte) {
 	t.Helper()
 	raw, err := os.ReadFile(path)
@@ -64,8 +64,12 @@ func requireSSEBlob(t *testing.T, path string, plaintext []byte) {
 		probe = probe[:64]
 	}
 	assert.Falsef(t, bytes.Contains(raw, probe), "plaintext on the backend (%d bytes, first byte 0x%02x)", len(raw), raw[0])
-	assert.Equalf(t, crypto.SSEVersion, raw[0], "an SSE-S3 blob (first byte 0x%02x, %d bytes)", raw[0], len(raw))
-	assert.Equal(t, len(plaintext)+crypto.SSEOverheadBytes, len(raw), "plaintext + the SSE overhead")
+	require.Equalf(t, crypto.StreamFormat, raw[0], "a streaming SSE-S3 blob (first byte 0x%02x, %d bytes)", raw[0], len(raw))
+	h, err := crypto.ParseStreamHeader(raw)
+	require.NoError(t, err)
+	assert.Equal(t, crypto.StreamKindSSES3, h.Kind)
+	assert.Equal(t, crypto.StreamCiphertextLength(len(h.Raw), h.SegmentSize, int64(len(plaintext))), int64(len(raw)),
+		"the length function of the plaintext")
 }
 
 type headEnc struct {
@@ -194,34 +198,39 @@ func TestGeneratedObject_IntoSSEBucket_IsEncrypted(t *testing.T) {
 	})
 }
 
-func TestGeneratedObject_TooLargeIsRefusedNeverPlaintext(t *testing.T) {
-	t.Run("export: failed at once with a reason, no object", func(t *testing.T) {
+// WP-R8-5: a generated object of any size is sealed as it streams from its
+// spool (the 256 MiB refusal is gone). "Over the old cap" here is many
+// segments: the service seals 64-byte segments, so an export of a few KiB
+// is dozens of them, exactly as a 300 MiB one is hundreds at 1 MiB.
+func TestGeneratedObject_OverTheOldCap_Sealed(t *testing.T) {
+	t.Run("export: completed, sealed, opens", func(t *testing.T) {
 		f := setupExportFixture(t)
 		f.seed()
 		sse := sseFor(t, f.db, f.tenantID)
+		sse.SetSegmentSize(64)
 		f.svc.SetSSE(sse)
-		f.svc.writer.maxSSE = 512 // every export is larger
-		before := refusedCount(generatedKindExport, refusedTooLargeForSSE)
+		f.server.sseService = sse
 
 		id, err := f.svc.Request(context.Background(), f.userID, f.tenantID)
 		require.NoError(t, err)
 		f.run()
 		st := f.status(id)
-
-		t.Logf("export over the SSE limit: status %q, error %q, %d blobs", st.Status, st.Error, len(f.exportFiles()))
-		assert.Equal(t, "failed", st.Status, "a refusal is final: the next attempt would refuse again")
-		assert.Contains(t, st.Error, "too large to be encrypted", "the reason the dashboard shows")
-		assert.Empty(t, f.exportFiles(), "never stored plaintext")
-		var heads int
-		require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2`, f.tenantID, tenant.ExportsBucket).Scan(&heads))
-		assert.Zero(t, heads)
-		assert.Equal(t, before+1, refusedCount(generatedKindExport, refusedTooLargeForSSE))
+		require.Equal(t, "completed", st.Status, st.Error)
+		files := f.exportFiles()
+		require.Len(t, files, 1)
+		raw, err := os.ReadFile(files[0])
+		require.NoError(t, err)
+		h, err := crypto.ParseStreamHeader(raw)
+		require.NoError(t, err)
+		assert.Equal(t, 64, h.SegmentSize)
+		assert.Greater(t, int64(len(raw)), int64(10*64), "many segments")
 	})
 
-	t.Run("inventory: a note, nothing written", func(t *testing.T) {
+	t.Run("inventory: written sealed", func(t *testing.T) {
 		f := setupInventoryFixture(t)
 		f.server.accessLogTracker = nil
 		sse := sseFor(t, f.db, f.tenantID)
+		sse.SetSegmentSize(16)
 		_, err := f.db.Exec(`UPDATE buckets SET sse_enabled = TRUE WHERE tenant_id = $1 AND name = $2`, f.tenantID, f.invBucket)
 		require.NoError(t, err)
 		_, err = f.db.Exec(`INSERT INTO object_head_cache (tenant_id, bucket, object_key, size_bytes, etag, content_type) VALUES ($1,$2,'x.txt',5,'e','text/plain')`, f.tenantID, f.bucket)
@@ -229,19 +238,14 @@ func TestGeneratedObject_TooLargeIsRefusedNeverPlaintext(t *testing.T) {
 		runner := NewInventoryRunner(f.db, f.eng, zap.NewNop())
 		w := newGeneratedObjectWriter(f.db, f.eng, nil, nil, zap.NewNop())
 		w.sse = sse
-		w.maxSSE = 16
 		runner.SetWriter(w)
-		before := refusedCount(generatedKindInventory, refusedTooLargeForSSE)
 
-		err = runner.generateReport(context.Background(), f.tenantID, f.bucket, f.invBucket, "inv/", "CSV", time.Now())
-		require.Error(t, err, "the report is not written: the run's note says so")
-		assert.ErrorIs(t, err, errGeneratedTooLargeForSSE)
+		require.NoError(t, runner.generateReport(context.Background(), f.tenantID, f.bucket, f.invBucket, "inv/", "CSV", time.Now()))
 		var heads int
-		require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2`, f.tenantID, f.invBucket).Scan(&heads))
-		assert.Zero(t, heads)
-		entries, _ := os.ReadDir(filepath.Join(f.tempDir, f.tenant.NamespaceContainer(f.invBucket)))
-		assert.Empty(t, entries, "no blob")
-		assert.Equal(t, before+1, refusedCount(generatedKindInventory, refusedTooLargeForSSE))
+		var algo string
+		require.NoError(t, f.db.QueryRow(`SELECT COUNT(*), MAX(encryption_algorithm) FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2`, f.tenantID, f.invBucket).Scan(&heads, &algo))
+		assert.Positive(t, heads)
+		assert.Equal(t, crypto.SSEAlgorithm, algo)
 	})
 
 	t.Run("no SSE service in this process: refused, rows kept", func(t *testing.T) {
@@ -304,21 +308,22 @@ func TestCopyObject_PlaintextSourceIntoSSEBucket_IsEncrypted(t *testing.T) {
 	require.Equal(t, 200, got.Code, got.Body.String())
 	assert.Equal(t, content, got.Body.Bytes())
 
-	// Over the SSE limit: refused before anything is written.
-	saved := maxSSEObjectSize
-	maxSSEObjectSize = 8
-	t.Cleanup(func() { maxSSEObjectSize = saved })
-	w = copyTo("too-big.txt")
-	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code, w.Body.String())
-	_, statErr := os.Stat(filepath.Join(f.tempDir, f.tenant.NamespaceContainer(f.logBucket), "too-big.txt"))
-	assert.True(t, os.IsNotExist(statErr), "never stored plaintext")
-	maxSSEObjectSize = saved
+	// Over the old cap (many segments: 8-byte segments here): sealed, as
+	// any size is since WP-R8-5 (this was a 413).
+	sse.SetSegmentSize(16)
+	w = copyTo("big.txt")
+	require.Equal(t, 200, w.Code, w.Body.String())
+	requireSSEBlob(t, blobPath(t, f.db, f.tempDir, f.tenantID, f.logBucket, "big.txt"), content)
+	got = f.s3(t, "GET", "/"+f.logBucket+"/big.txt", nil)
+	require.Equal(t, 200, got.Code, got.Body.String())
+	assert.Equal(t, content, got.Body.Bytes())
+	sse.SetSegmentSize(crypto.StreamSegmentSize)
 
 	// No SSE service on this process: refused, never plaintext.
 	f.server.sseService = nil
 	w = copyTo("no-key.txt")
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
-	_, statErr = os.Stat(filepath.Join(f.tempDir, f.tenant.NamespaceContainer(f.logBucket), "no-key.txt"))
+	_, statErr := os.Stat(filepath.Join(f.tempDir, f.tenant.NamespaceContainer(f.logBucket), "no-key.txt"))
 	assert.True(t, os.IsNotExist(statErr), "never stored plaintext")
 }
 
@@ -378,9 +383,8 @@ func TestCDN_SSEObject_IsDecrypted(t *testing.T) {
 	f := setupCDNFixture(t)
 	sse := sseFor(t, f.db, f.tenantID)
 	ctx := common.WithTenantID(context.Background(), f.tenantID)
-	ct, v, err := sse.EncryptBytes(ctx, f.tenantID, f.content)
-	require.NoError(t, err)
-	_, err = f.server.engine.Put(ctx, f.tenantID+"_"+f.bucket, f.key, bytes.NewReader(ct))
+	ct, v := sealedBlob(t, sse, f.tenantID, f.content)
+	_, err := f.server.engine.Put(ctx, f.tenantID+"_"+f.bucket, f.key, bytes.NewReader(ct))
 	require.NoError(t, err)
 	_, err = f.db.Exec(`UPDATE object_head_cache SET encryption_algorithm = $4, encryption_key_version = $5
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`, f.tenantID, f.bucket, f.key, crypto.SSEAlgorithm, v)
@@ -418,12 +422,6 @@ func firstByte(b []byte) byte {
 		return 0
 	}
 	return b[0]
-}
-
-// The dashboard says why an export was refused for its size: the export
-// service's error carries the marker the page looks for.
-func TestExportTooLargeReason_IsTheOneTheDashboardShows(t *testing.T) {
-	assert.Contains(t, errGeneratedTooLargeForSSE.Error(), handlers.ExportTooLargeToEncryptMarker)
 }
 
 // A5 at the server: a master key source that is set but unusable stops the

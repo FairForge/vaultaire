@@ -362,11 +362,7 @@ func (s *AccountExportService) RunOnce(ctx context.Context) (ExportRunResult, er
 		tried = append(tried, c.id)
 		log := s.logger.With(zap.String("export_id", c.id), zap.String("tenant_id", c.tenantID), zap.Int("attempt", c.attempts))
 		if err := s.renderOne(ctx, c, log); err != nil {
-			// An export too large to be encrypted into its sse_enabled
-			// bucket is refused, never written plaintext — and every retry
-			// would be refused the same way: it fails now, with the reason
-			// the dashboard shows (WP-R8-1 follow-up A1).
-			if c.attempts >= exportMaxAttempts || errors.Is(err, errGeneratedTooLargeForSSE) {
+			if c.attempts >= exportMaxAttempts {
 				res.Failed++
 				accountExportsTotal.WithLabelValues("failed").Inc()
 				s.mark(ctx, c.id, `UPDATE account_exports SET status = 'failed', error_message = $2, claimed_at = NULL WHERE id = $1::uuid AND status = 'pending'`, err.Error())
