@@ -65,6 +65,48 @@ or the database can read Normal-mode data. "Can't read it" exists only
 client-side (SSE-C today, Vault mode F-12 later); the copy says "encrypted at
 rest with keys we hold", never "zero-knowledge".
 
+**Step 0, immediately before the ceremony: clear the test data** (owner
+decision 2026-10-13). The key encrypts new writes only — no job ever
+encrypts an object stored before it, and only buckets created after it get
+`sse_enabled` — so whatever is stored at that moment stays plaintext for
+ever. On 2026-10-13 prod held only test data (4 tenants, ~19 GB, 0 Stripe
+customers, nothing encrypted): two old bench accounts, the bench tenant, and
+the retired LET demo (letplay; embedded nowhere). Done last, right before the
+key, so nothing plaintext lands in between.
+
+1. **Erase the three accounts** through the account-deletion runner (every
+   object deleted on its recorded backend, every backend swept, rows erased,
+   key rows shredded, an `account.erased` audit row each):
+
+   ```sql
+   UPDATE users u
+      SET status = 'pending_deletion', deletion_scheduled_at = NOW() - INTERVAL '1 minute',
+          deletion_reason = 'pre-master-key test data wipe'
+     FROM tenants t
+    WHERE t.email = u.email
+      AND t.id IN ('tenant-357e3a63382e091f',   -- old bench, 11 GB
+                   'tenant-f4294518dc0a7a8f',   -- old bench, 5.7 GB
+                   'tenant-cb05d8eeb2093573');  -- LET demo (letshow), 67 MB
+   ```
+
+   then `POST /api/v1/admin/jobs/account_deletion/run` (admin JWT) or wait
+   for the 04:30 UTC run. Done when `job_runs` says `ok` for
+   `account_deletion` and each tenant has its `account.erased` row; a tenant
+   it defers (a backend unreachable) fails the run on purpose — run it again.
+2. **Empty the bench tenant and drop its buckets** (`tenant-14a623b16b3f7012`,
+   the `VAULTAIRE_BENCH_*` key): for every bucket, delete every version and
+   delete marker (`aws s3api list-object-versions` → `delete-objects`), then
+   `aws s3 rb`. The account and its keys stay; buckets recreated after the
+   key are `sse_enabled`.
+3. **Check:** `SELECT count(*) FROM object_head_cache` and
+   `SELECT count(*) FROM object_versions WHERE storage_key IS NOT NULL` → 0.
+   What is left is unreachable and goes on schedule: displaced blobs after
+   the `retired_blobs` grace (24 h), chunk blobs after dedup GC's 7-day grace
+   (`dedup_gc`, 02:30 UTC). Each vendor's own deletion timing applies to
+   their copies.
+4. Outside the service: the letplay app (Maxko) and `~user1/letshow` on the
+   box can go too (no cron writes to the demo any more, checked 2026-10-13).
+
 Prerequisites (once): the build of Stage 1a Prompt 2A deployed (`/version`);
 `deploy/systemd/vaultaire@.service` of the same commit installed;
 `apt install libtss2-rc0 ssss age` (systemd-creds needs the TPM library —
