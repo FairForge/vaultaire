@@ -359,7 +359,6 @@ func (s *Server) batchDeleteKey(r *http.Request, t *tenant.Tenant, bucket, conta
 		bctx := r.Context()
 		if recordedBackend != "" && s.engine != nil {
 			noteRecordedBackend(s.engine, s.logger, "delete_objects", recordedBackend)
-			s.engine.HintBackend(container, blob, recordedBackend)
 			bctx = engine.WithRecordedBackend(bctx, recordedBackend)
 		}
 		// Every copy the tables know of, the recorded one first (R6-24).

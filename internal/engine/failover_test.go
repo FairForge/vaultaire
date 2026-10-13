@@ -292,10 +292,8 @@ func TestEngineGet_RecordedBackendDown_NoFailover(t *testing.T) {
 	eng.AddDriver("primary", primaryMock)
 	eng.AddDriver("backup", backupMock)
 
-	// Record object on primary
-	eng.objectBackends.Store("container/obj.txt", "primary")
-
-	ctx := tenantCtx()
+	// The object is recorded on the primary
+	ctx := WithRecordedBackend(tenantCtx(), "primary")
 	reader, err := eng.Get(ctx, "container", "obj.txt")
 	assert.Nil(t, reader)
 	assert.ErrorIs(t, err, ErrAllBackendsUnavailable, "503: the backend that holds it could not be asked")

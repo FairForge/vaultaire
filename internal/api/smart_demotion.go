@@ -474,9 +474,8 @@ func (r *SmartDemotionRunner) demote(ctx context.Context, hot, cold engine.Drive
 		return false, fmt.Errorf("commit: %w", err)
 	}
 
-	// Keep the engine's in-memory routing map consistent for this process;
-	// other processes/restarts read backend_name from the head cache on GET.
-	r.eng.HintBackend(container, blob, r.ColdBackend)
+	// Every read names the head row's backend (now the cold one) itself
+	// (WP-R6-1): there is no engine route to update.
 	r.logger.Info("smart demotion: object demoted",
 		zap.String("tenant", tenantID), zap.String("bucket", c.bucket), zap.String("key", c.key),
 		zap.Int64("bytes", c.size), zap.String("reason", c.reason))

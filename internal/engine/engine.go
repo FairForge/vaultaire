@@ -31,14 +31,10 @@ type CoreEngine struct {
 	db       *sql.DB
 	failover *FailoverManager
 
-	locations *LocationStore
-
-	// objectBackends records which backend each object was written to.
-	// Key: "container/artifact"  Value: backend name string
-	// This guarantees Get always reads from the same backend Put used.
-	// In-memory only; objects written before a restart fall back to
-	// object_locations, then e.primary (safe — they were written there too).
-	objectBackends sync.Map
+	// Where an object is, is not the engine's to remember (WP-R6-1): every
+	// call names the backend the object's row records on its context
+	// (WithRecordedBackend). The in-memory route map (objectBackends, R6-09:
+	// unbounded) and the object_locations second truth (R6-14) are gone.
 
 	// writeFailures counts PUTs that failed on every eligible durable
 	// backend (WP-F fail-loudly). Exposed via GetMetrics for alerting.
@@ -68,7 +64,6 @@ func NewEngine(db *sql.DB, logger *zap.Logger, config *Config) *CoreEngine {
 		config:   config,
 		failover: NewFailoverManager(logger),
 	}
-	e.locations = NewLocationStore(db, logger)
 	return e
 }
 
@@ -123,16 +118,10 @@ func (e *CoreEngine) CheckDriver(ctx context.Context, name string) error {
 	return driver.HealthCheck(ctx)
 }
 
-// objectKey returns the sync.Map key for a container+artifact pair.
-func objectKey(container, artifact string) string {
-	return container + "/" + artifact
-}
-
 // Get retrieves an artifact from the backend its row records — the
-// context's WithRecordedBackend, else this process's Put / HintBackend
-// route, else object_locations, else the primary — and from no other
-// (WP-R6-1, recorded_backend.go): a miss there is a miss, a backend that
-// cannot be asked is ErrAllBackendsUnavailable.
+// context's WithRecordedBackend, else the primary (a row with no backend on
+// record) — and from no other (WP-R6-1, recorded_backend.go): a miss there
+// is a miss, a backend that cannot be asked is ErrAllBackendsUnavailable.
 func (e *CoreEngine) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
 	if err := e.requireTenant(ctx, "get", container, artifact); err != nil {
 		return nil, err
@@ -207,9 +196,10 @@ func (e *CoreEngine) GetRange(ctx context.Context, container, artifact string, o
 // Put stores an artifact and returns the name of the backend it was written to.
 //
 // The returned backend name must be persisted by the caller (the S3 adapter
-// writes it to object_head_cache.backend_name). It is also stored in
-// objectBackends so that Get can route correctly within the same process
-// lifetime without a DB round-trip.
+// writes it to object_head_cache.backend_name): it is the one place every
+// later read and delete learns where the object is (WP-R6-1). The engine
+// records nothing itself — no in-memory route, no object_locations row
+// (R6-09, R6-14, R8-19: one row per chunk per store, never read for them).
 func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...PutOption) (string, error) {
 	if err := e.requireTenant(ctx, "put", container, artifact); err != nil {
 		return "", err
@@ -334,18 +324,6 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 		return "", fmt.Errorf("put %s/%s: %w", container, artifact, err)
 	}
 
-	e.objectBackends.Store(objectKey(container, artifact), usedBackend)
-
-	if e.locations != nil {
-		resolvedClass := options.StorageClass
-		if resolvedClass == "" {
-			resolvedClass = "STANDARD"
-		}
-		go func() { // #nosec G118 -- fire-and-forget location record; must outlive the request, request ctx would cancel it
-			_ = e.locations.RecordLocation(context.Background(), tenantID, container, artifact, usedBackend, resolvedClass, sizeReader.bytesRead)
-		}()
-	}
-
 	return usedBackend, nil
 }
 
@@ -370,9 +348,6 @@ func (e *CoreEngine) Delete(ctx context.Context, container, artifact string) err
 	if err := e.requireTenant(ctx, "delete", container, artifact); err != nil {
 		return err
 	}
-	tenantID := common.GetTenantID(ctx)
-
-	key := objectKey(container, artifact)
 	targets := []string{e.preferredBackend(ctx, container, artifact)}
 	for _, b := range KnownCopies(ctx) {
 		if !slices.Contains(targets, b) {
@@ -396,15 +371,6 @@ func (e *CoreEngine) Delete(ctx context.Context, container, artifact string) err
 		}
 	}
 
-	// A failed delete keeps the routing records with the head row, so the
-	// retry asks the same backends (Prompt 2b.3 D1.5); a miss is gone too —
-	// any backend's miss, the local driver's *fs.PathError included (E1.4).
-	if failure == nil {
-		e.objectBackends.Delete(key)
-		if e.locations != nil {
-			_ = e.locations.RemoveLocation(ctx, tenantID, container, artifact)
-		}
-	}
 	switch {
 	case failure != nil:
 		return failure
@@ -563,6 +529,20 @@ var targetOnlyBackends = map[string]bool{
 	"onedrive":   true, // legacy registration key (tools now use "permafrost", R7-10); keep for old head rows
 }
 
+// dormantBackends are general-purpose stores kept registered only so the
+// rows on them stay readable: never a write fall-over destination unless
+// they are the target or the primary, and — like every backend since
+// WP-R6-1 — never read unless a row names them. Unlike targetOnlyBackends
+// they may still be made the primary (STORAGE_MODE=wasabi, the admin
+// switch): then every write is theirs again.
+//
+//   - wasabi: the interim primary for one day (2026-10-03 → 10-04) while an
+//     iDrive key answered 403; a partner account kept dormant since. A 90-day
+//     minimum per object makes a stray fall-over write a 90-day charge.
+var dormantBackends = map[string]bool{
+	"wasabi": true,
+}
+
 // writeOnlyWhenTargeted reports whether name may receive a write only as the
 // explicit target or the configured primary.
 func writeOnlyWhenTargeted(name string) bool {
@@ -640,7 +620,7 @@ func (e *CoreEngine) buildWriteCandidateList(target string) []string {
 	all := e.buildCandidateList(target)
 	writable := make([]string, 0, len(all))
 	for _, name := range all {
-		if writeOnlyWhenTargeted(name) && name != target && name != e.primary {
+		if (writeOnlyWhenTargeted(name) || dormantBackends[name]) && name != target && name != e.primary {
 			continue
 		}
 		writable = append(writable, name)
@@ -679,15 +659,6 @@ func (e *CoreEngine) GetDriver(name string) (Driver, bool) {
 	defer e.mu.RUnlock()
 	d, ok := e.drivers[name]
 	return d, ok
-}
-
-// HintBackend seeds the objectBackends map so Get routes to the correct
-// backend without a failed attempt against the primary. The S3 adapter
-// calls this with the backend_name read from object_head_cache on GET.
-func (e *CoreEngine) HintBackend(container, artifact, backend string) {
-	if backend != "" {
-		e.objectBackends.Store(objectKey(container, artifact), backend)
-	}
 }
 
 // GetFailoverStatus returns circuit breaker states for all backends.

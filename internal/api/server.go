@@ -322,7 +322,8 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// "<tenant>_<bucket>" namespace, tenant in ctx, quota, head row.
 	reportWriter := newGeneratedObjectWriter(s.db, s.engine, s.quotaManager, s.gci, logger)
 	if reportWriter != nil {
-		reportWriter.sse = s.sseService // an sse_enabled target bucket gets SSE-S3, as a PUT does
+		reportWriter.sse = s.sseService                     // an sse_enabled target bucket gets SSE-S3, as a PUT does
+		reportWriter.allowSync = syncPlacementGate(s.flags) // and a sync-tier bucket what a PUT gets
 	}
 	s.accessLogTracker = NewS3AccessLogTracker(s.db)
 	s.accessLogTracker.SetLogger(logger)

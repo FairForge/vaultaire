@@ -30,9 +30,8 @@ func TestWholeObjectReads_GoThroughTheBlobAddress(t *testing.T) {
 		"Get": 2, "GetRange": 2, "GetRangeInfo": 2, "Exists": 2, "Delete": 2, "Put": 2,
 		"RestoreObject": 2, "RestoreStatus": 2, "ParallelRangeSource": 2,
 		"GetOn": 3, "ExistsOn": 3, "DeleteOn": 3, "PutOn": 3,
-		"HintBackend": 1,
 	}
-	call := regexp.MustCompile(`\.(Get|GetRange|GetRangeInfo|Exists|Delete|Put|RestoreObject|RestoreStatus|ParallelRangeSource|GetOn|ExistsOn|DeleteOn|PutOn|HintBackend)\(`)
+	call := regexp.MustCompile(`\.(Get|GetRange|GetRangeInfo|Exists|Delete|Put|RestoreObject|RestoreStatus|ParallelRangeSource|GetOn|ExistsOn|DeleteOn|PutOn)\(`)
 	rawKey := regexp.MustCompile(`^(\w+\.)?(key|object|artifact|srcKey|destKey|Key|Object|objectKey)$`)
 
 	// file → trimmed code fragments allowed to pass a raw key, and why.

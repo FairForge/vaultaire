@@ -55,10 +55,10 @@ func TestStrictTarget_UnregisteredAsksNobody(t *testing.T) {
 	assert.Empty(t, eng.buildWriteCandidateList("sync"), "nor is it written anywhere else")
 	assert.Equal(t, 1.0, promtest.ToFloat64(StrictUnregisteredCounter().WithLabelValues("sync", "get"))-before)
 
-	eng.HintBackend("c", "k", "sync")
-	_, err = eng.Get(tenantCtx(), "c", "k")
+	ctx := WithRecordedBackend(tenantCtx(), "sync")
+	_, err = eng.Get(ctx, "c", "k")
 	assert.ErrorIs(t, err, ErrAllBackendsUnavailable, "503, never the primary's copy")
-	err = eng.Delete(tenantCtx(), "c", "k")
+	err = eng.Delete(ctx, "c", "k")
 	assert.ErrorIs(t, err, ErrAllBackendsUnavailable, "the primary's DELETE of an absent key would be a 204 that drops the row")
 }
 

@@ -39,7 +39,7 @@ import (
 //	   client while a subscription id is set) defers THIS tenant to the next
 //	   run; nothing of theirs is touched before billing is settled.
 //	b. Objects — every object_head_cache row is deleted on its RECORDED
-//	   backend (HintBackend + engine.Delete, the R6-05 rule); chunked rows
+//	   backend (engine.WithRecordedBackend + Delete, R6-05/WP-R6-1); chunked rows
 //	   release their manifest under the key lock in the same transaction as
 //	   the head row (deleteHeadRowReleasing, R8) and never touch _global
 //	   blobs (dedup GC sweeps them); active multipart uploads are aborted
@@ -673,11 +673,6 @@ func (r *AccountDeletionRunner) deleteObject(ctx context.Context, t *tenant.Tena
 // to the primary alone). A miss is fine — the row drifted; anything else is
 // the caller's failure.
 func (r *AccountDeletionRunner) deleteOnBackend(ctx context.Context, container, blob, backend string) error {
-	if backend != "" {
-		if ce, ok := r.eng.(*engine.CoreEngine); ok {
-			ce.HintBackend(container, blob, backend)
-		}
-	}
 	if err := r.eng.Delete(engine.WithRecordedBackend(ctx, backend), container, blob); err != nil && !isObjectMissingErr(err) {
 		return fmt.Errorf("backend delete: %w", err)
 	}

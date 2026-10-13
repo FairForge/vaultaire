@@ -1,31 +1,15 @@
 package engine
 
-import (
-	"context"
-
-	"github.com/FairForge/vaultaire/internal/common"
-)
+import "context"
 
 // preferredBackend is the backend Get asks for an object (and the first a
 // Delete attempts): the row's backend on the context (WithRecordedBackend),
-// then this process's route (HintBackend / Put), then object_locations, then
-// the primary.
-func (e *CoreEngine) preferredBackend(ctx context.Context, container, artifact string) string {
+// else the primary — a row with no backend on record (WP-R6-1).
+func (e *CoreEngine) preferredBackend(ctx context.Context, _, _ string) string {
 	if b := RecordedBackend(ctx); b != "" {
 		return b
 	}
-	preferred := e.GetPrimary()
-	if v, ok := e.objectBackends.Load(objectKey(container, artifact)); ok {
-		if name, ok := v.(string); ok && name != "" {
-			preferred = name
-		}
-	} else if e.locations != nil {
-		if name, err := e.locations.LookupBackend(ctx, common.GetTenantID(ctx), container, artifact); err == nil && name != "" {
-			preferred = name
-			e.objectBackends.Store(objectKey(container, artifact), name)
-		}
-	}
-	return preferred
+	return e.GetPrimary()
 }
 
 // ParallelRangeSource is where a parallel ranged GET of one object reads

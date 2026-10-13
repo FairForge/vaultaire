@@ -100,9 +100,8 @@ func TestSyncPlacementEndToEnd_ObjectLandsOnSyncAndReadsBack(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, ok, "nothing on the primary")
 
-	// Reads follow the recorded backend (the API hints it from the head row).
-	eng.HintBackend(tenantID+"_mine", "k", backend)
-	rc, err := eng.Get(ctx, tenantID+"_mine", "k")
+	// Reads follow the recorded backend (the API names it from the head row).
+	rc, err := eng.Get(engine.WithRecordedBackend(ctx, backend), tenantID+"_mine", "k")
 	require.NoError(t, err)
 	defer func() { _ = rc.Close() }()
 }
