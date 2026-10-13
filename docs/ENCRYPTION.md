@@ -47,11 +47,20 @@ tenant_key_versions  (one row per tenant per version; the newest encrypts)
   with no master key refuses every write into an `sse_enabled` bucket (503)
   and every encrypted read (500) — R8-04's rule both ways. The `/cdn` path
   opens SSE-S3 objects (it streamed the ciphertext before).
-- **Not encrypted:** multipart uploads stay plaintext until WP-R3-1/WP-R3-3
-  (the known caveat; the public copy says so); SSE-C uses the customer's key
-  and never touches this; unencrypted chunks are in the shared `_global` dedup
-  scope; objects written before the key was set stay plaintext until
-  overwritten.
+  A multipart upload is placed exactly as a PUT of its bytes (WP-R3-1,
+  2026-10-13, `internal/api/placement.go`): chunked and chunk-encrypted when
+  a PUT would chunk, sealed whole up to 256 MiB, **413** above that on a
+  placement that cannot chunk (versioned, region-pinned, GLACIER /
+  DEEP_ARCHIVE, RESILIENT, PUBLIC, SYNC), **503** without the key — at
+  CreateMultipartUpload and again at Complete. A chunked source copied
+  into a placement that cannot chunk is re-stored whole there, sealed when
+  the destination encrypts.
+- **Not encrypted:** the staged parts of an open multipart upload, on the
+  box's own disk (`/tmp/vaultaire-multipart`) between UploadPart and Complete
+  (≤ 48 h, the reaper; WP-R3-5 moves the directory); multipart objects
+  completed before 2026-10-13; SSE-C uses the customer's key and never touches
+  this; unencrypted chunks are in the shared `_global` dedup scope; objects
+  written before the key was set stay plaintext until overwritten.
 
 ## Setting the master key (the on-box ceremony)
 
@@ -298,8 +307,8 @@ deleted and the backends swept. The `account.erased` audit row counts them as
   Without the key row it cannot be opened, master key or not.
 - **Not covered:**
   - Plaintext objects. Everything stored before encryption was turned on,
-    multipart uploads (until WP-R3-3), and unencrypted buckets are deleted,
-    not shredded.
+    multipart uploads completed before WP-R3-1 (2026-10-13), and unencrypted
+    buckets are deleted, not shredded.
   - Database backups: the key rows are in every dump taken before the
     erasure (7 days on the box, 30 days off-box). Until those age out, the old
     master key plus an old dump can open the blobs.

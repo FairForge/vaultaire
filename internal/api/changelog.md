@@ -5,6 +5,24 @@ what you need and it shows up here.
 
 ---
 
+## 2026-10-13: Large uploads are deduplicated, compressed and encrypted
+
+- **Multipart uploads are stored like single uploads.** Every upload over
+  8 MiB from aws-cli, rclone or restic is a multipart upload; until today
+  those objects were kept as one whole, uncompressed blob. They now go
+  through the same pipeline as a single upload of the same bytes: over
+  64 MiB they are split into content-defined chunks, deduplicated and
+  compressed. The ETag stays the `<md5>-<parts>` aws-cli computes.
+- **Encrypted buckets encrypt multipart uploads.** A multipart upload into a
+  bucket that encrypts at rest is encrypted (chunk by chunk, or sealed
+  whole up to 256 MiB). One that cannot be encrypted is refused with
+  `413 EntityTooLarge` instead of being stored as sent.
+- **Every part is checked again before it is stored.** If a staged part no
+  longer matches what you uploaded, CompleteMultipartUpload fails and nothing
+  is written; upload the part again.
+- **Public links serve large objects.** A public bucket's `/cdn` link now
+  serves objects over 64 MiB, Range requests included.
+
 ## 2026-10-13 — Versioning: the null version and batch deletes
 
 - **Objects uploaded before you enabled versioning are kept.** Such an object
