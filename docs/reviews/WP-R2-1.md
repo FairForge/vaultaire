@@ -999,3 +999,31 @@ WHERE storage_key IS NOT NULL`).
 - The prod synthetic check is still not configured (`SYNTHETIC_CHECK_*`).
 - After the deploy: one tenant reconcile per tenant holding retained versions
   (above) — done for the bench tenant as part of the prod proof below.
+
+## Prod proof of C2
+
+2026-10-13 01:34 UTC, deployed as 3cee192 (`/version` 3cee1928245b); 088
+applied (both C1 versions backfilled to `floor = standard`). Bench tenant
+(`tenant-14a623b16b3f7012`, the `bench-2026-10-09` key), aws-cli through
+`https://stored.ge`, bucket `wpr21-c1-proof`:
+
+- **The only tenant holding retained versions on prod** was the bench
+  tenant (2 rows, 14 + 18 B, written by C1's proof and never charged).
+- **Usage before** 2,356,146,980. **One more versioned PUT** of `k` (41 B,
+  version `0463f835…`, `k@wz28g7zd…`, floor standard) → **2,356,147,021**:
+  +41, and the displaced 18 B blob stayed billed as its version (nothing
+  released).
+- **The tenant reconcile** — the SQL of `ReconcileTenantStorageUsage`, run
+  by psql on the box (the admin endpoint needs the MFA'd prod admin) →
+  **2,364,535,643** = head rows 2,364,535,611 + retained versions 32 (14 +
+  18). Of the +8,388,622: 14 B is the C1-era version C2 now bills, and
+  **8,388,608 B (8 MiB exactly) is an older drift** — the ledger was already
+  that far below the head-row sum before this deploy (bench churn; not C2's).
+  The tenant has no floor rows.
+- **GET and HEAD `?versionId`**: `325d49f8…` → 14 B, ETag `bb42b00c…` = the
+  body's MD5; `111fa451…` → 18 B, ETag `0f34535b…` = the body's MD5; HEAD of
+  each answers its own length and ETag (before C2 it answered the current
+  object's). GET (current) = the 41 B body. HEAD of an unknown version id →
+  404.
+- Prod has no master key: the whole-object re-encryption is proven locally
+  only (above).
