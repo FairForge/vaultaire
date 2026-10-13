@@ -79,7 +79,7 @@ func (s *Server) initMetrics() {
 		// Tenant key versions (WP-R8-1): the boot re-wrap, rows no key
 		// opens, the re-encrypt job, and the rotation backlog (from the
 		// tables).
-		reg.MustRegister(tenantKeysRewrapped, tenantKeysUnwrapFailures, keyReencryptChunks)
+		reg.MustRegister(tenantKeysRewrapped, tenantKeysUnwrapFailures, keyReencryptChunks, keyReencryptObjects)
 		// Generated objects (export, access log, inventory) refused rather
 		// than stored plaintext in an sse_enabled bucket (WP-R8-1 A1).
 		reg.MustRegister(generatedObjectRefused)

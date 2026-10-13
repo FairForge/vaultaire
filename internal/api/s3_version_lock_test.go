@@ -123,3 +123,31 @@ func TestDeleteMarker_RacingAWriteLeavesOneLatestVersion(t *testing.T) {
 
 	assert.Equal(t, 1, f.latestVersions(t, "m.bin"))
 }
+
+// recordObjectVersion is a bare version write in a transaction of its own,
+// under the key's version lock — what a writer's flip does for the version
+// row (blob_flip.go), without the head row: the race tests hold two of them
+// between their two statements.
+func recordObjectVersion(ctx context.Context, db *sql.DB, tenantID, bucket, key string,
+	size int64, etag, contentType, backendName string) string {
+	if db == nil {
+		return ""
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := lockVersionKey(ctx, tx, tenantID, bucket, key); err != nil {
+		return ""
+	}
+	vStatus := bucketVersioningStatus(ctx, tx, tenantID, bucket)
+	if vStatus != "Enabled" && vStatus != "Suspended" {
+		return ""
+	}
+	versionID, err := writeVersionRow(ctx, tx, vStatus, tenantID, bucket, key, size, etag, contentType, backendName, "", versionBlobRef{})
+	if err != nil || tx.Commit() != nil {
+		return ""
+	}
+	return versionID
+}

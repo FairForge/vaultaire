@@ -12,7 +12,12 @@ package api
 //   - decides the displaced blob's fate: a version row that keeps it keeps
 //     it (Enabled: the previous version is now non-current and names its
 //     bytes); otherwise it is retired (retired_blobs, 'overwritten'), never
-//     deleted here.
+//     deleted here,
+//   - and the bill that goes with it (PR C2): a displaced blob a version
+//     keeps stays billed — the head row's charge becomes the version's, so
+//     the caller releases nothing for it (displacedRow.KeptByVersion); a
+//     retained null version a Suspended write replaces is released
+//     (displacedRow.ReplacedVersion) and its blob retired.
 //
 // Nothing before the commit touches the old bytes, so a failure anywhere
 // leaves the previous object exactly as it was (R2-05, R3-15); two
@@ -117,25 +122,49 @@ func commitBlobWrite(ctx context.Context, db *sql.DB, gci chunkManifestReleaser,
 		return flipResult{}, err
 	}
 	var newChunked bool
-	var newSK string
-	if err := tx.QueryRowContext(ctx, `SELECT is_chunked, COALESCE(storage_key, '') FROM object_head_cache
-		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`, w.TenantID, w.Bucket, w.Key).Scan(&newChunked, &newSK); err != nil {
+	var newSK, newFloor string
+	if err := tx.QueryRowContext(ctx, `SELECT is_chunked, COALESCE(storage_key, ''), floor FROM object_head_cache
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`, w.TenantID, w.Bucket, w.Key).Scan(&newChunked, &newSK, &newFloor); err != nil {
 		return flipResult{}, fmt.Errorf("read the written head row: %w", err)
+	}
+	dAddr, nAddr := "", ""
+	if displaced.Found && !displaced.Chunked {
+		dAddr = blobArtifact(w.Key, displaced.StorageKey)
+	}
+	if !newChunked {
+		nAddr = blobArtifact(w.Key, newSK)
 	}
 
 	var res flipResult
 	if w.Version != nil {
 		vStatus := bucketVersioningStatus(ctx, tx, w.TenantID, w.Bucket)
 		if vStatus == "Enabled" || vStatus == "Suspended" {
-			if displaced.Found && !displaced.Chunked {
+			if dAddr != "" {
 				if err := anchorDisplacedVersion(ctx, tx, w.TenantID, w.Bucket, w.Key, displaced); err != nil {
 					return flipResult{}, err
 				}
 			}
+			var replaced replacedNullVersion
+			if vStatus == "Suspended" {
+				if replaced, err = retainedNullVersion(ctx, tx, w.TenantID, w.Bucket, w.Key, dAddr, displaced.Floor); err != nil {
+					return flipResult{}, err
+				}
+			}
 			v := w.Version
-			res.VersionID, err = writeVersionRow(ctx, tx, vStatus, w.TenantID, w.Bucket, w.Key, v.Size, v.ETag, v.ContentType, v.Backend, v.Blob)
+			res.VersionID, err = writeVersionRow(ctx, tx, vStatus, w.TenantID, w.Bucket, w.Key, v.Size, v.ETag, v.ContentType, v.Backend, newFloor, v.Blob)
 			if err != nil {
 				return flipResult{}, fmt.Errorf("write version row: %w", err)
+			}
+			// The null version this write replaced was a retained
+			// non-current version (not the displaced current object, whose
+			// fate is below): its bytes are no longer named and no longer
+			// billed.
+			if replaced.storageKey != "" {
+				if err := retireBlob(ctx, tx, w.TenantID, w.Bucket, w.Key, replaced.storageKey, replaced.backend, retiredOverwritten); err != nil &&
+					!errors.Is(err, errUnaddressableBlob) {
+					return flipResult{}, err
+				}
+				displaced.ReplacedVersion = quotaRelease{Floor: replaced.floor, Bytes: replaced.size}
 			}
 		}
 	}
@@ -143,18 +172,17 @@ func commitBlobWrite(ctx context.Context, db *sql.DB, gci chunkManifestReleaser,
 	// The displaced blob: kept while a row names it (a version, the new
 	// row itself when the address is the same — a concurrent complete of the
 	// same upload), retired otherwise. A blob with no recorded backend
-	// cannot be addressed by the collector: left for the erasure sweep.
-	if displaced.Found && !displaced.Chunked {
-		dAddr := blobArtifact(w.Key, displaced.StorageKey)
-		nAddr := ""
-		if !newChunked {
-			nAddr = blobArtifact(w.Key, newSK)
+	// cannot be addressed by the collector: left for the erasure sweep. A
+	// blob a version keeps keeps its bill (the version's now).
+	if dAddr != "" && dAddr != nAddr {
+		kept, err := versionKeepsBlob(ctx, tx, w.TenantID, w.Bucket, w.Key, dAddr)
+		if err != nil {
+			return flipResult{}, err
 		}
-		if dAddr != nAddr {
-			if err := retireBlob(ctx, tx, w.TenantID, w.Bucket, w.Key, dAddr, displaced.Backend, retiredOverwritten); err != nil &&
-				!errors.Is(err, errUnaddressableBlob) {
-				return flipResult{}, err
-			}
+		displaced.KeptByVersion = kept
+		if err := retireBlob(ctx, tx, w.TenantID, w.Bucket, w.Key, dAddr, displaced.Backend, retiredOverwritten); err != nil &&
+			!errors.Is(err, errUnaddressableBlob) {
+			return flipResult{}, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -184,13 +212,44 @@ func lockHeadKey(ctx context.Context, tx *sql.Tx, tenantID, bucket, key string) 
 // the etags agree: a version row that describes other bytes is left as it is.
 func anchorDisplacedVersion(ctx context.Context, tx *sql.Tx, tenantID, bucket, key string, d displacedRow) error {
 	addr := blobArtifact(key, d.StorageKey)
+	// The floor too (PR C2): the version is billed where the head row was.
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE object_versions SET storage_key = $4, backend_name = NULLIF($5, ''),
-		       encryption_algorithm = NULLIF($6, ''), encryption_key_version = $7
+		       encryption_algorithm = NULLIF($6, ''), encryption_key_version = $7, floor = $9
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND is_latest AND NOT is_delete_marker
 		  AND etag = $8 AND (storage_key IS NULL OR storage_key = $4)`,
-		tenantID, bucket, key, addr, d.Backend, d.enc.Algorithm, d.enc.KeyVersion, d.etag); err != nil {
+		tenantID, bucket, key, addr, d.Backend, d.enc.Algorithm, d.enc.KeyVersion, d.etag, d.Floor); err != nil {
 		return fmt.Errorf("anchor the displaced version's blob: %w", err)
 	}
 	return nil
+}
+
+// replacedNullVersion is the retained null version a Suspended write is
+// about to replace.
+type replacedNullVersion struct {
+	storageKey, backend, floor string
+	size                       int64
+}
+
+// retainedNullVersion reads the key's "null" version when it keeps bytes
+// OTHER than the displaced current object's (dAddr): a non-current version
+// the Suspended write's null-row rewrite replaces. Its floor as the bill
+// knows it (usage.RetainedVersionFloor; the head row read is the displaced
+// one, under the same lock).
+func retainedNullVersion(ctx context.Context, tx *sql.Tx, tenantID, bucket, key, dAddr, headFloor string) (replacedNullVersion, error) {
+	var r replacedNullVersion
+	err := tx.QueryRowContext(ctx, `
+		SELECT storage_key, COALESCE(backend_name, ''), size_bytes,
+		       COALESCE(floor, NULLIF($5, ''), CASE WHEN backend_name = 'geyser' THEN 'vault' ELSE 'standard' END)
+		FROM object_versions
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND version_id = 'null'
+		  AND NOT is_delete_marker AND storage_key IS NOT NULL AND storage_key <> $4`,
+		tenantID, bucket, key, dAddr, headFloor).Scan(&r.storageKey, &r.backend, &r.size, &r.floor)
+	if errors.Is(err, sql.ErrNoRows) {
+		return replacedNullVersion{}, nil
+	}
+	if err != nil {
+		return replacedNullVersion{}, fmt.Errorf("read the null version: %w", err)
+	}
+	return r, nil
 }

@@ -160,11 +160,30 @@ curl -X POST -H "Authorization: Bearer <admin JWT>" -H "Idempotency-Key: $(uuidg
   `vaultaire_key_rotation_pending{kind="chunk"}` → 0, and
   `GET /api/v1/admin/jobs` → `key_reencrypt.result`. Rule:
   `KeyReencryptBacklogStuck`.
-- **Whole SSE-S3 objects are not re-encrypted yet.** Each keeps opening under
-  its recorded version. `vaultaire_key_rotation_pending{kind="whole"}` counts
-  them and falls only as they are overwritten or deleted. Their re-encryption
-  (write the new blob, then swap) lands with WP-R2-1. An in-place rewrite is
-  the R2-05/R2-15 class of bug.
+- **Whole SSE-S3 objects and retained versions** (WP-R2-1 C2,
+  `key_reencrypt_whole.go`): the same job, after the chunks, on what is left
+  of the SAME per-run budget. Each blob — a head row's or a retained
+  version's (`object_versions.storage_key`) — is read from the backend its row
+  records, checked (the 0x02 header names the row's version; the plaintext
+  matches the ETag), re-sealed under N and written to a **new** address
+  `<key>@<26>` on the same backend. One transaction (head-row lock, then
+  version lock) re-points every row still naming the old address at the old
+  version; the ETag does not change. The old address goes to `retired_blobs`
+  as `reencrypted` (24 h grace, then the `retired_blobs` collector deletes it
+  after its re-check) — never overwritten, never deleted in the run. A write
+  or delete that changed the rows first wins: the new blob is queued
+  `orphan_write`. **Skipped and left pending, by design** (the run's note and
+  `key_reencrypt.result.objects_skipped`): objects on the tape backend
+  (`archive` — a read would be a restore), an open Smart-demotion row
+  (`demotion`), a `vault_parity` row (`parity` — the shards are computed from
+  the stored ciphertext, so re-sealing would need the parity redone; vault
+  objects are on tape anyway), the `_exports` system bucket (`export`, 7-day
+  objects), and a backend that is unregistered or behind an open breaker
+  (`unavailable`). `vaultaire_key_rotation_pending{kind="whole"}` counts
+  blobs (head rows + retained versions; the current version is the head row's
+  blob, counted once) and therefore never reaches 0 while skipped objects
+  exist — which is why `KeyReencryptBacklogStuck` watches `kind="chunk"`
+  only. Metric: `vaultaire_key_reencrypt_objects_total{outcome}`.
 - The old version's key row stays (retired, `retired_at` set): it is needed
   to read whatever is still sealed under it. Deleting a retired version's row
   while anything is sealed under it destroys that data.
@@ -252,8 +271,8 @@ deleted and the backends swept. The `account.erased` audit row counts them as
 | Key rows | `SELECT tenant_id, key_version, created_at, retired_at FROM tenant_key_versions ORDER BY 1,2;` |
 | Chunk backlog | `vaultaire_key_rotation_pending{kind="chunk"}` |
 | Whole-object backlog | `vaultaire_key_rotation_pending{kind="whole"}` |
-| Job | `GET /api/v1/admin/jobs` → `key_reencrypt`; `vaultaire_key_reencrypt_chunks_total{outcome}` |
-| Old addresses awaiting delete | `SELECT * FROM retired_chunk_blobs ORDER BY retire_after;` |
+| Job | `GET /api/v1/admin/jobs` → `key_reencrypt`; `vaultaire_key_reencrypt_chunks_total{outcome}`, `vaultaire_key_reencrypt_objects_total{outcome}` |
+| Old addresses awaiting delete | chunks: `SELECT * FROM retired_chunk_blobs ORDER BY retire_after;` — whole objects: `SELECT * FROM retired_blobs WHERE reason = 'reencrypted' ORDER BY retire_after;` |
 | Boot check | `journalctl -u 'vaultaire@*' \| grep -E 'tenant keys\|master key'` |
 | Re-key progress | `key re-encrypt run master_rekey=true rewrapped=… unwrap_failures=…` in the log; `key_reencrypt.result` on the jobs page |
 | Chunked GETs that followed a moved chunk | `vaultaire_chunked_get_rereads_total{outcome}` |

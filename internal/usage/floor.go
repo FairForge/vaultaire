@@ -10,11 +10,11 @@
 //
 // Invariants, per tenant, in logical bytes:
 //
-//	tenant_quotas.storage_used_bytes        == SUM(object_head_cache.size_bytes)
-//	tenant_floor_quotas[f].storage_used_bytes == SUM(... WHERE floor = f)
+//	tenant_quotas.storage_used_bytes        == the billed bytes (billed.go: head rows + retained versions)
+//	tenant_floor_quotas[f].storage_used_bytes == the billed bytes on floor f
 //	tenant_quotas.storage_limit_bytes       == SUM(tenant_floor_quotas.storage_limit_bytes)   (house tenants)
 //
-// ReconcileStorageUsage rewrites all three from object_head_cache.
+// ReconcileStorageUsage rewrites all three from the tables.
 package usage
 
 import (
@@ -86,7 +86,7 @@ type FloorQuota struct {
 // SetHouse writes the floor limits a subscription grants. The total quota
 // becomes the sum of the floors and the tier follows the house (standard
 // when there is a downstairs, vault for an attic-only house). Floor rows are
-// created on first use with their used bytes summed from object_head_cache,
+// created on first use with their used bytes summed from the billed bytes,
 // so a free-tier tenant's existing objects are counted on the right floor;
 // on resize the used bytes are kept. Idempotent: the webhook may replay it.
 func (m *QuotaManager) SetHouse(ctx context.Context, tenantID string, h House) error {
@@ -114,8 +114,7 @@ func (m *QuotaManager) SetHouse(ctx context.Context, tenantID string, h House) e
 	}{{FloorStandard, h.StdBytes}, {FloorVault, h.VaultBytes}} {
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO tenant_floor_quotas (tenant_id, floor, storage_limit_bytes, storage_used_bytes)
-			 VALUES ($1, $2, $3, COALESCE(
-			     (SELECT SUM(size_bytes) FROM object_head_cache WHERE tenant_id = $1 AND floor = $2), 0))
+			 VALUES ($1, $2, $3, `+billedBytesOfParamsFloor+`)
 			 ON CONFLICT (tenant_id, floor) DO UPDATE
 			   SET storage_limit_bytes = EXCLUDED.storage_limit_bytes, updated_at = NOW()`,
 			tenantID, f.floor, f.limit); err != nil {

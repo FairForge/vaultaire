@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/crypto"
@@ -55,6 +56,7 @@ func init() {
 //  1. old addresses whose grace has passed (retired_chunk_blobs) are deleted
 //     under the chunk's lock — unless an index row names the address again
 //     (dedup GC swept the row and a PUT re-stored the chunk there);
+//
 //  2. for tenants with a retired version, the encrypted rows below the
 //     newest version, oldest first, up to KEY_REENCRYPT_MAX_GB_PER_RUN:
 //     under the chunk's advisory lock (the PUT path's and the GC's) the row
@@ -64,10 +66,13 @@ func init() {
 //     names the old blob, the cache entry dropped, and the old address
 //     retired for keyReencryptRetireAfter — never deleted in the same run.
 //
-// Whole SSE-S3 objects are not touched: each keeps opening under the
-// version its blob records, and their re-encryption (write the new key,
-// then swap) lands with WP-R2-1 — an in-place overwrite is the R2-05/R2-15
-// class.
+//  3. whole SSE-S3 objects — head rows and retained versions — within what
+//     is left of the same budget (WP-R2-1 Part C, PR C2,
+//     key_reencrypt_whole.go): re-sealed at a NEW address on the same
+//     backend, every row naming the old address and version re-pointed in
+//     one transaction, the old address retired ('reencrypted') for the
+//     retired_blobs collector — never overwritten in place (the R2-05/R2-15
+//     class) and never deleted in the run.
 type KeyReencryptRunner struct {
 	db     *sql.DB
 	eng    engine.Engine
@@ -82,9 +87,12 @@ type KeyReencryptRunner struct {
 	// JobName is the job_runs name (tests use their own: the table is shared).
 	JobName string
 	now     func() time.Time
-	// onlyScope limits a run to one tenant's chunks (tests: other packages
-	// rotate their own tenants on the same database).
+	// onlyScope limits a run to one tenant's chunks and objects (tests: other
+	// packages rotate their own tenants on the same database).
 	onlyScope string
+	// sse opens and re-seals whole SSE-S3 objects; nil = the whole-object
+	// pass is off (set by the server from its SSE service).
+	sse *crypto.SSEService
 }
 
 // KeyReencryptResult is one run's outcome, recorded as job_runs.result.
@@ -104,7 +112,18 @@ type KeyReencryptResult struct {
 	RetiredDeleted int   `json:"retired_deleted"`
 	RetiredKept    int   `json:"retired_kept,omitempty"`
 	RetiredFailed  int   `json:"retired_failed,omitempty"`
-	// Errors are the first few per-chunk failures (the rest are in the log).
+
+	// Whole SSE-S3 objects (WP-R2-1 C2): blobs — a head row's or a retained
+	// version's — below the newest version. Changed = a write or a delete
+	// changed the rows first (the new blob queued as an orphan). Skipped by
+	// reason (archive, demotion, parity, export, unavailable): still pending.
+	ObjectCandidates   int            `json:"object_candidates"`
+	ObjectsReencrypted int            `json:"objects_reencrypted"`
+	ObjectsChanged     int            `json:"objects_changed,omitempty"`
+	ObjectsFailed      int            `json:"objects_failed,omitempty"`
+	ObjectsSkipped     map[string]int `json:"objects_skipped,omitempty"`
+	// Errors are the first few per-chunk/per-object failures (the rest are
+	// in the log).
 	Errors []string `json:"errors,omitempty"`
 }
 
@@ -150,18 +169,30 @@ func (k *KeyReencryptRunner) spec() jobSpec {
 				zap.Int("unwrap_failures", res.UnwrapFailures), zap.Int("candidates", res.Candidates), zap.Int("reencrypted", res.Reencrypted),
 				zap.Int("failed", res.Failed), zap.Int64("bytes", res.Bytes), zap.Bool("budget_reached", res.BudgetReached),
 				zap.Int("retired_deleted", res.RetiredDeleted), zap.Int("retired_kept", res.RetiredKept),
-				zap.Int("retired_failed", res.RetiredFailed), zap.Error(err))
-			rep := jobReport{Rows: int64(res.Reencrypted), Result: res}
+				zap.Int("retired_failed", res.RetiredFailed), zap.Int("object_candidates", res.ObjectCandidates),
+				zap.Int("objects_reencrypted", res.ObjectsReencrypted), zap.Int("objects_changed", res.ObjectsChanged),
+				zap.Int("objects_failed", res.ObjectsFailed), zap.Any("objects_skipped", res.ObjectsSkipped), zap.Error(err))
+			rep := jobReport{Rows: int64(res.Reencrypted + res.ObjectsReencrypted), Result: res}
+			var notes []string
 			if res.Failed > 0 || res.RetiredFailed > 0 {
-				rep.Note = fmt.Sprintf("%d chunk(s) not re-encrypted, %d old address(es) not deleted (see the log); they stay for the next run",
-					res.Failed, res.RetiredFailed)
+				notes = append(notes, fmt.Sprintf("%d chunk(s) not re-encrypted, %d old address(es) not deleted (see the log); they stay for the next run",
+					res.Failed, res.RetiredFailed))
 			}
+			if res.ObjectsFailed > 0 {
+				notes = append(notes, fmt.Sprintf("%d whole object(s) not re-encrypted (see the log); they stay for the next run", res.ObjectsFailed))
+			}
+			if n := skippedTotal(res.ObjectsSkipped); n > 0 {
+				notes = append(notes, fmt.Sprintf("%d whole object(s) skipped and still pending %v (archive = never restored from tape; demotion/parity = moved by their own jobs later)",
+					n, res.ObjectsSkipped))
+			}
+			rep.Note = strings.Join(notes, "; ")
 			return rep, err
 		}}
 }
 
 // RunOnce does one pass: the master re-wrap while a master re-key is in
-// progress, retired blobs, then the re-encryption.
+// progress, retired chunk blobs, the chunks' re-encryption, then whole
+// objects' (one byte budget for both).
 func (k *KeyReencryptRunner) RunOnce(ctx context.Context) (KeyReencryptResult, error) {
 	var res KeyReencryptResult
 	if err := k.rewrapMaster(ctx, &res); err != nil {
@@ -170,8 +201,19 @@ func (k *KeyReencryptRunner) RunOnce(ctx context.Context) (KeyReencryptResult, e
 	if err := k.deleteRetired(ctx, &res); err != nil {
 		return res, err
 	}
-	err := k.reencrypt(ctx, &res)
+	if err := k.reencrypt(ctx, &res); err != nil {
+		return res, err
+	}
+	err := k.reencryptObjects(ctx, &res)
 	return res, err
+}
+
+func skippedTotal(m map[string]int) int {
+	n := 0
+	for _, v := range m {
+		n += v
+	}
+	return n
 }
 
 // rewrapMaster re-wraps, while ENCRYPTION_MASTER_KEY_PREVIOUS is set, every

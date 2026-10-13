@@ -182,9 +182,7 @@ func populateHouseOverview(ctx context.Context, db *sql.DB, fl *flags.Service, e
 	}
 
 	// bucket bytes per floor, for the pieces' names and links
-	rows, err := db.QueryContext(ctx,
-		`SELECT bucket, floor, COALESCE(SUM(size_bytes), 0) FROM object_head_cache
-		 WHERE tenant_id = $1 GROUP BY bucket, floor`, tenantID)
+	rows, err := db.QueryContext(ctx, bucketFloorBytesSQL, tenantID)
 	if err == nil {
 		defer func() { _ = rows.Close() }()
 		for rows.Next() {
@@ -384,3 +382,12 @@ func setDefaults(data map[string]any) {
 	data["APIKeyCount"] = 0
 	data["Activity"] = nil
 }
+
+// bucketFloorBytesSQL: a tenant's billed bytes (usage/billed.go) per bucket
+// and floor — current objects plus retained older versions, so the house's
+// pieces add up to the floors.
+const bucketFloorBytesSQL = `SELECT bucket, floor, COALESCE(SUM(size_bytes), 0) FROM (
+		     SELECT bucket, floor, size_bytes FROM object_head_cache WHERE tenant_id = $1
+		     UNION ALL
+		     SELECT v.bucket, ` + usage.RetainedVersionFloor + `, v.size_bytes FROM ` + usage.RetainedVersionsFrom + ` AND v.tenant_id = $1
+		 ) billed GROUP BY bucket, floor`

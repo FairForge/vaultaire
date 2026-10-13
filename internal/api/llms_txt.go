@@ -61,8 +61,10 @@ Sub-resources: ?versioning ?object-lock ?retention ?legal-hold ?tagging ?cors ?n
 ### S3 features
 - Presigned URLs (GET and PUT, SigV4 query auth)
 - Object Lock: GOVERNANCE and COMPLIANCE retention, legal hold (WORM)
-- Versioning: version history and delete markers; retrieving a previous
-  version's bytes is not yet available (GET ?versionId=<old> answers 501)
+- Versioning: every version keeps its own bytes — GET/HEAD ?versionId=<old>
+  serve that version, DELETE ?versionId removes it — and retained versions
+  count toward storage; versions written before 2026-10-12 kept no bytes
+  (GET/HEAD ?versionId of one answers 501)
 - Scoped API keys (per bucket, per operation, IP allowlist, expiry) and
   STS temporary credentials (POST /api/v1/sts/token)
 - Public-read buckets are served from the CDN: GET {CDN}<slug>/<bucket>/<key>

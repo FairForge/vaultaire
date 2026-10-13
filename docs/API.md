@@ -133,8 +133,15 @@ Behaviour worth knowing before writing code against it:
   request named that permission and its parent could; a presigned URL carries
   its signer's scope, and the flag counts only where the signature covers it.
   MFA Delete is available on lock-enabled buckets (`x-amz-mfa` TOTP).
-- **Versioning is metadata-only today**: version history and delete markers
-  work; `GET ?versionId=<non-current>` answers 501 (WP-R2-1).
+- **Versioning keeps every version's bytes** (since 2026-10-12, WP-R2-1):
+  `GET` / `HEAD ?versionId=<old>` serve that version from its own row and
+  blob, `DELETE ?versionId` removes it (deleting the current version makes
+  the newest remaining one current). Retained versions count toward storage —
+  `tenant_quotas`, the floor they were written on, the quota check of every
+  write and the usage numbers. A non-current version written before
+  2026-10-12 kept no bytes: `GET`/`HEAD ?versionId` of one answers **501**
+  (the newest version behind a delete marker is the exception: its bytes
+  were never overwritten).
 - **Regions**: a bucket's region is fixed at creation and must be one the
   deployment has a key pair for; otherwise 400 `InvalidLocationConstraint`.
   Vault objects go to the tape backend and public-read objects to the CDN

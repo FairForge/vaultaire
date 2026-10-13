@@ -59,7 +59,7 @@
                 <td><span class="badge {{.FloorClass}}">{{.FloorWord}}</span>{{if and (eq .FloorWord "downstairs") .AtticBytes}} <span class="text-muted" title="objects put away with a storage-class header">+ {{.AtticFmt}} in the attic</span>{{end}}</td>
                 <td>{{if eq .Visibility "public-read"}}<span class="badge badge-success">Public</span>{{else}}<span class="badge badge-default">Private</span>{{end}}</td>
                 <td>{{.ObjectCount}}</td>
-                <td>{{.SizeFmt}}</td>
+                <td>{{.SizeFmt}}{{if .VersionBytes}} <span class="text-muted" title="older versions keep their bytes and count toward storage">incl. {{.VersionFmt}} older versions</span>{{end}}</td>
                 <td>{{.LastModifiedFmt}}</td>
                 <td>
                     <a href="/dashboard/buckets/{{.Name}}" class="btn btn-sm">Browse</a>

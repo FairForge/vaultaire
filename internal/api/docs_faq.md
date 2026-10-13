@@ -139,9 +139,11 @@ always-hot Performance tier launches after October 31.
 **Which S3 features are supported?**
 Multipart, Object Lock (governance + compliance/WORM, legal hold), presigned URLs,
 CORS, range + conditional requests, tagging, batch delete, ListObjectsV2, scoped API
-keys (per-bucket, IP allowlist, expiry), STS temporary credentials, and versioning in
-the sense of version history + delete markers (retrieving a *previous* version's bytes
-is not yet available — `GET ?versionId=<old>` answers 501 rather than the wrong bytes).
+keys (per-bucket, IP allowlist, expiry), STS temporary credentials, and versioning:
+every version keeps its own bytes and `GET ?versionId=<old>` downloads it. Older
+versions count toward your storage quota until you delete them
+(`DELETE ?versionId=<old>`). Versions written before 2026-10-12 kept no bytes, so
+`GET ?versionId` of one of those answers 501 rather than the wrong bytes.
 The full list is the [OpenAPI spec](/openapi.json).
 
 ## Support

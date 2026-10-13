@@ -105,8 +105,9 @@ func (m *QuotaManager) ReleaseQuota(ctx context.Context, tenantID string, bytes 
 }
 
 // ReconcileStorageUsage rewrites every tenant's storage_used_bytes — and
-// every floor ledger (066) — to the sum of logical object sizes in
-// object_head_cache, the billing source of truth, in ONE transaction that
+// every floor ledger (066) — to the billed bytes: the logical sizes of the
+// head rows plus the retained non-current versions (billed.go), the billing
+// source of truth, in ONE transaction that
 // first locks every tenant row in order. Returns the number of tenant rows
 // updated. Run once before enabling metered billing (Gate C), and any time
 // drift is suspected.
@@ -130,9 +131,7 @@ func (m *QuotaManager) ReconcileStorageUsage(ctx context.Context) (int64, error)
 	}
 	res, err := tx.ExecContext(ctx, `
 		UPDATE tenant_quotas tq
-		SET storage_used_bytes = COALESCE(
-			(SELECT SUM(o.size_bytes) FROM object_head_cache o
-			 WHERE o.tenant_id = tq.tenant_id), 0),
+		SET storage_used_bytes = `+billedBytesOfTQ+`,
 		    updated_at = NOW()`)
 	if err != nil {
 		return 0, fmt.Errorf("reconciling storage usage: %w", err)
@@ -140,9 +139,7 @@ func (m *QuotaManager) ReconcileStorageUsage(ctx context.Context) (int64, error)
 	// The floor ledgers (066) follow the same source of truth, per floor.
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE tenant_floor_quotas f
-		SET storage_used_bytes = COALESCE(
-			(SELECT SUM(o.size_bytes) FROM object_head_cache o
-			 WHERE o.tenant_id = f.tenant_id AND o.floor = f.floor), 0),
+		SET storage_used_bytes = `+billedBytesOfF+`,
 		    updated_at = NOW()`); err != nil {
 		return 0, fmt.Errorf("reconciling floor usage: %w", err)
 	}
@@ -169,18 +166,14 @@ func (m *QuotaManager) ReconcileTenantStorageUsage(ctx context.Context, tenantID
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE tenant_quotas tq
-		SET storage_used_bytes = COALESCE(
-			(SELECT SUM(o.size_bytes) FROM object_head_cache o
-			 WHERE o.tenant_id = tq.tenant_id), 0),
+		SET storage_used_bytes = `+billedBytesOfTQ+`,
 		    updated_at = NOW()
 		WHERE tq.tenant_id = $1`, tenantID); err != nil {
 		return fmt.Errorf("reconciling storage usage for tenant %s: %w", tenantID, err)
 	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE tenant_floor_quotas f
-		SET storage_used_bytes = COALESCE(
-			(SELECT SUM(o.size_bytes) FROM object_head_cache o
-			 WHERE o.tenant_id = f.tenant_id AND o.floor = f.floor), 0),
+		SET storage_used_bytes = `+billedBytesOfF+`,
 		    updated_at = NOW()
 		WHERE f.tenant_id = $1`, tenantID); err != nil {
 		return fmt.Errorf("reconciling floor usage for tenant %s: %w", tenantID, err)

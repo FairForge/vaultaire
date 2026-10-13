@@ -690,6 +690,22 @@ registered tenant:
   `vaultaire_retired_blobs_backlog 0`. On disk only the four live addresses
   remain; GET `x`, `f`, `k` and `race` (MD5 = row ETag) all still serve.
 
+## Prod proof of C1
+
+On 2026-10-12, after the deploy (70d38b9, 21:55 UTC): the bench tenant,
+aws-cli through `https://stored.ge`, bucket `wpr21-c1-proof` (versioning
+Enabled, kept for C2's proof):
+
+- Two PUTs of key `k` made versions `325d49f8…` (`k@df2sspq3…`) and
+  `111fa451…` (`k@mrfz7pdv…`), each with its own `storage_key`; the head
+  row names the second.
+- GET returned the second PUT's bytes. `get-object --version-id 325d49f8…`
+  returned the first PUT's bytes (501 before C1).
+- A third PUT followed by `DELETE ?versionId` of it pointed GET back at the
+  second PUT's bytes; its blob is in `retired_blobs` as `version_deleted`.
+- `job_runs`: `retired_blobs` ok. The prod synthetic check is still
+  unconfigured ([YOU], unchanged).
+
 ## Gates
 
 - `go test -race ./...` on a fresh private DB (`vaultaire_r21c`, through
@@ -733,3 +749,253 @@ registered tenant:
   its tenant). Until it is, the C1 deploy is proven with an aws-cli round trip
   on the bench tenant: PUT twice, GET, `get-object --version-id` on a
   versioned bucket, and the `retired_blobs` row of the first PUT.
+
+---
+
+# Part C, PR C2: retained versions are billed and re-encrypted (migration 088)
+
+Lane: Engine. Read first and served: `docs/ARCHITECTURE_CONTRACT.md` line 4
+(keys only through the one hierarchy — the whole-object re-encryption uses
+`tenant_key_versions` through `SSEService`, nothing new), `docs/surfaces/ENGINE.md`
+(first ten, item 1: the Stage 1 one-way doors; "bytes that are never lost" —
+the re-encrypt never overwrites, a lost race leaves an orphan, not a hole),
+`docs/IMPLEMENTATION_PLAN.md` Stage 1 row, SYNTHESIS rows R2-03, R2-05,
+R2-15, R3-15, R13-06, R7-12 (closed by C1; R2-03 closed here) and R14-05 (the
+versioning claim), CLAUDE.md non-negotiables 3–6 and the two-slot rule (088 is
+additive; the C1 build serves it for up to 15 min). C1's prod proof is
+recorded above ("Prod proof of C1").
+
+## What was built
+
+**Billing (item 12).** One definition of what is billed, `internal/usage/billed.go`:
+every head row plus every **retained non-current version** —
+`usage.RetainedVersionsFrom`: an `object_versions` row with `storage_key` set,
+not a delete marker, whose address is not the head row's own blob (the latest
+version names the head row's blob and is counted once, as the head row; a
+chunked head has no blob, so every addressed version of its key counts).
+
+- **Migration 088** (additive, idempotent, applied twice clean):
+  `object_versions.floor` (NULL = not recorded), backfilled for C1's versions
+  from their key's head row, and a partial index of retained versions by
+  tenant. The version write records the head row's floor (`writeVersionRow`
+  reads it back inside the flip); `anchorDisplacedVersion` re-asserts it.
+  `usage.RetainedVersionFloor` = the version's floor, else the head row's,
+  else `vault` when the version's backend is `geyser`, else `standard` — a
+  vault-floor version is never billed as standard while either row knows.
+- **Charged in the flip's transaction** by not releasing: when the flip keeps
+  the displaced blob because a version names it, `displacedRow.KeptByVersion`
+  is set and every caller (`settlePutQuota`, Complete, direct upload,
+  generated objects — all through `displacedRow.releases()` /
+  `releaseDisplacedOn`) releases nothing for it. The bytes, the size and the
+  floor are the same: the head row's charge IS the version's, carried over
+  atomically with the decision. Same for a head row removed under a version
+  that keeps its blob: the delete marker, a Suspended bucket's plain DELETE
+  (`deleteHeadRowReleasing` sets it in its transaction).
+- **Released** by `DELETE ?versionId` of a retained version
+  (`headRepoint.VersionReleased`, read under both locks before the row goes),
+  and by a Suspended write that replaces a retained `null` version
+  (`retainedNullVersion` → its blob retired `overwritten`,
+  `displacedRow.ReplacedVersion` released). Deleting the CURRENT version
+  releases the head row's bytes; the newly-latest version it re-points to was
+  already billed as retained, so nothing is charged again (C1 force-accounted
+  it — which would now double count) and the head row takes its floor.
+- **The chunked PUT** now writes its version row inside the flip
+  (`commitBlobWrite` with a `versionWrite` of no blob) instead of a separate
+  transaction after it: otherwise a Suspended chunked write over a retained
+  `null` version left that version's blob unnamed, unretired and billed.
+  `recordObjectVersion` left production (a test helper now).
+- **Reconcile** (both functions) and `SetHouse`'s floor seeding sum heads +
+  retained versions, per floor (`billedBytesOfTQ`, `billedBytesOfF`,
+  `billedBytesOfParamsFloor` — constants, never SQL built from runtime
+  strings). `POST /api/v1/admin/quota-reconcile?tenant_id=<id>` reconciles
+  one tenant (the safe form while everyone else writes; OpenAPI updated).
+- **Quota checks**: reservation was already gross (new bytes vs everything
+  held), so with versions in `storage_used_bytes` a versioned overwrite near
+  the limit is refused (PUT, Complete, Copy, direct upload, generated objects).
+- **Dashboard / API**: `/api/v1/manage` usage, `/api/v1/user/usage`, the
+  overview and billing pages read `tenant_quotas` — they follow. The bucket
+  list and the house overview's per-bucket pieces now sum heads + retained
+  versions; the bucket list says "incl. N older versions".
+- **Metered reporting** (`billing/metered.go`) reads
+  `tenant_quotas.storage_used_bytes` for metered-tier tenants without a house:
+  it now reports a tenant's version bytes as stored bytes. Nothing in
+  `prices.json` or Stripe changed.
+- Pre-C versions (`storage_key` NULL) hold no bytes and are not billed.
+
+**Re-encryption (item 13)**, `key_reencrypt_whole.go`, the job's third pass
+after the chunks, same lock, same budget (`KEY_REENCRYPT_MAX_GB_PER_RUN` is
+spent by chunks first, then objects), same resume style (each run rescans
+what is still below the newest version; what moved drops out):
+
+- One candidate per BLOB (`objectReencryptCandidatesSQL`: head rows and
+  retained versions below their tenant's newest version, `DISTINCT ON` the
+  address, movable ones first, oldest key version first).
+- Read from the backend the row RECORDS (driver, tenant in the context),
+  header version = row version, opened, plaintext MD5 = ETag for single-part
+  ETags; re-sealed under the newest version; written to `newBlobAddress(key)`
+  on the SAME backend and container; hinted.
+- One transaction, `lockHeadKey` then `lockVersionKey`: the head row (if it
+  still names the address, the version, the backend, not chunked) and every
+  version row naming the address at the old version get the new address and
+  version; the ETag is kept. Nothing matched → `changed`: the new blob is
+  queued `orphan_write` in that transaction. Otherwise the old address is
+  retired as **`reencrypted`** (24 h grace; the collector's re-check deletes
+  it) — never deleted in the run.
+- **Skipped, pending, with a note** (`objects_skipped` in the result):
+  `archive` (`engine.ArchiveBackends()` = geyser: a read would be a tape
+  restore), `demotion` (an open ledger row), `parity` (a `vault_parity` row —
+  the shards are computed from the **stored ciphertext**: `protect` reads the
+  blob as stored, so re-sealing would need the row made stale and the parity
+  redone; vault objects live on tape, so the two skips coincide today and
+  the parity redo is left out), `export` (`_exports`, 7-day objects),
+  `unavailable` (no/unregistered backend, open breaker). Chunked objects are
+  the chunk pass's.
+- `vaultaire_key_reencrypt_objects_total{outcome}`; the result carries
+  `object_candidates`, `objects_reencrypted`, `objects_changed`,
+  `objects_failed`, `objects_skipped`.
+
+**The gauge (item 11).** `keyRotationPendingSQL($1, $2)` (`$2` = one tenant
+or '' — tests scope it) counts, for `kind="whole"`, BLOBS: head rows below the
+newest version plus retained versions (`RetainedVersionsFrom`) with
+`encryption_algorithm` set below it — the latest version, being the head's
+blob, is counted once. Its only reader is the collector. Because skipped
+blobs stay counted, `KeyReencryptBacklogStuck` keeps watching `chunk` only.
+
+**`?versionId` (item 14).** GET already served retained versions (C1); its
+501 text now says the version predates 2026-10-12. **HEAD ignored
+`?versionId` entirely** (it answered the current object's metadata for any
+version — found here): `headVersion` answers from the version row (size,
+ETag, type, Last-Modified = the version's creation, storage class from its
+floor, SSE headers; conditionals), 404 `NoSuchVersion` for an unknown id,
+404 + `x-amz-delete-marker` for a marker, falls through to the head row for
+the latest version (now with `x-amz-version-id`), and 501 only for an
+addressless pre-C version (the newest live one behind a marker excepted,
+as GET). Never a backend call (non-negotiable 2).
+
+**Public copy (R14-05).** `llms.txt`, the FAQ, `docs/API.md` and the
+changelog say versions keep their bytes, are downloadable, count toward
+storage, and that versions written before 2026-10-12 may answer 501. The
+landing and legal pages say "version history", which stays true; no claim in
+OpenAPI depended on versions (its rotate text now names objects and
+versions).
+
+## Decisions taken here
+
+- **"Kept by a version" is a carried charge, not a charge + a release.** The
+  flip records the decision in its transaction and the caller skips the
+  release; no quota write is needed, so there is no window in which the head
+  row's bytes are released and the version's not yet charged (or both
+  counted). The releases (version delete, null rewrite) stay where every
+  release is — after the commit, through the QuotaManager — and the
+  reconcile is the backstop, as for every other path.
+- **088 records the floor** instead of billing versions on the head row's
+  floor: a key can change floor between writes (a storage-class header, a
+  bucket tier change) and the head row may be gone (delete marker).
+- **HEAD of a delete-marker version is 404 with the marker header**, as our
+  GET (AWS answers 405); consistency within the product first.
+- **Parity rows are skipped**, not redone (see above).
+
+## Tests
+
+Red first. "Before" = the new tests on `origin/main` 70d38b9 (C1) in a
+scratch worktree, with a stub of the new symbols only (the runner's `sse`
+field and result fields, the hook, `retiredReencrypted`, the gauge's `$2`
+scope) — never committed.
+
+| Test | Before | After |
+|------|--------|-------|
+| `TestVersionBytes_BilledAndReleased` (+ house floor, reconcile at every step, the quota refusal) | after the 2nd PUT `storage_used_bytes` = 5000, want 8000: the flip released the displaced size the version keeps | pass |
+| `TestVersionBytes_MarkerAndSuspendedNull` | after a delete marker used = 0, want 3000: the marker released bytes the version keeps | pass |
+| `TestKeyReencrypt_WholeObject_FlipsAndRetires` | gauge `whole` = 1 (want 2: versions not counted); the run moved 0; head and version stay on v1 at their old addresses; nothing retired | pass |
+| `TestKeyReencrypt_WholeObject_LosesToAnOverwrite` | `objects_changed` 0; nothing written | pass |
+| `TestKeyReencrypt_WholeObject_BudgetResumesNextRun` | 0 moved in both runs, pending stays 2 | pass |
+| `TestKeyReencrypt_WholeObject_ArchiveSkipped` | the skip not counted | pass |
+| `TestKeyRotationPending_CountsRetainedVersions` | 1, want 3 | pass |
+| `TestVersionId_HeadAndGet_501OnlyWithoutAddress` | HEAD `?versionId=v1` answered the CURRENT object (Content-Length 19, its ETag, no `x-amz-version-id`); an unknown id 200 (want 404); a pre-C version's HEAD 200 (want 501). GET's 501 already held (C1) | pass |
+| `TestListBuckets_CountsRetainedVersions` (dashboard) | — (written after; the query was new) | pass |
+| `TestAdminTriggers_202Then409WhileRunning_DryRunStaysSynchronous` (quota-reconcile `?tenant_id`) | — | pass |
+
+`TestPresignedURL_Integration` (sqlmock) pins the flip's read-back
+statement: updated for the `floor` column.
+
+## Live proof (local, 2026-10-12)
+
+This branch built (`make build`), `STORAGE_MODE=local`, a private DB
+`vaultaire_live_r21c2` migrated through 088, `ENCRYPTION_MASTER_KEY_FILE`
+set (a random lab key), aws-cli as a registered tenant, bucket `c2-proof`
+(versioning Enabled; SSE by default with a master key):
+
+- **Billing.** PUT 3000 B → `storage_used_bytes` 3000; PUT 5000 B over it →
+  **8000** (two versions, `k@3adsa6gv…` / `k@f4a188na…`, `floor` standard,
+  SSE under key v1). The ledger forced to 999 and `POST
+  /api/v1/admin/quota-reconcile?tenant_id=…` → 8000 again.
+- **Re-encrypt.** `POST …/encryption-key/rotate` → `key_version` 2;
+  `vaultaire_key_rotation_pending{kind="whole"}` **2**. `POST
+  /api/v1/admin/jobs/key_reencrypt/run` → `job_runs`: `ok`, rows 2,
+  `{"object_candidates": 2, "objects_reencrypted": 2, "bytes": 8000, …}`.
+  The head row and the latest version moved together to `k@exgw4hv…` v2, v1
+  to `k@mq74raw5…` v2; both old addresses in `retired_blobs` as
+  `reencrypted` (due in 24 h); the gauge **0**;
+  `vaultaire_key_reencrypt_objects_total{outcome="reencrypted"} 2`.
+  `get-object` (current) and `get-object --version-id v1` byte-identical to
+  the uploaded files (`cmp`); `head-object --version-id v1` → 3000, AES256.
+- **Collector.** The two rows made due by SQL, `POST
+  /api/v1/admin/jobs/retired_blobs/run` → `{"due": 2, "deleted": 2, "kept": 0}`;
+  on disk only the two new addresses remain; both GETs still byte-identical.
+- **Release.** `delete-object --version-id v1` → 5000 (reconcile 5000); a
+  delete marker → still 5000 (the version keeps its bytes; reconcile 5000).
+- **The quota check.** Limit set to 12000; PUT 6000 B → 11000 (5000 retained
+  + 6000); PUT 2000 B → `QuotaExceeded` (11000 + 2000 > 12000, though the
+  current object alone + 2000 fits); reconcile 11000.
+- **501.** v2's `storage_key` set NULL by SQL (a pre-C version):
+  `head-object --version-id` → 501, `get-object --version-id` →
+  `NotImplemented` "This version was written before 2026-10-12…".
+
+The dashboard bucket list is proven by `TestListBuckets_CountsRetainedVersions`
+(the dashboard sign-in needs its CSRF flow; not driven here).
+
+Prod has no master key: the re-encryption is proven locally only.
+
+## Gates
+
+- `go test -race ./...` on a fresh private DB (`vaultaire_r21c2_full2`,
+  through 088): every package `ok`, exit 0. (The first full run, on
+  `vaultaire_r21c2_full`, failed only `TestPresignedURL_Integration`: its
+  sqlmock pins the flip's read-back statement, which now reads `floor` —
+  updated.)
+- `golangci-lint` v2.14.0 (scratchpad GOBIN): 0 issues. `gosec@latest` with
+  the Makefile's flags: 0 issues (two dashboard queries first flagged G202 —
+  inline concatenation with `usage.*` constants — hoisted into package
+  constants).
+- 088 applied twice on a database through 087: clean (NOTICEs only).
+
+## Two-slot window
+
+For up to 15 min the C1 slot drains on the 088 schema: it writes versions with
+a NULL `floor` (billed on the head row's floor by the reconcile), releases the
+displaced size that a version keeps (under-count) and force-accounts the
+re-pointed version on `DELETE ?versionId` of the current one (over-count).
+Prod's versions written by C1 (the bench tenant's proof bucket) were never
+charged either. **The reconcile repairs all of it**: after the deploy,
+`POST /api/v1/admin/quota-reconcile?tenant_id=<id>` for every tenant that
+holds retained versions (`SELECT DISTINCT tenant_id FROM object_versions
+WHERE storage_key IS NOT NULL`).
+
+## Not done / residuals
+
+- **The parity of a re-encrypted object** is not redone: such objects are
+  skipped (`parity`) and stay on their key version.
+- **Objects on tape keep their key version** until read back hot (`archive`
+  skip); a Smart-demoted object likewise while its ledger row is open.
+- **The chunked CopyObject still writes no version row** (pre-existing; its
+  displaced blob's charge carries over correctly).
+- **DeleteObjects stays versioning-unaware** (WP-R3-4) — its head-row release
+  honours `KeptByVersion`.
+- **The delete marker on a locked key** is still refused (R2-01's deviation).
+- Retired blobs inside their 24 h grace are not billed (unchanged from C1).
+
+## [YOU]
+
+- The prod synthetic check is still not configured (`SYNTHETIC_CHECK_*`).
+- After the deploy: one tenant reconcile per tenant holding retained versions
+  (above) — done for the bench tenant as part of the prod proof below.

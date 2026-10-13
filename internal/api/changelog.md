@@ -5,6 +5,22 @@ what you need and it shows up here.
 
 ---
 
+## 2026-10-12 — Versions keep their bytes
+
+- **Previous versions are downloadable.** On a bucket with versioning
+  enabled, every upload now keeps its own copy: `aws s3api get-object
+  --version-id <id>` (or `head-object`) returns that version's bytes and
+  metadata, and deleting the current version brings the previous one back as
+  the current object. Overwrites no longer replace bytes in place, so an
+  upload that fails half-way can never damage the object you already had.
+- **Older versions count toward your storage.** A version you keep is data
+  we keep: it counts toward your quota (on the floor it was written to) until
+  you delete it with `DELETE ?versionId=<id>`. The dashboard's bucket list
+  shows how much of each bucket is older versions.
+- Versions written **before 2026-10-12** were metadata only — their bytes
+  were overwritten by the next upload — so fetching one of those still
+  answers `501 Not Implemented` rather than the wrong bytes.
+
 ## 2026-10-06 — CORS on the S3 API
 
 - **Browser apps can talk to the S3 API directly.** `PUT /<bucket>?cors` takes

@@ -841,8 +841,10 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 		memUploadsMu.Unlock()
 	}
 
-	if quotaOn && displaced.Size > 0 {
-		s.releaseQuota(pctx, t.ID, displaced.Floor, displaced.Size)
+	if quotaOn {
+		for _, rel := range displaced.releases() {
+			s.releaseQuota(pctx, t.ID, rel.Floor, rel.Bytes)
+		}
 	}
 
 	// The bucket's default retention, exactly as plain PUT.
@@ -1325,18 +1327,18 @@ func (s *Server) reassertVersionRow(ctx context.Context, tenantID, bucket, objec
 		return nil
 	}
 	var size int64
-	var etag, contentType, backend string
+	var etag, contentType, backend, floor string
 	var described bool
 	var blob versionBlobRef
 	if err := tx.QueryRowContext(ctx, `
-		SELECT h.size_bytes, h.etag, h.content_type, COALESCE(h.backend_name, ''),
+		SELECT h.size_bytes, h.etag, h.content_type, COALESCE(h.backend_name, ''), h.floor,
 		       COALESCE(h.storage_key, ''), COALESCE(h.encryption_algorithm, ''), h.encryption_key_version,
 		       EXISTS(SELECT 1 FROM object_versions v
 		              WHERE v.tenant_id = h.tenant_id AND v.bucket = h.bucket AND v.object_key = h.object_key
 		                AND v.is_latest AND NOT v.is_delete_marker AND v.etag = h.etag)
 		FROM object_head_cache h
 		WHERE h.tenant_id = $1 AND h.bucket = $2 AND h.object_key = $3`,
-		tenantID, bucket, object).Scan(&size, &etag, &contentType, &backend,
+		tenantID, bucket, object).Scan(&size, &etag, &contentType, &backend, &floor,
 		&blob.StorageKey, &blob.Enc.Algorithm, &blob.Enc.KeyVersion, &described); err != nil {
 		return err
 	}
@@ -1344,7 +1346,7 @@ func (s *Server) reassertVersionRow(ctx context.Context, tenantID, bucket, objec
 		return nil
 	}
 	// The version names the head row's own blob (WP-R2-1).
-	if err := writeObjectVersion(ctx, tx, vStatus, tenantID, bucket, object, size, etag, contentType, backend, blob); err != nil {
+	if err := writeObjectVersion(ctx, tx, vStatus, tenantID, bucket, object, size, etag, contentType, backend, floor, blob); err != nil {
 		return err
 	}
 	reassertVersionWrittenHook()

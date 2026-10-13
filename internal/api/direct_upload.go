@@ -274,8 +274,8 @@ func (s *Server) handleMgmtCompleteDirectUpload(w http.ResponseWriter, r *http.R
 		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to register the object", "")
 		return
 	}
-	if d := flip.Displaced; d.Size > 0 {
-		s.releaseQuota(context.WithoutCancel(ctx), tenantID, d.Floor, d.Size)
+	for _, rel := range flip.Displaced.releases() {
+		s.releaseQuota(context.WithoutCancel(ctx), tenantID, rel.Floor, rel.Bytes)
 	}
 	writeJSON(w, http.StatusOK, mgmtDirectUploadComplete{
 		Object: "object", Bucket: bucket, Key: req.Key, Size: size, ETag: etag, ContentType: contentType,

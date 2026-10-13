@@ -1371,17 +1371,20 @@ func generateAdminPaths() map[string]*PathItem {
 				queryParam("dry_run", "Report only; move nothing", &Schema{Type: "boolean", Default: false}))),
 		},
 		"/api/v1/admin/quota-reconcile": {
-			Post: admin(jsonOp("Admin", "Reconcile quota usage from the HEAD cache", "AdminQuotaReconcile",
-				"Rewrites every tenant's `storage_used_bytes` from the `object_head_cache` sum. Run only while writes are quiesced: an in-flight PUT's "+
-					"reservation is not yet in the cache and would be erased until the next reconcile. Writes an `admin.quota_reconcile` audit row. No request body.",
+			Post: admin(withParams(jsonOp("Admin", "Reconcile quota usage from the billed bytes", "AdminQuotaReconcile",
+				"Rewrites every tenant's `storage_used_bytes` (and floor ledgers) from the billed bytes: the `object_head_cache` sum plus every retained "+
+					"non-current object version (versions keep their own bytes since WP-R2-1). Run only while writes are quiesced: an in-flight PUT's "+
+					"reservation is not yet in the cache and would be erased until the next reconcile. With `tenant_id`, only that tenant's ledgers are "+
+					"rewritten (only its writes need to be quiet). Writes an `admin.quota_reconcile` audit row. No request body.",
 				map[string]Response{
-					"200": jsonResp("Tenants updated", objectPtr("", map[string]*Schema{
+					"200": jsonResp("Tenants updated (all tenants), or the one tenant reconciled (`tenant_id`)", objectPtr("", map[string]*Schema{
 						"object":          strEnum("", "quota_reconcile"),
-						"tenants_updated": integer("Number of tenant rows rewritten"),
-					}, "object", "tenants_updated")),
+						"tenants_updated": integer("Number of tenant rows rewritten (all-tenant form)"),
+						"tenant_id":       str("The tenant reconciled (one-tenant form)"),
+					}, "object")),
 					"500": textResp("`reconcile failed: ...`"),
 					"503": textResp("`quota reconciliation not available`"),
-				})),
+				}), queryParam("tenant_id", "Reconcile only this tenant", str("")))),
 		},
 		"/api/v1/admin/chunk-move": {
 			Post: admin(withParams(jsonOp("Admin", "Move chunk blobs written before WP-R8-7 to their one address", "AdminChunkMove",
@@ -1408,7 +1411,7 @@ func generateAdminPaths() map[string]*PathItem {
 			Post: admin(jsonOp("Admin", "Rotate one tenant's encryption key", "AdminRotateTenantKey",
 				"Adds the tenant's next key version (WP-R8-1, `docs/ENCRYPTION.md`): new writes are sealed under it at once on the server that answered and "+
 					"within a minute on every other; every object keeps opening under the version it was sealed with. The `key_reencrypt` job then moves the "+
-					"tenant's chunks onto the new version (whole SSE-S3 objects stay on theirs until WP-R2-1). A tenant with no key gets its first. "+
+					"tenant's chunks, whole SSE-S3 objects and retained object versions onto the new version (each re-sealed at a new address; the old one is retired). A tenant with no key gets its first. "+
 					"Send an `Idempotency-Key`: a retry with the same key replays the first answer instead of rotating twice. Writes an `admin.key_rotate` audit row. No request body.",
 				map[string]Response{
 					"200": jsonResp("The new version", &Schema{Type: "object", Properties: map[string]*Schema{

@@ -226,7 +226,7 @@ func TestSSES3_GetAfterRotate_UsesRecordedVersion(t *testing.T) {
 
 	// The backlog gauge counts the v1 object.
 	var chunk, whole int64
-	require.NoError(t, f.db.QueryRow(keyRotationPendingSQL, crypto.SSEAlgorithm).Scan(&chunk, &whole))
+	require.NoError(t, f.db.QueryRow(keyRotationPendingSQL, crypto.SSEAlgorithm, "").Scan(&chunk, &whole))
 	assert.GreaterOrEqual(t, whole, int64(1))
 	assert.Equal(t, 2, testutil.CollectAndCount(newKeyRotationPendingCollector(f.db, zap.NewNop())))
 }
