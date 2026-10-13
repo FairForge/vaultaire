@@ -1,0 +1,96 @@
+name: Postgres mirror
+
+# CI's Postgres service image comes from our own registry, ghcr.io/fairforge/
+# postgres, pinned by digest in ci.yml. Docker Hub refused anonymous pulls
+# from the shared runner IPs (2026-10-09, #658), then ECR Public's anonymous
+# allowance — 500 GB a month per SOURCE IP, shared with every other user of
+# the same runner IP — answered `toomanyrequests: Data limit exceeded`
+# (2026-10-12/13: main once, the merge queue twice). GHCR, read with the
+# job's own token, has no such shared per-IP quota.
+#
+# This workflow copies the official image (every platform, digest unchanged
+# — `crane copy` moves the manifests as they are) to ghcr.io/fairforge/
+# postgres:<major>. Weekly, it refreshes the tag and, when upstream has moved
+# past the digest ci.yml pins, opens (or keeps) one issue: the pin is bumped
+# by a reviewed one-line diff, never silently. The major is the one prod runs
+# (PostgreSQL 18.6 since 2026-10-10): CI tests migrations on prod's version.
+
+on:
+  schedule:
+    - cron: '17 5 * * 1' # Mondays 05:17 UTC
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/postgres-mirror.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: postgres-mirror
+  cancel-in-progress: false
+
+env:
+  PG_MAJOR: '18'
+  TARGET: ghcr.io/fairforge/postgres
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    # A fork's pull request gets a read-only token: nothing to publish with.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+      packages: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install crane
+        uses: imjasonh/setup-crane@v0.4
+
+      - name: Copy the official image
+        id: copy
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "$GH_TOKEN" | crane auth login ghcr.io -u "${{ github.actor }}" --password-stdin
+          # Three copies of the official library image; the first that
+          # answers wins (each one rate-limits shared runner IPs its own way).
+          copied=""
+          for src in "mirror.gcr.io/library/postgres:$PG_MAJOR" \
+                     "public.ecr.aws/docker/library/postgres:$PG_MAJOR" \
+                     "docker.io/library/postgres:$PG_MAJOR"; do
+            if digest=$(crane digest "$src" 2>/dev/null) && crane copy "$src" "$TARGET:$PG_MAJOR"; then
+              echo "copied $src ($digest)"
+              echo "source=$src" >> "$GITHUB_OUTPUT"
+              copied=1
+              break
+            fi
+            echo "::warning::$src did not answer; trying the next source"
+          done
+          if [ -z "$copied" ]; then
+            echo "::error::no source of postgres:$PG_MAJOR answered; the mirror is unchanged"
+            exit 1
+          fi
+          mirrored=$(crane digest "$TARGET:$PG_MAJOR")
+          echo "digest=$mirrored" >> "$GITHUB_OUTPUT"
+          echo "$TARGET@$mirrored" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Compare with the digest ci.yml pins
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MIRRORED: ${{ steps.copy.outputs.digest }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          pinned=$(grep -oE "$TARGET@sha256:[0-9a-f]{64}" .github/workflows/ci.yml | head -1 | cut -d@ -f2 || true)
+          echo "ci.yml pins: ${pinned:-<none>}  mirror now: $MIRRORED" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ -z "$pinned" ] || [ "$pinned" = "$MIRRORED" ] || [ "$EVENT" != "schedule" ]; then
+            exit 0
+          fi
+          title="CI Postgres $PG_MAJOR image moved upstream: bump the digest in ci.yml"
+          if [ -z "$(gh issue list --state open --search "\"$title\" in:title" --json number -q '.[0].number')" ]; then
+            gh issue create --title "$title" --body "The weekly mirror copied a new official \`postgres:$PG_MAJOR\` to \`$TARGET:$PG_MAJOR\` (\`$MIRRORED\`). ci.yml still pins \`$pinned\`. Replace the digest in \`.github/workflows/ci.yml\` (one line) and let CI prove it."
+          fi
