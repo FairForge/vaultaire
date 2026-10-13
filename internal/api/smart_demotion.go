@@ -118,6 +118,7 @@ type TenantDemotionStats struct {
 type demotionCandidate struct {
 	bucket, key, etag string
 	size              int64
+	encAlgo           string // a sealed blob is longer than size (storedBlobLength)
 	reason            string
 	storageKey        string // the row's blob address ("" = the key, WP-R2-1)
 }
@@ -353,7 +354,7 @@ func (r *SmartDemotionRunner) planTenant(ctx context.Context, tenantID string, q
 
 	var cands []demotionCandidate
 	idleRows, err := r.db.QueryContext(ctx,
-		`SELECT o.bucket, o.object_key, o.etag, o.size_bytes, COALESCE(o.storage_key, '') `+eligible+
+		`SELECT o.bucket, o.object_key, o.etag, o.size_bytes, COALESCE(o.storage_key, ''), COALESCE(o.encryption_algorithm, '') `+eligible+
 			` AND o.last_accessed < $4 ORDER BY o.last_accessed ASC LIMIT $5`,
 		tenantID, r.HotBackend, ageCutoff, idleCutoff, r.MaxObjectsPerTenant)
 	if err != nil {
@@ -362,7 +363,7 @@ func (r *SmartDemotionRunner) planTenant(ctx context.Context, tenantID string, q
 	var idleBytes int64
 	for idleRows.Next() {
 		var c demotionCandidate
-		if err := idleRows.Scan(&c.bucket, &c.key, &c.etag, &c.size, &c.storageKey); err != nil {
+		if err := idleRows.Scan(&c.bucket, &c.key, &c.etag, &c.size, &c.storageKey, &c.encAlgo); err != nil {
 			_ = idleRows.Close()
 			return stats, nil, fmt.Errorf("scan idle: %w", err)
 		}
@@ -379,7 +380,7 @@ func (r *SmartDemotionRunner) planTenant(ctx context.Context, tenantID string, q
 	remaining := stats.HotBytesBefore - idleBytes - stats.HotBudgetBytes
 	if remaining > 0 && len(cands) < r.MaxObjectsPerTenant {
 		lruRows, err := r.db.QueryContext(ctx,
-			`SELECT o.bucket, o.object_key, o.etag, o.size_bytes, COALESCE(o.storage_key, '') `+eligible+
+			`SELECT o.bucket, o.object_key, o.etag, o.size_bytes, COALESCE(o.storage_key, ''), COALESCE(o.encryption_algorithm, '') `+eligible+
 				` AND o.last_accessed >= $4 ORDER BY o.last_accessed ASC LIMIT $5`,
 			tenantID, r.HotBackend, ageCutoff, idleCutoff, r.MaxObjectsPerTenant-len(cands))
 		if err != nil {
@@ -387,7 +388,7 @@ func (r *SmartDemotionRunner) planTenant(ctx context.Context, tenantID string, q
 		}
 		for lruRows.Next() && remaining > 0 {
 			var c demotionCandidate
-			if err := lruRows.Scan(&c.bucket, &c.key, &c.etag, &c.size, &c.storageKey); err != nil {
+			if err := lruRows.Scan(&c.bucket, &c.key, &c.etag, &c.size, &c.storageKey, &c.encAlgo); err != nil {
 				_ = lruRows.Close()
 				return stats, nil, fmt.Errorf("scan lru: %w", err)
 			}
@@ -416,7 +417,9 @@ func (r *SmartDemotionRunner) demote(ctx context.Context, hot, cold engine.Drive
 	if err != nil {
 		return false, fmt.Errorf("read hot: %w", err)
 	}
-	putErr := cold.Put(tctx, container, blob, rc, engine.WithContentLength(c.size))
+	// The STORED length: a sealed object's blob is its ciphertext (WP-R8-5;
+	// sized by the plaintext, an S3-class backend stored it cut short).
+	putErr := cold.Put(tctx, container, blob, rc, engine.WithContentLength(storedBlobLength(c.encAlgo, c.size, nil)))
 	_ = rc.Close()
 	if putErr != nil {
 		return false, fmt.Errorf("write cold: %w", putErr)

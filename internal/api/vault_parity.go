@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/common"
+	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/lib/pq"
@@ -231,6 +232,10 @@ type VaultParity struct {
 	eng    *engine.CoreEngine
 	flags  flagChecker
 	logger *zap.Logger
+	// SSE is this process's SSE-S3 service (nil: no master key): a sealed
+	// object's parity covers its STORED bytes, whose length it gives
+	// (storedBlobLength, WP-R8-5).
+	SSE *crypto.SSEService
 
 	JobName          string
 	Every            time.Duration
@@ -678,7 +683,8 @@ func (p *VaultParity) protectCandidates(ctx context.Context, res *VaultParityRes
 	)
 	for n := 0; n < vaultParityCandidatePages && len(cands) < p.MaxObjectsPerRun; n++ {
 		rows, err := p.db.QueryContext(ctx, `
-			SELECT o.tenant_id, o.bucket, o.object_key, o.etag, o.size_bytes, o.is_chunked, o.updated_at, COALESCE(o.storage_key, '')`+unprotectedFrom+`
+			SELECT o.tenant_id, o.bucket, o.object_key, o.etag, o.size_bytes, o.is_chunked, o.updated_at, COALESCE(o.storage_key, ''),
+			       COALESCE(o.encryption_algorithm, '')`+unprotectedFrom+`
 			  AND (v.tenant_id IS NULL OR v.etag <> o.etag OR v.attempts < $2)
 			  AND ($3::BIGINT < 0 OR o.size_bytes <= $3::BIGINT)
 			  AND ($4::BOOLEAN OR (o.updated_at, o.tenant_id, o.bucket, o.object_key) > ($5::TIMESTAMPTZ, $6::TEXT, $7::TEXT, $8::TEXT))
@@ -690,9 +696,17 @@ func (p *VaultParity) protectCandidates(ctx context.Context, res *VaultParityRes
 		read := 0
 		for rows.Next() {
 			var c parityCandidate
-			if err := rows.Scan(&c.tenantID, &c.bucket, &c.key, &c.etag, &c.size, &c.chunked, &curAt, &c.storageKey); err != nil {
+			var enc string
+			if err := rows.Scan(&c.tenantID, &c.bucket, &c.key, &c.etag, &c.size, &c.chunked, &curAt, &c.storageKey, &enc); err != nil {
 				_ = rows.Close()
 				return nil, fmt.Errorf("vault parity: scan candidate: %w", err)
+			}
+			// The shards cover the STORED bytes — a sealed object's
+			// ciphertext, read as stored and rebuilt as stored, then opened
+			// by the GET (WP-R8-5: sized by the plaintext, every sealed
+			// vault object failed "longer than its recorded bytes").
+			if !c.chunked {
+				c.size = storedBlobLength(enc, c.size, p.SSE)
 			}
 			read++
 			curT, curB, curK = c.tenantID, c.bucket, c.key

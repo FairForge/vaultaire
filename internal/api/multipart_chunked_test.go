@@ -321,22 +321,43 @@ func TestComplete_SSEBucket_NoKey_Refused503BeforeKeepAlive(t *testing.T) {
 	assert.Equal(t, "active", status, "the client can retry once the key is back")
 }
 
-func TestComplete_SSEBucket_NonChunkableOver256MiB_Refused413(t *testing.T) {
-	// Before: 200, stored whole plaintext.
-	f := setupMPChunkFixture(t, true)
-	instantCommit(f.server)
-	f.bucketSet(t, "sse_enabled = TRUE, versioning_status = 'Enabled'") // a non-chunkable placement
-	prev := maxSSEObjectSize
-	maxSSEObjectSize = 4 << 10
-	t.Cleanup(func() { maxSSEObjectSize = prev })
+// WP-R8-5 (= WP-R3-3): a non-chunkable Complete into an sse_enabled bucket is
+// sealed as the parts stream, at any size. Before (WP-R3-1, the
+// TestComplete_SSEBucket_NonChunkableOver256MiB_Refused413 this replaces):
+// 413 over maxSSEObjectSize, and at or under it the assembled plaintext and
+// its ciphertext held in memory. "Over the old cap" is many segments here:
+// the service seals 1 KiB segments, so 12 KiB is 12 of them.
+func TestComplete_SSEBucket_NonChunkableOver256MiB_SealedStreaming(t *testing.T) {
+	for name, c := range map[string]struct {
+		bucket string
+		hdr    map[string]string
+		floor  string
+	}{
+		"versioned bucket": {"sse_enabled = TRUE, versioning_status = 'Enabled'", nil, usage.FloorStandard},
+		"GLACIER (Vault)":  {"sse_enabled = TRUE", map[string]string{"x-amz-storage-class": "GLACIER"}, usage.FloorVault},
+		"DEEP_ARCHIVE":     {"sse_enabled = TRUE", map[string]string{"x-amz-storage-class": "DEEP_ARCHIVE"}, usage.FloorVault},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := setupMPChunkFixture(t, true)
+			f.server.sseService.SetSegmentSize(1 << 10)
+			f.bucketSet(t, c.bucket)
+			body := mpBody(12<<10, 4)
 
-	u := f.upload(t, "k.bin", splitParts(mpBody(12<<10, 4), 2), nil)
-	w := f.complete(t, "k.bin", u)
+			u := f.upload(t, "k.bin", splitParts(body, 2), c.hdr)
+			w := f.complete(t, "k.bin", u)
 
-	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code, w.Body.String())
-	assert.Contains(t, w.Body.String(), "EntityTooLarge")
-	assert.Zero(t, plaintextOnBackend(t, f.fixed.dir, f.tempDir))
-	assert.Equal(t, int64(0), f.used(t))
+			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			assert.Equal(t, "AES256", w.Header().Get("x-amz-server-side-encryption"), "the response says the object is encrypted")
+			row := f.row(t, "k.bin")
+			assert.False(t, row.chunked)
+			assert.Equal(t, crypto.SSEAlgorithm, row.enc)
+			assert.Equal(t, c.floor, row.floor)
+			assert.Equal(t, awsMultipartETag(splitParts(body, 2)), row.etag, "the -N ETag of the parts")
+			assert.Zero(t, plaintextOnBackend(t, f.fixed.dir, f.tempDir))
+			assert.Equal(t, int64(len(body)), f.used(t), "billed the plaintext size")
+			assert.Equal(t, body, f.get(t, "k.bin", "").Body.Bytes())
+		})
+	}
 }
 
 // TestPlacement_PutAndCompleteAgree drives a PUT and a Complete of the same
@@ -363,9 +384,17 @@ func TestPlacement_PutAndCompleteAgree(t *testing.T) {
 		{"sse, no key", false, "sse_enabled = TRUE", nil, 12 << 10},
 		{"sse, key, large", true, "sse_enabled = TRUE", nil, 12 << 10},
 		{"sse, key, small", true, "sse_enabled = TRUE", nil, 900},
-		{"sse, key, versioned ≤ cap", true, "sse_enabled = TRUE, versioning_status = 'Enabled'", nil, 3 << 10},
-		{"sse, key, versioned > cap", true, "sse_enabled = TRUE, versioning_status = 'Enabled'", nil, 12 << 10},
+		// WP-R8-5: every non-chunkable class and a versioned bucket, sealed
+		// at any size ("> cap" = many segments; this was a 413 both ways).
+		{"sse, key, versioned, small", true, "sse_enabled = TRUE, versioning_status = 'Enabled'", nil, 3 << 10},
+		{"sse, key, versioned > old cap", true, "sse_enabled = TRUE, versioning_status = 'Enabled'", nil, 12 << 10},
+		{"sse, key, GLACIER > old cap", true, "sse_enabled = TRUE", map[string]string{"x-amz-storage-class": "GLACIER"}, 12 << 10},
+		{"sse, key, DEEP_ARCHIVE > old cap", true, "sse_enabled = TRUE", map[string]string{"x-amz-storage-class": "DEEP_ARCHIVE"}, 12 << 10},
 		{"no sse bucket, key, large", true, "sse_enabled = FALSE", nil, 12 << 10},
+		// The header on Create is kept (089) and placed as the PUT's.
+		{"AES256 header, key, versioned > old cap", true, "versioning_status = 'Enabled'", map[string]string{"x-amz-server-side-encryption": "AES256"}, 12 << 10},
+		{"AES256 header, key, small", true, "sse_enabled = FALSE", map[string]string{"x-amz-server-side-encryption": "AES256"}, 900},
+		{"AES256 header, no key", false, "sse_enabled = FALSE", map[string]string{"x-amz-server-side-encryption": "AES256"}, 900},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -373,9 +402,9 @@ func TestPlacement_PutAndCompleteAgree(t *testing.T) {
 				f := setupMPChunkFixture(t, c.key)
 				instantCommit(f.server)
 				f.bucketSet(t, c.bucket)
-				prev := maxSSEObjectSize
-				maxSSEObjectSize = 4 << 10
-				defer func() { maxSSEObjectSize = prev }()
+				if f.server.sseService != nil {
+					f.server.sseService.SetSegmentSize(1 << 10)
+				}
 				hdr := map[string]string{}
 				for k, v := range c.hdr {
 					hdr[k] = v

@@ -22,6 +22,56 @@ func newTestSSE(t *testing.T) (*SSEService, *TenantKeys, string) {
 	return NewSSEService(keys), keys, keyTenant(t, db)
 }
 
+// legacyEncryptV2 is the 0x02 writer as it was before WP-R8-5 (EncryptBytes):
+// kept as a fixture so the compatibility opener is tested against the bytes
+// the old code wrote. No production code writes 0x02.
+func legacyEncryptV2(ctx context.Context, s *SSEService, tenantID string, plaintext []byte) ([]byte, int, error) {
+	kv, err := s.keys.Current(ctx, tenantID)
+	if err != nil {
+		return nil, 0, err
+	}
+	shared, kemCT := kv.Encap.Encapsulate()
+	aesKey, err := deriveSSEKey(shared)
+	if err != nil {
+		return nil, 0, err
+	}
+	block, err := aes.NewCipher(aesKey)
+	if err != nil {
+		return nil, 0, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, 0, err
+	}
+	nonce := make([]byte, 12)
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, 0, err
+	}
+	buf := append([]byte{SSEVersion}, binary.BigEndian.AppendUint32(nil, uint32(kv.Version))...)
+	header := append([]byte(nil), buf...)
+	buf = append(buf, kemCT...)
+	buf = append(buf, nonce...)
+	return gcm.Seal(buf, nonce, plaintext, header), kv.Version, nil
+}
+
+// legacyEncryptV1 is a 0x01 blob as the code before WP-R8-1 wrote it (no
+// version, no AAD), sealed against kv.
+func legacyEncryptV1(t *testing.T, kv *KeyVersion, plaintext []byte) []byte {
+	t.Helper()
+	shared, kemCT := kv.Encap.Encapsulate()
+	aesKey, err := deriveSSEKey(shared)
+	require.NoError(t, err)
+	block, err := aes.NewCipher(aesKey)
+	require.NoError(t, err)
+	gcm, err := cipher.NewGCM(block)
+	require.NoError(t, err)
+	nonce := make([]byte, 12)
+	_, _ = rand.Read(nonce)
+	legacy := append([]byte{SSEVersionV1}, kemCT...)
+	legacy = append(legacy, nonce...)
+	return gcm.Seal(legacy, nonce, plaintext, nil)
+}
+
 func TestSSEService_EncryptDecrypt_RoundTrip(t *testing.T) {
 	svc, _, tenantID := newTestSSE(t)
 	ctx := context.Background()
@@ -31,7 +81,7 @@ func TestSSEService_EncryptDecrypt_RoundTrip(t *testing.T) {
 	assert.Equal(t, 1, v)
 
 	plaintext := []byte("hello, post-quantum world!")
-	ciphertext, kv, err := svc.EncryptBytes(ctx, tenantID, plaintext)
+	ciphertext, kv, err := legacyEncryptV2(ctx, svc, tenantID, plaintext)
 	require.NoError(t, err)
 	assert.Equal(t, 1, kv)
 
@@ -46,12 +96,12 @@ func TestSSES3_V2BlobCarriesVersion_V1BlobStillDecrypts(t *testing.T) {
 	svc, keys, tenantID := newTestSSE(t)
 	ctx := context.Background()
 
-	v1blob, v, err := svc.EncryptBytes(ctx, tenantID, []byte("sealed under v1"))
+	v1blob, v, err := legacyEncryptV2(ctx, svc, tenantID, []byte("sealed under v1"))
 	require.NoError(t, err)
 	require.Equal(t, 1, v)
 	_, err = keys.Rotate(ctx, tenantID)
 	require.NoError(t, err)
-	v2blob, v, err := svc.EncryptBytes(ctx, tenantID, []byte("sealed under v2"))
+	v2blob, v, err := legacyEncryptV2(ctx, svc, tenantID, []byte("sealed under v2"))
 	require.NoError(t, err)
 	require.Equal(t, 2, v)
 
@@ -99,7 +149,7 @@ func TestSSES3_V2BlobCarriesVersion_V1BlobStillDecrypts(t *testing.T) {
 
 func TestSSEService_EncryptedFormat(t *testing.T) {
 	svc, _, tenantID := newTestSSE(t)
-	ct, _, err := svc.EncryptBytes(context.Background(), tenantID, []byte("format check"))
+	ct, _, err := legacyEncryptV2(context.Background(), svc, tenantID, []byte("format check"))
 	require.NoError(t, err)
 
 	assert.Equal(t, SSEVersion, ct[0])
@@ -113,7 +163,7 @@ func TestSSEService_EncryptedSizeOverhead(t *testing.T) {
 		plaintext := make([]byte, size)
 		_, _ = rand.Read(plaintext)
 
-		ct, _, err := svc.EncryptBytes(context.Background(), tenantID, plaintext)
+		ct, _, err := legacyEncryptV2(context.Background(), svc, tenantID, plaintext)
 		require.NoError(t, err)
 		assert.Equal(t, size+SSEOverheadBytes, len(ct), "overhead mismatch for plaintext size %d", size)
 	}
@@ -126,7 +176,7 @@ func TestSSEService_DecryptWrongTenant(t *testing.T) {
 	_, err := svc.Current(ctx, tenant2)
 	require.NoError(t, err)
 
-	ct, _, err := svc.EncryptBytes(ctx, tenant1, []byte("secret data"))
+	ct, _, err := legacyEncryptV2(ctx, svc, tenant1, []byte("secret data"))
 	require.NoError(t, err)
 
 	_, err = svc.DecryptBytes(ctx, tenant2, ct)
@@ -136,7 +186,7 @@ func TestSSEService_DecryptWrongTenant(t *testing.T) {
 func TestSSEService_DecryptCorruptedData(t *testing.T) {
 	svc, _, tenantID := newTestSSE(t)
 	ctx := context.Background()
-	ct, _, err := svc.EncryptBytes(ctx, tenantID, []byte("original"))
+	ct, _, err := legacyEncryptV2(ctx, svc, tenantID, []byte("original"))
 	require.NoError(t, err)
 
 	tampered := append([]byte(nil), ct...)
@@ -164,7 +214,7 @@ func TestSSEService_DecryptTooShort(t *testing.T) {
 func TestSSEService_DecryptShreddedKey(t *testing.T) {
 	svc, keys, tenantID := newTestSSE(t)
 	ctx := context.Background()
-	ct, _, err := svc.EncryptBytes(ctx, tenantID, []byte("erased with the account"))
+	ct, _, err := legacyEncryptV2(ctx, svc, tenantID, []byte("erased with the account"))
 	require.NoError(t, err)
 
 	_, err = getTestDB(t).Exec(`DELETE FROM tenant_key_versions WHERE tenant_id = $1`, tenantID)
@@ -178,7 +228,7 @@ func TestSSEService_DecryptShreddedKey(t *testing.T) {
 func TestSSEService_EmptyPlaintext(t *testing.T) {
 	svc, _, tenantID := newTestSSE(t)
 	ctx := context.Background()
-	ct, _, err := svc.EncryptBytes(ctx, tenantID, []byte{})
+	ct, _, err := legacyEncryptV2(ctx, svc, tenantID, []byte{})
 	require.NoError(t, err)
 	assert.Equal(t, SSEOverheadBytes, len(ct))
 

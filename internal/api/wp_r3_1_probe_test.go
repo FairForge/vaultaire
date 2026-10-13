@@ -6,7 +6,6 @@ package api
 import (
 	"bytes"
 	"crypto/rand"
-	"encoding/xml"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -195,23 +194,18 @@ func TestProbe_SealedCompleteInVersionedBucket(t *testing.T) {
 }
 
 // Probe 4: PUT asking for AES256 on a process with no master key, into a
-// bucket that is not sse_enabled.
+// bucket that is not sse_enabled. On 59e2769: 200, stored plaintext, no
+// header claiming encryption (W-4, P2). Since WP-R8-5 Part A: refused 503,
+// as an sse_enabled bucket is (TestPut_SSEHeader_NoKey_Refused503).
 func TestProbe_PutSSEHeader_NoKey_NonSSEBucket(t *testing.T) {
 	f := setupMPChunkFixture(t, false)
 	body := probeBody(t, 900)
 	r := httptestPut(f, "small.bin", body, map[string]string{"x-amz-server-side-encryption": "AES256"})
-	t.Logf("PUT %d sse=%q", r.Code, r.Header().Get("x-amz-server-side-encryption"))
-	h := doS3Request(f.server, f.tenant, "HEAD", "/test-bucket/small.bin", nil)
-	t.Logf("HEAD %d sse=%q", h.Code, h.Header().Get("x-amz-server-side-encryption"))
-	t.Logf("row enc=%q, plaintext on backend %d", f.row(t, "small.bin").enc, plaintextOnBackend(t, f.fixed.dir))
-
-	// Multipart with the header: Create, then Complete.
-	c := f.create(t, "mp.bin", map[string]string{"x-amz-server-side-encryption": "AES256"})
-	var init InitiateMultipartUploadResult
-	_ = xml.Unmarshal(c.Body.Bytes(), &init)
-	t.Logf("CREATE %d sse=%q", c.Code, c.Header().Get("x-amz-server-side-encryption"))
+	assert.Equal(t, http.StatusServiceUnavailable, r.Code)
 	assert.Empty(t, r.Header().Get("x-amz-server-side-encryption"), "never claims encryption it did not apply")
-	assert.Empty(t, h.Header().Get("x-amz-server-side-encryption"))
+	assert.Zero(t, plaintextOnBackend(t, f.fixed.dir))
+	c := f.create(t, "mp.bin", map[string]string{"x-amz-server-side-encryption": "AES256"})
+	assert.Equal(t, http.StatusServiceUnavailable, c.Code)
 }
 
 func httptestPut(f *mpChunkFixture, key string, body []byte, hdr map[string]string) *httptest.ResponseRecorder {

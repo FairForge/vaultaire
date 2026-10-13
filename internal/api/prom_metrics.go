@@ -80,6 +80,9 @@ func (s *Server) initMetrics() {
 		// opens, the re-encrypt job, and the rotation backlog (from the
 		// tables).
 		reg.MustRegister(tenantKeysRewrapped, tenantKeysUnwrapFailures, keyReencryptChunks, keyReencryptObjects)
+		// SSE-S3 blobs opened, by format (WP-R8-5): whether any 0x01/0x02
+		// blob is still read.
+		reg.MustRegister(sseBlobsOpened)
 		// Generated objects (export, access log, inventory) refused rather
 		// than stored plaintext in an sse_enabled bucket (WP-R8-1 A1).
 		reg.MustRegister(generatedObjectRefused)

@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"crypto/md5" // #nosec G501 — S3 spec requires MD5 for ETags
 	"database/sql"
 	"encoding/json"
@@ -327,9 +326,22 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 		s.handleChunkedCopy(w, r, t, srcBucket, srcKey, destBucket, destKey, srcSize, directive, requestAttrs)
 		return
 	}
-	if (srcEnc != "" && !sourceWhole) || (srcChunked && !sourceWhole) {
+	// An SSE-S3 whole source opens as it streams (WP-R8-5): its plaintext is
+	// the copy's source, re-sealed or not as the destination's placement
+	// says. Before, every sealed source answered 501 — after the master-key
+	// ceremony every object a new bucket holds is sealed or chunk-encrypted.
+	// SSE-C needs the customer's key on the copy (x-amz-copy-source-server-
+	// side-encryption-customer-*): still 501.
+	srcSealedS3 := !srcChunked && srcEnc != "" && srcEnc != crypto.SSECAlgorithm
+	if (srcEnc != "" && !sourceWhole && !srcSealedS3) || (srcChunked && !sourceWhole) {
 		WriteS3ErrorWithContext(w, ErrNotImplemented, r.URL.Path, generateRequestID(),
-			WithSuggestion("Copying encrypted or chunked objects is not yet supported. Download and re-upload instead."))
+			WithSuggestion("Copying objects encrypted with a customer-provided key (SSE-C) is not yet supported. Download and re-upload instead."))
+		return
+	}
+	if srcSealedS3 && s.sseService == nil {
+		s.logger.Error("copy of an encrypted source with no SSE service: ENCRYPTION_MASTER_KEY is not configured on this process",
+			zap.String("bucket", srcBucket), zap.String("key", srcKey))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return
 	}
 
@@ -338,11 +350,6 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 			zap.String("bucket", destBucket), zap.String("key", destKey))
 		w.Header().Set("Retry-After", "30")
 		WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
-		return
-	}
-	if destSSE && srcSize > maxSSEObjectSize {
-		WriteS3ErrorWithContext(w, ErrEntityTooLarge, r.URL.Path, generateRequestID(),
-			WithSuggestion("The destination bucket encrypts objects at rest, and objects larger than 256 MiB cannot yet be server-side encrypted."))
 		return
 	}
 
@@ -371,10 +378,26 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	// unsized one was one plain file on one bridge, ~30 MB/s).
 	gctx := r.Context()
 	if srcSize > 0 {
-		gctx = engine.WithExpectedSize(gctx, srcSize)
+		stored := srcSize
+		if srcSealedS3 {
+			stored = s.sseService.SealedLength(srcSize)
+		}
+		gctx = engine.WithExpectedSize(gctx, stored)
 	}
 	var reader io.ReadCloser
-	if sourceWhole {
+	if srcSealedS3 {
+		// Opened as it streams: the header and first segment are verified
+		// before anything is reserved or written (sse_stream.go).
+		reader, err = openSealed(r.Context(), s.sseService, sealedSource{
+			whole: func() (io.ReadCloser, error) { return s.engine.Get(gctx, srcContainer, srcBlob) },
+		}, sealedRead{TenantID: t.ID, Size: srcSize})
+		if errors.Is(err, errSealedUnreadable) {
+			s.logger.Error("copy: the encrypted source does not open", zap.Error(err),
+				zap.String("bucket", srcBucket), zap.String("key", srcKey))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+	} else if sourceWhole {
 		// The chunked source as one stream: every backend its chunks are
 		// on is asked first (503 before anything is reserved or written);
 		// each chunk decrypted and verified as it is read.
@@ -468,25 +491,31 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	source := &readErrReader{r: reader}
 	counter := &countingReader{r: &cutReader{ctx: r.Context(), r: source}}
 	var src io.Reader = counter
-	if srcSize > 0 {
+	if srcSize > 0 || destSSE {
 		// Bytes that are not the recorded size are not the source: the
-		// write fails rather than store them under a new ETag.
+		// write fails rather than store them under a new ETag. Into an
+		// sse_enabled bucket a source with no recorded size must be empty:
+		// a seal needs its size, and its bytes are never stored plaintext
+		// there (the copy answers the size drift's 503).
 		src = &exactSizeReader{r: counter, want: srcSize}
 	}
 	hasher := md5.New() // #nosec G401 — S3 spec requires MD5 for ETags
 	tee := io.TeeReader(src, hasher)
-	var sealer *sseSealingReader
+	var sealer *sseWriteSealer
 	putLength := srcSize
-	if destSSE {
+	if destSSE && srcSize > 0 {
 		// The hasher and the counter see the plaintext; the backend gets
-		// the sealed blob, of a length known in advance.
-		sealer = &sseSealingReader{src: tee, max: maxSSEObjectSize, seal: func(p []byte) ([]byte, int, error) {
-			return s.sseService.EncryptBytes(r.Context(), t.ID, p)
-		}}
-		tee = sealer
-		if srcSize > 0 {
-			putLength = srcSize + int64(crypto.SSEOverheadBytes)
+		// the blob sealed as it streams (WP-R8-5), of a length known in
+		// advance. An empty source is stored empty, as an empty PUT is.
+		var sErr error
+		if sealer, sErr = newSSEWriteSealer(r.Context(), s.sseService, t.ID, tee, srcSize); sErr != nil {
+			releaseReservation()
+			s.logger.Error("copy: SSE-S3 tenant key unavailable", zap.Error(sErr))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
 		}
+		tee = sealer
+		putLength = s.sseService.SealedLength(srcSize)
 	}
 
 	putOpts := []engine.PutOption{engine.WithContentType(attrs.ContentType)}
@@ -524,11 +553,6 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 				zap.Int64("recorded_size", srcSize), zap.Error(err))
 			w.Header().Set("Retry-After", "30")
 			WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
-		case errors.Is(err, errCopyTooLargeForSSE):
-			// The source had no recorded size and turned out larger than
-			// SSE-S3 seals: nothing was stored.
-			WriteS3ErrorWithContext(w, ErrEntityTooLarge, r.URL.Path, generateRequestID(),
-				WithSuggestion("The destination bucket encrypts objects at rest, and objects larger than 256 MiB cannot yet be server-side encrypted."))
 		case errors.Is(err, errRegionDriverUnavailable):
 			s.logger.Error("copy: region-pinned bucket has no driver — refused",
 				zap.String("bucket", destBucket), zap.Error(err))
@@ -861,82 +885,4 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(xml.Header))
 	_, _ = w.Write(xmlData)
-}
-
-// errCopyTooLargeForSSE: a copy into an sse_enabled bucket whose source had
-// no recorded size turned out larger than SSE-S3 seals.
-var errCopyTooLargeForSSE = errors.New("copy source too large for SSE-S3")
-
-// sseSealingReader seals its source with SSE-S3 on the first Read and then
-// serves the sealed blob (WP-R8-1 follow-up A1: a copy into an sse_enabled
-// bucket). The source's own errors pass through untouched, so the copy maps
-// them as it does for a plain stream. An empty source is passed through
-// unsealed, as an empty PUT is stored.
-type sseSealingReader struct {
-	src  io.Reader
-	max  int64
-	seal func([]byte) ([]byte, int, error)
-	// size, when > 0, is the exact plaintext length (a Complete knows it):
-	// read into one buffer of that size instead of a growing one, so the
-	// peak is the plaintext plus its ciphertext — 2 × size, 512 MiB at the
-	// 256 MiB cap — not io.ReadAll's doubling slack on top.
-	size    int64
-	out     io.Reader
-	version int
-	sealed  bool
-}
-
-func (s *sseSealingReader) Read(p []byte) (int, error) {
-	if s.out == nil {
-		plaintext, err := s.readPlaintext()
-		if err != nil {
-			return 0, err
-		}
-		if int64(len(plaintext)) > s.max {
-			return 0, errCopyTooLargeForSSE
-		}
-		if len(plaintext) == 0 {
-			s.out = bytes.NewReader(nil)
-		} else {
-			ct, v, err := s.seal(plaintext)
-			if err != nil {
-				return 0, fmt.Errorf("seal copy: %w", err)
-			}
-			s.out, s.version, s.sealed = bytes.NewReader(ct), v, true
-		}
-	}
-	return s.out.Read(p)
-}
-
-// readPlaintext reads the whole source: exactly size bytes when the size is
-// known (and nothing after them), else up to max+1.
-func (s *sseSealingReader) readPlaintext() ([]byte, error) {
-	if s.size <= 0 || s.size > s.max {
-		return io.ReadAll(io.LimitReader(s.src, s.max+1))
-	}
-	buf := make([]byte, s.size)
-	if _, err := io.ReadFull(s.src, buf); err != nil {
-		return nil, err
-	}
-	// io.ReadFull drops an error that came with the bytes that filled the
-	// buffer (a staged part's check fails on its last byte): one more read
-	// returns it, or EOF.
-	var one [1]byte
-	n, err := s.src.Read(one[:])
-	switch {
-	case n > 0:
-		return nil, errCopyTooLargeForSSE
-	case err != nil && !errors.Is(err, io.EOF):
-		return nil, err
-	}
-	return buf, nil
-}
-
-// encryption is what the stored blob is sealed with (nil reader: plaintext).
-func (s *sseSealingReader) encryption() objectEncryption {
-	if s == nil || !s.sealed {
-		return objectEncryption{}
-	}
-	v := s.version
-	return objectEncryption{Algorithm: crypto.SSEAlgorithm, KeyVersion: &v}
 }

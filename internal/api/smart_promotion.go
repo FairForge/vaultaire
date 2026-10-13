@@ -434,7 +434,8 @@ func (p *SmartPromoter) promote(ctx context.Context, tenantID, bucket, key, etag
 		}
 		return "", fmt.Errorf("read cold: %w", err)
 	}
-	putErr := hot.Put(tctx, container, blob, rc, engine.WithContentLength(size))
+	// The STORED length (a sealed blob is longer than the object, WP-R8-5).
+	putErr := hot.Put(tctx, container, blob, rc, engine.WithContentLength(storedBlobLength(rt.encAlgo, size, nil)))
 	_ = rc.Close()
 	if putErr != nil {
 		return "", fmt.Errorf("write hot: %w", putErr)
