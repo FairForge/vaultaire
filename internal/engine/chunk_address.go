@@ -130,10 +130,20 @@ func (e *CoreEngine) PutOn(ctx context.Context, backend, container, artifact str
 	if container == ChunkContainer && common.GetTenantID(ctx) != ChunkAddressTenant {
 		return ErrChunkAddress
 	}
-	err := e.on(ctx, "put", container, artifact, backend, func(d Driver) error { return d.Put(ctx, container, artifact, data, opts...) })
+	// The source's own read failure is the caller's, as in Put: never a
+	// charge on the backend's breaker (Prompt 2b.2 C1).
+	src := &sizeTrackingReader{Reader: data}
+	err := e.on(ctx, "put", container, artifact, backend, func(d Driver) error {
+		perr := d.Put(ctx, container, artifact, src, opts...)
+		if srcErr := src.sourceErr(); perr != nil && srcErr != nil && !errors.Is(perr, ErrCallerAborted) {
+			perr = fmt.Errorf("%w: %w (%w)", ErrCallerAborted, srcErr, perr)
+		}
+		return perr
+	})
 	if err != nil {
 		return fmt.Errorf("put %s/%s on %s: %w", container, artifact, backend, err)
 	}
+	common.SetBackendUsed(ctx, backend)
 	return nil
 }
 

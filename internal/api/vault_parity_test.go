@@ -538,8 +538,7 @@ func TestHandleGet_VaultObjectIsServedFromParityWhenGeysersBreakerIsOpen(t *test
 	ctx := common.WithTenantID(context.Background(), f.tenantID)
 	container := f.tn.NamespaceContainer(f.bucket)
 	for i := 0; i < 5; i++ {
-		f.eng.HintBackend(container, "films/nine.mkv", "geyser")
-		_, _ = f.eng.Get(ctx, container, "films/nine.mkv")
+		_, _ = f.eng.Get(engine.WithRecordedBackend(ctx, "geyser"), container, "films/nine.mkv")
 	}
 	require.Equal(t, engine.StateOpen.String(), f.eng.GetFailoverStatus()["geyser"], "the breaker is open")
 	// With the breaker open the engine never asks Geyser: the failover
@@ -620,8 +619,7 @@ func TestVaultParity_EraseTenantDefersWhenTheLegCannotBeReached(t *testing.T) {
 		f.leg.failGet.Store(true)
 		ctx := common.WithTenantID(ctx, f.tenantID)
 		for i := 0; i < 5; i++ {
-			f.eng.HintBackend("c", "k", "permafrost")
-			_, _ = f.eng.Get(ctx, "c", "k")
+			_, _ = f.eng.Get(engine.WithRecordedBackend(ctx, "permafrost"), "c", "k")
 		}
 		require.Equal(t, engine.StateOpen.String(), f.eng.GetFailoverStatus()["permafrost"], "the breaker is open")
 		n, err := f.svc.EraseTenant(ctx, f.tenantID)
@@ -849,8 +847,7 @@ func (f *parityFixture) openLegBreaker() {
 	f.leg.failGet.Store(true)
 	ctx := common.WithTenantID(context.Background(), f.tenantID)
 	for i := 0; i < 5; i++ {
-		f.eng.HintBackend("c", "k", "permafrost")
-		_, _ = f.eng.Get(ctx, "c", "k")
+		_, _ = f.eng.Get(engine.WithRecordedBackend(ctx, "permafrost"), "c", "k")
 	}
 	require.Equal(f.t, engine.StateOpen.String(), f.eng.GetFailoverStatus()["permafrost"], "the breaker is open")
 	f.leg.failGet.Store(false)

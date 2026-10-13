@@ -66,8 +66,7 @@ func TestEngine_AFleetWideDataPathOutageOpensTheSyncBreakerWhileProbesPass(t *te
 		if i%4 == 0 {
 			require.NoError(t, m.HealthCheck(ctx), "every probe passes")
 		}
-		e.HintBackend("c", a, "sync")
-		_, err := e.Get(ctx, "c", a)
+		_, err := e.Get(engine.WithRecordedBackend(ctx, "sync"), "c", a)
 		require.Error(t, err)
 		if errorsIsPartial(err) {
 			partial++
@@ -113,8 +112,7 @@ func TestEngine_OneBridgesDataPathDownStaysPartialWhileProbesPass(t *testing.T) 
 		if i%4 == 0 {
 			require.NoError(t, m.HealthCheck(ctx))
 		}
-		e.HintBackend("c", a, "sync")
-		_, err := e.Get(ctx, "c", a)
+		_, err := e.Get(engine.WithRecordedBackend(ctx, "sync"), "c", a)
 
 		// Assert
 		require.Error(t, err)
@@ -126,8 +124,7 @@ func TestEngine_OneBridgesDataPathDownStaysPartialWhileProbesPass(t *testing.T) 
 	down[1].Store(true)
 	for i := 0; i < 6; i++ {
 		a := keyOnBridge(ctx, t, m, "c", fmt.Sprintf("b1-%d", i), 1)
-		e.HintBackend("c", a, "sync")
-		_, err := e.Get(ctx, "c", a)
+		_, err := e.Get(engine.WithRecordedBackend(ctx, "sync"), "c", a)
 		assert.ErrorIs(t, err, engine.ErrPartiallyUnavailable)
 	}
 	assert.Equal(t, "closed", syncBreaker(e))

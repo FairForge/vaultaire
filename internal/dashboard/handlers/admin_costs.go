@@ -399,15 +399,23 @@ func formatSignedCents(cents int64) string {
 	return fmt.Sprintf("$%.2f", float64(cents)/100)
 }
 
+// bytesByBackendSQL: what each backend holds, from the tables of record
+// (WP-R6-1: object_locations is no longer written) — whole objects on their
+// head row's backend, every chunk blob once on its index row's backend.
+const bytesByBackendSQL = `
+	SELECT backend, COUNT(*), COALESCE(SUM(size_bytes), 0)::BIGINT FROM (
+		SELECT backend_name AS backend, size_bytes FROM object_head_cache
+		 WHERE NOT is_chunked AND COALESCE(backend_name, '') <> ''
+		UNION ALL
+		SELECT backend_id, size_bytes FROM global_content_index
+	) b GROUP BY backend ORDER BY SUM(size_bytes) DESC`
+
 func populateActualBackends(ctx context.Context, db *sql.DB, data map[string]any, logger *zap.Logger, mode costMode) {
 	egress := queryBackendEgress(ctx, db, logger)
 
-	rows, err := db.QueryContext(ctx, `
-		SELECT backend_name, COUNT(*), COALESCE(SUM(size_bytes), 0)
-		FROM object_locations GROUP BY backend_name
-		ORDER BY SUM(size_bytes) DESC`)
+	rows, err := db.QueryContext(ctx, bytesByBackendSQL)
 	if err != nil {
-		logger.Debug("costs: query object_locations", zap.Error(err))
+		logger.Debug("costs: query stored bytes by backend", zap.Error(err))
 		return
 	}
 	defer func() { _ = rows.Close() }()

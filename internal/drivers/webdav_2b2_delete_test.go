@@ -36,8 +36,7 @@ func TestEngine_AHintedSyncDeleteOnADownBridgeFailsAndTheRetryDeletes(t *testing
 	require.NoError(t, m.Put(ctx, "c", a, strings.NewReader("on bridge 0"), engine.WithContentLength(11)))
 	down.Store(true)
 
-	e.HintBackend("c", a, "sync")
-	err := e.Delete(ctx, "c", a)
+	err := e.Delete(engine.WithRecordedBackend(ctx, "sync"), "c", a)
 
 	require.Error(t, err)
 	assert.ErrorIs(t, err, engine.ErrPartiallyUnavailable)
@@ -46,8 +45,7 @@ func TestEngine_AHintedSyncDeleteOnADownBridgeFailsAndTheRetryDeletes(t *testing
 
 	// The bridge is back: the retry deletes the object there.
 	down.Store(false)
-	e.HintBackend("c", a, "sync")
-	require.NoError(t, e.Delete(ctx, "c", a))
+	require.NoError(t, e.Delete(engine.WithRecordedBackend(ctx, "sync"), "c", a))
 	ok, err := m.Exists(ctx, "c", a)
 	require.NoError(t, err)
 	assert.False(t, ok)

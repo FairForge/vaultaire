@@ -20,9 +20,7 @@ func TestEngineGet_PreferredOutageIsNotReportedAsMissing(t *testing.T) {
 	eng := NewEngine(nil, nopLogger(), &Config{DefaultBackend: "idrive"})
 	eng.AddDriver("idrive", &mockDriver{name: "idrive", getErr: fmt.Errorf("dial tcp: connection refused")})
 	eng.AddDriver("local", &fileWritingDriver{dir: t.TempDir()}) // *fs.PathError on a miss, like prod
-	eng.HintBackend("c", "k", "idrive")
-
-	_, err := eng.Get(tenantCtx(), "c", "k")
+	_, err := eng.Get(WithRecordedBackend(tenantCtx(), "idrive"), "c", "k")
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrAllBackendsUnavailable),
 		"an unreachable recorded backend must surface as unavailability, got: %v", err)
@@ -35,9 +33,7 @@ func TestEngineGet_AuthoritativeMissStaysMissWhenOtherBackendDown(t *testing.T) 
 	eng := NewEngine(nil, nopLogger(), &Config{DefaultBackend: "idrive"})
 	eng.AddDriver("idrive", &stubDriver{name: "idrive", data: map[string][]byte{}, healthy: true}) // NotFoundError
 	eng.AddDriver("lyve", &mockDriver{name: "lyve", getErr: fmt.Errorf("dial tcp: connection refused")})
-	eng.HintBackend("c", "k", "idrive")
-
-	_, err := eng.Get(tenantCtx(), "c", "k")
+	_, err := eng.Get(WithRecordedBackend(tenantCtx(), "idrive"), "c", "k")
 	require.Error(t, err)
 	assert.False(t, errors.Is(err, ErrAllBackendsUnavailable), "an authoritative miss is a miss: %v", err)
 	var nf NotFoundError

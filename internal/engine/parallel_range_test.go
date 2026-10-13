@@ -30,8 +30,7 @@ func TestParallelRangeSource_ResolvesTheRecordedBackend(t *testing.T) {
 	_, _, ok := eng.ParallelRangeSource(tenantCtx(), "c", "a")
 	assert.False(t, ok, "the primary cannot do versioned ranges")
 
-	eng.HintBackend("c", "a", "ranged")
-	name, rg, ok := eng.ParallelRangeSource(tenantCtx(), "c", "a")
+	name, rg, ok := eng.ParallelRangeSource(WithRecordedBackend(tenantCtx(), "ranged"), "c", "a")
 	require.True(t, ok)
 	assert.Equal(t, "ranged", name)
 	rc, info, err := rg.GetRangeInfo(tenantCtx(), "c", "a", 1, 3)

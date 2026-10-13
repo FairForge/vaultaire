@@ -182,8 +182,10 @@ func upsertWholeObjectHeadRowEnc(ctx context.Context, tx *sql.Tx, tenantID, buck
 
 // placeObject writes body at blob — the write's own address (newBlobAddress,
 // WP-R2-1), never the bare key — where the bucket's placement says (WP-R7-1): a
-// bucket pinned to a region this process serves goes straight to that
-// region's driver; a region with no driver is REFUSED with
+// bucket pinned to a region this process serves goes to that region's
+// backend alone, through the engine (PutOn: its breaker, its tenant rule,
+// a broken source tagged ErrCallerAborted — it used to call the driver
+// directly, outside all three, #677); a region with no driver is REFUSED with
 // errRegionDriverUnavailable (never silently the primary — that is a
 // residency breach recorded as normal); everything else goes through the
 // engine, which maps the storage class in opts to a backend. Returns the
@@ -196,13 +198,10 @@ func placeObject(ctx context.Context, db *sql.DB, eng engine.Engine, tenantID, b
 	}
 	if regionDriver != "" {
 		if ce, ok := eng.(*engine.CoreEngine); ok {
-			if drv, exists := ce.GetDriver(regionDriver); exists {
-				if putErr := drv.Put(ctx, container, blob, body, opts...); putErr != nil {
-					return "", fmt.Errorf("region driver %s put %s/%s: %w", regionDriver, container, blob, putErr)
-				}
-				ce.HintBackend(container, blob, regionDriver)
-				return regionDriver, nil
+			if putErr := ce.PutOn(ctx, regionDriver, container, blob, body, opts...); putErr != nil {
+				return "", fmt.Errorf("region driver %s put %s/%s: %w", regionDriver, container, blob, putErr)
 			}
+			return regionDriver, nil
 		}
 	}
 	return eng.Put(ctx, container, blob, body, opts...)

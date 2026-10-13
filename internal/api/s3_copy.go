@@ -364,10 +364,9 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	attrs := resolveCopyAttrs(directive, requestAttrs, sourceAttrs)
 	attrs.Tags = resolveCopyTags(r.Header.Get("x-amz-tagging-directive"), requestAttrs, sourceAttrs)
 
-	// Route the read to the backend that holds the source (routing truth).
-	if srcBackend != "" && s.engine != nil {
+	// The read goes to the backend that holds the source (routing truth).
+	if srcBackend != "" && s.engine != nil && !srcChunked {
 		noteRecordedBackend(s.engine, s.logger, "copy_source", srcBackend)
-		s.engine.HintBackend(srcContainer, srcBlob, srcBackend)
 	}
 	// The source's recorded size goes with the read and the write (Prompt
 	// 2b.2 C3): a backend holding two versions of the key after an

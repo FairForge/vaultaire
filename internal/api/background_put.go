@@ -85,6 +85,13 @@ type generatedObjectWriter struct {
 	// master key: a write into an sse_enabled bucket is refused, never
 	// stored plaintext.
 	sse *crypto.SSEService
+	// allowSync is the PUT's gate for a `sync`-tier bucket (the tenant's
+	// sync_backend flag, syncPlacementGate): a generated object lands where
+	// a PUT into the same bucket would (#677: it was nil, so a report into a
+	// flagged tenant's sync bucket landed on the primary, off the bucket's
+	// tier). nil = no tenant may use sync (the GDPR export's `_exports` is
+	// never a sync bucket).
+	allowSync func(tenantID string) bool
 }
 
 func newGeneratedObjectWriter(db *sql.DB, eng engine.Engine, quota QuotaManager, gci *crypto.GlobalContentIndex, logger *zap.Logger) *generatedObjectWriter {
@@ -217,7 +224,7 @@ func (g *generatedObjectWriter) writeOpts(ctx context.Context, tenantID, bucket,
 		enc = sealer.encryption()
 	}
 
-	class := resolvePutStorageClass(tctx, g.db, g.eng, nil, tenantID, bucket, "")
+	class := resolvePutStorageClass(tctx, g.db, g.eng, g.allowSync, tenantID, bucket, "")
 	floor := usage.FloorOf(class)
 	overQuota := false
 	if g.quota != nil {

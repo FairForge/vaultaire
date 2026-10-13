@@ -416,6 +416,8 @@ func main() {
 		}
 	}
 
+	registerLabDrivers(eng, logger) // a -tags lab build only (lab_on.go)
+
 	// 8. Set primary backend: STORAGE_MODE, else the first configured of
 	// iDrive > Wasabi > Quotaless > S3 > Geyser, else local
 	// (config.StorageModeOrder; the dashboard reads the same value).

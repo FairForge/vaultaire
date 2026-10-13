@@ -495,8 +495,7 @@ func TestErasureSweep_AnOpenBreakerDefersWithoutAskingTheBackend(t *testing.T) {
 	onLocal := f.onLocal(f.primary, T, f.bucket, "orphan")
 	f.fixed.failGet.Store(true)
 	for i := 0; i < 10 && f.eng.GetFailoverStatus()["fixed"] != "open"; i++ {
-		f.eng.HintBackend("c", "probe", "fixed")
-		_, _ = f.eng.Get(common.WithTenantID(context.Background(), "probe-tenant"), "c", "probe")
+		_, _ = f.eng.Get(engine.WithRecordedBackend(common.WithTenantID(context.Background(), "probe-tenant"), "fixed"), "c", "probe")
 	}
 	require.Equal(t, "open", f.eng.GetFailoverStatus()["fixed"], "fixture: the breaker must be open")
 

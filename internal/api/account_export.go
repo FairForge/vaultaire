@@ -474,11 +474,6 @@ func (s *AccountExportService) deleteExportObject(ctx context.Context, tenantID,
 		s.logger.Error("account export: read head row", zap.String("tenant_id", tenantID), zap.Error(err))
 	}
 	blob := blobArtifact(key, storageKey) // the row's address (WP-R2-1)
-	if backend != "" {
-		if ce, ok := s.eng.(*engine.CoreEngine); ok {
-			ce.HintBackend(container, blob, backend)
-		}
-	}
 	if err := s.eng.Delete(engine.WithRecordedBackend(tctx, backend), container, blob); err != nil && !isObjectMissingErr(err) {
 		s.logger.Error("account export: delete object", zap.String("tenant_id", tenantID), zap.String("key", key), zap.Error(err))
 	}

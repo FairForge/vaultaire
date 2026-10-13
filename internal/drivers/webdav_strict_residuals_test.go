@@ -25,9 +25,8 @@ func TestSync_RowWithoutTheSyncDriverIsNeverServedFromThePrimary(t *testing.T) {
 	e.AddDriver("primary", p)
 	ctx := davCtx("tenant-a")
 	require.NoError(t, p.Put(ctx, "c", "doc", strings.NewReader("OLD")))
-	e.HintBackend("c", "doc", "sync")
 
-	rc, err := e.Get(ctx, "c", "doc")
+	rc, err := e.Get(engine.WithRecordedBackend(ctx, "sync"), "c", "doc")
 	if err == nil {
 		b, _ := io.ReadAll(rc)
 		_ = rc.Close()
@@ -78,8 +77,7 @@ func TestSync_MetadataFailuresAreNoDataPathEvidence(t *testing.T) {
 	// Bridge 4 alone goes away: with the others' data path fine this is
 	// partial by the README's definition.
 	bs[4].srv.Close()
-	e.HintBackend("c", on4, "sync")
-	_, err = e.Get(ctx, "c", on4)
+	_, err = e.Get(engine.WithRecordedBackend(ctx, "sync"), "c", on4)
 	require.Error(t, err)
 	t.Logf("err=%v", err)
 	assert.ErrorIs(t, err, engine.ErrPartiallyUnavailable, "one bridge out while the rest's data path answers is partial, whatever their PROPFINDs said")

@@ -352,7 +352,6 @@ func (p *SmartPromoter) flipBack(ctx context.Context, tenantID, bucket, key, eta
 		return false
 	}
 	container, blob := objectBlobAddress(tenantID, bucket, key, storageKey)
-	p.eng.HintBackend(container, blob, p.HotBackend)
 	if cold, ok := p.eng.GetDriver(p.ColdBackend); ok {
 		if err := cold.Delete(common.WithTenantID(ctx, tenantID), container, blob); err != nil {
 			p.logger.Warn("smart promotion: cold copy not removed after flip-back", zap.Error(err))
@@ -488,7 +487,6 @@ func (p *SmartPromoter) promote(ctx context.Context, tenantID, bucket, key, etag
 		}
 		return "changed", nil
 	}
-	p.eng.HintBackend(container, blob, p.HotBackend)
 	if err := cold.Delete(tctx, container, blob); err != nil {
 		p.logger.Warn("smart promotion: cold copy not removed after copy-back", zap.Error(err))
 	}

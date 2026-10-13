@@ -319,11 +319,21 @@ const (
 	carbonFactorKgPerKWh        = 0.4
 )
 
+// tenantBytesByBackendSQL: where a tenant's bytes are, from the tables of
+// record (WP-R6-1: object_locations is no longer written) — whole objects
+// on their head row's backend, chunked objects on each chunk's backend.
+const tenantBytesByBackendSQL = `
+	SELECT backend, COALESCE(SUM(size_bytes), 0)::BIGINT FROM (
+		SELECT backend_name AS backend, size_bytes FROM object_head_cache
+		 WHERE tenant_id = $1 AND NOT is_chunked AND COALESCE(backend_name, '') <> ''
+		UNION ALL
+		SELECT g.backend_id, g.size_bytes FROM tenant_chunk_refs r
+		  JOIN global_content_index g ON g.dedup_scope = r.dedup_scope AND g.plaintext_hash = r.plaintext_hash
+		 WHERE r.tenant_id = $1
+	) b GROUP BY backend`
+
 func populateCarbonBadge(ctx context.Context, db *sql.DB, tenantID string, data map[string]any) {
-	rows, err := db.QueryContext(ctx,
-		`SELECT backend_name, COALESCE(SUM(size_bytes), 0)
-		 FROM object_locations WHERE tenant_id = $1
-		 GROUP BY backend_name`, tenantID)
+	rows, err := db.QueryContext(ctx, tenantBytesByBackendSQL, tenantID)
 	if err != nil {
 		return
 	}

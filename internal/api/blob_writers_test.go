@@ -580,8 +580,7 @@ func TestRetiredBlobs_Collector_OpenBreakerSkipped(t *testing.T) {
 	f.eng.AddDriver("lyve", down)
 	container := f.tenantID + "_b"
 	for i := 0; i < 10 && f.eng.GetFailoverStatus()["lyve"] == "closed"; i++ {
-		f.eng.HintBackend(container, "probe", "lyve")
-		_, _ = f.eng.Get(common.WithTenantID(context.Background(), f.tenantID), container, "probe")
+		_, _ = f.eng.Get(engine.WithRecordedBackend(common.WithTenantID(context.Background(), f.tenantID), "lyve"), container, "probe")
 	}
 	require.Equal(t, "open", f.eng.GetFailoverStatus()["lyve"], "fixture: the breaker must be open")
 	f.retire("lyve", "b", "x@00000000000000000000000000", -time.Second)

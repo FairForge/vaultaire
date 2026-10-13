@@ -41,7 +41,7 @@ func costsQueryRows(mock sqlmock.Sqlmock, rows *sqlmock.Rows) {
 }
 
 func emptyActualBackendRows(mock sqlmock.Sqlmock) {
-	mock.ExpectQuery(`SELECT backend_name, COUNT`).
+	mock.ExpectQuery(`SELECT backend, COUNT`).
 		WillReturnRows(sqlmock.NewRows([]string{"backend_name", "count", "sum"}))
 }
 
@@ -323,7 +323,7 @@ func TestAdminCosts_ActualBackendData(t *testing.T) {
 	costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage_used_bytes", "egress"}))
 
 	oneTB := int64(1024 * 1024 * 1024 * 1024)
-	mock.ExpectQuery(`SELECT backend_name, COUNT`).
+	mock.ExpectQuery(`SELECT backend, COUNT`).
 		WillReturnRows(sqlmock.NewRows([]string{"backend_name", "count", "sum"}).
 			AddRow("idrive", int64(500), oneTB).
 			AddRow("geyser", int64(200), int64(2)*oneTB))
@@ -347,7 +347,7 @@ func TestAdminCosts_ActualBackendData(t *testing.T) {
 // --- Modelled vs invoiced cost view (Lyve promo tracking) ---
 
 func actualBackendRows(mock sqlmock.Sqlmock, rows *sqlmock.Rows) {
-	mock.ExpectQuery(`SELECT backend_name, COUNT`).WillReturnRows(rows)
+	mock.ExpectQuery(`SELECT backend, COUNT`).WillReturnRows(rows)
 }
 
 // tbBytes makes the per-TB rate arithmetic exact in these tests.

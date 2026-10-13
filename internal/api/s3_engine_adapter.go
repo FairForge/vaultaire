@@ -402,15 +402,9 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		cachedBackendName = a.smartPromoter.OnRead(r.Context(), t.ID, bucket, artifact, cachedETag)
 	}
 
-	// Seed the engine's in-memory routing map so GET goes directly to the
-	// correct backend instead of failing over from primary on restart.
-	if cacheHit && cachedBackendName != "" {
-		if !cachedIsChunked { // a chunked row's name is a sentinel, not a route
-			noteRecordedBackend(a.engine, a.logger, "get", cachedBackendName)
-		}
-		if ce, ok := a.engine.(*engine.CoreEngine); ok {
-			ce.HintBackend(container, blob, cachedBackendName)
-		}
+	// The read goes to the backend the row records (gctx below, WP-R6-1).
+	if cacheHit && cachedBackendName != "" && !cachedIsChunked { // a chunked row's name is a sentinel, not a route
+		noteRecordedBackend(a.engine, a.logger, "get", cachedBackendName)
 	}
 	// The class this response reports: the floor decides, not the backend
 	// the bytes are read from (WP-R13-1) — the same value HEAD and the
@@ -2009,9 +2003,6 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 		dctx := r.Context()
 		if recordedBackend != "" {
 			noteRecordedBackend(a.engine, a.logger, "delete", recordedBackend)
-			if ce, ok := a.engine.(*engine.CoreEngine); ok {
-				ce.HintBackend(container, blob, recordedBackend)
-			}
 			dctx = engine.WithRecordedBackend(dctx, recordedBackend)
 		}
 		copies, cErr := knownBlobCopies(r.Context(), a.db, t.ID, bucket, object, container, storageKey, recordedBackend)

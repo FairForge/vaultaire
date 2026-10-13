@@ -5,9 +5,8 @@ package api
 // version, smart_demotions.storage_key for the copies a demotion made) — and
 // NULL means "<key>", for every row written before 2C, for ever. Every reader
 // of whole-object bytes resolves the address through objectBlobAddress (Part
-// B, 086); the engine's routing map (HintBackend, objectBackends,
-// object_locations) is keyed by (container, artifact), so a hint names the
-// address too.
+// B, 086); the engine call names the row's backend on its context
+// (engine.WithRecordedBackend, WP-R6-1) and the address as its artifact.
 //
 // The writers (Part C, 087): every whole-object write — PUT, multipart
 // complete, CopyObject, generated objects, direct-upload complete — puts its
