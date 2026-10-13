@@ -370,3 +370,31 @@ ceremony waits for it. Its Part 0 probes four things this review did not
 drive at the handlers: two concurrent chunked Completes of one upload, a
 chunked Complete racing the reaper, a sealed Complete's version row, and the
 response header of a PUT asking `AES256` on a keyless process.
+
+## Worker probe (WP-R8-5 Part 0, 2026-10-13)
+
+By the WP-R8-5 worker on `59e2769`, at the handlers on a private database
+through 088 (`internal/api/wp_r3_1_probe_test.go`, kept as regression tests).
+**No P0/P1; nothing to fix in its own PR.**
+
+| # | Probe | Result | Sev | Hand-off |
+|---|-------|--------|-----|----------|
+| W-1 | Two Completes of one chunked upload, both reading the last part when the first commits (a barrier in `stagedPartReadHook`) | Both 200 (the loser had its parts open; unlinking the staging directory does not cut an open file); `tenant_chunk_refs` for the key = one object's chunks, the sum of their GCI `ref_count` = the row count (1 each), usage = the size once, GET equal | holds | — |
+| W-1b | The same without the barrier, 40 runs | 40 × `[200 200]`, refs and bill exact every time; a third Complete afterwards is a replay (200, usage unchanged) | holds | — |
+| W-2 | The reaper's abort (`status = 'aborted'` + `RemoveAll`) between parts 2 and 3 of a chunked Complete over an existing object | 500 `InternalError` (`errStagedPartCorrupt`); the previous object still served, usage = the previous object only (reservation released), 0 `tenant_chunk_refs` for the tenant (compensated), the row stays `aborted`, a retry is 404 `NoSuchUpload` | holds | — |
+| W-3 | A sealed Complete in an Enabled `sse_enabled` bucket, then an overwrite | The version row carries `ML-KEM-768+AES-256-GCM` and `encryption_key_version` 1; 0 plaintext markers on the backend; `GET ?versionId=<old>` equal with `x-amz-server-side-encryption: AES256`, `HEAD ?versionId` reports `AES256` | holds | — |
+| W-4 | PUT with `x-amz-server-side-encryption: AES256` on a process with no master key, into a bucket that is not `sse_enabled`; CreateMultipartUpload with the same header | PUT 200, the object stored **plaintext** (`encryption_algorithm` '', markers on the backend); neither the PUT, the HEAD nor the Create echoes `x-amz-server-side-encryption` — so no lie in a header, but a client that asked for encryption is told nothing | **P2** | WP-R8-5 Part A: `decidePlacement` refuses `SSERequested` without an SSE service exactly like an `sse_enabled` bucket (503 + Retry-After), and so does Create (`TestPut_SSEHeader_NoKey_Refused503`) |
+
+The Part 0 grep list (every reader of `SSEOverheadBytes`, `MaxEncryptableSize`,
+`maxSSEObjectSize`, `EncryptBytes`, `DecryptBytes`, `SSECEncrypt`/`SSECDecrypt`,
+`sseSealingReader`, `openSSEBlob`; `encryption_algorithm` readers are SQL
+columns and listed in `docs/reviews/WP-R8-5.md`) is Part A's work list:
+
+- `internal/crypto/sse_s3.go:26-28,58,85,100,116`, `ssec.go:17,22,49`;
+- `internal/api/placement.go:25,45,157,160` (the seal-or-413 branch);
+- `s3_engine_adapter.go:604` (SSE-C GET), `:637` (SSE-S3 GET), `:1009,1036` (SSE-C PUT), `:1075` (SSE-S3 PUT);
+- `s3_multipart.go:784-796` (Complete's `sseSealingReader`);
+- `s3_copy.go:343` (the 413), `:478-488` (the copy's sealer), `:870-940` (`sseSealingReader` itself);
+- `background_put.go:56-58,99,110,234` (`maxSSEObjectSize`, generated objects);
+- `cdn.go:122` (the "row inconsistent" cap), `:290`, `:354-361` (`openSSEBlob`);
+- `key_reencrypt_whole.go:12,227,237,249`.
