@@ -137,11 +137,6 @@ func parseContentMD5(r *http.Request) (string, error) {
 	return hex.EncodeToString(raw), nil
 }
 
-// ssecMaxObjectSize is the largest SSE-C PUT: the customer-key seal is still
-// one AES-GCM over the buffered object (WP-R8-5 Part B moves it to the
-// streaming codec and removes this).
-const ssecMaxObjectSize int64 = 256 << 20
-
 // NewS3ToEngine creates a new adapter
 func NewS3ToEngine(e engine.Engine, db *sql.DB, logger *zap.Logger) *S3ToEngine {
 	return &S3ToEngine{
@@ -491,43 +486,76 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	if cacheHit {
 		gctx = engine.WithExpectedSize(gctx, cachedSize)
 	}
-	// An SSE-S3 object opens as it streams (WP-R8-5, sse_stream.go): the
-	// status line follows its verified header and first segment; a Range
-	// reads the header and the segments it spans. Sized by its stored
-	// length (a backend holding two versions of a key picks by it).
-	sealedS3 := cacheHit && cachedEncAlgo != "" && cachedEncAlgo != crypto.SSECAlgorithm
-	if sealedS3 {
-		if a.sseService == nil {
-			// The row says the blob is SSE-S3 ciphertext and this process has
-			// no master key (unset, mistyped, rotated on one node). Serving
-			// the raw blob as a 200 hands the client garbage cut to the
-			// plaintext Content-Length (R8-04) — fail closed instead, before
-			// any backend call.
-			a.logger.Error("encrypted object read with no SSE service: ENCRYPTION_MASTER_KEY is not configured on this process",
-				zap.String("bucket", bucket), zap.String("object", artifact), zap.String("algorithm", cachedEncAlgo))
-			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-			return
+	// A sealed object — SSE-S3 under the tenant's key, SSE-C under the
+	// customer's — opens as it streams (WP-R8-5, sse_stream.go): the status
+	// line follows its verified header and first segment; a Range reads the
+	// header and the segments it spans. Sized by its stored length (a
+	// backend holding two versions of a key picks by it).
+	sealed := cacheHit && cachedEncAlgo != ""
+	if sealed {
+		var op blobOpener
+		var ssecKey []byte
+		if crypto.IsSSEC(cachedEncAlgo) {
+			if !crypto.HasSSECHeaders(r) {
+				WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
+					WithSuggestion("This object was encrypted with SSE-C. Provide the encryption key."))
+				return
+			}
+			var parseErr error
+			if ssecKey, parseErr = crypto.ParseSSECHeaders(r); parseErr != nil {
+				WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(),
+					WithSuggestion(parseErr.Error()))
+				return
+			}
+			op = sseCOpener{key: ssecKey, legacy: cachedEncAlgo == crypto.SSECAlgorithm}
+		} else {
+			if a.sseService == nil {
+				// The row says the blob is SSE-S3 ciphertext and this process
+				// has no master key (unset, mistyped, rotated on one node).
+				// Serving the raw blob as a 200 hands the client garbage cut
+				// to the plaintext Content-Length (R8-04) — fail closed
+				// instead, before any backend call.
+				a.logger.Error("encrypted object read with no SSE service: ENCRYPTION_MASTER_KEY is not configured on this process",
+					zap.String("bucket", bucket), zap.String("object", artifact), zap.String("algorithm", cachedEncAlgo))
+				WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+				return
+			}
+			op = sseS3Opener{svc: a.sseService, tenantID: t.ID}
 		}
 		if rh := r.Header.Get("Range"); rh != "" && !errors.Is(rangeParseErr(rh, cachedSize), errMultiRange) {
 			rng, parseErr := parseRangeHeader(rh, cachedSize)
 			if parseErr != nil {
+				clear(ssecKey)
 				writeRangeNotSatisfiable(w, cachedSize)
 				return
 			}
 			wantRange = rng
 		}
 		var fromParity bool
-		reader, fromParity, err = a.openSealedGet(r.Context(), t.ID, bucket, artifact, container, blob, cachedETag,
-			cachedSize, cachedFloor, cachedBackendName, wantRange)
-		if err == nil {
+		reader, fromParity, err = a.openSealedGet(r.Context(), op, t.ID, bucket, artifact, container, blob, cachedETag,
+			cachedSize, storedBlobLength(cachedEncAlgo, cachedSize, a.sseService), cachedFloor, cachedBackendName, wantRange)
+		// Every open has derived its key by now (the DEK of a streaming
+		// blob, the old format's whole read): the customer's key goes.
+		clear(ssecKey)
+		switch {
+		case err == nil:
 			nativeRange = wantRange
-			w.Header().Set("x-amz-server-side-encryption", "AES256")
+			if ssecKey != nil {
+				w.Header().Set("x-amz-server-side-encryption-customer-algorithm", "AES256")
+			} else {
+				w.Header().Set("x-amz-server-side-encryption", "AES256")
+			}
 			if fromParity {
 				w.Header().Set("x-vaultaire-served-from", "parity")
 			}
-		} else if errors.Is(err, errSealedUnreadable) {
-			a.logger.Error("SSE-S3 object does not open", zap.Error(err),
-				zap.String("bucket", bucket), zap.String("object", artifact))
+		case errors.Is(err, crypto.ErrSSECKeyMismatch):
+			// Decided at the first segment, before the status line.
+			WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
+				WithSuggestion("The provided encryption key does not match."))
+			return
+		case errors.Is(err, errSealedUnreadable):
+			a.logger.Error("encrypted object does not open", zap.Error(err),
+				zap.String("bucket", bucket), zap.String("object", artifact), zap.String("algorithm", cachedEncAlgo))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 			return
 		}
@@ -572,14 +600,14 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	if reader == nil && cacheHit && cachedEncAlgo == "" && cachedFloor != usage.FloorVault && r.Header.Get("Range") == "" {
 		reader = a.openParallelGet(gctx, t.ID, container, blob, cachedSize, 0, cachedSize)
 	}
-	if reader == nil && err == nil && !sealedS3 {
+	if reader == nil && err == nil && !sealed {
 		reader, err = a.engine.Get(gctx, container, blob)
 	}
 	// A vault object whose backend failed — an error, not found through the
 	// failover chain, an open breaker — is rebuilt from its parity copy when
 	// there is one (WP-VAULT-1). On tape (ErrArchived) is the object's state,
 	// not a failure: the restore semantics stay.
-	if err != nil && !sealedS3 && cacheHit && cachedFloor == usage.FloorVault && a.vaultParity != nil && !errors.Is(err, engine.ErrArchived) {
+	if err != nil && !sealed && cacheHit && cachedFloor == usage.FloorVault && a.vaultParity != nil && !errors.Is(err, engine.ErrArchived) {
 		off, n := int64(0), cachedSize
 		if wantRange != nil {
 			off, n = wantRange.start, wantRange.length
@@ -628,42 +656,6 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	defer func() { _ = reader.Close() }()
 
 	var dataReader io.Reader = reader
-	if cachedEncAlgo == crypto.SSECAlgorithm {
-		if !crypto.HasSSECHeaders(r) {
-			WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
-				WithSuggestion("This object was encrypted with SSE-C. Provide the encryption key."))
-			return
-		}
-		ssecKey, parseErr := crypto.ParseSSECHeaders(r)
-		if parseErr != nil {
-			WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(),
-				WithSuggestion(parseErr.Error()))
-			return
-		}
-
-		encBytes, readErr := io.ReadAll(reader)
-		if readErr != nil {
-			a.logger.Error("failed to read SSE-C encrypted object", zap.Error(readErr))
-			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-			return
-		}
-		plaintext, decErr := crypto.SSECDecrypt(ssecKey, encBytes)
-		for i := range ssecKey {
-			ssecKey[i] = 0
-		}
-		if decErr != nil {
-			if errors.Is(decErr, crypto.ErrSSECKeyMismatch) {
-				WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
-					WithSuggestion("The provided encryption key does not match."))
-				return
-			}
-			a.logger.Error("SSE-C decryption failed", zap.Error(decErr))
-			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-			return
-		}
-		dataReader = bytes.NewReader(plaintext)
-		w.Header().Set("x-amz-server-side-encryption-customer-algorithm", "AES256")
-	}
 
 	// Content-Disposition: ?response-content-disposition overrides the stored
 	// value (applies to both presigned and plain authenticated GET, since it's
@@ -1027,11 +1019,6 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 				WithSuggestion("Cannot use SSE-S3 and SSE-C simultaneously."))
 			return
 		}
-		if size <= 0 || size > ssecMaxObjectSize {
-			WriteS3Error(w, ErrEntityTooLarge, r.URL.Path, generateRequestID())
-			return
-		}
-
 		ssecKey, parseErr := crypto.ParseSSECHeaders(r)
 		if parseErr != nil {
 			WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(),
@@ -1039,35 +1026,23 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 			return
 		}
 
-		plaintext, readErr := io.ReadAll(hashingBody)
-		if readErr != nil {
-			a.logger.Error("failed to read plaintext for SSE-C encryption", zap.Error(readErr))
-			WriteS3Error(w, bodyReadErrorCode(readErr), r.URL.Path, generateRequestID())
-			return
-		}
-		if sizeDeclared && int64(len(plaintext)) != metadataSize {
-			WriteS3Error(w, ErrIncompleteBody, r.URL.Path, generateRequestID())
-			return
-		}
-		if wantMD5 != "" && fmt.Sprintf("%x", hasher.Sum(nil)) != wantMD5 {
-			WriteS3Error(w, ErrBadDigest, r.URL.Path, generateRequestID())
-			return
-		}
-
-		ciphertext, encErr := crypto.SSECEncrypt(ssecKey, plaintext)
+		// Sealed as it streams under the customer's key (WP-R8-5 Part B,
+		// the codec's kind 0x02, any size): the DEK is derived from the key
+		// and the blob's own salt before SSECSeal returns, so the key is
+		// zeroed at once. The MD5 tee sees the plaintext; a body short or
+		// long of its size fails the sealer's read (the client's 400), a
+		// Content-MD5 mismatch retires the written blob below — as on the
+		// plain path.
+		sealed, encErr := crypto.SSECSeal(ssecKey, hashingBody, metadataSize)
+		clear(ssecKey)
 		if encErr != nil {
 			a.logger.Error("SSE-C encryption failed", zap.Error(encErr))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 			return
 		}
-
-		for i := range ssecKey {
-			ssecKey[i] = 0
-		}
-
-		hashingBody = bytes.NewReader(ciphertext)
-		size = int64(len(ciphertext))
-		encryptionAlgorithm = crypto.SSECAlgorithm
+		hashingBody = sealed
+		size = crypto.SSECSealedLength(metadataSize)
+		encryptionAlgorithm = crypto.SSECAlgorithmV3
 	} else {
 		shouldEncrypt := placement.Kind == placeWholeSealed
 
@@ -1299,7 +1274,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	// Object size on the PutObject response (newer AWS surface; SDKs expose
 	// it as PutObjectOutput.Size and test suites assert it).
 	w.Header().Set("x-amz-object-size", strconv.FormatInt(metadataSize, 10))
-	if encryptionAlgorithm == crypto.SSECAlgorithm {
+	if crypto.IsSSEC(encryptionAlgorithm) {
 		w.Header().Set("x-amz-server-side-encryption-customer-algorithm", "AES256")
 	} else if encryptionAlgorithm != "" {
 		w.Header().Set("x-amz-server-side-encryption", "AES256")

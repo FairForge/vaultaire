@@ -109,7 +109,7 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 	// object's per-chunk encryption is not this column's business here.
 	if !isChunked && encAlgo != "" {
 		switch {
-		case encAlgo == crypto.SSECAlgorithm:
+		case crypto.IsSSEC(encAlgo):
 			http.Error(w, "this object is encrypted with a customer-provided key and cannot be served publicly", http.StatusForbidden)
 			return
 		case s.sseService == nil:
@@ -243,7 +243,7 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 			reader = cr
 		}
 	} else if sealed {
-		req := sealedRead{TenantID: tenantID, Size: sizeBytes}
+		req := sealedRead{Size: sizeBytes}
 		if rangeHeader != "" {
 			rng, parseErr := parseRangeHeader(rangeHeader, sizeBytes)
 			if parseErr != nil {
@@ -257,7 +257,7 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 			whole:  func() (io.ReadCloser, error) { return s.engine.Get(ctx, container, blob) },
 			ranged: func(off, n int64) (io.ReadCloser, error) { return s.engine.GetRange(ctx, container, blob, off, n) },
 		}
-		reader, err = openSealed(ctx, s.sseService, src, req)
+		reader, err = openSealed(ctx, sseS3Opener{svc: s.sseService, tenantID: tenantID}, src, req)
 	} else {
 		reader, err = s.engine.Get(ctx, container, blob)
 	}

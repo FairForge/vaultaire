@@ -20,6 +20,10 @@ what you need and it shows up here.
   rclone moves) of an encrypted object used to answer `501 NotImplemented`;
   it now copies it, encrypted again in its destination. Objects encrypted
   with your own key (SSE-C) still cannot be copied server-side.
+- **Your own key (SSE-C) works at any size too.** Objects encrypted with a
+  customer-provided key are sealed as they stream, so the 256 MiB limit is
+  gone there as well, and ranged downloads read only what they need.
+  Objects you uploaded with SSE-C before still open with the same key.
 - **`x-amz-server-side-encryption` on multipart uploads.** The header sent
   on `CreateMultipartUpload` is honoured at `CompleteMultipartUpload`, and
   both answer it when the object is encrypted. A request that asks for

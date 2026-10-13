@@ -11,6 +11,7 @@ package api
 
 import (
 	"bytes"
+	"github.com/FairForge/vaultaire/internal/crypto"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -42,7 +43,7 @@ func TestSSEC_AboveChunkThreshold_NotChunked(t *testing.T) {
 		WHERE tenant_id = $1 AND bucket = 'test-bucket' AND object_key = 'ssec-big.bin'`,
 		f.tenantID).Scan(&isChunked, &algo))
 	assert.False(t, isChunked, "SSE-C bodies are ciphertext — they must never be chunked")
-	assert.Equal(t, "AES256-SSE-C", algo, "the SSE-C marker must survive")
+	assert.Equal(t, crypto.SSECAlgorithmV3, algo, "the SSE-C marker must survive (the streaming format since WP-R8-5 Part B)")
 
 	// GET with the key returns the plaintext.
 	getReq := httptest.NewRequest("GET", "/test-bucket/ssec-big.bin", nil)

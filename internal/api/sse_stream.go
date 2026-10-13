@@ -55,17 +55,19 @@ func countSSEOpens(svc *crypto.SSEService) {
 }
 
 // storedBlobLength is the length of a whole object's stored blob: its size,
-// or the sealed length of an encrypted one (a 0x03 SSE-S3 blob; an SSE-C
-// blob's nonce and tag). A 0x01/0x02 blob written before WP-R8-5 is
-// size + SSEOverheadBytes and is not this length: nothing but the vault
-// parity job sizes by it, and that job then fails such a blob as before
-// (prod holds none).
+// or the sealed length of an encrypted one (a 0x03 SSE-S3 or SSE-C blob; an
+// old-format SSE-C blob's nonce and tag). A 0x01/0x02 SSE-S3 blob written
+// before WP-R8-5 is size + SSEOverheadBytes and is not this length: the
+// readers that size by it then fall back as for any other size mismatch,
+// and the vault parity job fails such a blob as before (prod holds none).
 func storedBlobLength(encAlgo string, size int64, sse *crypto.SSEService) int64 {
 	switch {
 	case encAlgo == "":
 		return size
 	case encAlgo == crypto.SSECAlgorithm:
 		return size + crypto.SSECOverhead
+	case encAlgo == crypto.SSECAlgorithmV3:
+		return crypto.SSECSealedLength(size)
 	case sse != nil:
 		return sse.SealedLength(size)
 	}
@@ -106,7 +108,57 @@ func (s *sseWriteSealer) encryption() objectEncryption {
 	return objectEncryption{Algorithm: crypto.SSEAlgorithm, KeyVersion: &v}
 }
 
-// sealedSource is where an SSE-S3 object's stored bytes are read from.
+// blobOpener opens a sealed object's stored bytes: SSE-S3 under the tenant's
+// key, SSE-C under the customer's.
+type blobOpener interface {
+	// whole opens a whole blob (the first segment verified before it returns).
+	whole(ctx context.Context, src io.Reader) (io.Reader, error)
+	// rangeOf opens the planned segments of a 0x03 blob.
+	rangeOf(ctx context.Context, h *crypto.StreamHeader, size int64, rg crypto.StreamRange, src io.Reader) (io.Reader, error)
+	// streaming: the blob is (or may be, by its first byte) a 0x03 blob a
+	// range can be read from by segment. An old-format SSE-C blob is not:
+	// its first byte is a random nonce byte, never a format marker.
+	streaming() bool
+}
+
+// sseS3Opener opens SSE-S3 blobs of one tenant: 0x03, or 0x01/0x02 by the
+// compatibility opener (their first bytes are those markers).
+type sseS3Opener struct {
+	svc      *crypto.SSEService
+	tenantID string
+}
+
+func (o sseS3Opener) whole(ctx context.Context, src io.Reader) (io.Reader, error) {
+	return o.svc.Open(ctx, o.tenantID, src)
+}
+
+func (o sseS3Opener) rangeOf(ctx context.Context, h *crypto.StreamHeader, size int64, rg crypto.StreamRange, src io.Reader) (io.Reader, error) {
+	return o.svc.OpenRange(ctx, o.tenantID, h, size, rg, src)
+}
+
+func (sseS3Opener) streaming() bool { return true }
+
+// sseCOpener opens SSE-C blobs under the customer's key: the format is the
+// row's (crypto.SSECAlgorithmV3 = streaming, crypto.SSECAlgorithm = old).
+type sseCOpener struct {
+	key    []byte
+	legacy bool
+}
+
+func (o sseCOpener) whole(_ context.Context, src io.Reader) (io.Reader, error) {
+	if o.legacy {
+		return crypto.SSECOpenLegacy(o.key, src)
+	}
+	return crypto.SSECOpen(o.key, src)
+}
+
+func (o sseCOpener) rangeOf(_ context.Context, h *crypto.StreamHeader, size int64, rg crypto.StreamRange, src io.Reader) (io.Reader, error) {
+	return crypto.SSECOpenRange(o.key, h, size, rg, src)
+}
+
+func (o sseCOpener) streaming() bool { return !o.legacy }
+
+// sealedSource is where a sealed object's stored bytes are read from.
 type sealedSource struct {
 	// whole opens the stored blob from its first byte.
 	whole func() (io.ReadCloser, error)
@@ -118,10 +170,9 @@ type sealedSource struct {
 	rangeFallback func(err error) bool
 }
 
-// sealedRead is a request for plaintext of an SSE-S3 object: [Off, Off+N),
+// sealedRead is a request for plaintext of a sealed object: [Off, Off+N),
 // or the whole object when Ranged is false.
 type sealedRead struct {
-	TenantID string
 	// Size is the object's plaintext size (its row's size_bytes).
 	Size   int64
 	Ranged bool
@@ -134,9 +185,9 @@ type sealedRead struct {
 // unavailable, missing, archived — as the plain path answers it). The
 // reader it returns fails, never ends short, when a later segment does not
 // open or the plaintext is not the row's size.
-func openSealed(ctx context.Context, svc *crypto.SSEService, src sealedSource, req sealedRead) (io.ReadCloser, error) {
-	if req.Ranged && src.ranged != nil {
-		rc, err := openSealedRange(ctx, svc, src, req)
+func openSealed(ctx context.Context, op blobOpener, src sealedSource, req sealedRead) (io.ReadCloser, error) {
+	if req.Ranged && src.ranged != nil && op.streaming() {
+		rc, err := openSealedRange(ctx, op, src, req)
 		switch {
 		case err == nil:
 			return rc, nil
@@ -152,7 +203,7 @@ func openSealed(ctx context.Context, svc *crypto.SSEService, src sealedSource, r
 	if err != nil {
 		return nil, err
 	}
-	pt, err := svc.Open(ctx, req.TenantID, stored)
+	pt, err := op.whole(ctx, stored)
 	if err != nil {
 		_ = stored.Close()
 		return nil, fmt.Errorf("%w: %w", errSealedUnreadable, err)
@@ -175,7 +226,7 @@ var errSealedLegacy = errors.New("SSE-S3 blob is not a streaming one")
 // openSealedRange is the ranged open of a 0x03 blob: its header, then the
 // segments the range spans. A 0x01/0x02 blob is errSealedLegacy; a source
 // error is returned as is (the caller may retry whole).
-func openSealedRange(ctx context.Context, svc *crypto.SSEService, src sealedSource, req sealedRead) (io.ReadCloser, error) {
+func openSealedRange(ctx context.Context, op blobOpener, src sealedSource, req sealedRead) (io.ReadCloser, error) {
 	hr, err := src.ranged(0, int64(crypto.MaxStreamHeader))
 	if err != nil {
 		return nil, err
@@ -201,7 +252,7 @@ func openSealedRange(ctx context.Context, svc *crypto.SSEService, src sealedSour
 	if err != nil {
 		return nil, err
 	}
-	pt, err := svc.OpenRange(ctx, req.TenantID, h, req.Size, plan, io.LimitReader(sr, plan.CipherLength))
+	pt, err := op.rangeOf(ctx, h, req.Size, plan, io.LimitReader(sr, plan.CipherLength))
 	if err != nil {
 		_ = sr.Close()
 		return nil, fmt.Errorf("%w: %w", errSealedUnreadable, err)
@@ -235,17 +286,16 @@ type readCloser struct {
 	io.Closer
 }
 
-// openSealedGet opens an SSE-S3 object for the S3 GET: whole, or the range
+// openSealedGet opens a sealed (SSE-S3 or SSE-C) object for the S3 GET: whole, or the range
 // by segment (engine.GetRange: a native ranged read on the fixed-bucket,
 // Lyve, R2, Geyser and WebDAV drivers; a whole read with discard elsewhere).
 // A vault object whose backend failed — never ErrArchived, which keeps the
 // restore semantics — is opened from its parity copy, which holds the stored
 // (sealed) bytes: fromParity reports it.
-func (a *S3ToEngine) openSealedGet(ctx context.Context, tenantID, bucket, key, container, blob, etag string,
-	size int64, floor, backendName string, rng *httpRange) (rc io.ReadCloser, fromParity bool, err error) {
-	stored := a.sseService.SealedLength(size)
+func (a *S3ToEngine) openSealedGet(ctx context.Context, op blobOpener, tenantID, bucket, key, container, blob, etag string,
+	size, stored int64, floor, backendName string, rng *httpRange) (rc io.ReadCloser, fromParity bool, err error) {
 	sctx := engine.WithExpectedSize(ctx, stored)
-	req := sealedRead{TenantID: tenantID, Size: size}
+	req := sealedRead{Size: size}
 	if rng != nil {
 		req.Ranged, req.Off, req.N = true, rng.start, rng.length
 	}
@@ -258,7 +308,7 @@ func (a *S3ToEngine) openSealedGet(ctx context.Context, tenantID, bucket, key, c
 			return !errors.Is(err, engine.ErrAllBackendsUnavailable) || !engine.IsStrictTarget(backendName)
 		}
 	}
-	rc, err = openSealed(ctx, a.sseService, src, req)
+	rc, err = openSealed(ctx, op, src, req)
 	if err == nil || errors.Is(err, errSealedUnreadable) {
 		return rc, false, err
 	}
@@ -273,7 +323,7 @@ func (a *S3ToEngine) openSealedGet(ctx context.Context, tenantID, bucket, key, c
 			return a.vaultParity.Open(ctx, tenantID, bucket, key, blob, etag, stored, off, n)
 		},
 	}
-	prc, perr := openSealed(ctx, a.sseService, psrc, req)
+	prc, perr := openSealed(ctx, op, psrc, req)
 	if perr != nil {
 		a.logger.Error("vault object: its backend failed and the parity copy cannot serve it",
 			zap.String("bucket", bucket), zap.String("key", key), zap.NamedError("backend", err), zap.NamedError("parity", perr))

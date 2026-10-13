@@ -864,7 +864,7 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 			}
 		}
 	}
-	if encAlgo == crypto.SSECAlgorithm {
+	if crypto.IsSSEC(encAlgo) {
 		if !crypto.HasSSECHeaders(r) {
 			WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
 				WithSuggestion("This object was encrypted with SSE-C. Provide the encryption key to access metadata."))
@@ -945,7 +945,7 @@ func (s *Server) headVersion(w http.ResponseWriter, r *http.Request, tenantID st
 		WriteS3Error(w, ErrPreconditionFailed, r.URL.Path, generateRequestID())
 		return true
 	}
-	if encAlgo == crypto.SSECAlgorithm {
+	if crypto.IsSSEC(encAlgo) {
 		if !crypto.HasSSECHeaders(r) {
 			WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
 				WithSuggestion("This object was encrypted with SSE-C. Provide the encryption key to access metadata."))

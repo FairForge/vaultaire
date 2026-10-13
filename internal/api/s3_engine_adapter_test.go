@@ -290,7 +290,7 @@ func TestPutObject_SSEC_Encrypts(t *testing.T) {
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
 		f.tenantID, "test-bucket", "ssec-obj.txt").Scan(&encAlgo)
 	require.NoError(t, err)
-	assert.Equal(t, crypto.SSECAlgorithm, encAlgo)
+	assert.Equal(t, crypto.SSECAlgorithmV3, encAlgo, "the streaming SSE-C format since WP-R8-5 Part B")
 
 	var storedSize int64
 	err = f.db.QueryRow(`

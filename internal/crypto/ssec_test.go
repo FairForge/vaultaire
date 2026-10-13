@@ -1,9 +1,14 @@
 package crypto
 
 import (
+	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/md5" // #nosec G401 — S3 spec requires MD5
 	"crypto/rand"
 	"encoding/base64"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -24,7 +29,7 @@ func TestSSECEncryptDecrypt(t *testing.T) {
 	key := testSSECKey(t)
 	plaintext := []byte("hello, SSE-C world!")
 
-	ciphertext, err := SSECEncrypt(key, plaintext)
+	ciphertext, err := legacySSECEncrypt(key, plaintext)
 	require.NoError(t, err)
 	assert.Equal(t, len(plaintext)+SSECOverhead, len(ciphertext))
 
@@ -36,7 +41,7 @@ func TestSSECEncryptDecrypt(t *testing.T) {
 func TestSSECEncryptDecrypt_EmptyPlaintext(t *testing.T) {
 	key := testSSECKey(t)
 
-	ciphertext, err := SSECEncrypt(key, []byte{})
+	ciphertext, err := legacySSECEncrypt(key, []byte{})
 	require.NoError(t, err)
 	assert.Equal(t, SSECOverhead, len(ciphertext))
 
@@ -49,7 +54,7 @@ func TestSSECDecrypt_WrongKey(t *testing.T) {
 	key := testSSECKey(t)
 	wrongKey := testSSECKey(t)
 
-	ciphertext, err := SSECEncrypt(key, []byte("secret data"))
+	ciphertext, err := legacySSECEncrypt(key, []byte("secret data"))
 	require.NoError(t, err)
 
 	_, err = SSECDecrypt(wrongKey, ciphertext)
@@ -57,8 +62,8 @@ func TestSSECDecrypt_WrongKey(t *testing.T) {
 	assert.ErrorIs(t, err, ErrSSECKeyMismatch)
 }
 
-func TestSSECEncrypt_InvalidKeyLength(t *testing.T) {
-	_, err := SSECEncrypt(make([]byte, 16), []byte("data"))
+func TestLegacySSECEncrypt_InvalidKeyLength(t *testing.T) {
+	_, err := legacySSECEncrypt(make([]byte, 16), []byte("data"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "32 bytes")
 }
@@ -76,13 +81,13 @@ func TestSSECDecrypt_DataTooShort(t *testing.T) {
 	assert.Contains(t, err.Error(), "too short")
 }
 
-func TestSSECEncrypt_DifferentCiphertexts(t *testing.T) {
+func TestLegacySSECEncrypt_DifferentCiphertexts(t *testing.T) {
 	key := testSSECKey(t)
 	plaintext := []byte("same data")
 
-	ct1, err := SSECEncrypt(key, plaintext)
+	ct1, err := legacySSECEncrypt(key, plaintext)
 	require.NoError(t, err)
-	ct2, err := SSECEncrypt(key, plaintext)
+	ct2, err := legacySSECEncrypt(key, plaintext)
 	require.NoError(t, err)
 
 	assert.NotEqual(t, ct1, ct2, "different nonces should produce different ciphertexts")
@@ -191,4 +196,111 @@ func TestHasSSECHeaders(t *testing.T) {
 
 func TestSSECOverheadConstant(t *testing.T) {
 	assert.Equal(t, 28, SSECOverhead)
+}
+
+// legacySSECEncrypt is the SSE-C writer before WP-R8-5 Part B (SSECEncrypt):
+// [nonce 12][AES-GCM ct+tag], one GCM over the object. A fixture: no
+// production code writes this format.
+func legacySSECEncrypt(key, plaintext []byte) ([]byte, error) {
+	if len(key) != 32 {
+		return nil, fmt.Errorf("ssec: key must be 32 bytes, got %d", len(key))
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+	return gcm.Seal(nonce, nonce, plaintext, nil), nil
+}
+
+// WP-R8-5 Part B: SSE-C is kind 0x02 of the streaming codec.
+func TestSSECStream_RoundTripRangeWrongKey(t *testing.T) {
+	key := testSSECKey(t)
+	pt := make([]byte, 3*StreamSegmentSize+777)
+	_, _ = rand.Read(pt)
+
+	r, err := SSECSeal(key, bytes.NewReader(pt), int64(len(pt)))
+	require.NoError(t, err)
+	blob, err := io.ReadAll(r)
+	require.NoError(t, err)
+	assert.Equal(t, SSECSealedLength(int64(len(pt))), int64(len(blob)))
+	assert.Equal(t, StreamFormat, blob[0])
+	assert.Equal(t, StreamKindSSEC, blob[1])
+
+	o, err := SSECOpen(key, bytes.NewReader(blob))
+	require.NoError(t, err)
+	got, err := io.ReadAll(o)
+	require.NoError(t, err)
+	assert.Equal(t, pt, got)
+
+	h, err := ParseStreamHeader(blob)
+	require.NoError(t, err)
+	plan, err := PlanStreamRange(h, int64(len(pt)), StreamSegmentSize-5, 10)
+	require.NoError(t, err)
+	rr, err := SSECOpenRange(key, h, int64(len(pt)), plan, bytes.NewReader(blob[plan.CipherOffset:plan.CipherOffset+plan.CipherLength]))
+	require.NoError(t, err)
+	part, err := io.ReadAll(rr)
+	require.NoError(t, err)
+	assert.Equal(t, pt[StreamSegmentSize-5:StreamSegmentSize+5], part)
+
+	wrong := testSSECKey(t)
+	_, err = SSECOpen(wrong, bytes.NewReader(blob))
+	assert.ErrorIs(t, err, ErrSSECKeyMismatch, "decided at the first segment, before any byte")
+	_, err = SSECOpenRange(wrong, h, int64(len(pt)), plan, bytes.NewReader(blob[plan.CipherOffset:plan.CipherOffset+plan.CipherLength]))
+	assert.ErrorIs(t, err, ErrSSECKeyMismatch)
+}
+
+// One customer key over many objects never repeats a (key, nonce): every
+// blob has its own salt, so its own DEK.
+func TestSSECStream_SameKeySameBytes_DifferentBlobs(t *testing.T) {
+	key := testSSECKey(t)
+	pt := []byte("the same plaintext under the same customer key")
+	a, err := SSECSeal(key, bytes.NewReader(pt), int64(len(pt)))
+	require.NoError(t, err)
+	b, err := SSECSeal(key, bytes.NewReader(pt), int64(len(pt)))
+	require.NoError(t, err)
+	ab, _ := io.ReadAll(a)
+	bb, _ := io.ReadAll(b)
+	assert.NotEqual(t, ab[2:18], bb[2:18], "a fresh salt per object")
+	assert.NotEqual(t, ab[StreamHeaderSSEC:], bb[StreamHeaderSSEC:])
+}
+
+// The old format still opens, through its bounded opener; the row says which
+// format a blob is in, so an old blob whose random nonce starts like a 0x03
+// SSE-C header is opened as what it is.
+func TestSSECStream_OldBlobAndTheMagicCollision(t *testing.T) {
+	key := testSSECKey(t)
+	pt := []byte("an SSE-C object written before WP-R8-5 Part B")
+	var old []byte
+	for {
+		b, err := legacySSECEncrypt(key, pt)
+		require.NoError(t, err)
+		if b[0] == StreamFormat {
+			old = b
+			break
+		}
+	}
+	old[1] = StreamKindSSEC // and the kind byte too: a nonce is any 12 bytes
+	block, _ := aes.NewCipher(key)
+	gcm, _ := cipher.NewGCM(block)
+	old = gcm.Seal(append([]byte(nil), old[:12]...), old[:12], pt, nil)
+	require.Equal(t, []byte{StreamFormat, StreamKindSSEC}, old[:2])
+
+	r, err := SSECOpenLegacy(key, bytes.NewReader(old))
+	require.NoError(t, err)
+	got, err := io.ReadAll(r)
+	require.NoError(t, err)
+	assert.Equal(t, pt, got, "the row said old format: opened as one")
+	_, err = SSECOpen(key, bytes.NewReader(old))
+	assert.Error(t, err, "read as a streaming blob it does not open: the row is what decides")
+
+	assert.True(t, IsSSEC(SSECAlgorithm) && IsSSEC(SSECAlgorithmV3))
+	assert.False(t, IsSSEC(SSEAlgorithm) || IsSSEC(""))
 }
