@@ -864,11 +864,12 @@ func (r *routingCollector) Collect(ch chan<- prometheus.Metric) {
 var unknownReadLogged sync.Map
 
 // noteRecordedBackend is called by every reader of a WHOLE object's head row
-// backend_name before it hints the engine (a chunked row's name is a
+// backend_name before it names it to the engine (a chunked row's name is a
 // sentinel — 'chunked' or ” — never a route): a name no driver is
-// registered under is counted and logged once. The request goes on exactly as before (the
-// engine's fan-out finds the bytes if any backend has them; WP-R6-1 removes
-// that fallback, which is why these rows must be reconciled first).
+// registered under is counted and logged once. Since WP-R6-1 the engine
+// answers such a read or delete 503 (ErrBackendNotRegistered, an Error line
+// per call) — the fan-out that used to find the bytes on whichever backend
+// had a copy is gone; prod had 0 such rows on 2026-10-13 (routing_truth).
 func noteRecordedBackend(eng engine.Engine, logger *zap.Logger, op, backend string) {
 	ce, ok := eng.(*engine.CoreEngine)
 	if !ok || backend == "" {
@@ -879,7 +880,7 @@ func noteRecordedBackend(eng engine.Engine, logger *zap.Logger, op, backend stri
 	}
 	routingUnknownReads.WithLabelValues(op, backend).Inc()
 	if _, seen := unknownReadLogged.LoadOrStore(op+"/"+backend, struct{}{}); !seen && logger != nil {
-		logger.Warn("routing truth: a request read a head row whose backend is not registered — served by the engine's fan-out, if at all (logged once per op and backend)",
+		logger.Warn("routing truth: a request read a head row whose backend is not registered — answered 503, never another backend's copy (logged once per op and backend)",
 			zap.String("op", op), zap.String("backend", backend))
 	}
 }

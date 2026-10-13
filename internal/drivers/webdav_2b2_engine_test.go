@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/engine"
 )
 
@@ -212,7 +213,7 @@ func TestEngine_ASourceFailureIsNeverABackendFailureWhateverTheDriverWraps(t *te
 	e := engine.NewEngine(nil, zap.NewNop(), &engine.Config{DefaultBackend: "swallow"})
 	e.AddDriver("swallow", &sourceSwallowingDriver{memPrimary: *newMemPrimary()})
 	for i := 0; i < 5; i++ {
-		_, err := e.Put(context.Background(), "c", "k", &brokenSource{n: 1000}, engine.WithContentLength(5000))
+		_, err := e.Put(common.WithTenantID(context.Background(), "tenant-a"), "c", "k", &brokenSource{n: 1000}, engine.WithContentLength(5000))
 		require.Error(t, err)
 		assert.ErrorIs(t, err, engine.ErrCallerAborted)
 		assert.ErrorIs(t, err, io.ErrUnexpectedEOF)

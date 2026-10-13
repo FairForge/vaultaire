@@ -11,10 +11,11 @@ package api
 
 import (
 	"bytes"
-	"github.com/FairForge/vaultaire/internal/crypto"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/FairForge/vaultaire/internal/crypto"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

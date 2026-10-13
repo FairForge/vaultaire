@@ -209,6 +209,10 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		s.engine.HintBackend(container, blob, backendName)
 	}
+	// The one backend the bytes are read from: the row's (WP-R6-1).
+	if !isChunked {
+		ctx = engine.WithRecordedBackend(ctx, backendName)
+	}
 	// Backend-attribution slot: the engine records which backend served the
 	// bytes so CDN egress lands in backend_bandwidth_daily too.
 	ctx, _ = common.WithBackendNote(ctx)

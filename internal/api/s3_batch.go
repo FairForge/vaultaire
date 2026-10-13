@@ -325,16 +325,19 @@ func (s *Server) batchDeleteKey(r *http.Request, t *tenant.Tenant, bucket, conta
 	// on the real backend while the head row went (R6-05, WP-R6-1).
 	var isChunked bool
 	var recordedBackend, storageKey string
+	read := headRead{found: true}
 	if s.db != nil {
-		if rowErr := s.db.QueryRowContext(r.Context(),
+		rowErr := s.db.QueryRowContext(r.Context(),
 			`SELECT is_chunked, COALESCE(backend_name, ''), COALESCE(storage_key, '') FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-			t.ID, bucket, key).Scan(&isChunked, &recordedBackend, &storageKey); rowErr != nil && !errors.Is(rowErr, sql.ErrNoRows) {
+			t.ID, bucket, key).Scan(&isChunked, &recordedBackend, &storageKey)
+		if rowErr != nil && !errors.Is(rowErr, sql.ErrNoRows) {
 			// Never guess "whole" for a possibly chunked object (R8-07).
 			s.logger.Error("batch delete: head cache read failed", zap.Error(rowErr), zap.String("key", key))
 			return &DeleteError{
 				Key: key, Code: ErrInternalError, Message: "Internal error while deleting",
 			}
 		}
+		read = headRead{found: rowErr == nil, storageKey: storageKey}
 	}
 
 	// The blob the row names (WP-R2-1), kept while a version keeps it.
@@ -353,14 +356,22 @@ func (s *Server) batchDeleteKey(r *http.Request, t *tenant.Tenant, bucket, conta
 	// A chunked object's manifest is released together with its head row
 	// below, in one transaction (R8-08); there is no backend delete.
 	if (!isChunked || s.gci == nil) && !keptByVersion {
+		bctx := r.Context()
 		if recordedBackend != "" && s.engine != nil {
 			noteRecordedBackend(s.engine, s.logger, "delete_objects", recordedBackend)
 			s.engine.HintBackend(container, blob, recordedBackend)
+			bctx = engine.WithRecordedBackend(bctx, recordedBackend)
+		}
+		// Every copy the tables know of, the recorded one first (R6-24).
+		copies, cErr := knownBlobCopies(r.Context(), s.db, t.ID, bucket, key, container, storageKey, recordedBackend)
+		if cErr != nil {
+			s.logger.Error("batch delete: the known copies could not be read", zap.Error(cErr), zap.String("key", key))
+			return &DeleteError{Key: key, Code: ErrInternalError, Message: "Internal error while deleting"}
 		}
 		// A delete already in flight when a shutdown cuts the batch may
 		// still answer for longOpAnswerGrace: bytes it removed get their
 		// row settled (s3_long_op.go).
-		dctx, dcancel := backendCallCtx(r.Context(), s.longOpAnswerGrace())
+		dctx, dcancel := backendCallCtx(engine.WithKnownCopies(bctx, copies...), s.longOpAnswerGrace())
 		delErr = s.engine.Delete(dctx, container, blob)
 		dcancel()
 		// A miss is idempotent (AWS behaviour) in every shape a driver
@@ -395,7 +406,7 @@ func (s *Server) batchDeleteKey(r *http.Request, t *tenant.Tenant, bucket, conta
 	// Success (or idempotent miss): the one aftermath single DELETE runs —
 	// billing record, lock row, Smart copy, parity shards, notification
 	// (object_delete_shared.go), detached from the cut.
-	if err := aftermath.settle(r.Context(), t.ID, bucket, key, isChunked); err != nil {
+	if err := aftermath.settle(r.Context(), t.ID, bucket, key, isChunked, read); err != nil {
 		// The row (and a chunked manifest) is still there: the client
 		// retries this key — a backend miss, then the row.
 		s.logger.Error("batch delete: delete bookkeeping failed",

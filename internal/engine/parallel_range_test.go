@@ -27,14 +27,14 @@ func TestParallelRangeSource_ResolvesTheRecordedBackend(t *testing.T) {
 	eng.AddDriver("ranged", &rangeInfoDriver{stubDriver{name: "ranged", data: map[string][]byte{"c/a": []byte("hello")}, healthy: true}})
 
 	// Act + Assert: not hinted → the primary → no parallel source.
-	_, _, ok := eng.ParallelRangeSource(context.Background(), "c", "a")
+	_, _, ok := eng.ParallelRangeSource(tenantCtx(), "c", "a")
 	assert.False(t, ok, "the primary cannot do versioned ranges")
 
 	eng.HintBackend("c", "a", "ranged")
-	name, rg, ok := eng.ParallelRangeSource(context.Background(), "c", "a")
+	name, rg, ok := eng.ParallelRangeSource(tenantCtx(), "c", "a")
 	require.True(t, ok)
 	assert.Equal(t, "ranged", name)
-	rc, info, err := rg.GetRangeInfo(context.Background(), "c", "a", 1, 3)
+	rc, info, err := rg.GetRangeInfo(tenantCtx(), "c", "a", 1, 3)
 	require.NoError(t, err)
 	b, _ := io.ReadAll(rc)
 	assert.Equal(t, "ell", string(b))
@@ -47,7 +47,7 @@ func TestParallelRangeSource_NotWhileTheBreakerIsOpen(t *testing.T) {
 	for i := 0; i < failureThreshold; i++ {
 		eng.RecordReadOutcome("ranged", errors.New("connection reset by peer"))
 	}
-	_, _, ok := eng.ParallelRangeSource(context.Background(), "c", "a")
+	_, _, ok := eng.ParallelRangeSource(tenantCtx(), "c", "a")
 	assert.False(t, ok, "an open breaker means the single-stream path (and its failover)")
 }
 

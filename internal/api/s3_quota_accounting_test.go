@@ -607,7 +607,7 @@ func TestQuotaAccounting_CopyEncryptedSourceRejected(t *testing.T) {
 
 	content := testBytes(4 << 10)
 	container := f.tenant.NamespaceContainer("test-bucket")
-	_, err := f.server.engine.Put(context.Background(), container, "enc-src.bin", bytes.NewReader(content))
+	_, err := f.server.engine.Put(common.WithTenantID(context.Background(), f.tenantID), container, "enc-src.bin", bytes.NewReader(content))
 	require.NoError(t, err)
 	_, err = f.db.Exec(`
 		INSERT INTO object_head_cache (tenant_id, bucket, object_key, size_bytes, etag, content_type, encryption_algorithm, updated_at)

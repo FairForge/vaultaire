@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -30,7 +31,7 @@ func TestChunkedGet_NeverServesStaleWholeObjectBlob(t *testing.T) {
 
 	// v1: whole-object blob, as the plain path would have stored it.
 	oldBytes := []byte("OLD VERSION BYTES — must never be served again")
-	_, err := f.eng.Put(context.Background(), container, "swap.bin", bytes.NewReader(oldBytes))
+	_, err := f.eng.Put(common.WithTenantID(context.Background(), f.tenantID), container, "swap.bin", bytes.NewReader(oldBytes))
 	require.NoError(t, err)
 	_, err = f.db.Exec(`INSERT INTO object_head_cache (tenant_id, bucket, object_key, size_bytes, etag, backend_name)
 		VALUES ($1, 'test-bucket', 'swap.bin', $2, 'old-etag', 'local')`, f.tenantID, len(oldBytes))
@@ -57,7 +58,7 @@ func TestChunkedGet_NeverServesStaleWholeObjectBlob(t *testing.T) {
 	_, err = f.db.Exec(`DELETE FROM tenant_chunk_refs WHERE tenant_id::text = $1 AND object_key = 'swap.bin'`,
 		f.tenantID)
 	require.NoError(t, err)
-	_, err = f.eng.Put(context.Background(), container, "swap.bin", bytes.NewReader(oldBytes))
+	_, err = f.eng.Put(common.WithTenantID(context.Background(), f.tenantID), container, "swap.bin", bytes.NewReader(oldBytes))
 	require.NoError(t, err)
 
 	gw = stringTenantGet(t, f, "swap.bin")

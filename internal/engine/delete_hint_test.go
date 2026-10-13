@@ -86,7 +86,7 @@ func TestDelete_AHintedDeleteNeverFallsBackToThePrimary(t *testing.T) {
 			e.HintBackend("c", "k", "sync") // the head row's backend_name
 
 			// Act
-			err := e.Delete(context.Background(), "c", "k")
+			err := e.Delete(tenantCtx(), "c", "k")
 
 			// Assert: the client gets a retryable 503, nothing else is asked.
 			require.Error(t, err)
@@ -105,12 +105,12 @@ func TestDelete_AnOpenBreakerOnTheRecordedBackendIsA503(t *testing.T) {
 	e.AddDriver("sync", recorded)
 	for i := 0; i < 5; i++ {
 		e.HintBackend("c", "k", "sync")
-		_ = e.Delete(context.Background(), "c", "k")
+		_ = e.Delete(tenantCtx(), "c", "k")
 	}
 	require.Equal(t, "open", e.GetFailoverStatus()["sync"])
 
 	e.HintBackend("c", "k", "sync")
-	err := e.Delete(context.Background(), "c", "k")
+	err := e.Delete(tenantCtx(), "c", "k")
 	assert.ErrorIs(t, err, ErrAllBackendsUnavailable)
 	assert.Zero(t, primary.deletes)
 }
@@ -125,14 +125,18 @@ func TestDelete_RecordedMissAndUnregisteredNames(t *testing.T) {
 	e.AddDriver("sync", missDeleter{newDeleteRecorder("sync", nil)})
 
 	e.HintBackend("c", "gone", "sync")
-	err := e.Delete(context.Background(), "c", "gone")
+	err := e.Delete(tenantCtx(), "c", "gone")
 	var nf NotFoundError
 	assert.ErrorAs(t, err, &nf, "the recorded backend's miss is the verdict")
 	assert.Zero(t, primary.deletes)
 
-	e.HintBackend("c", "old", "onedrive") // a name no driver has
-	require.NoError(t, e.Delete(context.Background(), "c", "old"))
-	assert.Equal(t, 1, primary.deletes, "unhinted / unregistered: the primary, as before")
+	// WP-R6-1: a name no driver has is a 503 — the primary in its place
+	// (WP-R7-5's fallback, until WP-R6-1) is gone.
+	e.HintBackend("c", "old", "onedrive")
+	err = e.Delete(tenantCtx(), "c", "old")
+	assert.ErrorIs(t, err, ErrAllBackendsUnavailable)
+	assert.ErrorIs(t, err, ErrBackendNotRegistered)
+	assert.Zero(t, primary.deletes, "never the primary in its place")
 }
 
 type missDeleter struct{ *deleteRecorder }
@@ -151,10 +155,10 @@ func TestDelete_AFailedDeleteKeepsTheRoutingRecord(t *testing.T) {
 	e.AddDriver("primary", primary)
 	e.AddDriver("sync", recorded)
 	e.HintBackend("c", "k", "sync")
-	require.Error(t, e.Delete(context.Background(), "c", "k"))
+	require.Error(t, e.Delete(tenantCtx(), "c", "k"))
 
 	// Act: the retry, with no new hint.
-	err := e.Delete(context.Background(), "c", "k")
+	err := e.Delete(tenantCtx(), "c", "k")
 
 	// Assert
 	assert.ErrorIs(t, err, ErrAllBackendsUnavailable)
@@ -165,7 +169,7 @@ func TestDelete_AFailedDeleteKeepsTheRoutingRecord(t *testing.T) {
 	recorded.mu.Lock()
 	recorded.fail = nil
 	recorded.mu.Unlock()
-	require.NoError(t, e.Delete(context.Background(), "c", "k"))
+	require.NoError(t, e.Delete(tenantCtx(), "c", "k"))
 	_, ok := e.objectBackends.Load(objectKey("c", "k"))
 	assert.False(t, ok)
 }

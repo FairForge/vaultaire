@@ -246,6 +246,45 @@ func atomicHeadUpsertReleasing(ctx context.Context, db *sql.DB, gci chunkManifes
 // idempotent and there is nothing to release.
 func deleteHeadRowReleasing(ctx context.Context, db *sql.DB, gci chunkManifestReleaser,
 	tenantID, bucket, key string) (row displacedRow, found bool, err error) {
+	return deleteHeadRowWhere(ctx, db, gci, tenantID, bucket, key, nil)
+}
+
+// deleteHeadRowIfAt is deleteHeadRowReleasing for a DELETE that removed the
+// blob at storageKey ("" = the key itself): the row is deleted only while
+// it still names that address (PM-6 of WP-R2-1). A write that committed
+// between the blob delete and this — its own new address — is current and
+// untouched: superseded, and nothing deleted. The DELETE is then ordered
+// BEFORE the write (it answers 204; the write's object stays, its bytes
+// with it — they used to lose their row and leak until the erasure sweep).
+func deleteHeadRowIfAt(ctx context.Context, db *sql.DB, gci chunkManifestReleaser,
+	tenantID, bucket, key, storageKey string) (row displacedRow, found, superseded bool, err error) {
+	row, found, err = deleteHeadRowWhere(ctx, db, gci, tenantID, bucket, key, &storageKey)
+	if err != nil || found {
+		return row, found, false, err
+	}
+	if err := db.QueryRowContext(ctx, headRowExistsSQL, tenantID, bucket, key).Scan(&superseded); err != nil {
+		return displacedRow{}, false, false, fmt.Errorf("head row after a superseded delete: %w", err)
+	}
+	return displacedRow{}, false, superseded, nil
+}
+
+// The head-row delete, unconditional or at one address.
+const (
+	deleteHeadRowSQL = `
+		DELETE FROM object_head_cache
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
+		RETURNING size_bytes, floor, COALESCE(backend_name, ''), is_chunked, COALESCE(storage_key, '')`
+	deleteHeadRowAtSQL = `
+		DELETE FROM object_head_cache
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND COALESCE(storage_key, '') = $4
+		RETURNING size_bytes, floor, COALESCE(backend_name, ''), is_chunked, COALESCE(storage_key, '')`
+	headRowExistsSQL = `SELECT EXISTS (SELECT 1 FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3)`
+)
+
+// deleteHeadRowWhere deletes the key's head row — only at *storageKey when
+// it is set — and releases what it held, in one transaction.
+func deleteHeadRowWhere(ctx context.Context, db *sql.DB, gci chunkManifestReleaser,
+	tenantID, bucket, key string, storageKey *string) (row displacedRow, found bool, err error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return displacedRow{}, false, fmt.Errorf("begin head-cache delete: %w", err)
@@ -253,11 +292,11 @@ func deleteHeadRowReleasing(ctx context.Context, db *sql.DB, gci chunkManifestRe
 	defer func() { _ = tx.Rollback() }()
 
 	var chunked bool
-	err = tx.QueryRowContext(ctx, `
-		DELETE FROM object_head_cache
-		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
-		RETURNING size_bytes, floor, COALESCE(backend_name, ''), is_chunked, COALESCE(storage_key, '')`,
-		tenantID, bucket, key).Scan(&row.Size, &row.Floor, &row.Backend, &chunked, &row.StorageKey)
+	q, args := deleteHeadRowSQL, []any{tenantID, bucket, key}
+	if storageKey != nil {
+		q, args = deleteHeadRowAtSQL, append(args, *storageKey)
+	}
+	err = tx.QueryRowContext(ctx, q, args...).Scan(&row.Size, &row.Floor, &row.Backend, &chunked, &row.StorageKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		return displacedRow{}, false, nil
 	}

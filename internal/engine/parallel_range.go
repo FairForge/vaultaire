@@ -6,10 +6,14 @@ import (
 	"github.com/FairForge/vaultaire/internal/common"
 )
 
-// preferredBackend is the backend Get would ask first for an object: the
-// recorded route (HintBackend / Put), then object_locations, then the
-// primary.
+// preferredBackend is the backend Get asks for an object (and the first a
+// Delete attempts): the row's backend on the context (WithRecordedBackend),
+// then this process's route (HintBackend / Put), then object_locations, then
+// the primary.
 func (e *CoreEngine) preferredBackend(ctx context.Context, container, artifact string) string {
+	if b := RecordedBackend(ctx); b != "" {
+		return b
+	}
 	preferred := e.GetPrimary()
 	if v, ok := e.objectBackends.Load(objectKey(container, artifact)); ok {
 		if name, ok := v.(string); ok && name != "" {

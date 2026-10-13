@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"context"
 	"io"
 	"strings"
 	"testing"
@@ -23,7 +22,7 @@ func TestLocationStore_RecordAndLookup(t *testing.T) {
 		WithArgs("tenant1", "bucket1", "key1", "idrive", "STANDARD", int64(1024)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
-	err = store.RecordLocation(context.Background(), "tenant1", "bucket1", "key1", "idrive", "STANDARD", 1024)
+	err = store.RecordLocation(tenantCtx(), "tenant1", "bucket1", "key1", "idrive", "STANDARD", 1024)
 	require.NoError(t, err)
 
 	rows := sqlmock.NewRows([]string{"backend_name"}).AddRow("idrive")
@@ -31,7 +30,7 @@ func TestLocationStore_RecordAndLookup(t *testing.T) {
 		WithArgs("tenant1", "bucket1", "key1").
 		WillReturnRows(rows)
 
-	backend, err := store.LookupBackend(context.Background(), "tenant1", "bucket1", "key1")
+	backend, err := store.LookupBackend(tenantCtx(), "tenant1", "bucket1", "key1")
 	require.NoError(t, err)
 	assert.Equal(t, "idrive", backend)
 }
@@ -47,7 +46,7 @@ func TestLocationStore_LookupMiss(t *testing.T) {
 		WithArgs("tenant1", "bucket1", "missing").
 		WillReturnRows(sqlmock.NewRows([]string{"backend_name"}))
 
-	backend, err := store.LookupBackend(context.Background(), "tenant1", "bucket1", "missing")
+	backend, err := store.LookupBackend(tenantCtx(), "tenant1", "bucket1", "missing")
 	require.NoError(t, err)
 	assert.Equal(t, "", backend)
 }
@@ -63,7 +62,7 @@ func TestLocationStore_Remove(t *testing.T) {
 		WithArgs("tenant1", "bucket1", "key1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
-	err = store.RemoveLocation(context.Background(), "tenant1", "bucket1", "key1")
+	err = store.RemoveLocation(tenantCtx(), "tenant1", "bucket1", "key1")
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
@@ -82,9 +81,9 @@ func TestLocationStore_Upsert(t *testing.T) {
 		WithArgs("tenant1", "bucket1", "key1", "geyser", "GLACIER", int64(200)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
-	err = store.RecordLocation(context.Background(), "tenant1", "bucket1", "key1", "idrive", "STANDARD", 100)
+	err = store.RecordLocation(tenantCtx(), "tenant1", "bucket1", "key1", "idrive", "STANDARD", 100)
 	require.NoError(t, err)
-	err = store.RecordLocation(context.Background(), "tenant1", "bucket1", "key1", "geyser", "GLACIER", 200)
+	err = store.RecordLocation(tenantCtx(), "tenant1", "bucket1", "key1", "geyser", "GLACIER", 200)
 	require.NoError(t, err)
 
 	rows := sqlmock.NewRows([]string{"backend_name"}).AddRow("geyser")
@@ -92,7 +91,7 @@ func TestLocationStore_Upsert(t *testing.T) {
 		WithArgs("tenant1", "bucket1", "key1").
 		WillReturnRows(rows)
 
-	backend, err := store.LookupBackend(context.Background(), "tenant1", "bucket1", "key1")
+	backend, err := store.LookupBackend(tenantCtx(), "tenant1", "bucket1", "key1")
 	require.NoError(t, err)
 	assert.Equal(t, "geyser", backend)
 }
@@ -110,7 +109,7 @@ func TestLocationStore_CountByBackend(t *testing.T) {
 	mock.ExpectQuery("SELECT backend_name, COUNT").
 		WillReturnRows(rows)
 
-	counts, err := store.CountByBackend(context.Background())
+	counts, err := store.CountByBackend(tenantCtx())
 	require.NoError(t, err)
 	assert.Equal(t, int64(10), counts["idrive"])
 	assert.Equal(t, int64(5), counts["geyser"])
@@ -120,21 +119,21 @@ func TestLocationStore_CountByBackend(t *testing.T) {
 func TestLocationStore_NilDB(t *testing.T) {
 	store := NewLocationStore(nil, zap.NewNop())
 
-	err := store.RecordLocation(context.Background(), "t", "b", "k", "idrive", "STANDARD", 100)
+	err := store.RecordLocation(tenantCtx(), "t", "b", "k", "idrive", "STANDARD", 100)
 	assert.NoError(t, err)
 
-	backend, err := store.LookupBackend(context.Background(), "t", "b", "k")
+	backend, err := store.LookupBackend(tenantCtx(), "t", "b", "k")
 	assert.NoError(t, err)
 	assert.Equal(t, "", backend)
 
-	err = store.RemoveLocation(context.Background(), "t", "b", "k")
+	err = store.RemoveLocation(tenantCtx(), "t", "b", "k")
 	assert.NoError(t, err)
 
-	counts, err := store.CountByBackend(context.Background())
+	counts, err := store.CountByBackend(tenantCtx())
 	assert.NoError(t, err)
 	assert.Empty(t, counts)
 
-	err = store.TouchLastAccessed(context.Background(), "t", "b", "k")
+	err = store.TouchLastAccessed(tenantCtx(), "t", "b", "k")
 	assert.NoError(t, err)
 }
 
@@ -146,7 +145,7 @@ func TestEngine_PutRecordsLocation(t *testing.T) {
 	eng.AddDriver("primary", drv)
 	eng.SetPrimary("primary")
 
-	backend, err := eng.Put(context.Background(), "bucket", "key", strings.NewReader("data"))
+	backend, err := eng.Put(tenantCtx(), "bucket", "key", strings.NewReader("data"))
 	require.NoError(t, err)
 	assert.Equal(t, "primary", backend)
 
@@ -174,10 +173,10 @@ func TestEngine_GetFallsBackToLocationStore(t *testing.T) {
 
 	rows := sqlmock.NewRows([]string{"backend_name"}).AddRow("geyser")
 	mock.ExpectQuery("SELECT backend_name FROM object_locations").
-		WithArgs("default", "mybucket", "myobj").
+		WithArgs("tenant-a", "mybucket", "myobj").
 		WillReturnRows(rows)
 
-	reader, err := eng.Get(context.Background(), "mybucket", "myobj")
+	reader, err := eng.Get(tenantCtx(), "mybucket", "myobj")
 	require.NoError(t, err)
 	defer func() { _ = reader.Close() }()
 

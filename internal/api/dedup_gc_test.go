@@ -76,7 +76,7 @@ func TestDedupGC_DeletesMarkedPastGrace(t *testing.T) {
 
 	// Backend data should be gone.
 	for _, key := range keys {
-		rc, getErr := f.eng.Get(context.Background(), chunkContainer, key)
+		rc, getErr := f.eng.Get(engine.ChunkContext(context.Background()), chunkContainer, key)
 		if rc != nil {
 			_ = rc.Close()
 		}

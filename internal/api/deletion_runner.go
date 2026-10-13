@@ -678,7 +678,7 @@ func (r *AccountDeletionRunner) deleteOnBackend(ctx context.Context, container, 
 			ce.HintBackend(container, blob, backend)
 		}
 	}
-	if err := r.eng.Delete(ctx, container, blob); err != nil && !isObjectMissingErr(err) {
+	if err := r.eng.Delete(engine.WithRecordedBackend(ctx, backend), container, blob); err != nil && !isObjectMissingErr(err) {
 		return fmt.Errorf("backend delete: %w", err)
 	}
 	return nil

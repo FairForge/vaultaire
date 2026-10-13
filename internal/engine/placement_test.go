@@ -141,9 +141,14 @@ func TestBuildWriteCandidateList_TargetOnlyBackends(t *testing.T) {
 	})
 	t.Run("a strict target is asked alone (Prompt 2b.4 E1.1)", func(t *testing.T) {
 		assert.Equal(t, []string{"sync"}, eng.buildWriteCandidateList("sync"))
-		assert.Equal(t, []string{"sync"}, eng.readCandidates("sync", "get"))
-		assert.Equal(t, "geyser", eng.readCandidates("geyser", "get")[0])
-		assert.Greater(t, len(eng.readCandidates("geyser", "get")), 1, "tape keeps its read fall-over")
+		c, err := eng.readCandidates("sync", "get")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"sync"}, c)
+		// WP-R6-1: every recorded backend is read alone — tape included (it
+		// used to keep a read fall-over to every other backend).
+		c, err = eng.readCandidates("geyser", "get")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"geyser"}, c)
 	})
 	t.Run("a target-only primary is still writable", func(t *testing.T) {
 		g := NewEngine(nil, nopLogger(), &Config{DefaultBackend: "geyser"})
@@ -167,7 +172,7 @@ func TestEnginePut_NeverFailsOverToTargetOnlyBackend(t *testing.T) {
 	eng.AddDriver("idrive-eu-west-1", eu)
 	eng.SetPrimary("idrive")
 
-	_, err := eng.Put(context.Background(), "t_b", "k", strings.NewReader("private bytes"))
+	_, err := eng.Put(tenantCtx(), "t_b", "k", strings.NewReader("private bytes"))
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrAllBackendsUnavailable), "must fail loudly, got: %v", err)
 	assert.False(t, r2.has("t_b", "k"), "a private object must never land on the public R2 store")

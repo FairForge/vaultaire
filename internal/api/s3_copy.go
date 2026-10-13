@@ -376,7 +376,12 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	// stale plain bytes and recorded their MD5 as the new object — and a
 	// destination of known length is striped over the Sync bridges (an
 	// unsized one was one plain file on one bridge, ~30 MB/s).
+	// Read from the backend the source's row records, and no other (WP-R6-1;
+	// a chunked row's name is a sentinel: its chunks have their own rows).
 	gctx := r.Context()
+	if !srcChunked {
+		gctx = engine.WithRecordedBackend(gctx, srcBackend)
+	}
 	if srcSize > 0 {
 		stored := srcSize
 		if srcSealedS3 {

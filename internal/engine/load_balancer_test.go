@@ -2,7 +2,6 @@
 package engine
 
 import (
-	"context"
 	"sync"
 	"testing"
 
@@ -20,7 +19,7 @@ func TestLoadBalancer_RoundRobin(t *testing.T) {
 	// Should cycle through backends
 	selections := make([]string, 6)
 	for i := 0; i < 6; i++ {
-		selections[i] = lb.NextBackend(context.Background())
+		selections[i] = lb.NextBackend(tenantCtx())
 	}
 
 	// Each backend should be selected twice
@@ -47,7 +46,7 @@ func TestLoadBalancer_Concurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 
-			backend := lb.NextBackend(context.Background())
+			backend := lb.NextBackend(tenantCtx())
 			lb.StartRequest(backend)
 			defer lb.EndRequest(backend)
 

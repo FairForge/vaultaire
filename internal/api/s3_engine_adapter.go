@@ -485,6 +485,11 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	gctx := r.Context()
 	if cacheHit {
 		gctx = engine.WithExpectedSize(gctx, cachedSize)
+		// The one backend the bytes are read from: the row's (WP-R6-1). A
+		// chunked row's name is a sentinel; its chunks have their own rows.
+		if !cachedIsChunked {
+			gctx = engine.WithRecordedBackend(gctx, cachedBackendName)
+		}
 	}
 	// A sealed object — SSE-S3 under the tenant's key, SSE-C under the
 	// customer's — opens as it streams (WP-R8-5, sse_stream.go): the status
@@ -612,7 +617,10 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		if wantRange != nil {
 			off, n = wantRange.start, wantRange.length
 		}
-		pr, perr := a.vaultParity.Open(r.Context(), t.ID, bucket, artifact, blob, cachedETag, cachedSize, off, n)
+		// The parity reads its shards from the legs on this context (never
+		// an expected size: a shard is not the object) and the data ranges
+		// from the object's own backend.
+		pr, perr := a.vaultParity.Open(engine.WithRecordedBackend(r.Context(), cachedBackendName), t.ID, bucket, artifact, blob, cachedETag, cachedSize, off, n)
 		if perr == nil {
 			a.logger.Warn("vault object served from its parity copy", zap.String("bucket", bucket), zap.String("key", artifact),
 				zap.NamedError("backend", err))
@@ -1955,19 +1963,24 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 	// forever while the head row — and the customer's bill — went away (R6-05).
 	var isChunked bool
 	var recordedBackend, storageKey string
+	var read headRead
 	if a.db != nil {
 		// A failed read here must not be guessed away: treating a chunked
 		// object as whole sends it to the backend delete, which "succeeds" as
 		// an idempotent miss, and the head row goes while the manifest and
 		// its GCI references leak forever (R8-07).
-		if rowErr := a.db.QueryRowContext(r.Context(),
+		rowErr := a.db.QueryRowContext(r.Context(),
 			`SELECT is_chunked, COALESCE(backend_name, ''), COALESCE(storage_key, '') FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-			t.ID, bucket, object).Scan(&isChunked, &recordedBackend, &storageKey); rowErr != nil && !errors.Is(rowErr, sql.ErrNoRows) {
+			t.ID, bucket, object).Scan(&isChunked, &recordedBackend, &storageKey)
+		if rowErr != nil && !errors.Is(rowErr, sql.ErrNoRows) {
 			a.logger.Error("head cache read before delete failed", zap.Error(rowErr),
 				zap.String("bucket", bucket), zap.String("object", object))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 			return
 		}
+		read = headRead{found: rowErr == nil, storageKey: storageKey}
+	} else {
+		read.found = true // no database: the row delete is the old unconditional one
 	}
 
 	// The blob the row names (WP-R2-1); kept when a version row keeps it
@@ -1991,13 +2004,25 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 		// (the manifest is released together with the head row below, in one
 		// transaction, R8-08), and a version's bytes stay with the version.
 	} else {
+		// Every copy the tables know of, the recorded one first (WP-R6-1:
+		// a delete that left a second copy answered 204 — R6-24).
+		dctx := r.Context()
 		if recordedBackend != "" {
 			noteRecordedBackend(a.engine, a.logger, "delete", recordedBackend)
 			if ce, ok := a.engine.(*engine.CoreEngine); ok {
 				ce.HintBackend(container, blob, recordedBackend)
 			}
+			dctx = engine.WithRecordedBackend(dctx, recordedBackend)
 		}
-		if err := a.engine.Delete(r.Context(), container, blob); err != nil {
+		copies, cErr := knownBlobCopies(r.Context(), a.db, t.ID, bucket, object, container, storageKey, recordedBackend)
+		if cErr != nil {
+			a.logger.Error("delete: the known copies could not be read", zap.Error(cErr),
+				zap.String("bucket", bucket), zap.String("object", object))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+		dctx = engine.WithKnownCopies(dctx, copies...)
+		if err := a.engine.Delete(dctx, container, blob); err != nil {
 			if errors.Is(err, engine.ErrAllBackendsUnavailable) {
 				// The backend that holds the bytes is unreachable: the
 				// client retries; the head row must NOT be removed (a
@@ -2026,7 +2051,7 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 	// Everything after the bytes — the head row (billing), the lock row, the
 	// Smart second copy, the parity shards, the notification — is the one
 	// aftermath DeleteObjects runs too (object_delete_shared.go).
-	if err := a.objectDeleteAftermath().settle(r.Context(), t.ID, bucket, object, isChunked); err != nil {
+	if err := a.objectDeleteAftermath().settle(r.Context(), t.ID, bucket, object, isChunked, read); err != nil {
 		// The row (and a chunked object's manifest) is still there: the
 		// client retries — a backend miss, then the row. Answering 204 here
 		// would leave a live (or phantom) object.
