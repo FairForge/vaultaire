@@ -70,3 +70,45 @@ func TestChunkBlobCalls_GoThroughTheChunkStore(t *testing.T) {
 	assert.Empty(t, offenders, "a chunk blob call outside the chunk store: use chunkStore (internal/api) or engine.ChunkContext")
 	assert.Empty(t, literals, "the chunk container's name is engine.ChunkContainer / crypto.GlobalDedupScope")
 }
+
+// TestChunkedWrites_GoThroughTheChunkedCore (WP-R3-1): a chunked object is
+// written by ONE core — storeChunkedObject (chunked_write.go), which a PUT
+// and a CompleteMultipartUpload both call. Only it starts the chunk store
+// pool; a manifest is installed by it or by the manifest copy (CopyObject of
+// a chunked source into a chunkable destination, which writes no chunk).
+func TestChunkedWrites_GoThroughTheChunkedCore(t *testing.T) {
+	allowed := map[string][]string{
+		"newChunkStorePool(":       {"chunked_write.go"},
+		"ReplaceObjectManifestTx(": {"chunked_write.go", "s3_copy.go"},
+	}
+	entries, err := os.ReadDir(".")
+	require.NoError(t, err)
+	var offenders []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(name)
+		require.NoError(t, err)
+		for n, line := range strings.Split(string(src), "\n") {
+			code := line
+			if i := strings.Index(code, "//"); i >= 0 {
+				code = code[:i]
+			}
+			for call, files := range allowed {
+				if !strings.Contains(code, call) || strings.Contains(code, "func ") {
+					continue
+				}
+				ok := false
+				for _, f := range files {
+					ok = ok || name == f
+				}
+				if !ok {
+					offenders = append(offenders, name+":"+strconv.Itoa(n+1)+": "+strings.TrimSpace(code))
+				}
+			}
+		}
+	}
+	assert.Empty(t, offenders, "a chunked write outside the chunked core: call storeChunkedObject")
+}

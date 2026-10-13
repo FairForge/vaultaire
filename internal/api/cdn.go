@@ -224,7 +224,19 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 		// an interrupted commit serves the one of this size (Prompt 2b B3).
 		ctx = engine.WithExpectedSize(ctx, sizeBytes)
 	}
-	reader, err := s.engine.Get(ctx, container, blob)
+	// A chunked object has no whole blob: its chunks are read through the
+	// content index, as the S3 GET reads them (chunked_read.go, WP-R3-1 —
+	// this answered 404 for a row that exists). Every backend its chunks
+	// are on is asked before the status line: 503 when one cannot be.
+	var reader io.ReadCloser
+	if isChunked {
+		var cr *chunkedObjectReader
+		if cr, err = s.readAdapter().openChunkedObject(ctx, tenantID, bucket, key, sizeBytes); err == nil {
+			reader = cr
+		}
+	} else {
+		reader, err = s.engine.Get(ctx, container, blob)
+	}
 	if err != nil {
 		logGet := s.logger.Error
 		if errors.Is(err, engine.ErrAllBackendsUnavailable) {

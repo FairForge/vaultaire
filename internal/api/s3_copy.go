@@ -274,13 +274,35 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return
 	}
+	// The destination's class decides both where the copy lands and which
+	// floor it is billed on (header, then the destination bucket's tier).
+	destClass := resolvePutStorageClass(r.Context(), s.db, s.engine, syncPlacementGate(s.flags), t.ID, destBucket,
+		r.Header.Get("x-amz-storage-class"))
+	// A chunked source is copied as a manifest only where a PUT of its
+	// bytes would be chunked too (placement.go, WP-R3-1); a versioned, region-
+	// pinned or non-chunkable destination (archive, RESILIENT, PUBLIC, SYNC)
+	// gets the bytes re-stored whole, read through the content index
+	// (chunked_read.go) — a manifest there broke the bucket's promise (a
+	// version with no version row, a tier's object on the primary). Before,
+	// every chunked copy was a manifest copy whatever the destination.
+	sourceWhole := false
 	if srcChunked && s.gci != nil {
+		dp := s.writeAdapter().decidePlacement(r.Context(), placementRequest{
+			TenantID: t.ID, Bucket: destBucket, Class: destClass, Size: srcSize,
+			SSERequested: r.Header.Get("x-amz-server-side-encryption") == "AES256",
+		})
+		if dp.Refusal != nil {
+			dp.Refusal.write(w, r)
+			return
+		}
+		sourceWhole = dp.Kind != placeChunked
+	}
+	if srcChunked && s.gci != nil && !sourceWhole {
 		// A manifest copy moves no data: the chunks stay at their one
 		// address on the primary (WP-R8-7). A destination bucket pinned to
-		// a region promised where its bytes live (WP-R7-1), so it gets what
-		// every other write into it gets: a refusal when the region has no
-		// driver, and — until a chunked source can be re-stored whole in the
-		// region — 501 rather than a copy whose bytes are elsewhere.
+		// a region never gets here (it is not chunkable: the source is
+		// re-stored whole in the region); the region's driver is asked
+		// again here as every write into it is.
 		regionDriver, rErr := bucketRegionDriver(r.Context(), s.db, s.engine, t.ID, destBucket)
 		if rErr != nil {
 			s.logger.Error("copy: region-pinned bucket has no driver — refused",
@@ -305,7 +327,7 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 		s.handleChunkedCopy(w, r, t, srcBucket, srcKey, destBucket, destKey, srcSize, directive, requestAttrs)
 		return
 	}
-	if srcEnc != "" || srcChunked {
+	if (srcEnc != "" && !sourceWhole) || (srcChunked && !sourceWhole) {
 		WriteS3ErrorWithContext(w, ErrNotImplemented, r.URL.Path, generateRequestID(),
 			WithSuggestion("Copying encrypted or chunked objects is not yet supported. Download and re-upload instead."))
 		return
@@ -351,7 +373,18 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	if srcSize > 0 {
 		gctx = engine.WithExpectedSize(gctx, srcSize)
 	}
-	reader, err := s.engine.Get(gctx, srcContainer, srcBlob)
+	var reader io.ReadCloser
+	if sourceWhole {
+		// The chunked source as one stream: every backend its chunks are
+		// on is asked first (503 before anything is reserved or written);
+		// each chunk decrypted and verified as it is read.
+		var cr *chunkedObjectReader
+		if cr, err = s.readAdapter().openChunkedObject(r.Context(), t.ID, srcBucket, srcKey, srcSize); err == nil {
+			reader = cr
+		}
+	} else {
+		reader, err = s.engine.Get(gctx, srcContainer, srcBlob)
+	}
 	if err != nil {
 		switch {
 		case errors.Is(err, engine.ErrAllBackendsUnavailable):
@@ -382,10 +415,6 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	// is settled against the actual streamed byte count after the write, and
 	// an overwritten destination's bytes (captured atomically by the upsert)
 	// are released.
-	// The destination's class decides both where the copy lands and which
-	// floor it is billed on (header, then the destination bucket's tier).
-	destClass := resolvePutStorageClass(r.Context(), s.db, s.engine, syncPlacementGate(s.flags), t.ID, destBucket,
-		r.Header.Get("x-amz-storage-class"))
 	floor := usage.FloorOf(destClass)
 	quotaOn := s.quotaManager != nil
 	var reservedBytes int64
@@ -656,7 +685,9 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Chunked objects cannot live in versioned buckets (manifests have no
-	// version_id — review-A F3), so refuse a chunked copy INTO one.
+	// version_id — review-A F3). CopyObject never sends one here since
+	// WP-R3-1 (a versioned destination is not chunkable: the source is
+	// re-stored whole); kept against a status change between the two reads.
 	destVersioning := getBucketVersioningStatus(r.Context(), s.db, t.ID, destBucket)
 	if destVersioning == "Enabled" || destVersioning == "Suspended" {
 		WriteS3ErrorWithContext(w, ErrNotImplemented, r.URL.Path, generateRequestID(),
@@ -724,13 +755,19 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// The destination's attributes, resolved exactly as the whole copy
+	// resolves them (metadata directive, tagging directive), and written in
+	// full: the head row used to set only type, metadata and disposition, so
+	// an overwrite kept the displaced object's cache headers and tags.
 	contentType := resolveCopyContentType(directive, requestAttrs.ContentType, srcCT)
-	destUserMeta := srcUserMeta
-	destDisposition := srcDisposition
-	if strings.EqualFold(directive, "REPLACE") {
-		destUserMeta, _ = json.Marshal(requestAttrs.Metadata)
-		destDisposition = requestAttrs.ContentDisposition
+	sourceAttrs, aErr := loadHeadAttrs(r.Context(), s.db, t.ID, srcBucket, srcKey)
+	if aErr != nil {
+		sourceAttrs = objectAttrs{ContentDisposition: srcDisposition}
+		_ = json.Unmarshal(srcUserMeta, &sourceAttrs.Metadata)
 	}
+	destAttrs := resolveCopyAttrs(directive, requestAttrs, sourceAttrs)
+	destAttrs.Tags = resolveCopyTags(r.Header.Get("x-amz-tagging-directive"), requestAttrs, sourceAttrs)
+	destAttrs.ContentType = contentType
 
 	// Build the destination manifest: same chunks, new object identity.
 	destRefs := make([]crypto.TenantChunkRef, len(srcRefs))
@@ -777,25 +814,11 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 		}); repErr != nil {
 			return fmt.Errorf("install destination manifest: %w", repErr)
 		}
-		_, execErr := tx.ExecContext(r.Context(), `
-			INSERT INTO object_head_cache
-				(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, floor, is_chunked, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, '', $7, $8, $9, $10, TRUE, NOW())
-			ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
-				size_bytes            = EXCLUDED.size_bytes,
-				etag                  = EXCLUDED.etag,
-				content_type          = EXCLUDED.content_type,
-				backend_name          = EXCLUDED.backend_name,
-				metadata              = EXCLUDED.metadata,
-				encryption_algorithm  = EXCLUDED.encryption_algorithm,
-				encryption_key_version = NULL, -- versions live on the chunks
-				content_disposition   = EXCLUDED.content_disposition,
-				floor                 = EXCLUDED.floor,
-				is_chunked            = EXCLUDED.is_chunked,
-				storage_key           = NULL, -- a chunked object has no whole blob
-				updated_at            = NOW()
-		`, t.ID, destBucket, destKey, srcMeta.LogicalSize, srcETag, contentType,
-			destUserMeta, srcEncAlgo, destDisposition, chunkedObjectFloor)
+		// The copy reports the source's ETag: no byte is read, and the
+		// chunk hashes are SHA-256, not MD5 (a -N stays -N; AWS would report
+		// a fresh single-part ETag — the whole copy does). The backend name
+		// is the chunked sentinel, as every chunked row's.
+		execErr := upsertChunkedObjectHeadRow(r.Context(), tx, t.ID, destBucket, destKey, srcMeta.LogicalSize, srcETag, srcEncAlgo, destAttrs)
 		return execErr
 	})
 	if dbErr != nil {
@@ -850,9 +873,14 @@ var errCopyTooLargeForSSE = errors.New("copy source too large for SSE-S3")
 // them as it does for a plain stream. An empty source is passed through
 // unsealed, as an empty PUT is stored.
 type sseSealingReader struct {
-	src     io.Reader
-	max     int64
-	seal    func([]byte) ([]byte, int, error)
+	src  io.Reader
+	max  int64
+	seal func([]byte) ([]byte, int, error)
+	// size, when > 0, is the exact plaintext length (a Complete knows it):
+	// read into one buffer of that size instead of a growing one, so the
+	// peak is the plaintext plus its ciphertext — 2 × size, 512 MiB at the
+	// 256 MiB cap — not io.ReadAll's doubling slack on top.
+	size    int64
 	out     io.Reader
 	version int
 	sealed  bool
@@ -860,7 +888,7 @@ type sseSealingReader struct {
 
 func (s *sseSealingReader) Read(p []byte) (int, error) {
 	if s.out == nil {
-		plaintext, err := io.ReadAll(io.LimitReader(s.src, s.max+1))
+		plaintext, err := s.readPlaintext()
 		if err != nil {
 			return 0, err
 		}
@@ -878,6 +906,30 @@ func (s *sseSealingReader) Read(p []byte) (int, error) {
 		}
 	}
 	return s.out.Read(p)
+}
+
+// readPlaintext reads the whole source: exactly size bytes when the size is
+// known (and nothing after them), else up to max+1.
+func (s *sseSealingReader) readPlaintext() ([]byte, error) {
+	if s.size <= 0 || s.size > s.max {
+		return io.ReadAll(io.LimitReader(s.src, s.max+1))
+	}
+	buf := make([]byte, s.size)
+	if _, err := io.ReadFull(s.src, buf); err != nil {
+		return nil, err
+	}
+	// io.ReadFull drops an error that came with the bytes that filled the
+	// buffer (a staged part's check fails on its last byte): one more read
+	// returns it, or EOF.
+	var one [1]byte
+	n, err := s.src.Read(one[:])
+	switch {
+	case n > 0:
+		return nil, errCopyTooLargeForSSE
+	case err != nil && !errors.Is(err, io.EOF):
+		return nil, err
+	}
+	return buf, nil
 }
 
 // encryption is what the stored blob is sealed with (nil reader: plaintext).

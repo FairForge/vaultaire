@@ -130,6 +130,9 @@ type Server struct {
 	// chunkPutConcurrency, when > 0, overrides the adapter's default
 	// parallel chunk-store worker count (env CHUNK_PUT_CONCURRENCY).
 	chunkPutConcurrency int
+	// chunkingThreshold, when > 0, overrides the size above which a write
+	// is chunked (defaultChunkingThreshold, 64 MiB); tests lower it.
+	chunkingThreshold int64
 	// chunkGetPrefetch, when > 0, overrides the adapter's default chunked-GET
 	// prefetch depth (env CHUNK_GET_PREFETCH).
 	chunkGetPrefetch int

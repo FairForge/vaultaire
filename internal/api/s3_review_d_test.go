@@ -113,8 +113,9 @@ func TestPlainCopyOverChunkedDest_ReleasesManifest(t *testing.T) {
 	big := generateTestData(8 * 1024)
 	f.seedChunked(t, "dest-key.bin", big)
 
-	// A plain source, stored through the server path.
-	plainSrc := testBytes(2048)
+	// A plain source, stored through the server path (under the fixture's
+	// 1 KiB chunking threshold: whole).
+	plainSrc := testBytes(900)
 	require.Equal(t, 200, f.put(t, "plain-src.bin", plainSrc))
 
 	// Plain copy ONTO the chunked object (same bucket).

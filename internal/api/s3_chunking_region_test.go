@@ -99,11 +99,21 @@ func TestChunkedCopy_RegionPinnedDestination(t *testing.T) {
 		nothingInDest(t)
 	})
 
-	f.server.engine.AddDriver("idrive-eu-west-1", &fixedBucketDriver{dir: t.TempDir()})
+	eu := &fixedBucketDriver{dir: t.TempDir()}
+	f.server.engine.AddDriver("idrive-eu-west-1", eu)
 
-	t.Run("driver present: a manifest copy would leave the chunks on the primary — not implemented, nothing written", func(t *testing.T) {
+	// WP-R3-1: a pinned bucket is not chunkable, so the chunked source is
+	// re-stored whole IN the region (it was 501: a manifest copy would have
+	// left the bytes on the primary).
+	t.Run("driver present: the source re-stored whole in the region", func(t *testing.T) {
 		w := f.copyObject(t, "src.bin", "dest-bucket", "eu-copy.bin")
-		assert.Equal(t, http.StatusNotImplemented, w.Code, w.Body.String())
-		nothingInDest(t)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		var chunked bool
+		var backend string
+		require.NoError(t, f.db.QueryRow(`SELECT is_chunked, COALESCE(backend_name, '') FROM object_head_cache
+			WHERE tenant_id = $1 AND bucket = 'dest-bucket' AND object_key = 'eu-copy.bin'`, f.tenantID).Scan(&chunked, &backend))
+		assert.False(t, chunked)
+		assert.Equal(t, "idrive-eu-west-1", backend)
+		assert.Len(t, eu.blobs(), 1, "the bytes are in the region")
 	})
 }

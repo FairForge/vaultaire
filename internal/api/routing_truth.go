@@ -273,8 +273,9 @@ func (c *RoutingTruthChecker) unknownBackendRows(ctx context.Context) ([]unknown
 	queries := []q{
 		// A chunked row's backend_name is not routing truth (its bytes are the
 		// content index's — the chunk rows carry their own backend_id and the
-		// job checks them chunk by chunk): a PUT whose chunks were all dedup
-		// hits stamps the sentinel 'chunked', a manifest copy stamps ''.
+		// job checks them chunk by chunk): every chunked write stamps the
+		// sentinel 'chunked' (WP-R3-1); older rows carry the first stored
+		// chunk's backend, or '' from a manifest copy.
 		{"object_head_cache", `SELECT COALESCE(backend_name, ''), COUNT(*) FROM object_head_cache
 			WHERE ($2 = '' OR tenant_id = $2) AND NOT is_chunked
 			  AND (backend_name IS NULL OR NOT (backend_name = ANY($1::text[]))) GROUP BY 1`},
