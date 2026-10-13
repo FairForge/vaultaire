@@ -91,6 +91,13 @@ func setupQuotaAccountingFixture(t *testing.T, limitBytes int64) *quotaAccountin
 	container := tn.NamespaceContainer("test-bucket")
 	require.NoError(t, os.MkdirAll(filepath.Join(tempDir, container), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(tempDir, tn.NamespaceContainer("dest-bucket")), 0o755))
+	// The buckets the tests write into exist: a write into a bucket with no
+	// row is NoSuchBucket (R85-1).
+	for _, b := range []string{"test-bucket", "dest-bucket"} {
+		_, err = db.Exec(`INSERT INTO buckets (tenant_id, name, visibility) VALUES ($1, $2, 'private') ON CONFLICT (tenant_id, name) DO NOTHING`,
+			tenantID, b)
+		require.NoError(t, err)
+	}
 
 	server := &Server{
 		logger:       logger,
@@ -108,6 +115,7 @@ func setupQuotaAccountingFixture(t *testing.T, limitBytes int64) *quotaAccountin
 		_, _ = db.Exec("DELETE FROM object_head_cache WHERE tenant_id = $1", tenantID)
 		_, _ = db.Exec("DELETE FROM multipart_parts WHERE upload_id IN (SELECT upload_id FROM multipart_uploads WHERE tenant_id = $1)", tenantID)
 		_, _ = db.Exec("DELETE FROM multipart_uploads WHERE tenant_id = $1", tenantID)
+		_, _ = db.Exec("DELETE FROM buckets WHERE tenant_id = $1", tenantID)
 		_, _ = db.Exec("DELETE FROM tenants WHERE id = $1", tenantID)
 	})
 

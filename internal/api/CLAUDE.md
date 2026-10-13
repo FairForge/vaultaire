@@ -119,6 +119,8 @@ Two functions for writing S3 error XML:
 
 **NoSuchBucket** — call `bucketSuggestion(ctx, db, tenantID, bucket)` to find the closest Levenshtein match among the tenant's own buckets. Only suggests if distance <= 3.
 
+**Writes into a bucket that does not exist** (R85-1, WP-R6-1 Part 0): PutObject, CreateMultipartUpload and CompleteMultipartUpload call `Server.requireWriteBucket` (s3_long_op.go) — `NoSuchBucket` through `writeNoSuchBucket`, the PUT before any body byte or quota reservation, Create before the upload row or staging directory, Complete before `longOpBegin` (a bucket deleted since Create; the upload stays). The rule is `longOpBucketExists` (CopyObject's and DeleteObjects'): a `buckets` row, or objects recorded under the name (a bucket older than the registry). The free-tier cap check runs first and keeps its 403. They used to store and bill the object under a bucket no row names.
+
 **NoSuchKey** — call `keySuggestion(ctx, db, tenantID, bucket, key)` to find close matches in `object_head_cache`. Bounded to LIMIT 20 keys with matching prefix.
 
 **AccessDenied** — `authErrorHint(errMsg)` maps common auth failures to user-friendly hints (missing header, invalid key, bad signature format).

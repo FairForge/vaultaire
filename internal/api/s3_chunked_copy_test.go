@@ -37,7 +37,8 @@ func setupChunkedCopyFixture(t *testing.T) *chunkedCopyFixture {
 
 	tid := f.tenantID
 	// Both buckets exist: a copy into a missing bucket is NoSuchBucket.
-	_, err := f.db.Exec(`INSERT INTO buckets (tenant_id, name, visibility) VALUES ($1, 'test-bucket', 'private'), ($1, 'dest-bucket', 'private')`, tid)
+	_, err := f.db.Exec(`INSERT INTO buckets (tenant_id, name, visibility) VALUES ($1, 'test-bucket', 'private'), ($1, 'dest-bucket', 'private')
+		ON CONFLICT (tenant_id, name) DO NOTHING`, tid)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		cleanupTenantChunkRows(f.db, tid, tid)

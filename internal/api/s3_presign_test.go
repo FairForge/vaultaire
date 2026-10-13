@@ -374,6 +374,10 @@ func TestPresignedURL_Integration(t *testing.T) {
 		WithArgs(testPresignTenantID).
 		WillReturnRows(suspendedRow2)
 
+	// The bucket exists (R85-1: asked before the body is read).
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM buckets`).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+
 	// HandlePut internals: object_head_cache lookup, versioning check, then the
 	// WP-1 atomicHeadUpsert transaction (Begin → SELECT ... FOR UPDATE →
 	// INSERT → Commit). WP-3 made a failing upsert fail the PUT, so the mock
