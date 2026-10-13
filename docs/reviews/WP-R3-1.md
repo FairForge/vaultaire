@@ -200,7 +200,52 @@ Test files: random bytes with the marker `R31-PLAINTEXT-MARKER-…` at every MiB
 
 ## Prod proof
 
-_(after the deploy; see below)_
+2026-10-13, after the deploy of #703 (`/version` `08d4f24892d0`, build
+12:53:36 UTC). The bench tenant `tenant-14a623b16b3f7012` (no buckets, usage
+0 before), aws-cli on the SLC box (the box's config: 64 MiB parts, 8
+concurrent), bucket `wpr31-proof`, deleted afterwards.
+
+**Read-only counts before the deploy:** chunked head rows **0** (prod had never
+chunked a multipart object); `global_content_index` 2,500 rows, all at
+ref_count 0 (the 10-13 wipe's chunks, waiting for GC); `job_runs` `dedup_gc`
+last `ok` 02:44 UTC ("149 chunk(s) not swept … they stay candidates").
+
+| Step | Result |
+|---|---|
+| 1 GiB random, `aws s3 cp` via **stored.ge** | **119.3 MB/s** (9.0 s); head row `is_chunked t`, ETag `bc570d06…-16` = the md5-of-part-md5s of the file at 64 MiB parts (what this aws-cli computes), backend `chunked`, floor `standard`, no address, encryption `''` (prod has no key) |
+| GET via stored.ge / via s3.stored.ge | **186.9 / 236.1 MB/s**, sha256 equal both (`fc8ddf00…`); `bytes=500000000-500999999` equal |
+| the same bytes as a second key via s3.stored.ge | **330.1 MB/s**: every chunk a dedup hit. GCI 2,500 → **3,026** rows (+526 chunks for the first object, **0** for the second); the tenant's refs 1,052 = 2 × 526; usage 2,147,483,648 (logical, per object) |
+| 4 more fresh 1 GiB objects (new random bytes each) | up via s3.stored.ge **161 / 167 MB/s**, via stored.ge **153 / 150 MB/s**; down via s3.stored.ge **228 / 252 MB/s**, via stored.ge **187 / 168 MB/s**; every download byte-equal |
+
+**Next to the 2026-10-12 tiers bench** (`bench-results/TIERS-AND-LAYERS-2026-10-12.md`,
+tierbench, Standard on Lyve; the clients differ, so the comparison is
+approximate):
+
+| 1 GiB multipart | 2026-10-12 (stored whole) | now (chunked) |
+|---|---|---|
+| upload via origin | 241 MB/s | 161–167 MB/s |
+| upload via Cloudflare | 183 MB/s | 119–153 MB/s |
+| download via origin | 38 MB/s single stream; 135 with `parallel_get` (§8.7, the bench tenant has it ON) | **228–252 MB/s** |
+| download via Cloudflare | 70; 93 with `parallel_get` | **168–187 MB/s** |
+
+Downloads of multipart objects are 1.7–2× the `parallel_get` numbers (the
+chunked GET's hedged read-ahead). **Uploads of fresh content are ~30 % slower:**
+Complete now stores ~526 chunks through the 8-worker store pool
+(`CHUNK_PUT_CONCURRENCY`) instead of one streaming PUT; re-uploads of known
+bytes are faster than before (330 MB/s). The knob to try first is
+`CHUNK_PUT_CONCURRENCY` 16 (an owner `.env` change, measured with the same
+script); not changed here.
+
+**`/health` and the canary through the two-slot switch:** unchanged —
+`degraded`, reason naming exactly the 11 iDrive probes, 7/18 healthy, the Lyve
+primary's breaker closed (right after boot the count read 14/18 while the
+probes had not all run); 0 error lines in the 25 minutes around the proof;
+active slot :8000.
+
+**Cleanup:** every object and the bucket deleted through stored.ge; the bench
+tenant back to 0 objects, 0 buckets, usage 0, 0 chunk refs; the box's temp
+files removed. `global_content_index` holds 5,076 rows at ref_count 0, whose
+blobs `dedup_gc` deletes from Lyve after its 7-day grace.
 
 ## Gates
 
