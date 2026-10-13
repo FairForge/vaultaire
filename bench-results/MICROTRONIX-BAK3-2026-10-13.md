@@ -38,6 +38,47 @@ node or the HE.net path is not known; one run only, re-measure before relying on
 The 1 MiB-change rsync delta test did not transfer (a test flaw — size+mtime quick check);
 not measured.
 
+## Speed diagnosis (2026-10-13 18:34–20:12 UTC, from SLC)
+
+The limit is the path into Microtronix, not anything on our side or in SSH.
+
+| Lever tried | Effect |
+|---|---|
+| Cipher (chacha20 / aes128-gcm / aes128-ctr+umac64) | none (5–9 MB/s up, all within noise) |
+| `IPQoS=none` / `throughput` (scp marks bulk traffic CS1 "lower effort") | none (11.6 / 8.0 vs 9.2 MB/s baseline) |
+| SFTP pipelining `-B 261120 -R 64` and `-R 128` (16 / 32 MiB outstanding) | none (7.5 / 7.4 MB/s). `-B 262144` and above is refused by the server: exit 255, a 0-byte file — the "55 MB/s" of the first pass was that failure |
+| rclone `--sftp-chunk-size 255k --sftp-concurrency 128` | none (7.9 vs 7.7 MB/s) |
+| `--sockopts=SO_SNDBUF=16M` | none |
+| Parallel streams, upload (8 / 16 / 32 × SFTP) | 16.2 / 14.0 / 13.5 MB/s — a flat ceiling of ~110–130 Mbps |
+| Parallel streams, download (4 / 8 / 16 / 32) | 24.9 / 36.6 / 33.7 / 25.5 MB/s — peaks at 8 |
+
+What the sending socket said during a 256 MiB scp upload (`ss -ti`, every 3 s): never
+`rwnd_limited`, never `sndbuf_limited`; the peer's advertised window grows to 3 MiB (their
+Linux default `tcp_rmem`) and ours is 64 MiB with BBR; cwnd reaches 7,065 segments while only
+~1,400 are in flight. Then the path itself: RTT swings 48 → 130 ms as soon as we push, one
+burst of 330 lost segments at +9 s collapsed cwnd to 4, and 6,421 segments were retransmitted
+in 28 s — 275 MB sent for 268 MB of file, a 2.6 % retransmit rate on a link that shows 0 %
+ping loss when idle. That is a shaper or a saturated link on their ingress (or the Hurricane
+Electric ↔ Microtronix hand-off: the Mac's path from AT&T ends on the same two Microtronix
+hops and was slower still). BBR settles at the ~70 Mbps the path delivers per stream; eight
+streams share ~130 Mbps. Download has no such loss and is bounded by their send side at
+~13–15 MB/s per stream, ~37 MB/s total.
+
+Two more findings for anyone scripting against it:
+
+- **More than ~10 simultaneous SSH connections are dropped** (the sshd `MaxStartups`
+  default): of 16 parallel SFTP downloads only 10 verified, of 32 only 18 — the rest never
+  connected. Keep concurrency at 8 or stagger connection opening.
+- **rclone v1.60.1 hung for 74 min after a complete download** (the file was whole and its
+  md5 right; the process never exited and held no connection). Any use must carry
+  `--timeout`, as `pg-backup.sh` already does, and the box's rclone should be upgraded.
+
+What is left to try: a re-run off their business hours (`/var/tmp/diag3.sh` on SLC prints
+the socket samples; 20:00 UTC was 16:00 in Ohio), and a ticket asking Microtronix whether
+`bak3` carries a per-account shaper or is saturated, with these numbers — a move to another
+node is the only fix that is theirs to make. No IPv6 on either side, FTP on the box is
+plaintext only (no AUTH TLS), nothing else listens.
+
 ## Price and terms
 
 - $2.00 per TB per month, no ingress or egress fees, no contract (the product page and the
