@@ -333,6 +333,10 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	s.dedupGCRunner = NewDedupGCRunner(s.db, s.engine, s.gci, logger)
 	if s.chunkEncSvc != nil && s.engine != nil {
 		s.keyReencrypt = NewKeyReencryptRunner(s.db, s.engine, s.gci, s.chunkEncSvc, logger)
+		if s.keyReencrypt != nil {
+			// Whole SSE-S3 objects and retained versions (WP-R2-1 C2).
+			s.keyReencrypt.sse = s.sseService
+		}
 	}
 	s.chunkMover = NewChunkMover(s.db, s.engine, logger)
 	// The retired_blobs collector (WP-R2-1 Part C): the one deleter of

@@ -775,6 +775,17 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 		return
 	}
 
+	// HEAD ?versionId (WP-R2-1 C2) answers from the version's own row — a
+	// non-current version keeps its bytes since C1 — never from the head row,
+	// which describes the current object. The latest version falls through
+	// to the head row (it IS the current object).
+	if vid := r.URL.Query().Get("versionId"); vid != "" {
+		if s.headVersion(w, r, t.ID, req, vid) {
+			return
+		}
+		w.Header().Set("x-amz-version-id", vid)
+	}
+
 	var sizeBytes int64
 	var etag, contentType string
 	var updatedAt time.Time
@@ -891,6 +902,79 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	setEchoHeaders(w.Header(), echo.CacheControl, echo.Expires, echo.WebsiteRedirect)
 	// HEAD must not write a body.
 	w.WriteHeader(http.StatusOK)
+}
+
+// headVersion answers HEAD ?versionId=vid from the object_versions row and
+// reports true, or reports false for the key's latest version (the head row
+// describes it). The R2-03 501 is kept only for a non-current version
+// written before C1, which kept no bytes (no address) — except the newest
+// live version behind a delete marker, whose bytes are intact at <key>. A
+// delete marker answers 404 with x-amz-delete-marker, as GET does. Like
+// every HEAD: the database only, never a backend call.
+func (s *Server) headVersion(w http.ResponseWriter, r *http.Request, tenantID string, req *S3Request, vid string) bool {
+	var marker, latest bool
+	var etag, contentType, storageKey, backend, encAlgo, floor string
+	var size int64
+	var createdAt time.Time
+	err := s.db.QueryRowContext(r.Context(), `
+		SELECT is_delete_marker, is_latest, etag, content_type, size_bytes, created_at,
+		       COALESCE(storage_key, ''), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(floor, '')
+		FROM object_versions
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND version_id = $4`,
+		tenantID, req.Bucket, req.Object, vid).Scan(&marker, &latest, &etag, &contentType, &size, &createdAt,
+		&storageKey, &backend, &encAlgo, &floor)
+	if errors.Is(err, sql.ErrNoRows) {
+		WriteS3Error(w, ErrNoSuchVersion, r.URL.Path, generateRequestID())
+		return true
+	}
+	if err != nil {
+		s.logger.Error("HEAD ?versionId: version query failed", zap.Error(err))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return true
+	}
+	if marker {
+		w.Header().Set("x-amz-version-id", vid)
+		w.Header().Set("x-amz-delete-marker", "true")
+		WriteS3Error(w, ErrNoSuchKey, r.URL.Path, generateRequestID())
+		return true
+	}
+	if latest {
+		return false
+	}
+	w.Header().Set("x-amz-version-id", vid)
+	if storageKey == "" && !NewS3ToEngine(s.engine, s.db, s.logger).versionBytesIntact(r.Context(), tenantID, req.Bucket, req.Object, vid) {
+		WriteS3ErrorWithContext(w, ErrNotImplemented, r.URL.Path, generateRequestID(),
+			WithSuggestion("This version was written before 2026-10-12, when versions began keeping their own bytes; its data is not retained."))
+		return true
+	}
+	if code := evaluateConditionalGET(r, etag, createdAt); code == http.StatusNotModified {
+		writeNotModified(w, etag, createdAt, "")
+		return true
+	} else if code == http.StatusPreconditionFailed {
+		WriteS3Error(w, ErrPreconditionFailed, r.URL.Path, generateRequestID())
+		return true
+	}
+	if encAlgo == crypto.SSECAlgorithm {
+		if !crypto.HasSSECHeaders(r) {
+			WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
+				WithSuggestion("This object was encrypted with SSE-C. Provide the encryption key to access metadata."))
+			return true
+		}
+		w.Header().Set("x-amz-server-side-encryption-customer-algorithm", "AES256")
+	} else if encAlgo != "" {
+		w.Header().Set("x-amz-server-side-encryption", "AES256")
+	}
+	if floor == "" {
+		floor = usage.FloorStandard
+	}
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("ETag", fmt.Sprintf(`"%s"`, etag))
+	w.Header().Set("Last-Modified", createdAt.UTC().Format(http.TimeFormat))
+	w.Header().Set("x-amz-storage-class", engine.CustomerStorageClass(floor, backend))
+	w.Header().Set("x-amz-request-id", generateRequestID())
+	w.WriteHeader(http.StatusOK)
+	return true
 }
 
 // handlePutObject handles PUT requests

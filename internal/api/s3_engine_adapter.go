@@ -294,19 +294,19 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 				storageKey: vStorageKey, backend: vBackend, encAlgo: vEncAlgo}
 		}
 		if !isDeleteMarker && !isLatest && version == nil && !a.versionBytesIntact(r.Context(), t.ID, bucket, artifact, reqVersionID) {
-			// R2-03: a version written before WP-R2-1's writers (2C) kept
-			// no bytes — every PUT overwrote the one blob at this key — so
-			// the bytes of such a non-current version no longer exist.
-			// Answering 200 with the CURRENT object's bytes under the
-			// requested version id (the previous behaviour) made
-			// restore tools restore the wrong data. Fail loudly until
-			// WP-R2-1 keeps one blob per version. The one non-current
+			// R2-03: a version written before WP-R2-1's writers (C1,
+			// 2026-10-12) kept no bytes — every PUT overwrote the one blob
+			// at this key — so the bytes of such a non-current version no
+			// longer exist. Answering 200 with the CURRENT object's bytes
+			// under the requested version id (the old behaviour) made
+			// restore tools restore the wrong data. Every version written
+			// since keeps its own blob (above); the one older non-current
 			// version whose bytes ARE intact — the newest live version
 			// behind a delete marker (nothing has overwritten it) — is
 			// still served, so an accidental delete stays recoverable.
 			w.Header().Set("x-amz-version-id", reqVersionID)
 			WriteS3ErrorWithContext(w, ErrNotImplemented, r.URL.Path, generateRequestID(),
-				WithSuggestion("Only the current version of an object can be retrieved on this service; non-current versions are listed but their data is not retained."))
+				WithSuggestion("This version was written before 2026-10-12, when versions began keeping their own bytes; its data is not retained."))
 			return
 		}
 		if isDeleteMarker {
@@ -1611,22 +1611,28 @@ func (a *S3ToEngine) handleChunkedPut(
 	// with no compensating action. atomicHeadUpsert locks the head row first,
 	// so concurrent overwrites of the same key serialize before touching the
 	// manifest (consistent lock order: head row → manifest tables).
-	displaced, dbErr := atomicHeadUpsert(ctx, a.db, t.ID, bucket, artifact, func(tx *sql.Tx) error {
-		if metaErr := a.gci.ReplaceObjectManifestTx(ctx, tx, tenantID, bucket, artifact, newRefs, &crypto.ObjectMeta{
-			TenantID:       tenantID,
-			BucketName:     bucket,
-			ObjectKey:      artifact,
-			TotalSize:      measuredSize,
-			ChunkCount:     chunkCount,
-			ContentType:    &contentType,
-			LogicalSize:    measuredSize,
-			PhysicalSize:   &physicalSize,
-			DedupRatio:     &dedupRatio,
-			PipelineConfig: chunkedPipeline(chunker, encrypting),
-		}); metaErr != nil {
-			return fmt.Errorf("replace object manifest: %w", metaErr)
-		}
-		_, execErr := tx.ExecContext(ctx, `
+	// The version row is written in the same transaction (the flip,
+	// WP-R2-1): a chunked object keeps no whole blob, so its version names
+	// none — but a Suspended bucket's null-version rewrite must release and
+	// retire the retained bytes it replaces exactly as a whole write does.
+	flip, dbErr := commitBlobWrite(ctx, a.db, nil, blobWrite{TenantID: t.ID, Bucket: bucket, Key: artifact,
+		Version: &versionWrite{Size: measuredSize, ETag: etag, ContentType: contentType, Backend: backendName},
+		Upsert: func(tx *sql.Tx) error {
+			if metaErr := a.gci.ReplaceObjectManifestTx(ctx, tx, tenantID, bucket, artifact, newRefs, &crypto.ObjectMeta{
+				TenantID:       tenantID,
+				BucketName:     bucket,
+				ObjectKey:      artifact,
+				TotalSize:      measuredSize,
+				ChunkCount:     chunkCount,
+				ContentType:    &contentType,
+				LogicalSize:    measuredSize,
+				PhysicalSize:   &physicalSize,
+				DedupRatio:     &dedupRatio,
+				PipelineConfig: chunkedPipeline(chunker, encrypting),
+			}); metaErr != nil {
+				return fmt.Errorf("replace object manifest: %w", metaErr)
+			}
+			_, execErr := tx.ExecContext(ctx, `
 			INSERT INTO object_head_cache
 				(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, content_encoding, content_language, cache_control, http_expires, website_redirect_location, floor, is_chunked, tags, updated_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $17, TRUE, $16, NOW())
@@ -1650,9 +1656,9 @@ func (a *S3ToEngine) handleChunkedPut(
 				storage_key           = NULL, -- a chunked object has no whole blob
 				updated_at            = NOW()
 		`, t.ID, bucket, artifact, measuredSize, etag, contentType, backendName, metaJSON, chunkEncAlgo, contentDisposition, contentEncoding, contentLanguage, echoHdrs.CacheControl, echoHdrs.Expires, echoHdrs.WebsiteRedirect, tagsJSON, chunkedObjectFloor)
-		return execErr
-	})
-	a.displaced = displaced
+			return execErr
+		}})
+	a.displaced = flip.Displaced
 	if dbErr != nil {
 		// Manifest swap and head upsert rolled back together: the previous
 		// version is fully intact (old manifest, old head row) and the retry
@@ -1671,7 +1677,7 @@ func (a *S3ToEngine) handleChunkedPut(
 	// the install's transaction (the flip, WP-R2-1): nothing can serve it,
 	// and the collector removes it after its grace.
 
-	versionID := recordObjectVersion(ctx, a.db, t.ID, bucket, artifact, measuredSize, etag, contentType, backendName)
+	versionID := flip.VersionID
 
 	applyObjectLockOnPut(ctx, a.db, t.ID, bucket, artifact, r)
 
@@ -2270,7 +2276,7 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 		// A version that kept its bytes (WP-R2-1) has its blob queued in
 		// retired_blobs in the same transaction as the row delete; deleting
 		// the current version re-points the head row to the newly-latest
-		// version (or drops it), and the bill follows the head row.
+		// version (or drops it).
 		found, rp, err := deleteVersion(r.Context(), a.db, t.ID, bucket, object, reqVersionID)
 		if err != nil {
 			a.logger.Error("delete version failed", zap.Error(err))
@@ -2281,18 +2287,15 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 			WriteS3Error(w, ErrNoSuchVersion, r.URL.Path, generateRequestID())
 			return
 		}
+		// The bill (PR C2): the current object's bytes when the deleted
+		// version was its blob — the newly-latest version it re-pointed to
+		// was billed as a retained version and stays billed — or the
+		// deleted retained version's own bytes.
+		rel := displacedRow{ReplacedVersion: rp.VersionReleased}
 		if rp.Changed {
-			a.releaseQuotaForDelete(r, t.ID, displacedRow{Size: rp.OldSize, Floor: rp.Floor})
-			if !rp.Dropped && rp.NewSize > 0 && a.quota != nil {
-				// The re-pointed object is billed whatever the limit: its
-				// bytes are already stored (a negative release adds).
-				qctx, cancel := quotaCtx(r)
-				if qErr := releaseQuotaOn(qctx, a.quota, t.ID, rp.Floor, -rp.NewSize); qErr != nil {
-					a.logger.Error("quota: the re-pointed current version not accounted", zap.Error(qErr), zap.String("tenant_id", t.ID))
-				}
-				cancel()
-			}
+			rel.Size, rel.Floor = rp.OldSize, rp.Floor
 		}
+		a.releaseQuotaForDelete(r, t.ID, rel)
 
 		w.Header().Set("x-amz-version-id", reqVersionID)
 		w.WriteHeader(http.StatusNoContent)

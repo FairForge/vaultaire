@@ -462,3 +462,38 @@ func TestListBuckets_Dashboard_IncludesEmptyBuckets(t *testing.T) {
 	assert.Contains(t, body, "empty-bucket")
 	assert.Contains(t, body, `<span class="count">1</span>`)
 }
+
+// WP-R2-1 C2: a bucket's size is its billed bytes — the current objects plus
+// the retained older versions — and the page says how much is versions.
+func TestListBuckets_CountsRetainedVersions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires database")
+	}
+	db := testDashDB(t)
+	defer func() { _ = db.Close() }()
+	cleanupDashBucketData(t, db)
+	defer cleanupDashBucketData(t, db)
+	defer func() { _, _ = db.Exec(`DELETE FROM object_versions WHERE tenant_id = 'test-dash-v'`) }()
+
+	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key) VALUES ('test-dash-v', 'V', 'testdashv@test.com', 'VK-dv', 'SK-dv') ON CONFLICT DO NOTHING`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO buckets (tenant_id, name, versioning_status) VALUES ('test-dash-v', 'vb', 'Enabled') ON CONFLICT DO NOTHING`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO object_head_cache (tenant_id, bucket, object_key, size_bytes, etag, storage_key) VALUES ('test-dash-v', 'vb', 'k', 500, 'e2', 'k@new')`)
+	require.NoError(t, err)
+	// The latest version IS the head row's blob (not counted twice), one
+	// retained older version (counted), one pre-C version without bytes and
+	// a delete marker (neither counted).
+	_, err = db.Exec(`INSERT INTO object_versions (tenant_id, bucket, object_key, version_id, size_bytes, etag, is_latest, is_delete_marker, storage_key, floor) VALUES
+		('test-dash-v', 'vb', 'k', 'v3', 500, 'e2', TRUE, FALSE, 'k@new', 'standard'),
+		('test-dash-v', 'vb', 'k', 'v2', 300, 'e1', FALSE, FALSE, 'k@old', 'standard'),
+		('test-dash-v', 'vb', 'k', 'v1', 900, 'e0', FALSE, FALSE, NULL, NULL),
+		('test-dash-v', 'vb', 'gone', 'm1', 0, '', TRUE, TRUE, NULL, NULL)`)
+	require.NoError(t, err)
+
+	rows := listBuckets(context.Background(), db, "test-dash-v")
+	require.Len(t, rows, 1)
+	assert.Equal(t, int64(800), rows[0].TotalSize, "500 current + 300 retained")
+	assert.Equal(t, int64(300), rows[0].VersionBytes)
+	assert.Equal(t, 1, rows[0].ObjectCount)
+}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/audit"
 	"github.com/FairForge/vaultaire/internal/crypto"
+	"github.com/FairForge/vaultaire/internal/usage"
 	"github.com/go-chi/chi/v5"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
@@ -107,8 +108,8 @@ func checkTenantKeys(ctx context.Context, keys *crypto.TenantKeys, logger *zap.L
 // handleRotateTenantKey is POST /api/v1/admin/tenants/{tenant_id}/encryption-key/rotate.
 // New writes use the new version at once on this process and within a
 // minute on every other; every blob keeps opening under the version it
-// records, and the key_reencrypt job moves the tenant's chunks over. Whole
-// SSE-S3 objects stay on their version until WP-R2-1.
+// records, and the key_reencrypt job moves the tenant's chunks, whole SSE-S3
+// objects and retained versions over (WP-R2-1 C2).
 func (s *Server) handleRotateTenantKey(w http.ResponseWriter, r *http.Request) {
 	if s.tenantKeys == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "encryption_disabled",
@@ -146,8 +147,10 @@ func (s *Server) handleRotateTenantKey(w http.ResponseWriter, r *http.Request) {
 //
 //	chunk: encrypted index rows below their tenant's newest version (the
 //	       key_reencrypt job's backlog)
-//	whole: SSE-S3 objects below it (re-encrypted with WP-R2-1; until then
-//	       this only falls when the objects are overwritten or deleted)
+//	whole: SSE-S3 blobs below it — head rows and retained non-current
+//	       versions (WP-R2-1 C2) — also the key_reencrypt job's backlog;
+//	       what stays is skipped on purpose (archive backend, open demotion,
+//	       parity row, export: the run's note says which)
 type keyRotationPendingCollector struct {
 	db     *sql.DB
 	logger *zap.Logger
@@ -163,7 +166,7 @@ const keyRotationPendingTTL = 15 * time.Second
 func newKeyRotationPendingCollector(db *sql.DB, logger *zap.Logger) *keyRotationPendingCollector {
 	return &keyRotationPendingCollector{db: db, logger: logger,
 		desc: prometheus.NewDesc("vaultaire_key_rotation_pending",
-			"Encrypted data still sealed under an older version of its tenant's key, by kind: chunk (the key_reencrypt job's backlog) | whole (SSE-S3 objects; re-encrypted with WP-R2-1). Read from the tables.",
+			"Encrypted data still sealed under an older version of its tenant's key, by kind: chunk (index rows) | whole (SSE-S3 blobs: head rows and retained non-current versions) — the key_reencrypt job's backlog. Read from the tables.",
 			[]string{"kind"}, nil)}
 }
 
@@ -179,16 +182,25 @@ func (c *keyRotationPendingCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 }
 
-// keyRotationPendingSQL counts both backlogs in one statement.
+// keyRotationPendingSQL counts both backlogs in one statement ($1 = the
+// SSE-S3 algorithm, $2 = one tenant or ” for all — tests scope it). whole
+// counts BLOBS: the head rows below their tenant's newest version plus the
+// retained non-current versions below it (usage.RetainedVersionsFrom — a
+// version that keeps bytes of its own; the latest version names the head
+// row's blob and is counted once, as the head row; WP-R2-1 C2).
 const keyRotationPendingSQL = `
 	WITH cur AS (
-		SELECT tenant_id, MAX(key_version) AS v FROM tenant_key_versions GROUP BY tenant_id HAVING COUNT(*) > 1
+		SELECT tenant_id, MAX(key_version) AS v FROM tenant_key_versions
+		 WHERE ($2 = '' OR tenant_id = $2) GROUP BY tenant_id HAVING COUNT(*) > 1
 	)
 	SELECT
 		(SELECT COUNT(*) FROM global_content_index g JOIN cur ON cur.tenant_id = g.dedup_scope
 		  WHERE g.encrypted AND g.encryption_key_version < cur.v),
 		(SELECT COUNT(*) FROM object_head_cache h JOIN cur ON cur.tenant_id = h.tenant_id
-		  WHERE h.encryption_algorithm = $1 AND COALESCE(h.encryption_key_version, 1) < cur.v)`
+		  WHERE h.encryption_algorithm = $1 AND NOT h.is_chunked AND COALESCE(h.encryption_key_version, 1) < cur.v)
+		+ (SELECT COUNT(*) FROM ` + usage.RetainedVersionsFrom + `
+		    AND v.encryption_algorithm = $1
+		    AND COALESCE(v.encryption_key_version, 1) < (SELECT c.v FROM cur c WHERE c.tenant_id = v.tenant_id))`
 
 func (c *keyRotationPendingCollector) read() map[string]float64 {
 	c.mu.Lock()
@@ -200,7 +212,7 @@ func (c *keyRotationPendingCollector) read() map[string]float64 {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	var chunk, whole int64
-	if err := c.db.QueryRowContext(ctx, keyRotationPendingSQL, crypto.SSEAlgorithm).Scan(&chunk, &whole); err != nil {
+	if err := c.db.QueryRowContext(ctx, keyRotationPendingSQL, crypto.SSEAlgorithm, "").Scan(&chunk, &whole); err != nil {
 		if c.logger != nil {
 			c.logger.Warn("key rotation metrics: could not read the backlog", zap.Error(err))
 		}

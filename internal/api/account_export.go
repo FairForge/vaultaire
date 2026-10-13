@@ -491,8 +491,8 @@ func (s *AccountExportService) deleteExportObject(ctx context.Context, tenantID,
 		s.logger.Error("account export: delete head row", zap.String("tenant_id", tenantID), zap.Error(err))
 		return
 	}
-	if found && s.quota != nil && row.Size > 0 {
-		if err := releaseQuotaOn(tctx, s.quota, tenantID, row.Floor, row.Size); err != nil {
+	if found && s.quota != nil {
+		if err := releaseDisplacedOn(tctx, s.quota, tenantID, row); err != nil {
 			s.logger.Error("account export: quota release", zap.String("tenant_id", tenantID), zap.Error(err))
 		}
 	}

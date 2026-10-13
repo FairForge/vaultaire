@@ -658,10 +658,10 @@ func (r *AccountDeletionRunner) deleteObject(ctx context.Context, t *tenant.Tena
 		te.ObjectsDeleted++
 		accountDeletionObjects.WithLabelValues("deleted").Inc()
 	}
-	if found && r.quota != nil && row.Size > 0 {
+	if found && r.quota != nil {
 		qctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
-		if err := releaseQuotaOn(qctx, r.quota, t.ID, row.Floor, row.Size); err != nil {
+		if err := releaseDisplacedOn(qctx, r.quota, t.ID, row); err != nil {
 			r.logger.Error("account deletion: quota release", zap.String("tenant_id", t.ID), zap.Error(err))
 		}
 	}

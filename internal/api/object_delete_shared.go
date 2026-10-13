@@ -170,8 +170,9 @@ func (d objectDeleteAftermath) settle(ctx context.Context, tenantID, bucket, key
 			return fmt.Errorf("chunked delete: %w", delErr)
 		case delErr != nil:
 			return fmt.Errorf("head row delete: %w", delErr)
-		case found && deleted.Size > 0 && d.quota != nil:
-			if err := releaseQuotaOn(ctx, d.quota, tenantID, deleted.Floor, deleted.Size); err != nil {
+		case found && d.quota != nil:
+			// A version that keeps the blob keeps the bill (WP-R2-1 C2).
+			if err := releaseDisplacedOn(ctx, d.quota, tenantID, deleted); err != nil {
 				d.logger.Error("quota release after delete failed",
 					zap.Error(err), zap.String("tenant_id", tenantID), zap.Int64("bytes", deleted.Size))
 			}

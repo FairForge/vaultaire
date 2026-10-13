@@ -1,5 +1,7 @@
 package engine
 
+import "sort"
+
 // These keys are OUR S3 API's storage-class names — what a client sends us in
 // x-amz-storage-class — and the values pick which backend driver handles the
 // object. They are not the backend's own storage class: no driver sets
@@ -106,6 +108,20 @@ func BackendToStorageClass(backendName string) string {
 		return class
 	}
 	return "STANDARD"
+}
+
+// ArchiveBackends is every backend name whose storage class needs a restore
+// before its bytes can be read (sorted): a job that must never trigger a tape
+// restore skips objects recorded on one of them.
+func ArchiveBackends() []string {
+	var out []string
+	for name, class := range backendToStorageClass {
+		if IsArchiveClass(class) {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // archiveFloor is the object_head_cache.floor id of the attic

@@ -39,6 +39,10 @@ type BucketRow struct {
 	FloorClass     string // badge class
 	AtticBytes     int64  // bytes of this bucket recorded in the attic
 	AtticFmt       string
+	// VersionBytes: how much of TotalSize is retained older versions
+	// (WP-R2-1 C2 — they keep their bytes and are billed).
+	VersionBytes int64
+	VersionFmt   string
 }
 
 // floorWords maps a bucket tier preference onto the floor a customer reads.
@@ -309,14 +313,16 @@ func renderBucketList(w http.ResponseWriter, r *http.Request, tmpl *template.Tem
 	}
 }
 
-func listBuckets(ctx context.Context, db *sql.DB, tenantID string) []BucketRow {
-	rows, err := db.QueryContext(ctx,
-		`SELECT b.name,
+// listBucketsSQL: a tenant's buckets with their sizes, which are the billed
+// bytes (usage/billed.go): the current objects plus the retained older
+// versions, which keep their bytes (WP-R2-1 C2).
+const listBucketsSQL = `SELECT b.name,
 		        b.visibility,
 		        b.tier_preference,
 		        COALESCE(o.object_count, 0),
-		        COALESCE(o.total_size, 0),
-		        COALESCE(o.attic_size, 0),
+		        COALESCE(o.total_size, 0) + COALESCE(ver.version_size, 0),
+		        COALESCE(o.attic_size, 0) + COALESCE(ver.version_attic, 0),
+		        COALESCE(ver.version_size, 0),
 		        COALESCE(o.last_modified, b.created_at)
 		 FROM buckets b
 		 LEFT JOIN (
@@ -329,8 +335,18 @@ func listBuckets(ctx context.Context, db *sql.DB, tenantID string) []BucketRow {
 		     WHERE tenant_id = $1
 		     GROUP BY bucket
 		 ) o ON o.bucket = b.name
+		 LEFT JOIN (
+		     SELECT v.bucket,
+		            SUM(v.size_bytes) AS version_size,
+		            SUM(v.size_bytes) FILTER (WHERE ` + usage.RetainedVersionFloor + ` = 'vault') AS version_attic
+		     FROM ` + usage.RetainedVersionsFrom + ` AND v.tenant_id = $1
+		     GROUP BY v.bucket
+		 ) ver ON ver.bucket = b.name
 		 WHERE b.tenant_id = $1 AND b.name NOT LIKE '\_%'
-		 ORDER BY b.name`, tenantID)
+		 ORDER BY b.name`
+
+func listBuckets(ctx context.Context, db *sql.DB, tenantID string) []BucketRow {
+	rows, err := db.QueryContext(ctx, listBucketsSQL, tenantID)
 	if err != nil {
 		return nil
 	}
@@ -340,12 +356,13 @@ func listBuckets(ctx context.Context, db *sql.DB, tenantID string) []BucketRow {
 	for rows.Next() {
 		var b BucketRow
 		var lastMod time.Time
-		if err := rows.Scan(&b.Name, &b.Visibility, &b.TierPreference, &b.ObjectCount, &b.TotalSize, &b.AtticBytes, &lastMod); err != nil {
+		if err := rows.Scan(&b.Name, &b.Visibility, &b.TierPreference, &b.ObjectCount, &b.TotalSize, &b.AtticBytes, &b.VersionBytes, &lastMod); err != nil {
 			continue
 		}
 		b.LastModified = lastMod
 		b.SizeFmt = formatBytes(b.TotalSize)
 		b.AtticFmt = formatBytes(b.AtticBytes)
+		b.VersionFmt = formatBytes(b.VersionBytes)
 		b.FloorWord, b.FloorClass = floorWords(b.TierPreference)
 		b.LastModifiedFmt = relativeTime(lastMod)
 		buckets = append(buckets, b)

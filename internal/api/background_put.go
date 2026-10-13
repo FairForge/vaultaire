@@ -303,8 +303,8 @@ func (g *generatedObjectWriter) writeOpts(ctx context.Context, tenantID, bucket,
 		return deliveredObject{}, fmt.Errorf("head row for %s/%s: %w", bucket, key, dbErr)
 	}
 	displaced := flip.Displaced
-	if g.quota != nil && displaced.Size > 0 {
-		if err := releaseQuotaOn(context.WithoutCancel(tctx), g.quota, tenantID, displaced.Floor, displaced.Size); err != nil {
+	if g.quota != nil {
+		if err := releaseDisplacedOn(context.WithoutCancel(tctx), g.quota, tenantID, displaced); err != nil {
 			g.logger.Error("generated object: release overwritten object failed", zap.Error(err), zap.String("tenant_id", tenantID))
 		}
 	}

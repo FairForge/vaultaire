@@ -455,13 +455,25 @@ func TestAdminTriggers_202Then409WhileRunning_DryRunStaysSynchronous(t *testing.
 	s.quotaReconcileGate.release()
 	rr = doJSON(t, s.handleQuotaReconcile, "POST", "/api/v1/admin/quota-reconcile")
 	assert.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	// One tenant (WP-R2-1 C2): only that tenant's ledgers.
+	rr = doJSON(t, s.handleQuotaReconcile, "POST", "/api/v1/admin/quota-reconcile?tenant_id=t-one")
+	assert.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	assert.Equal(t, "t-one", s.quotaManager.(*fakeReconciler).tenant)
+	assert.Contains(t, rr.Body.String(), `"tenant_id":"t-one"`)
 }
 
 // fakeReconciler is the storageReconciler slice of a QuotaManager, enough
 // for the trigger.
-type fakeReconciler struct{ stubQuotaManager }
+type fakeReconciler struct {
+	stubQuotaManager
+	tenant string
+}
 
 func (*fakeReconciler) ReconcileStorageUsage(context.Context) (int64, error) { return 3, nil }
+func (f *fakeReconciler) ReconcileTenantStorageUsage(_ context.Context, tenantID string) error {
+	f.tenant = tenantID
+	return nil
+}
 
 // The quota-reconcile trigger runs on a context that survives the request: a
 // closed admin tab no longer cancels a half-done rewrite (Review R13-08).

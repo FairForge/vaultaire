@@ -16,9 +16,17 @@ import (
 
 // WP-1 quota accounting.
 //
-// Invariant: tenant_quotas.storage_used_bytes == SUM(object_head_cache.size_bytes)
-// per tenant, in LOGICAL bytes (chunked/deduplicated objects bill their
-// logical size, not physical stored bytes).
+// Invariant: tenant_quotas.storage_used_bytes == the billed bytes per
+// tenant (usage/billed.go): SUM(object_head_cache.size_bytes) plus every
+// retained non-current version (WP-R2-1 Part C, PR C2: a version that keeps
+// its own blob holds bytes), in LOGICAL bytes (chunked/deduplicated objects
+// bill their logical size, not physical stored bytes).
+//
+// A version's bill is its blob's: when a write or a delete removes a head
+// row whose blob a version keeps, nothing is released — the head row's
+// charge becomes the version's in the same transaction (the bytes, the size
+// and the floor are the same); it is released when the version goes
+// (DELETE ?versionId, a Suspended bucket's null-version overwrite).
 //
 // The API layer is the single reservation site: it reserves the declared
 // size up front (atomic check-and-reserve inside QuotaManager), settles to
@@ -76,10 +84,52 @@ type displacedRow struct {
 	StorageKey string
 	// Found: a row was displaced (Size may be 0 for an empty object).
 	Found bool
+	// KeptByVersion: a version row keeps the displaced blob (WP-R2-1 C2):
+	// its bytes stay billed — as that version — and are not released.
+	KeptByVersion bool
+	// ReplacedVersion is a retained version the write replaced (a Suspended
+	// bucket's null version that was not the current object): its bytes are
+	// released. Zero when none.
+	ReplacedVersion quotaRelease
 	// etag and enc describe the displaced blob, for the version row that
 	// keeps it (anchorDisplacedVersion).
 	etag string
 	enc  objectEncryption
+}
+
+// quotaRelease is bytes freed on one floor.
+type quotaRelease struct {
+	Floor string
+	Bytes int64
+}
+
+// releases is what removing this row frees: the row's own bytes unless a
+// version keeps its blob (the charge carries over to that version), plus a
+// retained version the same write replaced.
+func (d displacedRow) releases() []quotaRelease {
+	var out []quotaRelease
+	if d.Size > 0 && !d.KeptByVersion {
+		out = append(out, quotaRelease{Floor: d.Floor, Bytes: d.Size})
+	}
+	if d.ReplacedVersion.Bytes > 0 {
+		out = append(out, d.ReplacedVersion)
+	}
+	return out
+}
+
+// releaseDisplacedOn releases what removing d frees (displacedRow.releases);
+// the first error is returned, every release is attempted.
+func releaseDisplacedOn(ctx context.Context, qm QuotaManager, tenantID string, d displacedRow) error {
+	if qm == nil || tenantID == "" {
+		return nil
+	}
+	var first error
+	for _, r := range d.releases() {
+		if err := releaseQuotaOn(ctx, qm, tenantID, r.Floor, r.Bytes); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
 }
 
 // settlePutQuota reconciles a successful write's up-front reservation
@@ -114,11 +164,9 @@ func (s *Server) settlePutQuota(ctx context.Context, tenantID, floor string, res
 			}
 		}
 	}
-	if old.Size > 0 {
-		if err := releaseQuotaOn(ctx, qm, tenantID, old.Floor, old.Size); err != nil {
-			s.logger.Error("quota settle: release overwritten object failed",
-				zap.Error(err), zap.String("tenant_id", tenantID))
-		}
+	if err := releaseDisplacedOn(ctx, qm, tenantID, old); err != nil {
+		s.logger.Error("quota settle: release overwritten object failed",
+			zap.Error(err), zap.String("tenant_id", tenantID))
 	}
 }
 
@@ -139,12 +187,12 @@ func (s *Server) releaseQuota(ctx context.Context, tenantID, floor string, n int
 // the delete has already committed, so the bookkeeping must complete even
 // if the client disconnects.
 func (a *S3ToEngine) releaseQuotaForDelete(r *http.Request, tenantID string, row displacedRow) {
-	if a.quota == nil || row.Size <= 0 {
+	if a.quota == nil || len(row.releases()) == 0 {
 		return
 	}
 	ctx, cancel := quotaCtx(r)
 	defer cancel()
-	if err := releaseQuotaOn(ctx, a.quota, tenantID, row.Floor, row.Size); err != nil {
+	if err := releaseDisplacedOn(ctx, a.quota, tenantID, row); err != nil {
 		a.logger.Error("quota release after delete failed",
 			zap.Error(err), zap.String("tenant_id", tenantID), zap.Int64("bytes", row.Size))
 	}
@@ -237,6 +285,15 @@ func deleteHeadRowReleasing(ctx context.Context, db *sql.DB, gci chunkManifestRe
 			return displacedRow{}, false, fmt.Errorf("release chunk manifest: %w", relErr)
 		}
 	}
+	// A version that keeps the blob (a delete marker's, or a Suspended
+	// bucket's plain DELETE over an Enabled-era version) keeps the bill.
+	if !chunked {
+		kept, kErr := versionKeepsBlob(ctx, tx, tenantID, bucket, key, blobArtifact(key, row.StorageKey))
+		if kErr != nil {
+			return displacedRow{}, false, kErr
+		}
+		row.KeptByVersion = kept
+	}
 	if err := tx.Commit(); err != nil {
 		return displacedRow{}, false, fmt.Errorf("commit head-cache delete: %w", err)
 	}
@@ -247,15 +304,19 @@ func deleteHeadRowReleasing(ctx context.Context, db *sql.DB, gci chunkManifestRe
 // manager (no database) does not implement it.
 type storageReconciler interface {
 	ReconcileStorageUsage(ctx context.Context) (int64, error)
+	ReconcileTenantStorageUsage(ctx context.Context, tenantID string) error
 }
 
 // handleQuotaReconcile rewrites every tenant's storage_used_bytes from the
-// object_head_cache sum (admin-only; Gate C runs this once before enabling
-// metered billing).
+// billed bytes — head rows plus retained versions (admin-only; Gate C runs
+// this once before enabling metered billing).
 //
 // Run only while writes are quiesced: an in-flight PUT's reservation is not
 // yet reflected in object_head_cache, so reconciling during live traffic
-// erases it and under-counts until the next reconcile.
+// erases it and under-counts until the next reconcile. ?tenant_id=<id>
+// rewrites ONE tenant's ledgers (ReconcileTenantStorageUsage): only that
+// tenant's writes need to be quiet (WP-R2-1 C2: the repair after the
+// two-slot window, in which the previous build did not bill versions).
 func (s *Server) handleQuotaReconcile(w http.ResponseWriter, r *http.Request) {
 	rec, ok := s.quotaManager.(storageReconciler)
 	if !ok {
@@ -270,8 +331,21 @@ func (s *Server) handleQuotaReconcile(w http.ResponseWriter, r *http.Request) {
 	defer s.quotaReconcileGate.release()
 	ctx, cancel := adminTriggerContext(r)
 	defer cancel()
-	n, err := rec.ReconcileStorageUsage(ctx)
 	actor, _ := r.Context().Value(userIDKey).(string)
+	if tenantID := r.URL.Query().Get("tenant_id"); tenantID != "" {
+		err := rec.ReconcileTenantStorageUsage(ctx, tenantID)
+		audit.Record(r.Context(), s.db, audit.Entry{UserID: actor, TenantID: tenantID, EventType: "admin", Action: "admin.quota_reconcile",
+			Error: err, Metadata: map[string]any{"tenant_id": tenantID}})
+		if err != nil {
+			s.logger.Error("quota reconciliation failed", zap.String("tenant_id", tenantID), zap.Error(err))
+			http.Error(w, "reconcile failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.logger.Info("quota reconciliation complete", zap.String("tenant_id", tenantID))
+		writeJSON(w, http.StatusOK, map[string]any{"object": "quota_reconcile", "tenant_id": tenantID})
+		return
+	}
+	n, err := rec.ReconcileStorageUsage(ctx)
 	audit.Record(r.Context(), s.db, audit.Entry{UserID: actor, EventType: "admin", Action: "admin.quota_reconcile", Error: err,
 		Metadata: map[string]any{"tenants_updated": n}})
 	if err != nil {
