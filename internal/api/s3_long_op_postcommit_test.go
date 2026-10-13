@@ -80,7 +80,10 @@ func longOpFixture(t *testing.T, lockDays int) *quotaAccountingFixture {
 	}
 	_, err := f.db.Exec(`
 		INSERT INTO buckets (tenant_id, name, visibility, object_lock_enabled, default_retention_mode, default_retention_days)
-		VALUES ($1, 'test-bucket', 'private', $2, $3, $4)`, f.tenantID, lockDays > 0, mode, lockDays)
+		VALUES ($1, 'test-bucket', 'private', $2, $3, $4)
+		ON CONFLICT (tenant_id, name) DO UPDATE SET object_lock_enabled = EXCLUDED.object_lock_enabled,
+			default_retention_mode = EXCLUDED.default_retention_mode, default_retention_days = EXCLUDED.default_retention_days`,
+		f.tenantID, lockDays > 0, mode, lockDays)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		_, _ = f.db.Exec(`DELETE FROM object_locks WHERE tenant_id = $1`, f.tenantID)

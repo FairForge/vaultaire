@@ -57,7 +57,7 @@ func setupMPChunkFixture(t *testing.T, withKey bool) *mpChunkFixture {
 		f.server.sseService = crypto.NewSSEService(keys)
 		f.server.chunkEncSvc = crypto.NewChunkEncryptionService(keys)
 	}
-	_, err := f.db.Exec(`INSERT INTO buckets (tenant_id, name, visibility) VALUES ($1, 'test-bucket', 'private')`, f.tenantID)
+	_, err := f.db.Exec(`INSERT INTO buckets (tenant_id, name, visibility) VALUES ($1, 'test-bucket', 'private') ON CONFLICT (tenant_id, name) DO NOTHING`, f.tenantID)
 	require.NoError(t, err)
 	tid := f.tenantID
 	t.Cleanup(func() {

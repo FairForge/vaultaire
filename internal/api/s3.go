@@ -1017,6 +1017,10 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3
 		writeFreeTierBucketCap(w, r)
 		return
 	}
+	// The bucket must exist, before a byte of the body is read (R85-1).
+	if !s.requireWriteBucket(w, r, "put", req.TenantID, req.Bucket) {
+		return
+	}
 	// The floor is decided by the storage class the write resolves to
 	// (header, then bucket tier, then public-bucket placement); resolve it
 	// once here, reserve on it, and hand it to the adapter so placement and

@@ -97,6 +97,11 @@ func (s *Server) handleInitiateMultipartUpload(w http.ResponseWriter, r *http.Re
 		writeFreeTierBucketCap(w, r)
 		return
 	}
+	// The bucket must exist before an upload row or a staging directory
+	// does (R85-1).
+	if !s.requireWriteBucket(w, r, "create multipart", t.ID, bucket) {
+		return
+	}
 
 	if crypto.HasSSECHeaders(r) {
 		WriteS3ErrorWithContext(w, ErrNotImplemented, r.URL.Path, generateRequestID(),
@@ -140,8 +145,11 @@ func (s *Server) handleInitiateMultipartUpload(w http.ResponseWriter, r *http.Re
 		refuseNoMasterKey.write(w, r)
 		return
 	case sseRequested && s.sseService == nil:
-		s.logger.Error("multipart upload asking for SSE-S3 refused: ENCRYPTION_MASTER_KEY is not configured on this process",
+		// The client chose the header: its refusal is no server failure
+		// and no Error line any client could write at will (R85-9).
+		s.logger.Warn("multipart upload asking for SSE-S3 refused: ENCRYPTION_MASTER_KEY is not configured on this process",
 			zap.String("bucket", bucket), zap.String("object", object))
+		markClientRefusal(r.Context())
 		refuseNoMasterKeyRequested.write(w, r)
 		return
 	}
@@ -542,6 +550,12 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		WriteS3Error(w, ErrNoSuchUpload, r.URL.Path, generateRequestID())
+		return
+	}
+
+	// A bucket deleted since Create: NoSuchBucket, before the keep-alive
+	// can commit a 200 (R85-1). The upload stays for Abort or the reaper.
+	if !s.requireWriteBucket(w, r, "complete multipart", t.ID, bucket) {
 		return
 	}
 

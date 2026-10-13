@@ -155,8 +155,11 @@ func (a *S3ToEngine) decidePlacement(ctx context.Context, req placementRequest) 
 		return writePlacement{Refusal: refuseNoMasterKey}
 	}
 	if req.SSERequested && a.sseService == nil && !req.SSEC {
-		a.logger.Error("write asking for SSE-S3 refused: ENCRYPTION_MASTER_KEY is not configured on this process",
+		// The client chose the header: Warn, and out of the 5xx count
+		// (R85-9) — the bucket case above is the operator's, at Error.
+		a.logger.Warn("write asking for SSE-S3 refused: ENCRYPTION_MASTER_KEY is not configured on this process",
 			zap.String("bucket", req.Bucket))
+		markClientRefusal(ctx)
 		return writePlacement{Refusal: refuseNoMasterKeyRequested}
 	}
 

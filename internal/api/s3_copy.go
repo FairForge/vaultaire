@@ -562,6 +562,14 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 		case errors.Is(err, engine.ErrAllBackendsUnavailable):
 			w.Header().Set("Retry-After", "30")
 			WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
+		case source.err != nil && (errors.Is(source.err, crypto.ErrStreamCorrupt) || errors.Is(source.err, errSealedUnreadable)):
+			// A sealed source that does not open (a truncated or corrupt
+			// blob) is an integrity failure, as on the GET: 500 and an
+			// Error line — a 503 would be retried for ever (R85-10).
+			s.logger.Error("copy: the sealed source does not open — 500",
+				zap.String("tenant_id", t.ID), zap.String("source_bucket", srcBucket), zap.String("source_key", srcKey),
+				zap.NamedError("source_error", source.err))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		case source.err != nil && r.Context().Err() == nil:
 			s.logger.Warn("copy: the source could not be read — 503",
 				zap.String("tenant_id", t.ID), zap.String("source_bucket", srcBucket), zap.String("source_key", srcKey),
