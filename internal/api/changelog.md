@@ -5,6 +5,20 @@ what you need and it shows up here.
 
 ---
 
+## 2026-10-13 — Versioning: the null version and batch deletes
+
+- **Objects uploaded before you enabled versioning are kept.** Such an object
+  is the key's `null` version (as `list-object-versions` already showed):
+  overwriting or deleting it now keeps it, `get-object --version-id null`
+  downloads it, and `DELETE ?versionId=null` removes it for good. Until today
+  the first overwrite or delete on a newly versioned bucket discarded it.
+- **Batch deletes respect versioning.** `DeleteObjects` (what `aws s3 rm
+  --recursive` uses) writes a delete marker per key on a versioned bucket, and
+  an entry with a `VersionId` deletes exactly that version; the response
+  carries `DeleteMarker` / `DeleteMarkerVersionId` / `VersionId` as on AWS.
+  Before, it removed the current object without a marker, which left its
+  version stored, counted and unreachable.
+
 ## 2026-10-12 — Versions keep their bytes
 
 - **Previous versions are downloadable.** On a bucket with versioning

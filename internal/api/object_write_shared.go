@@ -225,14 +225,22 @@ func lockVersionKey(ctx context.Context, tx *sql.Tx, tenantID, bucket, key strin
 var versionRowUpdatedHook = func() {}
 
 // writeDeleteMarker makes a delete marker the key's latest version, under
-// the key's version lock.
+// the key's head-row lock and version lock (the flip's order). An object
+// written before versioning was enabled becomes the key's "null" version
+// first (anchorNullVersion): the marker hides it, never removes it.
 func writeDeleteMarker(ctx context.Context, db *sql.DB, tenantID, bucket, key, markerID string) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := lockHeadKey(ctx, tx, tenantID, bucket, key); err != nil {
+		return err
+	}
 	if err := lockVersionKey(ctx, tx, tenantID, bucket, key); err != nil {
+		return err
+	}
+	if err := anchorNullVersion(ctx, tx, tenantID, bucket, key); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `

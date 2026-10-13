@@ -182,22 +182,6 @@ func (s *Server) releaseQuota(ctx context.Context, tenantID, floor string, n int
 	}
 }
 
-// releaseQuotaForDelete releases a deleted object's logical bytes on the
-// floor its head row recorded, on a context detached from the request —
-// the delete has already committed, so the bookkeeping must complete even
-// if the client disconnects.
-func (a *S3ToEngine) releaseQuotaForDelete(r *http.Request, tenantID string, row displacedRow) {
-	if a.quota == nil || len(row.releases()) == 0 {
-		return
-	}
-	ctx, cancel := quotaCtx(r)
-	defer cancel()
-	if err := releaseDisplacedOn(ctx, a.quota, tenantID, row); err != nil {
-		a.logger.Error("quota release after delete failed",
-			zap.Error(err), zap.String("tenant_id", tenantID), zap.Int64("bytes", row.Size))
-	}
-}
-
 // atomicHeadUpsert captures the size and floor of an existing
 // object_head_cache row (locking it), runs the caller's upsert in the same
 // transaction, and returns the displaced row — zero when the key did not

@@ -86,9 +86,20 @@ func commitBlobWrite(ctx context.Context, db *sql.DB, gci chunkManifestReleaser,
 	if err := lockHeadKey(ctx, tx, w.TenantID, w.Bucket, w.Key); err != nil {
 		return flipResult{}, err
 	}
+	vStatus := ""
 	if w.Version != nil {
 		if err := lockVersionKey(ctx, tx, w.TenantID, w.Bucket, w.Key); err != nil {
 			return flipResult{}, err
+		}
+		vStatus = bucketVersioningStatus(ctx, tx, w.TenantID, w.Bucket)
+		// An object written before versioning was enabled is the key's
+		// "null" version (ListObjectVersions lists it so): an Enabled write
+		// over it keeps it as one, read from the head row before the upsert
+		// replaces it (Stage 1a Prompt 3, Part 0).
+		if vStatus == "Enabled" {
+			if err := anchorNullVersion(ctx, tx, w.TenantID, w.Bucket, w.Key); err != nil {
+				return flipResult{}, err
+			}
 		}
 	}
 
@@ -137,7 +148,6 @@ func commitBlobWrite(ctx context.Context, db *sql.DB, gci chunkManifestReleaser,
 
 	var res flipResult
 	if w.Version != nil {
-		vStatus := bucketVersioningStatus(ctx, tx, w.TenantID, w.Bucket)
 		if vStatus == "Enabled" || vStatus == "Suspended" {
 			if dAddr != "" {
 				if err := anchorDisplacedVersion(ctx, tx, w.TenantID, w.Bucket, w.Key, displaced); err != nil {
@@ -223,6 +233,37 @@ func anchorDisplacedVersion(ctx context.Context, tx *sql.Tx, tenantID, bucket, k
 	}
 	return nil
 }
+
+// anchorNullVersion makes the key's current object its "null" version when
+// the key has no version row at all — an object written while the bucket
+// was unversioned (or before versioning existed), which AWS keeps as the
+// null version once versioning is Enabled and ListObjectVersions already
+// lists as one. Called under the head-row lock and the version lock, before
+// a write or a delete marker displaces the head row: the version row then
+// names the blob (COALESCE(storage_key, object_key): <key> for a row older
+// than 086), so the flip keeps it and its bill carries over
+// (displacedRow.KeptByVersion). A chunked head row is not anchored: a
+// manifest has no version-addressed form yet (it is released, as before —
+// docs/reviews/WP-R2-1.md, post-merge review). The row is is_latest; the
+// caller's version write or marker makes it non-current.
+func anchorNullVersion(ctx context.Context, tx *sql.Tx, tenantID, bucket, key string) error {
+	if _, err := tx.ExecContext(ctx, anchorNullVersionSQL, tenantID, bucket, key); err != nil {
+		return fmt.Errorf("anchor the pre-versioning object as the null version: %w", err)
+	}
+	return nil
+}
+
+const anchorNullVersionSQL = `
+	INSERT INTO object_versions
+		(tenant_id, bucket, object_key, version_id, size_bytes, etag, content_type, is_latest, is_delete_marker,
+		 backend_name, storage_key, encryption_algorithm, encryption_key_version, floor, created_at)
+	SELECT h.tenant_id, h.bucket, h.object_key, 'null', h.size_bytes, h.etag, h.content_type, TRUE, FALSE,
+	       h.backend_name, COALESCE(h.storage_key, h.object_key), NULLIF(h.encryption_algorithm, ''), h.encryption_key_version,
+	       h.floor, h.updated_at
+	FROM object_head_cache h
+	WHERE h.tenant_id = $1 AND h.bucket = $2 AND h.object_key = $3 AND NOT h.is_chunked
+	  AND NOT EXISTS (SELECT 1 FROM object_versions v
+	                  WHERE v.tenant_id = $1 AND v.bucket = $2 AND v.object_key = $3)`
 
 // replacedNullVersion is the retained null version a Suspended write is
 // about to replace.

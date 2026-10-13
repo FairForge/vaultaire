@@ -285,8 +285,18 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND version_id = $4`,
 			t.ID, bucket, artifact, reqVersionID).Scan(&isDeleteMarker, &isLatest, &vETag, &vContentType, &vSize, &vCreatedAt,
 			&vStorageKey, &vBackend, &vEncAlgo)
-		if err != nil {
+		switch {
+		case errors.Is(err, sql.ErrNoRows) && isUnanchoredNullVersion(r.Context(), a.db, t.ID, bucket, artifact, reqVersionID):
+			// The key has no version row: its current object is the null
+			// version (written before versioning was enabled) — served as
+			// the current object, as ListObjectVersions lists it.
+			isLatest = true
+		case errors.Is(err, sql.ErrNoRows):
 			WriteS3Error(w, ErrNoSuchVersion, r.URL.Path, generateRequestID())
+			return
+		case err != nil:
+			a.logger.Error("GET ?versionId: version query failed", zap.Error(err))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 			return
 		}
 		if !isDeleteMarker && !isLatest && vStorageKey != "" {
@@ -774,6 +784,24 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	emitEvent(r.Context(), a.db, a.logger, "object.downloaded", t.ID, map[string]interface{}{
 		"bucket": bucket, "key": object, "size": written,
 	})
+}
+
+// isUnanchoredNullVersion reports whether versionID is "null" and the key has
+// no version row at all: its current object (if any) was written before
+// versioning was enabled and IS the null version (AWS; ListObjectVersions
+// lists it so). Once a write or a marker anchors it (anchorNullVersion) it
+// has its own row. A failed lookup answers false: the caller then treats
+// the id as a version id it does not know.
+func isUnanchoredNullVersion(ctx context.Context, db *sql.DB, tenantID, bucket, key, versionID string) bool {
+	if versionID != "null" || db == nil {
+		return false
+	}
+	var any bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM object_versions
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3)`, tenantID, bucket, key).Scan(&any); err != nil {
+		return false
+	}
+	return !any
 }
 
 // versionBytesIntact reports whether a non-current version's bytes are still
@@ -2272,12 +2300,16 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 		return
 	}
 
-	if a.db != nil && (vStatus == "Enabled" || vStatus == "Suspended") && reqVersionID != "" {
+	// ?versionId=null of a key with no version row names its current
+	// object (written before versioning was enabled): a permanent delete,
+	// the plain path below.
+	if a.db != nil && (vStatus == "Enabled" || vStatus == "Suspended") && reqVersionID != "" &&
+		!isUnanchoredNullVersion(r.Context(), a.db, t.ID, bucket, object, reqVersionID) {
 		// A version that kept its bytes (WP-R2-1) has its blob queued in
 		// retired_blobs in the same transaction as the row delete; deleting
 		// the current version re-points the head row to the newly-latest
-		// version (or drops it).
-		found, rp, err := deleteVersion(r.Context(), a.db, t.ID, bucket, object, reqVersionID)
+		// version (or drops it); the bill follows (PR C2).
+		found, err := a.objectDeleteAftermath().deleteVersionReleasing(r.Context(), t.ID, bucket, object, reqVersionID)
 		if err != nil {
 			a.logger.Error("delete version failed", zap.Error(err))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
@@ -2287,15 +2319,6 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 			WriteS3Error(w, ErrNoSuchVersion, r.URL.Path, generateRequestID())
 			return
 		}
-		// The bill (PR C2): the current object's bytes when the deleted
-		// version was its blob — the newly-latest version it re-pointed to
-		// was billed as a retained version and stays billed — or the
-		// deleted retained version's own bytes.
-		rel := displacedRow{ReplacedVersion: rp.VersionReleased}
-		if rp.Changed {
-			rel.Size, rel.Floor = rp.OldSize, rp.Floor
-		}
-		a.releaseQuotaForDelete(r, t.ID, rel)
 
 		w.Header().Set("x-amz-version-id", reqVersionID)
 		w.WriteHeader(http.StatusNoContent)
@@ -2307,35 +2330,14 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 	}
 
 	if a.db != nil && vStatus == "Enabled" && reqVersionID == "" {
-		markerID := generateVersionID()
-
-		if err := writeDeleteMarker(r.Context(), a.db, t.ID, bucket, object, markerID); err != nil {
-			a.logger.Error("delete marker not written", zap.Error(err), zap.String("bucket", bucket), zap.String("object", object))
-		}
-
-		// The head-cache row is the billing record (WP-1): DELETE...RETURNING
-		// captures the removed size atomically, so a concurrent writer or
-		// deleter can never cause the same bytes to be released twice. An
-		// object chunked before versioning was enabled releases its manifest
-		// in the same transaction (R8-07) — the marker branch used to drop the
-		// head row and leak the manifest and its GCI references forever.
-		marked, found, delErr := deleteHeadRowReleasing(r.Context(), a.db, manifestReleaser(a.gci), t.ID, bucket, object)
-		if delErr != nil {
-			a.logger.Error("delete-marker head cache delete failed", zap.Error(delErr),
-				zap.String("bucket", bucket), zap.String("object", object))
+		markerID, err := a.objectDeleteAftermath().deleteBehindMarker(r.Context(), t.ID, bucket, object)
+		if err != nil {
+			// Never drop the head row without its marker: a pre-versioning
+			// object is anchored as the null version in the marker's
+			// transaction, and without it the delete would lose its bytes.
+			a.logger.Error("delete marker failed", zap.Error(err), zap.String("bucket", bucket), zap.String("object", object))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 			return
-		}
-		if found {
-			a.releaseQuotaForDelete(r, t.ID, marked)
-			// The blob the head row named stays while a version keeps it
-			// (the undelete path); one no version names is displaced.
-			if marked.StorageKey != "" {
-				if err := retireBlobNow(r.Context(), a.db, t.ID, bucket, object, marked.StorageKey, marked.Backend, retiredOverwritten); err != nil {
-					a.logger.Warn("delete marker: the displaced blob is not queued for the collector — the erasure sweep is its only remover",
-						zap.Error(err), zap.String("bucket", bucket), zap.String("object", object), zap.String("storage_key", marked.StorageKey))
-				}
-			}
 		}
 
 		w.Header().Set("x-amz-version-id", markerID)
