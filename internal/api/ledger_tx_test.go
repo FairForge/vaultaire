@@ -301,3 +301,74 @@ func TestLedger_NoQuotaStatementAfterACommit(t *testing.T) {
 		}
 	}
 }
+
+// ledgerCalls change tenant_quotas / tenant_floor_quotas inside the caller's
+// transaction; statements are the database calls a transaction makes.
+var (
+	ledgerCalls = map[string]bool{"ApplyLedgerTx": true, "ReserveTx": true, "releasesTx": true, "settleTx": true, "giveBackPart": true,
+		"deleteHeadRowTx": true} // releases inside, last
+	statementCalls = map[string]bool{"ExecContext": true, "QueryContext": true, "QueryRowContext": true, "Exec": true, "Query": true, "QueryRow": true,
+		"retireBlob": true, "install": true}
+)
+
+// quotaLastAllowed names the functions where a statement follows a ledger
+// call, and why that is safe.
+var quotaLastAllowed = map[string]string{
+	// A part that measured more than it reserved is checked before its
+	// install (the rename replaces the part number's previous file): the
+	// quota row is held through the rename and the part row's insert. Every
+	// other locker of the upload row takes it before the quota row.
+	"settleUploadPart": "a part measured past its reservation (R108-8) is refused before the install",
+}
+
+// TestLedger_QuotaStatementIsLast (Stage 1a Prompt 7, Part 0): the ledger is
+// the last thing a transaction changes before COMMIT, so the tenant's quota
+// row is held from its UPDATE to the COMMIT only (ledger_tx.go). A database
+// statement after a ledger call in the same function holds the tenant's one
+// hot row through it — and one that can wait on another lock is a deadlock
+// waiting for its second party.
+func TestLedger_QuotaStatementIsLast(t *testing.T) {
+	fset := token.NewFileSet()
+	files, err := filepath.Glob("*.go")
+	require.NoError(t, err)
+	checked := 0
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		require.NoError(t, err)
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			var firstLedger, ledgerEnd token.Pos
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				callee := ""
+				switch f := call.Fun.(type) {
+				case *ast.Ident:
+					callee = f.Name
+				case *ast.SelectorExpr:
+					callee = f.Sel.Name
+				}
+				switch {
+				case ledgerCalls[callee]:
+					checked++
+					if firstLedger == token.NoPos {
+						firstLedger, ledgerEnd = call.Pos(), call.End() // its own arguments run before it
+					}
+				case statementCalls[callee] && firstLedger != token.NoPos && call.Pos() > ledgerEnd && quotaLastAllowed[fn.Name.Name] == "":
+					t.Errorf("%s: %s runs %s after its ledger call at %s — the ledger must be the transaction's last statement",
+						fset.Position(call.Pos()), fn.Name.Name, callee, fset.Position(firstLedger))
+				}
+				return true
+			})
+		}
+	}
+	assert.Greater(t, checked, 5, "the walk found the ledger calls")
+}
