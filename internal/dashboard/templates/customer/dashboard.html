@@ -260,6 +260,7 @@ curl -X PUT {{host "s3"}}/my-first-bucket/hello.txt \
             <div class="usage-bar-fill {{.StorageBarClass}}" style="width: {{.StoragePercent}}%"></div>
         </div>
         <div class="card-detail">{{.StoragePercent}}% of {{.StorageLimitFmt}}</div>
+        {{if .StorageUploadsFmt}}<div class="card-detail">{{.StorageUploadsFmt}} of it in uploads in progress</div>{{end}}
     </div>
     {{end}}
     <div class="card">

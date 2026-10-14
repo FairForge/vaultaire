@@ -222,14 +222,12 @@ func (m *QuotaManager) ReserveOnFloor(ctx context.Context, tenantID, floor strin
 		return Reservation{}, fmt.Errorf("beginning transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	// No quota_usage_events row (WP-R10-8 Part D, R10-25): one per
+	// reservation, with no key, was the table's only writer — read as
+	// "activity" and as usage history that summed operations nobody wrote.
 	res, err := ReserveTx(ctx, tx, tenantID, floor, bytes)
 	if err != nil || !res.OK {
 		return res, err
-	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO quota_usage_events (tenant_id, operation, bytes_delta, object_key)
-		 VALUES ($1, 'RESERVE', $2, '')`, tenantID, bytes); err != nil {
-		return Reservation{}, fmt.Errorf("recording event: %w", err)
 	}
 	return res, tx.Commit()
 }

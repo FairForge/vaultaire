@@ -86,7 +86,10 @@ func TestQuotaManager_CheckAndUpdateQuota(t *testing.T) {
 }
 
 // R9-03: GetUsageHistory embedded a literal `INTERVAL '%d days'` (never
-// formatted) so GET /api/v1/quota/history always failed.
+// formatted) so GET /api/v1/quota/history always failed. WP-R10-8 Part D:
+// it is the metered daily traffic (bandwidth_usage_daily); a reservation
+// is no history (it was the only row the table ever got —
+// TestUsageHistory_IsTheMeteredDailyTraffic in internal/api covers the rows).
 func TestQuotaManager_GetUsageHistory(t *testing.T) {
 	db := setupTestDB(t)
 	m := NewQuotaManager(db)
@@ -98,11 +101,8 @@ func TestQuotaManager_GetUsageHistory(t *testing.T) {
 
 	history, err := m.GetUsageHistory(context.Background(), tenantID, 30)
 	require.NoError(t, err, "usage history must be a valid query")
-	require.Len(t, history, 1, "one day of activity → one row")
-	assert.Equal(t, int64(4096), history[0]["peak_usage"])
+	assert.Empty(t, history, "a reservation is not traffic")
 
-	// A window that excludes today's event returns nothing, proving the
-	// day count is actually bound.
 	none, err := m.GetUsageHistory(context.Background(), tenantID, 0)
 	require.NoError(t, err)
 	assert.Empty(t, none)

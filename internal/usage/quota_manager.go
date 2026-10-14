@@ -73,16 +73,6 @@ func (m *QuotaManager) CheckAndReserve(ctx context.Context, tenantID string, byt
 		return false, fmt.Errorf("updating quota: %w", err)
 	}
 
-	// Record event
-	_, err = tx.ExecContext(ctx,
-		`INSERT INTO quota_usage_events (tenant_id, operation, bytes_delta, object_key)
-         VALUES ($1, 'RESERVE', $2, '')`,
-		tenantID, bytes)
-
-	if err != nil {
-		return false, fmt.Errorf("recording event: %w", err)
-	}
-
 	return true, tx.Commit()
 }
 
@@ -262,42 +252,38 @@ func (m *QuotaManager) GetTier(ctx context.Context, tenantID string) (string, er
 	return tier, err
 }
 
-// GetUsageHistory returns historical usage data
+// GetUsageHistory is the tenant's daily traffic for the last days days,
+// newest first: bytes uploaded and downloaded and requests served, from
+// bandwidth_usage_daily (the metered counters, UTC days). It summed
+// quota_usage_events, whose only writer was a 'RESERVE' row per reservation
+// with no key — uploaded and deleted were always 0 (R10-25, WP-R10-8 Part D).
 func (m *QuotaManager) GetUsageHistory(ctx context.Context, tenantID string, days int) ([]map[string]interface{}, error) {
 	rows, err := m.db.QueryContext(ctx,
-		`SELECT DATE(timestamp) as date,
-		        MAX(bytes_delta) as peak_usage,
-		        SUM(CASE WHEN operation = 'PUT' THEN bytes_delta ELSE 0 END) as uploaded,
-		        SUM(CASE WHEN operation = 'DELETE' THEN -bytes_delta ELSE 0 END) as deleted
-		 FROM quota_usage_events
-		 WHERE tenant_id = $1 AND timestamp > NOW() - make_interval(days => $2)
-		 GROUP BY DATE(timestamp)
+		`SELECT TO_CHAR(date, 'YYYY-MM-DD'), ingress_bytes, egress_bytes, requests_count
+		 FROM bandwidth_usage_daily
+		 WHERE tenant_id = $1 AND date > (NOW() AT TIME ZONE 'UTC')::date - $2::int
 		 ORDER BY date DESC`, tenantID, days)
-
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("usage history for tenant %s: %w", tenantID, err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	var history []map[string]interface{}
+	history := []map[string]interface{}{}
 	for rows.Next() {
 		var date string
-		var peak, uploaded, deleted int64
-
-		if err := rows.Scan(&date, &peak, &uploaded, &deleted); err != nil {
-			return nil, err
+		var uploaded, downloaded, requests int64
+		if err := rows.Scan(&date, &uploaded, &downloaded, &requests); err != nil {
+			return nil, fmt.Errorf("usage history for tenant %s: scan: %w", tenantID, err)
 		}
-
 		history = append(history, map[string]interface{}{
 			"date":       date,
-			"peak_usage": peak,
 			"uploaded":   uploaded,
-			"deleted":    deleted,
+			"downloaded": downloaded,
+			"requests":   requests,
 		})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate rows: %w", err)
 	}
-
 	return history, nil
 }
