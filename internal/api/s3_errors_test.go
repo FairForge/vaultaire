@@ -379,3 +379,28 @@ func TestNoSuchBucketSuggestion_EndToEnd(t *testing.T) {
 	// Verify the tenant.FromContext pattern works
 	_ = s3Ctx(ctx, &tenant.Tenant{ID: tenantID})
 }
+
+// An S3 error body must reach the SDK as the XML the origin wrote. Behind
+// Cloudflare a 403 answered to a request that said `Accept-Encoding: gzip`
+// came back gzip-compressed, and aws-sdk-go-v2 (rclone 1.71/1.75, 2026-10-13)
+// reported "XML syntax error: illegal character U+001F" instead of
+// SignatureDoesNotMatch — the customer could not see what was wrong.
+// `no-transform` tells the edge to leave the body alone; `no-store` keeps an
+// error for one request from being served to the next one for the same key
+// (Cloudflare caches some 4xx by default for cacheable extensions).
+func TestWriteS3Error_IsNeverTransformedOrCached(t *testing.T) {
+	for name, write := range map[string]func(http.ResponseWriter){
+		"plain": func(w http.ResponseWriter) { WriteS3Error(w, ErrSignatureDoesNotMatch, "/b/k.bin", "rid") },
+		"context": func(w http.ResponseWriter) {
+			WriteS3ErrorWithContext(w, ErrNoSuchKey, "/b/k.bin", "rid", WithSuggestion("Did you mean k.bim?"))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			write(w)
+			assert.Equal(t, "no-store, no-transform", w.Header().Get("Cache-Control"))
+			assert.Contains(t, w.Header().Get("Content-Type"), "application/xml")
+			assert.GreaterOrEqual(t, w.Code, 400)
+		})
+	}
+}
