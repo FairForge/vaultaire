@@ -222,7 +222,22 @@ func (m *QuotaManager) ReserveOnFloor(ctx context.Context, tenantID, floor strin
 		return Reservation{}, fmt.Errorf("beginning transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	res, err := ReserveTx(ctx, tx, tenantID, floor, bytes)
+	if err != nil || !res.OK {
+		return res, err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO quota_usage_events (tenant_id, operation, bytes_delta, object_key)
+		 VALUES ($1, 'RESERVE', $2, '')`, tenantID, bytes); err != nil {
+		return Reservation{}, fmt.Errorf("recording event: %w", err)
+	}
+	return res, tx.Commit()
+}
 
+// ReserveTx is ReserveOnFloor inside the caller's transaction (an UploadPart
+// reserves under its upload row's lock, WP-R10-8 Part C): the same checks,
+// the same writes, one rule. The caller commits.
+func ReserveTx(ctx context.Context, tx *sql.Tx, tenantID, floor string, bytes int64) (Reservation, error) {
 	var used, limit int64
 	if err := tx.QueryRowContext(ctx,
 		`SELECT storage_used_bytes, storage_limit_bytes FROM tenant_quotas
@@ -271,12 +286,7 @@ func (m *QuotaManager) ReserveOnFloor(ctx context.Context, tenantID, floor strin
 		  WHERE tenant_id = $2`, bytes, tenantID); err != nil {
 		return Reservation{}, fmt.Errorf("updating quota: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO quota_usage_events (tenant_id, operation, bytes_delta, object_key)
-		 VALUES ($1, 'RESERVE', $2, '')`, tenantID, bytes); err != nil {
-		return Reservation{}, fmt.Errorf("recording event: %w", err)
-	}
-	return res, tx.Commit()
+	return res, nil
 }
 
 // ReleaseFloor is ReleaseQuota for bytes known to sit on a floor: the total

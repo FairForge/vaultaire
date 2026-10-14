@@ -20,8 +20,10 @@ import (
 	"testing"
 
 	"github.com/FairForge/vaultaire/internal/usage"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 )
 
 // createUpload starts a multipart upload of key and returns its id.
@@ -149,6 +151,29 @@ func TestAbort_ReleasesWhatTheUploadHolds(t *testing.T) {
 	f.ledgerAgrees(t, "after the abort")
 }
 
+func TestReaper_ReleasesWhatAReapedUploadHolds(t *testing.T) {
+	f := setupQuotaAccountingFixture(t, 1<<30)
+	id := f.createUpload(t, "big.bin", nil)
+	for i := 1; i <= 2; i++ {
+		require.Equal(t, http.StatusOK, f.putPart(t, "big.bin", id, i, 64*kib).Code)
+	}
+	_, err := f.db.Exec(`UPDATE multipart_uploads SET created_at = NOW() - INTERVAL '49 hours' WHERE upload_id = $1`, id)
+	require.NoError(t, err)
+	_, err = f.db.Exec(`UPDATE multipart_parts SET created_at = NOW() - INTERVAL '49 hours' WHERE upload_id = $1`, id)
+	require.NoError(t, err)
+
+	ended, err := endUploadReleasing(context.Background(), f.db, id, "", "", "") // the reaper's abort, for this upload only
+	require.NoError(t, err)
+	require.True(t, ended)
+
+	assert.Zero(t, f.used(t))
+	f.ledgerAgrees(t, "after the reap")
+	ended, err = endUploadReleasing(context.Background(), f.db, id, "", "", "")
+	require.NoError(t, err)
+	assert.False(t, ended, "a second reap releases nothing")
+	assert.Zero(t, f.used(t))
+}
+
 func TestComplete_SettlesThePartsIntoTheObject_UnlistedReleased(t *testing.T) {
 	f := setupQuotaAccountingFixture(t, 1<<30)
 	id := f.createUpload(t, "big.bin", nil)
@@ -218,4 +243,40 @@ func TestSetHouse_SeedsAFloorRowWithWhatUploadsHold(t *testing.T) {
 	std, _ := f.floors(t)
 	assert.Equal(t, int64(64*kib), std)
 	f.ledgerAgrees(t, "after the house")
+}
+
+func TestUploadPart_StagingNearlyFull_503SlowDown_NothingStagedOrReserved(t *testing.T) {
+	f := setupQuotaAccountingFixture(t, 1<<30)
+	f.server.multipartStagingMinFree = defaultStagingMinFree
+	id := f.createUpload(t, "big.bin", nil)
+	old := stagingFS
+	stagingFS = func(string) (uint64, uint64, error) { return 6 << 30, 61 << 30, nil } // prod's tmpfs, 6 GiB free
+	t.Cleanup(func() { stagingFS = old })
+	before := testutil.ToFloat64(multipartStagingRefusals)
+
+	w := f.putPart(t, "big.bin", id, 1, 64*kib)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Contains(t, w.Body.String(), "SlowDown")
+	assert.NotEmpty(t, w.Header().Get("Retry-After"))
+	assert.Equal(t, before+1, testutil.ToFloat64(multipartStagingRefusals))
+	assert.Zero(t, f.used(t))
+	_, err := os.Stat(partFilePath(id, 1))
+	assert.True(t, os.IsNotExist(err))
+
+	stagingFS = func(string) (uint64, uint64, error) { return 40 << 30, 61 << 30, nil }
+	assert.Equal(t, http.StatusOK, f.putPart(t, "big.bin", id, 1, 64*kib).Code, "room again")
+}
+
+func TestStagingMinFree_DefaultAndEnv(t *testing.T) {
+	const gib = uint64(1 << 30)
+	assert.Equal(t, uint64(61*gib)/2, defaultStagingMinFree(61*gib), "prod's 61 GiB tmpfs: half kept free")
+	assert.Equal(t, 50*gib, defaultStagingMinFree(200*gib), "the prompt's 50 GiB from 100 GiB up")
+	assert.Equal(t, uint64(3600*gib)/10, defaultStagingMinFree(3600*gib), "10 % of a large disk")
+	env := func(v string) func(string) string { return func(string) string { return v } }
+	log := zap.NewNop()
+	assert.Nil(t, stagingMinFreeFromEnv(env("off"), log))
+	assert.Equal(t, 20*gib, stagingMinFreeFromEnv(env("20GiB"), log)(1000*gib))
+	assert.Equal(t, 250*gib, stagingMinFreeFromEnv(env("25%"), log)(1000*gib))
+	assert.Equal(t, defaultStagingMinFree(1000*gib), stagingMinFreeFromEnv(env("lots"), log)(1000*gib), "rejected: the default")
 }

@@ -696,9 +696,8 @@ func (r *AccountDeletionRunner) abortMultipart(ctx context.Context, tenantID str
 	}
 	for _, u := range ups {
 		if u.status == "active" {
-			if _, err := r.db.ExecContext(ctx,
-				`UPDATE multipart_uploads SET status = 'aborted' WHERE upload_id = $1 AND tenant_id = $2 AND status = 'active'`,
-				u.id, tenantID); err != nil {
+			// Aborted with what it holds released (WP-R10-8 Part C).
+			if _, err := endUploadReleasing(ctx, r.db, u.id, tenantID, "", ""); err != nil {
 				return fmt.Errorf("abort upload %s: %w", u.id, err)
 			}
 			te.MultipartAborted++

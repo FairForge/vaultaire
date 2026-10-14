@@ -1,0 +1,32 @@
+# Multipart staging free-space guard — install to /etc/prometheus/rules/ (see README).
+#
+# Series come from the app's /metrics (WP-R10-8 Part C,
+# internal/api/multipart_staging_guard.go):
+#   vaultaire_multipart_staging_refusals_total   UploadParts answered 503 SlowDown because the
+#                                                staging filesystem would fall below its floor
+#   vaultaire_multipart_staging_free_bytes       free bytes there at the last UploadPart's check
+#
+# Every part is reserved against its tenant's quota before it is staged, but
+# the staging filesystem is shared: N tenants × their quotas can still fill
+# it. The floor is MULTIPART_STAGING_MIN_FREE (default max(10 %, min(50 GiB,
+# 50 %)) of the filesystem: 30 GiB of prod's 61 GiB tmpfs /tmp, i.e. RAM).
+#
+# Triage when MultipartStagingRefusing fires: clients retry the part (503 +
+# Retry-After), nothing is lost, but large uploads stall.
+#   df -h /tmp; du -sh /tmp/vaultaire-multipart
+#   psql: SELECT tenant_id, COUNT(*), pg_size_pretty(SUM(reserved_bytes)) FROM multipart_uploads
+#         WHERE status = 'active' GROUP BY 1 ORDER BY SUM(reserved_bytes) DESC LIMIT 10;
+# One tenant holding most of it: their uploads end with an Abort, or the
+# reaper after 48 h idle (MULTIPART_ABANDON_HOURS). The lasting fix is
+# WP-R3-5: stage on the data disk instead of the tmpfs.
+groups:
+  - name: vaultaire-multipart
+    rules:
+      - alert: MultipartStagingRefusing
+        expr: increase(vaultaire_multipart_staging_refusals_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "UploadParts are refused: the multipart staging filesystem is near its floor"
+          description: "{{ $value }} part(s) answered 503 SlowDown in 15 min. Free: vaultaire_multipart_staging_free_bytes. Find the uploads holding it (multipart_uploads.reserved_bytes) — see the triage in deploy/monitoring/vaultaire-multipart.yml."
