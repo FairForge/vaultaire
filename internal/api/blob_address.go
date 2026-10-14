@@ -227,23 +227,6 @@ func retireBlob(ctx context.Context, tx *sql.Tx, tenantID, bucket, key, storageK
 	return nil
 }
 
-// retireBlobNow is retireBlob in a transaction of its own (a path whose row
-// change has already committed: the delete-marker branch).
-func retireBlobNow(ctx context.Context, db *sql.DB, tenantID, bucket, key, storageKey, backend, reason string) error {
-	if storageKey == "" || db == nil {
-		return nil
-	}
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin retire: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	if err := retireBlob(ctx, tx, tenantID, bucket, key, storageKey, backend, reason); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
 // versionKeepsBlob reports whether a version row keeps the blob at
 // storageKey: a delete of the head row must then leave the bytes.
 func versionKeepsBlob(ctx context.Context, q queryRower, tenantID, bucket, key, storageKey string) (bool, error) {

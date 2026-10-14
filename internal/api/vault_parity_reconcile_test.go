@@ -217,7 +217,13 @@ func TestVaultParity_ReconcileRunsWhenProtectUsesTheRun(t *testing.T) {
 	}
 	f.eng.AddDriver("permafrost", &slowLeg{flakyLegDriver: f.leg, delay: 100 * time.Millisecond})
 	f.svc.ReconcileSlice = time.Second
-	f.svc.ProtectOverhead = 150 * time.Millisecond
+	// The estimate must cover a protect's real duration — the leg's 100 ms
+	// plus four DB round trips, the source read and the encode — or the
+	// last protect started is cut by the run's deadline and RunOnce returns
+	// it (the CI flake of 2026-10-13: 150 ms left 50 ms of margin, under
+	// -race on a loaded runner). 40 objects × ≥ 100 ms (4 s) still exceed
+	// the 3 s run, so the pass always stops at its share.
+	f.svc.ProtectOverhead = 500 * time.Millisecond
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 

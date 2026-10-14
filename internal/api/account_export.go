@@ -430,7 +430,9 @@ func (s *AccountExportService) renderOne(ctx context.Context, c *claimed, log *z
 		// The row went away under us (an erasure between claim and write):
 		// the object must not outlive it.
 		log.Warn("account export: row gone before completion; removing the object")
-		s.deleteExportObject(context.WithoutCancel(ctx), c.tenantID, key)
+		if derr := s.deleteExportObject(context.WithoutCancel(ctx), c.tenantID, key); derr != nil {
+			log.Error("account export: the object of a vanished row is not removed — the erasure sweep is its remover", zap.Error(derr))
+		}
 		return errors.New("export row disappeared during the render")
 	}
 	audit.Record(context.WithoutCancel(ctx), s.db, audit.Entry{UserID: c.userID, TenantID: c.tenantID, EventType: "account",
@@ -462,31 +464,38 @@ func (s *AccountExportService) ensureSystemBucket(ctx context.Context, tenantID 
 
 // deleteExportObject removes one export object the way DeleteObject does:
 // the blob on its recorded backend (a miss is fine), then the head row, then
-// the quota. The caller decides what the row says.
-func (s *AccountExportService) deleteExportObject(ctx context.Context, tenantID, key string) {
+// the quota. The caller decides what the row says. An error leaves the row
+// (and the bill) for the next run: a row that cannot be read, or a blob its
+// backend could not delete, is never dropped with its bytes left behind
+// (Stage 1a Prompt 6 Part 0: the blob was deleted on the primary at a
+// guess, and the row went whatever the backend answered).
+func (s *AccountExportService) deleteExportObject(ctx context.Context, tenantID, key string) error {
 	t := &tenant.Tenant{ID: tenantID}
 	container := t.NamespaceContainer(tenant.ExportsBucket)
 	tctx := common.WithTenantID(ctx, tenantID)
 	var backend, storageKey string
 	err := s.db.QueryRowContext(tctx, `SELECT COALESCE(backend_name, ''), COALESCE(storage_key, '') FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
 		tenantID, tenant.ExportsBucket, key).Scan(&backend, &storageKey)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		s.logger.Error("account export: read head row", zap.String("tenant_id", tenantID), zap.Error(err))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil // no row names any bytes: nothing to delete
+	}
+	if err != nil {
+		return fmt.Errorf("read the export's head row: %w", err)
 	}
 	blob := blobArtifact(key, storageKey) // the row's address (WP-R2-1)
 	if err := s.eng.Delete(engine.WithRecordedBackend(tctx, backend), container, blob); err != nil && !isObjectMissingErr(err) {
-		s.logger.Error("account export: delete object", zap.String("tenant_id", tenantID), zap.String("key", key), zap.Error(err))
+		return fmt.Errorf("delete the export object: %w", err)
 	}
 	row, found, err := deleteHeadRowReleasing(tctx, s.db, manifestReleaser(s.gci), tenantID, tenant.ExportsBucket, key)
 	if err != nil {
-		s.logger.Error("account export: delete head row", zap.String("tenant_id", tenantID), zap.Error(err))
-		return
+		return fmt.Errorf("delete the export's head row: %w", err)
 	}
 	if found && s.quota != nil {
 		if err := releaseDisplacedOn(tctx, s.quota, tenantID, row); err != nil {
 			s.logger.Error("account export: quota release", zap.String("tenant_id", tenantID), zap.Error(err))
 		}
 	}
+	return nil
 }
 
 // --- expiry (the retention job's step) ------------------------------------
@@ -528,7 +537,12 @@ func (s *AccountExportService) PurgeExpired(ctx context.Context) (int64, error) 
 			return n, ctx.Err()
 		}
 		if i := strings.IndexByte(d.path, '/'); i >= 0 {
-			s.deleteExportObject(ctx, d.tenantID, d.path[i+1:])
+			if err := s.deleteExportObject(ctx, d.tenantID, d.path[i+1:]); err != nil {
+				// The row stays 'completed': the next run retries.
+				s.logger.Error("account export: expired object not deleted; retried next run",
+					zap.String("tenant_id", d.tenantID), zap.String("export_id", d.id), zap.Error(err))
+				continue
+			}
 		}
 		res, err := s.db.ExecContext(ctx, `UPDATE account_exports SET status = 'expired' WHERE id = $1::uuid AND status = 'completed'`, d.id)
 		if err != nil {

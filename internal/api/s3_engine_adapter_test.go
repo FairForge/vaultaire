@@ -129,6 +129,12 @@ func TestHandleGet_ContentTypeFallsBackToExtension(t *testing.T) {
 	container := f.tenant.NamespaceContainer("test-bucket")
 	_, err := f.eng.Put(common.WithTenantID(context.Background(), f.tenantID), container, "data.json", bytes.NewReader(content))
 	require.NoError(t, err)
+	// A row with no recorded type (the object exists: a GET of a key with
+	// no row is NoSuchKey, Stage 1a Prompt 6 Part 0).
+	_, err = f.db.Exec(`INSERT INTO object_head_cache (tenant_id, bucket, object_key, size_bytes, etag, content_type)
+		VALUES ($1, 'test-bucket', 'data.json', $2, 'e', '')
+		ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET size_bytes = $2, content_type = ''`, f.tenantID, len(content))
+	require.NoError(t, err)
 
 	req := httptest.NewRequest("GET", "/test-bucket/data.json", nil)
 	ctx := s3Ctx(req.Context(), f.tenant)
@@ -200,7 +206,10 @@ func TestHandleGet_RangeRequest_Unsatisfiable(t *testing.T) {
 	assert.Equal(t, http.StatusRequestedRangeNotSatisfiable, w.Code)
 }
 
-func TestHandleGet_RangeIgnoredWithoutCache(t *testing.T) {
+func TestHandleGet_NoRow_IsNoSuchKeyEvenWithBytesOnTheBackend(t *testing.T) {
+	// Was TestHandleGet_RangeIgnoredWithoutCache (200, the backend's bytes):
+	// the row is the one authority for an object (WP-R6-1) — a key with no
+	// row is NoSuchKey and no backend is asked (Stage 1a Prompt 6 Part 0).
 	f := setupAdapterFixture(t)
 
 	content := []byte("no cache content")
@@ -216,10 +225,8 @@ func TestHandleGet_RangeIgnoredWithoutCache(t *testing.T) {
 	w := httptest.NewRecorder()
 	f.adapter.HandleGet(w, req, "test-bucket", "nocache.txt")
 
-	assert.Equal(t, http.StatusOK, w.Code, "without cache, range is ignored and full content returned")
-
-	body, _ := io.ReadAll(w.Body)
-	assert.Equal(t, content, body)
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	assert.Contains(t, w.Body.String(), "NoSuchKey")
 }
 
 func TestHandleGet_ContentLengthSetFromCache(t *testing.T) {

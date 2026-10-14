@@ -226,8 +226,11 @@ var versionRowUpdatedHook = func() {}
 // writeDeleteMarker makes a delete marker the key's latest version, under
 // the key's head-row lock and version lock (the flip's order). An object
 // written before versioning was enabled becomes the key's "null" version
-// first (anchorNullVersion): the marker hides it, never removes it.
-func writeDeleteMarker(ctx context.Context, db *sql.DB, tenantID, bucket, key, markerID string) error {
+// first (anchorNullVersion): the marker hides it, never removes it. inTx,
+// when set, runs in the same transaction after the marker (the head row's
+// removal: one transaction, so no write can commit between the marker and
+// the row it hides — PM-6 under versioning, Stage 1a Prompt 6 Part 0).
+func writeDeleteMarker(ctx context.Context, db *sql.DB, tenantID, bucket, key, markerID string, inTx ...func(tx *sql.Tx) error) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -253,6 +256,11 @@ func writeDeleteMarker(ctx context.Context, db *sql.DB, tenantID, bucket, key, m
 			(tenant_id, bucket, object_key, version_id, size_bytes, etag, content_type, is_latest, is_delete_marker)
 		VALUES ($1, $2, $3, $4, 0, '', 'application/octet-stream', TRUE, TRUE)`, tenantID, bucket, key, markerID); err != nil {
 		return err
+	}
+	for _, fn := range inTx {
+		if err := fn(tx); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }

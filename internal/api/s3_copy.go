@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/md5" // #nosec G501 — S3 spec requires MD5 for ETags
 	"database/sql"
 	"encoding/json"
@@ -184,6 +185,7 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 
 	copySource := r.Header.Get("x-amz-copy-source")
 	srcBucket, srcKey, err := parseCopySource(copySource)
+	srcVersionID := copySourceVersionID(copySource)
 	if err != nil {
 		s.logger.Warn("invalid x-amz-copy-source",
 			zap.String("copy_source", copySource),
@@ -254,12 +256,45 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	var srcChunked bool
 	var srcBackend string
 	var srcFloor, srcStorageKey string
+	// versionAttrs: the attributes of a non-current source version — its
+	// content type alone (no per-version copy of the rest exists; a GET of
+	// it sends none either), never the current object's.
+	var versionAttrs *objectAttrs
 	if s.db != nil {
-		_ = s.db.QueryRowContext(r.Context(), `
+		// The source's row is the one authority for where its bytes are
+		// (WP-R6-1): a row that cannot be read is a 500 and a key with no row
+		// is NoSuchKey — neither is read from the primary at a guess, which
+		// is what the ignored error did (Stage 1a Prompt 6 Part 0).
+		rowErr := s.db.QueryRowContext(r.Context(), `
 			SELECT size_bytes, COALESCE(encryption_algorithm, ''), is_chunked, COALESCE(backend_name, ''), floor, COALESCE(storage_key, '')
 			FROM object_head_cache
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
 			t.ID, srcBucket, srcKey).Scan(&srcSize, &srcEnc, &srcChunked, &srcBackend, &srcFloor, &srcStorageKey)
+		srcFound := rowErr == nil
+		if rowErr != nil && !errors.Is(rowErr, sql.ErrNoRows) {
+			s.logger.Error("copy: source row read failed", zap.Error(rowErr), zap.String("bucket", srcBucket), zap.String("key", srcKey))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+		if srcVersionID != "" {
+			v, code := s.copySourceVersion(r.Context(), t.ID, srcBucket, srcKey, srcVersionID)
+			switch {
+			case code != "":
+				WriteS3Error(w, code, r.URL.Path, generateRequestID())
+				return
+			case !v.current:
+				srcFound = true
+				srcSize, srcEnc, srcChunked, srcBackend, srcStorageKey = v.size, v.enc, false, v.backend, v.storageKey
+				versionAttrs = &objectAttrs{ContentType: v.contentType}
+				if v.floor != "" {
+					srcFloor = v.floor
+				}
+			}
+		}
+		if !srcFound {
+			WriteS3Error(w, ErrNoSuchKey, r.URL.Path, generateRequestID())
+			return
+		}
 	}
 	// The source's bytes are at its row's address (WP-R2-1).
 	srcBlob := blobArtifact(srcKey, srcStorageKey)
@@ -323,6 +358,9 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 				WithSuggestion("Copying a large unencrypted object into a bucket that encrypts at rest is not supported yet. Download it and upload it into that bucket."))
 			return
 		}
+		if srcVersionID != "" {
+			w.Header().Set("x-amz-copy-source-version-id", srcVersionID)
+		}
 		s.handleChunkedCopy(w, r, t, srcBucket, srcKey, destBucket, destKey, srcSize, directive, requestAttrs)
 		return
 	}
@@ -356,7 +394,10 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	// The source's recorded attributes (COPY directive) — read before the
 	// stream so a self-copy with REPLACE sees the pre-write row.
 	sourceAttrs := objectAttrs{ContentType: "application/octet-stream"}
-	if s.db != nil {
+	switch {
+	case versionAttrs != nil:
+		sourceAttrs = *versionAttrs
+	case s.db != nil:
 		if a, aErr := loadHeadAttrs(r.Context(), s.db, t.ID, srcBucket, srcKey); aErr == nil {
 			sourceAttrs = a
 		}
@@ -634,6 +675,9 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	// The bucket's default retention.
 	applyObjectLockOnPut(pctx, s.db, t.ID, destBucket, destKey, r)
 
+	if srcVersionID != "" {
+		w.Header().Set("x-amz-copy-source-version-id", srcVersionID)
+	}
 	result := CopyObjectResult{
 		ETag:         fmt.Sprintf(`"%s"`, etag),
 		LastModified: now.Format("2006-01-02T15:04:05.000Z"),
@@ -698,6 +742,63 @@ func parseCopySource(source string) (bucket, key string, err error) {
 	}
 
 	return parts[0], decodedKey, nil
+}
+
+// copySourceVersionID is the versionId of an x-amz-copy-source
+// ("bucket/key?versionId=…"), "" when none.
+func copySourceVersionID(source string) string {
+	_, query, ok := strings.Cut(source, "?")
+	if !ok {
+		return ""
+	}
+	q, err := url.ParseQuery(query)
+	if err != nil {
+		return ""
+	}
+	return q.Get("versionId")
+}
+
+// copySource is the source of a copy that names a version: its own row's
+// bytes, or the current object (current = the head row describes it).
+type copySource struct {
+	current                                      bool
+	size                                         int64
+	enc, backend, storageKey, floor, contentType string
+}
+
+// copySourceVersion resolves a copy source's ?versionId the way a GET
+// ?versionId does (Stage 1a Prompt 6 Part 0: the id was dropped and the
+// CURRENT object copied — the S3 way to restore an earlier version, copying
+// it onto its own key, restored nothing). A code is the refusal: no such
+// version, a delete marker (AWS answers InvalidRequest), or a version
+// written before C1 whose bytes were not kept.
+func (s *Server) copySourceVersion(ctx context.Context, tenantID, bucket, key, versionID string) (copySource, string) {
+	var isMarker, isLatest bool
+	var v copySource
+	err := s.db.QueryRowContext(ctx, `
+		SELECT is_delete_marker, is_latest, size_bytes, COALESCE(encryption_algorithm, ''), COALESCE(backend_name, ''),
+		       COALESCE(storage_key, ''), COALESCE(floor, ''), content_type
+		FROM object_versions
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND version_id = $4`,
+		tenantID, bucket, key, versionID).Scan(&isMarker, &isLatest, &v.size, &v.enc, &v.backend, &v.storageKey, &v.floor, &v.contentType)
+	switch {
+	case errors.Is(err, sql.ErrNoRows) && isUnanchoredNullVersion(ctx, s.db, tenantID, bucket, key, versionID):
+		return copySource{current: true}, ""
+	case errors.Is(err, sql.ErrNoRows):
+		return copySource{}, ErrNoSuchVersion
+	case err != nil:
+		s.logger.Error("copy: source version read failed", zap.Error(err), zap.String("bucket", bucket), zap.String("key", key))
+		return copySource{}, ErrInternalError
+	case isMarker:
+		return copySource{}, ErrInvalidRequest
+	case isLatest:
+		return copySource{current: true}, ""
+	case v.storageKey != "":
+		return v, ""
+	case s.readAdapter().versionBytesIntact(ctx, tenantID, bucket, key, versionID):
+		return v, "" // at <key>, behind a delete marker
+	}
+	return copySource{}, ErrNotImplemented
 }
 
 // handleChunkedCopy copies a chunked object without moving any data: the

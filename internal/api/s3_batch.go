@@ -352,10 +352,19 @@ func (s *Server) batchDeleteKey(r *http.Request, t *tenant.Tenant, bucket, conta
 		keptByVersion = named
 	}
 
+	if isChunked && s.gci == nil {
+		// No content index on this process: a chunked object's chunks
+		// cannot be released, and a whole-blob delete would be a guess.
+		s.logger.Error("batch delete: a chunked object on a process with no content index", zap.String("key", key))
+		return &DeleteError{Key: key, Code: ErrInternalError, Message: "Internal error while deleting"}
+	}
+
 	var delErr error
 	// A chunked object's manifest is released together with its head row
-	// below, in one transaction (R8-08); there is no backend delete.
-	if (!isChunked || s.gci == nil) && !keptByVersion {
+	// below, in one transaction (R8-08); there is no backend delete. A key
+	// with no row names no bytes: nothing to delete on any backend (WP-R6-1,
+	// Stage 1a Prompt 6 Part 0 — it was a delete of <key> on the primary).
+	if !isChunked && !keptByVersion && read.found {
 		bctx := r.Context()
 		if recordedBackend != "" && s.engine != nil {
 			noteRecordedBackend(s.engine, s.logger, "delete_objects", recordedBackend)

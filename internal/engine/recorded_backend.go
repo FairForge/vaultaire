@@ -94,6 +94,23 @@ var noTenantRefusals = func() *prometheus.CounterVec {
 	return c
 }()
 
+// unrecordedBackendOps are the ops vaultaire_engine_unrecorded_backend_calls_total counts.
+var unrecordedBackendOps = []string{"get", "get_range", "delete", "parallel_get"}
+
+var unrecordedBackendCalls = func() *prometheus.CounterVec {
+	c := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vaultaire_engine_unrecorded_backend_calls_total",
+		Help: "Engine reads and deletes of an existing object whose context named no recorded backend (WithRecordedBackend), answered from the primary, by op (get, get_range, delete, parallel_get). A row with a NULL backend_name, or a caller that dropped the row's backend: expected 0 (prod has no NULL rows), each increase has a Warn line.",
+	}, []string{"op"})
+	for _, op := range unrecordedBackendOps {
+		c.WithLabelValues(op)
+	}
+	return c
+}()
+
+// UnrecordedBackendCallsCounter is vaultaire_engine_unrecorded_backend_calls_total (tests read it).
+func UnrecordedBackendCallsCounter() *prometheus.CounterVec { return unrecordedBackendCalls }
+
 // NoTenantRefusalsCounter is vaultaire_engine_no_tenant_refusals_total
 // (tests read it).
 func NoTenantRefusalsCounter() *prometheus.CounterVec { return noTenantRefusals }

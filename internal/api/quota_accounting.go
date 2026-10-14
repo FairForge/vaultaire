@@ -290,7 +290,21 @@ func deleteHeadRowWhere(ctx context.Context, db *sql.DB, gci chunkManifestReleas
 		return displacedRow{}, false, fmt.Errorf("begin head-cache delete: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	row, found, err = deleteHeadRowTx(ctx, tx, gci, tenantID, bucket, key, storageKey)
+	if err != nil || !found {
+		return displacedRow{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return displacedRow{}, false, fmt.Errorf("commit head-cache delete: %w", err)
+	}
+	return row, true, nil
+}
 
+// deleteHeadRowTx is deleteHeadRowWhere inside the caller's transaction: the
+// row (only at *storageKey when set), a chunked object's manifest, and
+// whether a version keeps the blob (it then keeps the bill).
+func deleteHeadRowTx(ctx context.Context, tx *sql.Tx, gci chunkManifestReleaser,
+	tenantID, bucket, key string, storageKey *string) (row displacedRow, found bool, err error) {
 	var chunked bool
 	q, args := deleteHeadRowSQL, []any{tenantID, bucket, key}
 	if storageKey != nil {
@@ -303,6 +317,7 @@ func deleteHeadRowWhere(ctx context.Context, db *sql.DB, gci chunkManifestReleas
 	if err != nil {
 		return displacedRow{}, false, fmt.Errorf("delete head-cache row: %w", err)
 	}
+	row.Found, row.Chunked = true, chunked
 	if chunked && gci != nil {
 		if relErr := gci.DeleteObjectChunksTx(ctx, tx, tenantID, bucket, key); relErr != nil {
 			return displacedRow{}, false, fmt.Errorf("release chunk manifest: %w", relErr)
@@ -316,9 +331,6 @@ func deleteHeadRowWhere(ctx context.Context, db *sql.DB, gci chunkManifestReleas
 			return displacedRow{}, false, kErr
 		}
 		row.KeptByVersion = kept
-	}
-	if err := tx.Commit(); err != nil {
-		return displacedRow{}, false, fmt.Errorf("commit head-cache delete: %w", err)
 	}
 	return row, true, nil
 }
