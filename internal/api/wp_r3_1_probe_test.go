@@ -5,6 +5,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"net/http"
 	"net/http/httptest"
@@ -131,9 +132,11 @@ func TestProbe_ChunkedCompleteRacingTheReaper(t *testing.T) {
 	body := probeBody(t, 3<<20)
 	u := f.upload(t, "k.bin", splitParts(body, 3), nil)
 	reap := func() {
-		res, err := f.db.Exec(`UPDATE multipart_uploads SET status = 'aborted' WHERE upload_id = $1 AND status = 'active'`, u.id)
+		// The reaper's abort: the status and the release of what the upload
+		// holds, in one transaction (WP-R10-8 Part C).
+		ended, err := endUploadReleasing(context.Background(), f.db, u.id, "", "", "")
 		require.NoError(t, err)
-		if n, _ := res.RowsAffected(); n > 0 {
+		if ended {
 			_ = os.RemoveAll(multipartDir(u.id))
 		}
 	}

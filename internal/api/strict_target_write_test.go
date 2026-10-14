@@ -139,7 +139,9 @@ func TestStrictTargetWrite_MultipartCompleteAfterDriverDropped_Is503(t *testing.
 	assert.Equal(t, "30", cw.Header().Get("Retry-After"))
 	assert.Equal(t, 0, f.headRows(t, "mp.bin"), "no head row")
 	assert.False(t, f.onPrimary(t, "mp.bin"), "nothing on the primary")
-	assert.Equal(t, int64(0), f.used(t), "the reservation is released")
+	// The upload keeps holding its part (WP-R10-8 Part C); the Complete
+	// reserved nothing more.
+	assert.Equal(t, int64(len(part)), f.used(t), "only what the upload holds")
 	assert.Equal(t, 1.0, strictPutCount()-strictBefore)
 	var status string
 	require.NoError(t, f.db.QueryRow(`SELECT status FROM multipart_uploads WHERE upload_id = $1`, init.UploadID).Scan(&status))
