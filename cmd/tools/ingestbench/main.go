@@ -72,6 +72,7 @@ func main() {
 	prefix := flag.String("prefix", "", "key prefix (default: ingest-<unix>/)")
 	outPath := flag.String("out", "", "append one JSON line per run to this file")
 	keep := flag.Bool("keep", false, "leave the objects in place")
+	overwrite := flag.Int("overwrite", 0, "N > 0: each worker cycles N keys, overwriting them (the overwrite path: displaced bytes released in the commit, WP-R10-8)")
 	h2 := flag.Bool("h2", false, "allow HTTP/2")
 	insecure := flag.Bool("insecure", false, "skip TLS verification")
 	flag.Parse()
@@ -150,7 +151,11 @@ func main() {
 				if budget > 0 && atomic.AddInt64(&sent, size) > budget {
 					return
 				}
-				key := fmt.Sprintf("%sw%02d-%05d.bin", *prefix, w, i)
+				n := i
+				if *overwrite > 0 {
+					n = i % *overwrite
+				}
+				key := fmt.Sprintf("%sw%02d-%05d.bin", *prefix, w, n)
 				t0 := time.Now()
 				_, err := client.PutObject(ctx, &s3.PutObjectInput{Bucket: bucket, Key: &key, Body: bytes.NewReader(body), ContentLength: aws.Int64(size)})
 				d := time.Since(t0)
