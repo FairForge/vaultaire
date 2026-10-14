@@ -444,10 +444,15 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 		return
 	}
 
-	pp := partFilePath(uploadID, partNumber)
 	etag := fmt.Sprintf("\"%x\"", hasher.Sum(nil))
+	// The install runs inside settleUploadPart's transaction: the id is
+	// checked where the path is built (the staging path's belt, as
+	// everywhere a path is built from an upload id — CodeQL go/path-injection).
 	install := func() error {
-		if err := os.Rename(tmp, pp); err != nil {
+		if !validUploadID(uploadID) {
+			return fmt.Errorf("install part file: invalid upload id")
+		}
+		if err := os.Rename(tmp, partFilePath(uploadID, partNumber)); err != nil {
 			return fmt.Errorf("install part file: %w", err)
 		}
 		return nil
