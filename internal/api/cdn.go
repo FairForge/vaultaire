@@ -203,11 +203,12 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 	// Seed the engine's routing map like the S3 GET path does, so the fetch
 	// goes straight to the backend that holds the object instead of walking
 	// the failover chain after a restart.
-	if backendName != "" && s.engine != nil {
-		if !isChunked { // a chunked row's name is a sentinel ('chunked' / ''), not a route
-			noteRecordedBackend(s.engine, s.logger, "cdn", backendName)
-		}
-		s.engine.HintBackend(container, blob, backendName)
+	if backendName != "" && s.engine != nil && !isChunked { // a chunked row's name is a sentinel ('chunked' / ''), not a route
+		noteRecordedBackend(s.engine, s.logger, "cdn", backendName)
+	}
+	// The one backend the bytes are read from: the row's (WP-R6-1).
+	if !isChunked {
+		ctx = engine.WithRecordedBackend(ctx, backendName)
 	}
 	// Backend-attribution slot: the engine records which backend served the
 	// bytes so CDN egress lands in backend_bandwidth_daily too.

@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"testing"
 
+	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -67,7 +68,7 @@ func TestGet_ResponseContentDispositionOverride(t *testing.T) {
 	f := setupAdapterFixture(t)
 	content := []byte("data")
 	container := f.tenant.NamespaceContainer("test-bucket")
-	_, err := f.eng.Put(context.Background(), container, "ovr.bin", bytes.NewReader(content))
+	_, err := f.eng.Put(common.WithTenantID(context.Background(), f.tenantID), container, "ovr.bin", bytes.NewReader(content))
 	require.NoError(t, err)
 
 	_, err = f.db.Exec(`
@@ -96,7 +97,7 @@ func TestGet_ContentDispositionHeaderInjectionStripped(t *testing.T) {
 	f := setupAdapterFixture(t)
 	content := []byte("data")
 	container := f.tenant.NamespaceContainer("test-bucket")
-	_, err := f.eng.Put(context.Background(), container, "inj.bin", bytes.NewReader(content))
+	_, err := f.eng.Put(common.WithTenantID(context.Background(), f.tenantID), container, "inj.bin", bytes.NewReader(content))
 	require.NoError(t, err)
 
 	_, err = f.db.Exec(`
@@ -199,6 +200,6 @@ func seedCDNObject(t *testing.T, f *cdnTestFixture, key, contentType string, con
 	require.NoError(t, err)
 
 	container := f.tenantID + "_" + f.bucket
-	_, err = f.server.engine.Put(context.Background(), container, key, bytes.NewReader(content))
+	_, err = f.server.engine.Put(common.WithTenantID(context.Background(), f.tenantID), container, key, bytes.NewReader(content))
 	require.NoError(t, err)
 }

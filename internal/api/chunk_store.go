@@ -100,11 +100,18 @@ func (c *chunkStore) put(ctx context.Context, storageKey string, data []byte) (s
 
 // getAt reads the blob at the address ctx names, from the row's backend only.
 func (c *chunkStore) getAt(ctx context.Context, a chunkAddr) (io.ReadCloser, error) {
-	if sb, ok := c.eng.(singleBackendEngine); ok && a.backend != "" {
+	if sb, ok := c.eng.(singleBackendEngine); ok {
+		if a.backend == "" {
+			return nil, errChunkNoBackend // never the primary at a guess (Stage 1a Prompt 6 Part 0)
+		}
 		return sb.GetOn(ctx, a.backend, chunkContainer, a.key)
 	}
 	return c.eng.Get(ctx, chunkContainer, a.key)
 }
+
+// errChunkNoBackend: a chunk row with no backend_id (NOT NULL in the schema,
+// so a caller's bug) — refused, as existsAt refuses it.
+var errChunkNoBackend = errors.New("chunk: the row names no backend")
 
 // get reads a chunk's blob: the one address, then — only when that address
 // answers "not there" — where a blob written before WP-R8-7 would be.
@@ -255,7 +262,10 @@ func (c *chunkStore) legacyCopyExists(ctx context.Context, a chunkAddr) (bool, e
 func (c *chunkStore) delete(ctx context.Context, a chunkAddr) error {
 	ctx = engine.ChunkContext(ctx)
 	var err error
-	if sb, ok := c.eng.(singleBackendEngine); ok && a.backend != "" {
+	if sb, ok := c.eng.(singleBackendEngine); ok {
+		if a.backend == "" {
+			return errChunkNoBackend
+		}
 		err = sb.DeleteOn(ctx, a.backend, chunkContainer, a.key)
 	} else {
 		err = c.eng.Delete(ctx, chunkContainer, a.key)

@@ -264,7 +264,6 @@ func (k *KeyReencryptRunner) reencryptObject(ctx context.Context, ce *engine.Cor
 		retireOrphanWrite(ctx, k.db, k.logger, c.tenantID, c.bucket, newAddr, c.backend)
 		return "failed", errors.New("the opened bytes do not match the row's ETag")
 	}
-	ce.HintBackend(container, newAddr, c.backend)
 	keyReencryptBeforeSwapHook(newAddr)
 
 	// 3. + 4. Re-point, retire.

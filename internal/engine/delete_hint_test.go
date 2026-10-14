@@ -83,10 +83,8 @@ func TestDelete_AHintedDeleteNeverFallsBackToThePrimary(t *testing.T) {
 			recorded := newDeleteRecorder("sync", tc.fail)
 			e.AddDriver("primary", primary)
 			e.AddDriver("sync", recorded)
-			e.HintBackend("c", "k", "sync") // the head row's backend_name
-
-			// Act
-			err := e.Delete(context.Background(), "c", "k")
+			// Act: the head row's backend_name, on the context
+			err := e.Delete(WithRecordedBackend(tenantCtx(), "sync"), "c", "k")
 
 			// Assert: the client gets a retryable 503, nothing else is asked.
 			require.Error(t, err)
@@ -103,36 +101,36 @@ func TestDelete_AnOpenBreakerOnTheRecordedBackendIsA503(t *testing.T) {
 	recorded := newDeleteRecorder("sync", errors.New("connection refused"))
 	e.AddDriver("primary", primary)
 	e.AddDriver("sync", recorded)
+	ctx := WithRecordedBackend(tenantCtx(), "sync")
 	for i := 0; i < 5; i++ {
-		e.HintBackend("c", "k", "sync")
-		_ = e.Delete(context.Background(), "c", "k")
+		_ = e.Delete(ctx, "c", "k")
 	}
 	require.Equal(t, "open", e.GetFailoverStatus()["sync"])
 
-	e.HintBackend("c", "k", "sync")
-	err := e.Delete(context.Background(), "c", "k")
+	err := e.Delete(ctx, "c", "k")
 	assert.ErrorIs(t, err, ErrAllBackendsUnavailable)
 	assert.Zero(t, primary.deletes)
 }
 
 // A miss on the recorded backend is still a miss (an idempotent delete),
-// and a row naming an unregistered backend keeps today's fallback until
-// WP-R6-1.
+// and a row naming an unregistered backend is a 503 (WP-R6-1).
 func TestDelete_RecordedMissAndUnregisteredNames(t *testing.T) {
 	e := NewEngine(nil, zap.NewNop(), &Config{DefaultBackend: "primary"})
 	primary := newDeleteRecorder("primary", nil)
 	e.AddDriver("primary", primary)
 	e.AddDriver("sync", missDeleter{newDeleteRecorder("sync", nil)})
 
-	e.HintBackend("c", "gone", "sync")
-	err := e.Delete(context.Background(), "c", "gone")
+	err := e.Delete(WithRecordedBackend(tenantCtx(), "sync"), "c", "gone")
 	var nf NotFoundError
 	assert.ErrorAs(t, err, &nf, "the recorded backend's miss is the verdict")
 	assert.Zero(t, primary.deletes)
 
-	e.HintBackend("c", "old", "onedrive") // a name no driver has
-	require.NoError(t, e.Delete(context.Background(), "c", "old"))
-	assert.Equal(t, 1, primary.deletes, "unhinted / unregistered: the primary, as before")
+	// WP-R6-1: a name no driver has is a 503 — the primary in its place
+	// (WP-R7-5's fallback, until WP-R6-1) is gone.
+	err = e.Delete(WithRecordedBackend(tenantCtx(), "onedrive"), "c", "old")
+	assert.ErrorIs(t, err, ErrAllBackendsUnavailable)
+	assert.ErrorIs(t, err, ErrBackendNotRegistered)
+	assert.Zero(t, primary.deletes, "never the primary in its place")
 }
 
 type missDeleter struct{ *deleteRecorder }
@@ -140,32 +138,28 @@ type missDeleter struct{ *deleteRecorder }
 func (m missDeleter) Delete(_ context.Context, c, a string) error { return ErrNotFound(c, a) }
 
 // Prompt 2b.3 D1.5: a FAILED delete kept the head row but dropped the
-// engine's own routing record, so the next call for the key without a new
-// hint went to the primary. Before (9bc9d1e): the retry asked the primary
-// and "succeeded" (primary.deletes 1) while the bytes stayed on sync.
-func TestDelete_AFailedDeleteKeepsTheRoutingRecord(t *testing.T) {
+// engine's own routing record, so the retry went to the primary. Since
+// WP-R6-1 the engine keeps no record: every call — the retry too — names
+// the head row's backend, and the primary is never asked.
+func TestDelete_TheRetryOfAFailedDeleteAsksTheRecordedBackendAgain(t *testing.T) {
 	// Arrange
 	e := NewEngine(nil, zap.NewNop(), &Config{DefaultBackend: "primary"})
 	primary := newDeleteRecorder("primary", nil)
 	recorded := newDeleteRecorder("sync", errors.New("connection refused"))
 	e.AddDriver("primary", primary)
 	e.AddDriver("sync", recorded)
-	e.HintBackend("c", "k", "sync")
-	require.Error(t, e.Delete(context.Background(), "c", "k"))
+	ctx := WithRecordedBackend(tenantCtx(), "sync")
+	require.Error(t, e.Delete(ctx, "c", "k"))
 
-	// Act: the retry, with no new hint.
-	err := e.Delete(context.Background(), "c", "k")
+	// Act: the retry.
+	err := e.Delete(ctx, "c", "k")
 
 	// Assert
 	assert.ErrorIs(t, err, ErrAllBackendsUnavailable)
 	assert.Equal(t, 2, recorded.deletes, "the retry asks the recorded backend again")
 	assert.Zero(t, primary.deletes)
-
-	// And a successful delete drops it.
 	recorded.mu.Lock()
 	recorded.fail = nil
 	recorded.mu.Unlock()
-	require.NoError(t, e.Delete(context.Background(), "c", "k"))
-	_, ok := e.objectBackends.Load(objectKey("c", "k"))
-	assert.False(t, ok)
+	require.NoError(t, e.Delete(ctx, "c", "k"))
 }

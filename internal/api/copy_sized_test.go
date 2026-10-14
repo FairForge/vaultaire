@@ -82,6 +82,7 @@ func spyFixture(t *testing.T) (*adapterTestFixture, *Server, *sizeSpy) {
 	f.eng.SetPrimary("local")
 	srv := &Server{logger: f.adapter.logger, router: chi.NewRouter(), engine: f.eng, db: f.db, testMode: true}
 	instantCommit(srv)
+	requireTestBucket(t, f.db, f.tenantID, "test-bucket")
 	return f, srv, spy
 }
 

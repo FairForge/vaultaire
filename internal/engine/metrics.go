@@ -32,7 +32,7 @@ var strictUnregistered = prometheus.NewCounterVec(prometheus.CounterOpts{
 
 // Collectors are the engine's metrics, for the server's registry.
 func Collectors() []prometheus.Collector {
-	return []prometheus.Collector{partialUnavailable, fallover, strictUnregistered}
+	return []prometheus.Collector{partialUnavailable, fallover, strictUnregistered, noTenantRefusals, unrecordedBackendCalls}
 }
 
 // StrictUnregisteredCounter is vaultaire_engine_strict_target_unregistered_total.

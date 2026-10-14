@@ -48,8 +48,19 @@ func TestFreeTier_ObjectWritesCannotGrowASecondBucket(t *testing.T) {
 	f.server.handleInitiateMultipartUpload(mw, mReq, "second-bucket", "mp.bin")
 	assert.Equal(t, 403, mw.Code)
 
-	// A paying tenant is not affected.
+	// A paying tenant is not refused by the cap — but a bucket that does
+	// not exist is NoSuchBucket for every tenant (R85-1: it used to be
+	// created implicitly, a 200), and is written once it is created.
 	_, err = f.db.Exec(`UPDATE tenant_quotas SET tier = 'standard' WHERE tenant_id = $1`, f.tenantID)
+	require.NoError(t, err)
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest("PUT", "/second-bucket/k.bin", bytes.NewReader(testBytes(4<<10)))
+	req.ContentLength = 4 << 10
+	req = req.WithContext(f.ctx(req.Context()))
+	f.server.handlePutObject(w, req, f.s3Req("second-bucket", "k.bin"))
+	assert.Equal(t, 404, w.Code)
+	assert.Contains(t, w.Body.String(), "NoSuchBucket")
+	_, err = f.db.Exec(`INSERT INTO buckets (tenant_id, name) VALUES ($1, 'second-bucket')`, f.tenantID)
 	require.NoError(t, err)
 	w = httptest.NewRecorder()
 	req = httptest.NewRequest("PUT", "/second-bucket/k.bin", bytes.NewReader(testBytes(4<<10)))

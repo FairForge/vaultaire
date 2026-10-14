@@ -5,9 +5,8 @@ package api
 // version, smart_demotions.storage_key for the copies a demotion made) — and
 // NULL means "<key>", for every row written before 2C, for ever. Every reader
 // of whole-object bytes resolves the address through objectBlobAddress (Part
-// B, 086); the engine's routing map (HintBackend, objectBackends,
-// object_locations) is keyed by (container, artifact), so a hint names the
-// address too.
+// B, 086); the engine call names the row's backend on its context
+// (engine.WithRecordedBackend, WP-R6-1) and the address as its artifact.
 //
 // The writers (Part C, 087): every whole-object write — PUT, multipart
 // complete, CopyObject, generated objects, direct-upload complete — puts its
@@ -226,23 +225,6 @@ func retireBlob(ctx context.Context, tx *sql.Tx, tenantID, bucket, key, storageK
 		return fmt.Errorf("retire blob %s: %w", storageKey, err)
 	}
 	return nil
-}
-
-// retireBlobNow is retireBlob in a transaction of its own (a path whose row
-// change has already committed: the delete-marker branch).
-func retireBlobNow(ctx context.Context, db *sql.DB, tenantID, bucket, key, storageKey, backend, reason string) error {
-	if storageKey == "" || db == nil {
-		return nil
-	}
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin retire: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	if err := retireBlob(ctx, tx, tenantID, bucket, key, storageKey, backend, reason); err != nil {
-		return err
-	}
-	return tx.Commit()
 }
 
 // versionKeepsBlob reports whether a version row keeps the blob at

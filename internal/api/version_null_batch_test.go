@@ -26,7 +26,8 @@ import (
 // unversionedBucket creates test-bucket with no versioning status.
 func (f *quotaAccountingFixture) unversionedBucket(t *testing.T) {
 	t.Helper()
-	_, err := f.db.Exec(`INSERT INTO buckets (tenant_id, name, visibility) VALUES ($1, 'test-bucket', 'private')`, f.tenantID)
+	_, err := f.db.Exec(`INSERT INTO buckets (tenant_id, name, visibility) VALUES ($1, 'test-bucket', 'private')
+		ON CONFLICT (tenant_id, name) DO NOTHING`, f.tenantID)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		_, _ = f.db.Exec(`DELETE FROM object_versions WHERE tenant_id = $1`, f.tenantID)

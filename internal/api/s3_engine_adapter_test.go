@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/testutil"
 
 	"github.com/FairForge/vaultaire/internal/crypto"
@@ -96,7 +97,7 @@ func TestHandleGet_ContentTypeFromCache(t *testing.T) {
 
 	content := []byte("fake video content for testing")
 	container := f.tenant.NamespaceContainer("test-bucket")
-	_, err := f.eng.Put(context.Background(), container, "video.mp4", bytes.NewReader(content))
+	_, err := f.eng.Put(common.WithTenantID(context.Background(), f.tenantID), container, "video.mp4", bytes.NewReader(content))
 	require.NoError(t, err)
 
 	_, err = f.db.Exec(`
@@ -126,7 +127,13 @@ func TestHandleGet_ContentTypeFallsBackToExtension(t *testing.T) {
 
 	content := []byte("some json data")
 	container := f.tenant.NamespaceContainer("test-bucket")
-	_, err := f.eng.Put(context.Background(), container, "data.json", bytes.NewReader(content))
+	_, err := f.eng.Put(common.WithTenantID(context.Background(), f.tenantID), container, "data.json", bytes.NewReader(content))
+	require.NoError(t, err)
+	// A row with no recorded type (the object exists: a GET of a key with
+	// no row is NoSuchKey, Stage 1a Prompt 6 Part 0).
+	_, err = f.db.Exec(`INSERT INTO object_head_cache (tenant_id, bucket, object_key, size_bytes, etag, content_type)
+		VALUES ($1, 'test-bucket', 'data.json', $2, 'e', '')
+		ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET size_bytes = $2, content_type = ''`, f.tenantID, len(content))
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("GET", "/test-bucket/data.json", nil)
@@ -145,7 +152,7 @@ func TestHandleGet_RangeRequest(t *testing.T) {
 
 	content := []byte("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 	container := f.tenant.NamespaceContainer("test-bucket")
-	_, err := f.eng.Put(context.Background(), container, "alphabet.txt", bytes.NewReader(content))
+	_, err := f.eng.Put(common.WithTenantID(context.Background(), f.tenantID), container, "alphabet.txt", bytes.NewReader(content))
 	require.NoError(t, err)
 
 	_, err = f.db.Exec(`
@@ -177,7 +184,7 @@ func TestHandleGet_RangeRequest_Unsatisfiable(t *testing.T) {
 
 	content := []byte("short")
 	container := f.tenant.NamespaceContainer("test-bucket")
-	_, err := f.eng.Put(context.Background(), container, "small.txt", bytes.NewReader(content))
+	_, err := f.eng.Put(common.WithTenantID(context.Background(), f.tenantID), container, "small.txt", bytes.NewReader(content))
 	require.NoError(t, err)
 
 	_, err = f.db.Exec(`
@@ -199,12 +206,15 @@ func TestHandleGet_RangeRequest_Unsatisfiable(t *testing.T) {
 	assert.Equal(t, http.StatusRequestedRangeNotSatisfiable, w.Code)
 }
 
-func TestHandleGet_RangeIgnoredWithoutCache(t *testing.T) {
+func TestHandleGet_NoRow_IsNoSuchKeyEvenWithBytesOnTheBackend(t *testing.T) {
+	// Was TestHandleGet_RangeIgnoredWithoutCache (200, the backend's bytes):
+	// the row is the one authority for an object (WP-R6-1) — a key with no
+	// row is NoSuchKey and no backend is asked (Stage 1a Prompt 6 Part 0).
 	f := setupAdapterFixture(t)
 
 	content := []byte("no cache content")
 	container := f.tenant.NamespaceContainer("test-bucket")
-	_, err := f.eng.Put(context.Background(), container, "nocache.txt", bytes.NewReader(content))
+	_, err := f.eng.Put(common.WithTenantID(context.Background(), f.tenantID), container, "nocache.txt", bytes.NewReader(content))
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("GET", "/test-bucket/nocache.txt", nil)
@@ -215,10 +225,8 @@ func TestHandleGet_RangeIgnoredWithoutCache(t *testing.T) {
 	w := httptest.NewRecorder()
 	f.adapter.HandleGet(w, req, "test-bucket", "nocache.txt")
 
-	assert.Equal(t, http.StatusOK, w.Code, "without cache, range is ignored and full content returned")
-
-	body, _ := io.ReadAll(w.Body)
-	assert.Equal(t, content, body)
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	assert.Contains(t, w.Body.String(), "NoSuchKey")
 }
 
 func TestHandleGet_ContentLengthSetFromCache(t *testing.T) {
@@ -226,7 +234,7 @@ func TestHandleGet_ContentLengthSetFromCache(t *testing.T) {
 
 	content := []byte("content with known size")
 	container := f.tenant.NamespaceContainer("test-bucket")
-	_, err := f.eng.Put(context.Background(), container, "sized.txt", bytes.NewReader(content))
+	_, err := f.eng.Put(common.WithTenantID(context.Background(), f.tenantID), container, "sized.txt", bytes.NewReader(content))
 	require.NoError(t, err)
 
 	_, err = f.db.Exec(`

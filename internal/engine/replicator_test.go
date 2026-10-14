@@ -52,7 +52,7 @@ func TestReplicator_ReplicateSync(t *testing.T) {
 
 	data := strings.NewReader("test data")
 
-	err := replicator.Replicate(context.Background(), []Driver{primary, secondary},
+	err := replicator.Replicate(tenantCtx(), []Driver{primary, secondary},
 		"container", "artifact", data)
 
 	assert.NoError(t, err)
@@ -68,7 +68,7 @@ func TestReplicator_ReplicateAsync(t *testing.T) {
 
 	data := strings.NewReader("test data")
 
-	err := replicator.Replicate(context.Background(), []Driver{primary, secondary},
+	err := replicator.Replicate(tenantCtx(), []Driver{primary, secondary},
 		"container", "artifact", data)
 
 	assert.NoError(t, err)

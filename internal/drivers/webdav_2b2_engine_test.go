@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/engine"
 )
 
@@ -108,8 +109,7 @@ func TestEngine_OneSyncBridgeDownNeverOpensTheSyncBreaker(t *testing.T) {
 	// Act: five reads of keys routed to the dead bridge (Before: the fifth
 	// opened the engine's `sync` breaker).
 	for _, a := range onDown {
-		e.HintBackend("c", a, "sync")
-		_, err := e.Get(ctx, "c", a)
+		_, err := e.Get(engine.WithRecordedBackend(ctx, "sync"), "c", a)
 
 		// Assert: a retryable 503, never a miss, never another backend.
 		require.Error(t, err)
@@ -121,15 +121,14 @@ func TestEngine_OneSyncBridgeDownNeverOpensTheSyncBreaker(t *testing.T) {
 	assert.Equal(t, "closed", syncBreaker(e), "one bridge down is not the backend down")
 
 	// The object on a healthy bridge reads (Before: 503 all backends unavailable).
-	e.HintBackend("c", healthy, "sync")
-	rc, err := e.Get(ctx, "c", healthy)
+	rc, err := e.Get(engine.WithRecordedBackend(ctx, "sync"), "c", healthy)
 	require.NoError(t, err)
 	assert.Equal(t, "on bridge 1", string(readAllClose(t, rc)))
 
 	// Ranged reads, existence, writes and deletes of the dead bridge's keys:
 	// the same 503, the same closed breaker.
 	for i := 0; i < 5; i++ {
-		_, err = e.GetRange(ctx, "c", onDown[i], 0, 2)
+		_, err = e.GetRange(engine.WithRecordedBackend(ctx, "sync"), "c", onDown[i], 0, 2)
 		assert.ErrorIs(t, err, engine.ErrPartiallyUnavailable)
 		_, err = e.Put(ctx, "c", onDown[i], strings.NewReader("v2"), engine.WithContentLength(2), engine.WithStorageClass("SYNC"))
 		assert.ErrorIs(t, err, engine.ErrPartiallyUnavailable)
@@ -143,7 +142,7 @@ func TestEngine_OneSyncBridgeDownNeverOpensTheSyncBreaker(t *testing.T) {
 	}
 	require.Error(t, m.HealthCheck(ctx))
 	for i := 0; i < 5; i++ {
-		_, err = e.Get(ctx, "c", healthy)
+		_, err = e.Get(engine.WithRecordedBackend(ctx, "sync"), "c", healthy)
 		require.Error(t, err)
 		assert.NotErrorIs(t, err, engine.ErrPartiallyUnavailable)
 	}
@@ -212,7 +211,7 @@ func TestEngine_ASourceFailureIsNeverABackendFailureWhateverTheDriverWraps(t *te
 	e := engine.NewEngine(nil, zap.NewNop(), &engine.Config{DefaultBackend: "swallow"})
 	e.AddDriver("swallow", &sourceSwallowingDriver{memPrimary: *newMemPrimary()})
 	for i := 0; i < 5; i++ {
-		_, err := e.Put(context.Background(), "c", "k", &brokenSource{n: 1000}, engine.WithContentLength(5000))
+		_, err := e.Put(common.WithTenantID(context.Background(), "tenant-a"), "c", "k", &brokenSource{n: 1000}, engine.WithContentLength(5000))
 		require.Error(t, err)
 		assert.ErrorIs(t, err, engine.ErrCallerAborted)
 		assert.ErrorIs(t, err, io.ErrUnexpectedEOF)

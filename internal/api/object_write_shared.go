@@ -182,8 +182,10 @@ func upsertWholeObjectHeadRowEnc(ctx context.Context, tx *sql.Tx, tenantID, buck
 
 // placeObject writes body at blob — the write's own address (newBlobAddress,
 // WP-R2-1), never the bare key — where the bucket's placement says (WP-R7-1): a
-// bucket pinned to a region this process serves goes straight to that
-// region's driver; a region with no driver is REFUSED with
+// bucket pinned to a region this process serves goes to that region's
+// backend alone, through the engine (PutOn: its breaker, its tenant rule,
+// a broken source tagged ErrCallerAborted — it used to call the driver
+// directly, outside all three, #677); a region with no driver is REFUSED with
 // errRegionDriverUnavailable (never silently the primary — that is a
 // residency breach recorded as normal); everything else goes through the
 // engine, which maps the storage class in opts to a backend. Returns the
@@ -196,13 +198,10 @@ func placeObject(ctx context.Context, db *sql.DB, eng engine.Engine, tenantID, b
 	}
 	if regionDriver != "" {
 		if ce, ok := eng.(*engine.CoreEngine); ok {
-			if drv, exists := ce.GetDriver(regionDriver); exists {
-				if putErr := drv.Put(ctx, container, blob, body, opts...); putErr != nil {
-					return "", fmt.Errorf("region driver %s put %s/%s: %w", regionDriver, container, blob, putErr)
-				}
-				ce.HintBackend(container, blob, regionDriver)
-				return regionDriver, nil
+			if putErr := ce.PutOn(ctx, regionDriver, container, blob, body, opts...); putErr != nil {
+				return "", fmt.Errorf("region driver %s put %s/%s: %w", regionDriver, container, blob, putErr)
 			}
+			return regionDriver, nil
 		}
 	}
 	return eng.Put(ctx, container, blob, body, opts...)
@@ -227,8 +226,11 @@ var versionRowUpdatedHook = func() {}
 // writeDeleteMarker makes a delete marker the key's latest version, under
 // the key's head-row lock and version lock (the flip's order). An object
 // written before versioning was enabled becomes the key's "null" version
-// first (anchorNullVersion): the marker hides it, never removes it.
-func writeDeleteMarker(ctx context.Context, db *sql.DB, tenantID, bucket, key, markerID string) error {
+// first (anchorNullVersion): the marker hides it, never removes it. inTx,
+// when set, runs in the same transaction after the marker (the head row's
+// removal: one transaction, so no write can commit between the marker and
+// the row it hides — PM-6 under versioning, Stage 1a Prompt 6 Part 0).
+func writeDeleteMarker(ctx context.Context, db *sql.DB, tenantID, bucket, key, markerID string, inTx ...func(tx *sql.Tx) error) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -254,6 +256,11 @@ func writeDeleteMarker(ctx context.Context, db *sql.DB, tenantID, bucket, key, m
 			(tenant_id, bucket, object_key, version_id, size_bytes, etag, content_type, is_latest, is_delete_marker)
 		VALUES ($1, $2, $3, $4, 0, '', 'application/octet-stream', TRUE, TRUE)`, tenantID, bucket, key, markerID); err != nil {
 		return err
+	}
+	for _, fn := range inTx {
+		if err := fn(tx); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -287,7 +294,7 @@ type headRepoint struct {
 // it kept no bytes. The deleted version's blob is retired unless a row still
 // names it. A head row that does not name the deleted version's blob (every
 // row written before 2C) is left as it was.
-func deleteVersion(ctx context.Context, db *sql.DB, tenantID, bucket, key, versionID string) (found bool, rp headRepoint, err error) {
+func deleteVersion(ctx context.Context, db *sql.DB, billed bool, tenantID, bucket, key, versionID string) (found bool, rp headRepoint, err error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, rp, err
@@ -348,6 +355,19 @@ func deleteVersion(ctx context.Context, db *sql.DB, tenantID, bucket, key, versi
 	// version a moment ago may still be reading it.
 	if err := retireBlob(ctx, tx, tenantID, bucket, key, storageKey, backend, retiredVersionDeleted); err != nil {
 		return true, rp, err
+	}
+	// The bill, last, in the same transaction (WP-R10-8): the current
+	// object's bytes when the deleted version was its blob (the re-pointed
+	// version was billed as retained and now is as the head row), the
+	// retained version's own bytes otherwise.
+	if billed {
+		rels := []quotaRelease{rp.VersionReleased}
+		if rp.Changed {
+			rels = append(rels, quotaRelease{Floor: rp.Floor, Bytes: rp.OldSize})
+		}
+		if err := releasesTx(ctx, tx, tenantID, rels); err != nil {
+			return true, rp, err
+		}
 	}
 	return true, rp, tx.Commit()
 }

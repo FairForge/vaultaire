@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/flags"
@@ -84,7 +85,7 @@ func TestSyncPlacementEndToEnd_ObjectLandsOnSyncAndReadsBack(t *testing.T) {
 
 	class := resolvePutStorageClass(context.Background(), db, eng, syncGateFor(tenantID), tenantID, "mine", "")
 	require.Equal(t, "SYNC", class)
-	ctx := context.Background()
+	ctx := common.WithTenantID(context.Background(), tenantID)
 	backend, err := eng.Put(ctx, tenantID+"_mine", "k", strings.NewReader("on the bridge"), engine.WithStorageClass(class))
 	require.NoError(t, err)
 	assert.Equal(t, "sync", backend, "the engine records the backend the API stores in object_head_cache.backend_name")
@@ -99,9 +100,8 @@ func TestSyncPlacementEndToEnd_ObjectLandsOnSyncAndReadsBack(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, ok, "nothing on the primary")
 
-	// Reads follow the recorded backend (the API hints it from the head row).
-	eng.HintBackend(tenantID+"_mine", "k", backend)
-	rc, err := eng.Get(ctx, tenantID+"_mine", "k")
+	// Reads follow the recorded backend (the API names it from the head row).
+	rc, err := eng.Get(engine.WithRecordedBackend(ctx, backend), tenantID+"_mine", "k")
 	require.NoError(t, err)
 	defer func() { _ = rc.Close() }()
 }

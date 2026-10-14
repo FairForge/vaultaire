@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/account"
+	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/testutil"
 
 	"github.com/google/uuid"
@@ -169,7 +170,7 @@ func TestChunkedPut_ReStoresVanishedChunk(t *testing.T) {
 			DELETE FROM global_content_index
 			WHERE dedup_scope = $1 AND plaintext_hash = $2`, c.scope, c.hash)
 		require.NoError(t, err)
-		_ = f.eng.Delete(ctx, chunkContainer, c.storageKey)
+		_ = f.eng.Delete(engine.ChunkContext(ctx), chunkContainer, c.storageKey)
 	}
 
 	// The re-PUT dedup-hits the stale cache; it must recover by re-storing.

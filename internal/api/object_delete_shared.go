@@ -13,10 +13,10 @@ package api
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
-	"time"
 
 	"github.com/FairForge/vaultaire/internal/crypto"
 	"go.uber.org/zap"
@@ -151,6 +151,21 @@ func (a *S3ToEngine) objectDeleteAftermath() objectDeleteAftermath {
 		vaultParity: a.vaultParity, notify: a.notifySvc, logger: a.logger}
 }
 
+// headRead is what a DELETE read of the key's head row before it removed
+// the bytes: whether there was a row, and the address it named.
+type headRead struct {
+	found      bool
+	storageKey string
+}
+
+// deleteBeforeRowHook runs in settle before the head row is deleted (tests
+// commit a write of the key there: PM-6).
+var deleteBeforeRowHook = func(tenantID, bucket, key string) {}
+
+// deleteMarkerWrittenHook runs after a delete marker's transaction (tests
+// commit a write of the key there: PM-6 under versioning).
+var deleteMarkerWrittenHook = func(tenantID, bucket, key string) {}
+
 // settle runs the aftermath for one key whose bytes are gone (or were never
 // there — S3 DELETE is idempotent). It runs detached from the request
 // (postCommit): the backend delete has happened, so neither a client that
@@ -161,39 +176,60 @@ func (a *S3ToEngine) objectDeleteAftermath() objectDeleteAftermath {
 // idempotent) settles the key; a chunked object releases its manifest in
 // that same transaction (R8-08) and stays intact on failure. Everything
 // after the row is best effort and never fails the delete.
-func (d objectDeleteAftermath) settle(ctx context.Context, tenantID, bucket, key string, isChunked bool) error {
+//
+// The row goes only while it is the one the DELETE read (read: the address
+// whose bytes it removed; PM-6 of WP-R2-1): a write that committed in
+// between is current — the DELETE is ordered before it, answers 204, and
+// leaves the write's row, bytes and retention alone. A DELETE that read no
+// row deletes none.
+func (d objectDeleteAftermath) settle(ctx context.Context, tenantID, bucket, key string, isChunked bool, read headRead) error {
 	ctx, cancel := postCommit(ctx)
 	defer cancel()
+	deleteBeforeRowHook(tenantID, bucket, key)
 	if d.db != nil {
-		deleted, found, delErr := deleteHeadRowReleasing(ctx, d.db, manifestReleaser(d.gci), tenantID, bucket, key)
+		var superseded bool
+		var delErr error
+		if read.found {
+			// The row and its bytes' release in one transaction (WP-R10-8):
+			// a version that keeps the blob keeps the bill (WP-R2-1 C2).
+			_, _, superseded, delErr = deleteHeadRowIfAt(ctx, d.db, manifestReleaser(d.gci), d.quota != nil, tenantID, bucket, key, read.storageKey)
+		} else if exErr := d.db.QueryRowContext(ctx, headRowExistsSQL, tenantID, bucket, key).Scan(&superseded); exErr != nil {
+			// Nothing was read, so no row is deleted; a row there now is a
+			// write's (superseded), and its retention stays.
+			delErr = fmt.Errorf("head row after a delete of nothing: %w", exErr)
+		}
 		switch {
 		case delErr != nil && isChunked:
 			return fmt.Errorf("chunked delete: %w", delErr)
 		case delErr != nil:
 			return fmt.Errorf("head row delete: %w", delErr)
-		case found && d.quota != nil:
-			// A version that keeps the blob keeps the bill (WP-R2-1 C2).
-			if err := releaseDisplacedOn(ctx, d.quota, tenantID, deleted); err != nil {
-				d.logger.Error("quota release after delete failed",
-					zap.Error(err), zap.String("tenant_id", tenantID), zap.Int64("bytes", deleted.Size))
-			}
 		}
 		// The retention (expired, governance-bypassed, or none) goes with the
 		// object: the PUT-side lock check no longer needs a head row, so a
-		// stale lock row would refuse the next upload to this key.
-		if _, err := d.db.ExecContext(ctx, `
-			DELETE FROM object_locks WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-			tenantID, bucket, key); err != nil {
-			d.logger.Error("object lock row delete failed", zap.Error(err),
-				zap.String("bucket", bucket), zap.String("key", key))
+		// stale lock row would refuse the next upload to this key. A write
+		// that superseded the delete keeps its own.
+		if superseded && read.found {
+			d.logger.Info("delete: a write of the key committed after its bytes were removed — the write is current, its row kept (the delete is ordered before it)",
+				zap.String("tenant_id", tenantID), zap.String("bucket", bucket), zap.String("key", key))
+		}
+		if !superseded {
+			if _, err := d.db.ExecContext(ctx, `
+				DELETE FROM object_locks WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+				tenantID, bucket, key); err != nil {
+				d.logger.Error("object lock row delete failed", zap.Error(err),
+					zap.String("bucket", bucket), zap.String("key", key))
+			}
 		}
 		// A Smart-demoted object has a second copy (the hot one, until it is
 		// reclaimed) that the delete did not reach: remove it now and settle
 		// the ledger, so no later job owes this key a delete (WP-R13-2).
 		d.smartPromoter.OnDelete(ctx, tenantID, bucket, key)
 		// The parity copy of a vault object goes with it (WP-VAULT-1); a leg
-		// that cannot be reached now is the job's stale pass to finish.
-		d.vaultParity.OnObjectDeleted(ctx, tenantID, bucket, key)
+		// that cannot be reached now is the job's stale pass to finish. A
+		// superseding write's object is not this delete's to unprotect.
+		if !superseded {
+			d.vaultParity.OnObjectDeleted(ctx, tenantID, bucket, key)
+		}
 	}
 	d.announce(ctx, tenantID, bucket, key)
 	return nil
@@ -232,16 +268,10 @@ func (d objectDeleteAftermath) announce(ctx context.Context, tenantID, bucket, k
 // was its blob, the retained version's own bytes otherwise. found is false
 // for a version id the key does not have.
 func (d objectDeleteAftermath) deleteVersionReleasing(ctx context.Context, tenantID, bucket, key, versionID string) (bool, error) {
-	found, rp, err := deleteVersion(ctx, d.db, tenantID, bucket, key, versionID)
-	if err != nil || !found {
-		return found, err
-	}
-	rel := displacedRow{ReplacedVersion: rp.VersionReleased}
-	if rp.Changed {
-		rel.Size, rel.Floor = rp.OldSize, rp.Floor
-	}
-	d.releaseDetached(ctx, tenantID, rel)
-	return true, nil
+	// The version row, the head row's re-point and the release they make
+	// commit together (WP-R10-8).
+	found, _, err := deleteVersion(ctx, d.db, d.quota != nil, tenantID, bucket, key, versionID)
+	return found, err
 }
 
 // deleteBehindMarker is a DELETE with no version id on an Enabled bucket: a
@@ -251,41 +281,85 @@ func (d objectDeleteAftermath) deleteVersionReleasing(ctx context.Context, tenan
 // blob no version names is retired. Returns the marker's version id.
 func (d objectDeleteAftermath) deleteBehindMarker(ctx context.Context, tenantID, bucket, key string) (string, error) {
 	markerID := generateVersionID()
-	if err := writeDeleteMarker(ctx, d.db, tenantID, bucket, key, markerID); err != nil {
-		return "", fmt.Errorf("write the delete marker: %w", err)
-	}
-	// The head-cache row is the billing record (WP-1): DELETE...RETURNING
-	// captures the removed size atomically. An object chunked before
-	// versioning was enabled releases its manifest in the same transaction
-	// (R8-07).
-	marked, found, err := deleteHeadRowReleasing(ctx, d.db, manifestReleaser(d.gci), tenantID, bucket, key)
-	if err != nil {
-		return "", fmt.Errorf("delete-marker head row: %w", err)
-	}
-	if found {
-		d.releaseDetached(ctx, tenantID, marked)
+	// The marker, the head row's removal (the billing record, DELETE ...
+	// RETURNING; an object chunked before versioning was enabled releases
+	// its manifest, R8-07) and the displaced blob's fate commit in ONE
+	// transaction under the key's locks: a write that commits around the
+	// DELETE is wholly before or wholly after it (PM-6 under versioning,
+	// Stage 1a Prompt 6 Part 0 — split in two, a PUT committed between the
+	// marker and the row delete lost its head row: GET 404 with its version
+	// the latest).
+	var marked displacedRow
+	var found bool
+	err := writeDeleteMarker(ctx, d.db, tenantID, bucket, key, markerID, func(tx *sql.Tx) error {
+		var err error
+		marked, found, err = deleteHeadRowTx(ctx, tx, manifestReleaser(d.gci), d.quota != nil, tenantID, bucket, key, nil)
+		if err != nil || !found || marked.StorageKey == "" {
+			return err
+		}
 		// The blob the head row named stays while a version keeps it (the
 		// undelete path); one no version names is displaced.
-		if marked.StorageKey != "" {
-			if err := retireBlobNow(ctx, d.db, tenantID, bucket, key, marked.StorageKey, marked.Backend, retiredOverwritten); err != nil {
-				d.logger.Warn("delete marker: the displaced blob is not queued for the collector — the erasure sweep is its only remover",
-					zap.Error(err), zap.String("bucket", bucket), zap.String("object", key), zap.String("storage_key", marked.StorageKey))
+		if err := retireBlob(ctx, tx, tenantID, bucket, key, marked.StorageKey, marked.Backend, retiredOverwritten); err != nil {
+			if !errors.Is(err, errUnaddressableBlob) {
+				return err
 			}
+			d.logger.Warn("delete marker: the displaced blob is not queued for the collector — the erasure sweep is its only remover",
+				zap.Error(err), zap.String("bucket", bucket), zap.String("object", key), zap.String("storage_key", marked.StorageKey))
 		}
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("write the delete marker: %w", err)
 	}
+	deleteMarkerWrittenHook(tenantID, bucket, key)
 	return markerID, nil
 }
 
-// releaseDetached releases what removing d frees, on a context detached
-// from the request: the row change has committed.
-func (d objectDeleteAftermath) releaseDetached(ctx context.Context, tenantID string, rel displacedRow) {
-	if d.quota == nil || len(rel.releases()) == 0 {
-		return
+// knownCopiesSQL: the backends other than the recorded one ($6) that hold
+// the blob at this address as far as the tables know — an unsettled
+// Smart-demotion ledger row of the key at the address (its hot copy until
+// reclaimed, its cold copy), and a retired_blobs row naming the address on
+// another backend (a CompleteMultipartUpload retry that reused its address
+// after the first attempt's blob was queued as an orphan elsewhere; 090).
+const knownCopiesSQL = `
+	SELECT hot_backend FROM smart_demotions
+	 WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND COALESCE(storage_key, '') = $4
+	   AND hot_deleted_at IS NULL AND hot_outcome NOT IN ('kept_changed', 'object_gone') AND hot_backend <> $6
+	UNION
+	SELECT cold_backend FROM smart_demotions
+	 WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND COALESCE(storage_key, '') = $4
+	   AND hot_outcome NOT IN ('kept_changed', 'object_gone') AND cold_backend <> $6
+	UNION
+	SELECT backend_id FROM retired_blobs
+	 WHERE container = $5 AND storage_key = $4 AND $4 <> '' AND tenant_id = $1 AND backend_id <> $6`
+
+// knownBlobCopies is every backend other than recorded the blob at
+// storageKey ("" = the key) is known to be on. A DELETE removes them with
+// the recorded copy (engine.WithKnownCopies): every one attempted, any
+// failure the delete's (R6-24). The Smart ledger's settle still runs after
+// the row (and the daily reclaim after a failure): this is the attempt
+// made before the DELETE answers.
+func knownBlobCopies(ctx context.Context, db *sql.DB, tenantID, bucket, key, container, storageKey, recorded string) ([]string, error) {
+	if db == nil {
+		return nil, nil
 	}
-	qctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-	defer cancel()
-	if err := releaseDisplacedOn(qctx, d.quota, tenantID, rel); err != nil {
-		d.logger.Error("quota release after delete failed",
-			zap.Error(err), zap.String("tenant_id", tenantID), zap.Int64("bytes", rel.Size))
+	rows, err := db.QueryContext(ctx, knownCopiesSQL, tenantID, bucket, key, storageKey, container, recorded)
+	if err != nil {
+		return nil, fmt.Errorf("known copies of %s/%s: %w", bucket, key, err)
 	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var b string
+		if err := rows.Scan(&b); err != nil {
+			return nil, fmt.Errorf("known copies of %s/%s: %w", bucket, key, err)
+		}
+		if b != "" {
+			out = append(out, b)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("known copies of %s/%s: %w", bucket, key, err)
+	}
+	return out, nil
 }

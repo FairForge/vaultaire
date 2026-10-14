@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -15,22 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/FairForge/vaultaire/internal/common"
-	"github.com/FairForge/vaultaire/internal/testutil"
 )
-
-// openTestDB connects to the test database (vaultaire_test by default,
-// DATABASE_URL overrides) or skips.
-func openTestDB(t *testing.T) *sql.DB {
-	t.Helper()
-	db, err := sql.Open("postgres", testutil.DSN())
-	require.NoError(t, err)
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		t.Skipf("test database unavailable (%v) — run `make test-db`", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	return db
-}
 
 // memDriver keeps objects in memory and records deletes; a missing
 // object is reported the way the local driver reports it.
@@ -141,9 +125,14 @@ func TestBuildWriteCandidateList_TargetOnlyBackends(t *testing.T) {
 	})
 	t.Run("a strict target is asked alone (Prompt 2b.4 E1.1)", func(t *testing.T) {
 		assert.Equal(t, []string{"sync"}, eng.buildWriteCandidateList("sync"))
-		assert.Equal(t, []string{"sync"}, eng.readCandidates("sync", "get"))
-		assert.Equal(t, "geyser", eng.readCandidates("geyser", "get")[0])
-		assert.Greater(t, len(eng.readCandidates("geyser", "get")), 1, "tape keeps its read fall-over")
+		c, err := eng.readCandidates("sync", "get")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"sync"}, c)
+		// WP-R6-1: every recorded backend is read alone — tape included (it
+		// used to keep a read fall-over to every other backend).
+		c, err = eng.readCandidates("geyser", "get")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"geyser"}, c)
 	})
 	t.Run("a target-only primary is still writable", func(t *testing.T) {
 		g := NewEngine(nil, nopLogger(), &Config{DefaultBackend: "geyser"})
@@ -167,7 +156,7 @@ func TestEnginePut_NeverFailsOverToTargetOnlyBackend(t *testing.T) {
 	eng.AddDriver("idrive-eu-west-1", eu)
 	eng.SetPrimary("idrive")
 
-	_, err := eng.Put(context.Background(), "t_b", "k", strings.NewReader("private bytes"))
+	_, err := eng.Put(tenantCtx(), "t_b", "k", strings.NewReader("private bytes"))
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrAllBackendsUnavailable), "must fail loudly, got: %v", err)
 	assert.False(t, r2.has("t_b", "k"), "a private object must never land on the public R2 store")
@@ -178,37 +167,31 @@ func TestEnginePut_NeverFailsOverToTargetOnlyBackend(t *testing.T) {
 }
 
 // R6-05: Delete resolved the backend from the in-memory map only. After a
-// restart the map is cold, the DELETE went to the primary, iDrive said 404,
+// restart the map was cold, the DELETE went to the primary, iDrive said 404,
 // the API treated that as an idempotent miss and removed the head row — the
-// bytes stayed on the real backend forever. Delete must consult the recorded
-// location like Get does.
-func TestEngineDelete_UsesRecordedLocationWhenMapIsCold(t *testing.T) {
-	db := openTestDB(t)
+// bytes stayed on the real backend forever. Since WP-R6-1 the engine keeps
+// no route at all: the caller names the head row's backend on the context,
+// the same after a restart as before it.
+func TestEngineDelete_UsesTheRecordedBackendAfterARestart(t *testing.T) {
 	const tenantID, container, key = "r6-delete-tenant", "r6-delete-tenant_bucket", "on-lyve.bin"
-	t.Cleanup(func() {
-		_, _ = db.Exec(`DELETE FROM object_locations WHERE tenant_id = $1`, tenantID)
-		_, _ = db.Exec(`DELETE FROM access_patterns WHERE tenant_id = $1`, tenantID)
-	})
 	idrive, lyve := newMemDriver("idrive"), newMemDriver("lyve")
 	ctx := common.WithTenantID(context.Background(), tenantID)
 
-	before := NewEngine(db, nopLogger(), &Config{DefaultBackend: "idrive"})
+	before := NewEngine(nil, nopLogger(), &Config{DefaultBackend: "idrive"})
 	before.AddDriver("idrive", idrive)
 	before.AddDriver("lyve", lyve)
 	before.SetPrimary("idrive")
 	backend, err := before.Put(ctx, container, key, strings.NewReader("resilient bytes"), WithStorageClass("RESILIENT"))
 	require.NoError(t, err)
-	require.Equal(t, "lyve", backend)
-	// Put records the location fire-and-forget; make it durable for the test.
-	require.NoError(t, before.locations.RecordLocation(ctx, tenantID, container, key, "lyve", "RESILIENT", 15))
+	require.Equal(t, "lyve", backend) // what the head row records
 
-	// "Restart": a fresh engine over the same drivers has an empty routing map.
-	after := NewEngine(db, nopLogger(), &Config{DefaultBackend: "idrive"})
+	// "Restart": a fresh engine over the same drivers.
+	after := NewEngine(nil, nopLogger(), &Config{DefaultBackend: "idrive"})
 	after.AddDriver("idrive", idrive)
 	after.AddDriver("lyve", lyve)
 	after.SetPrimary("idrive")
 
-	require.NoError(t, after.Delete(ctx, container, key))
+	require.NoError(t, after.Delete(WithRecordedBackend(ctx, backend), container, key))
 	assert.False(t, lyve.has(container, key), "the object must be deleted from the backend that holds it")
 	assert.Contains(t, lyve.deleted, container+"/"+key)
 }

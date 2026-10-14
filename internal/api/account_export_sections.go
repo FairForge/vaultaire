@@ -62,7 +62,7 @@ var exportExcludedTables = map[string]string{
 	"tenant_cost_daily":    "the operator's cost-of-goods ledger, not the customer's data",
 	"bandwidth_alerts":     "the allowance warning ladder; usage itself is in `bandwidth_usage`",
 	"bandwidth_rollover":   "internal allowance bookkeeping; usage itself is in `bandwidth_usage`",
-	"quota_usage_events":   "internal quota ledger (90-day retention); totals are in `quota`",
+	"quota_usage_events":   "no longer written (WP-R10-8; old rows pruned at 90 days); totals are in `quota`",
 	// operator-side records about the tenant
 	"admin_notes":         "the operator's own notes (not the customer's data; erased with the account)",
 	"admin_notifications": "operator alerts about the tenant (not the customer's data)",

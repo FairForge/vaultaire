@@ -57,7 +57,7 @@ func setupMPChunkFixture(t *testing.T, withKey bool) *mpChunkFixture {
 		f.server.sseService = crypto.NewSSEService(keys)
 		f.server.chunkEncSvc = crypto.NewChunkEncryptionService(keys)
 	}
-	_, err := f.db.Exec(`INSERT INTO buckets (tenant_id, name, visibility) VALUES ($1, 'test-bucket', 'private')`, f.tenantID)
+	_, err := f.db.Exec(`INSERT INTO buckets (tenant_id, name, visibility) VALUES ($1, 'test-bucket', 'private') ON CONFLICT (tenant_id, name) DO NOTHING`, f.tenantID)
 	require.NoError(t, err)
 	tid := f.tenantID
 	t.Cleanup(func() {
@@ -315,7 +315,9 @@ func TestComplete_SSEBucket_NoKey_Refused503BeforeKeepAlive(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "ServiceUnavailable")
 	assert.NotEmpty(t, w.Header().Get("Retry-After"))
 	assert.Zero(t, plaintextOnBackend(t, f.fixed.dir, f.tempDir))
-	assert.Equal(t, int64(0), f.used(t), "nothing reserved")
+	// The upload keeps holding its parts for a retry, Abort or the
+	// reaper (WP-R10-8 Part C): nothing more was reserved by the Complete.
+	assert.Equal(t, int64(12<<10), f.used(t), "only what the upload holds")
 	var status string
 	require.NoError(t, f.db.QueryRow(`SELECT status FROM multipart_uploads WHERE upload_id = $1`, u.id).Scan(&status))
 	assert.Equal(t, "active", status, "the client can retry once the key is back")
@@ -570,7 +572,11 @@ func TestComplete_Chunked_LongOpCut_CompensatesRefs(t *testing.T) {
 
 	assert.NotEqual(t, http.StatusOK, w.Code)
 	assert.Equal(t, "previous", f.get(t, "k.bin", "").Body.String())
-	assert.Equal(t, int64(len("previous")), f.used(t))
+	// The previous object, and the parts the still-active upload holds
+	// (WP-R10-8 Part C).
+	var held int64
+	require.NoError(t, f.db.QueryRow(`SELECT reserved_bytes FROM multipart_uploads WHERE upload_id = $1`, u.id).Scan(&held))
+	assert.Equal(t, int64(len("previous"))+held, f.used(t))
 	// 12 KiB is under the chunker's minimum: the whole body is one chunk,
 	// its hash the body's SHA-256.
 	sum := sha256.Sum256(body)

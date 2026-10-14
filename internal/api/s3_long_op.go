@@ -568,6 +568,27 @@ func (s *Server) longOpBucketExists(r *http.Request, tenantID, bucket string) (b
 	return exists, nil
 }
 
+// requireWriteBucket answers NoSuchBucket (with the near-name suggestion)
+// when a write names a bucket that does not exist, by longOpBucketExists'
+// rule, and reports whether the write may go on. It is asked before any
+// body byte is read, any quota reserved or any part staged: a PUT,
+// CreateMultipartUpload and CompleteMultipartUpload into a bucket with no
+// row used to be stored and billed — invisible to ListBuckets, without the
+// bucket's settings (R85-1). A failed lookup is a 500, never "exists".
+func (s *Server) requireWriteBucket(w http.ResponseWriter, r *http.Request, op, tenantID, bucket string) bool {
+	exists, err := s.longOpBucketExists(r, tenantID, bucket)
+	if err != nil {
+		s.log().Error(op+": bucket lookup failed", zap.Error(err), zap.String("bucket", bucket))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return false
+	}
+	if !exists {
+		s.writeNoSuchBucket(w, r, tenantID, bucket)
+		return false
+	}
+	return true
+}
+
 // longOpDrainBoundFromEnv is LONG_OP_DRAIN_BOUND (a Go duration, 1s–15m;
 // default and ceiling longOpDrainBound): a lab lowers it to watch a cut
 // happen. Never above 15 min — vaultaire-switch's wait and the unit's

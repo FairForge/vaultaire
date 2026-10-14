@@ -23,7 +23,7 @@ func TestCoreEngine_ImplementsInterface(t *testing.T) {
 	}
 
 	// Test health check
-	err := engine.HealthCheck(context.Background())
+	err := engine.HealthCheck(tenantCtx())
 	if err != nil {
 		t.Errorf("HealthCheck failed: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestGetDriver(t *testing.T) {
 	}
 }
 
-func TestHintBackend(t *testing.T) {
+func TestGet_TheRecordedBackendOnTheContext(t *testing.T) {
 	logger := zap.NewNop()
 	eng := NewEngine(nil, logger, nil)
 
@@ -92,11 +92,9 @@ func TestHintBackend(t *testing.T) {
 	drv.data["bucket/key"] = []byte("hello")
 	eng.AddDriver("idrive-eu-west-1", drv)
 
-	eng.HintBackend("bucket", "key", "idrive-eu-west-1")
-
-	reader, err := eng.Get(context.Background(), "bucket", "key")
+	reader, err := eng.Get(WithRecordedBackend(tenantCtx(), "idrive-eu-west-1"), "bucket", "key")
 	if err != nil {
-		t.Fatalf("Get after HintBackend failed: %v", err)
+		t.Fatalf("Get of the recorded backend failed: %v", err)
 	}
 	defer func() { _ = reader.Close() }()
 

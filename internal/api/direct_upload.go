@@ -246,14 +246,16 @@ func (s *Server) handleMgmtCompleteDirectUpload(w http.ResponseWriter, r *http.R
 		writeManagementError(w, ErrTypePermission, "object_locked", "the key is under Object Lock; the uploaded object was removed", "key")
 		return
 	}
+	var bill *writeBill
 	if s.quotaManager != nil {
-		ok, qErr := reserveQuota(ctx, s.quotaManager, tenantID, "standard", size)
+		res, qErr := reserveQuota(ctx, s.quotaManager, tenantID, "standard", size)
 		if qErr != nil {
 			s.logger.Error("direct upload: quota", zap.Error(qErr))
 			writeManagementError(w, ErrTypeAPI, "internal_error", "failed to reserve quota", "")
 			return
 		}
-		if !ok {
+		bill = &writeBill{Floor: "standard", Reserved: size, FloorReserved: res.Floor}
+		if !res.OK {
 			// The bytes are already on R2: they must not stay there unregistered.
 			removeUpload("quota")
 			writeManagementError(w, ErrTypePermission, "quota_exceeded", "storage quota exceeded; the uploaded object was removed", "")
@@ -261,7 +263,7 @@ func (s *Server) handleMgmtCompleteDirectUpload(w http.ResponseWriter, r *http.R
 		}
 	}
 	etag = strings.Trim(etag, `"`)
-	flip, err := commitBlobWrite(ctx, s.db, nil, blobWrite{TenantID: tenantID, Bucket: bucket, Key: req.Key,
+	_, err = commitBlobWrite(ctx, s.db, nil, blobWrite{TenantID: tenantID, Bucket: bucket, Key: req.Key, Bill: bill,
 		Version: &versionWrite{Size: size, ETag: etag, ContentType: contentType, Backend: "r2", Blob: versionBlobRef{StorageKey: blob}},
 		Upsert: func(tx *sql.Tx) error {
 			return upsertWholeObjectHeadRow(ctx, tx, tenantID, bucket, req.Key, blob, size, etag, "r2", "standard",
@@ -273,9 +275,6 @@ func (s *Server) handleMgmtCompleteDirectUpload(w http.ResponseWriter, r *http.R
 		retireOrphanWrite(ctx, s.db, s.logger, tenantID, bucket, blob, "r2")
 		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to register the object", "")
 		return
-	}
-	for _, rel := range flip.Displaced.releases() {
-		s.releaseQuota(context.WithoutCancel(ctx), tenantID, rel.Floor, rel.Bytes)
 	}
 	writeJSON(w, http.StatusOK, mgmtDirectUploadComplete{
 		Object: "object", Bucket: bucket, Key: req.Key, Size: size, ETag: etag, ContentType: contentType,

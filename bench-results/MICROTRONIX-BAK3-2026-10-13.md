@@ -79,6 +79,31 @@ the socket samples; 20:00 UTC was 16:00 in Ohio), and a ticket asking Microtroni
 node is the only fix that is theirs to make. No IPv6 on either side, FTP on the box is
 plaintext only (no AUTH TLS), nothing else listens.
 
+### Controls: is it our end? (20:42–20:59 UTC)
+
+No. Measured from the same box within the same half hour:
+
+| Control | Result |
+|---|---|
+| SLC NIC | 10 Gbps full duplex, 0 TX errors / drops; `fq` qdisc, 82 drops in 243 GB sent; path MTU 1500; BBR, 64 MiB buffers, window scaling / SACK / timestamps on |
+| iperf3 → Dallas (RTT 40 ms) | 93 MB/s one stream (7 retransmits), 691 MB/s with 8 |
+| iperf3 → Ashburn (RTT 48 ms) | 66 MB/s one stream (5 retransmits), 526 MB/s with 8; 65 MB/s down |
+| iperf3 → New York (RTT 50 ms) | 63 MB/s one stream (3 retransmits), 511 MB/s with 8; 67 MB/s down |
+| iperf3 → Washington DC, Leaseweb (RTT 52 ms) | 307 MB/s one stream, 695 MB/s with 8 |
+| HTTPS upload → Cloudflare, 277 MB | 50–76 MB/s one stream, 18 retransmits |
+| scp → Microtronix (RTT 48–130 ms) | 5–9 MB/s one stream, ~4,500–6,400 retransmits per 256 MiB |
+
+Same box, same hour, same distance: every other destination takes 60–300 MB/s per stream
+with a handful of retransmits; Microtronix takes 5–9 MB/s with thousands. Congestion control
+was also checked on the path itself through a proxy socket that sets `TCP_CONGESTION`: BBR
+3.7–4.2 MB/s against cubic 0.7–0.9 MB/s on back-to-back runs — the lossy path punishes
+cubic, so the box's BBR is already the right choice. The box-wide retransmit rate since
+boot is 1.0 % (every customer's last mile counts in it), so it says nothing by itself. Two
+intended controls failed: `iperf.he.net` resets or times out, and `mirrors.he.net` answers
+404 to a listing — so the Hurricane Electric leg specifically was not isolated; the
+Microtronix side of the HE hand-off or Microtronix's own edge are the candidates. iperf3 was
+taken from Ubuntu's signed package and extracted without root; nothing was installed.
+
 ## Price and terms
 
 - $2.00 per TB per month, no ingress or egress fees, no contract (the product page and the

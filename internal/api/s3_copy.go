@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/md5" // #nosec G501 — S3 spec requires MD5 for ETags
 	"database/sql"
 	"encoding/json"
@@ -184,6 +185,7 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 
 	copySource := r.Header.Get("x-amz-copy-source")
 	srcBucket, srcKey, err := parseCopySource(copySource)
+	srcVersionID := copySourceVersionID(copySource)
 	if err != nil {
 		s.logger.Warn("invalid x-amz-copy-source",
 			zap.String("copy_source", copySource),
@@ -254,12 +256,45 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	var srcChunked bool
 	var srcBackend string
 	var srcFloor, srcStorageKey string
+	// versionAttrs: the attributes of a non-current source version — its
+	// content type alone (no per-version copy of the rest exists; a GET of
+	// it sends none either), never the current object's.
+	var versionAttrs *objectAttrs
 	if s.db != nil {
-		_ = s.db.QueryRowContext(r.Context(), `
+		// The source's row is the one authority for where its bytes are
+		// (WP-R6-1): a row that cannot be read is a 500 and a key with no row
+		// is NoSuchKey — neither is read from the primary at a guess, which
+		// is what the ignored error did (Stage 1a Prompt 6 Part 0).
+		rowErr := s.db.QueryRowContext(r.Context(), `
 			SELECT size_bytes, COALESCE(encryption_algorithm, ''), is_chunked, COALESCE(backend_name, ''), floor, COALESCE(storage_key, '')
 			FROM object_head_cache
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
 			t.ID, srcBucket, srcKey).Scan(&srcSize, &srcEnc, &srcChunked, &srcBackend, &srcFloor, &srcStorageKey)
+		srcFound := rowErr == nil
+		if rowErr != nil && !errors.Is(rowErr, sql.ErrNoRows) {
+			s.logger.Error("copy: source row read failed", zap.Error(rowErr), zap.String("bucket", srcBucket), zap.String("key", srcKey))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+		if srcVersionID != "" {
+			v, code := s.copySourceVersion(r.Context(), t.ID, srcBucket, srcKey, srcVersionID)
+			switch {
+			case code != "":
+				WriteS3Error(w, code, r.URL.Path, generateRequestID())
+				return
+			case !v.current:
+				srcFound = true
+				srcSize, srcEnc, srcChunked, srcBackend, srcStorageKey = v.size, v.enc, false, v.backend, v.storageKey
+				versionAttrs = &objectAttrs{ContentType: v.contentType}
+				if v.floor != "" {
+					srcFloor = v.floor
+				}
+			}
+		}
+		if !srcFound {
+			WriteS3Error(w, ErrNoSuchKey, r.URL.Path, generateRequestID())
+			return
+		}
 	}
 	// The source's bytes are at its row's address (WP-R2-1).
 	srcBlob := blobArtifact(srcKey, srcStorageKey)
@@ -323,6 +358,9 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 				WithSuggestion("Copying a large unencrypted object into a bucket that encrypts at rest is not supported yet. Download it and upload it into that bucket."))
 			return
 		}
+		if srcVersionID != "" {
+			w.Header().Set("x-amz-copy-source-version-id", srcVersionID)
+		}
 		s.handleChunkedCopy(w, r, t, srcBucket, srcKey, destBucket, destKey, srcSize, directive, requestAttrs)
 		return
 	}
@@ -356,7 +394,10 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	// The source's recorded attributes (COPY directive) — read before the
 	// stream so a self-copy with REPLACE sees the pre-write row.
 	sourceAttrs := objectAttrs{ContentType: "application/octet-stream"}
-	if s.db != nil {
+	switch {
+	case versionAttrs != nil:
+		sourceAttrs = *versionAttrs
+	case s.db != nil:
 		if a, aErr := loadHeadAttrs(r.Context(), s.db, t.ID, srcBucket, srcKey); aErr == nil {
 			sourceAttrs = a
 		}
@@ -364,10 +405,9 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	attrs := resolveCopyAttrs(directive, requestAttrs, sourceAttrs)
 	attrs.Tags = resolveCopyTags(r.Header.Get("x-amz-tagging-directive"), requestAttrs, sourceAttrs)
 
-	// Route the read to the backend that holds the source (routing truth).
-	if srcBackend != "" && s.engine != nil {
+	// The read goes to the backend that holds the source (routing truth).
+	if srcBackend != "" && s.engine != nil && !srcChunked {
 		noteRecordedBackend(s.engine, s.logger, "copy_source", srcBackend)
-		s.engine.HintBackend(srcContainer, srcBlob, srcBackend)
 	}
 	// The source's recorded size goes with the read and the write (Prompt
 	// 2b.2 C3): a backend holding two versions of the key after an
@@ -376,7 +416,12 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	// stale plain bytes and recorded their MD5 as the new object — and a
 	// destination of known length is striped over the Sync bridges (an
 	// unsized one was one plain file on one bridge, ~30 MB/s).
+	// Read from the backend the source's row records, and no other (WP-R6-1;
+	// a chunked row's name is a sentinel: its chunks have their own rows).
 	gctx := r.Context()
+	if !srcChunked {
+		gctx = engine.WithRecordedBackend(gctx, srcBackend)
+	}
 	if srcSize > 0 {
 		stored := srcSize
 		if srcSealedS3 {
@@ -440,10 +485,13 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	// are released.
 	floor := usage.FloorOf(destClass)
 	quotaOn := s.quotaManager != nil
-	var reservedBytes int64
+	var bill *writeBill
 	if quotaOn {
 		if srcSize > 0 {
-			ok, qErr := reserveQuota(r.Context(), s.quotaManager, t.ID, floor, srcSize)
+			// Net of what the commit releases at the quota edge (Part B):
+			// restoring a version by copying it onto its own key at 100 %
+			// of the floor is a shrink or a wash, never a refusal.
+			b, ok, qErr := s.reserveWrite(r.Context(), t.ID, destBucket, destKey, floor, srcSize)
 			if qErr != nil {
 				s.logger.Error("copy: quota check failed",
 					zap.Error(qErr), zap.String("tenant_id", t.ID))
@@ -455,8 +503,9 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 					WithSuggestion("Upgrade at "+billingURL()))
 				return
 			}
-			reservedBytes = srcSize
+			bill = b
 		} else {
+			bill = &writeBill{Floor: floor} // settled to the counted bytes at commit
 			// Unknown source size (drifted or missing head-cache row): the
 			// bytes are accounted after the stream, but refuse outright when
 			// the tenant is already at their limit.
@@ -469,9 +518,9 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 		}
 	}
 	releaseReservation := func() {
-		if quotaOn && reservedBytes > 0 {
+		if bill != nil && bill.Reserved > 0 {
 			ctx, cancel := quotaCtx(r)
-			s.releaseQuota(ctx, t.ID, floor, reservedBytes)
+			s.releaseQuota(ctx, t.ID, floor, bill.Reserved)
 			cancel()
 		}
 	}
@@ -562,6 +611,14 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 		case errors.Is(err, engine.ErrAllBackendsUnavailable):
 			w.Header().Set("Retry-After", "30")
 			WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
+		case source.err != nil && (errors.Is(source.err, crypto.ErrStreamCorrupt) || errors.Is(source.err, errSealedUnreadable)):
+			// A sealed source that does not open (a truncated or corrupt
+			// blob) is an integrity failure, as on the GET: 500 and an
+			// Error line — a 503 would be retried for ever (R85-10).
+			s.logger.Error("copy: the sealed source does not open — 500",
+				zap.String("tenant_id", t.ID), zap.String("source_bucket", srcBucket), zap.String("source_key", srcKey),
+				zap.NamedError("source_error", source.err))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		case source.err != nil && r.Context().Err() == nil:
 			s.logger.Warn("copy: the source could not be read — 503",
 				zap.String("tenant_id", t.ID), zap.String("source_bucket", srcBucket), zap.String("source_key", srcKey),
@@ -591,11 +648,11 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	// attribute column is written (R3-05). A failed head write is a 500,
 	// never a 200 with no row (R3-10): the destination is untouched and the
 	// new blob is queued as an orphan.
-	var displaced displacedRow
 	var versionID string
 	if s.db != nil {
 		enc := sealer.encryption()
 		flip, dbErr := commitBlobWrite(pctx, s.db, manifestReleaser(s.gci), blobWrite{TenantID: t.ID, Bucket: destBucket, Key: destKey,
+			Bill: bill,
 			Version: &versionWrite{Size: counter.n, ETag: etag, ContentType: attrs.ContentType, Backend: backendName,
 				Blob: versionBlobRef{StorageKey: destBlob, Enc: enc}},
 			Upsert: func(tx *sql.Tx) error {
@@ -604,6 +661,11 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 		if dbErr != nil {
 			releaseReservation()
 			retireOrphanWrite(pctx, s.db, s.logger, t.ID, destBucket, destBlob, backendName)
+			if errors.Is(dbErr, errQuotaRace) {
+				WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
+					WithSuggestion("Upgrade at "+billingURL()))
+				return
+			}
 			s.logger.Error("copy: head row write failed — failing the request",
 				zap.Error(dbErr),
 				zap.String("tenant_id", t.ID),
@@ -612,16 +674,15 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 			return
 		}
-		displaced, versionID = flip.Displaced, flip.VersionID
-	}
-
-	if quotaOn {
-		s.settlePutQuota(pctx, t.ID, floor, reservedBytes, counter.n, displaced)
+		versionID = flip.VersionID
 	}
 
 	// The bucket's default retention.
 	applyObjectLockOnPut(pctx, s.db, t.ID, destBucket, destKey, r)
 
+	if srcVersionID != "" {
+		w.Header().Set("x-amz-copy-source-version-id", srcVersionID)
+	}
 	result := CopyObjectResult{
 		ETag:         fmt.Sprintf(`"%s"`, etag),
 		LastModified: now.Format("2006-01-02T15:04:05.000Z"),
@@ -688,6 +749,63 @@ func parseCopySource(source string) (bucket, key string, err error) {
 	return parts[0], decodedKey, nil
 }
 
+// copySourceVersionID is the versionId of an x-amz-copy-source
+// ("bucket/key?versionId=…"), "" when none.
+func copySourceVersionID(source string) string {
+	_, query, ok := strings.Cut(source, "?")
+	if !ok {
+		return ""
+	}
+	q, err := url.ParseQuery(query)
+	if err != nil {
+		return ""
+	}
+	return q.Get("versionId")
+}
+
+// copySource is the source of a copy that names a version: its own row's
+// bytes, or the current object (current = the head row describes it).
+type copySource struct {
+	current                                      bool
+	size                                         int64
+	enc, backend, storageKey, floor, contentType string
+}
+
+// copySourceVersion resolves a copy source's ?versionId the way a GET
+// ?versionId does (Stage 1a Prompt 6 Part 0: the id was dropped and the
+// CURRENT object copied — the S3 way to restore an earlier version, copying
+// it onto its own key, restored nothing). A code is the refusal: no such
+// version, a delete marker (AWS answers InvalidRequest), or a version
+// written before C1 whose bytes were not kept.
+func (s *Server) copySourceVersion(ctx context.Context, tenantID, bucket, key, versionID string) (copySource, string) {
+	var isMarker, isLatest bool
+	var v copySource
+	err := s.db.QueryRowContext(ctx, `
+		SELECT is_delete_marker, is_latest, size_bytes, COALESCE(encryption_algorithm, ''), COALESCE(backend_name, ''),
+		       COALESCE(storage_key, ''), COALESCE(floor, ''), content_type
+		FROM object_versions
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND version_id = $4`,
+		tenantID, bucket, key, versionID).Scan(&isMarker, &isLatest, &v.size, &v.enc, &v.backend, &v.storageKey, &v.floor, &v.contentType)
+	switch {
+	case errors.Is(err, sql.ErrNoRows) && isUnanchoredNullVersion(ctx, s.db, tenantID, bucket, key, versionID):
+		return copySource{current: true}, ""
+	case errors.Is(err, sql.ErrNoRows):
+		return copySource{}, ErrNoSuchVersion
+	case err != nil:
+		s.logger.Error("copy: source version read failed", zap.Error(err), zap.String("bucket", bucket), zap.String("key", key))
+		return copySource{}, ErrInternalError
+	case isMarker:
+		return copySource{}, ErrInvalidRequest
+	case isLatest:
+		return copySource{current: true}, ""
+	case v.storageKey != "":
+		return v, ""
+	case s.readAdapter().versionBytesIntact(ctx, tenantID, bucket, key, versionID):
+		return v, "" // at <key>, behind a delete marker
+	}
+	return copySource{}, ErrNotImplemented
+}
+
 // handleChunkedCopy copies a chunked object without moving any data: the
 // destination gets its own manifest rows referencing the same chunks, each
 // chunk's refcount is incremented, and the head-cache/metadata rows are
@@ -724,9 +842,9 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 	// Chunk blobs always live on the engine's primary backend, so a chunked
 	// copy is billed downstairs whatever the destination bucket's tier.
 	quotaOn := s.quotaManager != nil
-	var reservedBytes int64
-	if quotaOn && srcSize > 0 {
-		ok, qErr := reserveQuota(r.Context(), s.quotaManager, t.ID, chunkedObjectFloor, srcSize)
+	var bill *writeBill
+	if quotaOn {
+		b, ok, qErr := s.reserveWrite(r.Context(), t.ID, destBucket, destKey, chunkedObjectFloor, srcSize)
 		if qErr != nil {
 			s.logger.Error("chunked copy: quota check failed",
 				zap.Error(qErr), zap.String("tenant_id", t.ID))
@@ -738,12 +856,12 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 				WithSuggestion("Upgrade at "+billingURL()))
 			return
 		}
-		reservedBytes = srcSize
+		bill = b
 	}
 	releaseReservation := func() {
-		if quotaOn && reservedBytes > 0 {
+		if bill != nil && bill.Reserved > 0 {
 			ctx, cancel := quotaCtx(r)
-			s.releaseQuota(ctx, t.ID, chunkedObjectFloor, reservedBytes)
+			s.releaseQuota(ctx, t.ID, chunkedObjectFloor, bill.Reserved)
 			cancel()
 		}
 	}
@@ -808,7 +926,8 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 	longOpBegin(r)
 	// The install is ONE transaction — a shutdown's cut rolls it back whole;
 	// once it has committed, the rest runs to the end.
-	displaced, dbErr := atomicHeadUpsert(r.Context(), s.db, t.ID, destBucket, destKey, func(tx *sql.Tx) error {
+	// The bill is settled in the install's transaction (WP-R10-8).
+	_, dbErr := commitBlobWrite(r.Context(), s.db, nil, blobWrite{TenantID: t.ID, Bucket: destBucket, Key: destKey, Bill: bill, Upsert: func(tx *sql.Tx) error {
 		// Each destination ref is a new reference to its chunk. Incremented
 		// inside the same tx so a failed install leaves counts untouched.
 		for _, ref := range destRefs {
@@ -844,9 +963,14 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 		// is the chunked sentinel, as every chunked row's.
 		execErr := upsertChunkedObjectHeadRow(r.Context(), tx, t.ID, destBucket, destKey, srcMeta.LogicalSize, srcETag, srcEncAlgo, destAttrs)
 		return execErr
-	})
+	}})
 	if dbErr != nil {
 		releaseReservation()
+		if errors.Is(dbErr, errQuotaRace) {
+			WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
+				WithSuggestion("Upgrade at "+billingURL()))
+			return
+		}
 		s.logger.Error("chunked copy: install failed",
 			zap.Error(dbErr),
 			zap.String("dest_bucket", destBucket), zap.String("dest_key", destKey))
@@ -864,10 +988,6 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 	// A whole blob the destination held before (a plain object, at <key> or
 	// at its address) was retired inside the install's transaction (the
 	// flip, WP-R2-1): the collector removes it after its grace.
-
-	if quotaOn {
-		s.settlePutQuota(pctx, t.ID, chunkedObjectFloor, reservedBytes, srcMeta.LogicalSize, displaced)
-	}
 
 	now := time.Now().UTC()
 	result := CopyObjectResult{

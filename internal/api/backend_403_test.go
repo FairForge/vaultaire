@@ -279,9 +279,9 @@ func TestIDrive403_Jobs_ExistsOnAndDeleteOnAreErrors(t *testing.T) {
 	require.Error(t, err)
 	assert.False(t, ok)
 
-	// deletion runner's hinted Delete: an error, never a miss → the tenant defers.
-	f.eng.HintBackend("c", "k", "idrive")
-	err = f.eng.Delete(ctx, "c", "k")
+	// deletion runner's Delete of the recorded backend: an error, never a
+	// miss → the tenant defers.
+	err = f.eng.Delete(engine.WithRecordedBackend(ctx, "idrive"), "c", "k")
 	require.Error(t, err)
 	assert.False(t, isObjectMissingErr(err))
 	assert.True(t, strings.Contains(err.Error(), "AccessDenied"), err.Error())

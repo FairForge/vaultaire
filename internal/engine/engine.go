@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -30,14 +31,10 @@ type CoreEngine struct {
 	db       *sql.DB
 	failover *FailoverManager
 
-	locations *LocationStore
-
-	// objectBackends records which backend each object was written to.
-	// Key: "container/artifact"  Value: backend name string
-	// This guarantees Get always reads from the same backend Put used.
-	// In-memory only; objects written before a restart fall back to
-	// object_locations, then e.primary (safe — they were written there too).
-	objectBackends sync.Map
+	// Where an object is, is not the engine's to remember (WP-R6-1): every
+	// call names the backend the object's row records on its context
+	// (WithRecordedBackend). The in-memory route map (objectBackends, R6-09:
+	// unbounded) and the object_locations second truth (R6-14) are gone.
 
 	// writeFailures counts PUTs that failed on every eligible durable
 	// backend (WP-F fail-loudly). Exposed via GetMetrics for alerting.
@@ -67,7 +64,6 @@ func NewEngine(db *sql.DB, logger *zap.Logger, config *Config) *CoreEngine {
 		config:   config,
 		failover: NewFailoverManager(logger),
 	}
-	e.locations = NewLocationStore(db, logger)
 	return e
 }
 
@@ -122,37 +118,18 @@ func (e *CoreEngine) CheckDriver(ctx context.Context, name string) error {
 	return driver.HealthCheck(ctx)
 }
 
-// objectKey returns the sync.Map key for a container+artifact pair.
-func objectKey(container, artifact string) string {
-	return container + "/" + artifact
-}
-
-// Get retrieves an artifact.
-//
-// Backend selection consults objectBackends first — the map written by Put
-// that records exactly which backend each object landed on. This is the
-// source of truth.
-//
-// Fall-through to e.primary only occurs for objects written before this
-// engine version was deployed (map is empty on restart).
+// Get retrieves an artifact from the backend its row records — the
+// context's WithRecordedBackend, else the primary (a row with no backend on
+// record) — and from no other (WP-R6-1, recorded_backend.go): a miss there
+// is a miss, a backend that cannot be asked is ErrAllBackendsUnavailable.
 func (e *CoreEngine) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
-	tenantID := common.GetTenantID(ctx)
-
-	preferredBackend := e.primary
-	if v, ok := e.objectBackends.Load(objectKey(container, artifact)); ok {
-		if name, ok := v.(string); ok && name != "" {
-			preferredBackend = name
-		}
-	} else if e.locations != nil {
-		if name, err := e.locations.LookupBackend(ctx, tenantID, container, artifact); err == nil && name != "" {
-			preferredBackend = name
-			e.objectBackends.Store(objectKey(container, artifact), name)
-		}
+	if err := e.requireTenant(ctx, "get", container, artifact); err != nil {
+		return nil, err
 	}
-
-	// Build candidate list: preferred backend first, then primary, then
-	// others — a strict target alone (E1.1).
-	candidates := e.readCandidates(preferredBackend, "get")
+	candidates, err := e.readCandidates(e.preferredBackend(ctx, "get", container, artifact), "get")
+	if err != nil {
+		return nil, fmt.Errorf("get %s/%s: %w", container, artifact, err)
+	}
 
 	var reader io.ReadCloser
 	usedBackend, err := e.failover.ExecuteOp(ctx, "get", candidates, func(driverName string) error {
@@ -174,26 +151,19 @@ func (e *CoreEngine) Get(ctx context.Context, container, artifact string) (io.Re
 }
 
 // GetRange reads a byte range directly from the backend without downloading
-// the full object. Falls back to full Get + discard if the driver doesn't
-// implement RangeGetter.
+// the full object — the backend Get would ask, and no other. Falls back to
+// full Get + discard if the driver doesn't implement RangeGetter.
 func (e *CoreEngine) GetRange(ctx context.Context, container, artifact string, offset, length int64) (io.ReadCloser, error) {
-	preferredBackend := e.primary
-	if v, ok := e.objectBackends.Load(objectKey(container, artifact)); ok {
-		if name, ok := v.(string); ok && name != "" {
-			preferredBackend = name
-		}
-	} else if e.locations != nil {
-		tenantID := common.GetTenantID(ctx)
-		if name, err := e.locations.LookupBackend(ctx, tenantID, container, artifact); err == nil && name != "" {
-			preferredBackend = name
-			e.objectBackends.Store(objectKey(container, artifact), name)
-		}
+	if err := e.requireTenant(ctx, "get_range", container, artifact); err != nil {
+		return nil, err
+	}
+	candidates, err := e.readCandidates(e.preferredBackend(ctx, "get_range", container, artifact), "get_range")
+	if err != nil {
+		return nil, fmt.Errorf("get range %s/%s: %w", container, artifact, err)
 	}
 
-	candidates := e.readCandidates(preferredBackend, "get_range")
-
 	var reader io.ReadCloser
-	_, err := e.failover.ExecuteOp(ctx, "get_range", candidates, func(driverName string) error {
+	_, err = e.failover.ExecuteOp(ctx, "get_range", candidates, func(driverName string) error {
 		d, ok := e.drivers[driverName]
 		if !ok {
 			return fmt.Errorf("driver %s not found", driverName)
@@ -226,10 +196,14 @@ func (e *CoreEngine) GetRange(ctx context.Context, container, artifact string, o
 // Put stores an artifact and returns the name of the backend it was written to.
 //
 // The returned backend name must be persisted by the caller (the S3 adapter
-// writes it to object_head_cache.backend_name). It is also stored in
-// objectBackends so that Get can route correctly within the same process
-// lifetime without a DB round-trip.
+// writes it to object_head_cache.backend_name): it is the one place every
+// later read and delete learns where the object is (WP-R6-1). The engine
+// records nothing itself — no in-memory route, no object_locations row
+// (R6-09, R6-14, R8-19: one row per chunk per store, never read for them).
 func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...PutOption) (string, error) {
+	if err := e.requireTenant(ctx, "put", container, artifact); err != nil {
+		return "", err
+	}
 	tenantID := common.GetTenantID(ctx)
 	// A chunk blob has one address (WP-R8-7): a write into the chunk
 	// container under any other tenant's context would store it where no
@@ -350,92 +324,77 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 		return "", fmt.Errorf("put %s/%s: %w", container, artifact, err)
 	}
 
-	e.objectBackends.Store(objectKey(container, artifact), usedBackend)
-
-	if e.locations != nil {
-		resolvedClass := options.StorageClass
-		if resolvedClass == "" {
-			resolvedClass = "STANDARD"
-		}
-		go func() { // #nosec G118 -- fire-and-forget location record; must outlive the request, request ctx would cancel it
-			_ = e.locations.RecordLocation(context.Background(), tenantID, container, artifact, usedBackend, resolvedClass, sizeReader.bytesRead)
-		}()
-	}
-
 	return usedBackend, nil
 }
 
-// Delete removes an artifact from the backend that holds it. It stops at
-// the first backend that reports success (or a miss — the API layer treats a
-// miss as an idempotent delete), so a second copy on another backend is NOT
-// removed here; that is WP-R6-1.
+// Delete removes an artifact from every backend it is known to be on: the
+// one its row records (resolved as Get resolves it) and each backend the
+// context names as holding another copy (WithKnownCopies — the demotion
+// ledger's other copy, a retired_blobs row's backend). Every candidate is
+// attempted (R6-24: it used to stop at the first success and keep the
+// second copy). A miss on one is fine — that copy is gone; a failure on any
+// is the delete's failure (ErrAllBackendsUnavailable for a backend that
+// could not be asked, unregistered included: the API answers 503 and keeps
+// the head row, the quota and the aftermath, so the client retries) — never
+// "deleted" while a copy may remain. Misses everywhere return the miss: the
+// API's idempotent delete.
 //
-// A delete of an object KNOWN to be on a registered backend other than the
-// primary (the head row's backend_name hinted, this process's Put, the
-// object_locations row) asks that backend only: when it fails — a backend
-// failure, an open breaker, part of it out — the delete fails
-// (ErrAllBackendsUnavailable: the API answers 503 + Retry-After and keeps
-// the head row, the quota and the aftermath, so the client retries). It used
-// to fall back to the primary, whose DELETE of an absent key succeeds on
-// every S3-class store: DeleteObject answered 204 and dropped the head row
-// while the bytes stayed on the recorded backend (Prompt 2b.2 C2; on Sync
-// only the account-erasure sweep would ever have found them). A row naming
-// an UNREGISTERED backend keeps the fallback to the primary until WP-R6-1.
-//
-// The backend is resolved like Get does: hint / in-memory map first, then the
-// durable object_locations row. Resolving from the in-memory map alone meant
-// that after every restart a DELETE of an object stored off-primary went to
-// the primary, was answered "not found", and the head row was removed while
-// the bytes stayed on the real backend forever (R6-05). Callers that know the
-// head-cache backend_name must still HintBackend first — that column is the
-// routing truth and object_locations can lag it.
+// No candidate is ever the primary in place of the recorded backend: the
+// primary's DELETE of an absent key succeeds on every S3-class store, and
+// DeleteObject answered 204 and dropped the head row while the bytes stayed
+// where the row said (Prompt 2b.2 C2; WP-R7-5's fallback for a row on an
+// unregistered name is gone with WP-R6-1 — prod had 0 such rows).
 func (e *CoreEngine) Delete(ctx context.Context, container, artifact string) error {
-	tenantID := common.GetTenantID(ctx)
-
-	key := objectKey(container, artifact)
-	targetBackend := e.primary
-	if stored, ok := e.objectBackends.Load(key); ok {
-		if name, ok := stored.(string); ok && name != "" {
-			targetBackend = name
-		}
-	} else if e.locations != nil {
-		if name, err := e.locations.LookupBackend(ctx, tenantID, container, artifact); err == nil && name != "" {
-			targetBackend = name
+	if err := e.requireTenant(ctx, "delete", container, artifact); err != nil {
+		return err
+	}
+	targets := []string{e.preferredBackend(ctx, "delete", container, artifact)}
+	for _, b := range KnownCopies(ctx) {
+		if !slices.Contains(targets, b) {
+			targets = append(targets, b)
 		}
 	}
 
-	candidates := []string{targetBackend}
-	e.mu.RLock()
-	_, registered := e.drivers[targetBackend]
-	e.mu.RUnlock()
+	var failure, miss error
+	deleted := false
+	for _, name := range targets {
+		err := e.deleteOn(ctx, name, container, artifact)
+		switch {
+		case err == nil:
+			deleted = true
+		case IsObjectMiss(err):
+			if miss == nil {
+				miss = err
+			}
+		case failure == nil:
+			failure = err
+		}
+	}
+
 	switch {
-	case strictTarget(targetBackend) && !registered:
-		// The primary's DELETE of an absent key succeeds: 204 and the row
-		// dropped while the bytes stay on the strict backend (F3.1).
-		e.strictTargetUnregistered(targetBackend, "delete")
-	case targetBackend != e.primary && !registered:
-		candidates = append(candidates, e.primary)
+	case failure != nil:
+		return failure
+	case deleted:
+		return nil
+	default:
+		return miss
 	}
+}
 
-	_, lastErr := e.failover.ExecuteOp(ctx, "delete", candidates, func(driverName string) error {
-		d, ok := e.drivers[driverName]
-		if !ok {
-			return fmt.Errorf("driver %s not found", driverName)
-		}
+// deleteOn deletes the artifact on one named backend, through its breaker.
+func (e *CoreEngine) deleteOn(ctx context.Context, name, container, artifact string) error {
+	e.mu.RLock()
+	d, registered := e.drivers[name]
+	e.mu.RUnlock()
+	if !registered {
+		return fmt.Errorf("delete %s/%s on %s: %w", container, artifact, name, e.unregisteredBackend(name, "delete"))
+	}
+	if _, err := e.failover.ExecuteOp(ctx, "delete", []string{name}, func(string) error {
 		return d.Delete(ctx, container, artifact)
-	})
-
-	// A failed delete keeps the routing records with the head row, so the
-	// retry asks the same backend (Prompt 2b.3 D1.5); a miss is gone too —
-	// any backend's miss, the local driver's *fs.PathError included (E1.4).
-	if lastErr == nil || IsObjectMiss(lastErr) {
-		e.objectBackends.Delete(key)
-		if e.locations != nil {
-			_ = e.locations.RemoveLocation(ctx, tenantID, container, artifact)
-		}
+	}); err != nil {
+		return fmt.Errorf("delete %s/%s on %s: %w", container, artifact, name, err)
 	}
-
-	return lastErr
+	return nil
 }
 
 // List returns artifacts in a container
@@ -570,6 +529,20 @@ var targetOnlyBackends = map[string]bool{
 	"onedrive":   true, // legacy registration key (tools now use "permafrost", R7-10); keep for old head rows
 }
 
+// dormantBackends are general-purpose stores kept registered only so the
+// rows on them stay readable: never a write fall-over destination unless
+// they are the target or the primary, and — like every backend since
+// WP-R6-1 — never read unless a row names them. Unlike targetOnlyBackends
+// they may still be made the primary (STORAGE_MODE=wasabi, the admin
+// switch): then every write is theirs again.
+//
+//   - wasabi: the interim primary for one day (2026-10-03 → 10-04) while an
+//     iDrive key answered 403; a partner account kept dormant since. A 90-day
+//     minimum per object makes a stray fall-over write a 90-day charge.
+var dormantBackends = map[string]bool{
+	"wasabi": true,
+}
+
 // writeOnlyWhenTargeted reports whether name may receive a write only as the
 // explicit target or the configured primary.
 func writeOnlyWhenTargeted(name string) bool {
@@ -607,20 +580,20 @@ func strictTarget(name string) bool { return strictTargetBackends[name] }
 func IsStrictTarget(name string) bool { return strictTarget(name) }
 
 // readCandidates is the Get/GetRange candidate list for an object recorded
-// on preferred: preferred alone when it is a strict target — and nobody when
-// that strict target is not registered on this process (Prompt 2b.5 F3.1:
-// a redeploy without SYNC_WEBDAV_URLS fanned every sync-row read out to the
-// primary, which served whatever older copy of the key it held, 200).
-// ExecuteOp over no candidate is ErrAllBackendsUnavailable: 503.
-func (e *CoreEngine) readCandidates(preferred, op string) []string {
-	if strictTarget(preferred) {
-		if _, ok := e.drivers[preferred]; ok {
-			return []string{preferred}
-		}
-		e.strictTargetUnregistered(preferred, op)
-		return nil
+// on target: target alone (WP-R6-1; a strict target was already asked alone,
+// Prompt 2b.4 E1.1). A target no driver is registered under is
+// ErrAllBackendsUnavailable (503) — never the primary or any other backend in
+// its place (Prompt 2b.5 F3.1: a redeploy without SYNC_WEBDAV_URLS fanned
+// every sync-row read out to the primary, which served whatever older copy
+// of the key it held, 200).
+func (e *CoreEngine) readCandidates(target, op string) ([]string, error) {
+	e.mu.RLock()
+	_, ok := e.drivers[target]
+	e.mu.RUnlock()
+	if !ok {
+		return nil, e.unregisteredBackend(target, op)
 	}
-	return e.buildCandidateList(preferred)
+	return []string{target}, nil
 }
 
 // strictTargetUnregistered logs and counts a call routed to a strict target
@@ -647,7 +620,7 @@ func (e *CoreEngine) buildWriteCandidateList(target string) []string {
 	all := e.buildCandidateList(target)
 	writable := make([]string, 0, len(all))
 	for _, name := range all {
-		if writeOnlyWhenTargeted(name) && name != target && name != e.primary {
+		if (writeOnlyWhenTargeted(name) || dormantBackends[name]) && name != target && name != e.primary {
 			continue
 		}
 		writable = append(writable, name)
@@ -686,15 +659,6 @@ func (e *CoreEngine) GetDriver(name string) (Driver, bool) {
 	defer e.mu.RUnlock()
 	d, ok := e.drivers[name]
 	return d, ok
-}
-
-// HintBackend seeds the objectBackends map so Get routes to the correct
-// backend without a failed attempt against the primary. The S3 adapter
-// calls this with the backend_name read from object_head_cache on GET.
-func (e *CoreEngine) HintBackend(container, artifact, backend string) {
-	if backend != "" {
-		e.objectBackends.Store(objectKey(container, artifact), backend)
-	}
 }
 
 // GetFailoverStatus returns circuit breaker states for all backends.

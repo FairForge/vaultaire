@@ -33,19 +33,17 @@ func TestSync_KeyNamedNotFoundOnADownBridgeIsNoMiss(t *testing.T) {
 
 	// Delete of the plain key: partial 503, route kept — a second Delete
 	// asks sync again (the primary is never asked).
-	e.HintBackend("c", good, "sync")
-	err := e.Delete(ctx, "c", good)
+	err := e.Delete(engine.WithRecordedBackend(ctx, "sync"), "c", good)
 	require.ErrorIs(t, err, engine.ErrAllBackendsUnavailable)
-	err = e.Delete(ctx, "c", good)
+	err = e.Delete(engine.WithRecordedBackend(ctx, "sync"), "c", good)
 	require.ErrorIs(t, err, engine.ErrAllBackendsUnavailable)
 	assert.Zero(t, p.deletes, "plain key: the route is kept, the primary never asked")
 
 	// Delete of the "NotFound" key: the same 503 — but is the route kept?
-	e.HintBackend("c", bad, "sync")
-	err = e.Delete(ctx, "c", bad)
+	err = e.Delete(engine.WithRecordedBackend(ctx, "sync"), "c", bad)
 	t.Logf("first delete: %v", err)
 	require.ErrorIs(t, err, engine.ErrAllBackendsUnavailable, "the answer is still a 503")
-	err = e.Delete(ctx, "c", bad)
+	err = e.Delete(engine.WithRecordedBackend(ctx, "sync"), "c", bad)
 	t.Logf("second delete: %v (primary deletes=%d)", err, p.deletes)
 	assert.Zero(t, p.deletes, "the route of a key named NotFound must survive a bridge-down 503 like any other")
 }
@@ -60,8 +58,7 @@ func TestSync_FleetFailureOnKeysNamedNotFoundChargesTheBreaker(t *testing.T) {
 	fleetFailing(t, m, down)
 	for i := 0; i < 8; i++ {
 		a := keyOnBridge(ctx, t, m, "c", fmt.Sprintf("NotFound%d-", i), i%5)
-		e.HintBackend("c", a, "sync")
-		_, err := e.Get(ctx, "c", a)
+		_, err := e.Get(engine.WithRecordedBackend(ctx, "sync"), "c", a)
 		require.Error(t, err)
 	}
 	t.Logf("breaker after 8 charged-shape failures on NotFound-named keys: %s", syncBreaker(e))

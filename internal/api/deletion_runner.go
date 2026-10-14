@@ -39,7 +39,7 @@ import (
 //	   client while a subscription id is set) defers THIS tenant to the next
 //	   run; nothing of theirs is touched before billing is settled.
 //	b. Objects — every object_head_cache row is deleted on its RECORDED
-//	   backend (HintBackend + engine.Delete, the R6-05 rule); chunked rows
+//	   backend (engine.WithRecordedBackend + Delete, R6-05/WP-R6-1); chunked rows
 //	   release their manifest under the key lock in the same transaction as
 //	   the head row (deleteHeadRowReleasing, R8) and never touch _global
 //	   blobs (dedup GC sweeps them); active multipart uploads are aborted
@@ -647,8 +647,8 @@ func (r *AccountDeletionRunner) deleteObject(ctx context.Context, t *tenant.Tena
 			return err
 		}
 	}
-	row, found, err := deleteHeadRowReleasing(ctx, r.db, manifestReleaser(r.gci), t.ID, bucket, key)
-	if err != nil {
+	// The row and its bytes' release in one transaction (WP-R10-8).
+	if _, _, err := deleteHeadRowReleasing(ctx, r.db, manifestReleaser(r.gci), r.quota != nil, t.ID, bucket, key); err != nil {
 		return fmt.Errorf("head row: %w", err)
 	}
 	if chunked {
@@ -658,13 +658,6 @@ func (r *AccountDeletionRunner) deleteObject(ctx context.Context, t *tenant.Tena
 		te.ObjectsDeleted++
 		accountDeletionObjects.WithLabelValues("deleted").Inc()
 	}
-	if found && r.quota != nil {
-		qctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		if err := releaseDisplacedOn(qctx, r.quota, t.ID, row); err != nil {
-			r.logger.Error("account deletion: quota release", zap.String("tenant_id", t.ID), zap.Error(err))
-		}
-	}
 	return nil
 }
 
@@ -673,12 +666,7 @@ func (r *AccountDeletionRunner) deleteObject(ctx context.Context, t *tenant.Tena
 // to the primary alone). A miss is fine — the row drifted; anything else is
 // the caller's failure.
 func (r *AccountDeletionRunner) deleteOnBackend(ctx context.Context, container, blob, backend string) error {
-	if backend != "" {
-		if ce, ok := r.eng.(*engine.CoreEngine); ok {
-			ce.HintBackend(container, blob, backend)
-		}
-	}
-	if err := r.eng.Delete(ctx, container, blob); err != nil && !isObjectMissingErr(err) {
+	if err := r.eng.Delete(engine.WithRecordedBackend(ctx, backend), container, blob); err != nil && !isObjectMissingErr(err) {
 		return fmt.Errorf("backend delete: %w", err)
 	}
 	return nil
@@ -708,9 +696,8 @@ func (r *AccountDeletionRunner) abortMultipart(ctx context.Context, tenantID str
 	}
 	for _, u := range ups {
 		if u.status == "active" {
-			if _, err := r.db.ExecContext(ctx,
-				`UPDATE multipart_uploads SET status = 'aborted' WHERE upload_id = $1 AND tenant_id = $2 AND status = 'active'`,
-				u.id, tenantID); err != nil {
+			// Aborted with what it holds released (WP-R10-8 Part C).
+			if _, err := endUploadReleasing(ctx, r.db, u.id, tenantID, "", ""); err != nil {
 				return fmt.Errorf("abort upload %s: %w", u.id, err)
 			}
 			te.MultipartAborted++

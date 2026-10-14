@@ -23,7 +23,7 @@ func TestExecuteOp_CountsAFalloverFromTheFailedBackendToTheNext(t *testing.T) {
 	before := promtest.ToFloat64(FalloverCounter().WithLabelValues("idrive", "lyve", "put"))
 
 	// Act
-	used, err := eng.Put(context.Background(), "c", "k", strings.NewReader("x"))
+	used, err := eng.Put(tenantCtx(), "c", "k", strings.NewReader("x"))
 
 	// Assert
 	require.NoError(t, err)
@@ -40,20 +40,18 @@ func (d missDriver) Delete(context.Context, string, string) error {
 }
 
 // Prompt 2b.4 E1.4: Delete's "miss" matched NotFoundError only, so a local
-// miss kept objectBackends/object_locations while the API dropped the head
-// row. Before (eb79aaf): the route stayed "lyve".
-func TestDelete_ALocalStyleMissDropsTheRoute(t *testing.T) {
+// miss was not a miss. The engine keeps no route since WP-R6-1; the miss is
+// still the verdict (the API's idempotent delete).
+func TestDelete_ALocalStyleMissIsAMiss(t *testing.T) {
 	// Arrange
 	eng := NewEngine(nil, nopLogger(), &Config{DefaultBackend: "idrive"})
 	eng.AddDriver("idrive", newMemDriver("idrive"))
 	eng.AddDriver("lyve", missDriver{newMemDriver("lyve")})
-	eng.HintBackend("c", "k", "lyve")
 
 	// Act
-	err := eng.Delete(context.Background(), "c", "k")
+	err := eng.Delete(WithRecordedBackend(tenantCtx(), "lyve"), "c", "k")
 
 	// Assert
 	require.Error(t, err)
-	_, kept := eng.objectBackends.Load(objectKey("c", "k"))
-	assert.False(t, kept, "a miss is gone: the route goes with it")
+	assert.True(t, IsObjectMiss(err), "%v", err)
 }

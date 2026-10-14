@@ -120,16 +120,15 @@ func (m *MultipartReaper) abortAbandoned(ctx context.Context) (int, error) {
 	var aborted int
 	for _, id := range ids {
 		// Conditional: a concurrent CompleteMultipartUpload may have flipped
-		// the status since the scan — never remove a completed upload's state.
-		res, err := m.db.ExecContext(ctx, `
-			UPDATE multipart_uploads SET status = 'aborted'
-			WHERE upload_id = $1 AND status = 'active'
-		`, id)
+		// the status since the scan — never remove a completed upload's
+		// state. What the upload holds is released with the abort, in one
+		// transaction (WP-R10-8 Part C).
+		ended, err := endUploadReleasing(ctx, m.db, id, "", "", "")
 		if err != nil {
 			m.logger.Error("abort abandoned upload", zap.String("upload_id", id), zap.Error(err))
 			continue
 		}
-		if n, _ := res.RowsAffected(); n == 0 {
+		if !ended {
 			continue
 		}
 		if err := os.RemoveAll(multipartDir(id)); err != nil {

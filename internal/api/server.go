@@ -126,6 +126,10 @@ type Server struct {
 	// in-flight part bytes (0 = unlimited). Part data lives unbilled on local
 	// disk until complete — without a cap one upload can fill the disk.
 	multipartMaxUploadBytes int64
+	// multipartStagingMinFree is how much of the staging filesystem an
+	// UploadPart must leave free (MULTIPART_STAGING_MIN_FREE, WP-R10-8 Part
+	// C; nil = no guard — a Server built by hand in a test).
+	multipartStagingMinFree stagingMinFree
 
 	// chunkPutConcurrency, when > 0, overrides the adapter's default
 	// parallel chunk-store worker count (env CHUNK_PUT_CONCURRENCY).
@@ -322,7 +326,8 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// "<tenant>_<bucket>" namespace, tenant in ctx, quota, head row.
 	reportWriter := newGeneratedObjectWriter(s.db, s.engine, s.quotaManager, s.gci, logger)
 	if reportWriter != nil {
-		reportWriter.sse = s.sseService // an sse_enabled target bucket gets SSE-S3, as a PUT does
+		reportWriter.sse = s.sseService                     // an sse_enabled target bucket gets SSE-S3, as a PUT does
+		reportWriter.allowSync = syncPlacementGate(s.flags) // and a sync-tier bucket what a PUT gets
 	}
 	s.accessLogTracker = NewS3AccessLogTracker(s.db)
 	s.accessLogTracker.SetLogger(logger)
@@ -446,6 +451,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 			logger.Warn("invalid MULTIPART_MAX_UPLOAD_BYTES, keeping default", zap.String("value", v))
 		}
 	}
+	s.multipartStagingMinFree = stagingMinFreeFromEnv(os.Getenv, logger)
 	// Parallel chunk-store workers per chunked PUT. 0 keeps the adapter
 	// default; 1 is the sequential-store escape hatch.
 	if v := os.Getenv("CHUNK_PUT_CONCURRENCY"); v != "" {

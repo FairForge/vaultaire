@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -21,9 +20,7 @@ func TestEngineGet_PreferredOutageIsNotReportedAsMissing(t *testing.T) {
 	eng := NewEngine(nil, nopLogger(), &Config{DefaultBackend: "idrive"})
 	eng.AddDriver("idrive", &mockDriver{name: "idrive", getErr: fmt.Errorf("dial tcp: connection refused")})
 	eng.AddDriver("local", &fileWritingDriver{dir: t.TempDir()}) // *fs.PathError on a miss, like prod
-	eng.HintBackend("c", "k", "idrive")
-
-	_, err := eng.Get(context.Background(), "c", "k")
+	_, err := eng.Get(WithRecordedBackend(tenantCtx(), "idrive"), "c", "k")
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrAllBackendsUnavailable),
 		"an unreachable recorded backend must surface as unavailability, got: %v", err)
@@ -36,9 +33,7 @@ func TestEngineGet_AuthoritativeMissStaysMissWhenOtherBackendDown(t *testing.T) 
 	eng := NewEngine(nil, nopLogger(), &Config{DefaultBackend: "idrive"})
 	eng.AddDriver("idrive", &stubDriver{name: "idrive", data: map[string][]byte{}, healthy: true}) // NotFoundError
 	eng.AddDriver("lyve", &mockDriver{name: "lyve", getErr: fmt.Errorf("dial tcp: connection refused")})
-	eng.HintBackend("c", "k", "idrive")
-
-	_, err := eng.Get(context.Background(), "c", "k")
+	_, err := eng.Get(WithRecordedBackend(tenantCtx(), "idrive"), "c", "k")
 	require.Error(t, err)
 	assert.False(t, errors.Is(err, ErrAllBackendsUnavailable), "an authoritative miss is a miss: %v", err)
 	var nf NotFoundError
@@ -54,13 +49,13 @@ func TestFailoverManager_OpenPreferredBreakerPoisonsNotFound(t *testing.T) {
 	fm.Register("idrive")
 	fm.Register("local")
 	for i := 0; i < failureThreshold; i++ {
-		_, _ = fm.Execute(context.Background(), []string{"idrive"}, func(string) error {
+		_, _ = fm.Execute(tenantCtx(), []string{"idrive"}, func(string) error {
 			return fmt.Errorf("dial tcp: connection refused")
 		})
 	}
 	require.Equal(t, "open", fm.GetStatus("idrive"))
 
-	_, err := fm.Execute(context.Background(), []string{"idrive", "local"}, func(name string) error {
+	_, err := fm.Execute(tenantCtx(), []string{"idrive", "local"}, func(name string) error {
 		require.Equal(t, "local", name, "open breaker must be skipped")
 		return NotFoundError{Container: "c", Artifact: "k"}
 	})
@@ -76,7 +71,7 @@ func TestFailoverManager_FirstCandidateClientErrorKeepsIdentity(t *testing.T) {
 	fm.Register("a")
 	fm.Register("b")
 
-	_, err := fm.Execute(context.Background(), []string{"a", "b"}, func(name string) error {
+	_, err := fm.Execute(tenantCtx(), []string{"a", "b"}, func(name string) error {
 		if name == "a" {
 			return ErrQuotaExceeded
 		}

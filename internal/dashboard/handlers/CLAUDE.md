@@ -206,7 +206,7 @@ standard/performance→idrive, free→local. `egressCostPerTBCents` carries MODE
 market rates (lyve=1000 = $10/TB); `subsidizedBackends` (lyve) marks backends
 invoiced at $0 under a promo. `?costs=invoiced` zeroes subsidized backends
 (`parseCostMode`/`ratesFor`); the default "modelled" view charges full rates. The
-Actual table costs real bytes from `object_locations` plus this month's
+Actual table costs real bytes from the tables of record (`bytesByBackendSQL`) plus this month's
 per-backend egress from `backend_bandwidth_daily` (migration 060, attributed
 engine→BackendNote→RecordWithBackend), and the header reports modelled total,
 invoiced total, and the subsidy delta.
@@ -221,11 +221,13 @@ and per-tenant margin table with negative margins highlighted in red.
 Projected month-end: linear extrapolation from current day-of-month. Caption notes
 estimates are from intended tier→backend mapping, not live backend.
 
-**Actual Backend Distribution (Phase 7.4)**: `populateActualBackends` queries
-`object_locations` grouped by `backend_name` to show ground-truth object counts and
-storage per backend. Rendered as `ActualByBackend` (type `actualBackendRow`: Backend,
+**Actual Backend Distribution (Phase 7.4)**: `populateActualBackends` runs
+`bytesByBackendSQL` — whole objects by `object_head_cache.backend_name` plus every
+chunk blob by `global_content_index.backend_id` (WP-R6-1: `object_locations` is no
+longer written; the carbon badge's `tenantBytesByBackendSQL` is the per-tenant
+form) — to show ground-truth object/blob counts and storage per backend. Rendered as `ActualByBackend` (type `actualBackendRow`: Backend,
 ObjectCount, StorageFmt, StorageTB) in a separate "Storage by Backend (Actual)" card.
-Hidden when `object_locations` is empty. Complements the estimated ByBackend table.
+Hidden when nothing is stored. Complements the estimated ByBackend table.
 
 Template: `templates/admin/costs.html`. Nil-DB and empty-state both render 200
 with $0.00 zero-state.

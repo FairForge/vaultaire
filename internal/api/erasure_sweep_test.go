@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/account"
+	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/testutil"
@@ -494,8 +495,7 @@ func TestErasureSweep_AnOpenBreakerDefersWithoutAskingTheBackend(t *testing.T) {
 	onLocal := f.onLocal(f.primary, T, f.bucket, "orphan")
 	f.fixed.failGet.Store(true)
 	for i := 0; i < 10 && f.eng.GetFailoverStatus()["fixed"] != "open"; i++ {
-		f.eng.HintBackend("c", "probe", "fixed")
-		_, _ = f.eng.Get(context.Background(), "c", "probe")
+		_, _ = f.eng.Get(engine.WithRecordedBackend(common.WithTenantID(context.Background(), "probe-tenant"), "fixed"), "c", "probe")
 	}
 	require.Equal(t, "open", f.eng.GetFailoverStatus()["fixed"], "fixture: the breaker must be open")
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"github.com/FairForge/vaultaire/internal/tenant"
 	"html/template"
 	"math"
 	"net/http"
@@ -139,6 +140,13 @@ func populateStorageUsage(ctx context.Context, db *sql.DB, tenantID string, data
 
 	data["StorageUsedFmt"] = formatBytes(used)
 	data["StorageLimitFmt"] = formatBytes(limit)
+	// The part of "used" that is multipart uploads in progress: their parts
+	// are reserved as they arrive (WP-R10-8 Part C).
+	var uploads int64
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(SUM(reserved_bytes), 0) FROM multipart_uploads
+		WHERE tenant_id = $1 AND status = 'active'`, tenantID).Scan(&uploads); err == nil && uploads > 0 {
+		data["StorageUploadsFmt"] = formatBytes(uploads)
+	}
 	data["StoragePercent"] = pct
 	data["StorageBarClass"] = barClass
 	data["Tier"] = tier
@@ -252,13 +260,17 @@ func populateCounts(ctx context.Context, db *sql.DB, tenantID, userID string, da
 	data["APIKeyCount"] = apiKeyCount
 }
 
+// populateActivity lists the tenant's five most recent writes from the head
+// rows (what is true now: the object, its size, when it was written). It
+// read quota_usage_events, whose only rows were keyless 'RESERVE'
+// reservations (R10-25, WP-R10-8 Part D). The system bucket is never shown.
 func populateActivity(ctx context.Context, db *sql.DB, tenantID string, data map[string]any) {
 	rows, err := db.QueryContext(ctx,
-		`SELECT operation, object_key, bytes_delta, timestamp
-		 FROM quota_usage_events
-		 WHERE tenant_id = $1
-		 ORDER BY timestamp DESC
-		 LIMIT 5`, tenantID)
+		`SELECT bucket, object_key, size_bytes, updated_at
+		 FROM object_head_cache
+		 WHERE tenant_id = $1 AND bucket <> $2
+		 ORDER BY updated_at DESC
+		 LIMIT 5`, tenantID, tenant.ExportsBucket)
 	if err != nil {
 		data["Activity"] = nil
 		return
@@ -267,33 +279,23 @@ func populateActivity(ctx context.Context, db *sql.DB, tenantID string, data map
 
 	var activity []ActivityRow
 	for rows.Next() {
-		var op, key string
-		var delta int64
+		var bucket, key string
+		var size int64
 		var ts time.Time
-		if err := rows.Scan(&op, &key, &delta, &ts); err != nil {
+		if err := rows.Scan(&bucket, &key, &size, &ts); err != nil {
 			continue
 		}
-
-		badge := "default"
-		switch op {
-		case "PUT", "RESERVE":
-			badge = "success"
-		case "DELETE":
-			badge = "danger"
-		}
-
 		// Truncate long keys for display.
-		displayKey := key
+		displayKey := bucket + "/" + key
 		if len(displayKey) > 60 {
 			displayKey = displayKey[:57] + "..."
 		}
-
 		activity = append(activity, ActivityRow{
-			Operation:  op,
+			Operation:  "Upload",
 			ObjectKey:  displayKey,
-			SizeFmt:    formatBytes(absInt64(delta)),
+			SizeFmt:    formatBytes(size),
 			TimeFmt:    relativeTime(ts),
-			BadgeClass: badge,
+			BadgeClass: "success",
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -319,11 +321,21 @@ const (
 	carbonFactorKgPerKWh        = 0.4
 )
 
+// tenantBytesByBackendSQL: where a tenant's bytes are, from the tables of
+// record (WP-R6-1: object_locations is no longer written) — whole objects
+// on their head row's backend, chunked objects on each chunk's backend.
+const tenantBytesByBackendSQL = `
+	SELECT backend, COALESCE(SUM(size_bytes), 0)::BIGINT FROM (
+		SELECT backend_name AS backend, size_bytes FROM object_head_cache
+		 WHERE tenant_id = $1 AND NOT is_chunked AND COALESCE(backend_name, '') <> ''
+		UNION ALL
+		SELECT g.backend_id, g.size_bytes FROM tenant_chunk_refs r
+		  JOIN global_content_index g ON g.dedup_scope = r.dedup_scope AND g.plaintext_hash = r.plaintext_hash
+		 WHERE r.tenant_id = $1
+	) b GROUP BY backend`
+
 func populateCarbonBadge(ctx context.Context, db *sql.DB, tenantID string, data map[string]any) {
-	rows, err := db.QueryContext(ctx,
-		`SELECT backend_name, COALESCE(SUM(size_bytes), 0)
-		 FROM object_locations WHERE tenant_id = $1
-		 GROUP BY backend_name`, tenantID)
+	rows, err := db.QueryContext(ctx, tenantBytesByBackendSQL, tenantID)
 	if err != nil {
 		return
 	}

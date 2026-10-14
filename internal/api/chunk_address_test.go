@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/google/uuid"
@@ -461,15 +460,22 @@ func TestChunkWrite_OnlyAtTheOneAddress(t *testing.T) {
 	body := []byte("chunk")
 
 	for name, ctx := range map[string]context.Context{
-		"a tenant's request":   s3Ctx(context.Background(), f.a),
-		"a job with no tenant": context.Background(),
-		"the legacy context":   engine.LegacyChunkContext(context.Background(), f.a.ID),
+		"a tenant's request": s3Ctx(context.Background(), f.a),
+		"the legacy context": engine.LegacyChunkContext(context.Background(), f.a.ID),
 	} {
 		_, err := f.eng.Put(ctx, chunkContainer, "_chunks/x", bytes.NewReader(body))
 		assert.ErrorIs(t, err, engine.ErrChunkAddress, name)
 		err = f.eng.PutOn(ctx, f.backend, chunkContainer, "_chunks/x", bytes.NewReader(body))
 		assert.ErrorIs(t, err, engine.ErrChunkAddress, name)
 	}
+	// A job with no tenant is refused before that (WP-R6-1 A5): no tenant,
+	// no call.
+	expectNoTenantRefusals(t, func() {
+		_, err := f.eng.Put(context.Background(), chunkContainer, "_chunks/x", bytes.NewReader(body))
+		assert.ErrorIs(t, err, engine.ErrNoTenant)
+		err = f.eng.PutOn(context.Background(), f.backend, chunkContainer, "_chunks/x", bytes.NewReader(body))
+		assert.ErrorIs(t, err, engine.ErrNoTenant)
+	})
 	assert.Empty(t, f.chunkBlobs())
 
 	_, err := f.eng.Put(engine.ChunkContext(context.Background()), chunkContainer, "_chunks/x", bytes.NewReader(body))
@@ -485,12 +491,17 @@ func TestDriverCallWithoutATenant_IsRefusedNotFiledUnderDefault(t *testing.T) {
 	ctx := context.Background() // a job that forgot its tenant
 	container := f.a.NamespaceContainer("test-bucket")
 
-	_, getErr := f.eng.GetOn(ctx, f.backend, container, "k")
-	delErr := f.eng.DeleteOn(ctx, f.backend, container, "k")
-	_, exErr := f.eng.ExistsOn(ctx, f.backend, container, "k")
+	var getErr, delErr, exErr error
+	expectNoTenantRefusals(t, func() {
+		_, getErr = f.eng.GetOn(ctx, f.backend, container, "k")
+		delErr = f.eng.DeleteOn(ctx, f.backend, container, "k")
+		_, exErr = f.eng.ExistsOn(ctx, f.backend, container, "k")
+	})
 
+	// WP-R6-1 A5: the engine refuses it before the driver is asked (the
+	// driver's own refusal, drivers.ErrNoTenant, stays behind it).
 	for _, err := range []error{getErr, delErr, exErr} {
-		require.ErrorIs(t, err, drivers.ErrNoTenant)
+		require.ErrorIs(t, err, engine.ErrNoTenant)
 		assert.ErrorIs(t, err, engine.ErrInvalidInput, "a caller's bug: no charge on the backend's breaker")
 		assert.False(t, isObjectMissingErr(err), "and never a miss — a delete that 'succeeded' on t-default is how GC leaked every blob")
 	}

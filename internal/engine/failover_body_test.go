@@ -120,7 +120,7 @@ func TestEnginePut_SeekableBodyRewindsOnFailover(t *testing.T) {
 	eng.AddDriver("lyve", healthy)
 
 	content := []byte("full chunk body content")
-	backend, err := eng.Put(context.Background(), "bucket", "obj", bytes.NewReader(content))
+	backend, err := eng.Put(tenantCtx(), "bucket", "obj", bytes.NewReader(content))
 
 	require.NoError(t, err, "failover to the healthy backend must succeed")
 	assert.Equal(t, "lyve", backend)
@@ -142,7 +142,7 @@ func TestEnginePut_NonSeekableConsumedBodyFailsInsteadOfTruncating(t *testing.T)
 	eng.AddDriver("quotaless", lax)
 
 	content := []byte("streamed body that cannot be replayed")
-	_, err := eng.Put(context.Background(), "bucket", "obj",
+	_, err := eng.Put(tenantCtx(), "bucket", "obj",
 		&nonSeekable{Reader: bytes.NewReader(content)})
 
 	require.Error(t, err,
@@ -165,7 +165,7 @@ func TestEnginePut_NonSeekableBodyDoesNotChargeHealthyBreakers(t *testing.T) {
 	content := []byte("body long enough to be partially consumed")
 	// Breaker threshold is 5 failures / 60s: drive the flaky primary past it.
 	for i := 0; i < 5; i++ {
-		_, err := eng.Put(context.Background(), "bucket", fmt.Sprintf("obj-%d", i),
+		_, err := eng.Put(tenantCtx(), "bucket", fmt.Sprintf("obj-%d", i),
 			&nonSeekable{Reader: bytes.NewReader(content)},
 			WithContentLength(int64(len(content))))
 		require.Error(t, err)
@@ -191,7 +191,7 @@ func TestEnginePut_NonSeekableUnconsumedBodyStillFailsOver(t *testing.T) {
 	eng.AddDriver("lyve", healthy)
 
 	content := "untouched streamed body"
-	backend, err := eng.Put(context.Background(), "bucket", "obj",
+	backend, err := eng.Put(tenantCtx(), "bucket", "obj",
 		&nonSeekable{Reader: strings.NewReader(content)})
 
 	require.NoError(t, err)

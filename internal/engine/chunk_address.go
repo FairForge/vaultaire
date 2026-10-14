@@ -93,7 +93,10 @@ type KeyAddresser interface {
 // the other backends (what Get's candidate walk does after a miss) can only
 // cost round trips. The verdict is the backend's own: a miss is a miss, an
 // unavailable backend is ErrAllBackendsUnavailable.
-func (e *CoreEngine) on(ctx context.Context, backend string, fn func(d Driver) error) error {
+func (e *CoreEngine) on(ctx context.Context, op, container, artifact, backend string, fn func(d Driver) error) error {
+	if err := e.requireTenant(ctx, op, container, artifact); err != nil {
+		return err
+	}
 	e.mu.RLock()
 	d, ok := e.drivers[backend]
 	e.mu.RUnlock()
@@ -107,7 +110,7 @@ func (e *CoreEngine) on(ctx context.Context, backend string, fn func(d Driver) e
 // GetOn reads an artifact from the named backend only.
 func (e *CoreEngine) GetOn(ctx context.Context, backend, container, artifact string) (io.ReadCloser, error) {
 	var rc io.ReadCloser
-	err := e.on(ctx, backend, func(d Driver) error {
+	err := e.on(ctx, "get", container, artifact, backend, func(d Driver) error {
 		var getErr error
 		rc, getErr = d.Get(ctx, container, artifact)
 		return getErr
@@ -121,19 +124,32 @@ func (e *CoreEngine) GetOn(ctx context.Context, backend, container, artifact str
 // PutOn writes an artifact to the named backend only — no failover: the
 // caller records (or already recorded) that backend as the artifact's home.
 func (e *CoreEngine) PutOn(ctx context.Context, backend, container, artifact string, data io.Reader, opts ...PutOption) error {
+	if err := e.requireTenant(ctx, "put", container, artifact); err != nil {
+		return err
+	}
 	if container == ChunkContainer && common.GetTenantID(ctx) != ChunkAddressTenant {
 		return ErrChunkAddress
 	}
-	err := e.on(ctx, backend, func(d Driver) error { return d.Put(ctx, container, artifact, data, opts...) })
+	// The source's own read failure is the caller's, as in Put: never a
+	// charge on the backend's breaker (Prompt 2b.2 C1).
+	src := &sizeTrackingReader{Reader: data}
+	err := e.on(ctx, "put", container, artifact, backend, func(d Driver) error {
+		perr := d.Put(ctx, container, artifact, src, opts...)
+		if srcErr := src.sourceErr(); perr != nil && srcErr != nil && !errors.Is(perr, ErrCallerAborted) {
+			perr = fmt.Errorf("%w: %w (%w)", ErrCallerAborted, srcErr, perr)
+		}
+		return perr
+	})
 	if err != nil {
 		return fmt.Errorf("put %s/%s on %s: %w", container, artifact, backend, err)
 	}
+	common.SetBackendUsed(ctx, backend)
 	return nil
 }
 
 // DeleteOn deletes an artifact on the named backend only.
 func (e *CoreEngine) DeleteOn(ctx context.Context, backend, container, artifact string) error {
-	err := e.on(ctx, backend, func(d Driver) error { return d.Delete(ctx, container, artifact) })
+	err := e.on(ctx, "delete", container, artifact, backend, func(d Driver) error { return d.Delete(ctx, container, artifact) })
 	if err != nil {
 		return fmt.Errorf("delete %s/%s on %s: %w", container, artifact, backend, err)
 	}
@@ -143,7 +159,7 @@ func (e *CoreEngine) DeleteOn(ctx context.Context, backend, container, artifact 
 // ExistsOn asks the named backend only whether it holds an artifact.
 func (e *CoreEngine) ExistsOn(ctx context.Context, backend, container, artifact string) (bool, error) {
 	var exists bool
-	err := e.on(ctx, backend, func(d Driver) error {
+	err := e.on(ctx, "exists", container, artifact, backend, func(d Driver) error {
 		var exErr error
 		exists, exErr = d.Exists(ctx, container, artifact)
 		return exErr

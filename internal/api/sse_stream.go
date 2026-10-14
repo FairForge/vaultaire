@@ -294,7 +294,7 @@ type readCloser struct {
 // (sealed) bytes: fromParity reports it.
 func (a *S3ToEngine) openSealedGet(ctx context.Context, op blobOpener, tenantID, bucket, key, container, blob, etag string,
 	size, stored int64, floor, backendName string, rng *httpRange) (rc io.ReadCloser, fromParity bool, err error) {
-	sctx := engine.WithExpectedSize(ctx, stored)
+	sctx := engine.WithExpectedSize(engine.WithRecordedBackend(ctx, backendName), stored)
 	req := sealedRead{Size: size}
 	if rng != nil {
 		req.Ranged, req.Off, req.N = true, rng.start, rng.length
@@ -315,12 +315,13 @@ func (a *S3ToEngine) openSealedGet(ctx context.Context, op blobOpener, tenantID,
 	if floor != usage.FloorVault || a.vaultParity == nil || errors.Is(err, engine.ErrArchived) {
 		return nil, false, err
 	}
+	pctx := engine.WithRecordedBackend(ctx, backendName) // shards: no expected size
 	psrc := sealedSource{
 		whole: func() (io.ReadCloser, error) {
-			return a.vaultParity.Open(ctx, tenantID, bucket, key, blob, etag, stored, 0, stored)
+			return a.vaultParity.Open(pctx, tenantID, bucket, key, blob, etag, stored, 0, stored)
 		},
 		ranged: func(off, n int64) (io.ReadCloser, error) {
-			return a.vaultParity.Open(ctx, tenantID, bucket, key, blob, etag, stored, off, n)
+			return a.vaultParity.Open(pctx, tenantID, bucket, key, blob, etag, stored, off, n)
 		},
 	}
 	prc, perr := openSealed(ctx, op, psrc, req)

@@ -53,6 +53,8 @@ type chunkedWrite struct {
 	// InTx, when set, runs inside the install's transaction after the head
 	// row (a Complete marks its upload completed there).
 	InTx func(ctx context.Context, tx *sql.Tx) error
+	// Bill is settled inside the install's transaction (WP-R10-8).
+	Bill *writeBill
 }
 
 // chunkedResult is what a chunked write stored.
@@ -267,7 +269,7 @@ func (a *S3ToEngine) storeChunkedObject(ctx context.Context, cw chunkedWrite) (c
 	// the retained bytes it replaces exactly as a whole write does.
 	attrs := cw.Attrs
 	attrs.ContentType = contentType
-	flip, dbErr := commitBlobWrite(ictx, a.db, nil, blobWrite{TenantID: cw.TenantID, Bucket: cw.Bucket, Key: cw.Key,
+	flip, dbErr := commitBlobWrite(ictx, a.db, nil, blobWrite{TenantID: cw.TenantID, Bucket: cw.Bucket, Key: cw.Key, Bill: cw.Bill,
 		Version: &versionWrite{Size: measuredSize, ETag: etag, ContentType: contentType},
 		Upsert: func(tx *sql.Tx) error {
 			if metaErr := a.gci.ReplaceObjectManifestTx(ictx, tx, cw.TenantID, cw.Bucket, cw.Key, newRefs, &crypto.ObjectMeta{

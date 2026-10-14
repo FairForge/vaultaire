@@ -105,8 +105,7 @@ func TestEngine_ASyncPutWithTheBreakerOpenNeverLandsOnThePrimary(t *testing.T) {
 	fleetFailing(t, m, down)
 	for i := 0; syncBreaker(e) != "open" && i < 20; i++ {
 		a := keyOnBridge(ctx, t, m, "c", fmt.Sprintf("trip%d-", i), i%5)
-		e.HintBackend("c", a, "sync")
-		_, _ = e.Get(ctx, "c", a)
+		_, _ = e.Get(engine.WithRecordedBackend(ctx, "sync"), "c", a)
 	}
 	require.Equal(t, "open", syncBreaker(e))
 
@@ -137,12 +136,11 @@ func TestEngine_ASyncReadNeverServesAnotherBackendsCopy(t *testing.T) {
 			fleetFailing(t, m, down)
 
 			// Act. Before (eb79aaf): 200 with "OLD".
-			e.HintBackend("c", a, "sync")
 			var rc io.ReadCloser
 			if ranged {
-				rc, err = e.GetRange(ctx, "c", a, 0, 3)
+				rc, err = e.GetRange(engine.WithRecordedBackend(ctx, "sync"), "c", a, 0, 3)
 			} else {
-				rc, err = e.Get(ctx, "c", a)
+				rc, err = e.Get(engine.WithRecordedBackend(ctx, "sync"), "c", a)
 			}
 
 			// Assert
@@ -169,7 +167,7 @@ func TestEngine_ASyncDeleteNeverFallsOverToThePrimary(t *testing.T) {
 	fleetFailing(t, m, down)
 
 	// Act
-	err = e.Delete(ctx, "c", a)
+	err = e.Delete(engine.WithRecordedBackend(ctx, "sync"), "c", a)
 
 	// Assert
 	assert.ErrorIs(t, err, engine.ErrAllBackendsUnavailable)

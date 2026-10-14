@@ -426,7 +426,10 @@ func TestDeleteOfDemotedObject_BatchDeleteRemovesBothCopiesAtOnce(t *testing.T) 
 	assert.True(t, closed)
 }
 
-func TestDeleteOfDemotedObject_HotDeleteFailureIsRetriedByTheReclaim(t *testing.T) {
+// WP-R6-1 A3: the DELETE attempts the hot copy itself (a known copy), and
+// a copy it cannot remove is the DELETE's failure. Before: 204, the object
+// gone for the customer while its hot copy stayed, owed by the reclaim.
+func TestDeleteOfDemotedObject_HotDeleteFailure_IsA503AndTheRetryDeletes(t *testing.T) {
 	// Arrange: the hot backend refuses the delete (a flaky backend).
 	f := setupLedgerFixture(t)
 	hot := &flakyDriver{LocalDriver: drivers.NewLocalDriver(f.hotDir, zap.NewNop())}
@@ -434,20 +437,22 @@ func TestDeleteOfDemotedObject_HotDeleteFailureIsRetriedByTheReclaim(t *testing.
 	f.demoted("b", "k", false)
 	hot.fail.Store(true)
 
-	// Act: the customer's DELETE still succeeds — the object is gone for them.
-	f.del("b", "k")
+	// Act: the DELETE cannot remove every copy: 503, nothing settled.
+	w := httptest.NewRecorder()
+	f.adapter.HandleDelete(w, f.req("DELETE", "/b/k", nil), "b", "k")
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
 
-	// Assert: the ledger stays open, so the copy is still owed.
+	// Assert: the row and the ledger stay, so the client's retry (or the
+	// reclaim) still owes the copy.
 	assert.True(t, f.hotExists("b", "k"))
 	_, closed, _, ok := f.ledger("b", "k")
 	require.True(t, ok)
-	assert.False(t, closed, "a failed delete must leave the ledger open for the reclaim")
+	assert.False(t, closed, "a failed delete must leave the ledger open")
 
-	// The backend is back; the reclaim after the grace removes it.
+	// The backend is back; the client's retry removes both copies and the
+	// aftermath closes the ledger.
 	hot.fail.Store(false)
-	f.runner.now = func() time.Time { return f.now.Add(48 * time.Hour) }
-	_, err := f.runner.RunOnce(context.Background(), false)
-	require.NoError(t, err)
+	f.del("b", "k")
 	assert.False(t, f.hotExists("b", "k"))
 	_, closed, outcome, _ := f.ledger("b", "k")
 	assert.True(t, closed)

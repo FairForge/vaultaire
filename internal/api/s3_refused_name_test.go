@@ -35,6 +35,7 @@ func (d *generatedNameRefusingDriver) Put(_ context.Context, _, _ string, r io.R
 // returns the complete's recorder.
 func completeUploadWith(t *testing.T, s *Server, f *adapterTestFixture, key string) *httptest.ResponseRecorder {
 	t.Helper()
+	requireTestBucket(t, f.db, f.tenantID, "test-bucket")
 	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM multipart_uploads WHERE tenant_id = $1`, f.tenantID) })
 	req := func(method, target, body string) *http.Request {
 		r := httptest.NewRequest(method, target, strings.NewReader(body))
@@ -160,6 +161,7 @@ func TestCompleteMultipartUpload_KeyTheBackendRefusesIs400(t *testing.T) {
 	eng.AddDriver("sync", &nameRefusingDriver{downDriver{name: "sync"}})
 	eng.SetPrimary("sync")
 	s := &Server{engine: eng, db: f.db, logger: zap.NewNop()}
+	requireTestBucket(t, f.db, f.tenantID, "test-bucket")
 	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM multipart_uploads WHERE tenant_id = $1`, f.tenantID) })
 	req := func(method, target, body string) *http.Request {
 		r := httptest.NewRequest(method, target, strings.NewReader(body))
