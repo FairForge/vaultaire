@@ -162,6 +162,10 @@ type headRead struct {
 // commit a write of the key there: PM-6).
 var deleteBeforeRowHook = func(tenantID, bucket, key string) {}
 
+// deleteMarkerWrittenHook runs after a delete marker's transaction (tests
+// commit a write of the key there: PM-6 under versioning).
+var deleteMarkerWrittenHook = func(tenantID, bucket, key string) {}
+
 // settle runs the aftermath for one key whose bytes are gone (or were never
 // there — S3 DELETE is idempotent). It runs detached from the request
 // (postCommit): the backend delete has happened, so neither a client that
@@ -291,6 +295,7 @@ func (d objectDeleteAftermath) deleteBehindMarker(ctx context.Context, tenantID,
 	if err := writeDeleteMarker(ctx, d.db, tenantID, bucket, key, markerID); err != nil {
 		return "", fmt.Errorf("write the delete marker: %w", err)
 	}
+	deleteMarkerWrittenHook(tenantID, bucket, key)
 	// The head-cache row is the billing record (WP-1): DELETE...RETURNING
 	// captures the removed size atomically. An object chunked before
 	// versioning was enabled releases its manifest in the same transaction
