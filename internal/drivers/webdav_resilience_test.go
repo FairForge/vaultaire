@@ -83,6 +83,14 @@ func TestWebDAVDriver_PutStallIsBounded(t *testing.T) {
 }
 
 // A rewindable body is sent again after a stall, and the object is stored.
+// The idle timeout here is 4 s, not davTestIdle: the retry streams 40 MiB
+// into the in-process server, and under -race on a loaded runner the
+// server paused reading for more than 200 ms, so the retry was cut as a
+// second stall and the third attempt met the zero-duration lock
+// x/net/webdav still held for it (423 Locked, the three fast retries
+// spent in 3 ms) — 40/40 with GOMAXPROCS=2 and eight CPU hogs (2/40 at 2 s), one CI
+// run in four from 2026-10-13. The first attempt's stall now takes 4 s to
+// be seen; what is proved is unchanged.
 func TestWebDAVDriver_PutStallRetriesARewindableBody(t *testing.T) {
 	wait, release := hang()
 	var puts atomic.Int32
@@ -95,7 +103,7 @@ func TestWebDAVDriver_PutStallRetriesARewindableBody(t *testing.T) {
 			}
 			h.ServeHTTP(w, r)
 		})
-	}, WithWebDAVIdleTimeout(davTestIdle), fastRetries)
+	}, WithWebDAVIdleTimeout(4*time.Second), fastRetries)
 	t.Cleanup(release)
 
 	const size = 40 << 20
