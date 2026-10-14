@@ -289,24 +289,25 @@ func (d objectDeleteAftermath) deleteBehindMarker(ctx context.Context, tenantID,
 	// Stage 1a Prompt 6 Part 0 — split in two, a PUT committed between the
 	// marker and the row delete lost its head row: GET 404 with its version
 	// the latest).
-	var marked displacedRow
-	var found bool
 	err := writeDeleteMarker(ctx, d.db, tenantID, bucket, key, markerID, func(tx *sql.Tx) error {
-		var err error
-		marked, found, err = deleteHeadRowTx(ctx, tx, manifestReleaser(d.gci), d.quota != nil, tenantID, bucket, key, nil)
-		if err != nil || !found || marked.StorageKey == "" {
-			return err
-		}
 		// The blob the head row named stays while a version keeps it (the
-		// undelete path); one no version names is displaced.
-		if err := retireBlob(ctx, tx, tenantID, bucket, key, marked.StorageKey, marked.Backend, retiredOverwritten); err != nil {
-			if !errors.Is(err, errUnaddressableBlob) {
-				return err
-			}
-			d.logger.Warn("delete marker: the displaced blob is not queued for the collector — the erasure sweep is its only remover",
-				zap.Error(err), zap.String("bucket", bucket), zap.String("object", key), zap.String("storage_key", marked.StorageKey))
-		}
-		return nil
+		// undelete path); one no version names is displaced — queued before
+		// the release, which is the transaction's last statement (WP-R10-8).
+		_, _, err := deleteHeadRowTx(ctx, tx, manifestReleaser(d.gci), d.quota != nil, tenantID, bucket, key, nil,
+			func(row displacedRow) error {
+				if row.StorageKey == "" {
+					return nil
+				}
+				if err := retireBlob(ctx, tx, tenantID, bucket, key, row.StorageKey, row.Backend, retiredOverwritten); err != nil {
+					if !errors.Is(err, errUnaddressableBlob) {
+						return err
+					}
+					d.logger.Warn("delete marker: the displaced blob is not queued for the collector — the erasure sweep is its only remover",
+						zap.Error(err), zap.String("bucket", bucket), zap.String("object", key), zap.String("storage_key", row.StorageKey))
+				}
+				return nil
+			})
+		return err
 	})
 	if err != nil {
 		return "", fmt.Errorf("write the delete marker: %w", err)

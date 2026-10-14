@@ -135,6 +135,14 @@ func (m *QuotaManager) ClearHouse(ctx context.Context, tenantID string) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// The total first, as every writer takes it (ledger_tx.go): deleting the
+	// floor rows first deadlocked against a write committing meanwhile — it
+	// held the total and waited for the floor this held (Stage 1a Prompt 7,
+	// Part 0; staged: 40P01).
+	if _, err := tx.ExecContext(ctx,
+		`SELECT 1 FROM tenant_quotas WHERE tenant_id = $1 FOR UPDATE`, tenantID); err != nil {
+		return fmt.Errorf("clear house for tenant %s: lock: %w", tenantID, err)
+	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM tenant_floor_quotas WHERE tenant_id = $1`, tenantID); err != nil {
 		return fmt.Errorf("clear house for tenant %s: floors: %w", tenantID, err)
@@ -247,8 +255,10 @@ func ReserveTx(ctx context.Context, tx *sql.Tx, tenantID, floor string, bytes in
 	}
 
 	// The floor ledger, when the tenant has one. The total row lock above
-	// serialises every floor write for the tenant, so the floor read is
-	// consistent without its own FOR UPDATE.
+	// serialises every floor write for the tenant (every path locks a floor
+	// row only while it holds the total — ledger_tx.go, asserted by
+	// TestLedger_LockOrder_*), so the floor read is consistent without its
+	// own FOR UPDATE.
 	var floorRows int
 	if err := tx.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM tenant_floor_quotas WHERE tenant_id = $1`, tenantID).Scan(&floorRows); err != nil {

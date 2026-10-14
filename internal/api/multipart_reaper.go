@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/lib/pq"
 	"go.uber.org/zap"
 )
 
@@ -39,7 +40,17 @@ type MultipartReaper struct {
 type MultipartReapResult struct {
 	Aborted int `json:"aborted"`
 	Purged  int `json:"purged"`
+	// OrphanDirs: staging directories removed because no row names their
+	// upload (sweepOrphanStaging).
+	OrphanDirs int `json:"orphan_dirs"`
 }
+
+// orphanStagingGrace is how old a staging directory with no upload row must
+// be before the reaper removes it. A directory is created by UploadPart,
+// after its upload's row exists, so one with no row is never a live
+// upload's; the grace only spares a directory a request is creating right
+// now for an upload whose row another request is deleting.
+const orphanStagingGrace = time.Hour
 
 func NewMultipartReaper(db *sql.DB, logger *zap.Logger) *MultipartReaper {
 	if db == nil {
@@ -65,7 +76,7 @@ func (m *MultipartReaper) spec() jobSpec {
 		Name: multipartReaperJobName, Every: time.Hour, BootDelay: 10 * time.Second, MaxRunTime: 30 * time.Minute,
 		Run: func(ctx context.Context) (jobReport, error) {
 			result, err := m.RunOnce(ctx)
-			return jobReport{Rows: int64(result.Aborted + result.Purged)}, err
+			return jobReport{Rows: int64(result.Aborted + result.Purged + result.OrphanDirs)}, err
 		},
 	}
 }
@@ -86,7 +97,74 @@ func (m *MultipartReaper) RunOnce(ctx context.Context) (MultipartReapResult, err
 	}
 	result.Purged = purged
 
+	orphans, err := m.sweepOrphanStaging(ctx)
+	if err != nil {
+		return result, fmt.Errorf("sweep orphan staging: %w", err)
+	}
+	result.OrphanDirs = orphans
+
 	return result, nil
+}
+
+// sweepOrphanStaging removes the staging directories whose upload has no
+// row (Stage 1a Prompt 7, Part 0). The account erasure deletes an upload's
+// row with the account: an upload created after its abort pass and before
+// EraseRows — the customer's client still running — left its staged parts,
+// plaintext, on the staging disk until a reboot, because the passes above
+// only remove the directories of rows they read.
+func (m *MultipartReaper) sweepOrphanStaging(ctx context.Context) (int, error) {
+	entries, err := os.ReadDir(multipartTempBase)
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("list %s: %w", multipartTempBase, err)
+	}
+	cutoff := time.Now().Add(-orphanStagingGrace)
+	var ids []string
+	for _, e := range entries {
+		if !e.IsDir() || !validUploadID(e.Name()) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		ids = append(ids, e.Name())
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	rows, err := m.db.QueryContext(ctx, `SELECT upload_id FROM multipart_uploads WHERE upload_id = ANY($1)`, pq.Array(ids))
+	if err != nil {
+		return 0, fmt.Errorf("read upload rows: %w", err)
+	}
+	known := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("scan upload row: %w", err)
+		}
+		known[id] = true
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("read upload rows: %w", err)
+	}
+	removed := 0
+	for _, id := range ids {
+		if known[id] {
+			continue
+		}
+		if err := os.RemoveAll(multipartDir(id)); err != nil {
+			m.logger.Warn("remove orphan staging dir", zap.String("upload_id", id), zap.Error(err))
+			continue
+		}
+		removed++
+		m.logger.Info("removed a staging directory whose upload has no row", zap.String("upload_id", id))
+	}
+	return removed, nil
 }
 
 func (m *MultipartReaper) abortAbandoned(ctx context.Context) (int, error) {

@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -121,6 +122,11 @@ var Deleted = []Rule{
 
 	// --- quota ledgers (children of tenant_quotas first; they cascade too) ---
 	{"quota_usage_events", `DELETE FROM quota_usage_events WHERE tenant_id = $1`, ByTenant},
+	// The total before its floors, as every writer locks them
+	// (usage/ledger_tx.go): a write committing during the erase holds the
+	// total and then updates its floor, so deleting the floors first
+	// deadlocked against it (Stage 1a Prompt 7, Part 0; staged: 40P01).
+	{"tenant_quotas", `SELECT 1 FROM tenant_quotas WHERE tenant_id = $1 FOR UPDATE`, ByTenant}, // a lock, not counted
 	{"tenant_floor_quotas", `DELETE FROM tenant_floor_quotas WHERE tenant_id = $1`, ByTenant},
 	{"grace_periods", `DELETE FROM grace_periods WHERE tenant_id = $1`, ByTenant},
 	{"upgrade_suggestions", `DELETE FROM upgrade_suggestions WHERE tenant_id = $1`, ByTenant},
@@ -309,6 +315,9 @@ func (s *Service) EraseRows(ctx context.Context, userID, tenantID, email string,
 		out, err := tx.ExecContext(ctx, r.SQL, args...)
 		if err != nil {
 			return res, fmt.Errorf("erase %s: %w", r.Table, err)
+		}
+		if strings.HasPrefix(r.SQL, "SELECT") {
+			continue // a lock (FOR UPDATE): erases nothing
 		}
 		n, _ := out.RowsAffected()
 		res.Rows[r.Table] += n

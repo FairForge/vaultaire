@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -49,21 +50,40 @@ func (r *trickle) Read(p []byte) (int, error) {
 
 func TestMultiWebDAV_ASlowClientNeverRunsOutThePutDeadlineOrChargesTheBridge(t *testing.T) {
 	// Arrange: a 9 MiB body (above the in-memory retry buffer: streamed
-	// once) arriving in 1 MiB pieces 60 ms apart (~0.55 s) against a PUT
-	// deadline of 150 ms. Before: the deadline ran out while the driver
-	// waited for the client, the PUT failed (ErrNoFailover, a timeout) and
-	// the bridge was charged — three such uploads opened its breaker.
+	// once) arriving in 3 MiB pieces 1.5 s apart (4.5 s of waiting for the
+	// client) against a PUT deadline of 2 s. Before: the deadline ran out
+	// while the driver waited for the client, the PUT failed (ErrNoFailover,
+	// a timeout) and the bridge was charged — three such uploads opened its
+	// breaker.
+	//
+	// The deadline still runs while the transport and the bridge move the
+	// bytes. That time is ~15 ms on a laptop and reached 150 ms (this
+	// test's old deadline) on a loaded 2-vCPU CI runner under -race (4
+	// queue runs, 2026-10-13/14), and more than 1 s in a 2-CPU container
+	// with 16 CPU burners; so the deadline is 2 s and the client's waiting
+	// stays more than twice it. The three uploads run at once on three keys
+	// of the same bridge (the test lasts one upload).
 	bs := newBridges(t, 2, true, nil)
-	m := newMulti(t, bs, func(c *WebDAVConfig) { c.StripeMin = -1 }, WithWebDAVPutTimeout(150*time.Millisecond))
+	m := newMulti(t, bs, func(c *WebDAVConfig) { c.StripeMin = -1 }, WithWebDAVPutTimeout(2*time.Second))
 	ctx := davCtx("tenant-a")
-	a := keyOnBridge(ctx, t, m, "c", "slow", 0)
 	const size = 9 << 20
+	keys := make([]string, 3)
+	for i := range keys {
+		keys[i] = keyOnBridge(ctx, t, m, "c", fmt.Sprintf("slow%d", i), 0)
+	}
 
 	// Act
-	for i := 0; i < 3; i++ {
-		err := m.Put(ctx, "c", a, &trickle{left: size, chunk: 1 << 20, gap: 60 * time.Millisecond}, engine.WithContentLength(size))
+	errs := make([]error, len(keys))
+	var wg sync.WaitGroup
+	for i, k := range keys {
+		wg.Go(func() {
+			errs[i] = m.Put(ctx, "c", k, &trickle{left: size, chunk: 3 << 20, gap: 1500 * time.Millisecond}, engine.WithContentLength(size))
+		})
+	}
+	wg.Wait()
 
-		// Assert
+	// Assert
+	for i, err := range errs {
 		require.NoError(t, err, "upload %d", i)
 	}
 	assert.Zero(t, m.bridges[0].failures.Load(), "the bridge was never charged")

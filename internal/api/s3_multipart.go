@@ -849,16 +849,22 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 	defer putCancel()
 	body := &cutReader{ctx: r.Context(), r: staged}
 	markCompleted := func(ctx context.Context, tx *sql.Tx) error {
-		// Unconditional on purpose: the upload was active when this request
-		// started and every part was read in full, so a reaper abort that
-		// raced the assembly must not leave a fully written object without
-		// its row; a concurrent complete of the same upload wrote the same
-		// bytes and an identical row (the displaced size it releases is the
-		// size the other request reserved, so the bill stays exact).
-		if _, err := tx.ExecContext(ctx, `
+		// An abort is overridden on purpose: the upload was active when this
+		// request started and every part was read in full, so a reaper abort
+		// that raced the assembly must not leave a fully written object
+		// without its row. A COMPLETED upload is not: a concurrent Complete
+		// of the same upload (a client retrying a long one) committed first,
+		// and a second commit wrote a second version row naming the same
+		// blob — billed twice once the key was overwritten (Stage 1a Prompt
+		// 7, Part 0). This one rolls back and answers as a replay.
+		res, err := tx.ExecContext(ctx, `
 			UPDATE multipart_uploads SET status = 'completed'
-			WHERE upload_id = $1 AND tenant_id = $2`, uploadID, t.ID); err != nil {
+			WHERE upload_id = $1 AND tenant_id = $2 AND status <> 'completed'`, uploadID, t.ID)
+		if err != nil {
 			return fmt.Errorf("mark upload completed: %w", err)
+		}
+		if n, err := res.RowsAffected(); err != nil || n == 0 {
+			return errUploadAlreadyCompleted
 		}
 		return nil
 	}
@@ -887,6 +893,10 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 			InTx:          markCompleted,
 			Bill:          bill,
 		})
+		if errors.Is(cErr, errUploadAlreadyCompleted) {
+			s.answerConcurrentComplete(w, r, t.ID, bucket, object, finalETag)
+			return
+		}
 		if cErr != nil {
 			s.writeCompleteStoreError(w, r, cErr, bucket, object, uploadID, tierClass)
 			return
@@ -958,6 +968,12 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 					}
 					return markCompleted(pctx, tx)
 				}})
+			if errors.Is(dbErr, errUploadAlreadyCompleted) {
+				// The other Complete committed this same address: the head
+				// row names the blob, nothing to queue.
+				s.answerConcurrentComplete(w, r, t.ID, bucket, object, finalETag)
+				return
+			}
 			if dbErr != nil {
 				// The assembled blob is an orphan while no row names it. Queued
 				// for the collector, which keeps it while the upload is active
@@ -1023,6 +1039,29 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 // writeCompleteStoreError answers a Complete whose bytes could not be stored
 // (whole or chunked): nothing was committed and the upload keeps holding its
 // parts (WP-R10-8 Part C) for the retry, Abort or the reaper.
+// errUploadAlreadyCompleted: a Complete whose commit found its upload
+// completed by a concurrent Complete — rolled back, nothing written.
+var errUploadAlreadyCompleted = errors.New("multipart upload completed by a concurrent request")
+
+// answerConcurrentComplete answers a Complete that lost to a concurrent
+// Complete of the same upload: the result again when the object is the one
+// this request's part list makes (as a replay of a completed upload is
+// answered), NoSuchUpload otherwise (the other request completed other
+// parts).
+func (s *Server) answerConcurrentComplete(w http.ResponseWriter, r *http.Request, tenantID, bucket, object, finalETag string) {
+	var current string
+	if err := s.db.QueryRowContext(r.Context(), `SELECT etag FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+		tenantID, bucket, object).Scan(&current); err != nil || strings.Trim(current, "\"") != strings.Trim(finalETag, "\"") {
+		WriteS3Error(w, ErrNoSuchUpload, r.URL.Path, generateRequestID())
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml")
+	w.Header().Set("ETag", finalETag)
+	_ = xml.NewEncoder(w).Encode(CompleteMultipartUploadResult{
+		Location: fmt.Sprintf("http://%s/%s/%s", r.Host, bucket, object), Bucket: bucket, Key: object, ETag: finalETag,
+	})
+}
+
 func (s *Server) writeCompleteStoreError(w http.ResponseWriter, r *http.Request, err error, bucket, object, uploadID, tierClass string) {
 	switch {
 	case errors.Is(err, errRegionDriverUnavailable):

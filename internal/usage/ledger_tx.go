@@ -8,14 +8,17 @@
 // client between the row change and a separate quota statement used to
 // leave the bytes counted (or uncounted) until reconcile.
 //
-// Lock order (every path, asserted by TestLedger_LockOrder_*): the key's
+// Lock order (every path; TestLedger_LockOrder_* in this package stage the
+// deadlocks and walk every statement of the repository): the key's
 // advisory lock (lockHeadKey) → the head row (FOR UPDATE) → the key's
 // version lock and rows → the upload row (multipart_uploads, FOR UPDATE)
 // → tenant_quotas → tenant_floor_quotas (standard, then vault). The ledger
 // statements are the LAST of the transaction: the tenant's quota row is
 // held from its UPDATE to COMMIT only, and nothing that holds it waits for
 // a key, row or upload lock — the reservation (CheckAndReserveFloor), the
-// reconcile and SetHouse take the quota rows alone, in the same order.
+// reconcile, SetHouse, ClearHouse and the account erasure take the quota
+// rows alone, in the same order. A tenant_floor_quotas row is locked only
+// while the tenant's tenant_quotas row is held.
 package usage
 
 import (
@@ -61,11 +64,20 @@ func ApplyLedgerTx(ctx context.Context, tx *sql.Tx, tenantID string, c LedgerCha
 	if c.Zero() {
 		return nil
 	}
-	// The total's row is locked only when the total moves: a new key whose
-	// reservation equals its size changes no ledger, and a floor-only change
-	// (a write whose reservation predates a floor row SetHouse created)
-	// touches the floor row alone — the quota row is the tenant's one hot
-	// row, and every commit of the tenant would otherwise queue on it.
+	// The total's row is UPDATEd only when the total moves: a new key whose
+	// reservation equals its size changes no ledger at all and takes no
+	// lock — the quota row is the tenant's one hot row, and every commit of
+	// the tenant would otherwise queue on it. A floor-only change (a write
+	// whose reservation predates a floor row SetHouse created, a part held
+	// on another floor) still LOCKS it first: a floor row is locked only by
+	// a transaction holding the total, or two floors locked in either order
+	// deadlock against the reconcile or ClearHouse (Stage 1a Prompt 7,
+	// Part 0).
+	if c.Total == 0 {
+		if _, err := tx.ExecContext(ctx, `SELECT 1 FROM tenant_quotas WHERE tenant_id = $1 FOR UPDATE`, tenantID); err != nil {
+			return fmt.Errorf("ledger: lock tenant %s: %w", tenantID, err)
+		}
+	}
 	if c.Total != 0 {
 		var used, limit int64
 		err := tx.QueryRowContext(ctx, `
