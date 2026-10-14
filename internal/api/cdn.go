@@ -240,7 +240,7 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 	var reader io.ReadCloser
 	if isChunked {
 		var cr *chunkedObjectReader
-		if cr, err = s.readAdapter().openChunkedObject(ctx, tenantID, bucket, key, sizeBytes); err == nil {
+		if cr, err = s.readAdapter().openChunkedObject(ctx, tenantID, bucket, key, storageKey, sizeBytes); err == nil { // the head row's manifest (WP-VM-1)
 			reader = cr
 		}
 	} else if sealed {

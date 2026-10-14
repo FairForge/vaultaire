@@ -263,7 +263,7 @@ func (s *Server) handleMgmtCompleteDirectUpload(w http.ResponseWriter, r *http.R
 		}
 	}
 	etag = strings.Trim(etag, `"`)
-	_, err = commitBlobWrite(ctx, s.db, nil, blobWrite{TenantID: tenantID, Bucket: bucket, Key: req.Key, Bill: bill,
+	_, err = commitBlobWrite(ctx, s.db, blobWrite{TenantID: tenantID, Bucket: bucket, Key: req.Key, Bill: bill,
 		Version: &versionWrite{Size: size, ETag: etag, ContentType: contentType, Backend: "r2", Blob: versionBlobRef{StorageKey: blob}},
 		Upsert: func(tx *sql.Tx) error {
 			return upsertWholeObjectHeadRow(ctx, tx, tenantID, bucket, req.Key, blob, size, etag, "r2", "standard",

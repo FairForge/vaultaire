@@ -48,6 +48,19 @@ type scopedChunk struct {
 	scope, hash, storageKey string
 }
 
+// manifestOf is the SQL expression of the object_key the manifest of a
+// tenant's key is stored under: the address its chunked head row names
+// (WP-VM-1), the key itself for a row written before 092 — or when the key
+// has no chunked head row any more. tenant and key are SQL expressions ($1,
+// 'a.bin').
+func manifestOf(tenant, key string) string {
+	return fmt.Sprintf(`COALESCE((SELECT COALESCE(h.storage_key, h.object_key) FROM object_head_cache h
+	WHERE h.tenant_id = (%s)::text AND h.object_key = %s AND h.is_chunked LIMIT 1), %s)`, tenant, key, key)
+}
+
+// manifestOfKeySQL is manifestOf for tenant $1 and key $2.
+var manifestOfKeySQL = manifestOf("$1", "$2")
+
 func tenantChunks(t *testing.T, db *sql.DB, tenantID, key string) []scopedChunk {
 	t.Helper()
 	rows, err := db.Query(`
@@ -55,7 +68,7 @@ func tenantChunks(t *testing.T, db *sql.DB, tenantID, key string) []scopedChunk 
 		FROM tenant_chunk_refs r
 		JOIN global_content_index g
 		  ON g.dedup_scope = r.dedup_scope AND g.plaintext_hash = r.plaintext_hash
-		WHERE r.tenant_id::text = $1 AND r.object_key = $2`, tenantID, key)
+		WHERE r.tenant_id::text = $1 AND r.object_key = `+manifestOfKeySQL, tenantID, key)
 	require.NoError(t, err)
 	defer func() { _ = rows.Close() }()
 	var out []scopedChunk
@@ -75,6 +88,8 @@ func deleteChunkedObject(t *testing.T, f *adapterTestFixture, key string) {
 	w := httptest.NewRecorder()
 	f.adapter.HandleDelete(w, req, "test-bucket", key)
 	require.Equal(t, http.StatusNoContent, w.Code)
+	// Retired, then released by the collector after the grace (WP-VM-1).
+	releaseRetiredManifests(t, f.db, f.eng, f.adapter.gci, f.tenantID)
 }
 
 func getChunkedObject(t *testing.T, f *adapterTestFixture, key string) *httptest.ResponseRecorder {

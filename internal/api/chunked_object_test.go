@@ -44,7 +44,7 @@ func TestChunkedPut_RecordsTheChunkerIdentity(t *testing.T) {
 
 	// Assert: the record says what cut the chunks — and it is the default
 	// chunker, the only one the product has ever had.
-	meta, err := f.adapter.gci.GetObjectMetadata(context.Background(), f.a.ID, "test-bucket", "a.bin")
+	meta, err := f.adapter.gci.GetObjectMetadata(context.Background(), f.a.ID, "test-bucket", manifestKeyOf(t, f.db, f.a.ID, "test-bucket", "a.bin"))
 	require.NoError(t, err)
 	require.NotNil(t, meta)
 	require.NotNil(t, meta.PipelineConfig, "pipeline_config was NULL on every chunked object before WP-R8-4")
@@ -57,7 +57,7 @@ func TestChunkedPut_RecordsTheChunkerIdentity(t *testing.T) {
 
 	// The raw column is JSON a human can read.
 	var raw string
-	require.NoError(t, f.db.QueryRow(`SELECT pipeline_config::text FROM object_metadata WHERE tenant_id = $1 AND bucket_name = 'test-bucket' AND object_key = 'a.bin'`, f.a.ID).Scan(&raw))
+	require.NoError(t, f.db.QueryRow(`SELECT pipeline_config::text FROM object_metadata WHERE tenant_id = $1 AND bucket_name = 'test-bucket' AND object_key = `+manifestOf("$1", "'a.bin'")+``, f.a.ID).Scan(&raw))
 	assert.Contains(t, raw, `"library": "github.com/restic/chunker"`)
 	assert.Contains(t, raw, `"version": "v0.4.0"`)
 	assert.Contains(t, raw, `"polynomial": "0x2ADD89E3B790BB"`)
@@ -70,7 +70,7 @@ func TestChunkedCopy_CarriesTheSourcesChunkerIdentity(t *testing.T) {
 
 	require.Equal(t, 200, f.copyObject(t, "src.bin", "dest-bucket", "copy.bin").Code)
 
-	meta, err := f.server.gci.GetObjectMetadata(context.Background(), f.tenantID, "dest-bucket", "copy.bin")
+	meta, err := f.server.gci.GetObjectMetadata(context.Background(), f.tenantID, "dest-bucket", manifestKeyOf(t, f.db, f.tenantID, "dest-bucket", "copy.bin"))
 	require.NoError(t, err)
 	require.NotNil(t, meta)
 	require.NotNil(t, meta.PipelineConfig)

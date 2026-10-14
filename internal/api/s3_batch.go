@@ -251,15 +251,16 @@ func (s *Server) deleteObjects(w http.ResponseWriter, r *http.Request, req *S3Re
 }
 
 // batchDeleteEntry deletes one entry of a DeleteObjects batch: on a
-// versioned bucket through DELETE's versioned flavours (a version id, or a
-// marker on an Enabled bucket — object_delete_shared.go, the same code the
-// single DELETE runs), otherwise batchDeleteKey. item is the entry's
+// versioned bucket through DELETE's versioned flavours (a version id, a
+// marker on an Enabled bucket, the null marker on a Suspended one —
+// object_delete_shared.go, the same code the single DELETE runs), otherwise
+// batchDeleteKey. item is the entry's
 // Deleted element, filled in on success.
 func (s *Server) batchDeleteEntry(r *http.Request, t *tenant.Tenant, bucket, container string, id DeleteRequestKey,
 	vStatus string, aftermath objectDeleteAftermath, item *DeletedItem) *DeleteError {
 	versioned := s.db != nil && (vStatus == "Enabled" || vStatus == "Suspended")
 	byVersion := versioned && id.VersionID != "" && !isUnanchoredNullVersion(r.Context(), s.db, t.ID, bucket, id.Key, id.VersionID)
-	marker := versioned && vStatus == "Enabled" && id.VersionID == ""
+	marker := versioned && id.VersionID == "" // Enabled: a new marker; Suspended: the null marker (R61-5)
 	if id.Key == "" || (!byVersion && !marker) {
 		return s.batchDeleteKey(r, t, bucket, container, id.Key, aftermath)
 	}
@@ -282,6 +283,16 @@ func (s *Server) batchDeleteEntry(r *http.Request, t *tenant.Tenant, bucket, con
 		if !found {
 			return &DeleteError{Key: id.Key, Code: ErrNoSuchVersion, Message: errorMessages[ErrNoSuchVersion]}
 		}
+	} else if vStatus == "Suspended" {
+		gone, err := aftermath.deleteSuspended(ctx, t.ID, bucket, id.Key)
+		if err != nil {
+			s.logger.Error("batch delete: null delete marker failed", zap.Error(err), zap.String("key", id.Key))
+			return &DeleteError{Key: id.Key, Code: ErrInternalError, Message: "Internal error while deleting"}
+		}
+		if gone {
+			aftermath.afterObjectGone(ctx, t.ID, bucket, id.Key)
+		}
+		item.DeleteMarker, item.DeleteMarkerVersionID = true, "null"
 	} else {
 		markerID, err := aftermath.deleteBehindMarker(ctx, t.ID, bucket, id.Key)
 		if err != nil {

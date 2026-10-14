@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/common"
+	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
@@ -18,7 +19,14 @@ import (
 // 10 min): whole-object blobs that a write displaced, a version delete
 // released, or a write that failed after its bytes landed left behind
 // (retired_blobs, 086) are deleted once their grace has passed — modelled on
-// key_reencrypt's retired_chunk_blobs pass.
+// key_reencrypt's retired_chunk_blobs pass. Since WP-VM-1 it releases
+// retired MANIFESTS too (rows on the 'chunked' sentinel): the manifest's
+// rows are deleted and its chunks' content-index counts decremented, in one
+// transaction under the key's lock, after the same re-check; dedup GC then
+// reclaims a chunk no manifest references, as before. Its orphan pass finds
+// an addressed manifest no row names and no retired row queues (the
+// previous build's overwrite or delete in the two-slot window releases by
+// key and so misses it) and queues it.
 //
 // It is the ONLY path that deletes a displaced whole-object blob, and it
 // never trusts the row that queued it: under the key's head-row advisory
@@ -60,10 +68,12 @@ func init() {
 	}
 }
 
-// RetiredBlobCollector deletes retired whole-object blobs after their grace.
+// RetiredBlobCollector deletes retired whole-object blobs after their grace,
+// and releases retired manifests (WP-VM-1).
 type RetiredBlobCollector struct {
 	db     *sql.DB
 	eng    engine.Engine
+	gci    *crypto.GlobalContentIndex // nil: manifest rows wait (skipped)
 	logger *zap.Logger
 	// JobName is the job_runs name (tests use their own: the table is shared).
 	JobName string
@@ -87,15 +97,18 @@ type RetiredBlobsResult struct {
 	// breaker open).
 	SkippedBackends []string `json:"skipped_backends,omitempty"`
 	Errors          []string `json:"errors,omitempty"`
+	// OrphanManifests: addressed manifests no row names, queued this run
+	// (released by a later run, after the re-check).
+	OrphanManifests int `json:"orphan_manifests,omitempty"`
 }
 
 // NewRetiredBlobCollector builds the collector; nil without a database or
 // an engine.
-func NewRetiredBlobCollector(db *sql.DB, eng engine.Engine, logger *zap.Logger) *RetiredBlobCollector {
+func NewRetiredBlobCollector(db *sql.DB, eng engine.Engine, gci *crypto.GlobalContentIndex, logger *zap.Logger) *RetiredBlobCollector {
 	if db == nil || eng == nil {
 		return nil
 	}
-	return &RetiredBlobCollector{db: db, eng: eng, logger: logger, JobName: retiredBlobsJobName, now: time.Now}
+	return &RetiredBlobCollector{db: db, eng: eng, gci: gci, logger: logger, JobName: retiredBlobsJobName, now: time.Now}
 }
 
 func (c *RetiredBlobCollector) spec() jobSpec {
@@ -151,6 +164,20 @@ func (c *RetiredBlobCollector) RunOnce(ctx context.Context) (RetiredBlobsResult,
 		if ctx.Err() != nil {
 			return res, nil // the rest waits for the next run
 		}
+		if r.backend == chunkedBackendSentinel {
+			if c.gci == nil {
+				res.Skipped++
+				retiredBlobsTotal.WithLabelValues(retiredOutcomeSkipped).Inc()
+				if !skipped[r.backend] {
+					skipped[r.backend] = true
+					res.SkippedBackends = append(res.SkippedBackends, r.backend)
+				}
+				continue
+			}
+			outcome, err := c.collectManifest(ctx, r)
+			c.count(&res, outcome, r, err)
+			continue
+		}
 		var drv engine.Driver
 		var registered bool
 		if ce != nil {
@@ -167,22 +194,142 @@ func (c *RetiredBlobCollector) RunOnce(ctx context.Context) (RetiredBlobsResult,
 			continue
 		}
 		outcome, err := c.collect(ctx, drv, r)
-		retiredBlobsTotal.WithLabelValues(outcome).Inc()
-		switch outcome {
-		case retiredOutcomeDeleted:
-			res.Deleted++
-		case retiredOutcomeKept:
-			res.Kept++
-		default:
-			res.Failed++
-			if len(res.Errors) < 10 {
-				res.Errors = append(res.Errors, fmt.Sprintf("%s on %s: %v", r.storageKey, r.backend, err))
-			}
-			c.logger.Warn("retired blob not deleted (kept for the next run)", zap.String("backend", r.backend),
-				zap.String("container", r.container), zap.String("storage_key", r.storageKey), zap.Error(err))
+		c.count(&res, outcome, r, err)
+	}
+	if c.gci != nil && ctx.Err() == nil {
+		n, err := c.queueOrphanManifests(ctx)
+		res.OrphanManifests = n
+		if err != nil {
+			res.Errors = append(res.Errors, "orphan manifests: "+err.Error())
+			c.logger.Warn("retired blobs: the orphan-manifest pass failed (next run)", zap.Error(err))
 		}
 	}
 	return res, nil
+}
+
+// count records one row's outcome.
+func (c *RetiredBlobCollector) count(res *RetiredBlobsResult, outcome string, r retiredRow, err error) {
+	retiredBlobsTotal.WithLabelValues(outcome).Inc()
+	switch outcome {
+	case retiredOutcomeDeleted:
+		res.Deleted++
+	case retiredOutcomeKept:
+		res.Kept++
+	default:
+		res.Failed++
+		if len(res.Errors) < 10 {
+			res.Errors = append(res.Errors, fmt.Sprintf("%s on %s: %v", r.storageKey, r.backend, err))
+		}
+		c.logger.Warn("retired blob not deleted (kept for the next run)", zap.String("backend", r.backend),
+			zap.String("container", r.container), zap.String("storage_key", r.storageKey), zap.Error(err))
+	}
+}
+
+// collectManifest releases one retired manifest under the key's head-row
+// lock (every writer's flip holds it): kept, its row dropped, while a head
+// or version row names it; otherwise its rows are deleted and its chunks'
+// counts decremented (DeleteObjectChunksTx) with the retired row, in one
+// transaction. Not a bill: the bytes were released when the last row
+// naming them went (WP-R10-8).
+func (c *RetiredBlobCollector) collectManifest(ctx context.Context, r retiredRow) (string, error) {
+	bucket, ok := strings.CutPrefix(r.container, r.tenantID+"_")
+	if !ok {
+		return retiredOutcomeFailed, fmt.Errorf("container %q is not the tenant's", r.container)
+	}
+	key := retiredBlobKey(r.storageKey)
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return retiredOutcomeFailed, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := lockHeadKey(ctx, tx, r.tenantID, bucket, key); err != nil {
+		return retiredOutcomeFailed, err
+	}
+	named, err := manifestNamedBy(ctx, tx, r.tenantID, bucket, key, r.storageKey)
+	if err != nil {
+		return retiredOutcomeFailed, err
+	}
+	outcome := retiredOutcomeKept
+	if !named {
+		if c.beforeDelete != nil {
+			c.beforeDelete(r.storageKey)
+		}
+		if err := c.gci.DeleteObjectChunksTx(ctx, tx, r.tenantID, bucket, r.storageKey); err != nil {
+			return retiredOutcomeFailed, fmt.Errorf("release manifest: %w", err)
+		}
+		outcome = retiredOutcomeDeleted
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM retired_blobs WHERE backend_id = $1 AND container = $2 AND storage_key = $3`,
+		r.backend, r.container, r.storageKey); err != nil {
+		return retiredOutcomeFailed, err
+	}
+	return outcome, tx.Commit()
+}
+
+// orphanManifestBatch bounds one run's orphan pass.
+const orphanManifestBatch = 500
+
+// queueOrphanManifests queues, due now, every addressed manifest older than
+// the grace that no head or version row names and no retired row queues —
+// the previous build's overwrite or delete (two-slot window, rollback)
+// looked its manifest up by key and so released nothing. collectManifest
+// re-checks each under its key's lock before anything is released. A
+// manifest at the object key (written before 092) is never an orphan here:
+// its head row is the only thing that knew of it, and the previous build
+// released it when that row went.
+func (c *RetiredBlobCollector) queueOrphanManifests(ctx context.Context) (int, error) {
+	rows, err := c.db.QueryContext(ctx, `
+		SELECT m.tenant_id::text, m.bucket_name, m.object_key
+		FROM object_metadata m
+		WHERE m.object_key LIKE '%@%' AND length(m.object_key) > $3 AND m.updated_at < $1
+		  AND ($2 = '' OR m.tenant_id::text = $2)
+		  AND NOT EXISTS (SELECT 1 FROM object_head_cache h
+		                  WHERE h.tenant_id = m.tenant_id::text AND h.bucket = m.bucket_name
+		                    AND h.object_key IN (left(m.object_key, length(m.object_key) - $3), m.object_key)
+		                    AND h.is_chunked AND COALESCE(h.storage_key, h.object_key) = m.object_key)
+		  AND NOT EXISTS (SELECT 1 FROM object_versions v
+		                  WHERE v.tenant_id = m.tenant_id::text AND v.bucket = m.bucket_name
+		                    AND v.object_key IN (left(m.object_key, length(m.object_key) - $3), m.object_key)
+		                    AND v.storage_key = m.object_key AND v.backend_name = '`+chunkedBackendSentinel+`' AND NOT v.is_delete_marker)
+		  AND NOT EXISTS (SELECT 1 FROM retired_blobs r
+		                  WHERE r.backend_id = '`+chunkedBackendSentinel+`' AND r.container = m.tenant_id::text || '_' || m.bucket_name
+		                    AND r.storage_key = m.object_key)
+		ORDER BY m.updated_at
+		LIMIT $4`, c.now().Add(-retiredBlobGrace), c.onlyTenant, blobAddressSuffixLen, orphanManifestBatch)
+	if err != nil {
+		return 0, fmt.Errorf("find orphan manifests: %w", err)
+	}
+	type orphan struct{ tenantID, bucket, addr string }
+	var found []orphan
+	for rows.Next() {
+		var o orphan
+		if err := rows.Scan(&o.tenantID, &o.bucket, &o.addr); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("scan orphan manifest: %w", err)
+		}
+		if retiredBlobKey(o.addr) != o.addr { // an address newBlobAddress made
+			found = append(found, o)
+		}
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("find orphan manifests: %w", err)
+	}
+	queued := 0
+	for _, o := range found {
+		container, _ := objectBlobAddress(o.tenantID, o.bucket, "", o.addr)
+		if _, err := c.db.ExecContext(ctx, `
+			INSERT INTO retired_blobs (backend_id, container, storage_key, tenant_id, reason, retire_after)
+			VALUES ($1, $2, $3, $4, $5, $6)
+			ON CONFLICT (backend_id, container, storage_key) DO NOTHING`,
+			chunkedBackendSentinel, container, o.addr, o.tenantID, retiredOrphanManifest, c.now()); err != nil {
+			return queued, fmt.Errorf("queue orphan manifest %s: %w", o.addr, err)
+		}
+		queued++
+		c.logger.Warn("retired blobs: a manifest no row names was found and queued (the previous build's overwrite or delete)",
+			zap.String("tenant_id", o.tenantID), zap.String("bucket", o.bucket), zap.String("manifest", o.addr))
+	}
+	return queued, nil
 }
 
 // retiredBlobKey is the object key a retired address belongs to: the part

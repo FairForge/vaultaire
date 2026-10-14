@@ -30,7 +30,7 @@ func chunkedObjectChunks(t *testing.T, f *adapterTestFixture, key string) []hone
 		SELECT r.dedup_scope, r.plaintext_hash, COALESCE(g.storage_key, '')
 		FROM tenant_chunk_refs r
 		JOIN global_content_index g ON g.dedup_scope = r.dedup_scope AND g.plaintext_hash = r.plaintext_hash
-		WHERE r.tenant_id = $1 AND r.bucket_name = 'test-bucket' AND r.object_key = $2
+		WHERE r.tenant_id = $1 AND r.bucket_name = 'test-bucket' AND r.object_key = `+manifestOfKeySQL+`
 		ORDER BY r.chunk_index`, f.tenantID, key)
 	require.NoError(t, err)
 	defer func() { _ = rows.Close() }()

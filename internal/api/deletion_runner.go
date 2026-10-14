@@ -648,7 +648,7 @@ func (r *AccountDeletionRunner) deleteObject(ctx context.Context, t *tenant.Tena
 		}
 	}
 	// The row and its bytes' release in one transaction (WP-R10-8).
-	if _, _, err := deleteHeadRowReleasing(ctx, r.db, manifestReleaser(r.gci), r.quota != nil, t.ID, bucket, key); err != nil {
+	if _, _, err := deleteHeadRowReleasing(ctx, r.db, r.quota != nil, t.ID, bucket, key); err != nil {
 		return fmt.Errorf("head row: %w", err)
 	}
 	if chunked {

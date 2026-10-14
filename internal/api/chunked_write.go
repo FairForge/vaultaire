@@ -3,9 +3,9 @@ package api
 // WP-R3-1: the chunked write as a core with no HTTP in it. A PUT
 // (handleChunkedPut) and a CompleteMultipartUpload both hand it a stream and
 // what the head row records; it runs chunker → dedup lookups → store pool →
-// manifest + head row in ONE transaction (the flip, commitBlobWrite, with a
-// nil releaser: ReplaceObjectManifestTx releases the displaced manifest
-// itself, so the flip must not release it as well). The handlers keep what
+// manifest + head row in ONE transaction (the flip, commitBlobWrite). The
+// manifest goes to its own address (WP-VM-1): the flip keeps or retires the
+// one the displaced row named. The handlers keep what
 // is theirs: the status line and headers, Object Lock, x-amz-version-id, the
 // event they fire. TestChunkBlobCalls_GoThroughTheChunkStore keeps every
 // chunk store and manifest install inside this file.
@@ -111,13 +111,21 @@ func (a *S3ToEngine) storeChunkedObject(ctx context.Context, cw chunkedWrite) (c
 		dedupScope = cw.TenantID
 	}
 
+	// The manifest's own address (WP-VM-1): never the bare key, so this
+	// write neither replaces the manifest a row names (a retained version, a
+	// GET in flight) nor is replaced by a later write of the key.
+	addr, err := newBlobAddress(cw.Key)
+	if err != nil {
+		return chunkedResult{}, err
+	}
+
 	// New-chunk stores fan out to a bounded worker pool — the store step is a
 	// full HTTPS round-trip to the backend, and running stores one at a time
 	// capped engine-path uploads at chunk_size ÷ round-trip (~19 MB/s to
 	// iDrive). This dispatcher loop stays sequential for every dedup
 	// decision; only compress → encrypt → storeChunkLocked runs on workers.
 	pool := newChunkStorePool(pctx, a, cancelStores,
-		cw.TenantID, cw.TenantID, cw.Bucket, cw.Key, dedupScope, contentType, encrypting)
+		cw.TenantID, cw.TenantID, cw.Bucket, addr, dedupScope, contentType, encrypting)
 
 	// Every chunk processed takes one GCI reference (fresh insert at
 	// ref_count 1, ON CONFLICT increment, or IncrementRef on a dedup hit). If
@@ -257,25 +265,24 @@ func (a *S3ToEngine) storeChunkedObject(ctx context.Context, cw chunkedWrite) (c
 		defer cancel()
 	}
 
-	// Manifest swap and head-cache upsert commit in ONE transaction. Split
-	// across two, a failed upsert left the old manifest already destroyed
-	// while the head cache still advertised the old ETag/size — split-brain
-	// with no compensating action. The flip locks the head row first, so
-	// concurrent overwrites of the same key serialize before touching the
-	// manifest (consistent lock order: head row → manifest tables). The
-	// version row is written in the same transaction (WP-R2-1): a chunked
-	// object keeps no whole blob, so its version names none and no backend —
-	// but a Suspended bucket's null-version rewrite must release and retire
-	// the retained bytes it replaces exactly as a whole write does.
+	// The manifest at its address and the head row naming it commit in ONE
+	// transaction (the flip). The flip locks the head row first, so
+	// concurrent overwrites of the same key serialize; the manifest a
+	// displaced row names is kept by a version or retired (WP-VM-1) — never
+	// released here, so a GET that resolved it a moment ago finishes. The
+	// version row names this manifest too (backend 'chunked'): Enabled keeps
+	// it as a version once a later write displaces it.
 	attrs := cw.Attrs
 	attrs.ContentType = contentType
-	flip, dbErr := commitBlobWrite(ictx, a.db, nil, blobWrite{TenantID: cw.TenantID, Bucket: cw.Bucket, Key: cw.Key, Bill: cw.Bill,
-		Version: &versionWrite{Size: measuredSize, ETag: etag, ContentType: contentType},
+	flip, dbErr := commitBlobWrite(ictx, a.db, blobWrite{TenantID: cw.TenantID, Bucket: cw.Bucket, Key: cw.Key, Bill: cw.Bill,
+		Version: &versionWrite{Size: measuredSize, ETag: etag, ContentType: contentType, Backend: chunkedBackendSentinel,
+			Blob: versionBlobRef{StorageKey: addr, Enc: objectEncryption{Algorithm: chunkEncAlgo}}},
 		Upsert: func(tx *sql.Tx) error {
-			if metaErr := a.gci.ReplaceObjectManifestTx(ictx, tx, cw.TenantID, cw.Bucket, cw.Key, newRefs, &crypto.ObjectMeta{
+			// At a fresh address: nothing to replace, only the install.
+			if metaErr := a.gci.ReplaceObjectManifestTx(ictx, tx, cw.TenantID, cw.Bucket, addr, newRefs, &crypto.ObjectMeta{
 				TenantID:       cw.TenantID,
 				BucketName:     cw.Bucket,
-				ObjectKey:      cw.Key,
+				ObjectKey:      addr,
 				TotalSize:      measuredSize,
 				ChunkCount:     chunkCount,
 				ContentType:    &contentType,
@@ -286,7 +293,7 @@ func (a *S3ToEngine) storeChunkedObject(ctx context.Context, cw chunkedWrite) (c
 			}); metaErr != nil {
 				return fmt.Errorf("replace object manifest: %w", metaErr)
 			}
-			if err := upsertChunkedObjectHeadRow(ictx, tx, cw.TenantID, cw.Bucket, cw.Key, measuredSize, etag, chunkEncAlgo, attrs); err != nil {
+			if err := upsertChunkedObjectHeadRow(ictx, tx, cw.TenantID, cw.Bucket, cw.Key, addr, measuredSize, etag, chunkEncAlgo, attrs); err != nil {
 				return err
 			}
 			if cw.InTx != nil {
@@ -323,17 +330,18 @@ func (a *S3ToEngine) storeChunkedObject(ctx context.Context, cw chunkedWrite) (c
 
 // upsertChunkedObjectHeadRow writes the head row of a CHUNKED object inside
 // the install's transaction: every attribute column set explicitly (as
-// upsertWholeObjectHeadRow does), is_chunked TRUE, no address (a chunked
-// object has no whole blob), no key version (versions live on the chunks),
-// backend_name the sentinel, the floor every chunked object is billed on.
-func upsertChunkedObjectHeadRow(ctx context.Context, tx *sql.Tx, tenantID, bucket, key string,
+// upsertWholeObjectHeadRow does), is_chunked TRUE, the manifest's address
+// (WP-VM-1; a chunked object has no whole blob), no key version (versions
+// live on the chunks), backend_name the sentinel, the floor every chunked
+// object is billed on.
+func upsertChunkedObjectHeadRow(ctx context.Context, tx *sql.Tx, tenantID, bucket, key, manifest string,
 	size int64, etag, encAlgo string, attrs objectAttrs) error {
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO object_head_cache
 			(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm,
 			 content_disposition, content_encoding, content_language, cache_control, http_expires, website_redirect_location,
-			 floor, is_chunked, tags, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $17, TRUE, $16, NOW())
+			 floor, is_chunked, tags, storage_key, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $17, TRUE, $16, NULLIF($18, ''), NOW())
 		ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
 			size_bytes                = EXCLUDED.size_bytes,
 			etag                      = EXCLUDED.etag,
@@ -351,11 +359,11 @@ func upsertChunkedObjectHeadRow(ctx context.Context, tx *sql.Tx, tenantID, bucke
 			floor                     = EXCLUDED.floor,
 			is_chunked                = TRUE,
 			tags                      = EXCLUDED.tags,
-			storage_key               = NULL, -- a chunked object has no whole blob
+			storage_key               = EXCLUDED.storage_key, -- the manifest's address (WP-VM-1)
 			updated_at                = NOW()`,
 		tenantID, bucket, key, size, etag, attrs.ContentType, chunkedBackendSentinel, attrs.metadataJSON(), encAlgo,
 		attrs.ContentDisposition, attrs.ContentEncoding, attrs.ContentLanguage,
-		attrs.CacheControl, attrs.Expires, attrs.WebsiteRedirect, attrs.tagsJSON(), chunkedObjectFloor)
+		attrs.CacheControl, attrs.Expires, attrs.WebsiteRedirect, attrs.tagsJSON(), chunkedObjectFloor, manifest)
 	if err != nil {
 		return fmt.Errorf("upsert chunked head row %s/%s: %w", bucket, key, err)
 	}

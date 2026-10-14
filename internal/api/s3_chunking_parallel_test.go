@@ -118,7 +118,7 @@ func TestChunkedPut_DuplicateChunksSingleStore(t *testing.T) {
 	var refRows, distinctHashes int
 	require.NoError(t, f.db.QueryRow(`
 		SELECT COUNT(*), COUNT(DISTINCT plaintext_hash) FROM tenant_chunk_refs
-		WHERE tenant_id = $1 AND object_key = 'dup.bin'`, f.tenantID).
+		WHERE tenant_id = $1 AND object_key = `+manifestOf("$1", "'dup.bin'"), f.tenantID).
 		Scan(&refRows, &distinctHashes))
 	assert.Equal(t, 4, refRows, "every occurrence needs its own manifest ref")
 	assert.Equal(t, 1, distinctHashes)
@@ -155,7 +155,7 @@ func TestChunkedPut_WorkerFailureReleasesRefs(t *testing.T) {
 	var refRows int
 	require.NoError(t, f.db.QueryRow(`
 		SELECT COUNT(*) FROM tenant_chunk_refs
-		WHERE tenant_id = $1 AND object_key = 'fail.bin'`, f.tenantID).Scan(&refRows))
+		WHERE tenant_id = $1 AND object_key = `+manifestOf("$1", "'fail.bin'"), f.tenantID).Scan(&refRows))
 	assert.Zero(t, refRows, "no manifest rows may survive a failed chunked PUT")
 
 	// Chunks that stored successfully before the failure must have had their

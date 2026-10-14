@@ -63,7 +63,7 @@ func (e *hangEngine) Get(ctx context.Context, container, artifact string) (io.Re
 func chunkKeys(t *testing.T, f *adapterTestFixture, key string) []string {
 	t.Helper()
 	rows, err := f.db.Query(`SELECT plaintext_hash FROM tenant_chunk_refs
-		WHERE tenant_id = $1 AND object_key = $2 ORDER BY chunk_index`, f.tenantID, key)
+		WHERE tenant_id = $1 AND object_key = `+manifestOfKeySQL+` ORDER BY chunk_index`, f.tenantID, key)
 	require.NoError(t, err)
 	defer func() { _ = rows.Close() }()
 	var out []string
@@ -201,7 +201,7 @@ func TestResolveChunkDescs_OneBatchPerScope(t *testing.T) {
 	f := setupChunkingFixture(t)
 	content := generateTestData(24 << 20)
 	putChunkedObject(t, f, "batch.bin", content, "application/octet-stream")
-	refs, err := f.adapter.gci.GetObjectChunks(context.Background(), f.tenantID, "test-bucket", "batch.bin")
+	refs, err := f.adapter.gci.GetObjectChunks(context.Background(), f.tenantID, "test-bucket", manifestKeyOf(t, f.db, f.tenantID, "test-bucket", "batch.bin"))
 	require.NoError(t, err)
 
 	descs, err := f.adapter.resolveChunkDescs(context.Background(), refs)

@@ -113,7 +113,7 @@ func TestChunkedGet_MidStreamFailureAborts(t *testing.T) {
 	var firstHash string
 	require.NoError(t, f.db.QueryRow(`
 		SELECT plaintext_hash FROM tenant_chunk_refs
-		WHERE tenant_id = $1 AND object_key = 'abort.bin' AND chunk_index = 0`,
+		WHERE tenant_id = $1 AND object_key = `+manifestOf("$1", "'abort.bin'")+` AND chunk_index = 0`,
 		f.tenantID).Scan(&firstHash))
 
 	ie := &getInstrumentedEngine{Engine: f.eng, failGetAfter: -1,

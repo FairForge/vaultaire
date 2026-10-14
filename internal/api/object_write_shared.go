@@ -314,12 +314,12 @@ func deleteVersion(ctx context.Context, db *sql.DB, billed bool, tenantID, bucke
 	var retained bool
 	err = tx.QueryRowContext(ctx, `
 		SELECT COALESCE(v.storage_key, ''), COALESCE(v.backend_name, ''), v.size_bytes, `+usage.RetainedVersionFloor+`,
-		       (v.storage_key IS NOT NULL AND NOT v.is_delete_marker
-		        AND (h.tenant_id IS NULL OR h.is_chunked OR COALESCE(h.storage_key, h.object_key) <> v.storage_key))
+		       `+usage.VersionRetained+`
 		FROM object_versions v
 		LEFT JOIN object_head_cache h ON h.tenant_id = v.tenant_id AND h.bucket = v.bucket AND h.object_key = v.object_key
 		WHERE v.tenant_id = $1 AND v.bucket = $2 AND v.object_key = $3 AND v.version_id = $4`,
 		tenantID, bucket, key, versionID).Scan(&storageKey, &backend, &size, &floor, &retained)
+	chunked := backend == chunkedBackendSentinel // its address names a manifest (WP-VM-1)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, rp, nil
 	}
@@ -342,19 +342,21 @@ func deleteVersion(ctx context.Context, db *sql.DB, billed bool, tenantID, bucke
 		return true, rp, err
 	}
 	if storageKey != "" {
-		if rp, err = repointHeadAfterVersionDelete(ctx, tx, tenantID, bucket, key, storageKey); err != nil {
+		if rp, err = repointHeadAfterVersionDelete(ctx, tx, tenantID, bucket, key, storageKey, chunked); err != nil {
 			return true, rp, err
 		}
 	}
 	if retained && size > 0 {
 		rp.VersionReleased = quotaRelease{Floor: floor, Bytes: size}
 	}
-	// A version that kept its bytes (WP-R2-1): its blob goes to the
-	// collector with the row delete, unless the head row or another version
-	// still names it. Retired, not deleted here: a GET that resolved the
-	// version a moment ago may still be reading it.
-	if err := retireBlob(ctx, tx, tenantID, bucket, key, storageKey, backend, retiredVersionDeleted); err != nil {
-		return true, rp, err
+	// A version that kept its bytes (WP-R2-1) or its manifest (WP-VM-1):
+	// they go to the collector with the row delete, unless the head row or
+	// another version still names them. Retired, not deleted here: a GET
+	// that resolved the version a moment ago may still be reading it.
+	if storageKey != "" {
+		if err := retireRowBytes(ctx, tx, tenantID, bucket, key, storageKey, backend, chunked, retiredVersionDeleted); err != nil {
+			return true, rp, err
+		}
 	}
 	// The bill, last, in the same transaction (WP-R10-8): the current
 	// object's bytes when the deleted version was its blob (the re-pointed
@@ -373,13 +375,14 @@ func deleteVersion(ctx context.Context, db *sql.DB, billed bool, tenantID, bucke
 }
 
 // repointHeadAfterVersionDelete is deleteVersion's head-row step, inside its
-// transaction: only a head row that names deletedBlob is touched.
-func repointHeadAfterVersionDelete(ctx context.Context, tx *sql.Tx, tenantID, bucket, key, deletedBlob string) (headRepoint, error) {
+// transaction: only a head row that names deletedBlob — of the same kind
+// (a manifest when chunked, WP-VM-1) — is touched.
+func repointHeadAfterVersionDelete(ctx context.Context, tx *sql.Tx, tenantID, bucket, key, deletedBlob string, chunked bool) (headRepoint, error) {
 	var rp headRepoint
 	err := tx.QueryRowContext(ctx, `
 		SELECT size_bytes, floor, COALESCE(backend_name, '') FROM object_head_cache
-		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND storage_key = $4 AND NOT is_chunked
-		FOR UPDATE`, tenantID, bucket, key, deletedBlob).Scan(&rp.OldSize, &rp.Floor, &rp.Backend)
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND COALESCE(storage_key, object_key) = $4 AND is_chunked = $5
+		FOR UPDATE`, tenantID, bucket, key, deletedBlob, chunked).Scan(&rp.OldSize, &rp.Floor, &rp.Backend)
 	if errors.Is(err, sql.ErrNoRows) {
 		return headRepoint{}, nil // the head row names other bytes (or none): not this delete's business
 	}
@@ -387,16 +390,20 @@ func repointHeadAfterVersionDelete(ctx context.Context, tx *sql.Tx, tenantID, bu
 		return headRepoint{}, fmt.Errorf("read the head row of the deleted version: %w", err)
 	}
 	rp.Changed = true
-	// The newly-latest version, when it is a live version that kept bytes.
+	// The newly-latest version, when it is a live version that kept bytes —
+	// a whole blob or a manifest (is_chunked follows its kind, WP-VM-1) —
+	// with what that version recorded (R61-8; '' for one written before 092).
 	res, err := tx.ExecContext(ctx, `
 		UPDATE object_head_cache h SET
 			size_bytes = v.size_bytes, etag = v.etag, content_type = v.content_type,
 			backend_name = v.backend_name, storage_key = v.storage_key,
+			is_chunked = (COALESCE(v.backend_name, '') = '`+chunkedBackendSentinel+`'),
 			floor = COALESCE(v.floor, h.floor), -- where the version was billed (088)
 			encryption_algorithm = COALESCE(v.encryption_algorithm, ''), encryption_key_version = v.encryption_key_version,
-			-- no per-version copy of these exists: they described the deleted version
-			metadata = '{}', tags = '{}', content_disposition = '', content_encoding = '', content_language = '',
-			cache_control = '', http_expires = '', website_redirect_location = '',
+			metadata = COALESCE(v.metadata, '{}'), tags = '{}', content_disposition = COALESCE(v.content_disposition, ''),
+			content_encoding = COALESCE(v.content_encoding, ''), content_language = COALESCE(v.content_language, ''),
+			cache_control = COALESCE(v.cache_control, ''), http_expires = COALESCE(v.http_expires, ''),
+			website_redirect_location = COALESCE(v.website_redirect_location, ''),
 			updated_at = v.created_at
 		FROM object_versions v
 		WHERE h.tenant_id = $1 AND h.bucket = $2 AND h.object_key = $3
@@ -467,8 +474,32 @@ func writeVersionRow(ctx context.Context, q execer, vStatus, tenantID, bucket, k
 			encryption_key_version = EXCLUDED.encryption_key_version, floor = EXCLUDED.floor`,
 		tenantID, bucket, key, versionID, size, etag, contentType, backendName,
 		blob.StorageKey, blob.Enc.Algorithm, blob.Enc.KeyVersion, floor)
+	if err != nil {
+		return versionID, err
+	}
+	// What a GET of this version sends (R61-8, 092): the attributes of the
+	// head row this version describes — the caller wrote it in the same
+	// transaction (the flip's upsert, a Complete retry's current object).
+	_, err = q.ExecContext(ctx, copyHeadAttrsToVersionSQL, tenantID, bucket, key, versionID)
 	return versionID, err
 }
+
+// versionAttrColumns reads a version row's attributes (R61-8): metadata,
+// disposition, encoding, language, cache control, expires, redirect — the
+// empty string (metadata: {}) for a version written before 092.
+const versionAttrColumns = `COALESCE(metadata, '{}'), COALESCE(content_disposition, ''), COALESCE(content_encoding, ''),
+	COALESCE(content_language, ''), COALESCE(cache_control, ''), COALESCE(http_expires, ''), COALESCE(website_redirect_location, '')`
+
+// copyHeadAttrsToVersionSQL copies the head row's attributes onto one of
+// its key's version rows (R61-8).
+const copyHeadAttrsToVersionSQL = `
+	UPDATE object_versions v SET
+		metadata = h.metadata, content_disposition = h.content_disposition, content_encoding = h.content_encoding,
+		content_language = h.content_language, cache_control = h.cache_control, http_expires = h.http_expires,
+		website_redirect_location = h.website_redirect_location
+	FROM object_head_cache h
+	WHERE v.tenant_id = $1 AND v.bucket = $2 AND v.object_key = $3 AND v.version_id = $4
+	  AND h.tenant_id = v.tenant_id AND h.bucket = v.bucket AND h.object_key = v.object_key`
 
 // newUploadID returns "upload-" + 32 hex chars from crypto/rand (R5-28: the
 // old unix-nanos ids were predictable). Hex only — the id names the staging

@@ -236,7 +236,7 @@ func TestHandleGet_ChunkedObject_MultiChunk(t *testing.T) {
 	var chunkCount int
 	require.NoError(t, f.db.QueryRow(`
 		SELECT COUNT(*) FROM tenant_chunk_refs
-		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = $3`,
+		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = `+manifestOf("$1", "$3"),
 		tenantUUID, "test-bucket", "multi.bin").Scan(&chunkCount))
 	require.GreaterOrEqual(t, chunkCount, 2, "20 MB object must split into multiple chunks for this test to be meaningful")
 
@@ -313,7 +313,7 @@ func TestHandleGet_ChunkedDedup_CrossTenant(t *testing.T) {
 	require.NoError(t, f.db.QueryRow(`
 		SELECT MAX(gci.ref_count) FROM global_content_index gci
 		INNER JOIN tenant_chunk_refs tcr ON tcr.plaintext_hash = gci.plaintext_hash
-		WHERE tcr.tenant_id = $1 AND tcr.bucket_name = $2 AND tcr.object_key = $3`,
+		WHERE tcr.tenant_id = $1 AND tcr.bucket_name = $2 AND tcr.object_key = `+manifestOf("$1", "$3"),
 		bUUID, "test-bucket", "objB").Scan(&maxRef))
 	require.Equal(t, 2, maxRef, "tenant B's chunk must be deduplicated against tenant A's (ref_count=2)")
 
@@ -372,7 +372,7 @@ func TestHandleGet_ChunkedObject_CorruptChunk(t *testing.T) {
 	var hashHex string
 	require.NoError(t, f.db.QueryRow(`
 		SELECT plaintext_hash FROM tenant_chunk_refs
-		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = $3
+		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = `+manifestOf("$1", "$3")+`
 		ORDER BY chunk_index LIMIT 1`,
 		tenantUUID, "test-bucket", "corrupt.bin").Scan(&hashHex))
 
@@ -410,7 +410,7 @@ func TestChunkedOverwrite_FewerChunks_ReplacesManifest(t *testing.T) {
 	var refCount int
 	require.NoError(t, f.db.QueryRow(`
 		SELECT COUNT(*) FROM tenant_chunk_refs
-		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = $3`,
+		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = `+manifestOf("$1", "$3"),
 		tenantUUID, "test-bucket", key).Scan(&refCount))
 	assert.Equal(t, 1, refCount, "8 KB object should leave exactly one chunk ref")
 }
@@ -429,12 +429,14 @@ func TestChunkedOverwrite_ReleasesOldChunkRefs(t *testing.T) {
 	var oldHash string
 	require.NoError(t, f.db.QueryRow(`
 		SELECT plaintext_hash FROM tenant_chunk_refs
-		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = $3 ORDER BY chunk_index LIMIT 1`,
+		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = `+manifestOf("$1", "$3")+` ORDER BY chunk_index LIMIT 1`,
 		tenantUUID, "test-bucket", key).Scan(&oldHash))
 
 	// Overwrite with different content (different chunk hash).
 	contentB := generateTestData(8 * 1024)
 	putChunkedObject(t, f, key, contentB, "application/octet-stream")
+	// Retired at the overwrite, released by the collector (WP-VM-1).
+	releaseRetiredManifests(t, f.db, f.eng, f.adapter.gci, f.tenantID)
 
 	// The old version's chunk should have been released (ref_count 0 → marked).
 	var refCount int
@@ -537,7 +539,7 @@ func TestHandlePut_ChunkedUpload(t *testing.T) {
 	var chunkCount int
 	err = f.db.QueryRow(`
 		SELECT COUNT(*) FROM tenant_chunk_refs
-		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = $3`,
+		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = `+manifestOf("$1", "$3"),
 		tenantUUID, "test-bucket", "large-object.bin").Scan(&chunkCount)
 	require.NoError(t, err)
 	assert.Greater(t, chunkCount, 0, "should have chunk references")
@@ -547,7 +549,7 @@ func TestHandlePut_ChunkedUpload(t *testing.T) {
 	var savedChunkCount int
 	err = f.db.QueryRow(`
 		SELECT total_size, chunk_count FROM object_metadata
-		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = $3`,
+		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = `+manifestOf("$1", "$3"),
 		tenantUUID, "test-bucket", "large-object.bin").Scan(&totalSize, &savedChunkCount)
 	require.NoError(t, err)
 	assert.Equal(t, int64(len(content)), totalSize)
@@ -573,7 +575,7 @@ func TestHandlePut_ChunkedDedup(t *testing.T) {
 	var firstChunkCount int
 	err := f.db.QueryRow(`
 		SELECT COUNT(*) FROM tenant_chunk_refs
-		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = $3`,
+		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = `+manifestOf("$1", "$3"),
 		tenantUUID, "test-bucket", "dedup-obj-1.bin").Scan(&firstChunkCount)
 	require.NoError(t, err)
 
@@ -590,7 +592,7 @@ func TestHandlePut_ChunkedDedup(t *testing.T) {
 	rows, err := f.db.Query(`
 		SELECT gci.ref_count FROM global_content_index gci
 		INNER JOIN tenant_chunk_refs tcr ON tcr.plaintext_hash = gci.plaintext_hash
-		WHERE tcr.tenant_id = $1 AND tcr.bucket_name = $2 AND tcr.object_key = $3`,
+		WHERE tcr.tenant_id = $1 AND tcr.bucket_name = $2 AND tcr.object_key = `+manifestOf("$1", "$3"),
 		tenantUUID, "test-bucket", "dedup-obj-1.bin")
 	require.NoError(t, err)
 	defer func() { _ = rows.Close() }()
@@ -678,6 +680,8 @@ func TestHandleDelete_ChunkedObject(t *testing.T) {
 		f.tenantID, "test-bucket", "to-delete.bin").Scan(&isChunked))
 	require.True(t, isChunked)
 
+	manifest := manifestKeyOf(t, f.db, f.tenantID, "test-bucket", "to-delete.bin")
+
 	// Delete the chunked object
 	delReq := httptest.NewRequest("DELETE", "/test-bucket/to-delete.bin", nil)
 	ctx = s3Ctx(delReq.Context(), f.tenant)
@@ -686,6 +690,13 @@ func TestHandleDelete_ChunkedObject(t *testing.T) {
 	f.adapter.HandleDelete(dw, delReq, "test-bucket", "to-delete.bin")
 
 	assert.Equal(t, http.StatusNoContent, dw.Code)
+	// The manifest is retired (kept for the grace), then released by the
+	// collector (WP-VM-1).
+	var retired int
+	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM retired_blobs WHERE tenant_id = $1 AND storage_key = $2 AND backend_id = $3`,
+		f.tenantID, manifest, chunkedBackendSentinel).Scan(&retired))
+	assert.Equal(t, 1, retired, "the manifest is retired")
+	releaseRetiredManifests(t, f.db, f.eng, f.adapter.gci, f.tenantID)
 
 	// Verify object_head_cache is deleted
 	var count int
@@ -701,7 +712,7 @@ func TestHandleDelete_ChunkedObject(t *testing.T) {
 	err = f.db.QueryRow(`
 		SELECT COUNT(*) FROM tenant_chunk_refs
 		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = $3`,
-		tenantUUID, "test-bucket", "to-delete.bin").Scan(&count)
+		tenantUUID, "test-bucket", manifest).Scan(&count)
 	require.NoError(t, err)
 	assert.Equal(t, 0, count, "tenant_chunk_refs should be cleared")
 
@@ -709,7 +720,7 @@ func TestHandleDelete_ChunkedObject(t *testing.T) {
 	err = f.db.QueryRow(`
 		SELECT COUNT(*) FROM object_metadata
 		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = $3`,
-		tenantUUID, "test-bucket", "to-delete.bin").Scan(&count)
+		tenantUUID, "test-bucket", manifest).Scan(&count)
 	require.NoError(t, err)
 	assert.Equal(t, 0, count, "object_metadata should be cleared")
 
@@ -744,13 +755,14 @@ func TestHandleDelete_ChunkedDedup_PartialRefCount(t *testing.T) {
 	dw := httptest.NewRecorder()
 	f.adapter.HandleDelete(dw, delReq, "test-bucket", "shared-1.bin")
 	assert.Equal(t, http.StatusNoContent, dw.Code)
+	releaseRetiredManifests(t, f.db, f.eng, f.adapter.gci, f.tenantID) // WP-VM-1: retired, then released
 
 	// Verify ref_counts are now 1 (not 0) because shared-2.bin still references them
 	tenantUUID, _ := uuid.Parse(f.tenantID)
 	rows, err := f.db.Query(`
 		SELECT gci.ref_count, gci.marked_for_deletion FROM global_content_index gci
 		INNER JOIN tenant_chunk_refs tcr ON tcr.plaintext_hash = gci.plaintext_hash
-		WHERE tcr.tenant_id = $1 AND tcr.bucket_name = $2 AND tcr.object_key = $3`,
+		WHERE tcr.tenant_id = $1 AND tcr.bucket_name = $2 AND tcr.object_key = `+manifestOf("$1", "$3"),
 		tenantUUID, "test-bucket", "shared-2.bin")
 	require.NoError(t, err)
 	defer func() { _ = rows.Close() }()
@@ -1007,7 +1019,7 @@ func TestHandlePut_CompressesTextChunks(t *testing.T) {
 		SELECT g.compressed_size, g.compression_algo, g.size_bytes
 		FROM tenant_chunk_refs r
 		JOIN global_content_index g ON g.plaintext_hash = r.plaintext_hash
-		WHERE r.tenant_id = $1 AND r.bucket_name = $2 AND r.object_key = $3`,
+		WHERE r.tenant_id = $1 AND r.bucket_name = $2 AND r.object_key = `+manifestOf("$1", "$3"),
 		tenantUUID, "test-bucket", "compressible.txt")
 	require.NoError(t, err)
 	defer func() { _ = rows.Close() }()
@@ -1047,7 +1059,7 @@ func TestHandlePut_SkipsCompressionForImages(t *testing.T) {
 		SELECT g.compressed_size, g.compression_algo
 		FROM tenant_chunk_refs r
 		JOIN global_content_index g ON g.plaintext_hash = r.plaintext_hash
-		WHERE r.tenant_id = $1 AND r.bucket_name = $2 AND r.object_key = $3`,
+		WHERE r.tenant_id = $1 AND r.bucket_name = $2 AND r.object_key = `+manifestOf("$1", "$3"),
 		tenantUUID, "test-bucket", "photo.jpg")
 	require.NoError(t, err)
 	defer func() { _ = rows.Close() }()
@@ -1110,7 +1122,7 @@ func TestHandlePut_CompressionExpansionSkipped(t *testing.T) {
 		SELECT g.compressed_size, g.compression_algo, g.size_bytes
 		FROM tenant_chunk_refs r
 		JOIN global_content_index g ON g.plaintext_hash = r.plaintext_hash
-		WHERE r.tenant_id = $1 AND r.bucket_name = $2 AND r.object_key = $3`,
+		WHERE r.tenant_id = $1 AND r.bucket_name = $2 AND r.object_key = `+manifestOf("$1", "$3"),
 		tenantUUID, "test-bucket", "random.bin")
 	require.NoError(t, err)
 	defer func() { _ = rows.Close() }()
@@ -1220,7 +1232,7 @@ func TestHandlePut_ChunkedWithEncryption(t *testing.T) {
 	rows, err := f.db.Query(`
 		SELECT gci.encrypted, gci.encryption_algo FROM global_content_index gci
 		INNER JOIN tenant_chunk_refs tcr ON tcr.plaintext_hash = gci.plaintext_hash
-		WHERE tcr.tenant_id = $1 AND tcr.bucket_name = $2 AND tcr.object_key = $3`,
+		WHERE tcr.tenant_id = $1 AND tcr.bucket_name = $2 AND tcr.object_key = `+manifestOf("$1", "$3"),
 		tenantUUID, "test-bucket", "encrypted-chunked.bin")
 	require.NoError(t, err)
 	defer func() { _ = rows.Close() }()
@@ -1239,13 +1251,13 @@ func TestHandlePut_ChunkedWithEncryption(t *testing.T) {
 	var refCount int
 	err = f.db.QueryRow(`
 		SELECT COUNT(*) FROM tenant_chunk_refs
-		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = $3 AND ciphertext_hash IS NOT NULL`,
+		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = `+manifestOf("$1", "$3")+` AND ciphertext_hash IS NOT NULL`,
 		tenantUUID, "test-bucket", "encrypted-chunked.bin").Scan(&refCount)
 	require.NoError(t, err)
 	assert.Greater(t, refCount, 0, "all chunk refs should have ciphertext_hash")
 
 	// Verify raw stored data is NOT plaintext
-	refs, err := f.adapter.gci.GetObjectChunks(context.Background(), f.tenantID, "test-bucket", "encrypted-chunked.bin")
+	refs, err := f.adapter.gci.GetObjectChunks(context.Background(), f.tenantID, "test-bucket", manifestKeyOf(t, f.db, f.tenantID, "test-bucket", "encrypted-chunked.bin"))
 	require.NoError(t, err)
 	require.NotEmpty(t, refs)
 
@@ -1301,7 +1313,7 @@ func TestHandleGet_EncryptedCompressedRoundTrip(t *testing.T) {
 	var physicalSize *int64
 	_ = f.db.QueryRow(`
 		SELECT physical_size FROM object_metadata
-		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = $3`,
+		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = `+manifestOf("$1", "$3"),
 		tenantUUID, "test-bucket", "comp-enc.bin").Scan(&physicalSize)
 	// Physical includes encryption overhead but compression should still reduce size
 	// for highly compressible data
@@ -1325,7 +1337,7 @@ func TestHandlePut_ChunkedEncryptedDedup(t *testing.T) {
 	rows, err := f.db.Query(`
 		SELECT gci.ref_count FROM global_content_index gci
 		INNER JOIN tenant_chunk_refs tcr ON tcr.plaintext_hash = gci.plaintext_hash
-		WHERE tcr.tenant_id = $1 AND tcr.bucket_name = $2 AND tcr.object_key = $3`,
+		WHERE tcr.tenant_id = $1 AND tcr.bucket_name = $2 AND tcr.object_key = `+manifestOf("$1", "$3"),
 		tenantUUID, "test-bucket", "enc-dedup-1.bin")
 	require.NoError(t, err)
 	defer func() { _ = rows.Close() }()

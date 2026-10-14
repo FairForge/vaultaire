@@ -51,6 +51,13 @@ type Rule struct {
 // per key it is scoped by.
 var Deleted = []Rule{
 	// --- object index and manifests (the backend bytes are already gone) ---
+	// Every manifest of the tenant — addressed (WP-VM-1, retired ones
+	// included) and keyed by the object (before 092) — is in
+	// tenant_chunk_refs under its tenant id. Locked first: the retired_blobs
+	// collector releases a retired manifest (its refs deleted, counts
+	// decremented) under a key lock this erase does not take; counting refs
+	// it is deleting would decrement a shared chunk twice.
+	{"tenant_chunk_refs", `SELECT 1 FROM tenant_chunk_refs WHERE tenant_id::text = $1 FOR UPDATE`, ByTenant}, // a lock, not counted
 	// WP-6/F5: release the tenant's GCI references set-based BEFORE its chunk
 	// refs are deleted; rows that drop to zero are marked so dedup GC sweeps
 	// the blobs after grace. Tenant-scoped (encrypted) chunks stay decryptable

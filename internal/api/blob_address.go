@@ -124,6 +124,8 @@ const (
 	retiredOverwritten    = "overwritten"     // a write replaced the row that named it
 	retiredVersionDeleted = "version_deleted" // DELETE ?versionId of a version that kept bytes
 	retiredOrphanWrite    = "orphan_write"    // a write whose bytes landed and whose row never committed
+	retiredDeleted        = "deleted"         // a DELETE removed the head row of a chunked object (WP-VM-1)
+	retiredOrphanManifest = "orphan_manifest" // a manifest at an address no row names (WP-VM-1, the collector's orphan pass)
 )
 
 // retiredBlobGrace is how long a displaced blob stays readable after the row
@@ -164,7 +166,8 @@ func blobNamedBy(ctx context.Context, q queryRower, tenantID, bucket, key, artif
 		                  AND COALESCE(storage_key, object_key) = $4 AND NOT is_chunked)
 		    OR EXISTS (SELECT 1 FROM object_versions
 		                WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
-		                  AND storage_key = $4 AND NOT is_delete_marker)
+		                  AND storage_key = $4 AND NOT is_delete_marker
+		                  AND COALESCE(backend_name, '') <> '`+chunkedBackendSentinel+`')
 		    -- the blob at <key> of the newest live version behind a delete
 		    -- marker (versionBytesIntact serves it): kept, the undelete path
 		    OR ($4 = $3 AND EXISTS (SELECT 1 FROM object_versions
@@ -227,17 +230,107 @@ func retireBlob(ctx context.Context, tx *sql.Tx, tenantID, bucket, key, storageK
 	return nil
 }
 
-// versionKeepsBlob reports whether a version row keeps the blob at
-// storageKey: a delete of the head row must then leave the bytes.
+// versionKeepsBlob reports whether a version row keeps the WHOLE blob at
+// storageKey: a delete of the head row must then leave the bytes. A chunked
+// version (its address names a manifest) never keeps a whole blob.
 func versionKeepsBlob(ctx context.Context, q queryRower, tenantID, bucket, key, storageKey string) (bool, error) {
 	var kept bool
 	err := q.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM object_versions
-		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND storage_key = $4 AND NOT is_delete_marker)`,
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND storage_key = $4 AND NOT is_delete_marker
+		  AND COALESCE(backend_name, '') <> '`+chunkedBackendSentinel+`')`,
 		tenantID, bucket, key, storageKey).Scan(&kept)
 	if err != nil {
 		return false, fmt.Errorf("does a version keep blob %s: %w", storageKey, err)
 	}
 	return kept, nil
+}
+
+// WP-VM-1: a chunked object's manifest has an address, as a whole blob does
+// — newBlobAddress(key), written in the existing object_key column of
+// object_metadata and tenant_chunk_refs (their unique constraints, which the
+// previous build's ON CONFLICT names, are untouched). A head row names it
+// with storage_key (is_chunked, backend 'chunked'); a version row with
+// storage_key and backend 'chunked'. A chunked row written before 092 names
+// none: its manifest is at the object key (COALESCE(storage_key,
+// object_key), for ever). A manifest is retired exactly as a blob is: a
+// retired_blobs row on the 'chunked' sentinel, kept while a row names it,
+// released by the collector — refs deleted, content-index counts
+// decremented — only after the grace and a re-check under the key's lock;
+// dedup GC then reclaims the chunks as before.
+
+// manifestAddress is where a chunked row's manifest is: its address, the
+// object key for a row written before 092.
+func manifestAddress(key, storageKey string) string { return blobArtifact(key, storageKey) }
+
+// manifestNamedBy reports whether a head or version row names the manifest
+// at addr of (tenant, bucket, key). Deliberately kind-strict: a whole row at
+// <key> never keeps a legacy manifest at <key>, nor the reverse.
+func manifestNamedBy(ctx context.Context, q queryRower, tenantID, bucket, key, addr string) (bool, error) {
+	var named bool
+	err := q.QueryRowContext(ctx, `
+		SELECT EXISTS (SELECT 1 FROM object_head_cache
+		                WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
+		                  AND is_chunked AND COALESCE(storage_key, object_key) = $4)
+		    OR EXISTS (SELECT 1 FROM object_versions
+		                WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
+		                  AND storage_key = $4 AND NOT is_delete_marker AND backend_name = '`+chunkedBackendSentinel+`')
+		    -- a key that is itself shaped like an address, chunked before 092:
+		    -- its manifest is at its own key, named by its own rows
+		    OR EXISTS (SELECT 1 FROM object_head_cache
+		                WHERE tenant_id = $1 AND bucket = $2 AND object_key = $4 AND is_chunked AND storage_key IS NULL)
+		    OR EXISTS (SELECT 1 FROM object_versions
+		                WHERE tenant_id = $1 AND bucket = $2 AND object_key = $4
+		                  AND storage_key = $4 AND NOT is_delete_marker AND backend_name = '`+chunkedBackendSentinel+`')`,
+		tenantID, bucket, key, addr).Scan(&named)
+	if err != nil {
+		return false, fmt.Errorf("is manifest %s still named: %w", addr, err)
+	}
+	return named, nil
+}
+
+// versionKeepsManifest reports whether a version row keeps the manifest at
+// addr: a delete or an overwrite of the head row must then leave it — and
+// its bill, which becomes the version's (WP-R2-1 C2).
+func versionKeepsManifest(ctx context.Context, q queryRower, tenantID, bucket, key, addr string) (bool, error) {
+	var kept bool
+	err := q.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM object_versions
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND storage_key = $4 AND NOT is_delete_marker
+		  AND backend_name = '`+chunkedBackendSentinel+`')`,
+		tenantID, bucket, key, addr).Scan(&kept)
+	if err != nil {
+		return false, fmt.Errorf("does a version keep manifest %s: %w", addr, err)
+	}
+	return kept, nil
+}
+
+// retireManifest queues a displaced manifest for the collector, inside the
+// caller's transaction, unless a row still names it. Never a release here:
+// a chunked GET that resolved the row a moment ago may still be reading
+// the chunks (the grace is the blob grace).
+func retireManifest(ctx context.Context, tx *sql.Tx, tenantID, bucket, key, addr, reason string) error {
+	named, err := manifestNamedBy(ctx, tx, tenantID, bucket, key, addr)
+	if err != nil || named {
+		return err
+	}
+	container, _ := objectBlobAddress(tenantID, bucket, key, addr)
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO retired_blobs (backend_id, container, storage_key, tenant_id, reason, retire_after)
+		VALUES ($1, $2, $3, $4, $5, NOW() + make_interval(secs => $6))
+		ON CONFLICT (backend_id, container, storage_key) DO UPDATE SET reason = EXCLUDED.reason, retire_after = EXCLUDED.retire_after`,
+		chunkedBackendSentinel, container, addr, tenantID, reason, retiredBlobGrace.Seconds()); err != nil {
+		return fmt.Errorf("retire manifest %s: %w", addr, err)
+	}
+	return nil
+}
+
+// retireRowBytes retires what a removed row named: its manifest when it was
+// chunked, its whole blob otherwise (errUnaddressableBlob for a whole blob
+// with no recorded backend).
+func retireRowBytes(ctx context.Context, tx *sql.Tx, tenantID, bucket, key, addr, backend string, chunked bool, reason string) error {
+	if chunked {
+		return retireManifest(ctx, tx, tenantID, bucket, key, manifestAddress(key, addr), reason)
+	}
+	return retireBlob(ctx, tx, tenantID, bucket, key, addr, backend, reason)
 }
 
 // errUnaddressableBlob: a displaced blob whose row recorded no backend.

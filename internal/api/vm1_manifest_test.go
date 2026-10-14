@@ -9,23 +9,65 @@ package api
 import (
 	"bytes"
 	"context"
+	"database/sql"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/FairForge/vaultaire/internal/crypto"
+	"github.com/FairForge/vaultaire/internal/engine"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
 
-// vmBody is n bytes distinct per seed (a chunk of its own).
-func vmBody(n int, seed byte) []byte { return mpBody(n, seed) }
+// body is n bytes distinct per seed AND per fixture (the tenant id leads
+// it): the plaintext content index is shared by every test on the
+// database, and a chunk another test stored would dedup-hit a blob that
+// test's driver held.
+func (f *mpChunkFixture) body(n int, seed byte) []byte {
+	b := mpBody(n, seed)
+	copy(b, f.tenantID)
+	return b
+}
 
-// putBody PUTs body to test-bucket/key through the server path.
+// putBody PUTs body to test-bucket/key through the server path, and has
+// the content-index rows of its chunks removed with the test.
 func (f *mpChunkFixture) putBody(t *testing.T, key string, body []byte) (int, string) {
 	t.Helper()
 	w := doS3Request(f.server, f.tenant, "PUT", "/test-bucket/"+key, bytes.NewReader(body))
+	if w.Code == http.StatusOK {
+		f.forgetChunksOf(t, key)
+	}
 	return w.Code, w.Header().Get("x-amz-version-id")
+}
+
+// forgetChunksOf removes, after the test, the content-index rows of the
+// chunks key's manifest references now (bounded to them: packages share
+// the database).
+func (f *mpChunkFixture) forgetChunksOf(t *testing.T, key string) {
+	t.Helper()
+	rows, err := f.db.Query(`SELECT DISTINCT r.dedup_scope, r.plaintext_hash FROM tenant_chunk_refs r
+		JOIN object_head_cache h ON h.tenant_id = r.tenant_id::text AND h.bucket = r.bucket_name
+		 AND COALESCE(h.storage_key, h.object_key) = r.object_key
+		WHERE h.tenant_id = $1 AND h.bucket = 'test-bucket' AND h.object_key = $2 AND h.is_chunked`, f.tenantID, key)
+	require.NoError(t, err)
+	type scoped struct{ scope, hash string }
+	var hs []scoped
+	for rows.Next() {
+		var h scoped
+		require.NoError(t, rows.Scan(&h.scope, &h.hash))
+		hs = append(hs, h)
+	}
+	require.NoError(t, rows.Err())
+	_ = rows.Close()
+	t.Cleanup(func() {
+		for _, h := range hs {
+			_, _ = f.db.Exec(`DELETE FROM global_content_index WHERE dedup_scope = $1 AND plaintext_hash = $2`, h.scope, h.hash)
+		}
+	})
 }
 
 // head reads the key's head row: chunked, its address ("" = none).
@@ -68,7 +110,7 @@ func (f *mpChunkFixture) collectAfterGrace(t *testing.T) RetiredBlobsResult {
 }
 
 func newTestRetiredCollector(f *mpChunkFixture) *RetiredBlobCollector {
-	c := NewRetiredBlobCollector(f.db, f.server.engine, zap.NewNop())
+	c := NewRetiredBlobCollector(f.db, f.server.engine, f.server.gci, zap.NewNop())
 	c.onlyTenant = f.tenantID
 	c.JobName = "test_retired_vm1_" + f.tenantID[:8]
 	return c
@@ -85,7 +127,7 @@ func TestVM1_AChunkedWritePutsItsManifestAtItsOwnAddress(t *testing.T) {
 	// Before: the manifest was keyed by the object key (storage_key NULL),
 	// so a second chunked write of the key replaced it in place.
 	f := setupMPChunkFixture(t, false)
-	body := vmBody(4096, 1)
+	body := f.body(4096, 1)
 	code, _ := f.putBody(t, "obj.bin", body)
 	require.Equal(t, http.StatusOK, code)
 
@@ -105,7 +147,7 @@ func TestVM1_AChunkedOverwriteRetiresTheDisplacedManifest_TheCollectorReleasesIt
 	// deleted, counts decremented): a GET that had resolved it a moment
 	// before lost its chunks to the next dedup GC.
 	f := setupMPChunkFixture(t, false)
-	a, b := vmBody(4096, 1), vmBody(4096, 2)
+	a, b := f.body(4096, 1), f.body(4096, 2)
 	require.Equal(t, http.StatusOK, mustCode(f.putBody(t, "obj.bin", a)))
 	_, oldAddr := f.head(t, "obj.bin")
 	require.Equal(t, http.StatusOK, mustCode(f.putBody(t, "obj.bin", b)))
@@ -115,7 +157,7 @@ func TestVM1_AChunkedOverwriteRetiresTheDisplacedManifest_TheCollectorReleasesIt
 	assert.Positive(t, refs)
 	assert.Equal(t, 1, f.retiredManifests(t))
 	assert.Equal(t, b, f.getBytes(t, "obj.bin", ""))
-	rd, err := f.server.writeAdapter().openChunkedObject(context.Background(), f.tenantID, "test-bucket", oldAddr, int64(len(a)))
+	rd, err := f.server.writeAdapter().openChunkedObject(context.Background(), f.tenantID, "test-bucket", "obj.bin", oldAddr, int64(len(a)))
 	require.NoError(t, err, "a reader that resolved the old row still reads it")
 	got := new(bytes.Buffer)
 	_, err = got.ReadFrom(rd)
@@ -136,7 +178,7 @@ func TestVM1_AChunkedOverwriteRetiresTheDisplacedManifest_TheCollectorReleasesIt
 
 func TestVM1_AChunkedDeleteRetiresItsManifest(t *testing.T) {
 	f := setupMPChunkFixture(t, false)
-	require.Equal(t, http.StatusOK, mustCode(f.putBody(t, "obj.bin", vmBody(4096, 1))))
+	require.Equal(t, http.StatusOK, mustCode(f.putBody(t, "obj.bin", f.body(4096, 1))))
 	_, addr := f.head(t, "obj.bin")
 
 	require.Equal(t, http.StatusNoContent, doS3Request(f.server, f.tenant, "DELETE", "/test-bucket/obj.bin", nil).Code)
@@ -156,7 +198,7 @@ func TestVM1_PM3_APreVersioningChunkedObjectIsKeptAsTheNullVersionByAnOverwrite(
 	// manifest of an object chunked before versioning was enabled; AWS keeps
 	// it as the null version. Before: GET ?versionId=null 404.
 	f := setupMPChunkFixture(t, false)
-	a := vmBody(4096, 1)
+	a := f.body(4096, 1)
 	require.Equal(t, http.StatusOK, mustCode(f.putBody(t, "obj.bin", a)))
 	f.versioning(t, "Enabled")
 
@@ -185,7 +227,7 @@ func TestVM1_PM3_APreVersioningChunkedObjectIsKeptAsTheNullVersionByAnOverwrite(
 
 func TestVM1_PM3_APreVersioningChunkedObjectIsKeptBehindADeleteMarker(t *testing.T) {
 	f := setupMPChunkFixture(t, false)
-	a := vmBody(4096, 1)
+	a := f.body(4096, 1)
 	require.Equal(t, http.StatusOK, mustCode(f.putBody(t, "obj.bin", a)))
 	f.versioning(t, "Enabled")
 
@@ -205,7 +247,7 @@ func TestVM1_ASuspendedOverwriteOfAPreVersioningChunkedObjectReleasesIt(t *testi
 	// Suspended: the write replaces the null version (AWS), so the displaced
 	// chunked object is retired and released — through the collector.
 	f := setupMPChunkFixture(t, false)
-	require.Equal(t, http.StatusOK, mustCode(f.putBody(t, "obj.bin", vmBody(4096, 1))))
+	require.Equal(t, http.StatusOK, mustCode(f.putBody(t, "obj.bin", f.body(4096, 1))))
 	_, addr := f.head(t, "obj.bin")
 	f.versioning(t, "Suspended")
 
@@ -226,7 +268,7 @@ func TestVM1_ALegacyByKeyManifestStillReadsOverwritesAndDeletes(t *testing.T) {
 	// row names no address: it reads by key, and an overwrite or a delete
 	// retires it by key.
 	f := setupMPChunkFixture(t, false)
-	a := vmBody(4096, 1)
+	a := f.body(4096, 1)
 	plantLegacy := func(key string, body []byte) {
 		require.Equal(t, http.StatusOK, mustCode(f.putBody(t, key, body)))
 		_, sk := f.head(t, key)
@@ -244,12 +286,12 @@ func TestVM1_ALegacyByKeyManifestStillReadsOverwritesAndDeletes(t *testing.T) {
 		require.NoError(t, err)
 	}
 	plantLegacy("old.bin", a)
-	plantLegacy("gone.bin", vmBody(3000, 3))
+	plantLegacy("gone.bin", f.body(3000, 3))
 
 	assert.Equal(t, a, f.getBytes(t, "old.bin", ""), "a legacy manifest reads by key")
-	require.Equal(t, http.StatusOK, mustCode(f.putBody(t, "old.bin", vmBody(4096, 2))))
+	require.Equal(t, http.StatusOK, mustCode(f.putBody(t, "old.bin", f.body(4096, 2))))
 	require.Equal(t, http.StatusNoContent, doS3Request(f.server, f.tenant, "DELETE", "/test-bucket/gone.bin", nil).Code)
-	assert.Equal(t, vmBody(4096, 2), f.getBytes(t, "old.bin", ""))
+	assert.Equal(t, f.body(4096, 2), f.getBytes(t, "old.bin", ""))
 	f.ledgerAgrees(t, "after the overwrite and the delete")
 
 	f.collectAfterGrace(t)
@@ -257,7 +299,7 @@ func TestVM1_ALegacyByKeyManifestStillReadsOverwritesAndDeletes(t *testing.T) {
 		refs, meta := f.manifestRows(t, k)
 		assert.Zero(t, refs+meta, "the legacy manifest of %s is released by key", k)
 	}
-	assert.Equal(t, vmBody(4096, 2), f.getBytes(t, "old.bin", ""))
+	assert.Equal(t, f.body(4096, 2), f.getBytes(t, "old.bin", ""))
 }
 
 func TestVM1_AManifestNoRowNamesIsFoundAndReleased(t *testing.T) {
@@ -266,7 +308,7 @@ func TestVM1_AManifestNoRowNamesIsFoundAndReleased(t *testing.T) {
 	// key) and drops the head row. The collector's orphan pass finds the
 	// manifest no row names and releases it after the grace.
 	f := setupMPChunkFixture(t, false)
-	require.Equal(t, http.StatusOK, mustCode(f.putBody(t, "obj.bin", vmBody(4096, 1))))
+	require.Equal(t, http.StatusOK, mustCode(f.putBody(t, "obj.bin", f.body(4096, 1))))
 	_, addr := f.head(t, "obj.bin")
 	require.True(t, isBlobAddressOf("obj.bin", addr), "an addressed manifest: %q", addr)
 	_, err := f.db.Exec(`DELETE FROM object_head_cache WHERE tenant_id = $1 AND object_key = 'obj.bin'`, f.tenantID) // the old slot's delete
@@ -283,3 +325,33 @@ func TestVM1_AManifestNoRowNamesIsFoundAndReleased(t *testing.T) {
 }
 
 func mustCode(code int, _ string) int { return code }
+
+// releaseRetiredManifests runs the collector over tenantID's retired rows
+// as if their grace had passed: what a delete or an overwrite of a chunked
+// object releases since WP-VM-1, after the grace. Tests of dedup GC and the
+// chunk move start where the collector ends.
+func releaseRetiredManifests(t *testing.T, db *sql.DB, eng engine.Engine, gci *crypto.GlobalContentIndex, tenantID string) {
+	t.Helper()
+	c := NewRetiredBlobCollector(db, eng, gci, zap.NewNop())
+	require.NotNil(t, c)
+	c.onlyTenant = tenantID
+	c.JobName = "test_retired_release_" + tenantID[:8]
+	c.now = func() time.Time { return time.Now().Add(retiredBlobGrace + time.Hour) }
+	_, err := c.RunOnce(context.Background())
+	require.NoError(t, err)
+}
+
+// manifestKeyOf is where key's manifest is stored: the address its chunked
+// head row names (WP-VM-1), the key itself for one written before 092 or a
+// key with no chunked head row.
+func manifestKeyOf(t *testing.T, db *sql.DB, tenantID, bucket, key string) string {
+	t.Helper()
+	var at string
+	err := db.QueryRow(`SELECT COALESCE(storage_key, object_key) FROM object_head_cache
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND is_chunked`, tenantID, bucket, key).Scan(&at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return key
+	}
+	require.NoError(t, err)
+	return at
+}

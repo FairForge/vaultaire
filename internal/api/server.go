@@ -350,7 +350,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	s.chunkMover = NewChunkMover(s.db, s.engine, logger)
 	// The retired_blobs collector (WP-R2-1 Part C): the one deleter of
 	// displaced whole-object blobs.
-	s.retiredBlobs = NewRetiredBlobCollector(s.db, s.engine, logger)
+	s.retiredBlobs = NewRetiredBlobCollector(s.db, s.engine, s.gci, logger)
 
 	// Routing truth (WP-R7-5): the boot check runs in Start, the sampled
 	// job daily. Knobs: ROUTING_TRUTH_SAMPLE, ROUTING_TRUTH_PERMAFROST_SAMPLE,

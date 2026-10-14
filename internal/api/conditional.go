@@ -106,3 +106,46 @@ func writeNotModified(w http.ResponseWriter, etag string, lastModified time.Time
 	}
 	w.WriteHeader(http.StatusNotModified)
 }
+
+// copySourceConditionHeaders maps CopyObject's x-amz-copy-source-if-*
+// headers to the conditional headers they mirror.
+var copySourceConditionHeaders = [][2]string{
+	{"x-amz-copy-source-if-match", "If-Match"},
+	{"x-amz-copy-source-if-none-match", "If-None-Match"},
+	{"x-amz-copy-source-if-modified-since", "If-Modified-Since"},
+	{"x-amz-copy-source-if-unmodified-since", "If-Unmodified-Since"},
+}
+
+// evaluateCopySourceConditions decides CopyObject's x-amz-copy-source-if-*
+// conditions on the copy's source (its ETag and Last-Modified; R61-8 — no
+// copy evaluated them). 412 when one fails, 0 to proceed. AWS's two pairs:
+// an If-Match that holds wins over an If-Unmodified-Since that does not;
+// an If-None-Match that fails (the ETag matches) is 412 whatever
+// If-Modified-Since says, and one that holds wins over it.
+func evaluateCopySourceConditions(r *http.Request, etag string, lastModified time.Time) int {
+	h := http.Header{}
+	for _, m := range copySourceConditionHeaders {
+		if v := r.Header.Get(m[0]); v != "" {
+			h.Set(m[1], v)
+		}
+	}
+	if len(h) == 0 {
+		return 0
+	}
+	cr := &http.Request{Header: h}
+	if h.Get("If-Match") != "" {
+		if checkIfMatch(cr, etag) {
+			return http.StatusPreconditionFailed
+		}
+	} else if checkIfUnmodifiedSince(cr, lastModified) {
+		return http.StatusPreconditionFailed
+	}
+	if h.Get("If-None-Match") != "" {
+		if checkIfNoneMatch(cr, etag) {
+			return http.StatusPreconditionFailed
+		}
+	} else if checkIfModifiedSince(cr, lastModified) {
+		return http.StatusPreconditionFailed
+	}
+	return 0
+}

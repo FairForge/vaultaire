@@ -143,6 +143,7 @@ func NewRoutingTruthChecker(db *sql.DB, eng *engine.CoreEngine, gci *crypto.Glob
 type headRef struct {
 	tenantID, bucket, key, etag string
 	storageKey                  string // the row's blob address ("" = the key, WP-R2-1)
+	manifest                    string // a chunked row's manifest (WP-VM-1: its address, or the key)
 }
 
 // --- the result ---------------------------------------------------------------
@@ -284,8 +285,11 @@ func (c *RoutingTruthChecker) unknownBackendRows(ctx context.Context) ([]unknown
 			UNION ALL
 			SELECT cold_backend FROM smart_demotions WHERE hot_deleted_at IS NULL AND ($2 = '' OR tenant_id = $2)) x
 			WHERE NOT (b = ANY($1::text[])) GROUP BY 1`},
+		// A chunked version names its manifest with the same sentinel
+		// (WP-VM-1): checked chunk by chunk below, never a route.
 		{"object_versions", `SELECT COALESCE(backend_name, ''), COUNT(*) FROM object_versions
 			WHERE NOT is_delete_marker AND ($2 = '' OR tenant_id = $2)
+			  AND backend_name IS DISTINCT FROM '` + chunkedBackendSentinel + `'
 			  AND (backend_name IS NULL OR NOT (backend_name = ANY($1::text[]))) GROUP BY 1`},
 	}
 	var out []unknownRows
@@ -529,15 +533,29 @@ func (c *RoutingTruthChecker) checkWhole(ctx context.Context, backend string, h 
 	return "missing"
 }
 
-// sampleChunked checks the chunks of a few chunked objects at the one
-// address (WP-R8-7), through the chunk store — the same path a GET takes,
-// legacy fallback included.
+// chunkedManifestsSQL lists every manifest a row names (tenant $1, the
+// empty string for all): the chunked head rows' and, since WP-VM-1, the
+// chunked versions' (one per manifest: a head row's own version names the
+// same one).
+const chunkedManifestsSQL = `
+	SELECT tenant_id, bucket, object_key, COALESCE(storage_key, object_key) AS manifest
+	  FROM object_head_cache WHERE is_chunked AND ($1 = '' OR tenant_id = $1)
+	UNION
+	SELECT tenant_id, bucket, object_key, storage_key
+	  FROM object_versions
+	 WHERE backend_name = '` + chunkedBackendSentinel + `' AND storage_key IS NOT NULL AND NOT is_delete_marker
+	   AND ($1 = '' OR tenant_id = $1)`
+
+// sampleChunked checks the chunks of a few chunked objects — current and,
+// since WP-VM-1, non-current versions, each through the manifest its row
+// names — at the one address (WP-R8-7), through the chunk store: the same
+// path a GET takes, legacy fallback included.
 func (c *RoutingTruthChecker) sampleChunked(ctx context.Context, res *RoutingTruthResult) error {
 	if c.gci == nil || c.ChunkedSample <= 0 {
 		return nil
 	}
 	var total int64
-	if err := c.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM object_head_cache WHERE is_chunked AND ($1 = '' OR tenant_id = $1)`, c.scopeTenant).Scan(&total); err != nil {
+	if err := c.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM (`+chunkedManifestsSQL+`) m`, c.scopeTenant).Scan(&total); err != nil {
 		return fmt.Errorf("routing truth: count chunked: %w", err)
 	}
 	if total == 0 {
@@ -547,8 +565,8 @@ func (c *RoutingTruthChecker) sampleChunked(ctx context.Context, res *RoutingTru
 	if total > int64(c.ChunkedSample) {
 		offset = rand.Int64N(total - int64(c.ChunkedSample) + 1) // #nosec G404 — a sampling window
 	}
-	rows, err := c.db.QueryContext(ctx, `SELECT tenant_id, bucket, object_key FROM object_head_cache
-		WHERE is_chunked AND ($1 = '' OR tenant_id = $1) ORDER BY tenant_id, bucket, object_key OFFSET $2 LIMIT $3`,
+	rows, err := c.db.QueryContext(ctx, `SELECT tenant_id, bucket, object_key, manifest FROM (`+chunkedManifestsSQL+`) m
+		ORDER BY tenant_id, bucket, object_key, manifest OFFSET $2 LIMIT $3`,
 		c.scopeTenant, offset, c.ChunkedSample)
 	if err != nil {
 		return fmt.Errorf("routing truth: sample chunked: %w", err)
@@ -556,7 +574,7 @@ func (c *RoutingTruthChecker) sampleChunked(ctx context.Context, res *RoutingTru
 	var objs []headRef
 	for rows.Next() {
 		var h headRef
-		if err := rows.Scan(&h.tenantID, &h.bucket, &h.key); err != nil {
+		if err := rows.Scan(&h.tenantID, &h.bucket, &h.key, &h.manifest); err != nil {
 			_ = rows.Close()
 			return fmt.Errorf("routing truth: scan chunked: %w", err)
 		}
@@ -579,7 +597,7 @@ func (c *RoutingTruthChecker) sampleChunked(ctx context.Context, res *RoutingTru
 			break
 		}
 		ct.Objects++
-		refs, err := c.gci.GetObjectChunks(ctx, h.tenantID, h.bucket, h.key)
+		refs, err := c.gci.GetObjectChunks(ctx, h.tenantID, h.bucket, h.manifest)
 		if err != nil {
 			ct.Errors++
 			c.logger.Warn("routing truth: manifest could not be read", zap.String("key", h.key), zap.Error(err))

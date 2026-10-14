@@ -512,6 +512,7 @@ func TestQuotaAccounting_BatchDeleteChunkedReleasesRefs(t *testing.T) {
 	require.Equal(t, 200, f.put(t, "chunk-batch.bin", testBytes(size)))
 	require.Equal(t, int64(size), f.used(t))
 
+	manifest := manifestKeyOf(t, f.db, f.tenantID, "test-bucket", "chunk-batch.bin")
 	body := `<Delete><Object><Key>chunk-batch.bin</Key></Object></Delete>`
 	req := httptest.NewRequest("POST", "/test-bucket?delete", bytes.NewReader([]byte(body)))
 	req = req.WithContext(f.ctx(req.Context()))
@@ -522,13 +523,15 @@ func TestQuotaAccounting_BatchDeleteChunkedReleasesRefs(t *testing.T) {
 
 	assert.Equal(t, int64(0), f.used(t), "batch delete must release the chunked object's logical size")
 
+	// Retired with the delete, released by the collector (WP-VM-1).
+	releaseRetiredManifests(t, f.db, f.server.engine, f.server.gci, f.tenantID)
 	tenantUUID, err := uuid.Parse(f.tenantID)
 	require.NoError(t, err)
 	var refs int
 	require.NoError(t, f.db.QueryRow(`
 		SELECT COUNT(*) FROM tenant_chunk_refs
 		WHERE tenant_id = $1 AND bucket_name = $2 AND object_key = $3`,
-		tenantUUID, "test-bucket", "chunk-batch.bin").Scan(&refs))
+		tenantUUID, "test-bucket", manifest).Scan(&refs))
 	assert.Equal(t, 0, refs, "batch delete must decrement GCI chunk refs like single delete does")
 }
 

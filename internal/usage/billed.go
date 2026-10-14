@@ -10,7 +10,7 @@
 // holds bytes and is billed like an object. Not billed: a delete marker, a
 // version written before C1 (storage_key NULL — its bytes were overwritten
 // in place), and the version that IS the current object (the latest version
-// names the head row's blob: counted once, as the head row).
+// names the head row's blob or manifest: counted once, as the head row).
 //
 // The incremental ledgers (tenant_quotas, tenant_floor_quotas) follow the
 // same rule write by write (internal/api/quota_accounting.go); the
@@ -23,15 +23,26 @@ import (
 	"fmt"
 )
 
+// VersionRetained is the condition a version row v is a RETAINED
+// non-current version under its key's head row h (NULL when the key has no
+// current object — behind a delete marker): it names bytes (a whole blob,
+// or since WP-VM-1 a manifest — backend 'chunked') and they are not the
+// head row's. "The head row's" is matched by address AND kind: a chunked
+// head row names its manifest at COALESCE(storage_key, object_key), as a
+// whole one names its blob — a chunked version is billed like any other
+// (logical size), and the head row's own version is counted once, as the
+// head row.
+const VersionRetained = `(v.storage_key IS NOT NULL AND NOT v.is_delete_marker
+	AND (h.tenant_id IS NULL OR COALESCE(h.storage_key, h.object_key) <> v.storage_key
+	     OR h.is_chunked <> (COALESCE(v.backend_name, '') = 'chunked')))`
+
 // RetainedVersionsFrom is the FROM … WHERE of the retained non-current
-// versions: v is the version row, h the key's head row (NULL when the key
-// has no current object — behind a delete marker). A caller appends its own
-// "AND v.tenant_id = …".
+// versions: v is the version row, h the key's head row. A caller appends its
+// own "AND v.tenant_id = …".
 const RetainedVersionsFrom = `object_versions v
 	LEFT JOIN object_head_cache h
 	       ON h.tenant_id = v.tenant_id AND h.bucket = v.bucket AND h.object_key = v.object_key
-	WHERE v.storage_key IS NOT NULL AND NOT v.is_delete_marker
-	  AND (h.tenant_id IS NULL OR h.is_chunked OR COALESCE(h.storage_key, h.object_key) <> v.storage_key)`
+	WHERE ` + VersionRetained
 
 // RetainedVersionFloor is the floor a retained version is billed on: its
 // own (088, written with the version), else the head row's of its key, else

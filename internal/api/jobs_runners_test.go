@@ -129,6 +129,7 @@ func TestDedupGCJob_AChunkTheBackendWillNotDeleteIsANoteNotAFailedRun(t *testing
 	dw := httptest.NewRecorder()
 	f.adapter.HandleDelete(dw, delReq, "test-bucket", "gc-flaky.bin")
 	require.Equal(t, http.StatusNoContent, dw.Code)
+	releaseRetiredManifests(t, f.db, f.eng, f.adapter.gci, f.tenantID) // WP-VM-1: retired, then released
 	backdateGCIRows(t, f.db, pairs)
 	f.fixed.failDelete.Store(true)
 	jf := setupJobsFixture(t)

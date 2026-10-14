@@ -55,7 +55,7 @@ func TestChunkedGet_NeverServesStaleWholeObjectBlob(t *testing.T) {
 	assert.Equal(t, newBytes, gw.Body.Bytes())
 
 	// Damage the manifest, and re-plant a stale blob to tempt the fallthrough.
-	_, err = f.db.Exec(`DELETE FROM tenant_chunk_refs WHERE tenant_id::text = $1 AND object_key = 'swap.bin'`,
+	_, err = f.db.Exec(`DELETE FROM tenant_chunk_refs WHERE tenant_id::text = $1 AND object_key = `+manifestOf("$1", "'swap.bin'"),
 		f.tenantID)
 	require.NoError(t, err)
 	_, err = f.eng.Put(common.WithTenantID(context.Background(), f.tenantID), container, "swap.bin", bytes.NewReader(oldBytes))
@@ -80,7 +80,7 @@ func TestChunkedPut_FailedInstallLeavesPreviousVersionIntact(t *testing.T) {
 
 	var v1Refs int
 	require.NoError(t, f.db.QueryRow(
-		`SELECT COUNT(*) FROM tenant_chunk_refs WHERE tenant_id::text = $1 AND object_key = 'atomic.bin'`,
+		`SELECT COUNT(*) FROM tenant_chunk_refs WHERE tenant_id::text = $1 AND object_key = `+manifestOf("$1", "'atomic.bin'"),
 		f.tenantID).Scan(&v1Refs))
 	require.Positive(t, v1Refs)
 
@@ -96,7 +96,7 @@ func TestChunkedPut_FailedInstallLeavesPreviousVersionIntact(t *testing.T) {
 	// return v1's bytes.
 	var refsAfter int
 	require.NoError(t, f.db.QueryRow(
-		`SELECT COUNT(*) FROM tenant_chunk_refs WHERE tenant_id::text = $1 AND object_key = 'atomic.bin'`,
+		`SELECT COUNT(*) FROM tenant_chunk_refs WHERE tenant_id::text = $1 AND object_key = `+manifestOf("$1", "'atomic.bin'"),
 		f.tenantID).Scan(&refsAfter))
 	assert.Equal(t, v1Refs, refsAfter,
 		"failed install must not destroy the previous version's manifest")
@@ -156,7 +156,7 @@ func TestChunkedPut_FullyDedupedReportsZeroPhysical(t *testing.T) {
 	var physical int64
 	require.NoError(t, f.db.QueryRow(`
 		SELECT physical_size FROM object_metadata
-		WHERE tenant_id::text = $1 AND object_key = 'phys-b.bin'`,
+		WHERE tenant_id::text = $1 AND object_key = `+manifestOf("$1", "'phys-b.bin'"),
 		f.tenantID).Scan(&physical))
 	assert.Zero(t, physical,
 		"a fully-deduplicated upload adds no new physical bytes")

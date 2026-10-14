@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -188,30 +189,55 @@ func TestLedger_ConcurrentOverwriteDeleteReconcile_TwoKeys_NoDeadlock(t *testing
 // tenant_floor_quotas row equal what ReconcileTenantStorageUsage would
 // write — without running it.
 func TestLedger_RandomSequence_EqualsTheReconcileAtEveryStep(t *testing.T) {
-	for _, status := range []string{"", "Enabled", "Suspended"} {
+	// WP-VM-1: every run also writes chunked objects (anything over 3000
+	// bytes), runs the collector (retired manifests and blobs released),
+	// and "→Enabled→Suspended" changes the versioning state mid-run, so
+	// objects chunked before versioning become null versions (PM-3).
+	for _, status := range []string{"", "Enabled", "Suspended", "→Enabled→Suspended"} {
 		t.Run("versioning="+status, func(t *testing.T) {
 			seed := time.Now().UnixNano()
 			t.Logf("seed %d", seed)
 			rng := rand.New(rand.NewSource(seed))
 			f := setupQuotaAccountingFixture(t, 1<<30)
+			f.server.gci = crypto.NewGlobalContentIndex(f.db)
+			f.server.chunkingThreshold = 3000
 			f.house(t, 1<<30, 1<<30)
-			if status != "" {
+			if status == "Enabled" || status == "Suspended" {
 				f.versioning(t, status)
-				_, err := f.db.Exec(`INSERT INTO buckets (tenant_id, name, tier_preference) VALUES ($1, 'attic-bucket', 'archive')
-					ON CONFLICT (tenant_id, name) DO UPDATE SET tier_preference = 'archive'`, f.tenantID)
-				require.NoError(t, err)
+			} else {
+				f.unversionedBucket(t)
+			}
+			_, err := f.db.Exec(`INSERT INTO buckets (tenant_id, name, tier_preference) VALUES ($1, 'attic-bucket', 'archive')
+				ON CONFLICT (tenant_id, name) DO UPDATE SET tier_preference = 'archive'`, f.tenantID)
+			require.NoError(t, err)
+			// The body's first bytes are the tenant's: the plaintext content
+			// index is shared by every test on the database.
+			body := func(n int) []byte {
+				b := testBytes(n)
+				copy(b, f.tenantID)
+				return b
 			}
 			keys := []string{"k0", "k1", "k2"}
 			for step := 0; step < 60; step++ {
+				if status == "→Enabled→Suspended" && (step == 20 || step == 40) {
+					next := map[int]string{20: "Enabled", 40: "Suspended"}[step]
+					f.versioning(t, next)
+				}
 				key := keys[rng.Intn(len(keys))]
 				var op string
-				switch rng.Intn(8) {
+				switch rng.Intn(10) {
 				case 0, 1:
 					op = "PUT " + key
-					require.Equal(t, http.StatusOK, f.put(t, key, testBytes(rng.Intn(6000))), op)
+					require.Equal(t, http.StatusOK, f.put(t, key, body(rng.Intn(6000))), op)
+				case 8:
+					op = "PUT chunked " + key
+					require.Equal(t, http.StatusOK, f.put(t, key, body(3001+rng.Intn(6000))), op)
+				case 9:
+					op = "collector"
+					releaseRetiredManifests(t, f.db, f.server.engine, f.server.gci, f.tenantID)
 				case 2:
 					op = "PUT GLACIER " + key
-					require.Equal(t, http.StatusOK, f.putClass(t, "test-bucket", key, "GLACIER", testBytes(1+rng.Intn(6000))), op)
+					require.Equal(t, http.StatusOK, f.putClass(t, "test-bucket", key, "GLACIER", body(1+rng.Intn(6000))), op)
 				case 3:
 					op = "DELETE " + key
 					require.Equal(t, http.StatusNoContent, f.del(t, key), op)
@@ -231,6 +257,9 @@ func TestLedger_RandomSequence_EqualsTheReconcileAtEveryStep(t *testing.T) {
 					f.complete(t, key)
 				case 6:
 					src := keys[rng.Intn(len(keys))]
+					if src == key { // a self-copy of a chunked object without REPLACE is InvalidRequest (as AWS)
+						src = keys[(rng.Intn(len(keys)-1)+1+indexOf(keys, key))%len(keys)]
+					}
 					op = "COPY " + src + " → " + key
 					if f.headRows(t, src) == 0 {
 						continue
@@ -245,6 +274,15 @@ func TestLedger_RandomSequence_EqualsTheReconcileAtEveryStep(t *testing.T) {
 			}
 		})
 	}
+}
+
+func indexOf(xs []string, x string) int {
+	for i, v := range xs {
+		if v == x {
+			return i
+		}
+	}
+	return -1
 }
 
 func (f *quotaAccountingFixture) copyObject(t *testing.T, src, dst string) *httptest.ResponseRecorder {
@@ -265,7 +303,7 @@ func (f *quotaAccountingFixture) copyObject(t *testing.T, src, dst string) *http
 // come back.
 func TestLedger_NoQuotaStatementAfterACommit(t *testing.T) {
 	forbidden := map[string]bool{"settlePutQuota": true, "releaseDisplacedOn": true, "releaseDetached": true}
-	allowedReleasesCallers := map[string]bool{"settleTx": true, "deleteHeadRowTx": true, "predictRelease": true}
+	allowedReleasesCallers := map[string]bool{"settleTx": true, "deleteHeadRowTx": true, "predictRelease": true, "deleteSuspended": true}
 	fset := token.NewFileSet()
 	files, err := filepath.Glob("*.go")
 	require.NoError(t, err)

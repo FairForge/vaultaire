@@ -71,23 +71,26 @@ func TestPlainPutOverChunked_ReleasesManifest(t *testing.T) {
 	big := generateTestData(8 * 1024)
 	require.Equal(t, http.StatusOK, stringTenantPut(t, f, "shrink.bin", big).Code)
 
-	var refCountBefore int
-	require.NoError(t, f.db.QueryRow(`
-		SELECT COUNT(*) FROM tenant_chunk_refs WHERE tenant_id::text = $1 AND object_key = 'shrink.bin'`,
-		f.tenantID).Scan(&refCountBefore))
+	manifest := manifestKeyOf(t, f.db, f.tenantID, "test-bucket", "shrink.bin")
+	refsAt := func() int {
+		var n int
+		require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM tenant_chunk_refs WHERE tenant_id::text = $1 AND object_key = $2`,
+			f.tenantID, manifest).Scan(&n))
+		return n
+	}
+	refCountBefore := refsAt()
 	require.Positive(t, refCountBefore)
 
 	// v2: small plain overwrite (below the 1 KiB threshold → plain path).
 	small := []byte("small plain overwrite")
 	require.Equal(t, http.StatusOK, stringTenantPut(t, f, "shrink.bin", small).Code)
 
-	// Old manifest fully released, flag flipped, GCI refs decremented to 0
-	// (marked for GC).
-	var refsAfter int
-	require.NoError(t, f.db.QueryRow(`
-		SELECT COUNT(*) FROM tenant_chunk_refs WHERE tenant_id::text = $1 AND object_key = 'shrink.bin'`,
-		f.tenantID).Scan(&refsAfter))
-	assert.Zero(t, refsAfter, "plain overwrite must release the old chunk manifest")
+	// The old manifest is retired with the overwrite (WP-VM-1: kept for the
+	// grace, a GET in flight finishes), then released by the collector:
+	// refs gone, GCI counts decremented (marked for GC).
+	assert.Equal(t, refCountBefore, refsAt(), "retired, not released, at the overwrite")
+	releaseRetiredManifests(t, f.db, f.eng, f.adapter.gci, f.tenantID)
+	assert.Zero(t, refsAt(), "the collector releases the old chunk manifest")
 
 	var isChunked bool
 	require.NoError(t, f.db.QueryRow(`
@@ -98,8 +101,8 @@ func TestPlainPutOverChunked_ReleasesManifest(t *testing.T) {
 
 	var metaRows int
 	require.NoError(t, f.db.QueryRow(`
-		SELECT COUNT(*) FROM object_metadata WHERE tenant_id::text = $1 AND object_key = 'shrink.bin'`,
-		f.tenantID).Scan(&metaRows))
+		SELECT COUNT(*) FROM object_metadata WHERE tenant_id::text = $1 AND object_key = $2`,
+		f.tenantID, manifest).Scan(&metaRows))
 	assert.Zero(t, metaRows, "object_metadata for the chunked version must be gone")
 
 	// The new content round-trips.
@@ -114,6 +117,7 @@ func TestPlainCopyOverChunkedDest_ReleasesManifest(t *testing.T) {
 	// Chunked object sitting at the destination key.
 	big := generateTestData(8 * 1024)
 	f.seedChunked(t, "dest-key.bin", big)
+	manifest := manifestKeyOf(t, f.db, f.tenantID, "test-bucket", "dest-key.bin")
 
 	// A plain source, stored through the server path (under the fixture's
 	// 1 KiB chunking threshold: whole).
@@ -128,10 +132,12 @@ func TestPlainCopyOverChunkedDest_ReleasesManifest(t *testing.T) {
 	f.server.handleCopyObject(w, req, f.s3Req("test-bucket", "dest-key.bin"))
 	require.Equal(t, http.StatusOK, w.Code)
 
+	// Retired with the copy (WP-VM-1), released by the collector.
+	releaseRetiredManifests(t, f.db, f.server.engine, f.server.gci, f.tenantID)
 	var refs int
 	require.NoError(t, f.db.QueryRow(`
-		SELECT COUNT(*) FROM tenant_chunk_refs WHERE tenant_id::text = $1 AND object_key = 'dest-key.bin'`,
-		f.tenantID).Scan(&refs))
+		SELECT COUNT(*) FROM tenant_chunk_refs WHERE tenant_id::text = $1 AND object_key = $2`,
+		f.tenantID, manifest).Scan(&refs))
 	assert.Zero(t, refs, "plain copy over a chunked object must release its manifest")
 
 	var isChunked bool

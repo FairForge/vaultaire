@@ -19,6 +19,7 @@ import (
 	"sync"
 
 	"github.com/FairForge/vaultaire/internal/crypto"
+	"github.com/FairForge/vaultaire/internal/usage"
 	"go.uber.org/zap"
 )
 
@@ -192,7 +193,7 @@ func (d objectDeleteAftermath) settle(ctx context.Context, tenantID, bucket, key
 		if read.found {
 			// The row and its bytes' release in one transaction (WP-R10-8):
 			// a version that keeps the blob keeps the bill (WP-R2-1 C2).
-			_, _, superseded, delErr = deleteHeadRowIfAt(ctx, d.db, manifestReleaser(d.gci), d.quota != nil, tenantID, bucket, key, read.storageKey)
+			_, _, superseded, delErr = deleteHeadRowIfAt(ctx, d.db, d.quota != nil, tenantID, bucket, key, read.storageKey)
 		} else if exErr := d.db.QueryRowContext(ctx, headRowExistsSQL, tenantID, bucket, key).Scan(&superseded); exErr != nil {
 			// Nothing was read, so no row is deleted; a row there now is a
 			// write's (superseded), and its retention stays.
@@ -213,26 +214,34 @@ func (d objectDeleteAftermath) settle(ctx context.Context, tenantID, bucket, key
 				zap.String("tenant_id", tenantID), zap.String("bucket", bucket), zap.String("key", key))
 		}
 		if !superseded {
-			if _, err := d.db.ExecContext(ctx, `
-				DELETE FROM object_locks WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-				tenantID, bucket, key); err != nil {
-				d.logger.Error("object lock row delete failed", zap.Error(err),
-					zap.String("bucket", bucket), zap.String("key", key))
-			}
-		}
-		// A Smart-demoted object has a second copy (the hot one, until it is
-		// reclaimed) that the delete did not reach: remove it now and settle
-		// the ledger, so no later job owes this key a delete (WP-R13-2).
-		d.smartPromoter.OnDelete(ctx, tenantID, bucket, key)
-		// The parity copy of a vault object goes with it (WP-VAULT-1); a leg
-		// that cannot be reached now is the job's stale pass to finish. A
-		// superseding write's object is not this delete's to unprotect.
-		if !superseded {
-			d.vaultParity.OnObjectDeleted(ctx, tenantID, bucket, key)
+			d.afterObjectGone(ctx, tenantID, bucket, key)
+		} else {
+			// A Smart-demoted object has a second copy the delete did not
+			// reach: settled whatever superseded it (WP-R13-2).
+			d.smartPromoter.OnDelete(ctx, tenantID, bucket, key)
 		}
 	}
 	d.announce(ctx, tenantID, bucket, key)
 	return nil
+}
+
+// afterObjectGone is what a key owes once its current object is gone (its
+// head row deleted, its bytes no longer named): the retention (expired,
+// governance-bypassed, or none) goes with it — the PUT-side lock check
+// needs no head row, so a stale lock row would refuse the next upload; a
+// Smart-demoted object's second copy (the hot one, until it is reclaimed)
+// is removed and the ledger settled, so no later job owes the key a delete
+// (WP-R13-2); the parity copy of a vault object goes (WP-VAULT-1; a leg
+// that cannot be reached now is the job's stale pass to finish).
+func (d objectDeleteAftermath) afterObjectGone(ctx context.Context, tenantID, bucket, key string) {
+	if _, err := d.db.ExecContext(ctx, `
+		DELETE FROM object_locks WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+		tenantID, bucket, key); err != nil {
+		d.logger.Error("object lock row delete failed", zap.Error(err),
+			zap.String("bucket", bucket), zap.String("key", key))
+	}
+	d.smartPromoter.OnDelete(ctx, tenantID, bucket, key)
+	d.vaultParity.OnObjectDeleted(ctx, tenantID, bucket, key)
 }
 
 // announce fires a removed key's s3:ObjectRemoved:Delete notification and
@@ -282,8 +291,9 @@ func (d objectDeleteAftermath) deleteVersionReleasing(ctx context.Context, tenan
 func (d objectDeleteAftermath) deleteBehindMarker(ctx context.Context, tenantID, bucket, key string) (string, error) {
 	markerID := generateVersionID()
 	// The marker, the head row's removal (the billing record, DELETE ...
-	// RETURNING; an object chunked before versioning was enabled releases
-	// its manifest, R8-07) and the displaced blob's fate commit in ONE
+	// RETURNING; an object chunked before versioning was enabled is anchored
+	// as the null version, which keeps its manifest — PM-3, WP-VM-1) and the
+	// displaced blob's fate commit in ONE
 	// transaction under the key's locks: a write that commits around the
 	// DELETE is wholly before or wholly after it (PM-6 under versioning,
 	// Stage 1a Prompt 6 Part 0 — split in two, a PUT committed between the
@@ -293,10 +303,10 @@ func (d objectDeleteAftermath) deleteBehindMarker(ctx context.Context, tenantID,
 		// The blob the head row named stays while a version keeps it (the
 		// undelete path); one no version names is displaced — queued before
 		// the release, which is the transaction's last statement (WP-R10-8).
-		_, _, err := deleteHeadRowTx(ctx, tx, manifestReleaser(d.gci), d.quota != nil, tenantID, bucket, key, nil,
+		_, _, err := deleteHeadRowTx(ctx, tx, d.quota != nil, tenantID, bucket, key, nil,
 			func(row displacedRow) error {
-				if row.StorageKey == "" {
-					return nil
+				if row.Chunked || row.StorageKey == "" {
+					return nil // a manifest is kept or retired by deleteHeadRowTx itself (WP-VM-1)
 				}
 				if err := retireBlob(ctx, tx, tenantID, bucket, key, row.StorageKey, row.Backend, retiredOverwritten); err != nil {
 					if !errors.Is(err, errUnaddressableBlob) {
@@ -316,6 +326,109 @@ func (d objectDeleteAftermath) deleteBehindMarker(ctx context.Context, tenantID,
 	return markerID, nil
 }
 
+// deleteSuspended is a DELETE with no version id on a Suspended bucket
+// (R61-5, as AWS): the key's "null" version — the current object when a
+// Suspended write put it, or a retained one — is replaced by a "null"
+// delete marker, which becomes the latest version. In ONE transaction under
+// the key's locks: the null version's row is replaced; the head row goes;
+// bytes no row names any more (the null version's, and the current
+// object's when it WAS the null version) are retired — a GET in flight
+// finishes, the collector deletes them — and released; a current object an
+// Enabled-era version names keeps its bytes and its bill (that version
+// stays, non-current). Before, the head row went and the null version kept
+// the bytes billed and listed as live. headGone reports whether the key
+// had a current object whose bytes left with it (its lock row, parity and
+// Smart copy go too).
+func (d objectDeleteAftermath) deleteSuspended(ctx context.Context, tenantID, bucket, key string) (headGone bool, err error) {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := lockHeadKey(ctx, tx, tenantID, bucket, key); err != nil {
+		return false, err
+	}
+	if err := lockVersionKey(ctx, tx, tenantID, bucket, key); err != nil {
+		return false, err
+	}
+	// The null version as it is now, and whether it is retained bytes of
+	// its own (not the head row's: those are the head row's bill).
+	var nullKey, nullBackend, nullFloor string
+	var nullSize int64
+	var nullRetained, nullFound bool
+	err = tx.QueryRowContext(ctx, `
+		SELECT COALESCE(v.storage_key, ''), COALESCE(v.backend_name, ''), v.size_bytes, `+usage.RetainedVersionFloor+`,
+		       `+usage.VersionRetained+`
+		FROM object_versions v
+		LEFT JOIN object_head_cache h ON h.tenant_id = v.tenant_id AND h.bucket = v.bucket AND h.object_key = v.object_key
+		WHERE v.tenant_id = $1 AND v.bucket = $2 AND v.object_key = $3 AND v.version_id = 'null' AND NOT v.is_delete_marker`,
+		tenantID, bucket, key).Scan(&nullKey, &nullBackend, &nullSize, &nullFloor, &nullRetained)
+	switch {
+	case err == nil:
+		nullFound = true
+	case errors.Is(err, sql.ErrNoRows):
+	default:
+		return false, fmt.Errorf("read the null version: %w", err)
+	}
+	// The null row becomes the marker (the latest version); every other row
+	// is non-current.
+	if _, err := tx.ExecContext(ctx, `UPDATE object_versions SET is_latest = FALSE
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND is_latest`, tenantID, bucket, key); err != nil {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO object_versions
+			(tenant_id, bucket, object_key, version_id, size_bytes, etag, content_type, is_latest, is_delete_marker)
+		VALUES ($1, $2, $3, 'null', 0, '', 'application/octet-stream', TRUE, TRUE)
+		ON CONFLICT (tenant_id, bucket, object_key, version_id) DO UPDATE SET
+			size_bytes = 0, etag = '', content_type = 'application/octet-stream', is_latest = TRUE, is_delete_marker = TRUE,
+			backend_name = NULL, storage_key = NULL, encryption_algorithm = NULL, encryption_key_version = NULL, floor = NULL,
+			metadata = NULL, content_disposition = NULL, content_encoding = NULL, content_language = NULL,
+			cache_control = NULL, http_expires = NULL, website_redirect_location = NULL, created_at = NOW()`,
+		tenantID, bucket, key); err != nil {
+		return false, fmt.Errorf("write the null delete marker: %w", err)
+	}
+	var rels []quotaRelease
+	// A retained null version (bytes of its own) is removed: retired and
+	// released. One that was the head row's bytes is the head row's below.
+	if nullFound && nullRetained && nullKey != "" {
+		if err := retireRowBytes(ctx, tx, tenantID, bucket, key, nullKey, nullBackend, nullBackend == chunkedBackendSentinel, retiredVersionDeleted); err != nil &&
+			!errors.Is(err, errUnaddressableBlob) {
+			return false, err
+		}
+		rels = append(rels, quotaRelease{Floor: nullFloor, Bytes: nullSize})
+	}
+	// The head row: its bytes are kept only by a version that still names
+	// them (an Enabled-era current version); otherwise retired with it.
+	row, found, err := deleteHeadRowTx(ctx, tx, false, tenantID, bucket, key, nil,
+		func(row displacedRow) error {
+			if row.Chunked || row.KeptByVersion {
+				return nil // a manifest is retired by deleteHeadRowTx itself
+			}
+			if err := retireBlob(ctx, tx, tenantID, bucket, key, blobArtifact(key, row.StorageKey), row.Backend, retiredDeleted); err != nil &&
+				!errors.Is(err, errUnaddressableBlob) {
+				return err
+			}
+			return nil
+		})
+	if err != nil {
+		return false, err
+	}
+	if found {
+		rels = append(rels, row.releases()...)
+	}
+	// The bill, last (WP-R10-8).
+	if d.quota != nil {
+		if err := releasesTx(ctx, tx, tenantID, rels); err != nil {
+			return false, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return found && !row.KeptByVersion, nil
+}
+
 // knownCopiesSQL: the backends other than the recorded one ($6) that hold
 // the blob at this address as far as the tables know — an unsettled
 // Smart-demotion ledger row of the key at the address (its hot copy until
@@ -332,7 +445,8 @@ const knownCopiesSQL = `
 	   AND hot_outcome NOT IN ('kept_changed', 'object_gone') AND cold_backend <> $6
 	UNION
 	SELECT backend_id FROM retired_blobs
-	 WHERE container = $5 AND storage_key = $4 AND $4 <> '' AND tenant_id = $1 AND backend_id <> $6`
+	 WHERE container = $5 AND storage_key = $4 AND $4 <> '' AND tenant_id = $1 AND backend_id <> $6
+	   AND backend_id <> '` + chunkedBackendSentinel + `'` // a retired manifest is no copy of a blob (WP-VM-1)
 
 // knownBlobCopies is every backend other than recorded the blob at
 // storageKey ("" = the key) is known to be on. A DELETE removes them with

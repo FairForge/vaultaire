@@ -243,7 +243,7 @@ func (r *AccountDeletionRunner) planSweep(ctx context.Context, tenantID string) 
 	}
 
 	named, err := queryStrings(ctx, r.db, `
-		SELECT DISTINCT backend_name FROM object_versions WHERE tenant_id = $1 AND COALESCE(backend_name, '') <> ''
+		SELECT DISTINCT backend_name FROM object_versions WHERE tenant_id = $1 AND COALESCE(backend_name, '') NOT IN ('', '`+chunkedBackendSentinel+`')
 		UNION SELECT DISTINCT backend_name FROM object_locations WHERE tenant_id = $1 AND COALESCE(backend_name, '') <> ''
 		UNION SELECT hot_backend FROM smart_demotions WHERE tenant_id = $1
 		UNION SELECT cold_backend FROM smart_demotions WHERE tenant_id = $1`, tenantID)

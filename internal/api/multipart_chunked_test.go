@@ -213,7 +213,7 @@ func (f *mpChunkFixture) get(t *testing.T, key, rng string) *httptest.ResponseRe
 func (f *mpChunkFixture) chunkRefs(t *testing.T, key string) int {
 	t.Helper()
 	var n int
-	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM tenant_chunk_refs WHERE tenant_id::text = $1 AND object_key = $2`,
+	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM tenant_chunk_refs WHERE tenant_id::text = $1 AND object_key = `+manifestOfKeySQL,
 		f.tenantID, key).Scan(&n))
 	return n
 }
@@ -245,7 +245,7 @@ func TestComplete_ChunkableClass_StoresChunked_KeepsMultipartETag(t *testing.T) 
 	assert.Equal(t, awsMultipartETag(u.parts), row.etag, "the -N ETag aws-cli computes")
 	assert.Equal(t, awsMultipartETag(parts), row.etag)
 	assert.Equal(t, int64(len(body)), row.size)
-	assert.Equal(t, "", row.storageKey, "a chunked row names no blob")
+	assert.True(t, isBlobAddressOf("big.bin", row.storageKey), "a chunked row names its manifest's address (WP-VM-1): %q", row.storageKey)
 	assert.Equal(t, chunkedBackendSentinel, row.backend)
 	assert.Equal(t, usage.FloorStandard, row.floor)
 	assert.Greater(t, f.chunkRefs(t, "big.bin"), 0)
@@ -538,6 +538,7 @@ func TestComplete_Chunked_WholeOverChunked_ReleasesManifest(t *testing.T) {
 	f.multipart(t, "k.bin", first, 2, nil)
 	require.True(t, f.row(t, "k.bin").chunked)
 	require.Greater(t, f.chunkRefs(t, "k.bin"), 0)
+	oldManifest := f.row(t, "k.bin").storageKey
 
 	// The same key, now whole: under the threshold.
 	second := mpBody(900, 10)
@@ -545,8 +546,17 @@ func TestComplete_Chunked_WholeOverChunked_ReleasesManifest(t *testing.T) {
 
 	row := f.row(t, "k.bin")
 	assert.False(t, row.chunked)
-	assert.Equal(t, 0, f.chunkRefs(t, "k.bin"), "the displaced manifest released")
+	refsAt := func() int {
+		var n int
+		require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM tenant_chunk_refs WHERE tenant_id::text = $1 AND object_key = $2`,
+			f.tenantID, oldManifest).Scan(&n))
+		return n
+	}
+	assert.Positive(t, refsAt(), "the displaced manifest is retired, kept for the grace (WP-VM-1)")
 	assert.Equal(t, int64(len(second)), f.used(t))
+	assert.Equal(t, second, f.get(t, "k.bin", "").Body.Bytes())
+	releaseRetiredManifests(t, f.db, f.server.engine, f.server.gci, f.tenantID)
+	assert.Zero(t, refsAt(), "released by the collector after the grace")
 	assert.Equal(t, second, f.get(t, "k.bin", "").Body.Bytes())
 }
 

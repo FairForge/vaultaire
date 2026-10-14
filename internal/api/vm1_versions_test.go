@@ -9,6 +9,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"net/http"
 	"net/http/httptest"
@@ -16,8 +17,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 )
 
 // vbody is n bytes distinct per seed and per fixture (the tenant id leads
@@ -346,4 +349,51 @@ func (f *mpChunkFixture) versionAddress(t *testing.T, key, vid string) (backend,
 	require.NoError(t, f.db.QueryRow(`SELECT COALESCE(backend_name, ''), COALESCE(storage_key, '') FROM object_versions
 		WHERE tenant_id = $1 AND object_key = $2 AND version_id = $3`, f.tenantID, key, vid).Scan(&backend, &storageKey))
 	return backend, storageKey
+}
+
+func TestVM1_RoutingTruthSamplesChunkedVersions(t *testing.T) {
+	// A chunked version is checked through its own manifest, chunk by
+	// chunk; its 'chunked' sentinel is not an unknown backend.
+	f := setupMPChunkFixture(t, false)
+	f.preVersioningChunked(t, "obj.bin")
+	c := NewRoutingTruthChecker(f.db, f.server.engine, f.server.gci, zap.NewNop())
+	c.scopeTenant = f.tenantID
+
+	res, err := c.RunOnce(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, res.Chunks.Objects, "the null version's manifest (the head row is whole)")
+	assert.Positive(t, res.Chunks.Present)
+	assert.Zero(t, res.Chunks.Missing)
+	unknown, err := c.unknownBackendRows(context.Background())
+	require.NoError(t, err)
+	for _, u := range unknown {
+		assert.NotEqual(t, chunkedBackendSentinel, u.Backend, "%s counts the sentinel as an unknown backend", u.Table)
+	}
+}
+
+func TestVM1_AChunkedNonCurrentVersionReadsAfterAKeyRotation(t *testing.T) {
+	// key_reencrypt moves chunks per hash: a version's manifest names the
+	// same hashes, so it reads after the move like the current object.
+	f := setupMPChunkFixture(t, false)
+	keys := testTenantKeys(t, f.db, keyTestMasterA)
+	f.server.sseService = crypto.NewSSEService(keys)
+	f.server.chunkEncSvc = crypto.NewChunkEncryptionService(keys)
+	a := f.preVersioningChunked(t, "obj.bin")
+	_, err := keys.Rotate(context.Background(), f.tenantID)
+	require.NoError(t, err)
+	k := NewKeyReencryptRunner(f.db, f.server.engine, f.server.gci, f.server.chunkEncSvc, zap.NewNop())
+	require.NotNil(t, k)
+	k.JobName = "test_key_reencrypt_vm1_" + f.tenantID[:8]
+	k.onlyScope = f.tenantID
+	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM job_runs WHERE job = $1`, k.JobName) })
+
+	res, err := k.RunOnce(context.Background())
+	require.NoError(t, err)
+	assert.Positive(t, res.Reencrypted, "the version's chunks moved to the new key version")
+
+	assert.Equal(t, a, f.getBytes(t, "obj.bin", "null"))
+	var behind int
+	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM global_content_index WHERE dedup_scope = $1 AND encryption_key_version < 2`, f.tenantID).Scan(&behind))
+	assert.Zero(t, behind)
 }
