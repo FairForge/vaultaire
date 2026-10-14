@@ -294,7 +294,7 @@ type headRepoint struct {
 // it kept no bytes. The deleted version's blob is retired unless a row still
 // names it. A head row that does not name the deleted version's blob (every
 // row written before 2C) is left as it was.
-func deleteVersion(ctx context.Context, db *sql.DB, tenantID, bucket, key, versionID string) (found bool, rp headRepoint, err error) {
+func deleteVersion(ctx context.Context, db *sql.DB, billed bool, tenantID, bucket, key, versionID string) (found bool, rp headRepoint, err error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, rp, err
@@ -355,6 +355,19 @@ func deleteVersion(ctx context.Context, db *sql.DB, tenantID, bucket, key, versi
 	// version a moment ago may still be reading it.
 	if err := retireBlob(ctx, tx, tenantID, bucket, key, storageKey, backend, retiredVersionDeleted); err != nil {
 		return true, rp, err
+	}
+	// The bill, last, in the same transaction (WP-R10-8): the current
+	// object's bytes when the deleted version was its blob (the re-pointed
+	// version was billed as retained and now is as the head row), the
+	// retained version's own bytes otherwise.
+	if billed {
+		rels := []quotaRelease{rp.VersionReleased}
+		if rp.Changed {
+			rels = append(rels, quotaRelease{Floor: rp.Floor, Bytes: rp.OldSize})
+		}
+		if err := releasesTx(ctx, tx, tenantID, rels); err != nil {
+			return true, rp, err
+		}
 	}
 	return true, rp, tx.Commit()
 }

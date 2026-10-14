@@ -15,6 +15,11 @@
 // there is one definition.
 package usage
 
+import (
+	"context"
+	"fmt"
+)
+
 // RetainedVersionsFrom is the FROM … WHERE of the retained non-current
 // versions: v is the version row, h the key's head row (NULL when the key
 // has no current object — behind a delete marker). A caller appends its own
@@ -39,6 +44,26 @@ const (
 		+ COALESCE((SELECT SUM(v.size_bytes) FROM ` + RetainedVersionsFrom + ` AND v.tenant_id = tq.tenant_id), 0))`
 	billedBytesOfF = `(COALESCE((SELECT SUM(o.size_bytes) FROM object_head_cache o WHERE o.tenant_id = f.tenant_id AND o.floor = f.floor), 0)
 		+ COALESCE((SELECT SUM(v.size_bytes) FROM ` + RetainedVersionsFrom + ` AND v.tenant_id = f.tenant_id AND ` + RetainedVersionFloor + ` = f.floor), 0))`
+	billedBytesOfParams = `(COALESCE((SELECT SUM(o.size_bytes) FROM object_head_cache o WHERE o.tenant_id = $1::TEXT), 0)
+		+ COALESCE((SELECT SUM(v.size_bytes) FROM ` + RetainedVersionsFrom + ` AND v.tenant_id = $1::TEXT), 0))`
 	billedBytesOfParamsFloor = `(COALESCE((SELECT SUM(o.size_bytes) FROM object_head_cache o WHERE o.tenant_id = $1::TEXT AND o.floor = $2::TEXT), 0)
 		+ COALESCE((SELECT SUM(v.size_bytes) FROM ` + RetainedVersionsFrom + ` AND v.tenant_id = $1::TEXT AND ` + RetainedVersionFloor + ` = $2::TEXT), 0))`
 )
+
+// BilledBytes is what ReconcileTenantStorageUsage would write for tenantID —
+// the total and each floor row's — read without writing (tests compare the
+// incremental ledgers with it at every step; WP-R10-8).
+func (m *QuotaManager) BilledBytes(ctx context.Context, tenantID string) (total int64, floors map[string]int64, err error) {
+	if err := m.db.QueryRowContext(ctx, `SELECT `+billedBytesOfParams, tenantID).Scan(&total); err != nil {
+		return 0, nil, fmt.Errorf("billed bytes of tenant %s: %w", tenantID, err)
+	}
+	floors = map[string]int64{}
+	for _, f := range []string{FloorStandard, FloorVault} {
+		var n int64
+		if err := m.db.QueryRowContext(ctx, `SELECT `+billedBytesOfParamsFloor, tenantID, f).Scan(&n); err != nil {
+			return 0, nil, fmt.Errorf("billed bytes of tenant %s on %s: %w", tenantID, f, err)
+		}
+		floors[f] = n
+	}
+	return total, floors, nil
+}

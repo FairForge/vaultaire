@@ -195,15 +195,31 @@ func (m *QuotaManager) GetHouse(ctx context.Context, tenantID string) (House, bo
 	return h, true, nil
 }
 
-// CheckAndReserveFloor is CheckAndReserve for a write that lands on a known
+// Reservation is what a reservation charged: OK = it was made; Floor = the
+// tenant's floor row was charged too (it had one). The settle in the
+// write's commit takes back from the floor row only what reached it
+// (WP-R10-8, R10-19: a floor row SetHouse creates while the write is in
+// flight is seeded without it).
+type Reservation struct {
+	OK    bool
+	Floor bool
+}
+
+// CheckAndReserveFloor is ReserveOnFloor's yes/no.
+func (m *QuotaManager) CheckAndReserveFloor(ctx context.Context, tenantID, floor string, bytes int64) (bool, error) {
+	res, err := m.ReserveOnFloor(ctx, tenantID, floor, bytes)
+	return res.OK, err
+}
+
+// ReserveOnFloor is CheckAndReserve for a write that lands on a known
 // floor: the total is checked and reserved exactly as before, and when the
 // tenant has a house the floor is checked and reserved in the same
 // transaction. A house without that floor (no attic bought) refuses the
-// write. Returns false (no error) when either ledger has no room.
-func (m *QuotaManager) CheckAndReserveFloor(ctx context.Context, tenantID, floor string, bytes int64) (bool, error) {
+// write. OK is false (no error) when either ledger has no room.
+func (m *QuotaManager) ReserveOnFloor(ctx context.Context, tenantID, floor string, bytes int64) (Reservation, error) {
 	tx, err := m.db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, fmt.Errorf("beginning transaction: %w", err)
+		return Reservation{}, fmt.Errorf("beginning transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -211,10 +227,10 @@ func (m *QuotaManager) CheckAndReserveFloor(ctx context.Context, tenantID, floor
 	if err := tx.QueryRowContext(ctx,
 		`SELECT storage_used_bytes, storage_limit_bytes FROM tenant_quotas
 		  WHERE tenant_id = $1 FOR UPDATE`, tenantID).Scan(&used, &limit); err != nil {
-		return false, fmt.Errorf("checking quota for tenant %s: %w", tenantID, err)
+		return Reservation{}, fmt.Errorf("checking quota for tenant %s: %w", tenantID, err)
 	}
 	if used+bytes > limit {
-		return false, nil
+		return Reservation{}, nil
 	}
 
 	// The floor ledger, when the tenant has one. The total row lock above
@@ -223,42 +239,44 @@ func (m *QuotaManager) CheckAndReserveFloor(ctx context.Context, tenantID, floor
 	var floorRows int
 	if err := tx.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM tenant_floor_quotas WHERE tenant_id = $1`, tenantID).Scan(&floorRows); err != nil {
-		return false, fmt.Errorf("checking floors for tenant %s: %w", tenantID, err)
+		return Reservation{}, fmt.Errorf("checking floors for tenant %s: %w", tenantID, err)
 	}
+	res := Reservation{OK: true}
 	if floorRows > 0 {
 		var fUsed, fLimit int64
 		err := tx.QueryRowContext(ctx,
 			`SELECT storage_used_bytes, storage_limit_bytes FROM tenant_floor_quotas
 			  WHERE tenant_id = $1 AND floor = $2`, tenantID, floor).Scan(&fUsed, &fLimit)
 		if err == sql.ErrNoRows {
-			return false, nil // the house has no such floor
+			return Reservation{}, nil // the house has no such floor
 		}
 		if err != nil {
-			return false, fmt.Errorf("checking floor %s for tenant %s: %w", floor, tenantID, err)
+			return Reservation{}, fmt.Errorf("checking floor %s for tenant %s: %w", floor, tenantID, err)
 		}
 		if fUsed+bytes > fLimit {
-			return false, nil
+			return Reservation{}, nil
 		}
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE tenant_floor_quotas
 			    SET storage_used_bytes = storage_used_bytes + $1, updated_at = NOW()
 			  WHERE tenant_id = $2 AND floor = $3`, bytes, tenantID, floor); err != nil {
-			return false, fmt.Errorf("reserving on floor %s: %w", floor, err)
+			return Reservation{}, fmt.Errorf("reserving on floor %s: %w", floor, err)
 		}
+		res.Floor = true
 	}
 
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE tenant_quotas
 		    SET storage_used_bytes = storage_used_bytes + $1, updated_at = NOW()
 		  WHERE tenant_id = $2`, bytes, tenantID); err != nil {
-		return false, fmt.Errorf("updating quota: %w", err)
+		return Reservation{}, fmt.Errorf("updating quota: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO quota_usage_events (tenant_id, operation, bytes_delta, object_key)
 		 VALUES ($1, 'RESERVE', $2, '')`, tenantID, bytes); err != nil {
-		return false, fmt.Errorf("recording event: %w", err)
+		return Reservation{}, fmt.Errorf("recording event: %w", err)
 	}
-	return true, tx.Commit()
+	return res, tx.Commit()
 }
 
 // ReleaseFloor is ReleaseQuota for bytes known to sit on a floor: the total

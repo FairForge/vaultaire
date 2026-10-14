@@ -1028,7 +1028,7 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3
 	storageClass := resolvePutStorageClass(r.Context(), s.db, s.engine, syncPlacementGate(s.flags), req.TenantID, req.Bucket,
 		r.Header.Get("x-amz-storage-class"))
 	floor := usage.FloorOf(storageClass)
-	var reserved int64
+	var bill *writeBill
 	{
 		size := r.ContentLength
 		// The decoded length is only meaningful inside aws-chunked framing;
@@ -1046,8 +1046,10 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3
 			WriteS3Error(w, ErrMissingContentLength, r.URL.Path, generateRequestID())
 			return
 		}
-		if quotaOn && size > 0 {
-			ok, err := reserveQuota(r.Context(), s.quotaManager, req.TenantID, floor, size)
+		if quotaOn {
+			// Net of what the commit releases on this floor at the quota
+			// edge (Part B); settled in the commit's transaction (Part A).
+			b, ok, err := s.reserveWrite(r.Context(), req.TenantID, req.Bucket, req.Object, floor, size)
 			if err != nil {
 				// Fail closed: an unmetered write would corrupt billing.
 				s.logger.Error("quota check failed",
@@ -1060,12 +1062,13 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3
 					WithSuggestion("Upgrade at "+billingURL()))
 				return
 			}
-			reserved = size
+			bill = b
 		}
 	}
 
 	adapter := s.writeAdapter()
 	adapter.storageClass, adapter.storageClassResolved = storageClass, true
+	adapter.bill = bill
 
 	s.logger.Debug("S3 PUT translating to engine",
 		zap.String("s3.bucket", req.Bucket),
@@ -1077,15 +1080,12 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3
 	rec := &countingResponseWriter{ResponseWriter: w}
 	adapter.HandlePut(rec, r, req.Bucket, req.Object)
 
-	if !quotaOn {
-		return
-	}
-	ctx, cancel := quotaCtx(r)
-	defer cancel()
-	if rec.statusCode >= 200 && rec.statusCode < 300 {
-		s.settlePutQuota(ctx, req.TenantID, floor, reserved, adapter.putLogicalBytes, adapter.displaced)
-	} else {
-		s.releaseQuota(ctx, req.TenantID, floor, reserved)
+	// The bill was settled in the write's commit; a write that committed
+	// nothing gives its reservation back.
+	if quotaOn && bill != nil && !adapter.billSettled {
+		ctx, cancel := quotaCtx(r)
+		defer cancel()
+		s.releaseQuota(ctx, req.TenantID, floor, bill.Reserved)
 	}
 }
 

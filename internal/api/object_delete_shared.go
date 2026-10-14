@@ -17,7 +17,6 @@ import (
 	"fmt"
 	"sort"
 	"sync"
-	"time"
 
 	"github.com/FairForge/vaultaire/internal/crypto"
 	"go.uber.org/zap"
@@ -188,11 +187,12 @@ func (d objectDeleteAftermath) settle(ctx context.Context, tenantID, bucket, key
 	defer cancel()
 	deleteBeforeRowHook(tenantID, bucket, key)
 	if d.db != nil {
-		var deleted displacedRow
-		var found, superseded bool
+		var superseded bool
 		var delErr error
 		if read.found {
-			deleted, found, superseded, delErr = deleteHeadRowIfAt(ctx, d.db, manifestReleaser(d.gci), tenantID, bucket, key, read.storageKey)
+			// The row and its bytes' release in one transaction (WP-R10-8):
+			// a version that keeps the blob keeps the bill (WP-R2-1 C2).
+			_, _, superseded, delErr = deleteHeadRowIfAt(ctx, d.db, manifestReleaser(d.gci), d.quota != nil, tenantID, bucket, key, read.storageKey)
 		} else if exErr := d.db.QueryRowContext(ctx, headRowExistsSQL, tenantID, bucket, key).Scan(&superseded); exErr != nil {
 			// Nothing was read, so no row is deleted; a row there now is a
 			// write's (superseded), and its retention stays.
@@ -203,12 +203,6 @@ func (d objectDeleteAftermath) settle(ctx context.Context, tenantID, bucket, key
 			return fmt.Errorf("chunked delete: %w", delErr)
 		case delErr != nil:
 			return fmt.Errorf("head row delete: %w", delErr)
-		case found && d.quota != nil:
-			// A version that keeps the blob keeps the bill (WP-R2-1 C2).
-			if err := releaseDisplacedOn(ctx, d.quota, tenantID, deleted); err != nil {
-				d.logger.Error("quota release after delete failed",
-					zap.Error(err), zap.String("tenant_id", tenantID), zap.Int64("bytes", deleted.Size))
-			}
 		}
 		// The retention (expired, governance-bypassed, or none) goes with the
 		// object: the PUT-side lock check no longer needs a head row, so a
@@ -274,16 +268,10 @@ func (d objectDeleteAftermath) announce(ctx context.Context, tenantID, bucket, k
 // was its blob, the retained version's own bytes otherwise. found is false
 // for a version id the key does not have.
 func (d objectDeleteAftermath) deleteVersionReleasing(ctx context.Context, tenantID, bucket, key, versionID string) (bool, error) {
-	found, rp, err := deleteVersion(ctx, d.db, tenantID, bucket, key, versionID)
-	if err != nil || !found {
-		return found, err
-	}
-	rel := displacedRow{ReplacedVersion: rp.VersionReleased}
-	if rp.Changed {
-		rel.Size, rel.Floor = rp.OldSize, rp.Floor
-	}
-	d.releaseDetached(ctx, tenantID, rel)
-	return true, nil
+	// The version row, the head row's re-point and the release they make
+	// commit together (WP-R10-8).
+	found, _, err := deleteVersion(ctx, d.db, d.quota != nil, tenantID, bucket, key, versionID)
+	return found, err
 }
 
 // deleteBehindMarker is a DELETE with no version id on an Enabled bucket: a
@@ -305,7 +293,7 @@ func (d objectDeleteAftermath) deleteBehindMarker(ctx context.Context, tenantID,
 	var found bool
 	err := writeDeleteMarker(ctx, d.db, tenantID, bucket, key, markerID, func(tx *sql.Tx) error {
 		var err error
-		marked, found, err = deleteHeadRowTx(ctx, tx, manifestReleaser(d.gci), tenantID, bucket, key, nil)
+		marked, found, err = deleteHeadRowTx(ctx, tx, manifestReleaser(d.gci), d.quota != nil, tenantID, bucket, key, nil)
 		if err != nil || !found || marked.StorageKey == "" {
 			return err
 		}
@@ -324,24 +312,7 @@ func (d objectDeleteAftermath) deleteBehindMarker(ctx context.Context, tenantID,
 		return "", fmt.Errorf("write the delete marker: %w", err)
 	}
 	deleteMarkerWrittenHook(tenantID, bucket, key)
-	if found {
-		d.releaseDetached(ctx, tenantID, marked)
-	}
 	return markerID, nil
-}
-
-// releaseDetached releases what removing d frees, on a context detached
-// from the request: the row change has committed.
-func (d objectDeleteAftermath) releaseDetached(ctx context.Context, tenantID string, rel displacedRow) {
-	if d.quota == nil || len(rel.releases()) == 0 {
-		return
-	}
-	qctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-	defer cancel()
-	if err := releaseDisplacedOn(qctx, d.quota, tenantID, rel); err != nil {
-		d.logger.Error("quota release after delete failed",
-			zap.Error(err), zap.String("tenant_id", tenantID), zap.Int64("bytes", rel.Size))
-	}
 }
 
 // knownCopiesSQL: the backends other than the recorded one ($6) that hold

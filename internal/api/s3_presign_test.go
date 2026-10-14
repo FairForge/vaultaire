@@ -409,8 +409,8 @@ func TestPresignedURL_Integration(t *testing.T) {
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectExec(`INSERT INTO object_head_cache`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectQuery(`SELECT is_chunked, COALESCE\(storage_key, ''\), floor FROM object_head_cache`).
-		WillReturnRows(sqlmock.NewRows([]string{"is_chunked", "storage_key", "floor"}).AddRow(false, objectKey+"@"+zeroID, "standard"))
+	mock.ExpectQuery(`SELECT is_chunked, COALESCE\(storage_key, ''\), floor, size_bytes FROM object_head_cache`).
+		WillReturnRows(sqlmock.NewRows([]string{"is_chunked", "storage_key", "floor", "size_bytes"}).AddRow(false, objectKey+"@"+zeroID, "standard", len(testContent)))
 	mock.ExpectQuery(`SELECT versioning_status FROM buckets`).
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectCommit()

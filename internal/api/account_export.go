@@ -463,8 +463,8 @@ func (s *AccountExportService) ensureSystemBucket(ctx context.Context, tenantID 
 }
 
 // deleteExportObject removes one export object the way DeleteObject does:
-// the blob on its recorded backend (a miss is fine), then the head row, then
-// the quota. The caller decides what the row says. An error leaves the row
+// the blob on its recorded backend (a miss is fine), then the head row and
+// the quota it held. The caller decides what the row says. An error leaves the row
 // (and the bill) for the next run: a row that cannot be read, or a blob its
 // backend could not delete, is never dropped with its bytes left behind
 // (Stage 1a Prompt 6 Part 0: the blob was deleted on the primary at a
@@ -486,14 +486,9 @@ func (s *AccountExportService) deleteExportObject(ctx context.Context, tenantID,
 	if err := s.eng.Delete(engine.WithRecordedBackend(tctx, backend), container, blob); err != nil && !isObjectMissingErr(err) {
 		return fmt.Errorf("delete the export object: %w", err)
 	}
-	row, found, err := deleteHeadRowReleasing(tctx, s.db, manifestReleaser(s.gci), tenantID, tenant.ExportsBucket, key)
-	if err != nil {
+	// The row and its bytes' release in one transaction (WP-R10-8).
+	if _, _, err := deleteHeadRowReleasing(tctx, s.db, manifestReleaser(s.gci), s.quota != nil, tenantID, tenant.ExportsBucket, key); err != nil {
 		return fmt.Errorf("delete the export's head row: %w", err)
-	}
-	if found && s.quota != nil {
-		if err := releaseDisplacedOn(tctx, s.quota, tenantID, row); err != nil {
-			s.logger.Error("account export: quota release", zap.String("tenant_id", tenantID), zap.Error(err))
-		}
 	}
 	return nil
 }

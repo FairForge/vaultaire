@@ -724,26 +724,27 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 	// overwrites an existing key, the overwritten bytes are captured
 	// atomically by the head-cache upsert and released after success.
 	quotaOn := s.quotaManager != nil
-	var reservedBytes int64
+	var bill *writeBill
 	if quotaOn {
-		ok, qErr := reserveQuota(r.Context(), s.quotaManager, t.ID, floor, totalSize)
+		res, qErr := reserveQuota(r.Context(), s.quotaManager, t.ID, floor, totalSize)
 		if qErr != nil {
 			s.logger.Error("multipart complete: quota check failed",
 				zap.Error(qErr), zap.String("tenant_id", t.ID))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 			return
 		}
-		if !ok {
+		if !res.OK {
 			WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
 				WithSuggestion("Upgrade at "+billingURL()))
 			return
 		}
-		reservedBytes = totalSize
+		// Settled in the commit's transaction (WP-R10-8).
+		bill = &writeBill{Floor: floor, Reserved: totalSize, FloorReserved: res.Floor}
 	}
 	releaseReservation := func() {
-		if quotaOn {
+		if bill != nil {
 			ctx, cancel := quotaCtx(r)
-			s.releaseQuota(ctx, t.ID, floor, reservedBytes)
+			s.releaseQuota(ctx, t.ID, floor, bill.Reserved)
 			cancel()
 		}
 	}
@@ -795,7 +796,6 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 		return nil
 	}
 
-	var displaced displacedRow
 	var versionID, backendName string
 	// Encrypted at rest (sealed or chunk-encrypted): the response says so,
 	// as AWS's does.
@@ -818,13 +818,14 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 			},
 			DetachInstall: true,
 			InTx:          markCompleted,
+			Bill:          bill,
 		})
 		if cErr != nil {
 			releaseReservation()
 			s.writeCompleteStoreError(w, r, cErr, bucket, object, uploadID, tierClass)
 			return
 		}
-		displaced, versionID, backendName = res.Flip.Displaced, res.Flip.VersionID, chunkedBackendSentinel
+		versionID, backendName = res.Flip.VersionID, chunkedBackendSentinel
 	} else {
 		var src io.Reader = body
 		putLength := totalSize
@@ -884,6 +885,7 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 		enc := sealer.encryption()
 		if s.db != nil {
 			flip, dbErr := commitBlobWrite(pctx, s.db, manifestReleaser(s.gci), blobWrite{TenantID: t.ID, Bucket: bucket, Key: object,
+				Bill: bill,
 				Version: &versionWrite{Size: totalSize, ETag: etagValue, ContentType: attrs.ContentType, Backend: backendName,
 					Blob: versionBlobRef{StorageKey: blob, Enc: enc}},
 				Upsert: func(tx *sql.Tx) error {
@@ -904,7 +906,7 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 				WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 				return
 			}
-			displaced, versionID = flip.Displaced, flip.VersionID
+			versionID = flip.VersionID
 		} else {
 			memUploadsMu.Lock()
 			if mu, ok := memUploads[uploadID]; ok {
@@ -917,12 +919,6 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 
 	pctx, pcancel := postCommit(r.Context())
 	defer pcancel()
-
-	if quotaOn {
-		for _, rel := range displaced.releases() {
-			s.releaseQuota(pctx, t.ID, rel.Floor, rel.Bytes)
-		}
-	}
 
 	// The bucket's default retention, exactly as plain PUT.
 	applyObjectLockOnPut(pctx, s.db, t.ID, bucket, object, r)

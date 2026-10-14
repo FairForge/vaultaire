@@ -88,14 +88,14 @@ type S3ToEngine struct {
 	flags *flags.Service
 
 	// quota, when set, is used by HandleDelete to release the deleted
-	// object's logical bytes (WP-1). PUT reservation/settlement lives in the
-	// Server layer, which reads putLogicalBytes and displacedBytes after a
-	// successful HandlePut: the logical size recorded in object_head_cache,
-	// and the previous row's size captured atomically by the upsert (0 when
-	// the PUT created the key).
-	quota           QuotaManager
-	putLogicalBytes int64
-	displaced       displacedRow
+	// object's logical bytes (WP-1), inside the delete's transaction.
+	quota QuotaManager
+	// bill is a PUT's reservation (the Server layer reserves before the
+	// body is read); the write's commit settles it in its transaction and
+	// sets billSettled (WP-R10-8 Part A). A PUT that committed nothing
+	// leaves billSettled false and the Server gives the reservation back.
+	bill        *writeBill
+	billSettled bool
 
 	// storageClass, when storageClassResolved, is the class the Server
 	// layer already resolved (and reserved quota on) for this PUT; HandlePut
@@ -1135,6 +1135,9 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 				zap.String("bucket", bucket),
 				zap.String("key", artifact))
 			switch {
+			case errors.Is(chunkErr, errQuotaRace):
+				WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
+					WithSuggestion("Upgrade at "+billingURL()))
 			case errors.Is(chunkErr, errDecodedLengthMismatch):
 				WriteS3Error(w, ErrIncompleteBody, r.URL.Path, generateRequestID())
 			case errors.Is(chunkErr, errBadDigest):
@@ -1237,7 +1240,6 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		WriteS3Error(w, ErrBadDigest, r.URL.Path, generateRequestID())
 		return
 	}
-	a.putLogicalBytes = metadataSize
 
 	contentType := r.Header.Get("Content-Type")
 	if contentType == "" {
@@ -1260,6 +1262,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		// previous row's size is captured under its lock — a concurrent
 		// DELETE cannot double-release.
 		flip, dbErr := commitBlobWrite(r.Context(), a.db, manifestReleaser(a.gci), blobWrite{TenantID: t.ID, Bucket: bucket, Key: artifact,
+			Bill: a.bill,
 			Version: &versionWrite{Size: metadataSize, ETag: etag, ContentType: contentType, Backend: backendName,
 				Blob: versionBlobRef{StorageKey: blob, Enc: objectEncryption{Algorithm: encryptionAlgorithm, KeyVersion: encryptionKeyVersion}}},
 			Upsert: func(tx *sql.Tx) error {
@@ -1289,7 +1292,6 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 			`, t.ID, bucket, artifact, metadataSize, etag, contentType, backendName, metaJSON, encryptionAlgorithm, contentDisposition, contentEncoding, contentLanguage, echoHdrs.CacheControl, echoHdrs.Expires, echoHdrs.WebsiteRedirect, usage.FloorOf(resolvedStorageClass), tagsJSON, encryptionKeyVersion, blob)
 				return execErr
 			}})
-		a.displaced = flip.Displaced
 		versionID = flip.VersionID
 		if dbErr != nil {
 			// HEAD serves exclusively from object_head_cache — returning 200
@@ -1297,9 +1299,15 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 			// bytes are never billed. Nothing changed for the key: the
 			// previous object is intact, the new blob is an orphan queued
 			// for the collector, and the client's retry writes afresh.
-			a.displaced = displacedRow{}
-			a.putLogicalBytes = 0
 			retireOrphanWrite(r.Context(), a.db, a.logger, t.ID, bucket, blob, backendName)
+			if errors.Is(dbErr, errQuotaRace) {
+				// A concurrent write changed what this overwrite displaces:
+				// the net reservation no longer fits (Part B). Refused,
+				// nothing committed.
+				WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
+					WithSuggestion("Upgrade at "+billingURL()))
+				return
+			}
 			a.logger.Error("failed to cache object metadata — failing PUT",
 				zap.Error(dbErr),
 				zap.String("tenant_id", t.ID),
@@ -1308,6 +1316,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 			return
 		}
+		a.billSettled = true
 	}
 
 	applyObjectLockOnPut(r.Context(), a.db, t.ID, bucket, artifact, r)
@@ -1381,7 +1390,7 @@ func (a *S3ToEngine) handleChunkedPut(
 		declared = metadataSize
 	}
 	res, err := a.storeChunkedObject(ctx, chunkedWrite{
-		TenantID: t.ID, Bucket: bucket, Key: artifact,
+		TenantID: t.ID, Bucket: bucket, Key: artifact, Bill: a.bill,
 		Body: hashingBody, DeclaredSize: declared, Attrs: attrs,
 		ETag: func() (string, error) {
 			etag := fmt.Sprintf("%x", hasher.Sum(nil))
@@ -1392,12 +1401,9 @@ func (a *S3ToEngine) handleChunkedPut(
 		},
 	})
 	if err != nil {
-		a.displaced = displacedRow{}
-		a.putLogicalBytes = 0
 		return err
 	}
-	a.displaced = res.Flip.Displaced
-	a.putLogicalBytes = res.Size
+	a.billSettled = true
 
 	applyObjectLockOnPut(ctx, a.db, t.ID, bucket, artifact, r)
 
