@@ -1,0 +1,277 @@
+{
+  "host": "slc",
+  "os_arch": "linux/amd64",
+  "provider": "pixeldrain",
+  "base_url": "https://pixeldrain.com/api",
+  "started_at": "2026-10-14T17:57:32Z",
+  "finished_at": "2026-10-14T18:06:51Z",
+  "duration_sec": 559.005090115,
+  "smoke": false,
+  "concurrency": 8,
+  "workloads": [
+    {
+      "name": "speedtest_1gb",
+      "bytes": 1073741824,
+      "ops": 1,
+      "duration_ms": 3785,
+      "mb_per_sec": 270.51801187648044,
+      "note": "raw network, no storage I/O"
+    },
+    {
+      "name": "cold_dial_put_1kb",
+      "bytes": 1024,
+      "ops": 1,
+      "duration_ms": 2065,
+      "mb_per_sec": 0.00047271979098240845,
+      "note": "id=ZAdnTh8J"
+    },
+    {
+      "name": "warm_put_1kb",
+      "bytes": 10240,
+      "ops": 10,
+      "duration_ms": 15862,
+      "p50_ms": 1573,
+      "p95_ms": 1921,
+      "max_ms": 1921,
+      "mb_per_sec": 0.000615647845549694,
+      "ops_per_sec": 0.6304233938428867
+    },
+    {
+      "name": "warm_get_1kb",
+      "bytes": 5120,
+      "ops": 5,
+      "duration_ms": 2214,
+      "p50_ms": 303,
+      "p95_ms": 1001,
+      "max_ms": 1001,
+      "mb_per_sec": 0.0022046839314929442,
+      "ops_per_sec": 2.257596345848775
+    },
+    {
+      "name": "info_1kb",
+      "ops": 10,
+      "duration_ms": 3040,
+      "p50_ms": 303,
+      "p95_ms": 307,
+      "p99_ms": 307,
+      "max_ms": 307,
+      "ops_per_sec": 3.2894182542668053
+    },
+    {
+      "name": "put_1mb",
+      "bytes": 5242880,
+      "ops": 5,
+      "duration_ms": 10991,
+      "p50_ms": 2216,
+      "p95_ms": 2367,
+      "max_ms": 2367,
+      "mb_per_sec": 0.4548861139178335,
+      "ops_per_sec": 0.4548861139178335
+    },
+    {
+      "name": "get_1mb",
+      "bytes": 5242880,
+      "ops": 5,
+      "duration_ms": 4037,
+      "p50_ms": 1077,
+      "p95_ms": 1243,
+      "max_ms": 1243,
+      "mb_per_sec": 1.2384429353605564,
+      "ops_per_sec": 1.2384429353605564
+    },
+    {
+      "name": "put_10mb",
+      "bytes": 31457280,
+      "ops": 3,
+      "duration_ms": 14080,
+      "p50_ms": 3112,
+      "p95_ms": 8099,
+      "max_ms": 8099,
+      "mb_per_sec": 2.1306160522079662,
+      "ops_per_sec": 0.21306160522079665
+    },
+    {
+      "name": "get_10mb",
+      "bytes": 52428800,
+      "ops": 5,
+      "duration_ms": 6282,
+      "p50_ms": 1704,
+      "p95_ms": 1969,
+      "max_ms": 1969,
+      "mb_per_sec": 7.958740558244638,
+      "ops_per_sec": 0.7958740558244638
+    },
+    {
+      "name": "put_100mb",
+      "bytes": 104857600,
+      "ops": 1,
+      "duration_ms": 4248,
+      "mb_per_sec": 23.538948472754537,
+      "note": "id=n55f4o67"
+    },
+    {
+      "name": "get_100mb",
+      "bytes": 524288000,
+      "ops": 5,
+      "duration_ms": 20496,
+      "p50_ms": 3209,
+      "p95_ms": 9314,
+      "max_ms": 9314,
+      "mb_per_sec": 24.39399099675879,
+      "ops_per_sec": 0.24393990996758794
+    },
+    {
+      "name": "put_1gb",
+      "bytes": 1073741824,
+      "ops": 1,
+      "duration_ms": 9638,
+      "mb_per_sec": 106.24400614167715,
+      "note": "id=d1RfQagE streaming"
+    },
+    {
+      "name": "get_1gb",
+      "bytes": 1073741824,
+      "ops": 1,
+      "duration_ms": 14804,
+      "mb_per_sec": 69.16765931112005
+    },
+    {
+      "name": "range_parallel_1gb",
+      "bytes": 1073741824,
+      "ops": 16,
+      "duration_ms": 11828,
+      "p50_ms": 4054,
+      "p95_ms": 11827,
+      "mb_per_sec": 86.57365405481923,
+      "note": "16 ranges on d1RfQagE (1024 MB)"
+    },
+    {
+      "name": "integrity_10mb",
+      "bytes": 10485760,
+      "ops": 2,
+      "duration_ms": 6682,
+      "mb_per_sec": 2.9929911971338607,
+      "note": "SHA256 MATCH"
+    },
+    {
+      "name": "concurrent_upload_20s",
+      "bytes": 90177536,
+      "ops": 86,
+      "duration_ms": 21980,
+      "p50_ms": 2008,
+      "p95_ms": 2368,
+      "p99_ms": 2630,
+      "max_ms": 2630,
+      "mb_per_sec": 3.9125210267677466,
+      "ops_per_sec": 3.9125210267677466
+    },
+    {
+      "name": "concurrent_upload_large_20s",
+      "description": "117 × 64MB PUT, 8 workers",
+      "bytes": 7851737088,
+      "ops": 117,
+      "duration_ms": 20916,
+      "p50_ms": 1140,
+      "p95_ms": 3882,
+      "p99_ms": 5755,
+      "max_ms": 7451,
+      "mb_per_sec": 357.9947324193236,
+      "ops_per_sec": 5.593667694051931
+    },
+    {
+      "name": "concurrent_download_20s",
+      "bytes": 491782144,
+      "ops": 469,
+      "duration_ms": 20298,
+      "p50_ms": 310,
+      "p95_ms": 356,
+      "p99_ms": 1339,
+      "max_ms": 1361,
+      "mb_per_sec": 23.10510681050896,
+      "ops_per_sec": 23.10510681050896
+    },
+    {
+      "name": "concurrent_download_large_20s",
+      "bytes": 10066329600,
+      "ops": 150,
+      "duration_ms": 20592,
+      "p50_ms": 702,
+      "p95_ms": 4798,
+      "p99_ms": 6652,
+      "max_ms": 6823,
+      "mb_per_sec": 466.1784172653251,
+      "ops_per_sec": 7.284037769770705
+    },
+    {
+      "name": "batch_info",
+      "ops": 100,
+      "duration_ms": 14130,
+      "ops_per_sec": 7.076969271937989,
+      "note": "queried 100, returned 100"
+    },
+    {
+      "name": "burst_small_100",
+      "bytes": 409600,
+      "ops": 100,
+      "duration_ms": 20306,
+      "p50_ms": 1546,
+      "p95_ms": 1887,
+      "p99_ms": 2066,
+      "max_ms": 2088,
+      "mb_per_sec": 0.01923642742808754,
+      "ops_per_sec": 4.924525421590411
+    },
+    {
+      "name": "user_files_list",
+      "ops": 327,
+      "duration_ms": 331,
+      "ops_per_sec": 985.3231061133957,
+      "note": "327 files, 8808 MB total"
+    },
+    {
+      "name": "list_roundtrip",
+      "ops": 100,
+      "duration_ms": 1760,
+      "ops_per_sec": 56.807109821986614,
+      "note": "create=1148ms get=611ms list=HUxpcnK1 100 files"
+    },
+    {
+      "name": "cache_behavior",
+      "bytes": 31457280,
+      "ops": 3,
+      "duration_ms": 6571,
+      "mb_per_sec": 4.565515142291889,
+      "note": "cold=2046ms warm1=1646ms warm2=2879ms"
+    },
+    {
+      "name": "mixed_readwrite_20s",
+      "description": "up=37×4MB dn=217×4MB, 4+4 workers",
+      "bytes": 1065353216,
+      "ops": 254,
+      "duration_ms": 22142,
+      "mb_per_sec": 45.883755611835994,
+      "ops_per_sec": 11.470938902958999,
+      "note": "up=6.7MB/s(37) dn=39.2MB/s(217)"
+    },
+    {
+      "name": "soak_upload_2m",
+      "description": "246 × 64MB PUT, 8 workers, 2 min",
+      "bytes": 16508780544,
+      "ops": 246,
+      "duration_ms": 127163,
+      "mb_per_sec": 123.80895056446629,
+      "ops_per_sec": 1.9345148525697857,
+      "note": "30s-windows: [79, 132, 156, 158] MB/s STABLE"
+    },
+    {
+      "name": "soak_download_2m",
+      "description": "1376 × 64MB GET, 8 workers, 2 min",
+      "bytes": 92341796864,
+      "ops": 1376,
+      "duration_ms": 120733,
+      "mb_per_sec": 729.4088576335422,
+      "ops_per_sec": 11.397013400524097,
+      "note": "30s-windows: [595, 785, 764, 791] MB/s STABLE"
+    }
+  ]
+}

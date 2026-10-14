@@ -1,0 +1,14 @@
+lab-eu-idrive-fra small_put_4k                 n=30 p50 159 ms  p95 216 ms  max 226 ms
+lab-eu-idrive-fra small_get_4k                 n=30 p50 137 ms  p95 180 ms  max 263 ms  ok
+lab-eu-idrive-fra small_head_4k                n=30 p50 0 ms  p95 0 ms  max 0 ms
+lab-eu-idrive-fra list_prefix                  0.00 s  [30 keys listed]
+lab-eu-idrive-fra small_delete                 n=30 p50 140 ms  p95 215 ms  max 240 ms
+lab-eu-idrive-fra single_put_8mb               1.74 s  4.8 MB/s
+lab-eu-idrive-fra get_single_8mb               1.45 s  5.8 MB/s  ttfb 284 ms  ok
+lab-eu-idrive-fra single_put_64mb              2.71 s  24.8 MB/s
+lab-eu-idrive-fra get_single_64mb              4.49 s  15.0 MB/s  ttfb 1199 ms  ok
+lab-eu-idrive-fra single_put_256mb             2.74 s  97.9 MB/s
+lab-eu-idrive-fra get_single_256mb             7.49 s  35.9 MB/s  ttfb 3439 ms  ok
+lab-eu-idrive-fra mpu_put_256mb                2.94 s  91.4 MB/s  [16 parts x 16 MiB, 8 wide, complete 2.3 s]
+lab-eu-idrive-fra get_mpu_256mb                65.69 s  4.1 MB/s  ttfb 3026 ms  ok
+lab-eu-idrive-fra range_get_1mb                n=20 p50 264 ms  p95 271 ms  max 911 ms  [of single-256mb.bin]

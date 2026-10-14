@@ -1,0 +1,20 @@
+pub-cf         small_put_4k                 n=30 p50 360 ms  p95 762 ms  max 1503 ms
+pub-cf         small_get_4k                 n=30 p50 342 ms  p95 356 ms  max 380 ms  ok
+pub-cf         small_head_4k                n=30 p50 272 ms  p95 282 ms  max 426 ms
+pub-cf         list_prefix                  0.29 s  [30 keys listed]
+pub-cf         cdn_small_4k                 0.30 s  0.0 MB/s  ttfb 302 ms  [pass 1 status 404 cf-cache-status=DYNAMIC]
+pub-cf         cdn_small_4k                 0.29 s  0.0 MB/s  ttfb 290 ms  [pass 2 status 404 cf-cache-status=DYNAMIC]
+pub-cf         small_delete                 n=30 p50 353 ms  p95 694 ms  max 1823 ms
+pub-cf         single_put_8mb               3.11 s  2.7 MB/s
+pub-cf         get_single_8mb               1.83 s  4.6 MB/s  ttfb 341 ms  ok
+pub-cf         cdn_get_8mb                  0.36 s  0.0 MB/s  ttfb 356 ms  [pass 1 status 404 cf-cache-status=MISS]
+pub-cf         cdn_get_8mb                  0.13 s  0.0 MB/s  ttfb 126 ms  [pass 2 status 404 cf-cache-status=HIT]
+pub-cf         single_put_64mb              2.10 s  32.0 MB/s
+pub-cf         get_single_64mb              2.00 s  33.6 MB/s  ttfb 1037 ms  ok
+pub-cf         cdn_get_64mb                 0.35 s  0.0 MB/s  ttfb 348 ms  [pass 1 status 404 cf-cache-status=MISS]
+pub-cf         cdn_get_64mb                 0.13 s  0.0 MB/s  ttfb 127 ms  [pass 2 status 404 cf-cache-status=HIT]
+pub-cf         mpu_put_256mb                4.92 s  54.6 MB/s  [16 parts x 16 MiB, 8 wide, complete 0.9 s]
+pub-cf         get_mpu_256mb                7.71 s  34.8 MB/s  ttfb 851 ms  ok
+pub-cf         cdn_get_mpu_256mb            0.36 s  0.0 MB/s  ttfb 360 ms  [pass 1 status 404 cf-cache-status=MISS]
+pub-cf         cdn_get_mpu_256mb            0.13 s  0.0 MB/s  ttfb 128 ms  [pass 2 status 404 cf-cache-status=HIT]
+pub-cf         range_get_1mb                n=20 p50 555 ms  p95 1206 ms  max 1335 ms  [of mpu-256mb.bin]

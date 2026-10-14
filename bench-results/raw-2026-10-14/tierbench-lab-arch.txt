@@ -1,0 +1,16 @@
+lab-arch-geyser small_put_4k                 n=30 p50 62 ms  p95 185 ms  max 906 ms
+lab-arch-geyser small_get_4k                 n=30 p50 33 ms  p95 34 ms  max 34 ms  ok
+lab-arch-geyser small_head_4k                n=30 p50 32 ms  p95 32 ms  max 52 ms
+lab-arch-geyser list_prefix                  0.00 s  [30 keys listed]
+lab-arch-geyser small_delete                 n=30 p50 113 ms  p95 217 ms  max 592 ms
+lab-arch-geyser single_put_8mb               0.38 s  22.0 MB/s
+lab-arch-geyser get_single_8mb               1.20 s  7.0 MB/s  ttfb 65 ms  ok
+lab-arch-geyser archive_head                 0.00 s  [class=GLACIER restore=""]
+lab-arch-geyser archive_restore              0.03 s  [answer: operation error S3: RestoreObject, https response error StatusCode: 403]
+lab-arch-geyser single_put_64mb              1.07 s  62.4 MB/s
+lab-arch-geyser get_single_64mb              2.72 s  24.6 MB/s  ttfb 35 ms  ok
+lab-arch-geyser archive_head                 0.00 s  [class=GLACIER restore=""]
+lab-arch-geyser archive_restore              0.03 s  [answer: operation error S3: RestoreObject, https response error StatusCode: 403]
+lab-arch-geyser mpu_put_256mb                4.03 s  66.7 MB/s  [16 parts x 16 MiB, 8 wide, complete 3.6 s]
+lab-arch-geyser get_mpu_256mb                13.38 s  20.1 MB/s  ttfb 36 ms  ok
+lab-arch-geyser range_get_1mb                n=20 p50 280 ms  p95 525 ms  max 526 ms  [of mpu-256mb.bin]

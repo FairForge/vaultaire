@@ -1,0 +1,12 @@
+# Maxko (Sisak, Croatia, shared cPanel, noshell) as a remote EU customer of prod stored.ge via Cloudflare; rclone 1.75.2; seconds
+start 2026-10-14T17:52:17Z
+put_256mb_s 40.45
+get_256mb_multistream_s 6.78
+get_256mb_singlestream_s 5.71
+verify_multistream ok
+put_64x1mb_s 7.2
+get_64x1mb_s 4.08
+cdn_64mb_miss code=200 ttfb=0.566071s total=5.635564s
+cdn_64mb_hit code=200 ttfb=0.147893s total=0.660198s
+presign_ttfb_s 0.606779
+end 2026-10-14T17:53:47Z

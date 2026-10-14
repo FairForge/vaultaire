@@ -1,0 +1,47 @@
+Host:      slc (linux/amd64)
+Output:    raw-20261014/bench-compare-wr.json
+Transport: tuned (MaxIdleConnsPerHost=200, 4MB buffers, compression=off)
+Endpoints: 2 (smoke=false)
+
+[1/2] r2-default  (https://71a9e0116ef430a459a767e25ce1330e.r2.cloudflarestorage.com)
+─────────────────────────────────────────────────────────────────
+  ❌ bucket: create: operation error S3: CreateBucket, https response error StatusCode: 401, RequestID: , HostID: , api error Unauthorized: Unauthorized (head: operation error S3: HeadBucket, https response error StatusCode: 401, RequestID: , HostID: , api error Unauthorized: Unauthorized)
+
+[2/2] wasabi-us-west-1  (https://s3.us-west-1.wasabisys.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: vaultaire
+  cold_dial_put_1kb        1792ms  p50=156ms p95=403ms p99=403ms
+  warm_put_4kb            28428ms      4 ops/s  p50=50ms p95=528ms p99=14786ms
+  warm_get_4kb             4623ms     22 ops/s  p50=36ms p95=108ms p99=149ms
+  warm_head_4kb            2115ms     24 ops/s  p50=32ms p95=109ms p99=228ms
+  warm_copy_4kb             593ms     17 ops/s  p50=54ms p95=112ms p99=112ms
+  warm_delete_single       1921ms     16 ops/s  p50=51ms p95=150ms p99=175ms
+  delete_batch_100         1564ms     64 ops/s
+  list_100                  342ms  returned=100
+  list_prefix               256ms  returned=30
+  medium_put_1mb           4134ms     1.2 MB/s  p50=171ms p95=3283ms p99=3283ms
+  medium_get_1mb          36586ms     0.1 MB/s  p50=8382ms p95=11419ms p99=11419ms
+  medium_put_16mb         20181ms     4.0 MB/s  p50=624ms p95=18306ms p99=18306ms
+  medium_get_16mb          3567ms    22.4 MB/s  p50=431ms p95=1856ms p99=1856ms
+  large_put_64mb           1273ms    50.3 MB/s
+  large_get_64mb           1719ms    37.2 MB/s
+  multipart_put_256mb      9351ms    27.4 MB/s
+  multipart_put_256mb_16p   1995ms   128.3 MB/s
+  large_put_64mb_h1        1440ms    44.4 MB/s
+  multipart_put_256mb_h1_16p   1558ms   164.3 MB/s
+  mpu_abort                 795ms      6 ops/s  p50=81ms p95=469ms p99=469ms
+  concurrent_ingest_20s    4092ms   280.5 MB/s     70 ops/s  p50=153ms p95=891ms p99=2220ms
+  concurrent_download_20s   2269ms   505.8 MB/s    126 ops/s  p50=193ms p95=404ms p99=585ms
+  range_get_1mb_chunks     2354ms     6.8 MB/s      7 ops/s  p50=129ms p95=316ms p99=316ms
+  burst_small_files_500   22767ms     0.1 MB/s     22 ops/s  p50=59ms p95=656ms p99=6435ms
+  integrity_16mb           1102ms  ✓ checksum match
+  integrity_robust_16mb    1355ms    11.8 MB/s  ✓ verified (put_retries=0, get_retries=0)
+  integrity_chunked_16mb   1193ms    13.4 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   3332ms  p50=60ms p95=174ms p99=174ms  ✓ 20/20 consistent
+  consistency_overwrite    3705ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write   9354ms  ✓ 10/10 immediately visible in listing
+  rate_limit_escalation    7670ms     42 ops/s  max_clean=128 | ✓8w:15ops/s(0e) ✓16w:14ops/s(0e) ✓32w:325ops/s(0e) ✓64w:470ops/s(0e) ✓128w:165ops/s(0e)
+  sustained_upload_60s    60000ms    91.7 MB/s      6 ops/s  p50=540ms p95=1048ms p99=6206ms  00s:107MB/s 10s:106MB/s 20s:54MB/s 30s:118MB/s 40s:91MB/s 50s:74MB/s
+
+
+✅ Done in 5m10s. Results: raw-20261014/bench-compare-wr.json

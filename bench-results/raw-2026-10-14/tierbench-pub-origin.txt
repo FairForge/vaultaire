@@ -1,0 +1,20 @@
+pub-origin     small_put_4k                 n=30 p50 66 ms  p95 109 ms  max 432 ms
+pub-origin     small_get_4k                 n=30 p50 57 ms  p95 70 ms  max 73 ms  ok
+pub-origin     small_head_4k                n=30 p50 0 ms  p95 0 ms  max 0 ms
+pub-origin     list_prefix                  0.00 s  [30 keys listed]
+pub-origin     cdn_small_4k                 4.60 s  0.0 MB/s  ttfb 4600 ms  [pass 1 status 404 cf-cache-status=DYNAMIC]
+pub-origin     cdn_small_4k                 1.11 s  0.0 MB/s  ttfb 1112 ms  [pass 2 status 404 cf-cache-status=DYNAMIC]
+pub-origin     small_delete                 n=30 p50 63 ms  p95 74 ms  max 74 ms
+pub-origin     single_put_8mb               0.28 s  30.0 MB/s
+pub-origin     get_single_8mb               0.87 s  9.6 MB/s  ttfb 154 ms  ok
+pub-origin     cdn_get_8mb                  0.36 s  0.0 MB/s  ttfb 365 ms  [pass 1 status 404 cf-cache-status=MISS]
+pub-origin     cdn_get_8mb                  0.13 s  0.0 MB/s  ttfb 128 ms  [pass 2 status 404 cf-cache-status=HIT]
+pub-origin     single_put_64mb              1.99 s  33.7 MB/s
+pub-origin     get_single_64mb              1.55 s  43.4 MB/s  ttfb 691 ms  ok
+pub-origin     cdn_get_64mb                 0.36 s  0.0 MB/s  ttfb 361 ms  [pass 1 status 404 cf-cache-status=MISS]
+pub-origin     cdn_get_64mb                 0.13 s  0.0 MB/s  ttfb 128 ms  [pass 2 status 404 cf-cache-status=HIT]
+pub-origin     mpu_put_256mb                1.16 s  231.1 MB/s  [16 parts x 16 MiB, 8 wide, complete 0.6 s]
+pub-origin     get_mpu_256mb                1.93 s  138.7 MB/s  ttfb 510 ms  ok
+pub-origin     cdn_get_mpu_256mb            0.37 s  0.0 MB/s  ttfb 370 ms  [pass 1 status 404 cf-cache-status=MISS]
+pub-origin     cdn_get_mpu_256mb            0.13 s  0.0 MB/s  ttfb 132 ms  [pass 2 status 404 cf-cache-status=HIT]
+pub-origin     range_get_1mb                n=20 p50 117 ms  p95 267 ms  max 305 ms  [of mpu-256mb.bin]

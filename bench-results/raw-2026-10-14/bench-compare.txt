@@ -1,0 +1,146 @@
+⚠️  skipping r2-default: no URL (set R2_ENDPOINT)
+⚠️  skipping r2-eu: no URL (set R2_EU_ENDPOINT)
+⚠️  skipping idrive-us-southwest-1: IDRIVE_US_SOUTHWEST_1_ACCESS_KEY/IDRIVE_US_SOUTHWEST_1_SECRET_KEY not set
+⚠️  skipping idrive-us-west-1: IDRIVE_US_WEST_1_ACCESS_KEY/IDRIVE_US_WEST_1_SECRET_KEY not set
+⚠️  skipping idrive-ca-east-1: IDRIVE_CA_EAST_1_ACCESS_KEY/IDRIVE_CA_EAST_1_SECRET_KEY not set
+⚠️  skipping idrive-eu-west-4: IDRIVE_EU_WEST_4_ACCESS_KEY/IDRIVE_EU_WEST_4_SECRET_KEY not set
+⚠️  skipping idrive-eu-central-2: IDRIVE_EU_CENTRAL_2_ACCESS_KEY/IDRIVE_EU_CENTRAL_2_SECRET_KEY not set
+⚠️  skipping idrive-ap-southeast-1: IDRIVE_AP_SOUTHEAST_1_ACCESS_KEY/IDRIVE_AP_SOUTHEAST_1_SECRET_KEY not set
+Host:      slc (linux/amd64)
+Output:    raw-20261014/bench-compare.json
+Transport: tuned (MaxIdleConnsPerHost=200, 4MB buffers, compression=off)
+Endpoints: 16 (smoke=false)
+
+[1/16] lyve-us-east-1  (https://s3.us-east-1.global.lyve.seagate.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: vbench-lyve-us-east-1
+  cold_dial_put_1kb        2914ms  p50=287ms p95=435ms p99=435ms
+  warm_put_4kb             9798ms     10 ops/s  p50=88ms p95=173ms p99=425ms
+  warm_get_4kb             6279ms     16 ops/s  p50=58ms p95=71ms p99=374ms
+  warm_head_4kb            2869ms     17 ops/s  p50=56ms p95=67ms p99=68ms
+  warm_copy_4kb             644ms     16 ops/s  p50=63ms p95=96ms p99=96ms
+  warm_delete_single       1820ms     16 ops/s  p50=59ms p95=72ms p99=78ms
+  delete_batch_100          374ms    267 ops/s
+  list_100                  271ms  returned=100
+  list_prefix                54ms  returned=30
+  medium_put_1mb            804ms     6.2 MB/s  p50=79ms p95=487ms p99=487ms
+  medium_get_1mb            628ms     8.0 MB/s  p50=73ms p95=327ms p99=327ms
+  medium_put_16mb          1173ms    68.2 MB/s  p50=129ms p95=676ms p99=676ms
+  medium_get_16mb          1537ms    52.0 MB/s  p50=243ms p95=599ms p99=599ms
+  large_put_64mb            856ms    74.7 MB/s
+  large_get_64mb          65289ms     1.0 MB/s
+  multipart_put_256mb      2135ms   119.9 MB/s
+  multipart_put_256mb_16p   1615ms   158.5 MB/s
+  large_put_64mb_h1         820ms    78.0 MB/s
+  multipart_put_256mb_h1_16p   1581ms   161.9 MB/s
+  mpu_abort                2373ms      2 ops/s  p50=408ms p95=764ms p99=764ms
+  concurrent_ingest_20s    1712ms   670.2 MB/s    168 ops/s  p50=115ms p95=602ms p99=623ms
+  concurrent_download_20s   3188ms   360.1 MB/s     90 ops/s  p50=202ms p95=684ms p99=1048ms
+  range_get_1mb_chunks     1423ms    11.2 MB/s     11 ops/s  p50=66ms p95=324ms p99=324ms
+  burst_small_files_500    3609ms     0.5 MB/s    139 ops/s  p50=59ms p95=100ms p99=384ms
+  integrity_16mb           1245ms  ✓ checksum match
+  integrity_robust_16mb    1449ms    11.0 MB/s  ✓ verified (put_retries=0, get_retries=0)
+  integrity_chunked_16mb   1236ms    12.9 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   2910ms  p50=61ms p95=143ms p99=143ms  ✓ 20/20 consistent
+  consistency_overwrite    2872ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write   1545ms  ✓ 10/10 immediately visible in listing
+  rate_limit_escalation    1394ms    230 ops/s  max_clean=128 | ✓8w:88ops/s(0e) ✓16w:176ops/s(0e) ✓32w:438ops/s(0e) ✓64w:345ops/s(0e) ✓128w:407ops/s(0e)
+  sustained_upload_60s    60000ms   521.3 MB/s     33 ops/s  p50=117ms p95=136ms p99=288ms  00s:494MB/s 10s:528MB/s 20s:523MB/s 30s:531MB/s 40s:538MB/s 50s:514MB/s
+
+[2/16] lyve-us-west-1  (https://s3.us-west-1.global.lyve.seagate.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: vbench-lyve-us-west-1
+  cold_dial_put_1kb        2661ms  p50=301ms p95=449ms p99=449ms
+  warm_put_4kb            19201ms      5 ops/s  p50=165ms p95=410ms p99=526ms
+  warm_get_4kb             4039ms     25 ops/s  p50=45ms p95=56ms p99=111ms
+  warm_head_4kb            1759ms     28 ops/s  p50=42ms p95=49ms p99=53ms
+  warm_copy_4kb             663ms     15 ops/s  p50=40ms p95=305ms p99=305ms
+  warm_delete_single       2403ms     12 ops/s  p50=47ms p95=284ms p99=347ms
+  delete_batch_100          672ms    149 ops/s
+  list_100                  240ms  returned=100
+  list_prefix                85ms  returned=30
+  medium_put_1mb            400ms    12.5 MB/s  p50=56ms p95=208ms p99=208ms
+  medium_get_1mb            369ms    13.5 MB/s  p50=51ms p95=187ms p99=187ms
+  medium_put_16mb           920ms    86.9 MB/s  p50=103ms p95=350ms p99=350ms
+  medium_get_16mb          1096ms    73.0 MB/s  p50=136ms p95=375ms p99=375ms
+  large_put_64mb            467ms   137.0 MB/s
+  large_get_64mb            760ms    84.2 MB/s
+  multipart_put_256mb      1762ms   145.3 MB/s
+  multipart_put_256mb_16p   1071ms   238.9 MB/s
+  large_put_64mb_h1         455ms   140.6 MB/s
+  multipart_put_256mb_h1_16p   1127ms   227.1 MB/s
+  mpu_abort                2239ms      2 ops/s  p50=401ms p95=658ms p99=658ms
+  concurrent_ingest_20s    1522ms   754.1 MB/s    189 ops/s  p50=112ms p95=309ms p99=392ms
+  concurrent_download_20s   1860ms   617.0 MB/s    154 ops/s  p50=125ms p95=483ms p99=743ms
+  range_get_1mb_chunks      791ms    20.2 MB/s     20 ops/s  p50=49ms p95=136ms p99=136ms
+  burst_small_files_500    2297ms     0.8 MB/s    218 ops/s  p50=47ms p95=74ms p99=125ms
+  integrity_16mb            549ms  ✓ checksum match
+  integrity_robust_16mb     951ms    16.8 MB/s  ✓ verified (put_retries=0, get_retries=0)
+  integrity_chunked_16mb    632ms    25.3 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   1820ms  p50=49ms p95=82ms p99=82ms  ✓ 20/20 consistent
+  consistency_overwrite    1329ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write    863ms  ✓ 10/10 immediately visible in listing
+  rate_limit_escalation     817ms    392 ops/s  max_clean=128 | ✓8w:149ops/s(0e) ✓16w:295ops/s(0e) ✓32w:390ops/s(0e) ✓64w:513ops/s(0e) ✓128w:1016ops/s(0e)
+  sustained_upload_60s    60000ms   621.1 MB/s     39 ops/s  p50=102ms p95=127ms p99=186ms  00s:613MB/s 10s:619MB/s 20s:626MB/s 30s:621MB/s 40s:622MB/s 50s:626MB/s
+
+[3/16] lyve-eu-west-1  (https://s3.eu-west-1.global.lyve.seagate.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: vbench-lyve-eu-west-1
+  cold_dial_put_1kb        6776ms  p50=702ms p95=1148ms p99=1148ms
+  warm_put_4kb            16629ms      6 ops/s  p50=136ms p95=339ms p99=727ms
+  warm_get_4kb            14047ms      7 ops/s  p50=133ms p95=138ms p99=587ms
+  warm_head_4kb            6646ms      8 ops/s  p50=132ms p95=136ms p99=136ms
+  warm_copy_4kb            1428ms      7 ops/s  p50=137ms p95=155ms p99=155ms
+  warm_delete_single       4084ms      7 ops/s  p50=135ms p95=138ms p99=148ms
+  delete_batch_100          215ms    464 ops/s
+  list_100                  620ms  returned=100
+  list_prefix               135ms  returned=30
+  medium_put_1mb           1993ms     2.5 MB/s  p50=191ms p95=1228ms p99=1228ms
+  medium_get_1mb           1613ms     3.1 MB/s  p50=140ms p95=943ms p99=943ms
+  medium_put_16mb          2488ms    32.1 MB/s  p50=193ms p95=1701ms p99=1701ms
+  medium_get_16mb          3969ms    20.2 MB/s  p50=613ms p95=1526ms p99=1526ms
+  large_put_64mb           1957ms    32.7 MB/s
+  large_get_64mb           2914ms    22.0 MB/s
+  multipart_put_256mb      4312ms    59.4 MB/s
+  multipart_put_256mb_16p   3466ms    73.8 MB/s
+  large_put_64mb_h1        1947ms    32.9 MB/s
+  multipart_put_256mb_h1_16p   3283ms    78.0 MB/s
+  mpu_abort                4250ms      1 ops/s  p50=783ms p95=1128ms p99=1128ms
+  concurrent_ingest_20s    3260ms   352.1 MB/s     88 ops/s  p50=206ms p95=1482ms p99=1572ms
+  concurrent_download_20s   5622ms   204.2 MB/s     51 ops/s  p50=376ms p95=1682ms p99=1967ms
+  range_get_1mb_chunks     3122ms     5.1 MB/s      5 ops/s  p50=145ms p95=835ms p99=835ms
+  burst_small_files_500    8876ms     0.2 MB/s     56 ops/s  p50=136ms p95=163ms p99=1701ms
+  integrity_16mb           3218ms  ✓ checksum match
+  integrity_robust_16mb    3762ms     4.3 MB/s  ✓ verified (put_retries=0, get_retries=0)
+  integrity_chunked_16mb   3179ms     5.0 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   7086ms  p50=141ms p95=372ms p99=372ms  ✓ 20/20 consistent
+  consistency_overwrite    5583ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write   3183ms  ✓ 10/10 immediately visible in listing
+  rate_limit_escalation    2696ms    119 ops/s  max_clean=128 | ✓8w:40ops/s(0e) ✓16w:74ops/s(0e) ✓32w:178ops/s(0e) ✓64w:207ops/s(0e) ✓128w:364ops/s(0e)
+  sustained_upload_60s    60001ms   311.7 MB/s     19 ops/s  p50=196ms p95=216ms p99=322ms  00s:267MB/s 10s:310MB/s 20s:320MB/s 30s:320MB/s 40s:328MB/s 50s:325MB/s
+
+[4/16] geyser-la  (https://la1.geyserdata.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: stored3lib-632df558-9627-427b-ab86-9f3ff1eaafe9
+  cold_dial_put_1kb        1823ms  p50=141ms p95=600ms p99=600ms
+  warm_put_4kb             8491ms     12 ops/s  p50=57ms p95=200ms p99=643ms
+  warm_get_4kb             3167ms     32 ops/s  p50=31ms p95=31ms p99=34ms
+  warm_head_4kb            1532ms     33 ops/s  p50=30ms p95=30ms p99=31ms
+  warm_copy_4kb             844ms     12 ops/s  p50=105ms p95=151ms p99=151ms
+  warm_delete_single       5294ms      6 ops/s  p50=156ms p95=360ms p99=1008ms
+  delete_batch_100         1163ms     86 ops/s
+  list_100                31529ms  returned=100
+  list_prefix             29299ms  returned=30
+  medium_put_1mb            581ms     8.6 MB/s  p50=67ms p95=314ms p99=314ms
+  medium_get_1mb           1930ms     2.6 MB/s  p50=276ms p95=764ms p99=764ms
+  medium_put_16mb          3696ms    21.6 MB/s  p50=705ms p95=871ms p99=871ms
+  medium_get_16mb         19501ms     4.1 MB/s  p50=4366ms p95=4874ms p99=4874ms
+  large_put_64mb           2624ms    24.4 MB/s
+  large_get_64mb          18079ms     3.5 MB/s
+  multipart_put_256mb     10722ms    23.9 MB/s
+  multipart_put_256mb_16p  10869ms    23.6 MB/s
+  large_put_64mb_h1        1121ms    57.0 MB/s
+  multipart_put_256mb_h1_16p   2536ms   100.9 MB/s
+  mpu_abort                 586ms      9 ops/s  p50=90ms p95=201ms p99=201ms
+  concurrent_ingest_20s   20000ms    25.8 MB/s      6 ops/s  p50=4163ms p95=7823ms p99=9648ms
+  concurrent_download_20s  20001ms     3.6 MB/s      2 ops/s  p50=20000ms p95=20000ms p99=20000ms

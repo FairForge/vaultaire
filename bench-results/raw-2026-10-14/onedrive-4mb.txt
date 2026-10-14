@@ -1,0 +1,11 @@
+2026-10-14T16:39:07.282Z	INFO	drivers/onedrive.go:186	OneDrive fleet initialized	{"tenants": 3}
+
+OneDrive DRIVER-PATH benchmark — 3 accounts, 40 × 4 MB, concurrency 8
+─────────────────────────────────────────────────────────────────
+placement histogram (objects per account): [13 19 8]
+
+PUT       160.0 MB in   9.65s =   16.57 MB/s  (0 errors)
+GET       160.0 MB in   4.09s =   39.10 MB/s  (0 errors)
+LIST     40 objects in 1.52s (expected 40)
+DELETE    160.0 MB in   5.51s =   29.03 MB/s  (0 errors)
+post-delete LIST clean: 0 objects remain

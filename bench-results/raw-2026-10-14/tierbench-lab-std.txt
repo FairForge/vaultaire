@@ -1,0 +1,16 @@
+lab-std-idrive small_put_4k                 n=30 p50 36 ms  p95 39 ms  max 107 ms
+lab-std-idrive small_get_4k                 n=30 p50 30 ms  p95 31 ms  max 31 ms  ok
+lab-std-idrive small_head_4k                n=30 p50 0 ms  p95 0 ms  max 0 ms
+lab-std-idrive list_prefix                  0.00 s  [30 keys listed]
+lab-std-idrive small_delete                 n=30 p50 31 ms  p95 33 ms  max 47 ms
+lab-std-idrive single_put_8mb               0.32 s  26.4 MB/s
+lab-std-idrive get_single_8mb               3.77 s  2.2 MB/s  ttfb 98 ms  ok
+lab-std-idrive single_put_64mb              0.70 s  96.4 MB/s
+lab-std-idrive get_single_64mb              1.58 s  42.6 MB/s  ttfb 1127 ms  ok
+lab-std-idrive single_put_256mb             1.68 s  159.9 MB/s
+lab-std-idrive get_single_256mb             2.11 s  127.0 MB/s  ttfb 245 ms  ok
+lab-std-idrive mpu_put_256mb                2.19 s  122.8 MB/s  [16 parts x 16 MiB, 8 wide, complete 1.5 s]
+lab-std-idrive get_mpu_256mb                1.48 s  181.7 MB/s  ttfb 315 ms  ok
+lab-std-idrive mpu_put_1024mb               8.45 s  127.0 MB/s  [64 parts x 16 MiB, 8 wide, complete 6.8 s]
+lab-std-idrive get_mpu_1024mb               7.47 s  143.7 MB/s  ttfb 344 ms  ok
+lab-std-idrive range_get_1mb                n=20 p50 195 ms  p95 247 ms  max 587 ms  [of mpu-1024mb.bin]

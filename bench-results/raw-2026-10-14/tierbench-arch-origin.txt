@@ -1,0 +1,16 @@
+arch-origin    small_put_4k                 n=30 p50 76 ms  p95 194 ms  max 788 ms
+arch-origin    small_get_4k                 n=30 p50 33 ms  p95 34 ms  max 129 ms  ok
+arch-origin    small_head_4k                n=30 p50 32 ms  p95 32 ms  max 32 ms
+arch-origin    list_prefix                  0.00 s  [30 keys listed]
+arch-origin    small_delete                 n=30 p50 94 ms  p95 283 ms  max 627 ms
+arch-origin    single_put_8mb               0.64 s  13.2 MB/s
+arch-origin    get_single_8mb               0.34 s  24.4 MB/s  ttfb 98 ms  ok
+arch-origin    archive_head                 0.00 s  [class=GLACIER restore=""]
+arch-origin    archive_restore              0.03 s  [answer: operation error S3: RestoreObject, https response error StatusCode: 403]
+arch-origin    single_put_64mb              1.21 s  55.2 MB/s
+arch-origin    get_single_64mb              3.12 s  21.5 MB/s  ttfb 97 ms  ok
+arch-origin    archive_head                 0.00 s  [class=GLACIER restore=""]
+arch-origin    archive_restore              0.03 s  [answer: operation error S3: RestoreObject, https response error StatusCode: 403]
+arch-origin    mpu_put_256mb                4.69 s  57.2 MB/s  [16 parts x 16 MiB, 8 wide, complete 3.8 s]
+arch-origin    get_mpu_256mb                11.61 s  23.1 MB/s  ttfb 66 ms  ok
+arch-origin    range_get_1mb                n=20 p50 281 ms  p95 435 ms  max 495 ms  [of mpu-256mb.bin]
