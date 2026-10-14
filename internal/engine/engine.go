@@ -126,7 +126,7 @@ func (e *CoreEngine) Get(ctx context.Context, container, artifact string) (io.Re
 	if err := e.requireTenant(ctx, "get", container, artifact); err != nil {
 		return nil, err
 	}
-	candidates, err := e.readCandidates(e.preferredBackend(ctx, container, artifact), "get")
+	candidates, err := e.readCandidates(e.preferredBackend(ctx, "get", container, artifact), "get")
 	if err != nil {
 		return nil, fmt.Errorf("get %s/%s: %w", container, artifact, err)
 	}
@@ -157,7 +157,7 @@ func (e *CoreEngine) GetRange(ctx context.Context, container, artifact string, o
 	if err := e.requireTenant(ctx, "get_range", container, artifact); err != nil {
 		return nil, err
 	}
-	candidates, err := e.readCandidates(e.preferredBackend(ctx, container, artifact), "get_range")
+	candidates, err := e.readCandidates(e.preferredBackend(ctx, "get_range", container, artifact), "get_range")
 	if err != nil {
 		return nil, fmt.Errorf("get range %s/%s: %w", container, artifact, err)
 	}
@@ -348,7 +348,7 @@ func (e *CoreEngine) Delete(ctx context.Context, container, artifact string) err
 	if err := e.requireTenant(ctx, "delete", container, artifact); err != nil {
 		return err
 	}
-	targets := []string{e.preferredBackend(ctx, container, artifact)}
+	targets := []string{e.preferredBackend(ctx, "delete", container, artifact)}
 	for _, b := range KnownCopies(ctx) {
 		if !slices.Contains(targets, b) {
 			targets = append(targets, b)

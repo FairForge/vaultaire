@@ -13,6 +13,7 @@ package api
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -292,28 +293,39 @@ func (d objectDeleteAftermath) deleteVersionReleasing(ctx context.Context, tenan
 // blob no version names is retired. Returns the marker's version id.
 func (d objectDeleteAftermath) deleteBehindMarker(ctx context.Context, tenantID, bucket, key string) (string, error) {
 	markerID := generateVersionID()
-	if err := writeDeleteMarker(ctx, d.db, tenantID, bucket, key, markerID); err != nil {
+	// The marker, the head row's removal (the billing record, DELETE ...
+	// RETURNING; an object chunked before versioning was enabled releases
+	// its manifest, R8-07) and the displaced blob's fate commit in ONE
+	// transaction under the key's locks: a write that commits around the
+	// DELETE is wholly before or wholly after it (PM-6 under versioning,
+	// Stage 1a Prompt 6 Part 0 — split in two, a PUT committed between the
+	// marker and the row delete lost its head row: GET 404 with its version
+	// the latest).
+	var marked displacedRow
+	var found bool
+	err := writeDeleteMarker(ctx, d.db, tenantID, bucket, key, markerID, func(tx *sql.Tx) error {
+		var err error
+		marked, found, err = deleteHeadRowTx(ctx, tx, manifestReleaser(d.gci), tenantID, bucket, key, nil)
+		if err != nil || !found || marked.StorageKey == "" {
+			return err
+		}
+		// The blob the head row named stays while a version keeps it (the
+		// undelete path); one no version names is displaced.
+		if err := retireBlob(ctx, tx, tenantID, bucket, key, marked.StorageKey, marked.Backend, retiredOverwritten); err != nil {
+			if !errors.Is(err, errUnaddressableBlob) {
+				return err
+			}
+			d.logger.Warn("delete marker: the displaced blob is not queued for the collector — the erasure sweep is its only remover",
+				zap.Error(err), zap.String("bucket", bucket), zap.String("object", key), zap.String("storage_key", marked.StorageKey))
+		}
+		return nil
+	})
+	if err != nil {
 		return "", fmt.Errorf("write the delete marker: %w", err)
 	}
 	deleteMarkerWrittenHook(tenantID, bucket, key)
-	// The head-cache row is the billing record (WP-1): DELETE...RETURNING
-	// captures the removed size atomically. An object chunked before
-	// versioning was enabled releases its manifest in the same transaction
-	// (R8-07).
-	marked, found, err := deleteHeadRowReleasing(ctx, d.db, manifestReleaser(d.gci), tenantID, bucket, key)
-	if err != nil {
-		return "", fmt.Errorf("delete-marker head row: %w", err)
-	}
 	if found {
 		d.releaseDetached(ctx, tenantID, marked)
-		// The blob the head row named stays while a version keeps it (the
-		// undelete path); one no version names is displaced.
-		if marked.StorageKey != "" {
-			if err := retireBlobNow(ctx, d.db, tenantID, bucket, key, marked.StorageKey, marked.Backend, retiredOverwritten); err != nil {
-				d.logger.Warn("delete marker: the displaced blob is not queued for the collector — the erasure sweep is its only remover",
-					zap.Error(err), zap.String("bucket", bucket), zap.String("object", key), zap.String("storage_key", marked.StorageKey))
-			}
-		}
 	}
 	return markerID, nil
 }

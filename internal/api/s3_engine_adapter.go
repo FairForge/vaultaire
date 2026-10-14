@@ -302,7 +302,20 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 			version = &versionBlob{etag: vETag, contentType: vContentType, size: vSize, createdAt: vCreatedAt,
 				storageKey: vStorageKey, backend: vBackend, encAlgo: vEncAlgo}
 		}
-		if !isDeleteMarker && !isLatest && version == nil && !a.versionBytesIntact(r.Context(), t.ID, bucket, artifact, reqVersionID) {
+		intact := false
+		if !isDeleteMarker && !isLatest && version == nil {
+			intact = a.versionBytesIntact(r.Context(), t.ID, bucket, artifact, reqVersionID)
+		}
+		if intact {
+			// A version written before C1 whose bytes are intact at <key>
+			// (behind a delete marker: no head row) is read from its own
+			// row — its backend and its encryption — never the primary at
+			// a guess (Stage 1a Prompt 6 Part 0: it was read with no
+			// recorded backend, and a sealed one returned as ciphertext).
+			version = &versionBlob{etag: vETag, contentType: vContentType, size: vSize, createdAt: vCreatedAt,
+				backend: vBackend, encAlgo: vEncAlgo}
+		}
+		if !isDeleteMarker && !isLatest && version == nil {
 			// R2-03: a version written before WP-R2-1's writers (C1,
 			// 2026-10-12) kept no bytes — every PUT overwrote the one blob
 			// at this key — so the bytes of such a non-current version no
@@ -377,8 +390,15 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 			FROM object_head_cache
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
 			t.ID, bucket, artifact).Scan(&cachedContentType, &cachedSize, &cachedETag, &cachedUpdatedAt, &cachedMetadata, &cachedBackendName, &cachedEncAlgo, &cachedTags, &cachedContentDisposition, &cachedContentEncoding, &cachedContentLanguage, &cachedEcho.CacheControl, &cachedEcho.Expires, &cachedEcho.WebsiteRedirect, &cachedIsChunked, &cachedFloor, &cachedStorageKey)
-		if err == nil {
+		switch {
+		case err == nil:
 			cacheHit = true
+		case !errors.Is(err, sql.ErrNoRows):
+			// Never a guess on the primary when the row cannot be read
+			// (Stage 1a Prompt 6 Part 0); DELETE refuses the same way.
+			a.logger.Error("GET: head row read failed", zap.Error(err), zap.String("bucket", bucket), zap.String("object", artifact))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
 		}
 	}
 	if version != nil {
@@ -391,6 +411,27 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		cachedBackendName, cachedEncAlgo, cachedStorageKey, cachedIsChunked = version.backend, version.encAlgo, version.storageKey, false
 		cachedMetadata, cachedTags = []byte("{}"), []byte("{}")
 		cachedContentDisposition, cachedContentEncoding, cachedContentLanguage, cachedEcho = "", "", "", putEchoHeaders{}
+	}
+	// No row, no object: the row is the one authority for where an object
+	// is (WP-R6-1) — HEAD already answers from it alone — so a key with no
+	// row is NoSuchKey without asking any backend (it was asked of the
+	// primary at <key>, a guess; Stage 1a Prompt 6 Part 0).
+	if a.db != nil && !cacheHit {
+		reqID := generateRequestID()
+		if suggestion := keySuggestion(r.Context(), a.db, t.ID, bucket, artifact); suggestion != "" {
+			WriteS3ErrorWithContext(w, ErrNoSuchKey, r.URL.Path, reqID, WithSuggestion(suggestion))
+		} else {
+			WriteS3Error(w, ErrNoSuchKey, r.URL.Path, reqID)
+		}
+		return
+	}
+	// A chunked row is read through the content index alone; without one
+	// this process cannot read it, and the whole-object path would read a
+	// stale blob at <key> from the primary.
+	if cacheHit && cachedIsChunked && a.gci == nil {
+		a.logger.Error("GET: a chunked object on a process with no content index", zap.String("bucket", bucket), zap.String("object", artifact))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return
 	}
 	// Where the object's bytes are (WP-R2-1): the row's own address, <key>
 	// when it records none.
@@ -1993,11 +2034,25 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 		keptByVersion = named
 	}
 
-	if (isChunked && a.gci != nil) || keptByVersion {
+	if isChunked && a.gci == nil {
+		// A chunked row's bytes are its chunks: without the content index
+		// this process can release none of them, and a whole-blob delete of
+		// <key> on the primary would be a guess.
+		a.logger.Error("delete: a chunked object on a process with no content index", zap.String("bucket", bucket), zap.String("object", object))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return
+	}
+	switch {
+	case isChunked || keptByVersion:
 		// Nothing to delete on the backend: the chunks stay until dedup GC
 		// (the manifest is released together with the head row below, in one
 		// transaction, R8-08), and a version's bytes stay with the version.
-	} else {
+	case !read.found:
+		// No row names any bytes for this key (WP-R6-1: the row is the one
+		// authority): nothing to delete on any backend. A blob no row names
+		// is the collector's or the erasure sweep's, never a guess on the
+		// primary (Stage 1a Prompt 6 Part 0).
+	default:
 		// Every copy the tables know of, the recorded one first (WP-R6-1:
 		// a delete that left a second copy answered 204 — R6-24).
 		dctx := r.Context()

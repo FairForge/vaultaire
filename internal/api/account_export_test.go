@@ -516,9 +516,10 @@ func TestAccountExport_RetentionOnAnExportWhoseHeadRowIsAlreadyGone(t *testing.T
 	f.run()
 	f.exec(`UPDATE account_exports SET expires_at = NOW() - INTERVAL '1 minute' WHERE id = $1`, id)
 	// An export written in place by a build before WP-R2-1 Part C: its blob
-	// at <key>. (A Part C export's address is on its head row only; with the
-	// row gone it is left for the erasure sweep — the _exports bucket has no
-	// S3 writer, so only a bug removes that row.)
+	// at <key>. With its row gone no row names it, so it is left for the
+	// erasure sweep like a Part C export's (Stage 1a Prompt 6 Part 0: it was
+	// deleted from the primary at a guess) — the _exports bucket has no S3
+	// writer, so only a bug removes that row.
 	for _, p := range f.exportFiles() {
 		if i := strings.LastIndexByte(p, '@'); i > 0 {
 			require.NoError(t, os.Rename(p, p[:i]))
@@ -532,7 +533,7 @@ func TestAccountExport_RetentionOnAnExportWhoseHeadRowIsAlreadyGone(t *testing.T
 	var status string
 	require.NoError(t, f.db.QueryRow(`SELECT status FROM account_exports WHERE id = $1`, id).Scan(&status))
 	assert.Equal(t, "expired", status)
-	assert.Empty(t, f.exportFiles(), "the blob is removed even without its row")
+	assert.NotEmpty(t, f.exportFiles(), "no row names the blob: no backend is asked to delete it")
 }
 
 // --- failures ---------------------------------------------------------------

@@ -398,7 +398,9 @@ func bucketSuggestion(ctx context.Context, db *sql.DB, tenantID, bucket string) 
 
 // keySuggestion queries object_head_cache for keys in the same bucket that
 // share a common prefix and returns a "Did you mean 'X'?" string if a close
-// match exists. The query is bounded (LIMIT 20) to keep it cheap.
+// match exists. The query is bounded (LIMIT 20) to keep it cheap. The key
+// asked for is never suggested: when its row exists the miss is not a typo
+// (a backend that lost the bytes, a delete marker) — R61-1.
 func keySuggestion(ctx context.Context, db *sql.DB, tenantID, bucket, key string) string {
 	if db == nil {
 		return ""
@@ -433,7 +435,7 @@ func keySuggestion(ctx context.Context, db *sql.DB, tenantID, bucket, key string
 
 	for rows.Next() {
 		var k string
-		if err := rows.Scan(&k); err != nil {
+		if err := rows.Scan(&k); err != nil || k == key {
 			continue
 		}
 		d := levenshtein(key, k)
@@ -441,9 +443,6 @@ func keySuggestion(ctx context.Context, db *sql.DB, tenantID, bucket, key string
 			bestDist = d
 			bestKey = k
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return ""
 	}
 	if err := rows.Err(); err != nil {
 		return ""

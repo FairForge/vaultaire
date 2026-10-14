@@ -10,10 +10,13 @@ package api
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"sync/atomic"
 	"testing"
 
+	"github.com/FairForge/vaultaire/internal/engine"
+	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/FairForge/vaultaire/internal/usage"
 	smithy "github.com/aws/smithy-go"
 	"github.com/stretchr/testify/assert"
@@ -212,4 +215,166 @@ func listFiles(t *testing.T, dir string) []string {
 		out = append(out, e.Name())
 	}
 	return out
+}
+
+// --- the silent-primary hole (Part 0 item 2) -------------------------------
+
+func TestGet_NoRow_NoSuchKeyWithoutABackendCall(t *testing.T) {
+	// Before: a key with no head row was asked of the primary at <key> (an
+	// orphan blob there was served as the object).
+	f := setupLocFixture(t)
+	require.Equal(t, http.StatusOK, httptestPut(f.mpChunkFixture, "k.bin", mpBody(3000, 1), nil).Code)
+	f.plant(t, f.primary, "k.bin", mpBody(3000, 1))
+	p := f.blobPath(t, f.primary, "k.bin")
+	_, err := f.db.Exec(`DELETE FROM object_head_cache WHERE tenant_id = $1 AND object_key = 'k.bin'`, f.tenantID)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(f.primary.path(f.tenantID, f.tenant.NamespaceContainer("test-bucket"), "orphan.bin"), mustRead(t, p), 0o600))
+	f.resetCalls()
+
+	w := f.get(t, "orphan.bin", "")
+	assert.Equal(t, http.StatusNotFound, w.Code, "no row, no object")
+	assert.Zero(t, f.calls(), "no backend asked")
+}
+
+func TestDelete_NoRow_NoBackendCall(t *testing.T) {
+	f := setupLocFixture(t)
+	f.resetCalls()
+	d := f.del(t, "never.bin")
+	assert.Equal(t, http.StatusNoContent, d.StatusCode)
+	assert.Zero(t, f.calls(), "no row names any bytes: nothing to delete anywhere")
+	res := f.batchDelete(t, batchEntry{key: "never.bin"})
+	assert.Len(t, res.Deleted, 1)
+	assert.Zero(t, f.calls())
+}
+
+func TestGet_LegacyVersionBehindMarker_ReadFromItsRowsBackend(t *testing.T) {
+	// A version written before C1 (no address: its bytes at <key>) behind a
+	// delete marker — the one such version still served. Before: read with
+	// no recorded backend, i.e. from the primary.
+	f := setupLocFixture(t)
+	f.bucketSet(t, "versioning_status = 'Enabled'")
+	body := mpBody(3000, 7)
+	legacy := f.others["other05"]
+	p := legacy.path(f.tenantID, f.tenant.NamespaceContainer("test-bucket"), "old.bin")
+	require.NoError(t, os.MkdirAll(dirOf(p), 0o750))
+	require.NoError(t, os.WriteFile(p, body, 0o600))
+	_, err := f.db.Exec(`INSERT INTO object_versions (tenant_id, bucket, object_key, version_id, size_bytes, etag, content_type, is_latest, is_delete_marker, backend_name, created_at)
+		VALUES ($1, 'test-bucket', 'old.bin', 'v-legacy', $2, 'e', 'application/octet-stream', FALSE, FALSE, 'other05', NOW() - INTERVAL '1 hour'),
+		       ($1, 'test-bucket', 'old.bin', 'v-marker', 0, '', 'application/octet-stream', TRUE, TRUE, NULL, NOW())`, f.tenantID, len(body))
+	require.NoError(t, err)
+	f.resetCalls()
+
+	r := httptestGetVersion(f, "old.bin", "v-legacy")
+	require.Equal(t, http.StatusOK, r.Code, r.Body.String())
+	assert.Equal(t, body, r.Body.Bytes())
+	assert.Zero(t, f.primary.calls.Load(), "never the primary")
+}
+
+func TestCopy_SourceVersionId_CopiesThatVersion(t *testing.T) {
+	// Restoring an earlier version the S3 way: copy it onto its own key.
+	// Before: the versionId was dropped and the CURRENT object copied.
+	f := setupLocFixture(t)
+	f.bucketSet(t, "versioning_status = 'Enabled'")
+	v1Body, v2Body := mpBody(3000, 1), mpBody(4000, 2)
+	w1 := httptestPut(f.mpChunkFixture, "k.bin", v1Body, nil)
+	require.Equal(t, http.StatusOK, w1.Code)
+	require.Equal(t, http.StatusOK, httptestPut(f.mpChunkFixture, "k.bin", v2Body, nil).Code)
+	v1 := w1.Header().Get("x-amz-version-id")
+	require.NotEmpty(t, v1)
+
+	c := httptestCopy(f, "k.bin", "test-bucket/k.bin?versionId="+v1)
+	require.Equal(t, http.StatusOK, c.Code, c.Body.String())
+	assert.Equal(t, v1, c.Header().Get("x-amz-copy-source-version-id"))
+	g := f.get(t, "k.bin", "")
+	require.Equal(t, http.StatusOK, g.Code)
+	assert.Equal(t, v1Body, g.Body.Bytes(), "the restored version is current")
+
+	c = httptestCopy(f, "x.bin", "test-bucket/k.bin?versionId=nope")
+	assert.Equal(t, http.StatusNotFound, c.Code)
+	assert.Contains(t, c.Body.String(), "NoSuchVersion")
+}
+
+func TestCopy_SourceWithoutRow_NoSuchKeyWithoutABackendCall(t *testing.T) {
+	// Before: the row read's error was ignored: a key with no row was read
+	// from the primary at <key> and an orphan blob there copied.
+	f := setupLocFixture(t)
+	p := f.primary.path(f.tenantID, f.tenant.NamespaceContainer("test-bucket"), "orphan.bin")
+	require.NoError(t, os.MkdirAll(dirOf(p), 0o750))
+	require.NoError(t, os.WriteFile(p, mpBody(3000, 1), 0o600))
+	f.resetCalls()
+
+	c := httptestCopy(f, "dst.bin", "test-bucket/orphan.bin")
+	assert.Equal(t, http.StatusNotFound, c.Code, c.Body.String())
+	assert.Contains(t, c.Body.String(), "NoSuchKey")
+	assert.Zero(t, f.calls())
+	assert.Equal(t, 0, f.headRows(t, "dst.bin"))
+}
+
+func dirOf(p string) string {
+	for i := len(p) - 1; i >= 0; i-- {
+		if p[i] == '/' {
+			return p[:i]
+		}
+	}
+	return "."
+}
+
+func httptestGetVersion(f *locFixture, key, vid string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest("GET", "/test-bucket/"+key+"?versionId="+vid, nil)
+	r = r.WithContext(s3Ctx(r.Context(), f.tenant))
+	w := httptest.NewRecorder()
+	f.server.handleS3Request(w, r)
+	return w
+}
+
+func httptestCopy(f *locFixture, dstKey, source string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest("PUT", "/test-bucket/"+dstKey, nil)
+	r.Header.Set("x-amz-copy-source", source)
+	r = r.WithContext(s3Ctx(r.Context(), f.tenant))
+	w := httptest.NewRecorder()
+	f.server.handleS3Request(w, r)
+	return w
+}
+
+// failDeleteLocal is the export fixture's local driver with every delete
+// refused (a backend whose key cannot delete).
+type failDeleteLocal struct{ engine.Driver }
+
+func (d failDeleteLocal) Delete(context.Context, string, string) error { return accessDenied }
+
+func TestAccountExport_PurgeWhoseBackendDeleteFails_KeepsTheRowAndTheBill(t *testing.T) {
+	// Before: the export purge deleted the head row (and released the
+	// bytes) whatever the backend answered: the blob stayed with no row.
+	f := setupExportFixture(t)
+	f.seed()
+	id, err := f.svc.Request(context.Background(), f.userID, f.tenantID)
+	require.NoError(t, err)
+	f.run()
+	f.exec(`UPDATE account_exports SET expires_at = NOW() - INTERVAL '1 minute' WHERE id = $1`, id)
+	var usedBefore int64
+	require.NoError(t, f.db.QueryRow(`SELECT storage_used_bytes FROM tenant_quotas WHERE tenant_id = $1`, f.tenantID).Scan(&usedBefore))
+	local, ok := f.eng.GetDriver("local")
+	require.True(t, ok)
+	f.eng.AddDriver("local", failDeleteLocal{Driver: local})
+
+	n, err := f.svc.PurgeExpired(context.Background())
+
+	require.NoError(t, err)
+	assert.Zero(t, n, "not expired: retried next run")
+	var cnt int
+	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM object_head_cache WHERE tenant_id = $1 AND bucket = $2`, f.tenantID, tenant.ExportsBucket).Scan(&cnt))
+	assert.Equal(t, 1, cnt, "the head row stays with its bytes")
+	assert.NotEmpty(t, f.exportFiles())
+	var usedAfter int64
+	require.NoError(t, f.db.QueryRow(`SELECT storage_used_bytes FROM tenant_quotas WHERE tenant_id = $1`, f.tenantID).Scan(&usedAfter))
+	assert.Equal(t, usedBefore, usedAfter, "the bill stays")
+	var status string
+	require.NoError(t, f.db.QueryRow(`SELECT status FROM account_exports WHERE id = $1`, id).Scan(&status))
+	assert.Equal(t, "completed", status)
+
+	f.eng.AddDriver("local", local)
+	n, err = f.svc.PurgeExpired(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), n, "the next run converges")
+	assert.Empty(t, f.exportFiles())
 }
