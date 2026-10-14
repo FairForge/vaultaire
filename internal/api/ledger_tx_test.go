@@ -24,8 +24,10 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/crypto"
+	"github.com/FairForge/vaultaire/internal/flags"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 )
 
 // holdQuotaRow locks the tenant's tenant_quotas row from another
@@ -201,6 +203,15 @@ func TestLedger_RandomSequence_EqualsTheReconcileAtEveryStep(t *testing.T) {
 			f := setupQuotaAccountingFixture(t, 1<<30)
 			f.server.gci = crypto.NewGlobalContentIndex(f.db)
 			f.server.chunkingThreshold = 3000
+			// Chunked writes in all three versioning states (WP-VM-1 Part D):
+			// the tenant's versioned_chunking row.
+			fl := flags.New(f.db, zap.NewNop())
+			registerFlags(fl)
+			require.NoError(t, fl.Set(context.Background(), flagVersionedChunking, f.tenantID, true, "test"))
+			t.Cleanup(func() {
+				_, _ = f.db.Exec(`DELETE FROM feature_flags WHERE flag_key = $1 AND tenant_id = $2`, flagVersionedChunking, f.tenantID)
+			})
+			f.server.flags = fl
 			f.house(t, 1<<30, 1<<30)
 			if status == "Enabled" || status == "Suspended" {
 				f.versioning(t, status)

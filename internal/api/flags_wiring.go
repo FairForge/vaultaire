@@ -63,6 +63,15 @@ const (
 	// only for tenants named one by one (our own, or with that consent).
 	// Checked in resolvePutStorageClass via syncPlacementGate.
 	flagSyncBackend = "sync_backend"
+
+	// flagVersionedChunking lets a chunked write (PUT, CompleteMultipartUpload,
+	// the copy's manifest branch) go into an Enabled or Suspended bucket
+	// (WP-VM-1 Part D): since 092 a manifest has an address and a version
+	// keeps it. Default OFF, per-tenant rows first (built now, dark until
+	// proven); off, versioned buckets store whole objects as before. Reads
+	// never depend on it: a chunked version written while it was on reads
+	// after it goes off. Checked in decidePlacement.
+	flagVersionedChunking = "versioned_chunking"
 )
 
 // registerFlags registers every flag with its in-code default.
@@ -75,6 +84,7 @@ func registerFlags(fl *flags.Service) {
 	fl.Register(flagEgressThrottle, false)
 	fl.Register(flagVaultParity, false)
 	fl.Register(flagSyncBackend, false)
+	fl.Register(flagVersionedChunking, false)
 	fl.Register(flagParallelGet, false)
 }
 
