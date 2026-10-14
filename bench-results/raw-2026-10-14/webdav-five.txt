@@ -1,0 +1,83 @@
+webdav-bench slc-vaultaire-01 → http://127.0.0.1:4918,http://127.0.0.1:4919,http://127.0.0.1:4920,http://127.0.0.1:4921,http://127.0.0.1:4922 root=_bench20261014 run=run-20261014-170229-7372 suites=large,parity,crossbridge
+== large
+  large        16MiB c1               PUT        n=1     err=0       0.14 ops/s      2.41 MB/s p50=6962.9ms p95=6962.9ms p99=6962.9ms
+  large        16MiB c1               GET        n=1     err=0       0.79 ops/s     13.18 MB/s p50=1272.6ms p95=1272.6ms p99=1272.6ms
+  large        16MiB c1               GET TTFB   n=1     err=0       0.00 ops/s      0.00 MB/s p50=1263.2ms p95=1263.2ms p99=1263.2ms time to first byte
+  large        16MiB c4               PUT        n=4     err=0       0.77 ops/s     12.98 MB/s p50=4666.1ms p95=5170.9ms p99=5170.9ms
+  large        16MiB c4               GET        n=4     err=0       2.90 ops/s     48.57 MB/s p50=1265.4ms p95=1381.5ms p99=1381.5ms
+  large        16MiB c4               GET TTFB   n=4     err=0       0.00 ops/s      0.00 MB/s p50=1255.8ms p95=1372.3ms p99=1372.3ms time to first byte
+  large        256MiB c1              PUT        n=1     err=0       0.09 ops/s     23.04 MB/s p50=11650.3ms p95=11650.3ms p99=11650.3ms
+  large        256MiB c1              GET        n=1     err=0       0.15 ops/s     40.44 MB/s p50=6638.3ms p95=6638.3ms p99=6638.3ms
+  large        256MiB c1              GET TTFB   n=1     err=0       0.00 ops/s      0.00 MB/s p50=1372.1ms p95=1372.1ms p99=1372.1ms time to first byte
+  large        256MiB c4              PUT        n=4     err=0       0.27 ops/s     72.66 MB/s p50=14114.5ms p95=14778.4ms p99=14778.4ms
+  large        256MiB c4              GET        n=4     err=0       0.56 ops/s    149.61 MB/s p50=6730.1ms p95=7176.9ms p99=7176.9ms
+  large        256MiB c4              GET TTFB   n=4     err=0       0.00 ops/s      0.00 MB/s p50=1360.8ms p95=1460.5ms p99=1460.5ms time to first byte
+  large        1GiB c1                PUT        n=1     err=0       0.02 ops/s     25.25 MB/s p50=42528.6ms p95=42528.6ms p99=42528.6ms
+  large        1GiB c1                GET        n=1     err=0       0.05 ops/s     48.89 MB/s p50=21963.6ms p95=21963.6ms p99=21963.6ms
+  large        1GiB c1                GET TTFB   n=1     err=0       0.00 ops/s      0.00 MB/s p50=1384.8ms p95=1384.8ms p99=1384.8ms time to first byte
+  large        1GiB c4                PUT        n=4     err=0       0.09 ops/s     93.73 MB/s p50=43361.4ms p95=45820.9ms p99=45820.9ms
+  large        1GiB c4                GET        n=4     err=0       0.16 ops/s    173.55 MB/s p50=23546.7ms p95=24747.2ms p99=24747.2ms
+  large        1GiB c4                GET TTFB   n=4     err=0       0.00 ops/s      0.00 MB/s p50=1417.6ms p95=1522.0ms p99=1522.0ms time to first byte
+== large done in 3m19.73s
+== parity
+  parity       64MiB k4+m4 (16MiB shards) write m    n=4     err=0       0.67 ops/s     11.30 MB/s p50=4771.8ms p95=5938.0ms p99=5938.0ms
+  parity       64MiB k4+m4 (16MiB shards) read m     n=4     err=0       3.01 ops/s     50.56 MB/s p50=1248.2ms p95=1327.4ms p99=1327.4ms
+  parity       64MiB k4+m4 (16MiB shards) degraded k n=4     err=0       3.34 ops/s     56.08 MB/s p50=965.9ms p95=1196.5ms p99=1196.5ms
+  parity       256MiB k4+m4 (64MiB shards) write m    n=4     err=0       0.65 ops/s     43.52 MB/s p50=5976.8ms p95=6168.6ms p99=6168.6ms
+  parity       256MiB k4+m4 (64MiB shards) read m     n=4     err=0       1.63 ops/s    109.48 MB/s p50=2280.2ms p95=2451.8ms p99=2451.8ms
+  parity       256MiB k4+m4 (64MiB shards) degraded k n=4     err=0       1.62 ops/s    108.42 MB/s p50=2152.2ms p95=2475.9ms p99=2475.9ms
+  parity       1GiB k4+m4 (256MiB shards) write m    n=4     err=0       0.13 ops/s     35.79 MB/s p50=19378.0ms p95=30000.3ms p99=30000.3ms
+  parity       1GiB k4+m4 (256MiB shards) read m     n=4     err=0       0.08 ops/s     20.22 MB/s p50=51907.5ms p95=53093.4ms p99=53093.4ms
+  parity       1GiB k4+m4 (256MiB shards) degraded k n=4     err=0       0.47 ops/s    126.19 MB/s p50=8253.2ms p95=8509.0ms p99=8509.0ms
+  parity       300×1MiB flat c16      PUT        n=300   err=0      13.99 ops/s     14.67 MB/s p50=743.3ms p95=3845.4ms p99=4649.2ms
+  parity       300×1MiB flat c16      GET        n=300   err=0      18.01 ops/s     18.89 MB/s p50=841.0ms p95=1210.1ms p99=1441.0ms
+  parity       300×1MiB fanout c16    PUT        n=300   err=0       3.31 ops/s      3.47 MB/s p50=4717.2ms p95=6797.2ms p99=7183.4ms
+  parity       300×1MiB fanout c16    GET        n=300   err=0       8.20 ops/s      8.60 MB/s p50=1683.3ms p95=3358.5ms p99=4055.2ms
+== parity done in 7m25.881s
+== crossbridge
+  crossbridge  64KiB ×10 5b           visible new n=10    err=0       0.04 ops/s      0.00 MB/s p50=2438.6ms p95=25399.1ms p99=25399.1ms
+  crossbridge  64KiB ×10 5b           visible overwrite n=10    err=0       0.04 ops/s      0.00 MB/s p50=31058.2ms p95=31969.1ms p99=31969.1ms
+  crossbridge  64KiB ×10 5b           visible delete n=10    err=0       0.04 ops/s      0.00 MB/s p50=29795.3ms p95=39954.3ms p99=39954.3ms
+== crossbridge done in 3m52.059s
+
+        SUITE                         CASE                 OP    N  ERR  WALL s  OPS/s   MB/s   p50 ms   p95 ms   p99 ms                NOTE
+        large                     16MiB c1                PUT    1    0    6.96    0.1    2.4   6962.9   6962.9   6962.9
+        large                     16MiB c1                GET    1    0    1.27    0.8   13.2   1272.6   1272.6   1272.6
+        large                     16MiB c1           GET TTFB    1    0    0.00    0.0    0.0   1263.2   1263.2   1263.2  time to first byte
+        large                     16MiB c4                PUT    4    0    5.17    0.8   13.0   4666.1   5170.9   5170.9
+        large                     16MiB c4                GET    4    0    1.38    2.9   48.6   1265.4   1381.5   1381.5
+        large                     16MiB c4           GET TTFB    4    0    0.00    0.0    0.0   1255.8   1372.3   1372.3  time to first byte
+        large                    256MiB c1                PUT    1    0   11.65    0.1   23.0  11650.3  11650.3  11650.3
+        large                    256MiB c1                GET    1    0    6.64    0.2   40.4   6638.3   6638.3   6638.3
+        large                    256MiB c1           GET TTFB    1    0    0.00    0.0    0.0   1372.1   1372.1   1372.1  time to first byte
+        large                    256MiB c4                PUT    4    0   14.78    0.3   72.7  14114.5  14778.4  14778.4
+        large                    256MiB c4                GET    4    0    7.18    0.6  149.6   6730.1   7176.9   7176.9
+        large                    256MiB c4           GET TTFB    4    0    0.00    0.0    0.0   1360.8   1460.5   1460.5  time to first byte
+        large                      1GiB c1                PUT    1    0   42.53    0.0   25.2  42528.6  42528.6  42528.6
+        large                      1GiB c1                GET    1    0   21.96    0.0   48.9  21963.6  21963.6  21963.6
+        large                      1GiB c1           GET TTFB    1    0    0.00    0.0    0.0   1384.8   1384.8   1384.8  time to first byte
+        large                      1GiB c4                PUT    4    0   45.82    0.1   93.7  43361.4  45820.9  45820.9
+        large                      1GiB c4                GET    4    0   24.75    0.2  173.6  23546.7  24747.2  24747.2
+        large                      1GiB c4           GET TTFB    4    0    0.00    0.0    0.0   1417.6   1522.0   1522.0  time to first byte
+       parity   64MiB k4+m4 (16MiB shards)            write m    4    0    5.94    0.7   11.3   4771.8   5938.0   5938.0
+       parity   64MiB k4+m4 (16MiB shards)             read m    4    0    1.33    3.0   50.6   1248.2   1327.4   1327.4
+       parity   64MiB k4+m4 (16MiB shards)         degraded k    4    0    1.20    3.3   56.1    965.9   1196.5   1196.5
+       parity  256MiB k4+m4 (64MiB shards)            write m    4    0    6.17    0.6   43.5   5976.8   6168.6   6168.6
+       parity  256MiB k4+m4 (64MiB shards)             read m    4    0    2.45    1.6  109.5   2280.2   2451.8   2451.8
+       parity  256MiB k4+m4 (64MiB shards)         degraded k    4    0    2.48    1.6  108.4   2152.2   2475.9   2475.9
+       parity   1GiB k4+m4 (256MiB shards)            write m    4    0   30.00    0.1   35.8  19378.0  30000.3  30000.3
+       parity   1GiB k4+m4 (256MiB shards)             read m    4    0   53.09    0.1   20.2  51907.5  53093.4  53093.4
+       parity   1GiB k4+m4 (256MiB shards)         degraded k    4    0    8.51    0.5  126.2   8253.2   8509.0   8509.0
+       parity            300×1MiB flat c16                PUT  300    0   21.44   14.0   14.7    743.3   3845.4   4649.2
+       parity            300×1MiB flat c16                GET  300    0   16.65   18.0   18.9    841.0   1210.1   1441.0
+       parity          300×1MiB fanout c16                PUT  300    0   90.58    3.3    3.5   4717.2   6797.2   7183.4
+       parity          300×1MiB fanout c16                GET  300    0   36.59    8.2    8.6   1683.3   3358.5   4055.2
+  crossbridge                 64KiB ×10 5b        visible new   10    0  230.38    0.0    0.0   2438.6  25399.1  25399.1
+  crossbridge                 64KiB ×10 5b  visible overwrite   10    0  230.38    0.0    0.0  31058.2  31969.1  31969.1
+  crossbridge                 64KiB ×10 5b     visible delete   10    0  230.38    0.0    0.0  29795.3  39954.3  39954.3
+
+resources: sync-webdav pid=0 samples=0 peak RSS 0.0 MiB, CPU mean 0.0% peak 0.0% (process sync-webdav not found on this host)
+stalls: upload 0, download 0 (no progress for the idle timeout); retries 0; ops cut off by -op-timeout 0
+cleanup: deleted /_bench20261014/t-bench5/run-20261014-170229-7372/
+every read byte-verified (sha256): no mismatch
+results: raw-20261014/webdav-five.json

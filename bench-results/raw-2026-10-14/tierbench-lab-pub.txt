@@ -1,0 +1,20 @@
+lab-pub-r2     small_put_4k                 n=30 p50 34 ms  p95 36 ms  max 36 ms
+lab-pub-r2     small_get_4k                 n=30 p50 29 ms  p95 31 ms  max 55 ms  ok
+lab-pub-r2     small_head_4k                n=30 p50 0 ms  p95 0 ms  max 0 ms
+lab-pub-r2     list_prefix                  0.00 s  [30 keys listed]
+lab-pub-r2     cdn_small_4k                 0.00 s  0.1 MB/s  ttfb 0 ms  [pass 1 status 404 cf-cache-status=]
+lab-pub-r2     cdn_small_4k                 0.00 s  0.1 MB/s  ttfb 0 ms  [pass 2 status 404 cf-cache-status=]
+lab-pub-r2     small_delete                 n=30 p50 31 ms  p95 31 ms  max 31 ms
+lab-pub-r2     single_put_8mb               0.12 s  68.7 MB/s
+lab-pub-r2     get_single_8mb               2.01 s  4.2 MB/s  ttfb 56 ms  ok
+lab-pub-r2     cdn_get_8mb                  0.00 s  0.0 MB/s  ttfb 1 ms  [pass 1 status 404 cf-cache-status=]
+lab-pub-r2     cdn_get_8mb                  0.00 s  0.1 MB/s  ttfb 0 ms  [pass 2 status 404 cf-cache-status=]
+lab-pub-r2     single_put_64mb              0.70 s  95.7 MB/s
+lab-pub-r2     get_single_64mb              0.81 s  82.8 MB/s  ttfb 339 ms  ok
+lab-pub-r2     cdn_get_64mb                 0.00 s  0.0 MB/s  ttfb 1 ms  [pass 1 status 404 cf-cache-status=]
+lab-pub-r2     cdn_get_64mb                 0.00 s  0.1 MB/s  ttfb 0 ms  [pass 2 status 404 cf-cache-status=]
+lab-pub-r2     mpu_put_256mb                0.98 s  272.7 MB/s  [16 parts x 16 MiB, 8 wide, complete 0.6 s]
+lab-pub-r2     get_mpu_256mb                2.77 s  96.8 MB/s  ttfb 464 ms  ok
+lab-pub-r2     cdn_get_mpu_256mb            0.00 s  0.0 MB/s  ttfb 2 ms  [pass 1 status 404 cf-cache-status=]
+lab-pub-r2     cdn_get_mpu_256mb            0.00 s  0.1 MB/s  ttfb 0 ms  [pass 2 status 404 cf-cache-status=]
+lab-pub-r2     range_get_1mb                n=20 p50 117 ms  p95 250 ms  max 350 ms  [of mpu-256mb.bin]

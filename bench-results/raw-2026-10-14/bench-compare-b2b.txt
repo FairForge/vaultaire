@@ -1,0 +1,43 @@
+Host:      slc (linux/amd64)
+Output:    raw-20261014/bench-compare-b2b.json
+Transport: tuned (MaxIdleConnsPerHost=200, 4MB buffers, compression=off)
+Endpoints: 1 (smoke=false)
+
+[1/1] b2-us-east-005  (https://s3.us-east-005.backblazeb2.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: fairforge-bench-cold
+  cold_dial_put_1kb        4037ms  p50=368ms p95=685ms p99=685ms
+  warm_put_4kb            28833ms      3 ops/s  p50=242ms p95=728ms p99=923ms
+  warm_get_4kb             8409ms     12 ops/s  p50=69ms p95=137ms p99=222ms
+  warm_head_4kb            3056ms     16 ops/s  p50=58ms p95=67ms p99=137ms
+  warm_copy_4kb            2627ms      4 ops/s  p50=230ms p95=455ms p99=455ms
+  warm_delete_single       1847ms     16 ops/s  p50=60ms p95=66ms p99=70ms
+  delete_batch_100          177ms    563 ops/s
+  list_100                  252ms  returned=100
+  list_prefix                85ms  returned=30
+  medium_put_1mb            990ms     5.0 MB/s  p50=115ms p95=537ms p99=537ms
+  medium_get_1mb           1004ms     5.0 MB/s  p50=142ms p95=468ms p99=468ms
+  medium_put_16mb          3710ms    21.6 MB/s  p50=666ms p95=1091ms p99=1091ms
+  medium_get_16mb          2103ms    38.0 MB/s  p50=341ms p95=696ms p99=696ms
+  large_put_64mb           2393ms    26.7 MB/s
+  large_get_64mb           1510ms    42.4 MB/s
+  multipart_put_256mb      3873ms    66.1 MB/s
+  multipart_put_256mb_16p   1923ms   133.1 MB/s
+  large_put_64mb_h1        2501ms    25.6 MB/s
+  multipart_put_256mb_h1_16p   3899ms    65.6 MB/s
+  mpu_abort                 972ms      5 ops/s  p50=188ms p95=261ms p99=261ms
+  concurrent_ingest_20s    7674ms   149.6 MB/s     37 ops/s  p50=415ms p95=1242ms p99=2949ms
+  concurrent_download_20s   2371ms   484.1 MB/s    121 ops/s  p50=195ms p95=697ms p99=809ms
+  range_get_1mb_chunks     2125ms     7.5 MB/s      8 ops/s  p50=104ms p95=436ms p99=436ms
+  burst_small_files_500   16714ms     0.1 MB/s     30 ops/s  p50=250ms p95=772ms p99=1331ms
+  integrity_16mb           2621ms  ✓ checksum match
+  integrity_robust_16mb    2321ms     6.9 MB/s  ✓ verified (put_retries=0, get_retries=0)
+  integrity_chunked_16mb   2792ms     5.7 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   7439ms  p50=97ms p95=203ms p99=203ms  ✓ 20/20 consistent
+  consistency_overwrite    7259ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write   4795ms  ✓ 10/10 immediately visible in listing
+  rate_limit_escalation   13315ms     24 ops/s  max_clean=128 | ✓8w:17ops/s(0e) ✓16w:30ops/s(0e) ✓32w:32ops/s(0e) ✓64w:11ops/s(0e) ✓128w:60ops/s(0e)
+  sustained_upload_60s    60001ms    55.5 MB/s      3 ops/s  p50=912ms p95=2771ms p99=4811ms  00s:54MB/s 10s:43MB/s 20s:51MB/s 30s:62MB/s 40s:62MB/s 50s:59MB/s
+
+
+✅ Done in 4m32s. Results: raw-20261014/bench-compare-b2b.json

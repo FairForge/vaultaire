@@ -1,0 +1,38 @@
+Host:        slc (linux/amd64)
+Provider:    pixeldrain
+Output:      raw-20261014/pixeldrain.json
+Concurrency: 8
+Smoke:       false
+─────────────────────────────────────────────────────────────────
+Warming up 8 connections... ok
+  ✓  speedtest_1gb                   3785ms    270.5 MB/s  [raw network, no storage I/O]
+  ✓  cold_dial_put_1kb               2065ms      0.0 MB/s  [id=ZAdnTh8J]
+  ✓  warm_put_1kb                   15862ms      0.0 MB/s     0.6 ops/s
+  ✓  warm_get_1kb                    2214ms      0.0 MB/s     2.3 ops/s
+  ✓  info_1kb                        3040ms     3.3 ops/s
+  ✓  put_1mb                        10991ms      0.5 MB/s     0.5 ops/s
+  ✓  get_1mb                         4037ms      1.2 MB/s     1.2 ops/s
+  ✓  put_10mb                       14080ms      2.1 MB/s     0.2 ops/s
+  ✓  get_10mb                        6282ms      8.0 MB/s     0.8 ops/s
+  ✓  put_100mb                       4248ms     23.5 MB/s  [id=n55f4o67]
+  ✓  get_100mb                      20496ms     24.4 MB/s     0.2 ops/s
+  ✓  put_1gb                         9638ms    106.2 MB/s  [id=d1RfQagE streaming]
+  ✓  get_1gb                        14804ms     69.2 MB/s
+  ✓  range_parallel_1gb             11828ms     86.6 MB/s  [16 ranges on d1RfQagE (1024 MB)]
+  ✓  integrity_10mb                  6682ms      3.0 MB/s  [SHA256 MATCH]
+  ✓  concurrent_upload_20s          21980ms      3.9 MB/s     3.9 ops/s
+  ✓  concurrent_upload_large_20s    20916ms    358.0 MB/s     5.6 ops/s
+  ✓  concurrent_download_20s        20298ms     23.1 MB/s    23.1 ops/s
+  ✓  concurrent_download_large_20s   20592ms    466.2 MB/s     7.3 ops/s
+  ✓  batch_info                     14130ms     7.1 ops/s  [queried 100, returned 100]
+  ✓  burst_small_100                20306ms      0.0 MB/s     4.9 ops/s
+  ✓  user_files_list                  331ms   985.3 ops/s  [327 files, 8808 MB total]
+  ✓  list_roundtrip                  1760ms    56.8 ops/s  [create=1148ms get=611ms list=HUxpcnK1 100 files]
+  ✓  cache_behavior                  6571ms      4.6 MB/s  [cold=2046ms warm1=1646ms warm2=2879ms]
+  ✓  mixed_readwrite_20s            22142ms     45.9 MB/s    11.5 ops/s  [up=6.7MB/s(37) dn=39.2MB/s(217)]
+  ✓  soak_upload_2m                127163ms    123.8 MB/s     1.9 ops/s  [30s-windows: [79, 132, 156, 158] MB/s STABLE]
+  ✓  soak_download_2m              120733ms    729.4 MB/s    11.4 ops/s  [30s-windows: [595, 785, 764, 791] MB/s STABLE]
+
+Cleaning up 613 files... done (15.545s)
+
+✅ Done in 9m19s. Results: raw-20261014/pixeldrain.json

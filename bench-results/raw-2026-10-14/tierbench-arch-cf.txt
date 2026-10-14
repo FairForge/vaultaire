@@ -1,0 +1,16 @@
+arch-cf        small_put_4k                 n=30 p50 387 ms  p95 727 ms  max 1110 ms
+arch-cf        small_get_4k                 n=30 p50 321 ms  p95 532 ms  max 933 ms  ok
+arch-cf        small_head_4k                n=30 p50 307 ms  p95 328 ms  max 661 ms
+arch-cf        list_prefix                  0.29 s  [30 keys listed]
+arch-cf        small_delete                 n=30 p50 6689 ms  p95 8978 ms  max 12666 ms
+arch-cf        single_put_8mb               3.22 s  2.6 MB/s
+arch-cf        get_single_8mb               1.57 s  5.4 MB/s  ttfb 329 ms  ok
+arch-cf        archive_head                 0.00 s  [class=GLACIER restore=""]
+arch-cf        archive_restore              0.31 s  [answer: operation error S3: RestoreObject, https response error StatusCode: 403]
+arch-cf        single_put_64mb              2.01 s  33.4 MB/s
+arch-cf        get_single_64mb              2.64 s  25.5 MB/s  ttfb 343 ms  ok
+arch-cf        archive_head                 0.00 s  [class=GLACIER restore=""]
+arch-cf        archive_restore              0.31 s  [answer: operation error S3: RestoreObject, https response error StatusCode: 403]
+arch-cf        mpu_put_256mb                8.13 s  33.0 MB/s  [16 parts x 16 MiB, 8 wide, complete 4.0 s]
+arch-cf        get_mpu_256mb                75.41 s  3.6 MB/s  ttfb 336 ms  ok
+arch-cf        range_get_1mb                n=20 p50 692 ms  p95 1296 ms  max 2284 ms  [of mpu-256mb.bin]

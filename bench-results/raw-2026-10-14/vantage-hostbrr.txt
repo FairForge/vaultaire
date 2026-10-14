@@ -1,0 +1,13 @@
+# Hostbrr (New York, shared cPanel) as a remote US customer of prod stored.ge via Cloudflare; rclone 1.75.2; seconds
+# (a first run failed on a missing /usr/bin/time; its CDN fetch warmed the same key, so the "miss" below was already a hit of the previous object)
+start 2026-10-14T18:01:52Z
+put_256mb_s 5.36
+get_256mb_multistream_s 16.62
+get_256mb_singlestream_s 5.99
+verify_multistream ok
+put_64x1mb_s 4.47
+get_64x1mb_s 2.13
+cdn_64mb_miss code=200 ttfb=0.245716s total=0.535127s
+cdn_64mb_hit code=200 ttfb=0.314271s total=1.906999s
+presign_ttfb_s 2.262636
+end 2026-10-14T18:02:49Z

@@ -1,0 +1,446 @@
+⚠️  skipping r2-default: no URL (set R2_ENDPOINT)
+⚠️  skipping idrive-us-southwest-1: IDRIVE_US_SOUTHWEST_1_ACCESS_KEY/IDRIVE_US_SOUTHWEST_1_SECRET_KEY not set
+⚠️  skipping idrive-us-west-1: IDRIVE_US_WEST_1_ACCESS_KEY/IDRIVE_US_WEST_1_SECRET_KEY not set
+⚠️  skipping idrive-ca-east-1: IDRIVE_CA_EAST_1_ACCESS_KEY/IDRIVE_CA_EAST_1_SECRET_KEY not set
+⚠️  skipping idrive-eu-west-4: IDRIVE_EU_WEST_4_ACCESS_KEY/IDRIVE_EU_WEST_4_SECRET_KEY not set
+⚠️  skipping idrive-eu-central-2: IDRIVE_EU_CENTRAL_2_ACCESS_KEY/IDRIVE_EU_CENTRAL_2_SECRET_KEY not set
+⚠️  skipping idrive-ap-southeast-1: IDRIVE_AP_SOUTHEAST_1_ACCESS_KEY/IDRIVE_AP_SOUTHEAST_1_SECRET_KEY not set
+Host:      slc (linux/amd64)
+Output:    raw-20261014/bench-compare-2.json
+Transport: tuned (MaxIdleConnsPerHost=200, 4MB buffers, compression=off)
+Endpoints: 12 (smoke=false)
+
+[1/12] idrive-us-east-1  (https://s3.us-east-1.idrivee2.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: vaultaire-bench
+  cold_dial_put_1kb        1544ms  p50=144ms p95=221ms p99=221ms
+  warm_put_4kb             5679ms     18 ops/s  p50=52ms p95=73ms p99=222ms
+  warm_get_4kb             4795ms     21 ops/s  p50=47ms p95=48ms p99=71ms
+  warm_head_4kb            2331ms     21 ops/s  p50=46ms p95=47ms p99=47ms
+  warm_copy_4kb             541ms     18 ops/s  p50=51ms p95=69ms p99=69ms
+  warm_delete_single       1422ms     21 ops/s  p50=47ms p95=48ms p99=49ms
+  delete_batch_100          146ms    683 ops/s
+  list_100                  184ms  returned=100
+  list_prefix                46ms  returned=30
+  medium_put_1mb           1613ms     3.1 MB/s  p50=314ms p95=463ms p99=463ms
+  medium_get_1mb            894ms     5.6 MB/s  p50=140ms p95=326ms p99=326ms
+  medium_put_16mb          1806ms    44.3 MB/s  p50=293ms p95=669ms p99=669ms
+  medium_get_16mb         21855ms     3.7 MB/s  p50=4024ms p95=7270ms p99=7270ms
+  large_put_64mb           1020ms    62.7 MB/s
+  large_get_64mb           8078ms     7.9 MB/s
+  multipart_put_256mb      2786ms    91.9 MB/s
+  multipart_put_256mb_16p   1840ms   139.1 MB/s
+  large_put_64mb_h1        1070ms    59.8 MB/s
+  multipart_put_256mb_h1_16p   1482ms   172.7 MB/s
+  mpu_abort                 569ms      9 ops/s  p50=94ms p95=191ms p99=191ms
+  concurrent_ingest_20s    4365ms   263.0 MB/s     66 ops/s  p50=368ms p95=769ms p99=1139ms
+  concurrent_download_20s   4118ms   278.8 MB/s     70 ops/s  p50=235ms p95=907ms p99=1600ms
+  range_get_1mb_chunks     1744ms     9.2 MB/s      9 ops/s  p50=93ms p95=337ms p99=337ms
+  burst_small_files_500    3086ms     0.6 MB/s    162 ops/s  p50=52ms p95=117ms p99=191ms
+  integrity_16mb           1438ms  ✓ checksum match
+  integrity_robust_16mb    3047ms     5.2 MB/s  ✓ verified (put_retries=0, get_retries=0)
+  integrity_chunked_16mb   1854ms     8.6 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   6527ms  p50=49ms p95=167ms p99=167ms  ✓ 20/20 consistent
+  consistency_overwrite    5410ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write   1099ms  ✓ 10/10 immediately visible in listing
+  rate_limit_escalation    1038ms    308 ops/s  max_clean=128 | ✓8w:116ops/s(0e) ✓16w:225ops/s(0e) ✓32w:297ops/s(0e) ✓64w:397ops/s(0e) ✓128w:893ops/s(0e)
+  sustained_upload_60s    60000ms   234.7 MB/s     15 ops/s  p50=240ms p95=456ms p99=667ms  00s:224MB/s 10s:234MB/s 20s:261MB/s 30s:238MB/s 40s:232MB/s 50s:219MB/s
+
+[2/12] idrive-us-southeast-1  (https://s3.us-southeast-1.idrivee2.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: vaultaire-bench
+  cold_dial_put_1kb        1818ms  p50=175ms p95=224ms p99=224ms
+  warm_put_4kb             6491ms     15 ops/s  p50=63ms p95=67ms p99=175ms
+  warm_get_4kb             5847ms     17 ops/s  p50=58ms p95=61ms p99=65ms
+  warm_head_4kb            2894ms     17 ops/s  p50=57ms p95=59ms p99=74ms
+  warm_copy_4kb             617ms     16 ops/s  p50=61ms p95=65ms p99=65ms
+  warm_delete_single       1767ms     17 ops/s  p50=57ms p95=64ms p99=68ms
+  delete_batch_100          276ms    362 ops/s
+  list_100                  227ms  returned=100
+  list_prefix                57ms  returned=30
+  medium_put_1mb            980ms     5.1 MB/s  p50=109ms p95=538ms p99=538ms
+  medium_get_1mb            707ms     7.1 MB/s  p50=62ms p95=407ms p99=407ms
+  medium_put_16mb          1869ms    42.8 MB/s  p50=259ms p95=845ms p99=845ms
+  medium_get_16mb         60275ms     1.3 MB/s  p50=6948ms p95=26771ms p99=26771ms
+  large_put_64mb           1244ms    51.4 MB/s
+  large_get_64mb           1376ms    46.5 MB/s
+  multipart_put_256mb      1950ms   131.2 MB/s
+  multipart_put_256mb_16p   1479ms   173.1 MB/s
+  large_put_64mb_h1        1156ms    55.4 MB/s
+  multipart_put_256mb_h1_16p   1438ms   177.9 MB/s
+  mpu_abort                 692ms      7 ops/s  p50=115ms p95=230ms p99=230ms
+  concurrent_ingest_20s    2594ms   442.5 MB/s    111 ops/s  p50=152ms p95=691ms p99=763ms
+  concurrent_download_20s   6323ms   181.6 MB/s     45 ops/s  p50=228ms p95=1543ms p99=2576ms
+  range_get_1mb_chunks     3798ms     4.2 MB/s      4 ops/s  p50=281ms p95=406ms p99=406ms
+  burst_small_files_500    3296ms     0.6 MB/s    152 ops/s  p50=63ms p95=64ms p99=175ms
+  integrity_16mb           3085ms  ✓ checksum match
+  integrity_robust_16mb    1682ms     9.5 MB/s  ✓ verified (put_retries=0, get_retries=0)
+  integrity_chunked_16mb   3094ms     5.2 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   4009ms  p50=85ms p95=180ms p99=180ms  ✓ 20/20 consistent
+  consistency_overwrite    3036ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write   1293ms  ✓ 10/10 immediately visible in listing
+  rate_limit_escalation    1308ms    245 ops/s  max_clean=128 | ✓8w:86ops/s(0e) ✓16w:163ops/s(0e) ✓32w:255ops/s(0e) ✓64w:377ops/s(0e) ✓128w:800ops/s(0e)
+  sustained_upload_60s    60001ms   272.3 MB/s     17 ops/s  p50=223ms p95=287ms p99=402ms  00s:259MB/s 10s:270MB/s 20s:267MB/s 30s:278MB/s 40s:277MB/s 50s:282MB/s
+
+[3/12] idrive-us-midwest-1  (https://s3.us-midwest-1.idrivee2.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: vaultaire-bench
+  cold_dial_put_1kb        1187ms  p50=106ms p95=147ms p99=147ms
+  warm_put_4kb             4033ms     25 ops/s  p50=38ms p95=52ms p99=106ms
+  warm_get_4kb             3445ms     29 ops/s  p50=34ms p95=34ms p99=37ms
+  warm_head_4kb            1827ms     27 ops/s  p50=34ms p95=47ms p99=58ms
+  warm_copy_4kb             387ms     26 ops/s  p50=38ms p95=42ms p99=42ms
+  warm_delete_single       1114ms     27 ops/s  p50=38ms p95=41ms p99=42ms
+  delete_batch_100          126ms    790 ops/s
+  list_100                  145ms  returned=100
+  list_prefix                40ms  returned=30
+  medium_put_1mb            741ms     6.7 MB/s  p50=77ms p95=326ms p99=326ms
+  medium_get_1mb           2915ms     1.7 MB/s  p50=521ms p95=922ms p99=922ms
+  medium_put_16mb          1162ms    68.8 MB/s  p50=172ms p95=490ms p99=490ms
+  medium_get_16mb         13203ms     6.1 MB/s  p50=2035ms p95=6132ms p99=6132ms
+  large_put_64mb            657ms    97.4 MB/s
+  large_get_64mb            699ms    91.5 MB/s
+  multipart_put_256mb      1292ms   198.1 MB/s
+  multipart_put_256mb_16p   8855ms    28.9 MB/s
+  large_put_64mb_h1         660ms    96.9 MB/s
+  multipart_put_256mb_h1_16p   1066ms   240.0 MB/s
+  mpu_abort                 404ms     12 ops/s  p50=67ms p95=135ms p99=135ms
+  concurrent_ingest_20s   19788ms    58.0 MB/s     15 ops/s  p50=2140ms p95=2415ms p99=2435ms
+  concurrent_download_20s  20000ms     4.5 MB/s      2 ops/s  p50=19558ms p95=20000ms p99=20000ms
+  range_get_1mb_chunks    45048ms     0.4 MB/s      0 ops/s  p50=411ms p95=14982ms p99=14982ms
+  burst_small_files_500    2089ms     0.9 MB/s    239 ops/s  p50=37ms p95=53ms p99=140ms
+  integrity_16mb            955ms  ✓ checksum match
+  integrity_robust_16mb   13846ms     1.2 MB/s  ✓ verified (put_retries=0, get_retries=0)
+  integrity_chunked_16mb  10035ms     1.6 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   2486ms  p50=36ms p95=166ms p99=166ms  ✓ 20/20 consistent
+  consistency_overwrite    2873ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write    833ms  ✓ 10/10 immediately visible in listing
+  rate_limit_escalation    1008ms    317 ops/s  max_clean=128 | ✓8w:138ops/s(0e) ✓16w:246ops/s(0e) ✓32w:216ops/s(0e) ✓64w:451ops/s(0e) ✓128w:724ops/s(0e)
+  sustained_upload_60s    60001ms   414.9 MB/s     26 ops/s  p50=144ms p95=207ms p99=402ms  00s:397MB/s 10s:429MB/s 20s:426MB/s 30s:418MB/s 40s:424MB/s 50s:397MB/s
+
+[4/12] idrive-us-central-1  (https://s3.us-central-1.idrivee2.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: vaultaire-bench
+  cold_dial_put_1kb         884ms  p50=83ms p95=125ms p99=125ms
+  warm_put_4kb             3253ms     31 ops/s  p50=30ms p95=40ms p99=83ms
+  warm_get_4kb             2786ms     36 ops/s  p50=27ms p95=28ms p99=29ms
+  warm_head_4kb            1349ms     37 ops/s  p50=26ms p95=27ms p99=27ms
+  warm_copy_4kb             315ms     32 ops/s  p50=30ms p95=36ms p99=36ms
+  warm_delete_single        899ms     33 ops/s  p50=27ms p95=43ms p99=63ms
+  delete_batch_100          255ms    392 ops/s
+  list_100                  154ms  returned=100
+  list_prefix                28ms  returned=30
+  medium_put_1mb            525ms     9.5 MB/s  p50=66ms p95=266ms p99=266ms
+  medium_get_1mb           3060ms     1.6 MB/s  p50=440ms p95=1291ms p99=1291ms
+  medium_put_16mb           991ms    80.7 MB/s  p50=136ms p95=408ms p99=408ms
+  medium_get_16mb           901ms    88.7 MB/s  p50=122ms p95=369ms p99=369ms
+  large_put_64mb            606ms   105.6 MB/s
+  large_get_64mb            623ms   102.7 MB/s
+  multipart_put_256mb      1087ms   235.4 MB/s
+  multipart_put_256mb_16p    951ms   269.1 MB/s
+  large_put_64mb_h1         549ms   116.6 MB/s
+  multipart_put_256mb_h1_16p   1006ms   254.3 MB/s
+  mpu_abort                 385ms     13 ops/s  p50=71ms p95=115ms p99=115ms
+  concurrent_ingest_20s    1374ms   835.1 MB/s    209 ops/s  p50=119ms p95=372ms p99=410ms
+  concurrent_download_20s   3274ms   350.6 MB/s     88 ops/s  p50=106ms p95=463ms p99=2922ms
+  range_get_1mb_chunks     1063ms    15.0 MB/s     15 ops/s  p50=32ms p95=371ms p99=371ms
+  burst_small_files_500    1602ms     1.2 MB/s    312 ops/s  p50=30ms p95=32ms p99=84ms
+  integrity_16mb            719ms  ✓ checksum match
+  integrity_robust_16mb     872ms    18.3 MB/s  ✓ verified (put_retries=0, get_retries=0)
+  integrity_chunked_16mb    761ms    21.0 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   1743ms  p50=29ms p95=95ms p99=95ms  ✓ 20/20 consistent
+  consistency_overwrite    1540ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write    651ms  ✓ 10/10 immediately visible in listing
+  rate_limit_escalation     639ms    500 ops/s  max_clean=128 | ✓8w:176ops/s(0e) ✓16w:361ops/s(0e) ✓32w:474ops/s(0e) ✓64w:788ops/s(0e) ✓128w:1497ops/s(0e)
+  sustained_upload_60s    60001ms   447.5 MB/s     28 ops/s  p50=135ms p95=186ms p99=296ms  00s:422MB/s 10s:443MB/s 20s:458MB/s 30s:450MB/s 40s:453MB/s 50s:459MB/s
+
+[5/12] idrive-us-west-2  (https://s3.us-west-2.idrivee2.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: vaultaire-bench
+  cold_dial_put_1kb         853ms  p50=77ms p95=153ms p99=153ms
+  warm_put_4kb             2892ms     35 ops/s  p50=28ms p95=31ms p99=74ms
+  warm_get_4kb             2559ms     39 ops/s  p50=24ms p95=27ms p99=41ms
+  warm_head_4kb            1236ms     40 ops/s  p50=24ms p95=26ms p99=26ms
+  warm_copy_4kb             296ms     34 ops/s  p50=29ms p95=32ms p99=32ms
+  warm_delete_single        815ms     37 ops/s  p50=25ms p95=38ms p99=45ms
+  delete_batch_100          164ms    607 ops/s
+  list_100                   95ms  returned=100
+  list_prefix                30ms  returned=30
+  medium_put_1mb            870ms     5.7 MB/s  p50=164ms p95=250ms p99=250ms
+  medium_get_1mb            326ms    15.3 MB/s  p50=28ms p95=183ms p99=183ms
+  medium_put_16mb          1423ms    56.2 MB/s  p50=202ms p95=428ms p99=428ms
+  medium_get_16mb          9435ms     8.5 MB/s  p50=1644ms p95=2939ms p99=2939ms
+  large_put_64mb           1176ms    54.4 MB/s
+  large_get_64mb           3785ms    16.9 MB/s
+  multipart_put_256mb      4107ms    62.3 MB/s
+  multipart_put_256mb_16p   1902ms   134.5 MB/s
+  large_put_64mb_h1         903ms    70.9 MB/s
+  multipart_put_256mb_h1_16p   2513ms   101.8 MB/s
+  mpu_abort                 299ms     17 ops/s  p50=51ms p95=97ms p99=97ms
+  concurrent_ingest_20s   20000ms    36.0 MB/s      9 ops/s  p50=2919ms p95=5253ms p99=5905ms
+  concurrent_download_20s   4146ms   276.8 MB/s     69 ops/s  p50=99ms p95=952ms p99=2484ms
+  range_get_1mb_chunks     6229ms     2.6 MB/s      3 ops/s  p50=450ms p95=770ms p99=770ms
+  burst_small_files_500    1492ms     1.3 MB/s    335 ops/s  p50=27ms p95=34ms p99=75ms
+  integrity_16mb            985ms  ✓ checksum match
+  integrity_robust_16mb    1963ms     8.2 MB/s  ✓ verified (put_retries=0, get_retries=0)
+  integrity_chunked_16mb  12682ms     1.3 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   2597ms  p50=26ms p95=71ms p99=71ms  ✓ 20/20 consistent
+  consistency_overwrite    1692ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write    594ms  ✓ 10/10 immediately visible in listing
+  rate_limit_escalation     572ms    559 ops/s  max_clean=128 | ✓8w:200ops/s(0e) ✓16w:410ops/s(0e) ✓32w:575ops/s(0e) ✓64w:837ops/s(0e) ✓128w:1537ops/s(0e)
+  sustained_upload_60s    60000ms   318.7 MB/s     20 ops/s  p50=143ms p95=464ms p99=1034ms  00s:163MB/s 10s:259MB/s 20s:182MB/s 30s:430MB/s 40s:445MB/s 50s:432MB/s
+
+[6/12] idrive-eu-west-1  (https://s3.eu-west-1.idrivee2.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: vaultaire-bench
+  cold_dial_put_1kb        3650ms  p50=361ms p95=396ms p99=396ms
+  warm_put_4kb            13359ms      7 ops/s  p50=130ms p95=140ms p99=364ms
+  warm_get_4kb            12099ms      8 ops/s  p50=120ms p95=121ms p99=122ms
+  warm_head_4kb            5979ms      8 ops/s  p50=119ms p95=119ms p99=120ms
+  warm_copy_4kb            1243ms      8 ops/s  p50=123ms p95=131ms p99=131ms
+  warm_delete_single       3669ms      8 ops/s  p50=120ms p95=135ms p99=147ms
+  delete_batch_100          215ms    465 ops/s
+  list_100                  593ms  returned=100
+  list_prefix               120ms  returned=30
+  medium_put_1mb           2082ms     2.4 MB/s  p50=245ms p95=1126ms p99=1126ms
+  medium_get_1mb          10005ms     0.5 MB/s  p50=1182ms p95=5156ms p99=5156ms
+  medium_put_16mb          3771ms    21.2 MB/s  p50=583ms p95=1633ms p99=1633ms
+  medium_get_16mb          2331ms    34.3 MB/s  p50=253ms p95=1310ms p99=1310ms
+  large_put_64mb           2339ms    27.4 MB/s
+  large_get_64mb           1937ms    33.0 MB/s
+  multipart_put_256mb      3669ms    69.8 MB/s
+  multipart_put_256mb_16p   2373ms   107.8 MB/s
+  large_put_64mb_h1        2320ms    27.6 MB/s
+  multipart_put_256mb_h1_16p   2375ms   107.8 MB/s
+  mpu_abort                1447ms      3 ops/s  p50=242ms p95=479ms p99=479ms
+  concurrent_ingest_20s    3403ms   337.3 MB/s     84 ops/s  p50=234ms p95=1409ms p99=1496ms
+  concurrent_download_20s   6804ms   168.7 MB/s     42 ops/s  p50=360ms p95=1650ms p99=2535ms
+  range_get_1mb_chunks     2824ms     5.7 MB/s      6 ops/s  p50=122ms p95=842ms p99=842ms
+  burst_small_files_500    6769ms     0.3 MB/s     74 ops/s  p50=130ms p95=131ms p99=361ms
+  integrity_16mb           3056ms  ✓ checksum match
+  integrity_robust_16mb    3311ms     4.8 MB/s  ✓ verified (put_retries=0, get_retries=0)
+  integrity_chunked_16mb   4117ms     3.9 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   6963ms  p50=121ms p95=358ms p99=358ms  ✓ 20/20 consistent
+  consistency_overwrite    5836ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write   2653ms  ✓ 10/10 immediately visible in listing
+  rate_limit_escalation    2356ms    136 ops/s  max_clean=128 | ✓8w:47ops/s(0e) ✓16w:91ops/s(0e) ✓32w:123ops/s(0e) ✓64w:240ops/s(0e) ✓128w:455ops/s(0e)
+  sustained_upload_60s    60000ms   152.8 MB/s     10 ops/s  p50=394ms p95=548ms p99=882ms  00s:138MB/s 10s:160MB/s 20s:144MB/s 30s:150MB/s 40s:162MB/s 50s:163MB/s
+
+[7/12] idrive-eu-west-3  (https://s3.eu-west-3.idrivee2.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: vaultaire-bench
+  cold_dial_put_1kb        3826ms  p50=383ms p95=407ms p99=407ms
+  warm_put_4kb            13858ms      7 ops/s  p50=135ms p95=141ms p99=374ms
+  warm_get_4kb            12494ms      8 ops/s  p50=124ms p95=127ms p99=135ms
+  warm_head_4kb            6200ms      8 ops/s  p50=123ms p95=124ms p99=127ms
+  warm_copy_4kb            1348ms      7 ops/s  p50=132ms p95=144ms p99=144ms
+  warm_delete_single      11023ms      3 ops/s  p50=142ms p95=800ms p99=2136ms
+  delete_batch_100          226ms    441 ops/s
+  list_100                 6664ms  returned=100
+  list_prefix               902ms  returned=30
+  medium_put_1mb           7921ms     0.6 MB/s  p50=579ms p95=5262ms p99=5262ms
+  medium_get_1mb          36154ms     0.1 MB/s  p50=775ms p95=33046ms p99=33046ms
+  medium_put_16mb          3397ms    23.5 MB/s  p50=423ms p95=1714ms p99=1714ms
+  medium_get_16mb          9815ms     8.2 MB/s  p50=1151ms p95=5338ms p99=5338ms
+  large_put_64mb           2507ms    25.5 MB/s
+  large_get_64mb           5589ms    11.4 MB/s
+  multipart_put_256mb      3470ms    73.8 MB/s
+  multipart_put_256mb_16p   2304ms   111.1 MB/s
+  large_put_64mb_h1        2388ms    26.8 MB/s
+  multipart_put_256mb_h1_16p   2337ms   109.5 MB/s
+  mpu_abort                1549ms      3 ops/s  p50=259ms p95=512ms p99=512ms
+  concurrent_ingest_20s    3430ms   334.6 MB/s     84 ops/s  p50=221ms p95=1420ms p99=1464ms
+  concurrent_download_20s   5971ms   192.2 MB/s     48 ops/s  p50=386ms p95=1542ms p99=1945ms
+  range_get_1mb_chunks     2918ms     5.5 MB/s      5 ops/s  p50=133ms p95=906ms p99=906ms
+  burst_small_files_500    7171ms     0.3 MB/s     70 ops/s  p50=135ms p95=147ms p99=378ms
+  integrity_16mb           3512ms  ✓ checksum match
+  integrity_robust_16mb    3769ms     4.2 MB/s  ✓ verified (put_retries=0, get_retries=0)
+  integrity_chunked_16mb   3144ms     5.1 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   7391ms  p50=126ms p95=372ms p99=372ms  ✓ 20/20 consistent
+  consistency_overwrite    6032ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write   2772ms  ✓ 10/10 immediately visible in listing
+  rate_limit_escalation    2558ms    125 ops/s  max_clean=128 | ✓8w:44ops/s(0e) ✓16w:85ops/s(0e) ✓32w:108ops/s(0e) ✓64w:218ops/s(0e) ✓128w:421ops/s(0e)
+  sustained_upload_60s    60000ms   153.6 MB/s     10 ops/s  p50=400ms p95=429ms p99=784ms  00s:138MB/s 10s:155MB/s 20s:155MB/s 30s:157MB/s 40s:160MB/s 50s:157MB/s
+
+[8/12] idrive-us-west-4  (https://s3.us-west-4.idrivee2.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: vaultaire-bench
+  cold_dial_put_1kb         880ms  p50=84ms p95=116ms p99=116ms
+  warm_put_4kb             3135ms     32 ops/s  p50=30ms p95=35ms p99=85ms
+  warm_get_4kb             2927ms     34 ops/s  p50=28ms p95=34ms p99=36ms
+  warm_head_4kb            1437ms     35 ops/s  p50=27ms p95=35ms p99=39ms
+  warm_copy_4kb             327ms     31 ops/s  p50=31ms p95=40ms p99=40ms
+  warm_delete_single        884ms     34 ops/s  p50=28ms p95=36ms p99=36ms
+  delete_batch_100          125ms    796 ops/s
+  list_100                  107ms  returned=100
+  list_prefix                28ms  returned=30
+  medium_put_1mb            580ms     8.6 MB/s  p50=79ms p95=272ms p99=272ms
+  medium_get_1mb            344ms    14.5 MB/s  p50=30ms p95=197ms p99=197ms
+  medium_put_16mb          1065ms    75.0 MB/s  p50=204ms p95=372ms p99=372ms
+  medium_get_16mb           795ms   100.6 MB/s  p50=112ms p95=345ms p99=345ms
+  large_put_64mb            593ms   107.8 MB/s
+  large_get_64mb            797ms    80.2 MB/s
+  multipart_put_256mb      4544ms    56.3 MB/s
+  multipart_put_256mb_16p  12550ms    20.4 MB/s
+  large_put_64mb_h1        2170ms    29.5 MB/s
+  multipart_put_256mb_h1_16p    823ms   311.0 MB/s
+  mpu_abort                 412ms     12 ops/s  p50=67ms p95=129ms p99=129ms
+  concurrent_ingest_20s   15509ms    74.0 MB/s     19 ops/s  p50=159ms p95=11212ms p99=11572ms
+  concurrent_download_20s  20001ms    55.1 MB/s     14 ops/s  p50=122ms p95=19659ms p99=20001ms
+  range_get_1mb_chunks      857ms    18.7 MB/s     19 ops/s  p50=42ms p95=205ms p99=205ms
+  burst_small_files_500    1619ms     1.2 MB/s    309 ops/s  p50=29ms p95=37ms p99=84ms
+  integrity_16mb          11832ms  ✓ checksum match
+  integrity_robust_16mb   18848ms     0.8 MB/s  ✓ verified (put_retries=0, get_retries=0)
+  integrity_chunked_16mb   1028ms    15.6 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   1631ms  p50=29ms p95=80ms p99=80ms  ✓ 20/20 consistent
+  consistency_overwrite    1322ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write    646ms  ✓ 10/10 immediately visible in listing
+  rate_limit_escalation     696ms    460 ops/s  max_clean=128 | ✓8w:194ops/s(0e) ✓16w:373ops/s(0e) ✓32w:404ops/s(0e) ✓64w:418ops/s(0e) ✓128w:1454ops/s(0e)
+  sustained_upload_60s    60001ms   147.5 MB/s      9 ops/s  p50=112ms p95=389ms p99=4735ms  00s:174MB/s 10s:69MB/s 20s:222MB/s 30s:142MB/s 40s:138MB/s 50s:139MB/s
+
+[9/12] idrive-eu-central-1  (https://s3.eu-central-1.idrivee2.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: vaultaire-bench
+  cold_dial_put_1kb        4046ms  p50=397ms p95=435ms p99=435ms
+  warm_put_4kb            14586ms      7 ops/s  p50=142ms p95=146ms p99=397ms
+  warm_get_4kb            13347ms      7 ops/s  p50=132ms p95=140ms p99=142ms
+  warm_head_4kb            6592ms      8 ops/s  p50=131ms p95=133ms p99=138ms
+  warm_copy_4kb            1360ms      7 ops/s  p50=136ms p95=137ms p99=137ms
+  warm_delete_single       3982ms      8 ops/s  p50=132ms p95=137ms p99=138ms
+  delete_batch_100          256ms    390 ops/s
+  list_100                  523ms  returned=100
+  list_prefix               133ms  returned=30
+  medium_put_1mb           2266ms     2.2 MB/s  p50=223ms p95=1298ms p99=1298ms
+  medium_get_1mb           2512ms     2.0 MB/s  p50=397ms p95=923ms p99=923ms
+  medium_put_16mb          3678ms    21.7 MB/s  p50=477ms p95=1827ms p99=1827ms
+  medium_get_16mb         12435ms     6.4 MB/s  p50=2238ms p95=3389ms p99=3389ms
+  large_put_64mb           2545ms    25.1 MB/s
+  large_get_64mb         ERROR — unexpected EOF
+  multipart_put_256mb      3879ms    66.0 MB/s
+  multipart_put_256mb_16p   3297ms    77.6 MB/s
+  large_put_64mb_h1        2537ms    25.2 MB/s
+  multipart_put_256mb_h1_16p   2685ms    95.3 MB/s
+  mpu_abort                1646ms      3 ops/s  p50=272ms p95=551ms p99=551ms
+  concurrent_ingest_20s    4122ms   278.4 MB/s     70 ops/s  p50=276ms p95=1540ms p99=1619ms
+  concurrent_download_20s  10018ms   114.6 MB/s     29 ops/s  p50=535ms p95=2650ms p99=4685ms
+  range_get_1mb_chunks     6958ms     2.3 MB/s      2 ops/s  p50=392ms p95=1318ms p99=1318ms
+  burst_small_files_500    7459ms     0.3 MB/s     67 ops/s  p50=143ms p95=148ms p99=403ms
+  integrity_16mb           3523ms  ✓ checksum match
+  integrity_robust_16mb    4005ms     4.0 MB/s  ✓ verified (put_retries=0, get_retries=0)
+  integrity_chunked_16mb   4520ms     3.5 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   7996ms  p50=133ms p95=391ms p99=391ms  ✓ 20/20 consistent
+  consistency_overwrite    6599ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write   2942ms  ✓ 10/10 immediately visible in listing
+  rate_limit_escalation    2703ms    118 ops/s  max_clean=128 | ✓8w:43ops/s(0e) ✓16w:82ops/s(0e) ✓32w:110ops/s(0e) ✓64w:204ops/s(0e) ✓128w:322ops/s(0e)
+  sustained_upload_60s    60000ms   130.7 MB/s      8 ops/s  p50=443ms p95=641ms p99=1165ms  00s:104MB/s 10s:125MB/s 20s:136MB/s 30s:141MB/s 40s:141MB/s 50s:138MB/s
+
+[10/12] idrive-eu-south-1  (https://s3.eu-south-1.idrivee2.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: vaultaire-bench
+  cold_dial_put_1kb        4358ms  p50=433ms p95=469ms p99=469ms
+  warm_put_4kb            15519ms      6 ops/s  p50=151ms p95=156ms p99=426ms
+  warm_get_4kb            14545ms      7 ops/s  p50=144ms p95=155ms p99=161ms
+  warm_head_4kb            6944ms      7 ops/s  p50=138ms p95=139ms p99=141ms
+  warm_copy_4kb            1479ms      7 ops/s  p50=145ms p95=163ms p99=163ms
+  warm_delete_single       4367ms      7 ops/s  p50=144ms p95=150ms p99=152ms
+  delete_batch_100          290ms    344 ops/s
+  list_100                  557ms  returned=100
+  list_prefix               150ms  returned=30
+  medium_put_1mb           2229ms     2.2 MB/s  p50=221ms p95=1327ms p99=1327ms
+  medium_get_1mb           1635ms     3.1 MB/s  p50=154ms p95=1020ms p99=1020ms
+  medium_put_16mb          3989ms    20.1 MB/s  p50=520ms p95=1966ms p99=1966ms
+  medium_get_16mb          2734ms    29.3 MB/s  p50=302ms p95=1524ms p99=1524ms
+  large_put_64mb           3144ms    20.3 MB/s
+  large_get_64mb           5417ms    11.8 MB/s
+  multipart_put_256mb      4106ms    62.3 MB/s
+  multipart_put_256mb_16p   2830ms    90.5 MB/s
+  large_put_64mb_h1        3231ms    19.8 MB/s
+  multipart_put_256mb_h1_16p   2607ms    98.2 MB/s
+  mpu_abort                1794ms      3 ops/s  p50=301ms p95=591ms p99=591ms
+  concurrent_ingest_20s    4094ms   280.4 MB/s     70 ops/s  p50=304ms p95=1616ms p99=1671ms
+  concurrent_download_20s   7310ms   157.0 MB/s     39 ops/s  p50=171ms p95=2200ms p99=2746ms
+  range_get_1mb_chunks     3182ms     5.0 MB/s      5 ops/s  p50=145ms p95=997ms p99=997ms
+  burst_small_files_500    8550ms     0.2 MB/s     58 ops/s  p50=155ms p95=176ms p99=526ms
+  integrity_16mb          70075ms  ✓ checksum match
+  integrity_robust_16mb    4330ms     3.7 MB/s  ✓ verified (put_retries=0, get_retries=0)
+  integrity_chunked_16mb   3366ms     4.8 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   8177ms  p50=146ms p95=429ms p99=429ms  ✓ 20/20 consistent
+  consistency_overwrite    6508ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write   3112ms  ✓ 10/10 immediately visible in listing
+  rate_limit_escalation    2786ms    115 ops/s  max_clean=128 | ✓8w:39ops/s(0e) ✓16w:77ops/s(0e) ✓32w:105ops/s(0e) ✓64w:202ops/s(0e) ✓128w:397ops/s(0e)
+  sustained_upload_60s    60000ms   141.6 MB/s      9 ops/s  p50=377ms p95=542ms p99=956ms  00s:125MB/s 10s:144MB/s 20s:141MB/s 30s:150MB/s 40s:146MB/s 50s:144MB/s
+
+[11/12] idrive-ap-northeast-1  (https://s3.ap-northeast-1.idrivee2.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: vaultaire-bench
+  cold_dial_put_1kb        3419ms  p50=333ms p95=383ms p99=383ms
+  warm_put_4kb            12203ms      8 ops/s  p50=119ms p95=130ms p99=334ms
+  warm_get_4kb            12204ms      8 ops/s  p50=120ms p95=121ms p99=240ms
+  warm_head_4kb            5477ms      9 ops/s  p50=108ms p95=109ms p99=132ms
+  warm_copy_4kb            1246ms      8 ops/s  p50=124ms p95=125ms p99=125ms
+  warm_delete_single       3467ms      9 ops/s  p50=115ms p95=116ms p99=116ms
+  delete_batch_100          210ms    475 ops/s
+  list_100                  435ms  returned=100
+  list_prefix               120ms  returned=30
+  medium_put_1mb           1848ms     2.7 MB/s  p50=193ms p95=1079ms p99=1079ms
+  medium_get_1mb           1236ms     4.0 MB/s  p50=113ms p95=766ms p99=766ms
+  medium_put_16mb          2919ms    27.4 MB/s  p50=351ms p95=1514ms p99=1514ms
+  medium_get_16mb          3280ms    24.4 MB/s  p50=230ms p95=1308ms p99=1308ms
+  large_put_64mb           2327ms    27.5 MB/s
+  large_get_64mb           1989ms    32.2 MB/s
+  multipart_put_256mb      3145ms    81.4 MB/s
+  multipart_put_256mb_16p   2135ms   119.9 MB/s
+  large_put_64mb_h1        2625ms    24.4 MB/s
+  multipart_put_256mb_h1_16p   2706ms    94.6 MB/s
+  mpu_abort                1317ms      4 ops/s  p50=219ms p95=439ms p99=439ms
+  concurrent_ingest_20s    3141ms   365.4 MB/s     91 ops/s  p50=190ms p95=1251ms p99=1369ms
+  concurrent_download_20s  11830ms    97.0 MB/s     24 ops/s  p50=246ms p95=1856ms p99=10196ms
+  range_get_1mb_chunks     2617ms     6.1 MB/s      6 ops/s  p50=114ms p95=769ms p99=769ms
+  burst_small_files_500   11538ms     0.2 MB/s     43 ops/s  p50=119ms p95=491ms p99=1987ms
+  integrity_16mb          63488ms  ✓ checksum match
+  integrity_robust_16mb    3123ms     5.1 MB/s  ✓ verified (put_retries=0, get_retries=0)
+  integrity_chunked_16mb   2812ms     5.7 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   6272ms  p50=111ms p95=327ms p99=327ms  ✓ 20/20 consistent
+  consistency_overwrite    5150ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write   2431ms  ✓ 10/10 immediately visible in listing
+  rate_limit_escalation    2322ms    138 ops/s  max_clean=128 | ✓8w:47ops/s(0e) ✓16w:91ops/s(0e) ✓32w:133ops/s(0e) ✓64w:242ops/s(0e) ✓128w:486ops/s(0e)
+  sustained_upload_60s    60000ms   165.3 MB/s     10 ops/s  p50=358ms p95=647ms p99=795ms  00s:154MB/s 10s:173MB/s 20s:174MB/s 30s:160MB/s 40s:170MB/s 50s:162MB/s
+
+[12/12] wasabi-us-west-1  (https://s3.us-west-1.wasabisys.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: stwt1
+  cold_dial_put_1kb        4331ms  err=10
+  warm_put_4kb            36428ms  err=100
+  warm_get_4kb                0ms
+  warm_head_4kb               0ms
+  warm_copy_4kb               0ms
+  warm_delete_single          0ms
+  delete_batch_100       ERROR — seed failed
+  list_100               ERROR — operation error S3: ListObjectsV2, https response error StatusCode: 403, RequestID: 2F864A4260BC3437:A, HostID: NhDIHKSraHG4V5A/v8r9xsqf2ys0rkXFVbh4wJzltjOWevYNHlGOmu8hCdgI/uo/s+GBMCKfHjX2, api error AccessDenied: Access Denied
+  list_prefix            ERROR — seed failed
+  medium_put_1mb           4815ms  err=5
+  medium_get_1mb              0ms
+  medium_put_16mb         32624ms  err=5
+  medium_get_16mb             0ms
+  large_put_64mb         ERROR — operation error S3: PutObject, https response error StatusCode: 403, RequestID: 5AD9AE96ECC9C67F:A, HostID: KbbbKQ9iiaTxFZ4TYvfg7BeyBeKd4U6VXMffk3bUlCW2dRBgO4/aWeIN5DlZUNN6pc+/VNMRuySa, api error AccessDenied: Public use of objects is not allowed by this account. Please contact Wasabi Support at support@wasabi.com for assistance.
+  large_get_64mb         ERROR — seed failed: operation error S3: PutObject, https response error StatusCode: 403, RequestID: 83A28F71CE9ADD37:A, HostID: 2cakVdzOaI1XjqSQSAq9W85reoNN1nD3A+LapFGBhuW04fETO3RY8iebx+aR8jz+nb6ztnlFnIBd, api error AccessDenied: Public use of objects is not allowed by this account. Please contact Wasabi Support at support@wasabi.com for assistance.
+  multipart_put_256mb    ERROR — create: operation error S3: CreateMultipartUpload, https response error StatusCode: 403, RequestID: F133AC76FD3793BC:A, HostID: 2FAQ2rEgFfhtYWRzIcMjH/Hu89UG5E63kblHrkRyjNUjZLktPH/+t96Plmwd0/BN4bF+4pFPNCFu, api error AccessDenied: Public use of objects is not allowed by this account. Please contact Wasabi Support at support@wasabi.com for assistance.
+  multipart_put_256mb_16p ERROR — create: operation error S3: CreateMultipartUpload, https response error StatusCode: 403, RequestID: 1F2E371464581314:B, HostID: UJlWruHolcdwtYGCnKfzQDtQ25v9RdSPaaQYW6CmD5rbtzf/6wqZAZpoCBCcMSvHSM15LlYmOOiN, api error AccessDenied: Public use of objects is not allowed by this account. Please contact Wasabi Support at support@wasabi.com for assistance.
+  large_put_64mb_h1      ERROR — operation error S3: PutObject, https response error StatusCode: 403, RequestID: B67D03344A63909E:A, HostID: YzbQ46bXDZxa5dqeUFilyTEaqgxZPxCaGzQuMTuaxhqMaODnodRFYfxGg6osCeaq+ibOhluRyxwV, api error AccessDenied: Public use of objects is not allowed by this account. Please contact Wasabi Support at support@wasabi.com for assistance.
+  multipart_put_256mb_h1_16p ERROR — create: operation error S3: CreateMultipartUpload, https response error StatusCode: 403, RequestID: 100266F26C067139:A, HostID: i/aXwkoToepgaq/2z6PelqYJc1mdOqZ6/f2zyuc0ZX1OudE3R/g/Qm7FtQ1y/+GR6PZBqYNMkftM, api error AccessDenied: Public use of objects is not allowed by this account. Please contact Wasabi Support at support@wasabi.com for assistance.
+  mpu_abort                 806ms  err=5
+  concurrent_ingest_20s   20000ms  err=2336
+  concurrent_download_20s ERROR — seed: operation error S3: PutObject, https response error StatusCode: 403, RequestID: 8D454F9232E1C40F:A, HostID: bXAXUFCqG+2vfj63zMktYTWj6GBoWP4hIBfwViCjj53mCOI8OzL9TEKB/FhOWE9C5VbymZO+uec5, api error AccessDenied: Public use of objects is not allowed by this account. Please contact Wasabi Support at support@wasabi.com for assistance.
+  range_get_1mb_chunks   ERROR — seed: operation error S3: PutObject, https response error StatusCode: 403, RequestID: E758E178D44B8444:A, HostID: bd+59fInt8ni1x4y/PTEqTbZZSPMpvruI8IQIf5mh+tdFec4q/y84gQRKzoP/T1YSuHlaysEHYkC, api error AccessDenied: Public use of objects is not allowed by this account. Please contact Wasabi Support at support@wasabi.com for assistance.
+  burst_small_files_500   23032ms  err=500
+  integrity_16mb         ERROR — put: operation error S3: PutObject, https response error StatusCode: 403, RequestID: BA05E730C5FD327D:A, HostID: rDxxO6rEWCZqoRvTezezLRwzY8L+eToZqdG2wN8xnpAzPbroWAfnQxe0RjSzW8e76X/Y6TsPUQ3p, api error AccessDenied: Public use of objects is not allowed by this account. Please contact Wasabi Support at support@wasabi.com for assistance.
+  integrity_robust_16mb  ERROR — verified put: operation error S3: PutObject, https response error StatusCode: 403, RequestID: 8AC52D5205FAD1CC:A, HostID: ceNVSwXzLExdAqn+2oYvjdG2k6DOe2kjmfyjvmAUQALG2qYa6LBBwTGYbQ/s9SB3yg1rRw+F9UV+, api error AccessDenied: Public use of objects is not allowed by this account. Please contact Wasabi Support at support@wasabi.com for assistance.
+  integrity_chunked_16mb ERROR — chunk 3 failed after 3 retries
+  consistency_read_after_write   3853ms  err=20  ✓ 0/20 consistent
+  consistency_overwrite    1894ms  err=10  ✓ 0/10 overwrites correct
+  consistency_list_after_write   1958ms  err=10  ✓ 0/10 immediately visible in listing
+  rate_limit_escalation   83354ms  err=320  max_clean=0 | ✗8w:0ops/s(48e) ✗16w:0ops/s(48e) ✗32w:0ops/s(32e) ✗64w:0ops/s(64e) ✗128w:0ops/s(128e)
+  sustained_upload_60s    60002ms  err=181
+
+
+✅ Done in 50m33s. Results: raw-20261014/bench-compare-2.json
