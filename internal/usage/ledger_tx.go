@@ -61,20 +61,27 @@ func ApplyLedgerTx(ctx context.Context, tx *sql.Tx, tenantID string, c LedgerCha
 	if c.Zero() {
 		return nil
 	}
-	var used, limit int64
-	err := tx.QueryRowContext(ctx, `
-		UPDATE tenant_quotas
-		   SET storage_used_bytes = GREATEST(0, storage_used_bytes + $1), updated_at = NOW()
-		 WHERE tenant_id = $2
-		RETURNING storage_used_bytes, storage_limit_bytes`, c.Total, tenantID).Scan(&used, &limit)
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		return nil
-	case err != nil:
-		return fmt.Errorf("ledger: tenant %s: %w", tenantID, err)
-	}
-	if c.Guard != "" && c.Total > 0 && used > limit {
-		return fmt.Errorf("%w: tenant %s total %d > %d", ErrOverQuota, tenantID, used, limit)
+	// The total's row is locked only when the total moves: a new key whose
+	// reservation equals its size changes no ledger, and a floor-only change
+	// (a write whose reservation predates a floor row SetHouse created)
+	// touches the floor row alone — the quota row is the tenant's one hot
+	// row, and every commit of the tenant would otherwise queue on it.
+	if c.Total != 0 {
+		var used, limit int64
+		err := tx.QueryRowContext(ctx, `
+			UPDATE tenant_quotas
+			   SET storage_used_bytes = GREATEST(0, storage_used_bytes + $1), updated_at = NOW()
+			 WHERE tenant_id = $2
+			RETURNING storage_used_bytes, storage_limit_bytes`, c.Total, tenantID).Scan(&used, &limit)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			return nil
+		case err != nil:
+			return fmt.Errorf("ledger: tenant %s: %w", tenantID, err)
+		}
+		if c.Guard != "" && c.Total > 0 && used > limit {
+			return fmt.Errorf("%w: tenant %s total %d > %d", ErrOverQuota, tenantID, used, limit)
+		}
 	}
 	floors := make([]string, 0, len(c.Floors))
 	for f, d := range c.Floors {
