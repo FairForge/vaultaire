@@ -299,3 +299,111 @@ heads, 0 uploads, 0 buckets, usage 0, 0 chunk refs. The box's
   (`ErrNoTenant`; the counter has stayed 0 through the integration suite
   and on prod). The chunk container and the probes name their reserved
   tenants.
+
+## Post-merge (Stage 1a Prompt 6, Part 0, 2026-10-14)
+
+This is the adversarial probe of #714 and #715: on the code (#717,
+`ac4a32d`, deployed 02:50 UTC 2026-10-14) and on prod (read-only, ≥ 12 h
+after `7cc4bea`). The "before" column is the same test on `origin/main`
+`0d515bd`, run in a separate worktree. **No P0 and no P1 are left open.**
+Two findings were P1-class (a write that answered 200 hidden from GET;
+the S3 way of restoring a version restoring nothing), and both are fixed in
+#717.
+
+### Prod, read-only (item 1)
+
+The window is 22:11 UTC 2026-10-13 (the `7cc4bea` deploy) to 10:11 UTC
+2026-10-14, read at 10:15 UTC. The counters are Prometheus `increase` over
+those 12 h, because the deploys of #717–#719 (02:50, 03:18, 03:52) restarted
+the process. The "before" window is the same 12 h a day earlier.
+
+| Signal | Since the deploy | Verdict |
+|---|---|---|
+| `vaultaire_engine_no_tenant_refusals_total` | 0 | clean |
+| `vaultaire_routing_unknown_backend_reads_total` | no series (never incremented) | clean |
+| `vaultaire_engine_unrecorded_backend_calls_total` (new in #717) | 0 | clean |
+| `vaultaire_errors_total` | 0 (of ≈ 38,000 requests) | clean |
+| S3 5xx (`s3_access_log`), by op | 0 of 43 requests (before: 0 of 17) | clean |
+| journal: `ErrNoTenant`, `not registered on this process`, `delete … known copies`, `names no recorded backend` | 0, 0, 0, 0 | clean |
+| journal: Error lines | 100, all `sweep chunk` from `dedup_gc` at 02:54 | **finding, known cause** (below) |
+| journal: `backend failed, trying next` | 5, all `idrive exists _global/_chunks/…` from the same run (5 the day before) | same cause |
+| `job_runs`: `retired_blobs`, `vault_parity`, `account_export`, `retention`, `account_deletion`, `multipart_reaper` | `ok`, no note | clean |
+| `job_runs`: `dedup_gc` | `ok`, note "149 chunk(s) not swept" | **finding, known cause** |
+| `job_runs`: `routing_truth` (05:36) | `ok`, "idrive: 10 of 501 rows sampled, 0 present, 0 missing, 10 error" | **finding, known cause** |
+| `job_runs`: `key_reencrypt` | no row: the job is registered only with a master key, and prod has none | as designed |
+
+**The one cause: the dead iDrive key.** Every Error line answers
+`HeadObject 403 Forbidden` for a chunk at `t-_global/_global/_chunks/<hash>`
+on `idrive`, the 2026-10-11 key state (object calls AccessDenied). The day
+before the deploy has the same 100 lines and the same 5 warns, so nothing
+here comes from #714/#715 or #717. The chunks stay GC candidates, routing
+truth reports `error`, never `missing`, and both converge on their own once
+the account is repaired.
+
+### The probe
+
+| # | Case | Before | After | Verdict |
+|---|---|---|---|---|
+| P1 | DELETE of an object on a dead-key backend (AccessDenied, breaker closed: the 2026-10-11 iDrive shape) | 503 + Retry-After; row and bill kept; one call, on the recorded backend only; the retry converges once the key works | same | **holds** |
+| P2 | … after 5 failures | 503, the dead backend not asked (open breaker) | same | **holds** |
+| P3 | DeleteObjects mixing healthy keys and a dead-key backend's key | Deleted ×2, `ServiceUnavailable` for the dead key; its row and bill stay; the retry converges | same | **holds** |
+| P4 | PM-6 under **Suspended** (a PUT commits between the blob delete and the row delete) | the serial outcome (DELETE then PUT) | same | **holds** |
+| P5 | PM-6 under **Enabled**: a PUT commits between the delete marker's transaction and the head-row delete | **GET 404 after the PUT answered 200**: its head row deleted, its version the latest | 204; the PUT is current (GET 200, its bytes); ledger = reconcile. The marker, the row delete and the blob's fate are **one transaction** (`writeDeleteMarker(…, inTx)`) | **fixed (P1)** |
+| P6 | GET of a key with **no row** and an orphan blob at `<key>` on the primary | **200 with the orphan**, 1 backend call | NoSuchKey, **0 calls** (HEAD already answered from the row alone) | **fixed** |
+| P7 | DELETE / DeleteObjects of a key with no row | 1 / 2 calls (a delete of `<key>` on the primary) | 0 calls | **fixed** |
+| P8 | GET `?versionId` of a pre-C1 version behind a delete marker (bytes at `<key>` on its own backend) | 404: read from the **primary**, and its encryption ignored (a sealed one would have come back as ciphertext) | 200 from the version row's backend, with its encryption | **fixed** |
+| P9 | **CopyObject `x-amz-copy-source: b/k?versionId=v1`** (restoring a version onto its own key) | **the current object was copied**: the restore restored nothing | v1's bytes current, `x-amz-copy-source-version-id`; NoSuchVersion / InvalidRequest (a marker) / NotImplemented (a pre-C1 version without bytes) | **fixed (P1)** |
+| P10 | CopyObject whose source has no row (an orphan at `<key>`) | **200**, the orphan copied (the row read's error was ignored) | NoSuchKey, 0 calls; a failed row read is 500 | **fixed** |
+| P11 | export expiry when the backend delete fails | the row dropped and the bill released, **the blob left** | row and bill stay `completed`; the next run converges | **fixed** |
+| P12 | R61-1: a GET whose row exists but whose backend missed | "Did you mean 'k.bin'?" (the key asked) | no suggestion at all while the key's row exists | **fixed** |
+| P13 | `TestVaultParity_ReconcileRunsWhenProtectUsesTheRun`, `-race -count=200` | **1 / 200** (the CI error: `context deadline exceeded` at :229) | **0 / 200** | **fixed**: the test's protect estimate (150 ms) sat 50 ms above the leg's 100 ms sleep; a protect also makes four DB round trips, a source read and an encode under `-race`, so the last protect started could outlive the 3 s run. The estimate is now 500 ms. Product unchanged: in prod the estimate is 30 s + size / 20 MB/s, and an overrun is a job note |
+
+**The silent-primary hole (item 2).** An engine `Get` / `GetRange` /
+`Delete` / `ParallelRangeSource` that names no recorded backend asks the
+primary. A read-only audit listed every call site. **On the normal path,
+none drops a known backend:**
+- the S3 GET (whole, Range, `parallel_get`, sealed), DELETE and DeleteObjects;
+- CDN, the copy source, parity protect and rebuild, the deletion runner, the export;
+- `?versionId`, which uses the version row's backend.
+
+Restore, Smart demotion and promotion, key_reencrypt whole, routing truth,
+the collector, the sweep and dedup GC address drivers directly. The holes
+were edge paths, all fixed in #717:
+- P6–P10 above;
+- a head-row read error on GET (now 500, never the primary);
+- a chunked row on a process with no content index (GET, DELETE and batch now 500, never a whole-blob guess);
+- the chunk store with an empty `backend_id` (now refused, as `existsAt` already did).
+
+**Decision: count, don't refuse.**
+`vaultaire_engine_unrecorded_backend_calls_total{op}` counts every engine
+read or delete of an object whose context names no recorded backend, with
+a Warn line per call. After #717 the only such caller is a row with a NULL
+`backend_name`: prod has none, and routing truth's resolve-null fixes
+them. So the counter reads 0, and any increase is a caller that dropped
+the backend. Refusing would 503 a legacy row; counting shows the bug
+without an outage.
+
+**Delete with known copies (item 3).** AccessDenied is a backend failure
+(`isBackendFailure`), so the engine's single-candidate `ExecuteOp` answers
+`ErrAllBackendsUnavailable`. That makes the DELETE 503 + Retry-After, with
+the row and the bill kept. Five failures open the breaker, after which the
+dead backend is not asked. The retry converges once the key works (P1–P3).
+PM-6 (`deleteHeadRowIfAt`) holds under Suspended (P4); under Enabled it did
+not (P5, fixed).
+
+### New residuals
+
+| # | Sev | Item | Where it goes |
+|---|---|---|---|
+| R61-5 | P2 | A plain DELETE in a **Suspended** bucket of a key whose current bytes are its `null` version removes the head row and keeps the `null` version's bytes **billed** (GET 404, ListObjectVersions shows a live `null` version). AWS replaces the `null` version with a `null` delete marker and its bytes go | version-aware manifests' prompt (the versioning semantics) |
+| R61-6 | P3 | `VaultParity.Open` reads the data ranges with its caller's recorded backend on the context: correct for both callers, but a future caller without it reads the primary (now counted) | take the backend as a parameter when it is next touched |
+| R61-7 | note | The CDN has no parity fallback (a vault object whose backend failed is 503 on `/cdn`, rebuilt on S3 GET) | if a public vault object is ever served |
+| R61-8 | P3 | CopyObject of a non-current version carries its content type only (no per-version metadata exists; a GET of it sends none either). The `x-amz-copy-source-if-*` conditions are not implemented on any copy | version-aware manifests |
+
+**Outside this WP (CI).**
+`TestMultiWebDAV_ASlowClientNeverRunsOutThePutDeadlineOrChargesTheBridge`
+(`webdav_2b_test.go:67`, "PUT: no answer within …" against a 150 ms test
+deadline) failed four `main`/queue runs between 10-13 and 10-14 (runs
+38447256739, 38503086003, 38510564186 twice). Each passed on a re-run. It
+did not fail in 60 local runs, including under `GOMAXPROCS=1`. It is
+Prompt 2b's test and is left to that owner.
