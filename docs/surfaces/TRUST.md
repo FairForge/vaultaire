@@ -24,3 +24,10 @@
 8. The attested data plane (41.4): measured image, no SSH, key broker on the other box, published measurements, attestation endpoint, policy changes in the log.
 9. The first transparency report.
 10. The external audit that unlocks the words we do not use yet.
+
+**Added 2026-10-14 (F-20, F-21; plan 43.7, 43.8).**
+
+11. The key broker now, on a rented SEV-SNP VM, unwrapping per tenant (43.7, F-20) — after the F-14 ceremony, migrated by the `PREVIOUS` re-wrap; it replaces item 7 (the KEK leaves the box rather than hiding in its TPM).
+12. Before launch, two holes closed: `api_keys.secret_key` wrapped under the tenant's key; the pg dumps encrypted with `age` before they exist on disk (43.7).
+13. Boot-state and build transparency (a 43.6 entry per deploy with the binary hash and an fTPM quote, a daily quote otherwise), canary credentials, the customer's own audit view, the sub-processor and data-location page, the incident clock (43.8).
+14. The moderation scope written down and in the AUP (F-21): known hashes on the public surface only, a human before any action, the link before the account, an appeal, counts in the report.

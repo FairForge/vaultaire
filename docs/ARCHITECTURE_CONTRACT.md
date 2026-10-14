@@ -26,6 +26,8 @@ The engine (`cmd/vaultaire`) is the same under all three. The surfaces differ in
 10. **The attested data plane is the one shared foundation** (41.4, F-9, F-18): self-hosted confidential VMs on EPYC hardware with SEV-SNP, a key broker on another box, published measurements, an attestation endpoint. It hosts developer-grade processing, the consumer recovery realm and cloud AI, and makes any server-side access visible. Until it exists, nothing claims it.
 11. **One domain.** stored.cloud is canonical (F-17): `app.`, `s3.`, `docs.`, `trust.`, `status.` and `/developers`, `/photos`, `/platform`. stored.ge is served for as long as any customer has it configured. Public customer content lives on a separate non-brand content domain, never on the brand origin.
 12. **Metadata has clocks.** Phase 43: every column we hold on a customer is in the generated inventory, has a stated retention, and the identity record and the data plane are joined by an opaque id, not an e-mail.
+13. **The tenant is the unit of disclosure** (43.7, F-20). Keys are unwrapped per tenant by a broker that never rests with the data; answering a demand for one account never touches another account's keys, rows or logs; a request for the whole is contested and, if it survives, is itself a public event.
+14. **Content is never classified in private; known hashes are matched in public** (F-21). No classifier runs on private content in any mode; the public and shared surface is matched against known-CSAM hash lists with a threshold and a human; the first action is the link, never the account.
 
 ## How the plan is worked
 
