@@ -955,7 +955,7 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 	// The bill is settled in the install's transaction (WP-R10-8).
 	// The version row of a versioned destination names the new manifest
 	// (the flip fills in the address and the sentinel for a chunked row).
-	_, dbErr := commitBlobWrite(r.Context(), s.db, blobWrite{TenantID: t.ID, Bucket: destBucket, Key: destKey, Bill: bill,
+	flip, dbErr := commitBlobWrite(r.Context(), s.db, blobWrite{TenantID: t.ID, Bucket: destBucket, Key: destKey, Bill: bill,
 		Version: &versionWrite{Size: srcMeta.LogicalSize, ETag: srcETag, ContentType: contentType}, Upsert: func(tx *sql.Tx) error {
 			// Each destination ref is a new reference to its chunk. Incremented
 			// inside the same tx so a failed install leaves counts untouched.
@@ -1022,6 +1022,9 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 	result := CopyObjectResult{
 		ETag:         fmt.Sprintf(`"%s"`, srcETag),
 		LastModified: now.Format("2006-01-02T15:04:05.000Z"),
+	}
+	if flip.VersionID != "" {
+		w.Header().Set("x-amz-version-id", flip.VersionID)
 	}
 	xmlData, xmlErr := xml.MarshalIndent(result, "", "  ")
 	if xmlErr != nil {

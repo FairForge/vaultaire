@@ -110,21 +110,26 @@ var (
 		Suggestion: "The request asks for server-side encryption (x-amz-server-side-encryption: AES256) and the server's encryption key is not available right now. Nothing was stored; retry later."}
 )
 
+// versionedChunkingEnabled reports the tenant's `versioned_chunking` flag;
+// no flag service = off (dark).
+func (a *S3ToEngine) versionedChunkingEnabled(tenantID string) bool {
+	return a.flags != nil && a.flags.Enabled(flagVersionedChunking, tenantID)
+}
+
 // decidePlacement is the one placement decision (file comment). It reads the
 // bucket row (versioning, region pin, sse_enabled) and the `chunking` flag
 // once.
 func (a *S3ToEngine) decidePlacement(ctx context.Context, req placementRequest) writePlacement {
 	chunkThreshold := a.chunkThreshold()
 
-	// Versioned buckets keep the plain path: tenant_chunk_refs has no
-	// version_id, so a chunked overwrite would destroy the previous
-	// version's manifest while object_versions advertises it (silent
-	// version data loss). Until manifests are version-aware, Enabled and
-	// Suspended buckets store whole objects.
+	// A versioned bucket (Enabled or Suspended) chunks only with the
+	// tenant's `versioned_chunking` flag (WP-VM-1 Part D, default off):
+	// since 092 a manifest has an address and a version keeps it. Off, the
+	// bucket stores whole objects as before.
 	versioned := false
 	if a.db != nil {
 		vs := getBucketVersioningStatus(ctx, a.db, req.TenantID, req.Bucket)
-		versioned = vs == "Enabled" || vs == "Suspended"
+		versioned = (vs == "Enabled" || vs == "Suspended") && !a.versionedChunkingEnabled(req.TenantID)
 	}
 	// A RESILIENT / archive / PUBLIC / SYNC class keeps its tier's placement
 	// promise only whole: chunk blobs live on the engine primary.
