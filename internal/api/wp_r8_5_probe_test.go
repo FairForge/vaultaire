@@ -420,7 +420,7 @@ func TestProbe_KeyReencryptRacingAGet_GetFinishesByteEqual(t *testing.T) {
 	assert.Greater(t, graceLeft, 23*time.Hour, "the old address outlives the GET: the collector's grace")
 
 	// The collector runs now: the old blob is not due, so it stays.
-	c := NewRetiredBlobCollector(f.db, f.eng, zap.NewNop())
+	c := NewRetiredBlobCollector(f.db, f.eng, nil, zap.NewNop())
 	c.onlyTenant = f.tenantID
 	_, err = c.RunOnce(context.Background())
 	require.NoError(t, err)

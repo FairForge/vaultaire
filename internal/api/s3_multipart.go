@@ -958,7 +958,7 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 		// object is untouched until the commit (R3-15).
 		enc := sealer.encryption()
 		if s.db != nil {
-			flip, dbErr := commitBlobWrite(pctx, s.db, manifestReleaser(s.gci), blobWrite{TenantID: t.ID, Bucket: bucket, Key: object,
+			flip, dbErr := commitBlobWrite(pctx, s.db, blobWrite{TenantID: t.ID, Bucket: bucket, Key: object,
 				Bill: bill,
 				Version: &versionWrite{Size: totalSize, ETag: etagValue, ContentType: attrs.ContentType, Backend: backendName,
 					Blob: versionBlobRef{StorageKey: blob, Enc: enc}},

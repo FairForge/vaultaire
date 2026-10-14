@@ -278,7 +278,7 @@ func (g *generatedObjectWriter) writeOpts(ctx context.Context, tenantID, bucket,
 	}
 
 	attrs := objectAttrs{ContentType: contentType}
-	_, dbErr := commitBlobWrite(tctx, g.db, manifestReleaser(g.gci), blobWrite{TenantID: tenantID, Bucket: bucket, Key: key,
+	_, dbErr := commitBlobWrite(tctx, g.db, blobWrite{TenantID: tenantID, Bucket: bucket, Key: key,
 		Bill: bill,
 		Version: &versionWrite{Size: size, ETag: etag, ContentType: contentType, Backend: backendName,
 			Blob: versionBlobRef{StorageKey: blob, Enc: enc}},

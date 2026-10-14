@@ -72,7 +72,7 @@ func objectChunkVersions(t *testing.T, f *adapterTestFixture, key string) []chun
 		SELECT r.plaintext_hash, g.encryption_key_version, r.encryption_key_version
 		  FROM tenant_chunk_refs r
 		  JOIN global_content_index g ON g.dedup_scope = r.dedup_scope AND g.plaintext_hash = r.plaintext_hash
-		 WHERE r.tenant_id = $1 AND r.bucket_name = 'test-bucket' AND r.object_key = $2
+		 WHERE r.tenant_id = $1 AND r.bucket_name = 'test-bucket' AND r.object_key = `+manifestOfKeySQL+`
 		 ORDER BY r.chunk_index`, f.tenantID, key)
 	require.NoError(t, err)
 	defer func() { _ = rows.Close() }()
@@ -166,12 +166,12 @@ func TestChunkedGet_RowKeyVersionWinsOverRef(t *testing.T) {
 	c := objectChunkVersions(t, f, "w.bin")[0]
 
 	// The ref says something else: the row (the blob's own record) wins.
-	_, err = f.db.Exec(`UPDATE tenant_chunk_refs SET encryption_key_version = 2 WHERE tenant_id = $1 AND object_key = 'w.bin'`, f.tenantID)
+	_, err = f.db.Exec(`UPDATE tenant_chunk_refs SET encryption_key_version = 2 WHERE tenant_id = $1 AND object_key = `+manifestOf("$1", "'w.bin'"), f.tenantID)
 	require.NoError(t, err)
 	requireGet(t, f, "w.bin", content)
 
 	// A row sealed before 084 carries none: the ref stands in.
-	_, err = f.db.Exec(`UPDATE tenant_chunk_refs SET encryption_key_version = 1 WHERE tenant_id = $1 AND object_key = 'w.bin'`, f.tenantID)
+	_, err = f.db.Exec(`UPDATE tenant_chunk_refs SET encryption_key_version = 1 WHERE tenant_id = $1 AND object_key = `+manifestOf("$1", "'w.bin'"), f.tenantID)
 	require.NoError(t, err)
 	_, err = f.db.Exec(`UPDATE global_content_index SET encryption_key_version = NULL WHERE dedup_scope = $1 AND plaintext_hash = $2`, f.tenantID, c.hash)
 	require.NoError(t, err)
@@ -179,7 +179,7 @@ func TestChunkedGet_RowKeyVersionWinsOverRef(t *testing.T) {
 	requireGet(t, f, "w.bin", content)
 
 	// And with the ref wrong too, the read fails closed (500), never garbage.
-	_, err = f.db.Exec(`UPDATE tenant_chunk_refs SET encryption_key_version = 2 WHERE tenant_id = $1 AND object_key = 'w.bin'`, f.tenantID)
+	_, err = f.db.Exec(`UPDATE tenant_chunk_refs SET encryption_key_version = 2 WHERE tenant_id = $1 AND object_key = `+manifestOf("$1", "'w.bin'"), f.tenantID)
 	require.NoError(t, err)
 	w := getChunkedAs(t, f, f.tenant, "test-bucket", "w.bin")
 	assert.Equal(t, http.StatusInternalServerError, w.Code)

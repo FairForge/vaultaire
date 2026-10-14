@@ -111,7 +111,7 @@ func TestChunking_StringTenantID_DedupAndDelete(t *testing.T) {
 
 	var refsA int
 	require.NoError(t, f.db.QueryRow(
-		`SELECT COUNT(*) FROM tenant_chunk_refs WHERE tenant_id::text = $1 AND object_key = 'dedup-a.bin'`,
+		`SELECT COUNT(*) FROM tenant_chunk_refs WHERE tenant_id::text = $1 AND object_key = `+manifestOf("$1", "'dedup-a.bin'"),
 		f.tenantID).Scan(&refsA))
 	assert.Zero(t, refsA, "deleted object's chunk refs must be removed")
 

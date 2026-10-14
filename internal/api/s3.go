@@ -794,11 +794,22 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
 	`, t.ID, req.Bucket, req.Object).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &metadataJSON, &backendName, &encAlgo, &tagsJSON, &contentDisposition, &contentEncoding, &contentLanguage, &echo.CacheControl, &echo.Expires, &echo.WebsiteRedirect, &floor, &storageKey)
 
+	// R85-2: a HEAD of the current object of a versioned bucket names its
+	// version, as GET does — and a key whose latest version is a delete
+	// marker says so on its 404.
+	latestVID, latestMarker := "", false
+	if r.URL.Query().Get("versionId") == "" {
+		latestVID, latestMarker = s.latestVersion(r.Context(), t.ID, req.Bucket, req.Object, err == nil)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		s.logger.Warn("HEAD: object not in metadata cache",
 			zap.String("tenant_id", t.ID),
 			zap.String("bucket", req.Bucket),
 			zap.String("object", req.Object))
+		if latestMarker {
+			w.Header().Set("x-amz-version-id", latestVID)
+			w.Header().Set("x-amz-delete-marker", "true")
+		}
 		reqID := generateRequestID()
 		if suggestion := keySuggestion(r.Context(), s.db, t.ID, req.Bucket, req.Object); suggestion != "" {
 			WriteS3ErrorWithContext(w, ErrNoSuchKey, r.URL.Path, reqID, WithSuggestion(suggestion))
@@ -842,6 +853,9 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	storageClass := engine.CustomerStorageClass(floor, backendName)
 	w.Header().Set("x-amz-storage-class", storageClass)
 	w.Header().Set("x-amz-request-id", generateRequestID())
+	if latestVID != "" && !latestMarker {
+		w.Header().Set("x-amz-version-id", latestVID)
+	}
 	// V18.2: archive-class objects carry live restore state so Glacier restore
 	// pollers (rclone, aws-cli s3api head-object) work unmodified. This is the
 	// one deliberate exception to "HEAD never touches the backend" — the
@@ -892,6 +906,26 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	w.WriteHeader(http.StatusOK)
 }
 
+// latestVersion is the key's latest version id on a versioned bucket ("" on
+// an unversioned one, or none): a delete marker (marker), the id of the
+// current object, or "null" for a current object with no version row (one
+// written before versioning was enabled — ListObjectVersions lists it as
+// null). The database only, as every HEAD.
+func (s *Server) latestVersion(ctx context.Context, tenantID, bucket, key string, headFound bool) (vid string, marker bool) {
+	if vs := getBucketVersioningStatus(ctx, s.db, tenantID, bucket); vs != "Enabled" && vs != "Suspended" {
+		return "", false
+	}
+	err := s.db.QueryRowContext(ctx, `SELECT version_id, is_delete_marker FROM object_versions
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND is_latest`, tenantID, bucket, key).Scan(&vid, &marker)
+	switch {
+	case err == nil:
+		return vid, marker
+	case errors.Is(err, sql.ErrNoRows) && headFound:
+		return "null", false
+	}
+	return "", false
+}
+
 // headVersion answers HEAD ?versionId=vid from the object_versions row and
 // reports true, or reports false for the key's latest version (the head row
 // describes it). The R2-03 501 is kept only for a non-current version
@@ -904,13 +938,17 @@ func (s *Server) headVersion(w http.ResponseWriter, r *http.Request, tenantID st
 	var etag, contentType, storageKey, backend, encAlgo, floor string
 	var size int64
 	var createdAt time.Time
+	var attrs objectAttrs
+	var meta []byte
 	err := s.db.QueryRowContext(r.Context(), `
 		SELECT is_delete_marker, is_latest, etag, content_type, size_bytes, created_at,
-		       COALESCE(storage_key, ''), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(floor, '')
+		       COALESCE(storage_key, ''), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(floor, ''),
+		       `+versionAttrColumns+`
 		FROM object_versions
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND version_id = $4`,
 		tenantID, req.Bucket, req.Object, vid).Scan(&marker, &latest, &etag, &contentType, &size, &createdAt,
-		&storageKey, &backend, &encAlgo, &floor)
+		&storageKey, &backend, &encAlgo, &floor, &meta, &attrs.ContentDisposition, &attrs.ContentEncoding, &attrs.ContentLanguage,
+		&attrs.CacheControl, &attrs.Expires, &attrs.WebsiteRedirect)
 	if errors.Is(err, sql.ErrNoRows) {
 		if isUnanchoredNullVersion(r.Context(), s.db, tenantID, req.Bucket, req.Object, vid) {
 			return false // the current object is the null version (GET answers the same)
@@ -964,6 +1002,19 @@ func (s *Server) headVersion(w http.ResponseWriter, r *http.Request, tenantID st
 	w.Header().Set("Last-Modified", createdAt.UTC().Format(http.TimeFormat))
 	w.Header().Set("x-amz-storage-class", engine.CustomerStorageClass(floor, backend))
 	w.Header().Set("x-amz-request-id", generateRequestID())
+	// What the version recorded (R61-8, 092): none of it for one written
+	// before — the current object's belong to the current object.
+	setS3MetadataHeaders(w, meta)
+	if cd := sanitizeContentDisposition(attrs.ContentDisposition); cd != "" {
+		w.Header().Set("Content-Disposition", cd)
+	}
+	if attrs.ContentEncoding != "" {
+		w.Header().Set("Content-Encoding", attrs.ContentEncoding)
+	}
+	if attrs.ContentLanguage != "" {
+		w.Header().Set("Content-Language", attrs.ContentLanguage)
+	}
+	setEchoHeaders(w.Header(), attrs.CacheControl, attrs.Expires, attrs.WebsiteRedirect)
 	w.WriteHeader(http.StatusOK)
 	return true
 }

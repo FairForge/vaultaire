@@ -517,7 +517,7 @@ func TestDeleteCurrentVersion_RepointsHead(t *testing.T) {
 // --- the collector --------------------------------------------------------------------
 
 func (f *ledgerFixture) collector() *RetiredBlobCollector {
-	c := NewRetiredBlobCollector(f.db, f.eng, zap.NewNop())
+	c := NewRetiredBlobCollector(f.db, f.eng, nil, zap.NewNop())
 	c.onlyTenant = f.tenantID
 	c.JobName = "test-retired-" + f.tenantID
 	return c

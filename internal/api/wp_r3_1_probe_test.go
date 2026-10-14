@@ -35,11 +35,11 @@ func probeBody(t *testing.T, n int) []byte {
 // ref_count over the hashes the manifest names.
 func (f *mpChunkFixture) keyRefCounts(t *testing.T, key string) (rows, refSum int) {
 	t.Helper()
-	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM tenant_chunk_refs WHERE tenant_id = $1 AND object_key = $2`,
+	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM tenant_chunk_refs WHERE tenant_id = $1 AND object_key = `+manifestOfKeySQL,
 		f.tenantID, key).Scan(&rows))
 	require.NoError(t, f.db.QueryRow(`SELECT COALESCE(SUM(g.ref_count), 0) FROM global_content_index g
 		WHERE (g.dedup_scope, g.plaintext_hash) IN (SELECT dedup_scope, plaintext_hash FROM tenant_chunk_refs
-		WHERE tenant_id = $1 AND object_key = $2)`, f.tenantID, key).Scan(&refSum))
+		WHERE tenant_id = $1 AND object_key = `+manifestOfKeySQL+`)`, f.tenantID, key).Scan(&refSum))
 	return rows, refSum
 }
 

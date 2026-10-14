@@ -370,7 +370,7 @@ func TestPostMerge108_CompleteRetriedAfterItsCommitFailed_OneBlobHeldTakenOnce(t
 	f.ledgerAgrees(t, "after the retry")
 	// The collector, past the grace: the retry committed the same address,
 	// so the queued blob is named and kept.
-	c := NewRetiredBlobCollector(f.db, f.server.engine, zap.NewNop())
+	c := NewRetiredBlobCollector(f.db, f.server.engine, f.server.gci, zap.NewNop())
 	c.onlyTenant = f.tenantID
 	c.JobName = "test_retired_" + f.tenantID[:8]
 	res, err := c.RunOnce(context.Background())

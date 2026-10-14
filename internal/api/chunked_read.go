@@ -103,20 +103,23 @@ type chunkedObjectReader struct {
 	stream   *parfetch.Stream
 }
 
-// openChunkedObject resolves the manifest of tenantID's bucket/key and checks
-// that every backend its chunks are on can be asked now (registered, breaker
-// not open): engine.ErrAllBackendsUnavailable otherwise — before any byte, so
-// the caller answers 503. size is the head row's (the plan's total).
-func (a *S3ToEngine) openChunkedObject(ctx context.Context, tenantID, bucket, key string, size int64) (*chunkedObjectReader, error) {
+// openChunkedObject resolves the manifest a row of tenantID's bucket/key
+// names — at storageKey, the row's address (WP-VM-1; "" = the key, a
+// manifest written before 092) — and checks that every backend its chunks
+// are on can be asked now (registered, breaker not open):
+// engine.ErrAllBackendsUnavailable otherwise — before any byte, so the
+// caller answers 503. size is the row's (the plan's total).
+func (a *S3ToEngine) openChunkedObject(ctx context.Context, tenantID, bucket, key, storageKey string, size int64) (*chunkedObjectReader, error) {
 	if a.gci == nil {
 		return nil, errors.New("chunked object read without the content index")
 	}
-	refs, err := a.gci.GetObjectChunks(ctx, tenantID, bucket, key)
+	manifest := manifestAddress(key, storageKey)
+	refs, err := a.gci.GetObjectChunks(ctx, tenantID, bucket, manifest)
 	if err != nil {
 		return nil, fmt.Errorf("get object chunks: %w", err)
 	}
 	if len(refs) == 0 {
-		return nil, fmt.Errorf("no chunk references for %s/%s", bucket, key)
+		return nil, fmt.Errorf("no chunk references for %s/%s (manifest %s)", bucket, key, manifest)
 	}
 	descs, err := a.resolveChunkDescs(ctx, refs)
 	if err != nil {

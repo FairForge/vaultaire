@@ -102,7 +102,7 @@ func TestChunkedCopy_ManifestCopyRoundtrip(t *testing.T) {
 	require.NoError(t, f.db.QueryRow(`
 		SELECT MIN(g.ref_count) FROM global_content_index g
 		JOIN tenant_chunk_refs r ON r.plaintext_hash = g.plaintext_hash AND r.dedup_scope = g.dedup_scope
-		WHERE r.tenant_id::text = $1 AND r.object_key = 'copy.bin'`,
+		WHERE r.tenant_id::text = $1 AND r.object_key = `+manifestOf("$1", "'copy.bin'"),
 		f.tenantID).Scan(&minRef))
 	assert.GreaterOrEqual(t, minRef, 2, "each chunk must have gained a reference")
 
@@ -173,7 +173,7 @@ func TestChunkedCopy_VersionedDestination_StoredWholeWithItsVersion(t *testing.T
 
 	var n int
 	require.NoError(t, f.db.QueryRow(
-		`SELECT COUNT(*) FROM tenant_chunk_refs WHERE tenant_id::text = $1 AND object_key = 'vcopy.bin'`,
+		`SELECT COUNT(*) FROM tenant_chunk_refs WHERE tenant_id::text = $1 AND object_key = `+manifestOf("$1", "'vcopy.bin'"),
 		f.tenantID).Scan(&n))
 	assert.Zero(t, n, "no manifest in a versioned bucket")
 	var chunked bool

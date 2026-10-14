@@ -47,7 +47,7 @@ func chunkRefCount(t *testing.T, f *adapterTestFixture, key string) int {
 	var n int
 	require.NoError(t, f.db.QueryRow(`
 		SELECT COUNT(*) FROM tenant_chunk_refs
-		WHERE tenant_id = $1 AND bucket_name = 'test-bucket' AND object_key = $2`,
+		WHERE tenant_id = $1 AND bucket_name = 'test-bucket' AND object_key = `+manifestOfKeySQL,
 		tenantUUID, key).Scan(&n))
 	return n
 }

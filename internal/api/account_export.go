@@ -487,7 +487,7 @@ func (s *AccountExportService) deleteExportObject(ctx context.Context, tenantID,
 		return fmt.Errorf("delete the export object: %w", err)
 	}
 	// The row and its bytes' release in one transaction (WP-R10-8).
-	if _, _, err := deleteHeadRowReleasing(tctx, s.db, manifestReleaser(s.gci), s.quota != nil, tenantID, tenant.ExportsBucket, key); err != nil {
+	if _, _, err := deleteHeadRowReleasing(tctx, s.db, s.quota != nil, tenantID, tenant.ExportsBucket, key); err != nil {
 		return fmt.Errorf("delete the export's head row: %w", err)
 	}
 	return nil

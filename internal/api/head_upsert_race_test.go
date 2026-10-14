@@ -45,7 +45,7 @@ func TestAtomicHeadUpsert_ConcurrentFirstWritersAccountOnce(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			displaced[i], errs[i] = atomicHeadUpsertReleasing(context.Background(), db, nil, tenantID, bucket, key,
+			displaced[i], errs[i] = atomicHeadUpsert(context.Background(), db, tenantID, bucket, key,
 				func(tx *sql.Tx) error {
 					// Both writers are past the FOR UPDATE probe here (or the
 					// other one is blocked by the fix): wait for the peer,

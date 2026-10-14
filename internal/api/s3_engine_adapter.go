@@ -277,13 +277,16 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		var vETag, vContentType, vStorageKey, vBackend, vEncAlgo string
 		var vSize int64
 		var vCreatedAt time.Time
+		var vAttrs objectAttrs
+		var vMeta []byte
 		err := a.db.QueryRowContext(r.Context(), `
 			SELECT is_delete_marker, is_latest, etag, content_type, size_bytes, created_at,
-			       COALESCE(storage_key, ''), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, '')
+			       COALESCE(storage_key, ''), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), `+versionAttrColumns+`
 			FROM object_versions
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND version_id = $4`,
 			t.ID, bucket, artifact, reqVersionID).Scan(&isDeleteMarker, &isLatest, &vETag, &vContentType, &vSize, &vCreatedAt,
-			&vStorageKey, &vBackend, &vEncAlgo)
+			&vStorageKey, &vBackend, &vEncAlgo, &vMeta, &vAttrs.ContentDisposition, &vAttrs.ContentEncoding, &vAttrs.ContentLanguage,
+			&vAttrs.CacheControl, &vAttrs.Expires, &vAttrs.WebsiteRedirect)
 		switch {
 		case errors.Is(err, sql.ErrNoRows) && isUnanchoredNullVersion(r.Context(), a.db, t.ID, bucket, artifact, reqVersionID):
 			// The key has no version row: its current object is the null
@@ -300,7 +303,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		}
 		if !isDeleteMarker && !isLatest && vStorageKey != "" {
 			version = &versionBlob{etag: vETag, contentType: vContentType, size: vSize, createdAt: vCreatedAt,
-				storageKey: vStorageKey, backend: vBackend, encAlgo: vEncAlgo}
+				storageKey: vStorageKey, backend: vBackend, encAlgo: vEncAlgo, attrs: vAttrs, metadata: vMeta}
 		}
 		intact := false
 		if !isDeleteMarker && !isLatest && version == nil {
@@ -402,15 +405,21 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		}
 	}
 	if version != nil {
-		// The version's own row describes its bytes; the head row's user
-		// metadata, tags and echo headers belong to the current object and
-		// are not sent with an older version's body (no per-version copy of
-		// them exists). The floor stays the key's.
+		// The version's own row describes its bytes and what a GET of it
+		// sends (R61-8, 092: none of it for a version written before); the
+		// head row's belong to the current object. Tags are the key's
+		// (per-version tags are not kept). The floor stays the key's. A
+		// chunked version is read through its own manifest (WP-VM-1).
 		cacheHit = true
 		cachedSize, cachedETag, cachedContentType, cachedUpdatedAt = version.size, version.etag, version.contentType, version.createdAt
-		cachedBackendName, cachedEncAlgo, cachedStorageKey, cachedIsChunked = version.backend, version.encAlgo, version.storageKey, false
-		cachedMetadata, cachedTags = []byte("{}"), []byte("{}")
-		cachedContentDisposition, cachedContentEncoding, cachedContentLanguage, cachedEcho = "", "", "", putEchoHeaders{}
+		cachedBackendName, cachedEncAlgo, cachedStorageKey = version.backend, version.encAlgo, version.storageKey
+		cachedIsChunked = version.backend == chunkedBackendSentinel
+		cachedMetadata, cachedTags = version.metadata, []byte("{}")
+		if len(cachedMetadata) == 0 {
+			cachedMetadata = []byte("{}")
+		}
+		cachedContentDisposition, cachedContentEncoding, cachedContentLanguage = version.attrs.ContentDisposition, version.attrs.ContentEncoding, version.attrs.ContentLanguage
+		cachedEcho = putEchoHeaders{CacheControl: version.attrs.CacheControl, Expires: version.attrs.Expires, WebsiteRedirect: version.attrs.WebsiteRedirect}
 	}
 	// No row, no object: the row is the one authority for where an object
 	// is (WP-R6-1) — HEAD already answers from it alone — so a key with no
@@ -486,7 +495,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	// not be asked (sync and backup clients retry a 503 and alert on a 500 —
 	// Prompt 2b.5 F1.2), else 500.
 	if cacheHit && cachedIsChunked && a.gci != nil {
-		chunkErr := a.handleChunkedGet(w, r, t, bucket, artifact,
+		chunkErr := a.handleChunkedGet(w, r, t, bucket, artifact, manifestAddress(artifact, cachedStorageKey),
 			cachedSize, cachedETag, cachedContentType, cachedUpdatedAt,
 			cachedMetadata, cachedTags, cachedContentDisposition, cachedContentEncoding, cachedContentLanguage, cachedEcho, storageClass)
 		if chunkErr != nil {
@@ -890,6 +899,8 @@ type versionBlob struct {
 	createdAt           time.Time
 	storageKey, backend string
 	encAlgo             string
+	attrs               objectAttrs // what the version row recorded (R61-8)
+	metadata            []byte      // its x-amz-meta-* as JSON
 }
 
 // detectContentType determines MIME type from extension
@@ -1261,7 +1272,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		// displaced blob is retired (or kept by its version), and the
 		// previous row's size is captured under its lock — a concurrent
 		// DELETE cannot double-release.
-		flip, dbErr := commitBlobWrite(r.Context(), a.db, manifestReleaser(a.gci), blobWrite{TenantID: t.ID, Bucket: bucket, Key: artifact,
+		flip, dbErr := commitBlobWrite(r.Context(), a.db, blobWrite{TenantID: t.ID, Bucket: bucket, Key: artifact,
 			Bill: a.bill,
 			Version: &versionWrite{Size: metadataSize, ETag: etag, ContentType: contentType, Backend: backendName,
 				Blob: versionBlobRef{StorageKey: blob, Enc: objectEncryption{Algorithm: encryptionAlgorithm, KeyVersion: encryptionKeyVersion}}},
@@ -1676,7 +1687,7 @@ func (a *S3ToEngine) rereadChunk(ctx context.Context, d chunkDesc) (chunkDesc, b
 func (a *S3ToEngine) handleChunkedGet(
 	w http.ResponseWriter, r *http.Request,
 	t *tenant.Tenant,
-	bucket, artifact string,
+	bucket, artifact, manifest string,
 	cachedSize int64,
 	cachedETag string,
 	cachedContentType string,
@@ -1693,12 +1704,16 @@ func (a *S3ToEngine) handleChunkedGet(
 
 	container := t.NamespaceContainer(bucket)
 
-	refs, err := a.gci.GetObjectChunks(ctx, t.ID, bucket, artifact)
+	// The manifest the row names (WP-VM-1): its address, or the key for one
+	// written before 092. A row and its manifest are read in two statements:
+	// a manifest an overwrite displaced meanwhile is retired, not released,
+	// so it is still there.
+	refs, err := a.gci.GetObjectChunks(ctx, t.ID, bucket, manifest)
 	if err != nil {
 		return fmt.Errorf("get object chunks: %w", err)
 	}
 	if len(refs) == 0 {
-		return fmt.Errorf("no chunk references for %s/%s", bucket, artifact)
+		return fmt.Errorf("no chunk references for %s/%s (manifest %s)", bucket, artifact, manifest)
 	}
 
 	// Preflight: resolve every chunk's location from the index without reading
@@ -1987,6 +2002,31 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 		}
 
 		w.Header().Set("x-amz-version-id", markerID)
+		w.Header().Set("x-amz-delete-marker", "true")
+		w.WriteHeader(http.StatusNoContent)
+		a.notifySvc.Fire(t.ID, bucket, "s3:ObjectRemoved:Delete", object, 0, "")
+		emitEvent(r.Context(), a.db, a.logger, "object.deleted", t.ID, map[string]interface{}{
+			"bucket": bucket, "key": object,
+		})
+		return
+	}
+
+	if a.db != nil && vStatus == "Suspended" && reqVersionID == "" {
+		// R61-5: the null version is replaced by a null delete marker (as
+		// AWS); its bytes are retired and released, never deleted here.
+		aft := a.objectDeleteAftermath()
+		gone, err := aft.deleteSuspended(r.Context(), t.ID, bucket, object)
+		if err != nil {
+			a.logger.Error("delete (Suspended) failed", zap.Error(err), zap.String("bucket", bucket), zap.String("object", object))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+		if gone {
+			pctx, cancel := postCommit(r.Context())
+			aft.afterObjectGone(pctx, t.ID, bucket, object)
+			cancel()
+		}
+		w.Header().Set("x-amz-version-id", "null")
 		w.Header().Set("x-amz-delete-marker", "true")
 		w.WriteHeader(http.StatusNoContent)
 		a.notifySvc.Fire(t.ID, bucket, "s3:ObjectRemoved:Delete", object, 0, "")

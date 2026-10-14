@@ -47,6 +47,8 @@ func TestDedupGC_DeletesMarkedPastGrace(t *testing.T) {
 	dw := httptest.NewRecorder()
 	f.adapter.HandleDelete(dw, delReq, "test-bucket", "gc-delete.bin")
 	require.Equal(t, http.StatusNoContent, dw.Code)
+	// Retired, then released by the collector after the grace (WP-VM-1).
+	releaseRetiredManifests(t, f.db, f.eng, f.adapter.gci, f.tenantID)
 
 	// Backdate marked_at and last_accessed_at so they're past grace — only
 	// the rows this fixture wrote (R15: the table-wide UPDATE touched other
@@ -96,6 +98,8 @@ func TestDedupGC_RespectsGrace(t *testing.T) {
 	dw := httptest.NewRecorder()
 	f.adapter.HandleDelete(dw, delReq, "test-bucket", "gc-grace.bin")
 	require.Equal(t, http.StatusNoContent, dw.Code)
+	// Retired, then released by the collector after the grace (WP-VM-1).
+	releaseRetiredManifests(t, f.db, f.eng, f.adapter.gci, f.tenantID)
 
 	// marked_at is NOW — within grace period. GC should NOT delete.
 	result, err := runner.RunOnce(context.Background())
@@ -208,6 +212,8 @@ func TestDedupGC_EndToEnd(t *testing.T) {
 	dw := httptest.NewRecorder()
 	f.adapter.HandleDelete(dw, delReq, "test-bucket", "gc-e2e-a.bin")
 	require.Equal(t, http.StatusNoContent, dw.Code)
+	// Retired, then released by the collector after the grace (WP-VM-1).
+	releaseRetiredManifests(t, f.db, f.eng, f.adapter.gci, f.tenantID)
 
 	// Backdate for grace.
 	_, err := f.db.Exec(`UPDATE global_content_index SET last_accessed_at = NOW() - INTERVAL '1 day'`)
@@ -232,6 +238,7 @@ func TestDedupGC_EndToEnd(t *testing.T) {
 	dw2 := httptest.NewRecorder()
 	f.adapter.HandleDelete(dw2, delReq2, "test-bucket", "gc-e2e-b.bin")
 	require.Equal(t, http.StatusNoContent, dw2.Code)
+	releaseRetiredManifests(t, f.db, f.eng, f.adapter.gci, f.tenantID)
 
 	// Backdate again (only this fixture's rows).
 	backdateGCIRows(t, f.db, pairs)
@@ -277,6 +284,8 @@ func TestDedupGC_GlobalContainerCleanup(t *testing.T) {
 	dw := httptest.NewRecorder()
 	f.adapter.HandleDelete(dw, delReq, "test-bucket", "gc-global.bin")
 	require.Equal(t, http.StatusNoContent, dw.Code)
+	// Retired, then released by the collector after the grace (WP-VM-1).
+	releaseRetiredManifests(t, f.db, f.eng, f.adapter.gci, f.tenantID)
 
 	backdateGCIRows(t, f.db, pairs)
 

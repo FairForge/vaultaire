@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -173,26 +174,36 @@ func TestDelete_RacingPut_VersioningEnabled_SerialOutcome(t *testing.T) {
 }
 
 func TestDelete_RacingPut_VersioningSuspended_SerialOutcome(t *testing.T) {
+	// Since WP-VM-1 (R61-5) a Suspended DELETE is ONE transaction under the
+	// key's locks (the null marker, the head row, the bytes' fate, the
+	// bill): a PUT racing it is wholly before or wholly after. Run the race
+	// for real, many times: the outcome is always a serial one.
 	f := setupLocFixture(t)
 	f.bucketSet(t, "versioning_status = 'Suspended'")
 	require.NoError(t, f.qm.SetHouse(context.Background(), f.tenantID, usage.House{StdBytes: 1 << 30}))
-	require.Equal(t, http.StatusOK, httptestPut(f.mpChunkFixture, "k.bin", mpBody(3000, 1), nil).Code)
 	newBody := mpBody(5000, 2)
-	var putCode atomic.Int32
-	deleteBeforeRowHook = func(_, _, _ string) {
-		deleteBeforeRowHook = func(_, _, _ string) {}
-		putCode.Store(int32(httptestPut(f.mpChunkFixture, "k.bin", newBody, nil).Code))
+	for i := 0; i < 10; i++ {
+		require.Equal(t, http.StatusOK, httptestPut(f.mpChunkFixture, "k.bin", mpBody(3000, 1), nil).Code)
+		var wg sync.WaitGroup
+		var putCode int
+		var d *http.Response
+		wg.Go(func() { putCode = httptestPut(f.mpChunkFixture, "k.bin", newBody, nil).Code })
+		wg.Go(func() { d = f.del(t, "k.bin") })
+		wg.Wait()
+
+		require.Equal(t, http.StatusOK, putCode)
+		assert.Equal(t, http.StatusNoContent, d.StatusCode)
+		g := f.get(t, "k.bin", "")
+		switch g.Code {
+		case http.StatusOK: // the DELETE first, then the PUT
+			assert.Equal(t, newBody, g.Body.Bytes())
+			f.ledgerAgrees(t, 5000, "PUT after the DELETE")
+		case http.StatusNotFound: // the PUT first, then the DELETE
+			f.ledgerAgrees(t, 0, "DELETE after the PUT")
+		default:
+			t.Fatalf("GET %d", g.Code)
+		}
 	}
-	t.Cleanup(func() { deleteBeforeRowHook = func(_, _, _ string) {} })
-
-	d := f.del(t, "k.bin")
-
-	require.Equal(t, int32(http.StatusOK), putCode.Load())
-	assert.Equal(t, http.StatusNoContent, d.StatusCode)
-	g := f.get(t, "k.bin", "")
-	require.Equal(t, http.StatusOK, g.Code, "the PUT is the current object")
-	assert.Equal(t, newBody, g.Body.Bytes())
-	f.ledgerAgrees(t, 5000, "the null version rewritten by the PUT")
 }
 
 // ledgerAgrees: the incremental ledgers (total, the standard floor) equal

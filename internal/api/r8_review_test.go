@@ -189,20 +189,21 @@ func TestHandleGet_SSEObjectWithoutService_Fails(t *testing.T) {
 	assert.False(t, bytes.HasPrefix(body, []byte{0x01}), "the SSE-S3 blob (version byte 0x01) must not be served")
 }
 
-// R8-07 (R2-16): on a versioning-enabled bucket the delete-marker branch
-// removed the head row of a chunked object and never released its manifest —
-// refs and GCI counts leaked forever, the chunks unsweepable.
-func TestHandleDelete_DeleteMarkerReleasesChunkedManifest(t *testing.T) {
+// R8-07, then WP-VM-1 (PM-3): a delete marker over an object chunked before
+// versioning was enabled used to leak the manifest (R8-07), then released it
+// — the object lost although AWS keeps it as the "null" version. Now the
+// marker anchors it as the null version, which keeps its manifest and its
+// bill; DELETE ?versionId=null retires the manifest and the collector
+// releases it after the grace.
+func TestHandleDelete_DeleteMarkerKeepsAPreVersioningChunkedObjectAsTheNullVersion(t *testing.T) {
 	f := setupChunkingFixture(t)
-	ctx := context.Background()
-
-	putChunkedObject(t, f, "versioned-later.bin", generateTestData(8*1024), "application/octet-stream")
+	content := generateTestData(8 * 1024)
+	putChunkedObject(t, f, "versioned-later.bin", content, "application/octet-stream")
 	before := tenantChunks(t, f.db, f.tenantID, "versioned-later.bin")
 	require.NotEmpty(t, before)
+	manifest := manifestKeyOf(t, f.db, f.tenantID, "test-bucket", "versioned-later.bin")
 
-	// Versioning enabled AFTER the object was chunked (chunking is gated off
-	// on versioned buckets, so this is the only way a chunked object meets
-	// the marker branch).
+	// Versioning enabled AFTER the object was chunked.
 	_, err := f.db.Exec(`INSERT INTO buckets (tenant_id, name, versioning_status)
 		VALUES ($1,$2,'Enabled')
 		ON CONFLICT (tenant_id, name) DO UPDATE SET versioning_status = 'Enabled'`,
@@ -210,18 +211,37 @@ func TestHandleDelete_DeleteMarkerReleasesChunkedManifest(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		_, _ = f.db.Exec(`DELETE FROM object_versions WHERE tenant_id=$1`, f.tenantID)
+		_, _ = f.db.Exec(`DELETE FROM retired_blobs WHERE tenant_id=$1`, f.tenantID)
 		_, _ = f.db.Exec(`DELETE FROM buckets WHERE tenant_id=$1 AND name=$2`, f.tenantID, "test-bucket")
 	})
+	del := func(target string) {
+		req := httptest.NewRequest("DELETE", target, nil)
+		req = req.WithContext(s3Ctx(req.Context(), f.tenant))
+		w := httptest.NewRecorder()
+		f.adapter.HandleDelete(w, req, "test-bucket", "versioned-later.bin")
+		require.Equal(t, http.StatusNoContent, w.Code, w.Body.String())
+	}
+	refsAt := func() int {
+		var n int
+		require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM tenant_chunk_refs WHERE tenant_id = $1 AND object_key = $2`,
+			f.tenantID, manifest).Scan(&n))
+		return n
+	}
 
-	req := httptest.NewRequest("DELETE", "/test-bucket/versioned-later.bin", nil)
-	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
-	w := httptest.NewRecorder()
-	f.adapter.HandleDelete(w, req, "test-bucket", "versioned-later.bin")
-	require.Equal(t, http.StatusNoContent, w.Code)
-	require.Equal(t, "true", w.Header().Get("x-amz-delete-marker"))
+	del("/test-bucket/versioned-later.bin")
+	releaseRetiredManifests(t, f.db, f.eng, f.adapter.gci, f.tenantID)
 
-	assert.Empty(t, tenantChunks(t, f.db, f.tenantID, "versioned-later.bin"),
-		"the delete marker must release the chunked manifest")
+	assert.Equal(t, len(before), refsAt(), "the null version keeps its manifest behind the marker")
+	var vBackend, vKey string
+	require.NoError(t, f.db.QueryRow(`SELECT backend_name, storage_key FROM object_versions
+		WHERE tenant_id = $1 AND object_key = 'versioned-later.bin' AND version_id = 'null'`, f.tenantID).Scan(&vBackend, &vKey))
+	assert.Equal(t, chunkedBackendSentinel, vBackend)
+	assert.Equal(t, manifest, vKey)
+
+	del("/test-bucket/versioned-later.bin?versionId=null")
+	assert.Equal(t, len(before), refsAt(), "retired, kept for the grace")
+	releaseRetiredManifests(t, f.db, f.eng, f.adapter.gci, f.tenantID)
+	assert.Zero(t, refsAt())
 	for _, c := range before {
 		var refCount int
 		var marked bool
@@ -232,9 +252,8 @@ func TestHandleDelete_DeleteMarkerReleasesChunkedManifest(t *testing.T) {
 	}
 	var metaRows int
 	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM object_metadata
-		WHERE tenant_id = $1 AND object_key = $2`, f.tenantID, "versioned-later.bin").Scan(&metaRows))
+		WHERE tenant_id = $1 AND object_key = $2`, f.tenantID, manifest).Scan(&metaRows))
 	assert.Equal(t, 0, metaRows)
-	_ = ctx
 }
 
 // R8-08: the plain chunked DELETE released the manifest in one transaction and

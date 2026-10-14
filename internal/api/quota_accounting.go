@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/usage"
 	"go.uber.org/zap"
 )
@@ -249,7 +248,7 @@ func predictRelease(ctx context.Context, db *sql.DB, tenantID, bucket, key, floo
 	if err != nil {
 		return 0, err
 	}
-	res, err := commitBlobWrite(ctx, db, nil, blobWrite{TenantID: tenantID, Bucket: bucket, Key: key, DryRun: true,
+	res, err := commitBlobWrite(ctx, db, blobWrite{TenantID: tenantID, Bucket: bucket, Key: key, DryRun: true,
 		Version: &versionWrite{Blob: versionBlobRef{StorageKey: addr}},
 		Upsert: func(tx *sql.Tx) error {
 			return upsertWholeObjectHeadRow(ctx, tx, tenantID, bucket, key, addr, 0, "", "", floor, objectAttrs{})
@@ -291,37 +290,10 @@ func (s *Server) releaseQuota(ctx context.Context, tenantID, floor string, n int
 // the FOR UPDATE scan finds no visible tuple and reports no previous size.
 func atomicHeadUpsert(ctx context.Context, db *sql.DB, tenantID, bucket, key string,
 	upsert func(tx *sql.Tx) error) (displacedRow, error) {
-	return atomicHeadUpsertReleasing(ctx, db, nil, tenantID, bucket, key, upsert)
-}
-
-// chunkManifestReleaser is the slice of GlobalContentIndex the head-upsert
-// path needs; an interface so quota_accounting stays mock-testable.
-type chunkManifestReleaser interface {
-	DeleteObjectChunksTx(ctx context.Context, tx *sql.Tx, tenantID, bucket, key string) error
-}
-
-// manifestReleaser adapts a possibly-nil *crypto.GlobalContentIndex to the
-// interface without producing a typed-nil (which would panic on call).
-func manifestReleaser(g *crypto.GlobalContentIndex) chunkManifestReleaser {
-	if g == nil {
-		return nil
-	}
-	return g
-}
-
-// atomicHeadUpsertReleasing is atomicHeadUpsert for writers that store a
-// NON-chunked row: when the displaced row was a chunked object, its manifest
-// is released in the same transaction. Without this, a plain PUT / copy /
-// multipart-complete overwriting a chunked object flips (or worse, fails to
-// flip) is_chunked while the old tenant_chunk_refs and their GCI refcounts
-// leak forever — and a row left is_chunked=TRUE over a plain blob makes GET
-// serve the OLD object's bytes from the stale manifest.
-func atomicHeadUpsertReleasing(ctx context.Context, db *sql.DB, gci chunkManifestReleaser,
-	tenantID, bucket, key string, upsert func(tx *sql.Tx) error) (displacedRow, error) {
 	// One transaction for every head-row writer (blob_flip.go): the upsert
-	// names its own address (NULL for a chunked row), and a displaced whole
-	// blob at another address is retired, unless a row still names it.
-	res, err := commitBlobWrite(ctx, db, gci, blobWrite{TenantID: tenantID, Bucket: bucket, Key: key, Upsert: upsert})
+	// names its own address, and the blob or manifest the displaced row
+	// named is kept by a version or retired (WP-R2-1, WP-VM-1).
+	res, err := commitBlobWrite(ctx, db, blobWrite{TenantID: tenantID, Bucket: bucket, Key: key, Upsert: upsert})
 	if err != nil {
 		return displacedRow{}, err
 	}
@@ -330,19 +302,18 @@ func atomicHeadUpsertReleasing(ctx context.Context, db *sql.DB, gci chunkManifes
 
 // deleteHeadRowReleasing removes an object's head-cache row (the billing
 // record, DELETE ... RETURNING so the bytes are released exactly once) and,
-// when the row was a chunked object, releases its manifest — tenant_chunk_refs,
-// GCI ref counts, object_metadata — in the SAME transaction. Split across two
-// (manifest first, head row second) a crash between them left a head row that
-// said is_chunked with no manifest behind it: HEAD 200, GET 500, still billed
-// (R8-08); the delete-marker branch never released the manifest at all
-// (R8-07/R2-16). Lock order matches atomicHeadUpsertReleasing: head row, then
-// manifest rows.
+// when the row was a chunked object, retires its manifest in the SAME
+// transaction (WP-VM-1; released by the collector after the grace). Split
+// across two (manifest first, head row second) a crash between them left a
+// head row that said is_chunked with no manifest behind it: HEAD 200, GET
+// 500, still billed (R8-08); the delete-marker branch never released the
+// manifest at all (R8-07/R2-16).
 //
 // Returns found=false (no error) when there was no row: S3 DELETE is
 // idempotent and there is nothing to release.
-func deleteHeadRowReleasing(ctx context.Context, db *sql.DB, gci chunkManifestReleaser, billed bool,
+func deleteHeadRowReleasing(ctx context.Context, db *sql.DB, billed bool,
 	tenantID, bucket, key string) (row displacedRow, found bool, err error) {
-	return deleteHeadRowWhere(ctx, db, gci, billed, tenantID, bucket, key, nil)
+	return deleteHeadRowWhere(ctx, db, billed, tenantID, bucket, key, nil)
 }
 
 // deleteHeadRowIfAt is deleteHeadRowReleasing for a DELETE that removed the
@@ -352,9 +323,9 @@ func deleteHeadRowReleasing(ctx context.Context, db *sql.DB, gci chunkManifestRe
 // untouched: superseded, and nothing deleted. The DELETE is then ordered
 // BEFORE the write (it answers 204; the write's object stays, its bytes
 // with it — they used to lose their row and leak until the erasure sweep).
-func deleteHeadRowIfAt(ctx context.Context, db *sql.DB, gci chunkManifestReleaser, billed bool,
+func deleteHeadRowIfAt(ctx context.Context, db *sql.DB, billed bool,
 	tenantID, bucket, key, storageKey string) (row displacedRow, found, superseded bool, err error) {
-	row, found, err = deleteHeadRowWhere(ctx, db, gci, billed, tenantID, bucket, key, &storageKey)
+	row, found, err = deleteHeadRowWhere(ctx, db, billed, tenantID, bucket, key, &storageKey)
 	if err != nil || found {
 		return row, found, false, err
 	}
@@ -380,14 +351,14 @@ const (
 // deleteHeadRowWhere deletes the key's head row — only at *storageKey when
 // it is set — and releases what it held (billed: the tenant has a quota
 // ledger), in one transaction.
-func deleteHeadRowWhere(ctx context.Context, db *sql.DB, gci chunkManifestReleaser, billed bool,
+func deleteHeadRowWhere(ctx context.Context, db *sql.DB, billed bool,
 	tenantID, bucket, key string, storageKey *string) (row displacedRow, found bool, err error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return displacedRow{}, false, fmt.Errorf("begin head-cache delete: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	row, found, err = deleteHeadRowTx(ctx, tx, gci, billed, tenantID, bucket, key, storageKey)
+	row, found, err = deleteHeadRowTx(ctx, tx, billed, tenantID, bucket, key, storageKey)
 	if err != nil || !found {
 		return displacedRow{}, false, err
 	}
@@ -402,7 +373,7 @@ func deleteHeadRowWhere(ctx context.Context, db *sql.DB, gci chunkManifestReleas
 // version keeps the blob (it then keeps the bill), the caller's own steps
 // (beforeRelease: a delete marker retires the blob there), and — billed —
 // the release of what the row held, last, before the caller's COMMIT.
-func deleteHeadRowTx(ctx context.Context, tx *sql.Tx, gci chunkManifestReleaser, billed bool,
+func deleteHeadRowTx(ctx context.Context, tx *sql.Tx, billed bool,
 	tenantID, bucket, key string, storageKey *string, beforeRelease ...func(row displacedRow) error) (row displacedRow, found bool, err error) {
 	var chunked bool
 	q, args := deleteHeadRowSQL, []any{tenantID, bucket, key}
@@ -417,19 +388,27 @@ func deleteHeadRowTx(ctx context.Context, tx *sql.Tx, gci chunkManifestReleaser,
 		return displacedRow{}, false, fmt.Errorf("delete head-cache row: %w", err)
 	}
 	row.Found, row.Chunked = true, chunked
-	if chunked && gci != nil {
-		if relErr := gci.DeleteObjectChunksTx(ctx, tx, tenantID, bucket, key); relErr != nil {
-			return displacedRow{}, false, fmt.Errorf("release chunk manifest: %w", relErr)
-		}
+	// A version that keeps the blob or the manifest (a delete marker's, or a
+	// Suspended bucket's plain DELETE over an Enabled-era version) keeps the
+	// bill. A chunked row's manifest no version keeps is retired here — kept
+	// for the grace, released by the collector (WP-VM-1): never released in
+	// this transaction, so a chunked GET in flight finishes.
+	addr := blobArtifact(key, row.StorageKey)
+	var kept bool
+	var kErr error
+	if chunked {
+		kept, kErr = versionKeepsManifest(ctx, tx, tenantID, bucket, key, addr)
+	} else {
+		kept, kErr = versionKeepsBlob(ctx, tx, tenantID, bucket, key, addr)
 	}
-	// A version that keeps the blob (a delete marker's, or a Suspended
-	// bucket's plain DELETE over an Enabled-era version) keeps the bill.
-	if !chunked {
-		kept, kErr := versionKeepsBlob(ctx, tx, tenantID, bucket, key, blobArtifact(key, row.StorageKey))
-		if kErr != nil {
-			return displacedRow{}, false, kErr
+	if kErr != nil {
+		return displacedRow{}, false, kErr
+	}
+	row.KeptByVersion = kept
+	if chunked && !kept {
+		if err := retireManifest(ctx, tx, tenantID, bucket, key, addr, retiredDeleted); err != nil {
+			return displacedRow{}, false, err
 		}
-		row.KeptByVersion = kept
 	}
 	for _, fn := range beforeRelease {
 		if err := fn(row); err != nil {

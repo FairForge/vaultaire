@@ -99,6 +99,9 @@ func (f *chunkAddrFixture) do(method string, tn *tenant.Tenant, key string, body
 		f.adapter.HandleGet(w, req, "test-bucket", key)
 	default:
 		f.adapter.HandleDelete(w, req, "test-bucket", key)
+		// The manifest is retired; the collector releases it after the
+		// grace (WP-VM-1): these tests start where it ends.
+		releaseRetiredManifests(f.t, f.db, f.eng, f.adapter.gci, tn.ID)
 	}
 	return w
 }

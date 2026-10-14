@@ -255,10 +255,11 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	var srcEnc string
 	var srcChunked bool
 	var srcBackend string
-	var srcFloor, srcStorageKey string
-	// versionAttrs: the attributes of a non-current source version — its
-	// content type alone (no per-version copy of the rest exists; a GET of
-	// it sends none either), never the current object's.
+	var srcFloor, srcStorageKey, srcETag string
+	var srcModified time.Time
+	// versionAttrs: the attributes of a non-current source version — what
+	// its own row recorded (R61-8, 092; a version written before 092 has its
+	// content type alone), never the current object's.
 	var versionAttrs *objectAttrs
 	if s.db != nil {
 		// The source's row is the one authority for where its bytes are
@@ -266,10 +267,11 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 		// is NoSuchKey — neither is read from the primary at a guess, which
 		// is what the ignored error did (Stage 1a Prompt 6 Part 0).
 		rowErr := s.db.QueryRowContext(r.Context(), `
-			SELECT size_bytes, COALESCE(encryption_algorithm, ''), is_chunked, COALESCE(backend_name, ''), floor, COALESCE(storage_key, '')
+			SELECT size_bytes, COALESCE(encryption_algorithm, ''), is_chunked, COALESCE(backend_name, ''), floor, COALESCE(storage_key, ''),
+			       etag, updated_at
 			FROM object_head_cache
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-			t.ID, srcBucket, srcKey).Scan(&srcSize, &srcEnc, &srcChunked, &srcBackend, &srcFloor, &srcStorageKey)
+			t.ID, srcBucket, srcKey).Scan(&srcSize, &srcEnc, &srcChunked, &srcBackend, &srcFloor, &srcStorageKey, &srcETag, &srcModified)
 		srcFound := rowErr == nil
 		if rowErr != nil && !errors.Is(rowErr, sql.ErrNoRows) {
 			s.logger.Error("copy: source row read failed", zap.Error(rowErr), zap.String("bucket", srcBucket), zap.String("key", srcKey))
@@ -284,8 +286,12 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 				return
 			case !v.current:
 				srcFound = true
-				srcSize, srcEnc, srcChunked, srcBackend, srcStorageKey = v.size, v.enc, false, v.backend, v.storageKey
-				versionAttrs = &objectAttrs{ContentType: v.contentType}
+				// A chunked version is copied through its own manifest
+				// (WP-VM-1); a whole one from its own blob.
+				srcSize, srcEnc, srcChunked, srcBackend, srcStorageKey = v.size, v.enc, v.backend == chunkedBackendSentinel, v.backend, v.storageKey
+				srcETag, srcModified = v.etag, v.createdAt
+				va := v.attrs
+				versionAttrs = &va
 				if v.floor != "" {
 					srcFloor = v.floor
 				}
@@ -293,6 +299,12 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 		}
 		if !srcFound {
 			WriteS3Error(w, ErrNoSuchKey, r.URL.Path, generateRequestID())
+			return
+		}
+		// x-amz-copy-source-if-* (R61-8): decided on the source the copy
+		// reads — its ETag and Last-Modified — before anything is written.
+		if code := evaluateCopySourceConditions(r, srcETag, srcModified); code != 0 {
+			WriteS3Error(w, ErrPreconditionFailed, r.URL.Path, generateRequestID())
 			return
 		}
 	}
@@ -361,7 +373,9 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 		if srcVersionID != "" {
 			w.Header().Set("x-amz-copy-source-version-id", srcVersionID)
 		}
-		s.handleChunkedCopy(w, r, t, srcBucket, srcKey, destBucket, destKey, srcSize, directive, requestAttrs)
+		src := chunkedCopySource{Bucket: srcBucket, Key: srcKey, Manifest: manifestAddress(srcKey, srcStorageKey),
+			Size: srcSize, ETag: srcETag, EncAlgo: srcEnc, VersionID: srcVersionID, Attrs: versionAttrs}
+		s.handleChunkedCopy(w, r, t, src, destBucket, destKey, directive, requestAttrs)
 		return
 	}
 	// An SSE-S3 whole source opens as it streams (WP-R8-5): its plaintext is
@@ -447,7 +461,7 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 		// on is asked first (503 before anything is reserved or written);
 		// each chunk decrypted and verified as it is read.
 		var cr *chunkedObjectReader
-		if cr, err = s.readAdapter().openChunkedObject(r.Context(), t.ID, srcBucket, srcKey, srcSize); err == nil {
+		if cr, err = s.readAdapter().openChunkedObject(r.Context(), t.ID, srcBucket, srcKey, srcStorageKey, srcSize); err == nil {
 			reader = cr
 		}
 	} else {
@@ -651,7 +665,7 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	var versionID string
 	if s.db != nil {
 		enc := sealer.encryption()
-		flip, dbErr := commitBlobWrite(pctx, s.db, manifestReleaser(s.gci), blobWrite{TenantID: t.ID, Bucket: destBucket, Key: destKey,
+		flip, dbErr := commitBlobWrite(pctx, s.db, blobWrite{TenantID: t.ID, Bucket: destBucket, Key: destKey,
 			Bill: bill,
 			Version: &versionWrite{Size: counter.n, ETag: etag, ContentType: attrs.ContentType, Backend: backendName,
 				Blob: versionBlobRef{StorageKey: destBlob, Enc: enc}},
@@ -766,9 +780,11 @@ func copySourceVersionID(source string) string {
 // copySource is the source of a copy that names a version: its own row's
 // bytes, or the current object (current = the head row describes it).
 type copySource struct {
-	current                                      bool
-	size                                         int64
-	enc, backend, storageKey, floor, contentType string
+	current                                            bool
+	size                                               int64
+	enc, backend, storageKey, floor, contentType, etag string
+	createdAt                                          time.Time
+	attrs                                              objectAttrs // what the version row recorded (R61-8)
 }
 
 // copySourceVersion resolves a copy source's ?versionId the way a GET
@@ -780,12 +796,19 @@ type copySource struct {
 func (s *Server) copySourceVersion(ctx context.Context, tenantID, bucket, key, versionID string) (copySource, string) {
 	var isMarker, isLatest bool
 	var v copySource
+	var meta []byte
 	err := s.db.QueryRowContext(ctx, `
 		SELECT is_delete_marker, is_latest, size_bytes, COALESCE(encryption_algorithm, ''), COALESCE(backend_name, ''),
-		       COALESCE(storage_key, ''), COALESCE(floor, ''), content_type
+		       COALESCE(storage_key, ''), COALESCE(floor, ''), content_type, etag, created_at, `+versionAttrColumns+`
 		FROM object_versions
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND version_id = $4`,
-		tenantID, bucket, key, versionID).Scan(&isMarker, &isLatest, &v.size, &v.enc, &v.backend, &v.storageKey, &v.floor, &v.contentType)
+		tenantID, bucket, key, versionID).Scan(&isMarker, &isLatest, &v.size, &v.enc, &v.backend, &v.storageKey, &v.floor, &v.contentType,
+		&v.etag, &v.createdAt, &meta, &v.attrs.ContentDisposition, &v.attrs.ContentEncoding, &v.attrs.ContentLanguage,
+		&v.attrs.CacheControl, &v.attrs.Expires, &v.attrs.WebsiteRedirect)
+	v.attrs.ContentType = v.contentType
+	if len(meta) > 0 {
+		_ = json.Unmarshal(meta, &v.attrs.Metadata)
+	}
 	switch {
 	case errors.Is(err, sql.ErrNoRows) && isUnanchoredNullVersion(ctx, s.db, tenantID, bucket, key, versionID):
 		return copySource{current: true}, ""
@@ -806,36 +829,38 @@ func (s *Server) copySourceVersion(ctx context.Context, tenantID, bucket, key, v
 	return copySource{}, ErrNotImplemented
 }
 
-// handleChunkedCopy copies a chunked object without moving any data: the
-// destination gets its own manifest rows referencing the same chunks, each
-// chunk's refcount is incremented, and the head-cache/metadata rows are
-// copied. Works for per-chunk encrypted (AES256-CE) sources too — same
-// tenant, same convergent keys. Everything commits in ONE transaction via
-// atomicHeadUpsert + ReplaceObjectManifestTx, so an overwritten chunked
-// destination releases its old manifest atomically (same contract as
-// handleChunkedPut after review-A). The destination's Object Lock was checked
-// by the caller before the source was looked at.
-func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
-	t *tenant.Tenant, srcBucket, srcKey, destBucket, destKey string,
-	srcSize int64, directive string, requestAttrs objectAttrs) {
+// chunkedCopySource is the source of a manifest copy: the current object
+// of its key or one of its versions (WP-VM-1), and the manifest it names.
+type chunkedCopySource struct {
+	Bucket, Key   string
+	Manifest      string // the manifest's address (the key for one written before 092)
+	Size          int64
+	ETag, EncAlgo string
+	VersionID     string
+	Attrs         *objectAttrs // a version's own attributes; nil = the head row's
+}
 
-	if srcBucket == destBucket && srcKey == destKey {
-		// AWS requires changed metadata/storage-class for a self-copy; we
-		// don't support in-place rewrites of chunked objects.
+// handleChunkedCopy copies a chunked object without moving any data:
+// the destination gets its own manifest — at its own address (WP-VM-1) —
+// referencing the same chunks, each chunk's refcount is incremented, and
+// the head-cache/metadata rows are copied. Works for per-chunk encrypted
+// (AES256-CE) sources too — same tenant, same convergent keys — and for a
+// chunked VERSION as the source (its own manifest). Everything commits in
+// ONE transaction (the flip): the manifest an overwritten destination named
+// is kept by a version or retired, as on every write. The destination's
+// Object Lock was checked by the caller before the source was looked at.
+func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
+	t *tenant.Tenant, src chunkedCopySource, destBucket, destKey string,
+	directive string, requestAttrs objectAttrs) {
+
+	if src.Bucket == destBucket && src.Key == destKey && src.VersionID == "" && directive != "REPLACE" {
+		// AWS refuses a copy of an object onto itself that changes nothing;
+		// copying a version onto its key (the restore) or with REPLACE is a
+		// new write of the key.
 		WriteS3Error(w, ErrInvalidRequest, r.URL.Path, generateRequestID())
 		return
 	}
-
-	// Chunked objects cannot live in versioned buckets (manifests have no
-	// version_id — review-A F3). CopyObject never sends one here since
-	// WP-R3-1 (a versioned destination is not chunkable: the source is
-	// re-stored whole); kept against a status change between the two reads.
-	destVersioning := getBucketVersioningStatus(r.Context(), s.db, t.ID, destBucket)
-	if destVersioning == "Enabled" || destVersioning == "Suspended" {
-		WriteS3ErrorWithContext(w, ErrNotImplemented, r.URL.Path, generateRequestID(),
-			WithSuggestion("Copying a large (chunked) object into a versioned bucket is not yet supported."))
-		return
-	}
+	srcSize := src.Size
 
 	// Reserve the destination's logical bytes (copy bypasses the PUT
 	// handler's reservation — WP-1 contract).
@@ -866,34 +891,29 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	// Source manifest + head row (ETag is the plaintext MD5 — identical
-	// content, identical ETag).
-	srcRefs, err := s.gci.GetObjectChunks(r.Context(), t.ID, srcBucket, srcKey)
+	// Source manifest, at the address its row names (ETag is the plaintext
+	// MD5 — identical content, identical ETag).
+	srcRefs, err := s.gci.GetObjectChunks(r.Context(), t.ID, src.Bucket, src.Manifest)
 	if err != nil || len(srcRefs) == 0 {
 		releaseReservation()
 		s.logger.Error("chunked copy: source manifest unavailable",
-			zap.Error(err), zap.String("bucket", srcBucket), zap.String("key", srcKey))
+			zap.Error(err), zap.String("bucket", src.Bucket), zap.String("key", src.Key), zap.String("manifest", src.Manifest))
 		WriteS3Error(w, ErrNoSuchKey, r.URL.Path, generateRequestID())
 		return
 	}
-	srcMeta, err := s.gci.GetObjectMetadata(r.Context(), t.ID, srcBucket, srcKey)
-	if err != nil {
+	srcMeta, err := s.gci.GetObjectMetadata(r.Context(), t.ID, src.Bucket, src.Manifest)
+	if err != nil || srcMeta == nil {
 		releaseReservation()
 		s.logger.Error("chunked copy: source metadata unavailable", zap.Error(err))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return
 	}
-
-	var srcETag, srcCT, srcEncAlgo, srcDisposition string
-	var srcUserMeta []byte
-	if dbErr := s.db.QueryRowContext(r.Context(), `
-		SELECT etag, content_type, COALESCE(encryption_algorithm, ''),
-		       COALESCE(content_disposition, ''), COALESCE(metadata, '{}')
-		FROM object_head_cache
-		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-		t.ID, srcBucket, srcKey).Scan(&srcETag, &srcCT, &srcEncAlgo, &srcDisposition, &srcUserMeta); dbErr != nil {
+	srcETag, srcEncAlgo := src.ETag, src.EncAlgo
+	addr, aErr := newBlobAddress(destKey)
+	if aErr != nil {
 		releaseReservation()
-		WriteS3Error(w, ErrNoSuchKey, r.URL.Path, generateRequestID())
+		s.logger.Error("chunked copy: no manifest address", zap.Error(aErr))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return
 	}
 
@@ -901,12 +921,18 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 	// resolves them (metadata directive, tagging directive), and written in
 	// full: the head row used to set only type, metadata and disposition, so
 	// an overwrite kept the displaced object's cache headers and tags.
-	contentType := resolveCopyContentType(directive, requestAttrs.ContentType, srcCT)
-	sourceAttrs, aErr := loadHeadAttrs(r.Context(), s.db, t.ID, srcBucket, srcKey)
-	if aErr != nil {
-		sourceAttrs = objectAttrs{ContentDisposition: srcDisposition}
-		_ = json.Unmarshal(srcUserMeta, &sourceAttrs.Metadata)
+	var sourceAttrs objectAttrs
+	if src.Attrs != nil {
+		sourceAttrs = *src.Attrs
+	} else {
+		var lErr error
+		if sourceAttrs, lErr = loadHeadAttrs(r.Context(), s.db, t.ID, src.Bucket, src.Key); lErr != nil {
+			releaseReservation()
+			WriteS3Error(w, ErrNoSuchKey, r.URL.Path, generateRequestID())
+			return
+		}
 	}
+	contentType := resolveCopyContentType(directive, requestAttrs.ContentType, sourceAttrs.ContentType)
 	destAttrs := resolveCopyAttrs(directive, requestAttrs, sourceAttrs)
 	destAttrs.Tags = resolveCopyTags(r.Header.Get("x-amz-tagging-directive"), requestAttrs, sourceAttrs)
 	destAttrs.ContentType = contentType
@@ -916,7 +942,7 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 	for i, ref := range srcRefs {
 		destRefs[i] = ref
 		destRefs[i].BucketName = destBucket
-		destRefs[i].ObjectKey = destKey
+		destRefs[i].ObjectKey = addr
 	}
 
 	physicalSize := int64(0) // a copy adds no new physical bytes
@@ -927,43 +953,46 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 	// The install is ONE transaction — a shutdown's cut rolls it back whole;
 	// once it has committed, the rest runs to the end.
 	// The bill is settled in the install's transaction (WP-R10-8).
-	_, dbErr := commitBlobWrite(r.Context(), s.db, nil, blobWrite{TenantID: t.ID, Bucket: destBucket, Key: destKey, Bill: bill, Upsert: func(tx *sql.Tx) error {
-		// Each destination ref is a new reference to its chunk. Incremented
-		// inside the same tx so a failed install leaves counts untouched.
-		for _, ref := range destRefs {
-			scope := ref.DedupScope
-			if scope == "" {
-				scope = crypto.GlobalDedupScope
+	// The version row of a versioned destination names the new manifest
+	// (the flip fills in the address and the sentinel for a chunked row).
+	_, dbErr := commitBlobWrite(r.Context(), s.db, blobWrite{TenantID: t.ID, Bucket: destBucket, Key: destKey, Bill: bill,
+		Version: &versionWrite{Size: srcMeta.LogicalSize, ETag: srcETag, ContentType: contentType}, Upsert: func(tx *sql.Tx) error {
+			// Each destination ref is a new reference to its chunk. Incremented
+			// inside the same tx so a failed install leaves counts untouched.
+			for _, ref := range destRefs {
+				scope := ref.DedupScope
+				if scope == "" {
+					scope = crypto.GlobalDedupScope
+				}
+				if _, incErr := tx.ExecContext(r.Context(),
+					`SELECT increment_chunk_ref($1, $2)`, scope, ref.PlaintextHash); incErr != nil {
+					return fmt.Errorf("increment chunk ref %s: %w", ref.PlaintextHash, incErr)
+				}
 			}
-			if _, incErr := tx.ExecContext(r.Context(),
-				`SELECT increment_chunk_ref($1, $2)`, scope, ref.PlaintextHash); incErr != nil {
-				return fmt.Errorf("increment chunk ref %s: %w", ref.PlaintextHash, incErr)
+			if repErr := s.gci.ReplaceObjectManifestTx(r.Context(), tx, t.ID, destBucket, addr, destRefs, &crypto.ObjectMeta{
+				TenantID:     t.ID,
+				BucketName:   destBucket,
+				ObjectKey:    addr,
+				TotalSize:    srcMeta.TotalSize,
+				ChunkCount:   srcMeta.ChunkCount,
+				ContentType:  &contentType,
+				LogicalSize:  srcMeta.LogicalSize,
+				PhysicalSize: &physicalSize,
+				DedupRatio:   &dedupRatio,
+				// The copy's chunks are the source's: cut by the chunker the
+				// source records (the product has only ever cut with the
+				// default one, so a source without a record gets that).
+				PipelineConfig: copiedPipeline(srcMeta),
+			}); repErr != nil {
+				return fmt.Errorf("install destination manifest: %w", repErr)
 			}
-		}
-		if repErr := s.gci.ReplaceObjectManifestTx(r.Context(), tx, t.ID, destBucket, destKey, destRefs, &crypto.ObjectMeta{
-			TenantID:     t.ID,
-			BucketName:   destBucket,
-			ObjectKey:    destKey,
-			TotalSize:    srcMeta.TotalSize,
-			ChunkCount:   srcMeta.ChunkCount,
-			ContentType:  &contentType,
-			LogicalSize:  srcMeta.LogicalSize,
-			PhysicalSize: &physicalSize,
-			DedupRatio:   &dedupRatio,
-			// The copy's chunks are the source's: cut by the chunker the
-			// source records (the product has only ever cut with the
-			// default one, so a source without a record gets that).
-			PipelineConfig: copiedPipeline(srcMeta),
-		}); repErr != nil {
-			return fmt.Errorf("install destination manifest: %w", repErr)
-		}
-		// The copy reports the source's ETag: no byte is read, and the
-		// chunk hashes are SHA-256, not MD5 (a -N stays -N; AWS would report
-		// a fresh single-part ETag — the whole copy does). The backend name
-		// is the chunked sentinel, as every chunked row's.
-		execErr := upsertChunkedObjectHeadRow(r.Context(), tx, t.ID, destBucket, destKey, srcMeta.LogicalSize, srcETag, srcEncAlgo, destAttrs)
-		return execErr
-	}})
+			// The copy reports the source's ETag: no byte is read, and the
+			// chunk hashes are SHA-256, not MD5 (a -N stays -N; AWS would report
+			// a fresh single-part ETag — the whole copy does). The backend name
+			// is the chunked sentinel, as every chunked row's.
+			execErr := upsertChunkedObjectHeadRow(r.Context(), tx, t.ID, destBucket, destKey, addr, srcMeta.LogicalSize, srcETag, srcEncAlgo, destAttrs)
+			return execErr
+		}})
 	if dbErr != nil {
 		releaseReservation()
 		if errors.Is(dbErr, errQuotaRace) {
