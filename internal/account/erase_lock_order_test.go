@@ -24,6 +24,8 @@ func TestEraseRows_LocksTheTotalBeforeTheFloors(t *testing.T) {
 	t.Cleanup(func() { _ = writer.Rollback() })
 	_, err = writer.ExecContext(ctx, `UPDATE tenant_quotas SET storage_used_bytes = storage_used_bytes + 1 WHERE tenant_id = $1`, f.tenantID)
 	require.NoError(t, err)
+	var pid int
+	require.NoError(t, writer.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&pid))
 
 	eraseErr := make(chan error, 1)
 	go func() {
@@ -33,7 +35,8 @@ func TestEraseRows_LocksTheTotalBeforeTheFloors(t *testing.T) {
 	waited := false
 	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline) && !waited; time.Sleep(5 * time.Millisecond) {
 		var n int
-		_ = f.db.QueryRow(`SELECT COUNT(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%tenant_quotas%'`).Scan(&n)
+		// Only this writer's waiter: packages run in parallel on one database.
+		_ = f.db.QueryRow(`SELECT COUNT(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))`, pid).Scan(&n)
 		waited = n > 0
 	}
 	require.True(t, waited, "the erase waits for the writer's total")

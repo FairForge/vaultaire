@@ -399,10 +399,11 @@ func deleteHeadRowWhere(ctx context.Context, db *sql.DB, gci chunkManifestReleas
 
 // deleteHeadRowTx is deleteHeadRowWhere inside the caller's transaction: the
 // row (only at *storageKey when set), a chunked object's manifest, whether a
-// version keeps the blob (it then keeps the bill), and — billed — the
-// release of what the row held, last, before the caller's COMMIT.
+// version keeps the blob (it then keeps the bill), the caller's own steps
+// (beforeRelease: a delete marker retires the blob there), and — billed —
+// the release of what the row held, last, before the caller's COMMIT.
 func deleteHeadRowTx(ctx context.Context, tx *sql.Tx, gci chunkManifestReleaser, billed bool,
-	tenantID, bucket, key string, storageKey *string) (row displacedRow, found bool, err error) {
+	tenantID, bucket, key string, storageKey *string, beforeRelease ...func(row displacedRow) error) (row displacedRow, found bool, err error) {
 	var chunked bool
 	q, args := deleteHeadRowSQL, []any{tenantID, bucket, key}
 	if storageKey != nil {
@@ -429,6 +430,11 @@ func deleteHeadRowTx(ctx context.Context, tx *sql.Tx, gci chunkManifestReleaser,
 			return displacedRow{}, false, kErr
 		}
 		row.KeptByVersion = kept
+	}
+	for _, fn := range beforeRelease {
+		if err := fn(row); err != nil {
+			return displacedRow{}, false, err
+		}
 	}
 	if billed {
 		if err := releasesTx(ctx, tx, tenantID, row.releases()); err != nil {

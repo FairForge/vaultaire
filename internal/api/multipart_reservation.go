@@ -44,15 +44,18 @@ var errPartOverQuota = errors.New("part over quota")
 
 // lockActiveUpload locks the upload row and returns what a part's
 // reservation needs: the floor its parts are held on and what part
-// partNumber holds now (0 when none).
+// partNumber holds now (0 when none). The part's size is read in a second
+// statement, after the lock: a subquery of the locking statement reads the
+// snapshot taken before it waited, so two attempts at one part number each
+// missed the part the other had just installed and the upload kept both
+// reservations (Stage 1a Prompt 7, Part 0).
 func lockActiveUpload(ctx context.Context, tx *sql.Tx, tenantID, uploadID string, partNumber int) (floor string, partBytes int64, err error) {
 	var status string
 	err = tx.QueryRowContext(ctx, `
-		SELECT status, `+uploadHoldingFloorSQL+`,
-		       COALESCE((SELECT size_bytes FROM multipart_parts WHERE upload_id = $1 AND part_number = $3), 0)
+		SELECT status, `+uploadHoldingFloorSQL+`
 		FROM multipart_uploads u
 		WHERE u.upload_id = $1 AND u.tenant_id = $2
-		FOR UPDATE`, uploadID, tenantID, partNumber).Scan(&status, &floor, &partBytes)
+		FOR UPDATE`, uploadID, tenantID).Scan(&status, &floor)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return "", 0, errUploadEnded
@@ -60,6 +63,11 @@ func lockActiveUpload(ctx context.Context, tx *sql.Tx, tenantID, uploadID string
 		return "", 0, fmt.Errorf("lock upload %s: %w", uploadID, err)
 	case status != "active":
 		return "", 0, errUploadEnded
+	}
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE((SELECT size_bytes FROM multipart_parts WHERE upload_id = $1 AND part_number = $2), 0)`,
+		uploadID, partNumber).Scan(&partBytes); err != nil {
+		return "", 0, fmt.Errorf("read part %d of upload %s: %w", partNumber, uploadID, err)
 	}
 	return floor, partBytes, nil
 }
@@ -87,16 +95,18 @@ func reserveUploadPart(ctx context.Context, db *sql.DB, tenantID, uploadID strin
 	if up <= 0 {
 		return 0, nil // the part number already holds as much
 	}
+	// The upload row first (already locked), the ledger last: a refusal
+	// rolls both back.
+	if _, err := tx.ExecContext(ctx, `UPDATE multipart_uploads SET reserved_bytes = reserved_bytes + $2 WHERE upload_id = $1`,
+		uploadID, up); err != nil {
+		return 0, fmt.Errorf("record the part reservation: %w", err)
+	}
 	res, err := usage.ReserveTx(ctx, tx, tenantID, floor, up)
 	if err != nil {
 		return 0, err
 	}
 	if !res.OK {
 		return 0, errPartOverQuota
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE multipart_uploads SET reserved_bytes = reserved_bytes + $2 WHERE upload_id = $1`,
-		uploadID, up); err != nil {
-		return 0, fmt.Errorf("record the part reservation: %w", err)
 	}
 	return up, tx.Commit()
 }
@@ -120,6 +130,10 @@ func settleUploadPart(ctx context.Context, db *sql.DB, tenantID, uploadID string
 	}
 	delta := measured - held - reserved
 	if delta > 0 {
+		// A part that measured more than it reserved (no declared length,
+		// R108-8): checked before the install, which may replace the part
+		// number's previous file — so this one path holds the quota row
+		// through the rename below.
 		res, err := usage.ReserveTx(ctx, tx, tenantID, floor, delta)
 		if err != nil {
 			return err
@@ -132,10 +146,6 @@ func settleUploadPart(ctx context.Context, db *sql.DB, tenantID, uploadID string
 				return fmt.Errorf("commit the part's release: %w", err)
 			}
 			return errPartOverQuota
-		}
-	} else if delta < 0 {
-		if err := usage.ApplyLedgerTx(ctx, tx, tenantID, usage.LedgerChange{Total: delta, Floors: map[string]int64{floor: delta}}); err != nil {
-			return err
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE multipart_uploads SET reserved_bytes = GREATEST(0, reserved_bytes + $2) WHERE upload_id = $1`,
@@ -153,6 +163,13 @@ func settleUploadPart(ctx context.Context, db *sql.DB, tenantID, uploadID string
 			size_bytes = EXCLUDED.size_bytes,
 			created_at = NOW()`, uploadID, partNumber, etag, measured); err != nil {
 		return fmt.Errorf("record part metadata: %w", err)
+	}
+	// What the part holds less than it reserved goes back last: the quota
+	// row is held from here to COMMIT only (ledger_tx.go).
+	if delta < 0 {
+		if err := usage.ApplyLedgerTx(ctx, tx, tenantID, usage.LedgerChange{Total: delta, Floors: map[string]int64{floor: delta}}); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }

@@ -29,24 +29,28 @@ import (
 )
 
 // writerHoldsTotal opens a transaction that takes the tenant's total row the
-// way every commit does (ApplyLedgerTx's first statement) and returns it.
-func writerHoldsTotal(t *testing.T, db *sql.DB, tenantID string) *sql.Tx {
+// way every commit does (ApplyLedgerTx's first statement) and returns it,
+// with its backend's pid.
+func writerHoldsTotal(t *testing.T, db *sql.DB, tenantID string) (*sql.Tx, int) {
 	t.Helper()
 	tx, err := db.Begin()
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = tx.Rollback() })
 	_, err = tx.Exec(`UPDATE tenant_quotas SET storage_used_bytes = storage_used_bytes + 1 WHERE tenant_id = $1`, tenantID)
 	require.NoError(t, err)
-	return tx
+	var pid int
+	require.NoError(t, tx.QueryRow(`SELECT pg_backend_pid()`).Scan(&pid))
+	return tx, pid
 }
 
-// waitingOnALock reports, within d, whether some backend waits on a lock
-// while running a statement containing marker.
-func waitingOnALock(db *sql.DB, marker string, d time.Duration) bool {
+// blockedBy reports, within d, whether some backend waits on a lock held by
+// pid (packages run in parallel on one database: only this test's writer
+// counts).
+func blockedBy(db *sql.DB, pid int, d time.Duration) bool {
 	deadline := time.Now().Add(d)
 	for time.Now().Before(deadline) {
 		var n int
-		_ = db.QueryRow(`SELECT COUNT(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%' || $1 || '%'`, marker).Scan(&n)
+		_ = db.QueryRow(`SELECT COUNT(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))`, pid).Scan(&n)
 		if n > 0 {
 			return true
 		}
@@ -66,11 +70,10 @@ func TestLedger_LockOrder_ClearHouseTakesTheTotalBeforeTheFloors(t *testing.T) {
 	tenantID := newTestTenant(t, db, m, "lock-clear", "free", FreeTierLimits.StorageBytes)
 	require.NoError(t, m.SetHouse(ctx, tenantID, House{StdBytes: TB}))
 
-	writer := writerHoldsTotal(t, db, tenantID)
+	writer, pid := writerHoldsTotal(t, db, tenantID)
 	clearErr := make(chan error, 1)
 	go func() { clearErr <- m.ClearHouse(ctx, tenantID) }()
-	require.True(t, waitingOnALock(db, "tenant_quotas", 3*time.Second) || waitingOnALock(db, "tenant_floor_quotas", time.Second),
-		"ClearHouse waits for the writer")
+	require.True(t, blockedBy(db, pid, 5*time.Second), "ClearHouse waits for the writer")
 
 	_, wErr := writer.Exec(`UPDATE tenant_floor_quotas SET storage_used_bytes = storage_used_bytes + 1 WHERE tenant_id = $1 AND floor = 'standard'`, tenantID)
 	if wErr == nil {
@@ -97,7 +100,7 @@ func TestLedger_LockOrder_AFloorOnlyChangeTakesTheTotalFirst(t *testing.T) {
 	tenantID := newTestTenant(t, db, m, "lock-flooronly", "free", FreeTierLimits.StorageBytes)
 	require.NoError(t, m.SetHouse(ctx, tenantID, House{StdBytes: TB, VaultBytes: TB}))
 
-	holder := writerHoldsTotal(t, db, tenantID)
+	holder, _ := writerHoldsTotal(t, db, tenantID)
 	done := make(chan error, 1)
 	go func() {
 		tx, err := db.BeginTx(ctx, nil)
