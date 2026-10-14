@@ -406,6 +406,12 @@ func keySuggestion(ctx context.Context, db *sql.DB, tenantID, bucket, key string
 		return ""
 	}
 
+	// The key's own row exists: the miss is not a typo — no suggestion.
+	var exists bool
+	if err := db.QueryRowContext(ctx, headRowExistsSQL, tenantID, bucket, key).Scan(&exists); err != nil || exists {
+		return ""
+	}
+
 	// Use the key's directory prefix to narrow the search.
 	prefix := ""
 	if idx := strings.LastIndex(key, "/"); idx >= 0 {
@@ -435,7 +441,7 @@ func keySuggestion(ctx context.Context, db *sql.DB, tenantID, bucket, key string
 
 	for rows.Next() {
 		var k string
-		if err := rows.Scan(&k); err != nil || k == key {
+		if err := rows.Scan(&k); err != nil {
 			continue
 		}
 		d := levenshtein(key, k)

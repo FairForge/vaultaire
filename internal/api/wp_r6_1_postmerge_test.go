@@ -56,7 +56,7 @@ func TestKeySuggestion_NeverProposesTheKeyAsked(t *testing.T) {
 
 	assert.Empty(t, keySuggestion(context.Background(), f.db, f.tenantID, "test-bucket", "k.bin"),
 		"the key exists: nothing to suggest, least of all itself")
-	assert.Equal(t, "Did you mean 'k.bin'?", keySuggestion(context.Background(), f.db, f.tenantID, "test-bucket", "k.bix"),
+	assert.Equal(t, "Did you mean 'k.bin'?", keySuggestion(context.Background(), f.db, f.tenantID, "test-bucket", "k.binn"),
 		"a near miss still gets its suggestion")
 
 	require.NoError(t, os.Remove(f.blobPath(t, f.primary, "k.bin"))) // the backend lost it
