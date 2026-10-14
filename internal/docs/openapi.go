@@ -818,9 +818,9 @@ func generateUserPaths() map[string]*PathItem {
 		},
 		"/api/v1/user/quota/history": {
 			Get: jsonOp("User", "Get 30 days of usage history", "GetUserQuotaHistory",
-				"One row per day of `quota_usage_events` in the last 30 days, newest first. Plain JSON array (may be `null` when there were no events).",
+				"One row per UTC day with traffic in the last 30 days, newest first: bytes uploaded and downloaded and requests served (the metered daily counters). Plain JSON array, empty when there was none. Before 2026-10-14 this summed a ledger table whose rows carried no operation it counted: `uploaded`/`deleted` were always 0 and `peak_usage` was the largest single reservation.",
 				map[string]Response{
-					"200": jsonResp("Daily usage", nullable(arrayOf(ref("UsageHistoryEntry")))),
+					"200": jsonResp("Daily usage", arrayOf(ref("UsageHistoryEntry"))),
 					"401": textResp("`unauthorized`, Bearer token missing/invalid, or no tenant in the token"),
 					"500": textResp("`failed to get history`"),
 				}),
@@ -1800,12 +1800,12 @@ func generateJSONSchemas() map[string]Schema {
 			"current":   number("Current usage percentage"),
 			"timestamp": dateTime(""),
 		}, "level", "message", "threshold", "current", "timestamp"),
-		"UsageHistoryEntry": object("One day of quota_usage_events", map[string]*Schema{
-			"date":       str("Day (YYYY-MM-DD)"),
-			"peak_usage": integer("Largest single byte delta that day"),
-			"uploaded":   integer("Bytes added by PUTs"),
-			"deleted":    integer("Bytes removed by DELETEs"),
-		}, "date", "peak_usage", "uploaded", "deleted"),
+		"UsageHistoryEntry": object("One UTC day of the tenant's traffic", map[string]*Schema{
+			"date":       str("Day (YYYY-MM-DD, UTC)"),
+			"uploaded":   integer("Bytes received (uploads)"),
+			"downloaded": integer("Bytes sent (downloads, egress)"),
+			"requests":   integer("Requests served"),
+		}, "date", "uploaded", "downloaded", "requests"),
 		"UserAPIKey": object("An API key row as the auth service serialises it (secret blanked)", map[string]*Schema{
 			"id":           str("Key id"),
 			"user_id":      str(""),

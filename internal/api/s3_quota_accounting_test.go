@@ -200,7 +200,10 @@ func TestQuotaAccounting_PutDeleteBaseline(t *testing.T) {
 		"DELETE must release the object's reserved bytes back to the tenant")
 }
 
-// --- Spec test 3: multipart complete over quota → 403, no usage recorded. ---
+// --- Spec test 3: multipart over quota → 403, no usage recorded. Since
+// WP-R10-8 Part C the part that would pass the quota is refused at
+// UploadPart (nothing staged); it used to be staged free and refused only
+// at Complete.
 func TestQuotaAccounting_MultipartCompleteOverQuota(t *testing.T) {
 	f := setupQuotaAccountingFixture(t, 4<<10) // 4 KiB limit
 
@@ -215,7 +218,7 @@ func TestQuotaAccounting_MultipartCompleteOverQuota(t *testing.T) {
 	uploadID := initRes.UploadID
 	require.NotEmpty(t, uploadID)
 
-	// Upload one 8 KiB part (over the 4 KiB limit once assembled)
+	// One 8 KiB part: over the 4 KiB limit by itself.
 	part := testBytes(8 << 10)
 	pReq := httptest.NewRequest("PUT",
 		fmt.Sprintf("/test-bucket/mp-over.bin?uploadId=%s&partNumber=1", uploadID),
@@ -224,18 +227,10 @@ func TestQuotaAccounting_MultipartCompleteOverQuota(t *testing.T) {
 	pReq = pReq.WithContext(f.ctx(pReq.Context()))
 	pw := httptest.NewRecorder()
 	f.server.handleUploadPart(pw, pReq, "test-bucket", "mp-over.bin")
-	require.Equal(t, 200, pw.Code)
 
-	// Complete must be rejected with 403 QuotaExceeded (not 500)
-	cReq := httptest.NewRequest("POST",
-		fmt.Sprintf("/test-bucket/mp-over.bin?uploadId=%s", uploadID), nil)
-	cReq = cReq.WithContext(f.ctx(cReq.Context()))
-	cw := httptest.NewRecorder()
-	f.server.handleCompleteMultipartUpload(cw, cReq, "test-bucket", "mp-over.bin")
-
-	assert.Equal(t, 403, cw.Code, "multipart complete over quota must return 403")
-	assert.Contains(t, cw.Body.String(), "QuotaExceeded")
-	assert.Equal(t, int64(0), f.used(t), "rejected multipart complete must not consume quota")
+	assert.Equal(t, 403, pw.Code, "the part over quota must return 403")
+	assert.Contains(t, pw.Body.String(), "QuotaExceeded")
+	assert.Equal(t, int64(0), f.used(t), "a refused part must not consume quota")
 }
 
 // Multipart complete within quota reserves the assembled size exactly once,

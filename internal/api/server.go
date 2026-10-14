@@ -126,6 +126,10 @@ type Server struct {
 	// in-flight part bytes (0 = unlimited). Part data lives unbilled on local
 	// disk until complete — without a cap one upload can fill the disk.
 	multipartMaxUploadBytes int64
+	// multipartStagingMinFree is how much of the staging filesystem an
+	// UploadPart must leave free (MULTIPART_STAGING_MIN_FREE, WP-R10-8 Part
+	// C; nil = no guard — a Server built by hand in a test).
+	multipartStagingMinFree stagingMinFree
 
 	// chunkPutConcurrency, when > 0, overrides the adapter's default
 	// parallel chunk-store worker count (env CHUNK_PUT_CONCURRENCY).
@@ -447,6 +451,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 			logger.Warn("invalid MULTIPART_MAX_UPLOAD_BYTES, keeping default", zap.String("value", v))
 		}
 	}
+	s.multipartStagingMinFree = stagingMinFreeFromEnv(os.Getenv, logger)
 	// Parallel chunk-store workers per chunked PUT. 0 keeps the adapter
 	// default; 1 is the sequential-store escape hatch.
 	if v := os.Getenv("CHUNK_PUT_CONCURRENCY"); v != "" {

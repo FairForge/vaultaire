@@ -142,9 +142,10 @@ func TestCheckAndReserveFloor_EnforcesEachFloor(t *testing.T) {
 	used, _, _ := m.GetUsage(ctx, tenantID)
 	assert.Equal(t, int64(1200*GB), used, "total used == sum of the floors")
 
+	// No event row per reservation (WP-R10-8 Part D, R10-25: it was 2).
 	var events int
-	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM quota_usage_events WHERE tenant_id = $1 AND operation = 'RESERVE'`, tenantID).Scan(&events))
-	assert.Equal(t, 2, events)
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM quota_usage_events WHERE tenant_id = $1`, tenantID).Scan(&events))
+	assert.Zero(t, events)
 }
 
 func TestCheckAndReserveFloor_HouseWithoutAtticRefusesVault(t *testing.T) {

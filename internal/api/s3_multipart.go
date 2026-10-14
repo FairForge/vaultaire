@@ -163,15 +163,20 @@ func (s *Server) handleInitiateMultipartUpload(w http.ResponseWriter, r *http.Re
 
 	// Persist upload record
 	if s.db != nil {
+		// The floor its parts are reserved on: the class Complete's
+		// placement resolves from the same header and the bucket's tier
+		// (WP-R10-8 Part C). A tier changed before Complete moves the bill
+		// at Complete (the settle releases here, charges there).
+		reservedFloor := usage.FloorOf(resolvePutStorageClass(r.Context(), s.db, s.engine, syncPlacementGate(s.flags), t.ID, bucket, storageClass))
 		_, err := s.db.ExecContext(r.Context(), `
 			INSERT INTO multipart_uploads
 				(upload_id, tenant_id, bucket, object_key, status, content_type, metadata, storage_class,
 				 content_disposition, content_encoding, content_language, cache_control, http_expires,
-				 website_redirect_location, sse_requested)
-			VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+				 website_redirect_location, sse_requested, reserved_floor)
+			VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		`, uploadID, t.ID, bucket, object, attrs.ContentType, attrs.metadataJSON(), storageClass,
 			attrs.ContentDisposition, attrs.ContentEncoding, attrs.ContentLanguage,
-			attrs.CacheControl, attrs.Expires, attrs.WebsiteRedirect, sseRequested)
+			attrs.CacheControl, attrs.Expires, attrs.WebsiteRedirect, sseRequested, reservedFloor)
 		if err != nil {
 			s.logger.Error("failed to create multipart upload record", zap.Error(err))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
@@ -300,6 +305,13 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 	// and against the MEASURED size after the write (declared sizes are
 	// client-controlled). Sum excludes this part number — re-uploading an
 	// existing part replaces its bytes, it does not add.
+	declared := r.ContentLength
+	if isAWSChunked(r) {
+		declared = -1
+		if v, perr := strconv.ParseInt(r.Header.Get("x-amz-decoded-content-length"), 10, 64); perr == nil {
+			declared = v
+		}
+	}
 	var existingBytes int64
 	if s.db != nil && s.multipartMaxUploadBytes > 0 {
 		if err := s.db.QueryRowContext(r.Context(), `
@@ -310,12 +322,6 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 			return
 		}
-		declared := r.ContentLength
-		if isAWSChunked(r) {
-			if v, perr := strconv.ParseInt(r.Header.Get("x-amz-decoded-content-length"), 10, 64); perr == nil {
-				declared = v
-			}
-		}
 		if declared > 0 && existingBytes+declared > s.multipartMaxUploadBytes {
 			WriteS3ErrorWithContext(w, ErrEntityTooLarge, r.URL.Path, generateRequestID(),
 				WithSuggestion(fmt.Sprintf(
@@ -324,6 +330,50 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 			return
 		}
 	}
+
+	// The staging filesystem is shared by every tenant: a part that would
+	// leave it below its floor is refused before a byte is staged or
+	// reserved (WP-R10-8 Part C, the minimal guard of WP-R3-5).
+	if s.stagingWouldOverfill(declared) {
+		w.Header().Set("Retry-After", "60")
+		WriteS3ErrorWithContext(w, ErrSlowDown, r.URL.Path, generateRequestID(),
+			WithMessage("Please reduce your request rate: the server's upload staging space is nearly full."),
+			WithSuggestion("Retry the part in a minute."))
+		return
+	}
+
+	// The part's bytes are reserved on the upload's floor before the first
+	// is staged (WP-R10-8 Part C, R10-24 / R3-14): a part past the tenant's
+	// quota is refused here, nothing staged. A re-upload of a part number
+	// reserves the difference; whatever stops the part before its install
+	// gives the reservation back.
+	partBilled := s.db != nil && s.quotaManager != nil
+	var reserved int64
+	if partBilled {
+		reserved, err = reserveUploadPart(r.Context(), s.db, t.ID, uploadID, partNumber, max(declared, 0))
+		switch {
+		case errors.Is(err, errUploadEnded):
+			WriteS3Error(w, ErrNoSuchUpload, r.URL.Path, generateRequestID())
+			return
+		case errors.Is(err, errPartOverQuota):
+			WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
+				WithSuggestion("Parts in progress count against your storage. Upgrade at "+billingURL()+", or abort uploads you no longer need."))
+			return
+		case err != nil:
+			s.logger.Error("upload part: reservation failed", zap.Error(err))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+	}
+	installed := false
+	defer func() {
+		if partBilled && !installed {
+			if relErr := releaseUploadPart(context.WithoutCancel(r.Context()), s.db, t.ID, uploadID, partNumber, reserved); relErr != nil {
+				s.logger.Error("upload part: reservation not given back — the reconcile and the upload's end release it",
+					zap.Error(relErr), zap.String("upload_id", uploadID), zap.Int64("bytes", reserved))
+			}
+		}
+	}()
 
 	// Stream part data to temp file while computing MD5 ETag.
 	// Decode aws-chunked framing first — aws-cli v2 over HTTPS sends parts
@@ -394,18 +444,51 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 		return
 	}
 
-	pp := partFilePath(uploadID, partNumber)
-	if err := os.Rename(tmp, pp); err != nil {
+	etag := fmt.Sprintf("\"%x\"", hasher.Sum(nil))
+	// The install runs inside settleUploadPart's transaction: the id is
+	// checked where the path is built (the staging path's belt, as
+	// everywhere a path is built from an upload id — CodeQL go/path-injection).
+	install := func() error {
+		if !validUploadID(uploadID) {
+			return fmt.Errorf("install part file: invalid upload id")
+		}
+		if err := os.Rename(tmp, partFilePath(uploadID, partNumber)); err != nil {
+			return fmt.Errorf("install part file: %w", err)
+		}
+		return nil
+	}
+
+	// Record part metadata
+	if partBilled {
+		// The install, the part row and the reservation settled to the
+		// measured size: one transaction under the upload row's lock.
+		sErr := settleUploadPart(r.Context(), s.db, t.ID, uploadID, partNumber, reserved, size, etag, install)
+		switch {
+		case sErr == nil:
+			installed = true
+		case errors.Is(sErr, errUploadEnded):
+			installed = true // ended meanwhile: its end released this part's reservation
+			_ = os.Remove(tmp)
+			WriteS3Error(w, ErrNoSuchUpload, r.URL.Path, generateRequestID())
+			return
+		case errors.Is(sErr, errPartOverQuota):
+			installed = true // settleUploadPart gave the reservation back
+			_ = os.Remove(tmp)
+			WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
+				WithSuggestion("Parts in progress count against your storage. Upgrade at "+billingURL()+"."))
+			return
+		default:
+			_ = os.Remove(tmp)
+			s.logger.Error("failed to record part", zap.Error(sErr))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+	} else if err := install(); err != nil {
 		_ = os.Remove(tmp)
 		s.logger.Error("failed to install part file", zap.Error(err))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return
-	}
-
-	etag := fmt.Sprintf("\"%x\"", hasher.Sum(nil))
-
-	// Record part metadata
-	if s.db != nil {
+	} else if s.db != nil {
 		_, err := s.db.ExecContext(r.Context(), `
 			INSERT INTO multipart_parts (upload_id, part_number, etag, size_bytes)
 			VALUES ($1, $2, $3, $4)
@@ -723,30 +806,15 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 	// assembled size here before streaming to the backend. If the object
 	// overwrites an existing key, the overwritten bytes are captured
 	// atomically by the head-cache upsert and released after success.
-	quotaOn := s.quotaManager != nil
+	// The parts are already reserved, on the upload row (WP-R10-8 Part C):
+	// Complete reserves nothing more. Its commit turns what the upload
+	// holds into the object's bill — the parts it lists become the object,
+	// the parts it does not are released — and releases what it overwrote,
+	// in one transaction. A Complete that fails leaves the upload active and
+	// holding its parts, for the client's retry, Abort or the reaper.
 	var bill *writeBill
-	if quotaOn {
-		res, qErr := reserveQuota(r.Context(), s.quotaManager, t.ID, floor, totalSize)
-		if qErr != nil {
-			s.logger.Error("multipart complete: quota check failed",
-				zap.Error(qErr), zap.String("tenant_id", t.ID))
-			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-			return
-		}
-		if !res.OK {
-			WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
-				WithSuggestion("Upgrade at "+billingURL()))
-			return
-		}
-		// Settled in the commit's transaction (WP-R10-8).
-		bill = &writeBill{Floor: floor, Reserved: totalSize, FloorReserved: res.Floor}
-	}
-	releaseReservation := func() {
-		if bill != nil {
-			ctx, cancel := quotaCtx(r)
-			s.releaseQuota(ctx, t.ID, floor, bill.Reserved)
-			cancel()
-		}
+	if s.quotaManager != nil {
+		bill = &writeBill{Floor: floor, Held: uploadHeld(uploadID)}
 	}
 
 	// The address a WHOLE assembled object goes to (WP-R2-1), recorded on
@@ -760,7 +828,6 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 	var blob string
 	if placement.Kind != placeChunked {
 		if blob, err = s.completeBlobAddress(r.Context(), t.ID, uploadID, object); err != nil {
-			releaseReservation()
 			s.logger.Error("complete multipart: no blob address", zap.Error(err), zap.String("upload_id", uploadID))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 			return
@@ -821,7 +888,6 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 			Bill:          bill,
 		})
 		if cErr != nil {
-			releaseReservation()
 			s.writeCompleteStoreError(w, r, cErr, bucket, object, uploadID, tierClass)
 			return
 		}
@@ -837,7 +903,6 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 			// plaintext's, as a sealed PUT records them.
 			var sErr error
 			if sealer, sErr = newSSEWriteSealer(r.Context(), s.sseService, t.ID, body, totalSize); sErr != nil {
-				releaseReservation()
 				s.writeCompleteStoreError(w, r, sErr, bucket, object, uploadID, tierClass)
 				return
 			}
@@ -864,7 +929,6 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 			retireOrphanWrite(putCtx, s.db, s.logger, t.ID, bucket, blob, backendName)
 		}
 		if uploadErr != nil {
-			releaseReservation()
 			s.writeCompleteStoreError(w, r, uploadErr, bucket, object, uploadID, tierClass)
 			return
 		}
@@ -895,7 +959,6 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 					return markCompleted(pctx, tx)
 				}})
 			if dbErr != nil {
-				releaseReservation()
 				// The assembled blob is an orphan while no row names it. Queued
 				// for the collector, which keeps it while the upload is active
 				// (its retry commits this same address) and removes it once the
@@ -958,8 +1021,8 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 }
 
 // writeCompleteStoreError answers a Complete whose bytes could not be stored
-// (whole or chunked): nothing was committed and the reservation is already
-// released.
+// (whole or chunked): nothing was committed and the upload keeps holding its
+// parts (WP-R10-8 Part C) for the retry, Abort or the reaper.
 func (s *Server) writeCompleteStoreError(w http.ResponseWriter, r *http.Request, err error, bucket, object, uploadID, tierClass string) {
 	switch {
 	case errors.Is(err, errRegionDriverUnavailable):
@@ -1015,16 +1078,15 @@ func (s *Server) handleAbortMultipartUpload(w http.ResponseWriter, r *http.Reque
 	}
 
 	if s.db != nil {
-		result, err := s.db.ExecContext(r.Context(), `
-			UPDATE multipart_uploads SET status = 'aborted'
-			WHERE upload_id = $1 AND tenant_id = $2 AND bucket = $3 AND object_key = $4 AND status = 'active'
-		`, uploadID, t.ID, bucket, object)
+		// The abort and the release of what the upload holds: one
+		// transaction (WP-R10-8 Part C).
+		ended, err := endUploadReleasing(r.Context(), s.db, uploadID, t.ID, bucket, object)
 		if err != nil {
 			s.logger.Error("failed to abort multipart upload", zap.Error(err))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 			return
 		}
-		if rows, _ := result.RowsAffected(); rows == 0 {
+		if !ended {
 			WriteS3Error(w, ErrNoSuchUpload, r.URL.Path, generateRequestID())
 			return
 		}

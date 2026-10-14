@@ -86,6 +86,8 @@ func (s *Server) initMetrics() {
 		// Generated objects (export, access log, inventory) refused rather
 		// than stored plaintext in an sse_enabled bucket (WP-R8-1 A1).
 		reg.MustRegister(generatedObjectRefused)
+		// Multipart staging free-space guard (WP-R10-8 Part C).
+		reg.MustRegister(multipartStagingRefusals, multipartStagingFree)
 		// The retired_blobs collector (WP-R2-1 Part C): its outcomes, and
 		// the backlog of due rows read from the table.
 		reg.MustRegister(retiredBlobsTotal, newRetiredBlobsBacklogCollector(s.db, s.log()))
