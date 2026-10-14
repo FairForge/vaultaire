@@ -50,20 +50,21 @@ func (r *trickle) Read(p []byte) (int, error) {
 
 func TestMultiWebDAV_ASlowClientNeverRunsOutThePutDeadlineOrChargesTheBridge(t *testing.T) {
 	// Arrange: a 9 MiB body (above the in-memory retry buffer: streamed
-	// once) arriving in 3 MiB pieces 750 ms apart (2.25 s of waiting for
-	// the client) against a PUT deadline of 1 s. Before: the deadline ran
-	// out while the driver waited for the client, the PUT failed
-	// (ErrNoFailover, a timeout) and the bridge was charged — three such
-	// uploads opened its breaker.
+	// once) arriving in 3 MiB pieces 1.5 s apart (4.5 s of waiting for the
+	// client) against a PUT deadline of 2 s. Before: the deadline ran out
+	// while the driver waited for the client, the PUT failed (ErrNoFailover,
+	// a timeout) and the bridge was charged — three such uploads opened its
+	// breaker.
 	//
 	// The deadline still runs while the transport and the bridge move the
 	// bytes. That time is ~15 ms on a laptop and reached 150 ms (this
 	// test's old deadline) on a loaded 2-vCPU CI runner under -race (4
-	// queue runs, 2026-10-13/14), so the deadline is 1 s and the client's
-	// waiting stays more than twice it. The three uploads run at once on
-	// three keys of the same bridge (the test lasts one upload).
+	// queue runs, 2026-10-13/14), and more than 1 s in a 2-CPU container
+	// with 16 CPU burners; so the deadline is 2 s and the client's waiting
+	// stays more than twice it. The three uploads run at once on three keys
+	// of the same bridge (the test lasts one upload).
 	bs := newBridges(t, 2, true, nil)
-	m := newMulti(t, bs, func(c *WebDAVConfig) { c.StripeMin = -1 }, WithWebDAVPutTimeout(time.Second))
+	m := newMulti(t, bs, func(c *WebDAVConfig) { c.StripeMin = -1 }, WithWebDAVPutTimeout(2*time.Second))
 	ctx := davCtx("tenant-a")
 	const size = 9 << 20
 	keys := make([]string, 3)
@@ -76,7 +77,7 @@ func TestMultiWebDAV_ASlowClientNeverRunsOutThePutDeadlineOrChargesTheBridge(t *
 	var wg sync.WaitGroup
 	for i, k := range keys {
 		wg.Go(func() {
-			errs[i] = m.Put(ctx, "c", k, &trickle{left: size, chunk: 3 << 20, gap: 750 * time.Millisecond}, engine.WithContentLength(size))
+			errs[i] = m.Put(ctx, "c", k, &trickle{left: size, chunk: 3 << 20, gap: 1500 * time.Millisecond}, engine.WithContentLength(size))
 		})
 	}
 	wg.Wait()
