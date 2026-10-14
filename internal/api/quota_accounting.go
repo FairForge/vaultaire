@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/crypto"
+	"github.com/FairForge/vaultaire/internal/usage"
 	"go.uber.org/zap"
 )
 
@@ -44,21 +45,25 @@ import (
 
 // floorQuotaManager is the per-floor slice of usage.QuotaManager.
 type floorQuotaManager interface {
-	CheckAndReserveFloor(ctx context.Context, tenantID, floor string, bytes int64) (bool, error)
+	ReserveOnFloor(ctx context.Context, tenantID, floor string, bytes int64) (usage.Reservation, error)
 	ReleaseFloor(ctx context.Context, tenantID, floor string, bytes int64) error
 }
 
 // reserveQuota reserves n bytes for tenantID on floor, per floor when the
-// manager supports it.
-func reserveQuota(ctx context.Context, qm QuotaManager, tenantID, floor string, n int64) (bool, error) {
+// manager supports it (Floor then says whether the tenant's floor row was
+// charged too).
+func reserveQuota(ctx context.Context, qm QuotaManager, tenantID, floor string, n int64) (usage.Reservation, error) {
 	if fq, ok := qm.(floorQuotaManager); ok {
-		return fq.CheckAndReserveFloor(ctx, tenantID, floor, n)
+		return fq.ReserveOnFloor(ctx, tenantID, floor, n)
 	}
-	return qm.CheckAndReserve(ctx, tenantID, n)
+	ok, err := qm.CheckAndReserve(ctx, tenantID, n)
+	return usage.Reservation{OK: ok}, err
 }
 
 // releaseQuotaOn releases n bytes for tenantID on floor (negative n
-// force-accounts), per floor when the manager supports it.
+// force-accounts), per floor when the manager supports it. Only for a
+// reservation whose write committed nothing: what a commit changes is
+// settled inside it (writeBill, releasesTx).
 func releaseQuotaOn(ctx context.Context, qm QuotaManager, tenantID, floor string, n int64) error {
 	if fq, ok := qm.(floorQuotaManager); ok {
 		return fq.ReleaseFloor(ctx, tenantID, floor, n)
@@ -66,8 +71,9 @@ func releaseQuotaOn(ctx context.Context, qm QuotaManager, tenantID, floor string
 	return qm.ReleaseQuota(ctx, tenantID, n)
 }
 
-// quotaCtx returns a short-lived context detached from the request so quota
-// bookkeeping still completes when the client has already disconnected.
+// quotaCtx returns a short-lived context detached from the request so the
+// release of a failed write's reservation still completes when the client
+// has already disconnected.
 func quotaCtx(r *http.Request) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 }
@@ -105,7 +111,9 @@ type quotaRelease struct {
 
 // releases is what removing this row frees: the row's own bytes unless a
 // version keeps its blob (the charge carries over to that version), plus a
-// retained version the same write replaced.
+// retained version the same write replaced. The one rule of what a commit
+// releases: the flip's settle, every delete's, and the net reservation's
+// prediction (predictRelease) all read it.
 func (d displacedRow) releases() []quotaRelease {
 	var out []quotaRelease
 	if d.Size > 0 && !d.KeptByVersion {
@@ -117,57 +125,145 @@ func (d displacedRow) releases() []quotaRelease {
 	return out
 }
 
-// releaseDisplacedOn releases what removing d frees (displacedRow.releases);
-// the first error is returned, every release is attempted.
-func releaseDisplacedOn(ctx context.Context, qm QuotaManager, tenantID string, d displacedRow) error {
-	if qm == nil || tenantID == "" {
-		return nil
+// releasesTx releases what removing d frees, inside the transaction that
+// removed it (WP-R10-8 Part A: it used to run after COMMIT on a detached 5 s
+// context — a crash or a lock wait left the bytes billed until reconcile,
+// R10-17, R10-43).
+func releasesTx(ctx context.Context, tx *sql.Tx, tenantID string, rels []quotaRelease) error {
+	c := usage.LedgerChange{Floors: map[string]int64{}}
+	for _, r := range rels {
+		c.Total -= r.Bytes
+		c.Floors[r.Floor] -= r.Bytes
 	}
-	var first error
-	for _, r := range d.releases() {
-		if err := releaseQuotaOn(ctx, qm, tenantID, r.Floor, r.Bytes); err != nil && first == nil {
-			first = err
-		}
-	}
-	return first
+	return usage.ApplyLedgerTx(ctx, tx, tenantID, c)
 }
 
-// settlePutQuota reconciles a successful write's up-front reservation
-// (reserved; 0 when the size was unknown at reservation time) against the
-// logical size actually recorded in object_head_cache (actual) on the
-// write's floor, then releases any object the write overwrote on ITS floor
-// (which may differ: a bucket's tier can change between two writes).
-func (s *Server) settlePutQuota(ctx context.Context, tenantID, floor string, reserved, actual int64, old displacedRow) {
-	qm := s.quotaManager
-	if qm == nil || tenantID == "" {
-		return
-	}
-	switch {
-	case actual < reserved:
-		if err := releaseQuotaOn(ctx, qm, tenantID, floor, reserved-actual); err != nil {
-			s.logger.Error("quota settle: release over-reservation failed",
-				zap.Error(err), zap.String("tenant_id", tenantID))
+// writeBill is a write's bill, settled in its flip's transaction
+// (commitBlobWrite) before COMMIT: the reservation made before the write
+// becomes the logical size the head row records, on the floor it records,
+// and what the displaced row frees is released (WP-R10-8 Part A).
+type writeBill struct {
+	// Floor and Reserved: what the reservation charged before the write
+	// (0 = nothing: an unknown size, a write that shrinks the key).
+	Floor    string
+	Reserved int64
+	// FloorReserved: the reservation reached the tenant's floor row too (it
+	// had one); otherwise the floor row — one SetHouse created meanwhile,
+	// seeded without this write — is charged the whole size at commit.
+	FloorReserved bool
+	// Credited: bytes on Floor the reservation took credit for, predicted
+	// to be released by this commit (net reservation, R10-20). When the
+	// commit releases less (a concurrent write changed the row) and the
+	// ledger ends past its limit, the write is refused: errQuotaRace.
+	Credited int64
+	// Held, when set, reads (and clears) inside the transaction what the
+	// write's upload holds — its floor and bytes (CompleteMultipartUpload,
+	// Part C) — in place of Floor/Reserved.
+	Held func(ctx context.Context, tx *sql.Tx) (floor string, bytes int64, err error)
+}
+
+// errQuotaRace: a net reservation's commit released less than it was
+// credited and the ledger would end past the limit — nothing is committed.
+var errQuotaRace = fmt.Errorf("%w: the overwritten object changed under a net reservation", usage.ErrOverQuota)
+
+// settleTx settles the bill for a head row of size actual on floor
+// newFloor that displaced d.
+func (b *writeBill) settleTx(ctx context.Context, tx *sql.Tx, tenantID string, actual int64, newFloor string, d displacedRow) error {
+	floor, reserved, floorReserved := b.Floor, b.Reserved, b.FloorReserved
+	if b.Held != nil {
+		var err error
+		if floor, reserved, err = b.Held(ctx, tx); err != nil {
+			return err
 		}
-	case actual > reserved:
-		ok, err := reserveQuota(ctx, qm, tenantID, floor, actual-reserved)
-		if err != nil {
-			s.logger.Error("quota settle: reserve shortfall failed",
-				zap.Error(err), zap.String("tenant_id", tenantID))
-		} else if !ok {
-			// The bytes are already durably stored; account them anyway so
-			// billing reflects reality — the tenant simply sits over limit
-			// until they delete or upgrade. A negative delta adds
-			// unconditionally.
-			if err := releaseQuotaOn(ctx, qm, tenantID, floor, -(actual - reserved)); err != nil {
-				s.logger.Error("quota settle: force-account shortfall failed",
-					zap.Error(err), zap.String("tenant_id", tenantID))
-			}
+		// An upload's holding is in its floor row: charged there part by
+		// part, or seeded into a row created since (SetHouse counts active
+		// uploads, as the reconcile does).
+		floorReserved = true
+	}
+	c := usage.LedgerChange{Total: actual - reserved, Floors: map[string]int64{newFloor: actual}}
+	if floorReserved && reserved != 0 {
+		c.Floors[floor] -= reserved
+	}
+	var releasedOnFloor int64
+	for _, r := range d.releases() {
+		c.Total -= r.Bytes
+		c.Floors[r.Floor] -= r.Bytes
+		if r.Floor == floor {
+			releasedOnFloor += r.Bytes
 		}
 	}
-	if err := releaseDisplacedOn(ctx, qm, tenantID, old); err != nil {
-		s.logger.Error("quota settle: release overwritten object failed",
-			zap.Error(err), zap.String("tenant_id", tenantID))
+	if b.Credited > releasedOnFloor {
+		c.Guard = newFloor
 	}
+	if err := usage.ApplyLedgerTx(ctx, tx, tenantID, c); err != nil {
+		if errors.Is(err, usage.ErrOverQuota) {
+			return fmt.Errorf("%w: %w", errQuotaRace, err)
+		}
+		return err
+	}
+	return nil
+}
+
+// reserveWrite reserves a write of size bytes to tenantID's bucket/key on
+// floor, net of what its commit will release on that floor (WP-R10-8 Part
+// B, R10-20: at 100 % of a floor an overwrite with a SMALLER object was
+// refused — backup tools rewrite manifests in place at the quota edge). The
+// full size is tried first; only a refusal asks what the commit would
+// release (predictRelease — the commit's own rule, dry-run) and reserves
+// the difference: nothing when the write shrinks the key. The returned bill
+// carries the credit; the commit's settle is the correction, and refuses
+// the write only when a concurrent change made the credit wrong and the
+// ledger would end past its limit. ok=false: refused (nothing reserved).
+func (s *Server) reserveWrite(ctx context.Context, tenantID, bucket, key, floor string, size int64) (*writeBill, bool, error) {
+	if size <= 0 {
+		return &writeBill{Floor: floor}, true, nil // nothing to reserve (an empty object is never refused)
+	}
+	res, err := reserveQuota(ctx, s.quotaManager, tenantID, floor, size)
+	if err != nil || res.OK {
+		return &writeBill{Floor: floor, Reserved: size, FloorReserved: res.Floor}, res.OK, err
+	}
+	if s.db == nil {
+		return nil, false, nil
+	}
+	credit, err := predictRelease(ctx, s.db, tenantID, bucket, key, floor)
+	if err != nil || credit <= 0 {
+		return nil, false, err
+	}
+	charge := size - credit
+	if charge <= 0 {
+		return &writeBill{Floor: floor, Credited: credit}, true, nil
+	}
+	if res, err = reserveQuota(ctx, s.quotaManager, tenantID, floor, charge); err != nil || !res.OK {
+		return nil, false, err
+	}
+	return &writeBill{Floor: floor, Reserved: charge, FloorReserved: res.Floor, Credited: credit}, true, nil
+}
+
+// predictRelease is what a whole-object write of tenantID's bucket/key on
+// floor would release on that floor: the flip itself (commitBlobWrite) run
+// as a dry run — every statement, rolled back — so the reservation and the
+// commit decide what is released by ONE rule (displacedRow.releases), never
+// two. Only at the quota edge: a reservation that fits never asks.
+func predictRelease(ctx context.Context, db *sql.DB, tenantID, bucket, key, floor string) (int64, error) {
+	addr, err := newBlobAddress(key)
+	if err != nil {
+		return 0, err
+	}
+	res, err := commitBlobWrite(ctx, db, nil, blobWrite{TenantID: tenantID, Bucket: bucket, Key: key, DryRun: true,
+		Version: &versionWrite{Blob: versionBlobRef{StorageKey: addr}},
+		Upsert: func(tx *sql.Tx) error {
+			return upsertWholeObjectHeadRow(ctx, tx, tenantID, bucket, key, addr, 0, "", "", floor, objectAttrs{})
+		}})
+	if err != nil {
+		return 0, fmt.Errorf("predict the release of %s/%s: %w", bucket, key, err)
+	}
+	var n int64
+	for _, r := range res.Displaced.releases() {
+		if r.Floor == floor {
+			n += r.Bytes
+		}
+	}
+	return n, nil
 }
 
 // releaseQuota releases n reserved bytes on floor, logging (never failing
@@ -244,9 +340,9 @@ func atomicHeadUpsertReleasing(ctx context.Context, db *sql.DB, gci chunkManifes
 //
 // Returns found=false (no error) when there was no row: S3 DELETE is
 // idempotent and there is nothing to release.
-func deleteHeadRowReleasing(ctx context.Context, db *sql.DB, gci chunkManifestReleaser,
+func deleteHeadRowReleasing(ctx context.Context, db *sql.DB, gci chunkManifestReleaser, billed bool,
 	tenantID, bucket, key string) (row displacedRow, found bool, err error) {
-	return deleteHeadRowWhere(ctx, db, gci, tenantID, bucket, key, nil)
+	return deleteHeadRowWhere(ctx, db, gci, billed, tenantID, bucket, key, nil)
 }
 
 // deleteHeadRowIfAt is deleteHeadRowReleasing for a DELETE that removed the
@@ -256,9 +352,9 @@ func deleteHeadRowReleasing(ctx context.Context, db *sql.DB, gci chunkManifestRe
 // untouched: superseded, and nothing deleted. The DELETE is then ordered
 // BEFORE the write (it answers 204; the write's object stays, its bytes
 // with it — they used to lose their row and leak until the erasure sweep).
-func deleteHeadRowIfAt(ctx context.Context, db *sql.DB, gci chunkManifestReleaser,
+func deleteHeadRowIfAt(ctx context.Context, db *sql.DB, gci chunkManifestReleaser, billed bool,
 	tenantID, bucket, key, storageKey string) (row displacedRow, found, superseded bool, err error) {
-	row, found, err = deleteHeadRowWhere(ctx, db, gci, tenantID, bucket, key, &storageKey)
+	row, found, err = deleteHeadRowWhere(ctx, db, gci, billed, tenantID, bucket, key, &storageKey)
 	if err != nil || found {
 		return row, found, false, err
 	}
@@ -282,15 +378,16 @@ const (
 )
 
 // deleteHeadRowWhere deletes the key's head row — only at *storageKey when
-// it is set — and releases what it held, in one transaction.
-func deleteHeadRowWhere(ctx context.Context, db *sql.DB, gci chunkManifestReleaser,
+// it is set — and releases what it held (billed: the tenant has a quota
+// ledger), in one transaction.
+func deleteHeadRowWhere(ctx context.Context, db *sql.DB, gci chunkManifestReleaser, billed bool,
 	tenantID, bucket, key string, storageKey *string) (row displacedRow, found bool, err error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return displacedRow{}, false, fmt.Errorf("begin head-cache delete: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	row, found, err = deleteHeadRowTx(ctx, tx, gci, tenantID, bucket, key, storageKey)
+	row, found, err = deleteHeadRowTx(ctx, tx, gci, billed, tenantID, bucket, key, storageKey)
 	if err != nil || !found {
 		return displacedRow{}, false, err
 	}
@@ -301,9 +398,10 @@ func deleteHeadRowWhere(ctx context.Context, db *sql.DB, gci chunkManifestReleas
 }
 
 // deleteHeadRowTx is deleteHeadRowWhere inside the caller's transaction: the
-// row (only at *storageKey when set), a chunked object's manifest, and
-// whether a version keeps the blob (it then keeps the bill).
-func deleteHeadRowTx(ctx context.Context, tx *sql.Tx, gci chunkManifestReleaser,
+// row (only at *storageKey when set), a chunked object's manifest, whether a
+// version keeps the blob (it then keeps the bill), and — billed — the
+// release of what the row held, last, before the caller's COMMIT.
+func deleteHeadRowTx(ctx context.Context, tx *sql.Tx, gci chunkManifestReleaser, billed bool,
 	tenantID, bucket, key string, storageKey *string) (row displacedRow, found bool, err error) {
 	var chunked bool
 	q, args := deleteHeadRowSQL, []any{tenantID, bucket, key}
@@ -331,6 +429,11 @@ func deleteHeadRowTx(ctx context.Context, tx *sql.Tx, gci chunkManifestReleaser,
 			return displacedRow{}, false, kErr
 		}
 		row.KeptByVersion = kept
+	}
+	if billed {
+		if err := releasesTx(ctx, tx, tenantID, row.releases()); err != nil {
+			return displacedRow{}, false, err
+		}
 	}
 	return row, true, nil
 }

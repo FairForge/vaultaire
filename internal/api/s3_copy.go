@@ -485,10 +485,13 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	// are released.
 	floor := usage.FloorOf(destClass)
 	quotaOn := s.quotaManager != nil
-	var reservedBytes int64
+	var bill *writeBill
 	if quotaOn {
 		if srcSize > 0 {
-			ok, qErr := reserveQuota(r.Context(), s.quotaManager, t.ID, floor, srcSize)
+			// Net of what the commit releases at the quota edge (Part B):
+			// restoring a version by copying it onto its own key at 100 %
+			// of the floor is a shrink or a wash, never a refusal.
+			b, ok, qErr := s.reserveWrite(r.Context(), t.ID, destBucket, destKey, floor, srcSize)
 			if qErr != nil {
 				s.logger.Error("copy: quota check failed",
 					zap.Error(qErr), zap.String("tenant_id", t.ID))
@@ -500,8 +503,9 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 					WithSuggestion("Upgrade at "+billingURL()))
 				return
 			}
-			reservedBytes = srcSize
+			bill = b
 		} else {
+			bill = &writeBill{Floor: floor} // settled to the counted bytes at commit
 			// Unknown source size (drifted or missing head-cache row): the
 			// bytes are accounted after the stream, but refuse outright when
 			// the tenant is already at their limit.
@@ -514,9 +518,9 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 		}
 	}
 	releaseReservation := func() {
-		if quotaOn && reservedBytes > 0 {
+		if bill != nil && bill.Reserved > 0 {
 			ctx, cancel := quotaCtx(r)
-			s.releaseQuota(ctx, t.ID, floor, reservedBytes)
+			s.releaseQuota(ctx, t.ID, floor, bill.Reserved)
 			cancel()
 		}
 	}
@@ -644,11 +648,11 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	// attribute column is written (R3-05). A failed head write is a 500,
 	// never a 200 with no row (R3-10): the destination is untouched and the
 	// new blob is queued as an orphan.
-	var displaced displacedRow
 	var versionID string
 	if s.db != nil {
 		enc := sealer.encryption()
 		flip, dbErr := commitBlobWrite(pctx, s.db, manifestReleaser(s.gci), blobWrite{TenantID: t.ID, Bucket: destBucket, Key: destKey,
+			Bill: bill,
 			Version: &versionWrite{Size: counter.n, ETag: etag, ContentType: attrs.ContentType, Backend: backendName,
 				Blob: versionBlobRef{StorageKey: destBlob, Enc: enc}},
 			Upsert: func(tx *sql.Tx) error {
@@ -657,6 +661,11 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 		if dbErr != nil {
 			releaseReservation()
 			retireOrphanWrite(pctx, s.db, s.logger, t.ID, destBucket, destBlob, backendName)
+			if errors.Is(dbErr, errQuotaRace) {
+				WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
+					WithSuggestion("Upgrade at "+billingURL()))
+				return
+			}
 			s.logger.Error("copy: head row write failed — failing the request",
 				zap.Error(dbErr),
 				zap.String("tenant_id", t.ID),
@@ -665,11 +674,7 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 			return
 		}
-		displaced, versionID = flip.Displaced, flip.VersionID
-	}
-
-	if quotaOn {
-		s.settlePutQuota(pctx, t.ID, floor, reservedBytes, counter.n, displaced)
+		versionID = flip.VersionID
 	}
 
 	// The bucket's default retention.
@@ -837,9 +842,9 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 	// Chunk blobs always live on the engine's primary backend, so a chunked
 	// copy is billed downstairs whatever the destination bucket's tier.
 	quotaOn := s.quotaManager != nil
-	var reservedBytes int64
-	if quotaOn && srcSize > 0 {
-		ok, qErr := reserveQuota(r.Context(), s.quotaManager, t.ID, chunkedObjectFloor, srcSize)
+	var bill *writeBill
+	if quotaOn {
+		b, ok, qErr := s.reserveWrite(r.Context(), t.ID, destBucket, destKey, chunkedObjectFloor, srcSize)
 		if qErr != nil {
 			s.logger.Error("chunked copy: quota check failed",
 				zap.Error(qErr), zap.String("tenant_id", t.ID))
@@ -851,12 +856,12 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 				WithSuggestion("Upgrade at "+billingURL()))
 			return
 		}
-		reservedBytes = srcSize
+		bill = b
 	}
 	releaseReservation := func() {
-		if quotaOn && reservedBytes > 0 {
+		if bill != nil && bill.Reserved > 0 {
 			ctx, cancel := quotaCtx(r)
-			s.releaseQuota(ctx, t.ID, chunkedObjectFloor, reservedBytes)
+			s.releaseQuota(ctx, t.ID, chunkedObjectFloor, bill.Reserved)
 			cancel()
 		}
 	}
@@ -921,7 +926,8 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 	longOpBegin(r)
 	// The install is ONE transaction — a shutdown's cut rolls it back whole;
 	// once it has committed, the rest runs to the end.
-	displaced, dbErr := atomicHeadUpsert(r.Context(), s.db, t.ID, destBucket, destKey, func(tx *sql.Tx) error {
+	// The bill is settled in the install's transaction (WP-R10-8).
+	_, dbErr := commitBlobWrite(r.Context(), s.db, nil, blobWrite{TenantID: t.ID, Bucket: destBucket, Key: destKey, Bill: bill, Upsert: func(tx *sql.Tx) error {
 		// Each destination ref is a new reference to its chunk. Incremented
 		// inside the same tx so a failed install leaves counts untouched.
 		for _, ref := range destRefs {
@@ -957,9 +963,14 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 		// is the chunked sentinel, as every chunked row's.
 		execErr := upsertChunkedObjectHeadRow(r.Context(), tx, t.ID, destBucket, destKey, srcMeta.LogicalSize, srcETag, srcEncAlgo, destAttrs)
 		return execErr
-	})
+	}})
 	if dbErr != nil {
 		releaseReservation()
+		if errors.Is(dbErr, errQuotaRace) {
+			WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
+				WithSuggestion("Upgrade at "+billingURL()))
+			return
+		}
 		s.logger.Error("chunked copy: install failed",
 			zap.Error(dbErr),
 			zap.String("dest_bucket", destBucket), zap.String("dest_key", destKey))
@@ -977,10 +988,6 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 	// A whole blob the destination held before (a plain object, at <key> or
 	// at its address) was retired inside the install's transaction (the
 	// flip, WP-R2-1): the collector removes it after its grace.
-
-	if quotaOn {
-		s.settlePutQuota(pctx, t.ID, chunkedObjectFloor, reservedBytes, srcMeta.LogicalSize, displaced)
-	}
 
 	now := time.Now().UTC()
 	result := CopyObjectResult{

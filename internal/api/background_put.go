@@ -227,12 +227,17 @@ func (g *generatedObjectWriter) writeOpts(ctx context.Context, tenantID, bucket,
 	class := resolvePutStorageClass(tctx, g.db, g.eng, g.allowSync, tenantID, bucket, "")
 	floor := usage.FloorOf(class)
 	overQuota := false
+	var bill *writeBill
 	if g.quota != nil {
-		ok, qErr := reserveQuota(tctx, g.quota, tenantID, floor, size)
+		res, qErr := reserveQuota(tctx, g.quota, tenantID, floor, size)
 		if qErr != nil {
 			return deliveredObject{}, fmt.Errorf("reserve quota: %w", qErr)
 		}
-		if !ok {
+		// Settled in the flip's transaction (WP-R10-8). Over quota, the size
+		// was force-accounted on the total (the floor's row too when the
+		// tenant has one — ReleaseFloor adds to both).
+		bill = &writeBill{Floor: floor, Reserved: size, FloorReserved: res.Floor}
+		if !res.OK {
 			if !o.AllowOverQuota {
 				return deliveredObject{}, errTargetQuotaExceeded
 			}
@@ -241,6 +246,7 @@ func (g *generatedObjectWriter) writeOpts(ctx context.Context, tenantID, bucket,
 			if err := releaseQuotaOn(tctx, g.quota, tenantID, floor, -size); err != nil {
 				return deliveredObject{}, fmt.Errorf("account over-quota write: %w", err)
 			}
+			bill.FloorReserved = true
 			overQuota = true
 			g.logger.Warn("generated object: written past the tenant's quota on an explicit allowance",
 				zap.String("tenant_id", tenantID), zap.String("bucket", bucket), zap.String("key", key), zap.Int64("bytes", size))
@@ -272,7 +278,8 @@ func (g *generatedObjectWriter) writeOpts(ctx context.Context, tenantID, bucket,
 	}
 
 	attrs := objectAttrs{ContentType: contentType}
-	flip, dbErr := commitBlobWrite(tctx, g.db, manifestReleaser(g.gci), blobWrite{TenantID: tenantID, Bucket: bucket, Key: key,
+	_, dbErr := commitBlobWrite(tctx, g.db, manifestReleaser(g.gci), blobWrite{TenantID: tenantID, Bucket: bucket, Key: key,
+		Bill: bill,
 		Version: &versionWrite{Size: size, ETag: etag, ContentType: contentType, Backend: backendName,
 			Blob: versionBlobRef{StorageKey: blob, Enc: enc}},
 		Upsert: func(tx *sql.Tx) error {
@@ -286,13 +293,6 @@ func (g *generatedObjectWriter) writeOpts(ctx context.Context, tenantID, bucket,
 		retireOrphanWrite(tctx, g.db, g.logger, tenantID, bucket, blob, backendName)
 		return deliveredObject{}, fmt.Errorf("head row for %s/%s: %w", bucket, key, dbErr)
 	}
-	displaced := flip.Displaced
-	if g.quota != nil {
-		if err := releaseDisplacedOn(context.WithoutCancel(tctx), g.quota, tenantID, displaced); err != nil {
-			g.logger.Error("generated object: release overwritten object failed", zap.Error(err), zap.String("tenant_id", tenantID))
-		}
-	}
-
 	return deliveredObject{Size: size, ETag: etag, Backend: backendName, OverQuota: overQuota}, nil
 }
 

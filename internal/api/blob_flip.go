@@ -40,6 +40,14 @@ type blobWrite struct {
 	// Version, when set, is the version row of the written bytes, written
 	// in the same transaction when the bucket is versioned.
 	Version *versionWrite
+	// Bill, when set, is settled in the same transaction, last, before
+	// COMMIT (WP-R10-8 Part A): the reservation becomes the size the head
+	// row records and the displaced bytes are released — no quota statement
+	// runs after the commit. nil = an unbilled write (no quota manager).
+	Bill *writeBill
+	// DryRun runs every statement and rolls back: what the commit WOULD
+	// displace and release, by the commit's own rule (predictRelease).
+	DryRun bool
 }
 
 // versionWrite is what the version row of a write records.
@@ -68,9 +76,13 @@ type flipResult struct {
 // write).
 var headFlipHook = func(tenantID, bucket, key string) error { return nil }
 
-// commitBlobWrite is the flip (see the file comment). Lock order: the head
-// row's advisory lock, then the version lock — every path that takes both
-// takes them in this order (deleteVersion too).
+// commitBlobWrite is the flip (see the file comment). Lock order, the same
+// on every path that takes more than one (WP-R10-8; usage/ledger_tx.go):
+// the key's advisory lock → the head row → the key's version lock and rows
+// → the upload row (a Complete's markCompleted / Held) → tenant_quotas →
+// tenant_floor_quotas. The ledger is the last statement before COMMIT, so
+// the tenant's quota row is held from its UPDATE to COMMIT only, and
+// nothing holding it waits for a key, row or upload lock.
 func commitBlobWrite(ctx context.Context, db *sql.DB, gci chunkManifestReleaser, w blobWrite) (flipResult, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -129,13 +141,16 @@ func commitBlobWrite(ctx context.Context, db *sql.DB, gci chunkManifestReleaser,
 	if err := w.Upsert(tx); err != nil {
 		return flipResult{}, fmt.Errorf("upsert head-cache row: %w", err)
 	}
-	if err := headFlipHook(w.TenantID, w.Bucket, w.Key); err != nil {
-		return flipResult{}, err
+	if !w.DryRun {
+		if err := headFlipHook(w.TenantID, w.Bucket, w.Key); err != nil {
+			return flipResult{}, err
+		}
 	}
 	var newChunked bool
 	var newSK, newFloor string
-	if err := tx.QueryRowContext(ctx, `SELECT is_chunked, COALESCE(storage_key, ''), floor FROM object_head_cache
-		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`, w.TenantID, w.Bucket, w.Key).Scan(&newChunked, &newSK, &newFloor); err != nil {
+	var newSize int64
+	if err := tx.QueryRowContext(ctx, `SELECT is_chunked, COALESCE(storage_key, ''), floor, size_bytes FROM object_head_cache
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`, w.TenantID, w.Bucket, w.Key).Scan(&newChunked, &newSK, &newFloor, &newSize); err != nil {
 		return flipResult{}, fmt.Errorf("read the written head row: %w", err)
 	}
 	dAddr, nAddr := "", ""
@@ -192,6 +207,16 @@ func commitBlobWrite(ctx context.Context, db *sql.DB, gci chunkManifestReleaser,
 		displaced.KeptByVersion = kept
 		if err := retireBlob(ctx, tx, w.TenantID, w.Bucket, w.Key, dAddr, displaced.Backend, retiredOverwritten); err != nil &&
 			!errors.Is(err, errUnaddressableBlob) {
+			return flipResult{}, err
+		}
+	}
+	if w.DryRun {
+		res.Displaced = displaced
+		return res, nil // rolled back by the deferred Rollback
+	}
+	// The bill, last: the tenant's quota rows are locked from here to COMMIT.
+	if w.Bill != nil {
+		if err := w.Bill.settleTx(ctx, tx, w.TenantID, newSize, newFloor, displaced); err != nil {
 			return flipResult{}, err
 		}
 	}

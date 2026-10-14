@@ -7,6 +7,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -155,6 +156,32 @@ func TestNetReservation_FloorChange_IsAFullReservationOnTheNewFloor(t *testing.T
 	f.ledgerAgrees(t, "after the refusal")
 	_, vault := f.floors(t)
 	assert.Equal(t, int64(10*kib), vault, "the attic object is untouched")
+}
+
+func TestPredictRelease_IsTheCommitsRule(t *testing.T) {
+	// The prediction and the commit agree on every shape: plain, versioned
+	// Enabled (kept: 0), Suspended null rewrite.
+	f := setupQuotaAccountingFixture(t, 1<<30)
+	ctx := context.Background()
+	require.Equal(t, http.StatusOK, f.put(t, "k", testBytes(3000)))
+	n, err := predictRelease(ctx, f.db, f.tenantID, "test-bucket", "k", "standard")
+	require.NoError(t, err)
+	assert.Equal(t, int64(3000), n)
+	n, err = predictRelease(ctx, f.db, f.tenantID, "test-bucket", "new", "standard")
+	require.NoError(t, err)
+	assert.Zero(t, n)
+	n, err = predictRelease(ctx, f.db, f.tenantID, "test-bucket", "k", "vault")
+	require.NoError(t, err)
+	assert.Zero(t, n, "another floor: no credit there")
+
+	f.versioning(t, "Enabled")
+	n, err = predictRelease(ctx, f.db, f.tenantID, "test-bucket", "k", "standard")
+	require.NoError(t, err)
+	assert.Zero(t, n, "Enabled keeps the bytes as the null version")
+	assert.Equal(t, 1, f.headRows(t, "k"), "the dry run left the row")
+	var versions int
+	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM object_versions WHERE tenant_id = $1`, f.tenantID).Scan(&versions))
+	assert.Zero(t, versions, "and wrote nothing")
 }
 
 func (f *quotaAccountingFixture) headSize(t *testing.T, key string) int64 {

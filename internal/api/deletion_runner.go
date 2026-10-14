@@ -647,8 +647,8 @@ func (r *AccountDeletionRunner) deleteObject(ctx context.Context, t *tenant.Tena
 			return err
 		}
 	}
-	row, found, err := deleteHeadRowReleasing(ctx, r.db, manifestReleaser(r.gci), t.ID, bucket, key)
-	if err != nil {
+	// The row and its bytes' release in one transaction (WP-R10-8).
+	if _, _, err := deleteHeadRowReleasing(ctx, r.db, manifestReleaser(r.gci), r.quota != nil, t.ID, bucket, key); err != nil {
 		return fmt.Errorf("head row: %w", err)
 	}
 	if chunked {
@@ -657,13 +657,6 @@ func (r *AccountDeletionRunner) deleteObject(ctx context.Context, t *tenant.Tena
 	} else {
 		te.ObjectsDeleted++
 		accountDeletionObjects.WithLabelValues("deleted").Inc()
-	}
-	if found && r.quota != nil {
-		qctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		if err := releaseDisplacedOn(qctx, r.quota, t.ID, row); err != nil {
-			r.logger.Error("account deletion: quota release", zap.String("tenant_id", t.ID), zap.Error(err))
-		}
 	}
 	return nil
 }
