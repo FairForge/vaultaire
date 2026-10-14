@@ -630,6 +630,42 @@ func TestVerifySigV4_AcceptEncodingRewrittenByProxy(t *testing.T) {
 	require.ErrorIs(t, verify(t, r, testSecret), ErrSignatureMismatch)
 }
 
+// rclone's multi-stream download (every object of 256 MiB or more with the
+// default --multi-thread-cutoff) opens the source with `Accept-Encoding: gzip`
+// signed — aws-sdk-go-v2 with its gzip middleware enabled — and Cloudflare
+// rewrites that value too. Found 2026-10-13 from the Hostbrr and Maxko test
+// beds AND from a Mac: every multi-stream rclone download through stored.ge
+// was 403 (origin: signature_mismatch in 0.2 ms), the same request straight
+// at the origin passed. The identity variant alone did not cover it; the
+// verifier now tries the handful of values clients are known to sign for the
+// header. Each is still a full signature check over this request.
+func TestVerifySigV4_AcceptEncodingGzipRewrittenByProxy(t *testing.T) {
+	for _, signed := range []string{"gzip", "gzip, deflate", "gzip, deflate, br"} {
+		t.Run(signed, func(t *testing.T) {
+			r := httptest.NewRequest("GET", "http://stored.ge/my-bucket/big.bin", nil)
+			r.Header.Set("Accept-Encoding", signed)
+			r.Header.Set("Range", "bytes=0-67108863")
+			signV4(t, r, testAK, testSecret, "us-east-1", sha256Hex(""), time.Now().UTC())
+			require.Contains(t, r.Header.Get("Authorization"), "accept-encoding;")
+
+			// What Cloudflare hands the origin.
+			r.Header.Set("Accept-Encoding", "gzip, br")
+			require.NoError(t, verify(t, r, testSecret), "rewritten Accept-Encoding %q must still verify", signed)
+
+			// The Range the client signed is still bound: a rewritten Range fails.
+			r.Header.Set("Range", "bytes=0-1023")
+			require.ErrorIs(t, verify(t, r, testSecret), ErrSignatureMismatch)
+		})
+	}
+
+	// A value no client signs is not guessed: the variants are a fixed list.
+	r := httptest.NewRequest("GET", "http://stored.ge/my-bucket/big.bin", nil)
+	r.Header.Set("Accept-Encoding", "zstd")
+	signV4(t, r, testAK, testSecret, "us-east-1", sha256Hex(""), time.Now().UTC())
+	r.Header.Set("Accept-Encoding", "gzip, br")
+	require.ErrorIs(t, verify(t, r, testSecret), ErrSignatureMismatch)
+}
+
 // R2 Sippy's multi-part pull (objects above ~200 MiB) signs an If-Match
 // header carrying the object's ETag and then sends the request WITHOUT the
 // header (observed on the prod origin 2026-10-05: five parallel part GETs,

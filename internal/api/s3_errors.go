@@ -244,10 +244,24 @@ func WriteS3Error(w http.ResponseWriter, code string, resource string, requestID
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/xml")
+	setS3ErrorHeaders(w)
 	w.WriteHeader(statusCode)
 	_, _ = w.Write([]byte(xml.Header))
 	_, _ = w.Write(xmlData)
+}
+
+// setS3ErrorHeaders marks an S3 error response as XML the edge must hand over
+// untouched and must not keep. Behind Cloudflare a 403 answered to a request
+// that said `Accept-Encoding: gzip` came back gzip-compressed and
+// aws-sdk-go-v2 (rclone, 2026-10-13) reported "XML syntax error: illegal
+// character U+001F" instead of SignatureDoesNotMatch — `no-transform` stops
+// the compression (Cloudflare honours it). `no-store` keeps one request's
+// error (a 404 before the PUT landed, a 403 of a bad key) from being cached
+// for the next request to the same key: Cloudflare caches some 4xx answers
+// for cacheable file extensions by default, and S3 keys have extensions.
+func setS3ErrorHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/xml")
+	w.Header().Set("Cache-Control", "no-store, no-transform")
 }
 
 // ErrorContext carries optional context for enriched error messages.
@@ -315,7 +329,7 @@ func WriteS3ErrorWithContext(w http.ResponseWriter, code string, resource string
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/xml")
+	setS3ErrorHeaders(w)
 	w.WriteHeader(statusCode)
 	_, _ = w.Write([]byte(xml.Header))
 	_, _ = w.Write(xmlData)

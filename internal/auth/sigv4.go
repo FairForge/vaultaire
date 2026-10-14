@@ -171,14 +171,21 @@ func (a *Auth) verifySigV4(r *http.Request, p *sigV4Params, secretKey, tenantID 
 	// signed. Cloudflare replaces Accept-Encoding with the encodings IT
 	// accepts, and aws-sdk-go-v2 signs `accept-encoding: identity` on every
 	// S3 call — so every Go-SDK client got 403 through stored.ge while the
-	// same request through the origin passed (2026-10-04 benchmark). When the
-	// header is in the signed set, the value the client most plausibly signed
-	// is tried too. The signature must still be valid over that request;
-	// Accept-Encoding carries no authorization meaning.
+	// same request through the origin passed (2026-10-04 benchmark); with its
+	// gzip middleware on (rclone's multi-stream download opener, every object
+	// of 256 MiB or more) it signs `accept-encoding: gzip`, and that was 403
+	// for the same reason (2026-10-13, from three networks). When the header
+	// is in the signed set, each value a client is known to sign is tried
+	// too. The signature must still be valid over that request; Accept-
+	// Encoding carries no authorization meaning.
 	headerVariants := []map[string]string{nil}
-	if strings.Contains(";"+strings.ToLower(p.SignedHeaders)+";", ";accept-encoding;") &&
-		trimAWSSpaces(r.Header.Get("Accept-Encoding")) != "identity" {
-		headerVariants = append(headerVariants, map[string]string{"accept-encoding": "identity"})
+	if strings.Contains(";"+strings.ToLower(p.SignedHeaders)+";", ";accept-encoding;") {
+		got := trimAWSSpaces(r.Header.Get("Accept-Encoding"))
+		for _, v := range signedAcceptEncodings {
+			if v != got {
+				headerVariants = append(headerVariants, map[string]string{"accept-encoding": v})
+			}
+		}
 	}
 	// A signed header that never arrived (R2 Sippy signs If-Match with the
 	// object's ETag and drops the header): the value the server can supply
@@ -204,6 +211,14 @@ func (a *Auth) verifySigV4(r *http.Request, p *sigV4Params, secretKey, tenantID 
 	}
 	return fmt.Errorf("%w", ErrSignatureMismatch)
 }
+
+// signedAcceptEncodings are the Accept-Encoding values S3 clients sign, tried
+// in turn when a proxy rewrote the header on its way to the origin: identity
+// (aws-sdk-go-v2 default, botocore does not sign the header at all), gzip
+// (aws-sdk-go-v2 with gzip enabled — rclone's multi-stream opener), and the
+// two lists browsers and HTTP libraries send. A fixed list, never the wire
+// value's neighbours: each entry costs one HMAC and nothing is guessed.
+var signedAcceptEncodings = []string{"identity", "gzip", "gzip, deflate", "gzip, deflate, br"}
 
 // overrides substitutes the canonical value of a signed header (lower-case
 // name) — the verifier's proxy-rewrite variants; nil = the request as received.
