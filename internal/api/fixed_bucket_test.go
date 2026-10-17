@@ -40,6 +40,7 @@ type fixedBucketDriver struct {
 	failExists    atomic.Bool  // Exists fails (a backend that cannot be asked)
 	failDelete    atomic.Bool  // Delete fails
 	dropPut       atomic.Bool  // Put answers success and writes nothing
+	failPut       atomic.Bool  // Put drains the body, then fails (a backend 5xx)
 	noTenant      atomic.Int32 // calls refused because the context named no tenant
 	onObject      func(n int)  // called before object n of a walk is handed out
 	// failGetUnder: reads under this tenant's prefix fail (not a miss).
@@ -122,6 +123,10 @@ func (d *fixedBucketDriver) Put(ctx context.Context, container, artifact string,
 	if d.dropPut.Load() {
 		_, _ = io.Copy(io.Discard, data)
 		return nil
+	}
+	if d.failPut.Load() {
+		_, _ = io.Copy(io.Discard, data)
+		return errors.New("fixed bucket: 500 InternalError")
 	}
 	p := d.path(tn, container, artifact)
 	if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {

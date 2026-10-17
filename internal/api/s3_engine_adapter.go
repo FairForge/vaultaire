@@ -191,11 +191,17 @@ func (a *awsChunkedReader) Read(p []byte) (int, error) {
 		return 0, io.EOF
 	}
 
-	// If the current chunk is exhausted, read the next chunk header.
+	// If the current chunk is exhausted, read the next chunk header. A
+	// stream that is not well framed is the client's (errAWSChunkedFraming,
+	// WP-R2-3): it used to end "cleanly" wherever it stopped, and a size
+	// line that was not hex was a 500.
 	for a.chunkLeft == 0 {
 		// Read the chunk size line: "<hex-size>[;chunk-extension]\r\n"
 		line, err := a.r.ReadString('\n')
 		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return 0, fmt.Errorf("%w: the stream ended before its terminal chunk: %w", errAWSChunkedFraming, io.ErrUnexpectedEOF)
+			}
 			return 0, err
 		}
 		line = strings.TrimRight(line, "\r\n")
@@ -206,13 +212,13 @@ func (a *awsChunkedReader) Read(p []byte) (int, error) {
 		}
 		line = strings.TrimSpace(line)
 
-		size, err := strconv.ParseInt(line, 16, 64)
-		if err != nil {
-			return 0, fmt.Errorf("aws-chunked: invalid chunk size %q: %w", line, err)
+		size, err := strconv.ParseInt(line, 16, 32)
+		if err != nil || size < 0 {
+			return 0, fmt.Errorf("%w: invalid chunk size %q", errAWSChunkedFraming, line)
 		}
 
 		if size == 0 {
-			// Terminal chunk — drain trailing headers and signal EOF.
+			// Terminal chunk — trailing headers are ignored; signal EOF.
 			a.done = true
 			return 0, io.EOF
 		}
@@ -226,13 +232,28 @@ func (a *awsChunkedReader) Read(p []byte) (int, error) {
 	}
 	n, err := a.r.Read(p)
 	a.chunkLeft -= n
-
-	// When a chunk is fully consumed, read and discard the trailing CRLF.
-	if a.chunkLeft == 0 {
-		_, _ = a.r.ReadString('\n')
+	if errors.Is(err, io.EOF) && a.chunkLeft > 0 {
+		return n, fmt.Errorf("%w: the stream ended inside a chunk: %w", errAWSChunkedFraming, io.ErrUnexpectedEOF)
+	}
+	if err != nil && !errors.Is(err, io.EOF) {
+		return n, err
 	}
 
-	return n, err
+	// A fully consumed chunk is followed by CRLF.
+	if a.chunkLeft == 0 {
+		var crlf [2]byte
+		if _, err := io.ReadFull(a.r, crlf[:]); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return n, fmt.Errorf("%w: the stream ended after a chunk: %w", errAWSChunkedFraming, io.ErrUnexpectedEOF)
+			}
+			return n, err
+		}
+		if crlf != [2]byte{'\r', '\n'} {
+			return n, fmt.Errorf("%w: a chunk is not followed by CRLF", errAWSChunkedFraming)
+		}
+	}
+
+	return n, nil
 }
 
 // isAWSChunked returns true when the request body uses aws-chunked encoding.
@@ -1037,8 +1058,12 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	if chunked {
 		body = newAWSChunkedReader(r.Body)
 	}
+	// Every read error of the body is the client's, tagged where it is
+	// read (WP-R2-3): the sealer, the chunker and the driver all read
+	// through it.
+	src := newClientBody(body)
 
-	bodyCounter := &countingReader{r: body}
+	bodyCounter := &countingReader{r: src}
 	hasher := md5.New() // #nosec G401 — S3 spec requires MD5 for ETags
 	hashingBody := io.TeeReader(bodyCounter, hasher)
 
@@ -1141,6 +1166,14 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 			if chunkErr == nil {
 				return
 			}
+			if clientBodyFault(r.Context(), src, chunkErr) {
+				// R108-9: the body broke off, or the client went away and
+				// the workers saw only their cancelled context — a 500
+				// and an Error line before.
+				answerClientBody(w, r, a.logger, "PutObject", src, chunkErr,
+					zap.String("bucket", bucket), zap.String("key", artifact), zap.Bool("chunked", true))
+				return
+			}
 			a.logger.Error("chunked upload failed",
 				zap.Error(chunkErr),
 				zap.String("bucket", bucket),
@@ -1194,12 +1227,12 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 			w.Header().Set("Retry-After", "300")
 			WriteS3ErrorWithContext(w, ErrServiceUnavailable, r.URL.Path, generateRequestID(),
 				WithSuggestion("This bucket's region is not enabled on this deployment."))
-		case errors.Is(err, engine.ErrCallerAborted):
+		case clientBodyFault(r.Context(), src, err):
 			// The client's body broke off or trickled below the minimum
-			// rate: its request, never the backend's (Prompt 2b.2 C1).
-			a.logger.Info("put body not received",
-				zap.String("container", container), zap.String("artifact", artifact), zap.Error(err))
-			WriteS3Error(w, bodyReadErrorCode(err), r.URL.Path, generateRequestID())
+			// rate: its request, never the backend's (Prompt 2b.2 C1,
+			// WP-R2-3).
+			answerClientBody(w, r, a.logger, "PutObject", src, err,
+				zap.String("container", container), zap.String("artifact", artifact))
 		case errors.Is(err, engine.ErrAllBackendsUnavailable):
 			w.Header().Set("Retry-After", "30")
 			WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())

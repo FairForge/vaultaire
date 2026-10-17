@@ -95,6 +95,9 @@ func (s *Server) initMetrics() {
 			reg.MustRegister(newKeyRotationPendingCollector(s.db, s.log()))
 		}
 		reg.MustRegister(largeGetCollectors()...)
+		// Request bodies the client did not finish (WP-R2-3): 4xx, never a
+		// breaker charge.
+		reg.MustRegister(clientBodyErrors)
 		if b := s.largeGet.budget; b != nil {
 			reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 				Name: "vaultaire_large_get_budget_bytes_in_use",

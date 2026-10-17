@@ -171,6 +171,20 @@ month per backend, below every vendor's free request floor, plus one tiny
 object each. `/health` also reports `degraded` with a `reason` while the
 PRIMARY's breaker is open (it never answers 503 — HAProxy checks it).
 
+**Client bodies are the client's (WP-R2-3).** An upload whose body the client
+did not finish (it stopped mid-body, Cloudflare cut a > 100 MB single PUT, the
+aws-chunked framing broke off) is answered 400 `IncompleteBody` (408 for a
+body below Sync's minimum rate), never a 5xx, never a breaker charge, and is
+counted in `vaultaire_client_body_errors_total{op=PutObject|UploadPart,
+reason=short|gone|framing|too_slow}`. **No rule pages on it**, on purpose:
+it is client traffic. Read it when a customer reports failed uploads or
+when `VaultaireServerErrorRatio` is quiet but uploads fail: a step in
+`reason="gone"` is a proxy or a client timing out (compare Cloudflare's 413s
+and 524s), `reason="framing"` is one client's broken aws-chunked encoder.
+Before Prompt 2b.2 C1 five of them in a minute could open the primary's
+breaker (R2-09); until WP-R2-3 the chunked PUT still answered them 500, an
+Error line and a 5xx count each (R108-9).
+
 The original rules (`VaultaireDown`, `VaultaireHighErrorRate`, node rules)
 live only on the box in `/etc/prometheus/rules/vaultaire-alerts.yml`.
 `vaultaire_errors_total` counts 5xx responses since 2026-09-22 (it was a

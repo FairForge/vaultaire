@@ -384,6 +384,7 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 	if isAWSChunked(r) {
 		body = newAWSChunkedReader(r.Body)
 	}
+	src := newClientBody(body) // the client's own read failures (WP-R2-3)
 
 	// The part is written to a private temp file and renamed over the part
 	// path only once it is complete (R3-11). Writing the part path directly
@@ -407,28 +408,22 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 	tmp := f.Name()
 
 	hasher := md5.New() // #nosec G401 — S3 spec requires MD5 for ETags
-	src := &readErrReader{r: body}
 	size, err := io.Copy(f, io.TeeReader(src, hasher))
 	if closeErr := f.Close(); closeErr != nil && err == nil {
 		err = closeErr
 	}
 	if err != nil {
 		_ = os.Remove(tmp)
-		code := bodyReadErrorCode(err)
-		if code == ErrInternalError && src.err != nil {
-			// The client's body broke off (a reset, a dropped tunnel): its
-			// request, like PutObject's — not a 500 with a stack trace
-			// (Prompt 2b.3 D1.8; the part goes to disk, so engine.Put's
-			// tagging never sees it).
-			code = ErrIncompleteBody
+		if clientBodyFault(r.Context(), src, err) {
+			// The client's body broke off (a reset, a dropped tunnel, bad
+			// aws-chunked framing): its request, like PutObject's — not a
+			// 500 with a stack trace (Prompt 2b.3 D1.8, WP-R2-3).
+			answerClientBody(w, r, s.logger, "UploadPart", src, err,
+				zap.String("upload_id", uploadID), zap.Int("part", partNumber), zap.Int64("received", size))
+			return
 		}
-		if code == ErrInternalError {
-			s.logger.Error("failed to write part data", zap.Error(err))
-		} else {
-			s.logger.Info("upload part: the request body could not be read",
-				zap.String("upload_id", uploadID), zap.Int("part", partNumber), zap.Int64("received", size), zap.Error(err))
-		}
-		WriteS3Error(w, code, r.URL.Path, generateRequestID())
+		s.logger.Error("failed to write part data", zap.Error(err))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return
 	}
 
