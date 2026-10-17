@@ -82,11 +82,14 @@ func main() {
 	endpoint := flag.String("endpoint", env("WASABI_ENDPOINT", "https://s3.us-west-1.wasabisys.com"), "")
 	region := flag.String("region", env("WASABI_REGION", "us-west-1"), "")
 	bucket := flag.String("bucket", env("WASABI_BUCKET", "vaultaire"), "")
+	akEnv := flag.String("access-key-env", "WASABI_ACCESS_KEY", "env var holding the access key (any S3-class backend)")
+	skEnv := flag.String("secret-key-env", "WASABI_SECRET_KEY", "env var holding the secret key")
+	prefix := flag.String("prefix", "t-_probe/_probe/", "key prefix for the put mode's objects")
 	flag.Parse()
 
-	ak, sk := os.Getenv("WASABI_ACCESS_KEY"), os.Getenv("WASABI_SECRET_KEY")
+	ak, sk := os.Getenv(*akEnv), os.Getenv(*skEnv)
 	if ak == "" || sk == "" {
-		fmt.Fprintln(os.Stderr, "WASABI_ACCESS_KEY / WASABI_SECRET_KEY required")
+		fmt.Fprintf(os.Stderr, "%s / %s required\n", *akEnv, *skEnv)
 		os.Exit(2)
 	}
 	opts := []drivers.TransportOption{drivers.WithHTTP1Only(), drivers.WithResponseHeaderTimeout(60 * time.Second)}
@@ -140,7 +143,7 @@ func main() {
 			case "headobject":
 				_, e = c.HeadObject(cctx, &s3.HeadObjectInput{Bucket: aws.String(*bucket), Key: aws.String(*key)})
 			case "put":
-				k := fmt.Sprintf("t-_probe/_probe/stalltest-%d-%d", os.Getpid(), n)
+				k := fmt.Sprintf("%sstalltest-%d-%d", *prefix, os.Getpid(), n)
 				buf := make([]byte, *size)
 				_, _ = rand.Read(buf)
 				_, e = c.PutObject(cctx, &s3.PutObjectInput{Bucket: aws.String(*bucket), Key: aws.String(k), Body: bytesReader(buf), ContentLength: aws.Int64(*size)})
