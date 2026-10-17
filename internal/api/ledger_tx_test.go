@@ -195,6 +195,10 @@ func TestLedger_RandomSequence_EqualsTheReconcileAtEveryStep(t *testing.T) {
 	// bytes), runs the collector (retired manifests and blobs released),
 	// and "→Enabled→Suspended" changes the versioning state mid-run, so
 	// objects chunked before versioning become null versions (PM-3).
+	// Prompt 8 Part 0: every run also has a Suspended bucket ("susp-bucket")
+	// it writes chunked into and deletes from (the R61-5 Suspended delete of
+	// a chunked null version), and the manifest copy — a chunked source
+	// copied where a PUT would chunk — as an op of its own.
 	for _, status := range []string{"", "Enabled", "Suspended", "→Enabled→Suspended"} {
 		t.Run("versioning="+status, func(t *testing.T) {
 			seed := time.Now().UnixNano()
@@ -221,6 +225,9 @@ func TestLedger_RandomSequence_EqualsTheReconcileAtEveryStep(t *testing.T) {
 			_, err := f.db.Exec(`INSERT INTO buckets (tenant_id, name, tier_preference) VALUES ($1, 'attic-bucket', 'archive')
 				ON CONFLICT (tenant_id, name) DO UPDATE SET tier_preference = 'archive'`, f.tenantID)
 			require.NoError(t, err)
+			_, err = f.db.Exec(`INSERT INTO buckets (tenant_id, name, visibility, versioning_status) VALUES ($1, 'susp-bucket', 'private', 'Suspended')
+				ON CONFLICT (tenant_id, name) DO UPDATE SET versioning_status = 'Suspended'`, f.tenantID)
+			require.NoError(t, err)
 			// The body's first bytes are the tenant's: the plaintext content
 			// index is shared by every test on the database.
 			body := func(n int) []byte {
@@ -236,7 +243,7 @@ func TestLedger_RandomSequence_EqualsTheReconcileAtEveryStep(t *testing.T) {
 				}
 				key := keys[rng.Intn(len(keys))]
 				var op string
-				switch rng.Intn(10) {
+				switch rng.Intn(13) {
 				case 0, 1:
 					op = "PUT " + key
 					require.Equal(t, http.StatusOK, f.put(t, key, body(rng.Intn(6000))), op)
@@ -255,7 +262,7 @@ func TestLedger_RandomSequence_EqualsTheReconcileAtEveryStep(t *testing.T) {
 				case 4:
 					op = "DELETE ?versionId " + key
 					var vid string
-					err := f.db.QueryRow(`SELECT version_id FROM object_versions WHERE tenant_id = $1 AND object_key = $2
+					err := f.db.QueryRow(`SELECT version_id FROM object_versions WHERE tenant_id = $1 AND bucket = 'test-bucket' AND object_key = $2
 						ORDER BY random() LIMIT 1`, f.tenantID, key).Scan(&vid)
 					if err == sql.ErrNoRows {
 						continue
@@ -280,6 +287,23 @@ func TestLedger_RandomSequence_EqualsTheReconcileAtEveryStep(t *testing.T) {
 				case 7:
 					op = "DeleteObjects " + key
 					f.batchDelete(t, batchEntry{key: key})
+				case 10:
+					op = "PUT chunked susp-bucket/" + key
+					require.Equal(t, http.StatusOK, f.putClass(t, "susp-bucket", key, "", body(3001+rng.Intn(6000))), op)
+				case 11:
+					op = "Suspended DELETE susp-bucket/" + key
+					w := doS3Request(f.server, f.tenant, "DELETE", "/susp-bucket/"+key, nil)
+					require.Equal(t, http.StatusNoContent, w.Code, op+": "+w.Body.String())
+				case 12:
+					dst := keys[(indexOf(keys, key)+1+rng.Intn(len(keys)-1))%len(keys)]
+					op = "COPY manifest " + key + " → " + dst
+					require.Equal(t, http.StatusOK, f.put(t, key, body(3001+rng.Intn(6000))), op+": the chunked source")
+					w := f.copyObject(t, key, dst)
+					require.Equal(t, http.StatusOK, w.Code, op+": "+w.Body.String())
+					var chunked bool
+					require.NoError(t, f.db.QueryRow(`SELECT is_chunked FROM object_head_cache
+						WHERE tenant_id = $1 AND bucket = 'test-bucket' AND object_key = $2`, f.tenantID, dst).Scan(&chunked))
+					require.True(t, chunked, op+": a manifest copy")
 				}
 				f.ledgerAgrees(t, fmt.Sprintf("step %d (%s)", step, op))
 			}
