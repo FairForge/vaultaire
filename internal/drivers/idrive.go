@@ -65,7 +65,8 @@ type IDriveDriver struct {
 	client        *s3.Client
 	logger        *zap.Logger
 	egressTracker *EgressTracker // Track bandwidth usage
-	// putTimeout is the per-PUT deadline per 64 MiB (FIXED_BUCKET_PUT_TIMEOUT,
+	// putTimeout is the per-PUT deadline per 64 MiB, with a 10 s floor for a
+	// smaller body (s3PutDeadline; FIXED_BUCKET_PUT_TIMEOUT,
 	// 0 = off); putClient is the uploader's client that applies it with one
 	// retry on a fresh connection (put_deadline.go).
 	putTimeout time.Duration

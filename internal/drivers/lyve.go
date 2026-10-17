@@ -23,7 +23,8 @@ type LyveDriver struct {
 	tenantID string // Default tenant, can be overridden by context
 	region   string
 	logger   *zap.Logger
-	// putTimeout is the per-PUT deadline per 64 MiB (FIXED_BUCKET_PUT_TIMEOUT,
+	// putTimeout is the per-PUT deadline per 64 MiB, with a 10 s floor for a
+	// smaller body (s3PutDeadline; FIXED_BUCKET_PUT_TIMEOUT,
 	// 0 = off); putClient wraps client with it and the one retry on a fresh
 	// connection (put_deadline.go, 2026-10-17: the Lyve primary's PUT
 	// non-response).

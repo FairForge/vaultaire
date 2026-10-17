@@ -1100,8 +1100,12 @@ with the tool.
 
 Since that day the driver uploads through `deadlinePutClient`
 (`put_deadline.go`): `FIXED_BUCKET_PUT_TIMEOUT` per 64 MiB of the request
-(default 60 s), one retry of the same request on a connection opened for it,
+(default 60 s, scaled down for a body under 64 MiB to a 10 s floor: a 2 MiB chunk gets 10 s), one retry of the same request on a connection opened for it,
 counted in `vaultaire_driver_put_retries_total{driver="lyve"}`. A stalled
-chunk PUT now costs the deadline once instead of the 60 s response-header
-timeout plus the SDK's retry. Watch the counter after a deploy: a rising
+chunk PUT now costs 10 s once instead of the 60 s response-header timeout
+plus the SDK's retry. (The first cut, the same afternoon, gave a chunk the
+whole 60 s base: the WP-P8 post-merge probe at 17:30 UTC saw the retry fire
+at 60 s in the same second aws-cli's default read timeout gave up, a 400 to
+nobody, and the CLI's own retry succeed in 0.6 s on deduplicated chunks —
+the floor came that evening.) Watch the counter after a deploy: a rising
 `lyve` series is the region stalling again.
