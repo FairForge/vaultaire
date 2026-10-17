@@ -602,8 +602,23 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 			wantRange = rng
 		}
 		var fromParity bool
-		reader, fromParity, err = a.openSealedGet(r.Context(), op, t.ID, bucket, artifact, container, blob, cachedETag,
-			cachedSize, storedBlobLength(cachedEncAlgo, cachedSize, a.sseService), cachedFloor, cachedBackendName, wantRange)
+		stored := storedBlobLength(cachedEncAlgo, cachedSize, a.sseService)
+		// A large sealed object on a backend with cheap ranges is read as
+		// parallel ranges aligned to its segments, each opened as it
+		// arrives (`parallel_get`, s3_large_get.go; Prompt 8 Part B). Never
+		// a vault-floor object: tape and its restore semantics, and the
+		// parity fallback, stay on the single stream.
+		if cachedFloor != usage.FloorVault {
+			off, n := int64(0), cachedSize
+			if wantRange != nil {
+				off, n = wantRange.start, wantRange.length
+			}
+			reader = a.openParallelSealed(gctx, op, t.ID, container, blob, cachedSize, stored, off, n)
+		}
+		if reader == nil {
+			reader, fromParity, err = a.openSealedGet(r.Context(), op, t.ID, bucket, artifact, container, blob, cachedETag,
+				cachedSize, stored, cachedFloor, cachedBackendName, wantRange)
+		}
 		// Every open has derived its key by now (the DEK of a streaming
 		// blob, the old format's whole read): the customer's key goes.
 		clear(ssecKey)

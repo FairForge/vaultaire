@@ -177,6 +177,17 @@ func (s *SSEService) OpenRange(ctx context.Context, tenantID string, h *StreamHe
 	return r, nil
 }
 
+// RangeOpener derives the key of a 0x03 SSE-S3 blob whose header is h once,
+// for many ranges of it (a parallel ranged read). Counted as one open.
+func (s *SSEService) RangeOpener(ctx context.Context, tenantID string, h *StreamHeader) (*StreamRangeOpener, error) {
+	aead, err := s.streamAEADFor(ctx, tenantID, h)
+	if err != nil {
+		return nil, err
+	}
+	s.onOpen("0x03")
+	return &StreamRangeOpener{aead: aead, h: h}, nil
+}
+
 // SSEBlobKeyVersion reads the key version a blob was sealed under from its
 // first bytes (a 0x03 header, or a whole 0x01/0x02 blob): the 0x03 or 0x02
 // field, 1 for a 0x01 blob.

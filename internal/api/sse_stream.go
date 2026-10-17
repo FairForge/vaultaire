@@ -119,6 +119,9 @@ type blobOpener interface {
 	// range can be read from by segment. An old-format SSE-C blob is not:
 	// its first byte is a random nonce byte, never a format marker.
 	streaming() bool
+	// rangeOpener derives the key of a 0x03 blob with header h once, for the
+	// many ranges of a parallel read (Prompt 8 Part B).
+	rangeOpener(ctx context.Context, h *crypto.StreamHeader) (*crypto.StreamRangeOpener, error)
 }
 
 // sseS3Opener opens SSE-S3 blobs of one tenant: 0x03, or 0x01/0x02 by the
@@ -137,6 +140,10 @@ func (o sseS3Opener) rangeOf(ctx context.Context, h *crypto.StreamHeader, size i
 }
 
 func (sseS3Opener) streaming() bool { return true }
+
+func (o sseS3Opener) rangeOpener(ctx context.Context, h *crypto.StreamHeader) (*crypto.StreamRangeOpener, error) {
+	return o.svc.RangeOpener(ctx, o.tenantID, h)
+}
 
 // sseCOpener opens SSE-C blobs under the customer's key: the format is the
 // row's (crypto.SSECAlgorithmV3 = streaming, crypto.SSECAlgorithm = old).
@@ -157,6 +164,13 @@ func (o sseCOpener) rangeOf(_ context.Context, h *crypto.StreamHeader, size int6
 }
 
 func (o sseCOpener) streaming() bool { return !o.legacy }
+
+func (o sseCOpener) rangeOpener(_ context.Context, h *crypto.StreamHeader) (*crypto.StreamRangeOpener, error) {
+	if o.legacy {
+		return nil, errSealedLegacy
+	}
+	return crypto.SSECRangeOpener(o.key, h)
+}
 
 // sealedSource is where a sealed object's stored bytes are read from.
 type sealedSource struct {
