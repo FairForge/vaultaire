@@ -214,10 +214,34 @@ func TestRegionGate_ARefusalIsOneInfoLine(t *testing.T) {
 
 func TestRegionGate_TheDashboardAsksTheSameRule(t *testing.T) {
 	s, _ := regionGateServer(t)
+	s.healthChecker.UpdateHealth("idrive-eu-west-1", true, time.Millisecond, nil)
 	avail := s.regionAvailableNow
-	assert.True(t, avail("eu-west-1"), "registered and not failing")
+	assert.True(t, avail("eu-west-1"), "registered and its probe answered")
 	downByTheProbe(s, "idrive-eu-west-1")
 	assert.False(t, avail("eu-west-1"))
 	assert.True(t, avail("us-central-1"))
 	assert.False(t, avail("ap-northeast-1"), "not enabled is not available either (the picker tells the two apart itself)")
+}
+
+// Prod proof of #753 (2026-10-17 23:36 UTC): the picker rendered 60-odd
+// seconds after the slot switch offered us-west-2 and us-west-4 — both dead
+// — because their staggered first probes had not run yet and
+// RegisterBackend seeds Healthy. "Healthy by the probe" means a probe said
+// so: a region driver with probe state but no successful probe yet (never
+// probed, or failed since boot) is not offered. A working region is then
+// unavailable until its first probe answers (≤ one probe interval after
+// boot); a create in that window is a 503 + Retry-After, not a dead bucket.
+func TestRegionGate_ARegionNotYetProbedIsNotOffered(t *testing.T) {
+	s, mock := regionGateServer(t) // idrive-eu-west-1 registered, no probe yet
+	expectNewBucket(mock, "early-bucket")
+	before := regionRefusedCount("eu-west-1", "down")
+
+	w := s3Create(t, s, "early-bucket", "eu-west-1")
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
+	assert.Equal(t, 1.0, regionRefusedCount("eu-west-1", "down")-before)
+	assert.False(t, s.regionAvailableNow("eu-west-1"), "the picker says the same")
+
+	s.healthChecker.UpdateHealth("idrive-eu-west-1", true, time.Millisecond, nil)
+	assert.True(t, s.regionAvailableNow("eu-west-1"), "its first successful probe offers it")
 }
