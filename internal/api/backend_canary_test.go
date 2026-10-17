@@ -92,7 +92,9 @@ func probeServer() *Server {
 	return &Server{startTime: time.Now(), healthChecker: NewBackendHealthChecker(), logger: zap.NewNop()}
 }
 
-func TestObjectCanary_ObjectCallsForbidden_HealthZeroWithinOneProbe(t *testing.T) {
+// Two probes since WP-R6-3: one failed probe is counted and its error
+// shown, the second in a row makes the backend unhealthy.
+func TestObjectCanary_ObjectCallsForbidden_HealthZeroAtTheSecondProbe(t *testing.T) {
 	d, fi := newForbiddenIDrive(t, "idrive")
 	require.NoError(t, d.HealthCheck(context.Background()), "HeadBucket alone stays green — the 2026-10-11 shape")
 	s := probeServer()
@@ -102,12 +104,17 @@ func TestObjectCanary_ObjectCallsForbidden_HealthZeroWithinOneProbe(t *testing.T
 	s.probeBackendOnce(context.Background(), check)
 
 	st := s.healthChecker.GetBackendStates()["idrive"]
-	assert.False(t, st.Healthy, "one probe sees the object-level 403")
+	assert.True(t, st.Healthy, "one failed probe is not yet an outage")
 	assert.Equal(t, int64(1), st.Failures, "vaultaire_backend_probe_failures_total +1")
 	assert.Contains(t, st.LastError, "object canary HEAD")
 	assert.Contains(t, st.LastError, "403", "the SDK error is in the log and last_error")
 	assert.Contains(t, st.LastError, "and its PUT", "a 403 HEAD is followed by one PUT, refused too")
 	assert.Equal(t, int32(2), fi.objectCalls.Load(), "one HEAD, one PUT")
+
+	s.probeBackendOnce(context.Background(), check)
+	st = s.healthChecker.GetBackendStates()["idrive"]
+	assert.False(t, st.Healthy, "the second probe in a row sees the object-level 403: unhealthy")
+	assert.Equal(t, int64(2), st.Failures)
 }
 
 func TestObjectCanary_AbsentIsWrittenOnceThenHealthy(t *testing.T) {
@@ -194,6 +201,7 @@ func TestHealth_PrimaryBreakerOpenIsDegraded(t *testing.T) {
 
 	// A failing probe is named in the reason too.
 	s.healthChecker.UpdateHealth("geyser", false, time.Millisecond, nil)
+	s.healthChecker.UpdateHealth("geyser", false, time.Millisecond, nil) // two in a row (WP-R6-3)
 	body = health()
 	assert.Equal(t, "probe failing on geyser; circuit breaker open on the primary backend idrive", body["reason"])
 	s.healthChecker.UpdateHealth("geyser", true, time.Millisecond, nil)

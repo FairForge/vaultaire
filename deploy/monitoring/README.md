@@ -29,6 +29,7 @@ it is **not** committed. It lives in `/etc/default/ntfy-bridge` on the server
 | `vaultaire-backup.yml` | `/etc/prometheus/rules/` | BackupStale / BackupOffboxStale (critical) and BackupRunIncomplete (warning, Prompt 2a.2) — > 26 h or series absent — on the three timestamps `deploy/scripts/pg-backup.sh` writes into its own directory `/opt/vaultaire/metrics/` (user1), which node_exporter reads through root-owned symlinks (see "Backup metrics" below). Installed 2026-10-08; the run timestamp + symlink layout are the 2a.2 change |
 | `vaultaire-longops.yml` | `/etc/prometheus/rules/` | LongOpFailingAfterCommit (warning: ≥ 3 `<Error>` documents inside a committed 200 in 15 min, per op) and LongOpsAbandonedAtShutdown (warning: a stopping slot cancelled a CompleteMultipartUpload / CopyObject / DeleteObjects still running 15 min after its start) on `vaultaire_s3_long_op_total{op,outcome}` / `vaultaire_s3_long_ops_abandoned_total{op}` (`internal/api/s3_long_op.go`, #635). Since Prompt 2a.2 G1 (#644) also LongOpsFailedDuringDrain (warning: `vaultaire_s3_long_ops_drain_errors_total{op}`). Both shutdown counters are exported by the ACTIVE slot from `s3_long_op_incidents` (migration 082), which the stopping slot writes before its DB closes — the stopping slot itself is never scraped, so the in-process counter of #635 could not fire. Installed on SLC 2026-10-09 (sha256 = repo) |
 | `vaultaire-multipart.yml` | `/etc/prometheus/rules/` | MultipartStagingRefusing (warning): an UploadPart was answered 503 SlowDown because the staging filesystem (prod: the 61 GiB tmpfs `/tmp`) would fall below `MULTIPART_STAGING_MIN_FREE` (`vaultaire_multipart_staging_refusals_total`, WP-R10-8 Part C). Parts are reserved against each tenant's quota since then; this guard bounds the sum across tenants. Installed on SLC 2026-10-14 (sha256 = repo; 48 rules load) |
+| `vaultaire-drivers.yml` | `/etc/prometheus/rules/` | a backend that does not answer (WP-R6-3, Stage 1a Prompt 9): DriverHedgesWinning (warning: more than one in twenty hedges of a driver's small calls answered first over 15 min, ≥ 3 wins — its edge is stalling; `vaultaire_driver_hedges_total` / `_hedges_won_total`) and DriverOpSlow (warning: the primary's p99 of `put` or `get_first_byte` above 10 s for 15 min on `vaultaire_driver_op_seconds`). **Not installed by the deploy** (`deploy/**` is hand-installed): the owner recipe in "Installing a rules file" below |
 | `vaultaire-alerts.yml` | `/etc/prometheus/rules/` | the box's original rules (installed 2026-04-04, no source in the repo until Prompt 2b.2 C5 — copied from the box, sha256 `c40d860b…`): VaultaireDown / NodeDown (critical, `up{job=…} == 0` for 1 min), VaultaireHighErrorRate (warning, `rate(vaultaire_errors_total[5m]) > 0.1` for 5 min), DiskSpaceLow / DiskSpaceCritical (< 10 % / < 5 % free on `/`), HighMemoryUsage (> 90 %), HighCPUUsage (> 90 % for 10 min) |
 | `vaultaire-backends.yml`, `vaultaire-auth.yml`, `vaultaire-tls.yml`, `vaultaire-synthetic.yml`, `vaultaire-egress.yml`, `vaultaire-jobs.yml` | `/etc/prometheus/rules/` | alert rules: backend probes / auth failures / origin cert / customer-path canary / egress throttle / background jobs (Review R13 + WP-R10-9 + WP-R13-3 — install all six, checklist item 10). On SLC (checked 2026-10-11): `alerts`, `backends`, `backup`, `jobs`, `longops`, `tls`, `auth` and `egress` are installed (sha256 = repo, 42 rules); `routing` is held back (it fires on the WP-R7-5 backlog — see below) and `synthetic` waits for `SYNTHETIC_CHECK_URL` |
 
@@ -184,6 +185,26 @@ and 524s), `reason="framing"` is one client's broken aws-chunked encoder.
 Before Prompt 2b.2 C1 five of them in a minute could open the primary's
 breaker (R2-09); until WP-R2-3 the chunked PUT still answered them 500, an
 Error line and a 5xx count each (R108-9).
+
+**A backend that does not answer (WP-R6-3).** Every first-byte bound on
+the data path is ≤ 30 s (`internal/drivers/CLAUDE.md`, "The bound
+invariant"): a HEAD, DELETE or listing page 15 s, a GET's first byte 25 s,
+a PUT its per-size deadline (10 s floor), a Complete 10 min, Geyser 5 min.
+The probe's HeadBucket and the canary's HeadObject, every HeadObject/Exists,
+listing page and DeleteObject on an S3-class driver is **hedged**: sent once
+more on a fresh connection after `DRIVER_HEDGE_AFTER` (2 s), first answer
+wins (`vaultaire_driver_hedges_total{driver,op}`, `_hedges_won_total`;
+rule DriverHedgesWinning). Every driver call made through the engine is
+timed in `vaultaire_driver_op_seconds{driver,op}` (head, get_first_byte,
+put, delete, list, probe; a GET to its first byte, a PUT without the
+client's body time; rule DriverOpSlow on the primary).
+**`vaultaire_backend_health` is 0 after TWO failed probes in a row** (≥ 30 s
+of silence across two probes) and 1 again after one success; one failed
+probe still counts in `vaultaire_backend_probe_failures_total` and shows its
+error in `/health/backends` (`last_error`) and the Warn line, but no longer
+makes `/health` `degraded`. On 2026-10-17 most of Wasabi's 199
+`backend health check failed` lines in 2.7 days were single failures
+(`docs/reviews/WP-P9.md` has the count).
 
 The original rules (`VaultaireDown`, `VaultaireHighErrorRate`, node rules)
 live only on the box in `/etc/prometheus/rules/vaultaire-alerts.yml`.

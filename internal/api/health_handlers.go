@@ -37,7 +37,20 @@ type BackendHealthState struct {
 	// Failures counts failed probes since process start (monotonic; exported
 	// as vaultaire_backend_probe_failures_total).
 	Failures int64
+	// ConsecutiveFailures counts failed probes since the last success:
+	// Healthy turns false at probeFailuresToUnhealthy (WP-R6-3).
+	ConsecutiveFailures int
 }
+
+// probeFailuresToUnhealthy is how many probes in a row must fail before a
+// backend is unhealthy — on /health (status, reason), on
+// vaultaire_backend_health and on the dashboard (WP-R6-3). One success
+// makes it healthy again. The probe runs every 30 s with a 15 s deadline,
+// and ONE failure used to flip it: Wasabi's edge lost ~2.5 % of flows a
+// minute on 2026-10-17, and 199 single failures in 2.7 days each read as
+// an outage. Two in a row is ≥ 30 s of silence across two probes. Every
+// failure is still counted and its error kept (LastError).
+const probeFailuresToUnhealthy = 2
 
 // NewBackendHealthChecker creates a health checker
 func NewBackendHealthChecker() *BackendHealthChecker {
@@ -71,12 +84,16 @@ func (b *BackendHealthChecker) UpdateHealth(id string, healthy bool, latency tim
 		b.backends[id] = state
 	}
 
-	state.Healthy = healthy
 	state.Latency = latency
 	state.LastCheck = time.Now()
-	if !healthy {
+	if healthy {
+		state.ConsecutiveFailures = 0
+	} else {
 		state.Failures++
+		state.ConsecutiveFailures++
 	}
+	healthy = state.ConsecutiveFailures < probeFailuresToUnhealthy
+	state.Healthy = healthy
 	if err != nil {
 		state.LastError = err.Error()
 	} else {
@@ -127,7 +144,8 @@ func (b *BackendHealthChecker) GetOverallStatus() (status string, healthy int, t
 	}
 }
 
-// failingBackends names the backends whose last probe failed, sorted.
+// failingBackends names the backends unhealthy by the probe (two failed
+// probes in a row), sorted.
 func (b *BackendHealthChecker) failingBackends() []string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()

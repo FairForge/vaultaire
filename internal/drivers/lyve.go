@@ -30,13 +30,21 @@ type LyveDriver struct {
 	// non-response).
 	putTimeout time.Duration
 	putClient  manager.UploadAPIClient
+	// hedge sends a HEAD, a DELETE or a listing page again on a fresh
+	// connection when it has not answered after DRIVER_HEDGE_AFTER
+	// (hedge.go, WP-R6-3); nil = none.
+	hedge *s3Hedger
 }
 
 // setPutTimeout installs the per-PUT deadline (0 = off).
 func (d *LyveDriver) setPutTimeout(base time.Duration) {
 	d.putTimeout = base
-	d.putClient = &deadlinePutClient{Client: d.client, driver: "lyve", region: d.region, base: base,
-		fresh: TunedHTTPClient(WithHTTP1Only(), WithFreshConnections()), logger: d.logger}
+	pc := &deadlinePutClient{Client: d.client, driver: "lyve", region: d.region, base: base,
+		fresh: s3FreshHTTPClient(), logger: d.logger}
+	d.putClient = pc
+	if d.hedge != nil {
+		d.hedge.fresh = pc.fresh
+	}
 }
 
 // uploadClient is what Put uploads through: the deadline client once set.
@@ -78,8 +86,10 @@ func NewLyveDriver(accessKey, secretKey, tenantID, region string, logger *zap.Lo
 		// gateway that does speak h2). Response headers within 60 s like the
 		// fixed-bucket drivers (Prompt 2b.5 F3.4: the 2b.4 bound missed
 		// lyve, prod's primary since 2026-10-11 — a hung GET lasted until
-		// the caller's deadline).
+		// the caller's deadline). Since WP-R6-3 the bounds are per request
+		// class (s3OpTimeouts: 15 s metadata, 25 s a GET's first byte).
 		config.WithHTTPClient(s3ObjectHTTPClient()),
+		config.WithRetryMaxAttempts(requestRetryMaxAttempts),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
@@ -97,6 +107,7 @@ func NewLyveDriver(accessKey, secretKey, tenantID, region string, logger *zap.Lo
 	// answered nothing to ~3 % of 1 MiB PUTs after acknowledging the body).
 	driverPutRetries.WithLabelValues("lyve") // the series exists at 0
 	d.setPutTimeout(fixedBucketPutTimeoutFromEnv(logger))
+	d.hedge = newS3Hedger("lyve", driverHedgeAfterFromEnv(logger), d.putClient.(*deadlinePutClient).fresh)
 	return d, nil
 }
 
@@ -136,7 +147,7 @@ func (d *LyveDriver) Get(ctx context.Context, container, artifact string) (io.Re
 	result, err := d.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
-	})
+	}, sdkCallOptions(ctx)...)
 	if err != nil {
 		return nil, fmt.Errorf("get object: %w", err)
 	}
@@ -165,7 +176,7 @@ func (d *LyveDriver) GetRange(ctx context.Context, container, artifact string, o
 		input.Range = aws.String(rangeHeader)
 	}
 
-	result, err := d.client.GetObject(ctx, input)
+	result, err := d.client.GetObject(ctx, input, sdkCallOptions(ctx)...)
 	if err != nil {
 		return nil, fmt.Errorf("get range: %w", err)
 	}
@@ -191,7 +202,7 @@ func (d *LyveDriver) GetRangeInfo(ctx context.Context, container, artifact strin
 		Bucket: aws.String(d.getBucket()),
 		Key:    aws.String(key),
 		Range:  aws.String(fmt.Sprintf("bytes=%d-%d", offset, offset+length-1)),
-	})
+	}, sdkCallOptions(ctx)...)
 	if err != nil {
 		return nil, engine.RangeInfo{}, fmt.Errorf("lyve get range %s/%s: %w", container, artifact, err)
 	}
@@ -269,9 +280,9 @@ func (d *LyveDriver) Delete(ctx context.Context, container, artifact string) err
 	key := d.buildTenantKey(tenantID, container, artifact)
 	bucket := d.getBucket()
 
-	_, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String(key),
+	in := &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)}
+	_, err := hedged(ctx, d.hedge, "delete", func(ctx context.Context, o ...func(*s3.Options)) (*s3.DeleteObjectOutput, error) {
+		return d.client.DeleteObject(ctx, in, o...)
 	})
 	if err != nil {
 		return fmt.Errorf("delete object: %w", err)
@@ -295,23 +306,21 @@ func (d *LyveDriver) List(ctx context.Context, container string, prefix string) 
 	// Use the tenantID we actually used, not d.tenantID
 	tenantPrefix := fmt.Sprintf("t-%s/%s/", tenantID, container)
 	var keys []string
-	paginator := s3ListPaginator(d.client, &s3.ListObjectsV2Input{
+	err := listPages(ctx, d.hedge, d.client, &s3.ListObjectsV2Input{
 		Bucket: aws.String(bucket),
 		Prefix: aws.String(keyPrefix),
-	})
-	for paginator.HasMorePages() {
-		page, err := paginator.NextPage(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("list objects: %w", err)
-		}
+	}, func(page *s3.ListObjectsV2Output) error {
 		for _, obj := range page.Contents {
 			if obj.Key != nil {
 				// Remove the tenant/container prefix to return just the artifact name
 				keys = append(keys, strings.TrimPrefix(*obj.Key, tenantPrefix))
 			}
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list objects: %w", err)
 	}
-
 	return keys, nil
 }
 
@@ -323,9 +332,9 @@ func (d *LyveDriver) Exists(ctx context.Context, container, artifact string) (bo
 	key := d.buildTenantKey(tenantID, container, artifact)
 	bucket := d.getBucket()
 
-	_, err := d.client.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String(key),
+	in := &s3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)}
+	_, err := hedged(ctx, d.hedge, "head_object", func(ctx context.Context, o ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
+		return d.client.HeadObject(ctx, in, o...)
 	})
 	if err != nil {
 		if s3IsNotFound(err) {
@@ -340,10 +349,12 @@ func (d *LyveDriver) Name() string {
 	return "lyve"
 }
 
+// HealthCheck is the probe: a signed HeadBucket, hedged (hedge.go).
 func (d *LyveDriver) HealthCheck(ctx context.Context) error {
 	bucket := d.getBucket()
-	_, err := d.client.HeadBucket(ctx, &s3.HeadBucketInput{
-		Bucket: aws.String(bucket),
+	in := &s3.HeadBucketInput{Bucket: aws.String(bucket)}
+	_, err := hedged(ctx, d.hedge, "head_bucket", func(ctx context.Context, o ...func(*s3.Options)) (*s3.HeadBucketOutput, error) {
+		return d.client.HeadBucket(ctx, in, o...)
 	})
 	if err != nil {
 		return fmt.Errorf("lyve health check (%s): %w", bucket, err)

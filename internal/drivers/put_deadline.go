@@ -151,8 +151,9 @@ func bodySize(declared *int64, body io.Reader) int64 {
 // caller) ended it, once more on a fresh connection with the body rewound.
 func (c *deadlinePutClient) attempt(ctx context.Context, what string, size int64, body io.Reader,
 	call func(ctx context.Context, opts ...func(*s3.Options)) error) error {
+	opts := sdkCallOptions(ctx)
 	if c.base <= 0 {
-		return call(ctx)
+		return call(ctx, opts...)
 	}
 	timeout := s3PutDeadline(c.base, size)
 	seeker, rewindable := body.(io.Seeker)
@@ -166,7 +167,7 @@ func (c *deadlinePutClient) attempt(ctx context.Context, what string, size int64
 	}
 
 	actx, cancel := context.WithTimeout(ctx, timeout)
-	err := call(actx)
+	err := call(actx, opts...)
 	ours := err != nil && actx.Err() != nil && errors.Is(actx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
 	cancel()
 	if err == nil || !ours {
@@ -185,7 +186,7 @@ func (c *deadlinePutClient) attempt(ctx context.Context, what string, size int64
 
 	rctx, rcancel := context.WithTimeout(ctx, timeout)
 	defer rcancel()
-	if rerr := call(rctx, func(o *s3.Options) { o.HTTPClient = c.fresh }); rerr != nil {
+	if rerr := call(rctx, append(opts, func(o *s3.Options) { o.HTTPClient = c.fresh })...); rerr != nil {
 		if rctx.Err() != nil && errors.Is(rctx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
 			return fmt.Errorf("%s: no answer within %s, twice (after one retry on a fresh connection): %w", what, timeout, context.DeadlineExceeded)
 		}

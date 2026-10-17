@@ -76,6 +76,7 @@ func (e *CoreEngine) AddDriver(name string, driver Driver) {
 		e.primary = name
 	}
 	e.failover.Register(name)
+	InitDriverOpSeries(name)
 	e.logger.Info("driver added",
 		zap.String("name", name),
 		zap.Bool("is_primary", e.primary == name))
@@ -115,6 +116,8 @@ func (e *CoreEngine) CheckDriver(ctx context.Context, name string) error {
 	if !exists {
 		return fmt.Errorf("driver %q not found", name)
 	}
+	start := time.Now()
+	defer observeDriverOp(name, opProbe, start, 0)
 	return driver.HealthCheck(ctx)
 }
 
@@ -138,7 +141,9 @@ func (e *CoreEngine) Get(ctx context.Context, container, artifact string) (io.Re
 			return fmt.Errorf("driver %s not found", driverName)
 		}
 		var getErr error
+		start := time.Now()
 		reader, getErr = d.Get(ctx, container, artifact)
+		observeDriverOp(driverName, opGetFirstByte, start, 0)
 		return getErr
 	})
 
@@ -168,13 +173,16 @@ func (e *CoreEngine) GetRange(ctx context.Context, container, artifact string, o
 		if !ok {
 			return fmt.Errorf("driver %s not found", driverName)
 		}
+		start := time.Now()
 		if rg, ok := d.(RangeGetter); ok {
 			var getErr error
 			reader, getErr = rg.GetRange(ctx, container, artifact, offset, length)
+			observeDriverOp(driverName, opGetFirstByte, start, 0)
 			return getErr
 		}
 		// Fallback: full GET + seek/discard (existing slow path)
 		full, getErr := d.Get(ctx, container, artifact)
+		observeDriverOp(driverName, opGetFirstByte, start, 0)
 		if getErr != nil {
 			return getErr
 		}
@@ -287,7 +295,9 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 			sizeReader.bytesRead = 0
 		}
 		firstAttempt = false
+		start, waited := time.Now(), sizeReader.waitedSoFar()
 		perr := d.Put(ctx, container, artifact, sizeReader, opts...)
+		observeDriverOp(driverName, opPut, start, sizeReader.waitedSoFar()-waited)
 		// The SOURCE failed (a client that went away mid-body: Go's server
 		// hands the handler the read error before it cancels the context):
 		// the caller's failure, whatever the driver made of it — an SDK
@@ -390,6 +400,8 @@ func (e *CoreEngine) deleteOn(ctx context.Context, name, container, artifact str
 		return fmt.Errorf("delete %s/%s on %s: %w", container, artifact, name, e.unregisteredBackend(name, "delete"))
 	}
 	if _, err := e.failover.ExecuteOp(ctx, "delete", []string{name}, func(string) error {
+		start := time.Now()
+		defer observeDriverOp(name, opDelete, start, 0)
 		return d.Delete(ctx, container, artifact)
 	}); err != nil {
 		return fmt.Errorf("delete %s/%s on %s: %w", container, artifact, name, err)
@@ -404,7 +416,9 @@ func (e *CoreEngine) List(ctx context.Context, container, prefix string) ([]Arti
 		return nil, fmt.Errorf("no driver available")
 	}
 
+	start := time.Now()
 	keys, err := driver.List(ctx, container, prefix)
+	observeDriverOp(e.primary, opList, start, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -454,13 +468,18 @@ func (e *CoreEngine) GetMetrics(ctx context.Context) (map[string]interface{}, er
 type sizeTrackingReader struct {
 	io.Reader
 	bytesRead int64
+	// waited is the time spent inside the source's Read: the driver waiting
+	// on the request body, not on the backend (driver_op_seconds' put).
+	waited atomic.Int64
 
 	mu     sync.Mutex
 	srcErr error // the source's own read failure (never io.EOF)
 }
 
 func (r *sizeTrackingReader) Read(p []byte) (n int, err error) {
+	start := time.Now()
 	n, err = r.Reader.Read(p)
+	r.waited.Add(int64(time.Since(start)))
 	r.bytesRead += int64(n)
 	if err != nil && !errors.Is(err, io.EOF) {
 		r.mu.Lock()
@@ -471,6 +490,9 @@ func (r *sizeTrackingReader) Read(p []byte) (n int, err error) {
 	}
 	return
 }
+
+// waitedSoFar is the time spent so far waiting on the source.
+func (r *sizeTrackingReader) waitedSoFar() time.Duration { return time.Duration(r.waited.Load()) }
 
 // sourceErr is the first read error of the source itself, if any.
 func (r *sizeTrackingReader) sourceErr() error {

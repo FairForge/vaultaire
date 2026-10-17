@@ -13,6 +13,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
+
+	"github.com/FairForge/vaultaire/internal/common"
 )
 
 // The background-job scheduler (WP-R13-3; Review R13-07 / R13-11 / R13-23).
@@ -409,9 +411,11 @@ func (j *scheduledJob) execute(ctx context.Context, release func(), run func(con
 	start := s.now()
 	recordJobStart(ctx, s.db, name, start)
 
-	runCtx, cancel := ctx, context.CancelFunc(func() {})
+	// A job's backend calls get the SDK's three attempts, a request's two
+	// (common.WithJob, drivers/hedge.go — WP-R6-3).
+	runCtx, cancel := common.WithJob(ctx), context.CancelFunc(func() {})
 	if j.spec.MaxRunTime > 0 {
-		runCtx, cancel = context.WithTimeout(ctx, j.spec.MaxRunTime)
+		runCtx, cancel = context.WithTimeout(runCtx, j.spec.MaxRunTime)
 	}
 	func() {
 		defer cancel()

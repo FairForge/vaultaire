@@ -65,6 +65,14 @@ func WithGeyserEndpoint(ep string) GeyserOption {
 	return func(o *geyserOpts) { o.endpoint = ep }
 }
 
+// geyserOpTimeouts are Geyser's per-class response-header bounds.
+var geyserOpTimeouts = OpTimeouts{
+	Meta:     15 * time.Second,
+	Get:      5 * time.Minute,
+	Put:      5 * time.Minute,
+	Complete: 10 * time.Minute,
+}
+
 func NewGeyserDriver(accessKey, secretKey, bucket, tenantID string, logger *zap.Logger, options ...GeyserOption) (*GeyserDriver, error) {
 	opts := &geyserOpts{
 		endpoint: "https://la1.geyserdata.com",
@@ -83,7 +91,13 @@ func NewGeyserDriver(accessKey, secretKey, bucket, tenantID string, logger *zap.
 		// aggregate ingest at ~27 MB/s. Forcing h1 gives each request its own
 		// connection: measured 2026-07-29 from SLC, 256MB multipart went
 		// 25 MB/s (h2) → 235-276 MB/s (h1), sustained 227 MB/s over 2.5 GB.
-		config.WithHTTPClient(TunedHTTPClient(WithHTTP1Only(), WithResponseHeaderTimeout(5*time.Minute))),
+		// Bounds per request class (WP-R6-3): tape keeps 5 min for a GET's
+		// first byte and a PUT's answer (Vail; a cold object answers
+		// InvalidObjectState at once, a restore is asynchronous), a
+		// Complete 10 min; a HEAD, DELETE or listing page 15 s like every
+		// S3-class backend (it had the 5 min of everything).
+		config.WithHTTPClient(TunedHTTPClient(WithHTTP1Only(), WithOpTimeouts(geyserOpTimeouts))),
+		config.WithRetryMaxAttempts(requestRetryMaxAttempts),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
@@ -175,7 +189,7 @@ func (d *GeyserDriver) GetRange(ctx context.Context, container, artifact string,
 		input.Range = aws.String(rangeHeader)
 	}
 
-	resp, err := d.client.GetObject(ctx, input)
+	resp, err := d.client.GetObject(ctx, input, sdkCallOptions(ctx)...)
 	if err != nil {
 		return nil, fmt.Errorf("geyser get range %s: %w", key, geyserWireErr(err))
 	}
@@ -207,7 +221,7 @@ func (d *GeyserDriver) RestoreObject(ctx context.Context, container, artifact st
 		RestoreRequest: &types.RestoreRequest{
 			Days: aws.Int32(days),
 		},
-	})
+	}, sdkCallOptions(ctx)...)
 	if err != nil {
 		return fmt.Errorf("geyser restore %s: %w", key, geyserWireErr(err))
 	}
@@ -228,7 +242,7 @@ func (d *GeyserDriver) RestoreStatus(ctx context.Context, container, artifact st
 	resp, err := d.client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(d.bucket),
 		Key:    aws.String(key),
-	})
+	}, sdkCallOptions(ctx)...)
 	if err != nil {
 		return nil, fmt.Errorf("geyser restore status %s: %w", key, geyserWireErr(err))
 	}
@@ -270,7 +284,7 @@ func (d *GeyserDriver) Put(ctx context.Context, container, artifact string, data
 		Key:           aws.String(key),
 		Body:          body,
 		ContentLength: &contentLength,
-	})
+	}, sdkCallOptions(ctx)...)
 	if err != nil {
 		return fmt.Errorf("geyser put %s: %w", key, err)
 	}
@@ -332,7 +346,7 @@ func (d *GeyserDriver) Delete(ctx context.Context, container, artifact string) e
 	_, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(d.bucket),
 		Key:    aws.String(key),
-	})
+	}, sdkCallOptions(ctx)...)
 	if err != nil {
 		return fmt.Errorf("geyser delete %s: %w", key, err)
 	}
@@ -376,7 +390,7 @@ func (d *GeyserDriver) Exists(ctx context.Context, container, artifact string) (
 	_, err := d.client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(d.bucket),
 		Key:    aws.String(key),
-	})
+	}, sdkCallOptions(ctx)...)
 	if err != nil {
 		if s3IsNotFound(err) {
 			return false, nil
@@ -393,7 +407,7 @@ func (d *GeyserDriver) Name() string {
 func (d *GeyserDriver) HealthCheck(ctx context.Context) error {
 	_, err := d.client.HeadBucket(ctx, &s3.HeadBucketInput{
 		Bucket: aws.String(d.bucket),
-	})
+	}, sdkCallOptions(ctx)...)
 	if err != nil {
 		return fmt.Errorf("geyser health check: %w", err)
 	}

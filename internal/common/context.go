@@ -70,3 +70,20 @@ func BackendUsed(ctx context.Context) string {
 	defer n.mu.Unlock()
 	return n.name
 }
+
+// jobKey marks a context as a background job's (the scheduler's run, the
+// admin trigger): the drivers give such a call the SDK's three attempts
+// where a request gets two (WP-R6-3) — a job has no client waiting on it,
+// and a call it loses is a note on a run that comes again.
+const jobKey contextKey = "background-job"
+
+// WithJob marks ctx as a background job's.
+func WithJob(ctx context.Context) context.Context {
+	return context.WithValue(ctx, jobKey, true)
+}
+
+// IsJob reports whether ctx is a background job's.
+func IsJob(ctx context.Context) bool {
+	v, _ := ctx.Value(jobKey).(bool)
+	return v
+}

@@ -41,6 +41,7 @@ func TestHealthHandler_DegradedBackend(t *testing.T) {
 	s.healthChecker.RegisterBackend("quotaless")
 	s.healthChecker.UpdateHealth("lyve", true, 10*time.Millisecond, nil)
 	s.healthChecker.UpdateHealth("quotaless", false, 0, assert.AnError)
+	s.healthChecker.UpdateHealth("quotaless", false, 0, assert.AnError) // two failed probes in a row (WP-R6-3)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
@@ -61,7 +62,9 @@ func TestHealthHandler_AllUnhealthy(t *testing.T) {
 	s.healthChecker.RegisterBackend("lyve")
 	s.healthChecker.RegisterBackend("quotaless")
 	s.healthChecker.UpdateHealth("lyve", false, 0, assert.AnError)
+	s.healthChecker.UpdateHealth("lyve", false, 0, assert.AnError) // two failed probes in a row (WP-R6-3)
 	s.healthChecker.UpdateHealth("quotaless", false, 0, assert.AnError)
+	s.healthChecker.UpdateHealth("quotaless", false, 0, assert.AnError) // two failed probes in a row (WP-R6-3)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
@@ -124,6 +127,7 @@ func TestReadinessHandler_NotReady(t *testing.T) {
 	s := newTestServerWithHealthChecker(t)
 	s.healthChecker.RegisterBackend("lyve")
 	s.healthChecker.UpdateHealth("lyve", false, 0, assert.AnError)
+	s.healthChecker.UpdateHealth("lyve", false, 0, assert.AnError) // two failed probes in a row (WP-R6-3)
 
 	req := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
 	w := httptest.NewRecorder()
@@ -141,6 +145,7 @@ func TestBackendsHealthHandler(t *testing.T) {
 	s.healthChecker.UpdateHealth("lyve", true, 10*time.Millisecond, nil)
 	s.healthChecker.UpdateHealth("quotaless", true, 15*time.Millisecond, nil)
 	s.healthChecker.UpdateHealth("onedrive", false, 0, assert.AnError)
+	s.healthChecker.UpdateHealth("onedrive", false, 0, assert.AnError) // two failed probes in a row (WP-R6-3)
 
 	req := httptest.NewRequest(http.MethodGet, "/health/backends", nil)
 	w := httptest.NewRecorder()
@@ -204,6 +209,7 @@ func TestHealth_BackendFailureDoesNotRemoveInstanceFromRotation(t *testing.T) {
 	srv := newTestServerWithHealthChecker(t)
 	srv.healthChecker.RegisterBackend("lyve")
 	srv.healthChecker.UpdateHealth("lyve", false, 0, assert.AnError)
+	srv.healthChecker.UpdateHealth("lyve", false, 0, assert.AnError) // two failed probes in a row (WP-R6-3)
 
 	rec := httptest.NewRecorder()
 	srv.handleHealthEnhanced(rec, httptest.NewRequest(http.MethodGet, "/health", nil))

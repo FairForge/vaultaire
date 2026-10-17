@@ -39,7 +39,10 @@ func NewS3Driver(endpoint, accessKey, secretKey, region string, logger *zap.Logg
 	cfg, err := config.LoadDefaultConfig(context.TODO(),
 		config.WithCredentialsProvider(creds),
 		config.WithRegion(signingRegion),
-		config.WithHTTPClient(TunedHTTPClient()),
+		// The per-class bounds of every S3-class client (s3OpTimeouts,
+		// WP-R6-3; quotaless is built on this driver): it had none.
+		config.WithHTTPClient(TunedHTTPClient(WithOpTimeouts(s3OpTimeouts))),
+		config.WithRetryMaxAttempts(requestRetryMaxAttempts),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
@@ -75,7 +78,7 @@ func (d *S3Driver) Put(ctx context.Context, container, artifact string, data io.
 		Key:           aws.String(artifact),
 		Body:          body,
 		ContentLength: &contentLength,
-	})
+	}, sdkCallOptions(ctx)...)
 	if err != nil {
 		return fmt.Errorf("put object %s/%s: %w", container, artifact, err)
 	}
@@ -88,7 +91,7 @@ func (d *S3Driver) Get(ctx context.Context, container, artifact string) (io.Read
 	result, err := d.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(container),
 		Key:    aws.String(artifact),
-	})
+	}, sdkCallOptions(ctx)...)
 	if err != nil {
 		return nil, fmt.Errorf("get object %s/%s: %w", container, artifact, err)
 	}
@@ -100,7 +103,7 @@ func (d *S3Driver) Delete(ctx context.Context, container, artifact string) error
 	_, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(container),
 		Key:    aws.String(artifact),
-	})
+	}, sdkCallOptions(ctx)...)
 	if err != nil {
 		return fmt.Errorf("delete object %s/%s: %w", container, artifact, err)
 	}
@@ -137,7 +140,7 @@ func (d *S3Driver) Exists(ctx context.Context, container, artifact string) (bool
 	_, err := d.client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(container),
 		Key:    aws.String(artifact),
-	})
+	}, sdkCallOptions(ctx)...)
 	if err != nil {
 		if s3IsNotFound(err) {
 			return false, nil
