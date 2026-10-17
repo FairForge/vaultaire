@@ -82,11 +82,16 @@ func main() {
 	endpoint := flag.String("endpoint", env("WASABI_ENDPOINT", "https://s3.us-west-1.wasabisys.com"), "")
 	region := flag.String("region", env("WASABI_REGION", "us-west-1"), "")
 	bucket := flag.String("bucket", env("WASABI_BUCKET", "vaultaire"), "")
+	akEnv := flag.String("access-key-env", "WASABI_ACCESS_KEY", "env var holding the access key (any S3-class backend)")
+	skEnv := flag.String("secret-key-env", "WASABI_SECRET_KEY", "env var holding the secret key")
+	prefix := flag.String("prefix", "t-_probe/_probe/", "key prefix for the put mode's objects")
+	keep := flag.Bool("keep", false, "put: leave the objects in place (no delete after each call); clean the prefix up afterwards")
+	checksum := flag.String("checksum", "default", "SDK request checksum calculation: default (the SDK's: a trailing CRC on every PUT) | required (only where the API requires one)")
 	flag.Parse()
 
-	ak, sk := os.Getenv("WASABI_ACCESS_KEY"), os.Getenv("WASABI_SECRET_KEY")
+	ak, sk := os.Getenv(*akEnv), os.Getenv(*skEnv)
 	if ak == "" || sk == "" {
-		fmt.Fprintln(os.Stderr, "WASABI_ACCESS_KEY / WASABI_SECRET_KEY required")
+		fmt.Fprintf(os.Stderr, "%s / %s required\n", *akEnv, *skEnv)
 		os.Exit(2)
 	}
 	opts := []drivers.TransportOption{drivers.WithHTTP1Only(), drivers.WithResponseHeaderTimeout(60 * time.Second)}
@@ -101,7 +106,14 @@ func main() {
 		if err != nil {
 			panic(err)
 		}
-		return s3.NewFromConfig(cfg, func(o *s3.Options) { o.BaseEndpoint = aws.String(*endpoint); o.UsePathStyle = true })
+		return s3.NewFromConfig(cfg, func(o *s3.Options) {
+			o.BaseEndpoint = aws.String(*endpoint)
+			o.UsePathStyle = true
+			if *checksum == "required" {
+				o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
+				o.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
+			}
+		})
 	}
 	client := mk(hc)
 	freshClient := mk(drivers.TunedHTTPClient(drivers.WithHTTP1Only(), drivers.WithFreshConnections()))
@@ -140,14 +152,16 @@ func main() {
 			case "headobject":
 				_, e = c.HeadObject(cctx, &s3.HeadObjectInput{Bucket: aws.String(*bucket), Key: aws.String(*key)})
 			case "put":
-				k := fmt.Sprintf("t-_probe/_probe/stalltest-%d-%d", os.Getpid(), n)
+				k := fmt.Sprintf("%sstalltest-%d-%d", *prefix, os.Getpid(), n)
 				buf := make([]byte, *size)
 				_, _ = rand.Read(buf)
 				_, e = c.PutObject(cctx, &s3.PutObjectInput{Bucket: aws.String(*bucket), Key: aws.String(k), Body: bytesReader(buf), ContentLength: aws.Int64(*size)})
 				nbytes = *size
-				dctx, dc := context.WithTimeout(context.Background(), 30*time.Second)
-				_, _ = c.DeleteObject(dctx, &s3.DeleteObjectInput{Bucket: aws.String(*bucket), Key: aws.String(k)})
-				dc()
+				if !*keep {
+					dctx, dc := context.WithTimeout(context.Background(), 30*time.Second)
+					_, _ = c.DeleteObject(dctx, &s3.DeleteObjectInput{Bucket: aws.String(*bucket), Key: aws.String(k)})
+					dc()
+				}
 			case "get":
 				out, ge := c.GetObject(cctx, &s3.GetObjectInput{Bucket: aws.String(*bucket), Key: aws.String(*key)})
 				e = ge
