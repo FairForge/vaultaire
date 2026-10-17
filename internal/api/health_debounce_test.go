@@ -74,13 +74,34 @@ func TestHealth_OneFailedProbeIsNotAnOutage(t *testing.T) {
 	assert.Equal(t, "healthy", healthOf(t, s)["status"])
 }
 
-// A backend whose very first probe fails (a dead key at boot) is unhealthy
-// at its second, ~30 s later — not never.
-func TestHealth_ADeadBackendIsUnhealthyAtItsSecondProbe(t *testing.T) {
+// RP9-9 (Prompt 10 Part 0.3): RegisterBackend seeds Healthy and two
+// failures in a row used to be needed whatever the backend's past, so after
+// every slot switch /health said "healthy" for ~30 s with eleven dead iDrive
+// drivers and vaultaire_backend_health read 1 for them until their second
+// probe. A backend that has never answered a probe has no record to give
+// the benefit of the doubt to: it is unhealthy at its first failure. The
+// two-in-a-row rule is for a backend that has succeeded at least once.
+func TestHealth_ABackendWithNoSuccessYetIsUnhealthyAtItsFirstFailedProbe(t *testing.T) {
 	s := newTestServerWithHealthChecker(t)
 	s.healthChecker.RegisterBackend("idrive")
+	s.healthChecker.RegisterBackend("lyve")
+	s.healthChecker.UpdateHealth("lyve", true, 10*time.Millisecond, nil)
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(newBackendCollector(s.healthChecker, nil))
+	assert.Equal(t, "healthy", healthOf(t, s)["status"], "registered, not yet probed: nothing to report")
+
 	s.healthChecker.UpdateHealth("idrive", false, 0, errors.New("AccessDenied"))
-	assert.Equal(t, "healthy", healthOf(t, s)["status"])
+
+	resp := healthOf(t, s)
+	assert.Equal(t, "degraded", resp["status"], "its first probe failed and it has never answered one")
+	assert.Equal(t, "probe failing on idrive", resp["reason"])
+	assert.Contains(t, scrape(t, reg), `vaultaire_backend_health{backend="idrive"} 0`)
+	assert.False(t, s.healthChecker.GetBackendStates()["idrive"].Healthy)
+
+	// Once it has answered, one failure is not an outage again.
+	s.healthChecker.UpdateHealth("idrive", true, 10*time.Millisecond, nil)
 	s.healthChecker.UpdateHealth("idrive", false, 0, errors.New("AccessDenied"))
-	assert.Equal(t, "unhealthy", healthOf(t, s)["status"])
+	assert.Equal(t, "healthy", healthOf(t, s)["status"], "it has succeeded: the two-in-a-row rule applies")
+	s.healthChecker.UpdateHealth("idrive", false, 0, errors.New("AccessDenied"))
+	assert.Equal(t, "degraded", healthOf(t, s)["status"])
 }

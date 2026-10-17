@@ -199,7 +199,10 @@ timed in `vaultaire_driver_op_seconds{driver,op}` (head, get_first_byte,
 put, delete, list, probe; a GET to its first byte, a PUT without the
 client's body time; rule DriverOpSlow on the primary).
 **`vaultaire_backend_health` is 0 after TWO failed probes in a row** (≥ 30 s
-of silence across two probes) and 1 again after one success; one failed
+of silence across two probes) and 1 again after one success — **and after
+ONE failed probe for a backend that has never had a successful one** (RP9-9,
+Prompt 10 Part 0.3: the state is seeded healthy at boot, so after every slot
+switch the eleven dead iDrive drivers read 1 for ~30 s); one failed
 probe still counts in `vaultaire_backend_probe_failures_total` and shows its
 error in `/health/backends` (`last_error`) and the Warn line, but no longer
 makes `/health` `degraded`. On 2026-10-17 most of Wasabi's 199

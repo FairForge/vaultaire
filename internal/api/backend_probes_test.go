@@ -235,6 +235,7 @@ func TestProbeBackendOnce_ProbeIsBoundedByTimeout(t *testing.T) {
 	// wedge the health loop.
 	s := &Server{startTime: time.Now(), healthChecker: NewBackendHealthChecker(), logger: zap.NewNop()}
 	s.healthChecker.RegisterBackend("geyser")
+	s.healthChecker.UpdateHealth("geyser", true, 0, nil) // it has answered before (RP9-9)
 	hung := backendCheck{name: "geyser", timeout: 20 * time.Millisecond, probe: func(ctx context.Context) error {
 		<-ctx.Done()
 		return ctx.Err()
