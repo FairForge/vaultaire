@@ -69,8 +69,9 @@ Sync bridges through the real driver), `onedrive-bench` (the fleet through the r
    a customer; re-run on a quiet box before calling it a Cloudflare fact. → §7.7.
 6. **Residency is correct and slow**: a bucket pinned to Frankfurt answers small ops 100–130
    ms slower from SLC and read a 256 MiB multipart object at 4 MB/s on one connection
-   (chunked: 36 MB/s). `parallel_get` does not cover region drivers yet, and every byte
-   still transits SLC. → §7.6.
+   (chunked: 36 MB/s). ~~`parallel_get` does not cover region drivers yet~~ — **correction
+   2026-10-17 (WP-P8 B1): it did; this lab ran with the flag OFF for its tenant, and the
+   fast Dallas reads were the chunked path** — and every byte still transits SLC. → §7.6.
 7. **Every S3 backend is a per-connection lottery**: iDrive 7.9–103 MB/s and Lyve 1–84
    MB/s on single 64 MB reads, 37–241 MB/s on 10-10. Parallel ranges (the chunked path,
    `parallel_get`, multipart) are what make throughput repeatable, on every leg.
@@ -205,7 +206,10 @@ Reading it:
   small op from SLC and a whole-object multipart read came back at 4 MB/s on one
   connection (the chunked read at 36 MB/s). A European customer reading a Frankfurt bucket
   goes SLC → Frankfurt → SLC → Europe. Residency works; it is not a performance feature
-  until there is a hub in Europe or the parallel reader covers region drivers.
+  until there is a hub in Europe. (Correction 2026-10-17: the parallel reader already
+  covered region drivers — the lab's flag was off; with it on, Frankfurt read 24–55 MB/s
+  sealed and 37–42 plaintext from SLC, `WP-P8.md` Part B — each range is still one
+  high-RTT connection, so the hub stands.)
 - **Vault and Public behave the same through the lab as through prod** (Geyser 20–25 MB/s
   reads; R2 83–97 MB/s reads, 273 MB/s multipart in), so the tier numbers in §2.1 are the
   product's, not Lyve's.
@@ -472,8 +476,10 @@ And the legs that are not in the mix, with the measurement that puts them there:
 5. **Two small fixes on `/cdn`:** a `Cache-Control` header so small objects are cached
    (today `DYNAMIC`), and documentation that an overwritten public object is served stale
    until the bucket's max-age expires — new key on new content.
-6. **`parallel_get` must cover the region drivers** before residency is sold as fast; a
-   Frankfurt bucket read whole from SLC at 4 MB/s on one connection.
+6. ~~**`parallel_get` must cover the region drivers**~~ — it does (correction 2026-10-17,
+   WP-P8 B1: the lab's flag was off); what residency needs to be sold as fast is a hub in
+   Europe (RP8-4), not the reader. The 4 MB/s was one connection's bad luck: 23–36 MB/s
+   single-stream on 10-17.
 7. **Re-run the Cloudflare pass from a quiet box** before the `unexpected EOF` on a 1 GiB
    read and the 156 s 8 MB read are called Cloudflare facts; the remote vantages did not
    reproduce them. If they recur, it is a `stored.ge` zone setting, not a product bug.
