@@ -213,8 +213,9 @@ makes `/health` `degraded`. On 2026-10-17 most of Wasabi's 199
 `vaultaire_region_create_refused_total{region,reason}` counts bucket
 creations refused for their region on S3, the management API and the
 dashboard: `unknown` (`region="other"`), `not_enabled` (no driver here) and
-`down` (enabled, but its `idrive-<region>` driver is unhealthy by the probe
-or its breaker is open: 503 + `Retry-After`). No rule: the region driver's
+`down` (enabled, but its `idrive-<region>` driver is unhealthy by the probe,
+has not answered a probe since boot, or its breaker is open: 503 +
+`Retry-After`). No rule: the region driver's
 own probe rule (`BackendProbeFailing`) already pages, and a refusal is the
 gate doing its job.
 

@@ -169,16 +169,18 @@ func (b *BackendHealthChecker) failingBackends() []string {
 	return out
 }
 
-// backendHealthy is one backend's probe verdict; probed is false when no
-// probe state exists for it (never registered, never probed).
-func (b *BackendHealthChecker) backendHealthy(id string) (healthy, probed bool) {
+// backendProvenUp is one backend's probe verdict for the region gate: up =
+// healthy AND at least one probe has succeeded (RegisterBackend seeds
+// Healthy before the first probe runs). known is false when no probe state
+// exists for it at all (never registered: tests, a dev box without probes).
+func (b *BackendHealthChecker) backendProvenUp(id string) (up, known bool) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	st, ok := b.backends[id]
 	if !ok {
 		return false, false
 	}
-	return st.Healthy, true
+	return st.Healthy && !st.LastSuccess.IsZero(), true
 }
 
 // GetBackendStates returns all backend states

@@ -24,7 +24,10 @@ import (
 //     not_enabled: 400 InvalidLocationConstraint / region_unavailable);
 //   - and, unless it is the default region, healthy by the probe (the
 //     /health rule: unhealthy after two failed probes in a row, or at the
-//     first while it has never answered one) with its breaker not OPEN
+//     first while it has never answered one) AND answered at least one probe
+//     (the state is seeded healthy at boot: the prod proof of #753 saw two
+//     dead regions offered before their staggered first probe ran), with its
+//     breaker not OPEN
 //     (half-open lets the next call through, as engine.CanAsk) — else down:
 //     503 ServiceUnavailable + Retry-After / 503 region_unavailable_now.
 //
@@ -71,7 +74,7 @@ func (s *Server) regionCreateState(region string) regionCreateState {
 	}
 	backend := "idrive-" + region
 	if s.healthChecker != nil {
-		if healthy, probed := s.healthChecker.backendHealthy(backend); probed && !healthy {
+		if up, known := s.healthChecker.backendProvenUp(backend); known && !up {
 			return regionDown
 		}
 	}
