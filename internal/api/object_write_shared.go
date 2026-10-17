@@ -503,7 +503,7 @@ const copyHeadAttrsToVersionSQL = `
 
 // newUploadID returns "upload-" + 32 hex chars from crypto/rand (R5-28: the
 // old unix-nanos ids were predictable). Hex only — the id names the staging
-// directory under multipartTempBase.
+// directory under the staging root (MULTIPART_STAGING_DIR).
 func newUploadID() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {

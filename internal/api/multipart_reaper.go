@@ -13,7 +13,7 @@ import (
 
 // MultipartReaper closes the multipart disk-fill DoS (WP-10-minimal, H-1).
 //
-// Part data streams to /tmp/vaultaire-multipart/{uploadID}/ on local disk and
+// Part data streams to <MULTIPART_STAGING_DIR>/{uploadID}/ on local disk and
 // is unbilled until CompleteMultipartUpload (quota reserves at complete,
 // WP-1). Before the reaper existed, an initiated-but-never-completed upload
 // kept its part files forever: a malicious or crashed client could fill the
@@ -113,12 +113,13 @@ func (m *MultipartReaper) RunOnce(ctx context.Context) (MultipartReapResult, err
 // plaintext, on the staging disk until a reboot, because the passes above
 // only remove the directories of rows they read.
 func (m *MultipartReaper) sweepOrphanStaging(ctx context.Context) (int, error) {
-	entries, err := os.ReadDir(multipartTempBase)
+	root := multipartStagingDir()
+	entries, err := os.ReadDir(root)
 	if os.IsNotExist(err) {
 		return 0, nil
 	}
 	if err != nil {
-		return 0, fmt.Errorf("list %s: %w", multipartTempBase, err)
+		return 0, fmt.Errorf("list %s: %w", root, err)
 	}
 	cutoff := time.Now().Add(-orphanStagingGrace)
 	var ids []string

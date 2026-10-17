@@ -29,8 +29,10 @@ import (
 )
 
 const (
-	multipartTempBase = "/tmp/vaultaire-multipart"
-	maxPartNumber     = 10000
+	// defaultMultipartStagingDir is where parts stage unless
+	// MULTIPART_STAGING_DIR names another directory (multipart_staging_dir.go).
+	defaultMultipartStagingDir = "/tmp/vaultaire-multipart"
+	maxPartNumber              = 10000
 	// maxCompleteMultipartBodyBytes bounds the CompleteMultipartUpload XML
 	// body: 10,000 parts × ~150 bytes is ~1.5 MiB; S3 POST bodies are
 	// otherwise unlimited (R2's requestLimitsMiddleware note).
@@ -66,7 +68,7 @@ type memPart struct {
 // uploadIDPattern is the only shape an upload id can have: the current
 // `upload-<32 hex>` (newUploadID) and the pre-R3 `upload-<unix>-<nanos>` still
 // possible on rows that were in flight across the upgrade. The id names the
-// staging directory under multipartTempBase, so a request-supplied id is
+// staging directory under the staging root, so a request-supplied id is
 // checked against this BEFORE the tenant-scoped row lookup and before any
 // path is built from it — the row lookup is the authority, this is the
 // belt (CodeQL go/path-injection on the staging paths).
@@ -77,14 +79,14 @@ func validUploadID(id string) bool {
 	return uploadIDPattern.MatchString(id)
 }
 
-// multipartDir returns the temp directory for a specific upload's parts.
+// multipartDir returns the staging directory of an upload's parts.
 func multipartDir(uploadID string) string {
-	return filepath.Join(multipartTempBase, uploadID)
+	return filepath.Join(multipartStagingDir(), uploadID)
 }
 
-// partFilePath returns the temp file path for a specific part.
+// partFilePath returns the staging file of one part.
 func partFilePath(uploadID string, partNumber int) string {
-	return filepath.Join(multipartTempBase, uploadID, fmt.Sprintf("part-%05d", partNumber))
+	return filepath.Join(multipartStagingDir(), uploadID, fmt.Sprintf("part-%05d", partNumber))
 }
 
 func (s *Server) handleInitiateMultipartUpload(w http.ResponseWriter, r *http.Request, bucket, object string) {

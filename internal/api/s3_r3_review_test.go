@@ -649,7 +649,7 @@ func TestMultipart_MalformedUploadIDNeverTouchesTheFilesystem(t *testing.T) {
 		}
 	}
 	for _, id := range []string{"upload-zz", "upload-1-2-3", "x"} {
-		_, err := os.Stat(filepath.Join(multipartTempBase, id))
+		_, err := os.Stat(multipartDir(id))
 		assert.True(t, os.IsNotExist(err), "no directory for %q", id)
 	}
 	assert.True(t, validUploadID("upload-"+strings.Repeat("0", 32)))
