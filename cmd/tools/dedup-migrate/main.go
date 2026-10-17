@@ -385,6 +385,13 @@ func bootstrap(logger *zap.Logger) (*sql.DB, *engine.CoreEngine) {
 	eng := engine.NewEngine(db, logger, &engine.Config{
 		DefaultBackend: "local",
 	})
+	// Every driver is registered before eng.Seal() below: a refusal here is
+	// a boot-order bug (WP-R6-2).
+	addDriver := func(name string, d engine.Driver) {
+		if err := eng.AddDriver(name, d); err != nil {
+			logger.Fatal("driver registration refused", zap.String("name", name), zap.Error(err))
+		}
+	}
 
 	dataPath := os.Getenv("DATA_PATH")
 	if dataPath == "" {
@@ -394,13 +401,13 @@ func bootstrap(logger *zap.Logger) (*sql.DB, *engine.CoreEngine) {
 		logger.Fatal("create data dir", zap.Error(mkErr))
 	}
 	localDriver := drivers.NewLocalDriver(dataPath, logger)
-	eng.AddDriver("local", localDriver)
+	addDriver("local", localDriver)
 	logger.Info("local driver added", zap.String("path", dataPath))
 
 	if accessKey := os.Getenv("S3_ACCESS_KEY"); accessKey != "" {
 		secretKey := os.Getenv("S3_SECRET_KEY")
 		if d, dErr := drivers.NewS3CompatDriver(accessKey, secretKey, logger); dErr == nil {
-			eng.AddDriver("s3", d)
+			addDriver("s3", d)
 			logger.Info("S3 driver added")
 		}
 	}
@@ -412,7 +419,7 @@ func bootstrap(logger *zap.Logger) (*sql.DB, *engine.CoreEngine) {
 			region = "us-east-1"
 		}
 		if d, dErr := drivers.NewLyveDriver(accessKey, secretKey, "", region, logger); dErr == nil {
-			eng.AddDriver("lyve", d)
+			addDriver("lyve", d)
 			logger.Info("Lyve driver added")
 		}
 	}
@@ -424,7 +431,7 @@ func bootstrap(logger *zap.Logger) (*sql.DB, *engine.CoreEngine) {
 			endpoint = "https://us.quotaless.cloud:8000"
 		}
 		if d, dErr := drivers.NewQuotalessDriver(accessKey, secretKey, endpoint, logger); dErr == nil {
-			eng.AddDriver("quotaless", d)
+			addDriver("quotaless", d)
 			logger.Info("quotaless driver added")
 		}
 	}
@@ -440,7 +447,7 @@ func bootstrap(logger *zap.Logger) (*sql.DB, *engine.CoreEngine) {
 			geyserOpts = append(geyserOpts, drivers.WithGeyserEndpoint(ep))
 		}
 		if d, dErr := drivers.NewGeyserDriver(accessKey, secretKey, bucket, "", logger, geyserOpts...); dErr == nil {
-			eng.AddDriver("geyser", d)
+			addDriver("geyser", d)
 			logger.Info("geyser driver added")
 		}
 	}
@@ -453,7 +460,7 @@ func bootstrap(logger *zap.Logger) (*sql.DB, *engine.CoreEngine) {
 			defaultEndpoint = drivers.IDriveRegionEndpoint(os.Getenv, defaultRegion)
 		}
 		if d, dErr := drivers.NewIDriveDriver(accessKey, secretKey, defaultEndpoint, defaultRegion, logger); dErr == nil {
-			eng.AddDriver("idrive", d)
+			addDriver("idrive", d)
 			logger.Info("iDrive driver added")
 		}
 		// Same rule as cmd/vaultaire (WP-R7-1): a region driver only with its
@@ -467,14 +474,14 @@ func bootstrap(logger *zap.Logger) (*sql.DB, *engine.CoreEngine) {
 				continue
 			}
 			if d, dErr := drivers.NewIDriveDriver(ak, sk, drivers.IDriveRegionEndpoint(os.Getenv, region), region, logger); dErr == nil {
-				eng.AddDriver("idrive-"+region, d)
+				addDriver("idrive-"+region, d)
 			}
 		}
 	}
 
 	if os.Getenv("TENANT_1_ID") != "" {
 		if d, dErr := drivers.NewOneDriveFleetDriver(logger); dErr == nil {
-			eng.AddDriver("permafrost", d) // registration key = main.go's = d.Name(); "onedrive" wrote 2,613 orphan head rows (R7-10)
+			addDriver("permafrost", d) // registration key = main.go's = d.Name(); "onedrive" wrote 2,613 orphan head rows (R7-10)
 			logger.Info("OneDrive fleet driver added")
 		}
 	}
@@ -494,6 +501,7 @@ func bootstrap(logger *zap.Logger) (*sql.DB, *engine.CoreEngine) {
 		}
 	}
 	eng.SetPrimary(storageMode)
+	eng.Seal() // every driver is registered: AddDriver is refused from here (WP-R6-2)
 
 	return db, eng
 }

@@ -57,7 +57,7 @@ func TestEngine_ADeclaredTargetOnlyBackendIsNeverAFailoverDestination(t *testing
 	assert.ErrorIs(t, err, ErrAllBackendsUnavailable)
 	assert.Equal(t, int32(1), primary.puts.Load())
 	assert.Zero(t, lyve.puts.Load(), "a locked lyve bucket never takes someone else's object")
-	assert.NotContains(t, eng.buildWriteCandidateList(""), "lyve")
+	assert.NotContains(t, eng.buildWriteCandidateList(eng.view(), ""), "lyve")
 }
 
 // Control: an unlocked lyve stays the general fail-over leg (R6-04).

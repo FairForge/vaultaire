@@ -112,25 +112,25 @@ func TestBuildWriteCandidateList_TargetOnlyBackends(t *testing.T) {
 	eng.SetPrimary("idrive")
 
 	t.Run("STANDARD write never falls over to a target-only backend", func(t *testing.T) {
-		c := eng.buildWriteCandidateList("idrive")
+		c := eng.buildWriteCandidateList(eng.view(), "idrive")
 		assert.Equal(t, "idrive", c[0])
 		assert.ElementsMatch(t, []string{"idrive", "lyve", "s3"}, c)
 	})
 	t.Run("explicit target is honoured first, then general-purpose backends", func(t *testing.T) {
 		for _, target := range []string{"r2", "geyser", "permafrost", "idrive-eu-west-1"} {
-			c := eng.buildWriteCandidateList(target)
+			c := eng.buildWriteCandidateList(eng.view(), target)
 			assert.Equal(t, target, c[0], "target %s", target)
 			assert.ElementsMatch(t, []string{target, "idrive", "lyve", "s3"}, c, "target %s", target)
 		}
 	})
 	t.Run("a strict target is asked alone (Prompt 2b.4 E1.1)", func(t *testing.T) {
-		assert.Equal(t, []string{"sync"}, eng.buildWriteCandidateList("sync"))
-		c, err := eng.readCandidates("sync", "get")
+		assert.Equal(t, []string{"sync"}, eng.buildWriteCandidateList(eng.view(), "sync"))
+		c, err := eng.readCandidates(eng.view(), "sync", "get")
 		require.NoError(t, err)
 		assert.Equal(t, []string{"sync"}, c)
 		// WP-R6-1: every recorded backend is read alone — tape included (it
 		// used to keep a read fall-over to every other backend).
-		c, err = eng.readCandidates("geyser", "get")
+		c, err = eng.readCandidates(eng.view(), "geyser", "get")
 		require.NoError(t, err)
 		assert.Equal(t, []string{"geyser"}, c)
 	})
@@ -139,7 +139,7 @@ func TestBuildWriteCandidateList_TargetOnlyBackends(t *testing.T) {
 		g.AddDriver("geyser", newMemDriver("geyser"))
 		g.AddDriver("idrive", newMemDriver("idrive"))
 		g.SetPrimary("geyser")
-		assert.Contains(t, g.buildWriteCandidateList("idrive"), "geyser")
+		assert.Contains(t, g.buildWriteCandidateList(g.view(), "idrive"), "geyser")
 	})
 }
 

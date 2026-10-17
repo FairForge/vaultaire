@@ -45,7 +45,9 @@ options, a `List` without `prefix`, a `GetMetrics()` on drivers,
 `engine.ErrNotFound`/`engine.ErrAccessDenied` sentinels (`engine.ErrNotFound`
 is a constructor returning `NotFoundError`), `engine.RegisterDriver`, and
 `internal/engine/registry.go`. Drivers are added with `eng.AddDriver(key, drv)`
-in `cmd/vaultaire/main.go`; the engine addresses them by that key.
+in `cmd/vaultaire/main.go` (its `addDriver`), before `eng.Seal()` — one after
+that is refused with `engine.ErrEngineServing` (WP-R6-2); the engine addresses
+them by that key.
 
 ## What the engine assumes of every driver
 

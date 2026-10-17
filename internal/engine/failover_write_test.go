@@ -184,14 +184,14 @@ func TestBuildWriteCandidateList(t *testing.T) {
 	eng.AddDriver("local", &fileWritingDriver{dir: t.TempDir()})
 
 	t.Run("local excluded when durable primary", func(t *testing.T) {
-		candidates := eng.buildWriteCandidateList("idrive")
+		candidates := eng.buildWriteCandidateList(eng.view(), "idrive")
 		assert.NotContains(t, candidates, "local")
 		assert.Contains(t, candidates, "idrive")
 		assert.Contains(t, candidates, "s3")
 	})
 
 	t.Run("local included when explicitly targeted", func(t *testing.T) {
-		candidates := eng.buildWriteCandidateList("local")
+		candidates := eng.buildWriteCandidateList(eng.view(), "local")
 		assert.Equal(t, "local", candidates[0])
 	})
 
@@ -199,7 +199,7 @@ func TestBuildWriteCandidateList(t *testing.T) {
 		localPrimary := NewEngine(nil, logger, &Config{DefaultBackend: "local"})
 		localPrimary.AddDriver("local", &fileWritingDriver{dir: t.TempDir()})
 		localPrimary.AddDriver("idrive", &mockDriver{name: "idrive"})
-		candidates := localPrimary.buildWriteCandidateList("idrive")
+		candidates := localPrimary.buildWriteCandidateList(localPrimary.view(), "idrive")
 		assert.Contains(t, candidates, "local")
 	})
 }

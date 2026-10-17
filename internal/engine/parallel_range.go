@@ -13,14 +13,14 @@ import (
 // Stage 1a Prompt 6 Part 0): every caller of an existing object names its
 // row's backend, so a call that names none is a NULL backend_name row or a
 // caller that dropped it on the way.
-func (e *CoreEngine) preferredBackend(ctx context.Context, op, container, artifact string) string {
+func (e *CoreEngine) preferredBackend(ctx context.Context, v view, op, container, artifact string) string {
 	if b := RecordedBackend(ctx); b != "" {
 		return b
 	}
 	unrecordedBackendCalls.WithLabelValues(op).Inc()
 	e.logger.Warn("engine call names no recorded backend — asked the primary (a NULL backend_name row, or a caller that dropped the row's backend)",
 		zap.String("op", op), zap.String("container", container), zap.String("artifact", artifact))
-	return e.GetPrimary()
+	return v.primary
 }
 
 // ParallelRangeSource is where a parallel ranged GET of one object reads
@@ -31,10 +31,9 @@ func (e *CoreEngine) preferredBackend(ctx context.Context, op, container, artifa
 // outcome with RecordReadOutcome, so 64 ranges are one logical operation to
 // the breaker, as the single GET they replace was.
 func (e *CoreEngine) ParallelRangeSource(ctx context.Context, container, artifact string) (string, VersionedRangeGetter, bool) {
-	name := e.preferredBackend(ctx, "parallel_get", container, artifact)
-	e.mu.RLock()
-	d, exists := e.drivers[name]
-	e.mu.RUnlock()
+	v := e.view()
+	name := e.preferredBackend(ctx, v, "parallel_get", container, artifact)
+	d, exists := v.drivers[name]
 	if !exists {
 		return "", nil, false
 	}

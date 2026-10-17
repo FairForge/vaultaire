@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -24,8 +25,18 @@ import (
 // backup replication and age-based tiering that used to hang off this struct
 // were inert in production and were removed in Review R15 (WP-R6-4/5/6).
 type CoreEngine struct {
+	// drivers and primary are read and written under mu, and only there
+	// (WP-R6-2; engine_locking_test.go lists the sites). A call takes one
+	// view of both at its start (view) and works from it: the admin
+	// dashboard swaps the primary on a serving engine (SwapPrimary). The map
+	// is copy-on-write — AddDriver publishes a new one, never writes a map a
+	// view holds — so a view's map is read after the lock is released.
 	drivers map[string]Driver
 	primary string
+	// sealed is set by Seal (main, once every driver is registered, before
+	// it serves): from then on the set of backends is fixed and AddDriver is
+	// refused (ErrEngineServing). Guarded by mu.
+	sealed bool
 
 	logger   *zap.Logger
 	db       *sql.DB
@@ -67,11 +78,28 @@ func NewEngine(db *sql.DB, logger *zap.Logger, config *Config) *CoreEngine {
 	return e
 }
 
-// AddDriver adds a storage driver
-func (e *CoreEngine) AddDriver(name string, driver Driver) {
+// ErrEngineServing is AddDriver's answer once the engine is sealed: the set
+// of backends is fixed at boot (the boot checks — shared stores, routing
+// truth — ran over it, and every breaker was registered with it).
+var ErrEngineServing = errors.New("the engine is serving: drivers are registered before it is sealed")
+
+// AddDriver registers a storage driver under name (a name already registered
+// is replaced). Refused with ErrEngineServing, and logged, once the engine is
+// sealed (WP-R6-2). Before that a registration may run beside calls (a test
+// swapping a driver in): the map is copy-on-write, a call keeps the one its
+// view took.
+func (e *CoreEngine) AddDriver(name string, driver Driver) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.drivers[name] = driver
+	if e.sealed {
+		e.logger.Error("driver registration refused: the engine is already serving",
+			zap.String("name", name))
+		return fmt.Errorf("add driver %q: %w", name, ErrEngineServing)
+	}
+	next := make(map[string]Driver, len(e.drivers)+1)
+	maps.Copy(next, e.drivers)
+	next[name] = driver
+	e.drivers = next
 	if e.primary == "" {
 		e.primary = name
 	}
@@ -80,13 +108,55 @@ func (e *CoreEngine) AddDriver(name string, driver Driver) {
 	e.logger.Info("driver added",
 		zap.String("name", name),
 		zap.Bool("is_primary", e.primary == name))
+	return nil
 }
 
-// SetPrimary sets the primary driver
+// Seal closes registration: AddDriver is refused from now on. main calls it
+// once every driver is registered, before the server starts.
+func (e *CoreEngine) Seal() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.sealed = true
+}
+
+// SetPrimary sets the primary driver, unchecked: boot (after main's own
+// checks) and tests. The admin's lever is SwapPrimary.
 func (e *CoreEngine) SetPrimary(name string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.primary = name
+}
+
+// SwapPrimary makes name the write primary if it may be one
+// (CheckPrimaryEligible) — the check and the swap under one lock, so the
+// backend checked is the backend set — and returns the primary it replaced.
+// Calls already running keep the primary their view took; the swap is
+// process memory only (a restart reads STORAGE_MODE again).
+func (e *CoreEngine) SwapPrimary(name string) (string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := primaryEligible(e.drivers, name); err != nil {
+		return e.primary, err
+	}
+	previous := e.primary
+	e.primary = name
+	return previous, nil
+}
+
+// view is what one engine call reads of the registry: the primary and the
+// driver map, taken together under e.mu. The map is never written once
+// published (AddDriver copies), so it is read without the lock.
+type view struct {
+	primary string
+	drivers map[string]Driver
+}
+
+// view takes the call's view. Every entry point takes exactly one and
+// threads it through.
+func (e *CoreEngine) view() view {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return view{primary: e.primary, drivers: e.drivers}
 }
 
 // GetDriverNames returns a sorted list of registered driver names.
@@ -110,9 +180,7 @@ func (e *CoreEngine) GetPrimary() string {
 
 // CheckDriver runs HealthCheck on a single named driver.
 func (e *CoreEngine) CheckDriver(ctx context.Context, name string) error {
-	e.mu.RLock()
-	driver, exists := e.drivers[name]
-	e.mu.RUnlock()
+	driver, exists := e.view().drivers[name]
 	if !exists {
 		return fmt.Errorf("driver %q not found", name)
 	}
@@ -129,14 +197,15 @@ func (e *CoreEngine) Get(ctx context.Context, container, artifact string) (io.Re
 	if err := e.requireTenant(ctx, "get", container, artifact); err != nil {
 		return nil, err
 	}
-	candidates, err := e.readCandidates(e.preferredBackend(ctx, "get", container, artifact), "get")
+	v := e.view()
+	candidates, err := e.readCandidates(v, e.preferredBackend(ctx, v, "get", container, artifact), "get")
 	if err != nil {
 		return nil, fmt.Errorf("get %s/%s: %w", container, artifact, err)
 	}
 
 	var reader io.ReadCloser
 	usedBackend, err := e.failover.ExecuteOp(ctx, "get", candidates, func(driverName string) error {
-		d, ok := e.drivers[driverName]
+		d, ok := v.drivers[driverName]
 		if !ok {
 			return fmt.Errorf("driver %s not found", driverName)
 		}
@@ -162,14 +231,15 @@ func (e *CoreEngine) GetRange(ctx context.Context, container, artifact string, o
 	if err := e.requireTenant(ctx, "get_range", container, artifact); err != nil {
 		return nil, err
 	}
-	candidates, err := e.readCandidates(e.preferredBackend(ctx, "get_range", container, artifact), "get_range")
+	v := e.view()
+	candidates, err := e.readCandidates(v, e.preferredBackend(ctx, v, "get_range", container, artifact), "get_range")
 	if err != nil {
 		return nil, fmt.Errorf("get range %s/%s: %w", container, artifact, err)
 	}
 
 	var reader io.ReadCloser
 	_, err = e.failover.ExecuteOp(ctx, "get_range", candidates, func(driverName string) error {
-		d, ok := e.drivers[driverName]
+		d, ok := v.drivers[driverName]
 		if !ok {
 			return fmt.Errorf("driver %s not found", driverName)
 		}
@@ -236,11 +306,13 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 	// the primary for the resilient tier's backend (R6-03; the 2026-07-31 fix
 	// had only closed the "local" branch). The engine must never re-derive
 	// placement.
+	// One view for the whole write: the target is resolved and the
+	// candidates built against the same primary, whatever a swap does
+	// meanwhile (WP-R6-2).
 	options := ApplyPutOptions(opts...)
-	e.mu.RLock()
-	targetBackend, _ := ResolveStorageClass(options.StorageClass, e.primary, e.drivers)
-	_, targetRegistered := e.drivers[targetBackend]
-	e.mu.RUnlock()
+	v := e.view()
+	targetBackend, _ := ResolveStorageClass(options.StorageClass, v.primary, v.drivers)
+	_, targetRegistered := v.drivers[targetBackend]
 
 	// A strict target with no driver on this process (a redeploy without
 	// SYNC_WEBDAV_URLS) is a 503 the client retries — never the primary in
@@ -256,7 +328,7 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 	// general-purpose durable backends — target-only backends (local, r2,
 	// geyser, permafrost, idrive-<region>) are excluded unless targeted or
 	// primary (WP-F, R6-04).
-	candidates := e.buildWriteCandidateList(targetBackend)
+	candidates := e.buildWriteCandidateList(v, targetBackend)
 
 	// Failover body safety: retries share ONE reader, so an attempt that
 	// consumed bytes leaves the next backend a drained stream. Seekable
@@ -278,7 +350,7 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 	firstAttempt := true
 
 	usedBackend, err := e.failover.ExecuteOp(ctx, "put", candidates, func(driverName string) error {
-		d, ok := e.drivers[driverName]
+		d, ok := v.drivers[driverName]
 		if !ok {
 			return fmt.Errorf("driver %s not found", driverName)
 		}
@@ -358,7 +430,8 @@ func (e *CoreEngine) Delete(ctx context.Context, container, artifact string) err
 	if err := e.requireTenant(ctx, "delete", container, artifact); err != nil {
 		return err
 	}
-	targets := []string{e.preferredBackend(ctx, "delete", container, artifact)}
+	v := e.view()
+	targets := []string{e.preferredBackend(ctx, v, "delete", container, artifact)}
 	for _, b := range KnownCopies(ctx) {
 		if !slices.Contains(targets, b) {
 			targets = append(targets, b)
@@ -368,7 +441,7 @@ func (e *CoreEngine) Delete(ctx context.Context, container, artifact string) err
 	var failure, miss error
 	deleted := false
 	for _, name := range targets {
-		err := e.deleteOn(ctx, name, container, artifact)
+		err := e.deleteOn(ctx, v, name, container, artifact)
 		switch {
 		case err == nil:
 			deleted = true
@@ -392,10 +465,8 @@ func (e *CoreEngine) Delete(ctx context.Context, container, artifact string) err
 }
 
 // deleteOn deletes the artifact on one named backend, through its breaker.
-func (e *CoreEngine) deleteOn(ctx context.Context, name, container, artifact string) error {
-	e.mu.RLock()
-	d, registered := e.drivers[name]
-	e.mu.RUnlock()
+func (e *CoreEngine) deleteOn(ctx context.Context, v view, name, container, artifact string) error {
+	d, registered := v.drivers[name]
 	if !registered {
 		return fmt.Errorf("delete %s/%s on %s: %w", container, artifact, name, e.unregisteredBackend(name, "delete"))
 	}
@@ -411,14 +482,15 @@ func (e *CoreEngine) deleteOn(ctx context.Context, name, container, artifact str
 
 // List returns artifacts in a container
 func (e *CoreEngine) List(ctx context.Context, container, prefix string) ([]Artifact, error) {
-	driver, ok := e.drivers[e.primary]
+	v := e.view()
+	driver, ok := v.drivers[v.primary]
 	if !ok {
 		return nil, fmt.Errorf("no driver available")
 	}
 
 	start := time.Now()
 	keys, err := driver.List(ctx, container, prefix)
-	observeDriverOp(e.primary, opList, start, 0)
+	observeDriverOp(v.primary, opList, start, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -437,7 +509,7 @@ func (e *CoreEngine) List(ctx context.Context, container, prefix string) ([]Arti
 
 // HealthCheck verifies all drivers and systems are healthy
 func (e *CoreEngine) HealthCheck(ctx context.Context) error {
-	for name, driver := range e.drivers {
+	for name, driver := range e.view().drivers {
 		if err := driver.HealthCheck(ctx); err != nil {
 			return fmt.Errorf("driver %s unhealthy: %w", name, err)
 		}
@@ -457,9 +529,10 @@ func (e *CoreEngine) WriteFailures() int64 { return e.writeFailures.Load() }
 
 // GetMetrics returns comprehensive metrics
 func (e *CoreEngine) GetMetrics(ctx context.Context) (map[string]interface{}, error) {
+	v := e.view()
 	metrics := map[string]interface{}{
-		"drivers":        len(e.drivers),
-		"primary":        e.primary,
+		"drivers":        len(v.drivers),
+		"primary":        v.primary,
 		"write_failures": e.writeFailures.Load(),
 	}
 	return metrics, nil
@@ -503,13 +576,13 @@ func (r *sizeTrackingReader) sourceErr() error {
 
 // buildCandidateList returns an ordered list of backends to try: preferred
 // first, then primary (if different), then any remaining registered backends.
-func (e *CoreEngine) buildCandidateList(preferred string) []string {
+func (e *CoreEngine) buildCandidateList(v view, preferred string) []string {
 	seen := make(map[string]bool)
 	var candidates []string
 
 	add := func(name string) {
 		if name != "" && !seen[name] {
-			if _, ok := e.drivers[name]; ok {
+			if _, ok := v.drivers[name]; ok {
 				candidates = append(candidates, name)
 				seen[name] = true
 			}
@@ -517,8 +590,8 @@ func (e *CoreEngine) buildCandidateList(preferred string) []string {
 	}
 
 	add(preferred)
-	add(e.primary)
-	for name := range e.drivers {
+	add(v.primary)
+	for name := range v.drivers {
 		add(name)
 	}
 	return candidates
@@ -609,11 +682,8 @@ func IsStrictTarget(name string) bool { return strictTarget(name) }
 // its place (Prompt 2b.5 F3.1: a redeploy without SYNC_WEBDAV_URLS fanned
 // every sync-row read out to the primary, which served whatever older copy
 // of the key it held, 200).
-func (e *CoreEngine) readCandidates(target, op string) ([]string, error) {
-	e.mu.RLock()
-	_, ok := e.drivers[target]
-	e.mu.RUnlock()
-	if !ok {
+func (e *CoreEngine) readCandidates(v view, target, op string) ([]string, error) {
+	if _, ok := v.drivers[target]; !ok {
 		return nil, e.unregisteredBackend(target, op)
 	}
 	return []string{target}, nil
@@ -632,18 +702,18 @@ func (e *CoreEngine) strictTargetUnregistered(name, op string) {
 // surface as a 5xx to the client, not as a silent write to the hub's local
 // disk, to the public store, to tape or to the wrong jurisdiction (which lies
 // about durability or placement, and bills the wrong tier).
-func (e *CoreEngine) buildWriteCandidateList(target string) []string {
-	if strictTarget(target) && target != e.primary {
-		if _, ok := e.drivers[target]; ok {
+func (e *CoreEngine) buildWriteCandidateList(v view, target string) []string {
+	if strictTarget(target) && target != v.primary {
+		if _, ok := v.drivers[target]; ok {
 			return []string{target}
 		}
 		e.strictTargetUnregistered(target, "put")
 		return nil
 	}
-	all := e.buildCandidateList(target)
+	all := e.buildCandidateList(v, target)
 	writable := make([]string, 0, len(all))
 	for _, name := range all {
-		if (writeOnlyWhenTargeted(name) || dormantBackends[name] || IsDeclaredTargetOnly(e.drivers[name])) && name != target && name != e.primary {
+		if (writeOnlyWhenTargeted(name) || dormantBackends[name] || IsDeclaredTargetOnly(v.drivers[name])) && name != target && name != v.primary {
 			continue
 		}
 		writable = append(writable, name)
@@ -663,10 +733,14 @@ var ErrNotPrimaryEligible = errors.New("backend cannot be the primary")
 // used to hand SetPrimary any string, including drivers that do not exist
 // (Review R12 — proven live: primary set to "r2" on a box without an r2
 // driver, after which every write would have failed).
+//
+// SwapPrimary runs the same check under the lock it swaps under.
 func (e *CoreEngine) CheckPrimaryEligible(name string) error {
-	e.mu.RLock()
-	d, registered := e.drivers[name]
-	e.mu.RUnlock()
+	return primaryEligible(e.view().drivers, name)
+}
+
+func primaryEligible(drivers map[string]Driver, name string) error {
+	d, registered := drivers[name]
 	if !registered {
 		return fmt.Errorf("%w: %q is not a registered backend", ErrNotPrimaryEligible, name)
 	}

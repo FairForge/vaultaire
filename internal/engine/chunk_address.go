@@ -98,9 +98,7 @@ func (e *CoreEngine) on(ctx context.Context, op, container, artifact, backend st
 	if err := e.requireTenant(ctx, op, container, artifact); err != nil {
 		return err
 	}
-	e.mu.RLock()
-	d, ok := e.drivers[backend]
-	e.mu.RUnlock()
+	d, ok := e.view().drivers[backend]
 	if !ok {
 		return fmt.Errorf("%w: %q", ErrBackendNotRegistered, backend)
 	}
@@ -193,10 +191,7 @@ func (e *CoreEngine) ExistsOn(ctx context.Context, backend, container, artifact 
 // whose only traffic is chunk reads, refusing half-open would keep it
 // refused for good.
 func (e *CoreEngine) CanAsk(backend string) error {
-	e.mu.RLock()
-	_, ok := e.drivers[backend]
-	e.mu.RUnlock()
-	if !ok {
+	if _, ok := e.view().drivers[backend]; !ok {
 		return fmt.Errorf("%w: %w: %q", ErrAllBackendsUnavailable, ErrBackendNotRegistered, backend)
 	}
 	e.failover.mu.RLock()
