@@ -317,6 +317,52 @@ func TestPutDeadline_ScalesWithSize(t *testing.T) {
 	}
 }
 
+// 2026-10-17 17:30 UTC, prod: a 2,482,615-byte chunk PUT to the Lyve primary
+// stalled, the deadline retry fired at 60 s — the whole base, since every
+// body under one unit got it — and aws-cli's default 60 s read timeout gave
+// up on the upload in the same second. An S3 PUT under one unit now gets
+// the base scaled by its size, never under putDeadlineFloor (10 s), so the
+// retry comes long before any client's timeout.
+func TestS3PutDeadline_ABodyUnderOneUnitScalesDownToTheFloor(t *testing.T) {
+	base := 60 * time.Second
+	for _, c := range []struct {
+		size int64
+		want time.Duration
+	}{
+		{0, base}, {-1, base}, // unknown: the base
+		{1, 10 * time.Second}, {2 << 20, 10 * time.Second},
+		{2482615, 10 * time.Second}, // the stalled chunk of 2026-10-17
+		{8 << 20, 10 * time.Second}, {16 << 20, 15 * time.Second}, {32 << 20, 30 * time.Second},
+		{64 << 20, base}, {64<<20 + 1, 2 * base}, {1 << 30, 16 * base},
+	} {
+		assert.Equal(t, c.want, s3PutDeadline(base, c.size), "size %d", c.size)
+	}
+	// A base under the floor IS the floor.
+	assert.Equal(t, 5*time.Second, s3PutDeadline(5*time.Second, 2<<20))
+	assert.Equal(t, 5*time.Second, s3PutDeadline(5*time.Second, 1))
+}
+
+func TestFixedBucketPut_ASmallStalledPutIsCutAtTheFloorNotTheBase(t *testing.T) {
+	// The base is prod's default; the floor is lowered so the test is quick.
+	// Under the base alone a 4 KiB body would wait 60 s here.
+	prev := putDeadlineFloor
+	putDeadlineFloor = 300 * time.Millisecond
+	t.Cleanup(func() { putDeadlineFloor = prev })
+	f := newStallS3()
+	f.stall = func(a putAttempt, n int) bool { return strings.HasSuffix(a.key, "chunk.bin") && n == 1 }
+	d := newDeadlineDriver(t, f, 60*time.Second)
+	body := randomBody(t, 4096)
+	before := retriesOf("wasabi")
+
+	start := time.Now()
+	err := d.Put(tctx(), "c", "chunk.bin", bytes.NewReader(body), engine.WithContentLength(int64(len(body))))
+	require.NoError(t, err)
+	assert.Less(t, time.Since(start), 8*time.Second, "cut at the floor, not the 60 s base")
+	require.Len(t, f.attemptsFor("c/chunk.bin", 0), 2, "the stalled PUT and ONE retry")
+	assert.Equal(t, body, f.objects["b/t-t1/c/chunk.bin"])
+	assert.Equal(t, float64(1), retriesOf("wasabi")-before)
+}
+
 func TestFixedBucketPutTimeout_EnvRule(t *testing.T) {
 	for _, c := range []struct {
 		val  string

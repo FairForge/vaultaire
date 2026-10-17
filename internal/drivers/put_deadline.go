@@ -32,7 +32,7 @@ import (
 // deadlinePutClient is the uploader's view of the S3 client. It gives every
 // PutObject and every UploadPart — the two calls that carry bytes — a
 // deadline of FIXED_BUCKET_PUT_TIMEOUT per 64 MiB of that request's body
-// (default 60 s; a 16 MiB part gets 60 s), and when the deadline passes,
+// (default 60 s; a smaller body gets the base scaled by its size, never under 10 s — a 2 MiB chunk 10 s, a 16 MiB part 15 s; s3PutDeadline), and when the deadline passes,
 // ONE retry of the same request on a connection opened for it:
 //
 //   - the same request: an UploadPart goes again with the same part number
@@ -53,6 +53,10 @@ const (
 	// putDeadlineUnit is the body size the base timeout covers.
 	putDeadlineUnit = 64 << 20
 )
+
+// putDeadlineFloor is the least deadline an S3 PUT under one unit gets
+// (s3PutDeadline). A var so a test can lower it.
+var putDeadlineFloor = 10 * time.Second
 
 var driverPutRetries = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "vaultaire_driver_put_retries_total",
@@ -88,6 +92,24 @@ func putDeadline(base time.Duration, size int64) time.Duration {
 	}
 	units := (size + putDeadlineUnit - 1) / putDeadlineUnit
 	return base * time.Duration(units)
+}
+
+// s3PutDeadline is the deadline of one S3 PutObject / UploadPart: putDeadline
+// for a body of one unit or more; for a smaller body the base scaled DOWN
+// by its size, never under putDeadlineFloor (or the base, when that is
+// lower); an unknown size gets the base. Until 2026-10-17 every body under
+// 64 MiB got the whole base, so a stalled 2 MiB chunk PUT on the Lyve
+// primary waited 60 s — the transport's response-header timeout and
+// aws-cli's default read timeout to the second: the retry and the client's
+// giving up came together and the upload failed as the client's (the
+// WP-P8 post-merge probe). Now a 2 MiB chunk gets 10 s, a 16 MiB part 15 s,
+// a 64 MiB body the base.
+func s3PutDeadline(base time.Duration, size int64) time.Duration {
+	if size <= 0 || size >= putDeadlineUnit {
+		return putDeadline(base, size)
+	}
+	floor := min(base, putDeadlineFloor)
+	return max(floor, time.Duration(float64(base)*float64(size)/float64(putDeadlineUnit)))
 }
 
 // deadlinePutClient implements manager.UploadAPIClient over the driver's
@@ -132,7 +154,7 @@ func (c *deadlinePutClient) attempt(ctx context.Context, what string, size int64
 	if c.base <= 0 {
 		return call(ctx)
 	}
-	timeout := putDeadline(c.base, size)
+	timeout := s3PutDeadline(c.base, size)
 	seeker, rewindable := body.(io.Seeker)
 	var start int64
 	if rewindable {
