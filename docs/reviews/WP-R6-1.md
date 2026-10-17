@@ -395,10 +395,10 @@ not (P5, fixed).
 
 | # | Sev | Item | Where it goes |
 |---|---|---|---|
-| R61-5 | P2 | A plain DELETE in a **Suspended** bucket of a key whose current bytes are its `null` version removes the head row and keeps the `null` version's bytes **billed** (GET 404, ListObjectVersions shows a live `null` version). AWS replaces the `null` version with a `null` delete marker and its bytes go | version-aware manifests' prompt (the versioning semantics) |
+| R61-5 | P2 | A plain DELETE in a **Suspended** bucket of a key whose current bytes are its `null` version removes the head row and keeps the `null` version's bytes **billed** (GET 404, ListObjectVersions shows a live `null` version). AWS replaces the `null` version with a `null` delete marker and its bytes go | **closed 2026-10-14 (WP-VM-1, #728)**: a Suspended DELETE writes the null delete marker; the null version's bytes retired and released |
 | R61-6 | P3 | `VaultParity.Open` reads the data ranges with its caller's recorded backend on the context: correct for both callers, but a future caller without it reads the primary (now counted) | take the backend as a parameter when it is next touched |
 | R61-7 | note | The CDN has no parity fallback (a vault object whose backend failed is 503 on `/cdn`, rebuilt on S3 GET) | if a public vault object is ever served |
-| R61-8 | P3 | CopyObject of a non-current version carries its content type only (no per-version metadata exists; a GET of it sends none either). The `x-amz-copy-source-if-*` conditions are not implemented on any copy | version-aware manifests |
+| R61-8 | P3 | CopyObject of a non-current version carries its content type only (no per-version metadata exists; a GET of it sends none either). The `x-amz-copy-source-if-*` conditions are not implemented on any copy | **closed 2026-10-14 (WP-VM-1, #728, 092)**: version rows carry their attributes; the copy carries them; `x-amz-copy-source-if-*` implemented |
 
 **Outside this WP (CI).**
 `TestMultiWebDAV_ASlowClientNeverRunsOutThePutDeadlineOrChargesTheBridge`

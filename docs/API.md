@@ -147,8 +147,14 @@ Behaviour worth knowing before writing code against it:
   `DeleteObjects` on a versioned bucket writes a marker per key (no
   `VersionId`) or deletes the named version (`VersionId`), with
   `DeleteMarker` / `DeleteMarkerVersionId` / `VersionId` in its response.
-  A chunked object (> 64 MiB) written before versioning was enabled is not
-  kept as a `null` version: its first overwrite or delete marker releases it.
+  A chunked object (> 64 MiB) is a version like any other (since
+  2026-10-14): one written before versioning was enabled is kept as the
+  `null` version, and `?versionId` reads, copies and deletes chunked
+  versions. A version keeps its own metadata and headers. `DELETE` with no
+  `versionId` on a Suspended bucket replaces the `null` version with a
+  `null` delete marker (its bytes go), and `HEAD` answers `x-amz-version-id`.
+  CopyObject honours `x-amz-copy-source-if-match`, `-if-none-match`,
+  `-if-modified-since` and `-if-unmodified-since`.
 - **Regions**: a bucket's region is fixed at creation and must be one the
   deployment has a key pair for; otherwise 400 `InvalidLocationConstraint`.
   Vault objects go to the tape backend and public-read objects to the CDN
