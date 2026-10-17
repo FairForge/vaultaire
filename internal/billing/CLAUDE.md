@@ -63,12 +63,30 @@ Stripe billing integration for stored.ge subscriptions, payments, and invoices.
 - **Body cap**: 10 MB (`http.MaxBytesReader`, 413 past it; the general
   request-limits middleware gives `/webhook/` the same 10 MB). Never a
   truncating `LimitReader`.
-- **Acknowledgement**: 200 only after the handler succeeded and the event id
-  was written to `stripe_events`. A Stripe fetch error or a DB error answers
-  **500 and records nothing**, so Stripe retries (up to three days) and the
-  retry is handled as a fresh event. Handlers are idempotent; a duplicate of a
-  recorded event is a no-op 200. A payload the SDK cannot deserialise is logged
-  and dropped (200) — retrying it would only get the endpoint disabled.
+- **Dedup — claim first (WP-R10-2, R10-16)**: the event id is claimed BEFORE
+  its handler runs: `INSERT INTO stripe_events … ON CONFLICT (event_id) DO
+  NOTHING RETURNING event_id` inside a transaction (`claimEvent`) that stays
+  open while the handler runs and is **committed only after it succeeded**.
+  No row back = the id is already committed → a duplicate, 200 at once. A
+  concurrent delivery of the same id waits on the uncommitted row (Postgres's
+  speculative insert) — then it is a duplicate (the first committed) or takes
+  the event over (the first rolled back); the wait is bounded by `SET LOCAL
+  lock_timeout = '5s'`, past it a 500 Stripe retries. A handler failure, a
+  failed commit, a client that hung up (the request context cancels the
+  transaction) or a process that died (its connection goes, Postgres rolls the
+  claim back) leaves **no row**: the retry is handled — never a lost event. No
+  migration: `processed_at` keeps its default and means "the claim was
+  committed". Before: check-then-act (`SELECT EXISTS` … handle … `INSERT`),
+  two concurrent deliveries were both handled (two Stripe fetches, two
+  applications). Cost: a webhook holds two pooled connections while it runs
+  (the claim + the handler's queries; the pool is 50).
+- **Acknowledgement**: 200 only after the handler succeeded and the claim was
+  committed. A Stripe fetch error or a DB error answers **500 and records
+  nothing**, so Stripe retries (up to three days) and the retry is handled as
+  a fresh event. Handlers are idempotent. A payload the SDK cannot deserialise
+  is logged and dropped (200) — retrying it would only get the endpoint
+  disabled. A subscription Stripe answers **404** for (`resource_missing` —
+  `stripeMissing`) is nothing to apply: 200 + a Warn, never three days of 500s.
 - **Tenant resolution** (`resolveTenant`, post-merge R10-45): the customer id
   first; when `tenants` does not know it, the event's own `client_reference_id`
   / `metadata.tenant_id` (stamped on every session and subscription we create;
@@ -78,12 +96,40 @@ Stripe billing integration for stored.ge subscriptions, payments, and invoices.
   row never received. A customer that resolves nowhere is **not ours** (another
   product on the account, a dashboard-made customer, an erased tenant): 200 +
   recorded, never a three-day 500 retry storm.
-- **Ordering**: Stripe does not guarantee event order. `checkout.session.
-  completed` fetches the subscription; `customer.subscription.updated` still
-  trusts the payload (WP-R10-2).
+- **Ordering (WP-R10-2, R10-15)**: Stripe does not guarantee event order, so
+  no handler applies a payload's state. `checkout.session.completed` and
+  `customer.subscription.{created,updated}` **fetch the subscription**
+  (`fetchSubscription`) and apply the FETCHED status, items and metadata; the
+  payload names only the subscription, its customer and the tenant hint
+  (`resolveTenant` runs first, so a subscription that is not ours is a 200
+  with no fetch). A fetch failure is a 500 (Stripe retries). And **one
+  customer's events are applied one at a time** — the claim takes
+  `pg_advisory_xact_lock(hashtextextended('stripe-customer:'||<customer>, 0))`
+  (`eventCustomer`: `data.object.customer`) — so two events in flight cannot
+  fetch, then apply, in the wrong order: the last applied fetched last.
+  `customer.subscription.deleted` applies its payload: `canceled` is terminal
+  at Stripe, a fetch can say nothing newer, and a stale `updated` delivered
+  after it fetches `canceled` and clears again. Before: `updated(active)`
+  delivered after a later `updated(canceled)` re-granted a cancelled house; a
+  stale `updated(unpaid)` took a paid house away until the next event.
+  **Stripe calls of a normal house purchase**: 2 subscription GETs from the
+  webhook (checkout.session.completed + customer.subscription.created; was 1),
+  +1 per later `customer.subscription.updated` (a resize, a dunning step);
+  the dashboard's own calls (live-subscription list, checkout session) are
+  unchanged.
 - **Dunning**: `invoice.payment_failed` → `past_due`, house **kept** (grace =
   Stripe Smart Retries); the dashboard's "after retries" setting delivers
   `canceled`/`unpaid`, which clears the house. Set it to **cancel**.
+- **`paused` (WP-R10-2 decision)**: Stripe's `paused` status is a trial that
+  ended without a payment method — no invoice is created while it lasts, so
+  nothing is paid. It is treated exactly as `unpaid`: `applyHouse` **clears**
+  the house (current-subscription guard, data untouched), and
+  `HasLiveSubscription` **counts** it (resumable: a second Checkout beside it
+  would be a second subscription), so the dashboard sends the customer to
+  support as for `unpaid`. Our Checkout creates no trial, so `paused` arises
+  only from an operator adding one by hand. Distinct from **"pause payment
+  collection"** in the Stripe dashboard (`pause_collection`): the status stays
+  `active` and the house is kept — an operator's deliberate choice.
 - **Customer Portal** (dashboard config): keep quantity updates **off** — the
   dashboard's resize path refuses a floor below its usage, the portal would not.
 - **Tests**: every webhook test signs its fixture with
@@ -124,7 +170,7 @@ Stripe subscription per tenant, one item per line, `quantity` = TB.**
   (tenant, order, 5-min window) so a double submit is one session);
   `HasLiveSubscription` lists the customer's subscriptions and the dashboard
   refuses a new checkout while any is active/trialing/past_due/incomplete/
-  unpaid (R10-05 — a second Checkout is a second subscription);
+  unpaid/paused (R10-05 — a second Checkout is a second subscription);
   `UpdateHouseSubscription` resizes
   in place with `create_prorations` (quantity changes; a line at 0 is deleted;
   the **period is fixed** for the life of a subscription — switching = support).
@@ -134,7 +180,7 @@ Stripe subscription per tenant, one item per line, `quantity` = TB.**
   session carries no items) and `customer.subscription.{created,updated}`:
   active/trialing/past_due → `SetHouse` (floor rows, total = sum, tier
   standard|vault, `tenants.plan='house'`, `house_period`); canceled/unpaid/
-  incomplete_expired and `customer.subscription.deleted` → `ClearHouse` (free
+  incomplete_expired/**paused** and `customer.subscription.deleted` → `ClearHouse` (free
   tier limits, **used bytes untouched** — billing never deletes). Clearing is
   honoured only for the tenant's current `stripe_subscription_id`, so a stale
   subscription's events cannot take a paid house away. Idempotent; replays
