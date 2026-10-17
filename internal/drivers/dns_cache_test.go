@@ -59,6 +59,9 @@ type fakeDial struct {
 }
 
 func (d *fakeDial) dial(ctx context.Context, network, addr string) (net.Conn, error) {
+	if err := ctx.Err(); err != nil { // as net.Dialer: a finished context is not dialled
+		return nil, err
+	}
 	d.mu.Lock()
 	d.dialed = append(d.dialed, addr)
 	refused := d.down[addr]
@@ -116,8 +119,13 @@ func TestDNSCache_ARefreshedAnswerIsUsedAfterTheTTL(t *testing.T) {
 
 	clock.add(2 * time.Minute)
 	dialOnce(t, dial, "s3.lyve.example:443")
-	assert.Equal(t, "10.0.0.9:443", d.last(), "after the TTL the name is asked again")
-	assert.Equal(t, int32(2), r.calls.Load())
+	assert.Equal(t, "10.0.0.1:443", d.last(), "the dial after the TTL starts the refresh and takes the stale answer: it never waits on the resolver")
+	require.Eventually(t, func() bool { return r.calls.Load() == 2 }, time.Second, time.Millisecond, "after the TTL the name is asked again")
+	require.Eventually(t, func() bool {
+		dialOnce(t, dial, "s3.lyve.example:443")
+		return d.last() == "10.0.0.9:443"
+	}, time.Second, time.Millisecond, "the dials after the refresh take the new answer")
+	assert.Equal(t, int32(2), r.calls.Load(), "one lookup per TTL, never per dial")
 }
 
 func TestDNSCache_DialsRotateOverTheAnswer(t *testing.T) {
@@ -169,8 +177,12 @@ func TestDNSCache_AResolverOutageKeepsTheStaleAnswer(t *testing.T) {
 	dialOnce(t, dial, "s3.lyve.example:443")
 
 	assert.Equal(t, "10.0.0.1:443", d.last(), "the stale answer, not an outage")
-	assert.Equal(t, errs0+1, promtest.ToFloat64(driverDNSRefreshes.WithLabelValues("s3.lyve.example", "error")))
+	require.Eventually(t, func() bool {
+		return promtest.ToFloat64(driverDNSRefreshes.WithLabelValues("s3.lyve.example", "error")) == errs0+1
+	}, time.Second, time.Millisecond, "the failed refresh is counted")
 	assert.Equal(t, int32(2), r.calls.Load())
+	dialOnce(t, dial, "s3.lyve.example:443")
+	assert.Equal(t, "10.0.0.1:443", d.last(), "still the stale answer after the failed refresh")
 }
 
 func TestDNSCache_OneLookupForManyDialsAtOnce(t *testing.T) {
@@ -218,4 +230,89 @@ func TestDriverDNSTTL_EnvRule(t *testing.T) {
 		assert.Equal(t, c.want, driverDNSTTLFromEnv(logger), "value %q", c.v)
 		assert.Equal(t, c.warn, logs.Len() > before, "value %q: a rejected value is a Warn", c.v)
 	}
+}
+
+// Post-merge review of #748 (WP-P9): the refresh ran under
+// context.WithoutCancel and every dial waiting on it blocked in
+// singleflight.Do — a dial with a 100 ms context waited the whole hung
+// lookup (3 s in the probe), so a hedge "at 2 s on a fresh connection" and a
+// probe's 15 s budget were bounded by the resolver's own timeouts, not by
+// their callers (before #748 the lookup ran under the dial's context). Now a
+// dial whose context ends while the lookup runs returns at its deadline —
+// with the stale answer when there is one, else its context's error — and
+// the lookup itself has its own bound (dnsLookupTimeout), still finishing for
+// the next dial.
+
+func TestDNSCache_ADialWhoseContextEndsDuringTheLookupReturnsAtItsDeadline(t *testing.T) {
+	r := &fakeResolver{answers: map[string][]string{}, block: make(chan struct{})}
+	r.set("s3.lyve.example", "10.0.0.1")
+	d := &fakeDial{}
+	dial := newTestDNS(r, &fakeClock{t: time.Unix(1_800_000_000, 0)}).dialer(d.dial)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := dial(ctx, "tcp", "s3.lyve.example:443")
+	require.ErrorIs(t, err, context.DeadlineExceeded, "no answer yet: the dial's own error, not a wait on the resolver")
+	assert.Less(t, time.Since(start), time.Second, "it returned at its deadline, not when the resolver answered")
+	assert.Empty(t, d.dialed, "nothing was dialled by name either: the dial's context had ended")
+
+	close(r.block) // the abandoned refresh completes for the next dial
+	require.Eventually(t, func() bool {
+		c, err := dial(context.Background(), "tcp", "s3.lyve.example:443")
+		if err != nil {
+			return false
+		}
+		_ = c.Close()
+		return true
+	}, time.Second, 5*time.Millisecond)
+	assert.Equal(t, "10.0.0.1:443", d.last())
+	assert.Equal(t, int32(1), r.calls.Load(), "the refresh the first dial abandoned was the one that answered")
+}
+
+func TestDNSCache_ADialAfterTheTTLTakesTheStaleAnswerWhileTheRefreshRuns(t *testing.T) {
+	r := &fakeResolver{answers: map[string][]string{}}
+	r.set("s3.lyve.example", "10.0.0.1")
+	clock := &fakeClock{t: time.Unix(1_800_000_000, 0)}
+	d := &fakeDial{}
+	dial := newTestDNS(r, clock).dialer(d.dial)
+	dialOnce(t, dial, "s3.lyve.example:443")
+
+	r.block = make(chan struct{}) // the refresh after the TTL hangs
+	clock.add(6 * time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	c, err := dial(ctx, "tcp", "s3.lyve.example:443")
+	require.NoError(t, err, "the stale answer serves the dial at once while the refresh hangs")
+	_ = c.Close()
+	assert.Less(t, time.Since(start), 50*time.Millisecond, "no wait on the resolver at all")
+	assert.Equal(t, "10.0.0.1:443", d.last())
+	require.Eventually(t, func() bool { return r.calls.Load() == 2 }, time.Second, time.Millisecond, "the refresh was started beside it")
+	close(r.block)
+}
+
+func TestDNSCache_TheLookupItselfIsBounded(t *testing.T) {
+	r := &fakeResolver{answers: map[string][]string{}}
+	hung := func(ctx context.Context, host string) ([]string, error) {
+		r.calls.Add(1)
+		<-ctx.Done() // a resolver that never answers: only its own bound ends it
+		return nil, ctx.Err()
+	}
+	c := &dnsDialCache{lookup: hung, ttl: 5 * time.Minute, now: time.Now, lookupTimeout: 50 * time.Millisecond}
+	d := &fakeDial{}
+	dial := c.dialer(d.dial)
+
+	start := time.Now()
+	c1, err := dial(context.Background(), "tcp", "s3.lyve.example:443")
+	require.NoError(t, err, "no answer within the lookup's bound: the name is dialled as given")
+	_ = c1.Close()
+	assert.Less(t, time.Since(start), time.Second, "a caller without a deadline is still not held by the resolver")
+	assert.Equal(t, "s3.lyve.example:443", d.last())
+	assert.Equal(t, int32(1), r.calls.Load())
+}
+
+func TestDNSCache_TheDefaultLookupBoundIsFiveSeconds(t *testing.T) {
+	assert.Equal(t, 5*time.Second, (&dnsDialCache{}).lookupBound())
+	assert.Equal(t, 5*time.Second, sharedDNS.lookupBound(), "the shared cache: a hung resolver costs a dial at most this, once per host per TTL")
 }

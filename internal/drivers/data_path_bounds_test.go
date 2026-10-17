@@ -138,6 +138,7 @@ var boundSites = map[string]string{
 	"TunedHTTPClient lyve_console.go:NewLyveConsoleClient": "management plane (the root-key console probe), bounded by the probe's 45 s context",
 	// context.WithTimeout
 	"WithTimeout put_deadline.go:attempt":            "the per-size PUT deadline (s3PutDeadline)",
+	"WithTimeout dns_cache.go:entry":                 "one DNS lookup of the drivers' cache, 5 s (dnsLookupTimeout); a dial waits on it only within its own context",
 	"WithTimeout onedrive.go:NewOneDriveFleetDriver": "boot only: the fleet's first token and drive ids, 30 s",
 	"WithTimeout quotaless.go:HealthCheck":           "the quotaless probe, 10 s",
 	"WithTimeout tenant_walk.go:s3WalkPrefix":        "a job (the erasure sweep): one listing page, 60 s over a 15 s transport bound",
