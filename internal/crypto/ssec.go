@@ -123,6 +123,16 @@ func SSECOpenRange(key []byte, h *StreamHeader, size int64, rg StreamRange, src 
 	return r, nil
 }
 
+// SSECRangeOpener derives the DEK of a streaming SSE-C blob whose header is
+// h once, for many ranges of it. The caller may zero key when it returns.
+func SSECRangeOpener(key []byte, h *StreamHeader) (*StreamRangeOpener, error) {
+	aead, err := ssecAEAD(key, h)
+	if err != nil {
+		return nil, err
+	}
+	return &StreamRangeOpener{aead: aead, h: h, ssec: true}, nil
+}
+
 // SSECOpenLegacy opens a whole old-format SSE-C blob read from src (≤ 256
 // MiB by construction): the compatibility opener, bounded.
 func SSECOpenLegacy(key []byte, src io.Reader) (io.Reader, error) {

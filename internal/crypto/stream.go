@@ -508,3 +508,29 @@ func openRange(src io.Reader, aead cipher.AEAD, h *StreamHeader, size int64, rg 
 	}
 	return io.LimitReader(o, rg.Length), nil
 }
+
+// StreamRangeOpener opens planned ranges of ONE 0x03 blob under a key
+// derived once — a parallel ranged read opens many ranges of the same blob
+// (Prompt 8 Part B) and an SSE-C reader zeroes the customer's key as soon
+// as the opener exists. Safe for concurrent use: AES-GCM's Open keeps no
+// state between calls.
+type StreamRangeOpener struct {
+	aead cipher.AEAD
+	h    *StreamHeader
+	ssec bool
+}
+
+// Header is the blob's parsed header.
+func (o *StreamRangeOpener) Header() *StreamHeader { return o.h }
+
+// OpenRange opens plaintext [rg.Offset, +rg.Length) of the object (size
+// bytes); src is the stored bytes [rg.CipherOffset, +rg.CipherLength). The
+// first segment is verified before it returns; for SSE-C a first segment
+// that does not open is ErrSSECKeyMismatch, as SSECOpenRange answers.
+func (o *StreamRangeOpener) OpenRange(size int64, rg StreamRange, src io.Reader) (io.Reader, error) {
+	r, err := openRange(src, o.aead, o.h, size, rg)
+	if err != nil && o.ssec && errors.Is(err, ErrStreamCorrupt) {
+		return nil, ErrSSECKeyMismatch
+	}
+	return r, err
+}

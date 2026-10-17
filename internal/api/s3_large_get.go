@@ -185,7 +185,7 @@ const (
 func init() {
 	chunkedGetRereads.WithLabelValues(rereadMoved)
 	chunkedGetRereads.WithLabelValues(rereadMissing)
-	for _, p := range []string{"chunked", "ranged"} {
+	for _, p := range []string{"chunked", "ranged", "sealed"} {
 		for _, r := range []string{"slow", "error"} {
 			largeGetHedges.WithLabelValues(p, r)
 		}
@@ -205,7 +205,7 @@ func init() {
 
 // largeGetCollectors are registered on the server registry.
 func largeGetCollectors() []prometheus.Collector {
-	return []prometheus.Collector{largeGetHedges, largeGetHedgesWon, largeGetInflight, largeGetFallbacks, largeGetStreams, largeGetThroughput, chunkedGetTruncated, chunkedGetRereads}
+	return []prometheus.Collector{largeGetHedges, largeGetHedgesWon, largeGetInflight, largeGetFallbacks, largeGetStreams, largeGetThroughput, chunkedGetTruncated, chunkedGetRereads, largeGetParallelReads}
 }
 
 func largeGetHooks(path string) parfetch.Hooks {
@@ -323,12 +323,23 @@ func (a *S3ToEngine) chunkStreamConfig() parfetch.Config {
 // rather than spliced from two objects.
 var errRangeIdentity = errors.New("parallel get: range identity mismatch")
 
+// largeGetParallelReads counts the parallel ranged reads started, by the
+// backend they read from (registered drivers only) and path (ranged = a
+// plaintext whole object, sealed = an SSE-S3 / SSE-C 0x03 blob by segment).
+// It answers "did the parallel reader take this backend?" — the 2026-10-14
+// bench could not tell a pinned bucket's single stream from a parallel one.
+var largeGetParallelReads = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "vaultaire_large_get_parallel_reads_total",
+	Help: "Parallel ranged GETs started (the first range read), by backend and path: ranged (a plaintext whole object) | sealed (an SSE-S3 or SSE-C blob, by segment).",
+}, []string{"backend", "path"})
+
 // parallelGetReader is the client stream of a parallel ranged GET. Its
 // Close settles the read as ONE outcome on the backend's breaker.
 type parallelGetReader struct {
 	*parfetch.Reader
 	eng     *engine.CoreEngine
 	backend string
+	path    string // ranged | sealed
 	start   time.Time
 	length  int64 // the bytes the stream yields: all of them is done
 	n       int64
@@ -359,40 +370,90 @@ func (r *parallelGetReader) Close() error {
 		switch {
 		case done:
 			r.eng.RecordReadOutcome(r.backend, nil)
-		case err != nil && !errors.Is(err, errRangeIdentity):
+		// An object that changed mid-read, or stored bytes that do not open,
+		// say nothing about the backend's health.
+		case err != nil && !errors.Is(err, errRangeIdentity) && !errors.Is(err, errSealedUnreadable):
 			r.eng.RecordReadOutcome(r.backend, err)
 		}
-		observeLargeGet("ranged", err, done, r.n, r.start)
+		observeLargeGet(r.path, err, done, r.n, r.start)
 	})
 	return nil
 }
 
-// openParallelGet opens bytes [offset, offset+length) of a whole object as
-// parallel ranged reads of its blob (the row's address, WP-R2-1), or
-// returns nil: the caller then takes the single stream. objectSize is the recorded size every range must report. The
-// first range is read before this returns, so any failure up to there is a
-// clean fallback — nothing has been sent.
-func (a *S3ToEngine) openParallelGet(ctx context.Context, tenantID, container, blob string, objectSize, offset, length int64) io.ReadCloser {
+// parallelSource is the gate both parallel paths share: the length is
+// worth it, the tenant's flag is on, the row's backend has real ranged
+// reads and a closed breaker (engine.ParallelRangeSource — any registered
+// driver: the primary, an idrive-<region> driver of a pinned bucket, lyve),
+// and the process budget can spare two parts. ok=false: the single stream.
+func (a *S3ToEngine) parallelSource(ctx context.Context, tenantID, container, blob string, length int64) (string, engine.VersionedRangeGetter, *engine.CoreEngine, bool) {
 	cfg := a.largeGet
 	if length < cfg.minBytes || cfg.partBytes <= 0 || cfg.parallelParts < 2 {
-		return nil
+		return "", nil, nil, false
 	}
 	if a.flags == nil || !a.flags.Enabled(flagParallelGet, tenantID) {
-		return nil
+		return "", nil, nil, false
 	}
 	ce, ok := a.engine.(*engine.CoreEngine)
 	if !ok {
-		return nil
+		return "", nil, nil, false
 	}
 	backend, rg, ok := ce.ParallelRangeSource(ctx, container, blob)
 	if !ok {
-		return nil
+		return "", nil, nil, false
 	}
 	if cfg.budget.Available() < 2*cfg.partBytes {
 		largeGetFallbacks.WithLabelValues("budget").Inc()
+		return "", nil, nil, false
+	}
+	return backend, rg, ce, true
+}
+
+// startParallel runs the parts and reads the first before it returns, so
+// any failure up to there is a clean fallback — nothing has been sent.
+func (a *S3ToEngine) startParallel(ctx context.Context, path string, ce *engine.CoreEngine, backend, container, blob string,
+	sizes []int64, length int64, fetch func(context.Context, int) ([]byte, error)) io.ReadCloser {
+	cfg := a.largeGet
+	// The window holds parallelParts parts; a sealed part is whole segments,
+	// so it can be larger than LARGE_GET_PART_BYTES.
+	part := cfg.partBytes
+	for _, sz := range sizes {
+		part = max(part, sz)
+	}
+	start := time.Now()
+	stream := parfetch.Start(ctx, parfetch.Config{
+		Window:     int64(cfg.parallelParts) * part,
+		MaxParts:   cfg.parallelParts,
+		HedgeAfter: cfg.hedgeAfter,
+		Budget:     cfg.budget,
+		FreeParts:  1,
+		Hooks:      largeGetHooks(path),
+	}, sizes, fetch)
+	first, err := stream.Next()
+	if err != nil {
+		stream.Close()
+		if ctx.Err() == nil {
+			largeGetFallbacks.WithLabelValues("first_part").Inc()
+			a.logger.Warn("parallel get: first range failed, taking the single stream",
+				zap.String("backend", backend), zap.String("path", path), zap.String("container", container),
+				zap.String("blob", blob), zap.Error(err))
+		}
 		return nil
 	}
+	largeGetParallelReads.WithLabelValues(backend, path).Inc()
+	common.SetBackendUsed(ctx, backend)
+	return &parallelGetReader{Reader: parfetch.NewReader(stream, first), eng: ce, backend: backend, path: path, start: start, length: length}
+}
 
+// openParallelGet opens bytes [offset, offset+length) of a whole object as
+// parallel ranged reads of its blob (the row's address, WP-R2-1), or
+// returns nil: the caller then takes the single stream. objectSize is the
+// recorded size every range must report.
+func (a *S3ToEngine) openParallelGet(ctx context.Context, tenantID, container, blob string, objectSize, offset, length int64) io.ReadCloser {
+	backend, rg, ce, ok := a.parallelSource(ctx, tenantID, container, blob, length)
+	if !ok {
+		return nil
+	}
+	cfg := a.largeGet
 	n := int((length + cfg.partBytes - 1) / cfg.partBytes)
 	sizes := make([]int64, n)
 	for i := range sizes {
@@ -400,10 +461,7 @@ func (a *S3ToEngine) openParallelGet(ctx context.Context, tenantID, container, b
 	}
 	sizes[n-1] = length - int64(n-1)*cfg.partBytes
 
-	var (
-		idMu sync.Mutex
-		etag string
-	)
+	id := &rangeIdentity{size: objectSize}
 	fetch := func(fctx context.Context, i int) ([]byte, error) {
 		off := offset + int64(i)*cfg.partBytes
 		want := sizes[i]
@@ -412,17 +470,8 @@ func (a *S3ToEngine) openParallelGet(ctx context.Context, tenantID, container, b
 			return nil, fmt.Errorf("range %d (%d+%d) on %s: %w", i, off, want, backend, err)
 		}
 		defer func() { _ = rc.Close() }()
-		if info.Size != objectSize {
-			return nil, fmt.Errorf("%w: range %d reports object size %d, recorded %d", errRangeIdentity, i, info.Size, objectSize)
-		}
-		idMu.Lock()
-		if etag == "" {
-			etag = info.ETag
-		}
-		same := etag == info.ETag
-		idMu.Unlock()
-		if !same {
-			return nil, fmt.Errorf("%w: range %d etag %q, earlier ranges %q", errRangeIdentity, i, info.ETag, etag)
+		if err := id.check(i, info); err != nil {
+			return nil, err
 		}
 		buf := make([]byte, want)
 		if _, err := io.ReadFull(rc, buf); err != nil {
@@ -430,27 +479,131 @@ func (a *S3ToEngine) openParallelGet(ctx context.Context, tenantID, container, b
 		}
 		return buf, nil
 	}
+	return a.startParallel(ctx, "ranged", ce, backend, container, blob, sizes, length, fetch)
+}
 
-	start := time.Now()
-	stream := parfetch.Start(ctx, parfetch.Config{
-		Window:     int64(cfg.parallelParts) * cfg.partBytes,
-		MaxParts:   cfg.parallelParts,
-		HedgeAfter: cfg.hedgeAfter,
-		Budget:     cfg.budget,
-		FreeParts:  1,
-		Hooks:      largeGetHooks("ranged"),
-	}, sizes, fetch)
-	first, err := stream.Next()
+// rangeIdentity: every range of one read must come from one object — the
+// recorded size and the first range's ETag (a concurrent overwrite cuts the
+// body, never splices two objects).
+type rangeIdentity struct {
+	size int64
+	mu   sync.Mutex
+	etag string
+}
+
+func (id *rangeIdentity) check(i int, info engine.RangeInfo) error {
+	if info.Size != id.size {
+		return fmt.Errorf("%w: range %d reports object size %d, recorded %d", errRangeIdentity, i, info.Size, id.size)
+	}
+	id.mu.Lock()
+	defer id.mu.Unlock()
+	if id.etag == "" {
+		id.etag = info.ETag
+	}
+	if id.etag != info.ETag {
+		return fmt.Errorf("%w: range %d etag %q, earlier ranges %q", errRangeIdentity, i, info.ETag, id.etag)
+	}
+	return nil
+}
+
+// openParallelSealed opens plaintext [offset, offset+length) of a sealed
+// whole object — an SSE-S3 or SSE-C blob in the streaming format 0x03 — as
+// parallel ranged reads aligned to its segments, each part opened as it
+// arrives (Prompt 8 Part B): the header is read first (one ranged GET), the
+// key derived once, then every part reads the ciphertext span of its
+// segments and decrypts it into the window — only plaintext is held, so the
+// process budget counts what it holds. Every range reports the stored
+// length and one ETag, as on the plaintext path. nil: the caller takes the
+// single sealed stream (an old-format blob, a header or first part that
+// fails — a wrong SSE-C key among them: the single stream answers its 403).
+// Never a vault-floor object (the caller checks), never a chunked one (they
+// are not sealed whole), never Geyser (no VersionedRangeGetter).
+func (a *S3ToEngine) openParallelSealed(ctx context.Context, op blobOpener, tenantID, container, blob string, size, stored, offset, length int64) io.ReadCloser {
+	if !op.streaming() || stored < int64(crypto.MaxStreamHeader) {
+		return nil
+	}
+	backend, rg, ce, ok := a.parallelSource(ctx, tenantID, container, blob, length)
+	if !ok {
+		return nil
+	}
+	id := &rangeIdentity{size: stored}
+	h, err := readStreamHeaderRange(ctx, rg, container, blob, id)
 	if err != nil {
-		stream.Close()
-		if ctx.Err() == nil {
+		if !errors.Is(err, errSealedLegacy) && ctx.Err() == nil {
 			largeGetFallbacks.WithLabelValues("first_part").Inc()
-			a.logger.Warn("parallel get: first range failed, taking the single stream",
-				zap.String("backend", backend), zap.String("container", container),
-				zap.String("blob", blob), zap.Error(err))
+			a.logger.Warn("parallel get: the sealed header could not be read, taking the single stream",
+				zap.String("backend", backend), zap.String("blob", blob), zap.Error(err))
 		}
 		return nil
 	}
-	common.SetBackendUsed(ctx, backend)
-	return &parallelGetReader{Reader: parfetch.NewReader(stream, first), eng: ce, backend: backend, start: start, length: length}
+	opener, err := op.rangeOpener(ctx, h)
+	if err != nil {
+		return nil
+	}
+	cfg := a.largeGet
+	seg := int64(h.SegmentSize)
+	partSegs := max(cfg.partBytes/seg, 1)
+	first, last := offset/seg, (offset+length-1)/seg
+	n := int((last-first)/partSegs + 1)
+	starts := make([]int64, n)
+	sizes := make([]int64, n)
+	for i := range sizes {
+		s0 := first + int64(i)*partSegs
+		s1 := min(s0+partSegs-1, last)
+		starts[i] = max(offset, s0*seg)
+		sizes[i] = min(offset+length, (s1+1)*seg) - starts[i]
+	}
+	fetch := func(fctx context.Context, i int) ([]byte, error) {
+		plan, err := crypto.PlanStreamRange(h, size, starts[i], sizes[i])
+		if err != nil {
+			return nil, fmt.Errorf("%w: part %d: %w", errSealedUnreadable, i, err)
+		}
+		rc, info, err := rg.GetRangeInfo(fctx, container, blob, plan.CipherOffset, plan.CipherLength)
+		if err != nil {
+			return nil, fmt.Errorf("sealed range %d (%d+%d) on %s: %w", i, plan.CipherOffset, plan.CipherLength, backend, err)
+		}
+		defer func() { _ = rc.Close() }()
+		if err := id.check(i, info); err != nil {
+			return nil, err
+		}
+		buf := make([]byte, sizes[i])
+		pt, err := opener.OpenRange(size, plan, io.LimitReader(rc, plan.CipherLength))
+		if err == nil {
+			_, err = io.ReadFull(pt, buf)
+		}
+		if err != nil {
+			if errors.Is(err, crypto.ErrStreamCorrupt) || errors.Is(err, crypto.ErrSSECKeyMismatch) {
+				return nil, fmt.Errorf("%w: part %d: %w", errSealedUnreadable, i, err)
+			}
+			return nil, fmt.Errorf("sealed range %d on %s: read: %w", i, backend, err)
+		}
+		return buf, nil
+	}
+	return a.startParallel(ctx, "sealed", ce, backend, container, blob, sizes, length, fetch)
+}
+
+// readStreamHeaderRange reads a 0x03 blob's header with one ranged read
+// (errSealedLegacy: not a streaming blob).
+func readStreamHeaderRange(ctx context.Context, rg engine.VersionedRangeGetter, container, blob string, id *rangeIdentity) (*crypto.StreamHeader, error) {
+	rc, info, err := rg.GetRangeInfo(ctx, container, blob, 0, int64(crypto.MaxStreamHeader))
+	if err != nil {
+		return nil, fmt.Errorf("sealed header: %w", err)
+	}
+	defer func() { _ = rc.Close() }()
+	if err := id.check(-1, info); err != nil {
+		return nil, err
+	}
+	var hb [crypto.MaxStreamHeader]byte
+	k, err := io.ReadFull(rc, hb[:])
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return nil, fmt.Errorf("sealed header: read: %w", err)
+	}
+	if k == 0 || hb[0] != crypto.StreamFormat {
+		return nil, errSealedLegacy
+	}
+	h, err := crypto.ParseStreamHeader(hb[:k])
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errSealedUnreadable, err)
+	}
+	return h, nil
 }
