@@ -73,7 +73,7 @@ deliberately not in this file — "the production host" is the one box.
 | `/opt/vaultaire/bin/vaultaire-8000`, `vaultaire-8001` | the two slots' binaries (zero-downtime deploys, below); `vaultaire` is a symlink to the active one, the idle one holds the previous build |
 | `/opt/vaultaire/ACTIVE_PORT` | which slot is active (`vaultaire-switch`'s state) |
 | `/opt/vaultaire/configs/.env` | the env file (`EnvironmentFile=`); also where the deploy job reads `DB_PASSWORD` for migrations |
-| `/opt/vaultaire/data` | `DATA_PATH` of the `local` driver |
+| `/opt/vaultaire/data` | `DATA_PATH` of the `local` driver; `data/multipart` = the multipart staging directory once `MULTIPART_STAGING_DIR` is set (below) |
 | `/opt/vaultaire/backups/` | nightly PostgreSQL dumps (below) |
 | `/opt/vaultaire/monitoring/ntfy-bridge.py` | Alertmanager → ntfy push bridge |
 | `/etc/systemd/system/vaultaire@.service` | the slot template (`deploy/systemd/vaultaire@.service`). The single-unit `vaultaire.service` is **masked** since 2026-10-06 (its file kept at `/root/vaultaire.service.retired-20261006`) so nothing can start the old build on `:8000` |
@@ -81,6 +81,44 @@ deliberately not in this file — "the production host" is the one box.
 | `/opt/vaultaire/bin/health-check.sh` | cron every 5 min, probes the active slot (`deploy/scripts/health-check.sh`) |
 | `/etc/prometheus/rules/*.yml` | alert rules (installed by hand from `deploy/monitoring/`) |
 | `/etc/haproxy/haproxy.cfg`, `/etc/haproxy/certs/*-le.pem` | edge config and the origin cert the certbot deploy hook rebuilds |
+
+### Multipart staging
+
+Multipart parts are staged on local disk between UploadPart and
+CompleteMultipartUpload, under `MULTIPART_STAGING_DIR` (WP-R3-5,
+`internal/api/multipart_staging_dir.go`). The default is
+`/tmp/vaultaire-multipart`. On this box `/tmp` is a **61 GiB tmpfs**: RAM,
+wiped by `systemd-tmpfiles` at every boot, and shared with the Sync stripe
+staging and the pack store. `MULTIPART_STAGING_MIN_FREE` refuses a part there
+below 30 GiB free (503 SlowDown).
+
+**The prod choice (owner, not set yet):** the NVMe data disk, with the same
+`MULTIPART_STAGING_MIN_FREE` rule (10 % of the 3.6 TB filesystem ≈ 360 GiB
+kept free).
+
+1. Add `MULTIPART_STAGING_DIR=/opt/vaultaire/data/multipart` to
+   `/opt/vaultaire/configs/.env`.
+2. Run `sudo vaultaire-switch restart`.
+3. Read the boot line: `journalctl -u 'vaultaire@*' --since -5min -o cat | grep '"multipart staging"'`
+   must show `"dir":"/opt/vaultaire/data/multipart","default":false` and the
+   free bytes. A rejected value logs `MULTIPART_STAGING_DIR rejected` at Warn
+   and stages in the default.
+
+What to know:
+
+- The directory is created 0700 as `user1` at boot when absent.
+- **Both slots must see the same directory.** They read it from the one
+  `EnvironmentFile`, run as the same user and have no `PrivateTmp=`, so a
+  part staged on the old slot is there for the new one after a switch. Never
+  give the slots different values.
+- Uploads in flight at the restart that changes it keep their parts in the
+  old directory. Their Complete answers `InvalidPart` ("upload the part
+  again": the part files are not found in the new one). The parts left in
+  the old directory are no longer swept by the reaper; the tmpfs empties at
+  the next boot. Make the change when `active` uploads are few:
+  `SELECT count(*) FROM multipart_uploads WHERE status = 'active'`.
+- On the data disk a staged part survives a reboot, so an upload can be
+  completed after one; on the tmpfs it could not.
 
 The deploy user's passwordless sudo is pinned to four exact invocations
 (`deploy/sudoers/vaultaire-deploy`): `vaultaire-switch deploy /tmp/vaultaire-linux`,
@@ -226,6 +264,18 @@ vaultaire@8001  "green"   /opt/vaultaire/bin/vaultaire-8001     the other stoppe
     deployed. **Migrations must stay additive**: the build before is still
     serving the migrated schema until the switch, and `rollback` runs it
     against the new schema.
+  - **A migration that gives an artefact an address** (087: whole blobs at
+    `<key>@<id>`; 092: chunk manifests the same way) has one more check. The
+    previous build reads by the KEY, and during the two-slot window and after
+    a rollback it does not find nothing: it finds the RETIRED artefact the
+    new build left at `<key>`. Measured with the real `e209950` beside 092
+    (WP-P8 Part 0, 2026-10-17): a legacy chunked object overwritten on the new
+    slot was answered by the old slot with **200 and the old bytes under the
+    new ETag**, or with a prefix of them when the new object was smaller.
+    Before such a migration, count the legacy rows it can affect (they were
+    0 at 087 and 092). If any exist, ship a guard one deploy ahead: the old
+    reader refuses a row whose artefact `retired_blobs` lists. Owner decision
+    2026-10-17: this checklist line, no guard built until it is needed.
 - **Why one active slot, not two**: the pending-TOTP secret of an MFA enrolment
   and the credential cache are per process, the egress month counter is one
   per process, and the synthetic check would run twice — none of that is safe
