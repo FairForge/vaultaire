@@ -42,3 +42,13 @@ func s3IsNotFound(err error) bool {
 	}
 	return false
 }
+
+// s3IsForbidden reports an S3 403: AccessDenied, or a bodiless Forbidden.
+func s3IsForbidden(err error) bool {
+	var re *smithyhttp.ResponseError
+	if errors.As(err, &re) && re.HTTPStatusCode() == http.StatusForbidden {
+		return true
+	}
+	var apiErr smithy.APIError
+	return errors.As(err, &apiErr) && (apiErr.ErrorCode() == "AccessDenied" || apiErr.ErrorCode() == "Forbidden")
+}

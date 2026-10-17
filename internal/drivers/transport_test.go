@@ -85,17 +85,6 @@ func TestTunedHTTPClient_CombinedOptions(t *testing.T) {
 	assert.NotNil(t, transport.TLSNextProto)
 }
 
-func TestCachedDialContext_CachesLookup(t *testing.T) {
-	dnsCache.Delete("localhost")
-
-	dnsCache.Store("localhost", []string{"127.0.0.1"})
-	defer dnsCache.Delete("localhost")
-
-	val, ok := dnsCache.Load("localhost")
-	require.True(t, ok)
-	assert.Equal(t, []string{"127.0.0.1"}, val)
-}
-
 func TestS3Driver_Put_Streaming(t *testing.T) {
 	// Verify S3Driver.Put uses materialize (spill-to-disk for large objects)
 	// rather than io.ReadAll (which buffers everything in memory).
@@ -123,20 +112,6 @@ func TestTunedTransportDisabled_EnvParsing(t *testing.T) {
 	assert.True(t, strings.EqualFold("False", "false"))
 	assert.False(t, strings.EqualFold("true", "false"))
 	assert.False(t, strings.EqualFold("", "false"))
-}
-
-func TestDNSCache_SharedAcrossDrivers(t *testing.T) {
-	// The dnsCache var is package-level, shared by all S3-compatible drivers.
-	// Verify it's a sync.Map that can store and load.
-	key := "test-host-" + t.Name()
-	dnsCache.Store(key, []string{"10.0.0.1"})
-	defer dnsCache.Delete(key)
-
-	val, ok := dnsCache.Load(key)
-	require.True(t, ok)
-	addrs, ok := val.([]string)
-	require.True(t, ok)
-	assert.Equal(t, []string{"10.0.0.1"}, addrs)
 }
 
 // Ensure VAULTAIRE_TUNED_TRANSPORT env var is not currently set in test env.

@@ -180,6 +180,10 @@ func main() {
 	// Create engine with or without DB
 	eng := engine.NewEngine(db, logger, &engine.Config{DefaultBackend: "local"})
 
+	// The drivers' shared DNS cache: an answer kept DRIVER_DNS_TTL (WP-R7-6),
+	// set before the first driver dials.
+	drivers.ConfigureDriverDNS(logger)
+
 	// Initialize storage drivers
 	// 1. Always add local driver
 	dataPath := os.Getenv("DATA_PATH")
@@ -214,8 +218,9 @@ func main() {
 			region = "us-west-1"
 		}
 		if lyveDriver, err := drivers.NewLyveDriver(accessKey, secretKey, "", region, logger); err == nil {
+			checkLyveBucketLock(lyveDriver, logger)
 			eng.AddDriver("lyve", lyveDriver)
-			logger.Info("Lyve driver added")
+			logger.Info("Lyve driver added", zap.Bool("target_only", lyveDriver.TargetOnly()))
 		} else {
 			logger.Warn("failed to add Lyve driver", zap.Error(err))
 		}
@@ -429,7 +434,8 @@ func main() {
 		logger.Fatal("STORAGE_MODE names a backend that is not registered",
 			zap.String("mode", storageMode), zap.Strings("registered", eng.GetDriverNames()))
 	}
-	if err := refusedPrimary(storageMode); err != nil {
+	primaryDriver, _ := eng.GetDriver(storageMode)
+	if err := refusedPrimary(storageMode, primaryDriver); err != nil {
 		logger.Fatal("STORAGE_MODE names a backend that may not be the primary", zap.Error(err))
 	}
 	eng.SetPrimary(storageMode)
@@ -484,11 +490,40 @@ func main() {
 
 // refusedPrimary refuses a STORAGE_MODE that names a backend which must never
 // take every tenant's objects: `sync` (Sync.com's bridge — its terms forbid
-// reselling the service without written consent). config.DetectStorageMode
-// never picks it; this stops an operator's STORAGE_MODE=sync.
-func refusedPrimary(mode string) error {
+// reselling the service without written consent; config.DetectStorageMode
+// never picks it, this stops an operator's STORAGE_MODE=sync), and a driver
+// that declares itself target-only (engine.TargetOnlyDeclarer: a Lyve bucket
+// with Object Lock or a default retention, WP-R7-7).
+func refusedPrimary(mode string, drv engine.Driver) error {
 	if mode == "sync" {
 		return fmt.Errorf("%q is a target-only backend (Sync.com: customer data only for flagged tenants)", mode)
 	}
+	if drv != nil && engine.IsDeclaredTargetOnly(drv) {
+		return fmt.Errorf("%q declares itself target-only: its bucket has Object Lock enabled or a default retention, so every object written there would be undeletable until the retention lapsed (WP-R7-7; R7-16) — remove the lock or choose another primary", mode)
+	}
 	return nil
+}
+
+// checkLyveBucketLock reads the Lyve bucket's object-lock configuration at
+// boot (WP-R7-7, R7-16): locked = an Error line and the driver registered
+// target-only (never the primary, never a fail-over destination); a key that
+// may not read it = a Warn and no guard; a failed read = a Warn, the driver
+// as it was. Never a boot failure.
+func checkLyveBucketLock(d *drivers.LyveDriver, logger *zap.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	locked, err := d.CheckBucketLock(ctx)
+	switch {
+	case errors.Is(err, drivers.ErrLyveLockUnreadable):
+		logger.Warn("lyve: this key cannot read the bucket's object-lock configuration — no lock guard (never enable a default retention on stored-*)",
+			zap.String("region", d.Region()), zap.Error(err))
+	case err != nil:
+		logger.Warn("lyve: the bucket's object-lock configuration could not be read at boot — no lock guard this boot",
+			zap.String("region", d.Region()), zap.Error(err))
+	case locked:
+		logger.Error("lyve: the bucket has Object Lock enabled or a default retention — registered TARGET-ONLY (never the primary, never a fail-over destination): a write there would be undeletable until the retention lapsed",
+			zap.String("region", d.Region()), zap.String("bucket", "stored-"+d.Region()))
+	default:
+		logger.Info("lyve: bucket has no object lock", zap.String("region", d.Region()))
+	}
 }

@@ -1,0 +1,153 @@
+package drivers
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
+)
+
+// The drivers' DNS cache (WP-R7-6), shared by every S3-class driver
+// (OneDrive keeps its own odDNSCache).
+//
+// It used to store a host's answer for the life of the process and dial
+// addrs[0] every time: prod dialled ONE Wasabi address (.101) from boot on
+// (2026-10-17) and would do the same to Lyve — a vendor that moved the name,
+// or one bad edge node, was ours until a restart. Now:
+//
+//   - an answer expires after DRIVER_DNS_TTL (5 min); the next dial asks
+//     again, once for every dial waiting on it (singleflight), and a
+//     refresh that fails keeps the stale answer — a resolver outage must
+//     not take the drivers down (the answer is still the vendor's);
+//   - the dials rotate over the answer's addresses (round-robin per host);
+//   - a dial that fails on one address tries the next within the same call,
+//     until one connects, every address has been tried, or the caller's
+//     context ends.
+//
+// vaultaire_driver_dns_refreshes_total{host,outcome} counts the lookups
+// (ok | error).
+
+const driverDNSTTLDefault = 5 * time.Minute
+
+var driverDNSRefreshes = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "vaultaire_driver_dns_refreshes_total",
+	Help: "Lookups of an S3-class driver's endpoint by the drivers' DNS cache (one per host per DRIVER_DNS_TTL), by host and outcome (ok, error: the stale answer is kept).",
+}, []string{"host", "outcome"})
+
+// driverDNSTTLFromEnv reads DRIVER_DNS_TTL: a Go duration between 30 s and
+// 1 h. Anything else is logged at Warn and the default kept (R13-19).
+func driverDNSTTLFromEnv(logger *zap.Logger) time.Duration {
+	v := strings.TrimSpace(os.Getenv("DRIVER_DNS_TTL"))
+	if v == "" {
+		return driverDNSTTLDefault
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 30*time.Second || d > time.Hour {
+		logger.Warn("invalid DRIVER_DNS_TTL (need a duration 30s..1h such as 5m), keeping default",
+			zap.String("value", v), zap.Duration("default", driverDNSTTLDefault))
+		return driverDNSTTLDefault
+	}
+	return d
+}
+
+// ConfigureDriverDNS sets the shared cache's TTL from DRIVER_DNS_TTL; the
+// server calls it once at boot, before the drivers dial.
+func ConfigureDriverDNS(logger *zap.Logger) {
+	ttl := driverDNSTTLFromEnv(logger)
+	sharedDNS.mu.Lock()
+	sharedDNS.ttl = ttl
+	sharedDNS.mu.Unlock()
+}
+
+type dnsEntry struct {
+	addrs   []string
+	expires time.Time
+	next    atomic.Uint32 // the round-robin cursor
+}
+
+// dnsDialCache is the cache: one entry per host.
+type dnsDialCache struct {
+	lookup func(ctx context.Context, host string) ([]string, error)
+	now    func() time.Time
+
+	mu      sync.Mutex
+	ttl     time.Duration
+	entries map[string]*dnsEntry
+	flight  singleflight.Group
+}
+
+var sharedDNS = &dnsDialCache{lookup: net.DefaultResolver.LookupHost, ttl: driverDNSTTLDefault, now: time.Now}
+
+// entry is host's current answer: the cached one inside its TTL, else a
+// refresh (one per host however many dials wait on it), else the stale one
+// when the refresh fails. nil = no answer at all (the caller dials the name
+// itself, through the system resolver).
+func (c *dnsDialCache) entry(ctx context.Context, host string) *dnsEntry {
+	c.mu.Lock()
+	e := c.entries[host]
+	ttl := c.ttl
+	c.mu.Unlock()
+	if e != nil && c.now().Before(e.expires) {
+		return e
+	}
+	v, _, _ := c.flight.Do(host, func() (any, error) {
+		// A refresh the waiting dial abandoned still completes for the next.
+		addrs, err := c.lookup(context.WithoutCancel(ctx), host)
+		if err != nil || len(addrs) == 0 {
+			driverDNSRefreshes.WithLabelValues(host, "error").Inc()
+			return e, nil
+		}
+		driverDNSRefreshes.WithLabelValues(host, "ok").Inc()
+		fresh := &dnsEntry{addrs: addrs, expires: c.now().Add(ttl)}
+		if e != nil {
+			fresh.next.Store(e.next.Load())
+		}
+		c.mu.Lock()
+		if c.entries == nil {
+			c.entries = map[string]*dnsEntry{}
+		}
+		c.entries[host] = fresh
+		c.mu.Unlock()
+		return fresh, nil
+	})
+	got, _ := v.(*dnsEntry)
+	return got
+}
+
+// dialer dials addr through the cache: the next address of the answer in
+// turn, and on failure the ones after it.
+func (c *dnsDialCache) dialer(dial func(ctx context.Context, network, addr string) (net.Conn, error)) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil || net.ParseIP(host) != nil {
+			return dial(ctx, network, addr)
+		}
+		e := c.entry(ctx, host)
+		if e == nil {
+			return dial(ctx, network, addr)
+		}
+		n := len(e.addrs)
+		start := int(e.next.Add(1)-1) % n
+		var errs []error
+		for i := 0; i < n; i++ {
+			conn, derr := dial(ctx, network, net.JoinHostPort(e.addrs[(start+i)%n], port))
+			if derr == nil {
+				return conn, nil
+			}
+			errs = append(errs, derr)
+			if ctx.Err() != nil {
+				break
+			}
+		}
+		return nil, fmt.Errorf("dial %s (%d address(es) tried): %w", host, len(errs), errors.Join(errs...))
+	}
+}

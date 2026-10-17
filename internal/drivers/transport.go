@@ -7,13 +7,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"sync"
 	"time"
 )
-
-// dnsCache is a shared DNS cache for all S3-compatible drivers.
-// OneDrive has its own (odDNSCache) because it was written first.
-var dnsCache sync.Map
 
 var tunedTransportDisabled = strings.EqualFold(os.Getenv("VAULTAIRE_TUNED_TRANSPORT"), "false")
 
@@ -86,7 +81,8 @@ const (
 // as every S3-class driver here addresses): GetObject carries
 // `x-id=GetObject`, a listing `list-type=2`; a POST with `uploadId` is the
 // Complete, one with `uploads` the Create; a PUT with x-amz-copy-source is
-// a server-side copy.
+// a server-side copy; a POST `?restore` (Geyser) is classed with the
+// Complete.
 func requestClass(req *http.Request) opClass {
 	q := req.URL.Query()
 	hasKey := strings.Contains(strings.Trim(req.URL.Path, "/"), "/")
@@ -103,7 +99,9 @@ func requestClass(req *http.Request) opClass {
 			return classPut
 		}
 	case http.MethodPost:
-		if q.Has("uploadId") {
+		// RestoreObject (Geyser's recall) keeps the long bound with the
+		// Complete: the tape gateway's answer to it is not measured.
+		if q.Has("uploadId") || q.Has("restore") {
 			return classComplete
 		}
 	}
@@ -131,24 +129,10 @@ func WithHTTP1Only() TransportOption {
 	return func(c *transportConfig) { c.http1Only = true }
 }
 
+// cachedDialContext dials through the drivers' shared DNS cache
+// (dns_cache.go): an answer kept DRIVER_DNS_TTL, the dials rotated over it.
 func cachedDialContext(dialer *net.Dialer) func(ctx context.Context, network, addr string) (net.Conn, error) {
-	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		host, port, err := net.SplitHostPort(addr)
-		if err != nil {
-			return dialer.DialContext(ctx, network, addr)
-		}
-		if cached, ok := dnsCache.Load(host); ok {
-			if addrs, ok := cached.([]string); ok && len(addrs) > 0 {
-				return dialer.DialContext(ctx, network, net.JoinHostPort(addrs[0], port))
-			}
-		}
-		addrs, err := net.DefaultResolver.LookupHost(ctx, host)
-		if err != nil || len(addrs) == 0 {
-			return dialer.DialContext(ctx, network, addr)
-		}
-		dnsCache.Store(host, addrs)
-		return dialer.DialContext(ctx, network, net.JoinHostPort(addrs[0], port))
-	}
+	return sharedDNS.dialer(dialer.DialContext)
 }
 
 // TunedHTTPClient returns an HTTP client with connection pooling, DNS caching,

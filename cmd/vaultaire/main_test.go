@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -15,11 +16,28 @@ import (
 // The Sync.com bridge is never the primary: Sync's terms forbid reselling it
 // without written consent, and the primary takes every tenant's objects.
 func TestRefusedPrimary(t *testing.T) {
-	assert.Error(t, refusedPrimary("sync"))
+	assert.Error(t, refusedPrimary("sync", nil))
 	for _, ok := range []string{"local", "idrive", "wasabi", "quotaless", "s3", "geyser", "permafrost"} {
-		assert.NoError(t, refusedPrimary(ok), ok)
+		assert.NoError(t, refusedPrimary(ok, nil), ok)
 	}
 }
+
+// WP-R7-7: STORAGE_MODE=lyve on a bucket with Object Lock (or a default
+// retention) is a boot Fatal with the reason: every write would be
+// undeletable until the retention lapsed.
+func TestRefusedPrimary_ABackendThatDeclaresItselfTargetOnly(t *testing.T) {
+	err := refusedPrimary("lyve", lockedDriver{locked: true})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Object Lock")
+	assert.NoError(t, refusedPrimary("lyve", lockedDriver{locked: false}))
+}
+
+type lockedDriver struct {
+	engine.Driver
+	locked bool
+}
+
+func (d lockedDriver) TargetOnly() bool { return d.locked }
 
 type recordingShutdowner struct {
 	name  string

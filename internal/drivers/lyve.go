@@ -3,10 +3,12 @@ package drivers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/engine"
@@ -15,6 +17,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
 
@@ -34,6 +39,9 @@ type LyveDriver struct {
 	// connection when it has not answered after DRIVER_HEDGE_AFTER
 	// (hedge.go, WP-R6-3); nil = none.
 	hedge *s3Hedger
+	// lockEnabled: the bucket has Object Lock or a default retention
+	// (CheckBucketLock, WP-R7-7) — the driver is then target-only.
+	lockEnabled atomic.Bool
 }
 
 // setPutTimeout installs the per-PUT deadline (0 = off).
@@ -361,3 +369,63 @@ func (d *LyveDriver) HealthCheck(ctx context.Context) error {
 	}
 	return nil
 }
+
+// The lock guard (WP-R7-7, R7-16). Lyve is the only general-purpose
+// fail-over leg: a fail-over PUT lands in stored-<region> under the
+// tenant's prefix. With Object Lock — or a default retention — on that
+// bucket every such write would become undeletable until the retention
+// lapsed: the SDK answers the PUT 200 and the later DeleteObject
+// AccessDenied (a breaker charge), and an erasure request cannot be
+// honoured. Both prod buckets have no lock and versioning off (R7-16, and
+// ObjectLockConfigurationNotFoundError on 2026-10-17); this keeps it a
+// decision rather than one console click.
+
+// ErrLyveLockUnreadable: the key may not read the bucket's lock
+// configuration (a scoped service user). The guard cannot decide; the boot
+// says so at Warn.
+var ErrLyveLockUnreadable = errors.New("lyve: the bucket's object-lock configuration cannot be read with this key")
+
+var lyveBucketLockEnabled = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "vaultaire_lyve_bucket_lock_enabled",
+	Help: "1 when the Lyve driver's stored-<region> bucket has Object Lock enabled or a default retention (read at boot): the driver is then target-only — never the primary, never a fail-over destination (WP-R7-7). No series when the key cannot read the configuration.",
+}, []string{"region"})
+
+// CheckBucketLock reads stored-<region>'s object-lock configuration once
+// (the server calls it at boot): enabled — ObjectLockEnabled, or a default
+// retention rule — makes the driver target-only (TargetOnly) and sets
+// vaultaire_lyve_bucket_lock_enabled{region} 1. No configuration is no lock
+// (0). A 403 is ErrLyveLockUnreadable; anything else an error — both leave
+// the driver as it was.
+func (d *LyveDriver) CheckBucketLock(ctx context.Context) (bool, error) {
+	out, err := d.client.GetObjectLockConfiguration(ctx, &s3.GetObjectLockConfigurationInput{Bucket: aws.String(d.getBucket())})
+	if err != nil {
+		var apiErr smithy.APIError
+		switch {
+		case errors.As(err, &apiErr) && apiErr.ErrorCode() == "ObjectLockConfigurationNotFoundError":
+			d.lockEnabled.Store(false)
+			lyveBucketLockEnabled.WithLabelValues(d.region).Set(0)
+			return false, nil
+		case s3IsForbidden(err):
+			return false, fmt.Errorf("%w (%s): %w", ErrLyveLockUnreadable, d.getBucket(), err)
+		}
+		return false, fmt.Errorf("lyve object-lock configuration of %s: %w", d.getBucket(), err)
+	}
+	locked := false
+	if c := out.ObjectLockConfiguration; c != nil {
+		locked = c.ObjectLockEnabled == types.ObjectLockEnabledEnabled || (c.Rule != nil && c.Rule.DefaultRetention != nil)
+	}
+	d.lockEnabled.Store(locked)
+	v := 0.0
+	if locked {
+		v = 1
+	}
+	lyveBucketLockEnabled.WithLabelValues(d.region).Set(v)
+	return locked, nil
+}
+
+// TargetOnly is engine.TargetOnlyDeclarer: true once CheckBucketLock found
+// the bucket locked.
+func (d *LyveDriver) TargetOnly() bool { return d.lockEnabled.Load() }
+
+// Region is the Lyve region the driver stores into.
+func (d *LyveDriver) Region() string { return d.region }
