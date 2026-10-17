@@ -28,6 +28,15 @@ import (
 //     again, once for every dial waiting on it (singleflight), and a
 //     refresh that fails keeps the stale answer — a resolver outage must
 //     not take the drivers down (the answer is still the vendor's);
+//   - a dial never waits on a refresh: once an answer exists, the dial
+//     after the TTL starts the refresh and takes the stale answer while it
+//     runs (the one after it gets the new one); only a host with no answer
+//     yet waits, and within the dial's own context — the lookup itself is
+//     bounded by dnsLookupTimeout (5 s), never by a dial's context (a refresh
+//     the first dial abandoned still lands for the next). So a hedge "at 2 s
+//     on a fresh connection" and a probe's budget are bounded by their
+//     callers, not by the resolver (the post-merge review of #748 saw a
+//     100 ms dial wait a whole hung lookup);
 //   - the dials rotate over the answer's addresses (round-robin per host);
 //   - a dial that fails on one address tries the next within the same call,
 //     until one connects, every address has been tried, or the caller's
@@ -37,6 +46,12 @@ import (
 // (ok | error).
 
 const driverDNSTTLDefault = 5 * time.Minute
+
+// dnsLookupTimeout bounds one lookup of the cache: a hung resolver costs a
+// dial at most this, once per host per TTL (Go's own resolver gives up after
+// resolv.conf's timeout × attempts, ~10 s with one nameserver — a bound the
+// box's config holds, not this code).
+const dnsLookupTimeout = 5 * time.Second
 
 var driverDNSRefreshes = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "vaultaire_driver_dns_refreshes_total",
@@ -79,18 +94,29 @@ type dnsDialCache struct {
 	lookup func(ctx context.Context, host string) ([]string, error)
 	now    func() time.Time
 
-	mu      sync.Mutex
-	ttl     time.Duration
-	entries map[string]*dnsEntry
-	flight  singleflight.Group
+	mu            sync.Mutex
+	ttl           time.Duration
+	lookupTimeout time.Duration // 0 = dnsLookupTimeout
+	entries       map[string]*dnsEntry
+	flight        singleflight.Group
+}
+
+// lookupBound is how long one lookup may take.
+func (c *dnsDialCache) lookupBound() time.Duration {
+	if c.lookupTimeout > 0 {
+		return c.lookupTimeout
+	}
+	return dnsLookupTimeout
 }
 
 var sharedDNS = &dnsDialCache{lookup: net.DefaultResolver.LookupHost, ttl: driverDNSTTLDefault, now: time.Now}
 
-// entry is host's current answer: the cached one inside its TTL, else a
-// refresh (one per host however many dials wait on it), else the stale one
-// when the refresh fails. nil = no answer at all (the caller dials the name
-// itself, through the system resolver).
+// entry is host's current answer: the cached one inside its TTL; past it
+// the stale one at once while a refresh runs (one per host however many
+// dials trigger it; a refresh that fails keeps it); for a host with no
+// answer yet, the lookup's result, waited for within the dial's context.
+// nil = no answer at all (the caller dials the name itself, through the
+// system resolver, or gets its context's error).
 func (c *dnsDialCache) entry(ctx context.Context, host string) *dnsEntry {
 	c.mu.Lock()
 	e := c.entries[host]
@@ -99,9 +125,12 @@ func (c *dnsDialCache) entry(ctx context.Context, host string) *dnsEntry {
 	if e != nil && c.now().Before(e.expires) {
 		return e
 	}
-	v, _, _ := c.flight.Do(host, func() (any, error) {
-		// A refresh the waiting dial abandoned still completes for the next.
-		addrs, err := c.lookup(context.WithoutCancel(ctx), host)
+	ch := c.flight.DoChan(host, func() (any, error) {
+		// A refresh the waiting dial abandoned still completes for the next:
+		// under its own bound, never the dial's context.
+		lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.lookupBound())
+		defer cancel()
+		addrs, err := c.lookup(lctx, host)
 		if err != nil || len(addrs) == 0 {
 			driverDNSRefreshes.WithLabelValues(host, "error").Inc()
 			return e, nil
@@ -119,8 +148,16 @@ func (c *dnsDialCache) entry(ctx context.Context, host string) *dnsEntry {
 		c.mu.Unlock()
 		return fresh, nil
 	})
-	got, _ := v.(*dnsEntry)
-	return got
+	if e != nil {
+		return e // stale while the refresh runs
+	}
+	select {
+	case r := <-ch:
+		got, _ := r.Val.(*dnsEntry)
+		return got
+	case <-ctx.Done():
+		return nil // the dial's own deadline: the dialer returns its error
+	}
 }
 
 // dialer dials addr through the cache: the next address of the answer in
