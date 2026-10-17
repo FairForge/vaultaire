@@ -97,7 +97,7 @@ func TestWebhook_SubscriptionEventsResolveTenantFromMetadata(t *testing.T) {
 	sub.Customer.ID = cus
 	sub.Metadata = map[string]string{"tenant_id": f.tenantID, "house": "1"}
 
-	require.Equal(t, http.StatusOK, f.postCode(t, "meta_updated", "customer.subscription.updated", sub))
+	require.Equal(t, http.StatusOK, f.postCode(t, "meta_updated", "customer.subscription.updated", f.stripeHas(sub)))
 	house, ok, err := f.qm.GetHouse(context.Background(), f.tenantID)
 	require.NoError(t, err)
 	require.True(t, ok)

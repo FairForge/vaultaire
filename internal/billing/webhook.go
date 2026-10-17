@@ -32,12 +32,18 @@ type HouseQuotas interface {
 // WebhookHandler processes Stripe webhook events with signature
 // verification and persists subscription state to the database.
 //
-// Delivery contract (Review R10): an event is acknowledged with 200 only
-// after its handler succeeded AND its id was recorded in stripe_events.
-// Any failure in between answers 5xx and records nothing, so Stripe retries
-// the delivery (exponential backoff for up to three days in live mode) and
-// the retry is handled as a fresh event. Handlers are idempotent, so a
-// duplicate delivery of an already-recorded event is a no-op 200.
+// Delivery contract (Review R10, WP-R10-2): the event id is CLAIMED in
+// stripe_events before its handler runs — an INSERT inside a transaction
+// that stays open while the handler runs and commits only after it
+// succeeded. A delivery of an id already committed is a duplicate (200 at
+// once); a concurrent delivery of the same id waits on the uncommitted claim
+// (≤ 5 s, lock_timeout) and is then a duplicate, or takes the event over if
+// the first one failed. Any failure rolls the claim back and answers 5xx, so
+// Stripe retries (exponential backoff for up to three days in live mode) and
+// the retry is handled as a fresh event; a process that dies mid-handler
+// takes its connection — and so its claim — with it. One Stripe customer's
+// events are applied one at a time (an advisory lock in the claim), each
+// from the subscription as Stripe has it when it is applied.
 type WebhookHandler struct {
 	endpointSecret string
 	stripe         *StripeService
@@ -113,23 +119,107 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		zap.String("type", string(event.Type)),
 		zap.String("id", event.ID))
 
-	// Idempotency: skip if we already processed this event.
+	// Claim the event id before anything is applied (R10-16: the dedup was
+	// check-then-act, two concurrent deliveries were both handled).
+	var claim *sql.Tx
 	if h.stripe.db != nil && event.ID != "" {
-		var exists bool
-		if err := h.stripe.db.QueryRowContext(ctx,
-			`SELECT EXISTS(SELECT 1 FROM stripe_events WHERE event_id = $1)`,
-			event.ID).Scan(&exists); err != nil {
-			h.logger.Error("stripe webhook: dedup lookup failed", zap.String("id", event.ID), zap.Error(err))
+		tx, duplicate, err := h.claimEvent(ctx, event, body)
+		if err != nil {
+			h.logger.Error("stripe webhook: claim failed — left for Stripe to retry", zap.String("id", event.ID), zap.Error(err))
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		if exists {
+		if duplicate {
 			h.logger.Debug("duplicate webhook event, skipping", zap.String("id", event.ID))
 			w.WriteHeader(http.StatusOK)
 			return
 		}
+		claim = tx
+		defer func() { _ = claim.Rollback() }() // a no-op after Commit
 	}
 
+	if handleErr := h.handle(ctx, event); handleErr != nil {
+		// The claim is rolled back: Stripe retries, and the retry is handled.
+		h.logger.Error("stripe webhook: event not applied — left for Stripe to retry",
+			zap.String("type", string(event.Type)), zap.String("id", event.ID), zap.Error(handleErr))
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	// A claim that cannot be committed is a retry too: the handlers are
+	// idempotent, so applying the event again is the safe side.
+	if claim != nil {
+		if err := claim.Commit(); err != nil {
+			h.logger.Error("stripe webhook: record event failed", zap.String("id", event.ID), zap.Error(err))
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+// claimEvent claims event.ID: a transaction holding its new stripe_events
+// row (uncommitted) and the customer's advisory lock. duplicate is true when
+// the id was already committed (or is committed by the delivery this one
+// waited on); the transaction is then closed.
+func (h *WebhookHandler) claimEvent(ctx context.Context, event stripe.Event, body []byte) (*sql.Tx, bool, error) {
+	tx, err := h.stripe.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, false, fmt.Errorf("begin claim of %s: %w", event.ID, err)
+	}
+	// How long a delivery waits on another delivery of the same event, or on
+	// another event of the same customer, before it answers 500 and lets
+	// Stripe retry later.
+	if _, err := tx.ExecContext(ctx, `SET LOCAL lock_timeout = '5s'`); err != nil {
+		_ = tx.Rollback()
+		return nil, false, fmt.Errorf("claim of %s: lock timeout: %w", event.ID, err)
+	}
+	var claimed string
+	err = tx.QueryRowContext(ctx,
+		`INSERT INTO stripe_events (event_id, event_type, data)
+		 VALUES ($1, $2, $3)
+		 ON CONFLICT (event_id) DO NOTHING
+		 RETURNING event_id`,
+		event.ID, string(event.Type), string(body)).Scan(&claimed)
+	if errors.Is(err, sql.ErrNoRows) {
+		_ = tx.Rollback()
+		return nil, true, nil
+	}
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, false, fmt.Errorf("claim %s: %w", event.ID, err)
+	}
+	// One customer's events one at a time: each fetches the subscription
+	// after the previous one was applied, so the last applied is the latest.
+	if customer := eventCustomer(event); customer != "" {
+		if _, err := tx.ExecContext(ctx,
+			`SELECT pg_advisory_xact_lock(hashtextextended('stripe-customer:' || $1, 0))`, customer); err != nil {
+			_ = tx.Rollback()
+			return nil, false, fmt.Errorf("claim %s: lock customer %s: %w", event.ID, customer, err)
+		}
+	}
+	return tx, false, nil
+}
+
+// eventCustomer is the Stripe customer id of an event's object (an id, or an
+// expanded customer), "" when it has none.
+func eventCustomer(event stripe.Event) string {
+	if event.Data == nil {
+		return ""
+	}
+	switch c := event.Data.Object["customer"].(type) {
+	case string:
+		return c
+	case map[string]any:
+		id, _ := c["id"].(string)
+		return id
+	}
+	return ""
+}
+
+// handle applies one verified event; an error means it must be retried.
+func (h *WebhookHandler) handle(ctx context.Context, event stripe.Event) error {
 	var handleErr error
 	switch event.Type {
 	case "checkout.session.completed":
@@ -145,30 +235,15 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		h.logger.Debug("unhandled webhook event", zap.String("type", string(event.Type)))
 	}
-	if handleErr != nil {
-		// Not recorded: Stripe retries, and the retry is handled again.
-		h.logger.Error("stripe webhook: event not applied — left for Stripe to retry",
-			zap.String("type", string(event.Type)), zap.String("id", event.ID), zap.Error(handleErr))
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
+	return handleErr
+}
 
-	// Record event for idempotency. A failed record means a duplicate could
-	// be re-applied (handlers are idempotent) — still better than a lost
-	// event, so the failure is surfaced as a retry too.
-	if h.stripe.db != nil && event.ID != "" {
-		if _, err := h.stripe.db.ExecContext(ctx,
-			`INSERT INTO stripe_events (event_id, event_type, data)
-			 VALUES ($1, $2, $3)
-			 ON CONFLICT (event_id) DO NOTHING`,
-			event.ID, string(event.Type), string(body)); err != nil {
-			h.logger.Error("stripe webhook: record event failed", zap.String("id", event.ID), zap.Error(err))
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-	}
-
-	w.WriteHeader(http.StatusOK)
+// stripeMissing reports a Stripe 404 (resource_missing): the object is not
+// at Stripe — nothing an event about it could apply, and nothing a retry
+// would change.
+func stripeMissing(err error) bool {
+	var se *stripe.Error
+	return errors.As(err, &se) && (se.HTTPStatusCode == http.StatusNotFound || se.Code == stripe.ErrorCodeResourceMissing)
 }
 
 // A payload the SDK cannot deserialise is not retryable (it would fail the
@@ -274,6 +349,11 @@ func (h *WebhookHandler) handleCheckoutCompleted(ctx context.Context, event stri
 	// session payload carries no items, so fetch the subscription; the
 	// customer.subscription.created/updated events reach the same code.
 	sub, err := h.fetchSubscription(ctx, subscriptionID)
+	if stripeMissing(err) {
+		h.logger.Warn("stripe webhook: checkout names a subscription Stripe does not have — nothing applied",
+			zap.String("id", event.ID), zap.String("subscription", subscriptionID))
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("fetch subscription %s after checkout: %w", subscriptionID, err)
 	}
@@ -374,26 +454,42 @@ func (h *WebhookHandler) handlePaymentFailed(ctx context.Context, event stripe.E
 	return nil
 }
 
+// handleSubscriptionUpdated applies customer.subscription.created/updated
+// from the subscription as Stripe has it now — fetched, never the payload's
+// status or items (R10-15): Stripe does not guarantee delivery order, and an
+// older updated(active) delivered after updated(canceled) re-granted a
+// cancelled house (the reverse took a paid one away). The payload names the
+// subscription and its customer only.
 func (h *WebhookHandler) handleSubscriptionUpdated(ctx context.Context, event stripe.Event) error {
-	var sub stripe.Subscription
-	if !h.unmarshal(event, "subscription", &sub) {
+	var payload stripe.Subscription
+	if !h.unmarshal(event, "subscription", &payload) {
 		return nil
 	}
 
 	customerID := ""
-	if sub.Customer != nil {
-		customerID = sub.Customer.ID
+	if payload.Customer != nil {
+		customerID = payload.Customer.ID
 	}
-	if customerID == "" {
+	if customerID == "" || payload.ID == "" {
 		return nil
 	}
 
-	tenantID, ours, err := h.resolveTenant(ctx, event, customerID, sub.Metadata["tenant_id"])
+	tenantID, ours, err := h.resolveTenant(ctx, event, customerID, payload.Metadata["tenant_id"])
 	if err != nil {
 		return fmt.Errorf("lookup tenant for subscription update: %w", err)
 	}
 	if !ours {
 		return nil
+	}
+
+	sub, err := h.fetchSubscription(ctx, payload.ID)
+	if stripeMissing(err) {
+		h.logger.Warn("stripe webhook: subscription event for a subscription Stripe does not have — nothing applied",
+			zap.String("id", event.ID), zap.String("subscription", payload.ID), zap.String("tenant", tenantID))
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("fetch subscription %s for %s: %w", payload.ID, event.Type, err)
 	}
 
 	status := string(sub.Status)
@@ -424,7 +520,7 @@ func (h *WebhookHandler) handleSubscriptionUpdated(ctx context.Context, event st
 		zap.String("tenant", tenantID),
 		zap.String("status", status))
 
-	_, err = h.applyHouse(ctx, tenantID, &sub)
+	_, err = h.applyHouse(ctx, tenantID, sub)
 	return err
 }
 
@@ -432,9 +528,14 @@ func (h *WebhookHandler) handleSubscriptionUpdated(ctx context.Context, event st
 // when the subscription is not a house (legacy pack) or nothing is wired;
 // a non-nil error means the event must be retried.
 //
-//	active / trialing / past_due  → the house is granted (past_due = grace)
-//	canceled / unpaid / expired   → the house is cleared, data untouched
-//	incomplete / paused           → no change
+//	active / trialing / past_due     → the house is granted (past_due = grace)
+//	canceled / unpaid / expired /
+//	paused                           → the house is cleared, data untouched
+//	incomplete                       → no change (first payment pending)
+//
+// paused (WP-R10-2): a trial that ended without a payment method — Stripe
+// creates no invoice while it lasts, so nothing is being paid; it is
+// resumable, like unpaid, which is why HasLiveSubscription counts both.
 //
 // A clearing status is honoured only for the tenant's current subscription
 // so a stale, older subscription's events cannot take a paid house away.
@@ -459,7 +560,8 @@ func (h *WebhookHandler) applyHouse(ctx context.Context, tenantID string, sub *s
 			zap.String("tenant", tenantID), zap.String("subscription", sub.ID),
 			zap.Int("std_tb", order.Std), zap.Int("vault_tb", order.Vault), zap.Int("pin_hot_tb", order.PinHot),
 			zap.String("period", string(order.Period)), zap.String("status", string(sub.Status)))
-	case stripe.SubscriptionStatusCanceled, stripe.SubscriptionStatusUnpaid, stripe.SubscriptionStatusIncompleteExpired:
+	case stripe.SubscriptionStatusCanceled, stripe.SubscriptionStatusUnpaid, stripe.SubscriptionStatusIncompleteExpired,
+		stripe.SubscriptionStatusPaused:
 		current, err := h.isCurrentSubscription(ctx, tenantID, sub.ID)
 		if err != nil {
 			return true, err
@@ -496,6 +598,10 @@ func (h *WebhookHandler) isCurrentSubscription(ctx context.Context, tenantID, su
 	return !stored.Valid || stored.String == "" || stored.String == subID, nil
 }
 
+// handleSubscriptionDeleted applies customer.subscription.deleted from the
+// payload: canceled is terminal at Stripe (a deleted subscription is never
+// reactivated), so a fetch cannot tell anything newer; an older updated
+// delivered after it fetches the canceled state and clears again.
 func (h *WebhookHandler) handleSubscriptionDeleted(ctx context.Context, event stripe.Event) error {
 	var sub stripe.Subscription
 	if !h.unmarshal(event, "subscription", &sub) {

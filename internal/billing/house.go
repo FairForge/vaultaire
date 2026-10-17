@@ -449,9 +449,10 @@ func houseCheckoutIdempotencyKey(tenantID string, o HouseOrder, now time.Time) s
 }
 
 // HasLiveSubscription reports whether the customer already holds a
-// subscription Stripe would keep billing (active, trialing, past_due,
-// incomplete, unpaid). A second Checkout for such a customer would open a
-// second subscription while the first keeps invoicing (Review R10-05).
+// subscription Stripe would keep billing or can resume (active, trialing,
+// past_due, incomplete, unpaid, paused — paused since WP-R10-2: no invoice
+// while it lasts, but a resume brings it back). A second Checkout for such a
+// customer would open a second subscription beside the first (Review R10-05).
 func (s *StripeService) HasLiveSubscription(ctx context.Context, customerID string) (bool, error) {
 	params := &stripe.SubscriptionListParams{Customer: stripe.String(customerID), Status: stripe.String("all")}
 	params.Context = ctx
@@ -460,7 +461,7 @@ func (s *StripeService) HasLiveSubscription(ctx context.Context, customerID stri
 	for it.Next() {
 		switch it.Subscription().Status {
 		case stripe.SubscriptionStatusActive, stripe.SubscriptionStatusTrialing, stripe.SubscriptionStatusPastDue,
-			stripe.SubscriptionStatusIncomplete, stripe.SubscriptionStatusUnpaid:
+			stripe.SubscriptionStatusIncomplete, stripe.SubscriptionStatusUnpaid, stripe.SubscriptionStatusPaused:
 			return true, nil
 		}
 	}

@@ -353,7 +353,7 @@ func TestWebhook_SubscriptionUpdatedResizes(t *testing.T) {
 	cus := "cus_" + f.tenantID
 	sub := subWith("sub_"+f.tenantID, "active", item("si_1", "price_std_m", 2), item("si_2", "price_vault_m", 1))
 	sub.Customer.ID = cus
-	f.post(t, "created", "customer.subscription.created", sub)
+	f.post(t, "created", "customer.subscription.created", f.stripeHas(sub))
 	house, ok, _ := f.qm.GetHouse(context.Background(), f.tenantID)
 	require.True(t, ok)
 	assert.Equal(t, usage.HouseFromTB(2, 1, 0), house)
@@ -363,7 +363,7 @@ func TestWebhook_SubscriptionUpdatedResizes(t *testing.T) {
 	// Resize: the attic goes away, downstairs grows.
 	sub = subWith(sub.ID, "active", item("si_1", "price_std_m", 5))
 	sub.Customer.ID = cus
-	f.post(t, "updated", "customer.subscription.updated", sub)
+	f.post(t, "updated", "customer.subscription.updated", f.stripeHas(sub))
 	house, _, _ = f.qm.GetHouse(context.Background(), f.tenantID)
 	assert.Equal(t, usage.HouseFromTB(5, 0, 0), house)
 	floors, _ := f.qm.GetFloors(context.Background(), f.tenantID)
@@ -372,11 +372,11 @@ func TestWebhook_SubscriptionUpdatedResizes(t *testing.T) {
 
 	// Past due keeps the house (grace); unpaid clears it.
 	sub.Status = "past_due"
-	f.post(t, "pastdue", "customer.subscription.updated", sub)
+	f.post(t, "pastdue", "customer.subscription.updated", f.stripeHas(sub))
 	_, ok, _ = f.qm.GetHouse(context.Background(), f.tenantID)
 	assert.True(t, ok)
 	sub.Status = "unpaid"
-	f.post(t, "unpaid", "customer.subscription.updated", sub)
+	f.post(t, "unpaid", "customer.subscription.updated", f.stripeHas(sub))
 	_, ok, _ = f.qm.GetHouse(context.Background(), f.tenantID)
 	assert.False(t, ok, "an unpaid subscription grants nothing")
 	_, _, limit, _ := f.tenantRow(t)
@@ -390,7 +390,7 @@ func TestWebhook_SubscriptionDeletedClearsOnlyTheCurrentHouse(t *testing.T) {
 	cus := "cus_" + f.tenantID
 	sub := subWith("sub_"+f.tenantID, "active", item("si_1", "price_std_y", 3))
 	sub.Customer.ID = cus
-	f.post(t, "created", "customer.subscription.created", sub)
+	f.post(t, "created", "customer.subscription.created", f.stripeHas(sub))
 	_, ok, _ := f.qm.GetHouse(context.Background(), f.tenantID)
 	require.True(t, ok)
 
@@ -417,7 +417,7 @@ func TestWebhook_LegacyPackSubscriptionLeavesQuotasAlone(t *testing.T) {
 	cus := "cus_" + f.tenantID
 	sub := subWith("sub_pack_"+f.tenantID, "active", item("si_1", "price_vault18_pack", 1))
 	sub.Customer.ID = cus
-	f.post(t, "pack", "customer.subscription.updated", sub)
+	f.post(t, "pack", "customer.subscription.updated", f.stripeHas(sub))
 	_, ok, _ := f.qm.GetHouse(context.Background(), f.tenantID)
 	assert.False(t, ok)
 	_, status, _, _ := f.tenantRow(t)
