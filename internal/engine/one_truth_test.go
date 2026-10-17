@@ -59,7 +59,7 @@ func TestWasabi_NotACandidateUnlessRecorded(t *testing.T) {
 	e.AddDriver("wasabi", wasabi)
 	e.SetPrimary("idrive")
 
-	assert.NotContains(t, e.buildWriteCandidateList("idrive"), "wasabi", "never a fall-over destination")
+	assert.NotContains(t, e.buildWriteCandidateList(e.view(), "idrive"), "wasabi", "never a fall-over destination")
 	used, err := e.Put(tenantCtx(), "c", "k", bytes.NewReader([]byte("v")))
 	require.NoError(t, err)
 	assert.Equal(t, "lyve", used)

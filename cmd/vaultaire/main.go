@@ -179,6 +179,13 @@ func main() {
 
 	// Create engine with or without DB
 	eng := engine.NewEngine(db, logger, &engine.Config{DefaultBackend: "local"})
+	// Every driver is registered before eng.Seal() below: a refusal here is
+	// a boot-order bug (WP-R6-2).
+	addDriver := func(name string, d engine.Driver) {
+		if err := eng.AddDriver(name, d); err != nil {
+			logger.Fatal("driver registration refused", zap.String("name", name), zap.Error(err))
+		}
+	}
 
 	// The drivers' shared DNS cache: an answer kept DRIVER_DNS_TTL (WP-R7-6),
 	// set before the first driver dials.
@@ -194,14 +201,14 @@ func main() {
 		logger.Fatal("failed to create storage directory", zap.Error(err))
 	}
 	localDriver := drivers.NewLocalDriver(dataPath, logger)
-	eng.AddDriver("local", localDriver)
+	addDriver("local", localDriver)
 	logger.Info("local driver added", zap.String("path", dataPath))
 
 	// 2. Add S3 if credentials available
 	if accessKey := os.Getenv("S3_ACCESS_KEY"); accessKey != "" {
 		secretKey := os.Getenv("S3_SECRET_KEY")
 		if s3Driver, err := drivers.NewS3CompatDriver(accessKey, secretKey, logger); err == nil {
-			eng.AddDriver("s3", s3Driver)
+			addDriver("s3", s3Driver)
 			logger.Info("S3 driver added")
 		} else {
 			logger.Warn("failed to add S3 driver", zap.Error(err))
@@ -219,7 +226,7 @@ func main() {
 		}
 		if lyveDriver, err := drivers.NewLyveDriver(accessKey, secretKey, "", region, logger); err == nil {
 			checkLyveBucketLock(lyveDriver, logger)
-			eng.AddDriver("lyve", lyveDriver)
+			addDriver("lyve", lyveDriver)
 			logger.Info("Lyve driver added", zap.Bool("target_only", lyveDriver.TargetOnly()))
 		} else {
 			logger.Warn("failed to add Lyve driver", zap.Error(err))
@@ -238,7 +245,7 @@ func main() {
 		if err != nil {
 			logger.Warn("failed to create Quotaless driver", zap.Error(err))
 		} else {
-			eng.AddDriver("quotaless", quotalessDriver)
+			addDriver("quotaless", quotalessDriver)
 			logger.Info("quotaless driver added", zap.String("endpoint", endpoint))
 		}
 	}
@@ -261,7 +268,7 @@ func main() {
 		if err != nil {
 			logger.Warn("failed to create Geyser driver", zap.Error(err))
 		} else {
-			eng.AddDriver("geyser", geyserDriver)
+			addDriver("geyser", geyserDriver)
 			logger.Info("geyser driver added (LTO-9 tape)", zap.String("bucket", bucket))
 		}
 	}
@@ -281,7 +288,7 @@ func main() {
 		if err != nil {
 			logger.Warn("failed to add iDrive driver", zap.Error(err))
 		} else {
-			eng.AddDriver("idrive", idriveDriver)
+			addDriver("idrive", idriveDriver)
 			logger.Info("iDrive driver added", zap.String("endpoint", defaultEndpoint), zap.String("region", defaultRegion))
 		}
 
@@ -326,7 +333,7 @@ func main() {
 			// The driver calls itself "idrive"; its put-retry series must say
 			// which region stalled (WP-VAULT-1).
 			drv.SetBackendName("idrive-" + region)
-			eng.AddDriver("idrive-"+region, drv)
+			addDriver("idrive-"+region, drv)
 			registered = append(registered, region)
 		}
 		drivers.SetAvailableIDriveRegions(defaultRegion, registered)
@@ -346,7 +353,7 @@ func main() {
 		if err != nil {
 			logger.Warn("failed to add R2 driver", zap.Error(err))
 		} else {
-			eng.AddDriver("r2", r2Driver)
+			addDriver("r2", r2Driver)
 			logger.Info("R2 driver added (public buckets / CDN origin)",
 				zap.String("jurisdiction", os.Getenv("R2_JURISDICTION")),
 				zap.String("bucket", r2Driver.Bucket()))
@@ -374,7 +381,7 @@ func main() {
 				// unregister the primary; the probe keeps reporting it.
 				logger.Error("Wasabi bucket not confirmed at boot", zap.String("bucket", bucket), zap.Error(ensureErr))
 			}
-			eng.AddDriver("wasabi", wasabiDriver)
+			addDriver("wasabi", wasabiDriver)
 			logger.Info("Wasabi driver added",
 				zap.String("endpoint", endpoint), zap.String("region", region),
 				zap.String("bucket", bucket), zap.Bool("bucket_created", created))
@@ -387,7 +394,7 @@ func main() {
 		if err != nil {
 			logger.Warn("failed to add Permafrost driver", zap.Error(err))
 		} else {
-			eng.AddDriver("permafrost", onedriveDriver)
+			addDriver("permafrost", onedriveDriver)
 			logger.Info("Permafrost fleet driver added", zap.Int("tenants", onedriveDriver.TenantCount()))
 		}
 	}
@@ -415,7 +422,7 @@ func main() {
 		if err != nil {
 			logger.Error("failed to add Sync WebDAV driver", zap.Error(err))
 		} else {
-			eng.AddDriver("sync", syncDriver)
+			addDriver("sync", syncDriver)
 			logger.Info("Sync WebDAV driver added (target-only; sync_backend flag)",
 				zap.Int("bridges", syncDriver.Bridges()), zap.String("root", syncCfg.Root))
 		}
@@ -440,6 +447,7 @@ func main() {
 	}
 	eng.SetPrimary(storageMode)
 	logger.Info("primary backend set", zap.String("mode", storageMode))
+	eng.Seal() // every driver is registered: AddDriver is refused from here (WP-R6-2)
 
 	// Create server
 	var server *api.Server

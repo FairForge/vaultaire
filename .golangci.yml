@@ -71,6 +71,12 @@ linters:
         linters: [noctx, bodyclose, errorlint, revive]
       - path: _test\.go
         linters: [noctx, bodyclose, errorlint]
+      # Test fixtures register their drivers before the engine's first call;
+      # a refusal (WP-R6-2, ErrEngineServing) logs an Error and every call
+      # to that backend then fails the test with ErrBackendNotRegistered.
+      - path: _test\.go
+        linters: [errcheck]
+        text: "AddDriver"
 
 formatters:
   enable:

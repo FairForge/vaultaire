@@ -338,7 +338,7 @@ func TestBuildCandidateList(t *testing.T) {
 	eng.AddDriver("backup", &mockDriver{name: "backup"})
 	eng.AddDriver("archive", &mockDriver{name: "archive"})
 
-	candidates := eng.buildCandidateList("archive")
+	candidates := eng.buildCandidateList(eng.view(), "archive")
 	assert.Equal(t, "archive", candidates[0])
 	assert.Equal(t, "primary", candidates[1])
 	assert.Len(t, candidates, 3)

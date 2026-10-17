@@ -27,7 +27,9 @@ func registerLabDrivers(eng *engine.CoreEngine, logger *zap.Logger) {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			logger.Fatal("lab driver directory", zap.String("dir", dir), zap.Error(err))
 		}
-		eng.AddDriver(name, drivers.NewLocalDriver(dir, logger))
+		if err := eng.AddDriver(name, drivers.NewLocalDriver(dir, logger)); err != nil {
+			logger.Fatal("lab driver registration", zap.String("name", name), zap.Error(err))
+		}
 		logger.Warn("LAB BUILD: extra local driver registered", zap.String("name", name), zap.String("dir", dir))
 	}
 	labWrap(eng, logger)
@@ -72,7 +74,9 @@ func init() {
 		}
 		for _, name := range eng.GetDriverNames() {
 			d, _ := eng.GetDriver(name)
-			eng.AddDriver(name, labLoggedDriver{Driver: d, name: name, logger: logger})
+			if err := eng.AddDriver(name, labLoggedDriver{Driver: d, name: name, logger: logger}); err != nil {
+				logger.Fatal("lab driver wrap", zap.String("name", name), zap.Error(err))
+			}
 		}
 	}
 }

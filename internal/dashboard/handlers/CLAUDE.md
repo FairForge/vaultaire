@@ -350,6 +350,9 @@ with `'` (OWASP CSV injection); used by the waitlist and audit exports.
 r2 (public store), geyser (tape), permafrost/onedrive (second copy), `idrive-<region>` (residency
 pin) — with a flash and an `admin.primary_swap_refused` audit row (Review R12, proven live: the
 primary was set to "r2" on a box without an r2 driver). `local` stays allowed (dev/hub primary).
+The check and the swap are one call, `engine.SwapPrimary`, under the engine's lock (WP-R6-2); the
+`admin.primary_swapped` row and the Info line name the `previous` primary. The swap is process
+memory only: the other slot and a restart read `STORAGE_MODE` (WP-R12-13 persists it).
 
 ## Egress allowance (`egress.go`, WP-R10-9)
 
