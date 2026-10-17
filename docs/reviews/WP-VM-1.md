@@ -153,3 +153,37 @@ The 4 retired manifests are released by the collector after 24 h. Their chunks a
 - `make test-integration` (as `go test -race -p 4 -timeout 40m ./...` on a private DB, because the machine was loaded): every package ok, for #728 and #729.
 - golangci-lint v2.14.0: 0. gosec with the workflow's flags: 0.
 - Structure tests in that run: `TestLedger_NoQuotaStatementAfterACommit`, `TestLedger_QuotaStatementIsLast`, `TestLedger_LockOrder_*`, `TestEngineCalls_CarryTheTenant`, `TestExportSectionsCoverSchema`, the account schema walk, `TestChunkBlobCalls_GoThroughTheChunkStore`.
+
+## Post-merge review (2026-10-17, the meta session)
+
+Read: the product diffs of #726, #728 and #729 against the note, the vendor
+semantics where a claim cites them, and prod read-only (journal and the
+tables, 2026-10-14 21:16 → 2026-10-17 14:30 UTC). **Every claim holds. No P0
+and no P1.** Three P3 corrections are recorded below; nothing needed code.
+
+| # | Claim probed | How | Verdict |
+|---|---|---|---|
+| M1 | "retired, never released at the flip" on EVERY delete path (the pattern that found most earlier gaps: the same logic on the other entry points) | `DeleteObjectChunksTx` has exactly ONE caller left — the collector's `collectManifest`; DELETE, DeleteObjects, the marker, `?versionId`, the Suspended delete, the deletion runner and the export purge all reach `deleteHeadRowTx` / `deleteVersion`, which retire through `retireRowBytes`; `HandleDelete`'s old chunked branch releases nothing itself | holds |
+| M2 | Kind-strict naming: a legacy manifest at `<key>` and a whole blob at `<key>` are never confused | `manifestNamedBy` / `versionKeepsManifest` require `is_chunked` / backend `chunked`; `blobNamedBy` / `versionKeepsBlob` exclude them; `usage.VersionRetained` matches address AND kind, NULL head row short-circuits | holds |
+| M3 | The orphan pass cannot queue a live manifest | a manifest's rows appear only at the flip's COMMIT (no in-flight window); the shape check (`retiredBlobKey`) and the `COALESCE(storage_key, object_key)` head check exclude a legacy manifest at the key, a key that contains `@`, and a key that is itself address-shaped; `updated_at < now − 24 h`; the collector re-checks under the key's lock before releasing | holds |
+| M4 | Lock order, collector ↔ `EraseRows` | both take `tenant_chunk_refs` rows, then `global_content_index` rows; the erase's `FOR UPDATE` on the tenant's refs serialises them with no cycle | holds |
+| M5 | R61-5: the head row's bytes go unless an Enabled-era version names them | the null row becomes the marker BEFORE `deleteHeadRowTx` asks `versionKeeps*`, so only a non-null live version can keep them; a retained null version is retired and released in the same transaction, the bill last | holds |
+| M6 | R61-8: the copy-source conditions follow AWS's two pairs | `evaluateCopySourceConditions`: If-Match present decides alone (an If-Unmodified-Since that fails is ignored, as AWS); If-None-Match present decides alone; otherwise the date headers | holds (AWS documents only the two combinations; the undocumented ones are decided the same way) |
+| M7 | #726 P8 on the chunked Complete | `markCompleted` runs as `InTx` inside the flip's upsert: a lost Complete rolls the manifest and head row back, the dedup-hit chunks' refs are compensated, `answerConcurrentComplete` compares the head ETag | holds |
+| M8 | #726 reaper orphan sweep cannot remove a live upload's staging | a directory is created after its row; the sweep removes only directories with no row AND a 1 h old mtime; a part landing in a directory whose row an Abort just removed is the one race, and it fails that part only | holds |
+| M9 | Prod (read-only) | collector run 2026-10-16 02:33 UTC: `due 4, deleted 4` (the proof's manifests), one earlier `due 1, deleted 1`; now `retired_blobs` 0 rows, chunked head rows 0, chunked versions 0, `object_metadata` 0, `tenant_chunk_refs` 0; `global_content_index` 8,785 rows all at `ref_count 0` (dedup GC's 7-day grace; 793 on the dead iDrive key unsweepable, unchanged cause); all 18 jobs `ok`; the only `level:error` lines since the deploy are the three Cloudflare-cut proof PUTs (R108-9); `wasabi` probe failing (the dead partner pair, 194 warnings) — target-only, breaker closed, nothing routes to it | clean |
+
+### Corrections (P3, recorded; no code)
+
+| # | Item | Where it goes |
+|---|---|---|
+| RVM-1 (corrected) | "On the previous build an addressed chunked object is a 500, never wrong bytes" holds for an object chunked on the new build — but NOT for a chunked object written before 092 and overwritten chunked on the new slot during the ≤ 15 min two-slot window: the legacy manifest at `<key>` is retired (24 h grace), and the old slot's `GetObjectChunks(key)` serves ITS chunks under the new head row's size and ETag (a short or cut body, or old bytes under a new ETag). 087 had the same shape for whole blobs at `<key>`. Prod had 0 legacy chunked rows at the switch, so nothing was affected. **Pattern for every "the artefact gets an address" migration: the old slot's by-key reader does not find nothing — it finds the retired artefact.** The fix, if ever needed again, is to keep the old slot's reader from resolving a retired row (a `retired_blobs` check in the OLD build, shipped one deploy earlier) | the two-slot migration checklist (`docs/DEPLOY.md`), next time |
+| RVM-5 (extended) | A self-copy that names the CURRENT version (`?versionId=<the current id>`, or `null` on a key with no version row) without REPLACE is accepted (`src.VersionID != ""` reads as a restore); AWS answers InvalidRequest. A harmless rewrite: a new manifest address, the old one retired | the copy's next pass, with RVM-5 |
+| RVM-9 | `latestVersion` adds up to two DB reads to every HEAD on a versioned bucket (the versioning status, the `is_latest` row). DB-only still (non-negotiable 2); a note for the HEAD latency budget | WP-R9-5 (the per-GET touch coalescing) |
+
+### Handed to Stage 1a Prompt 8, Part 0
+
+1. The two-slot window with a REAL previous binary (`e209950` built from git on a lab port): a legacy chunked object, overwritten chunked on the new slot, read on the old slot — record what the client sees (RVM-1 corrected), and the orphan pass healing the old slot's overwrite and delete of an addressed object.
+2. A Suspended plain DELETE of a chunked object under Object Lock (retention and legal hold): 403 before the null row is touched, nothing retired.
+3. The chunked copy into an Enabled bucket under the flag, then every version deleted: `tenant_quotas` = `BilledBytes` after each step, the collector releasing each manifest once.
+4. `TestLedger_RandomSequence_*` with the Suspended delete and the manifest copy in its alphabet.
