@@ -37,6 +37,7 @@ func TestStatusPage_Degraded(t *testing.T) {
 	s := newTestServerWithHealthChecker(t)
 	s.healthChecker.RegisterBackend("quotaless")
 	s.healthChecker.UpdateHealth("quotaless", false, 0, assert.AnError)
+	s.healthChecker.UpdateHealth("quotaless", false, 0, assert.AnError) // two failed probes in a row (WP-R6-3)
 
 	req := httptest.NewRequest(http.MethodGet, "/status", nil)
 	rec := httptest.NewRecorder()

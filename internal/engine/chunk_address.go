@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/FairForge/vaultaire/internal/common"
 )
@@ -112,7 +113,9 @@ func (e *CoreEngine) GetOn(ctx context.Context, backend, container, artifact str
 	var rc io.ReadCloser
 	err := e.on(ctx, "get", container, artifact, backend, func(d Driver) error {
 		var getErr error
+		start := time.Now()
 		rc, getErr = d.Get(ctx, container, artifact)
+		observeDriverOp(backend, opGetFirstByte, start, 0)
 		return getErr
 	})
 	if err != nil {
@@ -134,7 +137,9 @@ func (e *CoreEngine) PutOn(ctx context.Context, backend, container, artifact str
 	// charge on the backend's breaker (Prompt 2b.2 C1).
 	src := &sizeTrackingReader{Reader: data}
 	err := e.on(ctx, "put", container, artifact, backend, func(d Driver) error {
+		start, waited := time.Now(), src.waitedSoFar()
 		perr := d.Put(ctx, container, artifact, src, opts...)
+		observeDriverOp(backend, opPut, start, src.waitedSoFar()-waited)
 		if srcErr := src.sourceErr(); perr != nil && srcErr != nil && !errors.Is(perr, ErrCallerAborted) {
 			perr = fmt.Errorf("%w: %w (%w)", ErrCallerAborted, srcErr, perr)
 		}
@@ -149,7 +154,11 @@ func (e *CoreEngine) PutOn(ctx context.Context, backend, container, artifact str
 
 // DeleteOn deletes an artifact on the named backend only.
 func (e *CoreEngine) DeleteOn(ctx context.Context, backend, container, artifact string) error {
-	err := e.on(ctx, "delete", container, artifact, backend, func(d Driver) error { return d.Delete(ctx, container, artifact) })
+	err := e.on(ctx, "delete", container, artifact, backend, func(d Driver) error {
+		start := time.Now()
+		defer observeDriverOp(backend, opDelete, start, 0)
+		return d.Delete(ctx, container, artifact)
+	})
 	if err != nil {
 		return fmt.Errorf("delete %s/%s on %s: %w", container, artifact, backend, err)
 	}
@@ -161,7 +170,9 @@ func (e *CoreEngine) ExistsOn(ctx context.Context, backend, container, artifact 
 	var exists bool
 	err := e.on(ctx, "exists", container, artifact, backend, func(d Driver) error {
 		var exErr error
+		start := time.Now()
 		exists, exErr = d.Exists(ctx, container, artifact)
+		observeDriverOp(backend, opHead, start, 0)
 		return exErr
 	})
 	if err != nil {

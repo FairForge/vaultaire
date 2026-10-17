@@ -99,7 +99,7 @@ func (d *GeyserDriver) getSingle(ctx context.Context, key string) (io.ReadCloser
 	resp, err := d.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(d.bucket),
 		Key:    aws.String(key),
-	})
+	}, sdkCallOptions(ctx)...)
 	if err != nil {
 		return nil, fmt.Errorf("geyser get %s: %w", key, geyserWireErr(err))
 	}
@@ -118,7 +118,7 @@ func (d *GeyserDriver) getRanged(ctx context.Context, key string) (io.ReadCloser
 		Bucket: aws.String(d.bucket),
 		Key:    aws.String(key),
 		Range:  aws.String(fmt.Sprintf("bytes=0-%d", rangeSize-1)),
-	})
+	}, sdkCallOptions(ctx)...)
 	if err != nil {
 		return nil, fmt.Errorf("geyser get %s: %w", key, geyserWireErr(err))
 	}
@@ -239,7 +239,7 @@ func (t *geyserLazyTail) Read(p []byte) (int, error) {
 			Bucket: aws.String(t.d.bucket),
 			Key:    aws.String(t.d.key(t.key)),
 			Range:  aws.String(fmt.Sprintf("bytes=%d-", t.from)),
-		})
+		}, sdkCallOptions(t.ctx)...)
 		geyserGetRanges.Inc()
 		if err != nil {
 			t.err = fmt.Errorf("geyser get tail %s from %d: %w", t.key, t.from, geyserWireErr(err))
@@ -365,7 +365,7 @@ func (r *geyserRangedReader) fetch(rg *geyserRange) {
 		Bucket: aws.String(r.d.bucket),
 		Key:    aws.String(r.key),
 		Range:  aws.String(fmt.Sprintf("bytes=%d-%d", rg.start, rg.end)),
-	})
+	}, sdkCallOptions(r.ctx)...)
 	geyserGetRanges.Inc()
 	if err != nil {
 		rg.err = fmt.Errorf("geyser get %s range %d-%d: %w", r.key, rg.start, rg.end, geyserWireErr(err))

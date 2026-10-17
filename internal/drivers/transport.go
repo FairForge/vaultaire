@@ -20,7 +20,7 @@ var tunedTransportDisabled = strings.EqualFold(os.Getenv("VAULTAIRE_TUNED_TRANSP
 type transportConfig struct {
 	insecureTLS           bool
 	responseHeaderTimeout time.Duration
-	completeHeaderTimeout time.Duration
+	ops                   *OpTimeouts
 	http1Only             bool
 	freshConnections      bool
 }
@@ -38,33 +38,85 @@ func WithResponseHeaderTimeout(d time.Duration) TransportOption {
 	return func(c *transportConfig) { c.responseHeaderTimeout = d }
 }
 
-// WithCompleteMultipartHeaderTimeout gives CompleteMultipartUpload (POST
-// ?uploadId=) its own, longer response-header timeout. The vendor assembles
-// the object before it answers, and a header timeout is an error the SDK's
-// retryer re-sends: a Complete that legitimately took longer than the
-// general timeout was sent twice, the second answered NoSuchUpload (→ 500)
-// after the first had committed (Prompt 2b.5 F3.8).
-func WithCompleteMultipartHeaderTimeout(d time.Duration) TransportOption {
-	return func(c *transportConfig) { c.completeHeaderTimeout = d }
+// OpTimeouts are the response-header bounds of one S3-class client by
+// request class (WP-R6-3): how long a request may wait for the backend's
+// first byte once it is sent (Go's ResponseHeaderTimeout: the clock starts
+// after the request body is written, so an upload's own time is never in
+// it). A backend that answers nothing trips ITS breaker within seconds and
+// never a client's read timeout — on 2026-10-17 a 60 s bound here, the PUT
+// deadline of a small body and aws-cli's 60 s read timeout fired in the
+// same second (RP8-9). The invariant, with its exceptions, is in
+// internal/drivers/CLAUDE.md and data_path_bounds_test.go.
+type OpTimeouts struct {
+	// Meta: HEAD (HeadObject, HeadBucket), DELETE, a listing page, bucket
+	// and multipart bookkeeping (CreateMultipartUpload, Abort, DeleteObjects).
+	Meta time.Duration
+	// Get: GetObject's first byte (the body then streams, ctx-bound).
+	Get time.Duration
+	// Put: PutObject / UploadPart's answer after the body. The per-size PUT
+	// deadline (s3PutDeadline) is the PUT's real bound and fires first.
+	Put time.Duration
+	// Complete: CompleteMultipartUpload and a server-side copy — the vendor
+	// assembles (or copies) the object before it answers, and a header
+	// timeout is retried by the SDK: a re-sent Complete whose first copy had
+	// committed answered NoSuchUpload (Prompt 2b.5 F3.8).
+	Complete time.Duration
 }
 
-// completeMultipartHeaderTimeout is the Complete's own bound: minutes, not
-// the 60 s of every other call.
-var completeMultipartHeaderTimeout = 10 * time.Minute
-
-// completeSplitTransport sends CompleteMultipartUpload through complete (the
-// same transport with the longer header timeout), everything else through
-// the embedded one.
-type completeSplitTransport struct {
-	*http.Transport
-	complete *http.Transport
+// WithOpTimeouts gives each request class its own response-header bound,
+// each through its own clone of the transport (one connection pool per
+// class, shared by every request of that class — never a client per
+// request).
+func WithOpTimeouts(t OpTimeouts) TransportOption {
+	return func(c *transportConfig) { c.ops = &t }
 }
 
-func (t *completeSplitTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.Method == http.MethodPost && req.URL.Query().Has("uploadId") {
-		return t.complete.RoundTrip(req)
+// opClass is a request's class for its response-header bound.
+type opClass int
+
+const (
+	classMeta opClass = iota
+	classGet
+	classPut
+	classComplete
+	opClasses
+)
+
+// requestClass reads the class off the request the SDK built (path-style,
+// as every S3-class driver here addresses): GetObject carries
+// `x-id=GetObject`, a listing `list-type=2`; a POST with `uploadId` is the
+// Complete, one with `uploads` the Create; a PUT with x-amz-copy-source is
+// a server-side copy.
+func requestClass(req *http.Request) opClass {
+	q := req.URL.Query()
+	hasKey := strings.Contains(strings.Trim(req.URL.Path, "/"), "/")
+	switch req.Method {
+	case http.MethodGet:
+		if q.Get("x-id") == "GetObject" || (hasKey && len(q) == 0) {
+			return classGet
+		}
+	case http.MethodPut:
+		if req.Header.Get("X-Amz-Copy-Source") != "" {
+			return classComplete
+		}
+		if hasKey {
+			return classPut
+		}
+	case http.MethodPost:
+		if q.Has("uploadId") {
+			return classComplete
+		}
 	}
-	return t.Transport.RoundTrip(req)
+	return classMeta
+}
+
+// opSplitTransport sends each request through the transport of its class.
+type opSplitTransport struct {
+	byClass [opClasses]*http.Transport
+}
+
+func (t *opSplitTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return t.byClass[requestClass(req)].RoundTrip(req)
 }
 
 // WithFreshConnections makes every request dial its own connection and
@@ -139,10 +191,14 @@ func TunedHTTPClient(opts ...TransportOption) *http.Client {
 		transport.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
 	}
 
-	if cfg.completeHeaderTimeout > 0 && cfg.responseHeaderTimeout > 0 {
-		complete := transport.Clone()
-		complete.ResponseHeaderTimeout = cfg.completeHeaderTimeout
-		return &http.Client{Transport: &completeSplitTransport{Transport: transport, complete: complete}}
+	if cfg.ops != nil {
+		split := &opSplitTransport{}
+		for class, d := range [opClasses]time.Duration{classMeta: cfg.ops.Meta, classGet: cfg.ops.Get, classPut: cfg.ops.Put, classComplete: cfg.ops.Complete} {
+			tr := transport.Clone()
+			tr.ResponseHeaderTimeout = d
+			split.byClass[class] = tr
+		}
+		return &http.Client{Transport: split}
 	}
 	return &http.Client{Transport: transport}
 }

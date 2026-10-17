@@ -38,6 +38,9 @@ type R2Driver struct {
 	bucket       string
 	client       *s3.Client
 	logger       *zap.Logger
+	// hedge: HEAD, DELETE, a listing page sent again on a fresh connection
+	// after DRIVER_HEDGE_AFTER (hedge.go, WP-R6-3); nil = none.
+	hedge *s3Hedger
 }
 
 // R2DefaultBucket is the R2 bucket public objects land in when R2_BUCKET is
@@ -98,7 +101,10 @@ func NewR2Driver(accountID, accessKey, secretKey, jurisdiction, bucket string, l
 		// HTTP/1.1 pinned like the other S3 backends: Go funnels an h2
 		// origin's uploads through one multiplexed connection, which caps
 		// aggregate throughput (see geyser.go / lyve.go for the numbers).
-		config.WithHTTPClient(TunedHTTPClient(WithHTTP1Only())),
+		// The per-class bounds of every S3-class client (s3OpTimeouts,
+		// WP-R6-3): R2 had none — a hung call lasted until TCP gave up.
+		config.WithHTTPClient(TunedHTTPClient(WithHTTP1Only(), WithOpTimeouts(s3OpTimeouts))),
+		config.WithRetryMaxAttempts(requestRetryMaxAttempts),
 		// R2 does not accept the SDK's default flexible-checksum trailers on
 		// streaming uploads (aws-chunked + x-amz-checksum-crc32 → 501); only
 		// compute checksums where an operation requires one.
@@ -126,6 +132,7 @@ func NewR2Driver(accountID, accessKey, secretKey, jurisdiction, bucket string, l
 		bucket:       bucket,
 		client:       client,
 		logger:       logger,
+		hedge:        newS3Hedger("r2", driverHedgeAfterFromEnv(logger), s3FreshHTTPClient()),
 	}, nil
 }
 
@@ -178,7 +185,7 @@ func (d *R2Driver) Get(ctx context.Context, container, artifact string) (io.Read
 	out, err := d.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(d.bucket),
 		Key:    aws.String(key),
-	})
+	}, sdkCallOptions(ctx)...)
 	if err != nil {
 		return nil, fmt.Errorf("r2 get %s: %w", key, err)
 	}
@@ -203,7 +210,7 @@ func (d *R2Driver) GetRange(ctx context.Context, container, artifact string, off
 		}
 		in.Range = aws.String(rng)
 	}
-	out, err := d.client.GetObject(ctx, in)
+	out, err := d.client.GetObject(ctx, in, sdkCallOptions(ctx)...)
 	if err != nil {
 		return nil, fmt.Errorf("r2 get range %s: %w", key, err)
 	}
@@ -215,9 +222,9 @@ func (d *R2Driver) Delete(ctx context.Context, container, artifact string) error
 	if kErr != nil {
 		return kErr
 	}
-	if _, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(d.bucket),
-		Key:    aws.String(key),
+	in := &s3.DeleteObjectInput{Bucket: aws.String(d.bucket), Key: aws.String(key)}
+	if _, err := hedged(ctx, d.hedge, "delete", func(ctx context.Context, o ...func(*s3.Options)) (*s3.DeleteObjectOutput, error) {
+		return d.client.DeleteObject(ctx, in, o...)
 	}); err != nil {
 		return fmt.Errorf("r2 delete %s: %w", key, err)
 	}
@@ -233,18 +240,17 @@ func (d *R2Driver) List(ctx context.Context, container, prefix string) ([]string
 	basePrefix := d.buildKey(tenantID, container, "")
 
 	var artifacts []string
-	paginator := s3ListPaginator(d.client, &s3.ListObjectsV2Input{
+	err := listPages(ctx, d.hedge, d.client, &s3.ListObjectsV2Input{
 		Bucket: aws.String(d.bucket),
 		Prefix: aws.String(fullPrefix),
-	})
-	for paginator.HasMorePages() {
-		page, err := paginator.NextPage(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("r2 list %s: %w", fullPrefix, err)
-		}
+	}, func(page *s3.ListObjectsV2Output) error {
 		for _, obj := range page.Contents {
 			artifacts = append(artifacts, strings.TrimPrefix(aws.ToString(obj.Key), basePrefix))
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("r2 list %s: %w", fullPrefix, err)
 	}
 	return artifacts, nil
 }
@@ -254,9 +260,9 @@ func (d *R2Driver) Exists(ctx context.Context, container, artifact string) (bool
 	if kErr != nil {
 		return false, kErr
 	}
-	_, err := d.client.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(d.bucket),
-		Key:    aws.String(key),
+	in := &s3.HeadObjectInput{Bucket: aws.String(d.bucket), Key: aws.String(key)}
+	_, err := hedged(ctx, d.hedge, "head_object", func(ctx context.Context, o ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
+		return d.client.HeadObject(ctx, in, o...)
 	})
 	if err != nil {
 		if s3IsNotFound(err) {
@@ -270,7 +276,10 @@ func (d *R2Driver) Exists(ctx context.Context, container, artifact string) (bool
 // HealthCheck is a signed HeadBucket — a revoked token fails it (the
 // authenticated-probe rule, CLAUDE.md architecture decision 1).
 func (d *R2Driver) HealthCheck(ctx context.Context) error {
-	if _, err := d.client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(d.bucket)}); err != nil {
+	in := &s3.HeadBucketInput{Bucket: aws.String(d.bucket)}
+	if _, err := hedged(ctx, d.hedge, "head_bucket", func(ctx context.Context, o ...func(*s3.Options)) (*s3.HeadBucketOutput, error) {
+		return d.client.HeadBucket(ctx, in, o...)
+	}); err != nil {
 		return fmt.Errorf("r2 health check (%s): %w", d.bucket, err)
 	}
 	return nil
@@ -304,7 +313,7 @@ func (d *R2Driver) Stat(ctx context.Context, container, artifact string) (size i
 	if kerr != nil {
 		return 0, "", "", kerr
 	}
-	out, herr := d.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(d.bucket), Key: aws.String(key)})
+	out, herr := d.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(d.bucket), Key: aws.String(key)}, sdkCallOptions(ctx)...)
 	if herr != nil {
 		return 0, "", "", fmt.Errorf("r2 stat %s: %w", key, herr)
 	}

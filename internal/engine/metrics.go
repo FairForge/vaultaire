@@ -1,6 +1,10 @@
 package engine
 
-import "github.com/prometheus/client_golang/prometheus"
+import (
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+)
 
 // partialUnavailable counts the calls a backend answered with
 // ErrPartiallyUnavailable: the part of it that holds the object is out
@@ -32,7 +36,7 @@ var strictUnregistered = prometheus.NewCounterVec(prometheus.CounterOpts{
 
 // Collectors are the engine's metrics, for the server's registry.
 func Collectors() []prometheus.Collector {
-	return []prometheus.Collector{partialUnavailable, fallover, strictUnregistered, noTenantRefusals, unrecordedBackendCalls}
+	return []prometheus.Collector{partialUnavailable, fallover, strictUnregistered, noTenantRefusals, unrecordedBackendCalls, driverOpSeconds}
 }
 
 // StrictUnregisteredCounter is vaultaire_engine_strict_target_unregistered_total.
@@ -44,3 +48,42 @@ func PartialUnavailableCounter() *prometheus.CounterVec { return partialUnavaila
 
 // FalloverCounter is vaultaire_engine_fallover_total (tests read it).
 func FalloverCounter() *prometheus.CounterVec { return fallover }
+
+// driverOpSeconds is how long each driver call the engine makes takes
+// (WP-R6-3, RP8-10): one observation per call, success or failure. On
+// 2026-10-17 a 60 s mode on the Lyve primary was found by a probe, not by a
+// dashboard. A GET is timed to its first byte (the driver returns its
+// reader once the backend answers; the body then streams at the client's
+// pace); a PUT without the time the driver spent waiting on the request
+// body (sizeTrackingReader.waited — a slow uploader is not a slow backend);
+// head = Exists, probe = HealthCheck. A call refused before the driver is
+// asked (an open breaker, an unregistered name) is not observed.
+var driverOpSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+	Name:    "vaultaire_driver_op_seconds",
+	Help:    "Driver calls made through the engine, by driver (the registered backend name) and op (head, get_first_byte, put, delete, list, probe): a GET to its first byte, a PUT without the time spent waiting on the request body.",
+	Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 15, 25, 30, 60, 120},
+}, []string{"driver", "op"})
+
+// The op labels of driverOpSeconds.
+const (
+	opHead         = "head"
+	opGetFirstByte = "get_first_byte"
+	opPut          = "put"
+	opDelete       = "delete"
+	opList         = "list"
+	opProbe        = "probe"
+)
+
+// observeDriverOp records one driver call that started at start, less
+// waited (time the call spent waiting on its source, not the backend).
+func observeDriverOp(driver, op string, start time.Time, waited time.Duration) {
+	driverOpSeconds.WithLabelValues(driver, op).Observe(max(time.Since(start)-waited, 0).Seconds())
+}
+
+// InitDriverOpSeries creates a backend's latency series at zero samples so a
+// dashboard lists it before its first call.
+func InitDriverOpSeries(driver string) {
+	for _, op := range []string{opHead, opGetFirstByte, opPut, opDelete, opList, opProbe} {
+		driverOpSeconds.WithLabelValues(driver, op)
+	}
+}

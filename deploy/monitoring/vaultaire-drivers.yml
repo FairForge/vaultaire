@@ -1,0 +1,64 @@
+# Drivers — install to /etc/prometheus/rules/ (see README; deploy/** is
+# installed by hand).
+#
+# A backend that does not answer (WP-R6-3, Stage 1a Prompt 9). On 2026-10-17
+# Wasabi's edge lost ~2.5 % of flows per region per minute and Lyve
+# us-east-1 answered nothing to ~1–3 % of small PUTs; three 60 s timers
+# raced on the data path and the stall surfaced as aws-cli giving up. Since
+# then every first-byte bound on the data path is ≤ 30 s (the invariant in
+# internal/drivers/CLAUDE.md), small idempotent calls are hedged on a fresh
+# connection, and every driver call is timed. Series from the app's /metrics:
+#
+#   vaultaire_driver_op_seconds{driver,op}          histogram (0.05 … 120 s) of every driver call made through
+#                                                  the engine: head | get_first_byte | put | delete | list | probe
+#                                                  (a GET to its first byte; a PUT without the time spent waiting
+#                                                  on the client's body)
+#   vaultaire_driver_hedges_total{driver,op}        small calls (head_bucket = the probe, head_object, list, delete)
+#                                                  sent again on a fresh connection after DRIVER_HEDGE_AFTER (2 s)
+#   vaultaire_driver_hedges_won_total{driver,op}    ... whose hedge answered first: the first attempt had stalled
+#   vaultaire_driver_put_retries_total{driver}      PUT / UploadPart past its per-size deadline, retried once on a
+#                                                  fresh connection (WP-VAULT-1, #740/#742)
+#
+# Triage:
+#   curl -s localhost:$(cat /opt/vaultaire/ACTIVE_PORT)/metrics | grep -E '^vaultaire_driver_(hedges|op_seconds_(sum|count))'
+#   journalctl -u 'vaultaire@*' | grep -E 'put deadline passed|backend health check failed'
+#   ~/vaultaire-bench/wasabi-stall -mode hedged -op headbucket …   (cmd/tools/wasabi-stall: the edge, measured)
+groups:
+  - name: vaultaire-drivers
+    rules:
+      # A hedge wins only when the first attempt had not answered in 2 s and
+      # the fresh connection did: more than one in twenty hedges winning
+      # over 15 min is that backend's edge stalling, not slow answers. A
+      # warning — the hedge is already answering for it; the questions are
+      # which region and since when (wasabi-stall).
+      - alert: DriverHedgesWinning
+        expr: |
+          (
+            sum by (driver) (increase(vaultaire_driver_hedges_won_total[15m]))
+              / sum by (driver) (increase(vaultaire_driver_hedges_total[15m]))
+          ) > 0.05
+          and sum by (driver) (increase(vaultaire_driver_hedges_won_total[15m])) >= 3
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.driver }}'s small calls are stalling: {{ $value | humanizePercentage }} of hedges answered first in 15 min"
+          description: "A HEAD, DELETE or listing page on {{ $labels.driver }} got no answer in DRIVER_HEDGE_AFTER (2 s) and the same call on a fresh connection did. The hedge answers for it (customers see seconds, not the 15 s bound), but the backend's edge is losing flows — the 2026-10-17 Wasabi / Lyve us-east-1 shape. Measure it with cmd/tools/wasabi-stall (-mode hedged / pooled) against that backend's endpoint and region; check the vendor's status page; DRIVER_HEDGE_AFTER is the knob."
+
+      # The primary's PUTs or GET first bytes are slow for a quarter of an
+      # hour: p99 over 10 s. The 2026-10-17 60 s mode would have been this
+      # rule's bucket. A warning, not a page: the deadlines and the hedge
+      # keep requests inside their bounds; this is the trend before a
+      # breaker opens.
+      - alert: DriverOpSlow
+        expr: |
+          histogram_quantile(0.99,
+            sum by (driver, op, le) (rate(vaultaire_driver_op_seconds_bucket{op=~"put|get_first_byte"}[15m]))
+          ) > 10
+          and on (driver) label_replace(vaultaire_primary_backend == 1, "driver", "$1", "backend", "(.+)")
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The primary {{ $labels.driver }}: p99 of {{ $labels.op }} is {{ $value | humanizeDuration }} over 15 min"
+          description: "vaultaire_driver_op_seconds{driver={{ $labels.driver }},op={{ $labels.op }}} has a p99 above 10 s for 15 minutes (a PUT without the client's body time; a GET to its first byte). Check vaultaire_driver_put_retries_total{driver={{ $labels.driver }}} (a rising count = PUTs stalling and retried at their deadline), DriverHedgesWinning, the probe (vaultaire_backend_probe_failures_total) and the vendor's status page. The breaker opens on 5 failures in 60 s; until then requests are slow, not failing."

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,9 +23,10 @@ import (
 // hangingS3 never answers; it records how long each request was held before
 // the client gave it up.
 type hangingS3 struct {
-	srv   *httptest.Server
-	mu    sync.Mutex
-	lives []time.Duration
+	srv      *httptest.Server
+	mu       sync.Mutex
+	lives    []time.Duration
+	arrivals atomic.Int32 // requests received (lives is written only as each ends)
 }
 
 func newHangingS3(t *testing.T) *hangingS3 {
@@ -32,6 +34,7 @@ func newHangingS3(t *testing.T) *hangingS3 {
 	h := &hangingS3{}
 	release := make(chan struct{})
 	h.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.arrivals.Add(1)
 		start := time.Now()
 		select {
 		case <-release:
@@ -61,9 +64,9 @@ func (h *hangingS3) assertEachRequestBounded(ctx context.Context, t *testing.T) 
 }
 
 func shortHeaderTimeout(t *testing.T) {
-	old := fixedBucketResponseHeaderTimeout
-	fixedBucketResponseHeaderTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { fixedBucketResponseHeaderTimeout = old })
+	old := s3OpTimeouts
+	s3OpTimeouts = OpTimeouts{Meta: 200 * time.Millisecond, Get: 200 * time.Millisecond, Put: 200 * time.Millisecond, Complete: 10 * time.Minute}
+	t.Cleanup(func() { s3OpTimeouts = old })
 }
 
 // A fixed-bucket GET whose response headers never come must fail in bounded
@@ -84,7 +87,7 @@ func TestFixedBucketDriver_GetWithNoResponseHeadersFailsInBoundedTime(t *testing
 	h.assertEachRequestBounded(ctx, t)
 }
 
-// Prompt 2b.5 F3.4: the 60 s bound landed on the fixed-bucket drivers only;
+// Prompt 2b.5 F3.4: the (then 60 s) bound landed on the fixed-bucket drivers only;
 // lyve (prod's primary since 2026-10-11) built TunedHTTPClient(WithHTTP1Only())
 // and a hung GET returned only at the caller's deadline (before: 3.0 s of a
 // 3 s deadline, no header timeout on its transport).
@@ -107,10 +110,10 @@ func TestLyveDriver_GetWithNoResponseHeadersFailsInBoundedTime(t *testing.T) {
 	require.NoError(t, err)
 	hc, ok := real.client.Options().HTTPClient.(*http.Client)
 	require.True(t, ok)
-	split, ok := hc.Transport.(*completeSplitTransport)
+	split, ok := hc.Transport.(*opSplitTransport)
 	require.True(t, ok, "lyve's transport: %T", hc.Transport)
-	assert.Equal(t, 200*time.Millisecond, split.ResponseHeaderTimeout)
-	assert.Equal(t, completeMultipartHeaderTimeout, split.complete.ResponseHeaderTimeout)
+	assert.Equal(t, 200*time.Millisecond, split.byClass[classGet].ResponseHeaderTimeout)
+	assert.Equal(t, 10*time.Minute, split.byClass[classComplete].ResponseHeaderTimeout)
 	ctx, cancel := context.WithTimeout(common.WithTenantID(context.Background(), "t1"), 30*time.Second)
 	defer cancel()
 
@@ -135,8 +138,8 @@ func TestTunedHTTPClient_CompleteMultipartHasItsOwnHeaderTimeout(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(srv.Close)
-	c := TunedHTTPClient(WithHTTP1Only(), WithResponseHeaderTimeout(100*time.Millisecond),
-		WithCompleteMultipartHeaderTimeout(5*time.Second))
+	c := TunedHTTPClient(WithHTTP1Only(), WithOpTimeouts(OpTimeouts{
+		Meta: 100 * time.Millisecond, Get: 100 * time.Millisecond, Put: 100 * time.Millisecond, Complete: 5 * time.Second}))
 
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/b/k?uploadId=u1", nil)
 	resp, err := c.Do(req)

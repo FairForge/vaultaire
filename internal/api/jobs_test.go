@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"github.com/FairForge/vaultaire/internal/common"
 	"net/http/httptest"
 	"regexp"
 	"strconv"
@@ -609,4 +610,22 @@ func TestJob_ARunThatEndsWhileTheProcessStopsIsNotASuccess(t *testing.T) {
 	assert.False(t, row.LastSuccess.Valid, "the next boot must run it again")
 	assert.Equal(t, float64(0), counterValue(name, jobOutcomeOK))
 	assert.Equal(t, float64(1), counterValue(name, jobOutcomeInterrupted))
+}
+
+// WP-R6-3: a job's backend calls get the SDK's three attempts where a
+// request's get two — the run's context says it is a job's.
+func TestJob_ARunsContextIsMarkedAsAJobs(t *testing.T) {
+	f := setupJobsFixture(t)
+	name := f.name("jobctx")
+	var marked bool
+	j := f.sched.Register(jobSpec{Name: name, Hour: 3, Minute: 30, MaxRunTime: time.Minute, Run: func(ctx context.Context) (jobReport, error) {
+		marked = common.IsJob(ctx)
+		return jobReport{}, nil
+	}})
+
+	_, err := j.RunNow(context.Background())
+
+	require.NoError(t, err)
+	assert.True(t, marked)
+	assert.False(t, common.IsJob(context.Background()))
 }

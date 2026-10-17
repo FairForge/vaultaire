@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path"
 	"strings"
@@ -22,6 +21,9 @@ type S3CompatDriver struct {
 	bucket string
 	prefix string
 	logger *zap.Logger
+	// hedge: HEAD, DELETE, a listing page sent again on a fresh connection
+	// after DRIVER_HEDGE_AFTER (hedge.go, WP-R6-3); nil = none.
+	hedge *s3Hedger
 }
 
 // NewS3CompatDriver creates a new S3-compatible storage driver
@@ -32,12 +34,14 @@ func NewS3CompatDriver(accessKey, secretKey string, logger *zap.Logger) (*S3Comp
 		logger.Warn("S3-compatible TLS verification disabled via S3COMPAT_INSECURE_TLS")
 	}
 
-	var httpClient *http.Client
+	// The per-class bounds of every S3-class client (s3OpTimeouts,
+	// WP-R6-3): this client had none.
+	opts := []TransportOption{WithOpTimeouts(s3OpTimeouts)}
 	if insecure {
-		httpClient = TunedHTTPClient(WithInsecureTLS())
-	} else {
-		httpClient = TunedHTTPClient()
+		opts = append(opts, WithInsecureTLS())
 	}
+	httpClient := TunedHTTPClient(opts...)
+	fresh := TunedHTTPClient(append(opts, WithFreshConnections())...)
 
 	client := s3.New(s3.Options{
 		BaseEndpoint: aws.String("https://us.s3compat.cloud:8000"),
@@ -47,8 +51,9 @@ func NewS3CompatDriver(accessKey, secretKey string, logger *zap.Logger) (*S3Comp
 			secretKey,
 			"",
 		),
-		UsePathStyle: true,
-		HTTPClient:   httpClient,
+		UsePathStyle:     true,
+		HTTPClient:       httpClient,
+		RetryMaxAttempts: requestRetryMaxAttempts,
 	})
 
 	return &S3CompatDriver{
@@ -56,6 +61,7 @@ func NewS3CompatDriver(accessKey, secretKey string, logger *zap.Logger) (*S3Comp
 		bucket: "data",
 		prefix: "personal-files/vaultaire",
 		logger: logger,
+		hedge:  newS3Hedger("s3", driverHedgeAfterFromEnv(logger), fresh),
 	}, nil
 }
 
@@ -80,7 +86,7 @@ func (d *S3CompatDriver) Get(ctx context.Context, container, artifact string) (i
 	result, err := d.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(d.bucket),
 		Key:    aws.String(key),
-	})
+	}, sdkCallOptions(ctx)...)
 	if err != nil {
 		return nil, fmt.Errorf("get object %s: %w", key, err)
 	}
@@ -110,9 +116,9 @@ func (d *S3CompatDriver) Put(ctx context.Context, container, artifact string, da
 func (d *S3CompatDriver) Delete(ctx context.Context, container, artifact string) error {
 	key := d.buildKey(container, artifact)
 
-	_, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(d.bucket),
-		Key:    aws.String(key),
+	in := &s3.DeleteObjectInput{Bucket: aws.String(d.bucket), Key: aws.String(key)}
+	_, err := hedged(ctx, d.hedge, "delete", func(ctx context.Context, o ...func(*s3.Options)) (*s3.DeleteObjectOutput, error) {
+		return d.client.DeleteObject(ctx, in, o...)
 	})
 	if err != nil {
 		return fmt.Errorf("delete object %s: %w", key, err)
@@ -129,15 +135,10 @@ func (d *S3CompatDriver) List(ctx context.Context, container, prefix string) ([]
 	keyPrefix := d.buildKey(container, "") + "/"
 
 	var artifacts []string
-	paginator := s3ListPaginator(d.client, &s3.ListObjectsV2Input{
+	err := listPages(ctx, d.hedge, d.client, &s3.ListObjectsV2Input{
 		Bucket: aws.String(d.bucket),
 		Prefix: aws.String(keyPrefix + prefix),
-	})
-	for paginator.HasMorePages() {
-		page, err := paginator.NextPage(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("list objects %s%s: %w", keyPrefix, prefix, err)
-		}
+	}, func(page *s3.ListObjectsV2Output) error {
 		for _, obj := range page.Contents {
 			key := aws.ToString(obj.Key)
 			// A sibling container sharing the prefix (c1 vs c1-other) cannot
@@ -148,8 +149,11 @@ func (d *S3CompatDriver) List(ctx context.Context, container, prefix string) ([]
 			}
 			artifacts = append(artifacts, key[len(keyPrefix):])
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list objects %s%s: %w", keyPrefix, prefix, err)
 	}
-
 	return artifacts, nil
 }
 
@@ -157,9 +161,9 @@ func (d *S3CompatDriver) List(ctx context.Context, container, prefix string) ([]
 func (d *S3CompatDriver) Exists(ctx context.Context, container, artifact string) (bool, error) {
 	key := d.buildKey(container, artifact)
 
-	_, err := d.client.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(d.bucket),
-		Key:    aws.String(key),
+	in := &s3.HeadObjectInput{Bucket: aws.String(d.bucket), Key: aws.String(key)}
+	_, err := hedged(ctx, d.hedge, "head_object", func(ctx context.Context, o ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
+		return d.client.HeadObject(ctx, in, o...)
 	})
 	if err != nil {
 		if s3IsNotFound(err) {
@@ -173,10 +177,9 @@ func (d *S3CompatDriver) Exists(ctx context.Context, container, artifact string)
 // HealthCheck verifies connectivity
 func (d *S3CompatDriver) HealthCheck(ctx context.Context) error {
 	// Try to list the bucket root - this should always work
-	_, err := d.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket:  aws.String(d.bucket),
-		Prefix:  aws.String(d.prefix),
-		MaxKeys: aws.Int32(1),
+	in := &s3.ListObjectsV2Input{Bucket: aws.String(d.bucket), Prefix: aws.String(d.prefix), MaxKeys: aws.Int32(1)}
+	_, err := hedged(ctx, d.hedge, "head_bucket", func(ctx context.Context, o ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
+		return d.client.ListObjectsV2(ctx, in, o...)
 	})
 
 	if err != nil {

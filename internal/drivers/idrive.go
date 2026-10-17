@@ -23,25 +23,34 @@ import (
 
 type ContextKey string
 
-// fixedBucketResponseHeaderTimeout bounds the wait for a fixed-bucket
-// backend's response headers (2b.4 E2.1). The client had none, and no
-// overall Timeout: a GET the vendor accepted and never answered lasted
-// until TCP gave up, and a large GET's ordered stream waited on it. The
-// clock starts once the request body is written, so a PUT's upload time is
-// not in it (FIXED_BUCKET_PUT_TIMEOUT covers PUTs); what it bounds after a
-// body is the vendor's processing before it answers. CompleteMultipartUpload
-// has its own, of minutes (WithCompleteMultipartHeaderTimeout, Prompt 2b.5
-// F3.8): a header timeout is retried by the SDK, and a re-sent Complete
-// whose first copy committed answers NoSuchUpload. A var for tests.
-var fixedBucketResponseHeaderTimeout = 60 * time.Second
+// s3OpTimeouts are the response-header bounds of the S3-class drivers that
+// serve customer traffic (WP-R6-3, R7's table; the invariant is in
+// CLAUDE.md): a HEAD, a DELETE or a listing page 15 s, a GET's first byte
+// 25 s, a PUT's answer after its body 25 s (the per-size PUT deadline fires
+// first), a Complete 10 min. Until 2026-10-17 every class waited 60 s
+// (fixedBucketResponseHeaderTimeout, 2b.4 E2.1) — r2, s3compat and the `s3`
+// driver for ever — and a stalled backend surfaced as the client's own
+// read timeout (RP8-9). A var for tests.
+var s3OpTimeouts = OpTimeouts{
+	Meta:     15 * time.Second,
+	Get:      25 * time.Second,
+	Put:      25 * time.Second,
+	Complete: 10 * time.Minute,
+}
 
 // s3ObjectHTTPClient is the client of the S3-class drivers that serve
-// customer reads (the fixed-bucket drivers, lyve): HTTP/1.1, response
-// headers within fixedBucketResponseHeaderTimeout, a Complete within
-// minutes.
+// customer reads (the fixed-bucket drivers, lyve): HTTP/1.1, the
+// per-class bounds of s3OpTimeouts.
 func s3ObjectHTTPClient() *http.Client {
-	return TunedHTTPClient(WithHTTP1Only(), WithResponseHeaderTimeout(fixedBucketResponseHeaderTimeout),
-		WithCompleteMultipartHeaderTimeout(completeMultipartHeaderTimeout))
+	return TunedHTTPClient(WithHTTP1Only(), WithOpTimeouts(s3OpTimeouts))
+}
+
+// s3FreshHTTPClient is the same client with keep-alives off: a connection
+// opened for each request. A stalled PUT is retried on it
+// (deadlinePutClient) and a small idempotent call is hedged on it
+// (hedge.go) — a pooled connection may be the one that stalled.
+func s3FreshHTTPClient() *http.Client {
+	return TunedHTTPClient(WithHTTP1Only(), WithFreshConnections(), WithOpTimeouts(s3OpTimeouts))
 }
 
 const (
@@ -71,6 +80,10 @@ type IDriveDriver struct {
 	// retry on a fresh connection (put_deadline.go).
 	putTimeout time.Duration
 	putClient  *deadlinePutClient
+	// hedge sends a HEAD, a DELETE or a listing page again on a fresh
+	// connection when it has not answered after DRIVER_HEDGE_AFTER
+	// (hedge.go, WP-R6-3); nil = none (a struct assembled by hand).
+	hedge *s3Hedger
 	// backendName is the name the engine registered this driver under when
 	// that differs from name (a regional driver is "idrive" to itself and
 	// `idrive-<region>` to the engine): the label of its put-retry series.
@@ -121,6 +134,7 @@ func NewFixedBucketS3Driver(name, accessKey, secretKey, endpoint, region, bucket
 		// at ALPN today — no-op now, insurance against a silent vendor flip
 		// onto h2 single-connection multiplexing (see lyve.go / geyser.go).
 		config.WithHTTPClient(s3ObjectHTTPClient()),
+		config.WithRetryMaxAttempts(requestRetryMaxAttempts),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("%s: load aws config: %w", name, err)
@@ -151,6 +165,7 @@ func NewFixedBucketS3Driver(name, accessKey, secretKey, endpoint, region, bucket
 	}
 	d.setPutTimeout(fixedBucketPutTimeoutFromEnv(logger))
 	driverPutRetries.WithLabelValues(name) // the series exists at 0
+	d.hedge = newS3Hedger(name, driverHedgeAfterFromEnv(logger), d.putClient.fresh)
 	return d, nil
 }
 
@@ -158,7 +173,10 @@ func NewFixedBucketS3Driver(name, accessKey, secretKey, endpoint, region, bucket
 func (d *IDriveDriver) setPutTimeout(base time.Duration) {
 	d.putTimeout = base
 	d.putClient = &deadlinePutClient{Client: d.client, driver: d.metricsName(), region: d.region, base: base,
-		fresh: TunedHTTPClient(WithHTTP1Only(), WithFreshConnections()), logger: d.logger}
+		fresh: s3FreshHTTPClient(), logger: d.logger}
+	if d.hedge != nil {
+		d.hedge.fresh = d.putClient.fresh
+	}
 }
 
 // metricsName is the backend name this driver's series are labelled with.
@@ -178,6 +196,7 @@ func (d *IDriveDriver) SetBackendName(name string) {
 	d.backendName = name
 	driverPutRetries.WithLabelValues(name) // the series exists at 0
 	d.setPutTimeout(d.putTimeout)
+	d.hedge.relabel(name)
 }
 
 // uploadClient is the client Put uploads through: the deadline client when
@@ -216,7 +235,7 @@ func (d *IDriveDriver) Get(ctx context.Context, container, artifact string) (io.
 	result, err := d.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(d.bucket),
 		Key:    aws.String(key),
-	})
+	}, sdkCallOptions(ctx)...)
 	if err != nil {
 		return nil, fmt.Errorf("%s get %s/%s: %w", d.name, container, artifact, err)
 	}
@@ -309,7 +328,7 @@ func (d *IDriveDriver) GetRange(ctx context.Context, container, artifact string,
 		input.Range = aws.String(rangeHeader)
 	}
 
-	result, err := d.client.GetObject(ctx, input)
+	result, err := d.client.GetObject(ctx, input, sdkCallOptions(ctx)...)
 	if err != nil {
 		return nil, fmt.Errorf("%s get stream %s/%s: %w", d.name, container, artifact, err)
 	}
@@ -333,7 +352,7 @@ func (d *IDriveDriver) GetRangeInfo(ctx context.Context, container, artifact str
 		Bucket: aws.String(d.bucket),
 		Key:    aws.String(key),
 		Range:  aws.String(fmt.Sprintf("bytes=%d-%d", offset, offset+length-1)),
-	})
+	}, sdkCallOptions(ctx)...)
 	if err != nil {
 		return nil, engine.RangeInfo{}, fmt.Errorf("%s get range %s/%s: %w", d.name, container, artifact, err)
 	}
@@ -356,9 +375,9 @@ func (d *IDriveDriver) Delete(ctx context.Context, container, artifact string) e
 	}
 	key := d.buildKey(tenantID, container, artifact)
 
-	_, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(d.bucket),
-		Key:    aws.String(key),
+	in := &s3.DeleteObjectInput{Bucket: aws.String(d.bucket), Key: aws.String(key)}
+	_, err := hedged(ctx, d.hedge, "delete", func(ctx context.Context, o ...func(*s3.Options)) (*s3.DeleteObjectOutput, error) {
+		return d.client.DeleteObject(ctx, in, o...)
 	})
 	if err != nil {
 		return fmt.Errorf("%s delete %s: %w", d.name, key, err)
@@ -376,20 +395,17 @@ func (d *IDriveDriver) List(ctx context.Context, container string, prefix string
 	basePrefix := d.buildKey(tenantID, container, "")
 
 	var artifacts []string
-	paginator := s3ListPaginator(d.client, &s3.ListObjectsV2Input{
+	err := listPages(ctx, d.hedge, d.client, &s3.ListObjectsV2Input{
 		Bucket: aws.String(d.bucket),
 		Prefix: aws.String(fullPrefix),
-	})
-
-	for paginator.HasMorePages() {
-		output, err := paginator.NextPage(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("%s list %s: %w", d.name, fullPrefix, err)
-		}
+	}, func(output *s3.ListObjectsV2Output) error {
 		for _, obj := range output.Contents {
-			name := strings.TrimPrefix(*obj.Key, basePrefix)
-			artifacts = append(artifacts, name)
+			artifacts = append(artifacts, strings.TrimPrefix(*obj.Key, basePrefix))
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("%s list %s: %w", d.name, fullPrefix, err)
 	}
 	return artifacts, nil
 }
@@ -402,9 +418,9 @@ func (d *IDriveDriver) Exists(ctx context.Context, container, artifact string) (
 	}
 	key := d.buildKey(tenantID, container, artifact)
 
-	_, err := d.client.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(d.bucket),
-		Key:    aws.String(key),
+	in := &s3.HeadObjectInput{Bucket: aws.String(d.bucket), Key: aws.String(key)}
+	_, err := hedged(ctx, d.hedge, "head_object", func(ctx context.Context, o ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
+		return d.client.HeadObject(ctx, in, o...)
 	})
 	if err != nil {
 		if s3IsNotFound(err) {
@@ -419,9 +435,11 @@ func (d *IDriveDriver) Name() string {
 	return d.name
 }
 
+// HealthCheck is the probe: a signed HeadBucket, hedged (hedge.go).
 func (d *IDriveDriver) HealthCheck(ctx context.Context) error {
-	_, err := d.client.HeadBucket(ctx, &s3.HeadBucketInput{
-		Bucket: aws.String(d.bucket),
+	in := &s3.HeadBucketInput{Bucket: aws.String(d.bucket)}
+	_, err := hedged(ctx, d.hedge, "head_bucket", func(ctx context.Context, o ...func(*s3.Options)) (*s3.HeadBucketOutput, error) {
+		return d.client.HeadBucket(ctx, in, o...)
 	})
 	if err != nil {
 		return fmt.Errorf("%s health check: %w", d.name, err)

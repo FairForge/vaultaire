@@ -215,18 +215,19 @@ func TestProbeBackendOnce_UpdatesHealthFromProbeResult(t *testing.T) {
 
 	// Act + Assert: failure is recorded with the auth error text
 	s.probeBackendOnce(context.Background(), failing)
+	s.probeBackendOnce(context.Background(), failing) // two in a row: unhealthy (WP-R6-3)
 	st := s.healthChecker.GetBackendStates()["idrive"]
 	require.NotNil(t, st)
 	assert.False(t, st.Healthy)
 	assert.Contains(t, st.LastError, "InvalidAccessKeyId")
-	assert.Equal(t, int64(1), st.Failures)
+	assert.Equal(t, int64(2), st.Failures)
 
 	// recovery clears it
 	s.probeBackendOnce(context.Background(), passing)
 	st = s.healthChecker.GetBackendStates()["idrive"]
 	assert.True(t, st.Healthy)
 	assert.Empty(t, st.LastError)
-	assert.Equal(t, int64(1), st.Failures, "failure counter is cumulative, not reset")
+	assert.Equal(t, int64(2), st.Failures, "failure counter is cumulative, not reset")
 }
 
 func TestProbeBackendOnce_ProbeIsBoundedByTimeout(t *testing.T) {
@@ -244,7 +245,8 @@ func TestProbeBackendOnce_ProbeIsBoundedByTimeout(t *testing.T) {
 
 	assert.Less(t, time.Since(start), 2*time.Second)
 	st := s.healthChecker.GetBackendStates()["geyser"]
-	assert.False(t, st.Healthy)
+	assert.True(t, st.Healthy, "one failed probe is not yet an outage (WP-R6-3)")
+	assert.Equal(t, int64(1), st.Failures)
 	assert.Contains(t, st.LastError, "deadline")
 }
 
