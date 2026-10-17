@@ -7,11 +7,13 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"go.uber.org/zap"
 )
@@ -21,6 +23,27 @@ type LyveDriver struct {
 	tenantID string // Default tenant, can be overridden by context
 	region   string
 	logger   *zap.Logger
+	// putTimeout is the per-PUT deadline per 64 MiB (FIXED_BUCKET_PUT_TIMEOUT,
+	// 0 = off); putClient wraps client with it and the one retry on a fresh
+	// connection (put_deadline.go, 2026-10-17: the Lyve primary's PUT
+	// non-response).
+	putTimeout time.Duration
+	putClient  manager.UploadAPIClient
+}
+
+// setPutTimeout installs the per-PUT deadline (0 = off).
+func (d *LyveDriver) setPutTimeout(base time.Duration) {
+	d.putTimeout = base
+	d.putClient = &deadlinePutClient{Client: d.client, driver: "lyve", region: d.region, base: base,
+		fresh: TunedHTTPClient(WithHTTP1Only(), WithFreshConnections()), logger: d.logger}
+}
+
+// uploadClient is what Put uploads through: the deadline client once set.
+func (d *LyveDriver) uploadClient() manager.UploadAPIClient {
+	if d.putClient != nil {
+		return d.putClient
+	}
+	return d.client
 }
 
 // NewLyveDriver builds a driver for one Lyve Cloud 2 region.
@@ -61,12 +84,19 @@ func NewLyveDriver(accessKey, secretKey, tenantID, region string, logger *zap.Lo
 		return nil, fmt.Errorf("load config: %w", err)
 	}
 
-	return &LyveDriver{
+	d := &LyveDriver{
 		client:   s3.NewFromConfig(cfg, func(o *s3.Options) { o.BaseEndpoint = aws.String(endpoint); o.UsePathStyle = true }),
 		tenantID: tenantID,
 		region:   region,
 		logger:   logger,
-	}, nil
+	}
+	// The per-PUT deadline and the one retry on a fresh connection, as the
+	// fixed-bucket drivers have had since WP-VAULT-1 (put_deadline.go;
+	// FIXED_BUCKET_PUT_TIMEOUT covers lyve too since 2026-10-17: us-east-1
+	// answered nothing to ~3 % of 1 MiB PUTs after acknowledging the body).
+	driverPutRetries.WithLabelValues("lyve") // the series exists at 0
+	d.setPutTimeout(fixedBucketPutTimeoutFromEnv(logger))
+	return d, nil
 }
 
 // getTenantID is the tenant the call is made for: the context's, else the
@@ -220,8 +250,10 @@ func (d *LyveDriver) Put(ctx context.Context, container, artifact string, data i
 	// Parallel multipart for large objects, single PutObject for small ones —
 	// same path as iDrive/s3compat. Lyve requires multipart uploads to be
 	// completed in the DC where they were initiated; that holds here because
-	// the driver only ever talks to one regional endpoint.
-	if err := s3ParallelUploadInput(ctx, d.client, input); err != nil {
+	// the driver only ever talks to one regional endpoint. Through the
+	// deadline client: a PutObject or UploadPart with no answer by its
+	// deadline is sent once more on a fresh connection (put_deadline.go).
+	if err := s3ParallelUploadInput(ctx, d.uploadClient(), input); err != nil {
 		return fmt.Errorf("put object: %w", err)
 	}
 

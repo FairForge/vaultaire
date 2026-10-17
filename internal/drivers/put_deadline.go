@@ -16,7 +16,11 @@ import (
 	"go.uber.org/zap"
 )
 
-// The per-PUT deadline of the fixed-bucket driver (WP-VAULT-1 part 4).
+// The per-PUT deadline of the fixed-bucket driver (WP-VAULT-1 part 4) — and
+// of the Lyve driver since 2026-10-17 (lyve.go: its us-east-1 region answered
+// nothing to ~3 % of 1 MiB PUTs after acknowledging the whole body, fresh
+// and pooled connections alike; a stalled chunk PUT then waited the 60 s
+// response-header timeout).
 //
 // Wasabi stalled about 4 % of PUTs for 9–123 s in both regions (bench
 // 2026-10-04, F4): the request is accepted and then nothing comes back. A
@@ -52,7 +56,7 @@ const (
 
 var driverPutRetries = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "vaultaire_driver_put_retries_total",
-	Help: "PutObject / UploadPart requests of a fixed-bucket driver that passed their deadline and were retried once on a fresh connection, by driver.",
+	Help: "PutObject / UploadPart requests of a fixed-bucket or Lyve driver that passed their deadline and were retried once on a fresh connection, by driver.",
 }, []string{"driver"})
 
 // fixedBucketPutTimeoutFromEnv reads FIXED_BUCKET_PUT_TIMEOUT: a Go

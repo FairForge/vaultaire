@@ -1084,3 +1084,24 @@ Paired 256 MiB throughput, two rounds: STANDARD PUT 153–167 / GET 56–170 MB/
 154–167 / GET 84–126 MB/s, single-stream presigned 159–211 MB/s for both — **IA is not slower
 than STANDARD**; the spread is Lyve's run-to-run variance. Only unmeasured: whether a lifecycle
 transition actually fires after 30 days.
+
+## PUT non-response and the deadline (2026-10-17)
+
+Measured from the SLC box with `cmd/tools/wasabi-stall -op put` (1 and 2 MiB,
+pooled and fresh connections, with and without the SDK's trailing checksum):
+**us-east-1 answered nothing to about 3 % of PUTs** after acknowledging the
+whole body (the socket: `bytes_acked = bytes_sent`, no retransmit, then
+silence until the client's deadline). us-west-1 was clean in the same
+minutes (110/110), HEAD and GET on us-east-1 were clean (680/680), and iDrive
+never stalled. Lyve's status page showed nothing. Prod's chunk writes had
+never logged one, and the 10-12 ingest bench could not have passed at that
+rate, so treat it as a condition of the region on that day, re-measurable
+with the tool.
+
+Since that day the driver uploads through `deadlinePutClient`
+(`put_deadline.go`): `FIXED_BUCKET_PUT_TIMEOUT` per 64 MiB of the request
+(default 60 s), one retry of the same request on a connection opened for it,
+counted in `vaultaire_driver_put_retries_total{driver="lyve"}`. A stalled
+chunk PUT now costs the deadline once instead of the 60 s response-header
+timeout plus the SDK's retry. Watch the counter after a deploy: a rising
+`lyve` series is the region stalling again.
