@@ -139,6 +139,9 @@ func (s *Server) initMetrics() {
 		if s.synthetic != nil {
 			reg.MustRegister(newSyntheticCollector(s.synthetic))
 		}
+		if s.dedupGCRunner != nil {
+			reg.MustRegister(newDedupGCCollector(s.dedupGCRunner))
+		}
 
 		var src engineMetricsSource
 		if s.engine != nil {
