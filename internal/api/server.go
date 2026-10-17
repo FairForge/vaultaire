@@ -452,6 +452,9 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		}
 	}
 	s.multipartStagingMinFree = stagingMinFreeFromEnv(os.Getenv, logger)
+	// Where parts stage (MULTIPART_STAGING_DIR, WP-R3-5): set before the
+	// first request, named once with its filesystem's free bytes.
+	configureMultipartStaging(os.Getenv, logger)
 	// Parallel chunk-store workers per chunked PUT. 0 keeps the adapter
 	// default; 1 is the sequential-store escape hatch.
 	if v := os.Getenv("CHUNK_PUT_CONCURRENCY"); v != "" {

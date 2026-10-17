@@ -26,6 +26,12 @@ EnvironmentFile=/opt/vaultaire/configs/.env
 # A credential that is present but unreadable or malformed refuses the boot.
 #LoadCredentialEncrypted=encryption_master_key:/etc/vaultaire/credentials/encryption_master_key.cred
 #LoadCredentialEncrypted=encryption_master_key_previous:/etc/vaultaire/credentials/encryption_master_key_previous.cred
+# Multipart parts stage in MULTIPART_STAGING_DIR (default /tmp/vaultaire-
+# multipart; WP-R3-5). Both slots read it from the one EnvironmentFile and
+# run as the same user, so a part staged on one slot is there for the other
+# after a switch: keep it that way — no PrivateTmp=, no per-slot value. On
+# this box /tmp is a 61 GiB tmpfs (RAM, wiped at boot); the data-disk choice
+# is /opt/vaultaire/data/multipart (docs/DEPLOY.md "Multipart staging").
 # The slot's port must win over the PORT in .env; EnvironmentFile= overrides
 # Environment=, so it is set on the exec line. Each slot runs its own binary.
 ExecStart=/bin/sh -c 'PORT=%i exec /opt/vaultaire/bin/vaultaire-%i'

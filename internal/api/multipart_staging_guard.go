@@ -12,8 +12,10 @@ package api
 // prompt's max(10 %, 50 GiB) on any filesystem of at least 100 GiB, but on
 // prod the staging directory is /tmp, a 61 GiB tmpfs — RAM, half the box's
 // 121 GiB — where a 50 GiB floor would leave 11 GiB for every upload in
-// flight; there the floor is 30 GiB (half of it kept free). Moving the
-// staging directory onto the 3.4 TB data disk is the rest of WP-R3-5.
+// flight; there the floor is 30 GiB (half of it kept free). The guard
+// measures the filesystem of MULTIPART_STAGING_DIR (the rest of WP-R3-5,
+// multipart_staging_dir.go): on the 3.4 TB data disk the same rule keeps
+// 340 GiB free.
 
 import (
 	"fmt"
@@ -105,7 +107,7 @@ func (s *Server) stagingWouldOverfill(n int64) bool {
 	if s.multipartStagingMinFree == nil {
 		return false
 	}
-	dir := multipartTempBase
+	dir := multipartStagingDir()
 	if _, err := os.Stat(dir); err != nil {
 		dir = os.TempDir()
 	}
