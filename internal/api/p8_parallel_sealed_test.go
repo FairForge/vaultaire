@@ -61,6 +61,7 @@ func ssecHdr(key []byte) map[string]string { return ssecHeaders(key) }
 
 func TestParallelSealed_SSES3_WholeObjectInParallelByteForByte(t *testing.T) {
 	f := setupSealedParallelFixture(t, true)
+	f.adapter.largeGet.hedgeAfter = 0     // the range count below is exact: no hedged second request on a slow runner
 	content := randomBytes(9<<20 + 77777) // 10 segments, the last one short
 	etag := f.putSealed(t, "sealed.bin", content, nil)
 	f.drv.delay = func(off int64, _ int32) time.Duration { return time.Duration((off/(1<<20))%5) * time.Millisecond }
