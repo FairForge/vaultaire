@@ -226,6 +226,13 @@ func (a *S3ToEngine) storeChunkedObject(ctx context.Context, cw chunkedWrite) (c
 	if joinErr := pool.join(); joinErr != nil {
 		return chunkedResult{}, joinErr
 	}
+	// The chunker stops without an error when the request's context ends
+	// (a client that went away after its last byte): what it measured is
+	// not the body, and the size check below would blame the client's
+	// declaration for it (WP-R2-3).
+	if err := ctx.Err(); err != nil {
+		return chunkedResult{}, fmt.Errorf("chunked write stopped: %w", err)
+	}
 	physicalSize := pool.physicalSize
 	newRefs := pool.sortedRefs()
 
