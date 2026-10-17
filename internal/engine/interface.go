@@ -209,3 +209,20 @@ func WithStorageClass(class string) PutOption {
 		o.StorageClass = class
 	}
 }
+
+// TargetOnlyDeclarer is an optional driver interface (WP-R7-7, R7-16): a
+// driver that knows at run time it must receive a write only as its
+// storage class's explicit target — never as a fail-over destination for
+// someone else's object, never as the primary. The Lyve driver declares it
+// when its bucket has Object Lock enabled or a default retention (every
+// fail-over write would be undeletable until the retention lapsed). It
+// extends targetOnlyBackends, the engine's fixed name list.
+type TargetOnlyDeclarer interface {
+	TargetOnly() bool
+}
+
+// IsDeclaredTargetOnly reports whether d declares itself target-only now.
+func IsDeclaredTargetOnly(d Driver) bool {
+	t, ok := d.(TargetOnlyDeclarer)
+	return ok && t.TargetOnly()
+}

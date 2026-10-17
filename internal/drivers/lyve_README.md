@@ -1109,3 +1109,29 @@ at 60 s in the same second aws-cli's default read timeout gave up, a 400 to
 nobody, and the CLI's own retry succeed in 0.6 s on deduplicated chunks —
 the floor came that evening.) Watch the counter after a deploy: a rising
 `lyve` series is the region stalling again.
+
+## The lock guard (WP-R7-7, 2026-10-17)
+
+Lyve is the only general-purpose fail-over leg: a fail-over PUT lands in
+`stored-<region>` under the tenant's prefix. With Object Lock — or a default
+retention — on that bucket, every such write would be undeletable until the
+retention lapsed (R7-16). At boot the driver reads the bucket's object-lock
+configuration (`LyveDriver.CheckBucketLock`):
+
+- **locked** (ObjectLockEnabled, or a default retention): an Error line; the
+  driver is target-only (never the primary, never a fail-over destination);
+  `vaultaire_lyve_bucket_lock_enabled{region}` 1, which pages
+  (`LyveBucketLockEnabled`); `STORAGE_MODE=lyve` refuses to boot.
+- **no configuration** (`ObjectLockConfigurationNotFoundError`): no lock, the
+  gauge 0. Both prod buckets answer this to prod's data-plane key
+  (2026-10-17, read-only from the box).
+- **403**: the key may not read it. A Warn, no guard.
+
+Read it by hand:
+
+```bash
+aws --endpoint-url https://s3.us-east-1.global.lyve.seagate.com \
+  s3api get-object-lock-configuration --bucket stored-us-east-1
+```
+
+Never enable a default retention on `stored-*`.

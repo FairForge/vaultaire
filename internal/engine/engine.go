@@ -541,7 +541,8 @@ func (e *CoreEngine) buildCandidateList(preferred string) []string {
 //
 // Failover for a general-purpose write is therefore between the target, the
 // primary and the remaining general-purpose durable backends (idrive, lyve,
-// s3, quotaless). (R6-04)
+// s3, quotaless). (R6-04) A driver may also declare itself target-only at
+// run time (TargetOnlyDeclarer, WP-R7-7: a Lyve bucket with Object Lock).
 var targetOnlyBackends = map[string]bool{
 	"local":      true,
 	"r2":         true,
@@ -642,7 +643,7 @@ func (e *CoreEngine) buildWriteCandidateList(target string) []string {
 	all := e.buildCandidateList(target)
 	writable := make([]string, 0, len(all))
 	for _, name := range all {
-		if (writeOnlyWhenTargeted(name) || dormantBackends[name]) && name != target && name != e.primary {
+		if (writeOnlyWhenTargeted(name) || dormantBackends[name] || IsDeclaredTargetOnly(e.drivers[name])) && name != target && name != e.primary {
 			continue
 		}
 		writable = append(writable, name)
@@ -664,13 +665,16 @@ var ErrNotPrimaryEligible = errors.New("backend cannot be the primary")
 // driver, after which every write would have failed).
 func (e *CoreEngine) CheckPrimaryEligible(name string) error {
 	e.mu.RLock()
-	_, registered := e.drivers[name]
+	d, registered := e.drivers[name]
 	e.mu.RUnlock()
 	if !registered {
 		return fmt.Errorf("%w: %q is not a registered backend", ErrNotPrimaryEligible, name)
 	}
 	if name != "local" && writeOnlyWhenTargeted(name) {
 		return fmt.Errorf("%w: %q is a target-only backend (public store, tape, second copy, third-party service or region pin)", ErrNotPrimaryEligible, name)
+	}
+	if IsDeclaredTargetOnly(d) {
+		return fmt.Errorf("%w: %q declares itself target-only (a Lyve bucket with Object Lock or a default retention: every write there would be undeletable)", ErrNotPrimaryEligible, name)
 	}
 	return nil
 }

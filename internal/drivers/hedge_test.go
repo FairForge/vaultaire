@@ -425,6 +425,7 @@ func TestRequestClass_TheSDKsShapes(t *testing.T) {
 		{"CreateMultipartUpload", req(http.MethodPost, "/b/t-1/c/k?uploads=&x-id=CreateMultipartUpload"), classMeta},
 		{"CompleteMultipartUpload", req(http.MethodPost, "/b/t-1/c/k?uploadId=u"), classComplete},
 		{"DeleteObjects", req(http.MethodPost, "/b?delete="), classMeta},
+		{"RestoreObject", req(http.MethodPost, "/b/t-1/c/k?restore=&x-id=RestoreObject"), classComplete},
 		{"DeleteObject", req(http.MethodDelete, "/b/t-1/c/k?x-id=DeleteObject"), classMeta},
 		{"AbortMultipartUpload", req(http.MethodDelete, "/b/t-1/c/k?uploadId=u&x-id=AbortMultipartUpload"), classMeta},
 	} {

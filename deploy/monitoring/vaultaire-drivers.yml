@@ -18,6 +18,11 @@
 #   vaultaire_driver_hedges_won_total{driver,op}    ... whose hedge answered first: the first attempt had stalled
 #   vaultaire_driver_put_retries_total{driver}      PUT / UploadPart past its per-size deadline, retried once on a
 #                                                  fresh connection (WP-VAULT-1, #740/#742)
+#   vaultaire_driver_dns_refreshes_total{host,outcome}  lookups of a driver endpoint by the shared DNS cache, one per
+#                                                  host per DRIVER_DNS_TTL (5 min): ok | error (the stale answer
+#                                                  is kept; WP-R7-6)
+#   vaultaire_lyve_bucket_lock_enabled{region}      1 when stored-<region> has Object Lock or a default retention
+#                                                  (read at boot; WP-R7-7) — lyve is then target-only
 #
 # Triage:
 #   curl -s localhost:$(cat /opt/vaultaire/ACTIVE_PORT)/metrics | grep -E '^vaultaire_driver_(hedges|op_seconds_(sum|count))'
@@ -62,3 +67,19 @@ groups:
         annotations:
           summary: "The primary {{ $labels.driver }}: p99 of {{ $labels.op }} is {{ $value | humanizeDuration }} over 15 min"
           description: "vaultaire_driver_op_seconds{driver={{ $labels.driver }},op={{ $labels.op }}} has a p99 above 10 s for 15 minutes (a PUT without the client's body time; a GET to its first byte). Check vaultaire_driver_put_retries_total{driver={{ $labels.driver }}} (a rising count = PUTs stalling and retried at their deadline), DriverHedgesWinning, the probe (vaultaire_backend_probe_failures_total) and the vendor's status page. The breaker opens on 5 failures in 60 s; until then requests are slow, not failing."
+
+      # Lyve is the only general-purpose fail-over leg: with Object Lock or
+      # a default retention on stored-<region>, every fail-over write there
+      # would be undeletable until the retention lapsed (R7-16) — an erasure
+      # request could not be honoured. The driver has made itself
+      # target-only (no fail-over writes, never the primary; a STORAGE_MODE=lyve
+      # boot refuses to start), but the lock itself is a one-way door on
+      # whatever the bucket already holds. Page.
+      - alert: LyveBucketLockEnabled
+        expr: vaultaire_lyve_bucket_lock_enabled == 1
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Lyve bucket stored-{{ $labels.region }} has Object Lock enabled — lyve is target-only"
+          description: "At boot the Lyve driver read an object-lock configuration (ObjectLockEnabled or a default retention) on stored-{{ $labels.region }}. Every object written there under a default retention is undeletable until it lapses, so lyve is no longer a fail-over destination and cannot be the primary (STORAGE_MODE=lyve stops the boot). Find who enabled it (Lyve console audit), whether a default retention is set (aws s3api get-object-lock-configuration), and what was written since. Never enable a default retention on stored-* (R7-16, docs/reviews/R7-drivers.md)."

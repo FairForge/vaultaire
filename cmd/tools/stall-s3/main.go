@@ -9,6 +9,7 @@
 //
 //	stall-s3 -addr 127.0.0.1:9555 -match '_chunks/' -nth 3 -count 1
 //	curl '127.0.0.1:9555/_stall/arm?match=partNumber=2&nth=1&count=1'   # re-arm between runs
+//	curl '127.0.0.1:9555/_stall/arm?method=HEAD&match=_probe&nth=1'      # hold a HEAD (the canary), a GET, a DELETE
 //	curl '127.0.0.1:9555/_stall/state'
 //
 // Point a lab server at it with STORAGE_MODE=wasabi,
@@ -53,6 +54,7 @@ type upload struct {
 }
 
 type stallState struct {
+	Method  string `json:"method"`
 	Match   string `json:"match"`
 	Nth     int    `json:"nth"`
 	Count   int    `json:"count"`
@@ -79,7 +81,8 @@ type fake struct {
 
 func main() {
 	addr := flag.String("addr", "127.0.0.1:9555", "listen address")
-	match := flag.String("match", "", "hold PUTs whose path?query matches this regexp (empty = hold none)")
+	method := flag.String("method", http.MethodPut, "the method of the requests to hold (PUT, GET, HEAD, DELETE)")
+	match := flag.String("match", "", "hold requests of -method whose path?query matches this regexp (empty = hold none)")
 	nth := flag.Int("nth", 1, "hold from the nth matching PUT on")
 	count := flag.Int("count", 1, "how many matching PUTs to hold")
 	release := flag.Duration("release-after", 0, "answer a held PUT after this long (0 = never: hold until the client gives up)")
@@ -87,7 +90,7 @@ func main() {
 
 	f := &fake{objects: map[string]*object{}, uploads: map[string]*upload{}, out: json.NewEncoder(log.Writer())}
 	log.SetFlags(0)
-	if err := f.arm(*match, *nth, *count, *release); err != nil {
+	if err := f.arm(*method, *match, *nth, *count, *release); err != nil {
 		log.Fatal(err)
 	}
 	srv := &http.Server{Addr: *addr, Handler: f, ReadHeaderTimeout: 10 * time.Second}
@@ -95,7 +98,7 @@ func main() {
 	log.Fatal(srv.ListenAndServe())
 }
 
-func (f *fake) arm(match string, nth, count int, release time.Duration) error {
+func (f *fake) arm(method, match string, nth, count int, release time.Duration) error {
 	var re *regexp.Regexp
 	if match != "" {
 		var err error
@@ -107,7 +110,10 @@ func (f *fake) arm(match string, nth, count int, release time.Duration) error {
 	defer f.mu.Unlock()
 	f.re = re
 	f.releaseAfter = release
-	f.state = stallState{Match: match, Nth: max(nth, 1), Count: count}
+	if method == "" {
+		method = http.MethodPut
+	}
+	f.state = stallState{Method: strings.ToUpper(method), Match: match, Nth: max(nth, 1), Count: count}
 	if release > 0 {
 		f.state.ReleaseAfter = release.String()
 	}
@@ -121,11 +127,11 @@ func (f *fake) event(v map[string]any) {
 	f.outMu.Unlock()
 }
 
-// shouldHold decides, under the lock, whether this PUT is one to hold.
-func (f *fake) shouldHold(target string) bool {
+// shouldHold decides, under the lock, whether this request is one to hold.
+func (f *fake) shouldHold(method, target string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.re == nil || !f.re.MatchString(target) {
+	if f.re == nil || method != f.state.Method || !f.re.MatchString(target) {
 		return false
 	}
 	f.state.Seen++
@@ -150,6 +156,25 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.event(ev)
 	}()
 
+	if r.Method != http.MethodPut && f.shouldHold(r.Method, r.URL.Path+"?"+r.URL.RawQuery) {
+		// A request with no body: silence from the start.
+		ev["held"] = true
+		f.event(map[string]any{"msg": "holding", "method": r.Method, "path": r.URL.Path, "query": r.URL.RawQuery})
+		f.mu.Lock()
+		release := f.releaseAfter
+		f.mu.Unlock()
+		var timer <-chan time.Time
+		if release > 0 {
+			timer = time.After(release)
+		}
+		select {
+		case <-r.Context().Done():
+			ev["held_end"] = "client gave up"
+			return
+		case <-timer:
+			ev["held_end"] = "released"
+		}
+	}
 	switch {
 	case key == "" && r.Method == http.MethodHead, key == "" && r.Method == http.MethodPut:
 		w.WriteHeader(http.StatusOK) // HeadBucket, CreateBucket
@@ -193,7 +218,7 @@ func (f *fake) control(w http.ResponseWriter, r *http.Request) {
 			count = 1
 		}
 		release, _ := time.ParseDuration(q.Get("release-after"))
-		if err := f.arm(q.Get("match"), nth, count, release); err != nil {
+		if err := f.arm(q.Get("method"), q.Get("match"), nth, count, release); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -218,7 +243,7 @@ func (f *fake) put(w http.ResponseWriter, r *http.Request, bucket, key string, q
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	if f.shouldHold(r.URL.Path + "?" + r.URL.RawQuery) {
+	if f.shouldHold(r.Method, r.URL.Path+"?"+r.URL.RawQuery) {
 		// The 2026-10-17 shape: the whole body taken, then silence.
 		ev["held"] = true
 		f.event(map[string]any{"msg": "holding", "path": r.URL.Path, "query": r.URL.RawQuery, "bytes": len(data)})
