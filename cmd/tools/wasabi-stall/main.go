@@ -28,7 +28,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
+	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/drivers"
+	"github.com/FairForge/vaultaire/internal/engine"
+	"github.com/prometheus/client_golang/prometheus"
+	"go.uber.org/zap"
 )
 
 type stageTimes struct {
@@ -69,7 +73,7 @@ func ms(a, b time.Time) float64 {
 }
 
 func main() {
-	mode := flag.String("mode", "pooled", "pooled | fresh | idle | hedged")
+	mode := flag.String("mode", "pooled", "pooled | fresh | idle | hedged | driver (the real LyveDriver.Put, FIXED_BUCKET_PUT_TIMEOUT honoured, the retry counter printed)")
 	hedgeAfter := flag.Duration("hedge-after", 2*time.Second, "hedged: a second attempt on a fresh connection after this; the first answer wins")
 	op := flag.String("op", "headbucket", "headbucket | headobject | put | get")
 	size := flag.Int64("size", 1<<20, "put: body bytes (random); each object is deleted after the call")
@@ -241,6 +245,9 @@ func main() {
 		}
 	}
 	switch *mode {
+	case "driver":
+		runDriverMode(*region, *interval, *count, *size, *timeout, enc)
+		return
 	case "idle":
 		n := 0
 		one(n, 0) // warm the pool
@@ -293,6 +300,59 @@ func (s *seekBuf) Seek(offset int64, whence int) (int64, error) {
 		s.off = int64(len(s.b)) + offset
 	}
 	return s.off, nil
+}
+
+// runDriverMode drives the real LyveDriver (the product's code path: the
+// deadline client, FIXED_BUCKET_PUT_TIMEOUT, the fresh-connection retry)
+// with 1 MiB PUTs under t-_probe/_probe/, and prints the
+// vaultaire_driver_put_retries_total{driver="lyve"} counter after each call.
+func runDriverMode(region string, interval time.Duration, count int, size int64, timeout time.Duration, enc *json.Encoder) {
+	ak, sk := os.Getenv("LYVE_ACCESS_KEY"), os.Getenv("LYVE_SECRET_KEY")
+	logger, _ := zap.NewProduction()
+	d, err := drivers.NewLyveDriver(ak, sk, "", region, logger)
+	if err != nil {
+		panic(err)
+	}
+	retries := func() float64 {
+		mfs, _ := prometheus.DefaultGatherer.Gather()
+		for _, mf := range mfs {
+			if mf.GetName() != "vaultaire_driver_put_retries_total" {
+				continue
+			}
+			for _, m := range mf.GetMetric() {
+				for _, l := range m.GetLabel() {
+					if l.GetName() == "driver" && l.GetValue() == "lyve" {
+						return m.GetCounter().GetValue()
+					}
+				}
+			}
+		}
+		return -1
+	}
+	ctx := common.WithTenantID(context.Background(), "_probe")
+	var okN, failN int
+	for n := 1; n <= count; n++ {
+		buf := make([]byte, size)
+		_, _ = rand.Read(buf)
+		key := fmt.Sprintf("driverprobe-%d-%d", os.Getpid(), n)
+		cctx, cancel := context.WithTimeout(ctx, timeout)
+		start := time.Now()
+		perr := d.Put(cctx, "_probe", key, bytesReader(buf), engine.WithContentLength(size))
+		cancel()
+		r := map[string]any{"n": n, "at": start.UTC().Format(time.RFC3339Nano), "mode": "driver", "op": "put", "ok": perr == nil,
+			"total_ms": float64(time.Since(start)) / 1e6, "retries_total": retries(), "bytes": size}
+		if perr != nil {
+			r["err"] = perr.Error()
+			failN++
+		} else {
+			okN++
+		}
+		_ = enc.Encode(r)
+		if n < count {
+			time.Sleep(interval)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "summary mode=driver ok=%d failed=%d retries_total=%.0f\n", okN, failN, retries())
 }
 
 func env(k, d string) string {
