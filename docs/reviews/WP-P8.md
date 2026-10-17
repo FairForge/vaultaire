@@ -13,6 +13,8 @@ PRs:
 - **#734**: Part A.
 - **#736**: Part B.
 - **#737**: Part C.
+
+Deployed: #733 `9fb91f0`, #734 `24be833`, #737 `5946aff`, #736 `314320c` (prod since 16:35 UTC, 2026-10-17).
 - this PR: docs only.
 
 **No migration.** The next number stays **093**.
@@ -253,9 +255,22 @@ The same SLC lab, with `MULTIPART_STAGING_DIR=~/vaultaire-bench/lab-p8/staging`:
 
 **Not provable on prod, by construction.** There are no sealed objects without the master key (F-14 ceremony not done), and no live region pair (every iDrive key answers AccessDenied to object calls since 2026-10-11). Proved on the SLC lab above.
 
-### Part C
+### Parts B and C, after #736 deployed (`314320c`, 16:37 UTC)
 
-The default is unchanged. The boot line on prod after #737 deployed is in the post-deploy check below. Setting `MULTIPART_STAGING_DIR` is the owner's `.env` line ([YOU], `docs/DEPLOY.md`).
+The bench tenant has `parallel_get`, `vault_parity` and `sync_backend` on.
+
+- **The boot line of the new slot** (8001; #737 and #736 both): `multipart staging dir=/tmp/vaultaire-multipart default=true free_bytes=64777670656 total_bytes=65049436160`. The default is unchanged (the tmpfs), no rejected value, 0 `level:error`.
+- A 100 MiB `aws s3 cp` (2 × 64 MiB parts):
+  - 2 parts staged in `/tmp/vaultaire-multipart` mid-upload, 0 directories left after;
+  - the Complete was placed as a PUT (chunked, backend `chunked`);
+  - a one-request GET: 61 MB/s, md5 equal;
+  - deleted, the bucket deleted, `used 0`, 0 active uploads, 0 `level:error`.
+- `vaultaire_client_body_errors_total` is exported. `vaultaire_large_get_parallel_reads_total` has no series until the first parallel read (a CounterVec prints nothing before one): no whole object on prod is a parallel candidate today, since every object over 64 MiB chunks.
+- **What the check found** (RP8-8, not this prompt's): the Complete took **62.5 s** for 100 MiB, and a 90 MB chunked single PUT through the origin ran at **1.45 MB/s**; a 60 MB whole PUT ran at 28.7 MB/s.
+  - The content index shows why. `first_seen_at` is the start of each chunk's store transaction: all 50 (then 45) chunk stores began within 1–2 s, and one of them took about **60 s**, the Lyve client's response-header bound.
+  - Straight to Lyve from the box, 40 fresh-connection 2 MiB PUTs took 0.58–0.67 s each, with no stall.
+  - Locally, `e367364` and `main` chunk-PUT 90 MB at 84–113 MB/s alike: no code change caused it.
+  - The VM-1 proof (10-15) chunked the same shape at 33–41 MB/s.
 
 ## Residuals
 
@@ -268,6 +283,7 @@ The default is unchanged. The boot line on prod after #737 deployed is in the po
 | RP8-5 | [YOU] | `MULTIPART_STAGING_DIR` is not set on prod: parts still stage on the 61 GiB tmpfs | `docs/DEPLOY.md` § Multipart staging |
 | RP8-6 | P3 | The aws-chunked decoder ignores trailing headers (`x-amz-checksum-*`): a trailer checksum is not verified | WP-R2-4 / the checksum work |
 | RP8-7 | note | A sealed blob in the 0x01/0x02 format (before WP-R8-5) or an old-format SSE-C blob stays one stream. Prod holds none | none |
+| RP8-8 | **P2** | On the Lyve primary a chunked write stalls about 60 s once per upload: one chunk PUT on a pooled connection hangs until the 60 s response-header bound, then retries. 100 MiB took 62.5 s (2026-10-17 16:37), 90 MB 62 s; fresh-connection PUTs show no stall. The fixed-bucket drivers have `FIXED_BUCKET_PUT_TIMEOUT` (a per-PUT deadline and one retry on a fresh connection); Lyve has only the 60 s bound (2b.5 F3.4). Likely the same edge-stall class as the Wasabi finding of 2026-10-17 | the hedged-PUT work (the Wasabi stall session's fix applied to `lyve`): a per-PUT deadline plus one retry on a fresh connection for the Lyve driver, or a hedge on the chunk store |
 | RVM-1 | closed | The two-slot window of an addressing migration | the checklist line in `docs/DEPLOY.md` |
 
 ## Gates
@@ -279,3 +295,4 @@ The default is unchanged. The boot line on prod after #737 deployed is in the po
   - new: `TestDriverWritePaths_WrapTheirErrorsWithW`;
   - kept: `TestLedger_NoQuotaStatementAfterACommit`, `TestLedger_QuotaStatementIsLast`, `TestLedger_LockOrder_*`, `TestEngineCalls_CarryTheTenant`, `TestExportSectionsCoverSchema`, `TestChunkBlobCalls_GoThroughTheChunkStore`.
 - `build-and-test` green on every PR and on each merge commit on `main`.
+  - #736's first run failed one of its own new tests: `TestParallelSealed_SSES3_WholeObjectInParallelByteForByte` counted 9 ranged reads for 6, because a slow runner hedged three ranges. The test now runs without hedging (15cb27f) and passed 3× under `-race -cpu 2`.
