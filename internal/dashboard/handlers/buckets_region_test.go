@@ -33,7 +33,7 @@ func TestHandleBuckets_RegionPickerFromTable(t *testing.T) {
 	drivers.SetAvailableIDriveRegions(drivers.IDriveDefaultRegion(os.Getenv), []string{"eu-west-1"})
 	t.Cleanup(drivers.ResetAvailableIDriveRegions)
 
-	handler := HandleBuckets(realBucketsTemplate(t), nil, t.TempDir(), zap.NewNop())
+	handler := HandleBuckets(realBucketsTemplate(t), nil, t.TempDir(), nil, zap.NewNop())
 	req := injectSessionWithTenant(httptest.NewRequest("GET", "/dashboard/buckets", nil), "test-dash-rp")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
@@ -54,7 +54,7 @@ func TestHandleBuckets_RegionPickerFromTable(t *testing.T) {
 // dashboard only renders the verdict, naming the region the customer picked.
 func TestHandleCreateBucket_RegionNotEnabledIsRefused(t *testing.T) {
 	fc := &fakeCreator{result: BucketCreateResult{State: BucketCreateRegionUnavailable}}
-	handler := HandleCreateBucket(testBucketsTemplate(t), nil, fc.fn(), zap.NewNop())
+	handler := HandleCreateBucket(testBucketsTemplate(t), nil, fc.fn(), nil, zap.NewNop())
 
 	form := url.Values{"name": {"tokyo-bucket"}, "region": {"ap-northeast-1"}}
 	req := injectSessionWithTenant(httptest.NewRequest("POST", "/dashboard/buckets",
@@ -67,4 +67,46 @@ func TestHandleCreateBucket_RegionNotEnabledIsRefused(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "Tokyo")
 	assert.Contains(t, w.Body.String(), "not enabled on this deployment")
 	assert.Equal(t, []string{"test-dash-r7/tokyo-bucket/ap-northeast-1"}, fc.calls)
+}
+
+// Prompt 10 Part A: a region whose driver is registered but down by the
+// probe (prod since 2026-10-11: every iDrive region key answers
+// AccessDenied) was offered like a live one; a bucket created there stores
+// nothing. The picker asks the API layer's gate (Deps.RegionAvailable) and
+// shows such a region disabled, "temporarily unavailable" — distinct from a
+// region this deployment has not enabled. The default region is always
+// offered.
+func TestHandleBuckets_ARegionDownByTheProbeIsDisabledAsTemporarilyUnavailable(t *testing.T) {
+	drivers.SetAvailableIDriveRegions(drivers.IDriveDefaultRegion(os.Getenv), []string{"eu-west-1", "eu-central-1"})
+	t.Cleanup(drivers.ResetAvailableIDriveRegions)
+	up := func(region string) bool { return region != "eu-west-1" }
+
+	handler := HandleBuckets(realBucketsTemplate(t), nil, t.TempDir(), up, zap.NewNop())
+	req := injectSessionWithTenant(httptest.NewRequest("GET", "/dashboard/buckets", nil), "test-dash-rg")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+
+	assert.Contains(t, body, `<option value="eu-west-1" disabled>EU West (Ireland) (temporarily unavailable)</option>`)
+	assert.Contains(t, body, `<option value="eu-central-1">EU Central (Frankfurt)</option>`, "registered and up: selectable")
+	assert.Contains(t, body, `<option value="ap-northeast-1" disabled>Asia Pacific (Tokyo) (not enabled)</option>`, "not enabled stays its own words")
+	assert.Contains(t, body, `<option value="us-central-1" selected>US Central (Dallas)</option>`)
+}
+
+func TestHandleCreateBucket_ARegionDownIsRefusedWithTheSameWords(t *testing.T) {
+	fc := &fakeCreator{result: BucketCreateResult{State: BucketCreateRegionDown}}
+	handler := HandleCreateBucket(testBucketsTemplate(t), nil, fc.fn(), nil, zap.NewNop())
+
+	form := url.Values{"name": {"dublin-bucket"}, "region": {"eu-west-1"}}
+	req := injectSessionWithTenant(httptest.NewRequest("POST", "/dashboard/buckets",
+		strings.NewReader(form.Encode())), "test-dash-rg2")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code, "re-rendered form")
+	assert.Contains(t, w.Body.String(), "Ireland")
+	assert.Contains(t, w.Body.String(), "temporarily unavailable")
+	assert.NotContains(t, w.Body.String(), "dublin-bucket created")
 }

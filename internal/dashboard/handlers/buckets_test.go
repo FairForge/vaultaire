@@ -77,7 +77,7 @@ func injectSession(req *http.Request) *http.Request {
 
 func TestHandleBuckets_NoDB(t *testing.T) {
 	tmpl := testBucketsTemplate(t)
-	handler := HandleBuckets(tmpl, nil, "", zap.NewNop())
+	handler := HandleBuckets(tmpl, nil, "", nil, zap.NewNop())
 
 	req := injectSession(httptest.NewRequest("GET", "/dashboard/buckets", nil))
 	w := httptest.NewRecorder()
@@ -92,7 +92,7 @@ func TestHandleBuckets_NoDB(t *testing.T) {
 
 func TestHandleBuckets_NoSession(t *testing.T) {
 	tmpl := testBucketsTemplate(t)
-	handler := HandleBuckets(tmpl, nil, "", zap.NewNop())
+	handler := HandleBuckets(tmpl, nil, "", nil, zap.NewNop())
 
 	req := httptest.NewRequest("GET", "/dashboard/buckets", nil)
 	w := httptest.NewRecorder()
@@ -131,7 +131,7 @@ func postCreateBucket(t *testing.T, handler http.HandlerFunc, form url.Values) *
 func TestHandleCreateBucket_DelegatesToTheRegistry(t *testing.T) {
 	tmpl := testBucketsTemplate(t)
 	fc := &fakeCreator{result: BucketCreateResult{State: BucketCreateOK, Region: "us-central-1"}}
-	handler := HandleCreateBucket(tmpl, nil, fc.fn(), zap.NewNop())
+	handler := HandleCreateBucket(tmpl, nil, fc.fn(), nil, zap.NewNop())
 
 	w := postCreateBucket(t, handler, url.Values{"name": {"My-Test-Bucket"}, "region": {"us-central-1"}})
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -156,7 +156,7 @@ func TestHandleCreateBucket_RendersTheRegistryVerdict(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fc := &fakeCreator{result: tc.result, err: tc.err}
-			w := postCreateBucket(t, HandleCreateBucket(tmpl, nil, fc.fn(), zap.NewNop()),
+			w := postCreateBucket(t, HandleCreateBucket(tmpl, nil, fc.fn(), nil, zap.NewNop()),
 				url.Values{"name": {"some-bucket"}, "region": {"eu-west-1"}})
 			assert.Equal(t, http.StatusOK, w.Code)
 			assert.Contains(t, w.Body.String(), tc.want)
@@ -167,7 +167,7 @@ func TestHandleCreateBucket_RendersTheRegistryVerdict(t *testing.T) {
 
 func TestHandleCreateBucket_NoCreatorIsRefused(t *testing.T) {
 	tmpl := testBucketsTemplate(t)
-	w := postCreateBucket(t, HandleCreateBucket(tmpl, nil, nil, zap.NewNop()), url.Values{"name": {"my-test-bucket"}})
+	w := postCreateBucket(t, HandleCreateBucket(tmpl, nil, nil, nil, zap.NewNop()), url.Values{"name": {"my-test-bucket"}})
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), "Bucket creation is not available")
 }
@@ -175,7 +175,7 @@ func TestHandleCreateBucket_NoCreatorIsRefused(t *testing.T) {
 func TestHandleCreateBucket_InvalidName(t *testing.T) {
 	tmpl := testBucketsTemplate(t)
 	fc := &fakeCreator{result: BucketCreateResult{State: BucketCreateOK}}
-	handler := HandleCreateBucket(tmpl, nil, fc.fn(), zap.NewNop())
+	handler := HandleCreateBucket(tmpl, nil, fc.fn(), nil, zap.NewNop())
 
 	tests := []struct {
 		name string
@@ -293,7 +293,7 @@ func injectSessionWithTenant(req *http.Request, tenantID string) *http.Request {
 
 func TestHandleCreateBucket_InvalidName_NoDB(t *testing.T) {
 	tmpl := testBucketsTemplate(t)
-	handler := HandleCreateBucket(tmpl, nil, nil, zap.NewNop())
+	handler := HandleCreateBucket(tmpl, nil, nil, nil, zap.NewNop())
 
 	form := url.Values{"name": {"-bad"}}
 	req := injectSession(httptest.NewRequest("POST", "/dashboard/buckets",
@@ -451,7 +451,7 @@ func TestListBuckets_Dashboard_IncludesEmptyBuckets(t *testing.T) {
 	require.NoError(t, err)
 
 	tmpl := testBucketsTemplate(t)
-	handler := HandleBuckets(tmpl, db, "", zap.NewNop())
+	handler := HandleBuckets(tmpl, db, "", nil, zap.NewNop())
 
 	req := injectSessionWithTenant(httptest.NewRequest("GET", "/dashboard/buckets", nil), "test-dash-2")
 	w := httptest.NewRecorder()

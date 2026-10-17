@@ -884,7 +884,8 @@ func generateManagementPaths() map[string]*PathItem {
 				queryParam("starting_after", "Return buckets whose name sorts after this one (the previous page's `next_cursor`)", &Schema{Type: "string"}))),
 			Post: mut(withBody(jsonOp("Management", "Create a bucket", "ManageCreateBucket",
 				"Registers a bucket for the tenant. `region` picks the iDrive region the bucket is homed in; omitted = the deployment default. "+
-					"A region is selectable only when its driver is enabled on this deployment (`region_unavailable` otherwise). "+
+					"A region is selectable only when its driver is enabled on this deployment (`region_unavailable` otherwise) "+
+					"and its storage is answering (`region_unavailable_now`, 503 with `Retry-After`, otherwise; the default region is always available). "+
 					"Free-tier tenants are capped at one bucket (403); every tenant at 1000 (409).",
 				map[string]Response{
 					"201": jsonResp("Bucket created", ref("ManagedBucket")),
@@ -892,6 +893,7 @@ func generateManagementPaths() map[string]*PathItem {
 					"403": errResp("`free_tier_bucket_limit`, the free tier allows one bucket; upgrade at /dashboard/billing"),
 					"409": errResp("`bucket_exists` (the tenant already owns it), `bucket_limit_exceeded` (1000 per account), or `idempotency_key_reuse`"),
 					"500": errResp("`internal_error`"),
+					"503": errResp("`region_unavailable_now` (type `unavailable_error`): the region is enabled but its storage is not answering; retry after `Retry-After` or pick another region"),
 				}),
 				jsonBody("Bucket definition", ref("ManagedBucketCreateRequest")))),
 		},

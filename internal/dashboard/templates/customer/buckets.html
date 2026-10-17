@@ -23,7 +23,7 @@
                 <label>Region</label>
                 <select name="region">
                     {{range .RegionGroups}}<optgroup label="{{.Label}}">
-                        {{range .Regions}}<option value="{{.ID}}"{{if eq .ID $.DefaultRegion}} selected{{end}}{{if not .Available}} disabled{{end}}>{{.Name}}{{if not .Available}} (not enabled){{end}}</option>
+                        {{range .Regions}}<option value="{{.ID}}"{{if eq .ID $.DefaultRegion}} selected{{end}}{{if not .Available}} disabled{{end}}>{{.Name}}{{if .Down}} (temporarily unavailable){{else if not .Available}} (not enabled){{end}}</option>
                         {{end}}</optgroup>
                     {{end}}
                 </select>

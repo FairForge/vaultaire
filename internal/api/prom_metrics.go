@@ -98,6 +98,8 @@ func (s *Server) initMetrics() {
 		// Request bodies the client did not finish (WP-R2-3): 4xx, never a
 		// breaker charge.
 		reg.MustRegister(clientBodyErrors)
+		// Bucket creations refused for their region (Prompt 10 Part A).
+		reg.MustRegister(regionCreateRefused)
 		if b := s.largeGet.budget; b != nil {
 			reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 				Name: "vaultaire_large_get_budget_bytes_in_use",

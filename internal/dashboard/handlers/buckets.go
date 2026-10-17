@@ -83,7 +83,7 @@ var bucketNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9]$`)
 
 // HandleBuckets returns an http.HandlerFunc that lists all buckets for the
 // current tenant, with object counts and total sizes.
-func HandleBuckets(tmpl *template.Template, db *sql.DB, dataPath string, logger *zap.Logger) http.HandlerFunc {
+func HandleBuckets(tmpl *template.Template, db *sql.DB, dataPath string, regionUp RegionAvailable, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
 		if sd == nil {
@@ -93,7 +93,7 @@ func HandleBuckets(tmpl *template.Template, db *sql.DB, dataPath string, logger 
 
 		data := sessionData(sd, "buckets")
 		withCSRF(r.Context(), data)
-		withRegionPicker(data)
+		withRegionPicker(data, regionUp)
 
 		if db != nil {
 			buckets := listBuckets(r.Context(), db, sd.TenantID)
@@ -123,6 +123,7 @@ const (
 	BucketCreateCapFree                                    // free-tier bucket cap
 	BucketCreateInvalidRegion                              // unknown region id
 	BucketCreateRegionUnavailable                          // region known, no driver on this deployment
+	BucketCreateRegionDown                                 // region enabled here, but down by its probe or breaker (Prompt 10 Part A)
 )
 
 // BucketCreateResult is what a BucketCreator decided; Region is the stored region.
@@ -139,11 +140,14 @@ type BucketCreateResult struct {
 // class). region == "" means the deployment default.
 type BucketCreator func(ctx context.Context, tenantID, name, region string) (BucketCreateResult, error)
 
+// RegionAvailable reports whether a bucket may be created in region now.
+type RegionAvailable func(region string) bool
+
 // HandleCreateBucket handles POST /dashboard/buckets to create a new bucket.
 // Name validation stays here (the form's error copy); everything else is the
 // creator's decision. A nil creator means bucket creation is not wired
 // (tests, dev without the API) and every attempt is refused.
-func HandleCreateBucket(tmpl *template.Template, db *sql.DB, create BucketCreator, logger *zap.Logger) http.HandlerFunc {
+func HandleCreateBucket(tmpl *template.Template, db *sql.DB, create BucketCreator, regionUp RegionAvailable, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
 		if sd == nil {
@@ -160,20 +164,20 @@ func HandleCreateBucket(tmpl *template.Template, db *sql.DB, create BucketCreato
 		// Validate bucket name (S3-compatible rules).
 		if !bucketNameRe.MatchString(name) {
 			data["CreateError"] = "Invalid bucket name. Use 3-63 lowercase letters, numbers, hyphens, or dots."
-			renderBucketList(w, r, tmpl, db, sd, data, logger)
+			renderBucketList(w, r, tmpl, db, sd, data, regionUp, logger)
 			return
 		}
 
 		// Prevent path traversal.
 		if strings.Contains(name, "..") {
 			data["CreateError"] = "Invalid bucket name."
-			renderBucketList(w, r, tmpl, db, sd, data, logger)
+			renderBucketList(w, r, tmpl, db, sd, data, regionUp, logger)
 			return
 		}
 
 		if create == nil {
 			data["CreateError"] = "Bucket creation is not available."
-			renderBucketList(w, r, tmpl, db, sd, data, logger)
+			renderBucketList(w, r, tmpl, db, sd, data, regionUp, logger)
 			return
 		}
 
@@ -182,7 +186,7 @@ func HandleCreateBucket(tmpl *template.Template, db *sql.DB, create BucketCreato
 		if err != nil {
 			logger.Error("create bucket", zap.String("bucket", name), zap.Error(err))
 			data["CreateError"] = "Failed to create bucket."
-			renderBucketList(w, r, tmpl, db, sd, data, logger)
+			renderBucketList(w, r, tmpl, db, sd, data, regionUp, logger)
 			return
 		}
 		switch res.State {
@@ -194,14 +198,16 @@ func HandleCreateBucket(tmpl *template.Template, db *sql.DB, create BucketCreato
 			data["CreateError"] = "Invalid region."
 		case BucketCreateRegionUnavailable:
 			data["CreateError"] = "Region " + drivers.RegionDisplayName(region) + " is not enabled on this deployment."
+		case BucketCreateRegionDown:
+			data["CreateError"] = "Region " + drivers.RegionDisplayName(region) + " is temporarily unavailable: its storage is not answering. Try again in a minute, or pick another region."
 		}
 		if _, refused := data["CreateError"]; refused {
-			renderBucketList(w, r, tmpl, db, sd, data, logger)
+			renderBucketList(w, r, tmpl, db, sd, data, regionUp, logger)
 			return
 		}
 
 		data["CreateSuccess"] = name
-		renderBucketList(w, r, tmpl, db, sd, data, logger)
+		renderBucketList(w, r, tmpl, db, sd, data, regionUp, logger)
 	}
 }
 
@@ -270,7 +276,11 @@ func HandleBucketObjects(tmpl *template.Template, db *sql.DB, logger *zap.Logger
 // regionPickerOption is one row of the bucket-creation region picker.
 type regionPickerOption struct {
 	ID, Name  string
-	Available bool // a driver is registered for it on this deployment
+	Available bool // a bucket may be created there now
+	// Down: enabled on this deployment (a driver is registered) but not
+	// available now — its probe or breaker says it cannot take a write
+	// (Prompt 10 Part A). Shown "temporarily unavailable", not "not enabled".
+	Down bool
 }
 
 // regionPickerGroup is one residency group of the picker.
@@ -282,13 +292,19 @@ type regionPickerGroup struct {
 // withRegionPicker adds the region picker data: every account region grouped
 // by residency, flagged with whether this deployment can store there, and the
 // default (primary) region. The template used to hard-code eight regions,
-// three of which never existed (Review R7-01).
-func withRegionPicker(data map[string]any) {
+// three of which never existed (Review R7-01). regionUp is the API layer's
+// gate (registered AND healthy by the probe AND breaker not open); nil =
+// registration alone. A registered region the gate refuses is Down.
+func withRegionPicker(data map[string]any, regionUp RegionAvailable) {
 	var groups []regionPickerGroup
 	for _, g := range drivers.IDriveRegionGroups() {
 		pg := regionPickerGroup{Label: g.Label}
 		for _, r := range g.Regions {
-			pg.Regions = append(pg.Regions, regionPickerOption{ID: r.ID, Name: r.Name, Available: drivers.IDriveRegionAvailable(r.ID)})
+			opt := regionPickerOption{ID: r.ID, Name: r.Name, Available: drivers.IDriveRegionAvailable(r.ID)}
+			if opt.Available && regionUp != nil && !regionUp(r.ID) {
+				opt.Available, opt.Down = false, true
+			}
+			pg.Regions = append(pg.Regions, opt)
 		}
 		groups = append(groups, pg)
 	}
@@ -296,8 +312,8 @@ func withRegionPicker(data map[string]any) {
 	data["DefaultRegion"] = drivers.IDriveDefaultRegion(os.Getenv)
 }
 
-func renderBucketList(w http.ResponseWriter, r *http.Request, tmpl *template.Template, db *sql.DB, sd *dashauth.SessionData, data map[string]any, logger *zap.Logger) {
-	withRegionPicker(data)
+func renderBucketList(w http.ResponseWriter, r *http.Request, tmpl *template.Template, db *sql.DB, sd *dashauth.SessionData, data map[string]any, regionUp RegionAvailable, logger *zap.Logger) {
+	withRegionPicker(data, regionUp)
 	if db != nil {
 		buckets := listBuckets(r.Context(), db, sd.TenantID)
 		data["Buckets"] = buckets

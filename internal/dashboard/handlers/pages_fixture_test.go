@@ -51,7 +51,7 @@ func TestPages_WriteScreenshotFixtures(t *testing.T) {
 	}
 	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM buckets WHERE tenant_id = $1`, id) })
 	w := httptest.NewRecorder()
-	HandleBuckets(page("buckets.html"), db, t.TempDir(), zap.NewNop()).ServeHTTP(w,
+	HandleBuckets(page("buckets.html"), db, t.TempDir(), nil, zap.NewNop()).ServeHTTP(w,
 		injectSessionWithTenant(httptest.NewRequest("GET", "/dashboard/buckets", nil), id))
 	write("buckets", w)
 

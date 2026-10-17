@@ -23,6 +23,7 @@ const (
 	bucketCreateCapFree                                    // FreeTierLimits.MaxBuckets
 	bucketCreateInvalidRegion                              // not a region id we know
 	bucketCreateRegionUnavailable                          // known region, no driver on this deployment (WP-R7-1)
+	bucketCreateRegionDown                                 // enabled region, down by its probe or breaker (Prompt 10 Part A)
 )
 
 // bucketCreateOutcome is what createBucketRegistry decided. Region is the
@@ -74,16 +75,25 @@ func (s *Server) createBucketRegistry(ctx context.Context, tenantID, bucket, reg
 	if region == "" {
 		region = drivers.IDriveDefaultRegion(os.Getenv)
 	}
-	if !drivers.IsValidRegion(region) {
+	// The region gate (region_gate.go): a region we do not know, one this
+	// deployment has no driver for — accepting it would silently store the
+	// objects on the primary, a data-residency breach with a truthful-looking
+	// label (Review R7-01 / WP-R7-1) — and one whose driver is down by its
+	// probe or breaker (Prompt 10 Part A: a bucket nothing can be stored in).
+	// A bucket the tenant already owns is not refused for its region being
+	// down: re-creating it creates nothing.
+	switch st := s.regionCreateState(region); {
+	case st == regionUnknown:
+		s.refuseRegion(tenantID, region, st)
 		out.state = bucketCreateInvalidRegion
 		return out, nil
-	}
-	// A region the account has but this deployment has no driver for must be
-	// refused: accepting the bucket would silently store its objects on the
-	// primary — a data-residency breach with a truthful-looking label
-	// (Review R7-01 / WP-R7-1).
-	if !drivers.IDriveRegionAvailable(region) {
+	case st == regionNotEnabled:
+		s.refuseRegion(tenantID, region, st)
 		out.state = bucketCreateRegionUnavailable
+		return out, nil
+	case st == regionDown && !out.alreadyOwned:
+		s.refuseRegion(tenantID, region, st)
+		out.state = bucketCreateRegionDown
 		return out, nil
 	}
 	out.region = region
@@ -164,6 +174,8 @@ func (s *Server) dashboardBucketCreator() handlers.BucketCreator {
 			res.State = handlers.BucketCreateInvalidRegion
 		case bucketCreateRegionUnavailable:
 			res.State = handlers.BucketCreateRegionUnavailable
+		case bucketCreateRegionDown:
+			res.State = handlers.BucketCreateRegionDown
 		default:
 			res.State = handlers.BucketCreateOK
 		}

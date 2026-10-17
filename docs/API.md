@@ -157,6 +157,10 @@ Behaviour worth knowing before writing code against it:
   `-if-modified-since` and `-if-unmodified-since`.
 - **Regions**: a bucket's region is fixed at creation and must be one the
   deployment has a key pair for; otherwise 400 `InvalidLocationConstraint`.
+  A region that is enabled but whose storage is not answering is refused
+  with 503 `ServiceUnavailable` and `Retry-After: 60` until it answers again
+  (the dashboard shows it as temporarily unavailable). The default region is
+  always available.
   Vault objects go to the tape backend and public-read objects to the CDN
   origin regardless of the bucket's region.
 - **Public buckets** (`?acl` public-read) are served unauthenticated from
@@ -253,7 +257,7 @@ Conventions (Stripe-style):
 
 - single object: `{"object":"bucket", …, "request_id":"…"}`
 - list: `{"object":"list","data":[…],"has_more":bool,"next_cursor":"…"}` with `?limit=&starting_after=`
-- error: `{"error":{"type":"invalid_request_error|authentication_error|permission_error|not_found_error|conflict_error|rate_limit_error|api_error","code":"…","message":"…","param":"…","request_id":"…"}}`
+- error: `{"error":{"type":"invalid_request_error|authentication_error|permission_error|not_found_error|conflict_error|rate_limit_error|gone_error|unavailable_error|api_error","code":"…","message":"…","param":"…","request_id":"…"}}`
 - `Idempotency-Key` on PUT/POST/DELETE: the 2xx response is cached 24 h and
   replayed with `Idempotency-Replayed: true`; reusing a key on a different
   method/path is 409 `idempotency_key_reuse`
@@ -296,7 +300,7 @@ refused a delete). The full code list from `internal/api/s3_errors.go`:
 | 413 | `EntityTooLarge` |
 | 500 | `InternalError` |
 | 501 | `NotImplemented` |
-| 503 | `ServiceUnavailable` (every backend unreachable; carries `Retry-After`), `SlowDown` (+ `Retry-After`: the egress stream guard, see Rate limits) |
+| 503 | `ServiceUnavailable` (every backend unreachable, or CreateBucket in a region whose storage is down; carries `Retry-After`), `SlowDown` (+ `Retry-After`: the egress stream guard, see Rate limits) |
 
 An object miss on any backend is 404 `NoSuchKey`; an unreachable backend is
 never reported as a miss — it is 503, so sync clients do not treat the object

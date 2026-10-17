@@ -198,6 +198,10 @@ func (s *Server) handleMgmtCreateBucket(w http.ResponseWriter, r *http.Request) 
 		writeManagementError(w, ErrTypeInvalidRequest, "region_unavailable",
 			fmt.Sprintf("Region %s is not enabled on this deployment.", req.Region), "region")
 		return
+	case bucketCreateRegionDown:
+		w.Header().Set("Retry-After", regionRetryAfter)
+		writeManagementError(w, ErrTypeUnavailable, "region_unavailable_now", regionDownMessage(req.Region), "region")
+		return
 	}
 	if outcome.alreadyOwned {
 		writeManagementError(w, ErrTypeConflict, "bucket_exists",
